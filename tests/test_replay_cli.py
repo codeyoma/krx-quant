@@ -6,6 +6,7 @@ the replay database, which must match replaying the same events by hand.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import timedelta
 from pathlib import Path
 
@@ -31,7 +32,7 @@ def record(data_dir: Path, events: list[Event]) -> None:
     recorder.close()
 
 
-async def test_a_recorded_day_replays_like_the_same_events_given_by_hand(
+def test_a_recorded_day_replays_like_the_same_events_given_by_hand(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     data = tmp_path / "data"
@@ -39,7 +40,7 @@ async def test_a_recorded_day_replays_like_the_same_events_given_by_hand(
     half = len(events) // 2
     record(data, events[:half])
     merged_parts = {p: p.read_bytes() for p in data.rglob("part-*.parquet")}
-    await archive(data, LocalObjectStore(tmp_path / "archive"))
+    asyncio.run(archive(data, LocalObjectStore(tmp_path / "archive")))
     # Parts a crash left behind after the merge: already in data.parquet, never read twice.
     for path, content in merged_parts.items():
         path.write_bytes(content)
@@ -54,7 +55,7 @@ async def test_a_recorded_day_replays_like_the_same_events_given_by_hand(
     assert main(["replay", DAY.isoformat()]) == 0
 
     db = tmp_path / "state" / f"replay-{DAY}.sqlite3"
-    run(tmp_path / "by-hand.db", events, until=END_OF_DAY)
+    asyncio.run(run(tmp_path / "by-hand.db", events, until=END_OF_DAY))
     assert stored(db) == stored(tmp_path / "by-hand.db")
     out = capsys.readouterr().out
     assert f"replayed {DAY} into {db}" in out

@@ -24,23 +24,29 @@ from krx_quant.pricing import Direction
 # The engine's database, in the state directory.
 DB_NAME = "engine.sqlite3"
 
-_VERSION = 1
+_VERSION = 2
 
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS predictions (
+# Probabilities are empty for a prediction that was not made (status other than ok).
+_PREDICTIONS = """
+CREATE TABLE IF NOT EXISTS {name} (
     id INTEGER PRIMARY KEY,
     symbol TEXT NOT NULL,
     algorithm TEXT NOT NULL,          -- an algorithm, a baseline, or a consensus
     model_version TEXT NOT NULL,
     bar_close TEXT NOT NULL,          -- the prediction time t
-    displayed_at TEXT NOT NULL,       -- when it became visible
-    p_up REAL NOT NULL,
-    p_flat REAL NOT NULL,
-    p_down REAL NOT NULL,
-    expected_ticks REAL NOT NULL,
-    status TEXT NOT NULL,             -- ok
+    displayed_at TEXT NOT NULL,       -- when it became visible (or was given up)
+    p_up REAL,
+    p_flat REAL,
+    p_down REAL,
+    expected_ticks REAL,
+    status TEXT NOT NULL,             -- ok, timed_out, error
     UNIQUE (symbol, algorithm, bar_close)
 );
+"""
+
+_SCHEMA = (
+    _PREDICTIONS.format(name="predictions")
+    + """
 CREATE INDEX IF NOT EXISTS predictions_by_time ON predictions (symbol, bar_close);
 CREATE TABLE IF NOT EXISTS outcomes (
     prediction_id INTEGER PRIMARY KEY REFERENCES predictions (id),
@@ -56,7 +62,25 @@ CREATE TABLE IF NOT EXISTS outcomes (
     scored_at TEXT                    -- null while pending
 );
 CREATE INDEX IF NOT EXISTS outcomes_pending ON outcomes (scored_at, target_at);
+CREATE TABLE IF NOT EXISTS runs (
+    id INTEGER PRIMARY KEY,
+    kind TEXT NOT NULL,               -- cpu_budget: an algorithm skipped for the CPU budget
+    at TEXT NOT NULL,
+    algorithm TEXT,
+    detail TEXT
+);
 """
+)
+
+# Version 1 (#9) required probabilities; rebuild the table without that.
+_FROM_V1 = (
+    _PREDICTIONS.format(name="predictions_v2")
+    + """
+INSERT INTO predictions_v2 SELECT * FROM predictions;
+DROP TABLE predictions;
+ALTER TABLE predictions_v2 RENAME TO predictions;
+"""
+)
 
 
 def iso(at: datetime) -> str:
@@ -70,7 +94,7 @@ class NewPrediction:
     model_version: str
     bar_close: datetime
     displayed_at: datetime
-    forecast: Forecast
+    forecast: Forecast | None  # None unless the status is ok
     target_at: datetime
     mid_close: float | None
     mid_display: float | None
@@ -94,6 +118,7 @@ class AlgorithmSummary:
 
     algorithm: str
     predictions: int
+    skipped: int  # not made: over the time budget, or failed
     scored: int
     unscorable: int
     pending: int
@@ -122,15 +147,14 @@ class PredictionStore:
         version = self._db.execute("PRAGMA user_version").fetchone()[0]
         if version > _VERSION:
             raise RuntimeError(f"{path} was written by a newer engine (schema {version})")
-        with self._db:
-            self._db.executescript(_SCHEMA)
-            self._db.execute(f"PRAGMA user_version={_VERSION}")
+        script = (_FROM_V1 if version == 1 else "") + _SCHEMA + f"PRAGMA user_version={_VERSION};"
+        self._db.executescript(f"BEGIN;{script}COMMIT;")
 
     def close(self) -> None:
         self._db.close()
 
     def add_all(self, predictions: Sequence[NewPrediction]) -> list[Pending]:
-        """Store a bar close's predictions in one transaction; they are pending until scored."""
+        """Store predictions in one transaction; those made are pending until scored."""
         added: list[Pending] = []
         with self._db:
             for p in predictions:
@@ -144,14 +168,16 @@ class PredictionStore:
                         p.model_version,
                         iso(p.bar_close),
                         iso(p.displayed_at),
-                        f.p_up,
-                        f.p_flat,
-                        f.p_down,
-                        f.expected_ticks,
+                        f and f.p_up,
+                        f and f.p_flat,
+                        f and f.p_down,
+                        f and f.expected_ticks,
                         p.status,
                     ),
                 )
                 assert cursor.lastrowid is not None
+                if f is None:
+                    continue  # nothing to score
                 self._db.execute(
                     "INSERT INTO outcomes (prediction_id, target_at, mid_close, mid_display, flat_ticks)"
                     " VALUES (?, ?, ?, ?, ?)",
@@ -161,6 +187,13 @@ class PredictionStore:
                     Pending(cursor.lastrowid, p.symbol, p.target_at, p.mid_close, p.mid_display, p.flat_ticks)
                 )
         return added
+
+    def add_run(self, kind: str, at: datetime, algorithm: str | None, detail: str) -> None:
+        with self._db:
+            self._db.execute(
+                "INSERT INTO runs (kind, at, algorithm, detail) VALUES (?, ?, ?, ?)",
+                (kind, iso(at), algorithm, detail),
+            )
 
     def pending(self) -> list[Pending]:
         rows = self._db.execute(
@@ -235,10 +268,11 @@ class PredictionStore:
 
     def summary(self) -> list[AlgorithmSummary]:
         rows = self._db.execute(
-            "SELECT p.algorithm, COUNT(*), COUNT(o.class_a),"
-            " TOTAL(o.scored_at IS NOT NULL AND o.class_a IS NULL), TOTAL(o.scored_at IS NULL),"
+            "SELECT p.algorithm, COUNT(*), TOTAL(p.status != 'ok'), COUNT(o.class_a),"
+            " TOTAL(o.scored_at IS NOT NULL AND o.class_a IS NULL),"
+            " TOTAL(o.prediction_id IS NOT NULL AND o.scored_at IS NULL),"
             " TOTAL(o.class_a = 'up'), TOTAL(o.class_a = 'flat'), TOTAL(o.class_a = 'down')"
-            " FROM predictions p JOIN outcomes o ON o.prediction_id = p.id GROUP BY p.algorithm"
+            " FROM predictions p LEFT JOIN outcomes o ON o.prediction_id = p.id GROUP BY p.algorithm"
             " ORDER BY p.algorithm"
         ).fetchall()
         return [AlgorithmSummary(r[0], *(int(v) for v in r[1:])) for r in rows]
@@ -255,7 +289,7 @@ class PredictionStore:
         rows = self._db.execute(
             "SELECT p.*, o.target_at, o.mid_close, o.mid_display, o.mid_target, o.flat_ticks,"
             " o.class_a, o.class_b, o.special, o.unscorable, o.scored_at"
-            " FROM predictions p JOIN outcomes o ON o.prediction_id = p.id " + where,
+            " FROM predictions p LEFT JOIN outcomes o ON o.prediction_id = p.id " + where,
             params,
         ).fetchall()
         return [dict(r) for r in rows]

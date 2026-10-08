@@ -13,20 +13,29 @@ from typing import Any
 
 from krx_quant.engine import Event
 from krx_quant.market_calendar import MarketCalendar
-from tests.replay_events import SYMBOL, api, at, book, get_json, krx_trade, run, steady_book, trade
-
-BASELINES = {"baseline-flat", "baseline-persist", "baseline-random"}
+from tests.replay_events import (
+    PREDICTORS,
+    SYMBOL,
+    api,
+    at,
+    book,
+    get_json,
+    krx_trade,
+    run,
+    steady_book,
+    trade,
+)
 
 
 async def test_every_baseline_predicts_at_a_bar_close_in_continuous_trading(tmp_path: Path) -> None:
     events = steady_book(at("09:29:00"), at("09:31:30"), bid=81_200, ask=81_300)
 
-    engine = run(tmp_path / "engine.db", events, until=at("09:31:30"))
+    engine = await run(tmp_path / "engine.db", events, until=at("09:31:30"))
 
     async with api(engine) as client:
         latest = await get_json(client, f"/v1/symbols/{SYMBOL}/latest")
     assert latest["bar_close"] == "2026-10-12T09:31:00+09:00"
-    assert {p["algorithm"] for p in latest["predictions"]} == BASELINES
+    assert {p["algorithm"] for p in latest["predictions"]} == PREDICTORS
     for p in latest["predictions"]:
         assert p["bar_close"] == "2026-10-12T09:31:00+09:00"
         assert p["target_at"] == "2026-10-12T09:35:00+09:00"
@@ -47,7 +56,9 @@ async def test_a_prediction_is_scored_from_the_bar_close_and_from_when_it_was_di
         *steady_book(at("09:33:00"), at("09:35:30"), bid=81_500, ask=81_600),  # 81,550 at the target
     ]
 
-    engine = run(tmp_path / "engine.db", events, until=at("09:35:30"), display_delay=timedelta(seconds=2))
+    engine = await run(
+        tmp_path / "engine.db", events, until=at("09:35:30"), display_delay=timedelta(seconds=2)
+    )
 
     async with api(engine) as client:
         body = await get_json(client, f"/v1/symbols/{SYMBOL}/predictions")
@@ -66,7 +77,7 @@ async def test_a_prediction_whose_target_mid_is_missing_is_left_unscorable(tmp_p
     # The book stops after 09:31:00: by 09:35 its last quote is over a minute old.
     events = steady_book(at("09:29:00"), at("09:31:00"), bid=81_200, ask=81_300)
 
-    engine = run(tmp_path / "engine.db", events, until=at("09:36:00"))
+    engine = await run(tmp_path / "engine.db", events, until=at("09:36:00"))
 
     async with api(engine) as client:
         body = await get_json(client, f"/v1/symbols/{SYMBOL}/predictions")
@@ -78,12 +89,12 @@ async def test_a_prediction_whose_target_mid_is_missing_is_left_unscorable(tmp_p
 
 
 async def test_without_any_quote_a_prediction_is_still_made_and_left_unscorable(tmp_path: Path) -> None:
-    engine = run(tmp_path / "engine.db", [], until=at("09:36:00"))
+    engine = await run(tmp_path / "engine.db", [], until=at("09:36:00"))
 
     async with api(engine) as client:
         body = await get_json(client, f"/v1/symbols/{SYMBOL}/predictions")
     predictions = by_algorithm(body["predictions"], "09:31:00")
-    assert set(predictions) == BASELINES
+    assert set(predictions) == PREDICTORS
     outcome = predictions["baseline-persist"]["outcome"]
     assert outcome["flat_ticks"] is None
     assert outcome["unscorable"] == "missing mid: close, display, target"
@@ -94,7 +105,7 @@ def bar_closes(predictions: list[dict[str, Any]]) -> list[str]:
 
 
 async def test_predictions_cover_continuous_trading_while_the_target_stays_inside_it(tmp_path: Path) -> None:
-    engine = run(tmp_path / "engine.db", [], until=at("16:00:00"))
+    engine = await run(tmp_path / "engine.db", [], until=at("16:00:00"))
 
     async with api(engine) as client:
         body = await get_json(client, f"/v1/symbols/{SYMBOL}/predictions?limit=1000")
@@ -110,7 +121,7 @@ async def test_a_late_opening_day_starts_predicting_an_hour_later(tmp_path: Path
     first_day = date(2026, 1, 2)  # the first trading day of 2026 opens at 10:00
     calendar = MarketCalendar({date(2026, 1, 1): False, first_day: True})
 
-    engine = run(tmp_path / "engine.db", [], until=at("12:00:00", first_day), calendar=calendar)
+    engine = await run(tmp_path / "engine.db", [], until=at("12:00:00", first_day), calendar=calendar)
 
     async with api(engine) as client:
         body = await get_json(client, f"/v1/symbols/{SYMBOL}/predictions?limit=1000")
@@ -121,7 +132,7 @@ async def test_nothing_is_predicted_on_a_holiday(tmp_path: Path) -> None:
     holiday = date(2026, 10, 9)  # Hangul Day
     calendar = MarketCalendar({holiday: False})
 
-    engine = run(tmp_path / "engine.db", [], until=at("16:00:00", holiday), calendar=calendar)
+    engine = await run(tmp_path / "engine.db", [], until=at("16:00:00", holiday), calendar=calendar)
 
     async with api(engine) as client:
         body = await get_json(client, f"/v1/symbols/{SYMBOL}/predictions")
@@ -146,8 +157,8 @@ async def test_only_krx_quotes_count_until_nxt_opens_thirty_seconds_in(tmp_path:
         book(at("09:00:35"), bid=81_300, ask=81_400),
     ]
 
-    early = run(tmp_path / "early.db", events, until=at("09:00:20"))
-    later = run(tmp_path / "later.db", events, until=at("09:00:40"))
+    early = await run(tmp_path / "early.db", events, until=at("09:00:20"))
+    later = await run(tmp_path / "later.db", events, until=at("09:00:40"))
 
     assert (await mid_now(early))["mid"] == 81_250
     assert (await mid_now(later))["mid"] == 81_350
@@ -157,20 +168,20 @@ async def test_a_locked_book_gives_its_price_and_a_crossed_one_is_ignored(tmp_pa
     locked = [book(at("10:00:00"), bid=81_300, ask=81_300)]
     crossed = [*locked, book(at("10:00:05"), bid=81_400, ask=81_300)]
 
-    assert await mid_now(run(tmp_path / "locked.db", locked, until=at("10:00:10"))) == {
+    assert await mid_now(await run(tmp_path / "locked.db", locked, until=at("10:00:10"))) == {
         "symbol": SYMBOL,
         "mid": 81_300,
         "tick": 100,
         "flat_ticks": 2,
     }
-    assert (await mid_now(run(tmp_path / "crossed.db", crossed, until=at("10:00:10"))))["mid"] == 81_300
+    assert (await mid_now(await run(tmp_path / "crossed.db", crossed, until=at("10:00:10"))))["mid"] == 81_300
 
 
 async def test_there_is_no_reference_price_outside_continuous_trading(tmp_path: Path) -> None:
     events = [book(at("08:55:00"), bid=81_200, ask=81_300), book(at("15:25:00"), bid=81_200, ask=81_300)]
 
-    assert (await mid_now(run(tmp_path / "pre.db", events, until=at("08:59:00"))))["mid"] is None
-    assert (await mid_now(run(tmp_path / "auction.db", events, until=at("15:25:30"))))["mid"] is None
+    assert (await mid_now(await run(tmp_path / "pre.db", events, until=at("08:59:00"))))["mid"] is None
+    assert (await mid_now(await run(tmp_path / "auction.db", events, until=at("15:25:30"))))["mid"] is None
 
 
 async def test_integrated_trades_make_one_minute_bars_by_exchange_time(tmp_path: Path) -> None:
@@ -184,7 +195,7 @@ async def test_integrated_trades_make_one_minute_bars_by_exchange_time(tmp_path:
         trade(at("09:31:10"), 81_300, 2),  # the 09:31 bar has not finished
     ]
 
-    engine = run(tmp_path / "engine.db", events, until=at("09:31:30"))
+    engine = await run(tmp_path / "engine.db", events, until=at("09:31:30"))
 
     async with api(engine) as client:
         body = await get_json(client, f"/v1/symbols/{SYMBOL}/bars")
@@ -212,7 +223,7 @@ async def test_the_persistence_baseline_expects_the_last_four_minutes_to_go_on(t
         *steady_book(at("09:31:30"), at("09:32:00"), bid=81_500, ask=81_600),  # 81,550 at 09:32
     ]
 
-    engine = run(tmp_path / "engine.db", events, until=at("09:32:30"))
+    engine = await run(tmp_path / "engine.db", events, until=at("09:32:30"))
 
     async with api(engine) as client:
         body = await get_json(client, f"/v1/symbols/{SYMBOL}/predictions")
@@ -226,7 +237,7 @@ async def test_the_random_baseline_draws_in_the_proportions_of_the_day_so_far(tm
     # A book that never moves: every scored bar is flat.
     events = steady_book(at("09:00:30"), at("10:30:00"), bid=81_200, ask=81_300)
 
-    engine = run(tmp_path / "engine.db", events, until=at("10:30:00"))
+    engine = await run(tmp_path / "engine.db", events, until=at("10:30:00"))
 
     async with api(engine) as client:
         body = await get_json(client, f"/v1/symbols/{SYMBOL}/predictions?algorithm=baseline-random&limit=30")
@@ -253,18 +264,23 @@ def busy_morning() -> list[Event]:
 
 
 def stored(db: Path) -> list[tuple[Any, ...]]:
+    """Every prediction with its outcome, without row IDs: algorithms finish in any order."""
     with sqlite3.connect(db) as conn:
         return conn.execute(
-            "SELECT p.*, o.* FROM predictions p JOIN outcomes o ON o.prediction_id = p.id ORDER BY p.id"
+            "SELECT p.symbol, p.algorithm, p.model_version, p.bar_close, p.displayed_at, p.p_up, p.p_flat,"
+            " p.p_down, p.expected_ticks, p.status, o.target_at, o.mid_close, o.mid_display, o.mid_target,"
+            " o.flat_ticks, o.class_a, o.class_b, o.special, o.unscorable, o.scored_at"
+            " FROM predictions p LEFT JOIN outcomes o ON o.prediction_id = p.id"
+            " ORDER BY p.bar_close, p.symbol, p.algorithm"
         ).fetchall()
 
 
 async def test_replaying_the_same_input_twice_gives_the_same_results(tmp_path: Path) -> None:
-    first = run(tmp_path / "first.db", busy_morning(), until=at("10:00:00"))
-    second = run(tmp_path / "second.db", busy_morning(), until=at("10:00:00"))
+    first = await run(tmp_path / "first.db", busy_morning(), until=at("10:00:00"))
+    second = await run(tmp_path / "second.db", busy_morning(), until=at("10:00:00"))
 
     assert stored(tmp_path / "first.db") == stored(tmp_path / "second.db")
-    assert len(stored(tmp_path / "first.db")) == 3 * 60  # 09:01–10:00
+    assert len(stored(tmp_path / "first.db")) == len(PREDICTORS) * 60  # 09:01–10:00
     async with api(first) as one, api(second) as two:
         for path in (f"/v1/symbols/{SYMBOL}/predictions?limit=1000", f"/v1/symbols/{SYMBOL}/bars"):
             assert await get_json(one, path) == await get_json(two, path)
@@ -286,24 +302,24 @@ def known_at_prediction(db: Path, t: str) -> list[tuple[Any, ...]]:
 
 async def test_a_prediction_does_not_change_when_everything_after_it_is_cut(tmp_path: Path) -> None:
     events = busy_morning()
-    run(tmp_path / "full.db", events, until=at("10:00:00"))
+    await run(tmp_path / "full.db", events, until=at("10:00:00"))
     # 09:13:00 has a book received exactly at the bar close.
     for t in ("09:05:00", "09:13:00", "09:31:00", "09:47:00"):
         cut = [e for e in events if e[1]["received_at"] <= at(t)]
 
-        run(tmp_path / f"cut-{t}.db", cut, until=at(t))
+        await run(tmp_path / f"cut-{t}.db", cut, until=at(t))
 
         known = known_at_prediction(tmp_path / f"cut-{t}.db", t)
-        assert len(known) == 3
+        assert len(known) == len(PREDICTORS)
         assert known == known_at_prediction(tmp_path / "full.db", t)
 
 
 async def test_a_restarted_engine_scores_what_was_pending(tmp_path: Path) -> None:
     db = tmp_path / "engine.db"
     events = steady_book(at("09:29:00"), at("09:36:00"), bid=81_200, ask=81_300)
-    run(db, [e for e in events if e[1]["received_at"] <= at("09:32:00")], until=at("09:32:00"))
+    await run(db, [e for e in events if e[1]["received_at"] <= at("09:32:00")], until=at("09:32:00"))
 
-    restarted = run(
+    restarted = await run(
         db,
         [e for e in events if e[1]["received_at"] > at("09:33:00")],
         until=at("09:36:00"),
@@ -321,7 +337,7 @@ async def test_a_restarted_engine_scores_what_was_pending(tmp_path: Path) -> Non
 
 
 async def test_the_api_refuses_an_unknown_symbol_and_a_bad_limit(tmp_path: Path) -> None:
-    engine = run(tmp_path / "engine.db", [], until=at("09:31:30"))
+    engine = await run(tmp_path / "engine.db", [], until=at("09:31:30"))
 
     async with api(engine) as client:
         unknown = await client.get("/v1/symbols/000000/latest")
@@ -340,7 +356,7 @@ async def test_a_quote_received_right_at_a_bar_close_counts_after_it_everywhere(
         *steady_book(at("09:31:10"), at("09:35:00"), bid=81_500, ask=81_600),  # 81,550
     ]
 
-    engine = run(tmp_path / "engine.db", events, until=at("09:35:30"))
+    engine = await run(tmp_path / "engine.db", events, until=at("09:35:30"))
 
     async with api(engine) as client:
         body = await get_json(client, f"/v1/symbols/{SYMBOL}/predictions")

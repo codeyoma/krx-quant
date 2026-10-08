@@ -14,13 +14,17 @@ from typing import Any
 
 from aiohttp.test_utils import TestClient, TestServer
 
+from krx_quant.algorithms import ALGORITHMS
 from krx_quant.api import create_app
+from krx_quant.baselines import BASELINES
 from krx_quant.engine import Event, PredictionEngine
 from krx_quant.feeds import BOOK, KRX_TRADE, KST, TRADE, Feed
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.replay import replay
 
 SYMBOL = "005930"
+# Everything that predicts at a bar close: the baselines and the registered algorithms.
+PREDICTORS = {b.name for b in BASELINES} | {a.name for a in ALGORITHMS}
 DAY = date(2026, 10, 12)  # a Monday
 CALENDAR = MarketCalendar({DAY: True})
 FEE = 0.015 / 100
@@ -92,7 +96,7 @@ def steady_book(start: datetime, end: datetime, bid: int, ask: int, every: float
     return events
 
 
-def run(
+async def run(
     db: Path,
     events: Iterable[Event],
     until: datetime,
@@ -102,7 +106,9 @@ def run(
     **options: Any,
 ) -> PredictionEngine:
     ordered = sorted(events, key=lambda e: e[1]["received_at"])
-    return replay(ordered, db=db, calendar=calendar, symbols=symbols, fee_rate=FEE, until=until, **options)
+    return await replay(
+        ordered, db=db, calendar=calendar, symbols=symbols, fee_rate=FEE, until=until, **options
+    )
 
 
 @contextlib.asynccontextmanager

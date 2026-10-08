@@ -1,0 +1,108 @@
+"""Algorithm Contract: what an algorithm module provides.
+
+- a personality card: the scientist, the core logic, its own (unique) features and how
+  it learns;
+- the features it declares, the only ones it is given;
+- ``fit``: training samples in, a versioned model out;
+- ``predict``: one symbol's features and the model in, a forecast out.
+
+Algorithms never see each other's output; only the consensus combines them.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
+from typing import Protocol
+
+from krx_quant.baselines import Forecast
+from krx_quant.features import FeatureVector
+from krx_quant.pricing import Direction
+
+log = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class Card:
+    """The personality card."""
+
+    scientist: str
+    character: str  # e.g. trend following
+    logic: str
+    unique_features: tuple[str, ...]
+    training: str  # what is learned, and how
+
+
+@dataclass(frozen=True)
+class Model:
+    """A versioned model: fitted parameters, or the defaults before any training."""
+
+    version: str
+    params: Mapping[str, float]
+    trained: str | None = None  # what it was trained on
+
+    def to_json(self) -> str:
+        return json.dumps({"version": self.version, "params": dict(self.params), "trained": self.trained})
+
+    @classmethod
+    def from_json(cls, text: str) -> Model:
+        data = json.loads(text)
+        return cls(
+            str(data["version"]), {k: float(v) for k, v in data["params"].items()}, data.get("trained")
+        )
+
+
+@dataclass(frozen=True)
+class Sample:
+    """One bar close of training data, with what happened four minutes later."""
+
+    symbol: str
+    bar_close: datetime
+    features: FeatureVector
+    outcome: Direction | None  # None if the bars do not tell
+    change_ticks: float | None
+    flat_ticks: int | None = field(default=None)
+
+
+class Algorithm(Protocol):
+    name: str
+    card: Card
+    features: tuple[str, ...]
+    training_days: int  # the rolling window it trains on
+
+    def default_model(self) -> Model: ...
+
+    def fit(self, samples: Sequence[Sample]) -> Model: ...
+
+    def predict(self, features: FeatureVector, model: Model) -> Forecast: ...
+
+
+def model_path(state_dir: Path, name: str) -> Path:
+    return state_dir / "models" / f"{name}.json"
+
+
+def save_model(state_dir: Path, name: str, model: Model) -> Path:
+    path = model_path(state_dir, name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(model.to_json())
+    tmp.replace(path)
+    return path
+
+
+def load_models(state_dir: Path, algorithms: Sequence[Algorithm]) -> dict[str, Model]:
+    """Each algorithm's trained model if one is saved, else its defaults."""
+    models: dict[str, Model] = {}
+    for algorithm in algorithms:
+        path = model_path(state_dir, algorithm.name)
+        models[algorithm.name] = algorithm.default_model()
+        if path.exists():
+            try:
+                models[algorithm.name] = Model.from_json(path.read_text())
+            except (OSError, ValueError, KeyError, TypeError) as e:
+                log.error("cannot read %s (%s); %s uses its default model", path, e, algorithm.name)
+    return models

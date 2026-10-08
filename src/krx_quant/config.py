@@ -93,6 +93,10 @@ class Settings:
     # address only. None (tests only) runs the engine without the API.
     api_host: str = "127.0.0.1"
     api_port: int | None = None
+    # One algorithm may take this long for a bar close (all symbols); the algorithms' expected
+    # work per bar close must fit in the CPU budget, or the last registered are skipped.
+    algorithm_seconds: float = 30.0
+    cpu_budget_seconds: float = 30.0
 
     @classmethod
     def from_env(
@@ -191,4 +195,6 @@ class Settings:
             fee_rate=float(number("KRX_FEE_PERCENT", "0.015", float, minimum=0, maximum=1)) / 100,
             api_host=values.get("KRX_API_HOST", "127.0.0.1"),
             api_port=int(number("KRX_API_PORT", "8080", int, maximum=65535)),
+            algorithm_seconds=float(number("KRX_ALGORITHM_SECONDS", "30", float, maximum=55)),
+            cpu_budget_seconds=float(number("KRX_CPU_BUDGET_SECONDS", "30", float)),
         )
