@@ -17,10 +17,12 @@ import time
 from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 from aiohttp import WSMsgType, web
 
+from krx_quant.feeds.stock import TRADE_COLUMNS
 from krx_quant.kis import WS_PATH
 
 
@@ -57,20 +59,27 @@ class FakeKis:
     # authorization header under "_auth").
     rest_requests: list[tuple[float, str, str, dict[str, str]]] = field(default_factory=list)
 
+    _demo_count: int = 0
     _runner: web.AppRunner | None = None
     _site: web.SockSite | None = None
     _sockets: list[web.WebSocketResponse] = field(default_factory=list)
     _pong_event: asyncio.Event = field(default_factory=asyncio.Event)
     _subscribed: asyncio.Condition = field(default_factory=asyncio.Condition)
     port: int = 0
+    # Listen address; 0.0.0.0 lets other containers reach it.
+    host: str = "127.0.0.1"
 
     @property
     def rest_url(self) -> str:
-        return f"http://127.0.0.1:{self.port}"
+        return f"http://{self._reachable_host}:{self.port}"
 
     @property
     def ws_url(self) -> str:
-        return f"ws://127.0.0.1:{self.port}"
+        return f"ws://{self._reachable_host}:{self.port}"
+
+    @property
+    def _reachable_host(self) -> str:
+        return "127.0.0.1" if self.host == "0.0.0.0" else self.host
 
     async def start(self) -> None:
         app = web.Application()
@@ -84,7 +93,7 @@ class FakeKis:
         await self._runner.setup()
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.bind(("127.0.0.1", self.port))
+        sock.bind((self.host, self.port))
         self.port = sock.getsockname()[1]
         self._site = web.SockSite(self._runner, sock)
         await self._site.start()
@@ -138,6 +147,23 @@ class FakeKis:
         """Drop every client connection, as KIS does on maintenance or errors."""
         for ws in list(self._sockets):
             await ws.close()
+
+    async def send_demo_trades(self, at: datetime) -> None:
+        """One synthetic integrated trade for every subscribed ``H0UNCNT0`` key (offline runs)."""
+        self._demo_count += 1
+        for tr_id, key in sorted(self.subscribed_keys()):
+            if tr_id != "H0UNCNT0":
+                continue
+            values = {
+                "MKSC_SHRN_ISCD": key,
+                "STCK_CNTG_HOUR": at.strftime("%H%M%S"),
+                "STCK_PRPR": str(80000 + 100 * (self._demo_count % 5)),
+                "CNTG_VOL": "1",
+                "ACML_VOL": str(self._demo_count),
+                "CNTG_CLS_CODE": "1",
+                "BSOP_DATE": at.strftime("%Y%m%d"),
+            }
+            await self.push(f"0|H0UNCNT0|001|{'^'.join(values.get(c, '0') for c in TRADE_COLUMNS)}")
 
     async def send_pingpong(self) -> None:
         msg = json.dumps({"header": {"tr_id": "PINGPONG", "datetime": "20261008093000"}})

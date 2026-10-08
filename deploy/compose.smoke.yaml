@@ -1,0 +1,19 @@
+# Local end-to-end check, layered over compose.yaml by deploy/smoke-local.sh: the
+# engine records the fake KIS server's synthetic trades and archives them into a local
+# Object Store. Nothing here touches the real .env, data/ or state/.
+services:
+  fake-kis:
+    image: krx-quant:latest
+    command: ["fake-kis", "--host", "0.0.0.0", "--port", "18080", "--trades"]
+  engine:
+    env_file: !override deploy/smoke.env
+    depends_on: [fake-kis]
+    volumes: !override
+      - smoke-data:/data
+      - smoke-state:/state
+      - smoke-archive:/archive
+
+volumes:
+  smoke-data:
+  smoke-state:
+  smoke-archive:

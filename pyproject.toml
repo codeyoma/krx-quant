@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.11,<3.12"
 dependencies = [
     "aiohttp>=3.10",
+    "boto3>=1.35",
     "pyarrow>=17",
     "python-dotenv>=1.0",
 ]
@@ -15,6 +16,7 @@ krx-quant = "krx_quant.cli:main"
 
 [dependency-groups]
 dev = [
+    "moto[s3]>=5.0",
     "mypy>=1.11",
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
@@ -42,7 +44,7 @@ strict = true
 files = ["src", "tests", "scripts"]
 
 [[tool.mypy.overrides]]
-module = ["pyarrow", "pyarrow.*"]
+module = ["pyarrow", "pyarrow.*", "boto3", "boto3.*", "botocore.*", "moto"]
 ignore_missing_imports = true
 
 [tool.ruff]

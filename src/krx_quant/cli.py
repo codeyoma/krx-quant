@@ -4,15 +4,20 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import itertools
 import logging
 import signal
 import sys
+from datetime import datetime
 
+from krx_quant.archive import run_archive
 from krx_quant.backfill import run_backfill
 from krx_quant.collector import measure_subscription_limit, run_collector
 from krx_quant.config import Settings, SettingsError
 from krx_quant.fake_kis import FakeKis
+from krx_quant.feeds.base import KST
 from krx_quant.kis import KisError
+from krx_quant.notify import send_test_alert
 
 
 async def _collect() -> None:
@@ -41,15 +46,39 @@ async def _backfill() -> None:
     print(f"filled one-minute bars for {filled} symbol-days")
 
 
-async def _fake_kis(port: int) -> None:
-    fake = FakeKis(port=port)
+async def _archive(recheck: bool) -> int:
+    report = await run_archive(Settings.from_env(), recheck=recheck)
+    print(f"archived: {report.uploaded} uploaded, {report.unchanged} unchanged, {len(report.failed)} failed")
+    for partition in report.failed:
+        print(f"failed: {partition}", file=sys.stderr)
+    return 1 if report.failed else 0
+
+
+async def _test_alert() -> int:
+    try:
+        sent = await send_test_alert(Settings.from_env())
+    except RuntimeError as e:
+        print(e, file=sys.stderr)
+        return 1
+    if not sent:
+        print("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are not set; alerts only go to the log")
+        return 1
+    print("test alert sent")
+    return 0
+
+
+async def _fake_kis(port: int, host: str, trades: bool) -> None:
+    fake = FakeKis(port=port, host=host)
     await fake.start()
     print(f"fake KIS listening: KIS_REST_URL={fake.rest_url} KIS_WS_URL={fake.ws_url}", flush=True)
     print(f"credentials: KIS_APP_KEY={fake.app_key} KIS_APP_SECRET={fake.app_secret}", flush=True)
     try:
-        while True:
-            await asyncio.sleep(10)
-            await fake.send_pingpong()
+        for tick in itertools.count(1):
+            await asyncio.sleep(1)
+            if trades:
+                await fake.send_demo_trades(datetime.now(KST))
+            if tick % 10 == 0:
+                await fake.send_pingpong()
     finally:
         await fake.stop()
 
@@ -66,8 +95,18 @@ def main(argv: list[str] | None = None) -> int:
         "backfill",
         help="fill missing one-minute bars for the past year and exit (stop the collector first)",
     )
+    archive_cmd = sub.add_parser(
+        "archive",
+        help="merge recorded part files and upload every day to KRX_OBJECT_STORE (safe to rerun)",
+    )
+    archive_cmd.add_argument(
+        "--recheck", action="store_true", help="compare every file with the store and upload what it lacks"
+    )
+    sub.add_parser("test-alert", help="send a test message to the Telegram chat that receives alerts")
     fake = sub.add_parser("fake-kis", help="run a local fake KIS server for offline testing")
     fake.add_argument("--port", type=int, default=18080)
+    fake.add_argument("--host", default="127.0.0.1", help="address to listen on (0.0.0.0 inside Docker)")
+    fake.add_argument("--trades", action="store_true", help="push a synthetic trade per stock every second")
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -78,8 +117,12 @@ def main(argv: list[str] | None = None) -> int:
             asyncio.run(_measure())
         elif args.command == "backfill":
             asyncio.run(_backfill())
+        elif args.command == "archive":
+            return asyncio.run(_archive(args.recheck))
+        elif args.command == "test-alert":
+            return asyncio.run(_test_alert())
         elif args.command == "fake-kis":
-            asyncio.run(_fake_kis(args.port))
+            asyncio.run(_fake_kis(args.port, args.host, args.trades))
     except SettingsError as e:
         print(f"configuration error: {e}", file=sys.stderr)
         return 2

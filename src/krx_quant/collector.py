@@ -6,11 +6,12 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import Callable
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 
 import aiohttp
 
 from krx_quant import kis
+from krx_quant.archive import archive
 from krx_quant.auth import TokenManager, tokens_and_client
 from krx_quant.backfill import keep_history
 from krx_quant.config import Settings
@@ -37,9 +38,10 @@ from krx_quant.feeds import (
 )
 from krx_quant.feeds.base import kst_day
 from krx_quant.health import FeedHealth, GapKind
-from krx_quant.market_calendar import calendar_store
+from krx_quant.market_calendar import MarketCalendar, calendar_store
 from krx_quant.masters import FrontMonths, MasterError, fetch_front_months
 from krx_quant.notify import Alerts
+from krx_quant.object_store import open_store
 from krx_quant.polling import Poller, PollJob
 from krx_quant.recorder import ParquetRecorder
 
@@ -48,6 +50,13 @@ log = logging.getLogger(__name__)
 Clock = Callable[[], datetime]
 
 _WS_ALERT = "websocket"
+_ARCHIVE_ALERT = "archive"
+
+# Recorded days are archived this long after each trading day's close (training starts
+# at 16:00), and every night, after the NXT and KRX after-market close and the 20:30
+# backfill, for the rest of the day's rows.
+ARCHIVE_AFTER_CLOSE = timedelta(minutes=15)
+NIGHTLY_ARCHIVE = time(21, 0)
 
 # WebSocket approval keys last about a day; take a new one on reconnect after this.
 _APPROVAL_MAX_AGE = timedelta(hours=20)
@@ -143,6 +152,12 @@ async def run_collector(settings: Settings, *, stop: asyncio.Event, clock: Clock
                 ),
                 asyncio.create_task(keep_history(settings, client, calendar, now)),
             ]
+            if settings.object_store is None:
+                log.warning("KRX_OBJECT_STORE is not set: recorded days are not archived")
+            else:
+                background.append(
+                    asyncio.create_task(_keep_archived(settings, recorder, calendar.calendar, alerts, now))
+                )
             try:
                 await stream.run()
             finally:
@@ -156,6 +171,55 @@ async def run_collector(settings: Settings, *, stop: asyncio.Event, clock: Clock
     finally:
         health.close()
         recorder.close()
+
+
+async def _keep_archived(
+    settings: Settings,
+    recorder: ParquetRecorder,
+    calendar: MarketCalendar,
+    alerts: Alerts,
+    now: Clock,
+) -> None:
+    """Archive finished days at start, then every day after the close and at night.
+
+    Buffered rows are written first so the archive holds everything recorded so far;
+    rows recorded later go into the next run. A failure (a bad store setting included)
+    raises one alert, cleared by the next run that archives everything; recording goes on.
+    """
+    before: date | None = kst_day(now())
+    target = now()
+    while True:
+        try:
+            store = open_store(settings)
+            assert store is not None
+            recorder.flush()
+            report = await archive(settings.data_dir, store, before=before)
+        except Exception:
+            log.exception("archiving failed")
+            alerts.raise_(_ARCHIVE_ALERT, "장 마감 데이터 업로드가 실패했습니다.")
+        else:
+            log.info("archived: %d uploaded, %d unchanged", report.uploaded, report.unchanged)
+            if report.failed:
+                alerts.raise_(
+                    _ARCHIVE_ALERT, f"장 마감 데이터 업로드가 {len(report.failed)}개 파티션에서 실패했습니다."
+                )
+            else:
+                alerts.resolve(_ARCHIVE_ALERT, "장 마감 데이터 업로드가 다시 됩니다.")
+        before = None
+        target = _next_archive_time(calendar, max(now(), target))
+        await asyncio.sleep(max(0.0, (target - now()).total_seconds()))
+
+
+def _next_archive_time(calendar: MarketCalendar, after: datetime) -> datetime:
+    """The first scheduled archive run later than ``after``."""
+    local = after.astimezone(KST)
+    candidates = []
+    for day in (local.date(), local.date() + timedelta(days=1)):
+        session = calendar.session(day)
+        if session is not None:
+            candidates.append(session.close + ARCHIVE_AFTER_CLOSE)
+        candidates.append(datetime.combine(day, NIGHTLY_ARCHIVE, KST))
+    return min(c for c in candidates if c > local)
 
 
 async def _every(seconds: float, action: Callable[[], None], name: str) -> None:
