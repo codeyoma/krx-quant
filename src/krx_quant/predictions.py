@@ -11,7 +11,7 @@ Times are ISO 8601 strings in KST, which sort in time order.
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -90,11 +90,14 @@ class Pending:
 
 @dataclass(frozen=True)
 class AlgorithmSummary:
+    """Counts on basis A."""
+
     algorithm: str
     predictions: int
-    scored: int  # on basis A
+    scored: int
     unscorable: int
-    up: int  # outcomes by class, on basis A
+    pending: int
+    up: int  # scored outcomes by class
     flat: int
     down: int
 
@@ -113,6 +116,9 @@ class PredictionStore:
         self._db = sqlite3.connect(path)
         self._db.row_factory = sqlite3.Row
         self._db.execute("PRAGMA journal_mode=WAL")
+        # With WAL, a power loss can lose the last commits but never corrupts the file;
+        # commits then do not wait for the disk, which would hold up the event loop.
+        self._db.execute("PRAGMA synchronous=NORMAL")
         version = self._db.execute("PRAGMA user_version").fetchone()[0]
         if version > _VERSION:
             raise RuntimeError(f"{path} was written by a newer engine (schema {version})")
@@ -123,33 +129,38 @@ class PredictionStore:
     def close(self) -> None:
         self._db.close()
 
-    def add(self, p: NewPrediction) -> Pending:
-        f = p.forecast
+    def add_all(self, predictions: Sequence[NewPrediction]) -> list[Pending]:
+        """Store a bar close's predictions in one transaction; they are pending until scored."""
+        added: list[Pending] = []
         with self._db:
-            cursor = self._db.execute(
-                "INSERT INTO predictions (symbol, algorithm, model_version, bar_close, displayed_at,"
-                " p_up, p_flat, p_down, expected_ticks, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    p.symbol,
-                    p.algorithm,
-                    p.model_version,
-                    iso(p.bar_close),
-                    iso(p.displayed_at),
-                    f.p_up,
-                    f.p_flat,
-                    f.p_down,
-                    f.expected_ticks,
-                    p.status,
-                ),
-            )
-            assert cursor.lastrowid is not None
-            prediction_id = cursor.lastrowid
-            self._db.execute(
-                "INSERT INTO outcomes (prediction_id, target_at, mid_close, mid_display, flat_ticks)"
-                " VALUES (?, ?, ?, ?, ?)",
-                (prediction_id, iso(p.target_at), p.mid_close, p.mid_display, p.flat_ticks),
-            )
-        return Pending(prediction_id, p.symbol, p.target_at, p.mid_close, p.mid_display, p.flat_ticks)
+            for p in predictions:
+                f = p.forecast
+                cursor = self._db.execute(
+                    "INSERT INTO predictions (symbol, algorithm, model_version, bar_close, displayed_at,"
+                    " p_up, p_flat, p_down, expected_ticks, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        p.symbol,
+                        p.algorithm,
+                        p.model_version,
+                        iso(p.bar_close),
+                        iso(p.displayed_at),
+                        f.p_up,
+                        f.p_flat,
+                        f.p_down,
+                        f.expected_ticks,
+                        p.status,
+                    ),
+                )
+                assert cursor.lastrowid is not None
+                self._db.execute(
+                    "INSERT INTO outcomes (prediction_id, target_at, mid_close, mid_display, flat_ticks)"
+                    " VALUES (?, ?, ?, ?, ?)",
+                    (cursor.lastrowid, iso(p.target_at), p.mid_close, p.mid_display, p.flat_ticks),
+                )
+                added.append(
+                    Pending(cursor.lastrowid, p.symbol, p.target_at, p.mid_close, p.mid_display, p.flat_ticks)
+                )
+        return added
 
     def pending(self) -> list[Pending]:
         rows = self._db.execute(
@@ -169,19 +180,23 @@ class PredictionStore:
             for r in rows
         ]
 
-    def score(self, prediction_id: int, score: Score, scored_at: datetime) -> None:
+    def score_all(self, scores: Sequence[tuple[int, Score]], scored_at: datetime) -> None:
+        """Complete the outcomes of (prediction ID, score) pairs in one transaction."""
         with self._db:
-            self._db.execute(
+            self._db.executemany(
                 "UPDATE outcomes SET mid_target = ?, class_a = ?, class_b = ?, unscorable = ?, scored_at = ?"
                 " WHERE prediction_id = ?",
-                (
-                    score.mid_target,
-                    score.class_a.value if score.class_a else None,
-                    score.class_b.value if score.class_b else None,
-                    score.unscorable,
-                    iso(scored_at),
-                    prediction_id,
-                ),
+                [
+                    (
+                        score.mid_target,
+                        score.class_a.value if score.class_a else None,
+                        score.class_b.value if score.class_b else None,
+                        score.unscorable,
+                        iso(scored_at),
+                        prediction_id,
+                    )
+                    for prediction_id, score in scores
+                ],
             )
 
     def day_classes(self, symbol: str, since: datetime, until: datetime) -> Mapping[Direction, int]:
@@ -207,23 +222,26 @@ class PredictionStore:
         """The symbol's predictions of its last ``limit`` bar closes, newest first; of one
         algorithm only if given.
         """
-        only = "" if algorithm is None else " AND algorithm = ?"
-        mine = () if algorithm is None else (algorithm,)
+        if algorithm is None:
+            return self._select(
+                "WHERE p.symbol = ? AND p.bar_close IN (SELECT DISTINCT bar_close FROM predictions"
+                " WHERE symbol = ? ORDER BY bar_close DESC LIMIT ?) ORDER BY p.bar_close DESC, p.algorithm",
+                (symbol, symbol, limit),
+            )
         return self._select(
-            f"WHERE p.symbol = ?{only.replace('algorithm', 'p.algorithm')} AND p.bar_close IN"
-            f" (SELECT DISTINCT bar_close FROM predictions WHERE symbol = ?{only}"
-            " ORDER BY bar_close DESC LIMIT ?) ORDER BY p.bar_close DESC, p.algorithm",
-            (symbol, *mine, symbol, *mine, limit),
+            "WHERE p.symbol = ? AND p.algorithm = ? ORDER BY p.bar_close DESC LIMIT ?",
+            (symbol, algorithm, limit),
         )
 
     def summary(self) -> list[AlgorithmSummary]:
         rows = self._db.execute(
-            "SELECT p.algorithm, COUNT(*), COUNT(o.class_a), COUNT(o.unscorable),"
-            " SUM(o.class_a = 'up'), SUM(o.class_a = 'flat'), SUM(o.class_a = 'down')"
+            "SELECT p.algorithm, COUNT(*), COUNT(o.class_a),"
+            " TOTAL(o.scored_at IS NOT NULL AND o.class_a IS NULL), TOTAL(o.scored_at IS NULL),"
+            " TOTAL(o.class_a = 'up'), TOTAL(o.class_a = 'flat'), TOTAL(o.class_a = 'down')"
             " FROM predictions p JOIN outcomes o ON o.prediction_id = p.id GROUP BY p.algorithm"
             " ORDER BY p.algorithm"
         ).fetchall()
-        return [AlgorithmSummary(r[0], r[1], r[2], r[3], r[4] or 0, r[5] or 0, r[6] or 0) for r in rows]
+        return [AlgorithmSummary(r[0], *(int(v) for v in r[1:])) for r in rows]
 
     def last_bar_close(self) -> str | None:
         value: str | None = self._db.execute("SELECT MAX(bar_close) FROM predictions").fetchone()[0]

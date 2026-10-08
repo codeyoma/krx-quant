@@ -60,6 +60,23 @@ async def test_a_recorded_day_replays_like_the_same_events_given_by_hand(
     assert "baseline-flat: 376 predictions" in out
 
 
+def test_replay_never_replaces_the_live_engine_database(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    record(tmp_path / "data", busy_morning())
+    live = tmp_path / "state" / "engine.sqlite3"
+    live.parent.mkdir()
+    live.write_bytes(b"live predictions")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("KRX_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("KRX_STATE_DIR", str(tmp_path / "state"))
+
+    assert main(["replay", DAY.isoformat(), "--db", "state/engine.sqlite3"]) == 1
+
+    assert live.read_bytes() == b"live predictions"
+    assert "live engine's database" in capsys.readouterr().err
+
+
 def test_replaying_a_day_with_nothing_recorded_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

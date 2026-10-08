@@ -10,7 +10,7 @@ Endpoints (all under ``/v1``):
   N bar closes (default 100, at most 1000), newest first, with their outcomes;
 - ``GET /symbols/{symbol}/bars``: today's finished one-minute bars, oldest first.
 
-Times are ISO 8601 in KST. The API is served on the Tailscale address only.
+Times are ISO 8601 in KST. On the server, compose publishes it on the Tailscale address only.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from aiohttp import web
 from krx_quant.engine import PredictionEngine
 from krx_quant.feeds.base import kst_day
 from krx_quant.predictions import iso
-from krx_quant.pricing import tick_size
+from krx_quant.pricing import flat_ticks, tick_size
 
 ENGINE_KEY = web.AppKey("engine", PredictionEngine)
 MODE_KEY = web.AppKey("mode", str)
@@ -82,7 +82,7 @@ async def _symbols(request: web.Request) -> web.Response:
                 "symbol": symbol,
                 "mid": mid,
                 "tick": tick_size(mid) if mid is not None else None,
-                "flat_ticks": engine.flat_ticks(mid) if mid is not None else None,
+                "flat_ticks": flat_ticks(mid, engine.fee_rate) if mid is not None else None,
             }
         )
     return web.json_response({"symbols": symbols})
