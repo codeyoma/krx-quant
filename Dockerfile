@@ -14,7 +14,9 @@ RUN uv sync --frozen --no-dev --no-install-project
 COPY src ./src
 RUN uv sync --frozen --no-dev
 
-RUN useradd --create-home --uid 10001 engine && mkdir -p /data /state && chown engine /data /state
+# /archive is a mount point for a local Object Store (deploy/smoke-local.sh); the server uses S3.
+RUN useradd --create-home --uid 10001 engine && mkdir -p /data /state /archive \
+    && chown engine /data /state /archive
 USER engine
 # /state holds the cached KIS access token; keep it on a volume so restarts reuse it.
 ENV KRX_DATA_DIR=/data KRX_STATE_DIR=/state

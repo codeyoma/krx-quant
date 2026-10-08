@@ -62,11 +62,26 @@ uv run krx-quant measure-subscriptions
 uv run krx-quant backfill
 ```
 
-Docker로 실행할 때(`-u`는 컨테이너가 호스트의 `data/`, `state/` 폴더에 쓸 수 있게 한다):
+장 마감 업로드:
+- `KRX_OBJECT_STORE`(`s3://버킷/engine` 또는 로컬 폴더)를 넣으면, 수집기가 거래일마다 장 마감 15분 뒤와 매일 21:00에 녹화한 날을 올린다. 시작할 때는 지난날 중 아직 안 올린 것을 올린다.
+- 파티션마다 part 파일을 `data.parquet` 하나로 합쳐 올린다. 다시 돌려도 결과가 같다. 손으로 돌릴 때는 다음 명령을 쓴다.
 
 ```bash
-docker build -t krx-quant .
-docker run --rm --env-file .env -u "$(id -u):$(id -g)" -v "$PWD/data:/data" -v "$PWD/state:/state" krx-quant collect
+uv run krx-quant archive
+```
+
+### 상시 서버 (Docker)
+
+서버는 `compose.yaml`로 띄운다. 개통, 키 교체, 장애 대응은 [docs/operations.md](docs/operations.md)에 있다.
+
+```bash
+docker compose up -d --build
+```
+
+로컬 Docker에서 가짜 KIS에 붙여 수집 → 녹화 → 업로드까지 확인하려면 다음을 실행한다. 업로드를 두 번 돌려 두 번째에 바뀌는 것이 없는지도 본다.
+
+```bash
+deploy/smoke-local.sh
 ```
 
 ### 키 없이 확인하기 (가짜 KIS)
@@ -103,6 +118,7 @@ uv run python -c "import glob, pyarrow.parquet as pq; d = sorted(glob.glob('data
 - [docs/design.md](docs/design.md): 설계 (목표, 구조, 데이터, 알고리즘, 학습, 인프라, 개발 단계)
 - [docs/kis-feeds.md](docs/kis-feeds.md): KIS 피드, 키, 한도, 최근월물 찾기
 - [docs/events.md](docs/events.md): 녹화 데이터와 1분봉 형식
+- [docs/operations.md](docs/operations.md): 서버 개통, 키 교체, 장애 대응
 - [docs/paid-data.md](docs/paid-data.md): 유료 데이터 조사
 
 ## 진행 상황

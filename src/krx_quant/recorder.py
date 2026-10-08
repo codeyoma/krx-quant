@@ -19,6 +19,9 @@ from typing import Any
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+# Part files are named ``part-<HHMMSS>-<id>.parquet``; archiving merges them.
+PART_PREFIX = "part-"
+
 
 @dataclass
 class _Partition:
@@ -49,7 +52,7 @@ class ParquetRecorder:
             if part.rows and now - part.last_flush >= self._flush_seconds:
                 self._write(path, part)
 
-    def close(self) -> None:
+    def flush(self) -> None:
         """Write every buffered partition; if some fail, still try the rest, then raise."""
         errors: list[Exception] = []
         for path, part in self._partitions.items():
@@ -61,9 +64,12 @@ class ParquetRecorder:
         if errors:
             raise ExceptionGroup("some partitions could not be written", errors)
 
+    def close(self) -> None:
+        self.flush()
+
     def _write(self, path: Path, part: _Partition) -> None:
         path.mkdir(parents=True, exist_ok=True)
-        name = f"part-{time.strftime('%H%M%S')}-{uuid.uuid4().hex[:8]}.parquet"
+        name = f"{PART_PREFIX}{time.strftime('%H%M%S')}-{uuid.uuid4().hex[:8]}.parquet"
         tmp = path / f".{name}.tmp"
         pq.write_table(pa.Table.from_pylist(part.rows, schema=part.schema), tmp)
         tmp.rename(path / name)

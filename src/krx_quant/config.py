@@ -73,6 +73,15 @@ class Settings:
     # Backfill queries are spaced evenly at this rate, inside the shared REST limit.
     backfill_max_per_second: float = 8.0
     data_dir: Path = Path("data")
+    # Recorded days are archived here after the close: ``s3://bucket/prefix`` or a local
+    # directory. Unset: no archiving.
+    object_store: str | None = None
+    # S3 access. Unset keys fall back to boto3's own lookup; the endpoint is for
+    # S3-compatible stores such as MinIO.
+    aws_region: str = "ap-northeast-2"
+    aws_access_key_id: str | None = None
+    aws_secret_access_key: str | None = None
+    s3_endpoint_url: str | None = None
     # The recorder writes a Parquet part file per partition when either limit is reached.
     flush_rows: int = 5000
     flush_seconds: float = 30.0
@@ -155,6 +164,11 @@ class Settings:
                 number("KRX_BACKFILL_MAX_PER_SECOND", "8", float, maximum=MAX_REST_PER_SECOND)
             ),
             data_dir=Path(values.get("KRX_DATA_DIR", "data")),
+            object_store=values.get("KRX_OBJECT_STORE") or None,
+            aws_region=values.get("AWS_REGION") or values.get("AWS_DEFAULT_REGION") or "ap-northeast-2",
+            aws_access_key_id=values.get("AWS_ACCESS_KEY_ID") or None,
+            aws_secret_access_key=values.get("AWS_SECRET_ACCESS_KEY") or None,
+            s3_endpoint_url=values.get("KRX_S3_ENDPOINT_URL") or None,
             flush_rows=int(number("KRX_FLUSH_ROWS", "5000", int)),
             flush_seconds=float(number("KRX_FLUSH_SECONDS", "30", float)),
         )
