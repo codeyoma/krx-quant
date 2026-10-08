@@ -186,8 +186,13 @@ async def _keep_archived(
     rows recorded later go into the next run. A failure (a bad store setting included)
     raises one alert, cleared by the next run that archives everything; recording goes on.
     """
-    before: date | None = kst_day(now())
-    target = now()
+    # At start, today is left for later only while none of today's runs is due yet: a
+    # collector restarted after 21:00 must not leave the finished day out until tomorrow.
+    started = now()
+    today = kst_day(started)
+    due_today = _archive_times(calendar, today)[0] <= started.astimezone(KST)
+    before: date | None = None if due_today else today
+    target = started
     while True:
         try:
             store = open_store(settings)
@@ -210,15 +215,19 @@ async def _keep_archived(
         await asyncio.sleep(max(0.0, (target - now()).total_seconds()))
 
 
+def _archive_times(calendar: MarketCalendar, day: date) -> list[datetime]:
+    """The scheduled archive runs on ``day``, in order."""
+    session = calendar.session(day)
+    times = [session.close + ARCHIVE_AFTER_CLOSE] if session is not None else []
+    return [*times, datetime.combine(day, NIGHTLY_ARCHIVE, KST)]
+
+
 def _next_archive_time(calendar: MarketCalendar, after: datetime) -> datetime:
     """The first scheduled archive run later than ``after``."""
     local = after.astimezone(KST)
-    candidates = []
-    for day in (local.date(), local.date() + timedelta(days=1)):
-        session = calendar.session(day)
-        if session is not None:
-            candidates.append(session.close + ARCHIVE_AFTER_CLOSE)
-        candidates.append(datetime.combine(day, NIGHTLY_ARCHIVE, KST))
+    candidates = _archive_times(calendar, local.date()) + _archive_times(
+        calendar, local.date() + timedelta(days=1)
+    )
     return min(c for c in candidates if c > local)
 
 

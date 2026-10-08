@@ -255,3 +255,21 @@ async def test_a_stray_folder_does_not_stop_the_other_days(tmp_path: Path) -> No
     await archive(data, store, before=DAY + timedelta(days=1))
 
     assert store.keys() == [KEY]
+
+
+async def test_a_collector_started_after_the_nightly_run_archives_today_at_once(
+    kis: FakeKis, tmp_path: Path
+) -> None:
+    kis.script[("H0UNCNT0", "005930")] = [
+        trade_frame({"MKSC_SHRN_ISCD": "005930", "STCK_CNTG_HOUR": "193000", "BSOP_DATE": "20261008"})
+    ]
+    store = tmp_path / "store"
+    settings = replace(settings_for(kis, tmp_path / "data"), object_store=str(store))
+    record(settings.data_dir, ["recorded before a restart at 21:10"])  # e.g. an update stopped the 21:00 run
+    after_nightly = datetime(2026, 10, 8, 21, 30, tzinfo=KST)
+    stop = asyncio.Event()
+    task = asyncio.create_task(run_collector(settings, stop=stop, clock=lambda: after_nightly))
+
+    await until(lambda: KEY in LocalObjectStore(store).keys())
+    stop.set()
+    await asyncio.wait_for(task, 5)
