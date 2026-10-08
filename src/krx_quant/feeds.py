@@ -130,6 +130,13 @@ BOOK_SCHEMA = pa.schema(
         ("total_ask_qty", pa.int64()),
         ("total_bid_qty", pa.int64()),
         ("cum_volume", pa.int64()),
+        # Resting mid-point orders per venue (KMID_* = KRX, NMID_* = NXT).
+        ("krx_midpoint_px", pa.int64()),
+        ("krx_midpoint_qty", pa.int64()),
+        ("krx_midpoint_cls", pa.string()),
+        ("nxt_midpoint_px", pa.int64()),
+        ("nxt_midpoint_qty", pa.int64()),
+        ("nxt_midpoint_cls", pa.string()),
     ]
 )
 
@@ -149,6 +156,12 @@ def _normalize_book(f: dict[str, str], received_at: datetime) -> Row:
         "total_ask_qty": _int(f["TOTAL_ASKP_RSQN"]),
         "total_bid_qty": _int(f["TOTAL_BIDP_RSQN"]),
         "cum_volume": _int(f["ACML_VOL"]),
+        "krx_midpoint_px": _int(f["KMID_PRC"]),
+        "krx_midpoint_qty": _int(f["KMID_TOTAL_RSQN"]),
+        "krx_midpoint_cls": f["KMID_CLS_CODE"],
+        "nxt_midpoint_px": _int(f["NMID_PRC"]),
+        "nxt_midpoint_qty": _int(f["NMID_TOTAL_RSQN"]),
+        "nxt_midpoint_cls": f["NMID_CLS_CODE"],
     }
 
 

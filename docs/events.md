@@ -48,7 +48,7 @@ KIS 레코드 하나가 이벤트 하나다. 한 메시지에 레코드가 여�
 | `halted` | bool | `TRHT_YN` | 거래정지 여부 |
 | `hour_cls` | string | `HOUR_CLS_CODE` | 시간 구분 코드(원문) |
 | `vi_ref_price` | int64 | `VI_STND_PRC` | VI 기준가 |
-| `market_cls_code` | string | `MARKET_CLS_CODE` | 시장 구분 코드(원문). 의미가 확인되지 않아 그대로 둔다. 체결별 거래소를 가리킬 수 있어서, 실제 데이터로 확인한 뒤 `venue`에 반영한다. |
+| `market_cls_code` | string | `MARKET_CLS_CODE` | 시장 구분 코드(원문). 실데이터에서 모든 체결이 `2`였다. 체결별 거래소를 구분하지 않는다. |
 
 ## events: 호가 (`H0UNASP0`, 국내주식 실시간호가 통합)
 
@@ -65,5 +65,19 @@ KIS 레코드 하나가 이벤트 하나다. 한 메시지에 레코드가 여�
 | `total_ask_qty` | int64 | `TOTAL_ASKP_RSQN` | 총 매도호가 잔량 |
 | `total_bid_qty` | int64 | `TOTAL_BIDP_RSQN` | 총 매수호가 잔량 |
 | `cum_volume` | int64 | `ACML_VOL` | 누적 거래량 |
+| `krx_midpoint_px` | int64 | `KMID_PRC` | KRX 중간가 주문 가격 |
+| `krx_midpoint_qty` | int64 | `KMID_TOTAL_RSQN` | KRX 중간가 주문 총 잔량 |
+| `krx_midpoint_cls` | string | `KMID_CLS_CODE` | KRX 중간가 구분 코드(원문, 의미 미확인) |
+| `nxt_midpoint_px` | int64 | `NMID_PRC` | NXT 중간가 주문 가격 |
+| `nxt_midpoint_qty` | int64 | `NMID_TOTAL_RSQN` | NXT 중간가 주문 총 잔량 |
+| `nxt_midpoint_cls` | string | `NMID_CLS_CODE` | NXT 중간가 구분 코드(원문, 의미 미확인) |
+
+## 실데이터 관찰 (2026-10-08, 삼성전자, 13시 전후 90초)
+
+- 체결 1,714건, 호가 409건을 받았다. 필드 수는 모든 메시지에서 문서와 같았다(체결 47개, 호가 66개).
+- `MARKET_CLS_CODE`는 모든 체결에서 `2`였다. 통합 피드만으로는 체결별 거래소를 알 수 없다. 거래소별 체결이 필요하면 KRX 전용(`H0STCNT0`)과 NXT 전용(`H0NXCNT0`) 피드를 따로 구독해야 한다.
+- 체결의 약 14%가 호가단위의 절반 가격(예: 263,250원, 호가단위 500원)에서 났다. 중간가 주문 체결로 보인다. 가격을 호가단위로 검증하는 코드는 이 경우를 허용해야 한다.
+- 통합 호가의 약 29%가 최우선 매도호가와 매수호가가 같았다(locked). KRX와 NXT의 최우선 호가가 맞물린 상태로 보인다. 뒤집힌(crossed) 경우는 없었다. 통합 중간가 계산과 스프레드 피처는 스프레드 0을 정상 값으로 다뤄야 한다.
+- 체결 시각 대비 수신 지연은 중앙값 약 0.7초였다. 체결 시각이 초 단위라서 최대 1초의 절삭이 포함된 값이다.
 
 KIS 필드 순서는 [koreainvestment/open-trading-api](https://github.com/koreainvestment/open-trading-api)의 `examples_llm/domestic_stock/ccnl_total`, `asking_price_total` 예제를 따른다.

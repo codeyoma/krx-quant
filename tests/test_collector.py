@@ -107,6 +107,12 @@ async def test_book_frame_is_recorded_with_ten_levels_per_side(kis: FakeKis, tmp
                 "TOTAL_ASKP_RSQN": "300000",
                 "TOTAL_BIDP_RSQN": "350000",
                 "ACML_VOL": "1234604",
+                "KMID_PRC": "81250",
+                "KMID_TOTAL_RSQN": "120",
+                "KMID_CLS_CODE": "1",
+                "NMID_PRC": "81250",
+                "NMID_TOTAL_RSQN": "45",
+                "NMID_CLS_CODE": "2",
             }
         )
     ]
@@ -123,6 +129,9 @@ async def test_book_frame_is_recorded_with_ten_levels_per_side(kis: FakeKis, tmp
     assert [book[f"bid_qty_{i}"] for i in (1, 10)] == [2001, 2010]
     assert (book["total_ask_qty"], book["total_bid_qty"]) == (300000, 350000)
     assert book["cum_volume"] == 1234604
+    # Mid-point order book per venue, carried inside the integrated frame.
+    assert (book["krx_midpoint_px"], book["krx_midpoint_qty"], book["krx_midpoint_cls"]) == (81250, 120, "1")
+    assert (book["nxt_midpoint_px"], book["nxt_midpoint_qty"], book["nxt_midpoint_cls"]) == (81250, 45, "2")
 
 
 async def test_raw_frames_are_recorded_verbatim(kis: FakeKis, tmp_path: Path) -> None:
