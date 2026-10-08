@@ -15,6 +15,7 @@ from krx_quant.auth import TokenManager
 from krx_quant.config import Settings
 from krx_quant.feeds import (
     BOOK,
+    ETF_FALLBACKS,
     FALLBACKS,
     FOREIGN_ESTIMATE,
     INDEX,
@@ -73,7 +74,8 @@ def subscription_plan(settings: Settings, fronts: FrontMonths | None) -> list[tu
     plan += [(INDEX, code) for code in settings.index_codes]
     if fronts is not None:
         plan += [(OPTION, code) for code in fronts.kospi200_options]
-    plan += [(TRADE, etf) for etf in settings.etf_symbols]
+    # ETFs do not trade on NXT, and the integrated feed sent nothing for them (2026-10-08).
+    plan += [(KRX_TRADE, etf) for etf in settings.etf_symbols]
     if settings.venue_trades:
         plan += [(feed, sym) for feed in (KRX_TRADE, NXT_TRADE) for sym in settings.symbols]
     return plan
@@ -248,7 +250,7 @@ async def _approval_key(session: aiohttp.ClientSession, settings: Settings) -> s
 
 
 def _fall_back(poller: Poller, settings: Settings, tr_id: str, key: str, reason: str) -> None:
-    fallback = FALLBACKS.get(tr_id)
+    fallback = (ETF_FALLBACKS if key in settings.etf_symbols else FALLBACKS).get(tr_id)
     if fallback is None:
         log.error("%s %s not recorded (%s) and has no REST fallback", tr_id, key, reason)
         return

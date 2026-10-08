@@ -99,3 +99,25 @@ async def test_measuring_the_limit_reports_how_many_registrations_kis_accepts(
     kis.max_subscriptions = 7
 
     assert await measure_subscription_limit(settings_for(kis, tmp_path)) == 7
+
+
+async def test_etfs_fall_back_to_the_krx_snapshot_and_stocks_to_the_integrated_one(
+    kis: FakeKis, tmp_path: Path
+) -> None:
+    # ETFs do not trade on NXT, so the integrated market has no data for them.
+    serve_snapshots(kis)
+    settings = replace(
+        settings_for(kis, tmp_path),
+        etf_symbols=("133690",),
+        ws_max_subscriptions=0,
+        fallback_poll_seconds=0.1,
+    )
+
+    await run_until(kis, settings, lambda: polled(kis, QUOTE, "005930") and polled(kis, QUOTE, "133690"))
+
+    markets = {
+        q["FID_INPUT_ISCD"]: q["FID_COND_MRKT_DIV_CODE"] for _, t, _, q in kis.rest_requests if t == QUOTE
+    }
+    assert markets == {"005930": "UN", "133690": "J"}, "J is KRX alone, UN the integrated market"
+    [etf, *_] = read(tmp_path, "events", QUOTE, symbol="133690")
+    assert (etf["price"], etf["cum_volume"]) == (190500, 1000)

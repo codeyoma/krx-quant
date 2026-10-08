@@ -17,6 +17,7 @@ from krx_quant.feeds.stock import (
     BOOK,
     BOOK_SNAPSHOT,
     FOREIGN_ESTIMATE,
+    KRX_QUOTE,
     KRX_TRADE,
     MEMBER,
     MEMBER_REST,
@@ -51,14 +52,20 @@ FALLBACKS: dict[str, RestFeed] = {
     INDEX.tr_id: INDEX_REST,
 }
 
+# ETFs are registered on the KRX-only trade feed and fall back to the KRX snapshot. Stocks'
+# KRX-only trades have no fallback: a KRX snapshot would share the integrated one's partition.
+ETF_FALLBACKS: dict[str, RestFeed] = {KRX_TRADE.tr_id: KRX_QUOTE}
+
 __all__ = [
     "BOOK",
     "BOOK_SNAPSHOT",
+    "ETF_FALLBACKS",
     "FALLBACKS",
     "FOREIGN_ESTIMATE",
     "INDEX",
     "INDEX_REST",
     "KOSPI200_FUTURES",
+    "KRX_QUOTE",
     "KRX_TRADE",
     "KST",
     "MEMBER",

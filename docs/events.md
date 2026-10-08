@@ -37,7 +37,7 @@ KIS 레코드 하나가 이벤트 하나다. 한 메시지에 레코드가 여�
 | `symbol` | string | `MKSC_SHRN_ISCD` | 종목코드 |
 | `event_time` | timestamp(s, Asia/Seoul) | `BSOP_DATE` + `STCK_CNTG_HOUR` | 체결 시각(초 단위) |
 | `received_at` | timestamp(us, UTC) | | 수신 시각 |
-| `venue` | string | | 피드별로 `UN`(통합, 체결별 거래소 정보 없음), `KRX`, `NXT` |
+| `venue` | string | | 피드별로 `UN`(통합, 체결별 거래소 정보 없음), `KRX`, `NXT`. ETF는 KRX 전용 피드로만 받아서 `KRX`다. |
 | `price` | int64 | `STCK_PRPR` | 체결가(원) |
 | `qty` | int64 | `CNTG_VOL` | 체결량(주) |
 | `side` | string | `CNTG_CLS_CODE` | 체결 방향: `1` → `buy`(매수 체결), `5` → `sell`(매도 체결), 그 외 → `unknown` |
@@ -156,7 +156,7 @@ KIS 레코드 하나가 이벤트 하나다. 한 메시지에 레코드가 여�
 
 | 피드 | 열 |
 |---|---|
-| `FHKST01010100` 시세(체결 대체) | `symbol`, `received_at`, `price`, `cum_volume`, `change_pct` |
+| `FHKST01010100` 시세(체결 대체) | `symbol`, `received_at`, `price`, `cum_volume`, `change_pct`. 주식은 통합(`UN`), ETF는 KRX(`J`) 시장으로 조회한다. |
 | `FHKST01010200` 호가 스냅샷(호가 대체) | `symbol`, `event_time`(`aspr_acpt_hour`), `received_at`, `price`, `ask_px_1..10`, `bid_px_1..10`, `ask_qty_1..10`, `bid_qty_1..10`, `total_ask_qty`, `total_bid_qty`, `vi_cls_code` |
 | `HHPTJ04160200` 추정 가집계 | `symbol`, `received_at`, `slot`(`bsop_hour_gb`), `foreign_net_qty`, `institution_net_qty`, `total_net_qty` |
 
