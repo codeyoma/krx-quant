@@ -4,6 +4,14 @@ KRX 종목의 4분 뒤 가격 움직임을 여러 퀀트 알고리즘이 예측�
 
 주문 기능은 없다. 신호만 낸다.
 
+## 받기
+
+```bash
+git clone --recurse-submodules https://github.com/codeyoma/krx-quant.git
+```
+
+`fincept/`는 공개 fork `codeyoma/FinceptTerminal`의 `custom` 브랜치를 가리키는 submodule이다. 작업 순서는 [AGENTS.md](AGENTS.md)의 Submodule workflow를 따른다.
+
 ## 문서
 
 - [docs/design.md](docs/design.md): 설계 (목표, 구조, 데이터, 알고리즘, 학습, 인프라, 개발 단계)

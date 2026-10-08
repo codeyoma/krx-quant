@@ -1,0 +1,4 @@
+[submodule "fincept"]
+	path = fincept
+	url = https://github.com/codeyoma/FinceptTerminal.git
+	branch = custom

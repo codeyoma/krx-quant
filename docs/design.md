@@ -40,6 +40,8 @@
 | `codeyoma/FinceptTerminal` | 공개 (GitHub fork는 비공개로 바꿀 수 없음) | Fincept 화면 코드만. 엔진 주소는 설정 파일에서 읽는다. |
 | `codeyoma/krx-quant` | 비공개 | 엔진, 알고리즘, 학습 파이프라인, 문서 |
 
+`krx-quant`는 fork를 `fincept/` submodule(`custom` 브랜치)로 포함한다. 그래서 `krx-quant`를 한 번 clone하면 두 저장소를 모두 받는다. 엔진 API 변경과 그에 맞는 화면 버전은 한 커밋으로 묶는다. 이렇게 하면 엔진과 화면 버전이 어긋나지 않는다. 비공개 저장소의 흔적은 공개 fork에 남지 않는다.
+
 **fork 브랜치.**
 - `main`: upstream 미러. 직접 커밋하지 않는다.
 - `custom`: 개인 빌드. 기본 브랜치다. upstream은 릴리스 태그(v4.x)만 merge 하고, rebase는 하지 않는다. 맥과 윈도우가 같은 이력을 공유하기 때문이다.
