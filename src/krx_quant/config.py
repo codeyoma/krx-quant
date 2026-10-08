@@ -42,7 +42,8 @@ class Settings:
     # KOSPI200 options recorded: the ATM strike and this many strikes on each side, calls and puts.
     option_strikes_each_side: int = 2
     foreign_estimate_poll_seconds: float = 300.0
-    # KRX-listed US index ETFs (TIGER 미국나스닥100, TIGER 미국필라델피아반도체나스닥), recorded like stocks.
+    # KRX-listed US index ETFs (TIGER 미국나스닥100, TIGER 미국필라델피아반도체나스닥), recorded from
+    # the KRX-only trade feed: ETFs do not trade on NXT.
     etf_symbols: tuple[str, ...] = ("133690", "381180")
     # KIS allows 20 REST calls per second on a real account.
     rest_max_per_second: int = 20

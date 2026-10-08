@@ -62,8 +62,8 @@ async def test_registers_every_feed_in_priority_order(kis: FakeKis, tmp_path: Pa
             ("H0UPCNT0", "2001"),
             ("H0UPCNT0", "0013"),
             *[("H0IOCNT0", code) for code in CALLS[1:6] + PUTS[1:6]],  # ATM +/- 2 strikes
-            ("H0UNCNT0", "133690"),  # KRX-listed US index ETFs
-            ("H0UNCNT0", "381180"),
+            ("H0STCNT0", "133690"),  # KRX-listed US index ETFs trade on KRX only
+            ("H0STCNT0", "381180"),
             *[("H0STCNT0", sym) for sym in SYMBOLS],
             *[("H0NXCNT0", sym) for sym in SYMBOLS],
         ]

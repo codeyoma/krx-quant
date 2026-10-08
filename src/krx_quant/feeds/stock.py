@@ -178,12 +178,20 @@ def _normalize_quote(body: dict[str, Any], key: str, received_at: datetime) -> l
     ]
 
 
-# FHKST01010100, "주식현재가 시세": a price snapshot. Used for KRX-listed US index ETFs.
+# FHKST01010100, "주식현재가 시세": a price snapshot of the integrated market (KRX + NXT).
 QUOTE = RestFeed(
     "FHKST01010100",
     "/uapi/domestic-stock/v1/quotations/inquire-price",
     QUOTE_SCHEMA,
     lambda symbol: {"FID_COND_MRKT_DIV_CODE": "UN", "FID_INPUT_ISCD": symbol},
+    _normalize_quote,
+)
+# The same snapshot for KRX alone (J), used for ETFs: they do not trade on NXT.
+KRX_QUOTE = RestFeed(
+    QUOTE.tr_id,
+    QUOTE.path,
+    QUOTE_SCHEMA,
+    lambda symbol: {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": symbol},
     _normalize_quote,
 )
 
