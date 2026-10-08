@@ -14,10 +14,11 @@ RUN uv sync --frozen --no-dev --no-install-project
 COPY src ./src
 RUN uv sync --frozen --no-dev
 
-RUN useradd --create-home --uid 10001 engine && mkdir -p /data && chown engine /data
+RUN useradd --create-home --uid 10001 engine && mkdir -p /data /state && chown engine /data /state
 USER engine
-ENV KRX_DATA_DIR=/data
-VOLUME ["/data"]
+# /state holds the cached KIS access token; keep it on a volume so restarts reuse it.
+ENV KRX_DATA_DIR=/data KRX_STATE_DIR=/state
+VOLUME ["/data", "/state"]
 
 ENTRYPOINT ["/app/.venv/bin/krx-quant"]
 CMD ["collect"]

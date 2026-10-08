@@ -13,12 +13,10 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import pyarrow.parquet as pq
-import pytest
 
 from krx_quant.collector import run_collector
 from krx_quant.config import Settings
 from krx_quant.fake_kis import FakeKis
-from krx_quant.kis import KisError
 from tests.kis_frames import book_frame, trade_frame
 
 KST = ZoneInfo("Asia/Seoul")
@@ -37,6 +35,7 @@ def settings_for(kis: FakeKis, data_dir: Path, symbols: tuple[str, ...] = ("0059
         us_symbols=(),
         venue_trades=False,
         master_url=kis.master_url,
+        state_dir=data_dir / "state",
         foreign_estimate_poll_seconds=3600,
         data_dir=data_dir,
     )
@@ -189,16 +188,3 @@ async def test_unparseable_messages_are_kept_raw_and_do_not_stop_recording(
     ]
     assert [r["message"] for r in read(tmp_path, "raw", "_unparsed", symbol="_")] == ["not a kis message"]
     assert [t["price"] for t in read(tmp_path, "events", "H0UNCNT0")] == [81200]
-
-
-async def test_collector_fails_when_kis_closes_the_connection(kis: FakeKis, tmp_path: Path) -> None:
-    kis.script[("H0UNCNT0", "005930")] = []
-    task = asyncio.create_task(
-        run_collector(settings_for(kis, tmp_path), stop=asyncio.Event(), clock=lambda: FIXED_NOW)
-    )
-    await kis.wait_for_subscriptions(set(kis.script))
-
-    await kis.close_connections()
-
-    with pytest.raises(KisError, match="closed"):
-        await asyncio.wait_for(task, 5)

@@ -15,8 +15,9 @@ venv/
 dist/
 build/
 
-# Local data and models
+# Local data, state (cached access token) and models
 data/
+state/
 *.parquet
 *.onnx
 *.sqlite

@@ -6,11 +6,12 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import aiohttp
 
 from krx_quant import kis
+from krx_quant.auth import TokenManager
 from krx_quant.config import Settings
 from krx_quant.feeds import (
     BOOK,
@@ -32,7 +33,10 @@ from krx_quant.feeds import (
     Feed,
     us_daytime_key,
 )
+from krx_quant.feeds.base import kst_day
+from krx_quant.health import FeedHealth, GapKind
 from krx_quant.masters import FrontMonths, MasterError, fetch_front_months
+from krx_quant.notify import Alerts
 from krx_quant.polling import Poller, PollJob
 from krx_quant.ratelimit import RateLimiter
 from krx_quant.recorder import ParquetRecorder
@@ -41,7 +45,12 @@ log = logging.getLogger(__name__)
 
 Clock = Callable[[], datetime]
 
-# How often the receive loop wakes up to flush partitions whose time limit has passed.
+_WS_ALERT = "websocket"
+
+# WebSocket approval keys last about a day; take a new one on reconnect after this.
+_APPROVAL_MAX_AGE = timedelta(hours=20)
+
+# How often buffered partitions whose time limit has passed are flushed.
 _TICK_SECONDS = 1.0
 
 
@@ -104,11 +113,33 @@ async def run_collector(settings: Settings, *, stop: asyncio.Event, clock: Clock
     """Record the configured feeds until ``stop`` is set, then flush and return."""
     now = clock or _system_clock
     recorder = ParquetRecorder(settings.data_dir, settings.flush_rows, settings.flush_seconds)
+    health = FeedHealth(recorder, now)
     try:
         async with aiohttp.ClientSession() as session:
-            token = await _issue_rest_token(session, settings)
-            approval = await _approval_key(session, settings)
-            poller = _poller(session, settings, token, recorder, now, stop)
+            alerts = Alerts(
+                session, settings.telegram_bot_token, settings.telegram_chat_id, settings.telegram_api_url
+            )
+            tokens = TokenManager(
+                session,
+                settings.kis_rest_url,
+                settings.kis_app_key,
+                settings.kis_app_secret,
+                settings.state_dir / "kis_token.json",
+                now,
+                timedelta(seconds=settings.token_refresh_margin_seconds),
+                settings.token_min_interval_seconds,
+            )
+            await _warm_up(tokens)
+            client = kis.RestClient(
+                session,
+                settings.kis_rest_url,
+                settings.kis_app_key,
+                settings.kis_app_secret,
+                tokens.get,
+                RateLimiter(settings.rest_max_per_second),
+                on_token_rejected=tokens.invalidate,
+            )
+            poller = Poller(client, recorder, now, stop, on_received=health.received)
             fronts = await front_months(session, settings)
             plan = subscription_plan(settings, fronts)
             cap = len(plan) if settings.ws_max_subscriptions is None else settings.ws_max_subscriptions
@@ -116,16 +147,44 @@ async def run_collector(settings: Settings, *, stop: asyncio.Event, clock: Clock
                 _fall_back(poller, settings, feed.tr_id, key, "beyond the configured cap")
             for job in rest_plan(settings):
                 poller.add(job)
+            stream = _Stream(session, settings, plan[:cap], recorder, now, stop, poller, health, alerts)
+            background = [
+                asyncio.create_task(_every(_TICK_SECONDS, recorder.flush_due, "periodic flush")),
+                asyncio.create_task(
+                    _every(settings.health_check_seconds, stream.check_stale, "health check")
+                ),
+            ]
             try:
-                async with session.ws_connect(settings.kis_ws_url + kis.WS_PATH) as ws:
-                    for feed, key in plan[:cap]:
-                        await ws.send_str(kis.subscribe_message(approval, feed.tr_id, key))
-                    await _receive_loop(ws, recorder, now, stop, poller, settings)
+                await stream.run()
             finally:
+                await stream.close()
+                for task in background:
+                    task.cancel()
+                await asyncio.gather(*background, return_exceptions=True)
                 # Jobs may be queued on the rate limiter; at shutdown, drop them.
                 await poller.close()
+                await alerts.close()
     finally:
+        health.close()
         recorder.close()
+
+
+async def _every(seconds: float, action: Callable[[], None], name: str) -> None:
+    """Run ``action`` every ``seconds`` until cancelled; a failure is logged, not fatal."""
+    while True:
+        await asyncio.sleep(seconds)
+        try:
+            action()
+        except Exception:
+            log.exception("%s failed", name)
+
+
+async def _warm_up(tokens: TokenManager) -> None:
+    """Get a REST token at startup so problems show early; REST polls retry on their own."""
+    try:
+        await tokens.get()
+    except (kis.KisError, aiohttp.ClientError, OSError, ValueError, KeyError) as e:
+        log.warning("REST access token not available yet: %s", e)
 
 
 async def measure_subscription_limit(settings: Settings) -> int:
@@ -188,43 +247,6 @@ async def _approval_key(session: aiohttp.ClientSession, settings: Settings) -> s
     )
 
 
-async def _issue_rest_token(session: aiohttp.ClientSession, settings: Settings) -> str | None:
-    """Issue the REST access token, or return None so the stream can still run.
-
-    KIS allows one token issuance per minute, so a refusal (e.g. on a quick
-    restart) disables REST polling for this run instead of stopping recording.
-    """
-    try:
-        return await kis.issue_access_token(
-            session, settings.kis_rest_url, settings.kis_app_key, settings.kis_app_secret
-        )
-    except kis.KisError as e:
-        log.warning("REST access token not issued: %s", e)
-        return None
-
-
-def _poller(
-    session: aiohttp.ClientSession,
-    settings: Settings,
-    token: str | None,
-    recorder: ParquetRecorder,
-    now: Clock,
-    stop: asyncio.Event,
-) -> Poller:
-    if token is None:
-        log.error("REST polling disabled: no access token")
-        return Poller(None, recorder, now, stop)
-    client = kis.RestClient(
-        session,
-        settings.kis_rest_url,
-        settings.kis_app_key,
-        settings.kis_app_secret,
-        token,
-        RateLimiter(settings.rest_max_per_second),
-    )
-    return Poller(client, recorder, now, stop)
-
-
 def _fall_back(poller: Poller, settings: Settings, tr_id: str, key: str, reason: str) -> None:
     fallback = FALLBACKS.get(tr_id)
     if fallback is None:
@@ -241,101 +263,209 @@ def _fall_back(poller: Poller, settings: Settings, tr_id: str, key: str, reason:
     poller.add(PollJob(fallback, key, settings.fallback_poll_seconds))
 
 
-async def _receive_loop(
-    ws: aiohttp.ClientWebSocketResponse,
-    recorder: ParquetRecorder,
-    now: Clock,
-    stop: asyncio.Event,
-    poller: Poller,
-    settings: Settings,
-) -> None:
-    """Read messages until the socket closes; ``stop`` closes it from a helper task.
+class _Stream:
+    """The KIS WebSocket session: kept up across reconnects, every message recorded."""
 
-    The read itself is never cancelled: cancelling an in-flight receive can drop a
-    frame that has already arrived. Time-based flushing runs in its own task.
-    """
+    def __init__(
+        self,
+        session: aiohttp.ClientSession,
+        settings: Settings,
+        subscriptions: list[tuple[Feed, str]],
+        recorder: ParquetRecorder,
+        now: Clock,
+        stop: asyncio.Event,
+        poller: Poller,
+        health: FeedHealth,
+        alerts: Alerts,
+    ) -> None:
+        self._session = session
+        self._settings = settings
+        # Registered on every (re)connect; keys refused for the session limit leave the list.
+        self._subscriptions = list(subscriptions)
+        self._recorder = recorder
+        self._now = now
+        self._stop = stop
+        self._poller = poller
+        self._health = health
+        self._alerts = alerts
+        self._approval: str | None = None
+        self._approval_at: datetime | None = None
+        self._acknowledged = False  # KIS answered a registration on the current connection
+        self._recovery: asyncio.Task[None] | None = None
 
-    async def flush_periodically() -> None:
-        while True:
-            await asyncio.sleep(_TICK_SECONDS)
+    async def run(self) -> None:
+        """Stay connected until ``stop``: reconnect with exponential backoff and register
+        every subscription again after each reconnect. The backoff only resets once KIS
+        has answered a registration, so a server that drops every new connection at once
+        is not hammered.
+        """
+        settings = self._settings
+        delay = settings.reconnect_initial_seconds
+        while not self._stop.is_set():
+            self._acknowledged = False
             try:
-                recorder.flush_due()
-            except Exception:
-                log.exception("periodic flush failed; rows stay buffered for the next attempt")
+                await self._ensure_approval()
+                async with self._session.ws_connect(settings.kis_ws_url + kis.WS_PATH) as ws:
+                    for feed, key in list(self._subscriptions):
+                        await ws.send_str(self._subscribe_message(feed.tr_id, key))
+                    await self._receive(ws)
+            except (kis.KisError, aiohttp.ClientError, OSError) as e:
+                if self._stop.is_set():
+                    return
+                if self._acknowledged:
+                    delay = settings.reconnect_initial_seconds
+                self._connection_lost(str(e))
+                log.warning("KIS WebSocket down (%s); reconnecting in %.1fs", e, delay)
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(self._stop.wait(), delay)
+                delay = min(delay * 2, settings.reconnect_max_seconds)
 
-    async def close_on_stop() -> None:
-        await stop.wait()
-        await ws.close()
+    async def close(self) -> None:
+        if self._recovery is not None:
+            self._recovery.cancel()
+            await asyncio.gather(self._recovery, return_exceptions=True)
 
-    def on_rejected(message: kis.SystemMessage) -> None:
+    def check_stale(self) -> None:
+        """Alert, in one message, on feeds that went quiet; announce the ones that came back."""
+        newly = self._health.check_stale()
+        if newly:
+            self._alerts.raise_many([_stale_name(k) for k in newly], "장중 데이터가 끊긴 피드")
+        still = {_stale_name(k) for k in self._health.open_gaps(GapKind.STALE)}
+        back = [name for name in self._alerts.active(_STALE_PREFIX) if name not in still]
+        if back:
+            self._alerts.resolve_many(back, "데이터가 다시 들어오는 피드")
+
+    async def _ensure_approval(self) -> None:
+        now = self._now()
+        if self._approval is None or self._approval_at is None or now - self._approval_at > _APPROVAL_MAX_AGE:
+            self._approval = await kis.issue_approval_key(
+                self._session,
+                self._settings.kis_rest_url,
+                self._settings.kis_app_key,
+                self._settings.kis_app_secret,
+            )
+            self._approval_at = now
+
+    def _subscribe_message(self, tr_id: str, key: str) -> str:
+        assert self._approval is not None
+        return kis.subscribe_message(self._approval, tr_id, key)
+
+    def _connection_lost(self, detail: str) -> None:
+        if self._recovery is not None:
+            self._recovery.cancel()  # it did not stay up long enough to count as recovered
+            self._recovery = None
+        self._health.connection_lost(((f.tr_id, k) for f, k in self._subscriptions), detail)
+        self._alerts.raise_(_WS_ALERT, f"KIS WebSocket 연결이 끊겼습니다 ({detail}). 재연결을 시도합니다.")
+
+    def _acknowledged_on_this_connection(self) -> None:
+        if self._acknowledged:
+            return
+        self._acknowledged = True
+        if self._alerts.is_active(_WS_ALERT) and self._recovery is None:
+            self._recovery = asyncio.create_task(self._announce_recovery())
+
+    async def _announce_recovery(self) -> None:
+        await asyncio.sleep(self._settings.recovery_hold_seconds)
+        self._recovery = None
+        self._alerts.resolve(_WS_ALERT, "KIS WebSocket이 다시 연결되어 구독을 복원했습니다.")
+
+    async def _receive(self, ws: aiohttp.ClientWebSocketResponse) -> None:
+        """Read messages until the socket closes; ``stop`` closes it from a helper task.
+
+        The read itself is never cancelled: cancelling an in-flight receive can drop a
+        frame that has already arrived.
+        """
+
+        async def close_on_stop() -> None:
+            await self._stop.wait()
+            await ws.close()
+
+        closer = asyncio.create_task(close_on_stop())
+        try:
+            async for msg in ws:
+                if msg.type == aiohttp.WSMsgType.TEXT:
+                    await self._handle(ws, msg.data)
+                elif msg.type == aiohttp.WSMsgType.ERROR:
+                    raise kis.KisError(f"websocket error: {ws.exception()}")
+            if not self._stop.is_set():
+                raise kis.KisError(f"websocket closed by KIS (code {ws.close_code})")
+        finally:
+            closer.cancel()
+            # gather, not suppress(CancelledError): that would also swallow our own cancellation.
+            await asyncio.gather(closer, return_exceptions=True)
+
+    async def _handle(self, ws: aiohttp.ClientWebSocketResponse, text: str) -> None:
+        """Record one message raw, then answer or normalize it.
+
+        The raw copy is written before anything can fail, and a message that cannot be
+        parsed or normalized is logged and skipped so one bad frame never stops recording.
+        """
+        at = self._now()
+        day = kst_day(at)
+        received_at = at.astimezone(UTC)
+        raw_row = {"received_at": received_at, "message": text}
+        try:
+            message = kis.parse_message(text)
+        except kis.KisError as e:
+            self._recorder.record("raw", day, "_unparsed", "_", raw_row, RAW_SCHEMA)
+            log.warning("unparseable message kept raw: %s", e)
+            return
+
+        if isinstance(message, kis.SystemMessage):
+            self._recorder.record("raw", day, "_system", message.tr_key or "_", raw_row, RAW_SCHEMA)
+            if message.is_pingpong:
+                await ws.pong(text.encode())
+                return
+            self._acknowledged_on_this_connection()
+            if not message.ok:
+                await self._on_rejected(ws, message)
+            elif message.tr_key:
+                self._health.subscribed((message.tr_id, message.tr_key))
+            return
+
+        self._recorder.record("raw", day, message.tr_id, message.symbol, raw_row, RAW_SCHEMA)
+        self._health.received((message.tr_id, message.symbol))
+        feed = WS_FEEDS.get(message.tr_id)
+        if feed is None or message.encrypted:
+            log.warning(
+                "not normalizing %s frame (known feed: %s, encrypted: %s)",
+                message.tr_id,
+                feed is not None,
+                message.encrypted,
+            )
+            return
+        try:
+            rows = [
+                feed.normalize(dict(zip(feed.columns, fields, strict=True)), received_at)
+                for fields in message.records(len(feed.columns))
+            ]
+        except (kis.KisError, ValueError, KeyError, IndexError):
+            log.exception("could not normalize %s frame; kept raw only", message.tr_id)
+            return
+        for row in rows:
+            self._recorder.record("events", day, feed.tr_id, row["symbol"], row, feed.schema)
+
+    async def _on_rejected(self, ws: aiohttp.ClientWebSocketResponse, message: kis.SystemMessage) -> None:
+        key = (message.tr_id, message.tr_key or "")
         if message.is_limit_rejection and message.tr_key:
-            _fall_back(poller, settings, message.tr_id, message.tr_key, "refused for the session limit")
+            # Moved to REST for good: not registered again on reconnects.
+            self._subscriptions = [(f, k) for f, k in self._subscriptions if (f.tr_id, k) != key]
+            self._health.covered_elsewhere(key)
+            _fall_back(
+                self._poller, self._settings, message.tr_id, message.tr_key, "refused for the session limit"
+            )
+        elif message.is_invalid_approval:
+            log.error("KIS refused the approval key; taking a new one and reconnecting")
+            self._approval = None
+            await ws.close()
         else:
             log.error(
                 "KIS rejected %s %s: %s %s", message.tr_id, message.tr_key, message.code, message.message
             )
 
-    helpers = [asyncio.create_task(flush_periodically()), asyncio.create_task(close_on_stop())]
-    try:
-        async for msg in ws:
-            if msg.type == aiohttp.WSMsgType.TEXT:
-                await _handle(ws, msg.data, recorder, now(), on_rejected)
-            elif msg.type == aiohttp.WSMsgType.ERROR:
-                raise kis.KisError(f"websocket error: {ws.exception()}")
-        if not stop.is_set():
-            raise kis.KisError(f"websocket closed by KIS (code {ws.close_code})")
-    finally:
-        for task in helpers:
-            task.cancel()
+
+_STALE_PREFIX = "stale "
 
 
-async def _handle(
-    ws: aiohttp.ClientWebSocketResponse,
-    text: str,
-    recorder: ParquetRecorder,
-    at: datetime,
-    on_rejected: Callable[[kis.SystemMessage], None],
-) -> None:
-    """Record one message raw, then answer or normalize it.
-
-    The raw copy is written before anything can fail, and a message that cannot be
-    parsed or normalized is logged and skipped so one bad frame never stops recording.
-    """
-    day = at.astimezone(KST).date()
-    received_at = at.astimezone(UTC)
-    raw_row = {"received_at": received_at, "message": text}
-    try:
-        message = kis.parse_message(text)
-    except kis.KisError as e:
-        recorder.record("raw", day, "_unparsed", "_", raw_row, RAW_SCHEMA)
-        log.warning("unparseable message kept raw: %s", e)
-        return
-
-    if isinstance(message, kis.SystemMessage):
-        recorder.record("raw", day, "_system", message.tr_key or "_", raw_row, RAW_SCHEMA)
-        if message.is_pingpong:
-            await ws.pong(text.encode())
-        elif not message.ok:
-            on_rejected(message)
-        return
-
-    recorder.record("raw", day, message.tr_id, message.symbol, raw_row, RAW_SCHEMA)
-    feed = WS_FEEDS.get(message.tr_id)
-    if feed is None or message.encrypted:
-        log.warning(
-            "not normalizing %s frame (known feed: %s, encrypted: %s)",
-            message.tr_id,
-            feed is not None,
-            message.encrypted,
-        )
-        return
-    try:
-        rows = [
-            feed.normalize(dict(zip(feed.columns, fields, strict=True)), received_at)
-            for fields in message.records(len(feed.columns))
-        ]
-    except (kis.KisError, ValueError, KeyError, IndexError):
-        log.exception("could not normalize %s frame; kept raw only", message.tr_id)
-        return
-    for row in rows:
-        recorder.record("events", day, feed.tr_id, row["symbol"], row, feed.schema)
+def _stale_name(key: tuple[str, str]) -> str:
+    return f"{_STALE_PREFIX}{key[0]} {key[1]}"

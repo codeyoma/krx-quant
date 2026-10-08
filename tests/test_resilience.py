@@ -1,0 +1,250 @@
+"""Reconnects, gap records and alerts, observed through the fake KIS seam."""
+
+from __future__ import annotations
+
+import asyncio
+from dataclasses import replace
+from datetime import datetime, timedelta
+from pathlib import Path
+
+from krx_quant.collector import run_collector
+from krx_quant.config import Settings
+from krx_quant.fake_kis import FakeKis
+from tests.kis_frames import trade_frame
+from tests.test_collector import FIXED_NOW, read, settings_for
+from tests.test_subscription_limit import until
+
+TRADE_KEY = ("H0UNCNT0", "005930")
+
+
+def fast(settings: Settings) -> Settings:
+    return replace(settings, reconnect_initial_seconds=0.05, reconnect_max_seconds=0.2)
+
+
+def fill(price: str) -> str:
+    return trade_frame(
+        {"MKSC_SHRN_ISCD": "005930", "STCK_CNTG_HOUR": "093015", "STCK_PRPR": price, "BSOP_DATE": "20261008"}
+    )
+
+
+async def test_reconnects_and_restores_every_subscription_after_kis_drops_the_connection(
+    kis: FakeKis, tmp_path: Path
+) -> None:
+    kis.script[TRADE_KEY] = [fill("81200")]
+    stop = asyncio.Event()
+    task = asyncio.create_task(
+        run_collector(fast(settings_for(kis, tmp_path)), stop=stop, clock=lambda: FIXED_NOW)
+    )
+    await kis.wait_for_subscription_count(TRADE_KEY, 1)
+    await kis.round_trip()  # every first-round registration has arrived
+    first_round = [(r["body"]["input"]["tr_id"], r["body"]["input"]["tr_key"]) for r in kis.subscriptions]
+
+    kis.script[TRADE_KEY] = [fill("81300")]
+    await kis.close_connections()
+    await kis.wait_for_subscription_count(TRADE_KEY, 2)
+    await kis.round_trip()
+    stop.set()
+    await asyncio.wait_for(task, 5)
+
+    assert kis.ws_connections == 2
+    second_round = [
+        (r["body"]["input"]["tr_id"], r["body"]["input"]["tr_key"])
+        for r in kis.subscriptions[len(first_round) :]
+    ]
+    assert second_round == first_round
+    assert [t["price"] for t in read(tmp_path, "events", "H0UNCNT0")] == [81200, 81300]
+
+
+class Clock:
+    """A settable clock for the collector (time is a system boundary)."""
+
+    def __init__(self, at: datetime) -> None:
+        self.at = at
+
+    def __call__(self) -> datetime:
+        return self.at
+
+
+async def test_a_dropped_connection_is_recorded_as_a_gap_for_every_subscription(
+    kis: FakeKis, tmp_path: Path
+) -> None:
+    kis.script[TRADE_KEY] = []
+    clock = Clock(FIXED_NOW)
+    stop = asyncio.Event()
+    task = asyncio.create_task(run_collector(fast(settings_for(kis, tmp_path)), stop=stop, clock=clock))
+    await kis.wait_for_subscription_count(TRADE_KEY, 1)
+
+    clock.at = FIXED_NOW + timedelta(seconds=10)
+    kis.accept_ws = False
+    await kis.close_connections()
+    await asyncio.sleep(0.3)  # a few refused reconnect attempts
+    clock.at = FIXED_NOW + timedelta(seconds=40)
+    kis.accept_ws = True
+    await kis.wait_for_subscription_count(TRADE_KEY, 2)
+    await kis.round_trip()
+    stop.set()
+    await asyncio.wait_for(task, 5)
+
+    gaps = read(tmp_path, "gaps", "H0UNCNT0")
+    assert [(g["start"], g["end"]) for g in gaps] == [(clock.at - timedelta(seconds=30), clock.at)]
+    assert "disconnected" in gaps[0]["reason"]
+    assert {g["feed"] for g in read(tmp_path, "gaps", "H0UNASP0")} == {"H0UNASP0"}
+
+
+def with_telegram(kis: FakeKis, settings: Settings) -> Settings:
+    return replace(
+        settings,
+        telegram_bot_token="123:fake",
+        telegram_chat_id="42",
+        telegram_api_url=kis.rest_url,
+        recovery_hold_seconds=0.05,
+    )
+
+
+async def test_a_disconnect_alerts_once_and_the_reconnect_sends_a_recovery(
+    kis: FakeKis, tmp_path: Path
+) -> None:
+    kis.script[TRADE_KEY] = []
+    stop = asyncio.Event()
+    settings = with_telegram(kis, fast(settings_for(kis, tmp_path)))
+    task = asyncio.create_task(run_collector(settings, stop=stop, clock=lambda: FIXED_NOW))
+    await kis.wait_for_subscription_count(TRADE_KEY, 1)
+
+    kis.accept_ws = False
+    await kis.close_connections()
+    await asyncio.sleep(0.5)  # several refused reconnect attempts: still a single outage
+    kis.accept_ws = True
+    await kis.wait_for_subscription_count(TRADE_KEY, 2)
+    await until(lambda: len(kis.telegram_messages) >= 2)
+    stop.set()
+    await asyncio.wait_for(task, 5)
+
+    texts = [m["text"] for m in kis.telegram_messages]
+    assert len(texts) == 2, texts
+    assert texts[0].startswith("[장애]") and "WebSocket" in texts[0]
+    assert texts[1].startswith("[복구]") and "WebSocket" in texts[1]
+    assert {(m["bot_token"], m["chat_id"]) for m in kis.telegram_messages} == {("123:fake", "42")}
+
+
+async def test_a_reconnect_after_a_long_session_uses_a_fresh_approval_key(
+    kis: FakeKis, tmp_path: Path
+) -> None:
+    kis.script[TRADE_KEY] = []
+    clock = Clock(FIXED_NOW)
+    stop = asyncio.Event()
+    task = asyncio.create_task(run_collector(fast(settings_for(kis, tmp_path)), stop=stop, clock=clock))
+    await kis.wait_for_subscription_count(TRADE_KEY, 1)
+
+    clock.at = FIXED_NOW + timedelta(hours=21)  # approval keys last about a day
+    await kis.close_connections()
+    await kis.wait_for_subscription_count(TRADE_KEY, 2)
+    stop.set()
+    await asyncio.wait_for(task, 5)
+
+    assert len(kis.approvals_issued) == 2
+    last = [s for s in kis.subscriptions if s["body"]["input"]["tr_id"] == TRADE_KEY[0]][-1]
+    assert last["header"]["approval_key"] == kis.approvals_issued[-1]
+
+
+async def test_a_feed_that_goes_quiet_in_market_hours_is_a_stale_gap_with_one_alert(
+    kis: FakeKis, tmp_path: Path
+) -> None:
+    kis.script[TRADE_KEY] = [fill("81200")]
+    clock = Clock(FIXED_NOW)  # Thursday 09:30:16 KST
+    stop = asyncio.Event()
+    settings = replace(with_telegram(kis, settings_for(kis, tmp_path)), health_check_seconds=0.05)
+    task = asyncio.create_task(run_collector(settings, stop=stop, clock=clock))
+    await kis.wait_for_subscription_count(TRADE_KEY, 1)
+    await kis.round_trip()
+
+    clock.at = FIXED_NOW + timedelta(minutes=5)  # no trades for 5 minutes
+    await until(lambda: len(kis.telegram_messages) >= 1)
+    await asyncio.sleep(0.2)  # more checks while still stale: no second alert
+    clock.at = FIXED_NOW + timedelta(minutes=6)
+    await kis.push(fill("81300"))
+    await until(lambda: len(kis.telegram_messages) >= 2)
+    stop.set()
+    await asyncio.wait_for(task, 5)
+
+    texts = [m["text"] for m in kis.telegram_messages]
+    assert len(texts) == 2 and texts[0].startswith("[장애]") and "H0UNCNT0 005930" in texts[0], texts
+    assert texts[1].startswith("[복구]"), texts
+    [gap] = [g for g in read(tmp_path, "gaps", "H0UNCNT0") if g["reason"] == "stale"]
+    assert (gap["start"], gap["end"]) == (FIXED_NOW, FIXED_NOW + timedelta(minutes=6))
+
+
+async def test_after_a_reconnect_refused_subscriptions_stay_on_one_rest_poll(
+    kis: FakeKis, tmp_path: Path
+) -> None:
+    kis.max_subscriptions = 1  # the trade feed fits, the book feed is refused
+    kis.rest_responses["FHKST01010200"] = lambda q: {"rt_cd": "1", "msg1": "not needed here"}
+    kis.script[TRADE_KEY] = []
+    stop = asyncio.Event()
+    task = asyncio.create_task(
+        run_collector(fast(settings_for(kis, tmp_path)), stop=stop, clock=lambda: FIXED_NOW)
+    )
+    await kis.wait_for_subscription_count(TRADE_KEY, 1)
+    await kis.close_connections()
+    await kis.wait_for_subscription_count(TRADE_KEY, 2)
+    await kis.round_trip()
+    stop.set()
+    await asyncio.wait_for(task, 5)
+
+    book = ("H0UNASP0", "005930")
+    assert kis.subscription_count(book) == 1, "a refused key is not registered again after a reconnect"
+    assert all(g["end"] is not None for g in read(tmp_path, "gaps", "H0UNCNT0"))
+    assert not (tmp_path / "gaps" / "date=2026-10-08" / "feed=H0UNASP0").exists(), "REST covers the book"
+
+
+async def test_backoff_keeps_growing_when_kis_drops_the_connection_before_answering(
+    kis: FakeKis, tmp_path: Path
+) -> None:
+    kis.drop_on_connect = True
+    stop = asyncio.Event()
+    settings = replace(settings_for(kis, tmp_path), reconnect_initial_seconds=0.05, reconnect_max_seconds=0.4)
+    task = asyncio.create_task(run_collector(settings, stop=stop, clock=lambda: FIXED_NOW))
+    await asyncio.sleep(1.0)
+    stop.set()
+    await asyncio.wait_for(task, 5)
+
+    # 0.05 + 0.1 + 0.2 + 0.4 + ... : about five attempts in a second, not twenty.
+    assert 2 <= kis.ws_connections <= 7, kis.ws_connections
+
+
+async def test_a_flapping_connection_does_not_repeat_alerts(kis: FakeKis, tmp_path: Path) -> None:
+    kis.script[TRADE_KEY] = []
+    stop = asyncio.Event()
+    settings = replace(with_telegram(kis, fast(settings_for(kis, tmp_path))), recovery_hold_seconds=0.6)
+    task = asyncio.create_task(run_collector(settings, stop=stop, clock=lambda: FIXED_NOW))
+    await kis.wait_for_subscription_count(TRADE_KEY, 1)
+    for n in (2, 3, 4):  # drops again shortly after every reconnect
+        await kis.close_connections()
+        await kis.wait_for_subscription_count(TRADE_KEY, n)
+    await asyncio.sleep(1.0)  # then stays up longer than the hold
+    stop.set()
+    await asyncio.wait_for(task, 5)
+
+    texts = [m["text"] for m in kis.telegram_messages]
+    assert [t[:4] for t in texts] == ["[장애]", "[복구]"], texts
+
+
+async def test_silence_counts_from_the_open_not_from_the_nxt_pre_market(kis: FakeKis, tmp_path: Path) -> None:
+    kis.script[TRADE_KEY] = [fill("81200")]
+    pre_market = datetime(2026, 10, 8, 8, 49, 0, tzinfo=FIXED_NOW.tzinfo)
+    clock = Clock(pre_market)
+    stop = asyncio.Event()
+    settings = replace(settings_for(kis, tmp_path), health_check_seconds=0.05)
+    task = asyncio.create_task(run_collector(settings, stop=stop, clock=clock))
+    await kis.wait_for_subscription_count(TRADE_KEY, 1)
+    await kis.round_trip()
+
+    clock.at = pre_market.replace(hour=9, minute=0, second=30)  # 30s into the session
+    await asyncio.sleep(0.3)
+    clock.at = pre_market.replace(hour=9, minute=10)
+    await asyncio.sleep(0.3)
+    stop.set()
+    await asyncio.wait_for(task, 5)
+
+    [gap] = read(tmp_path, "gaps", "H0UNCNT0")
+    assert gap["reason"] == "stale"
+    assert gap["start"] == pre_market.replace(hour=9, minute=0, second=0)

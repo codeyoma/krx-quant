@@ -18,6 +18,7 @@ dev = [
     "mypy>=1.11",
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
+    "pytest-timeout>=2.4.0",
     "ruff>=0.6",
 ]
 
@@ -32,6 +33,8 @@ packages = ["src/krx_quant"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+# Collector tests drive real sockets and timers; fail a stuck one instead of hanging CI.
+timeout = 30
 
 [tool.mypy]
 python_version = "3.11"

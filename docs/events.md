@@ -162,6 +162,21 @@ KIS 레코드 하나가 이벤트 하나다. 한 메시지에 레코드가 여�
 
 REST 응답 원문은 raw 계층에 `{"tr_id", "params", "body"}` JSON으로 남는다.
 
+## gaps: 결측 구간
+
+녹화가 빠진 구간이다. `gaps/date=<시작 날짜>/feed=<TR>/symbol=<키>/`에 기록한다.
+- **`disconnected: <원인>`**: WebSocket 연결이 끊긴 구간이다. 끊긴 시각에 시작하고, 재연결 후 해당 구독이 승인된 시각에 끝난다.
+- **`stale`**: 장중(평일 09:00–15:20)에 피드가 기준 시간보다 오래 조용했던 구간이다. 마지막 수신 시각에 시작하고, 다음 메시지가 온 시각에 끝난다. 기준 시간은 피드마다 다르다(`health.STALE_SECONDS`).
+- 수집기가 멈출 때까지 열려 있던 구간은 `end`가 비어 있다.
+
+| 열 | 타입 | 설명 |
+|---|---|---|
+| `feed` | string | TR ID |
+| `symbol` | string | 구독 키 |
+| `start` | timestamp(us, Asia/Seoul) | 시작 |
+| `end` | timestamp(us, Asia/Seoul), null 가능 | 끝 |
+| `reason` | string | `disconnected: …` 또는 `stale` |
+
 ## 실데이터 관찰 (2026-10-08, 삼성전자, 13시 전후 90초)
 
 - 체결 1,714건, 호가 409건을 받았다. 필드 수는 모든 메시지에서 문서와 같았다(체결 47개, 호가 66개).

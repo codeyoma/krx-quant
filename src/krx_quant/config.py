@@ -15,6 +15,7 @@ DEFAULT_WS_URL = "ws://ops.koreainvestment.com:21000"
 DEFAULT_MASTER_URL = "https://new.real.download.dws.co.kr/common/master"
 # KIS allows 20 REST calls per second on a real account.
 MAX_REST_PER_SECOND = 20
+DEFAULT_TELEGRAM_API_URL = "https://api.telegram.org"
 
 
 class SettingsError(ValueError):
@@ -47,6 +48,23 @@ class Settings:
     rest_max_per_second: int = 20
     # WebSocket registrations to attempt per session (None: until KIS refuses); the rest are polled.
     ws_max_subscriptions: int | None = None
+    # Local state such as the cached KIS access token (keep it out of git; mode 600).
+    state_dir: Path = Path("state")
+    # Refresh the access token this long before it expires; never issue twice within the interval.
+    token_refresh_margin_seconds: float = 3600.0
+    token_min_interval_seconds: float = 61.0
+    # Operational alerts go to this Telegram bot and chat; unset means log only.
+    telegram_bot_token: str | None = None
+    telegram_chat_id: str | None = None
+    telegram_api_url: str = DEFAULT_TELEGRAM_API_URL
+    # How often feed health (stale feeds) is checked.
+    health_check_seconds: float = 5.0
+    # A reconnect counts as recovered (and is announced) only after staying up this long,
+    # so a flapping connection does not send an alert pair on every cycle.
+    recovery_hold_seconds: float = 60.0
+    # WebSocket reconnect backoff: starts here, doubles per failed attempt, capped at the max.
+    reconnect_initial_seconds: float = 1.0
+    reconnect_max_seconds: float = 60.0
     # Poll interval for feeds that fell back from WebSocket to REST.
     fallback_poll_seconds: float = 5.0
     data_dir: Path = Path("data")
@@ -119,6 +137,14 @@ class Settings:
                 else None
             ),
             fallback_poll_seconds=float(number("KRX_FALLBACK_POLL_SECONDS", "5", float)),
+            state_dir=Path(values.get("KRX_STATE_DIR", "state")),
+            telegram_bot_token=values.get("TELEGRAM_BOT_TOKEN") or None,
+            telegram_chat_id=values.get("TELEGRAM_CHAT_ID") or None,
+            telegram_api_url=values.get("TELEGRAM_API_URL", DEFAULT_TELEGRAM_API_URL),
+            health_check_seconds=float(number("KRX_HEALTH_CHECK_SECONDS", "5", float)),
+            recovery_hold_seconds=float(number("KRX_RECOVERY_HOLD_SECONDS", "60", float)),
+            reconnect_initial_seconds=float(number("KRX_RECONNECT_INITIAL_SECONDS", "1", float)),
+            reconnect_max_seconds=float(number("KRX_RECONNECT_MAX_SECONDS", "60", float)),
             data_dir=Path(values.get("KRX_DATA_DIR", "data")),
             flush_rows=int(number("KRX_FLUSH_ROWS", "5000", int)),
             flush_seconds=float(number("KRX_FLUSH_SECONDS", "30", float)),

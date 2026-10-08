@@ -30,33 +30,36 @@ class PollJob:
 class Poller:
     """Runs poll jobs, including ones added while the collector is running.
 
-    With no client (no REST access token) jobs are logged and skipped.
     A failed call is logged and retried on the next interval.
     """
 
     def __init__(
         self,
-        client: RestClient | None,
+        client: RestClient,
         recorder: ParquetRecorder,
         now: Callable[[], datetime],
         stop: asyncio.Event,
+        on_received: Callable[[tuple[str, str]], None] | None = None,
     ) -> None:
         self._client = client
         self._recorder = recorder
         self._now = now
         self._stop = stop
-        self._tasks: list[asyncio.Task[None]] = []
+        self._on_received = on_received
+        self._tasks: dict[tuple[str, str], asyncio.Task[None]] = {}
 
     def add(self, job: PollJob) -> None:
-        if self._client is None:
-            log.error("not polling %s %s: REST is disabled", job.feed.tr_id, job.key)
+        """Start polling ``job``; a (feed, key) already being polled is not added twice."""
+        key = (job.feed.tr_id, job.key)
+        if key in self._tasks:
             return
-        self._tasks.append(asyncio.create_task(self._poll(job, self._client)))
+        self._tasks[key] = asyncio.create_task(self._poll(job, self._client))
 
     async def close(self) -> None:
-        for task in self._tasks:
+        tasks = list(self._tasks.values())
+        for task in tasks:
             task.cancel()
-        results = await asyncio.gather(*self._tasks, return_exceptions=True)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
         for job_error in results:
             if isinstance(job_error, Exception):
                 log.error("poll job ended with an error: %r", job_error)
@@ -70,6 +73,8 @@ class Poller:
                 log.warning("poll %s %s failed: %s", job.feed.tr_id, job.key, e)
             else:
                 self._record(job, params, body, self._now())
+                if self._on_received is not None:
+                    self._on_received((job.feed.tr_id, job.key))
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(self._stop.wait(), job.interval)
 

@@ -7,11 +7,14 @@ TR IDs; CI rejects them.
 from __future__ import annotations
 
 import json
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 import aiohttp
 
+from krx_quant.feeds.base import KST
 from krx_quant.ratelimit import RateLimiter
 
 WS_PATH = "/tryitout"
@@ -23,14 +26,19 @@ class KisError(RuntimeError):
 
 async def issue_access_token(
     session: aiohttp.ClientSession, rest_url: str, app_key: str, app_secret: str
-) -> str:
-    """REST access token (valid ~24h; KIS allows one issuance per minute)."""
+) -> tuple[str, datetime]:
+    """REST access token and its expiry (valid ~24h; KIS allows one issuance per minute).
+
+    Use auth.TokenManager rather than calling this directly: it caches and spaces issuances.
+    """
     body = {"grant_type": "client_credentials", "appkey": app_key, "appsecret": app_secret}
     async with session.post(f"{rest_url}/oauth2/tokenP", json=body) as resp:
         payload = await resp.json(content_type=None)
         if resp.status != 200 or "access_token" not in payload:
             raise KisError(f"access token request failed ({resp.status}): {payload}")
-        return str(payload["access_token"])
+    # KIS reports expiry as "YYYY-MM-DD HH:MM:SS" in Korean time.
+    expires = datetime.strptime(payload["access_token_token_expired"], "%Y-%m-%d %H:%M:%S")
+    return str(payload["access_token"]), expires.replace(tzinfo=KST)
 
 
 async def issue_approval_key(
@@ -104,6 +112,11 @@ class SystemMessage:
         """
         return not self.ok and (self.code == "OPSP0008" or "MAX SUBSCRIBE" in self.message.upper())
 
+    @property
+    def is_invalid_approval(self) -> bool:
+        """The approval key was not accepted (``OPSP0011`` / ``invalid approval``)."""
+        return not self.ok and (self.code == "OPSP0011" or "INVALID APPROVAL" in self.message.upper())
+
 
 def parse_message(text: str) -> RealtimeFrame | SystemMessage:
     """Parse one WebSocket text message; raise KisError if it is neither form."""
@@ -141,13 +154,15 @@ class RestClient:
         rest_url: str,
         app_key: str,
         app_secret: str,
-        access_token: str,
+        access_token: Callable[[], Awaitable[str]],
         limiter: RateLimiter,
+        on_token_rejected: Callable[[], None] | None = None,
     ) -> None:
         self._session = session
         self._rest_url = rest_url
+        self._access_token = access_token
+        self._on_token_rejected = on_token_rejected
         self._headers = {
-            "authorization": f"Bearer {access_token}",
             "appkey": app_key,
             "appsecret": app_secret,
             "custtype": "P",
@@ -157,10 +172,17 @@ class RestClient:
 
     async def get(self, tr_id: str, path: str, params: dict[str, str]) -> dict[str, Any]:
         """Return the JSON body; raise KisError unless KIS reports success (rt_cd "0")."""
+        token = await self._access_token()
         await self._limiter.acquire()
-        headers = {**self._headers, "tr_id": tr_id}
+        headers = {**self._headers, "authorization": f"Bearer {token}", "tr_id": tr_id}
         async with self._session.get(f"{self._rest_url}{path}", params=params, headers=headers) as resp:
             body = await resp.json(content_type=None)
         if not isinstance(body, dict) or body.get("rt_cd") != "0":
+            if isinstance(body, dict) and body.get("msg_cd") in _TOKEN_REJECTED and self._on_token_rejected:
+                self._on_token_rejected()
             raise KisError(f"{tr_id} {params}: HTTP {resp.status} {body}")
         return body
+
+
+# KIS answers these when the access token is expired or not valid.
+_TOKEN_REJECTED = {"EGW00121", "EGW00123"}

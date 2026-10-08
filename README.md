@@ -44,11 +44,19 @@ uv run krx-quant collect
 uv run krx-quant measure-subscriptions
 ```
 
-Docker로 실행할 때(`-u`는 컨테이너가 호스트의 `data/` 폴더에 쓸 수 있게 한다):
+장애 처리:
+- **재연결**: KIS가 연결을 끊으면 1초부터 두 배씩 늘려 최대 60초 간격으로 재연결하고, 모든 구독을 다시 등록한다. 20시간이 지난 승인키는 재연결할 때 새로 받는다.
+- **결측 기록**: 끊긴 구간과 장중에 조용해진 피드는 `gaps` 계층에 기록한다.
+- **토큰 재사용**: REST 접근 토큰은 `state/kis_token.json`(권한 600)에 캐시해서 재시작해도 다시 발급하지 않는다. 만료 1시간 전부터 갱신하고, 발급 간격은 61초 이상으로 둔다(KIS는 분당 1회).
+- **텔레그램 알림**: `TELEGRAM_BOT_TOKEN`과 `TELEGRAM_CHAT_ID`를 넣으면 장애가 시작될 때 한 번, 복구될 때 한 번 텔레그램으로 알린다. 넣지 않으면 로그만 남긴다.
+  - 재연결 복구 알림은 연결이 60초(`KRX_RECOVERY_HOLD_SECONDS`) 이상 유지된 뒤에 보낸다. 그래서 끊겼다 붙기를 반복해도 알림이 매번 가지 않는다.
+  - 지연 알림은 새로 지연된 피드들을 한 메시지로 묶어 보내고, 다시 들어온 피드도 묶어서 알린다.
+
+Docker로 실행할 때(`-u`는 컨테이너가 호스트의 `data/`, `state/` 폴더에 쓸 수 있게 한다):
 
 ```bash
 docker build -t krx-quant .
-docker run --rm --env-file .env -u "$(id -u):$(id -g)" -v "$PWD/data:/data" krx-quant collect
+docker run --rm --env-file .env -u "$(id -u):$(id -g)" -v "$PWD/data:/data" -v "$PWD/state:/state" krx-quant collect
 ```
 
 ### 키 없이 확인하기 (가짜 KIS)

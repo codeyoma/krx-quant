@@ -38,7 +38,23 @@ class FakeKis:
     rest_responses: dict[str, Callable[[dict[str, str]], dict[str, Any]]] = field(default_factory=dict)
     # Master files served under /master/<name>, e.g. "fo_idx_code_mts.mst.zip".
     masters: dict[str, bytes] = field(default_factory=dict)
-    # REST requests received: (monotonic arrival time, tr_id, path, query params).
+    # Access tokens: each issuance returns a new token valid until token_expires (KST,
+    # "YYYY-MM-DD HH:MM:SS"). Issuing again within token_min_interval seconds is refused
+    # with EGW00133, as KIS does (once per minute).
+    token_expires: str = "2099-12-31 23:59:59"
+    token_min_interval: float = 0.0
+    tokens_issued: list[str] = field(default_factory=list)
+    approvals_issued: list[str] = field(default_factory=list)
+    _last_token_at: float | None = None
+    # Telegram Bot API stand-in: messages sent to /bot<token>/sendMessage.
+    telegram_messages: list[dict[str, Any]] = field(default_factory=list)
+    # WebSocket sessions opened so far; set accept_ws=False to refuse new ones (HTTP 503).
+    ws_connections: int = 0
+    accept_ws: bool = True
+    # Accept the WebSocket, then drop it before answering anything (a flapping server).
+    drop_on_connect: bool = False
+    # REST requests received: (monotonic arrival time, tr_id, path, query params plus the
+    # authorization header under "_auth").
     rest_requests: list[tuple[float, str, str, dict[str, str]]] = field(default_factory=list)
 
     _runner: web.AppRunner | None = None
@@ -63,6 +79,7 @@ class FakeKis:
         app.router.add_get(WS_PATH, self._ws)
         app.router.add_get("/uapi/{tail:.*}", self._rest)
         app.router.add_get("/master/{name}", self._master)
+        app.router.add_post("/bot{token}/sendMessage", self._telegram)
         self._runner = web.AppRunner(app)
         await self._runner.setup()
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -86,6 +103,22 @@ class FakeKis:
         async with self._subscribed:
             await asyncio.wait_for(self._subscribed.wait_for(lambda: keys <= self.subscribed_keys()), timeout)
 
+    def subscription_count(self, key: tuple[str, str]) -> int:
+        return sum(
+            1
+            for s in self.subscriptions
+            if (s["body"]["input"]["tr_id"], s["body"]["input"]["tr_key"]) == key
+        )
+
+    async def wait_for_subscription_count(
+        self, key: tuple[str, str], count: int, timeout: float = 10.0
+    ) -> None:
+        """Wait until ``key`` has been registered ``count`` times (e.g. again after a reconnect)."""
+        async with self._subscribed:
+            await asyncio.wait_for(
+                self._subscribed.wait_for(lambda: self.subscription_count(key) >= count), timeout
+            )
+
     async def round_trip(self, timeout: float = 5.0) -> None:
         """Send a PINGPONG and wait for the client's pong.
 
@@ -95,6 +128,11 @@ class FakeKis:
         self._pong_event.clear()
         await self.send_pingpong()
         await asyncio.wait_for(self._pong_event.wait(), timeout)
+
+    async def push(self, frame: str) -> None:
+        """Send a data frame to every connected client now."""
+        for ws in self._sockets:
+            await ws.send_str(frame)
 
     async def close_connections(self) -> None:
         """Drop every client connection, as KIS does on maintenance or errors."""
@@ -110,10 +148,22 @@ class FakeKis:
         body = await request.json()
         if body.get("appkey") != self.app_key or body.get("appsecret") != self.app_secret:
             return web.json_response({"error_description": "invalid app key"}, status=403)
+        now = time.monotonic()
+        if self._last_token_at is not None and now - self._last_token_at < self.token_min_interval:
+            return web.json_response(
+                {
+                    "error_code": "EGW00133",
+                    "error_description": "접근토큰 발급 잠시 후 다시 시도하세요(1분당 1회)",
+                },
+                status=403,
+            )
+        self._last_token_at = now
+        token = f"fake-access-token-{len(self.tokens_issued) + 1}"
+        self.tokens_issued.append(token)
         return web.json_response(
             {
-                "access_token": "fake-access-token",
-                "access_token_token_expired": "2099-12-31 23:59:59",
+                "access_token": token,
+                "access_token_token_expired": self.token_expires,
                 "token_type": "Bearer",
                 "expires_in": 86400,
             }
@@ -123,11 +173,18 @@ class FakeKis:
         body = await request.json()
         if body.get("appkey") != self.app_key or body.get("secretkey") != self.app_secret:
             return web.json_response({"error_description": "invalid app key"}, status=403)
-        return web.json_response({"approval_key": "fake-approval-key"})
+        key = f"fake-approval-key-{len(self.approvals_issued) + 1}"
+        self.approvals_issued.append(key)
+        return web.json_response({"approval_key": key})
 
     @property
     def master_url(self) -> str:
         return f"{self.rest_url}/master"
+
+    async def _telegram(self, request: web.Request) -> web.Response:
+        body = await request.json()
+        self.telegram_messages.append({"bot_token": request.match_info["token"], **body})
+        return web.json_response({"ok": True, "result": {"message_id": len(self.telegram_messages)}})
 
     async def _master(self, request: web.Request) -> web.Response:
         body = self.masters.get(request.match_info["name"])
@@ -138,9 +195,10 @@ class FakeKis:
     async def _rest(self, request: web.Request) -> web.Response:
         h = request.headers
         tr_id = h.get("tr_id", "")
-        self.rest_requests.append((time.monotonic(), tr_id, request.path, dict(request.query)))
+        query = {**request.query, "_auth": h.get("authorization", "")}
+        self.rest_requests.append((time.monotonic(), tr_id, request.path, query))
         if (
-            h.get("authorization") != "Bearer fake-access-token"
+            h.get("authorization", "").removeprefix("Bearer ") not in self.tokens_issued
             or h.get("appkey") != self.app_key
             or h.get("appsecret") != self.app_secret
         ):
@@ -159,9 +217,15 @@ class FakeKis:
             raise
         return web.json_response(body)
 
-    async def _ws(self, request: web.Request) -> web.WebSocketResponse:
+    async def _ws(self, request: web.Request) -> web.StreamResponse:
+        if not self.accept_ws:
+            return web.Response(status=503, text="maintenance")
+        self.ws_connections += 1
         ws = web.WebSocketResponse(autoping=False)
         await ws.prepare(request)
+        if self.drop_on_connect:
+            await ws.close()
+            return ws
         self._sockets.append(ws)
         active: set[tuple[str, str]] = set()
         try:
@@ -187,7 +251,7 @@ class FakeKis:
             active.discard(key)
             await ws.send_str(_ack(key, "0", "OPSP0000", "UNSUBSCRIBE SUCCESS"))
             return
-        if header.get("approval_key") != "fake-approval-key":
+        if header.get("approval_key") not in self.approvals_issued:
             ok, reply = False, _ack(key, "1", "OPSP0011", "invalid approval : NOT FOUND")
         elif self.max_subscriptions is not None and len(active) >= self.max_subscriptions:
             ok, reply = False, _ack(key, "1", LIMIT_MSG_CD, LIMIT_MSG)
