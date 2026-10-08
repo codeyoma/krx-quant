@@ -11,16 +11,18 @@ from __future__ import annotations
 
 import heapq
 import logging
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
 import pyarrow.parquet as pq
 
+from krx_quant.algorithms import ALGORITHMS, Algorithm, Model, load_models
 from krx_quant.archive import partition_files
 from krx_quant.clock import FakeClock
 from krx_quant.config import Settings
-from krx_quant.engine import ENGINE_FEEDS, Event, PredictionEngine
+from krx_quant.engine import ENGINE_FEEDS, Budget, Event, PredictionEngine
+from krx_quant.features import FeatureStore
 from krx_quant.feeds.base import KST, kst_day
 from krx_quant.market_calendar import MarketCalendar, calendar_store
 from krx_quant.predictions import DB_NAME, AlgorithmSummary, PredictionStore
@@ -31,7 +33,7 @@ log = logging.getLogger(__name__)
 _BATCH_ROWS = 4096
 
 
-def replay(
+async def replay(
     events: Iterable[Event],
     *,
     db: Path,
@@ -41,35 +43,50 @@ def replay(
     until: datetime,
     start: datetime | None = None,
     display_delay: timedelta = timedelta(0),
+    algorithms: Sequence[Algorithm] = ALGORITHMS,
+    models: Mapping[str, Model] | None = None,
+    budget: Budget | None = None,
+    feature_store: FeatureStore | None = None,
 ) -> PredictionEngine:
     """Feed ``events`` (in receipt order) received by ``until`` to an engine storing into ``db``.
 
     The clock starts at ``start`` (default: midnight of ``until``'s day). Each bar close and
     scoring runs ``display_delay`` after its time, as a busy engine would: what it predicts
     from stays what was received by the bar close, but it is displayed (and scored on
-    basis B) later. The engine is returned with its clock at ``until``.
+    basis B) later. The clock stands still while algorithms work; their time budgets
+    count real time. The engine is returned with its clock at ``until``.
     """
     clock = FakeClock(start or datetime.combine(kst_day(until), time(), KST))
-    engine = PredictionEngine(PredictionStore(db), calendar, symbols, fee_rate, clock)
+    engine = PredictionEngine(
+        PredictionStore(db),
+        calendar,
+        symbols,
+        fee_rate,
+        clock,
+        algorithms=algorithms,
+        models=models,
+        budget=budget,
+        feature_store=feature_store,
+    )
     for feed, row in events:
         received_at: datetime = row["received_at"]
         if received_at > until:
             break
         if received_at < clock.now():
             raise ValueError(f"events out of order: {received_at} is before the clock at {clock.now()}")
-        _run_until(engine, clock, received_at, display_delay)
+        await _run_until(engine, clock, received_at, display_delay)
         clock.set(received_at)
         engine.on_event(feed, row)
-    _run_until(engine, clock, until, display_delay)
+    await _run_until(engine, clock, until, display_delay)
     clock.set(until)
     return engine
 
 
-def _run_until(engine: PredictionEngine, clock: FakeClock, until: datetime, delay: timedelta) -> None:
+async def _run_until(engine: PredictionEngine, clock: FakeClock, until: datetime, delay: timedelta) -> None:
     """Run what is due, each at its own time plus ``delay``, up to and including ``until``."""
     while (due := engine.next_due()) is not None and due + delay <= until:
         clock.set(max(clock.now(), due + delay))
-        engine.run_due()
+        await engine.run_due()
 
 
 def recorded_events(data_dir: Path, day: date, symbols: Sequence[str]) -> Iterator[Event]:
@@ -115,7 +132,9 @@ def _partition_rows(feed: str, files: Sequence[Path], columns: Sequence[str]) ->
         )
 
 
-def replay_day(settings: Settings, day: date, db: Path | None = None) -> tuple[Path, list[AlgorithmSummary]]:
+async def replay_day(
+    settings: Settings, day: date, db: Path | None = None
+) -> tuple[Path, list[AlgorithmSummary]]:
     """Replay a recorded day into a fresh database (default ``state/replay-<day>.sqlite3``).
 
     Refuses the live engine's database and its WAL and shared-memory files, and deletes
@@ -128,7 +147,7 @@ def replay_day(settings: Settings, day: date, db: Path | None = None) -> tuple[P
     for leftover in _sqlite_files(db):
         leftover.unlink(missing_ok=True)
     start = datetime.combine(day, time(), KST)
-    engine = replay(
+    engine = await replay(
         events,
         db=db,
         calendar=calendar_store(settings).calendar,
@@ -136,6 +155,8 @@ def replay_day(settings: Settings, day: date, db: Path | None = None) -> tuple[P
         fee_rate=settings.fee_rate,
         start=start,
         until=start + timedelta(days=1) - timedelta(microseconds=1),
+        models=load_models(settings.state_dir, ALGORITHMS),
+        budget=Budget(settings.algorithm_seconds, settings.cpu_budget_seconds),
     )
     try:
         return db, engine.store.summary()

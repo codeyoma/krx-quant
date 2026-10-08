@@ -8,7 +8,8 @@ Endpoints (all under ``/v1``):
 - ``GET /symbols/{symbol}/latest``: the predictions of the symbol's latest bar close;
 - ``GET /symbols/{symbol}/predictions?limit=N&algorithm=A``: the predictions of the last
   N bar closes (default 100, at most 1000), newest first, with their outcomes;
-- ``GET /symbols/{symbol}/bars``: today's finished one-minute bars, oldest first.
+- ``GET /symbols/{symbol}/bars``: today's finished one-minute bars, oldest first;
+- ``GET /algorithms``: each registered algorithm's card, features and current model.
 
 Times are ISO 8601 in KST. On the server, compose publishes it on the Tailscale address only.
 """
@@ -51,6 +52,7 @@ def create_app(
     app.router.add_get("/v1/symbols/{symbol}/latest", _latest)
     app.router.add_get("/v1/symbols/{symbol}/predictions", _predictions)
     app.router.add_get("/v1/symbols/{symbol}/bars", _bars)
+    app.router.add_get("/v1/algorithms", _algorithms)
     return app
 
 
@@ -128,6 +130,29 @@ async def _bars(request: web.Request) -> web.Response:
         for b in engine.bars(symbol)
     ]
     return web.json_response({"symbol": symbol, "bars": bars})
+
+
+async def _algorithms(request: web.Request) -> web.Response:
+    engine = request.app[ENGINE_KEY]
+    algorithms = []
+    for a in engine.algorithms:
+        model = engine.models[a.name]
+        algorithms.append(
+            {
+                "name": a.name,
+                "card": {
+                    "scientist": a.card.scientist,
+                    "character": a.card.character,
+                    "logic": a.card.logic,
+                    "unique_features": list(a.card.unique_features),
+                    "training": a.card.training,
+                },
+                "features": list(a.features),
+                "training_days": a.training_days,
+                "model": {"version": model.version, "params": dict(model.params), "trained": model.trained},
+            }
+        )
+    return web.json_response({"algorithms": algorithms})
 
 
 def _engine_and_symbol(request: web.Request) -> tuple[PredictionEngine, str]:

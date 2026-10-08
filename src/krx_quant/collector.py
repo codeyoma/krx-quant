@@ -13,13 +13,14 @@ import aiohttp
 from aiohttp import web
 
 from krx_quant import kis
+from krx_quant.algorithms import ALGORITHMS, load_models
 from krx_quant.api import create_app
 from krx_quant.archive import archive
 from krx_quant.auth import TokenManager, tokens_and_client
 from krx_quant.backfill import keep_history
 from krx_quant.clock import SessionClock, SystemClock
 from krx_quant.config import Settings
-from krx_quant.engine import PredictionEngine, run_live
+from krx_quant.engine import Budget, PredictionEngine, run_live
 from krx_quant.feeds import (
     BOOK,
     ETF_FALLBACKS,
@@ -141,7 +142,15 @@ async def run_collector(
     calendar = calendar_store(settings)
     health = FeedHealth(recorder, now, calendar.calendar)
     store = PredictionStore(settings.state_dir / DB_NAME)
-    engine = PredictionEngine(store, calendar.calendar, settings.symbols, settings.fee_rate, session_clock)
+    engine = PredictionEngine(
+        store,
+        calendar.calendar,
+        settings.symbols,
+        settings.fee_rate,
+        session_clock,
+        models=load_models(settings.state_dir, ALGORITHMS),
+        budget=Budget(settings.algorithm_seconds, settings.cpu_budget_seconds),
+    )
 
     def on_event(feed: str, row: dict[str, Any]) -> None:
         # Recording comes first: a prediction bug must never stop it.

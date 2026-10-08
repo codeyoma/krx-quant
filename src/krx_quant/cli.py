@@ -20,6 +20,7 @@ from krx_quant.feeds.base import KST
 from krx_quant.kis import KisError
 from krx_quant.notify import send_test_alert
 from krx_quant.replay import replay_day
+from krx_quant.training import fit_algorithm
 
 
 async def _collect() -> None:
@@ -58,19 +59,31 @@ async def _archive(recheck: bool) -> int:
 
 def _replay(day: date, db: Path | None) -> int:
     try:
-        path, summary = replay_day(Settings.from_env(require_kis=False), day, db)
+        path, summary = asyncio.run(replay_day(Settings.from_env(require_kis=False), day, db))
     except (FileNotFoundError, ValueError) as e:
         print(e, file=sys.stderr)
         return 1
     print(f"replayed {day} into {path} (counts on basis A)")
     for s in summary:
         print(
-            f"{s.algorithm}: {s.predictions} predictions, {s.scored} scored, {s.unscorable} unscorable,"
-            f" {s.pending} pending"
+            f"{s.algorithm}: {s.predictions} predictions, {s.skipped} skipped, {s.scored} scored,"
+            f" {s.unscorable} unscorable, {s.pending} pending"
         )
     if summary:
         s = summary[0]
         print(f"outcomes: {s.up} up, {s.flat} flat, {s.down} down")
+    return 0
+
+
+def _fit(name: str, days: int | None) -> int:
+    try:
+        fitted = fit_algorithm(Settings.from_env(require_kis=False), name, days)
+    except (FileNotFoundError, ValueError) as e:
+        print(e, file=sys.stderr)
+        return 1
+    print(f"{fitted.model.version}: {dict(fitted.model.params)}")
+    print(f"trained on {fitted.days} days ({fitted.samples} samples): {fitted.model.trained}")
+    print(f"saved to {fitted.path}; the engine uses it from its next start")
     return 0
 
 
@@ -131,6 +144,11 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         help="database to write, replaced if it exists (default: state/replay-<day>.sqlite3)",
     )
+    fit_cmd = sub.add_parser(
+        "fit", help="train an algorithm on the latest backfilled one-minute bars and save its model"
+    )
+    fit_cmd.add_argument("algorithm", help="e.g. newton")
+    fit_cmd.add_argument("--days", type=int, help="trading days to train on (default: the algorithm's own)")
     sub.add_parser("test-alert", help="send a test message to the Telegram chat that receives alerts")
     fake = sub.add_parser("fake-kis", help="run a local fake KIS server for offline testing")
     fake.add_argument("--port", type=int, default=18080)
@@ -150,6 +168,8 @@ def main(argv: list[str] | None = None) -> int:
             return asyncio.run(_archive(args.recheck))
         elif args.command == "replay":
             return _replay(args.day, args.db)
+        elif args.command == "fit":
+            return _fit(args.algorithm, args.days)
         elif args.command == "test-alert":
             return asyncio.run(_test_alert())
         elif args.command == "fake-kis":
