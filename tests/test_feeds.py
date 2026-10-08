@@ -117,6 +117,17 @@ async def test_the_closing_index_record_without_a_time_takes_the_time_received(
     assert (i["event_time"], i["value"], i["change_pct"]) == (FIXED_NOW, 6625.93, -2.62)
 
 
+async def test_an_index_record_with_a_malformed_time_stays_raw_only(kis: FakeKis, tmp_path: Path) -> None:
+    kis.script[("H0UPCNT0", "0001")] = [
+        index_frame({"bstp_cls_code": "0001", "bsop_hour": "25ab00", "prpr_nmix": "6625.93"})
+    ]
+
+    await collect(kis, replace(settings_for(kis, tmp_path), index_codes=("0001",)))
+
+    assert read(tmp_path, "raw", "H0UPCNT0", symbol="0001"), "kept for investigation"
+    assert not (tmp_path / "events" / "date=2026-10-08" / "feed=H0UPCNT0").exists()
+
+
 async def test_usd_futures(kis: FakeKis, tmp_path: Path) -> None:
     serve_masters(kis)
     kis.script[("H0CFCNT0", "A75610")] = [

@@ -49,16 +49,20 @@ def kst(day: date, hhmmss: str) -> datetime:
     return datetime.combine(day, time(int(hhmmss[0:2]), int(hhmmss[2:4]), int(hhmmss[4:6])), KST)
 
 
-def kst_or_received(day: date, hhmmss: str, received_at: datetime) -> datetime:
-    """``hhmmss`` on ``day``, or the second it was received when KIS sends no real time.
+# After the evening close KIS sends index (and derivative) records with the day's final
+# values and this in place of a time (seen live on 2026-10-08).
+CLOSING_TIME = "999999"
 
-    After the evening close KIS sends index (and derivative) records with the final
-    values and the time ``999999`` (seen live on 2026-10-08).
+
+def kst_or_received(hhmmss: str, received_at: datetime) -> datetime:
+    """``hhmmss`` on the day received, or the second received for a closing record.
+
+    Any other value that is not a time raises ValueError, so the record stays raw only.
     """
-    try:
-        return kst(day, hhmmss)
-    except ValueError:
-        return received_at.astimezone(KST).replace(microsecond=0)
+    local = received_at.astimezone(KST)
+    if hhmmss == CLOSING_TIME:
+        return local.replace(microsecond=0)
+    return kst(local.date(), hhmmss)
 
 
 def kst_day(received_at: datetime) -> date:
