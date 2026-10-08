@@ -1,33 +1,56 @@
 #!/usr/bin/env bash
 # Create the AWS side once: the S3 bucket for recorded days, an IAM user that can only
-# read and write that bucket, and the Lightsail instance (Seoul, 2 GB, public IPv4) with
-# its firewall and daily automatic snapshots.
+# read and write that bucket, and the Lightsail instance (2 GB, public IPv4) with its
+# firewall and daily automatic snapshots, all in one Region.
 #
 # Run on your own computer after `aws configure` with an administrator profile:
 #
 #   deploy/create-aws.sh <globally-unique-bucket-name>
+#
+# The Region is AWS_REGION, else the profile's region. An account made through AWS's new
+# sign-up gets a single Region (ours is ap-southeast-2); see docs/operations.md.
 #
 # Safe to run again: existing resources are kept. It does not create access keys; see
 # docs/operations.md for that one-time step.
 set -euo pipefail
 
 bucket=${1:?usage: deploy/create-aws.sh <globally-unique-bucket-name>}
-region=${AWS_REGION:-ap-northeast-2}
+region=${AWS_REGION:-$(aws configure get region 2>/dev/null || true)}
+if [[ -z "$region" ]]; then
+  echo "create-aws: no AWS Region; set AWS_REGION (e.g. ap-southeast-2)" \
+    "or a region in aws configure" >&2
+  exit 1
+fi
 zone=${ZONE:-${region}a}
 instance=${INSTANCE:-krx-quant}
-bundle=${BUNDLE:-small_3_0}         # 2 GB RAM with a public IPv4 (KIS has no IPv6)
+bundle=${BUNDLE:-}                  # unset: picked below
 blueprint=${BLUEPRINT:-ubuntu_24_04}
 iam_user=${IAM_USER:-krx-quant-engine}
 snapshot_utc=${SNAPSHOT_UTC:-18:00} # 03:00 KST, outside every session
 here=$(cd "$(dirname "$0")" && pwd)
 
-echo "== checking the Lightsail plan and image"
-if [[ -z "$(aws lightsail get-bundles --region "$region" \
+echo "== checking the Lightsail plan and image in $region"
+if [[ -z "$bundle" ]]; then
+  # 2 GB RAM with a public IPv4 (KIS has no IPv6). Bundle IDs differ by Region
+  # (small_3_0 in Seoul, small_3_2 in Sydney), so look it up.
+  query="bundles[?isActive && ramSizeInGb==\`2\` && publicIpv4AddressCount==\`1\`"
+  query+=" && contains(supportedPlatforms, 'LINUX_UNIX')].bundleId"
+  found=$(aws lightsail get-bundles --region "$region" --query "$query" --output text)
+  read -r -a bundles <<<"$found"
+  if [[ ${#bundles[@]} -ne 1 ]]; then
+    echo "create-aws: expected one active Linux 2 GB bundle with a public IPv4 in $region," \
+      "found ${#bundles[@]} (${bundles[*]:-none}); set BUNDLE, see" \
+      "aws lightsail get-bundles --region $region" >&2
+    exit 1
+  fi
+  bundle=${bundles[0]}
+elif [[ -z "$(aws lightsail get-bundles --region "$region" \
   --query "bundles[?bundleId=='$bundle'].bundleId" --output text)" ]]; then
   echo "create-aws: Lightsail bundle $bundle not found; list them with" \
     "aws lightsail get-bundles --region $region" >&2
   exit 1
 fi
+echo "bundle: $bundle"
 if [[ -z "$(aws lightsail get-blueprints --region "$region" \
   --query "blueprints[?blueprintId=='$blueprint'].blueprintId" --output text)" ]]; then
   echo "create-aws: Lightsail blueprint $blueprint not found" >&2
@@ -35,16 +58,19 @@ if [[ -z "$(aws lightsail get-blueprints --region "$region" \
 fi
 
 echo "== S3 bucket $bucket"
-if ! aws s3api head-bucket --bucket "$bucket" 2>/dev/null; then
+if ! aws s3api head-bucket --bucket "$bucket" --region "$region" 2>/dev/null; then
   aws s3api create-bucket --bucket "$bucket" --region "$region" \
     --create-bucket-configuration LocationConstraint="$region" >/dev/null
 fi
-aws s3api put-public-access-block --bucket "$bucket" --public-access-block-configuration \
+aws s3api put-public-access-block --bucket "$bucket" --region "$region" \
+  --public-access-block-configuration \
   BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
 # The engine may only overwrite, never delete, but an overwrite with a bad file would still
 # lose data: keep earlier versions for 30 days, and drop uploads that died half-way.
-aws s3api put-bucket-versioning --bucket "$bucket" --versioning-configuration Status=Enabled
-aws s3api put-bucket-lifecycle-configuration --bucket "$bucket" --lifecycle-configuration '{
+aws s3api put-bucket-versioning --bucket "$bucket" --region "$region" \
+  --versioning-configuration Status=Enabled
+aws s3api put-bucket-lifecycle-configuration --bucket "$bucket" --region "$region" \
+  --lifecycle-configuration '{
   "Rules": [{
     "ID": "keep-replaced-versions-30-days",
     "Status": "Enabled",
@@ -52,7 +78,7 @@ aws s3api put-bucket-lifecycle-configuration --bucket "$bucket" --lifecycle-conf
     "NoncurrentVersionExpiration": {"NoncurrentDays": 30},
     "AbortIncompleteMultipartUpload": {"DaysAfterInitiation": 7}
   }]
-}'
+}' >/dev/null
 
 echo "== IAM user $iam_user (this bucket only, no deletes)"
 if ! aws iam get-user --user-name "$iam_user" >/dev/null 2>&1; then

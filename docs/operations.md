@@ -1,8 +1,8 @@
 # 운영 문서
 
-상시 서버(AWS Lightsail 서울)에 엔진을 띄우고 운영하는 방법이다. 설계는 [design.md](design.md) 9장에 있다.
+상시 서버(AWS Lightsail 시드니)에 엔진을 띄우고 운영하는 방법이다. 설계는 [design.md](design.md) 9장에 있다.
 
-- 서버: Lightsail 서울, 2GB, 공인 IPv4, Ubuntu 24.04. 엔진은 Docker(`compose.yaml`)로 돈다.
+- 서버: Lightsail 시드니(`ap-southeast-2`), 2GB, 공인 IPv4, Ubuntu 24.04. 엔진은 Docker(`compose.yaml`)로 돈다.
 - 접속: Tailscale만 쓴다. 엔진 포트는 서버의 Tailscale 주소에만 열린다.
 - 데이터: 녹화한 날은 S3에 올려 영구 보관한다. 서버는 매일 03:00 KST에 Lightsail 자동 스냅샷을 뜬다.
 - 비밀값: 서버의 `.env`(권한 600)에만 둔다. 저장소에는 절대 커밋하지 않는다.
@@ -14,10 +14,14 @@
 1. **AWS 계정**
    1. AWS에 가입하고 결제 수단을 등록한다. 루트 계정에 MFA를 켠다.
    2. 관리용 IAM 사용자(또는 IAM Identity Center 사용자)를 만든다. 루트 계정 키는 만들지 않는다.
-   3. 맥에 AWS CLI를 설치하고(`brew install awscli`) 관리용 자격 증명으로 설정한다. 리전은 `ap-northeast-2`다.
+   3. 맥에 AWS CLI를 설치하고(`brew install awscli`) 관리용 자격 증명으로 설정한다. 리전은 `ap-southeast-2`다.
       ```bash
       aws configure
       ```
+
+   AWS의 새 가입 방식(AWS Settings 프로젝트)으로 만든 계정은 프로젝트마다 리전이 하나뿐이다. 연락처 주소의 국가에 따라 오하이오(`us-east-2`), 스톡홀름(`eu-north-1`), 시드니(`ap-southeast-2`) 중 하나로 자동으로 정해진다. 다른 리전 호출은 AWS가 관리하는 조직의 서비스 제어 정책이 막는다. 서울(`ap-northeast-2`)을 호출하면 `AccessDeniedException`(explicit deny in a service control policy)이 난다. 이 제한은 고급 기능을 활성화(Activate advanced features)해야 풀리는데, 되돌릴 수 없다. 그래서 시드니를 쓴다. 이유는 [design.md](design.md) 9장에 있다.
+
+   이 프로젝트에는 월 $100 지출 한도도 걸려 있다. 한도에 닿으면 프로젝트 전체가 일시정지되고 자원이 멈춘다. 상시 서버도 멈춘다는 뜻이다. 조기 통제인 "Stop new resource launches"도 켜져 있다. 예상 비용이 월 $15 정도라서 지금은 그대로 둔다. 설계는 상한에 닿아도 실시간 수집을 계속하도록 되어 있으므로 #23(비용 상한)에서 다시 정한다.
 2. **KIS Open API**: 실전계좌로 앱키와 앱시크릿을 발급받는다. 모의투자 키로는 통합 시세 피드가 오지 않는다.
 3. **텔레그램 봇**
    1. BotFather에게 `/newbot`을 보내 봇을 만들고 토큰을 받는다.
@@ -39,10 +43,12 @@
 deploy/create-aws.sh krx-quant-<이름>
 ```
 
+리전은 `AWS_REGION` 환경 변수, 없으면 `aws configure`에서 정한 리전(`ap-southeast-2`)을 쓴다. 모든 자원을 이 리전 하나에 만든다.
+
 이 스크립트가 만드는 것이다. 다시 돌려도 이미 있는 자원은 그대로 둔다.
-- S3 버킷: 서울 리전에 만들고 공개 접근을 모두 막는다. 버전 관리를 켜서 덮어쓴 이전 버전을 30일 보관한다. 엔진은 지울 수 없지만 덮어쓸 수는 있어서, 잘못된 파일로 덮어써도 되돌릴 수 있게 하려는 것이다.
+- S3 버킷: 시드니 리전에 만들고 공개 접근을 모두 막는다. 버전 관리를 켜서 덮어쓴 이전 버전을 30일 보관한다. 엔진은 지울 수 없지만 덮어쓸 수는 있어서, 잘못된 파일로 덮어써도 되돌릴 수 있게 하려는 것이다.
 - IAM 사용자 `krx-quant-engine`: 이 버킷만 읽고 쓸 수 있다. 삭제 권한은 없다(`deploy/iam-policy.json`).
-- Lightsail 인스턴스 `krx-quant`: `small_3_0` 번들(2GB, 공인 IPv4), Ubuntu 24.04다.
+- Lightsail 인스턴스 `krx-quant`: Ubuntu 24.04다. 번들은 2GB, 공인 IPv4인 리눅스 번들을 자동으로 고른다(시드니는 `small_3_2`). 번들 ID가 리전마다 달라서다. `BUNDLE`로 직접 정할 수도 있다.
 - Lightsail 방화벽: TCP 22는 Lightsail 브라우저 SSH에서만, UDP 41641(Tailscale 직접 연결)은 모두에게 연다. 나머지는 모두 닫는다.
 - 자동 스냅샷: 매일 18:00 UTC(03:00 KST)에 뜬다. Lightsail은 최근 7개를 보관한다.
 
@@ -55,18 +61,23 @@ aws iam create-access-key --user-name krx-quant-engine
 ### 2.2 서버 준비
 
 1. Lightsail 콘솔에서 `krx-quant` 인스턴스를 열고 **Connect using SSH**를 누른다.
-2. 비공개 저장소를 받기 위해 읽기 전용 배포 키를 만든다.
+2. 서버에서 KIS에 접속되는지 확인한다. 서버가 해외(시드니)에 있어서, KIS가 해외 IP를 막으면 엔진이 돌 수 없다.
+   ```bash
+   curl -s -o /dev/null -w '%{http_code}\n' https://openapi.koreainvestment.com:9443/oauth2/tokenP
+   ```
+   `000`이 아닌 코드가 나오면 접속된다. `000`이면 연결이 안 된 것이다. 개통을 멈추고 KIS에 해외 접속이 되는지 문의한다. WebSocket(`ops.koreainvestment.com:21000`)은 8단계의 엔진 로그로 확인한다.
+3. 비공개 저장소를 받기 위해 읽기 전용 배포 키를 만든다.
    ```bash
    ssh-keygen -t ed25519 -f ~/.ssh/krx-quant-deploy -N "" -C krx-quant-server
    cat ~/.ssh/krx-quant-deploy.pub
    ```
    출력된 공개 키를 GitHub `codeyoma/krx-quant` → Settings → Deploy keys에 추가한다. 쓰기 권한은 주지 않는다.
-3. 저장소를 받는다. `fincept/` submodule은 서버에 필요 없다.
+4. 저장소를 받는다. `fincept/` submodule은 서버에 필요 없다.
    ```bash
    printf 'Host github.com\n  IdentityFile ~/.ssh/krx-quant-deploy\n' >> ~/.ssh/config
    git clone git@github.com:codeyoma/krx-quant.git && cd krx-quant
    ```
-4. 준비 스크립트를 실행한다. Tailscale 로그인 URL이 나오면 브라우저에서 승인한다. auth key가 있으면 `sudo TS_AUTHKEY=tskey-... deploy/setup-server.sh`로 실행한다.
+5. 준비 스크립트를 실행한다. Tailscale 로그인 URL이 나오면 브라우저에서 승인한다. auth key가 있으면 `sudo TS_AUTHKEY=tskey-... deploy/setup-server.sh`로 실행한다.
    ```bash
    sudo deploy/setup-server.sh
    ```
@@ -75,7 +86,7 @@ aws iam create-access-key --user-name krx-quant-engine
    - Docker가 Tailscale 뒤에 시작되도록 순서를 정한다.
    - 방화벽을 설정한다: 들어오는 연결은 Tailscale 인터페이스, 22번, 41641/udp만 허용한다.
    - 첫 실행에서는 `.env`를 `.env.example`에서 만들고(권한 600) 멈춘다.
-5. `.env`를 채운다.
+6. `.env`를 채운다.
    ```bash
    nano .env
    ```
@@ -85,19 +96,20 @@ aws iam create-access-key --user-name krx-quant-engine
    | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | 1.3에서 받은 토큰과 chat id |
    | `KRX_OBJECT_STORE` | `s3://<버킷>/engine` |
    | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | 2.1에서 만든 엔진용 키 |
+   | `AWS_REGION` | `ap-southeast-2`. 버킷을 만든 리전과 같아야 한다 |
    | `KRX_SYMBOLS`, `KIS_WS_MAX_SUBSCRIPTIONS` | 기본값 그대로(`005930,000660,009150`, `41`) |
    | `KRX_BIND_ADDRESS` | 비워 둔다. 스크립트가 Tailscale 주소를 넣는다 |
-6. 스크립트를 한 번 더 실행한다. 이번에는 엔진을 빌드하고 띄운다.
+7. 스크립트를 한 번 더 실행한다. 이번에는 엔진을 빌드하고 띄운다.
    ```bash
    sudo deploy/setup-server.sh
    ```
-7. 확인한다. 아래 명령은 docker 그룹이 적용되도록 SSH에 다시 접속한 뒤 실행한다.
+8. 확인한다. 아래 명령은 docker 그룹이 적용되도록 SSH에 다시 접속한 뒤 실행한다.
    ```bash
    docker compose ps                  # engine이 running
    docker compose logs -f engine      # 구독 응답, "KIS rejected ..."가 없는지
    docker compose run --rm engine test-alert   # 텔레그램에 [테스트] 메시지가 오는지
    ```
-8. 맥과 윈도우에서 Tailscale로 접속되는지 확인한다. 두 컴퓨터 모두 Tailscale 앱이 켜져 있어야 한다.
+9. 맥과 윈도우에서 Tailscale로 접속되는지 확인한다. 두 컴퓨터 모두 Tailscale 앱이 켜져 있어야 한다.
    - 맥(터미널):
      ```bash
      ssh ubuntu@krx-quant
@@ -108,16 +120,16 @@ aws iam create-access-key --user-name krx-quant-engine
      ssh ubuntu@krx-quant
      ```
    Tailscale admin console에서 `krx-quant` 기기의 **Disable key expiry**를 켠다. 그래야 몇 달 뒤 서버가 tailnet에서 빠지지 않는다.
-9. Tailscale SSH가 되면 공용 SSH(22번)를 닫는다. 맥에서 실행한다.
-   ```bash
-   aws lightsail put-instance-public-ports --instance-name krx-quant --region ap-northeast-2 \
-     --port-infos '[{"fromPort": 41641, "toPort": 41641, "protocol": "udp", "cidrs": ["0.0.0.0/0"], "ipv6Cidrs": ["::/0"]}]'
-   ```
-   서버에서도 닫는다.
-   ```bash
-   sudo ufw delete allow 22/tcp
-   ```
-   그다음부터 Lightsail 브라우저 SSH는 쓸 수 없다. 접속은 Tailscale로만 한다.
+10. Tailscale SSH가 되면 공용 SSH(22번)를 닫는다. 맥에서 실행한다.
+    ```bash
+    aws lightsail put-instance-public-ports --instance-name krx-quant --region ap-southeast-2 \
+      --port-infos '[{"fromPort": 41641, "toPort": 41641, "protocol": "udp", "cidrs": ["0.0.0.0/0"], "ipv6Cidrs": ["::/0"]}]'
+    ```
+    서버에서도 닫는다.
+    ```bash
+    sudo ufw delete allow 22/tcp
+    ```
+    그다음부터 Lightsail 브라우저 SSH는 쓸 수 없다. 접속은 Tailscale로만 한다.
 
 엔진 API(#9)가 생기면 맥과 윈도우에서 `http://krx-quant:8080`으로 접속한다. 공인 IP로는 열리지 않는다.
 
@@ -206,7 +218,7 @@ docker compose logs --tail 200 engine
 | `EGW00133`(접근 토큰 발급 1분 1회) | 재시작을 반복했는지 | 토큰은 캐시되고, 1분 간격으로 스스로 다시 시도한다. |
 | `EGW00201`(초당 거래건수 초과) | 백필과 REST 대체 조회가 겹쳤는지 | 0.5초 뒤 스스로 다시 보낸다. 계속되면 `KRX_BACKFILL_MAX_PER_SECOND`를 낮춘다. |
 | 디스크가 찬다 | `df -h`, `du -sh data/*/` | 로컬 데이터는 자동으로 지우지 않는다. `.uploaded.json`이 있는 오래된 날짜 폴더는 S3에 있으므로 `raw`, `events`, `gaps`에서 지워도 된다. `bars`는 지우지 않는다(백필이 다시 받는다). |
-| 서버를 잃었다 | Lightsail 콘솔의 스냅샷 | 1. 옛 인스턴스가 아직 있으면 먼저 멈추거나 지운다. 같은 Tailscale 신원으로 두 대가 동시에 뜨지 않게 하려는 것이다.<br>2. 마지막 자동 스냅샷으로 새 인스턴스를 만든다. 디스크에 Tailscale 신원, `.env`, 데이터가 그대로 있어서 부팅하면 `krx-quant`로 다시 붙고 엔진도 스스로 뜬다. Tailscale admin의 기기는 지우지 않는다. 지우면 접속할 길이 없어진다.<br>3. 새 인스턴스의 Lightsail 방화벽은 41641/udp만 열어 둔다(2.2의 9단계 명령).<br>4. `docker compose run --rm engine archive --recheck`로 S3와 맞춘다.<br>마지막 스냅샷 뒤에 녹화하고 아직 올리지 못한 데이터는 잃는다. |
+| 서버를 잃었다 | Lightsail 콘솔의 스냅샷 | 1. 옛 인스턴스가 아직 있으면 먼저 멈추거나 지운다. 같은 Tailscale 신원으로 두 대가 동시에 뜨지 않게 하려는 것이다.<br>2. 마지막 자동 스냅샷으로 새 인스턴스를 만든다. 디스크에 Tailscale 신원, `.env`, 데이터가 그대로 있어서 부팅하면 `krx-quant`로 다시 붙고 엔진도 스스로 뜬다. Tailscale admin의 기기는 지우지 않는다. 지우면 접속할 길이 없어진다.<br>3. 새 인스턴스의 Lightsail 방화벽은 41641/udp만 열어 둔다(2.2의 10단계 명령).<br>4. `docker compose run --rm engine archive --recheck`로 S3와 맞춘다.<br>마지막 스냅샷 뒤에 녹화하고 아직 올리지 못한 데이터는 잃는다. |
 
 ## 7. 비용
 
@@ -214,3 +226,4 @@ docker compose logs --tail 200 engine
 - S3: 월 $1 미만으로 예상한다(#7에서 하루 데이터 크기를 잰다).
 - 스냅샷: GB·월당 $0.05다.
 - 상한은 월 $100이다. Budgets 알림과 Spot 학습 상한은 #23에서 만든다.
+- 지금은 AWS 프로젝트 지출 한도($100)가 걸려 있어서, 한도에 닿으면 상시 서버까지 멈춘다(1장 참고).
