@@ -10,11 +10,11 @@ same order, from normalized events to the Engine API.
 from __future__ import annotations
 
 import heapq
+import logging
 from collections.abc import Iterable, Iterator, Sequence
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
-import pyarrow as pa
 import pyarrow.parquet as pq
 
 from krx_quant.archive import partition_files
@@ -25,8 +25,10 @@ from krx_quant.feeds.base import KST, kst_day
 from krx_quant.market_calendar import MarketCalendar, calendar_store
 from krx_quant.predictions import DB_NAME, AlgorithmSummary, PredictionStore
 
-# Rows converted to Python at a time while reading a recorded day.
-_BATCH_ROWS = 10_000
+log = logging.getLogger(__name__)
+
+# Rows read and converted to Python at a time, per partition, while reading a recorded day.
+_BATCH_ROWS = 4096
 
 
 def replay(
@@ -54,7 +56,7 @@ def replay(
         if received_at > until:
             break
         if received_at < clock.now():
-            raise ValueError(f"events out of order: {received_at} after {clock.now()}")
+            raise ValueError(f"events out of order: {received_at} is before the clock at {clock.now()}")
         _run_until(engine, clock, received_at, display_delay)
         clock.set(received_at)
         engine.on_event(feed, row)
@@ -73,9 +75,10 @@ def _run_until(engine: PredictionEngine, clock: FakeClock, until: datetime, dela
 def recorded_events(data_dir: Path, day: date, symbols: Sequence[str]) -> Iterator[Event]:
     """The engine's events recorded on ``day``, in receipt order.
 
-    Only the columns the engine reads are loaded, and rows become Python objects a batch
-    at a time, so a whole day fits in little memory. Raises FileNotFoundError if none of
-    them were recorded that day.
+    Each partition is read file by file, a batch at a time, with only the columns the
+    engine uses, and the partitions are merged by receipt time: memory stays at about a
+    batch per partition however long the day. Raises FileNotFoundError if none of them
+    were recorded that day.
     """
     streams: list[Iterator[Event]] = []
     for feed, columns in ENGINE_FEEDS.items():
@@ -83,32 +86,46 @@ def recorded_events(data_dir: Path, day: date, symbols: Sequence[str]) -> Iterat
             partition = data_dir / "events" / f"date={day.isoformat()}" / f"feed={feed}" / f"symbol={symbol}"
             files = partition_files(partition) if partition.is_dir() else []
             if files:
-                tables = [
-                    pq.read_table(f, columns=list(columns)).replace_schema_metadata(None) for f in files
-                ]
-                streams.append(_rows(feed, pa.concat_tables(tables).sort_by("received_at")))
+                streams.append(_partition_rows(feed, files, columns))
     if not streams:
         raise FileNotFoundError(f"no events of {', '.join(ENGINE_FEEDS)} recorded on {day} in {data_dir}")
     # Stable: rows received at the same instant keep the order of the streams.
     return heapq.merge(*streams, key=lambda event: event[1]["received_at"])
 
 
-def _rows(feed: str, table: pa.Table) -> Iterator[Event]:
-    for batch in table.to_batches(max_chunksize=_BATCH_ROWS):
-        for row in batch.to_pylist():
-            yield feed, row
+def _partition_rows(feed: str, files: Sequence[Path], columns: Sequence[str]) -> Iterator[Event]:
+    """A partition's rows in the order written, which is the order received.
+
+    A row stamped earlier than the one before it (the system clock stepped back) is
+    taken as received with that one, so the merge stays in order.
+    """
+    last: datetime | None = None
+    stepped_back = 0
+    for path in files:
+        for batch in pq.ParquetFile(path).iter_batches(batch_size=_BATCH_ROWS, columns=list(columns)):
+            for row in batch.to_pylist():
+                if last is not None and row["received_at"] < last:
+                    row["received_at"] = last
+                    stepped_back += 1
+                last = row["received_at"]
+                yield feed, row
+    if stepped_back:
+        log.warning(
+            "%s %s: %d rows stamped before the row written before them", feed, files[0].parent, stepped_back
+        )
 
 
 def replay_day(settings: Settings, day: date, db: Path | None = None) -> tuple[Path, list[AlgorithmSummary]]:
     """Replay a recorded day into a fresh database (default ``state/replay-<day>.sqlite3``).
 
-    Refuses the live engine's database, and deletes nothing if the day was not recorded.
+    Refuses the live engine's database and its WAL and shared-memory files, and deletes
+    nothing if the day was not recorded.
     """
     db = db or settings.state_dir / f"replay-{day.isoformat()}.sqlite3"
-    if db.resolve() == (settings.state_dir / DB_NAME).resolve():
+    if db.resolve() in {p.resolve() for p in _sqlite_files(settings.state_dir / DB_NAME)}:
         raise ValueError(f"{db} is the live engine's database; replay into another file")
     events = recorded_events(settings.data_dir, day, settings.symbols)
-    for leftover in (db, db.with_name(db.name + "-wal"), db.with_name(db.name + "-shm")):
+    for leftover in _sqlite_files(db):
         leftover.unlink(missing_ok=True)
     start = datetime.combine(day, time(), KST)
     engine = replay(
@@ -124,3 +141,8 @@ def replay_day(settings: Settings, day: date, db: Path | None = None) -> tuple[P
         return db, engine.store.summary()
     finally:
         engine.store.close()
+
+
+def _sqlite_files(db: Path) -> list[Path]:
+    """A SQLite database and the files WAL mode keeps beside it."""
+    return [db, db.with_name(db.name + "-wal"), db.with_name(db.name + "-shm")]
