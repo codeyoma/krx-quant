@@ -41,3 +41,19 @@ def test_noise_is_fitted_with_heavy_friction_or_a_wide_dead_zone() -> None:
     params = fit(random_walk)
 
     assert params["damping"] >= 1.0 or params["threshold"] >= 1.5, params
+
+
+def test_a_training_sample_does_not_change_when_the_bars_after_it_are_cut() -> None:
+    day = DAYS[0]
+    bars = trending(day)
+    calendar = MarketCalendar({day: True})
+    full = samples({("005930", day): bars}, calendar, Newton.features, FEE)
+    for minutes in (30, 120, 300):
+        t = full[minutes].bar_close
+        cut = [b for b in bars if b.start + timedelta(minutes=1) <= t]
+
+        truncated = samples({("005930", day): cut}, calendar, Newton.features, FEE)
+
+        at_t = next(s for s in truncated if s.bar_close == t)
+        assert dict(at_t.features) == dict(full[minutes].features)
+        assert at_t.outcome is None  # what happened next is cut too

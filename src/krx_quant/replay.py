@@ -12,6 +12,7 @@ from __future__ import annotations
 import heapq
 import logging
 from collections.abc import Iterable, Iterator, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
@@ -132,13 +133,21 @@ def _partition_rows(feed: str, files: Sequence[Path], columns: Sequence[str]) ->
         )
 
 
-async def replay_day(
-    settings: Settings, day: date, db: Path | None = None
-) -> tuple[Path, list[AlgorithmSummary]]:
+@dataclass(frozen=True)
+class ReplayedDay:
+    db: Path
+    summary: list[AlgorithmSummary]
+    # Saved models trained on data up to the replayed day or later: they would be scored
+    # on what they learned from, so their defaults were used instead. One line each.
+    set_aside: list[str]
+
+
+async def replay_day(settings: Settings, day: date, db: Path | None = None) -> ReplayedDay:
     """Replay a recorded day into a fresh database (default ``state/replay-<day>.sqlite3``).
 
     Refuses the live engine's database and its WAL and shared-memory files, and deletes
-    nothing if the day was not recorded.
+    nothing if the day was not recorded. Saved models are used only if trained on days
+    before ``day``.
     """
     db = db or settings.state_dir / f"replay-{day.isoformat()}.sqlite3"
     if db.resolve() in {p.resolve() for p in _sqlite_files(settings.state_dir / DB_NAME)}:
@@ -146,6 +155,15 @@ async def replay_day(
     events = recorded_events(settings.data_dir, day, settings.symbols)
     for leftover in _sqlite_files(db):
         leftover.unlink(missing_ok=True)
+    models: dict[str, Model] = {}
+    set_aside: list[str] = []
+    for name, model in load_models(settings.state_dir, ALGORITHMS).items():
+        if model.trained_until is not None and model.trained_until >= day:
+            set_aside.append(
+                f"{model.version} was trained on data up to {model.trained_until}; using {name}'s default"
+            )
+        else:
+            models[name] = model
     start = datetime.combine(day, time(), KST)
     engine = await replay(
         events,
@@ -155,11 +173,11 @@ async def replay_day(
         fee_rate=settings.fee_rate,
         start=start,
         until=start + timedelta(days=1) - timedelta(microseconds=1),
-        models=load_models(settings.state_dir, ALGORITHMS),
-        budget=Budget(settings.algorithm_seconds, settings.cpu_budget_seconds),
+        models=models,
+        budget=Budget.of(settings),
     )
     try:
-        return db, engine.store.summary()
+        return ReplayedDay(db, engine.store.summary(), set_aside)
     finally:
         engine.store.close()
 

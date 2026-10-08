@@ -188,7 +188,7 @@ class PredictionStore:
                 )
         return added
 
-    def add_run(self, kind: str, at: datetime, algorithm: str | None, detail: str) -> None:
+    def add_run(self, kind: str, at: datetime, algorithm: str, detail: str) -> None:
         with self._db:
             self._db.execute(
                 "INSERT INTO runs (kind, at, algorithm, detail) VALUES (?, ?, ?, ?)",

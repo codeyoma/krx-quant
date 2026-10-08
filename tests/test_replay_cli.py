@@ -7,11 +7,13 @@ the replay database, which must match replaying the same events by hand.
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from datetime import timedelta
 from pathlib import Path
 
 import pytest
 
+from krx_quant.algorithms import Model, save_model
 from krx_quant.archive import archive
 from krx_quant.cli import main
 from krx_quant.engine import Event
@@ -110,3 +112,23 @@ def test_replaying_a_day_with_nothing_recorded_fails(
 
     assert main(["replay", DAY.isoformat()]) == 1
     assert "no events" in capsys.readouterr().err
+
+
+def test_replay_does_not_use_a_model_trained_on_the_day_it_replays(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    record(tmp_path / "data", busy_morning())
+    state = tmp_path / "state"
+    save_model(
+        state, "newton", Model("newton-20261012-aaaaaa", {"damping": 0.0, "threshold": 0.0}, None, DAY)
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("KRX_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("KRX_STATE_DIR", str(state))
+
+    assert main(["replay", DAY.isoformat()]) == 0
+
+    with sqlite3.connect(state / f"replay-{DAY}.sqlite3") as conn:
+        versions = conn.execute("SELECT DISTINCT model_version FROM predictions WHERE algorithm = 'newton'")
+        assert versions.fetchall() == [("newton-default",)]
+    assert "newton-20261012-aaaaaa was trained on data up to 2026-10-12" in capsys.readouterr().err

@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import math
+import time
 from datetime import date
 from pathlib import Path
 
@@ -84,10 +85,25 @@ def test_training_gives_a_new_versioned_model_that_can_be_saved(algorithm: Algor
         algorithm.predict(sample.features, model)
 
 
+def test_predicting_takes_a_small_part_of_the_time_budget(algorithm: Algorithm) -> None:
+    # The engine allows 30 seconds per bar close for every symbol; one prediction of each
+    # scenario, a hundred times over, must take well under a second.
+    model = algorithm.default_model()
+    vectors = [FeatureVector(values, algorithm.features) for values in SCENARIOS.values()]
+    started = time.perf_counter()
+    for _ in range(100):
+        for features in vectors:
+            algorithm.predict(features, model)
+    assert time.perf_counter() - started < 1.0
+
+
 def test_reading_an_undeclared_feature_breaks_the_contract() -> None:
     peeker = FixedAlgorithm(
         "peeker", features=("velocity",), unique=("velocity",), reads=("velocity", "volatility")
     )
+    features = FeatureVector(SCENARIOS["quiet"], peeker.features)
 
     with pytest.raises(UndeclaredFeature, match="volatility"):
-        peeker.predict(FeatureVector(SCENARIOS["quiet"], peeker.features), peeker.default_model())
+        peeker.predict(features, peeker.default_model())
+    with pytest.raises(UndeclaredFeature, match="volatility"):
+        features.get("volatility")
