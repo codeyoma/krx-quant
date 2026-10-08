@@ -6,6 +6,7 @@ TR IDs; CI rejects them.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -171,18 +172,32 @@ class RestClient:
         self._limiter = limiter
 
     async def get(self, tr_id: str, path: str, params: dict[str, str]) -> dict[str, Any]:
-        """Return the JSON body; raise KisError unless KIS reports success (rt_cd "0")."""
-        token = await self._access_token()
-        await self._limiter.acquire()
-        headers = {**self._headers, "authorization": f"Bearer {token}", "tr_id": tr_id}
-        async with self._session.get(f"{self._rest_url}{path}", params=params, headers=headers) as resp:
-            body = await resp.json(content_type=None)
-        if not isinstance(body, dict) or body.get("rt_cd") != "0":
-            if isinstance(body, dict) and body.get("msg_cd") in _TOKEN_REJECTED and self._on_token_rejected:
+        """Return the JSON body; raise KisError unless KIS reports success (rt_cd "0").
+
+        A call KIS refuses for its per-second limit is sent again after a short pause.
+        """
+        for attempt in range(_BUSY_RETRIES + 1):
+            token = await self._access_token()
+            await self._limiter.acquire()
+            headers = {**self._headers, "authorization": f"Bearer {token}", "tr_id": tr_id}
+            async with self._session.get(f"{self._rest_url}{path}", params=params, headers=headers) as resp:
+                body = await resp.json(content_type=None)
+            if isinstance(body, dict) and body.get("rt_cd") == "0":
+                return body
+            code = body.get("msg_cd") if isinstance(body, dict) else None
+            if code == _BUSY and attempt < _BUSY_RETRIES:
+                await asyncio.sleep(_BUSY_PAUSE)
+                continue
+            if code in _TOKEN_REJECTED and self._on_token_rejected:
                 self._on_token_rejected()
             raise KisError(f"{tr_id} {params}: HTTP {resp.status} {body}")
-        return body
+        raise KisError("unreachable: the last attempt returns or raises")
 
 
 # KIS answers these when the access token is expired or not valid.
 _TOKEN_REJECTED = {"EGW00121", "EGW00123"}
+# KIS refuses some calls with EGW00201 (per-second limit) even under 20 a second: measured
+# 2026-10-08, a few refusals at 10–20 calls a second, none at 8. Such a call is retried.
+_BUSY = "EGW00201"
+_BUSY_RETRIES = 5
+_BUSY_PAUSE = 0.5

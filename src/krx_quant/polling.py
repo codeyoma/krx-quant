@@ -39,12 +39,14 @@ class Poller:
         recorder: ParquetRecorder,
         now: Callable[[], datetime],
         stop: asyncio.Event,
+        on_added: Callable[[tuple[str, str]], None] | None = None,
         on_received: Callable[[tuple[str, str]], None] | None = None,
     ) -> None:
         self._client = client
         self._recorder = recorder
         self._now = now
         self._stop = stop
+        self._on_added = on_added
         self._on_received = on_received
         self._tasks: dict[tuple[str, str], asyncio.Task[None]] = {}
 
@@ -54,6 +56,8 @@ class Poller:
         if key in self._tasks:
             return
         self._tasks[key] = asyncio.create_task(self._poll(job, self._client))
+        if self._on_added is not None:
+            self._on_added(key)
 
     async def close(self) -> None:
         tasks = list(self._tasks.values())

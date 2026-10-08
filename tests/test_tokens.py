@@ -58,8 +58,10 @@ async def test_the_token_is_refreshed_before_it_expires(kis: FakeKis, tmp_path: 
     await until(lambda: len(kis.tokens_issued) == 1 and len(kis.rest_requests) > 0)
 
     clock.at = FIXED_NOW + timedelta(hours=1, minutes=30)  # inside the one-hour refresh margin
+    kis.token_expires = (clock.at + timedelta(hours=24)).strftime("%Y-%m-%d %H:%M:%S")  # a new token's day
     await until(lambda: len(kis.tokens_issued) == 2)
-    await asyncio.sleep(0.2)
+    # Polls outrun the 20-per-second limiter here, so the next request can wait up to a second.
+    await until(lambda: any(t == QUOTE and h["_auth"].endswith("-2") for _, t, _, h in kis.rest_requests))
     stop.set()
     await asyncio.wait_for(task, 5)
 
