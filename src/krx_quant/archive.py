@@ -133,12 +133,14 @@ def _merge(partition: Path) -> None:
         tmp = partition / f".{MERGED}.{uuid.uuid4().hex[:8]}.tmp"
         with pq.ParquetWriter(tmp, schema.with_metadata({_PARTS_KEY: json.dumps(names)})) as writer:
             pending: list[pa.RecordBatch] = []
+            pending_rows = 0
             for source in sources:
                 for batch in pq.ParquetFile(source).iter_batches():
                     pending.append(batch)
-                    if sum(b.num_rows for b in pending) >= _ROW_GROUP_ROWS:
+                    pending_rows += batch.num_rows
+                    if pending_rows >= _ROW_GROUP_ROWS:
                         writer.write_table(pa.Table.from_batches(pending), row_group_size=_ROW_GROUP_ROWS)
-                        pending = []
+                        pending, pending_rows = [], 0
             if pending:
                 writer.write_table(pa.Table.from_batches(pending), row_group_size=_ROW_GROUP_ROWS)
         _fsync(tmp)
