@@ -12,6 +12,11 @@ Default five-role vocabulary: `needs-triage`, `needs-info`, `ready-for-agent`, `
 
 Single-context: root `CONTEXT.md` + `docs/adr/`, plus the agreed system design in `docs/design.md`. See `docs/agents/domain.md`.
 
+## Git workflow
+
+- Never push to `main` directly. Start each change on a branch from `origin/main`, push the branch, open a pull request against `main` (`Closes #N` for the issue it implements), and merge it from the PR once CI passes.
+- The `fincept/` fork follows its own rules (`fincept/custom/AGENTS.md`).
+
 ## Repository layout
 
 - Engine code, algorithms and docs live in this private repo.
