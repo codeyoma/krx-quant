@@ -36,7 +36,13 @@ uv run python scripts/check_forbidden.py && uv run ruff check && uv run mypy && 
 uv run krx-quant collect
 ```
 
-`Ctrl+C`(또는 SIGTERM)로 멈추면 남은 데이터를 쓰고 끝난다. 녹화 형식은 [docs/events.md](docs/events.md)에 있다.
+`Ctrl+C`(또는 SIGTERM)로 멈추면 남은 데이터를 쓰고 끝난다. 녹화하는 피드와 구독 순서는 [docs/kis-feeds.md](docs/kis-feeds.md), 녹화 형식은 [docs/events.md](docs/events.md)에 있다.
+
+실시간 구독 한도를 다시 재려면 수집기를 멈춘 상태에서 실행한다(앱키 하나에 세션 하나라서):
+
+```bash
+uv run krx-quant measure-subscriptions
+```
 
 Docker로 실행할 때(`-u`는 컨테이너가 호스트의 `data/` 폴더에 쓸 수 있게 한다):
 
@@ -77,6 +83,7 @@ uv run python -c "import glob, pyarrow.parquet as pq; d = sorted(glob.glob('data
 ## 문서
 
 - [docs/design.md](docs/design.md): 설계 (목표, 구조, 데이터, 알고리즘, 학습, 인프라, 개발 단계)
+- [docs/kis-feeds.md](docs/kis-feeds.md): KIS 피드, 키, 한도, 최근월물 찾기
 - [docs/events.md](docs/events.md): 녹화 데이터 형식
 - [docs/paid-data.md](docs/paid-data.md): 유료 데이터 조사
 

@@ -8,8 +8,11 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from typing import Any
 
 import aiohttp
+
+from krx_quant.ratelimit import RateLimiter
 
 WS_PATH = "/tryitout"
 
@@ -42,13 +45,14 @@ async def issue_approval_key(
         return str(payload["approval_key"])
 
 
-def subscribe_message(approval_key: str, tr_id: str, tr_key: str) -> str:
+def subscribe_message(approval_key: str, tr_id: str, tr_key: str, subscribe: bool = True) -> str:
+    """Registration request; ``subscribe=False`` builds the matching unregistration."""
     return json.dumps(
         {
             "header": {
                 "approval_key": approval_key,
                 "custtype": "P",
-                "tr_type": "1",
+                "tr_type": "1" if subscribe else "2",
                 "content-type": "utf-8",
             },
             "body": {"input": {"tr_id": tr_id, "tr_key": tr_key}},
@@ -85,11 +89,20 @@ class SystemMessage:
     tr_id: str
     tr_key: str | None
     ok: bool
+    code: str
     message: str
 
     @property
     def is_pingpong(self) -> bool:
         return self.tr_id == "PINGPONG"
+
+    @property
+    def is_limit_rejection(self) -> bool:
+        """A registration refused because the session already holds the maximum (41 on 2026-10-08).
+
+        KIS answers ``OPSP0008`` / ``MAX SUBSCRIBE OVER``.
+        """
+        return not self.ok and (self.code == "OPSP0008" or "MAX SUBSCRIBE" in self.message.upper())
 
 
 def parse_message(text: str) -> RealtimeFrame | SystemMessage:
@@ -111,5 +124,43 @@ def parse_message(text: str) -> RealtimeFrame | SystemMessage:
         tr_id=str(header.get("tr_id", "")),
         tr_key=header.get("tr_key"),
         ok=body.get("rt_cd", "0") == "0",
+        code=str(body.get("msg_cd", "")),
         message=str(body.get("msg1", "")),
     )
+
+
+class RestClient:
+    """Authenticated GET calls to KIS quotation endpoints, shared-rate-limited.
+
+    Market data only: callers pass read TR IDs and quotation paths.
+    """
+
+    def __init__(
+        self,
+        session: aiohttp.ClientSession,
+        rest_url: str,
+        app_key: str,
+        app_secret: str,
+        access_token: str,
+        limiter: RateLimiter,
+    ) -> None:
+        self._session = session
+        self._rest_url = rest_url
+        self._headers = {
+            "authorization": f"Bearer {access_token}",
+            "appkey": app_key,
+            "appsecret": app_secret,
+            "custtype": "P",
+            "content-type": "application/json; charset=utf-8",
+        }
+        self._limiter = limiter
+
+    async def get(self, tr_id: str, path: str, params: dict[str, str]) -> dict[str, Any]:
+        """Return the JSON body; raise KisError unless KIS reports success (rt_cd "0")."""
+        await self._limiter.acquire()
+        headers = {**self._headers, "tr_id": tr_id}
+        async with self._session.get(f"{self._rest_url}{path}", params=params, headers=headers) as resp:
+            body = await resp.json(content_type=None)
+        if not isinstance(body, dict) or body.get("rt_cd") != "0":
+            raise KisError(f"{tr_id} {params}: HTTP {resp.status} {body}")
+        return body

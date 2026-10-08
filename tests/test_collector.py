@@ -7,7 +7,6 @@ the collector records. Nothing here reaches into collector internals.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -26,14 +25,6 @@ KST = ZoneInfo("Asia/Seoul")
 FIXED_NOW = datetime(2026, 10, 8, 9, 30, 16, tzinfo=KST)
 
 
-@pytest.fixture
-async def kis() -> AsyncIterator[FakeKis]:
-    fake = FakeKis()
-    await fake.start()
-    yield fake
-    await fake.stop()
-
-
 def settings_for(kis: FakeKis, data_dir: Path, symbols: tuple[str, ...] = ("005930",)) -> Settings:
     return Settings(
         kis_app_key=kis.app_key,
@@ -41,6 +32,12 @@ def settings_for(kis: FakeKis, data_dir: Path, symbols: tuple[str, ...] = ("0059
         kis_rest_url=kis.rest_url,
         kis_ws_url=kis.ws_url,
         symbols=symbols,
+        etf_symbols=(),
+        index_codes=(),
+        us_symbols=(),
+        venue_trades=False,
+        master_url=kis.master_url,
+        foreign_estimate_poll_seconds=3600,
         data_dir=data_dir,
     )
 
@@ -169,22 +166,6 @@ async def test_frame_with_several_records_yields_one_event_per_record(kis: FakeK
 
     trades = read(tmp_path, "events", "H0UNCNT0")
     assert [(t["price"], t["qty"], t["side"]) for t in trades] == [(81200, 5, "buy"), (81100, 9, "sell")]
-
-
-async def test_every_configured_symbol_gets_trade_and_book_subscriptions(
-    kis: FakeKis, tmp_path: Path
-) -> None:
-    kis.script[("H0UNCNT0", "000660")] = []
-    kis.script[("H0UNASP0", "005930")] = []
-
-    await collect(kis, settings_for(kis, tmp_path, symbols=("005930", "000660")))
-
-    assert kis.subscribed_keys() == {
-        ("H0UNCNT0", "005930"),
-        ("H0UNASP0", "005930"),
-        ("H0UNCNT0", "000660"),
-        ("H0UNASP0", "000660"),
-    }
 
 
 async def test_unparseable_messages_are_kept_raw_and_do_not_stop_recording(

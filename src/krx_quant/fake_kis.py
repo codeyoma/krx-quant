@@ -1,9 +1,10 @@
 """A local stand-in for the KIS Open API, for tests and offline runs.
 
 It implements just enough of KIS to drive the collector: access-token and
-WebSocket approval-key issuance over REST, and a WebSocket endpoint that
-acknowledges subscriptions, pushes scripted data frames, and sends
-PINGPONG heartbeats. Everything it receives is recorded so tests can
+WebSocket approval-key issuance, REST quotation endpoints answered from
+canned responses, and a WebSocket endpoint that acknowledges subscriptions
+(up to an optional per-session limit), pushes scripted data frames, and
+sends PINGPONG heartbeats. Everything it receives is recorded so tests can
 assert on what the collector sent.
 """
 
@@ -12,7 +13,9 @@ from __future__ import annotations
 import asyncio
 import json
 import socket
+import time
 from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -29,6 +32,14 @@ class FakeKis:
     script: dict[tuple[str, str], list[str]] = field(default_factory=lambda: defaultdict(list))
     subscriptions: list[dict[str, Any]] = field(default_factory=list)
     pongs: list[bytes] = field(default_factory=list)
+    # Registrations allowed per WebSocket session; None means unlimited.
+    max_subscriptions: int | None = None
+    # REST: tr_id -> function of the query params returning the JSON body to send.
+    rest_responses: dict[str, Callable[[dict[str, str]], dict[str, Any]]] = field(default_factory=dict)
+    # Master files served under /master/<name>, e.g. "fo_idx_code_mts.mst.zip".
+    masters: dict[str, bytes] = field(default_factory=dict)
+    # REST requests received: (monotonic arrival time, tr_id, path, query params).
+    rest_requests: list[tuple[float, str, str, dict[str, str]]] = field(default_factory=list)
 
     _runner: web.AppRunner | None = None
     _site: web.SockSite | None = None
@@ -50,6 +61,8 @@ class FakeKis:
         app.router.add_post("/oauth2/tokenP", self._token)
         app.router.add_post("/oauth2/Approval", self._approval)
         app.router.add_get(WS_PATH, self._ws)
+        app.router.add_get("/uapi/{tail:.*}", self._rest)
+        app.router.add_get("/master/{name}", self._master)
         self._runner = web.AppRunner(app)
         await self._runner.setup()
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -112,14 +125,49 @@ class FakeKis:
             return web.json_response({"error_description": "invalid app key"}, status=403)
         return web.json_response({"approval_key": "fake-approval-key"})
 
+    @property
+    def master_url(self) -> str:
+        return f"{self.rest_url}/master"
+
+    async def _master(self, request: web.Request) -> web.Response:
+        body = self.masters.get(request.match_info["name"])
+        if body is None:
+            return web.Response(status=404)
+        return web.Response(body=body, content_type="application/zip")
+
+    async def _rest(self, request: web.Request) -> web.Response:
+        h = request.headers
+        tr_id = h.get("tr_id", "")
+        self.rest_requests.append((time.monotonic(), tr_id, request.path, dict(request.query)))
+        if (
+            h.get("authorization") != "Bearer fake-access-token"
+            or h.get("appkey") != self.app_key
+            or h.get("appsecret") != self.app_secret
+        ):
+            return web.json_response(
+                {"rt_cd": "1", "msg_cd": "EGW00123", "msg1": "invalid token"}, status=403
+            )
+        respond = self.rest_responses.get(tr_id)
+        if respond is None:
+            return web.json_response({"rt_cd": "1", "msg_cd": "OPSQ0002", "msg1": f"unknown tr_id {tr_id}"})
+        try:
+            body = respond(dict(request.query))
+        except ConnectionResetError:
+            # Simulate KIS dropping the connection mid-request.
+            assert request.transport is not None
+            request.transport.close()
+            raise
+        return web.json_response(body)
+
     async def _ws(self, request: web.Request) -> web.WebSocketResponse:
         ws = web.WebSocketResponse(autoping=False)
         await ws.prepare(request)
         self._sockets.append(ws)
+        active: set[tuple[str, str]] = set()
         try:
             async for msg in ws:
                 if msg.type == WSMsgType.TEXT:
-                    await self._on_subscribe(ws, json.loads(msg.data))
+                    await self._on_subscribe(ws, json.loads(msg.data), active)
                 elif msg.type == WSMsgType.PING:
                     await ws.pong(msg.data)
                 elif msg.type == WSMsgType.PONG:
@@ -129,27 +177,46 @@ class FakeKis:
             self._sockets.remove(ws)
         return ws
 
-    async def _on_subscribe(self, ws: web.WebSocketResponse, req: dict[str, Any]) -> None:
+    async def _on_subscribe(
+        self, ws: web.WebSocketResponse, req: dict[str, Any], active: set[tuple[str, str]]
+    ) -> None:
         header = req.get("header", {})
         inp = req.get("body", {}).get("input", {})
-        tr_id, tr_key = inp.get("tr_id", ""), inp.get("tr_key", "")
-        ok = header.get("approval_key") == "fake-approval-key"
-        await ws.send_str(
-            json.dumps(
-                {
-                    "header": {"tr_id": tr_id, "tr_key": tr_key, "encrypt": "N"},
-                    "body": {
-                        "rt_cd": "0" if ok else "1",
-                        "msg_cd": "OPSP0000" if ok else "OPSP0011",
-                        "msg1": "SUBSCRIBE SUCCESS" if ok else "invalid approval : NOT FOUND",
-                        "output": {"iv": "0123456789abcdef", "key": "0123456789abcdef0123456789abcdef"},
-                    },
-                }
-            )
-        )
+        key = (inp.get("tr_id", ""), inp.get("tr_key", ""))
+        if header.get("tr_type") == "2":
+            active.discard(key)
+            await ws.send_str(_ack(key, "0", "OPSP0000", "UNSUBSCRIBE SUCCESS"))
+            return
+        if header.get("approval_key") != "fake-approval-key":
+            ok, reply = False, _ack(key, "1", "OPSP0011", "invalid approval : NOT FOUND")
+        elif self.max_subscriptions is not None and len(active) >= self.max_subscriptions:
+            ok, reply = False, _ack(key, "1", LIMIT_MSG_CD, LIMIT_MSG)
+        else:
+            ok, reply = True, _ack(key, "0", "OPSP0000", "SUBSCRIBE SUCCESS")
+            active.add(key)
+        await ws.send_str(reply)
         async with self._subscribed:
             self.subscriptions.append(req)
             self._subscribed.notify_all()
         if ok:
-            for frame in self.script.get((tr_id, tr_key), []):
+            for frame in self.script.get(key, []):
                 await ws.send_str(frame)
+
+
+# What KIS answers when a session exceeds its registration limit (observed live 2026-10-08).
+LIMIT_MSG_CD = "OPSP0008"
+LIMIT_MSG = "MAX SUBSCRIBE OVER"
+
+
+def _ack(key: tuple[str, str], rt_cd: str, msg_cd: str, msg1: str) -> str:
+    return json.dumps(
+        {
+            "header": {"tr_id": key[0], "tr_key": key[1], "encrypt": "N"},
+            "body": {
+                "rt_cd": rt_cd,
+                "msg_cd": msg_cd,
+                "msg1": msg1,
+                "output": {"iv": "0123456789abcdef", "key": "0123456789abcdef0123456789abcdef"},
+            },
+        }
+    )
