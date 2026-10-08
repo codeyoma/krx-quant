@@ -237,7 +237,10 @@ async def _approval_key(session: aiohttp.ClientSession, settings: Settings) -> s
 
 
 def _fall_back(poller: Poller, settings: Settings, tr_id: str, key: str, reason: str) -> None:
-    fallback = (ETF_FALLBACKS if key in settings.etf_symbols else FALLBACKS).get(tr_id)
+    # The ETF mapping only covers the ETF trade feed; a code also listed as a stock keeps
+    # the stock fallbacks for its other feeds.
+    etf = ETF_FALLBACKS.get(tr_id) if key in settings.etf_symbols else None
+    fallback = etf or FALLBACKS.get(tr_id)
     if fallback is None:
         log.error("%s %s not recorded (%s) and has no REST fallback", tr_id, key, reason)
         return

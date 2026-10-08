@@ -121,3 +121,20 @@ async def test_etfs_fall_back_to_the_krx_snapshot_and_stocks_to_the_integrated_o
     assert markets == {"005930": "UN", "133690": "J"}, "J is KRX alone, UN the integrated market"
     [etf, *_] = read(tmp_path, "events", QUOTE, symbol="133690")
     assert (etf["price"], etf["cum_volume"]) == (190500, 1000)
+
+
+async def test_a_code_listed_as_both_stock_and_etf_keeps_the_stock_fallbacks(
+    kis: FakeKis, tmp_path: Path
+) -> None:
+    serve_snapshots(kis)
+    settings = replace(
+        settings_for(kis, tmp_path),
+        symbols=("133690",),
+        etf_symbols=("133690",),
+        ws_max_subscriptions=0,
+        fallback_poll_seconds=0.1,
+    )
+
+    await run_until(kis, settings, lambda: polled(kis, BOOK_SNAPSHOT, "133690"))
+
+    assert polled(kis, "FHKST01010600", "133690"), "the book and member flow still fall back to REST"
