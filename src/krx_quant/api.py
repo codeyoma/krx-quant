@@ -149,7 +149,7 @@ async def _algorithms(request: web.Request) -> web.Response:
                 },
                 "features": list(a.features),
                 "training_days": a.training_days,
-                "model": {"version": model.version, "params": dict(model.params), "trained": model.trained},
+                "model": model.as_dict(),
             }
         )
     return web.json_response({"algorithms": algorithms})

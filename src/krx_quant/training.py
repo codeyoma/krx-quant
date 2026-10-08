@@ -25,7 +25,7 @@ from krx_quant.config import Settings
 from krx_quant.engine import HORIZON, prediction_window
 from krx_quant.features import FeatureStore, FeatureVector, Snapshot
 from krx_quant.market_calendar import MarketCalendar, calendar_store
-from krx_quant.pricing import classify, flat_ticks, tick_size
+from krx_quant.pricing import classify
 from krx_quant.reference import BAR, Bar
 
 BarDays = Mapping[tuple[str, date], Sequence[Bar]]  # (symbol, day) -> bars, oldest first
@@ -50,18 +50,15 @@ def samples(
         t, last = prediction_window(session)
         while t <= last:
             done = bars[: bisect.bisect_right(ends, t)]
-            price = done[-1].close if done else None
-            tick = tick_size(price) if price else None
-            k = flat_ticks(price, fee_rate) if price else None
-            snapshot = Snapshot(symbol, t, done, price, tick, k)
+            snapshot = Snapshot.at(symbol, t, done, done[-1].close if done else None, fee_rate)
             values = store.compute(snapshot, names)
             later = closes.get(t + HORIZON - BAR)  # the close of the bar ending at t + 4 minutes
             change = None
             outcome = None
-            if later is not None and price and tick and k:
-                change = (later - price) / tick
-                outcome = classify(later - price, k, tick)
-            out.append(Sample(symbol, t, FeatureVector(values, names), outcome, change, k))
+            if later is not None and snapshot.price and snapshot.tick and snapshot.flat_ticks:
+                change = (later - snapshot.price) / snapshot.tick
+                outcome = classify(later - snapshot.price, snapshot.flat_ticks, snapshot.tick)
+            out.append(Sample(symbol, t, FeatureVector(values, names), outcome, change))
             t += BAR
     return out
 

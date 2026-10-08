@@ -14,10 +14,10 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import date, datetime
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 from krx_quant.baselines import Forecast
 from krx_quant.features import FeatureVector
@@ -44,15 +44,28 @@ class Model:
     version: str
     params: Mapping[str, float]
     trained: str | None = None  # what it was trained on
+    trained_until: date | None = None  # the last day of its training data
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "version": self.version,
+            "params": dict(self.params),
+            "trained": self.trained,
+            "trained_until": self.trained_until.isoformat() if self.trained_until else None,
+        }
 
     def to_json(self) -> str:
-        return json.dumps({"version": self.version, "params": dict(self.params), "trained": self.trained})
+        return json.dumps(self.as_dict())
 
     @classmethod
     def from_json(cls, text: str) -> Model:
         data = json.loads(text)
+        until = data.get("trained_until")
         return cls(
-            str(data["version"]), {k: float(v) for k, v in data["params"].items()}, data.get("trained")
+            str(data["version"]),
+            {k: float(v) for k, v in data["params"].items()},
+            data.get("trained"),
+            date.fromisoformat(until) if until else None,
         )
 
 
@@ -64,8 +77,7 @@ class Sample:
     bar_close: datetime
     features: FeatureVector
     outcome: Direction | None  # None if the bars do not tell
-    change_ticks: float | None
-    flat_ticks: int | None = field(default=None)
+    change_ticks: float | None  # the move behind the outcome, for algorithms that learn its size
 
 
 class Algorithm(Protocol):

@@ -149,7 +149,7 @@ async def run_collector(
         settings.fee_rate,
         session_clock,
         models=load_models(settings.state_dir, ALGORITHMS),
-        budget=Budget(settings.algorithm_seconds, settings.cpu_budget_seconds),
+        budget=Budget.of(settings),
     )
 
     def on_event(feed: str, row: dict[str, Any]) -> None:

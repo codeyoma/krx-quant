@@ -3,12 +3,13 @@
 Personality card:
 - **Scientist**: Isaac Newton.
 - **Logic**: the price has a velocity and an acceleration (a parabola through the last
-  six one-minute closes). Volume is the mass: a move on heavy volume carries more
-  momentum and force (both scaled by volume relative to the last hour). Friction slows
-  it down: with damping γ, dv/dt = F − γv, and the move over the next four minutes is
-  extrapolated from there. A move smaller than θ·k (the flat band) is treated as none.
-  The forecast is a normal distribution around that move, as wide as the last 20
-  minutes' volatility.
+  six one-minute closes, in ticks: within a price band a tick is a fixed share of the
+  price, so this is the slope and curvature of returns). Volume is the mass: a move on
+  heavy volume carries more momentum and force (both scaled by volume relative to the
+  last hour). Friction slows it down: with damping γ, dv/dt = F − γv, and the move over
+  the next four minutes is extrapolated from there. A move smaller than θ·k (the flat
+  band) is treated as none. The forecast is a normal distribution around that move, as
+  wide as the last 20 minutes' volatility.
 - **Own features**: velocity, acceleration, relative volume.
 - **Learns**: the damping γ and the threshold θ, by grid search for the lowest log loss
   over the last 20 trading days.
@@ -92,6 +93,7 @@ class Newton:
             version=f"newton-{last:%Y%m%d}-{digest}",
             params=params,
             trained=f"{first}..{last}, {len(scored)} samples, log loss {loss:.4f}",
+            trained_until=last,
         )
 
     def _loss(self, sample: Sample, damping: float, threshold: float) -> float:

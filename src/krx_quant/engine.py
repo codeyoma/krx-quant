@@ -10,7 +10,8 @@ bar close in the prediction window, from what was received before it:
   waits. Each algorithm's predictions are displayed when it finishes. One that takes
   longer than its time budget is skipped for that bar close (``timed_out``), and so is
   each later bar close until it finishes. When the algorithms' expected work exceeds the
-  CPU budget, the last registered are skipped first and the skip is recorded (``runs``).
+  CPU budget, the last registered are skipped first and the skip is recorded (``runs``);
+  each skip halves the skipped one's expected time, so it is soon run (and timed) again.
 
 Four minutes later each prediction is scored on both bases.
 
@@ -35,6 +36,7 @@ from typing import Any
 from krx_quant.algorithms import ALGORITHMS, Algorithm, Model, register
 from krx_quant.baselines import BASELINES, Forecast, Inputs
 from krx_quant.clock import SessionClock
+from krx_quant.config import Settings
 from krx_quant.features import FeatureStore, FeatureValue, FeatureVector, Snapshot
 from krx_quant.feeds import BOOK, BOOK_SNAPSHOT, KRX_TRADE, TRADE
 from krx_quant.feeds.base import KST
@@ -67,6 +69,10 @@ ENGINE_FEEDS: dict[str, tuple[str, ...]] = {
 class Budget:
     per_algorithm: float = 30.0  # seconds one algorithm may take for a bar close, all symbols
     cpu: float = 30.0  # seconds of expected algorithm work per bar close, all together
+
+    @classmethod
+    def of(cls, settings: Settings) -> Budget:
+        return cls(settings.algorithm_seconds, settings.cpu_budget_seconds)
 
 
 # How much one bar close's measured time moves an algorithm's expected time.
@@ -178,17 +184,17 @@ class PredictionEngine:
         baselines: dict[tuple[str, str], dict[str, Forecast | None]] = {}
         for symbol in self.symbols:
             mid = self._reference.mid(symbol, bar_close)
-            k = flat_ticks(mid, self.fee_rate) if mid is not None else None
-            tick = tick_size(mid) if mid is not None else None
-            snapshot = Snapshot(symbol, bar_close, self._bars.closed(symbol, bar_close), mid, tick, k)
+            snapshot = Snapshot.at(
+                symbol, bar_close, self._bars.closed(symbol, bar_close), mid, self.fee_rate
+            )
             at_close[symbol] = _AtClose(mid, self._features.compute(snapshot, self._feature_names))
             inputs = Inputs(
                 symbol=symbol,
                 bar_close=bar_close,
                 mid=mid,
                 mid_before=self._reference.mid(symbol, bar_close - HORIZON),
-                flat_ticks=k,
-                tick=tick,
+                flat_ticks=snapshot.flat_ticks,
+                tick=snapshot.tick,
                 day_classes=self.store.day_classes(symbol, day_start, bar_close),
             )
             for b in BASELINES:
@@ -204,43 +210,39 @@ class PredictionEngine:
         chosen = list(self.algorithms)
         while chosen and sum(self._cost.get(a.name, 0.0) for a in chosen) > self._budget.cpu:
             dropped = chosen.pop()
-            detail = (
-                f"expected {self._cost.get(dropped.name, 0.0):.3f}s; budget {self._budget.cpu}s per bar close"
-            )
+            expected = self._cost.get(dropped.name, 0.0)
+            detail = f"expected {expected:.3f}s; budget {self._budget.cpu}s per bar close"
             log.warning("%s skipped at %s for the CPU budget (%s)", dropped.name, bar_close, detail)
             self.store.add_run("cpu_budget", bar_close, dropped.name, detail)
+            # Never run, it would never be timed again: expect less, so it is tried soon.
+            self._cost[dropped.name] = expected / 2
         return chosen
 
     async def _run(self, algorithm: Algorithm, bar_close: datetime, at_close: Mapping[str, _AtClose]) -> None:
         name, model = algorithm.name, self.models[algorithm.name]
-        none: dict[str, Forecast | None] = dict.fromkeys(at_close)
-        if name in self._busy:
-            self._record(bar_close, at_close, [(name, model.version, none, "timed_out")])
-            return
-        vectors = {s: FeatureVector(c.features, algorithm.features) for s, c in at_close.items()}
-        started = timer.perf_counter()
-        work = asyncio.ensure_future(asyncio.to_thread(_predict_symbols, algorithm, model, vectors))
-        try:
-            made: dict[str, Forecast | None] = dict(
-                await asyncio.wait_for(asyncio.shield(work), self._budget.per_algorithm)
-            )
-        except TimeoutError:
-            log.warning("%s took over %ss at %s; skipped", name, self._budget.per_algorithm, bar_close)
-            self._busy.add(name)
-            work.add_done_callback(partial(self._finished_late, name))
-            self._cost[name] = max(self._cost.get(name, 0.0), self._budget.per_algorithm)
-            self._record(bar_close, at_close, [(name, model.version, none, "timed_out")])
-            return
-        except Exception:
-            log.exception("%s failed at %s", name, bar_close)
-            self._record(bar_close, at_close, [(name, model.version, none, "error")])
-            return
-        elapsed = timer.perf_counter() - started
-        previous = self._cost.get(name)
-        self._cost[name] = (
-            elapsed if previous is None else (1 - _COST_WEIGHT) * previous + _COST_WEIGHT * elapsed
-        )
-        self._record(bar_close, at_close, [(name, model.version, made, "ok")])
+        made: Mapping[str, Forecast | None] = dict.fromkeys(at_close)  # nothing, unless it finishes
+        status = "timed_out"
+        if name not in self._busy:
+            vectors = {s: FeatureVector(c.features, algorithm.features) for s, c in at_close.items()}
+            started = timer.perf_counter()
+            work = asyncio.ensure_future(asyncio.to_thread(_predict_symbols, algorithm, model, vectors))
+            done, _ = await asyncio.wait({work}, timeout=self._budget.per_algorithm)
+            if not done:
+                log.warning("%s took over %ss at %s; skipped", name, self._budget.per_algorithm, bar_close)
+                self._busy.add(name)
+                work.add_done_callback(partial(self._finished_late, name))
+                self._cost[name] = max(self._cost.get(name, 0.0), self._budget.per_algorithm)
+            elif (error := work.exception()) is not None:
+                log.error("%s failed at %s: %r", name, bar_close, error, exc_info=error)
+                status = "error"
+            else:
+                made, status = work.result(), "ok"
+                elapsed = timer.perf_counter() - started
+                previous = self._cost.get(name)
+                self._cost[name] = (
+                    elapsed if previous is None else (1 - _COST_WEIGHT) * previous + _COST_WEIGHT * elapsed
+                )
+        self._record(bar_close, at_close, [(name, model.version, made, status)])
 
     def _finished_late(self, name: str, work: asyncio.Future[dict[str, Forecast]]) -> None:
         self._busy.discard(name)
@@ -298,10 +300,13 @@ def _predict_symbols(
     for symbol, features in vectors.items():
         f = algorithm.predict(features, model)
         probabilities = (f.p_up, f.p_flat, f.p_down)
-        if not all(0 <= p <= 1 for p in probabilities) or not math.isclose(
+        distribution = all(0 <= p <= 1 for p in probabilities) and math.isclose(
             sum(probabilities), 1, abs_tol=1e-6
-        ):
+        )
+        if not distribution:
             raise ValueError(f"{algorithm.name} gave probabilities {probabilities} for {symbol}")
+        if not math.isfinite(f.expected_ticks):
+            raise ValueError(f"{algorithm.name} expected {f.expected_ticks} ticks for {symbol}")
         forecasts[symbol] = f
     return forecasts
 

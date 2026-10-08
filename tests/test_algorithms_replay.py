@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from krx_quant.algorithms import Model
+from krx_quant.baselines import Forecast
 from krx_quant.engine import Budget
 from krx_quant.features import FEATURES, FeatureStore, Snapshot
 from tests.algorithm_doubles import FixedAlgorithm
@@ -56,6 +57,7 @@ async def test_a_trained_model_is_used_and_recorded(tmp_path: Path) -> None:
         "version": "newton-20261009-abc123",
         "params": dict(trained.params),
         "trained": None,
+        "trained_until": None,
     }
 
 
@@ -115,15 +117,40 @@ async def test_when_the_cpu_budget_runs_short_the_last_registered_is_skipped_fir
     engine = await run(
         tmp_path / "engine.db",
         busy_morning(),
-        until=at("09:02:30"),
+        until=at("09:03:30"),
         algorithms=[first, second, third],
         budget=Budget(cpu=0.2),
     )
 
     # 09:01 measures each one's time; at 09:02 the three together are over 0.2 seconds.
-    assert len(await predictions_of(engine, "first")) == 2
-    assert len(await predictions_of(engine, "second")) == 2
-    assert [p["bar_close"] for p in await predictions_of(engine, "third")] == ["2026-10-12T09:01:00+09:00"]
+    assert len(await predictions_of(engine, "first")) == 3
+    assert len(await predictions_of(engine, "second")) == 3
+    # Skipping halves its expected time, so at 09:03 it is tried (and timed) again.
+    third_closes = sorted(p["bar_close"][11:16] for p in await predictions_of(engine, "third"))
+    assert third_closes == ["09:01", "09:03"]
     with sqlite3.connect(tmp_path / "engine.db") as conn:
         runs = conn.execute("SELECT kind, at, algorithm FROM runs").fetchall()
     assert runs == [("cpu_budget", "2026-10-12T09:02:00+09:00", "third")]
+
+
+class Raising(FixedAlgorithm):
+    def predict(self, features: Any, model: Any) -> Any:
+        raise TimeoutError("its own timeout, not the engine's")
+
+
+async def test_an_algorithm_that_fails_or_breaks_the_contract_is_recorded_as_an_error(tmp_path: Path) -> None:
+    raising = Raising("raising", features=("velocity",), unique=("velocity",))
+    endless = FixedAlgorithm(
+        "endless",
+        features=("acceleration",),
+        unique=("acceleration",),
+        forecast=Forecast(0.2, 0.6, 0.2, float("inf")),
+    )
+
+    engine = await run(
+        tmp_path / "engine.db", busy_morning(), until=at("09:01:30"), algorithms=[raising, endless]
+    )
+
+    for name in ("raising", "endless"):
+        [failed] = await predictions_of(engine, name)
+        assert (failed["status"], failed["p_up"], failed["expected_ticks"]) == ("error", None, None)

@@ -16,6 +16,8 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
+from krx_quant.pricing import flat_ticks as flat_band
+from krx_quant.pricing import tick_size
 from krx_quant.reference import Bar
 
 FeatureValue = float | None
@@ -30,6 +32,15 @@ class Snapshot:
     tick: int | None  # the tick at that price
     flat_ticks: int | None  # k: smaller moves are flat
 
+    @classmethod
+    def at(
+        cls, symbol: str, bar_close: datetime, bars: Sequence[Bar], price: float | None, fee_rate: float
+    ) -> Snapshot:
+        """A snapshot with the tick and flat band of ``price``."""
+        if price is None:
+            return cls(symbol, bar_close, bars, None, None, None)
+        return cls(symbol, bar_close, bars, price, tick_size(price), flat_band(price, fee_rate))
+
 
 Feature = Callable[[Snapshot], FeatureValue]
 
@@ -38,6 +49,8 @@ SHAPE_BARS = 6
 RECENT_BARS = 5
 VOLUME_BARS = 60
 VOLATILITY_BARS = 20
+# Fewer one-minute changes than this give no volatility.
+MIN_CHANGES = 6
 
 
 def _closes_in_ticks(s: Snapshot, n: int) -> tuple[list[float], list[float]] | None:
@@ -111,7 +124,7 @@ def relative_volume(s: Snapshot) -> FeatureValue:
 def volatility(s: Snapshot) -> FeatureValue:
     """Standard deviation of one-minute close changes, in ticks."""
     points = _closes_in_ticks(s, min(len(s.bars), VOLATILITY_BARS + 1))
-    if points is None or len(points[1]) < 7:
+    if points is None or len(points[1]) < MIN_CHANGES + 1:
         return None
     changes = [b - a for a, b in zip(points[1], points[1][1:], strict=False)]
     mean = sum(changes) / len(changes)
@@ -131,8 +144,8 @@ FEATURES: dict[str, Feature] = {
 }
 
 
-class UndeclaredFeature(KeyError):
-    pass
+class UndeclaredFeature(LookupError):
+    """Not a KeyError: ``get`` and ``in`` must not quietly answer for an undeclared feature."""
 
 
 class FeatureVector(Mapping[str, FeatureValue]):

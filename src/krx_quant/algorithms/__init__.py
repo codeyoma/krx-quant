@@ -1,8 +1,11 @@
 """Algorithm Registry: the algorithms the engine runs, checked for a personality of their own.
 
-An algorithm is refused when its feature set is the same as a registered one's, or when
-none of its own (unique) features is free of the others. Order is priority: when the
-CPU budget runs short, the last registered is skipped first (until there is a ranking).
+An algorithm is refused when its feature set is the same as a registered one's, when it
+names no feature of its own (unique), or when one it calls its own is already used by a
+registered algorithm. Later algorithms may share an earlier one's own features (Turing
+uses them all), so the check runs in registration order. Order is also priority: when
+the CPU budget runs short, the last registered is skipped first (until there is a
+ranking).
 """
 
 from __future__ import annotations

@@ -67,3 +67,6 @@ def test_fitting_needs_a_known_algorithm_and_backfilled_bars(
     assert "unknown algorithm 'einstein'" in capsys.readouterr().err
     assert main(["fit", "newton"]) == 1
     assert "no backfilled bars" in capsys.readouterr().err
+    with pytest.raises(SystemExit):
+        main(["fit", "newton", "--days", "0"])
+    assert "must be at least 1" in capsys.readouterr().err

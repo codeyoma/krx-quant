@@ -59,11 +59,14 @@ async def _archive(recheck: bool) -> int:
 
 def _replay(day: date, db: Path | None) -> int:
     try:
-        path, summary = asyncio.run(replay_day(Settings.from_env(require_kis=False), day, db))
+        replayed = asyncio.run(replay_day(Settings.from_env(require_kis=False), day, db))
     except (FileNotFoundError, ValueError) as e:
         print(e, file=sys.stderr)
         return 1
-    print(f"replayed {day} into {path} (counts on basis A)")
+    for line in replayed.set_aside:
+        print(line, file=sys.stderr)
+    summary = replayed.summary
+    print(f"replayed {day} into {replayed.db} (counts on basis A)")
     for s in summary:
         print(
             f"{s.algorithm}: {s.predictions} predictions, {s.skipped} skipped, {s.scored} scored,"
@@ -116,6 +119,13 @@ async def _fake_kis(port: int, host: str, trades: bool) -> None:
         await fake.stop()
 
 
+def _positive(text: str) -> int:
+    value = int(text)
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"must be at least 1, got {value}")
+    return value
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="krx-quant")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -148,7 +158,9 @@ def main(argv: list[str] | None = None) -> int:
         "fit", help="train an algorithm on the latest backfilled one-minute bars and save its model"
     )
     fit_cmd.add_argument("algorithm", help="e.g. newton")
-    fit_cmd.add_argument("--days", type=int, help="trading days to train on (default: the algorithm's own)")
+    fit_cmd.add_argument(
+        "--days", type=_positive, help="trading days to train on (default: the algorithm's own)"
+    )
     sub.add_parser("test-alert", help="send a test message to the Telegram chat that receives alerts")
     fake = sub.add_parser("fake-kis", help="run a local fake KIS server for offline testing")
     fake.add_argument("--port", type=int, default=18080)
