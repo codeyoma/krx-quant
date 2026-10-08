@@ -24,6 +24,8 @@ from pathlib import Path
 import aiohttp
 
 from krx_quant import kis
+from krx_quant.config import Settings
+from krx_quant.ratelimit import RateLimiter
 
 log = logging.getLogger(__name__)
 
@@ -141,3 +143,29 @@ class TokenManager:
                 f,
             )
         tmp.replace(self._cache_path)
+
+
+def tokens_and_client(
+    session: aiohttp.ClientSession, settings: Settings, now: Callable[[], datetime]
+) -> tuple[TokenManager, kis.RestClient]:
+    """The app key's token manager and a REST client using it, with the key's one rate limiter."""
+    tokens = TokenManager(
+        session,
+        settings.kis_rest_url,
+        settings.kis_app_key,
+        settings.kis_app_secret,
+        settings.state_dir / "kis_token.json",
+        now,
+        timedelta(seconds=settings.token_refresh_margin_seconds),
+        settings.token_min_interval_seconds,
+    )
+    client = kis.RestClient(
+        session,
+        settings.kis_rest_url,
+        settings.kis_app_key,
+        settings.kis_app_secret,
+        tokens.get,
+        RateLimiter(settings.rest_max_per_second),
+        on_token_rejected=tokens.invalidate,
+    )
+    return tokens, client

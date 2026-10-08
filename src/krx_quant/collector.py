@@ -11,7 +11,8 @@ from datetime import UTC, datetime, timedelta
 import aiohttp
 
 from krx_quant import kis
-from krx_quant.auth import TokenManager
+from krx_quant.auth import TokenManager, tokens_and_client
+from krx_quant.backfill import keep_history
 from krx_quant.config import Settings
 from krx_quant.feeds import (
     BOOK,
@@ -35,10 +36,10 @@ from krx_quant.feeds import (
 )
 from krx_quant.feeds.base import kst_day
 from krx_quant.health import FeedHealth, GapKind
+from krx_quant.market_calendar import calendar_store
 from krx_quant.masters import FrontMonths, MasterError, fetch_front_months
 from krx_quant.notify import Alerts
 from krx_quant.polling import Poller, PollJob
-from krx_quant.ratelimit import RateLimiter
 from krx_quant.recorder import ParquetRecorder
 
 log = logging.getLogger(__name__)
@@ -113,33 +114,16 @@ async def run_collector(settings: Settings, *, stop: asyncio.Event, clock: Clock
     """Record the configured feeds until ``stop`` is set, then flush and return."""
     now = clock or _system_clock
     recorder = ParquetRecorder(settings.data_dir, settings.flush_rows, settings.flush_seconds)
-    health = FeedHealth(recorder, now)
+    calendar = calendar_store(settings)
+    health = FeedHealth(recorder, now, calendar.calendar)
     try:
         async with aiohttp.ClientSession() as session:
             alerts = Alerts(
                 session, settings.telegram_bot_token, settings.telegram_chat_id, settings.telegram_api_url
             )
-            tokens = TokenManager(
-                session,
-                settings.kis_rest_url,
-                settings.kis_app_key,
-                settings.kis_app_secret,
-                settings.state_dir / "kis_token.json",
-                now,
-                timedelta(seconds=settings.token_refresh_margin_seconds),
-                settings.token_min_interval_seconds,
-            )
+            tokens, client = tokens_and_client(session, settings, now)
             await _warm_up(tokens)
-            client = kis.RestClient(
-                session,
-                settings.kis_rest_url,
-                settings.kis_app_key,
-                settings.kis_app_secret,
-                tokens.get,
-                RateLimiter(settings.rest_max_per_second),
-                on_token_rejected=tokens.invalidate,
-            )
-            poller = Poller(client, recorder, now, stop, on_received=health.received)
+            poller = Poller(client, recorder, now, stop, on_added=health.watch, on_received=health.received)
             fronts = await front_months(session, settings)
             plan = subscription_plan(settings, fronts)
             cap = len(plan) if settings.ws_max_subscriptions is None else settings.ws_max_subscriptions
@@ -147,12 +131,15 @@ async def run_collector(settings: Settings, *, stop: asyncio.Event, clock: Clock
                 _fall_back(poller, settings, feed.tr_id, key, "beyond the configured cap")
             for job in rest_plan(settings):
                 poller.add(job)
+            for feed, key in plan[:cap]:
+                health.watch((feed.tr_id, key))
             stream = _Stream(session, settings, plan[:cap], recorder, now, stop, poller, health, alerts)
             background = [
                 asyncio.create_task(_every(_TICK_SECONDS, recorder.flush_due, "periodic flush")),
                 asyncio.create_task(
                     _every(settings.health_check_seconds, stream.check_stale, "health check")
                 ),
+                asyncio.create_task(keep_history(settings, client, calendar, now)),
             ]
             try:
                 await stream.run()

@@ -67,6 +67,10 @@ class Settings:
     reconnect_max_seconds: float = 60.0
     # Poll interval for feeds that fell back from WebSocket to REST.
     fallback_poll_seconds: float = 5.0
+    # One-minute bars are kept for trading days this far back (KIS keeps about a year).
+    backfill_days: int = 365
+    # Backfill queries are spaced evenly at this rate, inside the shared REST limit.
+    backfill_max_per_second: float = 8.0
     data_dir: Path = Path("data")
     # The recorder writes a Parquet part file per partition when either limit is reached.
     flush_rows: int = 5000
@@ -145,6 +149,10 @@ class Settings:
             recovery_hold_seconds=float(number("KRX_RECOVERY_HOLD_SECONDS", "60", float)),
             reconnect_initial_seconds=float(number("KRX_RECONNECT_INITIAL_SECONDS", "1", float)),
             reconnect_max_seconds=float(number("KRX_RECONNECT_MAX_SECONDS", "60", float)),
+            backfill_days=int(number("KRX_BACKFILL_DAYS", "365", int)),
+            backfill_max_per_second=float(
+                number("KRX_BACKFILL_MAX_PER_SECOND", "8", float, maximum=MAX_REST_PER_SECOND)
+            ),
             data_dir=Path(values.get("KRX_DATA_DIR", "data")),
             flush_rows=int(number("KRX_FLUSH_ROWS", "5000", int)),
             flush_seconds=float(number("KRX_FLUSH_SECONDS", "30", float)),

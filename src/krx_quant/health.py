@@ -2,7 +2,8 @@
 
 A gap opens for a WebSocket subscription when the connection drops (closed again
 once KIS acknowledges the subscription after the reconnect) and when a feed goes
-quiet in market hours for longer than its threshold (closed by the next message).
+quiet in continuous trading, per the Market Calendar, for longer than its threshold
+(closed by the next message).
 Closed gaps are written to the ``gaps`` layer; gaps still open at shutdown are
 written with no end.
 """
@@ -13,11 +14,12 @@ import enum
 import logging
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from datetime import datetime, time
+from datetime import datetime
 
 import pyarrow as pa
 
 from krx_quant.feeds.base import KST, kst_day
+from krx_quant.market_calendar import MarketCalendar, Phase
 from krx_quant.recorder import ParquetRecorder
 
 log = logging.getLogger(__name__)
@@ -59,15 +61,9 @@ STALE_SECONDS: dict[str, float] = {
 }
 DEFAULT_STALE_SECONDS = 300.0
 
-# KRX continuous trading in KST. Holidays need the market calendar (#5): until then a
-# feed only counts as stale once it has delivered something today, so closed days stay
-# quiet, and silence is counted from the open, not from the NXT pre-market.
-MARKET_OPEN, MARKET_CLOSE = time(9, 0), time(15, 20)
-
-
-def in_market_hours(at: datetime) -> bool:
-    local = at.astimezone(KST)
-    return local.weekday() < 5 and MARKET_OPEN <= local.time() < MARKET_CLOSE
+# Feeds that keep their own hours (the US daytime session starts at 10:00 KST outside US
+# summer time and skips US holidays): silence counts only once they delivered that day.
+OWN_HOURS = frozenset({"HDFSCNT0"})
 
 
 @dataclass
@@ -82,11 +78,19 @@ class _Gap:
 
 
 class FeedHealth:
-    def __init__(self, recorder: ParquetRecorder, now: Callable[[], datetime]) -> None:
+    def __init__(
+        self, recorder: ParquetRecorder, now: Callable[[], datetime], calendar: MarketCalendar
+    ) -> None:
         self._recorder = recorder
         self._now = now
+        self._calendar = calendar
         self._open: dict[Key, _Gap] = {}
         self._last_seen: dict[Key, datetime] = {}
+        self._watched: dict[Key, datetime] = {}  # key -> when it started being expected
+
+    def watch(self, key: Key) -> None:
+        """``key`` is registered or polled from now on, so it should deliver in market hours."""
+        self._watched.setdefault(key, self._now())
 
     def connection_lost(self, keys: Iterable[Key], detail: str) -> None:
         at = self._now()
@@ -98,8 +102,12 @@ class FeedHealth:
         self._close_if(key, GapKind.DISCONNECTED, self._now())
 
     def covered_elsewhere(self, key: Key) -> None:
-        """The key moved to REST polling: an open disconnect gap ends now."""
+        """The key moved to REST polling: an open disconnect gap ends now and the key is no
+        longer expected to deliver.
+        """
         self._close_if(key, GapKind.DISCONNECTED, self._now())
+        self._watched.pop(key, None)
+        self._last_seen.pop(key, None)
 
     def received(self, key: Key) -> None:
         at = self._now()
@@ -107,17 +115,27 @@ class FeedHealth:
         self._close_if(key, GapKind.STALE, at)
 
     def check_stale(self) -> list[Key]:
-        """Open a stale gap for every feed silent past its threshold; return the new ones."""
+        """Open a stale gap for every feed silent past its threshold in continuous trading;
+        return the new ones.
+
+        Silence counts from the open, or from when the feed was registered or last
+        delivered if later. A feed that has not delivered at all today counts only on a day
+        KIS confirmed as a trading day, and never for feeds that keep their own hours.
+        """
         at = self._now()
-        if not in_market_hours(at):
-            return []
         today = kst_day(at)
-        opened = datetime.combine(today, MARKET_OPEN, KST)
+        session = self._calendar.session(today)
+        if session is None or session.phase(at) is not Phase.CONTINUOUS:
+            return []
+        confirmed = self._calendar.knows(today)
         newly: list[Key] = []
-        for key, seen in self._last_seen.items():
-            if key in self._open or kst_day(seen) != today:
+        for key in self._watched.keys() | self._last_seen.keys():
+            if key in self._open:
                 continue
-            since = max(seen, opened)
+            seen = self._last_seen.get(key)
+            if (seen is None or kst_day(seen) != today) and (not confirmed or key[0] in OWN_HOURS):
+                continue
+            since = max(t for t in (session.open, seen, self._watched.get(key)) if t is not None)
             if (at - since).total_seconds() > STALE_SECONDS.get(key[0], DEFAULT_STALE_SECONDS):
                 self._open[key] = _Gap(GapKind.STALE, since)
                 newly.append(key)
