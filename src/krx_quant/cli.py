@@ -59,15 +59,18 @@ async def _archive(recheck: bool) -> int:
 def _replay(day: date, db: Path | None) -> int:
     try:
         path, summary = replay_day(Settings.from_env(require_kis=False), day, db)
-    except FileNotFoundError as e:
+    except (FileNotFoundError, ValueError) as e:
         print(e, file=sys.stderr)
         return 1
-    print(f"replayed {day} into {path}")
+    print(f"replayed {day} into {path} (counts on basis A)")
     for s in summary:
-        print(f"{s.algorithm}: {s.predictions} predictions, {s.scored} scored, {s.unscorable} unscorable")
+        print(
+            f"{s.algorithm}: {s.predictions} predictions, {s.scored} scored, {s.unscorable} unscorable,"
+            f" {s.pending} pending"
+        )
     if summary:
         s = summary[0]
-        print(f"outcomes on basis A: {s.up} up, {s.flat} flat, {s.down} down")
+        print(f"outcomes: {s.up} up, {s.flat} flat, {s.down} down")
     return 0
 
 

@@ -270,21 +270,32 @@ async def test_replaying_the_same_input_twice_gives_the_same_results(tmp_path: P
             assert await get_json(one, path) == await get_json(two, path)
 
 
+def known_at_prediction(db: Path, t: str) -> list[tuple[Any, ...]]:
+    """Each prediction at ``t`` with what was fixed when it was made: the mid-points it is
+    scored from and the flat band.
+    """
+    with sqlite3.connect(db) as conn:
+        return conn.execute(
+            "SELECT p.symbol, p.algorithm, p.model_version, p.bar_close, p.displayed_at, p.p_up, p.p_flat,"
+            " p.p_down, p.expected_ticks, p.status, o.target_at, o.mid_close, o.mid_display, o.flat_ticks"
+            " FROM predictions p JOIN outcomes o ON o.prediction_id = p.id WHERE p.bar_close = ?"
+            " ORDER BY p.algorithm",
+            (f"2026-10-12T{t}+09:00",),
+        ).fetchall()
+
+
 async def test_a_prediction_does_not_change_when_everything_after_it_is_cut(tmp_path: Path) -> None:
     events = busy_morning()
-    for t in ("09:05:00", "09:31:00", "09:47:00"):
+    run(tmp_path / "full.db", events, until=at("10:00:00"))
+    # 09:13:00 has a book received exactly at the bar close.
+    for t in ("09:05:00", "09:13:00", "09:31:00", "09:47:00"):
         cut = [e for e in events if e[1]["received_at"] <= at(t)]
 
-        full = run(tmp_path / f"full-{t}.db", events, until=at("10:00:00"))
-        truncated = run(tmp_path / f"cut-{t}.db", cut, until=at(t))
+        run(tmp_path / f"cut-{t}.db", cut, until=at(t))
 
-        async with api(full) as f, api(truncated) as c:
-            whole = await get_json(f, f"/v1/symbols/{SYMBOL}/predictions?limit=1000")
-            known = await get_json(c, f"/v1/symbols/{SYMBOL}/latest")
-        assert known["bar_close"] == f"2026-10-12T{t}+09:00"
-        at_t = by_algorithm(whole["predictions"], t)
-        for p in known["predictions"]:
-            assert {**p, "outcome": None} == {**at_t[p["algorithm"]], "outcome": None}
+        known = known_at_prediction(tmp_path / f"cut-{t}.db", t)
+        assert len(known) == 3
+        assert known == known_at_prediction(tmp_path / "full.db", t)
 
 
 async def test_a_restarted_engine_scores_what_was_pending(tmp_path: Path) -> None:
@@ -320,3 +331,20 @@ async def test_the_api_refuses_an_unknown_symbol_and_a_bad_limit(tmp_path: Path)
         assert (await unknown.json())["error"] == "unknown symbol '000000'"
         assert too_many.status == 400
         assert not_a_number.status == 400
+
+
+async def test_a_quote_received_right_at_a_bar_close_counts_after_it_everywhere(tmp_path: Path) -> None:
+    events = [
+        *steady_book(at("09:30:00"), at("09:30:50"), bid=81_200, ask=81_300),  # 81,250
+        book(at("09:31:00"), bid=81_500, ask=81_600),  # received exactly at the 09:31 bar close
+        *steady_book(at("09:31:10"), at("09:35:00"), bid=81_500, ask=81_600),  # 81,550
+    ]
+
+    engine = run(tmp_path / "engine.db", events, until=at("09:35:30"))
+
+    async with api(engine) as client:
+        body = await get_json(client, f"/v1/symbols/{SYMBOL}/predictions")
+    # The 09:31 prediction did not see the quote, so 09:31's mid stays 81,250 when 09:35
+    # looks back four minutes to it: +300 won is up.
+    assert by_algorithm(body["predictions"], "09:31:00")["baseline-flat"]["outcome"]["mid_close"] == 81_250
+    assert forecast(by_algorithm(body["predictions"], "09:35:00")["baseline-persist"]) == (1, 0, 0, 3)

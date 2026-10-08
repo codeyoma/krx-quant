@@ -6,7 +6,7 @@ continuous trading only KRX quotes count. A locked book (bid = ask) is normal on
 integrated book (about 29% of updates on 2026-10-08) and gives the shared price.
 
 Everything is looked up by the time the engine received it, so a value "at t" is what
-the engine knew at t, the same live and in replay.
+the engine had received before t, the same live and in replay.
 """
 
 from __future__ import annotations
@@ -60,7 +60,7 @@ class ReferencePrice:
             del quotes.times[:cut], quotes.mids[:cut]
 
     def mid(self, symbol: str, at: datetime) -> float | None:
-        """The mid-point at ``at`` in continuous trading, or None if it is unknown."""
+        """The mid-point just before ``at`` in continuous trading, or None if it is unknown."""
         local = at.astimezone(KST)
         session = self._calendar.session(local.date())
         if session is None or not session.open <= local <= session.closing_auction:
@@ -70,7 +70,9 @@ class ReferencePrice:
         quotes = self._quotes.get((symbol, source))
         if quotes is None:
             return None
-        i = bisect.bisect_right(quotes.times, at) - 1
+        # Received strictly before ``at``: at a bar close the engine runs before it takes
+        # what arrives in that same instant, and a later look back must agree.
+        i = bisect.bisect_left(quotes.times, at) - 1
         if i < 0 or quotes.times[i] < max(since, at - MAX_QUOTE_AGE):
             return None
         return quotes.mids[i]

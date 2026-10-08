@@ -19,7 +19,7 @@ from collections.abc import Sequence
 from datetime import datetime, time, timedelta
 from typing import Any
 
-from krx_quant.baselines import BASELINES, Baseline, Inputs
+from krx_quant.baselines import BASELINES, Baseline, Forecast, Inputs
 from krx_quant.clock import SessionClock
 from krx_quant.feeds import BOOK, BOOK_SNAPSHOT, KRX_TRADE, TRADE
 from krx_quant.feeds.base import KST
@@ -56,14 +56,12 @@ class PredictionEngine:
         symbols: Sequence[str],
         fee_rate: float,
         clock: SessionClock,
-        baselines: Sequence[Baseline] = BASELINES,
     ) -> None:
         self.store = store
         self.calendar = calendar
         self.symbols = tuple(symbols)
         self.fee_rate = fee_rate
         self.clock = clock
-        self._baselines = tuple(baselines)
         self._reference = ReferencePrice(calendar)
         self._bars = BarBuilder()
         self._last_tick = clock.now()
@@ -108,9 +106,6 @@ class PredictionEngine:
     def mid(self, symbol: str) -> float | None:
         return self._reference.mid(symbol, self.clock.now())
 
-    def flat_ticks(self, price: float) -> int:
-        return flat_ticks(price, self.fee_rate)
-
     def _next_bar_close(self, after: datetime) -> datetime | None:
         """The first bar close in a prediction window strictly after ``after``."""
         local = after.astimezone(KST)
@@ -128,46 +123,52 @@ class PredictionEngine:
         return None
 
     def _predict(self, bar_close: datetime) -> None:
+        """Every baseline on every symbol, stored together: they are displayed at once."""
         day_start = datetime.combine(bar_close.date(), time(), KST)
+        forecasts: list[tuple[str, float | None, Baseline, Forecast]] = []
         for symbol in self.symbols:
             mid = self._reference.mid(symbol, bar_close)
-            k = flat_ticks(mid, self.fee_rate) if mid is not None else None
             inputs = Inputs(
                 symbol=symbol,
                 bar_close=bar_close,
                 mid=mid,
                 mid_before=self._reference.mid(symbol, bar_close - HORIZON),
-                flat_ticks=k,
+                flat_ticks=flat_ticks(mid, self.fee_rate) if mid is not None else None,
                 tick=tick_size(mid) if mid is not None else None,
                 day_classes=self.store.day_classes(symbol, day_start, bar_close),
             )
-            for baseline in self._baselines:
-                forecast = baseline.predict(inputs)
-                displayed_at = self.clock.now()
-                mid_display = self._reference.mid(symbol, displayed_at)
-                if k is None and mid_display is not None:
-                    k = flat_ticks(mid_display, self.fee_rate)
-                pending = self.store.add(
-                    NewPrediction(
-                        symbol=symbol,
-                        algorithm=baseline.name,
-                        model_version=baseline.version,
-                        bar_close=bar_close,
-                        displayed_at=displayed_at,
-                        forecast=forecast,
-                        target_at=bar_close + HORIZON,
-                        mid_close=mid,
-                        mid_display=mid_display,
-                        flat_ticks=k,
-                    )
+            forecasts += [(symbol, mid, b, b.predict(inputs)) for b in BASELINES]
+        displayed_at = self.clock.now()
+        mid_display = {symbol: self._reference.mid(symbol, displayed_at) for symbol in self.symbols}
+        predictions = []
+        for symbol, mid, baseline, forecast in forecasts:
+            # k comes from the bar close's mid-point, or the display's if that is all there is.
+            reference = mid if mid is not None else mid_display[symbol]
+            predictions.append(
+                NewPrediction(
+                    symbol=symbol,
+                    algorithm=baseline.name,
+                    model_version=baseline.version,
+                    bar_close=bar_close,
+                    displayed_at=displayed_at,
+                    forecast=forecast,
+                    target_at=bar_close + HORIZON,
+                    mid_close=mid,
+                    mid_display=mid_display[symbol],
+                    flat_ticks=flat_ticks(reference, self.fee_rate) if reference is not None else None,
                 )
-                heapq.heappush(self._pending, (pending.target_at, pending.prediction_id, pending))
+            )
+        for pending in self.store.add_all(predictions):
+            heapq.heappush(self._pending, (pending.target_at, pending.prediction_id, pending))
 
     def _score_until(self, due: datetime) -> None:
+        scores: list[tuple[int, Score]] = []
         while self._pending and self._pending[0][0] <= due:
             _, _, pending = heapq.heappop(self._pending)
             mid_target = self._reference.mid(pending.symbol, pending.target_at)
-            self.store.score(pending.prediction_id, _score(pending, mid_target), self.clock.now())
+            scores.append((pending.prediction_id, _score(pending, mid_target)))
+        if scores:
+            self.store.score_all(scores, self.clock.now())
 
 
 def _score(p: Pending, mid_target: float | None) -> Score:
@@ -195,12 +196,13 @@ def _score(p: Pending, mid_target: float | None) -> Score:
 async def run_live(engine: PredictionEngine, clock: SessionClock) -> None:
     """Predict and score on the system clock until cancelled; a failure is logged, not fatal."""
     while True:
-        due = engine.next_due()
-        if due is None:
-            await asyncio.sleep(3600)
-            continue
-        await clock.sleep_until(due)
         try:
+            due = engine.next_due()
+            if due is None:
+                await asyncio.sleep(3600)
+                continue
+            await clock.sleep_until(due)
             engine.run_due()
         except Exception:
             log.exception("prediction run failed")
+            await asyncio.sleep(1)  # do not spin on a failure that repeats

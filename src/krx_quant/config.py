@@ -88,8 +88,9 @@ class Settings:
     # Commission per side, as a fraction (0.015% is 0.00015). With the sell tax it sets the
     # flat band: moves smaller than the round-trip cost count as flat.
     fee_rate: float = 0.00015
-    # The Engine API listens here; None runs the engine without it. Inside Docker the host
-    # is 0.0.0.0 and compose publishes the port on the Tailscale address only.
+    # The Engine API listens here (KRX_API_HOST, KRX_API_PORT, default 127.0.0.1:8080).
+    # Inside Docker the host is 0.0.0.0 and compose publishes the port on the Tailscale
+    # address only. None (tests only) runs the engine without the API.
     api_host: str = "127.0.0.1"
     api_port: int | None = None
 

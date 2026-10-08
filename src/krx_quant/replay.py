@@ -23,7 +23,7 @@ from krx_quant.config import Settings
 from krx_quant.engine import ENGINE_FEEDS, Event, PredictionEngine
 from krx_quant.feeds.base import KST, kst_day
 from krx_quant.market_calendar import MarketCalendar, calendar_store
-from krx_quant.predictions import AlgorithmSummary, PredictionStore
+from krx_quant.predictions import DB_NAME, AlgorithmSummary, PredictionStore
 
 # Rows converted to Python at a time while reading a recorded day.
 _BATCH_ROWS = 10_000
@@ -100,13 +100,19 @@ def _rows(feed: str, table: pa.Table) -> Iterator[Event]:
 
 
 def replay_day(settings: Settings, day: date, db: Path | None = None) -> tuple[Path, list[AlgorithmSummary]]:
-    """Replay a recorded day into a fresh database (default ``state/replay-<day>.sqlite3``)."""
+    """Replay a recorded day into a fresh database (default ``state/replay-<day>.sqlite3``).
+
+    Refuses the live engine's database, and deletes nothing if the day was not recorded.
+    """
     db = db or settings.state_dir / f"replay-{day.isoformat()}.sqlite3"
+    if db.resolve() == (settings.state_dir / DB_NAME).resolve():
+        raise ValueError(f"{db} is the live engine's database; replay into another file")
+    events = recorded_events(settings.data_dir, day, settings.symbols)
     for leftover in (db, db.with_name(db.name + "-wal"), db.with_name(db.name + "-shm")):
         leftover.unlink(missing_ok=True)
     start = datetime.combine(day, time(), KST)
     engine = replay(
-        recorded_events(settings.data_dir, day, settings.symbols),
+        events,
         db=db,
         calendar=calendar_store(settings).calendar,
         symbols=settings.symbols,
