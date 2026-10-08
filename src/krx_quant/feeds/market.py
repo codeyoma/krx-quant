@@ -16,6 +16,7 @@ from krx_quant.feeds.base import (
     Row,
     kst,
     kst_day,
+    kst_or_received,
     to_float,
     to_int,
 )
@@ -50,7 +51,7 @@ INDEX_SCHEMA = pa.schema(
 def _normalize_index(f: dict[str, str], received_at: datetime) -> Row:
     return {
         "symbol": f["bstp_cls_code"],
-        "event_time": kst(kst_day(received_at), f["bsop_hour"]),
+        "event_time": kst_or_received(kst_day(received_at), f["bsop_hour"], received_at),
         "received_at": received_at,
         "value": to_float(f["prpr_nmix"]),
         "change_pct": to_float(f["prdy_ctrt"]),
@@ -131,7 +132,7 @@ FUTURES_SCHEMA = pa.schema(
 def _normalize_futures(f: dict[str, str], received_at: datetime) -> Row:
     return {
         "symbol": f["futs_shrn_iscd"],
-        "event_time": kst(kst_day(received_at), f["bsop_hour"]),
+        "event_time": kst_or_received(kst_day(received_at), f["bsop_hour"], received_at),
         "received_at": received_at,
         # KIS sends float noise for currency futures (e.g. 1337.20000117); 2 decimals cover every tick.
         "price": round(to_float(f["futs_prpr"]), 2),
@@ -255,7 +256,7 @@ OPTION_SCHEMA = pa.schema(
 def _normalize_option(f: dict[str, str], received_at: datetime) -> Row:
     return {
         "symbol": f["optn_shrn_iscd"],
-        "event_time": kst(kst_day(received_at), f["bsop_hour"]),
+        "event_time": kst_or_received(kst_day(received_at), f["bsop_hour"], received_at),
         "received_at": received_at,
         "price": round(to_float(f["optn_prpr"]), 2),
         "qty": to_int(f["last_cnqn"]),
