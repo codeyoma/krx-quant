@@ -1,0 +1,13 @@
+.git
+.venv
+.env
+.env.*
+!.env.example
+data
+fincept
+docs
+tests
+**/__pycache__
+.mypy_cache
+.pytest_cache
+.ruff_cache

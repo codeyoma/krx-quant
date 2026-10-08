@@ -12,9 +12,72 @@ git clone --recurse-submodules https://github.com/codeyoma/krx-quant.git
 
 `fincept/`는 공개 fork `codeyoma/FinceptTerminal`의 `custom` 브랜치를 가리키는 submodule이다. 작업 순서는 [AGENTS.md](AGENTS.md)의 Submodule workflow를 따른다.
 
+## 개발 환경
+
+[uv](https://docs.astral.sh/uv/)로 Python 3.11 환경을 만든다.
+
+```bash
+uv sync
+```
+
+검사와 테스트:
+
+```bash
+uv run python scripts/check_forbidden.py && uv run ruff check && uv run mypy && uv run pytest -q
+```
+
+`scripts/check_forbidden.py`는 KIS 주문 TR 코드, 주문 엔드포인트, 비밀값 패턴이 저장소에 들어오면 실패한다. CI도 같은 검사를 한다.
+
+## 수집기 실행
+
+설정은 환경 변수와 `.env`에서 읽는다. `.env.example`을 `.env`로 복사해 채운다.
+
+```bash
+uv run krx-quant collect
+```
+
+`Ctrl+C`(또는 SIGTERM)로 멈추면 남은 데이터를 쓰고 끝난다. 녹화 형식은 [docs/events.md](docs/events.md)에 있다.
+
+Docker로 실행할 때(`-u`는 컨테이너가 호스트의 `data/` 폴더에 쓸 수 있게 한다):
+
+```bash
+docker build -t krx-quant .
+docker run --rm --env-file .env -u "$(id -u):$(id -g)" -v "$PWD/data:/data" krx-quant collect
+```
+
+### 키 없이 확인하기 (가짜 KIS)
+
+```bash
+uv run krx-quant fake-kis --port 18080
+```
+
+다른 터미널에서 출력된 주소와 테스트 키로 수집기를 붙인다.
+
+```bash
+KIS_APP_KEY=test-app-key KIS_APP_SECRET=test-app-secret KIS_REST_URL=http://127.0.0.1:18080 KIS_WS_URL=ws://127.0.0.1:18080 uv run krx-quant collect
+```
+
+가짜 서버는 구독에 응답하고 10초마다 PINGPONG만 보낸다. 시세 메시지는 테스트에서만 흘린다.
+
+### 실제 KIS로 확인하기 (장중)
+
+1. KIS Open API 실전 앱키와 시크릿을 `.env`의 `KIS_APP_KEY`, `KIS_APP_SECRET`에 넣는다. `KRX_SYMBOLS=005930`으로 둔다.
+2. 평일 09:00–15:20 사이에 `uv run krx-quant collect`를 실행한다.
+3. 로그에 구독 거부(`KIS rejected ...`)가 없는지 본다.
+4. 1–2분 뒤 `Ctrl+C`로 멈춘다.
+5. 다음 위치에 파일이 생겼는지 확인한다.
+   - `data/events/date=<오늘>/feed=H0UNCNT0/symbol=005930/`
+   - `data/events/date=<오늘>/feed=H0UNASP0/symbol=005930/`
+6. 다음 명령으로 체결가와 시각이 HTS와 맞는지 확인한다.
+
+```bash
+uv run python -c "import glob, pyarrow.parquet as pq; d = sorted(glob.glob('data/events/date=*/feed=H0UNCNT0/symbol=005930'))[-1]; [print(r) for r in pq.read_table(d).slice(0, 5).to_pylist()]"
+```
+
 ## 문서
 
 - [docs/design.md](docs/design.md): 설계 (목표, 구조, 데이터, 알고리즘, 학습, 인프라, 개발 단계)
+- [docs/events.md](docs/events.md): 녹화 데이터 형식
 - [docs/paid-data.md](docs/paid-data.md): 유료 데이터 조사
 
 ## 진행 상황
