@@ -131,7 +131,11 @@ aws iam create-access-key --user-name krx-quant-engine
     ```
     그다음부터 Lightsail 브라우저 SSH는 쓸 수 없다. 접속은 Tailscale로만 한다.
 
-엔진 API(#9)가 생기면 맥과 윈도우에서 `http://krx-quant:8080`으로 접속한다. 공인 IP로는 열리지 않는다.
+엔진 API는 맥과 윈도우에서 Tailscale로 읽는다. 공인 IP로는 열리지 않는다. 엔드포인트는 [engine-api.md](engine-api.md)에 있다.
+```bash
+curl http://krx-quant:8080/v1/status
+curl http://krx-quant:8080/v1/symbols/005930/latest
+```
 
 ### 2.3 첫 거래일 확인 (#7)
 
@@ -166,6 +170,7 @@ aws iam create-access-key --user-name krx-quant-engine
 | 시각 (KST) | 일 |
 |---|---|
 | 장중 | 실시간 녹화. 끊김과 지연은 `gaps`에 기록하고 텔레그램으로 알린다 |
+| 09:01–15:16 매분 | 기준 예측을 내고, 4분 뒤 채점한다. `state/engine.sqlite3`에 쌓인다 |
 | 장 마감 15분 뒤 (보통 15:45, 수능일 16:45) | 그날 녹화를 파티션마다 합쳐 S3에 올린다 |
 | 20:30 | 휴장일 정보를 갱신하고 1분봉 백필을 돌린다 |
 | 21:00 | 다시 올린다. NXT·애프터마켓의 늦은 데이터와 그날 1분봉이 들어간다 |
@@ -214,6 +219,8 @@ docker compose logs --tail 200 engine
 | `[장애] KIS WebSocket 연결이 끊겼습니다` | 로그의 `KIS WebSocket down (...)` 원인 | 1초에서 최대 60초 간격으로 스스로 재연결한다. 60초 넘게 붙어 있으면 `[복구]`가 온다. 오래 가면 KIS 점검 공지를 보고, 앱키가 유효한지 확인한다. |
 | `[장애] 장중 데이터가 끊긴 피드: stale <TR> <키>` | 한 종목만이면 거래정지나 VI다. 여러 피드면 연결 문제다. | 데이터가 다시 오면 `[복구]`가 온다. 거래일에 한 번도 안 오는 구독이면 구독 키가 잘못됐을 수 있다(KIS는 잘못된 키도 구독 성공으로 답한다). |
 | `[장애] 장 마감 데이터 업로드가 ... 실패했습니다` | 로그의 `could not archive ...` | 1. AWS 키, `KRX_OBJECT_STORE` 버킷 이름, IAM 정책을 확인한다.<br>2. 고친 뒤 `docker compose run --rm engine archive`를 돌린다. 다시 돌려도 안전하다.<br>3. 다음 업로드가 성공하면 `[복구]`가 온다. |
+| `[장애] 엔진 API를 열지 못했습니다` | 로그의 `Engine API not started on ...` | 녹화와 예측은 계속한다. 다른 프로세스가 8080을 쓰는지 확인하고 `docker compose up -d`로 다시 띄운다. |
+| 녹화된 날의 예측을 다시 보고 싶다 | | `docker compose run --rm --no-deps engine replay 2026-10-12`. 결과는 `state/replay-2026-10-12.sqlite3`다. 실시간 DB는 건드리지 않는다. |
 | 엔진 컨테이너가 계속 재시작한다 | 로그의 `configuration error` 또는 `KIS error` | `.env` 값을 고치고 `docker compose up -d`를 실행한다. |
 | `EGW00133`(접근 토큰 발급 1분 1회) | 재시작을 반복했는지 | 토큰은 캐시되고, 1분 간격으로 스스로 다시 시도한다. |
 | `EGW00201`(초당 거래건수 초과) | 백필과 REST 대체 조회가 겹쳤는지 | 0.5초 뒤 스스로 다시 보낸다. 계속되면 `KRX_BACKFILL_MAX_PER_SECOND`를 낮춘다. |

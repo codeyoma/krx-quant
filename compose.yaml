@@ -18,11 +18,15 @@ services:
     environment:
       KRX_DATA_DIR: /data
       KRX_STATE_DIR: /state
+      # The Engine API listens on every container interface; the published port below
+      # keeps it on the Tailscale address.
+      KRX_API_HOST: 0.0.0.0
+      KRX_API_PORT: "8080"
     volumes:
       - ./data:/data
       - ./state:/state
     ports:
-      # The engine API (#9) listens on 8080 inside the container.
+      # The Engine API listens on 8080 inside the container (docs/engine-api.md).
       - "${KRX_BIND_ADDRESS:?set KRX_BIND_ADDRESS to the Tailscale IPv4 (tailscale ip -4)}:${KRX_ENGINE_PORT:-8080}:8080"
     restart: unless-stopped
     # The collector flushes buffered rows and open gaps on SIGTERM.

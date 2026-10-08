@@ -77,6 +77,14 @@ class _Gap:
         return f"{self.kind.value}: {self.detail}" if self.detail else self.kind.value
 
 
+@dataclass(frozen=True)
+class FeedState:
+    feed: str
+    key: str
+    last_received_at: datetime | None
+    gap: str | None  # the reason of the open gap, if any
+
+
 class FeedHealth:
     def __init__(
         self, recorder: ParquetRecorder, now: Callable[[], datetime], calendar: MarketCalendar
@@ -143,6 +151,19 @@ class FeedHealth:
 
     def open_gaps(self, kind: GapKind) -> list[Key]:
         return [key for key, gap in self._open.items() if gap.kind is kind]
+
+    def snapshot(self) -> list[FeedState]:
+        """Every expected or delivering feed: when it last delivered and any open gap."""
+        keys = sorted(self._watched.keys() | self._last_seen.keys())
+        return [
+            FeedState(
+                key[0],
+                key[1],
+                self._last_seen.get(key),
+                gap.reason if (gap := self._open.get(key)) is not None else None,
+            )
+            for key in keys
+        ]
 
     def close(self) -> None:
         """Write gaps that are still open, with no end."""

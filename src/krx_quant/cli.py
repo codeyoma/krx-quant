@@ -8,7 +8,8 @@ import itertools
 import logging
 import signal
 import sys
-from datetime import datetime
+from datetime import date, datetime
+from pathlib import Path
 
 from krx_quant.archive import run_archive
 from krx_quant.backfill import run_backfill
@@ -18,6 +19,7 @@ from krx_quant.fake_kis import FakeKis
 from krx_quant.feeds.base import KST
 from krx_quant.kis import KisError
 from krx_quant.notify import send_test_alert
+from krx_quant.replay import replay_day
 
 
 async def _collect() -> None:
@@ -52,6 +54,21 @@ async def _archive(recheck: bool) -> int:
     for partition in report.failed:
         print(f"failed: {partition}", file=sys.stderr)
     return 1 if report.failed else 0
+
+
+def _replay(day: date, db: Path | None) -> int:
+    try:
+        path, summary = replay_day(Settings.from_env(require_kis=False), day, db)
+    except FileNotFoundError as e:
+        print(e, file=sys.stderr)
+        return 1
+    print(f"replayed {day} into {path}")
+    for s in summary:
+        print(f"{s.algorithm}: {s.predictions} predictions, {s.scored} scored, {s.unscorable} unscorable")
+    if summary:
+        s = summary[0]
+        print(f"outcomes on basis A: {s.up} up, {s.flat} flat, {s.down} down")
+    return 0
 
 
 async def _test_alert() -> int:
@@ -102,6 +119,15 @@ def main(argv: list[str] | None = None) -> int:
     archive_cmd.add_argument(
         "--recheck", action="store_true", help="compare every file with the store and upload what it lacks"
     )
+    replay_cmd = sub.add_parser(
+        "replay", help="replay a recorded day through the engine into its own database (no KIS needed)"
+    )
+    replay_cmd.add_argument("day", type=date.fromisoformat, help="the recorded day, YYYY-MM-DD")
+    replay_cmd.add_argument(
+        "--db",
+        type=Path,
+        help="database to write, replaced if it exists (default: state/replay-<day>.sqlite3)",
+    )
     sub.add_parser("test-alert", help="send a test message to the Telegram chat that receives alerts")
     fake = sub.add_parser("fake-kis", help="run a local fake KIS server for offline testing")
     fake.add_argument("--port", type=int, default=18080)
@@ -119,6 +145,8 @@ def main(argv: list[str] | None = None) -> int:
             asyncio.run(_backfill())
         elif args.command == "archive":
             return asyncio.run(_archive(args.recheck))
+        elif args.command == "replay":
+            return _replay(args.day, args.db)
         elif args.command == "test-alert":
             return asyncio.run(_test_alert())
         elif args.command == "fake-kis":

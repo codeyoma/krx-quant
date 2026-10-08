@@ -158,6 +158,16 @@ def _fsync(path: Path) -> None:
         os.close(fd)
 
 
+def partition_files(partition: Path) -> list[Path]:
+    """The files holding a partition's rows, each row once: the merged file, then the part
+    files it does not hold, in the order written.
+    """
+    merged = partition / MERGED
+    held = set(_held_parts(merged)) if merged.exists() else set()
+    parts = sorted(partition.glob(f"{PART_PREFIX}*.parquet"), key=lambda p: (p.stat().st_mtime_ns, p.name))
+    return ([merged] if merged.exists() else []) + [p for p in parts if p.name not in held]
+
+
 def _held_parts(merged: Path) -> list[str]:
     metadata = pq.read_schema(merged).metadata or {}
     names: list[str] = json.loads(metadata.get(_PARTS_KEY, b"[]"))

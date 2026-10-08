@@ -1,0 +1,139 @@
+# 엔진 API v1과 예측·채점 규칙
+
+엔진은 1분봉이 마감될 때마다 종목별로 4분 뒤 통합 중간가의 방향을 예측하고, 4분 뒤 채점한다. 결과는 `state/engine.sqlite3`에 저장하고 HTTP JSON API로 보여준다. Fincept 화면은 이 API만 읽는다.
+
+지금(#9)은 기준 예측 3종만 예측한다. 알고리즘(#10~), 합의(#18), 순위표와 통계(#11), WebSocket 스트림(#19)은 뒤에 붙는다.
+
+## 예측
+
+- **예측 시각 t.** 연속매매 중 1분봉이 마감되는 매 분이다. 첫 회차는 개장 1분 뒤(09:01)다. 마지막 회차는 채점 시각(t + 4분)이 아직 연속매매 안에 드는 15:16이다. 연초 첫 거래일과 수능일은 그날 일정에 맞춰 10:01부터다. 휴장일에는 예측하지 않는다.
+- **입력.** t 시점에 엔진이 받아 둔 데이터만 쓴다. 모든 데이터는 엔진이 받은 시각(`received_at`)으로 줄을 세운다. 그래서 실시간과 재생의 결과가 같고, t 뒤의 데이터를 잘라내도 t의 예측은 바뀌지 않는다.
+- **기준 예측 3종.** 모든 알고리즘이 넘어야 하는 기준이다. 셋 다 한 클래스를 확률 1로 예측한다.
+
+| 이름 | 예측 |
+|---|---|
+| `baseline-flat` | 항상 보합 |
+| `baseline-persist` | 직전 4분(t − 4분 → t) 중간가 변화를 채점과 같은 규칙으로 분류해, 그 방향이 이어진다고 본다. 기대수익은 그 변화의 틱 수다. 중간가를 모르면 보합이다. |
+| `baseline-random` | 그날 이미 채점된 봉의 클래스 비율(각 클래스에 1을 더한 값)대로 무작위로 뽑는다. 종목과 t로 시드를 정해서, 같은 입력이면 늘 같은 값이 나온다. |
+
+## 기준가 (통합 중간가)
+
+- KRX와 NXT를 합친 최우선 매수호가와 최우선 매도호가의 평균이다. 통합 호가(`H0UNASP0`), 통합 체결(`H0UNCNT0`)에 실린 최우선 호가, 통합 호가가 REST로 바뀌었을 때의 호가 스냅샷(`FHKST01010200`)을 쓴다.
+- NXT가 열리기 전인 개장 후 30초(보통 09:00:00–09:00:30)에는 KRX 호가만 쓴다. KRX 호가는 KRX 전용 체결(`H0STCNT0`)에 실린 최우선 호가다.
+- 최우선 매도호가와 매수호가가 같은 호가(locked)는 정상이다. 그 가격이 중간가다. 매도호가가 매수호가보다 낮은 호가(crossed)와 한쪽이 빈 호가는 쓰지 않는다.
+- 60초 넘게 새 호가가 없으면 중간가를 모르는 것으로 본다. 통합 호가 피드의 지연 판정 기준과 같다.
+- 연속매매 밖(개장 전, 종가 동시호가, 장 마감 후)에는 중간가가 없다.
+
+## 채점
+
+- **보합 범위 k.** t의 중간가에서 왕복 거래비용(매도 거래세 0.20% + 수수료율 × 2)을 덮는 가장 작은 틱 수다. 틱은 KRX 호가단위표(2023-01-25부터 코스피·코스닥 공통)를 따른다. 수수료율은 `KRX_FEE_PERCENT`(편도, %, 기본 0.015)다.
+  - 예: 81,200원은 비용 186.76원, 호가단위 100원이라 k = 2다.
+- **클래스.** 변화가 k틱 이상이면 상승, −k틱 이하면 하락, 그 사이는 보합이다.
+- **두 기준.** (A) 봉 마감 기준은 t의 중간가 → t + 4분 중간가다. (B) 표시 기준은 예측이 저장되어 API에 보인 시각(`displayed_at`)의 중간가 → t + 4분 중간가다.
+- **채점 불가.** 필요한 중간가를 모르면 그 기준은 채점하지 않고, `unscorable`에 빠진 중간가를 적는다. 예: `missing mid: target`. 예측 자체는 그대로 남는다.
+- 엔진이 재시작되어도 채점 대기 중인 예측은 이어서 채점한다. 엔진이 꺼져 있던 동안의 회차는 예측이 없다.
+- VI·서킷브레이커 "특수" 표시(`special`)는 #12에서 채운다. 지금은 늘 `false`다.
+
+## 저장 (`state/engine.sqlite3`)
+
+| 테이블 | 열 |
+|---|---|
+| `predictions` | `id`, `symbol`, `algorithm`, `model_version`, `bar_close`(t), `displayed_at`, `p_up`, `p_flat`, `p_down`, `expected_ticks`, `status`(`ok`) |
+| `outcomes` | `prediction_id`, `target_at`(t + 4분), `mid_close`(A), `mid_display`(B), `mid_target`, `flat_ticks`(k), `class_a`, `class_b`(`up`/`flat`/`down`), `special`, `unscorable`, `scored_at`(채점 전에는 비어 있음) |
+
+시각은 KST ISO 8601 문자열이다. 스키마 버전은 `PRAGMA user_version`에 있다.
+
+## API
+
+서버에서는 Tailscale 주소의 8080 포트로만 열린다. 맥과 윈도우에서 `http://krx-quant:8080/v1/...`로 읽는다.
+
+- 시각은 KST ISO 8601 문자열이다(예: `2026-10-12T09:31:00+09:00`).
+- 오류는 `{"error": "..."}`다. 모르는 종목은 404, 잘못된 `limit`은 400이다.
+
+### `GET /v1/status`
+
+| 필드 | 설명 |
+|---|---|
+| `mode` | `live` 또는 `replay` |
+| `now` | 엔진 시계 |
+| `phase` | 장 단계: `closed`, `pre_open`, `opening_auction`, `continuous`, `closing_auction`, `after_close` |
+| `session` | 오늘 장의 `open`(연속매매 시작), `close`(종가 동시호가 끝). 휴장일은 `null` |
+| `last_bar_close` | 마지막으로 예측한 봉 마감 시각 |
+| `pending_outcomes` | 채점을 기다리는 예측 수 |
+| `kis` | 실시간 모드만. `connected`(KIS가 현재 연결에서 구독에 답했는지), `feeds`(구독·조회별 `feed`, `key`, `last_received_at`, `seconds_since`, 열린 결측 구간의 `gap`) |
+
+### `GET /v1/symbols`
+
+예측하는 종목과 지금의 기준가다.
+
+```json
+{"symbols": [{"symbol": "005930", "mid": 81250.0, "tick": 100, "flat_ticks": 2}]}
+```
+
+중간가를 모르면 `mid`, `tick`, `flat_ticks`가 `null`이다.
+
+### `GET /v1/symbols/{symbol}/latest`
+
+종목의 가장 최근 봉 마감에 나온 예측들이다.
+
+```json
+{
+  "symbol": "005930",
+  "bar_close": "2026-10-12T09:31:00+09:00",
+  "predictions": [
+    {
+      "algorithm": "baseline-flat",
+      "model_version": "v1",
+      "bar_close": "2026-10-12T09:31:00+09:00",
+      "displayed_at": "2026-10-12T09:31:00.004120+09:00",
+      "target_at": "2026-10-12T09:35:00+09:00",
+      "status": "ok",
+      "p_up": 0.0,
+      "p_flat": 1.0,
+      "p_down": 0.0,
+      "expected_ticks": 0.0,
+      "outcome": null
+    }
+  ]
+}
+```
+
+`outcome`은 채점 전에는 `null`이고, 채점 뒤에는 다음과 같다.
+
+```json
+{
+  "mid_close": 81250.0,
+  "mid_display": 81250.0,
+  "mid_target": 81550.0,
+  "flat_ticks": 2,
+  "class_a": "up",
+  "class_b": "up",
+  "special": false,
+  "unscorable": null,
+  "scored_at": "2026-10-12T09:35:00.003000+09:00"
+}
+```
+
+### `GET /v1/symbols/{symbol}/predictions?limit=N&algorithm=A`
+
+최근 N개 봉 마감의 예측과 채점 결과다. 최신 것부터 온다. 항목 형식은 `latest`와 같다.
+- `limit`: 1–1000, 기본 100. 예측 개수가 아니라 봉 마감 개수다.
+- `algorithm`: 주면 그 알고리즘만 온다.
+
+### `GET /v1/symbols/{symbol}/bars`
+
+엔진이 통합 체결로 만든 오늘의 1분봉이다. 끝난 봉만 오래된 것부터 온다. 봉 시각은 체결 시각(거래소 시각) 기준 그 분의 시작이다. 늦게 도착한 체결도 체결 시각의 봉에 들어간다. 엔진이 재시작하면 그 전의 봉은 없다(과거 1분봉은 `bars` 계층의 백필에 있다).
+
+```json
+{"symbol": "005930", "bars": [{"start": "2026-10-12T09:30:00+09:00", "open": 81000, "high": 81400, "low": 81000, "close": 81100, "volume": 19, "trades": 4}]}
+```
+
+## 재생
+
+`krx-quant replay <날짜>`는 녹화된 하루를 실시간과 같은 엔진으로 다시 돌린다. 결과는 별도 DB(기본 `state/replay-<날짜>.sqlite3`, 있으면 새로 만든다)에 쓴다. KIS 키는 필요 없다. 거래 일정은 `state/market_calendar.json` 캐시를 쓰고, 없으면 평일을 거래일로 본다.
+
+```bash
+uv run krx-quant replay 2026-10-12
+```
+
+같은 입력을 두 번 재생하면 결과가 같다. 녹화 데이터를 손으로 만든 이벤트로 바꾼 것이 자동 테스트의 주 seam이다(`tests/test_replay.py`).
