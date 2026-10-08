@@ -100,6 +100,23 @@ async def test_sector_index(kis: FakeKis, tmp_path: Path) -> None:
     assert (i["advancers"], i["decliners"], i["unchanged"]) == (13, 30, 4)
 
 
+async def test_the_closing_index_record_without_a_time_takes_the_time_received(
+    kis: FakeKis, tmp_path: Path
+) -> None:
+    # After the evening close KIS sends each index's final values with bsop_hour 999999
+    # (seen live on 2026-10-08 at 20:05).
+    kis.script[("H0UPCNT0", "0001")] = [
+        index_frame(
+            {"bstp_cls_code": "0001", "bsop_hour": "999999", "prpr_nmix": "6625.93", "prdy_ctrt": "-2.62"}
+        )
+    ]
+
+    await collect(kis, replace(settings_for(kis, tmp_path), index_codes=("0001",)))
+
+    [i] = read(tmp_path, "events", "H0UPCNT0", symbol="0001")
+    assert (i["event_time"], i["value"], i["change_pct"]) == (FIXED_NOW, 6625.93, -2.62)
+
+
 async def test_usd_futures(kis: FakeKis, tmp_path: Path) -> None:
     serve_masters(kis)
     kis.script[("H0CFCNT0", "A75610")] = [

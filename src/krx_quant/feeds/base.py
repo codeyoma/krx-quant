@@ -49,6 +49,18 @@ def kst(day: date, hhmmss: str) -> datetime:
     return datetime.combine(day, time(int(hhmmss[0:2]), int(hhmmss[2:4]), int(hhmmss[4:6])), KST)
 
 
+def kst_or_received(day: date, hhmmss: str, received_at: datetime) -> datetime:
+    """``hhmmss`` on ``day``, or the second it was received when KIS sends no real time.
+
+    After the evening close KIS sends index (and derivative) records with the final
+    values and the time ``999999`` (seen live on 2026-10-08).
+    """
+    try:
+        return kst(day, hhmmss)
+    except ValueError:
+        return received_at.astimezone(KST).replace(microsecond=0)
+
+
 def kst_day(received_at: datetime) -> date:
     return received_at.astimezone(KST).date()
 
