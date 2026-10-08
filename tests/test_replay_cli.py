@@ -6,6 +6,7 @@ the replay database, which must match replaying the same events by hand.
 
 from __future__ import annotations
 
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -60,21 +61,44 @@ async def test_a_recorded_day_replays_like_the_same_events_given_by_hand(
     assert "baseline-flat: 376 predictions" in out
 
 
+@pytest.mark.parametrize("name", ["engine.sqlite3", "engine.sqlite3-wal", "engine.sqlite3-shm"])
 def test_replay_never_replaces_the_live_engine_database(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    name: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     record(tmp_path / "data", busy_morning())
-    live = tmp_path / "state" / "engine.sqlite3"
-    live.parent.mkdir()
-    live.write_bytes(b"live predictions")
+    state = tmp_path / "state"
+    state.mkdir()
+    live = {f: state / f for f in ("engine.sqlite3", "engine.sqlite3-wal", "engine.sqlite3-shm")}
+    for path in live.values():
+        path.write_bytes(b"live predictions")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("KRX_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("KRX_STATE_DIR", str(state))
+
+    assert main(["replay", DAY.isoformat(), "--db", f"state/{name}"]) == 1
+
+    assert all(path.read_bytes() == b"live predictions" for path in live.values())
+    assert "live engine's database" in capsys.readouterr().err
+
+
+def test_a_row_recorded_after_the_system_clock_stepped_back_still_replays(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    events = busy_morning()
+    # The clock stepped back 0.4 s: a book is received "before" the book written before it.
+    books = [i for i, (feed, _) in enumerate(events) if feed == "H0UNASP0"]
+    feed, row = events[books[10]]
+    events[books[10]] = (
+        feed,
+        {**row, "received_at": events[books[9]][1]["received_at"] - timedelta(seconds=0.4)},
+    )
+    record(tmp_path / "data", events)
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("KRX_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("KRX_STATE_DIR", str(tmp_path / "state"))
 
-    assert main(["replay", DAY.isoformat(), "--db", "state/engine.sqlite3"]) == 1
-
-    assert live.read_bytes() == b"live predictions"
-    assert "live engine's database" in capsys.readouterr().err
+    assert main(["replay", DAY.isoformat()]) == 0
+    assert "baseline-flat: 376 predictions" in capsys.readouterr().out
 
 
 def test_replaying_a_day_with_nothing_recorded_fails(
