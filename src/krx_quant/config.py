@@ -78,7 +78,7 @@ class Settings:
     object_store: str | None = None
     # S3 access. Unset keys fall back to boto3's own lookup; the endpoint is for
     # S3-compatible stores such as MinIO.
-    aws_region: str = "ap-northeast-2"
+    aws_region: str = "ap-southeast-2"
     aws_access_key_id: str | None = None
     aws_secret_access_key: str | None = None
     s3_endpoint_url: str | None = None
@@ -165,7 +165,7 @@ class Settings:
             ),
             data_dir=Path(values.get("KRX_DATA_DIR", "data")),
             object_store=values.get("KRX_OBJECT_STORE") or None,
-            aws_region=values.get("AWS_REGION") or values.get("AWS_DEFAULT_REGION") or "ap-northeast-2",
+            aws_region=values.get("AWS_REGION") or values.get("AWS_DEFAULT_REGION") or "ap-southeast-2",
             aws_access_key_id=values.get("AWS_ACCESS_KEY_ID") or None,
             aws_secret_access_key=values.get("AWS_SECRET_ACCESS_KEY") or None,
             s3_endpoint_url=values.get("KRX_S3_ENDPOINT_URL") or None,

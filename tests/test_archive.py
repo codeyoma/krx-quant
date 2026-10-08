@@ -41,9 +41,9 @@ def store(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[ObjectStor
         yield LocalObjectStore(tmp_path / "store")
         return
     with mock_aws():
-        client = boto3.client("s3", region_name="ap-northeast-2")
+        client = boto3.client("s3", region_name="ap-southeast-2")
         client.create_bucket(
-            Bucket="krx-quant-test", CreateBucketConfiguration={"LocationConstraint": "ap-northeast-2"}
+            Bucket="krx-quant-test", CreateBucketConfiguration={"LocationConstraint": "ap-southeast-2"}
         )
         yield S3ObjectStore(client, "krx-quant-test", "engine")
 
