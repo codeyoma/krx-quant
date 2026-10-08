@@ -9,6 +9,7 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Any
 
 import aiohttp
 
@@ -41,6 +42,7 @@ class Poller:
         stop: asyncio.Event,
         on_added: Callable[[tuple[str, str]], None] | None = None,
         on_received: Callable[[tuple[str, str]], None] | None = None,
+        on_event: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> None:
         self._client = client
         self._recorder = recorder
@@ -48,6 +50,7 @@ class Poller:
         self._stop = stop
         self._on_added = on_added
         self._on_received = on_received
+        self._on_event = on_event
         self._tasks: dict[tuple[str, str], asyncio.Task[None]] = {}
 
     def add(self, job: PollJob) -> None:
@@ -95,3 +98,5 @@ class Poller:
             return
         for row in rows:
             self._recorder.record("events", day, job.feed.tr_id, job.key, row, job.feed.schema)
+            if self._on_event is not None:
+                self._on_event(job.feed.tr_id, row)

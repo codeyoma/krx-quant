@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Run the engine in local Docker against the fake KIS server: record for a while, then
-# archive twice and check that the second run changes nothing.
+# Run the engine in local Docker against the fake KIS server: record for a while, check
+# that the Engine API answers, then archive twice and check that the second run changes
+# nothing.
 #
 # Usage: deploy/smoke-local.sh   (KEEP=1 keeps the containers and volumes afterwards)
 set -euo pipefail
@@ -29,6 +30,10 @@ for key in store.keys():
 "${compose[@]}" up -d fake-kis engine
 echo "recording for ${SECONDS_TO_RECORD:=15}s"
 sleep "$SECONDS_TO_RECORD"
+port=$(grep '^KRX_ENGINE_PORT=' deploy/smoke.env | cut -d= -f2)
+status=$(curl -fsS "http://127.0.0.1:$port/v1/status") ||
+  { echo "smoke: the Engine API did not answer" >&2; exit 1; }
+echo "engine status: $status"
 "${compose[@]}" stop engine # flushes buffered rows
 
 "${compose[@]}" run --rm -T engine archive

@@ -7,14 +7,19 @@ import contextlib
 import logging
 from collections.abc import Callable
 from datetime import UTC, date, datetime, time, timedelta
+from typing import Any
 
 import aiohttp
+from aiohttp import web
 
 from krx_quant import kis
+from krx_quant.api import create_app
 from krx_quant.archive import archive
 from krx_quant.auth import TokenManager, tokens_and_client
 from krx_quant.backfill import keep_history
+from krx_quant.clock import SessionClock, SystemClock
 from krx_quant.config import Settings
+from krx_quant.engine import PredictionEngine, run_live
 from krx_quant.feeds import (
     BOOK,
     ETF_FALLBACKS,
@@ -37,12 +42,13 @@ from krx_quant.feeds import (
     us_daytime_key,
 )
 from krx_quant.feeds.base import kst_day
-from krx_quant.health import FeedHealth, GapKind
+from krx_quant.health import FeedHealth, FeedState, GapKind
 from krx_quant.market_calendar import MarketCalendar, calendar_store
 from krx_quant.masters import FrontMonths, MasterError, fetch_front_months
 from krx_quant.notify import Alerts
 from krx_quant.object_store import open_store
 from krx_quant.polling import Poller, PollJob
+from krx_quant.predictions import DB_NAME, PredictionStore, iso
 from krx_quant.recorder import ParquetRecorder
 
 log = logging.getLogger(__name__)
@@ -51,6 +57,7 @@ Clock = Callable[[], datetime]
 
 _WS_ALERT = "websocket"
 _ARCHIVE_ALERT = "archive"
+_API_ALERT = "api"
 
 # Recorded days are archived this long after each trading day's close (training starts
 # at 16:00), and every night, after the NXT and KRX after-market close and the 20:30
@@ -63,10 +70,6 @@ _APPROVAL_MAX_AGE = timedelta(hours=20)
 
 # How often buffered partitions whose time limit has passed are flushed.
 _TICK_SECONDS = 1.0
-
-
-def _system_clock() -> datetime:
-    return datetime.now(KST)
 
 
 def subscription_plan(settings: Settings, fronts: FrontMonths | None) -> list[tuple[Feed, str]]:
@@ -121,12 +124,32 @@ async def front_months(session: aiohttp.ClientSession, settings: Settings) -> Fr
     return fronts
 
 
-async def run_collector(settings: Settings, *, stop: asyncio.Event, clock: Clock | None = None) -> None:
-    """Record the configured feeds until ``stop`` is set, then flush and return."""
-    now = clock or _system_clock
+async def run_collector(
+    settings: Settings, *, stop: asyncio.Event, clock: Clock | SessionClock | None = None
+) -> None:
+    """Record the configured feeds and predict from them until ``stop`` is set, then flush
+    and return.
+
+    ``clock`` is the Session Clock, or a function giving the time (then sleeping is real).
+    """
+    if isinstance(clock, SessionClock):
+        session_clock: SessionClock = clock
+    else:
+        session_clock = SystemClock() if clock is None else SystemClock(clock)
+    now = session_clock.now
     recorder = ParquetRecorder(settings.data_dir, settings.flush_rows, settings.flush_seconds)
     calendar = calendar_store(settings)
     health = FeedHealth(recorder, now, calendar.calendar)
+    store = PredictionStore(settings.state_dir / DB_NAME)
+    engine = PredictionEngine(store, calendar.calendar, settings.symbols, settings.fee_rate, session_clock)
+
+    def on_event(feed: str, row: dict[str, Any]) -> None:
+        # Recording comes first: a prediction bug must never stop it.
+        try:
+            engine.on_event(feed, row)
+        except Exception:
+            log.exception("the engine could not take a %s event", feed)
+
     try:
         async with aiohttp.ClientSession() as session:
             alerts = Alerts(
@@ -134,7 +157,15 @@ async def run_collector(settings: Settings, *, stop: asyncio.Event, clock: Clock
             )
             tokens, client = tokens_and_client(session, settings, now)
             await _warm_up(tokens)
-            poller = Poller(client, recorder, now, stop, on_added=health.watch, on_received=health.received)
+            poller = Poller(
+                client,
+                recorder,
+                now,
+                stop,
+                on_added=health.watch,
+                on_received=health.received,
+                on_event=on_event,
+            )
             fronts = await front_months(session, settings)
             plan = subscription_plan(settings, fronts)
             cap = len(plan) if settings.ws_max_subscriptions is None else settings.ws_max_subscriptions
@@ -144,13 +175,16 @@ async def run_collector(settings: Settings, *, stop: asyncio.Event, clock: Clock
                 poller.add(job)
             for feed, key in plan[:cap]:
                 health.watch((feed.tr_id, key))
-            stream = _Stream(session, settings, plan[:cap], recorder, now, stop, poller, health, alerts)
+            stream = _Stream(
+                session, settings, plan[:cap], recorder, now, stop, poller, health, alerts, on_event
+            )
             background = [
                 asyncio.create_task(_every(_TICK_SECONDS, recorder.flush_due, "periodic flush")),
                 asyncio.create_task(
                     _every(settings.health_check_seconds, stream.check_stale, "health check")
                 ),
                 asyncio.create_task(keep_history(settings, client, calendar, now)),
+                asyncio.create_task(run_live(engine, session_clock)),
             ]
             if settings.object_store is None:
                 log.warning("KRX_OBJECT_STORE is not set: recorded days are not archived")
@@ -158,9 +192,12 @@ async def run_collector(settings: Settings, *, stop: asyncio.Event, clock: Clock
                 background.append(
                     asyncio.create_task(_keep_archived(settings, recorder, calendar.calendar, alerts, now))
                 )
+            api = await _serve_api(settings, engine, _live_status(stream, health, now), alerts)
             try:
                 await stream.run()
             finally:
+                if api is not None:
+                    await api.cleanup()
                 await stream.close()
                 for task in background:
                     task.cancel()
@@ -171,6 +208,47 @@ async def run_collector(settings: Settings, *, stop: asyncio.Event, clock: Clock
     finally:
         health.close()
         recorder.close()
+        store.close()
+
+
+async def _serve_api(
+    settings: Settings,
+    engine: PredictionEngine,
+    live_status: Callable[[], dict[str, Any]],
+    alerts: Alerts,
+) -> web.AppRunner | None:
+    """Start the Engine API; if it cannot listen, alert and go on recording without it."""
+    if settings.api_port is None:
+        return None
+    runner = web.AppRunner(create_app(engine, mode="live", live_status=live_status), access_log=None)
+    await runner.setup()
+    try:
+        await web.TCPSite(runner, settings.api_host, settings.api_port).start()
+    except OSError as e:
+        await runner.cleanup()
+        log.error("Engine API not started on %s:%s: %s", settings.api_host, settings.api_port, e)
+        alerts.raise_(_API_ALERT, f"엔진 API를 열지 못했습니다 ({e}). 녹화는 계속합니다.")
+        return None
+    log.info("Engine API on http://%s:%s/v1", settings.api_host, settings.api_port)
+    return runner
+
+
+def _live_status(stream: _Stream, health: FeedHealth, now: Clock) -> Callable[[], dict[str, Any]]:
+    def feed(f: FeedState, at: datetime) -> dict[str, Any]:
+        last = f.last_received_at
+        return {
+            "feed": f.feed,
+            "key": f.key,
+            "last_received_at": iso(last) if last else None,
+            "seconds_since": (at - last).total_seconds() if last else None,
+            "gap": f.gap,
+        }
+
+    def status() -> dict[str, Any]:
+        at = now()
+        return {"connected": stream.connected, "feeds": [feed(f, at) for f in health.snapshot()]}
+
+    return status
 
 
 async def _keep_archived(
@@ -342,6 +420,7 @@ class _Stream:
         poller: Poller,
         health: FeedHealth,
         alerts: Alerts,
+        on_event: Callable[[str, dict[str, Any]], None],
     ) -> None:
         self._session = session
         self._settings = settings
@@ -353,6 +432,7 @@ class _Stream:
         self._poller = poller
         self._health = health
         self._alerts = alerts
+        self._on_event = on_event
         self._approval: str | None = None
         self._approval_at: datetime | None = None
         self._acknowledged = False  # KIS answered a registration on the current connection
@@ -385,6 +465,11 @@ class _Stream:
                     await asyncio.wait_for(self._stop.wait(), delay)
                 delay = min(delay * 2, settings.reconnect_max_seconds)
 
+    @property
+    def connected(self) -> bool:
+        """KIS has answered a registration on the current connection."""
+        return self._acknowledged
+
     async def close(self) -> None:
         if self._recovery is not None:
             self._recovery.cancel()
@@ -416,6 +501,7 @@ class _Stream:
         return kis.subscribe_message(self._approval, tr_id, key)
 
     def _connection_lost(self, detail: str) -> None:
+        self._acknowledged = False
         if self._recovery is not None:
             self._recovery.cancel()  # it did not stay up long enough to count as recovered
             self._recovery = None
@@ -509,6 +595,7 @@ class _Stream:
             return
         for row in rows:
             self._recorder.record("events", day, feed.tr_id, row["symbol"], row, feed.schema)
+            self._on_event(feed.tr_id, row)
 
     async def _on_rejected(self, ws: aiohttp.ClientWebSocketResponse, message: kis.SystemMessage) -> None:
         key = (message.tr_id, message.tr_key or "")

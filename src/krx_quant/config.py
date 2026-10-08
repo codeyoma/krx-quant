@@ -85,12 +85,27 @@ class Settings:
     # The recorder writes a Parquet part file per partition when either limit is reached.
     flush_rows: int = 5000
     flush_seconds: float = 30.0
+    # Commission per side, as a fraction (0.015% is 0.00015). With the sell tax it sets the
+    # flat band: moves smaller than the round-trip cost count as flat.
+    fee_rate: float = 0.00015
+    # The Engine API listens here; None runs the engine without it. Inside Docker the host
+    # is 0.0.0.0 and compose publishes the port on the Tailscale address only.
+    api_host: str = "127.0.0.1"
+    api_port: int | None = None
 
     @classmethod
     def from_env(
-        cls, env: Mapping[str, str] | None = None, dotenv_path: Path | None = Path(".env")
+        cls,
+        env: Mapping[str, str] | None = None,
+        dotenv_path: Path | None = Path(".env"),
+        *,
+        require_kis: bool = True,
     ) -> Settings:
-        """Build settings from `env` (default: os.environ) layered over `dotenv_path`."""
+        """Build settings from `env` (default: os.environ) layered over `dotenv_path`.
+
+        Without ``require_kis`` the KIS keys may be missing, for commands that never call
+        KIS (replay).
+        """
         values: dict[str, str] = {}
         if dotenv_path is not None and dotenv_path.exists():
             values.update({k: v for k, v in dotenv_values(dotenv_path).items() if v is not None})
@@ -98,7 +113,7 @@ class Settings:
 
         def required(name: str) -> str:
             value = values.get(name, "").strip()
-            if not value:
+            if not value and require_kis:
                 raise SettingsError(f"{name} is not set")
             return value
 
@@ -116,7 +131,8 @@ class Settings:
             except ValueError as e:
                 raise SettingsError(f"{name} must be a number, got {raw!r}") from e
             if (value < minimum) if minimum is not None else (value <= 0):
-                raise SettingsError(f"{name} must be at least {minimum or 'above 0'}, got {raw!r}")
+                floor = "above 0" if minimum is None else minimum
+                raise SettingsError(f"{name} must be at least {floor}, got {raw!r}")
             if maximum is not None and value > maximum:
                 raise SettingsError(f"{name} must be at most {maximum}, got {raw!r}")
             return value
@@ -171,4 +187,7 @@ class Settings:
             s3_endpoint_url=values.get("KRX_S3_ENDPOINT_URL") or None,
             flush_rows=int(number("KRX_FLUSH_ROWS", "5000", int)),
             flush_seconds=float(number("KRX_FLUSH_SECONDS", "30", float)),
+            fee_rate=float(number("KRX_FEE_PERCENT", "0.015", float, minimum=0, maximum=1)) / 100,
+            api_host=values.get("KRX_API_HOST", "127.0.0.1"),
+            api_port=int(number("KRX_API_PORT", "8080", int, maximum=65535)),
         )
