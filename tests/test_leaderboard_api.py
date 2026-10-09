@@ -49,16 +49,24 @@ def store_scored(
         [pending] = store.add_all(
             [
                 NewPrediction(
-                    symbol, algorithm, version, t, t, SURE[call], t + timedelta(minutes=4), 81_250, 81_250, 2
+                    symbol,
+                    algorithm,
+                    version,
+                    t,
+                    t,
+                    SURE[call],
+                    t + timedelta(minutes=4),
+                    81_250,
+                    81_250,
+                    2,
+                    special=special,
                 )
             ]
         )
         a = OUTCOMES[i]
         b = outcomes_b[i] if outcomes_b is not None else a
         target = 81_250 + {UP: 300, FLAT: 0, DOWN: -300}[a]
-        store.score_all(
-            [(pending.prediction_id, Score(target, a, b, None, special))], t + timedelta(minutes=4)
-        )
+        store.score_all([(pending.prediction_id, Score(target, a, b, None))], t + timedelta(minutes=4))
 
 
 @contextlib.asynccontextmanager

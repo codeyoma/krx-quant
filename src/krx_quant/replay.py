@@ -24,11 +24,9 @@ from krx_quant.clock import FakeClock
 from krx_quant.config import Settings
 from krx_quant.engine import ENGINE_FEEDS, MARKET_FEEDS, Budget, Event, PredictionEngine
 from krx_quant.features import FeatureStore
-from krx_quant.feeds import KOSPI200_FUTURES
 from krx_quant.feeds.base import KST, kst_day
 from krx_quant.market_calendar import MarketCalendar, calendar_store
 from krx_quant.predictions import DB_NAME, AlgorithmSummary, PredictionStore
-from krx_quant.special import KOSPI
 
 log = logging.getLogger(__name__)
 
@@ -116,11 +114,12 @@ def recorded_events(data_dir: Path, day: date, symbols: Sequence[str]) -> Iterat
 
 def _keys(feed: str, root: Path, symbols: Sequence[str]) -> list[str]:
     """The partitions of ``feed`` the engine reads: the symbols', or the market's."""
-    if feed == KOSPI200_FUTURES.tr_id:  # the front month, whichever it was that day
+    if feed not in MARKET_FEEDS:
+        return list(symbols)
+    key = MARKET_FEEDS[feed]
+    if key is None:  # the front month, whichever it was that day
         return sorted(p.name.removeprefix("symbol=") for p in root.glob("symbol=*"))
-    if feed in MARKET_FEEDS:
-        return [KOSPI]
-    return list(symbols)
+    return [key]
 
 
 def _partition_rows(feed: str, files: Sequence[Path], columns: Sequence[str]) -> Iterator[Event]:

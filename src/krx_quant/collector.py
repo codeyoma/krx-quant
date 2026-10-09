@@ -96,7 +96,7 @@ def subscription_plan(settings: Settings, fronts: FrontMonths | None) -> list[tu
     return plan
 
 
-# While these, VIs can matter to predictions: from the opening auction to the close.
+# The phases in which a VI can matter to predictions: from the opening auction to the close.
 _VI_PHASES = {Phase.OPENING_AUCTION, Phase.CONTINUOUS, Phase.CLOSING_AUCTION}
 
 

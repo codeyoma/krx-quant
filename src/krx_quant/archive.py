@@ -118,6 +118,15 @@ def _clean_tmp(partition: Path) -> None:
             tmp.unlink(missing_ok=True)
 
 
+def _conform(batch: pa.RecordBatch, schema: pa.Schema) -> pa.RecordBatch:
+    """``batch`` with ``schema``'s columns in its order, those it lacks all null."""
+    columns = [
+        batch.column(f.name) if f.name in batch.schema.names else pa.nulls(batch.num_rows, f.type)
+        for f in schema
+    ]
+    return pa.RecordBatch.from_arrays(columns, schema=schema)
+
+
 def _merge(partition: Path) -> None:
     # In the order written: several parts can share the second in their names.
     parts = sorted(partition.glob(f"{PART_PREFIX}*.parquet"), key=lambda p: (p.stat().st_mtime_ns, p.name))
@@ -128,7 +137,8 @@ def _merge(partition: Path) -> None:
     new = [p for p in parts if p.name not in held]
     if new:
         sources = ([merged] if merged.exists() else []) + new
-        schema = pq.read_schema(sources[0]).remove_metadata()
+        # A column added to a feed (and missing from files recorded before) is null there.
+        schema = pa.unify_schemas([pq.read_schema(s).remove_metadata() for s in sources])
         names = held + [p.name for p in new]
         tmp = partition / f".{MERGED}.{uuid.uuid4().hex[:8]}.tmp"
         with pq.ParquetWriter(tmp, schema.with_metadata({_PARTS_KEY: json.dumps(names)})) as writer:
@@ -136,7 +146,7 @@ def _merge(partition: Path) -> None:
             pending_rows = 0
             for source in sources:
                 for batch in pq.ParquetFile(source).iter_batches():
-                    pending.append(batch)
+                    pending.append(_conform(batch, schema))
                     pending_rows += batch.num_rows
                     if pending_rows >= _ROW_GROUP_ROWS:
                         writer.write_table(pa.Table.from_batches(pending), row_group_size=_ROW_GROUP_ROWS)

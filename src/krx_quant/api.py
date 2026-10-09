@@ -104,6 +104,11 @@ async def _status(request: web.Request) -> web.Response:
         "session": None if session is None else {"open": iso(session.open), "close": iso(session.close)},
         "last_bar_close": engine.store.last_bar_close(),
         "pending_outcomes": engine.store.pending_count(),
+        # VIs, circuit breakers and sidecars known today; symbol null is the whole market.
+        "special": [
+            {"kind": w.kind.value, "symbol": w.symbol, "start": iso(w.start), "end": iso(w.end)}
+            for w in engine.special_today()
+        ],
     }
     live_status = request.app.get(LIVE_STATUS_KEY)
     if live_status is not None:

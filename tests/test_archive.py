@@ -22,7 +22,7 @@ from moto import mock_aws
 from krx_quant.archive import archive
 from krx_quant.collector import run_collector
 from krx_quant.fake_kis import FakeKis
-from krx_quant.feeds import RAW_SCHEMA
+from krx_quant.feeds import KOSPI200_FUTURES, RAW_SCHEMA
 from krx_quant.feeds.base import KST
 from krx_quant.object_store import LocalObjectStore, ObjectStore, S3ObjectStore
 from krx_quant.recorder import ParquetRecorder
@@ -273,3 +273,30 @@ async def test_a_collector_started_after_the_nightly_run_archives_today_at_once(
     await until(lambda: KEY in LocalObjectStore(store).keys())
     stop.set()
     await asyncio.wait_for(task, 5)
+
+
+async def test_a_column_added_to_a_feed_during_the_day_is_null_in_the_rows_before(tmp_path: Path) -> None:
+    # A collector restarted mid-day with a newer schema: futures events gained change_pct.
+    data = tmp_path / "data"
+    new = KOSPI200_FUTURES.schema
+    old = new.remove(new.get_field_index("change_pct"))
+    at = datetime(2026, 10, 8, 9, 30, tzinfo=KST)
+
+    def row(price: float, **extra: Any) -> dict[str, Any]:
+        return {"symbol": "A01612", "event_time": at, "received_at": at, "price": price, **extra}
+
+    for schema, rows in ((old, [row(1056.3)]), (new, [row(1057.1, change_pct=-1.2)])):
+        recorder = ParquetRecorder(data, flush_rows=1, flush_seconds=3600)
+        for r in rows:
+            recorder.record("events", DAY, "H0IFCNT0", "A01612", r, schema)
+        recorder.close()
+    local = LocalObjectStore(tmp_path / "archive")
+
+    report = await archive(data, local)
+
+    assert not report.failed
+    key = "events/date=2026-10-08/feed=H0IFCNT0/symbol=A01612/data.parquet"
+    assert [(r["price"], r["change_pct"]) for r in fetched(local, key, tmp_path)] == [
+        (1056.3, None),
+        (1057.1, -1.2),
+    ]

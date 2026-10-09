@@ -239,7 +239,6 @@ OPTION_SCHEMA = pa.schema(
         ("event_time", EVENT_TIME),
         ("received_at", RECEIVED_AT),
         ("price", pa.float64()),
-        ("change_pct", pa.float64()),  # from the previous close; added for #12
         ("qty", pa.int64()),
         ("cum_volume", pa.int64()),
         ("open_interest", pa.int64()),
