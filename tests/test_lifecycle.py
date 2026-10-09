@@ -30,6 +30,7 @@ from tests.test_leaderboard_api import SURE
 ALPHA = FixedAlgorithm("alpha", features=("velocity",), unique=("velocity",))
 BETA = FixedAlgorithm("beta", features=("acceleration",), unique=("acceleration",))
 GAMMA = FixedAlgorithm("gamma", features=("relative_volume",), unique=("relative_volume",))
+DELTA = FixedAlgorithm("delta", features=("vwap_z",), unique=("vwap_z",))
 NEXT_DAY = date(2026, 10, 13)
 TWO_DAYS = MarketCalendar({DAY: True, NEXT_DAY: True})
 # What happened at each day's first eight bar closes from 09:01: up, flat, down, flat, twice.
@@ -207,3 +208,22 @@ async def test_a_benched_algorithm_recovers_or_after_sixty_days_is_a_retirement_
         notify=sent.append,
     )
     assert len(sent) == 1
+
+
+async def test_an_algorithm_on_probation_moving_with_an_earlier_one_is_a_clone(tmp_path: Path) -> None:
+    db = tmp_path / "engine.db"
+    days = weekdays_before(DAY, 5)
+    for name in ("alpha", "beta", "gamma"):
+        put_status(db, name, "probation", days[0])
+    put_status(db, "delta", "clone", days[0])
+    # beta says what alpha says; gamma does not; delta stopped copying anyone.
+    put_days(db, days, {"alpha": RIGHT, "beta": RIGHT, "gamma": MISSES_DOWNS, "delta": WRONG})
+
+    engine = await review_day(db, [ALPHA, BETA, GAMMA, DELTA])
+
+    statuses = await listed(engine)
+    assert last_change(statuses["beta"])[:2] == ("probation", "clone")
+    assert "alpha" in last_change(statuses["beta"])[2]
+    assert statuses["alpha"]["status"]["status"] == "probation"  # the earlier one is not the clone
+    assert statuses["gamma"]["status"]["status"] == "probation"
+    assert last_change(statuses["delta"])[:2] == ("clone", "probation")
