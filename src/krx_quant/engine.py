@@ -296,14 +296,12 @@ class PredictionEngine:
             fee_rate=self.fee_rate,
             alerted=alerted,
         )
-        current = self.store.statuses()  # a command may have changed one in the meantime
         for c in result.changes:
-            now = current[c.algorithm].status
-            if now is not c.previous:
-                log.info("%s: %s not applied, it is %s now", c.algorithm, c.status.value, now.value)
-                continue
-            log.info("%s: %s -> %s (%s)", c.algorithm, c.previous.value, c.status.value, c.reason)
-            self.store.add_status(c.algorithm, at, c.previous, c.status, c.reason)
+            # Only from the status reviewed: a retire command may have landed meanwhile.
+            if self.store.change_status(c.algorithm, at, c.previous, c.status, c.reason):
+                log.info("%s: %s -> %s (%s)", c.algorithm, c.previous.value, c.status.value, c.reason)
+            else:
+                log.info("%s: %s not applied, its status changed meanwhile", c.algorithm, c.status.value)
         for candidate in result.candidates:
             name = candidate.algorithm
             text = (

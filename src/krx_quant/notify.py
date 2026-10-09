@@ -48,11 +48,12 @@ class Alerts:
 
     async def deliver(self, text: str) -> bool:
         """Send a notice that is not a problem to resolve (an algorithm to retire) and wait:
-        whether it went, or there is nowhere to send it (then it is only logged).
+        whether it went. Not without Telegram set up (it is only logged), so it is asked for
+        again once it is.
         """
         log.warning("alert: %s", text)
         if self._url is None:
-            return True
+            return False
         try:
             await self.send_now(f"[알림] {text}")
         except RuntimeError as e:
