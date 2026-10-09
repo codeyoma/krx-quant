@@ -18,7 +18,9 @@ from krx_quant.config import Settings, SettingsError
 from krx_quant.fake_kis import FakeKis
 from krx_quant.feeds.base import KST
 from krx_quant.kis import KisError
+from krx_quant.lifecycle import Status
 from krx_quant.notify import send_test_alert
+from krx_quant.predictions import DB_NAME, PredictionStore
 from krx_quant.replay import replay_day
 from krx_quant.training import fit_algorithm
 
@@ -87,6 +89,30 @@ def _fit(name: str, days: int | None) -> int:
     print(f"{fitted.model.version}: {dict(fitted.model.params)}")
     print(f"trained on {fitted.days} days ({fitted.samples} samples): {fitted.model.trained}")
     print(f"saved to {fitted.path}; the engine uses it from its next start")
+    return 0
+
+
+def _retire(name: str, back: bool) -> int:
+    """Retire an algorithm (approved by the operator), or put a retired one back on probation."""
+    settings = Settings.from_env(require_kis=False)
+    store = PredictionStore(settings.state_dir / DB_NAME)
+    try:
+        standing = store.statuses().get(name)
+        if standing is None:
+            known = ", ".join(sorted(store.statuses()))
+            print(f"unknown algorithm {name!r}; known: {known}", file=sys.stderr)
+            return 1
+        current = Status(standing[0])
+        if back != (current is Status.RETIRED):
+            print(f"{name} is {current.value}", file=sys.stderr)
+            return 1
+        after, reason = (
+            (Status.PROBATION, "unretired by command") if back else (Status.RETIRED, "retired by command")
+        )
+        store.add_status(name, datetime.now(KST), current.value, after.value, reason)
+    finally:
+        store.close()
+    print(f"{name}: {current.value} -> {after.value}; the engine follows from its next bar close")
     return 0
 
 
@@ -161,6 +187,10 @@ def main(argv: list[str] | None = None) -> int:
     fit_cmd.add_argument(
         "--days", type=_positive, help="trading days to train on (default: the algorithm's own)"
     )
+    retire_cmd = sub.add_parser("retire", help="retire an algorithm: it is no longer run; its records stay")
+    retire_cmd.add_argument("algorithm")
+    unretire_cmd = sub.add_parser("unretire", help="put a retired algorithm back on probation")
+    unretire_cmd.add_argument("algorithm")
     sub.add_parser("test-alert", help="send a test message to the Telegram chat that receives alerts")
     fake = sub.add_parser("fake-kis", help="run a local fake KIS server for offline testing")
     fake.add_argument("--port", type=int, default=18080)
@@ -182,6 +212,8 @@ def main(argv: list[str] | None = None) -> int:
             return _replay(args.day, args.db)
         elif args.command == "fit":
             return _fit(args.algorithm, args.days)
+        elif args.command in ("retire", "unretire"):
+            return _retire(args.algorithm, back=args.command == "unretire")
         elif args.command == "test-alert":
             return asyncio.run(_test_alert())
         elif args.command == "fake-kis":

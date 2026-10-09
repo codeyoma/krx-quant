@@ -339,7 +339,7 @@ class PredictionEngine:
         )
         if not at_close:
             return
-        chosen = self._within_cpu_budget(bar_close)
+        chosen = self._within_cpu_budget(bar_close, self._running())
         await asyncio.gather(*(self._run(a, bar_close, at_close) for a in chosen))
 
     def _record_not_predicted(self, bar_close: datetime, symbols: Sequence[str], status: str) -> None:
@@ -347,12 +347,17 @@ class PredictionEngine:
         at_close = {s: _AtClose(self._reference.mid(s, bar_close), {}) for s in symbols}
         nothing = dict.fromkeys(symbols)
         made = [(b.name, b.version, nothing, status) for b in BASELINES]
-        made += [(a.name, self.models[a.name].version, nothing, status) for a in self.algorithms]
+        made += [(a.name, self.models[a.name].version, nothing, status) for a in self._running()]
         self._record(bar_close, at_close, made)
 
-    def _within_cpu_budget(self, bar_close: datetime) -> list[Algorithm]:
+    def _running(self) -> list[Algorithm]:
+        """The registered algorithms not retired (read each time: retiring is a command)."""
+        retired = {name for name, (s, _) in self.store.statuses().items() if s == Status.RETIRED.value}
+        return [a for a in self.algorithms if a.name not in retired]
+
+    def _within_cpu_budget(self, bar_close: datetime, running: Sequence[Algorithm]) -> list[Algorithm]:
         """The algorithms to run: the last registered drop out while the expected work is over budget."""
-        chosen = list(self.algorithms)
+        chosen = list(running)
         while chosen and sum(self._cost.get(a.name, 0.0) for a in chosen) > self._budget.cpu:
             dropped = chosen.pop()
             expected = self._cost.get(dropped.name, 0.0)
