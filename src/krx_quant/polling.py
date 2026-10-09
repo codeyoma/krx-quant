@@ -8,7 +8,7 @@ import json
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 
 import aiohttp
@@ -80,22 +80,24 @@ class Poller:
         while not self._stop.is_set():
             now = self._now()
             if job.when is None or job.when(now):
-                params = job.feed.params(job.key, kst_day(now))
+                day = kst_day(now)  # the answer is recorded under the day it was asked for
+                params = job.feed.params(job.key, day)
                 try:
                     body = await client.get(job.feed.tr_id, job.feed.path, params)
                 except (KisError, aiohttp.ClientError, OSError, ValueError, TimeoutError) as e:
                     log.warning("poll %s %s failed: %s", job.feed.tr_id, job.key, e)
                 else:
                     if not (job.changes_only and body == last):
-                        self._record(job, params, body, self._now())
+                        self._record(job, params, body, self._now(), day)
                         last = body
                     if self._on_received is not None:
                         self._on_received((job.feed.tr_id, job.key))
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(self._stop.wait(), job.interval)
 
-    def _record(self, job: PollJob, params: dict[str, str], body: dict[str, object], at: datetime) -> None:
-        day = kst_day(at)
+    def _record(
+        self, job: PollJob, params: dict[str, str], body: dict[str, object], at: datetime, day: date
+    ) -> None:
         received_at = at.astimezone(UTC)
         message = json.dumps({"tr_id": job.feed.tr_id, "params": params, "body": body}, ensure_ascii=False)
         raw_row = {"received_at": received_at, "message": message}

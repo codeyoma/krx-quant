@@ -154,13 +154,19 @@ class Settings:
         symbols = codes("KRX_SYMBOLS", "005930")
         if not symbols:
             raise SettingsError("KRX_SYMBOLS lists no symbols")
+        index_codes = codes("KRX_INDEX_CODES", "0001,2001,0013")
+        if "0001" not in index_codes:
+            # The engine calls KOSPI circuit breakers from it (special.py).
+            raise SettingsError(
+                "KRX_INDEX_CODES must include 0001 (KOSPI): circuit breakers are called from it"
+            )
         return cls(
             kis_app_key=required("KIS_APP_KEY"),
             kis_app_secret=required("KIS_APP_SECRET"),
             kis_rest_url=values.get("KIS_REST_URL", DEFAULT_REST_URL),
             kis_ws_url=values.get("KIS_WS_URL", DEFAULT_WS_URL),
             symbols=symbols,
-            index_codes=codes("KRX_INDEX_CODES", "0001,2001,0013"),
+            index_codes=index_codes,
             us_symbols=codes("KRX_US_SYMBOLS", "NVDA,MU,AMD"),
             venue_trades=values.get("KRX_VENUE_TRADES", "true").strip().lower() in ("1", "true", "yes"),
             master_url=values.get("KIS_MASTER_URL", DEFAULT_MASTER_URL),
