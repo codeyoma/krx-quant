@@ -19,15 +19,27 @@ from pathlib import Path
 from typing import Any
 
 from krx_quant.feeds import KST
-from krx_quant.predictions import PredictionStore
+from krx_quant.market_calendar import MarketCalendar
+from krx_quant.predictions import NewPrediction, PredictionStore, Score
 from krx_quant.pricing import Direction
 from tests.algorithm_doubles import FixedAlgorithm
 from tests.replay_events import DAY, api, at, get_json, run
-from tests.test_leaderboard_api import OUTCOMES, baselines, store_scored
+from tests.test_leaderboard_api import OUTCOMES as FORTY_OUTCOMES
+from tests.test_leaderboard_api import SURE
 
 ALPHA = FixedAlgorithm("alpha", features=("velocity",), unique=("velocity",))
 BETA = FixedAlgorithm("beta", features=("acceleration",), unique=("acceleration",))
 GAMMA = FixedAlgorithm("gamma", features=("relative_volume",), unique=("relative_volume",))
+NEXT_DAY = date(2026, 10, 13)
+TWO_DAYS = MarketCalendar({DAY: True, NEXT_DAY: True})
+# What happened at each day's first eight bar closes from 09:01: up, flat, down, flat, twice.
+# Enough for min_sample 20 within three days, and few enough to fill 65 days fast.
+OUTCOMES = FORTY_OUTCOMES[:8]
+BASELINE_CALLS = {
+    "baseline-flat": [Direction.FLAT] * len(OUTCOMES),
+    "baseline-persist": [Direction.UP] * len(OUTCOMES),
+    "baseline-random": [Direction.DOWN] * len(OUTCOMES),
+}
 RIGHT = OUTCOMES  # every call right
 FLAT = [Direction.FLAT] * len(OUTCOMES)  # the same calls as always-flat: no lift
 # Right but on the downs, which it calls flat: better than every baseline, and its p_up − p_down
@@ -88,13 +100,30 @@ def put_status(db: Path, algorithm: str, status: str, since: date) -> None:
 def put_days(
     db: Path, days: list[date], calls: dict[str, list[Direction]], *, with_baselines: bool = True
 ) -> None:
-    """Each algorithm's ``calls`` on each of ``days``, with the baselines' unless they are there."""
+    """Each algorithm's ``calls`` on each of ``days`` (one sure call per bar close from 09:01,
+    scored against OUTCOMES on both bases), with the baselines' unless they are there.
+    """
+    if with_baselines:
+        calls = {**calls, **BASELINE_CALLS}
     with stored(db) as store:
         for d in days:
-            if with_baselines:
-                baselines(store, day=d)
-            for algorithm, made in calls.items():
-                store_scored(store, algorithm, made, day=d)
+            made = []
+            for algorithm, directions in calls.items():
+                for i, call in enumerate(directions):
+                    t = datetime.combine(d, time(9, 1), KST) + timedelta(minutes=i)
+                    target = t + timedelta(minutes=4)
+                    made.append(
+                        NewPrediction("005930", algorithm, "v1", t, t, SURE[call], target, 81_250, 81_250, 2)
+                    )
+            pending = store.add_all(made)
+            scores = []
+            for p in pending:
+                outcome = OUTCOMES[
+                    (p.target_at - datetime.combine(d, time(9, 5), KST)) // timedelta(minutes=1)
+                ]
+                target = 81_250 + {Direction.UP: 300, Direction.FLAT: 0, Direction.DOWN: -300}[outcome]
+                scores.append((p.prediction_id, Score(target, outcome, outcome, None)))
+            store.score_all(scores, datetime.combine(d, time(15, 30), KST))
 
 
 def last_change(algorithm: dict[str, Any]) -> tuple[str | None, str, str]:
@@ -119,3 +148,62 @@ async def test_probation_ends_after_ten_days_better_than_every_baseline(tmp_path
     assert statuses["alpha"]["status"]["since"] == "2026-10-12T15:40:00+09:00"
     assert statuses["beta"]["status"]["status"] == "probation"  # too soon
     assert statuses["gamma"]["status"]["status"] == "probation"  # no better than always-flat
+
+
+# Wrong where it matters: down on the ups, up on the downs, flat on the flats. It beats no
+# baseline.
+WRONG = [{Direction.UP: Direction.DOWN, Direction.DOWN: Direction.UP}.get(o, o) for o in OUTCOMES]
+
+
+async def test_an_active_algorithm_no_better_than_a_baseline_is_benched_and_still_predicts(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "engine.db"
+    days = weekdays_before(DAY, 25)
+    put_status(db, "alpha", "active", days[0])
+    put_status(db, "beta", "active", days[0])
+    # Good for its first days, then wrong for the last twenty.
+    put_days(db, days[:5], {"alpha": RIGHT, "beta": MISSES_DOWNS})
+    put_days(db, days[5:], {"alpha": WRONG, "beta": MISSES_DOWNS})
+
+    engine = await review_day(db, [ALPHA, BETA])
+
+    statuses = await listed(engine)
+    assert last_change(statuses["alpha"])[:2] == ("active", "bench")
+    assert "last 20 days" in last_change(statuses["alpha"])[2]
+    assert statuses["beta"]["status"]["status"] == "active"
+    async with api(engine) as client:
+        body = await get_json(client, "/v1/symbols/005930/predictions?algorithm=alpha&limit=5")
+    assert len(body["predictions"]) == 5  # a benched algorithm is still run
+
+
+async def test_a_benched_algorithm_recovers_or_after_sixty_days_is_a_retirement_candidate(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "engine.db"
+    days = weekdays_before(DAY, 65)
+    put_status(db, "alpha", "bench", days[0])
+    put_status(db, "beta", "bench", days[0])
+    put_days(db, days[:-20], {"alpha": WRONG, "beta": WRONG})
+    put_days(db, days[-20:], {"alpha": WRONG, "beta": RIGHT})  # beta is good again
+    sent: list[str] = []
+
+    engine = await review_day(db, [ALPHA, BETA], notify=sent.append)
+
+    statuses = await listed(engine)
+    assert last_change(statuses["beta"])[:2] == ("bench", "active")
+    assert statuses["alpha"]["status"]["status"] == "bench"  # retired only by command
+    [alert] = sent
+    assert "alpha" in alert and "krx-quant retire alpha" in alert
+
+    # The next day it is still a candidate, but the alert is not sent again.
+    await run(
+        db,
+        [],
+        until=at("15:45:00", NEXT_DAY),
+        calendar=TWO_DAYS,
+        algorithms=[ALPHA, BETA],
+        min_sample=20,
+        notify=sent.append,
+    )
+    assert len(sent) == 1
