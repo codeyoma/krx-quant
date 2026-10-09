@@ -40,7 +40,7 @@ CREATE TABLE IF NOT EXISTS {name} (
     p_flat REAL,
     p_down REAL,
     expected_ticks REAL,
-    status TEXT NOT NULL,             -- ok, timed_out, error
+    status TEXT NOT NULL,             -- ok, timed_out, error, vi (not predicted in a VI)
     UNIQUE (symbol, algorithm, bar_close)
 );
 """
@@ -59,7 +59,7 @@ CREATE TABLE IF NOT EXISTS outcomes (
     flat_ticks INTEGER,               -- k: smaller moves are flat
     class_a TEXT,                     -- up, flat or down
     class_b TEXT,
-    special INTEGER NOT NULL DEFAULT 0,  -- a VI or circuit breaker fell in the window
+    special INTEGER NOT NULL DEFAULT 0,  -- a VI, circuit breaker or sidecar touched the window
     unscorable TEXT,                  -- why a basis could not be scored
     scored_at TEXT                    -- null while pending
 );
@@ -102,6 +102,7 @@ class NewPrediction:
     mid_display: float | None
     flat_ticks: int | None
     status: str = "ok"
+    special: bool = False  # a special situation known to touch its window when it was made
 
 
 @dataclass(frozen=True)
@@ -188,9 +189,17 @@ class PredictionStore:
                 if f is None:
                     continue  # nothing to score
                 self._db.execute(
-                    "INSERT INTO outcomes (prediction_id, target_at, mid_close, mid_display, flat_ticks)"
-                    " VALUES (?, ?, ?, ?, ?)",
-                    (cursor.lastrowid, iso(p.target_at), p.mid_close, p.mid_display, p.flat_ticks),
+                    "INSERT INTO outcomes"
+                    " (prediction_id, target_at, mid_close, mid_display, flat_ticks, special)"
+                    " VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        cursor.lastrowid,
+                        iso(p.target_at),
+                        p.mid_close,
+                        p.mid_display,
+                        p.flat_ticks,
+                        int(p.special),
+                    ),
                 )
                 added.append(
                     Pending(cursor.lastrowid, p.symbol, p.target_at, p.mid_close, p.mid_display, p.flat_ticks)
@@ -227,8 +236,8 @@ class PredictionStore:
         self.version += 1
         with self._db:
             self._db.executemany(
-                "UPDATE outcomes SET mid_target = ?, class_a = ?, class_b = ?, unscorable = ?, special = ?,"
-                " scored_at = ? WHERE prediction_id = ?",
+                "UPDATE outcomes SET mid_target = ?, class_a = ?, class_b = ?, unscorable = ?,"
+                " special = MAX(special, ?), scored_at = ? WHERE prediction_id = ?",
                 [
                     (
                         score.mid_target,
@@ -241,6 +250,24 @@ class PredictionStore:
                     )
                     for prediction_id, score in scores
                 ],
+            )
+
+    def mark_special(self, symbol: str | None, start: datetime, end: datetime) -> None:
+        """Mark special every prediction (of ``symbol``, or of every symbol if None) whose
+        window touches ``[start, end]``, scored or not.
+        """
+        self.version += 1
+        where = "p.bar_close < ? AND o.target_at > ?"
+        params: list[str] = [iso(end), iso(start)]
+        if symbol is not None:
+            where += " AND p.symbol = ?"
+            params.append(symbol)
+        with self._db:
+            self._db.execute(
+                "UPDATE outcomes SET special = 1 WHERE prediction_id IN"
+                f" (SELECT o.prediction_id FROM outcomes o JOIN predictions p ON p.id = o.prediction_id"
+                f" WHERE {where})",
+                params,
             )
 
     def day_classes(self, symbol: str, since: datetime, until: datetime) -> Mapping[Direction, int]:

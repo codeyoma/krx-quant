@@ -18,7 +18,7 @@ from krx_quant.algorithms import ALGORITHMS
 from krx_quant.api import create_app
 from krx_quant.baselines import BASELINES
 from krx_quant.engine import Event, PredictionEngine
-from krx_quant.feeds import BOOK, KRX_TRADE, KST, TRADE, Feed
+from krx_quant.feeds import BOOK, KRX_TRADE, KST, TRADE, VI_STATUS, Feed
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.replay import replay
 
@@ -94,6 +94,24 @@ def steady_book(start: datetime, end: datetime, bid: int, ask: int, every: float
         events.append(book(when, bid, ask))
         when += timedelta(seconds=every)
     return events
+
+
+def vi(received: datetime, start: str, end: str | None = None, symbol: str = SYMBOL) -> Event:
+    """A VI status answer received at ``received``: a VI from ``start`` (``"09:30:20"``),
+    released at ``end``, or still on.
+    """
+    row = {
+        "mksc_shrn_iscd": symbol,
+        "vi_cls_code": "N" if end else "Y",
+        "bsop_date": received.strftime("%Y%m%d"),
+        "cntg_vi_hour": start.replace(":", ""),
+        "vi_cncl_hour": end.replace(":", "") if end else "",
+        "vi_kind_code": "2",
+        "vi_prc": "81500",
+        "vi_count": "1",
+    }
+    [event] = VI_STATUS.normalize({"output": [row]}, symbol, received.astimezone(UTC))
+    return (VI_STATUS.tr_id, event)
 
 
 async def run(

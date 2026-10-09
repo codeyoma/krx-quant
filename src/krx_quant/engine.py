@@ -38,12 +38,13 @@ from krx_quant.baselines import BASELINES, Forecast, Inputs
 from krx_quant.clock import SessionClock
 from krx_quant.config import Settings
 from krx_quant.features import FeatureStore, FeatureValue, FeatureVector, Snapshot
-from krx_quant.feeds import BOOK, BOOK_SNAPSHOT, KRX_TRADE, TRADE
+from krx_quant.feeds import BOOK, BOOK_SNAPSHOT, KRX_TRADE, TRADE, VI_STATUS
 from krx_quant.feeds.base import KST
 from krx_quant.market_calendar import MarketCalendar, Session
 from krx_quant.predictions import NewPrediction, Pending, PredictionStore, Score
 from krx_quant.pricing import Direction, classify, flat_ticks, tick_size
 from krx_quant.reference import BAR, Bar, BarBuilder, ReferencePrice, Source
+from krx_quant.special import SpecialSituations, Window
 
 log = logging.getLogger(__name__)
 
@@ -62,6 +63,8 @@ ENGINE_FEEDS: dict[str, tuple[str, ...]] = {
     BOOK_SNAPSHOT.tr_id: ("symbol", "received_at", "ask_px_1", "bid_px_1"),
     # KRX-only trades carry KRX's best quotes, for the 30 seconds before NXT opens.
     KRX_TRADE.tr_id: ("symbol", "received_at", "ask1", "bid1"),
+    # A symbol's VIs: a bar close inside one is not predicted; a window touching one is special.
+    VI_STATUS.tr_id: ("symbol", "event_time", "received_at", "end_time"),
 }
 
 
@@ -120,6 +123,7 @@ class PredictionEngine:
         self._cost: dict[str, float] = {}  # expected seconds per bar close, by algorithm
         self._busy: set[str] = set()  # algorithms still working past their budget
         self._reference = ReferencePrice(calendar)
+        self._special = SpecialSituations()
         self._bars = BarBuilder()
         self._last_tick = clock.now()
         # Bars as they stood at bar closes not yet predicted, kept once an event received
@@ -136,6 +140,9 @@ class PredictionEngine:
         if symbol not in self.symbols or feed not in ENGINE_FEEDS:
             return
         received_at = row["received_at"]
+        if feed == VI_STATUS.tr_id:
+            self._learned(self._special.vi(row))
+            return
         self._freeze_before(received_at)
         if feed == TRADE.tr_id:
             self._bars.trade(symbol, row["event_time"], row["price"], row["qty"])
@@ -144,6 +151,12 @@ class PredictionEngine:
             self._reference.quote(symbol, Source.KRX, received_at, row["bid1"], row["ask1"])
         else:
             self._reference.quote(symbol, Source.INTEGRATED, received_at, row["bid_px_1"], row["ask_px_1"])
+
+    def _learned(self, window: Window | None) -> None:
+        """A special window just learned: the predictions it touches are special, scored or not."""
+        if window is not None:
+            log.info("special situation: %s", window)
+            self.store.mark_special(window.symbol, window.start, window.end)
 
     def _freeze_before(self, received_at: datetime) -> None:
         """Keep the bars of every bar close this event comes after (at the same instant
@@ -202,7 +215,12 @@ class PredictionEngine:
         baselines: dict[tuple[str, str], dict[str, Forecast | None]] = {}
         session = self.calendar.session(bar_close.date())
         session_open = session.open if session is not None else None
+        in_vi = [s for s in self.symbols if self._special.in_vi(s, bar_close, known_before=bar_close)]
+        if in_vi:
+            self._record_not_predicted(bar_close, in_vi, "vi")
         for symbol in self.symbols:
+            if symbol in in_vi:
+                continue
             mid = self._reference.mid(symbol, bar_close)
             snapshot = Snapshot.at(
                 symbol, bar_close, bars.get(symbol, []), mid, self.fee_rate, session_open=session_open
@@ -222,8 +240,18 @@ class PredictionEngine:
         self._record(
             bar_close, at_close, [(name, version, made, "ok") for (name, version), made in baselines.items()]
         )
+        if not at_close:
+            return
         chosen = self._within_cpu_budget(bar_close)
         await asyncio.gather(*(self._run(a, bar_close, at_close) for a in chosen))
+
+    def _record_not_predicted(self, bar_close: datetime, symbols: Sequence[str], status: str) -> None:
+        """Every predictor's empty prediction for ``symbols``, recorded with why."""
+        at_close = {s: _AtClose(self._reference.mid(s, bar_close), {}) for s in symbols}
+        nothing = dict.fromkeys(symbols)
+        made = [(b.name, b.version, nothing, status) for b in BASELINES]
+        made += [(a.name, self.models[a.name].version, nothing, status) for a in self.algorithms]
+        self._record(bar_close, at_close, made)
 
     def _within_cpu_budget(self, bar_close: datetime) -> list[Algorithm]:
         """The algorithms to run: the last registered drop out while the expected work is over budget."""
@@ -297,6 +325,9 @@ class PredictionEngine:
                         mid_display=mid_display[symbol],
                         flat_ticks=flat_ticks(reference, self.fee_rate) if reference is not None else None,
                         status=status,
+                        special=self._special.touches(
+                            symbol, bar_close, bar_close + HORIZON, known_before=displayed_at
+                        ),
                     )
                 )
         for pending in self.store.add_all(predictions):
