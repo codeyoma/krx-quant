@@ -9,6 +9,8 @@ from pathlib import Path
 
 from dotenv import dotenv_values
 
+from krx_quant.stats import DEFAULT_MIN_SAMPLE
+
 DEFAULT_REST_URL = "https://openapi.koreainvestment.com:9443"
 DEFAULT_WS_URL = "ws://ops.koreainvestment.com:21000"
 # KIS publishes daily master files of listed contracts here.
@@ -98,7 +100,7 @@ class Settings:
     algorithm_seconds: float = 30.0
     cpu_budget_seconds: float = 30.0
     # An algorithm needs this many scored predictions in a leaderboard to be ranked.
-    min_sample: int = 200
+    min_sample: int = DEFAULT_MIN_SAMPLE
 
     @classmethod
     def from_env(
@@ -199,5 +201,5 @@ class Settings:
             api_port=int(number("KRX_API_PORT", "8080", int, maximum=65535)),
             algorithm_seconds=float(number("KRX_ALGORITHM_SECONDS", "30", float, maximum=55)),
             cpu_budget_seconds=float(number("KRX_CPU_BUDGET_SECONDS", "30", float)),
-            min_sample=int(number("KRX_MIN_SAMPLE", "200", int)),
+            min_sample=int(number("KRX_MIN_SAMPLE", str(DEFAULT_MIN_SAMPLE), int)),
         )

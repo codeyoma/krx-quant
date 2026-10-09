@@ -162,13 +162,36 @@ async def test_an_algorithms_stats_break_down_by_symbol_slot_and_model_version(t
     assert {v: e["n"] for v, e in body["by_model_version"].items()} == {"alpha-1": 30, "alpha-2": 30}
     assert len(body["overall"]["calibration"]) == 10
     assert body["overall"]["pnl"]["trades"] == 30
+    # Overall lifts are adjusted with the whole leaderboard's; breakdowns are not tested.
+    assert body["overall"]["lift"]["vs"]["baseline-flat"]["significant"] is True
+    assert body["overall"]["lift"]["vs"]["baseline-flat"]["q"] is not None
+    by_symbol = body["by_symbol"]["005930"]["lift"]["vs"]["baseline-flat"]
+    assert (by_symbol["q"], by_symbol["significant"]) == (None, None)
 
 
 async def test_bad_choices_and_unknown_algorithms_are_refused(tmp_path: Path) -> None:
-    async with board(tmp_path) as (_, client):
+    async with board(tmp_path) as (engine, client):
+        store_scored(engine.store, "retired", OUTCOMES[:4], day=EARLIER)
         for query in ("period=week", "basis=c", "symbol=999999", "special=maybe"):
             assert "error" in await get(client, f"/v1/leaderboard?{query}", status=400)
         assert "error" in await get(client, "/v1/algorithms/einstein/stats", status=404)
+        # Known from earlier days: today it simply has nothing.
+        assert (await get(client, "/v1/algorithms/retired/stats"))["overall"]["n"] == 0
+
+
+async def test_ranking_needs_enough_pairs_and_only_candidates_share_the_adjustment(tmp_path: Path) -> None:
+    async with board(tmp_path) as (engine, client):
+        baselines(engine.store, n=10)  # baselines only at the first 10 bar closes
+        store_scored(engine.store, "alpha", OUTCOMES)  # 40 scored, but 10 pairs
+        store_scored(engine.store, "beta", OUTCOMES[:5])  # too few to be a candidate
+
+        body = await get(client, "/v1/leaderboard")
+
+    assert body["ranked"] == []
+    unranked = {e["algorithm"]: e for e in body["unranked"]}
+    assert unranked["alpha"]["n"] == 40
+    assert unranked["alpha"]["lift"]["vs"]["baseline-flat"]["n"] == 10
+    assert unranked["beta"]["lift"]["vs"]["baseline-flat"]["q"] is None
 
 
 async def test_a_replayed_morning_reaches_the_leaderboard(tmp_path: Path) -> None:
@@ -185,3 +208,17 @@ async def test_a_replayed_morning_reaches_the_leaderboard(tmp_path: Path) -> Non
     assert [b["n"] for b in body["baselines"]] == [56, 56, 56]
     assert newton["overall"]["n"] == 56
     assert set(newton["by_slot"]) == {"09:00", "09:30"}
+
+
+async def test_new_scores_show_on_the_next_request(tmp_path: Path) -> None:
+    async with board(tmp_path) as (engine, client):
+        baselines(engine.store)
+        store_scored(engine.store, "alpha", OUTCOMES[:30])
+        before = await get(client, "/v1/leaderboard")
+        store_scored(engine.store, "alpha", OUTCOMES[:10], symbol="000660")
+        after = await get(client, "/v1/leaderboard")
+
+    def alpha_n(body: Any) -> int:
+        return next(int(e["n"]) for e in body["ranked"] + body["unranked"] if e["algorithm"] == "alpha")
+
+    assert (alpha_n(before), alpha_n(after)) == (30, 40)

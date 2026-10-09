@@ -151,12 +151,17 @@ class PredictionStore:
             raise RuntimeError(f"{path} was written by a newer engine (schema {version})")
         script = (_FROM_V1 if version == 1 else "") + _SCHEMA + f"PRAGMA user_version={_VERSION};"
         self._db.executescript(f"BEGIN;{script}COMMIT;")
+        # Bumped by every write, so derived results (statistics) know when to recompute.
+        self.version = 0
+        self._algorithms = {r[0] for r in self._db.execute("SELECT DISTINCT algorithm FROM predictions")}
 
     def close(self) -> None:
         self._db.close()
 
     def add_all(self, predictions: Sequence[NewPrediction]) -> list[Pending]:
         """Store predictions in one transaction; those made are pending until scored."""
+        self.version += 1
+        self._algorithms.update(p.algorithm for p in predictions)
         added: list[Pending] = []
         with self._db:
             for p in predictions:
@@ -217,6 +222,7 @@ class PredictionStore:
 
     def score_all(self, scores: Sequence[tuple[int, Score]], scored_at: datetime) -> None:
         """Complete the outcomes of (prediction ID, score) pairs in one transaction."""
+        self.version += 1
         with self._db:
             self._db.executemany(
                 "UPDATE outcomes SET mid_target = ?, class_a = ?, class_b = ?, unscorable = ?, special = ?,"
@@ -280,25 +286,46 @@ class PredictionStore:
         ).fetchall()
         return [AlgorithmSummary(r[0], *(int(v) for v in r[1:])) for r in rows]
 
-    def prediction_days(self, until: date) -> list[date]:
-        """Days with predictions, up to ``until``, latest first."""
-        rows = self._db.execute(
-            "SELECT DISTINCT substr(bar_close, 1, 10) AS day FROM predictions WHERE bar_close < ?"
-            " ORDER BY day DESC",
-            (iso(datetime.combine(until + timedelta(days=1), time(), KST)),),
-        ).fetchall()
-        return [date.fromisoformat(r[0]) for r in rows]
+    def algorithms(self) -> set[str]:
+        """Every algorithm (and baseline) that ever predicted."""
+        return set(self._algorithms)
 
-    def scored(self, days: Sequence[date], symbol: str | None, include_special: bool) -> list[dict[str, Any]]:
+    def prediction_days(self, until: date, limit: int) -> list[date]:
+        """The latest ``limit`` days with predictions, up to ``until``, latest first.
+
+        Walks back a day at a time on the bar-close index rather than reading every row.
+        """
+        days: list[date] = []
+        before = iso(datetime.combine(until + timedelta(days=1), time(), KST))
+        while len(days) < limit:
+            latest = self._db.execute("SELECT MAX(bar_close) FROM predictions WHERE bar_close < ?", (before,))
+            value = latest.fetchone()[0]
+            if value is None:
+                break
+            day = date.fromisoformat(value[:10])
+            days.append(day)
+            before = iso(datetime.combine(day, time(), KST))
+        return days
+
+    def scored_predictions(
+        self, days: Sequence[date], symbol: str | None, include_special: bool
+    ) -> list[dict[str, Any]]:
         """Predictions made on ``days`` and scored on either basis, of one symbol or all."""
         if not days:
             return []
         marks = ", ".join("?" for _ in days)
+        # The time range lets SQLite use the bar-close index; the day list keeps out the
+        # days in between that were not asked for.
         where = (
-            f"WHERE substr(p.bar_close, 1, 10) IN ({marks}) AND p.status = 'ok' AND o.scored_at IS NOT NULL"
+            "WHERE p.bar_close >= ? AND p.bar_close < ?"
+            f" AND substr(p.bar_close, 1, 10) IN ({marks}) AND p.status = 'ok' AND o.scored_at IS NOT NULL"
             " AND (o.class_a IS NOT NULL OR o.class_b IS NOT NULL)"
         )
-        params: list[Any] = [d.isoformat() for d in days]
+        params: list[Any] = [
+            iso(datetime.combine(min(days), time(), KST)),
+            iso(datetime.combine(max(days) + timedelta(days=1), time(), KST)),
+            *(d.isoformat() for d in days),
+        ]
         if symbol is not None:
             where += " AND p.symbol = ?"
             params.append(symbol)
