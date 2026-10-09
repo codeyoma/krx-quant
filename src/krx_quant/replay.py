@@ -196,6 +196,7 @@ async def replay_day(settings: Settings, day: date, db: Path | None = None) -> R
         until=start + timedelta(days=1) - timedelta(microseconds=1),
         models=models,
         budget=Budget.of(settings),
+        min_sample=settings.min_sample,
     )
     try:
         return ReplayedDay(db, engine.store.summary(), set_aside)

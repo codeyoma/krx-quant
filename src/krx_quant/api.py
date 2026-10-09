@@ -9,7 +9,8 @@ Endpoints (all under ``/v1``):
 - ``GET /symbols/{symbol}/predictions?limit=N&algorithm=A``: the predictions of the last
   N bar closes (default 100, at most 1000), newest first, with their outcomes;
 - ``GET /symbols/{symbol}/bars``: today's finished one-minute bars, oldest first;
-- ``GET /algorithms``: each registered algorithm's card, features and current model;
+- ``GET /algorithms``: each registered algorithm's card, features, current model and status
+  (probation, active, bench, retired, clone) with its history;
 - ``GET /leaderboard?symbol=&period=&basis=&special=``: algorithms ranked by the lower
   bound of their weakest lift over the baselines, with their stats;
 - ``GET /algorithms/{name}/stats?symbol=&period=&basis=&special=``: one algorithm's
@@ -261,14 +262,15 @@ async def _leaderboard(request: web.Request) -> web.Response:
     engine = request.app[ENGINE_KEY]
     query = _query(request, engine)
     min_sample = request.app[MIN_SAMPLE_KEY]
+    statuses = {name: status for name, (status, _) in engine.store.statuses().items()}
 
     def build(algorithms: dict[str, list[Scored]], baselines: dict[str, list[Scored]]) -> dict[str, Any]:
         board = leaderboard(algorithms, baselines, min_sample, engine.fee_rate)
         return {
             **query.describe(),
             "min_sample": min_sample,
-            "ranked": [_entry_json(e) for e in board.ranked],
-            "unranked": [_entry_json(e) for e in board.unranked],
+            "ranked": [{**_entry_json(e), "status": statuses.get(e.algorithm)} for e in board.ranked],
+            "unranked": [{**_entry_json(e), "status": statuses.get(e.algorithm)} for e in board.unranked],
             "baselines": [_entry_json(e) for e in board.baselines],
         }
 

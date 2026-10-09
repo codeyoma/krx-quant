@@ -46,6 +46,10 @@ class Alerts:
         self._active.discard(key)
         self._send(f"[복구] {text}")
 
+    def notify(self, text: str) -> None:
+        """A message that is not a problem to resolve, e.g. an algorithm to retire."""
+        self._send(f"[알림] {text}")
+
     def raise_many(self, keys: list[str], text: str) -> None:
         """One message for every key not already alerted: ``text: key, key``."""
         new = [k for k in keys if k not in self._active]

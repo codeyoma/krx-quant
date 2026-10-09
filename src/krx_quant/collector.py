@@ -167,6 +167,7 @@ async def run_collector(
         session_clock,
         models=load_models(settings.state_dir, ALGORITHMS),
         budget=Budget.of(settings),
+        min_sample=settings.min_sample,
     )
 
     def on_event(feed: str, row: dict[str, Any]) -> None:
@@ -181,6 +182,7 @@ async def run_collector(
             alerts = Alerts(
                 session, settings.telegram_bot_token, settings.telegram_chat_id, settings.telegram_api_url
             )
+            engine.notify = alerts.notify  # retirement candidates
             tokens, client = tokens_and_client(session, settings, now)
             await _warm_up(tokens)
             poller = Poller(
