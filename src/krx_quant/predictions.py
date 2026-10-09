@@ -13,7 +13,7 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +48,7 @@ _SCHEMA = (
     _PREDICTIONS.format(name="predictions")
     + """
 CREATE INDEX IF NOT EXISTS predictions_by_time ON predictions (symbol, bar_close);
+CREATE INDEX IF NOT EXISTS predictions_by_close ON predictions (bar_close);
 CREATE TABLE IF NOT EXISTS outcomes (
     prediction_id INTEGER PRIMARY KEY REFERENCES predictions (id),
     target_at TEXT NOT NULL,          -- t + 4 minutes
@@ -133,6 +134,7 @@ class Score:
     class_a: Direction | None
     class_b: Direction | None
     unscorable: str | None
+    special: bool = False  # a VI or circuit breaker fell in the window (#12)
 
 
 class PredictionStore:
@@ -217,14 +219,15 @@ class PredictionStore:
         """Complete the outcomes of (prediction ID, score) pairs in one transaction."""
         with self._db:
             self._db.executemany(
-                "UPDATE outcomes SET mid_target = ?, class_a = ?, class_b = ?, unscorable = ?, scored_at = ?"
-                " WHERE prediction_id = ?",
+                "UPDATE outcomes SET mid_target = ?, class_a = ?, class_b = ?, unscorable = ?, special = ?,"
+                " scored_at = ? WHERE prediction_id = ?",
                 [
                     (
                         score.mid_target,
                         score.class_a.value if score.class_a else None,
                         score.class_b.value if score.class_b else None,
                         score.unscorable,
+                        int(score.special),
                         iso(scored_at),
                         prediction_id,
                     )
@@ -276,6 +279,32 @@ class PredictionStore:
             " ORDER BY p.algorithm"
         ).fetchall()
         return [AlgorithmSummary(r[0], *(int(v) for v in r[1:])) for r in rows]
+
+    def prediction_days(self, until: date) -> list[date]:
+        """Days with predictions, up to ``until``, latest first."""
+        rows = self._db.execute(
+            "SELECT DISTINCT substr(bar_close, 1, 10) AS day FROM predictions WHERE bar_close < ?"
+            " ORDER BY day DESC",
+            (iso(datetime.combine(until + timedelta(days=1), time(), KST)),),
+        ).fetchall()
+        return [date.fromisoformat(r[0]) for r in rows]
+
+    def scored(self, days: Sequence[date], symbol: str | None, include_special: bool) -> list[dict[str, Any]]:
+        """Predictions made on ``days`` and scored on either basis, of one symbol or all."""
+        if not days:
+            return []
+        marks = ", ".join("?" for _ in days)
+        where = (
+            f"WHERE substr(p.bar_close, 1, 10) IN ({marks}) AND p.status = 'ok' AND o.scored_at IS NOT NULL"
+            " AND (o.class_a IS NOT NULL OR o.class_b IS NOT NULL)"
+        )
+        params: list[Any] = [d.isoformat() for d in days]
+        if symbol is not None:
+            where += " AND p.symbol = ?"
+            params.append(symbol)
+        if not include_special:
+            where += " AND o.special = 0"
+        return self._select(where, tuple(params))
 
     def last_bar_close(self) -> str | None:
         value: str | None = self._db.execute("SELECT MAX(bar_close) FROM predictions").fetchone()[0]

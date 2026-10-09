@@ -229,7 +229,10 @@ async def _serve_api(
     """Start the Engine API; if it cannot listen, alert and go on recording without it."""
     if settings.api_port is None:
         return None
-    runner = web.AppRunner(create_app(engine, mode="live", live_status=live_status), access_log=None)
+    runner = web.AppRunner(
+        create_app(engine, mode="live", live_status=live_status, min_sample=settings.min_sample),
+        access_log=None,
+    )
     await runner.setup()
     try:
         await web.TCPSite(runner, settings.api_host, settings.api_port).start()
