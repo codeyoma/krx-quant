@@ -53,7 +53,7 @@ from krx_quant.feeds import (
     VI_STATUS,
 )
 from krx_quant.feeds.base import KST
-from krx_quant.lifecycle import Status
+from krx_quant.lifecycle import Status, review
 from krx_quant.market_calendar import MarketCalendar, Session
 from krx_quant.predictions import NewPrediction, Pending, PredictionStore, Score
 from krx_quant.pricing import Direction, classify, flat_ticks, tick_size
@@ -66,6 +66,10 @@ log = logging.getLogger(__name__)
 Event = tuple[str, dict[str, Any]]  # (feed TR ID, normalized row)
 
 HORIZON = timedelta(minutes=4)
+# Each day's algorithm review runs this long after the close, when everything is scored.
+REVIEW_AFTER_CLOSE = timedelta(minutes=10)
+# Days of history a review looks back over: enough for the longest rule (60 on the bench).
+_REVIEW_DAYS = 400
 # How far ahead to look for the next session (long holidays included).
 _LOOKAHEAD_DAYS = 15
 
@@ -164,6 +168,7 @@ class PredictionEngine:
             heapq.heappush(self._pending, (p.target_at, p.prediction_id, p))
         self.min_sample = min_sample
         self._notify = notify
+        self._reviewed_through = self._last_tick
         self._enroll()
 
     def _enroll(self) -> None:
@@ -210,7 +215,7 @@ class PredictionEngine:
 
     def next_due(self) -> datetime | None:
         """When ``run_due`` next has work: a bar close to predict or an outcome to score."""
-        candidates = [self._next_bar_close(self._last_tick)]
+        candidates = [self._next_bar_close(self._last_tick), self._next_review(self._reviewed_through)]
         if self._pending:
             candidates.append(self._pending[0][0])
         due = [c for c in candidates if c is not None]
@@ -224,6 +229,9 @@ class PredictionEngine:
             if due == self._next_bar_close(self._last_tick):
                 self._last_tick = due
                 await self._predict(due)
+            if due == self._next_review(self._reviewed_through):
+                self._reviewed_through = due
+                await self._review(due)
 
     def bars(self, symbol: str) -> list[Bar]:
         return self._bars.closed(symbol, self.clock.now())
@@ -252,6 +260,45 @@ class PredictionEngine:
             day += timedelta(days=1)
             local = datetime.combine(day, time(), KST)
         return None
+
+    def _next_review(self, after: datetime) -> datetime | None:
+        """The first daily review strictly after ``after``."""
+        day = after.astimezone(KST).date()
+        for _ in range(_LOOKAHEAD_DAYS):
+            session = self.calendar.session(day)
+            if session is not None and session.close + REVIEW_AFTER_CLOSE > after:
+                return session.close + REVIEW_AFTER_CLOSE
+            day += timedelta(days=1)
+        return None
+
+    async def _review(self, at: datetime) -> None:
+        """Change statuses by the lifecycle rules; alert retirement candidates."""
+        standings = {name: (Status(s), since) for name, (s, since) in self.store.statuses().items()}
+        alerted = {
+            name
+            for name, (status, since) in standings.items()
+            if status is Status.BENCH and self.store.has_run("retire_candidate", name, since)
+        }
+        days = self.store.prediction_days(at.astimezone(KST).date(), _REVIEW_DAYS)
+        result = await asyncio.to_thread(
+            review,
+            [a.name for a in self.algorithms],
+            standings,
+            days,
+            lambda chosen, special: self.store.scored_predictions(chosen, None, special),
+            min_sample=self.min_sample,
+            fee_rate=self.fee_rate,
+            alerted=alerted,
+        )
+        for c in result.changes:
+            log.info("%s: %s -> %s (%s)", c.algorithm, c.previous.value, c.status.value, c.reason)
+            self.store.add_status(c.algorithm, at, c.previous.value, c.status.value, c.reason)
+        for name, why in result.retire_candidates:
+            self.store.add_run("retire_candidate", at, name, why)
+            text = f"{name} 은퇴 후보: {why}. 은퇴하려면 krx-quant retire {name}"
+            log.warning("%s", text)
+            if self._notify is not None:
+                self._notify(text)
 
     async def _predict(self, bar_close: datetime) -> None:
         day_start = datetime.combine(bar_close.date(), time(), KST)
