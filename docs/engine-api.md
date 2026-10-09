@@ -57,6 +57,7 @@
 서버에서는 Tailscale 주소의 8080 포트로만 열린다. 맥과 윈도우에서 `http://krx-quant:8080/v1/...`로 읽는다.
 
 - 시각은 KST ISO 8601 문자열이다(예: `2026-10-12T09:31:00+09:00`).
+- 응답은 UTF-8 JSON이다(`Content-Type: application/json; charset=utf-8`). 사람이 읽기 쉽게 두 칸 들여쓰고, 한글을 `\u` 이스케이프 없이 그대로 보낸다.
 - 오류는 `{"error": "..."}`다. 모르는 종목은 404, 잘못된 `limit`은 400이다.
 
 ### `GET /v1/status`

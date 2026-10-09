@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from functools import partial
 from typing import Any
 
 from aiohttp import web
@@ -31,6 +32,9 @@ ENGINE_KEY = web.AppKey("engine", PredictionEngine)
 MODE_KEY = web.AppKey("mode", str)
 LiveStatus = Callable[[], dict[str, Any]]
 LIVE_STATUS_KEY: web.AppKey[LiveStatus] = web.AppKey("live_status")
+
+# Readable as is (curl, logs): indented, and Korean as UTF-8 rather than \u escapes.
+_dumps = partial(json.dumps, ensure_ascii=False, indent=2)
 
 DEFAULT_LIMIT = 100
 MAX_LIMIT = 1000
@@ -71,7 +75,7 @@ async def _status(request: web.Request) -> web.Response:
     live_status = request.app.get(LIVE_STATUS_KEY)
     if live_status is not None:
         body["kis"] = live_status()
-    return web.json_response(body)
+    return _json(body)
 
 
 async def _symbols(request: web.Request) -> web.Response:
@@ -87,13 +91,13 @@ async def _symbols(request: web.Request) -> web.Response:
                 "flat_ticks": flat_ticks(mid, engine.fee_rate) if mid is not None else None,
             }
         )
-    return web.json_response({"symbols": symbols})
+    return _json({"symbols": symbols})
 
 
 async def _latest(request: web.Request) -> web.Response:
     engine, symbol = _engine_and_symbol(request)
     rows = engine.store.latest(symbol)
-    return web.json_response(
+    return _json(
         {
             "symbol": symbol,
             "bar_close": rows[0]["bar_close"] if rows else None,
@@ -112,7 +116,7 @@ async def _predictions(request: web.Request) -> web.Response:
     if not 1 <= limit <= MAX_LIMIT:
         raise _error(web.HTTPBadRequest, f"limit must be 1 to {MAX_LIMIT}, got {raw!r}")
     rows = engine.store.recent(symbol, limit, request.query.get("algorithm"))
-    return web.json_response({"symbol": symbol, "predictions": [_prediction(r) for r in rows]})
+    return _json({"symbol": symbol, "predictions": [_prediction(r) for r in rows]})
 
 
 async def _bars(request: web.Request) -> web.Response:
@@ -129,7 +133,7 @@ async def _bars(request: web.Request) -> web.Response:
         }
         for b in engine.bars(symbol)
     ]
-    return web.json_response({"symbol": symbol, "bars": bars})
+    return _json({"symbol": symbol, "bars": bars})
 
 
 async def _algorithms(request: web.Request) -> web.Response:
@@ -152,7 +156,7 @@ async def _algorithms(request: web.Request) -> web.Response:
                 "model": model.as_dict(),
             }
         )
-    return web.json_response({"algorithms": algorithms})
+    return _json({"algorithms": algorithms})
 
 
 def _engine_and_symbol(request: web.Request) -> tuple[PredictionEngine, str]:
@@ -163,8 +167,12 @@ def _engine_and_symbol(request: web.Request) -> tuple[PredictionEngine, str]:
     return engine, symbol
 
 
+def _json(body: dict[str, Any]) -> web.Response:
+    return web.json_response(body, dumps=_dumps)
+
+
 def _error(kind: type[web.HTTPError], message: str) -> web.HTTPError:
-    return kind(text=json.dumps({"error": message}), content_type="application/json")
+    return kind(text=_dumps({"error": message}), content_type="application/json")
 
 
 def _prediction(row: dict[str, Any]) -> dict[str, Any]:
