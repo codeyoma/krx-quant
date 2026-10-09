@@ -17,11 +17,11 @@ Personality card:
 
 from __future__ import annotations
 
-import hashlib
 import math
 from collections.abc import Sequence
 
 from krx_quant.algorithms.contract import Card, Model, Sample
+from krx_quant.algorithms.forecasts import UNKNOWN, log_loss, normal_forecast
 from krx_quant.baselines import Forecast
 from krx_quant.features import FeatureVector
 from krx_quant.pricing import Direction
@@ -29,13 +29,9 @@ from krx_quant.pricing import Direction
 HORIZON_MINUTES = 4.0
 # Heavier than three times the usual volume adds no more mass.
 MAX_MASS = 3.0
-# Never sharper than half a tick: prices move in whole (or half) ticks.
-MIN_SPREAD_TICKS = 0.5
 DAMPINGS = (0.0, 0.1, 0.25, 0.5, 1.0, 2.0, 4.0)
 THRESHOLDS = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0)
 DEFAULT_PARAMS = {"damping": 0.5, "threshold": 1.0}
-# The smallest probability counted in the log loss, so one sure miss does not dominate.
-_FLOOR = 1e-6
 
 
 def displacement(velocity: float, force: float, damping: float, horizon: float = HORIZON_MINUTES) -> float:
@@ -46,10 +42,6 @@ def displacement(velocity: float, force: float, damping: float, horizon: float =
         return velocity * horizon + force * horizon**2 / 2
     terminal = force / damping
     return terminal * horizon + (velocity - terminal) * (1 - math.exp(-damping * horizon)) / damping
-
-
-def _normal_cdf(z: float) -> float:
-    return 0.5 * (1 + math.erf(z / math.sqrt(2)))
 
 
 class Newton:
@@ -85,29 +77,16 @@ class Newton:
                     best = (loss, damping, threshold)
         assert best is not None
         loss, damping, threshold = best
-        params = {"damping": damping, "threshold": threshold}
-        first = min(s.bar_close for s in scored).date()
-        last = max(s.bar_close for s in scored).date()
-        digest = hashlib.sha256(f"{params}|{first}|{last}|{len(scored)}".encode()).hexdigest()[:6]
-        return Model(
-            version=f"newton-{last:%Y%m%d}-{digest}",
-            params=params,
-            trained=f"{first}..{last}, {len(scored)} samples, log loss {loss:.4f}",
-            trained_until=last,
-        )
+        return Model.fitted(self.name, {"damping": damping, "threshold": threshold}, scored, loss)
 
     def _loss(self, sample: Sample, damping: float, threshold: float) -> float:
-        f = self._forecast(sample.features, damping, threshold)
-        p = {Direction.UP: f.p_up, Direction.FLAT: f.p_flat, Direction.DOWN: f.p_down}[
-            sample.outcome or Direction.FLAT
-        ]
-        return -math.log(max(p, _FLOOR))
+        return log_loss(self._forecast(sample.features, damping, threshold), sample.outcome or Direction.FLAT)
 
     def _forecast(self, features: FeatureVector, damping: float, threshold: float) -> Forecast:
         k = features["flat_ticks"]
         spread = features["volatility"]
         if k is None or spread is None:
-            return Forecast(1 / 3, 1 / 3, 1 / 3, 0.0)
+            return UNKNOWN
         v, a, mass = features["velocity"], features["acceleration"], features["relative_volume"]
         move = 0.0
         if v is not None and a is not None and mass is not None:
@@ -115,9 +94,4 @@ class Newton:
             move = displacement(m * v, m * a, damping)
             if abs(move) < threshold * k:
                 move = 0.0
-        sigma = max(spread * math.sqrt(HORIZON_MINUTES), MIN_SPREAD_TICKS)
-        p_up = 1 - _normal_cdf((k - move) / sigma)
-        p_down = _normal_cdf((-k - move) / sigma)
-        p_flat = max(0.0, 1 - p_up - p_down)
-        total = p_up + p_flat + p_down
-        return Forecast(p_up / total, p_flat / total, p_down / total, move)
+        return normal_forecast(move, spread * math.sqrt(HORIZON_MINUTES), k)

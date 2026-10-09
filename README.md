@@ -71,12 +71,13 @@ uv run krx-quant archive
 ```
 
 예측과 엔진 API:
-- 수집기는 받은 이벤트로 1분봉 마감마다 기준 예측 3종(항상 보합, 직전 4분 방향 지속, 클래스 비율 무작위)과 알고리즘(Newton)의 예측을 낸다. 4분 뒤 두 기준(봉 마감, 표시 시점)으로 채점한다. 결과는 `state/engine.sqlite3`에 쌓인다.
+- 수집기는 받은 이벤트로 1분봉 마감마다 기준 예측 3종(항상 보합, 직전 4분 방향 지속, 클래스 비율 무작위)과 알고리즘(Newton 추세 추종, Gauss 역추세)의 예측을 낸다. 4분 뒤 두 기준(봉 마감, 표시 시점)으로 채점한다. 결과는 `state/engine.sqlite3`에 쌓인다.
 - 순위표(`/v1/leaderboard`)와 알고리즘 상세 통계(`/v1/algorithms/<이름>/stats`)를 낸다. 방향 정밀도, 커버리지, 기준 3종 대비 lift, 가상손익, Brier 점수, 보정 곡선을 신뢰구간과 함께 보여준다.
 - 알고리즘은 백필 1분봉으로 학습한다. 모델은 `state/models/`에 저장되고, 엔진이 다음에 시작할 때 쓴다.
 
 ```bash
 uv run krx-quant fit newton
+uv run krx-quant fit gauss
 ```
 - 엔진 API는 `http://127.0.0.1:8080/v1/status`처럼 읽는다(`KRX_API_HOST`, `KRX_API_PORT`). 서버에서는 Tailscale 주소로만 열린다. 엔드포인트와 예측·채점 규칙은 [docs/engine-api.md](docs/engine-api.md)에 있다.
 - 녹화된 하루를 같은 엔진으로 다시 돌려 별도 DB(`state/replay-<날짜>.sqlite3`)에 쓴다. KIS 키는 필요 없다.

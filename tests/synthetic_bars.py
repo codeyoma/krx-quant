@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import random
 from datetime import date, datetime, time, timedelta
 
@@ -46,3 +47,17 @@ def trending(day: date, ticks_per_minute: float = 1.0, noise: float = 0.3, seed:
 def random_walk(day: date, seed: int = 0) -> list[Bar]:
     rng = random.Random(seed)
     return day_of_bars(day, [rng.choice((-1.0, 0.0, 1.0)) for _ in range(390)], seed=seed)
+
+
+def mean_reverting(day: date, speed: float = 0.3, noise: float = 1.5, seed: int = 0) -> list[Bar]:
+    """A price pulled back to where it opened at ``speed`` per minute (an Ornstein–Uhlenbeck
+    process, in ticks), jostled by ``noise``.
+    """
+    rng = random.Random(seed)
+    steps: list[float] = []
+    level = 0.0
+    for _ in range(390):
+        step = -level * (1 - math.exp(-speed)) + rng.gauss(0, noise)
+        steps.append(step)
+        level += step
+    return day_of_bars(day, steps, seed=seed)

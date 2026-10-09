@@ -60,7 +60,10 @@ async def test_the_collector_predicts_from_live_events_and_serves_them(kis: Fake
         clock.set(at("09:31:00.2"))  # the 09:30 bar closes
 
         base = f"http://127.0.0.1:{port}/v1"
-        latest = await poll(f"{base}/symbols/005930/latest", lambda b: b["bar_close"] is not None)
+        # Baselines are stored first; each algorithm when it has predicted every symbol.
+        latest = await poll(
+            f"{base}/symbols/005930/latest", lambda b: len(b["predictions"]) == len(PREDICTORS)
+        )
         status = await poll(f"{base}/status", lambda b: True)
         symbols = await poll(f"{base}/symbols", lambda b: True)
     finally:

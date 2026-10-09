@@ -20,6 +20,8 @@ from tests.algorithm_doubles import FixedAlgorithm
 from tests.replay_events import SYMBOL, api, at, get_json, run, trade
 from tests.test_replay import busy_morning
 
+VWAP_FEATURES = ("vwap_gap", "vwap_z", "reversion_speed")
+
 
 async def predictions_of(engine: Any, algorithm: str, limit: int = 1000) -> list[dict[str, Any]]:
     async with api(engine) as client:
@@ -41,6 +43,35 @@ async def test_newton_predicts_and_is_scored_under_its_model_version(tmp_path: P
     assert any(p["expected_ticks"] != 0 for p in newton)
 
 
+async def test_gauss_predicts_and_is_scored_under_its_model_version(tmp_path: Path) -> None:
+    engine = await run(tmp_path / "engine.db", busy_morning(), until=at("10:00:00"))
+
+    gauss = await predictions_of(engine, "gauss")
+    assert len(gauss) == 60  # 09:01–10:00
+    assert {(p["model_version"], p["status"]) for p in gauss} == {("gauss-default", "ok")}
+    assert len([p for p in gauss if p["outcome"] is not None]) == 56
+    # Once the VWAP has a few bars behind it, Gauss expects the price to be pulled back.
+    assert any(p["expected_ticks"] != 0 for p in gauss)
+
+
+async def test_pre_market_trades_stay_out_of_the_vwap(tmp_path: Path) -> None:
+    # The NXT pre-market trades on the integrated feed; the day's VWAP starts at the open.
+    pre_market = [trade(at("08:30:00"), 90_000, 50_000), trade(at("08:45:00"), 70_000, 50_000)]
+
+    def probe() -> FixedAlgorithm:
+        return FixedAlgorithm("probe", features=VWAP_FEATURES, unique=VWAP_FEATURES)
+
+    with_pre, without = probe(), probe()
+    engine = await run(
+        tmp_path / "pre.db", [*pre_market, *busy_morning()], until=at("09:40:00"), algorithms=[with_pre]
+    )
+    await run(tmp_path / "open.db", busy_morning(), until=at("09:40:00"), algorithms=[without])
+
+    assert with_pre.seen == without.seen
+    assert any(None not in s.values() for s in with_pre.seen)
+    assert engine.bars(SYMBOL)[0].start == at("08:30:00")  # the trades did make bars
+
+
 async def test_a_trained_model_is_used_and_recorded(tmp_path: Path) -> None:
     trained = Model("newton-20261009-abc123", {"damping": 0.0, "threshold": 0.0})
 
@@ -50,8 +81,9 @@ async def test_a_trained_model_is_used_and_recorded(tmp_path: Path) -> None:
 
     assert {p["model_version"] for p in await predictions_of(engine, "newton")} == {"newton-20261009-abc123"}
     async with api(engine) as client:
-        [newton] = (await get_json(client, "/v1/algorithms"))["algorithms"]
-    assert newton["name"] == "newton"
+        newton, gauss = (await get_json(client, "/v1/algorithms"))["algorithms"]
+    assert (newton["name"], gauss["name"]) == ("newton", "gauss")
+    assert gauss["model"]["version"] == "gauss-default"
     assert newton["card"]["scientist"] == "Isaac Newton"
     assert set(newton["card"]["unique_features"]) <= set(newton["features"])
     assert newton["model"] == {

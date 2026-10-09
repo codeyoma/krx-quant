@@ -1,7 +1,7 @@
 """Feature Store: named features, each computed once per symbol per bar close.
 
 A feature is a function of a ``Snapshot``: the day's finished one-minute bars up to the
-bar close and the reference price there. Live and replay build snapshots from the
+bar close, the reference price there, and when the session opened. Live and replay build snapshots from the
 engine's bars; training builds them from backfilled bars with the same code, so a
 feature means the same thing in both. A snapshot holds nothing received after its bar
 close, so no feature can see the future.
@@ -31,15 +31,24 @@ class Snapshot:
     price: float | None  # the reference price at the bar close
     tick: int | None  # the tick at that price
     flat_ticks: int | None  # k: smaller moves are flat
+    # Continuous trading started: the bars before it are the NXT pre-market's.
+    session_open: datetime | None = None
 
     @classmethod
     def at(
-        cls, symbol: str, bar_close: datetime, bars: Sequence[Bar], price: float | None, fee_rate: float
+        cls,
+        symbol: str,
+        bar_close: datetime,
+        bars: Sequence[Bar],
+        price: float | None,
+        fee_rate: float,
+        *,
+        session_open: datetime | None,
     ) -> Snapshot:
         """A snapshot with the tick and flat band of ``price``."""
         if price is None:
-            return cls(symbol, bar_close, bars, None, None, None)
-        return cls(symbol, bar_close, bars, price, tick_size(price), flat_band(price, fee_rate))
+            return cls(symbol, bar_close, bars, None, None, None, session_open)
+        return cls(symbol, bar_close, bars, price, tick_size(price), flat_band(price, fee_rate), session_open)
 
 
 Feature = Callable[[Snapshot], FeatureValue]
@@ -51,6 +60,13 @@ VOLUME_BARS = 60
 VOLATILITY_BARS = 20
 # Fewer one-minute changes than this give no volatility.
 MIN_CHANGES = 6
+# Session bars the VWAP needs before a gap from it means anything.
+VWAP_MIN_BARS = 5
+# Gaps from the VWAP the reversion speed is fitted on, and the fewest it needs.
+REVERSION_BARS = 30
+MIN_REVERSION_BARS = 10
+# Per minute: a gap left at 5% a minute later. Gaps that flip sign every minute get this.
+MAX_REVERSION_SPEED = 3.0
 
 
 def _closes_in_ticks(s: Snapshot, n: int) -> tuple[list[float], list[float]] | None:
@@ -131,6 +147,78 @@ def volatility(s: Snapshot) -> FeatureValue:
     return math.sqrt(sum((c - mean) ** 2 for c in changes) / (len(changes) - 1))
 
 
+def _session_bars(s: Snapshot) -> Sequence[Bar]:
+    """The bars from the open: the pre-market's thin trades do not set the day's level."""
+    if s.session_open is None:
+        return s.bars
+    return [b for b in s.bars if b.start >= s.session_open]
+
+
+def _typical(b: Bar) -> float:
+    return (b.high + b.low + b.close) / 3
+
+
+def _vwap_band(s: Snapshot) -> tuple[float, float] | None:
+    """The session's VWAP (of typical prices), and the volume-weighted standard deviation of
+    the traded prices around it, in won.
+
+    A bar's trades are taken to spread evenly over its range: each adds its typical price's
+    distance from the VWAP and its range's own spread, (high − low)² / 12.
+    """
+    bars = _session_bars(s)
+    volume = sum(b.volume for b in bars)
+    if len(bars) < VWAP_MIN_BARS or volume <= 0:
+        return None
+    vwap = sum(_typical(b) * b.volume for b in bars) / volume
+    variance = sum(b.volume * ((_typical(b) - vwap) ** 2 + (b.high - b.low) ** 2 / 12) for b in bars) / volume
+    return vwap, math.sqrt(variance)
+
+
+def vwap_gap(s: Snapshot) -> FeatureValue:
+    """How far the price stands from the session's VWAP, in ticks (above is positive)."""
+    band = _vwap_band(s)
+    if band is None or s.price is None or s.tick is None:
+        return None
+    return (s.price - band[0]) / s.tick
+
+
+def vwap_z(s: Snapshot) -> FeatureValue:
+    """That gap in standard deviations of the session's prices around the VWAP. None while
+    they have spread less than half a tick: the session has not moved yet.
+    """
+    band = _vwap_band(s)
+    if band is None or s.price is None or s.tick is None or band[1] < s.tick / 2:
+        return None
+    return (s.price - band[0]) / band[1]
+
+
+def reversion_speed(s: Snapshot) -> FeatureValue:
+    """How fast a gap from the VWAP closes, per minute: the Ornstein–Uhlenbeck κ of the last
+    30 closes' gaps from the VWAP as it stood at each, fitted as gap(t+1) = e^(−κ)·gap(t).
+
+    0 when the gaps grow; at most MAX_REVERSION_SPEED, when they flip sign every minute.
+    None while the closes have not strayed half a tick from the VWAP.
+    """
+    if s.tick is None:
+        return None
+    gaps: list[float] = []
+    value = volume = 0.0
+    for b in _session_bars(s):
+        value += _typical(b) * b.volume
+        volume += b.volume
+        if volume > 0:
+            gaps.append(b.close - value / volume)
+    gaps = gaps[-REVERSION_BARS:]
+    if len(gaps) < MIN_REVERSION_BARS or max(abs(g) for g in gaps[:-1]) < s.tick / 2:
+        return None
+    phi = sum(a * b for a, b in zip(gaps, gaps[1:], strict=False)) / sum(g * g for g in gaps[:-1])
+    if phi >= 1:
+        return 0.0
+    if phi <= math.exp(-MAX_REVERSION_SPEED):
+        return MAX_REVERSION_SPEED
+    return -math.log(phi)
+
+
 def flat_ticks(s: Snapshot) -> FeatureValue:
     return None if s.flat_ticks is None else float(s.flat_ticks)
 
@@ -141,6 +229,9 @@ FEATURES: dict[str, Feature] = {
     "relative_volume": relative_volume,
     "volatility": volatility,
     "flat_ticks": flat_ticks,
+    "vwap_gap": vwap_gap,
+    "vwap_z": vwap_z,
+    "reversion_speed": reversion_speed,
 }
 
 

@@ -200,9 +200,13 @@ class PredictionEngine:
         # Nothing received since the close has reached the bars: they are as they stood.
         bars = frozen if frozen is not None else {s: self._bars.closed(s, bar_close) for s in self.symbols}
         baselines: dict[tuple[str, str], dict[str, Forecast | None]] = {}
+        session = self.calendar.session(bar_close.date())
+        session_open = session.open if session is not None else None
         for symbol in self.symbols:
             mid = self._reference.mid(symbol, bar_close)
-            snapshot = Snapshot.at(symbol, bar_close, bars.get(symbol, []), mid, self.fee_rate)
+            snapshot = Snapshot.at(
+                symbol, bar_close, bars.get(symbol, []), mid, self.fee_rate, session_open=session_open
+            )
             at_close[symbol] = _AtClose(mid, self._features.compute(snapshot, self._feature_names))
             inputs = Inputs(
                 symbol=symbol,

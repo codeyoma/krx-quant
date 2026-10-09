@@ -21,6 +21,7 @@ from krx_quant.algorithms.contract import (
     model_path,
     save_model,
 )
+from krx_quant.algorithms.gauss import Gauss
 from krx_quant.algorithms.newton import Newton
 from krx_quant.features import FEATURES
 
@@ -55,7 +56,7 @@ def register(algorithms: Sequence[Algorithm]) -> tuple[Algorithm, ...]:
     return tuple(registered)
 
 
-ALGORITHMS: tuple[Algorithm, ...] = register([Newton()])
+ALGORITHMS: tuple[Algorithm, ...] = register([Newton(), Gauss()])
 
 __all__ = [
     "ALGORITHMS",

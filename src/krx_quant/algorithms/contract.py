@@ -11,6 +11,7 @@ Algorithms never see each other's output; only the consensus combines them.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from collections.abc import Mapping, Sequence
@@ -56,6 +57,19 @@ class Model:
 
     def to_json(self) -> str:
         return json.dumps(self.as_dict())
+
+    @classmethod
+    def fitted(cls, name: str, params: Mapping[str, float], scored: Sequence[Sample], loss: float) -> Model:
+        """A model fitted on ``scored``, versioned by its last day and what went into it."""
+        first = min(s.bar_close for s in scored).date()
+        last = max(s.bar_close for s in scored).date()
+        digest = hashlib.sha256(f"{dict(params)}|{first}|{last}|{len(scored)}".encode()).hexdigest()[:6]
+        return cls(
+            version=f"{name}-{last:%Y%m%d}-{digest}",
+            params=dict(params),
+            trained=f"{first}..{last}, {len(scored)} samples, log loss {loss:.4f}",
+            trained_until=last,
+        )
 
     @classmethod
     def from_json(cls, text: str) -> Model:
