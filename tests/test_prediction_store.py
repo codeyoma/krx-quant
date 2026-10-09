@@ -8,7 +8,8 @@ from pathlib import Path
 
 from krx_quant.baselines import Forecast
 from krx_quant.feeds import KST
-from krx_quant.predictions import NewPrediction, PredictionStore
+from krx_quant.predictions import NewPrediction, PredictionStore, Score
+from krx_quant.pricing import Direction
 
 # The schema the first engine (#9) wrote, verbatim.
 SCHEMA_V1 = """
@@ -50,6 +51,11 @@ def test_a_database_of_the_first_engine_is_upgraded_in_place(tmp_path: Path) -> 
     )
 
     assert pending.prediction_id == 1 and pending.mid_close == 81250
+    # The first engine's outcomes already had the special column: scoring one works.
+    store.score_all([(1, Score(81550, Direction.UP, Direction.UP, None, special=True))], T)
+    [special] = store.scored_predictions([T.date()], "005930", include_special=True)
+    assert (special["class_a"], special["special"]) == ("up", 1)
+    assert store.scored_predictions([T.date()], "005930", include_special=False) == []
     [kept] = store.recent("005930", 10, "baseline-flat")[1:]
     assert kept["bar_close"] == "2026-10-12T09:31:00+09:00"
     [skipped] = store.latest("005930")[1:]
