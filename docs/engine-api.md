@@ -81,7 +81,8 @@
 |---|---|
 | `predictions` | `id`, `symbol`, `algorithm`, `model_version`, `bar_close`(t), `displayed_at`, `p_up`, `p_flat`, `p_down`, `expected_ticks`, `status`(`ok`, `timed_out`, `error`, `vi`). 재생 결과의 `skipped`는 `ok`가 아닌 예측을 모두 센다. `ok`가 아니면 확률과 기대수익이 비어 있고 `outcomes` 행이 없다. |
 | `outcomes` | `prediction_id`, `target_at`(t + 4분), `mid_close`(A), `mid_display`(B), `mid_target`, `flat_ticks`(k), `class_a`, `class_b`(`up`/`flat`/`down`), `special`, `unscorable`, `scored_at`(채점 전에는 비어 있음) |
-| `runs` | `id`, `kind`(`cpu_budget`), `at`(봉 마감), `algorithm`, `detail` |
+| `runs` | `id`, `kind`(`cpu_budget`: CPU 예산으로 건너뜀, `retire_candidate`: 은퇴 후보 알림), `at`, `algorithm`, `detail` |
+| `statuses` | `id`, `algorithm`, `at`, `previous`, `status`, `reason`: 알고리즘 상태 이력(#17) |
 
 시각은 KST ISO 8601 문자열이다. 스키마 버전은 `PRAGMA user_version`에 있다(지금 2). 엔진이 시작할 때 예전 버전의 DB를 데이터를 지키며 올린다.
 
@@ -197,7 +198,11 @@
       "card": {"scientist": "Carl Friedrich Gauss", "character": "역추세", "unique_features": ["vwap_z", "reversion_speed"]},
       "features": ["vwap_gap", "vwap_z", "reversion_speed", "volatility", "flat_ticks"],
       "training_days": 20,
-      "model": {"version": "gauss-default", "params": {"speed": 0.05, "weight": 0.5, "threshold": 1.0}, "trained": null}
+      "model": {"version": "gauss-default", "params": {"speed": 0.05, "weight": 0.5, "threshold": 1.0}, "trained": null},
+      "status": {
+        "status": "probation", "since": "2026-10-12T08:00:00+09:00",
+        "history": [{"at": "2026-10-12T08:00:00+09:00", "from": null, "to": "probation", "reason": "registered"}]
+      }
     }
   ]
 }
@@ -260,6 +265,24 @@
 - `predict(features, model)`: 한 종목의 피처로 `{p_up, p_flat, p_down, expected_ticks}`를 낸다. 세 확률의 합은 1이다.
 
 알고리즘은 다른 알고리즘의 출력을 받지 않는다.
+
+### 상태 관리 (#17)
+
+알고리즘마다 상태가 있다(`lifecycle.py`). `/v1/algorithms`의 `status`(지금 상태, 언제부터, 이력)와 순위표 항목의 `status`로 보인다.
+
+| 상태 | 뜻 | 바뀌는 규칙 |
+|---|---|---|
+| `probation` 수습 | 처음 돌기 시작한 알고리즘 | 수습 10거래일 뒤, 수습 기간 전체에서 가장 약한 lift의 신뢰구간 하한이 0보다 크면 `active` |
+| `active` 정식 | 합의(#18)에 들어간다 | 최근 20거래일의 가장 약한 lift가 0 이하이면 `bench` |
+| `bench` 벤치 | 예측과 채점은 계속한다 | 최근 20거래일의 가장 약한 lift 하한이 0보다 크면 `active`로 회복. 벤치 60거래일 동안 회복하지 못하면 텔레그램으로 은퇴 후보 알림을 한 번 보낸다 |
+| `retired` 은퇴 | 더 돌리지 않는다. 기록은 남는다 | 명령으로만: `krx-quant retire <이름>`. `krx-quant unretire <이름>`은 `probation`으로 되돌린다 |
+| `clone` 복제 | 합의에서 빠진다 | 수습 중 먼저 등록된 알고리즘과 p_up − p_down 상관이 0.9를 넘으면 `clone`. 같은 종목·봉 마감 쌍이 30개 이상일 때만 본다. 상관이 다시 0.9 이하로 내려가면 `probation` |
+
+- 매일 장 마감 10분 뒤(보통 15:40) 점검한다. 그때는 그날 예측이 모두 채점되어 있다.
+- 통계는 순위표와 같다. 기준 B로 보고 특수 예측은 뺀다. "가장 약한 lift"는 기준 예측 3종 대비 lift 중 가장 작은 것이다. 채점된 예측 수와 각 기준 예측과의 짝이 모두 `KRX_MIN_SAMPLE`(기본 200) 이상일 때만 판정한다. 모자라면 상태를 그대로 둔다.
+- 거래일은 엔진이 예측한 날이다. 상태가 시작된 날부터 센다.
+- 상태 이력은 `statuses` 테이블에 시각, 이전·이후 상태, 사유로 남는다. 은퇴 후보 알림은 `runs` 테이블에 `retire_candidate`로 남는다. 그래서 알림은 한 번만 간다.
+- 은퇴 명령은 DB에 바로 쓴다. 엔진은 봉 마감마다 상태를 읽으므로 다음 봉 마감부터 그 알고리즘을 돌리지 않는다.
 
 ### 등록 검사
 

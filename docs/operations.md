@@ -221,6 +221,7 @@ docker compose logs --tail 200 engine
 | `[장애] 장 마감 데이터 업로드가 ... 실패했습니다` | 로그의 `could not archive ...` | 1. AWS 키, `KRX_OBJECT_STORE` 버킷 이름, IAM 정책을 확인한다.<br>2. 고친 뒤 `docker compose run --rm engine archive`를 돌린다. 다시 돌려도 안전하다.<br>3. 다음 업로드가 성공하면 `[복구]`가 온다. |
 | `[장애] 엔진 API를 열지 못했습니다` | 로그의 `Engine API not started on ...` | 녹화와 예측은 계속한다. 다른 프로세스가 8080을 쓰는지 확인하고 `docker compose up -d`로 다시 띄운다. |
 | 알고리즘을 다시 학습하고 싶다 | | 알고리즘마다(`newton`, `gauss`) `docker compose run --rm --no-deps engine fit <이름>` 뒤 `docker compose restart engine`. 모델은 `state/models/<이름>.json`이다. 되돌리려면 그 파일을 지우고 재시작한다(기본 모델). |
+| `[알림] <이름> 은퇴 후보: ...` | `curl -s http://krx-quant:8080/v1/algorithms`의 `status` 이력, `/v1/algorithms/<이름>/stats?period=20d` | 벤치 60거래일 동안 회복하지 못했다. 은퇴시키려면 `docker compose exec engine krx-quant retire <이름>`. 기록은 남고, 엔진은 다음 봉 마감부터 돌리지 않는다. 되돌리려면 `krx-quant unretire <이름>`(수습부터 다시). |
 | `[warning] ... skipped for the CPU budget` 또는 `took over 30s` 로그가 잦다 | `docker stats`로 CPU 사용률 | 알고리즘 계산이 서버에 버겁다. 4GB 요금제로 올리거나 `KRX_CPU_BUDGET_SECONDS`를 조정한다. |
 | 녹화된 날의 예측을 다시 보고 싶다 | | `docker compose run --rm --no-deps engine replay 2026-10-12`. 결과는 `state/replay-2026-10-12.sqlite3`다. 실시간 DB는 건드리지 않는다. |
 | 엔진 컨테이너가 계속 재시작한다 | 로그의 `configuration error` 또는 `KIS error` | `.env` 값을 고치고 `docker compose up -d`를 실행한다. |

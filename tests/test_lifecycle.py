@@ -117,7 +117,9 @@ def put_days(
                     t = datetime.combine(d, time(9, 1), KST) + timedelta(minutes=i)
                     at_target = t + timedelta(minutes=4)
                     made.append(
-                        NewPrediction("005930", algorithm, "v1", t, t, SURE[call], at_target, 81_250, 81_250, 2)
+                        NewPrediction(
+                            "005930", algorithm, "v1", t, t, SURE[call], at_target, 81_250, 81_250, 2
+                        )
                     )
             pending = store.add_all(made)
             scores = []
@@ -152,6 +154,13 @@ async def test_probation_ends_after_ten_days_better_than_every_baseline(tmp_path
     assert statuses["alpha"]["status"]["since"] == "2026-10-12T15:40:00+09:00"
     assert statuses["beta"]["status"]["status"] == "probation"  # too soon
     assert statuses["gamma"]["status"]["status"] == "probation"  # no better than always-flat
+    async with api(engine) as client:
+        board = await get_json(client, "/v1/leaderboard?period=20d")
+    assert {e["algorithm"]: e["status"] for e in board["ranked"] + board["unranked"]} == {
+        "alpha": "active",
+        "beta": "probation",
+        "gamma": "probation",
+    }
 
 
 # Wrong where it matters: down on the ups, up on the downs, flat on the flats. It beats no

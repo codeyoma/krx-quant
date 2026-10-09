@@ -167,7 +167,7 @@ class PredictionEngine:
         for p in store.pending():
             heapq.heappush(self._pending, (p.target_at, p.prediction_id, p))
         self.min_sample = min_sample
-        self._notify = notify
+        self.notify = notify  # where alerts go (Telegram, live)
         self._reviewed_through = self._last_tick
         self._enroll()
 
@@ -297,8 +297,8 @@ class PredictionEngine:
             self.store.add_run("retire_candidate", at, name, why)
             text = f"{name} 은퇴 후보: {why}. 은퇴하려면 krx-quant retire {name}"
             log.warning("%s", text)
-            if self._notify is not None:
-                self._notify(text)
+            if self.notify is not None:
+                self.notify(text)
 
     async def _predict(self, bar_close: datetime) -> None:
         day_start = datetime.combine(bar_close.date(), time(), KST)
