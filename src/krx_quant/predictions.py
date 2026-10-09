@@ -25,7 +25,7 @@ from krx_quant.pricing import Direction
 # The engine's database, in the state directory.
 DB_NAME = "engine.sqlite3"
 
-_VERSION = 2
+_VERSION = 3
 
 # Probabilities are empty for a prediction that was not made (status other than ok).
 _PREDICTIONS = """
@@ -66,11 +66,21 @@ CREATE TABLE IF NOT EXISTS outcomes (
 CREATE INDEX IF NOT EXISTS outcomes_pending ON outcomes (scored_at, target_at);
 CREATE TABLE IF NOT EXISTS runs (
     id INTEGER PRIMARY KEY,
-    kind TEXT NOT NULL,               -- cpu_budget: an algorithm skipped for the CPU budget
+    kind TEXT NOT NULL,               -- cpu_budget: an algorithm skipped for the CPU budget;
+                                      -- retire_candidate: benched too long, alerted
     at TEXT NOT NULL,
     algorithm TEXT,
     detail TEXT
 );
+CREATE TABLE IF NOT EXISTS statuses (  -- each algorithm's status changes, oldest first (#17)
+    id INTEGER PRIMARY KEY,
+    algorithm TEXT NOT NULL,
+    at TEXT NOT NULL,
+    previous TEXT,                    -- null for the first
+    status TEXT NOT NULL,             -- probation, active, bench, retired, clone
+    reason TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS statuses_by_algorithm ON statuses (algorithm, id);
 """
 )
 
@@ -204,6 +214,39 @@ class PredictionStore:
                     Pending(cursor.lastrowid, p.symbol, p.target_at, p.mid_close, p.mid_display, p.flat_ticks)
                 )
         return added
+
+    def add_status(
+        self, algorithm: str, at: datetime, previous: str | None, status: str, reason: str
+    ) -> None:
+        self.version += 1
+        with self._db:
+            self._db.execute(
+                "INSERT INTO statuses (algorithm, at, previous, status, reason) VALUES (?, ?, ?, ?, ?)",
+                (algorithm, iso(at), previous, status, reason),
+            )
+
+    def statuses(self) -> dict[str, tuple[str, datetime]]:
+        """Each algorithm's current status and since when."""
+        rows = self._db.execute(
+            "SELECT algorithm, status, at FROM statuses"
+            " WHERE id IN (SELECT MAX(id) FROM statuses GROUP BY algorithm)"
+        ).fetchall()
+        return {r["algorithm"]: (r["status"], datetime.fromisoformat(r["at"])) for r in rows}
+
+    def status_history(self, algorithm: str) -> list[dict[str, Any]]:
+        """The algorithm's status changes, oldest first."""
+        rows = self._db.execute(
+            "SELECT at, previous, status, reason FROM statuses WHERE algorithm = ? ORDER BY id", (algorithm,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def has_run(self, kind: str, algorithm: str, since: datetime) -> bool:
+        """Whether a ``kind`` run of ``algorithm`` was recorded at or after ``since``."""
+        row = self._db.execute(
+            "SELECT 1 FROM runs WHERE kind = ? AND algorithm = ? AND at >= ? LIMIT 1",
+            (kind, algorithm, iso(since)),
+        ).fetchone()
+        return row is not None
 
     def add_run(self, kind: str, at: datetime, algorithm: str, detail: str) -> None:
         with self._db:

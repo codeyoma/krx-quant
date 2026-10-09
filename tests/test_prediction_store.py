@@ -61,6 +61,9 @@ def test_a_database_of_the_first_engine_is_upgraded_in_place(tmp_path: Path) -> 
     assert kept["bar_close"] == "2026-10-12T09:31:00+09:00"
     [skipped] = store.latest("005930")[1:]
     assert (skipped["algorithm"], skipped["status"], skipped["p_up"]) == ("newton", "timed_out", None)
+    # Later versions added tables: algorithm statuses (3).
+    store.add_status("newton", T, None, "probation", "registered")
+    assert store.statuses() == {"newton": ("probation", T)}
     store.close()
     with sqlite3.connect(db) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3

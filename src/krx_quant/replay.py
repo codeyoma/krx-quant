@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import heapq
 import logging
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
@@ -27,6 +27,7 @@ from krx_quant.features import FeatureStore
 from krx_quant.feeds.base import KST, kst_day
 from krx_quant.market_calendar import MarketCalendar, calendar_store
 from krx_quant.predictions import DB_NAME, AlgorithmSummary, PredictionStore
+from krx_quant.stats import DEFAULT_MIN_SAMPLE
 
 log = logging.getLogger(__name__)
 
@@ -48,6 +49,8 @@ async def replay(
     models: Mapping[str, Model] | None = None,
     budget: Budget | None = None,
     feature_store: FeatureStore | None = None,
+    min_sample: int = DEFAULT_MIN_SAMPLE,
+    notify: Callable[[str], None] | None = None,
 ) -> PredictionEngine:
     """Feed ``events`` (in receipt order) received by ``until`` to an engine storing into ``db``.
 
@@ -68,6 +71,8 @@ async def replay(
         models=models,
         budget=budget,
         feature_store=feature_store,
+        min_sample=min_sample,
+        notify=notify,
     )
     for feed, row in events:
         received_at: datetime = row["received_at"]

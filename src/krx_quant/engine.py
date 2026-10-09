@@ -31,7 +31,7 @@ import heapq
 import logging
 import math
 import time as timer
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, time, timedelta
 from functools import partial
@@ -53,11 +53,13 @@ from krx_quant.feeds import (
     VI_STATUS,
 )
 from krx_quant.feeds.base import KST
+from krx_quant.lifecycle import Status
 from krx_quant.market_calendar import MarketCalendar, Session
 from krx_quant.predictions import NewPrediction, Pending, PredictionStore, Score
 from krx_quant.pricing import Direction, classify, flat_ticks, tick_size
 from krx_quant.reference import BAR, Bar, BarBuilder, ReferencePrice, Source
 from krx_quant.special import KOSPI, SpecialSituations, Window, in_vi, touching
+from krx_quant.stats import DEFAULT_MIN_SAMPLE
 
 log = logging.getLogger(__name__)
 
@@ -132,6 +134,8 @@ class PredictionEngine:
         models: Mapping[str, Model] | None = None,
         budget: Budget | None = None,
         feature_store: FeatureStore | None = None,
+        min_sample: int = DEFAULT_MIN_SAMPLE,
+        notify: Callable[[str], None] | None = None,
     ) -> None:
         self.store = store
         self.calendar = calendar
@@ -158,6 +162,16 @@ class PredictionEngine:
         self._pending: list[tuple[datetime, int, Pending]] = []
         for p in store.pending():
             heapq.heappush(self._pending, (p.target_at, p.prediction_id, p))
+        self.min_sample = min_sample
+        self._notify = notify
+        self._enroll()
+
+    def _enroll(self) -> None:
+        """An algorithm run for the first time starts on probation."""
+        known = self.store.statuses()
+        for a in self.algorithms:
+            if a.name not in known:
+                self.store.add_status(a.name, self.clock.now(), None, Status.PROBATION.value, "registered")
 
     def on_event(self, feed: str, row: dict[str, Any]) -> None:
         if feed in MARKET_FEEDS:
