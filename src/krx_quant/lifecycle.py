@@ -15,24 +15,28 @@
 
 The statistics are the leaderboard's: basis B, special predictions left out, and a
 decision only with at least ``min_sample`` scored predictions and as many pairs with each
-baseline; with fewer, the status stays. A trading day counts when the engine predicted
-on it, from the day the status began.
+baseline; with fewer (or, for a clone, too few pairs to correlate), the status stays. A
+trading day counts when the engine predicted on it, from the first day reviewed after the
+status began: a status set after a day's review starts counting the next day.
 """
 
 from __future__ import annotations
 
 import enum
-import math
-from collections.abc import Callable, Collection, Mapping, Sequence
+import statistics
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
 
-from krx_quant.baselines import BASELINES
-from krx_quant.feeds.base import KST
+from krx_quant.baselines import BASELINE_NAMES
 from krx_quant.stats import MIN_PAIRS_TESTED, Entry, enough, entry, scored_by_algorithm, split
 
-BASELINE_NAMES = frozenset(b.name for b in BASELINES)
+PROBATION_DAYS = 10
+RECENT_DAYS = 20
+BENCH_DAYS = 60
+CLONE_CORRELATION = 0.9
+BASIS = "b"  # as the leaderboard
 
 
 class Status(enum.Enum):
@@ -43,11 +47,10 @@ class Status(enum.Enum):
     CLONE = "clone"
 
 
-PROBATION_DAYS = 10
-RECENT_DAYS = 20
-BENCH_DAYS = 60
-CLONE_CORRELATION = 0.9
-BASIS = "b"  # as the leaderboard
+@dataclass(frozen=True)
+class Standing:
+    status: Status
+    since: datetime
 
 
 @dataclass(frozen=True)
@@ -59,9 +62,17 @@ class Change:
 
 
 @dataclass(frozen=True)
+class Candidate:
+    """A benched algorithm to retire, for the operator to approve."""
+
+    algorithm: str
+    days: int  # on the bench
+
+
+@dataclass(frozen=True)
 class Review:
     changes: list[Change]
-    retire_candidates: list[tuple[str, str]]  # (algorithm, why)
+    candidates: list[Candidate]
 
 
 Rows = Callable[[Sequence[date], bool], list[dict[str, Any]]]  # (days, with special) -> scored rows
@@ -69,68 +80,110 @@ Rows = Callable[[Sequence[date], bool], list[dict[str, Any]]]  # (days, with spe
 
 def review(
     algorithms: Sequence[str],
-    standings: Mapping[str, tuple[Status, datetime]],
+    standings: Mapping[str, Standing],
+    counted_from: Mapping[str, date],
     days: Sequence[date],
     rows: Rows,
     *,
     min_sample: int,
     fee_rate: float,
-    alerted: Collection[str],
+    alerted: set[str],
 ) -> Review:
-    """The status changes due after a day's close.
+    """The status changes due at a day's review.
 
-    ``algorithms`` are the registered ones in registration order; ``days`` the days with
-    predictions up to that day, latest first; ``rows`` reads scored predictions; ``alerted``
-    the benched algorithms already alerted as retirement candidates.
+    ``algorithms`` are the registered ones in registration order; ``counted_from`` the
+    first day each one's status counts; ``days`` the days with predictions up to the day
+    reviewed, latest first; ``rows`` reads scored predictions; ``alerted`` the benched
+    algorithms already alerted as retirement candidates.
     """
+    read: dict[tuple[tuple[date, ...], bool], list[dict[str, Any]]] = {}
+
+    def cached(chosen: Sequence[date], special: bool) -> list[dict[str, Any]]:
+        key = (tuple(chosen), special)
+        if key not in read:
+            read[key] = rows(chosen, special)
+        return read[key]
+
+    judge = _Judge(cached, list(days[:RECENT_DAYS]), min_sample, fee_rate)
     changes: list[Change] = []
-    candidates: list[tuple[str, str]] = []
-    recent = list(days[:RECENT_DAYS])
+    candidates: list[Candidate] = []
     for i, name in enumerate(algorithms):
         standing = standings.get(name)
-        if standing is None:
+        if standing is None or standing.status is Status.RETIRED:
             continue
-        status, since = standing
-        held = [d for d in days if d >= since.astimezone(KST).date()]
-
-        def change(to: Status, reason: str) -> None:
-            changes.append(Change(name, status, to, reason))  # noqa: B023 - used at once
-
-        if status in (Status.PROBATION, Status.CLONE):
-            twin = _twin(name, algorithms[:i], rows(held, True))
-            if twin is not None and status is Status.PROBATION:
-                change(Status.CLONE, f"p_up − p_down moves with {twin[0]} (correlation {twin[1]:.3f})")
-            elif twin is None and status is Status.CLONE:
-                change(Status.PROBATION, "no longer moves with an earlier algorithm")
-            elif status is Status.PROBATION and len(held) >= PROBATION_DAYS:
-                judged = _judge(name, rows(held, False), min_sample, fee_rate)
-                if judged is not None and judged.lift_low is not None and judged.lift_low > 0:
-                    change(
-                        Status.ACTIVE,
-                        f"{len(held)} days on probation; weakest lift low {judged.lift_low:.4f}",
-                    )
-        elif status is Status.ACTIVE:
-            judged = _judge(name, rows(recent, False), min_sample, fee_rate)
-            weakest = None if judged is None else _weakest(judged)
-            if weakest is not None and weakest <= 0:
-                change(Status.BENCH, f"weakest lift {weakest:.4f} over the last {len(recent)} days")
-        elif status is Status.BENCH:
-            judged = _judge(name, rows(recent, False), min_sample, fee_rate)
-            if judged is not None and judged.lift_low is not None and judged.lift_low > 0:
-                change(
-                    Status.ACTIVE,
-                    f"recovered: weakest lift low {judged.lift_low:.4f} over the last {len(recent)} days",
-                )
-            elif len(held) >= BENCH_DAYS and name not in alerted:
-                candidates.append((name, f"{len(held)} days on the bench without recovering"))
+        held = [d for d in days if d >= counted_from[name]]
+        earlier = [
+            a for a in algorithms[:i] if (s := standings.get(a)) is None or s.status is not Status.RETIRED
+        ]
+        change = judge.decide(name, standing.status, held, earlier)
+        if change is not None:
+            changes.append(change)
+        elif standing.status is Status.BENCH and len(held) >= BENCH_DAYS and name not in alerted:
+            candidates.append(Candidate(name, len(held)))
     return Review(changes, candidates)
 
 
-def _judge(name: str, rows: list[dict[str, Any]], min_sample: int, fee_rate: float) -> Entry | None:
-    """``name``'s stats against the baselines, if there are enough to judge by."""
-    algorithms, baselines = split(scored_by_algorithm(rows, BASIS), BASELINE_NAMES)
-    judged = entry(name, algorithms.get(name, []), baselines, fee_rate)
-    return judged if enough(judged, min_sample) else None
+@dataclass
+class _Judge:
+    rows: Rows
+    recent: list[date]
+    min_sample: int
+    fee_rate: float
+
+    def decide(self, name: str, status: Status, held: list[date], earlier: list[str]) -> Change | None:
+        """The change ``name``'s status is due for, if any."""
+        if status in (Status.PROBATION, Status.CLONE):
+            measured = _correlations(name, earlier, self.rows(held, True))
+            twin = max(measured.items(), key=lambda kv: kv[1], default=None)
+            if twin is not None and twin[1] > CLONE_CORRELATION:
+                if status is Status.PROBATION:
+                    return Change(
+                        name, status, Status.CLONE, f"p_up - p_down moves with {twin[0]} (r = {twin[1]:.3f})"
+                    )
+                return None
+            if status is Status.CLONE:
+                if not measured:
+                    return None  # too few pairs to tell: it stays
+                return Change(name, status, Status.PROBATION, "no longer moves with an earlier algorithm")
+            if len(held) >= PROBATION_DAYS:
+                low = self._lift_low(name, held)
+                if low is not None and low > 0:
+                    return Change(
+                        name,
+                        status,
+                        Status.ACTIVE,
+                        f"{len(held)} days on probation; weakest lift low {low:.4f}",
+                    )
+        elif status is Status.ACTIVE:
+            judged = self._judged(name, self.recent)
+            weakest = None if judged is None else _weakest(judged)
+            if weakest is not None and weakest <= 0:
+                return Change(
+                    name,
+                    status,
+                    Status.BENCH,
+                    f"weakest lift {weakest:.4f} over the last {len(self.recent)} days",
+                )
+        elif status is Status.BENCH:
+            low = self._lift_low(name, self.recent)
+            if low is not None and low > 0:
+                return Change(
+                    name,
+                    status,
+                    Status.ACTIVE,
+                    f"recovered: weakest lift low {low:.4f} over the last {len(self.recent)} days",
+                )
+        return None
+
+    def _judged(self, name: str, days: Sequence[date]) -> Entry | None:
+        """``name``'s stats against the baselines on ``days``, if there are enough to judge by."""
+        algorithms, baselines = split(scored_by_algorithm(self.rows(days, False), BASIS), BASELINE_NAMES)
+        judged = entry(name, algorithms.get(name, []), baselines, self.fee_rate)
+        return judged if enough(judged, self.min_sample) else None
+
+    def _lift_low(self, name: str, days: Sequence[date]) -> float | None:
+        judged = self._judged(name, days)
+        return None if judged is None else judged.lift_low
 
 
 def _weakest(e: Entry) -> float | None:
@@ -138,34 +191,24 @@ def _weakest(e: Entry) -> float | None:
     return None if any(v is None for v in values) else min(v for v in values if v is not None)
 
 
-def _twin(name: str, earlier: Sequence[str], rows: list[dict[str, Any]]) -> tuple[str, float] | None:
-    """The earlier algorithm ``name``'s predictions move with most, if above the line."""
+def _correlations(name: str, earlier: Sequence[str], rows: list[dict[str, Any]]) -> dict[str, float]:
+    """``name``'s correlation of p_up − p_down with each earlier algorithm it can be measured
+    against: enough bar closes both predicted, and neither always the same.
+    """
     scores: dict[str, dict[tuple[str, str], float]] = {}
     for row in rows:
         scores.setdefault(row["algorithm"], {})[(row["symbol"], row["bar_close"])] = (
             row["p_up"] - row["p_down"]
         )
     mine = scores.get(name, {})
-    best: tuple[str, float] | None = None
+    measured: dict[str, float] = {}
     for other in earlier:
         theirs = scores.get(other, {})
-        pairs = [(mine[k], theirs[k]) for k in mine.keys() & theirs.keys()]
-        r = _correlation(pairs)
-        if r is not None and r > CLONE_CORRELATION and (best is None or r > best[1]):
-            best = (other, r)
-    return best
-
-
-def _correlation(pairs: Sequence[tuple[float, float]]) -> float | None:
-    """Pearson's r, on enough pairs; None if too few or either side never moves."""
-    n = len(pairs)
-    if n < MIN_PAIRS_TESTED:
-        return None
-    mx = sum(x for x, _ in pairs) / n
-    my = sum(y for _, y in pairs) / n
-    sxy = sum((x - mx) * (y - my) for x, y in pairs)
-    sxx = sum((x - mx) ** 2 for x, _ in pairs)
-    syy = sum((y - my) ** 2 for _, y in pairs)
-    if sxx <= 0 or syy <= 0:
-        return None
-    return sxy / math.sqrt(sxx * syy)
+        shared = sorted(mine.keys() & theirs.keys())
+        if len(shared) < MIN_PAIRS_TESTED:
+            continue
+        try:
+            measured[other] = statistics.correlation([mine[k] for k in shared], [theirs[k] for k in shared])
+        except statistics.StatisticsError:
+            continue  # one side never moves
+    return measured

@@ -20,6 +20,7 @@ from typing import Any
 
 from krx_quant.baselines import Forecast
 from krx_quant.feeds.base import KST
+from krx_quant.lifecycle import Standing, Status
 from krx_quant.pricing import Direction
 
 # The engine's database, in the state directory.
@@ -67,6 +68,7 @@ CREATE INDEX IF NOT EXISTS outcomes_pending ON outcomes (scored_at, target_at);
 CREATE TABLE IF NOT EXISTS runs (
     id INTEGER PRIMARY KEY,
     kind TEXT NOT NULL,               -- cpu_budget: an algorithm skipped for the CPU budget;
+                                      -- review: the daily algorithm review ran;
                                       -- retire_candidate: benched too long, alerted
     at TEXT NOT NULL,
     algorithm TEXT,
@@ -216,22 +218,22 @@ class PredictionStore:
         return added
 
     def add_status(
-        self, algorithm: str, at: datetime, previous: str | None, status: str, reason: str
+        self, algorithm: str, at: datetime, previous: Status | None, status: Status, reason: str
     ) -> None:
         self.version += 1
         with self._db:
             self._db.execute(
                 "INSERT INTO statuses (algorithm, at, previous, status, reason) VALUES (?, ?, ?, ?, ?)",
-                (algorithm, iso(at), previous, status, reason),
+                (algorithm, iso(at), previous.value if previous else None, status.value, reason),
             )
 
-    def statuses(self) -> dict[str, tuple[str, datetime]]:
+    def statuses(self) -> dict[str, Standing]:
         """Each algorithm's current status and since when."""
         rows = self._db.execute(
             "SELECT algorithm, status, at FROM statuses"
             " WHERE id IN (SELECT MAX(id) FROM statuses GROUP BY algorithm)"
         ).fetchall()
-        return {r["algorithm"]: (r["status"], datetime.fromisoformat(r["at"])) for r in rows}
+        return {r["algorithm"]: Standing(Status(r["status"]), datetime.fromisoformat(r["at"])) for r in rows}
 
     def status_history(self, algorithm: str) -> list[dict[str, Any]]:
         """The algorithm's status changes, oldest first."""
@@ -240,7 +242,7 @@ class PredictionStore:
         ).fetchall()
         return [dict(r) for r in rows]
 
-    def has_run(self, kind: str, algorithm: str, since: datetime) -> bool:
+    def ran_since(self, kind: str, algorithm: str, since: datetime) -> bool:
         """Whether a ``kind`` run of ``algorithm`` was recorded at or after ``since``."""
         row = self._db.execute(
             "SELECT 1 FROM runs WHERE kind = ? AND algorithm = ? AND at >= ? LIMIT 1",
@@ -248,7 +250,12 @@ class PredictionStore:
         ).fetchone()
         return row is not None
 
-    def add_run(self, kind: str, at: datetime, algorithm: str, detail: str) -> None:
+    def last_run(self, kind: str) -> datetime | None:
+        """When the latest ``kind`` run was recorded, if one was."""
+        row = self._db.execute("SELECT MAX(at) FROM runs WHERE kind = ?", (kind,)).fetchone()
+        return None if row[0] is None else datetime.fromisoformat(row[0])
+
+    def add_run(self, kind: str, at: datetime, algorithm: str | None, detail: str) -> None:
         with self._db:
             self._db.execute(
                 "INSERT INTO runs (kind, at, algorithm, detail) VALUES (?, ?, ?, ?)",
