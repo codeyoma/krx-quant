@@ -192,9 +192,21 @@ async def _algorithms(request: web.Request) -> web.Response:
                 "features": list(a.features),
                 "training_days": a.training_days,
                 "model": model.as_dict(),
+                "status": _status_json(engine, a.name),
             }
         )
     return _json({"algorithms": algorithms})
+
+
+def _status_json(engine: PredictionEngine, name: str) -> dict[str, Any]:
+    history = engine.store.status_history(name)
+    return {
+        "status": history[-1]["status"] if history else None,
+        "since": history[-1]["at"] if history else None,
+        "history": [
+            {"at": h["at"], "from": h["previous"], "to": h["status"], "reason": h["reason"]} for h in history
+        ],
+    }
 
 
 def _engine_and_symbol(request: web.Request) -> tuple[PredictionEngine, str]:
