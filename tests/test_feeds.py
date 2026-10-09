@@ -336,3 +336,74 @@ async def test_index_falls_back_to_rest_when_refused_for_the_limit(kis: FakeKis,
 
     [i, *_] = read(tmp_path, "events", "FHPUP02100000", symbol="2001")
     assert (i["value"], i["advancers"], i["decliners"]) == (748.12, 120, 70)
+
+
+def vi_row(start: str, end: str, *, active: str = "N", kind: str = "2", count: str = "1") -> dict[str, str]:
+    """A row of the VI status query, shaped like the live answer for 005930 on 2026-10-08."""
+    return {
+        "hts_kor_isnm": "삼성전자",
+        "mksc_shrn_iscd": "005930",
+        "vi_cls_code": active,
+        "bsop_date": "20261008",
+        "cntg_vi_hour": start,
+        "vi_cncl_hour": end,
+        "vi_kind_code": kind,
+        "vi_prc": "261500",
+        "vi_stnd_prc": "0",
+        "vi_dprt": "0.00",
+        "vi_dmc_stnd_prc": "264500",
+        "vi_dmc_dprt": "-1.13",
+        "vi_count": count,
+    }
+
+
+async def test_vi_status_is_polled_for_the_day_and_recorded_when_it_changes(
+    kis: FakeKis, tmp_path: Path
+) -> None:
+    # Newest first, like KIS: one VI still on (no release time yet), one released.
+    answer = [vi_row("092950", "", active="Y", kind="1", count="2"), vi_row("091200", "091431")]
+    kis.rest_responses["FHPST01390000"] = lambda q: ok(output=answer)
+    settings = replace(settings_for(kis, tmp_path), vi_poll_seconds=0.02)
+
+    stop = asyncio.Event()
+    task = asyncio.create_task(run_collector(settings, stop=stop, clock=lambda: FIXED_NOW))
+    try:
+        await until(lambda: sum(t == "FHPST01390000" for _, t, _, _ in kis.rest_requests) >= 3)
+    finally:
+        stop.set()
+        await asyncio.wait_for(task, 5)
+
+    [query] = {q["FID_INPUT_DATE_1"] for _, t, _, q in kis.rest_requests if t == "FHPST01390000"}
+    assert query == "20261008"
+    # The same answer every time: recorded once.
+    assert len(read(tmp_path, "raw", "FHPST01390000")) == 1
+    on, released = read(tmp_path, "events", "FHPST01390000")
+    assert (on["event_time"], on["end_time"], on["active"], on["kind"]) == (
+        datetime(2026, 10, 8, 9, 29, 50, tzinfo=KST),
+        None,
+        True,
+        "static",
+    )
+    assert (released["event_time"], released["end_time"], released["active"], released["kind"]) == (
+        datetime(2026, 10, 8, 9, 12, tzinfo=KST),
+        datetime(2026, 10, 8, 9, 14, 31, tzinfo=KST),
+        False,
+        "dynamic",
+    )
+
+
+async def test_vis_are_not_polled_while_the_market_is_closed(kis: FakeKis, tmp_path: Path) -> None:
+    kis.rest_responses["FHPST01390000"] = lambda q: ok(output=[])
+    kis.rest_responses["HHPTJ04160200"] = lambda q: ok(output2=[])
+    settings = replace(settings_for(kis, tmp_path), vi_poll_seconds=0.02, foreign_estimate_poll_seconds=0.02)
+    evening = datetime(2026, 10, 8, 20, 30, tzinfo=KST)
+
+    stop = asyncio.Event()
+    task = asyncio.create_task(run_collector(settings, stop=stop, clock=lambda: evening))
+    try:
+        await until(lambda: sum(t == "HHPTJ04160200" for _, t, _, _ in kis.rest_requests) >= 3)
+    finally:
+        stop.set()
+        await asyncio.wait_for(task, 5)
+
+    assert not any(t == "FHPST01390000" for _, t, _, _ in kis.rest_requests)

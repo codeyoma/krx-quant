@@ -34,7 +34,7 @@ class RestFeed:
     tr_id: str
     path: str
     schema: pa.Schema
-    params: Callable[[str], dict[str, str]]
+    params: Callable[[str, date], dict[str, str]]  # (key, the day polled) -> query
     # (response body, key, received_at) -> event rows
     normalize: Callable[[dict[str, Any], str, datetime], list[Row]]
 

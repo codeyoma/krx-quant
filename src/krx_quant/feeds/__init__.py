@@ -25,6 +25,7 @@ from krx_quant.feeds.stock import (
     PROGRAM,
     QUOTE,
     TRADE,
+    VI_STATUS,
 )
 
 WS_FEEDS: dict[str, Feed] = {
@@ -78,6 +79,7 @@ __all__ = [
     "TRADE",
     "US_TRADE",
     "USD_FUTURES",
+    "VI_STATUS",
     "WS_FEEDS",
     "Feed",
     "RestFeed",

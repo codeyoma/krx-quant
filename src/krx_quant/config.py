@@ -44,6 +44,8 @@ class Settings:
     # KOSPI200 options recorded: the ATM strike and this many strikes on each side, calls and puts.
     option_strikes_each_side: int = 2
     foreign_estimate_poll_seconds: float = 300.0
+    # How often each symbol's VIs are polled while the market is open.
+    vi_poll_seconds: float = 5.0
     # KRX-listed US index ETFs (TIGER 미국나스닥100, TIGER 미국필라델피아반도체나스닥), recorded from
     # the KRX-only trade feed: ETFs do not trade on NXT.
     etf_symbols: tuple[str, ...] = ("133690", "381180")
@@ -166,6 +168,7 @@ class Settings:
             usd_futures_code=values.get("KRX_USD_FUTURES_CODE") or None,
             option_strikes_each_side=int(number("KRX_OPTION_STRIKES_EACH_SIDE", "2", int, minimum=0)),
             foreign_estimate_poll_seconds=float(number("KRX_FOREIGN_ESTIMATE_POLL_SECONDS", "300", float)),
+            vi_poll_seconds=float(number("KRX_VI_POLL_SECONDS", "5", float)),
             etf_symbols=codes("KRX_ETF_SYMBOLS", "133690,381180"),
             rest_max_per_second=int(
                 number("KIS_REST_MAX_PER_SECOND", "20", int, maximum=MAX_REST_PER_SECOND)
