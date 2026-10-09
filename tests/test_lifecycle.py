@@ -18,9 +18,12 @@ from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
 
+import pytest
+
+from krx_quant.cli import main
 from krx_quant.feeds import KST
 from krx_quant.market_calendar import MarketCalendar
-from krx_quant.predictions import NewPrediction, PredictionStore, Score
+from krx_quant.predictions import DB_NAME, NewPrediction, PredictionStore, Score
 from krx_quant.pricing import Direction
 from tests.algorithm_doubles import FixedAlgorithm
 from tests.replay_events import DAY, api, at, get_json, run
@@ -45,7 +48,7 @@ RIGHT = OUTCOMES  # every call right
 FLAT = [Direction.FLAT] * len(OUTCOMES)  # the same calls as always-flat: no lift
 # Right but on the downs, which it calls flat: better than every baseline, and its p_up − p_down
 # moves with RIGHT's at a correlation of 0.82 (0.25 / √(0.5 × 0.1875)), not a clone.
-MISSES_DOWNS = [Direction.FLAT if o is Direction.DOWN else o for o in OUTCOMES]
+MISSES_DOWNS: list[Direction] = [Direction.FLAT if o is Direction.DOWN else o for o in OUTCOMES]
 
 
 def weekdays_before(day: date, n: int) -> list[date]:
@@ -112,9 +115,9 @@ def put_days(
             for algorithm, directions in calls.items():
                 for i, call in enumerate(directions):
                     t = datetime.combine(d, time(9, 1), KST) + timedelta(minutes=i)
-                    target = t + timedelta(minutes=4)
+                    at_target = t + timedelta(minutes=4)
                     made.append(
-                        NewPrediction("005930", algorithm, "v1", t, t, SURE[call], target, 81_250, 81_250, 2)
+                        NewPrediction("005930", algorithm, "v1", t, t, SURE[call], at_target, 81_250, 81_250, 2)
                     )
             pending = store.add_all(made)
             scores = []
@@ -122,8 +125,8 @@ def put_days(
                 outcome = OUTCOMES[
                     (p.target_at - datetime.combine(d, time(9, 5), KST)) // timedelta(minutes=1)
                 ]
-                target = 81_250 + {Direction.UP: 300, Direction.FLAT: 0, Direction.DOWN: -300}[outcome]
-                scores.append((p.prediction_id, Score(target, outcome, outcome, None)))
+                mid = 81_250 + {Direction.UP: 300, Direction.FLAT: 0, Direction.DOWN: -300}[outcome]
+                scores.append((p.prediction_id, Score(mid, outcome, outcome, None)))
             store.score_all(scores, datetime.combine(d, time(15, 30), KST))
 
 
@@ -153,7 +156,9 @@ async def test_probation_ends_after_ten_days_better_than_every_baseline(tmp_path
 
 # Wrong where it matters: down on the ups, up on the downs, flat on the flats. It beats no
 # baseline.
-WRONG = [{Direction.UP: Direction.DOWN, Direction.DOWN: Direction.UP}.get(o, o) for o in OUTCOMES]
+WRONG: list[Direction] = [
+    {Direction.UP: Direction.DOWN, Direction.DOWN: Direction.UP}.get(o, o) for o in OUTCOMES
+]
 
 
 async def test_an_active_algorithm_no_better_than_a_baseline_is_benched_and_still_predicts(
@@ -227,3 +232,31 @@ async def test_an_algorithm_on_probation_moving_with_an_earlier_one_is_a_clone(t
     assert statuses["alpha"]["status"]["status"] == "probation"  # the earlier one is not the clone
     assert statuses["gamma"]["status"]["status"] == "probation"
     assert last_change(statuses["delta"])[:2] == ("clone", "probation")
+
+
+async def test_retiring_takes_a_command_stops_the_algorithm_and_keeps_its_records(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    state = tmp_path / "state"
+    db = state / DB_NAME
+    state.mkdir()
+    days = weekdays_before(DAY, 3)
+    put_status(db, "alpha", "bench", days[0])
+    put_days(db, days, {"alpha": WRONG})
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("KRX_STATE_DIR", str(state))
+
+    assert main(["retire", "alpha"]) == 0
+    assert main(["retire", "nobody"]) == 1
+    assert "unknown algorithm" in capsys.readouterr().err
+    engine = await review_day(db, [ALPHA, BETA])
+
+    alpha = (await listed(engine))["alpha"]
+    assert last_change(alpha) == ("bench", "retired", "retired by command")
+    with stored(db) as store:
+        made = [p for p in store.recent("005930", 1000, "alpha")]
+    assert made and all(p["bar_close"] < "2026-10-12" for p in made)  # nothing today, the rest kept
+
+    assert main(["unretire", "alpha"]) == 0
+    with stored(db) as store:
+        assert store.statuses()["alpha"][0] == "probation"
