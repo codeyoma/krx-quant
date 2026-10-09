@@ -4,11 +4,16 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from krx_quant.collector import run_collector
 from krx_quant.fake_kis import FakeKis
+from krx_quant.feeds import KST, VI_STATUS
+from krx_quant.polling import Poller, PollJob
+from krx_quant.recorder import ParquetRecorder
+from tests.kis_rest import requests_for, rest_client
 from tests.test_collector import FIXED_NOW, read, settings_for
 
 INQUIRE_PRICE = "FHKST01010100"
@@ -64,3 +69,24 @@ async def test_a_poll_job_survives_dropped_connections(kis: FakeKis, tmp_path: P
 
     assert calls["n"] > 2, "the job kept polling after the dropped connections"
     assert read(tmp_path, "events", INQUIRE_PRICE)
+
+
+async def test_an_answer_is_recorded_under_the_day_it_was_asked_for(kis: FakeKis, tmp_path: Path) -> None:
+    # Asked at the last instant of 10-08, answered after midnight: the day asked for keeps it.
+    kis.rest_responses["FHPST01390000"] = lambda q: {"rt_cd": "0", "msg_cd": "", "msg1": "", "output": []}
+    asked, answered = datetime(2026, 10, 8, 23, 59, 59, 900000, tzinfo=KST), datetime(2026, 10, 9, tzinfo=KST)
+    times = iter([asked, answered])
+    stop = asyncio.Event()
+    recorder = ParquetRecorder(tmp_path, flush_rows=1, flush_seconds=3600)
+    async with rest_client(kis, tmp_path, asked) as client:
+        poller = Poller(
+            client, recorder, lambda: next(times, answered), stop, on_received=lambda _: stop.set()
+        )
+        poller.add(PollJob(VI_STATUS, "005930", 3600))
+        await asyncio.wait_for(stop.wait(), 5)
+        await poller.close()
+    recorder.close()
+
+    assert [q["FID_INPUT_DATE_1"] for q in requests_for(kis, "FHPST01390000")] == ["20261008"]
+    [row] = read(tmp_path, "raw", "FHPST01390000")  # under date=2026-10-08
+    assert row["received_at"] == answered
