@@ -10,6 +10,7 @@ Times are ISO 8601 strings in KST, which sort in time order.
 
 from __future__ import annotations
 
+import contextlib
 import sqlite3
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -140,6 +141,7 @@ class Score:
 class PredictionStore:
     def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
+        self._path = path
         self._db = sqlite3.connect(path)
         self._db.row_factory = sqlite3.Row
         self._db.execute("PRAGMA journal_mode=WAL")
@@ -310,7 +312,11 @@ class PredictionStore:
     def scored_predictions(
         self, days: Sequence[date], symbol: str | None, include_special: bool
     ) -> list[dict[str, Any]]:
-        """Predictions made on ``days`` and scored on either basis, of one symbol or all."""
+        """Predictions made on ``days`` and scored on either basis, of one symbol or all.
+
+        Read on a read-only connection of its own, so a worker thread can run it while
+        the engine keeps writing (WAL lets them work at once).
+        """
         if not days:
             return []
         marks = ", ".join("?" for _ in days)
@@ -331,7 +337,9 @@ class PredictionStore:
             params.append(symbol)
         if not include_special:
             where += " AND o.special = 0"
-        return self._select(where, tuple(params))
+        with contextlib.closing(sqlite3.connect(self._path.resolve().as_uri() + "?mode=ro", uri=True)) as db:
+            db.row_factory = sqlite3.Row
+            return self._select(where, tuple(params), db)
 
     def last_bar_close(self) -> str | None:
         value: str | None = self._db.execute("SELECT MAX(bar_close) FROM predictions").fetchone()[0]
@@ -341,11 +349,17 @@ class PredictionStore:
         count: int = self._db.execute("SELECT COUNT(*) FROM outcomes WHERE scored_at IS NULL").fetchone()[0]
         return count
 
-    def _select(self, where: str, params: tuple[Any, ...]) -> list[dict[str, Any]]:
-        rows = self._db.execute(
-            "SELECT p.*, o.target_at, o.mid_close, o.mid_display, o.mid_target, o.flat_ticks,"
-            " o.class_a, o.class_b, o.special, o.unscorable, o.scored_at"
-            " FROM predictions p LEFT JOIN outcomes o ON o.prediction_id = p.id " + where,
-            params,
-        ).fetchall()
+    def _select(
+        self, where: str, params: tuple[Any, ...], db: sqlite3.Connection | None = None
+    ) -> list[dict[str, Any]]:
+        rows = (
+            (db or self._db)
+            .execute(
+                "SELECT p.*, o.target_at, o.mid_close, o.mid_display, o.mid_target, o.flat_ticks,"
+                " o.class_a, o.class_b, o.special, o.unscorable, o.scored_at"
+                " FROM predictions p LEFT JOIN outcomes o ON o.prediction_id = p.id " + where,
+                params,
+            )
+            .fetchall()
+        )
         return [dict(r) for r in rows]

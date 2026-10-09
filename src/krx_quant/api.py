@@ -343,9 +343,11 @@ async def _stats(
     cached = cache.get(key)
     if cached is not None and cached[0] == version:
         return cached[1]
-    rows = engine.store.scored_predictions(query.days, query.symbol, query.special)
 
     def compute() -> dict[str, Any]:
+        # Reading and computing both run in the worker: a long history must not hold up
+        # the event loop that records and predicts.
+        rows = engine.store.scored_predictions(query.days, query.symbol, query.special)
         algorithms, baselines = _split(_scored(rows, query.basis))
         for a in engine.algorithms:
             algorithms.setdefault(a.name, [])
