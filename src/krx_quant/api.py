@@ -40,7 +40,15 @@ from krx_quant.engine import PredictionEngine
 from krx_quant.feeds.base import KST, kst_day
 from krx_quant.predictions import iso
 from krx_quant.pricing import Direction, flat_ticks, tick_size
-from krx_quant.stats import CalibrationBin, Entry, Interval, Scored, entry, leaderboard
+from krx_quant.stats import (
+    DEFAULT_MIN_SAMPLE,
+    CalibrationBin,
+    Entry,
+    Interval,
+    Scored,
+    entry,
+    leaderboard,
+)
 
 ENGINE_KEY = web.AppKey("engine", PredictionEngine)
 MODE_KEY = web.AppKey("mode", str)
@@ -51,9 +59,10 @@ LIVE_STATUS_KEY: web.AppKey[LiveStatus] = web.AppKey("live_status")
 _dumps = partial(json.dumps, ensure_ascii=False, indent=2)
 
 MIN_SAMPLE_KEY = web.AppKey("min_sample", int)
-DEFAULT_MIN_SAMPLE = 200
+STATS_CACHE_KEY = web.AppKey("stats_cache", dict)
 PERIODS = {"today": 1, "5d": 5, "20d": 20}  # days with predictions
-SLOT = timedelta(minutes=30)
+# Results kept per question until the store changes (the screen asks the same often).
+_CACHED_QUESTIONS = 64
 
 DEFAULT_LIMIT = 100
 MAX_LIMIT = 1000
@@ -70,6 +79,7 @@ def create_app(
     app[ENGINE_KEY] = engine
     app[MODE_KEY] = mode
     app[MIN_SAMPLE_KEY] = min_sample
+    app[STATS_CACHE_KEY] = {}
     if live_status is not None:
         app[LIVE_STATUS_KEY] = live_status
     app.router.add_get("/v1/status", _status)
@@ -194,7 +204,7 @@ def _engine_and_symbol(request: web.Request) -> tuple[PredictionEngine, str]:
 class _Query:
     symbol: str | None  # None: every symbol
     period: str
-    days: list[date]
+    days: tuple[date, ...]
     basis: str
     special: bool
 
@@ -223,7 +233,7 @@ def _query(request: web.Request, engine: PredictionEngine) -> _Query:
     if special not in ("exclude", "include"):
         raise _error(web.HTTPBadRequest, "special must be exclude or include")
     today = kst_day(engine.clock.now())
-    days = [today] if period == "today" else engine.store.prediction_days(today)[: PERIODS[period]]
+    days = (today,) if period == "today" else tuple(engine.store.prediction_days(today, PERIODS[period]))
     return _Query(None if symbol == "all" else symbol, period, days, basis, special == "include")
 
 
@@ -262,55 +272,90 @@ def _split(by_algorithm: dict[str, list[Scored]]) -> tuple[dict[str, list[Scored
 async def _leaderboard(request: web.Request) -> web.Response:
     engine = request.app[ENGINE_KEY]
     query = _query(request, engine)
-    rows = engine.store.scored(query.days, query.symbol, query.special)
     min_sample = request.app[MIN_SAMPLE_KEY]
 
-    def build() -> dict[str, Any]:
-        algorithms, baselines = _split(_scored(rows, query.basis))
-        for a in engine.algorithms:
-            algorithms.setdefault(a.name, [])
+    def build(algorithms: dict[str, list[Scored]], baselines: dict[str, list[Scored]]) -> dict[str, Any]:
         board = leaderboard(algorithms, baselines, min_sample, engine.fee_rate)
         return {
             **query.describe(),
             "min_sample": min_sample,
-            "ranked": [_entry(e) for e in board.ranked],
-            "unranked": [_entry(e) for e in board.unranked],
-            "baselines": [_entry(e) for e in board.baselines],
+            "ranked": [_entry_json(e) for e in board.ranked],
+            "unranked": [_entry_json(e) for e in board.unranked],
+            "baselines": [_entry_json(e) for e in board.baselines],
         }
 
-    return _json(await asyncio.to_thread(build))
+    return _json(await _stats(request, ("leaderboard",), query, build))
 
 
 async def _algorithm_stats(request: web.Request) -> web.Response:
     engine = request.app[ENGINE_KEY]
     name = request.match_info["name"]
     query = _query(request, engine)
-    rows = engine.store.scored(query.days, query.symbol, query.special)
-    known = {a.name for a in engine.algorithms} | {b.name for b in BASELINES} | {r["algorithm"] for r in rows}
+    known = {a.name for a in engine.algorithms} | {b.name for b in BASELINES} | engine.store.algorithms()
     if name not in known:
         raise _error(web.HTTPNotFound, f"unknown algorithm {name!r}")
+    min_sample = request.app[MIN_SAMPLE_KEY]
 
-    def build() -> dict[str, Any]:
-        algorithms, baselines = _split(_scored(rows, query.basis))
-        records = baselines.get(name) or algorithms.get(name, [])
+    def build(algorithms: dict[str, list[Scored]], baselines: dict[str, list[Scored]]) -> dict[str, Any]:
+        records = baselines[name] if name in baselines else algorithms.get(name, [])
+        # Overall lifts carry the leaderboard's FDR adjustment; breakdowns are not tested.
+        board = leaderboard(algorithms, baselines, min_sample, engine.fee_rate)
+        listed = board.ranked + board.unranked + board.baselines
+        overall = next(
+            (e for e in listed if e.algorithm == name), entry(name, records, baselines, engine.fee_rate)
+        )
 
         def by(key: Callable[[Scored], str]) -> dict[str, Any]:
             groups: dict[str, list[Scored]] = {}
             for r in records:
                 groups.setdefault(key(r), []).append(r)
-            return {k: _entry(entry(name, g, baselines, engine.fee_rate)) for k, g in sorted(groups.items())}
+            return {
+                k: _entry_json(entry(name, g, baselines, engine.fee_rate)) for k, g in sorted(groups.items())
+            }
 
-        overall = entry(name, records, baselines, engine.fee_rate)
         return {
             "algorithm": name,
             **query.describe(),
-            "overall": {**_entry(overall), "calibration": [_bin(b) for b in overall.summary.calibration]},
+            "min_sample": min_sample,
+            "overall": {
+                **_entry_json(overall),
+                "calibration": [_bin_json(b) for b in overall.summary.calibration],
+            },
             "by_symbol": by(lambda r: r.symbol),
             "by_slot": by(_slot),
             "by_model_version": by(lambda r: r.model_version),
         }
 
-    return _json(await asyncio.to_thread(build))
+    return _json(await _stats(request, ("algorithm", name), query, build))
+
+
+Build = Callable[[dict[str, list[Scored]], dict[str, list[Scored]]], dict[str, Any]]
+
+
+async def _stats(
+    request: web.Request, question: tuple[str, ...], query: _Query, build: Build
+) -> dict[str, Any]:
+    """Statistics for ``query``, computed off the event loop and kept until the store changes."""
+    engine = request.app[ENGINE_KEY]
+    cache: dict[Any, tuple[int, dict[str, Any]]] = request.app[STATS_CACHE_KEY]
+    key = (question, query)
+    version = engine.store.version
+    cached = cache.get(key)
+    if cached is not None and cached[0] == version:
+        return cached[1]
+    rows = engine.store.scored_predictions(query.days, query.symbol, query.special)
+
+    def compute() -> dict[str, Any]:
+        algorithms, baselines = _split(_scored(rows, query.basis))
+        for a in engine.algorithms:
+            algorithms.setdefault(a.name, [])
+        return build(algorithms, baselines)
+
+    body = await asyncio.to_thread(compute)
+    if len(cache) >= _CACHED_QUESTIONS:
+        cache.clear()
+    cache[key] = (version, body)
+    return body
 
 
 def _slot(r: Scored) -> str:
@@ -320,22 +365,26 @@ def _slot(r: Scored) -> str:
     return f"{start.hour:02d}:{minute:02d}"
 
 
-def _interval(i: Interval | None) -> dict[str, Any] | None:
+def _interval_json(i: Interval | None) -> dict[str, Any] | None:
     return None if i is None else {"value": i.value, "low": i.low, "high": i.high, "n": i.n}
 
 
-def _entry(e: Entry) -> dict[str, Any]:
+def _entry_json(e: Entry) -> dict[str, Any]:
     s = e.summary
     out: dict[str, Any] = {
         "rank": e.rank,
         "algorithm": e.algorithm,
         "model_versions": e.model_versions,
         "n": s.n,
-        "accuracy": _interval(s.accuracy),
-        "precision": _interval(s.precision),
-        "coverage": _interval(s.coverage),
-        "brier": _interval(s.brier),
-        "pnl": {"trades": s.pnl.trades, "total_ticks": s.pnl.total, "per_trade": _interval(s.pnl.per_trade)},
+        "accuracy": _interval_json(s.accuracy),
+        "precision": _interval_json(s.precision),
+        "coverage": _interval_json(s.coverage),
+        "brier": _interval_json(s.brier),
+        "pnl": {
+            "trades": s.pnl.trades,
+            "total_ticks": s.pnl.total,
+            "per_trade": _interval_json(s.pnl.per_trade),
+        },
     }
     if e.lifts:
         out["lift"] = {
@@ -356,8 +405,14 @@ def _entry(e: Entry) -> dict[str, Any]:
     return out
 
 
-def _bin(b: CalibrationBin) -> dict[str, Any]:
-    return {"low": b.low, "high": b.high, "count": b.count, "mean_p": b.mean_p, "observed": b.observed}
+def _bin_json(b: CalibrationBin) -> dict[str, Any]:
+    return {
+        "low": b.low,
+        "high": b.high,
+        "count": b.count,
+        "mean_p": b.mean_p,
+        "observed": _interval_json(b.observed),
+    }
 
 
 def _json(body: dict[str, Any]) -> web.Response:

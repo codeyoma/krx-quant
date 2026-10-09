@@ -22,12 +22,15 @@ round-trip cost 0.23% = 186.875 won = 1.86875 ticks):
 - trades (#1–5): 3−c, 1−c, −3−c, 4−c, −2−c with c = 1.86875: total −6.34375, mean
   −1.26875 per trade;
 - against always-flat (right on #2, 6, 7, 10), the paired differences are
-  +1, −1, 0, +1, 0, 0, 0, 0, 0, 0: lift 0.1, standard error 0.1795, 95% interval
-  −0.2518 to 0.4518, one-sided p 0.2887.
+  +1, −1, 0, +1, 0, 0, 0, 0, 0, 0: lift 0.1. Ten pairs are too few to test, so the test
+  repeats the ten three times (30 pairs): the deviations from 0.1 square to 3 × 2.9 =
+  8.7, the variance is 8.7 / 29 = 0.3, the standard error √(0.3 / 30) = 0.1, so the 95%
+  interval is 0.1 ± 0.196 and the one-sided p is 1 − Φ(1) = 0.1587.
 """
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta
 
 import pytest
@@ -83,9 +86,11 @@ def test_ratios_come_with_wilson_intervals() -> None:
     precision, coverage, accuracy = known(s.precision), known(s.coverage), known(s.accuracy)
 
     assert (precision.value, precision.n) == (0.4, 5)
+    assert precision.low is not None and precision.high is not None
     assert (round(precision.low, 4), round(precision.high, 4)) == (0.1176, 0.7693)
     assert (coverage.value, coverage.n) == (0.5, 10)
     assert (accuracy.value, accuracy.n) == (0.5, 10)
+    assert accuracy.low is not None and accuracy.high is not None
     assert (round(accuracy.low, 4), round(accuracy.high, 4)) == (0.2366, 0.7634)
 
 
@@ -103,22 +108,27 @@ def test_the_calibration_curve_bins_every_class_probability() -> None:
     bins = {round(b.low, 1): b for b in summarize(ALGORITHM, FEE).calibration}
 
     # [0.7, 0.8): #3's 0.7 on up, which did not happen.
-    assert (bins[0.7].count, bins[0.7].mean_p, bins[0.7].observed) == (1, 0.7, 0.0)
+    assert (bins[0.7].count, bins[0.7].mean_p, known(bins[0.7].observed).value) == (1, 0.7, 0.0)
     # [0.9, 1.0]: #10's 1.0 on flat, which happened.
-    assert (bins[0.9].count, bins[0.9].mean_p, bins[0.9].observed) == (1, 1.0, 1.0)
+    assert (bins[0.9].count, bins[0.9].mean_p, known(bins[0.9].observed).value) == (1, 1.0, 1.0)
     # [0.0, 0.1): #10's two zeros; neither happened.
-    assert (bins[0.0].count, bins[0.0].observed) == (2, 0.0)
+    assert (bins[0.0].count, known(bins[0.0].observed).value) == (2, 0.0)
     assert sum(b.count for b in bins.values()) == 30
 
 
-def test_lift_is_the_paired_gain_in_accuracy_over_a_baseline() -> None:
-    result = lift(ALGORITHM, ALWAYS_FLAT)
+def thrice(records: list[Scored]) -> list[Scored]:
+    """The example three times over, at later bar closes."""
+    return [replace(r, bar_close=r.bar_close + timedelta(minutes=10 * k)) for k in range(3) for r in records]
 
-    assert result.n == 10
+
+def test_lift_is_the_paired_gain_in_accuracy_over_a_baseline() -> None:
+    result = lift(thrice(ALGORITHM), thrice(ALWAYS_FLAT))
+
+    assert result.n == 30
     assert result.value == pytest.approx(0.1)
-    assert result.low is not None and result.high is not None
-    assert (round(result.low, 4), round(result.high, 4)) == (-0.2518, 0.4518)
-    assert result.p == pytest.approx(0.2887, abs=1e-4)
+    assert result.low == pytest.approx(0.1 - 0.195996, abs=1e-6)
+    assert result.high == pytest.approx(0.1 + 0.195996, abs=1e-6)
+    assert result.p == pytest.approx(0.158655, abs=1e-6)
 
 
 def test_lift_only_compares_bar_closes_both_predicted() -> None:
@@ -140,3 +150,25 @@ def test_no_data_gives_no_interval() -> None:
     assert wilson(0, 0) is None
     empty = summarize([], FEE)
     assert empty.accuracy is None and empty.precision is None and empty.pnl.trades == 0
+
+
+def test_a_lift_on_too_few_pairs_is_not_tested() -> None:
+    # Two bar closes both gained: sure-looking, but far too few to test.
+    result = lift(ALGORITHM[:1] + ALGORITHM[3:4], ALWAYS_FLAT)
+
+    assert (result.n, result.value, result.p) == (2, 1.0, None)
+
+
+def test_a_single_trade_has_a_profit_but_no_interval() -> None:
+    per_trade = known(summarize(ALGORITHM[:1], FEE).pnl.per_trade)
+
+    assert per_trade.value == pytest.approx(1.13125)
+    assert (per_trade.low, per_trade.high, per_trade.n) == (None, None, 1)
+
+
+def test_each_calibration_bin_says_how_sure_its_observed_rate_is() -> None:
+    bins = {round(b.low, 1): b for b in summarize(ALGORITHM, FEE).calibration}
+
+    observed = known(bins[0.0].observed)  # 0 of 2 happened
+    assert (observed.value, observed.n, observed.low) == (0.0, 2, 0.0)
+    assert observed.high is not None and round(observed.high, 4) == 0.6576

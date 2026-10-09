@@ -15,8 +15,10 @@ was displayed). Its predicted class is the most likely one; a tie goes to flat, 
 - **lift**: the gain in accuracy over a baseline, paired by symbol and bar close, with a
   one-sided p-value for "no better than the baseline".
 
-Ratios come with 95% Wilson intervals, means with 95% normal intervals. Several lifts
-tested at once are adjusted by Benjamini–Hochberg (false discovery rate).
+Ratios come with 95% Wilson intervals, means with 95% normal intervals (none from a
+single value). A lift is tested only on enough pairs for the normal approximation; the
+lifts of the algorithms a leaderboard could rank are adjusted together by
+Benjamini–Hochberg (false discovery rate).
 """
 
 from __future__ import annotations
@@ -32,6 +34,10 @@ from krx_quant.pricing import SELL_TAX, Direction, tick_size
 _Z = NormalDist().inv_cdf(0.975)
 FDR = 0.05  # the false discovery rate a significant lift is held to
 CALIBRATION_BINS = 10
+# Fewer pairs than this are not tested: the normal approximation would be too rough.
+MIN_PAIRS_TESTED = 30
+# Scored predictions (and pairs with each baseline) an algorithm needs to be ranked.
+DEFAULT_MIN_SAMPLE = 200
 
 
 @dataclass(frozen=True)
@@ -67,8 +73,8 @@ class Scored:
 @dataclass(frozen=True)
 class Interval:
     value: float
-    low: float
-    high: float
+    low: float | None  # None when one value cannot tell how sure it is
+    high: float | None
     n: int
 
 
@@ -85,7 +91,7 @@ class CalibrationBin:
     high: float
     count: int
     mean_p: float | None
-    observed: float | None
+    observed: Interval | None  # how often the class happened
 
 
 @dataclass(frozen=True)
@@ -116,7 +122,7 @@ def wilson(successes: int, n: int) -> Interval | None:
     denominator = 1 + z2 / n
     center = (p + z2 / (2 * n)) / denominator
     half = _Z * math.sqrt(p * (1 - p) / n + z2 / (4 * n**2)) / denominator
-    return Interval(p, center - half, center + half, n)
+    return Interval(p, max(0.0, center - half), min(1.0, center + half), n)
 
 
 def mean_interval(values: Sequence[float]) -> Interval | None:
@@ -125,7 +131,7 @@ def mean_interval(values: Sequence[float]) -> Interval | None:
         return None
     mean = sum(values) / n
     if n == 1:
-        return Interval(mean, mean, mean, 1)
+        return Interval(mean, None, None, 1)
     half = _Z * _standard_error(values, mean)
     return Interval(mean, mean - half, mean + half, n)
 
@@ -176,7 +182,7 @@ def _calibration(records: Sequence[Scored]) -> list[CalibrationBin]:
             high=(i + 1) * width,
             count=int(count),
             mean_p=total / count if count else None,
-            observed=happened / count if count else None,
+            observed=wilson(int(happened), int(count)),
         )
         for i, (count, total, happened) in enumerate(sums)
     ]
@@ -189,8 +195,8 @@ def lift(records: Sequence[Scored], baseline: Sequence[Scored]) -> Lift:
     interval = mean_interval(gains)
     if interval is None:
         return Lift(0, None, None, None, None)
-    if interval.n < 2:
-        return Lift(interval.n, interval.value, None, None, None)
+    if interval.n < MIN_PAIRS_TESTED:
+        return Lift(interval.n, interval.value, interval.low, interval.high, None)
     error = _standard_error(gains, interval.value)
     if error == 0:
         p = 0.0 if interval.value > 0 else 1.0
@@ -220,8 +226,11 @@ class Tested:
     q: float | None = None
 
     @property
-    def significant(self) -> bool:
-        return self.q is not None and self.q <= FDR and (self.lift.value or 0) > 0
+    def significant(self) -> bool | None:
+        """None when it was not tested with the others (a breakdown, or not a candidate)."""
+        if self.q is None:
+            return None
+        return self.q <= FDR and (self.lift.value or 0) > 0
 
 
 @dataclass(frozen=True)
@@ -265,21 +274,42 @@ def leaderboard(
     min_sample: int,
     fee_rate: float,
 ) -> Leaderboard:
-    """Algorithms ranked by the lower bound of their weakest lift, among those with at least
-    ``min_sample`` scored predictions; every lift tested here shares one FDR adjustment.
+    """Algorithms ranked by the lower bound of their weakest lift.
+
+    The candidates have at least ``min_sample`` scored predictions, and as many pairs with
+    each baseline; their lifts, and only theirs, share one FDR adjustment.
     """
-    entries = [entry(name, records, baselines, fee_rate) for name, records in sorted(by_algorithm.items())]
-    tests = [(e, name) for e in entries for name, t in e.lifts.items() if t.lift.p is not None]
-    q_values = benjamini_hochberg([e.lifts[name].lift.p or 0.0 for e, name in tests])
-    for (e, name), q in zip(tests, q_values, strict=True):
-        e.lifts[name] = Tested(e.lifts[name].lift, q)
-    eligible = [e for e in entries if e.summary.n >= min_sample and e.lift_low is not None]
+    raw = [entry(name, records, baselines, fee_rate) for name, records in sorted(by_algorithm.items())]
+    candidates = {
+        e.algorithm
+        for e in raw
+        if e.summary.n >= min_sample and all(t.lift.n >= min_sample for t in e.lifts.values()) and e.lifts
+    }
+    tests = [
+        (e.algorithm, name, t.lift.p)
+        for e in raw
+        if e.algorithm in candidates
+        for name, t in e.lifts.items()
+        if t.lift.p is not None
+    ]
+    q_values = {
+        (a, b): q for (a, b, _), q in zip(tests, benjamini_hochberg([p for *_, p in tests]), strict=True)
+    }
+    adjusted = [
+        Entry(
+            e.algorithm,
+            e.model_versions,
+            e.summary,
+            {name: Tested(t.lift, q_values.get((e.algorithm, name))) for name, t in e.lifts.items()},
+        )
+        for e in raw
+    ]
+    eligible = [e for e in adjusted if e.algorithm in candidates and e.lift_low is not None]
     eligible.sort(key=lambda e: (-(e.lift_low or 0.0), e.algorithm))
     ranked = [Entry(e.algorithm, e.model_versions, e.summary, e.lifts, i + 1) for i, e in enumerate(eligible)]
     chosen = {e.algorithm for e in eligible}
-    unranked = [e for e in entries if e.algorithm not in chosen]
     return Leaderboard(
         ranked,
-        unranked,
+        [e for e in adjusted if e.algorithm not in chosen],
         [entry(name, records, baselines, fee_rate) for name, records in sorted(baselines.items())],
     )
