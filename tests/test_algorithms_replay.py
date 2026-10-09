@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections import Counter
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +17,7 @@ from krx_quant.baselines import Forecast
 from krx_quant.engine import Budget
 from krx_quant.features import FEATURES, FeatureStore, Snapshot
 from tests.algorithm_doubles import FixedAlgorithm
-from tests.replay_events import SYMBOL, api, at, get_json, run
+from tests.replay_events import SYMBOL, api, at, get_json, run, trade
 from tests.test_replay import busy_morning
 
 
@@ -154,3 +155,31 @@ async def test_an_algorithm_that_fails_or_breaks_the_contract_is_recorded_as_an_
     for name in ("raising", "endless"):
         [failed] = await predictions_of(engine, name)
         assert (failed["status"], failed["p_up"], failed["expected_ticks"]) == ("error", None, None)
+
+
+async def test_a_trade_received_after_a_bar_close_stays_out_of_its_features(tmp_path: Path) -> None:
+    # Live, the engine may run a bar close late, after later trades have arrived. A trade
+    # traded in the closing minute but received after 09:31 must not reach 09:31's features.
+    late = trade(at("09:31:00.5"), 81_200, 50_000, traded=at("09:30:59"))
+    events = [*busy_morning(), late]
+    delayed = timedelta(seconds=2)  # the 09:31 bar close runs at 09:31:02, after the late trade
+
+    with_late = await run(tmp_path / "late.db", events, until=at("09:32:30"), display_delay=delayed)
+    without = await run(tmp_path / "on-time.db", busy_morning(), until=at("09:32:30"), display_delay=delayed)
+
+    def at_0931(predictions: list[dict[str, Any]]) -> dict[str, Any]:
+        return next(p for p in predictions if p["bar_close"] == "2026-10-12T09:31:00+09:00")
+
+    late_newton = at_0931(await predictions_of(with_late, "newton"))
+    on_time_newton = at_0931(await predictions_of(without, "newton"))
+    for field in ("p_up", "p_flat", "p_down", "expected_ticks"):
+        assert late_newton[field] == on_time_newton[field], field
+    # It does count from the next bar close on.
+    assert at_0931_next(await predictions_of(with_late, "newton")) != at_0931_next(
+        await predictions_of(without, "newton")
+    )
+
+
+def at_0931_next(predictions: list[dict[str, Any]]) -> tuple[Any, ...]:
+    p = next(p for p in predictions if p["bar_close"] == "2026-10-12T09:32:00+09:00")
+    return (p["p_up"], p["p_flat"], p["p_down"], p["expected_ticks"])

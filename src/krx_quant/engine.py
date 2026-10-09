@@ -28,7 +28,7 @@ import logging
 import math
 import time as timer
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, time, timedelta
 from functools import partial
 from typing import Any
@@ -122,6 +122,10 @@ class PredictionEngine:
         self._reference = ReferencePrice(calendar)
         self._bars = BarBuilder()
         self._last_tick = clock.now()
+        # Bars as they stood at bar closes not yet predicted, kept once an event received
+        # at or after the close arrives: a late run must not see trades it could not have.
+        self._frozen: dict[datetime, dict[str, list[Bar]]] = {}
+        self._frozen_through = self._last_tick
         # Outcomes waiting for their target time: (target_at, prediction_id, pending).
         self._pending: list[tuple[datetime, int, Pending]] = []
         for p in store.pending():
@@ -132,6 +136,7 @@ class PredictionEngine:
         if symbol not in self.symbols or feed not in ENGINE_FEEDS:
             return
         received_at = row["received_at"]
+        self._freeze_before(received_at)
         if feed == TRADE.tr_id:
             self._bars.trade(symbol, row["event_time"], row["price"], row["qty"])
             self._reference.quote(symbol, Source.INTEGRATED, received_at, row["bid1"], row["ask1"])
@@ -139,6 +144,14 @@ class PredictionEngine:
             self._reference.quote(symbol, Source.KRX, received_at, row["bid1"], row["ask1"])
         else:
             self._reference.quote(symbol, Source.INTEGRATED, received_at, row["bid_px_1"], row["ask_px_1"])
+
+    def _freeze_before(self, received_at: datetime) -> None:
+        """Keep the bars of every bar close this event comes after (at the same instant
+        counts as after), before the event changes them.
+        """
+        while (close := self._next_bar_close(self._frozen_through)) is not None and received_at >= close:
+            self._frozen[close] = {s: [replace(b) for b in self._bars.closed(s, close)] for s in self.symbols}
+            self._frozen_through = close
 
     def next_due(self) -> datetime | None:
         """When ``run_due`` next has work: a bar close to predict or an outcome to score."""
@@ -181,12 +194,15 @@ class PredictionEngine:
     async def _predict(self, bar_close: datetime) -> None:
         day_start = datetime.combine(bar_close.date(), time(), KST)
         at_close: dict[str, _AtClose] = {}
+        frozen = self._frozen.pop(bar_close, None)
+        for stale in [c for c in self._frozen if c < bar_close]:
+            del self._frozen[stale]  # a close no longer predicted (the calendar changed)
+        # Nothing received since the close has reached the bars: they are as they stood.
+        bars = frozen if frozen is not None else {s: self._bars.closed(s, bar_close) for s in self.symbols}
         baselines: dict[tuple[str, str], dict[str, Forecast | None]] = {}
         for symbol in self.symbols:
             mid = self._reference.mid(symbol, bar_close)
-            snapshot = Snapshot.at(
-                symbol, bar_close, self._bars.closed(symbol, bar_close), mid, self.fee_rate
-            )
+            snapshot = Snapshot.at(symbol, bar_close, bars.get(symbol, []), mid, self.fee_rate)
             at_close[symbol] = _AtClose(mid, self._features.compute(snapshot, self._feature_names))
             inputs = Inputs(
                 symbol=symbol,

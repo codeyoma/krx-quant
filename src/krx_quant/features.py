@@ -160,6 +160,11 @@ class FeatureVector(Mapping[str, FeatureValue]):
             raise UndeclaredFeature(f"feature {name!r} was not declared")
         return self._values[name]
 
+    def __contains__(self, name: object) -> bool:
+        if name not in self._declared:
+            raise UndeclaredFeature(f"feature {name!r} was not declared")
+        return True
+
     def __iter__(self) -> Iterator[str]:
         return iter(self._values)
 

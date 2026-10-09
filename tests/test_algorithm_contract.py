@@ -107,3 +107,6 @@ def test_reading_an_undeclared_feature_breaks_the_contract() -> None:
         peeker.predict(features, peeker.default_model())
     with pytest.raises(UndeclaredFeature, match="volatility"):
         features.get("volatility")
+    with pytest.raises(UndeclaredFeature, match="volatility"):
+        assert "volatility" in features
+    assert "velocity" in features
