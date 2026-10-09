@@ -24,10 +24,11 @@ Benjamini–Hochberg (false discovery rate).
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from statistics import NormalDist
+from typing import Any
 
 from krx_quant.pricing import SELL_TAX, Direction, tick_size
 
@@ -112,6 +113,42 @@ class Lift:
     low: float | None
     high: float | None
     p: float | None  # one-sided: the chance of a lift this large with none really
+
+
+def scored_by_algorithm(rows: Sequence[Mapping[str, Any]], basis: str) -> dict[str, list[Scored]]:
+    """Each algorithm's stored predictions (``PredictionStore.scored_predictions``) scored
+    on ``basis`` (``a`` or ``b``); those its basis could not score are left out.
+    """
+    out: dict[str, list[Scored]] = {}
+    for r in rows:
+        outcome = r["class_a"] if basis == "a" else r["class_b"]
+        start = r["mid_close"] if basis == "a" else r["mid_display"]
+        if outcome is None or start is None or r["mid_target"] is None:
+            continue
+        out.setdefault(r["algorithm"], []).append(
+            Scored(
+                algorithm=r["algorithm"],
+                model_version=r["model_version"],
+                symbol=r["symbol"],
+                bar_close=datetime.fromisoformat(r["bar_close"]),
+                p_up=r["p_up"],
+                p_flat=r["p_flat"],
+                p_down=r["p_down"],
+                outcome=Direction(outcome),
+                start_mid=start,
+                target_mid=r["mid_target"],
+            )
+        )
+    return out
+
+
+def split(
+    by_algorithm: Mapping[str, list[Scored]], baseline_names: Collection[str]
+) -> tuple[dict[str, list[Scored]], dict[str, list[Scored]]]:
+    """The algorithms' records, and the baselines' (every one named, empty if none)."""
+    baselines = {name: list(by_algorithm.get(name, [])) for name in sorted(baseline_names)}
+    algorithms = {name: records for name, records in by_algorithm.items() if name not in baseline_names}
+    return algorithms, baselines
 
 
 def wilson(successes: int, n: int) -> Interval | None:
@@ -268,6 +305,13 @@ def entry(
     return Entry(algorithm, versions, summarize(records, fee_rate), lifts)
 
 
+def enough(e: Entry, min_sample: int) -> bool:
+    """Whether ``e`` has the scored predictions, and pairs with each baseline, to be judged."""
+    return (
+        bool(e.lifts) and e.summary.n >= min_sample and all(t.lift.n >= min_sample for t in e.lifts.values())
+    )
+
+
 def leaderboard(
     by_algorithm: dict[str, list[Scored]],
     baselines: dict[str, list[Scored]],
@@ -280,11 +324,7 @@ def leaderboard(
     each baseline; their lifts, and only theirs, share one FDR adjustment.
     """
     raw = [entry(name, records, baselines, fee_rate) for name, records in sorted(by_algorithm.items())]
-    candidates = {
-        e.algorithm
-        for e in raw
-        if e.summary.n >= min_sample and all(t.lift.n >= min_sample for t in e.lifts.values()) and e.lifts
-    }
+    candidates = {e.algorithm for e in raw if enough(e, min_sample)}
     tests = [
         (e.algorithm, name, t.lift.p)
         for e in raw

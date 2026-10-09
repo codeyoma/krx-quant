@@ -29,7 +29,7 @@ import asyncio
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from functools import partial
 from typing import Any
 
@@ -39,7 +39,7 @@ from krx_quant.baselines import BASELINES
 from krx_quant.engine import PredictionEngine
 from krx_quant.feeds.base import KST, kst_day
 from krx_quant.predictions import iso
-from krx_quant.pricing import Direction, flat_ticks, tick_size
+from krx_quant.pricing import flat_ticks, tick_size
 from krx_quant.stats import (
     DEFAULT_MIN_SAMPLE,
     CalibrationBin,
@@ -48,8 +48,11 @@ from krx_quant.stats import (
     Scored,
     entry,
     leaderboard,
+    scored_by_algorithm,
+    split,
 )
 
+BASELINE_NAMES = frozenset(b.name for b in BASELINES)
 ENGINE_KEY = web.AppKey("engine", PredictionEngine)
 MODE_KEY = web.AppKey("mode", str)
 LiveStatus = Callable[[], dict[str, Any]]
@@ -254,38 +257,6 @@ def _query(request: web.Request, engine: PredictionEngine) -> _Query:
     return _Query(None if symbol == "all" else symbol, period, days, basis, special == "include")
 
 
-def _scored(rows: list[dict[str, Any]], basis: str) -> dict[str, list[Scored]]:
-    """Each algorithm's predictions scored on ``basis``."""
-    out: dict[str, list[Scored]] = {}
-    for r in rows:
-        outcome = r["class_a"] if basis == "a" else r["class_b"]
-        start = r["mid_close"] if basis == "a" else r["mid_display"]
-        if outcome is None or start is None or r["mid_target"] is None:
-            continue
-        out.setdefault(r["algorithm"], []).append(
-            Scored(
-                algorithm=r["algorithm"],
-                model_version=r["model_version"],
-                symbol=r["symbol"],
-                bar_close=datetime.fromisoformat(r["bar_close"]),
-                p_up=r["p_up"],
-                p_flat=r["p_flat"],
-                p_down=r["p_down"],
-                outcome=Direction(outcome),
-                start_mid=start,
-                target_mid=r["mid_target"],
-            )
-        )
-    return out
-
-
-def _split(by_algorithm: dict[str, list[Scored]]) -> tuple[dict[str, list[Scored]], dict[str, list[Scored]]]:
-    names = {b.name for b in BASELINES}
-    baselines = {name: by_algorithm.get(name, []) for name in sorted(names)}
-    algorithms = {name: records for name, records in by_algorithm.items() if name not in names}
-    return algorithms, baselines
-
-
 async def _leaderboard(request: web.Request) -> web.Response:
     engine = request.app[ENGINE_KEY]
     query = _query(request, engine)
@@ -365,7 +336,7 @@ async def _stats(
         # Reading and computing both run in the worker: a long history must not hold up
         # the event loop that records and predicts.
         rows = engine.store.scored_predictions(query.days, query.symbol, query.special)
-        algorithms, baselines = _split(_scored(rows, query.basis))
+        algorithms, baselines = split(scored_by_algorithm(rows, query.basis), BASELINE_NAMES)
         for a in engine.algorithms:
             algorithms.setdefault(a.name, [])
         return build(algorithms, baselines)
