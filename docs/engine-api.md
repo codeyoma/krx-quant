@@ -42,6 +42,26 @@
 - 엔진이 재시작되어도 채점 대기 중인 예측은 이어서 채점한다. 엔진이 꺼져 있던 동안의 회차는 예측이 없다.
 - VI·서킷브레이커 "특수" 표시(`special`)는 #12에서 채운다. 지금은 늘 `false`다.
 
+## 통계와 순위표
+
+채점된 예측으로 성적을 낸다(`stats.py`). 한 기준(A 또는 B)으로 본다. 그 기준의 클래스가 정해진 예측만 센다. 예측 클래스는 세 확률 중 가장 큰 쪽이다. 동률이면 보합, 그다음 상승을 고른다.
+
+| 지표 | 정의 | 신뢰구간 |
+|---|---|---|
+| 3클래스 정답률 (`accuracy`) | 예측 클래스가 실제와 같은 비율 | Wilson 95% |
+| 방향 정밀도 (`precision`) | 상승·하락을 예측한 것 중 맞은 비율 | Wilson 95% |
+| 커버리지 (`coverage`) | 상승·하락을 예측한 비율 | Wilson 95% |
+| Brier 점수 (`brier`) | 세 클래스의 (확률 − 실제 0/1)² 합의 평균. 0이 완벽, 2는 확신하고 틀림 | 정규근사 95% |
+| 가상손익 (`pnl`) | 상승·하락 예측을 그 방향으로 시작 중간가에 사고(팔고) 목표 중간가에 판(산) 틱 수에서 왕복 비용(매도세 + 수수료 × 2, 틱)을 뺀 값. 거래 수, 합계, 거래당 평균 | 거래당 평균에 정규근사 95% |
+| 보정 곡선 (`calibration`) | 모든 클래스 확률을 0.1 간격 10구간으로 나눠, 구간별 평균 확률과 실제로 일어난 비율 | |
+| lift | 같은 종목·봉 마감의 기준 예측과 짝지어, 정답(1/0) 차이의 평균 | 정규근사 95%, 한쪽 p값 |
+
+- **lift**: 기준 3종(`baseline-flat`, `baseline-persist`, `baseline-random`) 각각에 대해 낸다. "항상 보합"을 이기려면 보합도 맞히고 방향도 맞혀야 한다. 확률을 분산해서 생기는 이득은 들어가지 않는다.
+- **운 보정**: 한 순위표 안의 모든 lift 검정(알고리즘 × 기준)을 Benjamini–Hochberg로 보정한 q값을 낸다. lift가 0보다 크고 q ≤ 0.05이면 `significant`다.
+- **순위**: 세 lift 중 가장 작은 것의 신뢰구간 하한(`lift.low`)으로 정렬한다. 즉 "모든 기준보다 낫다"를 얼마나 확실히 말할 수 있는지로 줄을 세운다. 채점된 예측이 `KRX_MIN_SAMPLE`(기본 200)보다 적은 알고리즘은 `unranked`에 둔다. 등록됐지만 아직 채점된 예측이 없는 알고리즘도 `unranked`에 나온다.
+- **기간**: `today`는 엔진 시계의 오늘이다. `5d`·`20d`는 예측이 있는 최근 5일·20일이다.
+- **특수 예측**: 4분 구간에 VI·서킷브레이커가 낀 예측(`special`, #12에서 채운다)은 기본으로 뺀다.
+
 ## 저장 (`state/engine.sqlite3`)
 
 | 테이블 | 열 |
@@ -161,6 +181,49 @@
   ]
 }
 ```
+
+### `GET /v1/leaderboard?symbol=&period=&basis=&special=`
+
+순위표다.
+- `symbol`: 종목 또는 `all`(기본)
+- `period`: `today`(기본), `5d`, `20d`
+- `basis`: `b`(기본, 표시 시점 기준), `a`(봉 마감 기준)
+- `special`: `exclude`(기본) 또는 `include`
+
+잘못된 값은 400이다.
+
+```json
+{
+  "symbol": "all", "period": "today", "days": ["2026-10-12"], "basis": "b", "special": "exclude",
+  "min_sample": 200,
+  "ranked": [
+    {
+      "rank": 1, "algorithm": "newton", "model_versions": ["newton-20261008-14a50c"], "n": 1128,
+      "accuracy": {"value": 0.52, "low": 0.49, "high": 0.55, "n": 1128},
+      "precision": {"value": 0.55, "low": 0.45, "high": 0.65, "n": 96},
+      "coverage": {"value": 0.085, "low": 0.07, "high": 0.10, "n": 1128},
+      "brier": {"value": 0.58, "low": 0.56, "high": 0.60, "n": 1128},
+      "pnl": {"trades": 96, "total_ticks": -12.4, "per_trade": {"value": -0.13, "low": -0.6, "high": 0.34, "n": 96}},
+      "lift": {
+        "low": -0.03,
+        "vs": {
+          "baseline-flat": {"n": 1128, "value": 0.01, "low": -0.01, "high": 0.03, "p": 0.18, "q": 0.27, "significant": false}
+        }
+      }
+    }
+  ],
+  "unranked": [],
+  "baselines": [{"rank": null, "algorithm": "baseline-flat", "n": 1128, "accuracy": {"value": 0.51}}]
+}
+```
+
+(값은 예시다. `vs`에는 기준 3종이 모두 온다. `baselines` 항목은 `lift`가 없는 것만 빼면 같은 형식이다.)
+
+### `GET /v1/algorithms/{name}/stats?symbol=&period=&basis=&special=`
+
+알고리즘 하나(기준 예측도 된다)의 상세 통계다. 질의 값은 순위표와 같다. 모르는 이름은 404다.
+- `overall`: 순위표 항목과 같은 형식에 `calibration`(10구간: `low`, `high`, `count`, `mean_p`, `observed`)을 더한다.
+- `by_symbol`, `by_slot`, `by_model_version`: 종목별, 30분 시간대별, 모델 버전별 항목이다. 시간대는 예측한 봉의 시작 시각 기준이다(`"09:00"`은 09:01–09:30 마감). 이 항목들의 lift에는 q값이 없다(`null`).
 
 ## 알고리즘
 

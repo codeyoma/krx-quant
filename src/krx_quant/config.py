@@ -97,6 +97,8 @@ class Settings:
     # work per bar close must fit in the CPU budget, or the last registered are skipped.
     algorithm_seconds: float = 30.0
     cpu_budget_seconds: float = 30.0
+    # An algorithm needs this many scored predictions in a leaderboard to be ranked.
+    min_sample: int = 200
 
     @classmethod
     def from_env(
@@ -197,4 +199,5 @@ class Settings:
             api_port=int(number("KRX_API_PORT", "8080", int, maximum=65535)),
             algorithm_seconds=float(number("KRX_ALGORITHM_SECONDS", "30", float, maximum=55)),
             cpu_budget_seconds=float(number("KRX_CPU_BUDGET_SECONDS", "30", float)),
+            min_sample=int(number("KRX_MIN_SAMPLE", "200", int)),
         )
