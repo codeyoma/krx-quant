@@ -36,7 +36,9 @@ class Forecast:
         )
 
     def probability(self, direction: Direction) -> float:
-        return {Direction.UP: self.p_up, Direction.FLAT: self.p_flat, Direction.DOWN: self.p_down}[direction]
+        if direction is Direction.UP:
+            return self.p_up
+        return self.p_flat if direction is Direction.FLAT else self.p_down
 
 
 @dataclass(frozen=True)

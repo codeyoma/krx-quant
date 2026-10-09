@@ -111,6 +111,16 @@ def test_the_vwap_catching_up_with_the_price_is_not_reversion() -> None:
     assert reversion_speed(snapshot(stepped)) == 0.0
 
 
+def test_a_move_across_minutes_without_a_bar_is_not_a_one_minute_move() -> None:
+    # The VWAP is pinned at 81,200 and the price sits 8 ticks above it for 21 minutes, then
+    # no bar for five minutes (no trades, or a feed gap), then a bar back at the VWAP. That
+    # move took six minutes, not one: it says nothing about one-minute reversion.
+    held = closes([0] + [8] * 21, first_volume=1_000_000)
+    back = held[-1].start + timedelta(minutes=6)
+
+    assert reversion_speed(snapshot([*held, bar(back, 81_200, 81_200, 81_200, 1)])) == 0.0
+
+
 def fit(make_day: object) -> dict[str, float]:
     assert callable(make_day)
     bar_days = {("005930", d): make_day(d, seed=i) for i, d in enumerate(DAYS)}

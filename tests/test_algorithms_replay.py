@@ -81,9 +81,10 @@ async def test_a_trained_model_is_used_and_recorded(tmp_path: Path) -> None:
 
     assert {p["model_version"] for p in await predictions_of(engine, "newton")} == {"newton-20261009-abc123"}
     async with api(engine) as client:
-        newton, gauss = (await get_json(client, "/v1/algorithms"))["algorithms"]
-    assert (newton["name"], gauss["name"]) == ("newton", "gauss")
-    assert gauss["model"]["version"] == "gauss-default"
+        listed = {a["name"]: a for a in (await get_json(client, "/v1/algorithms"))["algorithms"]}
+    assert listed.keys() == {"newton", "gauss"}
+    newton = listed["newton"]
+    assert listed["gauss"]["model"]["version"] == "gauss-default"
     assert newton["card"]["scientist"] == "Isaac Newton"
     assert set(newton["card"]["unique_features"]) <= set(newton["features"])
     assert newton["model"] == {
