@@ -57,7 +57,7 @@ from krx_quant.market_calendar import MarketCalendar, Session
 from krx_quant.predictions import NewPrediction, Pending, PredictionStore, Score
 from krx_quant.pricing import Direction, classify, flat_ticks, tick_size
 from krx_quant.reference import BAR, Bar, BarBuilder, ReferencePrice, Source
-from krx_quant.special import SpecialSituations, Window
+from krx_quant.special import KOSPI, SpecialSituations, Window, in_vi, touching
 
 log = logging.getLogger(__name__)
 
@@ -77,14 +77,19 @@ ENGINE_FEEDS: dict[str, tuple[str, ...]] = {
     # KRX-only trades carry KRX's best quotes, for the 30 seconds before NXT opens.
     KRX_TRADE.tr_id: ("symbol", "received_at", "ask1", "bid1"),
     # A symbol's VIs: a bar close inside one is not predicted; a window touching one is special.
-    VI_STATUS.tr_id: ("symbol", "event_time", "received_at", "end_time"),
+    VI_STATUS.tr_id: ("symbol", "event_time", "received_at", "end_time", "active"),
     # The KOSPI index and KOSPI200 futures, for circuit breakers and sidecars.
     INDEX.tr_id: ("symbol", "event_time", "received_at", "change_pct"),
     INDEX_REST.tr_id: ("symbol", "event_time", "received_at", "change_pct"),
     KOSPI200_FUTURES.tr_id: ("symbol", "event_time", "received_at", "change_pct"),
 }
-# Feeds of the whole market rather than of a symbol.
-MARKET_FEEDS = (INDEX.tr_id, INDEX_REST.tr_id, KOSPI200_FUTURES.tr_id)
+# Feeds of the whole market rather than of a symbol, and the partition the engine reads of
+# each (None: whichever there is, the front month of that day).
+MARKET_FEEDS: dict[str, str | None] = {
+    INDEX.tr_id: KOSPI,
+    INDEX_REST.tr_id: KOSPI,
+    KOSPI200_FUTURES.tr_id: None,
+}
 
 
 @dataclass(frozen=True)
@@ -142,7 +147,7 @@ class PredictionEngine:
         self._cost: dict[str, float] = {}  # expected seconds per bar close, by algorithm
         self._busy: set[str] = set()  # algorithms still working past their budget
         self._reference = ReferencePrice(calendar)
-        self._special = SpecialSituations()
+        self._special = SpecialSituations(calendar)
         self._bars = BarBuilder()
         self._last_tick = clock.now()
         # Bars as they stood at bar closes not yet predicted, kept once an event received
@@ -155,18 +160,16 @@ class PredictionEngine:
             heapq.heappush(self._pending, (p.target_at, p.prediction_id, p))
 
     def on_event(self, feed: str, row: dict[str, Any]) -> None:
-        if feed == KOSPI200_FUTURES.tr_id:
-            self._learned(self._special.futures(row))
-            return
         if feed in MARKET_FEEDS:
-            self._learned(self._special.index(row))
+            futures = feed == KOSPI200_FUTURES.tr_id
+            self._mark_special(self._special.futures(row) if futures else self._special.index(row))
             return
         symbol = row["symbol"]
         if symbol not in self.symbols or feed not in ENGINE_FEEDS:
             return
         received_at = row["received_at"]
         if feed == VI_STATUS.tr_id:
-            self._learned(self._special.vi(row))
+            self._mark_special(self._special.vi(row))
             return
         self._freeze_before(received_at)
         if feed == TRADE.tr_id:
@@ -177,11 +180,11 @@ class PredictionEngine:
         else:
             self._reference.quote(symbol, Source.INTEGRATED, received_at, row["bid_px_1"], row["ask_px_1"])
 
-    def _learned(self, window: Window | None) -> None:
+    def _mark_special(self, window: Window | None) -> None:
         """A special window just learned: the predictions it touches are special, scored or not."""
         if window is not None:
             log.info("special situation: %s", window)
-            self.store.mark_special(window.symbol, window.start, window.end)
+            self.store.mark_special(window.symbol, window.start, window.end, HORIZON)
 
     def _freeze_before(self, received_at: datetime) -> None:
         """Keep the bars of every bar close this event comes after (at the same instant
@@ -214,6 +217,13 @@ class PredictionEngine:
     def mid(self, symbol: str) -> float | None:
         return self._reference.mid(symbol, self.clock.now())
 
+    def special_today(self) -> list[Window]:
+        """The special situations known now that touch today, in time order."""
+        now = self.clock.now()
+        today = now.astimezone(KST).date()
+        windows = [w for w in self._special.known(before=now) if w.end.astimezone(KST).date() >= today]
+        return sorted(windows, key=lambda w: (w.start, w.kind.value, w.symbol or ""))
+
     def _next_bar_close(self, after: datetime) -> datetime | None:
         """The first bar close in a prediction window strictly after ``after``."""
         local = after.astimezone(KST)
@@ -240,11 +250,12 @@ class PredictionEngine:
         baselines: dict[tuple[str, str], dict[str, Forecast | None]] = {}
         session = self.calendar.session(bar_close.date())
         session_open = session.open if session is not None else None
-        in_vi = [s for s in self.symbols if self._special.in_vi(s, bar_close, known_before=bar_close)]
-        if in_vi:
-            self._record_not_predicted(bar_close, in_vi, "vi")
+        known = self._special.known(before=bar_close)
+        stopped = [s for s in self.symbols if in_vi(known, s, bar_close)]
+        if stopped:
+            self._record_not_predicted(bar_close, stopped, "vi")
         for symbol in self.symbols:
-            if symbol in in_vi:
+            if symbol in stopped:
                 continue
             mid = self._reference.mid(symbol, bar_close)
             snapshot = Snapshot.at(
@@ -331,6 +342,7 @@ class PredictionEngine:
         """Store (name, model version, forecasts by symbol, status) entries as displayed now."""
         displayed_at = self.clock.now()
         mid_display = {symbol: self._reference.mid(symbol, displayed_at) for symbol in at_close}
+        special = self._special.known(before=displayed_at)
         predictions = []
         for name, version, forecasts, status in made:
             for symbol, forecast in forecasts.items():
@@ -350,9 +362,7 @@ class PredictionEngine:
                         mid_display=mid_display[symbol],
                         flat_ticks=flat_ticks(reference, self.fee_rate) if reference is not None else None,
                         status=status,
-                        special=self._special.touches(
-                            symbol, bar_close, bar_close + HORIZON, known_before=displayed_at
-                        ),
+                        special=touching(special, symbol, bar_close, bar_close + HORIZON),
                     )
                 )
         for pending in self.store.add_all(predictions):

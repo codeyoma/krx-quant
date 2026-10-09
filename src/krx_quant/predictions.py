@@ -121,7 +121,7 @@ class AlgorithmSummary:
 
     algorithm: str
     predictions: int
-    skipped: int  # not made: over the time budget, or failed
+    skipped: int  # not made: over the time budget, failed, or in a VI
     scored: int
     unscorable: int
     pending: int
@@ -136,7 +136,6 @@ class Score:
     class_a: Direction | None
     class_b: Direction | None
     unscorable: str | None
-    special: bool = False  # a VI or circuit breaker fell in the window (#12)
 
 
 class PredictionStore:
@@ -237,14 +236,13 @@ class PredictionStore:
         with self._db:
             self._db.executemany(
                 "UPDATE outcomes SET mid_target = ?, class_a = ?, class_b = ?, unscorable = ?,"
-                " special = MAX(special, ?), scored_at = ? WHERE prediction_id = ?",
+                " scored_at = ? WHERE prediction_id = ?",
                 [
                     (
                         score.mid_target,
                         score.class_a.value if score.class_a else None,
                         score.class_b.value if score.class_b else None,
                         score.unscorable,
-                        int(score.special),
                         iso(scored_at),
                         prediction_id,
                     )
@@ -252,13 +250,13 @@ class PredictionStore:
                 ],
             )
 
-    def mark_special(self, symbol: str | None, start: datetime, end: datetime) -> None:
+    def mark_special(self, symbol: str | None, start: datetime, end: datetime, horizon: timedelta) -> None:
         """Mark special every prediction (of ``symbol``, or of every symbol if None) whose
-        window touches ``[start, end]``, scored or not.
+        window, ``horizon`` long, meets the open span from ``start`` to ``end``, scored or not.
         """
         self.version += 1
-        where = "p.bar_close < ? AND o.target_at > ?"
-        params: list[str] = [iso(end), iso(start)]
+        where = "p.bar_close > ? AND p.bar_close < ? AND o.target_at > ?"
+        params: list[str] = [iso(start - horizon), iso(end), iso(start)]
         if symbol is not None:
             where += " AND p.symbol = ?"
             params.append(symbol)

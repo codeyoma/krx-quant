@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from krx_quant.baselines import Forecast
@@ -51,8 +51,9 @@ def test_a_database_of_the_first_engine_is_upgraded_in_place(tmp_path: Path) -> 
     )
 
     assert pending.prediction_id == 1 and pending.mid_close == 81250
-    # The first engine's outcomes already had the special column: scoring one works.
-    store.score_all([(1, Score(81550, Direction.UP, Direction.UP, None, special=True))], T)
+    # The first engine's outcomes already had the special column: marking one works.
+    store.score_all([(1, Score(81550, Direction.UP, Direction.UP, None))], T)
+    store.mark_special("005930", T, T + timedelta(minutes=1), timedelta(minutes=4))
     [special] = store.scored_predictions([T.date()], "005930", include_special=True)
     assert (special["class_a"], special["special"]) == ("up", 1)
     assert store.scored_predictions([T.date()], "005930", include_special=False) == []

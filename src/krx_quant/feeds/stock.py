@@ -479,7 +479,8 @@ def _normalize_vi_status(body: dict[str, Any], key: str, received_at: datetime) 
 
 
 # FHPST01390000, "변동성완화장치(VI) 현황": every VI of the symbol on the day asked, newest
-# first, with its start and release times (2026-10-08 checked live, past days included).
+# first, with its start and release times (checked live on 2026-10-09 for 2026-10-08: past
+# days can be asked for).
 VI_STATUS = RestFeed(
     "FHPST01390000",
     "/uapi/domestic-stock/v1/quotations/inquire-vi-status",
