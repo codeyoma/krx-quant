@@ -50,7 +50,8 @@ def samples(
         t, last = prediction_window(session)
         while t <= last:
             done = bars[: bisect.bisect_right(ends, t)]
-            snapshot = Snapshot.at(symbol, t, done, done[-1].close if done else None, fee_rate)
+            price = done[-1].close if done else None
+            snapshot = Snapshot.at(symbol, t, done, price, fee_rate, session_open=session.open)
             values = store.compute(snapshot, names)
             later = closes.get(t + HORIZON - BAR)  # the close of the bar ending at t + 4 minutes
             change = None

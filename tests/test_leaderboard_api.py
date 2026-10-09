@@ -202,9 +202,9 @@ async def test_a_replayed_morning_reaches_the_leaderboard(tmp_path: Path) -> Non
         newton = await get(client, "/v1/algorithms/newton/stats?basis=a")
 
     # 09:01–09:56 are scored by 10:00 (09:57–10:00 wait for their targets).
-    [ranked] = body["ranked"]
-    assert (ranked["algorithm"], ranked["n"]) == ("newton", 56)
-    assert set(ranked["lift"]["vs"]) == {"baseline-flat", "baseline-persist", "baseline-random"}
+    assert {(e["algorithm"], e["n"]) for e in body["ranked"]} == {("newton", 56), ("gauss", 56)}
+    for ranked in body["ranked"]:
+        assert set(ranked["lift"]["vs"]) == {"baseline-flat", "baseline-persist", "baseline-random"}
     assert [b["n"] for b in body["baselines"]] == [56, 56, 56]
     assert newton["overall"]["n"] == 56
     assert set(newton["by_slot"]) == {"09:00", "09:30"}

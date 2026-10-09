@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import pytest
 
-from krx_quant.algorithms import RegistrationError, register
+from krx_quant.algorithms import ALGORITHMS, RegistrationError, register
+from krx_quant.algorithms.gauss import Gauss
+from krx_quant.algorithms.newton import Newton
 from tests.algorithm_doubles import FixedAlgorithm
 
 
@@ -46,3 +48,9 @@ def test_an_algorithm_must_declare_known_features_and_a_new_name() -> None:
         register([first, again])
     with pytest.raises(RegistrationError, match="stray.*acceleration.*not among its features"):
         register([stray])
+
+
+def test_newton_and_gauss_each_have_a_personality_of_their_own() -> None:
+    assert [a.name for a in register([Newton(), Gauss()])] == ["newton", "gauss"]
+    assert [a.name for a in ALGORITHMS] == ["newton", "gauss"]
+    assert not set(Gauss.card.unique_features) & set(Newton.features)
