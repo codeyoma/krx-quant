@@ -18,7 +18,7 @@ from krx_quant.algorithms import ALGORITHMS
 from krx_quant.api import create_app
 from krx_quant.baselines import BASELINES
 from krx_quant.engine import Event, PredictionEngine
-from krx_quant.feeds import BOOK, KRX_TRADE, KST, TRADE, VI_STATUS, Feed
+from krx_quant.feeds import BOOK, INDEX, KOSPI200_FUTURES, KRX_TRADE, KST, TRADE, VI_STATUS, Feed
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.replay import replay
 
@@ -112,6 +112,33 @@ def vi(received: datetime, start: str, end: str | None = None, symbol: str = SYM
     }
     [event] = VI_STATUS.normalize({"output": [row]}, symbol, received.astimezone(UTC))
     return (VI_STATUS.tr_id, event)
+
+
+def kospi(when: datetime, change_pct: float) -> Event:
+    """A KOSPI index tick at ``when``, ``change_pct`` from the previous close."""
+    fields = _fields(
+        INDEX, {"bstp_cls_code": "0001", "bsop_hour": when.strftime("%H%M%S"), "prdy_ctrt": str(change_pct)}
+    )
+    return (INDEX.tr_id, INDEX.normalize(fields, when.astimezone(UTC)))
+
+
+def kospi200_futures(when: datetime, change_pct: float) -> Event:
+    """A KOSPI200 front-month futures trade at ``when``, ``change_pct`` from the previous close."""
+    fields = _fields(
+        KOSPI200_FUTURES,
+        {"futs_shrn_iscd": "A01612", "bsop_hour": when.strftime("%H%M%S"), "futs_prdy_ctrt": str(change_pct)},
+    )
+    return (KOSPI200_FUTURES.tr_id, KOSPI200_FUTURES.normalize(fields, when.astimezone(UTC)))
+
+
+def every(start: datetime, end: datetime, seconds: float, make: Any) -> list[Event]:
+    """``make(when)`` every ``seconds`` in ``[start, end]``."""
+    events: list[Event] = []
+    when = start
+    while when <= end:
+        events.append(make(when))
+        when += timedelta(seconds=seconds)
+    return events
 
 
 async def run(

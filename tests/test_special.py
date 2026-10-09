@@ -14,7 +14,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from tests.replay_events import PREDICTORS, SYMBOL, api, at, get_json, run, vi
+from tests.replay_events import PREDICTORS, SYMBOL, api, at, every, get_json, kospi, kospi200_futures, run, vi
 from tests.test_replay import busy_morning
 
 # A VI from 09:30:20 to 09:32:40, seen on by 09:30:24 and released by 09:32:44.
@@ -86,3 +86,48 @@ async def test_special_predictions_are_left_out_of_the_leaderboard_by_default(tm
     assert await flat_n(without) == 41
     assert await flat_n(with_vi) == 41 - 2 - 4
     assert await flat_n(with_vi, "&special=include") == 41 - 2
+
+
+def held(start: str, end: str, make: Any, change_pct: float) -> list[Any]:
+    """Ticks every 5 seconds from ``start`` to ``end``, all ``change_pct`` off the previous close."""
+    return every(at(start), at(end), 5, lambda when: make(when, change_pct))
+
+
+async def test_a_kospi_drop_of_8_percent_held_a_minute_is_a_circuit_breaker(tmp_path: Path) -> None:
+    # Down 8.2% from 09:40:00: a circuit breaker at 09:41:00, trading halted 20 minutes and
+    # then a 10-minute single-price auction, to 10:11. A dip at 09:20 lasted 40 seconds.
+    market = [
+        *held("09:20:00", "09:20:40", kospi, -8.5),
+        *held("09:20:45", "09:39:55", kospi, -7.0),
+        *held("09:40:00", "10:19:55", kospi, -8.2),
+        # Down 15.4% from 10:20: the second stage at 10:21, to 10:51.
+        *held("10:20:00", "10:22:00", kospi, -15.4),
+    ]
+
+    engine = await run(tmp_path / "engine.db", [*busy_morning(), *market], until=at("10:30:00"))
+
+    made = await predictions(engine)
+    for close in ("09:17", "09:20", "09:37"):  # the dip; 09:37–09:41 ends as the halt begins
+        assert special(made, close) == {False}, close
+    for close in ("09:38", "09:41", "10:00", "10:10"):
+        assert special(made, close) == {True}, close
+    assert special(made, "10:16") == {False}  # between the stages
+    assert special(made, "10:20") == {True}
+
+
+async def test_kospi200_futures_5_percent_off_held_a_minute_is_a_sidecar_once_a_day(tmp_path: Path) -> None:
+    # Up 5.3% from 09:20:00: a sidecar at 09:21:00 halts program trading for 5 minutes.
+    # Up again at 09:40 for two minutes: a second sidecar the same day is not called.
+    futures = [
+        *held("09:20:00", "09:22:00", kospi200_futures, 5.3),
+        *held("09:22:05", "09:39:55", kospi200_futures, 4.0),
+        *held("09:40:00", "09:42:00", kospi200_futures, 5.6),
+    ]
+
+    engine = await run(tmp_path / "engine.db", [*busy_morning(), *futures], until=at("09:55:00"))
+
+    made = await predictions(engine)
+    for close in ("09:18", "09:21", "09:25"):
+        assert special(made, close) == {True}, close
+    for close in ("09:17", "09:26", "09:41"):
+        assert special(made, close) == {False}, close

@@ -128,6 +128,18 @@ async def test_a_late_opening_day_starts_predicting_an_hour_later(tmp_path: Path
     assert bar_closes(body["predictions"])[0] == "10:01"
 
 
+async def test_the_exam_day_moves_the_whole_window_an_hour_later(tmp_path: Path) -> None:
+    exam_day = date(2026, 11, 19)  # 수능: 10:00–16:30, the closing auction from 16:20
+    calendar = MarketCalendar({exam_day: True})
+
+    engine = await run(tmp_path / "engine.db", [], until=at("17:00:00", exam_day), calendar=calendar)
+
+    async with api(engine) as client:
+        body = await get_json(client, f"/v1/symbols/{SYMBOL}/predictions?limit=1000")
+    closes = bar_closes(body["predictions"])
+    assert (closes[0], closes[-1], len(closes)) == ("10:01", "16:16", 376)
+
+
 async def test_nothing_is_predicted_on_a_holiday(tmp_path: Path) -> None:
     holiday = date(2026, 10, 9)  # Hangul Day
     calendar = MarketCalendar({holiday: False})
