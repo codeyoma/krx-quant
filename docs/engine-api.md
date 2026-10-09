@@ -81,7 +81,7 @@
 |---|---|
 | `predictions` | `id`, `symbol`, `algorithm`, `model_version`, `bar_close`(t), `displayed_at`, `p_up`, `p_flat`, `p_down`, `expected_ticks`, `status`(`ok`, `timed_out`, `error`, `vi`). 재생 결과의 `skipped`는 `ok`가 아닌 예측을 모두 센다. `ok`가 아니면 확률과 기대수익이 비어 있고 `outcomes` 행이 없다. |
 | `outcomes` | `prediction_id`, `target_at`(t + 4분), `mid_close`(A), `mid_display`(B), `mid_target`, `flat_ticks`(k), `class_a`, `class_b`(`up`/`flat`/`down`), `special`, `unscorable`, `scored_at`(채점 전에는 비어 있음) |
-| `runs` | `id`, `kind`(`cpu_budget`: CPU 예산으로 건너뜀, `retire_candidate`: 은퇴 후보 알림), `at`, `algorithm`, `detail` |
+| `runs` | `id`, `kind`(`cpu_budget`: CPU 예산으로 건너뜀, `review`: 일일 상태 점검, `retire_candidate`: 은퇴 후보 알림), `at`, `algorithm`, `detail` |
 | `statuses` | `id`, `algorithm`, `at`, `previous`, `status`, `reason`: 알고리즘 상태 이력(#17) |
 
 시각은 KST ISO 8601 문자열이다. 스키마 버전은 `PRAGMA user_version`에 있다(지금 3). 엔진이 시작할 때 예전 버전의 DB를 데이터를 지키며 올린다.
@@ -283,7 +283,8 @@
 - 거래일은 엔진이 예측한 날이다. 상태가 시작된 날부터 센다. 그날 점검이 끝난 뒤에 시작된 상태(예: 저녁의 `unretire`)는 다음 날부터 센다.
 - 복제 판정은 은퇴하지 않은 먼저 등록된 알고리즘과만 비교한다. 짝이 30개 미만이거나 한쪽 값이 늘 같아 상관을 잴 수 없으면 상태를 그대로 둔다.
 - 점검 결과를 쓰기 직전에 상태를 다시 읽는다. 그 사이 은퇴 명령이 들어왔으면 점검의 변경은 버린다.
-- 은퇴 후보 알림은 텔레그램이 받았을 때만 보낸 것으로 친다. 보내지 못했으면 다음 점검에서 다시 보낸다.
+- 은퇴 후보 알림은 텔레그램이 받았을 때만 보낸 것으로 친다. 보내지 못했거나 텔레그램이 설정되지 않았으면(로그에만 남는다) 다음 점검에서 다시 보낸다.
+- 상태 변경은 "읽은 상태 그대로일 때만" 한 SQL 문으로 쓴다. 점검과 은퇴 명령이 동시에 써도 한쪽이 다른 쪽을 덮지 않는다.
 - 상태 이력은 `statuses` 테이블에 시각, 이전·이후 상태, 사유로 남는다. 은퇴 후보 알림은 `runs` 테이블에 `retire_candidate`로 남는다. 그래서 알림은 한 번만 간다.
 - 은퇴 명령은 DB에 바로 쓴다. 엔진은 봉 마감마다 상태를 읽으므로 다음 봉 마감부터 그 알고리즘을 돌리지 않는다.
 

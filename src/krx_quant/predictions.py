@@ -227,6 +227,21 @@ class PredictionStore:
                 (algorithm, iso(at), previous.value if previous else None, status.value, reason),
             )
 
+    def change_status(
+        self, algorithm: str, at: datetime, previous: Status, status: Status, reason: str
+    ) -> bool:
+        """Change ``algorithm``'s status if it is still ``previous``, in one statement (another
+        process may be changing it too); whether it changed.
+        """
+        self.version += 1
+        with self._db:
+            cursor = self._db.execute(
+                "INSERT INTO statuses (algorithm, at, previous, status, reason) SELECT ?, ?, ?, ?, ?"
+                " WHERE (SELECT status FROM statuses WHERE algorithm = ? ORDER BY id DESC LIMIT 1) = ?",
+                (algorithm, iso(at), previous.value, status.value, reason, algorithm, previous.value),
+            )
+        return cursor.rowcount == 1
+
     def statuses(self) -> dict[str, Standing]:
         """Each algorithm's current status and since when."""
         rows = self._db.execute(

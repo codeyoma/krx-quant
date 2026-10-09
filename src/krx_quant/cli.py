@@ -115,7 +115,9 @@ def _set_status(name: str, to: Status, reason: str, *, allowed: Callable[[Status
         if not allowed(current):
             print(f"{name} is {current.value}", file=sys.stderr)
             return 1
-        store.add_status(name, datetime.now(KST), current, to, reason)
+        if not store.change_status(name, datetime.now(KST), current, to, reason):
+            print(f"{name} changed status meanwhile; try again", file=sys.stderr)
+            return 1
     finally:
         store.close()
     print(f"{name}: {current.value} -> {to.value}; the engine follows from its next bar close")

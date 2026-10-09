@@ -68,3 +68,18 @@ def test_a_database_of_the_first_engine_is_upgraded_in_place(tmp_path: Path) -> 
     store.close()
     with sqlite3.connect(db) as conn:
         assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+
+
+def test_a_status_changes_only_from_the_status_it_was_read_as(tmp_path: Path) -> None:
+    # A review read "active" while a retire command (another process) was writing.
+    store = PredictionStore(tmp_path / "engine.sqlite3")
+    other = PredictionStore(tmp_path / "engine.sqlite3")
+    store.add_status("alpha", T, None, Status.ACTIVE, "set by the test")
+    other.change_status("alpha", T, Status.ACTIVE, Status.RETIRED, "retired by command")
+
+    applied = store.change_status("alpha", T, Status.ACTIVE, Status.BENCH, "weakest lift -0.1")
+
+    assert not applied
+    assert store.statuses()["alpha"].status is Status.RETIRED
+    store.close()
+    other.close()
