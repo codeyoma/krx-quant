@@ -15,6 +15,10 @@ bar close in the prediction window, from what was received before it:
 
 Four minutes later each prediction is scored on both bases.
 
+Special situations (``special.py``): a symbol in a VI at a bar close is not predicted
+(``vi``), and a prediction whose four minutes a VI, circuit breaker or sidecar touches is
+special, marked when it is made or as soon as the situation is learned.
+
 The prediction window is continuous trading, from the first bar close after the open
 until the last bar close whose target (t + 4 minutes) is still in continuous trading:
 09:01–15:16 on a normal day.

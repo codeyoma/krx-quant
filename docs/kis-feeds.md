@@ -35,6 +35,15 @@ WebSocket 구독은 아래 순서대로 보낸다. 세션 한도를 넘는 구�
 | 피드 | TR | 경로 | 키 | 기본 간격 |
 |---|---|---|---|---|
 | 외국인·기관 추정 가집계 | `HHPTJ04160200` | `/uapi/domestic-stock/v1/quotations/investor-trend-estimate` | 종목코드 | 300초 |
+| VI 현황 | `FHPST01390000` | `/uapi/domestic-stock/v1/quotations/inquire-vi-status` | 종목코드 | 5초(시가 동시호가~장 마감) |
+
+**VI 현황(`FHPST01390000`).** 2026-10-09에 실전 앱키로 과거 날짜(2026-10-08)를 조회해 확인했다.
+- 파라미터: `FID_DIV_CLS_CODE`(`0` 전체), `FID_COND_SCR_DIV_CODE`(`20139`), `FID_MRKT_CLS_CODE`(`0` 전체), `FID_INPUT_ISCD`(종목코드, 비우면 시장 전체), `FID_RANK_SORT_CLS_CODE`(`0` 정적·동적 모두), `FID_INPUT_DATE_1`(그날 `YYYYMMDD`), `FID_TRGT_CLS_CODE`, `FID_TRGT_EXLS_CLS_CODE`(빈 값).
+- 종목을 주면 그날 그 종목의 VI가 하나에 한 행씩, 최근 것부터 온다. 없으면 빈 목록이다. 예: 2026-10-08 `005930`은 동적 VI 1건(15:30:13–15:32:39), `006980`은 3건이 왔다.
+- 행 필드: `mksc_shrn_iscd`, `vi_cls_code`(VI 발동 상태, 지난 VI는 `N`), `bsop_date`, `cntg_vi_hour`(발동 시각), `vi_cncl_hour`(해제 시각), `vi_kind_code`(`1` 정적, `2` 동적, `3` 정적·동적), `vi_prc`(발동 가격), `vi_stnd_prc`, `vi_dprt`(정적 기준가와 괴리율), `vi_dmc_stnd_prc`, `vi_dmc_dprt`(동적 기준가와 괴리율), `vi_count`(그날 몇 번째).
+- 장 마감 뒤 시장 전체 조회에는 19:59의 VI도 있었다. KRX 애프터마켓에도 VI가 걸린다.
+- **VI가 걸려 있는 동안 응답이 어떤지는 아직 보지 못했다 ⚠.** `vi_cls_code`가 `N`이 아닌 값이고 `vi_cncl_hour`가 비어 있을 것으로 보고 처리한다. 첫 VI가 걸린 날 확인한다.
+- 구독 대신 REST로 받는다. 장운영정보(`H0UNMKO0`)에도 `VI_CLS_CODE`가 있지만, 구독 3건이 더 들어 한도 41건을 다 쓰고, 값의 뜻도 실측이 필요하다. REST는 발동과 해제 시각을 정확히 준다. 대신 최대 5초 늦게 안다.
 
 ## 세션과 한도
 
