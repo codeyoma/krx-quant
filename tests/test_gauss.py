@@ -24,6 +24,8 @@ At a reference price of 81,400 the gap is 120 won = 1.2 ticks, and z = 120 / 69.
 
 from __future__ import annotations
 
+import math
+from collections.abc import Sequence
 from datetime import date, datetime, time, timedelta
 
 import pytest
@@ -72,7 +74,7 @@ def test_the_gap_from_vwap_counts_the_session_from_the_open() -> None:
     assert vwap_z(s) == pytest.approx(3**0.5)
 
 
-def closes(ticks: list[float], first_volume: int = 1) -> list[Bar]:
+def closes(ticks: Sequence[float], first_volume: int = 1) -> list[Bar]:
     """Bars from the open closing ``ticks`` above 81,200 (high = low = close), volume 1
     except the first.
     """
@@ -82,21 +84,31 @@ def closes(ticks: list[float], first_volume: int = 1) -> list[Bar]:
     ]
 
 
-def test_a_gap_that_halves_every_minute_reverts_at_ln_2_per_minute() -> None:
-    # A heavy first bar pins the VWAP at 81,200; the gaps then halve: 64, 32, ..., 0.25 ticks.
-    halving = closes([0, 64, 32, 16, 8, 4, 2, 1, 0.5, 0.25], first_volume=1_000_000)
+def test_the_reversion_speed_fits_each_minutes_move_to_the_gap_before_it() -> None:
+    # A heavy first bar pins the VWAP at 81,200. The price then swings between 64 and 32
+    # ticks above it: half the gap closes, then opens again by as much. Moves of −32 on gaps
+    # of 64 and +32 on gaps of 32 fit 1 − e^(−κ) = (64·32 − 32·32) / (64² + 32²) = 0.2.
+    swinging = closes([0, *[64, 32] * 10, 64], first_volume=1_000_000)
 
-    assert reversion_speed(snapshot(halving)) == pytest.approx(0.6931, abs=1e-3)
+    assert reversion_speed(snapshot(swinging)) == pytest.approx(-math.log(0.8), abs=1e-3)
 
 
-def test_gaps_that_flip_sign_revert_fastest_and_gaps_that_grow_not_at_all() -> None:
-    zigzag = closes([0, 2] * 5)  # the price crosses its running VWAP every minute
-    drifting = closes(list(range(10)))  # it climbs away from it
+def test_overshooting_the_vwap_reverts_fastest_and_moving_away_not_at_all() -> None:
+    zigzag = closes([0, 2] * 11)  # the price crosses its running VWAP every minute
+    drifting = closes(list(range(22)))  # it climbs away from it
 
     assert reversion_speed(snapshot(zigzag)) == 3.0
     assert reversion_speed(snapshot(drifting)) == 0.0
-    assert reversion_speed(snapshot(drifting[:9])) is None  # too few bars to tell
-    assert reversion_speed(snapshot(closes([0] * 10))) is None  # never strayed
+    assert reversion_speed(snapshot(drifting[:20])) is None  # 19 moves: too few to tell
+    assert reversion_speed(snapshot(closes([0] * 22))) is None  # never strayed
+
+
+def test_the_vwap_catching_up_with_the_price_is_not_reversion() -> None:
+    # The price steps up 4 ticks and stays there. The running VWAP creeps up to it, so the
+    # gap shrinks every minute, but the price itself never moves back.
+    stepped = closes([0] * 5 + [4] * 20)
+
+    assert reversion_speed(snapshot(stepped)) == 0.0
 
 
 def fit(make_day: object) -> dict[str, float]:

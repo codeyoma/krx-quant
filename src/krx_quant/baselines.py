@@ -35,6 +35,9 @@ class Forecast:
             expected_ticks=expected_ticks,
         )
 
+    def probability(self, direction: Direction) -> float:
+        return {Direction.UP: self.p_up, Direction.FLAT: self.p_flat, Direction.DOWN: self.p_down}[direction]
+
 
 @dataclass(frozen=True)
 class Inputs:

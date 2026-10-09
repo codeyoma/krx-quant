@@ -21,12 +21,17 @@ import math
 from collections.abc import Sequence
 
 from krx_quant.algorithms.contract import Card, Model, Sample
-from krx_quant.algorithms.forecasts import UNKNOWN, log_loss, normal_forecast
+from krx_quant.algorithms.forecasts import (
+    HORIZON_MINUTES,
+    UNKNOWN,
+    Params,
+    lowest_log_loss,
+    normal_forecast,
+    with_outcomes,
+)
 from krx_quant.baselines import Forecast
 from krx_quant.features import FeatureVector
-from krx_quant.pricing import Direction
 
-HORIZON_MINUTES = 4.0
 # Heavier than three times the usual volume adds no more mass.
 MAX_MASS = 3.0
 DAMPINGS = (0.0, 0.1, 0.25, 0.5, 1.0, 2.0, 4.0)
@@ -63,26 +68,14 @@ class Newton:
         return Model("newton-default", dict(DEFAULT_PARAMS))
 
     def predict(self, features: FeatureVector, model: Model) -> Forecast:
-        return self._forecast(features, model.params["damping"], model.params["threshold"])
+        return self._forecast(features, model.params)
 
     def fit(self, samples: Sequence[Sample]) -> Model:
-        scored = [s for s in samples if s.outcome is not None]
-        if not scored:
-            raise ValueError("no training samples with an outcome")
-        best: tuple[float, float, float] | None = None
-        for damping in DAMPINGS:
-            for threshold in THRESHOLDS:
-                loss = sum(self._loss(s, damping, threshold) for s in scored) / len(scored)
-                if best is None or loss < best[0] - 1e-12:
-                    best = (loss, damping, threshold)
-        assert best is not None
-        loss, damping, threshold = best
-        return Model.fitted(self.name, {"damping": damping, "threshold": threshold}, scored, loss)
+        grid = ({"damping": d, "threshold": t} for d in DAMPINGS for t in THRESHOLDS)
+        return lowest_log_loss(self.name, with_outcomes(samples), grid, self._forecast)
 
-    def _loss(self, sample: Sample, damping: float, threshold: float) -> float:
-        return log_loss(self._forecast(sample.features, damping, threshold), sample.outcome or Direction.FLAT)
-
-    def _forecast(self, features: FeatureVector, damping: float, threshold: float) -> Forecast:
+    def _forecast(self, features: FeatureVector, params: Params) -> Forecast:
+        damping, threshold = params["damping"], params["threshold"]
         k = features["flat_ticks"]
         spread = features["volatility"]
         if k is None or spread is None:
