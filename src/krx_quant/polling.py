@@ -26,6 +26,10 @@ class PollJob:
     feed: RestFeed
     key: str
     interval: float
+    # Record an answer only when it differs from the one before (a list that rarely changes).
+    changes_only: bool = False
+    # Poll only at times this allows (default: always).
+    when: Callable[[datetime], bool] | None = None
 
 
 class Poller:
@@ -72,16 +76,21 @@ class Poller:
                 log.error("poll job ended with an error: %r", job_error)
 
     async def _poll(self, job: PollJob, client: RestClient) -> None:
-        params = job.feed.params(job.key)
+        last: object = None  # the last answer recorded, for changes_only
         while not self._stop.is_set():
-            try:
-                body = await client.get(job.feed.tr_id, job.feed.path, params)
-            except (KisError, aiohttp.ClientError, OSError, ValueError, TimeoutError) as e:
-                log.warning("poll %s %s failed: %s", job.feed.tr_id, job.key, e)
-            else:
-                self._record(job, params, body, self._now())
-                if self._on_received is not None:
-                    self._on_received((job.feed.tr_id, job.key))
+            now = self._now()
+            if job.when is None or job.when(now):
+                params = job.feed.params(job.key, kst_day(now))
+                try:
+                    body = await client.get(job.feed.tr_id, job.feed.path, params)
+                except (KisError, aiohttp.ClientError, OSError, ValueError, TimeoutError) as e:
+                    log.warning("poll %s %s failed: %s", job.feed.tr_id, job.key, e)
+                else:
+                    if not (job.changes_only and body == last):
+                        self._record(job, params, body, self._now())
+                        last = body
+                    if self._on_received is not None:
+                        self._on_received((job.feed.tr_id, job.key))
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(self._stop.wait(), job.interval)
 

@@ -88,7 +88,7 @@ INDEX_REST = RestFeed(
     "FHPUP02100000",
     "/uapi/domestic-stock/v1/quotations/inquire-index-price",
     INDEX_SCHEMA,
-    lambda code: {"FID_COND_MRKT_DIV_CODE": "U", "FID_INPUT_ISCD": code},
+    lambda code, _day: {"FID_COND_MRKT_DIV_CODE": "U", "FID_INPUT_ISCD": code},
     _normalize_index_rest,
 )
 

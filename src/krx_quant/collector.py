@@ -38,13 +38,14 @@ from krx_quant.feeds import (
     TRADE,
     US_TRADE,
     USD_FUTURES,
+    VI_STATUS,
     WS_FEEDS,
     Feed,
     us_daytime_key,
 )
 from krx_quant.feeds.base import kst_day
 from krx_quant.health import FeedHealth, FeedState, GapKind
-from krx_quant.market_calendar import MarketCalendar, calendar_store
+from krx_quant.market_calendar import MarketCalendar, Phase, calendar_store
 from krx_quant.masters import FrontMonths, MasterError, fetch_front_months
 from krx_quant.notify import Alerts
 from krx_quant.object_store import open_store
@@ -95,11 +96,27 @@ def subscription_plan(settings: Settings, fronts: FrontMonths | None) -> list[tu
     return plan
 
 
-def rest_plan(settings: Settings) -> list[PollJob]:
+# While these, VIs can matter to predictions: from the opening auction to the close.
+_VI_PHASES = {Phase.OPENING_AUCTION, Phase.CONTINUOUS, Phase.CLOSING_AUCTION}
+
+
+def rest_plan(settings: Settings, calendar: MarketCalendar) -> list[PollJob]:
     """Feeds that are only available over REST."""
-    return [
+    plan = [
         PollJob(FOREIGN_ESTIMATE, sym, settings.foreign_estimate_poll_seconds) for sym in settings.symbols
     ]
+    # The day's VI list is asked for again and again; it is recorded when it changes.
+    plan += [
+        PollJob(
+            VI_STATUS,
+            sym,
+            settings.vi_poll_seconds,
+            changes_only=True,
+            when=lambda now: calendar.phase(now) in _VI_PHASES,
+        )
+        for sym in settings.symbols
+    ]
+    return plan
 
 
 async def front_months(session: aiohttp.ClientSession, settings: Settings) -> FrontMonths | None:
@@ -180,7 +197,7 @@ async def run_collector(
             cap = len(plan) if settings.ws_max_subscriptions is None else settings.ws_max_subscriptions
             for feed, key in plan[cap:]:
                 _fall_back(poller, settings, feed.tr_id, key, "beyond the configured cap")
-            for job in rest_plan(settings):
+            for job in rest_plan(settings, calendar.calendar):
                 poller.add(job)
             for feed, key in plan[:cap]:
                 health.watch((feed.tr_id, key))

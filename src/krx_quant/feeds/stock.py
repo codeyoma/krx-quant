@@ -183,7 +183,7 @@ QUOTE = RestFeed(
     "FHKST01010100",
     "/uapi/domestic-stock/v1/quotations/inquire-price",
     QUOTE_SCHEMA,
-    lambda symbol: {"FID_COND_MRKT_DIV_CODE": "UN", "FID_INPUT_ISCD": symbol},
+    lambda symbol, _day: {"FID_COND_MRKT_DIV_CODE": "UN", "FID_INPUT_ISCD": symbol},
     _normalize_quote,
 )
 # The same snapshot for KRX alone (J), used for ETFs: they do not trade on NXT.
@@ -191,7 +191,7 @@ KRX_QUOTE = RestFeed(
     QUOTE.tr_id,
     QUOTE.path,
     QUOTE_SCHEMA,
-    lambda symbol: {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": symbol},
+    lambda symbol, _day: {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": symbol},
     _normalize_quote,
 )
 
@@ -237,7 +237,7 @@ BOOK_SNAPSHOT = RestFeed(
     "FHKST01010200",
     "/uapi/domestic-stock/v1/quotations/inquire-asking-price-exp-ccn",
     BOOK_SNAPSHOT_SCHEMA,
-    lambda symbol: {"FID_COND_MRKT_DIV_CODE": "UN", "FID_INPUT_ISCD": symbol},
+    lambda symbol, _day: {"FID_COND_MRKT_DIV_CODE": "UN", "FID_INPUT_ISCD": symbol},
     _normalize_book_snapshot,
 )
 
@@ -396,7 +396,7 @@ MEMBER_REST = RestFeed(
     "FHKST01010600",
     "/uapi/domestic-stock/v1/quotations/inquire-member",
     MEMBER_SCHEMA,
-    lambda symbol: {"FID_COND_MRKT_DIV_CODE": "UN", "FID_INPUT_ISCD": symbol},
+    lambda symbol, _day: {"FID_COND_MRKT_DIV_CODE": "UN", "FID_INPUT_ISCD": symbol},
     _normalize_member_rest,
 )
 
@@ -433,6 +433,66 @@ FOREIGN_ESTIMATE = RestFeed(
     "HHPTJ04160200",
     "/uapi/domestic-stock/v1/quotations/investor-trend-estimate",
     FOREIGN_ESTIMATE_SCHEMA,
-    lambda symbol: {"MKSC_SHRN_ISCD": symbol},
+    lambda symbol, _day: {"MKSC_SHRN_ISCD": symbol},
     _normalize_foreign_estimate,
+)
+
+
+VI_STATUS_SCHEMA = pa.schema(
+    [
+        ("symbol", pa.string()),
+        ("event_time", EVENT_TIME),  # when the VI started
+        ("received_at", RECEIVED_AT),
+        ("end_time", EVENT_TIME),  # when it was released; null while it is on
+        ("active", pa.bool_()),
+        ("kind", pa.string()),  # static, dynamic, or both
+        ("price", pa.int64()),  # the price that set it off
+        ("count", pa.int64()),  # the symbol's VIs that day, this one included
+    ]
+)
+
+_VI_KINDS = {"1": "static", "2": "dynamic", "3": "both"}
+
+
+def _normalize_vi_status(body: dict[str, Any], key: str, received_at: datetime) -> list[Row]:
+    rows = body.get("output") or []
+    if isinstance(rows, dict):
+        rows = [rows]
+    out = []
+    for r in rows:
+        day = datetime.strptime(r["bsop_date"], "%Y%m%d").date()
+        released = r.get("vi_cncl_hour", "")
+        out.append(
+            {
+                "symbol": r.get("mksc_shrn_iscd") or key,
+                "event_time": kst(day, r["cntg_vi_hour"]),
+                "received_at": received_at,
+                # A VI still on has no release time yet (⚠ not seen live: blank assumed).
+                "end_time": kst(day, released) if released.strip("0 ") else None,
+                "active": r.get("vi_cls_code", "N") != "N",
+                "kind": _VI_KINDS.get(r.get("vi_kind_code", ""), r.get("vi_kind_code", "")),
+                "price": to_int(r.get("vi_prc", "")),
+                "count": to_int(r.get("vi_count", "")),
+            }
+        )
+    return out
+
+
+# FHPST01390000, "변동성완화장치(VI) 현황": every VI of the symbol on the day asked, newest
+# first, with its start and release times (2026-10-08 checked live, past days included).
+VI_STATUS = RestFeed(
+    "FHPST01390000",
+    "/uapi/domestic-stock/v1/quotations/inquire-vi-status",
+    VI_STATUS_SCHEMA,
+    lambda symbol, day: {
+        "FID_DIV_CLS_CODE": "0",  # rises and falls
+        "FID_COND_SCR_DIV_CODE": "20139",
+        "FID_MRKT_CLS_CODE": "0",
+        "FID_INPUT_ISCD": symbol,
+        "FID_RANK_SORT_CLS_CODE": "0",  # static and dynamic
+        "FID_INPUT_DATE_1": day.strftime("%Y%m%d"),
+        "FID_TRGT_CLS_CODE": "",
+        "FID_TRGT_EXLS_CLS_CODE": "",
+    },
+    _normalize_vi_status,
 )
