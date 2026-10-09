@@ -113,6 +113,7 @@ FUTURES_SCHEMA = pa.schema(
         ("event_time", EVENT_TIME),
         ("received_at", RECEIVED_AT),
         ("price", pa.float64()),
+        ("change_pct", pa.float64()),  # from the previous close; added for #12
         ("qty", pa.int64()),
         ("cum_volume", pa.int64()),
         ("open_interest", pa.int64()),
@@ -135,6 +136,7 @@ def _normalize_futures(f: dict[str, str], received_at: datetime) -> Row:
         "received_at": received_at,
         # KIS sends float noise for currency futures (e.g. 1337.20000117); 2 decimals cover every tick.
         "price": round(to_float(f["futs_prpr"]), 2),
+        "change_pct": to_float(f["futs_prdy_ctrt"]),
         "qty": to_int(f["last_cnqn"]),
         "cum_volume": to_int(f["acml_vol"]),
         "open_interest": to_int(f["hts_otst_stpl_qty"]),
@@ -237,6 +239,7 @@ OPTION_SCHEMA = pa.schema(
         ("event_time", EVENT_TIME),
         ("received_at", RECEIVED_AT),
         ("price", pa.float64()),
+        ("change_pct", pa.float64()),  # from the previous close; added for #12
         ("qty", pa.int64()),
         ("cum_volume", pa.int64()),
         ("open_interest", pa.int64()),

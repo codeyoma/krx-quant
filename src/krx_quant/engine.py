@@ -38,7 +38,16 @@ from krx_quant.baselines import BASELINES, Forecast, Inputs
 from krx_quant.clock import SessionClock
 from krx_quant.config import Settings
 from krx_quant.features import FeatureStore, FeatureValue, FeatureVector, Snapshot
-from krx_quant.feeds import BOOK, BOOK_SNAPSHOT, KRX_TRADE, TRADE, VI_STATUS
+from krx_quant.feeds import (
+    BOOK,
+    BOOK_SNAPSHOT,
+    INDEX,
+    INDEX_REST,
+    KOSPI200_FUTURES,
+    KRX_TRADE,
+    TRADE,
+    VI_STATUS,
+)
 from krx_quant.feeds.base import KST
 from krx_quant.market_calendar import MarketCalendar, Session
 from krx_quant.predictions import NewPrediction, Pending, PredictionStore, Score
@@ -65,7 +74,13 @@ ENGINE_FEEDS: dict[str, tuple[str, ...]] = {
     KRX_TRADE.tr_id: ("symbol", "received_at", "ask1", "bid1"),
     # A symbol's VIs: a bar close inside one is not predicted; a window touching one is special.
     VI_STATUS.tr_id: ("symbol", "event_time", "received_at", "end_time"),
+    # The KOSPI index and KOSPI200 futures, for circuit breakers and sidecars.
+    INDEX.tr_id: ("symbol", "event_time", "received_at", "change_pct"),
+    INDEX_REST.tr_id: ("symbol", "event_time", "received_at", "change_pct"),
+    KOSPI200_FUTURES.tr_id: ("symbol", "event_time", "received_at", "change_pct"),
 }
+# Feeds of the whole market rather than of a symbol.
+MARKET_FEEDS = (INDEX.tr_id, INDEX_REST.tr_id, KOSPI200_FUTURES.tr_id)
 
 
 @dataclass(frozen=True)
@@ -136,6 +151,12 @@ class PredictionEngine:
             heapq.heappush(self._pending, (p.target_at, p.prediction_id, p))
 
     def on_event(self, feed: str, row: dict[str, Any]) -> None:
+        if feed == KOSPI200_FUTURES.tr_id:
+            self._learned(self._special.futures(row))
+            return
+        if feed in MARKET_FEEDS:
+            self._learned(self._special.index(row))
+            return
         symbol = row["symbol"]
         if symbol not in self.symbols or feed not in ENGINE_FEEDS:
             return

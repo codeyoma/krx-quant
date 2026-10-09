@@ -162,6 +162,7 @@ async def test_kospi200_futures(kis: FakeKis, tmp_path: Path) -> None:
                 "futs_shrn_iscd": "A01612",
                 "bsop_hour": "093016",
                 "futs_prpr": "1056.30",
+                "futs_prdy_ctrt": "-1.24",
                 "mrkt_basis": "3.77",
                 "hts_thpr": "1057.85",
             },
@@ -171,7 +172,12 @@ async def test_kospi200_futures(kis: FakeKis, tmp_path: Path) -> None:
     await collect(kis, settings_for(kis, tmp_path))
 
     [f] = read(tmp_path, "events", "H0IFCNT0", symbol="A01612")
-    assert (f["price"], f["market_basis"], f["theory_price"]) == (1056.3, 3.77, 1057.85)
+    assert (f["price"], f["change_pct"], f["market_basis"], f["theory_price"]) == (
+        1056.3,
+        -1.24,
+        3.77,
+        1057.85,
+    )
 
 
 async def test_us_daytime_trade(kis: FakeKis, tmp_path: Path) -> None:

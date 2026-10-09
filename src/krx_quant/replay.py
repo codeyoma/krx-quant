@@ -22,11 +22,13 @@ from krx_quant.algorithms import ALGORITHMS, Algorithm, Model, load_models
 from krx_quant.archive import partition_files
 from krx_quant.clock import FakeClock
 from krx_quant.config import Settings
-from krx_quant.engine import ENGINE_FEEDS, Budget, Event, PredictionEngine
+from krx_quant.engine import ENGINE_FEEDS, MARKET_FEEDS, Budget, Event, PredictionEngine
 from krx_quant.features import FeatureStore
+from krx_quant.feeds import KOSPI200_FUTURES
 from krx_quant.feeds.base import KST, kst_day
 from krx_quant.market_calendar import MarketCalendar, calendar_store
 from krx_quant.predictions import DB_NAME, AlgorithmSummary, PredictionStore
+from krx_quant.special import KOSPI
 
 log = logging.getLogger(__name__)
 
@@ -100,8 +102,9 @@ def recorded_events(data_dir: Path, day: date, symbols: Sequence[str]) -> Iterat
     """
     streams: list[Iterator[Event]] = []
     for feed, columns in ENGINE_FEEDS.items():
-        for symbol in symbols:
-            partition = data_dir / "events" / f"date={day.isoformat()}" / f"feed={feed}" / f"symbol={symbol}"
+        root = data_dir / "events" / f"date={day.isoformat()}" / f"feed={feed}"
+        for key in _keys(feed, root, symbols):
+            partition = root / f"symbol={key}"
             files = partition_files(partition) if partition.is_dir() else []
             if files:
                 streams.append(_partition_rows(feed, files, columns))
@@ -111,17 +114,31 @@ def recorded_events(data_dir: Path, day: date, symbols: Sequence[str]) -> Iterat
     return heapq.merge(*streams, key=lambda event: event[1]["received_at"])
 
 
+def _keys(feed: str, root: Path, symbols: Sequence[str]) -> list[str]:
+    """The partitions of ``feed`` the engine reads: the symbols', or the market's."""
+    if feed == KOSPI200_FUTURES.tr_id:  # the front month, whichever it was that day
+        return sorted(p.name.removeprefix("symbol=") for p in root.glob("symbol=*"))
+    if feed in MARKET_FEEDS:
+        return [KOSPI]
+    return list(symbols)
+
+
 def _partition_rows(feed: str, files: Sequence[Path], columns: Sequence[str]) -> Iterator[Event]:
     """A partition's rows in the order written, which is the order received.
 
     A row stamped earlier than the one before it (the system clock stepped back) is
-    taken as received with that one, so the merge stays in order.
+    taken as received with that one, so the merge stays in order. A column a file was
+    recorded without (added later) is None.
     """
     last: datetime | None = None
     stepped_back = 0
     for path in files:
-        for batch in pq.ParquetFile(path).iter_batches(batch_size=_BATCH_ROWS, columns=list(columns)):
+        parquet = pq.ParquetFile(path)
+        present = [c for c in columns if c in parquet.schema_arrow.names]
+        missing = dict.fromkeys(c for c in columns if c not in present)
+        for batch in parquet.iter_batches(batch_size=_BATCH_ROWS, columns=present):
             for row in batch.to_pylist():
+                row.update(missing)
                 if last is not None and row["received_at"] < last:
                     row["received_at"] = last
                     stepped_back += 1

@@ -11,26 +11,32 @@ import sqlite3
 from datetime import timedelta
 from pathlib import Path
 
+import pyarrow as pa
 import pytest
 
 from krx_quant.algorithms import Model, save_model
 from krx_quant.archive import archive
 from krx_quant.cli import main
 from krx_quant.engine import Event
-from krx_quant.feeds import WS_FEEDS
+from krx_quant.feeds import INDEX_REST, VI_STATUS, WS_FEEDS
 from krx_quant.object_store import LocalObjectStore
 from krx_quant.recorder import ParquetRecorder
 from krx_quant.replay import recorded_events
-from tests.replay_events import DAY, at, run
+from tests.replay_events import DAY, at, kospi, kospi200_futures, run
 from tests.test_replay import busy_morning, stored
+from tests.test_special import VI, held
 
 END_OF_DAY = at("23:59:59.999999")
+SCHEMAS = {
+    **{f: feed.schema for f, feed in WS_FEEDS.items()},
+    **{f.tr_id: f.schema for f in (VI_STATUS, INDEX_REST)},
+}
 
 
-def record(data_dir: Path, events: list[Event]) -> None:
+def record(data_dir: Path, events: list[Event], schemas: dict[str, pa.Schema] = SCHEMAS) -> None:
     recorder = ParquetRecorder(data_dir, flush_rows=50, flush_seconds=3600)
     for feed, row in events:
-        recorder.record("events", DAY, feed, row["symbol"], row, WS_FEEDS[feed].schema)
+        recorder.record("events", DAY, feed, row["symbol"], row, schemas[feed])
     recorder.close()
 
 
@@ -132,3 +138,53 @@ def test_replay_does_not_use_a_model_trained_on_the_day_it_replays(
         versions = conn.execute("SELECT DISTINCT model_version FROM predictions WHERE algorithm = 'newton'")
         assert versions.fetchall() == [("newton-default",)]
     assert "newton-20261012-aaaaaa was trained on data up to 2026-10-12" in capsys.readouterr().err
+
+
+def replays_like_by_hand(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, events: list[Event], recorded: int | None = None
+) -> None:
+    data = tmp_path / "data"
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("KRX_DATA_DIR", str(data))
+    monkeypatch.setenv("KRX_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("KRX_SYMBOLS", "005930")
+
+    assert len(list(recorded_events(data, DAY, ["005930"]))) == (recorded or len(events))
+    assert main(["replay", DAY.isoformat()]) == 0
+
+    asyncio.run(run(tmp_path / "by-hand.db", events, until=END_OF_DAY))
+    assert stored(tmp_path / "state" / f"replay-{DAY}.sqlite3") == stored(tmp_path / "by-hand.db")
+
+
+def test_vis_breakers_and_sidecars_replay_from_the_recorded_day(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events = [
+        *busy_morning(),
+        *VI,
+        *held("09:40:00", "09:42:00", kospi, -8.2),
+        *held("09:20:00", "09:22:00", kospi200_futures, 5.3),
+    ]
+    record(tmp_path / "data", events)
+
+    replays_like_by_hand(tmp_path, monkeypatch, events)
+    with sqlite3.connect(tmp_path / "state" / f"replay-{DAY}.sqlite3") as conn:
+        [(special,)] = conn.execute("SELECT COUNT(*) FROM outcomes WHERE special = 1").fetchall()
+        [(vi,)] = conn.execute("SELECT COUNT(*) FROM predictions WHERE status = 'vi'").fetchall()
+    assert special > 0 and vi > 0
+
+
+def test_futures_recorded_before_their_change_was_kept_still_replay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Days recorded before #12 have no change_pct in their futures events: no sidecar is called.
+    futures = held("09:20:00", "09:22:00", kospi200_futures, 5.3)
+    old = WS_FEEDS["H0IFCNT0"].schema.remove(WS_FEEDS["H0IFCNT0"].schema.get_field_index("change_pct"))
+    record(tmp_path / "data", busy_morning())
+    record(
+        tmp_path / "data",
+        [(f, {k: v for k, v in row.items() if k != "change_pct"}) for f, row in futures],
+        {**SCHEMAS, "H0IFCNT0": old},
+    )
+
+    replays_like_by_hand(tmp_path, monkeypatch, busy_morning(), recorded=len(busy_morning()) + len(futures))
