@@ -127,6 +127,7 @@ KIS 레코드 하나가 이벤트 하나다. 한 메시지에 레코드가 여�
 | `symbol` | string | `futs_shrn_iscd` | 선물 코드 |
 | `event_time`, `received_at` | | `bsop_hour` | 시각, 수신 시각 |
 | `price` | float64 | `futs_prpr` | 체결가 |
+| `change_pct` | float64 | `futs_prdy_ctrt` | 전일 대비 등락률(%). #12부터 기록한다. 그 전 파일에는 이 열이 없다. |
 | `qty`, `cum_volume` | int64 | `last_cnqn`, `acml_vol` | 체결량, 누적 거래량 |
 | `open_interest` | int64 | `hts_otst_stpl_qty` | 미결제약정 |
 | `theory_price`, `market_basis` | float64 | `hts_thpr`, `mrkt_basis` | 이론가, 시장 베이시스 |
@@ -164,6 +165,9 @@ KIS 레코드 하나가 이벤트 하나다. 한 메시지에 레코드가 여�
 | `FHKST01010100` 시세(체결 대체) | `symbol`, `received_at`, `price`, `cum_volume`, `change_pct`. 주식은 통합(`UN`), ETF는 KRX(`J`) 시장으로 조회한다. |
 | `FHKST01010200` 호가 스냅샷(호가 대체) | `symbol`, `event_time`(`aspr_acpt_hour`), `received_at`, `price`, `ask_px_1..10`, `bid_px_1..10`, `ask_qty_1..10`, `bid_qty_1..10`, `total_ask_qty`, `total_bid_qty`, `vi_cls_code` |
 | `HHPTJ04160200` 추정 가집계 | `symbol`, `received_at`, `slot`(`bsop_hour_gb`), `foreign_net_qty`, `institution_net_qty`, `total_net_qty` |
+| `FHPST01390000` VI 현황 | 응답의 VI마다 한 행: `symbol`, `event_time`(발동 시각 `cntg_vi_hour`), `received_at`, `end_time`(해제 시각 `vi_cncl_hour`, 아직이면 비어 있음), `active`(`vi_cls_code`가 `N`이 아님), `kind`(`static`, `dynamic`, `both`), `price`(발동 가격), `count`(그날 그 종목의 VI 횟수) |
+
+VI 현황은 같은 응답이 반복되면 기록하지 않는다. 응답이 바뀔 때마다 그날의 VI 전체가 raw와 events에 한 번씩 남는다.
 
 REST 응답 원문은 raw 계층에 `{"tr_id", "params", "body"}` JSON으로 남는다.
 
