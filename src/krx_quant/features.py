@@ -18,7 +18,7 @@ from datetime import datetime
 
 from krx_quant.pricing import flat_ticks as flat_band
 from krx_quant.pricing import tick_size
-from krx_quant.reference import Bar
+from krx_quant.reference import BAR, Bar
 
 FeatureValue = float | None
 
@@ -232,9 +232,10 @@ def reversion_speed(s: Snapshot) -> FeatureValue:
     fitted to the last 30 one-minute moves of the close, each against its gap from the VWAP
     as it stood a minute before.
 
-    Only the price's moves count: the VWAP catching up with the price is not reversion.
-    None with fewer than 20 moves, or while the closes have not strayed half a tick from
-    the VWAP.
+    Only the price's moves count: the VWAP catching up with the price is not reversion. A
+    move across minutes without a bar (no trades, or a feed gap) is not a one-minute move
+    and is left out. None with fewer than 20 moves, or while the closes have not strayed
+    half a tick from the VWAP.
     """
     if s.tick is None:
         return None
@@ -242,6 +243,7 @@ def reversion_speed(s: Snapshot) -> FeatureValue:
     pairs = [
         (b.close - vwap, later.close - b.close)
         for (b, vwap), (later, _) in zip(running, running[1:], strict=False)
+        if later.start - b.start == BAR
     ][-REVERSION_MOVES:]
     if len(pairs) < MIN_REVERSION_MOVES or max(abs(gap) for gap, _ in pairs) < s.tick / 2:
         return None
