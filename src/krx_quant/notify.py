@@ -46,9 +46,19 @@ class Alerts:
         self._active.discard(key)
         self._send(f"[복구] {text}")
 
-    def notify(self, text: str) -> None:
-        """A message that is not a problem to resolve, e.g. an algorithm to retire."""
-        self._send(f"[알림] {text}")
+    async def deliver(self, text: str) -> bool:
+        """Send a notice that is not a problem to resolve (an algorithm to retire) and wait:
+        whether it went, or there is nowhere to send it (then it is only logged).
+        """
+        log.warning("alert: %s", text)
+        if self._url is None:
+            return True
+        try:
+            await self.send_now(f"[알림] {text}")
+        except RuntimeError as e:
+            log.error("telegram send failed: %s", e)
+            return False
+        return True
 
     def raise_many(self, keys: list[str], text: str) -> None:
         """One message for every key not already alerted: ``text: key, key``."""

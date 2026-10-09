@@ -36,7 +36,7 @@ from typing import Any
 
 from aiohttp import web
 
-from krx_quant.baselines import BASELINES
+from krx_quant.baselines import BASELINE_NAMES, BASELINES
 from krx_quant.engine import PredictionEngine
 from krx_quant.feeds.base import KST, kst_day
 from krx_quant.predictions import iso
@@ -53,7 +53,6 @@ from krx_quant.stats import (
     split,
 )
 
-BASELINE_NAMES = frozenset(b.name for b in BASELINES)
 ENGINE_KEY = web.AppKey("engine", PredictionEngine)
 MODE_KEY = web.AppKey("mode", str)
 LiveStatus = Callable[[], dict[str, Any]]
@@ -262,19 +261,25 @@ async def _leaderboard(request: web.Request) -> web.Response:
     engine = request.app[ENGINE_KEY]
     query = _query(request, engine)
     min_sample = request.app[MIN_SAMPLE_KEY]
-    statuses = {name: status for name, (status, _) in engine.store.statuses().items()}
 
     def build(algorithms: dict[str, list[Scored]], baselines: dict[str, list[Scored]]) -> dict[str, Any]:
         board = leaderboard(algorithms, baselines, min_sample, engine.fee_rate)
         return {
             **query.describe(),
             "min_sample": min_sample,
-            "ranked": [{**_entry_json(e), "status": statuses.get(e.algorithm)} for e in board.ranked],
-            "unranked": [{**_entry_json(e), "status": statuses.get(e.algorithm)} for e in board.unranked],
+            "ranked": [_entry_json(e) for e in board.ranked],
+            "unranked": [_entry_json(e) for e in board.unranked],
             "baselines": [_entry_json(e) for e in board.baselines],
         }
 
-    return _json(await _stats(request, ("leaderboard",), query, build))
+    body = await _stats(request, ("leaderboard",), query, build)
+    # Read now, not cached with the stats: a retire command changes it from another process.
+    statuses = {name: s.status.value for name, s in engine.store.statuses().items()}
+
+    def with_status(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [{**e, "status": statuses.get(e["algorithm"])} for e in entries]
+
+    return _json({**body, "ranked": with_status(body["ranked"]), "unranked": with_status(body["unranked"])})
 
 
 async def _algorithm_stats(request: web.Request) -> web.Response:

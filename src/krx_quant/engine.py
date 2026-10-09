@@ -15,6 +15,9 @@ bar close in the prediction window, from what was received before it:
 
 Four minutes later each prediction is scored on both bases.
 
+After each day's close (+10 minutes) the algorithms' statuses are reviewed by the
+lifecycle rules (``lifecycle.py``); a retired algorithm is no longer run.
+
 Special situations (``special.py``): a symbol in a VI at a bar close is not predicted
 (``vi``), and a prediction whose four minutes a VI, circuit breaker or sidecar touches is
 special, marked when it is made or as soon as the situation is learned.
@@ -31,9 +34,9 @@ import heapq
 import logging
 import math
 import time as timer
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 from functools import partial
 from typing import Any
 
@@ -64,11 +67,13 @@ from krx_quant.stats import DEFAULT_MIN_SAMPLE
 log = logging.getLogger(__name__)
 
 Event = tuple[str, dict[str, Any]]  # (feed TR ID, normalized row)
+Notify = Callable[[str], Awaitable[bool]]  # send an alert; whether it went
 
 HORIZON = timedelta(minutes=4)
 # Each day's algorithm review runs this long after the close, when everything is scored.
 REVIEW_AFTER_CLOSE = timedelta(minutes=10)
-# Days of history a review looks back over: enough for the longest rule (60 on the bench).
+# Days with predictions a review reads back over: the longest rule counts 60 on the bench,
+# and a status can be older than that.
 _REVIEW_DAYS = 400
 # How far ahead to look for the next session (long holidays included).
 _LOOKAHEAD_DAYS = 15
@@ -139,7 +144,7 @@ class PredictionEngine:
         budget: Budget | None = None,
         feature_store: FeatureStore | None = None,
         min_sample: int = DEFAULT_MIN_SAMPLE,
-        notify: Callable[[str], None] | None = None,
+        notify: Notify | None = None,
     ) -> None:
         self.store = store
         self.calendar = calendar
@@ -168,7 +173,8 @@ class PredictionEngine:
             heapq.heappush(self._pending, (p.target_at, p.prediction_id, p))
         self.min_sample = min_sample
         self.notify = notify  # where alerts go (Telegram, live)
-        self._reviewed_through = self._last_tick
+        # Reviews pick up where the last one left off: one missed while down runs at start.
+        self._reviewed_through = store.last_run("review") or self._last_tick
         self._enroll()
 
     def _enroll(self) -> None:
@@ -176,7 +182,7 @@ class PredictionEngine:
         known = self.store.statuses()
         for a in self.algorithms:
             if a.name not in known:
-                self.store.add_status(a.name, self.clock.now(), None, Status.PROBATION.value, "registered")
+                self.store.add_status(a.name, self.clock.now(), None, Status.PROBATION, "registered")
 
     def on_event(self, feed: str, row: dict[str, Any]) -> None:
         if feed in MARKET_FEEDS:
@@ -214,7 +220,7 @@ class PredictionEngine:
             self._frozen_through = close
 
     def next_due(self) -> datetime | None:
-        """When ``run_due`` next has work: a bar close to predict or an outcome to score."""
+        """When ``run_due`` next has work: a bar close to predict, an outcome to score, or a review."""
         candidates = [self._next_bar_close(self._last_tick), self._next_review(self._reviewed_through)]
         if self._pending:
             candidates.append(self._pending[0][0])
@@ -222,7 +228,7 @@ class PredictionEngine:
         return min(due) if due else None
 
     async def run_due(self) -> None:
-        """Score and predict everything due by now, in time order."""
+        """Score, predict and review everything due by now, in time order."""
         now = self.clock.now()
         while (due := self.next_due()) is not None and due <= now:
             self._score_until(due)
@@ -272,33 +278,58 @@ class PredictionEngine:
         return None
 
     async def _review(self, at: datetime) -> None:
-        """Change statuses by the lifecycle rules; alert retirement candidates."""
-        standings = {name: (Status(s), since) for name, (s, since) in self.store.statuses().items()}
+        """Change statuses by the lifecycle rules, and alert retirement candidates."""
+        standings = self.store.statuses()
         alerted = {
             name
-            for name, (status, since) in standings.items()
-            if status is Status.BENCH and self.store.has_run("retire_candidate", name, since)
+            for name, s in standings.items()
+            if s.status is Status.BENCH and self.store.ran_since("retire_candidate", name, s.since)
         }
-        days = self.store.prediction_days(at.astimezone(KST).date(), _REVIEW_DAYS)
         result = await asyncio.to_thread(
             review,
             [a.name for a in self.algorithms],
             standings,
-            days,
+            {name: self._first_counted(s.since) for name, s in standings.items()},
+            self.store.prediction_days(at.astimezone(KST).date(), _REVIEW_DAYS),
             lambda chosen, special: self.store.scored_predictions(chosen, None, special),
             min_sample=self.min_sample,
             fee_rate=self.fee_rate,
             alerted=alerted,
         )
+        current = self.store.statuses()  # a command may have changed one in the meantime
         for c in result.changes:
+            now = current[c.algorithm].status
+            if now is not c.previous:
+                log.info("%s: %s not applied, it is %s now", c.algorithm, c.status.value, now.value)
+                continue
             log.info("%s: %s -> %s (%s)", c.algorithm, c.previous.value, c.status.value, c.reason)
-            self.store.add_status(c.algorithm, at, c.previous.value, c.status.value, c.reason)
-        for name, why in result.retire_candidates:
-            self.store.add_run("retire_candidate", at, name, why)
-            text = f"{name} 은퇴 후보: {why}. 은퇴하려면 krx-quant retire {name}"
-            log.warning("%s", text)
-            if self.notify is not None:
-                self.notify(text)
+            self.store.add_status(c.algorithm, at, c.previous, c.status, c.reason)
+        for candidate in result.candidates:
+            name = candidate.algorithm
+            text = (
+                f"{name} 은퇴 후보: 벤치에서 {candidate.days}거래일 동안 회복하지 못했습니다. "
+                f"은퇴시키려면 서버에서 krx-quant retire {name}"
+            )
+            if await self._deliver(text):  # else asked again at the next review
+                self.store.add_run("retire_candidate", at, name, text)
+        self.store.add_run("review", at, None, f"{len(result.changes)} status changes")
+
+    def _first_counted(self, since: datetime) -> date:
+        """The first day a status that began at ``since`` counts for: its day, unless it
+        began after that day's review.
+        """
+        day = since.astimezone(KST).date()
+        session = self.calendar.session(day)
+        if session is not None and since >= session.close + REVIEW_AFTER_CLOSE:
+            return day + timedelta(days=1)
+        return day
+
+    async def _deliver(self, text: str) -> bool:
+        """Send an alert; whether it went (or there is nowhere to send it)."""
+        if self.notify is None:
+            log.warning("alert: %s", text)
+            return True
+        return await self.notify(text)
 
     async def _predict(self, bar_close: datetime) -> None:
         day_start = datetime.combine(bar_close.date(), time(), KST)
@@ -311,10 +342,11 @@ class PredictionEngine:
         baselines: dict[tuple[str, str], dict[str, Forecast | None]] = {}
         session = self.calendar.session(bar_close.date())
         session_open = session.open if session is not None else None
+        running = self._running()
         known = self._special.known(before=bar_close)
         stopped = [s for s in self.symbols if in_vi(known, s, bar_close)]
         if stopped:
-            self._record_not_predicted(bar_close, stopped, "vi")
+            self._record_not_predicted(bar_close, stopped, "vi", running)
         for symbol in self.symbols:
             if symbol in stopped:
                 continue
@@ -339,20 +371,22 @@ class PredictionEngine:
         )
         if not at_close:
             return
-        chosen = self._within_cpu_budget(bar_close, self._running())
+        chosen = self._within_cpu_budget(bar_close, running)
         await asyncio.gather(*(self._run(a, bar_close, at_close) for a in chosen))
 
-    def _record_not_predicted(self, bar_close: datetime, symbols: Sequence[str], status: str) -> None:
+    def _record_not_predicted(
+        self, bar_close: datetime, symbols: Sequence[str], status: str, running: Sequence[Algorithm]
+    ) -> None:
         """Every predictor's empty prediction for ``symbols``, recorded with why."""
         at_close = {s: _AtClose(self._reference.mid(s, bar_close), {}) for s in symbols}
         nothing = dict.fromkeys(symbols)
         made = [(b.name, b.version, nothing, status) for b in BASELINES]
-        made += [(a.name, self.models[a.name].version, nothing, status) for a in self._running()]
+        made += [(a.name, self.models[a.name].version, nothing, status) for a in running]
         self._record(bar_close, at_close, made)
 
     def _running(self) -> list[Algorithm]:
         """The registered algorithms not retired (read each time: retiring is a command)."""
-        retired = {name for name, (s, _) in self.store.statuses().items() if s == Status.RETIRED.value}
+        retired = {name for name, s in self.store.statuses().items() if s.status is Status.RETIRED}
         return [a for a in self.algorithms if a.name not in retired]
 
     def _within_cpu_budget(self, bar_close: datetime, running: Sequence[Algorithm]) -> list[Algorithm]:

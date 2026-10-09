@@ -8,6 +8,7 @@ import itertools
 import logging
 import signal
 import sys
+from collections.abc import Callable
 from datetime import date, datetime
 from pathlib import Path
 
@@ -92,27 +93,32 @@ def _fit(name: str, days: int | None) -> int:
     return 0
 
 
-def _retire(name: str, back: bool) -> int:
-    """Retire an algorithm (approved by the operator), or put a retired one back on probation."""
+def _retire(name: str) -> int:
+    """Retire an algorithm, as the operator approves: it is no longer run; its records stay."""
+    return _set_status(name, Status.RETIRED, "retired by command", allowed=lambda s: s is not Status.RETIRED)
+
+
+def _unretire(name: str) -> int:
+    """Put a retired algorithm back on probation."""
+    return _set_status(name, Status.PROBATION, "unretired by command", allowed=lambda s: s is Status.RETIRED)
+
+
+def _set_status(name: str, to: Status, reason: str, *, allowed: Callable[[Status], bool]) -> int:
     settings = Settings.from_env(require_kis=False)
     store = PredictionStore(settings.state_dir / DB_NAME)
     try:
-        standing = store.statuses().get(name)
-        if standing is None:
-            known = ", ".join(sorted(store.statuses()))
-            print(f"unknown algorithm {name!r}; known: {known}", file=sys.stderr)
+        standings = store.statuses()
+        if name not in standings:
+            print(f"unknown algorithm {name!r}; known: {', '.join(sorted(standings))}", file=sys.stderr)
             return 1
-        current = Status(standing[0])
-        if back != (current is Status.RETIRED):
+        current = standings[name].status
+        if not allowed(current):
             print(f"{name} is {current.value}", file=sys.stderr)
             return 1
-        after, reason = (
-            (Status.PROBATION, "unretired by command") if back else (Status.RETIRED, "retired by command")
-        )
-        store.add_status(name, datetime.now(KST), current.value, after.value, reason)
+        store.add_status(name, datetime.now(KST), current, to, reason)
     finally:
         store.close()
-    print(f"{name}: {current.value} -> {after.value}; the engine follows from its next bar close")
+    print(f"{name}: {current.value} -> {to.value}; the engine follows from its next bar close")
     return 0
 
 
@@ -212,8 +218,10 @@ def main(argv: list[str] | None = None) -> int:
             return _replay(args.day, args.db)
         elif args.command == "fit":
             return _fit(args.algorithm, args.days)
-        elif args.command in ("retire", "unretire"):
-            return _retire(args.algorithm, back=args.command == "unretire")
+        elif args.command == "retire":
+            return _retire(args.algorithm)
+        elif args.command == "unretire":
+            return _unretire(args.algorithm)
         elif args.command == "test-alert":
             return asyncio.run(_test_alert())
         elif args.command == "fake-kis":

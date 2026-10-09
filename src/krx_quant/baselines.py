@@ -102,3 +102,4 @@ class ClassRatioRandom:
 
 
 BASELINES: tuple[Baseline, ...] = (AlwaysFlat(), Persistence(), ClassRatioRandom())
+BASELINE_NAMES = frozenset(b.name for b in BASELINES)

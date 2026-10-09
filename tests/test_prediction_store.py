@@ -8,6 +8,7 @@ from pathlib import Path
 
 from krx_quant.baselines import Forecast
 from krx_quant.feeds import KST
+from krx_quant.lifecycle import Standing, Status
 from krx_quant.predictions import NewPrediction, PredictionStore, Score
 from krx_quant.pricing import Direction
 
@@ -62,8 +63,8 @@ def test_a_database_of_the_first_engine_is_upgraded_in_place(tmp_path: Path) -> 
     [skipped] = store.latest("005930")[1:]
     assert (skipped["algorithm"], skipped["status"], skipped["p_up"]) == ("newton", "timed_out", None)
     # Later versions added tables: algorithm statuses (3).
-    store.add_status("newton", T, None, "probation", "registered")
-    assert store.statuses() == {"newton": ("probation", T)}
+    store.add_status("newton", T, None, Status.PROBATION, "registered")
+    assert store.statuses() == {"newton": Standing(Status.PROBATION, T)}
     store.close()
     with sqlite3.connect(db) as conn:
         assert conn.execute("PRAGMA user_version").fetchone()[0] == 3

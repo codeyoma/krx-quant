@@ -22,6 +22,7 @@ import pytest
 
 from krx_quant.cli import main
 from krx_quant.feeds import KST
+from krx_quant.lifecycle import Status
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.predictions import DB_NAME, NewPrediction, PredictionStore, Score
 from krx_quant.pricing import Direction
@@ -34,8 +35,8 @@ ALPHA = FixedAlgorithm("alpha", features=("velocity",), unique=("velocity",))
 BETA = FixedAlgorithm("beta", features=("acceleration",), unique=("acceleration",))
 GAMMA = FixedAlgorithm("gamma", features=("relative_volume",), unique=("relative_volume",))
 DELTA = FixedAlgorithm("delta", features=("vwap_z",), unique=("vwap_z",))
-NEXT_DAY = date(2026, 10, 13)
-TWO_DAYS = MarketCalendar({DAY: True, NEXT_DAY: True})
+NEXT_DAY, THIRD_DAY = date(2026, 10, 13), date(2026, 10, 14)
+THREE_DAYS = MarketCalendar({DAY: True, NEXT_DAY: True, THIRD_DAY: True})
 # What happened at each day's first eight bar closes from 09:01: up, flat, down, flat, twice.
 # Enough for min_sample 20 within three days, and few enough to fill 65 days fast.
 OUTCOMES = FORTY_OUTCOMES[:8]
@@ -98,7 +99,7 @@ def stored(db: Path) -> Iterator[PredictionStore]:
 
 def put_status(db: Path, algorithm: str, status: str, since: date) -> None:
     with stored(db) as store:
-        store.add_status(algorithm, morning(since), None, status, "set by the test")
+        store.add_status(algorithm, morning(since), None, Status(status), "set by the test")
 
 
 def put_days(
@@ -192,6 +193,18 @@ async def test_an_active_algorithm_no_better_than_a_baseline_is_benched_and_stil
     assert len(body["predictions"]) == 5  # a benched algorithm is still run
 
 
+class Outbox:
+    """Alerts sent, as Telegram would take them, or refuse them while ``down``."""
+
+    def __init__(self) -> None:
+        self.sent: list[str] = []
+        self.down = False
+
+    async def __call__(self, text: str) -> bool:
+        self.sent.append(text)
+        return not self.down
+
+
 async def test_a_benched_algorithm_recovers_or_after_sixty_days_is_a_retirement_candidate(
     tmp_path: Path,
 ) -> None:
@@ -201,27 +214,71 @@ async def test_a_benched_algorithm_recovers_or_after_sixty_days_is_a_retirement_
     put_status(db, "beta", "bench", days[0])
     put_days(db, days[:-20], {"alpha": WRONG, "beta": WRONG})
     put_days(db, days[-20:], {"alpha": WRONG, "beta": RIGHT})  # beta is good again
-    sent: list[str] = []
+    outbox = Outbox()
+    outbox.down = True  # Telegram is unreachable on the first day
 
-    engine = await review_day(db, [ALPHA, BETA], notify=sent.append)
+    engine = await review_day(db, [ALPHA, BETA], notify=outbox)
 
     statuses = await listed(engine)
     assert last_change(statuses["beta"])[:2] == ("bench", "active")
     assert statuses["alpha"]["status"]["status"] == "bench"  # retired only by command
-    [alert] = sent
-    assert "alpha" in alert and "krx-quant retire alpha" in alert
+    [alert] = outbox.sent
+    assert "alpha 은퇴 후보" in alert and "krx-quant retire alpha" in alert
 
-    # The next day it is still a candidate, but the alert is not sent again.
-    await run(
-        db,
-        [],
-        until=at("15:45:00", NEXT_DAY),
-        calendar=TWO_DAYS,
-        algorithms=[ALPHA, BETA],
-        min_sample=20,
-        notify=sent.append,
-    )
-    assert len(sent) == 1
+    # Not sent, so asked again the next day; sent then, so not the day after.
+    outbox.down = False
+    for day in (NEXT_DAY, THIRD_DAY):
+        await run(
+            db,
+            [],
+            until=at("15:45:00", day),
+            calendar=THREE_DAYS,
+            algorithms=[ALPHA, BETA],
+            min_sample=20,
+            notify=outbox,
+        )
+    assert len(outbox.sent) == 2
+
+
+async def test_a_status_set_after_the_review_counts_from_the_next_day(tmp_path: Path) -> None:
+    db = tmp_path / "engine.db"
+    history = weekdays_before(DAY, 9)
+    # Ten days with predictions, but the first one's review had run when probation began.
+    with stored(db) as store:
+        store.add_status("alpha", at("16:00:00", history[0]), None, Status.PROBATION, "set by the test")
+    put_days(db, history, {"alpha": RIGHT})
+
+    engine = await review_day(db, [ALPHA])
+
+    assert (await listed(engine))["alpha"]["status"]["status"] == "probation"
+
+
+async def test_with_too_little_to_judge_the_status_stays(tmp_path: Path) -> None:
+    db = tmp_path / "engine.db"
+    put_status(db, "alpha", "active", weekdays_before(DAY, 1)[0])
+    put_days(db, weekdays_before(DAY, 1), {"alpha": WRONG})  # 8 scored, below min_sample 20
+
+    engine = await review_day(db, [ALPHA])
+
+    assert (await listed(engine))["alpha"]["status"]["status"] == "active"
+
+
+async def test_a_review_missed_while_the_engine_was_down_runs_when_it_starts(tmp_path: Path) -> None:
+    db = tmp_path / "engine.db"
+    history = weekdays_before(DAY, 10)
+    put_status(db, "alpha", "probation", history[0])
+    put_days(db, history, {"alpha": RIGHT})
+    with stored(db) as store:
+        store.add_run(
+            "review", at("15:40:00", history[-1]), None, "the last review before the engine stopped"
+        )
+
+    # Down from before DAY's close until 16:00.
+    engine = await run(db, [], start=at("16:00:00"), until=at("16:01:00"), algorithms=[ALPHA], min_sample=20)
+
+    alpha = (await listed(engine))["alpha"]
+    assert last_change(alpha)[:2] == ("probation", "active")
+    assert alpha["status"]["since"] == "2026-10-12T15:40:00+09:00"  # as of the review it missed
 
 
 async def test_an_algorithm_on_probation_moving_with_an_earlier_one_is_a_clone(tmp_path: Path) -> None:
@@ -268,4 +325,4 @@ async def test_retiring_takes_a_command_stops_the_algorithm_and_keeps_its_record
 
     assert main(["unretire", "alpha"]) == 0
     with stored(db) as store:
-        assert store.statuses()["alpha"][0] == "probation"
+        assert store.statuses()["alpha"].status is Status.PROBATION

@@ -182,7 +182,7 @@ async def run_collector(
             alerts = Alerts(
                 session, settings.telegram_bot_token, settings.telegram_chat_id, settings.telegram_api_url
             )
-            engine.notify = alerts.notify  # retirement candidates
+            engine.notify = alerts.deliver  # retirement candidates
             tokens, client = tokens_and_client(session, settings, now)
             await _warm_up(tokens)
             poller = Poller(
