@@ -19,7 +19,17 @@ from krx_quant.api import create_app
 from krx_quant.baselines import BASELINES
 from krx_quant.consensus import NAMES as CONSENSUS
 from krx_quant.engine import Event, PredictionEngine
-from krx_quant.feeds import BOOK, INDEX, KOSPI200_FUTURES, KRX_TRADE, KST, TRADE, VI_STATUS, Feed
+from krx_quant.feeds import (
+    BOOK,
+    INDEX,
+    KOSPI200_FUTURES,
+    KRX_TRADE,
+    KST,
+    TRADE,
+    US_TRADE,
+    VI_STATUS,
+    Feed,
+)
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.replay import replay
 
@@ -132,6 +142,47 @@ def kospi200_futures(when: datetime, change_pct: float) -> Event:
         {"futs_shrn_iscd": "A01612", "bsop_hour": when.strftime("%H%M%S"), "futs_prdy_ctrt": str(change_pct)},
     )
     return (KOSPI200_FUTURES.tr_id, KOSPI200_FUTURES.normalize(fields, when.astimezone(UTC)))
+
+
+def futures_trade(
+    when: datetime, price: float, *, feed: Feed = KOSPI200_FUTURES, contract: str = "A01612"
+) -> Event:
+    """A front-month futures trade at ``when`` (KOSPI200 by default; USD with ``feed``)."""
+    fields = _fields(
+        feed,
+        {
+            "futs_shrn_iscd": contract,
+            "bsop_hour": when.strftime("%H%M%S"),
+            "futs_prpr": f"{price:.2f}",
+            "last_cnqn": "1",
+        },
+    )
+    return (feed.tr_id, feed.normalize(fields, when.astimezone(UTC)))
+
+
+def index_tick(when: datetime, code: str, value: float) -> Event:
+    """An index tick at ``when``."""
+    fields = _fields(
+        INDEX, {"bstp_cls_code": code, "bsop_hour": when.strftime("%H%M%S"), "prpr_nmix": f"{value:.2f}"}
+    )
+    return (INDEX.tr_id, INDEX.normalize(fields, when.astimezone(UTC)))
+
+
+def us_trade(when: datetime, ticker: str, price: float) -> Event:
+    """A US daytime trade at ``when`` (Korean time)."""
+    fields = _fields(
+        US_TRADE,
+        {
+            "RSYM": f"RBAQ{ticker}",
+            "SYMB": ticker,
+            "KYMD": when.strftime("%Y%m%d"),
+            "KHMS": when.strftime("%H%M%S"),
+            "LAST": f"{price:.4f}",
+            "EVOL": "10",
+            "MTYP": "1",
+        },
+    )
+    return (US_TRADE.tr_id, US_TRADE.normalize(fields, when.astimezone(UTC)))
 
 
 def every(start: datetime, end: datetime, seconds: float, make: Any) -> list[Event]:

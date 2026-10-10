@@ -22,6 +22,10 @@ After each day's close (+10 minutes) the algorithms' statuses are reviewed by th
 lifecycle rules (``lifecycle.py``), a retired algorithm is no longer run, and the
 consensus weights are refitted.
 
+The series that may lead the symbols (``features.Leaders``: futures, indices, US daytime
+trades, ETFs) get one-minute bars of their own, by exchange time, like the symbols'; the
+features see them as they stood at the bar close.
+
 Special situations (``special.py``): a symbol in a VI at a bar close is not predicted
 (``vi``), and a prediction whose four minutes a VI, circuit breaker or sidecar touches is
 special, marked when it is made or as soon as the situation is learned.
@@ -50,7 +54,8 @@ from krx_quant.clock import SessionClock
 from krx_quant.config import Settings
 from krx_quant.consensus import FAST, FINAL, NAMES, NO_WEIGHTS, SPANS, Timing, Weights, pool
 from krx_quant.consensus import fit as fit_weights
-from krx_quant.features import FeatureStore, FeatureValue, FeatureVector, Snapshot
+from krx_quant.contracts import KOSPI200, USD
+from krx_quant.features import FeatureStore, FeatureValue, FeatureVector, Leaders, Snapshot
 from krx_quant.feeds import (
     BOOK,
     BOOK_SNAPSHOT,
@@ -59,6 +64,8 @@ from krx_quant.feeds import (
     KOSPI200_FUTURES,
     KRX_TRADE,
     TRADE,
+    US_TRADE,
+    USD_FUTURES,
     VI_STATUS,
 )
 from krx_quant.feeds.base import KST
@@ -91,22 +98,36 @@ ENGINE_FEEDS: dict[str, tuple[str, ...]] = {
     BOOK.tr_id: ("symbol", "received_at", "ask_px_1", "bid_px_1"),
     # The REST book snapshot replaces the integrated book when it is cut by the session limit.
     BOOK_SNAPSHOT.tr_id: ("symbol", "received_at", "ask_px_1", "bid_px_1"),
-    # KRX-only trades carry KRX's best quotes, for the 30 seconds before NXT opens.
-    KRX_TRADE.tr_id: ("symbol", "received_at", "ask1", "bid1"),
+    # KRX-only trades carry KRX's best quotes, for the 30 seconds before NXT opens; the
+    # ETFs' make their bars.
+    KRX_TRADE.tr_id: ("symbol", "event_time", "received_at", "price", "qty", "ask1", "bid1"),
     # A symbol's VIs: a bar close inside one is not predicted; a window touching one is special.
     VI_STATUS.tr_id: ("symbol", "event_time", "received_at", "end_time", "active"),
-    # The KOSPI index and KOSPI200 futures, for circuit breakers and sidecars.
-    INDEX.tr_id: ("symbol", "event_time", "received_at", "change_pct"),
-    INDEX_REST.tr_id: ("symbol", "event_time", "received_at", "change_pct"),
-    KOSPI200_FUTURES.tr_id: ("symbol", "event_time", "received_at", "change_pct"),
+    # The KOSPI index and KOSPI200 futures, for circuit breakers and sidecars; with the other
+    # indices, USD futures and US daytime trades, they lead.
+    INDEX.tr_id: ("symbol", "event_time", "received_at", "value", "change_pct"),
+    INDEX_REST.tr_id: ("symbol", "event_time", "received_at", "value", "change_pct"),
+    KOSPI200_FUTURES.tr_id: ("symbol", "event_time", "received_at", "price", "qty", "change_pct"),
+    USD_FUTURES.tr_id: ("symbol", "event_time", "received_at", "price", "qty"),
+    US_TRADE.tr_id: ("symbol", "event_time", "received_at", "price", "qty"),
 }
-# Feeds of the whole market rather than of a symbol, and the partition the engine reads of
-# each (None: whichever there is, the front month of that day).
-MARKET_FEEDS: dict[str, str | None] = {
-    INDEX.tr_id: KOSPI,
-    INDEX_REST.tr_id: KOSPI,
-    KOSPI200_FUTURES.tr_id: None,
-}
+_INDEX_FEEDS = (INDEX.tr_id, INDEX_REST.tr_id)
+_FUTURES = {KOSPI200_FUTURES.tr_id: KOSPI200.series, USD_FUTURES.tr_id: USD.series}
+
+
+def partitions(feed: str, symbols: Sequence[str], leaders: Leaders) -> list[str] | None:
+    """The partitions of ``feed`` the engine reads; None for every one (a futures feed's
+    single front month, whichever it was that day).
+    """
+    if feed in _FUTURES:
+        return None
+    if feed in _INDEX_FEEDS:
+        return sorted({KOSPI, *leaders.indices})
+    if feed == US_TRADE.tr_id:
+        return list(leaders.us)
+    if feed == KRX_TRADE.tr_id:
+        return [*symbols, *leaders.etfs]
+    return list(symbols)
 
 
 @dataclass(frozen=True)
@@ -121,6 +142,14 @@ class Budget:
 
 # How much one bar close's measured time moves an algorithm's expected time.
 _COST_WEIGHT = 0.3
+
+
+@dataclass(frozen=True)
+class _Frozen:
+    """The bars as they stood at a bar close."""
+
+    symbols: dict[str, list[Bar]]
+    leaders: dict[str, list[Bar]]
 
 
 @dataclass(frozen=True)
@@ -152,6 +181,7 @@ class PredictionEngine:
         min_sample: int = DEFAULT_MIN_SAMPLE,
         notify: Notify | None = None,
         consensus_timing: Timing | None = None,
+        leaders: Leaders | None = None,
     ) -> None:
         self.store = store
         self.calendar = calendar
@@ -169,10 +199,12 @@ class PredictionEngine:
         self._reference = ReferencePrice(calendar)
         self._special = SpecialSituations(calendar)
         self._bars = BarBuilder()
+        self.leaders = leaders or Leaders()
+        self._leader_bars = BarBuilder()
         self._last_tick = clock.now()
         # Bars as they stood at bar closes not yet predicted, kept once an event received
         # at or after the close arrives: a late run must not see trades it could not have.
-        self._frozen: dict[datetime, dict[str, list[Bar]]] = {}
+        self._frozen: dict[datetime, _Frozen] = {}
         self._frozen_through = self._last_tick
         # Outcomes waiting for their target time: (target_at, prediction_id, pending).
         self._pending: list[tuple[datetime, int, Pending]] = []
@@ -194,9 +226,19 @@ class PredictionEngine:
                 self.store.add_status(a.name, self.clock.now(), None, Status.PROBATION, "registered")
 
     def on_event(self, feed: str, row: dict[str, Any]) -> None:
-        if feed in MARKET_FEEDS:
-            futures = feed == KOSPI200_FUTURES.tr_id
-            self._mark_special(self._special.futures(row) if futures else self._special.index(row))
+        series = self._leading(feed, row)
+        if series is not None:
+            self._freeze_before(row["received_at"])
+            price = row["value"] if feed in _INDEX_FEEDS else row["price"]
+            if price:  # None from a recorded file without the column
+                self._leader_bars.trade(series, row["event_time"], price, row.get("qty") or 0)
+        if feed in _INDEX_FEEDS:
+            self._mark_special(self._special.index(row))
+            return
+        if feed == KOSPI200_FUTURES.tr_id:
+            self._mark_special(self._special.futures(row))
+            return
+        if feed in (USD_FUTURES.tr_id, US_TRADE.tr_id):
             return
         symbol = row["symbol"]
         if symbol not in self.symbols or feed not in ENGINE_FEEDS:
@@ -214,6 +256,19 @@ class PredictionEngine:
         else:
             self._reference.quote(symbol, Source.INTEGRATED, received_at, row["bid_px_1"], row["ask_px_1"])
 
+    def _leading(self, feed: str, row: dict[str, Any]) -> str | None:
+        """The leading series an event trades in, if it is one."""
+        if feed in _FUTURES:
+            return _FUTURES[feed]
+        symbol = row["symbol"]
+        if feed in _INDEX_FEEDS:
+            return symbol if symbol in self.leaders.indices else None
+        if feed == US_TRADE.tr_id:
+            return symbol if symbol in self.leaders.us else None
+        if feed == KRX_TRADE.tr_id:
+            return symbol if symbol in self.leaders.etfs else None
+        return None
+
     def _mark_special(self, window: Window | None) -> None:
         """A special window just learned: the predictions it touches are special, scored or not."""
         if window is not None:
@@ -225,7 +280,10 @@ class PredictionEngine:
         counts as after), before the event changes them.
         """
         while (close := self._next_bar_close(self._frozen_through)) is not None and received_at >= close:
-            self._frozen[close] = {s: [replace(b) for b in self._bars.closed(s, close)] for s in self.symbols}
+            self._frozen[close] = _Frozen(
+                {s: [replace(b) for b in self._bars.closed(s, close)] for s in self.symbols},
+                {k: [replace(b) for b in self._leader_bars.closed(k, close)] for k in self.leaders.series},
+            )
             self._frozen_through = close
 
     def next_due(self) -> datetime | None:
@@ -361,7 +419,12 @@ class PredictionEngine:
         for stale in [c for c in self._frozen if c < bar_close]:
             del self._frozen[stale]  # a close no longer predicted (the calendar changed)
         # Nothing received since the close has reached the bars: they are as they stood.
-        bars = frozen if frozen is not None else {s: self._bars.closed(s, bar_close) for s in self.symbols}
+        if frozen is None:
+            frozen = _Frozen(
+                {s: self._bars.closed(s, bar_close) for s in self.symbols},
+                {k: self._leader_bars.closed(k, bar_close) for k in self.leaders.series},
+            )
+        bars = frozen.symbols
         baselines: dict[tuple[str, str], dict[str, Forecast | None]] = {}
         session = self.calendar.session(bar_close.date())
         session_open = session.open if session is not None else None
@@ -378,7 +441,13 @@ class PredictionEngine:
                 continue
             mid = self._reference.mid(symbol, bar_close)
             snapshot = Snapshot.at(
-                symbol, bar_close, bars.get(symbol, []), mid, self.fee_rate, session_open=session_open
+                symbol,
+                bar_close,
+                bars.get(symbol, []),
+                mid,
+                self.fee_rate,
+                session_open=session_open,
+                leaders=self.leaders.groups(symbol, bars, frozen.leaders),
             )
             at_close[symbol] = _AtClose(mid, self._features.compute(snapshot, self._feature_names))
             inputs = Inputs(

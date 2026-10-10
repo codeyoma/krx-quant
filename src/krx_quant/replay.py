@@ -23,8 +23,8 @@ from krx_quant.archive import partition_files
 from krx_quant.clock import FakeClock
 from krx_quant.config import Settings
 from krx_quant.consensus import Timing
-from krx_quant.engine import ENGINE_FEEDS, MARKET_FEEDS, Budget, Event, Notify, PredictionEngine
-from krx_quant.features import FeatureStore
+from krx_quant.engine import ENGINE_FEEDS, Budget, Event, Notify, PredictionEngine, partitions
+from krx_quant.features import FeatureStore, Leaders
 from krx_quant.feeds.base import KST, kst_day
 from krx_quant.market_calendar import MarketCalendar, calendar_store
 from krx_quant.predictions import DB_NAME, AlgorithmSummary, PredictionStore
@@ -53,6 +53,7 @@ async def replay(
     min_sample: int = DEFAULT_MIN_SAMPLE,
     notify: Notify | None = None,
     consensus_timing: Timing | None = None,
+    leaders: Leaders | None = None,
 ) -> PredictionEngine:
     """Feed ``events`` (in receipt order) received by ``until`` to an engine storing into ``db``.
 
@@ -76,6 +77,7 @@ async def replay(
         min_sample=min_sample,
         notify=notify,
         consensus_timing=consensus_timing,
+        leaders=leaders,
     )
     for feed, row in events:
         received_at: datetime = row["received_at"]
@@ -98,7 +100,9 @@ async def _run_until(engine: PredictionEngine, clock: FakeClock, until: datetime
         await engine.run_due()
 
 
-def recorded_events(data_dir: Path, day: date, symbols: Sequence[str]) -> Iterator[Event]:
+def recorded_events(
+    data_dir: Path, day: date, symbols: Sequence[str], leaders: Leaders | None = None
+) -> Iterator[Event]:
     """The engine's events recorded on ``day``, in receipt order.
 
     Each partition is read file by file, a batch at a time, with only the columns the
@@ -109,7 +113,7 @@ def recorded_events(data_dir: Path, day: date, symbols: Sequence[str]) -> Iterat
     streams: list[Iterator[Event]] = []
     for feed, columns in ENGINE_FEEDS.items():
         root = data_dir / "events" / f"date={day.isoformat()}" / f"feed={feed}"
-        for key in _keys(feed, root, symbols):
+        for key in _keys(feed, root, symbols, leaders or Leaders()):
             partition = root / f"symbol={key}"
             files = partition_files(partition) if partition.is_dir() else []
             if files:
@@ -120,14 +124,12 @@ def recorded_events(data_dir: Path, day: date, symbols: Sequence[str]) -> Iterat
     return heapq.merge(*streams, key=lambda event: event[1]["received_at"])
 
 
-def _keys(feed: str, root: Path, symbols: Sequence[str]) -> list[str]:
-    """The partitions of ``feed`` the engine reads: the symbols', or the market's."""
-    if feed not in MARKET_FEEDS:
-        return list(symbols)
-    key = MARKET_FEEDS[feed]
-    if key is None:  # the front month, whichever it was that day
+def _keys(feed: str, root: Path, symbols: Sequence[str], leaders: Leaders) -> list[str]:
+    """The partitions of ``feed`` the engine reads."""
+    keys = partitions(feed, symbols, leaders)
+    if keys is None:  # the front month, whichever it was that day
         return sorted(p.name.removeprefix("symbol=") for p in root.glob("symbol=*"))
-    return [key]
+    return keys
 
 
 def _partition_rows(feed: str, files: Sequence[Path], columns: Sequence[str]) -> Iterator[Event]:
@@ -176,7 +178,8 @@ async def replay_day(settings: Settings, day: date, db: Path | None = None) -> R
     db = db or settings.state_dir / f"replay-{day.isoformat()}.sqlite3"
     if db.resolve() in {p.resolve() for p in _sqlite_files(settings.state_dir / DB_NAME)}:
         raise ValueError(f"{db} is the live engine's database; replay into another file")
-    events = recorded_events(settings.data_dir, day, settings.symbols)
+    leaders = Leaders.of(settings)
+    events = recorded_events(settings.data_dir, day, settings.symbols, leaders)
     for leftover in _sqlite_files(db):
         leftover.unlink(missing_ok=True)
     models: dict[str, Model] = {}
@@ -200,6 +203,7 @@ async def replay_day(settings: Settings, day: date, db: Path | None = None) -> R
         models=models,
         budget=Budget.of(settings),
         min_sample=settings.min_sample,
+        leaders=leaders,
     )
     try:
         return ReplayedDay(db, engine.store.summary(), set_aside)
