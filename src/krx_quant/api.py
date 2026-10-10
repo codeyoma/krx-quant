@@ -11,11 +11,13 @@ Endpoints (all under ``/v1``):
 - ``GET /symbols/{symbol}/bars``: today's finished one-minute bars, oldest first;
 - ``GET /algorithms``: each registered algorithm's card, features, current model and status
   (probation, active, bench, retired, clone) with its history;
+- ``GET /algorithms/{name}``: one of them, with the models installed on the server for it;
 - ``GET /leaderboard?symbol=&period=&basis=&special=``: algorithms ranked by the lower
   bound of their weakest lift over the baselines, with their stats;
 - ``GET /algorithms/{name}/stats?symbol=&period=&basis=&special=``: one algorithm's
   stats, by symbol, 30-minute slot and model version, with its calibration curve;
-- ``GET /consensus``: the consensus members now and the weights last fitted.
+- ``GET /consensus``: the consensus members now and the weights last fitted;
+- ``GET /macro``: the latest day's market regime and macro readings (``macro.py``).
 
 ``symbol`` is a symbol or ``all`` (default), ``period`` is ``today`` (default), ``5d`` or
 ``20d`` (the latest days with predictions), ``basis`` is ``b`` (default: from when it was
@@ -31,16 +33,21 @@ import asyncio
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from functools import partial
+from pathlib import Path
+from time import monotonic
 from typing import Any, Literal
 
 from aiohttp import web
 
+from krx_quant.algorithms import Algorithm
 from krx_quant.baselines import BASELINE_NAMES, BASELINES
 from krx_quant.consensus import NAMES, slot
 from krx_quant.engine import PredictionEngine
 from krx_quant.feeds.base import kst_day
+from krx_quant.macro import LatestMacro, latest_macro
+from krx_quant.model_shelf import Shelf
 from krx_quant.predictions import iso
 from krx_quant.pricing import flat_ticks, tick_size
 from krx_quant.stats import (
@@ -66,6 +73,11 @@ LIVE_STATUS_KEY: web.AppKey[LiveStatus] = web.AppKey("live_status")
 _dumps = partial(json.dumps, ensure_ascii=False, indent=2)
 
 MIN_SAMPLE_KEY = web.AppKey("min_sample", int)
+DATA_DIR_KEY: web.AppKey[Path | None] = web.AppKey("data_dir")
+SHELF_KEY: web.AppKey[Shelf | None] = web.AppKey("shelf")
+# /v1/macro is read again at most this often: it changes only with the morning's reads.
+MACRO_SECONDS = 30.0
+MACRO_CACHE_KEY = web.AppKey("macro_cache", dict)
 STATS_CACHE_KEY = web.AppKey("stats_cache", dict)
 PERIODS = {"today": 1, "5d": 5, "20d": 20}  # days with predictions
 # Results kept per question until the store changes (the screen asks the same often).
@@ -81,12 +93,23 @@ def create_app(
     mode: Mode = "replay",
     live_status: LiveStatus | None = None,
     min_sample: int = DEFAULT_MIN_SAMPLE,
+    data_dir: Path | None = None,
+    shelf: Shelf | None = None,
 ) -> web.Application:
+    """The Engine API of ``engine``. ``data_dir`` holds the macro readings and ``shelf`` the
+    models installed on the server; without them there is no macro and no model history.
+    Live and demo show the KIS status: they need ``live_status``.
+    """
+    if mode in ("live", "demo") and live_status is None:
+        raise ValueError(f"the {mode} Engine API shows the kis status: give it live_status")
     app = web.Application()
     app[ENGINE_KEY] = engine
     app[MODE_KEY] = mode
     app[MIN_SAMPLE_KEY] = min_sample
     app[STATS_CACHE_KEY] = {}
+    app[DATA_DIR_KEY] = data_dir
+    app[SHELF_KEY] = shelf
+    app[MACRO_CACHE_KEY] = {}
     if live_status is not None:
         app[LIVE_STATUS_KEY] = live_status
     app.router.add_get("/v1/status", _status)
@@ -95,9 +118,11 @@ def create_app(
     app.router.add_get("/v1/symbols/{symbol}/predictions", _predictions)
     app.router.add_get("/v1/symbols/{symbol}/bars", _bars)
     app.router.add_get("/v1/algorithms", _algorithms)
+    app.router.add_get("/v1/algorithms/{name}", _algorithm)
     app.router.add_get("/v1/leaderboard", _leaderboard)
     app.router.add_get("/v1/algorithms/{name}/stats", _algorithm_stats)
     app.router.add_get("/v1/consensus", _consensus)
+    app.router.add_get("/v1/macro", _macro)
     return app
 
 
@@ -119,7 +144,19 @@ async def _status(request: web.Request) -> web.Response:
         ],
     }
     # The latest night's training and whether its promotions run (swap.py); null before any.
-    body["training"] = engine.training
+    training = engine.training
+    if training is not None:  # finalized where the night ran: shown in KST like every time here
+        training = {**training, "finalized_at": iso(datetime.fromisoformat(training["finalized_at"]))}
+    body["training"] = training
+    cpu = engine.cpu_use()
+    body["cpu"] = {
+        "budget_seconds": cpu.budget.cpu,
+        "algorithm_seconds": cpu.budget.per_algorithm,
+        "expected_seconds": cpu.expected_seconds,
+        "usage": cpu.usage,
+        "algorithms": dict(cpu.expected),
+        "skipped_today": cpu.skipped_today,
+    }
     live_status = request.app.get(LIVE_STATUS_KEY)
     if live_status is not None:
         body["kis"] = live_status()
@@ -186,26 +223,39 @@ async def _bars(request: web.Request) -> web.Response:
 
 async def _algorithms(request: web.Request) -> web.Response:
     engine = request.app[ENGINE_KEY]
-    algorithms = []
-    for a in engine.algorithms:
-        model = engine.models[a.name]
-        algorithms.append(
-            {
-                "name": a.name,
-                "card": {
-                    "scientist": a.card.scientist,
-                    "character": a.card.character,
-                    "logic": a.card.logic,
-                    "unique_features": list(a.card.unique_features),
-                    "training": a.card.training,
-                },
-                "features": list(a.features),
-                "training_days": a.training_days,
-                "model": model.as_dict(),
-                "status": _status_json(engine, a.name),
-            }
-        )
-    return _json({"algorithms": algorithms})
+    return _json({"algorithms": [_algorithm_json(engine, a) for a in engine.algorithms]})
+
+
+async def _algorithm(request: web.Request) -> web.Response:
+    engine = request.app[ENGINE_KEY]
+    name = request.match_info["name"]
+    algorithm = next((a for a in engine.algorithms if a.name == name), None)
+    if algorithm is None:
+        raise _error(web.HTTPNotFound, f"unknown algorithm {name!r}")
+    shelf = request.app[SHELF_KEY]
+    installed = shelf.history(name) if shelf is not None else []
+    history = [
+        {"at": iso(datetime.fromisoformat(e["at"])), "version": e["version"], "why": e["why"]}
+        for e in installed
+    ]
+    return _json({**_algorithm_json(engine, algorithm), "model_history": history})
+
+
+def _algorithm_json(engine: PredictionEngine, a: Algorithm) -> dict[str, Any]:
+    return {
+        "name": a.name,
+        "card": {
+            "scientist": a.card.scientist,
+            "character": a.card.character,
+            "logic": a.card.logic,
+            "unique_features": list(a.card.unique_features),
+            "training": a.card.training,
+        },
+        "features": list(a.features),
+        "training_days": a.training_days,
+        "model": engine.models[a.name].as_dict(),
+        "status": _status_json(engine, a.name),
+    }
 
 
 async def _consensus(request: web.Request) -> web.Response:
@@ -224,6 +274,46 @@ async def _consensus(request: web.Request) -> web.Response:
             "weights": by_symbol,
         }
     )
+
+
+async def _macro(request: web.Request) -> web.Response:
+    engine = request.app[ENGINE_KEY]
+    cache: dict[date, tuple[float, dict[str, Any]]] = request.app[MACRO_CACHE_KEY]
+    today = kst_day(engine.clock.now())
+    cached = cache.get(today)
+    if cached is None or monotonic() - cached[0] >= MACRO_SECONDS:
+        data_dir = request.app[DATA_DIR_KEY]
+        latest = None if data_dir is None else await asyncio.to_thread(latest_macro, data_dir, today)
+        cache.clear()
+        cached = cache[today] = (monotonic(), _macro_json(latest))
+    return _json(cached[1])
+
+
+def _macro_json(latest: LatestMacro | None) -> dict[str, Any]:
+    if latest is None:
+        empty: dict[str, Any] = {"day": None, "decided_at": None, "regime": None, "reasons": []}
+        return {**empty, "readings": [], "failed": {}, "skipped": []}
+    readings = [
+        {
+            "indicator": indicator.name,
+            "label": indicator.label,
+            "source": row["source"],
+            "series": row["series"],
+            "as_of": row["as_of"].isoformat() if row["as_of"] else None,
+            "value": row["value"],
+            "change_pct": row["change_pct"],
+        }
+        for indicator, row in latest.readings
+    ]
+    return {
+        "day": latest.day.isoformat(),
+        "decided_at": iso(latest.decided_at),
+        "regime": latest.regime,
+        "reasons": latest.reasons,
+        "readings": readings,
+        "failed": latest.failed,
+        "skipped": latest.skipped,
+    }
 
 
 def _status_json(engine: PredictionEngine, name: str) -> dict[str, Any]:
@@ -311,7 +401,12 @@ async def _algorithm_stats(request: web.Request) -> web.Response:
     engine = request.app[ENGINE_KEY]
     name = request.match_info["name"]
     query = _query(request, engine)
-    known = {a.name for a in engine.algorithms} | {b.name for b in BASELINES} | engine.store.algorithms()
+    known = (
+        {a.name for a in engine.algorithms}
+        | {b.name for b in BASELINES}
+        | set(NAMES)
+        | engine.store.algorithms()
+    )
     if name not in known:
         raise _error(web.HTTPNotFound, f"unknown algorithm {name!r}")
     min_sample = request.app[MIN_SAMPLE_KEY]

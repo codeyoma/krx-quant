@@ -313,6 +313,14 @@ class PredictionStore:
         ).fetchone()
         return row is not None
 
+    def count_runs(self, kind: str, since: datetime) -> int:
+        """How many ``kind`` runs were recorded at or after ``since``."""
+        row = self._db.execute(
+            "SELECT COUNT(*) FROM runs WHERE kind = ? AND at >= ?", (kind, iso(since))
+        ).fetchone()
+        count: int = row[0]
+        return count
+
     def last_run(self, kind: str) -> datetime | None:
         """When the latest ``kind`` run was recorded, if one was."""
         row = self._db.execute("SELECT MAX(at) FROM runs WHERE kind = ?", (kind,)).fetchone()

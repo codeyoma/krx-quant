@@ -146,7 +146,9 @@ aws iam create-access-key --user-name krx-quant-engine
 ```bash
 curl http://krx-quant:8080/v1/status
 curl http://krx-quant:8080/v1/symbols/005930/latest
+curl http://krx-quant:8080/v1/macro
 ```
+`/v1/status`의 `cpu`는 알고리즘이 CPU 예산을 얼마나 쓰는지다(`usage`가 1을 넘으면 늦게 등록된 알고리즘부터 건너뛴다). `/v1/macro`는 그날 07:30에 정한 국면과 지표다.
 
 #### 설정 값 전체
 

@@ -16,6 +16,7 @@ from krx_quant.algorithms import ALGORITHMS
 from krx_quant.cli import main
 from krx_quant.consensus import NAMES as CONSENSUS
 from krx_quant.demo import DEMO_SYMBOLS, demo_app
+from krx_quant.macro import INDICATORS
 from tests.replay_events import get_json
 
 
@@ -26,6 +27,8 @@ async def test_the_demo_engine_answers_what_a_screen_reads(tmp_path: Path) -> No
         status = await get_json(client, "/v1/status")
         symbols = await get_json(client, "/v1/symbols")
         latest = {s: await get_json(client, f"/v1/symbols/{s}/latest") for s in DEMO_SYMBOLS}
+        macro = await get_json(client, "/v1/macro")
+        newton = await get_json(client, "/v1/algorithms/newton")
 
     assert status["mode"] == "demo"
     assert status["phase"] == "continuous"
@@ -33,6 +36,13 @@ async def test_the_demo_engine_answers_what_a_screen_reads(tmp_path: Path) -> No
     assert [w["kind"] for w in status["special"]] == ["vi"], "a VI, so a screen shows one"
     assert status["training"]["day"] == "2026-10-09"
     assert [s["symbol"] for s in symbols["symbols"]] == list(DEMO_SYMBOLS)
+    assert (macro["day"], macro["regime"]) == ("2026-10-12", "risk_off"), "a macro row to show"
+    assert len(macro["readings"]) == len(INDICATORS)
+    assert status["kis"]["connected"] is True
+    assert [f["key"] for f in status["kis"]["feeds"] if f["gap"]] == ["000660"], (
+        "a gap, so a screen shows one"
+    )
+    assert [h["why"] for h in newton["model_history"]] == ["fit", "rollback from newton-20261008-5e1f0a"]
     assert all(s["mid"] is not None for s in symbols["symbols"])
     for body in latest.values():
         assert body["bar_close"] == "2026-10-12T10:30:00+09:00"

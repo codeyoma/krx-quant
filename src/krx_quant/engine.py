@@ -148,6 +148,24 @@ _COST_WEIGHT = 0.3
 
 
 @dataclass(frozen=True)
+class CpuUse:
+    """The CPU budget now, for the status."""
+
+    budget: Budget
+    expected: Mapping[str, float]  # seconds per bar close of each algorithm not retired, once timed
+    skipped_today: int  # algorithm runs skipped for the budget today
+
+    @property
+    def expected_seconds(self) -> float:
+        return sum(self.expected.values())
+
+    @property
+    def usage(self) -> float | None:
+        """The expected work as a share of the budget; over 1, the last registered are skipped."""
+        return self.expected_seconds / self.budget.cpu if self.budget.cpu > 0 else None
+
+
+@dataclass(frozen=True)
 class _AtClose:
     """What is fixed for a symbol at a bar close."""
 
@@ -263,6 +281,17 @@ class PredictionEngine:
         """The consensus members now: the active algorithms, in registration order."""
         active = _with_status(self.store.statuses(), Status.ACTIVE)
         return [a.name for a in self.algorithms if a.name in active]
+
+    def cpu_use(self) -> CpuUse:
+        """The CPU budget now: the algorithms that run, as timed so far, and today's skips."""
+        retired = _with_status(self.store.statuses(), Status.RETIRED)
+        expected = {
+            a.name: self._cost[a.name]
+            for a in self.algorithms
+            if a.name in self._cost and a.name not in retired
+        }
+        midnight = datetime.combine(self.clock.now().astimezone(KST).date(), time(), KST)
+        return CpuUse(self._budget, expected, self.store.count_runs("cpu_budget", midnight))
 
     def special_today(self) -> list[Window]:
         """The special situations known now that touch today, in time order."""

@@ -1,7 +1,8 @@
 """Macro collection: the sources over HTTP, a failing one, the alert and the regime recorded.
 
 Input: a fake server answering as ECOS, FRED, Yahoo and Telegram do, and backfilled USD
-futures bars. Output: the recorded readings and regime, and the Telegram messages.
+futures bars. Output: the recorded readings and regime, the Telegram messages, and what
+the Engine API shows of them (``/v1/macro``).
 """
 
 from __future__ import annotations
@@ -18,8 +19,9 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 from aiohttp import web
-from aiohttp.test_utils import TestServer
+from aiohttp.test_utils import TestClient, TestServer
 
+from krx_quant.api import create_app
 from krx_quant.archive import partition_files
 from krx_quant.backfill import FUTURES_BAR_SCHEMA, FUTURES_BARS_TR, bars_key
 from krx_quant.config import Settings
@@ -28,6 +30,7 @@ from krx_quant.macro import MacroCollector, Source, first_macro_run, keep_macro,
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.notify import Alerts
 from krx_quant.recorder import ParquetRecorder
+from tests.replay_events import at, get_json, run
 
 DAY = date(2026, 10, 12)  # a Monday; the KRX day before is Friday the 9th
 CALENDAR = MarketCalendar({DAY: True})
@@ -308,3 +311,78 @@ async def test_the_won_is_read_from_the_usd_futures_first(setup: Setup) -> None:
 )
 def test_a_restart_reads_again_only_before_the_open(started: datetime, first: datetime) -> None:
     assert first_macro_run(CALENDAR, time(7, 30), started) == first
+
+
+async def test_the_engine_api_shows_the_latest_regime_and_readings(setup: Setup, tmp_path: Path) -> None:
+    setup.sources.down = {"yahoo"}
+    await setup.collector.run(DAY)
+    setup.sources.down = set()
+    await setup.collector.run(DAY, [Source.YAHOO])
+    engine = await run(tmp_path / "engine.db", [], until=at("09:00:00"))
+
+    async with TestClient(TestServer(create_app(engine, data_dir=setup.settings.data_dir))) as client:
+        macro = await get_json(client, "/v1/macro")
+
+    assert (macro["day"], macro["regime"]) == ("2026-10-12", "risk_off")
+    assert macro["reasons"] == ["SOX -1.5% (-1% 이하)"]
+    assert macro["decided_at"] == "2026-10-12T07:30:00+09:00"
+    assert (macro["failed"], macro["skipped"]) == ({}, [])
+    readings = {r["indicator"]: r for r in macro["readings"]}
+    assert list(readings)[:2] == ["usdkrw", "ktb3y"], "in the indicators' order"
+    assert readings["sox"] == {
+        "indicator": "sox",
+        "label": "필라델피아 반도체지수",
+        "source": "yahoo",
+        "series": "^SOX",
+        "as_of": "2026-10-09",
+        "value": 12608.0,
+        "change_pct": pytest.approx(-1.5),
+    }
+
+
+async def test_the_readings_shown_are_those_the_regime_shown_was_decided_from(
+    setup: Setup, tmp_path: Path
+) -> None:
+    await setup.collector.run(DAY)
+    # The collector restarted before the open, and Yahoo is down this time.
+    setup.sources.down = {"yahoo"}
+    restarted = MacroCollector(
+        setup.settings,
+        setup.collector._session,
+        setup.alerts,
+        macro_recorder(setup.recorder),
+        CALENDAR,
+        lambda: MORNING + timedelta(minutes=40),
+    )
+    await restarted.run(DAY)
+    engine = await run(tmp_path / "engine.db", [], until=at("09:00:00"))
+
+    async with TestClient(TestServer(create_app(engine, data_dir=setup.settings.data_dir))) as client:
+        macro = await get_json(client, "/v1/macro")
+
+    assert (macro["regime"], macro["failed"]) == ("neutral", {"yahoo": "HTTP 503"})
+    assert "sox" not in {r["indicator"] for r in macro["readings"]}, "not from the read before the restart"
+
+
+async def test_the_engine_api_shows_the_latest_day_decided_or_nothing(setup: Setup, tmp_path: Path) -> None:
+    await setup.collector.run(DAY)
+    tomorrow = await run(
+        tmp_path / "engine.db", [], until=at("09:00:00", date(2026, 10, 13)), calendar=MarketCalendar({})
+    )
+    nothing_yet = await run(tmp_path / "other.db", [], until=at("09:00:00"))
+
+    async with TestClient(TestServer(create_app(tomorrow, data_dir=setup.settings.data_dir))) as client:
+        before_its_read = await get_json(client, "/v1/macro")
+    async with TestClient(TestServer(create_app(nothing_yet, data_dir=tmp_path / "empty"))) as client:
+        empty = await get_json(client, "/v1/macro")
+
+    assert before_its_read["day"] == "2026-10-12", "until the day's own read, the day before's"
+    assert empty == {
+        "day": None,
+        "decided_at": None,
+        "regime": None,
+        "reasons": [],
+        "readings": [],
+        "failed": {},
+        "skipped": [],
+    }
