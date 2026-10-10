@@ -141,6 +141,12 @@ class Pending:
 
 
 @dataclass(frozen=True)
+class Added:
+    ids: dict[str, list[int]]  # the IDs stored, by predictor
+    pending: list[Pending]  # those made, to score
+
+
+@dataclass(frozen=True)
 class AlgorithmSummary:
     """Counts on basis A."""
 
@@ -185,10 +191,11 @@ class PredictionStore:
     def close(self) -> None:
         self._db.close()
 
-    def add_all(self, predictions: Sequence[NewPrediction]) -> list[Pending]:
+    def add_all(self, predictions: Sequence[NewPrediction]) -> Added:
         """Store predictions in one transaction; those made are pending until scored."""
         self.version += 1
         self._algorithms.update(p.algorithm for p in predictions)
+        ids: dict[str, list[int]] = {}
         added: list[Pending] = []
         with self._db:
             for p in predictions:
@@ -210,6 +217,7 @@ class PredictionStore:
                     ),
                 )
                 assert cursor.lastrowid is not None
+                ids.setdefault(p.algorithm, []).append(cursor.lastrowid)
                 if f is None:
                     continue  # nothing to score
                 self._db.execute(
@@ -228,7 +236,7 @@ class PredictionStore:
                 added.append(
                     Pending(cursor.lastrowid, p.symbol, p.target_at, p.mid_close, p.mid_display, p.flat_ticks)
                 )
-        return added
+        return Added(ids, added)
 
     def add_status(
         self, algorithm: str, at: datetime, previous: Status | None, status: Status, reason: str
@@ -399,6 +407,25 @@ class PredictionStore:
             (symbol, iso(since), iso(until)),
         ).fetchall()
         return {Direction(r[0]): r[1] for r in rows}
+
+    def rows(self, ids: Sequence[int]) -> list[dict[str, Any]]:
+        """The predictions with these IDs, with their outcomes, by symbol and predictor."""
+        if not ids:
+            return []
+        marks = ", ".join("?" * len(ids))
+        return self._select(f"WHERE p.id IN ({marks}) ORDER BY p.symbol, p.algorithm", tuple(ids))
+
+    def status_changes(self, after: int) -> list[dict[str, Any]]:
+        """The status changes recorded after the one with ID ``after``, oldest first."""
+        rows = self._db.execute(
+            "SELECT id, algorithm, at, previous, status, reason FROM statuses WHERE id > ? ORDER BY id",
+            (after,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def last_status_id(self) -> int:
+        last: int | None = self._db.execute("SELECT MAX(id) FROM statuses").fetchone()[0]
+        return last or 0
 
     def latest(self, symbol: str) -> list[dict[str, Any]]:
         """The predictions of the symbol's latest bar close."""

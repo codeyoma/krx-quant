@@ -2,7 +2,7 @@
 
 엔진은 1분봉이 마감될 때마다 종목별로 4분 뒤 통합 중간가의 방향을 예측하고, 4분 뒤 채점한다. 결과는 `state/engine.sqlite3`에 저장하고 HTTP JSON API로 보여준다. Fincept 화면은 이 API만 읽는다.
 
-지금은 기준 예측 3종(#9), 알고리즘 Newton(#10), Gauss(#13), Granger(#15), 합의 Condorcet(#18)이 예측한다. 다른 알고리즘(Markov #14, Turing #16, Kalman #25, Shannon #26, Poisson #27)과 WebSocket 스트림(#19의 두 번째 PR)은 계획이다. 응답 형식은 JSON 스키마 `schemas/engine-api-v1.json`으로 고정한다(아래 "계약").
+지금은 기준 예측 3종(#9), 알고리즘 Newton(#10), Gauss(#13), Granger(#15), 합의 Condorcet(#18)이 예측한다. 다른 알고리즘(Markov #14, Turing #16, Kalman #25, Shannon #26, Poisson #27)은 계획이다. 화면은 REST로 지금 상태를 읽고, WebSocket 스트림(`/v1/stream`)으로 바뀌는 것을 바로 받는다. 응답 형식은 JSON 스키마 `schemas/engine-api-v1.json`으로 고정한다(아래 "계약").
 
 ## 예측
 
@@ -126,9 +126,10 @@
 
 ### 계약 (JSON 스키마, #19)
 
-- `schemas/engine-api-v1.json`이 모든 `/v1` 응답의 형식이다(JSON Schema 2020-12). 엔드포인트마다 `$defs`에 정의가 하나씩 있다: `status`, `symbols`, `latest`, `predictions`, `bars`, `algorithms`, `algorithm_detail`, `leaderboard`, `algorithm_stats`, `consensus`, `macro`, 오류는 `error`.
+- `schemas/engine-api-v1.json`이 모든 `/v1` 응답의 형식이다(JSON Schema 2020-12). 엔드포인트마다 `$defs`에 정의가 하나씩 있다: `status`, `symbols`, `latest`, `predictions`, `bars`, `algorithms`, `algorithm_detail`, `leaderboard`, `algorithm_stats`, `consensus`, `macro`, 오류는 `error`. 스트림의 메시지는 `event`(종류마다 `prediction_event` 등)다.
 - 스키마에 없는 필드는 계약 위반이다(모든 객체가 닫혀 있다). 그래서 필드를 더하거나 바꾸면 스키마도 같이 고친다. 시각은 `+09:00`이 붙은 ISO 8601이어야 한다.
 - 계약 테스트(`tests/test_api_contract.py`)가 세 모드의 엔진에 모든 엔드포인트, 질의 변형, 오류 응답을 물어 스키마로 검사한다. 빈 재생 엔진(값이 `null`인 경우), 데모 엔진(필드가 찬 경우), 가짜 KIS 위의 실시간 수집기다. 라우트마다 스키마 정의가 있는지도 확인한다(`tests/api_schema.py`의 `ROUTES`). 그래서 엔드포인트를 더하면 `ROUTES`와 스키마에 함께 넣어야 테스트를 지난다.
+- 스트림 테스트(`tests/test_api_stream.py`)는 받은 메시지마다 `event` 정의로 검사한다. 실시간 수집기의 계약 테스트도 스트림을 함께 검사한다.
 - 화면은 이 스키마와 데모 엔진(`krx-quant demo-engine`)으로 만든다. 데모 엔진도 같은 계약 테스트를 지난다.
 
 ### `GET /v1/status`
@@ -361,6 +362,38 @@
 - `readings`는 지표 표의 순서다(`macro.py`의 `INDICATORS`). 보이는 국면을 정한 그 읽기의 값이다. 수집기가 다시 시작해 그날 새로 읽었으면, 그 전 읽기의 값은 섞지 않는다. 그래서 실패하거나 키가 없어 건너뛴 출처의 지표는 빠진다. `as_of`는 출처 기준 값의 날짜, `change_pct`는 KRX 전 거래일 아침 대비 등락률(%)이다. 값을 모르면 `null`이다.
 - `failed`는 마지막 읽기에서 실패한 출처와 이유, `skipped`는 키가 없어 건너뛴 출처다.
 - 아직 정한 날이 없거나(데이터 디렉터리에 없음) 재생 엔진이면 `day`, `decided_at`, `regime`이 `null`이고 목록은 비어 있다. 데모 엔진은 가상의 국면(`risk_off`)을 보인다.
+
+### `GET /v1/stream` (WebSocket, #19)
+
+엔진이 하는 일을 그때그때 보낸다(`stream.py`). 메시지마다 JSON 텍스트 하나이고, `type`과 `at`(보낸 시각, 엔진 시계)이 있다. 클라이언트는 아무것도 보내지 않는다.
+
+| `type` | 언제 | 내용 |
+|---|---|---|
+| `prediction` | 예측이 저장(표시)될 때. 기준 예측 3종은 한 번에, 알고리즘은 각자 끝났을 때 | `bar_close`, `predictions`(항목은 `latest`의 예측 항목에 `symbol`을 더한 것) |
+| `consensus` | 합의가 저장될 때 | `kind`(`fast`, `final`), `bar_close`, `predictions`(합의 예측, 종목마다 하나) |
+| `outcome` | 예측이 채점될 때(봉 마감 4분 뒤) | `outcomes`(채점된 예측. 항목 형식은 같고 `outcome`이 찬다) |
+| `health` | 연결하자마자 한 번, 그리고 KIS 연결이나 피드의 결측 구간이 바뀔 때 | `kis`(`/v1/status`의 `kis`와 같다). 실시간과 데모만. 지연 초(`seconds_since`)가 바뀐 것만으로는 보내지 않는다 |
+| `lifecycle` | 알고리즘 상태가 바뀔 때. 일일 점검, 처음 등록, 다른 프로세스의 `retire`·`unretire` 명령 | `algorithm`, `change`(`at`, `from`, `to`, `reason`: `/v1/algorithms`의 상태 이력 항목과 같다) |
+
+```json
+{"type": "consensus", "at": "2026-10-12T09:31:00.180000+09:00", "kind": "final", "bar_close": "2026-10-12T09:31:00+09:00", "predictions": [{"symbol": "005930", "algorithm": "consensus-final", "model_version": "condorcet-equal", "p_up": 0.57, "...": "..."}]}
+```
+
+- 예측과 채점은 엔진이 저장하는 순간 보낸다. 상태 변경과 KIS 상태는 1초마다 살펴서 보낸다.
+- 한 봉 마감 안에서는 기준 예측, 알고리즘들(끝난 순서), 빠른 합의, 최종 합의 순서로 온다. 다만 알고리즘이 빠른 합의보다 늦게 끝나면 그 뒤에 온다.
+- 스트림은 연결한 뒤의 일만 보낸다. 연결하거나 다시 연결하면 REST(`/v1/symbols/{symbol}/latest` 등)로 지금 상태를 먼저 읽는다.
+- 클라이언트가 1,000개 넘게 밀리면 서버가 그 연결을 닫는다(코드 1013, `too slow`). 엔진이 꺼질 때는 1001로 닫는다. 둘 다 다시 연결하면 된다. 30초마다 ping을 보낸다.
+- 재생 엔진과 데모 엔진은 다 돌고 난 뒤에 API를 연다. 그래서 데모 엔진의 스트림에는 연결할 때의 `health` 하나만 오고, 재생 엔진에는 아무것도 오지 않는다.
+
+### 텔레그램 신호 알림 (#19)
+
+선택 기능이고 기본은 끈다(`KRX_SIGNAL_ALERT=on`으로 켠다, `signals.py`). 봉 마감마다 최종 합의가 나오면 종목마다 본다.
+
+1. 최종 합의의 상승 확률이 `KRX_SIGNAL_MIN_PROBABILITY`(기본 0.6) 이상이면 상승, 아니면 하락 확률이 그 이상일 때 하락이다. 둘 다 아니면 신호가 없다.
+2. 그 합의에 들어간 정식 알고리즘 가운데 `KRX_SIGNAL_MIN_AGREE`(기본 2)개 이상이 같은 방향을 예측해야 한다. 알고리즘의 예측 방향은 세 확률 중 가장 큰 쪽이다(동률이면 보합, 그다음 상승. 통계와 같다).
+3. 같은 종목·같은 방향의 신호는 앞 신호의 채점 시각(4분 뒤)까지 다시 보내지 않는다. 매분 같은 신호가 쌓이지 않게 하려는 것이다.
+
+메시지는 `[신호] 005930 상승 64% · 정식 3개 중 2개 같은 방향 · 09:31 봉 마감, 09:35까지`다. 정식 알고리즘이 없으면 합의가 비어서 신호도 없다. 주문은 하지 않는다(엔진에 주문 코드는 없다).
 
 ## 알고리즘
 

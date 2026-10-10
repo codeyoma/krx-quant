@@ -85,7 +85,7 @@ uv run krx-quant rollback granger      # 직전 모델로 되돌리기
 ```
 - 서버에서는 수집기가 매 거래일 21:30에 밤 학습을 돌리고, 다음 거래일 08:00에 이긴 모델로 바꾼다([docs/operations.md](docs/operations.md)).
 - 서버는 매일 06:00(KST)에 main의 새 커밋을 받아 스스로 다시 띄운다. 새 버전이 뜨지 않으면 이전 커밋으로 되돌리고 텔레그램으로 알린다(`deploy/auto-update.sh`).
-- 엔진 API는 `http://127.0.0.1:8080/v1/status`처럼 읽는다(`KRX_API_HOST`, `KRX_API_PORT`). 서버에서는 Tailscale 주소로만 열린다. 엔드포인트와 예측·채점 규칙은 [docs/engine-api.md](docs/engine-api.md)에 있다. 그날의 매크로 지표와 국면은 `/v1/macro`다.
+- 엔진 API는 `http://127.0.0.1:8080/v1/status`처럼 읽는다(`KRX_API_HOST`, `KRX_API_PORT`). 서버에서는 Tailscale 주소로만 열린다. 엔드포인트와 예측·채점 규칙은 [docs/engine-api.md](docs/engine-api.md)에 있다. 그날의 매크로 지표와 국면은 `/v1/macro`다. 예측, 합의, 채점, KIS 상태, 알고리즘 상태 변경은 WebSocket `/v1/stream`으로 바로 받는다.
 - 응답 형식은 JSON 스키마 [schemas/engine-api-v1.json](schemas/engine-api-v1.json)이 정한다. 화면과의 계약이다. 필드를 바꾸면 스키마도 고쳐야 계약 테스트(`tests/test_api_contract.py`)를 지난다.
 - 녹화된 하루를 같은 엔진으로 다시 돌려 별도 DB(`state/replay-<날짜>.sqlite3`)에 쓴다. KIS 키는 필요 없다.
 
@@ -186,7 +186,7 @@ uv run python -c "import glob, pyarrow.parquet as pq; d = sorted(glob.glob('data
 |---|---|---|
 | P0 | 저장소 준비, 설계 문서 | 완료 |
 | P1 | 수집기 | 거의 완료(#2–#6, #8, #30). 남은 것: 첫 거래일 확인(#7), ETF 장중 확인(#29), REST 대체 추가(#28) |
-| P2 | 예측·채점 핵심 | 진행 중. 완료: #9–#13, #15, #17, #18. 남은 것: Markov(#14), Turing(#16), 엔진 API 완성(#19: 스키마·계약 테스트·REST는 됐고, WebSocket 스트림과 신호 알림이 남았다) |
+| P2 | 예측·채점 핵심 | 진행 중. 완료: #9–#13, #15, #17–#19. 남은 것: Markov(#14), Turing(#16) |
 | P3 | Fincept 화면, 빌드 | 진행 중. 첫 화면과 개인 빌드(#20)는 됐다. 나머지(#21)가 남았다 |
 | P4 | 밤 학습 | 진행 중. 상시 서버의 밤 학습과 08:00 교체(PR #45), 녹화 이벤트로 학습하기(#22, PR #48)는 됐다. EC2 Spot과 비용 상한(#23)이 남았다 |
 | P5 | 호가 알고리즘, 재생 테스트 | 하루 재생(`replay`)만 있다. Kalman(#25), Shannon(#26), Poisson(#27), 사전 검증 도구(#24) |

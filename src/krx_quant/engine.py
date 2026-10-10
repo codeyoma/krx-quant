@@ -82,6 +82,7 @@ from krx_quant.market_view import (
 from krx_quant.predictions import NewPrediction, Pending, PredictionStore, Score
 from krx_quant.pricing import Direction, classify, flat_ticks, tick_size
 from krx_quant.reference import Bar
+from krx_quant.signals import Signals
 from krx_quant.special import KOSPI, SpecialSituations, Window, in_vi, touching
 from krx_quant.stats import DEFAULT_MIN_SAMPLE
 
@@ -89,6 +90,24 @@ log = logging.getLogger(__name__)
 
 Event = tuple[str, dict[str, Any]]  # (feed TR ID, normalized row)
 Notify = Callable[[str], Awaitable[bool]]  # send an alert; whether it went
+
+
+@dataclass(frozen=True)
+class Recorded:
+    """Predictions just stored: displayed now."""
+
+    bar_close: datetime
+    ids: Mapping[str, list[int]]  # by predictor
+
+
+@dataclass(frozen=True)
+class Scored:
+    """Outcomes just scored."""
+
+    ids: list[int]  # their predictions'
+
+
+Listener = Callable[[Recorded | Scored], None]  # told of each, as it happens (the stream)
 
 # Each day's algorithm review runs this long after the close, when everything is scored.
 REVIEW_AFTER_CLOSE = timedelta(minutes=10)
@@ -190,6 +209,7 @@ class PredictionEngine:
         notify: Notify | None = None,
         consensus_timing: Timing | None = None,
         leaders: Leaders | None = None,
+        signals: Signals | None = None,
     ) -> None:
         self.store = store
         self.calendar = calendar
@@ -217,6 +237,8 @@ class PredictionEngine:
         self.weights: Weights = store.latest_weights() or NO_WEIGHTS
         self.notify = notify  # where alerts go (Telegram, live)
         self.training: dict[str, Any] | None = None  # the last night's training, as the swap saw it
+        self.listeners: list[Listener] = []
+        self.signals = signals  # Telegram signal alerts, off without
         # Reviews pick up where the last one left off: one missed while down runs at start.
         self._reviewed_through = store.last_run("review") or self._last_tick
         self._enroll()
@@ -435,22 +457,26 @@ class PredictionEngine:
         finished: Mapping[str, Mapping[str, Forecast | None]],
     ) -> None:
         """The consensus of the members' forecasts finished so far; empty where there are none."""
-        pooled: dict[str, Forecast | None] = {}
+        pooled: dict[str, Forecast] = {}
         empty: dict[str, Forecast | None] = {}
+        pooled_from: dict[str, dict[str, Forecast]] = {}
         why = "none_finished" if members else "no_members"
         for symbol in at_close:
             present = {m: f for m in members if (f := finished.get(m, {}).get(symbol)) is not None}
             if present:
                 pooled[symbol] = pool(present, self.weights.of(symbol, bar_close, list(present)))
+                pooled_from[symbol] = present
             else:
                 empty[symbol] = None
         version = self.weights.version
-        made = [
+        made: list[tuple[str, str, Mapping[str, Forecast | None], str]] = [
             (name, version, forecasts, status)
             for forecasts, status in ((pooled, "ok"), (empty, why))
             if forecasts
         ]
         self._record(bar_close, at_close, made)
+        if name == FINAL and self.signals is not None:
+            self.signals.final(bar_close, bar_close + HORIZON, pooled, pooled_from)
 
     def _record_not_predicted(
         self, bar_close: datetime, symbols: Sequence[str], status: str, running: Sequence[Algorithm]
@@ -543,8 +569,10 @@ class PredictionEngine:
                         special=touching(special, symbol, bar_close, bar_close + HORIZON),
                     )
                 )
-        for pending in self.store.add_all(predictions):
+        added = self.store.add_all(predictions)
+        for pending in added.pending:
             heapq.heappush(self._pending, (pending.target_at, pending.prediction_id, pending))
+        self._tell(Recorded(bar_close, added.ids))
 
     def _score_until(self, due: datetime) -> None:
         scores: list[tuple[int, Score]] = []
@@ -554,6 +582,14 @@ class PredictionEngine:
             scores.append((pending.prediction_id, _score(pending, mid_target)))
         if scores:
             self.store.score_all(scores, self.clock.now())
+            self._tell(Scored([prediction_id for prediction_id, _ in scores]))
+
+    def _tell(self, change: Recorded | Scored) -> None:
+        for listener in self.listeners:
+            try:
+                listener(change)
+            except Exception:  # a listener never stops predicting
+                log.exception("engine listener failed")
 
 
 def _finished(

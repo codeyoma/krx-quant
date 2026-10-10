@@ -62,7 +62,7 @@ def store_scored(
                     special=special,
                 )
             ]
-        )
+        ).pending
         a = OUTCOMES[i]
         b = outcomes_b[i] if outcomes_b is not None else a
         target = 81_250 + {UP: 300, FLAT: 0, DOWN: -300}[a]

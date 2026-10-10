@@ -17,7 +17,9 @@ Endpoints (all under ``/v1``):
 - ``GET /algorithms/{name}/stats?symbol=&period=&basis=&special=``: one algorithm's
   stats, by symbol, 30-minute slot and model version, with its calibration curve;
 - ``GET /consensus``: the consensus members now and the weights last fitted;
-- ``GET /macro``: the latest day's market regime and macro readings (``macro.py``).
+- ``GET /macro``: the latest day's market regime and macro readings (``macro.py``);
+- ``GET /stream``: a WebSocket of predictions, consensus, outcomes, the KIS status and
+  status changes as they happen (``stream.py``).
 
 ``symbol`` is a symbol or ``all`` (default), ``period`` is ``today`` (default), ``5d`` or
 ``20d`` (the latest days with predictions), ``basis`` is ``b`` (default: from when it was
@@ -30,8 +32,9 @@ Times are ISO 8601 in KST. On the server, compose publishes it on the Tailscale 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from datetime import date, datetime
 from functools import partial
@@ -61,12 +64,12 @@ from krx_quant.stats import (
     scored_by_algorithm,
     split,
 )
+from krx_quant.stream import LiveStatus, Stream, prediction_json
 
 ENGINE_KEY = web.AppKey("engine", PredictionEngine)
 # live: the collector; demo: `krx-quant demo-engine`; replay: tests.
 Mode = Literal["live", "demo", "replay"]
 MODE_KEY = web.AppKey("mode", str)
-LiveStatus = Callable[[], dict[str, Any]]
 LIVE_STATUS_KEY: web.AppKey[LiveStatus] = web.AppKey("live_status")
 
 # Readable as is (curl, logs): indented, and Korean as UTF-8 rather than \u escapes.
@@ -95,6 +98,7 @@ def create_app(
     min_sample: int = DEFAULT_MIN_SAMPLE,
     data_dir: Path | None = None,
     shelf: Shelf | None = None,
+    stream_poll_seconds: float = 1.0,
 ) -> web.Application:
     """The Engine API of ``engine``. ``data_dir`` holds the macro readings and ``shelf`` the
     models installed on the server; without them there is no macro and no model history.
@@ -110,6 +114,22 @@ def create_app(
     app[DATA_DIR_KEY] = data_dir
     app[SHELF_KEY] = shelf
     app[MACRO_CACHE_KEY] = {}
+    stream = Stream(engine, live_status, stream_poll_seconds)
+
+    async def streaming(app: web.Application) -> AsyncIterator[None]:
+        engine.listeners.append(stream.changed)
+        polling = asyncio.create_task(stream.run())
+        yield
+        engine.listeners.remove(stream.changed)
+        polling.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await polling
+
+    async def closing(app: web.Application) -> None:
+        await stream.close()
+
+    app.cleanup_ctx.append(streaming)
+    app.on_shutdown.append(closing)
     if live_status is not None:
         app[LIVE_STATUS_KEY] = live_status
     app.router.add_get("/v1/status", _status)
@@ -123,6 +143,7 @@ def create_app(
     app.router.add_get("/v1/algorithms/{name}/stats", _algorithm_stats)
     app.router.add_get("/v1/consensus", _consensus)
     app.router.add_get("/v1/macro", _macro)
+    app.router.add_get("/v1/stream", stream.handle)
     return app
 
 
@@ -186,7 +207,7 @@ async def _latest(request: web.Request) -> web.Response:
         {
             "symbol": symbol,
             "bar_close": rows[0]["bar_close"] if rows else None,
-            "predictions": [_prediction(r) for r in rows],
+            "predictions": [prediction_json(r) for r in rows],
         }
     )
 
@@ -201,7 +222,7 @@ async def _predictions(request: web.Request) -> web.Response:
     if not 1 <= limit <= MAX_LIMIT:
         raise _error(web.HTTPBadRequest, f"limit must be 1 to {MAX_LIMIT}, got {raw!r}")
     rows = engine.store.recent(symbol, limit, request.query.get("algorithm"))
-    return _json({"symbol": symbol, "predictions": [_prediction(r) for r in rows]})
+    return _json({"symbol": symbol, "predictions": [prediction_json(r) for r in rows]})
 
 
 async def _bars(request: web.Request) -> web.Response:
@@ -531,32 +552,3 @@ def _json(body: dict[str, Any]) -> web.Response:
 
 def _error(kind: type[web.HTTPError], message: str) -> web.HTTPError:
     return kind(text=_dumps({"error": message}), content_type="application/json")
-
-
-def _prediction(row: dict[str, Any]) -> dict[str, Any]:
-    scored = row["scored_at"] is not None
-    return {
-        "algorithm": row["algorithm"],
-        "model_version": row["model_version"],
-        "bar_close": row["bar_close"],
-        "displayed_at": row["displayed_at"],
-        "target_at": row["target_at"],
-        "status": row["status"],
-        "p_up": row["p_up"],
-        "p_flat": row["p_flat"],
-        "p_down": row["p_down"],
-        "expected_ticks": row["expected_ticks"],
-        "outcome": None
-        if not scored
-        else {
-            "mid_close": row["mid_close"],
-            "mid_display": row["mid_display"],
-            "mid_target": row["mid_target"],
-            "flat_ticks": row["flat_ticks"],
-            "class_a": row["class_a"],
-            "class_b": row["class_b"],
-            "special": bool(row["special"]),
-            "unscorable": row["unscorable"],
-            "scored_at": row["scored_at"],
-        },
-    }

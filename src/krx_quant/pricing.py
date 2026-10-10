@@ -32,6 +32,14 @@ class Direction(enum.Enum):
     DOWN = "down"
 
 
+def most_likely(p_up: float, p_flat: float, p_down: float) -> Direction:
+    """The class a forecast predicts: the most likely; a tie goes to flat, then up."""
+    best = max(p_up, p_flat, p_down)
+    if p_flat == best:
+        return Direction.FLAT
+    return Direction.UP if p_up == best else Direction.DOWN
+
+
 def tick_size(price: float) -> int:
     """The tick of the band ``price`` falls in; a mid-point between ticks included."""
     return next(tick for low, tick in _TICK_BANDS if price >= low)

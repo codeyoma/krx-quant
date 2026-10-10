@@ -30,7 +30,7 @@ from datetime import datetime
 from statistics import NormalDist
 from typing import Any
 
-from krx_quant.pricing import SELL_TAX, Direction, tick_size
+from krx_quant.pricing import SELL_TAX, Direction, most_likely, tick_size
 
 _Z = NormalDist().inv_cdf(0.975)
 FDR = 0.05  # the false discovery rate a significant lift is held to
@@ -58,10 +58,7 @@ class Scored:
 
     @property
     def predicted(self) -> Direction:
-        best = max(self.p_up, self.p_flat, self.p_down)
-        if self.p_flat == best:
-            return Direction.FLAT
-        return Direction.UP if self.p_up == best else Direction.DOWN
+        return most_likely(self.p_up, self.p_flat, self.p_down)
 
     @property
     def correct(self) -> bool:

@@ -11,6 +11,7 @@ from pathlib import Path
 from dotenv import dotenv_values
 
 from krx_quant.regime import RegimeRules
+from krx_quant.signals import SignalRule
 from krx_quant.stats import DEFAULT_MIN_SAMPLE
 
 DEFAULT_REST_URL = "https://openapi.koreainvestment.com:9443"
@@ -25,6 +26,7 @@ DEFAULT_ECOS_URL = "https://ecos.bok.or.kr/api"
 DEFAULT_FRED_URL = "https://api.stlouisfed.org"
 DEFAULT_YAHOO_URL = "https://query1.finance.yahoo.com"
 RULES = RegimeRules()  # the regime's default thresholds
+SIGNALS = SignalRule()  # the signal alerts' defaults
 
 
 class SettingsError(ValueError):
@@ -125,6 +127,7 @@ class Settings:
     fred_url: str = DEFAULT_FRED_URL
     yahoo_url: str = DEFAULT_YAHOO_URL
     regime_rules: RegimeRules = RegimeRules()
+    signal_rule: SignalRule | None = None  # Telegram signal alerts; None: off
 
     @classmethod
     def from_env(
@@ -249,7 +252,24 @@ class Settings:
                 sox_move_pct=float(number("KRX_REGIME_SOX_MOVE_PERCENT", str(RULES.sox_move_pct), float)),
                 weak_won_pct=float(number("KRX_REGIME_WEAK_WON_PERCENT", str(RULES.weak_won_pct), float)),
             ),
+            signal_rule=SignalRule(
+                min_probability=float(
+                    number("KRX_SIGNAL_MIN_PROBABILITY", str(SIGNALS.min_probability), float, 0.5, 1)
+                ),
+                min_agree=int(number("KRX_SIGNAL_MIN_AGREE", str(SIGNALS.min_agree), int, 1)),
+            )
+            if _on_or_off("KRX_SIGNAL_ALERT", values.get("KRX_SIGNAL_ALERT", "off"))
+            else None,
         )
+
+
+def _on_or_off(name: str, raw: str) -> bool:
+    text = raw.strip().lower()
+    if text in ("on", "true", "1", "yes"):
+        return True
+    if text in ("", "off", "false", "0", "no"):
+        return False
+    raise SettingsError(f"{name} must be on or off, got {raw!r}")
 
 
 def _time_or_off(name: str, raw: str) -> time | None:

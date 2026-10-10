@@ -47,7 +47,8 @@
 | `market_calendar.py`, `backfill.py`, `archive.py`, `object_store.py` | 거래 일정, 1분봉 백필, 장 마감 업로드, Object Store(로컬·S3) |
 | `clock.py`, `reference.py`, `pricing.py`, `special.py` | 엔진 시계, 1분봉과 기준가(통합 중간가), 호가단위와 보합 범위, VI·서킷브레이커·사이드카 |
 | `engine.py`, `market_view.py`, `baselines.py`, `features.py`, `algorithms/`, `consensus.py` | 예측 엔진, 엔진과 학습이 같이 보는 1분봉·기준가, 기준 예측, 피처 저장소, 알고리즘 규약과 알고리즘, 합의 |
-| `predictions.py`, `stats.py`, `lifecycle.py`, `api.py` | SQLite 저장, 통계와 순위표, 알고리즘 상태, 엔진 API(형식은 `schemas/engine-api-v1.json`) |
+| `predictions.py`, `stats.py`, `lifecycle.py`, `api.py`, `stream.py` | SQLite 저장, 통계와 순위표, 알고리즘 상태, 엔진 API와 WebSocket 스트림(형식은 `schemas/engine-api-v1.json`) |
+| `signals.py` | 텔레그램 신호 알림(선택) |
 | `training.py`, `nightly.py`, `model_shelf.py`, `swap.py` | 학습 샘플, 밤 학습, 서버의 모델 이력, 08:00 교체와 모델 감시 |
 | `macro.py`, `regime.py` | 매크로 지표 수집(07:30), 일일 국면 |
 | `replay.py`, `demo.py`, `fake_kis.py`, `notify.py`, `cli.py` | 재생, 화면 개발용 데모 엔진, 가짜 KIS, 텔레그램 알림, 명령 |
@@ -339,7 +340,7 @@ v1에서는 쓰지 않는다. 조사 결과는 [paid-data.md](paid-data.md)에 �
   - $100에 도달하면 그달 남은 기간은 Spot 학습을 멈춘다. 실시간 예측은 계속한다(계획, #23).
   - 예상 비용: 서버 $12, S3 $1 미만, Spot 학습 $3–15(미확인).
   - 지금은 AWS 프로젝트 지출 한도($100)가 걸려 있다. 한도에 닿으면 프로젝트 전체가 일시정지되어 상시 서버도 멈추므로, 위의 "실시간 예측은 계속한다"와 맞지 않는다. Budgets 기반 상한으로 바꿀지는 #23에서 정한다.
-- **장애 알림.** 텔레그램 봇으로 보낸다. 대상은 KIS 연결 끊김, 데이터 지연, 장 마감 업로드 실패, 엔진 API 실패, 밤 학습 실패다. 밤 학습 요약, 모델 교체, 은퇴 후보, 서버 자동 업데이트 결과도 보낸다. 전체 목록은 [operations.md](operations.md#6-장애-대응)에 있다. 비용 경고(AWS Budgets)는 아직 없다(#23).
+- **장애 알림.** 텔레그램 봇으로 보낸다. 대상은 KIS 연결 끊김, 데이터 지연, 장 마감 업로드 실패, 엔진 API 실패, 밤 학습 실패다. 밤 학습 요약, 모델 교체, 은퇴 후보, 서버 자동 업데이트 결과도 보낸다. 예측 신호(`[신호]`, 최종 합의가 충분히 확실하고 정식 알고리즘 N개 이상이 같은 방향일 때)는 선택이고 기본은 끈다(#19, `KRX_SIGNAL_ALERT`). 전체 목록은 [operations.md](operations.md#6-장애-대응)에 있다. 비용 경고(AWS Budgets)는 아직 없다(#23).
 
 ## 10. Fincept 화면
 
@@ -365,7 +366,7 @@ v1에서는 쓰지 않는다. 조사 결과는 [paid-data.md](paid-data.md)에 �
 |---|---|---|
 | P0 | 저장소 준비: fork clone, `custom` 브랜치, upstream 동기화, `krx-quant` 생성, 설계 문서 | 완료 (2026-10-08) |
 | P1 | 수집기: Lightsail·Docker, KIS WebSocket/REST, Parquet·S3, 1분봉 1년 백필, 휴장일, 매크로, 텔레그램 장애 알림 | **최우선.** 호가는 녹화를 늦게 시작한 만큼 영구히 잃는다. 구현했다(#2–#6, #8, #30). 남은 것: 첫 거래일 확인(#7), ETF 장중 확인(#29), REST 대체 추가(#28) |
-| P2 | 예측·채점 핵심: 피처 저장소, 모듈 규약·개성 검사, 1분봉 알고리즘 5개(Newton, Gauss, Markov, Granger, Turing 1분봉 버전), Condorcet, 채점 2종, 통계, 엔진 API | 진행 중. 구현: 예측·채점(#9), 규약과 Newton(#10), 통계(#11), 특수 상황(#12), Gauss(#13), Granger(#15), 상태 관리(#17), Condorcet(#18). 엔진 API 계약(JSON 스키마 `schemas/engine-api-v1.json`, 계약 테스트), CPU 예산·매크로·알고리즘 상세 응답(#19 PR1). 남은 것: Markov(#14), Turing(#16), WebSocket 스트림과 텔레그램 신호 알림(#19 PR2) |
+| P2 | 예측·채점 핵심: 피처 저장소, 모듈 규약·개성 검사, 1분봉 알고리즘 5개(Newton, Gauss, Markov, Granger, Turing 1분봉 버전), Condorcet, 채점 2종, 통계, 엔진 API | 진행 중. 구현: 예측·채점(#9), 규약과 Newton(#10), 통계(#11), 특수 상황(#12), Gauss(#13), Granger(#15), 상태 관리(#17), Condorcet(#18). 엔진 API 계약(JSON 스키마 `schemas/engine-api-v1.json`, 계약 테스트), CPU 예산·매크로·알고리즘 상세 응답, WebSocket 스트림, 텔레그램 신호 알림(#19). 남은 것: Markov(#14), Turing(#16) |
 | P3 | Fincept 화면, GitHub Actions 빌드(DMG, setup.exe), 자동 업데이트 끄기 | 진행 중. 첫 화면과 개인 빌드(#20, 첫 태그 `custom-v4.5.0-krx.1`)는 됐다. 나머지 화면(#21)이 남았다 |
 | P4 | 밤 학습: champion/challenger(#22), EC2 Spot과 비용 상한 장치(#23) | 진행 중. 밤 학습 1차(백필 1분봉, 상시 서버 21:30)는 PR #45, 녹화 이벤트로 학습하는 2차는 PR #48로 들어갔다(#22). EC2와 비용 상한은 #23 |
 | P5 | 호가 알고리즘(Kalman, Shannon, Poisson), 재생 테스트 도구 | 호가 녹화 10거래일 이후. 하루 재생(`krx-quant replay`, #9)은 있다. 남은 것: Kalman(#25), Shannon(#26), Poisson(#27), 사전 검증 도구(#24) |
