@@ -128,7 +128,7 @@
 
 | 필드 | 설명 |
 |---|---|
-| `mode` | 지금은 늘 `live`다. API를 여는 것은 수집기(`collect`)뿐이다. `krx-quant replay`는 API를 열지 않아서, `replay`는 테스트에서만 나온다 |
+| `mode` | 수집기(`collect`)는 `live`다. 데모 엔진(`krx-quant demo-engine`, 화면 개발용 가상 데이터)은 `demo`다. `krx-quant replay`는 API를 열지 않아서, `replay`는 테스트에서만 나온다 |
 | `now` | 엔진 시계 |
 | `phase` | 장 단계: `closed`, `pre_open`, `opening_auction`, `continuous`, `closing_auction`, `after_close` |
 | `session` | 오늘 장의 `open`(연속매매 시작), `close`(종가 동시호가 끝). 휴장일은 `null` |

@@ -12,11 +12,14 @@ from collections.abc import Callable
 from datetime import date, datetime
 from pathlib import Path
 
+from aiohttp import web
+
 from krx_quant.algorithms import ALGORITHMS
 from krx_quant.archive import run_archive
 from krx_quant.backfill import run_backfill
 from krx_quant.collector import measure_subscription_limit, run_collector
 from krx_quant.config import Settings, SettingsError
+from krx_quant.demo import demo_app
 from krx_quant.fake_kis import FakeKis
 from krx_quant.feeds.base import KST
 from krx_quant.kis import KisError
@@ -191,6 +194,18 @@ async def _fake_kis(port: int, host: str, trades: bool) -> None:
         await fake.stop()
 
 
+async def _demo_engine(port: int, host: str, db: Path) -> None:
+    db.parent.mkdir(parents=True, exist_ok=True)
+    runner = web.AppRunner(await demo_app(db))
+    await runner.setup()
+    await web.TCPSite(runner, host, port).start()
+    print(f"demo Engine API: http://{host}:{port}/v1/status (2026-10-12 10:30, made-up data)", flush=True)
+    try:
+        await asyncio.Event().wait()
+    finally:
+        await runner.cleanup()
+
+
 def _positive(text: str) -> int:
     value = int(text)
     if value < 1:
@@ -252,6 +267,12 @@ def main(argv: list[str] | None = None) -> int:
     fake.add_argument("--port", type=int, default=18080)
     fake.add_argument("--host", default="127.0.0.1", help="address to listen on (0.0.0.0 inside Docker)")
     fake.add_argument("--trades", action="store_true", help="push a synthetic trade per stock every second")
+    demo = sub.add_parser(
+        "demo-engine", help="serve the Engine API on a made-up morning, to build screens without the server"
+    )
+    demo.add_argument("--port", type=int, default=8090)
+    demo.add_argument("--host", default="127.0.0.1", help="address to listen on (0.0.0.0: all)")
+    demo.add_argument("--db", type=Path, default=Path("state/demo.sqlite3"), help="demo database (replaced)")
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -282,6 +303,8 @@ def main(argv: list[str] | None = None) -> int:
             return asyncio.run(_test_alert())
         elif args.command == "fake-kis":
             asyncio.run(_fake_kis(args.port, args.host, args.trades))
+        elif args.command == "demo-engine":
+            asyncio.run(_demo_engine(args.port, args.host, args.db))
     except SettingsError as e:
         print(f"configuration error: {e}", file=sys.stderr)
         return 2
