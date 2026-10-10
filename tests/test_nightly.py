@@ -263,6 +263,35 @@ def test_cached_days_no_night_needs_any_more_are_removed(store_root: Path, tmp_p
     assert cached == [f"date={d}" for d in DAYS[-7:]], "the four training and three validation days"
 
 
+def test_a_day_with_one_symbols_bars_and_anothers_trades_is_not_trained_on(tmp_path: Path) -> None:
+    # 000660's backfill failed on one day, which has only its recording; 005930 the opposite.
+    root, symbols = tmp_path / "store", ("005930", "000660")
+    mixed = DAYS[-4]
+    for day in DAYS:
+        archive_bars(root, day)
+        if day != mixed:
+            archive_bars(root, day, symbol="000660")
+    archive_events(root, mixed, [trade(at("09:00:01", mixed), 200_000, symbol="000660")], tmp_path)
+
+    def train(day: date | None = None) -> Any:
+        return train_night(
+            LocalObjectStore(root),
+            tmp_path / "cache",
+            symbols=symbols,
+            fee_rate=FEE,
+            algorithms=[FrequencyAlgorithm("learner", "velocity")],
+            now=lambda: FINISHED,
+            day=day,
+        )
+
+    with pytest.raises(FileNotFoundError, match="bars missing: 000660; trades missing: 005930"):
+        train(mixed)
+    train()
+    report = read(root, f"reports/{NIGHT}/learner.json")
+    assert str(mixed) not in report["training_days"]
+    assert report["training_days"] == [str(d) for d in DAYS[:4]]
+
+
 def leading_index_day(day: date) -> list[Event]:
     """A morning where the stock follows the electrical and electronics index: the index
     jumps half-way through each minute, and the stock the same way twenty seconds into the

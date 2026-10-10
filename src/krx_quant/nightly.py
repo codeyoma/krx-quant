@@ -127,18 +127,26 @@ def train_night(
     store the promotion list. A night already finished is returned as it was.
     """
     leaders = leaders or Leaders()
-    days_of = _days_with_data(store, symbols)
-    days = sorted(set().union(*days_of.values()))
+    bars, trades = (
+        _archived(store, MINUTE_BARS_TR, "bars", symbols),
+        _archived(store, TRADE.tr_id, "events", symbols),
+    )
+    seen = sorted(set().union(*bars.values(), *trades.values()))
     if day is not None:
-        days = [d for d in days if d <= day]
-    if not days or (day is not None and days[-1] != day):
+        seen = [d for d in seen if d <= day]
+    if not seen or (day is not None and seen[-1] != day):
         raise FileNotFoundError(
             f"no archived bars or recorded trades of {', '.join(symbols)} for {day or 'any day'}"
         )
-    night = days[-1]
-    missing = [s for s in symbols if night not in days_of[s]]
-    if missing:
-        raise FileNotFoundError(f"bars or trades of {', '.join(missing)} for {night} are not archived yet")
+    night = seen[-1]
+    if not (_every(bars, night) or _every(trades, night)):
+        raise FileNotFoundError(
+            f"for {night} neither every symbol's bars nor every symbol's trades are archived yet"
+            f" (bars missing: {', '.join(s for s in symbols if night not in bars[s])};"
+            f" trades missing: {', '.join(s for s in symbols if night not in trades[s])})"
+        )
+    # A day trains on its recording or its backfill, each of every symbol: never a mix.
+    days = [d for d in seen if _every(bars, d) or _every(trades, d)]
     finished = get_json(store, promotions_key(night))
     if finished is not None:
         log.info("the night of %s is already trained", night)
@@ -339,18 +347,24 @@ def _engine_events(keys: Iterable[str], symbols: Sequence[str], leaders: Leaders
     return wanted
 
 
-def _days_with_data(store: ObjectStore, symbols: Sequence[str]) -> dict[str, set[date]]:
-    """The days the store has backfilled bars or recorded trades of each of ``symbols`` for."""
+def _archived(store: ObjectStore, feed: str, layer: str, symbols: Sequence[str]) -> dict[str, set[date]]:
+    """The days the store has ``feed`` of each of ``symbols`` for, in ``layer`` (backfilled
+    ``bars``, or recorded ``events``).
+    """
     days: dict[str, set[date]] = {s: set() for s in symbols}
-    for layer, feed in (("bars", MINUTE_BARS_TR), ("events", TRADE.tr_id)):
-        for key in store.keys(f"{layer}/"):
-            parts = key.split("/")  # layer, date=…, feed=…, symbol=…, file
-            if len(parts) != 5 or parts[2] != f"feed={feed}":
-                continue
-            symbol = parts[3].removeprefix("symbol=")
-            if symbol in days:
-                days[symbol].add(date.fromisoformat(parts[1].removeprefix("date=")))
+    for key in store.keys(f"{layer}/"):
+        parts = key.split("/")  # layer, date=…, feed=…, symbol=…, file
+        if len(parts) != 5 or parts[2] != f"feed={feed}":
+            continue
+        symbol = parts[3].removeprefix("symbol=")
+        if symbol in days:
+            days[symbol].add(date.fromisoformat(parts[1].removeprefix("date=")))
     return days
+
+
+def _every(days_of: dict[str, set[date]], day: date) -> bool:
+    """Whether every symbol has ``day``."""
+    return all(day in days for days in days_of.values())
 
 
 def _mean_loss(algorithm: Algorithm, model: Model, samples: Sequence[Sample]) -> float:

@@ -77,14 +77,15 @@ def training_day(
     leaders: Leaders,
 ) -> TrainingDay | None:
     """``day``'s samples: from its recorded events if every symbol's trades were recorded,
-    else from its backfilled bars; None if it has neither.
+    else from its backfilled bars if every symbol has them; None otherwise. A day never
+    trains on some symbols only.
     """
     if is_recorded(data_dir, day, symbols):
         events = recorded_events(data_dir, day, symbols, leaders)
         made = recorded_samples(events, calendar, day, symbols, names, fee_rate, leaders)
         return TrainingDay("mid", made)
     bar_days = bar_days_on(data_dir, symbols, [day])
-    if not bar_days:
+    if len(bar_days) < len(symbols):
         return None
     leader_days = load_leader_days(data_dir, leaders, [day]) if LEAD_FEATURES & set(names) else {}
     made = samples(bar_days, calendar, names, fee_rate, leader_days=leader_days, leaders=leaders)
@@ -98,8 +99,8 @@ def is_recorded(data_dir: Path, day: date, symbols: Sequence[str]) -> bool:
 
 
 def days_with_data(data_dir: Path, symbols: Sequence[str]) -> list[date]:
-    """The days with backfilled bars of any of ``symbols`` or recorded trades of all of them,
-    oldest first.
+    """The days with backfilled bars or recorded trades of every one of ``symbols``, oldest
+    first.
     """
     found: set[date] = set()
     for folder in [*(data_dir / "bars").glob("date=*"), *(data_dir / "events").glob("date=*")]:
@@ -107,7 +108,7 @@ def days_with_data(data_dir: Path, symbols: Sequence[str]) -> list[date]:
             day = date.fromisoformat(folder.name.removeprefix("date="))
         except ValueError:
             continue  # not a day's folder
-        backfilled = any((data_dir / bars_key(day, MINUTE_BARS_TR, s)).exists() for s in symbols)
+        backfilled = all((data_dir / bars_key(day, MINUTE_BARS_TR, s)).exists() for s in symbols)
         if backfilled or is_recorded(data_dir, day, symbols):
             found.add(day)
     return sorted(found)
