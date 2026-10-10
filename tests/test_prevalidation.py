@@ -350,3 +350,16 @@ def test_the_command_reports_and_never_touches_the_live_engine_s_record(
     assert live.read_bytes() == before, "the live engine's database is never written"
     assert (s.state_dir / "prevalidation-newton.sqlite3").exists()
     assert report(s, "newton")["days"] == ["2026-09-15"]
+
+
+def test_the_command_reports_a_registry_that_fails_the_registration_check_as_an_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    async def refused(*args: Any, **kwargs: Any) -> None:
+        raise RegistrationError("twin: the same features as contrarian")
+
+    monkeypatch.setattr("krx_quant.cli.prevalidate", refused)
+    monkeypatch.setenv("KRX_STATE_DIR", str(tmp_path / "state"))
+
+    assert main(["prevalidate", "twin"]) == 1
+    assert "twin: the same features as contrarian" in capsys.readouterr().err

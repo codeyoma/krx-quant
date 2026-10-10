@@ -14,7 +14,7 @@ from pathlib import Path
 
 from aiohttp import web
 
-from krx_quant.algorithms import ALGORITHMS
+from krx_quant.algorithms import ALGORITHMS, RegistrationError
 from krx_quant.archive import run_archive
 from krx_quant.backfill import run_backfill
 from krx_quant.collector import measure_subscription_limit, run_collector
@@ -120,7 +120,11 @@ def _prevalidate(name: str, days: int) -> int:
     settings = Settings.from_env(require_kis=False)
     try:
         result = asyncio.run(prevalidate(settings, name, days=days))
-    except (FileNotFoundError, ValueError) as e:
+    except (
+        FileNotFoundError,
+        RegistrationError,
+        ValueError,
+    ) as e:  # RegistrationError: named, though a ValueError
         print(e, file=sys.stderr)
         return 1
     span = f"{result.days[0]}..{result.days[-1]}"
