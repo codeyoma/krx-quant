@@ -308,6 +308,13 @@ v1에서는 쓰지 않는다. 조사 결과는 [paid-data.md](paid-data.md)에 �
   - 엔진 상태: KIS 연결, 데이터 지연, 어젯밤 학습 결과(교체 여부)
 - **신호 알림.** Condorcet 확률이 기준값 이상이고 N개 이상의 알고리즘이 같은 방향이면 데스크톱 알림과 소리를 낸다. 기준값과 N은 화면에서 조정한다. 텔레그램 신호 알림은 옵션이다.
 - **언어.** 한국어. 알고리즘 이름은 영어로 쓴다.
+- **지금 있는 것 (#20).** 첫 화면 **KRX 4분 예측**이다. Navigate → Trading & Portfolio에서 연다. 명령 팔레트에서 "krx"로 찾아도 된다.
+  - 위쪽: 엔진 상태(장 단계, 마지막 봉 마감, 채점 대기, KIS 연결, 지난밤 학습)와 오늘의 특수 상황.
+  - 표: 종목마다 기준가와 최신 봉 마감의 예측. 합의(최종·빠른), 알고리즘, 기준 예측 순이다. 열은 방향, 상승·보합·하락 확률, 기대 틱, 모델 버전이다. 상승과 하락이 같은 정수 %로 보이면 방향은 비운다.
+  - 화면이 보이는 동안 5초마다 엔진 API(`/v1/status`, `/v1/symbols`, `/v1/symbols/<종목>/latest`)를 읽는다. 실패하면 이유를 보여주고 지난 예측은 지운다.
+  - 엔진 주소는 화면 위 칸에 넣는다. 서버는 `http://krx-quant:8080`(Tailscale), 데모 엔진은 `http://127.0.0.1:8090`이다. 공개 fork에는 주소를 넣지 않아서 처음에는 비어 있다.
+  - 차트, 순위표, 매크로 줄, 신호 알림은 #21에서 만든다.
+- **개인 빌드.** fork의 `custom` 브랜치에 `custom-v*` 태그를 push하면 `custom-release` workflow가 맥 DMG(arm64, 임시 서명)와 윈도우 `setup.exe`(서명 없음)를 fork의 Release(prerelease)에 올린다. 앱 내 자동 업데이트는 꺼져 있다(`FINCEPT_DISABLE_AUTO_UPDATE`). 자세한 것은 `fincept/custom/README.md`에 있다.
 
 ## 11. 개발 단계
 
@@ -316,7 +323,7 @@ v1에서는 쓰지 않는다. 조사 결과는 [paid-data.md](paid-data.md)에 �
 | P0 | 저장소 준비: fork clone, `custom` 브랜치, upstream 동기화, `krx-quant` 생성, 설계 문서 | 완료 (2026-10-08) |
 | P1 | 수집기: Lightsail·Docker, KIS WebSocket/REST, Parquet·S3, 1분봉 1년 백필, 휴장일, 매크로, 텔레그램 장애 알림 | **최우선.** 호가는 녹화를 늦게 시작한 만큼 영구히 잃는다. 매크로(#8)를 빼고 구현했다(#2–#6, #30). 남은 것: 첫 거래일 확인(#7), ETF 장중 확인(#29), REST 대체 추가(#28), 매크로(#8) |
 | P2 | 예측·채점 핵심: 피처 저장소, 모듈 규약·개성 검사, 1분봉 알고리즘 5개(Newton, Gauss, Markov, Granger, Turing 1분봉 버전), Condorcet, 채점 2종, 통계, 엔진 API | 진행 중. 구현: 예측·채점(#9), 규약과 Newton(#10), 통계(#11), 특수 상황(#12), Gauss(#13), Granger(#15), 상태 관리(#17), Condorcet(#18). 남은 것: Markov(#14), Turing(#16), 엔진 API 완성과 WebSocket 스트림(#19) |
-| P3 | Fincept 화면, GitHub Actions 빌드(DMG, setup.exe), 자동 업데이트 끄기 | 시작 전(#20, #21) |
+| P3 | Fincept 화면, GitHub Actions 빌드(DMG, setup.exe), 자동 업데이트 끄기 | 진행 중: 첫 화면과 빌드(#20), 나머지 화면(#21) |
 | P4 | 밤 학습: champion/challenger(#22), EC2 Spot과 비용 상한 장치(#23) | 진행 중. 밤 학습 1차(백필 1분봉, 상시 서버 21:30)는 PR #45로 들어갔다. 녹화 이벤트로 학습하는 2차가 남았다(#22). EC2와 비용 상한은 #23 |
 | P5 | 호가 알고리즘(Kalman, Shannon, Poisson), 재생 테스트 도구 | 호가 녹화 10거래일 이후. 하루 재생(`krx-quant replay`, #9)은 있다. 남은 것: Kalman(#25), Shannon(#26), Poisson(#27), 사전 검증 도구(#24) |
 
