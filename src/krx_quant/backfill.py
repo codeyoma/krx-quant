@@ -2,9 +2,14 @@
 
 Order book and tick history cannot be queried anywhere, so only the collector's own
 recording has them and their gaps stay unfillable. One-minute bars can be queried for
-about a year back (``FHKST03010230``, at most 120 bars per query), so the Backfiller keeps
-the ``bars`` layer complete: its first run fills a year for each symbol, and later runs
-fill whichever trading days are still missing (outages, new symbols).
+about a year back, so the Backfiller keeps the ``bars`` layer complete: its first run fills
+a year for each series, and later runs fill whichever trading days are still missing
+(outages, new symbols). The series:
+
+- each stock and KRX-listed ETF (``FHKST03010230``, at most 120 bars per query);
+- KOSPI200 futures and USD futures, each one continuous series of every day's nearest
+  month (``FHKIF03020200``, at most 102 bars per query; ``contracts``). Each bar keeps
+  the contract it came from.
 
 A day is fetched only once all its sessions are over, always whole, and written as one
 file that replaces any earlier one. So a day's bars are either complete or absent, and
@@ -16,9 +21,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
+from functools import partial
 from pathlib import Path
+from typing import ClassVar
 
 import aiohttp
 import pyarrow as pa
@@ -26,7 +34,8 @@ import pyarrow.parquet as pq
 
 from krx_quant.auth import tokens_and_client
 from krx_quant.config import Settings
-from krx_quant.feeds.base import EVENT_TIME, KST, Row, kst, kst_day, to_int
+from krx_quant.contracts import KOSPI200, USD, Product, front_month
+from krx_quant.feeds.base import EVENT_TIME, KST, Row, kst, kst_day, to_float, to_int
 from krx_quant.kis import KisError, RestClient
 from krx_quant.market_calendar import CalendarStore, MarketCalendar, calendar_store
 from krx_quant.ratelimit import RateLimiter
@@ -36,6 +45,9 @@ log = logging.getLogger(__name__)
 MINUTE_BARS_TR = "FHKST03010230"
 MINUTE_BARS_PATH = "/uapi/domestic-stock/v1/quotations/inquire-time-dailychartprice"
 BARS_PER_QUERY = 120
+FUTURES_BARS_TR = "FHKIF03020200"
+FUTURES_BARS_PATH = "/uapi/domestic-futureoption/v1/quotations/inquire-time-fuopchartprice"
+FUTURES_BARS_PER_QUERY = 102
 # KIS market code -> venue recorded, in the order tried. Integrated KRX + NXT bars
 # (08:00–20:00) first, like the real-time feeds; KIS has none for what NXT does not trade
 # (ETFs), which take KRX bars instead.
@@ -61,10 +73,95 @@ BAR_SCHEMA = pa.schema(
     ]
 )
 
+FUTURES_BAR_SCHEMA = pa.schema(
+    [
+        ("symbol", pa.string()),  # the continuous series, e.g. KOSPI200F
+        ("bar_time", EVENT_TIME),
+        ("contract", pa.string()),  # the month the bar came from, e.g. A01612
+        ("open", pa.float64()),
+        ("high", pa.float64()),
+        ("low", pa.float64()),
+        ("close", pa.float64()),
+        ("volume", pa.int64()),
+        ("cum_value", pa.int64()),
+    ]
+)
 
-def bars_symbols(settings: Settings) -> tuple[str, ...]:
-    """Stocks and the KRX-listed ETFs: both have KIS minute bars."""
-    return settings.symbols + tuple(s for s in settings.etf_symbols if s not in settings.symbols)
+
+@dataclass(frozen=True)
+class Query:
+    """One way to ask KIS for a day of a series' bars, walked back from the day's end."""
+
+    tr_id: str
+    path: str
+    params: Mapping[str, str]  # all but the day and the hour
+    per_page: int  # the most bars KIS answers at once
+    bar: Callable[[date, dict[str, str]], Row]  # a KIS row as the bar stored
+
+
+@dataclass(frozen=True)
+class StockBars:
+    """A stock's or ETF's bars: integrated (KRX + NXT) where KIS has them, else KRX."""
+
+    symbol: str
+    feed: ClassVar[str] = MINUTE_BARS_TR
+    schema: ClassVar[pa.Schema] = BAR_SCHEMA
+
+    @property
+    def name(self) -> str:
+        return self.symbol
+
+    def queries(self, day: date, calendar: MarketCalendar) -> list[Query]:
+        """One per market, in the order tried."""
+        return [
+            Query(
+                MINUTE_BARS_TR,
+                MINUTE_BARS_PATH,
+                {
+                    "FID_COND_MRKT_DIV_CODE": market,
+                    "FID_INPUT_ISCD": self.symbol,
+                    "FID_PW_DATA_INCU_YN": "N",  # that day only
+                    "FID_FAKE_TICK_INCU_YN": "",
+                },
+                BARS_PER_QUERY,
+                partial(_bar, self.symbol, venue),
+            )
+            for market, venue in MARKETS.items()
+        ]
+
+
+@dataclass(frozen=True)
+class FuturesBars:
+    """A futures product's continuous bars: each day's from that day's nearest month."""
+
+    product: Product
+    feed: ClassVar[str] = FUTURES_BARS_TR
+    schema: ClassVar[pa.Schema] = FUTURES_BAR_SCHEMA
+
+    @property
+    def name(self) -> str:
+        return self.product.series
+
+    def queries(self, day: date, calendar: MarketCalendar) -> list[Query]:
+        contract = front_month(self.product, day, calendar)
+        params = {
+            "FID_COND_MRKT_DIV_CODE": self.product.market,
+            "FID_INPUT_ISCD": contract,
+            "FID_HOUR_CLS_CODE": "60",  # one-minute bars
+            "FID_PW_DATA_INCU_YN": "N",  # that day only
+            "FID_FAKE_TICK_INCU_YN": "N",
+        }
+        bar = partial(_futures_bar, self.name, contract)
+        return [Query(FUTURES_BARS_TR, FUTURES_BARS_PATH, params, FUTURES_BARS_PER_QUERY, bar)]
+
+
+Series = StockBars | FuturesBars
+
+
+def bars_series(settings: Settings) -> list[Series]:
+    """Stocks and the KRX-listed ETFs, then KOSPI200 and USD futures."""
+    symbols = settings.symbols + tuple(s for s in settings.etf_symbols if s not in settings.symbols)
+    return [*(StockBars(s) for s in symbols), FuturesBars(KOSPI200), FuturesBars(USD)]
 
 
 class Backfiller:
@@ -73,14 +170,14 @@ class Backfiller:
         client: RestClient,
         calendar: MarketCalendar,
         data_dir: Path,
-        symbols: Sequence[str],
+        series: Sequence[Series],
         history_days: int,
         max_per_second: float,
     ) -> None:
         self._client = client
         self._calendar = calendar
         self._data_dir = data_dir
-        self._symbols = tuple(symbols)
+        self._series = tuple(series)
         self._history = timedelta(days=history_days)
         # Evenly spaced under the shared REST limit: KIS refuses bursts (docs/kis-feeds.md),
         # and the polls need room.
@@ -88,7 +185,7 @@ class Backfiller:
 
     async def run(self, now: datetime) -> int:
         """Fill every finished trading day of the window that has no bars yet, newest first;
-        return how many symbol-days were filled.
+        return how many series-days were filled.
 
         A day that fails is logged and left for the next run. After a few failures in a
         row the run stops, so an unreachable KIS is not queried for a whole year of days.
@@ -97,17 +194,17 @@ class Backfiller:
         today = local.date()
         last = today if local.time() >= BARS_FINAL_AT else today - timedelta(days=1)
         days = self._calendar.trading_days(today - self._history, last)
-        todo = [(s, d) for d in reversed(days) for s in self._symbols if not self._path(s, d).exists()]
+        todo = [(s, d) for d in reversed(days) for s in self._series if not self._path(s, d).exists()]
         if not todo:
             return 0
-        log.info("backfilling one-minute bars for %d symbol-days", len(todo))
+        log.info("backfilling one-minute bars for %d series-days", len(todo))
         filled = failures = 0
-        for symbol, day in todo:
+        for series, day in todo:
             try:
-                found = await self.fill(symbol, day)
+                found = await self.fill(series, day)
             except (KisError, aiohttp.ClientError, OSError, ValueError, KeyError, TimeoutError) as e:
                 failures += 1
-                log.warning("one-minute bars for %s on %s not filled: %s", symbol, day, e)
+                log.warning("one-minute bars for %s on %s not filled: %s", series.name, day, e)
                 if failures >= _MAX_FAILURES:
                     log.error("backfill stopped after %d failures in a row; the next run retries", failures)
                     break
@@ -116,55 +213,48 @@ class Backfiller:
             if found:
                 filled += 1
             else:
-                log.info("no one-minute bars for %s on %s yet; the next run asks again", symbol, day)
-        log.info("backfilled %d of %d symbol-days", filled, len(todo))
+                log.info("no one-minute bars for %s on %s yet; the next run asks again", series.name, day)
+        log.info("backfilled %d of %d series-days", filled, len(todo))
         return filled
 
-    async def fill(self, symbol: str, day: date) -> bool:
-        """Fetch ``day``'s bars for ``symbol`` and replace whatever is stored.
+    async def fill(self, series: Series, day: date) -> bool:
+        """Fetch ``day``'s bars of ``series`` and replace whatever is stored.
 
         Return False, storing nothing, when KIS has no bars for the day.
         """
-        bars = await self._fetch(symbol, day)
+        bars = await self._fetch(series, day)
         if not bars:
             return False
-        path = self._path(symbol, day)
+        path = self._path(series, day)
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_name(f".{path.name}.tmp")
-        pq.write_table(pa.Table.from_pylist(bars, schema=BAR_SCHEMA), tmp)
+        pq.write_table(pa.Table.from_pylist(bars, schema=series.schema), tmp)
         tmp.rename(path)
         return True
 
-    async def _fetch(self, symbol: str, day: date) -> list[Row]:
-        """The day's bars, oldest first, from the first market that has any."""
-        for market in MARKETS:
-            bars = await self._fetch_market(symbol, day, market)
+    async def _fetch(self, series: Series, day: date) -> list[Row]:
+        """The day's bars, oldest first, from the first query that has any."""
+        for query in series.queries(day, self._calendar):
+            bars = await self._walk(query, day)
             if bars:
                 return bars
         return []
 
-    async def _fetch_market(self, symbol: str, day: date, market: str) -> list[Row]:
-        """Queries walk back from the day's end, 120 bars at a time."""
+    async def _walk(self, query: Query, day: date) -> list[Row]:
+        """Queries walk back from the day's end, a page of bars at a time."""
         bars: dict[datetime, Row] = {}
         ymd = day.strftime("%Y%m%d")
         hour = _DAY_END
         while True:
-            params = {
-                "FID_COND_MRKT_DIV_CODE": market,
-                "FID_INPUT_ISCD": symbol,
-                "FID_INPUT_HOUR_1": hour,
-                "FID_INPUT_DATE_1": ymd,
-                "FID_PW_DATA_INCU_YN": "N",  # that day only
-                "FID_FAKE_TICK_INCU_YN": "",
-            }
+            params = {**query.params, "FID_INPUT_DATE_1": ymd, "FID_INPUT_HOUR_1": hour}
             await self._pace.acquire()
-            body = await self._client.get(MINUTE_BARS_TR, MINUTE_BARS_PATH, params)
+            body = await self._client.get(query.tr_id, query.path, params)
             page = body.get("output2") or []
             # KIS pads an empty answer with blank rows; keep this day's bars only.
-            rows = [_bar(symbol, day, MARKETS[market], r) for r in page if r.get("stck_bsop_date") == ymd]
+            rows = [query.bar(day, r) for r in page if r.get("stck_bsop_date") == ymd]
             new = [r for r in rows if r["bar_time"] not in bars]
             bars.update((r["bar_time"], r) for r in new)
-            if len(page) < BARS_PER_QUERY or not new:
+            if len(page) < query.per_page or not new:
                 break
             earliest = min(r["bar_time"] for r in new)
             if earliest.time() == time(0, 0):
@@ -172,18 +262,18 @@ class Backfiller:
             hour = (earliest - timedelta(minutes=1)).strftime("%H%M%S")
         return [bars[t] for t in sorted(bars)]
 
-    def _path(self, symbol: str, day: date) -> Path:
+    def _path(self, series: Series, day: date) -> Path:
         return (
             self._data_dir
             / "bars"
             / f"date={day.isoformat()}"
-            / f"feed={MINUTE_BARS_TR}"
-            / f"symbol={symbol}"
+            / f"feed={series.feed}"
+            / f"symbol={series.name}"
             / "bars.parquet"
         )
 
 
-def _bar(symbol: str, day: date, venue: str, r: dict[str, str]) -> Row:
+def _bar(symbol: str, venue: str, day: date, r: dict[str, str]) -> Row:
     return {
         "symbol": symbol,
         # KIS labels a bar by the minute it starts (09:00 holds the opening auction).
@@ -199,12 +289,26 @@ def _bar(symbol: str, day: date, venue: str, r: dict[str, str]) -> Row:
     }
 
 
+def _futures_bar(series: str, contract: str, day: date, r: dict[str, str]) -> Row:
+    return {
+        "symbol": series,
+        "bar_time": kst(day, r["stck_cntg_hour"]),
+        "contract": contract,
+        "open": to_float(r["futs_oprc"]),
+        "high": to_float(r["futs_hgpr"]),
+        "low": to_float(r["futs_lwpr"]),
+        "close": to_float(r["futs_prpr"]),
+        "volume": to_int(r["cntg_vol"]),
+        "cum_value": to_int(r["acml_tr_pbmn"]),
+    }
+
+
 def backfiller_for(settings: Settings, client: RestClient, store: CalendarStore) -> Backfiller:
     return Backfiller(
         client,
         store.calendar,
         settings.data_dir,
-        bars_symbols(settings),
+        bars_series(settings),
         settings.backfill_days,
         settings.backfill_max_per_second,
     )

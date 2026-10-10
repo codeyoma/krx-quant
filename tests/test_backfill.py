@@ -8,17 +8,22 @@ from pathlib import Path
 from typing import Any
 
 import pyarrow.parquet as pq
+import pytest
 
-from krx_quant.backfill import Backfiller, run_backfill
+from krx_quant.backfill import Backfiller, FuturesBars, StockBars, run_backfill
+from krx_quant.contracts import KOSPI200, USD
 from krx_quant.fake_kis import FakeKis
 from krx_quant.feeds.base import KST
 from krx_quant.health import GAP_SCHEMA
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.recorder import ParquetRecorder
 from tests.kis_rest import (
+    FUTURES_BARS,
     HOLIDAYS,
     MINUTE_BARS,
     day_bars,
+    futures_bars_api,
+    futures_day_bars,
     holiday_api,
     minute_bars_api,
     requests_for,
@@ -29,14 +34,29 @@ from tests.test_collector import read, settings_for
 AFTER_HOURS = datetime(2026, 10, 8, 21, 0, tzinfo=KST)  # every session of the day is over
 
 
-def read_bars(data_dir: Path, day: date, symbol: str = "005930") -> list[dict[str, Any]]:
-    path = data_dir / "bars" / f"date={day.isoformat()}" / f"feed={MINUTE_BARS}" / f"symbol={symbol}"
+def read_bars(
+    data_dir: Path, day: date, symbol: str = "005930", feed: str = MINUTE_BARS
+) -> list[dict[str, Any]]:
+    path = data_dir / "bars" / f"date={day.isoformat()}" / f"feed={feed}" / f"symbol={symbol}"
     rows: list[dict[str, Any]] = pq.read_table(path).to_pylist()
     return rows
 
 
-def days_with_bars(data_dir: Path) -> list[date]:
-    return sorted(date.fromisoformat(p.name.removeprefix("date=")) for p in (data_dir / "bars").iterdir())
+def days_with_bars(data_dir: Path, symbol: str | None = None, feed: str = MINUTE_BARS) -> list[date]:
+    """The days with bars of ``symbol`` (any series without one)."""
+    pattern = "date=*" if symbol is None else f"date=*/feed={feed}/symbol={symbol}"
+    return sorted(
+        {
+            date.fromisoformat(p.relative_to(data_dir / "bars").parts[0][5:])
+            for p in (data_dir / "bars").glob(pattern)
+        }
+    )
+
+
+@pytest.fixture(autouse=True)
+def no_futures_bars_yet(kis: FakeKis) -> None:
+    """KIS answers the futures queries with no bars unless a test says otherwise."""
+    kis.rest_responses[FUTURES_BARS] = futures_bars_api(lambda market, contract, day: [])
 
 
 async def test_the_first_run_fills_a_year_of_minute_bars_for_every_trading_day(
@@ -102,9 +122,11 @@ async def test_filling_the_same_days_again_gives_the_same_bars(kis: FakeKis, tmp
     assert len(requests_for(kis, MINUTE_BARS)) == queries, "filled days are not queried again"
 
     async with rest_client(kis, tmp_path, AFTER_HOURS) as client:
-        backfiller = Backfiller(client, MarketCalendar(), tmp_path, ("005930",), 6, max_per_second=20)
+        backfiller = Backfiller(
+            client, MarketCalendar(), tmp_path, [StockBars("005930")], 6, max_per_second=20
+        )
         for day in first:
-            await backfiller.fill("005930", day)  # and filled again on purpose
+            await backfiller.fill(StockBars("005930"), day)  # and filled again on purpose
 
     assert {day: read_bars(tmp_path, day) for day in days_with_bars(tmp_path)} == first
     assert all(len(rows) == 250 for rows in first.values())
@@ -204,3 +226,94 @@ async def test_a_day_kis_answers_empty_is_tried_again_on_the_next_run(kis: FakeK
     published["yet"] = True
     await run_backfill(settings, clock=lambda: AFTER_HOURS)
     assert days_with_bars(tmp_path) == [date(2026, 10, 7), date(2026, 10, 8)]
+
+
+async def test_futures_bars_are_filled_for_a_year_from_each_days_nearest_month(
+    kis: FakeKis, tmp_path: Path
+) -> None:
+    lunar_new_year = {date(2026, 2, 16), date(2026, 2, 17), date(2026, 2, 18)}
+    holidays = {date(2025, 12, 25), date(2026, 1, 1), date(2026, 10, 9), *lunar_new_year}
+    kis.rest_responses[HOLIDAYS] = holiday_api(holidays)
+    kis.rest_responses[MINUTE_BARS] = minute_bars_api(lambda market, symbol, day: day_bars(day, 3))
+    kis.rest_responses[FUTURES_BARS] = futures_bars_api(
+        lambda market, contract, day: futures_day_bars(day, 3)
+    )
+    settings = replace(settings_for(kis, tmp_path), rest_max_per_second=1000, backfill_max_per_second=1000)
+
+    await run_backfill(settings, clock=lambda: AFTER_HOURS)
+
+    year = [date(2025, 10, 8) + timedelta(days=i) for i in range(366)]
+    trading = [d for d in year if d.weekday() < 5 and d not in holidays]
+    for series in ("KOSPI200F", "USDF"):
+        assert days_with_bars(tmp_path, series, FUTURES_BARS) == trading, series
+    queries = requests_for(kis, FUTURES_BARS)
+    assert len(queries) == 2 * len(trading), "one query per day of three bars"
+    assert {(q["FID_COND_MRKT_DIV_CODE"], q["FID_INPUT_ISCD"][:3]) for q in queries} == {
+        ("F", "101"),
+        ("F", "A01"),
+        ("CF", "175"),
+        ("CF", "A75"),
+    }
+
+    def contracts(series: str, day: date) -> set[str]:
+        return {b["contract"] for b in read_bars(tmp_path, day, series, FUTURES_BARS)}
+
+    assert contracts("KOSPI200F", date(2025, 12, 11)) == {"101W12"}  # its last trading day
+    assert contracts("KOSPI200F", date(2025, 12, 12)) == {"A01603"}
+    assert contracts("USDF", date(2026, 2, 13)) == {"A75602"}  # the third Monday was a holiday
+    assert contracts("USDF", date(2026, 2, 19)) == {"A75603"}
+    assert [
+        (b["symbol"], b["bar_time"], b["close"], b["high"], b["volume"])
+        for b in read_bars(tmp_path, date(2026, 10, 8), "USDF", FUTURES_BARS)
+    ] == [
+        ("USDF", datetime(2026, 10, 8, 8, 45, tzinfo=KST), 585.0, 585.05, 100),
+        ("USDF", datetime(2026, 10, 8, 8, 46, tzinfo=KST), 585.05, 585.1, 101),
+        ("USDF", datetime(2026, 10, 8, 8, 47, tzinfo=KST), 585.1, 585.15, 102),
+    ]
+
+
+async def test_a_futures_day_is_queried_back_102_bars_at_a_time_and_filled_again_the_same(
+    kis: FakeKis, tmp_path: Path
+) -> None:
+    kis.rest_responses[HOLIDAYS] = holiday_api()
+    kis.rest_responses[MINUTE_BARS] = minute_bars_api(lambda market, symbol, day: [])
+    # 08:45–15:35: five queries a day, the last one short.
+    kis.rest_responses[FUTURES_BARS] = futures_bars_api(
+        lambda market, contract, day: futures_day_bars(day, 411)
+    )
+    settings = replace(
+        settings_for(kis, tmp_path), rest_max_per_second=1000, backfill_max_per_second=1000, backfill_days=2
+    )
+
+    await run_backfill(settings, clock=lambda: AFTER_HOURS)
+
+    days = [date(2026, 10, 6), date(2026, 10, 7), date(2026, 10, 8)]
+    first = {(s, d): read_bars(tmp_path, d, s, FUTURES_BARS) for s in ("KOSPI200F", "USDF") for d in days}
+    for bars in first.values():
+        times = [b["bar_time"] for b in bars]
+        assert len(times) == 411 and times == sorted(set(times))
+        assert {b["contract"] for b in bars} <= {"A01612", "A75610"}
+    one_day = [
+        q["FID_INPUT_HOUR_1"]
+        for q in requests_for(kis, FUTURES_BARS)
+        if (q["FID_INPUT_ISCD"], q["FID_INPUT_DATE_1"]) == ("A01612", "20261008")
+    ]
+    assert one_day == ["235959", "135300", "121100", "102900", "084700"]
+    queries = len(requests_for(kis, FUTURES_BARS))
+    assert queries == 2 * 3 * 5
+
+    await run_backfill(settings, clock=lambda: AFTER_HOURS)
+    assert len(requests_for(kis, FUTURES_BARS)) == queries, "filled days are not queried again"
+
+    async with rest_client(kis, tmp_path, AFTER_HOURS) as client:
+        calendar = MarketCalendar()
+        series = [FuturesBars(KOSPI200), FuturesBars(USD)]
+        backfiller = Backfiller(client, calendar, tmp_path, series, 2, max_per_second=1000)
+        for s in series:
+            for day in days:
+                await backfiller.fill(s, day)  # and filled again on purpose
+
+    assert {
+        (s, d): read_bars(tmp_path, d, s, FUTURES_BARS) for s in ("KOSPI200F", "USDF") for d in days
+    } == first
+    assert len(list((tmp_path / "bars").rglob("*.parquet"))) == len(first), "one file per day, replaced"

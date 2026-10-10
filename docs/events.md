@@ -193,7 +193,7 @@ REST 응답 원문은 raw 계층에 `{"tr_id", "params", "body"}` JSON으로 남
 
 ## bars: 1분봉 (REST 백필)
 
-Backfiller가 KIS 주식일별분봉조회(`FHKST03010230`)로 받은 1분봉이다. 녹화가 아니라 조회라서, 녹화가 빠진 구간의 1분봉도 여기 있다.
+Backfiller가 KIS REST로 받은 1분봉이다. 주식과 ETF는 주식일별분봉조회(`FHKST03010230`)로 받는다. 녹화가 아니라 조회라서, 녹화가 빠진 구간의 1분봉도 여기 있다.
 
 ```
 <KRX_DATA_DIR>/bars/date=<YYYY-MM-DD>/feed=FHKST03010230/symbol=<종목>/bars.parquet
@@ -202,7 +202,7 @@ Backfiller가 KIS 주식일별분봉조회(`FHKST03010230`)로 받은 1분봉이
 - 거래일마다 종목별로 파일 하나다. 그날의 모든 장(KRX 애프터마켓, NXT는 20:00 종료)이 끝난 뒤 20:30부터 하루치를 통째로 받아 쓴다. 그래서 파일이 있으면 그날 1분봉은 완전하다.
 - 같은 날을 다시 받으면 파일을 통째로 바꾼다. 몇 번 받아도 결과가 같다(멱등).
 - 첫 실행에 지난 365일(`KRX_BACKFILL_DAYS`)의 모든 거래일을 받는다. 그다음부터는 파일이 없는 거래일만 받는다(서버가 멈췄던 날, 새로 추가한 종목). 최신 날부터 받는다.
-- 대상은 `KRX_SYMBOLS`와 `KRX_ETF_SYMBOLS`다.
+- 대상은 `KRX_SYMBOLS`와 `KRX_ETF_SYMBOLS`, 그리고 KOSPI200 선물과 달러선물(아래 "선물 연속 1분봉")이다.
 - KIS가 봉을 하나도 주지 않은 날(보관 기간 밖, 거래정지, 일시 오류)은 저장하지 않는다. 다음 실행에 다시 묻는다.
 
 | 열 | 타입 | KIS 필드 | 설명 |
@@ -213,6 +213,26 @@ Backfiller가 KIS 주식일별분봉조회(`FHKST03010230`)로 받은 1분봉이
 | `open`, `high`, `low`, `close` | int64 | `stck_oprc`, `stck_hgpr`, `stck_lwpr`, `stck_prpr` | 시가, 고가, 저가, 종가(원) |
 | `volume` | int64 | `cntg_vol` | 봉 거래량(주) |
 | `cum_value` | int64 | `acml_tr_pbmn` | 그날 누적 거래대금(원). 봉별 거래대금이 아니다. |
+
+### 선물 연속 1분봉
+
+KOSPI200 선물과 달러선물은 KIS 선물옵션 분봉조회(`FHKIF03020200`)로 받는다. 날마다 그날의 최근월물을 받아, 상품마다 연속 시계열 하나로 쓴다. 월물 교체 규칙은 [kis-feeds.md](kis-feeds.md#과거-1분봉)에 있다.
+
+```
+<KRX_DATA_DIR>/bars/date=<YYYY-MM-DD>/feed=FHKIF03020200/symbol=<KOSPI200F|USDF>/bars.parquet
+```
+
+- 파일 쓰기, 다시 받기, 빈 응답 처리, 요청 간격은 주식 1분봉과 같다.
+- 봉은 08:45–15:45다. 최종거래일에는 만기 월물이 일찍 끝나서(KOSPI200 15:20, 달러 11:30) 그 뒤 봉이 없다.
+
+| 열 | 타입 | KIS 필드 | 설명 |
+|---|---|---|---|
+| `symbol` | string | | 연속 시계열 이름: `KOSPI200F`, `USDF` |
+| `bar_time` | timestamp(s, Asia/Seoul) | `stck_bsop_date` + `stck_cntg_hour` | 봉이 시작하는 분 |
+| `contract` | string | | 그 봉을 받은 월물 코드(예: `A01612`, `175W10`) |
+| `open`, `high`, `low`, `close` | float64 | `futs_oprc`, `futs_hgpr`, `futs_lwpr`, `futs_prpr` | 시가, 고가, 저가, 종가(지수 포인트, 원/달러) |
+| `volume` | int64 | `cntg_vol` | 봉 거래량(계약) |
+| `cum_value` | int64 | `acml_tr_pbmn` | 그날 그 월물의 누적 거래대금. KOSPI200 선물은 천원, 달러선물은 원 단위다. |
 
 ## 실데이터 관찰 (2026-10-08, 삼성전자, 13시 전후 90초)
 
