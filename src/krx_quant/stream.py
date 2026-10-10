@@ -31,13 +31,14 @@ from typing import Any
 from aiohttp import WSCloseCode, web
 
 from krx_quant.consensus import FAST, FINAL
-from krx_quant.engine import PredictionEngine, Recorded, Scored
+from krx_quant.engine import OutcomesScored, PredictionEngine, PredictionsStored
 from krx_quant.predictions import iso
 
 log = logging.getLogger(__name__)
 
 LiveStatus = Callable[[], dict[str, Any]]
 QUEUE_SIZE = 1000  # events a client may fall behind by
+_CLOSE_SECONDS = 5.0  # shutting down waits this long for the clients to close
 
 _dumps = partial(json.dumps, ensure_ascii=False)
 _KINDS = {FAST: "fast", FINAL: "final"}
@@ -49,7 +50,7 @@ class _Client:
     queue: asyncio.Queue[dict[str, Any]] = field(default_factory=lambda: asyncio.Queue(QUEUE_SIZE))
 
 
-class Stream:
+class EventStream:
     """Fans the engine's events out to every connected client."""
 
     def __init__(self, engine: PredictionEngine, live_status: LiveStatus | None, poll_seconds: float) -> None:
@@ -61,26 +62,27 @@ class Stream:
         self._closing: set[asyncio.Task[Any]] = set()
         self._last_status = engine.store.last_status_id()
 
-    def changed(self, change: Recorded | Scored) -> None:
+    def changed(self, change: PredictionsStored | OutcomesScored) -> None:
         """The engine's listener."""
         if not self._clients:
             return
-        if isinstance(change, Scored):
-            rows = self._engine.store.rows(change.ids)
-            self._publish({"type": "outcome", "outcomes": [prediction_json(r, symbol=True) for r in rows]})
+        if isinstance(change, OutcomesScored):
+            self._publish({"type": "outcome", "outcomes": self._items(change.ids)})
             return
         bar_close = iso(change.bar_close)
         made = [i for name, ids in change.ids.items() if name not in _KINDS for i in ids]
         if made:
-            predictions = [prediction_json(r, symbol=True) for r in self._engine.store.rows(made)]
-            self._publish({"type": "prediction", "bar_close": bar_close, "predictions": predictions})
+            self._publish({"type": "prediction", "bar_close": bar_close, "predictions": self._items(made)})
         for name, kind in _KINDS.items():
             if name in change.ids:
-                rows = self._engine.store.rows(change.ids[name])
-                predictions = [prediction_json(r, symbol=True) for r in rows]
+                items = self._items(change.ids[name])
                 self._publish(
-                    {"type": "consensus", "kind": kind, "bar_close": bar_close, "predictions": predictions}
+                    {"type": "consensus", "kind": kind, "bar_close": bar_close, "predictions": items}
                 )
+
+    def _items(self, ids: list[int]) -> list[dict[str, Any]]:
+        """The predictions as the stream shows them: with their symbol, as several go together."""
+        return [{"symbol": row["symbol"], **prediction_json(row)} for row in self._engine.store.rows(ids)]
 
     async def run(self) -> None:
         """Poll the status changes and the KIS status until cancelled."""
@@ -119,14 +121,20 @@ class Stream:
         finally:
             self._clients.discard(client)
             sender.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await sender
+            await asyncio.gather(sender, return_exceptions=True)
         return ws
 
     async def close(self) -> None:
-        """Close every client (the server is shutting down)."""
-        for client in list(self._clients):
-            await client.ws.close(code=WSCloseCode.GOING_AWAY, message=b"engine shutting down")
+        """Close every client at once (the server is shutting down), waiting a moment at most."""
+        closing = [
+            c.ws.close(code=WSCloseCode.GOING_AWAY, message=b"engine shutting down") for c in self._clients
+        ]
+        for task in self._closing:
+            task.cancel()
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(
+                asyncio.gather(*closing, *self._closing, return_exceptions=True), _CLOSE_SECONDS
+            )
 
     def _publish(self, body: dict[str, Any]) -> None:
         event = self._event(body)
@@ -146,9 +154,12 @@ class Stream:
         return {"type": body["type"], "at": iso(self._engine.clock.now()), **body}
 
     async def _send(self, client: _Client) -> None:
-        while True:
-            event = await client.queue.get()
-            await client.ws.send_str(_dumps(event))
+        try:
+            while True:
+                event = await client.queue.get()
+                await client.ws.send_str(_dumps(event))
+        except ConnectionError:  # closed meanwhile (too slow, gone, or shutting down)
+            pass
 
 
 def _health_key(kis: dict[str, Any]) -> Any:
@@ -156,11 +167,10 @@ def _health_key(kis: dict[str, Any]) -> Any:
     return kis["connected"], sorted((f["feed"], f["key"], f["gap"] or "") for f in kis["feeds"])
 
 
-def prediction_json(row: dict[str, Any], *, symbol: bool = False) -> dict[str, Any]:
-    """A stored prediction as the API shows it; with its ``symbol`` where items of several
-    symbols go together (the stream)."""
+def prediction_json(row: dict[str, Any]) -> dict[str, Any]:
+    """A stored prediction as the API shows it."""
     scored = row["scored_at"] is not None
-    body = {
+    return {
         "algorithm": row["algorithm"],
         "model_version": row["model_version"],
         "bar_close": row["bar_close"],
@@ -185,4 +195,3 @@ def prediction_json(row: dict[str, Any], *, symbol: bool = False) -> dict[str, A
             "scored_at": row["scored_at"],
         },
     }
-    return {"symbol": row["symbol"], **body} if symbol else body

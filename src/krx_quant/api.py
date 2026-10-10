@@ -64,7 +64,7 @@ from krx_quant.stats import (
     scored_by_algorithm,
     split,
 )
-from krx_quant.stream import LiveStatus, Stream, prediction_json
+from krx_quant.stream import EventStream, LiveStatus, prediction_json
 
 ENGINE_KEY = web.AppKey("engine", PredictionEngine)
 # live: the collector; demo: `krx-quant demo-engine`; replay: tests.
@@ -114,7 +114,7 @@ def create_app(
     app[DATA_DIR_KEY] = data_dir
     app[SHELF_KEY] = shelf
     app[MACRO_CACHE_KEY] = {}
-    stream = Stream(engine, live_status, stream_poll_seconds)
+    stream = EventStream(engine, live_status, stream_poll_seconds)
 
     async def streaming(app: web.Application) -> AsyncIterator[None]:
         engine.listeners.append(stream.changed)

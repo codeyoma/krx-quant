@@ -13,6 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import aiohttp
 from aiohttp import ClientWebSocketResponse
 from aiohttp.test_utils import TestClient, TestServer
 
@@ -22,7 +23,7 @@ from krx_quant.clock import FakeClock
 from krx_quant.engine import PredictionEngine
 from krx_quant.lifecycle import Status
 from krx_quant.predictions import PredictionStore
-from krx_quant.replay import feed
+from krx_quant.replay import replay_into
 from tests.algorithm_doubles import FixedAlgorithm
 from tests.api_schema import check
 from tests.replay_events import CALENDAR, FEE, SYMBOL, at
@@ -68,7 +69,7 @@ async def test_a_client_receives_predictions_the_consensus_and_outcomes_as_they_
 
     async with TestClient(TestServer(create_app(engine))) as client:
         ws = await client.ws_connect("/v1/stream")
-        await feed(engine, clock, busy_morning(end="09:05:30"), until=at("09:05:30"))
+        await replay_into(engine, clock, busy_morning(end="09:05:30"), until=at("09:05:30"))
         events = await receive_until(ws, lambda e: e["type"] == "outcome")
         await ws.close()
 
@@ -133,3 +134,15 @@ async def test_the_kis_status_is_sent_on_connecting_and_when_it_changes(tmp_path
     assert now["kis"]["connected"] is True
     assert changed["kis"]["connected"] is False
     assert changed["kis"]["feeds"][0]["gap"] == "disconnected: closed"
+
+
+async def test_clients_are_told_when_the_engine_shuts_down(tmp_path: Path) -> None:
+    engine, _ = engine_at(tmp_path / "engine.db", at("09:30:00"))
+    server = TestServer(create_app(engine))
+    await server.start_server()
+    async with aiohttp.ClientSession() as session, session.ws_connect(server.make_url("/v1/stream")) as ws:
+        await server.close()
+        message = await asyncio.wait_for(ws.receive(), 5)
+
+    assert message.type is aiohttp.WSMsgType.CLOSE
+    assert message.data == aiohttp.WSCloseCode.GOING_AWAY

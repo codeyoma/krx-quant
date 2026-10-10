@@ -5,8 +5,9 @@ At each bar close's final consensus, for each symbol, the move is up if the cons
 ``p_up`` is at least ``min_probability``, else down if its ``p_down`` is. At least
 ``min_agree`` of the active algorithms it pooled must then predict that move: the most
 likely of their three classes, a tie going to flat, then up, as in the stats. A signal for
-the same symbol and move is not sent again before the first one's target time (4
-minutes later): one call per move, not one a minute. ``KRX_SIGNAL_ALERT`` turns it on.
+the same symbol and move is not sent again before the last one's target time (4 minutes
+later): a move that keeps holding is called every 4 minutes, not every minute.
+``KRX_SIGNAL_ALERT`` turns it on.
 """
 
 from __future__ import annotations

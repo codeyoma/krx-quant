@@ -79,11 +79,11 @@ async def replay(
         consensus_timing=consensus_timing,
         leaders=leaders,
     )
-    await feed(engine, clock, events, until=until, display_delay=display_delay)
+    await replay_into(engine, clock, events, until=until, display_delay=display_delay)
     return engine
 
 
-async def feed(
+async def replay_into(
     engine: PredictionEngine,
     clock: FakeClock,
     events: Iterable[Event],

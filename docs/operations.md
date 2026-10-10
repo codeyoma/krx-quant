@@ -203,7 +203,7 @@ curl http://krx-quant:8080/v1/macro
 | `KRX_ECOS_URL`, `KRX_FRED_URL`, `KRX_YAHOO_URL` | 각 공식 주소 | 매크로 출처 주소. 테스트용이다 |
 | `KRX_REGIME_SHOCK_SOX_PERCENT`, `KRX_REGIME_SHOCK_VIX`, `KRX_REGIME_SHOCK_USDKRW_PERCENT`, `KRX_REGIME_SOX_MOVE_PERCENT`, `KRX_REGIME_WEAK_WON_PERCENT` | `3`, `30`, `1`, `1`, `0.5` | 일일 국면 문턱값([design.md](design.md#45-매크로-지표)) |
 | `KRX_SIGNAL_ALERT` | `off` | `on`이면 텔레그램 신호 알림을 보낸다([engine-api.md](engine-api.md#텔레그램-신호-알림-19)) |
-| `KRX_SIGNAL_MIN_PROBABILITY` | `0.6` | 신호를 보낼 최종 합의의 상승(하락) 확률. 0.5–1 |
+| `KRX_SIGNAL_MIN_PROBABILITY` | `0.6` | 신호를 보낼 최종 합의의 상승(하락) 확률. 0.5–1. 알림이 꺼져 있어도 값을 검사한다 |
 | `KRX_SIGNAL_MIN_AGREE` | `2` | 같은 방향을 예측해야 하는 정식 알고리즘 수. 1 이상 |
 
 compose와 스크립트가 읽는 변수다. 엔진은 읽지 않는다.

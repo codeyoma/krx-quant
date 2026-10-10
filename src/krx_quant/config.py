@@ -185,6 +185,13 @@ class Settings:
             raise SettingsError(
                 "KRX_INDEX_CODES must include 0001 (KOSPI): circuit breakers are called from it"
             )
+        # Checked even while the alerts are off, so a wrong value shows before they are turned on.
+        signal_rule = SignalRule(
+            min_probability=float(
+                number("KRX_SIGNAL_MIN_PROBABILITY", str(SIGNALS.min_probability), float, 0.5, 1)
+            ),
+            min_agree=int(number("KRX_SIGNAL_MIN_AGREE", str(SIGNALS.min_agree), int, 1)),
+        )
         return cls(
             kis_app_key=required("KIS_APP_KEY"),
             kis_app_secret=required("KIS_APP_SECRET"),
@@ -252,12 +259,7 @@ class Settings:
                 sox_move_pct=float(number("KRX_REGIME_SOX_MOVE_PERCENT", str(RULES.sox_move_pct), float)),
                 weak_won_pct=float(number("KRX_REGIME_WEAK_WON_PERCENT", str(RULES.weak_won_pct), float)),
             ),
-            signal_rule=SignalRule(
-                min_probability=float(
-                    number("KRX_SIGNAL_MIN_PROBABILITY", str(SIGNALS.min_probability), float, 0.5, 1)
-                ),
-                min_agree=int(number("KRX_SIGNAL_MIN_AGREE", str(SIGNALS.min_agree), int, 1)),
-            )
+            signal_rule=signal_rule
             if _on_or_off("KRX_SIGNAL_ALERT", values.get("KRX_SIGNAL_ALERT", "off"))
             else None,
         )

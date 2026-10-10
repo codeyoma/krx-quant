@@ -93,7 +93,7 @@ Notify = Callable[[str], Awaitable[bool]]  # send an alert; whether it went
 
 
 @dataclass(frozen=True)
-class Recorded:
+class PredictionsStored:
     """Predictions just stored: displayed now."""
 
     bar_close: datetime
@@ -101,13 +101,13 @@ class Recorded:
 
 
 @dataclass(frozen=True)
-class Scored:
+class OutcomesScored:
     """Outcomes just scored."""
 
     ids: list[int]  # their predictions'
 
 
-Listener = Callable[[Recorded | Scored], None]  # told of each, as it happens (the stream)
+Listener = Callable[[PredictionsStored | OutcomesScored], None]  # told of each, as it happens (the stream)
 
 # Each day's algorithm review runs this long after the close, when everything is scored.
 REVIEW_AFTER_CLOSE = timedelta(minutes=10)
@@ -476,7 +476,10 @@ class PredictionEngine:
         ]
         self._record(bar_close, at_close, made)
         if name == FINAL and self.signals is not None:
-            self.signals.final(bar_close, bar_close + HORIZON, pooled, pooled_from)
+            try:
+                self.signals.final(bar_close, bar_close + HORIZON, pooled, pooled_from)
+            except Exception:  # an alert never stops predicting
+                log.exception("signal alert failed")
 
     def _record_not_predicted(
         self, bar_close: datetime, symbols: Sequence[str], status: str, running: Sequence[Algorithm]
@@ -572,7 +575,7 @@ class PredictionEngine:
         added = self.store.add_all(predictions)
         for pending in added.pending:
             heapq.heappush(self._pending, (pending.target_at, pending.prediction_id, pending))
-        self._tell(Recorded(bar_close, added.ids))
+        self._tell(PredictionsStored(bar_close, added.ids))
 
     def _score_until(self, due: datetime) -> None:
         scores: list[tuple[int, Score]] = []
@@ -582,9 +585,9 @@ class PredictionEngine:
             scores.append((pending.prediction_id, _score(pending, mid_target)))
         if scores:
             self.store.score_all(scores, self.clock.now())
-            self._tell(Scored([prediction_id for prediction_id, _ in scores]))
+            self._tell(OutcomesScored([prediction_id for prediction_id, _ in scores]))
 
-    def _tell(self, change: Recorded | Scored) -> None:
+    def _tell(self, change: PredictionsStored | OutcomesScored) -> None:
         for listener in self.listeners:
             try:
                 listener(change)

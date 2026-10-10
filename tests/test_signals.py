@@ -22,7 +22,7 @@ from krx_quant.engine import PredictionEngine
 from krx_quant.lifecycle import Status
 from krx_quant.notify import Alerts
 from krx_quant.predictions import PredictionStore
-from krx_quant.replay import feed
+from krx_quant.replay import replay_into
 from krx_quant.signals import SignalRule, Signals
 from tests.algorithm_doubles import FixedAlgorithm
 from tests.replay_events import CALENDAR, FEE, SYMBOL, at
@@ -30,6 +30,7 @@ from tests.test_replay import busy_morning
 
 UP = Forecast(0.7, 0.2, 0.1, 2.0)
 FLAT = Forecast(0.3, 0.4, 0.3, 0.0)
+DOWN = Forecast(0.1, 0.2, 0.7, -2.0)
 
 
 @pytest.fixture
@@ -62,7 +63,7 @@ async def morning(db: Path, forecasts: list[Forecast], signals: Signals | None) 
         store.add_status(f"m{n}", at("08:00:00"), None, Status.ACTIVE, "test")
     clock = FakeClock(at("09:00:00"))
     engine = PredictionEngine(store, CALENDAR, (SYMBOL,), FEE, clock, algorithms=algorithms, signals=signals)
-    await feed(engine, clock, busy_morning(end="09:05:30"), until=at("09:05:30"))
+    await replay_into(engine, clock, busy_morning(end="09:05:30"), until=at("09:05:30"))
     store.close()
 
 
@@ -82,6 +83,15 @@ async def test_a_sure_consensus_that_enough_members_agree_on_is_signalled_once_p
     ]
 
 
+async def test_a_fall_is_signalled_too(tmp_path: Path, telegram: tuple[Alerts, list[str]]) -> None:
+    alerts, sent = telegram
+
+    await morning(tmp_path / "engine.db", [DOWN, DOWN], Signals(SignalRule(0.6, 2), alerts.signal))
+    await alerts.close()
+
+    assert sent[0] == "[신호] 005930 하락 70% · 정식 2개 중 2개 같은 방향 · 09:01 봉 마감, 09:05까지"
+
+
 async def test_no_signal_without_enough_agreement_or_certainty(
     tmp_path: Path, telegram: tuple[Alerts, list[str]]
 ) -> None:
@@ -94,8 +104,7 @@ async def test_no_signal_without_enough_agreement_or_certainty(
     assert sent == []
 
 
-async def test_signals_are_off_by_default(tmp_path: Path, telegram: tuple[Alerts, list[str]]) -> None:
-    alerts, sent = telegram
+def test_signals_are_off_by_default_and_their_settings_are_checked() -> None:
     keys = {"KIS_APP_KEY": "key", "KIS_APP_SECRET": "secret"}
 
     assert Settings.from_env(keys, dotenv_path=None).signal_rule is None
@@ -104,9 +113,6 @@ async def test_signals_are_off_by_default(tmp_path: Path, telegram: tuple[Alerts
     ).signal_rule
     assert on == SignalRule(min_probability=0.6, min_agree=3)
     with pytest.raises(SettingsError, match="KRX_SIGNAL_MIN_PROBABILITY"):
-        Settings.from_env(
-            {**keys, "KRX_SIGNAL_ALERT": "on", "KRX_SIGNAL_MIN_PROBABILITY": "0.4"}, dotenv_path=None
-        )
-    await morning(tmp_path / "engine.db", [UP, UP, UP], None)
-    await alerts.close()
-    assert sent == []
+        Settings.from_env({**keys, "KRX_SIGNAL_MIN_PROBABILITY": "0.4"}, dotenv_path=None)
+    with pytest.raises(SettingsError, match="KRX_SIGNAL_ALERT"):
+        Settings.from_env({**keys, "KRX_SIGNAL_ALERT": "maybe"}, dotenv_path=None)
