@@ -25,6 +25,7 @@ import math
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time, timedelta
+from pathlib import Path
 from typing import Any, NamedTuple
 from zoneinfo import ZoneInfo
 
@@ -32,12 +33,14 @@ import aiohttp
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from krx_quant.archive import partition_files
 from krx_quant.backfill import FUTURES_BARS_TR, bars_key
 from krx_quant.config import Settings
 from krx_quant.contracts import USD
 from krx_quant.feeds.base import KST, kst_day
 from krx_quant.market_calendar import MarketCalendar, calendar_store, next_on_trading_day
 from krx_quant.notify import Alerts
+from krx_quant.predictions import iso
 from krx_quant.recorder import ParquetRecorder
 from krx_quant.regime import Decision, RegimeInputs, RegimeRules, decide
 
@@ -389,6 +392,69 @@ def macro_recorder(parquet: ParquetRecorder) -> Record:
         log.info("macro %s: %s (%s)", macro.day, macro.decision.regime.value, reasons)
 
     return record
+
+
+# The Engine API shows the latest day decided this far back (a long KRX holiday).
+SHOWN_DAYS = 10
+
+
+def latest_macro(data_dir: Path | None, today: date) -> dict[str, Any]:
+    """The Engine API's ``/v1/macro``: the latest day decided by ``today``, its regime and
+    each indicator's latest reading, in the indicators' order; nulls before any."""
+    found = None if data_dir is None else _latest_decided(data_dir, today)
+    if found is None:
+        return {
+            "day": None,
+            "decided_at": None,
+            "regime": None,
+            "reasons": [],
+            "readings": [],
+            "failed": {},
+            "skipped": [],
+        }
+    root, regime = found
+    readings = []
+    for indicator in INDICATORS:
+        rows = _rows(root / "feed=readings" / f"symbol={indicator.name}")
+        if rows:
+            r = rows[-1]  # the latest read
+            readings.append(
+                {
+                    "indicator": indicator.name,
+                    "label": indicator.label,
+                    "source": r["source"],
+                    "series": r["series"],
+                    "as_of": r["as_of"].isoformat() if r["as_of"] else None,
+                    "value": r["value"],
+                    "change_pct": r["change_pct"],
+                }
+            )
+    return {
+        "day": regime["day"].isoformat(),
+        "decided_at": iso(regime["recorded_at"]),
+        "regime": regime["regime"],
+        "reasons": json.loads(regime["reasons"]),
+        "readings": readings,
+        "failed": json.loads(regime["failed"]),
+        "skipped": json.loads(regime["skipped"]),
+    }
+
+
+def _latest_decided(data_dir: Path, today: date) -> tuple[Path, dict[str, Any]] | None:
+    """The latest day decided by ``today``: its directory and its latest regime row."""
+    for back in range(SHOWN_DAYS):
+        root = data_dir / MACRO / f"date={today - timedelta(days=back)}"
+        if regimes := _rows(root / "feed=regime" / "symbol=market"):
+            return root, regimes[-1]
+    return None
+
+
+def _rows(partition: Path) -> list[dict[str, Any]]:
+    """A partition's rows, in the order written."""
+    rows: list[dict[str, Any]] = []
+    for path in partition_files(partition):
+        rows += pq.read_table(path).to_pylist()
+    return rows
 
 
 async def keep_macro(

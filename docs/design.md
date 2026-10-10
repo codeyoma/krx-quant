@@ -46,10 +46,11 @@
 | `collector.py`, `polling.py`, `recorder.py`, `health.py` | 구독과 REST 조회, Parquet 녹화, 결측·지연 판정과 알림 |
 | `market_calendar.py`, `backfill.py`, `archive.py`, `object_store.py` | 거래 일정, 1분봉 백필, 장 마감 업로드, Object Store(로컬·S3) |
 | `clock.py`, `reference.py`, `pricing.py`, `special.py` | 엔진 시계, 1분봉과 기준가(통합 중간가), 호가단위와 보합 범위, VI·서킷브레이커·사이드카 |
-| `engine.py`, `baselines.py`, `features.py`, `algorithms/`, `consensus.py` | 예측 엔진, 기준 예측, 피처 저장소, 알고리즘 규약과 알고리즘, 합의 |
-| `predictions.py`, `stats.py`, `lifecycle.py`, `api.py` | SQLite 저장, 통계와 순위표, 알고리즘 상태, 엔진 API |
+| `engine.py`, `market_view.py`, `baselines.py`, `features.py`, `algorithms/`, `consensus.py` | 예측 엔진, 엔진과 학습이 같이 보는 1분봉·기준가, 기준 예측, 피처 저장소, 알고리즘 규약과 알고리즘, 합의 |
+| `predictions.py`, `stats.py`, `lifecycle.py`, `api.py` | SQLite 저장, 통계와 순위표, 알고리즘 상태, 엔진 API(형식은 `schemas/engine-api-v1.json`) |
 | `training.py`, `nightly.py`, `model_shelf.py`, `swap.py` | 학습 샘플, 밤 학습, 서버의 모델 이력, 08:00 교체와 모델 감시 |
-| `replay.py`, `fake_kis.py`, `notify.py`, `cli.py` | 재생, 가짜 KIS, 텔레그램 알림, 명령 |
+| `macro.py`, `regime.py` | 매크로 지표 수집(07:30), 일일 국면 |
+| `replay.py`, `demo.py`, `fake_kis.py`, `notify.py`, `cli.py` | 재생, 화면 개발용 데모 엔진, 가짜 KIS, 텔레그램 알림, 명령 |
 
 > **삭제됨** (2026-10-08, 0f5800c): `src/krx_quant/feeds.py` 한 파일. 이유 기록 없음(전체 구독 계획 #3을 넣은 커밋에서 나뉘었다). 대신: `feeds/` 패키지(`base.py`, `stock.py`, `market.py`)와 `masters.py`, `polling.py`, `ratelimit.py`.
 
@@ -137,6 +138,7 @@ Macro Collector(`macro.py`, #8)가 거래일마다 07:30(`KRX_MACRO_AT`, 미국 
 - 등락률은 KRX 전 거래일 아침에 알던 값에서 오늘 아침에 아는 값까지다. 그래서 미국 휴장 다음 날에는 0이고, KRX 연휴 뒤에는 그동안의 미국 장이 모두 더해진다.
 - 거래일 07:30부터 개장 전 사이에만 읽는다(수집기 재시작 포함). 개장 뒤에는 그날 국면을 다시 정하지 않는다. 다시 읽기도 개장 전에 끝나는 것만 한다. 예를 들어 08:45에 다시 시작하면 08:45와 08:55에만 읽는다. 읽는 시각(`KRX_MACRO_AT`)이 개장 시각 이후이면 그날은 읽지 않고 로그에 경고를 남긴다.
 - 지표 목록은 `macro.py`의 `INDICATORS`에 있다. 지표를 더하려면 이 표와 함께 고친다.
+- 엔진 API `/v1/macro`가 가장 최근에 정한 날의 국면과 지표를 보인다([engine-api.md](engine-api.md#get-v1macro)).
 - KRX 금은 아직 받지 않는다. KIS에서 금 시세를 주는 조회를 확인하지 못했다.
 
 > **바뀜** (2026-10-10, #8): 계획은 "미국 종가는 yfinance, KIS에서 달러선물과 KRX 금, 공식 출처에 없는 항목만 네이버 시장지표에서 낮은 빈도로"였다 → 지금은 yfinance 패키지 대신 같은 Yahoo 차트 API를 직접 읽고, 네이버는 읽지 않으며, KRX 금은 받지 않는다. 이유: 네이버 항목은 모두 공식 출처가 있거나 국면에 필요 없다(아래 대응표). 그리고 네이버는 robots.txt와 약관상 자동 수집을 허용하지 않는다. yfinance는 쓰지 않는 무거운 의존성(pandas)을 끌고 온다. KRX 금 시세를 주는 KIS 조회를 확인하지 못했고, 국면 규칙에도 쓰지 않는다.
@@ -363,9 +365,9 @@ v1에서는 쓰지 않는다. 조사 결과는 [paid-data.md](paid-data.md)에 �
 |---|---|---|
 | P0 | 저장소 준비: fork clone, `custom` 브랜치, upstream 동기화, `krx-quant` 생성, 설계 문서 | 완료 (2026-10-08) |
 | P1 | 수집기: Lightsail·Docker, KIS WebSocket/REST, Parquet·S3, 1분봉 1년 백필, 휴장일, 매크로, 텔레그램 장애 알림 | **최우선.** 호가는 녹화를 늦게 시작한 만큼 영구히 잃는다. 구현했다(#2–#6, #8, #30). 남은 것: 첫 거래일 확인(#7), ETF 장중 확인(#29), REST 대체 추가(#28) |
-| P2 | 예측·채점 핵심: 피처 저장소, 모듈 규약·개성 검사, 1분봉 알고리즘 5개(Newton, Gauss, Markov, Granger, Turing 1분봉 버전), Condorcet, 채점 2종, 통계, 엔진 API | 진행 중. 구현: 예측·채점(#9), 규약과 Newton(#10), 통계(#11), 특수 상황(#12), Gauss(#13), Granger(#15), 상태 관리(#17), Condorcet(#18). 남은 것: Markov(#14), Turing(#16), 엔진 API 완성과 WebSocket 스트림(#19) |
-| P3 | Fincept 화면, GitHub Actions 빌드(DMG, setup.exe), 자동 업데이트 끄기 | 진행 중: 첫 화면과 빌드(#20), 나머지 화면(#21) |
-| P4 | 밤 학습: champion/challenger(#22), EC2 Spot과 비용 상한 장치(#23) | 진행 중. 밤 학습 1차(백필 1분봉, 상시 서버 21:30)는 PR #45로 들어갔다. 녹화 이벤트로 학습하는 2차가 남았다(#22). EC2와 비용 상한은 #23 |
+| P2 | 예측·채점 핵심: 피처 저장소, 모듈 규약·개성 검사, 1분봉 알고리즘 5개(Newton, Gauss, Markov, Granger, Turing 1분봉 버전), Condorcet, 채점 2종, 통계, 엔진 API | 진행 중. 구현: 예측·채점(#9), 규약과 Newton(#10), 통계(#11), 특수 상황(#12), Gauss(#13), Granger(#15), 상태 관리(#17), Condorcet(#18). 엔진 API 계약(JSON 스키마 `schemas/engine-api-v1.json`, 계약 테스트), CPU 예산·매크로·알고리즘 상세 응답(#19 PR1). 남은 것: Markov(#14), Turing(#16), WebSocket 스트림과 텔레그램 신호 알림(#19 PR2) |
+| P3 | Fincept 화면, GitHub Actions 빌드(DMG, setup.exe), 자동 업데이트 끄기 | 진행 중. 첫 화면과 개인 빌드(#20, 첫 태그 `custom-v4.5.0-krx.1`)는 됐다. 나머지 화면(#21)이 남았다 |
+| P4 | 밤 학습: champion/challenger(#22), EC2 Spot과 비용 상한 장치(#23) | 진행 중. 밤 학습 1차(백필 1분봉, 상시 서버 21:30)는 PR #45, 녹화 이벤트로 학습하는 2차는 PR #48로 들어갔다(#22). EC2와 비용 상한은 #23 |
 | P5 | 호가 알고리즘(Kalman, Shannon, Poisson), 재생 테스트 도구 | 호가 녹화 10거래일 이후. 하루 재생(`krx-quant replay`, #9)은 있다. 남은 것: Kalman(#25), Shannon(#26), Poisson(#27), 사전 검증 도구(#24) |
 
 ## 12. 사용자가 직접 준비할 것

@@ -2,7 +2,7 @@
 
 엔진은 1분봉이 마감될 때마다 종목별로 4분 뒤 통합 중간가의 방향을 예측하고, 4분 뒤 채점한다. 결과는 `state/engine.sqlite3`에 저장하고 HTTP JSON API로 보여준다. Fincept 화면은 이 API만 읽는다.
 
-지금은 기준 예측 3종(#9), 알고리즘 Newton(#10), Gauss(#13), Granger(#15), 합의 Condorcet(#18)이 예측한다. 다른 알고리즘(Markov #14, Turing #16, Kalman #25, Shannon #26, Poisson #27)과 WebSocket 스트림(#19)은 계획이다.
+지금은 기준 예측 3종(#9), 알고리즘 Newton(#10), Gauss(#13), Granger(#15), 합의 Condorcet(#18)이 예측한다. 다른 알고리즘(Markov #14, Turing #16, Kalman #25, Shannon #26, Poisson #27)과 WebSocket 스트림(#19의 두 번째 PR)은 계획이다. 응답 형식은 JSON 스키마 `schemas/engine-api-v1.json`으로 고정한다(아래 "계약").
 
 ## 예측
 
@@ -124,6 +124,13 @@
 - 응답은 UTF-8 JSON이다(`Content-Type: application/json; charset=utf-8`). 사람이 읽기 쉽게 두 칸 들여쓰고, 한글을 `\u` 이스케이프 없이 그대로 보낸다.
 - 오류는 `{"error": "..."}`다. 모르는 종목은 404, 잘못된 `limit`은 400이다.
 
+### 계약 (JSON 스키마, #19)
+
+- `schemas/engine-api-v1.json`이 모든 `/v1` 응답의 형식이다(JSON Schema 2020-12). 엔드포인트마다 `$defs`에 정의가 하나씩 있다: `status`, `symbols`, `latest`, `predictions`, `bars`, `algorithms`, `algorithm_detail`, `leaderboard`, `algorithm_stats`, `consensus`, `macro`, 오류는 `error`.
+- 스키마에 없는 필드는 계약 위반이다(모든 객체가 닫혀 있다). 그래서 필드를 더하거나 바꾸면 스키마도 같이 고친다. 시각은 `+09:00`이 붙은 ISO 8601이어야 한다.
+- 계약 테스트(`tests/test_api_contract.py`)가 세 모드의 엔진에 모든 엔드포인트, 질의 변형, 오류 응답을 물어 스키마로 검사한다. 빈 재생 엔진(값이 `null`인 경우), 데모 엔진(모든 필드가 찬 경우), 가짜 KIS 위의 실시간 수집기(`kis` 포함)다.
+- 화면은 이 스키마와 데모 엔진(`krx-quant demo-engine`)으로 만든다. 데모 엔진도 같은 계약 테스트를 지난다.
+
 ### `GET /v1/status`
 
 | 필드 | 설명 |
@@ -136,6 +143,7 @@
 | `pending_outcomes` | 채점을 기다리는 예측 수 |
 | `special` | 오늘 알게 된 특수 상황. 항목마다 `kind`(`vi`, `circuit_breaker`, `sidecar`), `symbol`(VI의 종목, 시장 전체면 `null`), `start`, `end`. 해제를 아직 모르는 VI의 `end`는 발동 + 3분이다. |
 | `training` | 지난밤 학습(#22). `day`, `finalized_at`(승격 목록 확정 시각), `applied`(그 승격이 지금 돌고 있는지), `reason`, `promoted`(알고리즘 → 버전), `reports`(알고리즘별 `promoted`, `reason`: 검증 log loss 비교). 아직 없으면 `null` |
+| `cpu` | CPU 예산(#19). `budget_seconds`(`KRX_CPU_BUDGET_SECONDS`), `algorithm_seconds`(알고리즘 하나의 시간 예산, `KRX_ALGORITHM_SECONDS`), `algorithms`(은퇴하지 않은 알고리즘마다 봉 마감 한 번에 걸릴 것으로 보는 초. 한 번이라도 돈 것만), `expected_seconds`(그 합), `usage`(합 ÷ 예산. 예산이 0이면 `null`. 1을 넘으면 다음 봉 마감에 늦게 등록된 것부터 건너뛴다), `skipped_today`(오늘 CPU 예산으로 건너뛴 횟수) |
 | `kis` | 실시간 모드만. `connected`(KIS가 현재 연결에서 구독에 답했는지), `feeds`(구독·조회별 `feed`, `key`, `last_received_at`, `seconds_since`, 열린 결측 구간의 `gap`) |
 
 ### `GET /v1/symbols`
@@ -174,7 +182,7 @@
 }
 ```
 
-`outcome`은 채점 전에는 `null`이고, 채점 뒤에는 다음과 같다. `status`가 `ok`가 아닌 예측은 확률, 기대수익, `outcome`이 모두 `null`이다.
+`outcome`은 채점 전에는 `null`이고, 채점 뒤에는 다음과 같다. `status`가 `ok`가 아닌 예측은 확률, 기대수익, `target_at`, `outcome`이 모두 `null`이다. 채점하지 않기 때문이다. 합의 예측(`consensus-fast`, `consensus-final`)도 같은 목록에 다른 예측처럼 온다.
 
 ```json
 {
@@ -242,6 +250,26 @@
 - `model`: 지금 엔진이 돌리는 모델이다. `trained`는 학습한 날짜 범위, 표본 수, 학습 log loss를 적은 글이고(예: `2026-09-10..2026-10-08, 9120 samples, log loss 0.9312`), `trained_until`은 학습에 쓴 마지막 날(`YYYY-MM-DD`)이다. 기본 모델은 둘 다 `null`이다.
 - `status`: 알고리즘마다 온다(위 예시는 한 곳만 보였다). 형식은 아래 "상태 관리".
 
+### `GET /v1/algorithms/{name}`
+
+등록된 알고리즘 하나다(#19). `/v1/algorithms` 항목과 같고, 서버에 설치된 모델 이력 `model_history`가 붙는다. 등록된 알고리즘이 아닌 이름(기준 예측, 합의 포함)은 404다. 성적은 `/v1/algorithms/{name}/stats`에 있다.
+
+```json
+{
+  "name": "newton",
+  "card": {"scientist": "Isaac Newton", "character": "추세 추종"},
+  "model": {"version": "newton-default", "params": {"damping": 0.5, "threshold": 1.0}, "trained": null, "trained_until": null},
+  "status": {"status": "probation", "since": "2026-10-12T08:00:00+09:00", "history": []},
+  "model_history": [
+    {"at": "2026-10-13T08:00:00+09:00", "version": "newton-20261012-abc123", "why": "promotion 2026-10-12"},
+    {"at": "2026-10-13T09:10:00+09:00", "version": null, "why": "rollback from newton-20261012-abc123"}
+  ]
+}
+```
+
+- `model_history`: `state/models/history.json`(#45)에서 그 알고리즘의 항목이다. 오래된 것부터 온다. `why`는 `fit`, `promotion <밤 날짜>`, `rollback from <버전>`, `installed before`(이력이 생기기 전에 깔려 있던 모델)다. `version`이 `null`이면 기본 모델로 돌아간 것이다. 한 번도 설치하지 않았으면 빈 목록이다. 데모 엔진과 재생에는 서버 상태가 없어서 늘 빈 목록이다.
+- `model`은 엔진이 지금 돌리는 모델이다. 설치나 롤백 직후 1분 안에는 `model_history`의 마지막과 다를 수 있다(엔진이 모델 파일을 30초마다 본다).
+
 ### `GET /v1/leaderboard?symbol=&period=&basis=&special=`
 
 순위표다.
@@ -305,7 +333,33 @@
 - 맨 위에는 `algorithm`(이름)과 질의 값 `symbol`, `period`, `days`(실제로 쓴 날짜 목록), `basis`, `special`, 그리고 `min_sample`이 온다. 순위표 응답의 맨 위와 같다.
 - `overall`: 같은 질의의 순위표 항목(순위, q값 포함)에 `calibration`을 더한다. `calibration`은 10구간이고, 구간마다 `low`, `high`, `count`, `mean_p`와 `observed`(실제 비율과 Wilson 구간)가 있다.
 - `by_symbol`, `by_slot`, `by_model_version`: 종목별, 30분 시간대별, 모델 버전별 항목이다. 시간대는 예측한 봉의 시작 시각 기준이다(`"09:00"`은 09:01–09:30 마감). 이 항목들의 lift는 함께 검정하지 않으므로 `q`와 `significant`가 `null`이다.
-- 예전에 예측한 적이 있는 알고리즘은 그 기간에 예측이 없어도 404가 아니라 빈 통계(`n` 0)를 낸다.
+- 예전에 예측한 적이 있는 알고리즘과 합의(`consensus-fast`, `consensus-final`)는 그 기간에 예측이 없어도 404가 아니라 빈 통계(`n` 0)를 낸다.
+
+  > **바뀜** (2026-10-10, #19 PR1): 합의는 한 번도 예측하지 않은 엔진에서 404였다 → 기준 예측처럼 늘 아는 이름이다. 이유: 계약 테스트가 빈 엔진에서 404를 찾았다. 화면은 합의 성적을 늘 물을 수 있어야 한다.
+
+### `GET /v1/macro`
+
+그날의 매크로 지표와 국면이다(#8, #19). 수집기가 `macro` 계층에 기록한 것을 읽는다([design.md](design.md#45-매크로-지표)).
+
+```json
+{
+  "day": "2026-10-12",
+  "decided_at": "2026-10-12T07:30:02+09:00",
+  "regime": "risk_off",
+  "reasons": ["SOX -1.4% (-1% 이하)"],
+  "readings": [
+    {"indicator": "sox", "label": "필라델피아 반도체지수", "source": "yahoo", "series": "^SOX", "as_of": "2026-10-09", "value": 12620.8, "change_pct": -1.4}
+  ],
+  "failed": {},
+  "skipped": ["fred"]
+}
+```
+
+- 엔진 시계의 오늘부터 10일 전까지, 국면이 정해진 가장 최근 날을 보인다. 그래서 07:30 읽기 전에는 전 거래일의 국면이 온다. `day`로 오늘 것인지 확인한다.
+- `decided_at`은 그날 마지막으로 국면을 정한 시각이다. 실패한 출처를 다시 읽으면 늦어진다.
+- `readings`는 지표 표의 순서다(`macro.py`의 `INDICATORS`). 지표마다 그날 마지막으로 읽은 값이다. 키가 없어 건너뛴 출처의 지표는 빠진다. `as_of`는 출처 기준 값의 날짜, `change_pct`는 KRX 전 거래일 아침 대비 등락률(%)이다. 값을 모르면 `null`이다.
+- `failed`는 마지막 읽기에서 실패한 출처와 이유, `skipped`는 키가 없어 건너뛴 출처다.
+- 아직 정한 날이 없거나(데이터 디렉터리에 없음) 재생 엔진이면 `day`, `decided_at`, `regime`이 `null`이고 목록은 비어 있다. 데모 엔진은 가상의 국면(`risk_off`)을 보인다.
 
 ## 알고리즘
 

@@ -280,7 +280,14 @@ async def _serve_api(
     if settings.api_port is None:
         return None
     runner = web.AppRunner(
-        create_app(engine, mode="live", live_status=live_status, min_sample=settings.min_sample),
+        create_app(
+            engine,
+            mode="live",
+            live_status=live_status,
+            min_sample=settings.min_sample,
+            data_dir=settings.data_dir,
+            shelf=Shelf(settings.state_dir),
+        ),
         access_log=None,
     )
     await runner.setup()

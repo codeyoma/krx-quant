@@ -13,8 +13,10 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from aiohttp.test_utils import TestClient, TestServer
 
 from krx_quant.algorithms import Model, save_model
+from krx_quant.api import create_app
 from krx_quant.cli import main
 from krx_quant.clock import FakeClock
 from krx_quant.engine import PredictionEngine
@@ -25,6 +27,7 @@ from krx_quant.object_store import LocalObjectStore, ObjectStore
 from krx_quant.predictions import PredictionStore
 from krx_quant.swap import morning_swap, night_status, night_to_train, publish_live, reload_models
 from tests.replay_events import api, get_json
+from tests.test_api_contract import check
 
 NIGHT = date(2026, 10, 12)  # a Monday's night
 MORNING = date(2026, 10, 13)
@@ -211,3 +214,27 @@ def test_the_train_command_needs_the_object_store(
 
     assert main(["train"]) == 2
     assert "KRX_OBJECT_STORE is not set" in capsys.readouterr().err
+
+
+async def test_an_algorithm_s_detail_shows_the_models_installed_and_rolled_back(
+    store: ObjectStore, tmp_path: Path, engine: PredictionEngine
+) -> None:
+    night_list(tmp_path / "store", finalized=at(NIGHT, "21:40"), promoted={"newton": TRAINED})
+    await morning(store, tmp_path, engine)
+    shelf = Shelf(tmp_path / "state")
+    shelf.rollback("newton", at(MORNING, "09:10"))
+
+    async with TestClient(TestServer(create_app(engine, shelf=shelf))) as client:
+        newton = await get_json(client, "/v1/algorithms/newton")
+        gauss = await get_json(client, "/v1/algorithms/gauss")
+        unknown = await client.get("/v1/algorithms/nobody")
+
+    assert (newton["name"], newton["card"]["scientist"]) == ("newton", "Isaac Newton")
+    assert newton["status"]["status"] == "probation"
+    assert newton["model_history"] == [
+        {"at": "2026-10-13T08:00:00+09:00", "version": TRAINED.version, "why": f"promotion {NIGHT}"},
+        {"at": "2026-10-13T09:10:00+09:00", "version": None, "why": f"rollback from {TRAINED.version}"},
+    ]
+    assert gauss["model_history"] == [], "never installed: its defaults"
+    check("algorithm_detail", newton)
+    assert unknown.status == 404

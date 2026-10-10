@@ -3,13 +3,15 @@
 ``krx-quant demo-engine`` is for building screens (the Fincept screen, #20) without the
 server or KIS. It replays the same made-up events every time: three symbols wandering
 from 09:00 to 10:30 on 2026-10-12, KOSPI and KOSPI200 futures ticks, and a VI on one
-symbol. Every registered algorithm is set active, so the consensus has members, and the
-last night's training shows as applied. The clock stays at 10:30.
+symbol. Every registered algorithm is set active, so the consensus has members, the
+last night's training shows as applied, and the morning's macro read decided risk_off.
+The clock stays at 10:30.
 """
 
 from __future__ import annotations
 
 import random
+import shutil
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 
@@ -21,9 +23,12 @@ from krx_quant.engine import Event
 from krx_quant.feeds import BOOK, INDEX, KOSPI200_FUTURES, TRADE, VI_STATUS, Feed
 from krx_quant.feeds.base import KST
 from krx_quant.lifecycle import Status
+from krx_quant.macro import INDICATORS, MACRO, MacroDay, Observation, Reading, macro_recorder
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.nightly import Night
 from krx_quant.predictions import DB_NAME, PredictionStore
+from krx_quant.recorder import ParquetRecorder
+from krx_quant.regime import RegimeRules
 from krx_quant.replay import replay
 from krx_quant.swap import NightStatus
 
@@ -33,6 +38,20 @@ _START, _END = time(9, 0), time(10, 30)
 _FEE = 0.00015
 # Each symbol's mid-point at the open and its tick.
 _OPENS = {"005930": (81_250, 100), "000660": (201_000, 500), "009150": (150_050, 100)}
+# The overnight before the demo morning, each indicator's (Thursday, Friday) values: SOX
+# down 1.4% and the won 0.3% weaker, so risk_off.
+_OVERNIGHT = {
+    "usdkrw": (1384.6, 1388.2),
+    "ktb3y": (2.61, 2.63),
+    "us10y": (4.12, 4.15),
+    "wti": (71.0, 70.2),
+    "sox": (12800.0, 12620.8),
+    "vix": (17.2, 18.4),
+    "nq": (25010.0, 24880.0),
+    "nvda": (186.0, 183.1),
+    "mu": (210.0, 205.4),
+    "usdf": (1388.0, 1392.2),
+}
 
 
 def demo_events() -> list[Event]:
@@ -62,8 +81,9 @@ def demo_events() -> list[Event]:
 
 
 async def demo_app(db: Path) -> web.Application:
-    """The Engine API on the demo morning, replayed into ``db`` (replaced). Refuses the live
-    engine's database name, so a mistyped path cannot replace it.
+    """The Engine API on the demo morning, replayed into ``db`` (replaced), with the
+    morning's macro read in ``<db name>-data/macro`` (replaced). Refuses the live engine's
+    database name, so a mistyped path cannot replace it.
     """
     # Case-insensitive: on macOS and Windows ENGINE.SQLITE3 is the same file.
     if db.name.casefold() in {n.casefold() for n in (DB_NAME, f"{DB_NAME}-wal", f"{DB_NAME}-shm")}:
@@ -87,7 +107,27 @@ async def demo_app(db: Path) -> web.Application:
     reports = [{"algorithm": a.name, "promoted": False, "reason": "demo"} for a in ALGORITHMS]
     night = Night(date(2026, 10, 9), "2026-10-09T21:31:40+09:00", {}, reports)
     engine.training = NightStatus(night, True, "applied").as_dict()
-    return create_app(engine, mode="demo")
+    data_dir = db.with_name(f"{db.stem}-data")
+    write_demo_macro(data_dir)
+    return create_app(engine, mode="demo", data_dir=data_dir)
+
+
+def write_demo_macro(data_dir: Path) -> None:
+    """The demo morning's macro read at 07:30, recorded as the collector records it."""
+    shutil.rmtree(data_dir / MACRO, ignore_errors=True)
+    thursday, friday = date(2026, 10, 8), date(2026, 10, 9)
+    macro = MacroDay(DEMO_DAY, friday)
+    for indicator in INDICATORS:
+        before, last = _OVERNIGHT[indicator.name]
+        macro.readings[indicator.name] = Reading(
+            indicator, Observation(friday, last), Observation(thursday, before)
+        )
+    macro.decide(RegimeRules())
+    parquet = ParquetRecorder(data_dir, flush_rows=1000, flush_seconds=3600)
+    try:
+        macro_recorder(parquet)(macro, _at(time(7, 30)))
+    finally:
+        parquet.close()
 
 
 def _at(t: time) -> datetime:

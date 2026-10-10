@@ -179,6 +179,13 @@ async def test_when_the_cpu_budget_runs_short_the_last_registered_is_skipped_fir
     with sqlite3.connect(tmp_path / "engine.db") as conn:
         runs = conn.execute("SELECT kind, at, algorithm FROM runs").fetchall()
     assert runs == [("cpu_budget", "2026-10-12T09:02:00+09:00", "third")]
+    async with api(engine) as client:
+        cpu = (await get_json(client, "/v1/status"))["cpu"]
+    assert (cpu["budget_seconds"], cpu["algorithm_seconds"], cpu["skipped_today"]) == (0.2, 30.0, 1)
+    assert set(cpu["algorithms"]) == {"first", "second", "third"}
+    # Third was timed again at 09:03: the three are expected over the budget once more.
+    assert cpu["expected_seconds"] > 0.2
+    assert cpu["usage"] == cpu["expected_seconds"] / 0.2
 
 
 class Raising(FixedAlgorithm):
