@@ -214,6 +214,7 @@ async def test_a_replayed_morning_reaches_the_leaderboard(tmp_path: Path) -> Non
         ("newton", 56),
         ("gauss", 56),
         ("granger", 56),
+        ("markov", 56),
     }
     for ranked in body["ranked"]:
         assert set(ranked["lift"]["vs"]) == {"baseline-flat", "baseline-persist", "baseline-random"}

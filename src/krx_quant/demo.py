@@ -15,6 +15,7 @@ from __future__ import annotations
 import random
 import shutil
 from datetime import UTC, date, datetime, time, timedelta
+from functools import partial
 from pathlib import Path
 
 from aiohttp import web
@@ -25,7 +26,7 @@ from krx_quant.engine import Event
 from krx_quant.feeds import BOOK, INDEX, KOSPI200_FUTURES, TRADE, VI_STATUS, Feed
 from krx_quant.feeds.base import KST
 from krx_quant.lifecycle import Status
-from krx_quant.macro import INDICATORS, MACRO, MacroDay, Observation, Reading, macro_recorder
+from krx_quant.macro import INDICATORS, MACRO, MacroDay, Observation, Reading, day_regime, macro_recorder
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.model_shelf import Shelf
 from krx_quant.nightly import Night
@@ -99,6 +100,8 @@ async def demo_app(db: Path) -> web.Application:
     for a in ALGORITHMS:  # active from the start, so the consensus has members
         store.add_status(a.name, start, None, Status.ACTIVE, "demo")
     store.close()
+    data_dir = db.with_name(f"{db.stem}-data")
+    write_demo_macro(data_dir)  # first: Markov reads the morning's regime
     engine = await replay(
         demo_events(),
         db=db,
@@ -107,12 +110,11 @@ async def demo_app(db: Path) -> web.Application:
         fee_rate=_FEE,
         start=start,
         until=_at(_END),
+        regimes=partial(day_regime, data_dir),
     )
     reports = [{"algorithm": a.name, "promoted": False, "reason": "demo"} for a in ALGORITHMS]
     night = Night(date(2026, 10, 9), "2026-10-09T21:31:40+09:00", {}, reports)
     engine.training = NightStatus(night, True, "applied").as_dict()
-    data_dir = db.with_name(f"{db.stem}-data")
-    write_demo_macro(data_dir)
     shelf = demo_shelf(data_dir / "state")
     return create_app(engine, mode="demo", live_status=demo_kis, data_dir=data_dir, shelf=shelf)
 

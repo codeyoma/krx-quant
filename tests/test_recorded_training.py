@@ -74,7 +74,7 @@ async def test_a_recorded_day_trains_on_what_the_engine_saw_and_scored(tmp_path:
 
     predicted = [s for s in samples if s.bar_close <= END]
     assert len(predicted) == 2 * 90  # 09:01–10:30, both symbols
-    assert [dict(s.features) for s in predicted] == probe.seen
+    assert [s.features.as_dict() for s in predicted] == probe.seen
     outcomes = scored(tmp_path / "engine.db")
     assert len(outcomes) == 2 * 86  # 10:27–10:30 wait for targets after the replay ends
     for s in predicted:

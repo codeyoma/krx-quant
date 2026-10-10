@@ -55,7 +55,7 @@ from krx_quant.clock import SessionClock
 from krx_quant.config import Settings
 from krx_quant.consensus import FAST, FINAL, NAMES, NO_WEIGHTS, SPANS, Timing, Weights, pool
 from krx_quant.consensus import fit as fit_weights
-from krx_quant.features import FeatureStore, FeatureValue, FeatureVector, Leaders
+from krx_quant.features import FeatureStore, FeatureVector, Leaders, Value
 from krx_quant.feeds import (
     BOOK,
     BOOK_SNAPSHOT,
@@ -108,6 +108,7 @@ class OutcomesScored:
 
 
 Listener = Callable[[PredictionsStored | OutcomesScored], None]  # told of each, as it happens (the stream)
+Regimes = Callable[[date], str | None]  # a day's macro regime, decided before its open; None unknown
 
 # Each day's algorithm review runs this long after the close, when everything is scored.
 REVIEW_AFTER_CLOSE = timedelta(minutes=10)
@@ -189,7 +190,7 @@ class _AtClose:
     """What is fixed for a symbol at a bar close."""
 
     mid: float | None
-    features: Mapping[str, FeatureValue]
+    features: Mapping[str, Value]
 
 
 class PredictionEngine:
@@ -210,6 +211,7 @@ class PredictionEngine:
         consensus_timing: Timing | None = None,
         leaders: Leaders | None = None,
         signals: Signals | None = None,
+        regimes: Regimes | None = None,
     ) -> None:
         self.store = store
         self.calendar = calendar
@@ -239,6 +241,8 @@ class PredictionEngine:
         self.training: dict[str, Any] | None = None  # the last night's training, as the swap saw it
         self.listeners: list[Listener] = []
         self.signals = signals  # Telegram signal alerts, off without
+        self._regimes = regimes  # without: no macro regime, and nothing to say about it
+        self._regime_days: dict[date, str | None] = {}
         # Reviews pick up where the last one left off: one missed while down runs at start.
         self._reviewed_through = store.last_run("review") or self._last_tick
         self._enroll()
@@ -405,13 +409,14 @@ class PredictionEngine:
         running = [a for a in self.algorithms if a.name not in retired]
         members = [a.name for a in running if a.name in active]
         known = self._special.known(before=bar_close)
+        regime = self._regime(bar_close)
         stopped = [s for s in self.symbols if in_vi(known, s, bar_close)]
         if stopped:
             self._record_not_predicted(bar_close, stopped, "vi", running)
         for symbol in self.symbols:
             if symbol in stopped:
                 continue
-            snapshot = self._market.snapshot(frozen, symbol, self.fee_rate)
+            snapshot = self._market.snapshot(frozen, symbol, self.fee_rate, regime)
             mid = snapshot.price
             at_close[symbol] = _AtClose(mid, self._features.compute(snapshot, self._feature_names))
             inputs = Inputs(
@@ -447,6 +452,22 @@ class PredictionEngine:
             for task in runs.values():  # shutting down: none may write after the store closes
                 task.cancel()
             raise
+
+    def _regime(self, bar_close: datetime) -> str | None:
+        """The day's macro regime, read once a day; a day without one is recorded (``runs``)
+        when an algorithm reads it."""
+        day = bar_close.astimezone(KST).date()
+        if self._regimes is None:
+            return None
+        if day not in self._regime_days:
+            regime = self._regime_days[day] = self._regimes(day)
+            midnight = datetime.combine(day, time(), KST)
+            if regime is None and "macro_regime" in self._feature_names:
+                if not self.store.count_runs("no_regime", midnight):  # once, restarts too
+                    detail = f"no macro regime for {day}: the default transitions"
+                    log.warning(detail)
+                    self.store.add_run("no_regime", bar_close, None, detail)
+        return self._regime_days[day]
 
     def _record_consensus(
         self,

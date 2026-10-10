@@ -55,7 +55,9 @@ def alternating(first: int = 0, last: int = 29, a: float = 0.001, up_last: bool 
 
 
 def lead(snapshot: Snapshot, name: str) -> float | None:
-    return FEATURES[name](snapshot)
+    value = FEATURES[name](snapshot)
+    assert not isinstance(value, tuple)
+    return value
 
 
 def snapshot(

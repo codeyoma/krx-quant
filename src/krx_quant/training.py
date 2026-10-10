@@ -38,9 +38,10 @@ from krx_quant.backfill import FUTURES_BARS_TR, MINUTE_BARS_TR, bars_key
 from krx_quant.config import Settings
 from krx_quant.contracts import KOSPI200, USD
 from krx_quant.engine import Event
-from krx_quant.features import LEAD_FEATURES, FeatureStore, FeatureValue, FeatureVector, Leaders, Snapshot
+from krx_quant.features import LEAD_FEATURES, FeatureStore, FeatureVector, Leaders, Snapshot, Value
 from krx_quant.feeds import TRADE
 from krx_quant.feeds.base import KST
+from krx_quant.macro import day_regime
 from krx_quant.market_calendar import MarketCalendar, calendar_store
 from krx_quant.market_view import HORIZON, MarketView, prediction_window
 from krx_quant.model_shelf import Shelf
@@ -80,15 +81,18 @@ def training_day(
     else from its backfilled bars if every symbol has them; None otherwise. A day never
     trains on some symbols only.
     """
+    regime = day_regime(data_dir, day)
     if is_recorded(data_dir, day, symbols):
         events = recorded_events(data_dir, day, symbols, leaders)
-        made = recorded_samples(events, calendar, day, symbols, names, fee_rate, leaders)
+        made = recorded_samples(events, calendar, day, symbols, names, fee_rate, leaders, regime=regime)
         return TrainingDay("mid", made)
     bar_days = bar_days_on(data_dir, symbols, [day])
     if len(bar_days) < len(symbols):
         return None
     leader_days = load_leader_days(data_dir, leaders, [day]) if LEAD_FEATURES & set(names) else {}
-    made = samples(bar_days, calendar, names, fee_rate, leader_days=leader_days, leaders=leaders)
+    made = samples(
+        bar_days, calendar, names, fee_rate, leader_days=leader_days, leaders=leaders, regimes={day: regime}
+    )
     return TrainingDay("close", made)
 
 
@@ -123,12 +127,13 @@ def samples(
     *,
     leader_days: BarDays | None = None,
     leaders: Leaders | None = None,
+    regimes: Mapping[date, str | None] | None = None,
 ) -> list[Sample]:
     """A sample per bar close in each day's prediction window, in time order, from backfilled
     bars: the reference price is the last close, the outcome the close four minutes later.
 
     ``leader_days`` holds the leading series' bars by (series, day); the other symbols of
-    ``bar_days`` lead too.
+    ``bar_days`` lead too. ``regimes`` holds each day's macro regime (none: unknown).
     """
     store = store or FeatureStore()
     leaders = leaders or Leaders()
@@ -150,7 +155,14 @@ def samples(
             if leading:
                 groups = leaders.groups(symbol, stocks[day].until(t), series.get(day, _DayBars({})).until(t))
             snapshot = Snapshot.at(
-                symbol, t, done, price, fee_rate, session_open=session.open, leaders=groups
+                symbol,
+                t,
+                done,
+                price,
+                fee_rate,
+                session_open=session.open,
+                leaders=groups,
+                regime=(regimes or {}).get(day),
             )
             values = store.compute(snapshot, names)
             later = closes.get(t + HORIZON - BAR)  # the close of the bar ending at t + 4 minutes
@@ -168,6 +180,8 @@ def recorded_samples(
     fee_rate: float,
     leaders: Leaders,
     store: FeatureStore | None = None,
+    *,
+    regime: str | None = None,
 ) -> list[Sample]:
     """A sample per bar close of ``day``'s prediction window and symbol, in time order, from
     the day's events (in receipt order) through the engine's Market View.
@@ -189,7 +203,7 @@ def recorded_samples(
     # target to look the mid-point up at, or both.
     minutes = deque(first + i * BAR for i in range((last + HORIZON - first) // BAR + 1))
     # Each bar close's snapshot, features, and whether a window known then touched it.
-    seen: list[tuple[Snapshot, dict[str, FeatureValue], bool]] = []
+    seen: list[tuple[Snapshot, dict[str, Value], bool]] = []
     mids: dict[tuple[str, datetime], float | None] = {}
 
     def reach(moment: datetime) -> None:
@@ -202,7 +216,7 @@ def recorded_samples(
                 for symbol in symbols:
                     if in_vi(known, symbol, minute):
                         continue
-                    snapshot = view.snapshot(frozen, symbol, fee_rate)
+                    snapshot = view.snapshot(frozen, symbol, fee_rate, regime)
                     marked = touching(known, symbol, minute, minute + HORIZON)
                     seen.append((_bare(snapshot), store.compute(snapshot, names), marked))
             if minute >= first + HORIZON:
@@ -239,7 +253,7 @@ def _bare(snapshot: Snapshot) -> Snapshot:
 
 
 def _sample(
-    snapshot: Snapshot, values: Mapping[str, FeatureValue], names: Sequence[str], later: float | None
+    snapshot: Snapshot, values: Mapping[str, Value], names: Sequence[str], later: float | None
 ) -> Sample:
     """A sample of ``snapshot``, with the price four minutes later classified against its own."""
     change = None

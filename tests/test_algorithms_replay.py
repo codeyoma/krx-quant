@@ -16,7 +16,7 @@ from krx_quant.algorithms import Model
 from krx_quant.algorithms.granger import DEFAULT_PARAMS as GRANGER_DEFAULTS
 from krx_quant.baselines import Forecast
 from krx_quant.engine import Budget, Event
-from krx_quant.features import FEATURES, FeatureStore, Leaders, Snapshot
+from krx_quant.features import FEATURES, FeatureStore, Leaders, Snapshot, Value
 from krx_quant.feeds import USD_FUTURES
 from tests.algorithm_doubles import FixedAlgorithm
 from tests.replay_events import (
@@ -96,7 +96,7 @@ async def test_a_trained_model_is_used_and_recorded(tmp_path: Path) -> None:
     assert {p["model_version"] for p in await predictions_of(engine, "newton")} == {"newton-20261009-abc123"}
     async with api(engine) as client:
         listed = {a["name"]: a for a in (await get_json(client, "/v1/algorithms"))["algorithms"]}
-    assert listed.keys() == {"newton", "gauss", "granger"}
+    assert listed.keys() == {"newton", "gauss", "granger", "markov"}
     newton = listed["newton"]
     assert listed["gauss"]["model"]["version"] == "gauss-default"
     assert newton["card"]["scientist"] == "Isaac Newton"
@@ -113,7 +113,7 @@ async def test_each_feature_is_computed_once_per_symbol_and_bar_close_for_everyo
     computed: Counter[str] = Counter()
 
     def counted(name: str) -> Any:
-        def feature(s: Snapshot) -> float | None:
+        def feature(s: Snapshot) -> Value:
             computed[name] += 1
             return FEATURES[name](s)
 

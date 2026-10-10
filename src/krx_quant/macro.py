@@ -411,6 +411,12 @@ class LatestMacro:
     skipped: list[str]  # sources without their API key
 
 
+def day_regime(data_dir: Path, day: date) -> str | None:
+    """``day``'s macro regime as last decided (what the engine and training use), or None."""
+    regimes = _rows(data_dir / MACRO / f"date={day}" / "feed=regime" / "symbol=market")
+    return regimes[-1]["regime"] if regimes else None
+
+
 def latest_macro(data_dir: Path, today: date) -> LatestMacro | None:
     """The latest day decided by ``today`` (at most ``SHOWN_DAYS`` before it): its last
     regime and the readings it was decided from. A reading of an earlier read that day (a

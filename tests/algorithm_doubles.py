@@ -7,7 +7,7 @@ from collections.abc import Sequence
 
 from krx_quant.algorithms import Card, Model, Sample
 from krx_quant.baselines import Forecast
-from krx_quant.features import FeatureVector
+from krx_quant.features import SERIES_FEATURES, FeatureVector, Value
 from krx_quant.pricing import Direction
 
 CAUTIOUS = Forecast(0.2, 0.6, 0.2, 0.0)
@@ -36,7 +36,7 @@ class FixedAlgorithm:
         self._forecast = forecast
         self._seconds = seconds
         self._reads = features if reads is None else reads
-        self.seen: list[dict[str, float | None]] = []
+        self.seen: list[dict[str, Value]] = []
 
     def default_model(self) -> Model:
         return Model(f"{self.name}-default", {})
@@ -45,7 +45,12 @@ class FixedAlgorithm:
         return Model(f"{self.name}-fitted", {"samples": float(len(samples))})
 
     def predict(self, features: FeatureVector, model: Model) -> Forecast:
-        self.seen.append({name: features[name] for name in self._reads})
+        self.seen.append(
+            {
+                name: features.series(name) if name in SERIES_FEATURES else features[name]
+                for name in self._reads
+            }
+        )
         if self._seconds:
             time.sleep(self._seconds)
         return self._forecast
