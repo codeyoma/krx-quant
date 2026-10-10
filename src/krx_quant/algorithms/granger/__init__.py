@@ -58,6 +58,10 @@ COEFFICIENTS = (*OWN, *(name for names in GROUPS.values() for name in names))
 DEFAULT_PARAMS = {**dict.fromkeys(COEFFICIENTS, 0.0), "residual": math.sqrt(HORIZON_MINUTES)}
 # A group seen on fewer bar closes than this is not tested.
 MIN_SAMPLES = 100
+# Nor is one seen on less than this share of the bar closes that know the symbol's own past:
+# the fit keeps only the bar closes that know every chosen group, so a group recorded on a
+# few days only (indices and US daytime trades have no backfill) would cut the rest out.
+MIN_SHARE = 0.5
 
 
 class _Row(NamedTuple):
@@ -143,9 +147,10 @@ def _own_lags(rows: Sequence[_Row]) -> tuple[str, ...]:
 def _granger_causes(rows: Sequence[_Row], own: tuple[str, ...], group: tuple[str, ...]) -> tuple[str, ...]:
     """The group's minutes back that count, if any: its best number of lags by BIC, kept only
     if it lowers the BIC of the regression on the symbol's own past, on the same bar closes.
+    A group known on too few of them is not tested (``MIN_SAMPLES``, ``MIN_SHARE``).
     """
     known = _complete(rows, (*own, *group))
-    if len(known) < MIN_SAMPLES:
+    if len(known) < max(MIN_SAMPLES, MIN_SHARE * len(_complete(rows, own))):
         return ()
     without = _bic(known, own)
     best = min(range(1, len(group) + 1), key=lambda n: _bic(known, (*own, *group[:n])))

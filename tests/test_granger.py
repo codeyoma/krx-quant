@@ -160,6 +160,44 @@ def test_training_keeps_the_leader_that_moves_first_at_its_lag() -> None:
     assert kept == {"lead_kospi200f_1", "lead_kospi200f_2", "residual"}, "the noise and what has no history"
 
 
+def index_recorded_on(days: int, seed: int = 1) -> list[Sample]:
+    """Ten days of moves that follow KOSPI200 futures two minutes before and the electrical and
+    electronics index one minute before (0.5 each), the index known on the last ``days`` days
+    only, as when recording started lately. Before that it moved too, unseen.
+    """
+    rng = random.Random(seed)
+    out = []
+    for i in range(4000):
+        day = i // 400
+        known = day >= 10 - days
+        values: dict[str, float | None] = {
+            f"{name}_{lag}": rng.gauss(0, 1)
+            for name in ("return", "lead_kospi200f", "lead_indices")
+            for lag in (1, 2, 3)
+        }
+        futures, index = values["lead_kospi200f_2"] or 0.0, values["lead_indices_1"] or 0.0
+        if not known:
+            values |= {f"lead_indices_{lag}": None for lag in (1, 2, 3)}
+        change = VOLATILITY * (0.5 * futures + 0.5 * index + rng.gauss(0, 1))
+        at = datetime.combine(date(2026, 9, 14) + timedelta(days=day), time(9, 1), KST)
+        out.append(
+            Sample(
+                "005930", at + timedelta(minutes=i % 400), vector(values), classify(change, FLAT, 1), change
+            )
+        )
+    return out
+
+
+def test_a_leader_recorded_on_few_days_is_learned_once_it_is_known_on_half() -> None:
+    few = dict(Granger().fit(index_recorded_on(days=3)).params)
+    most = dict(Granger().fit(index_recorded_on(days=6)).params)
+
+    # The fit uses the bar closes that know every chosen group: three days would leave seven out.
+    assert few["lead_indices_1"] == 0.0
+    assert few["lead_kospi200f_2"] == pytest.approx(0.5, abs=0.05)
+    assert most["lead_indices_1"] == pytest.approx(0.5, abs=0.06)
+
+
 def test_a_missing_leader_counts_as_no_move_and_widens_the_forecast() -> None:
     granger = Granger()
     model = granger.fit(made_up_samples())

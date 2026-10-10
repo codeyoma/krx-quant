@@ -74,7 +74,7 @@ uv run krx-quant archive
 - 수집기는 받은 이벤트로 1분봉 마감마다 기준 예측 3종(항상 보합, 직전 4분 방향 지속, 클래스 비율 무작위), 알고리즘(Newton 추세 추종, Gauss 역추세, Granger 이웃 관찰), 합의 2종(Condorcet 빠른·최종)의 예측을 낸다. 4분 뒤 두 기준(봉 마감, 표시 시점)으로 채점한다. 결과는 `state/engine.sqlite3`에 쌓인다.
 - 알고리즘은 모두 수습으로 시작한다. 매일 장 마감 10분 뒤 상태(수습, 정식, 벤치, 은퇴, 복제)를 점검하고, 정식 알고리즘만 합의에 들어간다([docs/engine-api.md](docs/engine-api.md#상태-관리-17)).
 - 순위표(`/v1/leaderboard`)와 알고리즘 상세 통계(`/v1/algorithms/<이름>/stats`)를 낸다. 방향 정밀도, 커버리지, 기준 3종 대비 lift, 가상손익, Brier 점수, 보정 곡선을 신뢰구간과 함께 보여준다.
-- 알고리즘은 백필 1분봉으로 학습한다. 모델은 `state/models/`에 저장되고, 실행 중인 엔진은 30초마다 확인해 바뀐 모델로 바꾼다.
+- 알고리즘은 녹화된 날은 녹화 이벤트(중간가 기준)로, 백필만 있는 날은 1분봉(종가 기준)으로 학습한다. 모델은 `state/models/`에 저장되고, 실행 중인 엔진은 30초마다 확인해 바뀐 모델로 바꾼다.
 
 ```bash
 uv run krx-quant fit newton
@@ -148,7 +148,7 @@ uv run python -c "import glob, pyarrow.parquet as pq; d = sorted(glob.glob('data
 | `backfill` | 빠진 1분봉을 한 번 채운다. 수집기를 멈추고 실행한다 | 필요 |
 | `archive [--recheck]` | 녹화한 날을 합쳐 `KRX_OBJECT_STORE`에 올린다. `--recheck`는 모든 파일을 저장소와 비교한다 | 필요(쓰지는 않는다) |
 | `replay <YYYY-MM-DD> [--db 경로]` | 녹화한 하루를 엔진으로 다시 돌려 별도 DB에 쓴다 | 없어도 된다 |
-| `fit <알고리즘> [--days N]` | 백필 1분봉으로 학습해 `state/models/`에 설치한다 | 없어도 된다 |
+| `fit <알고리즘> [--days N]` | 최근 날들로 학습해 `state/models/`에 설치한다. 녹화된 날은 녹화 이벤트(중간가), 백필만 있는 날은 1분봉(종가)으로 | 없어도 된다 |
 | `train [--day YYYY-MM-DD]` | 밤 학습 한 번. `--day`가 없으면 Object Store에 1분봉이 있는 가장 최근 날 | 없어도 된다 |
 | `rollback <알고리즘>` | 직전 모델로 되돌린다 | 없어도 된다 |
 | `retire <알고리즘>`, `unretire <알고리즘>` | 은퇴시킨다, 은퇴를 풀어 수습으로 되돌린다 | 없어도 된다 |

@@ -91,7 +91,9 @@ def _fit(name: str, days: int | None) -> int:
         print(e, file=sys.stderr)
         return 1
     print(f"{fitted.model.version}: {dict(fitted.model.params)}")
+    recorded = ", ".join(d.isoformat() for d in fitted.recorded) or "none"
     print(f"trained on {fitted.days} days ({fitted.samples} samples): {fitted.model.trained}")
+    print(f"recorded days, on mid-points: {recorded}; the others on backfilled closes")
     print(f"saved to {fitted.path}; the running engine switches to it within a minute")
     return 0
 
@@ -225,7 +227,7 @@ def main(argv: list[str] | None = None) -> int:
         help="database to write, replaced if it exists (default: state/replay-<day>.sqlite3)",
     )
     fit_cmd = sub.add_parser(
-        "fit", help="train an algorithm on the latest backfilled one-minute bars and save its model"
+        "fit", help="train an algorithm on the latest recorded or backfilled days and save its model"
     )
     fit_cmd.add_argument("algorithm", help="e.g. newton")
     fit_cmd.add_argument(

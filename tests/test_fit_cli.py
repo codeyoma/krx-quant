@@ -1,4 +1,6 @@
-"""``krx-quant fit <algorithm>``: train on backfilled bars, save the model the engine loads."""
+"""``krx-quant fit <algorithm>``: train on recorded days and backfilled bars, save the model
+the engine loads.
+"""
 
 from __future__ import annotations
 
@@ -14,9 +16,13 @@ import pytest
 from krx_quant.algorithms import ALGORITHMS, load_models
 from krx_quant.backfill import BAR_SCHEMA, FUTURES_BAR_SCHEMA, FUTURES_BARS_TR, MINUTE_BARS_TR
 from krx_quant.cli import main
+from krx_quant.config import Settings
 from krx_quant.feeds import KST
 from krx_quant.reference import Bar
+from krx_quant.training import fit_algorithm
 from tests.synthetic_bars import day_of_bars, random_walk, trending
+from tests.test_replay import busy_morning
+from tests.test_replay_cli import record
 
 DAYS = [date(2026, 9, 14) + timedelta(days=i) for i in range(5)]
 
@@ -98,6 +104,33 @@ def test_fitting_newton_saves_a_model_the_engine_loads(env: Path, capsys: pytest
     out = capsys.readouterr().out
     assert model.version in out
     assert "trained on 3 days" in out
+
+
+def test_a_recorded_day_trains_on_its_events_rather_than_its_backfill(
+    env: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    for day in DAYS:
+        backfill(env / "data", day)
+    record(env / "data", busy_morning(DAYS[-1]), day=DAYS[-1])
+
+    assert main(["fit", "newton", "--days", "3"]) == 0
+
+    out = capsys.readouterr().out
+    assert "trained on 3 days" in out
+    assert f"recorded days, on mid-points: {DAYS[-1]};" in out
+
+
+def test_today_is_trained_on_only_once_its_recording_is_archived(env: Path) -> None:
+    for day in DAYS:
+        backfill(env / "data", day)
+    record(env / "data", busy_morning(DAYS[-1]), day=DAYS[-1])
+    settings = Settings.from_env(require_kis=False)
+
+    during = fit_algorithm(settings, "newton", 3, now=datetime.combine(DAYS[-1], time(14), KST))
+    archived = fit_algorithm(settings, "newton", 3, now=datetime.combine(DAYS[-1], time(21, 5), KST))
+
+    assert during.recorded == [] and during.model.trained_until == DAYS[-2]
+    assert archived.recorded == [DAYS[-1]] and archived.model.trained_until == DAYS[-1]
 
 
 def test_fitting_needs_a_known_algorithm_and_backfilled_bars(

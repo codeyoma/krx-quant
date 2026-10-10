@@ -32,6 +32,7 @@ from dataclasses import dataclass
 from datetime import datetime, time, timedelta
 from typing import Any
 
+from krx_quant.feeds import INDEX, INDEX_REST, KOSPI200_FUTURES, VI_STATUS
 from krx_quant.feeds.base import KST
 from krx_quant.market_calendar import MarketCalendar, Session
 
@@ -151,6 +152,18 @@ class SpecialSituations:
         self._breaker = _Breaker()
         self._sidecar = _Sidecar()
 
+    def event(self, feed: str, row: dict[str, Any], symbols: Sequence[str]) -> Window | None:
+        """Take one of the engine's events; the window it calls or changes, if any: a VI of
+        one of ``symbols``, a circuit breaker (KOSPI) or a sidecar (KOSPI200 futures).
+        """
+        if feed in (INDEX.tr_id, INDEX_REST.tr_id):
+            return self.index(row)
+        if feed == KOSPI200_FUTURES.tr_id:
+            return self.futures(row)
+        if feed == VI_STATUS.tr_id and row["symbol"] in symbols:
+            return self.vi(row)
+        return None
+
     def vi(self, row: dict[str, Any]) -> Window | None:
         """Take a VI status row; the window if it is new or changed, else None."""
         start: datetime = row["event_time"]
@@ -192,6 +205,12 @@ class SpecialSituations:
                 break
             latest[(w.kind, w.symbol, w.start)] = w
         return list(latest.values())
+
+    def learned_since(self, at: datetime) -> list[Window]:
+        """The windows learned at or after ``at``, each version (a VI's end changes when it is
+        released): the engine marks what they touch special when it learns them.
+        """
+        return [w for received_at, w in self._learned if received_at >= at]
 
     def _today(self, at: datetime) -> Session | None:
         """The session of ``at``'s day; a new day starts the rules' state afresh."""

@@ -262,6 +262,8 @@ Docker 이미지는 `TZ=Asia/Seoul`, `KRX_DATA_DIR=/data`, `KRX_STATE_DIR=/state
 밤 학습은 지금 Lightsail 수집기가 21:30에 별도 프로세스로 띄운다(#23에서 EC2 Spot으로 옮긴다).
 
 - 알고리즘마다 학습에 안 쓴 최근 3거래일로 새 모델(challenger)과 서버에서 돌고 있는 모델(champion)을 비교한다. log loss가 더 낮을 때만 승격한다. 학습 구간은 그 앞의 알고리즘별 거래일 수(기본 20)다.
+- S3의 `bars/`(백필)와 `events/`(녹화)를 읽는다. 녹화된 날은 중간가로, 백필만 있는 날은 종가로 학습한다([engine-api.md](engine-api.md#학습)). 리포트의 `reference_prices`에 날짜별로 `mid` 또는 `close`가 남는다. 텔레그램 요약 첫 줄에는 날 수가 나온다. 예: `2026-10-13 밤 학습 (녹화 중간가 4일, 백필 종가 19일)`.
+- 읽은 파일은 `state/training-cache/`에 복사해 두고 다음 밤에 다시 쓴다. 그 밤에 쓴 가장 오래된 날보다 오래된 날짜는 학습이 끝나면 지운다.
 - S3에 남는 것:
   - `models/<알고리즘>/<버전>.json`: 모델
   - `reports/<날짜>/<알고리즘>.json`: 검증 리포트. 알고리즘 단위 체크포인트다. 학습이 중간에 죽어도 다시 돌리면 끝난 알고리즘은 건너뛴다.
@@ -359,7 +361,7 @@ docker compose logs --tail 200 engine
 | 엔진이 `... was written by a newer engine (schema N)`으로 시작하지 못한다 | 지금 커밋과 `.auto-update-deployed` | 옛 엔진이 새 엔진이 올린 DB를 읽었다. 엔진은 더 새 스키마의 DB를 거부한다. 그 스키마를 아는 커밋으로 배포한다(4장). |
 | `EGW00133`(접근 토큰 발급 1분 1회) | 재시작을 반복했는지 | 토큰은 캐시되고, 1분 간격으로 스스로 다시 시도한다. |
 | `EGW00201`(초당 거래건수 초과) | 백필과 REST 대체 조회가 겹쳤는지 | 0.5초 뒤 스스로 다시 보낸다. 계속되면 `KRX_BACKFILL_MAX_PER_SECOND`를 낮춘다. |
-| 디스크가 찬다 | `df -h`, `du -sh data/*/` | 로컬 데이터는 자동으로 지우지 않는다. 지우기 전에 `docker compose run --rm engine archive --recheck`를 실행하고, `0 failed`로 끝나는지(종료 코드 0) 확인한다. `.uploaded.json`이 있다는 것만으로는 지금 파일이 S3에 있다고 볼 수 없다. 파티션을 합친 뒤 업로드가 실패하면 그 전 파일의 기록이 남아 있기 때문이다. 확인한 뒤에는 오래된 날짜 폴더를 `raw`, `events`, `gaps`에서 지워도 된다. `bars`는 지우지 않는다(백필이 다시 받는다). `state/training-cache/`도 자동으로 지우지 않는다. 이것은 지워도 된다(밤 학습이 S3에서 다시 받는다). |
+| 디스크가 찬다 | `df -h`, `du -sh data/*/` | 로컬 데이터는 자동으로 지우지 않는다. 지우기 전에 `docker compose run --rm engine archive --recheck`를 실행하고, `0 failed`로 끝나는지(종료 코드 0) 확인한다. `.uploaded.json`이 있다는 것만으로는 지금 파일이 S3에 있다고 볼 수 없다. 파티션을 합친 뒤 업로드가 실패하면 그 전 파일의 기록이 남아 있기 때문이다. 확인한 뒤에는 오래된 날짜 폴더를 `raw`, `events`, `gaps`에서 지워도 된다. `bars`는 지우지 않는다(백필이 다시 받는다). `state/training-cache/`는 밤 학습이 끝날 때 그 밤에 쓰지 않은 오래된 날짜를 지운다. 남은 것도 지워도 된다(밤 학습이 S3에서 다시 받는다). |
 | 서버를 잃었다 | Lightsail 콘솔의 스냅샷 | 1. 옛 인스턴스가 아직 있으면 먼저 멈추거나 지운다. 같은 Tailscale 신원으로 두 대가 동시에 뜨지 않게 하려는 것이다.<br>2. 마지막 자동 스냅샷으로 새 인스턴스를 만든다. 디스크에 Tailscale 신원, `.env`, 데이터가 그대로 있어서 부팅하면 `krx-quant`로 다시 붙고 엔진도 스스로 뜬다. Tailscale admin의 기기는 지우지 않는다. 지우면 접속할 길이 없어진다.<br>3. 새 인스턴스의 Lightsail 방화벽은 41641/udp만 열어 둔다(2.2의 10단계 명령).<br>4. `docker compose run --rm engine archive --recheck`로 S3와 맞춘다.<br>마지막 스냅샷 뒤에 녹화하고 아직 올리지 못한 데이터는 잃는다. |
 
 ## 7. 비용
@@ -400,7 +402,9 @@ docker compose logs --tail 200 engine
 | `models/versions/<알고리즘>/<버전>.json` | 설치한 적 있는 모든 모델. `rollback`이 여기서 읽는다 |
 | `models/history.json` | 설치와 되돌리기 이력. 항목마다 `at`, `algorithm`, `version`(기본 모델이면 `null`), `why`(`fit`, `promotion <날짜>`, `rollback from <버전>`, `installed before`) |
 | `models/applied.json` | `{"night": "<날짜>"}`: 마지막으로 적용한 승격 목록의 밤. 이 밤과 그 전의 목록은 다시 적용하지 않는다 |
-| `training-cache/` | 밤 학습이 Object Store에서 받아 둔 파일의 사본. 키 경로가 같다. 자동으로 지우지 않는다 |
+| `training-cache/` | 밤 학습이 Object Store에서 받아 둔 백필 1분봉과 녹화 이벤트의 사본. 키 경로가 같다. 학습이 끝나면 그 밤에 쓴 가장 오래된 날보다 오래된 날짜를 지운다 |
+
+> **바뀜** (2026-10-10, #48): 이전에는 `training-cache/`를 자동으로 지우지 않았다 → 지금은 밤마다 오래된 날짜를 지운다. 이유: 녹화 이벤트도 캐시하게 되어 크기가 커졌다.
 
 **서버의 저장소 폴더** (`~/krx-quant`)
 
@@ -417,7 +421,7 @@ docker compose logs --tail 200 engine
 | `raw/…/data.parquet`, `events/…/data.parquet`, `gaps/…/data.parquet` | 로컬 `data/`와 같은 경로. 장 마감 15분 뒤와 21:00에 올린다 |
 | `bars/…/bars.parquet` | 1분봉 백필. 로컬과 같은 경로 |
 | `models/<알고리즘>/<버전>.json` | 밤 학습의 challenger와 서버가 돌린 모델. 형식은 `state/models/<알고리즘>.json`과 같다 |
-| `reports/<날짜>/<알고리즘>.json` | 그 밤의 알고리즘별 검증 리포트이자 체크포인트: `algorithm`, `day`, `training_days`, `validation_days`, `champion`(`version`, `loss`), `challenger`(`version`, `loss`, `trained`), `promoted`, `reason`, `samples`(`validation`: 검증 표본 수, 검증까지 간 경우만). 학습하지 못했거나 검증할 정답이 없으면 `champion`, `challenger`가 `null`이다 |
+| `reports/<날짜>/<알고리즘>.json` | 그 밤의 알고리즘별 검증 리포트이자 체크포인트: `algorithm`, `day`, `training_days`, `validation_days`, `champion`(`version`, `loss`), `challenger`(`version`, `loss`, `trained`), `promoted`, `reason`, `reference_prices`(학습·검증일마다 `mid`: 녹화 중간가, `close`: 백필 종가), `samples`(`validation`: 검증 표본 수, 검증까지 간 경우만). 학습하지 못했거나 검증할 정답이 없으면 `champion`, `challenger`가 `null`이다 |
 | `promotions/<날짜>.json` | 그 밤의 승격 목록: `day`, `finalized_at`(확정 시각), `promoted`(알고리즘 → 버전), `reports`(위 리포트 전부). 모든 알고리즘이 끝난 뒤 한 번 쓴다 |
 | `live.json` | 서버가 지금 돌리는 버전(알고리즘 → 버전, 기본 모델이면 `<이름>-default`). 다음 밤의 champion이다 |
 
