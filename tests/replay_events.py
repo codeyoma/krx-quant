@@ -17,6 +17,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from krx_quant.algorithms import ALGORITHMS
 from krx_quant.api import create_app
 from krx_quant.baselines import BASELINES
+from krx_quant.consensus import NAMES as CONSENSUS
 from krx_quant.engine import Event, PredictionEngine
 from krx_quant.feeds import BOOK, INDEX, KOSPI200_FUTURES, KRX_TRADE, KST, TRADE, VI_STATUS, Feed
 from krx_quant.market_calendar import MarketCalendar
@@ -24,7 +25,10 @@ from krx_quant.replay import replay
 
 SYMBOL = "005930"
 # Everything that predicts at a bar close: the baselines and the registered algorithms.
-PREDICTORS = {b.name for b in BASELINES} | {a.name for a in ALGORITHMS}
+# What predicts at a bar close; the consensus is recorded there too, empty (no_members)
+# while no algorithm is active.
+PREDICTING = {b.name for b in BASELINES} | {a.name for a in ALGORITHMS}
+PREDICTORS = PREDICTING | set(CONSENSUS)
 DAY = date(2026, 10, 12)  # a Monday
 CALENDAR = MarketCalendar({DAY: True})
 FEE = 0.015 / 100

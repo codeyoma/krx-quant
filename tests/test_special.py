@@ -14,11 +14,19 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from krx_quant.consensus import NAMES as CONSENSUS
 from tests.replay_events import PREDICTORS, SYMBOL, api, at, every, get_json, kospi, kospi200_futures, run, vi
 from tests.test_replay import busy_morning
 
 # A VI from 09:30:20 to 09:32:40, seen on by 09:30:24 and released by 09:32:44.
 VI = [vi(at("09:30:24"), "09:30:20"), vi(at("09:32:44"), "09:30:20", "09:32:40")]
+
+
+def made_by(predictions: list[dict[str, Any]]) -> set[str]:
+    """The statuses of the baselines' and algorithms' predictions (the consensus is empty while
+    no algorithm is active).
+    """
+    return {p["status"] for p in predictions if p["algorithm"] not in CONSENSUS}
 
 
 async def predictions(engine: Any) -> dict[str, list[dict[str, Any]]]:
@@ -39,7 +47,7 @@ async def test_bar_closes_inside_a_vi_are_not_predicted(tmp_path: Path) -> None:
         assert {p["algorithm"] for p in made[close]} == PREDICTORS
         assert {(p["status"], p["p_up"], p["outcome"]) for p in made[close]} == {("vi", None, None)}
     for close in ("09:30", "09:33"):  # the VI was not yet known; it was over
-        assert {p["status"] for p in made[close]} == {"ok"}
+        assert made_by(made[close]) == {"ok"}
 
 
 def special(made: dict[str, list[dict[str, Any]]], close: str) -> set[bool]:
@@ -65,7 +73,7 @@ async def test_a_vi_learned_late_still_makes_what_it_touched_special(tmp_path: P
     engine = await run(tmp_path / "engine.db", [*busy_morning(), *late], until=at("09:45:00"))
 
     made = await predictions(engine)
-    assert {p["status"] for p in made["09:31"]} == {"ok"}
+    assert made_by(made["09:31"]) == {"ok"}
     for close in ("09:27", "09:30", "09:31", "09:32"):
         assert special(made, close) == {True}, close
     assert special(made, "09:33") == {False}
@@ -141,7 +149,7 @@ async def test_a_vi_whose_release_is_not_seen_lasts_three_minutes(tmp_path: Path
     made = await predictions(engine)
     for close in ("09:31", "09:32", "09:33"):  # to 09:33:20
         assert {p["status"] for p in made[close]} == {"vi"}, close
-    assert {p["status"] for p in made["09:34"]} == {"ok"}
+    assert made_by(made["09:34"]) == {"ok"}
 
 
 async def test_a_vi_at_the_open_skips_the_first_bar_closes(tmp_path: Path) -> None:
@@ -151,7 +159,7 @@ async def test_a_vi_at_the_open_skips_the_first_bar_closes(tmp_path: Path) -> No
 
     made = await predictions(engine)
     assert {p["status"] for p in made["09:01"] + made["09:02"]} == {"vi"}
-    assert {p["status"] for p in made["09:03"]} == {"ok"}
+    assert made_by(made["09:03"]) == {"ok"}
 
 
 async def test_a_futures_gap_from_before_the_open_is_a_sidecar_five_minutes_in(tmp_path: Path) -> None:
