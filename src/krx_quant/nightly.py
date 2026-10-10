@@ -291,7 +291,9 @@ def _days_with_bars(store: ObjectStore, symbols: Sequence[str]) -> dict[str, set
     return days
 
 
-def _mean_loss(algorithm: Algorithm, model: Model, scored: Sequence[Sample]) -> float:
-    return sum(log_loss(algorithm.predict(s.features, model), s.outcome) for s in scored if s.outcome) / len(
-        scored
-    )
+def _mean_loss(algorithm: Algorithm, model: Model, samples: Sequence[Sample]) -> float:
+    """The mean log loss of ``model`` over the samples with an outcome."""
+    losses = [
+        log_loss(algorithm.predict(s.features, model), s.outcome) for s in samples if s.outcome is not None
+    ]
+    return sum(losses) / len(losses)

@@ -2,8 +2,8 @@
 rollback in one command (``model_shelf``), and the models it runs published for the
 next night.
 
-At 08:00 on the first trading day after a night, that night's list is applied, if it was
-final by 07:30; otherwise yesterday's models run on, and the list is never applied. The
+At 08:00 each trading day the latest night's list not applied yet is, if it was final by
+07:30 and every model it names is in the store; otherwise yesterday's models run on. The
 running engine notices a model file that changed (the swap, ``krx-quant fit``,
 ``krx-quant rollback``) and switches to it within half a minute; the server then
 publishes what it runs (``live.json`` and the models), the champions of the next night.
@@ -24,6 +24,7 @@ from datetime import date, datetime, time, timedelta
 from typing import Any
 
 from krx_quant.algorithms import Algorithm, Model, load_models
+from krx_quant.archive import NIGHTLY_ARCHIVE
 from krx_quant.engine import PredictionEngine
 from krx_quant.feeds.base import KST, kst_day
 from krx_quant.market_calendar import MarketCalendar
@@ -74,28 +75,28 @@ def latest_night(store: ObjectStore, before: date) -> Night | None:
     return None if data is None else Night.from_dict(data)
 
 
-def apply_promotions(
-    store: ObjectStore, shelf: Shelf, calendar: MarketCalendar, *, today: date, at: datetime
-) -> NightStatus | None:
-    """The morning swap: install the promoted models of the night before ``today`` (the
-    last trading day before it), if its list was final by 07:30. None without a list.
+def apply_promotions(store: ObjectStore, shelf: Shelf, *, today: date, at: datetime) -> NightStatus | None:
+    """The morning swap: install the promoted models of the latest night not applied yet, if
+    its list was final by 07:30 ``today`` and every model it names is in the store. None
+    without a list.
+
+    A list final after 07:30 waits for the next morning, unless a later night replaces it.
     """
     night = latest_night(store, today)
     if night is None:
         return None
     if shelf.applied(night.day):
-        return NightStatus(night, True, "applied before")
-    if _next_trading_day(calendar, night.day) != today:
-        return NightStatus(night, False, f"not this morning's: the night of {night.day} was not trained")
+        return night_status(store, shelf, today)
     finalized = datetime.fromisoformat(night.finalized_at)
     if finalized > datetime.combine(today, DEADLINE, KST):
         reason = f"final at {finalized.astimezone(KST):%m-%d %H:%M}, after 07:30: yesterday's models run on"
         return NightStatus(night, False, reason)
-    for name, version in night.promoted.items():
-        data = get_json(store, model_key(name, version))
-        if data is None:
-            log.error("promoted %s is not in the store; %s keeps its model", version, name)
-            continue
+    models = {name: get_json(store, model_key(name, version)) for name, version in night.promoted.items()}
+    missing = [night.promoted[name] for name, data in models.items() if data is None]
+    if missing:
+        log.error("promoted %s not in the store; the list is not applied", ", ".join(missing))
+        return NightStatus(night, False, f"not in the store: {', '.join(missing)}; yesterday's models run on")
+    for name, data in models.items():
         shelf.install(name, Model.from_dict(data), f"promotion {night.day}", at)
     shelf.mark_applied(night.day)
     promoted = ", ".join(f"{n} {v}" for n, v in night.promoted.items()) or "nothing promoted"
@@ -103,13 +104,23 @@ def apply_promotions(
 
 
 def night_status(store: ObjectStore, shelf: Shelf, today: date) -> NightStatus | None:
-    """The latest night up to ``today``, and whether its promotions run yet."""
+    """The latest night up to ``today``, and whether its promotions run now: a rollback or a
+    fit since may have replaced them.
+    """
     night = latest_night(store, today + timedelta(days=1))
     if night is None:
         return None
-    if shelf.applied(night.day):
-        return NightStatus(night, True, "applied")
-    return NightStatus(night, False, "waiting for 08:00")
+    if not shelf.applied(night.day):
+        return NightStatus(night, False, "waiting for 08:00")
+    replaced = {
+        name: running
+        for name, version in night.promoted.items()
+        if (running := shelf.current_version(name)) != version
+    }
+    if replaced:
+        now_running = ", ".join(f"{n} runs {v or 'its defaults'}" for n, v in replaced.items())
+        return NightStatus(night, False, f"applied, then replaced: {now_running}")
+    return NightStatus(night, True, "applied")
 
 
 async def show_night(store: ObjectStore, shelf: Shelf, engine: PredictionEngine, today: date) -> None:
@@ -119,16 +130,10 @@ async def show_night(store: ObjectStore, shelf: Shelf, engine: PredictionEngine,
 
 
 async def morning_swap(
-    store: ObjectStore,
-    shelf: Shelf,
-    engine: PredictionEngine,
-    calendar: MarketCalendar,
-    *,
-    today: date,
-    at: datetime,
+    store: ObjectStore, shelf: Shelf, engine: PredictionEngine, *, today: date, at: datetime
 ) -> NightStatus | None:
     """Apply the night's list, switch the engine, and show the night in its status."""
-    status = await asyncio.to_thread(apply_promotions, store, shelf, calendar, today=today, at=at)
+    status = await asyncio.to_thread(apply_promotions, store, shelf, today=today, at=at)
     if status is not None:
         engine.training = status.as_dict()
     reload_models(engine, shelf)
@@ -172,16 +177,15 @@ async def keep_models(
     while True:
         await asyncio.sleep(WATCH_SECONDS)
         try:
-            changed = False
             if store is not None and now() >= swap_at:
                 today = kst_day(swap_at)
                 swap_at = _next_on_trading_day(calendar, SWAP_AT, now())
-                status = await morning_swap(store, shelf, engine, calendar, today=today, at=now())
-                changed = True
+                status = await morning_swap(store, shelf, engine, today=today, at=now())
                 if status is not None and (not status.applied or status.night.promoted):
                     await notify(_swap_notice(status))
-            changed = reload_models(engine, shelf) or changed
-            if changed and store is not None:
+                await asyncio.to_thread(publish_live, store, shelf, engine.algorithms)
+            elif reload_models(engine, shelf) and store is not None:  # a fit or a rollback
+                await show_night(store, shelf, engine, kst_day(now()))
                 await asyncio.to_thread(publish_live, store, shelf, engine.algorithms)
         except Exception:
             log.exception("the model swap failed")
@@ -202,7 +206,7 @@ async def keep_training(
     start = _first_training(calendar, train_at, now())
     while True:
         await asyncio.sleep(max(0.0, (start - now()).total_seconds()))
-        day = kst_day(start)
+        day = night_to_train(calendar, start)
         start = _next_on_trading_day(calendar, train_at, max(now(), start))
         try:
             failure = await _train(day)
@@ -274,8 +278,14 @@ def _next_on_trading_day(calendar: MarketCalendar, at: time, after: datetime) ->
         day += timedelta(days=1)
 
 
-def _next_trading_day(calendar: MarketCalendar, day: date) -> date:
-    following = day + timedelta(days=1)
-    while not calendar.is_trading_day(following):
-        following += timedelta(days=1)
-    return following
+def night_to_train(calendar: MarketCalendar, start: datetime) -> date:
+    """The day a training started at ``start`` trains on: that day once its bars are
+    archived (21:00), else the trading day before.
+    """
+    local = start.astimezone(KST)
+    if local.time() >= NIGHTLY_ARCHIVE:
+        return local.date()
+    day = local.date() - timedelta(days=1)
+    while not calendar.is_trading_day(day):
+        day -= timedelta(days=1)
+    return day

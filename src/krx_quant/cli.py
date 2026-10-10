@@ -99,6 +99,8 @@ def _fit(name: str, days: int | None) -> int:
 def _train(day: date | None) -> int:
     try:
         night = asyncio.run(run_training(Settings.from_env(require_kis=False), day))
+    except SettingsError:
+        raise  # a configuration error, reported as one (exit 2)
     except (FileNotFoundError, ValueError) as e:
         print(e, file=sys.stderr)
         return 1

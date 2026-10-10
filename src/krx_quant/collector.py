@@ -6,7 +6,7 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import Callable
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 import aiohttp
@@ -15,7 +15,7 @@ from aiohttp import web
 from krx_quant import kis
 from krx_quant.algorithms import ALGORITHMS, load_models
 from krx_quant.api import create_app
-from krx_quant.archive import archive
+from krx_quant.archive import NIGHTLY_ARCHIVE, archive
 from krx_quant.auth import TokenManager, tokens_and_client
 from krx_quant.backfill import keep_history
 from krx_quant.clock import SessionClock, SystemClock
@@ -68,7 +68,6 @@ _API_ALERT = "api"
 # after the NXT and KRX after-market close and the 20:30 backfill, for the rest of the
 # day's rows and the day's bars (the nightly training starts after it, KRX_TRAIN_AT).
 ARCHIVE_AFTER_CLOSE = timedelta(minutes=15)
-NIGHTLY_ARCHIVE = time(21, 0)
 
 # WebSocket approval keys last about a day; take a new one on reconnect after this.
 _APPROVAL_MAX_AGE = timedelta(hours=20)

@@ -206,9 +206,7 @@ async def test_a_promoted_model_runs_from_the_morning_and_defends_the_next_night
     )
     shelf = Shelf(tmp_path / "state")
 
-    await morning_swap(
-        store, shelf, engine, calendar, today=morning, at=datetime.combine(morning, time(8), KST)
-    )
+    await morning_swap(store, shelf, engine, today=morning, at=datetime.combine(morning, time(8), KST))
     publish_live(store, shelf, engine.algorithms)
     night(store_root, tmp_path, [learner])
 
