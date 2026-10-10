@@ -15,8 +15,12 @@ bar close in the prediction window, from what was received before it:
 
 Four minutes later each prediction is scored on both bases.
 
+Two consensus predictions follow (``consensus.py``): the fast one from the active
+algorithms done 2 seconds after they started, the final one once they are all done.
+
 After each day's close (+10 minutes) the algorithms' statuses are reviewed by the
-lifecycle rules (``lifecycle.py``); a retired algorithm is no longer run.
+lifecycle rules (``lifecycle.py``), a retired algorithm is no longer run, and the
+consensus weights are refitted.
 
 Special situations (``special.py``): a symbol in a VI at a bar close is not predicted
 (``vi``), and a prediction whose four minutes a VI, circuit breaker or sidecar touches is
@@ -44,7 +48,7 @@ from krx_quant.algorithms import ALGORITHMS, Algorithm, Model, register
 from krx_quant.baselines import BASELINES, Forecast, Inputs
 from krx_quant.clock import SessionClock
 from krx_quant.config import Settings
-from krx_quant.consensus import FAST, FINAL, NAMES, NO_WEIGHTS, PERIODS, Timing, Weights, pool
+from krx_quant.consensus import FAST, FINAL, NAMES, NO_WEIGHTS, SPANS, Timing, Weights, pool
 from krx_quant.consensus import fit as fit_weights
 from krx_quant.features import FeatureStore, FeatureValue, FeatureVector, Snapshot
 from krx_quant.feeds import (
@@ -320,14 +324,14 @@ class PredictionEngine:
             )
             if await self._deliver(text):  # else asked again at the next review
                 self.store.add_run("retire_candidate", at, name, text)
-        self.store.add_run("review", at, None, f"{len(result.changes)} status changes")
         await self._refit_weights(at)
+        # Last: a review that failed part way is run again after a restart.
+        self.store.add_run("review", at, None, f"{len(result.changes)} status changes")
 
     async def _refit_weights(self, at: datetime) -> None:
         """The consensus weights of the members active after the review."""
-        standings = self.store.statuses()
-        members = [a.name for a in self.algorithms if a.name in _with_status(standings, Status.ACTIVE)]
-        days = self.store.prediction_days(at.astimezone(KST).date(), max(PERIODS))
+        members = self.members()
+        days = self.store.prediction_days(at.astimezone(KST).date(), max(SPANS))
         rows = await asyncio.to_thread(self.store.scored_predictions, days, None, False)
         self.weights = await asyncio.to_thread(fit_weights, rows, members, days, at)
         self.store.save_weights(self.weights)
@@ -362,8 +366,9 @@ class PredictionEngine:
         session = self.calendar.session(bar_close.date())
         session_open = session.open if session is not None else None
         standings = self.store.statuses()  # read each time: retiring is a command
-        running = [a for a in self.algorithms if a.name not in _with_status(standings, Status.RETIRED)]
-        members = [a.name for a in running if a.name in _with_status(standings, Status.ACTIVE)]
+        retired, active = _with_status(standings, Status.RETIRED), _with_status(standings, Status.ACTIVE)
+        running = [a for a in self.algorithms if a.name not in retired]
+        members = [a.name for a in running if a.name in active]
         known = self._special.known(before=bar_close)
         stopped = [s for s in self.symbols if in_vi(known, s, bar_close)]
         if stopped:
@@ -393,15 +398,22 @@ class PredictionEngine:
         if not at_close:
             return
         chosen = self._within_cpu_budget(bar_close, running)
-        runs = [asyncio.ensure_future(self._run(a, bar_close, at_close)) for a in chosen]
-        finished: dict[str, Mapping[str, Forecast | None]] = {}
-        if runs:
-            soon = bar_close + timedelta(seconds=self.consensus_timing.fast_seconds) - self.clock.now()
-            done, _ = await asyncio.wait(runs, timeout=max(0.0, soon.total_seconds()))
-            finished = dict(r.result() for r in done)
-        self._record_consensus(FAST, bar_close, at_close, members, finished)
-        finished = dict(await asyncio.gather(*runs))
-        self._record_consensus(FINAL, bar_close, at_close, members, finished)
+        runs = {a.name: asyncio.ensure_future(self._run(a, bar_close, at_close)) for a in chosen}
+        mine = [runs[m] for m in members if m in runs]
+        try:
+            # The fast consensus: the members done within a moment of starting.
+            if mine:
+                await asyncio.wait(mine, timeout=self.consensus_timing.fast_seconds)
+            self._record_consensus(FAST, bar_close, at_close, members, _finished(mine))
+            # The final one: every member done (each has its time budget), not the others.
+            if mine:
+                await asyncio.wait(mine)
+            self._record_consensus(FINAL, bar_close, at_close, members, _finished(mine))
+            await asyncio.gather(*runs.values(), return_exceptions=True)
+        except BaseException:
+            for task in runs.values():  # shutting down: none may write after the store closes
+                task.cancel()
+            raise
 
     def _record_consensus(
         self,
@@ -414,6 +426,7 @@ class PredictionEngine:
         """The consensus of the members' forecasts finished so far; empty where there are none."""
         pooled: dict[str, Forecast | None] = {}
         empty: dict[str, Forecast | None] = {}
+        why = "none_finished" if members else "no_members"
         for symbol in at_close:
             present = {m: f for m in members if (f := finished.get(m, {}).get(symbol)) is not None}
             if present:
@@ -423,7 +436,7 @@ class PredictionEngine:
         version = self.weights.version
         made = [
             (name, version, forecasts, status)
-            for forecasts, status in ((pooled, "ok"), (empty, "no_members"))
+            for forecasts, status in ((pooled, "ok"), (empty, why))
             if forecasts
         ]
         self._record(bar_close, at_close, made)
@@ -530,6 +543,13 @@ class PredictionEngine:
             scores.append((pending.prediction_id, _score(pending, mid_target)))
         if scores:
             self.store.score_all(scores, self.clock.now())
+
+
+def _finished(
+    runs: Sequence[asyncio.Future[tuple[str, Mapping[str, Forecast | None]]]],
+) -> dict[str, Mapping[str, Forecast | None]]:
+    """The forecasts of the runs done (a run that failed counts as none)."""
+    return dict(r.result() for r in runs if r.done() and not r.cancelled() and r.exception() is None)
 
 
 def _with_status(standings: Mapping[str, Standing], status: Status) -> set[str]:

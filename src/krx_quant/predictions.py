@@ -84,9 +84,12 @@ CREATE TABLE IF NOT EXISTS statuses (  -- each algorithm's status changes, oldes
     reason TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS statuses_by_algorithm ON statuses (algorithm, id);
-CREATE TABLE IF NOT EXISTS consensus_weights (  -- refitted after each close (#18)
-    version TEXT NOT NULL,
-    computed_at TEXT NOT NULL,
+CREATE TABLE IF NOT EXISTS consensus_fits (  -- the consensus weights refitted after each close (#18)
+    version TEXT PRIMARY KEY,
+    computed_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS consensus_weights (
+    version TEXT NOT NULL REFERENCES consensus_fits (version),
     symbol TEXT NOT NULL,
     slot TEXT NOT NULL,               -- "09:00": the bar closes 09:01-09:30
     algorithm TEXT NOT NULL,
@@ -258,32 +261,30 @@ class PredictionStore:
         self.version += 1
         with self._db:
             self._db.execute("DELETE FROM consensus_weights WHERE version = ?", (weights.version,))
+            self._db.execute(
+                "INSERT OR REPLACE INTO consensus_fits (version, computed_at) VALUES (?, ?)",
+                (weights.version, iso(weights.computed_at)),
+            )
             self._db.executemany(
-                "INSERT INTO consensus_weights (version, computed_at, symbol, slot, algorithm, weight)"
-                " VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO consensus_weights (version, symbol, slot, algorithm, weight)"
+                " VALUES (?, ?, ?, ?, ?)",
                 [
-                    (weights.version, iso(weights.computed_at), symbol, slot, name, w)
+                    (weights.version, symbol, slot, name, w)
                     for (symbol, slot), cell in weights.cells.items()
                     for name, w in cell.items()
                 ],
             )
-            if not weights.cells:  # remember the fit even without a cell
-                self._db.execute(
-                    "INSERT INTO consensus_weights VALUES (?, ?, '', '', '', 0)",
-                    (weights.version, iso(weights.computed_at)),
-                )
 
     def latest_weights(self) -> Weights | None:
         """The last weights fitted, if any."""
         latest = self._db.execute(
-            "SELECT version, computed_at FROM consensus_weights ORDER BY computed_at DESC LIMIT 1"
+            "SELECT version, computed_at FROM consensus_fits ORDER BY computed_at DESC LIMIT 1"
         ).fetchone()
         if latest is None:
             return None
         cells: dict[tuple[str, str], dict[str, float]] = {}
         for r in self._db.execute(
-            "SELECT symbol, slot, algorithm, weight FROM consensus_weights"
-            " WHERE version = ? AND algorithm != ''",
+            "SELECT symbol, slot, algorithm, weight FROM consensus_weights WHERE version = ?",
             (latest["version"],),
         ):
             cells.setdefault((r["symbol"], r["slot"]), {})[r["algorithm"]] = r["weight"]

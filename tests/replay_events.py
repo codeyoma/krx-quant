@@ -24,7 +24,6 @@ from krx_quant.market_calendar import MarketCalendar
 from krx_quant.replay import replay
 
 SYMBOL = "005930"
-# Everything that predicts at a bar close: the baselines and the registered algorithms.
 # What predicts at a bar close; the consensus is recorded there too, empty (no_members)
 # while no algorithm is active.
 PREDICTING = {b.name for b in BASELINES} | {a.name for a in ALGORITHMS}

@@ -11,6 +11,7 @@ finished or run out of time. Both are predictions of their own, stored and score
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -149,13 +150,14 @@ async def test_an_algorithm_better_on_every_span_gains_weight_as_the_evidence_gr
 async def test_with_little_evidence_the_weights_stay_near_equal(tmp_path: Path) -> None:
     weights = await weights_after_review(tmp_path, 1, {"alpha": RIGHT, "beta": MISSES_DOWNS})
 
-    trust = 8 / 208
+    trust = 8 / 208  # one day of 8 bar closes against 200 of belief in equal weights
     assert weights["alpha"] == pytest.approx(trust + (1 - trust) / 2, abs=1e-6)
 
 
 async def test_an_algorithm_good_only_lately_gains_nothing(tmp_path: Path) -> None:
-    # gamma was wrong for 15 days and right for the last 5; alpha missed the downs all along.
-    # Over 5 days gamma is the better, over 20 alpha: neither is steady, so equal weights.
+    # gamma was wrong for 20 days and right for the last 5; alpha missed the downs all along.
+    # The 5-day span (the replayed day and four) has gamma the better, the 20-day span (14
+    # wrong days and 5 right) alpha: neither is steady, so equal weights.
     days = 25
     gamma = [WRONG] * (days - 5) + [RIGHT] * 5
     db = tmp_path / "engine.db"
@@ -192,3 +194,61 @@ async def test_the_consensus_uses_the_weights_refitted_after_the_close(tmp_path:
     w_upper = trust + (1 - trust) / 2
     assert final["model_version"] == "condorcet-20261012"
     assert final["p_up"] == pytest.approx(w_upper * 0.6 + (1 - w_upper) * 0.2)
+
+
+async def test_with_three_members_only_the_steady_one_takes_what_the_weak_one_loses(tmp_path: Path) -> None:
+    # alpha is right all along; beta only for the last four days; gamma never on the moves.
+    # Over 5 days (the replayed day and four) the pool would split alpha and beta, over 20
+    # alpha alone. alpha is above a third on both spans (it keeps the smaller, 1/2), beta is
+    # above on one and below on the other (it stays at a third), gamma below on both (about
+    # 0). What gamma gives up goes to alpha only: 2/3, 1/3 and 0 before the shrink.
+    db = tmp_path / "engine.db"
+    put_statuses(db, dict.fromkeys(("alpha", "beta", "gamma"), Status.ACTIVE))
+    history = weekdays_before(DAY, 25)
+    for i, day in enumerate(history):
+        beta = RIGHT if i >= len(history) - 4 else WRONG
+        put_days(db, [day], {"alpha": RIGHT, "beta": beta, "gamma": WRONG})
+
+    engine = await run(db, [], until=at("15:45:00"), algorithms=[ALPHA, BETA, GAMMA])
+
+    async with api(engine) as client:
+        weights = (await get_json(client, "/v1/consensus"))["weights"][SYMBOL]["09:00"]
+    trust = 152 / 352
+    assert weights["beta"] == pytest.approx(1 / 3, abs=1e-6)
+    assert weights["alpha"] == pytest.approx(trust * 2 / 3 + (1 - trust) / 3, abs=1e-4)
+    assert weights["gamma"] == pytest.approx((1 - trust) / 3, abs=1e-4)
+
+
+class Failing(FixedAlgorithm):
+    def predict(self, features: Any, model: Any) -> Any:
+        raise ValueError("a bug")
+
+
+async def test_members_that_have_not_finished_or_failed_leave_the_consensus_without_a_forecast(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "engine.db"
+    failing = Failing("failing", features=("relative_volume",), unique=("relative_volume",))
+    put_statuses(db, {"slow": Status.ACTIVE, "failing": Status.ACTIVE})
+
+    engine = await run(
+        db, busy_morning(), until=at("09:02:00"), algorithms=[SLOW, failing], consensus_timing=TIMING
+    )
+
+    made = await at_close(engine, "09:01")
+    assert (made["consensus-fast"]["status"], made["consensus-fast"]["p_up"]) == ("none_finished", None)
+    assert (made["consensus-final"]["status"], made["consensus-final"]["p_up"]) == ("ok", 0.2)  # slow alone
+
+
+async def test_the_final_consensus_does_not_wait_for_algorithms_outside_it(tmp_path: Path) -> None:
+    db = tmp_path / "engine.db"
+    late = FixedAlgorithm("late", features=("acceleration",), unique=("acceleration",), seconds=0.4)
+    put_statuses(db, {"quick": Status.ACTIVE, "late": Status.PROBATION})
+
+    await run(db, busy_morning(), until=at("09:01:30"), algorithms=[QUICK, late], consensus_timing=TIMING)
+
+    with sqlite3.connect(db) as conn:
+        order = [
+            r[0] for r in conn.execute("SELECT algorithm FROM predictions WHERE status = 'ok' ORDER BY id")
+        ]
+    assert order.index("consensus-final") < order.index("late")  # stored while late still worked
