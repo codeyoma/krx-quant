@@ -25,6 +25,8 @@ ROUTES = {
     "/v1/consensus": "consensus",
     "/v1/macro": "macro",
 }
+# The WebSocket route and the definition of each of its messages.
+STREAM = {"/v1/stream": "event"}
 
 
 def check(definition: str, body: Any) -> None:

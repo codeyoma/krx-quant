@@ -79,7 +79,21 @@ async def replay(
         consensus_timing=consensus_timing,
         leaders=leaders,
     )
-    for feed, row in events:
+    await replay_into(engine, clock, events, until=until, display_delay=display_delay)
+    return engine
+
+
+async def replay_into(
+    engine: PredictionEngine,
+    clock: FakeClock,
+    events: Iterable[Event],
+    *,
+    until: datetime,
+    display_delay: timedelta = timedelta(0),
+) -> None:
+    """Feed ``events`` (in receipt order) received by ``until`` to ``engine`` on ``clock``,
+    running what falls due in between; the clock ends at ``until``."""
+    for tr_id, row in events:
         received_at: datetime = row["received_at"]
         if received_at > until:
             break
@@ -87,10 +101,9 @@ async def replay(
             raise ValueError(f"events out of order: {received_at} is before the clock at {clock.now()}")
         await _run_until(engine, clock, received_at, display_delay)
         clock.set(received_at)
-        engine.on_event(feed, row)
+        engine.on_event(tr_id, row)
     await _run_until(engine, clock, until, display_delay)
     clock.set(until)
-    return engine
 
 
 async def _run_until(engine: PredictionEngine, clock: FakeClock, until: datetime, delay: timedelta) -> None:

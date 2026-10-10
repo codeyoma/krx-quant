@@ -128,7 +128,7 @@ def put_days(
                             "005930", algorithm, "v1", t, t, SURE[call], at_target, 81_250, 81_250, 2
                         )
                     )
-            pending = store.add_all(made)
+            pending = store.add_all(made).pending
             scores = []
             for p in pending:
                 outcome = OUTCOMES[

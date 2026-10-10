@@ -24,7 +24,7 @@ from krx_quant.clock import FakeClock
 from krx_quant.collector import run_collector
 from krx_quant.demo import demo_app
 from krx_quant.fake_kis import FakeKis
-from tests.api_schema import ROUTES, SCHEMA, check
+from tests.api_schema import ROUTES, SCHEMA, STREAM, check
 from tests.kis_frames import book_frame
 from tests.replay_events import PREDICTORS, api, at, run
 from tests.test_collector import settings_for
@@ -88,8 +88,8 @@ async def test_every_route_has_its_definition(tmp_path: Path) -> None:
         r.resource.canonical for r in create_app(engine).router.routes() if r.method == "GET" and r.resource
     }
 
-    assert routes == set(ROUTES)
-    assert set(ROUTES.values()) <= set(SCHEMA["$defs"])
+    assert routes == set(ROUTES) | set(STREAM)
+    assert {*ROUTES.values(), *STREAM.values()} <= set(SCHEMA["$defs"])
 
 
 async def test_live_and_demo_need_their_kis_status(tmp_path: Path) -> None:
@@ -104,7 +104,7 @@ def test_the_schema_is_valid_and_closed() -> None:
     Draft202012Validator.check_schema(SCHEMA)
 
     # Fragments others extend with allOf, closing them with unevaluatedProperties.
-    fragments = {"/$defs/entry_fields", "/$defs/query", "/$defs/algorithm_fields"}
+    fragments = {"/$defs/entry_fields", "/$defs/query", "/$defs/algorithm_fields", "/$defs/prediction_fields"}
 
     def open_objects(node: Any, path: str) -> list[str]:
         found = []
@@ -153,10 +153,16 @@ async def test_the_live_engine_keeps_the_contract(kis: FakeKis, tmp_path: Path) 
     try:
         await kis.wait_for_subscriptions(set(kis.script))
         await kis.round_trip()
-        clock.set(at("09:31:00.2"))
         base = f"http://127.0.0.1:{port}"
-        await poll(f"{base}/v1/symbols/005930/latest", lambda b: len(b["predictions"]) == len(PREDICTORS))
-        async with aiohttp.ClientSession(base) as http:
+        await poll(f"{base}/v1/status", lambda b: True)
+        async with aiohttp.ClientSession(base) as http, http.ws_connect("/v1/stream") as ws:
+            clock.set(at("09:31:00.2"))
+            events: list[dict[str, Any]] = []
+            async with asyncio.timeout(5):
+                while not events or events[-1].get("kind") != "final":
+                    events.append(await ws.receive_json())
+                    check("event", events[-1])
+            await poll(f"{base}/v1/symbols/005930/latest", lambda b: len(b["predictions"]) == len(PREDICTORS))
 
             async def get(path: str) -> tuple[int, Any]:
                 async with http.get(path) as response:
@@ -168,3 +174,5 @@ async def test_the_live_engine_keeps_the_contract(kis: FakeKis, tmp_path: Path) 
         await asyncio.wait_for(task, 5)
 
     assert checked["status"] == 1
+    assert events[0]["type"] == "health", "the KIS status first, on connecting"
+    assert {e["type"] for e in events} >= {"prediction", "consensus"}

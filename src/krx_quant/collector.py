@@ -55,6 +55,8 @@ from krx_quant.object_store import open_store
 from krx_quant.polling import Poller, PollJob
 from krx_quant.predictions import DB_NAME, PredictionStore, iso
 from krx_quant.recorder import ParquetRecorder
+from krx_quant.signals import Signals
+from krx_quant.stream import LiveStatus
 from krx_quant.swap import keep_models, keep_training, show_night
 
 log = logging.getLogger(__name__)
@@ -187,6 +189,8 @@ async def run_collector(
                 session, settings.telegram_bot_token, settings.telegram_chat_id, settings.telegram_api_url
             )
             engine.notify = alerts.deliver  # retirement candidates
+            if settings.signal_rule is not None:
+                engine.signals = Signals(settings.signal_rule, alerts.signal)
             tokens, client = tokens_and_client(session, settings, now)
             await _warm_up(tokens)
             poller = Poller(
@@ -273,7 +277,7 @@ async def run_collector(
 async def _serve_api(
     settings: Settings,
     engine: PredictionEngine,
-    live_status: Callable[[], dict[str, Any]],
+    live_status: LiveStatus,
     alerts: Alerts,
 ) -> web.AppRunner | None:
     """Start the Engine API; if it cannot listen, alert and go on recording without it."""
@@ -302,7 +306,7 @@ async def _serve_api(
     return runner
 
 
-def _live_status(stream: _Stream, health: FeedHealth, now: Clock) -> Callable[[], dict[str, Any]]:
+def _live_status(stream: _Stream, health: FeedHealth, now: Clock) -> LiveStatus:
     def feed(f: FeedState, at: datetime) -> dict[str, Any]:
         last = f.last_received_at
         return {

@@ -202,6 +202,9 @@ curl http://krx-quant:8080/v1/macro
 | `KRX_FRED_API_KEY` | (없음) | FRED 키. https://fred.stlouisfed.org/docs/api/api_key.html 에서 계정을 만든 뒤 받는다(무료). 없으면 FRED 지표(미국 10년물, WTI)를 건너뛴다 |
 | `KRX_ECOS_URL`, `KRX_FRED_URL`, `KRX_YAHOO_URL` | 각 공식 주소 | 매크로 출처 주소. 테스트용이다 |
 | `KRX_REGIME_SHOCK_SOX_PERCENT`, `KRX_REGIME_SHOCK_VIX`, `KRX_REGIME_SHOCK_USDKRW_PERCENT`, `KRX_REGIME_SOX_MOVE_PERCENT`, `KRX_REGIME_WEAK_WON_PERCENT` | `3`, `30`, `1`, `1`, `0.5` | 일일 국면 문턱값([design.md](design.md#45-매크로-지표)) |
+| `KRX_SIGNAL_ALERT` | `off` | `on`이면 텔레그램 신호 알림을 보낸다([engine-api.md](engine-api.md#텔레그램-신호-알림-19)) |
+| `KRX_SIGNAL_MIN_PROBABILITY` | `0.6` | 신호를 보낼 최종 합의의 상승(하락) 확률. 0.5–1. 알림이 꺼져 있어도 값을 검사한다 |
+| `KRX_SIGNAL_MIN_AGREE` | `2` | 같은 방향을 예측해야 하는 정식 알고리즘 수. 1 이상 |
 
 compose와 스크립트가 읽는 변수다. 엔진은 읽지 않는다.
 
@@ -365,6 +368,7 @@ docker compose logs --tail 200 engine
 | `WARNING krx_quant.engine: <이름> skipped at ... for the CPU budget` 또는 `<이름> took over 30.0s` 로그가 잦다 | `docker stats`로 CPU 사용률, DB의 `runs` 테이블(`kind`가 `cpu_budget`) | 알고리즘 계산이 서버에 버겁다. 텔레그램 알림은 없다. 4GB 요금제로 올리거나 `KRX_CPU_BUDGET_SECONDS`를 조정한다. |
 | `[장애] 매크로 출처 <ecos/fred/yahoo/kis>가 3번 연속 실패했습니다: <이유>` | 로그의 `macro source ... failed` | 키가 틀렸으면(`ECOS INFO-100`, `FRED 400 ... api_key`) `.env`를 고친다. `HTTP 5xx`나 연결 실패는 출처 쪽 장애다. 다음 거래일 07:30에 다시 읽고, 응답하면 `[복구] 매크로 출처 …가 다시 응답합니다.`가 온다. 그동안 그 출처의 지표 없이 국면을 정한다. |
 | `[장애] <날짜> 밤 학습이 실패했습니다: <이유>` | 로그의 `nightly training of ... failed`. 6시간 안에 안 끝나면 이유가 `not done in 6:00:00`이다 | `docker compose run --rm --no-deps engine train --day <날짜>`로 다시 돌린다. 끝난 알고리즘은 건너뛴다. 다음 밤 학습이 성공하면 `[복구] 밤 학습이 다시 됩니다.`가 온다. 그동안 전날 모델이 계속 돈다. |
+| `[신호] <종목> 상승 64% · 정식 3개 중 2개 같은 방향 · 09:31 봉 마감, 09:35까지` | `/v1/symbols/<종목>/latest`의 `consensus-final` | `KRX_SIGNAL_ALERT=on`일 때만 온다. 장애가 아니라 예측 신호다. 같은 종목·방향은 4분 안에 다시 오지 않는다. 주문 코드는 없다. |
 | `[알림] <날짜> 밤 학습`과 알고리즘별 `승격`·`유지`·`학습 안 함` | | 매일 밤 학습의 요약이다. 할 일은 없다. 승격된 모델은 다음 거래일 08:00에 바뀐다. |
 | `[알림] 모델 교체 (<날짜> 밤 학습): <알고리즘> → <버전>` | `/v1/status`의 `training` | 08:00 교체가 됐다. 되돌리려면 `docker compose exec engine krx-quant rollback <이름>`. |
 | `[알림] <날짜> 밤 학습 결과를 쓰지 않습니다: <이유>` | `/v1/status`의 `training.reason` | 전날 모델이 계속 돈다. `final at ..., after 07:30`이면 다음 아침에 쓴다(더 새 밤이 없으면). `not in the store: ...`면 S3에 모델이 없는 것이다. 다음 아침에 다시 시도한다. |

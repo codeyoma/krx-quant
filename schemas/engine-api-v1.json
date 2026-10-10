@@ -153,12 +153,24 @@
     },
 
     "prediction": {
+      "allOf": [{"$ref": "#/$defs/prediction_fields"}],
+      "unevaluatedProperties": false
+    },
+    "prediction_item": {
+      "description": "A prediction of the stream, where several symbols go together.",
+      "allOf": [{"$ref": "#/$defs/prediction_fields"}],
+      "type": "object",
+      "required": ["symbol"],
+      "properties": {"symbol": {"type": "string"}},
+      "unevaluatedProperties": false
+    },
+    "prediction_fields": {
+      "description": "The fields of a prediction, open so the stream's items can add the symbol.",
       "type": "object",
       "required": [
         "algorithm", "model_version", "bar_close", "displayed_at", "target_at", "status",
         "p_up", "p_flat", "p_down", "expected_ticks", "outcome"
       ],
-      "additionalProperties": false,
       "properties": {
         "algorithm": {"type": "string"},
         "model_version": {"type": "string"},
@@ -311,20 +323,18 @@
       "properties": {
         "status": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/lifecycle_status"}]},
         "since": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]},
-        "history": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "required": ["at", "from", "to", "reason"],
-            "additionalProperties": false,
-            "properties": {
-              "at": {"$ref": "#/$defs/time"},
-              "from": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/lifecycle_status"}]},
-              "to": {"$ref": "#/$defs/lifecycle_status"},
-              "reason": {"type": "string"}
-            }
-          }
-        }
+        "history": {"type": "array", "items": {"$ref": "#/$defs/status_change"}}
+      }
+    },
+    "status_change": {
+      "type": "object",
+      "required": ["at", "from", "to", "reason"],
+      "additionalProperties": false,
+      "properties": {
+        "at": {"$ref": "#/$defs/time"},
+        "from": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/lifecycle_status"}]},
+        "to": {"$ref": "#/$defs/lifecycle_status"},
+        "reason": {"type": "string"}
       }
     },
     "algorithms": {
@@ -507,6 +517,76 @@
         },
         "failed": {"type": "object", "additionalProperties": {"type": "string"}},
         "skipped": {"type": "array", "items": {"enum": ["ecos", "fred", "yahoo", "kis"]}}
+      }
+    },
+
+    "event": {
+      "description": "A message of GET /v1/stream (WebSocket), one JSON text each.",
+      "oneOf": [
+        {"$ref": "#/$defs/prediction_event"},
+        {"$ref": "#/$defs/consensus_event"},
+        {"$ref": "#/$defs/outcome_event"},
+        {"$ref": "#/$defs/health_event"},
+        {"$ref": "#/$defs/lifecycle_event"}
+      ]
+    },
+    "prediction_event": {
+      "description": "Predictions just displayed for a bar close: the baselines, or an algorithm.",
+      "type": "object",
+      "required": ["type", "at", "bar_close", "predictions"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {"const": "prediction"},
+        "at": {"$ref": "#/$defs/time"},
+        "bar_close": {"$ref": "#/$defs/time"},
+        "predictions": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/prediction_item"}}
+      }
+    },
+    "consensus_event": {
+      "description": "A consensus just displayed for a bar close.",
+      "type": "object",
+      "required": ["type", "at", "kind", "bar_close", "predictions"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {"const": "consensus"},
+        "at": {"$ref": "#/$defs/time"},
+        "kind": {"enum": ["fast", "final"]},
+        "bar_close": {"$ref": "#/$defs/time"},
+        "predictions": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/prediction_item"}}
+      }
+    },
+    "outcome_event": {
+      "description": "Predictions just scored, with their outcomes.",
+      "type": "object",
+      "required": ["type", "at", "outcomes"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {"const": "outcome"},
+        "at": {"$ref": "#/$defs/time"},
+        "outcomes": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/prediction_item"}}
+      }
+    },
+    "health_event": {
+      "description": "The KIS status, on connecting and when the connection or a feed's gap changes. Live and demo only.",
+      "type": "object",
+      "required": ["type", "at", "kis"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {"const": "health"},
+        "at": {"$ref": "#/$defs/time"},
+        "kis": {"$ref": "#/$defs/kis"}
+      }
+    },
+    "lifecycle_event": {
+      "description": "An algorithm's status changed.",
+      "type": "object",
+      "required": ["type", "at", "algorithm", "change"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {"const": "lifecycle"},
+        "at": {"$ref": "#/$defs/time"},
+        "algorithm": {"type": "string"},
+        "change": {"$ref": "#/$defs/status_change"}
       }
     },
 
