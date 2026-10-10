@@ -122,6 +122,14 @@ KIS_APP_KEY=test-app-key KIS_APP_SECRET=test-app-secret KIS_REST_URL=http://127.
 
 가짜 서버는 구독에 응답하고 10초마다 PINGPONG을 보낸다. `--trades`를 붙이면 구독한 통합 체결(`H0UNCNT0`) 종목마다 1초에 한 번 가짜 체결도 보낸다. 다른 시세 메시지는 테스트에서만 흘린다. Docker 안에서 다른 컨테이너가 붙게 하려면 `--host 0.0.0.0`을 쓴다(`deploy/compose.smoke.yaml`).
 
+### 화면을 만들 때 (데모 엔진)
+
+```bash
+uv run krx-quant demo-engine            # http://127.0.0.1:8090/v1/status
+```
+
+서버 없이 엔진 API를 띄운다(#20). 지어낸 아침(2026-10-12 09:00–10:30, 3종목, KOSPI·선물, VI 한 번)을 실제 엔진으로 재생하고, 실제 API 코드로 답한다. 늘 같은 응답이다. 시계는 10:30에 멈춰 있고, `status.mode`는 `demo`다. 모든 알고리즘을 정식(`active`)으로 두어 합의도 나온다. Fincept 화면의 엔진 주소를 `http://127.0.0.1:8090`으로 바꿔 붙인다. DB는 `state/demo.sqlite3`(`--db`)에 새로 만든다.
+
 ### 실제 KIS로 확인하기 (장중)
 
 1. KIS Open API 실전 앱키와 시크릿을 `.env`의 `KIS_APP_KEY`, `KIS_APP_SECRET`에 넣는다. `KRX_SYMBOLS=005930`으로 둔다.
@@ -155,6 +163,7 @@ uv run python -c "import glob, pyarrow.parquet as pq; d = sorted(glob.glob('data
 | `test-alert` | 텔레그램에 `[테스트]` 메시지를 보낸다 | 필요(쓰지는 않는다) |
 | `notify <글>` | 텔레그램에 `[알림] <글>`을 보낸다. `deploy/auto-update.sh`가 쓴다 | 없어도 된다 |
 | `fake-kis [--port 18080] [--host 127.0.0.1] [--trades]` | 가짜 KIS 서버(아래 "키 없이 확인하기") | 없어도 된다 |
+| `demo-engine [--port 8090] [--host 127.0.0.1] [--db state/demo.sqlite3]` | 데모 엔진 API(아래 "화면을 만들 때") | 없어도 된다 |
 
 종료 코드: 0은 성공이다. 2는 설정 오류(`configuration error: ...`)나 잘못된 인자다. 1은 KIS 오류(`KIS error: ...`, Docker가 다시 띄운다)이거나 명령이 할 일을 못 한 경우다. 예: 업로드에 실패한 파티션, 학습할 1분봉 없음, 되돌릴 모델 없음, 텔레그램 전송 실패.
 
@@ -176,7 +185,7 @@ uv run python -c "import glob, pyarrow.parquet as pq; d = sorted(glob.glob('data
 | P0 | 저장소 준비, 설계 문서 | 완료 |
 | P1 | 수집기 | 거의 완료(#2–#6, #30). 남은 것: 첫 거래일 확인(#7), ETF 장중 확인(#29), REST 대체 추가(#28), 매크로(#8) |
 | P2 | 예측·채점 핵심 | 진행 중. 완료: #9–#13, #15, #17, #18. 남은 것: Markov(#14), Turing(#16), 엔진 API 완성(#19) |
-| P3 | Fincept 화면, 빌드 | 시작 전(#20, #21) |
+| P3 | Fincept 화면, 빌드 | 진행 중: 첫 화면과 빌드(#20), 나머지(#21) |
 | P4 | 밤 학습 | 진행 중. 상시 서버의 밤 학습과 08:00 교체는 됐다(PR #45). 녹화 이벤트로 학습하기(#22), EC2 Spot과 비용 상한(#23)이 남았다 |
 | P5 | 호가 알고리즘, 재생 테스트 | 하루 재생(`replay`)만 있다. Kalman(#25), Shannon(#26), Poisson(#27), 사전 검증 도구(#24) |
 
