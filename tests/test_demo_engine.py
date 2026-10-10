@@ -6,12 +6,14 @@ Input: nothing but a database path. Output: the Engine API responses a screen re
 
 from __future__ import annotations
 
+import socket
 from pathlib import Path
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from krx_quant.algorithms import ALGORITHMS
+from krx_quant.cli import main
 from krx_quant.consensus import NAMES as CONSENSUS
 from krx_quant.demo import DEMO_SYMBOLS, demo_app
 from tests.replay_events import get_json
@@ -47,7 +49,7 @@ async def test_the_demo_is_the_same_every_time(tmp_path: Path) -> None:
             assert await get_json(a, path) == await get_json(b, path)
 
 
-@pytest.mark.parametrize("name", ["engine.sqlite3", "engine.sqlite3-wal"])
+@pytest.mark.parametrize("name", ["engine.sqlite3", "engine.sqlite3-wal", "ENGINE.SQLITE3"])
 async def test_the_demo_never_replaces_the_live_engines_database(tmp_path: Path, name: str) -> None:
     live = tmp_path / name
     live.write_text("live")
@@ -56,3 +58,20 @@ async def test_the_demo_never_replaces_the_live_engines_database(tmp_path: Path,
         await demo_app(live)
 
     assert live.read_text() == "live"
+
+
+def test_a_taken_port_is_a_clear_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    taken = socket.socket()
+    taken.bind(("127.0.0.1", 0))
+    taken.listen()
+    port = taken.getsockname()[1]
+    monkeypatch.chdir(tmp_path)
+    try:
+        code = main(["demo-engine", "--port", str(port), "--db", str(tmp_path / "demo.sqlite3")])
+    finally:
+        taken.close()
+
+    assert code == 1
+    assert f"demo Engine API not started on 127.0.0.1:{port}" in capsys.readouterr().err

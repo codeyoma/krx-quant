@@ -203,7 +203,12 @@ async def _demo_engine(port: int, host: str, db: Path) -> int:
         return 1
     runner = web.AppRunner(app)
     await runner.setup()
-    await web.TCPSite(runner, host, port).start()
+    try:
+        await web.TCPSite(runner, host, port).start()
+    except OSError as e:  # the port is taken, or the address is not this machine's
+        await runner.cleanup()
+        print(f"demo Engine API not started on {host}:{port}: {e}", file=sys.stderr)
+        return 1
     print(f"demo Engine API: http://{host}:{port}/v1/status (2026-10-12 10:30, made-up data)", flush=True)
     try:
         await asyncio.Event().wait()

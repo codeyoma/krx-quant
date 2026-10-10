@@ -65,7 +65,8 @@ async def demo_app(db: Path) -> web.Application:
     """The Engine API on the demo morning, replayed into ``db`` (replaced). Refuses the live
     engine's database name, so a mistyped path cannot replace it.
     """
-    if db.name in {DB_NAME, f"{DB_NAME}-wal", f"{DB_NAME}-shm"}:
+    # Case-insensitive: on macOS and Windows ENGINE.SQLITE3 is the same file.
+    if db.name.casefold() in {n.casefold() for n in (DB_NAME, f"{DB_NAME}-wal", f"{DB_NAME}-shm")}:
         raise ValueError(f"{db} is named like the live engine's database; the demo needs its own file")
     for leftover in (db, db.with_name(db.name + "-wal"), db.with_name(db.name + "-shm")):
         leftover.unlink(missing_ok=True)
