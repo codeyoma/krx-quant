@@ -103,10 +103,16 @@ def put_status(db: Path, algorithm: str, status: str, since: date) -> None:
 
 
 def put_days(
-    db: Path, days: list[date], calls: dict[str, list[Direction]], *, with_baselines: bool = True
+    db: Path,
+    days: list[date],
+    calls: dict[str, list[Direction]],
+    *,
+    with_baselines: bool = True,
+    on_display: Direction | None = None,
 ) -> None:
     """Each algorithm's ``calls`` on each of ``days`` (one sure call per bar close from 09:01,
-    scored against OUTCOMES on both bases), with the baselines' unless they are there.
+    scored against OUTCOMES on both bases, or on basis B as ``on_display`` if given), with the
+    baselines' unless they are there.
     """
     if with_baselines:
         calls = {**calls, **BASELINE_CALLS}
@@ -129,7 +135,7 @@ def put_days(
                     (p.target_at - datetime.combine(d, time(9, 5), KST)) // timedelta(minutes=1)
                 ]
                 mid = 81_250 + {Direction.UP: 300, Direction.FLAT: 0, Direction.DOWN: -300}[outcome]
-                scores.append((p.prediction_id, Score(mid, outcome, outcome, None)))
+                scores.append((p.prediction_id, Score(mid, outcome, on_display or outcome, None)))
             store.score_all(scores, datetime.combine(d, time(15, 30), KST))
 
 

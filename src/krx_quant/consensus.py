@@ -17,8 +17,9 @@ working, timed out or failed), ``none_finished``.
 **Weights**, per symbol and 30-minute slot, are refitted after each day's close:
 
 1. For the last 5 and the last 20 days with predictions, the weights whose pool would
-   have had the lowest log loss on the bar closes every member predicted (basis B,
-   special predictions left out), found by EM.
+   have had the lowest log loss on the bar closes every member predicted, found by EM.
+   Scored from the bar close (basis A), so every member is judged on the same outcome;
+   special predictions are left out.
 2. Only a weight steady across both spans moves: above equal in both, it takes the
    smaller; below in both, the larger; otherwise equal. What the steady losers give up
    goes to the steady winners (or, with none, to the rest alike), so they add up to 1.
@@ -26,7 +27,8 @@ working, timed out or failed), ``none_finished``.
 3. Shrunk toward equal weights by the evidence: with n bar closes in the 20 days, the
    fitted weights count n / (n + 200).
 
-Before the first fit, or for a member the fit did not know, the members count equally.
+Before the first fit the members count equally; a member the fit did not know gets an
+equal share, the others the rest as fitted.
 
 The fast consensus waits 2 seconds from when the algorithms start working, just after the
 bar close; an engine running late still gives them that long.
@@ -48,7 +50,9 @@ FINAL = "consensus-final"
 NAMES = (FAST, FINAL)
 EQUAL_VERSION = "condorcet-equal"  # before any fit
 SPANS = (5, 20)  # days with predictions
-BASIS = "b"  # as the leaderboard
+# The fit's outcomes: from the bar close (A), one per bar close for every member. On basis B
+# each member is scored from its own display, which a pool of them does not share.
+BASIS = "a"
 SHRINK = 200  # bar closes' worth of belief in equal weights
 _EM_ROUNDS = 200
 _EM_TOLERANCE = 1e-9
@@ -71,13 +75,17 @@ class Weights:
     def of(self, symbol: str, bar_close: datetime, present: Sequence[str]) -> dict[str, float]:
         """The weights of the ``present`` members at ``symbol``'s bar close, adding up to 1.
 
-        A member the fit did not know counts as one of equals.
+        A member the fit did not know gets an equal share; the known ones share the rest as
+        fitted.
         """
         fitted = self.cells.get((symbol, slot(bar_close)), {})
         equal = 1 / len(present)
-        raw = {name: fitted.get(name, equal) for name in present}
-        total = sum(raw.values())
-        return {name: w / total for name, w in raw.items()} if total > 0 else dict.fromkeys(present, equal)
+        known = {name: fitted[name] for name in present if name in fitted}
+        total = sum(known.values())
+        if total <= 0:
+            return dict.fromkeys(present, equal)
+        rest = 1 - equal * (len(present) - len(known))
+        return {name: rest * known[name] / total if name in known else equal for name in present}
 
 
 NO_WEIGHTS = Weights(EQUAL_VERSION, None)
