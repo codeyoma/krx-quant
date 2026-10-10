@@ -22,8 +22,10 @@ from krx_quant.feeds import BOOK, INDEX, KOSPI200_FUTURES, TRADE, VI_STATUS, Fee
 from krx_quant.feeds.base import KST
 from krx_quant.lifecycle import Status
 from krx_quant.market_calendar import MarketCalendar
-from krx_quant.predictions import PredictionStore
+from krx_quant.nightly import Night
+from krx_quant.predictions import DB_NAME, PredictionStore
 from krx_quant.replay import replay
+from krx_quant.swap import NightStatus
 
 DEMO_DAY = date(2026, 10, 12)
 DEMO_SYMBOLS = ("005930", "000660", "009150")
@@ -60,7 +62,11 @@ def demo_events() -> list[Event]:
 
 
 async def demo_app(db: Path) -> web.Application:
-    """The Engine API on the demo morning, replayed into ``db`` (replaced)."""
+    """The Engine API on the demo morning, replayed into ``db`` (replaced). Refuses the live
+    engine's database name, so a mistyped path cannot replace it.
+    """
+    if db.name in {DB_NAME, f"{DB_NAME}-wal", f"{DB_NAME}-shm"}:
+        raise ValueError(f"{db} is named like the live engine's database; the demo needs its own file")
     for leftover in (db, db.with_name(db.name + "-wal"), db.with_name(db.name + "-shm")):
         leftover.unlink(missing_ok=True)
     start = _at(time(0))
@@ -77,14 +83,9 @@ async def demo_app(db: Path) -> web.Application:
         start=start,
         until=_at(_END),
     )
-    engine.training = {
-        "day": "2026-10-09",
-        "finalized_at": "2026-10-09T21:31:40+09:00",
-        "applied": True,
-        "reason": "applied",
-        "promoted": {},
-        "reports": [{"algorithm": a.name, "promoted": False, "reason": "demo"} for a in ALGORITHMS],
-    }
+    reports = [{"algorithm": a.name, "promoted": False, "reason": "demo"} for a in ALGORITHMS]
+    night = Night(date(2026, 10, 9), "2026-10-09T21:31:40+09:00", {}, reports)
+    engine.training = NightStatus(night, True, "applied").as_dict()
     return create_app(engine, mode="demo")
 
 

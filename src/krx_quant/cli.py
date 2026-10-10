@@ -194,9 +194,14 @@ async def _fake_kis(port: int, host: str, trades: bool) -> None:
         await fake.stop()
 
 
-async def _demo_engine(port: int, host: str, db: Path) -> None:
+async def _demo_engine(port: int, host: str, db: Path) -> int:
     db.parent.mkdir(parents=True, exist_ok=True)
-    runner = web.AppRunner(await demo_app(db))
+    try:
+        app = await demo_app(db)
+    except ValueError as e:
+        print(e, file=sys.stderr)
+        return 1
+    runner = web.AppRunner(app)
     await runner.setup()
     await web.TCPSite(runner, host, port).start()
     print(f"demo Engine API: http://{host}:{port}/v1/status (2026-10-12 10:30, made-up data)", flush=True)
@@ -204,6 +209,7 @@ async def _demo_engine(port: int, host: str, db: Path) -> None:
         await asyncio.Event().wait()
     finally:
         await runner.cleanup()
+    return 0
 
 
 def _positive(text: str) -> int:
@@ -304,7 +310,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "fake-kis":
             asyncio.run(_fake_kis(args.port, args.host, args.trades))
         elif args.command == "demo-engine":
-            asyncio.run(_demo_engine(args.port, args.host, args.db))
+            return asyncio.run(_demo_engine(args.port, args.host, args.db))
     except SettingsError as e:
         print(f"configuration error: {e}", file=sys.stderr)
         return 2

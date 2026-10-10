@@ -33,7 +33,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
 from functools import partial
-from typing import Any
+from typing import Any, Literal
 
 from aiohttp import web
 
@@ -56,6 +56,8 @@ from krx_quant.stats import (
 )
 
 ENGINE_KEY = web.AppKey("engine", PredictionEngine)
+# live: the collector; demo: `krx-quant demo-engine`; replay: tests.
+Mode = Literal["live", "demo", "replay"]
 MODE_KEY = web.AppKey("mode", str)
 LiveStatus = Callable[[], dict[str, Any]]
 LIVE_STATUS_KEY: web.AppKey[LiveStatus] = web.AppKey("live_status")
@@ -76,7 +78,7 @@ MAX_LIMIT = 1000
 def create_app(
     engine: PredictionEngine,
     *,
-    mode: str = "replay",
+    mode: Mode = "replay",
     live_status: LiveStatus | None = None,
     min_sample: int = DEFAULT_MIN_SAMPLE,
 ) -> web.Application:

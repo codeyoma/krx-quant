@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from krx_quant.algorithms import ALGORITHMS
@@ -44,3 +45,14 @@ async def test_the_demo_is_the_same_every_time(tmp_path: Path) -> None:
     async with TestClient(TestServer(first)) as a, TestClient(TestServer(second)) as b:
         for path in ("/v1/symbols", "/v1/symbols/005930/predictions?limit=20&algorithm=newton"):
             assert await get_json(a, path) == await get_json(b, path)
+
+
+@pytest.mark.parametrize("name", ["engine.sqlite3", "engine.sqlite3-wal"])
+async def test_the_demo_never_replaces_the_live_engines_database(tmp_path: Path, name: str) -> None:
+    live = tmp_path / name
+    live.write_text("live")
+
+    with pytest.raises(ValueError, match="live engine"):
+        await demo_app(live)
+
+    assert live.read_text() == "live"
