@@ -190,3 +190,6 @@ async def test_a_day_without_a_macro_regime_runs_the_default_transitions_and_say
     assert sum(trending) > 2 * sum(fading)
     assert runs(tmp_path / "unknown.db") == [("no_regime", "no macro regime for 2026-10-12")]
     assert runs(tmp_path / "known.db") == []
+    # A regime this engine does not know (a newer collector's) is no regime, said so too.
+    await run(tmp_path / "new.db", busy_morning(), until=at("09:05:00"), regimes=lambda d, before: "melt_up")
+    assert runs(tmp_path / "new.db") == [("no_regime", "no macro regime for 2026-10-12 (unknown: melt_up)")]

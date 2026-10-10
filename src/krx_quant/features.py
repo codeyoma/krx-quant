@@ -237,9 +237,9 @@ def minute_ticks(s: Snapshot) -> Series:
         return ()
     moves: list[float] = []
     for before, after in zip(bars, bars[1:], strict=False):
-        quiet = int((after.start - before.start) / BAR) - 1
+        quiet = (after.start - before.start) // BAR - 1
         moves += [0.0] * quiet + [(after.close - before.close) / s.tick]
-    moves += [0.0] * int((s.bar_close - bars[-1].start - BAR) / BAR)  # quiet since the last bar
+    moves += [0.0] * ((s.bar_close - bars[-1].start - BAR) // BAR)  # quiet since the last bar
     return tuple(moves[-MINUTE_MOVES:])
 
 

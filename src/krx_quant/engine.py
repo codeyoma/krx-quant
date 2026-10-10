@@ -55,7 +55,7 @@ from krx_quant.clock import SessionClock
 from krx_quant.config import Settings
 from krx_quant.consensus import FAST, FINAL, NAMES, NO_WEIGHTS, SPANS, Timing, Weights, pool
 from krx_quant.consensus import fit as fit_weights
-from krx_quant.features import FeatureStore, FeatureVector, Leaders, Value
+from krx_quant.features import REGIME_CODES, FeatureStore, FeatureVector, Leaders, Value
 from krx_quant.feeds import (
     BOOK,
     BOOK_SNAPSHOT,
@@ -455,19 +455,20 @@ class PredictionEngine:
             raise
 
     def _regime(self, bar_close: datetime) -> str | None:
-        """The day's macro regime, read once a day; a day without one is recorded (``runs``)
-        when an algorithm reads it."""
+        """The day's macro regime, read once a day. A day without one, or with one this
+        engine does not know, is recorded (``runs``) when an algorithm reads it."""
         day = bar_close.astimezone(KST).date()
         if self._regimes is None:
             return None
         if day not in self._regime_days:
             session = self.calendar.session(day)
             opened = session.open if session is not None else bar_close
-            regime = self._regime_days[day] = self._regimes(day, opened)
+            read = self._regimes(day, opened)
+            regime = self._regime_days[day] = read if read in REGIME_CODES else None
             midnight = datetime.combine(day, time(), KST)
             if regime is None and "macro_regime" in self._feature_names:
                 if not self.store.count_runs("no_regime", midnight):  # once, restarts too
-                    detail = f"no macro regime for {day}"
+                    detail = f"no macro regime for {day}" + (f" (unknown: {read})" if read else "")
                     log.warning(detail)
                     self.store.add_run("no_regime", bar_close, None, detail)
         return self._regime_days[day]

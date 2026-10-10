@@ -26,7 +26,15 @@ from krx_quant.archive import partition_files
 from krx_quant.backfill import FUTURES_BAR_SCHEMA, FUTURES_BARS_TR, bars_key
 from krx_quant.config import Settings
 from krx_quant.feeds import KST
-from krx_quant.macro import MacroCollector, Source, day_regime, first_macro_run, keep_macro, macro_recorder
+from krx_quant.macro import (
+    REGIME_SCHEMA,
+    MacroCollector,
+    Source,
+    day_regime,
+    first_macro_run,
+    keep_macro,
+    macro_recorder,
+)
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.notify import Alerts
 from krx_quant.recorder import ParquetRecorder
@@ -404,3 +412,8 @@ async def test_the_day_s_regime_is_the_one_decided_before_the_open(setup: Setup)
     opened = datetime.combine(DAY, time(9, 0), KST)
     assert day_regime(setup.settings.data_dir, DAY, opened) == "risk_off"
     assert day_regime(setup.settings.data_dir, date(2026, 10, 13), opened) is None
+    newer = {"day": DAY, "recorded_at": datetime.combine(DAY, time(8, 0), KST), "regime": "melt_up"}
+    newer |= {"reasons": "[]", "failed": "{}", "skipped": "[]"}
+    setup.recorder.record("macro", DAY, "regime", "market", newer, REGIME_SCHEMA)
+    setup.recorder.flush()
+    assert day_regime(setup.settings.data_dir, DAY, opened) is None, "a newer collector's regime: none here"

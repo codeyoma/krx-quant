@@ -109,7 +109,7 @@
 |---|---|
 | `predictions` | `id`, `symbol`, `algorithm`, `model_version`, `bar_close`(t), `displayed_at`, `p_up`, `p_flat`, `p_down`, `expected_ticks`, `status`(`ok`, `timed_out`, `error`, `vi`, 합의의 `no_members`, `none_finished`). 재생 결과의 `skipped`는 `ok`가 아닌 예측을 모두 센다. `ok`가 아니면 확률과 기대수익이 비어 있고 `outcomes` 행이 없다. |
 | `outcomes` | `prediction_id`, `target_at`(t + 4분), `mid_close`(A), `mid_display`(B), `mid_target`, `flat_ticks`(k), `class_a`, `class_b`(`up`/`flat`/`down`), `special`, `unscorable`, `scored_at`(채점 전에는 비어 있음) |
-| `runs` | `id`, `kind`(`cpu_budget`: CPU 예산으로 건너뜀, `review`: 일일 상태 점검, `retire_candidate`: 은퇴 후보 알림, `no_regime`: 그날 매크로 국면이 없어 기본 전이행렬로 돈 날. 첫 봉 마감에 하루 한 번), `at`, `algorithm`, `detail` |
+| `runs` | `id`, `kind`(`cpu_budget`: CPU 예산으로 건너뜀, `review`: 일일 상태 점검, `retire_candidate`: 은퇴 후보 알림, `no_regime`: 그날 매크로 국면이 없거나 엔진이 모르는 이름이어서 기본 전이행렬로 돈 날(`detail`에 `(unknown: <이름>)`). 첫 봉 마감에 하루 한 번), `at`, `algorithm`, `detail` |
 | `statuses` | `id`, `algorithm`, `at`, `previous`, `status`, `reason`: 알고리즘 상태 이력(#17) |
 | `consensus_fits` | `version`, `computed_at`: 합의 가중치를 계산한 기록(#18). 엔진은 시작할 때 마지막 버전을 읽는다. |
 | `consensus_weights` | `version`, `symbol`, `slot`, `algorithm`, `weight`: 그 버전의 칸별 가중치 |
@@ -539,7 +539,7 @@ uv run krx-quant fit newton --days 60
 - 국면마다 1분 종가 변화(틱)가 정규분포를 따른다고 본다(평균, 표준편차).
 - 최근 1시간의 움직임(`minute_ticks`)을 전이행렬의 장기 분포에서 시작해 앞으로 걸러(forward filter), 지금 각 국면에 있을 확률을 낸다.
 - 그 확률에서 전이행렬로 4분 뒤까지 국면을 옮겨 가며 4분 움직임 합의 평균과 분산을 정확히 계산한다(분마다의 분산, 국면이 이어지며 생기는 공분산 포함). 그 정규분포로 상승·보합·하락 확률을 낸다.
-- 전이행렬은 그날 매크로 국면(`macro_regime`)의 것을 쓴다. 국면이 없는 날은 기본 전이행렬을 쓰고, 엔진이 `runs`에 `no_regime`(`no macro regime for <날짜>`)을 하루 한 번 남기고 로그에 경고한다.
+- 전이행렬은 그날 매크로 국면(`macro_regime`)의 것을 쓴다. 국면이 없거나 엔진이 모르는 이름(새 버전 수집기의 국면 등)인 날은 기본 전이행렬을 쓰고, 엔진이 `runs`에 `no_regime`(`no macro regime for <날짜>`, 모르는 이름이면 뒤에 `(unknown: <이름>)`)을 하루 한 번 남기고 로그에 경고한다.
 - 학습은 Baum–Welch 재추정이다. 종목·날짜마다 그날의 1분 움직임을 한 줄로 이어(첫 표본의 1시간, 그 뒤 표본마다 새 분) 최대 30번 반복한다.
   - 국면별 분포(평균, 표준편차)는 모든 날로 배운다.
   - 매크로 국면의 전이행렬은 그 국면의 날로 배운다. 기본 행렬 20개분을 더해서, 날이 적은 국면은 기본 행렬 쪽으로 당겨진다. 그 국면의 날이 없으면 기본 행렬과 같다.

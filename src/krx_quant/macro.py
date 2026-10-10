@@ -41,7 +41,7 @@ from krx_quant.feeds.base import KST, kst_day
 from krx_quant.market_calendar import MarketCalendar, calendar_store, next_on_trading_day
 from krx_quant.notify import Alerts
 from krx_quant.recorder import ParquetRecorder
-from krx_quant.regime import Decision, RegimeInputs, RegimeRules, decide
+from krx_quant.regime import Decision, Regime, RegimeInputs, RegimeRules, decide
 
 log = logging.getLogger(__name__)
 
@@ -421,7 +421,13 @@ def day_regime(data_dir: Path, day: date, before: datetime) -> str | None:
     and training use it), or None. A ``krx-quant macro`` run after the open changes nothing."""
     regimes = _rows(data_dir / regime_prefix(day) / "symbol=market")
     decided = [r for r in regimes if r["recorded_at"] < before]
-    return decided[-1]["regime"] if decided else None
+    if not decided:
+        return None
+    regime: str = decided[-1]["regime"]
+    if regime not in {r.value for r in Regime}:  # a newer collector's: no regime here
+        log.warning("unknown macro regime %r recorded for %s: none", regime, day)
+        return None
+    return regime
 
 
 def latest_macro(data_dir: Path, today: date) -> LatestMacro | None:
