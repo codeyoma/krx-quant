@@ -12,6 +12,7 @@ from collections.abc import Callable
 from datetime import date, datetime
 from pathlib import Path
 
+from krx_quant.algorithms import ALGORITHMS
 from krx_quant.archive import run_archive
 from krx_quant.backfill import run_backfill
 from krx_quant.collector import measure_subscription_limit, run_collector
@@ -20,6 +21,8 @@ from krx_quant.fake_kis import FakeKis
 from krx_quant.feeds.base import KST
 from krx_quant.kis import KisError
 from krx_quant.lifecycle import Status
+from krx_quant.model_shelf import Shelf
+from krx_quant.nightly import run_training
 from krx_quant.notify import send_test_alert
 from krx_quant.predictions import DB_NAME, PredictionStore
 from krx_quant.replay import replay_day
@@ -89,7 +92,33 @@ def _fit(name: str, days: int | None) -> int:
         return 1
     print(f"{fitted.model.version}: {dict(fitted.model.params)}")
     print(f"trained on {fitted.days} days ({fitted.samples} samples): {fitted.model.trained}")
-    print(f"saved to {fitted.path}; the engine uses it from its next start")
+    print(f"saved to {fitted.path}; the running engine switches to it within a minute")
+    return 0
+
+
+def _train(day: date | None) -> int:
+    try:
+        night = asyncio.run(run_training(Settings.from_env(require_kis=False), day))
+    except (FileNotFoundError, ValueError) as e:
+        print(e, file=sys.stderr)
+        return 1
+    print(night.summary())
+    print(f"promoted: {night.promoted or 'nothing'}; the server applies it at 08:00")
+    return 0
+
+
+def _rollback(name: str) -> int:
+    settings = Settings.from_env(require_kis=False)
+    if name not in {a.name for a in ALGORITHMS}:
+        print(f"unknown algorithm {name!r}", file=sys.stderr)
+        return 1
+    try:
+        model = Shelf(settings.state_dir).rollback(name, datetime.now(KST))
+    except ValueError as e:
+        print(e, file=sys.stderr)
+        return 1
+    running = model.version if model else "its defaults"
+    print(f"{name} now runs {running}; the running engine switches within a minute")
     return 0
 
 
@@ -195,6 +224,14 @@ def main(argv: list[str] | None = None) -> int:
     fit_cmd.add_argument(
         "--days", type=_positive, help="trading days to train on (default: the algorithm's own)"
     )
+    train_cmd = sub.add_parser(
+        "train", help="train every algorithm on KRX_OBJECT_STORE's latest days and store the promotion list"
+    )
+    train_cmd.add_argument(
+        "--day", type=date.fromisoformat, help="the night to train, YYYY-MM-DD (default: latest)"
+    )
+    rollback_cmd = sub.add_parser("rollback", help="put an algorithm back on the model it ran before")
+    rollback_cmd.add_argument("algorithm")
     retire_cmd = sub.add_parser("retire", help="retire an algorithm: it is no longer run; its records stay")
     retire_cmd.add_argument("algorithm")
     unretire_cmd = sub.add_parser("unretire", help="put a retired algorithm back on probation")
@@ -220,6 +257,10 @@ def main(argv: list[str] | None = None) -> int:
             return _replay(args.day, args.db)
         elif args.command == "fit":
             return _fit(args.algorithm, args.days)
+        elif args.command == "train":
+            return _train(args.day)
+        elif args.command == "rollback":
+            return _rollback(args.algorithm)
         elif args.command == "retire":
             return _retire(args.algorithm)
         elif args.command == "unretire":

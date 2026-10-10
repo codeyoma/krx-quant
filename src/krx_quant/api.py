@@ -116,6 +116,8 @@ async def _status(request: web.Request) -> web.Response:
             for w in engine.special_today()
         ],
     }
+    # The latest night's training and whether its promotions run (swap.py); null before any.
+    body["training"] = engine.training
     live_status = request.app.get(LIVE_STATUS_KEY)
     if live_status is not None:
         body["kis"] = live_status()

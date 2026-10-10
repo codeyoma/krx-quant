@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import time
 from pathlib import Path
 
 from dotenv import dotenv_values
@@ -103,6 +104,9 @@ class Settings:
     cpu_budget_seconds: float = 30.0
     # An algorithm needs this many scored predictions in a leaderboard to be ranked.
     min_sample: int = DEFAULT_MIN_SAMPLE
+    # The collector starts the nightly training at this time (KST) on trading days, once the
+    # day's bars are archived (KRX_TRAIN_AT, default 21:30; "off": trained elsewhere).
+    train_at: time | None = None
 
     @classmethod
     def from_env(
@@ -211,4 +215,15 @@ class Settings:
             algorithm_seconds=float(number("KRX_ALGORITHM_SECONDS", "30", float, maximum=55)),
             cpu_budget_seconds=float(number("KRX_CPU_BUDGET_SECONDS", "30", float)),
             min_sample=int(number("KRX_MIN_SAMPLE", str(DEFAULT_MIN_SAMPLE), int)),
+            train_at=_time_or_off("KRX_TRAIN_AT", values.get("KRX_TRAIN_AT", "21:30")),
         )
+
+
+def _time_or_off(name: str, raw: str) -> time | None:
+    text = raw.strip().lower()
+    if text in ("", "off"):
+        return None
+    try:
+        return time.fromisoformat(text)
+    except ValueError as e:
+        raise SettingsError(f"{name} must be HH:MM or off, got {raw!r}") from e

@@ -22,14 +22,16 @@ from typing import Any
 
 import pyarrow.parquet as pq
 
-from krx_quant.algorithms import ALGORITHMS, Model, save_model
+from krx_quant.algorithms import ALGORITHMS, Model, model_path
 from krx_quant.algorithms.contract import Sample
 from krx_quant.backfill import FUTURES_BARS_TR, MINUTE_BARS_TR
 from krx_quant.config import Settings
 from krx_quant.contracts import KOSPI200, USD
 from krx_quant.engine import HORIZON, prediction_window
 from krx_quant.features import LEAD_FEATURES, FeatureStore, FeatureVector, Leaders, Snapshot
+from krx_quant.feeds.base import KST
 from krx_quant.market_calendar import MarketCalendar, calendar_store
+from krx_quant.model_shelf import Shelf
 from krx_quant.pricing import classify
 from krx_quant.reference import BAR, Bar
 
@@ -126,13 +128,22 @@ def load_bar_days(data_dir: Path, symbols: Sequence[str], days: int) -> dict[tup
         if taken == days:
             break
         day = date.fromisoformat(folder.name.removeprefix("date="))
-        found = False
+        found = bar_days_on(data_dir, symbols, [day])
+        out.update(found)
+        taken += bool(found)
+    return out
+
+
+def bar_days_on(
+    data_dir: Path, symbols: Sequence[str], days: Iterable[date]
+) -> dict[tuple[str, date], list[Bar]]:
+    """The backfilled bars of ``symbols`` on ``days``, where there are any."""
+    out: dict[tuple[str, date], list[Bar]] = {}
+    for day in days:
         for symbol in symbols:
-            bars = _read_bars(folder, MINUTE_BARS_TR, symbol)
+            bars = _read_bars(data_dir / "bars" / f"date={day.isoformat()}", MINUTE_BARS_TR, symbol)
             if bars is not None:
                 out[(symbol, day)] = bars
-                found = True
-        taken += found
     return out
 
 
@@ -174,7 +185,8 @@ def fit_algorithm(settings: Settings, name: str, days: int | None = None) -> Fit
         leaders=leaders,
     )
     model = algorithm.fit(training)
-    path = save_model(settings.state_dir, name, model)
+    Shelf(settings.state_dir).install(name, model, "fit", datetime.now(KST))
+    path = model_path(settings.state_dir, name)
     return Fitted(
         model, path, len({day for _, day in bar_days}), sum(s.outcome is not None for s in training)
     )

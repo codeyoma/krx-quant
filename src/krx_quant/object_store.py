@@ -1,4 +1,4 @@
-"""Object Store: permanent storage for recorded days (and later models and reports).
+"""Object Store: permanent storage for recorded days, models and training reports.
 
 Two implementations share one interface: a local directory, for development and
 tests, and S3. Keys are ``/``-separated paths such as
@@ -9,7 +9,9 @@ the SHA-256 of its content, so a caller can tell whether a file is already store
 from __future__ import annotations
 
 import hashlib
+import json
 import shutil
+import tempfile
 import uuid
 from pathlib import Path
 from typing import Any, Protocol
@@ -35,9 +37,27 @@ class ObjectStore(Protocol):
 
     def get(self, key: str, target: Path) -> None: ...
 
-    def keys(self) -> list[str]:
-        """Every key, sorted."""
+    def keys(self, prefix: str = "") -> list[str]:
+        """Every key starting with ``prefix``, sorted."""
         ...
+
+
+def put_json(store: ObjectStore, key: str, data: Any) -> None:
+    """Store ``data`` as a JSON object."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "object.json"
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=1))
+        store.put(key, path, file_digest(path))
+
+
+def get_json(store: ObjectStore, key: str) -> Any:
+    """The JSON object stored under ``key``, or None if there is none."""
+    if store.digest(key) is None:
+        return None
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "object.json"
+        store.get(key, path)
+        return json.loads(path.read_text())
 
 
 def file_digest(path: Path) -> str:
@@ -70,13 +90,15 @@ class LocalObjectStore:
     def get(self, key: str, target: Path) -> None:
         shutil.copyfile(self._root / key, target)
 
-    def keys(self) -> list[str]:
+    def keys(self, prefix: str = "") -> list[str]:
         if not self._root.exists():
             return []
         return sorted(
-            p.relative_to(self._root).as_posix()
+            key
             for p in self._root.rglob("*")
-            if p.is_file() and not p.name.startswith(".")
+            if p.is_file()
+            and not p.name.startswith(".")
+            and (key := p.relative_to(self._root).as_posix()).startswith(prefix)
         )
 
 
@@ -110,10 +132,10 @@ class S3ObjectStore:
     def get(self, key: str, target: Path) -> None:
         self._client.download_file(self._bucket, self._prefix + key, str(target))
 
-    def keys(self) -> list[str]:
+    def keys(self, prefix: str = "") -> list[str]:
         found: list[str] = []
         for page in self._client.get_paginator("list_objects_v2").paginate(
-            Bucket=self._bucket, Prefix=self._prefix
+            Bucket=self._bucket, Prefix=self._prefix + prefix
         ):
             found += [obj["Key"][len(self._prefix) :] for obj in page.get("Contents", [])]
         return sorted(found)
