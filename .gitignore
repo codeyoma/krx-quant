@@ -23,6 +23,9 @@ state/
 *.sqlite
 *.db
 
+# The server's auto-update: the main that failed to start (deploy/auto-update.sh)
+.auto-update-failed
+
 # OS / editors
 .DS_Store
 Thumbs.db

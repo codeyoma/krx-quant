@@ -23,7 +23,7 @@ from krx_quant.kis import KisError
 from krx_quant.lifecycle import Status
 from krx_quant.model_shelf import Shelf
 from krx_quant.nightly import run_training
-from krx_quant.notify import send_test_alert
+from krx_quant.notify import send_notice, send_test_alert
 from krx_quant.predictions import DB_NAME, PredictionStore
 from krx_quant.replay import replay_day
 from krx_quant.training import fit_algorithm
@@ -155,6 +155,11 @@ def _set_status(name: str, to: Status, reason: str, *, allowed: Callable[[Status
     return 0
 
 
+async def _notify(text: str) -> int:
+    """Send a notice from a script (the server's auto-update); 1 if it did not go."""
+    return 0 if await send_notice(Settings.from_env(require_kis=False), text) else 1
+
+
 async def _test_alert() -> int:
     try:
         sent = await send_test_alert(Settings.from_env())
@@ -239,6 +244,8 @@ def main(argv: list[str] | None = None) -> int:
     unretire_cmd = sub.add_parser("unretire", help="put a retired algorithm back on probation")
     unretire_cmd.add_argument("algorithm")
     sub.add_parser("test-alert", help="send a test message to the Telegram chat that receives alerts")
+    notify_cmd = sub.add_parser("notify", help="send a notice to the Telegram chat that receives alerts")
+    notify_cmd.add_argument("text")
     fake = sub.add_parser("fake-kis", help="run a local fake KIS server for offline testing")
     fake.add_argument("--port", type=int, default=18080)
     fake.add_argument("--host", default="127.0.0.1", help="address to listen on (0.0.0.0 inside Docker)")
@@ -267,6 +274,8 @@ def main(argv: list[str] | None = None) -> int:
             return _retire(args.algorithm)
         elif args.command == "unretire":
             return _unretire(args.algorithm)
+        elif args.command == "notify":
+            return asyncio.run(_notify(args.text))
         elif args.command == "test-alert":
             return asyncio.run(_test_alert())
         elif args.command == "fake-kis":
