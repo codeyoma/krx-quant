@@ -134,7 +134,7 @@ class _Judge:
         """The change ``name``'s status is due for, if any."""
         if status in (Status.PROBATION, Status.CLONE):
             measured = correlations(name, earlier, self.rows(held, True))
-            twin = max(measured.items(), key=lambda kv: kv[1], default=None)
+            twin = most_correlated(measured)
             if twin is not None and twin[1] > CLONE_CORRELATION:
                 if status is Status.PROBATION:
                     return Change(
@@ -184,6 +184,11 @@ class _Judge:
     def _lift_low(self, name: str, days: Sequence[date]) -> float | None:
         judged = self._judged(name, days)
         return None if judged is None else judged.lift_low
+
+
+def most_correlated(measured: Mapping[str, float]) -> tuple[str, float] | None:
+    """The algorithm with the highest correlation, and that correlation; None if none."""
+    return max(measured.items(), key=lambda kv: kv[1], default=None)
 
 
 def correlations(name: str, others: Sequence[str], rows: list[dict[str, Any]]) -> dict[str, float]:

@@ -228,7 +228,7 @@ class PredictionEngine:
         leaders: Leaders | None = None,
         signals: Signals | None = None,
         regimes: Regimes | None = None,
-        admits: Callable[[str], bool] | None = None,
+        admits: Callable[[Algorithm], bool] | None = None,
     ) -> None:
         self.store = store
         self.calendar = calendar
@@ -271,10 +271,8 @@ class PredictionEngine:
         """Run the algorithms enrolled before and the new ones admitted; a new one starts on
         probation."""
         known = self.store.statuses()
-        admitted = [
-            a for a in self.registered if a.name in known or self._admits is None or self._admits(a.name)
-        ]
-        if len(admitted) == len(self.algorithms):
+        admitted = [a for a in self.registered if a.name in known or self._admits is None or self._admits(a)]
+        if tuple(admitted) == self.algorithms:
             return
         for a in admitted:
             if a.name not in known:

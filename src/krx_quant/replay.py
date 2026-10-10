@@ -57,7 +57,7 @@ async def replay(
     consensus_timing: Timing | None = None,
     leaders: Leaders | None = None,
     regimes: Regimes | None = None,
-    admits: Callable[[str], bool] | None = None,
+    admits: Callable[[Algorithm], bool] | None = None,
 ) -> PredictionEngine:
     """Feed ``events`` (in receipt order) received by ``until`` to an engine storing into ``db``.
 
@@ -210,25 +210,41 @@ async def replay_day(settings: Settings, day: date, db: Path | None = None) -> R
             )
         else:
             models[name] = model
-    start = datetime.combine(day, time(), KST)
-    engine = await replay(
-        events,
-        db=db,
-        calendar=calendar_store(settings).calendar,
-        symbols=settings.symbols,
-        fee_rate=settings.fee_rate,
-        start=start,
-        until=start + timedelta(days=1) - timedelta(microseconds=1),
-        models=models,
-        budget=Budget.of(settings),
-        min_sample=settings.min_sample,
-        leaders=leaders,
-        regimes=partial(day_regime, settings.data_dir),
-    )
+    engine = await replay_recorded(settings, day, events, db=db, models=models)
     try:
         return ReplayedDay(db, engine.store.summary(), set_aside)
     finally:
         engine.store.close()
+
+
+async def replay_recorded(
+    settings: Settings,
+    day: date,
+    events: Iterable[Event],
+    *,
+    db: Path,
+    models: Mapping[str, Model],
+    algorithms: Sequence[Algorithm] = ALGORITHMS,
+    calendar: MarketCalendar | None = None,
+) -> PredictionEngine:
+    """``day``'s recorded ``events``, all day, through an engine set up as the server's (its
+    settings, calendar and macro regimes) storing into ``db``."""
+    start = datetime.combine(day, time(), KST)
+    return await replay(
+        events,
+        db=db,
+        calendar=calendar or calendar_store(settings).calendar,
+        symbols=settings.symbols,
+        fee_rate=settings.fee_rate,
+        start=start,
+        until=start + timedelta(days=1) - timedelta(microseconds=1),
+        algorithms=algorithms,
+        models=models,
+        budget=Budget.of(settings),
+        min_sample=settings.min_sample,
+        leaders=Leaders.of(settings),
+        regimes=partial(day_regime, settings.data_dir),
+    )
 
 
 def sqlite_files(db: Path) -> list[Path]:

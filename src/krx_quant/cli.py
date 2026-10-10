@@ -126,7 +126,7 @@ def _prevalidate(name: str, days: int) -> int:
     span = f"{result.days[0]}..{result.days[-1]}"
     print(f"{name}: {'passed' if result.passed else 'refused'} ({len(result.days)} recorded days, {span})")
     for c in result.checks:
-        print(f"  {c.check}: {'ok' if c.passed else 'FAILED'} - {c.detail}")
+        print(f"  {c.name}: {'ok' if c.passed else 'FAILED'} - {c.detail}")
     print(f"report: {report_path(settings.state_dir, name)}")
     print(f"predictions: {result.db} (not in the official record)")
     if name in REGISTERED_BEFORE:

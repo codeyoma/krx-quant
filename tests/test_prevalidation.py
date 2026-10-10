@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 
-from krx_quant.algorithms import Algorithm, Card, Model, Sample, save_model
+from krx_quant.algorithms import Algorithm, Card, Model, RegistrationError, Sample, save_model
 from krx_quant.baselines import Forecast
 from krx_quant.cli import main
 from krx_quant.clock import FakeClock
@@ -28,7 +28,7 @@ from krx_quant.lifecycle import Status
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.model_shelf import Shelf
 from krx_quant.predictions import DB_NAME, PredictionStore
-from krx_quant.prevalidation import admits, prevalidate
+from krx_quant.prevalidation import admits, code_digest, prevalidate, report_path
 from krx_quant.replay import replay_into
 from krx_quant.swap import reload_models
 from tests.algorithm_doubles import FixedAlgorithm
@@ -37,8 +37,9 @@ from tests.test_lifecycle import Outbox
 from tests.test_replay import busy_morning
 from tests.test_replay_cli import record
 
-DAYS = [date(2026, 9, 14), date(2026, 9, 15), date(2026, 9, 16)]  # Monday to Wednesday
-AFTER = datetime.combine(DAYS[-1] + timedelta(days=1), time(8), KST)  # the next morning
+# Ten trading days, the fewest that can pass: Monday 14 to Friday 25 September.
+DAYS = [d for d in (date(2026, 9, 14) + timedelta(days=i) for i in range(12)) if d.weekday() < 5]
+AFTER = datetime.combine(date(2026, 9, 28), time(8), KST)  # the next Monday morning
 ALPHA = FixedAlgorithm("alpha", features=("velocity",), unique=("velocity",))
 
 
@@ -118,6 +119,7 @@ async def test_an_algorithm_that_beats_the_baselines_on_its_own_features_passes(
     saved = report(s, "contrarian")
     assert saved["passed"] is True and saved["days"] == [d.isoformat() for d in DAYS]
     assert {c["check"]: c["passed"] for c in saved["checks"]} == {
+        "days": True,
         "features": True,
         "budget": True,
         "correlation": True,
@@ -130,13 +132,13 @@ async def test_an_algorithm_that_beats_the_baselines_on_its_own_features_passes(
 
 
 async def test_an_algorithm_moving_with_another_is_refused_as_a_clone(tmp_path: Path) -> None:
-    s = settings(tmp_path)
+    s = settings(tmp_path, DAYS[:3])
     copycat = Contrarian("copycat", own="vwap_gap")  # reads vwap_gap, calls as contrarian does
 
     result = await prevalidate(s, "copycat", algorithms=[ALPHA, Contrarian("contrarian"), copycat], now=AFTER)
 
     assert not result.passed
-    checks = {c.check: c for c in result.checks}
+    checks = {c.name: c for c in result.checks}
     assert not checks["correlation"].passed and "contrarian" in checks["correlation"].detail
     assert result.correlations["contrarian"] == pytest.approx(1.0)
     assert checks["stats"].passed, "as good as the one it copies"
@@ -149,19 +151,19 @@ async def test_an_algorithm_over_its_time_budget_is_refused(tmp_path: Path) -> N
 
     result = await prevalidate(s, "slow", algorithms=[ALPHA, slow], now=AFTER)
 
-    checks = {c.check: c for c in result.checks}
-    assert not checks["budget"].passed and result.timed_out > 0
-    assert report(s, "slow")["timed_out"] == result.timed_out
+    checks = {c.name: c for c in result.checks}
+    assert not checks["budget"].passed and result.statuses["timed_out"] > 0
+    assert report(s, "slow")["timed_out"] == result.statuses["timed_out"]
 
 
 async def test_an_algorithm_no_better_than_a_baseline_is_refused(tmp_path: Path) -> None:
-    s = settings(tmp_path)
+    s = settings(tmp_path, DAYS[:3])
     flat = FixedAlgorithm("flat", features=("vwap_z",), unique=("vwap_z",))  # always flat, as a baseline
 
     result = await prevalidate(s, "flat", algorithms=[ALPHA, flat], now=AFTER)
 
-    checks = {c.check: c for c in result.checks}
-    assert not checks["stats"].passed and result.stats is not None
+    checks = {c.name: c for c in result.checks}
+    assert not checks["stats"].passed
     assert result.stats.lifts["baseline-flat"].lift.value == 0, "the same calls"
     assert checks["budget"].passed and checks["correlation"].passed
 
@@ -171,31 +173,38 @@ async def test_too_few_scored_predictions_to_judge_are_refused(tmp_path: Path) -
 
     result = await prevalidate(s, "contrarian", algorithms=[ALPHA, Contrarian("contrarian")], now=AFTER)
 
-    checks = {c.check: c for c in result.checks}
+    checks = {c.name: c for c in result.checks}
     assert not checks["stats"].passed and "too few to judge" in checks["stats"].detail
 
 
-async def test_an_algorithm_without_features_of_its_own_is_refused_unreplayed(tmp_path: Path) -> None:
+async def test_fewer_than_ten_recorded_days_never_pass(tmp_path: Path) -> None:
+    s = settings(tmp_path, DAYS[:9])
+
+    result = await prevalidate(s, "contrarian", algorithms=[ALPHA, Contrarian("contrarian")], now=AFTER)
+
+    assert [c.name for c in result.checks if not c.passed] == ["days"]
+    assert "9 recorded days (at least 10" in result.checks[0].detail
+
+
+async def test_a_registry_failing_the_registration_check_is_not_replayed(tmp_path: Path) -> None:
     s = settings(tmp_path, DAYS[:1])
     twin = FixedAlgorithm("twin", features=("minute_ticks",), unique=("minute_ticks",))
 
-    result = await prevalidate(s, "twin", algorithms=[Contrarian("contrarian"), twin], now=AFTER)
+    with pytest.raises(RegistrationError, match="the same features as contrarian"):
+        await prevalidate(s, "twin", algorithms=[Contrarian("contrarian"), twin], now=AFTER)
 
-    assert [(c.check, c.passed) for c in result.checks] == [("features", False)]
-    assert "the same features as contrarian" in result.checks[0].detail
-    saved = report(s, "twin")
-    assert saved["passed"] is False and saved["stats"] is None
+    assert not (s.state_dir / "prevalidations" / "twin.json").exists()
 
 
 async def test_each_day_is_predicted_by_a_model_trained_only_on_the_days_before_it(tmp_path: Path) -> None:
-    s = settings(tmp_path, [*DAYS, date(2026, 9, 17)])
+    s = settings(tmp_path, DAYS[:4])
     candidate = Contrarian("contrarian")
     # Thursday evening, before 21:00: Thursday's recording is not archived, so not replayed.
-    thursday_evening = datetime.combine(date(2026, 9, 17), time(20), KST)
+    thursday_evening = datetime.combine(DAYS[3], time(20), KST)
 
     result = await prevalidate(s, "contrarian", algorithms=[ALPHA, candidate], now=thursday_evening)
 
-    assert result.days == DAYS
+    assert result.days == DAYS[:3]
     assert candidate.fitted == [[DAYS[0]], [DAYS[0], DAYS[1]]], "two days at most: its training_days"
     versions = report(s, "contrarian")["models"]
     assert versions[DAYS[0].isoformat()] == "contrarian-default", "nothing before the first day"
@@ -216,19 +225,19 @@ async def test_a_new_algorithm_waits_for_its_prevalidation_then_starts_on_probat
     s = settings(tmp_path)
     registry: list[Algorithm] = [ALPHA, Contrarian("contrarian")]
     gate = admits(s.state_dir)
-    thursday = date(2026, 9, 17)
-    events = swings(thursday, end="10:00:00")
-    morning = [e for e in events if e[1]["received_at"] < at("09:20:00", thursday)]
-    later = [e for e in events if e[1]["received_at"] >= at("09:20:00", thursday)]
+    live_day = date(2026, 9, 28)  # the Monday after the ten days
+    events = swings(live_day, end="10:00:00")
+    morning = [e for e in events if e[1]["received_at"] < at("09:20:00", live_day)]
+    later = [e for e in events if e[1]["received_at"] >= at("09:20:00", live_day)]
     outbox = Outbox()
 
     engine = await run(
         tmp_path / "live.db",
         morning,
-        until=at("09:20:00", thursday),
-        calendar=MarketCalendar({thursday: True}),
+        until=at("09:20:00", live_day),
+        calendar=MarketCalendar({live_day: True}),
         algorithms=registry,
-        admits=lambda name: name == "alpha" or gate(name),
+        admits=lambda a: a.name == "alpha" or gate(a),
         notify=outbox,
     )
 
@@ -236,19 +245,43 @@ async def test_a_new_algorithm_waits_for_its_prevalidation_then_starts_on_probat
     assert engine.waiting() == ["contrarian"]
     assert not engine.store.status_counts("contrarian"), "not run"
 
-    await prevalidate(s, "contrarian", algorithms=registry, now=datetime.combine(thursday, time(8), KST))
+    await prevalidate(s, "contrarian", algorithms=registry, now=AFTER)
     # Trained (at night, or by hand) while it waited: it starts on that model.
-    trained = Model("contrarian-20260916-abcdef", {}, None, DAYS[-1])
+    trained = Model("contrarian-20260925-abcdef", {}, None, DAYS[-1])
     save_model(s.state_dir, "contrarian", trained)
     assert reload_models(engine, Shelf(s.state_dir))
     assert isinstance(engine.clock, FakeClock)
-    await replay_into(engine, engine.clock, later, until=at("15:45:00", thursday))
+    await replay_into(engine, engine.clock, later, until=at("15:45:00", live_day))
 
     assert await listed(engine) == {"alpha": "probation", "contrarian": "probation"}
     made = engine.store.recent("005930", 1000, "contrarian")
-    assert made[-1]["bar_close"] == at("09:21:00", thursday).isoformat(), "from the next bar close"
+    assert made[-1]["bar_close"] == at("09:21:00", live_day).isoformat(), "from the next bar close"
     assert {p["model_version"] for p in made} == {trained.version}
     assert outbox.sent == [], "nothing waits at the review"
+
+
+async def test_a_report_counts_only_for_the_code_that_passed(tmp_path: Path) -> None:
+    candidate = Contrarian("contrarian")
+    path = report_path(tmp_path / "state", "contrarian")
+    path.parent.mkdir(parents=True)
+    path.write_text("[]")  # not a report: it waits, and the engine goes on
+    gate = admits(tmp_path / "state")
+
+    engine = await run(
+        tmp_path / "live.db",
+        busy_morning(end="09:05:00"),
+        until=at("09:05:00"),
+        algorithms=[candidate],
+        admits=gate,
+    )
+    assert engine.waiting() == ["contrarian"]
+    path.write_text(json.dumps({"passed": True, "code": "0123456789abcdef"}))  # passed, then the code changed
+    assert isinstance(engine.clock, FakeClock)
+    await replay_into(engine, engine.clock, [], until=at("09:07:00"))
+    assert engine.waiting() == ["contrarian"]
+    path.write_text(json.dumps({"passed": True, "code": code_digest(candidate)}))
+    await replay_into(engine, engine.clock, [], until=at("09:08:00"))
+    assert engine.waiting() == []
 
 
 async def test_an_algorithm_waiting_is_alerted_once_after_the_engine_starts(tmp_path: Path) -> None:
@@ -257,7 +290,7 @@ async def test_an_algorithm_waiting_is_alerted_once_after_the_engine_starts(tmp_
     options: dict[str, Any] = {
         "calendar": MarketCalendar({thursday: True, friday: True, monday: True}),
         "algorithms": [ALPHA, Contrarian("contrarian")],
-        "admits": lambda name: name == "alpha",
+        "admits": lambda a: a.name == "alpha",
         "notify": outbox,
     }
     events = [*swings(thursday, end="09:30:00"), *swings(friday, end="09:30:00")]

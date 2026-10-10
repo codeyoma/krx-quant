@@ -147,7 +147,9 @@ def reload_models(engine: PredictionEngine, shelf: Shelf) -> bool:
 
 
 def publish_live(store: ObjectStore, shelf: Shelf, algorithms: Sequence[Algorithm]) -> None:
-    """Store the models the server runs, and which they are (``live.json``)."""
+    """Store the models the server runs, and which they are (``live.json``): those of the
+    algorithms waiting for their pre-validation too, the models they will start on, so the
+    night compares each challenger with the model installed."""
     live = {}
     for name, model in load_models(shelf.state_dir, algorithms).items():
         live[name] = model.version
@@ -172,7 +174,7 @@ async def keep_models(
     if store is not None:
         try:
             await show_night(store, shelf, engine, kst_day(now()))
-            await asyncio.to_thread(publish_live, store, shelf, engine.algorithms)
+            await asyncio.to_thread(publish_live, store, shelf, engine.registered)
         except Exception:
             log.exception("could not read the last night or publish the live models")
     while True:
@@ -184,10 +186,10 @@ async def keep_models(
                 status = await morning_swap(store, shelf, engine, today=today, at=now())
                 if status is not None and (not status.applied or status.night.promoted):
                     await notify(_swap_notice(status))
-                await asyncio.to_thread(publish_live, store, shelf, engine.algorithms)
+                await asyncio.to_thread(publish_live, store, shelf, engine.registered)
             elif reload_models(engine, shelf) and store is not None:  # a fit or a rollback
                 await show_night(store, shelf, engine, kst_day(now()))
-                await asyncio.to_thread(publish_live, store, shelf, engine.algorithms)
+                await asyncio.to_thread(publish_live, store, shelf, engine.registered)
         except Exception:
             log.exception("the model swap failed")
 
