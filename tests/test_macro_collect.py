@@ -225,6 +225,41 @@ async def test_the_morning_tries_a_failing_source_three_times_ten_minutes_apart(
     assert setup.sources.calls["ecos"] == 2, "the sources that answered are not asked again"
 
 
+async def test_retries_stop_at_the_open(setup: Setup) -> None:
+    # Restarted at 08:45 with Yahoo down: 08:45 and 08:55, but not 09:05 in the session.
+    setup.sources.down = {"yahoo"}
+    clock = [datetime.combine(DAY, time(8, 45), KST)]
+    waits: list[float] = []
+
+    async def sleep(seconds: float) -> None:
+        waits.append(seconds)
+        clock[0] += timedelta(seconds=seconds)
+        if len(waits) > 2:
+            raise _Stop
+
+    with pytest.raises(_Stop):
+        await keep_macro(setup.collector, CALENDAR, time(7, 30), lambda: clock[0], sleep)
+
+    assert waits[:2] == [0.0, 600.0]
+    assert clock[0] == datetime.combine(date(2026, 10, 13), time(7, 30), KST), "then tomorrow"
+    assert setup.sources.calls["yahoo"] == 2 * 5, "five symbols, two tries"
+
+
+async def test_a_time_at_or_after_the_open_reads_nothing(setup: Setup) -> None:
+    clock = [datetime.combine(DAY, time(7, 0), KST)]
+
+    async def sleep(seconds: float) -> None:
+        clock[0] += timedelta(seconds=seconds)
+        if clock[0].date() > DAY:
+            raise _Stop
+
+    with pytest.raises(_Stop):
+        await keep_macro(setup.collector, CALENDAR, time(9, 30), lambda: clock[0], sleep)
+
+    assert setup.sources.calls == {}
+    assert recorded(setup.settings, "regime") == []
+
+
 class _Stop(Exception):
     pass
 

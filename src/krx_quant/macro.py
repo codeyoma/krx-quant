@@ -400,24 +400,44 @@ async def keep_macro(
 ) -> None:
     """The collector's macro task, until cancelled: read every source each trading day at
     ``at``, then the failed ones again every ``RETRY_AFTER``, ``TRIES_A_MORNING`` reads in
-    all. The sleep is a parameter for tests.
+    all, and only before the open: once the market opens, the day's regime stays. The sleep
+    is a parameter for tests.
     """
     start = first_macro_run(calendar, at, now())
     while True:
         await sleep(max(0.0, (start - now()).total_seconds()))
         day = kst_day(start)
-        sources: Sequence[Source] = tuple(Source)
-        for attempt in range(TRIES_A_MORNING):
-            try:
-                macro = await collector.run(day, sources)
-            except Exception:
-                log.exception("the macro collection failed")
-                break
-            sources = list(macro.failed)
-            if not sources or attempt == TRIES_A_MORNING - 1:
-                break
-            await sleep(RETRY_AFTER.total_seconds())
+        session = calendar.session(day)
+        if session is None or now() >= session.open:
+            log.warning("macro read skipped on %s: KRX_MACRO_AT %s is not before the open", day, at)
+        else:
+            await _morning(collector, day, session.open, now, sleep)
         start = next_on_trading_day(calendar, at, max(now(), start))
+
+
+async def _morning(
+    collector: MacroCollector,
+    day: date,
+    opens: datetime,
+    now: Callable[[], datetime],
+    sleep: Callable[[float], Awaitable[None]],
+) -> None:
+    """A trading day's reads: every source, then the failed ones again while a retry still
+    lands before ``opens``."""
+    sources: Sequence[Source] = tuple(Source)
+    for attempt in range(TRIES_A_MORNING):
+        try:
+            macro = await collector.run(day, sources)
+        except Exception:
+            log.exception("the macro collection failed")
+            return
+        sources = list(macro.failed)
+        if not sources or attempt == TRIES_A_MORNING - 1:
+            return
+        if now() + RETRY_AFTER >= opens:
+            log.info("macro retries stop: the market opens at %s", opens.time())
+            return
+        await sleep(RETRY_AFTER.total_seconds())
 
 
 def first_macro_run(calendar: MarketCalendar, at: time, started: datetime) -> datetime:
@@ -439,8 +459,11 @@ async def run_macro(settings: Settings, now: Callable[[], datetime]) -> MacroDay
             alerts = Alerts(
                 session, settings.telegram_bot_token, settings.telegram_chat_id, settings.telegram_api_url
             )
-            calendar = calendar_store(settings).calendar
-            collector = MacroCollector(settings, session, alerts, macro_recorder(parquet), calendar, now)
-            return await collector.run(kst_day(now()))
+            try:
+                calendar = calendar_store(settings).calendar
+                collector = MacroCollector(settings, session, alerts, macro_recorder(parquet), calendar, now)
+                return await collector.run(kst_day(now()))
+            finally:
+                await alerts.close()  # send what is queued before the event loop ends
     finally:
         parquet.close()
