@@ -24,7 +24,7 @@ from krx_quant.collector import run_collector
 from krx_quant.fake_kis import FakeKis
 from krx_quant.feeds import KOSPI200_FUTURES, RAW_SCHEMA
 from krx_quant.feeds.base import KST
-from krx_quant.object_store import LocalObjectStore, ObjectStore, S3ObjectStore
+from krx_quant.object_store import LocalObjectStore, ObjectStore, S3ObjectStore, get_json, put_json
 from krx_quant.recorder import ParquetRecorder
 from tests.kis_frames import trade_frame
 from tests.test_collector import settings_for
@@ -300,3 +300,12 @@ async def test_a_column_added_to_a_feed_during_the_day_is_null_in_the_rows_befor
         (1056.3, None),
         (1057.1, -1.2),
     ]
+
+
+def test_objects_can_be_listed_by_prefix_and_kept_as_json(store: ObjectStore) -> None:
+    put_json(store, "reports/2026-10-12/newton.json", {"promoted": True})
+    put_json(store, "promotions/2026-10-12.json", {"day": "2026-10-12"})
+
+    assert store.keys("reports/") == ["reports/2026-10-12/newton.json"]
+    assert get_json(store, "promotions/2026-10-12.json") == {"day": "2026-10-12"}
+    assert get_json(store, "promotions/2026-10-13.json") is None

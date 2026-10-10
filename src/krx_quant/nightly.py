@@ -38,15 +38,14 @@ from typing import Any
 from krx_quant.algorithms import ALGORITHMS, Algorithm, Model
 from krx_quant.algorithms.contract import Sample
 from krx_quant.algorithms.forecasts import log_loss
-from krx_quant.backfill import FUTURES_BARS_TR, MINUTE_BARS_TR
+from krx_quant.backfill import MINUTE_BARS_TR, bars_key
 from krx_quant.config import Settings, SettingsError
-from krx_quant.contracts import KOSPI200, USD
 from krx_quant.features import Leaders
 from krx_quant.feeds.base import KST
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.notify import send_notice
 from krx_quant.object_store import ObjectStore, file_digest, get_json, open_store, put_json
-from krx_quant.training import bar_days_on, load_leader_days, samples
+from krx_quant.training import bar_days_on, leader_series, load_leader_days, samples
 
 log = logging.getLogger(__name__)
 
@@ -114,12 +113,16 @@ def train_night(
     store the promotion list. A night already finished is returned as it was.
     """
     leaders = leaders or Leaders()
-    days = _days_with_bars(store, symbols)
+    days_of = _days_with_bars(store, symbols)
+    days = sorted(set().union(*days_of.values()))
     if day is not None:
         days = [d for d in days if d <= day]
     if not days or (day is not None and days[-1] != day):
         raise FileNotFoundError(f"no archived bars of {', '.join(symbols)} for {day or 'any day'}")
     night = days[-1]
+    missing = [s for s in symbols if night not in days_of[s]]
+    if missing:
+        raise FileNotFoundError(f"bars of {', '.join(missing)} for {night} are not archived yet")
     finished = get_json(store, promotions_key(night))
     if finished is not None:
         log.info("the night of %s is already trained", night)
@@ -153,6 +156,7 @@ async def run_training(settings: Settings, day: date | None = None) -> Night:
     store = open_store(settings)
     if store is None:
         raise SettingsError("KRX_OBJECT_STORE is not set: nightly training reads and writes it")
+    finished_before = day is not None and store.digest(promotions_key(day)) is not None
     night = await asyncio.to_thread(
         train_night,
         store,
@@ -163,7 +167,8 @@ async def run_training(settings: Settings, day: date | None = None) -> Night:
         leaders=Leaders.of(settings),
         day=day,
     )
-    await send_notice(settings, night.summary())
+    if not finished_before:
+        await send_notice(settings, night.summary())
     return night
 
 
@@ -215,6 +220,9 @@ class _Trainer:
         challenger_loss = _mean_loss(algorithm, challenger, scored)
         promoted = challenger_loss < champion_loss
         sign = "<" if promoted else "≥"
+        # A champion fitted by hand on the latest days may have learned the validation days:
+        # it is then judged on what it saw, and is harder to beat than it should be.
+        saw = champion.trained_until is not None and champion.trained_until >= validation[0]
         return {
             **report,
             "champion": {"version": champion.version, "loss": champion_loss},
@@ -224,7 +232,8 @@ class _Trainer:
                 "trained": challenger.trained,
             },
             "promoted": promoted,
-            "reason": f"{challenger_loss:.4f} {sign} {champion_loss:.4f} ({champion.version})",
+            "reason": f"{challenger_loss:.4f} {sign} {champion_loss:.4f} ({champion.version}"
+            + (", trained on these days)" if saw else ")"),
         }
 
     def _samples(self, algorithm: Algorithm, days: Sequence[date]) -> list[Sample]:
@@ -253,11 +262,10 @@ class _Trainer:
 
     def _fetch(self, days: Sequence[date]) -> None:
         """Copy the days' bars from the store into the cache, where they are not there already."""
-        series = [(MINUTE_BARS_TR, s) for s in (*self._symbols, *self._leaders.etfs)]
-        series += [(FUTURES_BARS_TR, KOSPI200.series), (FUTURES_BARS_TR, USD.series)]
+        series = [(MINUTE_BARS_TR, s) for s in self._symbols] + leader_series(self._leaders)
         for day in days:
             for feed, name in series:
-                key = f"bars/date={day.isoformat()}/feed={feed}/symbol={name}/bars.parquet"
+                key = bars_key(day, feed, name)
                 stored = self._store.digest(key)
                 if stored is None:
                     continue
@@ -270,14 +278,17 @@ class _Trainer:
                 tmp.replace(path)
 
 
-def _days_with_bars(store: ObjectStore, symbols: Sequence[str]) -> list[date]:
-    """The days the store has bars of any of ``symbols`` for, oldest first."""
-    days = set()
+def _days_with_bars(store: ObjectStore, symbols: Sequence[str]) -> dict[str, set[date]]:
+    """The days the store has bars of each of ``symbols`` for."""
+    days: dict[str, set[date]] = {s: set() for s in symbols}
     for key in store.keys("bars/"):
         parts = key.split("/")  # bars, date=…, feed=…, symbol=…, bars.parquet
-        if len(parts) == 5 and parts[2] == f"feed={MINUTE_BARS_TR}" and parts[3][7:] in symbols:
-            days.add(date.fromisoformat(parts[1].removeprefix("date=")))
-    return sorted(days)
+        if len(parts) != 5 or parts[2] != f"feed={MINUTE_BARS_TR}":
+            continue
+        symbol = parts[3].removeprefix("symbol=")
+        if symbol in days:
+            days[symbol].add(date.fromisoformat(parts[1].removeprefix("date=")))
+    return days
 
 
 def _mean_loss(algorithm: Algorithm, model: Model, scored: Sequence[Sample]) -> float:

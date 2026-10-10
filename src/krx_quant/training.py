@@ -24,7 +24,7 @@ import pyarrow.parquet as pq
 
 from krx_quant.algorithms import ALGORITHMS, Model, model_path
 from krx_quant.algorithms.contract import Sample
-from krx_quant.backfill import FUTURES_BARS_TR, MINUTE_BARS_TR
+from krx_quant.backfill import FUTURES_BARS_TR, MINUTE_BARS_TR, bars_key
 from krx_quant.config import Settings
 from krx_quant.contracts import KOSPI200, USD
 from krx_quant.engine import HORIZON, prediction_window
@@ -106,14 +106,21 @@ def _by_day(bar_days: BarDays) -> dict[date, _DayBars]:
     return {day: _DayBars(bars) for day, bars in days.items()}
 
 
+def leader_series(leaders: Leaders) -> list[tuple[str, str]]:
+    """The leading series with backfilled bars, as (feed, name): the futures and the ETFs."""
+    return [
+        (FUTURES_BARS_TR, KOSPI200.series),
+        (FUTURES_BARS_TR, USD.series),
+        *((MINUTE_BARS_TR, etf) for etf in leaders.etfs),
+    ]
+
+
 def load_leader_days(data_dir: Path, leaders: Leaders, days: Iterable[date]) -> BarDays:
-    """The leading series' backfilled bars on ``days``: the futures and the ETFs."""
-    wanted = [(FUTURES_BARS_TR, KOSPI200.series), (FUTURES_BARS_TR, USD.series)]
-    wanted += [(MINUTE_BARS_TR, etf) for etf in leaders.etfs]
+    """The leading series' backfilled bars on ``days``."""
     out: dict[tuple[str, date], list[Bar]] = {}
     for day in days:
-        for feed, name in wanted:
-            bars = _read_bars(data_dir / "bars" / f"date={day.isoformat()}", feed, name)
+        for feed, name in leader_series(leaders):
+            bars = _read_bars(data_dir, day, feed, name)
             if bars is not None:
                 out[(name, day)] = bars
     return out
@@ -141,15 +148,15 @@ def bar_days_on(
     out: dict[tuple[str, date], list[Bar]] = {}
     for day in days:
         for symbol in symbols:
-            bars = _read_bars(data_dir / "bars" / f"date={day.isoformat()}", MINUTE_BARS_TR, symbol)
+            bars = _read_bars(data_dir, day, MINUTE_BARS_TR, symbol)
             if bars is not None:
                 out[(symbol, day)] = bars
     return out
 
 
-def _read_bars(day_folder: Path, feed: str, name: str) -> list[Bar] | None:
+def _read_bars(data_dir: Path, day: date, feed: str, name: str) -> list[Bar] | None:
     """A day's backfilled bars of a series, if it has a file."""
-    path = day_folder / f"feed={feed}" / f"symbol={name}" / "bars.parquet"
+    path = data_dir / bars_key(day, feed, name)
     if not path.exists():
         return None
     return [_bar(row) for row in pq.read_table(path).to_pylist()]

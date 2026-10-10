@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 
-from krx_quant.algorithms import Model
+from krx_quant.algorithms import Model, save_model
 from krx_quant.cli import main
 from krx_quant.clock import FakeClock
 from krx_quant.engine import PredictionEngine
@@ -23,7 +23,7 @@ from krx_quant.market_calendar import MarketCalendar
 from krx_quant.model_shelf import Shelf
 from krx_quant.object_store import LocalObjectStore, ObjectStore
 from krx_quant.predictions import PredictionStore
-from krx_quant.swap import morning_swap, publish_live, reload_models
+from krx_quant.swap import morning_swap, night_status, publish_live, reload_models
 from tests.replay_events import api, get_json
 
 NIGHT = date(2026, 10, 12)  # a Monday's night
@@ -61,13 +61,14 @@ def store(tmp_path: Path) -> ObjectStore:
 
 @pytest.fixture
 def engine(tmp_path: Path) -> PredictionEngine:
-    calendar = MarketCalendar({NIGHT: True, MORNING: True})
+    calendar = MarketCalendar({NIGHT: True, MORNING: True, date(2026, 10, 14): True})
     clock = FakeClock(at(MORNING, "07:00"))
     return PredictionEngine(PredictionStore(tmp_path / "engine.db"), calendar, ("005930",), 0.00015, clock)
 
 
 async def morning(store: ObjectStore, tmp_path: Path, engine: PredictionEngine, day: date = MORNING) -> Any:
-    return await morning_swap(store, Shelf(tmp_path / "state"), engine, today=day, at=at(day, "08:00"))
+    shelf = Shelf(tmp_path / "state")
+    return await morning_swap(store, shelf, engine, engine.calendar, today=day, at=at(day, "08:00"))
 
 
 async def test_the_night_s_promoted_models_run_from_08_00(
@@ -99,6 +100,10 @@ async def test_a_list_not_final_by_07_30_is_left_for_yesterday_s_models(
     assert engine.models["newton"].version == "newton-default"
     assert applied.as_dict()["applied"] is False
     assert "07:30" in applied.as_dict()["reason"]
+    # Nor the morning after: it was that night's list, and the next one did not train.
+    later = await morning(store, tmp_path, engine, day=date(2026, 10, 14))
+    assert engine.models["newton"].version == "newton-default"
+    assert later.as_dict()["applied"] is False
 
 
 async def test_without_a_list_nothing_changes(
@@ -149,3 +154,25 @@ def test_the_rollback_command_names_what_runs_now(
     assert main(["rollback", "newton"]) == 1
     assert "nothing to roll back" in capsys.readouterr().err
     assert main(["rollback", "einstein"]) == 1
+
+
+async def test_a_night_that_promoted_nothing_is_taken_all_the_same(
+    store: ObjectStore, tmp_path: Path, engine: PredictionEngine
+) -> None:
+    night_list(tmp_path / "store", finalized=at(NIGHT, "21:40"), promoted={})
+
+    applied = await morning(store, tmp_path, engine)
+
+    assert applied.as_dict()["applied"] is True
+    status = night_status(store, Shelf(tmp_path / "state"), MORNING)
+    assert status is not None and status.as_dict()["reason"] == "applied"
+
+
+def test_a_model_installed_before_the_history_is_one_rollback_away(tmp_path: Path) -> None:
+    earlier = Model("newton-20261008-14a50c", {"damping": 0.5, "threshold": 1.0}, "fit by hand")
+    save_model(tmp_path / "state", "newton", earlier)
+    shelf = Shelf(tmp_path / "state")
+
+    shelf.install("newton", TRAINED, f"promotion {NIGHT}", at(MORNING, "08:00"))
+
+    assert shelf.rollback("newton", at(MORNING, "09:00")) == earlier

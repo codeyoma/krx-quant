@@ -313,6 +313,16 @@ class PredictionEngine:
     def mid(self, symbol: str) -> float | None:
         return self._reference.mid(symbol, self.clock.now())
 
+    def switch_models(self, models: Mapping[str, Model]) -> bool:
+        """Run ``models`` from the next bar close (a swap, a fit, a rollback); whether any changed."""
+        changed = False
+        for name, model in models.items():
+            if name in self.models and self.models[name] != model:
+                log.info("%s now runs %s", name, model.version)
+                self.models[name] = model
+                changed = True
+        return changed
+
     def members(self) -> list[str]:
         """The consensus members now: the active algorithms, in registration order."""
         active = _with_status(self.store.statuses(), Status.ACTIVE)

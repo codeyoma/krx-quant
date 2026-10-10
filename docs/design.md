@@ -26,9 +26,9 @@
    엔진 API(HTTP/WebSocket) ◄─ Tailscale ◄─ Fincept 화면 (Mac, Windows)
    텔레그램 봇 (장애·비용 알림)
 
-[EC2 Spot 학습 서버] 매일 16:00 기동
-   S3 데이터 ─► 학습·검증(champion/challenger) ─► ONNX 모델 + 검증 리포트 ─► S3
-   상시 서버가 다음 날 08:00에 새 모델로 교체
+[밤 학습] 거래일 21:30 (지금은 상시 서버의 별도 프로세스, #23에서 EC2 Spot)
+   S3 데이터 ─► 학습·검증(champion/challenger) ─► 모델 + 검증 리포트 + 승격 목록 ─► S3
+   상시 서버가 다음 거래일 08:00에 새 모델로 교체
 ```
 
 학습하는 곳과 실시간으로 예측하는 곳을 분리한다. 학습은 PyTorch·LightGBM 등으로 하고, 실시간 예측은 ONNX Runtime 같은 가벼운 런타임으로 한다. 그래서 학습 장비를 바꿔도 상시 서버는 영향을 받지 않는다.
@@ -113,7 +113,7 @@ v1에서는 쓰지 않는다. 조사 결과는 [paid-data.md](paid-data.md)에 �
 ### 4.7 저장
 
 - 원본 체결·호가: 하루 단위 Parquet 파일로 저장하고, 장 마감 후 S3에 올린다. 영구 보관한다.
-  - 거래일마다 장 마감 15분 뒤(16:00 학습 시작 전)와 매일 21:00(NXT·애프터마켓 종료와 20:30 백필 뒤)에 올린다. 파티션마다 파일 하나로 합치고, 다시 올려도 결과가 같다(#6).
+  - 거래일마다 장 마감 15분 뒤와 매일 21:00(NXT·애프터마켓 종료와 20:30 백필 뒤, 밤 학습 전)에 올린다. 파티션마다 파일 하나로 합치고, 다시 올려도 결과가 같다(#6).
   - 서버의 `.env`에는 이 버킷만 읽고 쓰는(삭제 불가) IAM 사용자 키를 둔다. 덮어쓰기는 막을 수 없어서 버킷 버전 관리를 켜고 이전 버전을 30일 보관한다.
 - 피처, 예측, 채점, 통계: 상시 서버의 SQLite(`state/engine.sqlite3`)에 저장한다. 예측과 채점의 저장 구조는 [engine-api.md](engine-api.md)에 있다(#9).
 - 결측 구간: 지금은 `gaps` 계층의 Parquet로 기록한다(#4). SQLite의 `data_gaps`로 옮기는 일은 아직 하지 않았다.
@@ -273,7 +273,7 @@ v1에서는 쓰지 않는다. 조사 결과는 [paid-data.md](paid-data.md)에 �
 | P1 | 수집기: Lightsail·Docker, KIS WebSocket/REST, Parquet·S3, 1분봉 1년 백필, 휴장일, 매크로, 텔레그램 장애 알림 | **최우선.** 호가는 녹화를 늦게 시작한 만큼 영구히 잃는다. |
 | P2 | 예측·채점 핵심: 피처 저장소, 모듈 규약·개성 검사, 1분봉 알고리즘 5개(Newton, Gauss, Markov, Granger, Turing 1분봉 버전), Condorcet, 채점 2종, 통계, 엔진 API | |
 | P3 | Fincept 화면, GitHub Actions 빌드(DMG, setup.exe), 자동 업데이트 끄기 | |
-| P4 | 밤 학습: EC2 Spot, champion/challenger, 비용 상한 장치 | |
+| P4 | 밤 학습: champion/challenger(#22), EC2 Spot과 비용 상한 장치(#23) | |
 | P5 | 호가 알고리즘(Kalman, Shannon, Poisson), 재생 테스트 도구 | 호가 녹화 10거래일 이후 |
 
 ## 12. 사용자가 직접 준비할 것

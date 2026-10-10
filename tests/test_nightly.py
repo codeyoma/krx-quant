@@ -21,9 +21,15 @@ import pytest
 from krx_quant.algorithms import ALGORITHMS, Algorithm, Model, Sample
 from krx_quant.backfill import BAR_SCHEMA, MINUTE_BARS_TR
 from krx_quant.cli import main
+from krx_quant.clock import FakeClock
+from krx_quant.engine import PredictionEngine
 from krx_quant.feeds import KST
+from krx_quant.market_calendar import MarketCalendar
+from krx_quant.model_shelf import Shelf
 from krx_quant.nightly import VALIDATION_DAYS, train_night
 from krx_quant.object_store import LocalObjectStore
+from krx_quant.predictions import PredictionStore
+from krx_quant.swap import morning_swap, publish_live
 from tests.algorithm_doubles import FrequencyAlgorithm
 from tests.synthetic_bars import trending
 
@@ -172,3 +178,39 @@ def test_the_train_command_trains_every_registered_algorithm_from_the_store(
     promotions = read(store_root, f"promotions/{NIGHT}.json")
     assert [r["algorithm"] for r in promotions["reports"]] == [a.name for a in ALGORITHMS]
     assert f"{NIGHT} 밤 학습" in capsys.readouterr().out
+
+
+async def test_a_promoted_model_runs_from_the_morning_and_defends_the_next_night(
+    store_root: Path, tmp_path: Path
+) -> None:
+    learner = FrequencyAlgorithm("learner", "velocity")
+    store = LocalObjectStore(store_root)
+    first, morning = DAYS[-2], DAYS[-1]
+    promoted = train_night(
+        store,
+        tmp_path / "cache",
+        symbols=("005930",),
+        fee_rate=FEE,
+        algorithms=[learner],
+        now=lambda: datetime.combine(first, time(21, 40), KST),
+        day=first,
+    ).promoted["learner"]
+    calendar = MarketCalendar(dict.fromkeys(DAYS, True))
+    engine = PredictionEngine(
+        PredictionStore(tmp_path / "engine.db"),
+        calendar,
+        ("005930",),
+        FEE,
+        FakeClock(FINISHED),
+        algorithms=[learner],
+    )
+    shelf = Shelf(tmp_path / "state")
+
+    await morning_swap(
+        store, shelf, engine, calendar, today=morning, at=datetime.combine(morning, time(8), KST)
+    )
+    publish_live(store, shelf, engine.algorithms)
+    night(store_root, tmp_path, [learner])
+
+    assert engine.models["learner"].version == promoted
+    assert read(store_root, f"reports/{NIGHT}/learner.json")["champion"]["version"] == promoted

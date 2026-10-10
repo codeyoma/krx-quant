@@ -54,7 +54,7 @@ from krx_quant.object_store import open_store
 from krx_quant.polling import Poller, PollJob
 from krx_quant.predictions import DB_NAME, PredictionStore, iso
 from krx_quant.recorder import ParquetRecorder
-from krx_quant.swap import keep_models, keep_training, night_status
+from krx_quant.swap import keep_models, keep_training, show_night
 
 log = logging.getLogger(__name__)
 
@@ -64,9 +64,9 @@ _WS_ALERT = "websocket"
 _ARCHIVE_ALERT = "archive"
 _API_ALERT = "api"
 
-# Recorded days are archived this long after each trading day's close (training starts
-# at 16:00), and every night, after the NXT and KRX after-market close and the 20:30
-# backfill, for the rest of the day's rows.
+# Recorded days are archived this long after each trading day's close, and every night,
+# after the NXT and KRX after-market close and the 20:30 backfill, for the rest of the
+# day's rows and the day's bars (the nightly training starts after it, KRX_TRAIN_AT).
 ARCHIVE_AFTER_CLOSE = timedelta(minutes=15)
 NIGHTLY_ARCHIVE = time(21, 0)
 
@@ -232,14 +232,14 @@ async def run_collector(
                 )
             )
             if object_store is not None and settings.train_at is not None:
+                trained_on = object_store
 
-                async def show_night() -> None:
-                    status = await asyncio.to_thread(night_status, object_store, shelf, kst_day(now()))
-                    engine.training = None if status is None else status.as_dict()
+                async def refresh() -> None:
+                    await show_night(trained_on, shelf, engine, kst_day(now()))
 
                 background.append(
                     asyncio.create_task(
-                        keep_training(settings.train_at, calendar.calendar, alerts, now, show_night)
+                        keep_training(settings.train_at, calendar.calendar, alerts, now, refresh)
                     )
                 )
             api = await _serve_api(settings, engine, _live_status(stream, health, now), alerts)
