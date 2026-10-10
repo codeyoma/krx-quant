@@ -49,7 +49,7 @@ async def _measure() -> None:
 
 async def _backfill() -> None:
     filled = await run_backfill(Settings.from_env())
-    print(f"filled one-minute bars for {filled} symbol-days")
+    print(f"filled one-minute bars for {filled} series-days")
 
 
 async def _archive(recheck: bool) -> int:
