@@ -8,8 +8,8 @@ a year for each series, and later runs fill whichever trading days are still mis
 
 - each stock and KRX-listed ETF (``FHKST03010230``, at most 120 bars per query);
 - KOSPI200 futures and USD futures, each one continuous series of every day's nearest
-  month (``FHKIF03020200``, at most 102 bars per query; ``contracts``). Each bar keeps
-  the contract it came from.
+  month, rolled on its last trading day (``FHKIF03020200``, at most 102 bars per query;
+  ``contracts``). Each bar keeps the contract it came from.
 
 A day is fetched only once all its sessions are over, always whole, and written as one
 file that replaces any earlier one. So a day's bars are either complete or absent, and
@@ -96,7 +96,7 @@ class Query:
     path: str
     params: Mapping[str, str]  # all but the day and the hour
     per_page: int  # the most bars KIS answers at once
-    bar: Callable[[date, dict[str, str]], Row]  # a KIS row as the bar stored
+    to_bar: Callable[[date, dict[str, str]], Row]  # a KIS row as the bar stored
 
 
 @dataclass(frozen=True)
@@ -115,7 +115,7 @@ class StockBars:
         """One per market, in the order tried."""
         return [
             Query(
-                MINUTE_BARS_TR,
+                self.feed,
                 MINUTE_BARS_PATH,
                 {
                     "FID_COND_MRKT_DIV_CODE": market,
@@ -132,7 +132,7 @@ class StockBars:
 
 @dataclass(frozen=True)
 class FuturesBars:
-    """A futures product's continuous bars: each day's from that day's nearest month."""
+    """A futures product's continuous bars: each day's from that day's month (``front_month``)."""
 
     product: Product
     feed: ClassVar[str] = FUTURES_BARS_TR
@@ -151,8 +151,8 @@ class FuturesBars:
             "FID_PW_DATA_INCU_YN": "N",  # that day only
             "FID_FAKE_TICK_INCU_YN": "N",
         }
-        bar = partial(_futures_bar, self.name, contract)
-        return [Query(FUTURES_BARS_TR, FUTURES_BARS_PATH, params, FUTURES_BARS_PER_QUERY, bar)]
+        to_bar = partial(_futures_bar, self.product, contract)
+        return [Query(self.feed, FUTURES_BARS_PATH, params, FUTURES_BARS_PER_QUERY, to_bar)]
 
 
 Series = StockBars | FuturesBars
@@ -251,7 +251,7 @@ class Backfiller:
             body = await self._client.get(query.tr_id, query.path, params)
             page = body.get("output2") or []
             # KIS pads an empty answer with blank rows; keep this day's bars only.
-            rows = [query.bar(day, r) for r in page if r.get("stck_bsop_date") == ymd]
+            rows = [query.to_bar(day, r) for r in page if r.get("stck_bsop_date") == ymd]
             new = [r for r in rows if r["bar_time"] not in bars]
             bars.update((r["bar_time"], r) for r in new)
             if len(page) < query.per_page or not new:
@@ -289,9 +289,9 @@ def _bar(symbol: str, venue: str, day: date, r: dict[str, str]) -> Row:
     }
 
 
-def _futures_bar(series: str, contract: str, day: date, r: dict[str, str]) -> Row:
+def _futures_bar(product: Product, contract: str, day: date, r: dict[str, str]) -> Row:
     return {
-        "symbol": series,
+        "symbol": product.series,
         "bar_time": kst(day, r["stck_cntg_hour"]),
         "contract": contract,
         "open": to_float(r["futs_oprc"]),
@@ -299,7 +299,7 @@ def _futures_bar(series: str, contract: str, day: date, r: dict[str, str]) -> Ro
         "low": to_float(r["futs_lwpr"]),
         "close": to_float(r["futs_prpr"]),
         "volume": to_int(r["cntg_vol"]),
-        "cum_value": to_int(r["acml_tr_pbmn"]),
+        "cum_value": to_int(r["acml_tr_pbmn"]) * product.value_unit,  # in won, like stocks
     }
 
 

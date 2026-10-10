@@ -1,4 +1,4 @@
-"""Futures contracts by the exchange's expiry rules: the nearest month on a day, and its code.
+"""Futures contracts by the exchange's expiry rules: the month a day's bars are taken from.
 
 The KIS master files list only the contracts listed today (``masters``), so the backfill
 builds past codes from the rules. Checked against KIS minute bars on 2026-10-10:
@@ -7,9 +7,9 @@ builds past codes from the rules. Checked against KIS minute bars on 2026-10-10:
   Thursday; USD futures every month on the third Monday.
 - An expiry on a day KRX is closed moves to the trading day before: February 2026's third
   Monday fell in the Lunar New Year holidays, and that USD contract last traded on the 13th.
-- The nearest month is a contract through its last trading day, the next one from the
-  trading day after. On its last day an expiring contract stops early (KOSPI200 at 15:20,
-  USD at 11:30) while the next one trades all day.
+- On its last trading day an expiring contract stops early (KOSPI200 at 15:20, USD at
+  11:30), and the next month already trades more. So a day takes the nearest month that
+  does not expire that day: the series rolls on the last trading day.
 
 Codes: contracts expiring in 2025 have the old format, ``1`` + product + year letter +
 month (``101W12``, ``W`` = 2025); later ones the new, ``A`` + product + the year's last
@@ -36,16 +36,19 @@ class Product:
     months: tuple[int, ...]  # the months contracts expire in
     weekday: int  # the expiry's weekday (Monday 0) ...
     nth: int  # ... and which one of the month
+    value_unit: int  # won per unit of the traded value KIS reports
 
 
-KOSPI200 = Product("KOSPI200F", "01", "F", (3, 6, 9, 12), weekday=3, nth=2)
-USD = Product("USDF", "75", "CF", tuple(range(1, 13)), weekday=0, nth=3)
+KOSPI200 = Product("KOSPI200F", "01", "F", (3, 6, 9, 12), weekday=3, nth=2, value_unit=1000)
+USD = Product("USDF", "75", "CF", tuple(range(1, 13)), weekday=0, nth=3, value_unit=1)
 
 
 def front_month(product: Product, day: date, calendar: MarketCalendar) -> str:
-    """The code of ``product``'s contract nearest to expiry on ``day``."""
+    """The code of the ``product`` contract ``day``'s bars are taken from: the nearest month
+    whose last trading day is after ``day``.
+    """
     year, month = day.year, day.month
-    while month not in product.months or last_trading_day(product, year, month, calendar) < day:
+    while month not in product.months or last_trading_day(product, year, month, calendar) <= day:
         year, month = (year + 1, 1) if month == 12 else (year, month + 1)
     return contract_code(product, year, month)
 

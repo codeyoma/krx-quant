@@ -2,7 +2,9 @@
 
 KIS publishes daily master files of every listed contract. Futures codes roll
 (KOSPI200 quarterly, USD futures monthly), so the collector reads the masters
-at startup instead of hard-coding codes. Format notes, checked on 2026-10-08:
+at startup instead of hard-coding codes. They list only today's contracts; the
+backfill works out past months from the expiry rules instead (``contracts``).
+Format notes, checked on 2026-10-08:
 
 - ``fo_idx_code_mts.mst``: ``|``-separated rows ``type|short code|standard code|
   name|ATM flag|strike|month code|underlying code|underlying name``. Type ``1`` is an

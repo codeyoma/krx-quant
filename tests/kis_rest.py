@@ -91,7 +91,10 @@ def minute_bars_api(bars: Callable[[str, str, date], list[dict[str, str]]]) -> R
     before ``FID_INPUT_HOUR_1``, newest first, at most 120. ``bars(market, symbol, day)`` is
     the day, by market code (``UN`` integrated, ``J`` KRX).
     """
+    return _day_of_bars(bars, _BARS_PER_QUERY)
 
+
+def _day_of_bars(bars: Callable[[str, str, date], list[dict[str, str]]], per_page: int) -> Responder:
     def respond(params: dict[str, str]) -> dict[str, Any]:
         day = datetime.strptime(params["FID_INPUT_DATE_1"], "%Y%m%d").date()
         hour = params["FID_INPUT_HOUR_1"]
@@ -101,8 +104,7 @@ def minute_bars_api(bars: Callable[[str, str, date], list[dict[str, str]]]) -> R
             "rt_cd": "0",
             "msg_cd": "MCA00000",
             "msg1": "정상처리 되었습니다.",
-            "output1": {"hts_kor_isnm": "삼성전자"},
-            "output2": rows[:_BARS_PER_QUERY],
+            "output2": rows[:per_page],
         }
 
     return respond
@@ -140,18 +142,4 @@ def futures_bars_api(bars: Callable[[str, str, date], list[dict[str, str]]]) -> 
     or before ``FID_INPUT_HOUR_1``, newest first, at most 102. ``bars(market, contract, day)``
     is the day, by market code (``F`` index futures, ``CF`` currency futures).
     """
-
-    def respond(params: dict[str, str]) -> dict[str, Any]:
-        day = datetime.strptime(params["FID_INPUT_DATE_1"], "%Y%m%d").date()
-        hour = params["FID_INPUT_HOUR_1"]
-        that_day = bars(params["FID_COND_MRKT_DIV_CODE"], params["FID_INPUT_ISCD"], day)
-        rows = [b for b in reversed(that_day) if b["stck_cntg_hour"] <= hour]
-        return {
-            "rt_cd": "0",
-            "msg_cd": "MCA00000",
-            "msg1": "정상처리 되었습니다.",
-            "output1": {},
-            "output2": rows[:_FUTURES_BARS_PER_QUERY],
-        }
-
-    return respond
+    return _day_of_bars(bars, _FUTURES_BARS_PER_QUERY)
