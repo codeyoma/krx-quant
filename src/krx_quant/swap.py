@@ -27,7 +27,7 @@ from krx_quant.algorithms import Algorithm, Model, load_models
 from krx_quant.archive import NIGHTLY_ARCHIVE
 from krx_quant.engine import PredictionEngine
 from krx_quant.feeds.base import KST, kst_day
-from krx_quant.market_calendar import MarketCalendar
+from krx_quant.market_calendar import MarketCalendar, next_on_trading_day
 from krx_quant.model_shelf import Shelf
 from krx_quant.nightly import LIVE, Night, model_key, promotions_key
 from krx_quant.notify import Alerts
@@ -179,7 +179,7 @@ async def keep_models(
         try:
             if store is not None and now() >= swap_at:
                 today = kst_day(swap_at)
-                swap_at = _next_on_trading_day(calendar, SWAP_AT, now())
+                swap_at = next_on_trading_day(calendar, SWAP_AT, now())
                 status = await morning_swap(store, shelf, engine, today=today, at=now())
                 if status is not None and (not status.applied or status.night.promoted):
                     await notify(_swap_notice(status))
@@ -207,7 +207,7 @@ async def keep_training(
     while True:
         await asyncio.sleep(max(0.0, (start - now()).total_seconds()))
         day = night_to_train(calendar, start)
-        start = _next_on_trading_day(calendar, train_at, max(now(), start))
+        start = next_on_trading_day(calendar, train_at, max(now(), start))
         try:
             failure = await _train(day)
         except Exception as e:
@@ -255,7 +255,7 @@ def _first_swap(calendar: MarketCalendar, started: datetime) -> datetime:
     session = calendar.session(local.date())
     if session is not None and local < session.open:
         return datetime.combine(local.date(), SWAP_AT, KST)
-    return _next_on_trading_day(calendar, SWAP_AT, started)
+    return next_on_trading_day(calendar, SWAP_AT, started)
 
 
 def _first_training(calendar: MarketCalendar, train_at: time, started: datetime) -> datetime:
@@ -265,17 +265,7 @@ def _first_training(calendar: MarketCalendar, train_at: time, started: datetime)
     while not (calendar.is_trading_day(day) and datetime.combine(day, train_at, KST) <= local):
         day -= timedelta(days=1)
     last = datetime.combine(day, train_at, KST)
-    return last if local - last < CATCH_UP else _next_on_trading_day(calendar, train_at, started)
-
-
-def _next_on_trading_day(calendar: MarketCalendar, at: time, after: datetime) -> datetime:
-    """The first ``at`` on a trading day later than ``after``."""
-    day = after.astimezone(KST).date()
-    while True:
-        moment = datetime.combine(day, at, KST)
-        if moment > after and calendar.is_trading_day(day):
-            return moment
-        day += timedelta(days=1)
+    return last if local - last < CATCH_UP else next_on_trading_day(calendar, train_at, started)
 
 
 def night_to_train(calendar: MarketCalendar, start: datetime) -> date:

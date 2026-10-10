@@ -248,3 +248,28 @@ KOSPI200 선물과 달러선물은 KIS 선물옵션 분봉조회(`FHKIF03020200`
 - 체결 시각 대비 수신 지연은 중앙값 약 0.7초였다. 체결 시각이 초 단위라서 최대 1초의 절삭이 포함된 값이다.
 
 KIS 필드 순서는 [koreainvestment/open-trading-api](https://github.com/koreainvestment/open-trading-api)의 `examples_llm/domestic_stock/ccnl_total`, `asking_price_total` 예제를 따른다.
+
+## 매크로 지표와 일일 국면 (#8)
+
+Macro Collector가 거래일 07:30에 쓴다(`macro.py`, [design.md](design.md#45-매크로-지표)). `macro` 계층이다. 같은 날 다시 읽으면(재시도, 재시작, `krx-quant macro`) 줄이 더해진다. `recorded_at`이 가장 늦은 줄이 최신이다.
+
+**`macro/date=<날짜>/feed=readings/symbol=<지표>/`**: 지표 하나에 한 줄.
+
+| 열 | 형식 | 내용 |
+|---|---|---|
+| `day` | date | 그 국면을 쓰는 KRX 거래일 |
+| `recorded_at` | timestamp (UTC) | 기록한 시각 |
+| `indicator`, `source`, `series` | string | 지표 이름(`usdkrw` 등), 출처(`ecos`, `fred`, `yahoo`, `kis`), 출처의 코드 |
+| `as_of` | date | 값의 날짜(출처의 달력). 없으면 null |
+| `value` | float64 | 그날 값. 없으면(7일 넘게 묵었거나 출처에 없음) null |
+| `change_pct` | float64 | 그 전 값 대비 %. 둘이 없으면 null |
+
+**`macro/date=<날짜>/feed=regime/symbol=market/`**: 한 번 읽을 때마다 한 줄.
+
+| 열 | 형식 | 내용 |
+|---|---|---|
+| `day`, `recorded_at` | date, timestamp (UTC) | 위와 같다 |
+| `regime` | string | `shock`, `risk_off`, `risk_on`, `neutral`, `unknown` |
+| `reasons` | string (JSON 목록) | 맞은 조건, 한국어. 예: `["SOX -1.5% (-1% 이하)"]` |
+| `failed` | string (JSON 객체) | 이번에 실패한 출처와 이유 |
+| `skipped` | string (JSON 목록) | 키가 없어 건너뛴 출처 |

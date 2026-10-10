@@ -46,6 +46,7 @@ from krx_quant.feeds import (
 )
 from krx_quant.feeds.base import kst_day
 from krx_quant.health import FeedHealth, FeedState, GapKind
+from krx_quant.macro import MacroCollector, keep_macro, recorder_writer
 from krx_quant.market_calendar import MarketCalendar, Phase, calendar_store
 from krx_quant.masters import FrontMonths, MasterError, fetch_front_months
 from krx_quant.model_shelf import Shelf
@@ -240,6 +241,11 @@ async def run_collector(
                     asyncio.create_task(
                         keep_training(settings.train_at, calendar.calendar, alerts, now, refresh)
                     )
+                )
+            if settings.macro_at is not None:
+                macro = MacroCollector(settings, session, alerts, recorder_writer(recorder, settings), now)
+                background.append(
+                    asyncio.create_task(keep_macro(macro, calendar.calendar, settings.macro_at, now))
                 )
             api = await _serve_api(settings, engine, _live_status(stream, health, now), alerts)
             try:

@@ -127,6 +127,16 @@ class MarketCalendar:
         return True
 
 
+def next_on_trading_day(calendar: MarketCalendar, at: time, after: datetime) -> datetime:
+    """The first ``at`` (KST) on a trading day later than ``after``."""
+    day = after.astimezone(KST).date()
+    while True:
+        moment = datetime.combine(day, at, KST)
+        if moment > after and calendar.is_trading_day(day):
+            return moment
+        day += timedelta(days=1)
+
+
 def calendar_store(settings: Settings) -> CalendarStore:
     """The store kept in the state directory, covering the one-minute bar backfill window."""
     return CalendarStore(settings.state_dir / "market_calendar.json", settings.backfill_days)
