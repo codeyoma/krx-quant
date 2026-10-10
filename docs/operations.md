@@ -174,12 +174,37 @@ curl http://krx-quant:8080/v1/symbols/005930/latest
 | 장 마감 15분 뒤 (보통 15:45, 수능일 16:45) | 그날 녹화를 파티션마다 합쳐 S3에 올린다 |
 | 20:30 | 휴장일 정보를 갱신하고 1분봉 백필을 돌린다 |
 | 21:00 | 다시 올린다. NXT·애프터마켓의 늦은 데이터와 그날 1분봉이 들어간다 |
+| 21:30 | 밤 학습(`KRX_TRAIN_AT`). 알고리즘마다 다시 학습하고, 이긴 모델만 승격 목록에 올린다. 결과를 텔레그램으로 보낸다 |
 | 03:00 | Lightsail 자동 스냅샷 |
+| 08:00 (거래일) | 전날 밤 승격 목록대로 모델을 바꾼다. 바뀌면 텔레그램으로 알린다 |
 
 - 수집기가 시작할 때도 지난날 중 아직 안 올린 날을 올리고 백필을 돌린다.
 - 올리는 작업은 다시 돌려도 결과가 같다. 바뀐 파일만 다시 올린다.
 - 손으로 돌리려면 `docker compose run --rm engine archive`를 실행한다.
 - 업로드 기록은 서버의 각 파티션 `.uploaded.json`에 저장소별로 남는다. S3 쪽에서 객체가 사라졌을 수 있으면 `docker compose run --rm engine archive --recheck`로 모든 파일을 S3와 비교해 빠진 것을 올린다.
+
+### 밤 학습과 모델 교체 (#22)
+
+밤 학습은 지금 Lightsail 수집기가 21:30에 별도 프로세스로 띄운다(#23에서 EC2 Spot으로 옮긴다).
+
+- 알고리즘마다 학습에 안 쓴 최근 3거래일로 새 모델(challenger)과 서버에서 돌고 있는 모델(champion)을 비교한다. log loss가 더 낮을 때만 승격한다. 학습 구간은 그 앞의 알고리즘별 거래일 수(기본 20)다.
+- S3에 남는 것:
+  - `models/<알고리즘>/<버전>.json`: 모델
+  - `reports/<날짜>/<알고리즘>.json`: 검증 리포트. 알고리즘 단위 체크포인트다. 학습이 중간에 죽어도 다시 돌리면 끝난 알고리즘은 건너뛴다.
+  - `promotions/<날짜>.json`: 승격 목록
+  - `live.json`: 서버가 지금 돌리는 버전. 다음 밤의 champion이다.
+- 08:00 교체는 그날 07:30까지 확정된 목록만 쓴다. 늦게 확정됐거나 목록이 없으면 전날 모델을 그대로 쓴다.
+- 서버의 모델은 `state/models/<알고리즘>.json`이다. 설치한 버전은 `state/models/versions/`에, 언제 왜 바꿨는지는 `state/models/history.json`에 남는다.
+- 상태는 `curl http://krx-quant:8080/v1/status`의 `training`(지난밤 날짜, 적용 여부, 알고리즘별 결과)과 `/v1/algorithms`의 모델 버전으로 본다.
+
+```bash
+docker compose run --rm --no-deps engine train            # 밤 학습을 지금 한 번 (끝난 밤이면 그대로 둔다)
+docker compose exec engine krx-quant rollback granger     # 직전 모델로 되돌린다. 엔진이 1분 안에 바꾼다
+```
+
+- 되돌린 모델은 다음 승격까지 유지된다. 이미 적용한 승격 목록을 다시 적용하지 않는다.
+- 밤 학습을 끄려면 `.env`에 `KRX_TRAIN_AT=off`를 넣고 `docker compose up -d`를 실행한다.
+- 손으로 학습한 모델(`fit`)도 `history.json`에 남아서 되돌릴 수 있다.
 
 ## 4. 업데이트 배포
 
@@ -220,7 +245,7 @@ docker compose logs --tail 200 engine
 | `[장애] 장중 데이터가 끊긴 피드: stale <TR> <키>` | 한 종목만이면 거래정지나 VI다. 여러 피드면 연결 문제다. | 데이터가 다시 오면 `[복구]`가 온다. 거래일에 한 번도 안 오는 구독이면 구독 키가 잘못됐을 수 있다(KIS는 잘못된 키도 구독 성공으로 답한다). |
 | `[장애] 장 마감 데이터 업로드가 ... 실패했습니다` | 로그의 `could not archive ...` | 1. AWS 키, `KRX_OBJECT_STORE` 버킷 이름, IAM 정책을 확인한다.<br>2. 고친 뒤 `docker compose run --rm engine archive`를 돌린다. 다시 돌려도 안전하다.<br>3. 다음 업로드가 성공하면 `[복구]`가 온다. |
 | `[장애] 엔진 API를 열지 못했습니다` | 로그의 `Engine API not started on ...` | 녹화와 예측은 계속한다. 다른 프로세스가 8080을 쓰는지 확인하고 `docker compose up -d`로 다시 띄운다. |
-| 알고리즘을 다시 학습하고 싶다 | | 알고리즘마다(`newton`, `gauss`, `granger`) `docker compose run --rm --no-deps engine fit <이름>` 뒤 `docker compose restart engine`. 모델은 `state/models/<이름>.json`이다. 되돌리려면 그 파일을 지우고 재시작한다(기본 모델). |
+| 알고리즘을 다시 학습하고 싶다 | 밤 학습 결과는 텔레그램과 `/v1/status`의 `training` | 밤 학습이 매일 한다. 당장 바꾸려면 알고리즘마다(`newton`, `gauss`, `granger`) `docker compose run --rm --no-deps engine fit <이름>`. 엔진이 1분 안에 새 모델로 바꾼다. 되돌리려면 `docker compose exec engine krx-quant rollback <이름>`(위 "밤 학습과 모델 교체"). |
 | `[알림] <이름> 은퇴 후보: ...` | `curl -s http://krx-quant:8080/v1/algorithms`의 `status` 이력, `/v1/algorithms/<이름>/stats?period=20d` | 벤치 60거래일 동안 회복하지 못했다. 은퇴시키려면 `docker compose exec engine krx-quant retire <이름>`. 기록은 남고, 엔진은 다음 봉 마감부터 돌리지 않는다. 되돌리려면 `krx-quant unretire <이름>`(수습부터 다시). |
 | `[warning] ... skipped for the CPU budget` 또는 `took over 30s` 로그가 잦다 | `docker stats`로 CPU 사용률 | 알고리즘 계산이 서버에 버겁다. 4GB 요금제로 올리거나 `KRX_CPU_BUDGET_SECONDS`를 조정한다. |
 | 녹화된 날의 예측을 다시 보고 싶다 | | `docker compose run --rm --no-deps engine replay 2026-10-12`. 결과는 `state/replay-2026-10-12.sqlite3`다. 실시간 DB는 건드리지 않는다. |

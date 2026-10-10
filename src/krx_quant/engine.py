@@ -214,6 +214,7 @@ class PredictionEngine:
         self.consensus_timing = consensus_timing or Timing()
         self.weights: Weights = store.latest_weights() or NO_WEIGHTS
         self.notify = notify  # where alerts go (Telegram, live)
+        self.training: dict[str, Any] | None = None  # the last night's training, as the swap saw it
         # Reviews pick up where the last one left off: one missed while down runs at start.
         self._reviewed_through = store.last_run("review") or self._last_tick
         self._enroll()

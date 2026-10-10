@@ -74,7 +74,10 @@ class Model:
 
     @classmethod
     def from_json(cls, text: str) -> Model:
-        data = json.loads(text)
+        return cls.from_dict(json.loads(text))
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> Model:
         until = data.get("trained_until")
         return cls(
             str(data["version"]),

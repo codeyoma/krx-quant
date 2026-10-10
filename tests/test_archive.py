@@ -102,8 +102,8 @@ class Counting:
     def get(self, key: str, target: Path) -> None:
         self.store.get(key, target)
 
-    def keys(self) -> list[str]:
-        return self.store.keys()
+    def keys(self, prefix: str = "") -> list[str]:
+        return self.store.keys(prefix)
 
 
 async def test_archiving_again_gives_the_same_objects_without_uploading_again(

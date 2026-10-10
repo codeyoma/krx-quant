@@ -120,6 +120,7 @@
 | `last_bar_close` | 마지막으로 예측한 봉 마감 시각 |
 | `pending_outcomes` | 채점을 기다리는 예측 수 |
 | `special` | 오늘 알게 된 특수 상황. 항목마다 `kind`(`vi`, `circuit_breaker`, `sidecar`), `symbol`(VI의 종목, 시장 전체면 `null`), `start`, `end`. 해제를 아직 모르는 VI의 `end`는 발동 + 3분이다. |
+| `training` | 지난밤 학습(#22). `day`, `finalized_at`(승격 목록 확정 시각), `applied`(그 승격이 지금 돌고 있는지), `reason`, `promoted`(알고리즘 → 버전), `reports`(알고리즘별 `promoted`, `reason`: 검증 log loss 비교). 아직 없으면 `null` |
 | `kis` | 실시간 모드만. `connected`(KIS가 현재 연결에서 구독에 답했는지), `feeds`(구독·조회별 `feed`, `key`, `last_received_at`, `seconds_since`, 열린 결측 구간의 `gap`) |
 
 ### `GET /v1/symbols`
@@ -358,8 +359,8 @@ uv run krx-quant fit newton --days 60
 ```
 
 - 모델은 `state/models/<이름>.json`에 저장한다. 학습에 쓴 마지막 날(`trained_until`)도 적는다.
-- 엔진은 시작할 때 이 파일을 읽고, 없으면 기본 모델을 쓴다. 서버에서 다시 학습했으면 엔진을 재시작해야 반영된다.
-- 매일 밤 자동 학습과 교체는 #22에서 만든다.
+- 엔진은 시작할 때 이 파일을 읽고, 없으면 기본 모델을 쓴다. 실행 중에 파일이 바뀌면(학습, 08:00 교체, `rollback`) 1분 안에 새 모델로 바꾼다.
+- 매일 밤 자동 학습(walk-forward, champion/challenger)과 08:00 교체, 롤백은 [operations.md](operations.md#밤-학습과-모델-교체-22)에 있다(#22).
 
 ### Newton
 

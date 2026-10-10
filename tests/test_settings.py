@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import time
+
 import pytest
 
 from krx_quant.config import Settings, SettingsError
@@ -15,3 +17,11 @@ def test_the_index_codes_must_keep_kospi_for_the_circuit_breaker() -> None:
 
     assert "0001" in Settings.from_env({**KEYS, "KRX_INDEX_CODES": "2001,0001"}, dotenv_path=None).index_codes
     assert "0001" in Settings.from_env(KEYS, dotenv_path=None).index_codes
+
+
+def test_nightly_training_starts_at_21_30_unless_moved_or_off() -> None:
+    assert Settings.from_env(KEYS, dotenv_path=None).train_at == time(21, 30)
+    assert Settings.from_env({**KEYS, "KRX_TRAIN_AT": "22:15"}, dotenv_path=None).train_at == time(22, 15)
+    assert Settings.from_env({**KEYS, "KRX_TRAIN_AT": "off"}, dotenv_path=None).train_at is None
+    with pytest.raises(SettingsError, match="KRX_TRAIN_AT"):
+        Settings.from_env({**KEYS, "KRX_TRAIN_AT": "late"}, dotenv_path=None)

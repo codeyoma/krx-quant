@@ -122,6 +122,15 @@ class Alerts:
         return text.replace(self._bot_token, "***") if self._bot_token else text
 
 
+async def send_notice(settings: Settings, text: str) -> bool:
+    """Send a notice outside the collector (a training summary); whether it went."""
+    async with aiohttp.ClientSession() as session:
+        alerts = Alerts(
+            session, settings.telegram_bot_token, settings.telegram_chat_id, settings.telegram_api_url
+        )
+        return await alerts.deliver(text)
+
+
 async def send_test_alert(settings: Settings) -> bool:
     """Send a test message to the alert chat; False when Telegram is not configured.
 
