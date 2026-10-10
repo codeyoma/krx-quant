@@ -10,6 +10,7 @@ from pathlib import Path
 
 from dotenv import dotenv_values
 
+from krx_quant.regime import RegimeRules
 from krx_quant.stats import DEFAULT_MIN_SAMPLE
 
 DEFAULT_REST_URL = "https://openapi.koreainvestment.com:9443"
@@ -19,6 +20,11 @@ DEFAULT_MASTER_URL = "https://new.real.download.dws.co.kr/common/master"
 # KIS allows 20 REST calls per second on a real account.
 MAX_REST_PER_SECOND = 20
 DEFAULT_TELEGRAM_API_URL = "https://api.telegram.org"
+# Macro sources (macro.py).
+DEFAULT_ECOS_URL = "https://ecos.bok.or.kr/api"
+DEFAULT_FRED_URL = "https://api.stlouisfed.org"
+DEFAULT_YAHOO_URL = "https://query1.finance.yahoo.com"
+RULES = RegimeRules()  # the regime's default thresholds
 
 
 class SettingsError(ValueError):
@@ -108,6 +114,17 @@ class Settings:
     # day's bars are archived (KRX_TRAIN_AT: 21:30 unless set; "off": trained elsewhere).
     # None here, so a collector built in a test never trains.
     train_at: time | None = None
+    # The collector reads the macro indicators and decides the day's regime at this time
+    # (KST) on trading days, after the US close (KRX_MACRO_AT: 07:30 unless set; "off").
+    # None here, so a collector built in a test never does.
+    macro_at: time | None = None
+    # Free API keys of the Bank of Korea (ECOS) and FRED; a source without its key is skipped.
+    ecos_api_key: str | None = None
+    fred_api_key: str | None = None
+    ecos_url: str = DEFAULT_ECOS_URL
+    fred_url: str = DEFAULT_FRED_URL
+    yahoo_url: str = DEFAULT_YAHOO_URL
+    regime_rules: RegimeRules = RegimeRules()
 
     @classmethod
     def from_env(
@@ -217,6 +234,21 @@ class Settings:
             cpu_budget_seconds=float(number("KRX_CPU_BUDGET_SECONDS", "30", float)),
             min_sample=int(number("KRX_MIN_SAMPLE", str(DEFAULT_MIN_SAMPLE), int)),
             train_at=_time_or_off("KRX_TRAIN_AT", values.get("KRX_TRAIN_AT", "21:30")),
+            macro_at=_time_or_off("KRX_MACRO_AT", values.get("KRX_MACRO_AT", "07:30")),
+            ecos_api_key=values.get("KRX_ECOS_API_KEY") or None,
+            fred_api_key=values.get("KRX_FRED_API_KEY") or None,
+            ecos_url=values.get("KRX_ECOS_URL", DEFAULT_ECOS_URL),
+            fred_url=values.get("KRX_FRED_URL", DEFAULT_FRED_URL),
+            yahoo_url=values.get("KRX_YAHOO_URL", DEFAULT_YAHOO_URL),
+            regime_rules=RegimeRules(
+                shock_sox_pct=float(number("KRX_REGIME_SHOCK_SOX_PERCENT", str(RULES.shock_sox_pct), float)),
+                shock_vix=float(number("KRX_REGIME_SHOCK_VIX", str(RULES.shock_vix), float)),
+                shock_usdkrw_pct=float(
+                    number("KRX_REGIME_SHOCK_USDKRW_PERCENT", str(RULES.shock_usdkrw_pct), float)
+                ),
+                sox_move_pct=float(number("KRX_REGIME_SOX_MOVE_PERCENT", str(RULES.sox_move_pct), float)),
+                weak_won_pct=float(number("KRX_REGIME_WEAK_WON_PERCENT", str(RULES.weak_won_pct), float)),
+            ),
         )
 
 

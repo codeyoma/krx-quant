@@ -97,6 +97,13 @@ class MarketCalendar:
             return known
         return day.weekday() < 5 and (day.month, day.day) not in ALWAYS_CLOSED
 
+    def previous_trading_day(self, day: date) -> date:
+        """The last trading day before ``day``."""
+        before = day - timedelta(days=1)
+        while not self.is_trading_day(before):
+            before -= timedelta(days=1)
+        return before
+
     def trading_days(self, start: date, end: date) -> list[date]:
         """Days in ``[start, end]`` that KIS reported as trading days (guesses excluded)."""
         return sorted(d for d, is_open in self._open.items() if is_open and start <= d <= end)
@@ -125,6 +132,16 @@ class MarketCalendar:
                 return False
             d += timedelta(days=1)
         return True
+
+
+def next_on_trading_day(calendar: MarketCalendar, at: time, after: datetime) -> datetime:
+    """The first ``at`` (KST) on a trading day later than ``after``."""
+    day = after.astimezone(KST).date()
+    while True:
+        moment = datetime.combine(day, at, KST)
+        if moment > after and calendar.is_trading_day(day):
+            return moment
+        day += timedelta(days=1)
 
 
 def calendar_store(settings: Settings) -> CalendarStore:

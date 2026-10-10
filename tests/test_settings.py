@@ -25,3 +25,14 @@ def test_nightly_training_starts_at_21_30_unless_moved_or_off() -> None:
     assert Settings.from_env({**KEYS, "KRX_TRAIN_AT": "off"}, dotenv_path=None).train_at is None
     with pytest.raises(SettingsError, match="KRX_TRAIN_AT"):
         Settings.from_env({**KEYS, "KRX_TRAIN_AT": "late"}, dotenv_path=None)
+
+
+def test_the_macro_indicators_are_read_at_07_30_unless_moved_or_off() -> None:
+    assert Settings.from_env(KEYS, dotenv_path=None).macro_at == time(7, 30)
+    assert Settings.from_env({**KEYS, "KRX_MACRO_AT": "off"}, dotenv_path=None).macro_at is None
+    settings = Settings.from_env(
+        {**KEYS, "KRX_ECOS_API_KEY": "e", "KRX_REGIME_SHOCK_VIX": "25"}, dotenv_path=None
+    )
+    assert (settings.ecos_api_key, settings.fred_api_key) == ("e", None), "a source without a key is skipped"
+    assert settings.regime_rules.shock_vix == 25.0
+    assert settings.regime_rules.shock_sox_pct == 3.0

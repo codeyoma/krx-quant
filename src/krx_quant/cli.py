@@ -24,6 +24,7 @@ from krx_quant.fake_kis import FakeKis
 from krx_quant.feeds.base import KST
 from krx_quant.kis import KisError
 from krx_quant.lifecycle import Status
+from krx_quant.macro import run_macro
 from krx_quant.model_shelf import Shelf
 from krx_quant.nightly import run_training
 from krx_quant.notify import send_notice, send_test_alert
@@ -194,6 +195,23 @@ async def _fake_kis(port: int, host: str, trades: bool) -> None:
         await fake.stop()
 
 
+def _macro() -> int:
+    settings = Settings.from_env(require_kis=False)
+    macro = asyncio.run(run_macro(settings, lambda: datetime.now(KST)))
+    for name, reading in macro.readings.items():
+        current, change = reading.current, reading.change_pct
+        value = "missing" if current is None else f"{current.value:g} ({current.day})"
+        moved = "" if change is None else f" {change:+.2f}% since {macro.previous}"
+        print(f"{name:7} {value}{moved}  {reading.indicator.label}")
+    for source in macro.skipped:
+        print(f"{source.value}: skipped, no API key")
+    for source, why in macro.failed.items():
+        print(f"{source.value}: failed: {why}", file=sys.stderr)
+    assert macro.decision is not None
+    print(f"regime {macro.day}: {macro.decision.regime.value} ({'; '.join(macro.decision.reasons)})")
+    return 1 if macro.failed else 0
+
+
 async def _demo_engine(port: int, host: str, db: Path) -> int:
     db.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -272,6 +290,7 @@ def main(argv: list[str] | None = None) -> int:
     unretire_cmd = sub.add_parser("unretire", help="put a retired algorithm back on probation")
     unretire_cmd.add_argument("algorithm")
     sub.add_parser("test-alert", help="send a test message to the Telegram chat that receives alerts")
+    sub.add_parser("macro", help="read today's macro indicators and decide the regime, once")
     notify_cmd = sub.add_parser("notify", help="send a notice to the Telegram chat that receives alerts")
     notify_cmd.add_argument("text")
     fake = sub.add_parser("fake-kis", help="run a local fake KIS server for offline testing")
@@ -310,6 +329,8 @@ def main(argv: list[str] | None = None) -> int:
             return _unretire(args.algorithm)
         elif args.command == "notify":
             return asyncio.run(_notify(args.text))
+        elif args.command == "macro":
+            return _macro()
         elif args.command == "test-alert":
             return asyncio.run(_test_alert())
         elif args.command == "fake-kis":
