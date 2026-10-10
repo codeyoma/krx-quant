@@ -47,7 +47,7 @@ def days_with_bars(data_dir: Path, symbol: str | None = None, feed: str = MINUTE
     pattern = "date=*" if symbol is None else f"date=*/feed={feed}/symbol={symbol}"
     return sorted(
         {
-            date.fromisoformat(p.relative_to(data_dir / "bars").parts[0][5:])
+            date.fromisoformat(p.relative_to(data_dir / "bars").parts[0].removeprefix("date="))
             for p in (data_dir / "bars").glob(pattern)
         }
     )
@@ -258,10 +258,13 @@ async def test_futures_bars_are_filled_for_a_year_from_each_days_nearest_month(
     def contracts(series: str, day: date) -> set[str]:
         return {b["contract"] for b in read_bars(tmp_path, day, series, FUTURES_BARS)}
 
-    assert contracts("KOSPI200F", date(2025, 12, 11)) == {"101W12"}  # its last trading day
-    assert contracts("KOSPI200F", date(2025, 12, 12)) == {"A01603"}
-    assert contracts("USDF", date(2026, 2, 13)) == {"A75602"}  # the third Monday was a holiday
-    assert contracts("USDF", date(2026, 2, 19)) == {"A75603"}
+    assert contracts("KOSPI200F", date(2025, 12, 10)) == {"101W12"}
+    assert contracts("KOSPI200F", date(2025, 12, 11)) == {"A01603"}  # 101W12's last trading day
+    assert contracts("USDF", date(2026, 2, 12)) == {"A75602"}
+    assert contracts("USDF", date(2026, 2, 13)) == {"A75603"}  # the third Monday was a holiday
+    # KIS gives the traded value of KOSPI200 futures in thousands of won, of USD futures in won.
+    assert read_bars(tmp_path, date(2026, 10, 8), "KOSPI200F", FUTURES_BARS)[0]["cum_value"] == 23_000_000_000
+    assert read_bars(tmp_path, date(2026, 10, 8), "USDF", FUTURES_BARS)[0]["cum_value"] == 23_000_000
     assert [
         (b["symbol"], b["bar_time"], b["close"], b["high"], b["volume"])
         for b in read_bars(tmp_path, date(2026, 10, 8), "USDF", FUTURES_BARS)
