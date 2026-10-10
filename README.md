@@ -14,7 +14,7 @@ git clone --recurse-submodules https://github.com/codeyoma/krx-quant.git
 
 ## 개발 환경
 
-[uv](https://docs.astral.sh/uv/)로 Python 3.11 환경을 만든다.
+[uv](https://docs.astral.sh/uv/)로 Python 3.11 환경을 만든다. 맥에서는 Turing의 LightGBM이 OpenMP를 찾으므로 `brew install libomp`를 한 번 해 둔다(리눅스와 서버 이미지는 `libgomp1`).
 
 ```bash
 uv sync
@@ -72,7 +72,7 @@ uv run krx-quant archive
 ```
 
 예측과 엔진 API:
-- 수집기는 받은 이벤트로 1분봉 마감마다 기준 예측 3종(항상 보합, 직전 4분 방향 지속, 클래스 비율 무작위), 알고리즘(Newton 추세 추종, Gauss 역추세, Granger 이웃 관찰, Markov 국면 탐정), 합의 2종(Condorcet 빠른·최종)의 예측을 낸다. 4분 뒤 두 기준(봉 마감, 표시 시점)으로 채점한다. 결과는 `state/engine.sqlite3`에 쌓인다.
+- 수집기는 받은 이벤트로 1분봉 마감마다 기준 예측 3종(항상 보합, 직전 4분 방향 지속, 클래스 비율 무작위), 알고리즘(Newton 추세 추종, Gauss 역추세, Granger 이웃 관찰, Markov 국면 탐정, Turing 만능 학습), 합의 2종(Condorcet 빠른·최종)의 예측을 낸다. 4분 뒤 두 기준(봉 마감, 표시 시점)으로 채점한다. 결과는 `state/engine.sqlite3`에 쌓인다.
 - 알고리즘은 모두 수습으로 시작한다. 매일 장 마감 10분 뒤 상태(수습, 정식, 벤치, 은퇴, 복제)를 점검하고, 정식 알고리즘만 합의에 들어간다([docs/engine-api.md](docs/engine-api.md#상태-관리-17)).
 - 순위표(`/v1/leaderboard`)와 알고리즘 상세 통계(`/v1/algorithms/<이름>/stats`)를 낸다. 방향 정밀도, 커버리지, 기준 3종 대비 lift, 가상손익, Brier 점수, 보정 곡선을 신뢰구간과 함께 보여준다.
 - 알고리즘은 녹화된 날은 녹화 이벤트(중간가 기준)로, 백필만 있는 날은 1분봉(종가 기준)으로 학습한다. 모델은 `state/models/`에 저장되고, 실행 중인 엔진은 30초마다 확인해 바뀐 모델로 바꾼다.
@@ -82,6 +82,7 @@ uv run krx-quant fit newton
 uv run krx-quant fit gauss
 uv run krx-quant fit granger
 uv run krx-quant fit markov
+uv run krx-quant fit turing
 uv run krx-quant train                 # 밤 학습 한 번: KRX_OBJECT_STORE의 최근 날로 학습·검증·승격 목록
 uv run krx-quant rollback granger      # 직전 모델로 되돌리기
 ```
@@ -188,7 +189,7 @@ uv run python -c "import glob, pyarrow.parquet as pq; d = sorted(glob.glob('data
 |---|---|---|
 | P0 | 저장소 준비, 설계 문서 | 완료 |
 | P1 | 수집기 | 거의 완료(#2–#6, #8, #30). 남은 것: 첫 거래일 확인(#7), ETF 장중 확인(#29), REST 대체 추가(#28) |
-| P2 | 예측·채점 핵심 | 진행 중. 완료: #9–#15, #17–#19. 남은 것: Turing(#16) |
+| P2 | 예측·채점 핵심 | 완료: #9–#19. 호가 피처를 쓰는 Turing은 녹화가 쌓인 뒤(#55) |
 | P3 | Fincept 화면, 빌드 | 진행 중. 첫 화면과 개인 빌드(#20)는 됐다. 나머지(#21)가 남았다 |
 | P4 | 밤 학습 | 진행 중. 상시 서버의 밤 학습과 08:00 교체(PR #45), 녹화 이벤트로 학습하기(#22, PR #48)는 됐다. EC2 Spot과 비용 상한(#23)이 남았다 |
 | P5 | 호가 알고리즘, 재생 테스트 | 하루 재생(`replay`)만 있다. Kalman(#25), Shannon(#26), Poisson(#27), 사전 검증 도구(#24) |

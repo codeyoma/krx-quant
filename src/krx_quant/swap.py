@@ -151,7 +151,7 @@ def publish_live(store: ObjectStore, shelf: Shelf, algorithms: Sequence[Algorith
     for name, model in load_models(shelf.state_dir, algorithms).items():
         live[name] = model.version
         if model.trained is not None and store.digest(model_key(name, model.version)) is None:
-            put_json(store, model_key(name, model.version), model.as_dict())
+            put_json(store, model_key(name, model.version), model.as_dict(blob=True))
     put_json(store, LIVE, live)
 
 

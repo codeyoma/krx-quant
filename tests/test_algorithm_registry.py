@@ -9,6 +9,7 @@ from krx_quant.algorithms.gauss import Gauss
 from krx_quant.algorithms.granger import Granger
 from krx_quant.algorithms.markov import Markov
 from krx_quant.algorithms.newton import Newton
+from krx_quant.algorithms.turing import Turing
 from tests.algorithm_doubles import FixedAlgorithm
 
 
@@ -52,9 +53,12 @@ def test_an_algorithm_must_declare_known_features_and_a_new_name() -> None:
         register([stray])
 
 
-def test_newton_gauss_granger_and_markov_each_have_a_personality_of_their_own() -> None:
-    assert [a.name for a in ALGORITHMS] == ["newton", "gauss", "granger", "markov"]
+def test_each_registered_algorithm_has_a_personality_of_its_own() -> None:
+    assert [a.name for a in ALGORITHMS] == ["newton", "gauss", "granger", "markov", "turing"]
     assert not set(Gauss.card.unique_features) & set(Newton.features)
     assert not set(Granger.card.unique_features) & (set(Newton.features) | set(Gauss.features))
     earlier = set(Newton.features) | set(Gauss.features) | set(Granger.features)
     assert not set(Markov.card.unique_features) & earlier
+    # Turing reads every number the others do, and its own on top.
+    others = earlier | set(Markov.features)
+    assert set(Turing.features) == (others - {"minute_ticks"}) | set(Turing.card.unique_features)

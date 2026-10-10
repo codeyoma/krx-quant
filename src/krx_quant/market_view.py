@@ -1,8 +1,9 @@
 """Market View: what the engine knows of the market, built from its events.
 
-The predicted symbols' one-minute bars and reference prices (``reference``), and the bars
-of the series that may lead them (``features.Leaders``: futures, indices, US daytime
-trades, ETFs), each by exchange time, as they stood at each bar close. The engine predicts
+The predicted symbols' one-minute bars and reference prices (``reference``), the bars of
+the series that may lead them (``features.Leaders``: futures, indices, US daytime trades,
+ETFs), each by exchange time, as they stood at each bar close, and the symbols' flows
+(program trading, foreign member firms, investor estimates) as received before it. The engine predicts
 from it, live and in replay; training on a recorded day feeds the same events through it,
 so it learns from exactly what the engine saw.
 
@@ -12,25 +13,30 @@ that event changes them: a prediction made late never sees a trade it could not 
 
 from __future__ import annotations
 
+import bisect
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import Any
 
-from krx_quant.contracts import KOSPI200, USD
-from krx_quant.features import Leaders, Snapshot
+from krx_quant.contracts import KOSPI200, USD, days_to_expiry
+from krx_quant.features import FLOW_MINUTES, Flows, Leaders, Snapshot
 from krx_quant.feeds import (
     BOOK,
     BOOK_SNAPSHOT,
+    FOREIGN_ESTIMATE,
     INDEX,
     INDEX_REST,
     KOSPI200_FUTURES,
     KRX_TRADE,
+    MEMBER,
+    MEMBER_REST,
+    PROGRAM,
     TRADE,
     US_TRADE,
     USD_FUTURES,
 )
-from krx_quant.feeds.base import KST
+from krx_quant.feeds.base import KST, kst_day
 from krx_quant.market_calendar import MarketCalendar, Session
 from krx_quant.reference import BAR, Bar, BarBuilder, ReferencePrice, Source
 
@@ -41,6 +47,8 @@ INDEX_FEEDS = (INDEX.tr_id, INDEX_REST.tr_id)
 FUTURES_SERIES = {KOSPI200_FUTURES.tr_id: KOSPI200.series, USD_FUTURES.tr_id: USD.series}
 # The feeds with the symbols' trades and best quotes.
 _QUOTING = (TRADE.tr_id, KRX_TRADE.tr_id, BOOK.tr_id, BOOK_SNAPSHOT.tr_id)
+# The feeds with the symbols' flows (Turing's).
+FLOW_FEEDS = (PROGRAM.tr_id, MEMBER.tr_id, MEMBER_REST.tr_id, FOREIGN_ESTIMATE.tr_id)
 
 
 def prediction_window(session: Session) -> tuple[datetime, datetime]:
@@ -62,6 +70,68 @@ def next_bar_close(calendar: MarketCalendar, after: datetime) -> datetime | None
         day += timedelta(days=1)
         local = datetime.combine(day, time(), KST)
     return None
+
+
+class _Flow:
+    """A cumulative value of the day, in the order received; a new day starts empty."""
+
+    def __init__(self) -> None:
+        self._day: date | None = None
+        self._at: list[datetime] = []
+        self._values: list[float] = []
+
+    def add(self, at: datetime, value: float | None) -> None:
+        if value is None:
+            return
+        day = kst_day(at)
+        if day != self._day:
+            self._day, self._at, self._values = day, [], []
+        i = bisect.bisect_right(self._at, at)  # in receipt order, even if one came late
+        self._at.insert(i, at)
+        self._values.insert(i, float(value))
+
+    def before(self, at: datetime) -> float | None:
+        """The last value received strictly before ``at``, on ``at``'s day."""
+        if kst_day(at) != self._day:
+            return None
+        i = bisect.bisect_left(self._at, at)
+        return self._values[i - 1] if i else None
+
+    def base(self, at: datetime, opened: datetime | None) -> float | None:
+        """What a change up to now is measured from: the value before ``at``; 0 if nothing
+        was received by then and the day's first value came early (it counted from 0); else
+        unknown (the engine came back mid-day, holding a whole morning in one value)."""
+        before = self.before(at)
+        if before is not None or kst_day(at) != self._day or not self._at:
+            return before
+        early = opened is not None and self._at[0] <= opened + timedelta(minutes=FLOW_MINUTES)
+        return 0.0 if early else None
+
+
+class _Estimates:
+    """A symbol's investor estimates of the day: each poll gives every time slot so far.
+    The slots are KIS's codes (``bsop_hour_gb``), later ones larger ⚠ (not checked live)."""
+
+    def __init__(self) -> None:
+        self._day: date | None = None
+        self._rows: list[tuple[datetime, str, float | None, float | None]] = []
+
+    def add(self, row: dict[str, Any]) -> None:
+        day = kst_day(row["received_at"])
+        if day != self._day:
+            self._day, self._rows = day, []
+        foreign, institution = row["foreign_net_qty"], row["institution_net_qty"]
+        self._rows.append((row["received_at"], row["slot"], foreign, institution))
+
+    def before(self, at: datetime) -> tuple[float | None, float | None]:
+        """The foreign and institutional estimates of the latest slot that has each,
+        received before ``at`` on its day."""
+        known = sorted((r for r in self._rows if r[0] < at), key=lambda r: (r[1], r[0]))
+        if kst_day(at) != self._day or not known:
+            return None, None
+        foreign = next((r[2] for r in reversed(known) if r[2] is not None), None)
+        institution = next((r[3] for r in reversed(known) if r[3] is not None), None)
+        return foreign, institution
 
 
 @dataclass(frozen=True)
@@ -88,11 +158,18 @@ class MarketView:
         # after the close arrives.
         self._frozen: dict[datetime, BarsAtClose] = {}
         self._frozen_through = start
+        self._program = {s: _Flow() for s in self.symbols}
+        self._foreign_members = {s: _Flow() for s in self.symbols}
+        self._estimates = {s: _Estimates() for s in self.symbols}
+        self._expiry: dict[date, int] = {}
 
     def on_event(self, feed: str, row: dict[str, Any]) -> None:
         """Take a trade or a best quote into the bars and reference prices; other events
         are not the view's.
         """
+        if feed in FLOW_FEEDS:
+            self._flow(feed, row)
+            return
         series = self._leading(feed, row)
         if series is not None:
             self._freeze_before(row["received_at"])
@@ -131,9 +208,12 @@ class MarketView:
     def snapshot(
         self, frozen: BarsAtClose, symbol: str, fee_rate: float, regime: str | None = None
     ) -> Snapshot:
-        """``symbol`` at a bar close: its bars, reference price and leaders there, in the
-        day's macro ``regime``."""
-        session = self.calendar.session(frozen.close.astimezone(KST).date())
+        """``symbol`` at a bar close: its bars, reference price, leaders and flows there, in
+        the day's macro ``regime``."""
+        day = frozen.close.astimezone(KST).date()
+        session = self.calendar.session(day)
+        if day not in self._expiry:
+            self._expiry[day] = days_to_expiry(day, self.calendar)
         return Snapshot.at(
             symbol,
             frozen.close,
@@ -143,7 +223,38 @@ class MarketView:
             session_open=session.open if session is not None else None,
             leaders=self.leaders.groups(symbol, frozen.symbols, frozen.leaders),
             regime=regime,
+            flows=self.flows(symbol, frozen.close),
+            expiry_days=self._expiry[day],
         )
+
+    def flows(self, symbol: str, at: datetime) -> Flows:
+        """``symbol``'s flows as received before ``at``, and ``FLOW_MINUTES`` before that."""
+        if symbol not in self._program:
+            return Flows()
+        earlier = at - timedelta(minutes=FLOW_MINUTES)
+        session = self.calendar.session(kst_day(at))
+        opened = session.open if session is not None else None
+        program, members = self._program[symbol], self._foreign_members[symbol]
+        foreign, institution = self._estimates[symbol].before(at)
+        return Flows(
+            program_now=program.before(at),
+            program_before=program.base(earlier, opened),
+            foreign_member_now=members.before(at),
+            foreign_member_before=members.base(earlier, opened),
+            foreign_estimate=foreign,
+            institution_estimate=institution,
+        )
+
+    def _flow(self, feed: str, row: dict[str, Any]) -> None:
+        symbol = row.get("symbol")
+        if symbol not in self._program:
+            return
+        if feed == PROGRAM.tr_id:
+            self._program[symbol].add(row["received_at"], row.get("net_value"))
+        elif feed == FOREIGN_ESTIMATE.tr_id:
+            self._estimates[symbol].add(row)
+        else:
+            self._foreign_members[symbol].add(row["received_at"], row.get("foreign_net_qty"))
 
     def mid(self, symbol: str, at: datetime) -> float | None:
         """The reference price just before ``at``, or None if it is unknown."""

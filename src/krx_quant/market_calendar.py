@@ -91,6 +91,10 @@ class MarketCalendar:
     def knows(self, day: date) -> bool:
         return day in self._open
 
+    def known(self) -> dict[date, bool]:
+        """Every day this calendar was told about, and whether it trades."""
+        return dict(self._open)
+
     def is_trading_day(self, day: date) -> bool:
         known = self._open.get(day)
         if known is not None:

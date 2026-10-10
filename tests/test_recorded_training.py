@@ -17,7 +17,19 @@ from krx_quant.pricing import Direction, tick_size
 from krx_quant.recorder import ParquetRecorder
 from krx_quant.training import recorded_samples, training_day
 from tests.algorithm_doubles import FixedAlgorithm
-from tests.replay_events import CALENDAR, DAY, FEE, SYMBOL, at, book, run, steady_book, trade, vi
+from tests.replay_events import (
+    CALENDAR,
+    DAY,
+    FEE,
+    SYMBOL,
+    at,
+    book,
+    flows_morning,
+    run,
+    steady_book,
+    trade,
+    vi,
+)
 from tests.test_algorithms_replay import LEADERS, leaders_morning
 from tests.test_replay import busy_morning
 from tests.test_replay_cli import record
@@ -47,7 +59,8 @@ def peer_morning() -> list[Event]:
 
 
 def morning() -> list[Event]:
-    return sorted([*busy_morning(end="10:30:00"), *peer_morning(), *leaders_morning()], key=received)
+    flows = [*flows_morning(), *flows_morning(start="09:00:41", symbol=PEER)]
+    return sorted([*busy_morning(end="10:30:00"), *peer_morning(), *leaders_morning(), *flows], key=received)
 
 
 def scored(db: Path) -> dict[tuple[str, datetime], tuple[str | None, float | None, float | None]]:

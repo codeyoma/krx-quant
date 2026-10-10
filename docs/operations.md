@@ -280,6 +280,7 @@ Docker 이미지는 `TZ=Asia/Seoul`, `KRX_DATA_DIR=/data`, `KRX_STATE_DIR=/state
 
 - 알고리즘마다 학습에 안 쓴 최근 3거래일로 새 모델(challenger)과 서버에서 돌고 있는 모델(champion)을 비교한다. log loss가 더 낮을 때만 승격한다. 학습 구간은 그 앞의 알고리즘별 거래일 수(기본 20)다.
 - S3의 `bars/`(백필)와 `events/`(녹화), 그리고 날마다의 매크로 국면(`macro/.../feed=regime/`, Markov가 쓴다, #14)을 읽는다. 녹화된 날은 중간가로, 백필만 있는 날은 종가로 학습한다([engine-api.md](engine-api.md#학습)). 리포트의 `reference_prices`에 날짜별로 `mid` 또는 `close`가 남는다. 텔레그램 요약 첫 줄에는 날 수가 나온다. 예: `2026-10-13 밤 학습 (녹화 중간가 4일, 백필 종가 19일)`.
+- 가장 긴 학습 구간(Turing 60거래일)에 검증 3일을 더한 날들을 읽는다(#16 전에는 23일). 그래서 캐시, 학습 시간, 메모리가 그만큼 는다. 날마다 모든 알고리즘의 피처를 한 번에 계산해 두기 때문이다. Turing 모델 파일은 1MB 안팎이다.
 - 읽은 파일은 `state/training-cache/`에 복사해 두고 다음 밤에 다시 쓴다. 그 밤에 쓴 가장 오래된 날보다 오래된 날짜는 학습이 끝나면 지운다.
 - S3에 남는 것:
   - `models/<알고리즘>/<버전>.json`: 모델
@@ -363,7 +364,7 @@ docker compose logs --tail 200 engine
 | `[장애] 장중 데이터가 끊긴 피드: stale <TR> <키>` | 한 종목만이면 거래정지나 VI다. 여러 피드면 연결 문제다. | 데이터가 다시 오면 `[복구]`가 온다. 거래일에 한 번도 안 오는 구독이면 구독 키가 잘못됐을 수 있다(KIS는 잘못된 키도 구독 성공으로 답한다). |
 | `[장애] 장 마감 데이터 업로드가 ... 실패했습니다` | 로그의 `could not archive ...` | 1. AWS 키, `KRX_OBJECT_STORE` 버킷 이름, IAM 정책을 확인한다.<br>2. 고친 뒤 `docker compose run --rm engine archive`를 돌린다. 다시 돌려도 안전하다.<br>3. 다음 업로드가 성공하면 `[복구]`가 온다. |
 | `[장애] 엔진 API를 열지 못했습니다` | 로그의 `Engine API not started on ...` | 녹화와 예측은 계속한다. 다른 프로세스가 8080을 쓰는지 확인하고 `docker compose up -d`로 다시 띄운다. |
-| 알고리즘을 다시 학습하고 싶다 | 밤 학습 결과는 텔레그램과 `/v1/status`의 `training` | 밤 학습이 매일 한다. 당장 바꾸려면 알고리즘마다(`newton`, `gauss`, `granger`, `markov`) `docker compose run --rm --no-deps engine fit <이름>`. 엔진이 1분 안에 새 모델로 바꾼다. 되돌리려면 `docker compose exec engine krx-quant rollback <이름>`(위 "밤 학습과 모델 교체"). |
+| 알고리즘을 다시 학습하고 싶다 | 밤 학습 결과는 텔레그램과 `/v1/status`의 `training` | 밤 학습이 매일 한다. 당장 바꾸려면 알고리즘마다(`newton`, `gauss`, `granger`, `markov`, `turing`) `docker compose run --rm --no-deps engine fit <이름>`. 엔진이 1분 안에 새 모델로 바꾼다. 되돌리려면 `docker compose exec engine krx-quant rollback <이름>`(위 "밤 학습과 모델 교체"). |
 | `[알림] <이름> 은퇴 후보: ...` | `curl -s http://krx-quant:8080/v1/algorithms`의 `status` 이력, `/v1/algorithms/<이름>/stats?period=20d` | 벤치 60거래일 동안 회복하지 못했다. 은퇴시키려면 `docker compose exec engine krx-quant retire <이름>`. 기록은 남고, 엔진은 다음 봉 마감부터 돌리지 않는다. 되돌리려면 `krx-quant unretire <이름>`(수습부터 다시). |
 | `WARNING krx_quant.engine: <이름> skipped at ... for the CPU budget` 또는 `<이름> took over 30.0s` 로그가 잦다 | `docker stats`로 CPU 사용률, DB의 `runs` 테이블(`kind`가 `cpu_budget`) | 알고리즘 계산이 서버에 버겁다. 텔레그램 알림은 없다. 4GB 요금제로 올리거나 `KRX_CPU_BUDGET_SECONDS`를 조정한다. |
 | `[장애] 매크로 출처 <ecos/fred/yahoo/kis>가 3번 연속 실패했습니다: <이유>` | 로그의 `macro source ... failed` | 키가 틀렸으면(`ECOS INFO-100`, `FRED 400 ... api_key`) `.env`를 고친다. `HTTP 5xx`나 연결 실패는 출처 쪽 장애다. 다음 거래일 07:30에 다시 읽고, 응답하면 `[복구] 매크로 출처 …가 다시 응답합니다.`가 온다. 그동안 그 출처의 지표 없이 국면을 정한다. |
