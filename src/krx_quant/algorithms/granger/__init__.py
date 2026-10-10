@@ -16,29 +16,42 @@ Personality card:
 - **Learns**: over the last 20 trading days, first how many of its own past minutes count,
   then for each group how many minutes back (by BIC), keeping the group only if that
   lowers the BIC of the regression on its own past: a Granger causality test. Then the
-  coefficients of what is kept, by least squares.
+  coefficients of what is kept, by least squares. The four-minute moves of consecutive
+  bar closes overlap, so the BIC counts a quarter as many independent ones.
+
+Training measures the symbol's own moves on closes, which bounce between the bid and the
+ask; a bounce is undone the next minute, so the own coefficients learned lean negative
+against the live moves, which are on the mid-point.
 """
 
 from __future__ import annotations
 
 import math
 from collections.abc import Mapping, Sequence
+from typing import NamedTuple
 
 from krx_quant.algorithms.contract import Card, Model, Sample
 from krx_quant.algorithms.forecasts import (
     HORIZON_MINUTES,
     UNKNOWN,
     Params,
-    log_loss,
+    lowest_log_loss,
     normal_forecast,
     with_outcomes,
 )
 from krx_quant.baselines import Forecast
-from krx_quant.features import LEAD_GROUPS, LEAD_LAGS, FeatureValue, FeatureVector, solve
-from krx_quant.pricing import Direction
+from krx_quant.features import (
+    LEAD_GROUPS,
+    LEAD_LAGS,
+    FeatureValue,
+    FeatureVector,
+    lead_feature,
+    own_feature,
+    solve,
+)
 
-OWN = tuple(f"return_{lag}" for lag in LEAD_LAGS)
-GROUPS = {group: tuple(f"lead_{group}_{lag}" for lag in LEAD_LAGS) for group in LEAD_GROUPS}
+OWN = tuple(own_feature(lag) for lag in LEAD_LAGS)
+GROUPS = {group: tuple(lead_feature(group, lag) for lag in LEAD_LAGS) for group in LEAD_GROUPS}
 COEFFICIENTS = (*OWN, *(name for names in GROUPS.values() for name in names))
 # Without a fit: no move expected, and four minutes of a random walk around it, in one
 # minute's standard deviations. A fit sets the coefficients it keeps; the rest stay 0.
@@ -46,7 +59,10 @@ DEFAULT_PARAMS = {**dict.fromkeys(COEFFICIENTS, 0.0), "residual": math.sqrt(HORI
 # A group seen on fewer bar closes than this is not tested.
 MIN_SAMPLES = 100
 
-_Row = tuple[Mapping[str, FeatureValue], float]  # a sample's features, and its move to explain
+
+class _Row(NamedTuple):
+    features: Mapping[str, FeatureValue]
+    move: float  # the four-minute move to explain, in the symbol's standard deviations
 
 
 class Granger:
@@ -73,7 +89,7 @@ class Granger:
         return Model("granger-default", dict(DEFAULT_PARAMS))
 
     def predict(self, features: FeatureVector, model: Model) -> Forecast:
-        return _forecast(features, model.params)
+        return self._forecast(features, model.params)
 
     def fit(self, samples: Sequence[Sample]) -> Model:
         scored = with_outcomes(samples)
@@ -81,7 +97,7 @@ class Granger:
         for s in scored:
             volatility = s.features["volatility"]
             if volatility and s.change_ticks is not None:
-                rows.append((dict(s.features), s.change_ticks / volatility))
+                rows.append(_Row(dict(s.features), s.change_ticks / volatility))
         if not rows:
             raise ValueError("no training samples with a volatility to measure moves in")
         own = _own_lags(rows)
@@ -94,24 +110,25 @@ class Granger:
         coefficients, rss, n = fitted
         params = {**DEFAULT_PARAMS, **dict(zip(chosen, coefficients, strict=True))}
         params["residual"] = math.sqrt(rss / max(n - len(chosen), 1))
-        loss = sum(log_loss(_forecast(s.features, params), s.outcome or Direction.FLAT) for s in scored)
-        return Model.fitted(self.name, params, scored, loss / len(scored))
+        return lowest_log_loss(self.name, scored, [params], self._forecast)
 
-
-def _forecast(features: FeatureVector | Mapping[str, FeatureValue], params: Params) -> Forecast:
-    k, volatility = features["flat_ticks"], features["volatility"]
-    if k is None or volatility is None:
-        return UNKNOWN
-    move, variance = 0.0, params["residual"] ** 2
-    for name, weight in params.items():
-        if name == "residual" or weight == 0:
-            continue
-        value = features[name]
-        if value is None:
-            variance += weight * weight  # a move of about one standard deviation, unknown
-        else:
-            move += weight * value
-    return normal_forecast(volatility * move + 0.0, volatility * math.sqrt(variance), k)
+    @staticmethod
+    def _forecast(features: FeatureVector, params: Params) -> Forecast:
+        k, volatility = features["flat_ticks"], features["volatility"]
+        if k is None or volatility is None:
+            return UNKNOWN
+        move, variance = 0.0, params["residual"] ** 2
+        for name in COEFFICIENTS:
+            weight = params[name]
+            if weight == 0:
+                continue
+            value = features[name]
+            if value is None:
+                variance += weight * weight  # a move of about one standard deviation, unknown
+            else:
+                move += weight * value
+        # + 0.0: no move is 0, not −0
+        return normal_forecast(volatility * move + 0.0, volatility * math.sqrt(variance), k)
 
 
 def _own_lags(rows: Sequence[_Row]) -> tuple[str, ...]:
@@ -136,15 +153,19 @@ def _granger_causes(rows: Sequence[_Row], own: tuple[str, ...], group: tuple[str
 
 
 def _complete(rows: Sequence[_Row], names: Sequence[str]) -> list[_Row]:
-    return [row for row in rows if all(row[0][name] is not None for name in names)]
+    return [row for row in rows if all(row.features[name] is not None for name in names)]
 
 
 def _bic(rows: Sequence[_Row], names: Sequence[str]) -> float:
+    """The regression's BIC, counting the overlapping four-minute moves of consecutive bar
+    closes as a quarter as many independent ones.
+    """
     fitted = _least_squares(rows, names)
     if fitted is None:
         return math.inf
     _, rss, n = fitted
-    return n * math.log(max(rss, 1e-300) / n) + len(names) * math.log(n)
+    independent = max(n / HORIZON_MINUTES, 1.0)
+    return independent * math.log(max(rss, 1e-300) / n) + len(names) * math.log(independent)
 
 
 def _least_squares(rows: Sequence[_Row], names: Sequence[str]) -> tuple[list[float], float, int] | None:
@@ -154,8 +175,8 @@ def _least_squares(rows: Sequence[_Row], names: Sequence[str]) -> tuple[list[flo
     n, k = len(rows), len(names)
     if n == 0:
         return None
-    xs = [[row[0][name] or 0.0 for name in names] for row in rows]
-    ys = [row[1] for row in rows]
+    xs = [[row.features[name] or 0.0 for name in names] for row in rows]
+    ys = [row.move for row in rows]
     gram = [[sum(x[i] * x[j] for x in xs) for j in range(k)] for i in range(k)]
     moment = [sum(x[i] * y for x, y in zip(xs, ys, strict=True)) for i in range(k)]
     coefficients = solve(gram, moment) if k else []

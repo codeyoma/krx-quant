@@ -112,14 +112,14 @@ ENGINE_FEEDS: dict[str, tuple[str, ...]] = {
     US_TRADE.tr_id: ("symbol", "event_time", "received_at", "price", "qty"),
 }
 _INDEX_FEEDS = (INDEX.tr_id, INDEX_REST.tr_id)
-_FUTURES = {KOSPI200_FUTURES.tr_id: KOSPI200.series, USD_FUTURES.tr_id: USD.series}
+_FUTURES_SERIES = {KOSPI200_FUTURES.tr_id: KOSPI200.series, USD_FUTURES.tr_id: USD.series}
 
 
 def partitions(feed: str, symbols: Sequence[str], leaders: Leaders) -> list[str] | None:
     """The partitions of ``feed`` the engine reads; None for every one (a futures feed's
     single front month, whichever it was that day).
     """
-    if feed in _FUTURES:
+    if feed in _FUTURES_SERIES:
         return None
     if feed in _INDEX_FEEDS:
         return sorted({KOSPI, *leaders.indices})
@@ -258,8 +258,8 @@ class PredictionEngine:
 
     def _leading(self, feed: str, row: dict[str, Any]) -> str | None:
         """The leading series an event trades in, if it is one."""
-        if feed in _FUTURES:
-            return _FUTURES[feed]
+        if feed in _FUTURES_SERIES:
+            return _FUTURES_SERIES[feed]
         symbol = row["symbol"]
         if feed in _INDEX_FEEDS:
             return symbol if symbol in self.leaders.indices else None

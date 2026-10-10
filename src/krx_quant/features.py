@@ -20,6 +20,7 @@ from functools import cached_property
 
 from krx_quant.config import Settings
 from krx_quant.contracts import KOSPI200, USD
+from krx_quant.feeds.market import us_ticker
 from krx_quant.pricing import flat_ticks as flat_band
 from krx_quant.pricing import tick_size
 from krx_quant.reference import BAR, Bar
@@ -105,7 +106,7 @@ class Leaders:
 
     @classmethod
     def of(cls, settings: Settings) -> Leaders:
-        us = tuple(symbol.rpartition(":")[2] for symbol in settings.us_symbols)  # "NYS:X" -> "X"
+        us = tuple(us_ticker(symbol) for symbol in settings.us_symbols)
         etfs = tuple(e for e in settings.etf_symbols if e not in settings.symbols)
         return cls(settings.index_codes, us, etfs)
 
@@ -315,8 +316,8 @@ def flat_ticks(s: Snapshot) -> FeatureValue:
 
 def _moves(bars: Sequence[Bar], at: datetime) -> list[FeatureValue] | None:
     """A series' one-minute log returns 1 to 3 minutes before ``at``, each in standard
-    deviations of its last 20; None if it has not traded for 10 minutes or has moved in
-    fewer than 6 of them.
+    deviations of its last 20; None if it has not traded for 10 minutes, or if its bars
+    reach back over fewer than 6 of those minutes.
 
     A minute without a bar is no move: the last close carries over. Returns too old for the
     series' bars are left out. A series that has not moved at all moved 0.
@@ -355,6 +356,14 @@ def _group_moves(members: Sequence[Sequence[Bar]], at: datetime) -> list[Feature
     return out
 
 
+def own_feature(lag: int) -> str:
+    return f"return_{lag}"
+
+
+def lead_feature(group: str, lag: int) -> str:
+    return f"lead_{group}_{lag}"
+
+
 def _lead(group: str, lag: int) -> Feature:
     def feature(s: Snapshot) -> FeatureValue:
         return s.lead_moves[group][lag - 1]
@@ -380,10 +389,10 @@ FEATURES: dict[str, Feature] = {
     "vwap_gap": vwap_gap,
     "vwap_z": vwap_z,
     "reversion_speed": reversion_speed,
-    **{f"return_{lag}": _own(lag) for lag in LEAD_LAGS},
-    **{f"lead_{group}_{lag}": _lead(group, lag) for group in LEAD_GROUPS for lag in LEAD_LAGS},
+    **{own_feature(lag): _own(lag) for lag in LEAD_LAGS},
+    **{lead_feature(group, lag): _lead(group, lag) for group in LEAD_GROUPS for lag in LEAD_LAGS},
 }
-LEAD_FEATURES = frozenset(f"lead_{group}_{lag}" for group in LEAD_GROUPS for lag in LEAD_LAGS)
+LEAD_FEATURES = frozenset(lead_feature(group, lag) for group in LEAD_GROUPS for lag in LEAD_LAGS)
 
 
 class UndeclaredFeature(LookupError):

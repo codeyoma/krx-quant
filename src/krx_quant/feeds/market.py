@@ -219,6 +219,11 @@ def us_daytime_key(symbol: str) -> str:
     return f"R{_DAYTIME_EXCHANGES[exchange or 'NAS']}{ticker}"
 
 
+def us_ticker(symbol: str) -> str:
+    """The ticker of a configured US symbol (``NYS:XYZ`` -> ``XYZ``): its trades' ``symbol``."""
+    return symbol.rpartition(":")[2]
+
+
 # H0IOCNT0, KOSPI200 option trades with implied volatility and greeks
 # (KIS: "지수옵션 실시간체결가"). Keys are option codes near the money, from the KIS master.
 OPTION_COLUMNS = (
