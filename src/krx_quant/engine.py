@@ -175,7 +175,7 @@ class PredictionEngine:
         for p in store.pending():
             heapq.heappush(self._pending, (p.target_at, p.prediction_id, p))
         self.min_sample = min_sample
-        self._timing = consensus_timing or Timing()
+        self.consensus_timing = consensus_timing or Timing()
         self.weights: Weights = store.latest_weights() or NO_WEIGHTS
         self.notify = notify  # where alerts go (Telegram, live)
         # Reviews pick up where the last one left off: one missed while down runs at start.
@@ -249,6 +249,11 @@ class PredictionEngine:
 
     def mid(self, symbol: str) -> float | None:
         return self._reference.mid(symbol, self.clock.now())
+
+    def members(self) -> list[str]:
+        """The consensus members now: the active algorithms, in registration order."""
+        active = _with_status(self.store.statuses(), Status.ACTIVE)
+        return [a.name for a in self.algorithms if a.name in active]
 
     def special_today(self) -> list[Window]:
         """The special situations known now that touch today, in time order."""
@@ -391,7 +396,7 @@ class PredictionEngine:
         runs = [asyncio.ensure_future(self._run(a, bar_close, at_close)) for a in chosen]
         finished: dict[str, Mapping[str, Forecast | None]] = {}
         if runs:
-            soon = bar_close + timedelta(seconds=self._timing.fast_seconds) - self.clock.now()
+            soon = bar_close + timedelta(seconds=self.consensus_timing.fast_seconds) - self.clock.now()
             done, _ = await asyncio.wait(runs, timeout=max(0.0, soon.total_seconds()))
             finished = dict(r.result() for r in done)
         self._record_consensus(FAST, bar_close, at_close, members, finished)
