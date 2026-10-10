@@ -22,6 +22,7 @@ from krx_quant.algorithms import ALGORITHMS, Algorithm, Model, load_models
 from krx_quant.archive import partition_files
 from krx_quant.clock import FakeClock
 from krx_quant.config import Settings
+from krx_quant.consensus import Timing
 from krx_quant.engine import ENGINE_FEEDS, MARKET_FEEDS, Budget, Event, Notify, PredictionEngine
 from krx_quant.features import FeatureStore
 from krx_quant.feeds.base import KST, kst_day
@@ -51,6 +52,7 @@ async def replay(
     feature_store: FeatureStore | None = None,
     min_sample: int = DEFAULT_MIN_SAMPLE,
     notify: Notify | None = None,
+    consensus_timing: Timing | None = None,
 ) -> PredictionEngine:
     """Feed ``events`` (in receipt order) received by ``until`` to an engine storing into ``db``.
 
@@ -73,6 +75,7 @@ async def replay(
         feature_store=feature_store,
         min_sample=min_sample,
         notify=notify,
+        consensus_timing=consensus_timing,
     )
     for feed, row in events:
         received_at: datetime = row["received_at"]

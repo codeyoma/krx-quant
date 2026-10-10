@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from krx_quant.baselines import Forecast
+from krx_quant.consensus import Weights
 from krx_quant.feeds.base import KST
 from krx_quant.lifecycle import Standing, Status
 from krx_quant.pricing import Direction
@@ -26,7 +27,7 @@ from krx_quant.pricing import Direction
 # The engine's database, in the state directory.
 DB_NAME = "engine.sqlite3"
 
-_VERSION = 3
+_VERSION = 4
 
 # Probabilities are empty for a prediction that was not made (status other than ok).
 _PREDICTIONS = """
@@ -83,6 +84,15 @@ CREATE TABLE IF NOT EXISTS statuses (  -- each algorithm's status changes, oldes
     reason TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS statuses_by_algorithm ON statuses (algorithm, id);
+CREATE TABLE IF NOT EXISTS consensus_weights (  -- refitted after each close (#18)
+    version TEXT NOT NULL,
+    computed_at TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    slot TEXT NOT NULL,               -- "09:00": the bar closes 09:01-09:30
+    algorithm TEXT NOT NULL,
+    weight REAL NOT NULL,
+    PRIMARY KEY (version, symbol, slot, algorithm)
+);
 """
 )
 
@@ -241,6 +251,43 @@ class PredictionStore:
                 (algorithm, iso(at), previous.value, status.value, reason, algorithm, previous.value),
             )
         return cursor.rowcount == 1
+
+    def save_weights(self, weights: Weights) -> None:
+        """Keep ``weights`` (replacing a fit of the same version: a review run again)."""
+        assert weights.computed_at is not None
+        self.version += 1
+        with self._db:
+            self._db.execute("DELETE FROM consensus_weights WHERE version = ?", (weights.version,))
+            self._db.executemany(
+                "INSERT INTO consensus_weights (version, computed_at, symbol, slot, algorithm, weight)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                [
+                    (weights.version, iso(weights.computed_at), symbol, slot, name, w)
+                    for (symbol, slot), cell in weights.cells.items()
+                    for name, w in cell.items()
+                ],
+            )
+            if not weights.cells:  # remember the fit even without a cell
+                self._db.execute(
+                    "INSERT INTO consensus_weights VALUES (?, ?, '', '', '', 0)",
+                    (weights.version, iso(weights.computed_at)),
+                )
+
+    def latest_weights(self) -> Weights | None:
+        """The last weights fitted, if any."""
+        latest = self._db.execute(
+            "SELECT version, computed_at FROM consensus_weights ORDER BY computed_at DESC LIMIT 1"
+        ).fetchone()
+        if latest is None:
+            return None
+        cells: dict[tuple[str, str], dict[str, float]] = {}
+        for r in self._db.execute(
+            "SELECT symbol, slot, algorithm, weight FROM consensus_weights"
+            " WHERE version = ? AND algorithm != ''",
+            (latest["version"],),
+        ):
+            cells.setdefault((r["symbol"], r["slot"]), {})[r["algorithm"]] = r["weight"]
+        return Weights(latest["version"], datetime.fromisoformat(latest["computed_at"]), cells)
 
     def statuses(self) -> dict[str, Standing]:
         """Each algorithm's current status and since when."""

@@ -44,6 +44,8 @@ from krx_quant.algorithms import ALGORITHMS, Algorithm, Model, register
 from krx_quant.baselines import BASELINES, Forecast, Inputs
 from krx_quant.clock import SessionClock
 from krx_quant.config import Settings
+from krx_quant.consensus import FAST, FINAL, NAMES, NO_WEIGHTS, PERIODS, Timing, Weights, pool
+from krx_quant.consensus import fit as fit_weights
 from krx_quant.features import FeatureStore, FeatureValue, FeatureVector, Snapshot
 from krx_quant.feeds import (
     BOOK,
@@ -56,7 +58,7 @@ from krx_quant.feeds import (
     VI_STATUS,
 )
 from krx_quant.feeds.base import KST
-from krx_quant.lifecycle import Status, review
+from krx_quant.lifecycle import Standing, Status, review
 from krx_quant.market_calendar import MarketCalendar, Session
 from krx_quant.predictions import NewPrediction, Pending, PredictionStore, Score
 from krx_quant.pricing import Direction, classify, flat_ticks, tick_size
@@ -145,6 +147,7 @@ class PredictionEngine:
         feature_store: FeatureStore | None = None,
         min_sample: int = DEFAULT_MIN_SAMPLE,
         notify: Notify | None = None,
+        consensus_timing: Timing | None = None,
     ) -> None:
         self.store = store
         self.calendar = calendar
@@ -172,6 +175,8 @@ class PredictionEngine:
         for p in store.pending():
             heapq.heappush(self._pending, (p.target_at, p.prediction_id, p))
         self.min_sample = min_sample
+        self._timing = consensus_timing or Timing()
+        self.weights: Weights = store.latest_weights() or NO_WEIGHTS
         self.notify = notify  # where alerts go (Telegram, live)
         # Reviews pick up where the last one left off: one missed while down runs at start.
         self._reviewed_through = store.last_run("review") or self._last_tick
@@ -311,6 +316,17 @@ class PredictionEngine:
             if await self._deliver(text):  # else asked again at the next review
                 self.store.add_run("retire_candidate", at, name, text)
         self.store.add_run("review", at, None, f"{len(result.changes)} status changes")
+        await self._refit_weights(at)
+
+    async def _refit_weights(self, at: datetime) -> None:
+        """The consensus weights of the members active after the review."""
+        standings = self.store.statuses()
+        members = [a.name for a in self.algorithms if a.name in _with_status(standings, Status.ACTIVE)]
+        days = self.store.prediction_days(at.astimezone(KST).date(), max(PERIODS))
+        rows = await asyncio.to_thread(self.store.scored_predictions, days, None, False)
+        self.weights = await asyncio.to_thread(fit_weights, rows, members, days, at)
+        self.store.save_weights(self.weights)
+        log.info("consensus weights %s for %s", self.weights.version, ", ".join(members) or "no member")
 
     def _first_counted(self, since: datetime) -> date:
         """The first day a status that began at ``since`` counts for: its day, unless it
@@ -340,7 +356,9 @@ class PredictionEngine:
         baselines: dict[tuple[str, str], dict[str, Forecast | None]] = {}
         session = self.calendar.session(bar_close.date())
         session_open = session.open if session is not None else None
-        running = self._running()
+        standings = self.store.statuses()  # read each time: retiring is a command
+        running = [a for a in self.algorithms if a.name not in _with_status(standings, Status.RETIRED)]
+        members = [a.name for a in running if a.name in _with_status(standings, Status.ACTIVE)]
         known = self._special.known(before=bar_close)
         stopped = [s for s in self.symbols if in_vi(known, s, bar_close)]
         if stopped:
@@ -370,7 +388,40 @@ class PredictionEngine:
         if not at_close:
             return
         chosen = self._within_cpu_budget(bar_close, running)
-        await asyncio.gather(*(self._run(a, bar_close, at_close) for a in chosen))
+        runs = [asyncio.ensure_future(self._run(a, bar_close, at_close)) for a in chosen]
+        finished: dict[str, Mapping[str, Forecast | None]] = {}
+        if runs:
+            soon = bar_close + timedelta(seconds=self._timing.fast_seconds) - self.clock.now()
+            done, _ = await asyncio.wait(runs, timeout=max(0.0, soon.total_seconds()))
+            finished = dict(r.result() for r in done)
+        self._record_consensus(FAST, bar_close, at_close, members, finished)
+        finished = dict(await asyncio.gather(*runs))
+        self._record_consensus(FINAL, bar_close, at_close, members, finished)
+
+    def _record_consensus(
+        self,
+        name: str,
+        bar_close: datetime,
+        at_close: Mapping[str, _AtClose],
+        members: Sequence[str],
+        finished: Mapping[str, Mapping[str, Forecast | None]],
+    ) -> None:
+        """The consensus of the members' forecasts finished so far; empty where there are none."""
+        pooled: dict[str, Forecast | None] = {}
+        empty: dict[str, Forecast | None] = {}
+        for symbol in at_close:
+            present = {m: f for m in members if (f := finished.get(m, {}).get(symbol)) is not None}
+            if present:
+                pooled[symbol] = pool(present, self.weights.of(symbol, bar_close, list(present)))
+            else:
+                empty[symbol] = None
+        version = self.weights.version
+        made = [
+            (name, version, forecasts, status)
+            for forecasts, status in ((pooled, "ok"), (empty, "no_members"))
+            if forecasts
+        ]
+        self._record(bar_close, at_close, made)
 
     def _record_not_predicted(
         self, bar_close: datetime, symbols: Sequence[str], status: str, running: Sequence[Algorithm]
@@ -380,12 +431,8 @@ class PredictionEngine:
         nothing = dict.fromkeys(symbols)
         made = [(b.name, b.version, nothing, status) for b in BASELINES]
         made += [(a.name, self.models[a.name].version, nothing, status) for a in running]
+        made += [(name, self.weights.version, nothing, status) for name in NAMES]
         self._record(bar_close, at_close, made)
-
-    def _running(self) -> list[Algorithm]:
-        """The registered algorithms not retired (read each time: retiring is a command)."""
-        retired = {name for name, s in self.store.statuses().items() if s.status is Status.RETIRED}
-        return [a for a in self.algorithms if a.name not in retired]
 
     def _within_cpu_budget(self, bar_close: datetime, running: Sequence[Algorithm]) -> list[Algorithm]:
         """The algorithms to run: the last registered drop out while the expected work is over budget."""
@@ -400,7 +447,10 @@ class PredictionEngine:
             self._cost[dropped.name] = expected / 2
         return chosen
 
-    async def _run(self, algorithm: Algorithm, bar_close: datetime, at_close: Mapping[str, _AtClose]) -> None:
+    async def _run(
+        self, algorithm: Algorithm, bar_close: datetime, at_close: Mapping[str, _AtClose]
+    ) -> tuple[str, Mapping[str, Forecast | None]]:
+        """Run and record one algorithm; its name and forecasts (none unless it finished)."""
         name, model = algorithm.name, self.models[algorithm.name]
         made: Mapping[str, Forecast | None] = dict.fromkeys(at_close)  # nothing, unless it finishes
         status = "timed_out"
@@ -425,6 +475,7 @@ class PredictionEngine:
                     elapsed if previous is None else (1 - _COST_WEIGHT) * previous + _COST_WEIGHT * elapsed
                 )
         self._record(bar_close, at_close, [(name, model.version, made, status)])
+        return name, made
 
     def _finished_late(self, name: str, work: asyncio.Future[dict[str, Forecast]]) -> None:
         self._busy.discard(name)
@@ -474,6 +525,10 @@ class PredictionEngine:
             scores.append((pending.prediction_id, _score(pending, mid_target)))
         if scores:
             self.store.score_all(scores, self.clock.now())
+
+
+def _with_status(standings: Mapping[str, Standing], status: Status) -> set[str]:
+    return {name for name, s in standings.items() if s.status is status}
 
 
 def _predict_symbols(

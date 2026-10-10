@@ -11,9 +11,11 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
+from krx_quant.consensus import NAMES as CONSENSUS
 from krx_quant.engine import Event
 from krx_quant.market_calendar import MarketCalendar
 from tests.replay_events import (
+    PREDICTING,
     PREDICTORS,
     SYMBOL,
     api,
@@ -38,6 +40,9 @@ async def test_every_baseline_predicts_at_a_bar_close_in_continuous_trading(tmp_
     assert {p["algorithm"] for p in latest["predictions"]} == PREDICTORS
     for p in latest["predictions"]:
         assert p["bar_close"] == "2026-10-12T09:31:00+09:00"
+        if p["algorithm"] in CONSENSUS:
+            assert p["status"] == "no_members"  # no algorithm is active yet
+            continue
         assert p["target_at"] == "2026-10-12T09:35:00+09:00"
         assert abs(p["p_up"] + p["p_flat"] + p["p_down"] - 1) < 1e-9
         assert p["outcome"] is None  # not scored before 09:35
@@ -322,7 +327,7 @@ async def test_a_prediction_does_not_change_when_everything_after_it_is_cut(tmp_
         await run(tmp_path / f"cut-{t}.db", cut, until=at(t))
 
         known = known_at_prediction(tmp_path / f"cut-{t}.db", t)
-        assert len(known) == len(PREDICTORS)
+        assert len(known) == len(PREDICTING)  # the empty consensus has nothing to score
         assert known == known_at_prediction(tmp_path / "full.db", t)
 
 
