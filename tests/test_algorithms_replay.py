@@ -8,16 +8,30 @@ from __future__ import annotations
 
 import sqlite3
 from collections import Counter
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from krx_quant.algorithms import Model
+from krx_quant.algorithms.granger import DEFAULT_PARAMS as GRANGER_DEFAULTS
 from krx_quant.baselines import Forecast
-from krx_quant.engine import Budget
-from krx_quant.features import FEATURES, FeatureStore, Snapshot
+from krx_quant.engine import Budget, Event
+from krx_quant.features import FEATURES, FeatureStore, Leaders, Snapshot
+from krx_quant.feeds import USD_FUTURES
 from tests.algorithm_doubles import FixedAlgorithm
-from tests.replay_events import SYMBOL, api, at, get_json, run, trade
+from tests.replay_events import (
+    SYMBOL,
+    api,
+    at,
+    every,
+    futures_trade,
+    get_json,
+    index_tick,
+    krx_trade,
+    run,
+    trade,
+    us_trade,
+)
 from tests.test_replay import busy_morning
 
 VWAP_FEATURES = ("vwap_gap", "vwap_z", "reversion_speed")
@@ -82,7 +96,7 @@ async def test_a_trained_model_is_used_and_recorded(tmp_path: Path) -> None:
     assert {p["model_version"] for p in await predictions_of(engine, "newton")} == {"newton-20261009-abc123"}
     async with api(engine) as client:
         listed = {a["name"]: a for a in (await get_json(client, "/v1/algorithms"))["algorithms"]}
-    assert listed.keys() == {"newton", "gauss"}
+    assert listed.keys() == {"newton", "gauss", "granger"}
     newton = listed["newton"]
     assert listed["gauss"]["model"]["version"] == "gauss-default"
     assert newton["card"]["scientist"] == "Isaac Newton"
@@ -216,3 +230,80 @@ async def test_a_trade_received_after_a_bar_close_stays_out_of_its_features(tmp_
 def at_0931_next(predictions: list[dict[str, Any]]) -> tuple[Any, ...]:
     p = next(p for p in predictions if p["bar_close"] == "2026-10-12T09:32:00+09:00")
     return (p["p_up"], p["p_flat"], p["p_down"], p["expected_ticks"])
+
+
+LEADERS = Leaders(indices=("0013",), us=("NVDA",), etfs=("133690",))
+LEAD_1 = tuple(f"lead_{group}_1" for group in ("peers", "kospi200f", "usdf", "indices", "us", "etfs"))
+
+
+def wander(when: datetime, size: float) -> float:
+    """A deterministic walk of −5..+5 steps of ``size``, by the second."""
+    return ((int(when.timestamp()) * 7919) % 11 - 5) * size
+
+
+def leaders_morning() -> list[Event]:
+    """Every leading series trading through the morning, but US daytime trades only from
+    09:30, as when the US is not on summer time and they start late.
+    """
+    return [
+        *every(at("08:45:00"), at("10:00:00"), 7, lambda w: futures_trade(w, 1000 + wander(w, 0.05))),
+        *every(
+            at("08:45:00"),
+            at("10:00:00"),
+            11,
+            lambda w: futures_trade(w, 1340 + wander(w, 0.1), feed=USD_FUTURES, contract="A75610"),
+        ),
+        *every(at("09:00:00"), at("10:00:00"), 5, lambda w: index_tick(w, "0013", 3000 + wander(w, 0.5))),
+        *every(
+            at("09:00:00"),
+            at("10:00:00"),
+            17,
+            lambda w: krx_trade(w, 9000 + int(wander(w, 5)), bid=0, ask=0, symbol="133690"),
+        ),
+        *every(at("09:30:00"), at("10:00:00"), 9, lambda w: us_trade(w, "NVDA", 180 + wander(w, 0.01))),
+    ]
+
+
+async def test_the_leading_series_are_built_from_their_feeds(tmp_path: Path) -> None:
+    probe = FixedAlgorithm("probe", features=LEAD_1, unique=LEAD_1)
+
+    await run(
+        tmp_path / "engine.db",
+        [*busy_morning(), *leaders_morning()],
+        until=at("10:00:00"),
+        algorithms=[probe],
+        leaders=LEADERS,
+    )
+
+    def known(bar_close: str) -> set[str]:
+        minute = (at(bar_close) - at("09:01:00")) // timedelta(minutes=1)
+        return {name for name, value in probe.seen[minute].items() if value is not None}
+
+    assert known("09:01:00") == {"lead_kospi200f_1", "lead_usdf_1"}, "the futures trade from 08:45"
+    assert known("09:20:00") == {"lead_kospi200f_1", "lead_usdf_1", "lead_indices_1", "lead_etfs_1"}
+    assert known("09:45:00") == {
+        "lead_kospi200f_1",
+        "lead_usdf_1",
+        "lead_indices_1",
+        "lead_etfs_1",
+        "lead_us_1",
+    }
+    assert "lead_peers_1" not in known("09:59:00"), "one symbol has no peers"
+
+
+async def test_granger_predicts_through_a_silent_feed_and_is_scored(tmp_path: Path) -> None:
+    trained = Model("granger-test", {**GRANGER_DEFAULTS, "lead_kospi200f_1": 0.5, "lead_us_1": 0.5})
+
+    engine = await run(
+        tmp_path / "engine.db",
+        [*busy_morning(), *leaders_morning()],
+        until=at("10:00:00"),
+        models={"granger": trained},
+        leaders=LEADERS,
+    )
+
+    granger = await predictions_of(engine, "granger")
+    assert len(granger) == 60  # 09:01–10:00, before and after US daytime trades start
+    assert {(p["model_version"], p["status"]) for p in granger} == {("granger-test", "ok")}
+    assert len([p for p in granger if p["outcome"] is not None]) == 56
+    assert any(p["expected_ticks"] != 0 for p in granger)

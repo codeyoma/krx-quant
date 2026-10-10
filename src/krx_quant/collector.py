@@ -21,6 +21,7 @@ from krx_quant.backfill import keep_history
 from krx_quant.clock import SessionClock, SystemClock
 from krx_quant.config import Settings
 from krx_quant.engine import Budget, PredictionEngine, run_live
+from krx_quant.features import Leaders
 from krx_quant.feeds import (
     BOOK,
     ETF_FALLBACKS,
@@ -168,6 +169,7 @@ async def run_collector(
         models=load_models(settings.state_dir, ALGORITHMS),
         budget=Budget.of(settings),
         min_sample=settings.min_sample,
+        leaders=Leaders.of(settings),
     )
 
     def on_event(feed: str, row: dict[str, Any]) -> None:

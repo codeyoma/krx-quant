@@ -81,10 +81,11 @@ class ReferencePrice:
 @dataclass
 class Bar:
     start: datetime  # the minute the bar covers, by exchange time
-    open: int
-    high: int
-    low: int
-    close: int
+    # Prices: won for stocks; futures, indices and US trades have decimals.
+    open: float
+    high: float
+    low: float
+    close: float
     volume: int
     trades: int
     # Exchange times of the first and last trade: a trade can arrive after a later one.
@@ -93,13 +94,13 @@ class Bar:
 
 
 class BarBuilder:
-    """One-minute bars of the integrated trades, by exchange time, for the latest day."""
+    """One-minute bars of a series' trades, by exchange time, for the latest day."""
 
     def __init__(self) -> None:
         self._day: dict[str, date] = {}
         self._bars: dict[str, dict[datetime, Bar]] = {}
 
-    def trade(self, symbol: str, traded_at: datetime, price: int, qty: int) -> None:
+    def trade(self, symbol: str, traded_at: datetime, price: float, qty: int) -> None:
         local = traded_at.astimezone(KST)
         day = self._day.get(symbol)
         if day is None or local.date() > day:

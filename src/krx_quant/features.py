@@ -1,7 +1,8 @@
 """Feature Store: named features, each computed once per symbol per bar close.
 
 A feature is a function of a ``Snapshot``: the day's finished one-minute bars up to the
-bar close, the reference price there, and when the session opened. Live and replay build
+bar close, the reference price there, when the session opened, and the bars of the series
+that may lead the symbol (``Leaders``). Live and replay build
 snapshots from the engine's bars; training builds them from backfilled bars with the same
 code, so a feature means the same thing in both. A snapshot holds nothing received after its bar
 close, so no feature can see the future.
@@ -13,9 +14,12 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from functools import cached_property
 
+from krx_quant.config import Settings
+from krx_quant.contracts import KOSPI200, USD
 from krx_quant.pricing import flat_ticks as flat_band
 from krx_quant.pricing import tick_size
 from krx_quant.reference import BAR, Bar
@@ -34,6 +38,8 @@ class Snapshot:
     # Continuous trading started: the bars before it are the NXT pre-market's. None only if
     # the day has no session (the calendar changed under the engine): then every bar counts.
     session_open: datetime | None
+    # The day's finished bars of each lead group's members (``Leaders.groups``).
+    leaders: Mapping[str, Sequence[Sequence[Bar]]] = field(default_factory=dict)
 
     @classmethod
     def at(
@@ -45,11 +51,23 @@ class Snapshot:
         fee_rate: float,
         *,
         session_open: datetime | None,
+        leaders: Mapping[str, Sequence[Sequence[Bar]]] | None = None,
     ) -> Snapshot:
         """A snapshot with the tick and flat band of ``price``."""
+        lead = leaders or {}
         if price is None:
-            return cls(symbol, bar_close, bars, None, None, None, session_open)
-        return cls(symbol, bar_close, bars, price, tick_size(price), flat_band(price, fee_rate), session_open)
+            return cls(symbol, bar_close, bars, None, None, None, session_open, lead)
+        tick, band = tick_size(price), flat_band(price, fee_rate)
+        return cls(symbol, bar_close, bars, price, tick, band, session_open, lead)
+
+    @cached_property
+    def lead_moves(self) -> dict[str, list[FeatureValue]]:
+        """Each lead group's moves, 1 to 3 minutes back (computed once, for every feature)."""
+        return {group: _group_moves(self.leaders.get(group, []), self.bar_close) for group in LEAD_GROUPS}
+
+    @cached_property
+    def own_moves(self) -> list[FeatureValue]:
+        return _moves(self.bars, self.bar_close) or [None] * len(LEAD_LAGS)
 
 
 Feature = Callable[[Snapshot], FeatureValue]
@@ -68,6 +86,46 @@ REVERSION_MOVES = 30
 MIN_REVERSION_MOVES = 20
 # Per minute: a gap left at 5% a minute later. A price that overshoots the VWAP gets this.
 MAX_REVERSION_SPEED = 3.0
+# The series whose moves may come before a symbol's (Granger): the other predicted symbols,
+# KOSPI200 and USD futures, the market indices, US daytime trades and the KRX-listed US
+# ETFs. A group's move is the mean of its members'.
+LEAD_GROUPS = ("peers", "kospi200f", "usdf", "indices", "us", "etfs")
+LEAD_LAGS = (1, 2, 3)  # minutes back
+LEAD_WINDOW = 20  # one-minute moves a series' latest are measured against
+LEAD_STALE = timedelta(minutes=10)  # a series silent this long says nothing
+
+
+@dataclass(frozen=True)
+class Leaders:
+    """Which series lead, besides the other predicted symbols and the two futures."""
+
+    indices: tuple[str, ...] = ()  # index codes
+    us: tuple[str, ...] = ()  # US daytime tickers
+    etfs: tuple[str, ...] = ()  # KRX-listed ETF codes
+
+    @classmethod
+    def of(cls, settings: Settings) -> Leaders:
+        us = tuple(symbol.rpartition(":")[2] for symbol in settings.us_symbols)  # "NYS:X" -> "X"
+        etfs = tuple(e for e in settings.etf_symbols if e not in settings.symbols)
+        return cls(settings.index_codes, us, etfs)
+
+    @property
+    def series(self) -> tuple[str, ...]:
+        """The leading series' names, other than the predicted symbols."""
+        return (KOSPI200.series, USD.series, *self.indices, *self.us, *self.etfs)
+
+    def groups(
+        self, symbol: str, stocks: Mapping[str, Sequence[Bar]], series: Mapping[str, Sequence[Bar]]
+    ) -> dict[str, list[Sequence[Bar]]]:
+        """The lead groups of ``symbol``: the bars of each member, by group."""
+        return {
+            "peers": [bars for s, bars in stocks.items() if s != symbol],
+            "kospi200f": [series.get(KOSPI200.series, [])],
+            "usdf": [series.get(USD.series, [])],
+            "indices": [series.get(code, []) for code in self.indices],
+            "us": [series.get(ticker, []) for ticker in self.us],
+            "etfs": [series.get(etf, []) for etf in self.etfs],
+        }
 
 
 def _closes_in_ticks(s: Snapshot, n: int) -> tuple[list[float], list[float]] | None:
@@ -93,26 +151,27 @@ def _quadratic(s: Snapshot) -> tuple[float, float] | None:
     sums = [sum(t**p for t in ts) for p in range(5)]
     rhs = [sum(x * t**p for t, x in zip(ts, xs, strict=True)) for p in range(3)]
     matrix = [[sums[i + j] for j in range(3)] for i in range(3)]
-    solution = _solve3(matrix, rhs)
+    solution = solve(matrix, rhs)
     if solution is None:
         return None
     _, v, half_a = solution
     return v, 2 * half_a
 
 
-def _solve3(m: list[list[float]], b: list[float]) -> list[float] | None:
-    """Gaussian elimination for a 3×3 system; None if it is singular."""
-    a = [row[:] + [rhs] for row, rhs in zip(m, b, strict=True)]
-    for col in range(3):
-        pivot = max(range(col, 3), key=lambda r: abs(a[r][col]))
+def solve(m: Sequence[Sequence[float]], b: Sequence[float]) -> list[float] | None:
+    """Gaussian elimination for a square system; None if it is singular."""
+    n = len(b)
+    a = [list(row) + [rhs] for row, rhs in zip(m, b, strict=True)]
+    for col in range(n):
+        pivot = max(range(col, n), key=lambda r: abs(a[r][col]))
         if abs(a[pivot][col]) < 1e-12:
             return None
         a[col], a[pivot] = a[pivot], a[col]
-        for r in range(3):
+        for r in range(n):
             if r != col:
                 factor = a[r][col] / a[col][col]
                 a[r] = [x - factor * y for x, y in zip(a[r], a[col], strict=True)]
-    return [a[i][3] / a[i][i] for i in range(3)]
+    return [a[i][n] / a[i][i] for i in range(n)]
 
 
 def velocity(s: Snapshot) -> FeatureValue:
@@ -254,6 +313,64 @@ def flat_ticks(s: Snapshot) -> FeatureValue:
     return None if s.flat_ticks is None else float(s.flat_ticks)
 
 
+def _moves(bars: Sequence[Bar], at: datetime) -> list[FeatureValue] | None:
+    """A series' one-minute log returns 1 to 3 minutes before ``at``, each in standard
+    deviations of its last 20; None if it has not traded for 10 minutes or has moved in
+    fewer than 6 of them.
+
+    A minute without a bar is no move: the last close carries over. Returns too old for the
+    series' bars are left out. A series that has not moved at all moved 0.
+    """
+    if not bars or at - (bars[-1].start + BAR) > LEAD_STALE:
+        return None
+    closes: list[float | None] = []
+    i = len(bars) - 1
+    for k in range(LEAD_WINDOW + 1):
+        minute = at - k * BAR
+        while i >= 0 and bars[i].start + BAR > minute:
+            i -= 1
+        closes.append(bars[i].close if i >= 0 else None)
+    returns = [
+        math.log(now / before) if now and before else None
+        for now, before in zip(closes, closes[1:], strict=False)
+    ]
+    known = [r for r in returns if r is not None]
+    if len(known) < MIN_CHANGES:
+        return None
+    mean = sum(known) / len(known)
+    deviation = math.sqrt(sum((r - mean) ** 2 for r in known) / (len(known) - 1))
+    latest = returns[: len(LEAD_LAGS)]
+    if deviation == 0:
+        return [None if r is None else 0.0 for r in latest]
+    return [None if r is None else r / deviation for r in latest]
+
+
+def _group_moves(members: Sequence[Sequence[Bar]], at: datetime) -> list[FeatureValue]:
+    """The mean move of the members with one, at each lag; None where none has one."""
+    each = [m for m in (_moves(bars, at) for bars in members) if m is not None]
+    out: list[FeatureValue] = []
+    for lag in range(len(LEAD_LAGS)):
+        known = [m[lag] for m in each if m[lag] is not None]
+        out.append(sum(v for v in known if v is not None) / len(known) if known else None)
+    return out
+
+
+def _lead(group: str, lag: int) -> Feature:
+    def feature(s: Snapshot) -> FeatureValue:
+        return s.lead_moves[group][lag - 1]
+
+    feature.__doc__ = f"The {group} group's move {lag} minute(s) before the bar close."
+    return feature
+
+
+def _own(lag: int) -> Feature:
+    def feature(s: Snapshot) -> FeatureValue:
+        return s.own_moves[lag - 1]
+
+    feature.__doc__ = f"The symbol's own move {lag} minute(s) before the bar close."
+    return feature
+
+
 FEATURES: dict[str, Feature] = {
     "velocity": velocity,
     "acceleration": acceleration,
@@ -263,7 +380,10 @@ FEATURES: dict[str, Feature] = {
     "vwap_gap": vwap_gap,
     "vwap_z": vwap_z,
     "reversion_speed": reversion_speed,
+    **{f"return_{lag}": _own(lag) for lag in LEAD_LAGS},
+    **{f"lead_{group}_{lag}": _lead(group, lag) for group in LEAD_GROUPS for lag in LEAD_LAGS},
 }
+LEAD_FEATURES = frozenset(f"lead_{group}_{lag}" for group in LEAD_GROUPS for lag in LEAD_LAGS)
 
 
 class UndeclaredFeature(LookupError):

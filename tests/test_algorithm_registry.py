@@ -6,6 +6,7 @@ import pytest
 
 from krx_quant.algorithms import ALGORITHMS, RegistrationError, register
 from krx_quant.algorithms.gauss import Gauss
+from krx_quant.algorithms.granger import Granger
 from krx_quant.algorithms.newton import Newton
 from tests.algorithm_doubles import FixedAlgorithm
 
@@ -50,7 +51,8 @@ def test_an_algorithm_must_declare_known_features_and_a_new_name() -> None:
         register([stray])
 
 
-def test_newton_and_gauss_each_have_a_personality_of_their_own() -> None:
-    assert [a.name for a in register([Newton(), Gauss()])] == ["newton", "gauss"]
-    assert [a.name for a in ALGORITHMS] == ["newton", "gauss"]
+def test_newton_gauss_and_granger_each_have_a_personality_of_their_own() -> None:
+    assert [a.name for a in register([Newton(), Gauss(), Granger()])] == ["newton", "gauss", "granger"]
+    assert [a.name for a in ALGORITHMS] == ["newton", "gauss", "granger"]
     assert not set(Gauss.card.unique_features) & set(Newton.features)
+    assert not set(Granger.card.unique_features) & (set(Newton.features) | set(Gauss.features))
