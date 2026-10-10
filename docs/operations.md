@@ -30,8 +30,12 @@
 4. **Tailscale**
    1. Tailscale에 가입한다. 맥과 윈도우에 앱을 설치하고 같은 계정으로 로그인한다.
    2. (선택) 서버를 브라우저 승인 없이 붙이려면 admin console → Settings → Keys에서 auth key를 만든다. 1회용으로, 만료는 짧게 둔다.
-5. **AWS 자원 만들기**: 2.1절의 스크립트를 실행한다.
-6. **서버 개통**: 2.2절을 따라 한다.
+5. **매크로 API 키** (무료, 선택. #8)
+   1. 한국은행 ECOS: https://ecos.bok.or.kr/api/ 에 회원가입하고 "인증키 신청"을 한다. 바로 나온다.
+   2. FRED: https://fred.stlouisfed.org 에 계정을 만들고 https://fred.stlouisfed.org/docs/api/api_key.html 에서 키를 받는다.
+   - 키가 없으면 그 출처(ECOS: 원/달러·국고채, FRED: 미국 10년물·WTI)만 건너뛴다. 국면은 Yahoo(SOX, VIX)와 달러선물 종가로도 정해진다.
+6. **AWS 자원 만들기**: 2.1절의 스크립트를 실행한다.
+7. **서버 개통**: 2.2절을 따라 한다.
 
 ## 2. 개통
 
@@ -103,6 +107,7 @@ aws iam create-access-key --user-name krx-quant-engine
    | `AWS_REGION` | `ap-southeast-2`. 버킷을 만든 리전과 같아야 한다 |
    | `KRX_SYMBOLS`, `KIS_WS_MAX_SUBSCRIPTIONS` | `.env.example`의 값 그대로(`005930,000660,009150`, `41`). 지우면 코드 기본값(`005930` 한 종목, 구독 한도 없음)이 된다 |
    | `KRX_BIND_ADDRESS` | 비워 둔다. 스크립트가 Tailscale 주소를 넣는다 |
+   | `KRX_ECOS_API_KEY`, `KRX_FRED_API_KEY` | 1.5에서 받은 매크로 키(선택). 비워 두면 그 출처를 건너뛴다 |
 
    나머지 설정은 아래 "설정 값 전체"에 있다. `.env.example`에서 주석으로 둔 변수는 그대로 두면 기본값을 쓴다.
 7. 스크립트를 한 번 더 실행한다. 이번에는 엔진을 빌드하고 띄운다.
@@ -192,9 +197,9 @@ curl http://krx-quant:8080/v1/symbols/005930/latest
 | `KRX_TRAIN_AT` | `21:30` | 거래일 밤 학습 시각(KST, `HH:MM`). `off`나 빈 값이면 하지 않는다 |
 | `KRX_MACRO_AT` | `07:30` | 거래일 매크로 지표를 읽고 국면을 정하는 시각(KST). `off`나 빈 값이면 하지 않는다 |
 | `KRX_ECOS_API_KEY` | (없음) | 한국은행 ECOS 키. https://ecos.bok.or.kr/api/ 에서 회원가입 후 "인증키 신청"으로 받는다(무료, 즉시). 없으면 ECOS 지표(원/달러, 국고채 3년)를 건너뛴다 |
-| `KRX_FRED_API_KEY` | (없음) | FRED 키. https://fred.stlouisfed.org/docs/api/api_key.html 에서 계정을 만든 뒤 받는다(무료). 없으면 FRED 지표(미국 10년물, WTI, VIX)를 건너뛴다 |
+| `KRX_FRED_API_KEY` | (없음) | FRED 키. https://fred.stlouisfed.org/docs/api/api_key.html 에서 계정을 만든 뒤 받는다(무료). 없으면 FRED 지표(미국 10년물, WTI)를 건너뛴다 |
 | `KRX_ECOS_URL`, `KRX_FRED_URL`, `KRX_YAHOO_URL` | 각 공식 주소 | 매크로 출처 주소. 테스트용이다 |
-| `KRX_REGIME_SHOCK_SOX_PERCENT`, `KRX_REGIME_SHOCK_VIX`, `KRX_REGIME_SHOCK_USDKRW_PERCENT`, `KRX_REGIME_TREND_SOX_PERCENT`, `KRX_REGIME_OFF_USDKRW_PERCENT` | `3`, `30`, `1`, `1`, `0.5` | 일일 국면 문턱값([design.md](design.md#45-매크로-지표)) |
+| `KRX_REGIME_SHOCK_SOX_PERCENT`, `KRX_REGIME_SHOCK_VIX`, `KRX_REGIME_SHOCK_USDKRW_PERCENT`, `KRX_REGIME_SOX_MOVE_PERCENT`, `KRX_REGIME_WEAK_WON_PERCENT` | `3`, `30`, `1`, `1`, `0.5` | 일일 국면 문턱값([design.md](design.md#45-매크로-지표)) |
 
 compose와 스크립트가 읽는 변수다. 엔진은 읽지 않는다.
 
@@ -244,7 +249,7 @@ Docker 이미지는 `TZ=Asia/Seoul`, `KRX_DATA_DIR=/data`, `KRX_STATE_DIR=/state
 |---|---|
 | 03:00 | Lightsail 자동 스냅샷 |
 | 06:00 (매일) | 자동 업데이트(`krx-quant-update` 타이머). main에 새 커밋이 있으면 받아 엔진을 다시 띄운다(4장) |
-| 07:30 (거래일) | 매크로 지표(ECOS, FRED, Yahoo, 달러선물 백필)를 읽고 그날 국면을 정해 `macro` 계층에 기록한다(`KRX_MACRO_AT`). 실패한 출처는 10분 뒤 다시, 하루 3번까지 읽는다 |
+| 07:30 (거래일) | 매크로 지표(ECOS, FRED, Yahoo, 달러선물 백필)를 읽고 그날 국면을 정해 `macro` 계층에 기록한다(`KRX_MACRO_AT`). 실패한 출처는 10분 뒤 다시, 그날 아침 3번까지 읽는다 |
 | 08:00 (거래일) | 아직 적용하지 않은 가장 최근 밤의 승격 목록대로 모델을 바꾼다. 바꾸거나, 목록을 쓰지 않으면 텔레그램으로 알린다 |
 | 장중 | 실시간 녹화. 끊김과 지연은 `gaps`에 기록하고 텔레그램으로 알린다. VI 현황은 시가 동시호가부터 장 마감까지 5초마다, 외국인·기관 추정 가집계는 5분마다 조회한다 |
 | 09:01–15:16 매분 | 기준 예측 3종, 알고리즘, 빠른·최종 합의가 예측하고, 4분 뒤 채점한다. `state/engine.sqlite3`에 쌓인다 |
@@ -256,7 +261,7 @@ Docker 이미지는 `TZ=Asia/Seoul`, `KRX_DATA_DIR=/data`, `KRX_STATE_DIR=/state
 | 30초마다 | 모델 파일(`state/models/<알고리즘>.json`)이 바뀌었는지 본다(`fit`, `rollback`). 바뀌었으면 엔진이 새 모델로 바꾸고, 지금 도는 모델을 S3(`live.json`, `models/`)에 올린다 |
 
 - 수집기가 시작할 때도 지난날 중 아직 안 올린 날을 올리고 백필을 돌린다.
-- 거래일에 07:30 뒤에 수집기가 시작하면 매크로 지표를 바로 한 번 읽는다(그날 국면은 마지막으로 기록한 것이 쓰인다). 손으로 읽으려면 `docker compose run --rm --no-deps engine macro`.
+- 거래일 07:30부터 개장(09:00) 전 사이에 수집기가 시작하면 매크로 지표를 바로 한 번 읽는다. 개장 뒤에 시작하면 다음 거래일 07:30에 읽는다. 그날 국면이 장중에 바뀌지 않게 하려는 것이다. 손으로 읽으려면 `docker compose run --rm --no-deps engine macro`(이 명령은 언제든 새 줄을 기록한다).
 - 수집기가 시작할 때 지난밤 학습 결과를 읽고, 지금 도는 모델을 S3에 올린다.
 - 거래일에 08:00부터 개장 전 사이에 수집기가 시작하면, 그날 08:00 교체를 시작 30초 뒤에 바로 한다. 개장 뒤에 시작하면 다음 거래일 08:00에 한다.
 - 엔진이 꺼져 있어서 상태 점검을 놓치면, 다시 켜질 때 놓친 날 것부터 돌린다. 밤 학습은 학습 시각 뒤 8시간 안에 다시 시작하면 바로 돈다(아래).

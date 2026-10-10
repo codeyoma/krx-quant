@@ -262,14 +262,14 @@ Macro Collector가 거래일 07:30에 쓴다(`macro.py`, [design.md](design.md#4
 | `indicator`, `source`, `series` | string | 지표 이름(`usdkrw` 등), 출처(`ecos`, `fred`, `yahoo`, `kis`), 출처의 코드 |
 | `as_of` | date | 값의 날짜(출처의 달력). 없으면 null |
 | `value` | float64 | 그날 값. 없으면(7일 넘게 묵었거나 출처에 없음) null |
-| `change_pct` | float64 | 그 전 값 대비 %. 둘이 없으면 null |
+| `change_pct` | float64 | KRX 전 거래일 아침에 알던 값 대비 %. 둘 중 하나가 없으면 null |
 
 **`macro/date=<날짜>/feed=regime/symbol=market/`**: 한 번 읽을 때마다 한 줄.
 
 | 열 | 형식 | 내용 |
 |---|---|---|
 | `day`, `recorded_at` | date, timestamp (UTC) | 위와 같다 |
-| `regime` | string | `shock`, `risk_off`, `risk_on`, `neutral`, `unknown` |
+| `regime` | string | `shock`, `risk_off`, `risk_on`, `neutral` |
 | `reasons` | string (JSON 목록) | 맞은 조건, 한국어. 예: `["SOX -1.5% (-1% 이하)"]` |
 | `failed` | string (JSON 객체) | 이번에 실패한 출처와 이유 |
 | `skipped` | string (JSON 목록) | 키가 없어 건너뛴 출처 |

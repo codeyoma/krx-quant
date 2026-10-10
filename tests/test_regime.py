@@ -1,7 +1,7 @@
 """The daily market regime: the overnight indicators in, one of four regimes out.
 
-Input: the US semiconductor index's last move, the VIX and the won's last move against
-the dollar, any of them missing. Output: the regime and why.
+Input: the US semiconductor index's move, the VIX and the won's move against the dollar,
+any of them missing. Output: the regime and why.
 """
 
 from __future__ import annotations
@@ -44,14 +44,15 @@ def test_a_missing_indicator_never_holds_a_rule() -> None:
     assert decide(RegimeInputs(sox_pct=1.8, vix=None, usdkrw_pct=None), RULES).regime is Regime.NEUTRAL
     # What is known still decides.
     assert decide(RegimeInputs(sox_pct=None, vix=35.0, usdkrw_pct=None), RULES).regime is Regime.SHOCK
-    unknown = decide(RegimeInputs(sox_pct=None, vix=None, usdkrw_pct=None), RULES)
-    assert unknown.regime is Regime.UNKNOWN
-    assert unknown.reasons == ("지표 없음",)
+    nothing = decide(RegimeInputs(sox_pct=None, vix=None, usdkrw_pct=None), RULES)
+    assert nothing.regime is Regime.NEUTRAL, "four regimes only: without indicators, neutral"
+    assert nothing.reasons == ("지표 없음",)
+    assert len(Regime) == 4
 
 
 def test_the_thresholds_are_settings() -> None:
     calm = RegimeRules(
-        shock_sox_pct=5.0, shock_vix=40.0, shock_usdkrw_pct=2.0, trend_sox_pct=4.0, off_usdkrw_pct=1.0
+        shock_sox_pct=5.0, shock_vix=40.0, shock_usdkrw_pct=2.0, sox_move_pct=4.0, weak_won_pct=1.0
     )
 
     assert decide(RegimeInputs(sox_pct=-3.4, vix=31.0, usdkrw_pct=0.6), calm).regime is Regime.NEUTRAL

@@ -199,15 +199,16 @@ def _macro() -> int:
     settings = Settings.from_env(require_kis=False)
     macro = asyncio.run(run_macro(settings, lambda: datetime.now(KST)))
     for name, reading in macro.readings.items():
-        last, change = reading.last, reading.change_pct
-        value = "missing" if last is None else f"{last.value:g} ({last.day})"
-        print(f"{name:7} {value}" + ("" if change is None else f" {change:+.2f}%"))
+        current, change = reading.current, reading.change_pct
+        value = "missing" if current is None else f"{current.value:g} ({current.day})"
+        moved = "" if change is None else f" {change:+.2f}% since {macro.previous}"
+        print(f"{name:7} {value}{moved}  {reading.indicator.label}")
     for source in macro.skipped:
-        print(f"{source}: skipped, no API key")
+        print(f"{source.value}: skipped, no API key")
     for source, why in macro.failed.items():
-        print(f"{source}: failed: {why}", file=sys.stderr)
-    decision = macro.decision(settings)
-    print(f"regime {macro.day}: {decision.regime.value} ({'; '.join(decision.reasons)})")
+        print(f"{source.value}: failed: {why}", file=sys.stderr)
+    assert macro.decision is not None
+    print(f"regime {macro.day}: {macro.decision.regime.value} ({'; '.join(macro.decision.reasons)})")
     return 1 if macro.failed else 0
 
 

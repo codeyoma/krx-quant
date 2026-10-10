@@ -14,20 +14,23 @@ from pathlib import Path
 from typing import Any
 
 import aiohttp
+import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
 from krx_quant.archive import partition_files
+from krx_quant.backfill import FUTURES_BAR_SCHEMA, FUTURES_BARS_TR, bars_key
 from krx_quant.config import Settings
 from krx_quant.feeds import KST
-from krx_quant.macro import MacroCollector, keep_macro, recorder_writer
+from krx_quant.macro import MacroCollector, Source, first_macro_run, keep_macro, macro_recorder
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.notify import Alerts
 from krx_quant.recorder import ParquetRecorder
 
-DAY = date(2026, 10, 12)  # a Monday
+DAY = date(2026, 10, 12)  # a Monday; the KRX day before is Friday the 9th
+CALENDAR = MarketCalendar({DAY: True})
 MORNING = datetime.combine(DAY, time(7, 30), KST)
 NEW_YORK_FRIDAY_CLOSE = 1791576000  # 2026-10-09 16:00 New York
 
@@ -49,14 +52,15 @@ def ecos(request: web.Request) -> web.Response:
 
 
 def fred(request: web.Request) -> web.Response:
-    values = {"DGS10": "4.15", "DCOILWTICO": "71.2", "VIXCLS": "18.5"}[request.query["series_id"]]
+    values = {"DGS10": "4.15", "DCOILWTICO": "71.2"}[request.query["series_id"]]
     return web.json_response(
         {"observations": [{"date": "2026-10-08", "value": "."}, {"date": "2026-10-09", "value": values}]}
     )
 
 
 def yahoo(request: web.Request) -> web.Response:
-    closes = {"^SOX": [12800.0, 12608.0]}.get(request.match_info["symbol"], [100.0, 101.0])  # SOX -1.5%
+    known = {"^SOX": [12800.0, 12608.0], "^VIX": [17.0, 18.5]}  # SOX -1.5%
+    closes = known.get(request.match_info["symbol"], [100.0, 101.0])
     result = {
         "meta": {
             "exchangeTimezoneName": "America/New_York",
@@ -122,7 +126,7 @@ async def setup(tmp_path: Path) -> AsyncIterator[Setup]:
     async with aiohttp.ClientSession() as session:
         alerts = Alerts(session, "token", "chat", f"{base}/telegram")
         collector = MacroCollector(
-            settings, session, alerts, recorder_writer(recorder, settings), lambda: MORNING
+            settings, session, alerts, macro_recorder(recorder), CALENDAR, lambda: MORNING
         )
         yield Setup(sources, settings, collector, alerts, recorder)
         await alerts.close()
@@ -144,20 +148,20 @@ async def test_a_failing_source_leaves_the_others_recorded_and_the_regime_decide
 
     macro = await setup.collector.run(DAY)
 
-    assert set(macro.failed) == {"yahoo"}
+    assert set(macro.failed) == {Source.YAHOO}
     readings = {r["indicator"]: r for r in recorded(setup.settings, "readings")}
-    assert set(readings) == {"usdkrw", "ktb3y", "us10y", "wti", "vix", "usdf"}
+    assert set(readings) == {"usdkrw", "ktb3y", "us10y", "wti", "usdf"}
     assert readings["usdkrw"]["as_of"] == date(2026, 10, 9)
     assert readings["usdkrw"]["change_pct"] == pytest.approx(0.2029, abs=1e-4)
-    assert readings["vix"]["value"] == 18.5
+    assert readings["us10y"]["value"] == 4.15
     assert readings["usdf"]["value"] is None, "no USD futures bars were backfilled"
     [regime] = recorded(setup.settings, "regime")
-    # Without SOX, the won's +0.2% and a VIX of 18.5 hold no rule.
+    # Without SOX and the VIX, the won's +0.2% holds no rule.
     assert regime["regime"] == "neutral"
     assert json.loads(regime["failed"]) == {"yahoo": "HTTP 503"}
 
     setup.sources.down = set()
-    await setup.collector.run(DAY, ["yahoo"])  # the retry: the readings so far are kept
+    await setup.collector.run(DAY, [Source.YAHOO])  # the retry: the readings so far are kept
 
     latest = recorded(setup.settings, "regime")[-1]  # rows are read in the order written
     assert latest["regime"] == "risk_off"
@@ -169,17 +173,17 @@ async def test_a_source_failing_three_times_in_a_row_alerts_until_it_answers(set
     setup.sources.down = {"fred"}
 
     for _ in range(2):
-        await setup.collector.run(DAY, ["fred"])
+        await setup.collector.run(DAY, [Source.FRED])
     await setup.alerts.close()
     assert setup.sources.sent == [], "two failures are not yet an alert"
 
-    await setup.collector.run(DAY, ["fred"])
-    await setup.collector.run(DAY, ["fred"])  # still down: one alert only
+    await setup.collector.run(DAY, [Source.FRED])
+    await setup.collector.run(DAY, [Source.FRED])  # still down: one alert only
     await setup.alerts.close()
     assert setup.sources.sent == ["[장애] 매크로 출처 fred가 3번 연속 실패했습니다: HTTP 503"]
 
     setup.sources.down = set()
-    await setup.collector.run(DAY, ["fred"])
+    await setup.collector.run(DAY, [Source.FRED])
     await setup.alerts.close()
     assert setup.sources.sent[-1] == "[복구] 매크로 출처 fred가 다시 응답합니다."
 
@@ -189,14 +193,15 @@ async def test_a_source_without_its_key_is_skipped(setup: Setup) -> None:
         replace(setup.settings, ecos_api_key=None),
         aiohttp.ClientSession(),
         setup.alerts,
-        recorder_writer(setup.recorder, setup.settings),
+        macro_recorder(setup.recorder),
+        CALENDAR,
         lambda: MORNING,
     )
 
     macro = await collector.run(DAY)
     await collector._session.close()
 
-    assert macro.skipped == ["ecos"]
+    assert macro.skipped == [Source.ECOS]
     assert "ecos" not in setup.sources.calls
     assert "usdkrw" not in macro.readings
 
@@ -213,12 +218,58 @@ async def test_the_morning_tries_a_failing_source_three_times_ten_minutes_apart(
             raise _Stop
 
     with pytest.raises(_Stop):
-        await keep_macro(setup.collector, MarketCalendar({DAY: True}), time(7, 30), lambda: clock[0], sleep)
+        await keep_macro(setup.collector, CALENDAR, time(7, 30), lambda: clock[0], sleep)
 
     assert waits[:3] == [300.0, 600.0, 600.0]
-    assert setup.sources.calls["yahoo"] == 3 * 4, "four symbols, three tries"
+    assert setup.sources.calls["yahoo"] == 3 * 5, "five symbols, three tries"
     assert setup.sources.calls["ecos"] == 2, "the sources that answered are not asked again"
 
 
 class _Stop(Exception):
     pass
+
+
+def backfill_usd_futures(settings: Settings, day: date, close: float) -> None:
+    path = settings.data_dir / bars_key(day, FUTURES_BARS_TR, "USDF")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    start = datetime.combine(day, time(15, 44), KST)
+    row = {
+        "symbol": "USDF",
+        "bar_time": start,
+        "contract": "A75610",
+        "open": close,
+        "high": close,
+        "low": close,
+        "close": close,
+        "volume": 10,
+        "cum_value": 0,
+    }
+    pq.write_table(pa.Table.from_pylist([row], schema=FUTURES_BAR_SCHEMA), path)
+
+
+async def test_the_won_is_read_from_the_usd_futures_first(setup: Setup) -> None:
+    # The futures closed on Thursday and Friday: a weaker won by 0.6%, a day fresher than ECOS.
+    backfill_usd_futures(setup.settings, date(2026, 10, 8), 1380.0)
+    backfill_usd_futures(setup.settings, date(2026, 10, 9), 1388.3)
+
+    macro = await setup.collector.run(DAY)
+
+    assert macro.readings["usdf"].change_pct == pytest.approx(0.6014, abs=1e-4)
+    assert macro.decision is not None
+    assert macro.decision.regime.value == "risk_off"
+    assert "원/달러 +0.6% (+0.5% 이상, 원화 약세)" in macro.decision.reasons
+
+
+@pytest.mark.parametrize(
+    ("started", "first"),
+    [
+        (datetime.combine(DAY, time(7, 0), KST), MORNING),  # before 07:30: wait for it
+        (
+            datetime.combine(DAY, time(8, 10), KST),
+            datetime.combine(DAY, time(8, 10), KST),
+        ),  # restarted before the open
+        (datetime.combine(DAY, time(11, 0), KST), datetime.combine(date(2026, 10, 13), time(7, 30), KST)),
+    ],
+)
+def test_a_restart_reads_again_only_before_the_open(started: datetime, first: datetime) -> None:
+    assert first_macro_run(CALENDAR, time(7, 30), started) == first

@@ -24,6 +24,7 @@ DEFAULT_TELEGRAM_API_URL = "https://api.telegram.org"
 DEFAULT_ECOS_URL = "https://ecos.bok.or.kr/api"
 DEFAULT_FRED_URL = "https://api.stlouisfed.org"
 DEFAULT_YAHOO_URL = "https://query1.finance.yahoo.com"
+RULES = RegimeRules()  # the regime's default thresholds
 
 
 class SettingsError(ValueError):
@@ -240,11 +241,13 @@ class Settings:
             fred_url=values.get("KRX_FRED_URL", DEFAULT_FRED_URL),
             yahoo_url=values.get("KRX_YAHOO_URL", DEFAULT_YAHOO_URL),
             regime_rules=RegimeRules(
-                shock_sox_pct=float(number("KRX_REGIME_SHOCK_SOX_PERCENT", "3", float)),
-                shock_vix=float(number("KRX_REGIME_SHOCK_VIX", "30", float)),
-                shock_usdkrw_pct=float(number("KRX_REGIME_SHOCK_USDKRW_PERCENT", "1", float)),
-                trend_sox_pct=float(number("KRX_REGIME_TREND_SOX_PERCENT", "1", float)),
-                off_usdkrw_pct=float(number("KRX_REGIME_OFF_USDKRW_PERCENT", "0.5", float)),
+                shock_sox_pct=float(number("KRX_REGIME_SHOCK_SOX_PERCENT", str(RULES.shock_sox_pct), float)),
+                shock_vix=float(number("KRX_REGIME_SHOCK_VIX", str(RULES.shock_vix), float)),
+                shock_usdkrw_pct=float(
+                    number("KRX_REGIME_SHOCK_USDKRW_PERCENT", str(RULES.shock_usdkrw_pct), float)
+                ),
+                sox_move_pct=float(number("KRX_REGIME_SOX_MOVE_PERCENT", str(RULES.sox_move_pct), float)),
+                weak_won_pct=float(number("KRX_REGIME_WEAK_WON_PERCENT", str(RULES.weak_won_pct), float)),
             ),
         )
 

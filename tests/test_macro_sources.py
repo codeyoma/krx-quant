@@ -1,8 +1,9 @@
-"""Macro sources' answers read into daily observations.
+"""Macro sources' answers read into daily observations, and a day's readings of them.
 
 Input: answers shaped as ECOS, FRED and Yahoo send them (taken from live answers on
 2026-10-10), including no data, missing values, a session still trading and errors.
-Output: the observations, oldest first, or the source's error.
+Output: the observations, oldest first, or the source's error; and the move each
+reading shows on a KRX day.
 """
 
 from __future__ import annotations
@@ -12,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from krx_quant.macro import Observation, SourceError, change_pct, parse_ecos, parse_fred, parse_yahoo
+from krx_quant.macro import INDICATORS, Observation, Reading, SourceError, parse_ecos, parse_fred, parse_yahoo
 
 
 def ecos_row(day: str, value: str) -> dict[str, Any]:
@@ -108,8 +109,34 @@ def test_yahoo_errors_are_errors() -> None:
         parse_yahoo(body, datetime(2026, 10, 9, tzinfo=UTC))
 
 
-def test_the_change_is_from_the_close_before() -> None:
-    observations = [Observation(date(2026, 10, 8), 12623.71), Observation(date(2026, 10, 9), 12572.42)]
+SOX = next(i for i in INDICATORS if i.name == "sox")
 
-    assert change_pct(observations) == pytest.approx(-0.4063, abs=1e-4)
-    assert change_pct(observations[:1]) is None
+
+def closes(*pairs: tuple[int, float]) -> list[Observation]:
+    """Closes on October days of 2026."""
+    return [Observation(date(2026, 10, d), v) for d, v in pairs]
+
+
+def test_the_move_is_from_what_was_known_on_the_morning_of_the_krx_day_before() -> None:
+    # Monday the 12th: Friday's US session is new since Friday morning.
+    reading = Reading.of(SOX, closes((8, 12623.71), (9, 12572.42)), date(2026, 10, 12), date(2026, 10, 9))
+
+    assert reading.current == Observation(date(2026, 10, 9), 12572.42)
+    assert reading.change_pct == pytest.approx(-0.4063, abs=1e-4)
+
+
+def test_a_us_holiday_adds_no_move_and_a_krx_holiday_adds_all_the_sessions_since() -> None:
+    # No US session on Monday the 12th: Tuesday the 13th learns nothing new overnight.
+    us_holiday = Reading.of(SOX, closes((8, 100.0), (9, 98.0)), date(2026, 10, 13), date(2026, 10, 12))
+    assert us_holiday.change_pct == 0.0
+    # KRX closed on the 13th and 14th: Thursday the 15th sees three US sessions at once.
+    sessions = closes((9, 100.0), (12, 101.0), (13, 102.0), (14, 104.0))
+    krx_holiday = Reading.of(SOX, sessions, date(2026, 10, 15), date(2026, 10, 12))
+    assert krx_holiday.change_pct == pytest.approx(4.0)
+
+
+def test_a_value_older_than_a_week_is_missing() -> None:
+    stale = Reading.of(SOX, closes((1, 100.0), (2, 101.0)), date(2026, 10, 12), date(2026, 10, 9))
+
+    assert stale.current is None
+    assert stale.change_pct is None
