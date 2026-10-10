@@ -49,6 +49,7 @@ from krx_quant.engine import ENGINE_FEEDS, partitions
 from krx_quant.features import Leaders
 from krx_quant.feeds import TRADE
 from krx_quant.feeds.base import KST
+from krx_quant.macro import regime_prefix
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.notify import send_notice
 from krx_quant.object_store import ObjectStore, file_digest, get_json, open_store, put_json
@@ -305,7 +306,7 @@ class _Trainer:
         keys += _engine_events(
             self._store.keys(f"events/date={day.isoformat()}/"), self._symbols, self._leaders
         )
-        keys += self._store.keys(f"macro/date={day.isoformat()}/feed=regime/")  # Markov's
+        keys += self._store.keys(regime_prefix(day))  # Markov's
         for key in keys:
             stored = self._store.digest(key)
             if stored is None:

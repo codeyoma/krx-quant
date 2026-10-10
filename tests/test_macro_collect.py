@@ -26,7 +26,7 @@ from krx_quant.archive import partition_files
 from krx_quant.backfill import FUTURES_BAR_SCHEMA, FUTURES_BARS_TR, bars_key
 from krx_quant.config import Settings
 from krx_quant.feeds import KST
-from krx_quant.macro import MacroCollector, Source, first_macro_run, keep_macro, macro_recorder
+from krx_quant.macro import MacroCollector, Source, day_regime, first_macro_run, keep_macro, macro_recorder
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.notify import Alerts
 from krx_quant.recorder import ParquetRecorder
@@ -386,3 +386,21 @@ async def test_the_engine_api_shows_the_latest_day_decided_or_nothing(setup: Set
         "failed": {},
         "skipped": [],
     }
+
+
+async def test_the_day_s_regime_is_the_one_decided_before_the_open(setup: Setup) -> None:
+    await setup.collector.run(DAY)  # 07:30: risk_off
+    setup.sources.down = {"yahoo"}
+    late = MacroCollector(
+        setup.settings,
+        setup.collector._session,
+        setup.alerts,
+        macro_recorder(setup.recorder),
+        CALENDAR,
+        lambda: datetime.combine(DAY, time(10, 0), KST),
+    )
+    await late.run(DAY)  # `krx-quant macro` at 10:00, Yahoo down: neutral
+
+    opened = datetime.combine(DAY, time(9, 0), KST)
+    assert day_regime(setup.settings.data_dir, DAY, opened) == "risk_off"
+    assert day_regime(setup.settings.data_dir, date(2026, 10, 13), opened) is None

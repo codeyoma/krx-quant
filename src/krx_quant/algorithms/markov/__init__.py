@@ -27,7 +27,7 @@ import math
 from collections.abc import Mapping, Sequence
 
 from krx_quant.algorithms.contract import Card, Model, Sample
-from krx_quant.algorithms.forecasts import UNKNOWN, log_loss, normal_forecast, with_outcomes
+from krx_quant.algorithms.forecasts import UNKNOWN, lowest_log_loss, normal_forecast, with_outcomes
 from krx_quant.baselines import Forecast
 from krx_quant.features import REGIME_CODES, FeatureVector
 from krx_quant.reference import BAR
@@ -48,7 +48,12 @@ ROUNDS = 30
 _TOLERANCE = 1e-6
 # A regime's transitions count this many of the default's, per state, besides its own.
 PRIOR = 20.0
-MIN_SD = 0.1  # ticks: never surer of a minute than this
+# Ticks: never surer of a minute than this. Moves come in whole ticks, so a narrower quiet
+# state would fit only exact zeros and leave it at the first one-tick move.
+MIN_SD = 0.5
+# Each state's own transitions count this many of the untrained ones besides the data's,
+# so a state the data never visits keeps them.
+_UNTRAINED = 1.0
 
 
 def param(kind: str, *index: int | str) -> str:
@@ -86,13 +91,28 @@ class _Chain:
         top = max(logs)
         return [math.exp(v - top) for v in logs], top
 
-    def now(self, moves: Sequence[float], a: Matrix) -> list[float]:
-        """How likely each state is after ``moves``, starting from the chain's long-run mix."""
+    def forward(
+        self, moves: Sequence[float], a: Matrix
+    ) -> tuple[list[list[float]], list[list[float]], float]:
+        """Filter ``moves`` forward from the chain's long-run mix of states: how likely each
+        state is after each move, each move's (scaled) emissions, and the log-likelihood."""
+        alphas: list[list[float]] = []
+        emitted: list[list[float]] = []
+        likelihood = 0.0
         p = _stationary(a)
         for move in moves:
-            e, _ = self.emissions(move)
-            p = _normalized([sum(p[i] * a[i][j] for i in range(K)) * e[j] for j in range(K)])
-        return p
+            e, top = self.emissions(move)
+            raw = [q * e[j] for j, q in enumerate(p if not alphas else _step(alphas[-1], a))]
+            c = sum(raw) or 1e-300
+            alphas.append([v / c for v in raw])
+            emitted.append(e)
+            likelihood += math.log(c) + top
+        return alphas, emitted, likelihood
+
+    def now(self, moves: Sequence[float], a: Matrix) -> list[float]:
+        """How likely each state is after ``moves``."""
+        alphas, _, _ = self.forward(moves, a)
+        return alphas[-1] if alphas else _stationary(a)
 
     def ahead(self, p: list[float], a: Matrix) -> tuple[float, float]:
         """The mean and variance of the next ``STEPS`` minutes' summed move from states ``p``."""
@@ -150,18 +170,16 @@ class Markov:
         scored = with_outcomes(samples)
         days = _sequences(samples)
         params = default_params()
-        previous = -math.inf
+        previous = None
+        # Not strictly EM (the regimes' transitions are pulled toward the default), so the
+        # likelihood may wobble: stop once it barely moves either way.
         for _ in range(ROUNDS):
             params, likelihood = _reestimate(params, days)
-            if likelihood - previous < _TOLERANCE * max(1, sum(len(m) for _, m in days)):
+            if previous is not None and abs(likelihood - previous) < _TOLERANCE * max(1, len(days)):
                 break
             previous = likelihood
-        params = _in_order(params)
-        model = Model(f"{self.name}-fitting", params)
-        loss = sum(log_loss(self.predict(s.features, model), s.outcome) for s in scored if s.outcome) / len(
-            scored
-        )
-        return Model.fitted(self.name, params, scored, loss)
+        fitted = _in_order(params)
+        return lowest_log_loss(self.name, scored, [fitted], lambda f, p: self.predict(f, Model(self.name, p)))
 
 
 def _transitions_of(code: float | None) -> str:
@@ -204,15 +222,8 @@ def _reestimate(
     likelihood = 0.0
     for name, moves in days:
         a = chain.transitions[name]
-        scaled = [chain.emissions(x) for x in moves]
-        alphas: list[list[float]] = []
-        p = _stationary(a)
-        for n, (e, top) in enumerate(scaled):
-            prior = p if n == 0 else _step(alphas[-1], a)
-            raw = [prior[j] * e[j] for j in range(K)]
-            c = sum(raw) or 1e-300
-            alphas.append([v / c for v in raw])
-            likelihood += math.log(c) + top
+        alphas, emitted, day_likelihood = chain.forward(moves, a)
+        likelihood += day_likelihood
         beta = [1.0] * K
         for n in range(len(moves) - 1, -1, -1):
             gamma = _normalized([alphas[n][k] * beta[k] for k in range(K)])
@@ -222,7 +233,7 @@ def _reestimate(
                 squares[k] += gamma[k] * moves[n] ** 2
             if n == 0:
                 break
-            e = scaled[n][0]
+            e = emitted[n]
             xi = [[alphas[n - 1][i] * a[i][j] * e[j] * beta[j] for j in range(K)] for i in range(K)]
             norm = sum(map(sum, xi)) or 1e-300
             for i in range(K):
@@ -237,7 +248,11 @@ def _reestimate(
             mean = total[k] / weight[k]
             new[param("mean", k)] = mean
             new[param("sd", k)] = max(math.sqrt(max(squares[k] / weight[k] - mean * mean, 0.0)), MIN_SD)
-    default = [_normalized([v + 1e-6 for v in row]) for row in counts[DEFAULT]]
+    untrained = _Chain(default_params()).transitions[DEFAULT]
+    default = [
+        _normalized([counts[DEFAULT][i][j] + _UNTRAINED * untrained[i][j] for j in range(K)])
+        for i in range(K)
+    ]
     for t in TRANSITIONS:
         rows = (
             default

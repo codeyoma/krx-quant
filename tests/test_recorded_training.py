@@ -11,13 +11,16 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from krx_quant.engine import Event
-from krx_quant.features import FEATURES, Leaders
+from krx_quant.features import FEATURES, Leaders, regime_code
+from krx_quant.macro import MACRO, REGIME_SCHEMA
 from krx_quant.pricing import Direction, tick_size
-from krx_quant.training import recorded_samples
+from krx_quant.recorder import ParquetRecorder
+from krx_quant.training import recorded_samples, training_day
 from tests.algorithm_doubles import FixedAlgorithm
 from tests.replay_events import CALENDAR, DAY, FEE, SYMBOL, at, book, run, steady_book, trade, vi
 from tests.test_algorithms_replay import LEADERS, leaders_morning
 from tests.test_replay import busy_morning
+from tests.test_replay_cli import record
 
 PEER = "000660"
 NAMES = tuple(sorted(FEATURES))
@@ -125,3 +128,28 @@ async def test_a_recorded_day_leaves_out_what_live_statistics_leave_out(tmp_path
     assert left_out == {at("09:27:00") + timedelta(minutes=m) for m in range(6)}
     trained = {s.bar_close for s in samples if s.bar_close <= at("10:00:00")}
     assert trained == {at("09:01:00") + timedelta(minutes=m) for m in range(60)} - left_out
+
+
+def test_a_recorded_day_trains_in_the_macro_regime_decided_before_its_open(tmp_path: Path) -> None:
+    data = tmp_path / "data"
+    record(data, busy_morning(end="09:30:00"))
+    parquet = ParquetRecorder(data, flush_rows=1000, flush_seconds=3600)
+    for when, regime in (
+        (at("07:30:00"), "risk_on"),
+        (at("11:00:00"), "shock"),
+    ):  # the second: after the open
+        row = {
+            "day": DAY,
+            "recorded_at": when,
+            "regime": regime,
+            "reasons": "[]",
+            "failed": "{}",
+            "skipped": "[]",
+        }
+        parquet.record(MACRO, DAY, "regime", "market", row, REGIME_SCHEMA)
+    parquet.close()
+
+    day = training_day(data, DAY, CALENDAR, (SYMBOL,), ["macro_regime"], FEE, Leaders())
+
+    assert day is not None and day.reference == "mid"
+    assert {s.features["macro_regime"] for s in day.samples} == {regime_code("risk_on")}

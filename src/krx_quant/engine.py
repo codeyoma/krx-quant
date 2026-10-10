@@ -108,7 +108,8 @@ class OutcomesScored:
 
 
 Listener = Callable[[PredictionsStored | OutcomesScored], None]  # told of each, as it happens (the stream)
-Regimes = Callable[[date], str | None]  # a day's macro regime, decided before its open; None unknown
+# A day's macro regime as decided before a time (the day's open); None unknown.
+Regimes = Callable[[date, datetime], str | None]
 
 # Each day's algorithm review runs this long after the close, when everything is scored.
 REVIEW_AFTER_CLOSE = timedelta(minutes=10)
@@ -460,11 +461,13 @@ class PredictionEngine:
         if self._regimes is None:
             return None
         if day not in self._regime_days:
-            regime = self._regime_days[day] = self._regimes(day)
+            session = self.calendar.session(day)
+            opened = session.open if session is not None else bar_close
+            regime = self._regime_days[day] = self._regimes(day, opened)
             midnight = datetime.combine(day, time(), KST)
             if regime is None and "macro_regime" in self._feature_names:
                 if not self.store.count_runs("no_regime", midnight):  # once, restarts too
-                    detail = f"no macro regime for {day}: the default transitions"
+                    detail = f"no macro regime for {day}"
                     log.warning(detail)
                     self.store.add_run("no_regime", bar_close, None, detail)
         return self._regime_days[day]

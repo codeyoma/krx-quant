@@ -81,7 +81,8 @@ def training_day(
     else from its backfilled bars if every symbol has them; None otherwise. A day never
     trains on some symbols only.
     """
-    regime = day_regime(data_dir, day)
+    session = calendar.session(day)
+    regime = day_regime(data_dir, day, session.open) if session is not None else None
     if is_recorded(data_dir, day, symbols):
         events = recorded_events(data_dir, day, symbols, leaders)
         made = recorded_samples(events, calendar, day, symbols, names, fee_rate, leaders, regime=regime)

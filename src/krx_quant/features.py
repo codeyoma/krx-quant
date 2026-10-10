@@ -27,17 +27,20 @@ from krx_quant.feeds.market import us_ticker
 from krx_quant.pricing import flat_ticks as flat_band
 from krx_quant.pricing import tick_size
 from krx_quant.reference import BAR, Bar
+from krx_quant.regime import Regime
 
 FeatureValue = float | None
 Series = tuple[float, ...]
 Value = FeatureValue | Series
 
-# The macro regimes (regime.py) as the numbers a feature holds.
-REGIME_CODES = {"shock": 0.0, "risk_off": 1.0, "risk_on": 2.0, "neutral": 3.0}
+# The macro regimes (regime.py) as the numbers a feature holds: shock 0, risk_off 1,
+# risk_on 2, neutral 3.
+REGIME_CODES = {r.value: float(n) for n, r in enumerate(Regime)}
 
 
-def regime_code(regime: str) -> float:
-    return REGIME_CODES[regime]
+def regime_code(regime: str) -> float | None:
+    """A regime's code; None for a name this engine does not know (it counts as unknown)."""
+    return REGIME_CODES.get(regime)
 
 
 @dataclass(frozen=True)
@@ -226,15 +229,17 @@ def volatility(s: Snapshot) -> FeatureValue:
 
 def minute_ticks(s: Snapshot) -> Series:
     """The session's one-minute close changes in ticks (of the reference price), the last
-    hour of them, oldest first. A minute without a trade is a change of 0.
+    hour of them, oldest first. A minute without a trade is a change of 0, up to the bar
+    close.
     """
     bars = _session_bars(s)
-    if s.tick is None or len(bars) < 2:
+    if s.tick is None or not bars:
         return ()
     moves: list[float] = []
     for before, after in zip(bars, bars[1:], strict=False):
         quiet = int((after.start - before.start) / BAR) - 1
         moves += [0.0] * quiet + [(after.close - before.close) / s.tick]
+    moves += [0.0] * int((s.bar_close - bars[-1].start - BAR) / BAR)  # quiet since the last bar
     return tuple(moves[-MINUTE_MOVES:])
 
 

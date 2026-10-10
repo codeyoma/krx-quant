@@ -411,10 +411,17 @@ class LatestMacro:
     skipped: list[str]  # sources without their API key
 
 
-def day_regime(data_dir: Path, day: date) -> str | None:
-    """``day``'s macro regime as last decided (what the engine and training use), or None."""
-    regimes = _rows(data_dir / MACRO / f"date={day}" / "feed=regime" / "symbol=market")
-    return regimes[-1]["regime"] if regimes else None
+def regime_prefix(day: date) -> str:
+    """Where ``day``'s regime is recorded, under the data directory or the store."""
+    return f"{MACRO}/date={day}/feed=regime/"
+
+
+def day_regime(data_dir: Path, day: date, before: datetime) -> str | None:
+    """``day``'s macro regime as last decided before ``before`` (the open, as the engine
+    and training use it), or None. A ``krx-quant macro`` run after the open changes nothing."""
+    regimes = _rows(data_dir / regime_prefix(day) / "symbol=market")
+    decided = [r for r in regimes if r["recorded_at"] < before]
+    return decided[-1]["regime"] if decided else None
 
 
 def latest_macro(data_dir: Path, today: date) -> LatestMacro | None:

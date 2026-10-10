@@ -49,6 +49,8 @@ def test_the_minute_moves_are_in_ticks_since_the_open_a_quiet_minute_a_zero() ->
     s = snapshot(pre_market | closes, minutes=5)
 
     assert FEATURES["minute_ticks"](s) == (2.0, -1.0, 0.0, 3.0)
+    # Nothing traded since 09:04: at 09:07 the two quiet minutes are moves of 0 too.
+    assert FEATURES["minute_ticks"](snapshot(closes, minutes=7)) == (2.0, -1.0, 0.0, 3.0, 0.0, 0.0)
 
 
 def test_only_the_last_hour_of_moves_is_kept() -> None:
@@ -62,6 +64,7 @@ def test_only_the_last_hour_of_moves_is_kept() -> None:
 def test_the_macro_regime_is_a_code_and_unknown_without_a_snapshot() -> None:
     assert FEATURES["macro_regime"](snapshot({0: 81_000.0}, regime="risk_on")) == regime_code("risk_on")
     assert FEATURES["macro_regime"](snapshot({0: 81_000.0})) is None
+    assert FEATURES["macro_regime"](snapshot({0: 81_000.0}, regime="unheard_of")) is None, "unknown: default"
 
 
 def features(moves: tuple[float, ...], regime: str | None = None, flat: float = 1.0) -> FeatureVector:
@@ -143,7 +146,7 @@ def test_baum_welch_learns_how_long_a_trend_lasts_in_each_regime() -> None:
 
 async def test_markov_predicts_and_is_scored_from_the_first_day(tmp_path: Path) -> None:
     engine = await run(
-        tmp_path / "engine.db", busy_morning(), until=at("10:00:00"), regimes=lambda d: "neutral"
+        tmp_path / "engine.db", busy_morning(), until=at("10:00:00"), regimes=lambda d, before: "neutral"
     )
 
     markov = await predictions_of(engine, "markov")
@@ -168,16 +171,22 @@ async def test_a_day_without_a_macro_regime_runs_the_default_transitions_and_say
     model = {"markov": Model("markov-made", params)}
 
     known = await run(
-        tmp_path / "known.db", busy_morning(), until=at("09:30:00"), regimes=lambda d: "risk_on", models=model
+        tmp_path / "known.db",
+        busy_morning(),
+        until=at("09:30:00"),
+        regimes=lambda d, before: "risk_on",
+        models=model,
     )
     unknown = await run(
-        tmp_path / "unknown.db", busy_morning(), until=at("09:30:00"), regimes=lambda d: None, models=model
+        tmp_path / "unknown.db",
+        busy_morning(),
+        until=at("09:30:00"),
+        regimes=lambda d, before: None,
+        models=model,
     )
 
     trending = [abs(p["expected_ticks"]) for p in await predictions_of(known, "markov")]
     fading = [abs(p["expected_ticks"]) for p in await predictions_of(unknown, "markov")]
     assert sum(trending) > 2 * sum(fading)
-    assert runs(tmp_path / "unknown.db") == [
-        ("no_regime", "no macro regime for 2026-10-12: the default transitions")
-    ]
+    assert runs(tmp_path / "unknown.db") == [("no_regime", "no macro regime for 2026-10-12")]
     assert runs(tmp_path / "known.db") == []
