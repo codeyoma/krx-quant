@@ -23,7 +23,8 @@ state/
 *.sqlite
 *.db
 
-# The server's auto-update: the main that failed to start (deploy/auto-update.sh)
+# The server's auto-update: what runs, and the main that failed to start (deploy/auto-update.sh)
+.auto-update-deployed
 .auto-update-failed
 
 # OS / editors

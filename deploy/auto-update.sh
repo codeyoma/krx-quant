@@ -6,8 +6,9 @@
 #
 # 1. Weekdays 07:50-20:10 KST it refuses: KRX and NXT trade, and a restart leaves a gap
 #    in the recording.
-# 2. It fetches origin/main. Nothing to do if the checkout has it, or if that commit
-#    failed to start before (.auto-update-failed) and main has not moved since.
+# 2. It fetches origin/main. Nothing to do if the engine was last checked to start from it
+#    (.auto-update-deployed), or if that commit failed to start before
+#    (.auto-update-failed) and main has not moved since.
 # 3. It fast-forwards, rebuilds and restarts the engine.
 # 4. It waits for the Engine API to answer (3 minutes). If it does not, it goes back to
 #    the commit before, rebuilds, and remembers the commit that failed.
@@ -19,6 +20,7 @@ cd "$repo"
 tries=${KRX_UPDATE_TRIES:-36}
 pause=${KRX_UPDATE_PAUSE:-5}
 failed_file=.auto-update-failed
+deployed_file=.auto-update-deployed
 
 read -r weekday hhmm <<<"${KRX_UPDATE_NOW:-$(TZ=Asia/Seoul date '+%u %H%M')}"
 if ((weekday <= 5 && 10#$hhmm >= 750 && 10#$hhmm < 2010)); then
@@ -35,9 +37,11 @@ healthy() {
   local _
   for _ in $(seq "$tries"); do
     sleep "$pause"
+    # The port the engine listens on inside its container (compose sets KRX_API_PORT).
     if docker compose exec -T engine python -c \
-      'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8080/v1/status", timeout=5)' \
-      >/dev/null 2>&1; then
+      'import os, urllib.request
+port = os.environ.get("KRX_API_PORT", "8080")
+urllib.request.urlopen(f"http://127.0.0.1:{port}/v1/status", timeout=5)' >/dev/null 2>&1; then
       return 0
     fi
   done
@@ -53,34 +57,39 @@ restart() {
 trap 'notify "자동 업데이트 오류: ${BASH_COMMAND} (줄 ${LINENO}). 엔진은 그대로입니다."' ERR
 
 git fetch -q origin main
-current=$(git rev-parse HEAD)
 target=$(git rev-parse origin/main)
-if [[ "$current" == "$target" ]]; then
-  echo "auto-update: up to date (${current:0:7})"
+# The commit the running engine was last checked to start from. The checkout may be ahead
+# of it if a run was cut short (a reboot) after moving it; then the run is done again.
+# Before the first run, what is checked out is taken as running.
+deployed=$(cat "$deployed_file" 2>/dev/null || git rev-parse HEAD)
+if [[ "$deployed" == "$target" ]]; then
+  echo "$target" >"$deployed_file"
+  echo "auto-update: up to date (${target:0:7})"
   exit 0
 fi
 if [[ -f "$failed_file" && "$(cat "$failed_file")" == "$target" ]]; then
   echo "auto-update: ${target:0:7} did not start before; waiting for a newer main"
   exit 0
 fi
-changes=$(git log --format='- %s' "$current..$target" | head -n 10)
+changes=$(git log -n 10 --format='- %s' "$deployed..$target")
 git merge -q --ff-only "$target"
 
 if restart; then
+  echo "$target" >"$deployed_file"
   rm -f "$failed_file"
   docker image prune -f >/dev/null || true
-  echo "auto-update: ${current:0:7} -> ${target:0:7}"
-  notify "자동 업데이트: ${current:0:7} → ${target:0:7}"$'\n'"$changes"
+  echo "auto-update: ${deployed:0:7} -> ${target:0:7}"
+  notify "자동 업데이트: ${deployed:0:7} → ${target:0:7}"$'\n'"$changes"
   exit 0
 fi
 
-echo "auto-update: ${target:0:7} did not start; going back to ${current:0:7}" >&2
+echo "auto-update: ${target:0:7} did not start; going back to ${deployed:0:7}" >&2
 echo "$target" >"$failed_file"
-git reset -q --hard "$current"
+git reset -q --hard "$deployed"
 if restart; then
-  state="${current:0:7}로 되돌렸습니다"
+  state="${deployed:0:7}로 되돌렸습니다"
 else
-  state="${current:0:7}로 되돌렸지만 엔진이 응답하지 않습니다. 확인이 필요합니다"
+  state="${deployed:0:7}로 되돌렸지만 엔진이 응답하지 않습니다. 확인이 필요합니다"
 fi
 notify "자동 업데이트 실패: ${target:0:7}이 시작되지 않아 $state."
 exit 1

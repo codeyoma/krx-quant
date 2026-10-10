@@ -194,3 +194,27 @@ def test_an_update_that_cannot_fetch_is_reported_and_changes_nothing(server: Pat
     assert git(server, "rev-parse", "HEAD") == before
     assert "자동 업데이트 오류" in (server.parent / "docker.log").read_text()
     assert "compose up" not in (server.parent / "docker.log").read_text()
+
+
+def test_a_long_backlog_of_commits_is_deployed_with_the_latest_ten_listed(server: Path) -> None:
+    for i in range(12):
+        newest = push(server, f"change {i}")
+
+    result = update(server)
+
+    assert result.returncode == 0, result.stderr
+    assert git(server, "rev-parse", "HEAD") == newest
+    notice = (server.parent / "docker.log").read_text().split(" notify ", 1)[1]
+    assert "- change 11" in notice and "- change 2" in notice and "- change 1\n" not in notice
+
+
+def test_a_run_cut_short_after_moving_the_checkout_is_done_again(server: Path) -> None:
+    assert update(server).returncode == 0
+    new = push(server, "half deployed")
+    git(server, "pull", "-q", "--ff-only")  # the checkout moved; the engine was never restarted
+
+    result = update(server)
+
+    assert result.returncode == 0, result.stderr
+    assert "compose up -d --build" in docker_calls(server)
+    assert (server / ".auto-update-deployed").read_text().strip() == new
