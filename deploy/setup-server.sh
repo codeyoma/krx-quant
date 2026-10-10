@@ -94,4 +94,5 @@ docker compose ps
 
 echo "== daily update"
 deploy/install-auto-update.sh
-echo "Engine port: $(grep '^KRX_BIND_ADDRESS=' .env | cut -d= -f2) (Tailscale only)"
+port=$(grep '^KRX_ENGINE_PORT=' .env | cut -d= -f2)
+echo "Engine API: http://$(grep '^KRX_BIND_ADDRESS=' .env | cut -d= -f2):${port:-8080} (Tailscale only)"
