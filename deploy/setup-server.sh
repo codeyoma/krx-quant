@@ -91,4 +91,7 @@ chown -R "$engine_uid:$engine_uid" data state
 echo "== start"
 docker compose up -d --build
 docker compose ps
+
+echo "== daily update"
+deploy/install-auto-update.sh
 echo "Engine port: $(grep '^KRX_BIND_ADDRESS=' .env | cut -d= -f2) (Tailscale only)"

@@ -212,14 +212,24 @@ docker compose exec engine krx-quant rollback granger     # 직전 모델로 되
 
 ## 4. 업데이트 배포
 
+**자동이다.** main에 머지하면 다음 06:00(KST)에 서버가 스스로 받아 다시 띄운다(`deploy/auto-update.sh`, systemd 타이머 `krx-quant-update`).
+
+- 06:00은 밤 학습(21:30) 뒤, NXT 개장과 아침 모델 교체(08:00) 전이다. 다시 띄우는 동안 녹화가 비지 않는다.
+- main이 그대로면 아무것도 하지 않는다.
+- 평일 07:50–20:10에는 손으로 실행해도 거부한다.
+- 새 엔진이 3분 안에 API에 답하지 않으면 이전 커밋으로 되돌려 다시 띄운다. 실패한 커밋은 서버의 `.auto-update-failed`에 남아서, main이 더 바뀔 때까지 다시 시도하지 않는다.
+- 결과는 텔레그램으로 온다: `자동 업데이트: <이전> → <새 커밋>`과 커밋 제목, 또는 `자동 업데이트 실패: …`.
+- 업데이트가 끝나면 쓰지 않는 Docker 이미지를 지운다.
+
 ```bash
-cd ~/krx-quant
-git pull
-docker compose up -d --build
+journalctl -u krx-quant-update -n 50       # 지난 실행 기록
+systemctl list-timers krx-quant-update     # 다음 실행 시각
+deploy/auto-update.sh                      # 지금 바로 (장 시간 밖에서)
+sudo systemctl disable --now krx-quant-update.timer   # 자동 업데이트 끄기
 ```
 
-- 엔진을 다시 띄우는 동안은 녹화가 빈다. 장중 배포는 피한다.
-- 장 마감 후, 21:00 업로드가 끝난 뒤가 좋다.
+- 타이머는 `deploy/setup-server.sh`가 설치한다. 이미 개통한 서버에는 한 번만 `sudo deploy/install-auto-update.sh`를 실행한다.
+- 손으로 배포하려면 장 시간 밖에서 `git pull && docker compose up -d --build`를 실행한다.
 
 ## 5. 키 교체
 
