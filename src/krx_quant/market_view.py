@@ -86,8 +86,9 @@ class _Flow:
         day = kst_day(at)
         if day != self._day:
             self._day, self._at, self._values = day, [], []
-        self._at.append(at)
-        self._values.append(float(value))
+        i = bisect.bisect_right(self._at, at)  # in receipt order, even if one came late
+        self._at.insert(i, at)
+        self._values.insert(i, float(value))
 
     def before(self, at: datetime) -> float | None:
         """The last value received strictly before ``at``, on ``at``'s day."""

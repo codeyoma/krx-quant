@@ -169,6 +169,8 @@ KIS 레코드 하나가 이벤트 하나다. 한 메시지에 레코드가 여�
 | `HHPTJ04160200` 추정 가집계 | `symbol`, `received_at`, `slot`(`bsop_hour_gb`), `foreign_net_qty`, `institution_net_qty`, `total_net_qty` |
 | `FHPST01390000` VI 현황 | 응답의 VI마다 한 행: `symbol`, `event_time`(발동 시각 `cntg_vi_hour`), `received_at`, `end_time`(해제 시각 `vi_cncl_hour`, 아직이면 비어 있음), `active`(`vi_cls_code`가 `N`이 아님), `kind`(`static`, `dynamic`, `both`), `price`(발동 가격), `count`(그날 그 종목의 VI 횟수) |
 
+> **바뀜** (2026-10-11, #56): 추정 가집계의 빈 칸(그 시간대에 아직 입력되지 않은 투자자)을 0으로 기록했다 → null로 기록한다. 이유: 외국인과 기관은 입력 시각이 달라서(외국인 09:30, 기관 10:00 등), 0으로 두면 Turing이 앞 시간대의 실제 추정 대신 0을 읽었다. 그 전에 녹화된 날의 0은 빈 칸일 수 있다.
+
 VI 현황은 같은 응답이 반복되면 기록하지 않는다. 응답이 바뀔 때마다 그날의 VI 전체가 raw와 events에 한 번씩 남는다.
 
 REST 응답 원문은 raw 계층에 `{"tr_id", "params", "body"}` JSON으로 남는다.

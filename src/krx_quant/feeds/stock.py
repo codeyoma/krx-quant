@@ -419,12 +419,18 @@ def _normalize_foreign_estimate(body: dict[str, Any], key: str, received_at: dat
             "symbol": key,
             "received_at": received_at,
             "slot": str(r.get("bsop_hour_gb", "")),
-            "foreign_net_qty": to_int(r.get("frgn_fake_ntby_qty", "")),
-            "institution_net_qty": to_int(r.get("orgn_fake_ntby_qty", "")),
-            "total_net_qty": to_int(r.get("sum_fake_ntby_qty", "")),
+            # Each investor type is entered at its own times: a blank is not entered yet in
+            # that slot, not a zero (null, unlike the other feeds' blanks).
+            "foreign_net_qty": _entered(r.get("frgn_fake_ntby_qty", "")),
+            "institution_net_qty": _entered(r.get("orgn_fake_ntby_qty", "")),
+            "total_net_qty": _entered(r.get("sum_fake_ntby_qty", "")),
         }
         for r in body.get("output2") or []
     ]
+
+
+def _entered(value: Any) -> int | None:
+    return to_int(value) if str(value).strip() else None
 
 
 # HHPTJ04160200, "종목별 외인기관 추정가집계": broker estimates of foreign / institutional net

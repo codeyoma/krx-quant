@@ -203,21 +203,28 @@ def foreign_members(when: datetime, net_qty: int, symbol: str = SYMBOL) -> Event
     return (MEMBER.tr_id, MEMBER.normalize(fields, when.astimezone(UTC)))
 
 
-def estimates(when: datetime, slots: dict[str, tuple[int, int]], symbol: str = SYMBOL) -> list[Event]:
-    """One poll of the investor estimates: (foreign, institution) net buying by time slot."""
+def estimates(
+    when: datetime, slots: dict[str, tuple[int | None, int | None]], symbol: str = SYMBOL
+) -> list[Event]:
+    """One poll of the investor estimates: (foreign, institution) net buying by time slot;
+    None is a blank (not entered in that slot)."""
     body = {
         "output2": [
             {
                 "bsop_hour_gb": slot,
-                "frgn_fake_ntby_qty": str(f),
-                "orgn_fake_ntby_qty": str(i),
-                "sum_fake_ntby_qty": str(f + i),
+                "frgn_fake_ntby_qty": _blank(f),
+                "orgn_fake_ntby_qty": _blank(i),
+                "sum_fake_ntby_qty": _blank((f or 0) + (i or 0)),
             }
             for slot, (f, i) in slots.items()
         ]
     }
     rows = FOREIGN_ESTIMATE.normalize(body, symbol, when.astimezone(UTC))
     return [(FOREIGN_ESTIMATE.tr_id, row) for row in rows]
+
+
+def _blank(value: int | None) -> str:
+    return "" if value is None else str(value)
 
 
 def flows_morning(start: str = "09:00:30", end: str = "10:30:00", symbol: str = SYMBOL) -> list[Event]:

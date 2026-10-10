@@ -227,3 +227,21 @@ async def test_after_a_restart_a_flow_waits_for_its_own_five_minutes(tmp_path: P
     by_close = dict(zip((at(f"11:{m:02d}:00") for m in range(1, 11)), probe.seen, strict=True))
     assert by_close[at("11:02:00")]["program_net"] is None
     assert by_close[at("11:10:00")]["program_net"] is not None, "1,000,000 since 11:05"
+
+
+async def test_an_estimate_not_entered_in_a_slot_keeps_the_earlier_one(tmp_path: Path) -> None:
+    flows = ("investor_foreign", "investor_institution")
+    probe = FixedAlgorithm("probe", features=flows, unique=flows)
+    # 10:00 brings institutions only: the foreign field is blank, not a zero.
+    polls = [
+        *estimates(at("09:31:00"), {"1": (12_000, None)}),
+        *estimates(at("10:01:00"), {"1": (12_000, None), "2": (None, 5_000)}),
+    ]
+    events = sorted([*busy_morning(end="10:05:00"), *polls], key=lambda e: e[1]["received_at"])
+
+    await run(tmp_path / "engine.db", events, until=at("10:05:00"), algorithms=[probe])
+
+    at_1005 = probe.seen[-1]
+    foreign, institution = at_1005["investor_foreign"], at_1005["investor_institution"]
+    assert isinstance(foreign, float) and isinstance(institution, float)
+    assert foreign > 0 and institution > 0, "foreign from 09:30, institutions from 10:00"
