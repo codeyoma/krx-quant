@@ -26,8 +26,8 @@ from krx_quant.model_shelf import Shelf
 from krx_quant.object_store import LocalObjectStore, ObjectStore
 from krx_quant.predictions import PredictionStore
 from krx_quant.swap import morning_swap, night_status, night_to_train, publish_live, reload_models
+from tests.api_schema import check
 from tests.replay_events import api, get_json
-from tests.test_api_contract import check
 
 NIGHT = date(2026, 10, 12)  # a Monday's night
 MORNING = date(2026, 10, 13)

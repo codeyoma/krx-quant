@@ -129,7 +129,7 @@ KIS_APP_KEY=test-app-key KIS_APP_SECRET=test-app-secret KIS_REST_URL=http://127.
 uv run krx-quant demo-engine            # http://127.0.0.1:8090/v1/status
 ```
 
-서버 없이 엔진 API를 띄운다(#20). 지어낸 아침(2026-10-12 09:00–10:30, 3종목, KOSPI·선물, VI 한 번)을 실제 엔진으로 재생하고, 실제 API 코드로 답한다. 늘 같은 응답이다. 시계는 10:30에 멈춰 있고, `status.mode`는 `demo`다. 모든 알고리즘을 정식(`active`)으로 두어 합의도 나온다. 그날 07:30 매크로 읽기는 위험회피(`risk_off`)로 정해져 있다. Fincept 화면의 엔진 주소를 `http://127.0.0.1:8090`으로 바꿔 붙인다. DB는 `state/demo.sqlite3`(`--db`)에 새로 만들고, 매크로 기록은 그 옆 `state/demo-data/macro/`에 새로 쓴다. 응답은 실제 엔진과 같은 스키마를 지킨다.
+서버 없이 엔진 API를 띄운다(#20). 지어낸 아침(2026-10-12 09:00–10:30, 3종목, KOSPI·선물, VI 한 번)을 실제 엔진으로 재생하고, 실제 API 코드로 답한다. 늘 같은 응답이다. 다만 `status.cpu`의 시간은 실제로 재서 실행마다 조금 다르다. 시계는 10:30에 멈춰 있고, `status.mode`는 `demo`다. 모든 알고리즘을 정식(`active`)으로 두어 합의도 나온다. 그날 07:30 매크로 읽기는 위험회피(`risk_off`)로 정해져 있다. KIS 상태(`status.kis`, 결측 피드 하나)와 Newton의 모델 이력도 가상 값으로 보인다. Fincept 화면의 엔진 주소를 `http://127.0.0.1:8090`으로 바꿔 붙인다. DB는 `state/demo.sqlite3`(`--db`)에 새로 만들고, 매크로 기록과 모델 이력은 그 옆 `state/demo-data/`(`macro/`, `state/models/`)에 새로 쓴다. 응답은 실제 엔진과 같은 스키마를 지킨다.
 
 ### 실제 KIS로 확인하기 (장중)
 

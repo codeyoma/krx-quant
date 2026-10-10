@@ -159,6 +159,11 @@ class CpuUse:
     def expected_seconds(self) -> float:
         return sum(self.expected.values())
 
+    @property
+    def usage(self) -> float | None:
+        """The expected work as a share of the budget; over 1, the last registered are skipped."""
+        return self.expected_seconds / self.budget.cpu if self.budget.cpu > 0 else None
+
 
 @dataclass(frozen=True)
 class _AtClose:
@@ -278,6 +283,7 @@ class PredictionEngine:
         return [a.name for a in self.algorithms if a.name in active]
 
     def cpu_use(self) -> CpuUse:
+        """The CPU budget now: the algorithms that run, as timed so far, and today's skips."""
         retired = _with_status(self.store.statuses(), Status.RETIRED)
         expected = {
             a.name: self._cost[a.name]

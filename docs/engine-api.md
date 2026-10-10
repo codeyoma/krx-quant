@@ -128,7 +128,7 @@
 
 - `schemas/engine-api-v1.json`이 모든 `/v1` 응답의 형식이다(JSON Schema 2020-12). 엔드포인트마다 `$defs`에 정의가 하나씩 있다: `status`, `symbols`, `latest`, `predictions`, `bars`, `algorithms`, `algorithm_detail`, `leaderboard`, `algorithm_stats`, `consensus`, `macro`, 오류는 `error`.
 - 스키마에 없는 필드는 계약 위반이다(모든 객체가 닫혀 있다). 그래서 필드를 더하거나 바꾸면 스키마도 같이 고친다. 시각은 `+09:00`이 붙은 ISO 8601이어야 한다.
-- 계약 테스트(`tests/test_api_contract.py`)가 세 모드의 엔진에 모든 엔드포인트, 질의 변형, 오류 응답을 물어 스키마로 검사한다. 빈 재생 엔진(값이 `null`인 경우), 데모 엔진(모든 필드가 찬 경우), 가짜 KIS 위의 실시간 수집기(`kis` 포함)다.
+- 계약 테스트(`tests/test_api_contract.py`)가 세 모드의 엔진에 모든 엔드포인트, 질의 변형, 오류 응답을 물어 스키마로 검사한다. 빈 재생 엔진(값이 `null`인 경우), 데모 엔진(필드가 찬 경우), 가짜 KIS 위의 실시간 수집기다. 라우트마다 스키마 정의가 있는지도 확인한다(`tests/api_schema.py`의 `ROUTES`). 그래서 엔드포인트를 더하면 `ROUTES`와 스키마에 함께 넣어야 테스트를 지난다.
 - 화면은 이 스키마와 데모 엔진(`krx-quant demo-engine`)으로 만든다. 데모 엔진도 같은 계약 테스트를 지난다.
 
 ### `GET /v1/status`
@@ -142,9 +142,9 @@
 | `last_bar_close` | 마지막으로 예측한 봉 마감 시각 |
 | `pending_outcomes` | 채점을 기다리는 예측 수 |
 | `special` | 오늘 알게 된 특수 상황. 항목마다 `kind`(`vi`, `circuit_breaker`, `sidecar`), `symbol`(VI의 종목, 시장 전체면 `null`), `start`, `end`. 해제를 아직 모르는 VI의 `end`는 발동 + 3분이다. |
-| `training` | 지난밤 학습(#22). `day`, `finalized_at`(승격 목록 확정 시각), `applied`(그 승격이 지금 돌고 있는지), `reason`, `promoted`(알고리즘 → 버전), `reports`(알고리즘별 `promoted`, `reason`: 검증 log loss 비교). 아직 없으면 `null` |
+| `training` | 지난밤 학습(#22). `day`, `finalized_at`(승격 목록 확정 시각, KST), `applied`(그 승격이 지금 돌고 있는지), `reason`, `promoted`(알고리즘 → 버전), `reports`(알고리즘별 `promoted`, `reason`: 검증 log loss 비교). 아직 없으면 `null` |
 | `cpu` | CPU 예산(#19). `budget_seconds`(`KRX_CPU_BUDGET_SECONDS`), `algorithm_seconds`(알고리즘 하나의 시간 예산, `KRX_ALGORITHM_SECONDS`), `algorithms`(은퇴하지 않은 알고리즘마다 봉 마감 한 번에 걸릴 것으로 보는 초. 한 번이라도 돈 것만), `expected_seconds`(그 합), `usage`(합 ÷ 예산. 예산이 0이면 `null`. 1을 넘으면 다음 봉 마감에 늦게 등록된 것부터 건너뛴다), `skipped_today`(오늘 CPU 예산으로 건너뛴 횟수) |
-| `kis` | 실시간 모드만. `connected`(KIS가 현재 연결에서 구독에 답했는지), `feeds`(구독·조회별 `feed`, `key`, `last_received_at`, `seconds_since`, 열린 결측 구간의 `gap`) |
+| `kis` | 실시간 모드와 데모 엔진(가상 값)에만 있다. `connected`(KIS가 현재 연결에서 구독에 답했는지), `feeds`(구독·조회별 `feed`, `key`, `last_received_at`, `seconds_since`, 열린 결측 구간의 `gap`: `stale` 또는 `disconnected: <이유>`) |
 
 ### `GET /v1/symbols`
 
@@ -267,7 +267,7 @@
 }
 ```
 
-- `model_history`: `state/models/history.json`(#45)에서 그 알고리즘의 항목이다. 오래된 것부터 온다. `why`는 `fit`, `promotion <밤 날짜>`, `rollback from <버전>`, `installed before`(이력이 생기기 전에 깔려 있던 모델)다. `version`이 `null`이면 기본 모델로 돌아간 것이다. 한 번도 설치하지 않았으면 빈 목록이다. 데모 엔진과 재생에는 서버 상태가 없어서 늘 빈 목록이다.
+- `model_history`: `state/models/history.json`(#45)에서 그 알고리즘의 항목이다. 오래된 것부터 온다. `why`는 `fit`, `promotion <밤 날짜>`, `rollback from <버전>`, `installed before`(이력이 생기기 전에 깔려 있던 모델)다. `version`이 `null`이면 기본 모델로 돌아간 것이다. 한 번도 설치하지 않았으면 빈 목록이다. 재생에는 서버 상태가 없어서 늘 빈 목록이다. 데모 엔진은 Newton에 가상 이력(학습 설치, 롤백)을 보인다.
 - `model`은 엔진이 지금 돌리는 모델이다. 설치나 롤백 직후 1분 안에는 `model_history`의 마지막과 다를 수 있다(엔진이 모델 파일을 30초마다 본다).
 
 ### `GET /v1/leaderboard?symbol=&period=&basis=&special=`
@@ -357,7 +357,7 @@
 
 - 엔진 시계의 오늘부터 10일 전까지, 국면이 정해진 가장 최근 날을 보인다. 그래서 07:30 읽기 전에는 전 거래일의 국면이 온다. `day`로 오늘 것인지 확인한다.
 - `decided_at`은 그날 마지막으로 국면을 정한 시각이다. 실패한 출처를 다시 읽으면 늦어진다.
-- `readings`는 지표 표의 순서다(`macro.py`의 `INDICATORS`). 지표마다 그날 마지막으로 읽은 값이다. 키가 없어 건너뛴 출처의 지표는 빠진다. `as_of`는 출처 기준 값의 날짜, `change_pct`는 KRX 전 거래일 아침 대비 등락률(%)이다. 값을 모르면 `null`이다.
+- `readings`는 지표 표의 순서다(`macro.py`의 `INDICATORS`). 보이는 국면을 정한 그 읽기의 값이다. 수집기가 다시 시작해 그날 새로 읽었으면, 그 전 읽기의 값은 섞지 않는다. 그래서 실패하거나 키가 없어 건너뛴 출처의 지표는 빠진다. `as_of`는 출처 기준 값의 날짜, `change_pct`는 KRX 전 거래일 아침 대비 등락률(%)이다. 값을 모르면 `null`이다.
 - `failed`는 마지막 읽기에서 실패한 출처와 이유, `skipped`는 키가 없어 건너뛴 출처다.
 - 아직 정한 날이 없거나(데이터 디렉터리에 없음) 재생 엔진이면 `day`, `decided_at`, `regime`이 `null`이고 목록은 비어 있다. 데모 엔진은 가상의 국면(`risk_off`)을 보인다.
 

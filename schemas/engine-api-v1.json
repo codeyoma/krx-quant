@@ -74,7 +74,9 @@
           }
         },
         "kis": {"$ref": "#/$defs/kis"}
-      }
+      },
+      "if": {"properties": {"mode": {"enum": ["live", "demo"]}}},
+      "then": {"required": ["kis"]}
     },
     "training": {
       "description": "The latest night's training as the 08:00 swap saw it.",
@@ -83,7 +85,7 @@
       "additionalProperties": false,
       "properties": {
         "day": {"$ref": "#/$defs/day"},
-        "finalized_at": {"type": "string"},
+        "finalized_at": {"$ref": "#/$defs/time"},
         "promoted": {"type": "object", "additionalProperties": {"type": "string"}},
         "reports": {
           "type": "array",
@@ -103,7 +105,7 @@
       }
     },
     "kis": {
-      "description": "Live only: the KIS connection and each feed's latest delivery.",
+      "description": "Live and demo (made up) only: the KIS connection and each feed's latest delivery.",
       "type": "object",
       "required": ["connected", "feeds"],
       "additionalProperties": false,

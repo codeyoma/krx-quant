@@ -1,7 +1,8 @@
 """Macro collection: the sources over HTTP, a failing one, the alert and the regime recorded.
 
 Input: a fake server answering as ECOS, FRED, Yahoo and Telegram do, and backfilled USD
-futures bars. Output: the recorded readings and regime, and the Telegram messages.
+futures bars. Output: the recorded readings and regime, the Telegram messages, and what
+the Engine API shows of them (``/v1/macro``).
 """
 
 from __future__ import annotations
@@ -337,6 +338,30 @@ async def test_the_engine_api_shows_the_latest_regime_and_readings(setup: Setup,
         "value": 12608.0,
         "change_pct": pytest.approx(-1.5),
     }
+
+
+async def test_the_readings_shown_are_those_the_regime_shown_was_decided_from(
+    setup: Setup, tmp_path: Path
+) -> None:
+    await setup.collector.run(DAY)
+    # The collector restarted before the open, and Yahoo is down this time.
+    setup.sources.down = {"yahoo"}
+    restarted = MacroCollector(
+        setup.settings,
+        setup.collector._session,
+        setup.alerts,
+        macro_recorder(setup.recorder),
+        CALENDAR,
+        lambda: MORNING + timedelta(minutes=40),
+    )
+    await restarted.run(DAY)
+    engine = await run(tmp_path / "engine.db", [], until=at("09:00:00"))
+
+    async with TestClient(TestServer(create_app(engine, data_dir=setup.settings.data_dir))) as client:
+        macro = await get_json(client, "/v1/macro")
+
+    assert (macro["regime"], macro["failed"]) == ("neutral", {"yahoo": "HTTP 503"})
+    assert "sox" not in {r["indicator"] for r in macro["readings"]}, "not from the read before the restart"
 
 
 async def test_the_engine_api_shows_the_latest_day_decided_or_nothing(setup: Setup, tmp_path: Path) -> None:

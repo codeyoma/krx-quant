@@ -4,8 +4,10 @@
 server or KIS. It replays the same made-up events every time: three symbols wandering
 from 09:00 to 10:30 on 2026-10-12, KOSPI and KOSPI200 futures ticks, and a VI on one
 symbol. Every registered algorithm is set active, so the consensus has members, the
-last night's training shows as applied, and the morning's macro read decided risk_off.
-The clock stays at 10:30.
+last night's training shows as applied, the morning's macro read decided risk_off, Newton
+has a model installed and rolled back, and the KIS status is made up (one feed in a gap).
+The clock stays at 10:30. Every answer is the same each run, except the CPU budget's
+timings, which are measured.
 """
 
 from __future__ import annotations
@@ -17,7 +19,7 @@ from pathlib import Path
 
 from aiohttp import web
 
-from krx_quant.algorithms import ALGORITHMS
+from krx_quant.algorithms import ALGORITHMS, Model
 from krx_quant.api import create_app
 from krx_quant.engine import Event
 from krx_quant.feeds import BOOK, INDEX, KOSPI200_FUTURES, TRADE, VI_STATUS, Feed
@@ -25,8 +27,9 @@ from krx_quant.feeds.base import KST
 from krx_quant.lifecycle import Status
 from krx_quant.macro import INDICATORS, MACRO, MacroDay, Observation, Reading, macro_recorder
 from krx_quant.market_calendar import MarketCalendar
+from krx_quant.model_shelf import Shelf
 from krx_quant.nightly import Night
-from krx_quant.predictions import DB_NAME, PredictionStore
+from krx_quant.predictions import DB_NAME, PredictionStore, iso
 from krx_quant.recorder import ParquetRecorder
 from krx_quant.regime import RegimeRules
 from krx_quant.replay import replay
@@ -82,8 +85,9 @@ def demo_events() -> list[Event]:
 
 async def demo_app(db: Path) -> web.Application:
     """The Engine API on the demo morning, replayed into ``db`` (replaced), with the
-    morning's macro read in ``<db name>-data/macro`` (replaced). Refuses the live engine's
-    database name, so a mistyped path cannot replace it.
+    morning's macro read and the model history in ``<db stem>-data/`` (``macro/`` and
+    ``state/models/``, replaced). Refuses the live engine's database name, so a mistyped
+    path cannot replace it.
     """
     # Case-insensitive: on macOS and Windows ENGINE.SQLITE3 is the same file.
     if db.name.casefold() in {n.casefold() for n in (DB_NAME, f"{DB_NAME}-wal", f"{DB_NAME}-shm")}:
@@ -109,7 +113,46 @@ async def demo_app(db: Path) -> web.Application:
     engine.training = NightStatus(night, True, "applied").as_dict()
     data_dir = db.with_name(f"{db.stem}-data")
     write_demo_macro(data_dir)
-    return create_app(engine, mode="demo", data_dir=data_dir)
+    shelf = demo_shelf(data_dir / "state")
+    return create_app(engine, mode="demo", live_status=demo_kis, data_dir=data_dir, shelf=shelf)
+
+
+def demo_shelf(state_dir: Path) -> Shelf:
+    """Newton's model history: one fitted on the 8th, rolled back on the 9th to the defaults
+    the demo runs."""
+    shutil.rmtree(state_dir / "models", ignore_errors=True)
+    shelf = Shelf(state_dir)
+    fitted = Model(
+        "newton-20261008-5e1f0a",
+        {"damping": 0.25, "threshold": 1.5},
+        "2026-09-10..2026-10-08, 9120 samples, log loss 0.9312",
+        date(2026, 10, 8),
+    )
+    shelf.install("newton", fitted, "fit", datetime(2026, 10, 8, 22, 5, tzinfo=KST))
+    shelf.rollback("newton", datetime(2026, 10, 9, 9, 10, tzinfo=KST))
+    return shelf
+
+
+def demo_kis() -> dict[str, object]:
+    """A made-up KIS status at 10:30: connected, the member flow of 000660 quiet for 16 minutes."""
+    now = _at(_END)
+    last = {(TRADE.tr_id, s): now - timedelta(seconds=2) for s in DEMO_SYMBOLS}
+    last |= {(BOOK.tr_id, s): now - timedelta(seconds=1) for s in DEMO_SYMBOLS}
+    last |= {
+        (INDEX.tr_id, "0001"): now - timedelta(seconds=5),
+        ("H0UNMBC0", "000660"): now - timedelta(minutes=16),
+    }
+    feeds = [
+        {
+            "feed": feed,
+            "key": key,
+            "last_received_at": iso(at),
+            "seconds_since": (now - at).total_seconds(),
+            "gap": "stale" if feed == "H0UNMBC0" else None,
+        }
+        for (feed, key), at in last.items()
+    ]
+    return {"connected": True, "feeds": feeds}
 
 
 def write_demo_macro(data_dir: Path) -> None:

@@ -135,13 +135,16 @@ async def _status(request: web.Request) -> web.Response:
         ],
     }
     # The latest night's training and whether its promotions run (swap.py); null before any.
-    body["training"] = engine.training
+    training = engine.training
+    if training is not None:  # finalized where the night ran: shown in KST like every time here
+        training = {**training, "finalized_at": iso(datetime.fromisoformat(training["finalized_at"]))}
+    body["training"] = training
     cpu = engine.cpu_use()
     body["cpu"] = {
         "budget_seconds": cpu.budget.cpu,
         "algorithm_seconds": cpu.budget.per_algorithm,
         "expected_seconds": cpu.expected_seconds,
-        "usage": cpu.expected_seconds / cpu.budget.cpu if cpu.budget.cpu > 0 else None,
+        "usage": cpu.usage,
         "algorithms": dict(cpu.expected),
         "skipped_today": cpu.skipped_today,
     }
@@ -266,8 +269,35 @@ async def _consensus(request: web.Request) -> web.Response:
 
 async def _macro(request: web.Request) -> web.Response:
     engine = request.app[ENGINE_KEY]
+    data_dir = request.app[DATA_DIR_KEY]
     today = kst_day(engine.clock.now())
-    return _json(await asyncio.to_thread(latest_macro, request.app[DATA_DIR_KEY], today))
+    latest = None if data_dir is None else await asyncio.to_thread(latest_macro, data_dir, today)
+    if latest is None:
+        empty: dict[str, Any] = {"day": None, "decided_at": None, "regime": None, "reasons": []}
+        return _json({**empty, "readings": [], "failed": {}, "skipped": []})
+    readings = [
+        {
+            "indicator": indicator.name,
+            "label": indicator.label,
+            "source": row["source"],
+            "series": row["series"],
+            "as_of": row["as_of"].isoformat() if row["as_of"] else None,
+            "value": row["value"],
+            "change_pct": row["change_pct"],
+        }
+        for indicator, row in latest.readings
+    ]
+    return _json(
+        {
+            "day": latest.day.isoformat(),
+            "decided_at": iso(latest.decided_at),
+            "regime": latest.regime,
+            "reasons": latest.reasons,
+            "readings": readings,
+            "failed": latest.failed,
+            "skipped": latest.skipped,
+        }
+    )
 
 
 def _status_json(engine: PredictionEngine, name: str) -> dict[str, Any]:

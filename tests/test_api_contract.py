@@ -1,4 +1,5 @@
-"""Every Engine API answer keeps the /v1 contract: ``schemas/engine-api-v1.json``.
+"""Every Engine API answer keeps the /v1 contract: ``schemas/engine-api-v1.json``
+(``tests/api_schema.py``).
 
 Input: engines in each mode (an empty replayed morning, the demo engine, the live
 collector on the fake KIS seam), asked every endpoint with its query variants and its
@@ -8,7 +9,6 @@ errors. Output: each body checked against the schema of its endpoint.
 from __future__ import annotations
 
 import asyncio
-import json
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from pathlib import Path
@@ -18,27 +18,16 @@ import aiohttp
 from aiohttp.test_utils import TestClient, TestServer
 from jsonschema import Draft202012Validator
 
+from krx_quant.api import create_app
 from krx_quant.clock import FakeClock
 from krx_quant.collector import run_collector
 from krx_quant.demo import demo_app
 from krx_quant.fake_kis import FakeKis
+from tests.api_schema import ROUTES, SCHEMA, check
 from tests.kis_frames import book_frame
 from tests.replay_events import PREDICTORS, api, at, run
 from tests.test_collector import settings_for
 from tests.test_live_predictions import free_port, poll
-
-SCHEMA_PATH = Path(__file__).parent.parent / "schemas" / "engine-api-v1.json"
-SCHEMA = json.loads(SCHEMA_PATH.read_text())
-
-
-def check(definition: str, body: Any) -> None:
-    """``body`` keeps ``$defs/<definition>`` of the schema."""
-    validator = Draft202012Validator({"$ref": f"#/$defs/{definition}", "$defs": SCHEMA["$defs"]})
-    errors = [
-        f"{'/'.join(map(str, e.absolute_path)) or '(top)'}: {e.message}" for e in validator.iter_errors(body)
-    ]
-    assert not errors, f"{definition}:\n" + "\n".join(errors[:20])
-
 
 Get = Callable[[str], Awaitable[tuple[int, Any]]]  # a path to its status and JSON body
 
@@ -87,7 +76,19 @@ async def walk(get: Get) -> dict[str, int]:
         ("/v1/algorithms/nobody", 404),
     ):
         await ask(path, "error", status)
+    assert set(checked) == {*ROUTES.values(), "error"}, "every route asked"
     return checked
+
+
+async def test_every_route_has_its_definition(tmp_path: Path) -> None:
+    engine = await run(tmp_path / "engine.db", [], until=at("09:00:00"))
+
+    routes = {
+        r.resource.canonical for r in create_app(engine).router.routes() if r.method == "GET" and r.resource
+    }
+
+    assert routes == set(ROUTES)
+    assert set(ROUTES.values()) <= set(SCHEMA["$defs"])
 
 
 def test_the_schema_is_valid_and_closed() -> None:
@@ -103,7 +104,8 @@ def test_the_schema_is_valid_and_closed() -> None:
             if "properties" in node and not closed and path not in fragments:
                 found.append(path)
             for key, value in node.items():
-                found += open_objects(value, f"{path}/{key}")
+                if key != "if":  # a condition reads fields, it does not name them
+                    found += open_objects(value, f"{path}/{key}")
         elif isinstance(node, list):
             for i, value in enumerate(node):
                 found += open_objects(value, f"{path}/{i}")

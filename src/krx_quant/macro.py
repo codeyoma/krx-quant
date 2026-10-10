@@ -40,7 +40,6 @@ from krx_quant.contracts import USD
 from krx_quant.feeds.base import KST, kst_day
 from krx_quant.market_calendar import MarketCalendar, calendar_store, next_on_trading_day
 from krx_quant.notify import Alerts
-from krx_quant.predictions import iso
 from krx_quant.recorder import ParquetRecorder
 from krx_quant.regime import Decision, RegimeInputs, RegimeRules, decide
 
@@ -394,63 +393,62 @@ def macro_recorder(parquet: ParquetRecorder) -> Record:
     return record
 
 
-# The Engine API shows the latest day decided this far back (a long KRX holiday).
+# The Engine API looks this many days before today for the latest day decided (a long
+# KRX holiday).
 SHOWN_DAYS = 10
 
 
-def latest_macro(data_dir: Path | None, today: date) -> dict[str, Any]:
-    """The Engine API's ``/v1/macro``: the latest day decided by ``today``, its regime and
-    each indicator's latest reading, in the indicators' order; nulls before any."""
-    found = None if data_dir is None else _latest_decided(data_dir, today)
-    if found is None:
-        return {
-            "day": None,
-            "decided_at": None,
-            "regime": None,
-            "reasons": [],
-            "readings": [],
-            "failed": {},
-            "skipped": [],
-        }
-    root, regime = found
+@dataclass(frozen=True)
+class LatestMacro:
+    """A day's latest regime, and the readings of the same read, as recorded."""
+
+    day: date
+    decided_at: datetime
+    regime: str
+    reasons: list[str]
+    readings: list[tuple[Indicator, dict[str, Any]]]  # READING_SCHEMA rows, in the indicators' order
+    failed: dict[str, str]  # source -> why
+    skipped: list[str]  # sources without their API key
+
+
+def latest_macro(data_dir: Path, today: date) -> LatestMacro | None:
+    """The latest day decided by ``today`` (at most ``SHOWN_DAYS`` before it): its last
+    regime and the readings it was decided from. A reading of an earlier read that day (a
+    collector restarted since) is not one of them.
+    """
+    for back in range(SHOWN_DAYS + 1):
+        root = data_dir / MACRO / f"date={today - timedelta(days=back)}"
+        if regimes := _rows(root / "feed=regime" / "symbol=market"):
+            break
+    else:
+        return None
+    regime = regimes[-1]
+    decided_at = regime["recorded_at"]  # one read records all its rows at the same time
     readings = []
     for indicator in INDICATORS:
         rows = _rows(root / "feed=readings" / f"symbol={indicator.name}")
-        if rows:
-            r = rows[-1]  # the latest read
-            readings.append(
-                {
-                    "indicator": indicator.name,
-                    "label": indicator.label,
-                    "source": r["source"],
-                    "series": r["series"],
-                    "as_of": r["as_of"].isoformat() if r["as_of"] else None,
-                    "value": r["value"],
-                    "change_pct": r["change_pct"],
-                }
-            )
-    return {
-        "day": regime["day"].isoformat(),
-        "decided_at": iso(regime["recorded_at"]),
-        "regime": regime["regime"],
-        "reasons": json.loads(regime["reasons"]),
-        "readings": readings,
-        "failed": json.loads(regime["failed"]),
-        "skipped": json.loads(regime["skipped"]),
-    }
-
-
-def _latest_decided(data_dir: Path, today: date) -> tuple[Path, dict[str, Any]] | None:
-    """The latest day decided by ``today``: its directory and its latest regime row."""
-    for back in range(SHOWN_DAYS):
-        root = data_dir / MACRO / f"date={today - timedelta(days=back)}"
-        if regimes := _rows(root / "feed=regime" / "symbol=market"):
-            return root, regimes[-1]
-    return None
+        if same_read := [r for r in rows if r["recorded_at"] == decided_at]:
+            readings.append((indicator, same_read[-1]))
+    return LatestMacro(
+        day=regime["day"],
+        decided_at=decided_at,
+        regime=regime["regime"],
+        reasons=json.loads(regime["reasons"]),
+        readings=readings,
+        failed=json.loads(regime["failed"]),
+        skipped=json.loads(regime["skipped"]),
+    )
 
 
 def _rows(partition: Path) -> list[dict[str, Any]]:
     """A partition's rows, in the order written."""
+    try:
+        return _read_rows(partition)
+    except FileNotFoundError:  # the archive merged the parts in between: list them again
+        return _read_rows(partition)
+
+
+def _read_rows(partition: Path) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for path in partition_files(partition):
         rows += pq.read_table(path).to_pylist()
