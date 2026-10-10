@@ -144,7 +144,7 @@
 | `special` | 오늘 알게 된 특수 상황. 항목마다 `kind`(`vi`, `circuit_breaker`, `sidecar`), `symbol`(VI의 종목, 시장 전체면 `null`), `start`, `end`. 해제를 아직 모르는 VI의 `end`는 발동 + 3분이다. |
 | `training` | 지난밤 학습(#22). `day`, `finalized_at`(승격 목록 확정 시각, KST), `applied`(그 승격이 지금 돌고 있는지), `reason`, `promoted`(알고리즘 → 버전), `reports`(알고리즘별 `promoted`, `reason`: 검증 log loss 비교). 아직 없으면 `null` |
 | `cpu` | CPU 예산(#19). `budget_seconds`(`KRX_CPU_BUDGET_SECONDS`), `algorithm_seconds`(알고리즘 하나의 시간 예산, `KRX_ALGORITHM_SECONDS`), `algorithms`(은퇴하지 않은 알고리즘마다 봉 마감 한 번에 걸릴 것으로 보는 초. 한 번이라도 돈 것만), `expected_seconds`(그 합), `usage`(합 ÷ 예산. 예산이 0이면 `null`. 1을 넘으면 다음 봉 마감에 늦게 등록된 것부터 건너뛴다), `skipped_today`(오늘 CPU 예산으로 건너뛴 횟수) |
-| `kis` | 실시간 모드와 데모 엔진(가상 값)에만 있다. `connected`(KIS가 현재 연결에서 구독에 답했는지), `feeds`(구독·조회별 `feed`, `key`, `last_received_at`, `seconds_since`, 열린 결측 구간의 `gap`: `stale` 또는 `disconnected: <이유>`) |
+| `kis` | 실시간 모드와 데모 엔진(가상 값)에만 있고, 둘에서는 늘 있다(없으면 엔진 API가 시작하지 않는다). `connected`(KIS가 현재 연결에서 구독에 답했는지), `feeds`(구독·조회별 `feed`, `key`, `last_received_at`, `seconds_since`, 열린 결측 구간의 `gap`: `stale` 또는 `disconnected: <이유>`) |
 
 ### `GET /v1/symbols`
 
@@ -357,6 +357,7 @@
 
 - 엔진 시계의 오늘부터 10일 전까지, 국면이 정해진 가장 최근 날을 보인다. 그래서 07:30 읽기 전에는 전 거래일의 국면이 온다. `day`로 오늘 것인지 확인한다.
 - `decided_at`은 그날 마지막으로 국면을 정한 시각이다. 실패한 출처를 다시 읽으면 늦어진다.
+- 엔진은 이 답을 30초 동안 그대로 준다(아침 읽기 때만 바뀌어서다). 그래서 새 읽기는 30초 안에 보인다.
 - `readings`는 지표 표의 순서다(`macro.py`의 `INDICATORS`). 보이는 국면을 정한 그 읽기의 값이다. 수집기가 다시 시작해 그날 새로 읽었으면, 그 전 읽기의 값은 섞지 않는다. 그래서 실패하거나 키가 없어 건너뛴 출처의 지표는 빠진다. `as_of`는 출처 기준 값의 날짜, `change_pct`는 KRX 전 거래일 아침 대비 등락률(%)이다. 값을 모르면 `null`이다.
 - `failed`는 마지막 읽기에서 실패한 출처와 이유, `skipped`는 키가 없어 건너뛴 출처다.
 - 아직 정한 날이 없거나(데이터 디렉터리에 없음) 재생 엔진이면 `day`, `decided_at`, `regime`이 `null`이고 목록은 비어 있다. 데모 엔진은 가상의 국면(`risk_off`)을 보인다.

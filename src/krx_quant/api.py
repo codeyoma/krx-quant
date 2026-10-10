@@ -36,6 +36,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from functools import partial
 from pathlib import Path
+from time import monotonic
 from typing import Any, Literal
 
 from aiohttp import web
@@ -45,7 +46,7 @@ from krx_quant.baselines import BASELINE_NAMES, BASELINES
 from krx_quant.consensus import NAMES, slot
 from krx_quant.engine import PredictionEngine
 from krx_quant.feeds.base import kst_day
-from krx_quant.macro import latest_macro
+from krx_quant.macro import LatestMacro, latest_macro
 from krx_quant.model_shelf import Shelf
 from krx_quant.predictions import iso
 from krx_quant.pricing import flat_ticks, tick_size
@@ -74,6 +75,9 @@ _dumps = partial(json.dumps, ensure_ascii=False, indent=2)
 MIN_SAMPLE_KEY = web.AppKey("min_sample", int)
 DATA_DIR_KEY: web.AppKey[Path | None] = web.AppKey("data_dir")
 SHELF_KEY: web.AppKey[Shelf | None] = web.AppKey("shelf")
+# /v1/macro is read again at most this often: it changes only with the morning's reads.
+MACRO_SECONDS = 30.0
+MACRO_CACHE_KEY = web.AppKey("macro_cache", dict)
 STATS_CACHE_KEY = web.AppKey("stats_cache", dict)
 PERIODS = {"today": 1, "5d": 5, "20d": 20}  # days with predictions
 # Results kept per question until the store changes (the screen asks the same often).
@@ -93,7 +97,11 @@ def create_app(
     shelf: Shelf | None = None,
 ) -> web.Application:
     """The Engine API of ``engine``. ``data_dir`` holds the macro readings and ``shelf`` the
-    models installed on the server; without them there is no macro and no model history."""
+    models installed on the server; without them there is no macro and no model history.
+    Live and demo show the KIS status: they need ``live_status``.
+    """
+    if mode in ("live", "demo") and live_status is None:
+        raise ValueError(f"the {mode} Engine API shows the kis status: give it live_status")
     app = web.Application()
     app[ENGINE_KEY] = engine
     app[MODE_KEY] = mode
@@ -101,6 +109,7 @@ def create_app(
     app[STATS_CACHE_KEY] = {}
     app[DATA_DIR_KEY] = data_dir
     app[SHELF_KEY] = shelf
+    app[MACRO_CACHE_KEY] = {}
     if live_status is not None:
         app[LIVE_STATUS_KEY] = live_status
     app.router.add_get("/v1/status", _status)
@@ -269,12 +278,21 @@ async def _consensus(request: web.Request) -> web.Response:
 
 async def _macro(request: web.Request) -> web.Response:
     engine = request.app[ENGINE_KEY]
-    data_dir = request.app[DATA_DIR_KEY]
+    cache: dict[date, tuple[float, dict[str, Any]]] = request.app[MACRO_CACHE_KEY]
     today = kst_day(engine.clock.now())
-    latest = None if data_dir is None else await asyncio.to_thread(latest_macro, data_dir, today)
+    cached = cache.get(today)
+    if cached is None or monotonic() - cached[0] >= MACRO_SECONDS:
+        data_dir = request.app[DATA_DIR_KEY]
+        latest = None if data_dir is None else await asyncio.to_thread(latest_macro, data_dir, today)
+        cache.clear()
+        cached = cache[today] = (monotonic(), _macro_json(latest))
+    return _json(cached[1])
+
+
+def _macro_json(latest: LatestMacro | None) -> dict[str, Any]:
     if latest is None:
         empty: dict[str, Any] = {"day": None, "decided_at": None, "regime": None, "reasons": []}
-        return _json({**empty, "readings": [], "failed": {}, "skipped": []})
+        return {**empty, "readings": [], "failed": {}, "skipped": []}
     readings = [
         {
             "indicator": indicator.name,
@@ -287,17 +305,15 @@ async def _macro(request: web.Request) -> web.Response:
         }
         for indicator, row in latest.readings
     ]
-    return _json(
-        {
-            "day": latest.day.isoformat(),
-            "decided_at": iso(latest.decided_at),
-            "regime": latest.regime,
-            "reasons": latest.reasons,
-            "readings": readings,
-            "failed": latest.failed,
-            "skipped": latest.skipped,
-        }
-    )
+    return {
+        "day": latest.day.isoformat(),
+        "decided_at": iso(latest.decided_at),
+        "regime": latest.regime,
+        "reasons": latest.reasons,
+        "readings": readings,
+        "failed": latest.failed,
+        "skipped": latest.skipped,
+    }
 
 
 def _status_json(engine: PredictionEngine, name: str) -> dict[str, Any]:

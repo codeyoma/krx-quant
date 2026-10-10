@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import aiohttp
+import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from jsonschema import Draft202012Validator
 
@@ -89,6 +90,14 @@ async def test_every_route_has_its_definition(tmp_path: Path) -> None:
 
     assert routes == set(ROUTES)
     assert set(ROUTES.values()) <= set(SCHEMA["$defs"])
+
+
+async def test_live_and_demo_need_their_kis_status(tmp_path: Path) -> None:
+    engine = await run(tmp_path / "engine.db", [], until=at("09:00:00"))
+
+    for mode in ("live", "demo"):
+        with pytest.raises(ValueError, match="kis"):
+            create_app(engine, mode=mode)
 
 
 def test_the_schema_is_valid_and_closed() -> None:
