@@ -3,15 +3,16 @@
 At each bar close two consensus predictions are made, each stored and scored like an
 algorithm's:
 
-- **fast** (``consensus-fast``): from the active algorithms finished 2 seconds after the
-  bar close;
-- **final** (``consensus-final``): once every active algorithm has finished or run out of
-  its time budget (30 seconds at most).
+- **fast** (``consensus-fast``): from the active algorithms finished 2 seconds after they
+  started, just after the bar close;
+- **final** (``consensus-final``): once every active algorithm has finished, failed or
+  run out of its time budget (30 seconds).
 
 The pool is linear: each probability (and the expected move) is the weighted mean of the
 members', the weights of those present scaled to add up to 1. Algorithms on probation,
 on the bench, retired or clones are never members. With no member, the consensus is
-recorded empty (``no_members``).
+recorded empty (``no_members``); with members but no forecast from any by then (still
+working, timed out or failed), ``none_finished``.
 
 **Weights**, per symbol and 30-minute slot, are refitted after each day's close:
 
@@ -19,12 +20,16 @@ recorded empty (``no_members``).
    have had the lowest log loss on the bar closes every member predicted (basis B,
    special predictions left out), found by EM.
 2. Only a weight steady across both spans moves: above equal in both, it takes the
-   smaller; below in both, the larger; otherwise equal. Then they are scaled to add up
-   to 1. An algorithm good only lately gains nothing.
+   smaller; below in both, the larger; otherwise equal. What the steady losers give up
+   goes to the steady winners (or, with none, to the rest alike), so they add up to 1.
+   An algorithm good only lately gains nothing.
 3. Shrunk toward equal weights by the evidence: with n bar closes in the 20 days, the
    fitted weights count n / (n + 200).
 
 Before the first fit, or for a member the fit did not know, the members count equally.
+
+The fast consensus waits 2 seconds from when the algorithms start working, just after the
+bar close; an engine running late still gives them that long.
 """
 
 from __future__ import annotations
@@ -36,12 +41,14 @@ from typing import Any
 
 from krx_quant.baselines import Forecast
 from krx_quant.feeds.base import KST
+from krx_quant.stats import scored_by_algorithm
 
 FAST = "consensus-fast"
 FINAL = "consensus-final"
 NAMES = (FAST, FINAL)
-EQUAL = "condorcet-equal"  # the version before any fit
-PERIODS = (5, 20)  # days with predictions
+EQUAL_VERSION = "condorcet-equal"  # before any fit
+SPANS = (5, 20)  # days with predictions
+BASIS = "b"  # as the leaderboard
 SHRINK = 200  # bar closes' worth of belief in equal weights
 _EM_ROUNDS = 200
 _EM_TOLERANCE = 1e-9
@@ -73,7 +80,7 @@ class Weights:
         return {name: w / total for name, w in raw.items()} if total > 0 else dict.fromkeys(present, equal)
 
 
-NO_WEIGHTS = Weights(EQUAL, None)
+NO_WEIGHTS = Weights(EQUAL_VERSION, None)
 
 
 def slot(bar_close: datetime) -> str:
@@ -97,54 +104,67 @@ def pool(forecasts: Mapping[str, Forecast], weights: Mapping[str, float]) -> For
 def fit(
     rows: Sequence[Mapping[str, Any]], members: Sequence[str], days: Sequence[date], at: datetime
 ) -> Weights:
-    """Weights for ``members`` from scored predictions (``rows``) on ``days`` (latest first)."""
+    """Weights for ``members`` from stored scored predictions (``rows``) of ``days`` (latest
+    first, the longest span).
+    """
     version = f"condorcet-{at.astimezone(KST):%Y%m%d}"
-    if not members:
-        return Weights(version, at)
+    scored = scored_by_algorithm(rows, BASIS)
     # Each bar close's probability of what happened, by member, in each cell.
-    seen: dict[Cell, dict[tuple[str, str], dict[str, float]]] = {}
-    for r in rows:
-        if r["algorithm"] not in members or r["class_b"] is None:
-            continue
-        p = {"up": r["p_up"], "flat": r["p_flat"], "down": r["p_down"]}[r["class_b"]]
-        close = datetime.fromisoformat(r["bar_close"])
-        cell = (r["symbol"], slot(close))
-        seen.setdefault(cell, {}).setdefault((r["bar_close"], r["symbol"]), {})[r["algorithm"]] = max(
-            p, _FLOOR
-        )
-    spans = [set(days[:n]) for n in PERIODS]
+    seen: dict[Cell, dict[datetime, dict[str, float]]] = {}
+    for name in members:
+        for r in scored.get(name, []):
+            by_close = seen.setdefault((r.symbol, slot(r.bar_close)), {})
+            by_close.setdefault(r.bar_close, {})[name] = max(r.probability(r.outcome), _FLOOR)
+    spans = [set(days[:n]) for n in SPANS]
+    equal = 1 / len(members) if members else 0.0
     cells: dict[Cell, dict[str, float]] = {}
     for cell, closes in seen.items():
-        complete = [
-            (date.fromisoformat(key[0][:10]), probs)
-            for key, probs in closes.items()
-            if len(probs) == len(members)
-        ]
+        complete = [(close, probs) for close, probs in closes.items() if len(probs) == len(members)]
         if not complete:
             continue
         fitted = [
-            _em([[probs[m] for m in members] for day, probs in complete if day in span], len(members))
+            _em(
+                [[probs[m] for m in members] for close, probs in complete if _day(close) in span],
+                len(members),
+            )
             for span in spans
         ]
-        kept = [_steady([w[i] for w in fitted], 1 / len(members)) for i in range(len(members))]
-        total = sum(kept)
-        kept = [k / total for k in kept]
-        n = sum(1 for day, _ in complete if day in spans[-1])
-        trust = n / (n + SHRINK)
-        equal = 1 / len(members)
+        kept = _steady([[w[i] for w in fitted] for i in range(len(members))], equal)
+        trust = len(complete) / (len(complete) + SHRINK)
         cells[cell] = {m: trust * k + (1 - trust) * equal for m, k in zip(members, kept, strict=True)}
     return Weights(version, at, cells)
 
 
-def _steady(spans: Sequence[float], equal: float) -> float:
-    """A member's weight over the spans: above equal only if above it in every span (then the
-    least of them), below only if below in every span (the most), else equal.
+def _day(at: datetime) -> date:
+    return at.astimezone(KST).date()
+
+
+def _steady(by_member: Sequence[Sequence[float]], equal: float) -> list[float]:
+    """The members' weights from their weights over the spans, adding up to 1.
+
+    A weight is above equal only if above it in every span (then the least), below only if
+    below in every span (the most), else equal. What the steady losers give up goes to the
+    steady winners only, in proportion; with none, to everyone not losing, alike.
     """
-    if all(w > equal for w in spans):
-        return min(spans)
-    if all(w < equal for w in spans):
-        return max(spans)
-    return equal
+    kept = []
+    for weights in by_member:
+        if all(w > equal for w in weights):
+            kept.append(min(weights))
+        elif all(w < equal for w in weights):
+            kept.append(max(weights))
+        else:
+            kept.append(equal)
+    gap = 1 - sum(kept)
+    winners = [i for i, k in enumerate(kept) if k > equal]
+    if winners:
+        above = sum(kept[i] - equal for i in winners)
+        for i in winners:
+            kept[i] += gap * (kept[i] - equal) / above
+    else:
+        level = [i for i, k in enumerate(kept) if k >= equal]
+        for i in level:
+            kept[i] += gap / len(level)
+    return kept
 
 
 def _em(observations: Sequence[Sequence[float]], k: int) -> list[float]:

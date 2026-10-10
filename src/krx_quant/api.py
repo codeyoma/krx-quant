@@ -338,7 +338,7 @@ async def _algorithm_stats(request: web.Request) -> web.Response:
                 "calibration": [_bin_json(b) for b in overall.summary.calibration],
             },
             "by_symbol": by(lambda r: r.symbol),
-            "by_slot": by(_slot),
+            "by_slot": by(lambda r: slot(r.bar_close)),
             "by_model_version": by(lambda r: r.model_version),
         }
 
@@ -374,10 +374,6 @@ async def _stats(
         cache.clear()
     cache[key] = (version, body)
     return body
-
-
-def _slot(r: Scored) -> str:
-    return slot(r.bar_close)
 
 
 def _interval_json(i: Interval | None) -> dict[str, Any] | None:
