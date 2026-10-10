@@ -1,41 +1,115 @@
-"""Training data: backfilled one-minute bars turned into samples with the live feature code.
+"""Training data: each trading day turned into samples with the live feature code.
 
-Each bar close of a day's prediction window becomes a sample: the features of the bars
-finished by then (built by the Feature Store, as live) and what happened four minutes
-later. The backfill has bars, not quotes, so here the reference price is the last
-close, and the outcome is the close four minutes later against it, classified with the
-same flat band as live scoring.
+Each bar close of a day's prediction window becomes a sample per symbol: the features
+there (built by the Feature Store, as live) and what happened four minutes later,
+classified with the same flat band as live scoring. A day is read one of two ways:
 
-The lead groups (``features.Leaders``) come from the backfill too: the other symbols, the
-futures' continuous series and the ETFs. Indices and US daytime trades have no backfill,
-so their moves are unknown in training.
+- Recorded (every symbol's integrated trades were recorded): the day's events go through
+  the engine's own Market View, so the bars, leaders and reference price (the mid-point)
+  are exactly what the engine saw, and the outcome is the mid-point four minutes later,
+  as live scoring decides it (basis A). Every lead group is there, indices and US daytime
+  trades included.
+- Backfilled only: the backfill has bars, not quotes, so the reference price is the last
+  close and the outcome the close four minutes later. A close jumps between the bid and
+  the ask and back (bid-ask bounce), which live scoring on mid-points never sees. The
+  lead groups are the other symbols, the futures' continuous series and the ETFs; indices
+  and US daytime trades have no backfill, so their moves are unknown.
+
+A recorded day is read the first way even when it has backfilled bars too.
 """
 
 from __future__ import annotations
 
 import bisect
+from collections import deque
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
-from datetime import date, datetime
+from dataclasses import dataclass, replace
+from datetime import date, datetime, time
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import pyarrow.parquet as pq
 
 from krx_quant.algorithms import ALGORITHMS, Model, model_path
 from krx_quant.algorithms.contract import Sample
+from krx_quant.archive import partition_files
 from krx_quant.backfill import FUTURES_BARS_TR, MINUTE_BARS_TR, bars_key
 from krx_quant.config import Settings
 from krx_quant.contracts import KOSPI200, USD
-from krx_quant.engine import HORIZON, prediction_window
-from krx_quant.features import LEAD_FEATURES, FeatureStore, FeatureVector, Leaders, Snapshot
+from krx_quant.engine import Event
+from krx_quant.features import LEAD_FEATURES, FeatureStore, FeatureValue, FeatureVector, Leaders, Snapshot
+from krx_quant.feeds import TRADE
 from krx_quant.feeds.base import KST
 from krx_quant.market_calendar import MarketCalendar, calendar_store
+from krx_quant.market_view import HORIZON, MarketView, prediction_window
 from krx_quant.model_shelf import Shelf
 from krx_quant.pricing import classify
 from krx_quant.reference import BAR, Bar
+from krx_quant.replay import recorded_events
 
 BarDays = Mapping[tuple[str, date], Sequence[Bar]]  # (symbol, day) -> bars, oldest first
+# The reference price a day's samples were made with: "mid" from recorded events, "close"
+# from backfilled bars.
+Reference = Literal["mid", "close"]
+
+
+@dataclass(frozen=True)
+class TrainingDay:
+    """A day's samples, with every feature asked for, and the reference price they used."""
+
+    day: date
+    reference: Reference
+    samples: list[Sample]
+
+    def of(self, features: Sequence[str]) -> list[Sample]:
+        """The samples with only ``features``, as one algorithm declared them."""
+        return [replace(s, features=FeatureVector(s.features, features)) for s in self.samples]
+
+
+def training_day(
+    data_dir: Path,
+    day: date,
+    calendar: MarketCalendar,
+    symbols: Sequence[str],
+    names: Sequence[str],
+    fee_rate: float,
+    leaders: Leaders,
+) -> TrainingDay | None:
+    """``day``'s samples: from its recorded events if every symbol's trades were recorded,
+    else from its backfilled bars; None if it has neither.
+    """
+    if is_recorded(data_dir, day, symbols):
+        events = recorded_events(data_dir, day, symbols, leaders)
+        made = recorded_samples(events, calendar, day, symbols, names, fee_rate, leaders)
+        return TrainingDay(day, "mid", made)
+    bar_days = bar_days_on(data_dir, symbols, [day])
+    if not bar_days:
+        return None
+    leader_days = load_leader_days(data_dir, leaders, [day]) if LEAD_FEATURES & set(names) else {}
+    made = samples(bar_days, calendar, names, fee_rate, leader_days=leader_days, leaders=leaders)
+    return TrainingDay(day, "close", made)
+
+
+def is_recorded(data_dir: Path, day: date, symbols: Sequence[str]) -> bool:
+    """Whether every symbol's integrated trades were recorded on ``day``."""
+    root = data_dir / "events" / f"date={day.isoformat()}" / f"feed={TRADE.tr_id}"
+    return all(partition_files(root / f"symbol={s}") for s in symbols)
+
+
+def days_with_data(data_dir: Path, symbols: Sequence[str]) -> list[date]:
+    """The days with backfilled bars of any of ``symbols`` or recorded trades of all of them,
+    oldest first.
+    """
+    found: set[date] = set()
+    for folder in [*(data_dir / "bars").glob("date=*"), *(data_dir / "events").glob("date=*")]:
+        try:
+            day = date.fromisoformat(folder.name.removeprefix("date="))
+        except ValueError:
+            continue  # not a day's folder
+        backfilled = any((data_dir / bars_key(day, MINUTE_BARS_TR, s)).exists() for s in symbols)
+        if backfilled or is_recorded(data_dir, day, symbols):
+            found.add(day)
+    return sorted(found)
 
 
 def samples(
@@ -48,7 +122,8 @@ def samples(
     leader_days: BarDays | None = None,
     leaders: Leaders | None = None,
 ) -> list[Sample]:
-    """A sample per bar close in each day's prediction window, in time order.
+    """A sample per bar close in each day's prediction window, in time order, from backfilled
+    bars: the reference price is the last close, the outcome the close four minutes later.
 
     ``leader_days`` holds the leading series' bars by (series, day); the other symbols of
     ``bar_days`` lead too.
@@ -77,14 +152,87 @@ def samples(
             )
             values = store.compute(snapshot, names)
             later = closes.get(t + HORIZON - BAR)  # the close of the bar ending at t + 4 minutes
-            change = None
-            outcome = None
-            if later is not None and snapshot.price and snapshot.tick and snapshot.flat_ticks:
-                change = (later - snapshot.price) / snapshot.tick
-                outcome = classify(later - snapshot.price, snapshot.flat_ticks, snapshot.tick)
-            out.append(Sample(symbol, t, FeatureVector(values, names), outcome, change))
+            out.append(_sample(snapshot, values, names, later))
             t += BAR
     return out
+
+
+def recorded_samples(
+    events: Iterable[Event],
+    calendar: MarketCalendar,
+    day: date,
+    symbols: Sequence[str],
+    names: Sequence[str],
+    fee_rate: float,
+    leaders: Leaders,
+    store: FeatureStore | None = None,
+) -> list[Sample]:
+    """A sample per bar close of ``day``'s prediction window and symbol, in time order, from
+    the day's events (in receipt order) through the engine's Market View.
+
+    At each bar close the features are computed before any event received at or after it,
+    as the engine does; the outcome is the mid-point four minutes later against the one at
+    the bar close, as live scoring decides it on basis A.
+    """
+    session = calendar.session(day)
+    if session is None:
+        return []
+    store = store or FeatureStore()
+    view = MarketView(calendar, symbols, leaders, datetime.combine(day, time(), KST))
+    first, last = prediction_window(session)
+    # Every minute from the first bar close to the last target: a bar close to predict, a
+    # target to look the mid-point up at, or both.
+    minutes = deque(first + i * BAR for i in range((last + HORIZON - first) // BAR + 1))
+    seen: list[tuple[Snapshot, dict[str, FeatureValue]]] = []
+    mids: dict[tuple[str, datetime], float | None] = {}
+
+    def reach(moment: datetime) -> None:
+        """Everything due at the minutes up to ``moment``, before what is received then."""
+        while minutes and minutes[0] <= moment:
+            minute = minutes.popleft()
+            if minute <= last:
+                frozen = view.at_close(minute)
+                for symbol in symbols:
+                    snapshot = view.snapshot(frozen, symbol, fee_rate)
+                    # A snapshot holds the day's bars so far: only what the sample needs is kept.
+                    seen.append((_bare(snapshot), store.compute(snapshot, names)))
+            if minute >= first + HORIZON:
+                for symbol in symbols:
+                    mids[(symbol, minute)] = view.mid(symbol, minute)
+
+    for feed, row in events:
+        reach(row["received_at"])
+        view.on_event(feed, row)
+    reach(minutes[-1] if minutes else last)
+    out = []
+    for snapshot, values in seen:
+        later = mids.get((snapshot.symbol, snapshot.bar_close + HORIZON))
+        out.append(_sample(snapshot, values, names, later))
+    return out
+
+
+def _bare(snapshot: Snapshot) -> Snapshot:
+    return Snapshot(
+        snapshot.symbol,
+        snapshot.bar_close,
+        (),
+        snapshot.price,
+        snapshot.tick,
+        snapshot.flat_ticks,
+        snapshot.session_open,
+    )
+
+
+def _sample(
+    snapshot: Snapshot, values: Mapping[str, FeatureValue], names: Sequence[str], later: float | None
+) -> Sample:
+    """A sample of ``snapshot``, with the price four minutes later classified against its own."""
+    change = None
+    outcome = None
+    if later is not None and snapshot.price and snapshot.tick and snapshot.flat_ticks:
+        change = (later - snapshot.price) / snapshot.tick
+        outcome = classify(later - snapshot.price, snapshot.flat_ticks, snapshot.tick)
+    return Sample(snapshot.symbol, snapshot.bar_close, FeatureVector(values, names), outcome, change)
 
 
 class _DayBars:
@@ -126,21 +274,6 @@ def load_leader_days(data_dir: Path, leaders: Leaders, days: Iterable[date]) -> 
     return out
 
 
-def load_bar_days(data_dir: Path, symbols: Sequence[str], days: int) -> dict[tuple[str, date], list[Bar]]:
-    """The backfilled bars of the latest ``days`` days that have any."""
-    folders = sorted((data_dir / "bars").glob("date=*"), reverse=True)
-    out: dict[tuple[str, date], list[Bar]] = {}
-    taken = 0
-    for folder in folders:
-        if taken == days:
-            break
-        day = date.fromisoformat(folder.name.removeprefix("date="))
-        found = bar_days_on(data_dir, symbols, [day])
-        out.update(found)
-        taken += bool(found)
-    return out
-
-
 def bar_days_on(
     data_dir: Path, symbols: Sequence[str], days: Iterable[date]
 ) -> dict[tuple[str, date], list[Bar]]:
@@ -167,35 +300,49 @@ class Fitted:
     model: Model
     path: Path
     days: int
+    recorded: int  # of the days, those trained on recorded mid-points
     samples: int
 
 
 def fit_algorithm(settings: Settings, name: str, days: int | None = None) -> Fitted:
-    """Train an algorithm on the latest backfilled days and save the model for the engine.
-
-    The engine reads it when it starts.
+    """Train an algorithm on the latest days with data and save the model for the engine,
+    which switches to it within a minute.
     """
     algorithm = next((a for a in ALGORITHMS if a.name == name), None)
     if algorithm is None:
         raise ValueError(f"unknown algorithm {name!r}; registered: {', '.join(a.name for a in ALGORITHMS)}")
-    bar_days = load_bar_days(settings.data_dir, settings.symbols, days or algorithm.training_days)
-    if not bar_days:
-        raise FileNotFoundError(f"no backfilled bars of {', '.join(settings.symbols)} in {settings.data_dir}")
+    calendar = calendar_store(settings).calendar
     leaders = Leaders.of(settings)
-    leader_days = load_leader_days(settings.data_dir, leaders, {day for _, day in bar_days})
-    training = samples(
-        bar_days,
-        calendar_store(settings).calendar,
-        algorithm.features,
-        settings.fee_rate,
-        leader_days=leader_days,
-        leaders=leaders,
-    )
+    latest = days_with_data(settings.data_dir, settings.symbols)[-(days or algorithm.training_days) :]
+    loaded = [
+        found
+        for day in latest
+        if (
+            found := training_day(
+                settings.data_dir,
+                day,
+                calendar,
+                settings.symbols,
+                algorithm.features,
+                settings.fee_rate,
+                leaders,
+            )
+        )
+        is not None
+    ]
+    if not loaded:
+        raise FileNotFoundError(
+            f"no backfilled bars or recorded trades of {', '.join(settings.symbols)} in {settings.data_dir}"
+        )
+    training = [s for day in loaded for s in day.samples]
     model = algorithm.fit(training)
     Shelf(settings.state_dir).install(name, model, "fit", datetime.now(KST))
-    path = model_path(settings.state_dir, name)
     return Fitted(
-        model, path, len({day for _, day in bar_days}), sum(s.outcome is not None for s in training)
+        model,
+        model_path(settings.state_dir, name),
+        len(loaded),
+        sum(day.reference == "mid" for day in loaded),
+        sum(s.outcome is not None for s in training),
     )
 
 

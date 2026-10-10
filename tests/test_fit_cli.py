@@ -1,4 +1,6 @@
-"""``krx-quant fit <algorithm>``: train on backfilled bars, save the model the engine loads."""
+"""``krx-quant fit <algorithm>``: train on recorded days and backfilled bars, save the model
+the engine loads.
+"""
 
 from __future__ import annotations
 
@@ -17,6 +19,8 @@ from krx_quant.cli import main
 from krx_quant.feeds import KST
 from krx_quant.reference import Bar
 from tests.synthetic_bars import day_of_bars, random_walk, trending
+from tests.test_replay import busy_morning
+from tests.test_replay_cli import record
 
 DAYS = [date(2026, 9, 14) + timedelta(days=i) for i in range(5)]
 
@@ -98,6 +102,18 @@ def test_fitting_newton_saves_a_model_the_engine_loads(env: Path, capsys: pytest
     out = capsys.readouterr().out
     assert model.version in out
     assert "trained on 3 days" in out
+
+
+def test_a_recorded_day_trains_on_its_events_rather_than_its_backfill(
+    env: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    for day in DAYS:
+        backfill(env / "data", day)
+    record(env / "data", busy_morning(DAYS[-1]), day=DAYS[-1])
+
+    assert main(["fit", "newton", "--days", "3"]) == 0
+
+    assert "trained on 3 days (1 recorded, 2 backfilled;" in capsys.readouterr().out
 
 
 def test_fitting_needs_a_known_algorithm_and_backfilled_bars(

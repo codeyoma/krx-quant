@@ -22,9 +22,10 @@ After each day's close (+10 minutes) the algorithms' statuses are reviewed by th
 lifecycle rules (``lifecycle.py``), a retired algorithm is no longer run, and the
 consensus weights are refitted.
 
-The series that may lead the symbols (``features.Leaders``: futures, indices, US daytime
-trades, ETFs) get one-minute bars of their own, by exchange time, like the symbols'; the
-features see them as they stood at the bar close.
+The symbols' bars and reference prices, and the bars of the series that may lead them
+(``features.Leaders``: futures, indices, US daytime trades, ETFs), come from the Market
+View (``market_view.py``) as they stood at the bar close. Training on a recorded day goes
+through the same view.
 
 Special situations (``special.py``): a symbol in a VI at a bar close is not predicted
 (``vi``), and a prediction whose four minutes a VI, circuit breaker or sidecar touches is
@@ -43,7 +44,7 @@ import logging
 import math
 import time as timer
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from functools import partial
 from typing import Any
@@ -54,8 +55,7 @@ from krx_quant.clock import SessionClock
 from krx_quant.config import Settings
 from krx_quant.consensus import FAST, FINAL, NAMES, NO_WEIGHTS, SPANS, Timing, Weights, pool
 from krx_quant.consensus import fit as fit_weights
-from krx_quant.contracts import KOSPI200, USD
-from krx_quant.features import FeatureStore, FeatureValue, FeatureVector, Leaders, Snapshot
+from krx_quant.features import FeatureStore, FeatureValue, FeatureVector, Leaders
 from krx_quant.feeds import (
     BOOK,
     BOOK_SNAPSHOT,
@@ -70,10 +70,18 @@ from krx_quant.feeds import (
 )
 from krx_quant.feeds.base import KST
 from krx_quant.lifecycle import Standing, Status, review
-from krx_quant.market_calendar import MarketCalendar, Session
+from krx_quant.market_calendar import MarketCalendar
+from krx_quant.market_view import (
+    FUTURES_SERIES,
+    HORIZON,
+    INDEX_FEEDS,
+    LOOKAHEAD_DAYS,
+    MarketView,
+    next_bar_close,
+)
 from krx_quant.predictions import NewPrediction, Pending, PredictionStore, Score
 from krx_quant.pricing import Direction, classify, flat_ticks, tick_size
-from krx_quant.reference import BAR, Bar, BarBuilder, ReferencePrice, Source
+from krx_quant.reference import Bar
 from krx_quant.special import KOSPI, SpecialSituations, Window, in_vi, touching
 from krx_quant.stats import DEFAULT_MIN_SAMPLE
 
@@ -82,14 +90,11 @@ log = logging.getLogger(__name__)
 Event = tuple[str, dict[str, Any]]  # (feed TR ID, normalized row)
 Notify = Callable[[str], Awaitable[bool]]  # send an alert; whether it went
 
-HORIZON = timedelta(minutes=4)
 # Each day's algorithm review runs this long after the close, when everything is scored.
 REVIEW_AFTER_CLOSE = timedelta(minutes=10)
 # Days with predictions a review reads back over: the longest rule counts 60 on the bench,
 # and a status can be older than that.
 _REVIEW_DAYS = 400
-# How far ahead to look for the next session (long holidays included).
-_LOOKAHEAD_DAYS = 15
 
 # The feeds the engine reads, and the columns it uses from each.
 ENGINE_FEEDS: dict[str, tuple[str, ...]] = {
@@ -111,17 +116,15 @@ ENGINE_FEEDS: dict[str, tuple[str, ...]] = {
     USD_FUTURES.tr_id: ("symbol", "event_time", "received_at", "price", "qty"),
     US_TRADE.tr_id: ("symbol", "event_time", "received_at", "price", "qty"),
 }
-_INDEX_FEEDS = (INDEX.tr_id, INDEX_REST.tr_id)
-_FUTURES_SERIES = {KOSPI200_FUTURES.tr_id: KOSPI200.series, USD_FUTURES.tr_id: USD.series}
 
 
 def partitions(feed: str, symbols: Sequence[str], leaders: Leaders) -> list[str] | None:
     """The partitions of ``feed`` the engine reads; None for every one (a futures feed's
     single front month, whichever it was that day).
     """
-    if feed in _FUTURES_SERIES:
+    if feed in FUTURES_SERIES:
         return None
-    if feed in _INDEX_FEEDS:
+    if feed in INDEX_FEEDS:
         return sorted({KOSPI, *leaders.indices})
     if feed == US_TRADE.tr_id:
         return list(leaders.us)
@@ -145,24 +148,11 @@ _COST_WEIGHT = 0.3
 
 
 @dataclass(frozen=True)
-class _Frozen:
-    """The bars as they stood at a bar close."""
-
-    symbols: dict[str, list[Bar]]
-    leaders: dict[str, list[Bar]]
-
-
-@dataclass(frozen=True)
 class _AtClose:
     """What is fixed for a symbol at a bar close."""
 
     mid: float | None
     features: Mapping[str, FeatureValue]
-
-
-def prediction_window(session: Session) -> tuple[datetime, datetime]:
-    """The first and last bar close predicted in a session."""
-    return session.open + BAR, session.closing_auction - HORIZON
 
 
 class PredictionEngine:
@@ -196,16 +186,10 @@ class PredictionEngine:
         self._feature_names = sorted({f for a in self.algorithms for f in a.features})
         self._cost: dict[str, float] = {}  # expected seconds per bar close, by algorithm
         self._busy: set[str] = set()  # algorithms still working past their budget
-        self._reference = ReferencePrice(calendar)
         self._special = SpecialSituations(calendar)
-        self._bars = BarBuilder()
         self.leaders = leaders or Leaders()
-        self._leader_bars = BarBuilder()
         self._last_tick = clock.now()
-        # Bars as they stood at bar closes not yet predicted, kept once an event received
-        # at or after the close arrives: a late run must not see trades it could not have.
-        self._frozen: dict[datetime, _Frozen] = {}
-        self._frozen_through = self._last_tick
+        self._market = MarketView(calendar, symbols, self.leaders, self._last_tick)
         # Outcomes waiting for their target time: (target_at, prediction_id, pending).
         self._pending: list[tuple[datetime, int, Pending]] = []
         for p in store.pending():
@@ -227,48 +211,13 @@ class PredictionEngine:
                 self.store.add_status(a.name, self.clock.now(), None, Status.PROBATION, "registered")
 
     def on_event(self, feed: str, row: dict[str, Any]) -> None:
-        series = self._leading(feed, row)
-        if series is not None:
-            self._freeze_before(row["received_at"])
-            price = row["value"] if feed in _INDEX_FEEDS else row["price"]
-            if price:  # None from a recorded file without the column
-                self._leader_bars.trade(series, row["event_time"], price, row.get("qty") or 0)
-        if feed in _INDEX_FEEDS:
+        self._market.on_event(feed, row)
+        if feed in INDEX_FEEDS:
             self._mark_special(self._special.index(row))
-            return
-        if feed == KOSPI200_FUTURES.tr_id:
+        elif feed == KOSPI200_FUTURES.tr_id:
             self._mark_special(self._special.futures(row))
-            return
-        if feed in (USD_FUTURES.tr_id, US_TRADE.tr_id):
-            return
-        symbol = row["symbol"]
-        if symbol not in self.symbols or feed not in ENGINE_FEEDS:
-            return
-        received_at = row["received_at"]
-        if feed == VI_STATUS.tr_id:
+        elif feed == VI_STATUS.tr_id and row["symbol"] in self.symbols:
             self._mark_special(self._special.vi(row))
-            return
-        self._freeze_before(received_at)
-        if feed == TRADE.tr_id:
-            self._bars.trade(symbol, row["event_time"], row["price"], row["qty"])
-            self._reference.quote(symbol, Source.INTEGRATED, received_at, row["bid1"], row["ask1"])
-        elif feed == KRX_TRADE.tr_id:
-            self._reference.quote(symbol, Source.KRX, received_at, row["bid1"], row["ask1"])
-        else:
-            self._reference.quote(symbol, Source.INTEGRATED, received_at, row["bid_px_1"], row["ask_px_1"])
-
-    def _leading(self, feed: str, row: dict[str, Any]) -> str | None:
-        """The leading series an event trades in, if it is one."""
-        if feed in _FUTURES_SERIES:
-            return _FUTURES_SERIES[feed]
-        symbol = row["symbol"]
-        if feed in _INDEX_FEEDS:
-            return symbol if symbol in self.leaders.indices else None
-        if feed == US_TRADE.tr_id:
-            return symbol if symbol in self.leaders.us else None
-        if feed == KRX_TRADE.tr_id:
-            return symbol if symbol in self.leaders.etfs else None
-        return None
 
     def _mark_special(self, window: Window | None) -> None:
         """A special window just learned: the predictions it touches are special, scored or not."""
@@ -276,20 +225,12 @@ class PredictionEngine:
             log.info("special situation: %s", window)
             self.store.mark_special(window.symbol, window.start, window.end, HORIZON)
 
-    def _freeze_before(self, received_at: datetime) -> None:
-        """Keep the bars of every bar close this event comes after (at the same instant
-        counts as after), before the event changes them.
-        """
-        while (close := self._next_bar_close(self._frozen_through)) is not None and received_at >= close:
-            self._frozen[close] = _Frozen(
-                {s: [replace(b) for b in self._bars.closed(s, close)] for s in self.symbols},
-                {k: [replace(b) for b in self._leader_bars.closed(k, close)] for k in self.leaders.series},
-            )
-            self._frozen_through = close
-
     def next_due(self) -> datetime | None:
         """When ``run_due`` next has work: a bar close to predict, an outcome to score, or a review."""
-        candidates = [self._next_bar_close(self._last_tick), self._next_review(self._reviewed_through)]
+        candidates = [
+            next_bar_close(self.calendar, self._last_tick),
+            self._next_review(self._reviewed_through),
+        ]
         if self._pending:
             candidates.append(self._pending[0][0])
         due = [c for c in candidates if c is not None]
@@ -300,7 +241,7 @@ class PredictionEngine:
         now = self.clock.now()
         while (due := self.next_due()) is not None and due <= now:
             self._score_until(due)
-            if due == self._next_bar_close(self._last_tick):
+            if due == next_bar_close(self.calendar, self._last_tick):
                 self._last_tick = due
                 await self._predict(due)
             if due == self._next_review(self._reviewed_through):
@@ -308,10 +249,10 @@ class PredictionEngine:
                 await self._review(due)
 
     def bars(self, symbol: str) -> list[Bar]:
-        return self._bars.closed(symbol, self.clock.now())
+        return self._market.bars(symbol, self.clock.now())
 
     def mid(self, symbol: str) -> float | None:
-        return self._reference.mid(symbol, self.clock.now())
+        return self._market.mid(symbol, self.clock.now())
 
     def switch_models(self, models: Mapping[str, Model]) -> bool:
         """Run ``models`` from the next bar close (a swap, a fit, a rollback); whether any changed."""
@@ -335,25 +276,10 @@ class PredictionEngine:
         windows = [w for w in self._special.known(before=now) if w.end.astimezone(KST).date() >= today]
         return sorted(windows, key=lambda w: (w.start, w.kind.value, w.symbol or ""))
 
-    def _next_bar_close(self, after: datetime) -> datetime | None:
-        """The first bar close in a prediction window strictly after ``after``."""
-        local = after.astimezone(KST)
-        day = local.date()
-        for _ in range(_LOOKAHEAD_DAYS):
-            session = self.calendar.session(day)
-            if session is not None:
-                first, last = prediction_window(session)
-                candidate = max(first, local.replace(second=0, microsecond=0) + BAR)
-                if candidate <= last:
-                    return candidate
-            day += timedelta(days=1)
-            local = datetime.combine(day, time(), KST)
-        return None
-
     def _next_review(self, after: datetime) -> datetime | None:
         """The first daily review strictly after ``after``."""
         day = after.astimezone(KST).date()
-        for _ in range(_LOOKAHEAD_DAYS):
+        for _ in range(LOOKAHEAD_DAYS):
             session = self.calendar.session(day)
             if session is not None and session.close + REVIEW_AFTER_CLOSE > after:
                 return session.close + REVIEW_AFTER_CLOSE
@@ -426,19 +352,8 @@ class PredictionEngine:
     async def _predict(self, bar_close: datetime) -> None:
         day_start = datetime.combine(bar_close.date(), time(), KST)
         at_close: dict[str, _AtClose] = {}
-        frozen = self._frozen.pop(bar_close, None)
-        for stale in [c for c in self._frozen if c < bar_close]:
-            del self._frozen[stale]  # a close no longer predicted (the calendar changed)
-        # Nothing received since the close has reached the bars: they are as they stood.
-        if frozen is None:
-            frozen = _Frozen(
-                {s: self._bars.closed(s, bar_close) for s in self.symbols},
-                {k: self._leader_bars.closed(k, bar_close) for k in self.leaders.series},
-            )
-        bars = frozen.symbols
+        frozen = self._market.at_close(bar_close)
         baselines: dict[tuple[str, str], dict[str, Forecast | None]] = {}
-        session = self.calendar.session(bar_close.date())
-        session_open = session.open if session is not None else None
         standings = self.store.statuses()  # read each time: retiring is a command
         retired, active = _with_status(standings, Status.RETIRED), _with_status(standings, Status.ACTIVE)
         running = [a for a in self.algorithms if a.name not in retired]
@@ -450,22 +365,14 @@ class PredictionEngine:
         for symbol in self.symbols:
             if symbol in stopped:
                 continue
-            mid = self._reference.mid(symbol, bar_close)
-            snapshot = Snapshot.at(
-                symbol,
-                bar_close,
-                bars.get(symbol, []),
-                mid,
-                self.fee_rate,
-                session_open=session_open,
-                leaders=self.leaders.groups(symbol, bars, frozen.leaders),
-            )
+            snapshot = self._market.snapshot(frozen, symbol, self.fee_rate)
+            mid = snapshot.price
             at_close[symbol] = _AtClose(mid, self._features.compute(snapshot, self._feature_names))
             inputs = Inputs(
                 symbol=symbol,
                 bar_close=bar_close,
                 mid=mid,
-                mid_before=self._reference.mid(symbol, bar_close - HORIZON),
+                mid_before=self._market.mid(symbol, bar_close - HORIZON),
                 flat_ticks=snapshot.flat_ticks,
                 tick=snapshot.tick,
                 day_classes=self.store.day_classes(symbol, day_start, bar_close),
@@ -525,7 +432,7 @@ class PredictionEngine:
         self, bar_close: datetime, symbols: Sequence[str], status: str, running: Sequence[Algorithm]
     ) -> None:
         """Every predictor's empty prediction for ``symbols``, recorded with why."""
-        at_close = {s: _AtClose(self._reference.mid(s, bar_close), {}) for s in symbols}
+        at_close = {s: _AtClose(self._market.mid(s, bar_close), {}) for s in symbols}
         nothing = dict.fromkeys(symbols)
         made = [(b.name, b.version, nothing, status) for b in BASELINES]
         made += [(a.name, self.models[a.name].version, nothing, status) for a in running]
@@ -588,7 +495,7 @@ class PredictionEngine:
     ) -> None:
         """Store (name, model version, forecasts by symbol, status) entries as displayed now."""
         displayed_at = self.clock.now()
-        mid_display = {symbol: self._reference.mid(symbol, displayed_at) for symbol in at_close}
+        mid_display = {symbol: self._market.mid(symbol, displayed_at) for symbol in at_close}
         special = self._special.known(before=displayed_at)
         predictions = []
         for name, version, forecasts, status in made:
@@ -619,7 +526,7 @@ class PredictionEngine:
         scores: list[tuple[int, Score]] = []
         while self._pending and self._pending[0][0] <= due:
             _, _, pending = heapq.heappop(self._pending)
-            mid_target = self._reference.mid(pending.symbol, pending.target_at)
+            mid_target = self._market.mid(pending.symbol, pending.target_at)
             scores.append((pending.prediction_id, _score(pending, mid_target)))
         if scores:
             self.store.score_all(scores, self.clock.now())

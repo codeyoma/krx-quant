@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
-from datetime import timedelta
+from datetime import date, timedelta
 from pathlib import Path
 
 import pyarrow as pa
@@ -33,10 +33,12 @@ SCHEMAS = {
 }
 
 
-def record(data_dir: Path, events: list[Event], schemas: dict[str, pa.Schema] = SCHEMAS) -> None:
+def record(
+    data_dir: Path, events: list[Event], schemas: dict[str, pa.Schema] = SCHEMAS, *, day: date = DAY
+) -> None:
     recorder = ParquetRecorder(data_dir, flush_rows=50, flush_seconds=3600)
     for feed, row in events:
-        recorder.record("events", DAY, feed, row["symbol"], row, schemas[feed])
+        recorder.record("events", day, feed, row["symbol"], row, schemas[feed])
     recorder.close()
 
 

@@ -1,8 +1,10 @@
 """Nightly training: each algorithm retrained on the latest days, promoted only when it
 beats the model the server runs on days it did not learn from.
 
-A night trains on the latest trading day with bars in the Object Store. For each
-algorithm, in registration order:
+A night trains on the latest trading day with data in the Object Store: backfilled bars,
+or recorded events. A recorded day trains on what the engine saw, with the mid-point as
+the reference price, as live scoring; a day with backfilled bars only, on closes
+(``training``). For each algorithm, in registration order:
 
 1. The last 3 trading days are kept for validation; the algorithm trains on its own
    rolling window (``training_days``) before them (walk-forward).
@@ -18,7 +20,9 @@ challenger won, by version, and every report. The server applies it at 08:00 (``
 
 Objects:
 
-- ``bars/...``: archived one-minute bars, read (copied into a local cache once);
+- ``bars/...``: archived one-minute bars, and ``events/...``: recorded events of the feeds
+  the engine reads, both read (copied into a local cache once; days no night needs any
+  more are removed from it);
 - ``models/<algorithm>/<version>.json``: each challenger, and the models the server runs;
 - ``live.json``: the version each algorithm runs on the server, published by it;
 - ``reports/<day>/<algorithm>.json``: one algorithm's night;
@@ -29,7 +33,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable, Sequence
+import shutil
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -40,12 +45,14 @@ from krx_quant.algorithms.contract import Sample
 from krx_quant.algorithms.forecasts import log_loss
 from krx_quant.backfill import MINUTE_BARS_TR, bars_key
 from krx_quant.config import Settings, SettingsError
+from krx_quant.engine import ENGINE_FEEDS, partitions
 from krx_quant.features import Leaders
+from krx_quant.feeds import TRADE
 from krx_quant.feeds.base import KST
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.notify import send_notice
 from krx_quant.object_store import ObjectStore, file_digest, get_json, open_store, put_json
-from krx_quant.training import bar_days_on, leader_series, load_leader_days, samples
+from krx_quant.training import TrainingDay, leader_series, training_day
 
 log = logging.getLogger(__name__)
 
@@ -85,8 +92,15 @@ class Night:
         return cls(date.fromisoformat(data["day"]), data["finalized_at"], data["promoted"], data["reports"])
 
     def summary(self) -> str:
-        """One line per algorithm, for Telegram."""
-        lines = [f"{self.day} 밤 학습"]
+        """The days' reference prices, and one line per algorithm, for Telegram."""
+        references: dict[str, str] = {}
+        for r in self.reports:
+            references.update(r.get("reference_prices", {}))
+        title = f"{self.day} 밤 학습"
+        if references:
+            recorded = sum(kind == "mid" for kind in references.values())
+            title += f" (녹화 중간가 {recorded}일, 백필 종가 {len(references) - recorded}일)"
+        lines = [title]
         for r in self.reports:
             if r["promoted"]:
                 verdict = "승격"
@@ -94,7 +108,7 @@ class Night:
                 verdict = "학습 안 함"
             else:
                 verdict = "유지"
-            lines.append(f"- {r['algorithm']}: {verdict} ({r['reason']})")
+            lines.append(f"- {r['algorithm']} {verdict}: {r['reason']}")
         return "\n".join(lines)
 
 
@@ -109,25 +123,27 @@ def train_night(
     leaders: Leaders | None = None,
     day: date | None = None,
 ) -> Night:
-    """Train every algorithm for the night of ``day`` (default: the latest day with bars) and
+    """Train every algorithm for the night of ``day`` (default: the latest day with data) and
     store the promotion list. A night already finished is returned as it was.
     """
     leaders = leaders or Leaders()
-    days_of = _days_with_bars(store, symbols)
+    days_of = _days_with_data(store, symbols)
     days = sorted(set().union(*days_of.values()))
     if day is not None:
         days = [d for d in days if d <= day]
     if not days or (day is not None and days[-1] != day):
-        raise FileNotFoundError(f"no archived bars of {', '.join(symbols)} for {day or 'any day'}")
+        raise FileNotFoundError(
+            f"no archived bars or recorded trades of {', '.join(symbols)} for {day or 'any day'}"
+        )
     night = days[-1]
     missing = [s for s in symbols if night not in days_of[s]]
     if missing:
-        raise FileNotFoundError(f"bars of {', '.join(missing)} for {night} are not archived yet")
+        raise FileNotFoundError(f"bars or trades of {', '.join(missing)} for {night} are not archived yet")
     finished = get_json(store, promotions_key(night))
     if finished is not None:
         log.info("the night of %s is already trained", night)
         return Night.from_dict(finished)
-    trainer = _Trainer(store, cache_dir, symbols, fee_rate, leaders, days)
+    trainer = _Trainer(store, cache_dir, symbols, fee_rate, leaders, days, algorithms)
     live: dict[str, str] = get_json(store, LIVE) or {}
     reports = []
     for algorithm in algorithms:
@@ -146,6 +162,7 @@ def train_night(
         reports,
     )
     put_json(store, promotions_key(night), result.as_dict())
+    trainer.prune()
     return result
 
 
@@ -181,6 +198,7 @@ class _Trainer:
         fee_rate: float,
         leaders: Leaders,
         days: Sequence[date],
+        algorithms: Sequence[Algorithm],
     ) -> None:
         self._store = store
         self._cache = cache_dir
@@ -189,6 +207,11 @@ class _Trainer:
         self._leaders = leaders
         self._days = list(days)
         self._calendar = MarketCalendar(dict.fromkeys(days, True))
+        # Each day is read once, with every algorithm's features.
+        self._names = sorted({f for a in algorithms for f in a.features})
+        self._loaded: dict[date, TrainingDay | None] = {}
+        self._fetched: set[date] = set()
+        self._used: set[date] = set()
 
     def train(self, algorithm: Algorithm, live_version: str | None) -> dict[str, Any]:
         night = self._days[-1]
@@ -205,7 +228,8 @@ class _Trainer:
         }
         if not training:
             return {**report, "reason": f"too few days ({len(self._days)})"}
-        self._fetch([*training, *validation])
+        loaded = {d: self._day(d) for d in [*training, *validation]}
+        report["reference_prices"] = {d.isoformat(): t.reference for d, t in loaded.items() if t is not None}
         try:
             challenger = algorithm.fit(self._samples(algorithm, training))
         except ValueError as e:
@@ -237,14 +261,17 @@ class _Trainer:
         }
 
     def _samples(self, algorithm: Algorithm, days: Sequence[date]) -> list[Sample]:
-        return samples(
-            bar_days_on(self._cache, self._symbols, days),
-            self._calendar,
-            algorithm.features,
-            self._fee_rate,
-            leader_days=load_leader_days(self._cache, self._leaders, days),
-            leaders=self._leaders,
-        )
+        return [s for d in days if (found := self._day(d)) is not None for s in found.of(algorithm.features)]
+
+    def _day(self, day: date) -> TrainingDay | None:
+        """A day's samples with every algorithm's features, read once from the cache."""
+        if day not in self._loaded:
+            self._fetch(day)
+            self._loaded[day] = training_day(
+                self._cache, day, self._calendar, self._symbols, self._names, self._fee_rate, self._leaders
+            )
+        self._used.add(day)
+        return self._loaded[day]
 
     def _champion(self, algorithm: Algorithm, version: str | None) -> Model:
         default = algorithm.default_model()
@@ -260,34 +287,71 @@ class _Trainer:
     def _put_model(self, name: str, model: Model) -> None:
         put_json(self._store, model_key(name, model.version), model.as_dict())
 
-    def _fetch(self, days: Sequence[date]) -> None:
-        """Copy the days' bars from the store into the cache, where they are not there already."""
+    def _fetch(self, day: date) -> None:
+        """Copy a day's bars and the engine's recorded events from the store into the cache,
+        where they are not there already.
+        """
+        if day in self._fetched:
+            return
         series = [(MINUTE_BARS_TR, s) for s in self._symbols] + leader_series(self._leaders)
-        for day in days:
-            for feed, name in series:
-                key = bars_key(day, feed, name)
-                stored = self._store.digest(key)
-                if stored is None:
-                    continue
-                path = self._cache / key
-                if path.exists() and file_digest(path) == stored:
-                    continue
-                path.parent.mkdir(parents=True, exist_ok=True)
-                tmp = path.with_name(f".{path.name}.tmp")
-                self._store.get(key, tmp)
-                tmp.replace(path)
+        keys = [bars_key(day, feed, name) for feed, name in series]
+        keys += _engine_events(
+            self._store.keys(f"events/date={day.isoformat()}/"), self._symbols, self._leaders
+        )
+        for key in keys:
+            stored = self._store.digest(key)
+            if stored is None:
+                continue
+            path = self._cache / key
+            if path.exists() and file_digest(path) == stored:
+                continue
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_name(f".{path.name}.tmp")
+            self._store.get(key, tmp)
+            tmp.replace(path)
+        self._fetched.add(day)
+
+    def prune(self) -> None:
+        """Remove the cached days this night did not use: older ones no night needs again."""
+        if not self._used:
+            return
+        oldest = min(self._used)
+        for folder in [*self._cache.glob("bars/date=*"), *self._cache.glob("events/date=*")]:
+            try:
+                day = date.fromisoformat(folder.name.removeprefix("date="))
+            except ValueError:
+                continue
+            if day < oldest:
+                shutil.rmtree(folder, ignore_errors=True)
 
 
-def _days_with_bars(store: ObjectStore, symbols: Sequence[str]) -> dict[str, set[date]]:
-    """The days the store has bars of each of ``symbols`` for."""
-    days: dict[str, set[date]] = {s: set() for s in symbols}
-    for key in store.keys("bars/"):
-        parts = key.split("/")  # bars, date=…, feed=…, symbol=…, bars.parquet
-        if len(parts) != 5 or parts[2] != f"feed={MINUTE_BARS_TR}":
+def _engine_events(keys: Iterable[str], symbols: Sequence[str], leaders: Leaders) -> list[str]:
+    """The recorded events among ``keys`` that the engine reads (``engine.partitions``)."""
+    wanted = []
+    for key in keys:
+        parts = key.split("/")  # events, date=…, feed=…, symbol=…, file
+        if len(parts) != 5:
             continue
-        symbol = parts[3].removeprefix("symbol=")
-        if symbol in days:
-            days[symbol].add(date.fromisoformat(parts[1].removeprefix("date=")))
+        feed, symbol = parts[2].removeprefix("feed="), parts[3].removeprefix("symbol=")
+        if feed not in ENGINE_FEEDS:
+            continue
+        read = partitions(feed, symbols, leaders)
+        if read is None or symbol in read:
+            wanted.append(key)
+    return wanted
+
+
+def _days_with_data(store: ObjectStore, symbols: Sequence[str]) -> dict[str, set[date]]:
+    """The days the store has backfilled bars or recorded trades of each of ``symbols`` for."""
+    days: dict[str, set[date]] = {s: set() for s in symbols}
+    for layer, feed in (("bars", MINUTE_BARS_TR), ("events", TRADE.tr_id)):
+        for key in store.keys(f"{layer}/"):
+            parts = key.split("/")  # layer, date=…, feed=…, symbol=…, file
+            if len(parts) != 5 or parts[2] != f"feed={feed}":
+                continue
+            symbol = parts[3].removeprefix("symbol=")
+            if symbol in days:
+                days[symbol].add(date.fromisoformat(parts[1].removeprefix("date=")))
     return days
 
 

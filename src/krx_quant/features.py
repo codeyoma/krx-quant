@@ -2,9 +2,9 @@
 
 A feature is a function of a ``Snapshot``: the day's finished one-minute bars up to the
 bar close, the reference price there, when the session opened, and the bars of the series
-that may lead the symbol (``Leaders``). Live and replay build
-snapshots from the engine's bars; training builds them from backfilled bars with the same
-code, so a feature means the same thing in both. A snapshot holds nothing received after its bar
+that may lead the symbol (``Leaders``). Live and replay build snapshots from the engine's
+Market View; training builds them from recorded events through the same view, or from
+backfilled bars, so a feature means the same thing in both. A snapshot holds nothing received after its bar
 close, so no feature can see the future.
 
 Algorithms get a ``FeatureVector`` holding only the features they declared.
