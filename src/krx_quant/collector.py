@@ -7,6 +7,7 @@ import contextlib
 import logging
 from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
+from functools import partial
 from typing import Any
 
 import aiohttp
@@ -46,7 +47,7 @@ from krx_quant.feeds import (
 )
 from krx_quant.feeds.base import kst_day
 from krx_quant.health import FeedHealth, FeedState, GapKind
-from krx_quant.macro import MacroCollector, keep_macro, macro_recorder
+from krx_quant.macro import MacroCollector, day_regime, keep_macro, macro_recorder
 from krx_quant.market_calendar import MarketCalendar, Phase, calendar_store
 from krx_quant.masters import FrontMonths, MasterError, fetch_front_months
 from krx_quant.model_shelf import Shelf
@@ -174,6 +175,7 @@ async def run_collector(
         budget=Budget.of(settings),
         min_sample=settings.min_sample,
         leaders=Leaders.of(settings),
+        regimes=partial(day_regime, settings.data_dir),  # recorded by the 07:30 macro read
     )
 
     def on_event(feed: str, row: dict[str, Any]) -> None:

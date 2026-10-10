@@ -22,6 +22,7 @@ import pytest
 
 from krx_quant.algorithms import ALGORITHMS, Algorithm, Model, Sample
 from krx_quant.algorithms.granger import Granger
+from krx_quant.algorithms.markov import Markov
 from krx_quant.archive import archive
 from krx_quant.backfill import BAR_SCHEMA, MINUTE_BARS_TR
 from krx_quant.cli import main
@@ -29,11 +30,13 @@ from krx_quant.clock import FakeClock
 from krx_quant.engine import Event, PredictionEngine
 from krx_quant.features import Leaders
 from krx_quant.feeds import KST
+from krx_quant.macro import MACRO, REGIME_SCHEMA
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.model_shelf import Shelf
 from krx_quant.nightly import VALIDATION_DAYS, train_night
 from krx_quant.object_store import LocalObjectStore
 from krx_quant.predictions import PredictionStore
+from krx_quant.recorder import ParquetRecorder
 from krx_quant.swap import morning_swap, publish_live
 from tests.algorithm_doubles import FrequencyAlgorithm
 from tests.replay_events import at, book, every, index_tick, trade
@@ -327,3 +330,38 @@ def test_granger_learns_from_the_indices_on_recorded_days(tmp_path: Path) -> Non
     challenger = read(root, f"models/granger/{report['challenger']['version']}.json")
     assert challenger["params"]["lead_indices_1"] > 0
     assert result.promoted == {"granger": challenger["version"]}
+
+
+def archive_regime(root: Path, day: date, regime: str, work: Path) -> None:
+    """The day's macro regime as the collector records it at 07:30, archived."""
+    data = work / f"macro-{day}"
+    parquet = ParquetRecorder(data, flush_rows=1000, flush_seconds=3600)
+    row = {
+        "day": day,
+        "recorded_at": datetime.combine(day, time(7, 30), KST),
+        "regime": regime,
+        "reasons": "[]",
+        "failed": "{}",
+        "skipped": "[]",
+    }
+    parquet.record(MACRO, day, "regime", "market", row, REGIME_SCHEMA)
+    parquet.close()
+    asyncio.run(archive(data, LocalObjectStore(root)))
+
+
+def test_markov_learns_each_macro_regime_s_transitions_from_its_own_days(
+    store_root: Path, tmp_path: Path
+) -> None:
+    for day in DAYS[::2]:
+        archive_regime(store_root, day, "risk_on", tmp_path)
+
+    night(store_root, tmp_path, [Markov()])
+
+    report = read(store_root, f"reports/{NIGHT}/markov.json")
+    params = read(store_root, f"models/markov/{report['challenger']['version']}.json")["params"]
+
+    def rows(name: str) -> list[float]:
+        return [round(params[f"{name}.{i}.{j}"], 9) for i in range(4) for j in range(4)]
+
+    assert rows("shock") == rows("default"), "no shock day: the default transitions"
+    assert rows("risk_on") != rows("default"), "learned from the risk_on days"

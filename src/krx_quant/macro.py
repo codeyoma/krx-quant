@@ -41,7 +41,7 @@ from krx_quant.feeds.base import KST, kst_day
 from krx_quant.market_calendar import MarketCalendar, calendar_store, next_on_trading_day
 from krx_quant.notify import Alerts
 from krx_quant.recorder import ParquetRecorder
-from krx_quant.regime import Decision, RegimeInputs, RegimeRules, decide
+from krx_quant.regime import Decision, Regime, RegimeInputs, RegimeRules, decide
 
 log = logging.getLogger(__name__)
 
@@ -409,6 +409,25 @@ class LatestMacro:
     readings: list[tuple[Indicator, dict[str, Any]]]  # READING_SCHEMA rows, in the indicators' order
     failed: dict[str, str]  # source -> why
     skipped: list[str]  # sources without their API key
+
+
+def regime_prefix(day: date) -> str:
+    """Where ``day``'s regime is recorded, under the data directory or the store."""
+    return f"{MACRO}/date={day}/feed=regime/"
+
+
+def day_regime(data_dir: Path, day: date, before: datetime) -> str | None:
+    """``day``'s macro regime as last decided before ``before`` (the open, as the engine
+    and training use it), or None. A ``krx-quant macro`` run after the open changes nothing."""
+    regimes = _rows(data_dir / regime_prefix(day) / "symbol=market")
+    decided = [r for r in regimes if r["recorded_at"] < before]
+    if not decided:
+        return None
+    regime: str = decided[-1]["regime"]
+    if regime not in {r.value for r in Regime}:  # a newer collector's: no regime here
+        log.warning("unknown macro regime %r recorded for %s: none", regime, day)
+        return None
+    return regime
 
 
 def latest_macro(data_dir: Path, today: date) -> LatestMacro | None:

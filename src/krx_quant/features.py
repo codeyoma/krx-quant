@@ -1,13 +1,16 @@
 """Feature Store: named features, each computed once per symbol per bar close.
 
 A feature is a function of a ``Snapshot``: the day's finished one-minute bars up to the
-bar close, the reference price there, when the session opened, and the bars of the series
-that may lead the symbol (``Leaders``). Live and replay build snapshots from the engine's
-Market View; training builds them from recorded events through the same view, or from
-backfilled bars, so a feature means the same thing in both. A snapshot holds nothing received after its bar
-close, so no feature can see the future.
+bar close, the reference price there, when the session opened, the bars of the series
+that may lead the symbol (``Leaders``), and the day's macro regime (``macro.py``). Live
+and replay build snapshots from the engine's Market View; training builds them from
+recorded events through the same view, or from backfilled bars, so a feature means the
+same thing in both. A snapshot holds nothing received after its bar close, so no feature
+can see the future.
 
-Algorithms get a ``FeatureVector`` holding only the features they declared.
+A feature is a number (or None, unknown), or a series of numbers (``SERIES_FEATURES``,
+read with ``FeatureVector.series``). Algorithms get a ``FeatureVector`` holding only the
+features they declared.
 """
 
 from __future__ import annotations
@@ -24,8 +27,20 @@ from krx_quant.feeds.market import us_ticker
 from krx_quant.pricing import flat_ticks as flat_band
 from krx_quant.pricing import tick_size
 from krx_quant.reference import BAR, Bar
+from krx_quant.regime import Regime
 
 FeatureValue = float | None
+Series = tuple[float, ...]
+Value = FeatureValue | Series
+
+# The macro regimes (regime.py) as the numbers a feature holds: shock 0, risk_off 1,
+# risk_on 2, neutral 3.
+REGIME_CODES = {r.value: float(n) for n, r in enumerate(Regime)}
+
+
+def regime_code(regime: str) -> float | None:
+    """A regime's code; None for a name this engine does not know (it counts as unknown)."""
+    return REGIME_CODES.get(regime)
 
 
 @dataclass(frozen=True)
@@ -41,6 +56,7 @@ class Snapshot:
     session_open: datetime | None
     # The day's finished bars of each lead group's members (``Leaders.groups``).
     leaders: Mapping[str, Sequence[Sequence[Bar]]] = field(default_factory=dict)
+    regime: str | None = None  # the day's macro regime, decided before the open; None unknown
 
     @classmethod
     def at(
@@ -53,13 +69,14 @@ class Snapshot:
         *,
         session_open: datetime | None,
         leaders: Mapping[str, Sequence[Sequence[Bar]]] | None = None,
+        regime: str | None = None,
     ) -> Snapshot:
         """A snapshot with the tick and flat band of ``price``."""
         lead = leaders or {}
         if price is None:
-            return cls(symbol, bar_close, bars, None, None, None, session_open, lead)
+            return cls(symbol, bar_close, bars, None, None, None, session_open, lead, regime)
         tick, band = tick_size(price), flat_band(price, fee_rate)
-        return cls(symbol, bar_close, bars, price, tick, band, session_open, lead)
+        return cls(symbol, bar_close, bars, price, tick, band, session_open, lead, regime)
 
     @cached_property
     def lead_moves(self) -> dict[str, list[FeatureValue]]:
@@ -71,7 +88,7 @@ class Snapshot:
         return _moves(self.bars, self.bar_close) or [None] * len(LEAD_LAGS)
 
 
-Feature = Callable[[Snapshot], FeatureValue]
+Feature = Callable[[Snapshot], Value]
 
 # Bars the price-shape features are fitted on, and the window volume is compared with.
 SHAPE_BARS = 6
@@ -80,6 +97,8 @@ VOLUME_BARS = 60
 VOLATILITY_BARS = 20
 # Fewer one-minute changes than this give no volatility.
 MIN_CHANGES = 6
+# One-minute moves a series of them keeps: the last hour.
+MINUTE_MOVES = 60
 # Session bars the VWAP needs before a gap from it means anything.
 VWAP_MIN_BARS = 5
 # One-minute moves the reversion speed is fitted on, and the fewest it needs.
@@ -206,6 +225,27 @@ def volatility(s: Snapshot) -> FeatureValue:
     changes = [b - a for a, b in zip(points[1], points[1][1:], strict=False)]
     mean = sum(changes) / len(changes)
     return math.sqrt(sum((c - mean) ** 2 for c in changes) / (len(changes) - 1))
+
+
+def minute_ticks(s: Snapshot) -> Series:
+    """The session's one-minute close changes in ticks (of the reference price), the last
+    hour of them, oldest first. A minute without a trade is a change of 0, up to the bar
+    close.
+    """
+    bars = _session_bars(s)
+    if s.tick is None or not bars:
+        return ()
+    moves: list[float] = []
+    for before, after in zip(bars, bars[1:], strict=False):
+        quiet = (after.start - before.start) // BAR - 1
+        moves += [0.0] * quiet + [(after.close - before.close) / s.tick]
+    moves += [0.0] * ((s.bar_close - bars[-1].start - BAR) // BAR)  # quiet since the last bar
+    return tuple(moves[-MINUTE_MOVES:])
+
+
+def macro_regime(s: Snapshot) -> FeatureValue:
+    """The day's macro regime as a number (``REGIME_CODES``); None when it is unknown."""
+    return regime_code(s.regime) if s.regime is not None else None
 
 
 def _session_bars(s: Snapshot) -> Sequence[Bar]:
@@ -389,10 +429,13 @@ FEATURES: dict[str, Feature] = {
     "vwap_gap": vwap_gap,
     "vwap_z": vwap_z,
     "reversion_speed": reversion_speed,
+    "minute_ticks": minute_ticks,
+    "macro_regime": macro_regime,
     **{own_feature(lag): _own(lag) for lag in LEAD_LAGS},
     **{lead_feature(group, lag): _lead(group, lag) for group in LEAD_GROUPS for lag in LEAD_LAGS},
 }
 LEAD_FEATURES = frozenset(lead_feature(group, lag) for group in LEAD_GROUPS for lag in LEAD_LAGS)
+SERIES_FEATURES = frozenset({"minute_ticks"})  # the features that are series of numbers
 
 
 class UndeclaredFeature(LookupError):
@@ -400,13 +443,31 @@ class UndeclaredFeature(LookupError):
 
 
 class FeatureVector(Mapping[str, FeatureValue]):
-    """The features an algorithm declared; asking for any other raises UndeclaredFeature."""
+    """The features an algorithm declared; asking for any other raises UndeclaredFeature.
+    A number is read by name, a series with ``series``."""
 
-    def __init__(self, values: Mapping[str, FeatureValue], declared: Iterable[str]) -> None:
+    def __init__(self, values: Mapping[str, Value], declared: Iterable[str]) -> None:
+        source: Mapping[str, Value] = values._values if isinstance(values, FeatureVector) else values
         self._declared = frozenset(declared)
-        self._values = {name: values[name] for name in self._declared}
+        self._values: dict[str, Value] = {name: source[name] for name in self._declared}
 
     def __getitem__(self, name: str) -> FeatureValue:
+        value = self._value(name)
+        if isinstance(value, tuple):
+            raise TypeError(f"feature {name!r} is a series: read it with series()")
+        return value
+
+    def series(self, name: str) -> Series:
+        value = self._value(name)
+        if not isinstance(value, tuple):
+            raise TypeError(f"feature {name!r} is not a series")
+        return value
+
+    def as_dict(self) -> dict[str, Value]:
+        """Every declared feature's value, numbers and series alike."""
+        return dict(self._values)
+
+    def _value(self, name: str) -> Value:
         if name not in self._declared:
             raise UndeclaredFeature(f"feature {name!r} was not declared")
         return self._values[name]
@@ -427,6 +488,6 @@ class FeatureStore:
     def __init__(self, features: Mapping[str, Feature] = FEATURES) -> None:
         self._features = features
 
-    def compute(self, snapshot: Snapshot, names: Iterable[str]) -> dict[str, FeatureValue]:
+    def compute(self, snapshot: Snapshot, names: Iterable[str]) -> dict[str, Value]:
         """Each named feature once, for every algorithm that declared it."""
         return {name: self._features[name](snapshot) for name in set(names)}

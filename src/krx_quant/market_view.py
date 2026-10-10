@@ -128,8 +128,11 @@ class MarketView:
             {k: self._leader_bars.closed(k, close) for k in self.leaders.series},
         )
 
-    def snapshot(self, frozen: BarsAtClose, symbol: str, fee_rate: float) -> Snapshot:
-        """``symbol`` at a bar close: its bars, reference price and leaders there."""
+    def snapshot(
+        self, frozen: BarsAtClose, symbol: str, fee_rate: float, regime: str | None = None
+    ) -> Snapshot:
+        """``symbol`` at a bar close: its bars, reference price and leaders there, in the
+        day's macro ``regime``."""
         session = self.calendar.session(frozen.close.astimezone(KST).date())
         return Snapshot.at(
             symbol,
@@ -139,6 +142,7 @@ class MarketView:
             fee_rate,
             session_open=session.open if session is not None else None,
             leaders=self.leaders.groups(symbol, frozen.symbols, frozen.leaders),
+            regime=regime,
         )
 
     def mid(self, symbol: str, at: datetime) -> float | None:

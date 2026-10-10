@@ -49,6 +49,7 @@ from krx_quant.engine import ENGINE_FEEDS, partitions
 from krx_quant.features import Leaders
 from krx_quant.feeds import TRADE
 from krx_quant.feeds.base import KST
+from krx_quant.macro import regime_prefix
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.notify import send_notice
 from krx_quant.object_store import ObjectStore, file_digest, get_json, open_store, put_json
@@ -297,14 +298,15 @@ class _Trainer:
         put_json(self._store, model_key(name, model.version), model.as_dict())
 
     def _fetch(self, day: date) -> None:
-        """Copy a day's bars and the engine's recorded events from the store into the cache,
-        where they are not there already.
+        """Copy a day's bars, the engine's recorded events and its macro regime from the store
+        into the cache, where they are not there already.
         """
         series = [(MINUTE_BARS_TR, s) for s in self._symbols] + leader_series(self._leaders)
         keys = [bars_key(day, feed, name) for feed, name in series]
         keys += _engine_events(
             self._store.keys(f"events/date={day.isoformat()}/"), self._symbols, self._leaders
         )
+        keys += self._store.keys(regime_prefix(day))  # Markov's
         for key in keys:
             stored = self._store.digest(key)
             if stored is None:
@@ -322,7 +324,8 @@ class _Trainer:
         if not self._used:
             return
         oldest = min(self._used)
-        for folder in [*self._cache.glob("bars/date=*"), *self._cache.glob("events/date=*")]:
+        layers = ("bars", "events", "macro")
+        for folder in [f for layer in layers for f in self._cache.glob(f"{layer}/date=*")]:
             try:
                 day = date.fromisoformat(folder.name.removeprefix("date="))
             except ValueError:

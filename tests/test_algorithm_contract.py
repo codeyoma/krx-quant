@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from krx_quant.algorithms import ALGORITHMS, Algorithm, load_models, save_model
-from krx_quant.features import FEATURES, FeatureVector, UndeclaredFeature
+from krx_quant.features import FEATURES, SERIES_FEATURES, FeatureVector, UndeclaredFeature, Value
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.training import samples
 from tests.algorithm_doubles import FixedAlgorithm
@@ -26,9 +26,14 @@ FEE = 0.015 / 100
 DAYS = [date(2026, 9, 21), date(2026, 9, 22)]
 
 
-def given(default: float | None, **values: float | None) -> dict[str, float | None]:
-    """Every registered feature: ``default``, except those named."""
-    return {name: values.get(name, default) for name in FEATURES}
+def given(default: float | None, **values: float | None) -> dict[str, Value]:
+    """Every registered feature: ``default``, except those named; a series feature an hour
+    of the value (none of it for None)."""
+    out: dict[str, Value] = {}
+    for name in FEATURES:
+        value = values.get(name, default)
+        out[name] = (() if value is None else (value,) * 60) if name in SERIES_FEATURES else value
+    return out
 
 
 SCENARIOS = {

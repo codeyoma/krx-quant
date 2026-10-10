@@ -14,6 +14,7 @@ import logging
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
+from functools import partial
 from pathlib import Path
 
 import pyarrow.parquet as pq
@@ -23,9 +24,10 @@ from krx_quant.archive import partition_files
 from krx_quant.clock import FakeClock
 from krx_quant.config import Settings
 from krx_quant.consensus import Timing
-from krx_quant.engine import ENGINE_FEEDS, Budget, Event, Notify, PredictionEngine, partitions
+from krx_quant.engine import ENGINE_FEEDS, Budget, Event, Notify, PredictionEngine, Regimes, partitions
 from krx_quant.features import FeatureStore, Leaders
 from krx_quant.feeds.base import KST, kst_day
+from krx_quant.macro import day_regime
 from krx_quant.market_calendar import MarketCalendar, calendar_store
 from krx_quant.predictions import DB_NAME, AlgorithmSummary, PredictionStore
 from krx_quant.stats import DEFAULT_MIN_SAMPLE
@@ -54,6 +56,7 @@ async def replay(
     notify: Notify | None = None,
     consensus_timing: Timing | None = None,
     leaders: Leaders | None = None,
+    regimes: Regimes | None = None,
 ) -> PredictionEngine:
     """Feed ``events`` (in receipt order) received by ``until`` to an engine storing into ``db``.
 
@@ -78,6 +81,7 @@ async def replay(
         notify=notify,
         consensus_timing=consensus_timing,
         leaders=leaders,
+        regimes=regimes,
     )
     await replay_into(engine, clock, events, until=until, display_delay=display_delay)
     return engine
@@ -217,6 +221,7 @@ async def replay_day(settings: Settings, day: date, db: Path | None = None) -> R
         budget=Budget.of(settings),
         min_sample=settings.min_sample,
         leaders=leaders,
+        regimes=partial(day_regime, settings.data_dir),
     )
     try:
         return ReplayedDay(db, engine.store.summary(), set_aside)
