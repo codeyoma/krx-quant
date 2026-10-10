@@ -18,8 +18,9 @@ recorded empty (``no_members``).
 1. For the last 5 and the last 20 days with predictions, the weights whose pool would
    have had the lowest log loss on the bar closes every member predicted (basis B,
    special predictions left out), found by EM.
-2. An algorithm keeps the smaller of its two weights, then they are scaled to add up
-   to 1: only one good over both spans gains.
+2. Only a weight steady across both spans moves: above equal in both, it takes the
+   smaller; below in both, the larger; otherwise equal. Then they are scaled to add up
+   to 1. An algorithm good only lately gains nothing.
 3. Shrunk toward equal weights by the evidence: with n bar closes in the 20 days, the
    fitted weights count n / (n + 200).
 
@@ -125,7 +126,7 @@ def fit(
             _em([[probs[m] for m in members] for day, probs in complete if day in span], len(members))
             for span in spans
         ]
-        kept = [min(w[i] for w in fitted) for i in range(len(members))]
+        kept = [_steady([w[i] for w in fitted], 1 / len(members)) for i in range(len(members))]
         total = sum(kept)
         kept = [k / total for k in kept]
         n = sum(1 for day, _ in complete if day in spans[-1])
@@ -133,6 +134,17 @@ def fit(
         equal = 1 / len(members)
         cells[cell] = {m: trust * k + (1 - trust) * equal for m, k in zip(members, kept, strict=True)}
     return Weights(version, at, cells)
+
+
+def _steady(spans: Sequence[float], equal: float) -> float:
+    """A member's weight over the spans: above equal only if above it in every span (then the
+    least of them), below only if below in every span (the most), else equal.
+    """
+    if all(w > equal for w in spans):
+        return min(spans)
+    if all(w < equal for w in spans):
+        return max(spans)
+    return equal
 
 
 def _em(observations: Sequence[Sequence[float]], k: int) -> list[float]:

@@ -37,6 +37,7 @@ from typing import Any
 from aiohttp import web
 
 from krx_quant.baselines import BASELINE_NAMES, BASELINES
+from krx_quant.consensus import NAMES
 from krx_quant.engine import PredictionEngine
 from krx_quant.feeds.base import KST, kst_day
 from krx_quant.predictions import iso
@@ -93,6 +94,7 @@ def create_app(
     app.router.add_get("/v1/algorithms", _algorithms)
     app.router.add_get("/v1/leaderboard", _leaderboard)
     app.router.add_get("/v1/algorithms/{name}/stats", _algorithm_stats)
+    app.router.add_get("/v1/consensus", _consensus)
     return app
 
 
@@ -199,6 +201,24 @@ async def _algorithms(request: web.Request) -> web.Response:
             }
         )
     return _json({"algorithms": algorithms})
+
+
+async def _consensus(request: web.Request) -> web.Response:
+    engine = request.app[ENGINE_KEY]
+    weights = engine.weights
+    by_symbol: dict[str, dict[str, dict[str, float]]] = {}
+    for (symbol, slot), cell in sorted(weights.cells.items()):
+        by_symbol.setdefault(symbol, {})[slot] = dict(cell)
+    return _json(
+        {
+            "names": list(NAMES),
+            "version": weights.version,
+            "computed_at": iso(weights.computed_at) if weights.computed_at else None,
+            "members": engine.members(),
+            "fast_seconds": engine.consensus_timing.fast_seconds,
+            "weights": by_symbol,
+        }
+    )
 
 
 def _status_json(engine: PredictionEngine, name: str) -> dict[str, Any]:

@@ -15,6 +15,7 @@ from krx_quant.consensus import NAMES as CONSENSUS
 from krx_quant.engine import Event
 from krx_quant.market_calendar import MarketCalendar
 from tests.replay_events import (
+    DAY,
     PREDICTING,
     PREDICTORS,
     SYMBOL,
@@ -266,12 +267,12 @@ async def test_the_random_baseline_draws_in_the_proportions_of_the_day_so_far(tm
     assert sum(p["p_flat"] for p in draws) >= 27
 
 
-def busy_morning() -> list[Event]:
+def busy_morning(day: date = DAY) -> list[Event]:
     """A book and trades that wander, so every baseline and class shows up."""
     events: list[Event] = []
-    when, mid = at("09:00:00"), 81_250
+    when, mid = at("09:00:00", day), 81_250
     step = 0
-    while when <= at("10:00:00"):
+    while when <= at("10:00:00", day):
         step += 1
         mid += 100 * ((step * 7919) % 5 - 2)  # a deterministic walk of -2..+2 ticks
         events.append(book(when, mid - 50, mid + 50))
