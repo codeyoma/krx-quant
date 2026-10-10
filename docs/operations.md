@@ -46,11 +46,13 @@ deploy/create-aws.sh krx-quant-<이름>
 리전은 `AWS_REGION` 환경 변수, 없으면 `aws configure`에서 정한 리전(`ap-southeast-2`)을 쓴다. 모든 자원을 이 리전 하나에 만든다.
 
 이 스크립트가 만드는 것이다. 다시 돌려도 이미 있는 자원은 그대로 둔다.
-- S3 버킷: 시드니 리전에 만들고 공개 접근을 모두 막는다. 버전 관리를 켜서 덮어쓴 이전 버전을 30일 보관한다. 엔진은 지울 수 없지만 덮어쓸 수는 있어서, 잘못된 파일로 덮어써도 되돌릴 수 있게 하려는 것이다.
+- S3 버킷: 시드니 리전에 만들고 공개 접근을 모두 막는다. 버전 관리를 켜서 덮어쓴 이전 버전을 30일 보관한다. 엔진은 지울 수 없지만 덮어쓸 수는 있어서, 잘못된 파일로 덮어써도 되돌릴 수 있게 하려는 것이다. 중간에 죽은 멀티파트 업로드는 7일 뒤 지운다(같은 수명 주기 규칙 `keep-replaced-versions-30-days`).
 - IAM 사용자 `krx-quant-engine`: 이 버킷만 읽고 쓸 수 있다. 삭제 권한은 없다(`deploy/iam-policy.json`).
 - Lightsail 인스턴스 `krx-quant`: Ubuntu 24.04다. 번들은 2GB, 공인 IPv4인 리눅스 번들을 자동으로 고른다(시드니는 `small_3_2`). 번들 ID가 리전마다 달라서다. `BUNDLE`로 직접 정할 수도 있다.
 - Lightsail 방화벽: TCP 22는 Lightsail 브라우저 SSH에서만, UDP 41641(Tailscale 직접 연결)은 모두에게 연다. 나머지는 모두 닫는다.
 - 자동 스냅샷: 매일 18:00 UTC(03:00 KST)에 뜬다. Lightsail은 최근 7개를 보관한다.
+
+스크립트의 기본값은 환경 변수로 바꿀 수 있다: `AWS_REGION`(없으면 `aws configure`의 리전), `ZONE`(`<리전>a`), `INSTANCE`(`krx-quant`), `BUNDLE`(자동), `BLUEPRINT`(`ubuntu_24_04`), `IAM_USER`(`krx-quant-engine`), `SNAPSHOT_UTC`(`18:00`).
 
 엔진이 쓸 액세스 키를 한 번만 만든다. 출력된 `AccessKeyId`와 `SecretAccessKey`는 서버 `.env`에 넣는다. 비밀 키는 이때만 보이므로 바로 옮긴다.
 
@@ -83,9 +85,11 @@ aws iam create-access-key --user-name krx-quant-engine
    ```
    스크립트가 하는 일이다.
    - Docker, Tailscale(Tailscale SSH 포함), ufw를 설치한다.
-   - Docker가 Tailscale 뒤에 시작되도록 순서를 정한다.
+   - Docker가 Tailscale 뒤에 시작되도록 순서를 정한다(`/etc/systemd/system/docker.service.d/after-tailscale.conf`). 부팅 때 Tailscale 주소가 아직 없어도 엔진 포트를 열 수 있게 `net.ipv4.ip_nonlocal_bind = 1`을 켠다(`/etc/sysctl.d/90-krx-quant.conf`). 이 둘은 처음 한 번만 하고, 그때만 Docker를 다시 띄운다.
    - 방화벽을 설정한다: 들어오는 연결은 Tailscale 인터페이스, 22번, 41641/udp만 허용한다.
    - 첫 실행에서는 `.env`를 `.env.example`에서 만들고(권한 600) 멈춘다.
+   - 두 번째 실행에서는 `KRX_BIND_ADDRESS`를 쓰고, `data/`, `state/`의 주인을 이미지의 `engine` 사용자(uid 10001)로 바꾸고, 엔진을 띄우고, 자동 업데이트 타이머를 설치한다(4장).
+   - auth key는 `TS_AUTHKEY` 환경 변수로 준다.
 6. `.env`를 채운다.
    ```bash
    nano .env
@@ -97,8 +101,10 @@ aws iam create-access-key --user-name krx-quant-engine
    | `KRX_OBJECT_STORE` | `s3://<버킷>/engine` |
    | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | 2.1에서 만든 엔진용 키 |
    | `AWS_REGION` | `ap-southeast-2`. 버킷을 만든 리전과 같아야 한다 |
-   | `KRX_SYMBOLS`, `KIS_WS_MAX_SUBSCRIPTIONS` | 기본값 그대로(`005930,000660,009150`, `41`) |
+   | `KRX_SYMBOLS`, `KIS_WS_MAX_SUBSCRIPTIONS` | `.env.example`의 값 그대로(`005930,000660,009150`, `41`). 지우면 코드 기본값(`005930` 한 종목, 구독 한도 없음)이 된다 |
    | `KRX_BIND_ADDRESS` | 비워 둔다. 스크립트가 Tailscale 주소를 넣는다 |
+
+   나머지 설정은 아래 "설정 값 전체"에 있다. `.env.example`에서 주석으로 둔 변수는 그대로 두면 기본값을 쓴다.
 7. 스크립트를 한 번 더 실행한다. 이번에는 엔진을 빌드하고 띄운다.
    ```bash
    sudo deploy/setup-server.sh
@@ -137,6 +143,68 @@ curl http://krx-quant:8080/v1/status
 curl http://krx-quant:8080/v1/symbols/005930/latest
 ```
 
+#### 설정 값 전체
+
+엔진은 환경 변수와 `.env`에서 설정을 읽는다(`src/krx_quant/config.py`). 둘 다 있으면 환경 변수가 이긴다. 서버에서는 compose가 `.env`를 컨테이너 환경 변수로 넘기고, 아래 "compose" 값은 compose가 덮어쓴다.
+
+- 변수가 없으면 기본값을 쓴다. 값이 틀리면 명령이 `configuration error: ...`를 내고 끝난다(종료 코드 2).
+- 숫자는 따로 적지 않으면 0보다 커야 한다. 숫자 변수를 빈 값(`KRX_FEE_PERCENT=`)으로 두면 오류다.
+- 문자열 변수 중 `KRX_OBJECT_STORE`, AWS 키, 텔레그램 값, 선물 코드, `KRX_S3_ENDPOINT_URL`은 빈 값이 "없음"이다.
+
+| 변수 | 기본값 | 뜻과 범위 |
+|---|---|---|
+| `KIS_APP_KEY`, `KIS_APP_SECRET` | 없음 | KIS 실전 앱키와 시크릿. `collect`, `backfill`, `archive`, `measure-subscriptions`, `test-alert`는 이 값이 없으면 시작하지 않는다 |
+| `KIS_REST_URL` | `https://openapi.koreainvestment.com:9443` | KIS REST 주소. 모의투자 주소는 `.env.example`에 있다 |
+| `KIS_WS_URL` | `ws://ops.koreainvestment.com:21000` | KIS WebSocket 주소 |
+| `KIS_MASTER_URL` | `https://new.real.download.dws.co.kr/common/master` | 최근월물을 찾는 KIS 마스터 파일 주소 |
+| `KIS_WS_MAX_SUBSCRIPTIONS` | 없음(KIS가 거절할 때까지 모두 구독) | 세션당 실시간 구독 수. 넘는 구독은 REST로 바꾸거나 뺀다. 1 이상. `.env.example`은 41 |
+| `KIS_REST_MAX_PER_SECOND` | 20 | REST 초당 호출 한도. 수집기 안의 조회와 백필이 나눠 쓴다. 1–20 |
+| `KRX_SYMBOLS` | `005930` | 예측하고 녹화할 종목(쉼표로 구분). 하나 이상 |
+| `KRX_INDEX_CODES` | `0001,2001,0013` | 업종지수 코드. `0001`(KOSPI)이 꼭 있어야 한다(서킷브레이커 판정) |
+| `KRX_US_SYMBOLS` | `NVDA,MU,AMD` | 미국 주간거래 티커. 나스닥이 아니면 `NYS:티커`, `AMS:티커`. 비워도 된다 |
+| `KRX_ETF_SYMBOLS` | `133690,381180` | KRX 상장 미국 ETF. 비워도 된다 |
+| `KRX_VENUE_TRADES` | `true` | KRX 전용·NXT 전용 체결도 구독한다. `1`, `true`, `yes`만 참이다 |
+| `KRX_KOSPI200_FUTURES_CODE`, `KRX_USD_FUTURES_CODE` | 없음(마스터 파일에서 찾는다) | 최근월물 코드를 직접 정한다 |
+| `KRX_OPTION_STRIKES_EACH_SIDE` | 2 | KOSPI200 옵션 ATM 위아래로 구독할 행사가 수. 0 이상 |
+| `KRX_FOREIGN_ESTIMATE_POLL_SECONDS` | 300 | 외국인·기관 추정 가집계 조회 간격(초) |
+| `KRX_VI_POLL_SECONDS` | 5 | 종목별 VI 현황 조회 간격(초). 시가 동시호가부터 장 마감까지 |
+| `KRX_FALLBACK_POLL_SECONDS` | 5 | 한도로 잘린 피드의 REST 대체 조회 간격(초) |
+| `KRX_HEALTH_CHECK_SECONDS` | 5 | 피드 지연(`stale`)을 판정하는 간격(초) |
+| `KRX_RECOVERY_HOLD_SECONDS` | 60 | 재연결 뒤 이만큼 유지되어야 `[복구]` 알림을 보낸다(초) |
+| `KRX_RECONNECT_INITIAL_SECONDS`, `KRX_RECONNECT_MAX_SECONDS` | 1, 60 | WebSocket 재연결 간격의 처음과 최대(초). 실패할 때마다 두 배로 늘린다 |
+| `KRX_BACKFILL_DAYS` | 365 | 1분봉을 채우는 기간(일) |
+| `KRX_BACKFILL_MAX_PER_SECOND` | 8 | 백필 조회 속도(초당). 20 이하 |
+| `KRX_DATA_DIR` | `data` (compose `/data`) | Parquet 녹화 위치. 서버에서는 저장소의 `data/` |
+| `KRX_STATE_DIR` | `state` (compose `/state`) | 토큰, 거래 일정, DB, 모델. 서버에서는 저장소의 `state/` |
+| `KRX_FLUSH_ROWS`, `KRX_FLUSH_SECONDS` | 5000, 30 | 파티션마다 이 행 수나 초가 차면 part 파일을 쓴다 |
+| `KRX_OBJECT_STORE` | 없음 | `s3://<버킷>/<접두어>` 또는 로컬 폴더. 없으면 장 마감 업로드와 밤 학습을 하지 않는다 |
+| `AWS_REGION` | `AWS_DEFAULT_REGION`, 그것도 없으면 `ap-southeast-2` | 버킷 리전 |
+| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | 없음(boto3가 스스로 찾는다) | 엔진용 IAM 키 |
+| `KRX_S3_ENDPOINT_URL` | 없음 | S3 호환 저장소(MinIO 등) 주소 |
+| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | 없음(로그만 남긴다) | 알림을 받을 봇과 대화 |
+| `TELEGRAM_API_URL` | `https://api.telegram.org` | 텔레그램 Bot API 주소. 테스트가 가짜 서버로 바꾼다 |
+| `KRX_FEE_PERCENT` | 0.015 | 편도 수수료율(%). 0–1. 보합 범위와 가상손익에 쓴다 |
+| `KRX_API_HOST` | `127.0.0.1` (compose `0.0.0.0`) | 엔진 API가 듣는 주소 |
+| `KRX_API_PORT` | 8080 (compose 8080) | 엔진 API 포트. 1–65535 |
+| `KRX_ALGORITHM_SECONDS` | 30 | 알고리즘 하나가 봉 마감 한 번에 쓸 수 있는 시간(초). 55 이하 |
+| `KRX_CPU_BUDGET_SECONDS` | 30 | 봉 마감 한 번에 알고리즘 예상 시간 합의 상한(초) |
+| `KRX_MIN_SAMPLE` | 200 | 순위와 상태 판정에 필요한 채점 수와 기준 예측과의 짝 수 |
+| `KRX_TRAIN_AT` | `21:30` | 거래일 밤 학습 시각(KST, `HH:MM`). `off`나 빈 값이면 하지 않는다 |
+
+compose와 스크립트가 읽는 변수다. 엔진은 읽지 않는다.
+
+| 변수 | 읽는 곳 | 기본값 | 뜻 |
+|---|---|---|---|
+| `KRX_BIND_ADDRESS` | `compose.yaml` | 없음(없으면 compose가 멈춘다) | 엔진 포트를 열 서버의 Tailscale IPv4. `deploy/setup-server.sh`가 쓴다 |
+| `KRX_ENGINE_PORT` | `compose.yaml`, `deploy/setup-server.sh`, `deploy/smoke-local.sh` | 8080 | 엔진 API를 여는 서버 쪽 포트. 컨테이너 안은 늘 8080 |
+| `TS_AUTHKEY` | `deploy/setup-server.sh` | 없음(브라우저 로그인) | Tailscale auth key |
+| `KRX_UPDATE_TRIES`, `KRX_UPDATE_PAUSE` | `deploy/auto-update.sh` | 36, 5 | 새 엔진이 API에 답하는지 이 횟수만큼, 이 초 간격으로 본다(기본 3분) |
+| `KRX_UPDATE_NOW` | `deploy/auto-update.sh` | 지금(KST) | `<요일 1–7> <HHMM>`. 장 시간 판정을 테스트에서 바꾼다 |
+| `AWS_REGION`, `ZONE`, `INSTANCE`, `BUNDLE`, `BLUEPRINT`, `IAM_USER`, `SNAPSHOT_UTC` | `deploy/create-aws.sh` | 2.1절 | AWS 자원 이름과 위치 |
+| `KEEP`, `SECONDS_TO_RECORD` | `deploy/smoke-local.sh` | 없음, 15 | `KEEP=1`이면 컨테이너와 볼륨을 남긴다. 녹화 시간(초) |
+
+Docker 이미지는 `TZ=Asia/Seoul`, `KRX_DATA_DIR=/data`, `KRX_STATE_DIR=/state`로 돈다(`Dockerfile`).
+
 ### 2.3 첫 거래일 확인 (#7)
 
 1. **장 마감 후 S3에 올라갔는지** 맥에서 확인한다.
@@ -169,16 +237,22 @@ curl http://krx-quant:8080/v1/symbols/005930/latest
 
 | 시각 (KST) | 일 |
 |---|---|
-| 장중 | 실시간 녹화. 끊김과 지연은 `gaps`에 기록하고 텔레그램으로 알린다 |
-| 09:01–15:16 매분 | 기준 예측을 내고, 4분 뒤 채점한다. `state/engine.sqlite3`에 쌓인다 |
+| 03:00 | Lightsail 자동 스냅샷 |
+| 06:00 (매일) | 자동 업데이트(`krx-quant-update` 타이머). main에 새 커밋이 있으면 받아 엔진을 다시 띄운다(4장) |
+| 08:00 (거래일) | 아직 적용하지 않은 가장 최근 밤의 승격 목록대로 모델을 바꾼다. 바꾸거나, 목록을 쓰지 않으면 텔레그램으로 알린다 |
+| 장중 | 실시간 녹화. 끊김과 지연은 `gaps`에 기록하고 텔레그램으로 알린다. VI 현황은 시가 동시호가부터 장 마감까지 5초마다, 외국인·기관 추정 가집계는 5분마다 조회한다 |
+| 09:01–15:16 매분 | 기준 예측 3종, 알고리즘, 빠른·최종 합의가 예측하고, 4분 뒤 채점한다. `state/engine.sqlite3`에 쌓인다 |
+| 장 마감 10분 뒤 (보통 15:40, 수능일 16:40) | 알고리즘 상태를 점검하고(수습·정식·벤치·복제), 합의 가중치를 다시 계산한다. 은퇴 후보가 있으면 텔레그램으로 알린다 |
 | 장 마감 15분 뒤 (보통 15:45, 수능일 16:45) | 그날 녹화를 파티션마다 합쳐 S3에 올린다 |
 | 20:30 | 휴장일 정보를 갱신하고 1분봉 백필을 돌린다 |
 | 21:00 | 다시 올린다. NXT·애프터마켓의 늦은 데이터와 그날 1분봉이 들어간다 |
-| 21:30 | 밤 학습(`KRX_TRAIN_AT`). 알고리즘마다 다시 학습하고, 이긴 모델만 승격 목록에 올린다. 결과를 텔레그램으로 보낸다 |
-| 03:00 | Lightsail 자동 스냅샷 |
-| 08:00 (거래일) | 전날 밤 승격 목록대로 모델을 바꾼다. 바뀌면 텔레그램으로 알린다 |
+| 21:30 (거래일) | 밤 학습(`KRX_TRAIN_AT`). 알고리즘마다 다시 학습하고, 이긴 모델만 승격 목록에 올린다. 결과를 텔레그램으로 보낸다 |
+| 30초마다 | 모델 파일(`state/models/<알고리즘>.json`)이 바뀌었는지 본다(`fit`, `rollback`). 바뀌었으면 엔진이 새 모델로 바꾸고, 지금 도는 모델을 S3(`live.json`, `models/`)에 올린다 |
 
 - 수집기가 시작할 때도 지난날 중 아직 안 올린 날을 올리고 백필을 돌린다.
+- 수집기가 시작할 때 지난밤 학습 결과를 읽고, 지금 도는 모델을 S3에 올린다.
+- 거래일에 08:00부터 개장 전 사이에 수집기가 시작하면, 그날 08:00 교체를 시작 30초 뒤에 바로 한다. 개장 뒤에 시작하면 다음 거래일 08:00에 한다.
+- 엔진이 꺼져 있어서 상태 점검을 놓치면, 다시 켜질 때 놓친 날 것부터 돌린다. 밤 학습은 학습 시각 뒤 8시간 안에 다시 시작하면 바로 돈다(아래).
 - 올리는 작업은 다시 돌려도 결과가 같다. 바뀐 파일만 다시 올린다.
 - 손으로 돌리려면 `docker compose run --rm engine archive`를 실행한다.
 - 업로드 기록은 서버의 각 파티션 `.uploaded.json`에 저장소별로 남는다. S3 쪽에서 객체가 사라졌을 수 있으면 `docker compose run --rm engine archive --recheck`로 모든 파일을 S3와 비교해 빠진 것을 올린다.
@@ -194,6 +268,9 @@ curl http://krx-quant:8080/v1/symbols/005930/latest
   - `promotions/<날짜>.json`: 승격 목록
   - `live.json`: 서버가 지금 돌리는 버전. 다음 밤의 champion이다.
 - 08:00 교체는 아직 적용하지 않은 가장 최근 밤의 목록을, 그날 07:30까지 확정됐고 목록의 모델이 S3에 모두 있을 때만 쓴다. 아니면 전날 모델을 그대로 쓴다. 늦게 확정된 목록은 더 새 밤의 목록이 없으면 다음 날 아침에 쓴다.
+  - 목록은 모두 쓰거나 하나도 쓰지 않는다. 모델이 하나라도 S3에 없으면 적용했다고 표시하지 않고, 다음 날 아침에 다시 시도한다.
+
+  > **바뀜** (2026-10-10, #45): 08:00 교체 규칙이 PR 안에서 세 번 바뀌었다. 처음(75fa527)은 "07:30까지 확정된 목록만", 다음(ef08287)은 "그 밤 바로 다음 거래일 아침의 목록만, 늦은 목록은 쓰지 않음", 지금(1590d11)은 위 규칙이다. PR #45 본문은 두 번째 규칙을 적고 있으니 이 문서를 따른다. 이유: 이른 `KRX_TRAIN_AT`이나 늦게 끝난 학습의 목록도 다음 아침에 쓰고, 모델이 빠진 목록을 반만 적용하지 않기 위해서다(1590d11).
 - `KRX_TRAIN_AT`을 21:00(그날 1분봉 업로드) 전으로 당기면 전 거래일까지의 데이터로 학습한다.
 - `/v1/status`의 `training.applied`는 지금 그 승격 모델이 돌고 있는지다. 적용 뒤 `rollback`이나 `fit`으로 바꾸면 `false`가 되고, `reason`에 지금 도는 버전이 나온다.
 - 수집기가 학습 시각 뒤 8시간 안에 다시 시작하면(배포, 장애) 그 밤의 학습을 바로 이어서 돌린다. 끝난 알고리즘은 건너뛴다. 학습이 6시간 안에 끝나지 않으면 멈추고 알린다.
@@ -209,6 +286,9 @@ docker compose exec engine krx-quant rollback granger     # 직전 모델로 되
 - 되돌린 모델은 다음 승격까지 유지된다. 이미 적용한 승격 목록을 다시 적용하지 않는다.
 - 밤 학습을 끄려면 `.env`에 `KRX_TRAIN_AT=off`를 넣고 `docker compose up -d`를 실행한다.
 - 손으로 학습한 모델(`fit`)도 `history.json`에 남아서 되돌릴 수 있다.
+- 특정 밤을 다시 돌리려면 `docker compose run --rm --no-deps engine train --day 2026-10-12`. 이미 끝난 밤이면 그 결과를 그대로 보여 주고 텔레그램으로 다시 보내지 않는다.
+
+> **바뀜** (2026-10-10, #45): 모델을 바꾸려면 엔진을 재시작하고, 되돌리려면 `state/models/<이름>.json`을 지우고 재시작했다(기본 모델로만 돌아갔다) → 엔진이 30초마다 모델 파일을 보고 스스로 바꾼다. `krx-quant rollback <이름>`이 직전 모델로 되돌리고, 이력은 `state/models/history.json`과 `versions/`에 남는다. 이유: 08:00 교체와 명령 하나로 되돌리기(#22 요구사항)를 위해서다.
 
 ## 4. 업데이트 배포
 
@@ -218,8 +298,9 @@ docker compose exec engine krx-quant rollback granger     # 직전 모델로 되
 - 엔진이 마지막으로 정상 기동을 확인한 커밋은 서버의 `.auto-update-deployed`에 남는다. main이 그 커밋이면 아무것도 하지 않는다. 재부팅 등으로 업데이트가 중간에 끊겼으면 다음 실행이 다시 한다.
 - 평일 07:50–20:10에는 손으로 실행해도 거부한다.
 - 새 엔진이 3분 안에 API에 답하지 않으면 이전 커밋으로 되돌려 다시 띄운다. 실패한 커밋은 서버의 `.auto-update-failed`에 남아서, main이 더 바뀔 때까지 다시 시도하지 않는다.
-- 결과는 텔레그램으로 온다: `자동 업데이트: <이전> → <새 커밋>`과 커밋 제목, 또는 `자동 업데이트 실패: …`.
+- 결과는 텔레그램으로 온다(`krx-quant notify`): `[알림] 자동 업데이트: <이전> → <새 커밋>`과 커밋 제목(최대 10개), `[알림] 자동 업데이트 실패: …`, 그 밖의 오류(GitHub 접속 실패 등)는 `[알림] 자동 업데이트 오류: …`. 오류일 때 엔진은 그대로 돈다.
 - 업데이트가 끝나면 쓰지 않는 Docker 이미지를 지운다.
+- **주의: SQLite 스키마를 올리는 main.** 엔진은 시작할 때 `state/engine.sqlite3`를 새 스키마로 올린다. 그 main이 API 확인에 실패하면 되돌린 옛 엔진은 새 스키마의 DB를 거부하고(`... was written by a newer engine (schema N)`) 뜨지 못한다. 그러면 `자동 업데이트 실패: ...되돌렸지만 엔진이 응답하지 않습니다`가 온다. 고친 커밋을 main에 올리고 장 시간 밖에서 `deploy/auto-update.sh`를 실행한다. 실패한 커밋만 건너뛰므로 더 새 main은 바로 시도한다.
 
 ```bash
 journalctl -u krx-quant-update -n 50       # 지난 실행 기록
@@ -229,7 +310,11 @@ sudo systemctl disable --now krx-quant-update.timer   # 자동 업데이트 끄�
 ```
 
 - 타이머는 `deploy/setup-server.sh`가 설치한다. 이미 개통한 서버에는 한 번만 `sudo deploy/install-auto-update.sh`를 실행한다.
-- 손으로 배포하려면 장 시간 밖에서 `git pull && docker compose up -d --build`를 실행한다.
+  - `/etc/systemd/system/krx-quant-update.service`: `Type=oneshot`, 저장소 주인(`SUDO_USER`, 없으면 `ubuntu`)으로 저장소에서 `deploy/auto-update.sh`를 실행한다. Docker와 네트워크 뒤에 돈다.
+  - `/etc/systemd/system/krx-quant-update.timer`: `OnCalendar=*-*-* 06:00:00 Asia/Seoul`, `Persistent=false`. 서버가 꺼져 있어서 놓친 실행은 부팅 때 돌리지 않는다. 부팅이 장 시간일 수 있어서다.
+- 손으로 배포하려면 장 시간 밖에서 `git pull && docker compose up -d --build`를 실행한다. 그러면 `.auto-update-deployed`가 옛 커밋을 가리켜서, 다음 06:00 실행은 그 커밋을 새 커밋으로 보고 빌드와 API 확인을 한 번 더 한 뒤 알린다.
+
+> **바뀜** (2026-10-10, #46): main에 머지할 때마다 사람이 서버에 들어가 `git pull && docker compose up -d --build`를 실행했다(장 마감 뒤, 21:00 업로드가 끝난 뒤가 좋다고 적었다) → 매일 06:00 타이머가 한다. 이유: 밤 학습(21:30)과 08:00 교체가 이미 자동이라 배포도 자동으로 했다(PR #46). 처음 버전(7aa438d)은 "체크아웃이 이미 main이면 아무것도 하지 않음"이었고, a886368에서 `.auto-update-deployed`로 바꿨다. 이유: 재부팅으로 중간에 끊긴 실행을 다시 하기 위해서다.
 
 ## 5. 키 교체
 
@@ -261,12 +346,20 @@ docker compose logs --tail 200 engine
 | `[장애] 엔진 API를 열지 못했습니다` | 로그의 `Engine API not started on ...` | 녹화와 예측은 계속한다. 다른 프로세스가 8080을 쓰는지 확인하고 `docker compose up -d`로 다시 띄운다. |
 | 알고리즘을 다시 학습하고 싶다 | 밤 학습 결과는 텔레그램과 `/v1/status`의 `training` | 밤 학습이 매일 한다. 당장 바꾸려면 알고리즘마다(`newton`, `gauss`, `granger`) `docker compose run --rm --no-deps engine fit <이름>`. 엔진이 1분 안에 새 모델로 바꾼다. 되돌리려면 `docker compose exec engine krx-quant rollback <이름>`(위 "밤 학습과 모델 교체"). |
 | `[알림] <이름> 은퇴 후보: ...` | `curl -s http://krx-quant:8080/v1/algorithms`의 `status` 이력, `/v1/algorithms/<이름>/stats?period=20d` | 벤치 60거래일 동안 회복하지 못했다. 은퇴시키려면 `docker compose exec engine krx-quant retire <이름>`. 기록은 남고, 엔진은 다음 봉 마감부터 돌리지 않는다. 되돌리려면 `krx-quant unretire <이름>`(수습부터 다시). |
-| `[warning] ... skipped for the CPU budget` 또는 `took over 30s` 로그가 잦다 | `docker stats`로 CPU 사용률 | 알고리즘 계산이 서버에 버겁다. 4GB 요금제로 올리거나 `KRX_CPU_BUDGET_SECONDS`를 조정한다. |
+| `WARNING krx_quant.engine: <이름> skipped at ... for the CPU budget` 또는 `<이름> took over 30.0s` 로그가 잦다 | `docker stats`로 CPU 사용률, DB의 `runs` 테이블(`kind`가 `cpu_budget`) | 알고리즘 계산이 서버에 버겁다. 텔레그램 알림은 없다. 4GB 요금제로 올리거나 `KRX_CPU_BUDGET_SECONDS`를 조정한다. |
+| `[장애] <날짜> 밤 학습이 실패했습니다: <이유>` | 로그의 `nightly training of ... failed`. 6시간 안에 안 끝나면 이유가 `not done in 6:00:00`이다 | `docker compose run --rm --no-deps engine train --day <날짜>`로 다시 돌린다. 끝난 알고리즘은 건너뛴다. 다음 밤 학습이 성공하면 `[복구] 밤 학습이 다시 됩니다.`가 온다. 그동안 전날 모델이 계속 돈다. |
+| `[알림] <날짜> 밤 학습`과 알고리즘별 `승격`·`유지`·`학습 안 함` | | 매일 밤 학습의 요약이다. 할 일은 없다. 승격된 모델은 다음 거래일 08:00에 바뀐다. |
+| `[알림] 모델 교체 (<날짜> 밤 학습): <알고리즘> → <버전>` | `/v1/status`의 `training` | 08:00 교체가 됐다. 되돌리려면 `docker compose exec engine krx-quant rollback <이름>`. |
+| `[알림] <날짜> 밤 학습 결과를 쓰지 않습니다: <이유>` | `/v1/status`의 `training.reason` | 전날 모델이 계속 돈다. `final at ..., after 07:30`이면 다음 아침에 쓴다(더 새 밤이 없으면). `not in the store: ...`면 S3에 모델이 없는 것이다. 다음 아침에 다시 시도한다. |
+| `[알림] 자동 업데이트: <이전> → <새 커밋>` | | 06:00 자동 업데이트가 됐다. 할 일은 없다. |
+| `[알림] 자동 업데이트 실패: <커밋>이 시작되지 않아 ...` | `journalctl -u krx-quant-update -n 50`, `docker compose logs --tail 200 engine` | 새 커밋이 3분 안에 API에 답하지 않아 이전 커밋으로 되돌렸다. 고친 커밋을 main에 올리면 다음 06:00에 받는다. "되돌렸지만 엔진이 응답하지 않습니다"면 4장의 SQLite 스키마 주의를 본다. |
+| `[알림] 자동 업데이트 오류: <명령> (줄 N). 엔진은 그대로입니다.` | `journalctl -u krx-quant-update -n 50` | GitHub 접속 실패나 fast-forward가 안 되는 체크아웃 등이다. 엔진은 그대로 돈다. 원인을 고치고 다음 06:00을 기다리거나, 장 시간 밖에서 `deploy/auto-update.sh`를 실행한다. |
 | 녹화된 날의 예측을 다시 보고 싶다 | | `docker compose run --rm --no-deps engine replay 2026-10-12`. 결과는 `state/replay-2026-10-12.sqlite3`다. 실시간 DB는 건드리지 않는다. |
-| 엔진 컨테이너가 계속 재시작한다 | 로그의 `configuration error` 또는 `KIS error` | `.env` 값을 고치고 `docker compose up -d`를 실행한다. |
+| 엔진 컨테이너가 계속 재시작한다 | 로그의 `configuration error` 또는 `KIS error` | `.env` 값을 고치고 `docker compose up -d`를 실행한다(설정 값은 2.2의 "설정 값 전체"). |
+| 엔진이 `... was written by a newer engine (schema N)`으로 시작하지 못한다 | 지금 커밋과 `.auto-update-deployed` | 옛 엔진이 새 엔진이 올린 DB를 읽었다. 엔진은 더 새 스키마의 DB를 거부한다. 그 스키마를 아는 커밋으로 배포한다(4장). |
 | `EGW00133`(접근 토큰 발급 1분 1회) | 재시작을 반복했는지 | 토큰은 캐시되고, 1분 간격으로 스스로 다시 시도한다. |
 | `EGW00201`(초당 거래건수 초과) | 백필과 REST 대체 조회가 겹쳤는지 | 0.5초 뒤 스스로 다시 보낸다. 계속되면 `KRX_BACKFILL_MAX_PER_SECOND`를 낮춘다. |
-| 디스크가 찬다 | `df -h`, `du -sh data/*/` | 로컬 데이터는 자동으로 지우지 않는다. `.uploaded.json`이 있는 오래된 날짜 폴더는 S3에 있으므로 `raw`, `events`, `gaps`에서 지워도 된다. `bars`는 지우지 않는다(백필이 다시 받는다). |
+| 디스크가 찬다 | `df -h`, `du -sh data/*/` | 로컬 데이터는 자동으로 지우지 않는다. `.uploaded.json`이 있는 오래된 날짜 폴더는 S3에 있으므로 `raw`, `events`, `gaps`에서 지워도 된다. `bars`는 지우지 않는다(백필이 다시 받는다). `state/training-cache/`도 자동으로 지우지 않는다. 이것은 지워도 된다(밤 학습이 S3에서 다시 받는다). |
 | 서버를 잃었다 | Lightsail 콘솔의 스냅샷 | 1. 옛 인스턴스가 아직 있으면 먼저 멈추거나 지운다. 같은 Tailscale 신원으로 두 대가 동시에 뜨지 않게 하려는 것이다.<br>2. 마지막 자동 스냅샷으로 새 인스턴스를 만든다. 디스크에 Tailscale 신원, `.env`, 데이터가 그대로 있어서 부팅하면 `krx-quant`로 다시 붙고 엔진도 스스로 뜬다. Tailscale admin의 기기는 지우지 않는다. 지우면 접속할 길이 없어진다.<br>3. 새 인스턴스의 Lightsail 방화벽은 41641/udp만 열어 둔다(2.2의 10단계 명령).<br>4. `docker compose run --rm engine archive --recheck`로 S3와 맞춘다.<br>마지막 스냅샷 뒤에 녹화하고 아직 올리지 못한 데이터는 잃는다. |
 
 ## 7. 비용
@@ -276,3 +369,57 @@ docker compose logs --tail 200 engine
 - 스냅샷: GB·월당 $0.05다.
 - 상한은 월 $100이다. Budgets 알림과 Spot 학습 상한은 #23에서 만든다.
 - 지금은 AWS 프로젝트 지출 한도($100)가 걸려 있어서, 한도에 닿으면 상시 서버까지 멈춘다(1장 참고).
+
+## 8. 저장 위치
+
+엔진이 쓰는 파일과 Object Store 키 전체다. 형식은 링크한 문서에 있다.
+
+**로컬 `data/`** (`KRX_DATA_DIR`, 컨테이너 `/data`). 녹화 형식은 [events.md](events.md)에 있다.
+
+| 경로 | 내용 |
+|---|---|
+| `raw/date=<날짜>/feed=<TR>/symbol=<키>/` | 받은 메시지 원문. KIS 제어 메시지는 `feed=_system`, 알아볼 수 없는 메시지는 `feed=_unparsed` |
+| `events/date=…/feed=…/symbol=…/` | 정규화한 이벤트 |
+| `gaps/date=…/feed=…/symbol=…/` | 결측 구간 |
+| 위 세 계층의 `part-<HHMMSS>-<id>.parquet`, `data.parquet` | 장중에 쓰는 part 파일과, 업로드가 합친 파일 하나 |
+| `bars/date=…/feed=FHKST03010230/symbol=<종목>/bars.parquet` | 주식·ETF 1분봉 백필 |
+| `bars/date=…/feed=FHKIF03020200/symbol=<KOSPI200F 또는 USDF>/bars.parquet` | 선물 연속 1분봉 백필 |
+| 각 파티션의 `.uploaded.json` | 저장소별로 올린 파일의 크기, 수정 시각(ns), SHA-256. 바뀌지 않은 파일은 다시 올리지 않는다 |
+| 각 파티션의 `.*.tmp` | 쓰는 중인 임시 파일. 10분 넘은 것은 업로드가 지운다 |
+| `.archive.lock` | 업로드를 한 번에 하나만 돌리는 잠금 파일(`flock`) |
+
+**로컬 `state/`** (`KRX_STATE_DIR`, 컨테이너 `/state`)
+
+| 경로 | 내용 |
+|---|---|
+| `kis_token.json` | KIS REST 접근 토큰 캐시(권한 600). 앱키가 바뀌면 버린다 |
+| `market_calendar.json` | KIS 휴장일 조회 캐시 |
+| `engine.sqlite3`, `-wal`, `-shm` | 예측, 채점, 상태, 합의 가중치. 테이블은 [engine-api.md](engine-api.md#저장-stateenginesqlite3)에 있다. 스키마 버전은 `PRAGMA user_version`이다 |
+| `replay-<날짜>.sqlite3` | `krx-quant replay`의 결과 |
+| `models/<알고리즘>.json` | 엔진이 지금 돌리는 모델: `version`, `params`, `trained`, `trained_until`. 없으면 기본 모델 |
+| `models/versions/<알고리즘>/<버전>.json` | 설치한 적 있는 모든 모델. `rollback`이 여기서 읽는다 |
+| `models/history.json` | 설치와 되돌리기 이력. 항목마다 `at`, `algorithm`, `version`(기본 모델이면 `null`), `why`(`fit`, `promotion <날짜>`, `rollback from <버전>`, `installed before`) |
+| `models/applied.json` | `{"night": "<날짜>"}`: 마지막으로 적용한 승격 목록의 밤. 이 밤과 그 전의 목록은 다시 적용하지 않는다 |
+| `training-cache/` | 밤 학습이 Object Store에서 받아 둔 파일의 사본. 키 경로가 같다. 자동으로 지우지 않는다 |
+
+**서버의 저장소 폴더** (`~/krx-quant`)
+
+| 경로 | 내용 |
+|---|---|
+| `.env` | 설정과 비밀값(권한 600). 저장소에 커밋하지 않는다 |
+| `.auto-update-deployed` | 엔진이 마지막으로 정상 기동을 확인한 커밋 |
+| `.auto-update-failed` | 시작하지 못한 커밋. main이 바뀔 때까지 다시 시도하지 않는다 |
+
+**Object Store** (`KRX_OBJECT_STORE`, 서버에서는 `s3://<버킷>/engine`)
+
+| 키 | 내용 |
+|---|---|
+| `raw/…/data.parquet`, `events/…/data.parquet`, `gaps/…/data.parquet` | 로컬 `data/`와 같은 경로. 장 마감 15분 뒤와 21:00에 올린다 |
+| `bars/…/bars.parquet` | 1분봉 백필. 로컬과 같은 경로 |
+| `models/<알고리즘>/<버전>.json` | 밤 학습의 challenger와 서버가 돌린 모델. 형식은 `state/models/<알고리즘>.json`과 같다 |
+| `reports/<날짜>/<알고리즘>.json` | 그 밤의 알고리즘별 검증 리포트이자 체크포인트: `algorithm`, `day`, `training_days`, `validation_days`, `champion`(`version`, `loss`), `challenger`(`version`, `loss`, `trained`), `promoted`, `reason`, `samples`(`validation`: 검증 표본 수, 검증까지 간 경우만). 학습하지 못했거나 검증할 정답이 없으면 `champion`, `challenger`가 `null`이다 |
+| `promotions/<날짜>.json` | 그 밤의 승격 목록: `day`, `finalized_at`(확정 시각), `promoted`(알고리즘 → 버전), `reports`(위 리포트 전부). 모든 알고리즘이 끝난 뒤 한 번 쓴다 |
+| `live.json` | 서버가 지금 돌리는 버전(알고리즘 → 버전, 기본 모델이면 `<이름>-default`). 다음 밤의 champion이다 |
+
+- 객체마다 내용의 SHA-256을 함께 둔다. S3에서는 객체 메타데이터 `sha256`이고, 로컬 폴더에서는 파일에서 계산한다. 업로드와 밤 학습은 이 값으로 같은 파일인지 본다.
+- 엔진의 IAM 사용자는 객체를 지울 수 없다. 덮어쓴 이전 버전은 S3 버전 관리로 30일 남는다(2.1).

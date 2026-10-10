@@ -4,8 +4,7 @@ An algorithm is refused when its feature set is the same as a registered one's, 
 names no feature of its own (unique), or when one it calls its own is already used by a
 registered algorithm. Later algorithms may share an earlier one's own features (Turing
 uses them all), so the check runs in registration order. Order is also priority: when
-the CPU budget runs short, the last registered is skipped first (until there is a
-ranking).
+the CPU budget runs short, the last registered is skipped first, whatever the ranking.
 """
 
 from __future__ import annotations
