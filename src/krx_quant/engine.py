@@ -212,12 +212,7 @@ class PredictionEngine:
 
     def on_event(self, feed: str, row: dict[str, Any]) -> None:
         self._market.on_event(feed, row)
-        if feed in INDEX_FEEDS:
-            self._mark_special(self._special.index(row))
-        elif feed == KOSPI200_FUTURES.tr_id:
-            self._mark_special(self._special.futures(row))
-        elif feed == VI_STATUS.tr_id and row["symbol"] in self.symbols:
-            self._mark_special(self._special.vi(row))
+        self._mark_special(self._special.event(feed, row, self.symbols))
 
     def _mark_special(self, window: Window | None) -> None:
         """A special window just learned: the predictions it touches are special, scored or not."""

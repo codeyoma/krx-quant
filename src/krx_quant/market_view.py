@@ -65,7 +65,7 @@ def next_bar_close(calendar: MarketCalendar, after: datetime) -> datetime | None
 
 
 @dataclass(frozen=True)
-class Frozen:
+class BarsAtClose:
     """The bars as they stood at a bar close."""
 
     close: datetime
@@ -86,7 +86,7 @@ class MarketView:
         self._leader_bars = BarBuilder()
         # Bars as they stood at bar closes not taken yet, kept once an event received at or
         # after the close arrives.
-        self._frozen: dict[datetime, Frozen] = {}
+        self._frozen: dict[datetime, BarsAtClose] = {}
         self._frozen_through = start
 
     def on_event(self, feed: str, row: dict[str, Any]) -> None:
@@ -104,18 +104,17 @@ class MarketView:
         symbol, received_at = row["symbol"], row["received_at"]
         self._freeze_before(received_at)
         if feed == TRADE.tr_id:
-            # Integrated trades make the bars; their best quotes are integrated quotes too.
             self._bars.trade(symbol, row["event_time"], row["price"], row["qty"])
             self._reference.quote(symbol, Source.INTEGRATED, received_at, row["bid1"], row["ask1"])
         elif feed == KRX_TRADE.tr_id:
-            # KRX-only trades carry KRX's best quotes, for the 30 seconds before NXT opens.
             self._reference.quote(symbol, Source.KRX, received_at, row["bid1"], row["ask1"])
         else:
             self._reference.quote(symbol, Source.INTEGRATED, received_at, row["bid_px_1"], row["ask_px_1"])
 
-    def at_close(self, close: datetime) -> Frozen:
+    def at_close(self, close: datetime) -> BarsAtClose:
         """The bars as they stood at ``close``: kept when an event at or after it arrived,
-        else (nothing received since) as they are. Bars kept for earlier closes go.
+        else (nothing received since) as they are. Bars kept for earlier closes go, and none
+        are kept for ``close`` from now on.
         """
         frozen = self._frozen.pop(close, None)
         for stale in [c for c in self._frozen if c < close]:
@@ -123,13 +122,13 @@ class MarketView:
         self._frozen_through = max(self._frozen_through, close)
         if frozen is not None:
             return frozen
-        return Frozen(
+        return BarsAtClose(
             close,
             {s: self._bars.closed(s, close) for s in self.symbols},
             {k: self._leader_bars.closed(k, close) for k in self.leaders.series},
         )
 
-    def snapshot(self, frozen: Frozen, symbol: str, fee_rate: float) -> Snapshot:
+    def snapshot(self, frozen: BarsAtClose, symbol: str, fee_rate: float) -> Snapshot:
         """``symbol`` at a bar close: its bars, reference price and leaders there."""
         session = self.calendar.session(frozen.close.astimezone(KST).date())
         return Snapshot.at(
@@ -170,7 +169,7 @@ class MarketView:
         while (close := next_bar_close(self.calendar, self._frozen_through)) is not None:
             if received_at < close:
                 return
-            self._frozen[close] = Frozen(
+            self._frozen[close] = BarsAtClose(
                 close,
                 {s: [replace(b) for b in self._bars.closed(s, close)] for s in self.symbols},
                 {k: [replace(b) for b in self._leader_bars.closed(k, close)] for k in self.leaders.series},

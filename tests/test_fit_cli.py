@@ -16,8 +16,10 @@ import pytest
 from krx_quant.algorithms import ALGORITHMS, load_models
 from krx_quant.backfill import BAR_SCHEMA, FUTURES_BAR_SCHEMA, FUTURES_BARS_TR, MINUTE_BARS_TR
 from krx_quant.cli import main
+from krx_quant.config import Settings
 from krx_quant.feeds import KST
 from krx_quant.reference import Bar
+from krx_quant.training import fit_algorithm
 from tests.synthetic_bars import day_of_bars, random_walk, trending
 from tests.test_replay import busy_morning
 from tests.test_replay_cli import record
@@ -113,7 +115,22 @@ def test_a_recorded_day_trains_on_its_events_rather_than_its_backfill(
 
     assert main(["fit", "newton", "--days", "3"]) == 0
 
-    assert "trained on 3 days (1 recorded, 2 backfilled;" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "trained on 3 days" in out
+    assert f"recorded days, on mid-points: {DAYS[-1]};" in out
+
+
+def test_today_is_trained_on_only_once_its_recording_is_archived(env: Path) -> None:
+    for day in DAYS:
+        backfill(env / "data", day)
+    record(env / "data", busy_morning(DAYS[-1]), day=DAYS[-1])
+    settings = Settings.from_env(require_kis=False)
+
+    during = fit_algorithm(settings, "newton", 3, now=datetime.combine(DAYS[-1], time(14), KST))
+    archived = fit_algorithm(settings, "newton", 3, now=datetime.combine(DAYS[-1], time(21, 5), KST))
+
+    assert during.recorded == [] and during.model.trained_until == DAYS[-2]
+    assert archived.recorded == [DAYS[-1]] and archived.model.trained_until == DAYS[-1]
 
 
 def test_fitting_needs_a_known_algorithm_and_backfilled_bars(

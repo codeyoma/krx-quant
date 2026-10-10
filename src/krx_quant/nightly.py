@@ -1,10 +1,10 @@
 """Nightly training: each algorithm retrained on the latest days, promoted only when it
 beats the model the server runs on days it did not learn from.
 
-A night trains on the latest trading day with data in the Object Store: backfilled bars,
+A night trains on the latest trading day with data in the Object Store: backfilled bars
 or recorded events. A recorded day trains on what the engine saw, with the mid-point as
-the reference price, as live scoring; a day with backfilled bars only, on closes
-(``training``). For each algorithm, in registration order:
+the reference price, as live scoring has it. A day with backfilled bars only trains on
+closes (``training``). For each algorithm, in registration order:
 
 1. The last 3 trading days are kept for validation; the algorithm trains on its own
    rolling window (``training_days``) before them (walk-forward).
@@ -210,7 +210,6 @@ class _Trainer:
         # Each day is read once, with every algorithm's features.
         self._names = sorted({f for a in algorithms for f in a.features})
         self._loaded: dict[date, TrainingDay | None] = {}
-        self._fetched: set[date] = set()
         self._used: set[date] = set()
 
     def train(self, algorithm: Algorithm, live_version: str | None) -> dict[str, Any]:
@@ -228,8 +227,10 @@ class _Trainer:
         }
         if not training:
             return {**report, "reason": f"too few days ({len(self._days)})"}
-        loaded = {d: self._day(d) for d in [*training, *validation]}
-        report["reference_prices"] = {d.isoformat(): t.reference for d, t in loaded.items() if t is not None}
+        loaded = {day: self._day(day) for day in [*training, *validation]}
+        report["reference_prices"] = {
+            day.isoformat(): found.reference for day, found in loaded.items() if found is not None
+        }
         try:
             challenger = algorithm.fit(self._samples(algorithm, training))
         except ValueError as e:
@@ -291,8 +292,6 @@ class _Trainer:
         """Copy a day's bars and the engine's recorded events from the store into the cache,
         where they are not there already.
         """
-        if day in self._fetched:
-            return
         series = [(MINUTE_BARS_TR, s) for s in self._symbols] + leader_series(self._leaders)
         keys = [bars_key(day, feed, name) for feed, name in series]
         keys += _engine_events(
@@ -309,7 +308,6 @@ class _Trainer:
             tmp = path.with_name(f".{path.name}.tmp")
             self._store.get(key, tmp)
             tmp.replace(path)
-        self._fetched.add(day)
 
     def prune(self) -> None:
         """Remove the cached days this night did not use: older ones no night needs again."""

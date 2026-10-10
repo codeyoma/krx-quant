@@ -4,16 +4,17 @@ Each bar close of a day's prediction window becomes a sample per symbol: the fea
 there (built by the Feature Store, as live) and what happened four minutes later,
 classified with the same flat band as live scoring. A day is read one of two ways:
 
-- Recorded (every symbol's integrated trades were recorded): the day's events go through
-  the engine's own Market View, so the bars, leaders and reference price (the mid-point)
-  are exactly what the engine saw, and the outcome is the mid-point four minutes later,
-  as live scoring decides it (basis A). Every lead group is there, indices and US daytime
-  trades included.
-- Backfilled only: the backfill has bars, not quotes, so the reference price is the last
-  close and the outcome the close four minutes later. A close jumps between the bid and
-  the ask and back (bid-ask bounce), which live scoring on mid-points never sees. The
-  lead groups are the other symbols, the futures' continuous series and the ETFs; indices
-  and US daytime trades have no backfill, so their moves are unknown.
+- Recorded: every symbol's integrated trades were recorded. The day's events go through
+  the engine's own Market View. The bars, leaders and reference price (the mid-point) are
+  what the engine saw. The outcome is the mid-point four minutes later, as live scoring
+  decides it (basis A). Every lead group is there, indices and US daytime trades too. The
+  bar closes the engine does not predict (a VI) and those live statistics leave out (a
+  special situation touches them) are left out.
+- Backfilled only: the backfill has bars, not quotes. The reference price is the last
+  close, and the outcome the close four minutes later. A close jumps between the bid and
+  the ask and back (bid-ask bounce); live scoring on mid-points never sees that. The lead
+  groups are the other symbols, the futures' continuous series and the ETFs. Indices and
+  US daytime trades have no backfill, so their moves are unknown.
 
 A recorded day is read the first way even when it has backfilled bars too.
 """
@@ -32,7 +33,7 @@ import pyarrow.parquet as pq
 
 from krx_quant.algorithms import ALGORITHMS, Model, model_path
 from krx_quant.algorithms.contract import Sample
-from krx_quant.archive import partition_files
+from krx_quant.archive import NIGHTLY_ARCHIVE, partition_files
 from krx_quant.backfill import FUTURES_BARS_TR, MINUTE_BARS_TR, bars_key
 from krx_quant.config import Settings
 from krx_quant.contracts import KOSPI200, USD
@@ -46,6 +47,7 @@ from krx_quant.model_shelf import Shelf
 from krx_quant.pricing import classify
 from krx_quant.reference import BAR, Bar
 from krx_quant.replay import recorded_events
+from krx_quant.special import SpecialSituations, in_vi, touching
 
 BarDays = Mapping[tuple[str, date], Sequence[Bar]]  # (symbol, day) -> bars, oldest first
 # The reference price a day's samples were made with: "mid" from recorded events, "close"
@@ -57,7 +59,6 @@ Reference = Literal["mid", "close"]
 class TrainingDay:
     """A day's samples, with every feature asked for, and the reference price they used."""
 
-    day: date
     reference: Reference
     samples: list[Sample]
 
@@ -81,13 +82,13 @@ def training_day(
     if is_recorded(data_dir, day, symbols):
         events = recorded_events(data_dir, day, symbols, leaders)
         made = recorded_samples(events, calendar, day, symbols, names, fee_rate, leaders)
-        return TrainingDay(day, "mid", made)
+        return TrainingDay("mid", made)
     bar_days = bar_days_on(data_dir, symbols, [day])
     if not bar_days:
         return None
     leader_days = load_leader_days(data_dir, leaders, [day]) if LEAD_FEATURES & set(names) else {}
     made = samples(bar_days, calendar, names, fee_rate, leader_days=leader_days, leaders=leaders)
-    return TrainingDay(day, "close", made)
+    return TrainingDay("close", made)
 
 
 def is_recorded(data_dir: Path, day: date, symbols: Sequence[str]) -> bool:
@@ -171,19 +172,23 @@ def recorded_samples(
     the day's events (in receipt order) through the engine's Market View.
 
     At each bar close the features are computed before any event received at or after it,
-    as the engine does; the outcome is the mid-point four minutes later against the one at
-    the bar close, as live scoring decides it on basis A.
+    as the engine does. The outcome is the mid-point four minutes later against the one at
+    the bar close, as live scoring decides it on basis A. A symbol in a VI at a bar close
+    has no sample there (the engine does not predict it), and neither has a bar close whose
+    four minutes a VI, circuit breaker or sidecar touches (live statistics leave it out).
     """
     session = calendar.session(day)
     if session is None:
         return []
     store = store or FeatureStore()
     view = MarketView(calendar, symbols, leaders, datetime.combine(day, time(), KST))
+    special = SpecialSituations(calendar)
     first, last = prediction_window(session)
     # Every minute from the first bar close to the last target: a bar close to predict, a
     # target to look the mid-point up at, or both.
     minutes = deque(first + i * BAR for i in range((last + HORIZON - first) // BAR + 1))
-    seen: list[tuple[Snapshot, dict[str, FeatureValue]]] = []
+    # Each bar close's snapshot, features, and whether a window known then touched it.
+    seen: list[tuple[Snapshot, dict[str, FeatureValue], bool]] = []
     mids: dict[tuple[str, datetime], float | None] = {}
 
     def reach(moment: datetime) -> None:
@@ -192,10 +197,13 @@ def recorded_samples(
             minute = minutes.popleft()
             if minute <= last:
                 frozen = view.at_close(minute)
+                known = special.known(before=minute)
                 for symbol in symbols:
+                    if in_vi(known, symbol, minute):
+                        continue
                     snapshot = view.snapshot(frozen, symbol, fee_rate)
-                    # A snapshot holds the day's bars so far: only what the sample needs is kept.
-                    seen.append((_bare(snapshot), store.compute(snapshot, names)))
+                    marked = touching(known, symbol, minute, minute + HORIZON)
+                    seen.append((_bare(snapshot), store.compute(snapshot, names), marked))
             if minute >= first + HORIZON:
                 for symbol in symbols:
                     mids[(symbol, minute)] = view.mid(symbol, minute)
@@ -203,15 +211,21 @@ def recorded_samples(
     for feed, row in events:
         reach(row["received_at"])
         view.on_event(feed, row)
+        special.event(feed, row, symbols)
     reach(minutes[-1] if minutes else last)
     out = []
-    for snapshot, values in seen:
+    for snapshot, values, marked in seen:
+        # Special as the engine marks it: by the windows known when it is made, or learned since.
+        t = snapshot.bar_close
+        if marked or touching(special.learned_since(t), snapshot.symbol, t, t + HORIZON):
+            continue
         later = mids.get((snapshot.symbol, snapshot.bar_close + HORIZON))
         out.append(_sample(snapshot, values, names, later))
     return out
 
 
 def _bare(snapshot: Snapshot) -> Snapshot:
+    """``snapshot`` without its bars and leaders, all a sample needs once its features are computed."""
     return Snapshot(
         snapshot.symbol,
         snapshot.bar_close,
@@ -300,48 +314,47 @@ class Fitted:
     model: Model
     path: Path
     days: int
-    recorded: int  # of the days, those trained on recorded mid-points
+    recorded: list[date]  # of the days, those trained on recorded mid-points
     samples: int
 
 
-def fit_algorithm(settings: Settings, name: str, days: int | None = None) -> Fitted:
+def fit_algorithm(
+    settings: Settings, name: str, days: int | None = None, now: datetime | None = None
+) -> Fitted:
     """Train an algorithm on the latest days with data and save the model for the engine,
-    which switches to it within a minute.
+    which switches to it within a minute. Today counts only once its recording is archived
+    (21:00): before that it is still being recorded.
     """
     algorithm = next((a for a in ALGORITHMS if a.name == name), None)
     if algorithm is None:
         raise ValueError(f"unknown algorithm {name!r}; registered: {', '.join(a.name for a in ALGORITHMS)}")
+    local = (now or datetime.now(KST)).astimezone(KST)
+    finished = [
+        d
+        for d in days_with_data(settings.data_dir, settings.symbols)
+        if d < local.date() or local.time() >= NIGHTLY_ARCHIVE
+    ]
     calendar = calendar_store(settings).calendar
     leaders = Leaders.of(settings)
-    latest = days_with_data(settings.data_dir, settings.symbols)[-(days or algorithm.training_days) :]
-    loaded = [
-        found
-        for day in latest
-        if (
-            found := training_day(
-                settings.data_dir,
-                day,
-                calendar,
-                settings.symbols,
-                algorithm.features,
-                settings.fee_rate,
-                leaders,
-            )
+    loaded: dict[date, TrainingDay] = {}
+    for day in finished[-(days or algorithm.training_days) :]:
+        found = training_day(
+            settings.data_dir, day, calendar, settings.symbols, algorithm.features, settings.fee_rate, leaders
         )
-        is not None
-    ]
+        if found is not None:
+            loaded[day] = found
     if not loaded:
         raise FileNotFoundError(
             f"no backfilled bars or recorded trades of {', '.join(settings.symbols)} in {settings.data_dir}"
         )
-    training = [s for day in loaded for s in day.samples]
+    training = [s for found in loaded.values() for s in found.samples]
     model = algorithm.fit(training)
-    Shelf(settings.state_dir).install(name, model, "fit", datetime.now(KST))
+    Shelf(settings.state_dir).install(name, model, "fit", local)
     return Fitted(
         model,
         model_path(settings.state_dir, name),
         len(loaded),
-        sum(day.reference == "mid" for day in loaded),
+        [day for day, found in loaded.items() if found.reference == "mid"],
         sum(s.outcome is not None for s in training),
     )
 

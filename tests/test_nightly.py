@@ -252,6 +252,17 @@ def test_recorded_days_train_on_mid_points_and_the_report_says_which_days(
     assert "녹화 중간가 4일, 백필 종가 3일" in result.summary()
 
 
+def test_cached_days_no_night_needs_any_more_are_removed(store_root: Path, tmp_path: Path) -> None:
+    stale = tmp_path / "cache" / "events" / "date=2026-01-02" / f"feed={MINUTE_BARS_TR}"
+    stale.mkdir(parents=True)
+
+    night(store_root, tmp_path, [FrequencyAlgorithm("learner", "velocity")])
+
+    assert not stale.parent.exists()
+    cached = sorted(p.name for p in (tmp_path / "cache" / "bars").glob("date=*"))
+    assert cached == [f"date={d}" for d in DAYS[-7:]], "the four training and three validation days"
+
+
 def leading_index_day(day: date) -> list[Event]:
     """A morning where the stock follows the electrical and electronics index: the index
     jumps half-way through each minute, and the stock the same way twenty seconds into the

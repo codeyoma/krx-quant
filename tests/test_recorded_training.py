@@ -15,7 +15,7 @@ from krx_quant.features import FEATURES, Leaders
 from krx_quant.pricing import Direction, tick_size
 from krx_quant.training import recorded_samples
 from tests.algorithm_doubles import FixedAlgorithm
-from tests.replay_events import CALENDAR, DAY, FEE, SYMBOL, at, book, run, steady_book, trade
+from tests.replay_events import CALENDAR, DAY, FEE, SYMBOL, at, book, run, steady_book, trade, vi
 from tests.test_algorithms_replay import LEADERS, leaders_morning
 from tests.test_replay import busy_morning
 
@@ -103,3 +103,25 @@ def test_trades_bouncing_between_bid_and_ask_are_no_move_on_a_recorded_day() -> 
     assert len(outcomes) == 37  # 09:01–09:37: the last book, at 09:40, counts for a minute
     assert all(s.outcome is Direction.FLAT and s.change_ticks == 0 for s in outcomes)
     assert {s.features["return_1"] for s in outcomes[2:10]} != {0.0}, "the closes bounce"
+
+
+async def test_a_recorded_day_leaves_out_what_live_statistics_leave_out(tmp_path: Path) -> None:
+    # A VI from 09:30:20, first expected to last its least (3 minutes), released at 09:32:25.
+    events = sorted(
+        [*busy_morning(), vi(at("09:30:21"), "09:30:20"), vi(at("09:32:30"), "09:30:20", "09:32:25")],
+        key=received,
+    )
+    await run(tmp_path / "engine.db", events, until=at("10:00:00"))
+
+    samples = recorded_samples(events, CALENDAR, DAY, (SYMBOL,), ("return_1",), FEE, Leaders())
+
+    with sqlite3.connect(tmp_path / "engine.db") as conn:
+        rows = conn.execute(
+            "SELECT p.bar_close FROM predictions p LEFT JOIN outcomes o ON o.prediction_id = p.id"
+            " WHERE p.algorithm = 'baseline-flat' AND (p.status = 'vi' OR o.special = 1)"
+        ).fetchall()
+    left_out = {datetime.fromisoformat(t) for (t,) in rows}
+    # 09:31 and 09:32 in the VI; 09:27–09:30 reach into it. By 09:33 the release is known.
+    assert left_out == {at("09:27:00") + timedelta(minutes=m) for m in range(6)}
+    trained = {s.bar_close for s in samples if s.bar_close <= at("10:00:00")}
+    assert trained == {at("09:01:00") + timedelta(minutes=m) for m in range(60)} - left_out
