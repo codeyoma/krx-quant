@@ -59,6 +59,11 @@ class Shelf:
         entries: list[dict[str, Any]] = json.loads(path.read_text()) if path.exists() else []
         return [e for e in entries if name is None or e["algorithm"] == name]
 
+    def current_version(self, name: str) -> str | None:
+        """The version the engine runs (or will at once); None for the defaults."""
+        path = model_path(self.state_dir, name)
+        return Model.from_json(path.read_text()).version if path.exists() else None
+
     def mark_applied(self, night: date) -> None:
         """A night's promotion list is applied (whatever it promoted): never again."""
         _write(self._root / _APPLIED, {"night": night.isoformat()})

@@ -32,6 +32,7 @@ import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import date
+from datetime import time as clock_time
 from pathlib import Path
 
 import pyarrow as pa
@@ -43,6 +44,9 @@ from krx_quant.recorder import PART_PREFIX
 
 log = logging.getLogger(__name__)
 
+# The collector archives each day again at this time (KST), after the NXT and KRX
+# after-market close and the 20:30 backfill: the day's bars are in the store from then on.
+NIGHTLY_ARCHIVE = clock_time(21, 0)
 MERGED = "data.parquet"
 _PARTS_KEY = b"krx_quant.parts"
 _UPLOADED = ".uploaded.json"

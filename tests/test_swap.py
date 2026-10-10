@@ -23,7 +23,7 @@ from krx_quant.market_calendar import MarketCalendar
 from krx_quant.model_shelf import Shelf
 from krx_quant.object_store import LocalObjectStore, ObjectStore
 from krx_quant.predictions import PredictionStore
-from krx_quant.swap import morning_swap, night_status, publish_live, reload_models
+from krx_quant.swap import morning_swap, night_status, night_to_train, publish_live, reload_models
 from tests.replay_events import api, get_json
 
 NIGHT = date(2026, 10, 12)  # a Monday's night
@@ -68,7 +68,7 @@ def engine(tmp_path: Path) -> PredictionEngine:
 
 async def morning(store: ObjectStore, tmp_path: Path, engine: PredictionEngine, day: date = MORNING) -> Any:
     shelf = Shelf(tmp_path / "state")
-    return await morning_swap(store, shelf, engine, engine.calendar, today=day, at=at(day, "08:00"))
+    return await morning_swap(store, shelf, engine, today=day, at=at(day, "08:00"))
 
 
 async def test_the_night_s_promoted_models_run_from_08_00(
@@ -100,10 +100,10 @@ async def test_a_list_not_final_by_07_30_is_left_for_yesterday_s_models(
     assert engine.models["newton"].version == "newton-default"
     assert applied.as_dict()["applied"] is False
     assert "07:30" in applied.as_dict()["reason"]
-    # Nor the morning after: it was that night's list, and the next one did not train.
+    # The next morning it runs, if no later night replaced it.
     later = await morning(store, tmp_path, engine, day=date(2026, 10, 14))
-    assert engine.models["newton"].version == "newton-default"
-    assert later.as_dict()["applied"] is False
+    assert engine.models["newton"] == TRAINED
+    assert later.as_dict()["applied"] is True
 
 
 async def test_without_a_list_nothing_changes(
@@ -126,6 +126,9 @@ async def test_a_rollback_goes_back_one_model_and_stays_back(
     assert shelf.rollback("newton", at(MORNING, "09:30")) == fitted
     reload_models(engine, shelf)
     assert engine.models["newton"] == fitted
+    status = night_status(store, shelf, MORNING)
+    assert status is not None and status.applied is False
+    assert status.reason == f"applied, then replaced: newton runs {fitted.version}"
 
     # The next morning has no newer list: the rolled-back promotion is not applied again.
     await morning(store, tmp_path, engine, day=date(2026, 10, 14))
@@ -176,3 +179,35 @@ def test_a_model_installed_before_the_history_is_one_rollback_away(tmp_path: Pat
     shelf.install("newton", TRAINED, f"promotion {NIGHT}", at(MORNING, "08:00"))
 
     assert shelf.rollback("newton", at(MORNING, "09:00")) == earlier
+
+
+async def test_a_list_naming_a_model_the_store_lacks_is_not_applied_at_all(
+    store: ObjectStore, tmp_path: Path, engine: PredictionEngine
+) -> None:
+    gauss = Model("gauss-20261012-def456", {"speed": 0.1, "weight": 0.5, "threshold": 1.0})
+    night_list(tmp_path / "store", finalized=at(NIGHT, "21:40"), promoted={"newton": TRAINED, "gauss": gauss})
+    (tmp_path / "store" / "models" / "gauss" / f"{gauss.version}.json").unlink()
+
+    status = await morning(store, tmp_path, engine)
+
+    assert status.as_dict()["applied"] is False and gauss.version in status.as_dict()["reason"]
+    assert engine.models["newton"].version == "newton-default", "all or nothing"
+    assert not Shelf(tmp_path / "state").applied(NIGHT), "tried again the next morning"
+
+
+def test_a_training_before_the_night_s_archive_trains_the_day_before() -> None:
+    calendar = MarketCalendar({NIGHT: True, MORNING: True})
+
+    assert night_to_train(calendar, at(MORNING, "21:30")) == MORNING
+    assert night_to_train(calendar, at(MORNING, "16:00")) == NIGHT, "today's bars are archived at 21:00"
+    assert night_to_train(calendar, at(date(2026, 10, 19), "16:00")) == date(2026, 10, 16), "over a weekend"
+
+
+def test_the_train_command_needs_the_object_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("KRX_OBJECT_STORE", raising=False)
+
+    assert main(["train"]) == 2
+    assert "KRX_OBJECT_STORE is not set" in capsys.readouterr().err
