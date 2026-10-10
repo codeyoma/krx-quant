@@ -141,8 +141,9 @@ async def morning_swap(
 
 
 def reload_models(engine: PredictionEngine, shelf: Shelf) -> bool:
-    """Switch the engine to the model files that changed; whether any did."""
-    return engine.switch_models(load_models(shelf.state_dir, engine.algorithms))
+    """Switch the engine to the model files that changed; whether any did. Those of the
+    algorithms waiting for their pre-validation too, so they start on their latest."""
+    return engine.switch_models(load_models(shelf.state_dir, engine.registered))
 
 
 def publish_live(store: ObjectStore, shelf: Shelf, algorithms: Sequence[Algorithm]) -> None:

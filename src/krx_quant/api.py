@@ -403,9 +403,9 @@ async def _leaderboard(request: web.Request) -> web.Response:
         return {
             **query.describe(),
             "min_sample": min_sample,
-            "ranked": [_entry_json(e) for e in board.ranked],
-            "unranked": [_entry_json(e) for e in board.unranked],
-            "baselines": [_entry_json(e) for e in board.baselines],
+            "ranked": [entry_json(e) for e in board.ranked],
+            "unranked": [entry_json(e) for e in board.unranked],
+            "baselines": [entry_json(e) for e in board.baselines],
         }
 
     body = await _stats(request, ("leaderboard",), query, build)
@@ -446,7 +446,7 @@ async def _algorithm_stats(request: web.Request) -> web.Response:
             for r in records:
                 groups.setdefault(key(r), []).append(r)
             return {
-                k: _entry_json(entry(name, g, baselines, engine.fee_rate)) for k, g in sorted(groups.items())
+                k: entry_json(entry(name, g, baselines, engine.fee_rate)) for k, g in sorted(groups.items())
             }
 
         return {
@@ -454,7 +454,7 @@ async def _algorithm_stats(request: web.Request) -> web.Response:
             **query.describe(),
             "min_sample": min_sample,
             "overall": {
-                **_entry_json(overall),
+                **entry_json(overall),
                 "calibration": [_bin_json(b) for b in overall.summary.calibration],
             },
             "by_symbol": by(lambda r: r.symbol),
@@ -500,7 +500,7 @@ def _interval_json(i: Interval | None) -> dict[str, Any] | None:
     return None if i is None else {"value": i.value, "low": i.low, "high": i.high, "n": i.n}
 
 
-def _entry_json(e: Entry) -> dict[str, Any]:
+def entry_json(e: Entry) -> dict[str, Any]:
     s = e.summary
     out: dict[str, Any] = {
         "rank": e.rank,

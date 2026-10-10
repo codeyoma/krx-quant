@@ -55,6 +55,7 @@ from krx_quant.notify import Alerts
 from krx_quant.object_store import open_store
 from krx_quant.polling import Poller, PollJob
 from krx_quant.predictions import DB_NAME, PredictionStore, iso
+from krx_quant.prevalidation import admits
 from krx_quant.recorder import ParquetRecorder
 from krx_quant.signals import Signals
 from krx_quant.stream import LiveStatus
@@ -176,6 +177,7 @@ async def run_collector(
         min_sample=settings.min_sample,
         leaders=Leaders.of(settings),
         regimes=partial(day_regime, settings.data_dir),  # recorded by the 07:30 macro read
+        admits=admits(settings.state_dir),  # a new algorithm waits for its pre-validation
     )
 
     def on_event(feed: str, row: dict[str, Any]) -> None:

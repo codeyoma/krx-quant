@@ -283,6 +283,14 @@ class Entry:
             return None
         return min(low for low in lows if low is not None)
 
+    @property
+    def weakest_lift(self) -> float | None:
+        """The weakest lift: better than every baseline, by how much at least."""
+        values = [t.lift.value for t in self.lifts.values()]
+        if not values or any(v is None for v in values):
+            return None
+        return min(v for v in values if v is not None)
+
 
 @dataclass(frozen=True)
 class Leaderboard:

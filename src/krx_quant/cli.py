@@ -29,6 +29,7 @@ from krx_quant.model_shelf import Shelf
 from krx_quant.nightly import run_training
 from krx_quant.notify import send_notice, send_test_alert
 from krx_quant.predictions import DB_NAME, PredictionStore
+from krx_quant.prevalidation import PREVALIDATION_DAYS, REGISTERED_BEFORE, prevalidate, report_path
 from krx_quant.replay import replay_day
 from krx_quant.training import fit_algorithm
 
@@ -113,6 +114,28 @@ def _train(day: date | None) -> int:
     print(night.summary())
     print(f"promoted: {night.promoted or 'nothing'}; the server applies it at 08:00")
     return 0
+
+
+def _prevalidate(name: str, days: int) -> int:
+    settings = Settings.from_env(require_kis=False)
+    try:
+        result = asyncio.run(prevalidate(settings, name, days=days))
+    except (FileNotFoundError, ValueError) as e:
+        print(e, file=sys.stderr)
+        return 1
+    span = f"{result.days[0]}..{result.days[-1]}"
+    print(f"{name}: {'passed' if result.passed else 'refused'} ({len(result.days)} recorded days, {span})")
+    for c in result.checks:
+        print(f"  {c.check}: {'ok' if c.passed else 'FAILED'} - {c.detail}")
+    print(f"report: {report_path(settings.state_dir, name)}")
+    print(f"predictions: {result.db} (not in the official record)")
+    if name in REGISTERED_BEFORE:
+        print(f"{name} was registered before pre-validation: the engine runs it either way")
+    elif result.passed:
+        print(f"the engine starts {name} on probation at its next bar close, unless it runs it already")
+    else:
+        print(f"the engine does not start {name}; fix it and run this again")
+    return 0 if result.passed else 1
 
 
 def _rollback(name: str) -> int:
@@ -277,6 +300,17 @@ def main(argv: list[str] | None = None) -> int:
     fit_cmd.add_argument(
         "--days", type=_positive, help="trading days to train on (default: the algorithm's own)"
     )
+    prevalidate_cmd = sub.add_parser(
+        "prevalidate",
+        help="replay a new algorithm on the latest recorded days; the engine starts it only if it passes",
+    )
+    prevalidate_cmd.add_argument("algorithm", help="e.g. kalman")
+    prevalidate_cmd.add_argument(
+        "--days",
+        type=_positive,
+        default=PREVALIDATION_DAYS,
+        help=f"recorded trading days to replay (default: {PREVALIDATION_DAYS})",
+    )
     train_cmd = sub.add_parser(
         "train", help="train every algorithm on KRX_OBJECT_STORE's latest days and store the promotion list"
     )
@@ -319,6 +353,8 @@ def main(argv: list[str] | None = None) -> int:
             return _replay(args.day, args.db)
         elif args.command == "fit":
             return _fit(args.algorithm, args.days)
+        elif args.command == "prevalidate":
+            return _prevalidate(args.algorithm, args.days)
         elif args.command == "train":
             return _train(args.day)
         elif args.command == "rollback":
