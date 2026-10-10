@@ -2,7 +2,7 @@
 
 엔진은 1분봉이 마감될 때마다 종목별로 4분 뒤 통합 중간가의 방향을 예측하고, 4분 뒤 채점한다. 결과는 `state/engine.sqlite3`에 저장하고 HTTP JSON API로 보여준다. Fincept 화면은 이 API만 읽는다.
 
-지금은 기준 예측 3종(#9)과 알고리즘 Newton(#10), Gauss(#13)가 예측한다. 다른 알고리즘(#14~), 합의(#18), WebSocket 스트림(#19)은 뒤에 붙는다.
+지금은 기준 예측 3종(#9), 알고리즘 Newton(#10)과 Gauss(#13), 합의 Condorcet(#18)이 예측한다. 다른 알고리즘(#14~)과 WebSocket 스트림(#19)은 뒤에 붙는다.
 
 ## 예측
 
@@ -23,6 +23,18 @@
   - 예외를 던지거나 확률이 분포가 아니면 `error`로 남는다.
   - 알고리즘마다 걸린 시간을 재 둔다. 다음 회차에 예상 시간의 합이 CPU 예산(`KRX_CPU_BUDGET_SECONDS`, 기본 30초)을 넘으면, 늦게 등록된 알고리즘부터 그 회차를 건너뛴다(순위가 생기면 순위가 낮은 쪽부터). 건너뛴 기록은 `runs` 테이블에 `cpu_budget`으로 남는다.
   - 건너뛸 때마다 그 알고리즘의 예상 시간을 절반으로 줄인다. 그래서 곧 다시 돌려 시간을 새로 잰다. 한 번 건너뛰었다고 계속 빠지지는 않는다.
+- **합의(Condorcet, #18).** 봉 마감마다 두 합의를 낸다. 각각 하나의 예측(`algorithm`이 `consensus-fast`, `consensus-final`)으로 저장되고 채점된다(`consensus.py`).
+  - 빠른 합의: 봉 마감 +2초까지 끝난 정식 알고리즘으로 낸다.
+  - 최종 합의: 정식 알고리즘이 모두 끝나거나 시간 예산(30초)에 걸리면 바로 낸다. 그래서 늦어도 +30초다.
+  - 구성원은 정식(`active`) 알고리즘뿐이다. 수습, 벤치, 은퇴, 복제는 빠진다. 구성원이 없으면 `status`가 `no_members`인 빈 예측으로 남는다. VI 중인 종목은 `vi`다.
+  - 합치는 방법은 선형 결합이다. 세 확률과 기대수익을 구성원 가중치로 평균한다. 그 시점에 결과가 있는 구성원의 가중치만 합이 1이 되게 다시 나눈다.
+  - `model_version`은 가중치 버전이다(`condorcet-<계산한 날>`, 계산 전에는 `condorcet-equal`).
+- **합의 가중치.** 종목 × 30분 시간대(봉 마감 09:01–09:30은 `09:00`) 칸마다 매일 상태 점검 직후(보통 15:40) 다시 계산한다.
+  1. 최근 5일과 20일(예측이 있는 날) 각각에서, 모든 구성원이 예측한 봉 마감에 대해 합의의 로그손실이 가장 작아지는 가중치를 EM으로 구한다. 기준 B로 보고 특수 예측은 뺀다.
+  2. 두 기간 모두에서 균등(1/구성원 수)보다 높아야 올라간다. 이때는 둘 중 작은 값을 쓴다. 두 기간 모두 낮으면 둘 중 큰 값을 쓰고, 엇갈리면 균등이다. 그다음 합이 1이 되게 나눈다. 최근에만 좋은 알고리즘은 가중치가 오르지 않는다.
+  3. 20일의 봉 마감 수 n만큼만 믿고 나머지는 균등 쪽으로 당긴다. 맞춘 가중치에 n / (n + 200), 균등 가중치에 200 / (n + 200)을 준다.
+  - 가중치가 없는 칸이나 계산 뒤에 정식이 된 알고리즘은 균등하게 친다.
+  - 빠른 합의 시각은 테스트에서 줄일 수 있다(`Timing`). 재생에서는 알고리즘이 도는 동안 재생 시계가 멈춰 있어서, "2초까지 끝난" 여부는 실제로 걸린 시간으로 정한다. 시간 예산과 같다.
 
 ## 기준가 (통합 중간가)
 
@@ -79,12 +91,13 @@
 
 | 테이블 | 열 |
 |---|---|
-| `predictions` | `id`, `symbol`, `algorithm`, `model_version`, `bar_close`(t), `displayed_at`, `p_up`, `p_flat`, `p_down`, `expected_ticks`, `status`(`ok`, `timed_out`, `error`, `vi`). 재생 결과의 `skipped`는 `ok`가 아닌 예측을 모두 센다. `ok`가 아니면 확률과 기대수익이 비어 있고 `outcomes` 행이 없다. |
+| `predictions` | `id`, `symbol`, `algorithm`, `model_version`, `bar_close`(t), `displayed_at`, `p_up`, `p_flat`, `p_down`, `expected_ticks`, `status`(`ok`, `timed_out`, `error`, `vi`, 합의의 `no_members`). 재생 결과의 `skipped`는 `ok`가 아닌 예측을 모두 센다. `ok`가 아니면 확률과 기대수익이 비어 있고 `outcomes` 행이 없다. |
 | `outcomes` | `prediction_id`, `target_at`(t + 4분), `mid_close`(A), `mid_display`(B), `mid_target`, `flat_ticks`(k), `class_a`, `class_b`(`up`/`flat`/`down`), `special`, `unscorable`, `scored_at`(채점 전에는 비어 있음) |
 | `runs` | `id`, `kind`(`cpu_budget`: CPU 예산으로 건너뜀, `review`: 일일 상태 점검, `retire_candidate`: 은퇴 후보 알림), `at`, `algorithm`, `detail` |
 | `statuses` | `id`, `algorithm`, `at`, `previous`, `status`, `reason`: 알고리즘 상태 이력(#17) |
+| `consensus_weights` | `version`, `computed_at`, `symbol`, `slot`, `algorithm`, `weight`: 합의 가중치(#18). 버전마다 칸별로 남는다. 엔진은 시작할 때 마지막 버전을 읽는다. |
 
-시각은 KST ISO 8601 문자열이다. 스키마 버전은 `PRAGMA user_version`에 있다(지금 3). 엔진이 시작할 때 예전 버전의 DB를 데이터를 지키며 올린다.
+시각은 KST ISO 8601 문자열이다. 스키마 버전은 `PRAGMA user_version`에 있다(지금 4). 엔진이 시작할 때 예전 버전의 DB를 데이터를 지키며 올린다.
 
 ## API
 
@@ -244,6 +257,23 @@
 ```
 
 (값은 예시다. `vs`에는 기준 3종이 모두 온다. `baselines` 항목은 `lift`가 없는 것만 빼면 같은 형식이다.)
+
+### `GET /v1/consensus`
+
+합의의 구성과 가중치다.
+
+```json
+{
+  "names": ["consensus-fast", "consensus-final"],
+  "version": "condorcet-20261012", "computed_at": "2026-10-12T15:40:00+09:00",
+  "members": ["newton"],
+  "fast_seconds": 2.0,
+  "weights": {"005930": {"09:00": {"newton": 1.0}}}
+}
+```
+
+- `members`는 지금의 정식 알고리즘이다. `weights`는 마지막으로 계산한 칸별 가중치다(그때의 구성원).
+- 합의의 성적은 순위표와 `/v1/algorithms/consensus-final/stats`에서 다른 알고리즘처럼 볼 수 있다.
 
 ### `GET /v1/algorithms/{name}/stats?symbol=&period=&basis=&special=`
 
