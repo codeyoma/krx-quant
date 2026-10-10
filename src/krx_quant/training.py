@@ -69,7 +69,7 @@ def samples(
             price = done[-1].close if done else None
             groups = None
             if leading:
-                groups = leaders.groups(symbol, stocks[day].until(t), series.get(day, _Day({})).until(t))
+                groups = leaders.groups(symbol, stocks[day].until(t), series.get(day, _DayBars({})).until(t))
             snapshot = Snapshot.at(
                 symbol, t, done, price, fee_rate, session_open=session.open, leaders=groups
             )
@@ -85,7 +85,7 @@ def samples(
     return out
 
 
-class _Day:
+class _DayBars:
     """A day's bars of several series, cut at any bar close."""
 
     def __init__(self, bars: Mapping[str, Sequence[Bar]]) -> None:
@@ -97,32 +97,23 @@ class _Day:
         return {name: each[: bisect.bisect_right(self._ends[name], t)] for name, each in self._bars.items()}
 
 
-def _by_day(bar_days: BarDays) -> dict[date, _Day]:
+def _by_day(bar_days: BarDays) -> dict[date, _DayBars]:
     days: dict[date, dict[str, Sequence[Bar]]] = {}
     for (name, day), bars in bar_days.items():
         days.setdefault(day, {})[name] = bars
-    return {day: _Day(bars) for day, bars in days.items()}
+    return {day: _DayBars(bars) for day, bars in days.items()}
 
 
-def load_leader_days(
-    data_dir: Path, leaders: Leaders, days: Iterable[date]
-) -> dict[tuple[str, date], list[Bar]]:
+def load_leader_days(data_dir: Path, leaders: Leaders, days: Iterable[date]) -> BarDays:
     """The leading series' backfilled bars on ``days``: the futures and the ETFs."""
     wanted = [(FUTURES_BARS_TR, KOSPI200.series), (FUTURES_BARS_TR, USD.series)]
     wanted += [(MINUTE_BARS_TR, etf) for etf in leaders.etfs]
     out: dict[tuple[str, date], list[Bar]] = {}
     for day in days:
         for feed, name in wanted:
-            path = (
-                data_dir
-                / "bars"
-                / f"date={day.isoformat()}"
-                / f"feed={feed}"
-                / f"symbol={name}"
-                / "bars.parquet"
-            )
-            if path.exists():
-                out[(name, day)] = [_bar(row) for row in pq.read_table(path).to_pylist()]
+            bars = _read_bars(data_dir / "bars" / f"date={day.isoformat()}", feed, name)
+            if bars is not None:
+                out[(name, day)] = bars
     return out
 
 
@@ -137,12 +128,20 @@ def load_bar_days(data_dir: Path, symbols: Sequence[str], days: int) -> dict[tup
         day = date.fromisoformat(folder.name.removeprefix("date="))
         found = False
         for symbol in symbols:
-            path = folder / f"feed={MINUTE_BARS_TR}" / f"symbol={symbol}" / "bars.parquet"
-            if path.exists():
-                out[(symbol, day)] = [_bar(row) for row in pq.read_table(path).to_pylist()]
+            bars = _read_bars(folder, MINUTE_BARS_TR, symbol)
+            if bars is not None:
+                out[(symbol, day)] = bars
                 found = True
         taken += found
     return out
+
+
+def _read_bars(day_folder: Path, feed: str, name: str) -> list[Bar] | None:
+    """A day's backfilled bars of a series, if it has a file."""
+    path = day_folder / f"feed={feed}" / f"symbol={name}" / "bars.parquet"
+    if not path.exists():
+        return None
+    return [_bar(row) for row in pq.read_table(path).to_pylist()]
 
 
 @dataclass(frozen=True)
