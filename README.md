@@ -71,9 +71,10 @@ uv run krx-quant archive
 ```
 
 예측과 엔진 API:
-- 수집기는 받은 이벤트로 1분봉 마감마다 기준 예측 3종(항상 보합, 직전 4분 방향 지속, 클래스 비율 무작위)과 알고리즘(Newton 추세 추종, Gauss 역추세, Granger 이웃 관찰)의 예측을 낸다. 4분 뒤 두 기준(봉 마감, 표시 시점)으로 채점한다. 결과는 `state/engine.sqlite3`에 쌓인다.
+- 수집기는 받은 이벤트로 1분봉 마감마다 기준 예측 3종(항상 보합, 직전 4분 방향 지속, 클래스 비율 무작위), 알고리즘(Newton 추세 추종, Gauss 역추세, Granger 이웃 관찰), 합의 2종(Condorcet 빠른·최종)의 예측을 낸다. 4분 뒤 두 기준(봉 마감, 표시 시점)으로 채점한다. 결과는 `state/engine.sqlite3`에 쌓인다.
+- 알고리즘은 모두 수습으로 시작한다. 매일 장 마감 10분 뒤 상태(수습, 정식, 벤치, 은퇴, 복제)를 점검하고, 정식 알고리즘만 합의에 들어간다([docs/engine-api.md](docs/engine-api.md#상태-관리-17)).
 - 순위표(`/v1/leaderboard`)와 알고리즘 상세 통계(`/v1/algorithms/<이름>/stats`)를 낸다. 방향 정밀도, 커버리지, 기준 3종 대비 lift, 가상손익, Brier 점수, 보정 곡선을 신뢰구간과 함께 보여준다.
-- 알고리즘은 녹화된 날은 녹화 이벤트(중간가 기준)로, 백필만 있는 날은 1분봉(종가 기준)으로 학습한다. 모델은 `state/models/`에 저장되고, 실행 중인 엔진이 1분 안에 새 모델로 바꾼다.
+- 알고리즘은 녹화된 날은 녹화 이벤트(중간가 기준)로, 백필만 있는 날은 1분봉(종가 기준)으로 학습한다. 모델은 `state/models/`에 저장되고, 실행 중인 엔진은 30초마다 확인해 바뀐 모델로 바꾼다.
 
 ```bash
 uv run krx-quant fit newton
@@ -99,7 +100,9 @@ uv run krx-quant replay 2026-10-12
 docker compose up -d --build
 ```
 
-로컬 Docker에서 가짜 KIS에 붙여 수집 → 녹화 → 업로드까지 확인하려면 다음을 실행한다. 엔진 API가 응답하는지, 업로드를 두 번 돌려 두 번째에 바뀌는 것이 없는지도 본다.
+> **삭제됨** (2026-10-08, #33): `docker build -t krx-quant .` 뒤 `docker run --rm --env-file .env -u "$(id -u):$(id -g)" -v "$PWD/data:/data" -v "$PWD/state:/state" krx-quant collect`로 띄우던 안내. 이유 기록 없음. 대신: `compose.yaml`(엔진 포트를 Tailscale 주소에만 연다)과 `deploy/setup-server.sh`.
+
+로컬 Docker에서 가짜 KIS에 붙여 수집 → 녹화 → 업로드까지 확인하려면 다음을 실행한다. 엔진 API가 응답하는지, 업로드를 두 번 돌려 두 번째에 바뀌는 것이 없는지도 본다. 설정은 `deploy/smoke.env`이고, 실제 `.env`, `data/`, `state/`는 건드리지 않는다.
 
 ```bash
 deploy/smoke-local.sh
@@ -117,7 +120,7 @@ uv run krx-quant fake-kis --port 18080
 KIS_APP_KEY=test-app-key KIS_APP_SECRET=test-app-secret KIS_REST_URL=http://127.0.0.1:18080 KIS_WS_URL=ws://127.0.0.1:18080 uv run krx-quant collect
 ```
 
-가짜 서버는 구독에 응답하고 10초마다 PINGPONG만 보낸다. 시세 메시지는 테스트에서만 흘린다.
+가짜 서버는 구독에 응답하고 10초마다 PINGPONG을 보낸다. `--trades`를 붙이면 구독한 통합 체결(`H0UNCNT0`) 종목마다 1초에 한 번 가짜 체결도 보낸다. 다른 시세 메시지는 테스트에서만 흘린다. Docker 안에서 다른 컨테이너가 붙게 하려면 `--host 0.0.0.0`을 쓴다(`deploy/compose.smoke.yaml`).
 
 ### 실제 KIS로 확인하기 (장중)
 
@@ -134,25 +137,48 @@ KIS_APP_KEY=test-app-key KIS_APP_SECRET=test-app-secret KIS_REST_URL=http://127.
 uv run python -c "import glob, pyarrow.parquet as pq; d = sorted(glob.glob('data/events/date=*/feed=H0UNCNT0/symbol=005930'))[-1]; [print(r) for r in pq.read_table(d).slice(0, 5).to_pylist()]"
 ```
 
+## 명령
+
+모두 `uv run krx-quant <명령>`(서버에서는 `docker compose run --rm engine <명령>` 또는 `docker compose exec engine krx-quant <명령>`)이다. 설정은 환경 변수와 `.env`에서 읽는다([docs/operations.md](docs/operations.md#설정-값-전체)).
+
+| 명령 | 하는 일 | KIS 키 |
+|---|---|---|
+| `collect` | 실시간 녹화, 예측·채점, 엔진 API, 업로드, 백필, 밤 학습 일정. 멈출 때까지 돈다 | 필요 |
+| `measure-subscriptions` | 세션당 실시간 구독 한도를 잰다. 수집기를 멈추고 실행한다 | 필요 |
+| `backfill` | 빠진 1분봉을 한 번 채운다. 수집기를 멈추고 실행한다 | 필요 |
+| `archive [--recheck]` | 녹화한 날을 합쳐 `KRX_OBJECT_STORE`에 올린다. `--recheck`는 모든 파일을 저장소와 비교한다 | 필요(쓰지는 않는다) |
+| `replay <YYYY-MM-DD> [--db 경로]` | 녹화한 하루를 엔진으로 다시 돌려 별도 DB에 쓴다 | 없어도 된다 |
+| `fit <알고리즘> [--days N]` | 최근 날들로 학습해 `state/models/`에 설치한다. 녹화된 날은 녹화 이벤트(중간가), 백필만 있는 날은 1분봉(종가)으로 | 없어도 된다 |
+| `train [--day YYYY-MM-DD]` | 밤 학습 한 번. `--day`가 없으면 Object Store에 1분봉이 있는 가장 최근 날 | 없어도 된다 |
+| `rollback <알고리즘>` | 직전 모델로 되돌린다 | 없어도 된다 |
+| `retire <알고리즘>`, `unretire <알고리즘>` | 은퇴시킨다, 은퇴를 풀어 수습으로 되돌린다 | 없어도 된다 |
+| `test-alert` | 텔레그램에 `[테스트]` 메시지를 보낸다 | 필요(쓰지는 않는다) |
+| `notify <글>` | 텔레그램에 `[알림] <글>`을 보낸다. `deploy/auto-update.sh`가 쓴다 | 없어도 된다 |
+| `fake-kis [--port 18080] [--host 127.0.0.1] [--trades]` | 가짜 KIS 서버(아래 "키 없이 확인하기") | 없어도 된다 |
+
+종료 코드: 0은 성공이다. 2는 설정 오류(`configuration error: ...`)나 잘못된 인자다. 1은 KIS 오류(`KIS error: ...`, Docker가 다시 띄운다)이거나 명령이 할 일을 못 한 경우다. 예: 업로드에 실패한 파티션, 학습할 1분봉 없음, 되돌릴 모델 없음, 텔레그램 전송 실패.
+
 ## 문서
 
-- [docs/design.md](docs/design.md): 설계 (목표, 구조, 데이터, 알고리즘, 학습, 인프라, 개발 단계)
+- [docs/design.md](docs/design.md): 설계 (목표, 구조와 모듈 지도, 데이터, 알고리즘, 학습, 인프라, 개발 단계). 바뀐 결정은 각 절의 **바뀜**·**삭제됨** 표시에 있다
 - [docs/kis-feeds.md](docs/kis-feeds.md): KIS 피드, 키, 한도, 최근월물 찾기
 - [docs/events.md](docs/events.md): 녹화 데이터와 1분봉 형식
 - [docs/engine-api.md](docs/engine-api.md): 엔진 API, 예측·채점 규칙, 저장 구조, 알고리즘 규약과 학습, 재생
-- [docs/operations.md](docs/operations.md): 서버 개통, 키 교체, 장애 대응
+- [docs/operations.md](docs/operations.md): 서버 개통, 설정 값 전체, 매일 일정, 밤 학습과 모델 교체, 자동 업데이트, 키 교체, 장애 대응과 알림, 저장 위치
 - [docs/paid-data.md](docs/paid-data.md): 유료 데이터 조사
 
 ## 진행 상황
 
+2026-10-10 기준이다. 이슈는 `gh issue list --state all`로 본다. 자세한 것은 [docs/design.md](docs/design.md) 11장에 있다.
+
 | 단계 | 내용 | 상태 |
 |---|---|---|
 | P0 | 저장소 준비, 설계 문서 | 완료 |
-| P1 | 수집기 | 다음 |
-| P2 | 예측·채점 핵심 | |
-| P3 | Fincept 화면, 빌드 | |
-| P4 | 밤 학습 (EC2 Spot) | |
-| P5 | 호가 알고리즘, 재생 테스트 | |
+| P1 | 수집기 | 거의 완료(#2–#6, #30). 남은 것: 첫 거래일 확인(#7), ETF 장중 확인(#29), REST 대체 추가(#28), 매크로(#8) |
+| P2 | 예측·채점 핵심 | 진행 중. 완료: #9–#13, #15, #17, #18. 남은 것: Markov(#14), Turing(#16), 엔진 API 완성(#19) |
+| P3 | Fincept 화면, 빌드 | 시작 전(#20, #21) |
+| P4 | 밤 학습 | 진행 중. 상시 서버의 밤 학습과 08:00 교체는 됐다(PR #45). 녹화 이벤트로 학습하기(#22), EC2 Spot과 비용 상한(#23)이 남았다 |
+| P5 | 호가 알고리즘, 재생 테스트 | 하루 재생(`replay`)만 있다. Kalman(#25), Shannon(#26), Poisson(#27), 사전 검증 도구(#24) |
 
 ## 비밀값
 

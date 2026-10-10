@@ -63,7 +63,7 @@ Cell = tuple[str, str]  # (symbol, slot)
 
 @dataclass(frozen=True)
 class Timing:
-    fast_seconds: float = 2.0  # after the bar close
+    fast_seconds: float = 2.0  # after the algorithms start, just after the bar close
 
 
 @dataclass(frozen=True)

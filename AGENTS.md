@@ -17,6 +17,15 @@ Single-context: root `CONTEXT.md` + `docs/adr/`, plus the agreed system design i
 - Never push to `main` directly. Start each change on a branch from `origin/main`, push the branch, open a pull request against `main` (`Closes #N` for the issue it implements), and merge it from the PR once CI passes.
 - The `fincept/` fork follows its own rules (`fincept/custom/AGENTS.md`).
 
+## Documentation
+
+- Other agents learn the system from `docs/`, `README.md` and `.env.example`, not from chat history. Every PR updates the docs for what it adds or changes: settings, commands, API fields, stored files and keys, schedules, alerts and decisions.
+- Nothing is removed silently. When a feature, setting, command, field or decision is removed or replaced, its section keeps a note, in Korean like the rest of the docs:
+  - `> **삭제됨** (YYYY-MM-DD, #PR): 무엇이 없어졌는지. 이유: …. 대신: ….`
+  - `> **바뀜** (YYYY-MM-DD, #PR): 이전 → 지금. 이유: ….`
+- The reason is the one recorded in the PR or the commit. If none was recorded, write "이유 기록 없음".
+- Changes committed straight to `main` before PR #31 are cited by commit SHA instead of `#PR`.
+
 ## Repository layout
 
 - Engine code, algorithms and docs live in this private repo.
