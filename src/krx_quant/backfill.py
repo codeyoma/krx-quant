@@ -263,14 +263,12 @@ class Backfiller:
         return [bars[t] for t in sorted(bars)]
 
     def _path(self, series: Series, day: date) -> Path:
-        return (
-            self._data_dir
-            / "bars"
-            / f"date={day.isoformat()}"
-            / f"feed={series.feed}"
-            / f"symbol={series.name}"
-            / "bars.parquet"
-        )
+        return self._data_dir / bars_key(day, series.feed, series.name)
+
+
+def bars_key(day: date, feed: str, name: str) -> str:
+    """Where a day's bars of a series are, under the data directory or the Object Store."""
+    return f"bars/date={day.isoformat()}/feed={feed}/symbol={name}/bars.parquet"
 
 
 def _bar(symbol: str, venue: str, day: date, r: dict[str, str]) -> Row:

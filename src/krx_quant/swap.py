@@ -2,11 +2,14 @@
 rollback in one command (``model_shelf``), and the models it runs published for the
 next night.
 
-At 08:00 each trading day the latest list of an earlier night is applied, if it was
-final by 07:30; otherwise yesterday's models run on. The running engine notices a model
-file that changed (the swap, ``krx-quant rollback``) and switches to it before its next
-bar close; the server then publishes what it runs (``live.json`` and the models), the
-champions of the next night.
+At 08:00 on the first trading day after a night, that night's list is applied, if it was
+final by 07:30; otherwise yesterday's models run on, and the list is never applied. The
+running engine notices a model file that changed (the swap, ``krx-quant fit``,
+``krx-quant rollback``) and switches to it within half a minute; the server then
+publishes what it runs (``live.json`` and the models), the champions of the next night.
+
+Until #23 moves the training to EC2, the collector also starts it here, in its own
+process, at ``KRX_TRAIN_AT`` on trading days.
 """
 
 from __future__ import annotations
@@ -32,29 +35,30 @@ from krx_quant.object_store import ObjectStore, get_json, put_json
 log = logging.getLogger(__name__)
 
 SWAP_AT = time(8, 0)
-DEADLINE = time(7, 30)  # a list final later than this waits for the next one
+DEADLINE = time(7, 30)  # a list final later than this is not applied
+WATCH_SECONDS = 30.0  # how soon the engine notices a model file that changed
+# A night's training must be done well before the morning; a run still going is stopped.
+TRAINING_TIMEOUT = timedelta(hours=6)
+# A collector started this long after a scheduled training (a deploy, a crash) runs it at
+# once: the night resumes from its checkpoints.
+CATCH_UP = timedelta(hours=8)
+_TRAINING_ALERT = "training"
 
 
 @dataclass(frozen=True)
-class Applied:
-    """A promotion list the morning swap looked at, and what came of it."""
+class NightStatus:
+    """A night's promotion list as the server sees it."""
 
     night: Night
-    applied: bool
+    applied: bool  # its promotions run (or it promoted nothing and was taken)
     reason: str
 
     def as_dict(self) -> dict[str, Any]:
-        return {
-            "day": self.night.day.isoformat(),
-            "finalized_at": self.night.finalized_at,
-            "applied": self.applied,
-            "reason": self.reason,
-            "promoted": self.night.promoted,
-            "reports": [
-                {"algorithm": r["algorithm"], "promoted": r["promoted"], "reason": r["reason"]}
-                for r in self.night.reports
-            ],
-        }
+        reports = [
+            {"algorithm": r["algorithm"], "promoted": r["promoted"], "reason": r["reason"]}
+            for r in self.night.reports
+        ]
+        return {**self.night.as_dict(), "applied": self.applied, "reason": self.reason, "reports": reports}
 
 
 def latest_night(store: ObjectStore, before: date) -> Night | None:
@@ -70,60 +74,70 @@ def latest_night(store: ObjectStore, before: date) -> Night | None:
     return None if data is None else Night.from_dict(data)
 
 
-def apply_promotions(store: ObjectStore, shelf: Shelf, *, today: date, at: datetime) -> Applied | None:
-    """The morning swap: install the latest night's promoted models, if final by 07:30
-    ``today`` and not applied before. None without any list.
+def apply_promotions(
+    store: ObjectStore, shelf: Shelf, calendar: MarketCalendar, *, today: date, at: datetime
+) -> NightStatus | None:
+    """The morning swap: install the promoted models of the night before ``today`` (the
+    last trading day before it), if its list was final by 07:30. None without a list.
     """
     night = latest_night(store, today)
     if night is None:
         return None
-    finalized = datetime.fromisoformat(night.finalized_at)
-    deadline = datetime.combine(today, DEADLINE, KST)
-    if finalized > deadline:
-        reason = f"final at {finalized.astimezone(KST):%m-%d %H:%M}, after 07:30: yesterday's models run on"
-        return Applied(night, False, reason)
     if shelf.applied(night.day):
-        return Applied(night, True, "applied before")
+        return NightStatus(night, True, "applied before")
+    if _next_trading_day(calendar, night.day) != today:
+        return NightStatus(night, False, f"not this morning's: the night of {night.day} was not trained")
+    finalized = datetime.fromisoformat(night.finalized_at)
+    if finalized > datetime.combine(today, DEADLINE, KST):
+        reason = f"final at {finalized.astimezone(KST):%m-%d %H:%M}, after 07:30: yesterday's models run on"
+        return NightStatus(night, False, reason)
     for name, version in night.promoted.items():
         data = get_json(store, model_key(name, version))
         if data is None:
             log.error("promoted %s is not in the store; %s keeps its model", version, name)
             continue
         shelf.install(name, Model.from_dict(data), f"promotion {night.day}", at)
+    shelf.mark_applied(night.day)
     promoted = ", ".join(f"{n} {v}" for n, v in night.promoted.items()) or "nothing promoted"
-    return Applied(night, True, promoted)
+    return NightStatus(night, True, promoted)
 
 
-async def morning_swap(
-    store: ObjectStore, shelf: Shelf, engine: PredictionEngine, *, today: date, at: datetime
-) -> Applied | None:
-    """Apply the night's list, switch the engine, and show the night in its status."""
-    applied = await asyncio.to_thread(apply_promotions, store, shelf, today=today, at=at)
-    if applied is not None:
-        engine.training = applied.as_dict()
-    reload_models(engine, shelf)
-    return applied
-
-
-def night_status(store: ObjectStore, shelf: Shelf, today: date) -> Applied | None:
+def night_status(store: ObjectStore, shelf: Shelf, today: date) -> NightStatus | None:
     """The latest night up to ``today``, and whether its promotions run yet."""
     night = latest_night(store, today + timedelta(days=1))
     if night is None:
         return None
     if shelf.applied(night.day):
-        return Applied(night, True, "applied")
-    return Applied(night, False, "waiting for 08:00")
+        return NightStatus(night, True, "applied")
+    return NightStatus(night, False, "waiting for 08:00")
 
 
-def reload_models(engine: PredictionEngine, shelf: Shelf) -> list[str]:
-    """Switch the engine to the model files that changed; the names switched."""
-    changed = []
-    for name, model in load_models(shelf.state_dir, engine.algorithms).items():
-        if engine.models.get(name) != model:
-            log.info("%s now runs %s", name, model.version)
-            engine.models[name] = model
-            changed.append(name)
-    return changed
+async def show_night(store: ObjectStore, shelf: Shelf, engine: PredictionEngine, today: date) -> None:
+    """Show the latest night in the engine's status."""
+    status = await asyncio.to_thread(night_status, store, shelf, today)
+    engine.training = None if status is None else status.as_dict()
+
+
+async def morning_swap(
+    store: ObjectStore,
+    shelf: Shelf,
+    engine: PredictionEngine,
+    calendar: MarketCalendar,
+    *,
+    today: date,
+    at: datetime,
+) -> NightStatus | None:
+    """Apply the night's list, switch the engine, and show the night in its status."""
+    status = await asyncio.to_thread(apply_promotions, store, shelf, calendar, today=today, at=at)
+    if status is not None:
+        engine.training = status.as_dict()
+    reload_models(engine, shelf)
+    return status
+
+
+def reload_models(engine: PredictionEngine, shelf: Shelf) -> bool:
+    """Switch the engine to the model files that changed; whether any did."""
+    return engine.switch_models(load_models(shelf.state_dir, engine.algorithms))
 
 
 def publish_live(store: ObjectStore, shelf: Shelf, algorithms: Sequence[Algorithm]) -> None:
@@ -134,10 +148,6 @@ def publish_live(store: ObjectStore, shelf: Shelf, algorithms: Sequence[Algorith
         if model.trained is not None and store.digest(model_key(name, model.version)) is None:
             put_json(store, model_key(name, model.version), model.as_dict())
     put_json(store, LIVE, live)
-
-
-WATCH_SECONDS = 30.0  # how soon the engine notices a model file that changed
-_TRAINING_ALERT = "training"
 
 
 async def keep_models(
@@ -152,22 +162,27 @@ async def keep_models(
     once if started between 08:00 and the open), the engine switched to any model file that
     changes, and what it runs published. Without a store only the files are watched.
     """
-    if store is not None:
-        status = await asyncio.to_thread(night_status, store, shelf, kst_day(now()))
-        engine.training = None if status is None else status.as_dict()
-    await _publish(store, shelf, engine)
     swap_at = _first_swap(calendar, now())
+    if store is not None:
+        try:
+            await show_night(store, shelf, engine, kst_day(now()))
+            await asyncio.to_thread(publish_live, store, shelf, engine.algorithms)
+        except Exception:
+            log.exception("could not read the last night or publish the live models")
     while True:
         await asyncio.sleep(WATCH_SECONDS)
         try:
+            changed = False
             if store is not None and now() >= swap_at:
-                applied = await morning_swap(store, shelf, engine, today=kst_day(swap_at), at=now())
+                today = kst_day(swap_at)
                 swap_at = _next_on_trading_day(calendar, SWAP_AT, now())
-                if applied is not None and (not applied.applied or applied.night.promoted):
-                    await notify(_swap_notice(applied))
-                await _publish(store, shelf, engine)
-            elif reload_models(engine, shelf):
-                await _publish(store, shelf, engine)
+                status = await morning_swap(store, shelf, engine, calendar, today=today, at=now())
+                changed = True
+                if status is not None and (not status.applied or status.night.promoted):
+                    await notify(_swap_notice(status))
+            changed = reload_models(engine, shelf) or changed
+            if changed and store is not None:
+                await asyncio.to_thread(publish_live, store, shelf, engine.algorithms)
         except Exception:
             log.exception("the model swap failed")
 
@@ -179,42 +194,55 @@ async def keep_training(
     now: Callable[[], datetime],
     refresh: Callable[[], Awaitable[None]],
 ) -> None:
-    """Start ``krx-quant train`` in its own process at ``train_at`` each trading day, until
-    cancelled. It sends its own summary; a failure raises an alert, cleared by the next
-    night that trains.
+    """Start ``krx-quant train --day <day>`` in its own process at ``train_at`` each trading
+    day, until cancelled; at once for a night a restart interrupted or missed (``CATCH_UP``).
+    The process sends its own summary; a failure raises an alert, cleared by the next night
+    that trains.
     """
+    start = _first_training(calendar, train_at, now())
     while True:
-        start = _next_on_trading_day(calendar, train_at, now())
         await asyncio.sleep(max(0.0, (start - now()).total_seconds()))
-        process = await asyncio.create_subprocess_exec(
-            sys.executable, "-m", "krx_quant.cli", "train", stdout=PIPE, stderr=STDOUT
-        )
-        output, _ = await process.communicate()
-        text = output.decode(errors="replace").strip()
-        if process.returncode == 0:
-            log.info("nightly training finished:\n%s", text)
+        day = kst_day(start)
+        start = _next_on_trading_day(calendar, train_at, max(now(), start))
+        try:
+            failure = await _train(day)
+        except Exception as e:
+            log.exception("could not run the nightly training")
+            failure = str(e)
+        if failure is None:
             alerts.resolve(_TRAINING_ALERT, "밤 학습이 다시 됩니다.")
         else:
-            log.error("nightly training failed (exit %s):\n%s", process.returncode, text)
-            last = text.splitlines()[-1] if text else f"exit {process.returncode}"
-            alerts.raise_(_TRAINING_ALERT, f"밤 학습이 실패했습니다: {last}")
-        await refresh()
+            alerts.raise_(_TRAINING_ALERT, f"{day} 밤 학습이 실패했습니다: {failure}")
+        try:
+            await refresh()
+        except Exception:
+            log.exception("could not read the night's result")
 
 
-async def _publish(store: ObjectStore | None, shelf: Shelf, engine: PredictionEngine) -> None:
-    if store is None:
-        return
+async def _train(day: date) -> str | None:
+    """Run the night's training; None if it finished, else why not."""
+    process = await asyncio.create_subprocess_exec(
+        sys.executable, "-m", "krx_quant.cli", "train", "--day", day.isoformat(), stdout=PIPE, stderr=STDOUT
+    )
     try:
-        await asyncio.to_thread(publish_live, store, shelf, engine.algorithms)
-    except Exception:
-        log.exception("could not publish the models the server runs")
+        output, _ = await asyncio.wait_for(process.communicate(), TRAINING_TIMEOUT.total_seconds())
+    except TimeoutError:
+        process.kill()
+        await process.wait()
+        return f"not done in {TRAINING_TIMEOUT}"
+    text = output.decode(errors="replace").strip()
+    if process.returncode == 0:
+        log.info("nightly training of %s finished:\n%s", day, text)
+        return None
+    log.error("nightly training of %s failed (exit %s):\n%s", day, process.returncode, text)
+    return text.splitlines()[-1] if text else f"exit {process.returncode}"
 
 
-def _swap_notice(applied: Applied) -> str:
-    if not applied.applied:
-        return f"{applied.night.day} 밤 학습 결과를 쓰지 않습니다: {applied.reason}"
-    changes = ", ".join(f"{name} → {version}" for name, version in applied.night.promoted.items())
-    return f"모델 교체 ({applied.night.day} 밤 학습): {changes}"
+def _swap_notice(status: NightStatus) -> str:
+    if not status.applied:
+        return f"{status.night.day} 밤 학습 결과를 쓰지 않습니다: {status.reason}"
+    changes = ", ".join(f"{name} → {version}" for name, version in status.night.promoted.items())
+    return f"모델 교체 ({status.night.day} 밤 학습): {changes}"
 
 
 def _first_swap(calendar: MarketCalendar, started: datetime) -> datetime:
@@ -226,6 +254,16 @@ def _first_swap(calendar: MarketCalendar, started: datetime) -> datetime:
     return _next_on_trading_day(calendar, SWAP_AT, started)
 
 
+def _first_training(calendar: MarketCalendar, train_at: time, started: datetime) -> datetime:
+    """The last scheduled training if it was due less than ``CATCH_UP`` ago, else the next."""
+    local = started.astimezone(KST)
+    day = local.date()
+    while not (calendar.is_trading_day(day) and datetime.combine(day, train_at, KST) <= local):
+        day -= timedelta(days=1)
+    last = datetime.combine(day, train_at, KST)
+    return last if local - last < CATCH_UP else _next_on_trading_day(calendar, train_at, started)
+
+
 def _next_on_trading_day(calendar: MarketCalendar, at: time, after: datetime) -> datetime:
     """The first ``at`` on a trading day later than ``after``."""
     day = after.astimezone(KST).date()
@@ -234,3 +272,10 @@ def _next_on_trading_day(calendar: MarketCalendar, at: time, after: datetime) ->
         if moment > after and calendar.is_trading_day(day):
             return moment
         day += timedelta(days=1)
+
+
+def _next_trading_day(calendar: MarketCalendar, day: date) -> date:
+    following = day + timedelta(days=1)
+    while not calendar.is_trading_day(following):
+        following += timedelta(days=1)
+    return following
