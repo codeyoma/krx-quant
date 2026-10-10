@@ -59,10 +59,14 @@ from krx_quant.features import REGIME_CODES, FeatureStore, FeatureVector, Leader
 from krx_quant.feeds import (
     BOOK,
     BOOK_SNAPSHOT,
+    FOREIGN_ESTIMATE,
     INDEX,
     INDEX_REST,
     KOSPI200_FUTURES,
     KRX_TRADE,
+    MEMBER,
+    MEMBER_REST,
+    PROGRAM,
     TRADE,
     US_TRADE,
     USD_FUTURES,
@@ -136,6 +140,12 @@ ENGINE_FEEDS: dict[str, tuple[str, ...]] = {
     KOSPI200_FUTURES.tr_id: ("symbol", "event_time", "received_at", "price", "qty", "change_pct"),
     USD_FUTURES.tr_id: ("symbol", "event_time", "received_at", "price", "qty"),
     US_TRADE.tr_id: ("symbol", "event_time", "received_at", "price", "qty"),
+    # The symbols' flows, for Turing: program trading, foreign member firms (live or by
+    # REST), and brokers' estimates of investor buying.
+    PROGRAM.tr_id: ("symbol", "received_at", "net_value"),
+    MEMBER.tr_id: ("symbol", "received_at", "foreign_net_qty"),
+    MEMBER_REST.tr_id: ("symbol", "received_at", "foreign_net_qty"),
+    FOREIGN_ESTIMATE.tr_id: ("symbol", "received_at", "slot", "foreign_net_qty", "institution_net_qty"),
 }
 
 

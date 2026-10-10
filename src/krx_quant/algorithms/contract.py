@@ -15,7 +15,7 @@ import hashlib
 import json
 import logging
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Protocol
@@ -40,36 +40,52 @@ class Card:
 
 @dataclass(frozen=True)
 class Model:
-    """A versioned model: fitted parameters, or the defaults before any training."""
+    """A versioned model: fitted parameters, or the defaults before any training. A learner
+    whose model is more than numbers (Turing's trees) keeps it as text in ``blob``."""
 
     version: str
     params: Mapping[str, float]
     trained: str | None = None  # what it was trained on
     trained_until: date | None = None  # the last day of its training data
+    blob: str | None = field(default=None, repr=False)
 
-    def as_dict(self) -> dict[str, Any]:
-        return {
+    def as_dict(self, *, blob: bool = True) -> dict[str, Any]:
+        """As stored; without the blob (``blob=False``) as the Engine API shows it."""
+        out: dict[str, Any] = {
             "version": self.version,
             "params": dict(self.params),
             "trained": self.trained,
             "trained_until": self.trained_until.isoformat() if self.trained_until else None,
         }
+        if blob and self.blob is not None:
+            out["blob"] = self.blob
+        return out
 
     def to_json(self) -> str:
         return json.dumps(self.as_dict())
 
     @classmethod
-    def fitted(cls, name: str, params: Mapping[str, float], scored: Sequence[Sample], loss: float) -> Model:
+    def fitted(
+        cls,
+        name: str,
+        params: Mapping[str, float],
+        scored: Sequence[Sample],
+        loss: float,
+        blob: str | None = None,
+    ) -> Model:
         """A model fitted on ``scored``, versioned by its last day and what went into it."""
         first = min(s.bar_close for s in scored).date()
         last = max(s.bar_close for s in scored).date()
         canonical = json.dumps(dict(params), sort_keys=True)
+        if blob is not None:
+            canonical += "|" + hashlib.sha256(blob.encode()).hexdigest()
         digest = hashlib.sha256(f"{canonical}|{first}|{last}|{len(scored)}".encode()).hexdigest()[:6]
         return cls(
             version=f"{name}-{last:%Y%m%d}-{digest}",
             params=dict(params),
             trained=f"{first}..{last}, {len(scored)} samples, log loss {loss:.4f}",
             trained_until=last,
+            blob=blob,
         )
 
     @classmethod
@@ -84,6 +100,7 @@ class Model:
             {k: float(v) for k, v in data["params"].items()},
             data.get("trained"),
             date.fromisoformat(until) if until else None,
+            data.get("blob"),
         )
 
 

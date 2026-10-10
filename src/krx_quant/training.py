@@ -36,7 +36,7 @@ from krx_quant.algorithms.contract import Sample
 from krx_quant.archive import NIGHTLY_ARCHIVE, partition_files
 from krx_quant.backfill import FUTURES_BARS_TR, MINUTE_BARS_TR, bars_key
 from krx_quant.config import Settings
-from krx_quant.contracts import KOSPI200, USD
+from krx_quant.contracts import KOSPI200, USD, days_to_expiry
 from krx_quant.engine import Event
 from krx_quant.features import LEAD_FEATURES, FeatureStore, FeatureVector, Leaders, Snapshot, Value
 from krx_quant.feeds import TRADE
@@ -148,6 +148,7 @@ def samples(
             continue
         ends = [b.start + BAR for b in bars]
         closes = {b.start: b.close for b in bars}
+        expiry = days_to_expiry(day, calendar)
         t, last = prediction_window(session)
         while t <= last:
             done = bars[: bisect.bisect_right(ends, t)]
@@ -164,6 +165,7 @@ def samples(
                 session_open=session.open,
                 leaders=groups,
                 regime=(regimes or {}).get(day),
+                expiry_days=expiry,
             )
             values = store.compute(snapshot, names)
             later = closes.get(t + HORIZON - BAR)  # the close of the bar ending at t + 4 minutes

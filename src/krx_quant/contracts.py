@@ -61,6 +61,19 @@ def last_trading_day(product: Product, year: int, month: int, calendar: MarketCa
     return day
 
 
+def days_to_expiry(day: date, calendar: MarketCalendar) -> int:
+    """Trading days from ``day`` to the next KOSPI200 monthly options expiry (the second
+    Thursday, earlier if that is a holiday, as the futures'); 0 on the expiry itself."""
+    year, month = day.year, day.month
+    while (expiry := last_trading_day(KOSPI200, year, month, calendar)) < day:
+        year, month = (year + 1, 1) if month == 12 else (year, month + 1)
+    days, at = 0, day
+    while at < expiry:
+        at += timedelta(days=1)
+        days += calendar.is_trading_day(at)
+    return days
+
+
 def contract_code(product: Product, year: int, month: int) -> str:
     if year >= NEW_CODES_FROM:
         return f"A{product.code}{year % 10}{month:02d}"

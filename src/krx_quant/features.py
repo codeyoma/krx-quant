@@ -44,6 +44,19 @@ def regime_code(regime: str) -> float | None:
 
 
 @dataclass(frozen=True)
+class Flows:
+    """A symbol's cumulative flows of the day as known at a bar close and ``FLOW_MINUTES``
+    before it; None where nothing was received. Recorded days only: there is no backfill."""
+
+    program_now: float | None = None  # program trading's net buying (value, H0UNPGM0)
+    program_before: float | None = None
+    foreign_member_now: float | None = None  # foreign member firms' net buying (shares, H0UNMBC0)
+    foreign_member_before: float | None = None
+    foreign_estimate: float | None = None  # brokers' estimate of foreign net buying (shares)
+    institution_estimate: float | None = None  # ... and of institutions' (HHPTJ04160200)
+
+
+@dataclass(frozen=True)
 class Snapshot:
     symbol: str
     bar_close: datetime
@@ -57,6 +70,8 @@ class Snapshot:
     # The day's finished bars of each lead group's members (``Leaders.groups``).
     leaders: Mapping[str, Sequence[Sequence[Bar]]] = field(default_factory=dict)
     regime: str | None = None  # the day's macro regime, decided before the open; None unknown
+    flows: Flows = field(default_factory=Flows)
+    expiry_days: int | None = None  # trading days to the KOSPI200 options expiry; None unknown
 
     @classmethod
     def at(
@@ -70,13 +85,17 @@ class Snapshot:
         session_open: datetime | None,
         leaders: Mapping[str, Sequence[Sequence[Bar]]] | None = None,
         regime: str | None = None,
+        flows: Flows | None = None,
+        expiry_days: int | None = None,
     ) -> Snapshot:
         """A snapshot with the tick and flat band of ``price``."""
-        lead = leaders or {}
+        lead, known = leaders or {}, flows or Flows()
         if price is None:
-            return cls(symbol, bar_close, bars, None, None, None, session_open, lead, regime)
+            return cls(
+                symbol, bar_close, bars, None, None, None, session_open, lead, regime, known, expiry_days
+            )
         tick, band = tick_size(price), flat_band(price, fee_rate)
-        return cls(symbol, bar_close, bars, price, tick, band, session_open, lead, regime)
+        return cls(symbol, bar_close, bars, price, tick, band, session_open, lead, regime, known, expiry_days)
 
     @cached_property
     def lead_moves(self) -> dict[str, list[FeatureValue]]:
@@ -99,6 +118,8 @@ VOLATILITY_BARS = 20
 MIN_CHANGES = 6
 # One-minute moves a series of them keeps: the last hour.
 MINUTE_MOVES = 60
+# Minutes a flow's change is measured over.
+FLOW_MINUTES = 5
 # Session bars the VWAP needs before a gap from it means anything.
 VWAP_MIN_BARS = 5
 # One-minute moves the reversion speed is fitted on, and the fewest it needs.
@@ -241,6 +262,57 @@ def minute_ticks(s: Snapshot) -> Series:
         moves += [0.0] * quiet + [(after.close - before.close) / s.tick]
     moves += [0.0] * ((s.bar_close - bars[-1].start - BAR) // BAR)  # quiet since the last bar
     return tuple(moves[-MINUTE_MOVES:])
+
+
+def minutes_since_open(s: Snapshot) -> FeatureValue:
+    """Minutes from the open to the bar close: the time of day."""
+    return None if s.session_open is None else (s.bar_close - s.session_open) / timedelta(minutes=1)
+
+
+def days_to_expiry(s: Snapshot) -> FeatureValue:
+    """Trading days to the KOSPI200 options expiry; 0 on the expiry day."""
+    return None if s.expiry_days is None else float(s.expiry_days)
+
+
+def _flow(now: float | None, before: float | None, traded: float) -> FeatureValue:
+    """A cumulative flow's change over the last ``FLOW_MINUTES`` as a share of what traded
+    then. A flow first received today counts from 0."""
+    if now is None or traded <= 0:
+        return None
+    return (now - (before or 0.0)) / traded
+
+
+def _recent(s: Snapshot) -> Sequence[Bar]:
+    """The bars of the last ``FLOW_MINUTES`` before the bar close."""
+    since = s.bar_close - timedelta(minutes=FLOW_MINUTES)
+    return [b for b in _session_bars(s) if b.start >= since]
+
+
+def program_net(s: Snapshot) -> FeatureValue:
+    """Program trading's net buying over the last minutes, as a share of the value traded."""
+    traded = sum(b.close * b.volume for b in _recent(s))
+    return _flow(s.flows.program_now, s.flows.program_before, traded)
+
+
+def member_foreign_net(s: Snapshot) -> FeatureValue:
+    """Foreign member firms' net buying over the last minutes, as a share of the volume."""
+    traded = sum(b.volume for b in _recent(s))
+    return _flow(s.flows.foreign_member_now, s.flows.foreign_member_before, traded)
+
+
+def _of_the_day(estimate: float | None, s: Snapshot) -> FeatureValue:
+    volume = sum(b.volume for b in _session_bars(s))
+    return None if estimate is None or volume <= 0 else estimate / volume
+
+
+def investor_foreign(s: Snapshot) -> FeatureValue:
+    """The brokers' latest estimate of foreign net buying, as a share of the day's volume."""
+    return _of_the_day(s.flows.foreign_estimate, s)
+
+
+def investor_institution(s: Snapshot) -> FeatureValue:
+    """... of institutions' net buying."""
+    return _of_the_day(s.flows.institution_estimate, s)
 
 
 def macro_regime(s: Snapshot) -> FeatureValue:
@@ -431,6 +503,12 @@ FEATURES: dict[str, Feature] = {
     "reversion_speed": reversion_speed,
     "minute_ticks": minute_ticks,
     "macro_regime": macro_regime,
+    "minutes_since_open": minutes_since_open,
+    "days_to_expiry": days_to_expiry,
+    "program_net": program_net,
+    "member_foreign_net": member_foreign_net,
+    "investor_foreign": investor_foreign,
+    "investor_institution": investor_institution,
     **{own_feature(lag): _own(lag) for lag in LEAD_LAGS},
     **{lead_feature(group, lag): _lead(group, lag) for group in LEAD_GROUPS for lag in LEAD_LAGS},
 }

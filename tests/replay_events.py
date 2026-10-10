@@ -21,10 +21,13 @@ from krx_quant.consensus import NAMES as CONSENSUS
 from krx_quant.engine import Event, PredictionEngine
 from krx_quant.feeds import (
     BOOK,
+    FOREIGN_ESTIMATE,
     INDEX,
     KOSPI200_FUTURES,
     KRX_TRADE,
     KST,
+    MEMBER,
+    PROGRAM,
     TRADE,
     US_TRADE,
     VI_STATUS,
@@ -183,6 +186,54 @@ def us_trade(when: datetime, ticker: str, price: float) -> Event:
         },
     )
     return (US_TRADE.tr_id, US_TRADE.normalize(fields, when.astimezone(UTC)))
+
+
+def program(when: datetime, net_value: int, symbol: str = SYMBOL) -> Event:
+    """The day's program trading so far, net buying ``net_value``, received at ``when``."""
+    fields = _fields(
+        PROGRAM,
+        {"MKSC_SHRN_ISCD": symbol, "STCK_CNTG_HOUR": when.strftime("%H%M%S"), "NTBY_TR_PBMN": str(net_value)},
+    )
+    return (PROGRAM.tr_id, PROGRAM.normalize(fields, when.astimezone(UTC)))
+
+
+def foreign_members(when: datetime, net_qty: int, symbol: str = SYMBOL) -> Event:
+    """The top-5 member firms, the foreign ones net buying ``net_qty`` so far today."""
+    fields = _fields(MEMBER, {"MKSC_SHRN_ISCD": symbol, "GLOB_NTBY_QTY": str(net_qty)})
+    return (MEMBER.tr_id, MEMBER.normalize(fields, when.astimezone(UTC)))
+
+
+def estimates(when: datetime, slots: dict[str, tuple[int, int]], symbol: str = SYMBOL) -> list[Event]:
+    """One poll of the investor estimates: (foreign, institution) net buying by time slot."""
+    body = {
+        "output2": [
+            {
+                "bsop_hour_gb": slot,
+                "frgn_fake_ntby_qty": str(f),
+                "orgn_fake_ntby_qty": str(i),
+                "sum_fake_ntby_qty": str(f + i),
+            }
+            for slot, (f, i) in slots.items()
+        ]
+    }
+    rows = FOREIGN_ESTIMATE.normalize(body, symbol, when.astimezone(UTC))
+    return [(FOREIGN_ESTIMATE.tr_id, row) for row in rows]
+
+
+def flows_morning(start: str = "09:00:30", end: str = "10:30:00", symbol: str = SYMBOL) -> list[Event]:
+    """Programs and foreign firms buying and selling in turn, and estimates twice."""
+    events: list[Event] = []
+    when, net, members = at(start), 0, 0
+    step = 0
+    while when <= at(end):
+        step += 1
+        net += 50_000_000 * ((step * 31) % 7 - 3)
+        members += 200 * ((step * 17) % 5 - 2)
+        events += [program(when, net, symbol), foreign_members(when + timedelta(seconds=1), members, symbol)]
+        when += timedelta(seconds=23)
+    events += estimates(at("09:31:00"), {"1": (12_000, -3_000)}, symbol)
+    events += estimates(at("10:01:00"), {"2": (20_000, 5_000), "1": (12_000, -3_000)}, symbol)
+    return events
 
 
 def every(start: datetime, end: datetime, seconds: float, make: Any) -> list[Event]:
