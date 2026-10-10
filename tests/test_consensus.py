@@ -252,3 +252,46 @@ async def test_the_final_consensus_does_not_wait_for_algorithms_outside_it(tmp_p
             r[0] for r in conn.execute("SELECT algorithm FROM predictions WHERE status = 'ok' ORDER BY id")
         ]
     assert order.index("consensus-final") < order.index("late")  # stored while late still worked
+
+
+async def test_the_weights_are_fitted_on_what_happened_from_the_bar_close(tmp_path: Path) -> None:
+    # On basis B each member is scored from its own display; the pool needs one outcome per
+    # bar close, so the fit takes basis A's. Here B saw only flats (displays after the
+    # moves): fitted on B, the always-flat beta would win; on A, alpha is the right one.
+    db = tmp_path / "engine.db"
+    put_statuses(db, {"alpha": Status.ACTIVE, "beta": Status.ACTIVE})
+    flat = [Direction.FLAT] * len(RIGHT)
+    put_days(db, weekdays_before(DAY, 25), {"alpha": RIGHT, "beta": flat}, on_display=Direction.FLAT)
+
+    engine = await run(db, [], until=at("15:45:00"), algorithms=[ALPHA, BETA])
+
+    async with api(engine) as client:
+        weights = (await get_json(client, "/v1/consensus"))["weights"][SYMBOL]["09:00"]
+    assert weights["alpha"] > 0.5 > weights["beta"]
+
+
+async def test_a_member_the_fit_did_not_know_gets_an_equal_share(tmp_path: Path) -> None:
+    db = tmp_path / "engine.db"
+    put_statuses(db, {"upper": Status.ACTIVE, "lower": Status.ACTIVE})
+    put_days(db, weekdays_before(DAY, 25), {"upper": RIGHT, "lower": MISSES_DOWNS})
+    await run(db, [], until=at("15:45:00"), algorithms=[UPPER, LOWER])  # fits upper and lower
+    third = FixedAlgorithm(
+        "third", features=("vwap_z",), unique=("vwap_z",), forecast=Forecast(0.4, 0.4, 0.2, 0.0)
+    )
+    put_statuses(db, {"third": Status.ACTIVE})  # active since, unknown to the fit
+
+    engine = await run(
+        db,
+        busy_morning(NEXT_DAY),
+        until=at("09:02:00", NEXT_DAY),
+        calendar=TWO_DAYS,
+        algorithms=[UPPER, LOWER, third],
+    )
+
+    async with api(engine) as client:
+        body = await get_json(client, f"/v1/symbols/{SYMBOL}/predictions?algorithm=consensus-final")
+    [final] = [p for p in body["predictions"] if p["bar_close"] == "2026-10-13T09:01:00+09:00"]
+    trust = 152 / 352
+    w_upper = trust + (1 - trust) / 2  # as fitted, between the two it knew
+    fitted_part = w_upper * 0.6 + (1 - w_upper) * 0.2
+    assert final["p_up"] == pytest.approx(2 / 3 * fitted_part + 1 / 3 * 0.4)
