@@ -50,7 +50,7 @@ from krx_quant.features import Leaders
 from krx_quant.feeds import TRADE
 from krx_quant.feeds.base import KST
 from krx_quant.macro import regime_prefix
-from krx_quant.market_calendar import MarketCalendar
+from krx_quant.market_calendar import MarketCalendar, calendar_store
 from krx_quant.notify import send_notice
 from krx_quant.object_store import ObjectStore, file_digest, get_json, open_store, put_json
 from krx_quant.training import TrainingDay, leader_series, training_day
@@ -123,6 +123,7 @@ def train_night(
     algorithms: Sequence[Algorithm] = ALGORITHMS,
     leaders: Leaders | None = None,
     day: date | None = None,
+    calendar: MarketCalendar | None = None,
 ) -> Night:
     """Train every algorithm for the night of ``day`` (default: the latest day with data) and
     store the promotion list. A night already finished is returned as it was.
@@ -152,7 +153,7 @@ def train_night(
     if finished is not None:
         log.info("the night of %s is already trained", night)
         return Night.from_dict(finished)
-    trainer = _Trainer(store, cache_dir, symbols, fee_rate, leaders, days, algorithms)
+    trainer = _Trainer(store, cache_dir, symbols, fee_rate, leaders, days, algorithms, calendar)
     live: dict[str, str] = get_json(store, LIVE) or {}
     reports = []
     for algorithm in algorithms:
@@ -192,6 +193,7 @@ async def run_training(settings: Settings, day: date | None = None) -> Night:
         now=lambda: datetime.now(KST),
         leaders=Leaders.of(settings),
         day=day,
+        calendar=calendar_store(settings).calendar,
     )
     if not finished_before:
         await send_notice(settings, night.summary())
@@ -208,6 +210,7 @@ class _Trainer:
         leaders: Leaders,
         days: Sequence[date],
         algorithms: Sequence[Algorithm],
+        calendar: MarketCalendar | None = None,
     ) -> None:
         self._store = store
         self._cache = cache_dir
@@ -215,7 +218,11 @@ class _Trainer:
         self._fee_rate = fee_rate
         self._leaders = leaders
         self._days = list(days)
-        self._calendar = MarketCalendar(dict.fromkeys(days, True))
+        # The days with data trade; the others as the server's calendar knows them (holidays
+        # move the options expiry), or by weekday without one.
+        self._calendar = MarketCalendar(
+            {**(calendar.known() if calendar else {}), **dict.fromkeys(days, True)}
+        )
         # Each day is read once, with every algorithm's features.
         self._names = sorted({f for a in algorithms for f in a.features})
         self._loaded: dict[date, TrainingDay | None] = {}
@@ -295,7 +302,7 @@ class _Trainer:
         return default
 
     def _put_model(self, name: str, model: Model) -> None:
-        put_json(self._store, model_key(name, model.version), model.as_dict())
+        put_json(self._store, model_key(name, model.version), model.as_dict(blob=True))
 
     def _fetch(self, day: date) -> None:
         """Copy a day's bars, the engine's recorded events and its macro regime from the store

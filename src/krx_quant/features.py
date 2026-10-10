@@ -49,6 +49,7 @@ class Flows:
     before it; None where nothing was received. Recorded days only: there is no backfill."""
 
     program_now: float | None = None  # program trading's net buying (value, H0UNPGM0)
+    # ... ``FLOW_MINUTES`` before: 0 if it counted from 0 then (the day's first came early)
     program_before: float | None = None
     foreign_member_now: float | None = None  # foreign member firms' net buying (shares, H0UNMBC0)
     foreign_member_before: float | None = None
@@ -276,10 +277,10 @@ def days_to_expiry(s: Snapshot) -> FeatureValue:
 
 def _flow(now: float | None, before: float | None, traded: float) -> FeatureValue:
     """A cumulative flow's change over the last ``FLOW_MINUTES`` as a share of what traded
-    then. A flow first received today counts from 0."""
-    if now is None or traded <= 0:
+    then; unknown without where it stood then (``Flows``)."""
+    if now is None or before is None or traded <= 0:
         return None
-    return (now - (before or 0.0)) / traded
+    return (now - before) / traded
 
 
 def _recent(s: Snapshot) -> Sequence[Bar]:

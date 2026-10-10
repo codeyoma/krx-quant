@@ -368,7 +368,7 @@ v1에서는 쓰지 않는다. 조사 결과는 [paid-data.md](paid-data.md)에 �
 |---|---|---|
 | P0 | 저장소 준비: fork clone, `custom` 브랜치, upstream 동기화, `krx-quant` 생성, 설계 문서 | 완료 (2026-10-08) |
 | P1 | 수집기: Lightsail·Docker, KIS WebSocket/REST, Parquet·S3, 1분봉 1년 백필, 휴장일, 매크로, 텔레그램 장애 알림 | **최우선.** 호가는 녹화를 늦게 시작한 만큼 영구히 잃는다. 구현했다(#2–#6, #8, #30). 남은 것: 첫 거래일 확인(#7), ETF 장중 확인(#29), REST 대체 추가(#28) |
-| P2 | 예측·채점 핵심: 피처 저장소, 모듈 규약·개성 검사, 1분봉 알고리즘 5개(Newton, Gauss, Markov, Granger, Turing 1분봉 버전), Condorcet, 채점 2종, 통계, 엔진 API | 진행 중. 구현: 예측·채점(#9), 규약과 Newton(#10), 통계(#11), 특수 상황(#12), Gauss(#13), Granger(#15), 상태 관리(#17), Condorcet(#18). 엔진 API 계약(JSON 스키마 `schemas/engine-api-v1.json`, 계약 테스트), CPU 예산·매크로·알고리즘 상세 응답, WebSocket 스트림, 텔레그램 신호 알림(#19). Markov(#14), Turing 1분봉 버전(#16). 남은 것: 없음(호가 피처를 쓰는 Turing은 녹화가 쌓인 뒤) |
+| P2 | 예측·채점 핵심: 피처 저장소, 모듈 규약·개성 검사, 1분봉 알고리즘 5개(Newton, Gauss, Markov, Granger, Turing 1분봉 버전), Condorcet, 채점 2종, 통계, 엔진 API | 완료. 구현: 예측·채점(#9), 규약과 Newton(#10), 통계(#11), 특수 상황(#12), Gauss(#13), Granger(#15), 상태 관리(#17), Condorcet(#18). 엔진 API 계약(JSON 스키마 `schemas/engine-api-v1.json`, 계약 테스트), CPU 예산·매크로·알고리즘 상세 응답, WebSocket 스트림, 텔레그램 신호 알림(#19). Markov(#14), Turing 1분봉 버전(#16). 호가 피처를 쓰는 Turing은 녹화가 쌓인 뒤(#55) |
 | P3 | Fincept 화면, GitHub Actions 빌드(DMG, setup.exe), 자동 업데이트 끄기 | 진행 중. 첫 화면과 개인 빌드(#20, 첫 태그 `custom-v4.5.0-krx.1`)는 됐다. 나머지 화면(#21)이 남았다 |
 | P4 | 밤 학습: champion/challenger(#22), EC2 Spot과 비용 상한 장치(#23) | 진행 중. 밤 학습 1차(백필 1분봉, 상시 서버 21:30)는 PR #45, 녹화 이벤트로 학습하는 2차는 PR #48로 들어갔다(#22). EC2와 비용 상한은 #23 |
 | P5 | 호가 알고리즘(Kalman, Shannon, Poisson), 재생 테스트 도구 | 호가 녹화 10거래일 이후. 하루 재생(`krx-quant replay`, #9)은 있다. 남은 것: Kalman(#25), Shannon(#26), Poisson(#27), 사전 검증 도구(#24) |

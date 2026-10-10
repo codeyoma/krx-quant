@@ -55,6 +55,7 @@ BOOSTING: dict[str, Any] = {
     # The same trees for the same samples, and one core of the server's two.
     "num_threads": 1,
     "deterministic": True,
+    "force_col_wise": True,  # with deterministic: no layout chosen by timing
     "seed": 0,
     "verbose": -1,
 }
@@ -90,8 +91,10 @@ class Turing:
     def predict(self, features: FeatureVector, model: Model) -> Forecast:
         if model.blob is None:
             return UNKNOWN
-        row = np.array([[_number(features[n]) for n in self.features]], dtype=float)
-        p_down, p_flat, p_up = _normalized(_trees(model).predict(row, num_threads=1)[0])
+        trees = _trees(model)
+        # In the order the trees were trained on: features registered since are not theirs.
+        row = np.array([[_number(features[n]) for n in trees.feature_name()]], dtype=float)
+        p_down, p_flat, p_up = _normalized(trees.predict(row, num_threads=1)[0])
         params = model.params
         expected = p_up * params["move.up"] + p_flat * params["move.flat"] + p_down * params["move.down"]
         return Forecast(p_up, p_flat, p_down, expected)
@@ -99,7 +102,7 @@ class Turing:
     def fit(self, samples: Sequence[Sample]) -> Model:
         scored = with_outcomes(samples)
         x = np.array([[_number(s.features[n]) for n in self.features] for s in scored], dtype=float)
-        y = np.array([CLASSES.index(s.outcome) for s in scored if s.outcome is not None])
+        y = np.array([CLASSES.index(s.outcome or Direction.FLAT) for s in scored])  # all have one
         data = lgb.Dataset(x, y, feature_name=list(self.features), free_raw_data=True)
         booster = lgb.train(BOOSTING, data, num_boost_round=ROUNDS)
         probabilities = np.asarray(booster.predict(x, num_threads=1), dtype=float)

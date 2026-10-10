@@ -274,7 +274,7 @@ def _algorithm_json(engine: PredictionEngine, a: Algorithm) -> dict[str, Any]:
         },
         "features": list(a.features),
         "training_days": a.training_days,
-        "model": engine.models[a.name].as_dict(blob=False),
+        "model": engine.models[a.name].as_dict(),
         "status": _status_json(engine, a.name),
     }
 

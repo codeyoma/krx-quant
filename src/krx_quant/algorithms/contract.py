@@ -49,8 +49,8 @@ class Model:
     trained_until: date | None = None  # the last day of its training data
     blob: str | None = field(default=None, repr=False)
 
-    def as_dict(self, *, blob: bool = True) -> dict[str, Any]:
-        """As stored; without the blob (``blob=False``) as the Engine API shows it."""
+    def as_dict(self, *, blob: bool = False) -> dict[str, Any]:
+        """As the Engine API shows it; with the blob (``blob=True``) as stored."""
         out: dict[str, Any] = {
             "version": self.version,
             "params": dict(self.params),
@@ -62,7 +62,7 @@ class Model:
         return out
 
     def to_json(self) -> str:
-        return json.dumps(self.as_dict())
+        return json.dumps(self.as_dict(blob=True))
 
     @classmethod
     def fitted(

@@ -36,7 +36,7 @@ from krx_quant.feeds import (
     US_TRADE,
     USD_FUTURES,
 )
-from krx_quant.feeds.base import KST
+from krx_quant.feeds.base import KST, kst_day
 from krx_quant.market_calendar import MarketCalendar, Session
 from krx_quant.reference import BAR, Bar, BarBuilder, ReferencePrice, Source
 
@@ -73,40 +73,63 @@ def next_bar_close(calendar: MarketCalendar, after: datetime) -> datetime | None
 
 
 class _Flow:
-    """A cumulative value of the day, in the order received."""
+    """A cumulative value of the day, in the order received; a new day starts empty."""
 
     def __init__(self) -> None:
+        self._day: date | None = None
         self._at: list[datetime] = []
         self._values: list[float] = []
 
     def add(self, at: datetime, value: float | None) -> None:
-        if value is not None:
-            self._at.append(at)
-            self._values.append(float(value))
+        if value is None:
+            return
+        day = kst_day(at)
+        if day != self._day:
+            self._day, self._at, self._values = day, [], []
+        self._at.append(at)
+        self._values.append(float(value))
 
     def before(self, at: datetime) -> float | None:
-        """The last value received strictly before ``at``."""
+        """The last value received strictly before ``at``, on ``at``'s day."""
+        if kst_day(at) != self._day:
+            return None
         i = bisect.bisect_left(self._at, at)
         return self._values[i - 1] if i else None
 
+    def base(self, at: datetime, opened: datetime | None) -> float | None:
+        """What a change up to now is measured from: the value before ``at``; 0 if nothing
+        was received by then and the day's first value came early (it counted from 0); else
+        unknown (the engine came back mid-day, holding a whole morning in one value)."""
+        before = self.before(at)
+        if before is not None or kst_day(at) != self._day or not self._at:
+            return before
+        early = opened is not None and self._at[0] <= opened + timedelta(minutes=FLOW_MINUTES)
+        return 0.0 if early else None
+
 
 class _Estimates:
-    """A symbol's investor estimates: each poll gives every time slot of the day so far."""
+    """A symbol's investor estimates of the day: each poll gives every time slot so far.
+    The slots are KIS's codes (``bsop_hour_gb``), later ones larger ⚠ (not checked live)."""
 
     def __init__(self) -> None:
+        self._day: date | None = None
         self._rows: list[tuple[datetime, str, float | None, float | None]] = []
 
     def add(self, row: dict[str, Any]) -> None:
-        self._rows.append(
-            (row["received_at"], row["slot"], row["foreign_net_qty"], row["institution_net_qty"])
-        )
+        day = kst_day(row["received_at"])
+        if day != self._day:
+            self._day, self._rows = day, []
+        foreign, institution = row["foreign_net_qty"], row["institution_net_qty"]
+        self._rows.append((row["received_at"], row["slot"], foreign, institution))
 
     def before(self, at: datetime) -> tuple[float | None, float | None]:
-        """The latest slot's foreign and institutional estimates received before ``at``."""
-        known = [r for r in self._rows if r[0] < at]
-        if not known:
+        """The foreign and institutional estimates of the latest slot that has each,
+        received before ``at`` on its day."""
+        known = sorted((r for r in self._rows if r[0] < at), key=lambda r: (r[1], r[0]))
+        if kst_day(at) != self._day or not known:
             return None, None
-        _, _, foreign, institution = max(known, key=lambda r: (r[1], r[0]))
+        foreign = next((r[2] for r in reversed(known) if r[2] is not None), None)
+        institution = next((r[3] for r in reversed(known) if r[3] is not None), None)
         return foreign, institution
 
 
@@ -208,12 +231,15 @@ class MarketView:
         if symbol not in self._program:
             return Flows()
         earlier = at - timedelta(minutes=FLOW_MINUTES)
+        session = self.calendar.session(kst_day(at))
+        opened = session.open if session is not None else None
+        program, members = self._program[symbol], self._foreign_members[symbol]
         foreign, institution = self._estimates[symbol].before(at)
         return Flows(
-            program_now=self._program[symbol].before(at),
-            program_before=self._program[symbol].before(earlier),
-            foreign_member_now=self._foreign_members[symbol].before(at),
-            foreign_member_before=self._foreign_members[symbol].before(earlier),
+            program_now=program.before(at),
+            program_before=program.base(earlier, opened),
+            foreign_member_now=members.before(at),
+            foreign_member_before=members.base(earlier, opened),
             foreign_estimate=foreign,
             institution_estimate=institution,
         )

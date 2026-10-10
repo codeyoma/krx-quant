@@ -58,7 +58,9 @@ def register(algorithms: Sequence[Algorithm]) -> tuple[Algorithm, ...]:
     return tuple(registered)
 
 
-# Turing reads every feature registered before it, so it comes last.
+# Turing reads every feature in the Feature Store, so it comes last: an algorithm's own
+# features must be added before it, or Turing's taking them refuses it. Being last, it is
+# also the first skipped when the CPU budget runs short.
 ALGORITHMS: tuple[Algorithm, ...] = register([Newton(), Gauss(), Granger(), Markov(), Turing()])
 
 __all__ = [
