@@ -14,7 +14,8 @@ Endpoints (all under ``/v1``):
 - ``GET /leaderboard?symbol=&period=&basis=&special=``: algorithms ranked by the lower
   bound of their weakest lift over the baselines, with their stats;
 - ``GET /algorithms/{name}/stats?symbol=&period=&basis=&special=``: one algorithm's
-  stats, by symbol, 30-minute slot and model version, with its calibration curve.
+  stats, by symbol, 30-minute slot and model version, with its calibration curve;
+- ``GET /consensus``: the consensus members now and the weights last fitted.
 
 ``symbol`` is a symbol or ``all`` (default), ``period`` is ``today`` (default), ``5d`` or
 ``20d`` (the latest days with predictions), ``basis`` is ``b`` (default: from when it was
@@ -30,16 +31,16 @@ import asyncio
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date
 from functools import partial
 from typing import Any
 
 from aiohttp import web
 
 from krx_quant.baselines import BASELINE_NAMES, BASELINES
-from krx_quant.consensus import NAMES
+from krx_quant.consensus import NAMES, slot
 from krx_quant.engine import PredictionEngine
-from krx_quant.feeds.base import KST, kst_day
+from krx_quant.feeds.base import kst_day
 from krx_quant.predictions import iso
 from krx_quant.pricing import flat_ticks, tick_size
 from krx_quant.stats import (
@@ -207,8 +208,8 @@ async def _consensus(request: web.Request) -> web.Response:
     engine = request.app[ENGINE_KEY]
     weights = engine.weights
     by_symbol: dict[str, dict[str, dict[str, float]]] = {}
-    for (symbol, slot), cell in sorted(weights.cells.items()):
-        by_symbol.setdefault(symbol, {})[slot] = dict(cell)
+    for (symbol, slot_name), cell in sorted(weights.cells.items()):
+        by_symbol.setdefault(symbol, {})[slot_name] = dict(cell)
     return _json(
         {
             "names": list(NAMES),
@@ -376,10 +377,7 @@ async def _stats(
 
 
 def _slot(r: Scored) -> str:
-    """The 30-minute slot of the bar the prediction was made at the close of."""
-    start = (r.bar_close - timedelta(minutes=1)).astimezone(KST)
-    minute = start.minute - start.minute % 30
-    return f"{start.hour:02d}:{minute:02d}"
+    return slot(r.bar_close)
 
 
 def _interval_json(i: Interval | None) -> dict[str, Any] | None:
