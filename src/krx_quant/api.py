@@ -47,6 +47,7 @@ from aiohttp import web
 from krx_quant.algorithms import Algorithm
 from krx_quant.baselines import BASELINE_NAMES, BASELINES
 from krx_quant.consensus import NAMES, slot
+from krx_quant.contracts import USD
 from krx_quant.engine import PredictionEngine
 from krx_quant.feeds.base import kst_day
 from krx_quant.macro import LatestMacro, latest_macro
@@ -178,6 +179,7 @@ async def _status(request: web.Request) -> web.Response:
         "algorithms": dict(cpu.expected),
         "skipped_today": cpu.skipped_today,
     }
+    body["usd_futures"] = await _usd_futures(request)
     live_status = request.app.get(LIVE_STATUS_KEY)
     if live_status is not None:
         body["kis"] = live_status()
@@ -298,6 +300,11 @@ async def _consensus(request: web.Request) -> web.Response:
 
 
 async def _macro(request: web.Request) -> web.Response:
+    return _json(await _macro_now(request))
+
+
+async def _macro_now(request: web.Request) -> dict[str, Any]:
+    """``/v1/macro``'s answer, read again at most every ``MACRO_SECONDS``."""
     engine = request.app[ENGINE_KEY]
     cache: dict[date, tuple[float, dict[str, Any]]] = request.app[MACRO_CACHE_KEY]
     today = kst_day(engine.clock.now())
@@ -307,7 +314,29 @@ async def _macro(request: web.Request) -> web.Response:
         latest = None if data_dir is None else await asyncio.to_thread(latest_macro, data_dir, today)
         cache.clear()
         cached = cache[today] = (monotonic(), _macro_json(latest))
-    return _json(cached[1])
+    return cached[1]
+
+
+async def _usd_futures(request: web.Request) -> dict[str, Any] | None:
+    """The USD futures' latest trade today against the previous close: today's 07:30 macro
+    reading, when it is the previous trading day's (not an older one a missed backfill left).
+    None before today's first trade."""
+    engine = request.app[ENGINE_KEY]
+    latest = engine.latest_lead(USD.series)
+    if latest is None:
+        return None
+    price, traded_at = latest
+    macro = await _macro_now(request)
+    today = kst_day(engine.clock.now())
+    before = engine.calendar.previous_trading_day(today).isoformat()
+    closes = [
+        r["value"]
+        for r in macro["readings"]
+        if r["indicator"] == "usdf" and macro["day"] == today.isoformat() and r["as_of"] == before
+    ]
+    previous = closes[0] if closes else None
+    change = None if not previous else (price - previous) / previous * 100
+    return {"price": price, "at": iso(traded_at), "previous_close": previous, "change_pct": change}
 
 
 def _macro_json(latest: LatestMacro | None) -> dict[str, Any]:

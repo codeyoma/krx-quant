@@ -42,6 +42,8 @@ async def test_the_demo_engine_answers_what_a_screen_reads(tmp_path: Path) -> No
     assert [s["symbol"] for s in symbols["symbols"]] == list(DEMO_SYMBOLS)
     assert (macro["day"], macro["regime"]) == ("2026-10-12", "risk_off"), "a macro row to show"
     assert len(macro["readings"]) == len(INDICATORS)
+    usd = status["usd_futures"]
+    assert usd["previous_close"] == 1392.2 and usd["change_pct"] is not None, "the USD futures move to show"
     assert status["kis"]["connected"] is True
     assert [f["key"] for f in status["kis"]["feeds"] if f["gap"]] == ["000660"], (
         "a gap, so a screen shows one"

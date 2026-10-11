@@ -32,7 +32,7 @@ from krx_quant.algorithms import ALGORITHMS, Model
 from krx_quant.api import create_app
 from krx_quant.clock import FakeClock
 from krx_quant.engine import Event, PredictionEngine
-from krx_quant.feeds import BOOK, INDEX, KOSPI200_FUTURES, TRADE, VI_STATUS, Feed
+from krx_quant.feeds import BOOK, INDEX, KOSPI200_FUTURES, TRADE, USD_FUTURES, VI_STATUS, Feed
 from krx_quant.feeds.base import KST
 from krx_quant.lifecycle import Status
 from krx_quant.macro import INDICATORS, MACRO, MacroDay, Observation, Reading, day_regime, macro_recorder
@@ -66,6 +66,7 @@ _OVERNIGHT = {
     "mu": (210.0, 205.4),
     "usdf": (1388.0, 1392.2),
 }
+_USDF_CLOSE = _OVERNIGHT["usdf"][1]
 
 
 def demo_events() -> list[Event]:
@@ -88,6 +89,9 @@ def demo_events() -> list[Event]:
         level += rng.gauss(0, 0.02)
         events.append(_index(when, "0001", 2600 * (1 + level / 100), level))
         events.append(_futures(when + timedelta(seconds=2), 350 * (1 + level / 100), level))
+        # The USD futures around Friday's close (the morning's macro reading).
+        usd = _USDF_CLOSE * (1 + (level + 0.2) / 100)
+        events.append(_futures(when + timedelta(seconds=3), usd, level + 0.2, feed=USD_FUTURES, contract="A75610"))
     # 000660 in a VI from 09:40:10, released at 09:42:20.
     events.append(_vi(_at(time(9, 40, 11)), "000660", "094010", None))
     events.append(_vi(_at(time(9, 42, 21)), "000660", "094010", "094220"))
@@ -274,15 +278,17 @@ def _index(when: datetime, code: str, value: float, change_pct: float) -> Event:
     return _row(INDEX, when, values)
 
 
-def _futures(when: datetime, price: float, change_pct: float) -> Event:
+def _futures(
+    when: datetime, price: float, change_pct: float, *, feed: Feed = KOSPI200_FUTURES, contract: str = "A01612"
+) -> Event:
     values = {
-        "futs_shrn_iscd": "A01612",
+        "futs_shrn_iscd": contract,
         "bsop_hour": when.strftime("%H%M%S"),
         "futs_prpr": f"{price:.2f}",
         "last_cnqn": "1",
         "futs_prdy_ctrt": f"{change_pct:.2f}",
     }
-    return _row(KOSPI200_FUTURES, when, values)
+    return _row(feed, when, values)
 
 
 def _vi(received: datetime, symbol: str, start: str, end: str | None) -> Event:

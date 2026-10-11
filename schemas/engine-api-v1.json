@@ -25,7 +25,7 @@
     "status": {
       "description": "GET /v1/status",
       "type": "object",
-      "required": ["mode", "now", "phase", "session", "last_bar_close", "pending_outcomes", "special", "training", "cpu"],
+      "required": ["mode", "now", "phase", "session", "last_bar_close", "pending_outcomes", "special", "training", "cpu", "usd_futures"],
       "additionalProperties": false,
       "properties": {
         "mode": {"enum": ["live", "demo", "replay"]},
@@ -72,6 +72,23 @@
             "algorithms": {"type": "object", "additionalProperties": {"type": "number", "minimum": 0}},
             "skipped_today": {"type": "integer", "minimum": 0}
           }
+        },
+        "usd_futures": {
+          "description": "The USD futures' latest trade today against the previous close read at 07:30; null before today's first trade.",
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "required": ["price", "at", "previous_close", "change_pct"],
+              "additionalProperties": false,
+              "properties": {
+                "price": {"type": "number"},
+                "at": {"$ref": "#/$defs/time"},
+                "previous_close": {"type": ["number", "null"]},
+                "change_pct": {"type": ["number", "null"]}
+              }
+            }
+          ]
         },
         "kis": {"$ref": "#/$defs/kis"}
       },

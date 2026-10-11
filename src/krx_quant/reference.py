@@ -122,6 +122,14 @@ class BarBuilder:
         bar.volume += qty
         bar.trades += 1
 
+    def latest(self, symbol: str, now: datetime) -> tuple[float, datetime] | None:
+        """The latest trade of ``now``'s day by exchange time: its price and time; None before any."""
+        local = now.astimezone(KST)
+        if self._day.get(symbol) != local.date():
+            return None
+        last = max(self._bars[symbol].values(), key=lambda b: b.last_at)
+        return last.close, last.last_at
+
     def closed(self, symbol: str, now: datetime) -> list[Bar]:
         """Bars of ``now``'s day whose minute has ended, oldest first."""
         local = now.astimezone(KST)
