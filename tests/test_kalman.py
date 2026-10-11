@@ -224,3 +224,22 @@ async def test_what_comes_after_a_bar_close_never_changes_kalman_s_forecast(tmp_
         return {k: p[k] for k in ("p_up", "p_flat", "p_down", "expected_ticks")}
 
     assert at_cut(await predictions_of(full, "kalman")) == at_cut(await predictions_of(short, "kalman"))
+
+
+async def test_without_both_sizes_the_microprice_is_the_mid_point(tmp_path: Path) -> None:
+    # Bid size only (a side's size missing): no lean either way.
+    events = quiet_books("09:00:00", "09:03:00", 81_200, 81_300, bid_qty=300, ask_qty=0)
+    probe = FixedAlgorithm("probe", features=OWN, unique=OWN)
+
+    await run(tmp_path / "engine.db", events, until=at("09:03:00"), algorithms=[probe])
+
+    assert probe.seen[-1]["microprice_ticks"] == (0.0, 0.0, 0.0)
+
+
+def test_single_minutes_of_the_book_teach_nothing() -> None:
+    one_minute = [
+        replace(s, features=features([0.0], s.features.series("kospi200f_moves"))) for s in simulated(5)
+    ]
+
+    with pytest.raises(ValueError, match="two minutes"):
+        KALMAN.fit(one_minute)

@@ -594,9 +594,7 @@ class PredictionEngine:
                 log.error("%s failed at %s: %r", name, bar_close, error, exc_info=error)
                 status = "error"
             else:
-                result, status = work.result(), "ok"
-                made = {s: f for s, f in result.items() if isinstance(f, Forecast)}
-                declined = {s: f for s, f in result.items() if isinstance(f, Abstention)}
+                (made, declined), status = work.result(), "ok"
                 elapsed = timer.perf_counter() - started
                 previous = self._cost.get(name)
                 self._cost[name] = (
@@ -610,7 +608,7 @@ class PredictionEngine:
         self._record(bar_close, at_close, entries)
         return name, made
 
-    def _finished_late(self, name: str, work: asyncio.Future[dict[str, Forecast | Abstention]]) -> None:
+    def _finished_late(self, name: str, work: asyncio.Future[_Predicted]) -> None:
         self._busy.discard(name)
         if not work.cancelled() and work.exception() is not None:
             log.error("%s failed after its budget: %r", name, work.exception())
@@ -681,17 +679,19 @@ def _with_status(standings: Mapping[str, Standing], status: Status) -> set[str]:
     return {name for name, s in standings.items() if s.status is status}
 
 
-def _predict_symbols(
-    algorithm: Algorithm, model: Model, vectors: Mapping[str, FeatureVector]
-) -> dict[str, Forecast | Abstention]:
-    """Runs in a worker thread: one algorithm on every symbol, each forecast checked; why,
-    for a symbol it does not predict."""
-    forecasts: dict[str, Forecast | Abstention] = {}
+# An algorithm's forecasts by symbol, and why for each symbol it did not predict.
+_Predicted = tuple[dict[str, Forecast], dict[str, Abstention]]
+
+
+def _predict_symbols(algorithm: Algorithm, model: Model, vectors: Mapping[str, FeatureVector]) -> _Predicted:
+    """Runs in a worker thread: one algorithm on every symbol, each forecast checked."""
+    forecasts: dict[str, Forecast] = {}
+    declined: dict[str, Abstention] = {}
     for symbol, features in vectors.items():
         try:
             f = algorithm.predict(features, model)
         except NotPredicted as e:
-            forecasts[symbol] = e.why
+            declined[symbol] = e.why
             continue
         probabilities = (f.p_up, f.p_flat, f.p_down)
         distribution = all(0 <= p <= 1 for p in probabilities) and math.isclose(
@@ -702,7 +702,7 @@ def _predict_symbols(
         if not math.isfinite(f.expected_ticks):
             raise ValueError(f"{algorithm.name} expected {f.expected_ticks} ticks for {symbol}")
         forecasts[symbol] = f
-    return forecasts
+    return forecasts, declined
 
 
 def _score(p: Pending, mid_target: float | None) -> Score:

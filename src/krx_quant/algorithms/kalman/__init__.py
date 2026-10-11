@@ -25,16 +25,15 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from krx_quant.algorithms.contract import Abstention, Card, Model, NotPredicted, Sample
-from krx_quant.algorithms.forecasts import UNKNOWN, log_loss, normal_forecast, with_outcomes
+from krx_quant.algorithms.forecasts import UNKNOWN, lowest_log_loss, normal_forecast, with_outcomes
 from krx_quant.baselines import Forecast
 from krx_quant.features import FeatureVector
-from krx_quant.pricing import Direction
 from krx_quant.reference import BAR
 
 STEPS = 4  # minutes ahead
 # Before any training: a fair price wandering about a tick a minute with a slight trend,
 # behind a quarter-tick of noise, not following the futures.
-DEFAULTS: dict[str, float] = {"q_level": 0.5, "q_trend": 0.02, "r": 0.25, "phi": 0.8, "b": 0.0}
+DEFAULT_PARAMS: dict[str, float] = {"q_level": 0.5, "q_trend": 0.02, "r": 0.25, "phi": 0.8, "b": 0.0}
 # EM: at most this many rounds, stopping once the log-likelihood barely moves.
 ROUNDS = 50
 _TOLERANCE = 1e-6
@@ -152,7 +151,7 @@ class Kalman:
     )
 
     def default_model(self) -> Model:
-        return Model(f"{self.name}-default", dict(DEFAULTS))
+        return Model(f"{self.name}-default", dict(DEFAULT_PARAMS))
 
     def predict(self, features: FeatureVector, model: Model) -> Forecast:
         ys = features.series("microprice_ticks")
@@ -171,17 +170,18 @@ class Kalman:
         if not scored:
             raise ValueError("no training samples with the book")
         sequences = _sequences(samples)
-        p = _Params.of(DEFAULTS)
+        if not sequences:
+            raise ValueError("no two minutes of the book in a row to learn from")
+        p = _Params.of(DEFAULT_PARAMS)
         previous = None
         for _ in range(ROUNDS):
             p, likelihood = _reestimate(p, sequences)
             if previous is not None and abs(likelihood - previous) < _TOLERANCE * max(1.0, abs(previous)):
                 break
             previous = likelihood
-        params = p.as_dict()
-        model = Model(self.name, params)
-        loss = sum(log_loss(self.predict(s.features, model), s.outcome or Direction.FLAT) for s in scored)
-        return Model.fitted(self.name, params, scored, loss / len(scored))
+        return lowest_log_loss(
+            self.name, scored, [p.as_dict()], lambda f, q: self.predict(f, Model(self.name, q))
+        )
 
 
 def _sequences(samples: Sequence[Sample]) -> list[tuple[list[float], list[float]]]:

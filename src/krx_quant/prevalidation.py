@@ -331,7 +331,7 @@ class _WalkForward:
         try:
             return self._algorithm.fit(training)
         except ValueError as e:  # nothing it can learn from (no book on backfilled days): as the night does
-            log.info("%s not trained before %s: %s", self._algorithm.name, day, e)
+            log.warning("%s not trained before %s, its defaults predict: %s", self._algorithm.name, day, e)
             return self._algorithm.default_model()
 
     def _load(self, day: date) -> TrainingDay | None:

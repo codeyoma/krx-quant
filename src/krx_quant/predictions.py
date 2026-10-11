@@ -42,7 +42,8 @@ CREATE TABLE IF NOT EXISTS {name} (
     p_flat REAL,
     p_down REAL,
     expected_ticks REAL,
-    status TEXT NOT NULL,             -- ok, timed_out, error, vi (not predicted in a VI)
+    status TEXT NOT NULL,             -- ok, timed_out, error, vi (in a VI), no_book (declined),
+                                      -- no_members, none_finished (consensus)
     UNIQUE (symbol, algorithm, bar_close)
 );
 """

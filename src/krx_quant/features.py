@@ -270,14 +270,22 @@ def minute_ticks(s: Snapshot) -> Series:
     hour of them, oldest first. A minute without a trade is a change of 0, up to the bar
     close.
     """
-    bars = _session_bars(s)
-    if s.tick is None or not bars:
+    tick = s.tick
+    if tick is None:
+        return ()
+    return _minute_moves(_session_bars(s), s.bar_close, lambda before, after: (after - before) / tick)
+
+
+def _minute_moves(bars: Sequence[Bar], bar_close: datetime, move: Callable[[float, float], float]) -> Series:
+    """Each minute's ``move(close before, close)`` over ``bars``, the last hour of them,
+    oldest first: 0 for a minute without a trade, up to the bar close."""
+    if not bars:
         return ()
     moves: list[float] = []
     for before, after in zip(bars, bars[1:], strict=False):
         quiet = (after.start - before.start) // BAR - 1
-        moves += [0.0] * quiet + [(after.close - before.close) / s.tick]
-    moves += [0.0] * ((s.bar_close - bars[-1].start - BAR) // BAR)  # quiet since the last bar
+        moves += [0.0] * quiet + [move(before.close, after.close)]
+    moves += [0.0] * ((bar_close - bars[-1].start - BAR) // BAR)  # quiet since the last bar
     return tuple(moves[-MINUTE_MOVES:])
 
 
@@ -295,15 +303,8 @@ def kospi200f_moves(s: Snapshot) -> Series:
     last hour of them, oldest first. A minute without a trade is a move of 0, up to the bar
     close."""
     front = s.leaders.get("kospi200f", [])
-    bars = [b for b in (front[0] if front else []) if s.session_open is None or b.start >= s.session_open]
-    if not bars:
-        return ()
-    moves: list[float] = []
-    for before, after in zip(bars, bars[1:], strict=False):
-        quiet = (after.start - before.start) // BAR - 1
-        moves += [0.0] * quiet + [1e4 * math.log(after.close / before.close)]
-    moves += [0.0] * ((s.bar_close - bars[-1].start - BAR) // BAR)
-    return tuple(moves[-MINUTE_MOVES:])
+    bars = _from_open(front[0] if front else [], s.session_open)
+    return _minute_moves(bars, s.bar_close, lambda before, after: 1e4 * math.log(after / before))
 
 
 def minutes_since_open(s: Snapshot) -> FeatureValue:
@@ -364,9 +365,11 @@ def macro_regime(s: Snapshot) -> FeatureValue:
 
 def _session_bars(s: Snapshot) -> Sequence[Bar]:
     """The bars from the open: the pre-market's thin trades do not set the day's level."""
-    if s.session_open is None:
-        return s.bars
-    return [b for b in s.bars if b.start >= s.session_open]
+    return _from_open(s.bars, s.session_open)
+
+
+def _from_open(bars: Sequence[Bar], session_open: datetime | None) -> Sequence[Bar]:
+    return bars if session_open is None else [b for b in bars if b.start >= session_open]
 
 
 def _typical(b: Bar) -> float:

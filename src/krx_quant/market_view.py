@@ -21,7 +21,7 @@ from datetime import date, datetime, time, timedelta
 from typing import Any
 
 from krx_quant.contracts import KOSPI200, USD, days_to_expiry
-from krx_quant.features import FLOW_MINUTES, Flows, Leaders, Snapshot
+from krx_quant.features import FLOW_MINUTES, MINUTE_MOVES, Flows, Leaders, Snapshot
 from krx_quant.feeds import (
     BOOK,
     BOOK_SNAPSHOT,
@@ -48,8 +48,6 @@ INDEX_FEEDS = (INDEX.tr_id, INDEX_REST.tr_id)
 FUTURES_SERIES = {KOSPI200_FUTURES.tr_id: KOSPI200.series, USD_FUTURES.tr_id: USD.series}
 # The feeds with the symbols' trades and best quotes.
 _QUOTING = (TRADE.tr_id, KRX_TRADE.tr_id, BOOK.tr_id, BOOK_SNAPSHOT.tr_id)
-# Minute ends a microprice series covers: an hour of one-minute moves, and where they start.
-MINUTE_SPAN = 60
 # The feeds with the symbols' flows (Turing's).
 FLOW_FEEDS = (PROGRAM.tr_id, MEMBER.tr_id, MEMBER_REST.tr_id, FOREIGN_ESTIMATE.tr_id)
 
@@ -140,7 +138,7 @@ class _Estimates:
 class _Microprices:
     """A symbol's book microprices by receipt time, for the latest hour or so."""
 
-    _KEEP = timedelta(minutes=MINUTE_SPAN + 10)
+    _KEEP = timedelta(minutes=MINUTE_MOVES + 10)
 
     def __init__(self) -> None:
         self._at: list[datetime] = []
@@ -150,9 +148,12 @@ class _Microprices:
         """A book update; an empty side or a crossed book is not a usable one."""
         if bid <= 0 or ask <= 0 or ask < bid or (self._at and at < self._at[-1]):
             return
-        weight = (bid_qty or 0) + (ask_qty or 0)
         # The microprice leans toward the side with less waiting: the other is likelier to go.
-        value = (bid * (ask_qty or 0) + ask * (bid_qty or 0)) / weight if weight > 0 else (bid + ask) / 2
+        # Without both sizes (a file recorded without them) it is the mid-point.
+        if bid_qty and ask_qty and bid_qty > 0 and ask_qty > 0:
+            value = (bid * ask_qty + ask * bid_qty) / (bid_qty + ask_qty)
+        else:
+            value = (bid + ask) / 2
         self._at.append(at)
         self._values.append(value)
         if at - self._at[0] > 2 * self._KEEP:
@@ -274,7 +275,7 @@ class MarketView:
         session = self.calendar.session(kst_day(at))
         if symbol not in self._microprices or session is None:
             return []
-        first = max(session.open + BAR, at - MINUTE_SPAN * BAR)
+        first = max(session.open + BAR, at - MINUTE_MOVES * BAR)
         ends = [first + i * BAR for i in range((at - first) // BAR + 1)]
         return self._microprices[symbol].at_minute_ends(ends)
 
