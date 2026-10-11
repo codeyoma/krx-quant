@@ -12,7 +12,9 @@
 # 3. It fast-forwards, rebuilds and restarts the engine.
 # 4. It waits for the Engine API to answer (3 minutes). If it does not, it goes back to
 #    the commit before, rebuilds, and remembers the commit that failed.
-# 5. It reports to Telegram (krx-quant notify).
+# 5. It pushes the new image to ECR for the nightly training on EC2 Spot, if that is set
+#    up (deploy/push-image.sh, #23).
+# 6. It reports to Telegram (krx-quant notify).
 set -euo pipefail
 
 repo=$(cd "$(dirname "$0")/.." && pwd)
@@ -77,9 +79,13 @@ git merge -q --ff-only "$target"
 if restart; then
   echo "$target" >"$deployed_file"
   rm -f "$failed_file"
+  pushed=""
+  if ! deploy/push-image.sh; then
+    pushed=$'\n'"Spot 학습용 이미지를 올리지 못했습니다. 밤 학습은 이전 이미지로 돕니다."
+  fi
   docker image prune -f >/dev/null || true
   echo "auto-update: ${deployed:0:7} -> ${target:0:7}"
-  notify "자동 업데이트: ${deployed:0:7} → ${target:0:7}"$'\n'"$changes"
+  notify "자동 업데이트: ${deployed:0:7} → ${target:0:7}"$'\n'"$changes$pushed"
   exit 0
 fi
 

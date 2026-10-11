@@ -116,6 +116,16 @@ class Settings:
     # day's bars are archived (KRX_TRAIN_AT: 21:30 unless set; "off": trained elsewhere).
     # None here, so a collector built in a test never trains.
     train_at: time | None = None
+    # Where that night's training runs (KRX_TRAIN_ON): "server", in its own process here,
+    # or "spot", on EC2 Spot started by AWS at the same time (#23): then the collector only
+    # publishes what the run needs and waits for its result.
+    train_on: str = "server"
+    # Cost Guard (#23): the AWS Budgets budget the server watches (KRX_COST_BUDGET; unset:
+    # none), the EventBridge Scheduler schedules of the Spot training it turns off at the
+    # budget and on again in a new month (KRX_TRAINING_SCHEDULES), and how often it looks.
+    cost_budget: str | None = None
+    training_schedules: tuple[str, ...] = ()
+    cost_check_seconds: float = 3600.0
     # The collector reads the macro indicators and decides the day's regime at this time
     # (KST) on trading days, after the US close (KRX_MACRO_AT: 07:30 unless set; "off").
     # None here, so a collector built in a test never does.
@@ -244,6 +254,10 @@ class Settings:
             cpu_budget_seconds=float(number("KRX_CPU_BUDGET_SECONDS", "30", float)),
             min_sample=int(number("KRX_MIN_SAMPLE", str(DEFAULT_MIN_SAMPLE), int)),
             train_at=_time_or_off("KRX_TRAIN_AT", values.get("KRX_TRAIN_AT", "21:30")),
+            train_on=_one_of("KRX_TRAIN_ON", values.get("KRX_TRAIN_ON", "server"), TRAIN_ON),
+            cost_budget=values.get("KRX_COST_BUDGET", "").strip() or None,
+            training_schedules=codes("KRX_TRAINING_SCHEDULES", ""),
+            cost_check_seconds=float(number("KRX_COST_CHECK_SECONDS", "3600", float, minimum=60)),
             macro_at=_time_or_off("KRX_MACRO_AT", values.get("KRX_MACRO_AT", "07:30")),
             ecos_api_key=values.get("KRX_ECOS_API_KEY") or None,
             fred_api_key=values.get("KRX_FRED_API_KEY") or None,
@@ -272,6 +286,17 @@ def _on_or_off(name: str, raw: str) -> bool:
     if text in ("", "off", "false", "0", "no"):
         return False
     raise SettingsError(f"{name} must be on or off, got {raw!r}")
+
+
+# Where the nightly training runs: on this server, or on EC2 Spot (#23).
+TRAIN_ON = ("server", "spot")
+
+
+def _one_of(name: str, raw: str, choices: tuple[str, ...]) -> str:
+    text = raw.strip().lower()
+    if text not in choices:
+        raise SettingsError(f"{name} must be one of {', '.join(choices)}, got {raw!r}")
+    return text
 
 
 def _time_or_off(name: str, raw: str) -> time | None:

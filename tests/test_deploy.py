@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import shutil
 import stat
 import subprocess
@@ -63,6 +64,33 @@ def test_deploy_scripts_parse(script: Path) -> None:
     subprocess.run(["bash", "-n", script], check=True)
     if shutil.which("shellcheck"):
         subprocess.run(["shellcheck", script], check=True)
+
+
+def spot_start_script(path: Path) -> str:
+    """The Spot instance's start script in deploy/training.yaml, as CloudFormation fills it in."""
+    text = path.read_text().split("Fn::Base64: !Sub |\n", 1)[1].split("\n\n", 1)[0]
+    script = "\n".join(line[12:] for line in text.splitlines()) + "\n"
+    values = {
+        "MaxMinutes": "300",
+        "Bucket": "a-bucket",
+        "Prefix": "engine",
+        "Repository.RepositoryUri": "123456789012.dkr.ecr.ap-southeast-2.amazonaws.com/krx-quant",
+        "AWS::Region": "ap-southeast-2",
+    }
+    script = re.sub(r"\$\{(?!!)([A-Za-z:.]+)\}", lambda m: values[m.group(1)], script)
+    return script.replace("${!", "${")
+
+
+def test_the_spot_instance_s_start_script_parses(tmp_path: Path) -> None:
+    script = tmp_path / "start.sh"
+    script.write_text(spot_start_script(ROOT / "deploy" / "training.yaml"))
+
+    subprocess.run(["bash", "-n", script], check=True)
+    if shutil.which("shellcheck"):
+        subprocess.run(["shellcheck", script], check=True)
+    text = script.read_text()
+    assert "trap 'shutdown -h now' EXIT" in text, "it terminates itself however the training ends"
+    assert "train --from-store" in text
 
 
 FAKE_DOCKER = """#!/usr/bin/env bash
@@ -147,6 +175,22 @@ def test_the_server_updates_to_a_new_main_and_says_so(server: Path) -> None:
     assert calls[0] == "compose up -d --build"
     notice = (server.parent / "docker.log").read_text().split(" notify ", 1)[1]
     assert notice.startswith("자동 업데이트") and new[:7] in notice and "- Granger learns" in notice
+
+
+def test_with_the_training_on_spot_an_update_pushes_the_image_and_forgets_the_login(server: Path) -> None:
+    repository = "123456789012.dkr.ecr.ap-southeast-2.amazonaws.com/krx-quant"
+    (server / ".env").write_text(f"KRX_IMAGE_REPOSITORY={repository}\n")
+    push(server, "Markov reads the IV")
+
+    result = update(server)
+
+    assert result.returncode == 0, result.stderr
+    calls = docker_calls(server)
+    pushed = calls.index(f"push -q {repository}:latest")
+    login = calls.index("compose run --rm --no-deps -T engine registry-password")
+    assert calls.index("compose up -d --build") < login < pushed, "the new image, once it started"
+    assert calls[pushed - 1] == f"tag krx-quant:latest {repository}:latest"
+    assert calls[pushed + 1] == f"logout {repository.split('/')[0]}", "the registry password is not kept"
 
 
 def test_a_main_that_does_not_start_is_rolled_back_and_not_tried_again(server: Path) -> None:

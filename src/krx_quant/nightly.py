@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import shutil
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
@@ -71,6 +72,40 @@ def report_key(day: date, name: str) -> str:
 
 def promotions_key(day: date) -> str:
     return f"promotions/{day.isoformat()}.json"
+
+
+# What a night trained on another machine (EC2 Spot, #23) needs from the server: the
+# settings training reads, as the server's environment has them, and its market calendar.
+TRAINING_SETTINGS_KEY = "training/settings.json"
+TRAINING_CALENDAR_KEY = "training/market_calendar.json"
+
+
+def training_settings(settings: Settings) -> dict[str, str]:
+    """The settings a night's training reads, as environment values (none of them secret)."""
+    return {
+        "KRX_SYMBOLS": ",".join(settings.symbols),
+        "KRX_ETF_SYMBOLS": ",".join(settings.etf_symbols),
+        "KRX_US_SYMBOLS": ",".join(settings.us_symbols),
+        "KRX_INDEX_CODES": ",".join(settings.index_codes),
+        "KRX_FEE_PERCENT": f"{settings.fee_rate * 100:.10g}",
+    }
+
+
+def from_the_server(settings: Settings) -> Settings:
+    """``settings`` with what the server published for the night's training: its
+    settings, over this machine's, and its market calendar, into this state directory."""
+    store = open_store(settings)
+    if store is None:
+        raise SettingsError("KRX_OBJECT_STORE is not set: nightly training reads and writes it")
+    published = get_json(store, TRAINING_SETTINGS_KEY)
+    if published is None:
+        raise SettingsError(
+            f"no {TRAINING_SETTINGS_KEY} in {store.name}: the server publishes it (KRX_TRAIN_ON=spot)"
+        )
+    if store.digest(TRAINING_CALENDAR_KEY) is not None:
+        settings.state_dir.mkdir(parents=True, exist_ok=True)
+        store.get(TRAINING_CALENDAR_KEY, settings.state_dir / "market_calendar.json")
+    return Settings.from_env({**os.environ, **published}, None, require_kis=False)
 
 
 @dataclass(frozen=True)

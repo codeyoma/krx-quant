@@ -22,6 +22,7 @@ from krx_quant.auth import TokenManager, tokens_and_client
 from krx_quant.backfill import keep_history
 from krx_quant.clock import SessionClock, SystemClock
 from krx_quant.config import Settings
+from krx_quant.cost_guard import keep_costs
 from krx_quant.engine import Budget, PredictionEngine, run_live
 from krx_quant.features import Leaders
 from krx_quant.feeds import (
@@ -61,7 +62,13 @@ from krx_quant.prevalidation import admits
 from krx_quant.recorder import ParquetRecorder
 from krx_quant.signals import Signals
 from krx_quant.stream import LiveStatus
-from krx_quant.swap import keep_models, keep_training, show_night
+from krx_quant.swap import (
+    await_spot_night,
+    keep_models,
+    keep_training,
+    publish_training_inputs,
+    show_night,
+)
 
 log = logging.getLogger(__name__)
 
@@ -243,15 +250,32 @@ async def run_collector(
             )
             if object_store is not None and settings.train_at is not None:
                 trained_on = object_store
+                spot = settings.train_on == "spot"
 
                 async def refresh() -> None:
+                    if spot:  # for the next night, as the calendar stands now
+                        await asyncio.to_thread(publish_training_inputs, trained_on, settings)
                     await show_night(trained_on, shelf, engine, kst_day(now()))
 
+                async def on_spot(day: date) -> str | None:
+                    return await await_spot_night(trained_on, calendar.calendar, day, alerts, now)
+
+                if spot:
+                    await asyncio.to_thread(publish_training_inputs, trained_on, settings)
                 background.append(
                     asyncio.create_task(
-                        keep_training(settings.train_at, calendar.calendar, alerts, now, refresh)
+                        keep_training(
+                            settings.train_at,
+                            calendar.calendar,
+                            alerts,
+                            now,
+                            refresh,
+                            on_spot if spot else None,
+                        )
                     )
                 )
+            if settings.cost_budget is not None:
+                background.append(asyncio.create_task(keep_costs(settings, alerts.deliver, now)))
             if settings.macro_at is not None:
                 macro_collector = MacroCollector(
                     settings, session, alerts, macro_recorder(recorder), calendar.calendar, now

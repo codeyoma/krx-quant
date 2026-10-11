@@ -21,7 +21,7 @@
 
    AWS의 새 가입 방식(AWS Settings 프로젝트)으로 만든 계정은 프로젝트마다 리전이 하나뿐이다. 연락처 주소의 국가에 따라 오하이오(`us-east-2`), 스톡홀름(`eu-north-1`), 시드니(`ap-southeast-2`) 중 하나로 자동으로 정해진다. 다른 리전 호출은 AWS가 관리하는 조직의 서비스 제어 정책이 막는다. 서울(`ap-northeast-2`)을 호출하면 `AccessDeniedException`(explicit deny in a service control policy)이 난다. 이 제한은 고급 기능을 활성화(Activate advanced features)해야 풀리는데, 되돌릴 수 없다. 그래서 시드니를 쓴다. 이유는 [design.md](design.md) 9장에 있다.
 
-   이 프로젝트에는 월 $100 지출 한도도 걸려 있다. 한도에 닿으면 프로젝트 전체가 일시정지되고 자원이 멈춘다. 상시 서버도 멈춘다는 뜻이다. 조기 통제인 "Stop new resource launches"도 켜져 있다. 예상 비용이 월 $15 정도라서 지금은 그대로 둔다. 설계는 상한에 닿아도 실시간 수집을 계속하도록 되어 있으므로 #23(비용 상한)에서 다시 정한다.
+   이 프로젝트에는 월 $100 지출 한도도 걸려 있다. 한도에 닿으면 프로젝트 전체가 일시정지되고 자원이 멈춘다. 상시 서버도 멈춘다는 뜻이다. 조기 통제인 "Stop new resource launches"도 켜져 있다. 예상 비용이 월 $15 정도라서 지금은 그대로 둔다. 밤 학습을 EC2 Spot으로 옮기면(3장 "밤 학습을 EC2 Spot으로 옮기기") 서버의 비용 감시(Cost Guard)가 $100에서 Spot 학습만 끈다. 이 한도가 같은 $100이면 서버까지 멈추므로, 그때는 한도를 상한보다 높게(예: $130) 올릴지 정한다. 사용자가 정할 일이다.
 2. **KIS Open API**: 실전계좌로 앱키와 앱시크릿을 발급받는다. 모의투자 키로는 통합 시세 피드가 오지 않는다.
 3. **텔레그램 봇**
    1. BotFather에게 `/newbot`을 보내 봇을 만들고 토큰을 받는다.
@@ -196,7 +196,12 @@ curl http://krx-quant:8080/v1/macro
 | `KRX_ALGORITHM_SECONDS` | 30 | 알고리즘 하나가 봉 마감 한 번에 쓸 수 있는 시간(초). 55 이하 |
 | `KRX_CPU_BUDGET_SECONDS` | 30 | 봉 마감 한 번에 알고리즘 예상 시간 합의 상한(초) |
 | `KRX_MIN_SAMPLE` | 200 | 순위와 상태 판정에 필요한 채점 수와 기준 예측과의 짝 수 |
-| `KRX_TRAIN_AT` | `21:30` | 거래일 밤 학습 시각(KST, `HH:MM`). `off`나 빈 값이면 하지 않는다 |
+| `KRX_TRAIN_AT` | `21:30` | 거래일 밤 학습 시각(KST, `HH:MM`). `off`나 빈 값이면 하지 않는다. `KRX_TRAIN_ON=spot`이면 Spot 스케줄(`deploy/training.yaml`의 `TrainAt`)과 같게 둔다 |
+| `KRX_TRAIN_ON` | `server` | 밤 학습을 돌리는 곳(#23). `server`는 이 서버의 별도 프로세스, `spot`은 AWS가 같은 시각에 띄우는 EC2 Spot이다. `spot`이면 서버는 학습에 필요한 설정과 휴장일 달력을 S3(`training/`)에 올리고, 결과를 다음 거래일 07:30까지 기다려 요약을 텔레그램으로 보낸다 |
+| `KRX_COST_BUDGET` | (없음) | 서버가 1시간마다 읽는 AWS Budgets 예산 이름(`krx-quant-monthly`, #23). 이달 비용이 예산의 50%와 80%를 넘으면 한 번씩 알리고, 100%에 닿으면 `KRX_TRAINING_SCHEDULES`를 그달 동안 끈다. 없으면 보지 않는다 |
+| `KRX_TRAINING_SCHEDULES` | (없음) | 상한에서 끄고 다음 달 1일에 다시 켤 EventBridge Scheduler 스케줄(쉼표로 구분, `krx-quant-training,krx-quant-training-resume`) |
+| `KRX_COST_CHECK_SECONDS` | 3600 | 비용을 읽는 간격(초). 60 이상 |
+| `KRX_IMAGE_REPOSITORY` | (없음) | Spot 학습용 이미지를 올릴 ECR 저장소 URI. 엔진은 읽지 않고 `deploy/push-image.sh`(자동 업데이트가 부른다)만 읽는다. 없으면 올리지 않는다 |
 | `KRX_MACRO_AT` | `07:30` | 거래일 매크로 지표를 읽고 국면을 정하는 시각(KST). `off`나 빈 값이면 하지 않는다. 개장 전이어야 한다. 개장 이후 시각이면 읽지 않고 `macro read skipped` 경고를 남긴다 |
 | `KRX_ECOS_API_KEY` | (없음) | 한국은행 ECOS 키. https://ecos.bok.or.kr/api/ 에서 회원가입 후 "인증키 신청"으로 받는다(무료, 즉시). 없으면 ECOS 지표(원/달러, 국고채 3년)를 건너뛴다 |
 | `KRX_FRED_API_KEY` | (없음) | FRED 키. https://fred.stlouisfed.org/docs/api/api_key.html 에서 계정을 만든 뒤 받는다(무료). 없으면 FRED 지표(미국 10년물, WTI)를 건너뛴다 |
@@ -272,7 +277,8 @@ Docker 이미지는 `TZ=Asia/Seoul`, `KRX_DATA_DIR=/data`, `KRX_STATE_DIR=/state
 | 장 마감 15분 뒤 (보통 15:45, 수능일 16:45) | 그날 녹화를 파티션마다 합쳐 S3에 올린다 |
 | 20:30 | 휴장일 정보를 갱신하고 1분봉 백필을 돌린다 |
 | 21:00 | 다시 올린다. NXT·애프터마켓의 늦은 데이터와 그날 1분봉이 들어간다 |
-| 21:30 (거래일) | 밤 학습(`KRX_TRAIN_AT`). 알고리즘마다 다시 학습하고, 이긴 모델만 승격 목록에 올린다. 결과를 텔레그램으로 보낸다 |
+| 21:30 (거래일) | 밤 학습(`KRX_TRAIN_AT`). 알고리즘마다 다시 학습하고, 이긴 모델만 승격 목록에 올린다. 결과를 텔레그램으로 보낸다. `KRX_TRAIN_ON=spot`이면 AWS가 같은 시각(평일)에 EC2 Spot을 띄우고, 00:30에 한 번 더 띄워 회수된 밤을 이어 간다. 서버는 결과를 기다려 요약을 보낸다 |
+| 1시간마다 (`KRX_COST_BUDGET`이 있으면) | 이달 AWS 비용을 읽는다. 50%·80%에서 알리고, 100%에서 Spot 학습을 그달 동안 끈다. 다음 달 1일 첫 확인에서 다시 켠다 |
 | 30초마다 | 모델 파일(`state/models/<알고리즘>.json`)이 바뀌었는지 본다(`fit`, `rollback`). 바뀌었으면 엔진이 새 모델로 바꾸고, 지금 도는 모델을 S3(`live.json`, `models/`)에 올린다 |
 
 - 수집기가 시작할 때도 지난날 중 아직 안 올린 날을 올리고 백필을 돌린다.
@@ -286,7 +292,9 @@ Docker 이미지는 `TZ=Asia/Seoul`, `KRX_DATA_DIR=/data`, `KRX_STATE_DIR=/state
 
 ### 밤 학습과 모델 교체 (#22)
 
-밤 학습은 지금 Lightsail 수집기가 21:30에 별도 프로세스로 띄운다(#23에서 EC2 Spot으로 옮긴다).
+밤 학습은 기본으로 Lightsail 수집기가 21:30에 별도 프로세스로 띄운다(`KRX_TRAIN_ON=server`). EC2 Spot에서 돌릴 수도 있다(`spot`, 아래 "밤 학습을 EC2 Spot으로 옮기기"). 학습 내용과 S3에 남는 것은 어디서 돌든 같다.
+
+> **바뀜** (2026-10-11, #67): "지금은 Lightsail 수집기가 띄운다(#23에서 EC2 Spot으로 옮긴다)" → 서버와 EC2 Spot 중에서 고른다(`KRX_TRAIN_ON`). 기본은 그대로 서버다. 이유: #23. Spot으로 옮기는 것은 AWS 비용이 드는 일이라 사용자가 스택을 배포하고 켠다.
 
 - 알고리즘마다 학습에 안 쓴 최근 3거래일로 새 모델(challenger)과 서버에서 돌고 있는 모델(champion)을 비교한다. log loss가 더 낮을 때만 승격한다. 학습 구간은 그 앞의 알고리즘별 거래일 수(기본 20)다.
 - S3의 `bars/`(백필)와 `events/`(녹화), 그리고 날마다의 매크로 국면(`macro/.../feed=regime/`, Markov가 쓴다, #14)을 읽는다. 녹화된 날은 중간가로, 백필만 있는 날은 종가로 학습한다([engine-api.md](engine-api.md#학습)). 리포트의 `reference_prices`에 날짜별로 `mid` 또는 `close`가 남는다. 텔레그램 요약 첫 줄에는 날 수가 나온다. 예: `2026-10-13 밤 학습 (녹화 중간가 4일, 백필 종가 19일)`.
@@ -319,6 +327,79 @@ docker compose exec engine krx-quant rollback granger     # 직전 모델로 되
 - 특정 밤을 다시 돌리려면 `docker compose run --rm --no-deps engine train --day 2026-10-12`. 이미 끝난 밤이면 그 결과를 그대로 보여 주고 텔레그램으로 다시 보내지 않는다.
 
 > **바뀜** (2026-10-10, #45): 모델을 바꾸려면 엔진을 재시작하고, 되돌리려면 `state/models/<이름>.json`을 지우고 재시작했다(기본 모델로만 돌아갔다) → 엔진이 30초마다 모델 파일을 보고 스스로 바꾼다. `krx-quant rollback <이름>`이 직전 모델로 되돌리고, 이력은 `state/models/history.json`과 `versions/`에 남는다. 이유: 08:00 교체와 명령 하나로 되돌리기(#22 요구사항)를 위해서다.
+
+### 밤 학습을 EC2 Spot으로 옮기기 (#23)
+
+밤 학습을 상시 서버 대신 EC2 Spot에서 돌린다. 녹화가 쌓이면 학습 메모리가 2GB 서버에 빠듯해지기 때문이다. 월 비용 상한도 함께 건다. AWS 자원은 `deploy/training.yaml`(CloudFormation) 하나에 있다.
+
+**구조**
+- **시작.** EventBridge Scheduler가 평일 21:30(KST)에 시작 템플릿으로 one-time Spot 인스턴스(기본 `m6i.large`, 8GB)를 띄운다.
+- **학습.** 인스턴스는 Amazon Linux 2023에서 ECR의 엔진 이미지를 받아 `krx-quant train --from-store`를 한 번 돌린다. 서버가 올린 설정(`training/settings.json`: 종목, 선행 시리즈, 수수료율)과 휴장일 달력(`training/market_calendar.json`)으로 학습한다. 결과는 서버에서 돌 때와 같이 S3에 남는다. 실행 로그는 `training/logs/<시각>.log`에 남는다.
+- **종료.** 인스턴스는 학습이 끝나면 성공이든 실패든 스스로 종료한다(`shutdown`이 종료로 이어진다). 무엇이 멈춰도 5시간(`MaxMinutes`) 뒤에는 꺼진다. 디스크도 함께 지워진다.
+- **재시도.** 00:30에 한 번 더 띄운다. Spot이 회수되어 끊긴 밤은 끝난 알고리즘을 건너뛰고 이어서 한다. 끝난 밤이면 몇 분 안에 끝난다. Spot 용량이 없으면 스케줄러가 1시간 안에 다섯 번까지 다시 시도한다.
+- **비밀값.** 인스턴스에는 비밀값이 없다. S3와 ECR은 인스턴스 역할로 읽고 쓴다. 텔레그램 요약은 서버가 S3의 결과를 보고 보낸다. 다음 거래일 07:30까지 결과가 없으면 `[장애] <날짜> 밤 학습이 실패했습니다: Spot 학습 결과가 ... 오지 않았습니다`를 보낸다.
+- **이미지.** 서버의 06:00 자동 업데이트가 새 이미지를 빌드한 뒤 ECR에 올린다(`deploy/push-image.sh`). ECR에는 최근 3개만 남는다.
+- **비용 상한.** AWS Budgets 예산(`krx-quant-monthly`, 월 $100)을 서버의 Cost Guard가 1시간마다 읽는다.
+  - 이달 비용이 50%와 80%를 넘으면 텔레그램으로 한 번씩 알린다.
+  - 100%에 닿으면 두 스케줄을 끄고 알린다. 실시간 예측은 계속한다.
+  - 다음 달 1일 첫 확인에서 스케줄을 다시 켜고 알린다.
+  - AWS는 예산의 비용을 하루에 몇 번만 새로 계산하므로, 몇 시간 늦게 반응할 수 있다.
+- **권한.** 스택은 서버의 IAM 사용자(`krx-quant-engine`)에 정책 하나를 붙인다. 이미지 올리기, 예산 읽기, 두 스케줄 끄고 켜기만 할 수 있다.
+- **예상 비용.** Spot `m6i.large`는 시드니에서 시간당 몇 센트다. 학습이 하루 30분 안팎이면 월 $1 안팎이다(미확인 ⚠, 첫 달에 Cost Explorer로 확인한다). ECR 저장은 월 $0.1 안팎이다.
+
+**옮기는 순서** (맥에서, 관리용 자격 증명으로)
+1. 비용 상한과 프로젝트 지출 한도를 정한다(1장). 같은 $100이면 상한에서 서버까지 멈춘다.
+2. 리전에 기본 VPC가 있는지 본다. 인스턴스는 기본 VPC의 기본 서브넷에 뜬다. 없으면 만든다.
+   ```bash
+   aws ec2 describe-vpcs --filters Name=is-default,Values=true --query 'Vpcs[].VpcId'
+   aws ec2 create-default-vpc   # 위 결과가 비어 있을 때만
+   ```
+3. 스택을 배포하고 출력값을 본다. `Bucket`은 `deploy/create-aws.sh`의 버킷이다.
+   ```bash
+   aws cloudformation deploy --stack-name krx-quant-training --template-file deploy/training.yaml --capabilities CAPABILITY_NAMED_IAM --parameter-overrides Bucket=<버킷>
+   aws cloudformation describe-stacks --stack-name krx-quant-training --query 'Stacks[0].Outputs'
+   ```
+4. 서버의 `.env`에 출력값을 넣는다. 장 시간 밖에 한다.
+   ```bash
+   KRX_IMAGE_REPOSITORY=<ImageRepository>
+   KRX_TRAIN_ON=spot
+   KRX_COST_BUDGET=krx-quant-monthly
+   KRX_TRAINING_SCHEDULES=krx-quant-training,krx-quant-training-resume
+   ```
+5. 서버에서 첫 이미지를 올리고 엔진을 다시 띄운다.
+   ```bash
+   deploy/push-image.sh
+   docker compose up -d
+   ```
+6. 맥에서 한 번 띄워 본다. 이미 끝난 밤이면 몇 분 안에 끝나고 인스턴스가 사라진다.
+   ```bash
+   aws ec2 run-instances --launch-template 'LaunchTemplateName=krx-quant-training,Version=$Latest'
+   aws ec2 describe-instances --filters Name=tag:Name,Values=krx-quant-training --query 'Reservations[].Instances[].State.Name'
+   aws s3 ls s3://<버킷>/engine/training/logs/
+   ```
+   로그 마지막 줄이 `krx-quant training: exit 0`인지 본다. 처음 Spot을 띄우는 계정이면 Spot 서비스 연결 역할이 이때 만들어진다.
+7. 다음 거래일 밤에 확인한다(#23의 마지막 조건).
+   - 21:30 뒤 텔레그램에 `[알림] <날짜> 밤 학습` 요약이 오는지 본다. 서버가 S3에서 결과를 보고 보낸다.
+   - 다음 날 08:00에 `[알림] 모델 교체`가 오거나, `/v1/status`의 `training.day`가 그 밤인지 본다.
+
+**GPU Spot** (신경망 알고리즘이 생기면)
+- 새 계정의 GPU Spot 한도는 0 vCPU다. "All G and VT Spot Instance Requests" 할당량(`L-3819A6DF`)을 보고, 0이면 늘려 달라고 요청한다. 승인에 하루 이상 걸릴 수 있다.
+  ```bash
+  aws service-quotas get-service-quota --service-code ec2 --quota-code L-3819A6DF --query Quota.Value
+  aws service-quotas request-service-quota-increase --service-code ec2 --quota-code L-3819A6DF --desired-value 4
+  ```
+- 승인되면 `InstanceType=g4dn.xlarge`로 스택을 다시 배포한다. 그때 시작 템플릿의 이미지를 GPU 드라이버가 있는 것(Deep Learning AMI)으로 바꾼다. 지금 알고리즘은 모두 CPU로 학습한다.
+
+**되돌리기와 지우기**
+- 서버 학습으로 돌아가려면 `.env`의 `KRX_TRAIN_ON=server`로 바꾸고 `docker compose up -d`를 실행한다. 두 스케줄도 끈다.
+  ```bash
+  for s in krx-quant-training krx-quant-training-resume; do aws scheduler get-schedule --name "$s" --query State; done
+  ```
+  끌 때는 콘솔(EventBridge > Schedules)에서 Disable 하거나 스택을 지운다.
+- 스택을 지우면 ECR 이미지까지 지워진다. 그 전에 `.env`에서 `KRX_TRAIN_ON`, `KRX_COST_BUDGET`, `KRX_TRAINING_SCHEDULES`, `KRX_IMAGE_REPOSITORY`를 뺀다.
+  ```bash
+  aws cloudformation delete-stack --stack-name krx-quant-training
+  ```
 
 ### 새 알고리즘 사전 검증 (#24)
 
@@ -398,6 +479,10 @@ docker compose logs --tail 200 engine
 | `WARNING krx_quant.engine: <이름> skipped at ... for the CPU budget` 또는 `<이름> took over 30.0s` 로그가 잦다 | `docker stats`로 CPU 사용률, DB의 `runs` 테이블(`kind`가 `cpu_budget`) | 알고리즘 계산이 서버에 버겁다. 텔레그램 알림은 없다. 4GB 요금제로 올리거나 `KRX_CPU_BUDGET_SECONDS`를 조정한다. |
 | `[장애] 매크로 출처 <ecos/fred/yahoo/kis>가 3번 연속 실패했습니다: <이유>` | 로그의 `macro source ... failed` | 키가 틀렸으면(`ECOS INFO-100`, `FRED 400 ... api_key`) `.env`를 고친다. `HTTP 5xx`나 연결 실패는 출처 쪽 장애다. 다음 거래일 07:30에 다시 읽고, 응답하면 `[복구] 매크로 출처 …가 다시 응답합니다.`가 온다. 그동안 그 출처의 지표 없이 국면을 정한다. |
 | `[장애] <날짜> 밤 학습이 실패했습니다: <이유>` | 로그의 `nightly training of ... failed`. 6시간 안에 안 끝나면 이유가 `not done in 6:00:00`이다 | `docker compose run --rm --no-deps engine train --day <날짜>`로 다시 돌린다. 끝난 알고리즘은 건너뛴다. 다음 밤 학습이 성공하면 `[복구] 밤 학습이 다시 됩니다.`가 온다. 그동안 전날 모델이 계속 돈다. |
+| `[장애] <날짜> 밤 학습이 실패했습니다: Spot 학습 결과가 <다음 거래일> 07:30까지 오지 않았습니다` | S3의 `training/logs/`(최근 로그 마지막 줄), `aws ec2 describe-instances --filters Name=tag:Name,Values=krx-quant-training`, 스케줄러 상태 | Spot이 뜨지 못했거나(용량, 할당량, 상한으로 꺼진 스케줄) 학습이 실패했다. 맥에서 `aws ec2 run-instances --launch-template 'LaunchTemplateName=krx-quant-training,Version=$Latest'`로 다시 띄우면 끝난 알고리즘은 건너뛴다. 급하면 서버에서 `docker compose run --rm --no-deps engine train --day <날짜>`. 그동안 전날 모델이 계속 돈다. |
+| `[알림] AWS 비용이 이달 $N로 상한 $100의 50%(80%)를 넘었습니다.` | AWS Billing > Cost Explorer | 할 일은 없다. 예상보다 빠르면 무엇이 비용을 쓰는지 본다. |
+| `[알림] AWS 비용이 이달 $N로 상한 $100에 닿았습니다. 이달 남은 기간 밤 학습(Spot)을 끕니다. ...` | Cost Explorer | 그달은 학습 없이 전날 모델로 돈다. 서둘러 학습이 필요하면 서버에서 `train`을 손으로 돌린다. 다음 달 1일에 `[알림] 새 달(...)이라 밤 학습(Spot) 스케줄을 다시 켰습니다.`가 온다. |
+| 로그의 `could not check the AWS costs` | `.env`의 `KRX_COST_BUDGET`, IAM 정책(`krx-quant-engine-training`) | 예산 이름이나 권한이 틀렸다. 고치면 다음 확인부터 된다. |
 | `[신호] <종목> 상승 64% · 정식 3개 중 2개 같은 방향 · 09:31 봉 마감, 09:35까지` | `/v1/symbols/<종목>/latest`의 `consensus-final` | `KRX_SIGNAL_ALERT=on`일 때만 온다. 장애가 아니라 예측 신호다. 같은 종목·방향은 4분 안에 다시 오지 않는다. 주문 코드는 없다. |
 | `[알림] <날짜> 밤 학습`과 알고리즘별 `승격`·`유지`·`학습 안 함` | | 매일 밤 학습의 요약이다. 할 일은 없다. 승격된 모델은 다음 거래일 08:00에 바뀐다. |
 | `[알림] 모델 교체 (<날짜> 밤 학습): <알고리즘> → <버전>` | `/v1/status`의 `training` | 08:00 교체가 됐다. 되돌리려면 `docker compose exec engine krx-quant rollback <이름>`. |
@@ -419,8 +504,11 @@ docker compose logs --tail 200 engine
 - Lightsail 2GB: 월 $12. 데이터 전송 3TB가 포함된다.
 - S3: 월 $1 미만으로 예상한다(#7에서 하루 데이터 크기를 잰다).
 - 스냅샷: GB·월당 $0.05다.
-- 상한은 월 $100이다. Budgets 알림과 Spot 학습 상한은 #23에서 만든다.
-- 지금은 AWS 프로젝트 지출 한도($100)가 걸려 있어서, 한도에 닿으면 상시 서버까지 멈춘다(1장 참고).
+- 상한은 월 $100이다. 밤 학습을 Spot으로 옮기면 서버의 Cost Guard가 AWS Budgets 예산(`krx-quant-monthly`)을 1시간마다 읽어, 50%·80%에서 알리고 100%에서 그달 Spot 학습을 끈다(3장 "밤 학습을 EC2 Spot으로 옮기기").
+- Spot 학습: 하루 30분 안팎이면 월 $1 안팎으로 예상한다(미확인 ⚠). ECR: 월 $0.1 안팎.
+- 지금은 AWS 프로젝트 지출 한도($100)가 걸려 있어서, 한도에 닿으면 상시 서버까지 멈춘다(1장 참고). Cost Guard보다 먼저 닿지 않게 한도를 올릴지는 사용자가 정한다.
+
+> **바뀜** (2026-10-11, #67): "Budgets 알림과 Spot 학습 상한은 #23에서 만든다" → 서버의 Cost Guard가 한다. 계획은 AWS Budgets가 텔레그램으로 직접 알리는 것이었다. 이유: 텔레그램 토큰을 서버 `.env` 밖(Lambda, SSM)에 두지 않기 위해 서버가 예산을 읽어 알린다(사용자와 정함).
 
 ## 8. 저장 위치
 
