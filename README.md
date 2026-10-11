@@ -193,7 +193,7 @@ uv run python -c "import glob, pyarrow.parquet as pq; d = sorted(glob.glob('data
 | P2 | 예측·채점 핵심 | 완료: #9–#19. 호가 피처를 쓰는 Turing은 녹화가 쌓인 뒤(#55) |
 | P3 | Fincept 화면, 빌드 | 진행 중. 첫 화면과 개인 빌드(#20)는 됐다. 나머지(#21)가 남았다 |
 | P4 | 밤 학습 | 진행 중. 상시 서버의 밤 학습과 08:00 교체(PR #45), 녹화 이벤트로 학습하기(#22, PR #48)는 됐다. EC2 Spot과 비용 상한(#23)이 남았다 |
-| P5 | 호가 알고리즘, 재생 테스트 | 하루 재생(`replay`), 새 알고리즘 사전 검증(`prevalidate`, #24), Kalman(#25), Shannon(#26)이 있다(둘 다 사전 검증 뒤에 돈다). 남은 것: Poisson(#27) |
+| P5 | 호가 알고리즘, 재생 테스트 | 완료: 하루 재생(`replay`), 새 알고리즘 사전 검증(`prevalidate`, #24), Kalman(#25), Shannon(#26), Poisson(#27). 셋은 녹화 10거래일 뒤 사전 검증을 거쳐 돈다 |
 
 ## 비밀값
 

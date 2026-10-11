@@ -5,7 +5,7 @@
 - its probabilities are each in [0, 1] and add up to 1, whatever the features, unless it
   declines the symbol with a reason (``NotPredicted``: the book missing);
 - training gives a new, versioned model that survives being saved: on backfilled bars, or
-  on recorded days for an algorithm that reads the book.
+  on recorded days for an algorithm that reads the book or the trades' sides.
 """
 
 from __future__ import annotations
@@ -26,15 +26,18 @@ from krx_quant.algorithms import (
     predicted,
     save_model,
 )
+from krx_quant.engine import Event
 from krx_quant.features import (
     BOOK_FEATURES,
     FEATURES,
     SERIES_FEATURES,
+    TAPE_FEATURES,
     FeatureVector,
     Leaders,
     UndeclaredFeature,
     Value,
 )
+from krx_quant.feeds import TRADE
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.training import recorded_samples, samples
 from tests.algorithm_doubles import FixedAlgorithm
@@ -43,6 +46,14 @@ from tests.test_replay import busy_morning
 
 FEE = 0.015 / 100
 DAYS = [date(2026, 9, 21), date(2026, 9, 22)]
+
+
+def with_sides(events: list[Event]) -> list[Event]:
+    """The trades' aggressor sides, buying and selling in turn, as the collector records them."""
+    out: list[Event] = []
+    for i, (feed, row) in enumerate(events):
+        out.append((feed, {**row, "side": "buy" if i % 4 < 2 else "sell"} if feed == TRADE.tr_id else row))
+    return out
 
 
 def given(default: float | None, **values: float | None) -> dict[str, Value]:
@@ -102,12 +113,12 @@ def test_probabilities_are_a_distribution_from_declared_features_only(
 
 def test_training_gives_a_new_versioned_model_that_can_be_saved(algorithm: Algorithm, tmp_path: Path) -> None:
     calendar = MarketCalendar(dict.fromkeys(DAYS, True))
-    if set(algorithm.features) & BOOK_FEATURES:
+    if set(algorithm.features) & (BOOK_FEATURES | TAPE_FEATURES):
         training = [
             s
             for day in DAYS
             for s in recorded_samples(
-                busy_morning(day, end="11:00:00"),
+                with_sides(busy_morning(day, end="11:00:00")),
                 calendar,
                 day,
                 ("005930",),

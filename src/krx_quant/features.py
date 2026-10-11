@@ -3,8 +3,9 @@
 A feature is a function of a ``Snapshot``: the day's finished one-minute bars up to the
 bar close, the reference price there, when the session opened, the bars of the series
 that may lead the symbol (``Leaders``), the microprices of its book at each minute's end
-and its order flow (``OrderFlow``: the book, the trades' sides and venues; recorded days
-only, ``BOOK_FEATURES`` and ``TAPE_FEATURES``: backfilled bars have neither), its flows,
+and its order flow (``OrderFlow``: the book, the trades' sides and venues) and trade
+arrivals (``Arrivals``), recorded days only (``BOOK_FEATURES``, ``TAPE_FEATURES``:
+backfilled bars have neither), its flows,
 and the day's macro regime (``macro.py``). Live
 and replay build snapshots from the engine's Market View; training builds them from
 recorded events through the same view, or from backfilled bars, so a feature means the
@@ -83,6 +84,24 @@ class OrderFlow:
     nxt_volume: float | None = None
 
 
+# The decay times (seconds) of each side's excitation, and the minutes its arrivals are
+# summed over (Poisson's).
+EXCITATION_SECONDS = (10, 60)
+ARRIVAL_MINUTES = 1
+SIDES = ("buy", "sell")
+
+
+@dataclass(frozen=True)
+class Arrivals:
+    """A symbol's buy- and sell-initiated trades received before a bar close, from the open,
+    each weighing its size over the day's mean trade size so far (Poisson's). Empty without
+    any trade's side today: recorded days only."""
+
+    # (side, seconds): the trades' weights, each faded by e^(−age / seconds)
+    excitation: Mapping[tuple[str, int], float] = field(default_factory=dict)
+    last_minutes: Mapping[str, float] = field(default_factory=dict)  # side: weights over ARRIVAL_MINUTES
+
+
 @dataclass(frozen=True)
 class Snapshot:
     symbol: str
@@ -104,6 +123,7 @@ class Snapshot:
     # is missing at the bar close, and on a day with backfilled bars only.
     microprices: Sequence[float] = ()
     order_flow: OrderFlow = field(default_factory=OrderFlow)
+    arrivals: Arrivals = field(default_factory=Arrivals)
 
     @classmethod
     def at(
@@ -121,6 +141,7 @@ class Snapshot:
         expiry_days: int | None = None,
         microprices: Sequence[float] = (),
         order_flow: OrderFlow | None = None,
+        arrivals: Arrivals | None = None,
     ) -> Snapshot:
         """A snapshot with the tick and flat band of ``price``."""
         lead, known = leaders or {}, flows or Flows()
@@ -139,6 +160,7 @@ class Snapshot:
             expiry_days,
             microprices,
             order_flow or OrderFlow(),
+            arrivals or Arrivals(),
         )
 
     @cached_property
@@ -384,6 +406,36 @@ def nxt_share(s: Snapshot) -> FeatureValue:
     if krx is None or nxt is None or krx + nxt <= 0:
         return None
     return nxt / (krx + nxt)
+
+
+def excitation_feature(side: str, seconds: int) -> str:
+    return f"{side}_excitation_{seconds}"
+
+
+def arrivals_feature(side: str) -> str:
+    return f"{side}_arrivals_{ARRIVAL_MINUTES}"
+
+
+def _excitation(side: str, seconds: int) -> Feature:
+    def feature(s: Snapshot) -> FeatureValue:
+        return s.arrivals.excitation.get((side, seconds))
+
+    feature.__doc__ = (
+        f"The {side}-initiated trades from the open, each its size over the day's mean, faded by "
+        f"e^(−age / {seconds} s) at the bar close. Unknown without any trade's side today."
+    )
+    return feature
+
+
+def _arrivals(side: str) -> Feature:
+    def feature(s: Snapshot) -> FeatureValue:
+        return s.arrivals.last_minutes.get(side)
+
+    feature.__doc__ = (
+        f"The {side}-initiated trades of the last {ARRIVAL_MINUTES} minute(s), each its size over "
+        "the day's mean. Unknown without any trade's side today."
+    )
+    return feature
 
 
 def minutes_since_open(s: Snapshot) -> FeatureValue:
@@ -633,6 +685,8 @@ FEATURES: dict[str, Feature] = {
     "trade_imbalance": trade_imbalance,
     "trade_entropy": trade_entropy,
     "nxt_share": nxt_share,
+    **{excitation_feature(side, sec): _excitation(side, sec) for side in SIDES for sec in EXCITATION_SECONDS},
+    **{arrivals_feature(side): _arrivals(side) for side in SIDES},
     "macro_regime": macro_regime,
     "minutes_since_open": minutes_since_open,
     "days_to_expiry": days_to_expiry,
@@ -649,7 +703,15 @@ SERIES_FEATURES = frozenset({"minute_ticks", "microprice_ticks", "kospi200f_move
 # The features from the book, and from the trades' sides and venues: none on a day with
 # backfilled bars only.
 BOOK_FEATURES = frozenset({"microprice_ticks", "depth_imbalance", *(ofi_feature(m) for m in OFI_MINUTES)})
-TAPE_FEATURES = frozenset({"trade_imbalance", "trade_entropy", "nxt_share"})
+TAPE_FEATURES = frozenset(
+    {
+        "trade_imbalance",
+        "trade_entropy",
+        "nxt_share",
+        *(excitation_feature(side, sec) for side in SIDES for sec in EXCITATION_SECONDS),
+        *(arrivals_feature(side) for side in SIDES),
+    }
+)
 
 
 class UndeclaredFeature(LookupError):
