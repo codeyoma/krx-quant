@@ -10,14 +10,12 @@ from typing import Any
 import pyarrow.parquet as pq
 import pytest
 
-from krx_quant import auth
 from krx_quant.backfill import Backfiller, FuturesBars, StockBars, run_backfill
 from krx_quant.contracts import KOSPI200, USD
 from krx_quant.fake_kis import FakeKis
 from krx_quant.feeds.base import KST
 from krx_quant.health import GAP_SCHEMA
 from krx_quant.market_calendar import MarketCalendar
-from krx_quant.ratelimit import RateLimiter
 from krx_quant.recorder import ParquetRecorder
 from tests.kis_rest import (
     FUTURES_BARS,
@@ -30,6 +28,7 @@ from tests.kis_rest import (
     minute_bars_api,
     requests_for,
     rest_client,
+    rest_grants,
 )
 from tests.test_collector import read, settings_for
 
@@ -53,19 +52,6 @@ def days_with_bars(data_dir: Path, symbol: str | None = None, feed: str = MINUTE
             for p in (data_dir / "bars").glob(pattern)
         }
     )
-
-
-def rest_grants(monkeypatch: pytest.MonkeyPatch) -> list[float]:
-    """When the app key's REST limiter lets each call through from here on, on its own clock."""
-    grants: list[float] = []
-
-    class Recorded(RateLimiter):
-        async def acquire(self) -> float:
-            grants.append(await super().acquire())
-            return grants[-1]
-
-    monkeypatch.setattr(auth, "RateLimiter", Recorded)
-    return grants
 
 
 @pytest.fixture(autouse=True)

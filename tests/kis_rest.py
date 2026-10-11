@@ -9,10 +9,13 @@ from pathlib import Path
 from typing import Any
 
 import aiohttp
+import pytest
 
+from krx_quant import auth
 from krx_quant.auth import tokens_and_client
 from krx_quant.fake_kis import FakeKis
 from krx_quant.kis import RestClient
+from krx_quant.ratelimit import RateLimiter
 from tests.test_collector import settings_for
 
 Responder = Callable[[dict[str, str]], dict[str, Any]]
@@ -59,6 +62,22 @@ async def rest_client(kis: FakeKis, data_dir: Path, now: datetime) -> AsyncItera
 
 def requests_for(kis: FakeKis, tr_id: str) -> list[dict[str, str]]:
     return [query for _, t, _, query in kis.rest_requests if t == tr_id]
+
+
+def rest_grants(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """When the app key's REST limiter lets each call through from here on, on its own clock.
+
+    The moments come in time order, as the limiter lets the calls go.
+    """
+    grants: list[float] = []
+
+    class Recorded(RateLimiter):
+        async def acquire(self) -> float:
+            grants.append(await super().acquire())
+            return grants[-1]
+
+    monkeypatch.setattr(auth, "RateLimiter", Recorded)
+    return grants
 
 
 # KIS answers at most 120 bars per minute-bar query.
