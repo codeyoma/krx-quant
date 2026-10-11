@@ -2,8 +2,10 @@
 
 - its card is filled in and names features it declared;
 - it reads only the features it declared;
-- its probabilities are each in [0, 1] and add up to 1, whatever the features;
-- training gives a new, versioned model that survives being saved.
+- its probabilities are each in [0, 1] and add up to 1, whatever the features, unless it
+  declines the symbol with a reason (``NotPredicted``: the book missing);
+- training gives a new, versioned model that survives being saved: on backfilled bars, or
+  on recorded days for an algorithm that reads the book.
 """
 
 from __future__ import annotations
@@ -15,12 +17,29 @@ from pathlib import Path
 
 import pytest
 
-from krx_quant.algorithms import ALGORITHMS, Algorithm, load_models, save_model
-from krx_quant.features import FEATURES, SERIES_FEATURES, FeatureVector, UndeclaredFeature, Value
+from krx_quant.algorithms import (
+    ALGORITHMS,
+    Abstention,
+    Algorithm,
+    NotPredicted,
+    load_models,
+    predicted,
+    save_model,
+)
+from krx_quant.features import (
+    BOOK_FEATURES,
+    FEATURES,
+    SERIES_FEATURES,
+    FeatureVector,
+    Leaders,
+    UndeclaredFeature,
+    Value,
+)
 from krx_quant.market_calendar import MarketCalendar
-from krx_quant.training import samples
+from krx_quant.training import recorded_samples, samples
 from tests.algorithm_doubles import FixedAlgorithm
 from tests.synthetic_bars import random_walk, trending
+from tests.test_replay import busy_morning
 
 FEE = 0.015 / 100
 DAYS = [date(2026, 9, 21), date(2026, 9, 22)]
@@ -66,7 +85,14 @@ def test_probabilities_are_a_distribution_from_declared_features_only(
 ) -> None:
     features = FeatureVector(SCENARIOS[scenario], algorithm.features)  # reading any other raises
 
-    forecast = algorithm.predict(features, algorithm.default_model())
+    try:
+        forecast = algorithm.predict(features, algorithm.default_model())
+    except NotPredicted as declined:
+        assert isinstance(declined.why, Abstention)
+        assert set(algorithm.features) & BOOK_FEATURES, "only for missing data an algorithm reads"
+        missing = [SCENARIOS[scenario][n] in ((), None) for n in set(algorithm.features) & BOOK_FEATURES]
+        assert all(missing), "only when that data is missing"
+        return
 
     probabilities = (forecast.p_up, forecast.p_flat, forecast.p_down)
     assert all(0 <= p <= 1 for p in probabilities), probabilities
@@ -76,8 +102,23 @@ def test_probabilities_are_a_distribution_from_declared_features_only(
 
 def test_training_gives_a_new_versioned_model_that_can_be_saved(algorithm: Algorithm, tmp_path: Path) -> None:
     calendar = MarketCalendar(dict.fromkeys(DAYS, True))
-    bar_days = {("005930", DAYS[0]): trending(DAYS[0]), ("005930", DAYS[1]): random_walk(DAYS[1])}
-    training = samples(bar_days, calendar, algorithm.features, FEE)
+    if set(algorithm.features) & BOOK_FEATURES:
+        training = [
+            s
+            for day in DAYS
+            for s in recorded_samples(
+                busy_morning(day, end="11:00:00"),
+                calendar,
+                day,
+                ("005930",),
+                algorithm.features,
+                FEE,
+                Leaders(),
+            )
+        ]
+    else:
+        bar_days = {("005930", DAYS[0]): trending(DAYS[0]), ("005930", DAYS[1]): random_walk(DAYS[1])}
+        training = samples(bar_days, calendar, algorithm.features, FEE)
 
     model = algorithm.fit(training)
 
@@ -87,7 +128,7 @@ def test_training_gives_a_new_versioned_model_that_can_be_saved(algorithm: Algor
     save_model(tmp_path, algorithm.name, model)
     assert load_models(tmp_path, [algorithm])[algorithm.name] == model
     for sample in training[:50]:
-        algorithm.predict(sample.features, model)
+        predicted(algorithm, sample.features, model)
 
 
 def test_predicting_takes_a_small_part_of_the_time_budget(algorithm: Algorithm) -> None:
@@ -98,7 +139,7 @@ def test_predicting_takes_a_small_part_of_the_time_budget(algorithm: Algorithm) 
     started = time.perf_counter()
     for _ in range(100):
         for features in vectors:
-            algorithm.predict(features, model)
+            predicted(algorithm, features, model)
     assert time.perf_counter() - started < 1.0
 
 

@@ -30,7 +30,7 @@ import math
 from collections.abc import Mapping, Sequence
 from typing import NamedTuple
 
-from krx_quant.algorithms.contract import Card, Model, Sample
+from krx_quant.algorithms.contract import Card, Model, NothingToLearn, Sample
 from krx_quant.algorithms.forecasts import (
     HORIZON_MINUTES,
     UNKNOWN,
@@ -103,7 +103,7 @@ class Granger:
             if volatility and s.change_ticks is not None:
                 rows.append(_Row(dict(s.features), s.change_ticks / volatility))
         if not rows:
-            raise ValueError("no training samples with a volatility to measure moves in")
+            raise NothingToLearn("no training samples with a volatility to measure moves in")
         own = _own_lags(rows)
         chosen = list(own)
         for group in LEAD_GROUPS:

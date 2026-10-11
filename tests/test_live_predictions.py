@@ -19,7 +19,7 @@ from krx_quant.clock import FakeClock
 from krx_quant.collector import run_collector
 from krx_quant.fake_kis import FakeKis
 from tests.kis_frames import book_frame
-from tests.replay_events import PREDICTORS, at
+from tests.replay_events import LIVE_PREDICTORS, at
 from tests.test_collector import settings_for
 
 
@@ -62,7 +62,7 @@ async def test_the_collector_predicts_from_live_events_and_serves_them(kis: Fake
         base = f"http://127.0.0.1:{port}/v1"
         # Baselines are stored first; each algorithm when it has predicted every symbol.
         latest = await poll(
-            f"{base}/symbols/005930/latest", lambda b: len(b["predictions"]) == len(PREDICTORS)
+            f"{base}/symbols/005930/latest", lambda b: len(b["predictions"]) == len(LIVE_PREDICTORS)
         )
         status = await poll(f"{base}/status", lambda b: True)
         symbols = await poll(f"{base}/symbols", lambda b: True)
@@ -71,7 +71,7 @@ async def test_the_collector_predicts_from_live_events_and_serves_them(kis: Fake
         await asyncio.wait_for(task, 5)
 
     assert latest["bar_close"] == "2026-10-12T09:31:00+09:00"
-    assert {p["algorithm"] for p in latest["predictions"]} == PREDICTORS
+    assert {p["algorithm"] for p in latest["predictions"]} == LIVE_PREDICTORS
     assert {p["displayed_at"] for p in latest["predictions"]} == {"2026-10-12T09:31:00.200000+09:00"}
     # The engine took the book from the live stream.
     assert symbols["symbols"] == [{"symbol": "005930", "mid": 81_250, "tick": 100, "flat_ticks": 2}]

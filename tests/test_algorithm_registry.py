@@ -7,9 +7,11 @@ import pytest
 from krx_quant.algorithms import ALGORITHMS, RegistrationError, register
 from krx_quant.algorithms.gauss import Gauss
 from krx_quant.algorithms.granger import Granger
+from krx_quant.algorithms.kalman import Kalman
 from krx_quant.algorithms.markov import Markov
 from krx_quant.algorithms.newton import Newton
 from krx_quant.algorithms.turing import Turing
+from krx_quant.features import SERIES_FEATURES
 from tests.algorithm_doubles import FixedAlgorithm
 
 
@@ -54,11 +56,12 @@ def test_an_algorithm_must_declare_known_features_and_a_new_name() -> None:
 
 
 def test_each_registered_algorithm_has_a_personality_of_its_own() -> None:
-    assert [a.name for a in ALGORITHMS] == ["newton", "gauss", "granger", "markov", "turing"]
+    assert [a.name for a in ALGORITHMS] == ["newton", "gauss", "granger", "markov", "kalman", "turing"]
     assert not set(Gauss.card.unique_features) & set(Newton.features)
     assert not set(Granger.card.unique_features) & (set(Newton.features) | set(Gauss.features))
     earlier = set(Newton.features) | set(Gauss.features) | set(Granger.features)
     assert not set(Markov.card.unique_features) & earlier
-    # Turing reads every number the others do, and its own on top.
-    others = earlier | set(Markov.features)
-    assert set(Turing.features) == (others - {"minute_ticks"}) | set(Turing.card.unique_features)
+    assert not set(Kalman.card.unique_features) & (earlier | set(Markov.features))
+    # Turing reads every number the others do (not their series), and its own on top.
+    others = earlier | set(Markov.features) | set(Kalman.features)
+    assert set(Turing.features) == (others - SERIES_FEATURES) | set(Turing.card.unique_features)

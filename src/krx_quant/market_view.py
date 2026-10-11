@@ -2,8 +2,9 @@
 
 The predicted symbols' one-minute bars and reference prices (``reference``), the bars of
 the series that may lead them (``features.Leaders``: futures, indices, US daytime trades,
-ETFs), each by exchange time, as they stood at each bar close, and the symbols' flows
-(program trading, foreign member firms, investor estimates) as received before it. The engine predicts
+ETFs), each by exchange time, as they stood at each bar close, the symbols' microprices at
+each minute's end (from the integrated book), and their flows (program trading, foreign
+member firms, investor estimates), as received before it. The engine predicts
 from it, live and in replay; training on a recorded day feeds the same events through it,
 so it learns from exactly what the engine saw.
 
@@ -20,7 +21,7 @@ from datetime import date, datetime, time, timedelta
 from typing import Any
 
 from krx_quant.contracts import KOSPI200, USD, days_to_expiry
-from krx_quant.features import FLOW_MINUTES, Flows, Leaders, Snapshot
+from krx_quant.features import FLOW_MINUTES, MINUTE_MOVES, Flows, Leaders, Snapshot
 from krx_quant.feeds import (
     BOOK,
     BOOK_SNAPSHOT,
@@ -38,7 +39,7 @@ from krx_quant.feeds import (
 )
 from krx_quant.feeds.base import KST, kst_day
 from krx_quant.market_calendar import MarketCalendar, Session
-from krx_quant.reference import BAR, Bar, BarBuilder, ReferencePrice, Source
+from krx_quant.reference import BAR, MAX_QUOTE_AGE, Bar, BarBuilder, ReferencePrice, Source
 
 HORIZON = timedelta(minutes=4)
 # How far ahead to look for the next session (long holidays included).
@@ -134,6 +135,43 @@ class _Estimates:
         return foreign, institution
 
 
+class _Microprices:
+    """A symbol's book microprices by receipt time, for the latest hour or so."""
+
+    _KEEP = timedelta(minutes=MINUTE_MOVES + 10)
+
+    def __init__(self) -> None:
+        self._at: list[datetime] = []
+        self._values: list[float] = []
+
+    def add(self, at: datetime, bid: int, ask: int, bid_qty: int | None, ask_qty: int | None) -> None:
+        """A book update; an empty side or a crossed book is not a usable one."""
+        if bid <= 0 or ask <= 0 or ask < bid or (self._at and at < self._at[-1]):
+            return
+        # The microprice leans toward the side with less waiting: the other is likelier to go.
+        # Without both sizes (a file recorded without them) it is the mid-point.
+        if bid_qty and ask_qty and bid_qty > 0 and ask_qty > 0:
+            value = (bid * ask_qty + ask * bid_qty) / (bid_qty + ask_qty)
+        else:
+            value = (bid + ask) / 2
+        self._at.append(at)
+        self._values.append(value)
+        if at - self._at[0] > 2 * self._KEEP:
+            cut = bisect.bisect_left(self._at, at - self._KEEP)
+            del self._at[:cut], self._values[:cut]
+
+    def at_minute_ends(self, ends: Sequence[datetime]) -> list[float]:
+        """The microprice received just before each of ``ends`` (oldest first), back to the
+        last end without one received in the minute before it."""
+        out: list[float] = []
+        for end in reversed(ends):
+            i = bisect.bisect_left(self._at, end) - 1
+            if i < 0 or self._at[i] < end - MAX_QUOTE_AGE:
+                break
+            out.append(self._values[i])
+        return out[::-1]
+
+
 @dataclass(frozen=True)
 class BarsAtClose:
     """The bars as they stood at a bar close."""
@@ -161,6 +199,7 @@ class MarketView:
         self._program = {s: _Flow() for s in self.symbols}
         self._foreign_members = {s: _Flow() for s in self.symbols}
         self._estimates = {s: _Estimates() for s in self.symbols}
+        self._microprices = {s: _Microprices() for s in self.symbols}
         self._expiry: dict[date, int] = {}
 
     def on_event(self, feed: str, row: dict[str, Any]) -> None:
@@ -186,7 +225,9 @@ class MarketView:
         elif feed == KRX_TRADE.tr_id:
             self._reference.quote(symbol, Source.KRX, received_at, row["bid1"], row["ask1"])
         else:
-            self._reference.quote(symbol, Source.INTEGRATED, received_at, row["bid_px_1"], row["ask_px_1"])
+            bid, ask = row["bid_px_1"], row["ask_px_1"]
+            self._reference.quote(symbol, Source.INTEGRATED, received_at, bid, ask)
+            self._microprices[symbol].add(received_at, bid, ask, row.get("bid_qty_1"), row.get("ask_qty_1"))
 
     def at_close(self, close: datetime) -> BarsAtClose:
         """The bars as they stood at ``close``: kept when an event at or after it arrived,
@@ -225,7 +266,18 @@ class MarketView:
             regime=regime,
             flows=self.flows(symbol, frozen.close),
             expiry_days=self._expiry[day],
+            microprices=self.microprices(symbol, frozen.close),
         )
+
+    def microprices(self, symbol: str, at: datetime) -> list[float]:
+        """``symbol``'s microprice at each minute's end from the open up to ``at``, the last
+        hour of them, since the book last went missing (``Snapshot.microprices``)."""
+        session = self.calendar.session(kst_day(at))
+        if symbol not in self._microprices or session is None:
+            return []
+        first = max(session.open + BAR, at - MINUTE_MOVES * BAR)
+        ends = [first + i * BAR for i in range((at - first) // BAR + 1)]
+        return self._microprices[symbol].at_minute_ends(ends)
 
     def flows(self, symbol: str, at: datetime) -> Flows:
         """``symbol``'s flows as received before ``at``, and ``FLOW_MINUTES`` before that."""

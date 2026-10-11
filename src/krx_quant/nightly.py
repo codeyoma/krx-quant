@@ -41,7 +41,7 @@ from pathlib import Path
 from typing import Any
 
 from krx_quant.algorithms import ALGORITHMS, Algorithm, Model
-from krx_quant.algorithms.contract import Sample
+from krx_quant.algorithms.contract import Sample, predicted
 from krx_quant.algorithms.forecasts import log_loss
 from krx_quant.backfill import MINUTE_BARS_TR, bars_key
 from krx_quant.config import Settings, SettingsError
@@ -253,12 +253,15 @@ class _Trainer:
             return {**report, "reason": f"not trained: {e}"}
         self._put_model(algorithm.name, challenger)
         champion = self._champion(algorithm, live_version)
-        scored = [s for s in self._samples(algorithm, validation) if s.outcome is not None]
+        # The bar closes it predicts: without the data it reads (the book), it declines,
+        # whatever the model.
+        challenger_losses = _losses(algorithm, challenger, self._samples(algorithm, validation))
+        scored = [s for s, _ in challenger_losses]
         report["samples"] = {"validation": len(scored)}
         if not scored:
             return {**report, "reason": "no outcomes to validate on"}
-        champion_loss = _mean_loss(algorithm, champion, scored)
-        challenger_loss = _mean_loss(algorithm, challenger, scored)
+        champion_loss = _mean([loss for _, loss in _losses(algorithm, champion, scored)])
+        challenger_loss = _mean([loss for _, loss in challenger_losses])
         promoted = challenger_loss < champion_loss
         sign = "<" if promoted else "≥"
         # A champion fitted by hand on the latest days may have learned the validation days:
@@ -377,9 +380,14 @@ def _every(days_of: dict[str, set[date]], day: date) -> bool:
     return all(day in days for days in days_of.values())
 
 
-def _mean_loss(algorithm: Algorithm, model: Model, samples: Sequence[Sample]) -> float:
-    """The mean log loss of ``model`` over the samples with an outcome."""
-    losses = [
-        log_loss(algorithm.predict(s.features, model), s.outcome) for s in samples if s.outcome is not None
-    ]
-    return sum(losses) / len(losses)
+def _losses(algorithm: Algorithm, model: Model, samples: Sequence[Sample]) -> list[tuple[Sample, float]]:
+    """``model``'s log loss on each sample with an outcome that it predicts."""
+    out = []
+    for s in samples:
+        if s.outcome is not None and (f := predicted(algorithm, s.features, model)) is not None:
+            out.append((s, log_loss(f, s.outcome)))
+    return out
+
+
+def _mean(values: Sequence[float]) -> float:
+    return sum(values) / len(values)
