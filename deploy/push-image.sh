@@ -13,7 +13,10 @@ set -euo pipefail
 repo=$(cd "$(dirname "$0")/.." && pwd)
 cd "$repo"
 
-repository=$(sed -n 's/^KRX_IMAGE_REPOSITORY=//p' .env 2>/dev/null | tail -n 1 | tr -d "\"'")
+repository=""
+if [[ -f .env ]]; then
+  repository=$(sed -n 's/^KRX_IMAGE_REPOSITORY=//p' .env | tail -n 1 | tr -d "\"'")
+fi
 if [[ -z "$repository" ]]; then
   echo "push-image: KRX_IMAGE_REPOSITORY is not set in .env; nothing to push"
   exit 0

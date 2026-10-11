@@ -113,7 +113,7 @@ class Settings:
     # An algorithm needs this many scored predictions in a leaderboard to be ranked.
     min_sample: int = DEFAULT_MIN_SAMPLE
     # The collector starts the nightly training at this time (KST) on trading days, once the
-    # day's bars are archived (KRX_TRAIN_AT: 21:30 unless set; "off": trained elsewhere).
+    # day's bars are archived (KRX_TRAIN_AT: 21:30 unless set; "off": no nightly training).
     # None here, so a collector built in a test never trains.
     train_at: time | None = None
     # Where that night's training runs (KRX_TRAIN_ON): "server", in its own process here,

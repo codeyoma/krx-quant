@@ -19,7 +19,7 @@ import asyncio
 import json
 import logging
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -27,12 +27,14 @@ from typing import Any
 import boto3
 
 from krx_quant.config import Settings
+from krx_quant.notify import Alerts
 
 log = logging.getLogger(__name__)
 
 # The shares of the budget told on Telegram, in percent.
 WARN_AT = (50, 80)
 STATE_FILE = "cost_guard.json"
+_ALERT = "cost_guard"
 # What update_schedule takes back from get_schedule, besides the state.
 _SCHEDULE_FIELDS = (
     "Name",
@@ -56,6 +58,7 @@ class _Month:
     month: str
     warned: list[int] = field(default_factory=list)  # the shares told, in percent
     stopped: bool = False  # the Spot schedules are off for the rest of it
+    stop_told: bool = False
 
 
 class CostGuard:
@@ -81,56 +84,86 @@ class CostGuard:
         self._now = now
 
     async def check(self) -> None:
-        """Read the month's spend once and act on it."""
-        month = self._now().astimezone(UTC).strftime("%Y-%m")
-        state = self._load()
+        """Read the month's spend once and act on it.
+
+        In a new month the schedules are turned on, whatever the record says (it may be
+        lost). While the month is capped they are kept off (a stack deployed again turns
+        them on). A spend AWS last worked out before this month is last month's: nothing
+        is told or stopped on it.
+        """
+        now = self._now().astimezone(UTC)
+        month = now.strftime("%Y-%m")
+        state = self.load(self._path)
         if state.month != month:
-            if state.stopped:
-                await asyncio.to_thread(self._set_schedules, "ENABLED")
+            if await asyncio.to_thread(self._set_schedules, "ENABLED"):
                 await self._notify(f"새 달({month})이라 밤 학습(Spot) 스케줄을 다시 켰습니다.")
             state = _Month(month)
             self._save(state)
-        spent, limit = await asyncio.to_thread(self._spend)
-        for share in WARN_AT:
-            if share not in state.warned and spent >= limit * share / 100:
-                text = f"AWS 비용이 이달 ${spent:.2f}로 상한 ${limit:.0f}의 {share}%를 넘었습니다."
-                if await self._notify(text):
-                    state.warned.append(share)
-                    self._save(state)
-        if not state.stopped and spent >= limit:
+        spent, limit = await asyncio.to_thread(self._spend, now.replace(day=1, hour=0, minute=0, second=0))
+        if spent is not None:
+            for share in WARN_AT:
+                if share not in state.warned and spent >= limit * share / 100:
+                    text = f"AWS 비용이 이달 ${spent:.2f}로 상한 ${limit:.0f}의 {share}%를 넘었습니다."
+                    if await self._notify(text):
+                        state.warned.append(share)
+                        self._save(state)
+            if not state.stopped and spent >= limit:
+                state.stopped = True
+                self._save(state)
+        if state.stopped:
             await asyncio.to_thread(self._set_schedules, "DISABLED")
-            state.stopped = True
-            self._save(state)
-            await self._notify(
-                f"AWS 비용이 이달 ${spent:.2f}로 상한 ${limit:.0f}에 닿았습니다. "
-                "이달 남은 기간 밤 학습(Spot)을 끕니다. 실시간 예측은 계속합니다."
-            )
+            if not state.stop_told:
+                shown = f"${spent:.2f}" if spent is not None else "상한"
+                state.stop_told = await self._notify(
+                    f"AWS 비용이 이달 {shown}로 상한 ${limit:.0f}에 닿았습니다. "
+                    "이달 남은 기간 밤 학습(Spot)을 끕니다. 실시간 예측은 계속합니다."
+                )
+                self._save(state)
 
-    def _spend(self) -> tuple[float, float]:
-        """The month's actual spend and the budget, in dollars."""
+    def _spend(self, month_start: datetime) -> tuple[float | None, float]:
+        """The month's actual spend (None if AWS last worked it out before ``month_start``)
+        and the budget, in dollars."""
         budget = self._budgets.describe_budget(AccountId=self._account, BudgetName=self._budget)["Budget"]
+        limit = float(budget["BudgetLimit"]["Amount"])
+        updated = budget.get("LastUpdatedTime")
+        if updated is not None and updated < month_start:
+            return None, limit
         spent = budget.get("CalculatedSpend", {}).get("ActualSpend", {}).get("Amount", "0")
-        return float(spent), float(budget["BudgetLimit"]["Amount"])
+        return float(spent), limit
 
-    def _set_schedules(self, state: str) -> None:
+    def _set_schedules(self, state: str) -> list[str]:
+        """Put every schedule in ``state``; the ones that were not."""
+        changed = []
         for name in self._schedules:
             schedule = self._scheduler.get_schedule(Name=name)
+            if schedule["State"] == state:
+                continue
             kept = {k: schedule[k] for k in _SCHEDULE_FIELDS if k in schedule}
             self._scheduler.update_schedule(**kept, State=state)
+            changed.append(name)
             log.info("schedule %s: %s", name, state)
+        return changed
 
-    def _load(self) -> _Month:
+    @staticmethod
+    def load(path: Path) -> _Month:
         try:
-            data = json.loads(self._path.read_text())
-            return _Month(data["month"], [int(s) for s in data["warned"]], bool(data["stopped"]))
+            data = json.loads(path.read_text())
+            warned = [int(s) for s in data["warned"]]
+            return _Month(data["month"], warned, bool(data["stopped"]), bool(data.get("stop_told", True)))
         except (OSError, ValueError, KeyError, TypeError):
             return _Month("")
 
     def _save(self, state: _Month) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self._path.with_suffix(".tmp")
-        tmp.write_text(json.dumps({"month": state.month, "warned": state.warned, "stopped": state.stopped}))
+        tmp.write_text(json.dumps(asdict(state)))
         tmp.replace(self._path)
+
+
+def training_stopped(state_dir: Path, now: datetime) -> bool:
+    """Whether the guard turned the Spot training off for ``now``'s month."""
+    state = CostGuard.load(state_dir / STATE_FILE)
+    return state.stopped and state.month == now.astimezone(UTC).strftime("%Y-%m")
 
 
 def open_guard(
@@ -152,17 +185,18 @@ def open_guard(
     )
 
 
-async def keep_costs(
-    settings: Settings, notify: Callable[[str], Awaitable[bool]], now: Callable[[], datetime]
-) -> None:
-    """Check the costs every ``settings.cost_check_seconds`` until cancelled; a failure
-    (AWS unreachable, a missing permission) is logged and tried again the next time."""
+async def keep_costs(settings: Settings, alerts: Alerts, now: Callable[[], datetime]) -> None:
+    """Check the costs every ``settings.cost_check_seconds`` until cancelled. A failure (AWS
+    unreachable, a missing permission) raises an alert, cleared once a check works again."""
     guard: CostGuard | None = None
     while True:
         try:
             if guard is None:
-                guard = await asyncio.to_thread(open_guard, settings, notify, now)
+                guard = await asyncio.to_thread(open_guard, settings, alerts.deliver, now)
             await guard.check()
-        except Exception:
+        except Exception as e:
             log.exception("could not check the AWS costs")
+            alerts.raise_(_ALERT, f"AWS 비용을 읽지 못해 상한을 지킬 수 없습니다: {e}")
+        else:
+            alerts.resolve(_ALERT, "AWS 비용을 다시 읽습니다.")
         await asyncio.sleep(settings.cost_check_seconds)

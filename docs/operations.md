@@ -335,17 +335,18 @@ docker compose exec engine krx-quant rollback granger     # 직전 모델로 되
 **구조**
 - **시작.** EventBridge Scheduler가 평일 21:30(KST)에 시작 템플릿으로 one-time Spot 인스턴스(기본 `m6i.large`, 8GB)를 띄운다.
 - **학습.** 인스턴스는 Amazon Linux 2023에서 ECR의 엔진 이미지를 받아 `krx-quant train --from-store`를 한 번 돌린다. 서버가 올린 설정(`training/settings.json`: 종목, 선행 시리즈, 수수료율)과 휴장일 달력(`training/market_calendar.json`)으로 학습한다. 결과는 서버에서 돌 때와 같이 S3에 남는다. 실행 로그는 `training/logs/<시각>.log`에 남는다.
-- **종료.** 인스턴스는 학습이 끝나면 성공이든 실패든 스스로 종료한다(`shutdown`이 종료로 이어진다). 무엇이 멈춰도 5시간(`MaxMinutes`) 뒤에는 꺼진다. 디스크도 함께 지워진다.
-- **재시도.** 00:30에 한 번 더 띄운다. Spot이 회수되어 끊긴 밤은 끝난 알고리즘을 건너뛰고 이어서 한다. 끝난 밤이면 몇 분 안에 끝난다. Spot 용량이 없으면 스케줄러가 1시간 안에 다섯 번까지 다시 시도한다.
-- **비밀값.** 인스턴스에는 비밀값이 없다. S3와 ECR은 인스턴스 역할로 읽고 쓴다. 텔레그램 요약은 서버가 S3의 결과를 보고 보낸다. 다음 거래일 07:30까지 결과가 없으면 `[장애] <날짜> 밤 학습이 실패했습니다: Spot 학습 결과가 ... 오지 않았습니다`를 보낸다.
+- **종료.** 인스턴스는 학습이 끝나면 성공이든 실패든 스스로 종료한다(`shutdown`이 종료로 이어진다). 무엇이 멈춰도 4시간(`MaxMinutes`) 뒤에는 꺼진다. 디스크도 함께 지워진다.
+- **재시도.** 02:00에 한 번 더 띄운다. 첫 실행이 늦어도 01:30에는 꺼지므로 둘이 겹치지 않는다. Spot이 회수되어 끊긴 밤은 끝난 알고리즘을 건너뛰고 이어서 한다. 끝난 밤이면 몇 분 안에 끝난다. 재시도도 06:00 전에 꺼지므로 07:30 기한 안에 끝난다. Spot 용량이 없으면 스케줄러가 1시간 안에 다섯 번까지 다시 시도한다. `TrainAt`, `ResumeAt`, `MaxMinutes`를 바꾸면 이 관계를 지킨다.
+- **비밀값.** 인스턴스에는 비밀값이 없다. S3와 ECR은 인스턴스 역할로 읽고 쓴다. 텔레그램 요약은 서버가 S3의 결과를 보고 한 번 보낸다(재시작해도 다시 보내지 않는다, `state/spot_summarized.json`). 다음 거래일 07:30까지 결과가 없으면 `[장애] <날짜> 밤 학습이 실패했습니다: Spot 학습 결과가 ... 오지 않았습니다`를 보낸다. 서버가 그 사이에 재시작해도(06:00 자동 업데이트 포함) 07:30까지는 그 밤을 기다린다. 상한으로 Spot 학습이 꺼진 달에는 결과가 없어도 알리지 않는다.
 - **이미지.** 서버의 06:00 자동 업데이트가 새 이미지를 빌드한 뒤 ECR에 올린다(`deploy/push-image.sh`). ECR에는 최근 3개만 남는다.
 - **비용 상한.** AWS Budgets 예산(`krx-quant-monthly`, 월 $100)을 서버의 Cost Guard가 1시간마다 읽는다.
   - 이달 비용이 50%와 80%를 넘으면 텔레그램으로 한 번씩 알린다.
-  - 100%에 닿으면 두 스케줄을 끄고 알린다. 실시간 예측은 계속한다.
-  - 다음 달 1일 첫 확인에서 스케줄을 다시 켜고 알린다.
-  - AWS는 예산의 비용을 하루에 몇 번만 새로 계산하므로, 몇 시간 늦게 반응할 수 있다.
+  - 100%에 닿으면 두 스케줄을 끄고 알린다. 실시간 예측은 계속한다. 그달에는 확인할 때마다 꺼져 있는지 본다. 스택을 다시 배포해 켜져도 다시 끈다.
+  - 다음 달 1일(UTC) 첫 확인에서 스케줄을 다시 켜고 알린다. 상태 파일을 잃었어도 켠다.
+  - AWS는 예산의 비용을 하루에 몇 번만 새로 계산하므로, 몇 시간 늦게 반응할 수 있다. 이달에 계산되지 않은 비용(월초의 지난달 값)으로는 알리거나 끄지 않는다.
+  - 비용을 읽지 못하면(권한, 연결) `[장애] AWS 비용을 읽지 못해 상한을 지킬 수 없습니다`를 보내고, 다시 읽히면 `[복구]`를 보낸다.
 - **권한.** 스택은 서버의 IAM 사용자(`krx-quant-engine`)에 정책 하나를 붙인다. 이미지 올리기, 예산 읽기, 두 스케줄 끄고 켜기만 할 수 있다.
-- **예상 비용.** Spot `m6i.large`는 시드니에서 시간당 몇 센트다. 학습이 하루 30분 안팎이면 월 $1 안팎이다(미확인 ⚠, 첫 달에 Cost Explorer로 확인한다). ECR 저장은 월 $0.1 안팎이다.
+- **예상 비용.** Spot `m6i.large`는 시드니에서 시간당 몇 센트다. 스케줄은 평일마다 두 번 띄운다(재시도는 끝난 밤이면 몇 분). 학습이 하루 30분 안팎이면 월 $1 안팎이다(미확인 ⚠, 첫 달에 Cost Explorer로 확인한다). ECR 저장은 월 $0.1 안팎이다.
 
 **옮기는 순서** (맥에서, 관리용 자격 증명으로)
 1. 비용 상한과 프로젝트 지출 한도를 정한다(1장). 같은 $100이면 상한에서 서버까지 멈춘다.
@@ -482,7 +483,8 @@ docker compose logs --tail 200 engine
 | `[장애] <날짜> 밤 학습이 실패했습니다: Spot 학습 결과가 <다음 거래일> 07:30까지 오지 않았습니다` | S3의 `training/logs/`(최근 로그 마지막 줄), `aws ec2 describe-instances --filters Name=tag:Name,Values=krx-quant-training`, 스케줄러 상태 | Spot이 뜨지 못했거나(용량, 할당량, 상한으로 꺼진 스케줄) 학습이 실패했다. 맥에서 `aws ec2 run-instances --launch-template 'LaunchTemplateName=krx-quant-training,Version=$Latest'`로 다시 띄우면 끝난 알고리즘은 건너뛴다. 급하면 서버에서 `docker compose run --rm --no-deps engine train --day <날짜>`. 그동안 전날 모델이 계속 돈다. |
 | `[알림] AWS 비용이 이달 $N로 상한 $100의 50%(80%)를 넘었습니다.` | AWS Billing > Cost Explorer | 할 일은 없다. 예상보다 빠르면 무엇이 비용을 쓰는지 본다. |
 | `[알림] AWS 비용이 이달 $N로 상한 $100에 닿았습니다. 이달 남은 기간 밤 학습(Spot)을 끕니다. ...` | Cost Explorer | 그달은 학습 없이 전날 모델로 돈다. 서둘러 학습이 필요하면 서버에서 `train`을 손으로 돌린다. 다음 달 1일에 `[알림] 새 달(...)이라 밤 학습(Spot) 스케줄을 다시 켰습니다.`가 온다. |
-| 로그의 `could not check the AWS costs` | `.env`의 `KRX_COST_BUDGET`, IAM 정책(`krx-quant-engine-training`) | 예산 이름이나 권한이 틀렸다. 고치면 다음 확인부터 된다. |
+| `[장애] AWS 비용을 읽지 못해 상한을 지킬 수 없습니다: <이유>` | 로그의 `could not check the AWS costs`, `.env`의 `KRX_COST_BUDGET`, IAM 정책(`krx-quant-engine-training`) | 예산 이름이나 권한이 틀렸거나 AWS에 닿지 않는다. 고치면 다음 확인에서 `[복구] AWS 비용을 다시 읽습니다.`가 온다. 그동안 상한이 지켜지지 않는다. |
+| `[알림] 자동 업데이트: ...`에 `Spot 학습용 이미지를 올리지 못했습니다` | `deploy/push-image.sh`를 손으로 실행해 오류를 본다 | ECR 권한이나 연결 문제다. 다음 06:00에 다시 올린다. 그동안 Spot은 이전 이미지로 학습한다. |
 | `[신호] <종목> 상승 64% · 정식 3개 중 2개 같은 방향 · 09:31 봉 마감, 09:35까지` | `/v1/symbols/<종목>/latest`의 `consensus-final` | `KRX_SIGNAL_ALERT=on`일 때만 온다. 장애가 아니라 예측 신호다. 같은 종목·방향은 4분 안에 다시 오지 않는다. 주문 코드는 없다. |
 | `[알림] <날짜> 밤 학습`과 알고리즘별 `승격`·`유지`·`학습 안 함` | | 매일 밤 학습의 요약이다. 할 일은 없다. 승격된 모델은 다음 거래일 08:00에 바뀐다. |
 | `[알림] 모델 교체 (<날짜> 밤 학습): <알고리즘> → <버전>` | `/v1/status`의 `training` | 08:00 교체가 됐다. 되돌리려면 `docker compose exec engine krx-quant rollback <이름>`. |
@@ -544,6 +546,8 @@ docker compose logs --tail 200 engine
 | `models/history.json` | 설치와 되돌리기 이력. 항목마다 `at`, `algorithm`, `version`(기본 모델이면 `null`), `why`(`fit`, `promotion <날짜>`, `rollback from <버전>`, `installed before`) |
 | `models/applied.json` | `{"night": "<날짜>"}`: 마지막으로 적용한 승격 목록의 밤. 이 밤과 그 전의 목록은 다시 적용하지 않는다 |
 | `training-cache/` | 밤 학습이 Object Store에서 받아 둔 백필 1분봉과 녹화 이벤트의 사본. 키 경로가 같다. 학습이 끝나면 그 밤에 쓴 가장 오래된 날보다 오래된 날짜를 지운다 |
+| `cost_guard.json` | Cost Guard가 이달 한 일(#23): `month`(UTC `YYYY-MM`), `warned`(알린 비율, %), `stopped`(Spot 스케줄을 끔), `stop_told`(끈 것을 알림). 재시작해도 다시 알리지 않으려고 둔다. 잃어도 다음 달 1일에 스케줄을 다시 켠다 |
+| `spot_summarized.json` | `{"night": "<날짜>"}`: 요약을 보낸 마지막 Spot 학습 밤(#23). 재시작해도 같은 요약을 다시 보내지 않는다 |
 
 > **바뀜** (2026-10-10, #48): 이전에는 `training-cache/`를 자동으로 지우지 않았다 → 지금은 밤마다 오래된 날짜를 지운다. 이유: 녹화 이벤트도 캐시하게 되어 크기가 커졌다.
 
@@ -554,6 +558,7 @@ docker compose logs --tail 200 engine
 | `.env` | 설정과 비밀값(권한 600). 저장소에 커밋하지 않는다 |
 | `.auto-update-deployed` | 엔진이 마지막으로 정상 기동을 확인한 커밋 |
 | `.auto-update-failed` | 시작하지 못한 커밋. main이 바뀔 때까지 다시 시도하지 않는다 |
+| `.auto-update-push-failed` | Spot 학습용 이미지를 ECR에 올리지 못했다(#23). 다음 자동 업데이트가 새 커밋이 없어도 다시 올리고 지운다 |
 
 **Object Store** (`KRX_OBJECT_STORE`, 서버에서는 `s3://<버킷>/engine`)
 
@@ -565,6 +570,9 @@ docker compose logs --tail 200 engine
 | `reports/<날짜>/<알고리즘>.json` | 그 밤의 알고리즘별 검증 리포트이자 체크포인트: `algorithm`, `day`, `training_days`, `validation_days`, `champion`(`version`, `loss`), `challenger`(`version`, `loss`, `trained`), `promoted`, `reason`, `reference_prices`(학습·검증일마다 `mid`: 녹화 중간가, `close`: 백필 종가), `samples`(`validation`: 검증 표본 수, 검증까지 간 경우만). 학습하지 못했거나 검증할 정답이 없으면 `champion`, `challenger`가 `null`이다 |
 | `promotions/<날짜>.json` | 그 밤의 승격 목록: `day`, `finalized_at`(확정 시각), `promoted`(알고리즘 → 버전), `reports`(위 리포트 전부). 모든 알고리즘이 끝난 뒤 한 번 쓴다 |
 | `live.json` | 서버가 지금 돌리는 버전(알고리즘 → 버전, 기본 모델이면 `<이름>-default`). 다음 밤의 champion이다. 사전 검증을 기다리는 알고리즘은 돌기 시작할 때 쓸 모델이다(#24) |
+| `training/settings.json` | `KRX_TRAIN_ON=spot`일 때 서버가 올리는 학습 설정(#23): `KRX_SYMBOLS`, `KRX_ETF_SYMBOLS`, `KRX_US_SYMBOLS`, `KRX_INDEX_CODES`, `KRX_FEE_PERCENT`. 비밀값은 없다. 수집기가 시작할 때와 밤마다 올린다 |
+| `training/market_calendar.json` | 같은 때 올리는 서버의 휴장일 달력(`state/market_calendar.json`과 같은 형식). Spot 학습이 옵션 만기를 서버와 같게 센다 |
+| `training/logs/<KST 시각>.log` | Spot 인스턴스의 실행 로그. 마지막 줄이 `krx-quant training: exit <코드>`다 |
 
 - 객체마다 내용의 SHA-256을 함께 둔다. S3에서는 객체 메타데이터 `sha256`이고, 로컬 폴더에서는 파일에서 계산한다. 업로드와 밤 학습은 이 값으로 같은 파일인지 본다.
 - 엔진의 IAM 사용자는 객체를 지울 수 없다. 덮어쓴 이전 버전은 S3 버전 관리로 30일 남는다(2.1).

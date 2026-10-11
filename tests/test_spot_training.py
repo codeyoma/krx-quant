@@ -29,7 +29,7 @@ from krx_quant.fake_kis import FakeKis
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.notify import Alerts
 from krx_quant.object_store import LocalObjectStore
-from krx_quant.swap import await_spot_night, publish_training_inputs, spot_night_deadline
+from krx_quant.swap import await_spot_night, first_spot_wait, publish_training_inputs, spot_night_deadline
 from tests.test_collector import KST, settings_for
 from tests.test_nightly import DAYS, archive_bars
 from tests.test_nightly import NIGHT as LAST_DAY
@@ -67,7 +67,9 @@ async def test_the_night_s_summary_is_sent_once_its_list_is_in_the_store(
             night_list(tmp_path / "store", finalized=at(NIGHT, "22:10"), promoted={"newton": TRAINED})
         return at(NIGHT, "21:30") + timedelta(minutes=checks)
 
-    failure = await await_spot_night(store, CALENDAR, NIGHT, alerts, now, poll_seconds=0.01)
+    failure = await await_spot_night(
+        store, CALENDAR, NIGHT, alerts, now, tmp_path / "state", poll_seconds=0.01
+    )
 
     assert failure is None
     await alerts.close()
@@ -80,13 +82,85 @@ async def test_a_night_without_a_list_by_the_morning_deadline_says_so(
 ) -> None:
     store = LocalObjectStore(tmp_path / "store")
 
+    clock = ticking(at(NIGHT, "21:30"), timedelta(hours=2))
     failure = await await_spot_night(
-        store, CALENDAR, NIGHT, alerts, ticking(at(NIGHT, "21:30"), timedelta(hours=2)), poll_seconds=0.01
+        store, CALENDAR, NIGHT, alerts, clock, tmp_path / "state", poll_seconds=0.01
     )
 
     assert failure is not None and f"{MORNING} 07:30" in failure, failure
     await alerts.close()
     assert kis.telegram_messages == [], "the training alert is the caller's"
+
+
+async def test_a_night_s_summary_is_sent_once_whatever_the_restarts(
+    tmp_path: Path, kis: FakeKis, alerts: Alerts
+) -> None:
+    store = LocalObjectStore(tmp_path / "store")
+    night_list(tmp_path / "store", finalized=at(NIGHT, "22:10"), promoted={"newton": TRAINED})
+
+    # The collector restarted after the night was done, and waited for it again.
+    for _ in range(2):
+        found = await await_spot_night(
+            store, CALENDAR, NIGHT, alerts, lambda: at(NIGHT, "23:00"), tmp_path / "state", poll_seconds=0.01
+        )
+        assert found is None
+
+    await alerts.close()
+    assert len(kis.telegram_messages) == 1
+
+
+class Flaky(LocalObjectStore):
+    """A store that cannot be reached for its first few reads."""
+
+    def __init__(self, root: Path, failures: int) -> None:
+        super().__init__(root)
+        self.failures = failures
+
+    def digest(self, key: str) -> str | None:
+        if self.failures:
+            self.failures -= 1
+            raise OSError("connection reset")
+        return super().digest(key)
+
+
+async def test_a_store_that_fails_for_a_while_does_not_end_the_wait(
+    tmp_path: Path, kis: FakeKis, alerts: Alerts
+) -> None:
+    night_list(tmp_path / "store", finalized=at(NIGHT, "22:10"), promoted={"newton": TRAINED})
+    store = Flaky(tmp_path / "store", failures=3)
+
+    found = await await_spot_night(
+        store, CALENDAR, NIGHT, alerts, lambda: at(NIGHT, "23:00"), tmp_path / "state", poll_seconds=0.01
+    )
+
+    assert found is None
+    await alerts.close()
+    assert len(kis.telegram_messages) == 1
+
+
+def test_a_server_restarted_in_the_morning_still_waits_for_last_night() -> None:
+    # The 06:00 update restarts the collector: the night is still due until 07:30.
+    assert first_spot_wait(CALENDAR, time(21, 30), at(MORNING, "06:00")) == at(NIGHT, "21:30")
+    assert first_spot_wait(CALENDAR, time(21, 30), at(MORNING, "07:40")) == at(MORNING, "21:30")
+
+
+async def test_with_the_spot_training_off_for_the_cost_cap_a_missing_night_is_no_failure(
+    tmp_path: Path, kis: FakeKis, alerts: Alerts
+) -> None:
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "cost_guard.json").write_text(
+        json.dumps({"month": "2026-10", "warned": [50, 80], "stopped": True, "stop_told": True})
+    )
+    clock = ticking(at(NIGHT, "21:30"), timedelta(hours=2))
+
+    failure = await await_spot_night(
+        LocalObjectStore(tmp_path / "store"), CALENDAR, NIGHT, alerts, clock, state, poll_seconds=0.01
+    )
+
+    assert failure is None
+    await alerts.close()
+    assert kis.telegram_messages == []
 
 
 def test_a_night_on_a_friday_is_waited_for_until_monday_morning() -> None:

@@ -95,8 +95,11 @@ def test_the_spot_instance_s_start_script_parses(tmp_path: Path) -> None:
 
 FAKE_DOCKER = """#!/usr/bin/env bash
 # Stands in for docker: logs each call; the engine answers unless the checkout's
-# BROKEN file exists (a commit that does not start).
+# BROKEN file exists (a commit that does not start), and a push fails while PUSH_FAILS does.
 echo "$*" >>"$DOCKER_LOG"
+if [[ "$1" == push && -f PUSH_FAILS ]]; then
+  exit 1
+fi
 if [[ "$*" == *"exec -T engine"* ]]; then
   [[ ! -f BROKEN ]]
 fi
@@ -191,6 +194,34 @@ def test_with_the_training_on_spot_an_update_pushes_the_image_and_forgets_the_lo
     assert calls.index("compose up -d --build") < login < pushed, "the new image, once it started"
     assert calls[pushed - 1] == f"tag krx-quant:latest {repository}:latest"
     assert calls[pushed + 1] == f"logout {repository.split('/')[0]}", "the registry password is not kept"
+
+
+def test_an_image_that_could_not_be_pushed_is_pushed_on_the_next_run(server: Path) -> None:
+    repository = "123456789012.dkr.ecr.ap-southeast-2.amazonaws.com/krx-quant"
+    (server / ".env").write_text(f"KRX_IMAGE_REPOSITORY={repository}\n")
+    (server / "PUSH_FAILS").write_text("x")
+    push(server, "Markov reads the IV")
+
+    assert update(server).returncode == 0
+    assert "이미지를 올리지 못했습니다" in (server.parent / "docker.log").read_text()
+
+    (server / "PUSH_FAILS").unlink()
+    (server.parent / "docker.log").unlink()
+    assert update(server).returncode == 0, "nothing new on main"
+
+    calls = docker_calls(server)
+    assert f"push -q {repository}:latest" in calls
+    assert "compose up -d --build" not in calls
+    assert "이미지를 올렸습니다" in (server.parent / "docker.log").read_text()
+
+
+def test_without_an_env_file_there_is_no_image_to_push(server: Path) -> None:
+    env = {"PATH": f"{server.parent / 'bin'}:/usr/bin:/bin", "DOCKER_LOG": str(server.parent / "docker.log")}
+    done = subprocess.run([server / "deploy" / "push-image.sh"], env=env, capture_output=True, text=True)
+
+    assert done.returncode == 0, done.stderr
+    assert "nothing to push" in done.stdout
+    assert docker_calls(server) == []
 
 
 def test_a_main_that_does_not_start_is_rolled_back_and_not_tried_again(server: Path) -> None:

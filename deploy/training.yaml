@@ -10,9 +10,9 @@
 # - a launch template: a one-time Spot instance that pulls the image, runs
 #   `krx-quant train --from-store` and terminates itself when done, failed or not, and at
 #   the latest after MaxMinutes;
-# - two EventBridge Scheduler schedules that start it on weekday nights (the second one, in
-#   the small hours, resumes a night a reclaimed Spot instance cut short; a night already
-#   done is skipped in minutes);
+# - two EventBridge Scheduler schedules that start it on weekday nights (the second one,
+#   after the first can have run, resumes a night a reclaimed Spot instance cut short; a
+#   night already done is skipped in minutes);
 # - a monthly cost budget, read by the server's Cost Guard, which tells Telegram at half
 #   and four fifths of it and turns the schedules off at it (src/krx_quant/cost_guard.py);
 # - least-privilege roles for the instance and the scheduler, and a policy for the
@@ -22,6 +22,13 @@
 # server sends the night's summary to Telegram.
 AWSTemplateFormatVersion: "2010-09-09"
 Description: krx-quant nightly training on EC2 Spot, and the monthly cost cap (#23)
+
+Metadata:
+  cfn-lint:
+    config:
+      # ImageId is a String on purpose: "resolve:ssm:..." makes EC2 look the image up at
+      # each launch, where an image-id parameter would fix it when the stack is deployed.
+      ignore_checks: [W2506]
 
 Parameters:
   Bucket:
@@ -47,13 +54,22 @@ Parameters:
     Description: When the night's training starts (Asia/Seoul); keep KRX_TRAIN_AT the same.
   ResumeAt:
     Type: String
-    Default: cron(30 0 ? * TUE-SAT *)
-    Description: A second start (Asia/Seoul) that resumes a night a reclaimed instance cut short.
+    Default: cron(0 2 ? * TUE-SAT *)
+    Description: >-
+      A second start (Asia/Seoul) that resumes a night a reclaimed instance cut short. Keep it
+      at least MaxMinutes after TrainAt, so the two never run at once, and MaxMinutes before
+      07:30, when the server stops waiting.
   MaxMinutes:
     Type: Number
-    Default: 300
+    Default: 240
     MinValue: 30
     Description: The instance terminates itself after this long, whatever it is doing.
+  ImageId:
+    Type: String
+    Default: resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+    Description: >-
+      The machine image, looked up at each launch. A GPU type needs one with its drivers
+      (and the engine image built for it), once a neural algorithm needs it.
   VolumeGiB:
     Type: Number
     Default: 30
@@ -92,10 +108,12 @@ Resources:
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
-              - Sid: ListTheBucket
+              - Sid: ListTheStore
                 Effect: Allow
                 Action: s3:ListBucket
                 Resource: !Sub arn:aws:s3:::${Bucket}
+                Condition:
+                  StringLike: {s3:prefix: [!Ref Prefix, !Sub "${Prefix}/*"]}
               - Sid: ReadAndWriteTheStoreNoDelete
                 Effect: Allow
                 Action: [s3:GetObject, s3:PutObject, s3:AbortMultipartUpload]
@@ -120,8 +138,7 @@ Resources:
     Properties:
       LaunchTemplateName: krx-quant-training
       LaunchTemplateData:
-        # The latest Amazon Linux 2023, looked up at each launch.
-        ImageId: resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+        ImageId: !Ref ImageId
         InstanceType: !Ref InstanceType
         IamInstanceProfile: {Arn: !GetAtt TrainingProfile.Arn}
         InstanceMarketOptions:
@@ -152,10 +169,12 @@ Resources:
             shutdown -h +${MaxMinutes}
             trap 'shutdown -h now' EXIT
             log=/var/log/krx-quant-training.log
-            exec > >(tee "$log") 2>&1
+            exec >>"$log" 2>&1
             store=s3://${Bucket}/${Prefix}
             image=${Repository.RepositoryUri}:latest
-            if dnf install -y -q docker && systemctl start docker &&
+            # The engine runs as uid 10001 in its image (Dockerfile): its state must be its own.
+            if install -d -o 10001 -g 10001 /var/lib/krx-quant &&
+              dnf install -y -q docker && systemctl start docker &&
               aws ecr get-login-password --region ${AWS::Region} |
               docker login --username AWS --password-stdin "${!image%%/*}" &&
               docker pull -q "$image"; then
@@ -166,7 +185,8 @@ Resources:
               status=1
             fi
             echo "krx-quant training: exit $status"
-            aws s3 cp "$log" "$store/training/logs/$(TZ=Asia/Seoul date +%Y-%m-%dT%H%M).log" --only-show-errors
+            aws s3 cp "$log" "$store/training/logs/$(TZ=Asia/Seoul date +%Y-%m-%dT%H%M).log" \
+              --region ${AWS::Region} --only-show-errors
             exit "$status"
 
   SchedulerRole:
@@ -212,6 +232,8 @@ Resources:
                 Effect: Allow
                 Action: iam:PassRole
                 Resource: !GetAtt TrainingRole.Arn
+                Condition:
+                  StringEquals: {iam:PassedToService: ec2.amazonaws.com}
               - Sid: LetEc2RunSpotTheFirstTime
                 Effect: Allow
                 Action: iam:CreateServiceLinkedRole
@@ -285,13 +307,11 @@ Resources:
           - Sid: ReadTheBudget
             Effect: Allow
             Action: budgets:ViewBudget
-            Resource: !Sub arn:aws:budgets::${AWS::AccountId}:budget/krx-quant-monthly
+            Resource: !Sub arn:aws:budgets::${AWS::AccountId}:budget/${Budget}
           - Sid: TurnTheSchedulesOffAndOn
             Effect: Allow
             Action: [scheduler:GetSchedule, scheduler:UpdateSchedule]
-            Resource:
-              - !Sub arn:aws:scheduler:${AWS::Region}:${AWS::AccountId}:schedule/default/krx-quant-training
-              - !Sub arn:aws:scheduler:${AWS::Region}:${AWS::AccountId}:schedule/default/krx-quant-training-resume
+            Resource: [!GetAtt TrainingSchedule.Arn, !GetAtt ResumeSchedule.Arn]
           - Sid: KeepTheSchedulesRole
             Effect: Allow
             Action: iam:PassRole
@@ -305,7 +325,7 @@ Outputs:
     Value: !GetAtt Repository.RepositoryUri
   CostBudget:
     Description: KRX_COST_BUDGET in the server's .env
-    Value: krx-quant-monthly
+    Value: !Ref Budget
   TrainingSchedules:
     Description: KRX_TRAINING_SCHEDULES in the server's .env
     Value: !Sub "${TrainingSchedule},${ResumeSchedule}"
