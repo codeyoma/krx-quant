@@ -23,11 +23,11 @@ from krx_quant.algorithms.forecasts import UNKNOWN
 from krx_quant.algorithms.poisson import ARRIVALS, EXCITATIONS, Poisson
 from krx_quant.engine import Event
 from krx_quant.features import SIDES, FeatureVector, Leaders
-from krx_quant.feeds import KST, TRADE
+from krx_quant.feeds import KST
 from krx_quant.pricing import Direction
 from krx_quant.training import recorded_samples
 from tests.algorithm_doubles import FixedAlgorithm
-from tests.replay_events import CALENDAR, DAY, FEE, at, book, run, trade
+from tests.replay_events import CALENDAR, DAY, FEE, at, book, run, trade, with_sides
 from tests.test_algorithms_replay import predictions_of
 from tests.test_replay import busy_morning
 
@@ -82,7 +82,10 @@ async def test_without_any_trade_s_side_the_arrivals_are_unknown(tmp_path: Path)
 POISSON = Poisson()
 # Each side's next four minutes: a baseline, set off by its own fast excitation and a little
 # by the other side's; the slow excitations set off nothing.
-TRUE = {"buy": (2.0, 1.5, 0.0, 0.3, 0.0), "sell": (2.0, 0.3, 0.0, 1.5, 0.0)}  # base, then EXCITATIONS
+TRUE_INTENSITIES = {
+    "buy": (2.0, 1.5, 0.0, 0.3, 0.0),
+    "sell": (2.0, 0.3, 0.0, 1.5, 0.0),
+}  # base, then EXCITATIONS
 
 
 def vector(**values: float | None) -> FeatureVector:
@@ -97,7 +100,10 @@ def made_up(n: int, seed: int = 0) -> list[Sample]:
     start = datetime.combine(date(2026, 9, 1), time(9, 1), KST)
     for i in range(n):
         x = rng.exponential(1.0, size=len(EXCITATIONS))
-        drawn = {side: rng.poisson(TRUE[side][0] + float(np.dot(TRUE[side][1:], x))) for side in SIDES}
+        drawn = {
+            side: rng.poisson(TRUE_INTENSITIES[side][0] + float(np.dot(TRUE_INTENSITIES[side][1:], x)))
+            for side in SIDES
+        }
         lean = drawn["buy"] - drawn["sell"]
         outcome = Direction.UP if lean > 2 else Direction.DOWN if lean < -2 else Direction.FLAT
         t = start + timedelta(minutes=10 * i)
@@ -123,7 +129,7 @@ def test_maximum_likelihood_finds_the_baselines_and_what_excites_each_side() -> 
 
     assert model.version.startswith("poisson-2026")
     for side in SIDES:
-        base, *excites = TRUE[side]
+        base, *excites = TRUE_INTENSITIES[side]
         assert model.params[f"base.{side}"] == pytest.approx(base, rel=0.15)
         for excitation, true in zip(EXCITATIONS, excites, strict=True):
             learned = model.params[f"excite.{side}.{excitation}"]
@@ -157,12 +163,7 @@ def test_without_the_trades_sides_poisson_neither_learns_nor_leans() -> None:
 
 def a_sided_morning(end: str = "10:00:00") -> list[Event]:
     """The busy morning, its trades buying in runs and selling in runs."""
-    events: list[Event] = []
-    for i, (feed, row) in enumerate(busy_morning(end=end)):
-        if feed == TRADE.tr_id:
-            row = {**row, "side": "buy" if (i // 40) % 2 else "sell"}
-        events.append((feed, row))
-    return events
+    return with_sides(busy_morning(end=end), run=20)
 
 
 async def test_poisson_predicts_well_within_its_time_budget_and_is_scored(tmp_path: Path) -> None:

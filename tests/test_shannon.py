@@ -22,12 +22,12 @@ from krx_quant.algorithms import Abstention, NothingToLearn, NotPredicted, Sampl
 from krx_quant.algorithms.shannon import INPUTS, Shannon
 from krx_quant.engine import Event
 from krx_quant.features import FeatureVector, Leaders
-from krx_quant.feeds import BOOK, KRX_TRADE, KST, NXT_TRADE, TRADE
+from krx_quant.feeds import BOOK, KRX_TRADE, KST, NXT_TRADE
 from krx_quant.feeds.base import LEVELS
 from krx_quant.pricing import Direction
 from krx_quant.training import recorded_samples
 from tests.algorithm_doubles import FixedAlgorithm
-from tests.replay_events import CALENDAR, DAY, FEE, at, book, every, run, trade
+from tests.replay_events import CALENDAR, DAY, FEE, at, book, every, run, trade, with_sides
 from tests.test_algorithms_replay import predictions_of
 from tests.test_replay import busy_morning
 
@@ -188,15 +188,13 @@ def an_order_book_morning(end: str = "10:00:00") -> list[Event]:
     each trade's aggressor."""
     events: list[Event] = []
     for feed, row in busy_morning(end=end):
-        step = int(row["received_at"].timestamp()) // 13
         if feed == BOOK.tr_id:
+            step = int(row["received_at"].timestamp()) // 13
             sizes = {f"bid_qty_{i}": 100 + 50 * (step % 5) for i in LEVELS}
             sizes |= {f"ask_qty_{i}": 100 + 50 * ((step * 3) % 5) for i in LEVELS}
             row = {**row, **sizes}
-        elif feed == TRADE.tr_id:
-            row = {**row, "side": "buy" if step % 3 else "sell"}
         events.append((feed, row))
-    return events
+    return with_sides(events)
 
 
 async def test_without_the_book_at_a_bar_close_shannon_declines(tmp_path: Path) -> None:

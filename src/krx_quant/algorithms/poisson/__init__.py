@@ -12,8 +12,9 @@ Personality card:
 - **Own features**: the trades' arrival times, sides and sizes only: each side's excitation
   at both decays, and its arrivals in the last minute.
 - **Learns**: the baselines and excitations by maximum likelihood of each sample's next
-  four minutes of arrivals (the following samples' last minutes), as Poisson counts of a
-  linear, nonnegative intensity (EM); then k and c by the lowest log loss over a grid.
+  four minutes of arrivals (the following samples' last minutes) under a linear,
+  nonnegative intensity (EM). The arrivals are sizes over the mean, not whole counts, so it
+  is a quasi-Poisson likelihood. Then k and c by the lowest log loss over a grid.
 
 The trades' sides are recorded only (backfilled bars have none): on a day with backfilled
 bars only it does not learn, and without any trade's side today it forecasts nothing in
@@ -22,29 +23,23 @@ particular (every class a third).
 
 from __future__ import annotations
 
-import math
 from collections.abc import Mapping, Sequence
 from itertools import product
 
 import numpy as np
 
 from krx_quant.algorithms.contract import Card, Model, NothingToLearn, Sample
-from krx_quant.algorithms.forecasts import UNKNOWN, class_moves, lowest_log_loss, param
+from krx_quant.algorithms.forecasts import CLASSES, LOSS_FLOOR, UNKNOWN, class_moves, lowest_log_loss, param
 from krx_quant.baselines import Forecast
-from krx_quant.features import (
-    EXCITATION_SECONDS,
-    SIDES,
-    FeatureVector,
-    arrivals_feature,
-    excitation_feature,
-)
+from krx_quant.features import ARRIVAL_FEATURES, EXCITATION_FEATURES, SIDES, FeatureVector
 from krx_quant.pricing import Direction
 from krx_quant.reference import BAR
 
-EXCITATIONS = tuple(excitation_feature(side, seconds) for side in SIDES for seconds in EXCITATION_SECONDS)
-ARRIVALS = tuple(arrivals_feature(side) for side in SIDES)
+EXCITATIONS = EXCITATION_FEATURES
+ARRIVALS = ARRIVAL_FEATURES  # one minute each: four following samples make the four minutes ahead
 STEPS = 4  # minutes ahead
-# The ordered logistic's slope and cut tried, after the intensities are learned.
+# The ordered logistic's slope and cut tried, after the intensities are learned. Of equals,
+# the first: the gentlest slope, then the lowest cut.
 SLOPES = (0.5, 1.0, 2.0, 4.0, 8.0, 16.0)
 CUTS = (0.0, 0.25, 0.5, 1.0, 1.5, 2.0, 3.0)
 # EM: at most this many rounds, stopping once the log-likelihood barely moves.
@@ -53,7 +48,8 @@ _TOLERANCE = 1e-10
 
 
 def default_params() -> dict[str, float]:
-    """Before any training: a trade a minute on each side, nothing excited, no lean."""
+    """Before any training: four trades' worth over four minutes on each side, nothing
+    excited, no lean."""
     params = {"slope": 1.0, "cut": 1.0}
     for side in SIDES:
         params[param("base", side)] = float(STEPS)
@@ -88,9 +84,7 @@ class Poisson:
         x = [features[f] for f in EXCITATIONS]
         if any(v is None for v in x):
             return UNKNOWN
-        p = model.params
-        lean = _lean(p, [float(v) for v in x if v is not None])
-        return _ordered(p["slope"], p["cut"], lean, p)
+        return _ordered(model.params, _lean(model.params, [float(v) for v in x if v is not None]))
 
     def fit(self, samples: Sequence[Sample]) -> Model:
         pairs = _pairs(samples)
@@ -108,11 +102,15 @@ class Poisson:
             raise NothingToLearn("no scored samples with the trades' sides")
         params |= class_moves(scored)
         leans = np.array([_lean(params, [float(s.features[f] or 0.0) for f in EXCITATIONS]) for s in scored])
-        outcomes = np.array([_CLASSES.index(s.outcome or Direction.FLAT) for s in scored])
-        # Of equals, the first: the gentlest slope, then the lowest cut.
-        params["slope"], params["cut"] = min(
-            product(SLOPES, CUTS), key=lambda kc: _loss(kc[0], kc[1], leans, outcomes)
-        )
+        outcomes = np.array([CLASSES.index(s.outcome or Direction.FLAT) for s in scored])
+        best: tuple[float, float, float] | None = None
+        for slope, cut in product(SLOPES, CUTS):
+            chosen = _probabilities(slope, cut, leans)[np.arange(len(outcomes)), outcomes]
+            loss = float(-np.log(np.maximum(chosen, LOSS_FLOOR)).mean())
+            if best is None or loss < best[0] - 1e-12:
+                best = (loss, slope, cut)
+        assert best is not None
+        params["slope"], params["cut"] = best[1], best[2]
         return lowest_log_loss(self.name, scored, [params], lambda f, q: self.predict(f, Model(self.name, q)))
 
 
@@ -131,33 +129,21 @@ def _lean(p: Mapping[str, float], x: Sequence[float]) -> float:
     return (buys - sells) / (buys + sells) if buys + sells > 0 else 0.0
 
 
-def _ordered(slope: float, cut: float, lean: float, p: Mapping[str, float]) -> Forecast:
-    up = _sigmoid(slope * lean - cut)
-    down = _sigmoid(-slope * lean - cut)
-    flat = max(0.0, 1.0 - up - down)
-    total = up + flat + down
-    up, flat, down = up / total, flat / total, down / total
-    expected = up * p[param("move", "up")] + flat * p[param("move", "flat")] + down * p[param("move", "down")]
+def _ordered(p: Mapping[str, float], lean: float) -> Forecast:
+    up, flat, down = (float(q) for q in _probabilities(p["slope"], p["cut"], np.array([lean]))[0])
+    expected = sum(q * p[param("move", c.value)] for q, c in zip((up, flat, down), CLASSES, strict=True))
     return Forecast(up, flat, down, expected)
 
 
-_CLASSES = (Direction.UP, Direction.FLAT, Direction.DOWN)
-_FLOOR = 1e-6  # as the log loss
-
-
-def _loss(slope: float, cut: float, leans: np.ndarray, outcomes: np.ndarray) -> float:
-    """The mean log loss of the ordered logistic over every sample at once."""
+def _probabilities(slope: float, cut: float, leans: np.ndarray) -> np.ndarray:
+    """The ordered logistic's up, flat and down for each lean: P(up) = σ(k·lean − c),
+    P(down) = σ(−k·lean − c), the rest flat (never below 0, as c ≥ 0)."""
     up = 1 / (1 + np.exp(-(slope * leans - cut)))
-    down = 1 / (1 + np.exp(-(-slope * leans - cut)))
+    down = 1 / (1 + np.exp(slope * leans + cut))
     flat = np.maximum(0.0, 1.0 - up - down)
-    probabilities = np.stack([up, flat, down], axis=1)
-    probabilities /= probabilities.sum(axis=1, keepdims=True)
-    chosen = probabilities[np.arange(len(outcomes)), outcomes]
-    return float(-np.log(np.maximum(chosen, _FLOOR)).mean())
-
-
-def _sigmoid(z: float) -> float:
-    return 1 / (1 + math.exp(-z)) if z >= 0 else math.exp(z) / (1 + math.exp(z))
+    probabilities: np.ndarray = np.stack([up, flat, down], axis=1)
+    normalized: np.ndarray = probabilities / probabilities.sum(axis=1, keepdims=True)
+    return normalized
 
 
 def _pairs(samples: Sequence[Sample]) -> list[tuple[list[float], list[float]]]:

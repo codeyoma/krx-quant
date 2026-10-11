@@ -152,6 +152,19 @@ def vi(received: datetime, start: str, end: str | None = None, symbol: str = SYM
     return (VI_STATUS.tr_id, event)
 
 
+def with_sides(events: Iterable[Event], run: int = 2) -> list[Event]:
+    """``events`` with the integrated trades' aggressor sides: ``run`` buys, then ``run``
+    sells, in turn."""
+    out: list[Event] = []
+    trades = 0
+    for feed, row in events:
+        if feed == TRADE.tr_id:
+            row = {**row, "side": "buy" if (trades // run) % 2 == 0 else "sell"}
+            trades += 1
+        out.append((feed, row))
+    return out
+
+
 def kospi(when: datetime, change_pct: float) -> Event:
     """A KOSPI index tick at ``when``, ``change_pct`` from the previous close."""
     fields = _fields(

@@ -16,7 +16,9 @@ HORIZON_MINUTES = 4.0
 # Never sharper than half a tick: prices move in whole (or half) ticks.
 MIN_SPREAD_TICKS = 0.5
 # The smallest probability counted in the log loss, so one sure miss does not dominate.
-_FLOOR = 1e-6
+LOSS_FLOOR = 1e-6
+# The classes in a forecast's order: up, flat, down.
+CLASSES = (Direction.UP, Direction.FLAT, Direction.DOWN)
 # Without a flat band or a volatility there is nothing to say.
 UNKNOWN = Forecast(1 / 3, 1 / 3, 1 / 3, 0.0)
 
@@ -60,7 +62,7 @@ def normal_forecast(move: float, spread: float, flat_ticks: float) -> Forecast:
 
 
 def log_loss(forecast: Forecast, outcome: Direction) -> float:
-    return -math.log(max(forecast.probability(outcome), _FLOOR))
+    return -math.log(max(forecast.probability(outcome), LOSS_FLOOR))
 
 
 def with_outcomes(samples: Sequence[Sample]) -> list[Sample]:

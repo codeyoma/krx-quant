@@ -2,12 +2,12 @@
 
 The predicted symbols' one-minute bars and reference prices (``reference``), the bars of
 the series that may lead them (``features.Leaders``: futures, indices, US daytime trades,
-ETFs), each by exchange time, as they stood at each bar close, the symbols' microprices at
+ETFs), each by exchange time, as they stood at each bar close; the symbols' microprices at
 each minute's end, order flow (the integrated book's best quotes and ten levels, the
-trades' aggressor sides, the per-venue trades) and trade arrivals, and their flows (program trading, foreign
-member firms, investor estimates), as received before it. The engine predicts
-from it, live and in replay; training on a recorded day feeds the same events through it,
-so it learns from exactly what the engine saw.
+trades' aggressor sides, the per-venue trades), trade arrivals and flows (program trading,
+foreign member firms, investor estimates), as received before it. The engine predicts from
+it, live and in replay; training on a recorded day feeds the same events through it, so it
+learns from exactly what the engine saw.
 
 A bar close's bars are kept when the first event received at or after it arrives, before
 that event changes them: a prediction made late never sees a trade it could not have.
@@ -26,11 +26,11 @@ import numpy as np
 
 from krx_quant.contracts import KOSPI200, USD, days_to_expiry
 from krx_quant.features import (
-    ARRIVAL_MINUTES,
     EXCITATION_SECONDS,
     FLOW_MINUTES,
     MINUTE_MOVES,
     OFI_MINUTES,
+    SIDES,
     TRADE_MINUTES,
     Arrivals,
     Flows,
@@ -280,12 +280,13 @@ class _Book:
 
 
 class _Arrivals:
-    """A symbol's buy- and sell-initiated trades of the day by receipt time, compact: a
-    liquid symbol has many thousands a day."""
+    """A symbol's buy- and sell-initiated trades of the day by receipt time, compact (17 bytes
+    a trade): a liquid symbol has many thousands a day."""
 
-    # Older trades are left out of the excitation: they weigh under e^(−10) of their size at
-    # the longest decay.
+    # Older trades are left out of the decayed sizes: they weigh under e^(−10) of their size
+    # at the longest decay.
     _REACH = 10 * max(EXCITATION_SECONDS)
+    _RECENT = 60  # seconds: the last minute's arrivals
 
     def __init__(self) -> None:
         self._day: date | None = None
@@ -293,11 +294,10 @@ class _Arrivals:
 
     def _reset(self) -> None:
         self._at = array("d")  # seconds since the epoch
-        self._buy = array("b")
-        self._size = array("d")
+        self._buy = array("b")  # 1 bought (buy-initiated), 0 sold
         self._total = array("d")  # running total of the sizes
 
-    def add(self, at: datetime, buy: bool, size: float) -> None:
+    def add(self, at: datetime, side: str, size: float) -> None:
         day = kst_day(at)
         if day != self._day:
             self._day = day
@@ -306,8 +306,7 @@ class _Arrivals:
         if self._at and t < self._at[-1]:
             t = self._at[-1]  # the engine only ever moves forward
         self._at.append(t)
-        self._buy.append(1 if buy else 0)
-        self._size.append(size)
+        self._buy.append(1 if side == "buy" else 0)
         self._total.append((self._total[-1] if self._total else 0.0) + size)
 
     def before(self, opened: datetime, close: datetime) -> Arrivals:
@@ -323,16 +322,17 @@ class _Arrivals:
             return Arrivals()
         first = max(lo, bisect.bisect_left(self._at, end - self._REACH))
         age = end - np.frombuffer(self._at[first:hi])
-        weight = np.frombuffer(self._size[first:hi]) / mean
+        totals = np.frombuffer(self._total[max(first - 1, 0) : hi])
+        size = np.diff(totals, prepend=0.0) if first == 0 else np.diff(totals)
         buy = np.frombuffer(self._buy[first:hi], dtype=np.int8).astype(bool)
-        recent = age <= ARRIVAL_MINUTES * 60
-        excitation: dict[tuple[str, int], float] = {}
+        recent = age <= self._RECENT
+        decayed: dict[tuple[str, int], float] = {}
         last: dict[str, float] = {}
-        for side, mask in (("buy", buy), ("sell", ~buy)):
+        for side, mask in zip(SIDES, (buy, ~buy), strict=True):
             for seconds in EXCITATION_SECONDS:
-                excitation[(side, seconds)] = float((weight[mask] * np.exp(-age[mask] / seconds)).sum())
-            last[side] = float(weight[mask & recent].sum())
-        return Arrivals(excitation, last)
+                decayed[(side, seconds)] = float((size[mask] * np.exp(-age[mask] / seconds)).sum())
+            last[side] = float(size[mask & recent].sum())
+        return Arrivals(mean, decayed, last)
 
 
 class _Sides(NamedTuple):
@@ -406,10 +406,10 @@ class MarketView:
             qty = float(row["qty"] or 0)
             if row.get("side") == "buy":
                 self._sides[symbol].add(received_at, _Sides(1.0, 0.0, qty, 0.0))
-                self._arrivals[symbol].add(received_at, True, qty)
+                self._arrivals[symbol].add(received_at, "buy", qty)
             elif row.get("side") == "sell":
                 self._sides[symbol].add(received_at, _Sides(0.0, 1.0, 0.0, qty))
-                self._arrivals[symbol].add(received_at, False, qty)
+                self._arrivals[symbol].add(received_at, "sell", qty)
         elif feed == KRX_TRADE.tr_id:
             self._reference.quote(symbol, Source.KRX, received_at, row["bid1"], row["ask1"])
             self._venue_trade(symbol, "KRX", row)

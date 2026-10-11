@@ -26,7 +26,6 @@ from krx_quant.algorithms import (
     predicted,
     save_model,
 )
-from krx_quant.engine import Event
 from krx_quant.features import (
     BOOK_FEATURES,
     FEATURES,
@@ -37,23 +36,15 @@ from krx_quant.features import (
     UndeclaredFeature,
     Value,
 )
-from krx_quant.feeds import TRADE
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.training import recorded_samples, samples
 from tests.algorithm_doubles import FixedAlgorithm
+from tests.replay_events import with_sides
 from tests.synthetic_bars import random_walk, trending
 from tests.test_replay import busy_morning
 
 FEE = 0.015 / 100
 DAYS = [date(2026, 9, 21), date(2026, 9, 22)]
-
-
-def with_sides(events: list[Event]) -> list[Event]:
-    """The trades' aggressor sides, buying and selling in turn, as the collector records them."""
-    out: list[Event] = []
-    for i, (feed, row) in enumerate(events):
-        out.append((feed, {**row, "side": "buy" if i % 4 < 2 else "sell"} if feed == TRADE.tr_id else row))
-    return out
 
 
 def given(default: float | None, **values: float | None) -> dict[str, Value]:

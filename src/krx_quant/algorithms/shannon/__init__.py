@@ -27,10 +27,9 @@ from collections.abc import Mapping, Sequence
 import numpy as np
 
 from krx_quant.algorithms.contract import Abstention, Card, Model, NothingToLearn, NotPredicted, Sample
-from krx_quant.algorithms.forecasts import class_moves, lowest_log_loss, number, param
+from krx_quant.algorithms.forecasts import CLASSES, class_moves, lowest_log_loss, number, param
 from krx_quant.baselines import Forecast
 from krx_quant.features import FeatureVector
-from krx_quant.pricing import Direction
 
 INPUTS = (
     "ofi_1",
@@ -42,7 +41,6 @@ INPUTS = (
     "program_net",
     "member_foreign_net",
 )
-CLASSES = (Direction.UP, Direction.FLAT, Direction.DOWN)
 # L1 penalties tried, strongest first: of equals, the sparser model is kept.
 PENALTIES = (0.1, 0.03, 0.01, 0.003, 0.001)
 VALIDATION_SHARE = 0.2

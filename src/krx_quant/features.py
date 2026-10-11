@@ -24,6 +24,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from functools import cached_property
+from itertools import product
 
 from krx_quant.config import Settings
 from krx_quant.contracts import KOSPI200, USD
@@ -84,22 +85,21 @@ class OrderFlow:
     nxt_volume: float | None = None
 
 
-# The decay times (seconds) of each side's excitation, and the minutes its arrivals are
-# summed over (Poisson's).
+# The decay times (seconds) of each side's excitation (Poisson's); its arrivals are summed
+# over the last minute.
 EXCITATION_SECONDS = (10, 60)
-ARRIVAL_MINUTES = 1
 SIDES = ("buy", "sell")
 
 
 @dataclass(frozen=True)
 class Arrivals:
-    """A symbol's buy- and sell-initiated trades received before a bar close, from the open,
-    each weighing its size over the day's mean trade size so far (Poisson's). Empty without
-    any trade's side today: recorded days only."""
+    """A symbol's buy- and sell-initiated trades received before a bar close, from the open
+    (Poisson's). Recorded days only: without any trade's side today the mean size is None."""
 
-    # (side, seconds): the trades' weights, each faded by e^(−age / seconds)
-    excitation: Mapping[tuple[str, int], float] = field(default_factory=dict)
-    last_minutes: Mapping[str, float] = field(default_factory=dict)  # side: weights over ARRIVAL_MINUTES
+    mean_size: float | None = None  # the day's mean trade size so far (shares)
+    # (side, seconds): the trades' sizes, each faded by e^(−age / seconds)
+    decayed: Mapping[tuple[str, int], float] = field(default_factory=dict)
+    recent: Mapping[str, float] = field(default_factory=dict)  # side: the sizes of the last minute
 
 
 @dataclass(frozen=True)
@@ -413,12 +413,13 @@ def excitation_feature(side: str, seconds: int) -> str:
 
 
 def arrivals_feature(side: str) -> str:
-    return f"{side}_arrivals_{ARRIVAL_MINUTES}"
+    return f"{side}_arrivals_1"
 
 
 def _excitation(side: str, seconds: int) -> Feature:
     def feature(s: Snapshot) -> FeatureValue:
-        return s.arrivals.excitation.get((side, seconds))
+        mean = s.arrivals.mean_size
+        return None if not mean else s.arrivals.decayed.get((side, seconds), 0.0) / mean
 
     feature.__doc__ = (
         f"The {side}-initiated trades from the open, each its size over the day's mean, faded by "
@@ -429,11 +430,12 @@ def _excitation(side: str, seconds: int) -> Feature:
 
 def _arrivals(side: str) -> Feature:
     def feature(s: Snapshot) -> FeatureValue:
-        return s.arrivals.last_minutes.get(side)
+        mean = s.arrivals.mean_size
+        return None if not mean else s.arrivals.recent.get(side, 0.0) / mean
 
     feature.__doc__ = (
-        f"The {side}-initiated trades of the last {ARRIVAL_MINUTES} minute(s), each its size over "
-        "the day's mean. Unknown without any trade's side today."
+        f"The {side}-initiated trades of the last minute, each its size over the day's mean. "
+        "Unknown without any trade's side today."
     )
     return feature
 
@@ -685,7 +687,10 @@ FEATURES: dict[str, Feature] = {
     "trade_imbalance": trade_imbalance,
     "trade_entropy": trade_entropy,
     "nxt_share": nxt_share,
-    **{excitation_feature(side, sec): _excitation(side, sec) for side in SIDES for sec in EXCITATION_SECONDS},
+    **{
+        excitation_feature(side, sec): _excitation(side, sec)
+        for side, sec in product(SIDES, EXCITATION_SECONDS)
+    },
     **{arrivals_feature(side): _arrivals(side) for side in SIDES},
     "macro_regime": macro_regime,
     "minutes_since_open": minutes_since_open,
@@ -703,14 +708,11 @@ SERIES_FEATURES = frozenset({"minute_ticks", "microprice_ticks", "kospi200f_move
 # The features from the book, and from the trades' sides and venues: none on a day with
 # backfilled bars only.
 BOOK_FEATURES = frozenset({"microprice_ticks", "depth_imbalance", *(ofi_feature(m) for m in OFI_MINUTES)})
+# Each side's excitation at each decay, and its arrivals (Poisson's).
+EXCITATION_FEATURES = tuple(excitation_feature(side, sec) for side, sec in product(SIDES, EXCITATION_SECONDS))
+ARRIVAL_FEATURES = tuple(arrivals_feature(side) for side in SIDES)
 TAPE_FEATURES = frozenset(
-    {
-        "trade_imbalance",
-        "trade_entropy",
-        "nxt_share",
-        *(excitation_feature(side, sec) for side in SIDES for sec in EXCITATION_SECONDS),
-        *(arrivals_feature(side) for side in SIDES),
-    }
+    {"trade_imbalance", "trade_entropy", "nxt_share", *EXCITATION_FEATURES, *ARRIVAL_FEATURES}
 )
 
 
