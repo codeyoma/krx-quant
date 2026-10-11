@@ -299,8 +299,8 @@ async def test_the_atm_implied_vol_is_the_call_and_put_nearest_the_money(tmp_pat
 
     iv = dict(zip(range(1, 13), (seen["atm_iv"] for seen in probe.seen), strict=False))  # by minute
     assert iv[1] == pytest.approx((20.0 + 22.0) / 2), "09:01: C2 and P2, what came before the close"
-    assert iv[2] == pytest.approx((19.0 + 22.0) / 2), "09:02: C2's latest trade"
-    assert iv[10] == pytest.approx((19.0 + 22.0) / 2)
+    assert iv[2] == pytest.approx(((30.0 + 19.0) / 2 + 22.0) / 2), "09:02: C2's two trades in the minute"
+    assert iv[10] == pytest.approx((19.0 + 22.0) / 2), "no trade in the last minute: the latest"
     # A trade older than ten minutes says nothing: by 09:11 P2's (09:00:40) is gone, by
     # 09:12 every one.
     assert iv[11] == pytest.approx(19.0)
@@ -321,10 +321,29 @@ async def test_options_equally_near_the_money_count_alike(tmp_path: Path) -> Non
     assert probe.seen[0]["atm_iv"] == pytest.approx(((24.0 + 20.0) / 2 + 22.0) / 2)
 
 
+async def test_an_odd_last_trade_is_outvoted_by_the_minute_before_it(tmp_path: Path) -> None:
+    probe = FixedAlgorithm("probe", features=("atm_iv",), unique=("atm_iv",))
+    events = [
+        *busy_morning(end="09:02:00"),
+        option_trade(at("08:59:50"), "C2", 30.0, 0.50),  # over a minute before 09:01: not counted
+        option_trade(at("09:00:10"), "C2", 20.0, 0.50),
+        option_trade(at("09:00:20"), "C2", 20.4, 0.50),
+        option_trade(at("09:00:30"), "C2", 20.2, 0.50),
+        option_trade(at("09:00:40"), "C2", 12.0, 0.50),  # an odd print, the call's last
+        option_trade(at("09:00:50"), "P2", 22.0, -0.50),
+    ]
+
+    await run(tmp_path / "engine.db", events, until=at("09:01:00"), algorithms=[probe])
+
+    # The call: the median of its four trades in the minute (20.0, 20.4, 20.2, 12.0), not the
+    # last one's 12.0; the put: its one.
+    assert probe.seen[0]["atm_iv"] == pytest.approx((20.1 + 22.0) / 2)
+
+
 async def test_training_reads_the_atm_implied_vol_as_the_engine_does(tmp_path: Path) -> None:
     samples = recorded_samples(options_morning(), CALENDAR, DAY, ("005930",), ("atm_iv",), FEE, Leaders())
 
-    assert [s.features["atm_iv"] for s in samples[:2]] == [pytest.approx(21.0), pytest.approx(20.5)]
+    assert [s.features["atm_iv"] for s in samples[:2]] == [pytest.approx(21.0), pytest.approx(23.25)]
 
 
 def iv_morning(iv: float) -> list[Event]:

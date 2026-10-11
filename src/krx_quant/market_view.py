@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import bisect
 import math
+import statistics
 from array import array
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
@@ -158,6 +159,8 @@ class _Estimates:
 
 # An option trade older than this says nothing about where the money is at a bar close.
 OPTION_STALE = timedelta(minutes=10)
+# An option's implied volatility is the median of its trades in this long before the close.
+OPTION_SMOOTHING = timedelta(minutes=1)
 
 
 class _OptionTrade(NamedTuple):
@@ -175,12 +178,14 @@ class _Options:
 
     def __init__(self) -> None:
         self._trades: dict[str, list[_OptionTrade]] = {}  # by option code
+        self._last: tuple[datetime, float | None] | None = None  # the last answer, until a trade
 
     def add(self, row: dict[str, Any]) -> None:
         """An option trade; one without an implied volatility or a delta says nothing."""
         iv, delta = row.get("implied_vol"), row.get("delta")
         if not iv or iv <= 0 or not delta:
             return
+        self._last = None
         trade = _OptionTrade(row["received_at"], float(iv), float(delta))
         trades = self._trades.setdefault(row["symbol"], [])
         trades.insert(bisect.bisect_right(trades, trade.received_at, key=_received), trade)
@@ -192,13 +197,24 @@ class _Options:
 
     def atm_iv(self, at: datetime) -> float | None:
         """The mean implied volatility of the call whose delta is nearest 0.5 and the put
-        whose delta is nearest −0.5, each option by its latest trade received in the
-        ``OPTION_STALE`` before ``at``; one side's alone when the other has none."""
+        whose delta is nearest −0.5, each option chosen by its latest trade received in the
+        ``OPTION_STALE`` before ``at``; one side's alone when the other has none. An option's
+        implied volatility is the median of its trades in the ``OPTION_SMOOTHING`` before
+        ``at`` (one trade's is noisy), else its latest trade's. Asked again for the same
+        ``at`` (every symbol at a bar close), the answer is kept."""
+        if self._last is not None and self._last[0] == at:
+            return self._last[1]
+        self._last = (at, self._atm_iv(at))
+        return self._last[1]
+
+    def _atm_iv(self, at: datetime) -> float | None:
         latest = []
         for trades in self._trades.values():
             i = bisect.bisect_left(trades, at, key=_received)
             if i and trades[i - 1].received_at >= at - OPTION_STALE:
-                latest.append(trades[i - 1])
+                recent = trades[bisect.bisect_left(trades, at - OPTION_SMOOTHING, key=_received) : i]
+                iv = statistics.median(t.iv for t in recent) if recent else trades[i - 1].iv
+                latest.append(trades[i - 1]._replace(iv=iv))
         calls = [t for t in latest if t.delta > 0]
         puts = [t for t in latest if t.delta < 0]
         sides = [_nearest_iv(side, target) for side, target in ((calls, 0.5), (puts, -0.5)) if side]
