@@ -40,7 +40,7 @@ from datetime import date, datetime, time
 from pathlib import Path
 from typing import Any
 
-from krx_quant.algorithms import ALGORITHMS, Algorithm, Model, load_models, register
+from krx_quant.algorithms import ALGORITHMS, Algorithm, Model, NothingToLearn, load_models, register
 from krx_quant.baselines import BASELINE_NAMES
 from krx_quant.config import Settings
 from krx_quant.features import Leaders
@@ -330,7 +330,7 @@ class _WalkForward:
             return self._algorithm.default_model()
         try:
             return self._algorithm.fit(training)
-        except ValueError as e:  # nothing it can learn from (no book on backfilled days): as the night does
+        except NothingToLearn as e:  # no book on backfilled days, say; any other error fails the check
             log.warning("%s not trained before %s, its defaults predict: %s", self._algorithm.name, day, e)
             return self._algorithm.default_model()
 

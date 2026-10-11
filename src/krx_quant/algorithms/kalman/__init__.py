@@ -24,7 +24,7 @@ import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
-from krx_quant.algorithms.contract import Abstention, Card, Model, NotPredicted, Sample
+from krx_quant.algorithms.contract import Abstention, Card, Model, NothingToLearn, NotPredicted, Sample
 from krx_quant.algorithms.forecasts import UNKNOWN, lowest_log_loss, normal_forecast, with_outcomes
 from krx_quant.baselines import Forecast
 from krx_quant.features import FeatureVector
@@ -168,10 +168,10 @@ class Kalman:
     def fit(self, samples: Sequence[Sample]) -> Model:
         scored = [s for s in with_outcomes(samples) if s.features.series("microprice_ticks")]
         if not scored:
-            raise ValueError("no training samples with the book")
+            raise NothingToLearn("no training samples with the book")
         sequences = _sequences(samples)
         if not sequences:
-            raise ValueError("no two minutes of the book in a row to learn from")
+            raise NothingToLearn("no two minutes of the book in a row to learn from")
         p = _Params.of(DEFAULT_PARAMS)
         previous = None
         for _ in range(ROUNDS):

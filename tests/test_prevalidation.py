@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 
-from krx_quant.algorithms import Algorithm, Card, Model, RegistrationError, Sample, save_model
+from krx_quant.algorithms import Algorithm, Card, Model, NothingToLearn, RegistrationError, Sample, save_model
 from krx_quant.baselines import Forecast
 from krx_quant.cli import main
 from krx_quant.clock import FakeClock
@@ -370,10 +370,23 @@ async def test_a_day_with_nothing_the_algorithm_can_learn_from_is_predicted_by_i
 ) -> None:
     class Picky(Contrarian):  # learns from nothing it is given (a book algorithm on backfilled days)
         def fit(self, samples: Sequence[Sample]) -> Model:
-            raise ValueError("no training samples with the book")
+            raise NothingToLearn("no training samples with the book")
 
     s = settings(tmp_path, DAYS[:2])
 
     result = await prevalidate(s, "picky", algorithms=[ALPHA, Picky("picky")], now=AFTER)
 
     assert set(result.models.values()) == {"picky-default"}
+
+
+async def test_any_other_error_in_training_fails_the_pre_validation(tmp_path: Path) -> None:
+    class Broken(Contrarian):  # a defect, not a gap in the data
+        def fit(self, samples: Sequence[Sample]) -> Model:
+            raise ValueError("math domain error")
+
+    s = settings(tmp_path, DAYS[:2])
+
+    with pytest.raises(ValueError, match="math domain error"):
+        await prevalidate(s, "broken", algorithms=[ALPHA, Broken("broken")], now=AFTER)
+
+    assert not report_path(s.state_dir, "broken").exists(), "no report: the engine never starts it"

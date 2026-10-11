@@ -7,7 +7,7 @@ from __future__ import annotations
 import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
 
-from krx_quant.algorithms.contract import Model, Sample
+from krx_quant.algorithms.contract import Model, NothingToLearn, Sample
 from krx_quant.baselines import Forecast
 from krx_quant.features import FeatureVector
 from krx_quant.pricing import Direction
@@ -44,10 +44,10 @@ def log_loss(forecast: Forecast, outcome: Direction) -> float:
 
 
 def with_outcomes(samples: Sequence[Sample]) -> list[Sample]:
-    """The samples that can be trained on; raises ValueError if there are none."""
+    """The samples that can be trained on; raises NothingToLearn if there are none."""
     scored = [s for s in samples if s.outcome is not None]
     if not scored:
-        raise ValueError("no training samples with an outcome")
+        raise NothingToLearn("no training samples with an outcome")
     return scored
 
 

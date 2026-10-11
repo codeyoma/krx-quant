@@ -44,6 +44,11 @@ class NotPredicted(Exception):
         self.why = why
 
 
+class NothingToLearn(ValueError):
+    """Raised by ``fit`` when its samples hold nothing it can learn from (no outcomes, no
+    book): a gap in the data, not a defect. Any other error from ``fit`` is a failure."""
+
+
 @dataclass(frozen=True)
 class Card:
     """The personality card."""
