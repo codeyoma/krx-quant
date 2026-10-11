@@ -91,7 +91,9 @@ def demo_events() -> list[Event]:
         events.append(_futures(when + timedelta(seconds=2), 350 * (1 + level / 100), level))
         # The USD futures around Friday's close (the morning's macro reading).
         usd = _USDF_CLOSE * (1 + (level + 0.2) / 100)
-        events.append(_futures(when + timedelta(seconds=3), usd, level + 0.2, feed=USD_FUTURES, contract="A75610"))
+        events.append(
+            _futures(when + timedelta(seconds=3), usd, level + 0.2, feed=USD_FUTURES, contract="A75610")
+        )
     # 000660 in a VI from 09:40:10, released at 09:42:20.
     events.append(_vi(_at(time(9, 40, 11)), "000660", "094010", None))
     events.append(_vi(_at(time(9, 42, 21)), "000660", "094010", "094220"))
@@ -279,7 +281,12 @@ def _index(when: datetime, code: str, value: float, change_pct: float) -> Event:
 
 
 def _futures(
-    when: datetime, price: float, change_pct: float, *, feed: Feed = KOSPI200_FUTURES, contract: str = "A01612"
+    when: datetime,
+    price: float,
+    change_pct: float,
+    *,
+    feed: Feed = KOSPI200_FUTURES,
+    contract: str = "A01612",
 ) -> Event:
     values = {
         "futs_shrn_iscd": contract,
