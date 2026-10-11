@@ -8,12 +8,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from krx_quant.collector import run_collector
 from krx_quant.fake_kis import FakeKis
 from krx_quant.feeds import KST, VI_STATUS
 from krx_quant.polling import Poller, PollJob
 from krx_quant.recorder import ParquetRecorder
-from tests.kis_rest import requests_for, rest_client
+from tests.kis_rest import requests_for, rest_client, rest_grants
 from tests.test_collector import FIXED_NOW, read, settings_for
 
 INQUIRE_PRICE = "FHKST01010100"
@@ -36,7 +38,10 @@ async def run_for(kis: FakeKis, settings: Any, seconds: float) -> None:
     await asyncio.wait_for(task, 5)
 
 
-async def test_rest_calls_never_exceed_twenty_in_any_one_second_window(kis: FakeKis, tmp_path: Path) -> None:
+async def test_rest_calls_never_exceed_twenty_in_any_one_second_window(
+    kis: FakeKis, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    let_through = rest_grants(monkeypatch)
     for tr_id in (INQUIRE_PRICE, "FHKST01010200", "FHKST01010600"):
         kis.rest_responses[tr_id] = price_response
     # No WebSocket room: every symbol's trades, book and member flow fall back to REST.
@@ -47,9 +52,18 @@ async def test_rest_calls_never_exceed_twenty_in_any_one_second_window(kis: Fake
 
     await run_for(kis, settings, 2.5)
 
-    times = sorted(t for t, _, path, _ in kis.rest_requests if "/quotations/" in path)
-    assert len(times) > 30, "demand far exceeds the limit, so polling should run at the cap"
-    busiest = max(sum(1 for u in times if t <= u < t + 1.0) for t in times)
+    arrived = sorted(t for t, _, _, _ in kis.rest_requests)
+    assert len(arrived) > 30, "demand far exceeds the limit, so polling should run at the cap"
+    # The limit is checked on the limiter's own clock, when it let each call go. Arrival times at
+    # the fake KIS add the machine's scheduling delays: one call held up for longer than the
+    # limiter's 0.1 s margin arrives within a second of the next twenty. Many poll jobs share the
+    # limiter, so calls can pass each other on the way: the k-th arrival is matched to the k-th
+    # grant, both in time order. Stopping cancels the poll jobs, and a call let through just before
+    # can be cancelled before it reaches the fake KIS (seen on a new connection): grants may
+    # outnumber arrivals, and they still count toward the busiest second.
+    assert len(arrived) <= len(let_through), "every call went through the limiter"
+    assert all(g <= a for g, a in zip(let_through, arrived, strict=False)), "none arrived before its turn"
+    busiest = max(sum(1 for u in let_through if t <= u < t + 1.0) for t in let_through)
     assert busiest <= 20
 
 
