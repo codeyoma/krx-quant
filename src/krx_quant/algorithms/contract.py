@@ -4,13 +4,16 @@
   it learns;
 - the features it declares, the only ones it is given;
 - ``fit``: training samples in, a versioned model out;
-- ``predict``: one symbol's features and the model in, a forecast out.
+- ``predict``: one symbol's features and the model in, a forecast out; or, when the data
+  it needs is missing at the bar close, ``NotPredicted`` with why (stored as the
+  prediction's status, unscored).
 
 Algorithms never see each other's output; only the consensus combines them.
 """
 
 from __future__ import annotations
 
+import enum
 import hashlib
 import json
 import logging
@@ -25,6 +28,20 @@ from krx_quant.features import FeatureVector
 from krx_quant.pricing import Direction
 
 log = logging.getLogger(__name__)
+
+
+class Abstention(enum.Enum):
+    """Why an algorithm did not predict a symbol at a bar close: the prediction's status."""
+
+    NO_BOOK = "no_book"  # the book was missing at the bar close
+
+
+class NotPredicted(Exception):
+    """Raised by ``predict`` for a symbol it does not predict at this bar close."""
+
+    def __init__(self, why: Abstention) -> None:
+        super().__init__(why.value)
+        self.why = why
 
 
 @dataclass(frozen=True)
@@ -126,6 +143,14 @@ class Algorithm(Protocol):
     def fit(self, samples: Sequence[Sample]) -> Model: ...
 
     def predict(self, features: FeatureVector, model: Model) -> Forecast: ...
+
+
+def predicted(algorithm: Algorithm, features: FeatureVector, model: Model) -> Forecast | None:
+    """``algorithm``'s forecast, or None where it does not predict (``NotPredicted``)."""
+    try:
+        return algorithm.predict(features, model)
+    except NotPredicted:
+        return None
 
 
 def model_path(state_dir: Path, name: str) -> Path:

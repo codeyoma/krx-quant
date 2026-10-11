@@ -41,7 +41,7 @@ from pathlib import Path
 from typing import Any
 
 from krx_quant.algorithms import ALGORITHMS, Algorithm, Model
-from krx_quant.algorithms.contract import Sample
+from krx_quant.algorithms.contract import Sample, predicted
 from krx_quant.algorithms.forecasts import log_loss
 from krx_quant.backfill import MINUTE_BARS_TR, bars_key
 from krx_quant.config import Settings, SettingsError
@@ -253,7 +253,12 @@ class _Trainer:
             return {**report, "reason": f"not trained: {e}"}
         self._put_model(algorithm.name, challenger)
         champion = self._champion(algorithm, live_version)
-        scored = [s for s in self._samples(algorithm, validation) if s.outcome is not None]
+        # The bar closes it predicts: without the data it reads (the book), it declines.
+        scored = [
+            s
+            for s in self._samples(algorithm, validation)
+            if s.outcome is not None and predicted(algorithm, s.features, challenger) is not None
+        ]
         report["samples"] = {"validation": len(scored)}
         if not scored:
             return {**report, "reason": "no outcomes to validate on"}

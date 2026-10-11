@@ -26,7 +26,7 @@ from krx_quant.demo import demo_app
 from krx_quant.fake_kis import FakeKis
 from tests.api_schema import ROUTES, SCHEMA, STREAM, check
 from tests.kis_frames import book_frame
-from tests.replay_events import PREDICTORS, api, at, run
+from tests.replay_events import LIVE_PREDICTORS, api, at, run
 from tests.test_collector import settings_for
 from tests.test_live_predictions import free_port, poll
 
@@ -162,7 +162,9 @@ async def test_the_live_engine_keeps_the_contract(kis: FakeKis, tmp_path: Path) 
                 while not events or events[-1].get("kind") != "final":
                     events.append(await ws.receive_json())
                     check("event", events[-1])
-            await poll(f"{base}/v1/symbols/005930/latest", lambda b: len(b["predictions"]) == len(PREDICTORS))
+            await poll(
+                f"{base}/v1/symbols/005930/latest", lambda b: len(b["predictions"]) == len(LIVE_PREDICTORS)
+            )
 
             async def get(path: str) -> tuple[int, Any]:
                 async with http.get(path) as response:

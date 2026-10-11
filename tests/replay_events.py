@@ -34,6 +34,7 @@ from krx_quant.feeds import (
     Feed,
 )
 from krx_quant.market_calendar import MarketCalendar
+from krx_quant.prevalidation import REGISTERED_BEFORE
 from krx_quant.replay import replay
 
 SYMBOL = "005930"
@@ -41,6 +42,8 @@ SYMBOL = "005930"
 # while no algorithm is active.
 PREDICTING = {b.name for b in BASELINES} | {a.name for a in ALGORITHMS}
 PREDICTORS = PREDICTING | set(CONSENSUS)
+# Live, an algorithm registered after pre-validation existed waits for its report (#24).
+LIVE_PREDICTORS = PREDICTORS - {a.name for a in ALGORITHMS if a.name not in REGISTERED_BEFORE}
 DAY = date(2026, 10, 12)  # a Monday
 CALENDAR = MarketCalendar({DAY: True})
 FEE = 0.015 / 100
@@ -55,8 +58,11 @@ def _fields(feed: Feed, values: dict[str, str]) -> dict[str, str]:
     return dict.fromkeys(feed.columns, "0") | values
 
 
-def book(when: datetime, bid: int, ask: int, symbol: str = SYMBOL) -> Event:
-    """An integrated book update received at ``when``."""
+def book(
+    when: datetime, bid: int, ask: int, symbol: str = SYMBOL, *, bid_qty: int = 0, ask_qty: int = 0
+) -> Event:
+    """An integrated book update received at ``when``, with ``bid_qty`` and ``ask_qty`` at
+    the best quotes."""
     fields = _fields(
         BOOK,
         {
@@ -64,6 +70,8 @@ def book(when: datetime, bid: int, ask: int, symbol: str = SYMBOL) -> Event:
             "BSOP_HOUR": when.strftime("%H%M%S"),
             "BIDP1": str(bid),
             "ASKP1": str(ask),
+            "BIDP_RSQN1": str(bid_qty),
+            "ASKP_RSQN1": str(ask_qty),
         },
     )
     return (BOOK.tr_id, BOOK.normalize(fields, when.astimezone(UTC)))

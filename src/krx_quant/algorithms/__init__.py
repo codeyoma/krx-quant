@@ -12,16 +12,20 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from krx_quant.algorithms.contract import (
+    Abstention,
     Algorithm,
     Card,
     Model,
+    NotPredicted,
     Sample,
     load_models,
     model_path,
+    predicted,
     save_model,
 )
 from krx_quant.algorithms.gauss import Gauss
 from krx_quant.algorithms.granger import Granger
+from krx_quant.algorithms.kalman import Kalman
 from krx_quant.algorithms.markov import Markov
 from krx_quant.algorithms.newton import Newton
 from krx_quant.algorithms.turing import Turing
@@ -60,18 +64,22 @@ def register(algorithms: Sequence[Algorithm]) -> tuple[Algorithm, ...]:
 
 # Turing reads every feature in the Feature Store, so it comes last: an algorithm's own
 # features must be added before it, or Turing's taking them refuses it. Being last, it is
-# also the first skipped when the CPU budget runs short.
-ALGORITHMS: tuple[Algorithm, ...] = register([Newton(), Gauss(), Granger(), Markov(), Turing()])
+# also the first skipped when the CPU budget runs short. Kalman (#25) is the first
+# registered after pre-validation existed: the engine starts it once it has passed.
+ALGORITHMS: tuple[Algorithm, ...] = register([Newton(), Gauss(), Granger(), Markov(), Kalman(), Turing()])
 
 __all__ = [
     "ALGORITHMS",
+    "Abstention",
     "Algorithm",
     "Card",
     "Model",
+    "NotPredicted",
     "RegistrationError",
     "Sample",
     "load_models",
     "model_path",
+    "predicted",
     "register",
     "save_model",
 ]

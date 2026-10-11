@@ -9,9 +9,11 @@ bar close in the prediction window, from what was received before it:
   predicts every symbol from its own features, in a worker thread so recording never
   waits. Each algorithm's predictions are displayed when it finishes. One that takes
   longer than its time budget is skipped for that bar close (``timed_out``), and so is
-  each later bar close until it finishes. When the algorithms' expected work exceeds the
-  CPU budget, the last registered are skipped first and the skip is recorded (``runs``);
-  each skip halves the skipped one's expected time, so it is soon run (and timed) again.
+  each later bar close until it finishes. A symbol an algorithm declines for missing data
+  (``NotPredicted``) is stored with the reason as its status (``no_book``), unscored.
+  When the algorithms' expected work exceeds the CPU budget, the last registered are
+  skipped first and the skip is recorded (``runs``); each skip halves the skipped one's
+  expected time, so it is soon run (and timed) again.
 
 Four minutes later each prediction is scored on both bases.
 
@@ -54,7 +56,7 @@ from datetime import date, datetime, time, timedelta
 from functools import partial
 from typing import Any
 
-from krx_quant.algorithms import ALGORITHMS, Algorithm, Model, register
+from krx_quant.algorithms import ALGORITHMS, Abstention, Algorithm, Model, NotPredicted, register
 from krx_quant.baselines import BASELINES, Forecast, Inputs
 from krx_quant.clock import SessionClock
 from krx_quant.config import Settings
@@ -130,9 +132,10 @@ _REVIEW_DAYS = 400
 ENGINE_FEEDS: dict[str, tuple[str, ...]] = {
     # Integrated trades make the bars; their best quotes are integrated quotes too.
     TRADE.tr_id: ("symbol", "event_time", "received_at", "price", "qty", "ask1", "bid1"),
-    BOOK.tr_id: ("symbol", "received_at", "ask_px_1", "bid_px_1"),
+    # Its best quotes' sizes make the microprice (Kalman's).
+    BOOK.tr_id: ("symbol", "received_at", "ask_px_1", "bid_px_1", "ask_qty_1", "bid_qty_1"),
     # The REST book snapshot replaces the integrated book when it is cut by the session limit.
-    BOOK_SNAPSHOT.tr_id: ("symbol", "received_at", "ask_px_1", "bid_px_1"),
+    BOOK_SNAPSHOT.tr_id: ("symbol", "received_at", "ask_px_1", "bid_px_1", "ask_qty_1", "bid_qty_1"),
     # KRX-only trades carry KRX's best quotes, for the 30 seconds before NXT opens; the
     # ETFs' make their bars.
     KRX_TRADE.tr_id: ("symbol", "event_time", "received_at", "price", "qty", "ask1", "bid1"),
@@ -576,6 +579,7 @@ class PredictionEngine:
         name, model = algorithm.name, self.models[algorithm.name]
         made: Mapping[str, Forecast | None] = dict.fromkeys(at_close)  # nothing, unless it finishes
         status = "timed_out"
+        declined: dict[str, Abstention] = {}
         if name not in self._busy:
             vectors = {s: FeatureVector(c.features, algorithm.features) for s, c in at_close.items()}
             started = timer.perf_counter()
@@ -590,16 +594,23 @@ class PredictionEngine:
                 log.error("%s failed at %s: %r", name, bar_close, error, exc_info=error)
                 status = "error"
             else:
-                made, status = work.result(), "ok"
+                result, status = work.result(), "ok"
+                made = {s: f for s, f in result.items() if isinstance(f, Forecast)}
+                declined = {s: f for s, f in result.items() if isinstance(f, Abstention)}
                 elapsed = timer.perf_counter() - started
                 previous = self._cost.get(name)
                 self._cost[name] = (
                     elapsed if previous is None else (1 - _COST_WEIGHT) * previous + _COST_WEIGHT * elapsed
                 )
-        self._record(bar_close, at_close, [(name, model.version, made, status)])
+        entries = [(name, model.version, made, status)] if made else []
+        for why in dict.fromkeys(declined.values()):  # each reason once, in the order met
+            entries.append(
+                (name, model.version, {s: None for s, w in declined.items() if w is why}, why.value)
+            )
+        self._record(bar_close, at_close, entries)
         return name, made
 
-    def _finished_late(self, name: str, work: asyncio.Future[dict[str, Forecast]]) -> None:
+    def _finished_late(self, name: str, work: asyncio.Future[dict[str, Forecast | Abstention]]) -> None:
         self._busy.discard(name)
         if not work.cancelled() and work.exception() is not None:
             log.error("%s failed after its budget: %r", name, work.exception())
@@ -672,11 +683,16 @@ def _with_status(standings: Mapping[str, Standing], status: Status) -> set[str]:
 
 def _predict_symbols(
     algorithm: Algorithm, model: Model, vectors: Mapping[str, FeatureVector]
-) -> dict[str, Forecast]:
-    """Runs in a worker thread: one algorithm on every symbol, each forecast checked."""
-    forecasts = {}
+) -> dict[str, Forecast | Abstention]:
+    """Runs in a worker thread: one algorithm on every symbol, each forecast checked; why,
+    for a symbol it does not predict."""
+    forecasts: dict[str, Forecast | Abstention] = {}
     for symbol, features in vectors.items():
-        f = algorithm.predict(features, model)
+        try:
+            f = algorithm.predict(features, model)
+        except NotPredicted as e:
+            forecasts[symbol] = e.why
+            continue
         probabilities = (f.p_up, f.p_flat, f.p_down)
         distribution = all(0 <= p <= 1 for p in probabilities) and math.isclose(
             sum(probabilities), 1, abs_tol=1e-6

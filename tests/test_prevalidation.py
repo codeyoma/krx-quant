@@ -363,3 +363,17 @@ def test_the_command_reports_a_registry_that_fails_the_registration_check_as_an_
 
     assert main(["prevalidate", "twin"]) == 1
     assert "twin: the same features as contrarian" in capsys.readouterr().err
+
+
+async def test_a_day_with_nothing_the_algorithm_can_learn_from_is_predicted_by_its_defaults(
+    tmp_path: Path,
+) -> None:
+    class Picky(Contrarian):  # learns from nothing it is given (a book algorithm on backfilled days)
+        def fit(self, samples: Sequence[Sample]) -> Model:
+            raise ValueError("no training samples with the book")
+
+    s = settings(tmp_path, DAYS[:2])
+
+    result = await prevalidate(s, "picky", algorithms=[ALPHA, Picky("picky")], now=AFTER)
+
+    assert set(result.models.values()) == {"picky-default"}

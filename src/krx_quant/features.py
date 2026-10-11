@@ -2,7 +2,9 @@
 
 A feature is a function of a ``Snapshot``: the day's finished one-minute bars up to the
 bar close, the reference price there, when the session opened, the bars of the series
-that may lead the symbol (``Leaders``), and the day's macro regime (``macro.py``). Live
+that may lead the symbol (``Leaders``), the microprices of its book at each minute's end
+(recorded days only: backfilled bars have no book, ``BOOK_FEATURES``), its flows, and the
+day's macro regime (``macro.py``). Live
 and replay build snapshots from the engine's Market View; training builds them from
 recorded events through the same view, or from backfilled bars, so a feature means the
 same thing in both. A snapshot holds nothing received after its bar close, so no feature
@@ -73,6 +75,10 @@ class Snapshot:
     regime: str | None = None  # the day's macro regime, decided before the open; None unknown
     flows: Flows = field(default_factory=Flows)
     expiry_days: int | None = None  # trading days to the KOSPI200 options expiry; None unknown
+    # The book's microprice at each minute's end from the open, the last hour of them,
+    # oldest first, since the book last went missing (no update for a minute); empty if it
+    # is missing at the bar close, and on a day with backfilled bars only.
+    microprices: Sequence[float] = ()
 
     @classmethod
     def at(
@@ -88,15 +94,25 @@ class Snapshot:
         regime: str | None = None,
         flows: Flows | None = None,
         expiry_days: int | None = None,
+        microprices: Sequence[float] = (),
     ) -> Snapshot:
         """A snapshot with the tick and flat band of ``price``."""
         lead, known = leaders or {}, flows or Flows()
-        if price is None:
-            return cls(
-                symbol, bar_close, bars, None, None, None, session_open, lead, regime, known, expiry_days
-            )
-        tick, band = tick_size(price), flat_band(price, fee_rate)
-        return cls(symbol, bar_close, bars, price, tick, band, session_open, lead, regime, known, expiry_days)
+        tick, band = (None, None) if price is None else (tick_size(price), flat_band(price, fee_rate))
+        return cls(
+            symbol,
+            bar_close,
+            bars,
+            price,
+            tick,
+            band,
+            session_open,
+            lead,
+            regime,
+            known,
+            expiry_days,
+            microprices,
+        )
 
     @cached_property
     def lead_moves(self) -> dict[str, list[FeatureValue]]:
@@ -262,6 +278,31 @@ def minute_ticks(s: Snapshot) -> Series:
         quiet = (after.start - before.start) // BAR - 1
         moves += [0.0] * quiet + [(after.close - before.close) / s.tick]
     moves += [0.0] * ((s.bar_close - bars[-1].start - BAR) // BAR)  # quiet since the last bar
+    return tuple(moves[-MINUTE_MOVES:])
+
+
+def microprice_ticks(s: Snapshot) -> Series:
+    """The book's microprice at each minute's end, in ticks from the bar close's reference
+    price: the last hour of them since the book last went missing, oldest first. Empty when
+    the book is missing at the bar close (or was never recorded)."""
+    if s.price is None or s.tick is None:
+        return ()
+    return tuple((m - s.price) / s.tick for m in s.microprices)
+
+
+def kospi200f_moves(s: Snapshot) -> Series:
+    """KOSPI200 futures' one-minute moves in basis points of log return, from the open, the
+    last hour of them, oldest first. A minute without a trade is a move of 0, up to the bar
+    close."""
+    front = s.leaders.get("kospi200f", [])
+    bars = [b for b in (front[0] if front else []) if s.session_open is None or b.start >= s.session_open]
+    if not bars:
+        return ()
+    moves: list[float] = []
+    for before, after in zip(bars, bars[1:], strict=False):
+        quiet = (after.start - before.start) // BAR - 1
+        moves += [0.0] * quiet + [1e4 * math.log(after.close / before.close)]
+    moves += [0.0] * ((s.bar_close - bars[-1].start - BAR) // BAR)
     return tuple(moves[-MINUTE_MOVES:])
 
 
@@ -503,6 +544,8 @@ FEATURES: dict[str, Feature] = {
     "vwap_z": vwap_z,
     "reversion_speed": reversion_speed,
     "minute_ticks": minute_ticks,
+    "microprice_ticks": microprice_ticks,
+    "kospi200f_moves": kospi200f_moves,
     "macro_regime": macro_regime,
     "minutes_since_open": minutes_since_open,
     "days_to_expiry": days_to_expiry,
@@ -514,7 +557,10 @@ FEATURES: dict[str, Feature] = {
     **{lead_feature(group, lag): _lead(group, lag) for group in LEAD_GROUPS for lag in LEAD_LAGS},
 }
 LEAD_FEATURES = frozenset(lead_feature(group, lag) for group in LEAD_GROUPS for lag in LEAD_LAGS)
-SERIES_FEATURES = frozenset({"minute_ticks"})  # the features that are series of numbers
+# The features that are series of numbers.
+SERIES_FEATURES = frozenset({"minute_ticks", "microprice_ticks", "kospi200f_moves"})
+# The features from the book: none on a day with backfilled bars only.
+BOOK_FEATURES = frozenset({"microprice_ticks"})
 
 
 class UndeclaredFeature(LookupError):

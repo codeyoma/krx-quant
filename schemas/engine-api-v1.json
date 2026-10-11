@@ -180,7 +180,7 @@
           "description": "null unless the status is ok: only those are scored.",
           "oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]
         },
-        "status": {"enum": ["ok", "timed_out", "error", "vi", "no_members", "none_finished"]},
+        "status": {"enum": ["ok", "timed_out", "error", "vi", "no_book", "no_members", "none_finished"]},
         "p_up": {"$ref": "#/$defs/probability"},
         "p_flat": {"$ref": "#/$defs/probability"},
         "p_down": {"$ref": "#/$defs/probability"},
