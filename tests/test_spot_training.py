@@ -109,6 +109,26 @@ async def test_a_night_s_summary_is_sent_once_whatever_the_restarts(
     assert len(kis.telegram_messages) == 1
 
 
+async def test_a_summary_that_could_not_be_sent_is_sent_on_the_next_wait(
+    tmp_path: Path, kis: FakeKis, alerts: Alerts
+) -> None:
+    store = LocalObjectStore(tmp_path / "store")
+    night_list(tmp_path / "store", finalized=at(NIGHT, "22:10"), promoted={"newton": TRAINED})
+    late = at(MORNING, "08:00")  # past the deadline: no retrying within this wait
+    async with aiohttp.ClientSession() as session:
+        unreachable = Alerts(session, "123:fake", "42", "http://127.0.0.1:9")
+        assert (
+            await await_spot_night(store, CALENDAR, NIGHT, unreachable, lambda: late, tmp_path / "state")
+            is None
+        )
+        await unreachable.close()
+
+    assert await await_spot_night(store, CALENDAR, NIGHT, alerts, lambda: late, tmp_path / "state") is None
+
+    await alerts.close()
+    assert len(kis.telegram_messages) == 1
+
+
 class Flaky(LocalObjectStore):
     """A store that cannot be reached for its first few reads."""
 
@@ -188,11 +208,14 @@ def test_a_spot_run_trains_with_the_server_s_symbols_and_calendar(
 
     publish_training_inputs(LocalObjectStore(store_root), server)
 
-    # The Spot machine knows only the store; its defaults would train 005930, which has no bars.
+    # The Spot machine knows only the store (here from its .env); its defaults would train
+    # 005930, which has no bars.
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("KRX_OBJECT_STORE", str(store_root))
-    monkeypatch.setenv("KRX_STATE_DIR", str(tmp_path / "spot-state"))
-    monkeypatch.delenv("KRX_SYMBOLS", raising=False)
+    (tmp_path / ".env").write_text(
+        f"KRX_OBJECT_STORE={store_root}\nKRX_STATE_DIR={tmp_path / 'spot-state'}\n"
+    )
+    for name in ("KRX_OBJECT_STORE", "KRX_STATE_DIR", "KRX_SYMBOLS"):
+        monkeypatch.delenv(name, raising=False)
     assert main(["train", "--from-store"]) == 0, capsys.readouterr().err
     assert (store_root / f"promotions/{LAST_DAY}.json").exists()
     assert json.loads((tmp_path / "spot-state" / "market_calendar.json").read_text()) == calendar

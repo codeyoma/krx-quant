@@ -73,7 +73,6 @@ class Guarded:
     """A Cost Guard on the faked account, its clock, and the notices it sent."""
 
     def __init__(self, aws: Aws, state: Path) -> None:
-        # Now, as moto stamps the budget's spend when it is made: fresh this month.
         self.at = datetime.now(UTC)
         self.sent: list[str] = []
         self.telegram_down = False
@@ -132,6 +131,25 @@ async def test_at_the_budget_the_spot_training_stops_for_the_month_and_starts_ag
     assert aws.states() == {"ENABLED"}
     assert "다시 켰습니다" in g.sent[-1], g.sent[-1]
     assert len(g.sent) == 4
+    # AWS starts the month again from little: from then on this month's spend counts.
+    aws.spend(0.3)
+    await g.guard.check()
+    aws.spend(55.0)
+    await g.guard.check()
+    assert "$55.00" in g.sent[-1] and "50%" in g.sent[-1], g.sent
+
+
+async def test_months_after_the_budget_was_made_its_spend_still_counts(aws: Aws, tmp_path: Path) -> None:
+    # The budget itself was last edited when the stack was deployed, two months back.
+    g = Guarded(aws, tmp_path / "state")
+    g.next_month()
+    g.next_month()
+    await g.guard.check()
+
+    aws.spend(60.0)
+    await g.guard.check()
+
+    assert any("$60.00" in t and "50%" in t for t in g.sent), g.sent
 
 
 async def test_schedules_a_redeploy_turned_on_while_capped_are_turned_off_again(
@@ -164,7 +182,7 @@ async def test_the_stop_is_told_once_telegram_answers_again(aws: Aws, tmp_path: 
     assert [t for t in g.sent if "닿았습니다" in t], g.sent
 
 
-async def test_schedules_left_off_without_the_guard_s_record_are_turned_on_in_a_new_month(
+async def test_schedules_left_off_without_the_guard_s_record_are_turned_on_again(
     aws: Aws, tmp_path: Path
 ) -> None:
     g = Guarded(aws, tmp_path / "state")
@@ -172,11 +190,18 @@ async def test_schedules_left_off_without_the_guard_s_record_are_turned_on_in_a_
     await g.guard.check()
     (tmp_path / "state" / "cost_guard.json").unlink()  # the state directory was lost
 
+    # A new month, AWS still showing last month's spend: without the record it reads as
+    # this month's, and the training stops again...
     again = Guarded(aws, tmp_path / "state")
     again.next_month()
     await again.guard.check()
+    assert aws.states() == {"DISABLED"}
 
+    # ...until AWS starts the month again from little: a month's spend only grows.
+    aws.spend(0.4)
+    await again.guard.check()
     assert aws.states() == {"ENABLED"}
+    assert "다시 켰습니다" in again.sent[-1], again.sent
 
 
 async def test_a_restarted_server_does_not_tell_again(aws: Aws, tmp_path: Path) -> None:

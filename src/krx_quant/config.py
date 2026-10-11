@@ -186,6 +186,10 @@ class Settings:
         def codes(name: str, default: str) -> tuple[str, ...]:
             return tuple(c.strip() for c in values.get(name, default).split(",") if c.strip())
 
+        if values.get("KRX_COST_BUDGET", "").strip() and not codes("KRX_TRAINING_SCHEDULES", ""):
+            raise SettingsError(
+                "KRX_COST_BUDGET needs KRX_TRAINING_SCHEDULES: the schedules it turns off at the budget"
+            )
         symbols = codes("KRX_SYMBOLS", "005930")
         if not symbols:
             raise SettingsError("KRX_SYMBOLS lists no symbols")

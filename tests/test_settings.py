@@ -36,3 +36,10 @@ def test_the_macro_indicators_are_read_at_07_30_unless_moved_or_off() -> None:
     assert (settings.ecos_api_key, settings.fred_api_key) == ("e", None), "a source without a key is skipped"
     assert settings.regime_rules.shock_vix == 25.0
     assert settings.regime_rules.shock_sox_pct == 3.0
+
+
+def test_a_cost_budget_needs_the_schedules_it_turns_off() -> None:
+    with pytest.raises(SettingsError, match="KRX_TRAINING_SCHEDULES"):
+        Settings.from_env({**KEYS, "KRX_COST_BUDGET": "krx-quant-monthly"}, dotenv_path=None)
+    both = {**KEYS, "KRX_COST_BUDGET": "krx-quant-monthly", "KRX_TRAINING_SCHEDULES": "a,b"}
+    assert Settings.from_env(both, dotenv_path=None).training_schedules == ("a", "b")

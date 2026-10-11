@@ -309,9 +309,9 @@ async def await_spot_night(
 ) -> str | None:
     """Wait for the night of ``day``, trained on EC2 Spot, to leave its promotion list in
     the store, and send its summary once (the Spot run has no Telegram token; a restart
-    waits again but does not send it again): None once it came, or if the Cost Guard turned
-    the Spot training off this month; else, by the deadline, why not. A store that cannot
-    be read is tried again.
+    waits again but does not send it again, unless it could not be sent): None once it came,
+    or if the Cost Guard turned the Spot training off this month; else, by the deadline, why
+    not. A store that cannot be read is tried again.
     """
     deadline = spot_night_deadline(calendar, day)
     while True:
@@ -321,10 +321,14 @@ async def await_spot_night(
             log.warning("could not read the night's promotion list: %s", e)
         else:
             if data is not None:
-                if _summarized(state_dir) != day:
-                    await alerts.deliver(Night.from_dict(data).summary())
+                if _summarized(state_dir) == day:
+                    return None
+                if await alerts.deliver(Night.from_dict(data).summary()):
                     _mark_summarized(state_dir, day)
-                return None
+                    return None
+                if now() >= deadline:
+                    return None  # the night came; its summary waits for a later wait
+                # Not sent (Telegram unreachable): tried again until the deadline.
         if now() >= deadline:
             if training_stopped(state_dir, now()):
                 log.info("no Spot training of %s: turned off for the month's cost cap", day)

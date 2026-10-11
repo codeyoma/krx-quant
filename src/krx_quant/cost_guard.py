@@ -59,6 +59,10 @@ class _Month:
     warned: list[int] = field(default_factory=list)  # the shares told, in percent
     stopped: bool = False  # the Spot schedules are off for the rest of it
     stop_told: bool = False
+    spent: float | None = None  # the latest spend read as this month's
+    # Last month's final spend, while AWS still shows it: a read this high is not this
+    # month's yet (AWS starts each month again from 0 a few hours in).
+    carried: float | None = None
 
 
 class CostGuard:
@@ -88,18 +92,23 @@ class CostGuard:
 
         In a new month the schedules are turned on, whatever the record says (it may be
         lost). While the month is capped they are kept off (a stack deployed again turns
-        them on). A spend AWS last worked out before this month is last month's: nothing
-        is told or stopped on it.
+        them on). Until AWS starts the new month's spend again from little, what it shows
+        is last month's: nothing is told or stopped on it.
         """
-        now = self._now().astimezone(UTC)
-        month = now.strftime("%Y-%m")
+        month = self._now().astimezone(UTC).strftime("%Y-%m")
         state = self.load(self._path)
         if state.month != month:
             if await asyncio.to_thread(self._set_schedules, "ENABLED"):
                 await self._notify(f"새 달({month})이라 밤 학습(Spot) 스케줄을 다시 켰습니다.")
-            state = _Month(month)
+            state = _Month(month, carried=state.spent or None)
             self._save(state)
-        spent, limit = await asyncio.to_thread(self._spend, now.replace(day=1, hour=0, minute=0, second=0))
+        read, limit = await asyncio.to_thread(self._spend)
+        spent: float | None = read
+        if state.carried is not None and read >= state.carried:
+            spent = None  # still last month's
+        else:
+            state.carried, state.spent = None, read
+            self._save(state)
         if spent is not None:
             for share in WARN_AT:
                 if share not in state.warned and spent >= limit * share / 100:
@@ -110,6 +119,15 @@ class CostGuard:
             if not state.stopped and spent >= limit:
                 state.stopped = True
                 self._save(state)
+            elif state.stopped and spent < limit:
+                # A month's spend only grows: the stop was on last month's (a record lost
+                # when AWS still showed it).
+                state.stopped, state.stop_told = False, False
+                self._save(state)
+                if await asyncio.to_thread(self._set_schedules, "ENABLED"):
+                    await self._notify(
+                        f"이달 비용(${spent:.2f})이 상한 아래라 밤 학습(Spot) 스케줄을 다시 켰습니다."
+                    )
         if state.stopped:
             await asyncio.to_thread(self._set_schedules, "DISABLED")
             if not state.stop_told:
@@ -120,16 +138,15 @@ class CostGuard:
                 )
                 self._save(state)
 
-    def _spend(self, month_start: datetime) -> tuple[float | None, float]:
-        """The month's actual spend (None if AWS last worked it out before ``month_start``)
-        and the budget, in dollars."""
+    def _spend(self) -> tuple[float, float]:
+        """The actual spend AWS shows for the budget's period, and the budget, in dollars.
+
+        AWS keeps no time for when it last worked the spend out (``LastUpdatedTime`` is when
+        the budget itself was edited), hence ``carried``.
+        """
         budget = self._budgets.describe_budget(AccountId=self._account, BudgetName=self._budget)["Budget"]
-        limit = float(budget["BudgetLimit"]["Amount"])
-        updated = budget.get("LastUpdatedTime")
-        if updated is not None and updated < month_start:
-            return None, limit
         spent = budget.get("CalculatedSpend", {}).get("ActualSpend", {}).get("Amount", "0")
-        return float(spent), limit
+        return float(spent), float(budget["BudgetLimit"]["Amount"])
 
     def _set_schedules(self, state: str) -> list[str]:
         """Put every schedule in ``state``; the ones that were not."""
@@ -149,7 +166,15 @@ class CostGuard:
         try:
             data = json.loads(path.read_text())
             warned = [int(s) for s in data["warned"]]
-            return _Month(data["month"], warned, bool(data["stopped"]), bool(data.get("stop_told", True)))
+            spent, carried = data.get("spent"), data.get("carried")
+            return _Month(
+                data["month"],
+                warned,
+                bool(data["stopped"]),
+                bool(data.get("stop_told", True)),
+                None if spent is None else float(spent),
+                None if carried is None else float(carried),
+            )
         except (OSError, ValueError, KeyError, TypeError):
             return _Month("")
 

@@ -105,7 +105,8 @@ def from_the_server(settings: Settings) -> Settings:
     if store.digest(TRAINING_CALENDAR_KEY) is not None:
         settings.state_dir.mkdir(parents=True, exist_ok=True)
         store.get(TRAINING_CALENDAR_KEY, settings.state_dir / "market_calendar.json")
-    return Settings.from_env({**os.environ, **published}, None, require_kis=False)
+    # Over the environment and this machine's .env, as the settings were read.
+    return Settings.from_env({**os.environ, **published}, require_kis=False)
 
 
 @dataclass(frozen=True)

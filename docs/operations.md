@@ -198,7 +198,7 @@ curl http://krx-quant:8080/v1/macro
 | `KRX_MIN_SAMPLE` | 200 | 순위와 상태 판정에 필요한 채점 수와 기준 예측과의 짝 수 |
 | `KRX_TRAIN_AT` | `21:30` | 거래일 밤 학습 시각(KST, `HH:MM`). `off`나 빈 값이면 하지 않는다. `KRX_TRAIN_ON=spot`이면 Spot 스케줄(`deploy/training.yaml`의 `TrainAt`)과 같게 둔다 |
 | `KRX_TRAIN_ON` | `server` | 밤 학습을 돌리는 곳(#23). `server`는 이 서버의 별도 프로세스, `spot`은 AWS가 같은 시각에 띄우는 EC2 Spot이다. `spot`이면 서버는 학습에 필요한 설정과 휴장일 달력을 S3(`training/`)에 올리고, 결과를 다음 거래일 07:30까지 기다려 요약을 텔레그램으로 보낸다 |
-| `KRX_COST_BUDGET` | (없음) | 서버가 1시간마다 읽는 AWS Budgets 예산 이름(`krx-quant-monthly`, #23). 이달 비용이 예산의 50%와 80%를 넘으면 한 번씩 알리고, 100%에 닿으면 `KRX_TRAINING_SCHEDULES`를 그달 동안 끈다. 없으면 보지 않는다 |
+| `KRX_COST_BUDGET` | (없음) | 서버가 1시간마다 읽는 AWS Budgets 예산 이름(`krx-quant-monthly`, #23). 이달 비용이 예산의 50%와 80%를 넘으면 한 번씩 알리고, 100%에 닿으면 `KRX_TRAINING_SCHEDULES`를 그달 동안 끈다. 없으면 보지 않는다. 있으면 `KRX_TRAINING_SCHEDULES`도 있어야 한다(없으면 설정 오류) |
 | `KRX_TRAINING_SCHEDULES` | (없음) | 상한에서 끄고 다음 달 1일에 다시 켤 EventBridge Scheduler 스케줄(쉼표로 구분, `krx-quant-training,krx-quant-training-resume`) |
 | `KRX_COST_CHECK_SECONDS` | 3600 | 비용을 읽는 간격(초). 60 이상 |
 | `KRX_IMAGE_REPOSITORY` | (없음) | Spot 학습용 이미지를 올릴 ECR 저장소 URI. 엔진은 읽지 않고 `deploy/push-image.sh`(자동 업데이트가 부른다)만 읽는다. 없으면 올리지 않는다 |
@@ -343,7 +343,8 @@ docker compose exec engine krx-quant rollback granger     # 직전 모델로 되
   - 이달 비용이 50%와 80%를 넘으면 텔레그램으로 한 번씩 알린다.
   - 100%에 닿으면 두 스케줄을 끄고 알린다. 실시간 예측은 계속한다. 그달에는 확인할 때마다 꺼져 있는지 본다. 스택을 다시 배포해 켜져도 다시 끈다.
   - 다음 달 1일(UTC) 첫 확인에서 스케줄을 다시 켜고 알린다. 상태 파일을 잃었어도 켠다.
-  - AWS는 예산의 비용을 하루에 몇 번만 새로 계산하므로, 몇 시간 늦게 반응할 수 있다. 이달에 계산되지 않은 비용(월초의 지난달 값)으로는 알리거나 끄지 않는다.
+  - AWS는 예산의 비용을 하루에 몇 번만 새로 계산하므로, 몇 시간 늦게 반응할 수 있다. 월초에는 몇 시간 동안 지난달 값이 남아 있는데, AWS는 그것이 언제 계산한 값인지 알려 주지 않는다(`LastUpdatedTime`은 예산 자체를 고친 시각이다). 그래서 지난달 마지막으로 읽은 값 이상이 보이는 동안은 지난달 값으로 보고 알리거나 끄지 않는다. 그보다 낮은 값이 한 번 보이면 그때부터 이달 값이다.
+  - 상한으로 끈 달에 이달 비용이 상한 아래로 보이면 다시 켠다. 한 달의 비용은 줄지 않으므로, 그 정지는 지난달 값으로 한 것이다(상태 파일을 잃은 채 월초를 맞은 경우).
   - 비용을 읽지 못하면(권한, 연결) `[장애] AWS 비용을 읽지 못해 상한을 지킬 수 없습니다`를 보내고, 다시 읽히면 `[복구]`를 보낸다.
 - **권한.** 스택은 서버의 IAM 사용자(`krx-quant-engine`)에 정책 하나를 붙인다. 이미지 올리기, 예산 읽기, 두 스케줄 끄고 켜기만 할 수 있다.
 - **예상 비용.** Spot `m6i.large`는 시드니에서 시간당 몇 센트다. 스케줄은 평일마다 두 번 띄운다(재시도는 끝난 밤이면 몇 분). 학습이 하루 30분 안팎이면 월 $1 안팎이다(미확인 ⚠, 첫 달에 Cost Explorer로 확인한다). ECR 저장은 월 $0.1 안팎이다.
@@ -546,8 +547,8 @@ docker compose logs --tail 200 engine
 | `models/history.json` | 설치와 되돌리기 이력. 항목마다 `at`, `algorithm`, `version`(기본 모델이면 `null`), `why`(`fit`, `promotion <날짜>`, `rollback from <버전>`, `installed before`) |
 | `models/applied.json` | `{"night": "<날짜>"}`: 마지막으로 적용한 승격 목록의 밤. 이 밤과 그 전의 목록은 다시 적용하지 않는다 |
 | `training-cache/` | 밤 학습이 Object Store에서 받아 둔 백필 1분봉과 녹화 이벤트의 사본. 키 경로가 같다. 학습이 끝나면 그 밤에 쓴 가장 오래된 날보다 오래된 날짜를 지운다 |
-| `cost_guard.json` | Cost Guard가 이달 한 일(#23): `month`(UTC `YYYY-MM`), `warned`(알린 비율, %), `stopped`(Spot 스케줄을 끔), `stop_told`(끈 것을 알림). 재시작해도 다시 알리지 않으려고 둔다. 잃어도 다음 달 1일에 스케줄을 다시 켠다 |
-| `spot_summarized.json` | `{"night": "<날짜>"}`: 요약을 보낸 마지막 Spot 학습 밤(#23). 재시작해도 같은 요약을 다시 보내지 않는다 |
+| `cost_guard.json` | Cost Guard가 이달 한 일(#23): `month`(UTC `YYYY-MM`), `warned`(알린 비율, %), `stopped`(Spot 스케줄을 끔), `stop_told`(끈 것을 알림), `spent`(이달 값으로 마지막에 읽은 비용), `carried`(지난달 마지막 비용. 이 값 이상이 보이는 동안은 지난달 값으로 본다). 재시작해도 다시 알리지 않으려고 둔다. 잃어도 다음 달 1일에 스케줄을 다시 켠다 |
+| `spot_summarized.json` | `{"night": "<날짜>"}`: 요약을 보낸 마지막 Spot 학습 밤(#23). 재시작해도 같은 요약을 다시 보내지 않는다. 보내지 못한 요약은 적지 않아서, 기한까지 다시 시도하고 다음 기다림(재시작)에도 보낸다 |
 
 > **바뀜** (2026-10-10, #48): 이전에는 `training-cache/`를 자동으로 지우지 않았다 → 지금은 밤마다 오래된 날짜를 지운다. 이유: 녹화 이벤트도 캐시하게 되어 크기가 커졌다.
 

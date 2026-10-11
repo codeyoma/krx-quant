@@ -89,6 +89,8 @@ def test_the_spot_instance_s_start_script_parses(tmp_path: Path) -> None:
     if shutil.which("shellcheck"):
         subprocess.run(["shellcheck", script], check=True)
     text = script.read_text()
+    assert not re.search(r"\$\{[A-Za-z]+(::|\.)", text), "every CloudFormation value is filled in"
+    assert "123456789012.dkr.ecr.ap-southeast-2.amazonaws.com/krx-quant:latest" in text
     assert "trap 'shutdown -h now' EXIT" in text, "it terminates itself however the training ends"
     assert "train --from-store" in text
 
