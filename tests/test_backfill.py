@@ -10,12 +10,14 @@ from typing import Any
 import pyarrow.parquet as pq
 import pytest
 
+from krx_quant import auth
 from krx_quant.backfill import Backfiller, FuturesBars, StockBars, run_backfill
 from krx_quant.contracts import KOSPI200, USD
 from krx_quant.fake_kis import FakeKis
 from krx_quant.feeds.base import KST
 from krx_quant.health import GAP_SCHEMA
 from krx_quant.market_calendar import MarketCalendar
+from krx_quant.ratelimit import RateLimiter
 from krx_quant.recorder import ParquetRecorder
 from tests.kis_rest import (
     FUTURES_BARS,
@@ -53,6 +55,19 @@ def days_with_bars(data_dir: Path, symbol: str | None = None, feed: str = MINUTE
     )
 
 
+def rest_grants(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """When the app key's REST limiter lets each call through from here on, on its own clock."""
+    grants: list[float] = []
+
+    class Recorded(RateLimiter):
+        async def acquire(self) -> float:
+            grants.append(await super().acquire())
+            return grants[-1]
+
+    monkeypatch.setattr(auth, "RateLimiter", Recorded)
+    return grants
+
+
 @pytest.fixture(autouse=True)
 def no_futures_bars_yet(kis: FakeKis) -> None:
     """KIS answers the futures queries with no bars unless a test says otherwise."""
@@ -81,8 +96,9 @@ async def test_the_first_run_fills_a_year_of_minute_bars_for_every_trading_day(
 
 
 async def test_a_day_is_queried_back_from_its_end_120_bars_at_a_time_within_the_rest_limit(
-    kis: FakeKis, tmp_path: Path
+    kis: FakeKis, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    let_through = rest_grants(monkeypatch)
     kis.rest_responses[HOLIDAYS] = holiday_api()
     # 08:00–19:39: six queries a day, the last one short.
     kis.rest_responses[MINUTE_BARS] = minute_bars_api(lambda market, symbol, day: day_bars(day, 700))
@@ -106,8 +122,13 @@ async def test_a_day_is_queried_back_from_its_end_120_bars_at_a_time_within_the_
     ]
     assert one_day == ["235959", "173900", "153900", "133900", "113900", "093900"]
     assert len(requests_for(kis, MINUTE_BARS)) == 5 * 2 * 6
-    times = sorted(t for t, _, path, _ in kis.rest_requests if "/quotations/" in path)
-    assert max(sum(1 for u in times if t <= u < t + 1.0) for t in times) <= 20
+    # The limit is checked on the limiter's own clock, when it let each query go. Arrival times
+    # at the fake KIS add the machine's scheduling delays: one query held up for longer than the
+    # limiter's 0.1 s margin arrives within a second of the next twenty.
+    arrived = sorted(t for t, _, _, _ in kis.rest_requests)
+    assert len(let_through) == len(arrived), "every query went through the limiter"
+    assert all(g <= a for g, a in zip(let_through, arrived, strict=True)), "none arrived before its turn"
+    assert max(sum(1 for u in let_through if t <= u < t + 1.0) for t in let_through) <= 20
 
 
 async def test_filling_the_same_days_again_gives_the_same_bars(kis: FakeKis, tmp_path: Path) -> None:
