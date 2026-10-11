@@ -150,14 +150,20 @@ async def test_probation_ends_after_ten_days_better_than_every_baseline(tmp_path
     for name in ("alpha", "gamma"):
         put_status(db, name, "probation", history[0])
     put_status(db, "beta", "probation", history[-3])  # four days so far
-    put_days(db, history, {"alpha": RIGHT, "gamma": FLAT})
+    # Over always-flat, its weakest baseline, alpha gains 0.25 a day missing the downs and 0.5
+    # right: over the nine days, a mean of 0.3889 and a standard deviation of 0.1318, so a
+    # lower bound of 0.3889 - 2.3060 (t, 8 degrees of freedom) x 0.1318 / 3 = 0.2876.
+    put_days(db, history[:4], {"alpha": MISSES_DOWNS, "gamma": FLAT})
+    put_days(db, history[4:], {"alpha": RIGHT, "gamma": FLAT})
     put_days(db, history[-3:], {"beta": MISSES_DOWNS}, with_baselines=False)
 
     engine = await review_day(db, [ALPHA, BETA, GAMMA])
 
     statuses = await listed(engine)
     assert last_change(statuses["alpha"])[:2] == ("probation", "active")
-    assert "lift" in last_change(statuses["alpha"])[2]
+    assert last_change(statuses["alpha"])[2] == (
+        "10 days on probation; weakest lift low 0.2876 by trading day (9 days scored)"
+    )
     assert statuses["alpha"]["status"]["since"] == "2026-10-12T15:40:00+09:00"
     assert statuses["beta"]["status"]["status"] == "probation"  # too soon
     assert statuses["gamma"]["status"]["status"] == "probation"  # no better than always-flat
@@ -168,6 +174,26 @@ async def test_probation_ends_after_ten_days_better_than_every_baseline(tmp_path
         "beta": "probation",
         "gamma": "probation",
     }
+
+
+async def test_probation_needs_its_lift_day_after_day_not_on_a_few_days(tmp_path: Path) -> None:
+    db = tmp_path / "engine.db"
+    history = weekdays_before(DAY, 9)
+    put_status(db, "alpha", "probation", history[0])
+    # Right on two days, always-flat's calls on the other seven: over always-flat, a gain of
+    # 0.5 on two days and none on the rest. Counted bar close by bar close (72 pairs), its
+    # lower bound is above 0; counted day by day, it is not.
+    put_days(db, history[:7], {"alpha": FLAT})
+    put_days(db, history[7:], {"alpha": RIGHT})
+
+    engine = await review_day(db, [ALPHA])
+
+    assert (await listed(engine))["alpha"]["status"]["status"] == "probation"
+    async with api(engine) as client:
+        board = await get_json(client, "/v1/leaderboard?period=20d")
+    [alpha] = [e for e in board["ranked"] + board["unranked"] if e["algorithm"] == "alpha"]
+    assert alpha["lift"]["low"] > 0
+    assert alpha["lift"]["day_low"] <= 0
 
 
 # Wrong where it matters: down on the ups, up on the downs, flat on the flats. It beats no
@@ -226,7 +252,11 @@ async def test_a_benched_algorithm_recovers_or_after_sixty_days_is_a_retirement_
     engine = await review_day(db, [ALPHA, BETA], notify=outbox)
 
     statuses = await listed(engine)
-    assert last_change(statuses["beta"])[:2] == ("bench", "active")
+    assert last_change(statuses["beta"]) == (
+        "bench",
+        "active",
+        "recovered: weakest lift low 0.5000 by trading day (19 days scored) over the last 20 days",
+    )
     assert statuses["alpha"]["status"]["status"] == "bench"  # retired only by command
     [alert] = outbox.sent
     assert "alpha 은퇴 후보" in alert and "krx-quant retire alpha" in alert
@@ -244,6 +274,26 @@ async def test_a_benched_algorithm_recovers_or_after_sixty_days_is_a_retirement_
             notify=outbox,
         )
     assert len(outbox.sent) == 2
+
+
+async def test_a_benched_algorithm_recovers_only_on_its_lift_day_after_day(tmp_path: Path) -> None:
+    db = tmp_path / "engine.db"
+    days = weekdays_before(DAY, 25)
+    put_status(db, "alpha", "bench", days[0])
+    # Right on the last three days, always-flat's calls before: over the last 20 days (19 of
+    # them scored), its lower bound over always-flat is above 0 bar close by bar close, not
+    # day by day.
+    put_days(db, days[:-3], {"alpha": FLAT})
+    put_days(db, days[-3:], {"alpha": RIGHT})
+
+    engine = await review_day(db, [ALPHA])
+
+    assert (await listed(engine))["alpha"]["status"]["status"] == "bench"
+    async with api(engine) as client:
+        board = await get_json(client, "/v1/leaderboard?period=20d")
+    [alpha] = [e for e in board["ranked"] + board["unranked"] if e["algorithm"] == "alpha"]
+    assert alpha["lift"]["low"] > 0
+    assert alpha["lift"]["day_low"] <= 0
 
 
 async def test_a_status_set_after_the_review_counts_from_the_next_day(tmp_path: Path) -> None:
