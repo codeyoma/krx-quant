@@ -2,7 +2,7 @@
 
 엔진은 1분봉이 마감될 때마다 종목별로 4분 뒤 통합 중간가의 방향을 예측하고, 4분 뒤 채점한다. 결과는 `state/engine.sqlite3`에 저장하고 HTTP JSON API로 보여준다. Fincept 화면은 이 API만 읽는다.
 
-지금은 기준 예측 3종(#9), 알고리즘 Newton(#10), Gauss(#13), Granger(#15), Markov(#14), Kalman(#25), Shannon(#26), Turing(#16, 1분봉 버전), 합의 Condorcet(#18)이 예측한다. Kalman과 Shannon은 사전 검증(#24)을 통과해야 실시간에서 돈다. Poisson(#27)은 계획이다. 화면은 REST로 지금 상태를 읽고, WebSocket 스트림(`/v1/stream`)으로 바뀌는 것을 바로 받는다. 응답 형식은 JSON 스키마 `schemas/engine-api-v1.json`으로 고정한다(아래 "계약").
+지금은 기준 예측 3종(#9), 알고리즘 Newton(#10), Gauss(#13), Granger(#15), Markov(#14), Kalman(#25), Shannon(#26), Poisson(#27), Turing(#16, 1분봉 버전), 합의 Condorcet(#18)이 예측한다. Kalman, Shannon, Poisson은 사전 검증(#24)을 통과해야 실시간에서 돈다. 화면은 REST로 지금 상태를 읽고, WebSocket 스트림(`/v1/stream`)으로 바뀌는 것을 바로 받는다. 응답 형식은 JSON 스키마 `schemas/engine-api-v1.json`으로 고정한다(아래 "계약").
 
 ## 예측
 
@@ -17,7 +17,7 @@
 | `baseline-persist` | 직전 4분(t − 4분 → t) 중간가 변화를 채점과 같은 규칙으로 분류해, 그 방향이 이어진다고 본다. 기대수익은 그 변화의 틱 수다. 중간가를 모르면 보합이다. |
 | `baseline-random` | 그날 이미 채점된 봉의 클래스 비율(각 클래스에 1을 더한 값)대로 무작위로 뽑는다. 종목과 t로 시드를 정해서, 같은 입력이면 늘 같은 값이 나온다. |
 
-- **알고리즘.** 등록된 알고리즘(지금은 `newton`, `gauss`, `granger`, `markov`, `kalman`, `shannon`, `turing`)이 종목마다 예측한다. `kalman`과 `shannon`은 사전 검증을 통과해야 돈다(#24). 규약과 추가 방법은 아래 "알고리즘"에 있다.
+- **알고리즘.** 등록된 알고리즘(지금은 `newton`, `gauss`, `granger`, `markov`, `kalman`, `shannon`, `poisson`, `turing`)이 종목마다 예측한다. `kalman`, `shannon`, `poisson`은 사전 검증을 통과해야 돈다(#24). 규약과 추가 방법은 아래 "알고리즘"에 있다.
   - 알고리즘은 작업 스레드에서 돈다. 그래서 오래 걸려도 녹화를 막지 않는다.
   - 한 봉 마감에 알고리즘 하나가 모든 종목을 예측하는 데 30초(`KRX_ALGORITHM_SECONDS`)를 넘기면, 그 회차는 `status`가 `timed_out`인 빈 예측으로 남고 채점하지 않는다. 그 계산이 끝날 때까지는 다음 회차도 `timed_out`이다.
   - 예외를 던지거나 확률이 분포가 아니면 `error`로 남는다.
@@ -484,11 +484,11 @@ docker compose run --rm --no-deps engine prevalidate <이름> --days 5  # 빨리
 
 ### 피처 (Feature Store)
 
-`features.py`에 이름으로 등록한다. 봉 마감마다 종목별로, 알고리즘들이 선언한 피처를 한 번씩만 계산해 모두에게 같은 값을 준다. 입력은 그날 끝난 1분봉, 봉 마감의 기준가, 그날 개장 시각, 그날 매크로 국면(개장 전에 마지막으로 정한 것, #8), 그날 종목의 흐름(프로그램매매, 외국계 회원사, 투자자별 추정), 매분 끝의 microprice, 호가·체결의 주문 흐름(1호가 OFI, 10단계 잔량, 체결 방향, 거래소별 체결량), 옵션 만기까지 남은 거래일뿐이다. 흐름과 호가·체결은 봉 마감 전에 받은 것만 쓴다. 피처 값은 숫자 하나(모르면 없음)이거나, 숫자의 열이다(`minute_ticks`, `microprice_ticks`, `kospi200f_moves`. 알고리즘은 `FeatureVector.series`로 읽는다). 호가에서 나오는 피처(`microprice_ticks`, `ofi_1`, `ofi_5`, `depth_imbalance`, `BOOK_FEATURES`)와 체결 방향·거래소별 체결에서 나오는 피처(`trade_imbalance`, `trade_entropy`, `nxt_share`)는 녹화된 날에만 값이 있다. 백필에는 호가도 체결 방향도 없다. 1분봉은 통합 체결로 만들어서 NXT 프리마켓(08:00~) 봉도 들어 있다. VWAP 피처는 개장(보통 09:00, 시가 단일가 포함)부터의 봉만 쓴다.
+`features.py`에 이름으로 등록한다. 봉 마감마다 종목별로, 알고리즘들이 선언한 피처를 한 번씩만 계산해 모두에게 같은 값을 준다. 입력은 그날 끝난 1분봉, 봉 마감의 기준가, 그날 개장 시각, 그날 매크로 국면(개장 전에 마지막으로 정한 것, #8), 그날 종목의 흐름(프로그램매매, 외국계 회원사, 투자자별 추정), 매분 끝의 microprice, 호가·체결의 주문 흐름(1호가 OFI, 10단계 잔량, 체결 방향, 거래소별 체결량), 매수·매도 체결의 도착(시각, 방향, 크기), 옵션 만기까지 남은 거래일뿐이다. 흐름과 호가·체결은 봉 마감 전에 받은 것만 쓴다. 피처 값은 숫자 하나(모르면 없음)이거나, 숫자의 열이다(`minute_ticks`, `microprice_ticks`, `kospi200f_moves`. 알고리즘은 `FeatureVector.series`로 읽는다). 호가에서 나오는 피처(`microprice_ticks`, `ofi_1`, `ofi_5`, `depth_imbalance`, `BOOK_FEATURES`)와 체결 방향·거래소별 체결에서 나오는 피처(`trade_imbalance`, `trade_entropy`, `nxt_share`, `*_excitation_*`, `*_arrivals_1`, `TAPE_FEATURES`)는 녹화된 날에만 값이 있다. 백필에는 호가도 체결 방향도 없다. 1분봉은 통합 체결로 만들어서 NXT 프리마켓(08:00~) 봉도 들어 있다. VWAP 피처는 개장(보통 09:00, 시가 단일가 포함)부터의 봉만 쓴다.
 
 엔진은 흐름 피드도 읽는다(#16): 프로그램매매(`H0UNPGM0`의 `net_value`), 회원사(`H0UNMBC0`와 REST 대체 `FHKST01010600`의 `foreign_net_qty`), 외국인·기관 추정 가집계(`HHPTJ04160200`). 프로그램매매와 회원사는 그날 누적값이라, 피처는 봉 마감 전에 받은 마지막 값과 그 5분 전에 받은 값의 차이를 쓴다. 추정 가집계는 시간대별 값이라, 봉 마감 전에 받은 가장 늦은 시간대의 값을 쓴다(외국인·기관 각각 값이 있는 시간대. 시간대 코드가 클수록 늦다고 본다 ⚠ 실측 전). 흐름은 날짜가 바뀌면 처음부터 다시 쌓는다. 백필이 없어 녹화된 날에만 값이 있다.
 
-엔진은 Shannon(#26)을 위해 통합 체결의 체결 방향(`side`), NXT 전용 체결(`H0NXCNT0`)의 수량, 통합 호가의 10단계 잔량도 읽는다.
+엔진은 Shannon(#26)을 위해 통합 체결의 체결 방향(`side`), NXT 전용 체결(`H0NXCNT0`)의 수량, 통합 호가의 10단계 잔량도 읽는다. Poisson(#27)도 통합 체결의 체결 방향과 수량을 쓴다.
 
 엔진은 체결 피드로만 1분봉을 만든다: 종목은 통합 체결(`H0UNCNT0`), ETF는 KRX 전용 체결(`H0STCNT0`), 선행 시리즈는 선물·지수·미국 주간거래 피드다(지수는 REST 대체 `FHPUP02100000`도 읽는다). 세션 한도로 잘려 종목이나 ETF의 체결이 REST 시세(`FHKST01010100`)로 바뀌면 엔진은 그 시세를 읽지 않는다. 그러면 그 종목의 1분봉과 피처가 비고, ETF 묶음(`lead_etfs_*`)은 값이 없다. Granger는 그만큼 예측 폭을 넓힌다(PR #44 "Known limits"). 3종목 기본 계획(38건)에서는 잘리지 않는다.
 
@@ -511,6 +511,8 @@ docker compose run --rm --no-deps engine prevalidate <이름> --days 5  # 빨리
 | `depth_imbalance` | 봉 마감 직전 호가의 10단계 잔량 (매수 합 − 매도 합) ÷ (둘의 합). 봉 마감에 호가가 비어 있으면 값이 없다(#26). |
 | `trade_imbalance` | 최근 5분(개장부터) 통합 체결의 (매수 체결량 − 매도 체결량) ÷ 둘의 합. 체결 방향(`side`)이 `buy`·`sell`인 체결만 센다. 없으면 값이 없다(#26). |
 | `trade_entropy` | 같은 5분 체결 방향(건수)의 Shannon 엔트로피(비트): 한쪽뿐이면 0, 반반이면 1. 없으면 값이 없다(#26). |
+| `buy_excitation_10`, `buy_excitation_60`, `sell_excitation_10`, `sell_excitation_60` | 개장부터 봉 마감 전에 받은 매수(매도) 시장가 체결마다 크기 ÷ 그날(개장부터) 평균 체결 크기를 e^(−경과초 ÷ 10 또는 60)로 줄여 더한 값(Hawkes 흥분). 체결 방향은 통합 체결의 `side`다. 600초보다 오래된 체결은 뺀다(60초 감쇠에서 e^−10 미만). 그날 방향이 있는 체결을 받기 전에는 값이 없다(#27). |
+| `buy_arrivals_1`, `sell_arrivals_1` | 최근 1분(개장부터)의 매수(매도) 시장가 체결 크기 ÷ 그날 평균 체결 크기의 합. 값이 없는 경우는 위와 같다(#27). |
 | `nxt_share` | 최근 5분(개장부터) KRX 전용 체결(`H0STCNT0`)과 NXT 전용 체결(`H0NXCNT0`) 수량 중 NXT의 비중. 그날 두 거래소 중 하나라도 아직 체결을 받지 못했으면(피드가 없음: `KRX_VENUE_TRADES` 꺼짐, 세션 한도로 잘림) 값이 없다. 5분 동안 둘 다 체결이 없어도 값이 없다(#26). |
 | `macro_regime` | 그날 개장 전에 마지막으로 정한 매크로 국면(`shock` 0, `risk_off` 1, `risk_on` 2, `neutral` 3). 개장 전에 정한 국면이 없거나 엔진이 모르는 이름이면 값이 없다. 개장 뒤의 `krx-quant macro`는 바꾸지 않는다. |
 | `minutes_since_open` | 개장부터 봉 마감까지의 분(시간대). |
@@ -535,7 +537,7 @@ docker compose run --rm --no-deps engine prevalidate <이름> --days 5  # 빨리
 > **바뀜** (2026-10-10, #48): 이전에는 모든 날을 백필 1분봉과 종가 기준으로 학습했다 → 지금은 녹화된 날을 녹화 이벤트와 중간가로 학습한다. 이유: 종가의 bid-ask bounce 때문에 되돌림을 실제보다 크게 배울 수 있었다(2026-10-08 첫 학습의 Granger `return_1 = −0.335`). 또 지수·미국 주간거래 묶음은 백필이 없어 계수가 늘 0이었다.
 
 ```bash
-uv run krx-quant fit newton            # 알고리즘의 training_days(Newton, Gauss, Granger, Markov, Kalman, Shannon 20일, Turing 60일)만큼
+uv run krx-quant fit newton            # 알고리즘의 training_days(Newton, Gauss, Granger, Markov, Kalman, Shannon, Poisson 20일, Turing 60일)만큼
 uv run krx-quant fit gauss
 uv run krx-quant fit granger
 uv run krx-quant fit markov
@@ -638,10 +640,27 @@ uv run krx-quant fit newton --days 60
 - 파라미터 이름은 `penalty`, `mean.<입력>`, `sd.<입력>`, `w.<클래스>.<입력>`, `bias.<클래스>`, `move.<클래스>`다(클래스: `up`, `flat`, `down`). 모델 버전은 `shannon-<마지막 학습일>-<해시>`다.
 - 사전 검증(#24)을 통과해야 돈다. 녹화가 10거래일 쌓여야 통과할 수 있다.
 
+### Poisson
+
+쏠림 감지다(#27, `algorithms/poisson/`). 매수·매도 시장가 체결의 도착을 이산화한 Hawkes 과정(자기흥분 점과정)으로 본다.
+- 체결마다 크기(그날 평균 대비)만큼 자기 쪽과 반대쪽을 흥분시키고, 흥분은 감쇠 시간 10초·60초의 지수로 줄어든다. 피처는 봉 마감에서의 흥분 4개와 최근 1분의 도착 2개다(`*_excitation_*`, `*_arrivals_1`, 모두 고유 피처).
+- 강도: 매수·매도 쪽마다 다음 4분의 도착 기댓값 = 기준 강도(`base.<쪽>`) + 흥분 4개 × 계수(`excite.<쪽>.<흥분>`). 계수는 0 이상이다(자기·교차 흥분).
+- 예측: 봉 마감의 흥분으로 4분 동안의 매수·매도 도착 기댓값을 내고, 쏠림 = (매수 − 매도) ÷ (매수 + 매도)를 순서형 로지스틱으로 바꾼다: P(상승) = σ(k·쏠림 − c), P(하락) = σ(−k·쏠림 − c), 나머지가 보합. 기대수익은 클래스별 평균 움직임(`move.*`)을 확률로 가중한 값이다.
+- 그날 방향이 있는 체결을 아직 받지 못했으면(흥분을 모름) 세 확률이 같다.
+- 학습: 최근 20거래일의 녹화된 날로 한다.
+  - 표본마다 다음 4분의 도착(1·2·3·4분 뒤 표본의 `*_arrivals_1` 합)을 선형 강도의 Poisson 과정의 도착으로 보고, 우도를 최대로 하는 기준 강도와 흥분 계수를 EM으로 구한다(쪽마다 따로, 최대 1000번). 도착은 정수 건수가 아니라 크기 가중이라 엄밀히는 준-Poisson 우도다. 4분이 다 있는 표본만 쓴다.
+  - 그다음 기울기 k(0.5–16)와 문턱 c(0–3)를 격자에서 로그손실이 가장 작은 것으로 고른다(같으면 완만한 쪽, 낮은 문턱).
+  - 방향이 있는 체결이 없으면 학습하지 않는다(`NothingToLearn`).
+- 기본값(학습 전): 기준 강도 4(1분에 하나), 흥분 계수 0, k 1, c 1.
+- 파라미터 이름은 `base.<쪽>`, `excite.<쪽>.<흥분 피처>`, `slope`, `cut`, `move.<클래스>`다(쪽: `buy`, `sell`). 모델 버전은 `poisson-<마지막 학습일>-<해시>`다.
+- 시간 예산: 예측은 숫자 몇 개의 계산이다. 재생 테스트에서 봉 마감당 0.1초 안이다(엔진이 잰 시간). 흥분과 도착은 Market View가 그날 방향이 있는 체결을 압축 배열(체결당 17바이트)로 들고 봉 마감마다 계산하고, 피처 저장소가 그날 평균 크기로 나눈다. 이 시간은 알고리즘의 예산에 들지 않는다.
+- 사전 검증(#24)을 통과해야 돈다.
+- 설계(design.md 7.1)의 "Hawkes 과정"은 감쇠 시간을 고정한 이산화로 했다. 체결 하나하나를 피처로 넘기면 밤 학습의 표본 메모리가 2GB 서버를 넘기 때문이다(사용자와 정함).
+
 ### Turing
 
 만능 학습이다(#16, `algorithms/turing/`, 1분봉 버전). LightGBM 그래디언트 부스팅 트리로 4분 뒤 상승·보합·하락을 분류한다.
-- 피처: 피처 저장소의 숫자 피처(다른 알고리즘의 피처 포함)와 고유 피처 4개다. 예측은 모델의 트리가 학습한 피처 이름 순서대로 값을 넣는다. 그래서 나중에 피처가 더해져도 예전 모델은 자기 피처로 계속 예측한다. 고유 피처는 `minutes_since_open`, `days_to_expiry`, `investor_foreign`, `investor_institution`이다. 호가·체결 피처(`BOOK_FEATURES`, `TAPE_FEATURES`: Shannon의 6개)는 아직 읽지 않는다. 녹화가 10거래일 쌓인 뒤 #55에서 Turing의 호가 피처와 함께 더한다. 열 피처(`minute_ticks`, `microprice_ticks`, `kospi200f_moves`)는 쓰지 않는다. 모든 피처를 읽으므로 등록 순서의 맨 끝에 둔다(나중 알고리즘의 고유 피처를 먼저 쓰면 등록이 거부된다).
+- 피처: 피처 저장소의 숫자 피처(다른 알고리즘의 피처 포함)와 고유 피처 4개다. 예측은 모델의 트리가 학습한 피처 이름 순서대로 값을 넣는다. 그래서 나중에 피처가 더해져도 예전 모델은 자기 피처로 계속 예측한다. 고유 피처는 `minutes_since_open`, `days_to_expiry`, `investor_foreign`, `investor_institution`이다. 호가·체결 피처(`BOOK_FEATURES`, `TAPE_FEATURES`: Shannon의 6개, Poisson의 6개)는 아직 읽지 않는다. 녹화가 10거래일 쌓인 뒤 #55에서 Turing의 호가 피처와 함께 더한다. 열 피처(`minute_ticks`, `microprice_ticks`, `kospi200f_moves`)는 쓰지 않는다. 모든 피처를 읽으므로 등록 순서의 맨 끝에 둔다(나중 알고리즘의 고유 피처를 먼저 쓰면 등록이 거부된다).
 
   > **바뀜** (2026-10-11, #59): 고유 피처 6개 → 4개. `program_net`, `member_foreign_net`은 고유에서 빠지고 공유 피처로 계속 읽는다. 이유: 스펙대로 Shannon(#26)이 프로그램매매·회원사 흐름을 쓰는데, Shannon이 먼저 등록되므로 Turing의 고유 피처로 두면 등록이 거부된다(사용자와 정함).
 
@@ -651,7 +670,7 @@ uv run krx-quant fit newton --days 60
 - 학습 전(기본 모델)에는 트리가 없어서 세 확률이 같다(1/3).
 - 모델은 숫자 파라미터 말고도 트리 전체를 텍스트로 가진다(`blob`). `state/models/turing.json`, 모델 이력, S3의 모델 파일에는 들어가고, 엔진 API(`/v1/algorithms`)에는 나오지 않는다. 버전 해시에 트리도 들어간다.
 - 모델 버전은 `turing-<마지막 학습일>-<해시>`다.
-- 호가·체결 피처(10단계 호가 등, Shannon의 피처 포함)는 녹화가 10거래일 쌓인 뒤 따로 더한다(#55). 사전 검증을 거치지 않는 Turing이 검증 전의 피처를 먼저 실시간에 쓰지 않게 하려는 것이다.
+- 호가·체결 피처(10단계 호가 등, Shannon과 Poisson의 피처 포함)는 녹화가 10거래일 쌓인 뒤 따로 더한다(#55). 사전 검증을 거치지 않는 Turing이 검증 전의 피처를 먼저 실시간에 쓰지 않게 하려는 것이다.
 - 등록 순서의 맨 끝이라 CPU 예산이 모자라면 가장 먼저 건너뛴다.
 - 모델 파일이 크다(트리 텍스트, 학습 표본 3,000개에 약 1MB).
 - 실행 환경: LightGBM은 OpenMP가 필요하다. 서버 이미지에는 `libgomp1`을 넣었다. 맥에서 테스트하려면 `brew install libomp`가 필요하다.

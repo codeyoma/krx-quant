@@ -29,6 +29,7 @@ from krx_quant.algorithms.granger import Granger
 from krx_quant.algorithms.kalman import Kalman
 from krx_quant.algorithms.markov import Markov
 from krx_quant.algorithms.newton import Newton
+from krx_quant.algorithms.poisson import Poisson
 from krx_quant.algorithms.shannon import Shannon
 from krx_quant.algorithms.turing import Turing
 from krx_quant.features import FEATURES
@@ -66,10 +67,11 @@ def register(algorithms: Sequence[Algorithm]) -> tuple[Algorithm, ...]:
 
 # Turing reads every feature in the Feature Store, so it comes last: an algorithm's own
 # features must be added before it, or Turing's taking them refuses it. Being last, it is
-# also the first skipped when the CPU budget runs short. Kalman (#25) and Shannon (#26) were
-# registered after pre-validation existed: the engine starts each once it has passed.
+# also the first skipped when the CPU budget runs short. Kalman (#25), Shannon (#26) and
+# Poisson (#27) were registered after pre-validation existed: the engine starts each once
+# it has passed.
 ALGORITHMS: tuple[Algorithm, ...] = register(
-    [Newton(), Gauss(), Granger(), Markov(), Kalman(), Shannon(), Turing()]
+    [Newton(), Gauss(), Granger(), Markov(), Kalman(), Shannon(), Poisson(), Turing()]
 )
 
 __all__ = [

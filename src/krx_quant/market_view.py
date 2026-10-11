@@ -2,12 +2,12 @@
 
 The predicted symbols' one-minute bars and reference prices (``reference``), the bars of
 the series that may lead them (``features.Leaders``: futures, indices, US daytime trades,
-ETFs), each by exchange time, as they stood at each bar close, the symbols' microprices at
-each minute's end and order flow (the integrated book's best quotes and ten levels, the
-trades' aggressor sides, the per-venue trades), and their flows (program trading, foreign
-member firms, investor estimates), as received before it. The engine predicts
-from it, live and in replay; training on a recorded day feeds the same events through it,
-so it learns from exactly what the engine saw.
+ETFs), each by exchange time, as they stood at each bar close; the symbols' microprices at
+each minute's end, order flow (the integrated book's best quotes and ten levels, the
+trades' aggressor sides, the per-venue trades), trade arrivals and flows (program trading,
+foreign member firms, investor estimates), as received before it. The engine predicts from
+it, live and in replay; training on a recorded day feeds the same events through it, so it
+learns from exactly what the engine saw.
 
 A bar close's bars are kept when the first event received at or after it arrives, before
 that event changes them: a prediction made late never sees a trade it could not have.
@@ -16,17 +16,23 @@ that event changes them: a prediction made late never sees a trade it could not 
 from __future__ import annotations
 
 import bisect
+from array import array
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta
 from typing import Any, NamedTuple
 
+import numpy as np
+
 from krx_quant.contracts import KOSPI200, USD, days_to_expiry
 from krx_quant.features import (
+    EXCITATION_SECONDS,
     FLOW_MINUTES,
     MINUTE_MOVES,
     OFI_MINUTES,
+    SIDES,
     TRADE_MINUTES,
+    Arrivals,
     Flows,
     Leaders,
     OrderFlow,
@@ -273,6 +279,62 @@ class _Book:
         return imbalance, size / updates if updates else None
 
 
+class _Arrivals:
+    """A symbol's buy- and sell-initiated trades of the day by receipt time, compact (17 bytes
+    a trade): a liquid symbol has many thousands a day."""
+
+    # Older trades are left out of the decayed sizes: they weigh under e^(−10) of their size
+    # at the longest decay.
+    _REACH = 10 * max(EXCITATION_SECONDS)
+    _RECENT = 60  # seconds: the last minute's arrivals
+
+    def __init__(self) -> None:
+        self._day: date | None = None
+        self._reset()
+
+    def _reset(self) -> None:
+        self._at = array("d")  # seconds since the epoch
+        self._buy = array("b")  # 1 bought (buy-initiated), 0 sold
+        self._total = array("d")  # running total of the sizes
+
+    def add(self, at: datetime, side: str, size: float) -> None:
+        day = kst_day(at)
+        if day != self._day:
+            self._day = day
+            self._reset()
+        t = at.timestamp()
+        if self._at and t < self._at[-1]:
+            t = self._at[-1]  # the engine only ever moves forward
+        self._at.append(t)
+        self._buy.append(1 if side == "buy" else 0)
+        self._total.append((self._total[-1] if self._total else 0.0) + size)
+
+    def before(self, opened: datetime, close: datetime) -> Arrivals:
+        """The trades received from ``opened`` to just before ``close``, as ``Arrivals``."""
+        if self._day != kst_day(close):
+            return Arrivals()
+        end = close.timestamp()
+        lo, hi = bisect.bisect_left(self._at, opened.timestamp()), bisect.bisect_left(self._at, end)
+        if hi <= lo:
+            return Arrivals()
+        mean = (self._total[hi - 1] - (self._total[lo - 1] if lo else 0.0)) / (hi - lo)
+        if mean <= 0:
+            return Arrivals()
+        first = max(lo, bisect.bisect_left(self._at, end - self._REACH))
+        age = end - np.frombuffer(self._at[first:hi])
+        totals = np.frombuffer(self._total[max(first - 1, 0) : hi])
+        size = np.diff(totals, prepend=0.0) if first == 0 else np.diff(totals)
+        buy = np.frombuffer(self._buy[first:hi], dtype=np.int8).astype(bool)
+        recent = age <= self._RECENT
+        decayed: dict[tuple[str, int], float] = {}
+        last: dict[str, float] = {}
+        for side, mask in zip(SIDES, (buy, ~buy), strict=True):
+            for seconds in EXCITATION_SECONDS:
+                decayed[(side, seconds)] = float((size[mask] * np.exp(-age[mask] / seconds)).sum())
+            last[side] = float(size[mask & recent].sum())
+        return Arrivals(mean, decayed, last)
+
+
 class _Sides(NamedTuple):
     """Trades by aggressor: how many, and their volume."""
 
@@ -314,6 +376,7 @@ class MarketView:
         self._sides = {s: _Running(len(_Sides._fields), trades) for s in self.symbols}
         self._venues = {s: _Running(len(VENUES), trades) for s in self.symbols}  # volume by venue
         self._traded: dict[tuple[str, str], date] = {}  # (symbol, venue): the last day it traded
+        self._arrivals = {s: _Arrivals() for s in self.symbols}
         self._expiry: dict[date, int] = {}
 
     def on_event(self, feed: str, row: dict[str, Any]) -> None:
@@ -343,8 +406,10 @@ class MarketView:
             qty = float(row["qty"] or 0)
             if row.get("side") == "buy":
                 self._sides[symbol].add(received_at, _Sides(1.0, 0.0, qty, 0.0))
+                self._arrivals[symbol].add(received_at, "buy", qty)
             elif row.get("side") == "sell":
                 self._sides[symbol].add(received_at, _Sides(0.0, 1.0, 0.0, qty))
+                self._arrivals[symbol].add(received_at, "sell", qty)
         elif feed == KRX_TRADE.tr_id:
             self._reference.quote(symbol, Source.KRX, received_at, row["bid1"], row["ask1"])
             self._venue_trade(symbol, "KRX", row)
@@ -392,7 +457,15 @@ class MarketView:
             expiry_days=self._expiry[day],
             microprices=self.microprices(symbol, frozen.close),
             order_flow=self.order_flow(symbol, frozen.close),
+            arrivals=self.arrivals(symbol, frozen.close),
         )
+
+    def arrivals(self, symbol: str, at: datetime) -> Arrivals:
+        """``symbol``'s buy- and sell-initiated trades received before ``at``, from the open."""
+        session = self.calendar.session(kst_day(at))
+        if symbol not in self._arrivals or session is None:
+            return Arrivals()
+        return self._arrivals[symbol].before(session.open, at)
 
     def order_flow(self, symbol: str, at: datetime) -> OrderFlow:
         """``symbol``'s book and trades received in the minutes before ``at``, from the open.
