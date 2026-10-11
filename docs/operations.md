@@ -247,6 +247,16 @@ Docker 이미지는 `TZ=Asia/Seoul`, `KRX_DATA_DIR=/data`, `KRX_STATE_DIR=/state
    du -sh data/*/date=2026-10-12
    ```
 5. 잰 값은 `docs/design.md` 13장(확인 필요 항목)에 적는다.
+6. **REST 대체 조회**를 장중(09:00–15:20)에 한 번 확인한다(#28). 한도로 잘린 구독을 대신하는 REST 조회를 하나씩 한 번 부르고, 기록할 이벤트를 출력한다. REST만 써서 엔진을 멈추지 않아도 된다.
+   ```bash
+   docker compose run --rm engine check-fallbacks
+   ```
+   - 마지막 줄이 `N of N fallbacks answered`이고 종료 코드가 0인지 본다. 실패한 줄(`failed: ...`)은 그 조회와 이유를 보여 준다.
+   - [kis-feeds.md](kis-feeds.md#rest-대체-조회)의 ⚠ 항목을 확인한다.
+     - 달러선물 `CF` 줄이 실패하지 않는지 본다.
+     - 옵션 줄의 `price`가 옵션 가격으로 보이는지 본다.
+     - 프로그램매매 줄의 `net_value`를 같은 시각 `events/feed=H0UNPGM0`의 실시간 값과 견줘 금액 단위를 확인한다.
+   - 확인한 내용은 kis-feeds.md에 적고 ⚠를 지운다.
 
 ## 3. 매일 일어나는 일
 

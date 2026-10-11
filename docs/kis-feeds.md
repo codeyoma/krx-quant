@@ -6,20 +6,23 @@
 
 WebSocket 구독은 아래 순서대로 보낸다. 세션 한도를 넘는 구독은 뒤에서부터 잘린다.
 - 잘린 피드 중 REST 대체가 있는 것은 REST 조회로 바뀐다(기본 5초 간격, `KRX_FALLBACK_POLL_SECONDS`).
-- REST 대체가 없는 것은 오류 로그만 남긴다.
+- REST 대체가 없는 것(주식의 거래소별 체결)은 오류 로그만 남긴다.
+- 프로그램매매, 선물, 달러선물, 미국 주간거래, 옵션의 REST 대체는 그 피드를 **대신한다**. 이벤트를 대신하는 WebSocket 피드의 이름(예: `events/feed=H0IFCNT0`)과 스키마로 기록하고, 엔진도 그 이름으로 읽는다. 응답 원문은 REST TR 이름(`raw/feed=FHMIF10000000`)에 남는다. 응답이 바뀔 때만 기록한다(같은 응답이 다시 오면 raw와 events 모두 남기지 않는다). 자세한 내용은 아래 "REST 대체 조회"에 있다.
+- 체결, 호가, 회원사, 업종지수의 REST 대체는 전처럼 REST TR 이름으로 매번 기록한다.
+- `krx-quant check-fallbacks`는 계획의 REST 대체를 하나씩 한 번 조회해, 기록할 이벤트나 실패 이유를 보여 준다. 기록은 하지 않는다. REST만 쓰므로 수집기가 도는 중에 실행해도 된다.
 - 시장 전체 맥락(선물, 미국)을 맨 앞에 둬서, 종목을 늘려도 잘리지 않게 했다.
 
 | 순서 | 피드 | TR | 키 | 3종목 기준 건수 | REST 대체 |
 |---|---|---|---|---|---|
-| 1 | KOSPI200 선물 체결 | `H0IFCNT0` | 최근월물 코드(예: `A01612`) | 1 | 없음 |
-| 2 | 달러선물 체결 | `H0CFCNT0` | 최근월물 코드(예: `A75610`) | 1 | 없음 |
-| 3 | 미국 주간거래 체결 | `HDFSCNT0` | `RBAQ` + 티커(예: `RBAQNVDA`) | 3 | 없음 |
+| 1 | KOSPI200 선물 체결 | `H0IFCNT0` | 최근월물 코드(예: `A01612`) | 1 | `FHMIF10000000` 선물옵션 시세(`F`) |
+| 2 | 달러선물 체결 | `H0CFCNT0` | 최근월물 코드(예: `A75610`) | 1 | `FHMIF10000000` 선물옵션 시세(`CF`) ⚠ |
+| 3 | 미국 주간거래 체결 | `HDFSCNT0` | `RBAQ` + 티커(예: `RBAQNVDA`) | 3 | `HHDFS00000300` 해외주식 현재체결가 |
 | 4 | 통합 체결 | `H0UNCNT0` | 종목코드 | 3 | `FHKST01010100` 주식현재가 시세 |
 | 4 | 통합 호가 | `H0UNASP0` | 종목코드 | 3 | `FHKST01010200` 호가/예상체결 |
-| 4 | 프로그램매매(통합) | `H0UNPGM0` | 종목코드 | 3 | 없음 |
+| 4 | 프로그램매매(통합) | `H0UNPGM0` | 종목코드 | 3 | `FHPPG04650101` 종목별 프로그램매매추이(체결) |
 | 5 | 회원사(통합) | `H0UNMBC0` | 종목코드 | 3 | `FHKST01010600` 주식현재가 회원사 |
 | 6 | 업종지수 | `H0UPCNT0` | 업종코드 `0001`, `2001`, `0013` | 3 | `FHPUP02100000` 국내업종 현재지수 |
-| 7 | KOSPI200 옵션 체결(IV 포함) | `H0IOCNT0` | 최근 만기 ATM ±2 행사가 콜·풋 | 10 | 없음 |
+| 7 | KOSPI200 옵션 체결(IV 포함) | `H0IOCNT0` | 최근 만기 ATM ±2 행사가 콜·풋 | 10 | `FHMIF10000000` 선물옵션 시세(`O`) |
 | 8 | KRX 상장 미국 지수 ETF 체결(KRX 전용) | `H0STCNT0` | `133690`(TIGER 미국나스닥100), `381180`(TIGER 미국필라델피아반도체나스닥) | 2 | `FHKST01010100`(`J`) |
 | 9 | KRX 전용 체결 | `H0STCNT0` | 종목코드 | 3 | 없음 |
 | 9 | NXT 전용 체결 | `H0NXCNT0` | 종목코드 | 3 | 없음 |
@@ -28,7 +31,9 @@ WebSocket 구독은 아래 순서대로 보낸다. 세션 한도를 넘는 구�
 - 종목을 하나 늘릴 때마다 6건이 늘어나서, 4종목부터는 거래소별 체결이 뒤에서부터 잘린다.
 - REST 대체 조회는 통합 시장 코드(`FID_COND_MRKT_DIV_CODE=UN`)를 쓴다. 2026-10-08 실측에서 `UN` 누적 거래량이 `J`(KRX)와 `NX`(NXT)의 합과 같았다.
 - ETF만 KRX 시장 코드(`J`)로 조회한다. ETF는 NXT에서 거래되지 않는다(아래 피드별 메모).
-- 프로그램매매, 선물, 미국 주식, 옵션, 주식의 거래소별 체결은 아직 REST 대체가 없다. 주식의 KRX 전용 체결을 `J`로 조회하면 통합(`UN`) 조회와 같은 파티션(`feed=FHKST01010100/symbol=<종목>`)에 섞여서 붙이지 않았다.
+- 주식의 거래소별 체결(`H0STCNT0`, `H0NXCNT0`)은 REST 대체가 없다. 주식의 KRX 전용 체결을 `J`로 조회하면 통합(`UN`) 조회와 같은 파티션(`feed=FHKST01010100/symbol=<종목>`)에 섞여서 붙이지 않았다.
+
+  > **바뀜** (2026-10-11, #65): 프로그램매매, KOSPI200 선물, 달러선물, 미국 주간거래, 옵션은 REST 대체가 없어서, 한도로 잘리면 오류 로그만 남고 기록되지 않았다 → 아래 "REST 대체 조회"로 대신 기록한다. 이유: 3종목 기본 계획(38건)에서는 잘리지 않지만, 종목을 늘리거나 실제 한도가 더 작으면 이 피드들이 빠졌다(#3 리뷰, #28).
 
 항상 REST로 조회하는 피드:
 
@@ -44,6 +49,68 @@ WebSocket 구독은 아래 순서대로 보낸다. 세션 한도를 넘는 구�
 - 장 마감 뒤 시장 전체 조회에는 19:59의 VI도 있었다. KRX 애프터마켓에도 VI가 걸린다.
 - **VI가 걸려 있는 동안 응답이 어떤지는 아직 보지 못했다 ⚠.** `vi_cls_code`가 `N`이 아닌 값이고 `vi_cncl_hour`가 비어 있을 것으로 보고 처리한다. 첫 VI가 걸린 날 확인한다.
 - 구독 대신 REST로 받는다. 장운영정보(`H0UNMKO0`)에도 `VI_CLS_CODE`가 있지만, 구독 3건이 더 들어 한도 41건을 다 쓰고, 값의 뜻도 실측이 필요하다. REST는 발동과 해제 시각을 정확히 준다. 대신 최대 5초 늦게 안다.
+
+## REST 대체 조회
+
+한도로 잘린 WebSocket 구독을 대신하는 REST 조회다. 프로그램매매, 선물, 달러선물, 미국 주간거래, 옵션의 대체 조회를 여기에 적는다(#28). TR, 경로, 파라미터, 응답 필드는 [koreainvestment/open-trading-api](https://github.com/koreainvestment/open-trading-api)의 `examples_llm` 예제(2026-10-11에 확인)에서 가져왔다. 장중 실데이터로는 아직 확인하지 못했다 ⚠. `krx-quant check-fallbacks`로 확인한다.
+
+공통 규칙:
+- 이벤트는 대신하는 WebSocket 피드의 이름과 스키마로 기록한다. 그래서 엔진, 재생, 학습, 사이드카 판정이 고칠 것 없이 그대로 읽는다.
+- 응답에 시각이 없으면 `event_time`에 수신 시각(초 단위)을 쓴다.
+- 응답에 없는 값은 비워 둔다(null). 0으로 두지 않는다. 체결 하나의 수량, 호가 등이 그렇다.
+- 응답이 바뀔 때만 기록한다. WebSocket 피드는 새 체결이나 변화가 있을 때만 보낸다. 반면 이 응답들은 대개 시각이 없어서, 같은 응답을 다시 기록하면 새 소식처럼 보인다.
+
+### 프로그램매매: `FHPPG04650101` 종목별 프로그램매매추이(체결)
+
+- 대신하는 피드: `H0UNPGM0`. 예제: `examples_llm/domestic_stock/program_trade_by_stock`.
+- 경로: `/uapi/domestic-stock/v1/quotations/program-trade-by-stock`.
+- 파라미터: `FID_COND_MRKT_DIV_CODE`(`J` KRX, `NX` NXT, `UN` 통합), `FID_INPUT_ISCD`(종목코드). 실시간 피드처럼 통합(`UN`)으로 조회한다.
+- 응답: `output`은 행 목록이다. 각 행의 필드:
+  - `bsop_hour`(영업 시간), `stck_prpr`, `prdy_vrss`, `prdy_vrss_sign`, `prdy_ctrt`, `acml_vol`;
+  - `whol_smtn_seln_vol`, `whol_smtn_shnu_vol`, `whol_smtn_ntby_qty`: 전체 합계 매도·매수 거래량, 순매수 수량;
+  - `whol_smtn_seln_tr_pbmn`, `whol_smtn_shnu_tr_pbmn`, `whol_smtn_ntby_tr_pbmn`: 매도·매수·순매수 거래 대금;
+  - `whol_ntby_vol_icdc`, `whol_ntby_tr_pbmn_icdc`: 순매수 거래량·거래 대금 증감.
+- 기록: 시각이 가장 늦은 행 하나를 쓴다. 그 행이 그날의 누적값이다. `event_time`은 그 행의 `bsop_hour`다.
+  - 매도·매수·순매수 열은 위 필드에서 온다.
+  - 호가 잔량(`sell_order_qty`, `buy_order_qty`, `whole_net_qty`)은 응답에 없어 비워 둔다.
+- 확인하지 못한 것 ⚠:
+  - 행의 순서. 그래서 시각으로 고른다.
+  - 금액 단위가 실시간 피드(`NTBY_TR_PBMN`)와 같은지.
+
+### 선물, 달러선물, 옵션: `FHMIF10000000` 선물옵션 시세
+
+- 대신하는 피드: KOSPI200 선물 `H0IFCNT0`(시장 코드 `F`), 달러선물 `H0CFCNT0`(`CF`), KOSPI200 옵션 `H0IOCNT0`(`O`). 예제: `examples_llm/domestic_futureoption/inquire_price`.
+- 경로: `/uapi/domestic-futureoption/v1/quotations/inquire-price`.
+- 파라미터: `FID_COND_MRKT_DIV_CODE`(시장 코드), `FID_INPUT_ISCD`(선물·옵션 코드).
+- 응답: `output1`(종목), `output2`·`output3`(지수). `output1`의 필드:
+  - 가격: `hts_kor_isnm`, `futs_prpr`(현재가), `futs_prdy_vrss`, `prdy_vrss_sign`, `futs_prdy_clpr`, `futs_prdy_ctrt`(전일 대비율), `futs_oprc`, `futs_hgpr`, `futs_lwpr`, `futs_mxpr`, `futs_llam`, `futs_sdpr`;
+  - 거래와 미결제약정: `acml_vol`, `acml_tr_pbmn`, `hts_otst_stpl_qty`(미결제약정), `otst_stpl_qty_icdc`;
+  - 이론가와 베이시스: `basis`, `hts_thpr`(이론가), `dprt`, `mrkt_basis`(시장 베이시스);
+  - 상품 정보: `crbr_aply_mxpr`, `crbr_aply_llam`, `futs_last_tr_date`, `hts_rmnn_dynu`, `futs_lstn_medm_hgpr`, `futs_lstn_medm_lwpr`;
+  - 옵션 값: `delta_val`, `gama`, `theta`, `vega`, `rho`, `hist_vltl`, `hts_ints_vltl`(내재변동성), `acpr`(행사가).
+- 예제는 선물과 옵션에 같은 필드 목록을 쓴다. 그래서 옵션 가격도 `futs_prpr`로 읽는다 ⚠.
+- 기록:
+  - 응답에 시각이 없어 `event_time`은 수신 시각이다.
+  - 선물: `price`, `change_pct`, `cum_volume`, `open_interest`, `theory_price`, `market_basis`를 채운다. 체결 하나의 수량(`qty`)과 호가 열은 비워 둔다.
+  - 옵션: `price`, `cum_volume`, `open_interest`, `implied_vol`, `delta`, `gamma`(`gama`), `vega`, `theta`, `theory_price`를 채운다. `qty`, `ask1`, `bid1`은 비워 둔다.
+  - 가격은 실시간 피드처럼 소수 둘째 자리로 반올림한다.
+- 달러선물의 시장 코드 `CF`는 선물 분봉 조회(`FHKIF03020200`)에서 달러선물에 쓰는 코드다(`contracts.USD`). 예제는 이 시세 조회의 시장 코드로 `F`와 `O`만 적는다. `CF`가 맞는지는 확인하지 못했다 ⚠.
+- 호가는 `FHMIF10010000`(선물옵션 시세호가)이 따로 준다. 쓰지 않았다. 조회가 두 배가 되기 때문이다.
+
+### 미국 주간거래: `HHDFS00000300` 해외주식 현재체결가
+
+- 대신하는 피드: `HDFSCNT0`. 예제: `examples_llm/overseas_stock/price`.
+- 경로: `/uapi/overseas-price/v1/quotations/price`.
+- 파라미터: `AUTH`(빈 값), `EXCD`(거래소), `SYMB`(티커).
+  - 예제의 거래소 목록에 주간거래(`BAQ` 나스닥, `BAY` 뉴욕, `BAA` 아멕스)가 있다.
+  - 키 `RBAQNVDA`를 `EXCD=BAQ`, `SYMB=NVDA`로 나눈다.
+- 응답 `output`의 필드: `rsym`(실시간조회종목코드), `zdiv`(소수점자리수), `base`(전일종가), `pvol`(전일거래량), `last`(현재가), `sign`, `diff`, `rate`(등락율), `tvol`(거래량), `tamt`(거래대금), `ordy`(매수가능여부).
+- 기록:
+  - `symbol`은 티커, `key`는 KIS 키다. 실시간 피드처럼 티커 파티션(`symbol=NVDA`)에 쓴다.
+  - 응답에 시각이 없어 `event_time`은 수신 시각이다.
+  - `price`는 `last`, `cum_volume`은 `tvol`이다.
+  - 현지 날짜·시각, 체결량, 호가, 잔량, 장 구분은 비워 둔다.
+- 쓰지 않은 대안: 체결추이(`HHDFS76200300`)는 체결마다 시각, 수량, 호가를 준다. 하지만 예제의 거래소 목록에 주간거래가 없다.
 
 ## 세션과 한도
 

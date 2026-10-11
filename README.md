@@ -160,6 +160,7 @@ uv run python -c "import glob, pyarrow.parquet as pq; d = sorted(glob.glob('data
 |---|---|---|
 | `collect` | 실시간 녹화, 예측·채점, 엔진 API, 업로드, 백필, 밤 학습 일정. 멈출 때까지 돈다 | 필요 |
 | `measure-subscriptions` | 세션당 실시간 구독 한도를 잰다. 수집기를 멈추고 실행한다 | 필요 |
+| `check-fallbacks` | 한도로 잘린 구독을 대신하는 REST 조회를 하나씩 한 번 부르고, 기록할 이벤트나 실패 이유를 출력한다. 기록하지 않고 REST만 써서 수집기가 도는 중에 실행해도 된다. 실패가 있으면 종료 코드 1([docs/kis-feeds.md](docs/kis-feeds.md#rest-대체-조회)) | 필요 |
 | `backfill` | 빠진 1분봉을 한 번 채운다. 수집기를 멈추고 실행한다 | 필요 |
 | `archive [--recheck]` | 녹화한 날을 합쳐 `KRX_OBJECT_STORE`에 올린다. `--recheck`는 모든 파일을 저장소와 비교한다 | 필요(쓰지는 않는다) |
 | `replay <YYYY-MM-DD> [--db 경로]` | 녹화한 하루를 엔진으로 다시 돌려 별도 DB에 쓴다 | 없어도 된다 |
@@ -174,7 +175,7 @@ uv run python -c "import glob, pyarrow.parquet as pq; d = sorted(glob.glob('data
 | `fake-kis [--port 18080] [--host 127.0.0.1] [--trades]` | 가짜 KIS 서버(아래 "키 없이 확인하기") | 없어도 된다 |
 | `demo-engine [--port 8090] [--host 127.0.0.1] [--db state/demo.sqlite3] [--pace 초]` | 데모 엔진 API(아래 "화면을 만들 때"). `--pace`는 10:00부터 이어 재생하며 스트림을 보낸다 | 없어도 된다 |
 
-종료 코드: 0은 성공이다. 2는 설정 오류(`configuration error: ...`)나 잘못된 인자다. 1은 KIS 오류(`KIS error: ...`, Docker가 다시 띄운다)이거나 명령이 할 일을 못 한 경우다. 예: 업로드에 실패한 파티션, 학습할 1분봉 없음, 되돌릴 모델 없음, 텔레그램 전송 실패, 사전 검증 거부.
+종료 코드: 0은 성공이다. 2는 설정 오류(`configuration error: ...`)나 잘못된 인자다. 1은 KIS 오류(`KIS error: ...`, Docker가 다시 띄운다)이거나 명령이 할 일을 못 한 경우다. 예: 업로드에 실패한 파티션, 학습할 1분봉 없음, 되돌릴 모델 없음, 텔레그램 전송 실패, 사전 검증 거부, 실패한 REST 대체 조회.
 
 ## 문서
 
@@ -192,7 +193,7 @@ uv run python -c "import glob, pyarrow.parquet as pq; d = sorted(glob.glob('data
 | 단계 | 내용 | 상태 |
 |---|---|---|
 | P0 | 저장소 준비, 설계 문서 | 완료 |
-| P1 | 수집기 | 거의 완료(#2–#6, #8, #30). 남은 것: 첫 거래일 확인(#7), ETF 장중 확인(#29), REST 대체 추가(#28) |
+| P1 | 수집기 | 거의 완료(#2–#6, #8, #30). 남은 것: 첫 거래일 확인(#7), ETF 장중 확인(#29), REST 대체 장중 확인(#28, `check-fallbacks`) |
 | P2 | 예측·채점 핵심 | 완료: #9–#19. 호가 피처를 쓰는 Turing은 녹화가 쌓인 뒤(#55) |
 | P3 | Fincept 화면, 빌드 | 구현 완료: 첫 화면과 개인 빌드(#20), 차트·예측 패널·순위표·매크로 줄·엔진 상태·신호 알림·스트림(#21). #21을 담은 개인 빌드는 새 태그로 만든다 |
 | P4 | 밤 학습 | 진행 중. 상시 서버의 밤 학습과 08:00 교체(PR #45), 녹화 이벤트로 학습하기(#22, PR #48)는 됐다. EC2 Spot과 비용 상한(#23)이 남았다 |

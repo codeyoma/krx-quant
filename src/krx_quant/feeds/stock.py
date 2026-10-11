@@ -287,6 +287,43 @@ def _normalize_program(f: dict[str, str], received_at: datetime) -> Row:
 PROGRAM = Feed("H0UNPGM0", tuple(PROGRAM_COLUMNS), PROGRAM_SCHEMA, _normalize_program)
 
 
+def _normalize_program_rest(body: dict[str, Any], key: str, received_at: datetime) -> list[Row]:
+    # Each row holds the day's totals up to its time; the latest is the news (the rows'
+    # order is not confirmed ⚠). The resting program orders are not in the answer.
+    rows = body.get("output") or []
+    if not rows:
+        return []
+    latest = max(rows, key=lambda r: r["bsop_hour"])
+    return [
+        {
+            "symbol": key,
+            "event_time": kst(kst_day(received_at), latest["bsop_hour"]),
+            "received_at": received_at,
+            "sell_qty": to_int(latest["whol_smtn_seln_vol"]),
+            "sell_value": to_int(latest["whol_smtn_seln_tr_pbmn"]),
+            "buy_qty": to_int(latest["whol_smtn_shnu_vol"]),
+            "buy_value": to_int(latest["whol_smtn_shnu_tr_pbmn"]),
+            "net_qty": to_int(latest["whol_smtn_ntby_qty"]),
+            "net_value": to_int(latest["whol_smtn_ntby_tr_pbmn"]),
+            "sell_order_qty": None,
+            "buy_order_qty": None,
+            "whole_net_qty": None,
+        }
+    ]
+
+
+# FHPPG04650101, "종목별 프로그램매매추이(체결)": the integrated program trading by REST,
+# standing in for H0UNPGM0.
+PROGRAM_REST = RestFeed(
+    "FHPPG04650101",
+    "/uapi/domestic-stock/v1/quotations/program-trade-by-stock",
+    PROGRAM_SCHEMA,
+    lambda symbol, _day: {"FID_COND_MRKT_DIV_CODE": "UN", "FID_INPUT_ISCD": symbol},
+    _normalize_program_rest,
+    stands_in_for=PROGRAM.tr_id,
+)
+
+
 # H0UNMBC0, integrated top-5 member firms per stock (KIS: "국내주식 실시간회원사 (통합)").
 MEMBER_COLUMNS = (
     "MKSC_SHRN_ISCD SELN2_MBCR_NAME1 SELN2_MBCR_NAME2 SELN2_MBCR_NAME3 SELN2_MBCR_NAME4 "

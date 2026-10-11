@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import itertools
+import json
 import logging
 import math
 import signal
@@ -18,7 +19,7 @@ from aiohttp import web
 from krx_quant.algorithms import ALGORITHMS, RegistrationError
 from krx_quant.archive import run_archive
 from krx_quant.backfill import run_backfill
-from krx_quant.collector import measure_subscription_limit, run_collector
+from krx_quant.collector import check_fallbacks, measure_subscription_limit, run_collector
 from krx_quant.config import Settings, SettingsError
 from krx_quant.demo import demo_app, demo_morning
 from krx_quant.fake_kis import FakeKis
@@ -54,6 +55,22 @@ async def _measure() -> None:
     limit = await measure_subscription_limit(Settings.from_env())
     print(f"KIS accepted {limit} real-time registrations in one session.")
     print(f"Set KIS_WS_MAX_SUBSCRIPTIONS={limit} in .env to stay within it.")
+
+
+async def _check_fallbacks() -> int:
+    checks = await check_fallbacks(Settings.from_env())
+    for check in checks:
+        query = " ".join(f"{k}={v}" for k, v in check.params.items())
+        print(f"{check.feed} {check.key} -> {check.rest.tr_id} {query}")
+        if check.error is not None:
+            print(f"  failed: {check.error}")
+        elif not check.rows:
+            print("  answered with nothing to record")
+        for row in check.rows:
+            print("  " + json.dumps(row, ensure_ascii=False, default=str))
+    failed = sum(c.error is not None for c in checks)
+    print(f"{len(checks) - failed} of {len(checks)} fallbacks answered")
+    return 1 if failed else 0
 
 
 async def _backfill() -> None:
@@ -290,6 +307,10 @@ def main(argv: list[str] | None = None) -> int:
         help="count how many real-time registrations KIS allows per session (stop the collector first)",
     )
     sub.add_parser(
+        "check-fallbacks",
+        help="ask each feed's REST fallback once and print what it would record (safe beside the collector)",
+    )
+    sub.add_parser(
         "backfill",
         help="fill missing one-minute bars for the past year and exit (stop the collector first)",
     )
@@ -366,6 +387,8 @@ def main(argv: list[str] | None = None) -> int:
             asyncio.run(_collect())
         elif args.command == "measure-subscriptions":
             asyncio.run(_measure())
+        elif args.command == "check-fallbacks":
+            return asyncio.run(_check_fallbacks())
         elif args.command == "backfill":
             asyncio.run(_backfill())
         elif args.command == "archive":

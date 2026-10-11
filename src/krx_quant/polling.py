@@ -107,7 +107,9 @@ class Poller:
         except (KeyError, ValueError, TypeError):
             log.exception("could not normalize %s %s; kept raw only", job.feed.tr_id, job.key)
             return
+        feed = job.feed.events_feed
         for row in rows:
-            self._recorder.record("events", day, job.feed.tr_id, job.key, row, job.feed.schema)
+            # By the event's symbol, as the stream records them (a US ticker, not its key).
+            self._recorder.record("events", day, feed, row["symbol"], row, job.feed.schema)
             if self._on_event is not None:
-                self._on_event(job.feed.tr_id, row)
+                self._on_event(feed, row)
