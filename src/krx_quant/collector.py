@@ -55,7 +55,7 @@ from krx_quant.masters import FrontMonths, MasterError, fetch_front_months
 from krx_quant.model_shelf import Shelf
 from krx_quant.notify import Alerts
 from krx_quant.object_store import open_store
-from krx_quant.polling import Poller, PollJob
+from krx_quant.polling import CALL_ERRORS, NORMALIZE_ERRORS, Poller, PollJob
 from krx_quant.predictions import DB_NAME, PredictionStore, iso
 from krx_quant.prevalidation import admits
 from krx_quant.recorder import ParquetRecorder
@@ -478,7 +478,7 @@ def fallback_for(settings: Settings, tr_id: str, key: str) -> RestFeed | None:
 class FallbackCheck:
     """A REST fallback asked once: the event rows it would record, or why it failed."""
 
-    feed: str  # the WebSocket feed it is polled for when that feed's registration is cut
+    cut_feed: str  # the WebSocket feed whose cut registration it is polled for
     key: str
     rest: RestFeed
     params: dict[str, str]
@@ -505,7 +505,7 @@ async def check_fallbacks(settings: Settings, now: Clock | None = None) -> list[
             try:
                 body = await client.get(fallback.tr_id, fallback.path, params)
                 rows = fallback.normalize(body, key, clock().astimezone(UTC))
-            except (kis.KisError, aiohttp.ClientError, OSError, ValueError, KeyError, TypeError) as e:
+            except (*CALL_ERRORS, *NORMALIZE_ERRORS) as e:
                 checks.append(
                     FallbackCheck(feed.tr_id, key, fallback, params, [], f"{type(e).__name__}: {e}")
                 )
@@ -527,10 +527,7 @@ def _fall_back(poller: Poller, settings: Settings, tr_id: str, key: str, reason:
         fallback.tr_id,
         settings.fallback_poll_seconds,
     )
-    # A stand-in's answer is recorded when it changes, as the feed it stands in for sends
-    # only on changes; its snapshots mostly carry no time to tell a repeat from news.
-    stand_in = fallback.stands_in_for is not None
-    poller.add(PollJob(fallback, key, settings.fallback_poll_seconds, changes_only=stand_in))
+    poller.add(PollJob.fallback(fallback, key, settings.fallback_poll_seconds))
 
 
 class _Stream:

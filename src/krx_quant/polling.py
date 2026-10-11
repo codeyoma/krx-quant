@@ -20,16 +20,37 @@ from krx_quant.recorder import ParquetRecorder
 
 log = logging.getLogger(__name__)
 
+# A call that failed: logged, and asked again on the next interval.
+CALL_ERRORS = (KisError, aiohttp.ClientError, OSError, ValueError, TimeoutError)
+# An answer that could not be normalized: kept raw only.
+NORMALIZE_ERRORS = (KeyError, ValueError, TypeError)
+
+_UNSEEN = object()
+
 
 @dataclass(frozen=True)
 class PollJob:
     feed: RestFeed
     key: str
     interval: float
-    # Record an answer only when it differs from the one before (a list that rarely changes).
+    # Record an answer only when its news differs from the one before (a list that rarely
+    # changes).
     changes_only: bool = False
     # Poll only at times this allows (default: always).
     when: Callable[[datetime], bool] | None = None
+    # The first answer only sets what later ones are compared with: when its values were
+    # true is unknown (before a session it is the last one's).
+    first_is_baseline: bool = False
+
+    @classmethod
+    def fallback(cls, feed: RestFeed, key: str, interval: float) -> PollJob:
+        """Polling ``feed`` for ``key``, whose WebSocket registration was cut.
+
+        A stand-in records only news, as the feed it stands in for sends only on news; its
+        answers mostly carry no time to tell a repeat, or the last session's values, from news.
+        """
+        stand_in = feed.stands_in_for is not None
+        return cls(feed, key, interval, changes_only=stand_in, first_is_baseline=stand_in)
 
 
 class Poller:
@@ -76,7 +97,7 @@ class Poller:
                 log.error("poll job ended with an error: %r", job_error)
 
     async def _poll(self, job: PollJob, client: RestClient) -> None:
-        last: object = None  # the last answer recorded, for changes_only
+        last: object = _UNSEEN  # the news of the last answer, for changes_only
         while not self._stop.is_set():
             now = self._now()
             if job.when is None or job.when(now):
@@ -84,12 +105,14 @@ class Poller:
                 params = job.feed.params(job.key, day)
                 try:
                     body = await client.get(job.feed.tr_id, job.feed.path, params)
-                except (KisError, aiohttp.ClientError, OSError, ValueError, TimeoutError) as e:
+                except CALL_ERRORS as e:
                     log.warning("poll %s %s failed: %s", job.feed.tr_id, job.key, e)
                 else:
-                    if not (job.changes_only and body == last):
+                    news = job.feed.news(body)
+                    baseline = job.first_is_baseline and last is _UNSEEN
+                    if not (baseline or (job.changes_only and news == last)):
                         self._record(job, params, body, self._now(), day)
-                        last = body
+                    last = news
                     if self._on_received is not None:
                         self._on_received((job.feed.tr_id, job.key))
             with contextlib.suppress(TimeoutError):
@@ -104,12 +127,13 @@ class Poller:
         self._recorder.record("raw", day, job.feed.tr_id, job.key, raw_row, RAW_SCHEMA)
         try:
             rows = job.feed.normalize(body, job.key, received_at)
-        except (KeyError, ValueError, TypeError):
+        except NORMALIZE_ERRORS:
             log.exception("could not normalize %s %s; kept raw only", job.feed.tr_id, job.key)
             return
-        feed = job.feed.events_feed
+        events_feed = job.feed.events_feed
         for row in rows:
             # By the event's symbol, as the stream records them (a US ticker, not its key).
-            self._recorder.record("events", day, feed, row["symbol"], row, job.feed.schema)
+            symbol = row.get("symbol") or job.key
+            self._recorder.record("events", day, events_feed, symbol, row, job.feed.schema)
             if self._on_event is not None:
-                self._on_event(feed, row)
+                self._on_event(events_feed, row)

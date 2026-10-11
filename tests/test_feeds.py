@@ -228,13 +228,19 @@ def ok(**body: Any) -> dict[str, Any]:
 
 
 async def poll_until(
-    kis: FakeKis, settings: Any, tr_id: str, asked: Callable[[dict[str, str]], bool] = lambda q: True
+    kis: FakeKis,
+    settings: Any,
+    tr_id: str,
+    asked: Callable[[dict[str, str]], bool] = lambda q: True,
+    times: int = 1,
 ) -> None:
-    """Run the collector until it has called ``tr_id`` (with a query ``asked`` accepts)."""
+    """Run the collector until it has called ``tr_id`` ``times`` times (with a query
+    ``asked`` accepts).
+    """
     stop = asyncio.Event()
     task = asyncio.create_task(run_collector(settings, stop=stop, clock=lambda: FIXED_NOW))
     try:
-        await until(lambda: any(t == tr_id and asked(q) for _, t, _, q in kis.rest_requests))
+        await until(lambda: sum(t == tr_id and asked(q) for _, t, _, q in kis.rest_requests) >= times)
         await asyncio.sleep(0.05)
     finally:
         stop.set()
@@ -369,6 +375,25 @@ def program_row(
     }
 
 
+Responder = Callable[[dict[str, str]], dict[str, Any]]
+
+
+def after_a_first_answer(respond: Responder) -> Responder:
+    """``respond`` from each query's second call on. A stand-in takes its first answer only
+    as what later ones are compared with: when its values were true is unknown.
+    """
+    seen: set[tuple[tuple[str, str], ...]] = set()
+
+    def answer(q: dict[str, str]) -> dict[str, Any]:
+        query = tuple(sorted(q.items()))
+        if query in seen:
+            return respond(q)
+        seen.add(query)
+        return ok()
+
+    return answer
+
+
 async def test_program_trading_falls_back_to_rest_when_refused_for_the_limit(
     kis: FakeKis, tmp_path: Path
 ) -> None:
@@ -377,10 +402,10 @@ async def test_program_trading_falls_back_to_rest_when_refused_for_the_limit(
         program_row("093012", ("100000", "8120000000"), ("120000", "9744000000"), ("20000", "1624000000")),
         program_row("093016", ("120000", "9744000000"), ("150000", "12180000000"), ("30000", "2436000000")),
     ]
-    kis.rest_responses["FHPPG04650101"] = lambda q: ok(output=rows)
-    settings = replace(settings_for(kis, tmp_path), ws_max_subscriptions=0, fallback_poll_seconds=0.1)
+    kis.rest_responses["FHPPG04650101"] = after_a_first_answer(lambda q: ok(output=rows))
+    settings = replace(settings_for(kis, tmp_path), ws_max_subscriptions=0, fallback_poll_seconds=0.05)
 
-    await poll_until(kis, settings, "FHPPG04650101")
+    await poll_until(kis, settings, "FHPPG04650101", times=2)
 
     [request, *_] = [q for _, t, _, q in kis.rest_requests if t == "FHPPG04650101"]
     assert (request["FID_COND_MRKT_DIV_CODE"], request["FID_INPUT_ISCD"]) == ("UN", "005930")
@@ -397,6 +422,20 @@ async def test_program_trading_falls_back_to_rest_when_refused_for_the_limit(
     # The resting program orders are not in the answer: unknown, not 0.
     assert (p["sell_order_qty"], p["buy_order_qty"], p["whole_net_qty"]) == (None, None, None)
     assert read(tmp_path, "raw", "FHPPG04650101"), "the answer itself is kept under its own TR"
+
+
+async def test_a_program_trading_row_of_the_last_session_is_not_taken_for_today(
+    kis: FakeKis, tmp_path: Path
+) -> None:
+    # Before the open, the answer may still hold the last session's rows: timed after now.
+    rows = [program_row("153000", ("1", "81200"), ("2", "162400"), ("1", "81200"))]
+    kis.rest_responses["FHPPG04650101"] = after_a_first_answer(lambda q: ok(output=rows))
+    settings = replace(settings_for(kis, tmp_path), ws_max_subscriptions=0, fallback_poll_seconds=0.05)
+
+    await poll_until(kis, settings, "FHPPG04650101", times=2)
+
+    assert read(tmp_path, "raw", "FHPPG04650101")
+    assert not (tmp_path / "events" / "date=2026-10-08" / "feed=H0UNPGM0").exists()
 
 
 def derivative_quotes(answers: dict[tuple[str, str], dict[str, str]]) -> Any:
@@ -424,10 +463,10 @@ async def test_kospi200_futures_fall_back_to_rest_when_refused_for_the_limit(
         "hts_thpr": "1057.85",
         "mrkt_basis": "3.77",
     }
-    kis.rest_responses["FHMIF10000000"] = derivative_quotes({("F", "A01612"): quote})
-    settings = replace(settings_for(kis, tmp_path), ws_max_subscriptions=0, fallback_poll_seconds=0.1)
+    kis.rest_responses["FHMIF10000000"] = after_a_first_answer(derivative_quotes({("F", "A01612"): quote}))
+    settings = replace(settings_for(kis, tmp_path), ws_max_subscriptions=0, fallback_poll_seconds=0.05)
 
-    await poll_until(kis, settings, "FHMIF10000000")
+    await poll_until(kis, settings, "FHMIF10000000", lambda q: q["FID_COND_MRKT_DIV_CODE"] == "F", times=2)
 
     # The quote has no time: the event's is the second it was received.
     [f] = read(tmp_path, "events", "H0IFCNT0", symbol="A01612")
@@ -444,6 +483,45 @@ async def test_kospi200_futures_fall_back_to_rest_when_refused_for_the_limit(
     assert [f[c] for c in unknown] == [None] * len(unknown)
 
 
+async def test_a_derivative_stand_in_is_not_recorded_again_for_the_index_quotes_beside_it(
+    kis: FakeKis, tmp_path: Path
+) -> None:
+    serve_masters(kis)
+    quote = {
+        "futs_prpr": "1056.30",
+        "futs_prdy_ctrt": "-1.24",
+        "acml_vol": "183402",
+        "hts_otst_stpl_qty": "251873",
+        "hts_thpr": "1057.85",
+        "mrkt_basis": "3.77",
+    }
+    calls = 0
+
+    def respond(q: dict[str, str]) -> dict[str, Any]:
+        nonlocal calls
+        if (q["FID_COND_MRKT_DIV_CODE"], q["FID_INPUT_ISCD"]) != ("F", "A01612"):
+            return {"rt_cd": "1", "msg_cd": "OPSQ0002", "msg1": "없는 종목"}
+        calls += 1
+        # The answer also carries index quotes, which move by the second; the contract's
+        # quote changes once, after the first answer.
+        index = {"bstp_cls_code": "2001", "bstp_nmix_prpr": f"{1052 + calls / 100:.2f}"}
+        contract = quote if calls == 1 else {**quote, "futs_prpr": "1056.35"}
+        return ok(output1=contract, output2=index, output3=index)
+
+    kis.rest_responses["FHMIF10000000"] = respond
+    settings = replace(settings_for(kis, tmp_path), ws_max_subscriptions=0, fallback_poll_seconds=0.02)
+
+    stop = asyncio.Event()
+    task = asyncio.create_task(run_collector(settings, stop=stop, clock=lambda: FIXED_NOW))
+    try:
+        await until(lambda: calls >= 4)
+    finally:
+        stop.set()
+        await asyncio.wait_for(task, 5)
+
+    assert [f["price"] for f in read(tmp_path, "events", "H0IFCNT0", symbol="A01612")] == [1056.35]
+
+
 async def test_usd_futures_fall_back_to_rest_when_refused_for_the_limit(kis: FakeKis, tmp_path: Path) -> None:
     serve_masters(kis)
     # Currency futures prices come with float noise, as on the WebSocket.
@@ -455,10 +533,10 @@ async def test_usd_futures_fall_back_to_rest_when_refused_for_the_limit(kis: Fak
         "hts_thpr": "1388.95",
         "mrkt_basis": "0.00",
     }
-    kis.rest_responses["FHMIF10000000"] = derivative_quotes({("CF", "A75610"): quote})
-    settings = replace(settings_for(kis, tmp_path), ws_max_subscriptions=0, fallback_poll_seconds=0.1)
+    kis.rest_responses["FHMIF10000000"] = after_a_first_answer(derivative_quotes({("CF", "A75610"): quote}))
+    settings = replace(settings_for(kis, tmp_path), ws_max_subscriptions=0, fallback_poll_seconds=0.05)
 
-    await poll_until(kis, settings, "FHMIF10000000", lambda q: q["FID_COND_MRKT_DIV_CODE"] == "CF")
+    await poll_until(kis, settings, "FHMIF10000000", lambda q: q["FID_COND_MRKT_DIV_CODE"] == "CF", times=2)
 
     [f] = read(tmp_path, "events", "H0CFCNT0", symbol="A75610")
     assert (f["event_time"], f["price"], f["cum_volume"], f["open_interest"]) == (
@@ -485,10 +563,10 @@ async def test_options_fall_back_to_rest_when_refused_for_the_limit(kis: FakeKis
         "rho": "0.1102",
         "acpr": "1072.50",
     }
-    kis.rest_responses["FHMIF10000000"] = derivative_quotes({("O", CALLS[3]): quote})
-    settings = replace(settings_for(kis, tmp_path), ws_max_subscriptions=0, fallback_poll_seconds=0.1)
+    kis.rest_responses["FHMIF10000000"] = after_a_first_answer(derivative_quotes({("O", CALLS[3]): quote}))
+    settings = replace(settings_for(kis, tmp_path), ws_max_subscriptions=0, fallback_poll_seconds=0.05)
 
-    await poll_until(kis, settings, "FHMIF10000000", lambda q: q["FID_INPUT_ISCD"] == CALLS[3])
+    await poll_until(kis, settings, "FHMIF10000000", lambda q: q["FID_INPUT_ISCD"] == CALLS[3], times=2)
 
     [o] = read(tmp_path, "events", "H0IOCNT0", symbol=CALLS[3])
     assert (o["event_time"], o["price"], o["cum_volume"], o["open_interest"]) == (
@@ -530,12 +608,12 @@ def us_quote(last: str, volume: str) -> dict[str, Any]:
 async def test_us_daytime_trades_fall_back_to_rest_when_refused_for_the_limit(
     kis: FakeKis, tmp_path: Path
 ) -> None:
-    kis.rest_responses["HHDFS00000300"] = lambda q: us_quote("192.3400", "1520000")
+    kis.rest_responses["HHDFS00000300"] = after_a_first_answer(lambda q: us_quote("192.3400", "1520000"))
     settings = replace(
-        settings_for(kis, tmp_path), us_symbols=("NVDA",), ws_max_subscriptions=0, fallback_poll_seconds=0.1
+        settings_for(kis, tmp_path), us_symbols=("NVDA",), ws_max_subscriptions=0, fallback_poll_seconds=0.05
     )
 
-    await poll_until(kis, settings, "HHDFS00000300")
+    await poll_until(kis, settings, "HHDFS00000300", times=2)
 
     [request, *_] = [q for _, t, _, q in kis.rest_requests if t == "HHDFS00000300"]
     assert (request["EXCD"], request["SYMB"]) == ("BAQ", "NVDA"), "the NASDAQ daytime session"
@@ -551,7 +629,19 @@ async def test_us_daytime_trades_fall_back_to_rest_when_refused_for_the_limit(
     assert [t[c] for c in unknown] == [None] * len(unknown)
 
 
-async def test_a_stand_in_is_recorded_when_its_answer_changes(kis: FakeKis, tmp_path: Path) -> None:
+async def test_a_us_quote_without_a_price_records_nothing(kis: FakeKis, tmp_path: Path) -> None:
+    kis.rest_responses["HHDFS00000300"] = after_a_first_answer(lambda q: us_quote("", ""))
+    settings = replace(
+        settings_for(kis, tmp_path), us_symbols=("NVDA",), ws_max_subscriptions=0, fallback_poll_seconds=0.05
+    )
+
+    await poll_until(kis, settings, "HHDFS00000300", times=2)
+
+    assert read(tmp_path, "raw", "HHDFS00000300", symbol="RBAQNVDA")
+    assert not (tmp_path / "events" / "date=2026-10-08" / "feed=HDFSCNT0").exists()
+
+
+async def test_a_stand_in_records_only_news_and_not_its_first_answer(kis: FakeKis, tmp_path: Path) -> None:
     calls = 0
 
     def respond(q: dict[str, str]) -> dict[str, Any]:
@@ -572,9 +662,10 @@ async def test_a_stand_in_is_recorded_when_its_answer_changes(kis: FakeKis, tmp_
         stop.set()
         await asyncio.wait_for(task, 5)
 
-    # The quote carries no time: a repeat is not news, as the stream sends only new trades.
-    assert [t["price"] for t in read(tmp_path, "events", "HDFSCNT0", symbol="NVDA")] == [192.34, 192.5]
-    assert len(read(tmp_path, "raw", "HHDFS00000300", symbol="RBAQNVDA")) == 2
+    # The quote carries no time: a repeat is not news, as the stream sends only new trades,
+    # and the first answer may be the last session's (before the open), so it is not either.
+    assert [t["price"] for t in read(tmp_path, "events", "HDFSCNT0", symbol="NVDA")] == [192.5]
+    assert len(read(tmp_path, "raw", "HHDFS00000300", symbol="RBAQNVDA")) == 1
 
 
 def vi_row(start: str, end: str, *, active: str = "N", kind: str = "2", count: str = "1") -> dict[str, str]:
@@ -669,7 +760,7 @@ async def test_each_fallback_of_the_plan_can_be_checked_once_beside_the_collecto
 
     checks = await check_fallbacks(settings, lambda: FIXED_NOW)
 
-    by_feed = {(c.feed, c.key): c for c in checks}
+    by_feed = {(c.cut_feed, c.key): c for c in checks}
     assert list(by_feed) == [
         ("H0IFCNT0", "A01612"),
         ("H0CFCNT0", "A75610"),

@@ -289,15 +289,20 @@ PROGRAM = Feed("H0UNPGM0", tuple(PROGRAM_COLUMNS), PROGRAM_SCHEMA, _normalize_pr
 
 def _normalize_program_rest(body: dict[str, Any], key: str, received_at: datetime) -> list[Row]:
     # Each row holds the day's totals up to its time; the latest is the news (the rows'
-    # order is not confirmed ⚠). The resting program orders are not in the answer.
+    # order is not confirmed ⚠). A row timed after it was received is the last session's
+    # (before the open). The resting program orders are not in the answer.
     rows = body.get("output") or []
-    if not rows:
+    if isinstance(rows, dict):
+        rows = [rows]
+    day = kst_day(received_at)
+    today = [r for r in rows if kst(day, r["bsop_hour"]) <= received_at]
+    if not today:
         return []
-    latest = max(rows, key=lambda r: r["bsop_hour"])
+    latest = max(today, key=lambda r: r["bsop_hour"])
     return [
         {
             "symbol": key,
-            "event_time": kst(kst_day(received_at), latest["bsop_hour"]),
+            "event_time": kst(day, latest["bsop_hour"]),
             "received_at": received_at,
             "sell_qty": to_int(latest["whol_smtn_seln_vol"]),
             "sell_value": to_int(latest["whol_smtn_seln_tr_pbmn"]),
@@ -320,7 +325,7 @@ PROGRAM_REST = RestFeed(
     PROGRAM_SCHEMA,
     lambda symbol, _day: {"FID_COND_MRKT_DIV_CODE": "UN", "FID_INPUT_ISCD": symbol},
     _normalize_program_rest,
-    stands_in_for=PROGRAM.tr_id,
+    stands_in_for=PROGRAM,
 )
 
 

@@ -61,7 +61,7 @@ async def _check_fallbacks() -> int:
     checks = await check_fallbacks(Settings.from_env())
     for check in checks:
         query = " ".join(f"{k}={v}" for k, v in check.params.items())
-        print(f"{check.feed} {check.key} -> {check.rest.tr_id} {query}")
+        print(f"{check.cut_feed} {check.key} -> {check.rest.tr_id} {query}")
         if check.error is not None:
             print(f"  failed: {check.error}")
         elif not check.rows:

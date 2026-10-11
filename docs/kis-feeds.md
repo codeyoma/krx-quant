@@ -7,9 +7,9 @@
 WebSocket 구독은 아래 순서대로 보낸다. 세션 한도를 넘는 구독은 뒤에서부터 잘린다.
 - 잘린 피드 중 REST 대체가 있는 것은 REST 조회로 바뀐다(기본 5초 간격, `KRX_FALLBACK_POLL_SECONDS`).
 - REST 대체가 없는 것(주식의 거래소별 체결)은 오류 로그만 남긴다.
-- 프로그램매매, 선물, 달러선물, 미국 주간거래, 옵션의 REST 대체는 그 피드를 **대신한다**. 이벤트를 대신하는 WebSocket 피드의 이름(예: `events/feed=H0IFCNT0`)과 스키마로 기록하고, 엔진도 그 이름으로 읽는다. 응답 원문은 REST TR 이름(`raw/feed=FHMIF10000000`)에 남는다. 응답이 바뀔 때만 기록한다(같은 응답이 다시 오면 raw와 events 모두 남기지 않는다). 자세한 내용은 아래 "REST 대체 조회"에 있다.
+- 프로그램매매, 선물, 달러선물, 미국 주간거래, 옵션의 REST 대체는 그 피드를 **대신한다**. 이벤트를 대신하는 WebSocket 피드의 이름(예: `events/feed=H0IFCNT0`)과 스키마로 기록하고, 엔진도 그 이름으로 읽는다. 응답 원문은 REST TR 이름(`raw/feed=FHMIF10000000`)에 남는다. 새 소식만 기록한다(같은 응답이나 첫 응답은 raw와 events 모두 남기지 않는다). 자세한 내용은 아래 "REST 대체 조회"에 있다.
 - 체결, 호가, 회원사, 업종지수의 REST 대체는 전처럼 REST TR 이름으로 매번 기록한다.
-- `krx-quant check-fallbacks`는 계획의 REST 대체를 하나씩 한 번 조회해, 기록할 이벤트나 실패 이유를 보여 준다. 기록은 하지 않는다. REST만 쓰므로 수집기가 도는 중에 실행해도 된다.
+- `krx-quant check-fallbacks`는 계획의 REST 대체를 하나씩 한 번 조회해, 기록할 이벤트나 실패 이유를 보여 준다. 기록은 하지 않는다. REST만 쓰므로 수집기가 도는 중에 실행해도 된다. 단, 초당 한도는 프로세스마다 따로 센다. 수집기의 조회와 겹쳐 KIS 한도를 넘으면 그 줄이 `EGW00201`로 실패할 수 있다. 그때는 다시 실행한다. 이 명령은 첫 응답도 그대로 보여 준다(위의 "새 소식만" 규칙은 수집기의 기록에만 적용된다).
 - 시장 전체 맥락(선물, 미국)을 맨 앞에 둬서, 종목을 늘려도 잘리지 않게 했다.
 
 | 순서 | 피드 | TR | 키 | 3종목 기준 건수 | REST 대체 |
@@ -58,7 +58,10 @@ WebSocket 구독은 아래 순서대로 보낸다. 세션 한도를 넘는 구�
 - 이벤트는 대신하는 WebSocket 피드의 이름과 스키마로 기록한다. 그래서 엔진, 재생, 학습, 사이드카 판정이 고칠 것 없이 그대로 읽는다.
 - 응답에 시각이 없으면 `event_time`에 수신 시각(초 단위)을 쓴다.
 - 응답에 없는 값은 비워 둔다(null). 0으로 두지 않는다. 체결 하나의 수량, 호가 등이 그렇다.
-- 응답이 바뀔 때만 기록한다. WebSocket 피드는 새 체결이나 변화가 있을 때만 보낸다. 반면 이 응답들은 대개 시각이 없어서, 같은 응답을 다시 기록하면 새 소식처럼 보인다.
+- 새 소식만 기록한다. WebSocket 피드는 새 체결이나 변화가 있을 때만 보낸다. 반면 이 응답들은 대개 시각이 없다.
+  - 같은 응답이 다시 오면 기록하지 않는다. 다시 기록하면 새 소식처럼 보인다.
+  - 첫 응답은 기록하지 않고, 다음 응답과 견줄 기준으로만 쓴다. 언제 값인지 알 수 없어서다. 장 전에 시작하면 첫 응답은 지난 세션의 값이다. 그 값을 받은 시각으로 기록하면, 개장 뒤 첫 체결과의 차이가 1분 사이의 움직임처럼 보인다. 장중에 시작하면 다음 변화부터 기록한다.
+  - 선물옵션 시세는 종목 시세(`output1`)만 견준다. 함께 오는 지수 시세(`output2`, `output3`)는 초마다 바뀐다.
 
 ### 프로그램매매: `FHPPG04650101` 종목별 프로그램매매추이(체결)
 
@@ -71,6 +74,7 @@ WebSocket 구독은 아래 순서대로 보낸다. 세션 한도를 넘는 구�
   - `whol_smtn_seln_tr_pbmn`, `whol_smtn_shnu_tr_pbmn`, `whol_smtn_ntby_tr_pbmn`: 매도·매수·순매수 거래 대금;
   - `whol_ntby_vol_icdc`, `whol_ntby_tr_pbmn_icdc`: 순매수 거래량·거래 대금 증감.
 - 기록: 시각이 가장 늦은 행 하나를 쓴다. 그 행이 그날의 누적값이다. `event_time`은 그 행의 `bsop_hour`다.
+  - 받은 시각보다 늦은 시각의 행은 지난 세션의 것으로 보고 쓰지 않는다(장 전에 지난 세션의 행이 올 수 있다 ⚠). 응답에는 날짜가 없다.
   - 매도·매수·순매수 열은 위 필드에서 온다.
   - 호가 잔량(`sell_order_qty`, `buy_order_qty`, `whole_net_qty`)은 응답에 없어 비워 둔다.
 - 확인하지 못한 것 ⚠:
@@ -82,7 +86,7 @@ WebSocket 구독은 아래 순서대로 보낸다. 세션 한도를 넘는 구�
 - 대신하는 피드: KOSPI200 선물 `H0IFCNT0`(시장 코드 `F`), 달러선물 `H0CFCNT0`(`CF`), KOSPI200 옵션 `H0IOCNT0`(`O`). 예제: `examples_llm/domestic_futureoption/inquire_price`.
 - 경로: `/uapi/domestic-futureoption/v1/quotations/inquire-price`.
 - 파라미터: `FID_COND_MRKT_DIV_CODE`(시장 코드), `FID_INPUT_ISCD`(선물·옵션 코드).
-- 응답: `output1`(종목), `output2`·`output3`(지수). `output1`의 필드:
+- 응답: `output1`(종목), `output2`·`output3`(지수: `bstp_cls_code`, `hts_kor_isnm`, `bstp_nmix_prpr`, `prdy_vrss_sign`, `bstp_nmix_prdy_vrss`, `bstp_nmix_prdy_ctrt`). `output1`의 필드:
   - 가격: `hts_kor_isnm`, `futs_prpr`(현재가), `futs_prdy_vrss`, `prdy_vrss_sign`, `futs_prdy_clpr`, `futs_prdy_ctrt`(전일 대비율), `futs_oprc`, `futs_hgpr`, `futs_lwpr`, `futs_mxpr`, `futs_llam`, `futs_sdpr`;
   - 거래와 미결제약정: `acml_vol`, `acml_tr_pbmn`, `hts_otst_stpl_qty`(미결제약정), `otst_stpl_qty_icdc`;
   - 이론가와 베이시스: `basis`, `hts_thpr`(이론가), `dprt`, `mrkt_basis`(시장 베이시스);
@@ -110,6 +114,8 @@ WebSocket 구독은 아래 순서대로 보낸다. 세션 한도를 넘는 구�
   - 응답에 시각이 없어 `event_time`은 수신 시각이다.
   - `price`는 `last`, `cum_volume`은 `tvol`이다.
   - 현지 날짜·시각, 체결량, 호가, 잔량, 장 구분은 비워 둔다.
+  - 가격이 없는 응답(`last`가 비었거나 0)은 기록하지 않는다.
+- 주간거래 시간 밖에도 조회한다. 그때 `EXCD=BAQ`가 무엇을 돌려주는지(주간거래의 마지막 값인지, 정규장 값인지) 확인하지 못했다 ⚠. 정규장 값이 바뀌며 온다면 밤에도 `HDFSCNT0`에 행이 생긴다.
 - 쓰지 않은 대안: 체결추이(`HHDFS76200300`)는 체결마다 시각, 수량, 호가를 준다. 하지만 예제의 거래소 목록에 주간거래가 없다.
 
 ## 세션과 한도

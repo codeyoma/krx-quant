@@ -155,10 +155,11 @@ KOSPI200_FUTURES = Feed("H0IFCNT0", tuple(FUTURES_COLUMNS), FUTURES_SCHEMA, _nor
 USD_FUTURES = Feed("H0CFCNT0", tuple(FUTURES_COLUMNS), FUTURES_SCHEMA, _normalize_futures)
 
 
-# FHMIF10000000, "선물옵션 시세": a futures or option contract's quote by REST, for the
-# market code given (F index futures, CF commodity / currency futures, O index options).
-DERIVATIVE_QUOTE_TR = "FHMIF10000000"
-DERIVATIVE_QUOTE_PATH = "/uapi/domestic-futureoption/v1/quotations/inquire-price"
+def _contract_quote(body: dict[str, Any]) -> Any:
+    """The contract's own quote in a futures or options quote answer: its output2 and
+    output3 are index quotes, which move by the second.
+    """
+    return body.get("output1")
 
 
 def _normalize_futures_rest(body: dict[str, Any], key: str, received_at: datetime) -> list[Row]:
@@ -186,23 +187,27 @@ def _normalize_futures_rest(body: dict[str, Any], key: str, received_at: datetim
     ]
 
 
+# FHMIF10000000, "선물옵션 시세": a futures or option contract's quote by REST, for the
+# market code given (F index futures, CF commodity / currency futures, O index options).
 KOSPI200_FUTURES_REST = RestFeed(
-    DERIVATIVE_QUOTE_TR,
-    DERIVATIVE_QUOTE_PATH,
+    "FHMIF10000000",
+    "/uapi/domestic-futureoption/v1/quotations/inquire-price",
     FUTURES_SCHEMA,
     lambda code, _day: {"FID_COND_MRKT_DIV_CODE": "F", "FID_INPUT_ISCD": code},
     _normalize_futures_rest,
-    stands_in_for=KOSPI200_FUTURES.tr_id,
+    stands_in_for=KOSPI200_FUTURES,
+    news=_contract_quote,
 )
 # The market code is the one the futures minute bars are read with (contracts.USD); the
 # official example names F and O only ⚠.
 USD_FUTURES_REST = RestFeed(
-    DERIVATIVE_QUOTE_TR,
-    DERIVATIVE_QUOTE_PATH,
+    KOSPI200_FUTURES_REST.tr_id,
+    KOSPI200_FUTURES_REST.path,
     FUTURES_SCHEMA,
     lambda code, _day: {"FID_COND_MRKT_DIV_CODE": "CF", "FID_INPUT_ISCD": code},
     _normalize_futures_rest,
-    stands_in_for=USD_FUTURES.tr_id,
+    stands_in_for=USD_FUTURES,
+    news=_contract_quote,
 )
 
 
@@ -281,8 +286,11 @@ def us_ticker(symbol: str) -> str:
 
 
 def _normalize_us_quote(body: dict[str, Any], key: str, received_at: datetime) -> list[Row]:
-    # The quote has no time, no single trade and no book: those fields are unknown.
+    # The quote has no time, no single trade and no book: those fields are unknown. A quote
+    # without a price (none traded yet) is no trade.
     out = body["output"]
+    if not to_float(out["last"]):
+        return []
     return [
         {
             "symbol": _daytime_parts(key)[1],
@@ -316,7 +324,7 @@ US_TRADE_REST = RestFeed(
     US_TRADE_SCHEMA,
     _us_quote_query,
     _normalize_us_quote,
-    stands_in_for=US_TRADE.tr_id,
+    stands_in_for=US_TRADE,
 )
 
 
@@ -403,10 +411,11 @@ def _normalize_option_rest(body: dict[str, Any], key: str, received_at: datetime
 
 
 OPTION_REST = RestFeed(
-    DERIVATIVE_QUOTE_TR,
-    DERIVATIVE_QUOTE_PATH,
+    KOSPI200_FUTURES_REST.tr_id,
+    KOSPI200_FUTURES_REST.path,
     OPTION_SCHEMA,
     lambda code, _day: {"FID_COND_MRKT_DIV_CODE": "O", "FID_INPUT_ISCD": code},
     _normalize_option_rest,
-    stands_in_for=OPTION.tr_id,
+    stands_in_for=OPTION,
+    news=_contract_quote,
 )

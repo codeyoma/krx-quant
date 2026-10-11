@@ -38,14 +38,20 @@ class RestFeed:
     # (response body, key, received_at) -> event rows
     normalize: Callable[[dict[str, Any], str, datetime], list[Row]]
     # The WebSocket feed this endpoint stands in for when its registration is cut, if its
-    # events are that feed's: they are recorded, and read by the engine, under its name
-    # (the answers themselves stay under this TR).
-    stands_in_for: str | None = None
+    # events are that feed's: they are recorded, and read by the engine, under its name and
+    # schema (the answers themselves stay under this TR).
+    stands_in_for: Feed | None = None
+    # The part of an answer whose change is news, for polls that record only news.
+    news: Callable[[dict[str, Any]], Any] = lambda body: body
+
+    def __post_init__(self) -> None:
+        if self.stands_in_for is not None and self.schema != self.stands_in_for.schema:
+            raise ValueError(f"{self.tr_id} records {self.stands_in_for.tr_id} events in another schema")
 
     @property
     def events_feed(self) -> str:
         """The feed this endpoint's events are recorded under."""
-        return self.stands_in_for or self.tr_id
+        return self.stands_in_for.tr_id if self.stands_in_for is not None else self.tr_id
 
 
 RAW_SCHEMA = pa.schema([("received_at", pa.timestamp("us", tz="UTC")), ("message", pa.string())])
