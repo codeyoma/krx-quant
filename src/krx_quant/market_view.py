@@ -49,6 +49,7 @@ from krx_quant.feeds import (
     MEMBER,
     MEMBER_REST,
     NXT_TRADE,
+    OPTION,
     PROGRAM,
     TRADE,
     US_TRADE,
@@ -152,6 +153,46 @@ class _Estimates:
         foreign = next((r[2] for r in reversed(known) if r[2] is not None), None)
         institution = next((r[3] for r in reversed(known) if r[3] is not None), None)
         return foreign, institution
+
+
+# An option trade older than this says nothing about where the money is at a bar close.
+OPTION_STALE = timedelta(minutes=10)
+
+
+class _Options:
+    """The KOSPI200 options' trades by receipt time, each one's implied volatility and
+    delta, for the latest ``OPTION_STALE`` or so (Markov's at-the-money implied volatility)."""
+
+    def __init__(self) -> None:
+        self._trades: dict[str, list[tuple[datetime, float, float]]] = {}  # by option code
+
+    def add(self, row: dict[str, Any]) -> None:
+        """An option trade; one without an implied volatility or a delta says nothing."""
+        iv, delta = row.get("implied_vol"), row.get("delta")
+        if not iv or iv <= 0 or not delta:
+            return
+        at = row["received_at"]
+        trades = self._trades.setdefault(row["symbol"], [])
+        trades.insert(bisect.bisect_right(trades, at, key=_received), (at, float(iv), float(delta)))
+        del trades[: bisect.bisect_left(trades, at - 2 * OPTION_STALE, key=_received)]
+
+    def atm_iv(self, at: datetime) -> float | None:
+        """The mean implied volatility of the call whose delta is nearest 0.5 and the put
+        whose delta is nearest −0.5, each option by its latest trade received in the
+        ``OPTION_STALE`` before ``at``; one side's alone when the other has none."""
+        latest = []
+        for trades in self._trades.values():
+            i = bisect.bisect_left(trades, at, key=_received)
+            if i and trades[i - 1][0] >= at - OPTION_STALE:
+                latest.append(trades[i - 1][1:])
+        calls = [(abs(delta - 0.5), iv) for iv, delta in latest if delta > 0]
+        puts = [(abs(delta + 0.5), iv) for iv, delta in latest if delta < 0]
+        sides = [min(side)[1] for side in (calls, puts) if side]
+        return sum(sides) / len(sides) if sides else None
+
+
+def _received(trade: tuple[datetime, float, float]) -> datetime:
+    return trade[0]
 
 
 class _Running:
@@ -378,11 +419,15 @@ class MarketView:
         self._traded: dict[tuple[str, str], date] = {}  # (symbol, venue): the last day it traded
         self._arrivals = {s: _Arrivals() for s in self.symbols}
         self._expiry: dict[date, int] = {}
+        self._options = _Options()
 
     def on_event(self, feed: str, row: dict[str, Any]) -> None:
-        """Take an event into the bars, reference prices, microprices, order flow or flows;
-        other events are not the view's.
+        """Take an event into the bars, reference prices, microprices, order flow, flows or
+        options; other events are not the view's.
         """
+        if feed == OPTION.tr_id:
+            self._options.add(row)
+            return
         if feed in FLOW_FEEDS:
             self._flow(feed, row)
             return
@@ -458,6 +503,7 @@ class MarketView:
             microprices=self.microprices(symbol, frozen.close),
             order_flow=self.order_flow(symbol, frozen.close),
             arrivals=self.arrivals(symbol, frozen.close),
+            atm_iv=self._options.atm_iv(frozen.close),
         )
 
     def arrivals(self, symbol: str, at: datetime) -> Arrivals:

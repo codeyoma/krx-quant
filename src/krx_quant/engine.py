@@ -74,6 +74,7 @@ from krx_quant.feeds import (
     MEMBER,
     MEMBER_REST,
     NXT_TRADE,
+    OPTION,
     PROGRAM,
     TRADE,
     US_TRADE,
@@ -166,14 +167,16 @@ ENGINE_FEEDS: dict[str, tuple[str, ...]] = {
     MEMBER.tr_id: ("symbol", "received_at", "foreign_net_qty"),
     MEMBER_REST.tr_id: ("symbol", "received_at", "foreign_net_qty"),
     FOREIGN_ESTIMATE.tr_id: ("symbol", "received_at", "slot", "foreign_net_qty", "institution_net_qty"),
+    # The options near the money, for their at-the-money implied volatility (Markov's).
+    OPTION.tr_id: ("symbol", "received_at", "implied_vol", "delta"),
 }
 
 
 def partitions(feed: str, symbols: Sequence[str], leaders: Leaders) -> list[str] | None:
     """The partitions of ``feed`` the engine reads; None for every one (a futures feed's
-    single front month, whichever it was that day).
+    single front month, whichever it was that day, and the options near the money that day).
     """
-    if feed in FUTURES_SERIES:
+    if feed in FUTURES_SERIES or feed == OPTION.tr_id:
         return None
     if feed in INDEX_FEEDS:
         return sorted({KOSPI, *leaders.indices})

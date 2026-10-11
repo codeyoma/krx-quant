@@ -5,8 +5,8 @@ bar close, the reference price there, when the session opened, the bars of the s
 that may lead the symbol (``Leaders``), the microprices of its book at each minute's end
 and its order flow (``OrderFlow``: the book, the trades' sides and venues) and trade
 arrivals (``Arrivals``), recorded days only (``BOOK_FEATURES``, ``TAPE_FEATURES``:
-backfilled bars have neither), its flows,
-and the day's macro regime (``macro.py``). Live
+backfilled bars have neither), its flows, the options' at-the-money implied volatility
+(recorded days only), and the day's macro regime (``macro.py``). Live
 and replay build snapshots from the engine's Market View; training builds them from
 recorded events through the same view, or from backfilled bars, so a feature means the
 same thing in both. A snapshot holds nothing received after its bar close, so no feature
@@ -124,6 +124,9 @@ class Snapshot:
     microprices: Sequence[float] = ()
     order_flow: OrderFlow = field(default_factory=OrderFlow)
     arrivals: Arrivals = field(default_factory=Arrivals)
+    # The KOSPI200 options' at-the-money implied volatility (%) at the bar close; None
+    # without a recent option trade, and on a day with backfilled bars only.
+    atm_iv: float | None = None
 
     @classmethod
     def at(
@@ -142,6 +145,7 @@ class Snapshot:
         microprices: Sequence[float] = (),
         order_flow: OrderFlow | None = None,
         arrivals: Arrivals | None = None,
+        atm_iv: float | None = None,
     ) -> Snapshot:
         """A snapshot with the tick and flat band of ``price``."""
         lead, known = leaders or {}, flows or Flows()
@@ -161,6 +165,7 @@ class Snapshot:
             microprices,
             order_flow or OrderFlow(),
             arrivals or Arrivals(),
+            atm_iv,
         )
 
     @cached_property
@@ -450,6 +455,11 @@ def days_to_expiry(s: Snapshot) -> FeatureValue:
     return None if s.expiry_days is None else float(s.expiry_days)
 
 
+def atm_iv(s: Snapshot) -> FeatureValue:
+    """The KOSPI200 options' at-the-money implied volatility (%): Markov's."""
+    return s.atm_iv
+
+
 def _flow(now: float | None, before: float | None, traded: float) -> FeatureValue:
     """A cumulative flow's change over the last ``FLOW_MINUTES`` as a share of what traded
     then; unknown without where it stood then (``Flows``)."""
@@ -695,6 +705,7 @@ FEATURES: dict[str, Feature] = {
     "macro_regime": macro_regime,
     "minutes_since_open": minutes_since_open,
     "days_to_expiry": days_to_expiry,
+    "atm_iv": atm_iv,
     "program_net": program_net,
     "member_foreign_net": member_foreign_net,
     "investor_foreign": investor_foreign,
