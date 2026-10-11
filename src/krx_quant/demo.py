@@ -142,14 +142,15 @@ async def _paced(
     engine: PredictionEngine, events: Sequence[Event], pace: float, app: web.Application
 ) -> AsyncIterator[None]:
     """While the API is served: the rest of the morning, a minute every ``pace`` seconds."""
-    going = asyncio.create_task(_go_on(engine, events, pace))
+    going = asyncio.create_task(_replay_the_rest(engine, events, pace))
     yield
     going.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await going
 
 
-async def _go_on(engine: PredictionEngine, events: Sequence[Event], pace: float) -> None:
+async def _replay_the_rest(engine: PredictionEngine, events: Sequence[Event], pace: float) -> None:
+    """The morning's events after the clock, a minute of them every ``pace`` seconds, to 10:30."""
     clock = engine.clock
     assert isinstance(clock, FakeClock)  # replay's
     minute = clock.now()
@@ -160,6 +161,13 @@ async def _go_on(engine: PredictionEngine, events: Sequence[Event], pace: float)
         due = [e for e in rest if e[1]["received_at"] <= minute]
         rest = rest[len(due) :]
         await replay_into(engine, clock, due, until=minute)
+
+
+def demo_morning(pace: float | None) -> str:
+    """The demo's clock in words, for its startup line."""
+    if pace is None:
+        return f"{DEMO_DAY} {_END:%H:%M}"
+    return f"{DEMO_DAY} {_PACED_FROM:%H:%M} to {_END:%H:%M}, a minute every {pace:g} s"
 
 
 def demo_shelf(state_dir: Path) -> Shelf:

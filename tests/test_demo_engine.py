@@ -140,9 +140,10 @@ def test_a_taken_port_is_a_clear_error(
     assert f"demo Engine API not started on 127.0.0.1:{port}" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("pace", ["0", "-1"])
+@pytest.mark.parametrize("pace", ["0", "-1", "nan"])
 def test_a_pace_is_more_than_0_seconds(tmp_path: Path, pace: str, capsys: pytest.CaptureFixture[str]) -> None:
-    code = main(["demo-engine", "--pace", pace, "--db", str(tmp_path / "demo.sqlite3")])
+    with pytest.raises(SystemExit) as exit:
+        main(["demo-engine", "--pace", pace, "--db", str(tmp_path / "demo.sqlite3")])
 
-    assert code == 1
-    assert "--pace is seconds per minute of the demo morning: more than 0" in capsys.readouterr().err
+    assert exit.value.code == 2, "a wrong argument, as the README's exit codes say"
+    assert "seconds per minute of the demo morning, more than 0" in capsys.readouterr().err

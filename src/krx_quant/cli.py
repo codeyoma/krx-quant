@@ -19,7 +19,7 @@ from krx_quant.archive import run_archive
 from krx_quant.backfill import run_backfill
 from krx_quant.collector import measure_subscription_limit, run_collector
 from krx_quant.config import Settings, SettingsError
-from krx_quant.demo import demo_app
+from krx_quant.demo import demo_app, demo_morning
 from krx_quant.fake_kis import FakeKis
 from krx_quant.feeds.base import KST
 from krx_quant.kis import KisError
@@ -239,10 +239,15 @@ def _macro() -> int:
     return 1 if macro.failed else 0
 
 
+def _seconds_per_minute(text: str) -> float:
+    """``--pace``: seconds per minute of the demo morning, more than 0."""
+    seconds = float(text)
+    if not seconds > 0:
+        raise argparse.ArgumentTypeError(f"seconds per minute of the demo morning, more than 0: {text}")
+    return seconds
+
+
 async def _demo_engine(port: int, host: str, db: Path, pace: float | None = None) -> int:
-    if pace is not None and pace <= 0:
-        print("--pace is seconds per minute of the demo morning: more than 0", file=sys.stderr)
-        return 1
     db.parent.mkdir(parents=True, exist_ok=True)
     try:
         app = await demo_app(db, pace)
@@ -257,8 +262,7 @@ async def _demo_engine(port: int, host: str, db: Path, pace: float | None = None
         await runner.cleanup()
         print(f"demo Engine API not started on {host}:{port}: {e}", file=sys.stderr)
         return 1
-    morning = "2026-10-12 10:30" if pace is None else f"2026-10-12 10:00 to 10:30, a minute every {pace:g} s"
-    print(f"demo Engine API: http://{host}:{port}/v1/status ({morning}, made-up data)", flush=True)
+    print(f"demo Engine API: http://{host}:{port}/v1/status ({demo_morning(pace)}, made-up data)", flush=True)
     try:
         await asyncio.Event().wait()
     finally:
@@ -347,7 +351,7 @@ def main(argv: list[str] | None = None) -> int:
     demo.add_argument("--db", type=Path, default=Path("state/demo.sqlite3"), help="demo database (replaced)")
     demo.add_argument(
         "--pace",
-        type=float,
+        type=_seconds_per_minute,
         help="open at 10:00 and go on to 10:30 a minute every PACE seconds, streaming as it goes",
     )
     args = parser.parse_args(argv)
