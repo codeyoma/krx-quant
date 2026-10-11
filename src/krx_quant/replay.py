@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import heapq
 import logging
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from functools import partial
@@ -57,6 +57,7 @@ async def replay(
     consensus_timing: Timing | None = None,
     leaders: Leaders | None = None,
     regimes: Regimes | None = None,
+    admits: Callable[[Algorithm], bool] | None = None,
 ) -> PredictionEngine:
     """Feed ``events`` (in receipt order) received by ``until`` to an engine storing into ``db``.
 
@@ -82,6 +83,7 @@ async def replay(
         consensus_timing=consensus_timing,
         leaders=leaders,
         regimes=regimes,
+        admits=admits,
     )
     await replay_into(engine, clock, events, until=until, display_delay=display_delay)
     return engine
@@ -193,11 +195,11 @@ async def replay_day(settings: Settings, day: date, db: Path | None = None) -> R
     before ``day``.
     """
     db = db or settings.state_dir / f"replay-{day.isoformat()}.sqlite3"
-    if db.resolve() in {p.resolve() for p in _sqlite_files(settings.state_dir / DB_NAME)}:
+    if db.resolve() in {p.resolve() for p in sqlite_files(settings.state_dir / DB_NAME)}:
         raise ValueError(f"{db} is the live engine's database; replay into another file")
     leaders = Leaders.of(settings)
     events = recorded_events(settings.data_dir, day, settings.symbols, leaders)
-    for leftover in _sqlite_files(db):
+    for leftover in sqlite_files(db):
         leftover.unlink(missing_ok=True)
     models: dict[str, Model] = {}
     set_aside: list[str] = []
@@ -208,27 +210,43 @@ async def replay_day(settings: Settings, day: date, db: Path | None = None) -> R
             )
         else:
             models[name] = model
-    start = datetime.combine(day, time(), KST)
-    engine = await replay(
-        events,
-        db=db,
-        calendar=calendar_store(settings).calendar,
-        symbols=settings.symbols,
-        fee_rate=settings.fee_rate,
-        start=start,
-        until=start + timedelta(days=1) - timedelta(microseconds=1),
-        models=models,
-        budget=Budget.of(settings),
-        min_sample=settings.min_sample,
-        leaders=leaders,
-        regimes=partial(day_regime, settings.data_dir),
-    )
+    engine = await replay_recorded(settings, day, events, db=db, models=models)
     try:
         return ReplayedDay(db, engine.store.summary(), set_aside)
     finally:
         engine.store.close()
 
 
-def _sqlite_files(db: Path) -> list[Path]:
+async def replay_recorded(
+    settings: Settings,
+    day: date,
+    events: Iterable[Event],
+    *,
+    db: Path,
+    models: Mapping[str, Model],
+    algorithms: Sequence[Algorithm] = ALGORITHMS,
+    calendar: MarketCalendar | None = None,
+) -> PredictionEngine:
+    """``day``'s recorded ``events``, all day, through an engine set up as the server's (its
+    settings, calendar and macro regimes) storing into ``db``."""
+    start = datetime.combine(day, time(), KST)
+    return await replay(
+        events,
+        db=db,
+        calendar=calendar or calendar_store(settings).calendar,
+        symbols=settings.symbols,
+        fee_rate=settings.fee_rate,
+        start=start,
+        until=start + timedelta(days=1) - timedelta(microseconds=1),
+        algorithms=algorithms,
+        models=models,
+        budget=Budget.of(settings),
+        min_sample=settings.min_sample,
+        leaders=Leaders.of(settings),
+        regimes=partial(day_regime, settings.data_dir),
+    )
+
+
+def sqlite_files(db: Path) -> list[Path]:
     """A SQLite database and the files WAL mode keeps beside it."""
     return [db, db.with_name(db.name + "-wal"), db.with_name(db.name + "-shm")]

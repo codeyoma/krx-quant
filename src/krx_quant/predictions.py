@@ -321,12 +321,13 @@ class PredictionStore:
         ).fetchone()
         return row is not None
 
-    def count_runs(self, kind: str, since: datetime) -> int:
-        """How many ``kind`` runs were recorded at or after ``since``."""
-        row = self._db.execute(
-            "SELECT COUNT(*) FROM runs WHERE kind = ? AND at >= ?", (kind, iso(since))
-        ).fetchone()
-        count: int = row[0]
+    def count_runs(self, kind: str, since: datetime, algorithm: str | None = None) -> int:
+        """How many ``kind`` runs were recorded at or after ``since``; of one algorithm if given."""
+        sql, params = "SELECT COUNT(*) FROM runs WHERE kind = ? AND at >= ?", [kind, iso(since)]
+        if algorithm is not None:
+            sql += " AND algorithm = ?"
+            params.append(algorithm)
+        count: int = self._db.execute(sql, params).fetchone()[0]
         return count
 
     def last_run(self, kind: str) -> datetime | None:
@@ -460,6 +461,13 @@ class PredictionStore:
             " ORDER BY p.algorithm"
         ).fetchall()
         return [AlgorithmSummary(r[0], *(int(v) for v in r[1:])) for r in rows]
+
+    def status_counts(self, algorithm: str) -> dict[str, int]:
+        """How many of the algorithm's predictions have each status (ok, timed_out, ...)."""
+        rows = self._db.execute(
+            "SELECT status, COUNT(*) FROM predictions WHERE algorithm = ? GROUP BY status", (algorithm,)
+        )
+        return {status: count for status, count in rows}
 
     def algorithms(self) -> set[str]:
         """Every algorithm (and baseline) that ever predicted."""

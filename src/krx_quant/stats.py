@@ -283,6 +283,14 @@ class Entry:
             return None
         return min(low for low in lows if low is not None)
 
+    @property
+    def weakest_lift(self) -> float | None:
+        """The weakest lift: better than every baseline, by how much at least."""
+        values = [t.lift.value for t in self.lifts.values()]
+        if not values or any(v is None for v in values):
+            return None
+        return min(v for v in values if v is not None)
+
 
 @dataclass(frozen=True)
 class Leaderboard:
@@ -350,3 +358,43 @@ def leaderboard(
         [e for e in adjusted if e.algorithm not in chosen],
         [entry(name, records, baselines, fee_rate) for name, records in sorted(baselines.items())],
     )
+
+
+def interval_json(i: Interval | None) -> dict[str, Any] | None:
+    return None if i is None else {"value": i.value, "low": i.low, "high": i.high, "n": i.n}
+
+
+def entry_json(e: Entry) -> dict[str, Any]:
+    s = e.summary
+    out: dict[str, Any] = {
+        "rank": e.rank,
+        "algorithm": e.algorithm,
+        "model_versions": e.model_versions,
+        "n": s.n,
+        "accuracy": interval_json(s.accuracy),
+        "precision": interval_json(s.precision),
+        "coverage": interval_json(s.coverage),
+        "brier": interval_json(s.brier),
+        "pnl": {
+            "trades": s.pnl.trades,
+            "total_ticks": s.pnl.total,
+            "per_trade": interval_json(s.pnl.per_trade),
+        },
+    }
+    if e.lifts:
+        out["lift"] = {
+            "low": e.lift_low,
+            "vs": {
+                name: {
+                    "n": t.lift.n,
+                    "value": t.lift.value,
+                    "low": t.lift.low,
+                    "high": t.lift.high,
+                    "p": t.lift.p,
+                    "q": t.q,
+                    "significant": t.significant,
+                }
+                for name, t in e.lifts.items()
+            },
+        }
+    return out

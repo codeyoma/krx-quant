@@ -258,7 +258,7 @@ Docker 이미지는 `TZ=Asia/Seoul`, `KRX_DATA_DIR=/data`, `KRX_STATE_DIR=/state
 | 08:00 (거래일) | 아직 적용하지 않은 가장 최근 밤의 승격 목록대로 모델을 바꾼다. 바꾸거나, 목록을 쓰지 않으면 텔레그램으로 알린다 |
 | 장중 | 실시간 녹화. 끊김과 지연은 `gaps`에 기록하고 텔레그램으로 알린다. VI 현황은 시가 동시호가부터 장 마감까지 5초마다, 외국인·기관 추정 가집계는 5분마다 조회한다 |
 | 09:01–15:16 매분 | 기준 예측 3종, 알고리즘, 빠른·최종 합의가 예측하고, 4분 뒤 채점한다. `state/engine.sqlite3`에 쌓인다 |
-| 장 마감 10분 뒤 (보통 15:40, 수능일 16:40) | 알고리즘 상태를 점검하고(수습·정식·벤치·복제), 합의 가중치를 다시 계산한다. 은퇴 후보가 있으면 텔레그램으로 알린다 |
+| 장 마감 10분 뒤 (보통 15:40, 수능일 16:40) | 알고리즘 상태를 점검하고(수습·정식·벤치·복제), 합의 가중치를 다시 계산한다. 은퇴 후보가 있으면 텔레그램으로 알린다. 엔진이 시작한 뒤 첫 점검에서는 사전 검증을 기다리는 알고리즘도 알린다(#24) |
 | 장 마감 15분 뒤 (보통 15:45, 수능일 16:45) | 그날 녹화를 파티션마다 합쳐 S3에 올린다 |
 | 20:30 | 휴장일 정보를 갱신하고 1분봉 백필을 돌린다 |
 | 21:00 | 다시 올린다. NXT·애프터마켓의 늦은 데이터와 그날 1분봉이 들어간다 |
@@ -286,7 +286,7 @@ Docker 이미지는 `TZ=Asia/Seoul`, `KRX_DATA_DIR=/data`, `KRX_STATE_DIR=/state
   - `models/<알고리즘>/<버전>.json`: 모델
   - `reports/<날짜>/<알고리즘>.json`: 검증 리포트. 알고리즘 단위 체크포인트다. 학습이 중간에 죽어도 다시 돌리면 끝난 알고리즘은 건너뛴다.
   - `promotions/<날짜>.json`: 승격 목록
-  - `live.json`: 서버가 지금 돌리는 버전. 다음 밤의 champion이다.
+  - `live.json`: 서버가 지금 돌리는 버전. 다음 밤의 champion이다. 사전 검증을 기다리는 알고리즘(#24)의 설치된 모델도 들어간다.
 - 08:00 교체는 아직 적용하지 않은 가장 최근 밤의 목록을, 그날 07:30까지 확정됐고 목록의 모델이 S3에 모두 있을 때만 쓴다. 아니면 전날 모델을 그대로 쓴다. 늦게 확정된 목록은 더 새 밤의 목록이 없으면 다음 날 아침에 쓴다.
   - 목록은 모두 쓰거나 하나도 쓰지 않는다. 모델이 하나라도 S3에 없으면 적용했다고 표시하지 않고, 다음 날 아침에 다시 시도한다.
 
@@ -309,6 +309,23 @@ docker compose exec engine krx-quant rollback granger     # 직전 모델로 되
 - 특정 밤을 다시 돌리려면 `docker compose run --rm --no-deps engine train --day 2026-10-12`. 이미 끝난 밤이면 그 결과를 그대로 보여 주고 텔레그램으로 다시 보내지 않는다.
 
 > **바뀜** (2026-10-10, #45): 모델을 바꾸려면 엔진을 재시작하고, 되돌리려면 `state/models/<이름>.json`을 지우고 재시작했다(기본 모델로만 돌아갔다) → 엔진이 30초마다 모델 파일을 보고 스스로 바꾼다. `krx-quant rollback <이름>`이 직전 모델로 되돌리고, 이력은 `state/models/history.json`과 `versions/`에 남는다. 이유: 08:00 교체와 명령 하나로 되돌리기(#22 요구사항)를 위해서다.
+
+### 새 알고리즘 사전 검증 (#24)
+
+새 알고리즘을 머지하면 06:00 자동 업데이트로 배포되지만 엔진은 그 알고리즘을 바로 돌리지 않는다. 그날 15:40 점검 때 `[알림] 사전 검증 대기: <이름>. …`이 한 번 온다. 그러면 장 시간 밖에서(저녁이나 주말) 다음을 실행한다.
+
+```bash
+docker compose run --rm --no-deps engine prevalidate <이름>
+```
+
+- 녹화된 최근 20거래일을 하루씩 재생한다. 날마다 그 전날까지로 다시 학습하고, 등록된 모든 알고리즘을 같이 돌린다. 하루 재생(`replay`)의 20배쯤 걸리고 CPU를 많이 쓴다. 장중에는 실시간 예측과 CPU를 다투므로 돌리지 않는다. 21:30 밤 학습과도 겹치지 않게 한다. 메모리 2GB 서버에서 엔진과 같이 돌므로 처음 한 번은 `docker stats`로 메모리를 본다.
+- 출력은 검사 네 가지(`features`, `budget`, `correlation`, `stats`)의 결과다. 기준은 [engine-api.md](engine-api.md#사전-검증-24)에 있다.
+- 통과(`passed`, 종료 코드 0)하면 엔진이 다음 봉 마감부터 수습으로 돌린다. 장 시간 밖이면 다음 거래일 첫 봉 마감부터다. 재시작은 필요 없다.
+- 거부(`refused`, 종료 코드 1)되면 엔진은 계속 기다린다. 고친 커밋이 배포된 뒤 다시 돌린다.
+- 결과는 `state/prevalidations/<이름>.json`(리포트)과 `state/prevalidation-<이름>.sqlite3`(재생한 예측)에 남는다. 실시간 DB와 순위표는 바뀌지 않는다.
+- 녹화가 20거래일보다 적으면 있는 날만 쓴다. 10거래일보다 적으면 리포트는 남지만 통과하지 못한다(`days` 검사). 녹화는 2026-10-08에 시작했다.
+- 통과는 그때의 코드에만 유효하다. 통과한 뒤 엔진이 돌리기 전에 그 알고리즘의 코드가 바뀌어 배포되면 다시 기다린다. 다시 돌린다.
+- 같은 알고리즘을 동시에 두 번 돌리지 않는다. 같은 DB와 리포트 파일에 쓴다.
 
 ## 4. 업데이트 배포
 
@@ -365,6 +382,7 @@ docker compose logs --tail 200 engine
 | `[장애] 장 마감 데이터 업로드가 ... 실패했습니다` | 로그의 `could not archive ...` | 1. AWS 키, `KRX_OBJECT_STORE` 버킷 이름, IAM 정책을 확인한다.<br>2. 고친 뒤 `docker compose run --rm engine archive`를 돌린다. 다시 돌려도 안전하다.<br>3. 다음 업로드가 성공하면 `[복구]`가 온다. |
 | `[장애] 엔진 API를 열지 못했습니다` | 로그의 `Engine API not started on ...` | 녹화와 예측은 계속한다. 다른 프로세스가 8080을 쓰는지 확인하고 `docker compose up -d`로 다시 띄운다. |
 | 알고리즘을 다시 학습하고 싶다 | 밤 학습 결과는 텔레그램과 `/v1/status`의 `training` | 밤 학습이 매일 한다. 당장 바꾸려면 알고리즘마다(`newton`, `gauss`, `granger`, `markov`, `turing`) `docker compose run --rm --no-deps engine fit <이름>`. 엔진이 1분 안에 새 모델로 바꾼다. 되돌리려면 `docker compose exec engine krx-quant rollback <이름>`(위 "밤 학습과 모델 교체"). |
+| `[알림] 사전 검증 대기: <이름>. 검증을 통과해야 돌기 시작합니다. ...` | `curl -s http://krx-quant:8080/v1/algorithms`에 그 이름이 없다 | 새로 등록된 알고리즘이 사전 검증을 기다린다. 장 시간 밖에서 `docker compose run --rm --no-deps engine prevalidate <이름>`(3장 "새 알고리즘 사전 검증"). 엔진이 다시 시작할 때마다 한 번 온다. |
 | `[알림] <이름> 은퇴 후보: ...` | `curl -s http://krx-quant:8080/v1/algorithms`의 `status` 이력, `/v1/algorithms/<이름>/stats?period=20d` | 벤치 60거래일 동안 회복하지 못했다. 은퇴시키려면 `docker compose exec engine krx-quant retire <이름>`. 기록은 남고, 엔진은 다음 봉 마감부터 돌리지 않는다. 되돌리려면 `krx-quant unretire <이름>`(수습부터 다시). |
 | `WARNING krx_quant.engine: <이름> skipped at ... for the CPU budget` 또는 `<이름> took over 30.0s` 로그가 잦다 | `docker stats`로 CPU 사용률, DB의 `runs` 테이블(`kind`가 `cpu_budget`) | 알고리즘 계산이 서버에 버겁다. 텔레그램 알림은 없다. 4GB 요금제로 올리거나 `KRX_CPU_BUDGET_SECONDS`를 조정한다. |
 | `[장애] 매크로 출처 <ecos/fred/yahoo/kis>가 3번 연속 실패했습니다: <이유>` | 로그의 `macro source ... failed` | 키가 틀렸으면(`ECOS INFO-100`, `FRED 400 ... api_key`) `.env`를 고친다. `HTTP 5xx`나 연결 실패는 출처 쪽 장애다. 다음 거래일 07:30에 다시 읽고, 응답하면 `[복구] 매크로 출처 …가 다시 응답합니다.`가 온다. 그동안 그 출처의 지표 없이 국면을 정한다. |
@@ -420,6 +438,8 @@ docker compose logs --tail 200 engine
 | `market_calendar.json` | KIS 휴장일 조회 캐시 |
 | `engine.sqlite3`, `-wal`, `-shm` | 예측, 채점, 상태, 합의 가중치. 테이블은 [engine-api.md](engine-api.md#저장-stateenginesqlite3)에 있다. 스키마 버전은 `PRAGMA user_version`이다 |
 | `replay-<날짜>.sqlite3` | `krx-quant replay`의 결과 |
+| `prevalidation-<알고리즘>.sqlite3` | `krx-quant prevalidate`가 재생한 예측과 채점. 다시 돌리면 새로 만든다 |
+| `prevalidations/<알고리즘>.json` | 사전 검증 리포트(`passed`, 검사별 결과, 통계). 엔진이 봉 마감마다 기다리는 알고리즘의 것을 읽는다([engine-api.md](engine-api.md#사전-검증-24)) |
 | `models/<알고리즘>.json` | 엔진이 지금 돌리는 모델: `version`, `params`, `trained`, `trained_until`. 없으면 기본 모델 |
 | `models/versions/<알고리즘>/<버전>.json` | 설치한 적 있는 모든 모델. `rollback`이 여기서 읽는다 |
 | `models/history.json` | 설치와 되돌리기 이력. 항목마다 `at`, `algorithm`, `version`(기본 모델이면 `null`), `why`(`fit`, `promotion <날짜>`, `rollback from <버전>`, `installed before`) |
@@ -445,7 +465,7 @@ docker compose logs --tail 200 engine
 | `models/<알고리즘>/<버전>.json` | 밤 학습의 challenger와 서버가 돌린 모델. 형식은 `state/models/<알고리즘>.json`과 같다 |
 | `reports/<날짜>/<알고리즘>.json` | 그 밤의 알고리즘별 검증 리포트이자 체크포인트: `algorithm`, `day`, `training_days`, `validation_days`, `champion`(`version`, `loss`), `challenger`(`version`, `loss`, `trained`), `promoted`, `reason`, `reference_prices`(학습·검증일마다 `mid`: 녹화 중간가, `close`: 백필 종가), `samples`(`validation`: 검증 표본 수, 검증까지 간 경우만). 학습하지 못했거나 검증할 정답이 없으면 `champion`, `challenger`가 `null`이다 |
 | `promotions/<날짜>.json` | 그 밤의 승격 목록: `day`, `finalized_at`(확정 시각), `promoted`(알고리즘 → 버전), `reports`(위 리포트 전부). 모든 알고리즘이 끝난 뒤 한 번 쓴다 |
-| `live.json` | 서버가 지금 돌리는 버전(알고리즘 → 버전, 기본 모델이면 `<이름>-default`). 다음 밤의 champion이다 |
+| `live.json` | 서버가 지금 돌리는 버전(알고리즘 → 버전, 기본 모델이면 `<이름>-default`). 다음 밤의 champion이다. 사전 검증을 기다리는 알고리즘은 돌기 시작할 때 쓸 모델이다(#24) |
 
 - 객체마다 내용의 SHA-256을 함께 둔다. S3에서는 객체 메타데이터 `sha256`이고, 로컬 폴더에서는 파일에서 계산한다. 업로드와 밤 학습은 이 값으로 같은 파일인지 본다.
 - 엔진의 IAM 사용자는 객체를 지울 수 없다. 덮어쓴 이전 버전은 S3 버전 관리로 30일 남는다(2.1).

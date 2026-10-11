@@ -22,6 +22,11 @@ After each day's close (+10 minutes) the algorithms' statuses are reviewed by th
 lifecycle rules (``lifecycle.py``), a retired algorithm is no longer run, and the
 consensus weights are refitted.
 
+Live, a new algorithm runs only once ``admits`` lets it (its pre-validation passed,
+``prevalidation.py``): from the next bar close it starts on probation. Until then it is
+not run, listed or reviewed; the first review after the engine starts alerts it once.
+An algorithm the engine has already enrolled always runs.
+
 The symbols' bars and reference prices, and the bars of the series that may lead them
 (``features.Leaders``: futures, indices, US daytime trades, ETFs), come from the Market
 View (``market_view.py``) as they stood at the bar close. Training on a recorded day goes
@@ -223,18 +228,22 @@ class PredictionEngine:
         leaders: Leaders | None = None,
         signals: Signals | None = None,
         regimes: Regimes | None = None,
+        admits: Callable[[Algorithm], bool] | None = None,
     ) -> None:
         self.store = store
         self.calendar = calendar
         self.symbols = tuple(symbols)
         self.fee_rate = fee_rate
         self.clock = clock
-        self.algorithms = register(algorithms)
+        self.registered = register(algorithms)
         given = models or {}
-        self.models = {a.name: given.get(a.name) or a.default_model() for a in self.algorithms}
+        self.models = {a.name: given.get(a.name) or a.default_model() for a in self.registered}
+        self._admits = admits  # without: every registered algorithm runs (replay, tests)
+        self.algorithms: tuple[Algorithm, ...] = ()  # the registered ones that run, in order
+        self._feature_names: list[str] = []
+        self._told_waiting: set[str] = set()  # waiting algorithms already alerted
         self._budget = budget or Budget()
         self._features = feature_store or FeatureStore()
-        self._feature_names = sorted({f for a in self.algorithms for f in a.features})
         self._cost: dict[str, float] = {}  # expected seconds per bar close, by algorithm
         self._busy: set[str] = set()  # algorithms still working past their budget
         self._special = SpecialSituations(calendar)
@@ -256,14 +265,24 @@ class PredictionEngine:
         self._regime_days: dict[date, str | None] = {}
         # Reviews pick up where the last one left off: one missed while down runs at start.
         self._reviewed_through = store.last_run("review") or self._last_tick
-        self._enroll()
+        self._admit()
 
-    def _enroll(self) -> None:
-        """An algorithm run for the first time starts on probation."""
+    def _admit(self) -> None:
+        """Run the algorithms enrolled before and the new ones admitted; a new one starts on
+        probation."""
         known = self.store.statuses()
-        for a in self.algorithms:
+        admitted = [a for a in self.registered if a.name in known or self._admits is None or self._admits(a)]
+        if tuple(admitted) == self.algorithms:
+            return
+        for a in admitted:
             if a.name not in known:
                 self.store.add_status(a.name, self.clock.now(), None, Status.PROBATION, "registered")
+        self.algorithms = tuple(admitted)
+        self._feature_names = sorted({f for a in self.algorithms for f in a.features})
+
+    def waiting(self) -> list[str]:
+        """The registered algorithms not run yet: their pre-validation has not passed."""
+        return [a.name for a in self.registered if a not in self.algorithms]
 
     def on_event(self, feed: str, row: dict[str, Any]) -> None:
         self._market.on_event(feed, row)
@@ -380,6 +399,15 @@ class PredictionEngine:
             )
             if await self._deliver(text):  # else asked again at the next review
                 self.store.add_run("retire_candidate", at, name, text)
+        untold = [name for name in self.waiting() if name not in self._told_waiting]
+        if untold:
+            names = ", ".join(untold)
+            text = (
+                f"사전 검증 대기: {names}. 검증을 통과해야 돌기 시작합니다. "
+                f"서버에서 장 시간 밖에 krx-quant prevalidate <이름>"
+            )
+            if await self._deliver(text):
+                self._told_waiting.update(untold)
         await self._refit_weights(at)
         # Last: a review that failed part way is run again after a restart.
         self.store.add_run("review", at, None, f"{len(result.changes)} status changes")
@@ -411,6 +439,7 @@ class PredictionEngine:
         return await self.notify(text)
 
     async def _predict(self, bar_close: datetime) -> None:
+        self._admit()
         day_start = datetime.combine(bar_close.date(), time(), KST)
         at_close: dict[str, _AtClose] = {}
         frozen = self._market.at_close(bar_close)

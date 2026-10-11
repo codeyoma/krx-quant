@@ -161,6 +161,7 @@ uv run python -c "import glob, pyarrow.parquet as pq; d = sorted(glob.glob('data
 | `archive [--recheck]` | 녹화한 날을 합쳐 `KRX_OBJECT_STORE`에 올린다. `--recheck`는 모든 파일을 저장소와 비교한다 | 필요(쓰지는 않는다) |
 | `replay <YYYY-MM-DD> [--db 경로]` | 녹화한 하루를 엔진으로 다시 돌려 별도 DB에 쓴다 | 없어도 된다 |
 | `fit <알고리즘> [--days N]` | 최근 날들로 학습해 `state/models/`에 설치한다. 녹화된 날은 녹화 이벤트(중간가), 백필만 있는 날은 1분봉(종가)으로 | 없어도 된다 |
+| `prevalidate <알고리즘> [--days N]` | 새 알고리즘을 녹화된 최근 20거래일(최소 10일)로 재생해 사전 검증한다. 통과하면 엔진이 다음 봉 마감부터 수습으로 돌린다. 거부되면 종료 코드 1([docs/engine-api.md](docs/engine-api.md#사전-검증-24)) | 없어도 된다 |
 | `train [--day YYYY-MM-DD]` | 밤 학습 한 번. `--day`가 없으면 Object Store에 모든 종목의 백필 1분봉이나 녹화된 체결이 있는 가장 최근 날 | 없어도 된다 |
 | `macro` | 오늘의 매크로 지표를 한 번 읽고 국면을 정해 `data/macro`에 기록한다(#8). 실패한 출처가 있으면 종료 코드 1 | 없어도 된다 |
 | `rollback <알고리즘>` | 직전 모델로 되돌린다 | 없어도 된다 |
@@ -170,7 +171,7 @@ uv run python -c "import glob, pyarrow.parquet as pq; d = sorted(glob.glob('data
 | `fake-kis [--port 18080] [--host 127.0.0.1] [--trades]` | 가짜 KIS 서버(아래 "키 없이 확인하기") | 없어도 된다 |
 | `demo-engine [--port 8090] [--host 127.0.0.1] [--db state/demo.sqlite3]` | 데모 엔진 API(아래 "화면을 만들 때") | 없어도 된다 |
 
-종료 코드: 0은 성공이다. 2는 설정 오류(`configuration error: ...`)나 잘못된 인자다. 1은 KIS 오류(`KIS error: ...`, Docker가 다시 띄운다)이거나 명령이 할 일을 못 한 경우다. 예: 업로드에 실패한 파티션, 학습할 1분봉 없음, 되돌릴 모델 없음, 텔레그램 전송 실패.
+종료 코드: 0은 성공이다. 2는 설정 오류(`configuration error: ...`)나 잘못된 인자다. 1은 KIS 오류(`KIS error: ...`, Docker가 다시 띄운다)이거나 명령이 할 일을 못 한 경우다. 예: 업로드에 실패한 파티션, 학습할 1분봉 없음, 되돌릴 모델 없음, 텔레그램 전송 실패, 사전 검증 거부.
 
 ## 문서
 
@@ -192,7 +193,7 @@ uv run python -c "import glob, pyarrow.parquet as pq; d = sorted(glob.glob('data
 | P2 | 예측·채점 핵심 | 완료: #9–#19. 호가 피처를 쓰는 Turing은 녹화가 쌓인 뒤(#55) |
 | P3 | Fincept 화면, 빌드 | 진행 중. 첫 화면과 개인 빌드(#20)는 됐다. 나머지(#21)가 남았다 |
 | P4 | 밤 학습 | 진행 중. 상시 서버의 밤 학습과 08:00 교체(PR #45), 녹화 이벤트로 학습하기(#22, PR #48)는 됐다. EC2 Spot과 비용 상한(#23)이 남았다 |
-| P5 | 호가 알고리즘, 재생 테스트 | 하루 재생(`replay`)만 있다. Kalman(#25), Shannon(#26), Poisson(#27), 사전 검증 도구(#24) |
+| P5 | 호가 알고리즘, 재생 테스트 | 하루 재생(`replay`)과 새 알고리즘 사전 검증(`prevalidate`, #24)이 있다. 남은 것: Kalman(#25), Shannon(#26), Poisson(#27) |
 
 ## 비밀값
 

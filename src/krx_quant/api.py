@@ -56,10 +56,10 @@ from krx_quant.pricing import flat_ticks, tick_size
 from krx_quant.stats import (
     DEFAULT_MIN_SAMPLE,
     CalibrationBin,
-    Entry,
-    Interval,
     Scored,
     entry,
+    entry_json,
+    interval_json,
     leaderboard,
     scored_by_algorithm,
     split,
@@ -403,9 +403,9 @@ async def _leaderboard(request: web.Request) -> web.Response:
         return {
             **query.describe(),
             "min_sample": min_sample,
-            "ranked": [_entry_json(e) for e in board.ranked],
-            "unranked": [_entry_json(e) for e in board.unranked],
-            "baselines": [_entry_json(e) for e in board.baselines],
+            "ranked": [entry_json(e) for e in board.ranked],
+            "unranked": [entry_json(e) for e in board.unranked],
+            "baselines": [entry_json(e) for e in board.baselines],
         }
 
     body = await _stats(request, ("leaderboard",), query, build)
@@ -446,7 +446,7 @@ async def _algorithm_stats(request: web.Request) -> web.Response:
             for r in records:
                 groups.setdefault(key(r), []).append(r)
             return {
-                k: _entry_json(entry(name, g, baselines, engine.fee_rate)) for k, g in sorted(groups.items())
+                k: entry_json(entry(name, g, baselines, engine.fee_rate)) for k, g in sorted(groups.items())
             }
 
         return {
@@ -454,7 +454,7 @@ async def _algorithm_stats(request: web.Request) -> web.Response:
             **query.describe(),
             "min_sample": min_sample,
             "overall": {
-                **_entry_json(overall),
+                **entry_json(overall),
                 "calibration": [_bin_json(b) for b in overall.summary.calibration],
             },
             "by_symbol": by(lambda r: r.symbol),
@@ -496,53 +496,13 @@ async def _stats(
     return body
 
 
-def _interval_json(i: Interval | None) -> dict[str, Any] | None:
-    return None if i is None else {"value": i.value, "low": i.low, "high": i.high, "n": i.n}
-
-
-def _entry_json(e: Entry) -> dict[str, Any]:
-    s = e.summary
-    out: dict[str, Any] = {
-        "rank": e.rank,
-        "algorithm": e.algorithm,
-        "model_versions": e.model_versions,
-        "n": s.n,
-        "accuracy": _interval_json(s.accuracy),
-        "precision": _interval_json(s.precision),
-        "coverage": _interval_json(s.coverage),
-        "brier": _interval_json(s.brier),
-        "pnl": {
-            "trades": s.pnl.trades,
-            "total_ticks": s.pnl.total,
-            "per_trade": _interval_json(s.pnl.per_trade),
-        },
-    }
-    if e.lifts:
-        out["lift"] = {
-            "low": e.lift_low,
-            "vs": {
-                name: {
-                    "n": t.lift.n,
-                    "value": t.lift.value,
-                    "low": t.lift.low,
-                    "high": t.lift.high,
-                    "p": t.lift.p,
-                    "q": t.q,
-                    "significant": t.significant,
-                }
-                for name, t in e.lifts.items()
-            },
-        }
-    return out
-
-
 def _bin_json(b: CalibrationBin) -> dict[str, Any]:
     return {
         "low": b.low,
         "high": b.high,
         "count": b.count,
         "mean_p": b.mean_p,
-        "observed": _interval_json(b.observed),
+        "observed": interval_json(b.observed),
     }
 
 

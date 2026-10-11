@@ -133,8 +133,8 @@ class _Judge:
     def decide(self, name: str, status: Status, held: list[date], earlier: list[str]) -> Change | None:
         """The change ``name``'s status is due for, if any."""
         if status in (Status.PROBATION, Status.CLONE):
-            measured = _correlations(name, earlier, self.rows(held, True))
-            twin = max(measured.items(), key=lambda kv: kv[1], default=None)
+            measured = correlations(name, earlier, self.rows(held, True))
+            twin = most_correlated(measured)
             if twin is not None and twin[1] > CLONE_CORRELATION:
                 if status is Status.PROBATION:
                     return Change(
@@ -156,7 +156,7 @@ class _Judge:
                     )
         elif status is Status.ACTIVE:
             judged = self._judged(name, self.recent)
-            weakest = None if judged is None else _weakest(judged)
+            weakest = None if judged is None else judged.weakest_lift
             if weakest is not None and weakest <= 0:
                 return Change(
                     name,
@@ -186,13 +186,13 @@ class _Judge:
         return None if judged is None else judged.lift_low
 
 
-def _weakest(e: Entry) -> float | None:
-    values = [t.lift.value for t in e.lifts.values()]
-    return None if any(v is None for v in values) else min(v for v in values if v is not None)
+def most_correlated(measured: Mapping[str, float]) -> tuple[str, float] | None:
+    """The algorithm with the highest correlation, and that correlation; None if none."""
+    return max(measured.items(), key=lambda kv: kv[1], default=None)
 
 
-def _correlations(name: str, earlier: Sequence[str], rows: list[dict[str, Any]]) -> dict[str, float]:
-    """``name``'s correlation of p_up − p_down with each earlier algorithm it can be measured
+def correlations(name: str, others: Sequence[str], rows: list[dict[str, Any]]) -> dict[str, float]:
+    """``name``'s correlation of p_up − p_down with each of ``others`` it can be measured
     against: enough bar closes both predicted, and neither always the same.
     """
     scores: dict[str, dict[tuple[str, str], float]] = {}
@@ -202,7 +202,7 @@ def _correlations(name: str, earlier: Sequence[str], rows: list[dict[str, Any]])
         )
     mine = scores.get(name, {})
     measured: dict[str, float] = {}
-    for other in earlier:
+    for other in others:
         theirs = scores.get(other, {})
         shared = sorted(mine.keys() & theirs.keys())
         if len(shared) < MIN_PAIRS_TESTED:

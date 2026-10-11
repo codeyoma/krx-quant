@@ -119,6 +119,15 @@ def days_with_data(data_dir: Path, symbols: Sequence[str]) -> list[date]:
     return sorted(found)
 
 
+def finished_days(data_dir: Path, symbols: Sequence[str], now: datetime) -> list[date]:
+    """The days with data, oldest first. Today counts only once its recording is archived
+    (21:00): before that it is still being recorded.
+    """
+    local = now.astimezone(KST)
+    archived = local.time() >= NIGHTLY_ARCHIVE
+    return [d for d in days_with_data(data_dir, symbols) if d < local.date() or archived]
+
+
 def samples(
     bar_days: BarDays,
     calendar: MarketCalendar,
@@ -347,11 +356,7 @@ def fit_algorithm(
     if algorithm is None:
         raise ValueError(f"unknown algorithm {name!r}; registered: {', '.join(a.name for a in ALGORITHMS)}")
     local = (now or datetime.now(KST)).astimezone(KST)
-    finished = [
-        d
-        for d in days_with_data(settings.data_dir, settings.symbols)
-        if d < local.date() or local.time() >= NIGHTLY_ARCHIVE
-    ]
+    finished = finished_days(settings.data_dir, settings.symbols, local)
     calendar = calendar_store(settings).calendar
     leaders = Leaders.of(settings)
     loaded: dict[date, TrainingDay] = {}
