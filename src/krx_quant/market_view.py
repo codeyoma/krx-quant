@@ -16,6 +16,7 @@ that event changes them: a prediction made late never sees a trade it could not 
 from __future__ import annotations
 
 import bisect
+import math
 from array import array
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
@@ -198,10 +199,18 @@ class _Options:
             i = bisect.bisect_left(trades, at, key=_received)
             if i and trades[i - 1].received_at >= at - OPTION_STALE:
                 latest.append(trades[i - 1])
-        calls = [(abs(t.delta - 0.5), t.iv) for t in latest if t.delta > 0]
-        puts = [(abs(t.delta + 0.5), t.iv) for t in latest if t.delta < 0]
-        sides = [min(side)[1] for side in (calls, puts) if side]
+        calls = [t for t in latest if t.delta > 0]
+        puts = [t for t in latest if t.delta < 0]
+        sides = [_nearest_iv(side, target) for side, target in ((calls, 0.5), (puts, -0.5)) if side]
         return sum(sides) / len(sides) if sides else None
+
+
+def _nearest_iv(trades: Sequence[_OptionTrade], delta: float) -> float:
+    """The implied volatility of the option whose delta is nearest ``delta``; the mean of
+    those equally near, so no IV wins a tie."""
+    nearest = min(abs(t.delta - delta) for t in trades)
+    ivs = [t.iv for t in trades if math.isclose(abs(t.delta - delta), nearest)]
+    return sum(ivs) / len(ivs)
 
 
 def _received(trade: _OptionTrade) -> datetime:

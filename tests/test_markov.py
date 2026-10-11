@@ -307,6 +307,20 @@ async def test_the_atm_implied_vol_is_the_call_and_put_nearest_the_money(tmp_pat
     assert iv[12] is None
 
 
+async def test_options_equally_near_the_money_count_alike(tmp_path: Path) -> None:
+    probe = FixedAlgorithm("probe", features=("atm_iv",), unique=("atm_iv",))
+    events = [
+        *busy_morning(end="09:02:00"),
+        option_trade(at("09:00:20"), "C1", 24.0, 0.55),
+        option_trade(at("09:00:30"), "C2", 20.0, 0.45),  # as near 0.5: neither IV wins
+        option_trade(at("09:00:40"), "P2", 22.0, -0.5),
+    ]
+
+    await run(tmp_path / "engine.db", events, until=at("09:01:00"), algorithms=[probe])
+
+    assert probe.seen[0]["atm_iv"] == pytest.approx(((24.0 + 20.0) / 2 + 22.0) / 2)
+
+
 async def test_training_reads_the_atm_implied_vol_as_the_engine_does(tmp_path: Path) -> None:
     samples = recorded_samples(options_morning(), CALENDAR, DAY, ("005930",), ("atm_iv",), FEE, Leaders())
 
