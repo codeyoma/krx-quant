@@ -8,12 +8,20 @@ last night's training shows as applied, the morning's macro read decided risk_of
 has a model installed and rolled back, and the KIS status is made up (one feed in a gap).
 The clock stays at 10:30. Every answer is the same each run, except the CPU budget's
 timings, which are measured.
+
+With a pace (``demo-engine --pace SECONDS``), the morning is replayed at once only up to
+10:00; the API opens there, and the rest goes on a minute every ``pace`` seconds, so the
+stream sends predictions, the consensus and outcomes as they are made (#21). It ends at
+10:30 as the unpaced demo does, with the same answers.
 """
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import random
 import shutil
+from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, date, datetime, time, timedelta
 from functools import partial
 from pathlib import Path
@@ -22,7 +30,8 @@ from aiohttp import web
 
 from krx_quant.algorithms import ALGORITHMS, Model
 from krx_quant.api import create_app
-from krx_quant.engine import Event
+from krx_quant.clock import FakeClock
+from krx_quant.engine import Event, PredictionEngine
 from krx_quant.feeds import BOOK, INDEX, KOSPI200_FUTURES, TRADE, VI_STATUS, Feed
 from krx_quant.feeds.base import KST
 from krx_quant.lifecycle import Status
@@ -33,12 +42,13 @@ from krx_quant.nightly import Night
 from krx_quant.predictions import DB_NAME, PredictionStore, iso
 from krx_quant.recorder import ParquetRecorder
 from krx_quant.regime import RegimeRules
-from krx_quant.replay import replay
+from krx_quant.replay import replay, replay_into
 from krx_quant.swap import NightStatus
 
 DEMO_DAY = date(2026, 10, 12)
 DEMO_SYMBOLS = ("005930", "000660", "009150")
 _START, _END = time(9, 0), time(10, 30)
+_PACED_FROM = time(10, 0)  # a paced demo opens here and goes on a minute at a time
 _FEE = 0.00015
 # Each symbol's mid-point at the open and its tick.
 _OPENS = {"005930": (81_250, 100), "000660": (201_000, 500), "009150": (150_050, 100)}
@@ -84,11 +94,14 @@ def demo_events() -> list[Event]:
     return sorted(events, key=lambda e: e[1]["received_at"])
 
 
-async def demo_app(db: Path) -> web.Application:
+async def demo_app(db: Path, pace: float | None = None) -> web.Application:
     """The Engine API on the demo morning, replayed into ``db`` (replaced), with the
     morning's macro read and the model history in ``<db stem>-data/`` (``macro/`` and
     ``state/models/``, replaced). Refuses the live engine's database name, so a mistyped
     path cannot replace it.
+
+    With ``pace``, the API opens at 10:00 and the morning goes on to 10:30 a minute every
+    ``pace`` seconds while it is served.
     """
     # Case-insensitive: on macOS and Windows ENGINE.SQLITE3 is the same file.
     if db.name.casefold() in {n.casefold() for n in (DB_NAME, f"{DB_NAME}-wal", f"{DB_NAME}-shm")}:
@@ -102,21 +115,59 @@ async def demo_app(db: Path) -> web.Application:
     store.close()
     data_dir = db.with_name(f"{db.stem}-data")
     write_demo_macro(data_dir)  # first: Markov reads the morning's regime
+    events = demo_events()
     engine = await replay(
-        demo_events(),
+        events,
         db=db,
         calendar=MarketCalendar({DEMO_DAY: True}),
         symbols=DEMO_SYMBOLS,
         fee_rate=_FEE,
         start=start,
-        until=_at(_END),
+        until=_at(_END if pace is None else _PACED_FROM),
         regimes=partial(day_regime, data_dir),
     )
     reports = [{"algorithm": a.name, "promoted": False, "reason": "demo"} for a in ALGORITHMS]
     night = Night(date(2026, 10, 9), "2026-10-09T21:31:40+09:00", {}, reports)
     engine.training = NightStatus(night, True, "applied").as_dict()
     shelf = demo_shelf(data_dir / "state")
-    return create_app(engine, mode="demo", live_status=demo_kis, data_dir=data_dir, shelf=shelf)
+    app = create_app(
+        engine, mode="demo", live_status=lambda: demo_kis(engine.clock.now()), data_dir=data_dir, shelf=shelf
+    )
+    if pace is not None:
+        app.cleanup_ctx.append(partial(_paced, engine, events, pace))
+    return app
+
+
+async def _paced(
+    engine: PredictionEngine, events: Sequence[Event], pace: float, app: web.Application
+) -> AsyncIterator[None]:
+    """While the API is served: the rest of the morning, a minute every ``pace`` seconds."""
+    going = asyncio.create_task(_replay_the_rest(engine, events, pace))
+    yield
+    going.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await going
+
+
+async def _replay_the_rest(engine: PredictionEngine, events: Sequence[Event], pace: float) -> None:
+    """The morning's events after the clock, a minute of them every ``pace`` seconds, to 10:30."""
+    clock = engine.clock
+    assert isinstance(clock, FakeClock)  # replay's
+    minute = clock.now()
+    rest = [e for e in events if e[1]["received_at"] > minute]
+    while minute < _at(_END):
+        await asyncio.sleep(pace)
+        minute += timedelta(minutes=1)
+        due = [e for e in rest if e[1]["received_at"] <= minute]
+        rest = rest[len(due) :]
+        await replay_into(engine, clock, due, until=minute)
+
+
+def demo_morning(pace: float | None) -> str:
+    """The demo's clock in words, for its startup line."""
+    if pace is None:
+        return f"{DEMO_DAY} {_END:%H:%M}"
+    return f"{DEMO_DAY} {_PACED_FROM:%H:%M} to {_END:%H:%M}, a minute every {pace:g} s"
 
 
 def demo_shelf(state_dir: Path) -> Shelf:
@@ -135,9 +186,8 @@ def demo_shelf(state_dir: Path) -> Shelf:
     return shelf
 
 
-def demo_kis() -> dict[str, object]:
-    """A made-up KIS status at 10:30: connected, the member flow of 000660 quiet for 16 minutes."""
-    now = _at(_END)
+def demo_kis(now: datetime) -> dict[str, object]:
+    """A made-up KIS status at ``now``: connected, the member flow of 000660 quiet for 16 minutes."""
     last = {(TRADE.tr_id, s): now - timedelta(seconds=2) for s in DEMO_SYMBOLS}
     last |= {(BOOK.tr_id, s): now - timedelta(seconds=1) for s in DEMO_SYMBOLS}
     last |= {

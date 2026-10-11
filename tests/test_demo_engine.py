@@ -6,8 +6,11 @@ Input: nothing but a database path. Output: the Engine API responses a screen re
 
 from __future__ import annotations
 
+import asyncio
 import socket
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
@@ -18,6 +21,7 @@ from krx_quant.consensus import NAMES as CONSENSUS
 from krx_quant.demo import DEMO_SYMBOLS, demo_app
 from krx_quant.macro import INDICATORS
 from tests.replay_events import get_json
+from tests.test_api_stream import receive_until
 
 
 async def test_the_demo_engine_answers_what_a_screen_reads(tmp_path: Path) -> None:
@@ -59,6 +63,55 @@ async def test_the_demo_is_the_same_every_time(tmp_path: Path) -> None:
             assert await get_json(a, path) == await get_json(b, path)
 
 
+async def test_a_paced_demo_streams_its_last_half_hour_as_it_goes(tmp_path: Path) -> None:
+    paced = await demo_app(tmp_path / "paced.sqlite3", pace=0.05)
+
+    async with TestClient(TestServer(paced)) as client:
+        ws = await client.ws_connect("/v1/stream")
+        events = await receive_until(ws, _a_final_consensus_and_an_outcome_seen(), timeout=30)
+        await ws.close()
+        status = await _until_the_demo_ends(client)
+        made = await get_json(client, "/v1/symbols/005930/predictions?limit=40&algorithm=newton")
+
+    assert any(e["type"] == "prediction" for e in events)
+    assert all(e["at"] >= "2026-10-12T10:00:00+09:00" for e in events if e["type"] != "health"), "after 10:00"
+    assert status["last_bar_close"] == "2026-10-12T10:30:00+09:00", "it goes on to 10:30, then stays"
+    unpaced = await demo_app(tmp_path / "unpaced.sqlite3")
+    async with TestClient(TestServer(unpaced)) as client:
+        assert await get_json(client, "/v1/symbols/005930/predictions?limit=40&algorithm=newton") == made, (
+            "the same morning as without the pace"
+        )
+
+
+async def test_a_paced_demo_starts_at_10(tmp_path: Path) -> None:
+    paced = await demo_app(tmp_path / "paced.sqlite3", pace=60)
+
+    async with TestClient(TestServer(paced)) as client:
+        status = await get_json(client, "/v1/status")
+
+    assert status["now"] == "2026-10-12T10:00:00+09:00"
+    assert status["last_bar_close"] == "2026-10-12T10:00:00+09:00"
+
+
+def _a_final_consensus_and_an_outcome_seen() -> Callable[[dict[str, Any]], bool]:
+    seen: set[tuple[str, str | None]] = set()
+
+    def done(event: dict[str, Any]) -> bool:
+        seen.add((event["type"], event.get("kind")))
+        return {("consensus", "final"), ("outcome", None)} <= seen
+
+    return done
+
+
+async def _until_the_demo_ends(client: TestClient[Any, Any]) -> dict[str, Any]:
+    async with asyncio.timeout(30):
+        while True:
+            status: dict[str, Any] = await get_json(client, "/v1/status")
+            if status["now"] >= "2026-10-12T10:30:00+09:00":
+                return status
+            await asyncio.sleep(0.05)
+
+
 @pytest.mark.parametrize("name", ["engine.sqlite3", "engine.sqlite3-wal", "ENGINE.SQLITE3"])
 async def test_the_demo_never_replaces_the_live_engines_database(tmp_path: Path, name: str) -> None:
     live = tmp_path / name
@@ -85,3 +138,15 @@ def test_a_taken_port_is_a_clear_error(
 
     assert code == 1
     assert f"demo Engine API not started on 127.0.0.1:{port}" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("pace", ["0", "-1", "nan", "inf", "1e10000"])
+def test_a_pace_is_a_finite_number_of_seconds_more_than_0(
+    tmp_path: Path, pace: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # An infinite pace would leave the demo at 10:00 for good, streaming nothing.
+    with pytest.raises(SystemExit) as exit:
+        main(["demo-engine", "--pace", pace, "--db", str(tmp_path / "demo.sqlite3")])
+
+    assert exit.value.code == 2, "a wrong argument, as the README's exit codes say"
+    assert "seconds per minute of the demo morning: a finite number more than 0" in capsys.readouterr().err

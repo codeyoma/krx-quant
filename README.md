@@ -130,9 +130,12 @@ KIS_APP_KEY=test-app-key KIS_APP_SECRET=test-app-secret KIS_REST_URL=http://127.
 
 ```bash
 uv run krx-quant demo-engine            # http://127.0.0.1:8090/v1/status
+uv run krx-quant demo-engine --pace 2   # 10:00에 열고 10:30까지 1분을 2초마다 이어 재생하며 스트림을 보낸다
 ```
 
 서버 없이 엔진 API를 띄운다(#20). 지어낸 아침(2026-10-12 09:00–10:30, 3종목, KOSPI·선물, VI 한 번)을 실제 엔진으로 재생하고, 실제 API 코드로 답한다. 늘 같은 응답이다. 다만 `status.cpu`의 시간은 실제로 재서 실행마다 조금 다르다. 시계는 10:30에 멈춰 있고, `status.mode`는 `demo`다. 모든 알고리즘을 정식(`active`)으로 두어 합의도 나온다. 그날 07:30 매크로 읽기는 위험회피(`risk_off`)로 정해져 있다. KIS 상태(`status.kis`, 결측 피드 하나)와 Newton의 모델 이력도 가상 값으로 보인다. Fincept 화면의 엔진 주소를 `http://127.0.0.1:8090`으로 바꿔 붙인다. DB는 `state/demo.sqlite3`(`--db`)에 새로 만들고, 매크로 기록과 모델 이력은 그 옆 `state/demo-data/`(`macro/`, `state/models/`)에 새로 쓴다. 응답은 실제 엔진과 같은 스키마를 지킨다.
+
+`--pace 초`를 주면(#21) 10:00까지만 미리 재생하고 API를 연 뒤, 10:30까지 1분을 그 초마다 이어 재생한다. 그동안 스트림(`/v1/stream`)으로 예측, 합의, 채점이 실제처럼 와서 화면의 스트림, 차트 갱신, 재연결을 시험할 수 있다. KIS 상태의 시각도 데모 시계를 따른다. 10:30에 끝나면 `--pace` 없이 띄운 데모와 같은 답을 낸다. 데모 아침의 최종 합의는 50%를 거의 넘지 않아 화면의 신호 알림은 나오지 않는다.
 
 ### 실제 KIS로 확인하기 (장중)
 
@@ -169,7 +172,7 @@ uv run python -c "import glob, pyarrow.parquet as pq; d = sorted(glob.glob('data
 | `test-alert` | 텔레그램에 `[테스트]` 메시지를 보낸다 | 필요(쓰지는 않는다) |
 | `notify <글>` | 텔레그램에 `[알림] <글>`을 보낸다. `deploy/auto-update.sh`가 쓴다 | 없어도 된다 |
 | `fake-kis [--port 18080] [--host 127.0.0.1] [--trades]` | 가짜 KIS 서버(아래 "키 없이 확인하기") | 없어도 된다 |
-| `demo-engine [--port 8090] [--host 127.0.0.1] [--db state/demo.sqlite3]` | 데모 엔진 API(아래 "화면을 만들 때") | 없어도 된다 |
+| `demo-engine [--port 8090] [--host 127.0.0.1] [--db state/demo.sqlite3] [--pace 초]` | 데모 엔진 API(아래 "화면을 만들 때"). `--pace`는 10:00부터 이어 재생하며 스트림을 보낸다 | 없어도 된다 |
 
 종료 코드: 0은 성공이다. 2는 설정 오류(`configuration error: ...`)나 잘못된 인자다. 1은 KIS 오류(`KIS error: ...`, Docker가 다시 띄운다)이거나 명령이 할 일을 못 한 경우다. 예: 업로드에 실패한 파티션, 학습할 1분봉 없음, 되돌릴 모델 없음, 텔레그램 전송 실패, 사전 검증 거부.
 
@@ -184,14 +187,14 @@ uv run python -c "import glob, pyarrow.parquet as pq; d = sorted(glob.glob('data
 
 ## 진행 상황
 
-2026-10-10 기준이다. 이슈는 `gh issue list --state all`로 본다. 자세한 것은 [docs/design.md](docs/design.md) 11장에 있다.
+2026-10-11 기준이다. 이슈는 `gh issue list --state all`로 본다. 자세한 것은 [docs/design.md](docs/design.md) 11장에 있다.
 
 | 단계 | 내용 | 상태 |
 |---|---|---|
 | P0 | 저장소 준비, 설계 문서 | 완료 |
 | P1 | 수집기 | 거의 완료(#2–#6, #8, #30). 남은 것: 첫 거래일 확인(#7), ETF 장중 확인(#29), REST 대체 추가(#28) |
 | P2 | 예측·채점 핵심 | 완료: #9–#19. 호가 피처를 쓰는 Turing은 녹화가 쌓인 뒤(#55) |
-| P3 | Fincept 화면, 빌드 | 진행 중. 첫 화면과 개인 빌드(#20)는 됐다. 나머지(#21)가 남았다 |
+| P3 | Fincept 화면, 빌드 | 구현 완료: 첫 화면과 개인 빌드(#20), 차트·예측 패널·순위표·매크로 줄·엔진 상태·신호 알림·스트림(#21). #21을 담은 개인 빌드는 새 태그로 만든다 |
 | P4 | 밤 학습 | 진행 중. 상시 서버의 밤 학습과 08:00 교체(PR #45), 녹화 이벤트로 학습하기(#22, PR #48)는 됐다. EC2 Spot과 비용 상한(#23)이 남았다 |
 | P5 | 호가 알고리즘, 재생 테스트 | 구현 완료: 하루 재생(`replay`), 새 알고리즘 사전 검증(`prevalidate`, #24), Kalman(#25), Shannon(#26), Poisson(#27). 셋은 녹화 10거래일 뒤 사전 검증을 통과해야 실시간에서 돈다 |
 

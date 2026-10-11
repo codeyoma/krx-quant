@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import itertools
 import logging
+import math
 import signal
 import sys
 from collections.abc import Callable
@@ -19,7 +20,7 @@ from krx_quant.archive import run_archive
 from krx_quant.backfill import run_backfill
 from krx_quant.collector import measure_subscription_limit, run_collector
 from krx_quant.config import Settings, SettingsError
-from krx_quant.demo import demo_app
+from krx_quant.demo import demo_app, demo_morning
 from krx_quant.fake_kis import FakeKis
 from krx_quant.feeds.base import KST
 from krx_quant.kis import KisError
@@ -239,10 +240,21 @@ def _macro() -> int:
     return 1 if macro.failed else 0
 
 
-async def _demo_engine(port: int, host: str, db: Path) -> int:
+def _seconds_per_minute(text: str) -> float:
+    """``--pace``: seconds per minute of the demo morning, a finite number more than 0 (an
+    infinite one would leave the demo at 10:00 for good)."""
+    seconds = float(text)
+    if not (math.isfinite(seconds) and seconds > 0):
+        raise argparse.ArgumentTypeError(
+            f"seconds per minute of the demo morning: a finite number more than 0, not {text}"
+        )
+    return seconds
+
+
+async def _demo_engine(port: int, host: str, db: Path, pace: float | None = None) -> int:
     db.parent.mkdir(parents=True, exist_ok=True)
     try:
-        app = await demo_app(db)
+        app = await demo_app(db, pace)
     except ValueError as e:
         print(e, file=sys.stderr)
         return 1
@@ -254,7 +266,7 @@ async def _demo_engine(port: int, host: str, db: Path) -> int:
         await runner.cleanup()
         print(f"demo Engine API not started on {host}:{port}: {e}", file=sys.stderr)
         return 1
-    print(f"demo Engine API: http://{host}:{port}/v1/status (2026-10-12 10:30, made-up data)", flush=True)
+    print(f"demo Engine API: http://{host}:{port}/v1/status ({demo_morning(pace)}, made-up data)", flush=True)
     try:
         await asyncio.Event().wait()
     finally:
@@ -341,6 +353,11 @@ def main(argv: list[str] | None = None) -> int:
     demo.add_argument("--port", type=int, default=8090)
     demo.add_argument("--host", default="127.0.0.1", help="address to listen on (0.0.0.0: all)")
     demo.add_argument("--db", type=Path, default=Path("state/demo.sqlite3"), help="demo database (replaced)")
+    demo.add_argument(
+        "--pace",
+        type=_seconds_per_minute,
+        help="open at 10:00 and go on to 10:30 a minute every PACE seconds, streaming as it goes",
+    )
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -376,7 +393,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "fake-kis":
             asyncio.run(_fake_kis(args.port, args.host, args.trades))
         elif args.command == "demo-engine":
-            return asyncio.run(_demo_engine(args.port, args.host, args.db))
+            return asyncio.run(_demo_engine(args.port, args.host, args.db, args.pace))
     except SettingsError as e:
         print(f"configuration error: {e}", file=sys.stderr)
         return 2
