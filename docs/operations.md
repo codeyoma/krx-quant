@@ -265,6 +265,26 @@ Docker 이미지는 `TZ=Asia/Seoul`, `KRX_DATA_DIR=/data`, `KRX_STATE_DIR=/state
      - 프로그램매매 줄의 `net_value`를 같은 시각 `events/feed=H0UNPGM0`의 실시간 값과 견줘 금액 단위를 확인한다.
    - 확인한 내용은 kis-feeds.md에 적고 ⚠를 지운다.
 
+### CPU 여유 재기
+
+Lightsail은 버스트형 CPU다. 기준선보다 많이 쓰면 쌓아 둔 버스트 용량을 쓰고, 바닥나면 기준선으로 느려진다. 장중에(개장 직후와 오후에 한 번씩) 다음을 본다(#69).
+
+1. **엔진이 보는 알고리즘 시간.** 맥에서 실행한다.
+   ```bash
+   curl -s http://krx-quant:8080/v1/status | python3 -c 'import json,sys; c=json.load(sys.stdin)["cpu"]; print(c["usage"], c["expected_seconds"], c["algorithms"])'
+   ```
+   `usage`는 봉 마감 한 번에 알고리즘들이 걸릴 것으로 보는 시간의 합을 CPU 예산(`KRX_CPU_BUDGET_SECONDS`)으로 나눈 값이다. 실제 걸린 시간(벽시계)이라 버스트 용량이 바닥나 CPU가 느려지면 함께 오른다.
+2. **서버 CPU.** 서버에서 실행한다.
+   ```bash
+   docker stats --no-stream
+   ```
+3. **버스트 용량.** Lightsail 콘솔 → 인스턴스 → 지표에서 CPU 사용률과 남은 버스트 용량(Remaining CPU burst capacity, 분과 %)을 본다.
+4. **판단.** 다음 중 하나라도 해당하면 CPU 기준선이 높은 요금제($44: 기준선 30%, $84: vCPU 4개 40%)나 비버스트형 EC2로 옮긴다([design.md](design.md) 9장). $24(4GB)는 $12와 CPU가 같아서(vCPU 2개, 기준선 20%) CPU 문제에는 소용없다. 메모리가 모자랄 때(`docker stats`의 메모리가 한도에 닿을 때)만 $24로 올린다.
+   - `usage`가 0.5를 넘는다(잠정 기준: 예산의 절반이면 장중 부하가 몰릴 때 건너뜀이 생길 수 있다).
+   - 버스트 용량이 장중 내내 줄기만 해서 바닥에 닿는다.
+   - `[알림] <날짜> 예산 때문에 예측이 빠진 알고리즘이 있습니다.`가 온다.
+5. 잰 값은 [design.md](design.md) 13장에 적는다.
+
 ## 3. 매일 일어나는 일
 
 | 시각 (KST) | 일 |
@@ -480,7 +500,7 @@ docker compose logs --tail 200 engine
 | 알고리즘을 다시 학습하고 싶다 | 밤 학습 결과는 텔레그램과 `/v1/status`의 `training` | 밤 학습이 매일 한다. 당장 바꾸려면 알고리즘마다(`newton`, `gauss`, `granger`, `markov`, `kalman`, `shannon`, `poisson`, `turing`) `docker compose run --rm --no-deps engine fit <이름>`. 엔진이 1분 안에 새 모델로 바꾼다. 되돌리려면 `docker compose exec engine krx-quant rollback <이름>`(위 "밤 학습과 모델 교체"). |
 | `[알림] 사전 검증 대기: <이름>. 검증을 통과해야 돌기 시작합니다. ...` | `curl -s http://krx-quant:8080/v1/algorithms`에 그 이름이 없다 | 새로 등록된 알고리즘이 사전 검증을 기다린다. 장 시간 밖에서 `docker compose run --rm --no-deps engine prevalidate <이름>`(3장 "새 알고리즘 사전 검증"). 엔진이 다시 시작할 때마다 한 번 온다. |
 | `[알림] <이름> 은퇴 후보: ...` | `curl -s http://krx-quant:8080/v1/algorithms`의 `status` 이력, `/v1/algorithms/<이름>/stats?period=20d` | 벤치 60거래일 동안 회복하지 못했다. 은퇴시키려면 `docker compose exec engine krx-quant retire <이름>`. 기록은 남고, 엔진은 다음 봉 마감부터 돌리지 않는다. 되돌리려면 `krx-quant unretire <이름>`(수습부터 다시). |
-| `[알림] <날짜> 예산 때문에 예측이 빠진 알고리즘이 있습니다. ...`, 또는 `WARNING krx_quant.engine: <이름> skipped at ... for the CPU budget`나 `<이름> took over 10.0s` 로그 | `curl -s http://krx-quant:8080/v1/status`의 `cpu`(알고리즘별 예상 초와 `usage`), `docker stats`로 CPU 사용률, DB의 `runs` 테이블(`kind`가 `cpu_budget`) | 시간 초과는 그 알고리즘이 봉 마감 한 번에 `KRX_ALGORITHM_SECONDS`를 넘긴 것이고, CPU 예산 건너뜀은 알고리즘들의 합이 `KRX_CPU_BUDGET_SECONDS`를 넘은 것이다. 알고리즘을 가볍게 하거나 4GB 요금제로 올린다. 예산을 늘리려면 한도가 예산보다 작게 둘 다 고친다. 알림은 그날 일일 점검 때 한 번만 온다. |
+| `[알림] <날짜> 예산 때문에 예측이 빠진 알고리즘이 있습니다. ...`, 또는 `WARNING krx_quant.engine: <이름> skipped at ... for the CPU budget`나 `<이름> took over 10.0s` 로그 | `curl -s http://krx-quant:8080/v1/status`의 `cpu`(알고리즘별 예상 초와 `usage`), `docker stats`로 CPU 사용률, DB의 `runs` 테이블(`kind`가 `cpu_budget`) | 시간 초과는 그 알고리즘이 봉 마감 한 번에 `KRX_ALGORITHM_SECONDS`를 넘긴 것이고, CPU 예산 건너뜀은 알고리즘들의 합이 `KRX_CPU_BUDGET_SECONDS`를 넘은 것이다. 알고리즘을 가볍게 하거나 CPU 기준선이 높은 요금제로 옮긴다(위 "CPU 여유 재기"). 예산을 늘리려면 한도가 예산보다 작게 둘 다 고친다. 알림은 그날 일일 점검 때 한 번만 온다. |
 | `[장애] 매크로 출처 <ecos/fred/yahoo/kis>가 3번 연속 실패했습니다: <이유>` | 로그의 `macro source ... failed` | 키가 틀렸으면(`ECOS INFO-100`, `FRED 400 ... api_key`) `.env`를 고친다. `HTTP 5xx`나 연결 실패는 출처 쪽 장애다. 다음 거래일 07:30에 다시 읽고, 응답하면 `[복구] 매크로 출처 …가 다시 응답합니다.`가 온다. 그동안 그 출처의 지표 없이 국면을 정한다. |
 | `[장애] <날짜> 밤 학습이 실패했습니다: <이유>` | 로그의 `nightly training of ... failed`. 6시간 안에 안 끝나면 이유가 `not done in 6:00:00`이다 | `docker compose run --rm --no-deps engine train --day <날짜>`로 다시 돌린다. 끝난 알고리즘은 건너뛴다. 다음 밤 학습이 성공하면 `[복구] 밤 학습이 다시 됩니다.`가 온다. 그동안 전날 모델이 계속 돈다. |
 | `[장애] <날짜> 밤 학습이 실패했습니다: Spot 학습 결과가 <다음 거래일> 07:30까지 오지 않았습니다` | S3의 `training/logs/`(최근 로그 마지막 줄), `aws ec2 describe-instances --filters Name=tag:Name,Values=krx-quant-training`, 스케줄러 상태 | Spot이 뜨지 못했거나(용량, 할당량, 상한으로 꺼진 스케줄) 학습이 실패했다. 맥에서 `aws ec2 run-instances --launch-template 'LaunchTemplateName=krx-quant-training,Version=$Latest'`로 다시 띄우면 끝난 알고리즘은 건너뛴다. 급하면 서버에서 `docker compose run --rm --no-deps engine train --day <날짜>`. 그동안 전날 모델이 계속 돈다. |
