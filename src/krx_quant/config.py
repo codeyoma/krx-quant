@@ -107,8 +107,9 @@ class Settings:
     api_host: str = "127.0.0.1"
     api_port: int | None = None
     # One algorithm may take this long for a bar close (all symbols); the algorithms' expected
-    # work per bar close must fit in the CPU budget, or the last registered are skipped.
-    algorithm_seconds: float = 30.0
+    # work per bar close must fit in the CPU budget, or the last registered are skipped. One
+    # algorithm at its limit leaves the others room: the limit is below the budget.
+    algorithm_seconds: float = 10.0
     cpu_budget_seconds: float = 30.0
     # An algorithm needs this many scored predictions in a leaderboard to be ranked.
     min_sample: int = DEFAULT_MIN_SAMPLE
@@ -190,6 +191,13 @@ class Settings:
             raise SettingsError(
                 "KRX_COST_BUDGET needs KRX_TRAINING_SCHEDULES: the schedules it turns off at the budget"
             )
+        algorithm_seconds = float(number("KRX_ALGORITHM_SECONDS", "10", float, maximum=55))
+        cpu_budget_seconds = float(number("KRX_CPU_BUDGET_SECONDS", "30", float))
+        if algorithm_seconds >= cpu_budget_seconds:
+            raise SettingsError(
+                f"KRX_ALGORITHM_SECONDS ({algorithm_seconds:g}) must be below KRX_CPU_BUDGET_SECONDS "
+                f"({cpu_budget_seconds:g}): one algorithm at its limit would leave the others no room"
+            )
         symbols = codes("KRX_SYMBOLS", "005930")
         if not symbols:
             raise SettingsError("KRX_SYMBOLS lists no symbols")
@@ -254,8 +262,8 @@ class Settings:
             fee_rate=float(number("KRX_FEE_PERCENT", "0.015", float, minimum=0, maximum=1)) / 100,
             api_host=values.get("KRX_API_HOST", "127.0.0.1"),
             api_port=int(number("KRX_API_PORT", "8080", int, maximum=65535)),
-            algorithm_seconds=float(number("KRX_ALGORITHM_SECONDS", "30", float, maximum=55)),
-            cpu_budget_seconds=float(number("KRX_CPU_BUDGET_SECONDS", "30", float)),
+            algorithm_seconds=algorithm_seconds,
+            cpu_budget_seconds=cpu_budget_seconds,
             min_sample=int(number("KRX_MIN_SAMPLE", str(DEFAULT_MIN_SAMPLE), int)),
             train_at=_time_or_off("KRX_TRAIN_AT", values.get("KRX_TRAIN_AT", "21:30")),
             train_on=_one_of("KRX_TRAIN_ON", values.get("KRX_TRAIN_ON", "server"), TRAIN_ON),

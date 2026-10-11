@@ -322,14 +322,40 @@ class PredictionStore:
         ).fetchone()
         return row is not None
 
-    def count_runs(self, kind: str, since: datetime, algorithm: str | None = None) -> int:
-        """How many ``kind`` runs were recorded at or after ``since``; of one algorithm if given."""
+    def count_runs(
+        self, kind: str, since: datetime, algorithm: str | None = None, until: datetime | None = None
+    ) -> int:
+        """How many ``kind`` runs were recorded at or after ``since`` (and before ``until`` if
+        given); of one algorithm if given."""
         sql, params = "SELECT COUNT(*) FROM runs WHERE kind = ? AND at >= ?", [kind, iso(since)]
+        if until is not None:
+            sql += " AND at < ?"
+            params.append(iso(until))
         if algorithm is not None:
             sql += " AND algorithm = ?"
             params.append(algorithm)
         count: int = self._db.execute(sql, params).fetchone()[0]
         return count
+
+    def runs_by_algorithm(self, kind: str, since: datetime, until: datetime) -> dict[str, int]:
+        """How many ``kind`` runs each algorithm had from ``since`` until before ``until``."""
+        rows = self._db.execute(
+            "SELECT algorithm, COUNT(*) FROM runs"
+            " WHERE kind = ? AND at >= ? AND at < ? AND algorithm IS NOT NULL"
+            " GROUP BY algorithm ORDER BY algorithm",
+            (kind, iso(since), iso(until)),
+        ).fetchall()
+        return {r[0]: r[1] for r in rows}
+
+    def timeouts_by_algorithm(self, since: datetime, until: datetime) -> dict[str, int]:
+        """How many bar closes from ``since`` until before ``until`` each algorithm timed out at."""
+        rows = self._db.execute(
+            "SELECT algorithm, COUNT(DISTINCT bar_close) FROM predictions"
+            " WHERE status = 'timed_out' AND bar_close >= ? AND bar_close < ?"
+            " GROUP BY algorithm ORDER BY algorithm",
+            (iso(since), iso(until)),
+        ).fetchall()
+        return {r[0]: r[1] for r in rows}
 
     def last_run(self, kind: str) -> datetime | None:
         """When the latest ``kind`` run was recorded, if one was."""

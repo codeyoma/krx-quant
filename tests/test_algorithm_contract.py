@@ -134,7 +134,7 @@ def test_training_gives_a_new_versioned_model_that_can_be_saved(algorithm: Algor
 
 
 def test_predicting_takes_a_small_part_of_the_time_budget(algorithm: Algorithm) -> None:
-    # The engine allows 30 seconds per bar close for every symbol; one prediction of each
+    # The engine allows 10 seconds per bar close for every symbol; one prediction of each
     # scenario, a hundred times over, must take well under a second.
     model = algorithm.default_model()
     vectors = [FeatureVector(values, algorithm.features) for values in SCENARIOS.values()]

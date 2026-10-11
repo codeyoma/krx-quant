@@ -19,16 +19,22 @@
 
 - **알고리즘.** 등록된 알고리즘(지금은 `newton`, `gauss`, `granger`, `markov`, `kalman`, `shannon`, `poisson`, `turing`)이 종목마다 예측한다. `kalman`, `shannon`, `poisson`은 사전 검증을 통과해야 돈다(#24). 규약과 추가 방법은 아래 "알고리즘"에 있다.
   - 알고리즘은 작업 스레드에서 돈다. 그래서 오래 걸려도 녹화를 막지 않는다.
-  - 한 봉 마감에 알고리즘 하나가 모든 종목을 예측하는 데 30초(`KRX_ALGORITHM_SECONDS`)를 넘기면, 그 회차는 `status`가 `timed_out`인 빈 예측으로 남고 채점하지 않는다. 그 계산이 끝날 때까지는 다음 회차도 `timed_out`이다.
+  - 한 봉 마감에 알고리즘 하나가 모든 종목을 예측하는 데 10초(`KRX_ALGORITHM_SECONDS`)를 넘기면, 그 회차는 `status`가 `timed_out`인 빈 예측으로 남고 채점하지 않는다. 그 계산이 끝날 때까지는 다음 회차도 `timed_out`이다.
   - 예외를 던지거나 확률이 분포가 아니면 `error`로 남는다.
   - 알고리즘이 읽는 데이터가 봉 마감에 없으면 그 종목은 예측하지 않고(`NotPredicted`) 이유를 `status`로 남긴다: 호가가 없으면 `no_book`(#25). 확률이 비어 있고 채점하지 않으며 합의에서도 빠진다. 다른 종목은 그대로 예측한다.
-  - 알고리즘마다 걸린 시간을 재 둔다. 다음 회차에 예상 시간의 합이 CPU 예산(`KRX_CPU_BUDGET_SECONDS`, 기본 30초)을 넘으면, 늦게 등록된 알고리즘부터 그 회차를 건너뛴다. 순위는 보지 않는다. 건너뛴 기록은 `runs` 테이블에 `cpu_budget`으로 남고, 로그에 경고가 남는다. 텔레그램 알림은 없다.
+  - 알고리즘마다 걸린 시간을 재 둔다. 다음 회차에 예상 시간의 합이 CPU 예산(`KRX_CPU_BUDGET_SECONDS`, 기본 30초)을 넘으면, 늦게 등록된 알고리즘부터 그 회차를 건너뛴다. 순위는 보지 않는다. 건너뛴 기록은 `runs` 테이블에 `cpu_budget`으로 남고, 로그에 경고가 남는다.
+  - 알고리즘 하나의 한도는 CPU 예산보다 작아야 한다. 같거나 크면 설정 오류다. 한도를 다 쓴 알고리즘은 예상 시간이 한도로 잡히는데, 그래도 나머지 알고리즘에 예산이 남는다(기본값이면 20초).
+  - 장 마감 10분 뒤 일일 점검 때, 그날 `timed_out`인 봉 마감이나 CPU 예산으로 건너뛴 회차가 있으면 텔레그램으로 한 번 알린다(`[알림] <날짜> 예산 때문에 예측이 빠진 알고리즘이 있습니다. 시간 초과(…): <이름> N회. CPU 예산(…)으로 건너뜀: <이름> N회. …`). 보낸 기록은 `runs`에 `budget_report`로 남아서, 점검이 엔진 재시작 뒤 다시 돌아도 또 보내지 않는다. 보내지 못하면 다시 보내지 않는다. 엔진이 꺼져 있어 놓친 날의 점검을 나중에 돌리면 그날 날짜로 보낸다.
+
+  > **바뀜** (2026-10-12, #73): `KRX_ALGORITHM_SECONDS` 기본 30초 → 10초, 한도 < CPU 예산 검사, "텔레그램 알림은 없다" → 하루 한 번 알림. 이유: 한도와 예산이 같아 한 알고리즘이 한도를 다 쓰면 뒤의 알고리즘이 모두 건너뛰어졌고, 운영자가 알 길이 로그뿐이었다(#71).
   - 건너뛸 때마다 그 알고리즘의 예상 시간을 절반으로 줄인다. 그래서 곧 다시 돌려 시간을 새로 잰다. 한 번 건너뛰었다고 계속 빠지지는 않는다.
 
   > **바뀜** (2026-10-09, #37): 설계(design.md 5장)는 "순위가 낮은 알고리즘부터 건너뛰고, 잦으면 서버를 늘리라고 경고한다"였다 → 늘 늦게 등록된 것부터 건너뛰고, 텔레그램 경고는 없다. 이 문서에 있던 "순위가 생기면 순위가 낮은 쪽부터"는 구현된 적이 없다. 이유 기록 없음.
 - **합의(Condorcet, #18).** 봉 마감마다 두 합의를 낸다. 각각 하나의 예측(`algorithm`이 `consensus-fast`, `consensus-final`)으로 저장되고 채점된다(`consensus.py`).
   - 빠른 합의: 알고리즘 계산을 시작하고(봉 마감 직후) 2초 안에 끝난 정식 알고리즘으로 낸다. 엔진이 늦게 돌아도 2초는 기다린다.
-  - 최종 합의: 정식 알고리즘이 모두 끝나거나, 실패하거나, 각자의 시간 예산(`KRX_ALGORITHM_SECONDS`, 30초)에 걸리면 바로 낸다. 정식이 아닌 알고리즘은 기다리지 않는다.
+  - 최종 합의: 정식 알고리즘이 모두 끝나거나, 실패하거나, 각자의 시간 예산(`KRX_ALGORITHM_SECONDS`, 10초)에 걸리면 바로 낸다. 정식이 아닌 알고리즘은 기다리지 않는다.
+
+    > **바뀜** (2026-10-12, #73): 시간 예산 30초 → 10초. 그래서 최종 합의도 늦어도 계산 시작 +10초쯤 나온다. 이유: 위 시간 예산 메모와 같다(#71).
   - 구성원은 정식(`active`) 알고리즘뿐이다. 수습, 벤치, 은퇴, 복제는 빠진다. 구성원이 없으면 `status`가 `no_members`인 빈 예측으로 남는다. 구성원은 있는데 그때까지 결과가 하나도 없으면(계산 중, 시간 초과, 실패, 그 종목을 예측하지 않음(`no_book`)) `none_finished`다. VI 중인 종목은 `vi`다.
   - 합치는 방법은 선형 결합이다. 세 확률과 기대수익을 구성원 가중치로 평균한다. 그 시점에 결과가 있는 구성원의 가중치만 합이 1이 되게 다시 나눈다.
   - `model_version`은 가중치 버전이다(`condorcet-<계산한 날>`, 계산 전에는 `condorcet-equal`).
@@ -110,7 +116,7 @@
 |---|---|
 | `predictions` | `id`, `symbol`, `algorithm`, `model_version`, `bar_close`(t), `displayed_at`, `p_up`, `p_flat`, `p_down`, `expected_ticks`, `status`(`ok`, `timed_out`, `error`, `vi`, `no_book`, 합의의 `no_members`, `none_finished`). 재생 결과의 `skipped`는 `ok`가 아닌 예측을 모두 센다. `ok`가 아니면 확률과 기대수익이 비어 있고 `outcomes` 행이 없다. |
 | `outcomes` | `prediction_id`, `target_at`(t + 4분), `mid_close`(A), `mid_display`(B), `mid_target`, `flat_ticks`(k), `class_a`, `class_b`(`up`/`flat`/`down`), `special`, `unscorable`, `scored_at`(채점 전에는 비어 있음) |
-| `runs` | `id`, `kind`(`cpu_budget`: CPU 예산으로 건너뜀, `review`: 일일 상태 점검, `retire_candidate`: 은퇴 후보 알림, `no_regime`: 그날 매크로 국면이 없거나 엔진이 모르는 이름이어서 기본 전이행렬로 돈 날(`detail`에 `(unknown: <이름>)`). 첫 봉 마감에 하루 한 번), `at`, `algorithm`, `detail` |
+| `runs` | `id`, `kind`(`cpu_budget`: CPU 예산으로 건너뜀, `review`: 일일 상태 점검, `retire_candidate`: 은퇴 후보 알림, `budget_report`: 그날 예산 때문에 빠진 예측을 알림(#71), `no_regime`: 그날 매크로 국면이 없거나 엔진이 모르는 이름이어서 기본 전이행렬로 돈 날(`detail`에 `(unknown: <이름>)`). 첫 봉 마감에 하루 한 번), `at`, `algorithm`, `detail` |
 | `statuses` | `id`, `algorithm`, `at`, `previous`, `status`, `reason`: 알고리즘 상태 이력(#17) |
 | `consensus_fits` | `version`, `computed_at`: 합의 가중치를 계산한 기록(#18). 엔진은 시작할 때 마지막 버전을 읽는다. |
 | `consensus_weights` | `version`, `symbol`, `slot`, `algorithm`, `weight`: 그 버전의 칸별 가중치 |
@@ -468,9 +474,11 @@ docker compose run --rm --no-deps engine prevalidate <이름> --days 5  # 빨리
 |---|---|
 | `days` | 재생한 날이 10거래일 이상이다 |
 | `features` | 등록 검사를 통과했다(늘 통과한다). 리포트에는 고유 피처가 나온다 |
-| `budget` | 시간 예산(`KRX_ALGORITHM_SECONDS`, 기본 30초)을 넘긴 예측(`timed_out`)이 0번이다 |
+| `budget` | 시간 예산(`KRX_ALGORITHM_SECONDS`, 기본 10초)을 넘긴 예측(`timed_out`)이 0번이다 |
 | `correlation` | 다른 알고리즘과의 p_up − p_down 상관이 모두 0.9 이하다(복제 규칙과 같다. 짝 30개 이상, 특수 예측 포함). 먼저 등록된 것만이 아니라 다른 모든 알고리즘과 비교한다. 그래서 서로 닮은 두 알고리즘이 함께 기다리면 둘 다 거부된다. 잴 수 없는 상대(짝 부족, 늘 같은 값)는 빠진다 |
 | `stats` | 재생 결과의 순위표(기준 B, 특수 예측 제외)에서, 채점된 예측과 각 기준 예측과의 짝이 `KRX_MIN_SAMPLE`(기본 200) 이상이고, 가장 약한 lift의 값이 0보다 크다. 신뢰구간 하한은 보지 않는다. 그것은 수습 10거래일 뒤 정식 승격의 기준이다 |
+
+> **바뀜** (2026-10-12, #73): `budget` 기준의 시간 예산 기본 30초 → 10초. 그래서 사전 검증도 봉 마감 한 번에 10초를 넘기면 통과하지 못한다. 이유: 실시간의 알고리즘 한도가 10초로 줄었다(#71).
 
 - **리포트**: `state/prevalidations/<이름>.json`. 통과하든 못 하든 마지막 결과로 덮어쓴다.
   - `algorithm`, `code`(재생한 코드의 digest), `prevalidated_at`, `passed`, `days`, `models`(날짜 → 모델 버전), `checks`(`check`, `passed`, `detail`)
