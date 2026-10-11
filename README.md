@@ -166,7 +166,8 @@ uv run python -c "import glob, pyarrow.parquet as pq; d = sorted(glob.glob('data
 | `replay <YYYY-MM-DD> [--db 경로]` | 녹화한 하루를 엔진으로 다시 돌려 별도 DB에 쓴다 | 없어도 된다 |
 | `fit <알고리즘> [--days N]` | 최근 날들로 학습해 `state/models/`에 설치한다. 녹화된 날은 녹화 이벤트(중간가), 백필만 있는 날은 1분봉(종가)으로 | 없어도 된다 |
 | `prevalidate <알고리즘> [--days N]` | 새 알고리즘을 녹화된 최근 20거래일(최소 10일)로 재생해 사전 검증한다. 통과하면 엔진이 다음 봉 마감부터 수습으로 돌린다. 거부되면 종료 코드 1([docs/engine-api.md](docs/engine-api.md#사전-검증-24)) | 없어도 된다 |
-| `train [--day YYYY-MM-DD]` | 밤 학습 한 번. `--day`가 없으면 Object Store에 모든 종목의 백필 1분봉이나 녹화된 체결이 있는 가장 최근 날 | 없어도 된다 |
+| `train [--day YYYY-MM-DD] [--from-store]` | 밤 학습 한 번. `--day`가 없으면 Object Store에 모든 종목의 백필 1분봉이나 녹화된 체결이 있는 가장 최근 날. `--from-store`는 서버가 S3에 올린 설정과 휴장일 달력으로 학습한다(EC2 Spot, #23) | 없어도 된다 |
+| `registry-password` | ECR 레지스트리의 `docker login` 암호를 출력한다. `deploy/push-image.sh`가 쓴다(#23) | 없어도 된다 |
 | `macro` | 오늘의 매크로 지표를 한 번 읽고 국면을 정해 `data/macro`에 기록한다(#8). 실패한 출처가 있으면 종료 코드 1 | 없어도 된다 |
 | `rollback <알고리즘>` | 직전 모델로 되돌린다 | 없어도 된다 |
 | `retire <알고리즘>`, `unretire <알고리즘>` | 은퇴시킨다, 은퇴를 풀어 수습으로 되돌린다 | 없어도 된다 |
@@ -196,7 +197,7 @@ uv run python -c "import glob, pyarrow.parquet as pq; d = sorted(glob.glob('data
 | P1 | 수집기 | 거의 완료(#2–#6, #8, #30). 남은 것: 첫 거래일 확인(#7), ETF 장중 확인(#29), REST 대체 장중 확인(#28, `check-fallbacks`) |
 | P2 | 예측·채점 핵심 | 완료: #9–#19, Markov 옵션 IV 국면(#53). 호가 피처를 쓰는 Turing은 녹화가 쌓인 뒤(#55) |
 | P3 | Fincept 화면, 빌드 | 구현 완료: 첫 화면과 개인 빌드(#20), 차트·예측 패널·순위표·매크로 줄·엔진 상태·신호 알림·스트림(#21). #21을 담은 개인 빌드는 새 태그로 만든다 |
-| P4 | 밤 학습 | 진행 중. 상시 서버의 밤 학습과 08:00 교체(PR #45), 녹화 이벤트로 학습하기(#22, PR #48)는 됐다. EC2 Spot과 비용 상한(#23)이 남았다 |
+| P4 | 밤 학습 | 구현 완료: 상시 서버의 밤 학습과 08:00 교체(PR #45), 녹화 이벤트로 학습하기(#22, PR #48), EC2 Spot 학습과 비용 상한(#23, `deploy/training.yaml`). Spot은 사용자가 스택을 배포하고 켠다(docs/operations.md 3장) |
 | P5 | 호가 알고리즘, 재생 테스트 | 구현 완료: 하루 재생(`replay`), 새 알고리즘 사전 검증(`prevalidate`, #24), Kalman(#25), Shannon(#26), Poisson(#27). 셋은 녹화 10거래일 뒤 사전 검증을 통과해야 실시간에서 돈다 |
 
 ## 비밀값

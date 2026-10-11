@@ -12,7 +12,10 @@
 # 3. It fast-forwards, rebuilds and restarts the engine.
 # 4. It waits for the Engine API to answer (3 minutes). If it does not, it goes back to
 #    the commit before, rebuilds, and remembers the commit that failed.
-# 5. It reports to Telegram (krx-quant notify).
+# 5. It pushes the new image to ECR for the nightly training on EC2 Spot, if that is set
+#    up (deploy/push-image.sh, #23). A push that failed is tried again on the next run,
+#    even with nothing new on main (.auto-update-push-failed).
+# 6. It reports to Telegram (krx-quant notify).
 set -euo pipefail
 
 repo=$(cd "$(dirname "$0")/.." && pwd)
@@ -21,6 +24,7 @@ tries=${KRX_UPDATE_TRIES:-36}
 pause=${KRX_UPDATE_PAUSE:-5}
 failed_file=.auto-update-failed
 deployed_file=.auto-update-deployed
+push_failed_file=.auto-update-push-failed
 
 read -r weekday hhmm <<<"${KRX_UPDATE_NOW:-$(TZ=Asia/Seoul date '+%u %H%M')}"
 if ((weekday <= 5 && 10#$hhmm >= 750 && 10#$hhmm < 2010)); then
@@ -52,6 +56,16 @@ restart() {
   docker compose up -d --build && healthy
 }
 
+# The running image to ECR for the Spot training; remembered when it fails, for the next run.
+push_image() {
+  if deploy/push-image.sh; then
+    rm -f "$push_failed_file"
+  else
+    touch "$push_failed_file"
+    return 1
+  fi
+}
+
 # Anything else that fails (GitHub unreachable, a checkout that cannot fast-forward) is
 # reported too; the engine keeps running what it ran.
 trap 'notify "자동 업데이트 오류: ${BASH_COMMAND} (줄 ${LINENO}). 엔진은 그대로입니다."' ERR
@@ -65,6 +79,9 @@ deployed=$(cat "$deployed_file" 2>/dev/null || git rev-parse HEAD)
 if [[ "$deployed" == "$target" ]]; then
   echo "$target" >"$deployed_file"
   echo "auto-update: up to date (${target:0:7})"
+  if [[ -f "$push_failed_file" ]] && push_image; then
+    notify "Spot 학습용 이미지를 올렸습니다 (${target:0:7})."
+  fi
   exit 0
 fi
 if [[ -f "$failed_file" && "$(cat "$failed_file")" == "$target" ]]; then
@@ -77,9 +94,13 @@ git merge -q --ff-only "$target"
 if restart; then
   echo "$target" >"$deployed_file"
   rm -f "$failed_file"
+  pushed=""
+  if ! push_image; then
+    pushed=$'\n'"Spot 학습용 이미지를 올리지 못했습니다. 밤 학습은 이전 이미지로 돌고, 다음 06:00에 다시 올립니다."
+  fi
   docker image prune -f >/dev/null || true
   echo "auto-update: ${deployed:0:7} -> ${target:0:7}"
-  notify "자동 업데이트: ${deployed:0:7} → ${target:0:7}"$'\n'"$changes"
+  notify "자동 업데이트: ${deployed:0:7} → ${target:0:7}"$'\n'"$changes$pushed"
   exit 0
 fi
 

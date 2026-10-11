@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import itertools
 import json
 import logging
@@ -14,7 +15,9 @@ from collections.abc import Callable
 from datetime import date, datetime
 from pathlib import Path
 
+import boto3
 from aiohttp import web
+from botocore.exceptions import BotoCoreError, ClientError
 
 from krx_quant.algorithms import ALGORITHMS, RegistrationError
 from krx_quant.archive import run_archive
@@ -28,7 +31,7 @@ from krx_quant.kis import KisError
 from krx_quant.lifecycle import Status
 from krx_quant.macro import run_macro
 from krx_quant.model_shelf import Shelf
-from krx_quant.nightly import run_training
+from krx_quant.nightly import from_the_server, run_training
 from krx_quant.notify import send_notice, send_test_alert
 from krx_quant.predictions import DB_NAME, PredictionStore
 from krx_quant.prevalidation import PREVALIDATION_DAYS, REGISTERED_BEFORE, prevalidate, report_path
@@ -71,6 +74,20 @@ async def _check_fallbacks() -> int:
     failed = sum(c.error is not None for c in checks)
     print(f"{len(checks) - failed} of {len(checks)} fallbacks answered")
     return 1 if failed else 0
+
+
+def _registry_password() -> int:
+    """The password of this AWS account's ECR registry, for ``docker login --username AWS
+    --password-stdin`` (deploy/push-image.sh), from the server's own keys."""
+    region = Settings.from_env(require_kis=False).aws_region
+    try:
+        token = boto3.client("ecr", region_name=region).get_authorization_token()
+    except (BotoCoreError, ClientError) as e:
+        print(f"AWS error: {e}", file=sys.stderr)
+        return 1
+    _, password = base64.b64decode(token["authorizationData"][0]["authorizationToken"]).decode().split(":", 1)
+    print(password)
+    return 0
 
 
 async def _backfill() -> None:
@@ -121,9 +138,12 @@ def _fit(name: str, days: int | None) -> int:
     return 0
 
 
-def _train(day: date | None) -> int:
+def _train(day: date | None, from_store: bool) -> int:
     try:
-        night = asyncio.run(run_training(Settings.from_env(require_kis=False), day))
+        settings = Settings.from_env(require_kis=False)
+        if from_store:
+            settings = from_the_server(settings)
+        night = asyncio.run(run_training(settings, day))
     except SettingsError:
         raise  # a configuration error, reported as one (exit 2)
     except (FileNotFoundError, ValueError) as e:
@@ -311,6 +331,10 @@ def main(argv: list[str] | None = None) -> int:
         help="ask each feed's REST fallback once and print what it would record (safe beside the collector)",
     )
     sub.add_parser(
+        "registry-password",
+        help="print the ECR registry's docker login password (deploy/push-image.sh, EC2 Spot training)",
+    )
+    sub.add_parser(
         "backfill",
         help="fill missing one-minute bars for the past year and exit (stop the collector first)",
     )
@@ -354,6 +378,11 @@ def main(argv: list[str] | None = None) -> int:
     train_cmd.add_argument(
         "--day", type=date.fromisoformat, help="the night to train, YYYY-MM-DD (default: latest)"
     )
+    train_cmd.add_argument(
+        "--from-store",
+        action="store_true",
+        help="train with the settings and market calendar the server published (EC2 Spot)",
+    )
     rollback_cmd = sub.add_parser("rollback", help="put an algorithm back on the model it ran before")
     rollback_cmd.add_argument("algorithm")
     retire_cmd = sub.add_parser("retire", help="retire an algorithm: it is no longer run; its records stay")
@@ -389,6 +418,8 @@ def main(argv: list[str] | None = None) -> int:
             asyncio.run(_measure())
         elif args.command == "check-fallbacks":
             return asyncio.run(_check_fallbacks())
+        elif args.command == "registry-password":
+            return _registry_password()
         elif args.command == "backfill":
             asyncio.run(_backfill())
         elif args.command == "archive":
@@ -400,7 +431,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "prevalidate":
             return _prevalidate(args.algorithm, args.days)
         elif args.command == "train":
-            return _train(args.day)
+            return _train(args.day, args.from_store)
         elif args.command == "rollback":
             return _rollback(args.algorithm)
         elif args.command == "retire":

@@ -8,30 +8,47 @@ running engine notices a model file that changed (the swap, ``krx-quant fit``,
 ``krx-quant rollback``) and switches to it within half a minute; the server then
 publishes what it runs (``live.json`` and the models), the champions of the next night.
 
-Until #23 moves the training to EC2, the collector also starts it here, in its own
-process, at ``KRX_TRAIN_AT`` on trading days.
+The nightly training runs at ``KRX_TRAIN_AT`` on trading days: here, in its own process
+(``KRX_TRAIN_ON=server``), or on EC2 Spot started by AWS at the same time (``spot``, #23).
+On Spot, the server publishes what the run needs from it, waits for the night's result in
+the store until the next trading day's 07:30, and sends its summary (the Spot run has no
+Telegram token).
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import sys
 from asyncio.subprocess import PIPE, STDOUT
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
+from pathlib import Path
 from typing import Any
+
+from botocore.exceptions import BotoCoreError, ClientError
 
 from krx_quant.algorithms import Algorithm, Model, load_models
 from krx_quant.archive import NIGHTLY_ARCHIVE
+from krx_quant.config import Settings
+from krx_quant.cost_guard import training_stopped
 from krx_quant.engine import PredictionEngine
 from krx_quant.feeds.base import KST, kst_day
 from krx_quant.market_calendar import MarketCalendar, next_on_trading_day
 from krx_quant.model_shelf import Shelf
-from krx_quant.nightly import LIVE, Night, model_key, promotions_key
+from krx_quant.nightly import (
+    LIVE,
+    TRAINING_CALENDAR_KEY,
+    TRAINING_SETTINGS_KEY,
+    Night,
+    model_key,
+    promotions_key,
+    training_settings,
+)
 from krx_quant.notify import Alerts
-from krx_quant.object_store import ObjectStore, get_json, put_json
+from krx_quant.object_store import ObjectStore, file_digest, get_json, put_json
 
 log = logging.getLogger(__name__)
 
@@ -44,6 +61,10 @@ TRAINING_TIMEOUT = timedelta(hours=6)
 # once: the night resumes from its checkpoints.
 CATCH_UP = timedelta(hours=8)
 _TRAINING_ALERT = "training"
+# How often the server looks for the result of a night trained on EC2 Spot (#23), and the
+# last such night whose summary it sent (in the state directory).
+SPOT_POLL_SECONDS = 300.0
+SUMMARIZED_FILE = "spot_summarized.json"
 
 
 @dataclass(frozen=True)
@@ -200,19 +221,23 @@ async def keep_training(
     alerts: Alerts,
     now: Callable[[], datetime],
     refresh: Callable[[], Awaitable[None]],
+    run_night: Callable[[date], Awaitable[str | None]] | None = None,
+    first: Callable[[MarketCalendar, time, datetime], datetime] | None = None,
 ) -> None:
     """Start ``krx-quant train --day <day>`` in its own process at ``train_at`` each trading
     day, until cancelled; at once for a night a restart interrupted or missed (``CATCH_UP``).
     The process sends its own summary; a failure raises an alert, cleared by the next night
-    that trains.
+    that trains. With ``run_night`` (the training on EC2 Spot), that runs the night instead
+    (None once done, else why not), and ``first`` picks the first night to run.
     """
-    start = _first_training(calendar, train_at, now())
+    run = run_night or _train
+    start = (first or _first_training)(calendar, train_at, now())
     while True:
         await asyncio.sleep(max(0.0, (start - now()).total_seconds()))
         day = night_to_train(calendar, start)
         start = next_on_trading_day(calendar, train_at, max(now(), start))
         try:
-            failure = await _train(day)
+            failure = await run(day)
         except Exception as e:
             log.exception("could not run the nightly training")
             failure = str(e)
@@ -243,6 +268,86 @@ async def _train(day: date) -> str | None:
         return None
     log.error("nightly training of %s failed (exit %s):\n%s", day, process.returncode, text)
     return text.splitlines()[-1] if text else f"exit {process.returncode}"
+
+
+def publish_training_inputs(store: ObjectStore, settings: Settings) -> None:
+    """Put what a night trained on EC2 Spot needs from this server in the store: the
+    settings training reads, and the market calendar (``krx-quant train --from-store``)."""
+    put_json(store, TRAINING_SETTINGS_KEY, training_settings(settings))
+    calendar = settings.state_dir / "market_calendar.json"
+    if calendar.exists():
+        store.put(TRAINING_CALENDAR_KEY, calendar, file_digest(calendar))
+
+
+def spot_night_deadline(calendar: MarketCalendar, day: date) -> datetime:
+    """When the night of ``day``, trained elsewhere, must be done: ``DEADLINE`` on the next
+    trading day (a later list is not applied that morning)."""
+    return next_on_trading_day(calendar, DEADLINE, datetime.combine(day, time.max, KST))
+
+
+def first_spot_wait(calendar: MarketCalendar, train_at: time, started: datetime) -> datetime:
+    """The last scheduled Spot training if its night is still due (before the next trading
+    day's ``DEADLINE``: a collector restarted at 06:00 still waits for it), else the next."""
+    local = started.astimezone(KST)
+    day = local.date()
+    while not (calendar.is_trading_day(day) and datetime.combine(day, train_at, KST) <= local):
+        day -= timedelta(days=1)
+    last = datetime.combine(day, train_at, KST)
+    if local < spot_night_deadline(calendar, night_to_train(calendar, last)):
+        return last
+    return next_on_trading_day(calendar, train_at, started)
+
+
+async def await_spot_night(
+    store: ObjectStore,
+    calendar: MarketCalendar,
+    day: date,
+    alerts: Alerts,
+    now: Callable[[], datetime],
+    state_dir: Path,
+    poll_seconds: float = SPOT_POLL_SECONDS,
+) -> str | None:
+    """Wait for the night of ``day``, trained on EC2 Spot, to leave its promotion list in
+    the store, and send its summary once (the Spot run has no Telegram token; a restart
+    waits again but does not send it again, unless it could not be sent): None once it came,
+    or if the Cost Guard turned the Spot training off this month; else, by the deadline, why
+    not. A store that cannot be read is tried again.
+    """
+    deadline = spot_night_deadline(calendar, day)
+    while True:
+        try:
+            data = await asyncio.to_thread(get_json, store, promotions_key(day))
+        except (OSError, ValueError, BotoCoreError, ClientError) as e:
+            log.warning("could not read the night's promotion list: %s", e)
+        else:
+            if data is not None:
+                if _summarized(state_dir) == day:
+                    return None
+                if await alerts.deliver(Night.from_dict(data).summary()):
+                    _mark_summarized(state_dir, day)
+                    return None
+                if now() >= deadline:
+                    return None  # the night came; its summary waits for a later wait
+                # Not sent (Telegram unreachable): tried again until the deadline.
+        if now() >= deadline:
+            if training_stopped(state_dir, now()):
+                log.info("no Spot training of %s: turned off for the month's cost cap", day)
+                return None
+            return f"Spot 학습 결과가 {deadline:%Y-%m-%d %H:%M}까지 오지 않았습니다"
+        await asyncio.sleep(poll_seconds)
+
+
+def _summarized(state_dir: Path) -> date | None:
+    """The last night trained on Spot whose summary was sent."""
+    try:
+        return date.fromisoformat(json.loads((state_dir / SUMMARIZED_FILE).read_text())["night"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def _mark_summarized(state_dir: Path, day: date) -> None:
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / SUMMARIZED_FILE).write_text(json.dumps({"night": day.isoformat()}))
 
 
 def _swap_notice(status: NightStatus) -> str:

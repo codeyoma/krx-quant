@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import shutil
 import stat
 import subprocess
@@ -65,10 +66,42 @@ def test_deploy_scripts_parse(script: Path) -> None:
         subprocess.run(["shellcheck", script], check=True)
 
 
+def spot_start_script(path: Path) -> str:
+    """The Spot instance's start script in deploy/training.yaml, as CloudFormation fills it in."""
+    text = path.read_text().split("Fn::Base64: !Sub |\n", 1)[1].split("\n\n", 1)[0]
+    script = "\n".join(line[12:] for line in text.splitlines()) + "\n"
+    values = {
+        "MaxMinutes": "300",
+        "Bucket": "a-bucket",
+        "Prefix": "engine",
+        "Repository.RepositoryUri": "123456789012.dkr.ecr.ap-southeast-2.amazonaws.com/krx-quant",
+        "AWS::Region": "ap-southeast-2",
+    }
+    script = re.sub(r"\$\{(?!!)([A-Za-z:.]+)\}", lambda m: values[m.group(1)], script)
+    return script.replace("${!", "${")
+
+
+def test_the_spot_instance_s_start_script_parses(tmp_path: Path) -> None:
+    script = tmp_path / "start.sh"
+    script.write_text(spot_start_script(ROOT / "deploy" / "training.yaml"))
+
+    subprocess.run(["bash", "-n", script], check=True)
+    if shutil.which("shellcheck"):
+        subprocess.run(["shellcheck", script], check=True)
+    text = script.read_text()
+    assert not re.search(r"\$\{[A-Za-z]+(::|\.)", text), "every CloudFormation value is filled in"
+    assert "123456789012.dkr.ecr.ap-southeast-2.amazonaws.com/krx-quant:latest" in text
+    assert "trap 'shutdown -h now' EXIT" in text, "it terminates itself however the training ends"
+    assert "train --from-store" in text
+
+
 FAKE_DOCKER = """#!/usr/bin/env bash
 # Stands in for docker: logs each call; the engine answers unless the checkout's
-# BROKEN file exists (a commit that does not start).
+# BROKEN file exists (a commit that does not start), and a push fails while PUSH_FAILS does.
 echo "$*" >>"$DOCKER_LOG"
+if [[ "$1" == push && -f PUSH_FAILS ]]; then
+  exit 1
+fi
 if [[ "$*" == *"exec -T engine"* ]]; then
   [[ ! -f BROKEN ]]
 fi
@@ -147,6 +180,50 @@ def test_the_server_updates_to_a_new_main_and_says_so(server: Path) -> None:
     assert calls[0] == "compose up -d --build"
     notice = (server.parent / "docker.log").read_text().split(" notify ", 1)[1]
     assert notice.startswith("자동 업데이트") and new[:7] in notice and "- Granger learns" in notice
+
+
+def test_with_the_training_on_spot_an_update_pushes_the_image_and_forgets_the_login(server: Path) -> None:
+    repository = "123456789012.dkr.ecr.ap-southeast-2.amazonaws.com/krx-quant"
+    (server / ".env").write_text(f"KRX_IMAGE_REPOSITORY={repository}\n")
+    push(server, "Markov reads the IV")
+
+    result = update(server)
+
+    assert result.returncode == 0, result.stderr
+    calls = docker_calls(server)
+    pushed = calls.index(f"push -q {repository}:latest")
+    login = calls.index("compose run --rm --no-deps -T engine registry-password")
+    assert calls.index("compose up -d --build") < login < pushed, "the new image, once it started"
+    assert calls[pushed - 1] == f"tag krx-quant:latest {repository}:latest"
+    assert calls[pushed + 1] == f"logout {repository.split('/')[0]}", "the registry password is not kept"
+
+
+def test_an_image_that_could_not_be_pushed_is_pushed_on_the_next_run(server: Path) -> None:
+    repository = "123456789012.dkr.ecr.ap-southeast-2.amazonaws.com/krx-quant"
+    (server / ".env").write_text(f"KRX_IMAGE_REPOSITORY={repository}\n")
+    (server / "PUSH_FAILS").write_text("x")
+    push(server, "Markov reads the IV")
+
+    assert update(server).returncode == 0
+    assert "이미지를 올리지 못했습니다" in (server.parent / "docker.log").read_text()
+
+    (server / "PUSH_FAILS").unlink()
+    (server.parent / "docker.log").unlink()
+    assert update(server).returncode == 0, "nothing new on main"
+
+    calls = docker_calls(server)
+    assert f"push -q {repository}:latest" in calls
+    assert "compose up -d --build" not in calls
+    assert "이미지를 올렸습니다" in (server.parent / "docker.log").read_text()
+
+
+def test_without_an_env_file_there_is_no_image_to_push(server: Path) -> None:
+    env = {"PATH": f"{server.parent / 'bin'}:/usr/bin:/bin", "DOCKER_LOG": str(server.parent / "docker.log")}
+    done = subprocess.run([server / "deploy" / "push-image.sh"], env=env, capture_output=True, text=True)
+
+    assert done.returncode == 0, done.stderr
+    assert "nothing to push" in done.stdout
+    assert docker_calls(server) == []
 
 
 def test_a_main_that_does_not_start_is_rolled_back_and_not_tried_again(server: Path) -> None:
