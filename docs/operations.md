@@ -324,7 +324,7 @@ docker compose run --rm --no-deps engine prevalidate <이름>
 - 거부(`refused`, 종료 코드 1)되면 엔진은 계속 기다린다. 고친 커밋이 배포된 뒤 다시 돌린다.
 - 결과는 `state/prevalidations/<이름>.json`(리포트)과 `state/prevalidation-<이름>.sqlite3`(재생한 예측)에 남는다. 실시간 DB와 순위표는 바뀌지 않는다.
 - 녹화가 20거래일보다 적으면 있는 날만 쓴다. 10거래일보다 적으면 리포트는 남지만 통과하지 못한다(`days` 검사). 녹화는 2026-10-08에 시작했다.
-- 첫 대상은 Kalman(#25)이다. 배포된 날부터 엔진이 시작할 때마다 `사전 검증 대기: kalman` 알림이 온다. 녹화된 거래일이 10일이 된 날 21:00 업로드 뒤에 돌릴 수 있다(10-12부터 빠짐없이 녹화했다면 2026-10-23). 그 전에 돌리면 `days` 검사에서 거부된다. 녹화된 날 수는 `ls -d data/events/date=* | wc -l`로 본다(휴장일 폴더가 있으면 그만큼 뺀다).
+- 첫 대상은 Kalman(#25)과 Shannon(#26)이다. 배포된 날부터 엔진이 시작할 때마다 `사전 검증 대기: kalman, shannon` 알림이 온다. 알고리즘마다 따로 돌린다. 녹화된 거래일이 10일이 된 날 21:00 업로드 뒤에 돌릴 수 있다(10-12부터 빠짐없이 녹화했다면 2026-10-23). 그 전에 돌리면 `days` 검사에서 거부된다. 녹화된 날 수는 `ls -d data/events/date=* | wc -l`로 본다(휴장일 폴더가 있으면 그만큼 뺀다).
 - 통과는 그때의 코드에만 유효하다. 통과한 뒤 엔진이 돌리기 전에 그 알고리즘의 코드가 바뀌어 배포되면 다시 기다린다. 다시 돌린다.
 - 같은 알고리즘을 동시에 두 번 돌리지 않는다. 같은 DB와 리포트 파일에 쓴다.
 
@@ -382,7 +382,7 @@ docker compose logs --tail 200 engine
 | `[장애] 장중 데이터가 끊긴 피드: stale <TR> <키>` | 한 종목만이면 거래정지나 VI다. 여러 피드면 연결 문제다. | 데이터가 다시 오면 `[복구]`가 온다. 거래일에 한 번도 안 오는 구독이면 구독 키가 잘못됐을 수 있다(KIS는 잘못된 키도 구독 성공으로 답한다). |
 | `[장애] 장 마감 데이터 업로드가 ... 실패했습니다` | 로그의 `could not archive ...` | 1. AWS 키, `KRX_OBJECT_STORE` 버킷 이름, IAM 정책을 확인한다.<br>2. 고친 뒤 `docker compose run --rm engine archive`를 돌린다. 다시 돌려도 안전하다.<br>3. 다음 업로드가 성공하면 `[복구]`가 온다. |
 | `[장애] 엔진 API를 열지 못했습니다` | 로그의 `Engine API not started on ...` | 녹화와 예측은 계속한다. 다른 프로세스가 8080을 쓰는지 확인하고 `docker compose up -d`로 다시 띄운다. |
-| 알고리즘을 다시 학습하고 싶다 | 밤 학습 결과는 텔레그램과 `/v1/status`의 `training` | 밤 학습이 매일 한다. 당장 바꾸려면 알고리즘마다(`newton`, `gauss`, `granger`, `markov`, `kalman`, `turing`) `docker compose run --rm --no-deps engine fit <이름>`. 엔진이 1분 안에 새 모델로 바꾼다. 되돌리려면 `docker compose exec engine krx-quant rollback <이름>`(위 "밤 학습과 모델 교체"). |
+| 알고리즘을 다시 학습하고 싶다 | 밤 학습 결과는 텔레그램과 `/v1/status`의 `training` | 밤 학습이 매일 한다. 당장 바꾸려면 알고리즘마다(`newton`, `gauss`, `granger`, `markov`, `kalman`, `shannon`, `turing`) `docker compose run --rm --no-deps engine fit <이름>`. 엔진이 1분 안에 새 모델로 바꾼다. 되돌리려면 `docker compose exec engine krx-quant rollback <이름>`(위 "밤 학습과 모델 교체"). |
 | `[알림] 사전 검증 대기: <이름>. 검증을 통과해야 돌기 시작합니다. ...` | `curl -s http://krx-quant:8080/v1/algorithms`에 그 이름이 없다 | 새로 등록된 알고리즘이 사전 검증을 기다린다. 장 시간 밖에서 `docker compose run --rm --no-deps engine prevalidate <이름>`(3장 "새 알고리즘 사전 검증"). 엔진이 다시 시작할 때마다 한 번 온다. |
 | `[알림] <이름> 은퇴 후보: ...` | `curl -s http://krx-quant:8080/v1/algorithms`의 `status` 이력, `/v1/algorithms/<이름>/stats?period=20d` | 벤치 60거래일 동안 회복하지 못했다. 은퇴시키려면 `docker compose exec engine krx-quant retire <이름>`. 기록은 남고, 엔진은 다음 봉 마감부터 돌리지 않는다. 되돌리려면 `krx-quant unretire <이름>`(수습부터 다시). |
 | `WARNING krx_quant.engine: <이름> skipped at ... for the CPU budget` 또는 `<이름> took over 30.0s` 로그가 잦다 | `docker stats`로 CPU 사용률, DB의 `runs` 테이블(`kind`가 `cpu_budget`) | 알고리즘 계산이 서버에 버겁다. 텔레그램 알림은 없다. 4GB 요금제로 올리거나 `KRX_CPU_BUDGET_SECONDS`를 조정한다. |

@@ -73,13 +73,14 @@ from krx_quant.feeds import (
     KRX_TRADE,
     MEMBER,
     MEMBER_REST,
+    NXT_TRADE,
     PROGRAM,
     TRADE,
     US_TRADE,
     USD_FUTURES,
     VI_STATUS,
 )
-from krx_quant.feeds.base import KST
+from krx_quant.feeds.base import KST, LEVELS
 from krx_quant.lifecycle import Standing, Status, review
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.market_view import (
@@ -128,17 +129,28 @@ REVIEW_AFTER_CLOSE = timedelta(minutes=10)
 # and a status can be older than that.
 _REVIEW_DAYS = 400
 
+_BOOK_COLUMNS = (
+    "symbol",
+    "received_at",
+    "ask_px_1",
+    "bid_px_1",
+    *(f"{side}_qty_{i}" for side in ("ask", "bid") for i in LEVELS),
+)
 # The feeds the engine reads, and the columns it uses from each.
 ENGINE_FEEDS: dict[str, tuple[str, ...]] = {
-    # Integrated trades make the bars; their best quotes are integrated quotes too.
-    TRADE.tr_id: ("symbol", "event_time", "received_at", "price", "qty", "ask1", "bid1"),
-    # Its best quotes' sizes make the microprice (Kalman's).
-    BOOK.tr_id: ("symbol", "received_at", "ask_px_1", "bid_px_1", "ask_qty_1", "bid_qty_1"),
+    # Integrated trades make the bars; their best quotes are integrated quotes too, and their
+    # aggressor side counts (Shannon's).
+    TRADE.tr_id: ("symbol", "event_time", "received_at", "price", "qty", "ask1", "bid1", "side"),
+    # The book's sizes make the microprice (Kalman's), the order flow imbalance and the
+    # depth imbalance (Shannon's).
+    BOOK.tr_id: _BOOK_COLUMNS,
     # The REST book snapshot replaces the integrated book when it is cut by the session limit.
-    BOOK_SNAPSHOT.tr_id: ("symbol", "received_at", "ask_px_1", "bid_px_1", "ask_qty_1", "bid_qty_1"),
+    BOOK_SNAPSHOT.tr_id: _BOOK_COLUMNS,
     # KRX-only trades carry KRX's best quotes, for the 30 seconds before NXT opens; the
     # ETFs' make their bars.
     KRX_TRADE.tr_id: ("symbol", "event_time", "received_at", "price", "qty", "ask1", "bid1"),
+    # NXT's trades, for its share of the volume (Shannon's).
+    NXT_TRADE.tr_id: ("symbol", "received_at", "qty"),
     # A symbol's VIs: a bar close inside one is not predicted; a window touching one is special.
     VI_STATUS.tr_id: ("symbol", "event_time", "received_at", "end_time", "active"),
     # The KOSPI index and KOSPI200 futures, for circuit breakers and sidecars; with the other

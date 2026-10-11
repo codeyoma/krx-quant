@@ -59,10 +59,20 @@ def _fields(feed: Feed, values: dict[str, str]) -> dict[str, str]:
 
 
 def book(
-    when: datetime, bid: int, ask: int, symbol: str = SYMBOL, *, bid_qty: int = 0, ask_qty: int = 0
+    when: datetime,
+    bid: int,
+    ask: int,
+    symbol: str = SYMBOL,
+    *,
+    bid_qty: int = 0,
+    ask_qty: int = 0,
+    deeper: tuple[int, int] = (0, 0),
 ) -> Event:
     """An integrated book update received at ``when``, with ``bid_qty`` and ``ask_qty`` at
-    the best quotes."""
+    the best quotes and ``deeper`` (bid, ask) sizes at each of levels 2–10."""
+    sizes = {f"BIDP_RSQN{i}": str(deeper[0]) for i in range(2, 11)} | {
+        f"ASKP_RSQN{i}": str(deeper[1]) for i in range(2, 11)
+    }
     fields = _fields(
         BOOK,
         {
@@ -72,6 +82,7 @@ def book(
             "ASKP1": str(ask),
             "BIDP_RSQN1": str(bid_qty),
             "ASKP_RSQN1": str(ask_qty),
+            **sizes,
         },
     )
     return (BOOK.tr_id, BOOK.normalize(fields, when.astimezone(UTC)))
@@ -87,8 +98,10 @@ def trade(
     traded: datetime | None = None,
     feed: Feed = TRADE,
     symbol: str = SYMBOL,
+    side: str = "",
 ) -> Event:
-    """A trade received at ``when``; ``traded`` is its exchange time (default ``when``)."""
+    """A trade received at ``when``; ``traded`` is its exchange time (default ``when``);
+    ``side`` the aggressor, ``"buy"`` or ``"sell"`` (else unknown)."""
     exchange_time = traded or when
     fields = _fields(
         feed,
@@ -100,6 +113,7 @@ def trade(
             "CNTG_VOL": str(qty),
             "BIDP1": str(bid),
             "ASKP1": str(ask),
+            "CNTG_CLS_CODE": {"buy": "1", "sell": "5"}.get(side, ""),
         },
     )
     return (feed.tr_id, feed.normalize(fields, when.astimezone(UTC)))

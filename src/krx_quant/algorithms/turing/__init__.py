@@ -3,18 +3,21 @@
 Personality card:
 - **Scientist**: Alan Turing.
 - **Logic**: gradient-boosted trees (LightGBM) classify the next four minutes as up, flat
-  or down from every number the Feature Store has: the other algorithms' features, and its
-  own: the time of day, the trading days to the KOSPI200 options expiry, and the day's flows
-  (program trading, foreign member firms, brokers' estimates of foreign and institutional
-  buying). A feature not known (a flow on a backfilled day) is left missing, and the trees
-  learn where missing ones go. The expected move is the classes' mean moves in training,
+  or down from every number the Feature Store has: the other algorithms' features (the
+  book's and the trades' among them, Shannon's; program trading and foreign member firms'
+  flows, which Shannon reads too), and its own: the time of day, the trading days to the
+  KOSPI200 options expiry, and brokers' estimates of foreign and institutional buying. A
+  feature not known (a flow on a backfilled day) is left missing, and the trees learn where
+  missing ones go. The expected move is the classes' mean moves in training,
   weighted by their probabilities.
-- **Own features**: the time of day, the options expiry, and the flows.
+- **Own features**: the time of day, the options expiry, and the investor estimates.
 - **Learns**: over the last 60 trading days, a fixed number of boosting rounds, the same
   trees for the same samples (one thread, a fixed seed).
 
-This is the one-minute version: order book features come once ten trading days of quotes
-are recorded (#16). The series features (``minute_ticks``) are left to Markov.
+This is the one-minute version: Turing's own order book features come once ten trading
+days of quotes are recorded (#55); Shannon's (#26) already reach it as shared features.
+The series features (``minute_ticks``, ``microprice_ticks``, ``kospi200f_moves``) are left
+to Markov and Kalman.
 """
 
 from __future__ import annotations
@@ -33,14 +36,9 @@ from krx_quant.features import FEATURES, SERIES_FEATURES, FeatureVector
 from krx_quant.pricing import Direction
 
 CLASSES = (Direction.DOWN, Direction.FLAT, Direction.UP)  # the trees' labels 0, 1, 2
-OWN = (
-    "minutes_since_open",
-    "days_to_expiry",
-    "program_net",
-    "member_foreign_net",
-    "investor_foreign",
-    "investor_institution",
-)
+# Program trading and foreign member firms' flows were its own until Shannon (#26), which
+# comes before it, read them too.
+OWN = ("minutes_since_open", "days_to_expiry", "investor_foreign", "investor_institution")
 ROUNDS = 200
 BOOSTING: dict[str, Any] = {
     "objective": "multiclass",
@@ -74,8 +72,9 @@ class Turing:
         character="만능 학습",
         logic=(
             "LightGBM 그래디언트 부스팅 트리로 4분 뒤 상승·보합·하락을 분류한다. 피처 저장소의 모든 숫자 피처"
-            "(다른 알고리즘의 피처 포함)에 시간대, 옵션 만기까지 남은 거래일, 프로그램매매·외국계 회원사·"
-            "투자자별 추정 흐름을 더한다. 모르는 피처(백필만 있는 날의 흐름)는 비워 두고 트리가 다룬다."
+            "(다른 알고리즘의 피처 포함: 호가·체결, 프로그램매매·외국계 회원사 흐름)에 시간대, "
+            "옵션 만기까지 남은 거래일, 투자자별 추정 흐름을 더한다. 모르는 피처(백필만 있는 날의 흐름)는 "
+            "비워 두고 트리가 다룬다."
         ),
         unique_features=OWN,
         training=(
