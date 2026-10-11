@@ -447,6 +447,30 @@ async def test_the_status_shows_the_usd_futures_now_against_the_last_close(
     }
 
 
+async def test_a_macro_read_after_the_open_keeps_the_morning_close(setup: Setup, tmp_path: Path) -> None:
+    backfill_usd_futures(setup.settings, date(2026, 10, 9), 1388.3)
+    await setup.collector.run(DAY)
+    # `krx-quant macro` run again at 10:00, Friday's bars gone meanwhile: it reads no close.
+    (setup.settings.data_dir / bars_key(date(2026, 10, 9), FUTURES_BARS_TR, "USDF")).unlink()
+    async with aiohttp.ClientSession() as session:
+        later = MacroCollector(
+            setup.settings,
+            session,
+            setup.alerts,
+            macro_recorder(setup.recorder),
+            CALENDAR,
+            lambda: at("10:00:00"),
+        )
+        await later.run(DAY)
+    trade = [futures_trade(at("10:05:00"), 1395.2, feed=USD_FUTURES, contract="A75610")]
+    engine = await run(tmp_path / "engine.db", trade, until=at("10:10:00"))
+
+    async with TestClient(TestServer(create_app(engine, data_dir=setup.settings.data_dir))) as client:
+        usd = (await get_json(client, "/v1/status"))["usd_futures"]
+
+    assert usd["previous_close"] == 1388.3, "the close read before the open, as the regime is"
+
+
 async def test_an_older_close_is_not_taken_for_the_previous_one(setup: Setup, tmp_path: Path) -> None:
     # Friday's bars were never backfilled: the 07:30 reading is Thursday's close.
     backfill_usd_futures(setup.settings, date(2026, 10, 8), 1380.0)
