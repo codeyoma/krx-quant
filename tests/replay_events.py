@@ -27,6 +27,7 @@ from krx_quant.feeds import (
     KRX_TRADE,
     KST,
     MEMBER,
+    OPTION,
     PROGRAM,
     TRADE,
     US_TRADE,
@@ -196,6 +197,22 @@ def futures_trade(
         },
     )
     return (feed.tr_id, feed.normalize(fields, when.astimezone(UTC)))
+
+
+def option_trade(when: datetime, code: str, implied_vol: float, delta: float) -> Event:
+    """A KOSPI200 option trade at ``when`` with its implied volatility (%) and delta."""
+    fields = _fields(
+        OPTION,
+        {
+            "optn_shrn_iscd": code,
+            "bsop_hour": when.strftime("%H%M%S"),
+            "optn_prpr": "12.35",
+            "last_cnqn": "1",
+            "hts_ints_vltl": f"{implied_vol}",
+            "delta": f"{delta}",
+        },
+    )
+    return (OPTION.tr_id, OPTION.normalize(fields, when.astimezone(UTC)))
 
 
 def index_tick(when: datetime, code: str, value: float) -> Event:

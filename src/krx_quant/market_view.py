@@ -16,6 +16,7 @@ that event changes them: a prediction made late never sees a trade it could not 
 from __future__ import annotations
 
 import bisect
+import math
 from array import array
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
@@ -49,6 +50,7 @@ from krx_quant.feeds import (
     MEMBER,
     MEMBER_REST,
     NXT_TRADE,
+    OPTION,
     PROGRAM,
     TRADE,
     US_TRADE,
@@ -152,6 +154,67 @@ class _Estimates:
         foreign = next((r[2] for r in reversed(known) if r[2] is not None), None)
         institution = next((r[3] for r in reversed(known) if r[3] is not None), None)
         return foreign, institution
+
+
+# An option trade older than this says nothing about where the money is at a bar close.
+OPTION_STALE = timedelta(minutes=10)
+
+
+class _OptionTrade(NamedTuple):
+    received_at: datetime
+    iv: float  # implied volatility (%)
+    delta: float
+
+
+class _Options:
+    """The KOSPI200 options' trades by receipt time, each one's implied volatility and
+    delta, for the latest ``OPTION_STALE`` or so (Markov's at-the-money implied volatility).
+    An option that stopped trading (the money moved, a new day) is dropped."""
+
+    _KEEP = 2 * OPTION_STALE
+
+    def __init__(self) -> None:
+        self._trades: dict[str, list[_OptionTrade]] = {}  # by option code
+
+    def add(self, row: dict[str, Any]) -> None:
+        """An option trade; one without an implied volatility or a delta says nothing."""
+        iv, delta = row.get("implied_vol"), row.get("delta")
+        if not iv or iv <= 0 or not delta:
+            return
+        trade = _OptionTrade(row["received_at"], float(iv), float(delta))
+        trades = self._trades.setdefault(row["symbol"], [])
+        trades.insert(bisect.bisect_right(trades, trade.received_at, key=_received), trade)
+        oldest = trade.received_at - self._KEEP
+        for code, kept in list(self._trades.items()):
+            del kept[: bisect.bisect_left(kept, oldest, key=_received)]
+            if not kept:
+                del self._trades[code]
+
+    def atm_iv(self, at: datetime) -> float | None:
+        """The mean implied volatility of the call whose delta is nearest 0.5 and the put
+        whose delta is nearest −0.5, each option by its latest trade received in the
+        ``OPTION_STALE`` before ``at``; one side's alone when the other has none."""
+        latest = []
+        for trades in self._trades.values():
+            i = bisect.bisect_left(trades, at, key=_received)
+            if i and trades[i - 1].received_at >= at - OPTION_STALE:
+                latest.append(trades[i - 1])
+        calls = [t for t in latest if t.delta > 0]
+        puts = [t for t in latest if t.delta < 0]
+        sides = [_nearest_iv(side, target) for side, target in ((calls, 0.5), (puts, -0.5)) if side]
+        return sum(sides) / len(sides) if sides else None
+
+
+def _nearest_iv(trades: Sequence[_OptionTrade], delta: float) -> float:
+    """The implied volatility of the option whose delta is nearest ``delta``; the mean of
+    those equally near, so no IV wins a tie."""
+    nearest = min(abs(t.delta - delta) for t in trades)
+    ivs = [t.iv for t in trades if math.isclose(abs(t.delta - delta), nearest)]
+    return sum(ivs) / len(ivs)
+
+
+def _received(trade: _OptionTrade) -> datetime:
+    return trade.received_at
 
 
 class _Running:
@@ -378,11 +441,15 @@ class MarketView:
         self._traded: dict[tuple[str, str], date] = {}  # (symbol, venue): the last day it traded
         self._arrivals = {s: _Arrivals() for s in self.symbols}
         self._expiry: dict[date, int] = {}
+        self._options = _Options()
 
     def on_event(self, feed: str, row: dict[str, Any]) -> None:
-        """Take an event into the bars, reference prices, microprices, order flow or flows;
-        other events are not the view's.
+        """Take an event into the bars, reference prices, microprices, order flow, flows or
+        options; other events are not the view's.
         """
+        if feed == OPTION.tr_id:
+            self._options.add(row)
+            return
         if feed in FLOW_FEEDS:
             self._flow(feed, row)
             return
@@ -458,6 +525,7 @@ class MarketView:
             microprices=self.microprices(symbol, frozen.close),
             order_flow=self.order_flow(symbol, frozen.close),
             arrivals=self.arrivals(symbol, frozen.close),
+            atm_iv=self._options.atm_iv(frozen.close),
         )
 
     def arrivals(self, symbol: str, at: datetime) -> Arrivals:
