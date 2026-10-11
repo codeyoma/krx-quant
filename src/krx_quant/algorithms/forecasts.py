@@ -23,6 +23,26 @@ UNKNOWN = Forecast(1 / 3, 1 / 3, 1 / 3, 0.0)
 Params = Mapping[str, float]
 
 
+def param(kind: str, *index: int | str) -> str:
+    """A parameter's name: its kind and indices, dotted (``w.up.ofi_1``)."""
+    return ".".join([kind, *map(str, index)])
+
+
+def number(value: float | None) -> float:
+    """A feature's value for a numeric array: NaN where unknown or not finite."""
+    return math.nan if value is None or not math.isfinite(value) else value
+
+
+def class_moves(scored: Sequence[Sample]) -> dict[str, float]:
+    """Each class's mean move in training, in ticks, as ``move.<class>`` (0 where none is
+    known): what a classifier expects of each."""
+    out = {}
+    for d in Direction:
+        moves = [s.change_ticks for s in scored if s.outcome is d and s.change_ticks is not None]
+        out[param("move", d.value)] = sum(moves) / len(moves) if moves else 0.0
+    return out
+
+
 def _normal_cdf(z: float) -> float:
     return 0.5 * (1 + math.erf(z / math.sqrt(2)))
 

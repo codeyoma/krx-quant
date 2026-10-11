@@ -27,7 +27,7 @@ from krx_quant.feeds.base import LEVELS
 from krx_quant.pricing import Direction
 from krx_quant.training import recorded_samples
 from tests.algorithm_doubles import FixedAlgorithm
-from tests.replay_events import CALENDAR, DAY, FEE, at, book, run, trade
+from tests.replay_events import CALENDAR, DAY, FEE, at, book, every, run, trade
 from tests.test_algorithms_replay import predictions_of
 from tests.test_replay import busy_morning
 
@@ -69,6 +69,52 @@ async def test_the_order_flow_of_the_minutes_before_a_bar_close(tmp_path: Path) 
     # No book for over a minute by 09:03: the book's features are unknown, the trades' remain.
     assert at_0903["ofi_1"] is None and at_0903["ofi_5"] is None and at_0903["depth_imbalance"] is None
     assert at_0903["trade_imbalance"] == pytest.approx(-0.25)
+
+
+async def test_a_window_counts_only_what_came_in_it_after_a_busy_pre_market(tmp_path: Path) -> None:
+    # NXT's pre-market buys from 08:00 to 08:50: long gone from the first minute's windows.
+    early = every(at("08:00:00"), at("08:50:00"), 10, lambda w: trade(w, 81_300, 7, side="buy"))
+    early += every(at("08:00:05"), at("08:50:00"), 10, lambda w: trade(w, 81_300, 7, feed=NXT_TRADE))
+    probe = FixedAlgorithm("probe", features=OWN + SHARED, unique=OWN + SHARED)
+    events = sorted([*early, *first_minute()], key=lambda e: e[1]["received_at"])
+
+    await run(tmp_path / "engine.db", events, until=at("09:01:00"), algorithms=[probe])
+
+    [at_0901] = probe.seen
+    assert at_0901["trade_imbalance"] == pytest.approx((30 - 50) / 80)
+    assert at_0901["nxt_share"] == pytest.approx(20 / 80)
+
+
+async def test_the_order_flow_restarts_after_the_book_went_missing(tmp_path: Path) -> None:
+    # The bid grows all pre-market; no book from 08:10 until 10:27, when it comes back larger
+    # and stands still. The first book back is not a move from the one two hours before.
+    early = [
+        book(at("08:00:00") + timedelta(seconds=10 * i), 81_200, 81_300, bid_qty=100 + 10 * i, ask_qty=100)
+        for i in range(60)
+    ]
+    late = every(
+        at("10:27:00"), at("10:31:00"), 10, lambda w: book(w, 81_200, 81_300, bid_qty=900, ask_qty=100)
+    )
+    probe = FixedAlgorithm("probe", features=OWN + SHARED, unique=OWN + SHARED)
+
+    await run(tmp_path / "engine.db", [*early, *late], until=at("10:31:00"), algorithms=[probe])
+
+    assert probe.seen[-1]["ofi_5"] == 0.0, "nothing moved since the book came back"
+
+
+async def test_without_nxt_s_trades_its_share_is_unknown(tmp_path: Path) -> None:
+    # The NXT feed is not there (cut by the session limit, or KRX_VENUE_TRADES off).
+    events = [e for e in first_minute() if e[0] != NXT_TRADE.tr_id]
+    probe = FixedAlgorithm("probe", features=OWN + SHARED, unique=OWN + SHARED)
+
+    await run(
+        tmp_path / "engine.db",
+        sorted(events, key=lambda e: e[1]["received_at"]),
+        until=at("09:01:00"),
+        algorithms=[probe],
+    )
+
+    assert probe.seen[-1]["nxt_share"] is None
 
 
 SHANNON = Shannon()

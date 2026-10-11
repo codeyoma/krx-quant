@@ -12,7 +12,7 @@ from krx_quant.algorithms.markov import Markov
 from krx_quant.algorithms.newton import Newton
 from krx_quant.algorithms.shannon import Shannon
 from krx_quant.algorithms.turing import Turing
-from krx_quant.features import SERIES_FEATURES
+from krx_quant.features import BOOK_FEATURES, SERIES_FEATURES, TAPE_FEATURES
 from tests.algorithm_doubles import FixedAlgorithm
 
 
@@ -73,6 +73,8 @@ def test_each_registered_algorithm_has_a_personality_of_its_own() -> None:
     assert not set(Kalman.card.unique_features) & (earlier | set(Markov.features))
     before_shannon = earlier | set(Markov.features) | set(Kalman.features)
     assert not set(Shannon.card.unique_features) & before_shannon
-    # Turing reads every number the others do (not their series), and its own on top.
+    # Turing reads every number the others do (not their series, nor the book's and the
+    # tape's until #55), and its own on top.
     others = before_shannon | set(Shannon.features)
-    assert set(Turing.features) == (others - SERIES_FEATURES) | set(Turing.card.unique_features)
+    unread = SERIES_FEATURES | BOOK_FEATURES | TAPE_FEATURES
+    assert set(Turing.features) == (others - unread) | set(Turing.card.unique_features)

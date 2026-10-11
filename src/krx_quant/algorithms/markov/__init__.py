@@ -27,7 +27,7 @@ import math
 from collections.abc import Mapping, Sequence
 
 from krx_quant.algorithms.contract import Card, Model, Sample
-from krx_quant.algorithms.forecasts import UNKNOWN, lowest_log_loss, normal_forecast, with_outcomes
+from krx_quant.algorithms.forecasts import UNKNOWN, lowest_log_loss, normal_forecast, param, with_outcomes
 from krx_quant.baselines import Forecast
 from krx_quant.features import REGIME_CODES, FeatureVector
 from krx_quant.reference import BAR
@@ -54,10 +54,6 @@ MIN_SD = 0.5
 # Each state's own transitions count this many of the untrained ones besides the data's,
 # so a state the data never visits keeps them.
 _UNTRAINED = 1.0
-
-
-def param(kind: str, *index: int | str) -> str:
-    return ".".join([kind, *map(str, index)])
 
 
 def default_params() -> dict[str, float]:

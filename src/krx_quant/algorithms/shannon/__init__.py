@@ -27,7 +27,7 @@ from collections.abc import Mapping, Sequence
 import numpy as np
 
 from krx_quant.algorithms.contract import Abstention, Card, Model, NothingToLearn, NotPredicted, Sample
-from krx_quant.algorithms.forecasts import lowest_log_loss
+from krx_quant.algorithms.forecasts import class_moves, lowest_log_loss, number, param
 from krx_quant.baselines import Forecast
 from krx_quant.features import FeatureVector
 from krx_quant.pricing import Direction
@@ -51,10 +51,6 @@ MIN_SPLIT = 100
 ROUNDS = 1000
 _TOLERANCE = 1e-8
 _MIN_SD = 1e-9
-
-
-def param(kind: str, *index: str) -> str:
-    return ".".join([kind, *index])
 
 
 def default_params() -> dict[str, float]:
@@ -97,16 +93,8 @@ class Shannon:
         if features["depth_imbalance"] is None:
             raise NotPredicted(Abstention.NO_BOOK)
         p = model.params
-        x = [_standardized(features[f], p[param("mean", f)], p[param("sd", f)]) for f in INPUTS]
-        logits = [
-            p[param("bias", c.value)]
-            + sum(p[param("w", c.value, f)] * v for f, v in zip(INPUTS, x, strict=True))
-            for c in CLASSES
-        ]
-        top = max(logits)
-        weights = [math.exp(v - top) for v in logits]
-        total = sum(weights)
-        up, flat, down = (w / total for w in weights)
+        x = np.array([[_standardized(features[f], p[param("mean", f)], p[param("sd", f)]) for f in INPUTS]])
+        up, flat, down = (float(q) for q in _probabilities(*_weights(p), x)[0])
         expected = sum(q * p[param("move", c.value)] for q, c in zip((up, flat, down), CLASSES, strict=True))
         return Forecast(up, flat, down, expected)
 
@@ -123,7 +111,9 @@ class Shannon:
 
 
 def _standardized(value: float | None, mean: float, sd: float) -> float:
-    return 0.0 if value is None else (value - mean) / sd
+    """An input in standard deviations from its training mean; 0 (the mean) where unknown."""
+    known = number(value)
+    return 0.0 if math.isnan(known) else (known - mean) / sd
 
 
 def _chosen_penalty(scored: Sequence[Sample]) -> float:
@@ -147,7 +137,7 @@ def _chosen_penalty(scored: Sequence[Sample]) -> float:
 def _trained(scored: Sequence[Sample], penalty: float) -> dict[str, float]:
     """The L1-penalized regression on ``scored``, as parameters."""
     params = default_params()
-    raw = np.array([[_number(s.features[f]) for f in INPUTS] for s in scored], dtype=float)
+    raw = np.array([[number(s.features[f]) for f in INPUTS] for s in scored], dtype=float)
     for j, f in enumerate(INPUTS):
         known = raw[~np.isnan(raw[:, j]), j]
         mean = float(known.mean()) if known.size else 0.0
@@ -161,13 +151,7 @@ def _trained(scored: Sequence[Sample], penalty: float) -> dict[str, float]:
         params[param("bias", c.value)] = float(b[i])
         for j, f in enumerate(INPUTS):
             params[param("w", c.value, f)] = float(w[i, j]) + 0.0  # a zeroed weight is 0, not −0
-        moves = [s.change_ticks for s in scored if s.outcome is c and s.change_ticks is not None]
-        params[param("move", c.value)] = sum(moves) / len(moves) if moves else 0.0
-    return params
-
-
-def _number(value: object) -> float:
-    return float(value) if isinstance(value, int | float) else math.nan
+    return params | class_moves(scored)
 
 
 def _matrix(scored: Sequence[Sample], params: Mapping[str, float]) -> tuple[np.ndarray, np.ndarray]:
@@ -215,6 +199,8 @@ def _fista(x: np.ndarray, y: np.ndarray, penalty: float) -> tuple[np.ndarray, np
         p = _probabilities(zw, zb, x)
         gw, gb = (p - y).T @ x / n, (p - y).mean(axis=0)
         base = _cross_entropy(zw, zb, x, y)
+        if not math.isfinite(base):
+            break  # never on standardized inputs; a guard against looping on NaN
         while True:
             nw = _soft(zw - step * gw, step * penalty)
             nb = zb - step * gb

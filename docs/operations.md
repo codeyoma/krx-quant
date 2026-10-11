@@ -170,7 +170,7 @@ curl http://krx-quant:8080/v1/macro
 | `KRX_INDEX_CODES` | `0001,2001,0013` | 업종지수 코드. `0001`(KOSPI)이 꼭 있어야 한다(서킷브레이커 판정) |
 | `KRX_US_SYMBOLS` | `NVDA,MU,AMD` | 미국 주간거래 티커. 나스닥이 아니면 `NYS:티커`, `AMS:티커`. 비워도 된다 |
 | `KRX_ETF_SYMBOLS` | `133690,381180` | KRX 상장 미국 ETF. 비워도 된다 |
-| `KRX_VENUE_TRADES` | `true` | KRX 전용·NXT 전용 체결도 구독한다. `1`, `true`, `yes`만 참이다 |
+| `KRX_VENUE_TRADES` | `true` | KRX 전용·NXT 전용 체결도 구독한다. `1`, `true`, `yes`만 참이다. 끄면 Shannon의 `nxt_share`가 늘 값이 없다(#26). 구독 계획의 맨 끝이라 종목을 늘려 세션 한도에 걸리면 가장 먼저 잘린다 |
 | `KRX_KOSPI200_FUTURES_CODE`, `KRX_USD_FUTURES_CODE` | 없음(마스터 파일에서 찾는다) | 최근월물 코드를 직접 정한다 |
 | `KRX_OPTION_STRIKES_EACH_SIDE` | 2 | KOSPI200 옵션 ATM 위아래로 구독할 행사가 수. 0 이상 |
 | `KRX_FOREIGN_ESTIMATE_POLL_SECONDS` | 300 | 외국인·기관 추정 가집계 조회 간격(초) |

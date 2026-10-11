@@ -3,7 +3,8 @@
 The predicted symbols' one-minute bars and reference prices (``reference``), the bars of
 the series that may lead them (``features.Leaders``: futures, indices, US daytime trades,
 ETFs), each by exchange time, as they stood at each bar close, the symbols' microprices at
-each minute's end (from the integrated book), and their flows (program trading, foreign
+each minute's end and order flow (the integrated book's best quotes and ten levels, the
+trades' aggressor sides, the per-venue trades), and their flows (program trading, foreign
 member firms, investor estimates), as received before it. The engine predicts
 from it, live and in replay; training on a recorded day feeds the same events through it,
 so it learns from exactly what the engine saw.
@@ -18,7 +19,7 @@ import bisect
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta
-from typing import Any
+from typing import Any, NamedTuple
 
 from krx_quant.contracts import KOSPI200, USD, days_to_expiry
 from krx_quant.features import (
@@ -58,7 +59,9 @@ INDEX_FEEDS = (INDEX.tr_id, INDEX_REST.tr_id)
 FUTURES_SERIES = {KOSPI200_FUTURES.tr_id: KOSPI200.series, USD_FUTURES.tr_id: USD.series}
 # The feeds with the symbols' trades and best quotes.
 _QUOTING = (TRADE.tr_id, KRX_TRADE.tr_id, BOOK.tr_id, BOOK_SNAPSHOT.tr_id)
-# The feeds with the symbols' flows (Turing's).
+# The venues of the per-venue trade feeds.
+VENUES = ("KRX", "NXT")
+# The feeds with the symbols' flows (Turing's and Shannon's).
 FLOW_FEEDS = (PROGRAM.tr_id, MEMBER.tr_id, MEMBER_REST.tr_id, FOREIGN_ESTIMATE.tr_id)
 
 
@@ -145,10 +148,60 @@ class _Estimates:
         return foreign, institution
 
 
+class _Running:
+    """Running totals of what was received, for the latest ``keep`` or so: a window's sum is
+    the total at its end less the total before its start."""
+
+    def __init__(self, width: int, keep: timedelta) -> None:
+        self._keep = keep
+        self._at: list[datetime] = []
+        self._totals: list[tuple[float, ...]] = []
+        self._zero = (0.0,) * width
+        self._dropped = self._zero  # the total before the first one kept
+
+    def add(self, at: datetime, values: tuple[float, ...]) -> None:
+        if self._at and at < self._at[-1]:
+            at = self._at[-1]  # the engine only ever moves forward
+        last = self._totals[-1] if self._totals else self._dropped
+        self._at.append(at)
+        self._totals.append(tuple(a + b for a, b in zip(last, values, strict=True)))
+        if at - self._at[0] > 2 * self._keep:
+            cut = bisect.bisect_left(self._at, at - self._keep)
+            if cut:
+                self._dropped = self._totals[cut - 1]
+                del self._at[:cut], self._totals[:cut]
+
+    def between(self, start: datetime, end: datetime) -> tuple[float, ...]:
+        """The sums of what was received in [start, end), ``keep`` back at most."""
+        lo, hi = bisect.bisect_left(self._at, start), bisect.bisect_left(self._at, end)
+        if hi <= lo:
+            return self._zero
+        before = self._totals[lo - 1] if lo > 0 else self._dropped
+        return tuple(a - b for a, b in zip(self._totals[hi - 1], before, strict=True))
+
+
+class _Quote(NamedTuple):
+    """The best quotes and their sizes."""
+
+    bid: int
+    bid_size: int
+    ask: int
+    ask_size: int
+
+
+def _order_flow_imbalance(before: _Quote, now: _Quote) -> float:
+    """Cont, Kukanov and Stoikov's order flow imbalance of one update: the size a bid at the
+    same or a higher price adds, less what left at the same or a lower one, and the mirror
+    on the ask."""
+    bids = (now.bid_size if now.bid >= before.bid else 0) - (before.bid_size if now.bid <= before.bid else 0)
+    asks = (now.ask_size if now.ask <= before.ask else 0) - (before.ask_size if now.ask >= before.ask else 0)
+    return float(bids - asks)
+
+
 class _Book:
-    """A symbol's book updates by receipt time, for the latest hour or so: the microprice,
-    the ten levels' sizes, and running sums of the order flow imbalance at the best quotes
-    and of their mean size."""
+    """A symbol's book updates by receipt time, for the latest hour or so: each one's
+    microprice and ten levels' sizes, and running totals of the order flow imbalance at the
+    best quotes, of their mean size and of the updates."""
 
     _KEEP = timedelta(minutes=MINUTE_MOVES + 10)
 
@@ -156,38 +209,40 @@ class _Book:
         self._at: list[datetime] = []
         self._micro: list[float] = []
         self._depth: list[tuple[float, float]] = []  # bid, ask: the ten levels' sizes
-        self._ofi: list[float] = []  # running sums
-        self._size: list[float] = []
-        self._last: tuple[int, int, int, int] | None = None  # bid, its size, ask, its size
+        self._flow = _Running(3, self._KEEP)  # order flow imbalance, best quotes' mean size, updates
+        self._last: _Quote | None = None
 
     def add(self, at: datetime, row: dict[str, Any]) -> None:
         """A book update; an empty side or a crossed book is not a usable one."""
-        bid, ask = row["bid_px_1"], row["ask_px_1"]
-        if bid <= 0 or ask <= 0 or ask < bid or (self._at and at < self._at[-1]):
+        quote = _Quote(row["bid_px_1"], row.get("bid_qty_1") or 0, row["ask_px_1"], row.get("ask_qty_1") or 0)
+        if quote.bid <= 0 or quote.ask <= 0 or quote.ask < quote.bid or (self._at and at < self._at[-1]):
             return
-        bid_qty, ask_qty = row.get("bid_qty_1") or 0, row.get("ask_qty_1") or 0
         # The microprice leans toward the side with less waiting: the other is likelier to go.
         # Without both sizes (a file recorded without them) it is the mid-point.
-        if bid_qty > 0 and ask_qty > 0:
-            micro = (bid * ask_qty + ask * bid_qty) / (bid_qty + ask_qty)
+        if quote.bid_size > 0 and quote.ask_size > 0:
+            micro = (quote.bid * quote.ask_size + quote.ask * quote.bid_size) / (
+                quote.bid_size + quote.ask_size
+            )
         else:
-            micro = (bid + ask) / 2
+            micro = (quote.bid + quote.ask) / 2
+        # The first update after the book went missing (the day's first too) is no move from
+        # the one before the gap.
         flow = 0.0
-        if self._last is not None:  # Cont, Kukanov and Stoikov's order flow imbalance
-            b0, bq0, a0, aq0 = self._last
-            flow = (bid_qty if bid >= b0 else 0) - (bq0 if bid <= b0 else 0)
-            flow -= (ask_qty if ask <= a0 else 0) - (aq0 if ask >= a0 else 0)
-        self._last = (bid, bid_qty, ask, ask_qty)
-        depth = tuple(float(sum(row.get(f"{side}_qty_{i}") or 0 for i in LEVELS)) for side in ("bid", "ask"))
+        if self._last is not None and self._at and at - self._at[-1] <= MAX_QUOTE_AGE:
+            flow = _order_flow_imbalance(self._last, quote)
+        self._last = quote
         self._at.append(at)
         self._micro.append(micro)
-        self._depth.append((depth[0], depth[1]))
-        self._ofi.append((self._ofi[-1] if self._ofi else 0.0) + flow)
-        self._size.append((self._size[-1] if self._size else 0.0) + (bid_qty + ask_qty) / 2)
+        self._depth.append(
+            (
+                float(sum(row.get(f"bid_qty_{i}") or 0 for i in LEVELS)),
+                float(sum(row.get(f"ask_qty_{i}") or 0 for i in LEVELS)),
+            )
+        )
+        self._flow.add(at, (flow, (quote.bid_size + quote.ask_size) / 2, 1.0))
         if at - self._at[0] > 2 * self._KEEP:
             cut = bisect.bisect_left(self._at, at - self._KEEP)
-            for kept in (self._at, self._micro, self._depth, self._ofi, self._size):
-                del kept[:cut]
+            del self._at[:cut], self._micro[:cut], self._depth[:cut]
 
     def _latest(self, at: datetime) -> int | None:
         """The update received just before ``at``, unless the book went missing (none in the
@@ -214,41 +269,17 @@ class _Book:
     def flow(self, start: datetime, end: datetime) -> tuple[float, float | None]:
         """The order flow imbalance of the updates received in [start, end), and the best
         quotes' mean size over them (None without any)."""
-        lo, hi = bisect.bisect_left(self._at, start), bisect.bisect_left(self._at, end)
-        if hi <= lo:
-            return 0.0, None
-        ofi = self._ofi[hi - 1] - (self._ofi[lo - 1] if lo > 0 else 0.0)
-        size = self._size[hi - 1] - (self._size[lo - 1] if lo > 0 else 0.0)
-        return ofi, size / (hi - lo)
+        imbalance, size, updates = self._flow.between(start, end)
+        return imbalance, size / updates if updates else None
 
 
-class _Running:
-    """Running sums of what was received, for the latest minutes."""
+class _Sides(NamedTuple):
+    """Trades by aggressor: how many, and their volume."""
 
-    _KEEP = timedelta(minutes=TRADE_MINUTES + 5)
-
-    def __init__(self, width: int) -> None:
-        self._at: list[datetime] = []
-        self._sums: list[tuple[float, ...]] = []
-        self._zero = (0.0,) * width
-
-    def add(self, at: datetime, values: tuple[float, ...]) -> None:
-        if self._at and at < self._at[-1]:
-            at = self._at[-1]  # the engine only ever moves forward
-        last = self._sums[-1] if self._sums else self._zero
-        self._at.append(at)
-        self._sums.append(tuple(a + b for a, b in zip(last, values, strict=True)))
-        if at - self._at[0] > 2 * self._KEEP:
-            cut = bisect.bisect_left(self._at, at - self._KEEP)
-            del self._at[:cut], self._sums[:cut]
-
-    def between(self, start: datetime, end: datetime) -> tuple[float, ...]:
-        """The sums of what was received in [start, end)."""
-        lo, hi = bisect.bisect_left(self._at, start), bisect.bisect_left(self._at, end)
-        if hi <= lo:
-            return self._zero
-        before = self._sums[lo - 1] if lo > 0 else self._zero
-        return tuple(a - b for a, b in zip(self._sums[hi - 1], before, strict=True))
+    buys: float
+    sells: float
+    bought: float
+    sold: float
 
 
 @dataclass(frozen=True)
@@ -279,13 +310,15 @@ class MarketView:
         self._foreign_members = {s: _Flow() for s in self.symbols}
         self._estimates = {s: _Estimates() for s in self.symbols}
         self._books = {s: _Book() for s in self.symbols}
-        self._sides = {s: _Running(4) for s in self.symbols}  # buys, sells, their volumes
-        self._venues = {s: _Running(2) for s in self.symbols}  # KRX, NXT volume
+        trades = timedelta(minutes=TRADE_MINUTES + 5)
+        self._sides = {s: _Running(len(_Sides._fields), trades) for s in self.symbols}
+        self._venues = {s: _Running(len(VENUES), trades) for s in self.symbols}  # volume by venue
+        self._traded: dict[tuple[str, str], date] = {}  # (symbol, venue): the last day it traded
         self._expiry: dict[date, int] = {}
 
     def on_event(self, feed: str, row: dict[str, Any]) -> None:
-        """Take a trade or a best quote into the bars and reference prices; other events
-        are not the view's.
+        """Take an event into the bars, reference prices, microprices, order flow or flows;
+        other events are not the view's.
         """
         if feed in FLOW_FEEDS:
             self._flow(feed, row)
@@ -298,7 +331,7 @@ class MarketView:
                 self._leader_bars.trade(series, row["event_time"], price, row.get("qty") or 0)
         if feed == NXT_TRADE.tr_id:
             if row["symbol"] in self.symbols:
-                self._venues[row["symbol"]].add(row["received_at"], (0.0, float(row.get("qty") or 0)))
+                self._venue_trade(row["symbol"], "NXT", row)
             return
         if feed not in _QUOTING or row["symbol"] not in self.symbols:
             return
@@ -307,13 +340,14 @@ class MarketView:
         if feed == TRADE.tr_id:
             self._bars.trade(symbol, row["event_time"], row["price"], row["qty"])
             self._reference.quote(symbol, Source.INTEGRATED, received_at, row["bid1"], row["ask1"])
-            side, qty = row.get("side"), float(row["qty"] or 0)
-            if side in ("buy", "sell"):
-                buy = side == "buy"
-                self._sides[symbol].add(received_at, (float(buy), float(not buy), qty * buy, qty * (not buy)))
+            qty = float(row["qty"] or 0)
+            if row.get("side") == "buy":
+                self._sides[symbol].add(received_at, _Sides(1.0, 0.0, qty, 0.0))
+            elif row.get("side") == "sell":
+                self._sides[symbol].add(received_at, _Sides(0.0, 1.0, 0.0, qty))
         elif feed == KRX_TRADE.tr_id:
             self._reference.quote(symbol, Source.KRX, received_at, row["bid1"], row["ask1"])
-            self._venues[symbol].add(received_at, (float(row.get("qty") or 0), 0.0))
+            self._venue_trade(symbol, "KRX", row)
         else:
             bid, ask = row["bid_px_1"], row["ask_px_1"]
             self._reference.quote(symbol, Source.INTEGRATED, received_at, bid, ask)
@@ -357,12 +391,14 @@ class MarketView:
             flows=self.flows(symbol, frozen.close),
             expiry_days=self._expiry[day],
             microprices=self.microprices(symbol, frozen.close),
-            orders=self.orders(symbol, frozen.close),
+            order_flow=self.order_flow(symbol, frozen.close),
         )
 
-    def orders(self, symbol: str, at: datetime) -> OrderFlow:
-        """``symbol``'s book and trades received in the minutes before ``at``, from the open."""
-        session = self.calendar.session(kst_day(at))
+    def order_flow(self, symbol: str, at: datetime) -> OrderFlow:
+        """``symbol``'s book and trades received in the minutes before ``at``, from the open.
+        A venue that has not traded today is unknown (its feed is not there)."""
+        day = kst_day(at)
+        session = self.calendar.session(day)
         if symbol not in self._books or session is None:
             return OrderFlow()
 
@@ -371,21 +407,28 @@ class MarketView:
 
         book = self._books[symbol]
         depth = book.depth(at)
-        flows = {m: book.flow(since(m), at) for m in OFI_MINUTES}
-        buys, sells, bought, sold = self._sides[symbol].between(since(TRADE_MINUTES), at)
-        krx, nxt = self._venues[symbol].between(since(TRADE_MINUTES), at)
+        imbalances = {m: book.flow(since(m), at) for m in OFI_MINUTES}
+        sides = _Sides(*self._sides[symbol].between(since(TRADE_MINUTES), at))
+        volumes = dict(zip(VENUES, self._venues[symbol].between(since(TRADE_MINUTES), at), strict=True))
+        known = all(self._traded.get((symbol, venue)) == day for venue in VENUES)
         return OrderFlow(
-            ofi={m: ofi for m, (ofi, _) in flows.items()},
-            size={m: size for m, (_, size) in flows.items() if size is not None},
+            ofi={m: imbalance for m, (imbalance, _) in imbalances.items()},
+            quote_size={m: size for m, (_, size) in imbalances.items() if size is not None},
             bid_depth=None if depth is None else depth[0],
             ask_depth=None if depth is None else depth[1],
-            buys=int(buys),
-            sells=int(sells),
-            buy_volume=bought,
-            sell_volume=sold,
-            krx_volume=krx,
-            nxt_volume=nxt,
+            buys=int(sides.buys),
+            sells=int(sides.sells),
+            buy_volume=sides.bought,
+            sell_volume=sides.sold,
+            krx_volume=volumes["KRX"] if known else None,
+            nxt_volume=volumes["NXT"] if known else None,
         )
+
+    def _venue_trade(self, symbol: str, venue: str, row: dict[str, Any]) -> None:
+        received_at = row["received_at"]
+        self._traded[(symbol, venue)] = kst_day(received_at)
+        qty = float(row.get("qty") or 0)
+        self._venues[symbol].add(received_at, tuple(qty if v == venue else 0.0 for v in VENUES))
 
     def microprices(self, symbol: str, at: datetime) -> list[float]:
         """``symbol``'s microprice at each minute's end from the open up to ``at``, the last
