@@ -109,8 +109,9 @@ class Poller:
                     log.warning("poll %s %s failed: %s", job.feed.tr_id, job.key, e)
                 else:
                     news = job.feed.news(body)
-                    baseline = job.first_is_baseline and last is _UNSEEN
-                    if not (baseline or (job.changes_only and news == last)):
+                    if job.first_is_baseline and last is _UNSEEN:
+                        self._read_baseline(job, params, body, self._now(), day)
+                    elif not (job.changes_only and news == last):
                         self._record(job, params, body, self._now(), day)
                     last = news
                     if self._on_received is not None:
@@ -118,13 +119,30 @@ class Poller:
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(self._stop.wait(), job.interval)
 
+    def _read_baseline(
+        self, job: PollJob, params: dict[str, str], body: dict[str, object], at: datetime, day: date
+    ) -> None:
+        """Read a baseline answer like any other without recording it (when its values were
+        true is unknown); one that cannot be read is kept raw, to look into.
+        """
+        try:
+            job.feed.normalize(body, job.key, at.astimezone(UTC))
+        except NORMALIZE_ERRORS:
+            log.exception("could not normalize %s %s; kept raw only", job.feed.tr_id, job.key)
+            self._record_raw(job, params, body, at, day)
+
+    def _record_raw(
+        self, job: PollJob, params: dict[str, str], body: dict[str, object], at: datetime, day: date
+    ) -> None:
+        message = json.dumps({"tr_id": job.feed.tr_id, "params": params, "body": body}, ensure_ascii=False)
+        raw_row = {"received_at": at.astimezone(UTC), "message": message}
+        self._recorder.record("raw", day, job.feed.tr_id, job.key, raw_row, RAW_SCHEMA)
+
     def _record(
         self, job: PollJob, params: dict[str, str], body: dict[str, object], at: datetime, day: date
     ) -> None:
         received_at = at.astimezone(UTC)
-        message = json.dumps({"tr_id": job.feed.tr_id, "params": params, "body": body}, ensure_ascii=False)
-        raw_row = {"received_at": received_at, "message": message}
-        self._recorder.record("raw", day, job.feed.tr_id, job.key, raw_row, RAW_SCHEMA)
+        self._record_raw(job, params, body, at, day)
         try:
             rows = job.feed.normalize(body, job.key, received_at)
         except NORMALIZE_ERRORS:

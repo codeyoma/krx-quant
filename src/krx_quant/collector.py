@@ -497,14 +497,22 @@ async def check_fallbacks(settings: Settings, now: Clock | None = None) -> list[
     checks: list[FallbackCheck] = []
     async with aiohttp.ClientSession() as session:
         _, client = tokens_and_client(session, settings, clock)
-        for feed, key in subscription_plan(settings, await front_months(session, settings)):
+        plan = subscription_plan(settings, await front_months(session, settings))
+        # A derivative left out of the plan (its contract not found) is not checked: a failure.
+        planned = {feed.tr_id for feed, _ in plan}
+        for feed in (KOSPI200_FUTURES, USD_FUTURES, OPTION):
+            if feed.tr_id not in planned:
+                why = "no contract to ask for: the KIS masters could not be read"
+                checks.append(FallbackCheck(feed.tr_id, "", FALLBACKS[feed.tr_id], {}, [], why))
+        for feed, key in plan:
             fallback = fallback_for(settings, feed.tr_id, key)
             if fallback is None:
                 continue
-            params = fallback.params(key, kst_day(clock()))
+            at = clock()  # one time for the day asked for and the time received
+            params = fallback.params(key, kst_day(at))
             try:
                 body = await client.get(fallback.tr_id, fallback.path, params)
-                rows = fallback.normalize(body, key, clock().astimezone(UTC))
+                rows = fallback.normalize(body, key, at.astimezone(UTC))
             except (*CALL_ERRORS, *NORMALIZE_ERRORS) as e:
                 checks.append(
                     FallbackCheck(feed.tr_id, key, fallback, params, [], f"{type(e).__name__}: {e}")

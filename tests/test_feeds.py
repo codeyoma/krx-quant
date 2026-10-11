@@ -522,6 +522,33 @@ async def test_a_derivative_stand_in_is_not_recorded_again_for_the_index_quotes_
     assert [f["price"] for f in read(tmp_path, "events", "H0IFCNT0", symbol="A01612")] == [1056.35]
 
 
+async def test_a_stand_in_first_answer_that_cannot_be_read_is_kept_raw(kis: FakeKis, tmp_path: Path) -> None:
+    serve_masters(kis)
+    calls = 0
+
+    def respond(q: dict[str, str]) -> dict[str, Any]:
+        nonlocal calls
+        if (q["FID_COND_MRKT_DIV_CODE"], q["FID_INPUT_ISCD"]) != ("F", "A01612"):
+            return {"rt_cd": "1", "msg_cd": "OPSQ0002", "msg1": "없는 종목"}
+        calls += 1
+        return ok(output1={"hts_kor_isnm": "F 202612"}, output2={}, output3={})  # no price
+
+    kis.rest_responses["FHMIF10000000"] = respond
+    settings = replace(settings_for(kis, tmp_path), ws_max_subscriptions=0, fallback_poll_seconds=0.02)
+
+    stop = asyncio.Event()
+    task = asyncio.create_task(run_collector(settings, stop=stop, clock=lambda: FIXED_NOW))
+    try:
+        await until(lambda: calls >= 3)
+    finally:
+        stop.set()
+        await asyncio.wait_for(task, 5)
+
+    # The baseline is read like any answer: one that cannot be is kept raw (once) to look into.
+    assert len(read(tmp_path, "raw", "FHMIF10000000", symbol="A01612")) == 1
+    assert not (tmp_path / "events" / "date=2026-10-08" / "feed=H0IFCNT0").exists()
+
+
 async def test_usd_futures_fall_back_to_rest_when_refused_for_the_limit(kis: FakeKis, tmp_path: Path) -> None:
     serve_masters(kis)
     # Currency futures prices come with float noise, as on the WebSocket.
@@ -783,3 +810,17 @@ async def test_each_fallback_of_the_plan_can_be_checked_once_beside_the_collecto
     assert kis.subscriptions == []
     assert not (tmp_path / "events").exists()
     assert not (tmp_path / "raw").exists()
+
+
+async def test_checking_the_fallbacks_fails_for_derivatives_whose_contracts_are_unknown(
+    kis: FakeKis, tmp_path: Path
+) -> None:
+    # No KIS masters and no configured codes: the nearest contracts cannot be found.
+    checks = await check_fallbacks(settings_for(kis, tmp_path), lambda: FIXED_NOW)
+
+    unknown = [
+        (c.cut_feed, c.error is not None)
+        for c in checks
+        if c.cut_feed in ("H0IFCNT0", "H0CFCNT0", "H0IOCNT0")
+    ]
+    assert unknown == [("H0IFCNT0", True), ("H0CFCNT0", True), ("H0IOCNT0", True)]
