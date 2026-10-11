@@ -3,8 +3,9 @@
 A feature is a function of a ``Snapshot``: the day's finished one-minute bars up to the
 bar close, the reference price there, when the session opened, the bars of the series
 that may lead the symbol (``Leaders``), the microprices of its book at each minute's end
-(recorded days only: backfilled bars have no book, ``BOOK_FEATURES``), its flows, and the
-day's macro regime (``macro.py``). Live
+and its order flow (``OrderFlow``: the book, the trades' sides and venues; recorded days
+only, ``BOOK_FEATURES`` and ``TAPE_FEATURES``: backfilled bars have neither), its flows,
+and the day's macro regime (``macro.py``). Live
 and replay build snapshots from the engine's Market View; training builds them from
 recorded events through the same view, or from backfilled bars, so a feature means the
 same thing in both. A snapshot holds nothing received after its bar close, so no feature
@@ -59,6 +60,29 @@ class Flows:
     institution_estimate: float | None = None  # ... and of institutions' (HHPTJ04160200)
 
 
+# Minutes the order flow imbalance is summed over, and the trades are counted over.
+OFI_MINUTES = (1, 5)
+TRADE_MINUTES = 5
+
+
+@dataclass(frozen=True)
+class OrderFlow:
+    """A symbol's book and trades in the minutes before a bar close, as received, from the
+    open (Shannon's). Recorded days only: there is no backfill of either."""
+
+    ofi: Mapping[int, float] = field(default_factory=dict)  # by window: order flow imbalance (shares)
+    quote_size: Mapping[int, float] = field(default_factory=dict)  # by window: the best quotes' mean size
+    bid_depth: float | None = None  # the ten levels' sizes at the bar close; None without the book
+    ask_depth: float | None = None
+    buys: int = 0  # trades over ``TRADE_MINUTES`` by aggressor (integrated feed)
+    sells: int = 0
+    buy_volume: float = 0.0
+    sell_volume: float = 0.0
+    # ... and by venue (the per-venue feeds); None while a venue has not traded today.
+    krx_volume: float | None = None
+    nxt_volume: float | None = None
+
+
 @dataclass(frozen=True)
 class Snapshot:
     symbol: str
@@ -79,6 +103,7 @@ class Snapshot:
     # oldest first, since the book last went missing (no update for a minute); empty if it
     # is missing at the bar close, and on a day with backfilled bars only.
     microprices: Sequence[float] = ()
+    order_flow: OrderFlow = field(default_factory=OrderFlow)
 
     @classmethod
     def at(
@@ -95,6 +120,7 @@ class Snapshot:
         flows: Flows | None = None,
         expiry_days: int | None = None,
         microprices: Sequence[float] = (),
+        order_flow: OrderFlow | None = None,
     ) -> Snapshot:
         """A snapshot with the tick and flat band of ``price``."""
         lead, known = leaders or {}, flows or Flows()
@@ -112,6 +138,7 @@ class Snapshot:
             known,
             expiry_days,
             microprices,
+            order_flow or OrderFlow(),
         )
 
     @cached_property
@@ -305,6 +332,58 @@ def kospi200f_moves(s: Snapshot) -> Series:
     front = s.leaders.get("kospi200f", [])
     bars = _from_open(front[0] if front else [], s.session_open)
     return _minute_moves(bars, s.bar_close, lambda before, after: 1e4 * math.log(after / before))
+
+
+def ofi_feature(minutes: int) -> str:
+    return f"ofi_{minutes}"
+
+
+def _ofi(minutes: int) -> Feature:
+    def feature(s: Snapshot) -> FeatureValue:
+        flow = s.order_flow
+        if flow.bid_depth is None:
+            return None
+        size = flow.quote_size.get(minutes)
+        return flow.ofi.get(minutes, 0.0) / size if size else 0.0
+
+    feature.__doc__ = (
+        f"Order flow imbalance at the best quotes over the last {minutes} minute(s), from the open, "
+        "in units of their mean size. Unknown without the book at the bar close."
+    )
+    return feature
+
+
+def depth_imbalance(s: Snapshot) -> FeatureValue:
+    """(Bid − ask) sizes over both, the book's ten levels at the bar close."""
+    bid, ask = s.order_flow.bid_depth, s.order_flow.ask_depth
+    if bid is None or ask is None:
+        return None
+    return (bid - ask) / (bid + ask) if bid + ask > 0 else 0.0
+
+
+def trade_imbalance(s: Snapshot) -> FeatureValue:
+    """(Bought − sold) volume over both, by aggressor, in the last ``TRADE_MINUTES``."""
+    bought, sold = s.order_flow.buy_volume, s.order_flow.sell_volume
+    return (bought - sold) / (bought + sold) if bought + sold > 0 else None
+
+
+def trade_entropy(s: Snapshot) -> FeatureValue:
+    """The Shannon entropy (bits) of the trades' aggressor sides in the last
+    ``TRADE_MINUTES``: 0 all one way, 1 half and half."""
+    flow = s.order_flow
+    total = flow.buys + flow.sells
+    if total == 0:
+        return None
+    return -sum(p * math.log2(p) for p in (flow.buys / total, flow.sells / total) if p > 0)
+
+
+def nxt_share(s: Snapshot) -> FeatureValue:
+    """NXT's share of the volume traded on both venues in the last ``TRADE_MINUTES``;
+    unknown while a venue has not traded today (its feed is not there)."""
+    krx, nxt = s.order_flow.krx_volume, s.order_flow.nxt_volume
+    if krx is None or nxt is None or krx + nxt <= 0:
+        return None
+    return nxt / (krx + nxt)
 
 
 def minutes_since_open(s: Snapshot) -> FeatureValue:
@@ -549,6 +628,11 @@ FEATURES: dict[str, Feature] = {
     "minute_ticks": minute_ticks,
     "microprice_ticks": microprice_ticks,
     "kospi200f_moves": kospi200f_moves,
+    **{ofi_feature(m): _ofi(m) for m in OFI_MINUTES},
+    "depth_imbalance": depth_imbalance,
+    "trade_imbalance": trade_imbalance,
+    "trade_entropy": trade_entropy,
+    "nxt_share": nxt_share,
     "macro_regime": macro_regime,
     "minutes_since_open": minutes_since_open,
     "days_to_expiry": days_to_expiry,
@@ -562,8 +646,10 @@ FEATURES: dict[str, Feature] = {
 LEAD_FEATURES = frozenset(lead_feature(group, lag) for group in LEAD_GROUPS for lag in LEAD_LAGS)
 # The features that are series of numbers.
 SERIES_FEATURES = frozenset({"minute_ticks", "microprice_ticks", "kospi200f_moves"})
-# The features from the book: none on a day with backfilled bars only.
-BOOK_FEATURES = frozenset({"microprice_ticks"})
+# The features from the book, and from the trades' sides and venues: none on a day with
+# backfilled bars only.
+BOOK_FEATURES = frozenset({"microprice_ticks", "depth_imbalance", *(ofi_feature(m) for m in OFI_MINUTES)})
+TAPE_FEATURES = frozenset({"trade_imbalance", "trade_entropy", "nxt_share"})
 
 
 class UndeclaredFeature(LookupError):

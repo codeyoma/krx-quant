@@ -3,7 +3,8 @@
 The predicted symbols' one-minute bars and reference prices (``reference``), the bars of
 the series that may lead them (``features.Leaders``: futures, indices, US daytime trades,
 ETFs), each by exchange time, as they stood at each bar close, the symbols' microprices at
-each minute's end (from the integrated book), and their flows (program trading, foreign
+each minute's end and order flow (the integrated book's best quotes and ten levels, the
+trades' aggressor sides, the per-venue trades), and their flows (program trading, foreign
 member firms, investor estimates), as received before it. The engine predicts
 from it, live and in replay; training on a recorded day feeds the same events through it,
 so it learns from exactly what the engine saw.
@@ -18,10 +19,19 @@ import bisect
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta
-from typing import Any
+from typing import Any, NamedTuple
 
 from krx_quant.contracts import KOSPI200, USD, days_to_expiry
-from krx_quant.features import FLOW_MINUTES, MINUTE_MOVES, Flows, Leaders, Snapshot
+from krx_quant.features import (
+    FLOW_MINUTES,
+    MINUTE_MOVES,
+    OFI_MINUTES,
+    TRADE_MINUTES,
+    Flows,
+    Leaders,
+    OrderFlow,
+    Snapshot,
+)
 from krx_quant.feeds import (
     BOOK,
     BOOK_SNAPSHOT,
@@ -32,12 +42,13 @@ from krx_quant.feeds import (
     KRX_TRADE,
     MEMBER,
     MEMBER_REST,
+    NXT_TRADE,
     PROGRAM,
     TRADE,
     US_TRADE,
     USD_FUTURES,
 )
-from krx_quant.feeds.base import KST, kst_day
+from krx_quant.feeds.base import KST, LEVELS, kst_day
 from krx_quant.market_calendar import MarketCalendar, Session
 from krx_quant.reference import BAR, MAX_QUOTE_AGE, Bar, BarBuilder, ReferencePrice, Source
 
@@ -48,7 +59,9 @@ INDEX_FEEDS = (INDEX.tr_id, INDEX_REST.tr_id)
 FUTURES_SERIES = {KOSPI200_FUTURES.tr_id: KOSPI200.series, USD_FUTURES.tr_id: USD.series}
 # The feeds with the symbols' trades and best quotes.
 _QUOTING = (TRADE.tr_id, KRX_TRADE.tr_id, BOOK.tr_id, BOOK_SNAPSHOT.tr_id)
-# The feeds with the symbols' flows (Turing's).
+# The venues of the per-venue trade feeds.
+VENUES = ("KRX", "NXT")
+# The feeds with the symbols' flows (Turing's and Shannon's).
 FLOW_FEEDS = (PROGRAM.tr_id, MEMBER.tr_id, MEMBER_REST.tr_id, FOREIGN_ESTIMATE.tr_id)
 
 
@@ -135,41 +148,138 @@ class _Estimates:
         return foreign, institution
 
 
-class _Microprices:
-    """A symbol's book microprices by receipt time, for the latest hour or so."""
+class _Running:
+    """Running totals of what was received, for the latest ``keep`` or so: a window's sum is
+    the total at its end less the total before its start."""
+
+    def __init__(self, width: int, keep: timedelta) -> None:
+        self._keep = keep
+        self._at: list[datetime] = []
+        self._totals: list[tuple[float, ...]] = []
+        self._zero = (0.0,) * width
+        self._dropped = self._zero  # the total before the first one kept
+
+    def add(self, at: datetime, values: tuple[float, ...]) -> None:
+        if self._at and at < self._at[-1]:
+            at = self._at[-1]  # the engine only ever moves forward
+        last = self._totals[-1] if self._totals else self._dropped
+        self._at.append(at)
+        self._totals.append(tuple(a + b for a, b in zip(last, values, strict=True)))
+        if at - self._at[0] > 2 * self._keep:
+            cut = bisect.bisect_left(self._at, at - self._keep)
+            if cut:
+                self._dropped = self._totals[cut - 1]
+                del self._at[:cut], self._totals[:cut]
+
+    def between(self, start: datetime, end: datetime) -> tuple[float, ...]:
+        """The sums of what was received in [start, end), ``keep`` back at most."""
+        lo, hi = bisect.bisect_left(self._at, start), bisect.bisect_left(self._at, end)
+        if hi <= lo:
+            return self._zero
+        before = self._totals[lo - 1] if lo > 0 else self._dropped
+        return tuple(a - b for a, b in zip(self._totals[hi - 1], before, strict=True))
+
+
+class _Quote(NamedTuple):
+    """The best quotes and their sizes."""
+
+    bid: int
+    bid_size: int
+    ask: int
+    ask_size: int
+
+
+def _order_flow_imbalance(before: _Quote, now: _Quote) -> float:
+    """Cont, Kukanov and Stoikov's order flow imbalance of one update: the size a bid at the
+    same or a higher price adds, less what left at the same or a lower one, and the mirror
+    on the ask."""
+    bids = (now.bid_size if now.bid >= before.bid else 0) - (before.bid_size if now.bid <= before.bid else 0)
+    asks = (now.ask_size if now.ask <= before.ask else 0) - (before.ask_size if now.ask >= before.ask else 0)
+    return float(bids - asks)
+
+
+class _Book:
+    """A symbol's book updates by receipt time, for the latest hour or so: each one's
+    microprice and ten levels' sizes, and running totals of the order flow imbalance at the
+    best quotes, of their mean size and of the updates."""
 
     _KEEP = timedelta(minutes=MINUTE_MOVES + 10)
 
     def __init__(self) -> None:
         self._at: list[datetime] = []
-        self._values: list[float] = []
+        self._micro: list[float] = []
+        self._depth: list[tuple[float, float]] = []  # bid, ask: the ten levels' sizes
+        self._flow = _Running(3, self._KEEP)  # order flow imbalance, best quotes' mean size, updates
+        self._last: _Quote | None = None
 
-    def add(self, at: datetime, bid: int, ask: int, bid_qty: int | None, ask_qty: int | None) -> None:
+    def add(self, at: datetime, row: dict[str, Any]) -> None:
         """A book update; an empty side or a crossed book is not a usable one."""
-        if bid <= 0 or ask <= 0 or ask < bid or (self._at and at < self._at[-1]):
+        quote = _Quote(row["bid_px_1"], row.get("bid_qty_1") or 0, row["ask_px_1"], row.get("ask_qty_1") or 0)
+        if quote.bid <= 0 or quote.ask <= 0 or quote.ask < quote.bid or (self._at and at < self._at[-1]):
             return
         # The microprice leans toward the side with less waiting: the other is likelier to go.
         # Without both sizes (a file recorded without them) it is the mid-point.
-        if bid_qty and ask_qty and bid_qty > 0 and ask_qty > 0:
-            value = (bid * ask_qty + ask * bid_qty) / (bid_qty + ask_qty)
+        if quote.bid_size > 0 and quote.ask_size > 0:
+            micro = (quote.bid * quote.ask_size + quote.ask * quote.bid_size) / (
+                quote.bid_size + quote.ask_size
+            )
         else:
-            value = (bid + ask) / 2
+            micro = (quote.bid + quote.ask) / 2
+        # The first update after the book went missing (the day's first too) is no move from
+        # the one before the gap.
+        flow = 0.0
+        if self._last is not None and self._at and at - self._at[-1] <= MAX_QUOTE_AGE:
+            flow = _order_flow_imbalance(self._last, quote)
+        self._last = quote
         self._at.append(at)
-        self._values.append(value)
+        self._micro.append(micro)
+        self._depth.append(
+            (
+                float(sum(row.get(f"bid_qty_{i}") or 0 for i in LEVELS)),
+                float(sum(row.get(f"ask_qty_{i}") or 0 for i in LEVELS)),
+            )
+        )
+        self._flow.add(at, (flow, (quote.bid_size + quote.ask_size) / 2, 1.0))
         if at - self._at[0] > 2 * self._KEEP:
             cut = bisect.bisect_left(self._at, at - self._KEEP)
-            del self._at[:cut], self._values[:cut]
+            del self._at[:cut], self._micro[:cut], self._depth[:cut]
+
+    def _latest(self, at: datetime) -> int | None:
+        """The update received just before ``at``, unless the book went missing (none in the
+        minute before)."""
+        i = bisect.bisect_left(self._at, at) - 1
+        return None if i < 0 or self._at[i] < at - MAX_QUOTE_AGE else i
 
     def at_minute_ends(self, ends: Sequence[datetime]) -> list[float]:
         """The microprice received just before each of ``ends`` (oldest first), back to the
         last end without one received in the minute before it."""
         out: list[float] = []
         for end in reversed(ends):
-            i = bisect.bisect_left(self._at, end) - 1
-            if i < 0 or self._at[i] < end - MAX_QUOTE_AGE:
+            i = self._latest(end)
+            if i is None:
                 break
-            out.append(self._values[i])
+            out.append(self._micro[i])
         return out[::-1]
+
+    def depth(self, at: datetime) -> tuple[float, float] | None:
+        """The ten levels' sizes (bid, ask) just before ``at``; None if the book is missing."""
+        i = self._latest(at)
+        return None if i is None else self._depth[i]
+
+    def flow(self, start: datetime, end: datetime) -> tuple[float, float | None]:
+        """The order flow imbalance of the updates received in [start, end), and the best
+        quotes' mean size over them (None without any)."""
+        imbalance, size, updates = self._flow.between(start, end)
+        return imbalance, size / updates if updates else None
+
+
+class _Sides(NamedTuple):
+    """Trades by aggressor: how many, and their volume."""
+
+    buys: float
+    sells: float
+    bought: float
+    sold: float
 
 
 @dataclass(frozen=True)
@@ -199,12 +309,16 @@ class MarketView:
         self._program = {s: _Flow() for s in self.symbols}
         self._foreign_members = {s: _Flow() for s in self.symbols}
         self._estimates = {s: _Estimates() for s in self.symbols}
-        self._microprices = {s: _Microprices() for s in self.symbols}
+        self._books = {s: _Book() for s in self.symbols}
+        trades = timedelta(minutes=TRADE_MINUTES + 5)
+        self._sides = {s: _Running(len(_Sides._fields), trades) for s in self.symbols}
+        self._venues = {s: _Running(len(VENUES), trades) for s in self.symbols}  # volume by venue
+        self._traded: dict[tuple[str, str], date] = {}  # (symbol, venue): the last day it traded
         self._expiry: dict[date, int] = {}
 
     def on_event(self, feed: str, row: dict[str, Any]) -> None:
-        """Take a trade or a best quote into the bars and reference prices; other events
-        are not the view's.
+        """Take an event into the bars, reference prices, microprices, order flow or flows;
+        other events are not the view's.
         """
         if feed in FLOW_FEEDS:
             self._flow(feed, row)
@@ -215,6 +329,10 @@ class MarketView:
             price = row["value"] if feed in INDEX_FEEDS else row["price"]
             if price:  # None from a recorded file without the column
                 self._leader_bars.trade(series, row["event_time"], price, row.get("qty") or 0)
+        if feed == NXT_TRADE.tr_id:
+            if row["symbol"] in self.symbols:
+                self._venue_trade(row["symbol"], "NXT", row)
+            return
         if feed not in _QUOTING or row["symbol"] not in self.symbols:
             return
         symbol, received_at = row["symbol"], row["received_at"]
@@ -222,12 +340,18 @@ class MarketView:
         if feed == TRADE.tr_id:
             self._bars.trade(symbol, row["event_time"], row["price"], row["qty"])
             self._reference.quote(symbol, Source.INTEGRATED, received_at, row["bid1"], row["ask1"])
+            qty = float(row["qty"] or 0)
+            if row.get("side") == "buy":
+                self._sides[symbol].add(received_at, _Sides(1.0, 0.0, qty, 0.0))
+            elif row.get("side") == "sell":
+                self._sides[symbol].add(received_at, _Sides(0.0, 1.0, 0.0, qty))
         elif feed == KRX_TRADE.tr_id:
             self._reference.quote(symbol, Source.KRX, received_at, row["bid1"], row["ask1"])
+            self._venue_trade(symbol, "KRX", row)
         else:
             bid, ask = row["bid_px_1"], row["ask_px_1"]
             self._reference.quote(symbol, Source.INTEGRATED, received_at, bid, ask)
-            self._microprices[symbol].add(received_at, bid, ask, row.get("bid_qty_1"), row.get("ask_qty_1"))
+            self._books[symbol].add(received_at, row)
 
     def at_close(self, close: datetime) -> BarsAtClose:
         """The bars as they stood at ``close``: kept when an event at or after it arrived,
@@ -267,17 +391,58 @@ class MarketView:
             flows=self.flows(symbol, frozen.close),
             expiry_days=self._expiry[day],
             microprices=self.microprices(symbol, frozen.close),
+            order_flow=self.order_flow(symbol, frozen.close),
         )
+
+    def order_flow(self, symbol: str, at: datetime) -> OrderFlow:
+        """``symbol``'s book and trades received in the minutes before ``at``, from the open.
+        A venue that has not traded today is unknown (its feed is not there)."""
+        day = kst_day(at)
+        session = self.calendar.session(day)
+        if symbol not in self._books or session is None:
+            return OrderFlow()
+
+        def since(minutes: int) -> datetime:
+            return max(session.open, at - minutes * BAR)
+
+        book = self._books[symbol]
+        depth = book.depth(at)
+        imbalances = {m: book.flow(since(m), at) for m in OFI_MINUTES}
+        sides = _Sides(*self._sides[symbol].between(since(TRADE_MINUTES), at))
+        volumes: dict[str, float | None] = {
+            venue: volume if self._traded.get((symbol, venue)) == day else None
+            for venue, volume in zip(
+                VENUES, self._venues[symbol].between(since(TRADE_MINUTES), at), strict=True
+            )
+        }
+        return OrderFlow(
+            ofi={m: imbalance for m, (imbalance, _) in imbalances.items()},
+            quote_size={m: size for m, (_, size) in imbalances.items() if size is not None},
+            bid_depth=None if depth is None else depth[0],
+            ask_depth=None if depth is None else depth[1],
+            buys=int(sides.buys),
+            sells=int(sides.sells),
+            buy_volume=sides.bought,
+            sell_volume=sides.sold,
+            krx_volume=volumes["KRX"],
+            nxt_volume=volumes["NXT"],
+        )
+
+    def _venue_trade(self, symbol: str, venue: str, row: dict[str, Any]) -> None:
+        received_at = row["received_at"]
+        self._traded[(symbol, venue)] = kst_day(received_at)
+        qty = float(row.get("qty") or 0)
+        self._venues[symbol].add(received_at, tuple(qty if v == venue else 0.0 for v in VENUES))
 
     def microprices(self, symbol: str, at: datetime) -> list[float]:
         """``symbol``'s microprice at each minute's end from the open up to ``at``, the last
         hour of them, since the book last went missing (``Snapshot.microprices``)."""
         session = self.calendar.session(kst_day(at))
-        if symbol not in self._microprices or session is None:
+        if symbol not in self._books or session is None:
             return []
         first = max(session.open + BAR, at - MINUTE_MOVES * BAR)
         ends = [first + i * BAR for i in range((at - first) // BAR + 1)]
-        return self._microprices[symbol].at_minute_ends(ends)
+        return self._books[symbol].at_minute_ends(ends)
 
     def flows(self, symbol: str, at: datetime) -> Flows:
         """``symbol``'s flows as received before ``at``, and ``FLOW_MINUTES`` before that."""

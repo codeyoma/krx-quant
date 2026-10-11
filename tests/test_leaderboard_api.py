@@ -216,6 +216,7 @@ async def test_a_replayed_morning_reaches_the_leaderboard(tmp_path: Path) -> Non
         ("granger", 56),
         ("markov", 56),
         ("kalman", 56),
+        ("shannon", 56),
         ("turing", 56),
     }
     for ranked in body["ranked"]:
