@@ -47,9 +47,10 @@ from aiohttp import web
 from krx_quant.algorithms import Algorithm
 from krx_quant.baselines import BASELINE_NAMES, BASELINES
 from krx_quant.consensus import NAMES, slot
+from krx_quant.contracts import USD
 from krx_quant.engine import PredictionEngine
 from krx_quant.feeds.base import kst_day
-from krx_quant.macro import LatestMacro, latest_macro
+from krx_quant.macro import LatestMacro, latest_macro, reading_before
 from krx_quant.model_shelf import Shelf
 from krx_quant.predictions import iso
 from krx_quant.pricing import flat_ticks, tick_size
@@ -81,6 +82,7 @@ SHELF_KEY: web.AppKey[Shelf | None] = web.AppKey("shelf")
 # /v1/macro is read again at most this often: it changes only with the morning's reads.
 MACRO_SECONDS = 30.0
 MACRO_CACHE_KEY = web.AppKey("macro_cache", dict)
+USD_CLOSE_CACHE_KEY = web.AppKey("usd_close_cache", dict)
 STATS_CACHE_KEY = web.AppKey("stats_cache", dict)
 PERIODS = {"today": 1, "5d": 5, "20d": 20}  # days with predictions
 # Results kept per question until the store changes (the screen asks the same often).
@@ -114,6 +116,7 @@ def create_app(
     app[DATA_DIR_KEY] = data_dir
     app[SHELF_KEY] = shelf
     app[MACRO_CACHE_KEY] = {}
+    app[USD_CLOSE_CACHE_KEY] = {}
     stream = EventStream(engine, live_status, stream_poll_seconds)
 
     async def streaming(app: web.Application) -> AsyncIterator[None]:
@@ -178,6 +181,7 @@ async def _status(request: web.Request) -> web.Response:
         "algorithms": dict(cpu.expected),
         "skipped_today": cpu.skipped_today,
     }
+    body["usd_futures"] = await _usd_futures(request)
     live_status = request.app.get(LIVE_STATUS_KEY)
     if live_status is not None:
         body["kis"] = live_status()
@@ -298,6 +302,11 @@ async def _consensus(request: web.Request) -> web.Response:
 
 
 async def _macro(request: web.Request) -> web.Response:
+    return _json(await _macro_now(request))
+
+
+async def _macro_now(request: web.Request) -> dict[str, Any]:
+    """``/v1/macro``'s answer, read again at most every ``MACRO_SECONDS``."""
     engine = request.app[ENGINE_KEY]
     cache: dict[date, tuple[float, dict[str, Any]]] = request.app[MACRO_CACHE_KEY]
     today = kst_day(engine.clock.now())
@@ -307,7 +316,39 @@ async def _macro(request: web.Request) -> web.Response:
         latest = None if data_dir is None else await asyncio.to_thread(latest_macro, data_dir, today)
         cache.clear()
         cached = cache[today] = (monotonic(), _macro_json(latest))
-    return _json(cached[1])
+    return cached[1]
+
+
+async def _usd_futures(request: web.Request) -> dict[str, Any] | None:
+    """The USD futures' latest trade today against the previous close: today's macro read
+    before the open (07:30), when it is the previous trading day's close (not an older one a
+    missed backfill left). None before today's first trade."""
+    engine = request.app[ENGINE_KEY]
+    latest = engine.latest_lead(USD.series)
+    if latest is None:
+        return None
+    price, traded_at = latest
+    previous = await _previous_usd_close(request, kst_day(engine.clock.now()))
+    change = None if not previous else (price - previous) / previous * 100
+    return {"price": price, "at": iso(traded_at), "previous_close": previous, "change_pct": change}
+
+
+async def _previous_usd_close(request: web.Request, today: date) -> float | None:
+    """The USD futures' previous close as read before ``today``'s open, read again at most
+    every ``MACRO_SECONDS``."""
+    engine = request.app[ENGINE_KEY]
+    cache: dict[date, tuple[float, float | None]] = request.app[USD_CLOSE_CACHE_KEY]
+    cached = cache.get(today)
+    if cached is None or monotonic() - cached[0] >= MACRO_SECONDS:
+        data_dir, session = request.app[DATA_DIR_KEY], engine.calendar.session(today)
+        reading = None
+        if data_dir is not None and session is not None:
+            reading = await asyncio.to_thread(reading_before, data_dir, today, "usdf", session.open)
+        before = engine.calendar.previous_trading_day(today)
+        close = reading["value"] if reading is not None and reading["as_of"] == before else None
+        cache.clear()
+        cached = cache[today] = (monotonic(), close)
+    return cached[1]
 
 
 def _macro_json(latest: LatestMacro | None) -> dict[str, Any]:

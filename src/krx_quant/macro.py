@@ -430,6 +430,15 @@ def day_regime(data_dir: Path, day: date, before: datetime) -> str | None:
     return regime
 
 
+def reading_before(data_dir: Path, day: date, indicator: str, before: datetime) -> dict[str, Any] | None:
+    """``indicator``'s reading in ``day``'s last read recorded before ``before`` (the open,
+    as ``day_regime`` takes the regime), or None. A ``krx-quant macro`` run after the open
+    changes nothing."""
+    rows = _rows(data_dir / MACRO / f"date={day}" / "feed=readings" / f"symbol={indicator}")
+    earlier = [r for r in rows if r["recorded_at"] < before]
+    return earlier[-1] if earlier else None
+
+
 def latest_macro(data_dir: Path, today: date) -> LatestMacro | None:
     """The latest day decided by ``today`` (at most ``SHOWN_DAYS`` before it): its last
     regime and the readings it was decided from. A reading of an earlier read that day (a

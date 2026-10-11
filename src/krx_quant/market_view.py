@@ -618,6 +618,10 @@ class MarketView:
         """The reference price just before ``at``, or None if it is unknown."""
         return self._reference.mid(symbol, at)
 
+    def latest_lead(self, series: str, now: datetime) -> tuple[float, datetime] | None:
+        """A leading series' latest trade of ``now``'s day (``features.Leaders``): price and time."""
+        return self._leader_bars.latest(series, now)
+
     def bars(self, symbol: str, now: datetime) -> list[Bar]:
         """``symbol``'s bars of ``now``'s day whose minute has ended."""
         return self._bars.closed(symbol, now)

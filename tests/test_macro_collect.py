@@ -25,7 +25,7 @@ from krx_quant.api import create_app
 from krx_quant.archive import partition_files
 from krx_quant.backfill import FUTURES_BAR_SCHEMA, FUTURES_BARS_TR, bars_key
 from krx_quant.config import Settings
-from krx_quant.feeds import KST
+from krx_quant.feeds import KST, USD_FUTURES
 from krx_quant.macro import (
     REGIME_SCHEMA,
     MacroCollector,
@@ -38,7 +38,8 @@ from krx_quant.macro import (
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.notify import Alerts
 from krx_quant.recorder import ParquetRecorder
-from tests.replay_events import at, get_json, run
+from tests.api_schema import check
+from tests.replay_events import at, futures_trade, get_json, run
 
 DAY = date(2026, 10, 12)  # a Monday; the KRX day before is Friday the 9th
 CALENDAR = MarketCalendar({DAY: True})
@@ -417,3 +418,99 @@ async def test_the_day_s_regime_is_the_one_decided_before_the_open(setup: Setup)
     setup.recorder.record("macro", DAY, "regime", "market", newer, REGIME_SCHEMA)
     setup.recorder.flush()
     assert day_regime(setup.settings.data_dir, DAY, opened) is None, "a newer collector's regime: none here"
+
+
+async def test_the_status_shows_the_usd_futures_now_against_the_last_close(
+    setup: Setup, tmp_path: Path
+) -> None:
+    # Friday's close, read at 07:30; then Monday's trades, the status read after each.
+    backfill_usd_futures(setup.settings, date(2026, 10, 9), 1388.3)
+    await setup.collector.run(DAY)
+    trades = [
+        futures_trade(at("09:00:05"), 1390.0, feed=USD_FUTURES, contract="A75610"),
+        futures_trade(at("09:10:02"), 1395.2, feed=USD_FUTURES, contract="A75610"),
+    ]
+    seen = []
+    for until in (at("09:05:00"), at("09:15:00")):
+        engine = await run(tmp_path / f"engine-{until:%H%M}.db", trades, until=until)
+        async with TestClient(TestServer(create_app(engine, data_dir=setup.settings.data_dir))) as client:
+            status = await get_json(client, "/v1/status")
+        check("status", status)
+        seen.append(status["usd_futures"])
+
+    assert seen[0]["price"] == 1390.0
+    assert seen[1] == {
+        "price": 1395.2,
+        "at": "2026-10-12T09:10:02+09:00",
+        "previous_close": 1388.3,
+        "change_pct": pytest.approx(0.497, abs=1e-3),  # 6.9 / 1388.3
+    }
+
+
+async def test_a_macro_read_after_the_open_keeps_the_morning_close(setup: Setup, tmp_path: Path) -> None:
+    backfill_usd_futures(setup.settings, date(2026, 10, 9), 1388.3)
+    await setup.collector.run(DAY)
+    # `krx-quant macro` run again at 10:00, Friday's bars gone meanwhile: it reads no close.
+    (setup.settings.data_dir / bars_key(date(2026, 10, 9), FUTURES_BARS_TR, "USDF")).unlink()
+    async with aiohttp.ClientSession() as session:
+        later = MacroCollector(
+            setup.settings,
+            session,
+            setup.alerts,
+            macro_recorder(setup.recorder),
+            CALENDAR,
+            lambda: at("10:00:00"),
+        )
+        await later.run(DAY)
+    trade = [futures_trade(at("10:05:00"), 1395.2, feed=USD_FUTURES, contract="A75610")]
+    engine = await run(tmp_path / "engine.db", trade, until=at("10:10:00"))
+
+    async with TestClient(TestServer(create_app(engine, data_dir=setup.settings.data_dir))) as client:
+        usd = (await get_json(client, "/v1/status"))["usd_futures"]
+
+    assert usd["previous_close"] == 1388.3, "the close read before the open, as the regime is"
+
+
+async def test_an_older_close_is_not_taken_for_the_previous_one(setup: Setup, tmp_path: Path) -> None:
+    # Friday's bars were never backfilled: the 07:30 reading is Thursday's close.
+    backfill_usd_futures(setup.settings, date(2026, 10, 8), 1380.0)
+    await setup.collector.run(DAY)
+    trade = [futures_trade(at("09:00:05"), 1390.0, feed=USD_FUTURES, contract="A75610")]
+    engine = await run(tmp_path / "engine.db", trade, until=at("09:15:00"))
+
+    async with TestClient(TestServer(create_app(engine, data_dir=setup.settings.data_dir))) as client:
+        usd = (await get_json(client, "/v1/status"))["usd_futures"]
+
+    assert (usd["price"], usd["previous_close"], usd["change_pct"]) == (1390.0, None, None)
+
+
+async def test_the_usd_futures_without_a_trade_today_or_a_close_to_compare_with(
+    setup: Setup, tmp_path: Path
+) -> None:
+    before_any = await run(tmp_path / "engine.db", [], until=at("08:40:00"))
+    trade = [futures_trade(at("09:00:05"), 1390.0, feed=USD_FUTURES, contract="A75610")]
+    no_macro = await run(tmp_path / "other.db", trade, until=at("09:15:00"))
+
+    next_morning = await run(
+        tmp_path / "third.db",
+        trade,
+        start=at("08:00:00"),
+        until=at("08:40:00", date(2026, 10, 13)),
+        calendar=MarketCalendar({}),
+    )
+
+    async with TestClient(TestServer(create_app(before_any, data_dir=setup.settings.data_dir))) as client:
+        assert (await get_json(client, "/v1/status"))["usd_futures"] is None
+    async with TestClient(TestServer(create_app(next_morning, data_dir=setup.settings.data_dir))) as client:
+        assert (await get_json(client, "/v1/status"))["usd_futures"] is None, (
+            "yesterday's trades are not today's"
+        )
+    async with TestClient(TestServer(create_app(no_macro, data_dir=tmp_path / "empty"))) as client:
+        status = await get_json(client, "/v1/status")
+    check("status", status)
+    assert status["usd_futures"] == {
+        "price": 1390.0,
+        "at": "2026-10-12T09:00:05+09:00",
+        "previous_close": None,
+        "change_pct": None,
+    }

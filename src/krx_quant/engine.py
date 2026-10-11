@@ -347,6 +347,10 @@ class PredictionEngine:
     def mid(self, symbol: str) -> float | None:
         return self._market.mid(symbol, self.clock.now())
 
+    def latest_lead(self, series: str) -> tuple[float, datetime] | None:
+        """A leading series' latest trade today (e.g. the USD futures): price and time."""
+        return self._market.latest_lead(series, self.clock.now())
+
     def switch_models(self, models: Mapping[str, Model]) -> bool:
         """Run ``models`` from the next bar close (a swap, a fit, a rollback); whether any changed."""
         changed = False
