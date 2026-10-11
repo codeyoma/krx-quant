@@ -409,8 +409,12 @@ class MarketView:
         depth = book.depth(at)
         imbalances = {m: book.flow(since(m), at) for m in OFI_MINUTES}
         sides = _Sides(*self._sides[symbol].between(since(TRADE_MINUTES), at))
-        volumes = dict(zip(VENUES, self._venues[symbol].between(since(TRADE_MINUTES), at), strict=True))
-        known = all(self._traded.get((symbol, venue)) == day for venue in VENUES)
+        volumes: dict[str, float | None] = {
+            venue: volume if self._traded.get((symbol, venue)) == day else None
+            for venue, volume in zip(
+                VENUES, self._venues[symbol].between(since(TRADE_MINUTES), at), strict=True
+            )
+        }
         return OrderFlow(
             ofi={m: imbalance for m, (imbalance, _) in imbalances.items()},
             quote_size={m: size for m, (_, size) in imbalances.items() if size is not None},
@@ -420,8 +424,8 @@ class MarketView:
             sells=int(sides.sells),
             buy_volume=sides.bought,
             sell_volume=sides.sold,
-            krx_volume=volumes["KRX"] if known else None,
-            nxt_volume=volumes["NXT"] if known else None,
+            krx_volume=volumes["KRX"],
+            nxt_volume=volumes["NXT"],
         )
 
     def _venue_trade(self, symbol: str, venue: str, row: dict[str, Any]) -> None:
