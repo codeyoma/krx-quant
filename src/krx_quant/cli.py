@@ -239,10 +239,13 @@ def _macro() -> int:
     return 1 if macro.failed else 0
 
 
-async def _demo_engine(port: int, host: str, db: Path) -> int:
+async def _demo_engine(port: int, host: str, db: Path, pace: float | None = None) -> int:
+    if pace is not None and pace <= 0:
+        print("--pace is seconds per minute of the demo morning: more than 0", file=sys.stderr)
+        return 1
     db.parent.mkdir(parents=True, exist_ok=True)
     try:
-        app = await demo_app(db)
+        app = await demo_app(db, pace)
     except ValueError as e:
         print(e, file=sys.stderr)
         return 1
@@ -254,7 +257,8 @@ async def _demo_engine(port: int, host: str, db: Path) -> int:
         await runner.cleanup()
         print(f"demo Engine API not started on {host}:{port}: {e}", file=sys.stderr)
         return 1
-    print(f"demo Engine API: http://{host}:{port}/v1/status (2026-10-12 10:30, made-up data)", flush=True)
+    morning = "2026-10-12 10:30" if pace is None else f"2026-10-12 10:00 to 10:30, a minute every {pace:g} s"
+    print(f"demo Engine API: http://{host}:{port}/v1/status ({morning}, made-up data)", flush=True)
     try:
         await asyncio.Event().wait()
     finally:
@@ -341,6 +345,11 @@ def main(argv: list[str] | None = None) -> int:
     demo.add_argument("--port", type=int, default=8090)
     demo.add_argument("--host", default="127.0.0.1", help="address to listen on (0.0.0.0: all)")
     demo.add_argument("--db", type=Path, default=Path("state/demo.sqlite3"), help="demo database (replaced)")
+    demo.add_argument(
+        "--pace",
+        type=float,
+        help="open at 10:00 and go on to 10:30 a minute every PACE seconds, streaming as it goes",
+    )
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -376,7 +385,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "fake-kis":
             asyncio.run(_fake_kis(args.port, args.host, args.trades))
         elif args.command == "demo-engine":
-            return asyncio.run(_demo_engine(args.port, args.host, args.db))
+            return asyncio.run(_demo_engine(args.port, args.host, args.db, args.pace))
     except SettingsError as e:
         print(f"configuration error: {e}", file=sys.stderr)
         return 2
