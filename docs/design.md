@@ -74,7 +74,13 @@
 - 반영은 `custom/merge-upstream-release.sh`로 한다. 자세한 내용은 fork의 `custom/README.md`에 있다.
 
 **Fincept 수정 원칙.**
-- 새 화면 하나만 추가한다. 화면 등록 때문에 고치는 upstream 파일은 `fincept-qt/CMakeLists.txt`, `src/app/WindowFrame_Setup.cpp`, `src/app/DockScreenRouter.cpp`, `src/ui/navigation/ToolBar.cpp`, `src/ui/navigation/CommandBar.cpp`로 제한한다.
+- 새 화면 하나만 추가한다. 고치는 upstream 파일은 7개로 제한한다.
+  - 화면 등록: `fincept-qt/CMakeLists.txt`(자동 업데이트를 끄는 `FINCEPT_DISABLE_AUTO_UPDATE` 옵션도), `src/app/WindowFrame_Setup.cpp`, `src/app/DockScreenRouter.cpp`, `src/ui/navigation/ToolBar.cpp`, `src/ui/navigation/CommandBar.cpp`
+  - 화면 테스트 등록: `fincept-qt/tests/CMakeLists.txt`
+  - 자동 업데이트 끄기: `src/services/updater/UpdateService.cpp`
+  - 무엇을 고쳤는지는 fork의 `custom/README.md` 표가 정본이다.
+
+  > **바뀜** (2026-10-12, #75): 고치는 upstream 파일 5개 → 7개(`tests/CMakeLists.txt`, `UpdateService.cpp`). 이유: 화면 테스트를 upstream 테스트 빌드에 등록하고, 개인 빌드의 자동 업데이트를 끄려면 두 파일을 고쳐야 했다(#20). 이 문서만 갱신하지 않았다.
 - Fincept SQLite migration은 쓰지 않는다. upstream의 다음 번호와 충돌하기 때문이다.
 - 개인 빌드에서는 앱 내 자동 업데이트를 끈다.
 - upstream의 예약·릴리스 workflow는 fork에서 disable 했다.
@@ -190,11 +196,18 @@ v1에서는 쓰지 않는다. 조사 결과는 [paid-data.md](paid-data.md)에 �
   - 서버의 `.env`에는 이 버킷만 읽고 쓰는(삭제 불가) IAM 사용자 키를 둔다. 덮어쓰기는 막을 수 없어서 버킷 버전 관리를 켜고 이전 버전을 30일 보관한다.
 - 예측, 채점, 알고리즘 상태, 합의 가중치: 상시 서버의 SQLite(`state/engine.sqlite3`)에 저장한다. 저장 구조는 [engine-api.md](engine-api.md#저장-stateenginesqlite3)에 있다(#9).
 - 피처와 통계는 저장하지 않는다. 피처는 봉 마감마다 메모리에서 계산하고, 통계는 API를 읽을 때 저장된 예측으로 계산한다.
+- 알고리즘, 모델 버전, 실행 기록은 스펙 #1의 SQLite 표 셋 대신 다음처럼 나눠 둔다.
+  - **알고리즘:** 이름, 성격 카드, 선언 피처는 코드(`algorithms/`, `/v1/algorithms`)에 있다. 지금 상태와 상태 이력은 SQLite `statuses`에 있다.
+  - **모델 버전:** 서버의 `state/models/`(지금 모델, `versions/`, `history.json`)에 있다. Object Store에는 모델 파일(`models/<알고리즘>/<버전>.json`), 지금 도는 모델(`live.json`), 밤 학습의 검증 리포트(`reports/`)와 승격 목록(`promotions/`)이 있다.
+  - **실행 기록:** SQLite `runs`에는 CPU 예산 건너뜀, 일일 점검, 은퇴 후보 알림, 국면 없음, 예산 알림만 남는다. 밤 학습 실행은 Object Store의 `reports/`, `promotions/`, Spot 로그(`training/logs/`)에, 재생과 사전 검증 실행은 따로 만드는 재생 DB에 있다.
+  - 위치와 필드는 [operations.md](operations.md#8-저장-위치)에 있다.
 - 결측 구간: 지금은 `gaps` 계층의 Parquet로 기록한다(#4). SQLite의 `data_gaps`로 옮기는 일은 아직 하지 않았다.
 - 백업: Lightsail 스냅샷을 매일 뜬다.
 - 로컬 파일과 Object Store 키의 전체 목록은 [operations.md](operations.md#8-저장-위치)에 있다.
 
 > **바뀜** (2026-10-09, #37, #38): "피처, 예측, 채점, 통계를 SQLite에 저장" → 예측과 채점만 저장하고, 피처와 통계는 그때그때 계산한다. 이유 기록 없음.
+
+> **바뀜** (2026-10-12, #75): 스펙 #1의 SQLite 표 `algorithms`(이름, 성격 카드, 선언 피처, 상태, 상태 이력), `model_versions`(알고리즘, 버전, 학습 구간, 검증 점수, 승격 여부, 산출물 위치), `runs`(학습 실행, 재생 실행, CPU 예산 위반) → 위처럼 코드, `statuses`, 모델 파일, Object Store, `runs`, 재생 DB에 나눠 둔다. 이유 기록 없음(#17, #22, #24, #45). 표로 모으지 않고 지금 방식을 유지하기로 사용자와 정했다(#69).
 
 > **바뀜** (2026-10-09, #36): 결측 구간을 SQLite(`data_gaps`)로 옮기는 일을 미뤘다. 지금은 `gaps` 계층 Parquet뿐이다. 이유 기록 없음(PR #36에서 사용자와 합의했다는 기록만 있다).
 
@@ -369,7 +382,10 @@ v1에서는 쓰지 않는다. 조사 결과는 [paid-data.md](paid-data.md)에 �
   - 서울이 아니라 시드니인 이유: 2026-10-08에 AWS의 새 가입 방식(AWS Settings 프로젝트)으로 계정을 만들었다. 이 방식에서는 프로젝트마다 리전이 하나뿐이고, 연락처 주소의 국가에 따라 오하이오·스톡홀름·시드니 중 하나로 정해진다. 서울을 쓰려면 고급 기능을 활성화해야 하는데 되돌릴 수 없어서, 시드니에 둔다.
   - KIS까지 왕복 지연이 100ms 넘게 늘어나지만, 4분 뒤를 예측하는 데는 무시할 만하다.
   - 학습용 EC2 Spot과 S3도 같은 리전에 둔다. 리전 사이 데이터 전송 요금을 피하기 위해서다.
-  - Lightsail은 버스트형 CPU다. 부하가 늘면 4GB($24) 요금제나 비버스트형 EC2로 옮긴다.
+  - Lightsail은 버스트형 CPU다. 부하가 늘면 4GB($24) 요금제나 비버스트형 EC2로 옮긴다. 재는 법은 [operations.md](operations.md#cpu-여유-재기)에 있다.
+  - 로컬 개발은 호스트에서 `uv run`으로 한다(README "개발 환경"). 컨테이너는 서버, Spot 학습(ECR 이미지), 로컬 연기 시험(`deploy/smoke-local.sh`)에서만 쓴다.
+
+  > **바뀜** (2026-10-12, #75): 스펙 #1 "로컬 개발도 같은 컨테이너를 쓴다" → 로컬 개발은 호스트의 `uv`, 컨테이너는 서버, Spot 학습, 연기 시험만. 이유 기록 없음.
 
   > **바뀜** (2026-10-08, #34): 서울(`ap-northeast-2`), Lightsail 번들 `small_3_0` → 시드니(`ap-southeast-2`), 번들은 리전에서 자동으로 고른다(시드니 `small_3_2`). 코드 기본값(`AWS_REGION`)과 `.env.example`도 바꿨다. 이유: 새 가입 방식의 계정은 리전이 하나뿐이고, 서울을 쓰려면 되돌릴 수 없는 고급 기능을 켜야 한다(위). 번들 ID는 리전마다 다르다.
 - **접속.** Tailscale(무료)로 상시 서버, 맥, 윈도우를 연결한다. 서버 포트는 인터넷에 열지 않는다.
@@ -448,9 +464,9 @@ v1에서는 쓰지 않는다. 조사 결과는 [paid-data.md](paid-data.md)에 �
 | KIS가 시드니(해외) IP 접속을 허용하는지 | 서버 개통(#7) |
 | 프로젝트 지출 한도($100 도달 시 프로젝트 일시정지)를 Cost Guard 상한보다 높게 올릴지 | 사용자 (#23에서 Cost Guard를 만들었다) |
 | 사용자 KIS 수수료율 | P1 설정 |
-| 미국 서머타임이 아닌 기간에는 주간거래가 10:00 KST부터라 개장 첫 1시간이 빔 | P2 피처 설계 |
+| ~~미국 서머타임이 아닌 기간에는 주간거래가 10:00 KST부터라 개장 첫 1시간이 빔~~ | 처리함 (2026-10-12 확인, #75): 선행 묶음의 값이 없으면 움직임 0으로 보고 예측 폭을 넓힌다(Granger, #15). [engine-api.md](engine-api.md#granger) |
 | 신규 AWS 계정의 GPU Spot 한도 | P4 |
-| Lightsail 버스트 CPU로 실시간 예측 부하를 감당할 수 있는지 | P2 이후 측정 |
+| Lightsail 버스트 CPU로 실시간 예측 부하를 감당할 수 있는지 | 서버 개통 뒤 장중에 잰다. 방법: [operations.md](operations.md#cpu-여유-재기) |
 | CME Non-Display 라이선스 해당 여부 | 유료 데이터 검토 시 |
 | 2027-03 NXT 데이터 유료화가 개인 API 이용에 미치는 영향 | 2027 초 |
 | REST 대체 조회(#28): 달러선물 시세의 시장 코드 `CF`, 옵션 가격 필드(`futs_prpr`), 프로그램매매 추이의 행 순서·금액 단위·장 전 응답, 주간거래 시간 밖의 미국 시세 | 장중 `check-fallbacks` ([operations.md](operations.md) 2.3), [kis-feeds.md](kis-feeds.md#rest-대체-조회) |

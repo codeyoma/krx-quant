@@ -265,6 +265,26 @@ Docker 이미지는 `TZ=Asia/Seoul`, `KRX_DATA_DIR=/data`, `KRX_STATE_DIR=/state
      - 프로그램매매 줄의 `net_value`를 같은 시각 `events/feed=H0UNPGM0`의 실시간 값과 견줘 금액 단위를 확인한다.
    - 확인한 내용은 kis-feeds.md에 적고 ⚠를 지운다.
 
+### CPU 여유 재기
+
+Lightsail은 버스트형 CPU다. 기준선보다 많이 쓰면 쌓아 둔 버스트 용량을 쓰고, 바닥나면 기준선으로 느려진다. 장중에(개장 직후와 오후에 한 번씩) 다음을 본다(#69).
+
+1. **엔진이 보는 알고리즘 시간.** 맥에서 실행한다.
+   ```bash
+   curl -s http://krx-quant:8080/v1/status | python3 -c 'import json,sys; c=json.load(sys.stdin)["cpu"]; print(c["usage"], c["expected_seconds"], c["algorithms"])'
+   ```
+   `usage`는 봉 마감 한 번에 알고리즘들이 걸릴 것으로 보는 시간의 합을 CPU 예산(`KRX_CPU_BUDGET_SECONDS`)으로 나눈 값이다. 실제 걸린 시간(벽시계)이라 버스트 용량이 바닥나 CPU가 느려지면 함께 오른다.
+2. **서버 CPU.** 서버에서 실행한다.
+   ```bash
+   docker stats --no-stream
+   ```
+3. **버스트 용량.** Lightsail 콘솔 → 인스턴스 → 지표에서 CPU 사용률과 남은 버스트 용량(Remaining CPU burst capacity, 분과 %)을 본다.
+4. **판단.** 다음 중 하나라도 해당하면 4GB 요금제로 올린다([design.md](design.md) 9장).
+   - `usage`가 0.5를 넘는다(잠정 기준: 예산의 절반이면 장중 부하가 몰릴 때 건너뜀이 생길 수 있다).
+   - 버스트 용량이 장중 내내 줄기만 해서 바닥에 닿는다.
+   - `[알림] <날짜> 예산 때문에 예측이 빠진 알고리즘이 있습니다.`가 온다.
+5. 잰 값은 [design.md](design.md) 13장에 적는다.
+
 ## 3. 매일 일어나는 일
 
 | 시각 (KST) | 일 |
