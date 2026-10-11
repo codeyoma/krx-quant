@@ -159,22 +159,35 @@ class _Estimates:
 OPTION_STALE = timedelta(minutes=10)
 
 
+class _OptionTrade(NamedTuple):
+    received_at: datetime
+    iv: float  # implied volatility (%)
+    delta: float
+
+
 class _Options:
     """The KOSPI200 options' trades by receipt time, each one's implied volatility and
-    delta, for the latest ``OPTION_STALE`` or so (Markov's at-the-money implied volatility)."""
+    delta, for the latest ``OPTION_STALE`` or so (Markov's at-the-money implied volatility).
+    An option that stopped trading (the money moved, a new day) is dropped."""
+
+    _KEEP = 2 * OPTION_STALE
 
     def __init__(self) -> None:
-        self._trades: dict[str, list[tuple[datetime, float, float]]] = {}  # by option code
+        self._trades: dict[str, list[_OptionTrade]] = {}  # by option code
 
     def add(self, row: dict[str, Any]) -> None:
         """An option trade; one without an implied volatility or a delta says nothing."""
         iv, delta = row.get("implied_vol"), row.get("delta")
         if not iv or iv <= 0 or not delta:
             return
-        at = row["received_at"]
+        trade = _OptionTrade(row["received_at"], float(iv), float(delta))
         trades = self._trades.setdefault(row["symbol"], [])
-        trades.insert(bisect.bisect_right(trades, at, key=_received), (at, float(iv), float(delta)))
-        del trades[: bisect.bisect_left(trades, at - 2 * OPTION_STALE, key=_received)]
+        trades.insert(bisect.bisect_right(trades, trade.received_at, key=_received), trade)
+        oldest = trade.received_at - self._KEEP
+        for code, kept in list(self._trades.items()):
+            del kept[: bisect.bisect_left(kept, oldest, key=_received)]
+            if not kept:
+                del self._trades[code]
 
     def atm_iv(self, at: datetime) -> float | None:
         """The mean implied volatility of the call whose delta is nearest 0.5 and the put
@@ -183,16 +196,16 @@ class _Options:
         latest = []
         for trades in self._trades.values():
             i = bisect.bisect_left(trades, at, key=_received)
-            if i and trades[i - 1][0] >= at - OPTION_STALE:
-                latest.append(trades[i - 1][1:])
-        calls = [(abs(delta - 0.5), iv) for iv, delta in latest if delta > 0]
-        puts = [(abs(delta + 0.5), iv) for iv, delta in latest if delta < 0]
+            if i and trades[i - 1].received_at >= at - OPTION_STALE:
+                latest.append(trades[i - 1])
+        calls = [(abs(t.delta - 0.5), t.iv) for t in latest if t.delta > 0]
+        puts = [(abs(t.delta + 0.5), t.iv) for t in latest if t.delta < 0]
         sides = [min(side)[1] for side in (calls, puts) if side]
         return sum(sides) / len(sides) if sides else None
 
 
-def _received(trade: tuple[datetime, float, float]) -> datetime:
-    return trade[0]
+def _received(trade: _OptionTrade) -> datetime:
+    return trade.received_at
 
 
 class _Running:

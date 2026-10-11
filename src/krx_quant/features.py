@@ -725,6 +725,8 @@ ARRIVAL_FEATURES = tuple(arrivals_feature(side) for side in SIDES)
 TAPE_FEATURES = frozenset(
     {"trade_imbalance", "trade_entropy", "nxt_share", *EXCITATION_FEATURES, *ARRIVAL_FEATURES}
 )
+# The features from the options' trades: none on a day with backfilled bars only either.
+OPTION_FEATURES = frozenset({"atm_iv"})
 
 
 class UndeclaredFeature(LookupError):

@@ -176,8 +176,12 @@ def test_training_learns_the_iv_bounds_and_how_much_more_each_regime_moves() -> 
     assert 15.4 < model.params["iv_cut.0"] < 20.0
     assert 20.4 < model.params["iv_cut.1"] < 28.0
     low, normal, high = (model.params[f"iv_scale.{r}"] for r in range(3))
-    assert low < normal < high
-    assert high / low > 2, "the made-up days move three times as much"
+    # Normal is the states' own size, as an unknown IV is: the others are against it.
+    assert normal == 1.0
+    assert low == pytest.approx(0.6, abs=0.1)
+    assert high == pytest.approx(1.8, abs=0.25)
+    moves = (0.0, 1.0, 0.0, -1.0, 0.0, 1.0)
+    assert same(MARKOV.predict(features(moves, iv=20.0), model), MARKOV.predict(features(moves), model))
 
 
 def test_with_fewer_than_five_recorded_days_of_the_iv_its_regimes_are_not_learned() -> None:

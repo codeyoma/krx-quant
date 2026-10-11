@@ -245,3 +245,8 @@ async def test_an_estimate_not_entered_in_a_slot_keeps_the_earlier_one(tmp_path:
     foreign, institution = at_1005["investor_foreign"], at_1005["investor_institution"]
     assert isinstance(foreign, float) and isinstance(institution, float)
     assert foreign > 0 and institution > 0, "foreign from 09:30, institutions from 10:00"
+
+
+def test_turing_leaves_the_options_implied_vol_until_the_recorded_days_features() -> None:
+    # Recorded days only, like the book's and the tape's: in its 60 days nearly always empty.
+    assert "atm_iv" not in TURING.features

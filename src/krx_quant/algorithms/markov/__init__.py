@@ -31,6 +31,7 @@ from __future__ import annotations
 import math
 import statistics
 from collections.abc import Mapping, Sequence
+from typing import NamedTuple
 
 from krx_quant.algorithms.contract import Card, Model, Sample
 from krx_quant.algorithms.forecasts import UNKNOWN, lowest_log_loss, normal_forecast, param, with_outcomes
@@ -62,9 +63,10 @@ MIN_SD = 0.5
 _UNTRAINED = 1.0
 # The options' at-the-money implied volatility, low, normal or high against two bounds
 # learned in training (``iv_cut.0`` and ``iv_cut.1``); a minute's move in each is the states'
-# times its scale (``iv_scale.<n>``, normal 1).
+# times its scale (``iv_scale.<n>``). Normal is the states' own size, as an unknown IV is:
+# its scale stays 1, so the states and the scales cannot trade size between them.
 IV_REGIMES = ("low", "normal", "high")
-NORMAL_IV = 1
+LOW_IV, NORMAL_IV, HIGH_IV = range(len(IV_REGIMES))
 # The bounds are learned only from this many recorded days with the IV, or more; with fewer
 # the IV is unknown to the model.
 MIN_IV_DAYS = 5
@@ -101,18 +103,19 @@ class _Chain:
         self.cuts = None if low is None or high is None else (low, high)
         self.scales = [params.get(param("iv_scale", r), 1.0) for r in range(len(IV_REGIMES))]
 
-    def regime(self, iv: float | None) -> int | None:
-        """The IV regime of ``iv``; None without the IV or the bounds."""
-        return _iv_regime(iv, self.cuts)
-
     def scale(self, regime: int | None) -> float:
+        """The move scale of an IV regime; 1 without one."""
         return 1.0 if regime is None else self.scales[regime]
+
+    def scale_at(self, iv: float | None) -> float:
+        """The move scale at the options' implied volatility ``iv``."""
+        return self.scale(_iv_regime(iv, self.cuts))
 
     def emitting(self, scale: float) -> tuple[list[float], list[float]]:
         """The states' means and standard deviations of a minute's move at ``scale``."""
         return [m * scale for m in self.means], [max(s * scale, MIN_SD) for s in self.sds]
 
-    def emissions(self, move: float, scale: float = 1.0) -> tuple[list[float], float]:
+    def emissions(self, move: float, scale: float) -> tuple[list[float], float]:
         """Each state's density of ``move``, scaled so the largest is 1, and the log of the scale."""
         means, sds = self.emitting(scale)
         logs = [
@@ -123,17 +126,17 @@ class _Chain:
         return [math.exp(v - top) for v in logs], top
 
     def forward(
-        self, moves: Sequence[float], a: Matrix, scales: Sequence[float] | None = None
+        self, moves: Sequence[float], a: Matrix, scales: Sequence[float]
     ) -> tuple[list[list[float]], list[list[float]], float]:
-        """Filter ``moves`` (each at its IV ``scales``, default 1) forward from the chain's
-        long-run mix of states: how likely each state is after each move, each move's
-        (scaled) emissions, and the log-likelihood."""
+        """Filter ``moves`` (each at its IV scale) forward from the chain's long-run mix of
+        states: how likely each state is after each move, each move's (scaled) emissions, and
+        the log-likelihood."""
         alphas: list[list[float]] = []
         emitted: list[list[float]] = []
         likelihood = 0.0
         p = _stationary(a)
         for n, move in enumerate(moves):
-            e, top = self.emissions(move, 1.0 if scales is None else scales[n])
+            e, top = self.emissions(move, scales[n])
             raw = [q * e[j] for j, q in enumerate(p if not alphas else _step(alphas[-1], a))]
             c = sum(raw) or 1e-300
             alphas.append([v / c for v in raw])
@@ -141,12 +144,12 @@ class _Chain:
             likelihood += math.log(c) + top
         return alphas, emitted, likelihood
 
-    def now(self, moves: Sequence[float], a: Matrix, scale: float = 1.0) -> list[float]:
+    def now(self, moves: Sequence[float], a: Matrix, scale: float) -> list[float]:
         """How likely each state is after ``moves``, all at ``scale``."""
         alphas, _, _ = self.forward(moves, a, [scale] * len(moves))
         return alphas[-1] if alphas else _stationary(a)
 
-    def ahead(self, p: list[float], a: Matrix, scale: float = 1.0) -> tuple[float, float]:
+    def ahead(self, p: list[float], a: Matrix, scale: float) -> tuple[float, float]:
         """The mean and variance of the next ``STEPS`` minutes' summed move from states ``p``,
         at ``scale``."""
         mu, sds = self.emitting(scale)
@@ -200,7 +203,7 @@ class Markov:
         chain = _Chain(model.params)
         a = chain.transitions[_transitions_of(features["macro_regime"])]
         # The IV regime now stands for the whole hour: it moves slowly.
-        scale = chain.scale(chain.regime(features["atm_iv"]))
+        scale = chain.scale_at(features["atm_iv"])
         mean, variance = chain.ahead(chain.now(features.series("minute_ticks"), a, scale), a, scale)
         return normal_forecast(mean, math.sqrt(variance), flat)
 
@@ -227,7 +230,7 @@ def _iv_regime(iv: float | None, cuts: tuple[float, float] | None) -> int | None
     """Low, normal or high (0, 1, 2) against ``cuts``; None without the IV or the bounds."""
     if iv is None or cuts is None:
         return None
-    return 0 if iv < cuts[0] else 2 if iv >= cuts[1] else NORMAL_IV
+    return LOW_IV if iv < cuts[0] else HIGH_IV if iv >= cuts[1] else NORMAL_IV
 
 
 def _iv_bounds(samples: Sequence[Sample]) -> tuple[float, float] | None:
@@ -247,7 +250,13 @@ def _transitions_of(code: float | None) -> str:
     return next((r for r, c in REGIME_CODES.items() if c == code), DEFAULT)
 
 
-Day = tuple[str, list[float], list[int | None]]
+class Day(NamedTuple):
+    """A symbol's day: its transitions' name, its one-minute moves in time order, and each
+    move's IV regime."""
+
+    transitions: str
+    moves: list[float]
+    regimes: list[int | None]
 
 
 def _sequences(samples: Sequence[Sample], cuts: tuple[float, float] | None) -> list[Day]:
@@ -270,16 +279,17 @@ def _sequences(samples: Sequence[Sample], cuts: tuple[float, float] | None) -> l
             regimes += [_iv_regime(s.features["atm_iv"], cuts)] * new
             previous = s.bar_close
         if len(moves) >= 2:
-            out.append((_transitions_of(day[0].features["macro_regime"]), moves, regimes))
+            out.append(Day(_transitions_of(day[0].features["macro_regime"]), moves, regimes))
     return out
 
 
 def _reestimate(params: Mapping[str, float], days: Sequence[Day]) -> tuple[dict[str, float], float]:
     """One Baum–Welch round: the re-estimated parameters, and the log-likelihood before it.
 
-    The states' means and deviations are those of the moves over their IV scale; each IV
-    regime's scale, how much larger its moves are than the states make them (not strictly
-    EM: matched on the mean square, and pulled toward 1).
+    The states' means and deviations are those of the moves over their IV scale; the low
+    and high IV regimes' scales, how much larger their moves are than the states make them
+    (not strictly EM: matched on the mean square as the chain emits it, floor included, and
+    pulled toward 1). The normal regime's stays 1.
     """
     chain = _Chain(params)
     weight = [0.0] * K
@@ -326,8 +336,10 @@ def _reestimate(params: Mapping[str, float], days: Sequence[Day]) -> tuple[dict[
             mean = total[k] / weight[k]
             new[param("mean", k)] = mean
             new[param("sd", k)] = max(math.sqrt(max(squares[k] / weight[k] - mean * mean, 0.0)), MIN_SD)
-    second = [new[param("mean", k)] ** 2 + new[param("sd", k)] ** 2 for k in range(K)]
-    for r in range(len(IV_REGIMES)):
+    for r in (LOW_IV, HIGH_IV):
+        # Over the scale, a deviation floored as the chain floors it at the scale so far.
+        floor = MIN_SD / chain.scales[r]
+        second = [new[param("mean", k)] ** 2 + max(new[param("sd", k)], floor) ** 2 for k in range(K)]
         expected = _dot(occupancy[r], second)
         if minutes[r] > 0 and expected > 0:
             seen = math.sqrt(squared[r] / expected)

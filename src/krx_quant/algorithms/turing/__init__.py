@@ -31,7 +31,14 @@ import numpy as np
 from krx_quant.algorithms.contract import Card, Model, Sample
 from krx_quant.algorithms.forecasts import UNKNOWN, class_moves, number, with_outcomes
 from krx_quant.baselines import Forecast
-from krx_quant.features import BOOK_FEATURES, FEATURES, SERIES_FEATURES, TAPE_FEATURES, FeatureVector
+from krx_quant.features import (
+    BOOK_FEATURES,
+    FEATURES,
+    OPTION_FEATURES,
+    SERIES_FEATURES,
+    TAPE_FEATURES,
+    FeatureVector,
+)
 from krx_quant.pricing import Direction
 
 CLASSES = (Direction.DOWN, Direction.FLAT, Direction.UP)  # the trees' labels 0, 1, 2
@@ -63,10 +70,10 @@ _KEPT = 4
 
 class Turing:
     name = "turing"
-    # Every number the Feature Store has, at registration, but the book's and the tape's
-    # (#55): register Turing last.
+    # Every number the Feature Store has, at registration, but the book's, the tape's and
+    # the options' (recorded days only, #55): register Turing last.
     features: tuple[str, ...] = tuple(
-        n for n in FEATURES if n not in SERIES_FEATURES | BOOK_FEATURES | TAPE_FEATURES
+        n for n in FEATURES if n not in SERIES_FEATURES | BOOK_FEATURES | TAPE_FEATURES | OPTION_FEATURES
     )
     training_days = 60
     card = Card(
