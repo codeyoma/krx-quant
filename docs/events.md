@@ -17,6 +17,10 @@
 
 - `date`는 메시지를 받은 시각의 한국 날짜다.
 - `feed`는 KIS TR ID다(예: `H0UNCNT0`). 피드 목록과 키는 [kis-feeds.md](kis-feeds.md)에 있다. KIS 제어 메시지(구독 응답, PINGPONG)는 `raw` 계층의 `feed=_system`에 남는다. 형식을 알아볼 수 없는 메시지는 `raw` 계층의 `feed=_unparsed`에 남는다.
+- 한도로 잘린 프로그램매매, 선물, 달러선물, 미국 주간거래, 옵션을 대신하는 REST 조회는 events를 대신하는 WebSocket 피드 이름으로 쓴다. 그래서 이 다섯 피드의 events에는 REST로 받은 행도 있을 수 있다. 그 응답 원문은 raw의 REST TR 이름(`FHPPG04650101`, `FHMIF10000000`, `HHDFS00000300`)에 남는다(#28).
+- events의 `symbol` 파티션은 이벤트의 `symbol`이다. REST 응답의 raw는 조회한 키로 쓴다.
+
+  > **바뀜** (2026-10-11, #65): events의 `feed`는 그 행을 만든 TR이었다 → 잘린 피드를 대신하는 REST 조회의 행은 대신하는 WebSocket 피드 이름으로 쓴다. REST 조회의 events `symbol` 파티션은 조회한 키였다 → 이벤트의 `symbol`이다(미국 주간거래를 실시간 피드처럼 티커로 쓰기 위해서다. 그 전 REST 피드는 둘이 같아서 바뀐 파일은 없다). 이유: 선물, 달러선물, 옵션의 대체 조회가 같은 TR(`FHMIF10000000`)이라 TR 이름으로 쓰면 스키마가 다른 행이 한 폴더에 섞인다. 대신하는 피드 이름으로 쓰면 엔진, 재생, 학습이 고칠 것 없이 읽는다.
 - 메시지는 항상 `raw`에 먼저 기록된다. 정규화에 실패한 메시지는 `raw`에만 남고, 수집은 멈추지 않는다.
 - 한 파티션은 행이 `KRX_FLUSH_ROWS`만큼 쌓이거나 `KRX_FLUSH_SECONDS`가 지나면 새 part 파일로 쓰인다. 종료할 때도 남은 행을 쓴다.
 - part 파일은 임시 이름으로 쓴 뒤 이름을 바꾼다. 그래서 프로세스가 중간에 죽어도 반쯤 쓰인 part 파일은 남지 않는다. fsync는 하지 않으므로 전원이 꺼지는 경우까지 보장하지는 않는다.
@@ -92,6 +96,8 @@ KIS 레코드 하나가 이벤트 하나다. 한 메시지에 레코드가 여�
 | `sell_order_qty`, `buy_order_qty` | int64 | `SELN_RSQN`, `SHNU_RSQN` | 매도·매수 호가 잔량 |
 | `whole_net_qty` | int64 | `WHOL_NTBY_QTY` | 전체 순매수 호가 잔량 |
 
+한도로 잘리면 REST `FHPPG04650101`(종목별 프로그램매매추이)이 이 피드를 대신한다. 응답에서 시각이 가장 늦은 행을 쓴다. `event_time`은 `bsop_hour`, 매도·매수·순매수 열은 `whol_smtn_seln_vol`, `whol_smtn_seln_tr_pbmn`, `whol_smtn_shnu_vol`, `whol_smtn_shnu_tr_pbmn`, `whol_smtn_ntby_qty`, `whol_smtn_ntby_tr_pbmn`이다. 호가 잔량 세 열은 응답에 없어 null이다([kis-feeds.md](kis-feeds.md)).
+
 ## events: 회원사 (`H0UNMBC0` 통합, REST `FHKST01010600`)
 
 두 형식 모두 같은 스키마로 기록한다. 메시지에 시각이 없어 `received_at`만 있다.
@@ -136,6 +142,8 @@ KIS 레코드 하나가 이벤트 하나다. 한 메시지에 레코드가 여�
 | `ask1`, `bid1`, `ask_qty1`, `bid_qty1` | | `futs_askp1` … | 최우선 호가와 잔량 |
 | `total_ask_qty`, `total_bid_qty` | int64 | | 총 호가 잔량 |
 
+한도로 잘리면 REST `FHMIF10000000`(선물옵션 시세, KOSPI200 `F`, 달러선물 `CF`)이 이 피드를 대신한다. 응답에 시각이 없어 `event_time`은 수신 시각이다. `price`, `change_pct`, `cum_volume`, `open_interest`, `theory_price`, `market_basis`는 같은 이름의 필드에서 온다. `qty`와 호가 열(`ask1` … `total_bid_qty`)은 응답에 없어 null이다.
+
 ## events: 미국 주식 (`HDFSCNT0`)
 
 `symbol`은 티커(`NVDA`)이고 `key`는 KIS 키(`RBAQNVDA`)다. raw 계층의 `symbol` 파티션은 키다.
@@ -149,6 +157,8 @@ KIS 레코드 하나가 이벤트 하나다. 한 메시지에 레코드가 여�
 | `bid_qty`, `ask_qty` | int64 | `VBID`, `VASK` | 호가 잔량 |
 | `session` | string | `MTYP` | 1 정규장, 2 장전, 3 장후 |
 
+한도로 잘리면 REST `HHDFS00000300`(해외주식 현재체결가, `EXCD=BAQ` 등)이 이 피드를 대신한다. 응답에 시각이 없어 `event_time`은 수신 시각이다. `price`는 `last`, `cum_volume`은 `tvol`이다. `local_date`, `local_time`, `qty`, `bid`, `ask`, `bid_qty`, `ask_qty`, `session`은 null이다.
+
 ## events: KOSPI200 옵션 (`H0IOCNT0`)
 
 | 열 | 타입 | KIS 필드 | 설명 |
@@ -159,6 +169,8 @@ KIS 레코드 하나가 이벤트 하나다. 한 메시지에 레코드가 여�
 | `qty`, `cum_volume`, `open_interest` | int64 | `last_cnqn`, `acml_vol`, `hts_otst_stpl_qty` | 체결량, 누적 거래량, 미결제약정 |
 | `implied_vol` | float64 | `hts_ints_vltl` | 내재변동성(%) |
 | `delta`, `gamma`, `vega`, `theta` | float64 | `delta`, `gama`, `vega`, `theta` | 그릭스 |
+
+한도로 잘리면 REST `FHMIF10000000`(선물옵션 시세, 시장 코드 `O`)이 이 피드를 대신한다. 응답에 시각이 없어 `event_time`은 수신 시각이다. 가격은 `futs_prpr`, 델타는 `delta_val`이고, 나머지는 위와 같은 필드다. `qty`, `ask1`, `bid1`은 null이다.
 
 ## events: REST 스냅샷
 
@@ -172,6 +184,8 @@ KIS 레코드 하나가 이벤트 하나다. 한 메시지에 레코드가 여�
 > **바뀜** (2026-10-11, #56): 추정 가집계의 빈 칸(그 시간대에 아직 입력되지 않은 투자자)을 0으로 기록했다 → null로 기록한다. 이유: 외국인과 기관은 입력 시각이 달라서(외국인 09:30, 기관 10:00 등), 0으로 두면 Turing이 앞 시간대의 실제 추정 대신 0을 읽었다. 그 전에 녹화된 날의 0은 빈 칸일 수 있다.
 
 VI 현황은 같은 응답이 반복되면 기록하지 않는다. 응답이 바뀔 때마다 그날의 VI 전체가 raw와 events에 한 번씩 남는다.
+
+프로그램매매, 선물, 달러선물, 미국 주간거래, 옵션을 대신하는 REST 조회는 이 표에 없다. 대신하는 피드의 이름과 스키마로 기록하기 때문이다(위 각 피드). 이 조회들은 새 소식만 기록한다. 같은 응답이 반복되면 기록하지 않고, 첫 응답도 기록하지 않는다(언제 값인지 알 수 없다. [kis-feeds.md](kis-feeds.md#rest-대체-조회)).
 
 REST 응답 원문은 raw 계층에 `{"tr_id", "params", "body"}` JSON으로 남는다.
 

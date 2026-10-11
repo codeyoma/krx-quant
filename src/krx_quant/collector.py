@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from functools import partial
 from typing import Any
@@ -43,6 +44,7 @@ from krx_quant.feeds import (
     VI_STATUS,
     WS_FEEDS,
     Feed,
+    RestFeed,
     us_daytime_key,
 )
 from krx_quant.feeds.base import kst_day
@@ -53,7 +55,7 @@ from krx_quant.masters import FrontMonths, MasterError, fetch_front_months
 from krx_quant.model_shelf import Shelf
 from krx_quant.notify import Alerts
 from krx_quant.object_store import open_store
-from krx_quant.polling import Poller, PollJob
+from krx_quant.polling import CALL_ERRORS, NORMALIZE_ERRORS, Poller, PollJob
 from krx_quant.predictions import DB_NAME, PredictionStore, iso
 from krx_quant.prevalidation import admits
 from krx_quant.recorder import ParquetRecorder
@@ -464,11 +466,64 @@ async def _approval_key(session: aiohttp.ClientSession, settings: Settings) -> s
     )
 
 
-def _fall_back(poller: Poller, settings: Settings, tr_id: str, key: str, reason: str) -> None:
+def fallback_for(settings: Settings, tr_id: str, key: str) -> RestFeed | None:
+    """The REST feed polled instead when ``tr_id``'s registration of ``key`` is cut, if any."""
     # The ETF mapping only covers the ETF trade feed; a code also listed as a stock keeps
     # the stock fallbacks for its other feeds.
     etf = ETF_FALLBACKS.get(tr_id) if key in settings.etf_symbols else None
-    fallback = etf or FALLBACKS.get(tr_id)
+    return etf or FALLBACKS.get(tr_id)
+
+
+@dataclass(frozen=True)
+class FallbackCheck:
+    """A REST fallback asked once: the event rows it would record, or why it failed."""
+
+    cut_feed: str  # the WebSocket feed whose cut registration it is polled for
+    key: str
+    rest: RestFeed
+    params: dict[str, str]
+    rows: list[dict[str, Any]]
+    error: str | None = None
+
+
+async def check_fallbacks(settings: Settings, now: Clock | None = None) -> list[FallbackCheck]:
+    """Ask the REST fallback of every registration in the subscription plan once, in the
+    plan's order, and normalize the answers without recording them.
+
+    REST only, one call each: safe to run beside the collector, to see live that each
+    fallback answers and what it would record.
+    """
+    clock = now or (lambda: datetime.now(UTC))
+    checks: list[FallbackCheck] = []
+    async with aiohttp.ClientSession() as session:
+        _, client = tokens_and_client(session, settings, clock)
+        plan = subscription_plan(settings, await front_months(session, settings))
+        # A derivative left out of the plan (its contract not found) is not checked: a failure.
+        planned = {feed.tr_id for feed, _ in plan}
+        for feed in (KOSPI200_FUTURES, USD_FUTURES, OPTION):
+            if feed.tr_id not in planned:
+                why = "no contract to ask for: the KIS masters could not be read"
+                checks.append(FallbackCheck(feed.tr_id, "", FALLBACKS[feed.tr_id], {}, [], why))
+        for feed, key in plan:
+            fallback = fallback_for(settings, feed.tr_id, key)
+            if fallback is None:
+                continue
+            at = clock()  # one time for the day asked for and the time received
+            params = fallback.params(key, kst_day(at))
+            try:
+                body = await client.get(fallback.tr_id, fallback.path, params)
+                rows = fallback.normalize(body, key, at.astimezone(UTC))
+            except (*CALL_ERRORS, *NORMALIZE_ERRORS) as e:
+                checks.append(
+                    FallbackCheck(feed.tr_id, key, fallback, params, [], f"{type(e).__name__}: {e}")
+                )
+            else:
+                checks.append(FallbackCheck(feed.tr_id, key, fallback, params, rows))
+    return checks
+
+
+def _fall_back(poller: Poller, settings: Settings, tr_id: str, key: str, reason: str) -> None:
+    fallback = fallback_for(settings, tr_id, key)
     if fallback is None:
         log.error("%s %s not recorded (%s) and has no REST fallback", tr_id, key, reason)
         return
@@ -480,7 +535,7 @@ def _fall_back(poller: Poller, settings: Settings, tr_id: str, key: str, reason:
         fallback.tr_id,
         settings.fallback_poll_seconds,
     )
-    poller.add(PollJob(fallback, key, settings.fallback_poll_seconds))
+    poller.add(PollJob.fallback(fallback, key, settings.fallback_poll_seconds))
 
 
 class _Stream:

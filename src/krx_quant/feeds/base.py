@@ -37,6 +37,21 @@ class RestFeed:
     params: Callable[[str, date], dict[str, str]]  # (key, the day polled) -> query
     # (response body, key, received_at) -> event rows
     normalize: Callable[[dict[str, Any], str, datetime], list[Row]]
+    # The WebSocket feed this endpoint stands in for when its registration is cut, if its
+    # events are that feed's: they are recorded, and read by the engine, under its name and
+    # schema (the answers themselves stay under this TR).
+    stands_in_for: Feed | None = None
+    # The part of an answer whose change is news, for polls that record only news.
+    news: Callable[[dict[str, Any]], Any] = lambda body: body
+
+    def __post_init__(self) -> None:
+        if self.stands_in_for is not None and self.schema != self.stands_in_for.schema:
+            raise ValueError(f"{self.tr_id} records {self.stands_in_for.tr_id} events in another schema")
+
+    @property
+    def events_feed(self) -> str:
+        """The feed this endpoint's events are recorded under."""
+        return self.stands_in_for.tr_id if self.stands_in_for is not None else self.tr_id
 
 
 RAW_SCHEMA = pa.schema([("received_at", pa.timestamp("us", tz="UTC")), ("message", pa.string())])
@@ -54,15 +69,19 @@ def kst(day: date, hhmmss: str) -> datetime:
 CLOSING_TIME = "999999"
 
 
+def received_second(received_at: datetime) -> datetime:
+    """The time of a record that carries none: the second it was received, in KST."""
+    return received_at.astimezone(KST).replace(microsecond=0)
+
+
 def kst_or_received(hhmmss: str, received_at: datetime) -> datetime:
     """``hhmmss`` on the day received, or the second received for a closing record.
 
     Any other value that is not a time raises ValueError, so the record stays raw only.
     """
-    local = received_at.astimezone(KST)
     if hhmmss == CLOSING_TIME:
-        return local.replace(microsecond=0)
-    return kst(local.date(), hhmmss)
+        return received_second(received_at)
+    return kst(kst_day(received_at), hhmmss)
 
 
 def kst_day(received_at: datetime) -> date:
