@@ -21,7 +21,8 @@ Two consensus predictions follow (``consensus.py``): the fast one from the activ
 algorithms done 2 seconds after they started, the final one once they are all done.
 
 After each day's close (+10 minutes) the algorithms' statuses are reviewed by the
-lifecycle rules (``lifecycle.py``), a retired algorithm is no longer run, and the
+lifecycle rules (``lifecycle.py``), the day's predictions lost to the time and CPU budgets
+are told once, a retired algorithm is no longer run, and the
 consensus weights are refitted.
 
 Live, a new algorithm runs only once ``admits`` lets it (its pre-validation passed,
@@ -189,12 +190,17 @@ def partitions(feed: str, symbols: Sequence[str], leaders: Leaders) -> list[str]
 
 @dataclass(frozen=True)
 class Budget:
-    per_algorithm: float = 30.0  # seconds one algorithm may take for a bar close, all symbols
+    per_algorithm: float = 10.0  # seconds one algorithm may take for a bar close, all symbols
     cpu: float = 30.0  # seconds of expected algorithm work per bar close, all together
 
     @classmethod
     def of(cls, settings: Settings) -> Budget:
         return cls(settings.algorithm_seconds, settings.cpu_budget_seconds)
+
+
+def _start_of(day: date) -> datetime:
+    """Midnight starting ``day``, KST."""
+    return datetime.combine(day, time(), KST)
 
 
 # How much one bar close's measured time moves an algorithm's expected time.
@@ -364,7 +370,7 @@ class PredictionEngine:
             for a in self.algorithms
             if a.name in self._cost and a.name not in retired
         }
-        midnight = datetime.combine(self.clock.now().astimezone(KST).date(), time(), KST)
+        midnight = _start_of(self.clock.now().astimezone(KST).date())
         return CpuUse(self._budget, expected, self.store.count_runs("cpu_budget", midnight))
 
     def special_today(self) -> list[Window]:
@@ -385,7 +391,8 @@ class PredictionEngine:
         return None
 
     async def _review(self, at: datetime) -> None:
-        """Change statuses by the lifecycle rules, and alert retirement candidates."""
+        """Change statuses by the lifecycle rules, alert retirement candidates, and tell the
+        predictions the budgets cost that day."""
         standings = self.store.statuses()
         alerted = {
             name
@@ -426,9 +433,38 @@ class PredictionEngine:
             )
             if await self._deliver(text):
                 self._told_waiting.update(untold)
+        await self._report_budgets(at)
         await self._refit_weights(at)
         # Last: a review that failed part way is run again after a restart.
         self.store.add_run("review", at, None, f"{len(result.changes)} status changes")
+
+    async def _report_budgets(self, at: datetime) -> None:
+        """Tell the reviewed day's predictions the time and CPU budgets cost, if any: an
+        algorithm too slow for its limit, or the algorithms together too much for the
+        server. Once a day, a review run again after a restart included (``budget_report``)."""
+        day = at.astimezone(KST).date()
+        midnight, next_day = _start_of(day), _start_of(day + timedelta(days=1))
+        if self.store.count_runs("budget_report", midnight, until=next_day):
+            return
+        timed_out = self.store.timeouts_by_algorithm(midnight, next_day)
+        skipped = self.store.runs_by_algorithm("cpu_budget", midnight, next_day)
+        if not timed_out and not skipped:
+            return
+
+        def counts(by_algorithm: Mapping[str, int]) -> str:
+            return ", ".join(f"{name} {n}회" for name, n in by_algorithm.items())
+
+        lines = [f"{day} 예산 때문에 예측이 빠진 알고리즘이 있습니다."]
+        if timed_out:
+            lines.append(
+                f"시간 초과(봉 마감 한 번에 {self._budget.per_algorithm:g}초 넘김): {counts(timed_out)}."
+            )
+        if skipped:
+            lines.append(f"CPU 예산({self._budget.cpu:g}초)으로 건너뜀: {counts(skipped)}.")
+        lines.append("알고리즘을 가볍게 하거나 서버를 늘리세요. 걸리는 시간은 /v1/status의 cpu에 있습니다.")
+        text = " ".join(lines)
+        if await self._deliver(text):
+            self.store.add_run("budget_report", at, None, text)
 
     async def _refit_weights(self, at: datetime) -> None:
         """The consensus weights of the members active after the review."""

@@ -193,7 +193,7 @@ curl http://krx-quant:8080/v1/macro
 | `KRX_FEE_PERCENT` | 0.015 | 편도 수수료율(%). 0–1. 보합 범위와 가상손익에 쓴다 |
 | `KRX_API_HOST` | `127.0.0.1` (compose `0.0.0.0`) | 엔진 API가 듣는 주소 |
 | `KRX_API_PORT` | 8080 (compose 8080) | 엔진 API 포트. 1–65535 |
-| `KRX_ALGORITHM_SECONDS` | 30 | 알고리즘 하나가 봉 마감 한 번에 쓸 수 있는 시간(초). 55 이하 |
+| `KRX_ALGORITHM_SECONDS` | 10 | 알고리즘 하나가 봉 마감 한 번에 쓸 수 있는 시간(초). 55 이하이고 `KRX_CPU_BUDGET_SECONDS`보다 작아야 한다 |
 | `KRX_CPU_BUDGET_SECONDS` | 30 | 봉 마감 한 번에 알고리즘 예상 시간 합의 상한(초) |
 | `KRX_MIN_SAMPLE` | 200 | 순위와 상태 판정에 필요한 채점 수와 기준 예측과의 짝 수 |
 | `KRX_TRAIN_AT` | `21:30` | 거래일 밤 학습 시각(KST, `HH:MM`). `off`나 빈 값이면 하지 않는다. `KRX_TRAIN_ON=spot`이면 Spot 스케줄(`deploy/training.yaml`의 `TrainAt`)과 같게 둔다 |
@@ -210,6 +210,8 @@ curl http://krx-quant:8080/v1/macro
 | `KRX_SIGNAL_ALERT` | `off` | `on`이면 텔레그램 신호 알림을 보낸다([engine-api.md](engine-api.md#텔레그램-신호-알림-19)) |
 | `KRX_SIGNAL_MIN_PROBABILITY` | `0.6` | 신호를 보낼 최종 합의의 상승(하락) 확률. 0.5–1. 알림이 꺼져 있어도 값을 검사한다 |
 | `KRX_SIGNAL_MIN_AGREE` | `2` | 같은 방향을 예측해야 하는 정식 알고리즘 수. 1 이상 |
+
+> **바뀜** (2026-10-12, #73): `KRX_ALGORITHM_SECONDS` 기본 30 → 10, `KRX_CPU_BUDGET_SECONDS`보다 작아야 한다. 이유: 둘이 같으면 한도를 다 쓰는 알고리즘 하나 때문에 뒤에 등록된 알고리즘이 모두 건너뛰어졌다(#71). `.env`에 30을 적어 두었다면 지우거나 30보다 작게 고쳐야 엔진이 뜬다.
 
 compose와 스크립트가 읽는 변수다. 엔진은 읽지 않는다.
 
@@ -273,7 +275,7 @@ Docker 이미지는 `TZ=Asia/Seoul`, `KRX_DATA_DIR=/data`, `KRX_STATE_DIR=/state
 | 08:00 (거래일) | 아직 적용하지 않은 가장 최근 밤의 승격 목록대로 모델을 바꾼다. 바꾸거나, 목록을 쓰지 않으면 텔레그램으로 알린다 |
 | 장중 | 실시간 녹화. 끊김과 지연은 `gaps`에 기록하고 텔레그램으로 알린다. VI 현황은 시가 동시호가부터 장 마감까지 5초마다, 외국인·기관 추정 가집계는 5분마다 조회한다 |
 | 09:01–15:16 매분 | 기준 예측 3종, 알고리즘, 빠른·최종 합의가 예측하고, 4분 뒤 채점한다. `state/engine.sqlite3`에 쌓인다 |
-| 장 마감 10분 뒤 (보통 15:40, 수능일 16:40) | 알고리즘 상태를 점검하고(수습·정식·벤치·복제), 합의 가중치를 다시 계산한다. 은퇴 후보가 있으면 텔레그램으로 알린다. 엔진이 시작한 뒤 첫 점검에서는 사전 검증을 기다리는 알고리즘도 알린다(#24) |
+| 장 마감 10분 뒤 (보통 15:40, 수능일 16:40) | 알고리즘 상태를 점검하고(수습·정식·벤치·복제), 합의 가중치를 다시 계산한다. 은퇴 후보가 있으면 텔레그램으로 알린다. 그날 시간 초과나 CPU 예산으로 빠진 예측이 있으면 알고리즘별 횟수를 알린다. 엔진이 시작한 뒤 첫 점검에서는 사전 검증을 기다리는 알고리즘도 알린다(#24) |
 | 장 마감 15분 뒤 (보통 15:45, 수능일 16:45) | 그날 녹화를 파티션마다 합쳐 S3에 올린다 |
 | 20:30 | 휴장일 정보를 갱신하고 1분봉 백필을 돌린다 |
 | 21:00 | 다시 올린다. NXT·애프터마켓의 늦은 데이터와 그날 1분봉이 들어간다 |
@@ -478,7 +480,7 @@ docker compose logs --tail 200 engine
 | 알고리즘을 다시 학습하고 싶다 | 밤 학습 결과는 텔레그램과 `/v1/status`의 `training` | 밤 학습이 매일 한다. 당장 바꾸려면 알고리즘마다(`newton`, `gauss`, `granger`, `markov`, `kalman`, `shannon`, `poisson`, `turing`) `docker compose run --rm --no-deps engine fit <이름>`. 엔진이 1분 안에 새 모델로 바꾼다. 되돌리려면 `docker compose exec engine krx-quant rollback <이름>`(위 "밤 학습과 모델 교체"). |
 | `[알림] 사전 검증 대기: <이름>. 검증을 통과해야 돌기 시작합니다. ...` | `curl -s http://krx-quant:8080/v1/algorithms`에 그 이름이 없다 | 새로 등록된 알고리즘이 사전 검증을 기다린다. 장 시간 밖에서 `docker compose run --rm --no-deps engine prevalidate <이름>`(3장 "새 알고리즘 사전 검증"). 엔진이 다시 시작할 때마다 한 번 온다. |
 | `[알림] <이름> 은퇴 후보: ...` | `curl -s http://krx-quant:8080/v1/algorithms`의 `status` 이력, `/v1/algorithms/<이름>/stats?period=20d` | 벤치 60거래일 동안 회복하지 못했다. 은퇴시키려면 `docker compose exec engine krx-quant retire <이름>`. 기록은 남고, 엔진은 다음 봉 마감부터 돌리지 않는다. 되돌리려면 `krx-quant unretire <이름>`(수습부터 다시). |
-| `WARNING krx_quant.engine: <이름> skipped at ... for the CPU budget` 또는 `<이름> took over 30.0s` 로그가 잦다 | `docker stats`로 CPU 사용률, DB의 `runs` 테이블(`kind`가 `cpu_budget`) | 알고리즘 계산이 서버에 버겁다. 텔레그램 알림은 없다. 4GB 요금제로 올리거나 `KRX_CPU_BUDGET_SECONDS`를 조정한다. |
+| `[알림] <날짜> 예산 때문에 예측이 빠진 알고리즘이 있습니다. ...`, 또는 `WARNING krx_quant.engine: <이름> skipped at ... for the CPU budget`나 `<이름> took over 10.0s` 로그 | `curl -s http://krx-quant:8080/v1/status`의 `cpu`(알고리즘별 예상 초와 `usage`), `docker stats`로 CPU 사용률, DB의 `runs` 테이블(`kind`가 `cpu_budget`) | 시간 초과는 그 알고리즘이 봉 마감 한 번에 `KRX_ALGORITHM_SECONDS`를 넘긴 것이고, CPU 예산 건너뜀은 알고리즘들의 합이 `KRX_CPU_BUDGET_SECONDS`를 넘은 것이다. 알고리즘을 가볍게 하거나 4GB 요금제로 올린다. 예산을 늘리려면 한도가 예산보다 작게 둘 다 고친다. 알림은 그날 일일 점검 때 한 번만 온다. |
 | `[장애] 매크로 출처 <ecos/fred/yahoo/kis>가 3번 연속 실패했습니다: <이유>` | 로그의 `macro source ... failed` | 키가 틀렸으면(`ECOS INFO-100`, `FRED 400 ... api_key`) `.env`를 고친다. `HTTP 5xx`나 연결 실패는 출처 쪽 장애다. 다음 거래일 07:30에 다시 읽고, 응답하면 `[복구] 매크로 출처 …가 다시 응답합니다.`가 온다. 그동안 그 출처의 지표 없이 국면을 정한다. |
 | `[장애] <날짜> 밤 학습이 실패했습니다: <이유>` | 로그의 `nightly training of ... failed`. 6시간 안에 안 끝나면 이유가 `not done in 6:00:00`이다 | `docker compose run --rm --no-deps engine train --day <날짜>`로 다시 돌린다. 끝난 알고리즘은 건너뛴다. 다음 밤 학습이 성공하면 `[복구] 밤 학습이 다시 됩니다.`가 온다. 그동안 전날 모델이 계속 돈다. |
 | `[장애] <날짜> 밤 학습이 실패했습니다: Spot 학습 결과가 <다음 거래일> 07:30까지 오지 않았습니다` | S3의 `training/logs/`(최근 로그 마지막 줄), `aws ec2 describe-instances --filters Name=tag:Name,Values=krx-quant-training`, 스케줄러 상태 | Spot이 뜨지 못했거나(용량, 할당량, 상한으로 꺼진 스케줄) 학습이 실패했다. 맥에서 `aws ec2 run-instances --launch-template 'LaunchTemplateName=krx-quant-training,Version=$Latest'`로 다시 띄우면 끝난 알고리즘은 건너뛴다. 급하면 서버에서 `docker compose run --rm --no-deps engine train --day <날짜>`. 그동안 전날 모델이 계속 돈다. |
@@ -501,6 +503,8 @@ docker compose logs --tail 200 engine
 | 로그의 `no macro regime for <날짜>` | `docker compose logs engine \| grep macro`, `/v1/macro` | 그날 개장 전에 정한 매크로 국면이 없다(07:30 수집이 꺼졌거나 모든 출처가 실패했거나, 수집기가 개장 뒤에 시작했다). Markov가 그날 기본 전이행렬로 돈다. `runs`에 `no_regime`으로 남는다. 할 일은 없고, 매일 나오면 07:30 수집을 확인한다. |
 | 디스크가 찬다 | `df -h`, `du -sh data/*/` | 로컬 데이터는 자동으로 지우지 않는다. 지우기 전에 `docker compose run --rm engine archive --recheck`를 실행하고, `0 failed`로 끝나는지(종료 코드 0) 확인한다. `.uploaded.json`이 있다는 것만으로는 지금 파일이 S3에 있다고 볼 수 없다. 파티션을 합친 뒤 업로드가 실패하면 그 전 파일의 기록이 남아 있기 때문이다. 확인한 뒤에는 오래된 날짜 폴더를 `raw`, `events`, `gaps`에서 지워도 된다. `bars`는 지우지 않는다(백필이 다시 받는다). `state/training-cache/`는 밤 학습이 끝날 때 그 밤에 쓰지 않은 오래된 날짜를 지운다. 남은 것도 지워도 된다(밤 학습이 S3에서 다시 받는다). |
 | 서버를 잃었다 | Lightsail 콘솔의 스냅샷 | 1. 옛 인스턴스가 아직 있으면 먼저 멈추거나 지운다. 같은 Tailscale 신원으로 두 대가 동시에 뜨지 않게 하려는 것이다.<br>2. 마지막 자동 스냅샷으로 새 인스턴스를 만든다. 디스크에 Tailscale 신원, `.env`, 데이터가 그대로 있어서 부팅하면 `krx-quant`로 다시 붙고 엔진도 스스로 뜬다. Tailscale admin의 기기는 지우지 않는다. 지우면 접속할 길이 없어진다.<br>3. 새 인스턴스의 Lightsail 방화벽은 41641/udp만 열어 둔다(2.2의 10단계 명령).<br>4. `docker compose run --rm engine archive --recheck`로 S3와 맞춘다.<br>마지막 스냅샷 뒤에 녹화하고 아직 올리지 못한 데이터는 잃는다. |
+
+> **바뀜** (2026-10-12, #73): 위 표의 CPU 예산 행은 "텔레그램 알림은 없다"였다 → 하루 한 번 알린다. 이유: 운영자가 예산 문제를 로그로만 알 수 있었다(#71).
 
 ## 7. 비용
 

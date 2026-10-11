@@ -157,6 +157,87 @@ async def test_an_algorithm_over_its_time_budget_is_skipped_and_recorded(tmp_pat
     assert (made["status"], made["p_flat"]) == ("ok", 0.6)
 
 
+async def test_one_algorithm_at_its_time_limit_leaves_the_others_room(tmp_path: Path) -> None:
+    # The default budgets in proportion, shrunk 50 times so the test is quick.
+    budget = Budget(per_algorithm=Budget().per_algorithm / 50, cpu=Budget().cpu / 50)
+    slow = FixedAlgorithm(
+        "slow", features=("velocity",), unique=("velocity",), seconds=budget.per_algorithm * 2
+    )
+    second = FixedAlgorithm("second", features=("acceleration",), unique=("acceleration",))
+    third = FixedAlgorithm("third", features=("relative_volume",), unique=("relative_volume",))
+
+    engine = await run(
+        tmp_path / "engine.db",
+        busy_morning(),
+        until=at("09:03:30"),
+        algorithms=[slow, second, third],
+        budget=budget,
+    )
+
+    # Registered first, the slow one counts its whole limit from 09:01 on; the others still run.
+    assert {p["status"] for p in await predictions_of(engine, "slow")} == {"timed_out"}
+    for quick in ("second", "third"):
+        assert len(await predictions_of(engine, quick)) == 3, quick
+    with sqlite3.connect(tmp_path / "engine.db") as conn:
+        assert conn.execute("SELECT COUNT(*) FROM runs WHERE kind = 'cpu_budget'").fetchone()[0] == 0
+
+
+async def test_the_days_predictions_lost_to_the_budgets_are_told_after_the_close(tmp_path: Path) -> None:
+    db = tmp_path / "engine.db"
+    budget = Budget(per_algorithm=0.3, cpu=0.35)
+    quick = FixedAlgorithm("quick", features=("velocity",), unique=("velocity",))
+    slow = FixedAlgorithm("slow", features=("acceleration",), unique=("acceleration",), seconds=0.6)
+    heavy = FixedAlgorithm("heavy", features=("relative_volume",), unique=("relative_volume",), seconds=0.1)
+    algorithms = [quick, slow, heavy]
+    sent: list[str] = []
+
+    async def notify(text: str) -> bool:
+        sent.append(text)
+        return True
+
+    # The morning: slow is over its limit at each bar close; with it counted at its limit,
+    # heavy (registered last) no longer fits in the CPU budget.
+    await run(db, busy_morning(), until=at("09:03:30"), algorithms=algorithms, budget=budget, notify=notify)
+    assert sent == []
+    with sqlite3.connect(db) as conn:
+        skipped = conn.execute("SELECT COUNT(*) FROM runs WHERE kind = 'cpu_budget' AND algorithm = 'heavy'")
+        skips = skipped.fetchone()[0]
+    assert skips >= 1
+
+    # The daily review after the close tells it once.
+    await run(
+        db,
+        [],
+        start=at("15:39:00"),
+        until=at("15:45:00"),
+        algorithms=algorithms,
+        budget=budget,
+        notify=notify,
+    )
+
+    [told] = sent
+    assert told.startswith("2026-10-12 ")
+    assert "slow 3회" in told and "시간 초과" in told, told
+    assert f"heavy {skips}회" in told and "CPU 예산" in told, told
+    assert "quick" not in told
+    assert "/v1/status" in told
+
+
+async def test_a_day_without_predictions_lost_to_the_budgets_tells_nothing(tmp_path: Path) -> None:
+    db = tmp_path / "engine.db"
+    quick = FixedAlgorithm("quick", features=("velocity",), unique=("velocity",))
+    sent: list[str] = []
+
+    async def notify(text: str) -> bool:
+        sent.append(text)
+        return True
+
+    await run(db, busy_morning(), until=at("09:03:30"), algorithms=[quick], notify=notify)
+    await run(db, [], start=at("15:39:00"), until=at("15:45:00"), algorithms=[quick], notify=notify)
+
+    assert sent == []
+
+
 async def test_when_the_cpu_budget_runs_short_the_last_registered_is_skipped_first(tmp_path: Path) -> None:
     first = FixedAlgorithm("first", features=("velocity",), unique=("velocity",), seconds=0.01)
     second = FixedAlgorithm("second", features=("acceleration",), unique=("acceleration",), seconds=0.01)
@@ -181,7 +262,7 @@ async def test_when_the_cpu_budget_runs_short_the_last_registered_is_skipped_fir
     assert runs == [("cpu_budget", "2026-10-12T09:02:00+09:00", "third")]
     async with api(engine) as client:
         cpu = (await get_json(client, "/v1/status"))["cpu"]
-    assert (cpu["budget_seconds"], cpu["algorithm_seconds"], cpu["skipped_today"]) == (0.2, 30.0, 1)
+    assert (cpu["budget_seconds"], cpu["algorithm_seconds"], cpu["skipped_today"]) == (0.2, 10.0, 1)
     assert set(cpu["algorithms"]) == {"first", "second", "third"}
     # Third was timed again at 09:03: the three are expected over the budget once more.
     assert cpu["expected_seconds"] > 0.2

@@ -178,7 +178,7 @@ async def test_poisson_predicts_well_within_its_time_budget_and_is_scored(tmp_pa
     )
 
     poisson = await predictions_of(engine, "poisson")
-    assert len(poisson) == 60 and {p["status"] for p in poisson} == {"ok"}, "none over the 30 s budget"
+    assert len(poisson) == 60 and {p["status"] for p in poisson} == {"ok"}, "none over its time budget"
     assert {p["model_version"] for p in poisson} == {model.version}
     assert sum(p["outcome"] is not None for p in poisson) == 56
     assert engine.cpu_use().expected["poisson"] < 0.1, "seconds a bar close, as the engine timed it"

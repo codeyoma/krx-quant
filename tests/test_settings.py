@@ -43,3 +43,14 @@ def test_a_cost_budget_needs_the_schedules_it_turns_off() -> None:
         Settings.from_env({**KEYS, "KRX_COST_BUDGET": "krx-quant-monthly"}, dotenv_path=None)
     both = {**KEYS, "KRX_COST_BUDGET": "krx-quant-monthly", "KRX_TRAINING_SCHEDULES": "a,b"}
     assert Settings.from_env(both, dotenv_path=None).training_schedules == ("a", "b")
+
+
+def test_one_algorithms_limit_is_below_the_cpu_budget() -> None:
+    # One algorithm at its limit must leave the others room in the budget.
+    defaults = Settings.from_env(KEYS, dotenv_path=None)
+    assert (defaults.algorithm_seconds, defaults.cpu_budget_seconds) == (10.0, 30.0)
+    for limit, budget in (("30", "30"), ("40", "30")):
+        with pytest.raises(SettingsError, match="KRX_ALGORITHM_SECONDS"):
+            Settings.from_env(
+                {**KEYS, "KRX_ALGORITHM_SECONDS": limit, "KRX_CPU_BUDGET_SECONDS": budget}, dotenv_path=None
+            )
