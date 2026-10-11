@@ -58,9 +58,11 @@ async def test_rest_calls_never_exceed_twenty_in_any_one_second_window(
     # the fake KIS add the machine's scheduling delays: one call held up for longer than the
     # limiter's 0.1 s margin arrives within a second of the next twenty. Many poll jobs share the
     # limiter, so calls can pass each other on the way: the k-th arrival is matched to the k-th
-    # grant, both in time order.
-    assert len(let_through) == len(arrived), "every call went through the limiter"
-    assert all(g <= a for g, a in zip(let_through, arrived, strict=True)), "none arrived before its turn"
+    # grant, both in time order. Stopping cancels the poll jobs, and a call let through just before
+    # can be cancelled before it reaches the fake KIS (seen on a new connection): grants may
+    # outnumber arrivals, and they still count toward the busiest second.
+    assert len(arrived) <= len(let_through), "every call went through the limiter"
+    assert all(g <= a for g, a in zip(let_through, arrived, strict=False)), "none arrived before its turn"
     busiest = max(sum(1 for u in let_through if t <= u < t + 1.0) for t in let_through)
     assert busiest <= 20
 
