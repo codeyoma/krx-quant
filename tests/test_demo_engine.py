@@ -140,10 +140,13 @@ def test_a_taken_port_is_a_clear_error(
     assert f"demo Engine API not started on 127.0.0.1:{port}" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("pace", ["0", "-1", "nan"])
-def test_a_pace_is_more_than_0_seconds(tmp_path: Path, pace: str, capsys: pytest.CaptureFixture[str]) -> None:
+@pytest.mark.parametrize("pace", ["0", "-1", "nan", "inf", "1e10000"])
+def test_a_pace_is_a_finite_number_of_seconds_more_than_0(
+    tmp_path: Path, pace: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # An infinite pace would leave the demo at 10:00 for good, streaming nothing.
     with pytest.raises(SystemExit) as exit:
         main(["demo-engine", "--pace", pace, "--db", str(tmp_path / "demo.sqlite3")])
 
     assert exit.value.code == 2, "a wrong argument, as the README's exit codes say"
-    assert "seconds per minute of the demo morning, more than 0" in capsys.readouterr().err
+    assert "seconds per minute of the demo morning: a finite number more than 0" in capsys.readouterr().err

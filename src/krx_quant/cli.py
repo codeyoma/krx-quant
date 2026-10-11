@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import itertools
 import logging
+import math
 import signal
 import sys
 from collections.abc import Callable
@@ -240,10 +241,13 @@ def _macro() -> int:
 
 
 def _seconds_per_minute(text: str) -> float:
-    """``--pace``: seconds per minute of the demo morning, more than 0."""
+    """``--pace``: seconds per minute of the demo morning, a finite number more than 0 (an
+    infinite one would leave the demo at 10:00 for good)."""
     seconds = float(text)
-    if not seconds > 0:
-        raise argparse.ArgumentTypeError(f"seconds per minute of the demo morning, more than 0: {text}")
+    if not (math.isfinite(seconds) and seconds > 0):
+        raise argparse.ArgumentTypeError(
+            f"seconds per minute of the demo morning: a finite number more than 0, not {text}"
+        )
     return seconds
 
 
