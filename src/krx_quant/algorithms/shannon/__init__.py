@@ -11,8 +11,9 @@ Personality card:
 - **Own features**: the order flow imbalance and the entropy of the trades' sides.
 - **Learns**: L1-penalized regression over the last 20 trading days' recorded books and
   trades (accelerated proximal gradient). The penalty is the one, of a few, whose model
-  trained on the earlier 80% of the samples has the lowest log loss on the last 20%;
-  then it is trained on all of them.
+  trained on the earlier trading days has the lowest log loss on the latest ones, about
+  20% of the samples, whole days only: a four-minute outcome never spans the two. Then it
+  is trained on all of them. The model keeps the penalty and the days it was validated on.
 
 The book and the trades' sides are recorded only (backfilled days have neither): on a
 day with backfilled bars only it does not learn, and at a bar close without the book it
@@ -22,7 +23,9 @@ does not predict (``no_book``).
 from __future__ import annotations
 
 import math
+from collections import Counter
 from collections.abc import Mapping, Sequence
+from datetime import date
 
 import numpy as np
 
@@ -30,6 +33,7 @@ from krx_quant.algorithms.contract import Abstention, Card, Model, NothingToLear
 from krx_quant.algorithms.forecasts import CLASSES, class_moves, lowest_log_loss, number, param
 from krx_quant.baselines import Forecast
 from krx_quant.features import FeatureVector
+from krx_quant.feeds.base import kst_day
 
 INPUTS = (
     "ofi_1",
@@ -44,7 +48,7 @@ INPUTS = (
 # L1 penalties tried, strongest first: of equals, the sparser model is kept.
 PENALTIES = (0.1, 0.03, 0.01, 0.003, 0.001)
 VALIDATION_SHARE = 0.2
-# Fewer samples than this: no validation split; the middle penalty.
+# Fewer samples than this, or a single trading day: no validation split; the middle penalty.
 MIN_SPLIT = 100
 ROUNDS = 1000
 _TOLERANCE = 1e-8
@@ -53,7 +57,8 @@ _MIN_SD = 1e-9
 
 def default_params() -> dict[str, float]:
     """Before any training: no input matters, every class as likely, no move expected."""
-    params = {"penalty": 0.0}
+    # The days the penalty was validated on (YYYYMMDD; 0 and none: not validated).
+    params = {"penalty": 0.0, "validation_from": 0.0, "validation_to": 0.0, "validation_days": 0.0}
     for f in INPUTS:
         params[param("mean", f)] = 0.0
         params[param("sd", f)] = 1.0
@@ -79,8 +84,9 @@ class Shannon:
         ),
         unique_features=("ofi_1", "ofi_5", "trade_entropy"),
         training=(
-            "최근 20거래일의 녹화된 호가·체결로 L1 로지스틱 회귀를 다시 학습한다. 표본의 앞 80%로 학습하고 "
-            "뒤 20%의 로그손실이 가장 작은 L1 강도를 골라, 전체로 다시 학습한다."
+            "최근 20거래일의 녹화된 호가·체결로 L1 로지스틱 회귀를 다시 학습한다. 표본의 약 20%가 되는 "
+            "최근 거래일들을 통째로 검증에 두고, 그 전 날들로 학습해 검증 로그손실이 가장 작은 L1 강도를 골라, "
+            "전체로 다시 학습한다."
         ),
     )
 
@@ -103,8 +109,8 @@ class Shannon:
         )
         if not scored:
             raise NothingToLearn("no training samples with the book")
-        penalty = _chosen_penalty(scored)
-        params = _trained(scored, penalty)
+        penalty, validated = _chosen_penalty(scored)
+        params = _trained(scored, penalty) | _validated_on(validated)
         return lowest_log_loss(self.name, scored, [params], lambda f, q: self.predict(f, Model(self.name, q)))
 
 
@@ -114,13 +120,26 @@ def _standardized(value: float | None, mean: float, sd: float) -> float:
     return 0.0 if math.isnan(known) else (known - mean) / sd
 
 
-def _chosen_penalty(scored: Sequence[Sample]) -> float:
-    """The penalty whose model, trained on the earlier samples, has the lowest log loss on the
-    later ones; the middle one with too few to split."""
-    if len(scored) < MIN_SPLIT:
-        return PENALTIES[len(PENALTIES) // 2]
-    cut = int(len(scored) * (1 - VALIDATION_SHARE))
-    train, held = scored[:cut], scored[cut:]
+def _chosen_penalty(scored: Sequence[Sample]) -> tuple[float, list[date]]:
+    """The penalty whose model, trained on the earlier trading days, has the lowest log loss
+    on the latest ones, and those days; the middle penalty and no day with too few to split.
+
+    The latest days are taken whole, as many as bring the samples held out nearest
+    VALIDATION_SHARE (the fewer of equals), one day at least being left to train on: a split
+    inside a day would let the four-minute outcomes of its bar closes before the cut reach
+    into the validation."""
+    days = sorted({kst_day(s.bar_close) for s in scored})
+    if len(scored) < MIN_SPLIT or len(days) < 2:
+        return PENALTIES[len(PENALTIES) // 2], []
+    per_day = Counter(kst_day(s.bar_close) for s in scored)
+    target = len(scored) * VALIDATION_SHARE
+
+    def off_target(k: int) -> float:
+        return abs(sum(per_day[d] for d in days[-k:]) - target)
+
+    held_days = days[-min(range(1, len(days)), key=off_target) :]
+    train = [s for s in scored if kst_day(s.bar_close) < held_days[0]]
+    held = [s for s in scored if kst_day(s.bar_close) >= held_days[0]]
     best: tuple[float, float] | None = None
     for penalty in PENALTIES:
         params = _trained(train, penalty)
@@ -129,7 +148,18 @@ def _chosen_penalty(scored: Sequence[Sample]) -> float:
         if best is None or loss < best[0] - 1e-12:
             best = (loss, penalty)
     assert best is not None
-    return best[1]
+    return best[1], held_days
+
+
+def _validated_on(days: Sequence[date]) -> dict[str, float]:
+    """The days the penalty was validated on, as the model keeps them (YYYYMMDD)."""
+    if not days:
+        return {"validation_from": 0.0, "validation_to": 0.0, "validation_days": 0.0}
+    return {
+        "validation_from": float(f"{days[0]:%Y%m%d}"),
+        "validation_to": float(f"{days[-1]:%Y%m%d}"),
+        "validation_days": float(len(days)),
+    }
 
 
 def _trained(scored: Sequence[Sample], penalty: float) -> dict[str, float]:

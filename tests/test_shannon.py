@@ -173,6 +173,39 @@ def test_the_same_samples_give_the_same_model() -> None:
     assert SHANNON.fit(made_up(300)).version == SHANNON.fit(made_up(300)).version
 
 
+def on_days(counts: list[int]) -> list[Sample]:
+    """``made_up`` samples spread over consecutive days, ``counts[i]`` on the i-th."""
+    samples, start = made_up(sum(counts)), 0
+    out = []
+    for day, n in enumerate(counts):
+        for k, s in enumerate(samples[start : start + n]):
+            at = datetime.combine(date(2026, 9, 1) + timedelta(days=day), time(9, 1), KST) + timedelta(
+                minutes=k
+            )
+            out.append(replace(s, bar_close=at))
+        start += n
+    return out
+
+
+def test_the_penalty_is_validated_on_whole_trading_days_after_those_it_trained_on() -> None:
+    # 140 samples: 20% is 28. The last day holds 20, the last two 60: the last day is nearer.
+    model = SHANNON.fit(on_days([50, 30, 40, 20]))
+
+    p = model.params
+    assert (p["validation_from"], p["validation_to"], p["validation_days"]) == (20260904.0, 20260904.0, 1.0)
+    assert p["penalty"] in (0.1, 0.03, 0.01, 0.003, 0.001)
+    assert model.version == SHANNON.fit(on_days([50, 30, 40, 20])).version
+    # 240 samples: 20% is 48. The last two days hold 40, nearer than 20 or 140.
+    p = SHANNON.fit(on_days([100, 100, 20, 20])).params
+    assert (p["validation_from"], p["validation_to"], p["validation_days"]) == (20260903.0, 20260904.0, 2.0)
+
+
+def test_with_one_day_only_the_middle_penalty_is_kept_unvalidated() -> None:
+    p = SHANNON.fit(on_days([150])).params
+
+    assert (p["penalty"], p["validation_days"]) == (0.01, 0.0)
+
+
 def test_without_the_book_shannon_neither_learns_nor_predicts() -> None:
     no_book = [replace(s, features=inputs(depth_imbalance=None, ofi_1=1.0)) for s in made_up(20)]
 
