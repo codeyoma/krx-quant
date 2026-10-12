@@ -132,8 +132,8 @@ class Settings:
     # None here, so a collector built in a test never does.
     macro_at: time | None = None
     # The collector stops at this time (KST) on a trading day after the one it started on,
-    # for Docker to start it afresh with that day's contracts (KRX_RESTART_AT: 07:50 unless
-    # set; "off"; before the NXT pre-market at 08:00). None here, as macro_at.
+    # for Docker to start it afresh with that day's contracts (KRX_RESTART_AT: 07:20 unless
+    # set; "off"; before macro_at and the NXT pre-market at 08:00). None here, as macro_at.
     restart_at: time | None = None
     # Free API keys of the Bank of Korea (ECOS) and FRED; a source without its key is skipped.
     ecos_api_key: str | None = None
@@ -218,6 +218,15 @@ class Settings:
             ),
             min_agree=int(number("KRX_SIGNAL_MIN_AGREE", str(SIGNALS.min_agree), int, 1)),
         )
+        macro_at = _time_or_off("KRX_MACRO_AT", values.get("KRX_MACRO_AT", "07:30"))
+        restart_at = _before_pre_market("KRX_RESTART_AT", values.get("KRX_RESTART_AT", "07:20"))
+        if restart_at is not None and macro_at is not None and restart_at >= macro_at:
+            # The new collector would read that morning's macro again, and a source failing
+            # then would replace the earlier read's regime for the whole day.
+            raise SettingsError(
+                f"KRX_RESTART_AT ({restart_at:%H:%M}) must be before KRX_MACRO_AT ({macro_at:%H:%M}): "
+                "the restarted collector reads the day's macro once"
+            )
         return cls(
             kis_app_key=required("KIS_APP_KEY"),
             kis_app_secret=required("KIS_APP_SECRET"),
@@ -274,8 +283,8 @@ class Settings:
             cost_budget=values.get("KRX_COST_BUDGET", "").strip() or None,
             training_schedules=codes("KRX_TRAINING_SCHEDULES", ""),
             cost_check_seconds=float(number("KRX_COST_CHECK_SECONDS", "3600", float, minimum=60)),
-            macro_at=_time_or_off("KRX_MACRO_AT", values.get("KRX_MACRO_AT", "07:30")),
-            restart_at=_before_pre_market("KRX_RESTART_AT", values.get("KRX_RESTART_AT", "07:50")),
+            macro_at=macro_at,
+            restart_at=restart_at,
             ecos_api_key=values.get("KRX_ECOS_API_KEY") or None,
             fred_api_key=values.get("KRX_FRED_API_KEY") or None,
             ecos_url=values.get("KRX_ECOS_URL", DEFAULT_ECOS_URL),

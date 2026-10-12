@@ -29,28 +29,33 @@ async def stopped_at(started: datetime) -> datetime:
     async def sleep(seconds: float) -> None:
         clock[0] += timedelta(seconds=seconds)
 
-    await restart_each_day(time(7, 50), CALENDAR, lambda: clock[0], stop, sleep)
+    await restart_each_day(time(7, 20), CALENDAR, lambda: clock[0], stop, sleep)
     assert stop.is_set()
     return clock[0]
 
 
 async def test_a_collector_running_since_an_earlier_day_stops_before_the_next_session() -> None:
-    # Started Monday afternoon: it stops at 07:50 on the next trading day, Wednesday.
+    # Started Monday afternoon: it stops at 07:20 on the next trading day, Wednesday.
     assert await stopped_at(datetime(2026, 10, 12, 14, 0, tzinfo=KST)) == datetime(
-        2026, 10, 14, 7, 50, tzinfo=KST
+        2026, 10, 14, 7, 20, tzinfo=KST
     )
 
 
 async def test_a_collector_started_that_morning_keeps_running_through_its_day() -> None:
     # Started at Monday's 06:00 deploy: it already read Monday's contracts.
     assert await stopped_at(datetime(2026, 10, 12, 6, 0, tzinfo=KST)) == datetime(
-        2026, 10, 14, 7, 50, tzinfo=KST
+        2026, 10, 14, 7, 20, tzinfo=KST
     )
 
 
-def test_the_restart_is_before_the_nxt_pre_market_unless_off() -> None:
+def test_the_restart_is_before_the_macro_read_and_the_nxt_pre_market_unless_off() -> None:
     keys = {"KIS_APP_KEY": "key", "KIS_APP_SECRET": "secret"}
-    assert Settings.from_env(keys, dotenv_path=None).restart_at == time(7, 50)
+    assert Settings.from_env(keys, dotenv_path=None).restart_at == time(7, 20)
     assert Settings.from_env({**keys, "KRX_RESTART_AT": "off"}, dotenv_path=None).restart_at is None
     with pytest.raises(SettingsError, match="KRX_RESTART_AT"):
         Settings.from_env({**keys, "KRX_RESTART_AT": "09:30"}, dotenv_path=None)
+    # After the 07:30 macro read, the new collector would read the morning again (#125 review).
+    with pytest.raises(SettingsError, match="KRX_MACRO_AT"):
+        Settings.from_env({**keys, "KRX_RESTART_AT": "07:50"}, dotenv_path=None)
+    without_macro = {**keys, "KRX_RESTART_AT": "07:50", "KRX_MACRO_AT": "off"}
+    assert Settings.from_env(without_macro, dotenv_path=None).restart_at == time(7, 50)
