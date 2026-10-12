@@ -205,6 +205,7 @@ curl http://krx-quant:8080/v1/macro
 | `KRX_TRAINING_SCHEDULES` | (없음) | 상한에서 끄고 다음 달 1일에 다시 켤 EventBridge Scheduler 스케줄(쉼표로 구분, `krx-quant-training,krx-quant-training-resume`) |
 | `KRX_COST_CHECK_SECONDS` | 3600 | 비용을 읽는 간격(초). 60 이상 |
 | `KRX_IMAGE_REPOSITORY` | (없음) | Spot 학습용 이미지를 올릴 ECR 저장소 URI. 엔진은 읽지 않고 `deploy/push-image.sh`(자동 업데이트가 부른다)만 읽는다. 없으면 올리지 않는다 |
+| `KRX_RESTART_AT` | `07:20` | 수집기가 시작한 날 다음 거래일의 이 시각(KST)에 스스로 멈추면 Docker가 다시 띄운다(#115). 새 수집기가 그날의 선물·옵션 월물과 등가격 행사가를 다시 고른다. `off`면 하지 않는다. `KRX_MACRO_AT`과 08:00(NXT 장전) 전이어야 한다. 매크로를 읽은 뒤 다시 띄우면 새 수집기가 그날 아침을 다시 읽어, 그때 실패한 출처가 앞서 정한 국면을 하루 내내 덮기 때문이다 |
 | `KRX_MACRO_AT` | `07:30` | 거래일 매크로 지표를 읽고 국면을 정하는 시각(KST). `off`나 빈 값이면 하지 않는다. 개장 전이어야 한다. 개장 이후 시각이면 읽지 않고 `macro read skipped` 경고를 남긴다 |
 | `KRX_ECOS_API_KEY` | (없음) | 한국은행 ECOS 키. https://ecos.bok.or.kr/api/ 에서 회원가입 후 "인증키 신청"으로 받는다(무료, 즉시). 없으면 ECOS 지표(원/달러, 국고채 3년)를 건너뛴다 |
 | `KRX_FRED_API_KEY` | (없음) | FRED 키. https://fred.stlouisfed.org/docs/api/api_key.html 에서 계정을 만든 뒤 받는다(무료). 없으면 FRED 지표(미국 10년물, WTI)를 건너뛴다 |
@@ -323,6 +324,7 @@ docker compose run --rm engine diagnose --days 5
 |---|---|
 | 03:00 | Lightsail 자동 스냅샷 |
 | 06:00 (매일) | 자동 업데이트(`krx-quant-update` 타이머). main에 새 커밋이 있으면 받아 엔진을 다시 띄운다(4장) |
+| 07:20 (거래일) | 전날 이전부터 돌던 수집기가 스스로 멈추고 Docker가 다시 띄운다(`KRX_RESTART_AT`, #115). 그날의 KIS 마스터로 선물·옵션 월물과 등가격 ±2 행사가를 다시 고른다. 그날 06:00 배포로 시작한 수집기는 그대로다. 매크로(07:30)와 NXT 장전(08:00) 전이라, 새 수집기가 그날 매크로를 처음부터 읽고 녹화가 비지 않는다 |
 | 07:30 (거래일) | 매크로 지표(ECOS, FRED, Yahoo, 달러선물 백필)를 읽고 그날 국면을 정해 `macro` 계층에 기록한다(`KRX_MACRO_AT`). 실패한 출처는 10분 뒤 다시, 그날 아침 3번까지 읽는다. 다시 읽기는 개장 전에만 한다 |
 | 08:00 (거래일) | 아직 적용하지 않은 가장 최근 밤의 승격 목록대로 모델을 바꾼다. 바꾸거나, 목록을 쓰지 않으면 텔레그램으로 알린다 |
 | 장중 | 실시간 녹화. 끊김과 지연은 `gaps`에 기록하고 텔레그램으로 알린다. VI 현황은 시가 동시호가부터 장 마감까지 5초마다, 외국인·기관 추정 가집계는 5분마다 조회한다 |

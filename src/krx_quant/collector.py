@@ -6,9 +6,9 @@ import asyncio
 import contextlib
 import json
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from functools import partial
 from typing import Any
 
@@ -53,7 +53,7 @@ from krx_quant.feeds.base import kst_day
 from krx_quant.health import FeedHealth, FeedState, GapKind
 from krx_quant.lifecycle import Rules
 from krx_quant.macro import MacroCollector, day_regime, keep_macro, macro_recorder
-from krx_quant.market_calendar import MarketCalendar, Phase, calendar_store
+from krx_quant.market_calendar import MarketCalendar, Phase, calendar_store, next_on_trading_day
 from krx_quant.masters import FrontMonths, MasterError, fetch_front_months
 from krx_quant.model_shelf import Shelf
 from krx_quant.notify import Alerts
@@ -313,6 +313,10 @@ async def run_collector(
                 )
             if settings.cost_budget is not None:
                 background.append(asyncio.create_task(keep_costs(settings, alerts, now)))
+            if settings.restart_at is not None:
+                background.append(
+                    asyncio.create_task(restart_each_day(settings.restart_at, calendar.calendar, now, stop))
+                )
             if settings.macro_at is not None:
                 macro_collector = MacroCollector(
                     settings, session, alerts, macro_recorder(recorder), calendar.calendar, now
@@ -339,6 +343,30 @@ async def run_collector(
         health.close()
         recorder.close()
         store.close()
+
+
+async def restart_each_day(
+    at: time,
+    calendar: MarketCalendar,
+    now: Callable[[], datetime],
+    stop: asyncio.Event,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> None:
+    """Stop the collector at ``at`` on the first trading day after the one it started on.
+
+    Docker starts it again (``restart: unless-stopped``), and the new collector reads that
+    day's KIS masters: the nearest futures, the options month not expired and their strikes
+    around the money. A collector left running across days would keep an expired month, and
+    strikes drifting from the money (#115). One started that morning (the 06:00 deploy) read
+    them already. The sleep is a parameter for tests.
+    """
+    started = now()
+    when = next_on_trading_day(calendar, at, started)
+    if kst_day(when) == kst_day(started):
+        when = next_on_trading_day(calendar, at, when)
+    await sleep(max(0.0, (when - now()).total_seconds()))
+    log.info("stopping for the daily restart: %s's contracts are read afresh", kst_day(when))
+    stop.set()
 
 
 async def _serve_api(
