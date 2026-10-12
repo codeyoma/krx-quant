@@ -207,7 +207,7 @@ curl http://krx-quant:8080/v1/macro
 | `KRX_FRED_API_KEY` | (없음) | FRED 키. https://fred.stlouisfed.org/docs/api/api_key.html 에서 계정을 만든 뒤 받는다(무료). 없으면 FRED 지표(미국 10년물, WTI)를 건너뛴다 |
 | `KRX_ECOS_URL`, `KRX_FRED_URL`, `KRX_YAHOO_URL` | 각 공식 주소 | 매크로 출처 주소. 테스트용이다 |
 | `KRX_REGIME_SHOCK_SOX_PERCENT`, `KRX_REGIME_SHOCK_VIX`, `KRX_REGIME_SHOCK_USDKRW_PERCENT`, `KRX_REGIME_SOX_MOVE_PERCENT`, `KRX_REGIME_WEAK_WON_PERCENT` | `3`, `30`, `1`, `1`, `0.5` | 일일 국면 문턱값([design.md](design.md#45-매크로-지표)) |
-| `KRX_SIGNAL_ALERT` | `off` | `on`이면 텔레그램 신호 알림을 보낸다([engine-api.md](engine-api.md#텔레그램-신호-알림-19)) |
+| `KRX_SIGNAL_ALERT` | `off` | `on`이면 텔레그램 신호 알림을 보낸다([engine-api.md](engine-api.md#텔레그램-신호-알림-19)). VI·서킷브레이커, 기준가 없음, 목표 시각 지남이면 보내지 않는다. 보낸·막힌 신호는 DB `runs`에 `signal_sent`, `signal_blocked`로 남는다 |
 | `KRX_SIGNAL_MIN_PROBABILITY` | `0.6` | 신호를 보낼 최종 합의의 상승(하락) 확률. 0.5–1. 알림이 꺼져 있어도 값을 검사한다 |
 | `KRX_SIGNAL_MIN_AGREE` | `2` | 같은 방향을 예측해야 하는 정식 알고리즘 수. 1 이상 |
 
@@ -508,7 +508,7 @@ docker compose logs --tail 200 engine
 | `[알림] AWS 비용이 이달 $N로 상한 $100에 닿았습니다. 이달 남은 기간 밤 학습(Spot)을 끕니다. ...` | Cost Explorer | 그달은 학습 없이 전날 모델로 돈다. 서둘러 학습이 필요하면 서버에서 `train`을 손으로 돌린다. 다음 달 1일에 `[알림] 새 달(...)이라 밤 학습(Spot) 스케줄을 다시 켰습니다.`가 온다. |
 | `[장애] AWS 비용을 읽지 못해 상한을 지킬 수 없습니다: <이유>` | 로그의 `could not check the AWS costs`, `.env`의 `KRX_COST_BUDGET`, IAM 정책(`krx-quant-engine-training`) | 예산 이름이나 권한이 틀렸거나 AWS에 닿지 않는다. 고치면 다음 확인에서 `[복구] AWS 비용을 다시 읽습니다.`가 온다. 그동안 상한이 지켜지지 않는다. |
 | `[알림] 자동 업데이트: ...`에 `Spot 학습용 이미지를 올리지 못했습니다` | `deploy/push-image.sh`를 손으로 실행해 오류를 본다 | ECR 권한이나 연결 문제다. 다음 06:00에 다시 올린다. 그동안 Spot은 이전 이미지로 학습한다. |
-| `[신호] <종목> 상승 64% · 정식 3개 중 2개 같은 방향 · 09:31 봉 마감, 09:35까지` | `/v1/symbols/<종목>/latest`의 `consensus-final` | `KRX_SIGNAL_ALERT=on`일 때만 온다. 장애가 아니라 예측 신호다. 같은 종목·방향은 4분 안에 다시 오지 않는다. 주문 코드는 없다. |
+| `[신호] <종목> 상승 64% · 정식 3개 중 2개 같은 방향 · 09:31 봉 마감, 09:35까지` | `/v1/symbols/<종목>/latest`의 `consensus-final` | `KRX_SIGNAL_ALERT=on`일 때만 온다. 장애가 아니라 예측 신호다. 같은 종목·방향은 4분 안에 다시 오지 않는다(엔진을 다시 시작해도). VI·서킷브레이커에 걸리거나, 기준가가 없거나, 목표 시각이 지난 신호는 오지 않고 로그에 `signal blocked (<이유>)`, DB `runs`에 `signal_blocked`로 남는다. 주문 코드는 없다. |
 | `[알림] <날짜> 밤 학습`과 알고리즘별 `승격`·`유지`·`학습 안 함` | | 매일 밤 학습의 요약이다. 할 일은 없다. 승격된 모델은 다음 거래일 08:00에 바뀐다. |
 | `[알림] 모델 교체 (<날짜> 밤 학습): <알고리즘> → <버전>` | `/v1/status`의 `training` | 08:00 교체가 됐다. 되돌리려면 `docker compose exec engine krx-quant rollback <이름>`. |
 | `[알림] <날짜> 밤 학습 결과를 쓰지 않습니다: <이유>` | `/v1/status`의 `training.reason` | 전날 모델이 계속 돈다. `final at ..., after 07:30`이면 다음 아침에 쓴다(더 새 밤이 없으면). `not in the store: ...`면 S3에 모델이 없는 것이다. 다음 아침에 다시 시도한다. |
