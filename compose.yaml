@@ -11,7 +11,11 @@ name: krx-quant
 
 services:
   engine:
-    build: .
+    build:
+      context: .
+      args:
+        # The commit built, set by deploy/auto-update.sh; "unknown" when built by hand.
+        KRX_COMMIT: ${KRX_COMMIT:-unknown}
     image: krx-quant:latest
     command: ["collect"]
     env_file: .env

@@ -253,9 +253,12 @@ class PredictionEngine:
         signals: Signals | None = None,
         regimes: Regimes | None = None,
         admits: Callable[[Algorithm], bool] | None = None,
+        commit: str = "unknown",
         review_rules: Rules | None = None,
     ) -> None:
         self.store = store
+        self.commit = commit  # the code it runs (the deploy's KRX_COMMIT)
+        self.started_at = clock.now()
         self.review_rules = review_rules or Rules()  # when statuses are judged (#87)
         self.calendar = calendar
         self.symbols = tuple(symbols)

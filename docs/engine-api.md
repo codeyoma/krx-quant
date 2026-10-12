@@ -136,7 +136,7 @@
 | `predictions` | `id`, `symbol`, `algorithm`, `model_version`, `bar_close`(t), `displayed_at`, `p_up`, `p_flat`, `p_down`, `expected_ticks`, `status`(`ok`, `timed_out`, `error`, `vi`, `no_book`, 합의의 `no_members`, `none_finished`). 재생 결과의 `skipped`는 `ok`가 아닌 예측을 모두 센다. `ok`가 아니면 확률과 기대수익이 비어 있고 `outcomes` 행이 없다. |
 | `blocks` | `prediction_id`, `reason`(`special`, `no_reference`, `expired`). 최종 합의 예측 중 따르면 안 되는 것과 그 이유(#88). 따로 둔 표라서, 이 표가 생기기 전 엔진으로 되돌려도 DB를 읽는다 |
 | `outcomes` | `prediction_id`, `target_at`(t + 4분), `mid_close`(A), `mid_display`(B), `mid_target`, `flat_ticks`(k), `class_a`, `class_b`(`up`/`flat`/`down`), `special`, `unscorable`, `scored_at`(채점 전에는 비어 있음) |
-| `runs` | `id`, `kind`(`cpu_budget`: CPU 예산으로 건너뜀, `review`: 일일 상태 점검, `retire_candidate`: 은퇴 후보 알림, `budget_report`: 그날 예산 때문에 빠진 예측을 알림(#71), `no_regime`: 그날 매크로 국면이 없거나 엔진이 모르는 이름이어서 기본 전이행렬로 돈 날, 첫 봉 마감에 하루 한 번(`detail`에 `(unknown: <이름>)`), `signal_sent`: 보낸 텔레그램 신호, `signal_blocked`: 막힌 텔레그램 신호(둘 다 판정할 때마다 하나씩, `detail`은 JSON, 아래 "텔레그램 신호 알림", #80)), `at`, `algorithm`, `detail` |
+| `runs` | `id`, `kind`(`cpu_budget`: CPU 예산으로 건너뜀, `review`: 일일 상태 점검, `retire_candidate`: 은퇴 후보 알림, `budget_report`: 그날 예산 때문에 빠진 예측을 알림(#71), `no_regime`: 그날 매크로 국면이 없거나 엔진이 모르는 이름이어서 기본 전이행렬로 돈 날, 첫 봉 마감에 하루 한 번(`detail`에 `(unknown: <이름>)`), `start`: 수집기가 엔진을 시작함(`detail`은 JSON: `commit`, `fee_rate`, `signal_rule`(`min_probability`, `min_agree`, 끄면 `null`), `algorithm_seconds`, `cpu_budget_seconds`. 성적을 코드와 설정별로 가르는 근거, #85), `signal_sent`: 보낸 텔레그램 신호, `signal_blocked`: 막힌 텔레그램 신호(둘 다 판정할 때마다 하나씩, `detail`은 JSON, 아래 "텔레그램 신호 알림", #80)), `at`, `algorithm`, `detail` |
 | `statuses` | `id`, `algorithm`, `at`, `previous`, `status`, `reason`: 알고리즘 상태 이력(#17) |
 | `consensus_fits` | `version`, `computed_at`: 합의 가중치를 계산한 기록(#18). 엔진은 시작할 때 마지막 버전을 읽는다. |
 | `consensus_weights` | `version`, `symbol`, `slot`, `algorithm`, `weight`: 그 버전의 칸별 가중치 |
@@ -165,6 +165,8 @@
 |---|---|
 | `mode` | 수집기(`collect`)는 `live`다. 데모 엔진(`krx-quant demo-engine`, 화면 개발용 가상 데이터)은 `demo`다. `krx-quant replay`는 API를 열지 않아서, `replay`는 테스트에서만 나온다 |
 | `now` | 엔진 시계 |
+| `commit` | 엔진이 도는 코드의 커밋(#85). 자동 배포가 이미지를 만들 때 넘긴다(`KRX_COMMIT`). 손으로 만든 이미지나 로컬 실행은 `unknown`이다 |
+| `started_at` | 엔진이 시작한 시각(#85) |
 | `phase` | 장 단계: `closed`, `pre_open`, `opening_auction`, `continuous`, `closing_auction`, `after_close` |
 | `session` | 오늘 장의 `open`(연속매매 시작), `close`(종가 동시호가 끝). 휴장일은 `null` |
 | `last_bar_close` | 마지막으로 예측한 봉 마감 시각 |
