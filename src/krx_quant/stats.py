@@ -30,7 +30,7 @@ days). The statuses (``lifecycle.py``) are decided by these; the paired ones onl
 from __future__ import annotations
 
 import math
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import date, datetime
 from functools import cache
@@ -230,14 +230,14 @@ def _calibration(records: Sequence[Scored]) -> list[CalibrationBin]:
     ]
 
 
-def _gains(records: Sequence[Scored], baseline: Sequence[Scored]) -> list[tuple[datetime, float]]:
+def _gains(records: Sequence[Scored], baseline: Sequence[Scored]) -> Iterator[tuple[datetime, float]]:
     """Each bar close both predicted, and the accuracy gained over ``baseline`` there (1, 0 or -1)."""
     theirs = {(b.symbol, b.bar_close): b.correct for b in baseline}
-    return [
+    return (
         (r.bar_close, float(r.correct) - theirs[key])
         for r in records
         if (key := (r.symbol, r.bar_close)) in theirs
-    ]
+    )
 
 
 def lift(records: Sequence[Scored], baseline: Sequence[Scored]) -> Lift:
