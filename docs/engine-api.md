@@ -118,7 +118,7 @@
 |---|---|
 | `predictions` | `id`, `symbol`, `algorithm`, `model_version`, `bar_close`(t), `displayed_at`, `p_up`, `p_flat`, `p_down`, `expected_ticks`, `status`(`ok`, `timed_out`, `error`, `vi`, `no_book`, 합의의 `no_members`, `none_finished`). 재생 결과의 `skipped`는 `ok`가 아닌 예측을 모두 센다. `ok`가 아니면 확률과 기대수익이 비어 있고 `outcomes` 행이 없다. |
 | `outcomes` | `prediction_id`, `target_at`(t + 4분), `mid_close`(A), `mid_display`(B), `mid_target`, `flat_ticks`(k), `class_a`, `class_b`(`up`/`flat`/`down`), `special`, `unscorable`, `scored_at`(채점 전에는 비어 있음) |
-| `runs` | `id`, `kind`(`cpu_budget`: CPU 예산으로 건너뜀, `review`: 일일 상태 점검, `retire_candidate`: 은퇴 후보 알림, `budget_report`: 그날 예산 때문에 빠진 예측을 알림(#71), `no_regime`: 그날 매크로 국면이 없거나 엔진이 모르는 이름이어서 기본 전이행렬로 돈 날(`detail`에 `(unknown: <이름>)`). 첫 봉 마감에 하루 한 번. `signal_sent`, `signal_blocked`: 보낸·막힌 텔레그램 신호(`detail`은 JSON, 아래 "텔레그램 신호 알림", #80)), `at`, `algorithm`, `detail` |
+| `runs` | `id`, `kind`(`cpu_budget`: CPU 예산으로 건너뜀, `review`: 일일 상태 점검, `retire_candidate`: 은퇴 후보 알림, `budget_report`: 그날 예산 때문에 빠진 예측을 알림(#71), `no_regime`: 그날 매크로 국면이 없거나 엔진이 모르는 이름이어서 기본 전이행렬로 돈 날, 첫 봉 마감에 하루 한 번(`detail`에 `(unknown: <이름>)`), `signal_sent`: 보낸 텔레그램 신호, `signal_blocked`: 막힌 텔레그램 신호(둘 다 판정할 때마다 하나씩, `detail`은 JSON, 아래 "텔레그램 신호 알림", #80)), `at`, `algorithm`, `detail` |
 | `statuses` | `id`, `algorithm`, `at`, `previous`, `status`, `reason`: 알고리즘 상태 이력(#17) |
 | `consensus_fits` | `version`, `computed_at`: 합의 가중치를 계산한 기록(#18). 엔진은 시작할 때 마지막 버전을 읽는다. |
 | `consensus_weights` | `version`, `symbol`, `slot`, `algorithm`, `weight`: 그 버전의 칸별 가중치 |
