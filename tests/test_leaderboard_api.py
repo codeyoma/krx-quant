@@ -221,6 +221,112 @@ async def test_an_algorithms_stats_break_down_by_symbol_slot_and_model_version(t
     assert (by_symbol["q"], by_symbol["significant"]) == (None, None)
 
 
+def store_one(
+    store: PredictionStore,
+    algorithm: str,
+    t: datetime,
+    *,
+    forecast: Forecast | None = SURE[UP],
+    status: str = "ok",
+    classes: tuple[Direction | None, Direction | None] | None = (UP, UP),
+    special: bool = False,
+) -> None:
+    """One prediction at bar close ``t``, scored ``classes`` (A, B) unless None (pending)."""
+    added = store.add_all(
+        [
+            NewPrediction(
+                "005930",
+                algorithm,
+                "v1",
+                t,
+                t,
+                forecast,
+                t + timedelta(minutes=4),
+                81_250,
+                81_250,
+                2,
+                status,
+                special,
+            )
+        ]
+    )
+    if classes is not None and added.pending:
+        a, b = classes
+        unscorable = None if a and b else "no mid-point"
+        store.score_all(
+            [(added.pending[0].prediction_id, Score(81_550, a, b, unscorable))], t + timedelta(minutes=4)
+        )
+
+
+async def test_calibration_is_also_shown_class_by_class(tmp_path: Path) -> None:
+    async with board(tmp_path) as (engine, client):
+        baselines(engine.store)
+        # Every class given 1/3, ten times, and the price went up every time.
+        for i in range(10):
+            store_one(
+                engine.store,
+                "even",
+                at("09:01:00") + timedelta(minutes=i),
+                forecast=Forecast(1 / 3, 1 / 3, 1 / 3, 0),
+            )
+
+        body = await get(client, "/v1/algorithms/even/stats?basis=a")
+
+    check("algorithm_stats", body)
+    overall = body["overall"]
+    # Pooled, the three classes look perfectly calibrated: 1/3 forecast, 1/3 happened.
+    pooled = overall["calibration"][3]
+    assert (pooled["count"], pooled["observed"]["value"]) == (30, pytest.approx(1 / 3))
+    # Class by class they do not: up always happened, flat and down never did.
+    by_class = overall["calibration_by_class"]
+    assert [len(by_class[c]) for c in ("up", "flat", "down")] == [10, 10, 10]
+    observed = {c: (by_class[c][3]["count"], by_class[c][3]["observed"]["value"]) for c in by_class}
+    assert observed == {"up": (10, 1.0), "flat": (10, 0.0), "down": (10, 0.0)}
+    assert by_class["up"][3]["mean_p"] == pytest.approx(1 / 3)
+
+
+async def test_the_stats_count_what_they_leave_out(tmp_path: Path) -> None:
+    async with board(tmp_path) as (engine, client):
+        baselines(engine.store)
+        t = [at("09:01:00") + timedelta(minutes=i) for i in range(12)]
+        store = engine.store
+        for i in range(3):
+            store_one(store, "alpha", t[i])  # scored on both bases
+        for i in range(3, 5):
+            store_one(store, "alpha", t[i], special=True)  # a VI or breaker touched it
+        for i in range(5, 7):
+            store_one(store, "alpha", t[i], classes=(UP, None))  # basis B could not be scored
+        store_one(store, "alpha", t[7], classes=None)  # still pending: neither
+        for i, status in zip(range(8, 12), ("vi", "vi", "timed_out", "no_book"), strict=True):
+            store_one(store, "alpha", t[i], forecast=None, status=status)
+        store_one(store, "alpha", at("09:01:00", EARLIER), status="error", forecast=None)  # another day
+
+        b = await get(client, "/v1/leaderboard?basis=b")
+        a = await get(client, "/v1/leaderboard?basis=a&special=include")
+        stats = await get(client, "/v1/algorithms/alpha/stats?basis=b")
+
+    check("leaderboard", b)
+    check("algorithm_stats", stats)
+    [alpha_b] = [e for e in b["unranked"] if e["algorithm"] == "alpha"]
+    assert alpha_b["n"] == 3
+    assert alpha_b["excluded"] == {
+        "special": 2,
+        "unscorable": 2,
+        "status": {"no_book": 1, "timed_out": 1, "vi": 2},
+    }
+    # On basis A every scored one was scorable; with special included, the two are counted in.
+    [alpha_a] = [e for e in a["unranked"] if e["algorithm"] == "alpha"]
+    assert alpha_a["n"] == 7
+    assert alpha_a["excluded"] == {
+        "special": 2,
+        "unscorable": 0,
+        "status": {"no_book": 1, "timed_out": 1, "vi": 2},
+    }
+    assert stats["overall"]["excluded"] == alpha_b["excluded"]
+    # A baseline that left nothing out says so.
+    assert b["baselines"][0]["excluded"] == {"special": 0, "unscorable": 0, "status": {}}
+
+
 async def test_bad_choices_and_unknown_algorithms_are_refused(tmp_path: Path) -> None:
     async with board(tmp_path) as (engine, client):
         store_scored(engine.store, "retired", OUTCOMES[:4], day=EARLIER)
