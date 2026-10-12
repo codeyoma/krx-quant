@@ -187,7 +187,7 @@
       "description": "The fields of a prediction, open so the stream's items can add the symbol.",
       "type": "object",
       "required": [
-        "algorithm", "model_version", "bar_close", "displayed_at", "target_at", "status",
+        "algorithm", "model_version", "bar_close", "displayed_at", "target_at", "status", "blocked",
         "p_up", "p_flat", "p_down", "expected_ticks", "outcome"
       ],
       "properties": {
@@ -200,6 +200,10 @@
           "oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]
         },
         "status": {"enum": ["ok", "timed_out", "error", "vi", "no_book", "no_members", "none_finished"]},
+        "blocked": {
+          "description": "Why a final consensus is not to be acted on (#88); null for any other prediction.",
+          "enum": [null, "special", "no_reference", "expired"]
+        },
         "p_up": {"$ref": "#/$defs/probability"},
         "p_flat": {"$ref": "#/$defs/probability"},
         "p_down": {"$ref": "#/$defs/probability"},

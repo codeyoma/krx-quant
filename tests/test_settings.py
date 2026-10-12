@@ -50,6 +50,21 @@ def test_the_commit_running_is_the_deploy_s_or_unknown() -> None:
     assert Settings.from_env({**KEYS, "KRX_COMMIT": "0123abc"}, dotenv_path=None).commit == "0123abc"
 
 
+def test_the_statuses_are_judged_on_rising_days_at_a_level_below_one() -> None:
+    defaults = Settings.from_env(KEYS, dotenv_path=None)
+    assert (defaults.probation_review_days, defaults.bench_review_days) == ((10, 20, 40), (20, 40, 60))
+    assert defaults.review_confidence == 0.983
+    chosen = Settings.from_env({**KEYS, "KRX_PROBATION_REVIEW_DAYS": "15, 30"}, dotenv_path=None)
+    assert chosen.probation_review_days == (15, 30)
+    for name in ("KRX_PROBATION_REVIEW_DAYS", "KRX_BENCH_REVIEW_DAYS"):
+        for bad in ("", "20,10", "0,10", "10,10", "ten", "10,401"):
+            with pytest.raises(SettingsError, match=name):
+                Settings.from_env({**KEYS, name: bad}, dotenv_path=None)
+    for bad in ("0.4", "1", "nan", "inf"):
+        with pytest.raises(SettingsError, match="KRX_REVIEW_CONFIDENCE"):
+            Settings.from_env({**KEYS, "KRX_REVIEW_CONFIDENCE": bad}, dotenv_path=None)
+
+
 def test_one_algorithms_limit_is_below_the_cpu_budget() -> None:
     # One algorithm at its limit must leave the others room in the budget.
     defaults = Settings.from_env(KEYS, dotenv_path=None)

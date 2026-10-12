@@ -60,7 +60,7 @@ from typing import Any
 from krx_quant.algorithms import ALGORITHMS, Abstention, Algorithm, Model, NotPredicted, register
 from krx_quant.baselines import BASELINES, Forecast, Inputs
 from krx_quant.clock import SessionClock
-from krx_quant.config import Settings
+from krx_quant.config import MAX_REVIEW_DAY, Settings
 from krx_quant.consensus import FAST, FINAL, NAMES, NO_WEIGHTS, SPANS, Timing, Weights, pool
 from krx_quant.consensus import fit as fit_weights
 from krx_quant.features import REGIME_CODES, FeatureStore, FeatureVector, Leaders, Value
@@ -83,7 +83,7 @@ from krx_quant.feeds import (
     VI_STATUS,
 )
 from krx_quant.feeds.base import KST, LEVELS
-from krx_quant.lifecycle import Standing, Status, review
+from krx_quant.lifecycle import Rules, Standing, Status, review
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.market_view import (
     FUTURES_SERIES,
@@ -129,7 +129,7 @@ Regimes = Callable[[date, datetime], str | None]
 REVIEW_AFTER_CLOSE = timedelta(minutes=10)
 # Days with predictions a review reads back over: the longest rule counts 60 on the bench,
 # and a status can be older than that.
-_REVIEW_DAYS = 400
+_REVIEW_DAYS = MAX_REVIEW_DAY  # prediction days a review reads back
 
 _BOOK_COLUMNS = (
     "symbol",
@@ -254,10 +254,12 @@ class PredictionEngine:
         regimes: Regimes | None = None,
         admits: Callable[[Algorithm], bool] | None = None,
         commit: str = "unknown",
+        review_rules: Rules | None = None,
     ) -> None:
         self.store = store
         self.commit = commit  # the code it runs (the deploy's KRX_COMMIT)
         self.started_at = clock.now()
+        self.review_rules = review_rules or Rules()  # when statuses are judged (#87)
         self.calendar = calendar
         self.symbols = tuple(symbols)
         self.fee_rate = fee_rate
@@ -405,7 +407,8 @@ class PredictionEngine:
         alerted = {
             name
             for name, s in standings.items()
-            if s.status is Status.BENCH and self.store.ran_since("retire_candidate", name, s.since)
+            if s.status in (Status.PROBATION, Status.BENCH)
+            and self.store.ran_since("retire_candidate", name, s.since)
         }
         result = await asyncio.to_thread(
             review,
@@ -417,6 +420,7 @@ class PredictionEngine:
             min_sample=self.min_sample,
             fee_rate=self.fee_rate,
             alerted=alerted,
+            rules=self.review_rules,
         )
         for c in result.changes:
             # Only from the status reviewed: a retire command may have landed meanwhile.
@@ -426,10 +430,12 @@ class PredictionEngine:
                 log.info("%s: %s not applied, its status changed meanwhile", c.algorithm, c.status.value)
         for candidate in result.candidates:
             name = candidate.algorithm
-            text = (
-                f"{name} 은퇴 후보: 벤치에서 {candidate.days}거래일 동안 회복하지 못했습니다. "
-                f"은퇴시키려면 서버에서 krx-quant retire {name}"
+            stuck = (
+                f"수습 {candidate.days}거래일 동안 정식이 되지 못했습니다"
+                if candidate.status is Status.PROBATION
+                else f"벤치에서 {candidate.days}거래일 동안 회복하지 못했습니다"
             )
+            text = f"{name} 은퇴 후보: {stuck}. 은퇴시키려면 서버에서 krx-quant retire {name}"
             if await self._deliver(text):  # else asked again at the next review
                 self.store.add_run("retire_candidate", at, name, text)
         untold = [name for name in self.waiting() if name not in self._told_waiting]
@@ -600,28 +606,22 @@ class PredictionEngine:
             for forecasts, status in ((pooled, "ok"), (empty, why))
             if forecasts
         ]
-        self._record(bar_close, at_close, made)
+        # A final consensus not to be acted on says why, stored with it for every client (#88).
+        blocked = self._blocked(bar_close, at_close, pooled) if name == FINAL else {}
+        self._record(bar_close, at_close, made, blocked)
         if name == FINAL and self.signals is not None:
             try:
-                self._signal(self.signals, bar_close, at_close, pooled, pooled_from)
+                self._signal(self.signals, bar_close, pooled, pooled_from, blocked)
             except Exception:  # an alert never stops predicting
                 log.exception("signal alert failed")
 
-    def _signal(
-        self,
-        signals: Signals,
-        bar_close: datetime,
-        at_close: Mapping[str, _AtClose],
-        pooled: Mapping[str, Forecast],
-        pooled_from: Mapping[str, Mapping[str, Forecast]],
-    ) -> None:
-        """Judge a final consensus for signals, block what should not be acted on, and keep
-        each signal judged (``runs``)."""
+    def _blocked(
+        self, bar_close: datetime, at_close: Mapping[str, _AtClose], pooled: Mapping[str, Forecast]
+    ) -> dict[str, Blocked]:
+        """Why each symbol's final consensus is not to be acted on, by what is known now: a VI
+        or circuit breaker touching its four minutes, no reference price at its bar close, or
+        its target time past."""
         now = self.clock.now()
-        if not self._signals_resumed:
-            self._signals_resumed = True  # once, even if reading fails
-            midnight = datetime.combine(now.astimezone(KST).date(), time(), KST)
-            signals.resume(r.detail for r in self.store.runs(SENT, midnight))
         target_at = bar_close + HORIZON
         known = [w for w in self._special.known(before=now) if w.kind in (Kind.VI, Kind.CIRCUIT_BREAKER)]
         blocked: dict[str, Blocked] = {}
@@ -632,6 +632,24 @@ class PredictionEngine:
                 blocked[symbol] = Blocked.NO_REFERENCE
             elif now >= target_at:
                 blocked[symbol] = Blocked.EXPIRED
+        return blocked
+
+    def _signal(
+        self,
+        signals: Signals,
+        bar_close: datetime,
+        pooled: Mapping[str, Forecast],
+        pooled_from: Mapping[str, Mapping[str, Forecast]],
+        blocked: Mapping[str, Blocked],
+    ) -> None:
+        """Judge a final consensus for signals, block what should not be acted on, and keep
+        each signal judged (``runs``)."""
+        now = self.clock.now()
+        if not self._signals_resumed:
+            self._signals_resumed = True  # once, even if reading fails
+            midnight = datetime.combine(now.astimezone(KST).date(), time(), KST)
+            signals.resume(r.detail for r in self.store.runs(SENT, midnight))
+        target_at = bar_close + HORIZON
 
         def keep(judged: Judged) -> None:
             self.store.add_run(judged.kind, now, None, judged.detail(signals.rule))
@@ -710,6 +728,7 @@ class PredictionEngine:
         bar_close: datetime,
         at_close: Mapping[str, _AtClose],
         made: Sequence[tuple[str, str, Mapping[str, Forecast | None], str]],
+        blocked: Mapping[str, Blocked] | None = None,
     ) -> None:
         """Store (name, model version, forecasts by symbol, status) entries as displayed now."""
         displayed_at = self.clock.now()
@@ -735,6 +754,9 @@ class PredictionEngine:
                         flat_ticks=flat_ticks(reference, self.fee_rate) if reference is not None else None,
                         status=status,
                         special=touching(special, symbol, bar_close, bar_close + HORIZON),
+                        blocked=why.value
+                        if forecast is not None and blocked and (why := blocked.get(symbol)) is not None
+                        else None,
                     )
                 )
         added = self.store.add_all(predictions)

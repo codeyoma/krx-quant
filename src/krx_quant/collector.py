@@ -51,6 +51,7 @@ from krx_quant.feeds import (
 )
 from krx_quant.feeds.base import kst_day
 from krx_quant.health import FeedHealth, FeedState, GapKind
+from krx_quant.lifecycle import Rules
 from krx_quant.macro import MacroCollector, day_regime, keep_macro, macro_recorder
 from krx_quant.market_calendar import MarketCalendar, Phase, calendar_store
 from krx_quant.masters import FrontMonths, MasterError, fetch_front_months
@@ -211,6 +212,7 @@ async def run_collector(
         regimes=partial(day_regime, settings.data_dir),  # recorded by the 07:30 macro read
         admits=admits(settings.state_dir),  # a new algorithm waits for its pre-validation
         commit=settings.commit,
+        review_rules=Rules.of(settings),
     )
     store.add_run("start", engine.started_at, None, json.dumps(started(settings)))
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -20,6 +21,8 @@ DEFAULT_WS_URL = "ws://ops.koreainvestment.com:21000"
 DEFAULT_MASTER_URL = "https://new.real.download.dws.co.kr/common/master"
 # KIS allows 20 REST calls per second on a real account.
 MAX_REST_PER_SECOND = 20
+# The prediction days a status review reads back: its review days must stay within them.
+MAX_REVIEW_DAY = 400
 DEFAULT_TELEGRAM_API_URL = "https://api.telegram.org"
 # Macro sources (macro.py).
 DEFAULT_ECOS_URL = "https://ecos.bok.or.kr/api"
@@ -140,6 +143,9 @@ class Settings:
     regime_rules: RegimeRules = RegimeRules()
     signal_rule: SignalRule | None = None  # Telegram signal alerts; None: off
     commit: str = "unknown"  # the commit the image was built from (KRX_COMMIT, set by the deploy)
+    probation_review_days: tuple[int, ...] = (10, 20, 40)  # days on probation it is judged on (#87)
+    bench_review_days: tuple[int, ...] = (20, 40, 60)  # days on the bench it may recover on
+    review_confidence: float = 0.983  # the lift-by-day interval's level those judgements need
 
     @classmethod
     def from_env(
@@ -178,6 +184,8 @@ class Settings:
                 value = kind(raw)
             except ValueError as e:
                 raise SettingsError(f"{name} must be a number, got {raw!r}") from e
+            if not math.isfinite(value):  # nan passes every comparison below
+                raise SettingsError(f"{name} must be a finite number, got {raw!r}")
             if (value < minimum) if minimum is not None else (value <= 0):
                 floor = "above 0" if minimum is None else minimum
                 raise SettingsError(f"{name} must be at least {floor}, got {raw!r}")
@@ -187,6 +195,19 @@ class Settings:
 
         def codes(name: str, default: str) -> tuple[str, ...]:
             return tuple(c.strip() for c in values.get(name, default).split(",") if c.strip())
+
+        def review_days(name: str, default: str) -> tuple[int, ...]:
+            """Days in a status a review judges on: positive whole days, rising, at least one."""
+            raw = codes(name, default)
+            try:
+                days = tuple(int(d) for d in raw)
+            except ValueError as e:
+                raise SettingsError(f"{name} must be whole days, got {','.join(raw)!r}") from e
+            if not days or days[0] < 1 or any(b <= a for a, b in zip(days, days[1:], strict=False)):
+                raise SettingsError(f"{name} must be rising days from 1 on, got {','.join(raw)!r}")
+            if days[-1] > MAX_REVIEW_DAY:
+                raise SettingsError(f"{name} must stay within {MAX_REVIEW_DAY} days (the history reviewed)")
+            return days
 
         if values.get("KRX_COST_BUDGET", "").strip() and not codes("KRX_TRAINING_SCHEDULES", ""):
             raise SettingsError(
@@ -290,6 +311,11 @@ class Settings:
             if _on_or_off("KRX_SIGNAL_ALERT", values.get("KRX_SIGNAL_ALERT", "off"))
             else None,
             commit=values.get("KRX_COMMIT", "").strip() or "unknown",
+            probation_review_days=review_days("KRX_PROBATION_REVIEW_DAYS", "10,20,40"),
+            bench_review_days=review_days("KRX_BENCH_REVIEW_DAYS", "20,40,60"),
+            review_confidence=float(
+                number("KRX_REVIEW_CONFIDENCE", "0.983", float, minimum=0.5, maximum=0.9999)
+            ),
         )
 
 
