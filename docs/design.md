@@ -79,11 +79,14 @@
   > **바뀜** (2026-10-12, #94): 매주 월요일 09:00 KST에 새 릴리스를 issue로 알리고 반영은 손으로 했다 → 매일 05:00 KST에 merge·시험 빌드·`custom` 반영·태그까지 자동으로 한다. 이유: upstream이 릴리스를 내면 업데이트가 저절로 돌게 하려고(#93).
 
 **Fincept 수정 원칙.**
-- 새 화면 하나만 추가한다. 고치는 upstream 파일은 7개로 제한한다.
+- 새 화면 하나와 로컬 CLI LLM provider(#96)만 추가한다. 고치는 upstream 파일은 16개로 제한한다.
   - 화면 등록: `fincept-qt/CMakeLists.txt`(공식 업데이트를 끄는 `FINCEPT_DISABLE_AUTO_UPDATE` 옵션, 빌드 태그 `FINCEPT_CUSTOM_TAG`, 업데이트 도우미 리소스도), `src/app/WindowFrame_Setup.cpp`, `src/app/DockScreenRouter.cpp`, `src/ui/navigation/ToolBar.cpp`, `src/ui/navigation/CommandBar.cpp`
   - 화면 테스트 등록: `fincept-qt/tests/CMakeLists.txt`(`krx_quant.cmake`를 include 하는 한 줄. 테스트는 새 파일 `fincept-qt/tests/krx_quant.cmake`에 등록한다. 그래서 upstream이 파일 끝에 붙이는 테스트와 merge 충돌하지 않는다. #93)
   - 공식 업데이트 대신 개인 빌드 업데이트로 넘기기: `src/services/updater/UpdateService.cpp`
+  - 로컬 CLI LLM provider(#96, 10장의 "로컬 CLI LLM"): `src/services/llm/ProviderCatalog.cpp`, `LlmService.h`, `LlmService.cpp`, `LlmFinceptAsync.cpp`, `LlmModelsApi.cpp`, `src/screens/settings/LlmConfigSection_Providers.cpp`, `LlmConfigSection_Profiles.cpp`, `src/services/alpha_arena/ArenaModelRegistry.cpp`, `src/mcp/ProviderToolFormatSelfTest.cpp`. 새 코드는 `src/services/krx_quant/LocalCli*`에 두고, 이 파일들에는 한두 줄짜리 갈래만 넣는다.
   - 무엇을 고쳤는지는 fork의 `custom/README.md` 표가 정본이다.
+
+  > **바뀜** (2026-10-12, #97): "새 화면 하나만 추가한다", 고치는 upstream 파일 7개 → 로컬 CLI LLM provider도 추가하고 16개(위 LLM 파일 9개). 이유: Fincept의 LLM 기능을 Fincept 크레딧이나 API key 대신 이 컴퓨터에 로그인된 Claude Code·Codex CLI(구독)로 쓰려면 provider 목록, 요청 경로, 설정 화면에 갈래가 필요했다(#96).
 
   > **바뀜** (2026-10-12, #75): 고치는 upstream 파일 5개 → 7개(`tests/CMakeLists.txt`, `UpdateService.cpp`). 이유: 화면 테스트를 upstream 테스트 빌드에 등록하고, 개인 빌드의 자동 업데이트를 끄려면 두 파일을 고쳐야 했다(#20). 이 문서만 갱신하지 않았다.
 - Fincept SQLite migration은 쓰지 않는다. upstream의 다음 번호와 충돌하기 때문이다.
@@ -447,6 +450,7 @@ v1에서는 쓰지 않는다. 조사 결과는 [paid-data.md](paid-data.md)에 �
   > **바뀜** (2026-10-11, #64): 화면이 보이는 동안 5초마다 엔진 API(`/v1/status`, `/v1/symbols`, `/v1/symbols/<종목>/latest`)를 모두 읽었다 → 스트림을 따르고 API는 연결 때와 위의 주기로 읽는다. 화면이 가려져도 스트림은 열어 둔다. 이유: 스트림으로 갱신하고 끊기면 다시 연결한다는 #21의 요구, 그리고 다른 화면을 보는 동안에도 신호 알림이 와야 한다.
 
   > **바뀜** (2026-10-11, #64): 종목마다 모든 예측을 한 표에 → 종목 목록과 고른 종목의 예측 패널. 알고리즘은 엔진이 준 순서 → 이름순. "차트, 순위표, 매크로 줄, 신호 알림은 #21에서 만든다"였던 것을 이번에 만들었다. 이유: 차트를 한 종목씩 보여주게 됐고, 스트림이 알고리즘을 끝난 순서대로 가져와 줄이 매분 바뀌었다.
+- **로컬 CLI LLM (#96).** Fincept의 LLM 기능(AI Chat 화면, 떠 있는 채팅 버블, workflow의 agent 노드)을 Fincept 크레딧이나 API key 대신 이 컴퓨터에 로그인된 Claude Code CLI나 Codex CLI로 돌린다. Settings → LLM Config에서 provider **Claude Code CLI (local)**나 **Codex CLI (local)**를 추가하고 Save 한다. API key는 없고, Base URL 칸이 "CLI path"(비우면 자동으로 찾는다)가 된다. LLM 한 라운드마다 CLI를 도구 없이 한 번 실행하고(프롬프트는 stdin, 답은 JSON), Fincept 도구는 Fincept LLM과 같은 `<tool_call>` 평문 프롬프트 루프로 돈다. Python 에이전트(Agents, Teams), LLM 프로필, Alpha Arena는 provider API를 직접 불러서 쓰지 못한다. 자세한 것(명령줄, PATH 찾기, 한도, 주의)은 `fincept/custom/README.md`의 "로컬 CLI LLM"에 있다.
 - **개인 빌드.** fork의 `custom` 브랜치에 `custom-v*` 태그를 push하면 `custom-release` workflow가 맥 DMG(arm64, 임시 서명)와 윈도우 `setup.exe`(서명 없음)를 fork의 Release(prerelease)에 올린다. 공식 버전 업데이트는 꺼져 있다(`FINCEPT_DISABLE_AUTO_UPDATE`). 설치된 앱은 fork의 개인 빌드 Release에서 스스로 업데이트한다(#92). 로그인 뒤 한 번, 그리고 메뉴의 업데이트 확인으로 새 `custom-v*` 빌드를 찾는다. "지금 업데이트"를 누르면 내려받아 GitHub의 sha256과 맞춰 보고, 앱을 닫은 뒤 같은 자리에 설치해 다시 연다(맥: `.app` 교체, 윈도우: 유지보수 도구로 지우고 무인 재설치). 안 되면 설치 파일을 열어 직접 설치하게 한다. 자세한 것은 `fincept/custom/README.md`의 "앱 업데이트"에 있다.
 
   > **바뀜** (2026-10-12, #95): 앱 내 자동 업데이트 꺼짐 → 개인 빌드 Release에서 버튼 한 번으로 업데이트. 이유: 위와 같다(#92). 첫 업데이트는 이 기능이 들어간 빌드를 한 번 직접 설치한 뒤부터 된다.
