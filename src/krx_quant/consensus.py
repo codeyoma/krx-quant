@@ -6,7 +6,7 @@ algorithm's:
 - **fast** (``consensus-fast``): from the active algorithms finished 2 seconds after they
   started, just after the bar close;
 - **final** (``consensus-final``): once every active algorithm has finished, failed or
-  run out of its time budget (30 seconds).
+  run out of its time budget (``KRX_ALGORITHM_SECONDS``, 10 seconds by default).
 
 The pool is linear: each probability (and the expected move) is the weighted mean of the
 members', the weights of those present scaled to add up to 1. Algorithms on probation,
