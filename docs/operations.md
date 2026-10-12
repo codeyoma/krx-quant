@@ -484,7 +484,7 @@ docker compose run --rm --no-deps engine prevalidate <이름>
 - 업데이트가 끝나면 쓰지 않는 Docker 이미지를 지운다.
 - 이미지를 만들 때 그 커밋을 넘긴다(`KRX_COMMIT`, `compose.yaml`의 빌드 인자). 엔진은 `/v1/status`의 `commit`으로 보이고, 시작할 때마다 DB `runs`에 `start`로 커밋과 수수료율, 신호 규칙, 시간·CPU 예산을 남긴다(#85). 손으로 `docker compose up -d --build`하면 `unknown`이다. 커밋을 남기려면 `KRX_COMMIT=$(git rev-parse HEAD) docker compose up -d --build`로 띄운다.
 
-  > **바뀜** (2026-10-13, #PR85): 도는 엔진의 커밋을 알 수 없었다 → 자동 배포가 이미지에 넘기고, 엔진이 보이고 기록한다. 이유: 성적을 코드와 설정별로 가를 수 없었다(#78, #85). 이 변경을 처음 받는 06:00 배포는 이전 스크립트로 이미지를 만들어 `unknown`이고, 그다음 배포부터 커밋이 나온다.
+  > **바뀜** (2026-10-13, #121): 도는 엔진의 커밋을 알 수 없었다 → 자동 배포가 이미지에 넘기고, 엔진이 보이고 기록한다. 이유: 성적을 코드와 설정별로 가를 수 없었다(#78, #85). 이 변경을 처음 받는 06:00 배포는 이전 스크립트로 이미지를 만들어 `unknown`이고, 그다음 배포부터 커밋이 나온다.
 - **주의: SQLite 스키마를 올리는 main.** 엔진은 시작할 때 `state/engine.sqlite3`를 새 스키마로 올린다. 그 main이 API 확인에 실패하면 되돌린 옛 엔진은 새 스키마의 DB를 거부하고(`... was written by a newer engine (schema N)`) 뜨지 못한다. 그러면 `자동 업데이트 실패: ...되돌렸지만 엔진이 응답하지 않습니다`가 온다. 고친 커밋을 main에 올리고 장 시간 밖에서 `deploy/auto-update.sh`를 실행한다. 실패한 커밋만 건너뛰므로 더 새 main은 바로 시도한다.
 
 ```bash
