@@ -71,7 +71,8 @@ CREATE TABLE IF NOT EXISTS runs (
     id INTEGER PRIMARY KEY,
     kind TEXT NOT NULL,               -- cpu_budget: an algorithm skipped for the CPU budget;
                                       -- review: the daily algorithm review ran;
-                                      -- retire_candidate: benched too long, alerted
+                                      -- retire_candidate: benched too long, alerted;
+                                      -- signal_sent, signal_blocked: a Telegram signal (#80)
     at TEXT NOT NULL,
     algorithm TEXT,
     detail TEXT
@@ -113,6 +114,14 @@ ALTER TABLE predictions_v2 RENAME TO predictions;
 
 def iso(at: datetime) -> str:
     return at.astimezone(KST).isoformat()
+
+
+@dataclass(frozen=True)
+class Run:
+    kind: str
+    at: datetime
+    algorithm: str | None
+    detail: str
 
 
 @dataclass(frozen=True)
@@ -361,6 +370,14 @@ class PredictionStore:
         """When the latest ``kind`` run was recorded, if one was."""
         row = self._db.execute("SELECT MAX(at) FROM runs WHERE kind = ?", (kind,)).fetchone()
         return None if row[0] is None else datetime.fromisoformat(row[0])
+
+    def runs(self, kind: str, since: datetime) -> list[Run]:
+        """The ``kind`` runs recorded at or after ``since``, oldest first."""
+        rows = self._db.execute(
+            "SELECT kind, at, algorithm, detail FROM runs WHERE kind = ? AND at >= ? ORDER BY at, id",
+            (kind, iso(since)),
+        ).fetchall()
+        return [Run(r[0], datetime.fromisoformat(r[1]), r[2], r[3] or "") for r in rows]
 
     def add_run(self, kind: str, at: datetime, algorithm: str | None, detail: str) -> None:
         with self._db:

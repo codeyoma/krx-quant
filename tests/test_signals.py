@@ -2,13 +2,17 @@
 members agree on. Off by default.
 
 Input: an engine on a fake clock with active stand-in algorithms, fed a morning, and a
-fake Telegram. Output: the messages Telegram receives.
+fake Telegram. Output: the messages Telegram receives and the signals the store keeps,
+sent and blocked (``runs``).
 """
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+import json
+from collections.abc import AsyncIterator, Iterable
+from datetime import timedelta
 from pathlib import Path
+from typing import Any
 
 import aiohttp
 import pytest
@@ -18,14 +22,14 @@ from aiohttp.test_utils import TestServer
 from krx_quant.baselines import Forecast
 from krx_quant.clock import FakeClock
 from krx_quant.config import Settings, SettingsError
-from krx_quant.engine import PredictionEngine
+from krx_quant.engine import Event, PredictionEngine
 from krx_quant.lifecycle import Status
 from krx_quant.notify import Alerts
 from krx_quant.predictions import PredictionStore
 from krx_quant.replay import replay_into
 from krx_quant.signals import SignalRule, Signals
 from tests.algorithm_doubles import FixedAlgorithm
-from tests.replay_events import CALENDAR, FEE, SYMBOL, at
+from tests.replay_events import CALENDAR, FEE, SYMBOL, at, book, every, kospi, kospi200_futures, vi
 from tests.test_replay import busy_morning
 
 UP = Forecast(0.7, 0.2, 0.1, 2.0)
@@ -52,19 +56,42 @@ async def telegram() -> AsyncIterator[tuple[Alerts, list[str]]]:
     await server.close()
 
 
-async def morning(db: Path, forecasts: list[Forecast], signals: Signals | None) -> None:
-    """The members predict ``forecasts`` at every bar close from 09:01 to 09:05."""
+async def morning(
+    db: Path,
+    forecasts: list[Forecast],
+    signals: Signals | None,
+    events: Iterable[Event] | None = None,
+    *,
+    start: str = "09:00:00",
+    until: str = "09:05:30",
+    display_delay: timedelta = timedelta(0),
+) -> None:
+    """The members predict ``forecasts`` at every bar close from ``start`` to ``until``, fed
+    ``events`` (a busy morning by default) received from ``start`` on."""
     store = PredictionStore(db)
     algorithms = []
+    registered = store.statuses()
     for n, (forecast, feature) in enumerate(
         zip(forecasts, ("velocity", "acceleration", "relative_volume"), strict=False)
     ):
         algorithms.append(FixedAlgorithm(f"m{n}", features=(feature,), unique=(feature,), forecast=forecast))
-        store.add_status(f"m{n}", at("08:00:00"), None, Status.ACTIVE, "test")
-    clock = FakeClock(at("09:00:00"))
+        if f"m{n}" not in registered:
+            store.add_status(f"m{n}", at("08:00:00"), None, Status.ACTIVE, "test")
+    clock = FakeClock(at(start))
     engine = PredictionEngine(store, CALENDAR, (SYMBOL,), FEE, clock, algorithms=algorithms, signals=signals)
-    await replay_into(engine, clock, busy_morning(end="09:05:30"), until=at("09:05:30"))
+    fed = busy_morning(end=until) if events is None else events
+    later = sorted((e for e in fed if e[1]["received_at"] >= at(start)), key=lambda e: e[1]["received_at"])
+    await replay_into(engine, clock, later, until=at(until), display_delay=display_delay)
     store.close()
+
+
+def kept(db: Path, kind: str) -> list[dict[str, Any]]:
+    """The signals the store kept as ``kind`` (``signal_sent``, ``signal_blocked``)."""
+    store = PredictionStore(db)
+    try:
+        return [json.loads(run.detail) for run in store.runs(kind, at("00:00:00"))]
+    finally:
+        store.close()
 
 
 async def test_a_sure_consensus_that_enough_members_agree_on_is_signalled_once_per_move(
@@ -81,6 +108,20 @@ async def test_a_sure_consensus_that_enough_members_agree_on_is_signalled_once_p
         "[신호] 005930 상승 57% · 정식 3개 중 2개 같은 방향 · 09:01 봉 마감, 09:05까지",
         "[신호] 005930 상승 57% · 정식 3개 중 2개 같은 방향 · 09:05 봉 마감, 09:09까지",
     ]
+    first, second = kept(tmp_path / "engine.db", "signal_sent")
+    assert first == {
+        "symbol": SYMBOL,
+        "direction": "up",
+        "probability": pytest.approx(0.5667, abs=1e-4),
+        "agree": 2,
+        "members": 3,
+        "bar_close": "2026-10-12T09:01:00+09:00",
+        "target_at": "2026-10-12T09:05:00+09:00",
+        "rule": {"min_probability": 0.5, "min_agree": 2},
+        "blocked": None,
+    }
+    assert second["bar_close"] == "2026-10-12T09:05:00+09:00"
+    assert kept(tmp_path / "engine.db", "signal_blocked") == []
 
 
 async def test_a_fall_is_signalled_too(tmp_path: Path, telegram: tuple[Alerts, list[str]]) -> None:
@@ -102,6 +143,150 @@ async def test_no_signal_without_enough_agreement_or_certainty(
     await alerts.close()
 
     assert sent == []
+
+
+async def test_a_vi_learned_after_the_bar_close_blocks_its_signal(
+    tmp_path: Path, telegram: tuple[Alerts, list[str]]
+) -> None:
+    alerts, sent = telegram
+    # The VI starts a second after the 09:01 bar close and its status arrives a second
+    # later, before the final consensus (displayed 3 seconds after the bar close).
+    events = [*busy_morning(end="09:05:30"), vi(at("09:01:02"), "09:01:01")]
+
+    await morning(
+        tmp_path / "engine.db",
+        [UP, UP, FLAT],
+        Signals(SignalRule(0.5, 2), alerts.signal),
+        events,
+        display_delay=timedelta(seconds=3),
+    )
+    await alerts.close()
+
+    # 09:02–09:04 fall inside the VI and are not predicted; at 09:05 it is over.
+    assert sent == ["[신호] 005930 상승 57% · 정식 3개 중 2개 같은 방향 · 09:05 봉 마감, 09:09까지"]
+    [blocked] = kept(tmp_path / "engine.db", "signal_blocked")
+    assert (blocked["bar_close"], blocked["direction"], blocked["blocked"]) == (
+        "2026-10-12T09:01:00+09:00",
+        "up",
+        "special",
+    )
+
+
+# KOSPI 8.5% down, or KOSPI200 futures 5.5% up, from 09:06: called at 09:07 (held a minute).
+BREAKER = every(at("09:06:00"), at("09:12:30"), 10, lambda when: kospi(when, -8.5))
+SIDECAR = every(at("09:06:00"), at("09:12:30"), 10, lambda when: kospi200_futures(when, 5.5))
+
+
+async def test_a_circuit_breaker_blocks_the_signals_it_touches(
+    tmp_path: Path, telegram: tuple[Alerts, list[str]]
+) -> None:
+    alerts, sent = telegram
+
+    await morning(
+        tmp_path / "engine.db",
+        [UP, UP, FLAT],
+        Signals(SignalRule(0.5, 2), alerts.signal),
+        [*busy_morning(end="09:12:30"), *BREAKER],
+        until="09:12:30",
+    )
+    await alerts.close()
+
+    # The 09:05 call (to 09:09) was sent before the breaker was called; from 09:09 each is
+    # blocked, and a blocked one does not hold the next back.
+    assert [m.split(" · ")[2] for m in sent] == ["09:01 봉 마감, 09:05까지", "09:05 봉 마감, 09:09까지"]
+    blocked = kept(tmp_path / "engine.db", "signal_blocked")
+    assert [(b["bar_close"][11:16], b["blocked"]) for b in blocked] == [
+        ("09:09", "special"),
+        ("09:10", "special"),
+        ("09:11", "special"),
+        ("09:12", "special"),
+    ]
+
+
+async def test_a_sidecar_does_not_block_signals(tmp_path: Path, telegram: tuple[Alerts, list[str]]) -> None:
+    alerts, sent = telegram
+
+    await morning(
+        tmp_path / "engine.db",
+        [UP, UP, FLAT],
+        Signals(SignalRule(0.5, 2), alerts.signal),
+        [*busy_morning(end="09:12:30"), *SIDECAR],
+        until="09:12:30",
+    )
+    await alerts.close()
+
+    # A sidecar halts program trading only.
+    assert [m.split(" · ")[2] for m in sent] == [
+        "09:01 봉 마감, 09:05까지",
+        "09:05 봉 마감, 09:09까지",
+        "09:09 봉 마감, 09:13까지",
+    ]
+    assert kept(tmp_path / "engine.db", "signal_blocked") == []
+
+
+async def test_a_signal_is_blocked_when_the_book_was_silent_over_a_minute(
+    tmp_path: Path, telegram: tuple[Alerts, list[str]]
+) -> None:
+    alerts, sent = telegram
+    # A VI from 09:00:30, released at 09:02:30: 09:01 and 09:02 are not predicted. The last
+    # quote comes at 09:01:59, so at the 09:03 bar close it is 61 seconds old.
+    events = [
+        *busy_morning(end="09:01:58"),
+        book(at("09:01:59"), 81_200, 81_300),
+        vi(at("09:00:31"), "09:00:30"),
+        vi(at("09:02:31"), "09:00:30", "09:02:30"),
+    ]
+
+    await morning(tmp_path / "engine.db", [UP, UP, FLAT], Signals(SignalRule(0.5, 2), alerts.signal), events)
+    await alerts.close()
+
+    assert sent == []
+    blocked = kept(tmp_path / "engine.db", "signal_blocked")
+    assert [(b["bar_close"][11:16], b["blocked"]) for b in blocked] == [
+        ("09:03", "no_reference"),
+        ("09:04", "no_reference"),
+        ("09:05", "no_reference"),
+    ]
+
+
+async def test_a_signal_past_its_target_time_is_not_sent(
+    tmp_path: Path, telegram: tuple[Alerts, list[str]]
+) -> None:
+    alerts, sent = telegram
+
+    # The engine stalls and catches up at 09:05:01: the 09:01 call's four minutes are over,
+    # 09:02's are not (09:03–09:05 repeat it).
+    await morning(
+        tmp_path / "engine.db",
+        [UP, UP, FLAT],
+        Signals(SignalRule(0.5, 2), alerts.signal),
+        display_delay=timedelta(minutes=4, seconds=1),
+    )
+    await alerts.close()
+
+    assert [m.split(" · ")[2] for m in sent] == ["09:02 봉 마감, 09:06까지"]
+    [blocked] = kept(tmp_path / "engine.db", "signal_blocked")
+    assert (blocked["bar_close"], blocked["blocked"]) == ("2026-10-12T09:01:00+09:00", "expired")
+
+
+async def test_a_restarted_engine_does_not_repeat_a_running_signal(
+    tmp_path: Path, telegram: tuple[Alerts, list[str]]
+) -> None:
+    alerts, sent = telegram
+    db = tmp_path / "engine.db"
+
+    await morning(db, [UP, UP, FLAT], Signals(SignalRule(0.5, 2), alerts.signal), until="09:05:30")
+    # Restarted on the same store: of the calls sent, the 09:05 one runs to 09:09.
+    await morning(
+        db, [UP, UP, FLAT], Signals(SignalRule(0.5, 2), alerts.signal), start="09:05:30", until="09:09:30"
+    )
+    await alerts.close()
+
+    assert [m.split(" · ")[2] for m in sent] == [
+        "09:01 봉 마감, 09:05까지",
+        "09:05 봉 마감, 09:09까지",
+        "09:09 봉 마감, 09:13까지",
+    ]
 
 
 def test_signals_are_off_by_default_and_their_settings_are_checked() -> None:

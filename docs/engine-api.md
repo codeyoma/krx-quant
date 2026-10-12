@@ -118,7 +118,7 @@
 |---|---|
 | `predictions` | `id`, `symbol`, `algorithm`, `model_version`, `bar_close`(t), `displayed_at`, `p_up`, `p_flat`, `p_down`, `expected_ticks`, `status`(`ok`, `timed_out`, `error`, `vi`, `no_book`, 합의의 `no_members`, `none_finished`). 재생 결과의 `skipped`는 `ok`가 아닌 예측을 모두 센다. `ok`가 아니면 확률과 기대수익이 비어 있고 `outcomes` 행이 없다. |
 | `outcomes` | `prediction_id`, `target_at`(t + 4분), `mid_close`(A), `mid_display`(B), `mid_target`, `flat_ticks`(k), `class_a`, `class_b`(`up`/`flat`/`down`), `special`, `unscorable`, `scored_at`(채점 전에는 비어 있음) |
-| `runs` | `id`, `kind`(`cpu_budget`: CPU 예산으로 건너뜀, `review`: 일일 상태 점검, `retire_candidate`: 은퇴 후보 알림, `budget_report`: 그날 예산 때문에 빠진 예측을 알림(#71), `no_regime`: 그날 매크로 국면이 없거나 엔진이 모르는 이름이어서 기본 전이행렬로 돈 날(`detail`에 `(unknown: <이름>)`). 첫 봉 마감에 하루 한 번), `at`, `algorithm`, `detail` |
+| `runs` | `id`, `kind`(`cpu_budget`: CPU 예산으로 건너뜀, `review`: 일일 상태 점검, `retire_candidate`: 은퇴 후보 알림, `budget_report`: 그날 예산 때문에 빠진 예측을 알림(#71), `no_regime`: 그날 매크로 국면이 없거나 엔진이 모르는 이름이어서 기본 전이행렬로 돈 날, 첫 봉 마감에 하루 한 번(`detail`에 `(unknown: <이름>)`), `signal_sent`: 보낸 텔레그램 신호, `signal_blocked`: 막힌 텔레그램 신호(둘 다 판정할 때마다 하나씩, `detail`은 JSON, 아래 "텔레그램 신호 알림", #80)), `at`, `algorithm`, `detail` |
 | `statuses` | `id`, `algorithm`, `at`, `previous`, `status`, `reason`: 알고리즘 상태 이력(#17) |
 | `consensus_fits` | `version`, `computed_at`: 합의 가중치를 계산한 기록(#18). 엔진은 시작할 때 마지막 버전을 읽는다. |
 | `consensus_weights` | `version`, `symbol`, `slot`, `algorithm`, `weight`: 그 버전의 칸별 가중치 |
@@ -407,7 +407,16 @@
 
 1. 최종 합의의 상승 확률이 `KRX_SIGNAL_MIN_PROBABILITY`(기본 0.6) 이상이면 상승, 아니면 하락 확률이 그 이상일 때 하락이다. 둘 다 아니면 신호가 없다.
 2. 그 합의에 들어간 정식 알고리즘 가운데 `KRX_SIGNAL_MIN_AGREE`(기본 2)개 이상이 같은 방향을 예측해야 한다. 알고리즘의 예측 방향은 세 확률 중 가장 큰 쪽이다(동률이면 보합, 그다음 상승. 통계와 같다).
-3. 같은 종목·같은 방향의 신호는 앞 신호의 채점 시각(4분 뒤)까지 다시 보내지 않는다. 매분 같은 신호가 쌓이지 않게 하려는 것이다.
+3. 같은 종목·같은 방향의 신호는 앞 신호의 채점 시각(4분 뒤)까지 다시 보내지 않는다. 매분 같은 신호가 쌓이지 않게 하려는 것이다. 엔진이 다시 시작하면 첫 최종 합의 때 오늘 보낸 신호 기록(`runs`의 `signal_sent`)으로 이 상태를 되살린다.
+4. 보내기 직전에, 그때까지 엔진이 안 것으로 막을 이유를 본다. 이유가 있으면 보내지 않는다(막힌 신호). 막힌 신호는 3의 반복 억제를 시작하지 않는다. 다음 분에 이유가 없어지면 그 신호는 나간다.
+   - `special`: 그때까지 받은 VI나 서킷브레이커 창이 그 종목의 봉 마감 ~ 목표 시각에 닿는다. 예측의 특수 상황(`special`)보다 좁다. 봉 마감 뒤 최종 합의 전에 받은 VI 상태도 막는다(VI 상태는 5초마다 조회한다). 사이드카는 프로그램매매만 멈추므로 막지 않는다.
+   - `no_reference`: 봉 마감 기준가(중간가)가 없다. 호가가 60초 넘게 오지 않았다.
+   - `expired`: 지금이 이미 목표 시각이다. 엔진이 밀려 뒤늦게 최종 합의를 낸 경우다.
+   - 여러 이유에 걸리면 위 순서의 첫 이유를 남긴다.
+
+보낸 신호와 막힌 신호는 `runs` 테이블에 `signal_sent`, `signal_blocked`로 남는다. `detail`은 JSON이다: `symbol`, `direction`(`up`, `down`), `probability`, `agree`(같은 방향인 정식 알고리즘 수), `members`(합의에 들어간 정식 알고리즘 수), `bar_close`, `target_at`, `rule`(`min_probability`, `min_agree`, 그때의 신호 규칙), `blocked`(막힌 이유, 보낸 신호는 `null`). 3에서 반복이라 건너뛴 신호는 남지 않는다. 막힌 신호는 로그에도 `signal blocked (<이유>)`로 남는다.
+
+> **바뀜** (2026-10-12, #116): 최종 합의가 확률·동의 조건만 맞으면 보냈고, 반복 억제 상태는 메모리에만 있었다 → 보내기 직전에 막을 이유(`special`, `no_reference`, `expired`)를 보고, 보낸·막힌 신호를 `runs`에 남기며, 재시작하면 오늘 보낸 신호로 반복 억제를 되살린다. 이유: VI는 봉 마감 시점에만 확인해서 봉 마감 직후에 걸린 VI가 신호를 막지 못했고, 기준가가 없는 종목에도 신호가 나갔고, 엔진이 재시작하면 같은 신호가 목표 시각 전에 다시 나갈 수 있었다(#78, #80).
 
 메시지는 `[신호] 005930 상승 64% · 정식 3개 중 2개 같은 방향 · 09:31 봉 마감, 09:35까지`다. 정식 알고리즘이 없으면 합의가 비어서 신호도 없다. 주문은 하지 않는다(엔진에 주문 코드는 없다).
 
