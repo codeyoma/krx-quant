@@ -234,6 +234,13 @@ def test_the_losses_by_reference_price_split_recorded_and_backfilled_days(
         }
         assert validation["by_reference"][kind] == pytest.approx(expected)
     assert by_day[str(DAYS[-1])]["samples"] == 56, "09:01–09:56 of a recorded morning"
+    # Days of unequal size: the standard error is the sample-weighted mean's, clustered by day.
+    sized = [(r["samples"], r["challenger"] - r["champion"]) for r in by_day.values()]
+    n = sum(k for k, _ in sized)
+    mean = sum(k * d for k, d in sized) / n
+    clustered = math.sqrt(1.5 * sum((k * (d - mean)) ** 2 for k, d in sized)) / n
+    assert validation["paired"]["mean_difference"] == pytest.approx(mean)
+    assert validation["paired"]["day_standard_error"] == pytest.approx(clustered)
 
 
 def test_a_champion_fitted_by_hand_on_the_validation_days_is_reported(
@@ -267,6 +274,27 @@ def test_a_champion_fitted_by_hand_on_the_validation_days_is_reported(
     assert report["champion"]["version"] == by_hand.version
     assert report["champion"]["trained_on_validation"] is True
     assert "trained on these days" in report["reason"]
+
+
+def test_a_checkpoint_an_older_version_wrote_is_trained_again(store_root: Path, tmp_path: Path) -> None:
+    learner = FrequencyAlgorithm("learner", "velocity")
+    older = {
+        "algorithm": "learner",
+        "day": str(NIGHT),
+        "champion": None,
+        "challenger": None,
+        "promoted": False,
+    }
+    (store_root / "reports" / str(NIGHT)).mkdir(parents=True)
+    (store_root / "reports" / str(NIGHT) / "learner.json").write_text(
+        json.dumps({**older, "reason": "older"})
+    )
+
+    night(store_root, tmp_path, [learner], commit="0123abc")
+
+    report = read(store_root, f"reports/{NIGHT}/learner.json")
+    assert len(learner.fitted_on) == 1
+    assert report["commit"] == "0123abc" and "validation" in report
 
 
 class Reclaimed(RuntimeError):

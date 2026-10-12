@@ -40,7 +40,6 @@ import logging
 import math
 import os
 import shutil
-import statistics
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -202,7 +201,8 @@ def train_night(
     reports = []
     for algorithm in algorithms:
         report = get_json(store, report_key(night, algorithm.name))
-        if report is None:
+        # A checkpoint an older version wrote lacks the evidence (#89): trained again.
+        if report is None or "commit" not in report:
             report = {**trainer.train(algorithm, live.get(algorithm.name)), "commit": commit}
             put_json(store, report_key(night, algorithm.name), report)
             log.info("%s: %s", algorithm.name, report["reason"])
@@ -450,19 +450,24 @@ def _validation(
     references: Mapping[date, str],
 ) -> dict[str, Any]:
     """The validation's losses by day and by reference price (``mid``, ``close``), and the
-    paired difference (challenger minus champion, on the samples both predicted): its mean,
-    and its standard error over the days' means (None with fewer than two days).
+    paired difference (challenger minus champion, on the samples both predicted): its mean
+    over the samples, and that mean's standard error clustered by day, as the days' 4-minute
+    outcomes overlap (None with fewer than two days).
     """
-    by_champion = {id(s): loss for s, loss in champion}
+
+    def key(sample: Sample) -> tuple[str, datetime]:
+        return sample.symbol, sample.bar_close
+
+    by_champion = {key(s): loss for s, loss in champion}
 
     def losses(day_of: Callable[[Sample], Any]) -> dict[str, dict[str, Any]]:
         groups: dict[Any, list[tuple[Sample, float]]] = {}
         for sample, loss in challenger:
             groups.setdefault(day_of(sample), []).append((sample, loss))
         out = {}
-        for key, rows in sorted(groups.items()):
-            theirs = [by_champion[id(s)] for s, _ in rows if id(s) in by_champion]
-            out[str(key)] = {
+        for group, rows in sorted(groups.items()):
+            theirs = [by_champion[key(s)] for s, _ in rows if key(s) in by_champion]
+            out[str(group)] = {
                 "samples": len(rows),
                 "challenger": _mean([loss for _, loss in rows]),
                 "champion": _mean(theirs) if theirs else None,
@@ -471,16 +476,18 @@ def _validation(
 
     paired: dict[date, list[float]] = {}
     for sample, loss in challenger:
-        if id(sample) in by_champion:
-            paired.setdefault(kst_day(sample.bar_close), []).append(loss - by_champion[id(sample)])
+        if key(sample) in by_champion:
+            paired.setdefault(kst_day(sample.bar_close), []).append(loss - by_champion[key(sample)])
     differences = [d for day in paired.values() for d in day]
-    days = [_mean(day) for day in paired.values()]
+    mean = _mean(differences) if differences else None
+    error = None
+    if mean is not None and len(paired) > 1:
+        # Each day's residuals summed, then the days' sums as independent: with days of equal
+        # size, the standard error of the days' means.
+        sums = [sum(d - mean for d in day) for day in paired.values()]
+        error = math.sqrt(len(sums) / (len(sums) - 1) * sum(s * s for s in sums)) / len(differences)
     return {
         "by_day": losses(lambda s: kst_day(s.bar_close)),
         "by_reference": losses(lambda s: references.get(kst_day(s.bar_close))),
-        "paired": {
-            "samples": len(differences),
-            "mean_difference": _mean(differences) if differences else None,
-            "day_standard_error": statistics.stdev(days) / math.sqrt(len(days)) if len(days) > 1 else None,
-        },
+        "paired": {"samples": len(differences), "mean_difference": mean, "day_standard_error": error},
     }
