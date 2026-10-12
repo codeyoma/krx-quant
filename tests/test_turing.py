@@ -205,7 +205,7 @@ BOOK_OWN = ("spread_ticks", "top_imbalance", "top_size_change")
 async def test_the_best_quotes_spread_balance_and_change_at_a_bar_close(tmp_path: Path) -> None:
     probe = FixedAlgorithm("probe", features=BOOK_OWN, unique=BOOK_OWN)
     events = [
-        book(at("09:00:10"), 81_200, 81_300, bid_qty=100, ask_qty=100),
+        book(at("09:00:00"), 81_200, 81_300, bid_qty=100, ask_qty=100),  # right at the open
         book(at("09:00:50"), 81_200, 81_400, bid_qty=200, ask_qty=50),
         book(at("09:01:20"), 81_300, 81_400, bid_qty=60, ask_qty=90),
     ]
@@ -213,8 +213,8 @@ async def test_the_best_quotes_spread_balance_and_change_at_a_bar_close(tmp_path
     await run(tmp_path / "engine.db", events, until=at("09:04:00"), algorithms=[probe])
 
     at_0901, at_0902, _, at_0904 = probe.seen
-    # 09:01: the 09:00:50 quotes, 200 won apart at a 100-won tick; no quotes from a minute
-    # before (none before the open).
+    # 09:01: the 09:00:50 quotes, 200 won apart at a 100-won tick; no change in the first
+    # minute, even with a quote right at the open.
     assert at_0901["spread_ticks"] == pytest.approx(2.0)
     assert at_0901["top_imbalance"] == pytest.approx((200 - 50) / 250)
     assert at_0901["top_size_change"] is None

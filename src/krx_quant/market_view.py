@@ -574,7 +574,7 @@ class MarketView:
         depth = book.depth(at)
         top = book.top(at, session.open)
         # A minute before: from the open too, as the windows (none in the first minute).
-        top_before = book.top(at - BAR, session.open) if at - BAR >= session.open else None
+        top_before = book.top(at - BAR, session.open) if at - BAR > session.open else None
         imbalances = {m: book.flow(since(m), at) for m in OFI_MINUTES}
         sides = _Sides(*self._sides[symbol].between(since(TRADE_MINUTES), at))
         volumes: dict[str, float | None] = {
