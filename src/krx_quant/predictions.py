@@ -112,6 +112,10 @@ ALTER TABLE predictions_v2 RENAME TO predictions;
 )
 
 
+# A prediction scored on either basis (outcomes ``o`` joined to predictions ``p``).
+SCORED = "p.status = 'ok' AND o.scored_at IS NOT NULL AND (o.class_a IS NOT NULL OR o.class_b IS NOT NULL)"
+
+
 def _made_on(days: Sequence[date], symbol: str | None) -> tuple[str, list[Any]]:
     """A condition on predictions ``p`` made on ``days`` (of ``symbol`` if given), and its
     parameters. The time range lets SQLite use the bar-close index; the day list keeps out
@@ -568,10 +572,7 @@ class PredictionStore:
         if not days:
             return []
         on, params = _made_on(days, symbol)
-        where = (
-            f"WHERE {on} AND p.status = 'ok' AND o.scored_at IS NOT NULL"
-            " AND (o.class_a IS NOT NULL OR o.class_b IS NOT NULL)"
-        )
+        where = f"WHERE {on} AND {SCORED}"
         if not include_special:
             where += " AND o.special = 0"
         with self._reading() as db:

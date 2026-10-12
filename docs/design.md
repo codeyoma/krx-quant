@@ -54,6 +54,7 @@
 | `macro.py`, `regime.py` | 매크로 지표 수집(07:30), 일일 국면 |
 | `replay.py`, `demo.py`, `fake_kis.py`, `notify.py`, `cli.py` | 재생, 화면 개발용 데모 엔진, 가짜 KIS, 텔레그램 알림, 명령 |
 | `prevalidation.py` | 새 알고리즘 사전 검증: 최근 20거래일 재생과 엔진의 등록 관문(#24) |
+| `diagnose.py` | 읽기 전용 진단 명령: 남은 결정에 필요한 실측(#82) |
 
 > **삭제됨** (2026-10-08, 0f5800c): `src/krx_quant/feeds.py` 한 파일. 이유 기록 없음(전체 구독 계획 #3을 넣은 커밋에서 나뉘었다). 대신: `feeds/` 패키지(`base.py`, `stock.py`, `market.py`)와 `masters.py`, `polling.py`, `ratelimit.py`.
 

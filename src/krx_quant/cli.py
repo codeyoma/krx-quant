@@ -25,11 +25,13 @@ from krx_quant.backfill import run_backfill
 from krx_quant.collector import check_fallbacks, measure_subscription_limit, run_collector
 from krx_quant.config import Settings, SettingsError
 from krx_quant.demo import demo_app, demo_morning
+from krx_quant.diagnose import DEFAULT_DAYS, diagnose
 from krx_quant.fake_kis import FakeKis
 from krx_quant.feeds.base import KST
 from krx_quant.kis import KisError
 from krx_quant.lifecycle import Status
 from krx_quant.macro import run_macro
+from krx_quant.market_calendar import calendar_store
 from krx_quant.model_shelf import Shelf
 from krx_quant.nightly import from_the_server, run_training
 from krx_quant.notify import send_notice, send_test_alert
@@ -260,6 +262,12 @@ async def _fake_kis(port: int, host: str, trades: bool) -> None:
         await fake.stop()
 
 
+def _diagnose(days: int) -> int:
+    settings = Settings.from_env(require_kis=False)
+    print(diagnose(settings.data_dir, settings.state_dir / DB_NAME, calendar_store(settings).calendar, days))
+    return 0
+
+
 def _macro() -> int:
     settings = Settings.from_env(require_kis=False)
     macro = asyncio.run(run_macro(settings, lambda: datetime.now(KST)))
@@ -391,6 +399,15 @@ def main(argv: list[str] | None = None) -> int:
     unretire_cmd.add_argument("algorithm")
     sub.add_parser("test-alert", help="send a test message to the Telegram chat that receives alerts")
     sub.add_parser("macro", help="read today's macro indicators and decide the regime, once")
+    diagnose_cmd = sub.add_parser(
+        "diagnose", help="print the measurements the open decisions need; reads only, writes nothing"
+    )
+    diagnose_cmd.add_argument(
+        "--days",
+        type=_positive,
+        default=DEFAULT_DAYS,
+        help=f"the latest N trading days with data (default {DEFAULT_DAYS})",
+    )
     notify_cmd = sub.add_parser("notify", help="send a notice to the Telegram chat that receives alerts")
     notify_cmd.add_argument("text")
     fake = sub.add_parser("fake-kis", help="run a local fake KIS server for offline testing")
@@ -442,6 +459,8 @@ def main(argv: list[str] | None = None) -> int:
             return asyncio.run(_notify(args.text))
         elif args.command == "macro":
             return _macro()
+        elif args.command == "diagnose":
+            return _diagnose(args.days)
         elif args.command == "test-alert":
             return asyncio.run(_test_alert())
         elif args.command == "fake-kis":

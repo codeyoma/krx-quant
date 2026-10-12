@@ -48,11 +48,14 @@ class Decision:
     reasons: tuple[str, ...]  # the conditions that held, in Korean
 
 
+NO_INDICATOR = "지표 없음"  # the reason when not one of the three indicators was read
+
+
 def decide(inputs: RegimeInputs, rules: RegimeRules) -> Decision:
     """The regime of ``inputs`` under ``rules``."""
     sox, vix, won = inputs.sox_pct, inputs.vix, inputs.usdkrw_pct
     if sox is None and vix is None and won is None:
-        return Decision(Regime.NEUTRAL, ("지표 없음",))
+        return Decision(Regime.NEUTRAL, (NO_INDICATOR,))
     shock = []
     if sox is not None and abs(sox) >= rules.shock_sox_pct:
         shock.append(_sox(sox, f"±{rules.shock_sox_pct:g}% 이상"))

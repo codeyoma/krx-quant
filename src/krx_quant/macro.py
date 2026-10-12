@@ -430,6 +430,31 @@ def day_regime(data_dir: Path, day: date, before: datetime) -> str | None:
     return regime
 
 
+@dataclass(frozen=True)
+class Decided:
+    """A day's regime as last decided before a moment, and which indicators that read had."""
+
+    reasons: list[str]
+    valued: set[str]  # the indicators with a value in the same read
+
+
+def decided_before(data_dir: Path, day: date, before: datetime) -> Decided | None:
+    """``day``'s regime as last decided before ``before`` (the open, as ``day_regime``), and
+    the indicators valued in that read; None if none was decided by then."""
+    root = data_dir / MACRO / f"date={day}"
+    decided = [r for r in _rows(root / "feed=regime" / "symbol=market") if r["recorded_at"] < before]
+    if not decided:
+        return None
+    regime = decided[-1]
+    valued = {
+        indicator.name
+        for indicator in INDICATORS
+        for r in _rows(root / "feed=readings" / f"symbol={indicator.name}")
+        if r["recorded_at"] == regime["recorded_at"] and r["value"] is not None
+    }
+    return Decided(json.loads(regime["reasons"]), valued)
+
+
 def reading_before(data_dir: Path, day: date, indicator: str, before: datetime) -> dict[str, Any] | None:
     """``indicator``'s reading in ``day``'s last read recorded before ``before`` (the open,
     as ``day_regime`` takes the regime), or None. A ``krx-quant macro`` run after the open
@@ -470,17 +495,25 @@ def latest_macro(data_dir: Path, today: date) -> LatestMacro | None:
 
 def _rows(partition: Path) -> list[dict[str, Any]]:
     """A partition's rows, in the order written."""
+    table = read_partition(partition)
+    return [] if table is None else table.to_pylist()
+
+
+def read_partition(partition: Path, columns: Sequence[str] | None = None) -> pa.Table | None:
+    """A partition's rows, each once and in the order written (of ``columns`` only, if
+    given); None if it holds no file, or not all ``columns``."""
     try:
-        return _read_rows(partition)
+        return _read_partition(partition, columns)
     except FileNotFoundError:  # the archive merged the parts in between: list them again
-        return _read_rows(partition)
+        return _read_partition(partition, columns)
 
 
-def _read_rows(partition: Path) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    for path in partition_files(partition):
-        rows += pq.read_table(path).to_pylist()
-    return rows
+def _read_partition(partition: Path, columns: Sequence[str] | None) -> pa.Table | None:
+    files = partition_files(partition)
+    if not files or (columns is not None and not set(columns) <= set(pq.read_schema(files[0]).names)):
+        return None
+    chosen = None if columns is None else list(columns)
+    return pa.concat_tables(pq.read_table(path, columns=chosen) for path in files)
 
 
 async def keep_macro(
