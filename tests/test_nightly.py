@@ -192,8 +192,8 @@ def test_the_report_has_the_losses_by_day_and_the_paired_difference(store_root: 
 
     validation = report["validation"]
     assert list(validation["by_day"]) == list(by_day)
-    for day, row in by_day.items():
-        assert validation["by_day"][day] == pytest.approx(row)
+    for shown, row in by_day.items():
+        assert validation["by_day"][shown] == pytest.approx(row)
     n = sum(k for k, _ in differences)
     assert validation["paired"] == pytest.approx(
         {
