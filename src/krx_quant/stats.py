@@ -11,7 +11,8 @@ was displayed). Its predicted class is the most likely one; a tie goes to flat, 
 - **profit**: each up or down call traded in its direction from the start mid-point to
   the target, in ticks, less the round-trip cost (sell tax and both commissions);
 - **calibration**: every class probability binned by tenths, against how often that
-  class happened;
+  class happened; pooled over the three classes, and each class on its own (pooled, a
+  forecast of 1/3 each when only rises happen looks perfect; on its own, up does not);
 - **lift**: the gain in accuracy over a baseline, paired by symbol and bar close, with a
   one-sided p-value for "no better than the baseline".
 
@@ -108,7 +109,8 @@ class Summary:
     coverage: Interval | None
     brier: Interval | None
     pnl: Profit
-    calibration: list[CalibrationBin]
+    calibration: list[CalibrationBin]  # the three classes pooled
+    calibration_by_class: dict[Direction, list[CalibrationBin]]
 
 
 @dataclass(frozen=True)
@@ -193,7 +195,8 @@ def summarize(records: Sequence[Scored], fee_rate: float) -> Summary:
         coverage=wilson(len(directional), len(records)),
         brier=mean_interval([_brier(r) for r in records]),
         pnl=Profit(len(trades), sum(trades), mean_interval(trades)),
-        calibration=_calibration(records),
+        calibration=_calibration(records, tuple(Direction)),
+        calibration_by_class={d: _calibration(records, (d,)) for d in Direction},
     )
 
 
@@ -208,10 +211,11 @@ def _profit(r: Scored, fee_rate: float) -> float:
     return (move if r.predicted is Direction.UP else -move) - cost
 
 
-def _calibration(records: Sequence[Scored]) -> list[CalibrationBin]:
+def _calibration(records: Sequence[Scored], classes: Sequence[Direction]) -> list[CalibrationBin]:
+    """The probabilities of ``classes`` binned by tenths, against how often each happened."""
     sums = [[0, 0.0, 0] for _ in range(CALIBRATION_BINS)]  # count, sum of p, happened
     for r in records:
-        for d in Direction:
+        for d in classes:
             p = r.probability(d)
             i = min(int(round(p * CALIBRATION_BINS, 9)), CALIBRATION_BINS - 1)
             sums[i][0] += 1
