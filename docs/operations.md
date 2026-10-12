@@ -351,6 +351,7 @@ docker compose run --rm engine diagnose --days 5
 > **바뀜** (2026-10-11, #67): "지금은 Lightsail 수집기가 띄운다(#23에서 EC2 Spot으로 옮긴다)" → 서버와 EC2 Spot 중에서 고른다(`KRX_TRAIN_ON`). 기본은 그대로 서버다. 이유: #23. Spot으로 옮기는 것은 AWS 비용이 드는 일이라 사용자가 스택을 배포하고 켠다.
 
 - 알고리즘마다 학습에 안 쓴 최근 3거래일로 새 모델(challenger)과 서버에서 돌고 있는 모델(champion)을 비교한다. log loss가 더 낮을 때만 승격한다. 학습 구간은 그 앞의 알고리즘별 거래일 수(기본 20)다.
+- 리포트에는 그 교체가 잡음인지 판단할 근거도 남는다(#89). 검증일별·기준가별 평균 손실, 두 모델이 모두 예측한 표본에서 짝지은 손실 차이(challenger − champion)의 평균과 일 단위 표준오차, champion이 검증일을 학습했는지, 학습한 코드의 커밋이다. 교체 규칙은 그대로 평균 log loss만 본다. 최소 개선폭과 champion이 검증일을 학습한 경우의 처리는 사용자가 정한 뒤 따로 한다.
 - S3의 `bars/`(백필)와 `events/`(녹화), 그리고 날마다의 매크로 국면(`macro/.../feed=regime/`, Markov가 쓴다, #14)을 읽는다. 녹화된 날은 중간가로, 백필만 있는 날은 종가로 학습한다([engine-api.md](engine-api.md#학습)). 리포트의 `reference_prices`에 날짜별로 `mid` 또는 `close`가 남는다. 텔레그램 요약 첫 줄에는 날 수가 나온다. 예: `2026-10-13 밤 학습 (녹화 중간가 4일, 백필 종가 19일)`.
 - 가장 긴 학습 구간(Turing 60거래일)에 검증 3일을 더한 날들을 읽는다(#16 전에는 23일). 그래서 캐시, 학습 시간, 메모리가 그만큼 는다. 날마다 모든 알고리즘의 피처를 한 번에 계산해 두기 때문이다. Turing 모델 파일은 1MB 안팎이다.
 - 읽은 파일은 `state/training-cache/`에 복사해 두고 다음 밤에 다시 쓴다. 그 밤에 쓴 가장 오래된 날보다 오래된 날짜는 학습이 끝나면 지운다.
@@ -629,7 +630,7 @@ docker compose logs --tail 200 engine
 | `raw/…/data.parquet`, `events/…/data.parquet`, `gaps/…/data.parquet` | 로컬 `data/`와 같은 경로. 장 마감 15분 뒤와 21:00에 올린다 |
 | `bars/…/bars.parquet` | 1분봉 백필. 로컬과 같은 경로 |
 | `models/<알고리즘>/<버전>.json` | 밤 학습의 challenger와 서버가 돌린 모델. 형식은 `state/models/<알고리즘>.json`과 같다 |
-| `reports/<날짜>/<알고리즘>.json` | 그 밤의 알고리즘별 검증 리포트이자 체크포인트: `algorithm`, `day`, `training_days`, `validation_days`, `champion`(`version`, `loss`), `challenger`(`version`, `loss`, `trained`), `promoted`, `reason`, `reference_prices`(학습·검증일마다 `mid`: 녹화 중간가, `close`: 백필 종가), `samples`(`validation`: 검증 표본 수, 검증까지 간 경우만). 학습하지 못했거나 검증할 정답이 없으면 `champion`, `challenger`가 `null`이다 |
+| `reports/<날짜>/<알고리즘>.json` | 그 밤의 알고리즘별 검증 리포트이자 체크포인트: `algorithm`, `day`, `training_days`, `validation_days`, `champion`(`version`, `loss`, `trained_on_validation`: 검증일까지 학습한 모델인지. 손으로 `fit`한 모델 등), `challenger`(`version`, `loss`, `trained`), `promoted`, `reason`, `reference_prices`(학습·검증일마다 `mid`: 녹화 중간가, `close`: 백필 종가), `samples`(`validation`: 검증 표본 수, 검증까지 간 경우만), `validation`(검증까지 간 경우만, #89: `by_day`는 검증일마다, `by_reference`는 `mid`·`close`마다 `samples`·`challenger`·`champion` 평균 log loss. champion이 하나도 예측하지 않았으면 `champion`이 `null`. `paired`는 두 모델이 모두 예측한 표본 수 `samples`, 손실 차이(challenger − champion) 평균 `mean_difference`, 검증일 평균들의 표준오차 `day_standard_error`(검증일이 2일보다 적으면 `null`)), `commit`(학습한 코드, 엔진처럼 `KRX_COMMIT`. 없으면 `unknown`, #85). 학습하지 못했거나 검증할 정답이 없으면 `champion`, `challenger`가 `null`이다 |
 | `promotions/<날짜>.json` | 그 밤의 승격 목록: `day`, `finalized_at`(확정 시각), `promoted`(알고리즘 → 버전), `reports`(위 리포트 전부). 모든 알고리즘이 끝난 뒤 한 번 쓴다 |
 | `live.json` | 서버가 지금 돌리는 버전(알고리즘 → 버전, 기본 모델이면 `<이름>-default`). 다음 밤의 champion이다. 사전 검증을 기다리는 알고리즘은 돌기 시작할 때 쓸 모델이다(#24) |
 | `training/settings.json` | `KRX_TRAIN_ON=spot`일 때 서버가 올리는 학습 설정(#23): `KRX_SYMBOLS`, `KRX_ETF_SYMBOLS`, `KRX_US_SYMBOLS`, `KRX_INDEX_CODES`, `KRX_FEE_PERCENT`. 비밀값은 없다. 수집기가 시작할 때와 밤마다 올린다 |

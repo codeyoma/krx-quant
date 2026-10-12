@@ -11,7 +11,11 @@ closes (``training``). For each algorithm, in registration order:
 2. The new model (challenger) and the one the server runs (champion: ``live.json``, else
    the defaults) both forecast the validation days. The challenger is promoted only if
    its mean log loss there is lower.
-3. The challenger and a report of both are stored. The report is the algorithm's
+3. The challenger and a report of both are stored. Besides the verdict, the report has
+   what tells a real improvement from noise (#89): the losses by validation day and by
+   reference price, the paired difference with its standard error over days, whether
+   the champion learned the validation days, and the code that trained (``KRX_COMMIT``).
+   The rule stays the mean loss alone. The report is the algorithm's
    checkpoint: a night run again (after a crash, or a reclaimed Spot instance) skips the
    algorithms it has.
 
@@ -33,9 +37,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import shutil
-from collections.abc import Callable, Iterable, Sequence
+import statistics
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -49,7 +55,7 @@ from krx_quant.config import Settings, SettingsError
 from krx_quant.engine import ENGINE_FEEDS, partitions
 from krx_quant.features import Leaders
 from krx_quant.feeds import TRADE
-from krx_quant.feeds.base import KST
+from krx_quant.feeds.base import KST, kst_day
 from krx_quant.macro import regime_prefix
 from krx_quant.market_calendar import MarketCalendar, calendar_store
 from krx_quant.notify import send_notice
@@ -160,9 +166,11 @@ def train_night(
     leaders: Leaders | None = None,
     day: date | None = None,
     calendar: MarketCalendar | None = None,
+    commit: str = "unknown",
 ) -> Night:
     """Train every algorithm for the night of ``day`` (default: the latest day with data) and
-    store the promotion list. A night already finished is returned as it was.
+    store the promotion list. A night already finished is returned as it was. Each report
+    names ``commit``, the code that trained it.
     """
     leaders = leaders or Leaders()
     bars, trades = (
@@ -195,7 +203,7 @@ def train_night(
     for algorithm in algorithms:
         report = get_json(store, report_key(night, algorithm.name))
         if report is None:
-            report = trainer.train(algorithm, live.get(algorithm.name))
+            report = {**trainer.train(algorithm, live.get(algorithm.name)), "commit": commit}
             put_json(store, report_key(night, algorithm.name), report)
             log.info("%s: %s", algorithm.name, report["reason"])
         else:
@@ -230,6 +238,7 @@ async def run_training(settings: Settings, day: date | None = None) -> Night:
         leaders=Leaders.of(settings),
         day=day,
         calendar=calendar_store(settings).calendar,
+        commit=settings.commit,
     )
     if not finished_before:
         await send_notice(settings, night.summary())
@@ -296,7 +305,8 @@ class _Trainer:
         report["samples"] = {"validation": len(scored)}
         if not scored:
             return {**report, "reason": "no outcomes to validate on"}
-        champion_loss = _mean([loss for _, loss in _losses(algorithm, champion, scored)])
+        champion_losses = _losses(algorithm, champion, scored)
+        champion_loss = _mean([loss for _, loss in champion_losses])
         challenger_loss = _mean([loss for _, loss in challenger_losses])
         promoted = challenger_loss < champion_loss
         sign = "<" if promoted else "≥"
@@ -305,13 +315,18 @@ class _Trainer:
         saw = champion.trained_until is not None and champion.trained_until >= validation[0]
         return {
             **report,
-            "champion": {"version": champion.version, "loss": champion_loss},
+            "champion": {"version": champion.version, "loss": champion_loss, "trained_on_validation": saw},
             "challenger": {
                 "version": challenger.version,
                 "loss": challenger_loss,
                 "trained": challenger.trained,
             },
             "promoted": promoted,
+            "validation": _validation(
+                challenger_losses,
+                champion_losses,
+                {day: found.reference for day, found in loaded.items() if found is not None},
+            ),
             "reason": f"{challenger_loss:.4f} {sign} {champion_loss:.4f} ({champion.version}"
             + (", trained on these days)" if saw else ")"),
         }
@@ -427,3 +442,45 @@ def _losses(algorithm: Algorithm, model: Model, samples: Sequence[Sample]) -> li
 
 def _mean(values: Sequence[float]) -> float:
     return sum(values) / len(values)
+
+
+def _validation(
+    challenger: Sequence[tuple[Sample, float]],
+    champion: Sequence[tuple[Sample, float]],
+    references: Mapping[date, str],
+) -> dict[str, Any]:
+    """The validation's losses by day and by reference price (``mid``, ``close``), and the
+    paired difference (challenger minus champion, on the samples both predicted): its mean,
+    and its standard error over the days' means (None with fewer than two days).
+    """
+    by_champion = {id(s): loss for s, loss in champion}
+
+    def losses(day_of: Callable[[Sample], Any]) -> dict[str, dict[str, Any]]:
+        groups: dict[Any, list[tuple[Sample, float]]] = {}
+        for sample, loss in challenger:
+            groups.setdefault(day_of(sample), []).append((sample, loss))
+        out = {}
+        for key, rows in sorted(groups.items()):
+            theirs = [by_champion[id(s)] for s, _ in rows if id(s) in by_champion]
+            out[str(key)] = {
+                "samples": len(rows),
+                "challenger": _mean([loss for _, loss in rows]),
+                "champion": _mean(theirs) if theirs else None,
+            }
+        return out
+
+    paired: dict[date, list[float]] = {}
+    for sample, loss in challenger:
+        if id(sample) in by_champion:
+            paired.setdefault(kst_day(sample.bar_close), []).append(loss - by_champion[id(sample)])
+    differences = [d for day in paired.values() for d in day]
+    days = [_mean(day) for day in paired.values()]
+    return {
+        "by_day": losses(lambda s: kst_day(s.bar_close)),
+        "by_reference": losses(lambda s: references.get(kst_day(s.bar_close))),
+        "paired": {
+            "samples": len(differences),
+            "mean_difference": _mean(differences) if differences else None,
+            "day_standard_error": statistics.stdev(days) / math.sqrt(len(days)) if len(days) > 1 else None,
+        },
+    }
