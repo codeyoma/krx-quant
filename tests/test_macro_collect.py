@@ -420,6 +420,26 @@ async def test_the_day_s_regime_is_the_one_decided_before_the_open(setup: Setup)
     assert day_regime(setup.settings.data_dir, DAY, opened) is None, "a newer collector's regime: none here"
 
 
+async def test_a_day_without_any_indicator_has_no_regime_not_a_neutral_one(setup: Setup) -> None:
+    opened = datetime.combine(DAY, time(9, 0), KST)
+    neutral = {"day": DAY, "recorded_at": datetime.combine(DAY, time(7, 30), KST), "regime": "neutral"}
+    neutral |= {"failed": "{}", "skipped": "[]"}
+    # Not one indicator was read: recorded as neutral, read as no regime.
+    setup.recorder.record(
+        "macro", DAY, "regime", "market", neutral | {"reasons": '["지표 없음"]'}, REGIME_SCHEMA
+    )
+    setup.recorder.flush()
+    assert day_regime(setup.settings.data_dir, DAY, opened) is None
+    # A day whose indicators held no rule is neutral, as recorded.
+    later = date(2026, 10, 13)
+    held = neutral | {"day": later, "recorded_at": datetime.combine(later, time(7, 30), KST)}
+    setup.recorder.record(
+        "macro", later, "regime", "market", held | {"reasons": '["해당 없음"]'}, REGIME_SCHEMA
+    )
+    setup.recorder.flush()
+    assert day_regime(setup.settings.data_dir, later, datetime.combine(later, time(9, 0), KST)) == "neutral"
+
+
 async def test_the_status_shows_the_usd_futures_now_against_the_last_close(
     setup: Setup, tmp_path: Path
 ) -> None:
