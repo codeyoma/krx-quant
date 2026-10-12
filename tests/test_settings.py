@@ -51,10 +51,11 @@ def test_the_statuses_are_judged_on_rising_days_at_a_level_below_one() -> None:
     assert defaults.review_confidence == 0.983
     chosen = Settings.from_env({**KEYS, "KRX_PROBATION_REVIEW_DAYS": "15, 30"}, dotenv_path=None)
     assert chosen.probation_review_days == (15, 30)
-    for bad in ("", "20,10", "0,10", "10,10", "ten"):
-        with pytest.raises(SettingsError, match="KRX_PROBATION_REVIEW_DAYS"):
-            Settings.from_env({**KEYS, "KRX_PROBATION_REVIEW_DAYS": bad}, dotenv_path=None)
-    for bad in ("0.4", "1"):
+    for name in ("KRX_PROBATION_REVIEW_DAYS", "KRX_BENCH_REVIEW_DAYS"):
+        for bad in ("", "20,10", "0,10", "10,10", "ten", "10,401"):
+            with pytest.raises(SettingsError, match=name):
+                Settings.from_env({**KEYS, name: bad}, dotenv_path=None)
+    for bad in ("0.4", "1", "nan", "inf"):
         with pytest.raises(SettingsError, match="KRX_REVIEW_CONFIDENCE"):
             Settings.from_env({**KEYS, "KRX_REVIEW_CONFIDENCE": bad}, dotenv_path=None)
 

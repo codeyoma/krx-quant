@@ -35,10 +35,13 @@ import statistics
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from krx_quant.baselines import BASELINE_NAMES
 from krx_quant.stats import MIN_PAIRS_TESTED, Entry, Lift, enough, entry, scored_by_algorithm, split
+
+if TYPE_CHECKING:
+    from krx_quant.config import Settings
 
 RECENT_DAYS = 20
 CLONE_CORRELATION = 0.9
@@ -74,6 +77,10 @@ class Rules:
     probation_days: tuple[int, ...] = (10, 20, 40)  # days on probation it is judged on; the last ends it
     bench_days: tuple[int, ...] = (20, 40, 60)  # days on the bench it may recover on; likewise
     confidence: float = 0.983  # the two-sided level of the lift-by-day interval it needs
+
+    @classmethod
+    def of(cls, settings: Settings) -> Rules:
+        return cls(settings.probation_review_days, settings.bench_review_days, settings.review_confidence)
 
     @property
     def max_probation(self) -> int:

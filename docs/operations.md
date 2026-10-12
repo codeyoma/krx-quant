@@ -196,9 +196,9 @@ curl http://krx-quant:8080/v1/macro
 | `KRX_ALGORITHM_SECONDS` | 10 | 알고리즘 하나가 봉 마감 한 번에 쓸 수 있는 시간(초). 55 이하이고 `KRX_CPU_BUDGET_SECONDS`보다 작아야 한다 |
 | `KRX_CPU_BUDGET_SECONDS` | 30 | 봉 마감 한 번에 알고리즘 예상 시간 합의 상한(초) |
 | `KRX_MIN_SAMPLE` | 200 | 순위와 상태 판정에 필요한 채점 수와 기준 예측과의 짝 수 |
-| `KRX_PROBATION_REVIEW_DAYS` | `10,20,40` | 수습을 판정하는 날(수습 며칠째, 올라가는 정수). 마지막 날이 지나면 은퇴 후보 알림(#87) |
-| `KRX_BENCH_REVIEW_DAYS` | `20,40,60` | 벤치에서 회복을 판정하는 날. 마지막 날이 지나면 은퇴 후보 알림 |
-| `KRX_REVIEW_CONFIDENCE` | 0.983 | 그 판정에 쓰는 거래일 단위 lift 구간의 신뢰수준(양쪽). 0.5 이상 1 미만. 판정 횟수가 늘면 높인다(본페로니) |
+| `KRX_PROBATION_REVIEW_DAYS` | `10,20,40` | 수습을 판정하는 날(수습 며칠째, 올라가는 정수, 400 이하). 마지막 날이 지나면 은퇴 후보 알림(#87) |
+| `KRX_BENCH_REVIEW_DAYS` | `20,40,60` | 벤치에서 회복을 판정하는 날(같은 형식). 마지막 날이 지나면 은퇴 후보 알림. 재생(`replay`, `prevalidate`)도 같은 설정을 쓴다 |
+| `KRX_REVIEW_CONFIDENCE` | 0.983 | 그 판정에 쓰는 거래일 단위 lift 구간의 신뢰수준(양쪽). 0.5 이상 0.9999 이하의 유한한 수. 판정 횟수가 늘면 높인다(본페로니) |
 | `KRX_TRAIN_AT` | `21:30` | 거래일 밤 학습 시각(KST, `HH:MM`). `off`나 빈 값이면 하지 않는다. `KRX_TRAIN_ON=spot`이면 Spot 스케줄(`deploy/training.yaml`의 `TrainAt`)과 같게 둔다 |
 | `KRX_TRAIN_ON` | `server` | 밤 학습을 돌리는 곳(#23). `server`는 이 서버의 별도 프로세스, `spot`은 AWS가 같은 시각에 띄우는 EC2 Spot이다. `spot`이면 서버는 학습에 필요한 설정과 휴장일 달력을 S3(`training/`)에 올리고, 결과를 다음 거래일 07:30까지 기다려 요약을 텔레그램으로 보낸다 |
 | `KRX_COST_BUDGET` | (없음) | 서버가 1시간마다 읽는 AWS Budgets 예산 이름(`krx-quant-monthly`, #23). 이달 비용이 예산의 50%와 80%를 넘으면 한 번씩 알리고, 100%에 닿으면 `KRX_TRAINING_SCHEDULES`를 그달 동안 끈다. 없으면 보지 않는다. 있으면 `KRX_TRAINING_SCHEDULES`도 있어야 한다(없으면 설정 오류) |

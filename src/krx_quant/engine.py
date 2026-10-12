@@ -60,7 +60,7 @@ from typing import Any
 from krx_quant.algorithms import ALGORITHMS, Abstention, Algorithm, Model, NotPredicted, register
 from krx_quant.baselines import BASELINES, Forecast, Inputs
 from krx_quant.clock import SessionClock
-from krx_quant.config import Settings
+from krx_quant.config import MAX_REVIEW_DAY, Settings
 from krx_quant.consensus import FAST, FINAL, NAMES, NO_WEIGHTS, SPANS, Timing, Weights, pool
 from krx_quant.consensus import fit as fit_weights
 from krx_quant.features import REGIME_CODES, FeatureStore, FeatureVector, Leaders, Value
@@ -129,7 +129,7 @@ Regimes = Callable[[date, datetime], str | None]
 REVIEW_AFTER_CLOSE = timedelta(minutes=10)
 # Days with predictions a review reads back over: the longest rule counts 60 on the bench,
 # and a status can be older than that.
-_REVIEW_DAYS = 400
+_REVIEW_DAYS = MAX_REVIEW_DAY  # prediction days a review reads back
 
 _BOOK_COLUMNS = (
     "symbol",

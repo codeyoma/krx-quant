@@ -195,9 +195,7 @@ async def run_collector(
         leaders=Leaders.of(settings),
         regimes=partial(day_regime, settings.data_dir),  # recorded by the 07:30 macro read
         admits=admits(settings.state_dir),  # a new algorithm waits for its pre-validation
-        review_rules=Rules(
-            settings.probation_review_days, settings.bench_review_days, settings.review_confidence
-        ),
+        review_rules=Rules.of(settings),
     )
 
     def on_event(feed: str, row: dict[str, Any]) -> None:

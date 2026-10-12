@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -20,6 +21,8 @@ DEFAULT_WS_URL = "ws://ops.koreainvestment.com:21000"
 DEFAULT_MASTER_URL = "https://new.real.download.dws.co.kr/common/master"
 # KIS allows 20 REST calls per second on a real account.
 MAX_REST_PER_SECOND = 20
+# The prediction days a status review reads back: its review days must stay within them.
+MAX_REVIEW_DAY = 400
 DEFAULT_TELEGRAM_API_URL = "https://api.telegram.org"
 # Macro sources (macro.py).
 DEFAULT_ECOS_URL = "https://ecos.bok.or.kr/api"
@@ -180,6 +183,8 @@ class Settings:
                 value = kind(raw)
             except ValueError as e:
                 raise SettingsError(f"{name} must be a number, got {raw!r}") from e
+            if not math.isfinite(value):  # nan passes every comparison below
+                raise SettingsError(f"{name} must be a finite number, got {raw!r}")
             if (value < minimum) if minimum is not None else (value <= 0):
                 floor = "above 0" if minimum is None else minimum
                 raise SettingsError(f"{name} must be at least {floor}, got {raw!r}")
@@ -199,6 +204,8 @@ class Settings:
                 raise SettingsError(f"{name} must be whole days, got {','.join(raw)!r}") from e
             if not days or days[0] < 1 or any(b <= a for a, b in zip(days, days[1:], strict=False)):
                 raise SettingsError(f"{name} must be rising days from 1 on, got {','.join(raw)!r}")
+            if days[-1] > MAX_REVIEW_DAY:
+                raise SettingsError(f"{name} must stay within {MAX_REVIEW_DAY} days (the history reviewed)")
             return days
 
         if values.get("KRX_COST_BUDGET", "").strip() and not codes("KRX_TRAINING_SCHEDULES", ""):
