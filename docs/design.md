@@ -75,7 +75,7 @@
   - 맥과 윈도우 빌드가 통과하면 `custom`에 반영하고 `custom-<tag>-krx.1` 태그로 개인 빌드를 낸다. 앱은 그 빌드를 업데이트로 받는다.
   - 충돌이나 빌드 실패면 `custom`은 그대로 두고 fork에 issue를 연다. 그때는 손으로 `custom/merge-upstream-release.sh`를 돌린다.
   - 자세한 내용(`SYNC_TOKEN` 포함)은 fork의 `custom/README.md` "upstream 릴리스 반영"에 있다.
-  > **바뀜** (2026-10-12, #PR): 매주 월요일 09:00 KST에 새 릴리스를 issue로 알리고 반영은 손으로 했다 → 매일 05:00 KST에 merge·시험 빌드·`custom` 반영·태그까지 자동으로 한다. 이유: upstream이 릴리스를 내면 업데이트가 저절로 돌게 하려고(#93).
+  > **바뀜** (2026-10-12, #94): 매주 월요일 09:00 KST에 새 릴리스를 issue로 알리고 반영은 손으로 했다 → 매일 05:00 KST에 merge·시험 빌드·`custom` 반영·태그까지 자동으로 한다. 이유: upstream이 릴리스를 내면 업데이트가 저절로 돌게 하려고(#93).
 
 **Fincept 수정 원칙.**
 - 새 화면 하나만 추가한다. 고치는 upstream 파일은 7개로 제한한다.
