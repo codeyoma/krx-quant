@@ -40,4 +40,5 @@ Single-context: root `CONTEXT.md` + `docs/adr/`, plus the agreed system design i
 3. Commit inside `fincept/` and push it to `origin custom` first.
 4. Then, in this repo, `git add fincept` and commit the pointer bump. Put it in the same commit as any engine change the screen depends on (for example an Engine API change), so engine and screen versions move together.
 5. Never push a krx-quant commit whose `fincept` pointer is not on the fork's remote. `push.recurseSubmodules=check` enforces this.
-6. Upstream Fincept releases are merged inside `fincept/` with `custom/merge-upstream-release.sh`; then commit the pointer bump here.
+6. Upstream Fincept releases merge by themselves: the fork's daily `custom-upstream-watch` workflow merges a new release into `custom`, trial-builds it, lands it, and tags the personal build `custom-<tag>-krx.1` (`fincept/custom/README.md`, "upstream 릴리스 반영"). When it opens an "Upstream <tag>: merge needs a hand" issue on the fork, finish inside `fincept/` with `custom/merge-upstream-release.sh` as the issue says. The `fincept` pointer here moves past the merge with the next krx-quant commit that touches `fincept/`.
+   > **바뀜** (2026-10-12, #PR): upstream 릴리스는 `fincept/` 안에서 손으로 merge 하고 포인터를 올렸다 → fork workflow가 merge·시험 빌드·`custom` 반영·태그까지 한다. 이유: upstream이 릴리스를 내면 업데이트가 저절로 돌게 하려고(#93).

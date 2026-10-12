@@ -70,13 +70,17 @@
 - `main`: upstream 미러. 직접 커밋하지 않는다.
 - `custom`: 개인 빌드. 기본 브랜치다. upstream은 릴리스 태그(v4.x)만 merge 하고, rebase는 하지 않는다. 맥과 윈도우가 같은 이력을 공유하기 때문이다.
 - `custom/UPSTREAM_BASE`에 현재 기반 태그를 적는다 (시작: v4.5.0).
-- `custom-upstream-watch` workflow가 매주 월요일 09:00 KST에 `main`을 동기화한다. 새 릴리스가 나오면 issue를 연다.
-- 반영은 `custom/merge-upstream-release.sh`로 한다. 자세한 내용은 fork의 `custom/README.md`에 있다.
+- `custom-upstream-watch` workflow가 매일 05:00 KST에 `main`을 동기화하고, upstream의 새 릴리스를 반영한다.
+  - runner에서 `custom/merge-upstream-release.sh`로 `custom`에 merge 하고, 그 결과(`upstream-merge/<tag>` 브랜치)를 `custom-release`로 시험 빌드한다.
+  - 맥과 윈도우 빌드가 통과하면 `custom`에 반영하고 `custom-<tag>-krx.1` 태그로 개인 빌드를 낸다. 앱은 그 빌드를 업데이트로 받는다.
+  - 충돌이나 빌드 실패면 `custom`은 그대로 두고 fork에 issue를 연다. 그때는 손으로 `custom/merge-upstream-release.sh`를 돌린다.
+  - 자세한 내용(`SYNC_TOKEN` 포함)은 fork의 `custom/README.md` "upstream 릴리스 반영"에 있다.
+  > **바뀜** (2026-10-12, #PR): 매주 월요일 09:00 KST에 새 릴리스를 issue로 알리고 반영은 손으로 했다 → 매일 05:00 KST에 merge·시험 빌드·`custom` 반영·태그까지 자동으로 한다. 이유: upstream이 릴리스를 내면 업데이트가 저절로 돌게 하려고(#93).
 
 **Fincept 수정 원칙.**
 - 새 화면 하나만 추가한다. 고치는 upstream 파일은 7개로 제한한다.
   - 화면 등록: `fincept-qt/CMakeLists.txt`(자동 업데이트를 끄는 `FINCEPT_DISABLE_AUTO_UPDATE` 옵션도), `src/app/WindowFrame_Setup.cpp`, `src/app/DockScreenRouter.cpp`, `src/ui/navigation/ToolBar.cpp`, `src/ui/navigation/CommandBar.cpp`
-  - 화면 테스트 등록: `fincept-qt/tests/CMakeLists.txt`
+  - 화면 테스트 등록: `fincept-qt/tests/CMakeLists.txt`(`krx_quant.cmake`를 include 하는 한 줄. 테스트는 새 파일 `tests/krx_quant.cmake`에 등록한다. 그래서 upstream이 파일 끝에 붙이는 테스트와 merge 충돌하지 않는다. #93)
   - 자동 업데이트 끄기: `src/services/updater/UpdateService.cpp`
   - 무엇을 고쳤는지는 fork의 `custom/README.md` 표가 정본이다.
 
