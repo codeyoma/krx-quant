@@ -196,6 +196,9 @@ curl http://krx-quant:8080/v1/macro
 | `KRX_ALGORITHM_SECONDS` | 10 | 알고리즘 하나가 봉 마감 한 번에 쓸 수 있는 시간(초). 55 이하이고 `KRX_CPU_BUDGET_SECONDS`보다 작아야 한다 |
 | `KRX_CPU_BUDGET_SECONDS` | 30 | 봉 마감 한 번에 알고리즘 예상 시간 합의 상한(초) |
 | `KRX_MIN_SAMPLE` | 200 | 순위와 상태 판정에 필요한 채점 수와 기준 예측과의 짝 수 |
+| `KRX_PROBATION_REVIEW_DAYS` | `10,20,40` | 수습을 판정하는 날(수습 며칠째, 올라가는 정수, 400 이하). 마지막 날이 지나면 은퇴 후보 알림(#87) |
+| `KRX_BENCH_REVIEW_DAYS` | `20,40,60` | 벤치에서 회복을 판정하는 날(같은 형식). 마지막 날이 지나면 은퇴 후보 알림. 재생(`replay`, `prevalidate`)도 같은 설정을 쓴다 |
+| `KRX_REVIEW_CONFIDENCE` | 0.983 | 그 판정에 쓰는 거래일 단위 lift 구간의 신뢰수준(양쪽). 0.5 이상 0.9999 이하의 유한한 수. 판정 횟수가 늘면 높인다(본페로니) |
 | `KRX_TRAIN_AT` | `21:30` | 거래일 밤 학습 시각(KST, `HH:MM`). `off`나 빈 값이면 하지 않는다. `KRX_TRAIN_ON=spot`이면 Spot 스케줄(`deploy/training.yaml`의 `TrainAt`)과 같게 둔다 |
 | `KRX_TRAIN_ON` | `server` | 밤 학습을 돌리는 곳(#23). `server`는 이 서버의 별도 프로세스, `spot`은 AWS가 같은 시각에 띄우는 EC2 Spot이다. `spot`이면 서버는 학습에 필요한 설정과 휴장일 달력을 S3(`training/`)에 올리고, 결과를 다음 거래일 07:30까지 기다려 요약을 텔레그램으로 보낸다 |
 | `KRX_COST_BUDGET` | (없음) | 서버가 1시간마다 읽는 AWS Budgets 예산 이름(`krx-quant-monthly`, #23). 이달 비용이 예산의 50%와 80%를 넘으면 한 번씩 알리고, 100%에 닿으면 `KRX_TRAINING_SCHEDULES`를 그달 동안 끈다. 없으면 보지 않는다. 있으면 `KRX_TRAINING_SCHEDULES`도 있어야 한다(없으면 설정 오류) |
@@ -484,6 +487,9 @@ docker compose run --rm --no-deps engine prevalidate <이름>
 - 새 엔진이 3분 안에 API에 답하지 않으면 이전 커밋으로 되돌려 다시 띄운다. 실패한 커밋은 서버의 `.auto-update-failed`에 남아서, main이 더 바뀔 때까지 다시 시도하지 않는다.
 - 결과는 텔레그램으로 온다(`krx-quant notify`): `[알림] 자동 업데이트: <이전> → <새 커밋>`과 커밋 제목(최대 10개), `[알림] 자동 업데이트 실패: …`, 그 밖의 오류(GitHub 접속 실패 등)는 `[알림] 자동 업데이트 오류: …`. 오류일 때 엔진은 그대로 돈다.
 - 업데이트가 끝나면 쓰지 않는 Docker 이미지를 지운다.
+- 이미지를 만들 때 그 커밋을 넘긴다(`KRX_COMMIT`, `compose.yaml`의 빌드 인자). 엔진은 `/v1/status`의 `commit`으로 보이고, 시작할 때마다 DB `runs`에 `start`로 커밋과 수수료율, 신호 규칙, 시간·CPU 예산을 남긴다(#85). 손으로 `docker compose up -d --build`하면 `unknown`이다. 커밋을 남기려면 `KRX_COMMIT=$(git rev-parse HEAD) docker compose up -d --build`로 띄운다.
+
+  > **바뀜** (2026-10-13, #121): 도는 엔진의 커밋을 알 수 없었다 → 자동 배포가 이미지에 넘기고, 엔진이 보이고 기록한다. 이유: 성적을 코드와 설정별로 가를 수 없었다(#78, #85). 이 변경을 처음 받는 06:00 배포는 이전 스크립트로 이미지를 만들어 `unknown`이고, 그다음 배포부터 커밋이 나온다.
 - **주의: SQLite 스키마를 올리는 main.** 엔진은 시작할 때 `state/engine.sqlite3`를 새 스키마로 올린다. 그 main이 API 확인에 실패하면 되돌린 옛 엔진은 새 스키마의 DB를 거부하고(`... was written by a newer engine (schema N)`) 뜨지 못한다. 그러면 `자동 업데이트 실패: ...되돌렸지만 엔진이 응답하지 않습니다`가 온다. 고친 커밋을 main에 올리고 장 시간 밖에서 `deploy/auto-update.sh`를 실행한다. 실패한 커밋만 건너뛰므로 더 새 main은 바로 시도한다.
 
 ```bash

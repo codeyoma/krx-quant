@@ -152,7 +152,8 @@ async def test_probation_ends_after_ten_days_better_than_every_baseline(tmp_path
     put_status(db, "beta", "probation", history[-3])  # four days so far
     # Over always-flat, its weakest baseline, alpha gains 0.25 a day missing the downs and 0.5
     # right: over the nine days, a mean of 0.3889 and a standard deviation of 0.1318, so a
-    # lower bound of 0.3889 - 2.3060 (t, 8 degrees of freedom) x 0.1318 / 3 = 0.2876.
+    # 98.3% lower bound of 0.3889 - 3.0028 (t at 99.15%, 8 degrees of freedom) x 0.1318 / 3
+    # = 0.2570.
     put_days(db, history[:4], {"alpha": MISSES_DOWNS, "gamma": FLAT})
     put_days(db, history[4:], {"alpha": RIGHT, "gamma": FLAT})
     put_days(db, history[-3:], {"beta": MISSES_DOWNS}, with_baselines=False)
@@ -162,7 +163,7 @@ async def test_probation_ends_after_ten_days_better_than_every_baseline(tmp_path
     statuses = await listed(engine)
     assert last_change(statuses["alpha"])[:2] == ("probation", "active")
     assert last_change(statuses["alpha"])[2] == (
-        "10 days on probation; weakest lift low 0.2876 by trading day (9 days scored)"
+        "10 days on probation; weakest lift low 0.2570 by trading day at 98.3% (9 days scored)"
     )
     assert statuses["alpha"]["status"]["since"] == "2026-10-12T15:40:00+09:00"
     assert statuses["beta"]["status"]["status"] == "probation"  # too soon
@@ -174,6 +175,34 @@ async def test_probation_ends_after_ten_days_better_than_every_baseline(tmp_path
         "beta": "probation",
         "gamma": "probation",
     }
+
+
+async def test_probation_is_judged_on_its_tenth_twentieth_and_fortieth_days_only(tmp_path: Path) -> None:
+    judged = {}
+    for days in (11, 20, 30):  # with the replayed day
+        db = tmp_path / f"{days}.db"
+        history = weekdays_before(DAY, days - 1)
+        put_status(db, "alpha", "probation", history[0])
+        put_days(db, history, {"alpha": RIGHT})
+        judged[days] = (await listed(await review_day(db, [ALPHA])))["alpha"]["status"]["status"]
+
+    # Better than every baseline each day, but judged on the twentieth day only.
+    assert judged == {11: "probation", 20: "active", 30: "probation"}
+
+
+async def test_past_its_last_judged_day_probation_is_a_retirement_candidate(tmp_path: Path) -> None:
+    db = tmp_path / "engine.db"
+    history = weekdays_before(DAY, 39)  # with the replayed day, forty days on probation
+    put_status(db, "alpha", "probation", history[0])
+    put_days(db, history, {"alpha": FLAT})  # never better than always-flat
+    outbox = Outbox()
+
+    engine = await review_day(db, [ALPHA], notify=outbox)
+
+    assert (await listed(engine))["alpha"]["status"]["status"] == "probation"  # retired only by command
+    [alert] = outbox.sent
+    assert "alpha 은퇴 후보: 수습 40거래일 동안 정식이 되지 못했습니다" in alert
+    assert "krx-quant retire alpha" in alert
 
 
 async def test_probation_needs_its_lift_day_after_day_not_on_a_few_days(tmp_path: Path) -> None:
@@ -241,7 +270,7 @@ async def test_a_benched_algorithm_recovers_or_after_sixty_days_is_a_retirement_
     tmp_path: Path,
 ) -> None:
     db = tmp_path / "engine.db"
-    days = weekdays_before(DAY, 65)
+    days = weekdays_before(DAY, 59)  # with the replayed day, sixty days on the bench: judged
     put_status(db, "alpha", "bench", days[0])
     put_status(db, "beta", "bench", days[0])
     put_days(db, days[:-20], {"alpha": WRONG, "beta": WRONG})
@@ -255,11 +284,13 @@ async def test_a_benched_algorithm_recovers_or_after_sixty_days_is_a_retirement_
     assert last_change(statuses["beta"]) == (
         "bench",
         "active",
-        "recovered: weakest lift low 0.5000 by trading day (19 days scored) over the last 20 days",
+        "recovered: weakest lift low 0.5000 by trading day at 98.3% (19 days scored) over the last 20 days,"
+        " 60 on the bench",
     )
     assert statuses["alpha"]["status"]["status"] == "bench"  # retired only by command
     [alert] = outbox.sent
-    assert "alpha 은퇴 후보" in alert and "krx-quant retire alpha" in alert
+    assert "alpha 은퇴 후보: 벤치에서 60거래일 동안 회복하지 못했습니다" in alert
+    assert "krx-quant retire alpha" in alert
 
     # Not sent, so asked again the next day; sent then, so not the day after.
     outbox.down = False
@@ -278,7 +309,7 @@ async def test_a_benched_algorithm_recovers_or_after_sixty_days_is_a_retirement_
 
 async def test_a_benched_algorithm_recovers_only_on_its_lift_day_after_day(tmp_path: Path) -> None:
     db = tmp_path / "engine.db"
-    days = weekdays_before(DAY, 25)
+    days = weekdays_before(DAY, 39)  # with the replayed day, forty days on the bench: judged
     put_status(db, "alpha", "bench", days[0])
     # Right on the last three days, always-flat's calls before: over the last 20 days (19 of
     # them scored), its lower bound over always-flat is above 0 bar close by bar close, not
@@ -294,6 +325,20 @@ async def test_a_benched_algorithm_recovers_only_on_its_lift_day_after_day(tmp_p
     [alpha] = [e for e in board["ranked"] + board["unranked"] if e["algorithm"] == "alpha"]
     assert alpha["lift"]["low"] > 0
     assert alpha["lift"]["day_low"] <= 0
+
+
+async def test_the_bench_is_judged_on_its_twentieth_fortieth_and_sixtieth_days_only(tmp_path: Path) -> None:
+    db = tmp_path / "engine.db"
+    for name, n in (("alpha", 21), ("beta", 40)):  # with the replayed day
+        days = weekdays_before(DAY, n - 1)
+        put_status(db, name, "bench", days[0])
+        put_days(db, days, {name: RIGHT}, with_baselines=name == "alpha")
+
+    engine = await review_day(db, [ALPHA, BETA])
+
+    statuses = await listed(engine)
+    assert statuses["alpha"]["status"]["status"] == "bench"  # good again, not a day it is judged on
+    assert last_change(statuses["beta"])[:2] == ("bench", "active")
 
 
 async def test_a_status_set_after_the_review_counts_from_the_next_day(tmp_path: Path) -> None:

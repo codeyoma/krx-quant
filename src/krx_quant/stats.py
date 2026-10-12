@@ -260,10 +260,11 @@ def lift(records: Sequence[Scored], baseline: Sequence[Scored]) -> Lift:
     return Lift(interval.n, interval.value, interval.low, interval.high, p)
 
 
-def day_lift(records: Sequence[Scored], baseline: Sequence[Scored]) -> Lift | None:
+def day_lift(records: Sequence[Scored], baseline: Sequence[Scored], level: float = 0.95) -> Lift | None:
     """The lift over ``baseline`` taken a trading day at a time: each day's mean gain is one
-    value, every day weighing the same. Its ``n`` is the days; None from fewer than two. Days
-    that all gained the same have no spread: the interval is that gain alone.
+    value, every day weighing the same, with a two-sided ``level`` interval. Its ``n`` is the
+    days; None from fewer than two. Days that all gained the same have no spread: the
+    interval is that gain alone.
     """
     by_day: dict[date, list[float]] = {}
     for at, gain in _gains(records, baseline):
@@ -274,7 +275,7 @@ def day_lift(records: Sequence[Scored], baseline: Sequence[Scored]) -> Lift | No
         return None
     mean = sum(means) / n
     error = _standard_error(means, mean)
-    half = _t_quantile(0.975, n - 1) * error
+    half = _t_quantile(1 - (1 - level) / 2, n - 1) * error
     if error == 0:
         p = 0.0 if mean > 0 else 1.0
     else:
@@ -414,13 +415,21 @@ class Leaderboard:
 
 
 def entry(
-    algorithm: str, records: Sequence[Scored], baselines: dict[str, list[Scored]], fee_rate: float
+    algorithm: str,
+    records: Sequence[Scored],
+    baselines: dict[str, list[Scored]],
+    fee_rate: float,
+    day_level: float = 0.95,
 ) -> Entry:
-    """One algorithm's (or baseline's) stats, with its lift over each baseline."""
+    """One algorithm's (or baseline's) stats, with its lift over each baseline; by trading
+    day, a ``day_level`` interval."""
     lifts = (
         {}
         if algorithm in baselines
-        else {name: Tested(lift(records, b), by_day=day_lift(records, b)) for name, b in baselines.items()}
+        else {
+            name: Tested(lift(records, b), by_day=day_lift(records, b, day_level))
+            for name, b in baselines.items()
+        }
     )
     versions = sorted({r.model_version for r in records})
     return Entry(algorithm, versions, summarize(records, fee_rate), lifts)

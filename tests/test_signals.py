@@ -29,7 +29,20 @@ from krx_quant.predictions import PredictionStore
 from krx_quant.replay import replay_into
 from krx_quant.signals import SignalRule, Signals
 from tests.algorithm_doubles import FixedAlgorithm
-from tests.replay_events import CALENDAR, FEE, SYMBOL, at, book, every, kospi, kospi200_futures, vi
+from tests.api_schema import check
+from tests.replay_events import (
+    CALENDAR,
+    FEE,
+    SYMBOL,
+    api,
+    at,
+    book,
+    every,
+    get_json,
+    kospi,
+    kospi200_futures,
+    vi,
+)
 from tests.test_replay import busy_morning
 
 UP = Forecast(0.7, 0.2, 0.1, 2.0)
@@ -143,6 +156,28 @@ async def test_no_signal_without_enough_agreement_or_certainty(
     await alerts.close()
 
     assert sent == []
+
+
+async def test_every_client_reads_why_a_final_consensus_is_not_to_be_acted_on(tmp_path: Path) -> None:
+    # Telegram signals off: the reason is stored with the final consensus for every client.
+    events = [*busy_morning(end="09:05:30"), vi(at("09:01:02"), "09:01:01")]
+    store = PredictionStore(tmp_path / "engine.db")
+    algorithms = [FixedAlgorithm("m0", features=("velocity",), unique=("velocity",), forecast=UP)]
+    store.add_status("m0", at("08:00:00"), None, Status.ACTIVE, "test")
+    clock = FakeClock(at("09:00:00"))
+    engine = PredictionEngine(store, CALENDAR, (SYMBOL,), FEE, clock, algorithms=algorithms)
+    events.sort(key=lambda e: e[1]["received_at"])
+    await replay_into(engine, clock, events, until=at("09:05:30"), display_delay=timedelta(seconds=3))
+
+    async with api(engine) as client:
+        final = await get_json(client, f"/v1/symbols/{SYMBOL}/predictions?algorithm=consensus-final")
+        everything = await get_json(client, f"/v1/symbols/{SYMBOL}/predictions")
+    store.close()
+
+    check("predictions", final)
+    blocked = {p["bar_close"][11:16]: p["blocked"] for p in final["predictions"] if p["status"] == "ok"}
+    assert blocked == {"09:01": "special", "09:05": None}  # 09:02-09:04: in the VI, not predicted
+    assert {p["blocked"] for p in everything["predictions"] if p["algorithm"] != "consensus-final"} == {None}
 
 
 async def test_a_vi_learned_after_the_bar_close_blocks_its_signal(

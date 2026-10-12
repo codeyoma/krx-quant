@@ -27,6 +27,7 @@ from krx_quant.consensus import Timing
 from krx_quant.engine import ENGINE_FEEDS, Budget, Event, Notify, PredictionEngine, Regimes, partitions
 from krx_quant.features import FeatureStore, Leaders
 from krx_quant.feeds.base import KST, kst_day
+from krx_quant.lifecycle import Rules
 from krx_quant.macro import day_regime
 from krx_quant.market_calendar import MarketCalendar, calendar_store
 from krx_quant.predictions import DB_NAME, AlgorithmSummary, PredictionStore
@@ -58,6 +59,7 @@ async def replay(
     leaders: Leaders | None = None,
     regimes: Regimes | None = None,
     admits: Callable[[Algorithm], bool] | None = None,
+    review_rules: Rules | None = None,
 ) -> PredictionEngine:
     """Feed ``events`` (in receipt order) received by ``until`` to an engine storing into ``db``.
 
@@ -84,6 +86,7 @@ async def replay(
         leaders=leaders,
         regimes=regimes,
         admits=admits,
+        review_rules=review_rules,
     )
     await replay_into(engine, clock, events, until=until, display_delay=display_delay)
     return engine
@@ -244,6 +247,7 @@ async def replay_recorded(
         min_sample=settings.min_sample,
         leaders=Leaders.of(settings),
         regimes=partial(day_regime, settings.data_dir),
+        review_rules=Rules.of(settings),
     )
 
 

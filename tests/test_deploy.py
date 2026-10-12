@@ -99,6 +99,10 @@ FAKE_DOCKER = """#!/usr/bin/env bash
 # Stands in for docker: logs each call; the engine answers unless the checkout's
 # BROKEN file exists (a commit that does not start), and a push fails while PUSH_FAILS does.
 echo "$*" >>"$DOCKER_LOG"
+# The commit a compose build is given (KRX_COMMIT), one per build.
+if [[ "$*" == "compose up -d --build" ]]; then
+  echo "${KRX_COMMIT:-}" >>"$DOCKER_LOG.commits"
+fi
 if [[ "$1" == push && -f PUSH_FAILS ]]; then
   exit 1
 fi
@@ -180,6 +184,23 @@ def test_the_server_updates_to_a_new_main_and_says_so(server: Path) -> None:
     assert calls[0] == "compose up -d --build"
     notice = (server.parent / "docker.log").read_text().split(" notify ", 1)[1]
     assert notice.startswith("자동 업데이트") and new[:7] in notice and "- Granger learns" in notice
+
+
+def built_commits(server: Path) -> list[str]:
+    log = server.parent / "docker.log.commits"
+    return log.read_text().splitlines() if log.exists() else []
+
+
+def test_each_build_is_given_the_commit_it_runs(server: Path) -> None:
+    before = git(server, "rev-parse", "HEAD")
+    new = push(server, "Granger learns")
+    assert update(server).returncode == 0
+    bad = push(server, "a bug", broken=True)
+    assert update(server).returncode != 0
+
+    # The new main, then the bad one that did not start and the one it went back to.
+    assert built_commits(server) == [new, bad, new]
+    assert before != new
 
 
 def test_with_the_training_on_spot_an_update_pushes_the_image_and_forgets_the_login(server: Path) -> None:

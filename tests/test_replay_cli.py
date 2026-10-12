@@ -17,11 +17,13 @@ import pytest
 from krx_quant.algorithms import Model, save_model
 from krx_quant.archive import archive
 from krx_quant.cli import main
+from krx_quant.config import Settings
 from krx_quant.engine import Event
 from krx_quant.feeds import INDEX_REST, VI_STATUS, WS_FEEDS
+from krx_quant.lifecycle import Rules
 from krx_quant.object_store import LocalObjectStore
 from krx_quant.recorder import ParquetRecorder
-from krx_quant.replay import recorded_events
+from krx_quant.replay import recorded_events, replay_recorded
 from tests.replay_events import DAY, at, kospi, kospi200_futures, run
 from tests.test_replay import busy_morning, stored
 from tests.test_special import VI, held
@@ -190,3 +192,16 @@ def test_futures_recorded_before_their_change_was_kept_still_replay(
     )
 
     replays_like_by_hand(tmp_path, monkeypatch, busy_morning(), recorded=len(busy_morning()) + len(futures))
+
+
+async def test_a_recorded_replay_judges_statuses_by_the_server_s_rules(tmp_path: Path) -> None:
+    env = {
+        "KRX_STATE_DIR": str(tmp_path / "state"),
+        "KRX_PROBATION_REVIEW_DAYS": "1,5",
+        "KRX_REVIEW_CONFIDENCE": "0.99",
+    }
+    settings = Settings.from_env(env, dotenv_path=None, require_kis=False)
+
+    engine = await replay_recorded(settings, DAY, [], db=tmp_path / "replay.db", models={})
+
+    assert engine.review_rules == Rules((1, 5), (20, 40, 60), 0.99)
