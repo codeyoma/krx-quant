@@ -177,6 +177,7 @@ def prediction_json(row: dict[str, Any]) -> dict[str, Any]:
         "displayed_at": row["displayed_at"],
         "target_at": row["target_at"],
         "status": row["status"],
+        "blocked": row.get("blocked"),
         "p_up": row["p_up"],
         "p_flat": row["p_flat"],
         "p_down": row["p_down"],
