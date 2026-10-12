@@ -142,6 +142,7 @@ class Settings:
     yahoo_url: str = DEFAULT_YAHOO_URL
     regime_rules: RegimeRules = RegimeRules()
     signal_rule: SignalRule | None = None  # Telegram signal alerts; None: off
+    commit: str = "unknown"  # the commit the image was built from (KRX_COMMIT, set by the deploy)
     probation_review_days: tuple[int, ...] = (10, 20, 40)  # days on probation it is judged on (#87)
     bench_review_days: tuple[int, ...] = (20, 40, 60)  # days on the bench it may recover on
     review_confidence: float = 0.983  # the lift-by-day interval's level those judgements need
@@ -309,6 +310,7 @@ class Settings:
             signal_rule=signal_rule
             if _on_or_off("KRX_SIGNAL_ALERT", values.get("KRX_SIGNAL_ALERT", "off"))
             else None,
+            commit=values.get("KRX_COMMIT", "").strip() or "unknown",
             probation_review_days=review_days("KRX_PROBATION_REVIEW_DAYS", "10,20,40"),
             bench_review_days=review_days("KRX_BENCH_REVIEW_DAYS", "20,40,60"),
             review_confidence=float(

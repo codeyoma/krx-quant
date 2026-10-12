@@ -92,6 +92,19 @@ async def test_every_route_has_its_definition(tmp_path: Path) -> None:
     assert {*ROUTES.values(), *STREAM.values()} <= set(SCHEMA["$defs"])
 
 
+async def test_the_status_names_the_commit_running_and_when_the_engine_started(tmp_path: Path) -> None:
+    engine = await run(tmp_path / "engine.db", [], until=at("09:00:00"))
+    async with TestClient(TestServer(create_app(engine))) as client:
+        unknown = await (await client.get("/v1/status")).json()
+        engine.commit = "0123456789abcdef0123456789abcdef01234567"
+        deployed = await (await client.get("/v1/status")).json()
+
+    check("status", deployed)
+    assert unknown["commit"] == "unknown", "an engine not built by the auto-deploy"
+    assert deployed["commit"] == "0123456789abcdef0123456789abcdef01234567"
+    assert deployed["started_at"] == "2026-10-12T00:00:00+09:00", "the replay's clock when it was made"
+
+
 async def test_live_and_demo_need_their_kis_status(tmp_path: Path) -> None:
     engine = await run(tmp_path / "engine.db", [], until=at("09:00:00"))
 

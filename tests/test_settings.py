@@ -45,6 +45,11 @@ def test_a_cost_budget_needs_the_schedules_it_turns_off() -> None:
     assert Settings.from_env(both, dotenv_path=None).training_schedules == ("a", "b")
 
 
+def test_the_commit_running_is_the_deploy_s_or_unknown() -> None:
+    assert Settings.from_env(KEYS, dotenv_path=None).commit == "unknown"
+    assert Settings.from_env({**KEYS, "KRX_COMMIT": "0123abc"}, dotenv_path=None).commit == "0123abc"
+
+
 def test_the_statuses_are_judged_on_rising_days_at_a_level_below_one() -> None:
     defaults = Settings.from_env(KEYS, dotenv_path=None)
     assert (defaults.probation_review_days, defaults.bench_review_days) == ((10, 20, 40), (20, 40, 60))
