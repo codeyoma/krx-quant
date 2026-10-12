@@ -80,6 +80,7 @@ async def test_a_client_receives_predictions_the_consensus_and_outcomes_as_they_
     assert made == {"baseline-flat", "baseline-persist", "baseline-random", "first", "second"}
     [final] = [e for e in first if e.get("kind") == "final"]
     assert final["predictions"][0]["p_up"] == UP.p_up and final["predictions"][0]["symbol"] == SYMBOL
+    assert final["predictions"][0]["votes"] == {"up": 2, "flat": 0, "down": 0}, "first and second, both up"
     outcome = events[-1]
     assert outcome["at"] == "2026-10-12T09:05:00+09:00"
     scored = {(p["algorithm"], p["bar_close"]) for p in outcome["outcomes"]}

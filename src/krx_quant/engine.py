@@ -94,7 +94,7 @@ from krx_quant.market_view import (
     next_bar_close,
 )
 from krx_quant.predictions import NewPrediction, Pending, PredictionStore, Score
-from krx_quant.pricing import Direction, classify, flat_ticks, tick_size
+from krx_quant.pricing import Direction, classify, flat_ticks, most_likely, tick_size
 from krx_quant.reference import Bar
 from krx_quant.signals import SENT, Blocked, Judged, Signals
 from krx_quant.special import KOSPI, Kind, SpecialSituations, Window, in_vi, touching
@@ -608,7 +608,7 @@ class PredictionEngine:
         ]
         # A final consensus not to be acted on says why, stored with it for every client (#88).
         blocked = self._blocked(bar_close, at_close, pooled) if name == FINAL else {}
-        self._record(bar_close, at_close, made, blocked)
+        self._record(bar_close, at_close, made, blocked, {s: _votes(f) for s, f in pooled_from.items()})
         if name == FINAL and self.signals is not None:
             try:
                 self._signal(self.signals, bar_close, pooled, pooled_from, blocked)
@@ -729,8 +729,10 @@ class PredictionEngine:
         at_close: Mapping[str, _AtClose],
         made: Sequence[tuple[str, str, Mapping[str, Forecast | None], str]],
         blocked: Mapping[str, Blocked] | None = None,
+        votes: Mapping[str, tuple[int, int, int]] | None = None,
     ) -> None:
-        """Store (name, model version, forecasts by symbol, status) entries as displayed now."""
+        """Store (name, model version, forecasts by symbol, status) entries as displayed now;
+        a consensus with how its members leaned (``votes``, by symbol)."""
         displayed_at = self.clock.now()
         mid_display = {symbol: self._market.mid(symbol, displayed_at) for symbol in at_close}
         special = self._special.known(before=displayed_at)
@@ -757,6 +759,7 @@ class PredictionEngine:
                         blocked=why.value
                         if forecast is not None and blocked and (why := blocked.get(symbol)) is not None
                         else None,
+                        votes=(votes or {}).get(symbol) if forecast is not None else None,
                     )
                 )
         added = self.store.add_all(predictions)
@@ -780,6 +783,13 @@ class PredictionEngine:
                 listener(change)
             except Exception:  # a listener never stops predicting
                 log.exception("engine listener failed")
+
+
+def _votes(forecasts: Mapping[str, Forecast]) -> tuple[int, int, int]:
+    """The members by the class each forecast most likely, as scored (ties: flat, then up):
+    up, flat, down (#106)."""
+    leaned = [most_likely(f.p_up, f.p_flat, f.p_down) for f in forecasts.values()]
+    return leaned.count(Direction.UP), leaned.count(Direction.FLAT), leaned.count(Direction.DOWN)
 
 
 def _finished(

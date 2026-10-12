@@ -178,6 +178,9 @@ def prediction_json(row: dict[str, Any]) -> dict[str, Any]:
         "target_at": row["target_at"],
         "status": row["status"],
         "blocked": row.get("blocked"),
+        "votes": None
+        if row.get("votes_up") is None
+        else {"up": row["votes_up"], "flat": row["votes_flat"], "down": row["votes_down"]},
         "p_up": row["p_up"],
         "p_flat": row["p_flat"],
         "p_down": row["p_down"],

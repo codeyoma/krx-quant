@@ -135,6 +135,7 @@
 |---|---|
 | `predictions` | `id`, `symbol`, `algorithm`, `model_version`, `bar_close`(t), `displayed_at`, `p_up`, `p_flat`, `p_down`, `expected_ticks`, `status`(`ok`, `timed_out`, `error`, `vi`, `no_book`, 합의의 `no_members`, `none_finished`). 재생 결과의 `skipped`는 `ok`가 아닌 예측을 모두 센다. `ok`가 아니면 확률과 기대수익이 비어 있고 `outcomes` 행이 없다. |
 | `blocks` | `prediction_id`, `reason`(`special`, `no_reference`, `expired`). 최종 합의 예측 중 따르면 안 되는 것과 그 이유(#88). 따로 둔 표라서, 이 표가 생기기 전 엔진으로 되돌려도 DB를 읽는다 |
+| `votes` | `prediction_id`, `up`, `flat`, `down`. 합의 예측(빠른·최종)에 들어간 정식 알고리즘을 각자 가장 큰 확률의 방향으로 센 수(#106). 합의를 만들 때 함께 쓴다. `blocks`처럼 따로 둔 표다 |
 | `outcomes` | `prediction_id`, `target_at`(t + 4분), `mid_close`(A), `mid_display`(B), `mid_target`, `flat_ticks`(k), `class_a`, `class_b`(`up`/`flat`/`down`), `special`, `unscorable`, `scored_at`(채점 전에는 비어 있음) |
 | `runs` | `id`, `kind`(`cpu_budget`: CPU 예산으로 건너뜀, `review`: 일일 상태 점검, `retire_candidate`: 은퇴 후보 알림, `budget_report`: 그날 예산 때문에 빠진 예측을 알림(#71), `no_regime`: 그날 매크로 국면이 없거나 엔진이 모르는 이름이어서 기본 전이행렬로 돈 날, 첫 봉 마감에 하루 한 번(`detail`에 `(unknown: <이름>)`), `start`: 수집기가 엔진을 시작함(`detail`은 JSON: `commit`, `fee_rate`, `signal_rule`(`min_probability`, `min_agree`, 끄면 `null`), `algorithm_seconds`, `cpu_budget_seconds`. 성적을 코드와 설정별로 가르는 근거, #85), `signal_sent`: 보낸 텔레그램 신호, `signal_blocked`: 막힌 텔레그램 신호(둘 다 판정할 때마다 하나씩, `detail`은 JSON, 아래 "텔레그램 신호 알림", #80)), `at`, `algorithm`, `detail` |
 | `statuses` | `id`, `algorithm`, `at`, `previous`, `status`, `reason`: 알고리즘 상태 이력(#17) |
@@ -204,6 +205,7 @@
       "target_at": "2026-10-12T09:35:00+09:00",
       "status": "ok",
       "blocked": null,
+      "votes": null,
       "p_up": 0.0,
       "p_flat": 1.0,
       "p_down": 0.0,
@@ -214,7 +216,7 @@
 }
 ```
 
-`outcome`은 채점 전에는 `null`이고, 채점 뒤에는 다음과 같다. `status`가 `ok`가 아닌 예측은 확률, 기대수익, `target_at`, `outcome`이 모두 `null`이다. 채점하지 않기 때문이다. 합의 예측(`consensus-fast`, `consensus-final`)도 같은 목록에 다른 예측처럼 온다.
+`outcome`은 채점 전에는 `null`이고, 채점 뒤에는 다음과 같다. `status`가 `ok`가 아닌 예측은 확률, 기대수익, `target_at`, `outcome`이 모두 `null`이다. 채점하지 않기 때문이다. 합의 예측(`consensus-fast`, `consensus-final`)도 같은 목록에 다른 예측처럼 온다. 합의 예측의 `votes`는 그 합의에 들어간 정식 알고리즘을 각자의 방향(가장 큰 확률, 동률이면 보합, 그다음 상승. 채점과 같다)으로 센 것이다: `{"up": 2, "flat": 1, "down": 0}`(#106). 다른 예측, 구성원이 없거나 아무도 끝내지 못한 합의, 이 필드가 생기기 전에 만든 합의는 `null`이다. 스트림의 `consensus` 이벤트에도 같은 항목으로 온다.
 
 ```json
 {
