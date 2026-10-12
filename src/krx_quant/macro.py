@@ -420,7 +420,7 @@ def day_regime(data_dir: Path, day: date, before: datetime) -> str | None:
     """``day``'s macro regime as last decided before ``before`` (the open, as the engine
     and training use it), or None. A ``krx-quant macro`` run after the open changes nothing.
 
-    A day decided without one indicator (recorded as neutral, "지표 없음") has no regime:
+    A day decided without any indicator read (recorded as neutral, "지표 없음") has no regime:
     the engine, training and replay all read it so, the days recorded before too (#84).
     """
     regimes = _rows(data_dir / regime_prefix(day) / "symbol=market")
