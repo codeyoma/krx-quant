@@ -152,6 +152,8 @@ async def front_months(session: aiohttp.ClientSession, settings: Settings, today
             return FrontMonths(settings.kospi200_futures_code, settings.usd_futures_code, ())
         log.error("derivative feeds skipped: nearest contracts not found (%s)", e)
         return None
+    if not found.kospi200_options:
+        log.error("no KOSPI200 options month with an ATM strike in the KIS master: options not recorded")
     fronts = FrontMonths(
         settings.kospi200_futures_code or found.kospi200_futures,
         settings.usd_futures_code or found.usd_futures,

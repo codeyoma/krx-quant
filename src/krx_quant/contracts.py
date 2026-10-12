@@ -1,6 +1,6 @@
 """Futures contracts by the exchange's expiry rules: the month a day's bars are taken from.
 
-The KIS master files list only the contracts listed today (``masters``), so the backfill
+The KIS master files list today's contracts, not past ones (``masters``), so the backfill
 builds past codes from the rules. Checked against KIS minute bars on 2026-10-10:
 
 - KOSPI200 futures expire quarterly (March, June, September, December) on the second
@@ -57,6 +57,13 @@ def nominal_expiry(product: Product, year: int, month: int) -> date:
     """The rule's expiry day (the nth weekday of the month), before a closed day moves it."""
     first = date(year, month, 1)
     return first + timedelta(days=(product.weekday - first.weekday()) % 7 + 7 * (product.nth - 1))
+
+
+def option_expired(year: int, month: int, day: date) -> bool:
+    """Whether the KOSPI200 options of ``year``/``month`` expired before ``day`` (they expire
+    as the futures do). The rule's day is enough: a closed day only moves the expiry earlier,
+    and the days between are closed too. On the expiry day itself they still trade."""
+    return nominal_expiry(KOSPI200, year, month) < day
 
 
 def last_trading_day(product: Product, year: int, month: int, calendar: MarketCalendar) -> date:

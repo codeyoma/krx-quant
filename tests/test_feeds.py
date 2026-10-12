@@ -22,7 +22,7 @@ from tests.kis_frames import (
 )
 from tests.test_collector import FIXED_NOW, KST, collect, read, settings_for
 from tests.test_subscription_limit import until
-from tests.test_subscription_plan import CALLS, PUTS, serve_masters
+from tests.test_subscription_plan import CALLS, NOVEMBER_CALLS, NOVEMBER_PUTS, PUTS, options_of, serve_masters
 
 
 async def test_program_trading(kis: FakeKis, tmp_path: Path) -> None:
@@ -810,6 +810,19 @@ async def test_each_fallback_of_the_plan_can_be_checked_once_beside_the_collecto
     assert kis.subscriptions == []
     assert not (tmp_path / "events").exists()
     assert not (tmp_path / "raw").exists()
+
+
+async def test_checking_the_fallbacks_asks_for_options_not_yet_expired(kis: FakeKis, tmp_path: Path) -> None:
+    serve_masters(
+        kis, [*options_of("202610", CALLS, PUTS), *options_of("202611", NOVEMBER_CALLS, NOVEMBER_PUTS)]
+    )
+
+    checks = await check_fallbacks(
+        settings_for(kis, tmp_path), lambda: datetime(2026, 10, 12, 9, 30, tzinfo=KST)
+    )
+
+    # October's options expired on the 8th: November's are asked for.
+    assert [c.key for c in checks if c.cut_feed == "H0IOCNT0"] == NOVEMBER_CALLS[1:6] + NOVEMBER_PUTS[1:6]
 
 
 async def test_checking_the_fallbacks_fails_for_derivatives_whose_contracts_are_unknown(

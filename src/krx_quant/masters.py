@@ -2,10 +2,10 @@
 
 KIS publishes daily master files of every listed contract. Futures codes roll
 (KOSPI200 quarterly, USD futures monthly), so the collector reads the masters
-at startup instead of hard-coding codes. They list today's contracts, and not
-only: on 2026-10-12 the index master still listed October's options, expired on
-the 8th, with an ATM strike, so options of a month already expired are passed
-over. The backfill works out past months from the expiry rules (``contracts``).
+at startup instead of hard-coding codes. They list today's contracts but not past
+ones, so the backfill works out past months from the expiry rules (``contracts``).
+They may still list an options month already expired: on 2026-10-12 the index
+master listed October's options, expired on the 8th, with an ATM strike.
 Format notes, checked on 2026-10-08:
 
 - ``fo_idx_code_mts.mst``: ``|``-separated rows ``type|short code|standard code|
@@ -27,7 +27,7 @@ from datetime import date
 
 import aiohttp
 
-from krx_quant.contracts import KOSPI200, nominal_expiry
+from krx_quant.contracts import option_expired
 
 _COM_MONTH_UNDERLYING = re.compile(r"(\d{9})([A-Z]{3})")
 
@@ -56,9 +56,10 @@ async def fetch_front_months(
 def parse_index_master(text: str, today: date, strikes_each_side: int = 2) -> tuple[str, tuple[str, ...]]:
     """Return the nearest KOSPI200 futures code and option codes around the money.
 
-    Options are the nearest expiry not yet past on ``today`` (the expiry day itself still
-    trades), its ATM strike (the master's ATM flag ``1``, set from the previous close) and
-    ``strikes_each_side`` strikes above and below it, calls then puts.
+    Options are the nearest month not expired on ``today``, its ATM strike (the master's ATM
+    flag ``1``, set from the previous close) and ``strikes_each_side`` strikes above and
+    below it, calls then puts; none if that month has no ATM strike. Only a missing futures
+    code is an error: the futures are recorded without the options.
     """
     futures: str | None = None
     # (kind, month) -> {strike: code}; kind 5 = call, 6 = put
@@ -76,9 +77,13 @@ def parse_index_master(text: str, today: date, strikes_each_side: int = 2) -> tu
             options.setdefault((kind, name[1]), {})[strike] = code
             if cols[4].strip() == "1":
                 atm[name[1]] = strike
-    months = sorted({month for _, month in options if not _expired(month, today)})
-    if futures is None or not months or months[0] not in atm:
-        raise MasterError("KOSPI200 nearest futures or ATM options not found in fo_idx_code_mts")
+    if futures is None:
+        raise MasterError("KOSPI200 nearest futures not found in fo_idx_code_mts")
+    months = sorted(
+        m for m in {month for _, month in options} if not option_expired(int(m[:4]), int(m[4:6]), today)
+    )
+    if not months or months[0] not in atm:
+        return futures, ()
     month, center = months[0], atm[months[0]]
     codes: list[str] = []
     for kind in ("5", "6"):
@@ -89,12 +94,6 @@ def parse_index_master(text: str, today: date, strikes_each_side: int = 2) -> tu
         for strike in strikes[max(0, i - strikes_each_side) : i + strikes_each_side + 1]:
             codes.append(options[kind, month][strike])
     return futures, tuple(codes)
-
-
-def _expired(month: str, today: date) -> bool:
-    """Whether a ``YYYYMM`` series of KOSPI200 options expired before ``today``. The rule's
-    day is enough: a holiday only moves the expiry earlier, onto a day already past."""
-    return nominal_expiry(KOSPI200, int(month[:4]), int(month[4:6])) < today
 
 
 def parse_commodity_master(text: str, underlying: str) -> str:
