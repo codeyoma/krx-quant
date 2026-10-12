@@ -112,6 +112,10 @@ ALTER TABLE predictions_v2 RENAME TO predictions;
 )
 
 
+# A prediction scored on either basis (outcomes ``o`` joined to predictions ``p``).
+SCORED = "p.status = 'ok' AND o.scored_at IS NOT NULL AND (o.class_a IS NOT NULL OR o.class_b IS NOT NULL)"
+
+
 def iso(at: datetime) -> str:
     return at.astimezone(KST).isoformat()
 
@@ -549,8 +553,7 @@ class PredictionStore:
         # days in between that were not asked for.
         where = (
             "WHERE p.bar_close >= ? AND p.bar_close < ?"
-            f" AND substr(p.bar_close, 1, 10) IN ({marks}) AND p.status = 'ok' AND o.scored_at IS NOT NULL"
-            " AND (o.class_a IS NOT NULL OR o.class_b IS NOT NULL)"
+            f" AND substr(p.bar_close, 1, 10) IN ({marks}) AND {SCORED}"
         )
         params: list[Any] = [
             iso(datetime.combine(min(days), time(), KST)),
