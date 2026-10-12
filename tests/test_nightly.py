@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import random
+import statistics
 from collections.abc import Sequence
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
@@ -36,8 +38,10 @@ from krx_quant.model_shelf import Shelf
 from krx_quant.nightly import VALIDATION_DAYS, train_night
 from krx_quant.object_store import LocalObjectStore
 from krx_quant.predictions import PredictionStore
+from krx_quant.pricing import Direction
 from krx_quant.recorder import ParquetRecorder
 from krx_quant.swap import morning_swap, publish_live
+from krx_quant.training import training_day
 from tests.algorithm_doubles import FrequencyAlgorithm
 from tests.replay_events import at, book, every, index_tick, trade
 from tests.synthetic_bars import trending
@@ -93,7 +97,11 @@ def store_root(tmp_path: Path) -> Path:
 
 
 def night(
-    store_root: Path, tmp_path: Path, algorithms: Sequence[Algorithm], leaders: Leaders | None = None
+    store_root: Path,
+    tmp_path: Path,
+    algorithms: Sequence[Algorithm],
+    leaders: Leaders | None = None,
+    commit: str = "unknown",
 ) -> Any:
     return train_night(
         LocalObjectStore(store_root),
@@ -103,6 +111,7 @@ def night(
         algorithms=algorithms,
         leaders=leaders,
         now=lambda: FINISHED,
+        commit=commit,
     )
 
 
@@ -150,6 +159,144 @@ def test_the_champion_is_the_model_the_server_runs(store_root: Path, tmp_path: P
     assert read(store_root, f"promotions/{NIGHT}.json")["promoted"] == {}, "the live model stays"
 
 
+def outcomes(tmp_path: Path, day: date) -> list[Direction]:
+    """The validation outcomes of ``day``, from the samples training reads (the cache the
+    night filled)."""
+    found = training_day(
+        tmp_path / "cache",
+        day,
+        MarketCalendar(dict.fromkeys(DAYS, True)),
+        ("005930",),
+        ["velocity"],
+        FEE,
+        Leaders(),
+    )
+    assert found is not None
+    return [s.outcome for s in found.samples if s.outcome is not None]
+
+
+def test_the_report_has_the_losses_by_day_and_the_paired_difference(store_root: Path, tmp_path: Path) -> None:
+    night(store_root, tmp_path, [FrequencyAlgorithm("learner", "velocity")], commit="0123abc")
+
+    report = read(store_root, f"reports/{NIGHT}/learner.json")
+    params = read(store_root, f"models/learner/{report['challenger']['version']}.json")["params"]
+    # The stand-in's forecast: its class frequencies, each at least 0.01, summing to one.
+    floored = {d: max(params[d.value], 0.01) for d in Direction}
+    forecast = {d: p / sum(floored.values()) for d, p in floored.items()}
+    by_day, differences = {}, []
+    for day in DAYS[-VALIDATION_DAYS:]:
+        seen = outcomes(tmp_path, day)
+        challenger = -sum(math.log(forecast[o]) for o in seen) / len(seen)
+        by_day[str(day)] = {"samples": len(seen), "challenger": challenger, "champion": math.log(3)}
+        differences.append((len(seen), challenger - math.log(3)))  # the default: a third each
+
+    validation = report["validation"]
+    assert list(validation["by_day"]) == list(by_day)
+    for shown, row in by_day.items():
+        assert validation["by_day"][shown] == pytest.approx(row)
+    n = sum(k for k, _ in differences)
+    assert validation["paired"] == pytest.approx(
+        {
+            "samples": n,
+            "mean_difference": sum(k * d for k, d in differences) / n,
+            "day_standard_error": statistics.stdev(d for _, d in differences) / math.sqrt(VALIDATION_DAYS),
+        }
+    )
+    assert list(validation["by_reference"]) == ["close"], "backfilled days only"
+    assert validation["by_reference"]["close"] == pytest.approx(
+        {"samples": n, "challenger": report["challenger"]["loss"], "champion": math.log(3)}
+    )
+    assert report["champion"]["trained_on_validation"] is False
+    assert report["commit"] == "0123abc"
+    assert read(store_root, f"promotions/{NIGHT}.json")["promoted"] == {
+        "learner": report["challenger"]["version"]
+    }
+
+
+def test_the_losses_by_reference_price_split_recorded_and_backfilled_days(
+    store_root: Path, tmp_path: Path
+) -> None:
+    # The last two validation days were recorded (mornings only); the first is backfilled.
+    for day in DAYS[-2:]:
+        archive_events(store_root, day, busy_morning(day), tmp_path)
+
+    night(store_root, tmp_path, [FrequencyAlgorithm("learner", "velocity")])
+
+    validation = read(store_root, f"reports/{NIGHT}/learner.json")["validation"]
+    by_day = validation["by_day"]
+    for kind, days in (("close", DAYS[-3:-2]), ("mid", DAYS[-2:])):
+        rows = [by_day[str(d)] for d in days]
+        n = sum(r["samples"] for r in rows)
+        expected = {
+            "samples": n,
+            "challenger": sum(r["samples"] * r["challenger"] for r in rows) / n,
+            "champion": sum(r["samples"] * r["champion"] for r in rows) / n,
+        }
+        assert validation["by_reference"][kind] == pytest.approx(expected)
+    assert by_day[str(DAYS[-1])]["samples"] == 56, "09:01–09:56 of a recorded morning"
+    # Days of unequal size: the standard error is the sample-weighted mean's, clustered by day.
+    sized = [(r["samples"], r["challenger"] - r["champion"]) for r in by_day.values()]
+    n = sum(k for k, _ in sized)
+    mean = sum(k * d for k, d in sized) / n
+    clustered = math.sqrt(1.5 * sum((k * (d - mean)) ** 2 for k, d in sized)) / n
+    assert validation["paired"]["mean_difference"] == pytest.approx(mean)
+    assert validation["paired"]["day_standard_error"] == pytest.approx(clustered)
+
+
+def test_a_champion_fitted_by_hand_on_the_validation_days_is_reported(
+    store_root: Path, tmp_path: Path
+) -> None:
+    learner = FrequencyAlgorithm("learner", "velocity")
+    validation = DAYS[-VALIDATION_DAYS:]
+    calendar = MarketCalendar(dict.fromkeys(DAYS, True))
+    night(store_root, tmp_path / "first", [learner])  # fills a cache to fit from
+    samples = [
+        s
+        for d in validation
+        if (
+            found := training_day(
+                tmp_path / "first" / "cache", d, calendar, ("005930",), ["velocity"], FEE, Leaders()
+            )
+        )
+        for s in found.samples
+    ]
+    by_hand = learner.fit(samples)  # as `krx-quant fit` would, up to the latest day
+    assert by_hand.trained_until == validation[-1]
+    (store_root / "models" / "learner" / f"{by_hand.version}.json").write_text(by_hand.to_json())
+    (store_root / "live.json").write_text(json.dumps({"learner": by_hand.version}))
+    for stale in (store_root / "reports", store_root / "promotions"):
+        for path in stale.rglob("*.json"):
+            path.unlink()
+
+    night(store_root, tmp_path, [learner])
+
+    report = read(store_root, f"reports/{NIGHT}/learner.json")
+    assert report["champion"]["version"] == by_hand.version
+    assert report["champion"]["trained_on_validation"] is True
+    assert "trained on these days" in report["reason"]
+
+
+def test_a_checkpoint_an_older_version_wrote_is_trained_again(store_root: Path, tmp_path: Path) -> None:
+    learner = FrequencyAlgorithm("learner", "velocity")
+    older = {
+        "algorithm": "learner",
+        "day": str(NIGHT),
+        "champion": None,
+        "challenger": None,
+        "promoted": False,
+    }
+    (store_root / "reports" / str(NIGHT)).mkdir(parents=True)
+    (store_root / "reports" / str(NIGHT) / "learner.json").write_text(
+        json.dumps({**older, "reason": "older"})
+    )
+
+    night(store_root, tmp_path, [learner], commit="0123abc")
+
+    report = read(store_root, f"reports/{NIGHT}/learner.json")
+    assert len(learner.fitted_on) == 1
+    assert report["commit"] == "0123abc" and "validation" in report
+
+
 class Reclaimed(RuntimeError):
     """The Spot instance went away mid-night."""
 
@@ -193,11 +340,13 @@ def test_the_train_command_trains_every_registered_algorithm_from_the_store(
     monkeypatch.setenv("KRX_OBJECT_STORE", str(store_root))
     monkeypatch.setenv("KRX_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setenv("KRX_SYMBOLS", "005930")
+    monkeypatch.setenv("KRX_COMMIT", "0123abc")
 
     assert main(["train"]) == 0, capsys.readouterr().err
 
     promotions = read(store_root, f"promotions/{NIGHT}.json")
     assert [r["algorithm"] for r in promotions["reports"]] == [a.name for a in ALGORITHMS]
+    assert {r["commit"] for r in promotions["reports"]} == {"0123abc"}, "the deploy's, as the engine's (#85)"
     assert f"{NIGHT} 밤 학습" in capsys.readouterr().out
 
 
