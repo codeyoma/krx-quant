@@ -458,14 +458,56 @@
       }
     },
     "ranked_entry": {
-      "description": "A leaderboard entry of an algorithm, with its status now.",
+      "description": "A leaderboard entry of an algorithm, with its status now and what its stats leave out.",
       "allOf": [{"$ref": "#/$defs/entry_fields"}],
       "type": "object",
-      "required": ["status"],
+      "required": ["status", "excluded"],
       "properties": {
-        "status": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/lifecycle_status"}]}
+        "status": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/lifecycle_status"}]},
+        "excluded": {"$ref": "#/$defs/excluded"}
       },
       "unevaluatedProperties": false
+    },
+    "baseline_entry": {
+      "description": "A leaderboard entry of a baseline, with what its stats leave out.",
+      "allOf": [{"$ref": "#/$defs/entry_fields"}],
+      "type": "object",
+      "required": ["excluded"],
+      "properties": {"excluded": {"$ref": "#/$defs/excluded"}},
+      "unevaluatedProperties": false
+    },
+    "excluded": {
+      "description": "What a query's stats leave out of a predictor's predictions (#83): scored ones touched by a special situation (left out unless special=include, then counted in), those its basis could not score, and those not made, by status.",
+      "type": "object",
+      "required": ["special", "unscorable", "status"],
+      "additionalProperties": false,
+      "properties": {
+        "special": {"type": "integer", "minimum": 0},
+        "unscorable": {"type": "integer", "minimum": 0},
+        "status": {
+          "type": "object",
+          "propertyNames": {"enum": ["timed_out", "error", "vi", "no_book", "no_members", "none_finished"]},
+          "additionalProperties": {"type": "integer", "minimum": 1}
+        }
+      }
+    },
+    "calibration": {
+      "description": "Ten bins of forecast probabilities by tenths, against how often the class happened.",
+      "type": "array",
+      "minItems": 10,
+      "maxItems": 10,
+      "items": {
+        "type": "object",
+        "required": ["low", "high", "count", "mean_p", "observed"],
+        "additionalProperties": false,
+        "properties": {
+          "low": {"type": "number"},
+          "high": {"type": "number"},
+          "count": {"type": "integer", "minimum": 0},
+          "mean_p": {"type": ["number", "null"]},
+          "observed": {"$ref": "#/$defs/interval"}
+        }
+      }
     },
     "query": {
       "description": "The query a leaderboard or stats answer was computed for, open so they can add to it.",
@@ -488,7 +530,7 @@
       "properties": {
         "ranked": {"type": "array", "items": {"$ref": "#/$defs/ranked_entry"}},
         "unranked": {"type": "array", "items": {"$ref": "#/$defs/ranked_entry"}},
-        "baselines": {"type": "array", "items": {"$ref": "#/$defs/entry"}}
+        "baselines": {"type": "array", "items": {"$ref": "#/$defs/baseline_entry"}}
       },
       "unevaluatedProperties": false
     },
@@ -502,23 +544,20 @@
         "overall": {
           "allOf": [{"$ref": "#/$defs/entry_fields"}],
           "type": "object",
-          "required": ["calibration"],
+          "required": ["calibration", "calibration_by_class", "excluded"],
           "properties": {
-            "calibration": {
-              "type": "array",
-              "items": {
-                "type": "object",
-                "required": ["low", "high", "count", "mean_p", "observed"],
-                "additionalProperties": false,
-                "properties": {
-                  "low": {"type": "number"},
-                  "high": {"type": "number"},
-                  "count": {"type": "integer", "minimum": 0},
-                  "mean_p": {"type": ["number", "null"]},
-                  "observed": {"$ref": "#/$defs/interval"}
-                }
+            "calibration": {"$ref": "#/$defs/calibration"},
+            "calibration_by_class": {
+              "type": "object",
+              "required": ["up", "flat", "down"],
+              "additionalProperties": false,
+              "properties": {
+                "up": {"$ref": "#/$defs/calibration"},
+                "flat": {"$ref": "#/$defs/calibration"},
+                "down": {"$ref": "#/$defs/calibration"}
               }
-            }
+            },
+            "excluded": {"$ref": "#/$defs/excluded"}
           },
           "unevaluatedProperties": false
         },

@@ -52,11 +52,12 @@ from krx_quant.engine import PredictionEngine
 from krx_quant.feeds.base import kst_day
 from krx_quant.macro import LatestMacro, latest_macro, reading_before
 from krx_quant.model_shelf import Shelf
-from krx_quant.predictions import iso
+from krx_quant.predictions import Excluded, iso
 from krx_quant.pricing import flat_ticks, tick_size
 from krx_quant.stats import (
     DEFAULT_MIN_SAMPLE,
     CalibrationBin,
+    Entry,
     Scored,
     entry,
     entry_json,
@@ -441,14 +442,20 @@ async def _leaderboard(request: web.Request) -> web.Response:
     query = _query(request, engine)
     min_sample = request.app[MIN_SAMPLE_KEY]
 
-    def build(algorithms: dict[str, list[Scored]], baselines: dict[str, list[Scored]]) -> dict[str, Any]:
+    def build(
+        algorithms: dict[str, list[Scored]], baselines: dict[str, list[Scored]], excluded: dict[str, Excluded]
+    ) -> dict[str, Any]:
         board = leaderboard(algorithms, baselines, min_sample, engine.fee_rate)
+
+        def listed(entries: list[Entry]) -> list[dict[str, Any]]:
+            return [{**entry_json(e), "excluded": _excluded_json(excluded.get(e.algorithm))} for e in entries]
+
         return {
             **query.describe(),
             "min_sample": min_sample,
-            "ranked": [entry_json(e) for e in board.ranked],
-            "unranked": [entry_json(e) for e in board.unranked],
-            "baselines": [entry_json(e) for e in board.baselines],
+            "ranked": listed(board.ranked),
+            "unranked": listed(board.unranked),
+            "baselines": listed(board.baselines),
         }
 
     body = await _stats(request, ("leaderboard",), query, build)
@@ -475,7 +482,9 @@ async def _algorithm_stats(request: web.Request) -> web.Response:
         raise _error(web.HTTPNotFound, f"unknown algorithm {name!r}")
     min_sample = request.app[MIN_SAMPLE_KEY]
 
-    def build(algorithms: dict[str, list[Scored]], baselines: dict[str, list[Scored]]) -> dict[str, Any]:
+    def build(
+        algorithms: dict[str, list[Scored]], baselines: dict[str, list[Scored]], excluded: dict[str, Excluded]
+    ) -> dict[str, Any]:
         records = baselines[name] if name in baselines else algorithms.get(name, [])
         # Overall lifts carry the leaderboard's FDR adjustment; breakdowns are not tested.
         board = leaderboard(algorithms, baselines, min_sample, engine.fee_rate)
@@ -499,6 +508,11 @@ async def _algorithm_stats(request: web.Request) -> web.Response:
             "overall": {
                 **entry_json(overall),
                 "calibration": [_bin_json(b) for b in overall.summary.calibration],
+                "calibration_by_class": {
+                    d.value: [_bin_json(b) for b in bins]
+                    for d, bins in overall.summary.calibration_by_class.items()
+                },
+                "excluded": _excluded_json(excluded.get(name)),
             },
             "by_symbol": by(lambda r: r.symbol),
             "by_slot": by(lambda r: slot(r.bar_close)),
@@ -508,7 +522,7 @@ async def _algorithm_stats(request: web.Request) -> web.Response:
     return _json(await _stats(request, ("algorithm", name), query, build))
 
 
-Build = Callable[[dict[str, list[Scored]], dict[str, list[Scored]]], dict[str, Any]]
+Build = Callable[[dict[str, list[Scored]], dict[str, list[Scored]], dict[str, Excluded]], dict[str, Any]]
 
 
 async def _stats(
@@ -526,11 +540,13 @@ async def _stats(
     def compute() -> dict[str, Any]:
         # Reading and computing both run in the worker: a long history must not hold up
         # the event loop that records and predicts.
-        rows = engine.store.scored_predictions(query.days, query.symbol, query.special)
+        rows, excluded = engine.store.scored_and_excluded(
+            query.days, query.symbol, query.special, query.basis
+        )
         algorithms, baselines = split(scored_by_algorithm(rows, query.basis), BASELINE_NAMES)
         for a in engine.algorithms:
             algorithms.setdefault(a.name, [])
-        return build(algorithms, baselines)
+        return build(algorithms, baselines, excluded)
 
     body = await asyncio.to_thread(compute)
     if len(cache) >= _CACHED_QUESTIONS:
@@ -547,6 +563,11 @@ def _bin_json(b: CalibrationBin) -> dict[str, Any]:
         "mean_p": b.mean_p,
         "observed": interval_json(b.observed),
     }
+
+
+def _excluded_json(e: Excluded | None) -> dict[str, Any]:
+    e = e or Excluded()
+    return {"special": e.special, "unscorable": e.unscorable, "status": e.status}
 
 
 def _json(body: dict[str, Any]) -> web.Response:

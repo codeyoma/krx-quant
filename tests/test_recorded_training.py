@@ -166,3 +166,17 @@ def test_a_recorded_day_trains_in_the_macro_regime_decided_before_its_open(tmp_p
 
     assert day is not None and day.reference == "mid"
     assert {s.features["macro_regime"] for s in day.samples} == {regime_code("risk_on")}
+
+
+def test_a_recorded_day_without_any_macro_indicator_trains_as_a_day_without_a_regime(tmp_path: Path) -> None:
+    data = tmp_path / "data"
+    record(data, busy_morning(end="09:30:00"))
+    parquet = ParquetRecorder(data, flush_rows=1000, flush_seconds=3600)
+    row = {"day": DAY, "recorded_at": at("07:30:00"), "regime": "neutral", "reasons": '["지표 없음"]'}
+    parquet.record(MACRO, DAY, "regime", "market", row | {"failed": "{}", "skipped": "[]"}, REGIME_SCHEMA)
+    parquet.close()
+
+    day = training_day(data, DAY, CALENDAR, (SYMBOL,), ["macro_regime"], FEE, Leaders())
+
+    assert day is not None
+    assert {s.features["macro_regime"] for s in day.samples} == {None}, "not neutral's code"
