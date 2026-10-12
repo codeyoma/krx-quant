@@ -41,7 +41,7 @@ from krx_quant.feeds.base import KST, kst_day
 from krx_quant.market_calendar import MarketCalendar, calendar_store, next_on_trading_day
 from krx_quant.notify import Alerts
 from krx_quant.recorder import ParquetRecorder
-from krx_quant.regime import Decision, Regime, RegimeInputs, RegimeRules, decide
+from krx_quant.regime import NO_INDICATOR, Decision, Regime, RegimeInputs, RegimeRules, decide
 
 log = logging.getLogger(__name__)
 
@@ -418,10 +418,14 @@ def regime_prefix(day: date) -> str:
 
 def day_regime(data_dir: Path, day: date, before: datetime) -> str | None:
     """``day``'s macro regime as last decided before ``before`` (the open, as the engine
-    and training use it), or None. A ``krx-quant macro`` run after the open changes nothing."""
+    and training use it), or None. A ``krx-quant macro`` run after the open changes nothing.
+
+    A day decided without one indicator (recorded as neutral, "지표 없음") has no regime:
+    the engine, training and replay all read it so, the days recorded before too (#84).
+    """
     regimes = _rows(data_dir / regime_prefix(day) / "symbol=market")
     decided = [r for r in regimes if r["recorded_at"] < before]
-    if not decided:
+    if not decided or json.loads(decided[-1]["reasons"]) == [NO_INDICATOR]:
         return None
     regime: str = decided[-1]["regime"]
     if regime not in {r.value for r in Regime}:  # a newer collector's: no regime here
