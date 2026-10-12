@@ -29,7 +29,7 @@ from krx_quant.predictions import PredictionStore
 from krx_quant.replay import replay_into
 from krx_quant.signals import SignalRule, Signals
 from tests.algorithm_doubles import FixedAlgorithm
-from tests.replay_events import CALENDAR, FEE, SYMBOL, at, every, kospi, kospi200_futures, vi
+from tests.replay_events import CALENDAR, FEE, SYMBOL, at, book, every, kospi, kospi200_futures, vi
 from tests.test_replay import busy_morning
 
 UP = Forecast(0.7, 0.2, 0.1, 2.0)
@@ -172,71 +172,81 @@ async def test_a_vi_learned_after_the_bar_close_blocks_its_signal(
     )
 
 
-async def test_a_circuit_breaker_blocks_signals_and_a_sidecar_does_not(
+# KOSPI 8.5% down, or KOSPI200 futures 5.5% up, from 09:06: called at 09:07 (held a minute).
+BREAKER = every(at("09:06:00"), at("09:12:30"), 10, lambda when: kospi(when, -8.5))
+SIDECAR = every(at("09:06:00"), at("09:12:30"), 10, lambda when: kospi200_futures(when, 5.5))
+
+
+async def test_a_circuit_breaker_blocks_the_signals_it_touches(
     tmp_path: Path, telegram: tuple[Alerts, list[str]]
 ) -> None:
     alerts, sent = telegram
-    # KOSPI 8.5% down, or KOSPI200 futures 5.5% up, from 09:06: called at 09:07 (held a minute).
-    breaker = every(at("09:06:00"), at("09:12:30"), 10, lambda when: kospi(when, -8.5))
-    sidecar = every(at("09:06:00"), at("09:12:30"), 10, lambda when: kospi200_futures(when, 5.5))
-    rule = SignalRule(0.5, 2)
 
     await morning(
-        tmp_path / "breaker.db",
+        tmp_path / "engine.db",
         [UP, UP, FLAT],
-        Signals(rule, alerts.signal),
-        [*busy_morning(end="09:12:30"), *breaker],
-        until="09:12:30",
-    )
-    breaker_sent = list(sent)
-    sent.clear()
-    await morning(
-        tmp_path / "sidecar.db",
-        [UP, UP, FLAT],
-        Signals(rule, alerts.signal),
-        [*busy_morning(end="09:12:30"), *sidecar],
+        Signals(SignalRule(0.5, 2), alerts.signal),
+        [*busy_morning(end="09:12:30"), *BREAKER],
         until="09:12:30",
     )
     await alerts.close()
 
-    # The 09:05 call (to 09:09) was sent before the breaker; from 09:09 each is blocked.
-    assert [m.split(" · ")[2] for m in breaker_sent] == [
-        "09:01 봉 마감, 09:05까지",
-        "09:05 봉 마감, 09:09까지",
-    ]
-    blocked = kept(tmp_path / "breaker.db", "signal_blocked")
+    # The 09:05 call (to 09:09) was sent before the breaker was called; from 09:09 each is
+    # blocked, and a blocked one does not hold the next back.
+    assert [m.split(" · ")[2] for m in sent] == ["09:01 봉 마감, 09:05까지", "09:05 봉 마감, 09:09까지"]
+    blocked = kept(tmp_path / "engine.db", "signal_blocked")
     assert [(b["bar_close"][11:16], b["blocked"]) for b in blocked] == [
         ("09:09", "special"),
         ("09:10", "special"),
         ("09:11", "special"),
         ("09:12", "special"),
     ]
-    # A sidecar halts program trading only: signals go on.
+
+
+async def test_a_sidecar_does_not_block_signals(tmp_path: Path, telegram: tuple[Alerts, list[str]]) -> None:
+    alerts, sent = telegram
+
+    await morning(
+        tmp_path / "engine.db",
+        [UP, UP, FLAT],
+        Signals(SignalRule(0.5, 2), alerts.signal),
+        [*busy_morning(end="09:12:30"), *SIDECAR],
+        until="09:12:30",
+    )
+    await alerts.close()
+
+    # A sidecar halts program trading only.
     assert [m.split(" · ")[2] for m in sent] == [
         "09:01 봉 마감, 09:05까지",
         "09:05 봉 마감, 09:09까지",
         "09:09 봉 마감, 09:13까지",
     ]
-    assert kept(tmp_path / "sidecar.db", "signal_blocked") == []
+    assert kept(tmp_path / "engine.db", "signal_blocked") == []
 
 
-async def test_a_symbol_without_a_reference_price_is_not_signalled(
+async def test_a_signal_is_blocked_when_the_book_was_silent_over_a_minute(
     tmp_path: Path, telegram: tuple[Alerts, list[str]]
 ) -> None:
     alerts, sent = telegram
+    # A VI from 09:00:30, released at 09:02:30: 09:01 and 09:02 are not predicted. The last
+    # quote comes at 09:01:59, so at the 09:03 bar close it is 61 seconds old.
+    events = [
+        *busy_morning(end="09:01:58"),
+        book(at("09:01:59"), 81_200, 81_300),
+        vi(at("09:00:31"), "09:00:30"),
+        vi(at("09:02:31"), "09:00:30", "09:02:30"),
+    ]
 
-    # The book stops at 09:01:50: from 09:03 the last quote is over a minute old.
-    await morning(
-        tmp_path / "engine.db",
-        [UP, UP, FLAT],
-        Signals(SignalRule(0.5, 2), alerts.signal),
-        busy_morning(end="09:01:50"),
-    )
+    await morning(tmp_path / "engine.db", [UP, UP, FLAT], Signals(SignalRule(0.5, 2), alerts.signal), events)
     await alerts.close()
 
-    assert [m.split(" · ")[2] for m in sent] == ["09:01 봉 마감, 09:05까지"]
-    [blocked] = kept(tmp_path / "engine.db", "signal_blocked")
-    assert (blocked["bar_close"], blocked["blocked"]) == ("2026-10-12T09:05:00+09:00", "no_reference")
+    assert sent == []
+    blocked = kept(tmp_path / "engine.db", "signal_blocked")
+    assert [(b["bar_close"][11:16], b["blocked"]) for b in blocked] == [
+        ("09:03", "no_reference"),
+        ("09:04", "no_reference"),
+        ("09:05", "no_reference"),
+    ]
 
 
 async def test_a_signal_past_its_target_time_is_not_sent(
@@ -265,12 +275,18 @@ async def test_a_restarted_engine_does_not_repeat_a_running_signal(
     alerts, sent = telegram
     db = tmp_path / "engine.db"
 
-    await morning(db, [UP, UP, FLAT], Signals(SignalRule(0.5, 2), alerts.signal), until="09:01:30")
-    # Restarted on the same store: the 09:01 call runs to 09:05.
-    await morning(db, [UP, UP, FLAT], Signals(SignalRule(0.5, 2), alerts.signal), start="09:01:30")
+    await morning(db, [UP, UP, FLAT], Signals(SignalRule(0.5, 2), alerts.signal), until="09:05:30")
+    # Restarted on the same store: of the calls sent, the 09:05 one runs to 09:09.
+    await morning(
+        db, [UP, UP, FLAT], Signals(SignalRule(0.5, 2), alerts.signal), start="09:05:30", until="09:09:30"
+    )
     await alerts.close()
 
-    assert [m.split(" · ")[2] for m in sent] == ["09:01 봉 마감, 09:05까지", "09:05 봉 마감, 09:09까지"]
+    assert [m.split(" · ")[2] for m in sent] == [
+        "09:01 봉 마감, 09:05까지",
+        "09:05 봉 마감, 09:09까지",
+        "09:09 봉 마감, 09:13까지",
+    ]
 
 
 def test_signals_are_off_by_default_and_their_settings_are_checked() -> None:

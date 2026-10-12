@@ -48,7 +48,6 @@ from __future__ import annotations
 
 import asyncio
 import heapq
-import json
 import logging
 import math
 import time as timer
@@ -97,7 +96,7 @@ from krx_quant.market_view import (
 from krx_quant.predictions import NewPrediction, Pending, PredictionStore, Score
 from krx_quant.pricing import Direction, classify, flat_ticks, tick_size
 from krx_quant.reference import Bar
-from krx_quant.signals import Blocked, Signals
+from krx_quant.signals import SENT, Blocked, Judged, Signals
 from krx_quant.special import KOSPI, Kind, SpecialSituations, Window, in_vi, touching
 from krx_quant.stats import DEFAULT_MIN_SAMPLE
 
@@ -617,9 +616,9 @@ class PredictionEngine:
         each signal judged (``runs``)."""
         now = self.clock.now()
         if not self._signals_resumed:
+            self._signals_resumed = True  # once, even if reading fails
             midnight = datetime.combine(now.astimezone(KST).date(), time(), KST)
-            signals.resume(json.loads(r.detail) for r in self.store.runs("signal_sent", midnight))
-            self._signals_resumed = True
+            signals.resume(r.detail for r in self.store.runs(SENT, midnight))
         target_at = bar_close + HORIZON
         known = [w for w in self._special.known(before=now) if w.kind in (Kind.VI, Kind.CIRCUIT_BREAKER)]
         blocked: dict[str, Blocked] = {}
@@ -630,11 +629,13 @@ class PredictionEngine:
                 blocked[symbol] = Blocked.NO_REFERENCE
             elif now >= target_at:
                 blocked[symbol] = Blocked.EXPIRED
-        for judged in signals.final(bar_close, target_at, pooled, pooled_from, blocked):
-            kind = "signal_sent" if judged.blocked is None else "signal_blocked"
-            self.store.add_run(kind, now, None, json.dumps(judged.record(signals.rule), ensure_ascii=False))
+
+        def keep(judged: Judged) -> None:
+            self.store.add_run(judged.kind, now, None, judged.detail(signals.rule))
             if judged.blocked is not None:
                 log.info("signal blocked (%s): %s", judged.blocked.value, judged.signal.text())
+
+        signals.final(bar_close, target_at, pooled, pooled_from, blocked, keep)
 
     def _record_not_predicted(
         self, bar_close: datetime, symbols: Sequence[str], status: str, running: Sequence[Algorithm]
