@@ -8,7 +8,7 @@ and the directory and DB as they were.
 from __future__ import annotations
 
 import json
-import sqlite3
+import shutil
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
@@ -124,13 +124,9 @@ def server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return tmp_path
 
 
-def snapshot(root: Path) -> tuple[dict[str, bytes], list[str]]:
-    """The data files' bytes and the DB's contents."""
-    files = {
-        str(p.relative_to(root)): p.read_bytes() for p in sorted((root / "data").rglob("*")) if p.is_file()
-    }
-    with sqlite3.connect(root / "state" / DB_NAME) as db:
-        return files, list(db.iterdump())
+def snapshot(root: Path) -> dict[str, bytes]:
+    """Every file's bytes under ``root``: the data, the DB and any file made beside it."""
+    return {str(p.relative_to(root)): p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file()}
 
 
 def test_the_measurements_are_reported_as_worked_out_by_hand(
@@ -142,9 +138,12 @@ def test_the_measurements_are_reported_as_worked_out_by_hand(
 
     out = capsys.readouterr().out
     # Quantiles are the lower of the two values around q·(n − 1).
-    assert "진단 2026-10-08 – 2026-10-12 (2일)" in out
-    # Delays 0.5, 1, 2, 4, 10 s; four scored, B differs from A once.
-    assert "  newton: 예측 5, 지연 p50 2.00 · p90 4.00 · p99 4.00 · 최대 10.00 · 채점 4, A≠B 25.0%" in out
+    assert "진단 2026-10-08 – 2026-10-12 (2거래일)" in out
+    # Delays 0.5, 1, 2, 4, 10 s; four scored on both bases, B differs from A once.
+    assert (
+        "  newton: 예측 5, 지연 p50 2.00 · p90 4.00 · p99 4.00 · 최대 10.00"
+        " · 채점 4, A≠B 25.0% (둘 다 채점 4)" in out
+    )
     assert "  채점 4, 특수 상황 1 (25.0%)" in out
     assert "  상태: ok 5, timed_out 1" in out
     # 09:01: 2 ticks (the 09:00:50 book); 09:02: 1 tick; 09:03 on: the book is over a minute old.
@@ -154,11 +153,12 @@ def test_the_measurements_are_reported_as_worked_out_by_hand(
     assert "  H0UNCNT0: 1건, p50 1.50 · p90 1.50 · p99 1.50 · 최대 1.50" in out
     assert (
         "  H0IFCNT0: 1건, p50 0.25 · p90 0.25 · p99 0.25 · 최대 0.25"
-        " · 거래소 시각이 수신 초인 행: REST 대체 행" in out
+        " · 거래소 시각이 수신 초인 행: REST 대체 행, 장 마감 기록" in out
     )
     assert "  지표 없음: 2026-10-12" in out
     assert "  일부 빠짐: 2026-10-08 (usdkrw, vix)" in out
-    assert snapshot(server) == before, "nothing is written"
+    assert "  기록 없음: 없음" in out
+    assert snapshot(server) == before, "nothing is written, not even beside the DB"
 
 
 def test_days_narrows_the_range_to_the_latest_trading_days(
@@ -167,11 +167,25 @@ def test_days_narrows_the_range_to_the_latest_trading_days(
     assert main(["diagnose", "--days", "1"]) == 0
 
     out = capsys.readouterr().out
-    assert "진단 2026-10-12 – 2026-10-12 (1일)" in out
-    assert "  newton: 예측 4, 지연 p50 1.00 · p90 2.00 · p99 2.00 · 최대 4.00 · 채점 3, A≠B 33.3%" in out
+    assert "진단 2026-10-12 – 2026-10-12 (1거래일)" in out
+    assert (
+        "  newton: 예측 4, 지연 p50 1.00 · p90 2.00 · p99 2.00 · 최대 4.00 · 채점 3, A≠B 33.3% (둘 다 채점 3)"
+        in out
+    )
     assert "  채점 3, 특수 상황 1 (33.3%)" in out
     assert "  상태: ok 4, timed_out 1" in out
     assert "  일부 빠짐: 없음" in out
+
+
+def test_only_the_sections_without_data_say_so(server: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    shutil.rmtree(server / "data")
+
+    assert main(["diagnose"]) == 0
+
+    out = capsys.readouterr().out
+    assert "  newton: 예측 5," in out
+    sections = out.split("\n\n")
+    assert [s.splitlines()[1] for s in sections[3:]] == ["  없음", "  없음", "  없음"]
 
 
 def test_a_section_without_its_data_says_so(

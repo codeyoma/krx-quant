@@ -25,7 +25,7 @@ from krx_quant.backfill import run_backfill
 from krx_quant.collector import check_fallbacks, measure_subscription_limit, run_collector
 from krx_quant.config import Settings, SettingsError
 from krx_quant.demo import demo_app, demo_morning
-from krx_quant.diagnose import diagnose
+from krx_quant.diagnose import DEFAULT_DAYS, diagnose
 from krx_quant.fake_kis import FakeKis
 from krx_quant.feeds.base import KST
 from krx_quant.kis import KisError
@@ -262,7 +262,7 @@ async def _fake_kis(port: int, host: str, trades: bool) -> None:
         await fake.stop()
 
 
-def _diagnose(days: int | None) -> int:
+def _diagnose(days: int) -> int:
     settings = Settings.from_env(require_kis=False)
     print(diagnose(settings.data_dir, settings.state_dir / DB_NAME, calendar_store(settings).calendar, days))
     return 0
@@ -403,7 +403,10 @@ def main(argv: list[str] | None = None) -> int:
         "diagnose", help="print the measurements the open decisions need; reads only, writes nothing"
     )
     diagnose_cmd.add_argument(
-        "--days", type=_positive, help="only the latest N days with data (default: all)"
+        "--days",
+        type=_positive,
+        default=DEFAULT_DAYS,
+        help=f"the latest N trading days with data (default {DEFAULT_DAYS})",
     )
     notify_cmd = sub.add_parser("notify", help="send a notice to the Telegram chat that receives alerts")
     notify_cmd.add_argument("text")
