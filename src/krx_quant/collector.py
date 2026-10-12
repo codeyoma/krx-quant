@@ -136,20 +136,26 @@ def rest_plan(settings: Settings, calendar: MarketCalendar) -> list[PollJob]:
     return plan
 
 
-async def front_months(session: aiohttp.ClientSession, settings: Settings) -> FrontMonths | None:
-    """Nearest derivative contracts from the KIS masters; configured futures codes win.
+async def front_months(
+    session: aiohttp.ClientSession, settings: Settings, today: date, calendar: MarketCalendar
+) -> FrontMonths | None:
+    """Nearest derivative contracts on ``today`` from the KIS masters; configured futures codes win.
 
     If the masters cannot be read, configured futures codes are still used (without
     options); with no codes configured, derivative feeds are skipped (returns None).
     """
     try:
-        found = await fetch_front_months(session, settings.master_url, settings.option_strikes_each_side)
+        found = await fetch_front_months(
+            session, settings.master_url, today, calendar, settings.option_strikes_each_side
+        )
     except (MasterError, aiohttp.ClientError, OSError, ValueError, TimeoutError) as e:
         if settings.kospi200_futures_code and settings.usd_futures_code:
             log.error("KIS masters unavailable (%s); using configured futures codes, no options", e)
             return FrontMonths(settings.kospi200_futures_code, settings.usd_futures_code, ())
         log.error("derivative feeds skipped: nearest contracts not found (%s)", e)
         return None
+    if not found.kospi200_options:
+        log.error("no KOSPI200 options month with an ATM strike in the KIS master: options not recorded")
     fronts = FrontMonths(
         settings.kospi200_futures_code or found.kospi200_futures,
         settings.usd_futures_code or found.usd_futures,
@@ -216,7 +222,7 @@ async def run_collector(
                 on_received=health.received,
                 on_event=on_event,
             )
-            fronts = await front_months(session, settings)
+            fronts = await front_months(session, settings, kst_day(now()), calendar.calendar)
             plan = subscription_plan(settings, fronts)
             cap = len(plan) if settings.ws_max_subscriptions is None else settings.ws_max_subscriptions
             for feed, key in plan[cap:]:
@@ -532,7 +538,8 @@ async def check_fallbacks(settings: Settings, now: Clock | None = None) -> list[
     checks: list[FallbackCheck] = []
     async with aiohttp.ClientSession() as session:
         _, client = tokens_and_client(session, settings, clock)
-        plan = subscription_plan(settings, await front_months(session, settings))
+        fronts = await front_months(session, settings, kst_day(clock()), calendar_store(settings).calendar)
+        plan = subscription_plan(settings, fronts)
         # A derivative left out of the plan (its contract not found) is not checked: a failure.
         planned = {feed.tr_id for feed, _ in plan}
         for feed in (KOSPI200_FUTURES, USD_FUTURES, OPTION):

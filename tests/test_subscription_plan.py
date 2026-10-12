@@ -2,27 +2,42 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
+
+import pytest
 
 from krx_quant.config import Settings
 from krx_quant.fake_kis import FakeKis
 from tests.kis_frames import master_zips
-from tests.test_collector import collect, settings_for
+from tests.test_collector import KST, collect, settings_for
 
 SYMBOLS = ("005930", "000660", "009150")
 
 
 # Nearest expiry 202610 with ATM 1,072.5; two strikes each side are recorded, the rest are not.
 STRIKES = ["1,065.0", "1,067.5", "1,070.0", "1,072.5", "1,075.0", "1,077.5", "1,080.0"]
+ATM = "1,072.5"
 CALLS = [f"B01610C{i}" for i in range(len(STRIKES))]
 PUTS = [f"C01610P{i}" for i in range(len(STRIKES))]
+NOVEMBER_CALLS = [f"B01611C{i}" for i in range(len(STRIKES))]
+NOVEMBER_PUTS = [f"C01611P{i}" for i in range(len(STRIKES))]
 
 
-def serve_masters(kis: FakeKis) -> None:
-    options = [(c, "C", f"202610 {k}", k == "1,072.5") for c, k in zip(CALLS, STRIKES, strict=True)]
-    options += [(p, "P", f"202610 {k}", k == "1,072.5") for p, k in zip(PUTS, STRIKES, strict=True)]
-    options += [("B01611C3", "C", "202611 1,072.5", True)]  # a later expiry is ignored
+def options_of(month: str, calls: list[str], puts: list[str]) -> list[tuple[str, str, str, bool]]:
+    """A month's options in the master, one call and one put at each strike."""
+    rows = [(c, "C", f"{month} {k}", k == ATM) for c, k in zip(calls, STRIKES, strict=True)]
+    return rows + [(p, "P", f"{month} {k}", k == ATM) for p, k in zip(puts, STRIKES, strict=True)]
+
+
+def serve_masters(kis: FakeKis, options: list[tuple[str, str, str, bool]] | None = None) -> None:
+    if options is None:
+        options = [
+            *options_of("202610", CALLS, PUTS),
+            ("B01611C3", "C", f"202611 {ATM}", True),
+        ]  # later: ignored
     kis.masters = master_zips(
         kospi200_futures=[("A01703", "2"), ("A01612", "1")],
         usd_futures=[("A75611", "2"), ("A75610", "1")],
@@ -68,6 +83,68 @@ async def test_registers_every_feed_in_priority_order(kis: FakeKis, tmp_path: Pa
             *[("H0NXCNT0", sym) for sym in SYMBOLS],
         ]
     )
+
+
+@pytest.mark.parametrize(
+    ("day", "month"),
+    [
+        (8, "10"),  # October's expiry day itself: its options still trade until 15:20
+        (12, "11"),  # October's expired on the 8th
+    ],
+)
+async def test_options_are_taken_from_the_nearest_month_not_yet_expired(
+    kis: FakeKis, tmp_path: Path, day: int, month: str
+) -> None:
+    # On 2026-10-12 the master KIS published still listed October's options, expired on the
+    # 8th (the second Thursday), with an ATM strike (seen live).
+    serve_masters(
+        kis, [*options_of("202610", CALLS, PUTS), *options_of("202611", NOVEMBER_CALLS, NOVEMBER_PUTS)]
+    )
+    calls, puts = (CALLS, PUTS) if month == "10" else (NOVEMBER_CALLS, NOVEMBER_PUTS)
+    kis.script[("H0IOCNT0", calls[3])] = []
+
+    await collect(kis, settings_for(kis, tmp_path), now=datetime(2026, 10, day, 9, 30, tzinfo=KST))
+
+    options = sorted(key for tr, key in kis.subscribed_keys() if tr == "H0IOCNT0")
+    assert options == sorted(calls[1:6] + puts[1:6])
+
+
+async def test_options_whose_last_day_came_early_for_a_holiday_are_passed_over(
+    kis: FakeKis, tmp_path: Path
+) -> None:
+    # Were 2026-11-12, November's second Thursday, a holiday, November's options would last
+    # trade on the 11th: a collector started on the 12th takes December's.
+    state = tmp_path / "state"
+    state.mkdir()
+    closed = {"refreshed_on": "2026-11-12", "open_days": {"2026-11-12": False}}
+    (state / "market_calendar.json").write_text(json.dumps(closed))
+    december_calls = [f"B01612C{i}" for i in range(len(STRIKES))]
+    december_puts = [f"C01612P{i}" for i in range(len(STRIKES))]
+    serve_masters(
+        kis,
+        [
+            *options_of("202611", NOVEMBER_CALLS, NOVEMBER_PUTS),
+            *options_of("202612", december_calls, december_puts),
+        ],
+    )
+    kis.script[("H0IOCNT0", december_calls[3])] = []
+
+    await collect(kis, settings_for(kis, tmp_path), now=datetime(2026, 11, 12, 9, 30, tzinfo=KST))
+
+    options = sorted(key for tr, key in kis.subscribed_keys() if tr == "H0IOCNT0")
+    assert options == sorted(december_calls[1:6] + december_puts[1:6])
+
+
+async def test_the_futures_are_recorded_even_when_no_option_month_can_be_chosen(
+    kis: FakeKis, tmp_path: Path
+) -> None:
+    serve_masters(kis, options_of("202610", CALLS, PUTS))  # the only month listed has expired
+    kis.script[("H0IFCNT0", "A01612")] = []
+
+    await collect(kis, settings_for(kis, tmp_path), now=datetime(2026, 10, 12, 9, 30, tzinfo=KST))
+
+    assert {("H0IFCNT0", "A01612"), ("H0CFCNT0", "A75610")} <= kis.subscribed_keys()
+    assert not any(tr == "H0IOCNT0" for tr, _ in kis.subscribed_keys())
 
 
 async def test_configured_futures_codes_are_used_when_the_masters_are_unavailable(
