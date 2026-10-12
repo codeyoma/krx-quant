@@ -134,6 +134,7 @@
 | 테이블 | 열 |
 |---|---|
 | `predictions` | `id`, `symbol`, `algorithm`, `model_version`, `bar_close`(t), `displayed_at`, `p_up`, `p_flat`, `p_down`, `expected_ticks`, `status`(`ok`, `timed_out`, `error`, `vi`, `no_book`, 합의의 `no_members`, `none_finished`). 재생 결과의 `skipped`는 `ok`가 아닌 예측을 모두 센다. `ok`가 아니면 확률과 기대수익이 비어 있고 `outcomes` 행이 없다. |
+| `blocks` | `prediction_id`, `reason`(`special`, `no_reference`, `expired`). 최종 합의 예측 중 따르면 안 되는 것과 그 이유(#88). 따로 둔 표라서, 이 표가 생기기 전 엔진으로 되돌려도 DB를 읽는다 |
 | `outcomes` | `prediction_id`, `target_at`(t + 4분), `mid_close`(A), `mid_display`(B), `mid_target`, `flat_ticks`(k), `class_a`, `class_b`(`up`/`flat`/`down`), `special`, `unscorable`, `scored_at`(채점 전에는 비어 있음) |
 | `runs` | `id`, `kind`(`cpu_budget`: CPU 예산으로 건너뜀, `review`: 일일 상태 점검, `retire_candidate`: 은퇴 후보 알림, `budget_report`: 그날 예산 때문에 빠진 예측을 알림(#71), `no_regime`: 그날 매크로 국면이 없거나 엔진이 모르는 이름이어서 기본 전이행렬로 돈 날, 첫 봉 마감에 하루 한 번(`detail`에 `(unknown: <이름>)`), `signal_sent`: 보낸 텔레그램 신호, `signal_blocked`: 막힌 텔레그램 신호(둘 다 판정할 때마다 하나씩, `detail`은 JSON, 아래 "텔레그램 신호 알림", #80)), `at`, `algorithm`, `detail` |
 | `statuses` | `id`, `algorithm`, `at`, `previous`, `status`, `reason`: 알고리즘 상태 이력(#17) |
@@ -200,6 +201,7 @@
       "displayed_at": "2026-10-12T09:31:00.004120+09:00",
       "target_at": "2026-10-12T09:35:00+09:00",
       "status": "ok",
+      "blocked": null,
       "p_up": 0.0,
       "p_flat": 1.0,
       "p_down": 0.0,
@@ -431,6 +433,10 @@
    - `no_reference`: 봉 마감 기준가(중간가)가 없다. 호가가 60초 넘게 오지 않았다.
    - `expired`: 지금이 이미 목표 시각이다. 엔진이 밀려 뒤늦게 최종 합의를 낸 경우다.
    - 여러 이유에 걸리면 위 순서의 첫 이유를 남긴다.
+
+막을 이유는 신호와 상관없이 최종 합의 예측마다 정해, 예측과 함께 저장하고 예측 조회와 스트림의 `blocked`로 낸다(`special`, `no_reference`, `expired`, 없으면 `null`. 다른 예측은 늘 `null`, #88). 텔레그램 신호가 꺼져 있어도 같다. 화면의 신호 알림도 이것을 따른다.
+
+  > **바뀜** (2026-10-13, #PR88): 막을 이유는 텔레그램 신호를 보낼 때만 엔진 안에서 정했다 → 최종 합의 예측마다 정해 저장하고 API와 스트림으로 낸다. 이유: 화면의 데스크톱 알림도 같은 판정을 따르게 하려고. 판정 규칙은 엔진 한 곳에만 둔다(#78, #88).
 
 보낸 신호와 막힌 신호는 `runs` 테이블에 `signal_sent`, `signal_blocked`로 남는다. `detail`은 JSON이다: `symbol`, `direction`(`up`, `down`), `probability`, `agree`(같은 방향인 정식 알고리즘 수), `members`(합의에 들어간 정식 알고리즘 수), `bar_close`, `target_at`, `rule`(`min_probability`, `min_agree`, 그때의 신호 규칙), `blocked`(막힌 이유, 보낸 신호는 `null`). 3에서 반복이라 건너뛴 신호는 남지 않는다. 막힌 신호는 로그에도 `signal blocked (<이유>)`로 남는다.
 

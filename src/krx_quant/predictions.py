@@ -52,6 +52,10 @@ _SCHEMA = (
     _PREDICTIONS.format(name="predictions")
     + """
 CREATE INDEX IF NOT EXISTS predictions_by_time ON predictions (symbol, bar_close);
+CREATE TABLE IF NOT EXISTS blocks (  -- why a final consensus is not to be acted on (#88); a table of
+    prediction_id INTEGER PRIMARY KEY REFERENCES predictions (id),  -- its own, so an engine
+    reason TEXT NOT NULL              -- rolled back to before it still reads the DB:
+);                                    -- special, no_reference or expired
 CREATE INDEX IF NOT EXISTS predictions_by_close ON predictions (bar_close);
 CREATE TABLE IF NOT EXISTS outcomes (
     prediction_id INTEGER PRIMARY KEY REFERENCES predictions (id),
@@ -191,6 +195,7 @@ class NewPrediction:
     flat_ticks: int | None
     status: str = "ok"
     special: bool = False  # a special situation known to touch its window when it was made
+    blocked: str | None = None  # a final consensus's reason not to be acted on (#88)
 
 
 @dataclass(frozen=True)
@@ -281,6 +286,11 @@ class PredictionStore:
                 )
                 assert cursor.lastrowid is not None
                 ids.setdefault(p.algorithm, []).append(cursor.lastrowid)
+                if p.blocked is not None:
+                    self._db.execute(
+                        "INSERT INTO blocks (prediction_id, reason) VALUES (?, ?)",
+                        (cursor.lastrowid, p.blocked),
+                    )
                 if f is None:
                     continue  # nothing to score
                 self._db.execute(
@@ -643,8 +653,9 @@ class PredictionStore:
             (db or self._db)
             .execute(
                 "SELECT p.*, o.target_at, o.mid_close, o.mid_display, o.mid_target, o.flat_ticks,"
-                " o.class_a, o.class_b, o.special, o.unscorable, o.scored_at"
-                " FROM predictions p LEFT JOIN outcomes o ON o.prediction_id = p.id " + where,
+                " o.class_a, o.class_b, o.special, o.unscorable, o.scored_at, b.reason AS blocked"
+                " FROM predictions p LEFT JOIN outcomes o ON o.prediction_id = p.id"
+                " LEFT JOIN blocks b ON b.prediction_id = p.id " + where,
                 params,
             )
             .fetchall()

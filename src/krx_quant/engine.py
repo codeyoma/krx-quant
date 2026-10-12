@@ -597,28 +597,22 @@ class PredictionEngine:
             for forecasts, status in ((pooled, "ok"), (empty, why))
             if forecasts
         ]
-        self._record(bar_close, at_close, made)
+        # A final consensus not to be acted on says why, stored with it for every client (#88).
+        blocked = self._blocked(bar_close, at_close, pooled) if name == FINAL else {}
+        self._record(bar_close, at_close, made, blocked)
         if name == FINAL and self.signals is not None:
             try:
-                self._signal(self.signals, bar_close, at_close, pooled, pooled_from)
+                self._signal(self.signals, bar_close, pooled, pooled_from, blocked)
             except Exception:  # an alert never stops predicting
                 log.exception("signal alert failed")
 
-    def _signal(
-        self,
-        signals: Signals,
-        bar_close: datetime,
-        at_close: Mapping[str, _AtClose],
-        pooled: Mapping[str, Forecast],
-        pooled_from: Mapping[str, Mapping[str, Forecast]],
-    ) -> None:
-        """Judge a final consensus for signals, block what should not be acted on, and keep
-        each signal judged (``runs``)."""
+    def _blocked(
+        self, bar_close: datetime, at_close: Mapping[str, _AtClose], pooled: Mapping[str, Forecast]
+    ) -> dict[str, Blocked]:
+        """Why each symbol's final consensus is not to be acted on, by what is known now: a VI
+        or circuit breaker touching its four minutes, no reference price at its bar close, or
+        its target time past."""
         now = self.clock.now()
-        if not self._signals_resumed:
-            self._signals_resumed = True  # once, even if reading fails
-            midnight = datetime.combine(now.astimezone(KST).date(), time(), KST)
-            signals.resume(r.detail for r in self.store.runs(SENT, midnight))
         target_at = bar_close + HORIZON
         known = [w for w in self._special.known(before=now) if w.kind in (Kind.VI, Kind.CIRCUIT_BREAKER)]
         blocked: dict[str, Blocked] = {}
@@ -629,6 +623,24 @@ class PredictionEngine:
                 blocked[symbol] = Blocked.NO_REFERENCE
             elif now >= target_at:
                 blocked[symbol] = Blocked.EXPIRED
+        return blocked
+
+    def _signal(
+        self,
+        signals: Signals,
+        bar_close: datetime,
+        pooled: Mapping[str, Forecast],
+        pooled_from: Mapping[str, Mapping[str, Forecast]],
+        blocked: Mapping[str, Blocked],
+    ) -> None:
+        """Judge a final consensus for signals, block what should not be acted on, and keep
+        each signal judged (``runs``)."""
+        now = self.clock.now()
+        if not self._signals_resumed:
+            self._signals_resumed = True  # once, even if reading fails
+            midnight = datetime.combine(now.astimezone(KST).date(), time(), KST)
+            signals.resume(r.detail for r in self.store.runs(SENT, midnight))
+        target_at = bar_close + HORIZON
 
         def keep(judged: Judged) -> None:
             self.store.add_run(judged.kind, now, None, judged.detail(signals.rule))
@@ -707,6 +719,7 @@ class PredictionEngine:
         bar_close: datetime,
         at_close: Mapping[str, _AtClose],
         made: Sequence[tuple[str, str, Mapping[str, Forecast | None], str]],
+        blocked: Mapping[str, Blocked] | None = None,
     ) -> None:
         """Store (name, model version, forecasts by symbol, status) entries as displayed now."""
         displayed_at = self.clock.now()
@@ -732,6 +745,9 @@ class PredictionEngine:
                         flat_ticks=flat_ticks(reference, self.fee_rate) if reference is not None else None,
                         status=status,
                         special=touching(special, symbol, bar_close, bar_close + HORIZON),
+                        blocked=why.value
+                        if forecast is not None and blocked and (why := blocked.get(symbol)) is not None
+                        else None,
                     )
                 )
         added = self.store.add_all(predictions)
