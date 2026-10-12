@@ -52,8 +52,9 @@ urllib.request.urlopen(f"http://127.0.0.1:{port}/v1/status", timeout=5)' >/dev/n
   return 1
 }
 
+# The image is told the commit it is built from (KRX_COMMIT): the engine shows and records it.
 restart() {
-  docker compose up -d --build && healthy
+  KRX_COMMIT=$(git rev-parse HEAD) docker compose up -d --build && healthy
 }
 
 # The running image to ECR for the Spot training; remembered when it fails, for the next run.

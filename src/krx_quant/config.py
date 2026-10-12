@@ -139,6 +139,7 @@ class Settings:
     yahoo_url: str = DEFAULT_YAHOO_URL
     regime_rules: RegimeRules = RegimeRules()
     signal_rule: SignalRule | None = None  # Telegram signal alerts; None: off
+    commit: str = "unknown"  # the commit the image was built from (KRX_COMMIT, set by the deploy)
 
     @classmethod
     def from_env(
@@ -288,6 +289,7 @@ class Settings:
             signal_rule=signal_rule
             if _on_or_off("KRX_SIGNAL_ALERT", values.get("KRX_SIGNAL_ALERT", "off"))
             else None,
+            commit=values.get("KRX_COMMIT", "").strip() or "unknown",
         )
 
 

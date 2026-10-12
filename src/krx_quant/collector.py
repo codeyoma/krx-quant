@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -165,6 +166,21 @@ async def front_months(
     return fronts
 
 
+def started(settings: Settings) -> dict[str, Any]:
+    """What an engine start is recorded with (``runs``, kind ``start``): the code and the
+    settings its results depend on, so stats can be told apart by them (#85)."""
+    rule = settings.signal_rule
+    return {
+        "commit": settings.commit,
+        "fee_rate": settings.fee_rate,
+        "signal_rule": None
+        if rule is None
+        else {"min_probability": rule.min_probability, "min_agree": rule.min_agree},
+        "algorithm_seconds": settings.algorithm_seconds,
+        "cpu_budget_seconds": settings.cpu_budget_seconds,
+    }
+
+
 async def run_collector(
     settings: Settings, *, stop: asyncio.Event, clock: Clock | SessionClock | None = None
 ) -> None:
@@ -194,7 +210,9 @@ async def run_collector(
         leaders=Leaders.of(settings),
         regimes=partial(day_regime, settings.data_dir),  # recorded by the 07:30 macro read
         admits=admits(settings.state_dir),  # a new algorithm waits for its pre-validation
+        commit=settings.commit,
     )
+    store.add_run("start", engine.started_at, None, json.dumps(started(settings)))
 
     def on_event(feed: str, row: dict[str, Any]) -> None:
         # Recording comes first: a prediction bug must never stop it.

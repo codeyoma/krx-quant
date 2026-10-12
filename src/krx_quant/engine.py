@@ -253,8 +253,11 @@ class PredictionEngine:
         signals: Signals | None = None,
         regimes: Regimes | None = None,
         admits: Callable[[Algorithm], bool] | None = None,
+        commit: str = "unknown",
     ) -> None:
         self.store = store
+        self.commit = commit  # the code it runs (the deploy's KRX_COMMIT)
+        self.started_at = clock.now()
         self.calendar = calendar
         self.symbols = tuple(symbols)
         self.fee_rate = fee_rate

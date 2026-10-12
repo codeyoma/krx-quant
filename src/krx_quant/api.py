@@ -157,6 +157,8 @@ async def _status(request: web.Request) -> web.Response:
     body: dict[str, Any] = {
         "mode": request.app[MODE_KEY],
         "now": iso(now),
+        "commit": engine.commit,
+        "started_at": iso(engine.started_at),
         "phase": engine.calendar.phase(now).value,
         "session": None if session is None else {"open": iso(session.open), "close": iso(session.close)},
         "last_bar_close": engine.store.last_bar_close(),

@@ -7,7 +7,9 @@ the collector records. Nothing here reaches into collector internals.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+import json
+from dataclasses import replace
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -17,6 +19,8 @@ import pyarrow.parquet as pq
 from krx_quant.collector import run_collector
 from krx_quant.config import Settings
 from krx_quant.fake_kis import FakeKis
+from krx_quant.predictions import DB_NAME, PredictionStore
+from krx_quant.signals import SignalRule
 from tests.kis_frames import book_frame, trade_frame
 
 KST = ZoneInfo("Asia/Seoul")
@@ -87,6 +91,30 @@ async def test_trade_frame_is_recorded_as_normalized_trade_event(kis: FakeKis, t
     assert trade["cum_volume"] == 1234567
     assert (trade["ask1"], trade["bid1"]) == (81300, 81200)
     assert trade["market_cls_code"] == "J"
+
+
+async def test_an_engine_start_is_recorded_with_its_commit_and_settings(kis: FakeKis, tmp_path: Path) -> None:
+    kis.script[("H0UNCNT0", "005930")] = []
+    settings = replace(
+        settings_for(kis, tmp_path),
+        commit="0123456789abcdef",
+        fee_rate=0.0002,
+        signal_rule=SignalRule(0.65, 3),
+    )
+
+    await collect(kis, settings)
+
+    store = PredictionStore(tmp_path / "state" / DB_NAME)
+    [run] = store.runs("start", FIXED_NOW - timedelta(days=1))
+    store.close()
+    assert run.at == FIXED_NOW
+    assert json.loads(run.detail) == {
+        "commit": "0123456789abcdef",
+        "fee_rate": 0.0002,
+        "signal_rule": {"min_probability": 0.65, "min_agree": 3},
+        "algorithm_seconds": 10.0,
+        "cpu_budget_seconds": 30.0,
+    }
 
 
 async def test_book_frame_is_recorded_with_ten_levels_per_side(kis: FakeKis, tmp_path: Path) -> None:

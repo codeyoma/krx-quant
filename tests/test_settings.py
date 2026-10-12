@@ -45,6 +45,11 @@ def test_a_cost_budget_needs_the_schedules_it_turns_off() -> None:
     assert Settings.from_env(both, dotenv_path=None).training_schedules == ("a", "b")
 
 
+def test_the_commit_running_is_the_deploy_s_or_unknown() -> None:
+    assert Settings.from_env(KEYS, dotenv_path=None).commit == "unknown"
+    assert Settings.from_env({**KEYS, "KRX_COMMIT": "0123abc"}, dotenv_path=None).commit == "0123abc"
+
+
 def test_one_algorithms_limit_is_below_the_cpu_budget() -> None:
     # One algorithm at its limit must leave the others room in the budget.
     defaults = Settings.from_env(KEYS, dotenv_path=None)

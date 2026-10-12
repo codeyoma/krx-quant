@@ -24,6 +24,10 @@ RUN useradd --create-home --uid 10001 engine && mkdir -p /data /state /archive \
 USER engine
 # /state holds the cached KIS access token; keep it on a volume so restarts reuse it.
 ENV KRX_DATA_DIR=/data KRX_STATE_DIR=/state
+# The commit the image is built from (deploy/auto-update.sh passes it), last: it changes
+# with every build and must not invalidate the layers above.
+ARG KRX_COMMIT=unknown
+ENV KRX_COMMIT=$KRX_COMMIT
 VOLUME ["/data", "/state"]
 
 ENTRYPOINT ["/app/.venv/bin/krx-quant"]
