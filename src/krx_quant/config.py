@@ -139,6 +139,9 @@ class Settings:
     yahoo_url: str = DEFAULT_YAHOO_URL
     regime_rules: RegimeRules = RegimeRules()
     signal_rule: SignalRule | None = None  # Telegram signal alerts; None: off
+    probation_review_days: tuple[int, ...] = (10, 20, 40)  # days on probation it is judged on (#87)
+    bench_review_days: tuple[int, ...] = (20, 40, 60)  # days on the bench it may recover on
+    review_confidence: float = 0.983  # the lift-by-day interval's level those judgements need
 
     @classmethod
     def from_env(
@@ -186,6 +189,17 @@ class Settings:
 
         def codes(name: str, default: str) -> tuple[str, ...]:
             return tuple(c.strip() for c in values.get(name, default).split(",") if c.strip())
+
+        def review_days(name: str, default: str) -> tuple[int, ...]:
+            """Days in a status a review judges on: positive whole days, rising, at least one."""
+            raw = codes(name, default)
+            try:
+                days = tuple(int(d) for d in raw)
+            except ValueError as e:
+                raise SettingsError(f"{name} must be whole days, got {','.join(raw)!r}") from e
+            if not days or days[0] < 1 or any(b <= a for a, b in zip(days, days[1:], strict=False)):
+                raise SettingsError(f"{name} must be rising days from 1 on, got {','.join(raw)!r}")
+            return days
 
         if values.get("KRX_COST_BUDGET", "").strip() and not codes("KRX_TRAINING_SCHEDULES", ""):
             raise SettingsError(
@@ -288,6 +302,11 @@ class Settings:
             signal_rule=signal_rule
             if _on_or_off("KRX_SIGNAL_ALERT", values.get("KRX_SIGNAL_ALERT", "off"))
             else None,
+            probation_review_days=review_days("KRX_PROBATION_REVIEW_DAYS", "10,20,40"),
+            bench_review_days=review_days("KRX_BENCH_REVIEW_DAYS", "20,40,60"),
+            review_confidence=float(
+                number("KRX_REVIEW_CONFIDENCE", "0.983", float, minimum=0.5, maximum=0.9999)
+            ),
         )
 
 

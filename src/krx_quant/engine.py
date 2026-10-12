@@ -83,7 +83,7 @@ from krx_quant.feeds import (
     VI_STATUS,
 )
 from krx_quant.feeds.base import KST, LEVELS
-from krx_quant.lifecycle import Standing, Status, review
+from krx_quant.lifecycle import Rules, Standing, Status, review
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.market_view import (
     FUTURES_SERIES,
@@ -253,8 +253,10 @@ class PredictionEngine:
         signals: Signals | None = None,
         regimes: Regimes | None = None,
         admits: Callable[[Algorithm], bool] | None = None,
+        review_rules: Rules | None = None,
     ) -> None:
         self.store = store
+        self.review_rules = review_rules or Rules()  # when statuses are judged (#87)
         self.calendar = calendar
         self.symbols = tuple(symbols)
         self.fee_rate = fee_rate
@@ -402,7 +404,8 @@ class PredictionEngine:
         alerted = {
             name
             for name, s in standings.items()
-            if s.status is Status.BENCH and self.store.ran_since("retire_candidate", name, s.since)
+            if s.status in (Status.PROBATION, Status.BENCH)
+            and self.store.ran_since("retire_candidate", name, s.since)
         }
         result = await asyncio.to_thread(
             review,
@@ -414,6 +417,7 @@ class PredictionEngine:
             min_sample=self.min_sample,
             fee_rate=self.fee_rate,
             alerted=alerted,
+            rules=self.review_rules,
         )
         for c in result.changes:
             # Only from the status reviewed: a retire command may have landed meanwhile.
@@ -423,10 +427,12 @@ class PredictionEngine:
                 log.info("%s: %s not applied, its status changed meanwhile", c.algorithm, c.status.value)
         for candidate in result.candidates:
             name = candidate.algorithm
-            text = (
-                f"{name} 은퇴 후보: 벤치에서 {candidate.days}거래일 동안 회복하지 못했습니다. "
-                f"은퇴시키려면 서버에서 krx-quant retire {name}"
+            stuck = (
+                f"수습 {candidate.days}거래일 동안 정식이 되지 못했습니다"
+                if candidate.status is Status.PROBATION
+                else f"벤치에서 {candidate.days}거래일 동안 회복하지 못했습니다"
             )
+            text = f"{name} 은퇴 후보: {stuck}. 은퇴시키려면 서버에서 krx-quant retire {name}"
             if await self._deliver(text):  # else asked again at the next review
                 self.store.add_run("retire_candidate", at, name, text)
         untold = [name for name in self.waiting() if name not in self._told_waiting]
