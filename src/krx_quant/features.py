@@ -76,6 +76,13 @@ class OrderFlow:
     quote_size: Mapping[int, float] = field(default_factory=dict)  # by window: the best quotes' mean size
     bid_depth: float | None = None  # the ten levels' sizes at the bar close; None without the book
     ask_depth: float | None = None
+    # The best quotes and their sizes at the bar close, and both sizes a minute before
+    # (Turing's, #55); None without the book, or before the open.
+    best_bid: float | None = None
+    best_ask: float | None = None
+    best_bid_size: float | None = None
+    best_ask_size: float | None = None
+    best_size_before: float | None = None
     buys: int = 0  # trades over ``TRADE_MINUTES`` by aggressor (integrated feed)
     sells: int = 0
     buy_volume: float = 0.0
@@ -388,6 +395,33 @@ def depth_imbalance(s: Snapshot) -> FeatureValue:
     return (bid - ask) / (bid + ask) if bid + ask > 0 else 0.0
 
 
+def spread_ticks(s: Snapshot) -> FeatureValue:
+    """The best quotes' spread at the bar close, in ticks of the reference price."""
+    bid, ask = s.order_flow.best_bid, s.order_flow.best_ask
+    if bid is None or ask is None or s.tick is None:
+        return None
+    return (ask - bid) / s.tick
+
+
+def top_imbalance(s: Snapshot) -> FeatureValue:
+    """(Bid − ask) sizes over both, at the best quotes only, at the bar close: the next
+    trade's side more than the book's weight (``depth_imbalance``)."""
+    bid, ask = s.order_flow.best_bid_size, s.order_flow.best_ask_size
+    if bid is None or ask is None or bid + ask <= 0:
+        return None
+    return (bid - ask) / (bid + ask)
+
+
+def top_size_change(s: Snapshot) -> FeatureValue:
+    """How the size waiting at the best quotes changed over the last minute: the log of
+    both sizes now over a minute before. Below 0, the best quotes are thinning."""
+    flow = s.order_flow
+    if flow.best_bid_size is None or flow.best_ask_size is None or flow.best_size_before is None:
+        return None
+    now = flow.best_bid_size + flow.best_ask_size
+    return math.log(now / flow.best_size_before) if now > 0 and flow.best_size_before > 0 else None
+
+
 def trade_imbalance(s: Snapshot) -> FeatureValue:
     """(Bought − sold) volume over both, by aggressor, in the last ``TRADE_MINUTES``."""
     bought, sold = s.order_flow.buy_volume, s.order_flow.sell_volume
@@ -694,6 +728,9 @@ FEATURES: dict[str, Feature] = {
     "kospi200f_moves": kospi200f_moves,
     **{ofi_feature(m): _ofi(m) for m in OFI_MINUTES},
     "depth_imbalance": depth_imbalance,
+    "spread_ticks": spread_ticks,
+    "top_imbalance": top_imbalance,
+    "top_size_change": top_size_change,
     "trade_imbalance": trade_imbalance,
     "trade_entropy": trade_entropy,
     "nxt_share": nxt_share,
@@ -718,7 +755,16 @@ LEAD_FEATURES = frozenset(lead_feature(group, lag) for group in LEAD_GROUPS for 
 SERIES_FEATURES = frozenset({"minute_ticks", "microprice_ticks", "kospi200f_moves"})
 # The features from the book, and from the trades' sides and venues: none on a day with
 # backfilled bars only.
-BOOK_FEATURES = frozenset({"microprice_ticks", "depth_imbalance", *(ofi_feature(m) for m in OFI_MINUTES)})
+BOOK_FEATURES = frozenset(
+    {
+        "microprice_ticks",
+        "depth_imbalance",
+        "spread_ticks",
+        "top_imbalance",
+        "top_size_change",
+        *(ofi_feature(m) for m in OFI_MINUTES),
+    }
+)
 # Each side's excitation at each decay, and its arrivals (Poisson's).
 EXCITATION_FEATURES = tuple(excitation_feature(side, sec) for side, sec in product(SIDES, EXCITATION_SECONDS))
 ARRIVAL_FEATURES = tuple(arrivals_feature(side) for side in SIDES)

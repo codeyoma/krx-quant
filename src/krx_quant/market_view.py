@@ -285,8 +285,8 @@ def _order_flow_imbalance(before: _Quote, now: _Quote) -> float:
 
 class _Book:
     """A symbol's book updates by receipt time, for the latest hour or so: each one's
-    microprice and ten levels' sizes, and running totals of the order flow imbalance at the
-    best quotes, of their mean size and of the updates."""
+    microprice, best quotes and ten levels' sizes, and running totals of the order flow
+    imbalance at the best quotes, of their mean size and of the updates."""
 
     _KEEP = timedelta(minutes=MINUTE_MOVES + 10)
 
@@ -294,6 +294,7 @@ class _Book:
         self._at: list[datetime] = []
         self._micro: list[float] = []
         self._depth: list[tuple[float, float]] = []  # bid, ask: the ten levels' sizes
+        self._top: list[_Quote] = []  # the best quotes and their sizes
         self._flow = _Running(3, self._KEEP)  # order flow imbalance, best quotes' mean size, updates
         self._last: _Quote | None = None
 
@@ -324,10 +325,11 @@ class _Book:
                 float(sum(row.get(f"ask_qty_{i}") or 0 for i in LEVELS)),
             )
         )
+        self._top.append(quote)
         self._flow.add(at, (flow, (quote.bid_size + quote.ask_size) / 2, 1.0))
         if at - self._at[0] > 2 * self._KEEP:
             cut = bisect.bisect_left(self._at, at - self._KEEP)
-            del self._at[:cut], self._micro[:cut], self._depth[:cut]
+            del self._at[:cut], self._micro[:cut], self._depth[:cut], self._top[:cut]
 
     def _latest(self, at: datetime) -> int | None:
         """The update received just before ``at``, unless the book went missing (none in the
@@ -350,6 +352,12 @@ class _Book:
         """The ten levels' sizes (bid, ask) just before ``at``; None if the book is missing."""
         i = self._latest(at)
         return None if i is None else self._depth[i]
+
+    def top(self, at: datetime, since: datetime) -> _Quote | None:
+        """The best quotes received just before ``at``, from ``since`` on; None if the book is
+        missing or they came before ``since``."""
+        i = self._latest(at)
+        return None if i is None or self._at[i] < since else self._top[i]
 
     def flow(self, start: datetime, end: datetime) -> tuple[float, float | None]:
         """The order flow imbalance of the updates received in [start, end), and the best
@@ -564,6 +572,9 @@ class MarketView:
 
         book = self._books[symbol]
         depth = book.depth(at)
+        top = book.top(at, session.open)
+        # A minute before: from the open too, as the windows (none in the first minute).
+        top_before = book.top(at - BAR, session.open) if at - BAR > session.open else None
         imbalances = {m: book.flow(since(m), at) for m in OFI_MINUTES}
         sides = _Sides(*self._sides[symbol].between(since(TRADE_MINUTES), at))
         volumes: dict[str, float | None] = {
@@ -577,6 +588,11 @@ class MarketView:
             quote_size={m: size for m, (_, size) in imbalances.items() if size is not None},
             bid_depth=None if depth is None else depth[0],
             ask_depth=None if depth is None else depth[1],
+            best_bid=None if top is None else float(top.bid),
+            best_ask=None if top is None else float(top.ask),
+            best_bid_size=None if top is None else float(top.bid_size),
+            best_ask_size=None if top is None else float(top.ask_size),
+            best_size_before=None if top_before is None else float(top_before.bid_size + top_before.ask_size),
             buys=int(sides.buys),
             sells=int(sides.sells),
             buy_volume=sides.bought,
