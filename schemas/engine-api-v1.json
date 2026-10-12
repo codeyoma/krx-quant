@@ -408,15 +408,19 @@
         },
         "lift": {
           "type": "object",
-          "required": ["low", "vs"],
+          "required": ["low", "day_low", "vs"],
           "additionalProperties": false,
           "properties": {
             "low": {"type": ["number", "null"]},
+            "day_low": {
+              "description": "The weakest lift's lower bound by trading day: what the statuses are decided by.",
+              "type": ["number", "null"]
+            },
             "vs": {
               "type": "object",
               "additionalProperties": {
                 "type": "object",
-                "required": ["n", "value", "low", "high", "p", "q", "significant"],
+                "required": ["n", "value", "low", "high", "p", "q", "significant", "by_day"],
                 "additionalProperties": false,
                 "properties": {
                   "n": {"type": "integer", "minimum": 0},
@@ -425,7 +429,25 @@
                   "high": {"type": ["number", "null"]},
                   "p": {"type": ["number", "null"]},
                   "q": {"type": ["number", "null"]},
-                  "significant": {"type": ["boolean", "null"]}
+                  "significant": {"type": ["boolean", "null"]},
+                  "by_day": {
+                    "description": "The lift taken a trading day at a time (each day's mean gain one value); null from fewer than two days.",
+                    "oneOf": [
+                      {"type": "null"},
+                      {
+                        "type": "object",
+                        "required": ["n", "value", "low", "high", "p"],
+                        "additionalProperties": false,
+                        "properties": {
+                          "n": {"type": "integer", "minimum": 2},
+                          "value": {"type": "number"},
+                          "low": {"type": "number"},
+                          "high": {"type": "number"},
+                          "p": {"type": "number"}
+                        }
+                      }
+                    ]
+                  }
                 }
               }
             }

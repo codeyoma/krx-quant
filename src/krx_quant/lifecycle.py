@@ -1,11 +1,11 @@
 """Algorithm lifecycle: each algorithm's status, changed by rules after each day's close.
 
 - **probation**: new. After 10 trading days, it is made active if the lower bound of its
-  weakest lift over the baselines (all its probation days) is above 0.
+  weakest lift over the baselines by trading day (all its probation days) is above 0.
 - **active**: in the consensus (#18). Benched if its weakest lift over the last 20
   trading days is 0 or less.
-- **bench**: still predicted and scored. Made active again if its weakest lift over the
-  last 20 trading days has a lower bound above 0. After 60 trading days on the bench
+- **bench**: still predicted and scored. Made active again if its weakest lift by trading
+  day over the last 20 trading days has a lower bound above 0. After 60 trading days on the bench
   without that, it is a retirement candidate: an alert is sent, once.
 - **retired**: by command only (``krx-quant retire``); it is no longer run. Its records
   stay. ``krx-quant unretire`` puts it back on probation.
@@ -16,8 +16,10 @@
 The statistics are the leaderboard's: basis B, special predictions left out, and a
 decision only with at least ``min_sample`` scored predictions and as many pairs with each
 baseline; with fewer (or, for a clone, too few pairs to correlate), the status stays. A
-trading day counts when the engine predicted on it, from the first day reviewed after the
-status began: a status set after a day's review starts counting the next day.
+lower bound is the lift's by trading day (``stats.day_lift``): the overlapping four-minute
+outcomes of one day are not counted as independent evidence. A trading day counts when
+the engine predicted on it, from the first day reviewed after the status began: a status
+set after a day's review starts counting the next day.
 """
 
 from __future__ import annotations
@@ -30,7 +32,7 @@ from datetime import date, datetime
 from typing import Any
 
 from krx_quant.baselines import BASELINE_NAMES
-from krx_quant.stats import MIN_PAIRS_TESTED, Entry, enough, entry, scored_by_algorithm, split
+from krx_quant.stats import MIN_PAIRS_TESTED, Entry, Lift, enough, entry, scored_by_algorithm, split
 
 PROBATION_DAYS = 10
 RECENT_DAYS = 20
@@ -146,13 +148,14 @@ class _Judge:
                     return None  # too few pairs to tell: it stays
                 return Change(name, status, Status.PROBATION, "no longer moves with an earlier algorithm")
             if len(held) >= PROBATION_DAYS:
-                low = self._lift_low(name, held)
-                if low is not None and low > 0:
+                passed = self._passed_by_day(name, held)
+                if passed is not None:
                     return Change(
                         name,
                         status,
                         Status.ACTIVE,
-                        f"{len(held)} days on probation; weakest lift low {low:.4f}",
+                        f"{len(held)} days on probation; weakest lift low {passed.low:.4f}"
+                        f" by trading day ({passed.n} days scored)",
                     )
         elif status is Status.ACTIVE:
             judged = self._judged(name, self.recent)
@@ -165,13 +168,14 @@ class _Judge:
                     f"weakest lift {weakest:.4f} over the last {len(self.recent)} days",
                 )
         elif status is Status.BENCH:
-            low = self._lift_low(name, self.recent)
-            if low is not None and low > 0:
+            passed = self._passed_by_day(name, self.recent)
+            if passed is not None:
                 return Change(
                     name,
                     status,
                     Status.ACTIVE,
-                    f"recovered: weakest lift low {low:.4f} over the last {len(self.recent)} days",
+                    f"recovered: weakest lift low {passed.low:.4f} by trading day ({passed.n} days scored)"
+                    f" over the last {len(self.recent)} days",
                 )
         return None
 
@@ -181,9 +185,11 @@ class _Judge:
         judged = entry(name, algorithms.get(name, []), baselines, self.fee_rate)
         return judged if enough(judged, self.min_sample) else None
 
-    def _lift_low(self, name: str, days: Sequence[date]) -> float | None:
+    def _passed_by_day(self, name: str, days: Sequence[date]) -> Lift | None:
+        """``name``'s weakest lift by trading day on ``days``, if its lower bound is above 0."""
         judged = self._judged(name, days)
-        return None if judged is None else judged.lift_low
+        weakest = None if judged is None else judged.weakest_by_day
+        return weakest if weakest is not None and weakest.low is not None and weakest.low > 0 else None
 
 
 def most_correlated(measured: Mapping[str, float]) -> tuple[str, float] | None:

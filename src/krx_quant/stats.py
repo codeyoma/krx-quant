@@ -19,17 +19,25 @@ Ratios come with 95% Wilson intervals, means with 95% normal intervals (none fro
 single value). A lift is tested only on enough pairs for the normal approximation; the
 lifts of the algorithms a leaderboard could rank are adjusted together by
 Benjamini–Hochberg (false discovery rate).
+
+These intervals count every prediction as independent of the others. They are not: a
+four-minute outcome overlaps the next three bar closes', and the symbols move with the
+market. So each lift is also taken **by trading day**: a day's mean gain is one value, and
+the days' mean has a Student t interval and one-sided p-value (none from fewer than two
+days). The statuses (``lifecycle.py``) are decided by these; the paired ones only describe.
 """
 
 from __future__ import annotations
 
 import math
-from collections.abc import Collection, Mapping, Sequence
-from dataclasses import dataclass
-from datetime import datetime
+from collections.abc import Collection, Iterator, Mapping, Sequence
+from dataclasses import dataclass, replace
+from datetime import date, datetime
+from functools import cache
 from statistics import NormalDist
 from typing import Any
 
+from krx_quant.feeds.base import kst_day
 from krx_quant.pricing import SELL_TAX, Direction, most_likely, tick_size
 
 _Z = NormalDist().inv_cdf(0.975)
@@ -105,7 +113,7 @@ class Summary:
 
 @dataclass(frozen=True)
 class Lift:
-    n: int
+    n: int  # the pairs; the days for a lift by trading day (day_lift)
     value: float | None
     low: float | None
     high: float | None
@@ -222,10 +230,19 @@ def _calibration(records: Sequence[Scored]) -> list[CalibrationBin]:
     ]
 
 
+def _gains(records: Sequence[Scored], baseline: Sequence[Scored]) -> Iterator[tuple[datetime, float]]:
+    """Each bar close both predicted, and the accuracy gained over ``baseline`` there (1, 0 or -1)."""
+    theirs = {(b.symbol, b.bar_close): b.correct for b in baseline}
+    return (
+        (r.bar_close, float(r.correct) - theirs[key])
+        for r in records
+        if (key := (r.symbol, r.bar_close)) in theirs
+    )
+
+
 def lift(records: Sequence[Scored], baseline: Sequence[Scored]) -> Lift:
     """Accuracy gained over ``baseline`` on the bar closes both predicted."""
-    theirs = {(b.symbol, b.bar_close): b.correct for b in baseline}
-    gains = [float(r.correct) - theirs[key] for r in records if (key := (r.symbol, r.bar_close)) in theirs]
+    gains = [gain for _, gain in _gains(records, baseline)]
     interval = mean_interval(gains)
     if interval is None:
         return Lift(0, None, None, None, None)
@@ -237,6 +254,81 @@ def lift(records: Sequence[Scored], baseline: Sequence[Scored]) -> Lift:
     else:
         p = 1 - NormalDist().cdf(interval.value / error)
     return Lift(interval.n, interval.value, interval.low, interval.high, p)
+
+
+def day_lift(records: Sequence[Scored], baseline: Sequence[Scored]) -> Lift | None:
+    """The lift over ``baseline`` taken a trading day at a time: each day's mean gain is one
+    value, every day weighing the same. Its ``n`` is the days; None from fewer than two. Days
+    that all gained the same have no spread: the interval is that gain alone.
+    """
+    by_day: dict[date, list[float]] = {}
+    for at, gain in _gains(records, baseline):
+        by_day.setdefault(kst_day(at), []).append(gain)
+    means = [sum(gains) / len(gains) for gains in by_day.values()]
+    n = len(means)
+    if n < 2:
+        return None
+    mean = sum(means) / n
+    error = _standard_error(means, mean)
+    half = _t_quantile(0.975, n - 1) * error
+    if error == 0:
+        p = 0.0 if mean > 0 else 1.0
+    else:
+        p = _t_above(mean / error, n - 1)
+    return Lift(n, mean, mean - half, mean + half, p)
+
+
+def _t_above(x: float, df: int) -> float:
+    """P(T > x) for Student's t with ``df`` degrees of freedom."""
+    tail = 0.5 * _incomplete_beta(df / 2, 0.5, df / (df + x * x))
+    return tail if x >= 0 else 1 - tail
+
+
+@cache
+def _t_quantile(q: float, df: int) -> float:
+    """The ``q`` quantile (above the median) of Student's t with ``df`` degrees of freedom."""
+    low, high = 0.0, 1.0
+    while _t_above(high, df) > 1 - q:
+        high *= 2
+    for _ in range(100):
+        middle = (low + high) / 2
+        low, high = (middle, high) if _t_above(middle, df) > 1 - q else (low, middle)
+    return (low + high) / 2
+
+
+def _incomplete_beta(a: float, b: float, x: float) -> float:
+    """The regularized incomplete beta function I_x(a, b), by its continued fraction."""
+    if x <= 0:
+        return 0.0
+    if x >= 1:
+        return 1.0
+    log_beta = math.lgamma(a) + math.lgamma(b) - math.lgamma(a + b)
+    front = math.exp(a * math.log(x) + b * math.log1p(-x) - log_beta)
+    if x < (a + 1) / (a + b + 2):
+        return front * _beta_fraction(a, b, x) / a
+    return 1 - front * _beta_fraction(b, a, 1 - x) / b
+
+
+def _beta_fraction(a: float, b: float, x: float) -> float:
+    """The incomplete beta function's continued fraction, by Lentz's method."""
+    tiny = 1e-300
+
+    def step(value: float) -> float:
+        return value if abs(value) > tiny else tiny
+
+    c, d = 1.0, 1 / step(1 - (a + b) * x / (a + 1))
+    fraction = d
+    for m in range(1, 300):
+        for numerator in (
+            m * (b - m) * x / ((a + 2 * m - 1) * (a + 2 * m)),
+            -(a + m) * (a + b + m) * x / ((a + 2 * m) * (a + 2 * m + 1)),
+        ):
+            d = 1 / step(1 + numerator * d)
+            c = step(1 + numerator / c)
+            fraction *= d * c
+        if abs(d * c - 1) < 1e-15:
+            break
+    return fraction
 
 
 def benjamini_hochberg(p_values: Sequence[float]) -> list[float]:
@@ -254,10 +346,12 @@ def benjamini_hochberg(p_values: Sequence[float]) -> list[float]:
 
 @dataclass(frozen=True)
 class Tested:
-    """A lift with its false-discovery-rate adjustment, when it was tested with others."""
+    """A lift with its false-discovery-rate adjustment, when it was tested with others, and
+    the same lift by trading day."""
 
     lift: Lift
     q: float | None = None
+    by_day: Lift | None = None  # the same lift taken by trading day (day_lift)
 
     @property
     def significant(self) -> bool | None:
@@ -284,6 +378,22 @@ class Entry:
         return min(low for low in lows if low is not None)
 
     @property
+    def weakest_by_day(self) -> Lift | None:
+        """The lift by trading day with the lowest lower bound: better than every baseline,
+        day after day, how surely. None unless every baseline has one."""
+        by_day = [t.by_day for t in self.lifts.values()]
+        lows = [(d.low, d) for d in by_day if d is not None and d.low is not None]
+        if not by_day or len(lows) < len(by_day):
+            return None
+        return min(lows, key=lambda pair: pair[0])[1]
+
+    @property
+    def day_low(self) -> float | None:
+        """The lower bound of the weakest lift by trading day: what the statuses go by."""
+        weakest = self.weakest_by_day
+        return None if weakest is None else weakest.low
+
+    @property
     def weakest_lift(self) -> float | None:
         """The weakest lift: better than every baseline, by how much at least."""
         values = [t.lift.value for t in self.lifts.values()]
@@ -304,7 +414,9 @@ def entry(
 ) -> Entry:
     """One algorithm's (or baseline's) stats, with its lift over each baseline."""
     lifts = (
-        {} if algorithm in baselines else {name: Tested(lift(records, b)) for name, b in baselines.items()}
+        {}
+        if algorithm in baselines
+        else {name: Tested(lift(records, b), by_day=day_lift(records, b)) for name, b in baselines.items()}
     )
     versions = sorted({r.model_version for r in records})
     return Entry(algorithm, versions, summarize(records, fee_rate), lifts)
@@ -345,7 +457,7 @@ def leaderboard(
             e.algorithm,
             e.model_versions,
             e.summary,
-            {name: Tested(t.lift, q_values.get((e.algorithm, name))) for name, t in e.lifts.items()},
+            {name: replace(t, q=q_values.get((e.algorithm, name))) for name, t in e.lifts.items()},
         )
         for e in raw
     ]
@@ -384,17 +496,19 @@ def entry_json(e: Entry) -> dict[str, Any]:
     if e.lifts:
         out["lift"] = {
             "low": e.lift_low,
+            "day_low": e.day_low,
             "vs": {
                 name: {
-                    "n": t.lift.n,
-                    "value": t.lift.value,
-                    "low": t.lift.low,
-                    "high": t.lift.high,
-                    "p": t.lift.p,
+                    **_lift_json(t.lift),
                     "q": t.q,
                     "significant": t.significant,
+                    "by_day": None if t.by_day is None else _lift_json(t.by_day),
                 }
                 for name, t in e.lifts.items()
             },
         }
     return out
+
+
+def _lift_json(lift: Lift) -> dict[str, Any]:
+    return {"n": lift.n, "value": lift.value, "low": lift.low, "high": lift.high, "p": lift.p}

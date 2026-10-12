@@ -7,6 +7,7 @@ leaderboard and per-algorithm stats.
 from __future__ import annotations
 
 import contextlib
+import math
 from collections.abc import AsyncIterator, Sequence
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -21,6 +22,7 @@ from krx_quant.engine import PredictionEngine
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.predictions import NewPrediction, PredictionStore, Score
 from krx_quant.pricing import Direction
+from tests.api_schema import check
 from tests.replay_events import DAY, at, run
 from tests.test_replay import busy_morning
 
@@ -153,6 +155,48 @@ async def test_the_leaderboard_chooses_basis_symbol_period_and_leaves_out_specia
     assert alpha(five_days)["n"] == 44
     assert all(e["algorithm"] != "delta" for e in on_b["ranked"] + on_b["unranked"])
     assert any(e["algorithm"] == "delta" for e in with_special["ranked"] + with_special["unranked"])
+
+
+# Alpha against always-flat, day by day: right throughout (a gain of 0.5), right at the
+# first 20 bar closes and flat after (0.25), flat throughout (0). Over the three days:
+# a mean of 0.25 and a standard deviation of 0.25.
+DAILY_CALLS = [OUTCOMES, OUTCOMES[:20] + [FLAT] * 20, [FLAT] * 40]
+THREE_DAYS = [EARLIER, date(2026, 10, 9), DAY]
+T_975_2 = 4.302652729911275  # Student's t, 97.5th percentile, 2 degrees of freedom (tables)
+
+
+async def test_each_lift_is_also_judged_by_trading_day(tmp_path: Path) -> None:
+    async with board(tmp_path) as (engine, client):
+        for day, calls in zip(THREE_DAYS, DAILY_CALLS, strict=True):
+            baselines(engine.store, day=day)
+            store_scored(engine.store, "alpha", calls, day=day)
+
+        three_days = await get(client, "/v1/leaderboard?period=5d")
+        today = await get(client, "/v1/leaderboard")
+        stats = await get(client, "/v1/algorithms/alpha/stats?period=5d")
+
+    check("leaderboard", three_days)
+    check("algorithm_stats", stats)
+
+    def alpha(body: Any) -> Any:
+        return next(e for e in body["ranked"] + body["unranked"] if e["algorithm"] == "alpha")
+
+    lift = alpha(three_days)["lift"]
+    by_day = lift["vs"]["baseline-flat"]["by_day"]
+    error = 0.25 / math.sqrt(3)
+    assert (by_day["n"], by_day["value"]) == (3, pytest.approx(0.25))
+    assert (by_day["low"], by_day["high"]) == (
+        pytest.approx(0.25 - T_975_2 * error),
+        pytest.approx(0.25 + T_975_2 * error),
+    )
+    # With 2 degrees of freedom the t distribution has a closed form: P(T > x) = 1/2 - x / (2√(2 + x²)).
+    x = 0.25 / error
+    assert by_day["p"] == pytest.approx(0.5 - x / (2 * math.sqrt(2 + x * x)))
+    assert lift["day_low"] == min(v["by_day"]["low"] for v in lift["vs"].values())
+    assert stats["overall"]["lift"]["vs"]["baseline-flat"]["by_day"] == by_day
+    # One day says nothing of how the days differ.
+    assert alpha(today)["lift"]["vs"]["baseline-flat"]["by_day"] is None
+    assert alpha(today)["lift"]["day_low"] is None
 
 
 async def test_an_algorithms_stats_break_down_by_symbol_slot_and_model_version(tmp_path: Path) -> None:
