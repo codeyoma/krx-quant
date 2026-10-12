@@ -3,21 +3,21 @@
 Personality card:
 - **Scientist**: Alan Turing.
 - **Logic**: gradient-boosted trees (LightGBM) classify the next four minutes as up, flat
-  or down from every number the Feature Store has but the book's and the tape's: the other
-  algorithms' features (program trading and foreign member firms' flows among them, which
-  Shannon reads too), and its own: the time of day, the trading days to the KOSPI200
-  options expiry, and brokers' estimates of foreign and institutional buying. A
-  feature not known (a flow on a backfilled day) is left missing, and the trees learn where
-  missing ones go. The expected move is the classes' mean moves in training,
-  weighted by their probabilities.
-- **Own features**: the time of day, the options expiry, and the investor estimates.
+  or down from every number the Feature Store has: the other algorithms' features (program
+  trading and foreign member firms' flows, the book's order flow, the tape's sides and
+  arrivals, the options' implied volatility), and its own. A feature not known (the book on
+  a backfilled day) is left missing, and the trees learn where missing ones go. The expected
+  move is the classes' mean moves in training, weighted by their probabilities.
+- **Own features**: the time of day, the options expiry, the investor estimates, and the
+  best quotes: their spread in ticks, the balance of their sizes and how those sizes
+  changed over the last minute (#55).
 - **Learns**: over the last 60 trading days, a fixed number of boosting rounds, the same
   trees for the same samples (one thread, a fixed seed).
 
-This is the one-minute version: the book's and the tape's features (Shannon's among them,
-``BOOK_FEATURES`` and ``TAPE_FEATURES``) come once ten trading days are recorded (#55).
-The series features (``minute_ticks``, ``microprice_ticks``, ``kospi200f_moves``) are left
-to Markov and Kalman.
+It began as the one-minute version (#16); the book's, the tape's and the options' features
+came once recordings had piled up (#55). A model trained before reads the features it was
+trained on, in their order. The series features (``minute_ticks``, ``microprice_ticks``,
+``kospi200f_moves``) are left to Markov and Kalman.
 """
 
 from __future__ import annotations
@@ -31,20 +31,21 @@ import numpy as np
 from krx_quant.algorithms.contract import Card, Model, Sample
 from krx_quant.algorithms.forecasts import UNKNOWN, class_moves, number, with_outcomes
 from krx_quant.baselines import Forecast
-from krx_quant.features import (
-    BOOK_FEATURES,
-    FEATURES,
-    OPTION_FEATURES,
-    SERIES_FEATURES,
-    TAPE_FEATURES,
-    FeatureVector,
-)
+from krx_quant.features import FEATURES, SERIES_FEATURES, FeatureVector
 from krx_quant.pricing import Direction
 
 CLASSES = (Direction.DOWN, Direction.FLAT, Direction.UP)  # the trees' labels 0, 1, 2
 # Program trading and foreign member firms' flows were its own until Shannon (#26), which
 # comes before it, read them too.
-OWN = ("minutes_since_open", "days_to_expiry", "investor_foreign", "investor_institution")
+OWN = (
+    "minutes_since_open",
+    "days_to_expiry",
+    "investor_foreign",
+    "investor_institution",
+    "spread_ticks",
+    "top_imbalance",
+    "top_size_change",
+)
 ROUNDS = 200
 BOOSTING: dict[str, Any] = {
     "objective": "multiclass",
@@ -70,20 +71,18 @@ _KEPT = 4
 
 class Turing:
     name = "turing"
-    # Every number the Feature Store has, at registration, but the book's, the tape's and
-    # the options' (recorded days only, #55): register Turing last.
-    features: tuple[str, ...] = tuple(
-        n for n in FEATURES if n not in SERIES_FEATURES | BOOK_FEATURES | TAPE_FEATURES | OPTION_FEATURES
-    )
+    # Every number the Feature Store has, at registration: register Turing last.
+    features: tuple[str, ...] = tuple(n for n in FEATURES if n not in SERIES_FEATURES)
     training_days = 60
     card = Card(
         scientist="Alan Turing",
         character="만능 학습",
         logic=(
             "LightGBM 그래디언트 부스팅 트리로 4분 뒤 상승·보합·하락을 분류한다. 피처 저장소의 모든 숫자 "
-            "피처(다른 알고리즘의 프로그램매매·외국계 회원사 흐름 포함. 호가·체결 피처는 녹화가 쌓인 뒤 "
-            "더한다)에 시간대, 옵션 만기까지 남은 거래일, 투자자별 추정 흐름을 더한다. 모르는 피처(백필만 "
-            "있는 날의 흐름)는 비워 두고 트리가 다룬다."
+            "피처(다른 알고리즘의 프로그램매매·외국계 회원사 흐름, 호가의 주문 흐름, 체결의 방향과 도착, "
+            "옵션 내재변동성 포함)에 시간대, 옵션 만기까지 남은 거래일, 투자자별 추정 흐름, 최우선 호가의 "
+            "스프레드·잔량 균형·잔량 변화를 더한다. 모르는 피처(백필만 있는 날의 호가)는 비워 두고 트리가 "
+            "다룬다."
         ),
         unique_features=OWN,
         training=(

@@ -7,6 +7,7 @@ of the features. Output: the feature values, and what the fitted model forecasts
 
 from __future__ import annotations
 
+import math
 import random
 from dataclasses import replace
 from datetime import date, datetime, time, timedelta
@@ -25,7 +26,7 @@ from krx_quant.market_calendar import MarketCalendar
 from krx_quant.pricing import Direction
 from krx_quant.reference import Bar
 from tests.algorithm_doubles import FixedAlgorithm
-from tests.replay_events import at, estimates, flows_morning, program, run
+from tests.replay_events import at, book, estimates, flows_morning, program, run
 from tests.test_algorithms_replay import predictions_of
 from tests.test_replay import busy_morning
 
@@ -198,6 +199,66 @@ async def test_a_day_s_flows_start_fresh_the_next_morning(tmp_path: Path) -> Non
     assert foreign_0935 > 0
 
 
+BOOK_OWN = ("spread_ticks", "top_imbalance", "top_size_change")
+
+
+async def test_the_best_quotes_spread_balance_and_change_at_a_bar_close(tmp_path: Path) -> None:
+    probe = FixedAlgorithm("probe", features=BOOK_OWN, unique=BOOK_OWN)
+    events = [
+        book(at("09:00:10"), 81_200, 81_300, bid_qty=100, ask_qty=100),
+        book(at("09:00:50"), 81_200, 81_400, bid_qty=200, ask_qty=50),
+        book(at("09:01:20"), 81_300, 81_400, bid_qty=60, ask_qty=90),
+    ]
+
+    await run(tmp_path / "engine.db", events, until=at("09:04:00"), algorithms=[probe])
+
+    at_0901, at_0902, _, at_0904 = probe.seen
+    # 09:01: the 09:00:50 quotes, 200 won apart at a 100-won tick; no quotes from a minute
+    # before (none before the open).
+    assert at_0901["spread_ticks"] == pytest.approx(2.0)
+    assert at_0901["top_imbalance"] == pytest.approx((200 - 50) / 250)
+    assert at_0901["top_size_change"] is None
+    # 09:02: the 09:01:20 quotes, against the 09:00:50 ones a minute before: 150 waiting at
+    # the best quotes, down from 250.
+    assert at_0902["spread_ticks"] == pytest.approx(1.0)
+    assert at_0902["top_imbalance"] == pytest.approx((60 - 90) / 150)
+    assert at_0902["top_size_change"] == pytest.approx(math.log(150 / 250))
+    # 09:04: no quote for over a minute: the book is missing.
+    assert at_0904 == dict.fromkeys(BOOK_OWN)
+
+
+def test_turing_reads_the_book_the_tape_and_the_options_besides_its_own() -> None:
+    for name in ("depth_imbalance", "ofi_1", "trade_entropy", "nxt_share", "atm_iv", *BOOK_OWN):
+        assert name in TURING.features
+    assert "microprice_ticks" not in TURING.features, "a series: Markov's and Kalman's"
+
+
+def test_a_model_trained_before_the_book_s_features_still_predicts() -> None:
+    class BeforeTheBook(Turing):  # the one-minute version's features (#16)
+        features = tuple(
+            n
+            for n in TURING.features
+            if n
+            not in {
+                "depth_imbalance",
+                "ofi_1",
+                "ofi_5",
+                "trade_imbalance",
+                "trade_entropy",
+                "nxt_share",
+                "atm_iv",
+                *BOOK_OWN,
+            }
+            and not n.startswith(("excitation_", "arrivals_"))
+        )
+
+    older = BeforeTheBook()
+    model = older.fit([replace(s, features=FeatureVector(s.features, older.features)) for s in made_up(1000)])
+    now = features(program_net=0.8, flat_ticks=1.0, volatility=1.0, spread_ticks=3.0, top_imbalance=-0.5)
+
+    assert TURING.predict(now, model) == older.predict(FeatureVector(now, older.features), model)
+
+
 def test_a_model_reads_the_features_it_was_trained_on_whatever_is_registered_since() -> None:
     class Older(Turing):  # trained before the last feature was registered, in another order
         features = tuple(reversed(TURING.features[:-1]))
@@ -245,8 +306,3 @@ async def test_an_estimate_not_entered_in_a_slot_keeps_the_earlier_one(tmp_path:
     foreign, institution = at_1005["investor_foreign"], at_1005["investor_institution"]
     assert isinstance(foreign, float) and isinstance(institution, float)
     assert foreign > 0 and institution > 0, "foreign from 09:30, institutions from 10:00"
-
-
-def test_turing_leaves_the_options_implied_vol_until_the_recorded_days_features() -> None:
-    # Recorded days only, like the book's and the tape's: in its 60 days nearly always empty.
-    assert "atm_iv" not in TURING.features
