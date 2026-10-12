@@ -13,7 +13,7 @@ from __future__ import annotations
 import contextlib
 import sqlite3
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
@@ -133,6 +133,29 @@ def _made_on(days: Sequence[date], symbol: str | None) -> tuple[str, list[Any]]:
     return where, params
 
 
+def _excluded(
+    days: Sequence[date], symbol: str | None, basis: str, db: sqlite3.Connection
+) -> dict[str, Excluded]:
+    """What the stats on ``basis`` leave out of the predictions made on ``days``, by predictor."""
+    on, params = _made_on(days, symbol)
+    outcome = "o.class_a" if basis == "a" else "o.class_b"
+    out: dict[str, Excluded] = {}
+    for name, special, unscorable in db.execute(
+        f"SELECT p.algorithm, SUM({outcome} IS NOT NULL AND o.special = 1), SUM({outcome} IS NULL)"
+        " FROM predictions p JOIN outcomes o ON o.prediction_id = p.id"
+        f" WHERE {on} AND p.status = 'ok' AND o.scored_at IS NOT NULL GROUP BY p.algorithm",
+        params,
+    ):
+        out[name] = Excluded(special, unscorable)
+    for name, status, n in db.execute(
+        f"SELECT p.algorithm, p.status, COUNT(*) FROM predictions p WHERE {on} AND p.status != 'ok'"
+        " GROUP BY p.algorithm, p.status ORDER BY p.status",
+        params,
+    ):
+        out.setdefault(name, Excluded()).status[status] = n
+    return out
+
+
 def iso(at: datetime) -> str:
     return at.astimezone(KST).isoformat()
 
@@ -141,9 +164,9 @@ def iso(at: datetime) -> str:
 class Excluded:
     """What a query's stats leave out of a predictor's predictions (#83)."""
 
-    special: int  # scored on the basis, touched by a special situation
-    unscorable: int  # made, but the basis could not score them
-    statuses: dict[str, int]  # not made, by status (vi, no_book, timed_out, error, ...)
+    special: int = 0  # scored on the basis, touched by a special situation
+    unscorable: int = 0  # made, but the basis could not score them
+    status: dict[str, int] = field(default_factory=dict)  # not made, by status (vi, no_book, ...)
 
 
 @dataclass(frozen=True)
@@ -571,40 +594,34 @@ class PredictionStore:
         read on a connection of its own (``_reading``)."""
         if not days:
             return []
+        with self._reading() as db:
+            db.row_factory = sqlite3.Row
+            return self._scored(days, symbol, include_special, db)
+
+    def _scored(
+        self, days: Sequence[date], symbol: str | None, include_special: bool, db: sqlite3.Connection
+    ) -> list[dict[str, Any]]:
         on, params = _made_on(days, symbol)
         where = f"WHERE {on} AND {SCORED}"
         if not include_special:
             where += " AND o.special = 0"
-        with self._reading() as db:
-            db.row_factory = sqlite3.Row
-            return self._select(where, tuple(params), db)
+        return self._select(where, tuple(params), db)
 
-    def exclusions(self, days: Sequence[date], symbol: str | None, basis: str) -> dict[str, Excluded]:
-        """What the stats of predictions made on ``days`` (of one symbol or all), scored on
-        ``basis`` (``a`` or ``b``), leave out, by predictor. Read like ``scored_predictions``."""
+    def scored_and_excluded(
+        self, days: Sequence[date], symbol: str | None, include_special: bool, basis: str
+    ) -> tuple[list[dict[str, Any]], dict[str, Excluded]]:
+        """``scored_predictions`` and what the stats on ``basis`` (``a`` or ``b``) leave out of
+        the same predictions, by predictor, read in one transaction so they agree."""
         if not days:
-            return {}
-        on, params = _made_on(days, symbol)
-        outcome = "o.class_a" if basis == "a" else "o.class_b"
-        counts: dict[str, list[Any]] = {}
+            return [], {}
         with self._reading() as db:
-            for name, special, unscorable in db.execute(
-                f"SELECT p.algorithm, SUM({outcome} IS NOT NULL AND o.special = 1), SUM({outcome} IS NULL)"
-                " FROM predictions p JOIN outcomes o ON o.prediction_id = p.id"
-                f" WHERE {on} AND p.status = 'ok' AND o.scored_at IS NOT NULL GROUP BY p.algorithm",
-                params,
-            ):
-                counts[name] = [special, unscorable, {}]
-            for name, status, n in db.execute(
-                f"SELECT p.algorithm, p.status, COUNT(*) FROM predictions p WHERE {on} AND p.status != 'ok'"
-                " GROUP BY p.algorithm, p.status ORDER BY p.status",
-                params,
-            ):
-                counts.setdefault(name, [0, 0, {}])[2][status] = n
-        return {
-            name: Excluded(special, unscorable, statuses)
-            for name, (special, unscorable, statuses) in counts.items()
-        }
+            db.execute("BEGIN")
+            db.row_factory = sqlite3.Row
+            rows = self._scored(days, symbol, include_special, db)
+            db.row_factory = None
+            excluded = _excluded(days, symbol, basis, db)
+            db.execute("COMMIT")
+        return rows, excluded
 
     def _reading(self) -> contextlib.closing[sqlite3.Connection]:
         """A read-only connection of its own: a worker thread can read while the engine

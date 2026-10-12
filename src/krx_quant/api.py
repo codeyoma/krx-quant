@@ -538,11 +538,13 @@ async def _stats(
     def compute() -> dict[str, Any]:
         # Reading and computing both run in the worker: a long history must not hold up
         # the event loop that records and predicts.
-        rows = engine.store.scored_predictions(query.days, query.symbol, query.special)
+        rows, excluded = engine.store.scored_and_excluded(
+            query.days, query.symbol, query.special, query.basis
+        )
         algorithms, baselines = split(scored_by_algorithm(rows, query.basis), BASELINE_NAMES)
         for a in engine.algorithms:
             algorithms.setdefault(a.name, [])
-        return build(algorithms, baselines, engine.store.exclusions(query.days, query.symbol, query.basis))
+        return build(algorithms, baselines, excluded)
 
     body = await asyncio.to_thread(compute)
     if len(cache) >= _CACHED_QUESTIONS:
@@ -562,9 +564,8 @@ def _bin_json(b: CalibrationBin) -> dict[str, Any]:
 
 
 def _excluded_json(e: Excluded | None) -> dict[str, Any]:
-    if e is None:
-        return {"special": 0, "unscorable": 0, "status": {}}
-    return {"special": e.special, "unscorable": e.unscorable, "status": e.statuses}
+    e = e or Excluded()
+    return {"special": e.special, "unscorable": e.unscorable, "status": e.status}
 
 
 def _json(body: dict[str, Any]) -> web.Response:

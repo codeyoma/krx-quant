@@ -299,28 +299,52 @@ async def test_the_stats_count_what_they_leave_out(tmp_path: Path) -> None:
         store_one(store, "alpha", t[7], classes=None)  # still pending: neither
         for i, status in zip(range(8, 12), ("vi", "vi", "timed_out", "no_book"), strict=True):
             store_one(store, "alpha", t[i], forecast=None, status=status)
+        store_one(
+            store, "alpha", t[2] + timedelta(seconds=1), special=True, classes=(UP, None)
+        )  # both: unscorable
         store_one(store, "alpha", at("09:01:00", EARLIER), status="error", forecast=None)  # another day
+        added = store.add_all(  # another symbol
+            [
+                NewPrediction(
+                    "000660",
+                    "alpha",
+                    "v1",
+                    t[0],
+                    t[0],
+                    None,
+                    t[0] + timedelta(minutes=4),
+                    None,
+                    None,
+                    None,
+                    "vi",
+                )
+            ]
+        )
+        assert added.ids
 
-        b = await get(client, "/v1/leaderboard?basis=b")
+        b = await get(client, "/v1/leaderboard?basis=b&symbol=005930")
         a = await get(client, "/v1/leaderboard?basis=a&special=include")
-        stats = await get(client, "/v1/algorithms/alpha/stats?basis=b")
+        stats = await get(client, "/v1/algorithms/alpha/stats?basis=b&symbol=005930")
 
     check("leaderboard", b)
+    check("leaderboard", a)
     check("algorithm_stats", stats)
     [alpha_b] = [e for e in b["unranked"] if e["algorithm"] == "alpha"]
     assert alpha_b["n"] == 3
+    # The one both special and unscorable on B counts once, as unscorable.
     assert alpha_b["excluded"] == {
         "special": 2,
-        "unscorable": 2,
+        "unscorable": 3,
         "status": {"no_book": 1, "timed_out": 1, "vi": 2},
     }
-    # On basis A every scored one was scorable; with special included, the two are counted in.
+    # Every symbol on basis A: the other symbol's VI too; every scored one was scorable; with
+    # special included, the three are counted in.
     [alpha_a] = [e for e in a["unranked"] if e["algorithm"] == "alpha"]
-    assert alpha_a["n"] == 7
+    assert alpha_a["n"] == 8
     assert alpha_a["excluded"] == {
-        "special": 2,
+        "special": 3,
         "unscorable": 0,
-        "status": {"no_book": 1, "timed_out": 1, "vi": 2},
+        "status": {"no_book": 1, "timed_out": 1, "vi": 3},
     }
     assert stats["overall"]["excluded"] == alpha_b["excluded"]
     # A baseline that left nothing out says so.

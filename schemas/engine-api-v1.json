@@ -482,12 +482,18 @@
       "properties": {
         "special": {"type": "integer", "minimum": 0},
         "unscorable": {"type": "integer", "minimum": 0},
-        "status": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 1}}
+        "status": {
+          "type": "object",
+          "propertyNames": {"enum": ["timed_out", "error", "vi", "no_book", "no_members", "none_finished"]},
+          "additionalProperties": {"type": "integer", "minimum": 1}
+        }
       }
     },
     "calibration": {
       "description": "Ten bins of forecast probabilities by tenths, against how often the class happened.",
       "type": "array",
+      "minItems": 10,
+      "maxItems": 10,
       "items": {
         "type": "object",
         "required": ["low", "high", "count", "mean_p", "observed"],
