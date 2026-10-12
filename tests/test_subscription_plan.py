@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 
 from krx_quant.config import Settings
 from krx_quant.fake_kis import FakeKis
 from tests.kis_frames import master_zips
-from tests.test_collector import collect, settings_for
+from tests.test_collector import KST, collect, settings_for
 
 SYMBOLS = ("005930", "000660", "009150")
 
@@ -68,6 +69,27 @@ async def test_registers_every_feed_in_priority_order(kis: FakeKis, tmp_path: Pa
             *[("H0NXCNT0", sym) for sym in SYMBOLS],
         ]
     )
+
+
+async def test_options_of_a_month_already_expired_are_passed_over(kis: FakeKis, tmp_path: Path) -> None:
+    # 2026-10-12: October's options expired on 10-08 (the second Thursday), yet the master
+    # KIS published that morning still listed them with an ATM strike (seen live).
+    november = [(f"B01611C{i}", "C", f"202611 {k}", k == "1,072.5") for i, k in enumerate(STRIKES)]
+    november += [(f"C01611P{i}", "P", f"202611 {k}", k == "1,072.5") for i, k in enumerate(STRIKES)]
+    kis.masters = master_zips(
+        kospi200_futures=[("A01703", "2"), ("A01612", "1")],
+        usd_futures=[("A75611", "2"), ("A75610", "1")],
+        options=[
+            *[(c, "C", f"202610 {k}", k == "1,072.5") for c, k in zip(CALLS, STRIKES, strict=True)],
+            *november,
+        ],
+    )
+    kis.script[("H0IOCNT0", "B01611C3")] = []
+
+    await collect(kis, settings_for(kis, tmp_path), now=datetime(2026, 10, 12, 9, 30, tzinfo=KST))
+
+    options = sorted(key for tr, key in kis.subscribed_keys() if tr == "H0IOCNT0")
+    assert options == sorted([f"B01611C{i}" for i in range(1, 6)] + [f"C01611P{i}" for i in range(1, 6)])
 
 
 async def test_configured_futures_codes_are_used_when_the_masters_are_unavailable(

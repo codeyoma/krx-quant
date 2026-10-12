@@ -53,9 +53,14 @@ def front_month(product: Product, day: date, calendar: MarketCalendar) -> str:
     return contract_code(product, year, month)
 
 
-def last_trading_day(product: Product, year: int, month: int, calendar: MarketCalendar) -> date:
+def nominal_expiry(product: Product, year: int, month: int) -> date:
+    """The rule's expiry day (the nth weekday of the month), before a closed day moves it."""
     first = date(year, month, 1)
-    day = first + timedelta(days=(product.weekday - first.weekday()) % 7 + 7 * (product.nth - 1))
+    return first + timedelta(days=(product.weekday - first.weekday()) % 7 + 7 * (product.nth - 1))
+
+
+def last_trading_day(product: Product, year: int, month: int, calendar: MarketCalendar) -> date:
+    day = nominal_expiry(product, year, month)
     while not calendar.is_trading_day(day):
         day -= timedelta(days=1)
     return day

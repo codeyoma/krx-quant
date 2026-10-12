@@ -41,10 +41,10 @@ def settings_for(kis: FakeKis, data_dir: Path, symbols: tuple[str, ...] = ("0059
     )
 
 
-async def collect(kis: FakeKis, settings: Settings) -> None:
+async def collect(kis: FakeKis, settings: Settings, now: datetime = FIXED_NOW) -> None:
     """Run the collector until every scripted frame has been handled, then stop it."""
     stop = asyncio.Event()
-    task = asyncio.create_task(run_collector(settings, stop=stop, clock=lambda: FIXED_NOW))
+    task = asyncio.create_task(run_collector(settings, stop=stop, clock=lambda: now))
     await kis.wait_for_subscriptions(set(kis.script))
     await kis.round_trip()
     stop.set()
