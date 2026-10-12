@@ -28,6 +28,7 @@ from datetime import date
 import aiohttp
 
 from krx_quant.contracts import option_expired
+from krx_quant.market_calendar import MarketCalendar
 
 _COM_MONTH_UNDERLYING = re.compile(r"(\d{9})([A-Z]{3})")
 
@@ -45,15 +46,21 @@ class FrontMonths:
 
 
 async def fetch_front_months(
-    session: aiohttp.ClientSession, master_url: str, today: date, strikes_each_side: int = 2
+    session: aiohttp.ClientSession,
+    master_url: str,
+    today: date,
+    calendar: MarketCalendar,
+    strikes_each_side: int = 2,
 ) -> FrontMonths:
     idx = await _download(session, f"{master_url}/fo_idx_code_mts.mst.zip")
     com = await _download(session, f"{master_url}/fo_com_code.mst.zip")
-    futures, options = parse_index_master(idx, today, strikes_each_side)
+    futures, options = parse_index_master(idx, today, calendar, strikes_each_side)
     return FrontMonths(futures, parse_commodity_master(com, "USD"), options)
 
 
-def parse_index_master(text: str, today: date, strikes_each_side: int = 2) -> tuple[str, tuple[str, ...]]:
+def parse_index_master(
+    text: str, today: date, calendar: MarketCalendar, strikes_each_side: int = 2
+) -> tuple[str, tuple[str, ...]]:
     """Return the nearest KOSPI200 futures code and option codes around the money.
 
     Options are the nearest month not expired on ``today``, its ATM strike (the master's ATM
@@ -80,7 +87,9 @@ def parse_index_master(text: str, today: date, strikes_each_side: int = 2) -> tu
     if futures is None:
         raise MasterError("KOSPI200 nearest futures not found in fo_idx_code_mts")
     months = sorted(
-        m for m in {month for _, month in options} if not option_expired(int(m[:4]), int(m[4:6]), today)
+        m
+        for m in {month for _, month in options}
+        if not option_expired(int(m[:4]), int(m[4:6]), today, calendar)
     )
     if not months or months[0] not in atm:
         return futures, ()

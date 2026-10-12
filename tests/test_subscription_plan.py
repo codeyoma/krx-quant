@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
@@ -106,6 +107,32 @@ async def test_options_are_taken_from_the_nearest_month_not_yet_expired(
 
     options = sorted(key for tr, key in kis.subscribed_keys() if tr == "H0IOCNT0")
     assert options == sorted(calls[1:6] + puts[1:6])
+
+
+async def test_options_whose_last_day_came_early_for_a_holiday_are_passed_over(
+    kis: FakeKis, tmp_path: Path
+) -> None:
+    # Were 2026-11-12, November's second Thursday, a holiday, November's options would last
+    # trade on the 11th: a collector started on the 12th takes December's.
+    state = tmp_path / "state"
+    state.mkdir()
+    closed = {"refreshed_on": "2026-11-12", "open_days": {"2026-11-12": False}}
+    (state / "market_calendar.json").write_text(json.dumps(closed))
+    december_calls = [f"B01612C{i}" for i in range(len(STRIKES))]
+    december_puts = [f"C01612P{i}" for i in range(len(STRIKES))]
+    serve_masters(
+        kis,
+        [
+            *options_of("202611", NOVEMBER_CALLS, NOVEMBER_PUTS),
+            *options_of("202612", december_calls, december_puts),
+        ],
+    )
+    kis.script[("H0IOCNT0", december_calls[3])] = []
+
+    await collect(kis, settings_for(kis, tmp_path), now=datetime(2026, 11, 12, 9, 30, tzinfo=KST))
+
+    options = sorted(key for tr, key in kis.subscribed_keys() if tr == "H0IOCNT0")
+    assert options == sorted(december_calls[1:6] + december_puts[1:6])
 
 
 async def test_the_futures_are_recorded_even_when_no_option_month_can_be_chosen(

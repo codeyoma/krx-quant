@@ -59,18 +59,18 @@ def nominal_expiry(product: Product, year: int, month: int) -> date:
     return first + timedelta(days=(product.weekday - first.weekday()) % 7 + 7 * (product.nth - 1))
 
 
-def option_expired(year: int, month: int, day: date) -> bool:
-    """Whether the KOSPI200 options of ``year``/``month`` expired before ``day`` (they expire
-    as the futures do). The rule's day is enough: a closed day only moves the expiry earlier,
-    and the days between are closed too. On the expiry day itself they still trade."""
-    return nominal_expiry(KOSPI200, year, month) < day
-
-
 def last_trading_day(product: Product, year: int, month: int, calendar: MarketCalendar) -> date:
     day = nominal_expiry(product, year, month)
     while not calendar.is_trading_day(day):
         day -= timedelta(days=1)
     return day
+
+
+def option_expired(year: int, month: int, day: date, calendar: MarketCalendar) -> bool:
+    """Whether the KOSPI200 options of ``year``/``month`` expired before ``day``: they last
+    trade as the futures do, earlier when the rule's day is closed. On that last day they
+    still trade."""
+    return last_trading_day(KOSPI200, year, month, calendar) < day
 
 
 def days_to_expiry(day: date, calendar: MarketCalendar) -> int:
