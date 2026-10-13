@@ -439,6 +439,8 @@ v1에서는 쓰지 않는다. 조사 결과는 [paid-data.md](paid-data.md)에 �
   - 엔진 상태: KIS 연결, 데이터 지연, 어젯밤 학습 결과(교체 여부)
 - **신호 알림.** Condorcet 확률이 기준값 이상이고 N개 이상의 알고리즘이 같은 방향이면 데스크톱 알림과 소리를 낸다. 기준값과 N은 화면에서 조정한다. 텔레그램 신호 알림은 옵션이다.
 - **언어.** 한국어. 알고리즘 이름은 영어로 쓴다.
+- **Fincept 공통 UI 한국어 (#132).** Settings → General → Interface language에서 **한국어**를 고르면 기존 내부 언어 팩과 같은 방식으로 즉시 적용된다. 선택은 SQLite settings의 `general.language=ko_KR`에 저장되고 다음 실행에도 유지된다. 기존 공통 팩 전체와 최신 설정·탐색 문구를 한국어로 제공하며, 팩 밖의 신규·고정 문구는 영어로 보일 수 있다. 언어 팩과 검증 방법은 `fincept/custom/README.md`의 "한국어 언어 팩"을 따른다.
+- **Fincept 표시 통화 (#138).** 같은 설정의 Display currency(표시 통화)에서 **₩ South Korean Won (KRW)**을 고를 수 있다. 선택은 SQLite settings의 `general.currency=KRW`에 저장되어 다음 실행에도 유지된다. 기존 통화 helper에 연결된 계산기·분석 화면의 기호를 바꾸며, 환율 환산은 하지 않는다. 고유 통화를 지정하는 시세·포트폴리오 금액은 그 통화를 유지한다. 자세한 것은 `fincept/custom/README.md`의 "원화 표시 통화"를 따른다.
 - **지금 있는 것 (#20, #21, #68).** 화면 **KRX 4분 예측**이다. Navigate → Trading & Portfolio에서 연다. 명령 팔레트에서 "krx"로 찾아도 된다. 자세한 것은 `fincept/custom/README.md`의 "KRX 예측 화면"에 있다.
   - 모양(#103): Fincept의 다른 화면과 같은 부품이다. 패널마다 Portfolio 화면식 머리줄, 표는 Fincept 공용 표, 글꼴·밀도·테마는 Fincept 설정을 따르고 테마가 바뀌면 다시 칠한다. 엔진을 처음 읽는 동안은 Fincept 읽는 중 표시가 덮는다. 엔진 연결은 화면 머리줄의 점(초록 정상, 빨강 읽기 실패, 회색 읽는 중)과 그 툴팁(이유, 갱신 시각, 엔진 시계)으로 본다. 순위 규칙과 알림 규칙은 패널 제목의 툴팁에 있다.
 
