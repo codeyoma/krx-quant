@@ -63,9 +63,9 @@ async def test_the_probe_reports_markets_history_and_adjusted_prices(
 
     report = "\n".join(lines)
     assert "markets for 133690 (D, the last 30 days):\n  UN: 0 rows, -\n  J: 31 rows" in report
-    # Each period paged back to its first candle (1990 here), 100 a call.
-    assert "  D: 13435 candles in 135 calls (at most 100 a call), oldest 1990-01-0" in report
-    assert "  Y: 37 candles in 1 calls (at most 37 a call), oldest 1990-" in report
+    # Each period paged back to its first candle (1990 here), 100 a call; the last call finds none.
+    assert "  D: 13435 candles in 136 calls (at most 100 a call), oldest 1990-01-0" in report
+    assert "  Y: 37 candles in 2 calls (at most 37 a call), oldest 1990-" in report
     assert "  FID_ORG_ADJ_PRC=0: 20180423:50000, " in report
     assert "  FID_ORG_ADJ_PRC=1: 20180423:2500000, " in report
     assert calls == len([r for r in kis.rest_requests if r[1] == CANDLES_TR])

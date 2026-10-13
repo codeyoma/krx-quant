@@ -96,8 +96,9 @@ class _Prober:
 
     async def history(self, market: str, symbol: str, period: str, today: date) -> None:
         """Page back from today until no older candle comes: per call and in all."""
-        end, total, sizes, oldest = today, 0, [], None
+        end, total, sizes, oldest, calls = today, 0, [], None, 0
         for _ in range(MAX_PAGES):
+            calls += 1  # the last, which finds nothing older, too
             try:
                 rows, _ = await self.candles(query(market, symbol, FIRST_DAY, end, period))
             except KisError as e:
@@ -113,7 +114,7 @@ class _Prober:
         else:
             self._out(f"  {period}: stopped at {MAX_PAGES} calls, still going")
         per_call = f"at most {max(sizes)} a call" if sizes else "none"
-        self._out(f"  {period}: {total} candles in {len(sizes)} calls ({per_call}), oldest {oldest}")
+        self._out(f"  {period}: {total} candles in {calls} calls ({per_call}), oldest {oldest}")
 
     async def adjusted(self, market: str) -> None:
         """Closes around the split, adjusted and as traded."""
