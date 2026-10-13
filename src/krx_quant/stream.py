@@ -181,6 +181,7 @@ def prediction_json(row: dict[str, Any]) -> dict[str, Any]:
         "votes": None
         if row.get("votes_up") is None
         else {"up": row["votes_up"], "flat": row["votes_flat"], "down": row["votes_down"]},
+        "pooled": row.get("pooled"),
         "p_up": row["p_up"],
         "p_flat": row["p_flat"],
         "p_down": row["p_down"],

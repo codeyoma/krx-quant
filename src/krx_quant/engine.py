@@ -608,7 +608,14 @@ class PredictionEngine:
         ]
         # A final consensus not to be acted on says why, stored with it for every client (#88).
         blocked = self._blocked(bar_close, at_close, pooled) if name == FINAL else {}
-        self._record(bar_close, at_close, made, blocked, {s: _votes(f) for s, f in pooled_from.items()})
+        self._record(
+            bar_close,
+            at_close,
+            made,
+            blocked,
+            {s: _votes(f) for s, f in pooled_from.items()},
+            {s: tuple(f) for s, f in pooled_from.items()},
+        )
         if name == FINAL and self.signals is not None:
             try:
                 self._signal(self.signals, bar_close, pooled, pooled_from, blocked)
@@ -730,9 +737,11 @@ class PredictionEngine:
         made: Sequence[tuple[str, str, Mapping[str, Forecast | None], str]],
         blocked: Mapping[str, Blocked] | None = None,
         votes: Mapping[str, tuple[int, int, int]] | None = None,
+        pooled: Mapping[str, tuple[str, ...]] | None = None,
     ) -> None:
         """Store (name, model version, forecasts by symbol, status) entries as displayed now;
-        a consensus with how its members leaned (``votes``, by symbol)."""
+        a consensus with how its members leaned (``votes``) and who they were (``pooled``),
+        by symbol."""
         displayed_at = self.clock.now()
         mid_display = {symbol: self._market.mid(symbol, displayed_at) for symbol in at_close}
         special = self._special.known(before=displayed_at)
@@ -760,6 +769,7 @@ class PredictionEngine:
                         if forecast is not None and blocked and (why := blocked.get(symbol)) is not None
                         else None,
                         votes=(votes or {}).get(symbol) if forecast is not None else None,
+                        pooled=(pooled or {}).get(symbol) if forecast is not None else None,
                     )
                 )
         added = self.store.add_all(predictions)

@@ -62,6 +62,12 @@ CREATE TABLE IF NOT EXISTS votes (   -- how a consensus's members leaned (#106):
     flat INTEGER NOT NULL,
     down INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS pooled (  -- the members a consensus pooled (#107), in registration order
+    prediction_id INTEGER NOT NULL REFERENCES predictions (id),
+    position INTEGER NOT NULL,
+    algorithm TEXT NOT NULL,
+    PRIMARY KEY (prediction_id, position)
+);
 CREATE INDEX IF NOT EXISTS predictions_by_close ON predictions (bar_close);
 CREATE TABLE IF NOT EXISTS outcomes (
     prediction_id INTEGER PRIMARY KEY REFERENCES predictions (id),
@@ -203,6 +209,7 @@ class NewPrediction:
     special: bool = False  # a special situation known to touch its window when it was made
     blocked: str | None = None  # a final consensus's reason not to be acted on (#88)
     votes: tuple[int, int, int] | None = None  # a consensus's members by direction: up, flat, down (#106)
+    pooled: tuple[str, ...] | None = None  # a consensus's members, in registration order (#107)
 
 
 @dataclass(frozen=True)
@@ -302,6 +309,11 @@ class PredictionStore:
                     self._db.execute(
                         "INSERT INTO votes (prediction_id, up, flat, down) VALUES (?, ?, ?, ?)",
                         (cursor.lastrowid, *p.votes),
+                    )
+                if p.pooled is not None:
+                    self._db.executemany(
+                        "INSERT INTO pooled (prediction_id, position, algorithm) VALUES (?, ?, ?)",
+                        [(cursor.lastrowid, i, name) for i, name in enumerate(p.pooled)],
                     )
                 if f is None:
                     continue  # nothing to score
@@ -555,6 +567,18 @@ class PredictionStore:
             (symbol, symbol),
         )
 
+    def at_close(
+        self, symbol: str, bar_close: datetime, algorithm: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Every prediction of the symbol at one bar close (#107); of one algorithm only if given."""
+        if algorithm is None:
+            return self._select(
+                "WHERE p.symbol = ? AND p.bar_close = ? ORDER BY p.algorithm", (symbol, iso(bar_close))
+            )
+        return self._select(
+            "WHERE p.symbol = ? AND p.bar_close = ? AND p.algorithm = ?", (symbol, iso(bar_close), algorithm)
+        )
+
     def recent(self, symbol: str, limit: int, algorithm: str | None = None) -> list[dict[str, Any]]:
         """The symbol's predictions of its last ``limit`` bar closes, newest first; of one
         algorithm only if given.
@@ -674,4 +698,19 @@ class PredictionStore:
             )
             .fetchall()
         )
-        return [dict(r) for r in rows]
+        out = [dict(r) for r in rows]
+        # A consensus's members, as a list on its row (#107); None where none were stored.
+        ids = [r["id"] for r in out]
+        pooled: dict[int, list[str]] = {}
+        for start in range(0, len(ids), 500):  # under SQLite's limit on parameters
+            chunk = ids[start : start + 500]
+            marks = ",".join("?" * len(chunk))
+            for r in (db or self._db).execute(
+                f"SELECT prediction_id, algorithm FROM pooled WHERE prediction_id IN ({marks})"
+                " ORDER BY prediction_id, position",
+                chunk,
+            ):
+                pooled.setdefault(r[0], []).append(r[1])
+        for r in out:
+            r["pooled"] = pooled.get(r["id"])
+        return out
