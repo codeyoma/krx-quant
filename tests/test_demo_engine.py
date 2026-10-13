@@ -118,6 +118,25 @@ async def test_a_paced_demo_streams_its_last_half_hour_as_it_goes(tmp_path: Path
         )
 
 
+async def test_a_paced_demo_moves_the_bar_being_made_within_its_minute(tmp_path: Path) -> None:
+    paced = await demo_app(tmp_path / "paced.sqlite3", pace=3)  # 10 s of the morning every half second
+
+    async with TestClient(TestServer(paced)) as client:
+        ws = await client.ws_connect("/v1/stream")
+        bars: list[dict[str, Any]] = []
+
+        def two_of_one_minute(event: dict[str, Any]) -> bool:
+            if event["type"] == "bar" and event["symbol"] == "005930":
+                bars.append(event["bar"])
+            return len(bars) >= 2 and bars[-1]["start"] == bars[-2]["start"]
+
+        await receive_until(ws, two_of_one_minute, timeout=15)
+        await ws.close()
+
+    assert bars[-1]["start"] >= "2026-10-12T10:00:00+09:00"
+    assert bars[-1]["volume"] > bars[-2]["volume"], "the same minute's bar, grown"
+
+
 async def test_a_paced_demo_starts_at_10(tmp_path: Path) -> None:
     paced = await demo_app(tmp_path / "paced.sqlite3", pace=60)
 

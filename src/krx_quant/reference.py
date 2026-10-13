@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import bisect
 import enum
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
 
 from krx_quant.feeds.base import KST
@@ -129,6 +129,15 @@ class BarBuilder:
             return None
         last = max(self._bars[symbol].values(), key=lambda b: b.last_at)
         return last.close, last.last_at
+
+    def last(self, symbol: str, now: datetime) -> Bar | None:
+        """The latest bar of ``now``'s day that has begun, finished or not; None before any."""
+        local = now.astimezone(KST)
+        if self._day.get(symbol) != local.date():
+            return None
+        begun = (b for b in self._bars[symbol].values() if b.start <= local)
+        last = max(begun, key=lambda b: b.start, default=None)
+        return replace(last) if last is not None else None
 
     def closed(self, symbol: str, now: datetime) -> list[Bar]:
         """Bars of ``now``'s day whose minute has ended, oldest first."""

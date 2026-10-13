@@ -15,8 +15,9 @@ it, 2026-10-07 and 2026-10-08 (Friday the 9th is Hangul Day, closed), so a chart
 the backfill stores them, under ``<db stem>-data/bars/``.
 
 With a pace (``demo-engine --pace SECONDS``), the morning is replayed at once only up to
-10:00; the API opens there, and the rest goes on a minute every ``pace`` seconds, so the
-stream sends predictions, the consensus and outcomes as they are made (#21). It ends at
+10:00; the API opens there, and the rest goes on a minute every ``pace`` seconds, in steps
+of 10 seconds, so the stream sends predictions, the consensus, outcomes and the bar being
+made as they are (#21, #110). It ends at
 10:30 as the unpaced demo does, with the same answers.
 """
 
@@ -73,7 +74,8 @@ _CALENDAR = MarketCalendar(
     {d: True for d in PAST_DAYS}
     | {date(2026, 10, 9): False, date(2026, 10, 10): False, date(2026, 10, 11): False, DEMO_DAY: True}
 )
-_PACED_FROM = time(10, 0)  # a paced demo opens here and goes on a minute at a time
+_PACED_FROM = time(10, 0)  # a paced demo opens here and goes on a minute at a time…
+_STEPS = 6  # …in steps of 10 seconds
 _FEE = 0.00015
 # Each symbol's mid-point at the open and its tick.
 _OPENS = {"005930": (81_250, 100), "000660": (201_000, 500), "009150": (150_050, 100)}
@@ -245,17 +247,21 @@ async def _paced(
 
 
 async def _replay_the_rest(engine: PredictionEngine, events: Sequence[Event], pace: float) -> None:
-    """The morning's events after the clock, a minute of them every ``pace`` seconds, to 10:30."""
+    """The morning's events after the clock, a minute of them every ``pace`` seconds, to 10:30,
+    in six steps of 10 seconds: the bar being made moves within its minute (#110)."""
     clock = engine.clock
     assert isinstance(clock, FakeClock)  # replay's
-    minute = clock.now()
-    rest = [e for e in events if e[1]["received_at"] > minute]
-    while minute < _at(_END):
-        await asyncio.sleep(pace)
-        minute += timedelta(minutes=1)
-        due = [e for e in rest if e[1]["received_at"] <= minute]
-        rest = rest[len(due) :]
-        await replay_into(engine, clock, due, until=minute)
+    moment = clock.now()
+    rest = [e for e in events if e[1]["received_at"] > moment]  # in receipt order
+    sent = 0
+    while moment < _at(_END):
+        await asyncio.sleep(pace / _STEPS)
+        moment += timedelta(minutes=1) / _STEPS
+        upto = sent
+        while upto < len(rest) and rest[upto][1]["received_at"] <= moment:
+            upto += 1
+        await replay_into(engine, clock, rest[sent:upto], until=moment)
+        sent = upto
 
 
 def demo_morning(pace: float | None) -> str:

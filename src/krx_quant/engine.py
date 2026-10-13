@@ -350,6 +350,10 @@ class PredictionEngine:
     def bars(self, symbol: str) -> list[Bar]:
         return self._market.bars(symbol, self.clock.now())
 
+    def last_bar(self, symbol: str) -> Bar | None:
+        """The symbol's latest bar today, the one being made if its minute goes on (#110)."""
+        return self._market.last_bar(symbol, self.clock.now())
+
     def mid(self, symbol: str) -> float | None:
         return self._market.mid(symbol, self.clock.now())
 

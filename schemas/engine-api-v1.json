@@ -631,7 +631,8 @@
         {"$ref": "#/$defs/consensus_event"},
         {"$ref": "#/$defs/outcome_event"},
         {"$ref": "#/$defs/health_event"},
-        {"$ref": "#/$defs/lifecycle_event"}
+        {"$ref": "#/$defs/lifecycle_event"},
+        {"$ref": "#/$defs/bar_event"}
       ]
     },
     "prediction_event": {
@@ -691,6 +692,31 @@
         "at": {"$ref": "#/$defs/time"},
         "algorithm": {"type": "string"},
         "change": {"$ref": "#/$defs/status_change"}
+      }
+    },
+    "bar_event": {
+      "description": "The one-minute bar being made (#110): its values so far, sent for each symbol at most once a poll (1 s), when they changed.",
+      "type": "object",
+      "required": ["type", "at", "symbol", "bar"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {"const": "bar"},
+        "at": {"$ref": "#/$defs/time"},
+        "symbol": {"type": "string"},
+        "bar": {
+          "type": "object",
+          "required": ["start", "open", "high", "low", "close", "volume", "trades"],
+          "additionalProperties": false,
+          "properties": {
+            "start": {"$ref": "#/$defs/time"},
+            "open": {"type": "number"},
+            "high": {"type": "number"},
+            "low": {"type": "number"},
+            "close": {"type": "number"},
+            "volume": {"type": "number", "minimum": 0},
+            "trades": {"type": "integer", "minimum": 1}
+          }
+        }
       }
     },
 
