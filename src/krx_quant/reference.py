@@ -135,8 +135,9 @@ class BarBuilder:
         local = now.astimezone(KST)
         if self._day.get(symbol) != local.date():
             return None
-        begun = [b for b in self._bars[symbol].values() if b.start <= local]
-        return replace(max(begun, key=lambda b: b.start)) if begun else None
+        begun = (b for b in self._bars[symbol].values() if b.start <= local)
+        last = max(begun, key=lambda b: b.start, default=None)
+        return replace(last) if last is not None else None
 
     def closed(self, symbol: str, now: datetime) -> list[Bar]:
         """Bars of ``now``'s day whose minute has ended, oldest first."""

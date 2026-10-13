@@ -252,13 +252,16 @@ async def _replay_the_rest(engine: PredictionEngine, events: Sequence[Event], pa
     clock = engine.clock
     assert isinstance(clock, FakeClock)  # replay's
     moment = clock.now()
-    rest = [e for e in events if e[1]["received_at"] > moment]
+    rest = [e for e in events if e[1]["received_at"] > moment]  # in receipt order
+    sent = 0
     while moment < _at(_END):
         await asyncio.sleep(pace / _STEPS)
         moment += timedelta(minutes=1) / _STEPS
-        due = [e for e in rest if e[1]["received_at"] <= moment]
-        rest = rest[len(due) :]
-        await replay_into(engine, clock, due, until=moment)
+        upto = sent
+        while upto < len(rest) and rest[upto][1]["received_at"] <= moment:
+            upto += 1
+        await replay_into(engine, clock, rest[sent:upto], until=moment)
+        sent = upto
 
 
 def demo_morning(pace: float | None) -> str:
