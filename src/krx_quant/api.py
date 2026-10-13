@@ -6,9 +6,11 @@ Endpoints (all under ``/v1``):
   live, the KIS connection and when each feed last delivered;
 - ``GET /symbols``: the predicted symbols with their reference price and flat band now;
 - ``GET /symbols/{symbol}/latest``: the predictions of the symbol's latest bar close;
-- ``GET /symbols/{symbol}/predictions?limit=N&algorithm=A``: the predictions of the last
-  N bar closes (default 100, at most 1000), newest first, with their outcomes;
+- ``GET /symbols/{symbol}/predictions?limit=N&algorithm=A&before=T``: the predictions of the
+  last N bar closes (default 100, at most 1000; before ``T`` if given), newest first, with
+  their outcomes; ``?bar_close=T`` gives that bar close's;
 - ``GET /symbols/{symbol}/bars``: today's finished one-minute bars, oldest first;
+  ``?before=T&limit=N``: the last N bars before ``T`` across days (the backfill's files);
 - ``GET /algorithms``: each registered algorithm's card, features, current model and status
   (probation, active, bench, retired, clone) with its history;
 - ``GET /algorithms/{name}``: one of them, with the models installed on the server for it;
@@ -36,7 +38,7 @@ import contextlib
 import json
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, time
 from functools import partial
 from pathlib import Path
 from time import monotonic
@@ -45,6 +47,7 @@ from typing import Any, Literal
 from aiohttp import web
 
 from krx_quant.algorithms import Algorithm
+from krx_quant.backfill import stock_bars_path, stored_bars
 from krx_quant.baselines import BASELINE_NAMES, BASELINES
 from krx_quant.consensus import NAMES, slot
 from krx_quant.contracts import USD
@@ -54,6 +57,7 @@ from krx_quant.macro import LatestMacro, latest_macro, reading_before
 from krx_quant.model_shelf import Shelf
 from krx_quant.predictions import Excluded, iso
 from krx_quant.pricing import flat_ticks, tick_size
+from krx_quant.reference import Bar
 from krx_quant.stats import (
     DEFAULT_MIN_SAMPLE,
     CalibrationBin,
@@ -91,6 +95,9 @@ _CACHED_QUESTIONS = 64
 
 DEFAULT_LIMIT = 100
 MAX_LIMIT = 1000
+# Bars before a time (#108): a trading day is up to 720 one-minute bars (08:00–20:00).
+DEFAULT_BARS = 400
+MAX_BARS = 2000
 
 
 def create_app(
@@ -221,44 +228,89 @@ async def _latest(request: web.Request) -> web.Response:
 
 async def _predictions(request: web.Request) -> web.Response:
     engine, symbol = _engine_and_symbol(request)
-    if (at := request.query.get("bar_close")) is not None:
+    if (bar_close := _time_query(request, "bar_close")) is not None:
         # One bar close's every prediction (#107): what the models said that minute.
-        try:
-            bar_close = datetime.fromisoformat(at)
-        except ValueError:
-            bar_close = None
-        if bar_close is None or bar_close.tzinfo is None:
-            raise _error(
-                web.HTTPBadRequest, f"bar_close must be an ISO 8601 time with its offset, got {at!r}"
-            )
-        rows = engine.store.at_close(symbol, bar_close.astimezone(KST), request.query.get("algorithm"))
+        rows = engine.store.at_close(symbol, bar_close, request.query.get("algorithm"))
         return _json({"symbol": symbol, "predictions": [prediction_json(r) for r in rows]})
-    raw = request.query.get("limit", str(DEFAULT_LIMIT))
-    try:
-        limit = int(raw)
-    except ValueError:
-        limit = 0
-    if not 1 <= limit <= MAX_LIMIT:
-        raise _error(web.HTTPBadRequest, f"limit must be 1 to {MAX_LIMIT}, got {raw!r}")
-    rows = engine.store.recent(symbol, limit, request.query.get("algorithm"))
+    limit = _limit_query(request, DEFAULT_LIMIT, MAX_LIMIT)
+    before = _time_query(request, "before")  # the chart scrolled back (#108)
+    rows = engine.store.recent(symbol, limit, request.query.get("algorithm"), before)
     return _json({"symbol": symbol, "predictions": [prediction_json(r) for r in rows]})
 
 
 async def _bars(request: web.Request) -> web.Response:
     engine, symbol = _engine_and_symbol(request)
-    bars = [
+    today = engine.bars(symbol)
+    if "before" not in request.query and "limit" not in request.query:
+        return _json({"symbol": symbol, "bars": [_bar_json(b) for b in today]})
+    # The chart scrolled back (#108): the last bars before a time, across days.
+    before = _time_query(request, "before") or engine.clock.now()
+    limit = _limit_query(request, DEFAULT_BARS, MAX_BARS)
+    data_dir = request.app[DATA_DIR_KEY]
+    day = kst_day(engine.clock.now())
+    recent: list[dict[str, Any]] = []
+    stored_before = before
+    if data_dir is None or not stock_bars_path(data_dir, day, symbol).exists():
+        # Today from memory until the 20:30 backfill stores the whole day, which also
+        # fills what a restart during the day left out of memory.
+        recent = [_bar_json(b) for b in today if b.start < before]
+        stored_before = min(before, datetime.combine(day, time(), KST))
+    older = []
+    if data_dir is not None and len(recent) < limit:  # files: off the event loop
+        older = await asyncio.to_thread(stored_bars, data_dir, symbol, stored_before, limit - len(recent))
+    stored = [
         {
-            "start": iso(b.start),
-            "open": b.open,
-            "high": b.high,
-            "low": b.low,
-            "close": b.close,
-            "volume": b.volume,
-            "trades": b.trades,
+            "start": iso(r["bar_time"]),
+            "open": r["open"],
+            "high": r["high"],
+            "low": r["low"],
+            "close": r["close"],
+            "volume": r["volume"],
+            "trades": None,  # the backfill's bars do not count trades
         }
-        for b in engine.bars(symbol)
+        for r in older
     ]
-    return _json({"symbol": symbol, "bars": bars})
+    return _json({"symbol": symbol, "bars": [*stored, *recent][-limit:]})
+
+
+def _bar_json(b: Bar) -> dict[str, Any]:
+    return {
+        "start": iso(b.start),
+        "open": b.open,
+        "high": b.high,
+        "low": b.low,
+        "close": b.close,
+        "volume": b.volume,
+        "trades": b.trades,
+    }
+
+
+def _time_query(request: web.Request, name: str) -> datetime | None:
+    """The query's ISO 8601 time ``name`` in KST, None if absent; 400 without its offset."""
+    if (raw := request.query.get(name)) is None:
+        return None
+    at: datetime | None = None
+    try:
+        parsed = datetime.fromisoformat(raw)
+        # In KST: a time at the very edge of the calendar (9999-12-31T23:59-12:00) overflows.
+        if parsed.tzinfo is not None:
+            at = parsed.astimezone(KST)
+    except (ValueError, OverflowError):
+        pass
+    if at is None:
+        raise _error(web.HTTPBadRequest, f"{name} must be an ISO 8601 time with its offset, got {raw!r}")
+    return at
+
+
+def _limit_query(request: web.Request, default: int, most: int) -> int:
+    raw = request.query.get("limit", str(default))
+    try:
+        limit = int(raw)
+    except ValueError:
+        limit = 0
+    if not 1 <= limit <= most:
+        raise _error(web.HTTPBadRequest, f"limit must be 1 to {most}, got {raw!r}")
+    return limit
 
 
 async def _algorithms(request: web.Request) -> web.Response:

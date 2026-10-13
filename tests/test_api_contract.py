@@ -61,6 +61,10 @@ async def walk(get: Get) -> dict[str, int]:
         await ask(f"/v1/symbols/{symbol}/predictions", "predictions")
         await ask(f"/v1/symbols/{symbol}/predictions?limit=5&algorithm=consensus-final", "predictions")
         await ask(f"/v1/symbols/{symbol}/bars", "bars")
+        await ask(f"/v1/symbols/{symbol}/bars?limit=500", "bars")  # into earlier days, if stored
+        await ask(
+            f"/v1/symbols/{symbol}/predictions?before=2026-10-12T10:00:00%2B09:00&limit=5", "predictions"
+        )
     for query in ("", "?period=5d&basis=a&special=include", f"?symbol={symbols[0]}&period=20d"):
         await ask(f"/v1/leaderboard{query}", "leaderboard")
     for name in algorithms:
@@ -72,6 +76,9 @@ async def walk(get: Get) -> dict[str, int]:
     for path, status in (
         ("/v1/symbols/999999/latest", 404),
         ("/v1/symbols/005930/predictions?limit=0", 400),
+        ("/v1/symbols/005930/predictions?before=10:00", 400),
+        ("/v1/symbols/005930/bars?limit=0", 400),
+        ("/v1/symbols/005930/bars?before=10:00", 400),
         ("/v1/leaderboard?period=week", 400),
         ("/v1/algorithms/nobody/stats", 404),
         ("/v1/algorithms/nobody", 404),
