@@ -654,6 +654,10 @@ class MarketView:
         """A leading series' latest trade of ``now``'s day (``features.Leaders``): price and time."""
         return self._leader_bars.latest(series, now)
 
+    def last_bar(self, symbol: str, now: datetime) -> Bar | None:
+        """``symbol``'s latest bar of ``now``'s day, the one being made if its minute goes on."""
+        return self._bars.last(symbol, now)
+
     def bars(self, symbol: str, now: datetime) -> list[Bar]:
         """``symbol``'s bars of ``now``'s day whose minute has ended."""
         return self._bars.closed(symbol, now)

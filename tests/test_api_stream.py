@@ -26,7 +26,7 @@ from krx_quant.predictions import PredictionStore
 from krx_quant.replay import replay_into
 from tests.algorithm_doubles import FixedAlgorithm
 from tests.api_schema import check
-from tests.replay_events import CALENDAR, FEE, SYMBOL, at
+from tests.replay_events import CALENDAR, FEE, SYMBOL, at, trade
 from tests.test_replay import busy_morning
 
 UP = Forecast(0.7, 0.2, 0.1, 2.0)
@@ -135,6 +135,54 @@ async def test_the_kis_status_is_sent_on_connecting_and_when_it_changes(tmp_path
     assert now["kis"]["connected"] is True
     assert changed["kis"]["connected"] is False
     assert changed["kis"]["feeds"][0]["gap"] == "disconnected: closed"
+
+
+OTHER = "000660"
+
+
+async def test_the_bar_being_made_is_sent_once_a_poll_with_its_last_values(tmp_path: Path) -> None:
+    store = PredictionStore(tmp_path / "engine.db")
+    clock = FakeClock(at("09:30:00"))
+    engine = PredictionEngine(store, CALENDAR, (SYMBOL, OTHER), FEE, clock, algorithms=[])
+    app = create_app(engine, stream_poll_seconds=0.3)
+
+    def trades(*made: tuple[str, str, int, int]) -> None:
+        """At once, between two polls: no await in between."""
+        for symbol, when, price, qty in made:
+            clock.set(at(when))
+            engine.on_event(*trade(at(when), price, qty, symbol=symbol))
+
+    async with TestClient(TestServer(app)) as client:
+        ws = await client.ws_connect("/v1/stream")
+        await asyncio.sleep(0.05)
+        trades(
+            (SYMBOL, "09:30:01", 81_200, 10),
+            (SYMBOL, "09:30:02", 81_400, 5),
+            (SYMBOL, "09:30:03", 81_300, 1),
+            (OTHER, "09:30:03", 201_000, 2),
+        )
+        first = await receive_until(ws, lambda e: e["type"] == "bar")
+        second = await receive_until(ws, lambda e: e["type"] == "bar")
+        await asyncio.sleep(0.7)  # two more polls: nothing changed, nothing sent
+        trades((SYMBOL, "09:31:00.5", 81_100, 3))  # the next minute begins
+        third = await receive_until(ws, lambda e: e["type"] == "bar")
+        await ws.close()
+
+    sent = {e["symbol"]: e["bar"] for e in (*first, *second)}
+    assert sent[SYMBOL] == {
+        "start": "2026-10-12T09:30:00+09:00",
+        "open": 81_200,
+        "high": 81_400,
+        "low": 81_200,
+        "close": 81_300,
+        "volume": 16,
+        "trades": 3,
+    }, "one event for three trades, with the last values"
+    assert sent[OTHER]["close"] == 201_000, "each symbol on its own"
+    assert len(first) == len(second) == 1
+    assert [e["type"] for e in third] == ["bar"], "no event while nothing changed"
+    assert third[0]["symbol"] == SYMBOL
+    assert third[0]["bar"]["start"] == "2026-10-12T09:31:00+09:00"
 
 
 async def test_clients_are_told_when_the_engine_shuts_down(tmp_path: Path) -> None:
