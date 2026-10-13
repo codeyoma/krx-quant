@@ -86,6 +86,23 @@ async def test_the_demo_scrolls_back_into_two_earlier_afternoons(tmp_path: Path)
     )
 
 
+async def test_the_demo_has_two_years_of_day_candles_before_the_morning(tmp_path: Path) -> None:
+    app = await demo_app(tmp_path / "demo.sqlite3")
+
+    async with TestClient(TestServer(app)) as client:
+        latest = await get_json(client, "/v1/symbols/005930/candles?period=day")
+        older = await get_json(
+            client, "/v1/symbols/005930/candles?period=day&before=2026-10-07T00:00:00%2B09:00&limit=2000"
+        )
+
+    dates = [c["date"] for c in latest["candles"]]
+    assert (latest["venue"], len(dates), dates[-2:]) == ("UN", 400, ["2026-10-07", "2026-10-08"])
+    assert len(older["candles"]) == 498 and older["candles"][-1]["date"] == "2026-10-06"
+    last = latest["candles"][-1]
+    assert last["low"] <= min(last["open"], last["close"]) <= max(last["open"], last["close"]) <= last["high"]
+    assert abs(last["close"] - 81_250) <= 81_250 * 0.001, "the last close is near the morning's open"
+
+
 async def test_the_demo_is_the_same_every_time(tmp_path: Path) -> None:
     first, second = await demo_app(tmp_path / "a.sqlite3"), await demo_app(tmp_path / "b.sqlite3")
 
@@ -94,6 +111,7 @@ async def test_the_demo_is_the_same_every_time(tmp_path: Path) -> None:
             "/v1/symbols",
             "/v1/symbols/005930/predictions?limit=20&algorithm=newton",
             "/v1/symbols/005930/bars?limit=500",
+            "/v1/symbols/005930/candles?period=day",
         ):
             assert await get_json(a, path) == await get_json(b, path)
 

@@ -298,6 +298,34 @@
       }
     },
 
+    "candles": {
+      "description": "GET /v1/symbols/{symbol}/candles?period=day: the stored candles before a time, oldest first, never today's (#111). Prices are adjusted. venue is where they come from (UN integrated KRX + NXT, KRX regular session), null with none stored.",
+      "type": "object",
+      "required": ["symbol", "period", "venue", "candles"],
+      "additionalProperties": false,
+      "properties": {
+        "symbol": {"type": "string"},
+        "period": {"enum": ["day"]},
+        "venue": {"enum": ["UN", "KRX", null]},
+        "candles": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["date", "open", "high", "low", "close", "volume"],
+            "additionalProperties": false,
+            "properties": {
+              "date": {"$ref": "#/$defs/day"},
+              "open": {"type": "number"},
+              "high": {"type": "number"},
+              "low": {"type": "number"},
+              "close": {"type": "number"},
+              "volume": {"type": "number", "minimum": 0}
+            }
+          }
+        }
+      }
+    },
+
     "algorithm": {
       "description": "An item of GET /v1/algorithms.",
       "allOf": [{"$ref": "#/$defs/algorithm_fields"}],

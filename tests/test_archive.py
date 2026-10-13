@@ -20,6 +20,7 @@ import pytest
 from moto import mock_aws
 
 from krx_quant.archive import archive
+from krx_quant.candles import write_candles
 from krx_quant.collector import run_collector
 from krx_quant.fake_kis import FakeKis
 from krx_quant.feeds import KOSPI200_FUTURES, RAW_SCHEMA
@@ -192,6 +193,33 @@ async def test_days_from_a_given_day_on_can_be_left_out(tmp_path: Path) -> None:
     await archive(data, store, before=DAY)
 
     assert store.keys() == ["raw/date=2026-10-07/feed=H0UNCNT0/symbol=005930/data.parquet"]
+
+
+async def test_day_candles_are_uploaded_on_every_run_they_changed(tmp_path: Path) -> None:
+    data = tmp_path / "data"
+    record(data, ["today"])
+    candle = {
+        "symbol": "005930",
+        "date": DAY,
+        "venue": "UN",
+        "open": 1,
+        "high": 2,
+        "low": 1,
+        "close": 2,
+        "volume": 3,
+        "value": 6,
+    }
+    write_candles(data, "day", "005930", [candle])
+    store = Counting(LocalObjectStore(tmp_path / "store"))
+    key = "candles/period=day/symbol=005930/candles.parquet"
+
+    await archive(data, store, before=DAY)  # today's recording is left for later, not the candles
+    write_candles(data, "day", "005930", [candle, {**candle, "date": DAY + timedelta(days=1), "close": 3}])
+    await archive(data, store, before=DAY)
+    await archive(data, store, before=DAY)
+
+    assert store.puts == [key, key], "uploaded when written, again when a candle was added"
+    assert [r["close"] for r in fetched(store.store, key, tmp_path)] == [2, 3]
 
 
 async def test_the_collector_archives_the_day_after_the_close(kis: FakeKis, tmp_path: Path) -> None:

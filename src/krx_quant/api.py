@@ -11,6 +11,9 @@ Endpoints (all under ``/v1``):
   their outcomes; ``?bar_close=T`` gives that bar close's;
 - ``GET /symbols/{symbol}/bars``: today's finished one-minute bars, oldest first;
   ``?before=T&limit=N``: the last N bars before ``T`` across days (the backfill's files);
+- ``GET /symbols/{symbol}/candles?period=day&before=T&limit=N``: the last N stored day
+  candles (default 400, at most 2000) that start before ``T`` (default now), oldest first,
+  never today's (``candles``);
 - ``GET /algorithms``: each registered algorithm's card, features, current model and status
   (probation, active, bench, retired, clone) with its history;
 - ``GET /algorithms/{name}``: one of them, with the models installed on the server for it;
@@ -51,11 +54,13 @@ from aiohttp import web
 from krx_quant.algorithms import Algorithm
 from krx_quant.backfill import stock_bars_path, stored_bars
 from krx_quant.baselines import BASELINE_NAMES, BASELINES
+from krx_quant.candles import PERIODS as CANDLE_PERIODS
+from krx_quant.candles import stored_candles
 from krx_quant.consensus import NAMES, slot
 from krx_quant.contracts import USD
 from krx_quant.econ_calendar import calendar_answer, read_latest
 from krx_quant.engine import PredictionEngine
-from krx_quant.feeds.base import KST, kst_day
+from krx_quant.feeds.base import KST, Row, kst_day
 from krx_quant.macro import LatestMacro, latest_macro, reading_before
 from krx_quant.model_shelf import Shelf
 from krx_quant.predictions import Excluded, iso
@@ -107,6 +112,9 @@ MAX_LIMIT = 1000
 # Bars before a time (#108): a trading day is up to 720 one-minute bars (08:00–20:00).
 DEFAULT_BARS = 400
 MAX_BARS = 2000
+# Day candles (#111): the chart reads a screenful and scrolls back for more.
+DEFAULT_CANDLES = 400
+MAX_CANDLES = 2000
 
 
 def create_app(
@@ -158,6 +166,7 @@ def create_app(
     app.router.add_get("/v1/symbols/{symbol}/latest", _latest)
     app.router.add_get("/v1/symbols/{symbol}/predictions", _predictions)
     app.router.add_get("/v1/symbols/{symbol}/bars", _bars)
+    app.router.add_get("/v1/symbols/{symbol}/candles", _candles)
     app.router.add_get("/v1/algorithms", _algorithms)
     app.router.add_get("/v1/algorithms/{name}", _algorithm)
     app.router.add_get("/v1/leaderboard", _leaderboard)
@@ -282,6 +291,35 @@ async def _bars(request: web.Request) -> web.Response:
         for r in older
     ]
     return _json({"symbol": symbol, "bars": [*stored, *recent][-limit:]})
+
+
+async def _candles(request: web.Request) -> web.Response:
+    engine, symbol = _engine_and_symbol(request)
+    period = request.query.get("period")
+    if period not in CANDLE_PERIODS:
+        raise _error(web.HTTPBadRequest, f"period must be one of {', '.join(CANDLE_PERIODS)}, got {period!r}")
+    now = engine.clock.now()
+    before = _time_query(request, "before") or now
+    limit = _limit_query(request, DEFAULT_CANDLES, MAX_CANDLES)
+    data_dir = request.app[DATA_DIR_KEY]
+    venue: str | None = None
+    rows: list[Row] = []
+    if data_dir is not None:  # a file: off the event loop
+        venue, rows = await asyncio.to_thread(
+            stored_candles, data_dir, period, symbol, before, limit, kst_day(now)
+        )
+    candles = [
+        {
+            "date": r["date"].isoformat(),
+            "open": r["open"],
+            "high": r["high"],
+            "low": r["low"],
+            "close": r["close"],
+            "volume": r["volume"],
+        }
+        for r in rows
+    ]
+    return _json({"symbol": symbol, "period": period, "venue": venue, "candles": candles})
 
 
 def _bar_json(b: Bar) -> dict[str, Any]:
