@@ -200,6 +200,13 @@ Backfiller가 날마다 그날의 최근월물을 받아 연속 1분봉(`KOSPI20
 
   > **바뀜** (2026-10-13, #125): 수집기는 시작할 때만 월물을 골랐고, 06:00 배포는 새 커밋이 있을 때만 다시 띄웠다 → 거래일 07:20에 다시 시작한다(그날 아침에 시작한 수집기는 빼고). 이유: 커밋 없는 날이 이어지면 만기를 넘긴 월물을 계속 구독하고 옵션 등가격이 날마다 멀어졌다(#115). 방법(프로세스 재시작)은 사용자와 정했다.
 
+## 기간별 시세 (일·주·월·년봉)
+
+일봉 보기(#111)와 주·월·년봉 보기(#112)가 쓸 KIS 국내주식기간별시세(`FHKST03010100`)다. 아직 실측하지 못했다 ⚠. 서버에서 장 마감 뒤(20:00 이후, 20:30 백필과 겹치지 않게) `krx-quant probe-candles`로 재고, 그 결과를 여기에 적은 뒤 수집을 만든다.
+
+- 경로: `/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice`. 파라미터: `FID_COND_MRKT_DIV_CODE`(`UN` 통합, `J` KRX, `NX` NXT), `FID_INPUT_ISCD`, `FID_INPUT_DATE_1`(시작일), `FID_INPUT_DATE_2`(종료일), `FID_PERIOD_DIV_CODE`(`D`·`W`·`M`·`Y`), `FID_ORG_ADJ_PRC`(`0` 수정주가, `1` 원주가). [koreainvestment/open-trading-api](https://github.com/koreainvestment/open-trading-api) 예제 기준이다.
+- 잴 것: 한 번에 주는 개수(예제는 100개), 거슬러 갈 수 있는 끝(기간마다), 통합(`UN`) 구분을 주는지와 NXT에서 거래하지 않는 ETF의 답, `FID_ORG_ADJ_PRC`가 2018-05-04 삼성전자 액면분할 앞의 가격을 바꾸는지, `output1`·`output2` 필드.
+
 ## 최근월물 코드 찾기
 
 선물 코드는 새 형식(`A` + 상품 + 연도 + 월)이다. KOSPI200 선물은 분기마다, 달러선물은 매달 바뀐다. 그래서 수집기는 시작할 때 KIS가 매일 배포하는 마스터 파일을 받아 최근월물을 찾는다. `KRX_KOSPI200_FUTURES_CODE`, `KRX_USD_FUTURES_CODE`로 직접 지정할 수도 있다.
