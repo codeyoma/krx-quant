@@ -272,7 +272,7 @@
       }
     },
     "bars": {
-      "description": "GET /v1/symbols/{symbol}/bars",
+      "description": "GET /v1/symbols/{symbol}/bars: today's finished bars, or with before/limit the last bars before a time across days (#108). A stored (backfilled) bar has trades null.",
       "type": "object",
       "required": ["symbol", "bars"],
       "additionalProperties": false,
@@ -291,7 +291,7 @@
               "low": {"type": "number"},
               "close": {"type": "number"},
               "volume": {"type": "number", "minimum": 0},
-              "trades": {"type": "integer", "minimum": 0}
+              "trades": {"type": ["integer", "null"], "minimum": 0}
             }
           }
         }

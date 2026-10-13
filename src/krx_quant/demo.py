@@ -9,6 +9,11 @@ has a model installed and rolled back, and the KIS status is made up (one feed i
 The clock stays at 10:30. Every answer is the same each run, except the CPU budget's
 timings, which are measured.
 
+Before the morning come the last 80 minutes (14:00–15:20) of the two trading days before
+it, Thursday 2026-10-08 and Friday 2026-10-09, so a chart scrolls back into them
+(#108): their predictions are in the database, and their one-minute bars are stored as
+the backfill stores them, under ``<db stem>-data/bars/``.
+
 With a pace (``demo-engine --pace SECONDS``), the morning is replayed at once only up to
 10:00; the API opens there, and the rest goes on a minute every ``pace`` seconds, so the
 stream sends predictions, the consensus and outcomes as they are made (#21). It ends at
@@ -21,15 +26,19 @@ import asyncio
 import contextlib
 import random
 import shutil
+from collections import defaultdict
 from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, date, datetime, time, timedelta
 from functools import partial
 from pathlib import Path
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 from aiohttp import web
 
 from krx_quant.algorithms import ALGORITHMS, Model
 from krx_quant.api import create_app
+from krx_quant.backfill import BAR_SCHEMA, stock_bars_path
 from krx_quant.clock import FakeClock
 from krx_quant.engine import Event, PredictionEngine
 from krx_quant.feeds import BOOK, INDEX, KOSPI200_FUTURES, TRADE, USD_FUTURES, VI_STATUS, Feed
@@ -48,6 +57,12 @@ from krx_quant.swap import NightStatus
 DEMO_DAY = date(2026, 10, 12)
 DEMO_SYMBOLS = ("005930", "000660", "009150")
 _START, _END = time(9, 0), time(10, 30)
+# The trading days before the morning, with the minutes of each a chart scrolls back into.
+PAST_DAYS = (date(2026, 10, 8), date(2026, 10, 9))
+_PAST_FROM, _PAST_TO = time(14, 0), time(15, 20)
+_CALENDAR = MarketCalendar(
+    {d: True for d in PAST_DAYS} | {date(2026, 10, 10): False, date(2026, 10, 11): False, DEMO_DAY: True}
+)
 _PACED_FROM = time(10, 0)  # a paced demo opens here and goes on a minute at a time
 _FEE = 0.00015
 # Each symbol's mid-point at the open and its tick.
@@ -71,10 +86,25 @@ _USDF_CLOSE = _OVERNIGHT["usdf"][1]
 
 def demo_events() -> list[Event]:
     """The demo morning's events, in receipt order."""
+    events = _session_events(_at(_START), _at(_END), seed=0)
+    # 000660 in a VI from 09:40:10, released at 09:42:20.
+    events.append(_vi(_at(time(9, 40, 11)), "000660", "094010", None))
+    events.append(_vi(_at(time(9, 42, 21)), "000660", "094010", "094220"))
+    return sorted(events, key=lambda e: e[1]["received_at"])
+
+
+def past_events(day: date) -> list[Event]:
+    """The last 80 minutes of an earlier trading day (``PAST_DAYS``), in receipt order."""
+    seed = 10 * (1 + PAST_DAYS.index(day))
+    return _session_events(datetime.combine(day, _PAST_FROM, KST), datetime.combine(day, _PAST_TO, KST), seed)
+
+
+def _session_events(start: datetime, end: datetime, seed: int) -> list[Event]:
+    """Each symbol wandering from its open (``seed`` picks the walk), with the index and the
+    futures, from ``start`` to ``end``, in receipt order."""
     events: list[Event] = []
-    start, end = _at(_START), _at(_END)
     for n, symbol in enumerate(DEMO_SYMBOLS):
-        rng = random.Random(n)
+        rng = random.Random(seed + n)
         mid, tick = _OPENS[symbol]
         when = start + timedelta(seconds=3 * n)
         while when <= end:
@@ -83,7 +113,7 @@ def demo_events() -> list[Event]:
             price = mid + rng.choice((-1, 1)) * (tick // 2)  # at the bid or the ask
             events.append(_trade(when + timedelta(seconds=1), symbol, price, rng.randint(1, 50)))
             when += timedelta(seconds=11)
-    rng = random.Random(len(DEMO_SYMBOLS))
+    rng = random.Random(seed + len(DEMO_SYMBOLS))
     level = 0.0
     for when in _every(start, end, 5):
         level += rng.gauss(0, 0.02)
@@ -94,10 +124,40 @@ def demo_events() -> list[Event]:
         events.append(
             _futures(when + timedelta(seconds=3), usd, level + 0.2, feed=USD_FUTURES, contract="A75610")
         )
-    # 000660 in a VI from 09:40:10, released at 09:42:20.
-    events.append(_vi(_at(time(9, 40, 11)), "000660", "094010", None))
-    events.append(_vi(_at(time(9, 42, 21)), "000660", "094010", "094220"))
     return sorted(events, key=lambda e: e[1]["received_at"])
+
+
+def write_past_bars(data_dir: Path, day: date, events: Sequence[Event]) -> None:
+    """``day``'s one-minute bars of the demo symbols from its trades, stored as the backfill
+    stores them (``backfill.py``), replacing earlier ones."""
+    minutes: dict[str, dict[datetime, list[tuple[int, int]]]] = defaultdict(lambda: defaultdict(list))
+    for tr_id, row in events:
+        if tr_id == TRADE.tr_id:
+            traded = row["received_at"].astimezone(KST)
+            minutes[row["symbol"]][traded.replace(second=0, microsecond=0)].append((row["price"], row["qty"]))
+    for symbol, bars in minutes.items():
+        cum = 0
+        rows = []
+        for start in sorted(bars):
+            prices = [p for p, _ in bars[start]]
+            volume = sum(q for _, q in bars[start])
+            cum += sum(p * q for p, q in bars[start])
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "bar_time": start,
+                    "venue": "UN",
+                    "open": prices[0],
+                    "high": max(prices),
+                    "low": min(prices),
+                    "close": prices[-1],
+                    "volume": volume,
+                    "cum_value": cum,
+                }
+            )
+        path = stock_bars_path(data_dir, day, symbol)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pq.write_table(pa.Table.from_pylist(rows, schema=BAR_SCHEMA), path)
 
 
 async def demo_app(db: Path, pace: float | None = None) -> web.Application:
@@ -116,16 +176,32 @@ async def demo_app(db: Path, pace: float | None = None) -> web.Application:
         leftover.unlink(missing_ok=True)
     start = _at(time(0))
     store = PredictionStore(db)
-    for a in ALGORITHMS:  # active from the start, so the consensus has members
-        store.add_status(a.name, start, None, Status.ACTIVE, "demo")
+    for a in ALGORITHMS:  # active from the first day, so the consensus has members
+        store.add_status(a.name, datetime.combine(PAST_DAYS[0], time(), KST), None, Status.ACTIVE, "demo")
     store.close()
     data_dir = db.with_name(f"{db.stem}-data")
     write_demo_macro(data_dir)  # first: Markov reads the morning's regime
+    shutil.rmtree(data_dir / "bars", ignore_errors=True)
+    for day in PAST_DAYS:
+        # Each day by its own engine, ended before the daily review after the close, so
+        # every algorithm stays active as on the morning.
+        past = past_events(day)
+        write_past_bars(data_dir, day, past)
+        engine = await replay(
+            past,
+            db=db,
+            calendar=_CALENDAR,
+            symbols=DEMO_SYMBOLS,
+            fee_rate=_FEE,
+            start=datetime.combine(day, _PAST_FROM, KST) - timedelta(minutes=1),
+            until=datetime.combine(day, time(15, 30), KST),
+        )  # no macro read those mornings: no regime
+        engine.store.close()
     events = demo_events()
     engine = await replay(
         events,
         db=db,
-        calendar=MarketCalendar({DEMO_DAY: True}),
+        calendar=_CALENDAR,
         symbols=DEMO_SYMBOLS,
         fee_rate=_FEE,
         start=start,

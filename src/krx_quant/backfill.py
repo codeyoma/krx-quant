@@ -271,6 +271,32 @@ def bars_key(day: date, feed: str, name: str) -> str:
     return f"bars/date={day.isoformat()}/feed={feed}/symbol={name}/bars.parquet"
 
 
+def stock_bars_path(data_dir: Path, day: date, symbol: str) -> Path:
+    """A stock's or ETF's bars of ``day`` under the data directory, whether filled or not."""
+    return data_dir / bars_key(day, MINUTE_BARS_TR, symbol)
+
+
+def stored_bars(data_dir: Path, symbol: str, before: datetime, limit: int) -> list[Row]:
+    """The last ``limit`` stored bars of a stock or ETF that start before ``before``, across
+    days, oldest first (the chart scrolled back, #108). Days are read newest first, only
+    as many as needed.
+    """
+    days = sorted(
+        (date.fromisoformat(d.name.removeprefix("date=")) for d in (data_dir / "bars").glob("date=*")),
+        reverse=True,
+    )
+    found: list[Row] = []
+    for day in days:
+        if len(found) >= limit:
+            break
+        path = stock_bars_path(data_dir, day, symbol)
+        if day > kst_day(before) or not path.exists():
+            continue
+        bars = [r for r in pq.read_table(path).to_pylist() if r["bar_time"] < before]
+        found = sorted(bars, key=lambda r: r["bar_time"]) + found
+    return found[-limit:] if limit > 0 else []
+
+
 def _bar(symbol: str, venue: str, day: date, r: dict[str, str]) -> Row:
     return {
         "symbol": symbol,
