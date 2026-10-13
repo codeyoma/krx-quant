@@ -155,7 +155,7 @@
 
 ### 계약 (JSON 스키마, #19)
 
-- `schemas/engine-api-v1.json`이 모든 `/v1` 응답의 형식이다(JSON Schema 2020-12). 엔드포인트마다 `$defs`에 정의가 하나씩 있다: `status`, `symbols`, `latest`, `predictions`, `bars`, `algorithms`, `algorithm_detail`, `leaderboard`, `algorithm_stats`, `consensus`, `macro`, 오류는 `error`. 스트림의 메시지는 `event`(종류마다 `prediction_event` 등)다.
+- `schemas/engine-api-v1.json`이 모든 `/v1` 응답의 형식이다(JSON Schema 2020-12). 엔드포인트마다 `$defs`에 정의가 하나씩 있다: `status`, `symbols`, `latest`, `predictions`, `bars`, `algorithms`, `algorithm_detail`, `leaderboard`, `algorithm_stats`, `consensus`, `macro`, `calendar`, 오류는 `error`. 스트림의 메시지는 `event`(종류마다 `prediction_event` 등)다.
 - 스키마에 없는 필드는 계약 위반이다(모든 객체가 닫혀 있다). 그래서 필드를 더하거나 바꾸면 스키마도 같이 고친다. 시각은 `+09:00`이 붙은 ISO 8601이어야 한다.
 - 계약 테스트(`tests/test_api_contract.py`)가 세 모드의 엔진에 모든 엔드포인트, 질의 변형, 오류 응답을 물어 스키마로 검사한다. 빈 재생 엔진(값이 `null`인 경우), 데모 엔진(필드가 찬 경우), 가짜 KIS 위의 실시간 수집기다. 라우트마다 스키마 정의가 있는지도 확인한다(`tests/api_schema.py`의 `ROUTES`). 그래서 엔드포인트를 더하면 `ROUTES`와 스키마에 함께 넣어야 테스트를 지난다.
 - 스트림 테스트(`tests/test_api_stream.py`)는 받은 메시지마다 `event` 정의로 검사한다. 실시간 수집기의 계약 테스트도 스트림을 함께 검사한다.
@@ -433,6 +433,27 @@
 - `readings`는 지표 표의 순서다(`macro.py`의 `INDICATORS`). 보이는 국면을 정한 그 읽기의 값이다. 수집기가 다시 시작해 그날 새로 읽었으면, 그 전 읽기의 값은 섞지 않는다. 그래서 실패하거나 키가 없어 건너뛴 출처의 지표는 빠진다. `as_of`는 출처 기준 값의 날짜, `change_pct`는 KRX 전 거래일 아침 대비 등락률(%)이다. 값을 모르면 `null`이다.
 - `failed`는 마지막 읽기에서 실패한 출처와 이유, `skipped`는 키가 없어 건너뛴 출처다.
 - 아직 정한 날이 없거나(데이터 디렉터리에 없음) 재생 엔진이면 `day`, `decided_at`, `regime`이 `null`이고 목록은 비어 있다. 데모 엔진은 가상의 국면(`risk_off`)을 보인다.
+
+### `GET /v1/calendar` (#150)
+
+경제 캘린더다. 수집기가 TradingView에서 마지막으로 읽은 것 가운데, 엔진 시계의 오늘 0시(KST)부터의 일정을 시각 순으로 보인다([design.md](design.md#45-매크로-지표)의 "경제 캘린더").
+
+```json
+{
+  "fetched_at": "2026-10-13T09:15:00+09:00",
+  "source": "tradingview",
+  "countries": ["US", "KR", "CN", "JP", "EU", "DE", "GB"],
+  "events": [
+    {"id": "421602", "at": "2026-10-14T21:30:00+09:00", "country": "US", "title": "Inflation Rate YoY", "indicator": "Inflation Rate", "category": "prce", "period": "Sep", "actual": null, "forecast": 3.7, "previous": 3.4, "unit": "%", "scale": null, "currency": "USD", "importance": "high", "source": "Bureau of Labour Statistics", "source_url": "https://www.bls.gov"}
+  ]
+}
+```
+
+- `limit`: 일정 수(기본 100, 1–1000). 범위 밖이면 400이다.
+- `fetched_at`은 수집기가 마지막으로 읽은 시각이다. 읽기에 실패하는 동안은 앞의 답이 그대로라서 늦어진다. 한 번도 읽지 않았으면(재생·데모 엔진 포함) `null`이고 목록은 비어 있다.
+- 값(`actual`, `forecast`, `previous`)은 숫자이고, 모르면 `null`이다. 값은 `<숫자><scale>`이고 단위는 `unit`이다. `scale`은 `K`(천), `M`(백만), `B`(십억), `T`(조) 또는 `null`이라서, `previous: 23.75, scale: "K"`는 23,750이다. `unit`은 `%`, 통화(`$`, `€`, `£`, `CNY` 등) 또는 `null`이다. 실제 값은 발표 뒤 수집기가 처음 읽을 때(기본 15분 안에) 찬다.
+- 엔진은 수집기가 남긴 파일을 그대로 넘기지 않고 한 번 읽어 다시 쓴다. 그래서 파일이 망가지거나 손으로 고쳐져도 답은 이 형식을 지키고, 읽을 수 없는 일정은 빠진다.
+- 엔진은 수집기가 쓴 파일을 많아야 30초마다 다시 읽는다.
 
 ### `GET /v1/stream` (WebSocket, #19)
 

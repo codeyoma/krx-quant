@@ -652,6 +652,45 @@
       }
     },
 
+    "calendar": {
+      "description": "GET /v1/calendar: the economic calendar from the start of today (KST), in time order, as last read; fetched_at null before any read.",
+      "type": "object",
+      "required": ["fetched_at", "source", "countries", "events"],
+      "additionalProperties": false,
+      "properties": {
+        "fetched_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]},
+        "source": {"const": "tradingview"},
+        "countries": {"type": "array", "items": {"type": "string", "pattern": "^[A-Z]{2}$"}},
+        "events": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "at", "country", "title", "indicator", "category", "period", "actual", "forecast",
+                         "previous", "unit", "scale", "currency", "importance", "source", "source_url"],
+            "additionalProperties": false,
+            "properties": {
+              "id": {"type": "string"},
+              "at": {"$ref": "#/$defs/time"},
+              "country": {"type": "string"},
+              "title": {"type": "string"},
+              "indicator": {"type": ["string", "null"]},
+              "category": {"type": ["string", "null"]},
+              "period": {"type": ["string", "null"]},
+              "actual": {"type": ["number", "null"]},
+              "forecast": {"type": ["number", "null"]},
+              "previous": {"type": ["number", "null"]},
+              "unit": {"type": ["string", "null"]},
+              "scale": {"enum": ["K", "M", "B", "T", null]},
+              "currency": {"type": ["string", "null"]},
+              "importance": {"enum": ["low", "medium", "high"]},
+              "source": {"type": ["string", "null"]},
+              "source_url": {"type": ["string", "null"]}
+            }
+          }
+        }
+      }
+    },
+
     "event": {
       "description": "A message of GET /v1/stream (WebSocket), one JSON text each.",
       "oneOf": [

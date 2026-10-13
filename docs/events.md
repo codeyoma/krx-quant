@@ -297,6 +297,26 @@ KOSPI200 선물과 달러선물은 KIS 선물옵션 분봉조회(`FHKIF03020200`
 
 KIS 필드 순서는 [koreainvestment/open-trading-api](https://github.com/koreainvestment/open-trading-api)의 `examples_llm/domestic_stock/ccnl_total`, `asking_price_total` 예제를 따른다.
 
+## 경제 캘린더 (#150)
+
+수집기가 TradingView 경제 캘린더를 읽을 때마다(기본 15분) 새로 나타나거나 바뀐 일정만 쓴다(`econ_calendar.py`, [design.md](design.md#45-매크로-지표)의 "경제 캘린더"). 바뀌었다는 것은 발표 시각, 이름, 기간, 실제·예상·이전 값, 중요도 중 하나가 달라졌다는 뜻이다. 그래서 한 일정의 줄들을 `recorded_at` 순으로 보면 그때그때 알던 값이 나온다(실제 값은 발표 뒤 처음 읽을 때 생긴다). 수집기가 다시 시작하면 `calendar/latest.json`의 마지막 답에서 이어서 비교한다. 바뀐 일정을 이 계층에 먼저 쓰고 `latest.json`을 나중에 바꾼다. 그래서 그 사이에 멈추면 다시 시작한 뒤 같은 변화가 한 번 더 기록될 수는 있어도(적어도 한 번), 빠지지는 않는다.
+
+**`calendar/date=<읽은 날, KST>/feed=tradingview/symbol=<국가>/`**: 일정 하나의 새 값마다 한 줄.
+
+| 열 | 형식 | 내용 |
+|---|---|---|
+| `recorded_at` | timestamp (UTC) | 읽은 시각 |
+| `id` | string | 출처의 일정 id |
+| `at` | timestamp (UTC) | 발표 시각 |
+| `country` | string | 두 글자 국가(`US`, `KR`, `EU` 등) |
+| `title`, `indicator`, `category`, `period` | string | 일정 이름, 지표, 출처의 분류 코드, 기준 기간(`Sep` 등). 없으면 null |
+| `actual`, `forecast`, `previous` | float64 | 실제(발표 전 null), 예상, 이전 값. `unit` 단위 |
+| `unit`, `scale`, `currency` | string | 단위(`%`, `$`, `CNY` 등), 배율(`K`, `M`, `B`, `T`: 값은 `<숫자><배율>`), 통화. 없으면 null |
+| `importance` | string | `low`, `medium`, `high` |
+| `source`, `source_url` | string | 발표 기관과 그 주소 |
+
+`calendar/latest.json`은 마지막 답 전체다(`fetched_at`, `source`, `countries`, `events`). 계층이 아니어서 보관(S3)은 올리지 않는다.
+
 ## 매크로 지표와 일일 국면 (#8)
 
 Macro Collector가 거래일 07:30에 쓴다(`macro.py`, [design.md](design.md#45-매크로-지표)). `macro` 계층이다. 같은 날 다시 읽으면(재시도, 재시작, `krx-quant macro`) 줄이 더해진다. `recorded_at`이 가장 늦은 줄이 최신이다.

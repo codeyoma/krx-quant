@@ -78,6 +78,8 @@ async def walk(get: Get) -> dict[str, int]:
         await ask(f"/v1/algorithms/{name}/stats", "algorithm_stats")
     await ask("/v1/consensus", "consensus")
     await ask("/v1/macro", "macro")
+    await ask("/v1/calendar", "calendar")
+    await ask("/v1/calendar?limit=5", "calendar")
     for path, status in (
         ("/v1/symbols/999999/latest", 404),
         ("/v1/symbols/005930/predictions?limit=0", 400),
@@ -92,6 +94,7 @@ async def walk(get: Get) -> dict[str, int]:
         ("/v1/leaderboard?period=week", 400),
         ("/v1/algorithms/nobody/stats", 404),
         ("/v1/algorithms/nobody", 404),
+        ("/v1/calendar?limit=0", 400),
     ):
         await ask(path, "error", status)
     assert set(checked) == {*ROUTES.values(), "error"}, "every route asked"

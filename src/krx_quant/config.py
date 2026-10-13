@@ -6,7 +6,7 @@ import math
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import time
+from datetime import time, timedelta
 from pathlib import Path
 
 from dotenv import dotenv_values
@@ -28,6 +28,10 @@ DEFAULT_TELEGRAM_API_URL = "https://api.telegram.org"
 DEFAULT_ECOS_URL = "https://ecos.bok.or.kr/api"
 DEFAULT_FRED_URL = "https://api.stlouisfed.org"
 DEFAULT_YAHOO_URL = "https://query1.finance.yahoo.com"
+# The economic calendar (econ_calendar.py, #150).
+DEFAULT_CALENDAR_URL = "https://economic-calendar.tradingview.com/events"
+DEFAULT_CALENDAR_COUNTRIES = "US,KR,CN,JP,EU,DE,GB"
+MIN_CALENDAR_MINUTES = 5  # the feed is not ours: no faster than this
 RULES = RegimeRules()  # the regime's default thresholds
 SIGNALS = SignalRule()  # the signal alerts' defaults
 
@@ -144,6 +148,12 @@ class Settings:
     ecos_url: str = DEFAULT_ECOS_URL
     fred_url: str = DEFAULT_FRED_URL
     yahoo_url: str = DEFAULT_YAHOO_URL
+    # The collector reads the economic calendar this often (KRX_CALENDAR_EVERY: 15 minutes
+    # unless set; "off"), for these countries (KRX_CALENDAR_COUNTRIES, two-letter codes).
+    # None here, as macro_at: a collector built in a test never does.
+    calendar_every: timedelta | None = None
+    calendar_countries: tuple[str, ...] = tuple(DEFAULT_CALENDAR_COUNTRIES.split(","))
+    calendar_url: str = DEFAULT_CALENDAR_URL
     regime_rules: RegimeRules = RegimeRules()
     signal_rule: SignalRule | None = None  # Telegram signal alerts; None: off
     commit: str = "unknown"  # the commit the image was built from (KRX_COMMIT, set by the deploy)
@@ -240,6 +250,15 @@ class Settings:
             ),
             min_agree=int(number("KRX_SIGNAL_MIN_AGREE", str(SIGNALS.min_agree), int, 1)),
         )
+        calendar_every = _minutes_or_off(
+            "KRX_CALENDAR_EVERY", values.get("KRX_CALENDAR_EVERY", "15"), MIN_CALENDAR_MINUTES
+        )
+        calendar_countries = tuple(
+            c.upper() for c in codes("KRX_CALENDAR_COUNTRIES", DEFAULT_CALENDAR_COUNTRIES)
+        )
+        if not calendar_countries or any(len(c) != 2 or not c.isalpha() for c in calendar_countries):
+            raw = values.get("KRX_CALENDAR_COUNTRIES")
+            raise SettingsError(f"KRX_CALENDAR_COUNTRIES must be two-letter country codes, got {raw!r}")
         macro_at = _time_or_off("KRX_MACRO_AT", values.get("KRX_MACRO_AT", "07:30"))
         restart_at = _before_pre_market("KRX_RESTART_AT", values.get("KRX_RESTART_AT", "07:20"))
         if restart_at is not None and macro_at is not None and restart_at >= macro_at:
@@ -312,6 +331,9 @@ class Settings:
             ecos_url=values.get("KRX_ECOS_URL", DEFAULT_ECOS_URL),
             fred_url=values.get("KRX_FRED_URL", DEFAULT_FRED_URL),
             yahoo_url=values.get("KRX_YAHOO_URL", DEFAULT_YAHOO_URL),
+            calendar_every=calendar_every,
+            calendar_countries=calendar_countries,
+            calendar_url=values.get("KRX_CALENDAR_URL", DEFAULT_CALENDAR_URL),
             regime_rules=RegimeRules(
                 shock_sox_pct=float(number("KRX_REGIME_SHOCK_SOX_PERCENT", str(RULES.shock_sox_pct), float)),
                 shock_vix=float(number("KRX_REGIME_SHOCK_VIX", str(RULES.shock_vix), float)),
@@ -360,6 +382,19 @@ def _before_pre_market(name: str, raw: str) -> time | None:
     if at is not None and at >= time(8, 0):
         raise SettingsError(f"{name} must be before 08:00 (the NXT pre-market) or off, got {raw!r}")
     return at
+
+
+def _minutes_or_off(name: str, raw: str, minimum: int) -> timedelta | None:
+    text = raw.strip().lower()
+    if text in ("", "off"):
+        return None
+    try:
+        minutes = int(text)
+    except ValueError as e:
+        raise SettingsError(f"{name} must be whole minutes or off, got {raw!r}") from e
+    if minutes < minimum:
+        raise SettingsError(f"{name} must be at least {minimum} minutes or off, got {raw!r}")
+    return timedelta(minutes=minutes)
 
 
 def _time_or_off(name: str, raw: str) -> time | None:
