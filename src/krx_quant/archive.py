@@ -3,7 +3,9 @@
 During the day the recorder writes many small part files per partition. Archiving
 merges each partition's part files into one ``data.parquet`` with large row groups,
 streaming so a big day never sits in memory, and uploads the partition's final files
-(``data.parquet``, the backfill's ``bars.parquet``) under the same layout.
+(``data.parquet``, the backfill's ``bars.parquet``) under the same layout. The day candles
+(``candles/period=<period>/symbol=<symbol>/candles.parquet``, ``candles``) are not by day:
+they are uploaded on every run when changed.
 
 Running it again is always safe and gives the same objects:
 
@@ -103,7 +105,8 @@ def _archive(data_dir: Path, store: ObjectStore, before: date | None, recheck: b
 
 
 def _partitions(data_dir: Path, before: date | None) -> Iterator[Path]:
-    """``<layer>/date=<day>/feed=<feed>/symbol=<symbol>`` directories, in order."""
+    """``<layer>/date=<day>/feed=<feed>/symbol=<symbol>`` directories, in order, then the
+    candles' ``candles/period=<period>/symbol=<symbol>`` (only finished candles are stored)."""
     for layer in sorted(p for p in data_dir.iterdir() if p.is_dir() and not p.name.startswith(".")):
         for day_dir in sorted(layer.glob("date=*")):
             try:
@@ -113,6 +116,7 @@ def _partitions(data_dir: Path, before: date | None) -> Iterator[Path]:
                 continue
             if before is None or day < before:
                 yield from sorted(p for p in day_dir.glob("feed=*/symbol=*") if p.is_dir())
+    yield from sorted(p for p in (data_dir / "candles").glob("period=*/symbol=*") if p.is_dir())
 
 
 def _clean_tmp(partition: Path) -> None:
