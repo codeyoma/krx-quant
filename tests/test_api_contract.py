@@ -62,6 +62,10 @@ async def walk(get: Get) -> dict[str, int]:
         await ask(f"/v1/symbols/{symbol}/predictions?limit=5&algorithm=consensus-final", "predictions")
         await ask(f"/v1/symbols/{symbol}/bars", "bars")
         await ask(f"/v1/symbols/{symbol}/bars?limit=500", "bars")  # into earlier days, if stored
+        await ask(f"/v1/symbols/{symbol}/candles?period=day", "candles")
+        await ask(
+            f"/v1/symbols/{symbol}/candles?period=day&before=2026-10-08T00:00:00%2B09:00&limit=3", "candles"
+        )
         await ask(
             f"/v1/symbols/{symbol}/predictions?before=2026-10-12T10:00:00%2B09:00&limit=5", "predictions"
         )
@@ -79,6 +83,10 @@ async def walk(get: Get) -> dict[str, int]:
         ("/v1/symbols/005930/predictions?before=10:00", 400),
         ("/v1/symbols/005930/bars?limit=0", 400),
         ("/v1/symbols/005930/bars?before=10:00", 400),
+        ("/v1/symbols/005930/candles", 400),
+        ("/v1/symbols/005930/candles?period=minute", 400),
+        ("/v1/symbols/005930/candles?period=day&limit=0", 400),
+        ("/v1/symbols/999999/candles?period=day", 404),
         ("/v1/leaderboard?period=week", 400),
         ("/v1/algorithms/nobody/stats", 404),
         ("/v1/algorithms/nobody", 404),

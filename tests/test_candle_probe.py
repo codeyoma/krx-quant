@@ -14,7 +14,8 @@ from typing import Any
 import pytest
 
 from krx_quant import candle_probe
-from krx_quant.candle_probe import CANDLES_TR, probe_candles
+from krx_quant.candle_probe import probe_candles
+from krx_quant.candles import CANDLES_TR
 from krx_quant.fake_kis import FakeKis
 from tests.test_collector import settings_for
 

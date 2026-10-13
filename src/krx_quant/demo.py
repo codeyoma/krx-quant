@@ -12,7 +12,8 @@ timings, which are measured.
 Before the morning come the last 80 minutes (14:00–15:20) of the two trading days before
 it, 2026-10-07 and 2026-10-08 (Friday the 9th is Hangul Day, closed), so a chart scrolls back into them
 (#108): their predictions are in the database, and their one-minute bars are stored as
-the backfill stores them, under ``<db stem>-data/bars/``.
+the backfill stores them, under ``<db stem>-data/bars/``. Each symbol also has two years of
+made-up day candles up to the 8th (``candles/``), for the chart's day view (#111).
 
 With a pace (``demo-engine --pace SECONDS``), the morning is replayed at once only up to
 10:00; the API opens there, and the rest goes on a minute every ``pace`` seconds, in steps
@@ -40,6 +41,7 @@ from aiohttp import web
 from krx_quant.algorithms import ALGORITHMS, Model
 from krx_quant.api import create_app
 from krx_quant.backfill import BAR_SCHEMA, stock_bars_path
+from krx_quant.candles import write_candles
 from krx_quant.clock import FakeClock
 from krx_quant.engine import Event, PredictionEngine
 from krx_quant.feeds import BOOK, INDEX, KOSPI200_FUTURES, TRADE, USD_FUTURES, VI_STATUS, Feed
@@ -67,6 +69,7 @@ from krx_quant.swap import NightStatus
 DEMO_DAY = date(2026, 10, 12)
 DEMO_SYMBOLS = ("005930", "000660", "009150")
 _START, _END = time(9, 0), time(10, 30)
+_CANDLE_DAYS = 500  # about two years of trading days
 # The trading days before the morning, with the minutes of each a chart scrolls back into.
 PAST_DAYS = (date(2026, 10, 7), date(2026, 10, 8))
 _PAST_FROM, _PAST_TO = time(14, 0), time(15, 20)
@@ -175,6 +178,41 @@ def write_past_bars(data_dir: Path, day: date, events: Sequence[Event]) -> None:
         tmp.rename(path)
 
 
+def write_demo_candles(data_dir: Path) -> None:
+    """Each demo symbol's made-up day candles, the last on the trading day before the morning
+    and closing near its open, stored as the collector stores them (``candles.py``)."""
+    shutil.rmtree(data_dir / "candles", ignore_errors=True)
+    days: list[date] = []
+    day = DEMO_DAY
+    while len(days) < _CANDLE_DAYS:
+        day = _CALENDAR.previous_trading_day(day)
+        days.append(day)
+    for n, symbol in enumerate(DEMO_SYMBOLS):
+        rng = random.Random(100 + n)
+        close, tick = _OPENS[symbol]
+        rows = []
+        for day in days:  # newest first, walking back
+            open_ = max(tick, close + tick * round(close * rng.gauss(0, 0.012) / tick))
+            high = max(open_, close) + tick * rng.randint(0, 8)
+            low = min(open_, close) - tick * rng.randint(0, 8)
+            volume = rng.randint(2_000_000, 20_000_000)
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "date": day,
+                    "venue": "UN",
+                    "open": open_,
+                    "high": high,
+                    "low": max(tick, low),
+                    "close": close,
+                    "volume": volume,
+                    "value": volume * close,
+                }
+            )
+            close = max(tick, open_ + tick * round(open_ * rng.gauss(0, 0.004) / tick))  # the day before's
+        write_candles(data_dir, "day", symbol, list(reversed(rows)))
+
+
 async def demo_app(db: Path, pace: float | None = None) -> web.Application:
     """The Engine API on the demo morning, replayed into ``db`` (replaced), with the
     morning's macro read and the model history in ``<db stem>-data/`` (``macro/`` and
@@ -197,6 +235,7 @@ async def demo_app(db: Path, pace: float | None = None) -> web.Application:
     data_dir = db.with_name(f"{db.stem}-data")
     write_demo_macro(data_dir)  # first: Markov reads the morning's regime
     shutil.rmtree(data_dir / "bars", ignore_errors=True)
+    write_demo_candles(data_dir)
     for day in PAST_DAYS:
         # Each day by its own engine, ended before the daily review after the close, so
         # every algorithm stays active as on the morning.

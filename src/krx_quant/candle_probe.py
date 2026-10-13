@@ -25,11 +25,10 @@ from typing import Any
 import aiohttp
 
 from krx_quant.auth import tokens_and_client
+from krx_quant.candles import CANDLES_PATH, CANDLES_TR
 from krx_quant.config import Settings
 from krx_quant.kis import KisError, RestClient
 
-CANDLES_TR = "FHKST03010100"
-CANDLES_PATH = "/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice"
 MARKETS = ("UN", "J", "NX")
 PERIODS = ("D", "W", "M", "Y")
 PACE = 0.5  # seconds between calls
