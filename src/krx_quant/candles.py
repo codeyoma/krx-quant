@@ -98,14 +98,15 @@ class CandleKeeper:
         calendar: MarketCalendar,
         data_dir: Path,
         symbols: Sequence[str],
-        max_per_second: float,
+        pace: RateLimiter,
     ) -> None:
         self._client = client
         self._calendar = calendar
         self._data_dir = data_dir
         self._symbols = tuple(symbols)
-        # Spaced like the backfill, inside the shared REST limit (docs/kis-feeds.md).
-        self._pace = RateLimiter(1, 1 / max_per_second, margin=0)
+        # The backfill's own (Backfiller.pace): one spacing for both, inside the shared REST
+        # limit (docs/kis-feeds.md), with no burst where one hands over to the other.
+        self._pace = pace
 
     async def run(self, now: datetime) -> int:
         """Bring every symbol's candles of every period up to the last finished trading day;
@@ -121,17 +122,19 @@ class CandleKeeper:
         return changed
 
     async def update(self, period: str, symbol: str, last: date) -> bool:
-        """Add the candles up to ``last`` that are not stored yet; True if the file changed."""
+        """Add the candles up to ``last`` that are not stored yet; True if the file changed.
+
+        The last stored candle is asked again every run, a new one due or not, so a past
+        KIS adjusted (a split before the open, say) is taken again at once.
+        """
         stored = read_candles(self._data_dir, period, symbol)
-        if stored and stored[-1]["date"] >= last:
-            return False
         if stored:
             newest = stored[-1]
             market = _market(newest["venue"])
-            fresh = await self._walk(period, market, symbol, newest["date"], last)
+            fresh = await self._walk(period, market, symbol, newest["date"], max(last, newest["date"]))
             again = next((r for r in fresh if r["date"] == newest["date"]), None)
             if again is not None and _prices(again) == _prices(newest):
-                new = [r for r in fresh if r["date"] > newest["date"]]
+                new = [r for r in fresh if newest["date"] < r["date"] <= last]
                 if not new:
                     return False
                 write_candles(self._data_dir, period, symbol, [*stored, *new])

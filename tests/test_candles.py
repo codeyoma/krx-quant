@@ -16,6 +16,7 @@ from krx_quant.candles import CANDLES_TR, CandleKeeper, read_candles, stored_can
 from krx_quant.fake_kis import FakeKis
 from krx_quant.feeds.base import KST
 from krx_quant.market_calendar import MarketCalendar
+from krx_quant.ratelimit import RateLimiter
 from tests.api_schema import check
 from tests.kis_rest import requests_for, rest_client, rest_grants
 from tests.replay_events import at, get_json, run
@@ -80,8 +81,9 @@ async def keep(
     symbols: tuple[str, ...] = ("005930",),
     per_second: float = 1000,
 ) -> int:
+    pace = RateLimiter(1, 1 / per_second, margin=0)  # the backfill's, in the collector
     async with rest_client(kis, data_dir, now) as client:
-        return await CandleKeeper(client, CALENDAR, data_dir, symbols, per_second).run(now)
+        return await CandleKeeper(client, CALENDAR, data_dir, symbols, pace).run(now)
 
 
 def closes(data_dir: Path, symbol: str = "005930") -> list[tuple[date, int]]:
@@ -162,6 +164,21 @@ async def test_an_adjusted_past_takes_the_whole_history_again(kis: FakeKis, tmp_
 
     answer["history"] = after_split
     await keep(kis, tmp_path, datetime(2026, 10, 14, 21, 0, tzinfo=KST))
+
+    assert closes(tmp_path) == [(d, 50_000 + 10 * i) for i, d in enumerate(days)]
+
+
+async def test_a_past_adjusted_before_any_new_candle_is_taken_again_at_once(
+    kis: FakeKis, tmp_path: Path
+) -> None:
+    days = trading_days(date(2026, 8, 3), date(2026, 10, 13))
+    answer = {"history": kis_candles(days, base=2_500_000)}
+    kis.rest_responses[CANDLES_TR] = candles_api(lambda market, symbol: answer["history"])
+    await keep(kis, tmp_path, AFTER_HOURS)
+
+    answer["history"] = kis_candles(days, base=50_000)  # a split effective at the 14th's open
+    restart = datetime(2026, 10, 14, 7, 20, tzinfo=KST)  # the morning's restart: no new candle yet
+    assert await keep(kis, tmp_path, restart) == 1
 
     assert closes(tmp_path) == [(d, 50_000 + 10 * i) for i, d in enumerate(days)]
 

@@ -180,8 +180,8 @@ class Backfiller:
         self._series = tuple(series)
         self._history = timedelta(days=history_days)
         # Evenly spaced under the shared REST limit: KIS refuses bursts (docs/kis-feeds.md),
-        # and the polls need room.
-        self._pace = RateLimiter(1, 1 / max_per_second, margin=0)
+        # and the polls need room. The day candles keep the same pace (``candles``).
+        self.pace = RateLimiter(1, 1 / max_per_second, margin=0)
 
     async def run(self, now: datetime) -> int:
         """Fill every finished trading day of the window that has no bars yet, newest first;
@@ -247,7 +247,7 @@ class Backfiller:
         hour = _DAY_END
         while True:
             params = {**query.params, "FID_INPUT_DATE_1": ymd, "FID_INPUT_HOUR_1": hour}
-            await self._pace.acquire()
+            await self.pace.acquire()
             body = await self._client.get(query.tr_id, query.path, params)
             page = body.get("output2") or []
             # KIS pads an empty answer with blank rows; keep this day's bars only.
@@ -348,9 +348,7 @@ async def keep_history(
     from krx_quant.candles import CandleKeeper  # it builds on this module's markets
 
     backfiller = backfiller_for(settings, client, store)
-    candles = CandleKeeper(
-        client, store.calendar, settings.data_dir, settings.symbols, settings.backfill_max_per_second
-    )
+    candles = CandleKeeper(client, store.calendar, settings.data_dir, settings.symbols, backfiller.pace)
     while True:
         started = now()
         try:
