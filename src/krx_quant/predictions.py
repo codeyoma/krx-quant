@@ -56,6 +56,12 @@ CREATE TABLE IF NOT EXISTS blocks (  -- why a final consensus is not to be acted
     prediction_id INTEGER PRIMARY KEY REFERENCES predictions (id),  -- its own, so an engine
     reason TEXT NOT NULL              -- rolled back to before it still reads the DB:
 );                                    -- special, no_reference or expired
+CREATE TABLE IF NOT EXISTS votes (   -- how a consensus's members leaned (#106): a table of its own,
+    prediction_id INTEGER PRIMARY KEY REFERENCES predictions (id),  -- as blocks
+    up INTEGER NOT NULL,             -- members whose most likely class was up
+    flat INTEGER NOT NULL,
+    down INTEGER NOT NULL
+);
 CREATE INDEX IF NOT EXISTS predictions_by_close ON predictions (bar_close);
 CREATE TABLE IF NOT EXISTS outcomes (
     prediction_id INTEGER PRIMARY KEY REFERENCES predictions (id),
@@ -196,6 +202,7 @@ class NewPrediction:
     status: str = "ok"
     special: bool = False  # a special situation known to touch its window when it was made
     blocked: str | None = None  # a final consensus's reason not to be acted on (#88)
+    votes: tuple[int, int, int] | None = None  # a consensus's members by direction: up, flat, down (#106)
 
 
 @dataclass(frozen=True)
@@ -290,6 +297,11 @@ class PredictionStore:
                     self._db.execute(
                         "INSERT INTO blocks (prediction_id, reason) VALUES (?, ?)",
                         (cursor.lastrowid, p.blocked),
+                    )
+                if p.votes is not None:
+                    self._db.execute(
+                        "INSERT INTO votes (prediction_id, up, flat, down) VALUES (?, ?, ?, ?)",
+                        (cursor.lastrowid, *p.votes),
                     )
                 if f is None:
                     continue  # nothing to score
@@ -653,9 +665,11 @@ class PredictionStore:
             (db or self._db)
             .execute(
                 "SELECT p.*, o.target_at, o.mid_close, o.mid_display, o.mid_target, o.flat_ticks,"
-                " o.class_a, o.class_b, o.special, o.unscorable, o.scored_at, b.reason AS blocked"
+                " o.class_a, o.class_b, o.special, o.unscorable, o.scored_at, b.reason AS blocked,"
+                " v.up AS votes_up, v.flat AS votes_flat, v.down AS votes_down"
                 " FROM predictions p LEFT JOIN outcomes o ON o.prediction_id = p.id"
-                " LEFT JOIN blocks b ON b.prediction_id = p.id " + where,
+                " LEFT JOIN blocks b ON b.prediction_id = p.id"
+                " LEFT JOIN votes v ON v.prediction_id = p.id " + where,
                 params,
             )
             .fetchall()

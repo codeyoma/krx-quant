@@ -23,6 +23,7 @@ from krx_quant.lifecycle import Status
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.pricing import Direction
 from tests.algorithm_doubles import FixedAlgorithm
+from tests.api_schema import check
 from tests.replay_events import DAY, SYMBOL, api, at, get_json, run
 from tests.test_lifecycle import (
     MISSES_DOWNS,
@@ -105,6 +106,61 @@ async def test_the_fast_consensus_takes_the_active_finished_soon_and_the_final_t
     )
     assert fast["model_version"] == final["model_version"] == "condorcet-equal"
     assert fast["outcome"] is not None and final["outcome"] is not None  # scored by 09:05
+
+
+async def test_a_consensus_counts_its_members_directions(tmp_path: Path) -> None:
+    db = tmp_path / "engine.db"
+    steady = FixedAlgorithm(
+        "steady", features=("vwap_z",), unique=("vwap_z",), forecast=Forecast(0.3, 0.4, 0.3, 0.0)
+    )
+    # Up and flat tie: flat, as the engine scores a forecast.
+    tied = FixedAlgorithm(
+        "tied",
+        features=("reversion_speed",),
+        unique=("reversion_speed",),
+        forecast=Forecast(0.4, 0.4, 0.2, 0.5),
+    )
+    put_statuses(
+        db,
+        {"quick": Status.ACTIVE, "slow": Status.ACTIVE, "steady": Status.ACTIVE, "tied": Status.ACTIVE}
+        | {"new": Status.PROBATION},
+    )
+
+    engine = await run(
+        db,
+        busy_morning(),
+        until=at("09:06:00"),
+        algorithms=[QUICK, SLOW, NEW, steady, tied],
+        consensus_timing=TIMING,
+    )
+
+    made = await at_close(engine, "09:01")
+    # By hand: quick up, slow down (not finished for the fast one), steady flat, tied flat;
+    # new is on probation, never a member.
+    assert made["consensus-final"]["votes"] == {"up": 1, "flat": 2, "down": 1}
+    assert made["consensus-fast"]["votes"] == {"up": 1, "flat": 2, "down": 0}
+    assert {made[name]["votes"] for name in ("quick", "slow", "new", "steady", "tied")} == {None}
+    async with api(engine) as client:
+        check("predictions", await get_json(client, f"/v1/symbols/{SYMBOL}/predictions?limit=1000"))
+
+
+async def test_a_consensus_stored_before_the_votes_shows_none(tmp_path: Path) -> None:
+    db = tmp_path / "engine.db"
+    put_days(db, weekdays_before(DAY, 1), {"consensus-final": [Direction.UP]}, with_baselines=False)
+
+    engine = await run(db, [], until=at("08:00:00"), algorithms=[QUICK])
+
+    async with api(engine) as client:
+        body = await get_json(client, f"/v1/symbols/{SYMBOL}/predictions?limit=10")
+    [older] = body["predictions"]
+    assert (older["algorithm"], older["votes"]) == ("consensus-final", None)
+
+
+async def test_an_empty_consensus_has_no_votes(tmp_path: Path) -> None:
+    engine = await run(tmp_path / "engine.db", busy_morning(), until=at("09:02:00"), algorithms=[QUICK])
+
+    made = await at_close(engine, "09:01")
+    assert made["consensus-final"]["votes"] is None
 
 
 async def test_with_no_active_algorithm_the_consensus_is_recorded_empty(tmp_path: Path) -> None:
