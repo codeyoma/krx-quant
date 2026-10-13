@@ -88,8 +88,18 @@ async def test_a_refused_refresh_keeps_using_the_still_valid_token(kis: FakeKis,
     kis.token_min_interval = 30.0  # KIS refuses a second issuance for the rest of the test
     settings = replace(polling(kis, tmp_path), token_min_interval_seconds=0.05)
 
-    await run_briefly(settings, lambda: FIXED_NOW, seconds=0.6)
+    def used() -> list[str]:
+        return [h["_auth"] for _, t, _, h in kis.rest_requests if t == QUOTE]
 
-    used = [h["_auth"] for _, t, _, h in kis.rest_requests if t == QUOTE]
-    assert len(used) >= 3, "polling was not blocked by the refused refresh"
-    assert set(used) == {"Bearer fake-access-token-1"}
+    stop = asyncio.Event()
+    task = asyncio.create_task(run_collector(settings, stop=stop, clock=lambda: FIXED_NOW))
+    # Wait for the polls rather than a fixed window: a slow runner fits fewer polls in 0.6s.
+    try:
+        await until(lambda: len(used()) >= 3)
+    except TimeoutError:
+        raise AssertionError("polling was blocked by the refused refresh") from None
+    stop.set()
+    await asyncio.wait_for(task, 5)
+
+    assert set(used()) == {"Bearer fake-access-token-1"}
+    assert kis.tokens_issued == ["fake-access-token-1"], "KIS refused the refresh"
