@@ -68,18 +68,18 @@ async def test_the_demo_scrolls_back_into_two_earlier_afternoons(tmp_path: Path)
         )
 
     starts = [b["start"] for b in bars["bars"]]
-    # 14:00–15:19 of Thursday and Friday, oldest first.
+    # 14:00–15:19 of the 7th and the 8th (Friday the 9th is Hangul Day), oldest first.
     assert (len(starts), starts[0], starts[-1]) == (
         160,
-        "2026-10-08T14:00:00+09:00",
-        "2026-10-09T15:19:00+09:00",
+        "2026-10-07T14:00:00+09:00",
+        "2026-10-08T15:19:00+09:00",
     )
-    assert starts[79:81] == ["2026-10-08T15:19:00+09:00", "2026-10-09T14:00:00+09:00"]
+    assert starts[79:81] == ["2026-10-07T15:19:00+09:00", "2026-10-08T14:00:00+09:00"]
     closes = [p["bar_close"] for p in made["predictions"]]
     assert (len(closes), closes[0], closes[-1]) == (
         154,
-        "2026-10-09T15:16:00+09:00",
-        "2026-10-08T14:00:00+09:00",
+        "2026-10-08T15:16:00+09:00",
+        "2026-10-07T14:00:00+09:00",
     )
     assert all(p["status"] == "ok" and p["outcome"] and p["pooled"] for p in made["predictions"]), (
         "made by active members and scored, as on the morning"
