@@ -49,7 +49,7 @@ from krx_quant.baselines import BASELINE_NAMES, BASELINES
 from krx_quant.consensus import NAMES, slot
 from krx_quant.contracts import USD
 from krx_quant.engine import PredictionEngine
-from krx_quant.feeds.base import kst_day
+from krx_quant.feeds.base import KST, kst_day
 from krx_quant.macro import LatestMacro, latest_macro, reading_before
 from krx_quant.model_shelf import Shelf
 from krx_quant.predictions import Excluded, iso
@@ -221,6 +221,18 @@ async def _latest(request: web.Request) -> web.Response:
 
 async def _predictions(request: web.Request) -> web.Response:
     engine, symbol = _engine_and_symbol(request)
+    if (at := request.query.get("bar_close")) is not None:
+        # One bar close's every prediction (#107): what the models said that minute.
+        try:
+            bar_close = datetime.fromisoformat(at)
+        except ValueError:
+            bar_close = None
+        if bar_close is None or bar_close.tzinfo is None:
+            raise _error(
+                web.HTTPBadRequest, f"bar_close must be an ISO 8601 time with its offset, got {at!r}"
+            )
+        rows = engine.store.at_close(symbol, bar_close.astimezone(KST), request.query.get("algorithm"))
+        return _json({"symbol": symbol, "predictions": [prediction_json(r) for r in rows]})
     raw = request.query.get("limit", str(DEFAULT_LIMIT))
     try:
         limit = int(raw)

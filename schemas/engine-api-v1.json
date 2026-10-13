@@ -188,7 +188,7 @@
       "type": "object",
       "required": [
         "algorithm", "model_version", "bar_close", "displayed_at", "target_at", "status", "blocked",
-        "votes", "p_up", "p_flat", "p_down", "expected_ticks", "outcome"
+        "votes", "pooled", "p_up", "p_flat", "p_down", "expected_ticks", "outcome"
       ],
       "properties": {
         "algorithm": {"type": "string"},
@@ -203,6 +203,10 @@
         "blocked": {
           "description": "Why a final consensus is not to be acted on (#88); null for any other prediction.",
           "enum": [null, "special", "no_reference", "expired"]
+        },
+        "pooled": {
+          "description": "The active algorithms a consensus pooled, in registration order (#107); null for any other prediction, an empty consensus, and those made before.",
+          "oneOf": [{"type": "null"}, {"type": "array", "items": {"type": "string"}, "minItems": 1}]
         },
         "votes": {
           "description": "A consensus's members by the class each forecast most likely (#106); null for any other prediction, an empty consensus, and those made before.",

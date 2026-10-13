@@ -140,6 +140,10 @@ async def test_a_consensus_counts_its_members_directions(tmp_path: Path) -> None
     assert made["consensus-final"]["votes"] == {"up": 1, "flat": 2, "down": 1}
     assert made["consensus-fast"]["votes"] == {"up": 1, "flat": 2, "down": 0}
     assert {made[name]["votes"] for name in ("quick", "slow", "new", "steady", "tied")} == {None}
+    # Who added to each (#107): the members that had finished, in registration order.
+    assert made["consensus-final"]["pooled"] == ["quick", "slow", "steady", "tied"]
+    assert made["consensus-fast"]["pooled"] == ["quick", "steady", "tied"]
+    assert all(made[name]["pooled"] is None for name in ("quick", "slow", "new", "steady", "tied"))
     async with api(engine) as client:
         check("predictions", await get_json(client, f"/v1/symbols/{SYMBOL}/predictions?limit=1000"))
 
@@ -153,7 +157,36 @@ async def test_a_consensus_stored_before_the_votes_shows_none(tmp_path: Path) ->
     async with api(engine) as client:
         body = await get_json(client, f"/v1/symbols/{SYMBOL}/predictions?limit=10")
     [older] = body["predictions"]
-    assert (older["algorithm"], older["votes"]) == ("consensus-final", None)
+    assert (older["algorithm"], older["votes"], older["pooled"]) == ("consensus-final", None, None)
+
+
+async def test_one_bar_close_s_predictions_every_one_of_them(tmp_path: Path) -> None:
+    db = tmp_path / "engine.db"
+    put_statuses(db, {"quick": Status.ACTIVE})
+    engine = await run(db, busy_morning(), until=at("09:06:00"), algorithms=[QUICK], consensus_timing=TIMING)
+
+    async with api(engine) as client:
+        body = await get_json(
+            client, f"/v1/symbols/{SYMBOL}/predictions?bar_close=2026-10-12T09:03:00%2B09:00"
+        )
+        check("predictions", body)
+        bad = await client.get(f"/v1/symbols/{SYMBOL}/predictions?bar_close=09:03")
+        assert bad.status == 400
+        later = await get_json(
+            client, f"/v1/symbols/{SYMBOL}/predictions?bar_close=2026-10-12T09:59:00%2B09:00"
+        )
+    made = {p["algorithm"]: p for p in body["predictions"]}
+    assert {p["bar_close"] for p in body["predictions"]} == {"2026-10-12T09:03:00+09:00"}
+    assert set(made) == {
+        "baseline-flat",
+        "baseline-persist",
+        "baseline-random",
+        "quick",
+        "consensus-fast",
+        "consensus-final",
+    }
+    assert made["consensus-final"]["pooled"] == ["quick"]
+    assert later["predictions"] == [], "no predictions at that bar close"
 
 
 async def test_an_empty_consensus_has_no_votes(tmp_path: Path) -> None:
@@ -161,6 +194,7 @@ async def test_an_empty_consensus_has_no_votes(tmp_path: Path) -> None:
 
     made = await at_close(engine, "09:01")
     assert made["consensus-final"]["votes"] is None
+    assert made["consensus-final"]["pooled"] is None
 
 
 async def test_with_no_active_algorithm_the_consensus_is_recorded_empty(tmp_path: Path) -> None:
