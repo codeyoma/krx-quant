@@ -199,7 +199,7 @@ uv run python -c "import glob, pyarrow.parquet as pq; d = sorted(glob.glob('data
 | P1 | 수집기 | 거의 완료(#2–#6, #8, #30). 남은 것: 첫 거래일 확인(#7), ETF 장중 확인(#29), REST 대체 장중 확인(#28, `check-fallbacks`) |
 | P2 | 예측·채점 핵심 | 완료: #9–#19, Markov 옵션 IV 국면(#53). 호가 피처를 쓰는 Turing은 녹화가 쌓인 뒤(#55) |
 | P3 | Fincept 화면, 빌드 | 구현 완료: 첫 화면과 개인 빌드(#20), 차트·예측 패널·순위표·매크로 줄·엔진 상태·신호 알림·스트림(#21, `krx.2`), 알고리즘 상세 통계 창(#68, `krx.3`), 버튼 한 번으로 업데이트(#92), 자동 개인 빌드(#93, #98). 마지막 개인 빌드는 `custom-v4.5.0-krx.7`이다(`krx.4`–`krx.6`은 Windows 빌드 실패로 Release 없음, #101) |
-| P4 | 밤 학습 | 코드 완료, 첫 Spot 실행 확인 대기(#23): 상시 서버의 밤 학습과 08:00 교체(PR #45), 녹화 이벤트로 학습하기(#22, PR #48), EC2 Spot 학습과 비용 상한(PR #67, `deploy/training.yaml`). Spot은 사용자가 스택을 배포하고 켠다(docs/operations.md 3장) |
+| P4 | 밤 학습 | 코드 완료. 밤 학습은 상시 서버에서 돈다. Spot은 계정의 서비스 제어 정책이 막아 보류했다(2026-10-14, #23, docs/design.md 8장): 상시 서버의 밤 학습과 08:00 교체(PR #45), 녹화 이벤트로 학습하기(#22, PR #48), EC2 Spot 학습과 비용 상한(PR #67, `deploy/training.yaml`). Spot 절차(docs/operations.md 3장)는 고급 기능을 활성화해 그 정책을 바꾼 계정에서만 쓸 수 있다 |
 | P5 | 호가 알고리즘, 재생 테스트 | 구현 완료: 하루 재생(`replay`), 새 알고리즘 사전 검증(`prevalidate`, #24), Kalman(#25), Shannon(#26), Poisson(#27). 셋은 녹화 10거래일 뒤 사전 검증을 통과해야 실시간에서 돈다 |
 
 ## 비밀값

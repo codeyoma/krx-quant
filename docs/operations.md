@@ -391,6 +391,8 @@ docker compose exec engine krx-quant rollback granger     # 직전 모델로 되
 
 밤 학습을 상시 서버 대신 EC2 Spot에서 돌린다. 녹화가 쌓이면 학습 메모리가 2GB 서버에 빠듯해지기 때문이다. 월 비용 상한도 함께 건다. AWS 자원은 `deploy/training.yaml`(CloudFormation) 하나에 있다.
 
+> **바뀜** (2026-10-14, #158): Spot 학습을 켜는 절차 → 지금 계정에서는 쓰지 않는다. 밤 학습은 상시 서버에서 돈다(`KRX_TRAIN_ON=server`). 스택은 배포했다가 지웠다. 그래서 Cost Guard, ECR 이미지, 두 스케줄도 없다. 이유: AWS Settings 프로젝트 계정의 서비스 제어 정책이 Spot을 막는다. 2026-10-14 시험 실행(아래 6단계)에서 `RunInstances`가 `explicit deny in a service control policy`로 거부됐다. 거부 메시지를 풀어 보니(`aws sts decode-authorization-message`) 문 `DenySpotMarketType`(`ec2:InstanceMarketType` = `spot`)이었다([design.md](design.md) 8장). 아래 절차는 고급 기능을 활성화해 이 정책을 바꾼 계정에서만 끝까지 된다.
+
 **구조**
 - **시작.** EventBridge Scheduler가 평일 21:30(KST)에 시작 템플릿으로 one-time Spot 인스턴스(기본 `m6i.large`, 8GB)를 띄운다.
 - **학습.** 인스턴스는 Amazon Linux 2023에서 ECR의 엔진 이미지를 받아 `krx-quant train --from-store`를 한 번 돌린다. 서버가 올린 설정(`training/settings.json`: 종목, 선행 시리즈, 수수료율)과 휴장일 달력(`training/market_calendar.json`)으로 학습한다. 결과는 서버에서 돌 때와 같이 S3에 남는다. 실행 로그는 `training/logs/<시각>.log`에 남는다.
@@ -548,6 +550,7 @@ docker compose logs --tail 200 engine
 | `[알림] AWS 비용이 이달 $N로 상한 $100에 닿았습니다. 이달 남은 기간 밤 학습(Spot)을 끕니다. ...` | Cost Explorer | 그달은 학습 없이 전날 모델로 돈다. 서둘러 학습이 필요하면 서버에서 `train`을 손으로 돌린다. 다음 달 1일에 `[알림] 새 달(...)이라 밤 학습(Spot) 스케줄을 다시 켰습니다.`가 온다. |
 | `[장애] AWS 비용을 읽지 못해 상한을 지킬 수 없습니다: <이유>` | 로그의 `could not check the AWS costs`, `.env`의 `KRX_COST_BUDGET`, IAM 정책(`krx-quant-engine-training`) | 예산 이름이나 권한이 틀렸거나 AWS에 닿지 않는다. 고치면 다음 확인에서 `[복구] AWS 비용을 다시 읽습니다.`가 온다. 그동안 상한이 지켜지지 않는다. |
 | `[알림] 자동 업데이트: ...`에 `Spot 학습용 이미지를 올리지 못했습니다` | `deploy/push-image.sh`를 손으로 실행해 오류를 본다 | ECR 권한이나 연결 문제다. 다음 06:00에 다시 올린다. 그동안 Spot은 이전 이미지로 학습한다. |
+| AWS 호출이 `... with an explicit deny in a service control policy`로 거부됨 | 서버 `.env`의 `AWS_REGION`, 맥이면 `aws configure get region` | AWS Settings 프로젝트 계정은 시드니(`ap-southeast-2`) 밖의 리전을 막는다(1장). `AWS_REGION=ap-southeast-2`로 고치고 `docker compose up -d`. 리전이 맞는데도 거부되면 계정 정책이 그 동작 자체를 막는 것이다(예: Spot, 8장). 메시지 끝의 `Encoded authorization failure message`를 맥에서 `aws sts decode-authorization-message`로 풀면 막은 문(`Sid`)이 보인다. 2026-10-14에 서버의 `AWS_REGION=ap-northeast-2`(서울)가 이것으로 ECR 로그인을 막았다(#23). |
 | `[신호] <종목> 상승 64% · 정식 3개 중 2개 같은 방향 · 09:31 봉 마감, 09:35까지` | `/v1/symbols/<종목>/latest`의 `consensus-final` | `KRX_SIGNAL_ALERT=on`일 때만 온다. 장애가 아니라 예측 신호다. 같은 종목·방향은 4분 안에 다시 오지 않는다(엔진을 다시 시작해도). VI·서킷브레이커에 걸리거나, 기준가가 없거나, 목표 시각이 지난 신호는 오지 않고 로그에 `signal blocked (<이유>)`, DB `runs`에 `signal_blocked`로 남는다. 주문 코드는 없다. |
 | `[알림] <날짜> 밤 학습`과 알고리즘별 `승격`·`유지`·`학습 안 함` | | 매일 밤 학습의 요약이다. 할 일은 없다. 승격된 모델은 다음 거래일 08:00에 바뀐다. |
 | `[알림] 모델 교체 (<날짜> 밤 학습): <알고리즘> → <버전>` | `/v1/status`의 `training` | 08:00 교체가 됐다. 되돌리려면 `docker compose exec engine krx-quant rollback <이름>`. |
