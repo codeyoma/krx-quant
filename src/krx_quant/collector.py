@@ -24,6 +24,7 @@ from krx_quant.backfill import keep_history
 from krx_quant.clock import SessionClock, SystemClock
 from krx_quant.config import Settings
 from krx_quant.cost_guard import keep_costs
+from krx_quant.econ_calendar import CalendarCollector, keep_calendar
 from krx_quant.engine import Budget, PredictionEngine, run_live
 from krx_quant.features import Leaders
 from krx_quant.feeds import (
@@ -325,6 +326,19 @@ async def run_collector(
                     asyncio.create_task(
                         keep_macro(macro_collector, calendar.calendar, settings.macro_at, now)
                     )
+                )
+            if settings.calendar_every is not None:
+                calendar_collector = CalendarCollector(
+                    session=session,
+                    data_dir=settings.data_dir,
+                    countries=settings.calendar_countries,
+                    alerts=alerts,
+                    recorder=recorder,
+                    now=now,
+                    url=settings.calendar_url,
+                )
+                background.append(
+                    asyncio.create_task(keep_calendar(calendar_collector, settings.calendar_every))
                 )
             api = await _serve_api(settings, engine, _live_status(stream, health, now), alerts)
             try:

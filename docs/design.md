@@ -52,6 +52,7 @@
 | `training.py`, `nightly.py`, `model_shelf.py`, `swap.py` | 학습 샘플, 밤 학습, 서버의 모델 이력, 08:00 교체와 모델 감시, Spot 학습 결과 기다리기 |
 | `cost_guard.py` | 월 AWS 비용 감시: 50%·80% 알림, 상한에서 Spot 학습 끄기(#23) |
 | `macro.py`, `regime.py` | 매크로 지표 수집(07:30), 일일 국면 |
+| `econ_calendar.py` | 경제 캘린더 수집(15분마다, TradingView), `/v1/calendar`의 답 (#150) |
 | `replay.py`, `demo.py`, `fake_kis.py`, `notify.py`, `cli.py` | 재생, 화면 개발용 데모 엔진, 가짜 KIS, 텔레그램 알림, 명령 |
 | `prevalidation.py` | 새 알고리즘 사전 검증: 최근 20거래일 재생과 엔진의 등록 관문(#24) |
 | `diagnose.py` | 읽기 전용 진단 명령: 남은 결정에 필요한 실측(#82) |
@@ -195,6 +196,12 @@ Macro Collector(`macro.py`, #8)가 거래일마다 07:30(`KRX_MACRO_AT`, 미국 
 - 없는 지표는 어떤 규칙도 만족시키지 않는다.
 - 같은 입력이면 늘 같은 국면과 이유가 나온다. 문턱값은 `KRX_REGIME_*` 설정으로 바꾼다.
 - Markov(#14)가 국면마다 전이행렬을 따로 배운다.
+
+**경제 캘린더 (#150).** 수집기가 15분마다(`KRX_CALENDAR_EVERY`, 분 단위, 5분 이상, `off`로 끈다) TradingView의 공개 경제 캘린더(`https://economic-calendar.tradingview.com/events`)를 읽는다(`econ_calendar.py`). 미국·한국·중국·일본·유로존·독일·영국(`KRX_CALENDAR_COUNTRIES`)의, 어제 0시(KST)부터 7일 뒤까지의 발표 일정이다. 지표 이름, 국가, 발표 시각, 기간, 실제·예상·이전 값, 단위, 중요도(`low`, `medium`, `high`), 출처가 있다.
+- 공식 API가 아니어서 예고 없이 바뀌거나 막힐 수 있다. 읽지 못하면 마지막으로 받은 것을 계속 보인다. 4번(기본값으로 한 시간) 연속 실패하면 텔레그램으로 알리고, 다시 읽히면 해제를 알린다. 키는 필요 없다.
+- 마지막 답은 `data/calendar/latest.json`에 통째로 쓴다(임시 파일을 쓰고 이름을 바꾼다). 엔진 API `/v1/calendar`가 이것을 보인다([engine-api.md](engine-api.md#get-v1calendar)). 수집기가 다시 시작해도 바로 보인다.
+- 새로 나타나거나 바뀐 일정(예상이 바뀌거나 실제가 나옴)은 `calendar` 계층에 한 줄씩 기록한다([events.md](events.md#경제-캘린더-150)). 나중에 "발표 전후"나 "예상 대비 실제" 같은 피처를 그때 알던 값으로 만들 수 있게 하려는 것이다. 아직 어떤 알고리즘도 쓰지 않는다.
+- Fincept 대시보드의 Economic Calendar 위젯이 엔진에서 읽는다(10장). 원래 출처(`api.fincept.in/macro/upcoming-events`)는 Fincept 크레딧을 쓰고, 위젯이 떠 있는 동안 5분마다 요청했다.
 
 ### 4.6 유료 데이터
 
@@ -439,6 +446,7 @@ v1에서는 쓰지 않는다. 조사 결과는 [paid-data.md](paid-data.md)에 �
   - 엔진 상태: KIS 연결, 데이터 지연, 어젯밤 학습 결과(교체 여부)
 - **신호 알림.** Condorcet 확률이 기준값 이상이고 N개 이상의 알고리즘이 같은 방향이면 데스크톱 알림과 소리를 낸다. 기준값과 N은 화면에서 조정한다. 텔레그램 신호 알림은 옵션이다.
 - **언어.** 한국어. 알고리즘 이름은 영어로 쓴다.
+- **경제 캘린더 (#150).** KRX 화면에 엔진 주소(`krx_quant/base_url`)를 넣으면, 대시보드의 Economic Calendar 위젯은 Fincept 서버(`api.fincept.in/macro/upcoming-events`, 크레딧을 쓴다) 대신 엔진의 `/v1/calendar`를 읽는다(4.5의 "경제 캘린더"). 시각은 KST로 보인다. 엔진 주소가 없으면 원래대로 Fincept 서버를 읽는다. 자세한 것은 `fincept/custom/README.md`의 "경제 캘린더"에 있다.
 - **Fincept 공통 UI 한국어 (#132).** Settings → General → Interface language에서 **한국어**를 고르면 기존 내부 언어 팩과 같은 방식으로 즉시 적용된다. 선택은 SQLite settings의 `general.language=ko_KR`에 저장되고 다음 실행에도 유지된다. 기존 공통 팩 전체와 최신 설정·탐색 문구를 한국어로 제공하며, 팩 밖의 신규·고정 문구는 영어로 보일 수 있다. 언어 팩과 검증 방법은 `fincept/custom/README.md`의 "한국어 언어 팩"을 따른다. 용어와 문체는 국내 증권사 HTS/MTS와 KRX·DART 표기(PER, 평가손익, 평균단가, 매입금액, 계좌/계정, 증권사, 모의투자/실전투자, 가상자산, 샤프지수 등)를 따른다. 기준은 `fincept/custom/korean-glossary.md`다.
 
   > **바뀜** (2026-10-13, codeyoma/FinceptTerminal#31): 직역 위주의 금융 용어(P/E 비율, 미실현 손익, 취득 원가, 브로커, 모의 거래, 암호화폐 등)와 번역투 → 업계 표기와 자연스러운 문장으로 약 1,200개 항목을 고쳤다. 환산하지 않은 시세 표시 `(원 단위)`는 `(거래 통화)`가 됐다. 이유: 국내 금융 화면의 표기와 달랐고, KRW 표시 통화가 생긴 뒤 `원`이 원화로 읽혔다.
