@@ -98,8 +98,9 @@ async def test_a_refused_refresh_keeps_using_the_still_valid_token(kis: FakeKis,
         await until(lambda: len(used()) >= 3)
     except TimeoutError:
         raise AssertionError("polling was blocked by the refused refresh") from None
-    stop.set()
-    await asyncio.wait_for(task, 5)
+    finally:
+        stop.set()
+        await asyncio.wait_for(task, 5)
 
     assert set(used()) == {"Bearer fake-access-token-1"}
     assert kis.tokens_issued == ["fake-access-token-1"], "KIS refused the refresh"
