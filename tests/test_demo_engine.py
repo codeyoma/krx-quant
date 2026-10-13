@@ -57,11 +57,44 @@ async def test_the_demo_engine_answers_what_a_screen_reads(tmp_path: Path) -> No
         assert all(made[name]["status"] == "ok" for name in CONSENSUS), "the algorithms are active"
 
 
+async def test_the_demo_scrolls_back_into_two_earlier_afternoons(tmp_path: Path) -> None:
+    app = await demo_app(tmp_path / "demo.sqlite3")
+    before = "before=2026-10-12T09:00:00%2B09:00"
+
+    async with TestClient(TestServer(app)) as client:
+        bars = await get_json(client, f"/v1/symbols/005930/bars?{before}&limit=2000")
+        made = await get_json(
+            client, f"/v1/symbols/005930/predictions?algorithm=consensus-final&{before}&limit=1000"
+        )
+
+    starts = [b["start"] for b in bars["bars"]]
+    # 14:00–15:19 of the 7th and the 8th (Friday the 9th is Hangul Day), oldest first.
+    assert (len(starts), starts[0], starts[-1]) == (
+        160,
+        "2026-10-07T14:00:00+09:00",
+        "2026-10-08T15:19:00+09:00",
+    )
+    assert starts[79:81] == ["2026-10-07T15:19:00+09:00", "2026-10-08T14:00:00+09:00"]
+    closes = [p["bar_close"] for p in made["predictions"]]
+    assert (len(closes), closes[0], closes[-1]) == (
+        154,
+        "2026-10-08T15:16:00+09:00",
+        "2026-10-07T14:00:00+09:00",
+    )
+    assert all(p["status"] == "ok" and p["outcome"] and p["pooled"] for p in made["predictions"]), (
+        "made by active members and scored, as on the morning"
+    )
+
+
 async def test_the_demo_is_the_same_every_time(tmp_path: Path) -> None:
     first, second = await demo_app(tmp_path / "a.sqlite3"), await demo_app(tmp_path / "b.sqlite3")
 
     async with TestClient(TestServer(first)) as a, TestClient(TestServer(second)) as b:
-        for path in ("/v1/symbols", "/v1/symbols/005930/predictions?limit=20&algorithm=newton"):
+        for path in (
+            "/v1/symbols",
+            "/v1/symbols/005930/predictions?limit=20&algorithm=newton",
+            "/v1/symbols/005930/bars?limit=500",
+        ):
             assert await get_json(a, path) == await get_json(b, path)
 
 
@@ -83,6 +116,25 @@ async def test_a_paced_demo_streams_its_last_half_hour_as_it_goes(tmp_path: Path
         assert await get_json(client, "/v1/symbols/005930/predictions?limit=40&algorithm=newton") == made, (
             "the same morning as without the pace"
         )
+
+
+async def test_a_paced_demo_moves_the_bar_being_made_within_its_minute(tmp_path: Path) -> None:
+    paced = await demo_app(tmp_path / "paced.sqlite3", pace=3)  # 10 s of the morning every half second
+
+    async with TestClient(TestServer(paced)) as client:
+        ws = await client.ws_connect("/v1/stream")
+        bars: list[dict[str, Any]] = []
+
+        def two_of_one_minute(event: dict[str, Any]) -> bool:
+            if event["type"] == "bar" and event["symbol"] == "005930":
+                bars.append(event["bar"])
+            return len(bars) >= 2 and bars[-1]["start"] == bars[-2]["start"]
+
+        await receive_until(ws, two_of_one_minute, timeout=15)
+        await ws.close()
+
+    assert bars[-1]["start"] >= "2026-10-12T10:00:00+09:00"
+    assert bars[-1]["volume"] > bars[-2]["volume"], "the same minute's bar, grown"
 
 
 async def test_a_paced_demo_starts_at_10(tmp_path: Path) -> None:

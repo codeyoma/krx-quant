@@ -22,6 +22,7 @@ from botocore.exceptions import BotoCoreError, ClientError
 from krx_quant.algorithms import ALGORITHMS, RegistrationError
 from krx_quant.archive import run_archive
 from krx_quant.backfill import run_backfill
+from krx_quant.candle_probe import probe_candles
 from krx_quant.collector import check_fallbacks, measure_subscription_limit, run_collector
 from krx_quant.config import Settings, SettingsError
 from krx_quant.demo import demo_app, demo_morning
@@ -89,6 +90,11 @@ def _registry_password() -> int:
         return 1
     _, password = base64.b64decode(token["authorizationData"][0]["authorizationToken"]).decode().split(":", 1)
     print(password)
+    return 0
+
+
+async def _probe_candles() -> int:
+    await probe_candles(Settings.from_env(), datetime.now(KST).date())
     return 0
 
 
@@ -339,6 +345,10 @@ def main(argv: list[str] | None = None) -> int:
         help="ask each feed's REST fallback once and print what it would record (safe beside the collector)",
     )
     sub.add_parser(
+        "probe-candles",
+        help="measure what KIS's day/week/month/year chart query gives, read-only (safe beside collect)",
+    )
+    sub.add_parser(
         "registry-password",
         help="print the ECR registry's docker login password (deploy/push-image.sh, EC2 Spot training)",
     )
@@ -435,6 +445,8 @@ def main(argv: list[str] | None = None) -> int:
             asyncio.run(_measure())
         elif args.command == "check-fallbacks":
             return asyncio.run(_check_fallbacks())
+        elif args.command == "probe-candles":
+            return asyncio.run(_probe_candles())
         elif args.command == "registry-password":
             return _registry_password()
         elif args.command == "backfill":

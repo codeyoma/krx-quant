@@ -10,11 +10,14 @@ was sent):
 - ``health``: the KIS status, on connecting and whenever the connection or a feed's gap
   changes (live and demo only);
 - ``lifecycle``: an algorithm's status changed, by the daily review or a command run in
-  another process.
+  another process;
+- ``bar``: a symbol's one-minute bar being made, its values so far (#110), at most once a
+  poll for each symbol and only when they changed.
 
-Predictions are told by the engine as it stores them; status changes and the KIS status
-are polled. Clients send nothing. A client that falls behind by ``QUEUE_SIZE`` events is
-closed (code 1013) and should reconnect and read the REST endpoints again.
+Predictions are told by the engine as it stores them; status changes, the KIS status and
+the bars being made are polled (every second). Clients send nothing. A client that falls
+behind by ``QUEUE_SIZE`` events is closed (code 1013) and should reconnect and read the
+REST endpoints again.
 """
 
 from __future__ import annotations
@@ -61,6 +64,7 @@ class EventStream:
         self._health: Any = None  # what the last health event showed
         self._closing: set[asyncio.Task[Any]] = set()
         self._last_status = engine.store.last_status_id()
+        self._bars: dict[str, dict[str, Any]] = {}  # each symbol's bar as last sent
 
     def changed(self, change: PredictionsStored | OutcomesScored) -> None:
         """The engine's listener."""
@@ -97,6 +101,7 @@ class EventStream:
                         "reason": row["reason"],
                     }
                     self._publish({"type": "lifecycle", "algorithm": row["algorithm"], "change": change})
+                self._publish_bars()
                 if self._live_status is not None:
                     kis = self._live_status()
                     shown = _health_key(kis)
@@ -135,6 +140,25 @@ class EventStream:
             await asyncio.wait_for(
                 asyncio.gather(*closing, *self._closing, return_exceptions=True), _CLOSE_SECONDS
             )
+
+    def _publish_bars(self) -> None:
+        """Each symbol's latest bar, if it changed since it was last sent."""
+        for symbol in self._engine.symbols:
+            bar = self._engine.last_bar(symbol)
+            if bar is None:
+                continue
+            shown = {
+                "start": iso(bar.start),
+                "open": bar.open,
+                "high": bar.high,
+                "low": bar.low,
+                "close": bar.close,
+                "volume": bar.volume,
+                "trades": bar.trades,
+            }
+            if self._bars.get(symbol) != shown:
+                self._bars[symbol] = shown
+                self._publish({"type": "bar", "symbol": symbol, "bar": shown})
 
     def _publish(self, body: dict[str, Any]) -> None:
         event = self._event(body)

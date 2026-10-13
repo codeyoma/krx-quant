@@ -579,19 +579,24 @@ class PredictionStore:
             "WHERE p.symbol = ? AND p.bar_close = ? AND p.algorithm = ?", (symbol, iso(bar_close), algorithm)
         )
 
-    def recent(self, symbol: str, limit: int, algorithm: str | None = None) -> list[dict[str, Any]]:
+    def recent(
+        self, symbol: str, limit: int, algorithm: str | None = None, before: datetime | None = None
+    ) -> list[dict[str, Any]]:
         """The symbol's predictions of its last ``limit`` bar closes, newest first; of one
-        algorithm only if given.
+        algorithm only if given; of bar closes before ``before`` only if given (#108).
         """
+        # Bar closes are stored as ISO 8601 in KST, so they compare as text.
+        until = iso(before) if before is not None else "9999"
         if algorithm is None:
             return self._select(
                 "WHERE p.symbol = ? AND p.bar_close IN (SELECT DISTINCT bar_close FROM predictions"
-                " WHERE symbol = ? ORDER BY bar_close DESC LIMIT ?) ORDER BY p.bar_close DESC, p.algorithm",
-                (symbol, symbol, limit),
+                " WHERE symbol = ? AND bar_close < ? ORDER BY bar_close DESC LIMIT ?)"
+                " ORDER BY p.bar_close DESC, p.algorithm",
+                (symbol, symbol, until, limit),
             )
         return self._select(
-            "WHERE p.symbol = ? AND p.algorithm = ? ORDER BY p.bar_close DESC LIMIT ?",
-            (symbol, algorithm, limit),
+            "WHERE p.symbol = ? AND p.algorithm = ? AND p.bar_close < ? ORDER BY p.bar_close DESC LIMIT ?",
+            (symbol, algorithm, until, limit),
         )
 
     def summary(self) -> list[AlgorithmSummary]:
