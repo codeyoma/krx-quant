@@ -10,7 +10,7 @@ The clock stays at 10:30. Every answer is the same each run, except the CPU budg
 timings, which are measured.
 
 Before the morning come the last 80 minutes (14:00–15:20) of the two trading days before
-it, Thursday 2026-10-08 and Friday 2026-10-09, so a chart scrolls back into them
+it, 2026-10-07 and 2026-10-08 (Friday the 9th is Hangul Day, closed), so a chart scrolls back into them
 (#108): their predictions are in the database, and their one-minute bars are stored as
 the backfill stores them, under ``<db stem>-data/bars/``.
 
@@ -44,7 +44,16 @@ from krx_quant.engine import Event, PredictionEngine
 from krx_quant.feeds import BOOK, INDEX, KOSPI200_FUTURES, TRADE, USD_FUTURES, VI_STATUS, Feed
 from krx_quant.feeds.base import KST
 from krx_quant.lifecycle import Status
-from krx_quant.macro import INDICATORS, MACRO, MacroDay, Observation, Reading, day_regime, macro_recorder
+from krx_quant.macro import (
+    INDICATORS,
+    MACRO,
+    MacroDay,
+    Observation,
+    Reading,
+    Source,
+    day_regime,
+    macro_recorder,
+)
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.model_shelf import Shelf
 from krx_quant.nightly import Night
@@ -58,17 +67,19 @@ DEMO_DAY = date(2026, 10, 12)
 DEMO_SYMBOLS = ("005930", "000660", "009150")
 _START, _END = time(9, 0), time(10, 30)
 # The trading days before the morning, with the minutes of each a chart scrolls back into.
-PAST_DAYS = (date(2026, 10, 8), date(2026, 10, 9))
+PAST_DAYS = (date(2026, 10, 7), date(2026, 10, 8))
 _PAST_FROM, _PAST_TO = time(14, 0), time(15, 20)
 _CALENDAR = MarketCalendar(
-    {d: True for d in PAST_DAYS} | {date(2026, 10, 10): False, date(2026, 10, 11): False, DEMO_DAY: True}
+    {d: True for d in PAST_DAYS}
+    | {date(2026, 10, 9): False, date(2026, 10, 10): False, date(2026, 10, 11): False, DEMO_DAY: True}
 )
 _PACED_FROM = time(10, 0)  # a paced demo opens here and goes on a minute at a time
 _FEE = 0.00015
 # Each symbol's mid-point at the open and its tick.
 _OPENS = {"005930": (81_250, 100), "000660": (201_000, 500), "009150": (150_050, 100)}
-# The overnight before the demo morning, each indicator's (Thursday, Friday) values: SOX
-# down 1.4% and the won 0.3% weaker, so risk_off.
+# The overnight before the demo morning, each indicator's (day before, last day) values: SOX
+# down 1.4% and the won 0.3% weaker, so risk_off. The last day is Friday the 9th for the US
+# sources, Thursday the 8th for the Korean ones (ECOS, KIS): Seoul was closed on Hangul Day.
 _OVERNIGHT = {
     "usdkrw": (1384.6, 1388.2),
     "ktb3y": (2.61, 2.63),
@@ -294,12 +305,14 @@ def demo_kis(now: datetime) -> dict[str, object]:
 def write_demo_macro(data_dir: Path) -> None:
     """The demo morning's macro read at 07:30, recorded as the collector records it."""
     shutil.rmtree(data_dir / MACRO, ignore_errors=True)
-    thursday, friday = date(2026, 10, 8), date(2026, 10, 9)
-    macro = MacroDay(DEMO_DAY, friday)
+    wednesday, thursday, friday = date(2026, 10, 7), date(2026, 10, 8), date(2026, 10, 9)
+    macro = MacroDay(DEMO_DAY, thursday)  # the KRX trading day before
     for indicator in INDICATORS:
         before, last = _OVERNIGHT[indicator.name]
+        seoul = indicator.source in (Source.ECOS, Source.KIS)
+        days = (wednesday, thursday) if seoul else (thursday, friday)
         macro.readings[indicator.name] = Reading(
-            indicator, Observation(friday, last), Observation(thursday, before)
+            indicator, Observation(days[1], last), Observation(days[0], before)
         )
     macro.decide(RegimeRules())
     parquet = ParquetRecorder(data_dir, flush_rows=1000, flush_seconds=3600)
