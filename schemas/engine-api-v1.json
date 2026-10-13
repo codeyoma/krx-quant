@@ -299,13 +299,13 @@
     },
 
     "candles": {
-      "description": "GET /v1/symbols/{symbol}/candles?period=day: the stored candles before a time, oldest first, never today's (#111). Prices are adjusted. venue is where they come from (UN integrated KRX + NXT, KRX regular session), null with none stored.",
+      "description": "GET /v1/symbols/{symbol}/candles?period=day|week|month|year: the stored candles before a time, oldest first, each dated by its period's first day (a week's Monday, a month's 1st, a year's 1 January), never the one holding today (#111, #112). Prices are adjusted. venue is where they come from (UN integrated KRX + NXT, KRX regular session), null with none stored.",
       "type": "object",
       "required": ["symbol", "period", "venue", "candles"],
       "additionalProperties": false,
       "properties": {
         "symbol": {"type": "string"},
-        "period": {"enum": ["day"]},
+        "period": {"enum": ["day", "week", "month", "year"]},
         "venue": {"enum": ["UN", "KRX", null]},
         "candles": {
           "type": "array",

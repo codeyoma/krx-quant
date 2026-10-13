@@ -11,9 +11,9 @@ Endpoints (all under ``/v1``):
   their outcomes; ``?bar_close=T`` gives that bar close's;
 - ``GET /symbols/{symbol}/bars``: today's finished one-minute bars, oldest first;
   ``?before=T&limit=N``: the last N bars before ``T`` across days (the backfill's files);
-- ``GET /symbols/{symbol}/candles?period=day&before=T&limit=N``: the last N stored day
-  candles (default 400, at most 2000) that start before ``T`` (default now), oldest first,
-  never today's (``candles``);
+- ``GET /symbols/{symbol}/candles?period=day|week|month|year&before=T&limit=N``: the last N
+  stored candles of the period (default 400, at most 2000) that start before ``T`` (default
+  now), oldest first, never the one holding today (``candles``);
 - ``GET /algorithms``: each registered algorithm's card, features, current model and status
   (probation, active, bench, retired, clone) with its history;
 - ``GET /algorithms/{name}``: one of them, with the models installed on the server for it;
