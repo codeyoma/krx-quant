@@ -268,7 +268,7 @@ KIS 필드 순서는 [koreainvestment/open-trading-api](https://github.com/korea
 
 ## 경제 캘린더 (#150)
 
-수집기가 TradingView 경제 캘린더를 읽을 때마다(기본 15분) 새로 나타나거나 바뀐 일정만 쓴다(`econ_calendar.py`, [design.md](design.md#45-매크로-지표)의 "경제 캘린더"). 바뀌었다는 것은 발표 시각, 이름, 기간, 실제·예상·이전 값, 중요도 중 하나가 달라졌다는 뜻이다. 그래서 한 일정의 줄들을 `recorded_at` 순으로 보면 그때그때 알던 값이 나온다(실제 값은 발표 뒤 처음 읽을 때 생긴다). 수집기가 다시 시작하면 `calendar/latest.json`의 마지막 답에서 이어서 비교한다.
+수집기가 TradingView 경제 캘린더를 읽을 때마다(기본 15분) 새로 나타나거나 바뀐 일정만 쓴다(`econ_calendar.py`, [design.md](design.md#45-매크로-지표)의 "경제 캘린더"). 바뀌었다는 것은 발표 시각, 이름, 기간, 실제·예상·이전 값, 중요도 중 하나가 달라졌다는 뜻이다. 그래서 한 일정의 줄들을 `recorded_at` 순으로 보면 그때그때 알던 값이 나온다(실제 값은 발표 뒤 처음 읽을 때 생긴다). 수집기가 다시 시작하면 `calendar/latest.json`의 마지막 답에서 이어서 비교한다. 바뀐 일정을 이 계층에 먼저 쓰고 `latest.json`을 나중에 바꾼다. 그래서 그 사이에 멈추면 다시 시작한 뒤 같은 변화가 한 번 더 기록될 수는 있어도(적어도 한 번), 빠지지는 않는다.
 
 **`calendar/date=<읽은 날, KST>/feed=tradingview/symbol=<국가>/`**: 일정 하나의 새 값마다 한 줄.
 
@@ -280,7 +280,7 @@ KIS 필드 순서는 [koreainvestment/open-trading-api](https://github.com/korea
 | `country` | string | 두 글자 국가(`US`, `KR`, `EU` 등) |
 | `title`, `indicator`, `category`, `period` | string | 일정 이름, 지표, 출처의 분류 코드, 기준 기간(`Sep` 등). 없으면 null |
 | `actual`, `forecast`, `previous` | float64 | 실제(발표 전 null), 예상, 이전 값. `unit` 단위 |
-| `unit`, `currency` | string | 단위(`%`, `B` 등), 통화. 없으면 null |
+| `unit`, `scale`, `currency` | string | 단위(`%`, `$`, `CNY` 등), 배율(`K`, `M`, `B`, `T`: 값은 `<숫자><배율>`), 통화. 없으면 null |
 | `importance` | string | `low`, `medium`, `high` |
 | `source`, `source_url` | string | 발표 기관과 그 주소 |
 

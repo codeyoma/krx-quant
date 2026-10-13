@@ -67,6 +67,7 @@ EVENT_SCHEMA = pa.schema(
         ("forecast", pa.float64()),
         ("previous", pa.float64()),
         ("unit", pa.string()),
+        ("scale", pa.string()),
         ("currency", pa.string()),
         ("importance", pa.string()),
         ("source", pa.string()),
@@ -81,8 +82,9 @@ class CalendarError(RuntimeError):
 
 @dataclass(frozen=True)
 class CalendarEvent:
-    """One scheduled release. ``at`` is when it comes out; values are the feed's numbers, in
-    ``unit`` (``%``, ``B`` and the like), or None while not known."""
+    """One scheduled release. ``at`` is when it comes out; values are the feed's numbers, or
+    None while not known: a value is ``<number><scale>`` in ``unit``, so ``previous=23.75``
+    with ``scale="K"`` is 23,750, and ``unit`` is ``%``, a currency (``$``, ``CNY``) or none."""
 
     id: str
     at: datetime
@@ -95,6 +97,7 @@ class CalendarEvent:
     forecast: float | None
     previous: float | None
     unit: str | None
+    scale: str | None  # K, M, B, T: thousands to trillions
     currency: str | None
     importance: str  # low, medium, high
     source: str | None
@@ -108,13 +111,46 @@ class CalendarEvent:
 
     @classmethod
     def from_json(cls, body: Mapping[str, Any]) -> CalendarEvent:
-        fields = dict(body)
-        fields["at"] = datetime.fromisoformat(body["at"])
-        return cls(**fields)
+        """An event from ``to_json``'s form; KeyError, TypeError or ValueError if it is not one.
+        Fields a kept answer from an earlier version lacks are None."""
+        at = datetime.fromisoformat(body["at"])
+        if at.tzinfo is None:
+            raise ValueError(f"no offset: {body['at']!r}")
+        texts = {name: _text(body.get(name)) for name in _OPTIONAL_TEXTS}
+        importance = body.get("importance")
+        if not isinstance(importance, str) or importance not in IMPORTANCE.values():
+            raise ValueError(f"importance {importance!r}")
+        ident, title = _text(body["id"]), _text(body["title"])
+        if ident is None or title is None:
+            raise ValueError("no id or title")
+        return cls(
+            id=ident,
+            at=at.astimezone(UTC),
+            country=_text(body.get("country")) or "",
+            title=title,
+            actual=_number(body.get("actual")),
+            forecast=_number(body.get("forecast")),
+            previous=_number(body.get("previous")),
+            importance=importance,
+            **texts,
+        )
 
     def known(self) -> tuple[Any, ...]:
         """What a change of is worth recording."""
-        return (self.at, self.title, self.period, self.actual, self.forecast, self.previous, self.importance)
+        return (
+            self.at,
+            self.title,
+            self.period,
+            self.actual,
+            self.forecast,
+            self.previous,
+            self.unit,
+            self.scale,
+            self.importance,
+        )
+
+
+_OPTIONAL_TEXTS = ("indicator", "category", "period", "unit", "scale", "currency", "source", "source_url")
 
 
 def _text(value: Any) -> str | None:
@@ -161,6 +197,7 @@ def parse_tradingview(body: Any) -> list[CalendarEvent]:
                 forecast=_number(item.get("forecast")),
                 previous=_number(item.get("previous")),
                 unit=_text(item.get("unit")),
+                scale=_text(item.get("scale")),
                 currency=_text(item.get("currency")),
                 importance=IMPORTANCE.get(importance, "low") if isinstance(importance, int) else "low",
                 source=_text(item.get("source")),
@@ -260,6 +297,10 @@ class CalendarCollector:
             return False
 
         changed = [e for e in events if self._known.get(e.id) != e.known()]
+        # Recorded before the kept answer moves on: a restart compares with the kept answer, so
+        # a change recorded but not yet kept is recorded again (at least once), never lost.
+        if self._recorder is not None and changed:
+            self._record(changed, at)
         body = {
             "fetched_at": at.astimezone(KST).isoformat(),
             "source": SOURCE,
@@ -267,10 +308,8 @@ class CalendarCollector:
             "events": [e.to_json() for e in events],
         }
         await asyncio.to_thread(_write_latest, self._data_dir, body)
-        if self._recorder is not None and changed:
-            self._record(changed, at)
-        for event in events:
-            self._known[event.id] = event.known()
+        # Only the events of the current window: older ones never come back.
+        self._known = {event.id: event.known() for event in events}
         if self.failures >= ALERT_AFTER:
             self._alerts.resolve(ALERT_KEY, "경제 캘린더를 다시 읽습니다.")
         self.failures = 0
@@ -304,20 +343,31 @@ async def keep_calendar(
 
 def calendar_answer(kept: Mapping[str, Any] | None, now: datetime, limit: int) -> dict[str, Any]:
     """``/v1/calendar``'s answer from the kept one: the events from the start of today (KST)
-    on, in time order, at most ``limit``."""
+    on, in time order, at most ``limit``. Each part is read back and written again, so a kept
+    file that was damaged or edited still answers in the API's form (what cannot be read is
+    left out)."""
+    answer: dict[str, Any] = {"fetched_at": None, "source": SOURCE, "countries": [], "events": []}
     if kept is None:
-        return {"fetched_at": None, "source": SOURCE, "countries": [], "events": []}
+        return answer
+    try:
+        fetched = datetime.fromisoformat(str(kept.get("fetched_at")))
+        if fetched.tzinfo is not None:
+            answer["fetched_at"] = fetched.astimezone(KST).isoformat()
+    except ValueError:
+        pass
+    countries = kept.get("countries")
+    if isinstance(countries, list):
+        answer["countries"] = [c for c in countries if isinstance(c, str) and len(c) == 2 and c.isupper()]
     start = datetime.combine(kst_day(now), time(0), KST)
     events = []
-    for item in kept.get("events", []):
+    items = kept.get("events")
+    for item in items if isinstance(items, list) else []:
         try:
-            if datetime.fromisoformat(item["at"]) >= start:
-                events.append(item)
-        except (KeyError, TypeError, ValueError):
+            event = CalendarEvent.from_json(item)
+        except (KeyError, TypeError, ValueError, AttributeError):
             continue
-    return {
-        "fetched_at": kept.get("fetched_at"),
-        "source": kept.get("source", SOURCE),
-        "countries": list(kept.get("countries", [])),
-        "events": events[:limit],
-    }
+        if event.at >= start:
+            events.append(event)
+    events.sort(key=lambda e: (e.at, e.country, e.title))
+    answer["events"] = [e.to_json() for e in events[:limit]]
+    return answer

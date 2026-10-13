@@ -91,13 +91,15 @@ ITEMS = [
     item("5", "2026-10-14 12:30", "No offset"),
     item("6", "", "No time"),
     item("7", "2026-10-15T12:30:00.000Z", "Text values", actual="1.2%", forecast=float("nan")),
+    item("8", "2026-10-15T12:15:00.000Z", "ADP Employment Change", previous=23.75, unit=None, scale="K"),
 ]
 
 
 def test_the_feed_reads_as_events_in_time_order() -> None:
     events = parse_tradingview({"status": "ok", "result": ITEMS})
-    assert [e.id for e in events] == ["3", "1", "2", "7"]  # no id, no offset, no time: left out
-    machinery, unemployment, inflation, text = events
+    assert [e.id for e in events] == ["3", "1", "2", "8", "7"]  # no id, no offset, no time: left out
+    machinery, unemployment, inflation, adp, text = events
+    assert (adp.previous, adp.scale, adp.unit) == (23.75, "K", None)  # 23,750
     assert machinery.at == datetime(2026, 10, 11, 23, 50, tzinfo=UTC)
     assert (machinery.actual, machinery.previous, machinery.importance) == (1.2, 0.4, "low")
     assert (unemployment.country, unemployment.importance, unemployment.unit) == ("KR", "medium", None)
@@ -202,26 +204,52 @@ async def test_a_read_keeps_the_answer_and_records_every_event_once(setup: Setup
     assert kept is not None
     assert kept["fetched_at"] == "2026-10-13T09:15:00+09:00"
     assert kept["countries"] == ["US", "KR", "JP"]
-    assert [e["id"] for e in kept["events"]] == ["3", "1", "2", "7"]
+    assert [e["id"] for e in kept["events"]] == ["3", "1", "2", "8", "7"]
     rows = recorded(setup.data_dir)
-    assert sorted(r["id"] for r in rows) == ["1", "2", "3", "7"]
+    assert sorted(r["id"] for r in rows) == ["1", "2", "3", "7", "8"]
     by_country = {p.name for p in (setup.data_dir / LAYER / "date=2026-10-13" / "feed=tradingview").iterdir()}
     assert by_country == {"symbol=US", "symbol=KR", "symbol=JP"}
 
     # The same answer again: nothing new to record.
     assert await collector.run()
-    assert len(recorded(setup.data_dir)) == 4
+    assert len(recorded(setup.data_dir)) == 5
 
     # The actual arrives for one event: only it is recorded again.
     setup.feed.items = [dict(i, actual=3.9) if i["id"] == "2" else i for i in ITEMS]
     assert await collector.run()
     rows = recorded(setup.data_dir)
-    assert len(rows) == 5
+    assert len(rows) == 6
     assert [r["actual"] for r in rows if r["id"] == "2"] == [None, 3.9]  # in the order recorded
 
     # A restarted collector starts from the kept answer: nothing recorded again.
     assert await setup.make().run()
-    assert len(recorded(setup.data_dir)) == 5
+    assert len(recorded(setup.data_dir)) == 6
+
+
+async def test_a_change_is_never_lost_when_the_kept_answer_cannot_be_written(
+    setup: Setup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert await setup.make().run()
+    setup.feed.items = [dict(i, actual=3.9) if i["id"] == "2" else i for i in ITEMS]
+
+    def fail(data_dir: Path, body: Any) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr("krx_quant.econ_calendar._write_latest", fail)
+    with pytest.raises(OSError):
+        await setup.make().run()  # the change is recorded, the kept answer is not moved on
+    monkeypatch.undo()
+    assert await setup.make().run()  # a restart sees the change again: recorded twice, not lost
+    assert [r["actual"] for r in recorded(setup.data_dir) if r["id"] == "2"] == [None, 3.9, 3.9]
+
+
+async def test_the_collector_remembers_only_the_current_window(setup: Setup) -> None:
+    collector = setup.make()
+    assert await collector.run()
+    setup.feed.items = [i for i in ITEMS if i["id"] != "3"]  # Machinery Orders left the window
+    assert await collector.run()
+    assert "3" not in collector._known
+    assert set(collector._known) == {"1", "2", "7", "8"}
 
 
 async def test_failures_keep_the_last_answer_and_alert_after_an_hour(setup: Setup) -> None:
@@ -267,7 +295,7 @@ def test_the_answer_shows_today_on_in_time_order_up_to_the_limit(tmp_path: Path)
     }
     answer = calendar_answer(kept, NOW, 100)
     # Machinery Orders came out on the 12th at 08:50 KST; the unemployment rate today at 08:00.
-    assert [e["id"] for e in answer["events"]] == ["1", "2", "7"]
+    assert [e["id"] for e in answer["events"]] == ["1", "2", "8", "7"]
     assert [e["id"] for e in calendar_answer(kept, NOW, 1)["events"]] == ["1"]
     assert calendar_answer(None, NOW, 10) == {
         "fetched_at": None,
@@ -301,6 +329,26 @@ async def test_the_engine_api_serves_the_kept_answer(tmp_path: Path) -> None:
         assert [e["id"] for e in body["events"]] == ["3", "1"]
         bad = await client.get("/v1/calendar?limit=x")
         assert bad.status == 400
+
+
+def test_a_damaged_kept_answer_still_answers_in_the_apis_form() -> None:
+    good = parse_tradingview({"status": "ok", "result": ITEMS})[1].to_json()  # the unemployment rate
+    older = {k: v for k, v in good.items() if k != "scale"} | {"id": "older"}  # kept before scale
+    kept = {
+        "fetched_at": "yesterday",
+        "source": "somewhere else",
+        "countries": ["US", "usa", 3, "KR"],
+        "events": [good, older, {"id": "x"}, "junk", dict(good, importance="huge"), dict(good, at="08:00")],
+    }
+    answer = calendar_answer(kept, NOW, 100)
+    check("calendar", answer)
+    assert (answer["fetched_at"], answer["source"], answer["countries"]) == (
+        None,
+        "tradingview",
+        ["US", "KR"],
+    )
+    assert [e["id"] for e in answer["events"]] == ["1", "older"]
+    assert answer["events"][1]["scale"] is None
 
 
 def test_the_settings_read_the_interval_and_the_countries() -> None:

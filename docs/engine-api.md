@@ -428,14 +428,15 @@
   "source": "tradingview",
   "countries": ["US", "KR", "CN", "JP", "EU", "DE", "GB"],
   "events": [
-    {"id": "421602", "at": "2026-10-14T21:30:00+09:00", "country": "US", "title": "Inflation Rate YoY", "indicator": "Inflation Rate", "category": "prce", "period": "Sep", "actual": null, "forecast": 3.7, "previous": 3.4, "unit": "%", "currency": "USD", "importance": "high", "source": "Bureau of Labour Statistics", "source_url": "https://www.bls.gov"}
+    {"id": "421602", "at": "2026-10-14T21:30:00+09:00", "country": "US", "title": "Inflation Rate YoY", "indicator": "Inflation Rate", "category": "prce", "period": "Sep", "actual": null, "forecast": 3.7, "previous": 3.4, "unit": "%", "scale": null, "currency": "USD", "importance": "high", "source": "Bureau of Labour Statistics", "source_url": "https://www.bls.gov"}
   ]
 }
 ```
 
 - `limit`: 일정 수(기본 100, 1–1000). 범위 밖이면 400이다.
 - `fetched_at`은 수집기가 마지막으로 읽은 시각이다. 읽기에 실패하는 동안은 앞의 답이 그대로라서 늦어진다. 한 번도 읽지 않았으면(재생·데모 엔진 포함) `null`이고 목록은 비어 있다.
-- 값(`actual`, `forecast`, `previous`)은 `unit` 단위의 숫자이고, 모르면 `null`이다. 실제 값은 발표 뒤 수집기가 처음 읽을 때(기본 15분 안에) 찬다.
+- 값(`actual`, `forecast`, `previous`)은 숫자이고, 모르면 `null`이다. 값은 `<숫자><scale>`이고 단위는 `unit`이다. `scale`은 `K`(천), `M`(백만), `B`(십억), `T`(조) 또는 `null`이라서, `previous: 23.75, scale: "K"`는 23,750이다. `unit`은 `%`, 통화(`$`, `€`, `£`, `CNY` 등) 또는 `null`이다. 실제 값은 발표 뒤 수집기가 처음 읽을 때(기본 15분 안에) 찬다.
+- 엔진은 수집기가 남긴 파일을 그대로 넘기지 않고 한 번 읽어 다시 쓴다. 그래서 파일이 망가지거나 손으로 고쳐져도 답은 이 형식을 지키고, 읽을 수 없는 일정은 빠진다.
 - 엔진은 수집기가 쓴 파일을 많아야 30초마다 다시 읽는다.
 
 ### `GET /v1/stream` (WebSocket, #19)

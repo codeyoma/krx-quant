@@ -638,7 +638,7 @@
           "items": {
             "type": "object",
             "required": ["id", "at", "country", "title", "indicator", "category", "period", "actual", "forecast",
-                         "previous", "unit", "currency", "importance", "source", "source_url"],
+                         "previous", "unit", "scale", "currency", "importance", "source", "source_url"],
             "additionalProperties": false,
             "properties": {
               "id": {"type": "string"},
@@ -652,6 +652,7 @@
               "forecast": {"type": ["number", "null"]},
               "previous": {"type": ["number", "null"]},
               "unit": {"type": ["string", "null"]},
+              "scale": {"enum": ["K", "M", "B", "T", null]},
               "currency": {"type": ["string", "null"]},
               "importance": {"enum": ["low", "medium", "high"]},
               "source": {"type": ["string", "null"]},
