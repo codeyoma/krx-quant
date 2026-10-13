@@ -12,7 +12,14 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from krx_quant.api import MAX_CANDLES, create_app
-from krx_quant.candles import CANDLES_TR, CandleKeeper, read_candles, stored_candles, write_candles
+from krx_quant.candles import (
+    CANDLES_TR,
+    CandleKeeper,
+    period_start,
+    read_candles,
+    stored_candles,
+    write_candles,
+)
 from krx_quant.fake_kis import FakeKis
 from krx_quant.feeds.base import KST
 from krx_quant.market_calendar import MarketCalendar
@@ -54,14 +61,46 @@ def kis_candles(days: list[date], base: int = 50_000) -> list[dict[str, str]]:
     return rows
 
 
-def candles_api(candles: Candles) -> Callable[[dict[str, str]], dict[str, Any]]:
-    """The period chart query: the newest 100 of ``candles(market, symbol)`` from
-    ``FID_INPUT_DATE_1`` to ``FID_INPUT_DATE_2``, newest first, padded like KIS."""
+def kis_periods(days: list[dict[str, str]], code: str, label: str = "last") -> list[dict[str, str]]:
+    """KIS's candles of the period ``code`` (D, W, M, Y) made of its day candles, oldest first:
+    each labelled with its period's ``label`` ("first" or "last") trading day. The period
+    still going holds every day there is, as KIS's does during it."""
+    if code == "D":
+        return days
+    period = {"W": "week", "M": "month", "Y": "year"}[code]
+    groups: dict[date, list[dict[str, str]]] = {}
+    for r in days:
+        groups.setdefault(
+            period_start(datetime.strptime(r["stck_bsop_date"], "%Y%m%d").date(), period), []
+        ).append(r)
+    out = []
+    for start in sorted(groups):
+        group = groups[start]
+        out.append(
+            {
+                "stck_bsop_date": (group[-1] if label == "last" else group[0])["stck_bsop_date"],
+                "stck_oprc": group[0]["stck_oprc"],
+                "stck_hgpr": str(max(int(r["stck_hgpr"]) for r in group)),
+                "stck_lwpr": str(min(int(r["stck_lwpr"]) for r in group)),
+                "stck_clpr": group[-1]["stck_clpr"],
+                "acml_vol": str(sum(int(r["acml_vol"]) for r in group)),
+                "acml_tr_pbmn": str(sum(int(r["acml_tr_pbmn"]) for r in group)),
+                "mod_yn": "N",
+            }
+        )
+    return out
+
+
+def candles_api(candles: Candles, label: str = "last") -> Callable[[dict[str, str]], dict[str, Any]]:
+    """The period chart query: the newest 100 candles of the period asked, made of the day
+    candles ``candles(market, symbol)``, labelled from ``FID_INPUT_DATE_1`` to
+    ``FID_INPUT_DATE_2``, newest first, padded like KIS."""
 
     def respond(params: dict[str, str]) -> dict[str, Any]:
-        assert params["FID_PERIOD_DIV_CODE"] == "D" and params["FID_ORG_ADJ_PRC"] == "0"
+        assert params["FID_ORG_ADJ_PRC"] == "0"
         first, last = params["FID_INPUT_DATE_1"], params["FID_INPUT_DATE_2"]
-        rows = candles(params["FID_COND_MRKT_DIV_CODE"], params["FID_INPUT_ISCD"])
+        days = candles(params["FID_COND_MRKT_DIV_CODE"], params["FID_INPUT_ISCD"])
+        rows = kis_periods(days, params["FID_PERIOD_DIV_CODE"], label)
         within = [r for r in reversed(rows) if first <= r["stck_bsop_date"] <= last][:PER_QUERY]
         return {
             "rt_cd": "0",
@@ -86,8 +125,12 @@ async def keep(
         return await CandleKeeper(client, CALENDAR, data_dir, symbols, pace).run(now)
 
 
-def closes(data_dir: Path, symbol: str = "005930") -> list[tuple[date, int]]:
-    return [(r["date"], r["close"]) for r in read_candles(data_dir, "day", symbol)]
+def closes(data_dir: Path, symbol: str = "005930", period: str = "day") -> list[tuple[date, int]]:
+    return [(r["date"], r["close"]) for r in read_candles(data_dir, period, symbol)]
+
+
+def day_queries(kis: FakeKis) -> list[dict[str, str]]:
+    return [q for q in requests_for(kis, CANDLES_TR) if q["FID_PERIOD_DIV_CODE"] == "D"]
 
 
 async def test_the_first_run_takes_every_candle_kis_has_paging_back_100_at_a_time(
@@ -97,7 +140,7 @@ async def test_the_first_run_takes_every_candle_kis_has_paging_back_100_at_a_tim
     history = kis_candles(days)
     kis.rest_responses[CANDLES_TR] = candles_api(lambda market, symbol: history)
 
-    assert await keep(kis, tmp_path, AFTER_HOURS) == 1
+    assert await keep(kis, tmp_path, AFTER_HOURS) == 4, "a file each of days, weeks, months, years"
 
     stored = read_candles(tmp_path, "day", "005930")
     assert [r["date"] for r in stored] == days
@@ -112,11 +155,11 @@ async def test_the_first_run_takes_every_candle_kis_has_paging_back_100_at_a_tim
         "volume": 1000 + len(days) - 1,
         "value": int(history[-1]["acml_tr_pbmn"]),
     }
-    asked = requests_for(kis, CANDLES_TR)
+    asked = day_queries(kis)
     assert len(asked) == math.ceil(len(days) / PER_QUERY) + 1, "every page, then one that finds nothing older"
     second_end = days[-PER_QUERY] - timedelta(days=1)
     assert [q["FID_INPUT_DATE_2"] for q in asked[:2]] == ["20261013", second_end.strftime("%Y%m%d")]
-    assert {q["FID_COND_MRKT_DIV_CODE"] for q in asked} == {"UN"}
+    assert {q["FID_COND_MRKT_DIV_CODE"] for q in requests_for(kis, CANDLES_TR)} == {"UN"}
 
 
 async def test_the_next_day_only_the_new_candle_is_added(kis: FakeKis, tmp_path: Path) -> None:
@@ -133,7 +176,7 @@ async def test_the_next_day_only_the_new_candle_is_added(kis: FakeKis, tmp_path:
         (date(2026, 10, 14), 50_000 + 10 * (len(days) - 1))
     ]
     assert len(closes(tmp_path)) == len(days)
-    [asked] = requests_for(kis, CANDLES_TR)
+    [asked] = day_queries(kis)
     assert (asked["FID_INPUT_DATE_1"], asked["FID_INPUT_DATE_2"]) == ("20261013", "20261014"), (
         "the last stored day, to see that KIS did not adjust it, and the new one"
     )
@@ -146,7 +189,7 @@ async def test_a_candle_is_stored_only_once_its_day_is_over(kis: FakeKis, tmp_pa
     await keep(kis, tmp_path, datetime(2026, 10, 13, 15, 40, tzinfo=KST))  # after the close, before 20:30
 
     assert closes(tmp_path)[-1][0] == date(2026, 10, 12)
-    assert requests_for(kis, CANDLES_TR)[0]["FID_INPUT_DATE_2"] == "20261012"
+    assert day_queries(kis)[0]["FID_INPUT_DATE_2"] == "20261012"
 
     await keep(kis, tmp_path, datetime(2026, 10, 10, 12, 0, tzinfo=KST))  # a Saturday: nothing new
 
@@ -178,7 +221,7 @@ async def test_a_past_adjusted_before_any_new_candle_is_taken_again_at_once(
 
     answer["history"] = kis_candles(days, base=50_000)  # a split effective at the 14th's open
     restart = datetime(2026, 10, 14, 7, 20, tzinfo=KST)  # the morning's restart: no new candle yet
-    assert await keep(kis, tmp_path, restart) == 1
+    assert await keep(kis, tmp_path, restart) == 3, "the days, weeks and months (no year is over yet)"
 
     assert closes(tmp_path) == [(d, 50_000 + 10 * i) for i, d in enumerate(days)]
 
@@ -211,7 +254,7 @@ async def test_a_symbol_kis_has_nothing_for_is_asked_again_next_run(kis: FakeKis
     assert read_candles(tmp_path, "day", "005930") == []
 
     answer["history"] = kis_candles(trading_days(date(2026, 10, 1), date(2026, 10, 13)))
-    assert await keep(kis, tmp_path, AFTER_HOURS) == 1
+    assert await keep(kis, tmp_path, AFTER_HOURS) == 2, "the days and the finished weeks"
 
 
 async def test_a_failing_symbol_does_not_stop_the_others(kis: FakeKis, tmp_path: Path) -> None:
@@ -224,7 +267,7 @@ async def test_a_failing_symbol_does_not_stop_the_others(kis: FakeKis, tmp_path:
 
     kis.rest_responses[CANDLES_TR] = respond
 
-    assert await keep(kis, tmp_path, AFTER_HOURS, symbols=("000660", "005930")) == 1
+    assert await keep(kis, tmp_path, AFTER_HOURS, symbols=("000660", "005930")) == 2  # 005930's days, weeks
     assert closes(tmp_path)[-1][0] == date(2026, 10, 13)
 
 
@@ -237,10 +280,98 @@ async def test_the_queries_keep_the_backfill_pace_inside_the_rest_limit(
 
     await keep(kis, tmp_path, AFTER_HOURS, symbols=("005930", "000660"), per_second=20)
 
-    assert (
-        len(let_through) == len(requests_for(kis, CANDLES_TR)) == 2 * (math.ceil(len(days) / PER_QUERY) + 1)
-    )
+    assert len(let_through) == len(requests_for(kis, CANDLES_TR))
+    assert len(day_queries(kis)) == 2 * (math.ceil(len(days) / PER_QUERY) + 1)
     assert max(sum(1 for u in let_through if t <= u < t + 1.0) for t in let_through) <= 20
+
+
+@pytest.mark.parametrize("label", ["last", "first"])
+async def test_weeks_months_and_years_are_stored_by_their_first_day_once_over(
+    kis: FakeKis, tmp_path: Path, label: str
+) -> None:
+    days = trading_days(date(2024, 12, 2), date(2026, 10, 13))
+    history = kis_candles(days)
+    kis.rest_responses[CANDLES_TR] = candles_api(lambda market, symbol: history, label)
+
+    await keep(kis, tmp_path, AFTER_HOURS)  # Tuesday the 13th
+
+    weeks = read_candles(tmp_path, "week", "005930")
+    # Every week up to the one before the 13th's, by its Monday, whichever day KIS labels it.
+    assert (weeks[0]["date"], weeks[-1]["date"]) == (date(2024, 12, 2), date(2026, 10, 5))
+    assert all(w["date"].weekday() == 0 for w in weeks)
+    # 5–8 October (Friday the 9th closed): Monday's open, the highest, the lowest, Thursday's close.
+    week = [r for r in history if "20261005" <= r["stck_bsop_date"] <= "20261008"]
+    assert {k: weeks[-1][k] for k in ("open", "high", "low", "close", "volume")} == {
+        "open": int(week[0]["stck_oprc"]),
+        "high": max(int(r["stck_hgpr"]) for r in week),
+        "low": min(int(r["stck_lwpr"]) for r in week),
+        "close": int(week[-1]["stck_clpr"]),
+        "volume": sum(int(r["acml_vol"]) for r in week),
+    }
+    months = [r["date"] for r in read_candles(tmp_path, "month", "005930")]
+    assert (months[0], months[-1], len(months)) == (date(2024, 12, 1), date(2026, 9, 1), 22)
+    assert [r["date"] for r in read_candles(tmp_path, "year", "005930")] == [
+        date(2024, 1, 1),
+        date(2025, 1, 1),
+    ]
+
+
+async def test_a_week_is_added_once_it_is_over(kis: FakeKis, tmp_path: Path) -> None:
+    answer = {"history": kis_candles(trading_days(date(2026, 8, 3), date(2026, 10, 13)))}
+    kis.rest_responses[CANDLES_TR] = candles_api(lambda market, symbol: answer["history"])
+    await keep(kis, tmp_path, AFTER_HOURS)
+    answer["history"] = kis_candles(trading_days(date(2026, 8, 3), date(2026, 10, 19)))
+    kis.rest_requests.clear()
+
+    await keep(kis, tmp_path, datetime(2026, 10, 16, 21, 0, tzinfo=KST))  # Friday: its week still going
+    assert closes(tmp_path, period="week")[-1][0] == date(2026, 10, 5)
+    await keep(kis, tmp_path, datetime(2026, 10, 19, 21, 0, tzinfo=KST))  # Monday: the week before is over
+
+    assert [d for d, _ in closes(tmp_path, period="week")][-2:] == [date(2026, 10, 5), date(2026, 10, 12)]
+    weekly = [q for q in requests_for(kis, CANDLES_TR) if q["FID_PERIOD_DIV_CODE"] == "W"]
+    assert [(q["FID_INPUT_DATE_1"], q["FID_INPUT_DATE_2"]) for q in weekly] == [
+        ("20261005", "20261016"),
+        ("20261005", "20261019"),
+    ], "from the last stored week, once a run"
+
+
+async def test_the_api_gives_finished_weeks_months_and_years_never_the_one_going(tmp_path: Path) -> None:
+    data = tmp_path / "data"
+
+    def candle(day: date, close: int) -> dict[str, Any]:
+        return {
+            "symbol": "005930",
+            "date": day,
+            "venue": "UN",
+            "open": close,
+            "high": close,
+            "low": close,
+            "close": close,
+            "volume": 1,
+            "value": 1,
+        }
+
+    mondays = [date(2026, 9, 21), date(2026, 9, 28), date(2026, 10, 5), date(2026, 10, 12)]  # the 12th's too
+    write_candles(data, "week", "005930", [candle(d, i) for i, d in enumerate(mondays)])
+    write_candles(data, "month", "005930", [candle(date(2026, m, 1), m) for m in (8, 9, 10)])
+    write_candles(data, "year", "005930", [candle(date(y, 1, 1), y) for y in (2025, 2026)])
+    engine = await run(tmp_path / "engine.db", [], until=at("10:00:00"))  # Monday the 12th
+
+    async with TestClient(TestServer(create_app(engine, data_dir=data))) as client:
+        weeks = await get_json(client, "/v1/symbols/005930/candles?period=week")
+        older = await get_json(
+            client, "/v1/symbols/005930/candles?period=week&before=2026-10-05T00:00:00%2B09:00&limit=1"
+        )
+        months = await get_json(client, "/v1/symbols/005930/candles?period=month")
+        years = await get_json(client, "/v1/symbols/005930/candles?period=year")
+
+    for body in (weeks, older, months, years):
+        check("candles", body)
+    assert [c["date"] for c in weeks["candles"]] == ["2026-09-21", "2026-09-28", "2026-10-05"]
+    assert weeks["period"] == "week"
+    assert [c["date"] for c in older["candles"]] == ["2026-09-28"]
+    assert [c["date"] for c in months["candles"]] == ["2026-08-01", "2026-09-01"]
+    assert [c["date"] for c in years["candles"]] == ["2025-01-01"]
 
 
 def test_stored_candles_before_a_time_oldest_first_without_today(tmp_path: Path) -> None:
@@ -302,7 +433,7 @@ async def test_the_api_gives_stored_candles_before_a_time_oldest_first_never_tod
         )
         bad = [
             (await client.get(f"/v1/symbols/005930/candles?{q}")).status
-            for q in ("", "period=week", "period=day&limit=0", f"period=day&limit={MAX_CANDLES + 1}")
+            for q in ("", "period=minute", "period=day&limit=0", f"period=day&limit={MAX_CANDLES + 1}")
         ]
     async with TestClient(TestServer(create_app(engine, data_dir=tmp_path / "empty"))) as client:
         none = await get_json(client, "/v1/symbols/005930/candles?period=day")

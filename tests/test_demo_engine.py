@@ -103,6 +103,24 @@ async def test_the_demo_has_two_years_of_day_candles_before_the_morning(tmp_path
     assert abs(last["close"] - 81_250) <= 81_250 * 0.001, "the last close is near the morning's open"
 
 
+async def test_the_demo_has_finished_weeks_months_and_years_made_of_its_days(tmp_path: Path) -> None:
+    app = await demo_app(tmp_path / "demo.sqlite3")
+
+    async with TestClient(TestServer(app)) as client:
+        days = await get_json(client, "/v1/symbols/005930/candles?period=day&limit=2000")
+        weeks = await get_json(client, "/v1/symbols/005930/candles?period=week&limit=2000")
+        months = await get_json(client, "/v1/symbols/005930/candles?period=month")
+        years = await get_json(client, "/v1/symbols/005930/candles?period=year")
+
+    # The morning (Monday the 12th) is in a new week: the 8th's is the last one over.
+    assert weeks["candles"][-1]["date"] == "2026-10-05"
+    assert months["candles"][-1]["date"] == "2026-09-01"
+    assert [c["date"] for c in years["candles"]] == ["2024-01-01", "2025-01-01"]
+    last_week = [c for c in days["candles"] if "2026-10-05" <= c["date"] <= "2026-10-08"]
+    assert weeks["candles"][-1]["close"] == last_week[-1]["close"]
+    assert weeks["candles"][-1]["volume"] == sum(c["volume"] for c in last_week)
+
+
 async def test_the_demo_is_the_same_every_time(tmp_path: Path) -> None:
     first, second = await demo_app(tmp_path / "a.sqlite3"), await demo_app(tmp_path / "b.sqlite3")
 

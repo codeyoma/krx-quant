@@ -13,7 +13,8 @@ Before the morning come the last 80 minutes (14:00–15:20) of the two trading d
 it, 2026-10-07 and 2026-10-08 (Friday the 9th is Hangul Day, closed), so a chart scrolls back into them
 (#108): their predictions are in the database, and their one-minute bars are stored as
 the backfill stores them, under ``<db stem>-data/bars/``. Each symbol also has two years of
-made-up day candles up to the 8th (``candles/``), for the chart's day view (#111).
+made-up day candles up to the 8th (``candles/``), for the chart's day view (#111), and the
+finished week, month and year candles made of them (#112).
 
 With a pace (``demo-engine --pace SECONDS``), the morning is replayed at once only up to
 10:00; the API opens there, and the rest goes on a minute every ``pace`` seconds, in steps
@@ -41,11 +42,11 @@ from aiohttp import web
 from krx_quant.algorithms import ALGORITHMS, Model
 from krx_quant.api import create_app
 from krx_quant.backfill import BAR_SCHEMA, stock_bars_path
-from krx_quant.candles import write_candles
+from krx_quant.candles import PERIODS, period_start, write_candles
 from krx_quant.clock import FakeClock
 from krx_quant.engine import Event, PredictionEngine
 from krx_quant.feeds import BOOK, INDEX, KOSPI200_FUTURES, TRADE, USD_FUTURES, VI_STATUS, Feed
-from krx_quant.feeds.base import KST
+from krx_quant.feeds.base import KST, Row
 from krx_quant.lifecycle import Status
 from krx_quant.macro import (
     INDICATORS,
@@ -210,7 +211,31 @@ def write_demo_candles(data_dir: Path) -> None:
                 }
             )
             close = max(tick, open_ + tick * round(open_ * rng.gauss(0, 0.004) / tick))  # the day before's
-        write_candles(data_dir, "day", symbol, list(reversed(rows)))
+        oldest_first = list(reversed(rows))
+        write_candles(data_dir, "day", symbol, oldest_first)
+        for period in PERIODS:
+            if period != "day":  # the finished ones, made of the days, as KIS's would be (#112)
+                write_candles(data_dir, period, symbol, _finished_periods(oldest_first, period))
+
+
+def _finished_periods(days: list[Row], period: str) -> list[Row]:
+    """The candles of ``period`` made of day candles (oldest first), each dated by its first
+    day, without the one holding the demo morning: as the collector stores them."""
+    out: list[Row] = []
+    for day in days:
+        start = period_start(day["date"], period)
+        if start >= period_start(DEMO_DAY, period):
+            break
+        if out and out[-1]["date"] == start:
+            into = out[-1]
+            into["high"] = max(into["high"], day["high"])
+            into["low"] = min(into["low"], day["low"])
+            into["close"] = day["close"]
+            into["volume"] += day["volume"]
+            into["value"] += day["value"]
+        else:
+            out.append({**day, "date": start})
+    return out
 
 
 async def demo_app(db: Path, pace: float | None = None) -> web.Application:
