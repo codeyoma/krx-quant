@@ -157,7 +157,9 @@ def write_past_bars(data_dir: Path, day: date, events: Sequence[Event]) -> None:
             )
         path = stock_bars_path(data_dir, day, symbol)
         path.parent.mkdir(parents=True, exist_ok=True)
-        pq.write_table(pa.Table.from_pylist(rows, schema=BAR_SCHEMA), path)
+        tmp = path.with_name(f".{path.name}.tmp")  # whole or absent, as the backfill writes
+        pq.write_table(pa.Table.from_pylist(rows, schema=BAR_SCHEMA), tmp)
+        tmp.rename(path)
 
 
 async def demo_app(db: Path, pace: float | None = None) -> web.Application:

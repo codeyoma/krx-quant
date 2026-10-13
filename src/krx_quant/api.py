@@ -289,13 +289,17 @@ def _time_query(request: web.Request, name: str) -> datetime | None:
     """The query's ISO 8601 time ``name`` in KST, None if absent; 400 without its offset."""
     if (raw := request.query.get(name)) is None:
         return None
+    at: datetime | None = None
     try:
-        at = datetime.fromisoformat(raw)
-    except ValueError:
-        at = None
-    if at is None or at.tzinfo is None:
+        parsed = datetime.fromisoformat(raw)
+        # In KST: a time at the very edge of the calendar (9999-12-31T23:59-12:00) overflows.
+        if parsed.tzinfo is not None:
+            at = parsed.astimezone(KST)
+    except (ValueError, OverflowError):
+        pass
+    if at is None:
         raise _error(web.HTTPBadRequest, f"{name} must be an ISO 8601 time with its offset, got {raw!r}")
-    return at.astimezone(KST)
+    return at
 
 
 def _limit_query(request: web.Request, default: int, most: int) -> int:

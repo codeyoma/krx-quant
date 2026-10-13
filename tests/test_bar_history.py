@@ -71,7 +71,7 @@ async def test_bars_before_a_time_go_back_across_days_oldest_first(tmp_path: Pat
         )
         bad = [
             await client.get(f"/v1/symbols/{SYMBOL}/bars?before={q}")
-            for q in ("2026-10-12T09:32:00", "yesterday")
+            for q in ("2026-10-12T09:32:00", "yesterday", "9999-12-31T23:59:59-12:00")
         ] + [
             await client.get(f"/v1/symbols/{SYMBOL}/bars?before=2026-10-12T09:32:00%2B09:00&limit={n}")
             for n in (0, MAX_BARS + 1, "x")
@@ -101,7 +101,7 @@ async def test_bars_before_a_time_go_back_across_days_oldest_first(tmp_path: Pat
     )
     assert stored["trades"] is None, "the backfill does not count trades"
     assert starts(nothing) == []
-    assert [r.status for r in bad] == [400] * 5
+    assert [r.status for r in bad] == [400] * 6, "no offset, no time, past the calendar in KST, bad limits"
 
 
 async def test_a_backfilled_day_replaces_what_memory_kept_of_it(tmp_path: Path) -> None:
