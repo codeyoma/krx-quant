@@ -62,7 +62,8 @@ async def walk(get: Get) -> dict[str, int]:
         await ask(f"/v1/symbols/{symbol}/predictions?limit=5&algorithm=consensus-final", "predictions")
         await ask(f"/v1/symbols/{symbol}/bars", "bars")
         await ask(f"/v1/symbols/{symbol}/bars?limit=500", "bars")  # into earlier days, if stored
-        await ask(f"/v1/symbols/{symbol}/candles?period=day", "candles")
+        for period in ("day", "week", "month", "year"):
+            await ask(f"/v1/symbols/{symbol}/candles?period={period}", "candles")
         await ask(
             f"/v1/symbols/{symbol}/candles?period=day&before=2026-10-08T00:00:00%2B09:00&limit=3", "candles"
         )
@@ -77,6 +78,8 @@ async def walk(get: Get) -> dict[str, int]:
         await ask(f"/v1/algorithms/{name}/stats", "algorithm_stats")
     await ask("/v1/consensus", "consensus")
     await ask("/v1/macro", "macro")
+    await ask("/v1/calendar", "calendar")
+    await ask("/v1/calendar?limit=5", "calendar")
     for path, status in (
         ("/v1/symbols/999999/latest", 404),
         ("/v1/symbols/005930/predictions?limit=0", 400),
@@ -85,11 +88,13 @@ async def walk(get: Get) -> dict[str, int]:
         ("/v1/symbols/005930/bars?before=10:00", 400),
         ("/v1/symbols/005930/candles", 400),
         ("/v1/symbols/005930/candles?period=minute", 400),
+        ("/v1/symbols/005930/candles?period=quarter", 400),
         ("/v1/symbols/005930/candles?period=day&limit=0", 400),
         ("/v1/symbols/999999/candles?period=day", 404),
         ("/v1/leaderboard?period=week", 400),
         ("/v1/algorithms/nobody/stats", 404),
         ("/v1/algorithms/nobody", 404),
+        ("/v1/calendar?limit=0", 400),
     ):
         await ask(path, "error", status)
     assert set(checked) == {*ROUTES.values(), "error"}, "every route asked"

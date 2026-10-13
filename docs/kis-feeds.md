@@ -202,10 +202,10 @@ Backfiller가 날마다 그날의 최근월물을 받아 연속 1분봉(`KOSPI20
 
 ## 기간별 시세 (일·주·월·년봉)
 
-일봉 보기(#111)와 주·월·년봉 보기(#112)가 쓸 KIS 국내주식기간별시세(`FHKST03010100`)다. 아직 실측하지 못했다 ⚠. 서버에서 장 마감 뒤(20:00 이후, 20:30 백필과 겹치지 않게) `krx-quant probe-candles`로 재고, 그 결과를 여기에 적은 뒤 수집을 만든다.
+일봉 보기(#111)와 주·월·년봉 보기(#112)가 쓸 KIS 국내주식기간별시세(`FHKST03010100`)다. 아직 실측하지 못했다 ⚠. 서버에서 장 마감 뒤(20:00 이후, 20:30 백필과 겹치지 않게) `krx-quant probe-candles`로 재고, 그 결과를 여기에 적는다. 수집(`candles.py`, #111, #112)은 실측 전에 아래 규칙으로 만들었고, 실측 결과로 그 규칙을 확인한다.
 
 - 경로: `/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice`. 파라미터: `FID_COND_MRKT_DIV_CODE`(`UN` 통합, `J` KRX, `NX` NXT), `FID_INPUT_ISCD`, `FID_INPUT_DATE_1`(시작일), `FID_INPUT_DATE_2`(종료일), `FID_PERIOD_DIV_CODE`(`D`·`W`·`M`·`Y`), `FID_ORG_ADJ_PRC`(`0` 수정주가, `1` 원주가). [koreainvestment/open-trading-api](https://github.com/koreainvestment/open-trading-api) 예제 기준이다.
-- 쓰는 곳: 일봉 수집(`candles.py`, #111). 수정주가(`0`), 통합(`UN`)을 먼저 묻고 봉이 없으면 KRX(`J`)를 묻는다. 기간 끝(`FID_INPUT_DATE_2`)을 마지막 끝난 거래일로 두고, 받은 가장 오래된 날의 전날로 옮겨 가며 더 오래된 봉이 오지 않을 때까지 묻는다. 아래 실측 결과로 이 규칙을 확인한다.
+- 쓰는 곳: 일·주·월·년봉 수집(`candles.py`, #111, #112). 수정주가(`0`), 통합(`UN`)을 먼저 묻고 봉이 없으면 KRX(`J`)를 묻는다. 기간 끝(`FID_INPUT_DATE_2`)을 마지막 끝난 거래일로 두고, 받은 가장 오래된 날의 전날로 옮겨 가며 더 오래된 봉이 오지 않을 때까지 묻는다. 아래 실측 결과로 이 규칙을 확인한다.
 - 잴 것: 한 번에 주는 개수(예제는 100개), 거슬러 갈 수 있는 끝(기간마다), 통합(`UN`) 구분을 주는지와 NXT에서 거래하지 않는 ETF의 답, `FID_ORG_ADJ_PRC`가 2018-05-04 삼성전자 액면분할 앞의 가격을 바꾸는지, `output1`·`output2` 필드.
 
 ## 최근월물 코드 찾기

@@ -11,9 +11,9 @@ Endpoints (all under ``/v1``):
   their outcomes; ``?bar_close=T`` gives that bar close's;
 - ``GET /symbols/{symbol}/bars``: today's finished one-minute bars, oldest first;
   ``?before=T&limit=N``: the last N bars before ``T`` across days (the backfill's files);
-- ``GET /symbols/{symbol}/candles?period=day&before=T&limit=N``: the last N stored day
-  candles (default 400, at most 2000) that start before ``T`` (default now), oldest first,
-  never today's (``candles``);
+- ``GET /symbols/{symbol}/candles?period=day|week|month|year&before=T&limit=N``: the last N
+  stored candles of the period (default 400, at most 2000) that start before ``T`` (default
+  now), oldest first, never the one holding today (``candles``);
 - ``GET /algorithms``: each registered algorithm's card, features, current model and status
   (probation, active, bench, retired, clone) with its history;
 - ``GET /algorithms/{name}``: one of them, with the models installed on the server for it;
@@ -23,6 +23,8 @@ Endpoints (all under ``/v1``):
   stats, by symbol, 30-minute slot and model version, with its calibration curve;
 - ``GET /consensus``: the consensus members now and the weights last fitted;
 - ``GET /macro``: the latest day's market regime and macro readings (``macro.py``);
+- ``GET /calendar?limit=``: the economic calendar from the start of today, as the collector
+  last read it (``econ_calendar.py``);
 - ``GET /stream``: a WebSocket of predictions, consensus, outcomes, the KIS status and
   status changes as they happen (``stream.py``).
 
@@ -56,6 +58,7 @@ from krx_quant.candles import PERIODS as CANDLE_PERIODS
 from krx_quant.candles import stored_candles
 from krx_quant.consensus import NAMES, slot
 from krx_quant.contracts import USD
+from krx_quant.econ_calendar import calendar_answer, read_latest
 from krx_quant.engine import PredictionEngine
 from krx_quant.feeds.base import KST, Row, kst_day
 from krx_quant.macro import LatestMacro, latest_macro, reading_before
@@ -93,6 +96,12 @@ SHELF_KEY: web.AppKey[Shelf | None] = web.AppKey("shelf")
 MACRO_SECONDS = 30.0
 MACRO_CACHE_KEY = web.AppKey("macro_cache", dict)
 USD_CLOSE_CACHE_KEY = web.AppKey("usd_close_cache", dict)
+# /v1/calendar's kept answer is read again at most this often: the collector rewrites it every
+# few minutes.
+CALENDAR_SECONDS = 30.0
+CALENDAR_CACHE_KEY = web.AppKey("calendar_cache", dict)
+CALENDAR_LIMIT = 100  # events by default
+MAX_CALENDAR_LIMIT = 1000
 STATS_CACHE_KEY = web.AppKey("stats_cache", dict)
 PERIODS = {"today": 1, "5d": 5, "20d": 20}  # days with predictions
 # Results kept per question until the store changes (the screen asks the same often).
@@ -133,6 +142,7 @@ def create_app(
     app[SHELF_KEY] = shelf
     app[MACRO_CACHE_KEY] = {}
     app[USD_CLOSE_CACHE_KEY] = {}
+    app[CALENDAR_CACHE_KEY] = {}
     stream = EventStream(engine, live_status, stream_poll_seconds)
 
     async def streaming(app: web.Application) -> AsyncIterator[None]:
@@ -163,6 +173,7 @@ def create_app(
     app.router.add_get("/v1/algorithms/{name}/stats", _algorithm_stats)
     app.router.add_get("/v1/consensus", _consensus)
     app.router.add_get("/v1/macro", _macro)
+    app.router.add_get("/v1/calendar", _calendar)
     app.router.add_get("/v1/stream", stream.handle)
     return app
 
@@ -422,6 +433,18 @@ async def _macro_now(request: web.Request) -> dict[str, Any]:
         cache.clear()
         cached = cache[today] = (monotonic(), _macro_json(latest))
     return cached[1]
+
+
+async def _calendar(request: web.Request) -> web.Response:
+    limit = _limit_query(request, CALENDAR_LIMIT, MAX_CALENDAR_LIMIT)
+    engine = request.app[ENGINE_KEY]
+    cache: dict[str, tuple[float, dict[str, Any] | None]] = request.app[CALENDAR_CACHE_KEY]
+    cached = cache.get("kept")
+    if cached is None or monotonic() - cached[0] >= CALENDAR_SECONDS:
+        data_dir = request.app[DATA_DIR_KEY]
+        kept = None if data_dir is None else await asyncio.to_thread(read_latest, data_dir)
+        cached = cache["kept"] = (monotonic(), kept)
+    return _json(calendar_answer(cached[1], engine.clock.now(), limit))
 
 
 async def _usd_futures(request: web.Request) -> dict[str, Any] | None:

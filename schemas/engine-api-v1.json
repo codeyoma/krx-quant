@@ -299,13 +299,13 @@
     },
 
     "candles": {
-      "description": "GET /v1/symbols/{symbol}/candles?period=day: the stored candles before a time, oldest first, never today's (#111). Prices are adjusted. venue is where they come from (UN integrated KRX + NXT, KRX regular session), null with none stored.",
+      "description": "GET /v1/symbols/{symbol}/candles?period=day|week|month|year: the stored candles before a time, oldest first, each dated by its period's first day (a week's Monday, a month's 1st, a year's 1 January), never the one holding today (#111, #112). Prices are adjusted. venue is where they come from (UN integrated KRX + NXT, KRX regular session), null with none stored.",
       "type": "object",
       "required": ["symbol", "period", "venue", "candles"],
       "additionalProperties": false,
       "properties": {
         "symbol": {"type": "string"},
-        "period": {"enum": ["day"]},
+        "period": {"enum": ["day", "week", "month", "year"]},
         "venue": {"enum": ["UN", "KRX", null]},
         "candles": {
           "type": "array",
@@ -649,6 +649,45 @@
         },
         "failed": {"type": "object", "additionalProperties": {"type": "string"}},
         "skipped": {"type": "array", "items": {"enum": ["ecos", "fred", "yahoo", "kis"]}}
+      }
+    },
+
+    "calendar": {
+      "description": "GET /v1/calendar: the economic calendar from the start of today (KST), in time order, as last read; fetched_at null before any read.",
+      "type": "object",
+      "required": ["fetched_at", "source", "countries", "events"],
+      "additionalProperties": false,
+      "properties": {
+        "fetched_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]},
+        "source": {"const": "tradingview"},
+        "countries": {"type": "array", "items": {"type": "string", "pattern": "^[A-Z]{2}$"}},
+        "events": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "at", "country", "title", "indicator", "category", "period", "actual", "forecast",
+                         "previous", "unit", "scale", "currency", "importance", "source", "source_url"],
+            "additionalProperties": false,
+            "properties": {
+              "id": {"type": "string"},
+              "at": {"$ref": "#/$defs/time"},
+              "country": {"type": "string"},
+              "title": {"type": "string"},
+              "indicator": {"type": ["string", "null"]},
+              "category": {"type": ["string", "null"]},
+              "period": {"type": ["string", "null"]},
+              "actual": {"type": ["number", "null"]},
+              "forecast": {"type": ["number", "null"]},
+              "previous": {"type": ["number", "null"]},
+              "unit": {"type": ["string", "null"]},
+              "scale": {"enum": ["K", "M", "B", "T", null]},
+              "currency": {"type": ["string", "null"]},
+              "importance": {"enum": ["low", "medium", "high"]},
+              "source": {"type": ["string", "null"]},
+              "source_url": {"type": ["string", "null"]}
+            }
+          }
+        }
       }
     },
 

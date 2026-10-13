@@ -25,6 +25,7 @@ ROUTES = {
     "/v1/leaderboard": "leaderboard",
     "/v1/consensus": "consensus",
     "/v1/macro": "macro",
+    "/v1/calendar": "calendar",
 }
 # The WebSocket route and the definition of each of its messages.
 STREAM = {"/v1/stream": "event"}

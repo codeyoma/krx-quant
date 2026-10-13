@@ -256,20 +256,23 @@ KOSPI200 선물과 달러선물은 KIS 선물옵션 분봉조회(`FHKIF03020200`
 
 > **바뀜** (2026-10-10, #43): KOSPI200 선물의 `cum_value`를 KIS가 준 천원 단위 그대로 쓰던 것(9f440ab) → 원으로 바꿔 쓴다. 이유: 다른 시리즈처럼 원으로 맞추기 위해서다(250ba59). 같은 PR에서 월물 교체도 "최종거래일 다음 날" → "최종거래일"로 바뀌었다([kis-feeds.md](kis-feeds.md#과거-1분봉)).
 
-## candles: 일봉 (REST, #111)
+## candles: 일·주·월·년봉 (REST, #111, #112)
 
-`CandleKeeper`가 KIS 국내주식기간별시세(`FHKST03010100`)로 받은 일봉이다. 차트의 "일" 보기가 KIS에 있는 만큼 거슬러 보게 하려고 둔다.
+`CandleKeeper`가 KIS 국내주식기간별시세(`FHKST03010100`, `FID_PERIOD_DIV_CODE` `D`·`W`·`M`·`Y`)로 받은 봉이다. 차트의 "일·주·월·년" 보기가 KIS에 있는 만큼 거슬러 보게 하려고 둔다.
 
 ```
-<KRX_DATA_DIR>/candles/period=day/symbol=<종목>/candles.parquet
+<KRX_DATA_DIR>/candles/period=<day|week|month|year>/symbol=<종목>/candles.parquet
 ```
 
-- 대상은 `KRX_SYMBOLS`(`/v1/symbols`의 종목)다. 종목마다 파일 하나에 끝난 일봉을 오래된 것부터 모두 담는다.
+- 봉의 날짜(`date`)는 기간이 시작하는 날이다: 일봉은 그날, 주봉은 월요일, 월봉은 1일, 년봉은 1월 1일. KIS가 기간의 첫날로 붙이든 마지막 거래일로 붙이든 이렇게 맞춘다.
+- 끝난 봉만 저장한다. 일봉은 그날 장이 다 끝난 뒤(20:30), 주·월·년봉은 마지막 끝난 거래일이 다음 기간으로 넘어간 뒤다. 예: 화요일 밤에는 지난주까지의 주봉만 있다. 그 사이의 봉은 화면이 일봉과 오늘의 1분봉으로 만든다.
+
+- 대상은 `KRX_SYMBOLS`(`/v1/symbols`의 종목)다. 종목·기간마다 파일 하나에 끝난 봉을 오래된 것부터 모두 담는다.
 - 첫 실행에 KIS에 있는 전체 기간을 받는다. 마지막 끝난 거래일부터 한 번에 100개씩 거슬러 가며, 더 오래된 봉이 오지 않을 때까지 묻는다.
-- 그다음부터는 저장된 마지막 날부터 마지막 끝난 거래일까지를 묻고 새 봉만 더한다. 새 봉이 없는 실행(주말, 아침 재시작)에도 저장된 마지막 날은 다시 묻는다. 그 봉이 KIS의 것과 다르면(액면분할 같은 수정) 전체 기간을 다시 받아 파일을 바꾼다.
+- 그다음부터는 저장된 마지막 봉의 기간부터 마지막 끝난 거래일까지를 묻고 새로 끝난 봉만 더한다. 새 봉이 없는 실행(주말, 아침 재시작)에도 저장된 마지막 날은 다시 묻는다. 그 봉이 KIS의 것과 다르면(액면분할 같은 수정) 전체 기간을 다시 받아 파일을 바꾼다.
 - 가격은 수정주가다(`FID_ORG_ADJ_PRC=0`, 증권사 차트와 같다). 1분봉(`bars`)은 원래 가격이라, 수정이 일어난 날 이전 구간은 두 계층의 가격이 다를 수 있다.
 - 시장은 1분봉과 같이 통합(`UN`)을 먼저 묻고, 봉이 하나도 없으면 KRX(`J`)를 묻는다. 한 종목은 처음 받은 시장을 계속 쓴다.
-- 오늘의 봉은 그날의 모든 장이 끝난 뒤(20:30, 1분봉 백필 다음)에만 저장한다. 그 전의 오늘 봉은 화면이 그날의 1분봉으로 만든다.
+- 일봉은 그날의 모든 장이 끝난 뒤(20:30, 1분봉 백필 다음)에만 저장한다. 그 전의 오늘 일봉은 화면이 그날의 1분봉으로 만든다. 주·월·년봉은 위처럼 그 기간이 끝난 뒤에 저장한다.
 - 요청 간격은 1분봉 백필과 같은 제한기 하나를 함께 쓴다(`KRX_BACKFILL_MAX_PER_SECOND`). 백필에서 일봉으로 넘어갈 때도 몰리지 않는다.
 - 파일은 통째로 바꾼다(임시 파일에 쓰고 이름 바꾸기). KIS가 아무 봉도 주지 않으면 저장하지 않고 다음 실행에 다시 묻는다.
 - 매일 21:00 업로드와 장 마감 뒤 업로드 때 바뀌었으면 S3의 같은 경로에 올린다.
@@ -278,7 +281,7 @@ KOSPI200 선물과 달러선물은 KIS 선물옵션 분봉조회(`FHKIF03020200`
 | 열 | 타입 | KIS 필드 | 설명 |
 |---|---|---|---|
 | `symbol` | string | | 종목코드 |
-| `date` | date32 | `stck_bsop_date` | 거래일 |
+| `date` | date32 | `stck_bsop_date` | 기간이 시작하는 날(일봉은 거래일) |
 | `venue` | string | | `UN`(통합 KRX+NXT) 또는 `KRX`(KRX 정규장) |
 | `open`, `high`, `low`, `close` | int64 | `stck_oprc`, `stck_hgpr`, `stck_lwpr`, `stck_clpr` | 수정 시가, 고가, 저가, 종가(원) |
 | `volume` | int64 | `acml_vol` | 거래량(주) |
@@ -293,6 +296,26 @@ KOSPI200 선물과 달러선물은 KIS 선물옵션 분봉조회(`FHKIF03020200`
 - 체결 시각 대비 수신 지연은 중앙값 약 0.7초였다. 체결 시각이 초 단위라서 최대 1초의 절삭이 포함된 값이다.
 
 KIS 필드 순서는 [koreainvestment/open-trading-api](https://github.com/koreainvestment/open-trading-api)의 `examples_llm/domestic_stock/ccnl_total`, `asking_price_total` 예제를 따른다.
+
+## 경제 캘린더 (#150)
+
+수집기가 TradingView 경제 캘린더를 읽을 때마다(기본 15분) 새로 나타나거나 바뀐 일정만 쓴다(`econ_calendar.py`, [design.md](design.md#45-매크로-지표)의 "경제 캘린더"). 바뀌었다는 것은 발표 시각, 이름, 기간, 실제·예상·이전 값, 중요도 중 하나가 달라졌다는 뜻이다. 그래서 한 일정의 줄들을 `recorded_at` 순으로 보면 그때그때 알던 값이 나온다(실제 값은 발표 뒤 처음 읽을 때 생긴다). 수집기가 다시 시작하면 `calendar/latest.json`의 마지막 답에서 이어서 비교한다. 바뀐 일정을 이 계층에 먼저 쓰고 `latest.json`을 나중에 바꾼다. 그래서 그 사이에 멈추면 다시 시작한 뒤 같은 변화가 한 번 더 기록될 수는 있어도(적어도 한 번), 빠지지는 않는다.
+
+**`calendar/date=<읽은 날, KST>/feed=tradingview/symbol=<국가>/`**: 일정 하나의 새 값마다 한 줄.
+
+| 열 | 형식 | 내용 |
+|---|---|---|
+| `recorded_at` | timestamp (UTC) | 읽은 시각 |
+| `id` | string | 출처의 일정 id |
+| `at` | timestamp (UTC) | 발표 시각 |
+| `country` | string | 두 글자 국가(`US`, `KR`, `EU` 등) |
+| `title`, `indicator`, `category`, `period` | string | 일정 이름, 지표, 출처의 분류 코드, 기준 기간(`Sep` 등). 없으면 null |
+| `actual`, `forecast`, `previous` | float64 | 실제(발표 전 null), 예상, 이전 값. `unit` 단위 |
+| `unit`, `scale`, `currency` | string | 단위(`%`, `$`, `CNY` 등), 배율(`K`, `M`, `B`, `T`: 값은 `<숫자><배율>`), 통화. 없으면 null |
+| `importance` | string | `low`, `medium`, `high` |
+| `source`, `source_url` | string | 발표 기관과 그 주소 |
+
+`calendar/latest.json`은 마지막 답 전체다(`fetched_at`, `source`, `countries`, `events`). 계층이 아니어서 보관(S3)은 올리지 않는다.
 
 ## 매크로 지표와 일일 국면 (#8)
 

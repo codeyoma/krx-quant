@@ -155,7 +155,7 @@
 
 ### 계약 (JSON 스키마, #19)
 
-- `schemas/engine-api-v1.json`이 모든 `/v1` 응답의 형식이다(JSON Schema 2020-12). 엔드포인트마다 `$defs`에 정의가 하나씩 있다: `status`, `symbols`, `latest`, `predictions`, `bars`, `algorithms`, `algorithm_detail`, `leaderboard`, `algorithm_stats`, `consensus`, `macro`, 오류는 `error`. 스트림의 메시지는 `event`(종류마다 `prediction_event` 등)다.
+- `schemas/engine-api-v1.json`이 모든 `/v1` 응답의 형식이다(JSON Schema 2020-12). 엔드포인트마다 `$defs`에 정의가 하나씩 있다: `status`, `symbols`, `latest`, `predictions`, `bars`, `algorithms`, `algorithm_detail`, `leaderboard`, `algorithm_stats`, `consensus`, `macro`, `calendar`, 오류는 `error`. 스트림의 메시지는 `event`(종류마다 `prediction_event` 등)다.
 - 스키마에 없는 필드는 계약 위반이다(모든 객체가 닫혀 있다). 그래서 필드를 더하거나 바꾸면 스키마도 같이 고친다. 시각은 `+09:00`이 붙은 ISO 8601이어야 한다.
 - 계약 테스트(`tests/test_api_contract.py`)가 세 모드의 엔진에 모든 엔드포인트, 질의 변형, 오류 응답을 물어 스키마로 검사한다. 빈 재생 엔진(값이 `null`인 경우), 데모 엔진(필드가 찬 경우), 가짜 KIS 위의 실시간 수집기다. 라우트마다 스키마 정의가 있는지도 확인한다(`tests/api_schema.py`의 `ROUTES`). 그래서 엔드포인트를 더하면 `ROUTES`와 스키마에 함께 넣어야 테스트를 지난다.
 - 스트림 테스트(`tests/test_api_stream.py`)는 받은 메시지마다 `event` 정의로 검사한다. 실시간 수집기의 계약 테스트도 스트림을 함께 검사한다.
@@ -261,20 +261,21 @@
 
 > **바뀜** (2026-10-13, #108): 오늘의 1분봉만 줬다 → `before`·`limit`으로 지난 날의 봉도 준다(백필 파일). 이유: 차트를 지난 날로 스크롤한다(#100).
 
-### `GET /v1/symbols/{symbol}/candles?period=day&before=T&limit=N`
+### `GET /v1/symbols/{symbol}/candles?period=day|week|month|year&before=T&limit=N`
 
-서버에 저장한 일봉(#111)을 `before`보다 앞서 시작한 것만 최대 `limit`개, 오래된 것부터 준다. 차트의 "일" 보기가 처음에 읽고, 왼쪽 끝에 닿으면 가장 오래된 봉의 날로 `before`를 줘서 더 읽는다.
+서버에 저장한 일·주·월·년봉(#111, #112)을 `before`보다 앞서 시작한 것만 최대 `limit`개, 오래된 것부터 준다. 차트의 "일·주·월·년" 보기가 처음에 읽고, 왼쪽 끝에 닿으면 가장 오래된 봉의 날로 `before`를 줘서 더 읽는다.
 
 ```json
 {"symbol": "005930", "period": "day", "venue": "UN", "candles": [{"date": "2026-10-08", "open": 80900, "high": 81700, "low": 80500, "close": 81250, "volume": 12873000}]}
 ```
 
-- `period`: 지금은 `day`뿐이다(주·월·년은 #112). 없거나 다른 값이면 400이다.
+- `period`: `day`, `week`, `month`, `year`. 없거나 다른 값이면 400이다.
+- `date`는 봉의 기간이 시작하는 날(KST)이다: 일봉은 그날, 주봉은 그 주의 월요일, 월봉은 1일, 년봉은 1월 1일. KIS가 어느 날로 붙였든 이렇게 맞춘다.
 - `before`: ISO 8601 시각, 오프셋 포함. 없으면 지금이다. 일봉은 그날 00:00 KST에 시작한 것으로 본다. 오프셋이 없거나 시각이 아니면 400이다.
 - `limit`: 1–2000, 기본 400. 범위 밖이면 400이다.
-- 오늘이 든 봉은 주지 않는다. 20:30 뒤 저장된 뒤에도 그렇다. 화면이 오늘의 1분봉과 실시간 봉으로 만든다.
+- 오늘이 든 봉은 주지 않는다: 오늘의 일봉, 이번 주·달·해의 봉. 20:30 뒤 저장된 뒤에도 그렇다. 화면이 오늘의 1분봉과 실시간 봉, 그리고 이번 기간의 지난 일봉으로 만든다.
 - 가격은 수정주가다. `venue`는 봉이 온 시장이다: `UN`(통합 KRX+NXT)이면 화면은 오늘 봉을 그날의 모든 1분봉으로, `KRX`면 09:00–15:30 봉으로 만든다. 저장된 봉이 없으면 `venue`는 `null`, `candles`는 빈 목록이다.
-- 파일은 [events.md](events.md#candles-일봉-rest-111)의 `candles` 계층이다. 데이터 디렉터리가 없는 재생 엔진은 빈 목록을 준다. 데모 엔진은 종목마다 10-08까지 만든 일봉 500개를 준다.
+- 파일은 [events.md](events.md#candles-일주월년봉-rest-111-112)의 `candles` 계층이다. 데이터 디렉터리가 없는 재생 엔진은 빈 목록을 준다. 데모 엔진은 종목마다 10-08까지 만든 일봉 500개와, 그 일봉을 묶은 끝난 주·월·년봉을 준다.
 
 ### `GET /v1/algorithms`
 
@@ -432,6 +433,27 @@
 - `readings`는 지표 표의 순서다(`macro.py`의 `INDICATORS`). 보이는 국면을 정한 그 읽기의 값이다. 수집기가 다시 시작해 그날 새로 읽었으면, 그 전 읽기의 값은 섞지 않는다. 그래서 실패하거나 키가 없어 건너뛴 출처의 지표는 빠진다. `as_of`는 출처 기준 값의 날짜, `change_pct`는 KRX 전 거래일 아침 대비 등락률(%)이다. 값을 모르면 `null`이다.
 - `failed`는 마지막 읽기에서 실패한 출처와 이유, `skipped`는 키가 없어 건너뛴 출처다.
 - 아직 정한 날이 없거나(데이터 디렉터리에 없음) 재생 엔진이면 `day`, `decided_at`, `regime`이 `null`이고 목록은 비어 있다. 데모 엔진은 가상의 국면(`risk_off`)을 보인다.
+
+### `GET /v1/calendar` (#150)
+
+경제 캘린더다. 수집기가 TradingView에서 마지막으로 읽은 것 가운데, 엔진 시계의 오늘 0시(KST)부터의 일정을 시각 순으로 보인다([design.md](design.md#45-매크로-지표)의 "경제 캘린더").
+
+```json
+{
+  "fetched_at": "2026-10-13T09:15:00+09:00",
+  "source": "tradingview",
+  "countries": ["US", "KR", "CN", "JP", "EU", "DE", "GB"],
+  "events": [
+    {"id": "421602", "at": "2026-10-14T21:30:00+09:00", "country": "US", "title": "Inflation Rate YoY", "indicator": "Inflation Rate", "category": "prce", "period": "Sep", "actual": null, "forecast": 3.7, "previous": 3.4, "unit": "%", "scale": null, "currency": "USD", "importance": "high", "source": "Bureau of Labour Statistics", "source_url": "https://www.bls.gov"}
+  ]
+}
+```
+
+- `limit`: 일정 수(기본 100, 1–1000). 범위 밖이면 400이다.
+- `fetched_at`은 수집기가 마지막으로 읽은 시각이다. 읽기에 실패하는 동안은 앞의 답이 그대로라서 늦어진다. 한 번도 읽지 않았으면(재생·데모 엔진 포함) `null`이고 목록은 비어 있다.
+- 값(`actual`, `forecast`, `previous`)은 숫자이고, 모르면 `null`이다. 값은 `<숫자><scale>`이고 단위는 `unit`이다. `scale`은 `K`(천), `M`(백만), `B`(십억), `T`(조) 또는 `null`이라서, `previous: 23.75, scale: "K"`는 23,750이다. `unit`은 `%`, 통화(`$`, `€`, `£`, `CNY` 등) 또는 `null`이다. 실제 값은 발표 뒤 수집기가 처음 읽을 때(기본 15분 안에) 찬다.
+- 엔진은 수집기가 남긴 파일을 그대로 넘기지 않고 한 번 읽어 다시 쓴다. 그래서 파일이 망가지거나 손으로 고쳐져도 답은 이 형식을 지키고, 읽을 수 없는 일정은 빠진다.
+- 엔진은 수집기가 쓴 파일을 많아야 30초마다 다시 읽는다.
 
 ### `GET /v1/stream` (WebSocket, #19)
 
