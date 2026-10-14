@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import sqlite3
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
@@ -17,7 +18,7 @@ import pytest
 from krx_quant.baselines import Forecast
 from krx_quant.cli import main
 from krx_quant.macro import INDICATORS, READING_SCHEMA, REGIME_SCHEMA
-from krx_quant.predictions import DB_NAME, NewPrediction, PredictionStore, Score
+from krx_quant.predictions import DB_NAME, NewPrediction, PredictionStore, Score, iso
 from krx_quant.pricing import Direction
 from krx_quant.recorder import ParquetRecorder
 from krx_quant.touch import SILENT, Reached, TouchResult
@@ -115,6 +116,16 @@ def server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         at("09:10:00"),
     )
     store.close()
+    # An earlier target version's label of the same 09:01 window: not this version's, left out.
+    conn = sqlite3.connect(state / DB_NAME)
+    with conn:
+        conn.execute(
+            "INSERT INTO touches (symbol, bar_close, target_version, class, unscorable, path, scored_at)"
+            " SELECT symbol, bar_close, 1, 'down', unscorable, path, scored_at FROM touches"
+            " WHERE bar_close = ?",
+            (iso(at("09:01:00")),),
+        )
+    conn.close()
     record(
         data,
         [
@@ -141,7 +152,11 @@ def touched(
     close: datetime, *, up_at: datetime | None, dwell: float | None, max_bid: float, trade_high: float
 ) -> TouchResult:
     """A window at 81,250 (targets 81,450 and 81,050) whose ask never fell below 81,300."""
-    reached = Reached(up_at, max_bid, None, up_at + timedelta(seconds=dwell)) if up_at and dwell else None
+    reached = (
+        Reached(up_at, max_bid, None, up_at + timedelta(seconds=dwell))
+        if up_at is not None and dwell is not None
+        else None
+    )
     return TouchResult(
         SYMBOL,
         close,

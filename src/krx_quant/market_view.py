@@ -480,6 +480,7 @@ class MarketView:
         # integrated best quote (bid, ask), the one before a window opens.
         self._windows: dict[str, dict[datetime, TouchWindow]] = {s: {} for s in self.symbols}
         self._best: dict[str, tuple[float, float]] = {}
+        self._ended_through: datetime | None = None  # the last bar close whose windows were handed out
 
     def on_event(self, feed: str, row: dict[str, Any]) -> None:
         """Take an event into the bars, reference prices, microprices, order flow, flows or
@@ -671,6 +672,22 @@ class MarketView:
         a window not followed (the engine started after its bar close) says so."""
         window = self._windows.get(symbol, {}).get(bar_close)
         return window.result() if window is not None else restarted(symbol, bar_close)
+
+    def ended_windows(self, due: datetime) -> list[tuple[str, datetime]]:
+        """The touch windows over by ``due`` (#167), as (symbol, bar close), each handed out
+        once: every symbol's, predicted or not (a VI, a missing book)."""
+        closes = sorted(
+            {
+                c
+                for windows in self._windows.values()
+                for c in windows
+                if c + WINDOW <= due and (self._ended_through is None or c > self._ended_through)
+            }
+        )
+        if not closes:
+            return []
+        self._ended_through = closes[-1]
+        return [(s, c) for c in closes for s in self.symbols if c in self._windows[s]]
 
     def _open_windows(self, close: datetime) -> None:
         """Start following each symbol's touch window from the bar close ``close``, once."""

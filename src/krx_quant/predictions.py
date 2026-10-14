@@ -547,10 +547,12 @@ class PredictionStore:
             )
 
     def touches(self, symbol: str | None = None) -> list[dict[str, Any]]:
-        """The touch labels stored, oldest first, with their path parsed (diagnosis, tests)."""
-        where, params = ("WHERE symbol = ?", (symbol,)) if symbol else ("", ())
+        """The touch labels of this target version stored, oldest first, with their path
+        parsed (diagnosis, tests)."""
+        where, params = ("AND symbol = ?", (symbol,)) if symbol else ("", ())
         rows = self._db.execute(
-            f"SELECT symbol, bar_close, class, unscorable, path, scored_at FROM touches {where}"
+            "SELECT symbol, bar_close, class, unscorable, path, scored_at FROM touches"
+            f" WHERE target_version = {TARGET_VERSION} {where}"
             " ORDER BY bar_close, symbol",
             params,
         ).fetchall()

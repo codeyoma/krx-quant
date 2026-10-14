@@ -783,17 +783,19 @@ class PredictionEngine:
 
     def _score_until(self, due: datetime) -> None:
         scores: list[tuple[int, Score]] = []
-        windows: dict[tuple[str, datetime], None] = {}  # the bar closes scored, in order
+        # The touch label of every window over (#167), predicted or not (a VI), and of each
+        # bar close scored (one from before a restart says so): recorded beside the outcomes,
+        # not yet what they are scored on.
+        windows = dict.fromkeys(self._market.ended_windows(due))
         while self._pending and self._pending[0][0] <= due:
             _, _, pending = heapq.heappop(self._pending)
             mid_target = self._market.mid(pending.symbol, pending.target_at)
             scores.append((pending.prediction_id, _score(pending, mid_target)))
             windows[(pending.symbol, pending.target_at - HORIZON)] = None
-        if scores:
-            now = self.clock.now()
-            # The touch label of each bar close scored (#167): recorded beside the outcomes,
-            # not yet what they are scored on.
+        now = self.clock.now()
+        if windows:
             self.store.add_touches([self._market.touch(symbol, close) for symbol, close in windows], now)
+        if scores:
             self.store.score_all(scores, now)
             self._tell(OutcomesScored([prediction_id for prediction_id, _ in scores]))
 

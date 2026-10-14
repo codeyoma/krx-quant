@@ -12,10 +12,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from krx_quant.consensus import NAMES as CONSENSUS
 from krx_quant.engine import Event
 from krx_quant.predictions import PredictionStore
 from krx_quant.touch import RESTARTED, SILENT
-from tests.replay_events import SYMBOL, api, at, book, get_json, run, steady_book
+from tests.replay_events import SYMBOL, api, at, book, get_json, run, steady_book, vi
 
 
 def quiet_book(start: str, end: str) -> list[Event]:
@@ -93,3 +94,22 @@ async def test_a_window_the_engine_restarted_in_is_not_scored(tmp_path: Path) ->
     assert {rows[c]["unscorable"] for c in ("09:30", "09:31", "09:32", "09:33")} == {RESTARTED}
     assert rows["09:34"]["class"] == "flat"  # opened after the restart
     assert rows["09:29"]["class"] == "flat"  # scored at 09:33, before it
+
+
+async def test_a_bar_close_in_a_vi_still_gets_its_touch_label(tmp_path: Path) -> None:
+    db = tmp_path / "engine.sqlite3"
+    # A VI from 09:30:20 to 09:32:40: the 09:31 and 09:32 bar closes are not predicted.
+    events = quiet_book("09:00:30", "09:45:00") + [
+        vi(at("09:30:24"), "09:30:20"),
+        vi(at("09:32:44"), "09:30:20", "09:32:40"),
+    ]
+
+    engine = await run(db, sorted(events, key=lambda e: e[1]["received_at"]), until=at("09:45:00"))
+
+    async with api(engine) as client:
+        made = await get_json(
+            client, f"/v1/symbols/{SYMBOL}/predictions?bar_close=2026-10-12T09:31:00%2B09:00"
+        )
+    assert {p["status"] for p in made["predictions"] if p["algorithm"] not in CONSENSUS} == {"vi"}
+    labels = classes(db)
+    assert labels["09:31"] == labels["09:32"] == "flat"  # recorded though nothing was scored

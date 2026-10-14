@@ -56,6 +56,7 @@ from krx_quant.predictions import SCORED
 from krx_quant.pricing import most_likely, tick_size
 from krx_quant.reference import BAR, KRX_ONLY, MAX_QUOTE_AGE
 from krx_quant.regime import NO_INDICATOR
+from krx_quant.touch import TARGET_VERSION
 
 DEFAULT_DAYS = 20
 QUANTILES = (0.5, 0.9, 0.99)
@@ -282,7 +283,7 @@ def _touches(conn: sqlite3.Connection | None, days: Sequence[date]) -> list[str]
     try:
         rows = conn.execute(
             "SELECT symbol, bar_close, class, unscorable, path FROM touches p"
-            f" WHERE {cond} ORDER BY bar_close",
+            f" WHERE target_version = {TARGET_VERSION} AND {cond} ORDER BY bar_close",
             params,
         ).fetchall()
     except sqlite3.OperationalError:
@@ -358,6 +359,7 @@ def _touched_before_display(conn: sqlite3.Connection, cond: str, params: list[st
     rows = conn.execute(
         "SELECT p.p_up, p.p_flat, p.p_down, p.displayed_at, t.class, t.path FROM predictions p"
         " JOIN touches t ON t.symbol = p.symbol AND t.bar_close = p.bar_close"
+        f" AND t.target_version = {TARGET_VERSION}"
         f" WHERE p.status = 'ok' AND t.class IN ('up', 'down') AND {cond}",
         params,
     ).fetchall()
