@@ -14,7 +14,7 @@ import enum
 import logging
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 
 import pyarrow as pa
 
@@ -138,19 +138,43 @@ class FeedHealth:
         confirmed = self._calendar.knows(today)
         newly: list[Key] = []
         for key in self._watched.keys() | self._last_seen.keys():
-            if key in self._open:
+            if key in self._open or not self._counts_silence(key, today, confirmed):
                 continue
             seen = self._last_seen.get(key)
-            if (seen is None or kst_day(seen) != today) and (not confirmed or key[0] in OWN_HOURS):
-                continue
             since = max(t for t in (session.open, seen, self._watched.get(key)) if t is not None)
             if (at - since).total_seconds() > STALE_SECONDS.get(key[0], DEFAULT_STALE_SECONDS):
                 self._open[key] = _Gap(GapKind.STALE, since)
                 newly.append(key)
         return newly
 
-    def open_gaps(self, kind: GapKind) -> list[Key]:
-        return [key for key, gap in self._open.items() if gap.kind is kind]
+    def silent_feeds(self) -> list[str]:
+        """Feeds with a stale gap on every key that can go stale today.
+
+        A whole feed going quiet is a fault: a wrong subscription, a parser or the
+        connection. One quiet key of a busier feed is the market: a halt, a VI, an option
+        strike nobody trades. A key that cannot go stale yet (not delivered today, in a
+        feed that keeps its own hours or on a day KIS has not confirmed) does not hold the
+        rest of its feed back.
+        """
+        today = kst_day(self._now())
+        confirmed = self._calendar.knows(today)
+        stale = {key for key, gap in self._open.items() if gap.kind is GapKind.STALE}
+        keys: dict[str, list[Key]] = {}
+        for key in self._watched.keys() | self._last_seen.keys():
+            keys.setdefault(key[0], []).append(key)
+        return sorted(
+            feed
+            for feed, feed_keys in keys.items()
+            if any(k in stale for k in feed_keys)
+            and all(k in stale or not self._counts_silence(k, today, confirmed) for k in feed_keys)
+        )
+
+    def _counts_silence(self, key: Key, today: date, confirmed: bool) -> bool:
+        """Whether ``key`` can go stale today (see ``check_stale``)."""
+        seen = self._last_seen.get(key)
+        if seen is not None and kst_day(seen) == today:
+            return True
+        return confirmed and key[0] not in OWN_HOURS
 
     def snapshot(self) -> list[FeedState]:
         """Every expected or delivering feed: when it last delivered and any open gap."""

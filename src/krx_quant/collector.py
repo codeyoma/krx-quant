@@ -52,7 +52,7 @@ from krx_quant.feeds import (
     us_daytime_key,
 )
 from krx_quant.feeds.base import kst_day
-from krx_quant.health import FeedHealth, FeedState, GapKind
+from krx_quant.health import FeedHealth, FeedState
 from krx_quant.lifecycle import Rules
 from krx_quant.macro import MacroCollector, day_regime, keep_macro, macro_recorder
 from krx_quant.market_calendar import MarketCalendar, Phase, calendar_store, next_on_trading_day
@@ -726,12 +726,13 @@ class _Stream:
             await asyncio.gather(self._recovery, return_exceptions=True)
 
     def check_stale(self) -> None:
-        """Alert, in one message, on feeds that went quiet; announce the ones that came back."""
-        newly = self._health.check_stale()
-        if newly:
-            self._alerts.raise_many([_stale_name(k) for k in newly], "장중 데이터가 끊긴 피드")
-        still = {_stale_name(k) for k in self._health.open_gaps(GapKind.STALE)}
-        back = [name for name in self._alerts.active(_STALE_PREFIX) if name not in still]
+        """Alert, in one message, on feeds whose every key went quiet; announce the ones that
+        came back. One quiet key is only a gap record: it is the market, not a fault.
+        """
+        self._health.check_stale()
+        silent = [_stale_name(feed) for feed in self._health.silent_feeds()]
+        self._alerts.raise_many(silent, "구독한 키가 모두 끊긴 피드")
+        back = [name for name in self._alerts.active(_STALE_PREFIX) if name not in silent]
         if back:
             self._alerts.resolve_many(back, "데이터가 다시 들어오는 피드")
 
@@ -869,5 +870,5 @@ class _Stream:
 _STALE_PREFIX = "stale "
 
 
-def _stale_name(key: tuple[str, str]) -> str:
-    return f"{_STALE_PREFIX}{key[0]} {key[1]}"
+def _stale_name(feed: str) -> str:
+    return f"{_STALE_PREFIX}{feed}"
