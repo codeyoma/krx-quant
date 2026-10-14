@@ -72,7 +72,7 @@ aws iam create-access-key --user-name krx-quant-engine
    curl -s -o /dev/null -w '%{http_code}\n' https://openapi.koreainvestment.com:9443/oauth2/tokenP
    ```
    `000`이 아닌 코드가 나오면 접속된다. `000`이면 연결이 안 된 것이다. 개통을 멈추고 KIS에 해외 접속이 되는지 문의한다. WebSocket(`ops.koreainvestment.com:21000`)은 8단계의 엔진 로그로 확인한다.
-3. 비공개 저장소를 받기 위해 읽기 전용 배포 키를 만든다.
+3. 저장소를 받는 읽기 전용 배포 키를 만든다. 저장소가 비공개였을 때(2026-10-14까지) 필요했던 단계다. 공개된 뒤에는 HTTPS로도 받을 수 있지만, 이미 배포 키로 받는 서버는 그대로 둔다.
    ```bash
    ssh-keygen -t ed25519 -f ~/.ssh/krx-quant-deploy -N "" -C krx-quant-server
    cat ~/.ssh/krx-quant-deploy.pub
