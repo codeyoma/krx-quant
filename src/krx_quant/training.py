@@ -30,7 +30,8 @@ answers of its bar closes (``TrainingDay.answers``), what the kind's algorithms 
 (``TrainingDay.of_kind``): on a recorded day the kind's answer function on the windows the
 Market View follows, as the engine answers them; on a backfilled day the kind's bar rule
 (``Kind.bar_answer``; none without one). The bar closes left out are the direction's (a VI,
-a special situation).
+a special situation); a day counts them by why (``TrainingDay.left_out``, #184), for the
+night's report.
 
 The previous trading day's one-minute ranges (``range_prev_day``, #181) and bars (#183, the
 barrier's width) come from that day's backfilled bars (``backfill.PreviousDay``), on a recorded
@@ -89,16 +90,24 @@ BarDays = Mapping[tuple[str, date], Sequence[Bar]]  # (symbol, day) -> bars, old
 Reference = Literal["mid", "close"]
 # The kinds' answers of a day's bar closes (#179), by (kind, symbol, bar close).
 Answers = dict[tuple[str, str, datetime], Answer | None]
+# Why a recorded day's bar close has no sample (#184): the symbol in a VI there (the engine does
+# not predict it), or its four minutes touched by a special situation (live statistics leave it
+# out).
+IN_VI = "vi"
+SPECIAL = "special"
 
 
 @dataclass(frozen=True)
 class TrainingDay:
     """A day's samples, with every feature asked for, and the reference price they used; with
-    the kinds asked for (#179), their answers of its bar closes."""
+    the kinds asked for (#179), their answers of its bar closes; and how many of its bar closes
+    (and symbols) have no sample, by why (#184: ``IN_VI``, ``SPECIAL``; none on a backfilled
+    day, which knows of no VI)."""
 
     reference: Reference
     samples: list[Sample]
     answers: Mapping[tuple[str, str, datetime], Answer | None] = field(default_factory=dict)
+    left_out: Mapping[str, int] = field(default_factory=dict)
 
     def of(self, features: Sequence[str]) -> list[Sample]:
         """The samples with only ``features``, as one algorithm declared them, each naming the
@@ -147,7 +156,7 @@ def training_day(
     previous = PreviousDay(data_dir, calendar) if needs_previous_day(names, kinds) else None
     if is_recorded(data_dir, day, symbols):
         events = recorded_events(data_dir, day, symbols, leaders)
-        made, answers = recorded_day(
+        made, answers, left_out = recorded_day(
             events,
             calendar,
             day,
@@ -160,7 +169,7 @@ def training_day(
             kinds=kinds,
             previous=previous,
         )
-        return TrainingDay("mid", made, answers)
+        return TrainingDay("mid", made, answers, left_out)
     bar_days = bar_days_on(data_dir, symbols, [day])
     if len(bar_days) < len(symbols):
         return None
@@ -307,7 +316,7 @@ def recorded_samples(
     """A sample per bar close of ``day``'s prediction window and symbol, in time order, from
     the day's events (in receipt order) through the engine's Market View (``recorded_day``).
     """
-    made, _ = recorded_day(
+    made, _, _ = recorded_day(
         events,
         calendar,
         day,
@@ -336,10 +345,11 @@ def recorded_day(
     target_version: int = 1,
     kinds: Sequence[Kind] = (),
     previous: PreviousDays | None = None,
-) -> tuple[list[Sample], Answers]:
+) -> tuple[list[Sample], Answers, dict[str, int]]:
     """A sample per bar close of ``day``'s prediction window and symbol, in time order, from
-    the day's events (in receipt order) through the engine's Market View; and the ``kinds``'
-    answers of its windows (#179), as the engine answers them.
+    the day's events (in receipt order) through the engine's Market View; the ``kinds``'
+    answers of its windows (#179), as the engine answers them; and how many bar closes (and
+    symbols) were left out, by why (#184: ``IN_VI``, ``SPECIAL``).
 
     At each bar close the features are computed before any event received at or after it,
     as the engine does. The outcome is the mid-point four minutes later against the one at
@@ -352,7 +362,7 @@ def recorded_day(
     """
     session = calendar.session(day)
     if session is None:
-        return [], {}
+        return [], {}, {}
     store = store or FeatureStore()
     to_touch = target_version >= 2
     # With the touch target or the kinds, the view follows the windows as the engine's does.
@@ -377,6 +387,7 @@ def recorded_day(
     mids: dict[tuple[str, datetime], float | None] = {}
     labels: dict[tuple[str, datetime], Direction | None] = {}  # by bar close, once its window ended
     answers: Answers = {}  # the kinds' (#179), likewise
+    left_out = {IN_VI: 0, SPECIAL: 0}  # the bar closes without a sample, by why (#184)
 
     def reach(moment: datetime) -> None:
         """Everything due at the minutes up to ``moment``, before what is received then."""
@@ -387,6 +398,7 @@ def recorded_day(
                 known = special.known(before=minute)
                 for symbol in symbols:
                     if in_vi(known, symbol, minute):
+                        left_out[IN_VI] += 1
                         continue
                     snapshot = view.snapshot(frozen, symbol, fee_rate, regime)
                     marked = touching(known, symbol, minute, minute + HORIZON)
@@ -412,13 +424,14 @@ def recorded_day(
         # Special as the engine marks it: by the windows known when it is made, or learned since.
         t = snapshot.bar_close
         if marked or touching(special.learned_since(t), snapshot.symbol, t, t + HORIZON):
+            left_out[SPECIAL] += 1
             continue
         later = mids.get((snapshot.symbol, snapshot.bar_close + HORIZON))
         sample = _sample(snapshot, values, names, later, terms)
         if to_touch:
             sample = replace(sample, outcome=labels.get((snapshot.symbol, t)))
         out.append(sample)
-    return out, answers
+    return out, answers, left_out
 
 
 def bar_answers(
