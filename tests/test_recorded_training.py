@@ -1,7 +1,8 @@
 """Training on a recorded day: the engine's events turned into training samples.
 
 Input: hand-made events, as the collector records them. Output: the samples, compared
-with what the engine computed and scored when it replayed the same events.
+with what the engine computed and scored when it replayed the same events: the
+four-minute move on basis A, or with the touch target (#169) the touch labels it recorded.
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ from pathlib import Path
 from krx_quant.engine import Event
 from krx_quant.features import FEATURES, Leaders, regime_code
 from krx_quant.macro import MACRO, REGIME_SCHEMA
+from krx_quant.predictions import PredictionStore
 from krx_quant.pricing import Direction, tick_size
 from krx_quant.recorder import ParquetRecorder
 from krx_quant.training import recorded_samples, training_day
@@ -180,3 +182,36 @@ def test_a_recorded_day_without_any_macro_indicator_trains_as_a_day_without_a_re
 
     assert day is not None
     assert {s.features["macro_regime"] for s in day.samples} == {None}, "not neutral's code"
+
+
+async def test_a_recorded_day_trains_on_the_touch_labels_the_engine_records(tmp_path: Path) -> None:
+    # With the touch target (#169) a recorded day's outcomes are the engine's own touch labels.
+    events = morning()
+    probe = FixedAlgorithm("probe", features=NAMES, unique=NAMES)
+    await run(
+        tmp_path / "engine.db", events, until=END, symbols=(SYMBOL, PEER), algorithms=[probe], leaders=LEADERS
+    )
+    store = PredictionStore(tmp_path / "engine.db")
+    try:
+        recorded = {(r["symbol"], datetime.fromisoformat(r["bar_close"])): r for r in store.touches()}
+    finally:
+        store.close()
+
+    touching = recorded_samples(events, CALENDAR, DAY, (SYMBOL, PEER), NAMES, FEE, LEADERS, target_version=2)
+    moving = recorded_samples(events, CALENDAR, DAY, (SYMBOL, PEER), NAMES, FEE, LEADERS)
+
+    # The windows over by the end of the replay: 09:01–10:26.
+    over = [s for s in touching if s.bar_close <= END - timedelta(minutes=4)]
+    assert len(over) == 2 * 86
+    for s in over:
+        row = recorded[(s.symbol, s.bar_close)]
+        assert (s.outcome.value if s.outcome else None) == row["class"]
+        path = row["path"]
+        assert s.features.touch is not None
+        assert s.features.touch.half_spread == (path["ask_start"] - path["bid_start"]) / 2 / path["tick"]
+    assert {s.outcome for s in over} >= {Direction.UP, Direction.FLAT, Direction.DOWN}
+    assert any(s.outcome is not m.outcome for s, m in zip(touching, moving, strict=True)), "a new label"
+    # Only the label changes: the features, and the move the outcome used to be, stay.
+    assert [s.change_ticks for s in touching] == [s.change_ticks for s in moving]
+    assert [s.features.as_dict() for s in touching] == [s.features.as_dict() for s in moving]
+    assert all(m.features.touch is None for m in moving)

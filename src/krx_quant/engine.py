@@ -43,6 +43,14 @@ special, marked when it is made or as soon as the situation is learned.
 The prediction window is continuous trading, from the first bar close after the open
 until the last bar close whose target (t + 4 minutes) is still in continuous trading:
 09:01–15:16 on a normal day.
+
+With the touch target (``target_version`` 2, #169) the algorithms' features carry its
+terms at the bar close (half the spread there), so the shared normal forecast gives the
+chances of reaching the targets; the baselines are the touch target's (``baselines_for``):
+the last four minutes' direction is the label of the touch window that just ended, read
+from the Market View (not predicted, ``no_previous``, when it could not be scored), the
+random one draws in the day's touch labels' proportions, and the climate baseline calls
+its table's direction (``climate.py``), a model the morning swap installs.
 """
 
 from __future__ import annotations
@@ -59,12 +67,16 @@ from functools import partial
 from typing import Any
 
 from krx_quant.algorithms import ALGORITHMS, Abstention, Algorithm, Model, NotPredicted, register
-from krx_quant.baselines import BASELINES, Forecast, Inputs
+from krx_quant.algorithms.forecasts import forecasting
+from krx_quant.baselines import NO_PREVIOUS, Baseline, Forecast, Inputs, baselines_for
+from krx_quant.climate import CLIMATE
+from krx_quant.climate import DEFAULT as NO_CLIMATE
+from krx_quant.climate import direction as climate_direction
 from krx_quant.clock import SessionClock
 from krx_quant.config import MAX_REVIEW_DAY, Settings
 from krx_quant.consensus import FAST, FINAL, NAMES, NO_WEIGHTS, SPANS, Timing, Weights, pool
 from krx_quant.consensus import fit as fit_weights
-from krx_quant.features import REGIME_CODES, FeatureStore, FeatureVector, Leaders, Value
+from krx_quant.features import REGIME_CODES, FeatureStore, FeatureVector, Leaders, TouchTerms, Value
 from krx_quant.feeds import (
     BOOK,
     BOOK_SNAPSHOT,
@@ -233,6 +245,7 @@ class _AtClose:
 
     mid: float | None
     features: Mapping[str, Value]
+    touch: TouchTerms | None = None  # the touch target's terms (target version 2)
 
 
 class PredictionEngine:
@@ -257,6 +270,8 @@ class PredictionEngine:
         admits: Callable[[Algorithm], bool] | None = None,
         commit: str = "unknown",
         review_rules: Rules | None = None,
+        target_version: int = 1,
+        climate: Model | None = None,
     ) -> None:
         self.store = store
         self.commit = commit  # the code it runs (the deploy's KRX_COMMIT)
@@ -267,6 +282,11 @@ class PredictionEngine:
         self.fee_rate = fee_rate
         self.clock = clock
         self.registered = register(algorithms)
+        # What is learned and forecast (KRX_TARGET_VERSION, #169), and the baselines of it.
+        self.target_version = target_version
+        self.baselines: tuple[Baseline, ...] = baselines_for(target_version)
+        self.baseline_names = frozenset(b.name for b in self.baselines)
+        self.climate = climate or NO_CLIMATE  # the climate baseline's table (target version 2)
         given = models or {}
         self.models = {a.name: given.get(a.name) or a.default_model() for a in self.registered}
         self._admits = admits  # without: every registered algorithm runs (replay, tests)
@@ -375,6 +395,10 @@ class PredictionEngine:
                 log.info("%s now runs %s", name, model.version)
                 self.models[name] = model
                 changed = True
+            elif name == CLIMATE and name in self.baseline_names and self.climate != model:
+                log.info("%s now runs %s", name, model.version)
+                self.climate = model
+                changed = True
         return changed
 
     def members(self) -> list[str]:
@@ -431,6 +455,7 @@ class PredictionEngine:
             fee_rate=self.fee_rate,
             alerted=alerted,
             rules=self.review_rules,
+            baselines=self.baseline_names,
         )
         for c in result.changes:
             # Only from the status reviewed: a retire command may have landed meanwhile.
@@ -535,6 +560,7 @@ class PredictionEngine:
             min_sample=self.min_sample,
             fee_rate=self.fee_rate,
             rules=self.review_rules,
+            baselines=self.baseline_names,  # the target's set, as the review judges by (#169)
         )
         dated = {name: replace(s, next_review_on=self._review_on(next_day, s)) for name, s in found.items()}
         self._stages = (key, dated)
@@ -564,7 +590,6 @@ class PredictionEngine:
         day_start = datetime.combine(bar_close.date(), time(), KST)
         at_close: dict[str, _AtClose] = {}
         frozen = self._market.at_close(bar_close)
-        baselines: dict[tuple[str, str], dict[str, Forecast | None]] = {}
         standings = self.store.statuses()  # read each time: retiring is a command
         retired, active = _with_status(standings, Status.RETIRED), _with_status(standings, Status.ACTIVE)
         running = [a for a in self.algorithms if a.name not in retired]
@@ -574,12 +599,17 @@ class PredictionEngine:
         stopped = [s for s in self.symbols if in_vi(known, s, bar_close)]
         if stopped:
             self._record_not_predicted(bar_close, stopped, "vi", running)
+        to_touch = self.target_version >= 2
+        made_by: dict[tuple[str, str, str], dict[str, Forecast | None]] = {}
         for symbol in self.symbols:
             if symbol in stopped:
                 continue
             snapshot = self._market.snapshot(frozen, symbol, self.fee_rate, regime)
             mid = snapshot.price
-            at_close[symbol] = _AtClose(mid, self._features.compute(snapshot, self._feature_names))
+            touch = (
+                TouchTerms.at(self._market.quote_at(symbol, bar_close), snapshot.tick) if to_touch else None
+            )
+            at_close[symbol] = _AtClose(mid, self._features.compute(snapshot, self._feature_names), touch)
             inputs = Inputs(
                 symbol=symbol,
                 bar_close=bar_close,
@@ -587,12 +617,23 @@ class PredictionEngine:
                 mid_before=self._market.mid(symbol, bar_close - HORIZON),
                 flat_ticks=snapshot.flat_ticks,
                 tick=snapshot.tick,
-                day_classes=self.store.day_classes(symbol, day_start, bar_close),
+                day_classes=(
+                    # The windows over by now: their bar closes four minutes back or more.
+                    self.store.day_touches(symbol, day_start, bar_close - HORIZON)
+                    if to_touch
+                    else self.store.day_classes(symbol, day_start, bar_close)
+                ),
+                previous=self._market.touch(symbol, bar_close - HORIZON).direction if to_touch else None,
+                climate=climate_direction(self.climate, symbol, bar_close) if to_touch else None,
             )
-            for b in BASELINES:
-                baselines.setdefault((b.name, b.version), {})[symbol] = b.predict(inputs)
+            for b in self.baselines:
+                forecast = b.predict(inputs)
+                status = "ok" if forecast is not None else NO_PREVIOUS
+                made_by.setdefault((b.name, self._version(b), status), {})[symbol] = forecast
         self._record(
-            bar_close, at_close, [(name, version, made, "ok") for (name, version), made in baselines.items()]
+            bar_close,
+            at_close,
+            [(name, version, made, status) for (name, version, status), made in made_by.items()],
         )
         if not at_close:
             return
@@ -724,10 +765,14 @@ class PredictionEngine:
         """Every predictor's empty prediction for ``symbols``, recorded with why."""
         at_close = {s: _AtClose(self._market.mid(s, bar_close), {}) for s in symbols}
         nothing = dict.fromkeys(symbols)
-        made = [(b.name, b.version, nothing, status) for b in BASELINES]
+        made = [(b.name, self._version(b), nothing, status) for b in self.baselines]
         made += [(a.name, self.models[a.name].version, nothing, status) for a in running]
         made += [(name, self.weights.version, nothing, status) for name in NAMES]
         self._record(bar_close, at_close, made)
+
+    def _version(self, baseline: Baseline) -> str:
+        """The version a baseline's predictions carry: the climate table's for the climate."""
+        return self.climate.version if baseline.name == CLIMATE else baseline.version
 
     def _within_cpu_budget(self, bar_close: datetime, running: Sequence[Algorithm]) -> list[Algorithm]:
         """The algorithms to run: the last registered drop out while the expected work is over budget."""
@@ -751,7 +796,7 @@ class PredictionEngine:
         status = "timed_out"
         declined: dict[str, Abstention] = {}
         if name not in self._busy:
-            vectors = {s: FeatureVector(c.features, algorithm.features) for s, c in at_close.items()}
+            vectors = {s: FeatureVector(c.features, algorithm.features, c.touch) for s, c in at_close.items()}
             started = timer.perf_counter()
             work = asyncio.ensure_future(asyncio.to_thread(_predict_symbols, algorithm, model, vectors))
             done, _ = await asyncio.wait({work}, timeout=self._budget.per_algorithm)
@@ -884,7 +929,8 @@ def _predict_symbols(algorithm: Algorithm, model: Model, vectors: Mapping[str, F
     declined: dict[str, Abstention] = {}
     for symbol, features in vectors.items():
         try:
-            f = algorithm.predict(features, model)
+            with forecasting(features):  # of the target the features carry (#169)
+                f = algorithm.predict(features, model)
         except NotPredicted as e:
             declined[symbol] = e.why
             continue

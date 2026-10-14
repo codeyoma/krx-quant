@@ -160,6 +160,10 @@ class Settings:
     probation_review_days: tuple[int, ...] = (10, 20, 40)  # days on probation it is judged on (#87)
     bench_review_days: tuple[int, ...] = (20, 40, 60)  # days on the bench it may recover on
     review_confidence: float = 0.983  # the lift-by-day interval's level those judgements need
+    # The target the engine learns and forecasts (KRX_TARGET_VERSION, #169): 1, the four-minute
+    # mid-point move; 2, the touch target (#160): training labels, the shared normal forecast
+    # and the baselines follow it. The touch labels are recorded either way (#167).
+    target_version: int = 1
 
     @classmethod
     def from_env(
@@ -352,6 +356,7 @@ class Settings:
             review_confidence=float(
                 number("KRX_REVIEW_CONFIDENCE", "0.983", float, minimum=0.5, maximum=0.9999)
             ),
+            target_version=int(_one_of("KRX_TARGET_VERSION", values.get("KRX_TARGET_VERSION", "1"), TARGETS)),
         )
 
 
@@ -366,6 +371,8 @@ def _on_or_off(name: str, raw: str) -> bool:
 
 # Where the nightly training runs: on this server, or on EC2 Spot (#23).
 TRAIN_ON = ("server", "spot")
+# The target versions (#169): 1, the four-minute mid-point move; 2, the touch target (#160).
+TARGETS = ("1", "2")
 
 
 def _one_of(name: str, raw: str, choices: tuple[str, ...]) -> str:

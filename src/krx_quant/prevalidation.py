@@ -26,6 +26,11 @@ It passes when all of these hold:
 
 The report is saved to ``state/prevalidations/<name>.json``, passed or not, with a digest
 of the algorithm's code; the engine reads it at each bar close.
+
+With the touch target (``KRX_TARGET_VERSION=2``, #169) the candidate trains on its labels,
+the replay forecasts it (the touch target's baselines, the climate table refitted before
+each day on the days before it, as the candidate is), and the stats are scored on the
+touch label instead of basis B.
 """
 
 from __future__ import annotations
@@ -41,7 +46,8 @@ from pathlib import Path
 from typing import Any
 
 from krx_quant.algorithms import ALGORITHMS, Algorithm, Model, NothingToLearn, load_models, register
-from krx_quant.baselines import BASELINE_NAMES
+from krx_quant.baselines import baselines_for
+from krx_quant.climate import CLIMATE_DAYS, fit_climate
 from krx_quant.config import Settings
 from krx_quant.features import Leaders
 from krx_quant.feeds.base import KST
@@ -49,7 +55,7 @@ from krx_quant.lifecycle import BASIS, CLONE_CORRELATION, correlations, most_cor
 from krx_quant.market_calendar import MarketCalendar, calendar_store
 from krx_quant.predictions import PredictionStore
 from krx_quant.replay import recorded_events, replay_recorded, sqlite_files
-from krx_quant.stats import Entry, enough, entry_json, leaderboard, scored_by_algorithm, split
+from krx_quant.stats import TOUCH_BASIS, Entry, enough, entry_json, leaderboard, scored_by_algorithm, split
 from krx_quant.training import TrainingDay, finished_days, is_recorded, training_day
 
 log = logging.getLogger(__name__)
@@ -79,9 +85,10 @@ def code_digest(algorithm: Algorithm) -> str:
     return digest.hexdigest()[:16]
 
 
-def admits(state_dir: Path) -> Callable[[Algorithm], bool]:
+def admits(state_dir: Path, target_version: int = 1) -> Callable[[Algorithm], bool]:
     """Whether the engine may start a new algorithm: registered before pre-validation, or
-    its latest report passed with the code it runs now."""
+    its latest report passed with the code it runs now, on the target it runs now (#169; a
+    report without one was on the four-minute move, 1)."""
 
     def admitted(algorithm: Algorithm) -> bool:
         if algorithm.name in REGISTERED_BEFORE:
@@ -98,6 +105,9 @@ def admits(state_dir: Path) -> Callable[[Algorithm], bool]:
             return False
         if report.get("code") != code_digest(algorithm):
             log.warning("%s passed with other code; it waits for a new pre-validation", algorithm.name)
+            return False
+        if report.get("target_version", 1) != target_version:
+            log.warning("%s passed on another target; it waits for a new pre-validation", algorithm.name)
             return False
         return True
 
@@ -124,6 +134,7 @@ class Prevalidation:
     statuses: dict[str, int]  # its predictions by status
     skipped_for_cpu: int  # bar closes it was skipped at for the CPU budget
     db: Path
+    target_version: int = 1  # the target replayed and scored on (#169)
 
     @property
     def passed(self) -> bool:
@@ -144,6 +155,7 @@ class Prevalidation:
             "statuses": self.statuses,
             "skipped_for_cpu": self.skipped_for_cpu,
             "db": str(self.db),
+            "target_version": self.target_version,
         }
 
 
@@ -202,6 +214,7 @@ async def _replay(
     for day in replayed:
         model = trainer.before(day)
         versions[day] = model.version
+        climate = trainer.climate_before(day) if settings.target_version >= 2 else None
         events = recorded_events(settings.data_dir, day, settings.symbols, leaders)
         engine = await replay_recorded(
             settings,
@@ -211,6 +224,7 @@ async def _replay(
             models={**running, candidate.name: model},
             algorithms=algorithms,
             calendar=calendar,
+            climate=climate,
         )
         engine.store.close()
         log.info("%s: replayed %s with %s", candidate.name, day, model.version)
@@ -228,12 +242,15 @@ def _judge(
 ) -> Prevalidation:
     """The candidate's report, from what the replay stored in ``db``."""
     name = candidate.name
+    # The touch target's label and baselines with it (#169), else basis B's.
+    basis = TOUCH_BASIS if settings.target_version >= 2 else BASIS
+    names = {b.name for b in baselines_for(settings.target_version)}
     store = PredictionStore(db)
     try:
         statuses = store.status_counts(name)
         skipped = store.count_runs("cpu_budget", datetime.combine(replayed[0], time(), KST), name)
         algos, baselines = split(
-            scored_by_algorithm(store.scored_predictions(replayed, None, False), BASIS), BASELINE_NAMES
+            scored_by_algorithm(store.scored_predictions(replayed, None, False), basis), names
         )
         measured = correlations(name, others, store.scored_predictions(replayed, None, True))
     finally:
@@ -268,6 +285,7 @@ def _judge(
         statuses=statuses,
         skipped_for_cpu=skipped,
         db=db,
+        target_version=settings.target_version,
     )
 
 
@@ -320,6 +338,7 @@ class _WalkForward:
         self._calendar = calendar
         self._leaders = leaders
         self._loaded: dict[date, TrainingDay | None] = {}
+        self._labelled: dict[date, TrainingDay | None] = {}  # the climate's days, labels only
 
     def before(self, day: date) -> Model:
         window = [d for d in self._available if d < day][-self._algorithm.training_days :]
@@ -334,16 +353,34 @@ class _WalkForward:
             log.warning("%s not trained before %s, its defaults predict: %s", self._algorithm.name, day, e)
             return self._algorithm.default_model()
 
+    def climate_before(self, day: date) -> Model:
+        """The climate baseline's table fitted on the latest ``CLIMATE_DAYS`` days before
+        ``day``, as the night before it would (#169)."""
+        window = [d for d in self._available if d < day][-CLIMATE_DAYS:]
+        for gone in [d for d in self._labelled if not window or d < window[0]]:
+            del self._labelled[gone]
+        days = [self._loaded[d] if d in self._loaded else self._labels(d) for d in window]
+        return fit_climate([s for found in days if found is not None for s in found.samples])
+
+    def _labels(self, day: date) -> TrainingDay | None:
+        if day not in self._labelled:
+            self._labelled[day] = self._read(day, ())
+        return self._labelled[day]
+
     def _load(self, day: date) -> TrainingDay | None:
         if day not in self._loaded:
-            s = self._settings
-            self._loaded[day] = training_day(
-                s.data_dir,
-                day,
-                self._calendar,
-                s.symbols,
-                self._algorithm.features,
-                s.fee_rate,
-                self._leaders,
-            )
+            self._loaded[day] = self._read(day, self._algorithm.features)
         return self._loaded[day]
+
+    def _read(self, day: date, features: Sequence[str]) -> TrainingDay | None:
+        s = self._settings
+        return training_day(
+            s.data_dir,
+            day,
+            self._calendar,
+            s.symbols,
+            features,
+            s.fee_rate,
+            self._leaders,
+            target_version=s.target_version,
+        )

@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import enum
 import statistics
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import TYPE_CHECKING, Any
@@ -125,13 +125,15 @@ def review(
     fee_rate: float,
     alerted: set[str],
     rules: Rules | None = None,
+    baselines: Collection[str] = BASELINE_NAMES,
 ) -> Review:
     """The status changes due at a day's review.
 
     ``algorithms`` are the registered ones in registration order; ``counted_from`` the
     first day each one's status counts; ``days`` the days with predictions up to the day
     reviewed, latest first; ``rows`` reads scored predictions; ``alerted`` the benched
-    algorithms already alerted as retirement candidates; ``rules`` when to judge (defaults).
+    algorithms already alerted as retirement candidates; ``rules`` when to judge (defaults);
+    ``baselines`` the baselines' names, the lifts' (those of the target version, #169).
     """
     rules = rules or Rules()
     read: dict[tuple[tuple[date, ...], bool], list[dict[str, Any]]] = {}
@@ -142,7 +144,7 @@ def review(
             read[key] = rows(chosen, special)
         return read[key]
 
-    judge = _Judge(cached, list(days[:RECENT_DAYS]), min_sample, fee_rate, rules)
+    judge = _Judge(cached, list(days[:RECENT_DAYS]), min_sample, fee_rate, rules, baselines)
     changes: list[Change] = []
     candidates: list[Candidate] = []
     for i, name in enumerate(algorithms):
@@ -169,6 +171,7 @@ class _Judge:
     min_sample: int
     fee_rate: float
     rules: Rules
+    baselines: Collection[str] = BASELINE_NAMES
 
     def decide(self, name: str, status: Status, held: list[date], earlier: list[str]) -> Change | None:
         """The change ``name``'s status is due for, if any."""
@@ -226,7 +229,7 @@ class _Judge:
 
     def measure(self, name: str, days: Sequence[date]) -> Entry:
         """``name``'s stats against the baselines on ``days``, enough to judge by or not."""
-        algorithms, baselines = split(scored_by_algorithm(self.rows(days, False), BASIS), BASELINE_NAMES)
+        algorithms, baselines = split(scored_by_algorithm(self.rows(days, False), BASIS), self.baselines)
         return entry(name, algorithms.get(name, []), baselines, self.fee_rate, self.rules.confidence)
 
     def _passed_by_day(self, name: str, days: Sequence[date]) -> Lift | None:
@@ -294,6 +297,7 @@ def stages(
     min_sample: int,
     fee_rate: float,
     rules: Rules | None = None,
+    baselines: Collection[str] = BASELINE_NAMES,
 ) -> dict[str, Stage]:
     """Each algorithm on probation or on the bench, where it stands toward its next review (#165).
 
@@ -319,7 +323,7 @@ def stages(
         keep = {d.isoformat() for d in chosen}
         return [r for r in read if r["bar_close"][:10] in keep]
 
-    judge = _Judge(rows_on, recent, min_sample, fee_rate, rules)
+    judge = _Judge(rows_on, recent, min_sample, fee_rate, rules, baselines)
     out: dict[str, Stage] = {}
     for name, (standing, held, lift_days) in on.items():
         review_days = rules.probation_days if standing.status is Status.PROBATION else rules.bench_days

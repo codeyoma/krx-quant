@@ -1,15 +1,31 @@
 """For algorithms that forecast a move in ticks: the three classes of a normal
 distribution around it, and training by the lowest log loss over a grid of parameters.
+
+What the three classes are follows the target (``KRX_TARGET_VERSION``, #169), which the
+features carry (``FeatureVector.touch``) and ``forecasting`` puts in force:
+
+- version 1, the four-minute move: up is the chance the move ends k ticks or more up,
+  down k ticks or more down, flat the rest (the endpoint);
+- version 2, the touch target (#160): up is the chance the best bid reaches the upper
+  target at some time in the four minutes, by the reflection principle for a Brownian
+  motion with that drift and spread; the distance is k ticks plus half the spread at the
+  bar close (the bid starts half the spread below the mid-point). Down is the chance of
+  the ask reaching the lower target times the chance the upper one was not reached (up
+  wins when both are, as the label has it; taken as independent), flat the rest.
+
+The algorithms' code is the same for both: only this shared function changes.
 """
 
 from __future__ import annotations
 
 import math
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 from krx_quant.algorithms.contract import Model, NothingToLearn, Sample
 from krx_quant.baselines import Forecast
-from krx_quant.features import FeatureVector
+from krx_quant.features import FeatureVector, TouchTerms
 from krx_quant.pricing import Direction
 
 HORIZON_MINUTES = 4.0
@@ -50,17 +66,67 @@ def class_moves(scored: Sequence[Sample]) -> dict[str, float]:
     return out
 
 
+# The touch target's terms of the bar close being forecast (target version 2); None: the
+# four-minute move (version 1).
+_TOUCH: ContextVar[TouchTerms | None] = ContextVar("touch", default=None)
+
+
+@contextmanager
+def forecasting(features: FeatureVector) -> Iterator[None]:
+    """Forecasts made inside are of ``features``' target: the touch target when they carry
+    its terms (target version 2), else the four-minute move."""
+    token = _TOUCH.set(features.touch)
+    try:
+        yield
+    finally:
+        _TOUCH.reset(token)
+
+
 def _normal_cdf(z: float) -> float:
     return 0.5 * (1 + math.erf(z / math.sqrt(2)))
 
 
+def _upper_tail(z: float) -> float:
+    """1 − Φ(z), accurate far in the tail."""
+    return 0.5 * math.erfc(z / math.sqrt(2))
+
+
+def _log_cdf(z: float) -> float:
+    """ln Φ(z); far in the lower tail, where Φ underflows, from its asymptotic series."""
+    if z > -30:
+        return math.log(0.5 * math.erfc(-z / math.sqrt(2)))
+    return -0.5 * z * z - math.log(-z) - 0.5 * math.log(2 * math.pi) + math.log1p(-1 / z**2 + 3 / z**4)
+
+
+def reach_probability(distance: float, drift: float, sigma: float) -> float:
+    """The chance that a Brownian motion with ``drift`` and standard deviation ``sigma`` over
+    the horizon reaches ``distance`` above its start at some time in it (the reflection
+    principle): 1 − Φ((a − μ)/s) + exp(2μa/s²)·Φ((−a − μ)/s); without drift 2·(1 − Φ(a/s)),
+    twice the chance of ending there. A distance of 0 or less is reached at once.
+    """
+    if distance <= 0:
+        return 1.0
+    a, mu, s = distance, drift, sigma
+    # The reflected term in logs: its exponential alone overflows for a strong drift.
+    reflected = 2 * mu * a / (s * s) + _log_cdf((-a - mu) / s)
+    return min(1.0, _upper_tail((a - mu) / s) + (math.exp(reflected) if reflected > -745 else 0.0))
+
+
 def normal_forecast(move: float, spread: float, flat_ticks: float) -> Forecast:
     """Up, flat and down for a move normally distributed around ``move`` with standard
-    deviation ``spread`` (both in ticks), against the flat band ``flat_ticks``.
+    deviation ``spread`` (both in ticks), against the flat band ``flat_ticks``: of where the
+    move ends (target version 1), or of reaching the targets on the way (version 2, the
+    terms ``forecasting`` put in force).
     """
     sigma = max(spread, MIN_SPREAD_TICKS)
-    p_up = 1 - _normal_cdf((flat_ticks - move) / sigma)
-    p_down = _normal_cdf((-flat_ticks - move) / sigma)
+    touch = _TOUCH.get()
+    if touch is not None:
+        distance = flat_ticks + touch.half_spread
+        p_up = reach_probability(distance, move, sigma)
+        p_down = reach_probability(distance, -move, sigma) * (1 - p_up)
+    else:
+        p_up = 1 - _normal_cdf((flat_ticks - move) / sigma)
+        p_down = _normal_cdf((-flat_ticks - move) / sigma)
     p_flat = max(0.0, 1 - p_up - p_down)
     total = p_up + p_flat + p_down
     return Forecast(p_up / total, p_flat / total, p_down / total, move)
@@ -88,8 +154,18 @@ def lowest_log_loss(
     on ``scored``; the first of equals.
     """
     best: tuple[float, Params] | None = None
+    touching = any(s.features.touch is not None for s in scored)
     for params in grid:
-        loss = sum(log_loss(forecast(s.features, params), s.outcome or Direction.FLAT) for s in scored)
+        if touching:  # each sample's forecast of its own target (#169)
+            loss = 0.0
+            for s in scored:
+                token = _TOUCH.set(s.features.touch)  # as ``forecasting``, without its overhead
+                try:
+                    loss += log_loss(forecast(s.features, params), s.outcome or Direction.FLAT)
+                finally:
+                    _TOUCH.reset(token)
+        else:
+            loss = sum(log_loss(forecast(s.features, params), s.outcome or Direction.FLAT) for s in scored)
         loss /= len(scored)
         if best is None or loss < best[0] - 1e-12:
             best = (loss, params)

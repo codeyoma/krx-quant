@@ -32,6 +32,7 @@ from botocore.exceptions import BotoCoreError, ClientError
 
 from krx_quant.algorithms import Algorithm, Model, load_models
 from krx_quant.archive import NIGHTLY_ARCHIVE
+from krx_quant.climate import CLIMATE, load_climate
 from krx_quant.config import Settings
 from krx_quant.cost_guard import training_stopped
 from krx_quant.engine import PredictionEngine
@@ -171,8 +172,12 @@ async def morning_swap(
 
 def reload_models(engine: PredictionEngine, shelf: Shelf) -> bool:
     """Switch the engine to the model files that changed; whether any did. Those of the
-    algorithms waiting for their pre-validation too, so they start on their latest."""
-    return engine.switch_models(load_models(shelf.state_dir, engine.registered))
+    algorithms waiting for their pre-validation too, so they start on their latest; and,
+    with the touch target, the climate baseline's table (#169)."""
+    models = load_models(shelf.state_dir, engine.registered)
+    if CLIMATE in engine.baseline_names:
+        models[CLIMATE] = load_climate(shelf.state_dir)
+    return engine.switch_models(models)
 
 
 def publish_live(store: ObjectStore, shelf: Shelf, algorithms: Sequence[Algorithm]) -> None:

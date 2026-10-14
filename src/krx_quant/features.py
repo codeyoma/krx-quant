@@ -994,14 +994,47 @@ class UndeclaredFeature(LookupError):
     """Not a KeyError: ``get`` and ``in`` must not quietly answer for an undeclared feature."""
 
 
+# Half the spread at a bar close where it is not known (a backfilled day, no book): a
+# one-tick spread, as 99.4% of the recorded bar closes had (#160).
+DEFAULT_HALF_SPREAD = 0.5
+
+
+@dataclass(frozen=True)
+class TouchTerms:
+    """Beside the features, what a forecast of the touch target (target version 2, #160,
+    #169) needs at the bar close: half the spread there, in ticks of the reference price.
+    The best bid starts that far below the mid-point the targets are set from (the best ask
+    as far above), so the upper target is k ticks and this much away for the bid to reach.
+    """
+
+    half_spread: float = DEFAULT_HALF_SPREAD
+
+    @classmethod
+    def at(cls, quote: tuple[float, float] | None, tick: float | None) -> TouchTerms:
+        """The terms of a bar close whose last best quote was ``quote`` (bid, ask), in ticks of
+        ``tick``; the default half spread without either."""
+        if quote is None or not tick:
+            return cls()
+        bid, ask = quote
+        return cls(max(ask - bid, 0.0) / 2 / tick)
+
+
 class FeatureVector(Mapping[str, FeatureValue]):
     """The features an algorithm declared; asking for any other raises UndeclaredFeature.
-    A number is read by name, a series with ``series``."""
+    A number is read by name, a series with ``series``.
 
-    def __init__(self, values: Mapping[str, Value], declared: Iterable[str]) -> None:
+    ``touch`` carries the touch target's terms at the bar close when the engine forecasts
+    that target (target version 2); None for the four-minute move (version 1). A vector made
+    from another keeps its terms."""
+
+    def __init__(
+        self, values: Mapping[str, Value], declared: Iterable[str], touch: TouchTerms | None = None
+    ) -> None:
         source: Mapping[str, Value] = values._values if isinstance(values, FeatureVector) else values
         self._declared = frozenset(declared)
         self._values: dict[str, Value] = {name: source[name] for name in self._declared}
+        inherited = values.touch if isinstance(values, FeatureVector) else None
+        self.touch: TouchTerms | None = touch if touch is not None else inherited
 
     def __getitem__(self, name: str) -> FeatureValue:
         value = self._value(name)

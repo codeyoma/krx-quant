@@ -45,7 +45,8 @@ CREATE TABLE IF NOT EXISTS {name} (
     p_down REAL,
     expected_ticks REAL,
     status TEXT NOT NULL,             -- ok, timed_out, error, vi (in a VI), no_book (declined),
-                                      -- no_members, none_finished (consensus)
+                                      -- no_members, none_finished (consensus),
+                                      -- no_previous (baseline-persist, touch target, #169)
     UNIQUE (symbol, algorithm, bar_close)
 );
 """
@@ -644,6 +645,16 @@ class PredictionStore:
             " JOIN predictions p ON p.id = o.prediction_id"
             " WHERE p.symbol = ? AND p.bar_close BETWEEN ? AND ? AND o.class_a IS NOT NULL"
             " GROUP BY o.class_a",
+            (symbol, iso(since), iso(until)),
+        ).fetchall()
+        return {Direction(r[0]): r[1] for r in rows}
+
+    def day_touches(self, symbol: str, since: datetime, until: datetime) -> Mapping[Direction, int]:
+        """Touch labels (this target version) of the bar closes in ``[since, until]`` stored so
+        far, predicted or not (#169)."""
+        rows = self._db.execute(
+            "SELECT class, COUNT(*) FROM touches WHERE symbol = ? AND bar_close BETWEEN ? AND ?"
+            f" AND target_version = {TARGET_VERSION} AND class IS NOT NULL GROUP BY class",
             (symbol, iso(since), iso(until)),
         ).fetchall()
         return {Direction(r[0]): r[1] for r in rows}
