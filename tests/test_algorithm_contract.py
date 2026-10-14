@@ -29,7 +29,7 @@ from krx_quant.algorithms import (
     predicted,
     save_model,
 )
-from krx_quant.baselines import BASELINES
+from krx_quant.baselines import BASELINES, TOUCH_BASELINES
 from krx_quant.consensus import CARDS, NAMES
 from krx_quant.features import (
     BOOK_FEATURES,
@@ -114,6 +114,23 @@ def test_the_baselines_and_the_consensus_have_cards_too() -> None:
         assert card.unique_features == ()
     assert all(b.card.scientist is None for b in BASELINES), "named after no one"
     assert all(CARDS[name].scientist for name in NAMES)
+
+
+def test_the_touch_targets_baselines_have_cards_too() -> None:
+    # With KRX_TARGET_VERSION=2 (#169): the climate is new, persist and random say the new label.
+    assert [b.name for b in TOUCH_BASELINES] == [
+        "baseline-flat",
+        "baseline-persist",
+        "baseline-random",
+        "baseline-climate",
+    ]
+    for b in TOUCH_BASELINES:
+        card = b.card
+        assert card.character and card.logic and card.training and card.forecasting and card.failure
+        assert card.unique_features == () and card.scientist is None
+    persist, random = TOUCH_BASELINES[1], TOUCH_BASELINES[2]
+    assert "도달 정답" in persist.card.logic and "도달 정답" in random.card.logic
+    assert (persist.version, random.version) == ("v2", "v2")
 
 
 @pytest.mark.parametrize("scenario", SCENARIOS, ids=str)

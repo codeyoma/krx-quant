@@ -199,7 +199,7 @@
           "description": "null unless the status is ok: only those are scored.",
           "oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]
         },
-        "status": {"enum": ["ok", "timed_out", "error", "vi", "no_book", "no_members", "none_finished"]},
+        "status": {"enum": ["ok", "timed_out", "error", "vi", "no_book", "no_members", "none_finished", "no_previous"]},
         "blocked": {
           "description": "Why a final consensus is not to be acted on (#88); null for any other prediction.",
           "enum": [null, "special", "no_reference", "expired"]
@@ -462,14 +462,14 @@
       "properties": {
         "algorithms": {"type": "array", "items": {"$ref": "#/$defs/algorithm"}},
         "baselines": {
-          "description": "The three baselines' cards.",
+          "description": "The baselines' cards: three, four with the touch target (KRX_TARGET_VERSION=2, #169: baseline-climate).",
           "type": "array",
           "items": {
             "type": "object",
             "required": ["name", "card"],
             "additionalProperties": false,
             "properties": {
-              "name": {"enum": ["baseline-flat", "baseline-persist", "baseline-random"]},
+              "name": {"enum": ["baseline-flat", "baseline-persist", "baseline-random", "baseline-climate"]},
               "card": {"$ref": "#/$defs/card"}
             }
           }
@@ -638,7 +638,7 @@
         "unscorable": {"type": "integer", "minimum": 0},
         "status": {
           "type": "object",
-          "propertyNames": {"enum": ["timed_out", "error", "vi", "no_book", "no_members", "none_finished"]},
+          "propertyNames": {"enum": ["timed_out", "error", "vi", "no_book", "no_members", "none_finished", "no_previous"]},
           "additionalProperties": {"type": "integer", "minimum": 1}
         }
       }

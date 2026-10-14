@@ -23,17 +23,21 @@ the quote stayed there and the size then, the highest bid and lowest ask, the be
 t and at the end, and the trades' high and low. Other widths can be scored from it later
 without reading the window again.
 
-This step only records it: training, the reviews, the consensus and the chart's ✓/✗ still
-score on the four-minute mid-point move (#167).
+This step only records it: the reviews, the consensus and the chart's ✓/✗ still score on
+the four-minute mid-point move (#167). Training learns it with ``KRX_TARGET_VERSION=2``
+(#169): a recorded day labelled by these windows, replaying its quotes, as the engine
+labels it; a day with one-minute bars only by the bar rule (``bar_touch``).
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
 from krx_quant.feeds.base import KST
 from krx_quant.pricing import Direction, flat_ticks, tick_size
+from krx_quant.reference import Bar
 
 TARGET_VERSION = 2
 WINDOW = timedelta(minutes=4)
@@ -265,3 +269,51 @@ def touch_path(r: TouchResult) -> dict[str, float | str | None]:
         "trade_high": r.trade_high,
         "trade_low": r.trade_low,
     }
+
+
+# The one-minute bar rule (#160, #169), for a day with backfilled bars only: no quotes, so
+# the label is read from the trades' highs and lows. A best bid reaching a price shows in
+# the bars as a trade a tick above it, as a rule: the targets carry one tick more. On the
+# recorded days of 2026-10-12 and 13 it agreed with the quote label on 93.2% of windows.
+BAR_BUFFER = 1  # ticks
+
+
+def close_side(bar: Bar, next_open: float | None) -> int:
+    """Which side of the book a bar's close traded on: +1 the ask (the bar closed at its
+    high), −1 the bid (at its low); a bar that did neither (one price, or a close between)
+    by the next trade: an open below the close +1, above it −1, the same 0. 0 too without
+    a next trade."""
+    if bar.high > bar.low:
+        if bar.close == bar.high:
+            return 1
+        if bar.close == bar.low:
+            return -1
+    if next_open is None:
+        return 0
+    return 1 if next_open < bar.close else -1 if next_open > bar.close else 0
+
+
+def bar_touch(closing: Bar, after: Sequence[Bar], fee_rate: float) -> Direction | None:
+    """The touch label of the four minutes after a bar close, from one-minute bars: the bar
+    that ended at the bar close (``closing``) and the bars of the four minutes after it
+    (``after``, those with trades). None without any trade in those minutes.
+
+    The close is the anchor, and k is the flat band at it. Up when the highest high reaches
+    the close plus k ticks, one tick of buffer, and one more if the close traded on the bid
+    (``close_side`` −1: the mid-point was above it); else down when the lowest low reaches
+    the close minus as many, one more if it traded on the ask; else flat. The next bar's
+    open only places the close: it is never a feature.
+    """
+    if not after:
+        return None
+    price = closing.close
+    tick = tick_size(price)
+    k = flat_ticks(price, fee_rate)
+    side = close_side(closing, after[0].open)
+    upper = price + (k + BAR_BUFFER + (side == -1)) * tick
+    lower = price - (k + BAR_BUFFER + (side == 1)) * tick
+    if max(b.high for b in after) >= upper:
+        return Direction.UP
+    if min(b.low for b in after) <= lower:
+        return Direction.DOWN
+    return Direction.FLAT

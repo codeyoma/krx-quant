@@ -21,6 +21,7 @@ from krx_quant.api import create_app
 from krx_quant.archive import NIGHTLY_ARCHIVE, archive
 from krx_quant.auth import TokenManager, tokens_and_client
 from krx_quant.backfill import keep_history
+from krx_quant.climate import load_climate
 from krx_quant.clock import SessionClock, SystemClock
 from krx_quant.config import Settings
 from krx_quant.cost_guard import keep_costs
@@ -214,6 +215,8 @@ async def run_collector(
         admits=admits(settings.state_dir),  # a new algorithm waits for its pre-validation
         commit=settings.commit,
         review_rules=Rules.of(settings),
+        target_version=settings.target_version,  # the target learned and forecast (#169)
+        climate=load_climate(settings.state_dir) if settings.target_version >= 2 else None,
     )
     store.add_run("start", engine.started_at, None, json.dumps(started(settings)))
 

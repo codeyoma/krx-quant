@@ -8,6 +8,7 @@ every four minutes, and a registry of stand-in algorithms. Output: the report
 from __future__ import annotations
 
 import json
+import sqlite3
 from collections.abc import Sequence
 from dataclasses import replace
 from datetime import date, datetime, time, timedelta
@@ -391,3 +392,52 @@ async def test_any_other_error_in_training_fails_the_pre_validation(tmp_path: Pa
         await prevalidate(s, "broken", algorithms=[ALPHA, Broken("broken")], now=AFTER)
 
     assert not report_path(s.state_dir, "broken").exists(), "no report: the engine never starts it"
+
+
+async def test_with_the_touch_target_it_trains_replays_and_is_judged_on_the_touch_label(
+    tmp_path: Path,
+) -> None:
+    class Watched(Contrarian):  # keeps what it was trained on
+        def fit(self, samples: Sequence[Sample]) -> Model:
+            self.samples = list(samples)
+            return super().fit(samples)
+
+    s = replace(settings(tmp_path, DAYS[:3]), target_version=2)
+    candidate = Watched("contrarian")
+
+    result = await prevalidate(s, "contrarian", algorithms=[ALPHA, candidate], now=AFTER)
+
+    # Trained on the touch target: its samples carry the terms of its forecast.
+    assert candidate.samples and all(x.features.touch is not None for x in candidate.samples)
+    assert set(result.stats.lifts) == {
+        "baseline-flat",
+        "baseline-persist",
+        "baseline-random",
+        "baseline-climate",
+    }
+    with sqlite3.connect(result.db) as db:
+        # Judged on the touch label: every prediction of it with a label and basis A's mid-points.
+        [(labelled,)] = db.execute(
+            "SELECT COUNT(*) FROM predictions p JOIN outcomes o ON o.prediction_id = p.id"
+            " JOIN touches t ON t.symbol = p.symbol AND t.bar_close = p.bar_close"
+            " WHERE p.algorithm = 'contrarian' AND p.status = 'ok' AND t.class IS NOT NULL"
+            " AND o.mid_close IS NOT NULL AND o.mid_target IS NOT NULL AND o.special = 0"
+        )
+        versions = dict(
+            db.execute(
+                "SELECT substr(bar_close, 1, 10), model_version FROM predictions"
+                " WHERE algorithm = 'baseline-climate' GROUP BY 1"
+            )
+        )
+        persist = {
+            v
+            for (v,) in db.execute(
+                "SELECT model_version FROM predictions WHERE algorithm = 'baseline-persist'"
+            )
+        }
+    assert result.stats.summary.n == labelled > 0
+    # The climate table, refitted before each day on the days before it.
+    assert versions[str(DAYS[0])] == "baseline-climate-default"
+    assert versions[str(DAYS[1])].startswith(f"baseline-climate-{DAYS[0]:%Y%m%d}-")
+    assert versions[str(DAYS[2])].startswith(f"baseline-climate-{DAYS[1]:%Y%m%d}-")
+    assert persist == {"v2"}
