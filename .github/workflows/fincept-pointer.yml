@@ -1,0 +1,75 @@
+# Keeps the fincept/ submodule pointer on the fork's `custom` head (#186).
+#
+# The fork's custom-krx-pointer workflow sends a `fincept-custom` repository_dispatch
+# after every push to `custom`. This run reads custom's head itself (dispatches may
+# arrive out of order) and, when the pointer differs, pushes a commit that changes only
+# the pointer straight to main: the one exception to "never push to main directly"
+# (AGENTS.md). A daily run and a manual run catch a dispatch that never came.
+#
+# Pushed with GITHUB_TOKEN, so the commit starts no workflow: CI does not read
+# fincept/ anyway.
+name: fincept-pointer
+
+on:
+  repository_dispatch:
+    types: [fincept-custom]
+  schedule:
+    - cron: "30 20 * * *" # 05:30 KST, before the 06:00 server update
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# One run at a time: a run started meanwhile waits, and a newer waiting run replaces an
+# older waiting one (GitHub's concurrency groups; the running one is not cancelled). Each
+# reads the latest head anyway.
+concurrency:
+  group: fincept-pointer
+  cancel-in-progress: false
+
+jobs:
+  follow:
+    runs-on: ubuntu-latest
+    env:
+      FORK: codeyoma/FinceptTerminal
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          submodules: false
+          fetch-depth: 1
+
+      - name: Point fincept at custom's head
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          head=$(git ls-remote "https://github.com/$FORK.git" refs/heads/custom | cut -f1)
+          if [[ -z "$head" ]]; then
+            echo "::error::Could not read custom's head from $FORK"
+            exit 1
+          fi
+          subject=$(gh api "repos/$FORK/commits/$head" --jq '.commit.message | split("\n")[0]' || true)
+          # main may move under us (a PR merged meanwhile): start again from its tip.
+          for attempt in 1 2 3; do
+            git fetch -q --depth=1 origin main
+            git reset -q --hard FETCH_HEAD
+            current=$(git ls-tree HEAD fincept | awk '{print $3}')
+            if [[ "$current" == "$head" ]]; then
+              echo "fincept already points at ${head:0:7}"
+              exit 0
+            fi
+            git update-index --cacheinfo "160000,$head,fincept"
+            git commit -q -m "fincept: follow custom to ${head:0:7}" \
+              -m "${subject:-(subject unknown)}" \
+              -m "https://github.com/$FORK/commit/$head"
+            if git push -q origin HEAD:main; then
+              echo "fincept: ${current:0:7} -> ${head:0:7}"
+              exit 0
+            fi
+            echo "push rejected (attempt $attempt); retrying on the new main"
+            sleep $((attempt * 5))
+          done
+          echo "::error::Could not push the pointer move to main after 3 attempts"
+          exit 1
