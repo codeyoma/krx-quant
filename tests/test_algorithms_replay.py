@@ -97,7 +97,17 @@ async def test_a_trained_model_is_used_and_recorded(tmp_path: Path) -> None:
     async with api(engine) as client:
         body = await get_json(client, "/v1/algorithms")
     listed = {a["name"]: a for a in body["algorithms"]}
-    assert listed.keys() == {"newton", "gauss", "granger", "markov", "kalman", "shannon", "poisson", "turing"}
+    assert listed.keys() == {
+        "newton",
+        "gauss",
+        "granger",
+        "markov",
+        "kalman",
+        "shannon",
+        "poisson",
+        "turing",
+        "mandelbrot",  # the range's (#181)
+    }
     newton = listed["newton"]
     assert listed["gauss"]["model"]["version"] == "gauss-default"
     assert newton["card"]["scientist"] == "Isaac Newton"
@@ -141,6 +151,7 @@ async def test_each_feature_is_computed_once_per_symbol_and_bar_close_for_everyo
         busy_morning(),
         until=at("09:30:00"),
         algorithms=[first, second],
+        kind_algorithms=(),  # the direction's only: the range's Mandelbrot reads its own (#181)
         feature_store=store,
     )
 
@@ -261,6 +272,7 @@ async def test_when_the_cpu_budget_runs_short_the_last_registered_is_skipped_fir
         busy_morning(),
         until=at("09:03:30"),
         algorithms=[first, second, third],
+        kind_algorithms=(),  # the direction's only: a kind's would be skipped first (#179)
         budget=Budget(cpu=0.2),
     )
 

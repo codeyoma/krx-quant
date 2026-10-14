@@ -24,6 +24,7 @@ import pytest
 
 from krx_quant.algorithms import ALGORITHMS, Algorithm, Model, Sample
 from krx_quant.algorithms.granger import Granger
+from krx_quant.algorithms.mandelbrot import NAME as MANDELBROT
 from krx_quant.algorithms.markov import Markov
 from krx_quant.archive import archive
 from krx_quant.backfill import BAR_SCHEMA, MINUTE_BARS_TR
@@ -452,15 +453,23 @@ def test_the_train_command_trains_every_registered_algorithm_from_the_store(
 
     promotions = read(store_root, f"promotions/{NIGHT}.json")
     # On the touch target, the default (#170): the climate baseline's table, then the range's
-    # (#180), of the range's answers (answer version 1).
-    names = [a.name for a in ALGORITHMS] + [CLIMATE, RANGE_CLIMATE]
+    # (#180), of the range's answers (answer version 1), then the range's Mandelbrot (#181).
+    names = [a.name for a in ALGORITHMS] + [CLIMATE, RANGE_CLIMATE, MANDELBROT]
     assert [r["algorithm"] for r in promotions["reports"]] == names
     assert {r["algorithm"]: r["target_version"] for r in promotions["reports"]} == {
         **dict.fromkeys(names, 2),
         RANGE_CLIMATE: 1,
+        MANDELBROT: 1,
     }
     assert {r["commit"] for r in promotions["reports"]} == {"0123abc"}, "the deploy's, as the engine's (#85)"
-    assert f"{NIGHT} 밤 학습" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert f"{NIGHT} 밤 학습" in out
+    # Mandelbrot's report names the range and counts its answers by source: bars only here.
+    mandelbrot = read(store_root, f"reports/{NIGHT}/{MANDELBROT}.json")
+    assert mandelbrot["kind"] == "range" and mandelbrot["promoted"] is True
+    labels = mandelbrot["labels"]["samples"]
+    assert labels["recorded"] == 0 and labels["bars"] > 0
+    assert f"range 정답 표본: 녹화 호가 0개, 1분봉 {labels['bars']}개" in out
 
 
 async def test_a_promoted_model_runs_from_the_morning_and_defends_the_next_night(
@@ -511,6 +520,7 @@ async def test_the_night_s_reports_and_what_the_model_trained_on_come_out_of_the
         FEE,
         FakeClock(datetime.combine(morning, time(7), KST)),
         algorithms=[learner, backwards],
+        kind_algorithms=(),
     )
     async with api(engine) as client:
         before = await get_json(client, "/v1/algorithms")

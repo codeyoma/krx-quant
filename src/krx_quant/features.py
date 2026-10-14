@@ -1,7 +1,9 @@
 """Feature Store: named features, each computed once per symbol per bar close.
 
 A feature is a function of a ``Snapshot``: the day's finished one-minute bars up to the
-bar close, the reference price there, when the session opened, the bars of the series
+bar close, the reference price there, when the session opened, the previous trading day's
+one-minute ranges by 30-minute slot (``day_slot_ranges``, #181: from its backfilled bars,
+on recorded and backfilled days alike), the bars of the series
 that may lead the symbol (``Leaders``), the microprices of its book at each minute's end
 and its order flow (``OrderFlow``: the book, the trades' sides and venues) and trade
 arrivals (``Arrivals``), recorded days only (``BOOK_FEATURES``, ``TAPE_FEATURES``:
@@ -25,14 +27,16 @@ from __future__ import annotations
 import math
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from functools import cached_property
 from itertools import product
 
 from krx_quant.cards import Meaning
 from krx_quant.config import Settings
+from krx_quant.consensus import slot
 from krx_quant.contracts import KOSPI200, USD
 from krx_quant.feeds.market import us_ticker
+from krx_quant.market_calendar import Session
 from krx_quant.pricing import flat_ticks as flat_band
 from krx_quant.pricing import tick_size
 from krx_quant.reference import BAR, Bar
@@ -41,6 +45,9 @@ from krx_quant.regime import Regime
 FeatureValue = float | None
 Series = tuple[float, ...]
 Value = FeatureValue | Series
+# A symbol's previous trading day's one-minute ranges by 30-minute slot, for a day
+# (``day_slot_ranges``, #181): what ``Snapshot.previous_ranges`` holds. Empty when unknown.
+PreviousRanges = Callable[[str, date], Mapping[str, float]]
 
 # The macro regimes (regime.py) as the numbers a feature holds: shock 0, risk_off 1,
 # risk_on 2, neutral 3.
@@ -138,6 +145,9 @@ class Snapshot:
     # The KOSPI200 options' at-the-money implied volatility (%) at the bar close; None
     # without a recent option trade, and on a day with backfilled bars only.
     atm_iv: float | None = None
+    # The previous trading day's mean one-minute range (high − low, won) in each 30-minute
+    # slot of its session (``day_slot_ranges``, #181), by slot; empty when unknown (no bars).
+    previous_ranges: Mapping[str, float] = field(default_factory=dict)
 
     @classmethod
     def at(
@@ -157,6 +167,7 @@ class Snapshot:
         order_flow: OrderFlow | None = None,
         arrivals: Arrivals | None = None,
         atm_iv: float | None = None,
+        previous_ranges: Mapping[str, float] | None = None,
     ) -> Snapshot:
         """A snapshot with the tick and flat band of ``price``."""
         lead, known = leaders or {}, flows or Flows()
@@ -177,6 +188,7 @@ class Snapshot:
             order_flow or OrderFlow(),
             arrivals or Arrivals(),
             atm_iv,
+            previous_ranges or {},
         )
 
     @cached_property
@@ -652,6 +664,69 @@ def flat_ticks(s: Snapshot) -> FeatureValue:
     return None if s.flat_ticks is None else float(s.flat_ticks)
 
 
+# The range's own features (#181, ``algorithms/mandelbrot``): the mean one-minute range over
+# the last minutes, at three time scales (HAR, Corsi 2009), and the previous trading day's
+# in the same 30-minute slot. The direction's algorithms never read them (Turing leaves them
+# out): the direction predicts as it did.
+RANGE_MINUTES = (4, 20, 60)
+PREVIOUS_DAY_RANGE = "range_prev_day"
+
+
+def range_feature(minutes: int) -> str:
+    return f"range_{minutes}"
+
+
+def _range(minutes: int) -> Feature:
+    def feature(s: Snapshot) -> FeatureValue:
+        if s.tick is None:
+            return None
+        start = s.bar_close - minutes * BAR
+        if s.session_open is not None:
+            start = max(start, s.session_open)
+        span = (s.bar_close - start) // BAR  # the window's minutes, from the open
+        widths = []
+        for b in reversed(s.bars):  # the day's finished bars: none after the bar close
+            if b.start < start:
+                break
+            widths.append(b.high - b.low)
+        if span <= 0 or not widths:
+            return None
+        return sum(widths) / span / s.tick
+
+    feature.__doc__ = (
+        f"The mean high − low of the one-minute bars of the last {minutes} minutes before the bar "
+        "close, from the open, in ticks of the reference price: a minute without a trade counts 0. "
+        "Fewer minutes since the open: those. Unknown without a trade in them, or a reference price."
+    )
+    return feature
+
+
+def day_slot_ranges(bars: Sequence[Bar], session: Session) -> dict[str, float]:
+    """A day's mean one-minute range (high − low, won) in each 30-minute slot of its continuous
+    session (#181), by slot as ``consensus.slot`` names a bar close's (``"09:00"``: the minutes
+    09:00–09:29, whose bars close 09:01–09:30): over the slot's minutes from the open to the
+    closing auction, a minute without a trade 0. A slot without any trade is left out."""
+    minutes: dict[str, int] = {}
+    at = session.open
+    while at < session.closing_auction:
+        key = slot(at + BAR)
+        minutes[key] = minutes.get(key, 0) + 1
+        at += BAR
+    widths: dict[str, float] = {}
+    for b in bars:
+        if session.open <= b.start < session.closing_auction:
+            key = slot(b.start + BAR)
+            widths[key] = widths.get(key, 0.0) + (b.high - b.low)
+    return {key: total / minutes[key] for key, total in widths.items()}
+
+
+def range_prev_day(s: Snapshot) -> FeatureValue:
+    """The previous trading day's mean one-minute range in the bar close's 30-minute slot, in
+    ticks of the reference price: unknown without that day's bars or a trade in the slot."""
+    width = s.previous_ranges.get(slot(s.bar_close))
+    return None if width is None or s.tick is None else width / s.tick
+
+
 def _moves(bars: Sequence[Bar], at: datetime) -> list[FeatureValue] | None:
     """A series' one-minute log returns 1 to 3 minutes before ``at``, each in standard
     deviations of its last 20; None if it has not traded for 10 minutes, or if its bars
@@ -753,8 +828,12 @@ FEATURES: dict[str, Feature] = {
     "investor_institution": investor_institution,
     **{own_feature(lag): _own(lag) for lag in LEAD_LAGS},
     **{lead_feature(group, lag): _lead(group, lag) for group in LEAD_GROUPS for lag in LEAD_LAGS},
+    **{range_feature(m): _range(m) for m in RANGE_MINUTES},
+    PREVIOUS_DAY_RANGE: range_prev_day,
 }
 LEAD_FEATURES = frozenset(lead_feature(group, lag) for group in LEAD_GROUPS for lag in LEAD_LAGS)
+# The range's own features (#181): no direction algorithm reads them.
+RANGE_FEATURES = frozenset({*(range_feature(m) for m in RANGE_MINUTES), PREVIOUS_DAY_RANGE})
 # The features that are series of numbers.
 SERIES_FEATURES = frozenset({"minute_ticks", "microprice_ticks", "kospi200f_moves"})
 # The features from the book, and from the trades' sides and venues: none on a day with
@@ -987,6 +1066,23 @@ FEATURE_MEANINGS: dict[str, Meaning] = {
         for group in LEAD_GROUPS
         for lag in LEAD_LAGS
     },
+    **{
+        range_feature(m): Meaning(
+            f"봉 마감 전 {m}분(개장부터) 1분봉의 (고가 − 저가) 평균을 봉 마감 기준가의 호가단위로 잰 값. "
+            f"체결이 없는 분은 0으로 센다. 개장 뒤 {m}분이 안 됐으면 개장부터의 분으로 평균한다.",
+            "틱",
+            f"{_BARS} 녹화된 날과 백필 날에 모두 있다. 그 분들에 체결이 하나도 없거나 기준가가 없으면 없다.",
+        )
+        for m in RANGE_MINUTES
+    },
+    PREVIOUS_DAY_RANGE: Meaning(
+        "전 거래일 같은 30분 시간대(봉 마감 09:01–09:30이면 09:00–09:29의 분)의 1분봉 (고가 − 저가) 평균을 "
+        "봉 마감 기준가의 호가단위로 잰 값. 연속매매(개장부터 종가 동시호가 전까지)의 분만 보고, 체결이 "
+        "없는 분은 0으로 센다.",
+        "틱",
+        "그날 개장 전에 안다(전 거래일의 백필 1분봉). 녹화된 날과 백필 날에 모두 있다. 전 거래일의 백필이 "
+        "없거나 그 시간대에 체결이 없었거나 기준가가 없으면 없다.",
+    ),
 }
 
 

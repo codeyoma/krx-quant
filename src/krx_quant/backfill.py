@@ -35,10 +35,12 @@ import pyarrow.parquet as pq
 from krx_quant.auth import tokens_and_client
 from krx_quant.config import Settings
 from krx_quant.contracts import KOSPI200, USD, Product, front_month
+from krx_quant.features import day_slot_ranges
 from krx_quant.feeds.base import EVENT_TIME, KST, Row, kst, kst_day, to_float, to_int
 from krx_quant.kis import KisError, RestClient
 from krx_quant.market_calendar import CalendarStore, MarketCalendar, calendar_store
 from krx_quant.ratelimit import RateLimiter
+from krx_quant.reference import Bar
 
 log = logging.getLogger(__name__)
 
@@ -274,6 +276,56 @@ def bars_key(day: date, feed: str, name: str) -> str:
 def stock_bars_path(data_dir: Path, day: date, symbol: str) -> Path:
     """A stock's or ETF's bars of ``day`` under the data directory, whether filled or not."""
     return data_dir / bars_key(day, MINUTE_BARS_TR, symbol)
+
+
+def read_bars(data_dir: Path, day: date, feed: str, name: str) -> list[Bar] | None:
+    """A day's backfilled bars of a series, as stored (oldest first), if it has a file."""
+    path = data_dir / bars_key(day, feed, name)
+    if not path.exists():
+        return None
+    return [_stored_bar(row) for row in pq.read_table(path).to_pylist()]
+
+
+def _stored_bar(row: Row) -> Bar:
+    start = row["bar_time"]
+    return Bar(
+        start=start,
+        open=row["open"],
+        high=row["high"],
+        low=row["low"],
+        close=row["close"],
+        volume=row["volume"],
+        trades=0,  # the backfill has no trade counts
+        first_at=start,
+        last_at=start,
+    )
+
+
+class PreviousDay:
+    """Each symbol's previous trading day's one-minute ranges by 30-minute slot (#181,
+    ``features.day_slot_ranges``: the range's ``range_prev_day``), from that day's backfilled
+    bars under the data directory; empty without them. The same on a recorded day and a
+    backfilled one: every finished trading day is backfilled (20:30). Read once per symbol and
+    day; a file that cannot be read is logged and counts as none (the engine predicts on)."""
+
+    def __init__(self, data_dir: Path, calendar: MarketCalendar) -> None:
+        self._data_dir = data_dir
+        self._calendar = calendar
+        self._read: dict[tuple[str, date], dict[str, float]] = {}
+
+    def __call__(self, symbol: str, day: date) -> Mapping[str, float]:
+        if (symbol, day) not in self._read:
+            before = self._calendar.previous_trading_day(day)
+            session = self._calendar.session(before)
+            try:
+                bars = read_bars(self._data_dir, before, MINUTE_BARS_TR, symbol)
+            except Exception:
+                log.exception("cannot read %s's bars of %s; its range_prev_day is unknown", symbol, before)
+                bars = None
+            self._read[(symbol, day)] = (
+                {} if bars is None or session is None else day_slot_ranges(bars, session)
+            )
+        return self._read[(symbol, day)]
 
 
 def stored_bars(data_dir: Path, symbol: str, before: datetime, limit: int) -> list[Row]:

@@ -49,7 +49,12 @@ async def test_a_recorded_day_trains_a_kind_on_the_answers_the_engine_scores(tmp
     data = tmp_path / "data"
     record(data, events)
     engine = await run(
-        tmp_path / "engine.db", events, until=at("10:00:00"), target_version=2, kinds=(TEST_KIND,)
+        tmp_path / "engine.db",
+        events,
+        until=at("10:00:00"),
+        target_version=2,
+        kinds=(TEST_KIND,),
+        kind_algorithms=(),  # the range's Mandelbrot needs the range (#181)
     )
     stored = {datetime.fromisoformat(a["bar_close"]): a for a in engine.store.kind_answers(DRIFT, SYMBOL)}
     engine.store.close()

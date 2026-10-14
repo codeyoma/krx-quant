@@ -110,7 +110,15 @@ from krx_quant.clock import SessionClock
 from krx_quant.config import MAX_REVIEW_DAY, Settings
 from krx_quant.consensus import FAST, FINAL, NAMES, NO_WEIGHTS, SPANS, Timing, Weights, pool
 from krx_quant.consensus import fit as fit_weights
-from krx_quant.features import REGIME_CODES, FeatureStore, FeatureVector, Leaders, TouchTerms, Value
+from krx_quant.features import (
+    REGIME_CODES,
+    FeatureStore,
+    FeatureVector,
+    Leaders,
+    PreviousRanges,
+    TouchTerms,
+    Value,
+)
 from krx_quant.feeds import (
     BOOK,
     BOOK_SNAPSHOT,
@@ -344,6 +352,7 @@ class PredictionEngine:
         climate: Model | None = None,
         kinds: Sequence[PredictionKind] = KINDS,
         kind_algorithms: Sequence[KindAlgorithm] = KIND_ALGORITHMS,
+        previous: PreviousRanges | None = None,
     ) -> None:
         self.store = store
         self.commit = commit  # the code it runs (the deploy's KRX_COMMIT)
@@ -396,8 +405,15 @@ class PredictionEngine:
         self._special = SpecialSituations(calendar)
         self.leaders = leaders or Leaders()
         self._last_tick = clock.now()
+        # Each symbol's previous trading day's ranges (#181, ``range_prev_day``): without, unknown.
         self._market = MarketView(
-            calendar, symbols, self.leaders, self._last_tick, self.fee_rate, kinds=self.kinds
+            calendar,
+            symbols,
+            self.leaders,
+            self._last_tick,
+            self.fee_rate,
+            kinds=self.kinds,
+            previous=previous,
         )
         # Outcomes waiting for their target time: (target_at, prediction_id, pending).
         self._pending: list[tuple[datetime, int, Pending]] = []

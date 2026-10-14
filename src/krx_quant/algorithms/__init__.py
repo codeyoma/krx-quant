@@ -35,6 +35,7 @@ from krx_quant.algorithms.contract import (
 from krx_quant.algorithms.gauss import Gauss
 from krx_quant.algorithms.granger import Granger
 from krx_quant.algorithms.kalman import Kalman
+from krx_quant.algorithms.mandelbrot import Mandelbrot
 from krx_quant.algorithms.markov import Markov
 from krx_quant.algorithms.newton import Newton
 from krx_quant.algorithms.poisson import Poisson
@@ -115,8 +116,11 @@ ALGORITHMS: tuple[Algorithm, ...] = register(
 )
 
 # The algorithms of the kinds besides the direction (#179), in the kinds' order, all after
-# the direction's. None yet: the range's (#181) and the barrier's (#183) come here.
-KIND_ALGORITHMS: tuple[KindAlgorithm, ...] = register_kind_algorithms([], taken={a.name for a in ALGORITHMS})
+# the direction's: the range's Mandelbrot (#181), registered after pre-validation existed (it
+# runs once it has passed); the barrier's (#183) come after it.
+KIND_ALGORITHMS: tuple[KindAlgorithm, ...] = register_kind_algorithms(
+    [Mandelbrot()], taken={a.name for a in ALGORITHMS}
+)
 
 __all__ = [
     "ALGORITHMS",

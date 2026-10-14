@@ -598,6 +598,7 @@ async def test_an_algorithm_waits_until_the_swap_runs_a_model_of_the_target(tmp_
         until=at("15:45:00"),
         calendar=THREE_DAYS,
         algorithms=[ALPHA, BETA],
+        kind_algorithms=(),
         models=old,
     )
     waiting = await listed(deploy_day)
@@ -614,6 +615,7 @@ async def test_an_algorithm_waits_until_the_swap_runs_a_model_of_the_target(tmp_
         until=at("08:00:00", NEXT_DAY),
         calendar=THREE_DAYS,
         algorithms=[ALPHA, BETA],
+        kind_algorithms=(),
         models=old,
     )
     assert engine.switch_models({"alpha": Model("alpha-new", {}, target_version=2)})  # the morning swap

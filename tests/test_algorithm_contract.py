@@ -8,6 +8,10 @@
   declines the symbol with a reason (``NotPredicted``: the book missing);
 - training gives a new, versioned model that survives being saved: on backfilled bars, or
   on recorded days for an algorithm that reads the book or the trades' sides.
+
+An algorithm of a kind besides the direction (#179, ``KIND_ALGORITHMS``) keeps the same
+contract on its kind: its forecasts keep the kind's (``Kind.invalid``), it trains on the
+kind's answers.
 """
 
 from __future__ import annotations
@@ -21,8 +25,11 @@ import pytest
 
 from krx_quant.algorithms import (
     ALGORITHMS,
+    KIND_ALGORITHMS,
     Abstention,
     Algorithm,
+    KindAlgorithm,
+    KindSample,
     Meaning,
     NotPredicted,
     load_models,
@@ -42,8 +49,9 @@ from krx_quant.features import (
     UndeclaredFeature,
     Value,
 )
+from krx_quant.kind_registry import kind_named
 from krx_quant.market_calendar import MarketCalendar
-from krx_quant.training import recorded_samples, samples
+from krx_quant.training import bar_answers, recorded_samples, samples
 from tests.algorithm_doubles import FixedAlgorithm
 from tests.replay_events import with_sides
 from tests.synthetic_bars import random_walk, trending
@@ -211,3 +219,56 @@ def test_reading_an_undeclared_feature_breaks_the_contract() -> None:
     with pytest.raises(UndeclaredFeature, match="volatility"):
         assert "volatility" in features
     assert "velocity" in features
+
+
+@pytest.fixture(params=KIND_ALGORITHMS, ids=lambda a: a.name)
+def kind_algorithm(request: pytest.FixtureRequest) -> KindAlgorithm:
+    chosen: KindAlgorithm = request.param
+    return chosen
+
+
+def test_a_kind_s_algorithm_keeps_the_contract_on_its_kind(
+    kind_algorithm: KindAlgorithm, tmp_path: Path
+) -> None:
+    """Its card is filled in; its parameters have meanings; whatever the features, its forecast
+    keeps its kind's contract or it declines with a reason; trained on the kind's answers of
+    two days of bars, it gives a versioned model of the kind's answer version that can be
+    saved, whose every parameter has a meaning."""
+    kind = kind_named(kind_algorithm.kind)
+    assert kind is not None and kind.name != "direction"
+    card = kind_algorithm.card
+    assert card.scientist and card.character and card.logic and card.training
+    assert card.forecasting and card.failure
+    assert card.unique_features and set(card.unique_features) <= set(kind_algorithm.features)
+    assert set(kind_algorithm.default_model().params) <= set(kind_algorithm.param_meanings)
+    assert all(filled(m) for m in kind_algorithm.param_meanings.values())
+    calendar = MarketCalendar(dict.fromkeys(DAYS, True))
+    bar_days = {("005930", DAYS[0]): trending(DAYS[0]), ("005930", DAYS[1]): random_walk(DAYS[1])}
+    answers = bar_answers(bar_days, calendar, FEE, (kind,))
+    training = [
+        KindSample(
+            s.symbol,
+            s.bar_close,
+            s.features,
+            answers.get((kind.name, s.symbol, s.bar_close)),
+            kind.answer_version,
+            "close",
+        )
+        for s in samples(bar_days, calendar, kind_algorithm.features, FEE)
+    ]
+
+    model = kind_algorithm.fit(training)
+
+    assert model.version != kind_algorithm.default_model().version
+    assert model.target_version == kind.answer_version
+    assert set(model.params) <= set(kind_algorithm.param_meanings), "every fitted parameter has a meaning"
+    save_model(tmp_path, kind_algorithm.name, model)
+    assert load_models(tmp_path, [kind_algorithm])[kind_algorithm.name] == model
+    for chosen in (kind_algorithm.default_model(), model):
+        for values in SCENARIOS.values():
+            try:
+                forecast = kind_algorithm.predict(FeatureVector(values, kind_algorithm.features), chosen)
+            except NotPredicted as declined:
+                assert isinstance(declined.why, Abstention)
+                continue
+            assert kind.invalid(forecast) is None

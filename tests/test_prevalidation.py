@@ -246,6 +246,7 @@ async def test_a_new_algorithm_waits_for_its_prevalidation_then_starts_on_probat
         until=at("09:20:00", live_day),
         calendar=MarketCalendar({live_day: True}),
         algorithms=registry,
+        kind_algorithms=(),  # the direction's: the range's Mandelbrot would wait too (#181)
         admits=lambda a: a.name == "alpha" or gate(a),
         notify=outbox,
     )
@@ -281,6 +282,7 @@ async def test_a_report_counts_only_for_the_code_that_passed(tmp_path: Path) -> 
         busy_morning(end="09:05:00"),
         until=at("09:05:00"),
         algorithms=[candidate],
+        kind_algorithms=(),
         admits=gate,
     )
     assert engine.waiting() == ["contrarian"]

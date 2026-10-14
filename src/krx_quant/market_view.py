@@ -42,6 +42,7 @@ from krx_quant.features import (
     Flows,
     Leaders,
     OrderFlow,
+    PreviousRanges,
     Snapshot,
 )
 from krx_quant.feeds import (
@@ -457,10 +458,13 @@ class MarketView:
         start: datetime,
         fee_rate: float | None = None,
         kinds: Sequence[Kind] = (),
+        previous: PreviousRanges | None = None,
     ) -> None:
         """A view with nothing received yet, whose first bar close is the first after ``start``.
         With ``fee_rate`` it also follows each bar close's touch window (#167), and, given
-        ``kinds`` (besides the direction, #179), the quotes their answers are made from."""
+        ``kinds`` (besides the direction, #179), the quotes their answers are made from. Its
+        snapshots hold each symbol's previous trading day's ranges from ``previous`` (#181;
+        without: unknown)."""
         self.calendar = calendar
         self.symbols = tuple(symbols)
         self.leaders = leaders
@@ -482,6 +486,7 @@ class MarketView:
         self._arrivals = {s: _Arrivals() for s in self.symbols}
         self._expiry: dict[date, int] = {}
         self._options = _Options()
+        self._previous = previous
         self._fee_rate = fee_rate
         # The touch windows followed (#167), by symbol and bar close, and each symbol's last
         # integrated best quote (bid, ask), the one before a window opens.
@@ -558,7 +563,7 @@ class MarketView:
         self, frozen: BarsAtClose, symbol: str, fee_rate: float, regime: str | None = None
     ) -> Snapshot:
         """``symbol`` at a bar close: its bars, reference price, leaders and flows there, in
-        the day's macro ``regime``."""
+        the day's macro ``regime``, with its previous trading day's ranges (#181)."""
         day = frozen.close.astimezone(KST).date()
         session = self.calendar.session(day)
         if day not in self._expiry:
@@ -578,6 +583,7 @@ class MarketView:
             order_flow=self.order_flow(symbol, frozen.close),
             arrivals=self.arrivals(symbol, frozen.close),
             atm_iv=self._options.atm_iv(frozen.close),
+            previous_ranges=self._previous(symbol, day) if self._previous is not None else None,
         )
 
     def arrivals(self, symbol: str, at: datetime) -> Arrivals:
