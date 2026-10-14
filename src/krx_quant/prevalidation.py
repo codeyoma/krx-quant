@@ -36,7 +36,9 @@ An algorithm of a kind besides the direction (#179, ``kinds.py``) is checked the
 on its kind: it trains on the kind's answers, its stats are the kind's (scored on its
 answers, against its baselines), its correlation is of its first class's probability less
 its third's with the other algorithms of its kind only, and its report holds the kind and
-the kind's answer version, which the engine's ``admits`` checks.
+the kind's answer version, which the engine's ``admits`` checks. Its kind's baselines that
+predict from a table (#180, the range's climate) are refitted before each day on the kind's
+answers of the days before it, as the night before would.
 """
 
 from __future__ import annotations
@@ -68,11 +70,12 @@ from krx_quant.climate import CLIMATE_DAYS, fit_climate
 from krx_quant.config import Settings
 from krx_quant.features import Leaders
 from krx_quant.feeds.base import KST
+from krx_quant.kind_registry import KINDS, kind_named
 from krx_quant.kind_stats import KindEntry, kind_scoring, scored_of_kind
 from krx_quant.kind_stats import entry_json as kind_entry_json
 from krx_quant.kind_stats import leaderboard as kind_leaderboard
 from krx_quant.kind_stats import split as kind_split
-from krx_quant.kinds import DIRECTION, KINDS, Kind, kind_named
+from krx_quant.kinds import DIRECTION, Kind, table_baselines
 from krx_quant.lifecycle import CLONE_CORRELATION, correlations, most_correlated
 from krx_quant.market_calendar import MarketCalendar, calendar_store
 from krx_quant.predictions import PredictionStore
@@ -274,13 +277,14 @@ async def _replay(
         model = trainer.before(day)
         versions[day] = model.version
         climate = trainer.climate_before(day) if settings.target_version >= 2 else None
+        tables = trainer.tables_before(day)  # its kind's baselines' (#180)
         events = recorded_events(settings.data_dir, day, settings.symbols, leaders)
         engine = await replay_recorded(
             settings,
             day,
             events,
             db=db,
-            models={**running, candidate.name: model},
+            models={**running, **tables, candidate.name: model},
             algorithms=algorithms,
             calendar=calendar,
             climate=climate,
@@ -453,6 +457,7 @@ class _WalkForward:
         self._leaders = leaders
         self._loaded: dict[date, TrainingDay | None] = {}
         self._labelled: dict[date, TrainingDay | None] = {}  # the climate's days, labels only
+        self._answered: dict[date, TrainingDay | None] = {}  # the kind's tables' days, answers only
 
     def before(self, day: date) -> Model:
         window = [d for d in self._available if d < day][-self._algorithm.training_days :]
@@ -483,6 +488,29 @@ class _WalkForward:
         days = [self._loaded[d] if d in self._loaded else self._labels(d) for d in window]
         return fit_climate([s for found in days if found is not None for s in found.samples])
 
+    def tables_before(self, day: date) -> dict[str, Model]:
+        """The tables of the candidate's kind's baselines (#180), each fitted on the kind's
+        answers of its latest ``days`` days before ``day``, as the night before it would; none
+        for the direction's candidate."""
+        if self._kind is None:
+            return {}
+        kind = self._kind
+        tables: dict[str, Model] = {}
+        for _, baseline in table_baselines([kind]):
+            window = [d for d in self._available if d < day][-baseline.days :]
+            for gone in [d for d in self._answered if not window or d < window[0]]:
+                del self._answered[gone]
+            days = [self._loaded[d] if d in self._loaded else self._answers(d) for d in window]
+            tables[baseline.name] = baseline.fit(
+                [s for found in days if found is not None for s in found.of_kind(kind, ())]
+            )
+        return tables
+
+    def _answers(self, day: date) -> TrainingDay | None:
+        if day not in self._answered:
+            self._answered[day] = self._read(day, (), answered=True)
+        return self._answered[day]
+
     def _labels(self, day: date) -> TrainingDay | None:
         if day not in self._labelled:
             self._labelled[day] = self._read(day, ())
@@ -493,7 +521,9 @@ class _WalkForward:
             self._loaded[day] = self._read(day, self._algorithm.features)
         return self._loaded[day]
 
-    def _read(self, day: date, features: Sequence[str]) -> TrainingDay | None:
+    def _read(self, day: date, features: Sequence[str], answered: bool = False) -> TrainingDay | None:
+        """``day``'s samples with ``features``; with the kind's answers for the candidate's
+        features, or (``answered``) for its kind's tables."""
         s = self._settings
         return training_day(
             s.data_dir,
@@ -504,5 +534,5 @@ class _WalkForward:
             s.fee_rate,
             self._leaders,
             target_version=s.target_version,
-            kinds=() if self._kind is None or not features else (self._kind,),
+            kinds=() if self._kind is None or not (features or answered) else (self._kind,),
         )

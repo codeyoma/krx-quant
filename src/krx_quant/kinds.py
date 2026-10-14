@@ -14,9 +14,12 @@ A kind declares in one place (``Kind``):
 - its answer function and answer version: the class of a bar close's four minutes, from
   the quotes the Market View followed through them (``Followed``), and, for days with
   one-minute bars only, a bar rule (``bar_answer``) to train on;
-- its baselines, the predictions every algorithm of the kind must beat;
+- its baselines, the predictions every algorithm of the kind must beat: some from what
+  they know at the bar close, some from a table the nightly training refits on the kind's
+  answers and the 08:00 swap installs (``TableBaseline``, #180);
 - its extra output fields beside the three probabilities, and their check;
-- its extra statistics, beside the three-class ones.
+- its extra statistics, beside the three-class ones (with the kind's baselines' records,
+  to compare against).
 
 A forecast's class is its most likely one; a tie goes to the middle class, then the
 first (as the direction's goes to flat, then up).
@@ -34,9 +37,9 @@ or one-sided quote is dropped; a window that received a REST snapshot of the boo
 sixty seconds without a quote, or that the engine restarted in cannot be scored
 (``Followed.unscorable``), whatever the answer function says.
 
-The kinds are registered in ``KINDS``, in order: the direction first. A new kind's
-algorithms run after the direction's (``algorithms.KIND_ALGORITHMS``), so the CPU budget
-skips them first.
+The kinds are registered in ``kind_registry.KINDS``, in order: the direction first, then
+the range (#180, ``ranges.py``). A new kind's algorithms run after the direction's
+(``algorithms.KIND_ALGORITHMS``), so the CPU budget skips them first.
 """
 
 from __future__ import annotations
@@ -46,11 +49,14 @@ import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, NamedTuple, Protocol
+from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, runtime_checkable
 
 from krx_quant.cards import Card, Meaning
 from krx_quant.reference import Bar
 from krx_quant.touch import MISSING_MID, REST_QUOTES, SILENCE, SILENT, TARGET_VERSION, WINDOW
+
+if TYPE_CHECKING:  # the algorithm contract builds on this module: its types only
+    from krx_quant.algorithms.contract import KindSample, Model
 
 DIRECTION = "direction"
 # Why a kind's answer function gave no class for a window the shared rules could score.
@@ -154,15 +160,20 @@ class QuoteLog:
         quotes = tuple(q for q in self._quotes if start <= q.received_at < end)
         rest = any(start <= r < end for r in self._rests)
         trades = tuple(t for t in self._trades if start <= t[0] < end)
-        last, silent = start, False
-        for q in quotes:
-            if q.received_at - last >= SILENCE:
-                silent = True
-            last = q.received_at
-        if end - last >= SILENCE:
-            silent = True
+        silent = went_silent(start, end, [q.received_at for q in quotes])
         unscorable = MISSING_MID if anchor is None else REST_QUOTES if rest else SILENT if silent else None
         return Followed(symbol, bar_close, anchor, tick, k, bid_start, ask_start, quotes, trades, unscorable)
+
+
+def went_silent(start: datetime, end: datetime, received: Sequence[datetime]) -> bool:
+    """Whether sixty seconds or more went by without a quote in [``start``, ``end``): from the
+    start to the first quote ``received``, between two, or from the last to the end."""
+    last = start
+    for at in received:
+        if at - last >= SILENCE:
+            return True
+        last = at
+    return end - last >= SILENCE
 
 
 @dataclass(frozen=True)
@@ -219,6 +230,39 @@ class KindBaseline(Protocol):
         ...
 
 
+@runtime_checkable
+class TableBaseline(Protocol):
+    """A kind baseline that predicts from a table (#180, ``range-climate``): a model like an
+    algorithm's (``state/models/<name>.json``), which the nightly training refits every night
+    on the kind's answers of the latest ``days`` training days and always promotes, and the
+    08:00 swap installs, as the direction's climate table (``climate.py``). The engine binds
+    the table it runs (``using``): the predictions carry the table's version."""
+
+    name: str
+    version: str  # the bound table's
+    card: Card
+    days: int  # the latest training days a table is fitted on
+
+    def predict(self, inputs: KindInputs) -> KindForecast | None: ...
+
+    def default_table(self) -> Model:
+        """The table before any training."""
+        ...
+
+    def fit(self, samples: Sequence[KindSample]) -> Model:
+        """The table of the kind's answers of ``samples`` (the defaults without any)."""
+        ...
+
+    def using(self, table: Model) -> TableBaseline:
+        """This baseline predicting from ``table``."""
+        ...
+
+
+def table_baselines(kinds: Sequence[Kind]) -> list[tuple[Kind, TableBaseline]]:
+    """The kinds' baselines that predict from a table, with their kind, in order."""
+    return [(k, b) for k in kinds for b in k.baselines if isinstance(b, TableBaseline)]
+
+
 @dataclass(frozen=True)
 class KindScored:
     """One scored prediction of a kind, on its bar close's answer."""
@@ -253,8 +297,9 @@ def most_likely(probabilities: Sequence[float]) -> int:
 # The check of a kind's output (the probabilities and its fields, as stored): why it breaks
 # the kind's contract, None if it keeps it.
 OutputCheck = Callable[[Mapping[str, float]], str | None]
-# A kind's statistics beside the three-class ones, from a predictor's scored predictions.
-ExtraStats = Callable[[Sequence[KindScored]], dict[str, Any]]
+# A kind's statistics beside the three-class ones, from a predictor's scored predictions and
+# the kind's baselines' (by name, to compare against; #180).
+ExtraStats = Callable[[Sequence[KindScored], Mapping[str, Sequence[KindScored]]], dict[str, Any]]
 
 
 @dataclass(frozen=True, eq=False)
@@ -386,10 +431,5 @@ DIRECTION_KIND = Kind(
     },
 )
 
-# Every kind the engine predicts, in registration order: the direction first. A kind added
-# here (#180 range, #183 barrier) runs after it, and its algorithms after the direction's.
-KINDS: tuple[Kind, ...] = register_kinds([DIRECTION_KIND])
-
-
-def kind_named(name: str, kinds: Sequence[Kind] = KINDS) -> Kind | None:
-    return next((k for k in kinds if k.name == name), None)
+# Every kind the engine predicts is registered in ``kind_registry.KINDS`` (#180): a kind's own
+# module (``ranges.py``) builds on this one.

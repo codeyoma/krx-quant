@@ -174,7 +174,7 @@ uv run python -c "import glob, pyarrow.parquet as pq; d = sorted(glob.glob('data
 | `train [--day YYYY-MM-DD] [--from-store]` | 밤 학습 한 번. `--day`가 없으면 Object Store에 모든 종목의 백필 1분봉이나 녹화된 체결이 있는 가장 최근 날. `--from-store`는 서버가 S3에 올린 설정과 휴장일 달력으로 학습한다(EC2 Spot, #23) | 없어도 된다 |
 | `registry-password` | ECR 레지스트리의 `docker login` 암호를 출력한다. `deploy/push-image.sh`가 쓴다(#23) | 없어도 된다 |
 | `macro` | 오늘의 매크로 지표를 한 번 읽고 국면을 정해 `data/macro`에 기록한다(#8). 실패한 출처가 있으면 종료 코드 1 | 없어도 된다 |
-| `diagnose [--days N]` | 판단에 필요한 실측(표시 지연과 채점 수, 특수 상황 비율과 예측 상태, 봉 마감 스프레드, 피드 수신 지연, 매크로 결측, 도달 정답의 분포·폭·표시 전 닿음)을 텍스트로 출력한다(#170부터 기준 A·B 차이는 없다). 읽기만 한다. `--days`는 데이터가 있는 최근 N거래일, 기본 20([docs/operations.md](docs/operations.md#진단-82)) | 없어도 된다 |
+| `diagnose [--days N]` | 판단에 필요한 실측(표시 지연과 채점 수, 특수 상황 비율과 예측 상태, 봉 마감 스프레드, 피드 수신 지연, 매크로 결측, 도달 정답의 분포·폭·표시 전 닿음, 변동폭 정답의 분포와 1분봉 규칙 일치율(#180))을 텍스트로 출력한다(#170부터 기준 A·B 차이는 없다). 읽기만 한다. `--days`는 데이터가 있는 최근 N거래일, 기본 20([docs/operations.md](docs/operations.md#진단-82)) | 없어도 된다 |
 | `rollback <알고리즘>` | 직전 모델로 되돌린다. 도달 정답에서는 그 정답으로 학습한 모델로만(#193) | 없어도 된다 |
 | `retire <알고리즘>`, `unretire <알고리즘>` | 은퇴시킨다, 은퇴를 풀어 수습으로 되돌린다 | 없어도 된다 |
 | `test-alert` | 텔레그램에 `[테스트]` 메시지를 보낸다 | 필요(쓰지는 않는다) |

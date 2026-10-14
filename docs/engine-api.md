@@ -6,7 +6,9 @@
 
 지금은 기준 예측 4종(#9, #169), 알고리즘 Newton(#10), Gauss(#13), Granger(#15), Markov(#14), Kalman(#25), Shannon(#26), Poisson(#27), Turing(#16, 호가 피처는 #55), 합의 Condorcet(#18)이 예측한다. Kalman, Shannon, Poisson은 사전 검증(#24)을 통과해야 실시간에서 돈다. 화면은 REST로 지금 상태를 읽고, WebSocket 스트림(`/v1/stream`)으로 바뀌는 것을 바로 받는다. 응답 형식은 JSON 스키마 `schemas/engine-api-v1.json`으로 고정한다(아래 "계약").
 
-이 문서의 예측, 채점, 통계는 방향(상승·보합·하락)의 것이다. 방향 말고 다른 종류의 예측(#179)은 같은 봉 마감에 따로 저장·채점된다. 규칙은 아래 "예측 종류"에 있다. 지금 등록된 종류는 방향 하나다.
+이 문서의 예측, 채점, 통계는 방향(상승·보합·하락)의 것이다. 방향 말고 다른 종류의 예측(#179)은 같은 봉 마감에 따로 저장·채점된다. 규칙은 아래 "예측 종류"에, 첫 종류인 변동폭(#180)은 아래 "변동폭"에 있다. 등록된 종류는 방향과 변동폭이다.
+
+> **바뀜** (2026-10-15, #180): "지금 등록된 종류는 방향 하나다" → 방향과 변동폭. 이유: 변동폭이 첫 종류다(#177).
 
 ## 예측
 
@@ -174,12 +176,12 @@
 | `outcomes` | `prediction_id`, `target_at`(t + 4분), `mid_close`(A), `mid_display`(B), `mid_target`, `flat_ticks`(k), `class_a`, `class_b`(`up`/`flat`/`down`), `special`, `unscorable`, `scored_at`(채점 전에는 비어 있음). #170부터 `special`과 `scored_at`(4분이 지났는지)만 읽고, 옛 기준의 값(`class_a`, `class_b`, `mid_target`, `unscorable`)은 쓰기만 한다. 옛 엔진으로 되돌려도 돌게 하려고다 |
 | `model_targets` | `algorithm`, `version`, `target_version`(1 또는 2, 기본 모델과 기록되기 전 모델은 비어 있음): 엔진이 돌린 모델마다 그 모델을 학습한 정답 버전(#170). 엔진이 시작할 때와 모델을 바꿀 때 쓴다. 상태 판정, 합의 가중치, 순위표와 통계가 예측의 `model_version`을 이것으로 거른다. 따로 둔 표다 |
 | `touches` | `symbol`, `bar_close`, `target_version`(지금 2), `class`(`up`/`flat`/`down`, 채점할 수 없으면 비어 있음), `unscorable`(`missing mid`, `rest quotes`, `silent quotes`, `restarted`, `not recorded`), `path`(JSON: 아래 `touch`의 경로 필드), `scored_at`. 봉 마감의 도달 정답(#160, #167). 예측이 아니라 (종목, 봉 마감)마다 하나고, 예측하지 않은 봉 마감(VI 등)에도 있다. `blocks`처럼 따로 둔 표라 옛 엔진도 DB를 연다. 엔진은 이미 있는 봉 마감을 덮어쓰지 않는다. 지난 예측의 빠진 행은 엔진이 시작할 때 녹화로 채우고(`scored_at`은 그 4분이 끝난 시각), 다른 값으로 바꾸는 것은 `rescore`뿐이다(아래 "지난 예측의 도달 정답", #168) |
-| `runs` | `id`, `kind`(`cpu_budget`: CPU 예산으로 건너뜀, `review`: 일일 상태 점검, `retire_candidate`: 은퇴 후보 알림, `budget_report`: 그날 예산 때문에 빠진 예측을 알림(#71), `no_regime`: 그날 매크로 국면이 없거나 엔진이 모르는 이름이어서 기본 전이행렬로 돈 날, 첫 봉 마감에 하루 한 번(`detail`에 `(unknown: <이름>)`), `start`: 수집기가 엔진을 시작함(`detail`은 JSON: `commit`, `fee_rate`, `signal_rule`(`min_probability`, `min_agree`, 끄면 `null`), `algorithm_seconds`, `cpu_budget_seconds`. 성적을 코드와 설정별로 가르는 근거, #85), `signal_sent`: 보낸 텔레그램 신호, `signal_blocked`: 막힌 텔레그램 신호(둘 다 판정할 때마다 하나씩, `detail`은 JSON, 아래 "텔레그램 신호 알림", #80), `touch_fill`: 엔진이 시작할 때 지난 예측의 도달 정답을 채움(한 행이라도 썼을 때), `rescore`: `krx-quant rescore`를 돌림(둘 다 `detail`은 날마다 `day`, `source`(녹화를 읽은 곳), `labeled`(녹화로 낸 창 수), `written`(쓴 행 수), `not_recorded`, `failed`(읽지 못한 이유)의 JSON 목록, #168), `target`: 상태가 도달 정답으로 다시 시작됨(`detail` `2`. 엔진이 이 DB를 처음 열 때 한 번, #170)), `at`, `algorithm`, `detail` |
+| `runs` | `id`, `kind`(`cpu_budget`: CPU 예산으로 건너뜀, `review`: 일일 상태 점검, `retire_candidate`: 은퇴 후보 알림, `budget_report`: 그날 예산 때문에 빠진 예측을 알림(#71), `no_regime`: 그날 매크로 국면이 없거나 엔진이 모르는 이름이어서 기본 전이행렬로 돈 날, 첫 봉 마감에 하루 한 번(`detail`에 `(unknown: <이름>)`), `start`: 수집기가 엔진을 시작함(`detail`은 JSON: `commit`, `fee_rate`, `signal_rule`(`min_probability`, `min_agree`, 끄면 `null`), `algorithm_seconds`, `cpu_budget_seconds`. 성적을 코드와 설정별로 가르는 근거, #85), `signal_sent`: 보낸 텔레그램 신호, `signal_blocked`: 막힌 텔레그램 신호(둘 다 판정할 때마다 하나씩, `detail`은 JSON, 아래 "텔레그램 신호 알림", #80), `touch_fill`: 엔진이 시작할 때 지난 예측의 도달 정답을 채움(한 행이라도 썼을 때), `rescore`: `krx-quant rescore`를 돌림(둘 다 `detail`은 날마다 `day`, `source`(녹화를 읽은 곳), `labeled`(녹화로 낸 창 수), `written`(쓴 행 수), `not_recorded`, `failed`(읽지 못한 이유)의 JSON 목록, #168), `kind_fill`: 엔진이 시작할 때 다른 종류의 지난 정답을 채움(한 행이라도 썼을 때. `detail`은 `touch_fill`과 같은 JSON 목록이고, `labeled`는 답한 창 수, `not_recorded`는 녹화가 없는 예측된 봉 마감 수다, #180), `target`: 상태가 도달 정답으로 다시 시작됨(`detail` `2`. 엔진이 이 DB를 처음 열 때 한 번, #170)), `at`, `algorithm`, `detail` |
 | `statuses` | `id`, `algorithm`, `at`, `previous`, `status`, `reason`: 알고리즘 상태 이력(#17) |
 | `consensus_fits` | `version`, `computed_at`: 합의 가중치를 계산한 기록(#18). 엔진은 시작할 때 마지막 버전을 읽는다. |
 | `consensus_weights` | `version`, `symbol`, `slot`, `algorithm`, `weight`: 그 버전의 칸별 가중치 |
 | `kind_predictions` | `id`, `kind`, `symbol`, `algorithm`(그 종류의 알고리즘이나 기준 예측), `model_version`, `bar_close`, `displayed_at`, `status`(`predictions`와 같은 값: `ok`, `timed_out`, `error`, `vi`, `no_book`, `no_previous`), `output`(JSON: `p_<클래스>` 셋과 종류의 추가 필드, `ok`가 아니면 비어 있음). 방향 말고 다른 종류의 예측(#179, 아래 "예측 종류"). (`kind`, `symbol`, `algorithm`, `bar_close`)마다 하나다. 따로 둔 표라 옛 엔진도 DB를 연다 |
-| `kind_answers` | `kind`, `symbol`, `bar_close`, `answer_version`, `class`(종류의 클래스 중 하나, 채점할 수 없으면 비어 있음), `unscorable`(`missing mid`, `rest quotes`, `silent quotes`, `restarted`, 정답 함수가 클래스를 내지 않으면 그 이유나 `no answer`), `special`(VI·서킷브레이커·사이드카가 4분에 닿음), `path`(JSON: 종류의 경로 요약), `scored_at`. 종류의 정답(#179). (종류, 종목, 봉 마감, 정답 버전)마다 하나이고 그 봉 마감의 그 종류 예측이 모두 이것으로 채점된다. 예측하지 않은 봉 마감에도 있다. 엔진은 이미 있는 행을 덮어쓰지 않는다. 따로 둔 표다 |
+| `kind_answers` | `kind`, `symbol`, `bar_close`, `answer_version`, `class`(종류의 클래스 중 하나, 채점할 수 없으면 비어 있음), `unscorable`(`missing mid`, `rest quotes`, `silent quotes`, `restarted`, 정답 함수가 클래스를 내지 않으면 그 이유나 `no answer`, 지난 정답을 채울 때 녹화가 없으면 `not recorded`(#180)), `special`(VI·서킷브레이커·사이드카가 4분에 닿음), `path`(JSON: 종류의 경로 요약), `scored_at`. 종류의 정답(#179). (종류, 종목, 봉 마감, 정답 버전)마다 하나이고 그 봉 마감의 그 종류 예측이 모두 이것으로 채점된다. 예측하지 않은 봉 마감에도 있다. 엔진은 이미 있는 행을 덮어쓰지 않는다. 지난 봉 마감의 빠진 행은 엔진이 시작할 때 녹화로 채운다(아래 "변동폭"의 "지난 정답", #180). 따로 둔 표다 |
 
 `predictions`에는 (`algorithm`, `bar_close`) 인덱스도 있다(#170, 알고리즘마다 도달 정답 모델의 첫 예측을 찾는다). `kind_predictions`에는 (`kind`, `bar_close`), (`kind`, `symbol`, `bar_close`), (`algorithm`, `bar_close`) 인덱스가 있다(#179). 새 표와 인덱스는 스키마 버전을 올리지 않는다.
 
@@ -196,6 +198,7 @@
 ### 계약 (JSON 스키마, #19)
 
 - `schemas/engine-api-v1.json`이 모든 `/v1` 응답의 형식이다(JSON Schema 2020-12). 엔드포인트마다 `$defs`에 정의가 하나씩 있다: `status`, `symbols`, `latest`, `predictions`, `bars`, `algorithms`, `algorithm_detail`, `leaderboard`, `algorithm_stats`, `consensus`, `macro`, `calendar`, `kinds`, `kind_latest`, `kind_predictions`, 오류는 `error`. 스트림의 메시지는 `event`(종류마다 `prediction_event` 등)다.
+- 다른 종류 항목의 `output`, 정답의 `path`, 통계의 `extra`는 종류마다 형식이 다르다. 변동폭의 것은 `range_output`, `range_path`, `range_stats`다(#180, 아래 "변동폭").
 - `leaderboard`와 `algorithm_stats`는 둘 중 하나다(#179): 방향의 것(`direction_leaderboard`, `direction_algorithm_stats`, 이전과 같은 형식)과 다른 종류의 것(`kind_leaderboard`, `kind_algorithm_stats`, 맨 위에 `kind`가 있다).
 
   > **바뀜** (2026-10-15, #196): `leaderboard`와 `algorithm_stats` 정의가 방향의 형식 그 자체였다 → 그 형식은 `direction_leaderboard`, `direction_algorithm_stats`로 옮기고, 두 정의는 방향의 것과 다른 종류의 것 중 하나다. 방향의 응답 형식은 그대로다. 항목의 `lift`도 같은 내용을 `lift` 정의로 옮겨 두 종류가 함께 쓴다. 이유: 엔드포인트마다 정의 하나를 지키면서 다른 종류의 응답도 계약으로 검사하려고(#179).
@@ -638,7 +641,9 @@
 
 ### `GET /v1/kinds` (#179)
 
-엔진이 예측하는 종류다. 방향이 처음이고 그 뒤로 등록 순서다(아래 "예측 종류"). 지금은 방향 하나다.
+엔진이 예측하는 종류다. 방향이 처음이고 그 뒤로 등록 순서다(아래 "예측 종류"). 방향과 변동폭(#180)이다.
+
+> **바뀜** (2026-10-15, #180): "지금은 방향 하나다" → 방향과 변동폭. 이유: 변동폭이 첫 종류다.
 
 ```json
 {
@@ -652,6 +657,23 @@
       "answer_version": 2,
       "fields": {"expected_ticks": {"meaning": "4분 뒤 중간가 변화의 기대값. 세 확률과 함께 낸다.", "unit": "틱", "known": "봉 마감에 낸다."}},
       "baselines": [{"name": "baseline-flat", "card": {"scientist": null, "character": "기준 예측: 늘 보합", "...": "..."}}]
+    },
+    {
+      "name": "range",
+      "title": "변동폭",
+      "classes": ["small", "medium", "large"],
+      "class_titles": ["작음", "보통", "큼"],
+      "action": ["small", "large"],
+      "answer_version": 1,
+      "fields": {
+        "q10": {"meaning": "봉 마감부터 4분 동안 통합 중간가 변동폭(최고 − 최저)의 10% 분위수. 열에 하나는 이보다 작다.", "unit": "틱(봉 마감 중간가의 호가단위)", "known": "봉 마감에 낸다."},
+        "q50": {"...": "..."},
+        "q90": {"...": "..."}
+      },
+      "baselines": [
+        {"name": "range-climate", "card": {"scientist": null, "character": "기준 예측: 변동폭 시간대 기후", "...": "..."}},
+        {"name": "range-persist", "card": {"scientist": null, "character": "기준 예측: 직전 4분 변동폭", "...": "..."}}
+      ]
     }
   ]
 }
@@ -675,7 +697,7 @@
   "predictions": [
     {
       "algorithm": "range-climate",
-      "model_version": "v1",
+      "model_version": "range-climate-20261014-3f9a1c",
       "bar_close": "2026-10-12T09:31:00+09:00",
       "displayed_at": "2026-10-12T09:31:00.004120+09:00",
       "target_at": "2026-10-12T09:35:00+09:00",
@@ -683,14 +705,22 @@
       "output": {"p_small": 0.2, "p_medium": 0.5, "p_large": 0.3, "q10": 1.0, "q50": 2.5, "q90": 5.0},
       "answer": {
         "answer_version": 1, "class": "medium", "unscorable": null, "special": false,
-        "scored_at": "2026-10-12T09:35:00.003000+09:00", "path": {"r": 3.0}
+        "scored_at": "2026-10-12T09:35:00.003000+09:00",
+        "path": {
+          "r": 3.0, "k": 2, "tick": 100, "anchor": 81250.0,
+          "max_mid": 81450.0, "max_mid_at": "2026-10-12T09:32:10.201000+09:00",
+          "min_mid": 81150.0, "min_mid_at": "2026-10-12T09:33:30.512000+09:00",
+          "up": 2.0, "down": 1.0, "quotes": 1043, "silent": false, "max_bid": 81400.0, "min_ask": 81200.0
+        }
       }
     }
   ]
 }
 ```
 
-(`range`와 그 값은 #180의 것을 예로 든 것이다. #179에는 다른 종류가 없다.)
+(변동폭의 출력과 경로 필드는 아래 "변동폭"에 있다.)
+
+> **바뀜** (2026-10-15, #180): "(`range`와 그 값은 #180의 것을 예로 든 것이다. #179에는 다른 종류가 없다.)" → 변동폭의 실제 형식. 이유: #180이 변동폭을 등록했다.
 
 - `output`: `p_<클래스>` 셋(분포)과 종류의 추가 필드. `status`가 `ok`가 아니면 `output`, `target_at`, `answer`가 모두 `null`이다. 채점하지 않기 때문이다.
 - `answer`: 그 봉 마감의 그 종류 정답이다. 그 봉 마감의 그 종류 예측이 모두 같은 것을 가진다. 4분이 지나기 전에는 `null`이다. `class`가 `null`이면 채점할 수 없고 `unscorable`이 이유다(아래 "예측 종류"의 "정답"). `special`이 `true`면 기본 통계에서 뺀다. `path`는 종류의 경로 요약이다.
@@ -707,6 +737,8 @@
 - 항목에 `pnl`(닿음 손익, 방향의 것)이 없고 `extra`(종류의 추가 통계, 없는 종류는 `null`)가 있다.
 - `precision`·`coverage`는 그 종류의 행동 클래스로 센다. `lift.vs`의 키는 그 종류의 기준 예측이다.
 - 알고리즘의 예측은 그 종류의 정답 버전으로 학습한 모델의 것만 센다(기본값 모델의 것은 빠진다). 기준 예측은 모두 센다.
+
+변동폭의 `extra`는 분위수 통계다(아래 "변동폭"의 "통계", 스키마 `range_stats`).
 
 `GET /v1/algorithms/{name}/stats`는 그 이름이 다른 종류의 알고리즘이나 기준 예측이면 그 종류의 통계다. 방향의 상세 통계와 같은 형식에 맨 위 `kind`가 있고, 항목은 위의 종류 항목이며, `overall.calibration_by_class`의 키는 그 종류의 클래스다.
 
@@ -762,9 +794,13 @@
 
 ## 예측 종류 (#179)
 
-방향 말고 다른 종류의 예측을 같은 봉 마감, 같은 시장 보기, 같은 작업 스레드에서 낸다(설계는 [design.md](design.md#예측-종류-179)). 변동폭(#180)과 장벽(#183)이 이 위에 올라간다. 지금 등록된 종류는 방향 하나이고, 다른 종류는 테스트의 시험용 종류(`tests/kind_doubles.py`의 `drift`)로만 돈다.
+방향 말고 다른 종류의 예측을 같은 봉 마감, 같은 시장 보기, 같은 작업 스레드에서 낸다(설계는 [design.md](design.md#예측-종류-179)). 변동폭(#180)과 장벽(#183)이 이 위에 올라간다. 등록된 종류는 방향과 변동폭(아래 "변동폭")이다. 테스트에는 시험용 종류(`tests/kind_doubles.py`의 `drift`)도 있다.
 
-**종류 등록(`kinds.py`).** 종류는 `kinds.Kind` 하나로 선언하고 `KINDS`에 방향 뒤로 넣는다(`register_kinds`가 검사한다).
+> **바뀜** (2026-10-15, #180): "지금 등록된 종류는 방향 하나이고, 다른 종류는 테스트의 시험용 종류로만 돈다" → 방향과 변동폭. 이유: 변동폭이 첫 종류다(#177).
+
+**종류 등록(`kinds.py`, `kind_registry.py`).** 종류는 `kinds.Kind` 하나로 선언하고(종류의 규칙은 그 종류의 모듈에 둔다. 변동폭은 `ranges.py`), `kind_registry.KINDS`에 방향 뒤로 넣는다(`register_kinds`가 검사한다).
+
+> **바뀜** (2026-10-15, #180): 종류 목록 `KINDS`(와 `kind_named`)는 `kinds.py`에 있었다 → `kind_registry.py`. 이유: 변동폭 모듈(`ranges.py`)이 `kinds.py`의 틀 위에 서므로, 목록을 따로 두어야 두 모듈이 서로를 읽지 않는다.
 
 | 필드 | 뜻 |
 |---|---|
@@ -773,9 +809,11 @@
 | `action` | 행동 클래스: 정밀도·커버리지를 셀 클래스(`classes` 안에서) |
 | `answer`, `answer_version` | 정답 함수: 창(`kinds.Followed`)을 받아 `kinds.Answer`(클래스 이름, 클래스가 없을 때의 이유, 경로 요약)를 낸다. 정답 규칙을 바꾸면 정답 버전을 올린다 |
 | `bar_answer` | 1분봉만 있는 날의 정답 규칙(학습용): 봉 마감에 끝난 봉, 그 뒤 4분의 봉(체결이 있는 것), 수수료율을 받는다. 없으면(`None`) 그런 날은 그 종류를 학습하지 않는다 |
-| `baselines` | 기준 예측(`kinds.KindBaseline`: `name`, `version`, `card`, `predict(KindInputs)`). 이름은 방향의 예측자와 다른 종류의 기준 예측과 겹치지 않는다 |
+| `baselines` | 기준 예측(`kinds.KindBaseline`: `name`, `version`, `card`, `predict(KindInputs)`). 이름은 방향의 예측자와 다른 종류의 기준 예측과 겹치지 않는다. 표에서 내는 기준 예측(`kinds.TableBaseline`, #180: 그 위에 `days`, `default_table()`, `fit(KindSample 목록)`, `using(표)`)은 밤 학습이 그 종류의 최근 `days`거래일 정답으로 표(`Model`)를 다시 맞추고 08:00 교체가 `state/models/<이름>.json`으로 설치한다. 엔진은 그 표를 쥐고(`kind_tables`) 낸다. 예측의 모델 버전은 표의 버전이다 |
 | `fields`, `check` | 세 확률 말고 내는 출력 필드와 그 뜻(`cards.Meaning`), 출력 전체의 검사(어기면 그 이유) |
-| `stats` | 추가 통계: 그 예측자의 채점된 예측(`kinds.KindScored`)에서 JSON 객체를 낸다. 통계 항목의 `extra`가 된다 |
+| `stats` | 추가 통계: 그 예측자의 채점된 예측(`kinds.KindScored`)과 그 종류 기준 예측들의 채점된 예측(이름마다)에서 JSON 객체를 낸다. 통계 항목의 `extra`가 된다 |
+
+> **바뀜** (2026-10-15, #180): `stats`는 그 예측자의 채점된 예측만 받았다 → 그 종류 기준 예측들의 것도 받는다. 이유: 변동폭의 `range-climate` 대비 pinball loss 차이를 내려고(#177).
 
 방향(`DIRECTION_KIND`)은 클래스 `up`·`flat`·`down`, 행동 클래스 `up`·`down`, 정답 버전 2(도달 정답), 출력 필드 `expected_ticks`로 등록되어 있다. 정답 함수와 기준 예측은 따로 없다. 방향은 지금 표와 코드(`touch.py`, `baselines.py`, `consensus.py`) 그대로 돈다.
 
@@ -803,6 +841,56 @@
 **상태.** "상태 관리"의 규칙을 종류마다 따로 쓴다. lift는 그 종류의 기준 예측 대비이고, 수습은 그 종류의 정답 버전으로 학습한 모델로 처음 예측한 날부터 센다. 복제는 같은 종류의 먼저 등록된 알고리즘과만, 첫 클래스 확률 − 셋째 클래스 확률의 상관으로 본다(이유 `p_<첫째> - p_<셋째> moves with …`). 정식이 되어도 합의가 없다.
 
 **학습.** `krx-quant fit`, 밤 학습, 08:00 교체, `rollback`, 사전 검증이 다른 종류의 알고리즘에도 돈다(아래 "학습", "사전 검증"). 표본(`KindSample`)은 방향 표본과 같은 봉 마감(VI·특수는 빠짐)과 피처에 그 종류의 정답을 붙인 것이다. 녹화된 날은 엔진과 같은 시장 보기 창과 정답 함수로(재생 채점과 같다, 테스트로 확인), 1분봉만 있는 날은 `bar_answer`로 만든다. 모델의 `target_version`은 그 종류의 정답 버전이다. 밤 학습은 그 종류 세 클래스의 log loss로 champion과 견준다. 엔진의 모델 교체와 `rollback`은 그 종류의 정답 버전이 2 이상이면 그 버전으로 학습한 모델로만 바꾼다(방향의 #170 규칙과 같다).
+
+## 변동폭 (#177, #180)
+
+첫 다른 종류다(`ranges.py`의 `RANGE`, 이름 `range`, 설계는 [design.md](design.md#변동폭-177-180)). 봉 마감 t부터 4분 동안 통합 중간가가 얼마나 움직였는지(최고 − 최저, 틱)를 비용 기준 세 구간으로 나눈다. 범위 기반 변동성(Parkinson 1980, CARR)을 체결가가 아니라 중간가로 잰 것이다. 체결가는 매수·매도 호가를 오가며 범위를 부풀린다(bid-ask bounce). 지금은 기준 예측 둘만 예측한다. 첫 모델(`mandelbrot`)은 #181, 화면은 #182다.
+
+**정답(정답 버전 1, `range_answer`).**
+- 기준 가격은 t의 통합 중간가(위 "기준가")다. 없으면 채점할 수 없다(`missing mid`).
+- 창의 중간가는 기준 가격과, 받은 시각 기준 t 이상 t + 4분 미만에 받은 WebSocket 통합 1호가(위 "예측 종류"의 "정답": 뒤집히거나 한쪽만 있는 호가는 버리고, 붙은 호가는 쓴다)의 중간가다.
+- 변동폭 r = (그중 최고 − 최저) ÷ 기준 가격의 호가단위다. 중간가라서 반 틱 단위 값이다.
+- k는 기준 가격의 보합 폭(위 "채점")이다. 작음(`small`) r < k, 보통(`medium`) k ≤ r < 2k, 큼(`large`) r ≥ 2k. 작음은 "중간가로 봐도 4분 안에 어떤 왕복 매매로도 비용을 넘을 수 없었다"는 뜻이다.
+- 예(81,250원, 호가단위 100원, k = 2): 4분 동안 중간가가 81,250 → 81,450 → 81,050이면 r = 4, 큼이다. 81,450까지만 갔으면 r = 2, 보통이고, 붙은 호가 81,300 / 81,300(중간가 81,300)까지만 갔으면 r = 0.5, 작음이다. 같은 4틱도 k가 3인 가격(87,050원)에서는 보통이다(손계산 표: `tests/test_ranges.py`).
+- 채점할 수 없는 창(REST 대체 호가, 60초 끊김, 재시작)과 특수 상황은 위 "예측 종류"의 규칙(도달 정답과 같다) 그대로다.
+- 경로(`path`, 스키마 `range_path`): `r`, `k`, `tick`, `anchor`(기준 중간가), `max_mid`·`max_mid_at`(최고 중간가와 그것을 처음 받은 시각, 기준 가격이 최고면 봉 마감), `min_mid`·`min_mid_at`, `up`(최고 − 기준, 틱), `down`(기준 − 최저, 틱), `quotes`(받은 호가 수), `silent`(60초 넘게 호가가 끊겼는지), `max_bid`·`min_ask`(진단용, 도달 정답 경로의 것과 같다). 따라가지 못한 창(`restarted`, `not recorded`)은 빈 객체다.
+
+**출력(스키마 `range_output`).** `p_small`, `p_medium`, `p_large`(합 1)와 r의 분위수 `q10`, `q50`, `q90`(틱)이다. 0 ≤ q10 ≤ q50 ≤ q90이어야 하고(`quantiles_ordered`), 어기면 그 회차는 `error`다. 예측 클래스는 가장 큰 확률이다(동률이면 보통, 그다음 작음).
+
+**기준 예측.**
+
+| 이름 | 버전 | 예측 |
+|---|---|---|
+| `range-climate` | 표의 버전 | 종목 × 30분 시간대(봉 마감 09:01–09:30은 `09:00`)마다 최근 20거래일의 변동폭 정답(녹화일은 호가, 그 전 날은 아래 1분봉 규칙)에서 세 구간의 비율을 세 확률로, r의 10·50·90% 분위수(정렬한 r의 q·(n − 1) 위치, 사이는 선형 보간)를 분위수로 낸다. 표에 없는 칸은 그 종목 하루 전체(`<종목>.all`)의 값, 그것도 없으면 기본값(1/3씩, 분위수 0·k·2k틱)이다(모든 봉 마감에 내야 lift가 모든 예측과 짝지어진다). 표는 밤 학습이 매일 다시 맞추고 성적 비교 없이 승격하며, 08:00 교체가 `state/models/range-climate.json`으로 설치한다. 파라미터는 `<종목>.<시간대>.p_small`·`.p_medium`·`.p_large`·`.q10`·`.q50`·`.q90`·`.n`(센 정답 수)이다. 예측의 `model_version`은 표의 버전(`range-climate-<마지막 날>-<해시>`, 표가 없으면 `range-climate-default`)이다 |
+| `range-persist` | `v1` | 직전 창(t − 4분 → t)의 r을 시장 보기가 따라간 그 창에서 같은 정답 규칙으로 구해, 지금 봉 마감의 k로 나눈 구간을 확률 1로, q10 = q50 = q90 = r로 낸다. 그 창을 채점할 수 없으면(그날 처음 4분, 재시작 포함) 예측하지 않는다(`no_previous`, 방향의 `baseline-persist`와 같다) |
+
+- 변동폭의 가장 약한 lift는 이 둘 대비 lift 중 작은 것이다. `range-climate`는 변동성의 장중 계절성(개장·마감 때 큼)만 맞혀서 이기는 모델을, `range-persist`는 변동성 군집만 쓰는 모델을 거른다(1분봉 1년치에서 직전 4분과 다음 4분 범위의 로그 상관은 0.74–0.86, #177).
+
+**통계.** 3클래스 통계는 위 "예측 종류"와 같고, 정밀도·커버리지는 행동 클래스 작음·큼으로 센다. 항목의 `extra`(스키마 `range_stats`)는 분위수 통계다.
+- `n`: 채점된 예측 중 경로에 r이 있는 것의 수.
+- `pinball`: 분위수(`q10`, `q50`, `q90`)마다 pinball loss(틱). τ 분위수 q와 실제 r에서 r ≥ q면 τ·(r − q), 아니면 (1 − τ)·(q − r)이다. `mean`은 평균과 정규근사 95% 구간, `by_day`는 거래일마다의 평균을 값 하나로 본 평균과 t분포 95% 구간이다(`n`은 날 수, 2일보다 적으면 `null`).
+- `interval_coverage`: q10 ≤ r ≤ q90인 비율(이상적으로 0.8)과 Wilson 95% 구간.
+- `q50_abs_error`: |r − q50|의 평균(틱)과 정규근사 95% 구간.
+- `vs_climate`: 같은 종목·봉 마감의 `range-climate`와 짝지은 pinball loss 차이(이 예측자 − 기후, 음수가 낫다). 분위수마다 `mean`과 `by_day`다. 설명용이고 판정에는 쓰지 않는다(판정은 3클래스 lift다). `range-climate` 자신은 `null`이다.
+- 예(손계산, `tests/test_ranges.py`): q10 1, q50 2, q90 4에 r = 3이면 pinball은 0.2, 0.5, 0.1이고 구간 안이다. r = 0.5면 0.45, 0.75, 0.35이고 구간 밖이다.
+
+**1분봉 날의 정답(학습용, `bar_range`).** 녹화가 없는 날은 호가가 없어 통합 1분봉(백필)으로 근사한다.
+- r ≈ max(0, (t의 종가와, t부터 4분 안에 시작한 1분봉(체결이 있는 봉) 중 최고 고가 − 최저 저가) ÷ 호가단위 − c). 기준 가격과 k는 t의 종가(t에 끝난 봉의 종가)로 정한다.
+- t에 끝난 봉이 없거나 그 4분에 체결이 하나도 없으면 정답이 없다(도달 정답의 1분봉 규칙과 같다). 체결이 없는 1분은 건너뛴다.
+- c는 체결가의 호가 튐 보정이다. 1분봉 범위는 중간가 범위보다 약 1틱 크다(005930 1분봉 중앙 3틱, 녹화일 중간가 중앙 1–2틱, #177).
+- **c는 지금 1이다(`ranges.BAR_C`, 잠정).** #177의 위 실측으로 골랐다. 녹화일에서 c = 0과 1 중 어느 쪽이 호가 정답의 구간과 더 많이 같은지는 아직 재지 않았다(서버의 녹화로만 잴 수 있다). `krx-quant diagnose` 7절이 잰다([operations.md](operations.md#변동폭-1분봉-규칙의-c-정하기-180)). 재면 더 많이 같은 값으로 고정하고 그 일치율을 여기에 적는다.
+
+**학습.** 다른 종류의 학습(아래 "학습"의 "다른 종류의 정답으로 학습")과 같다. 녹화된 날은 위 정답 모듈로(재생 채점과 같다, `tests/test_ranges.py`), 1분봉만 있는 날은 위 1분봉 규칙으로 정답을 만든다. `range-climate`의 표도 이 정답으로 맞춘다.
+
+**지난 정답(#180, `rescore.fill_kind_answers`).** 엔진이 녹화와 API를 먼저 열고 지난 도달 정답을 채운 뒤, 작업 스레드가 2026-10-12(`RECORDING_START`)부터 어제까지 예측이 있는 봉 마감 중 변동폭 정답(정답 버전 1) 행이 없는 날을 그날 녹화로 채운다.
+- 그날의 창을 모두 재생과 같은 시장 보기 창으로 답하고, 없는 행만 쓴다(이미 있는 행은 그대로다). 그래서 두 번 돌려도 같고, 채운 정답은 같은 날을 새로 재생한 정답과 같다: 클래스, 채점 불가 이유, 경로, `scored_at`(그 4분이 끝난 시각), 특수 표시까지(`tests/test_rescore.py`).
+- 특수 표시를 위해 통합 체결·호가·REST 호가 말고 그 종목의 VI 현황, 코스피 지수(서킷브레이커), 코스피200 선물(사이드카)도 읽는다. 엔진처럼 그 봉 마감에 알던 구간이나 그 뒤에 알게 된 구간(어느 판이든)이 4분에 닿으면 특수다.
+- 녹화는 종목·날마다 데이터 디렉터리, 없으면 Object Store에서 읽는다. 둘 다 없으면 예측이 있는 봉 마감을 `not recorded`로 쓴다. 읽다 실패한 날은 쓰지 않고 다음 시작 때 다시 한다. 오늘은 실시간 엔진에 맡긴다.
+- 기준 예측은 지난 봉 마감을 다시 예측하지 않는다(그때 표시된 적이 없다). 채운 정답은 진단에 쓴다. 학습은 녹화를 직접 재생해 같은 정답을 만든다.
+- 한 일은 `runs`의 `kind_fill`에 남고, 쓴 행이 있으면 저장소 버전을 올린다. `rescore`는 종류의 정답을 다시 계산하지 않는다. 정답 규칙을 고치면 정답 버전을 올린다. 그러면 새 버전의 행이 모두 빠진 것이 되어 다음 시작 때 채워진다.
+- 운영 절차는 [operations.md](operations.md#종류의-지난-정답-180)에 있다.
+
+**진단(`krx-quant diagnose` 7절).** 저장된 변동폭 정답(특수는 뺀다)의 종목 × 시간대별 구간 비율과 r 분포, 녹화일 1분봉(백필)으로 낸 1분봉 규칙(c = 0, 1)이 호가 정답과 구간이 같은 비율(전체와 종목별, 더 많이 같은 c), 1분봉 범위 − 호가 범위의 분포(c = 0), 종목별로 위·아래로 간 폭의 분포다([operations.md](operations.md#진단-82)).
 
 ## 알고리즘
 
@@ -935,6 +1023,7 @@ docker compose run --rm --no-deps engine prevalidate <이름> --days 5  # 빨리
   - `stats`는 그 종류의 정답으로 채점하고(특수 제외), lift는 그 종류의 기준 예측 대비다. 리포트의 `stats`는 그 종류의 순위표 항목 형식이다(`pnl` 없음, `extra` 있음).
   - `correlation`은 같은 종류의 다른 알고리즘과만, 첫 클래스 확률 − 셋째 클래스 확률로 잰다.
   - `budget`은 그 종류의 예측(`kind_predictions`) 상태로 센다.
+  - 그 종류의 표에서 내는 기준 예측(변동폭의 `range-climate`, #180)은 날마다 그 전날까지의 그 종류 정답으로 다시 맞춘다(`baseline-climate`와 같다). 첫날처럼 그 전 날이 없으면 기본 표다.
   - 리포트에 `kind`(종류 이름)가 있고, `target_version`은 그 종류의 정답 버전이다. 엔진의 관문은 리포트의 `target_version`을 그 종류의 정답 버전과 견준다(`KRX_TARGET_VERSION`이 아니다). 엔진이 모르는 종류의 알고리즘은 통과하지 못한다.
 
 ### 피처 (Feature Store)
@@ -1016,7 +1105,8 @@ docker compose run --rm --no-deps engine prevalidate <이름> --days 5  # 빨리
 - **녹화된 날**: Market View가 엔진처럼 종류의 창(`kinds.QuoteLog`)을 따라가고, 4분 뒤 그 종류의 정답 함수로 정답을 만든다. 엔진이 같은 날을 재생해 `kind_answers`에 쓰는 정답(클래스, 이유, 경로 요약)과 같다(`tests/test_kind_training.py`).
 - **1분봉만 있는 날**: 종류의 1분봉 규칙(`Kind.bar_answer`)으로 만든다. 봉 마감에 끝난 봉이 없으면 정답이 없다. 규칙이 없는 종류는 그런 날의 정답이 없다.
 - 학습한 모델의 `target_version`은 그 종류의 정답 버전이다(`Model.fitted`가 표본에서 정한다). 버전 1이면 해시에 들어가지 않고, 2 이상이면 방향처럼 들어간다.
-- 밤 학습은 방향 알고리즘과 기후 표 다음에 학습하고, 그 종류 세 클래스의 log loss(`-log max(p, 1e-6)`, 방향과 같은 바닥)로 champion과 견준다. 리포트에 `kind`, `target_version`(그 종류의 정답 버전), `labels`(그 종류의 정답 출처별 표본 수)가 남는다. 체크포인트는 리포트의 `target_version`이 그 종류의 정답 버전과 다르면 다시 학습한다. 텔레그램 요약에는 종류마다 `<종류> 정답 표본: 녹화 호가 N개, 1분봉 M개`가 한 줄 붙는다. 방향의 `정답 버전 2 표본` 줄은 방향의 리포트로만 센다.
+- 밤 학습은 방향 알고리즘과 기후 표들 다음에 학습하고, 그 종류 세 클래스의 log loss(`-log max(p, 1e-6)`, 방향과 같은 바닥)로 champion과 견준다. 리포트에 `kind`, `target_version`(그 종류의 정답 버전), `labels`(그 종류의 정답 출처별 표본 수)가 남는다. 체크포인트는 리포트의 `target_version`이 그 종류의 정답 버전과 다르면 다시 학습한다. 텔레그램 요약에는 종류마다 `<종류> 정답 표본: 녹화 호가 N개, 1분봉 M개`가 한 줄 붙는다. 방향의 `정답 버전 2 표본` 줄은 방향의 리포트로만 센다.
+- 종류의 표에서 내는 기준 예측(변동폭의 `range-climate`, #180)은 방향의 기후 표 다음에 그 종류의 최근 `days`거래일(그 밤까지) 정답으로 다시 맞춘다(`TableBaseline.fit`). 리포트(`reports/<날짜>/<이름>.json`)는 종류의 알고리즘과 같은 형식(`kind`, `target_version`, `labels`)이고 검증 없이 늘 승격한다. 그 종류의 알고리즘이 없어도 맞춘다.
 
 > **바뀜** (2026-10-14, #191): 정답 버전 2에서만: 표본의 정답은 4분 뒤 중간가(녹화일)·종가(백필일)와 견준 클래스였다 → 도달 정답(녹화일은 호가, 백필일은 1분봉 규칙). 이유: 사용자가 알고 싶은 것은 4분 안에 그 가격에 시장가로 실제로 거래할 수 있었는지다(#160). 1분봉 날도 새 정답에 가깝게 학습해야 최근 20거래일로 바로 다시 학습할 수 있다.
 

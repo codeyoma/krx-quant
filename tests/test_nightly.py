@@ -33,6 +33,8 @@ from krx_quant.clock import FakeClock
 from krx_quant.engine import Event, PredictionEngine
 from krx_quant.features import Leaders
 from krx_quant.feeds import KST
+from krx_quant.kind_registry import KINDS
+from krx_quant.kinds import DIRECTION_KIND, Kind
 from krx_quant.macro import MACRO, REGIME_SCHEMA
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.model_shelf import Shelf
@@ -40,6 +42,9 @@ from krx_quant.nightly import VALIDATION_DAYS, train_night
 from krx_quant.object_store import LocalObjectStore
 from krx_quant.predictions import PredictionStore
 from krx_quant.pricing import Direction
+from krx_quant.ranges import CLASSES as RANGE_CLASSES
+from krx_quant.ranges import CLIMATE as RANGE_CLIMATE
+from krx_quant.ranges import RANGE
 from krx_quant.recorder import ParquetRecorder
 from krx_quant.swap import morning_swap, publish_live
 from krx_quant.training import training_day
@@ -105,7 +110,9 @@ def night(
     leaders: Leaders | None = None,
     commit: str = "unknown",
     target_version: int = 1,
+    kinds: Sequence[Kind] = (DIRECTION_KIND,),
 ) -> Any:
+    """The direction's night; the other kinds' tables too (#180) with ``kinds``."""
     return train_night(
         LocalObjectStore(store_root),
         tmp_path / "cache",
@@ -116,6 +123,7 @@ def night(
         now=lambda: FINISHED,
         commit=commit,
         target_version=target_version,
+        kinds=kinds,
     )
 
 
@@ -443,9 +451,14 @@ def test_the_train_command_trains_every_registered_algorithm_from_the_store(
     assert main(["train"]) == 0, capsys.readouterr().err
 
     promotions = read(store_root, f"promotions/{NIGHT}.json")
-    # On the touch target, the default (#170): the climate baseline's table last.
-    assert [r["algorithm"] for r in promotions["reports"]] == [a.name for a in ALGORITHMS] + [CLIMATE]
-    assert {r["target_version"] for r in promotions["reports"]} == {2}
+    # On the touch target, the default (#170): the climate baseline's table, then the range's
+    # (#180), of the range's answers (answer version 1).
+    names = [a.name for a in ALGORITHMS] + [CLIMATE, RANGE_CLIMATE]
+    assert [r["algorithm"] for r in promotions["reports"]] == names
+    assert {r["algorithm"]: r["target_version"] for r in promotions["reports"]} == {
+        **dict.fromkeys(names, 2),
+        RANGE_CLIMATE: 1,
+    }
     assert {r["commit"] for r in promotions["reports"]} == {"0123abc"}, "the deploy's, as the engine's (#85)"
     assert f"{NIGHT} 밤 학습" in capsys.readouterr().out
 
@@ -768,3 +781,89 @@ def test_the_first_target_trains_no_climate_table(store_root: Path, tmp_path: Pa
     report = read(store_root, f"reports/{NIGHT}/learner.json")
     assert "labels" not in report and "target_version" not in report
     assert "정답 버전 2" not in result.summary()
+
+
+def answered(cache: Path, day: date) -> list[tuple[datetime, str, float]]:
+    """``day``'s range answers with a class (bar close, class, r), as the night read them."""
+    found = training_day(
+        cache,
+        day,
+        MarketCalendar(dict.fromkeys(DAYS, True)),
+        ("005930",),
+        [],
+        FEE,
+        Leaders(),
+        target_version=2,
+        kinds=(RANGE,),
+    )
+    assert found is not None
+    return [
+        (s.bar_close, s.answer.label, s.answer.path["r"])
+        for s in found.of_kind(RANGE, ())
+        if s.answer is not None and s.answer.label is not None
+    ]
+
+
+def test_the_range_s_climate_table_is_refitted_every_night_and_runs_from_the_morning(
+    store_root: Path, tmp_path: Path
+) -> None:
+    """#180. Input: eight days of bars, the last four recorded mornings too; the range kind
+    registered. Output: the range's climate table refitted on the range's answers of all eight
+    days (recorded mornings by their quotes, the others by the bar rule), its report naming
+    the kind and counting the answers by where they came from, promoted whatever it scores;
+    the 09:00 cell's class shares are those of the night's answers; the summary has a line of
+    the range's answers by source; the morning swap installs it for the engine."""
+    for day in DAYS[-4:]:
+        archive_events(store_root, day, busy_morning(day), tmp_path)
+
+    result = night(
+        store_root, tmp_path, [FrequencyAlgorithm("learner", "velocity")], target_version=2, kinds=KINDS
+    )
+
+    version = result.promoted[RANGE_CLIMATE]
+    report = read(store_root, f"reports/{NIGHT}/{RANGE_CLIMATE}.json")
+    assert (report["kind"], report["target_version"], report["promoted"]) == ("range", 1, True)
+    assert report["training_days"] == [str(d) for d in DAYS], "the latest twenty: all eight here"
+    by_day = {str(d): len(answered(tmp_path / "cache", d)) for d in DAYS}
+    quotes = sum(by_day[str(d)] for d in DAYS[-4:])
+    assert report["labels"] == {
+        "samples": {"recorded": quotes, "bars": sum(by_day.values()) - quotes},
+        "by_day": by_day,
+    }
+    table = read(store_root, f"models/{RANGE_CLIMATE}/{version}.json")
+    first_slot = [
+        (label, r)
+        for d in DAYS
+        for close, label, r in answered(tmp_path / "cache", d)
+        if close <= datetime.combine(d, time(9, 30), KST)
+    ]
+    for c in RANGE_CLASSES:
+        share = sum(label == c for label, _ in first_slot) / len(first_slot)
+        assert table["params"][f"005930.09:00.p_{c}"] == pytest.approx(share)
+    assert table["params"]["005930.09:00.n"] == len(first_slot)
+    assert table["target_version"] == 1
+    assert (
+        f"range 정답 표본: 녹화 호가 {quotes}개, 1분봉 {sum(by_day.values()) - quotes}개" in result.summary()
+    )
+    assert f"- {RANGE_CLIMATE} 승격:" in result.summary()
+
+    engine = PredictionEngine(
+        PredictionStore(tmp_path / "engine.db"),
+        MarketCalendar(dict.fromkeys(DAYS, True)),
+        ("005930",),
+        FEE,
+        FakeClock(FINISHED),
+        algorithms=[FrequencyAlgorithm("learner", "velocity")],
+        target_version=2,
+    )
+    assert engine.kind_tables[RANGE_CLIMATE].version == f"{RANGE_CLIMATE}-default"
+    monday = NIGHT + timedelta(days=3)
+    swap = morning_swap(
+        LocalObjectStore(store_root),
+        Shelf(tmp_path / "state"),
+        engine,
+        today=monday,
+        at=datetime.combine(monday, time(8), KST),
+    )
+    asyncio.run(swap)
+    assert engine.kind_tables[RANGE_CLIMATE].version == version

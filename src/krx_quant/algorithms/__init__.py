@@ -42,7 +42,8 @@ from krx_quant.algorithms.shannon import Shannon
 from krx_quant.algorithms.turing import Turing
 from krx_quant.cards import Card, Meaning
 from krx_quant.features import FEATURES
-from krx_quant.kinds import DIRECTION, KINDS, Kind
+from krx_quant.kind_registry import KINDS
+from krx_quant.kinds import DIRECTION, Kind
 
 
 class RegistrationError(ValueError):

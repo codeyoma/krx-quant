@@ -841,6 +841,21 @@ class PredictionStore:
             out += [(kind, r[0], datetime.fromisoformat(r[1])) for r in rows]
         return sorted(out, key=lambda k: (k[2], k[0], k[1]))
 
+    def unanswered(
+        self, kind: str, answer_version: int, since: date, before: date
+    ) -> list[tuple[str, datetime]]:
+        """The (symbol, bar close) pairs predicted (the direction's predictions: every bar close
+        the engine ran) on the days from ``since`` to before ``before`` without ``kind``'s answer
+        of ``answer_version`` (#180, the kinds' fill), in time order."""
+        rows = self._db.execute(
+            "SELECT DISTINCT p.symbol, p.bar_close FROM predictions p"
+            " WHERE p.bar_close >= ? AND p.bar_close < ? AND NOT EXISTS (SELECT 1 FROM kind_answers a"
+            " WHERE a.kind = ? AND a.symbol = p.symbol AND a.bar_close = p.bar_close"
+            " AND a.answer_version = ?) ORDER BY p.bar_close, p.symbol",
+            (iso(_midnight(since)), iso(_midnight(before)), kind, answer_version),
+        )
+        return [(r[0], datetime.fromisoformat(r[1])) for r in rows]
+
     def day_kind_classes(
         self, kind: str, answer_version: int, symbol: str, since: datetime, until: datetime
     ) -> dict[str, int]:

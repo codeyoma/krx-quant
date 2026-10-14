@@ -13,7 +13,8 @@ one; a tie goes to the middle class, then the first.
 - **lift** over each of the kind's baselines, paired by symbol and bar close and by trading
   day, adjusted for the false discovery rate on the leaderboard (``stats.lift``,
   ``stats.day_lift``, ``stats.q_values``: the same code as the direction's);
-- the kind's own statistics (``Kind.stats``), beside these.
+- the kind's own statistics (``Kind.stats``), beside these, given the kind's baselines'
+  records to compare against (the range's pinball loss against its climate's, #180).
 
 There is no touch P&L: it is the direction's. The lifecycle judges a kind's algorithms by
 these, against the kind's baselines, within the kind (``kind_scoring``).
@@ -128,7 +129,11 @@ def split(
     return algorithms, baselines
 
 
-def summarize(records: Sequence[KindScored], kind: Kind) -> KindSummary:
+def summarize(
+    records: Sequence[KindScored], kind: Kind, baselines: Mapping[str, Sequence[KindScored]] | None = None
+) -> KindSummary:
+    """A predictor's statistics of ``kind``; its own (``Kind.stats``) with the kind's
+    ``baselines``' records beside, to compare against (#180)."""
     action = {kind.index(c) for c in kind.action}
     calls = [r for r in records if r.predicted in action]
     return KindSummary(
@@ -139,7 +144,7 @@ def summarize(records: Sequence[KindScored], kind: Kind) -> KindSummary:
         brier=mean_interval([_brier(r) for r in records]),
         calibration=_calibration(records, (0, 1, 2)),
         calibration_by_class={c: _calibration(records, (i,)) for i, c in enumerate(kind.classes)},
-        extra=None if kind.stats is None else kind.stats(records),
+        extra=None if kind.stats is None else kind.stats(records, baselines or {}),
     )
 
 
@@ -189,7 +194,7 @@ def entry(
         }
     )
     versions = sorted({r.model_version for r in records})
-    return KindEntry(algorithm, versions, summarize(records, kind), lifts)
+    return KindEntry(algorithm, versions, summarize(records, kind, baselines), lifts)
 
 
 def leaderboard(

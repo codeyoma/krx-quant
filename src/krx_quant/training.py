@@ -63,7 +63,8 @@ from krx_quant.features import (
 )
 from krx_quant.feeds import TRADE
 from krx_quant.feeds.base import KST
-from krx_quant.kinds import KINDS, Answer, Kind, kind_named
+from krx_quant.kind_registry import KINDS, kind_named
+from krx_quant.kinds import Answer, Kind
 from krx_quant.macro import day_regime
 from krx_quant.market_calendar import MarketCalendar, calendar_store
 from krx_quant.market_view import HORIZON, MarketView, prediction_window

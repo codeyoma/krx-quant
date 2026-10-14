@@ -16,6 +16,9 @@ nightly training refits it every night and always installs it (``nightly.py``); 
 engine reads ``state/models/baseline-climate.json`` and its defaults (no table: flat
 everywhere) without one. A tie goes to flat, then up, as a forecast's most likely class
 does.
+
+The kinds' baselines that predict from a table (#180, ``kinds.TableBaseline``: the range's
+climate) are kept the same way, each in ``state/models/<name>.json`` (``load_tables``).
 """
 
 from __future__ import annotations
@@ -31,6 +34,7 @@ from pathlib import Path
 from krx_quant.algorithms.contract import Model, Sample, model_path
 from krx_quant.consensus import slot
 from krx_quant.feeds.base import KST
+from krx_quant.kinds import Kind, table_baselines
 from krx_quant.pricing import Direction
 from krx_quant.touch import TARGET_VERSION
 
@@ -104,3 +108,19 @@ def load_climate(state_dir: Path) -> Model:
     except (OSError, ValueError, KeyError, TypeError) as e:
         log.error("cannot read %s (%s); %s runs its defaults", path, e, CLIMATE)
         return DEFAULT
+
+
+def load_tables(state_dir: Path, kinds: Sequence[Kind]) -> dict[str, Model]:
+    """The tables the server runs for the ``kinds``' table baselines (#180), by name: each
+    ``state/models/<name>.json``, else (missing or unreadable) its defaults."""
+    tables: dict[str, Model] = {}
+    for _, baseline in table_baselines(kinds):
+        path = model_path(state_dir, baseline.name)
+        tables[baseline.name] = baseline.default_table()
+        if not path.exists():
+            continue
+        try:
+            tables[baseline.name] = Model.from_json(path.read_text())
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            log.error("cannot read %s (%s); %s runs its defaults", path, e, baseline.name)
+    return tables

@@ -38,6 +38,11 @@ whatever the scores. Their reports name the kind (``kind``) and its answer versi
 (``target_version``), and count the kind's labelled samples by source; the Telegram summary
 has a line of those per kind.
 
+A kind's baselines that predict from a table (#180, ``kinds.TableBaseline``: the range's
+climate) are refitted after the direction's climate, each on the kind's answers of its
+latest ``days`` days, with a report of its own (naming the kind), and always promoted, as
+the direction's climate table is.
+
 Objects:
 
 - ``bars/...``: archived one-minute bars, and ``events/...``: recorded events of the feeds
@@ -73,7 +78,8 @@ from krx_quant.engine import ENGINE_FEEDS, partitions
 from krx_quant.features import Leaders
 from krx_quant.feeds import TRADE
 from krx_quant.feeds.base import KST, kst_day
-from krx_quant.kinds import KINDS, Kind, KindForecast, kind_named
+from krx_quant.kind_registry import KINDS, kind_named
+from krx_quant.kinds import Kind, KindForecast, TableBaseline, table_baselines
 from krx_quant.macro import regime_prefix
 from krx_quant.market_calendar import MarketCalendar, calendar_store
 from krx_quant.notify import send_notice
@@ -209,8 +215,9 @@ def train_night(
     """Train every algorithm for the night of ``day`` (default: the latest day with data) and
     store the promotion list. A night already finished is returned as it was. Each report
     names ``commit``, the code that trained it. The samples' outcomes are of
-    ``target_version``; with the touch target (2) the climate baseline is refitted too. The
-    algorithms of the ``kinds`` besides the direction train last, on their kind's answers (#179).
+    ``target_version``; with the touch target (2) the climate baseline is refitted too, and
+    so are the tables of the ``kinds``' baselines (#180). The algorithms of the ``kinds``
+    besides the direction train last, on their kind's answers (#179).
     """
     leaders = leaders or Leaders()
     bars, trades = (
@@ -239,6 +246,8 @@ def train_night(
         return Night.from_dict(finished)
     # Each kind algorithm with its kind (#179); one of a kind not registered is not trained.
     of_kinds = [(a, k) for a in kind_algorithms if (k := kind_named(a.kind, kinds)) is not None]
+    # The kinds' baselines refitted every night, with their kind (#180).
+    tables = table_baselines([k for k in kinds if k.answer is not None])
     trainer = _Trainer(
         store,
         cache_dir,
@@ -250,6 +259,7 @@ def train_night(
         calendar,
         target_version,
         of_kinds,
+        [k for k, _ in tables],
     )
     live: dict[str, str] = get_json(store, LIVE) or {}
     reports = []
@@ -259,6 +269,8 @@ def train_night(
     ]
     if target_version >= 2:
         steps.append((CLIMATE, target_version, False, trainer.climate))
+    for kind, table in tables:
+        steps.append((table.name, kind.answer_version, True, partial(trainer.table, kind, table)))
     for a, kind in of_kinds:
         steps.append(
             (a.name, kind.answer_version, True, partial(trainer.train_kind, a, kind, live.get(a.name)))
@@ -327,11 +339,13 @@ class _Trainer:
         calendar: MarketCalendar | None = None,
         target_version: int = 1,
         of_kinds: Sequence[tuple[KindAlgorithm, Kind]] = (),
+        tabled: Sequence[Kind] = (),
     ) -> None:
         self._store = store
         self._target_version = target_version
-        # The kinds besides the direction its kind algorithms predict (#179), each day read with.
-        self._kinds = tuple({k.name: k for _, k in of_kinds}.values())
+        # The kinds besides the direction its kind algorithms predict (#179) and its tables
+        # are of (#180, ``tabled``), each day read with.
+        self._kinds = tuple({k.name: k for k in [*(k for _, k in of_kinds), *tabled]}.values())
         self._cache = cache_dir
         self._symbols = tuple(symbols)
         self._fee_rate = fee_rate
@@ -502,6 +516,41 @@ class _Trainer:
             "challenger": {"version": model.version, "trained": model.trained},
             "promoted": True,
             "reason": f"each symbol and 30-minute slot's most frequent touch label over {len(loaded)} days"
+            " (installed every night)",
+        }
+
+    def table(self, kind: Kind, baseline: TableBaseline) -> dict[str, Any]:
+        """A kind baseline's table refitted on the kind's answers of its latest ``days`` days
+        (the night's included: it predicts the next day), stored and always promoted (#180)."""
+        night = self._days[-1]
+        days = self._days[-baseline.days :]
+        loaded = {day: self._day(day) for day in days}
+        report: dict[str, Any] = {
+            "algorithm": baseline.name,
+            "kind": kind.name,
+            "day": night.isoformat(),
+            "training_days": [d.isoformat() for d in days],
+            "validation_days": [],
+            "champion": None,
+            "challenger": None,
+            "promoted": False,
+            "reference_prices": {
+                day.isoformat(): found.reference for day, found in loaded.items() if found is not None
+            },
+            "target_version": kind.answer_version,
+            "labels": _kind_labels(loaded, kind),
+        }
+        model = baseline.fit(
+            [s for found in loaded.values() if found is not None for s in found.of_kind(kind, ())]
+        )
+        if model.trained is None:
+            return {**report, "reason": "not trained: no answered samples"}
+        self._put_model(baseline.name, model)
+        return {
+            **report,
+            "challenger": {"version": model.version, "trained": model.trained},
+            "promoted": True,
+            "reason": f"each symbol and 30-minute slot's {kind.name} answers over {len(loaded)} days"
             " (installed every night)",
         }
 

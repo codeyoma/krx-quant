@@ -29,7 +29,7 @@ from krx_quant.demo import demo_app, demo_morning
 from krx_quant.diagnose import DEFAULT_DAYS, diagnose
 from krx_quant.fake_kis import FakeKis
 from krx_quant.feeds.base import KST
-from krx_quant.kinds import kind_named
+from krx_quant.kind_registry import kind_named
 from krx_quant.kis import KisError
 from krx_quant.lifecycle import Status
 from krx_quant.macro import run_macro
@@ -296,7 +296,10 @@ async def _fake_kis(port: int, host: str, trades: bool) -> None:
 
 def _diagnose(days: int) -> int:
     settings = Settings.from_env(require_kis=False)
-    print(diagnose(settings.data_dir, settings.state_dir / DB_NAME, calendar_store(settings).calendar, days))
+    calendar = calendar_store(settings).calendar
+    print(
+        diagnose(settings.data_dir, settings.state_dir / DB_NAME, calendar, days, fee_rate=settings.fee_rate)
+    )
     return 0
 
 

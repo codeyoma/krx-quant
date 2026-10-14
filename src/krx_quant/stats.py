@@ -373,6 +373,19 @@ def day_lift(records: Sequence[Paired], baseline: Sequence[Paired], level: float
     return Lift(n, mean, mean - half, mean + half, p)
 
 
+def day_mean(by_day: Mapping[date, Sequence[float]], level: float = 0.95) -> Interval | None:
+    """A mean taken a trading day at a time (#180, a kind's own statistics): each day's mean
+    is one value, every day weighing the same, with a two-sided ``level`` Student t interval
+    over the days, as ``day_lift``'s. Its ``n`` is the days; None from fewer than two."""
+    means = [sum(values) / len(values) for values in by_day.values() if values]
+    n = len(means)
+    if n < 2:
+        return None
+    mean = sum(means) / n
+    half = _t_quantile(1 - (1 - level) / 2, n - 1) * _standard_error(means, mean)
+    return Interval(mean, mean - half, mean + half, n)
+
+
 def _t_above(x: float, df: int) -> float:
     """P(T > x) for Student's t with ``df`` degrees of freedom."""
     tail = 0.5 * _incomplete_beta(df / 2, 0.5, df / (df + x * x))

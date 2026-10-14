@@ -233,6 +233,28 @@ async def test_a_morning_with_another_kind_keeps_the_contract(tmp_path: Path) ->
     assert board["baselines"][0]["n"] > 0, "scored"
 
 
+async def test_a_morning_with_the_range_keeps_the_contract(tmp_path: Path) -> None:
+    """#180. Input: a replayed busy morning with the kinds the engine predicts (the range).
+    Output: every endpoint within the contract; the range's outputs, answer paths and own
+    statistics within theirs (``range_output``, ``range_path``, ``range_stats``)."""
+    engine = await run(tmp_path / "engine.db", busy_morning(), until=at("10:00:00"), target_version=2)
+
+    async with api(engine) as client:
+        checked = await walk(through(client))
+        made = await (await client.get("/v1/symbols/005930/kinds/range/predictions?limit=60")).json()
+        board = await (await client.get("/v1/leaderboard?kind=range")).json()
+
+    assert checked["kind_latest"] == 1
+    ok = [p for p in made["predictions"] if p["status"] == "ok"]
+    assert ok and all(p["answer"] is not None for p in ok if p["bar_close"] < "2026-10-12T09:56")
+    for p in ok:
+        check("range_output", p["output"])
+        if p["answer"] is not None:
+            check("range_path", p["answer"]["path"])
+    for e in board["baselines"]:
+        check("range_stats", e["extra"])
+
+
 async def test_a_screen_from_before_reads_the_touch_label_where_it_read_the_bases(tmp_path: Path) -> None:
     """For one release (#170). Input: a replayed morning on the touch target, read as the
     screen before #170 reads it. Output: every scored outcome's ``class_a`` and ``class_b`` are
