@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import heapq
 import logging
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from functools import partial
@@ -129,17 +129,22 @@ async def _run_until(engine: PredictionEngine, clock: FakeClock, until: datetime
 
 
 def recorded_events(
-    data_dir: Path, day: date, symbols: Sequence[str], leaders: Leaders | None = None
+    data_dir: Path,
+    day: date,
+    symbols: Sequence[str],
+    leaders: Leaders | None = None,
+    feeds: Collection[str] | None = None,
 ) -> Iterator[Event]:
-    """The engine's events recorded on ``day``, in receipt order.
+    """The engine's events recorded on ``day``, in receipt order; of ``feeds`` only, if given.
 
     Each partition is read file by file, a batch at a time, with only the columns the
     engine uses, and the partitions are merged by receipt time: memory stays at about a
     batch per partition however long the day. Raises FileNotFoundError if none of them
     were recorded that day.
     """
+    read = {f: c for f, c in ENGINE_FEEDS.items() if feeds is None or f in feeds}
     streams: list[Iterator[Event]] = []
-    for feed, columns in ENGINE_FEEDS.items():
+    for feed, columns in read.items():
         root = data_dir / "events" / f"date={day.isoformat()}" / f"feed={feed}"
         for key in _keys(feed, root, symbols, leaders or Leaders()):
             partition = root / f"symbol={key}"
@@ -147,7 +152,7 @@ def recorded_events(
             if files:
                 streams.append(_partition_rows(feed, files, columns))
     if not streams:
-        raise FileNotFoundError(f"no events of {', '.join(ENGINE_FEEDS)} recorded on {day} in {data_dir}")
+        raise FileNotFoundError(f"no events of {', '.join(read)} recorded on {day} in {data_dir}")
     # Stable: rows received at the same instant keep the order of the streams.
     return heapq.merge(*streams, key=lambda event: event[1]["received_at"])
 

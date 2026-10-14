@@ -344,6 +344,7 @@ docker compose run --rm engine diagnose --days 5
 - 수집기가 시작할 때도 지난날 중 아직 안 올린 날을 올리고 백필과 일봉 갱신을 돌린다. 일·주·월·년봉의 첫 전체 수집은 종목마다 수십~수백 번 묻고, 백필과 같은 속도(`KRX_BACKFILL_MAX_PER_SECOND`)로 간다.
 - 거래일 07:30부터 개장(09:00) 전 사이에 수집기가 시작하면 매크로 지표를 바로 한 번 읽는다. 개장 뒤에 시작하면 다음 거래일 07:30에 읽는다. 그날 국면이 장중에 바뀌지 않게 하려는 것이다. 손으로 읽으려면 `docker compose run --rm --no-deps engine macro`(이 명령은 언제든 새 줄을 기록한다).
 - 수집기가 시작할 때 지난밤 학습 결과를 읽고, 지금 도는 모델을 S3에 올린다.
+- 수집기가 시작해 엔진 API를 연 뒤, 지난 예측 중 도달 정답이 빠진 봉 마감을 녹화로 채운다(아래 "지난 예측의 도달 정답", #168).
 - 거래일에 08:00부터 개장 전 사이에 수집기가 시작하면, 그날 08:00 교체를 시작 30초 뒤에 바로 한다. 개장 뒤에 시작하면 다음 거래일 08:00에 한다.
 - 엔진이 꺼져 있어서 상태 점검을 놓치면, 다시 켜질 때 놓친 날 것부터 돌린다. 밤 학습은 학습 시각 뒤 8시간 안에 다시 시작하면 바로 돈다(아래).
 - 올리는 작업은 다시 돌려도 결과가 같다. 바뀐 파일만 다시 올린다.
@@ -488,6 +489,38 @@ docker compose run --rm --no-deps engine prevalidate <이름>
 - 같은 알고리즘을 동시에 두 번 돌리지 않는다. 같은 DB와 리포트 파일에 쓴다.
 - 도달 정답(`KRX_TARGET_VERSION=2`, #169)이면 검증 대상도 도달 정답으로 학습하고, 재생은 도달 정답의 기준 예측 넷으로 하며(`baseline-climate` 표는 날마다 그 전날까지의 최근 20거래일로 다시 맞춘다), `stats` 검사는 도달 정답으로 채점한다([engine-api.md](engine-api.md#사전-검증-24)).
 
+### 지난 예측의 도달 정답 (#168)
+
+도달 정답(`touches` 표, #167)은 실시간 엔진이 봉 마감마다 4분 뒤에 쓴다. 그 전에 한 예측과, 엔진이 정답 없이 남긴 봉 마감(되돌린 옛 엔진이 돈 날 등)은 그날의 녹화로 채운다. 녹화한 날을 실시간과 같은 시장 보기 창(`market_view.py`, `touch.py`)으로 다시 흘리므로, 채운 정답은 실시간 엔진이 냈을 것, 그리고 같은 날을 새로 재생(`replay`)한 결과와 같다. 서버에서 손으로 할 일은 없다.
+
+**엔진이 시작할 때 저절로 채운다.**
+
+- 수집기는 녹화와 엔진 API를 먼저 열고, 그 뒤 작업 스레드에서 채운다. 그래서 06:00 배포의 API 확인(3분)을 막지 않는다. 채우는 동안에도 녹화, 예측, API는 평소대로 돈다.
+- 대상: 2026-10-12(녹화 시작)부터 어제까지 예측이 있는데 지금 정답 버전(`target_version` 2)의 행이 없는 (종목, 봉 마감). 오늘은 실시간 엔진에 맡긴다. 장중에 재시작한 날의 `restarted`도 실시간 엔진이 쓴다.
+- 녹화는 종목·날마다 `data/events/`에서 읽는다. 통합 체결(`H0UNCNT0`), 통합 호가(`H0UNASP0`), REST 호가 스냅샷(`FHKST01010200`)만 읽는다. 없으면 `KRX_OBJECT_STORE`에서 같은 파티션을 임시 폴더로 받아 읽고 지운다.
+- 둘 다 없으면 그 봉 마감은 채점 불가 `not recorded`로 쓰고 경고를 남긴다: `<날짜>: N predicted bar closes of <종목> have no recorded events in the data directory nor s3://…; left unscorable (not recorded)`.
+- 파일이나 S3를 읽다 실패하면(네트워크 등) 그날은 아무것도 쓰지 않는다. 로그에 `could not read the events recorded on <날짜>; …`가 남고, 다음 시작 때 다시 한다.
+- 이미 있는 행은 덮어쓰지 않는다. 그래서 롤백했다가 다시 올라와도 빠진 행만 채운다. 다시 시작해도 바뀌는 것이 없다.
+- 채운 행의 `scored_at`은 그 4분이 끝난 시각이다(재생과 같다). 채운 날과 행 수는 `runs`의 `touch_fill`에 남는다([engine-api.md](engine-api.md#저장-stateenginesqlite3)). 날마다 로그 한 줄: `touch labels of <날짜> from the data directory: <창 수> windows, <행 수> rows written`.
+- 다 채우면 저장소 버전을 올려 순위표·통계 캐시를 비운다. API의 `outcome.touch`는 행이 써지는 대로 보인다.
+- 처음 배포하는 아침에는 2026-10-12부터의 날을 모두 채운다. 엔진을 멈추면(재시작, 배포) 하던 날을 버리고 멈추며, 다음 시작 때 그날부터 다시 한다.
+
+**손으로 다시 계산하려면 `rescore`.** 도달 정답 규칙의 버그를 고쳤는데 정답 버전을 올리지 않을 때, 또는 녹화를 나중에 되찾았을 때 쓴다. 장 시간 밖에 엔진을 멈추고 돌린다.
+
+```bash
+docker compose stop engine
+docker compose run --rm --no-deps engine rescore
+docker compose start engine
+```
+
+- 엔진이 돌고 있으면 거부한다: `the engine is running (it holds /state/.engine.lock): stop it first (docker compose stop engine)`, 종료 코드 1. 다른 프로세스가 정답을 고치면 도는 엔진의 순위표 캐시와 합의 가중치가 옛 값으로 남기 때문이다. 엔진은 도는 동안 `state/.engine.lock`을 `flock`으로 잡고 있다.
+- 2026-10-12부터 예측이나 정답 행이 있는 모든 날을 다시 계산한다. 오늘은 마지막 4분 창이 끝난 뒤(보통 15:20)부터 넣는다.
+- 다시 계산한 값(정답, 채점 불가 이유, 경로)이 저장된 것과 다른 행만 바꾼다. 그래서 여러 번 돌려도 같다(두 번째는 `0 rows written`).
+- 녹화를 찾지 못한 종목·날은 있던 행을 그대로 두고, 행이 없는 봉 마감만 `not recorded`로 쓴다. 읽다 실패한 날은 아무것도 바꾸지 않고 종료 코드 1이다.
+- `touches` 표만 쓴다. 옛 채점(`outcomes`의 `class_a`·`class_b`)과 특수 표시(`special`)는 건드리지 않는다.
+- 출력은 날마다 한 줄이다: `2026-10-12: 1128 windows from the data directory, 3 rows written`. 실행은 `runs`의 `rescore`에 남는다.
+- rescore가 도는 중에 엔진이 시작하면(06:00 배포 등) 엔진은 `… .engine.lock is held: a rescore runs`를 남기고 평소대로 돈다. 채우기는 rescore가 끝난 뒤에 한다.
+
 ## 4. 업데이트 배포
 
 **자동이다.** main에 머지하면 다음 06:00(KST)에 서버가 스스로 받아 다시 띄운다(`deploy/auto-update.sh`, systemd 타이머 `krx-quant-update`).
@@ -496,6 +529,7 @@ docker compose run --rm --no-deps engine prevalidate <이름>
 - 엔진이 마지막으로 정상 기동을 확인한 커밋은 서버의 `.auto-update-deployed`에 남는다. main이 그 커밋이면 아무것도 하지 않는다. 재부팅 등으로 업데이트가 중간에 끊겼으면 다음 실행이 다시 한다.
 - 평일 07:50–20:10에는 손으로 실행해도 거부한다.
 - 새 엔진이 3분 안에 API에 답하지 않으면 이전 커밋으로 되돌려 다시 띄운다. 실패한 커밋은 서버의 `.auto-update-failed`에 남아서, main이 더 바뀔 때까지 다시 시도하지 않는다.
+- 새 엔진은 API를 연 뒤에 지난 예측의 도달 정답을 채운다(3장 "지난 예측의 도달 정답", #168). 채우기가 3분보다 오래 걸려도 이 확인에는 걸리지 않는다.
 - 결과는 텔레그램으로 온다(`krx-quant notify`): `[알림] 자동 업데이트: <이전> → <새 커밋>`과 커밋 제목(최대 10개), `[알림] 자동 업데이트 실패: …`, 그 밖의 오류(GitHub 접속 실패 등)는 `[알림] 자동 업데이트 오류: …`. 오류일 때 엔진은 그대로 돈다.
 - 업데이트가 끝나면 쓰지 않는 Docker 이미지를 지운다.
 - 이미지를 만들 때 그 커밋을 넘긴다(`KRX_COMMIT`, `compose.yaml`의 빌드 인자). 엔진은 `/v1/status`의 `commit`으로 보이고, 시작할 때마다 DB `runs`에 `start`로 커밋과 수수료율, 신호 규칙, 시간·CPU 예산을 남긴다(#85). 손으로 `docker compose up -d --build`하면 `unknown`이다. 커밋을 남기려면 `KRX_COMMIT=$(git rev-parse HEAD) docker compose up -d --build`로 띄운다.
@@ -565,6 +599,8 @@ docker compose logs --tail 200 engine
 | `[알림] 자동 업데이트 실패: <커밋>이 시작되지 않아 ...` | `journalctl -u krx-quant-update -n 50`, `docker compose logs --tail 200 engine` | 새 커밋이 3분 안에 API에 답하지 않아 이전 커밋으로 되돌렸다. 고친 커밋을 main에 올리면 다음 06:00에 받는다. "되돌렸지만 엔진이 응답하지 않습니다"면 4장의 SQLite 스키마 주의를 본다. |
 | `[알림] 자동 업데이트 오류: <명령> (줄 N). 엔진은 그대로입니다.` | `journalctl -u krx-quant-update -n 50` | GitHub 접속 실패나 fast-forward가 안 되는 체크아웃 등이다. 엔진은 그대로 돈다. 원인을 고치고 다음 06:00을 기다리거나, 장 시간 밖에서 `deploy/auto-update.sh`를 실행한다. |
 | 녹화된 날의 예측을 다시 보고 싶다 | | `docker compose run --rm --no-deps engine replay 2026-10-12`. 결과는 `state/replay-2026-10-12.sqlite3`다. 실시간 DB는 건드리지 않는다. |
+| 로그의 `... have no recorded events in ...; left unscorable (not recorded)` | `ls -d data/events/date=<날짜>`, `aws s3 ls s3://<버킷>/engine/events/date=<날짜>/` | 그 날·종목의 녹화가 서버에도 S3에도 없어 지난 예측의 도달 정답을 채점 불가로 남겼다(3장 "지난 예측의 도달 정답"). 녹화를 되찾아 `data/events/`에 두거나 S3에 올렸으면 장 시간 밖에 엔진을 멈추고 `docker compose run --rm --no-deps engine rescore`. |
+| `rescore`가 `the engine is running ...`으로 거부된다 | `docker compose ps` | 엔진이 돌고 있다. `docker compose stop engine` 뒤 다시 돌리고 `docker compose start engine`. |
 | 엔진 컨테이너가 계속 재시작한다 | 로그의 `configuration error` 또는 `KIS error` | `.env` 값을 고치고 `docker compose up -d`를 실행한다(설정 값은 2.2의 "설정 값 전체"). |
 | 엔진이 `... was written by a newer engine (schema N)`으로 시작하지 못한다 | 지금 커밋과 `.auto-update-deployed` | 옛 엔진이 새 엔진이 올린 DB를 읽었다. 엔진은 더 새 스키마의 DB를 거부한다. 그 스키마를 아는 커밋으로 배포한다(4장). |
 | `EGW00133`(접근 토큰 발급 1분 1회) | 재시작을 반복했는지 | 토큰은 캐시되고, 1분 간격으로 스스로 다시 시도한다. |
@@ -615,6 +651,7 @@ docker compose logs --tail 200 engine
 | `market_calendar.json` | KIS 휴장일 조회 캐시 |
 | `engine.sqlite3`, `-wal`, `-shm` | 예측, 채점, 상태, 합의 가중치. 테이블은 [engine-api.md](engine-api.md#저장-stateenginesqlite3)에 있다. 스키마 버전은 `PRAGMA user_version`이다 |
 | `replay-<날짜>.sqlite3` | `krx-quant replay`의 결과 |
+| `.engine.lock` | 도는 엔진이 잡는 잠금 파일(`flock`, #168). 잡혀 있으면 `rescore`가 거부한다. 엔진이 끝나면 풀린다. 파일은 남아도 된다 |
 | `prevalidation-<알고리즘>.sqlite3` | `krx-quant prevalidate`가 재생한 예측과 채점. 다시 돌리면 새로 만든다 |
 | `prevalidations/<알고리즘>.json` | 사전 검증 리포트(`passed`, 검사별 결과, 통계). 엔진이 봉 마감마다 기다리는 알고리즘의 것을 읽는다([engine-api.md](engine-api.md#사전-검증-24)) |
 | `models/<알고리즘>.json` | 엔진이 지금 돌리는 모델: `version`, `params`, `trained`, `trained_until`. 없으면 기본 모델 |

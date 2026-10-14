@@ -151,8 +151,8 @@
 | `pooled` | `prediction_id`, `position`, `algorithm`. 합의 예측(빠른·최종)에 확률을 보탠 정식 알고리즘, 등록 순서대로(#107). 합의를 만들 때 함께 쓴다. 따로 둔 표다 |
 | `votes` | `prediction_id`, `up`, `flat`, `down`. 합의 예측(빠른·최종)에 들어간 정식 알고리즘을 각자 가장 큰 확률의 방향으로 센 수(#106). 합의를 만들 때 함께 쓴다. `blocks`처럼 따로 둔 표다 |
 | `outcomes` | `prediction_id`, `target_at`(t + 4분), `mid_close`(A), `mid_display`(B), `mid_target`, `flat_ticks`(k), `class_a`, `class_b`(`up`/`flat`/`down`), `special`, `unscorable`, `scored_at`(채점 전에는 비어 있음) |
-| `touches` | `symbol`, `bar_close`, `target_version`(지금 2), `class`(`up`/`flat`/`down`, 채점할 수 없으면 비어 있음), `unscorable`(`missing mid`, `rest quotes`, `silent quotes`, `restarted`), `path`(JSON: 아래 `touch`의 경로 필드), `scored_at`. 봉 마감의 도달 정답(#160, #167). 예측이 아니라 (종목, 봉 마감)마다 하나고, 예측하지 않은 봉 마감(VI 등)에도 있다. `blocks`처럼 따로 둔 표라 옛 엔진도 DB를 연다. 이미 있는 봉 마감은 덮어쓰지 않는다 |
-| `runs` | `id`, `kind`(`cpu_budget`: CPU 예산으로 건너뜀, `review`: 일일 상태 점검, `retire_candidate`: 은퇴 후보 알림, `budget_report`: 그날 예산 때문에 빠진 예측을 알림(#71), `no_regime`: 그날 매크로 국면이 없거나 엔진이 모르는 이름이어서 기본 전이행렬로 돈 날, 첫 봉 마감에 하루 한 번(`detail`에 `(unknown: <이름>)`), `start`: 수집기가 엔진을 시작함(`detail`은 JSON: `commit`, `fee_rate`, `signal_rule`(`min_probability`, `min_agree`, 끄면 `null`), `algorithm_seconds`, `cpu_budget_seconds`. 성적을 코드와 설정별로 가르는 근거, #85), `signal_sent`: 보낸 텔레그램 신호, `signal_blocked`: 막힌 텔레그램 신호(둘 다 판정할 때마다 하나씩, `detail`은 JSON, 아래 "텔레그램 신호 알림", #80)), `at`, `algorithm`, `detail` |
+| `touches` | `symbol`, `bar_close`, `target_version`(지금 2), `class`(`up`/`flat`/`down`, 채점할 수 없으면 비어 있음), `unscorable`(`missing mid`, `rest quotes`, `silent quotes`, `restarted`, `not recorded`), `path`(JSON: 아래 `touch`의 경로 필드), `scored_at`. 봉 마감의 도달 정답(#160, #167). 예측이 아니라 (종목, 봉 마감)마다 하나고, 예측하지 않은 봉 마감(VI 등)에도 있다. `blocks`처럼 따로 둔 표라 옛 엔진도 DB를 연다. 엔진은 이미 있는 봉 마감을 덮어쓰지 않는다. 지난 예측의 빠진 행은 엔진이 시작할 때 녹화로 채우고(`scored_at`은 그 4분이 끝난 시각), 다른 값으로 바꾸는 것은 `rescore`뿐이다(아래 "지난 예측의 도달 정답", #168) |
+| `runs` | `id`, `kind`(`cpu_budget`: CPU 예산으로 건너뜀, `review`: 일일 상태 점검, `retire_candidate`: 은퇴 후보 알림, `budget_report`: 그날 예산 때문에 빠진 예측을 알림(#71), `no_regime`: 그날 매크로 국면이 없거나 엔진이 모르는 이름이어서 기본 전이행렬로 돈 날, 첫 봉 마감에 하루 한 번(`detail`에 `(unknown: <이름>)`), `start`: 수집기가 엔진을 시작함(`detail`은 JSON: `commit`, `fee_rate`, `signal_rule`(`min_probability`, `min_agree`, 끄면 `null`), `algorithm_seconds`, `cpu_budget_seconds`. 성적을 코드와 설정별로 가르는 근거, #85), `signal_sent`: 보낸 텔레그램 신호, `signal_blocked`: 막힌 텔레그램 신호(둘 다 판정할 때마다 하나씩, `detail`은 JSON, 아래 "텔레그램 신호 알림", #80), `touch_fill`: 엔진이 시작할 때 지난 예측의 도달 정답을 채움(한 행이라도 썼을 때), `rescore`: `krx-quant rescore`를 돌림(둘 다 `detail`은 날마다 `day`, `source`(녹화를 읽은 곳), `labeled`(녹화로 낸 창 수), `written`(쓴 행 수), `not_recorded`, `failed`(읽지 못한 이유)의 JSON 목록, #168)), `at`, `algorithm`, `detail` |
 | `statuses` | `id`, `algorithm`, `at`, `previous`, `status`, `reason`: 알고리즘 상태 이력(#17) |
 | `consensus_fits` | `version`, `computed_at`: 합의 가중치를 계산한 기록(#18). 엔진은 시작할 때 마지막 버전을 읽는다. |
 | `consensus_weights` | `version`, `symbol`, `slot`, `algorithm`, `weight`: 그 버전의 칸별 가중치 |
@@ -258,9 +258,11 @@
 }
 ```
 
-`touch`는 그 봉 마감의 도달 정답이다(#160, #167, 기록만). 그 봉 마감의 모든 예측이 같은 것을 가진다. 이 필드가 생기기 전에 채점된 예측은 `null`이다.
+`touch`는 그 봉 마감의 도달 정답이다(#160, #167, 기록만). 그 봉 마감의 모든 예측이 같은 것을 가진다. 2026-10-12(녹화 시작)부터의 지난 예측은 엔진이 시작할 때 그날 녹화로 채운다(아래 "지난 예측의 도달 정답"). 채우기 전과 2026-10-12 전에 채점된 예측은 `null`이다.
 
-- `class`: 4분 안에(받은 시각 기준) 통합 최우선 매수호가가 `upper`(= `anchor` + `k`·`tick`) 이상이 된 적이 있으면 `up`, 아니고 최우선 매도호가가 `lower` 이하가 된 적이 있으면 `down`, 아니면 `flat`. 채점할 수 없으면 `null`이고 `unscorable`이 이유다.
+> **바뀜** (2026-10-14, #190): 이 필드가 생기기 전(#167 배포 전)에 채점된 예측은 늘 `null`이었다 → 엔진이 시작할 때 2026-10-12부터의 것을 녹화로 채운다. 이유: 차트를 거슬러 볼 때 정답 기준이 섞이지 않게 하려고(#160).
+
+- `class`: 4분 안에(받은 시각 기준) 통합 최우선 매수호가가 `upper`(= `anchor` + `k`·`tick`) 이상이 된 적이 있으면 `up`, 아니고 최우선 매도호가가 `lower` 이하가 된 적이 있으면 `down`, 아니면 `flat`. 채점할 수 없으면 `null`이고 `unscorable`이 이유다: `missing mid`(봉 마감의 중간가가 없음), `rest quotes`(REST 대체 호가를 받음), `silent quotes`(WebSocket 호가가 60초 넘게 끊김), `restarted`(엔진이 그 창을 따라가는 중에 다시 시작됨), `not recorded`(지난 예측을 채울 때 그 종목·날의 녹화가 데이터 디렉터리에도 Object Store에도 없었음, #168). 이때 경로 필드는 모두 `null`일 수 있다.
 - `anchor`: 봉 마감의 통합 중간가(기준 가격 규칙). `bid_start`·`ask_start`: 봉 마감 전에 받은 마지막 통합 1호가. `bid_end`·`ask_end`: 4분 안에 받은 마지막 1호가.
 - `upper_at`·`upper_price`: 위 목표에 처음 닿은 받은 시각과 그때 매수호가. `upper_dwell`: 처음 닿은 뒤 매수호가가 목표 아래로 내려갈 때까지의 초(내려가지 않으면 4분 끝까지). `upper_size`: 그때 매수 1호가 잔량(통합 호가 피드에서만, 체결에 실린 호가면 `null`). `lower_*`는 아래 목표의 같은 값(매도호가 기준).
 - `max_bid`·`min_ask`: 4분 안의 최고 매수호가와 최저 매도호가, 그 시각. `trade_high`·`trade_low`: 4분 안의 통합 체결 고가·저가(체결가 기준 정답과 견주는 진단용).
@@ -950,3 +952,15 @@ uv run krx-quant replay 2026-10-12
 - 재생은 계산 시간을 0으로 친다. 그래서 표시 시각이 봉 마감과 같고, 표시 기준(B)이 봉 마감 기준(A)과 같다. 실시간에서는 둘 사이가 계산 시간(수 ms)만큼 벌어진다.
 
 같은 입력을 두 번 재생하면 결과가 같다. 녹화 데이터를 손으로 만든 이벤트로 바꾼 것이 자동 테스트의 주 seam이다(`tests/test_replay.py`).
+
+## 지난 예측의 도달 정답 (#168)
+
+실시간 엔진은 #167부터 봉 마감마다 도달 정답(`touches`)을 쓴다. 그 전의 예측과 엔진이 정답 없이 남긴 봉 마감(되돌린 옛 엔진이 돈 날 등)은 그날의 녹화로 채운다(`rescore.py`). 녹화를 같은 시장 보기 창으로 흘리므로, 채운 정답은 실시간 엔진이 냈을 것, 그리고 같은 날을 새로 재생한 결과와 같다(정답, 채점 불가 이유, 경로, `scored_at`까지).
+
+- 시장 보기는 녹화 이벤트를 받은 시각순으로 받고, 봉 마감마다 그때 받은 것보다 먼저 그 봉 마감의 창을 연다. 창은 4분이 끝난 분에 정답을 낸다. 엔진이 채점 시각에 하는 것과 같다. 창이 따라가는 피드(통합 체결 `H0UNCNT0`, 통합 호가 `H0UNASP0`, REST 호가 스냅샷 `FHKST01010200`)만 읽는다. 종목마다 따로 따라가므로 다른 종목이나 피드를 빼도 정답은 같다.
+- **엔진이 시작할 때.** 수집기는 녹화와 엔진 API를 먼저 연다. 그 뒤 작업 스레드가 2026-10-12(`RECORDING_START`)부터 어제까지 예측이 있는데 지금 정답 버전의 행이 없는 (종목, 봉 마감)을 채운다. 이미 있는 행은 그대로 둔다. 다 채우면 저장소 버전을 올려 순위표·통계 캐시를 다시 계산하게 한다. 오늘은 실시간 엔진에 맡긴다.
+- **`krx-quant rescore`.** 엔진이 멈춰 있을 때만 돈다. 2026-10-12부터 예측이나 정답 행이 있는 날(오늘은 마지막 창이 끝난 뒤부터)을 모두 다시 계산하고, 정답·채점 불가 이유·경로가 저장된 것과 다른 행만 바꾼다. 여러 번 돌려도 같다.
+- **녹화를 찾는 곳.** 종목·날마다 데이터 디렉터리의 `events/`, 없으면 Object Store의 같은 키. 둘 다 없으면 예측이 있는 봉 마감을 `not recorded`로 쓴다(`rescore`는 있던 행을 그대로 둔다). 읽다 실패한 날은 쓰지 않고 다음에 다시 한다.
+- **잠금.** 도는 엔진은 `state/.engine.lock`을 `flock`으로 잡는다. 잡혀 있으면 `rescore`는 거부한다. 다른 프로세스가 정답을 바꾸면 엔진의 순위표 캐시와 합의 가중치가 옛 값으로 남기 때문이다. rescore가 잡고 있을 때 시작한 엔진은 평소대로 돌고, 채우기만 rescore가 끝날 때까지 기다린다.
+- `touches` 표만 쓴다. `outcomes`(기준 A·B, 특수 표시)는 건드리지 않는다. 한 일은 `runs`의 `touch_fill`, `rescore`에 남는다.
+- 운영 절차는 [operations.md](operations.md#지난-예측의-도달-정답-168)에 있다.

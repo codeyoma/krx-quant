@@ -4,8 +4,9 @@ reach the bar close's mid-point plus k ticks (up), else the best ask reach it mi
 
 A window follows one symbol from its bar close t: it takes the integrated best quotes
 received from t up to t + 4 minutes (by receipt time, as the engine takes its mid-points),
-and the integrated trades for diagnosis. One module for the live engine, the Replay Harness
-and, later, re-scoring and training, so they all label alike.
+and the integrated trades for diagnosis. One module for the live engine, the Replay Harness,
+the past bar closes filled in from their recorded days (``rescore.py``, #168) and, later,
+training, so they all label alike.
 
 - Up when a quote with the best bid at or above the upper target was received, at any time
   in the window; else down when a quote with the best ask at or below the lower target was;
@@ -47,6 +48,9 @@ MISSING_MID = "missing mid"
 REST_QUOTES = "rest quotes"
 SILENT = "silent quotes"
 RESTARTED = "restarted"
+# Filled in later (#168): the day's events were found neither in the data directory nor in
+# the Object Store, or held no window for the bar close.
+NOT_RECORDED = "not recorded"
 
 
 @dataclass
