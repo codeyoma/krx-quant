@@ -1,8 +1,8 @@
 """The read-only diagnose command (#82): the measurements the open decisions need, as text.
 
 Input: a data directory with a fixed engine DB, recorded events and macro readings, made
-by hand. Output: what ``krx-quant diagnose`` prints, against figures worked out by hand;
-and the directory and DB as they were.
+by hand; and a recorded day of crossed quotes alone (#187). Output: what ``krx-quant
+diagnose`` prints, against figures worked out by hand; and the directory and DB as they were.
 """
 
 from __future__ import annotations
@@ -21,13 +21,15 @@ from krx_quant.backfill import BAR_SCHEMA, MINUTE_BARS_TR
 from krx_quant.barriers import AMBIGUOUS
 from krx_quant.baselines import Forecast
 from krx_quant.cli import main
+from krx_quant.engine import Event
+from krx_quant.feeds import KRX_TRADE, NXT_TRADE
 from krx_quant.kinds import Answer
 from krx_quant.macro import INDICATORS, READING_SCHEMA, REGIME_SCHEMA
 from krx_quant.predictions import DB_NAME, NewPrediction, PredictionStore, Score, iso
 from krx_quant.pricing import Direction
 from krx_quant.recorder import ParquetRecorder
 from krx_quant.touch import SILENT, Reached, TouchResult
-from tests.replay_events import DAY, SYMBOL, at, book, futures_trade, trade
+from tests.replay_events import DAY, SYMBOL, at, book, futures_trade, trade, vi
 from tests.test_replay_cli import record
 
 EARLIER = date(2026, 10, 8)
@@ -348,6 +350,15 @@ def test_the_measurements_are_reported_as_worked_out_by_hand(
         "  005930 미래를 알았을 때의 장벽 손익(틱, 연구용): 거래 3 · 합계 -0.1 · 거래당 -0.04"
         " (95% -0.69–0.62)" in out
     )
+    # The book (#187): three updates from the open, none crossed; the trade's quotes are empty.
+    assert (
+        "  005930 2026-10-12: 통합 호가 3건 중 뒤집힘 0.0% · 시간 0.0% · 뒤집힘 0번"
+        " · 통합 체결 1호가 1건 중 뒤집힘 0.0%\n    30분 칸(호가/시간): 09:00 0.0%/0.0%\n" in out
+    )
+    assert (
+        "  005930 뒤집힌 통합 호가 없음\n"
+        "  005930 봉 마감 직전 호가가 뒤집힘: 376개 중 0개 (날마다 0–0)\n" in out
+    )
     assert snapshot(server) == before, "nothing is written, not even beside the DB"
 
 
@@ -372,7 +383,7 @@ def test_only_the_sections_without_data_say_so(server: Path, capsys: pytest.Capt
     out = capsys.readouterr().out
     assert "  newton: 예측 5," in out
     sections = out.split("\n\n")
-    assert [s.splitlines()[1] for s in sections[3:6]] == ["  없음", "  없음", "  없음"]
+    assert [s.splitlines()[1] for s in sections[3:6] + sections[9:]] == ["  없음"] * 4
     assert "  1분봉 규칙: 정답이 있는 날의 1분봉 없음" in out, "the range's answers, without the bars"
 
 
@@ -386,5 +397,152 @@ def test_a_section_without_its_data_says_so(
     assert main(["diagnose"]) == 0
 
     out = capsys.readouterr().out
-    assert out.count("  없음") == 8
+    assert out.count("  없음") == 9
     assert not (tmp_path / "state").exists() and not (tmp_path / "data").exists()
+
+
+CROSSED = "000660"
+
+
+def coded(event: Event, hour_cls: str) -> Event:
+    """``event`` with its raw time code (``HOUR_CLS_CODE``)."""
+    feed, row = event
+    return feed, {**row, "hour_cls": hour_cls}
+
+
+def crossed_book(when: datetime, bid: int, ask: int) -> Event:
+    return book(when, bid, ask, CROSSED)
+
+
+def venue_trade(when: datetime, venue: str, price: int, bid: int, ask: int) -> Event:
+    """A trade on one venue, carrying that venue's best quotes."""
+    feed = KRX_TRADE if venue == "KRX" else NXT_TRADE
+    return trade(when, price, bid=bid, ask=ask, feed=feed, symbol=CROSSED)
+
+
+# A day of 000660 (ticks of 100 won) with five crossed spells of the integrated book (#187).
+CROSSED_DAY = [
+    # 1. 09:00:58–09:01:01 (3 s; 1 tick, then 2): KRX's bid 81,400 above NXT's ask 81,200, both
+    # traded at. It spans the 09:01 bar close: its last quote, an integrated trade's, is crossed,
+    # and the reference price used the trade's valid quote of 09:00:45, 15 s old.
+    crossed_book(at("09:00:40"), 81_200, 81_300),
+    trade(at("09:00:45"), 81_250, bid=81_200, ask=81_300, symbol=CROSSED),
+    crossed_book(at("09:00:58"), 81_300, 81_200),
+    crossed_book(at("09:00:59.5"), 81_400, 81_200),
+    venue_trade(at("09:00:59.6"), "KRX", 81_400, 81_400, 81_500),
+    venue_trade(at("09:00:59.7"), "NXT", 81_200, 81_100, 81_200),
+    trade(at("09:00:59.8"), 81_300, bid=81_400, ask=81_200, symbol=CROSSED),
+    crossed_book(at("09:01:01"), 81_200, 81_300),
+    # 2. 10:00:00–10:01:30 (90 s, over a minute) in a VI (10:00:05–10:02:10), the book's time code
+    # C: KRX's own book crossed. At the 10:01 close the last valid quote is 70 s old: no mid.
+    crossed_book(at("09:59:50"), 81_200, 81_300),
+    coded(crossed_book(at("10:00:00"), 81_400, 81_300), "C"),
+    coded(crossed_book(at("10:00:30"), 81_400, 81_300), "C"),
+    coded(venue_trade(at("10:00:40"), "KRX", 81_350, 81_400, 81_300), "C"),
+    coded(crossed_book(at("10:01:00"), 81_400, 81_300), "C"),
+    crossed_book(at("10:01:30"), 81_300, 81_400),
+    vi(at("10:02:15"), "10:00:05", "10:02:10", CROSSED),
+    trade(at("10:30:00"), 81_300, bid=81_300, ask=81_400, symbol=CROSSED),
+    venue_trade(at("10:30:00"), "KRX", 81_300, 81_300, 81_400),
+    # 3. 11:00:00–11:00:02: NXT's bid 81,300 above KRX's ask 81,200, traded at NXT's bid only.
+    crossed_book(at("11:00:00"), 81_300, 81_200),
+    venue_trade(at("11:00:01"), "NXT", 81_300, 81_300, 81_400),
+    crossed_book(at("11:00:02"), 81_200, 81_300),
+    # 4. 11:30:00–11:30:01: a KRX trade whose quotes are on neither side.
+    crossed_book(at("11:30:00"), 81_300, 81_200),
+    venue_trade(at("11:30:00.5"), "KRX", 81_250, 81_100, 81_250),
+    crossed_book(at("11:30:01"), 81_200, 81_300),
+    venue_trade(at("12:00:00"), "NXT", 81_250, 81_200, 81_300),
+    # 5. 13:00:00–13:00:00.5: no trade on either venue.
+    crossed_book(at("13:00:00"), 81_300, 81_200),
+    crossed_book(at("13:00:00.5"), 81_200, 81_300),
+]
+
+
+def test_crossed_quotes_are_measured_as_worked_out_by_hand(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    data = tmp_path / "data"
+    record(data, CROSSED_DAY)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("KRX_DATA_DIR", str(data))
+    monkeypatch.setenv("KRX_STATE_DIR", str(tmp_path / "state"))
+    before = snapshot(tmp_path)
+
+    assert main(["diagnose"]) == 0
+
+    out = capsys.readouterr().out
+    section = out.split("\n\n")[9].splitlines()
+    assert section[0].startswith("9. 뒤집힌 호가(#187)")
+    # Fifteen updates, eight crossed. Each holds until the next, a minute at most: 424.5 s in
+    # all, 96.5 s crossed. By slot: 09:00 3 s of 81 crossed; 10:00 90 of 150; 11:00 2 of 62;
+    # 11:30 1 of 61; 13:00 0.5 of 60.5. One integrated trade's quotes of three crossed.
+    assert section[1:3] == [
+        "  000660 2026-10-12: 통합 호가 15건 중 뒤집힘 53.3% · 시간 22.7% · 뒤집힘 5번"
+        " · 통합 체결 1호가 3건 중 뒤집힘 33.3%",
+        "    30분 칸(호가/시간): 09:00 50.0%/3.7% · 09:30 0.0%/0.0% · 10:00 75.0%/60.0%"
+        " · 11:00 50.0%/3.2% · 11:30 50.0%/1.6% · 13:00 50.0%/0.8%",
+    ]
+    # Spells of 0.5, 1, 2, 3 and 90 s; seven crossed updates 1 tick deep, one 2.
+    assert section[3:6] == [
+        "  000660 한 번 뒤집혀 있는 시간(초, 5번): p50 2.0 · p90 3.0 · p99 3.0 · 최대 90.0",
+        "  000660 깊이(틱, 뒤집힌 호가 8건): p50 1 · p90 1 · p99 1 · 최대 2",
+        "  000660 60초 넘게 뒤집힘: 2026-10-12 10:00:00부터 90.0초",
+    ]
+    # The 09:01 and 10:01 closes of the 376.
+    assert section[6] == (
+        "  000660 봉 마감 직전 호가가 뒤집힘: 376개 중 2개 (날마다 2–2)"
+        " · 그때 쓴 유효 호가의 나이(초): p50 15.0 · p90 15.0 · p99 15.0 · 최대 15.0"
+        " · 유효 호가 없음(중간가 모름) 1개"
+    )
+    # A spell each; their time 3, 2, 90, 1 and 0.5 s of 96.5.
+    assert section[7] == (
+        "  000660 거래소 귀속(뒤집힘 5번): KRX 매수 > NXT 매도 20.0% (시간 3.1%)"
+        " · NXT 매수 > KRX 매도 20.0% (시간 2.1%) · KRX 자체 뒤집힘 20.0% (시간 93.3%)"
+        " · NXT 자체 뒤집힘 0.0% (시간 0.0%) · 섞임 0.0% (시간 0.0%)"
+        " · 통합과 맞지 않음 20.0% (시간 1.0%) · 거래소별 체결 없음 20.0% (시간 0.5%)"
+    )
+    assert section[8] == (
+        "  000660 뒤집힌 가격에 체결: KRX 매수 > NXT 매도 1번 중 높은 매수호가(KRX)에 체결 100.0%"
+        " · 낮은 매도호가(NXT)에 체결 100.0% · 둘 다 100.0%"
+        " | NXT 매수 > KRX 매도 1번 중 높은 매수호가(NXT)에 체결 100.0%"
+        " · 낮은 매도호가(KRX)에 체결 0.0% · 둘 다 0.0%"
+    )
+    assert section[9:12] == [
+        # The 90 s spell from 10:00:00 overlaps the VI from 10:00:05: 85 s of 96.5.
+        "  000660 VI와 겹친 뒤집힘: 1번 (뒤집힌 시간의 88.1%) · 그 날들의 VI 1번",
+        "  000660 통합 호가의 시간 구분 코드(원문): 뒤집힌 호가 0 62.5% · C 37.5% (8건)"
+        " | 그 밖 0 100.0% (7건)",
+        "  000660 거래소별 체결의 장운영/시간 구분 코드(원문): 뒤집힌 동안"
+        " KRX 0/0 66.7% · 0/C 33.3% (3건), NXT 0/0 100.0% (2건)"
+        " | 그 밖 KRX 0/0 100.0% (1건), NXT 0/0 100.0% (1건)",
+    ]
+    assert section[12].startswith("  거래소별 1호가는 거래소별 체결(H0STCNT0 KRX, H0NXCNT0 NXT)에 실린")
+    assert len(section) == 13
+    assert snapshot(tmp_path) == before, "nothing is written"
+
+
+def test_a_one_sided_quote_after_a_crossed_one_is_the_close_s_last_quote(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Input: a crossed update at 09:00:58, then a one-sided one (no ask) at 09:00:59, before the
+    09:01 close. Output: the close's last quote is the one-sided one, not crossed: no crossed
+    close, though the reference price still falls back on the valid quote of 09:00:40."""
+    data = tmp_path / "data"
+    record(
+        data,
+        [
+            crossed_book(at("09:00:40"), 81_200, 81_300),
+            crossed_book(at("09:00:58"), 81_300, 81_200),
+            crossed_book(at("09:00:59"), 81_300, 0),
+            crossed_book(at("09:01:30"), 81_200, 81_300),
+        ],
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("KRX_DATA_DIR", str(data))
+    monkeypatch.setenv("KRX_STATE_DIR", str(tmp_path / "state"))
+
+    assert main(["diagnose"]) == 0
+
+    section = capsys.readouterr().out.split("\n\n")[9].splitlines()
+    assert "  000660 봉 마감 직전 호가가 뒤집힘: 376개 중 0개 (날마다 0–0)" in section
