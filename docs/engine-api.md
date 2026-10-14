@@ -682,9 +682,12 @@ docker compose run --rm --no-deps engine prevalidate <이름> --days 5  # 빨리
 - **리포트**: `state/prevalidations/<이름>.json`. 통과하든 못 하든 마지막 결과로 덮어쓴다.
   - `algorithm`, `code`(재생한 코드의 digest), `prevalidated_at`, `passed`, `days`, `models`(날짜 → 모델 버전), `checks`(`check`, `passed`, `detail`)
   - `stats`: 순위표 항목과 같은 형식(`rank`, `n`, `accuracy`, `precision`, `coverage`, `brier`, `pnl`, `lift`). 재생한 알고리즘들끼리 매긴 순위와 FDR 보정(`q`, `significant`)이다. 기준 A와 종목·시간대별 분할은 없다
-  - `correlations`(알고리즘 → r), `timed_out`, `statuses`(예측 상태별 개수), `skipped_for_cpu`(CPU 예산으로 건너뛴 봉 마감 수, 판정에는 쓰지 않는다), `db`
+  - `correlations`(알고리즘 → r), `timed_out`, `statuses`(예측 상태별 개수), `skipped_for_cpu`(CPU 예산으로 건너뛴 봉 마감 수, 판정에는 쓰지 않는다), `db`, `target_version`(재생하고 채점한 정답 버전, #191. 없으면 1)
 - 명령은 검사별 결과를 출력하고, 통과하면 0, 아니면 1로 끝난다.
-- **엔진의 관문**: 실시간 엔진은 봉 마감마다 아직 돌리지 않은 알고리즘의 리포트를 읽는다. `passed`가 `true`이고 `code`가 지금 코드의 digest와 같으면 그 봉 마감부터 수습(`registered`)으로 돌린다. digest는 알고리즘 모듈 파일(패키지면 그 안의 모든 `.py`)의 SHA-256 앞 16자리다. 공용 코드(`features.py` 등)는 넣지 않는다. 그 전에는 예측하지 않고, `/v1/algorithms`와 상태 점검에도 나오지 않는다. 엔진이 시작한 뒤 첫 일일 점검 때 기다리는 알고리즘을 텔레그램으로 한 번 알린다(`[알림] 사전 검증 대기: …`).
+- **엔진의 관문**: 실시간 엔진은 봉 마감마다 아직 돌리지 않은 알고리즘의 리포트를 읽는다. `passed`가 `true`이고 `code`가 지금 코드의 digest와 같고 `target_version`이 지금 `KRX_TARGET_VERSION`과 같으면(없으면 1로 본다) 그 봉 마감부터 수습(`registered`)으로 돌린다. digest는 알고리즘 모듈 파일(패키지면 그 안의 모든 `.py`)의 SHA-256 앞 16자리다. 공용 코드(`features.py` 등)는 넣지 않는다. 그 전에는 예측하지 않고, `/v1/algorithms`와 상태 점검에도 나오지 않는다. 엔진이 시작한 뒤 첫 일일 점검 때 기다리는 알고리즘을 텔레그램으로 한 번 알린다(`[알림] 사전 검증 대기: …`).
+
+  > **바뀜** (2026-10-14, #191): 리포트는 코드 digest만 맞으면 통했다 → 정답 버전도 맞아야 한다. 이유: 버전 1에서 통과한 알고리즘이 버전 2로 바꾼 뒤 도달 정답과 그 기준 예측으로 판정받지 않고 돌기 시작하지 않게(리뷰).
+
 - 한 번 돌기 시작한 알고리즘(상태가 있는 알고리즘)은 리포트나 코드가 바뀌어도 계속 돈다. 그 뒤는 상태 관리 규칙이 맡는다.
 - 사전 검증이 생기기 전에 등록된 Newton, Gauss, Granger, Markov, Turing은 리포트 없이 돈다(`REGISTERED_BEFORE`). 새 서버의 빈 DB에서도 마찬가지다.
 - 기다리는 알고리즘의 모델도 밤 학습이 만든다. 엔진은 등록된 모든 알고리즘의 모델 파일을 보고 `live.json`에도 올린다. 그래서 밤 학습은 서버에 설치된 모델과 비교하고, 알고리즘은 돌기 시작할 때 최신 모델을 쓴다.

@@ -85,9 +85,10 @@ def code_digest(algorithm: Algorithm) -> str:
     return digest.hexdigest()[:16]
 
 
-def admits(state_dir: Path) -> Callable[[Algorithm], bool]:
+def admits(state_dir: Path, target_version: int = 1) -> Callable[[Algorithm], bool]:
     """Whether the engine may start a new algorithm: registered before pre-validation, or
-    its latest report passed with the code it runs now."""
+    its latest report passed with the code it runs now, on the target it runs now (#169; a
+    report without one was on the four-minute move, 1)."""
 
     def admitted(algorithm: Algorithm) -> bool:
         if algorithm.name in REGISTERED_BEFORE:
@@ -104,6 +105,9 @@ def admits(state_dir: Path) -> Callable[[Algorithm], bool]:
             return False
         if report.get("code") != code_digest(algorithm):
             log.warning("%s passed with other code; it waits for a new pre-validation", algorithm.name)
+            return False
+        if report.get("target_version", 1) != target_version:
+            log.warning("%s passed on another target; it waits for a new pre-validation", algorithm.name)
             return False
         return True
 
@@ -130,6 +134,7 @@ class Prevalidation:
     statuses: dict[str, int]  # its predictions by status
     skipped_for_cpu: int  # bar closes it was skipped at for the CPU budget
     db: Path
+    target_version: int = 1  # the target replayed and scored on (#169)
 
     @property
     def passed(self) -> bool:
@@ -150,6 +155,7 @@ class Prevalidation:
             "statuses": self.statuses,
             "skipped_for_cpu": self.skipped_for_cpu,
             "db": str(self.db),
+            "target_version": self.target_version,
         }
 
 
@@ -279,6 +285,7 @@ def _judge(
         statuses=statuses,
         skipped_for_cpu=skipped,
         db=db,
+        target_version=settings.target_version,
     )
 
 

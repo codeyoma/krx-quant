@@ -286,6 +286,19 @@ async def test_a_report_counts_only_for_the_code_that_passed(tmp_path: Path) -> 
     assert engine.waiting() == []
 
 
+def test_a_report_counts_only_for_the_target_it_was_scored_on(tmp_path: Path) -> None:
+    candidate = Contrarian("contrarian")
+    path = report_path(tmp_path / "state", "contrarian")
+    path.parent.mkdir(parents=True)
+    passed = {"passed": True, "code": code_digest(candidate)}
+    path.write_text(json.dumps(passed))  # before #169: the four-minute move
+    assert admits(tmp_path / "state")(candidate)
+    assert not admits(tmp_path / "state", target_version=2)(candidate), "not judged on the touch target"
+    path.write_text(json.dumps({**passed, "target_version": 2}))
+    assert admits(tmp_path / "state", target_version=2)(candidate)
+    assert not admits(tmp_path / "state")(candidate)
+
+
 async def test_an_algorithm_waiting_is_alerted_once_after_the_engine_starts(tmp_path: Path) -> None:
     thursday, friday, monday = date(2026, 9, 17), date(2026, 9, 18), date(2026, 9, 21)
     outbox = Outbox()

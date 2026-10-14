@@ -225,9 +225,13 @@ def train_night(
         steps.append((CLIMATE, trainer.climate))
     for name, step in steps:
         report = get_json(store, report_key(night, name))
-        # A checkpoint an older version wrote lacks the evidence (#89): trained again.
-        if report is None or "commit" not in report:
+        # A checkpoint an older version wrote lacks the evidence (#89), and one of another
+        # target (#169; none written: the four-minute move, 1) labelled other outcomes:
+        # trained again.
+        if report is None or "commit" not in report or report.get("target_version", 1) != target_version:
             report = {**step(), "commit": commit}
+            if target_version >= 2:
+                report["target_version"] = target_version
             put_json(store, report_key(night, name), report)
             log.info("%s: %s", name, report["reason"])
         else:

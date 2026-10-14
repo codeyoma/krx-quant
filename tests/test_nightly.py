@@ -299,6 +299,32 @@ def test_a_checkpoint_an_older_version_wrote_is_trained_again(store_root: Path, 
     assert report["commit"] == "0123abc" and "validation" in report
 
 
+def test_a_checkpoint_of_another_target_is_trained_again(store_root: Path, tmp_path: Path) -> None:
+    learner = FrequencyAlgorithm("learner", "velocity")
+    # Written by a run on the four-minute move (no target_version: 1), then the night is
+    # resumed on the touch target (#169): its labels and losses were of other outcomes.
+    (store_root / "reports" / str(NIGHT)).mkdir(parents=True)
+    (store_root / "reports" / str(NIGHT) / "learner.json").write_text(
+        json.dumps(
+            {
+                "algorithm": "learner",
+                "day": str(NIGHT),
+                "champion": None,
+                "challenger": None,
+                "promoted": False,
+                "reason": "on the four-minute move",
+                "commit": "0123abc",
+            }
+        )
+    )
+
+    night(store_root, tmp_path, [learner], commit="0123abc", target_version=2)
+
+    report = read(store_root, f"reports/{NIGHT}/learner.json")
+    assert len(learner.fitted_on) == 1
+    assert report["target_version"] == 2
+
+
 class Reclaimed(RuntimeError):
     """The Spot instance went away mid-night."""
 

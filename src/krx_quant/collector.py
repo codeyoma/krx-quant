@@ -212,7 +212,8 @@ async def run_collector(
         min_sample=settings.min_sample,
         leaders=Leaders.of(settings),
         regimes=partial(day_regime, settings.data_dir),  # recorded by the 07:30 macro read
-        admits=admits(settings.state_dir),  # a new algorithm waits for its pre-validation
+        # A new algorithm waits for its pre-validation, on the target it runs.
+        admits=admits(settings.state_dir, settings.target_version),
         commit=settings.commit,
         review_rules=Rules.of(settings),
         target_version=settings.target_version,  # the target learned and forecast (#169)
