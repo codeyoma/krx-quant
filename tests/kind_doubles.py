@@ -56,7 +56,7 @@ def within_a_hundred(output: Mapping[str, float]) -> str | None:
 
 
 def share_of_rises(
-    records: Sequence[KindScored], baselines: Mapping[str, Sequence[KindScored]]
+    algorithm: str, records: Sequence[KindScored], baselines: Mapping[str, Sequence[KindScored]]
 ) -> dict[str, Any]:
     rises = sum(r.outcome == CLASSES.index("rose") for r in records)
     return {"rises": rises, "rise_share": rises / len(records) if records else None}

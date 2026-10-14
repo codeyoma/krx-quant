@@ -297,9 +297,9 @@ def most_likely(probabilities: Sequence[float]) -> int:
 # The check of a kind's output (the probabilities and its fields, as stored): why it breaks
 # the kind's contract, None if it keeps it.
 OutputCheck = Callable[[Mapping[str, float]], str | None]
-# A kind's statistics beside the three-class ones, from a predictor's scored predictions and
-# the kind's baselines' (by name, to compare against; #180).
-ExtraStats = Callable[[Sequence[KindScored], Mapping[str, Sequence[KindScored]]], dict[str, Any]]
+# A kind's statistics beside the three-class ones: of the predictor named, from its scored
+# predictions and the kind's baselines' (by name, to compare against; #180).
+ExtraStats = Callable[[str, Sequence[KindScored], Mapping[str, Sequence[KindScored]]], dict[str, Any]]
 
 
 @dataclass(frozen=True, eq=False)
