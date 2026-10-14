@@ -56,8 +56,8 @@ from krx_quant.algorithms import Algorithm
 from krx_quant.backfill import stock_bars_path, stored_bars
 from krx_quant.candles import PERIODS as CANDLE_PERIODS
 from krx_quant.candles import stored_candles
-from krx_quant.consensus import CARDS as CONSENSUS_CARDS
 from krx_quant.consensus import NAMES, slot
+from krx_quant.consensus import cards as consensus_cards
 from krx_quant.contracts import USD
 from krx_quant.econ_calendar import calendar_answer, read_latest
 from krx_quant.engine import PredictionEngine
@@ -370,7 +370,10 @@ async def _algorithms(request: web.Request) -> web.Response:
         {
             "algorithms": [_algorithm_json(engine, a) for a in engine.algorithms],
             "baselines": [{"name": b.name, "card": b.card.as_dict()} for b in engine.baselines],
-            "consensus": [{"name": name, "card": CONSENSUS_CARDS[name].as_dict()} for name in NAMES],
+            "consensus": [
+                {"name": name, "card": card.as_dict()}
+                for name, card in consensus_cards(engine.consensus_timing).items()
+            ],
         }
     )
 
