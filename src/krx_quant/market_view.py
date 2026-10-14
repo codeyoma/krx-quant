@@ -11,6 +11,10 @@ learns from exactly what the engine saw.
 
 A bar close's bars are kept when the first event received at or after it arrives, before
 that event changes them: a prediction made late never sees a trade it could not have.
+
+With a fee rate the view follows each bar close's four minutes (#167): the touch window
+(``touch.TouchWindow``), and, for the kinds besides the direction (#179, ``kinds.py``), the
+same quotes logged (``kinds.QuoteLog``) for each kind's answer function, by the same rules.
 """
 
 from __future__ import annotations
@@ -58,9 +62,10 @@ from krx_quant.feeds import (
     USD_FUTURES,
 )
 from krx_quant.feeds.base import KST, LEVELS, kst_day
+from krx_quant.kinds import Answer, Followed, Kind, QuoteLog
 from krx_quant.market_calendar import MarketCalendar, Session
 from krx_quant.reference import BAR, MAX_QUOTE_AGE, Bar, BarBuilder, ReferencePrice, Source
-from krx_quant.touch import WINDOW, TouchResult, TouchWindow, restarted
+from krx_quant.touch import RESTARTED, WINDOW, TouchResult, TouchWindow, restarted
 
 HORIZON = timedelta(minutes=4)
 # Touch windows are kept this long after they end, for a score running late.
@@ -451,9 +456,11 @@ class MarketView:
         leaders: Leaders,
         start: datetime,
         fee_rate: float | None = None,
+        kinds: Sequence[Kind] = (),
     ) -> None:
         """A view with nothing received yet, whose first bar close is the first after ``start``.
-        With ``fee_rate`` it also follows each bar close's touch window (#167)."""
+        With ``fee_rate`` it also follows each bar close's touch window (#167), and, given
+        ``kinds`` (besides the direction, #179), the quotes their answers are made from."""
         self.calendar = calendar
         self.symbols = tuple(symbols)
         self.leaders = leaders
@@ -481,6 +488,10 @@ class MarketView:
         self._windows: dict[str, dict[datetime, TouchWindow]] = {s: {} for s in self.symbols}
         self._best: dict[str, tuple[float, float]] = {}
         self._ended_through: datetime | None = None  # the last bar close whose windows were handed out
+        # The kinds' quotes (#179): each symbol's, kept as long as its touch windows.
+        self._logs: dict[str, QuoteLog] = (
+            {s: QuoteLog() for s in self.symbols} if kinds and fee_rate is not None else {}
+        )
 
     def on_event(self, feed: str, row: dict[str, Any]) -> None:
         """Take an event into the bars, reference prices, microprices, order flow, flows or
@@ -673,6 +684,25 @@ class MarketView:
         window = self._windows.get(symbol, {}).get(bar_close)
         return window.result() if window is not None else restarted(symbol, bar_close)
 
+    def followed(self, symbol: str, bar_close: datetime) -> Followed | None:
+        """``symbol``'s four minutes from ``bar_close`` as followed so far, for a kind's answer
+        (#179): the touch window's start (mid-point, tick, k, best quote) and the quotes and
+        trades logged since; None for a window not followed (the engine started after its
+        bar close) or without kinds."""
+        window = self._windows.get(symbol, {}).get(bar_close)
+        log = self._logs.get(symbol)
+        if window is None or log is None:
+            return None
+        return log.window(
+            symbol, bar_close, window.anchor, window.tick, window.k, window.bid_start, window.ask_start
+        )
+
+    def kind_answer(self, kind: Kind, symbol: str, bar_close: datetime) -> Answer:
+        """``kind``'s answer of ``symbol``'s window from ``bar_close`` (#179), as followed so far;
+        a window not followed says so (``restarted``), as its touch label does."""
+        window = self.followed(symbol, bar_close)
+        return Answer(None, RESTARTED) if window is None else kind.answer_to(window)
+
     def quote_at(self, symbol: str, bar_close: datetime) -> tuple[float, float] | None:
         """The best quote (bid, ask) ``symbol``'s touch window from ``bar_close`` starts from
         (#169): the last integrated one received before it. None without one, or without
@@ -718,6 +748,8 @@ class MarketView:
             # Windows long over (kept a while for a late score): dropped.
             for old in [c for c in windows if c + WINDOW + _KEEP_WINDOWS < close]:
                 del windows[old]
+            if symbol in self._logs:  # and the quotes only they read
+                self._logs[symbol].forget(min(windows))
 
     def _follow(self, feed: str, symbol: str, received_at: datetime, row: dict[str, Any]) -> None:
         """Give the symbol's open touch windows a quote or trade (#167): the integrated feeds'
@@ -736,6 +768,13 @@ class MarketView:
             window.quote(received_at, bid, ask, bid_size=bid_size, ask_size=ask_size, rest=rest)
             if feed == TRADE.tr_id:
                 window.trade(received_at, row["price"])
+        log = self._logs.get(symbol)
+        # The kinds' windows read the same (#179): kept while a window open now reads it (every
+        # window an event falls in is open by the time it is followed, ``_freeze_before``).
+        if log is not None and any(c <= received_at < c + WINDOW for c in self._windows[symbol]):
+            log.quote(received_at, bid, ask, bid_size, ask_size, rest)
+            if feed == TRADE.tr_id:
+                log.trade(received_at, row["price"])
 
     def latest_lead(self, series: str, now: datetime) -> tuple[float, datetime] | None:
         """A leading series' latest trade of ``now``'s day (``features.Leaders``): price and time."""

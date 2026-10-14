@@ -19,7 +19,7 @@ import boto3
 from aiohttp import web
 from botocore.exceptions import BotoCoreError, ClientError
 
-from krx_quant.algorithms import ALGORITHMS, RegistrationError
+from krx_quant.algorithms import ALGORITHMS, KIND_ALGORITHMS, RegistrationError
 from krx_quant.archive import run_archive
 from krx_quant.backfill import run_backfill
 from krx_quant.candle_probe import probe_candles
@@ -29,6 +29,7 @@ from krx_quant.demo import demo_app, demo_morning
 from krx_quant.diagnose import DEFAULT_DAYS, diagnose
 from krx_quant.fake_kis import FakeKis
 from krx_quant.feeds.base import KST
+from krx_quant.kinds import kind_named
 from krx_quant.kis import KisError
 from krx_quant.lifecycle import Status
 from krx_quant.macro import run_macro
@@ -211,11 +212,15 @@ def _prevalidate(name: str, days: int) -> int:
 
 def _rollback(name: str) -> int:
     settings = Settings.from_env(require_kis=False)
-    if name not in {a.name for a in ALGORITHMS}:
+    # An algorithm of a kind besides the direction rolls back on its kind's answers (#179).
+    of_kind = next((a for a in KIND_ALGORITHMS if a.name == name), None)
+    kind = None if of_kind is None else kind_named(of_kind.kind)
+    if name not in {a.name for a in ALGORITHMS} and kind is None:
         print(f"unknown algorithm {name!r}", file=sys.stderr)
         return 1
+    target = settings.target_version if kind is None else kind.answer_version
     try:
-        model = Shelf(settings.state_dir).rollback(name, datetime.now(KST), settings.target_version)
+        model = Shelf(settings.state_dir).rollback(name, datetime.now(KST), target)
     except ValueError as e:
         print(e, file=sys.stderr)
         return 1

@@ -406,11 +406,16 @@
       "description": "The fields of an algorithm, open so the detail can add to them.",
       "type": "object",
       "required": [
-        "name", "card", "features", "feature_meanings", "training_days", "model", "param_meanings", "status",
-        "validation", "stage"
+        "name", "kind", "card", "features", "feature_meanings", "training_days", "model", "param_meanings",
+        "status", "validation", "stage"
       ],
       "properties": {
         "name": {"type": "string"},
+        "kind": {
+          "description": "The kind it predicts (#179): direction, or another of GET /v1/kinds.",
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$"
+        },
         "card": {
           "description": "An algorithm's card always names its scientist.",
           "$ref": "#/$defs/card",
@@ -709,49 +714,51 @@
             "per_trade": {"$ref": "#/$defs/interval"}
           }
         },
-        "lift": {
+        "lift": {"$ref": "#/$defs/lift"}
+      }
+    },
+    "lift": {
+      "description": "An entry's lifts over each baseline (its kind's, #179), absent for a baseline and when no baseline was scored.",
+      "type": "object",
+      "required": ["low", "day_low", "vs"],
+      "additionalProperties": false,
+      "properties": {
+        "low": {"type": ["number", "null"]},
+        "day_low": {
+          "description": "The weakest lift's lower bound by trading day: what the statuses are decided by.",
+          "type": ["number", "null"]
+        },
+        "vs": {
           "type": "object",
-          "required": ["low", "day_low", "vs"],
-          "additionalProperties": false,
-          "properties": {
-            "low": {"type": ["number", "null"]},
-            "day_low": {
-              "description": "The weakest lift's lower bound by trading day: what the statuses are decided by.",
-              "type": ["number", "null"]
-            },
-            "vs": {
-              "type": "object",
-              "additionalProperties": {
-                "type": "object",
-                "required": ["n", "value", "low", "high", "p", "q", "significant", "by_day"],
-                "additionalProperties": false,
-                "properties": {
-                  "n": {"type": "integer", "minimum": 0},
-                  "value": {"type": ["number", "null"]},
-                  "low": {"type": ["number", "null"]},
-                  "high": {"type": ["number", "null"]},
-                  "p": {"type": ["number", "null"]},
-                  "q": {"type": ["number", "null"]},
-                  "significant": {"type": ["boolean", "null"]},
-                  "by_day": {
-                    "description": "The lift taken a trading day at a time (each day's mean gain one value); null from fewer than two days.",
-                    "oneOf": [
-                      {"type": "null"},
-                      {
-                        "type": "object",
-                        "required": ["n", "value", "low", "high", "p"],
-                        "additionalProperties": false,
-                        "properties": {
-                          "n": {"type": "integer", "minimum": 2},
-                          "value": {"type": "number"},
-                          "low": {"type": "number"},
-                          "high": {"type": "number"},
-                          "p": {"type": "number"}
-                        }
-                      }
-                    ]
+          "additionalProperties": {
+            "type": "object",
+            "required": ["n", "value", "low", "high", "p", "q", "significant", "by_day"],
+            "additionalProperties": false,
+            "properties": {
+              "n": {"type": "integer", "minimum": 0},
+              "value": {"type": ["number", "null"]},
+              "low": {"type": ["number", "null"]},
+              "high": {"type": ["number", "null"]},
+              "p": {"type": ["number", "null"]},
+              "q": {"type": ["number", "null"]},
+              "significant": {"type": ["boolean", "null"]},
+              "by_day": {
+                "description": "The lift taken a trading day at a time (each day's mean gain one value); null from fewer than two days.",
+                "oneOf": [
+                  {"type": "null"},
+                  {
+                    "type": "object",
+                    "required": ["n", "value", "low", "high", "p"],
+                    "additionalProperties": false,
+                    "properties": {
+                      "n": {"type": "integer", "minimum": 2},
+                      "value": {"type": "number"},
+                      "low": {"type": "number"},
+                      "high": {"type": "number"},
+                      "p": {"type": "number"}
+                    }
                   }
-                }
+                ]
               }
             }
           }
@@ -827,7 +834,11 @@
       }
     },
     "leaderboard": {
-      "description": "GET /v1/leaderboard",
+      "description": "GET /v1/leaderboard: the direction's (without kind, or kind=direction: as before #179), or another kind's (kind_leaderboard).",
+      "oneOf": [{"$ref": "#/$defs/direction_leaderboard"}, {"$ref": "#/$defs/kind_leaderboard"}]
+    },
+    "direction_leaderboard": {
+      "description": "GET /v1/leaderboard of the direction",
       "allOf": [{"$ref": "#/$defs/query"}],
       "type": "object",
       "required": ["ranked", "unranked", "baselines"],
@@ -839,7 +850,11 @@
       "unevaluatedProperties": false
     },
     "algorithm_stats": {
-      "description": "GET /v1/algorithms/{name}/stats",
+      "description": "GET /v1/algorithms/{name}/stats: of the predictor's kind (#179), the direction's or another's (kind_algorithm_stats).",
+      "oneOf": [{"$ref": "#/$defs/direction_algorithm_stats"}, {"$ref": "#/$defs/kind_algorithm_stats"}]
+    },
+    "direction_algorithm_stats": {
+      "description": "GET /v1/algorithms/{name}/stats of a direction predictor",
       "allOf": [{"$ref": "#/$defs/query"}],
       "type": "object",
       "required": ["algorithm", "overall", "by_symbol", "by_slot", "by_model_version"],
@@ -868,6 +883,219 @@
         "by_symbol": {"type": "object", "additionalProperties": {"$ref": "#/$defs/entry"}},
         "by_slot": {"type": "object", "additionalProperties": {"$ref": "#/$defs/entry"}},
         "by_model_version": {"type": "object", "additionalProperties": {"$ref": "#/$defs/entry"}}
+      },
+      "unevaluatedProperties": false
+    },
+
+    "kinds": {
+      "description": "GET /v1/kinds (#179): every kind of prediction the engine makes, the direction first.",
+      "type": "object",
+      "required": ["kinds"],
+      "additionalProperties": false,
+      "properties": {"kinds": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/prediction_kind"}}}
+    },
+    "prediction_kind": {
+      "description": "A kind of prediction (#179): its three classes in order (a forecast's class is the most likely, a tie the middle one, then the first), the classes precision and coverage count, the fields of its output besides the probabilities, its answer version and its baselines' cards.",
+      "type": "object",
+      "required": ["name", "title", "classes", "class_titles", "action", "answer_version", "fields", "baselines"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
+        "title": {"type": "string"},
+        "classes": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"}
+        },
+        "class_titles": {"type": "array", "minItems": 3, "maxItems": 3, "items": {"type": "string"}},
+        "action": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+        "answer_version": {"type": "integer", "minimum": 1},
+        "fields": {"type": "object", "additionalProperties": {"$ref": "#/$defs/meaning"}},
+        "baselines": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "card"],
+            "additionalProperties": false,
+            "properties": {"name": {"type": "string"}, "card": {"$ref": "#/$defs/card"}}
+          }
+        }
+      }
+    },
+    "kind_prediction": {
+      "allOf": [{"$ref": "#/$defs/kind_prediction_fields"}],
+      "unevaluatedProperties": false
+    },
+    "kind_prediction_item": {
+      "description": "A prediction of a kind in the stream, where several symbols go together.",
+      "allOf": [{"$ref": "#/$defs/kind_prediction_fields"}],
+      "type": "object",
+      "required": ["symbol"],
+      "properties": {"symbol": {"type": "string"}},
+      "unevaluatedProperties": false
+    },
+    "kind_prediction_fields": {
+      "description": "The fields of a prediction of a kind besides the direction (#179), open so the stream's items can add the symbol.",
+      "type": "object",
+      "required": ["algorithm", "model_version", "bar_close", "displayed_at", "target_at", "status", "output", "answer"],
+      "properties": {
+        "algorithm": {"type": "string"},
+        "model_version": {"type": "string"},
+        "bar_close": {"$ref": "#/$defs/time"},
+        "displayed_at": {"$ref": "#/$defs/time"},
+        "target_at": {
+          "description": "null unless the status is ok: only those are scored.",
+          "oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]
+        },
+        "status": {"enum": ["ok", "timed_out", "error", "vi", "no_book", "no_previous"]},
+        "output": {
+          "description": "p_<class> for each of the kind's three classes (GET /v1/kinds), a distribution, then the kind's fields; null unless the status is ok.",
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "propertyNames": {"pattern": "^[a-z][a-z0-9_]*$"},
+              "additionalProperties": {"type": "number"}
+            }
+          ]
+        },
+        "answer": {
+          "description": "Its bar close's answer, every predictor's of the kind there; null before its four minutes are over, and unless the status is ok.",
+          "oneOf": [{"type": "null"}, {"$ref": "#/$defs/kind_answer"}]
+        }
+      }
+    },
+    "kind_answer": {
+      "allOf": [{"$ref": "#/$defs/kind_answer_fields"}],
+      "unevaluatedProperties": false
+    },
+    "kind_answer_item": {
+      "description": "An answer of a kind in the stream, of one symbol and bar close.",
+      "allOf": [{"$ref": "#/$defs/kind_answer_fields"}],
+      "type": "object",
+      "required": ["symbol", "bar_close"],
+      "properties": {"symbol": {"type": "string"}, "bar_close": {"$ref": "#/$defs/time"}},
+      "unevaluatedProperties": false
+    },
+    "kind_answer_fields": {
+      "description": "A bar close's answer of a kind (#179), open so the stream's items can add the symbol and the bar close: its class (null when its window could not be scored, unscorable says why), whether a VI, circuit breaker or sidecar touched its window, and the kind's summary of the window.",
+      "type": "object",
+      "required": ["answer_version", "class", "unscorable", "special", "scored_at", "path"],
+      "properties": {
+        "answer_version": {"type": "integer", "minimum": 1},
+        "class": {"type": ["string", "null"]},
+        "unscorable": {"type": ["string", "null"]},
+        "special": {"type": "boolean"},
+        "scored_at": {"$ref": "#/$defs/time"},
+        "path": {"description": "The kind's summary of the window.", "type": "object"}
+      }
+    },
+    "kind_latest": {
+      "description": "GET /v1/symbols/{symbol}/kinds/{kind}/latest (#179): the kind's predictions of the symbol's latest bar close.",
+      "type": "object",
+      "required": ["symbol", "kind", "bar_close", "predictions"],
+      "additionalProperties": false,
+      "properties": {
+        "symbol": {"type": "string"},
+        "kind": {"type": "string"},
+        "bar_close": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]},
+        "predictions": {"type": "array", "items": {"$ref": "#/$defs/kind_prediction"}}
+      }
+    },
+    "kind_predictions": {
+      "description": "GET /v1/symbols/{symbol}/kinds/{kind}/predictions (#179)",
+      "type": "object",
+      "required": ["symbol", "kind", "predictions"],
+      "additionalProperties": false,
+      "properties": {
+        "symbol": {"type": "string"},
+        "kind": {"type": "string"},
+        "predictions": {"type": "array", "items": {"$ref": "#/$defs/kind_prediction"}}
+      }
+    },
+    "kind_entry": {
+      "description": "One predictor's stats of a kind over a query (#179).",
+      "allOf": [{"$ref": "#/$defs/kind_entry_fields"}],
+      "unevaluatedProperties": false
+    },
+    "kind_entry_fields": {
+      "description": "The fields of a kind's entry (#179), open so others can add to them: the direction's without the touch P&L, and the kind's own statistics.",
+      "type": "object",
+      "required": ["rank", "algorithm", "model_versions", "n", "accuracy", "precision", "coverage", "brier", "extra"],
+      "properties": {
+        "rank": {"type": ["integer", "null"], "minimum": 1},
+        "algorithm": {"type": "string"},
+        "model_versions": {"type": "array", "items": {"type": "string"}},
+        "n": {"type": "integer", "minimum": 0},
+        "accuracy": {"$ref": "#/$defs/interval"},
+        "precision": {"description": "Of the calls of the kind's action classes, the share that happened.", "$ref": "#/$defs/interval"},
+        "coverage": {"description": "The share of calls of the kind's action classes.", "$ref": "#/$defs/interval"},
+        "brier": {"$ref": "#/$defs/interval"},
+        "extra": {"description": "The kind's own statistics; null for a kind without.", "type": ["object", "null"]},
+        "lift": {"$ref": "#/$defs/lift"}
+      }
+    },
+    "kind_ranked_entry": {
+      "description": "A kind's leaderboard entry of an algorithm, with its status now and what its stats leave out.",
+      "allOf": [{"$ref": "#/$defs/kind_entry_fields"}],
+      "type": "object",
+      "required": ["status", "excluded"],
+      "properties": {
+        "status": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/lifecycle_status"}]},
+        "excluded": {"$ref": "#/$defs/excluded"}
+      },
+      "unevaluatedProperties": false
+    },
+    "kind_baseline_entry": {
+      "description": "A kind's leaderboard entry of a baseline, with what its stats leave out.",
+      "allOf": [{"$ref": "#/$defs/kind_entry_fields"}],
+      "type": "object",
+      "required": ["excluded"],
+      "properties": {"excluded": {"$ref": "#/$defs/excluded"}},
+      "unevaluatedProperties": false
+    },
+    "kind_leaderboard": {
+      "description": "GET /v1/leaderboard?kind=<a kind besides the direction> (#179): its algorithms ranked against its baselines.",
+      "allOf": [{"$ref": "#/$defs/query"}],
+      "type": "object",
+      "required": ["kind", "ranked", "unranked", "baselines"],
+      "properties": {
+        "kind": {"type": "string"},
+        "ranked": {"type": "array", "items": {"$ref": "#/$defs/kind_ranked_entry"}},
+        "unranked": {"type": "array", "items": {"$ref": "#/$defs/kind_ranked_entry"}},
+        "baselines": {"type": "array", "items": {"$ref": "#/$defs/kind_baseline_entry"}}
+      },
+      "unevaluatedProperties": false
+    },
+    "kind_algorithm_stats": {
+      "description": "GET /v1/algorithms/{name}/stats of a predictor of a kind besides the direction (#179).",
+      "allOf": [{"$ref": "#/$defs/query"}],
+      "type": "object",
+      "required": ["kind", "algorithm", "overall", "by_symbol", "by_slot", "by_model_version"],
+      "properties": {
+        "kind": {"type": "string"},
+        "algorithm": {"type": "string"},
+        "overall": {
+          "allOf": [{"$ref": "#/$defs/kind_entry_fields"}],
+          "type": "object",
+          "required": ["calibration", "calibration_by_class", "excluded"],
+          "properties": {
+            "calibration": {"$ref": "#/$defs/calibration"},
+            "calibration_by_class": {
+              "description": "By the kind's class names.",
+              "type": "object",
+              "minProperties": 3,
+              "maxProperties": 3,
+              "additionalProperties": {"$ref": "#/$defs/calibration"}
+            },
+            "excluded": {"$ref": "#/$defs/excluded"}
+          },
+          "unevaluatedProperties": false
+        },
+        "by_symbol": {"type": "object", "additionalProperties": {"$ref": "#/$defs/kind_entry"}},
+        "by_slot": {"type": "object", "additionalProperties": {"$ref": "#/$defs/kind_entry"}},
+        "by_model_version": {"type": "object", "additionalProperties": {"$ref": "#/$defs/kind_entry"}}
       },
       "unevaluatedProperties": false
     },
@@ -951,7 +1179,9 @@
         {"$ref": "#/$defs/outcome_event"},
         {"$ref": "#/$defs/health_event"},
         {"$ref": "#/$defs/lifecycle_event"},
-        {"$ref": "#/$defs/bar_event"}
+        {"$ref": "#/$defs/bar_event"},
+        {"$ref": "#/$defs/kind_prediction_event"},
+        {"$ref": "#/$defs/kind_answer_event"}
       ]
     },
     "prediction_event": {
@@ -1036,6 +1266,31 @@
             "trades": {"type": "integer", "minimum": 1}
           }
         }
+      }
+    },
+    "kind_prediction_event": {
+      "description": "Predictions of a kind besides the direction just displayed for a bar close (#179): its baselines, or an algorithm. The kind is prediction_kind (a consensus event's kind is fast or final). A client that does not know the type ignores it.",
+      "type": "object",
+      "required": ["type", "at", "prediction_kind", "bar_close", "predictions"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {"const": "kind_prediction"},
+        "at": {"$ref": "#/$defs/time"},
+        "prediction_kind": {"type": "string"},
+        "bar_close": {"$ref": "#/$defs/time"},
+        "predictions": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/kind_prediction_item"}}
+      }
+    },
+    "kind_answer_event": {
+      "description": "A kind's answers just made, four minutes after their bar closes (#179): what its predictions there are scored on.",
+      "type": "object",
+      "required": ["type", "at", "prediction_kind", "answers"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {"const": "kind_answer"},
+        "at": {"$ref": "#/$defs/time"},
+        "prediction_kind": {"type": "string"},
+        "answers": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/kind_answer_item"}}
       }
     },
 

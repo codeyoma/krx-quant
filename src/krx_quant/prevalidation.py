@@ -31,6 +31,12 @@ With the touch target (``KRX_TARGET_VERSION=2``, the default since #170) the can
 trains on its labels and the replay forecasts it (the touch target's baselines, the climate
 table refitted before each day on the days before it, as the candidate is). The stats are
 scored on the touch label either way (#170; before, basis B).
+
+An algorithm of a kind besides the direction (#179, ``kinds.py``) is checked the same way
+on its kind: it trains on the kind's answers, its stats are the kind's (scored on its
+answers, against its baselines), its correlation is of its first class's probability less
+its third's with the other algorithms of its kind only, and its report holds the kind and
+the kind's answer version, which the engine's ``admits`` checks.
 """
 
 from __future__ import annotations
@@ -43,19 +49,44 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
-from krx_quant.algorithms import ALGORITHMS, Algorithm, Model, NothingToLearn, load_models, register
+from krx_quant.algorithms import (
+    ALGORITHMS,
+    KIND_ALGORITHMS,
+    Algorithm,
+    KindAlgorithm,
+    Model,
+    NothingToLearn,
+    kind_of,
+    load_models,
+    register,
+    register_kind_algorithms,
+)
 from krx_quant.baselines import baselines_for
 from krx_quant.climate import CLIMATE_DAYS, fit_climate
 from krx_quant.config import Settings
 from krx_quant.features import Leaders
 from krx_quant.feeds.base import KST
+from krx_quant.kind_stats import KindEntry, kind_scoring, scored_of_kind
+from krx_quant.kind_stats import entry_json as kind_entry_json
+from krx_quant.kind_stats import leaderboard as kind_leaderboard
+from krx_quant.kind_stats import split as kind_split
+from krx_quant.kinds import DIRECTION, KINDS, Kind, kind_named
 from krx_quant.lifecycle import CLONE_CORRELATION, correlations, most_correlated
 from krx_quant.market_calendar import MarketCalendar, calendar_store
 from krx_quant.predictions import PredictionStore
 from krx_quant.replay import recorded_events, replay_recorded, sqlite_files
-from krx_quant.stats import Entry, enough, entry_json, leaderboard, scored_by_algorithm, split
+from krx_quant.stats import (
+    Entry,
+    Lifted,
+    enough,
+    entry_json,
+    leaderboard,
+    on_target,
+    scored_by_algorithm,
+    split,
+)
 from krx_quant.training import TrainingDay, finished_days, is_recorded, training_day
 
 log = logging.getLogger(__name__)
@@ -70,7 +101,7 @@ def report_path(state_dir: Path, name: str) -> Path:
     return state_dir / "prevalidations" / f"{name}.json"
 
 
-def code_digest(algorithm: Algorithm) -> str:
+def code_digest(algorithm: Algorithm | KindAlgorithm) -> str:
     """A digest of the algorithm's own code: its module, or every module of its package."""
     module = inspect.getmodule(type(algorithm))
     if module is None or module.__file__ is None:
@@ -85,12 +116,15 @@ def code_digest(algorithm: Algorithm) -> str:
     return digest.hexdigest()[:16]
 
 
-def admits(state_dir: Path, target_version: int = 1) -> Callable[[Algorithm], bool]:
+def admits(
+    state_dir: Path, target_version: int = 1, kinds: Sequence[Kind] = KINDS
+) -> Callable[[Algorithm | KindAlgorithm], bool]:
     """Whether the engine may start a new algorithm: registered before pre-validation, or
     its latest report passed with the code it runs now, on the target it runs now (#169; a
-    report without one was on the four-minute move, 1)."""
+    report without one was on the four-minute move, 1). An algorithm of a kind besides the
+    direction (#179) passed on its kind's answer version (one of ``kinds``)."""
 
-    def admitted(algorithm: Algorithm) -> bool:
+    def admitted(algorithm: Algorithm | KindAlgorithm) -> bool:
         if algorithm.name in REGISTERED_BEFORE:
             return True
         path = report_path(state_dir, algorithm.name)
@@ -106,12 +140,22 @@ def admits(state_dir: Path, target_version: int = 1) -> Callable[[Algorithm], bo
         if report.get("code") != code_digest(algorithm):
             log.warning("%s passed with other code; it waits for a new pre-validation", algorithm.name)
             return False
-        if report.get("target_version", 1) != target_version:
+        if report.get("target_version", 1) != _target(algorithm, target_version, kinds):
             log.warning("%s passed on another target; it waits for a new pre-validation", algorithm.name)
             return False
         return True
 
     return admitted
+
+
+def _target(algorithm: Algorithm | KindAlgorithm, target_version: int, kinds: Sequence[Kind]) -> int | None:
+    """The target an algorithm's report must have passed on: the engine's, or its kind's answer
+    version (#179); None for a kind not registered (it never passes)."""
+    name = kind_of(algorithm)
+    if name == DIRECTION:
+        return target_version
+    kind = kind_named(name, kinds)
+    return None if kind is None else kind.answer_version
 
 
 @dataclass(frozen=True)
@@ -129,19 +173,20 @@ class Prevalidation:
     days: list[date]  # replayed, oldest first
     models: dict[date, str]  # the version the algorithm predicted each day with
     checks: list[Check]
-    stats: Entry
+    stats: Entry | KindEntry  # its kind's (#179)
     correlations: dict[str, float]  # with each other algorithm it could be measured against
     statuses: dict[str, int]  # its predictions by status
     skipped_for_cpu: int  # bar closes it was skipped at for the CPU budget
     db: Path
-    target_version: int = 1  # the target replayed and scored on (#169)
+    target_version: int = 1  # the target replayed and scored on (#169); a kind's answer version
+    kind: str = DIRECTION  # the kind it predicts (#179)
 
     @property
     def passed(self) -> bool:
         return all(c.passed for c in self.checks)
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        out = {
             "algorithm": self.algorithm,
             "code": self.code,
             "prevalidated_at": self.prevalidated_at.isoformat(),
@@ -149,7 +194,7 @@ class Prevalidation:
             "days": [d.isoformat() for d in self.days],
             "models": {d.isoformat(): v for d, v in self.models.items()},
             "checks": [{"check": c.name, "passed": c.passed, "detail": c.detail} for c in self.checks],
-            "stats": entry_json(self.stats),
+            "stats": entry_json(self.stats) if isinstance(self.stats, Entry) else kind_entry_json(self.stats),
             "correlations": self.correlations,
             "timed_out": self.statuses.get("timed_out", 0),
             "statuses": self.statuses,
@@ -157,6 +202,9 @@ class Prevalidation:
             "db": str(self.db),
             "target_version": self.target_version,
         }
+        if self.kind != DIRECTION:
+            out["kind"] = self.kind
+        return out
 
 
 async def prevalidate(
@@ -164,6 +212,8 @@ async def prevalidate(
     name: str,
     *,
     algorithms: Sequence[Algorithm] = ALGORITHMS,
+    kind_algorithms: Sequence[KindAlgorithm] = KIND_ALGORITHMS,
+    kinds: Sequence[Kind] = KINDS,
     days: int = PREVALIDATION_DAYS,
     now: datetime | None = None,
 ) -> Prevalidation:
@@ -172,10 +222,19 @@ async def prevalidate(
     Raises ValueError for an algorithm not registered (RegistrationError for a registry
     that fails the registration check), FileNotFoundError when no day was recorded.
     """
-    candidate = next((a for a in algorithms if a.name == name), None)
+    candidate: Algorithm | KindAlgorithm | None = next((a for a in algorithms if a.name == name), None)
     if candidate is None:
-        raise ValueError(f"unknown algorithm {name!r}; registered: {', '.join(a.name for a in algorithms)}")
+        candidate = next((a for a in kind_algorithms if a.name == name), None)
+    kind = (
+        None
+        if candidate is None or kind_of(candidate) == DIRECTION
+        else kind_named(kind_of(candidate), kinds)
+    )
+    if candidate is None or (kind_of(candidate) != DIRECTION and kind is None):
+        names = ", ".join([*(a.name for a in algorithms), *(a.name for a in kind_algorithms)])
+        raise ValueError(f"unknown algorithm {name!r}; registered: {names}")
     register(algorithms)
+    register_kind_algorithms(kind_algorithms, kinds, taken={a.name for a in algorithms})
     now = now or datetime.now(KST)
     available = finished_days(settings.data_dir, settings.symbols, now)
     replayed = [d for d in available if is_recorded(settings.data_dir, d, settings.symbols)][-days:]
@@ -184,10 +243,15 @@ async def prevalidate(
     db = settings.state_dir / f"prevalidation-{name}.sqlite3"
     for leftover in sqlite_files(db):
         leftover.unlink(missing_ok=True)
-    models = await _replay(settings, candidate, algorithms, available, replayed, db)
-    result = _judge(
-        settings, candidate, [a.name for a in algorithms if a is not candidate], replayed, models, db, now
+    models = await _replay(
+        settings, candidate, kind, algorithms, kind_algorithms, kinds, available, replayed, db
     )
+    if kind is None:
+        others = [a.name for a in algorithms if a is not candidate]
+        result = _judge(settings, candidate, others, replayed, models, db, now)
+    else:
+        same = [a.name for a in kind_algorithms if a.kind == kind.name and a is not candidate]
+        result = _judge_kind(settings, candidate, kind, same, replayed, models, db, now)
     path = report_path(settings.state_dir, name)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".json.tmp")
@@ -198,18 +262,22 @@ async def prevalidate(
 
 async def _replay(
     settings: Settings,
-    candidate: Algorithm,
+    candidate: Algorithm | KindAlgorithm,
+    kind: Kind | None,
     algorithms: Sequence[Algorithm],
+    kind_algorithms: Sequence[KindAlgorithm],
+    kinds: Sequence[Kind],
     available: Sequence[date],
     replayed: Sequence[date],
     db: Path,
 ) -> dict[date, str]:
-    """Replay each day into ``db``, the candidate trained on the days before it; the
-    version it predicted each day with."""
+    """Replay each day into ``db``, the candidate trained on the days before it (on its kind's
+    answers, #179); the version it predicted each day with."""
     calendar = calendar_store(settings).calendar
     leaders = Leaders.of(settings)
-    running = load_models(settings.state_dir, [a for a in algorithms if a is not candidate])
-    trainer = _WalkForward(settings, candidate, available, calendar, leaders)
+    everyone: list[Algorithm | KindAlgorithm] = [*algorithms, *kind_algorithms]
+    running = load_models(settings.state_dir, [a for a in everyone if a is not candidate])
+    trainer = _WalkForward(settings, candidate, available, calendar, leaders, kind)
     versions: dict[date, str] = {}
     for day in replayed:
         model = trainer.before(day)
@@ -225,6 +293,8 @@ async def _replay(
             algorithms=algorithms,
             calendar=calendar,
             climate=climate,
+            kinds=kinds,
+            kind_algorithms=kind_algorithms,
         )
         engine.store.close()
         log.info("%s: replayed %s with %s", candidate.name, day, model.version)
@@ -233,7 +303,7 @@ async def _replay(
 
 def _judge(
     settings: Settings,
-    candidate: Algorithm,
+    candidate: Algorithm | KindAlgorithm,
     others: Sequence[str],
     replayed: Sequence[date],
     models: Mapping[date, str],
@@ -257,7 +327,77 @@ def _judge(
         {**algos, name: algos.get(name, [])}, baselines, settings.min_sample, settings.fee_rate
     )
     stats = next(e for e in [*board.ranked, *board.unranked] if e.algorithm == name)
-    checks = [
+    return Prevalidation(
+        algorithm=name,
+        code=code_digest(candidate),
+        prevalidated_at=now,
+        days=list(replayed),
+        models=dict(models),
+        checks=_checks(candidate, replayed, statuses, measured, stats, settings.min_sample),
+        stats=stats,
+        correlations=measured,
+        statuses=statuses,
+        skipped_for_cpu=skipped,
+        db=db,
+        target_version=settings.target_version,
+    )
+
+
+def _judge_kind(
+    settings: Settings,
+    candidate: Algorithm | KindAlgorithm,
+    kind: Kind,
+    others: Sequence[str],
+    replayed: Sequence[date],
+    models: Mapping[date, str],
+    db: Path,
+    now: datetime,
+) -> Prevalidation:
+    """A kind's candidate's report (#179): scored on the kind's answers, against its baselines,
+    correlated with the other algorithms of its kind only."""
+    name = candidate.name
+    names = {b.name for b in kind.baselines}
+    store = PredictionStore(db)
+    try:
+        statuses = store.kind_status_counts(name)
+        skipped = store.count_runs("cpu_budget", datetime.combine(replayed[0], time(), KST), name)
+        # As the API and the statuses go by: only forecasts of models trained on the kind's
+        # answers (a default model, as on the first replayed day, or another version's sits out).
+        version = kind.answer_version
+        scored = on_target(store.kind_scored(kind.name, version, replayed, None, False), names, version)
+        algos, baselines = kind_split(scored_of_kind(scored, kind), names)
+        every = on_target(store.kind_scored(kind.name, version, replayed, None, True), names, version)
+        measured = correlations(name, others, every, kind_scoring(kind).lean)
+    finally:
+        store.close()
+    board = kind_leaderboard({**algos, name: algos.get(name, [])}, baselines, settings.min_sample, kind)
+    stats = next(e for e in [*board.ranked, *board.unranked] if e.algorithm == name)
+    return Prevalidation(
+        algorithm=name,
+        code=code_digest(candidate),
+        prevalidated_at=now,
+        days=list(replayed),
+        models=dict(models),
+        checks=_checks(candidate, replayed, statuses, measured, stats, settings.min_sample),
+        stats=stats,
+        correlations=measured,
+        statuses=statuses,
+        skipped_for_cpu=skipped,
+        db=db,
+        target_version=kind.answer_version,
+        kind=kind.name,
+    )
+
+
+def _checks(
+    candidate: Algorithm | KindAlgorithm,
+    replayed: Sequence[date],
+    statuses: Mapping[str, int],
+    measured: Mapping[str, float],
+    stats: Lifted,
+    min_sample: int,
+) -> list[Check]:
+    return [
         Check(
             "days",
             len(replayed) >= MIN_DAYS,
@@ -268,22 +408,8 @@ def _judge(
         ),
         _budget(statuses),
         _correlation(measured),
-        _stats(stats, settings.min_sample),
+        _stats(stats, min_sample),
     ]
-    return Prevalidation(
-        algorithm=name,
-        code=code_digest(candidate),
-        prevalidated_at=now,
-        days=list(replayed),
-        models=dict(models),
-        checks=checks,
-        stats=stats,
-        correlations=measured,
-        statuses=statuses,
-        skipped_for_cpu=skipped,
-        db=db,
-        target_version=settings.target_version,
-    )
 
 
 def _budget(statuses: Mapping[str, int]) -> Check:
@@ -304,7 +430,7 @@ def _correlation(measured: Mapping[str, float]) -> Check:
     )
 
 
-def _stats(stats: Entry, min_sample: int) -> Check:
+def _stats(stats: Lifted, min_sample: int) -> Check:
     weakest = stats.weakest_lift
     if not enough(stats, min_sample) or weakest is None:
         pairs = min((t.lift.n for t in stats.lifts.values()), default=0)
@@ -319,18 +445,21 @@ def _stats(stats: Entry, min_sample: int) -> Check:
 
 
 class _WalkForward:
-    """The algorithm retrained before each day on its own window of the days before it."""
+    """The algorithm retrained before each day on its own window of the days before it; an
+    algorithm of a kind besides the direction (``kind``, #179) on that kind's answers."""
 
     def __init__(
         self,
         settings: Settings,
-        algorithm: Algorithm,
+        algorithm: Algorithm | KindAlgorithm,
         available: Sequence[date],
         calendar: MarketCalendar,
         leaders: Leaders,
+        kind: Kind | None = None,
     ) -> None:
         self._settings = settings
         self._algorithm = algorithm
+        self._kind = kind
         self._available = list(available)
         self._calendar = calendar
         self._leaders = leaders
@@ -341,11 +470,18 @@ class _WalkForward:
         window = [d for d in self._available if d < day][-self._algorithm.training_days :]
         for gone in [d for d in self._loaded if not window or d < window[0]]:
             del self._loaded[gone]
-        training = [s for d in window if (found := self._load(d)) is not None for s in found.samples]
-        if not any(s.outcome is not None for s in training):
-            return self._algorithm.default_model()
+        days = [found for d in window if (found := self._load(d)) is not None]
         try:
-            return self._algorithm.fit(training)
+            if self._kind is not None:
+                kind_algorithm = cast(KindAlgorithm, self._algorithm)
+                answered = [s for found in days for s in found.of_kind(self._kind, kind_algorithm.features)]
+                if not any(s.label is not None for s in answered):
+                    return self._algorithm.default_model()
+                return kind_algorithm.fit(answered)
+            training = [s for found in days for s in found.samples]
+            if not any(s.outcome is not None for s in training):
+                return self._algorithm.default_model()
+            return cast(Algorithm, self._algorithm).fit(training)
         except NothingToLearn as e:  # no book on backfilled days, say; any other error fails the check
             log.warning("%s not trained before %s, its defaults predict: %s", self._algorithm.name, day, e)
             return self._algorithm.default_model()
@@ -380,4 +516,5 @@ class _WalkForward:
             s.fee_rate,
             self._leaders,
             target_version=s.target_version,
+            kinds=() if self._kind is None or not features else (self._kind,),
         )

@@ -31,6 +31,13 @@ rule. Each report then counts the labelled samples by source (``labels``), and s
 Telegram summary. The climate baseline's table (``climate.py``) is refitted on the latest
 ``CLIMATE_DAYS`` days after the algorithms, with a report of its own, and always promoted.
 
+The algorithms of the kinds besides the direction (#179, ``kinds.py``) are trained after
+those, the same way on their kind's answers (``training.TrainingDay.of_kind``): the log loss
+of the kind's three classes, a champion of another answer version than the kind's replaced
+whatever the scores. Their reports name the kind (``kind``) and its answer version
+(``target_version``), and count the kind's labelled samples by source; the Telegram summary
+has a line of those per kind.
+
 Objects:
 
 - ``bars/...``: archived one-minute bars, and ``events/...``: recorded events of the feeds
@@ -54,11 +61,11 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
-from krx_quant.algorithms import ALGORITHMS, Algorithm, Model
-from krx_quant.algorithms.contract import Sample, predicted
-from krx_quant.algorithms.forecasts import forecasting, log_loss
+from krx_quant.algorithms import ALGORITHMS, KIND_ALGORITHMS, Algorithm, KindAlgorithm, Model
+from krx_quant.algorithms.contract import KindSample, Sample, kind_predicted, predicted
+from krx_quant.algorithms.forecasts import LOSS_FLOOR, forecasting, log_loss
 from krx_quant.backfill import MINUTE_BARS_TR, bars_key
 from krx_quant.climate import CLIMATE, CLIMATE_DAYS, fit_climate
 from krx_quant.config import Settings, SettingsError
@@ -66,6 +73,7 @@ from krx_quant.engine import ENGINE_FEEDS, partitions
 from krx_quant.features import Leaders
 from krx_quant.feeds import TRADE
 from krx_quant.feeds.base import KST, kst_day
+from krx_quant.kinds import KINDS, Kind, KindForecast, kind_named
 from krx_quant.macro import regime_prefix
 from krx_quant.market_calendar import MarketCalendar, calendar_store
 from krx_quant.notify import send_notice
@@ -75,6 +83,7 @@ from krx_quant.training import TrainingDay, leader_series, training_day
 log = logging.getLogger(__name__)
 
 VALIDATION_DAYS = 3
+_S = TypeVar("_S", Sample, KindSample)  # a direction's sample or a kind's (#179)
 LIVE = "live.json"
 
 
@@ -150,9 +159,13 @@ class Night:
         version 2), and one line per algorithm, for Telegram."""
         references: dict[str, str] = {}
         labelled: dict[str, int] = {}
+        kinds: dict[str, dict[str, int]] = {}  # the kinds' labelled samples by day (#179)
         for r in self.reports:
             references.update(r.get("reference_prices", {}))
-            labelled.update(r.get("labels", {}).get("by_day", {}))
+            if "kind" in r:
+                kinds.setdefault(r["kind"], {}).update(r.get("labels", {}).get("by_day", {}))
+            else:
+                labelled.update(r.get("labels", {}).get("by_day", {}))
         title = f"{self.day} 밤 학습"
         if references:
             recorded = sum(kind == "mid" for kind in references.values())
@@ -161,6 +174,9 @@ class Night:
         if labelled:
             quotes = sum(n for day, n in labelled.items() if references.get(day) == "mid")
             lines.append(f"정답 버전 2 표본: 녹화 호가 {quotes}개, 1분봉 {sum(labelled.values()) - quotes}개")
+        for kind, by_day in kinds.items():
+            quotes = sum(n for day, n in by_day.items() if references.get(day) == "mid")
+            lines.append(f"{kind} 정답 표본: 녹화 호가 {quotes}개, 1분봉 {sum(by_day.values()) - quotes}개")
         for r in self.reports:
             if r["promoted"] and r.get("forced"):
                 verdict = "승격(정답 바뀜, 성적 비교 없이)"
@@ -187,11 +203,14 @@ def train_night(
     calendar: MarketCalendar | None = None,
     commit: str = "unknown",
     target_version: int = 1,
+    kind_algorithms: Sequence[KindAlgorithm] = KIND_ALGORITHMS,
+    kinds: Sequence[Kind] = KINDS,
 ) -> Night:
     """Train every algorithm for the night of ``day`` (default: the latest day with data) and
     store the promotion list. A night already finished is returned as it was. Each report
     names ``commit``, the code that trained it. The samples' outcomes are of
-    ``target_version``; with the touch target (2) the climate baseline is refitted too.
+    ``target_version``; with the touch target (2) the climate baseline is refitted too. The
+    algorithms of the ``kinds`` besides the direction train last, on their kind's answers (#179).
     """
     leaders = leaders or Leaders()
     bars, trades = (
@@ -218,24 +237,40 @@ def train_night(
     if finished is not None:
         log.info("the night of %s is already trained", night)
         return Night.from_dict(finished)
+    # Each kind algorithm with its kind (#179); one of a kind not registered is not trained.
+    of_kinds = [(a, k) for a in kind_algorithms if (k := kind_named(a.kind, kinds)) is not None]
     trainer = _Trainer(
-        store, cache_dir, symbols, fee_rate, leaders, days, algorithms, calendar, target_version
+        store,
+        cache_dir,
+        symbols,
+        fee_rate,
+        leaders,
+        days,
+        algorithms,
+        calendar,
+        target_version,
+        of_kinds,
     )
     live: dict[str, str] = get_json(store, LIVE) or {}
     reports = []
-    steps: list[tuple[str, Callable[[], dict[str, Any]]]] = [
-        (a.name, partial(trainer.train, a, live.get(a.name))) for a in algorithms
+    # (name, the target its report must be of, whether a kind's, the step)
+    steps: list[tuple[str, int, bool, Callable[[], dict[str, Any]]]] = [
+        (a.name, target_version, False, partial(trainer.train, a, live.get(a.name))) for a in algorithms
     ]
     if target_version >= 2:
-        steps.append((CLIMATE, trainer.climate))
-    for name, step in steps:
+        steps.append((CLIMATE, target_version, False, trainer.climate))
+    for a, kind in of_kinds:
+        steps.append(
+            (a.name, kind.answer_version, True, partial(trainer.train_kind, a, kind, live.get(a.name)))
+        )
+    for name, version, of_kind, step in steps:
         report = get_json(store, report_key(night, name))
         # A checkpoint an older version wrote lacks the evidence (#89), and one of another
         # target (#169; none written: the four-minute move, 1) labelled other outcomes:
-        # trained again.
-        if report is None or "commit" not in report or report.get("target_version", 1) != target_version:
+        # trained again. A kind's is of its answer version (#179).
+        if report is None or "commit" not in report or report.get("target_version", 1) != version:
             report = {**step(), "commit": commit}
-            if target_version >= 2:
+            if target_version >= 2 and not of_kind:
                 report["target_version"] = target_version
             put_json(store, report_key(night, name), report)
             log.info("%s: %s", name, report["reason"])
@@ -291,9 +326,12 @@ class _Trainer:
         algorithms: Sequence[Algorithm],
         calendar: MarketCalendar | None = None,
         target_version: int = 1,
+        of_kinds: Sequence[tuple[KindAlgorithm, Kind]] = (),
     ) -> None:
         self._store = store
         self._target_version = target_version
+        # The kinds besides the direction its kind algorithms predict (#179), each day read with.
+        self._kinds = tuple({k.name: k for _, k in of_kinds}.values())
         self._cache = cache_dir
         self._symbols = tuple(symbols)
         self._fee_rate = fee_rate
@@ -305,16 +343,62 @@ class _Trainer:
             {**(calendar.known() if calendar else {}), **dict.fromkeys(days, True)}
         )
         # Each day is read once, with every algorithm's features.
-        self._names = sorted({f for a in algorithms for f in a.features})
+        everyone: list[Algorithm | KindAlgorithm] = [*algorithms, *(a for a, _ in of_kinds)]
+        self._names = sorted({f for a in everyone for f in a.features})
         self._loaded: dict[date, TrainingDay | None] = {}
         self._used: set[date] = set()
 
     def train(self, algorithm: Algorithm, live_version: str | None) -> dict[str, Any]:
+        """An algorithm's night: its challenger against its champion."""
+        return self._train(
+            algorithm,
+            live_version,
+            self._target_version,
+            {},
+            lambda loaded: (
+                {"target_version": self._target_version, "labels": _labels(loaded)}
+                if self._target_version >= 2
+                else {}
+            ),
+            lambda days: self._samples(algorithm, days),
+            algorithm.fit,
+            partial(_losses, algorithm),
+        )
+
+    def train_kind(self, algorithm: KindAlgorithm, kind: Kind, live_version: str | None) -> dict[str, Any]:
+        """A kind's algorithm's night (#179), on the kind's answers: the target is the kind's
+        answer version."""
+        return self._train(
+            algorithm,
+            live_version,
+            kind.answer_version,
+            {"kind": kind.name},
+            lambda loaded: {"target_version": kind.answer_version, "labels": _kind_labels(loaded, kind)},
+            lambda days: self._kind_samples(algorithm, kind, days),
+            algorithm.fit,
+            partial(_kind_losses, algorithm, kind),
+        )
+
+    def _train(
+        self,
+        algorithm: Algorithm | KindAlgorithm,
+        live_version: str | None,
+        target: int,
+        heading: Mapping[str, Any],
+        labels: Callable[[Mapping[date, TrainingDay | None]], dict[str, Any]],
+        samples: Callable[[Sequence[date]], list[_S]],
+        fit: Callable[[list[_S]], Model],
+        losses: Callable[[Model, Sequence[_S]], list[tuple[_S, float]]],
+    ) -> dict[str, Any]:
+        """The challenger trained on ``samples`` of the training days, against the champion, both
+        by ``losses`` on the validation days; the report's ``heading`` after its name, and its
+        ``labels`` (the target and the labelled samples by source)."""
         night = self._days[-1]
-        validation = self._days[-VALIDATION_DAYS:]
-        training = self._days[:-VALIDATION_DAYS][-algorithm.training_days :]
+        validation: list[date] = self._days[-VALIDATION_DAYS:]
+        training: list[date] = self._days[:-VALIDATION_DAYS][-algorithm.training_days :]
         report: dict[str, Any] = {
             "algorithm": algorithm.name,
+            **heading,
             "day": night.isoformat(),
             "training_days": [d.isoformat() for d in training],
             "validation_days": [d.isoformat() for d in validation],
@@ -328,25 +412,24 @@ class _Trainer:
         report["reference_prices"] = {
             day.isoformat(): found.reference for day, found in loaded.items() if found is not None
         }
-        if self._target_version >= 2:
-            report |= {"target_version": self._target_version, "labels": _labels(loaded)}
+        report |= labels(loaded)
         try:
-            challenger = algorithm.fit(self._samples(algorithm, training))
+            challenger = fit(samples(training))
         except ValueError as e:
             return {**report, "reason": f"not trained: {e}"}
         self._put_model(algorithm.name, challenger)
         champion = self._champion(algorithm, live_version)
         # The bar closes it predicts: without the data it reads (the book), it declines,
         # whatever the model.
-        challenger_losses = _losses(algorithm, challenger, self._samples(algorithm, validation))
+        challenger_losses = losses(challenger, samples(validation))
         scored = [s for s, _ in challenger_losses]
         report["samples"] = {"validation": len(scored)}
         # A champion of another target (#170) is replaced whatever the scores say.
         champion_target = champion.target_version or 1
-        retarget = champion_target != self._target_version
+        retarget = champion_target != target
         changed = (
             f"; {champion.version} learned target {champion_target}, the night target"
-            f" {self._target_version}: promoted without comparing"
+            f" {target}: promoted without comparing"
         )
         if not scored:
             if retarget:
@@ -362,7 +445,7 @@ class _Trainer:
                     "reason": "no outcomes to validate on" + changed,
                 }
             return {**report, "reason": "no outcomes to validate on"}
-        champion_losses = _losses(algorithm, champion, scored)
+        champion_losses = losses(champion, scored)
         champion_loss = _mean([loss for _, loss in champion_losses])
         challenger_loss = _mean([loss for _, loss in challenger_losses])
         better = challenger_loss < champion_loss
@@ -425,6 +508,14 @@ class _Trainer:
     def _samples(self, algorithm: Algorithm, days: Sequence[date]) -> list[Sample]:
         return [s for d in days if (found := self._day(d)) is not None for s in found.of(algorithm.features)]
 
+    def _kind_samples(self, algorithm: KindAlgorithm, kind: Kind, days: Sequence[date]) -> list[KindSample]:
+        return [
+            s
+            for d in days
+            if (found := self._day(d)) is not None
+            for s in found.of_kind(kind, algorithm.features)
+        ]
+
     def _day(self, day: date) -> TrainingDay | None:
         """A day's samples with every algorithm's features, read once from the cache."""
         if day not in self._loaded:
@@ -438,11 +529,12 @@ class _Trainer:
                 self._fee_rate,
                 self._leaders,
                 target_version=self._target_version,
+                kinds=self._kinds,
             )
         self._used.add(day)
         return self._loaded[day]
 
-    def _champion(self, algorithm: Algorithm, version: str | None) -> Model:
+    def _champion(self, algorithm: Algorithm | KindAlgorithm, version: str | None) -> Model:
         default = algorithm.default_model()
         if version is not None and version != default.version:
             data = get_json(self._store, model_key(algorithm.name, version))
@@ -558,13 +650,48 @@ def _labels(loaded: Mapping[date, TrainingDay | None]) -> dict[str, Any]:
     return {"samples": {"recorded": recorded, "bars": sum(by_day.values()) - recorded}, "by_day": by_day}
 
 
+def _kind_losses(
+    algorithm: KindAlgorithm, kind: Kind, model: Model, samples: Sequence[KindSample]
+) -> list[tuple[KindSample, float]]:
+    """``model``'s log loss of ``kind``'s three classes on each sample with an answer that it
+    predicts (#179)."""
+    out = []
+    for s in samples:
+        if s.label is None:
+            continue
+        f = kind_predicted(algorithm, s.features, model)
+        if f is not None:
+            out.append((s, kind_log_loss(kind, f, s.label)))
+    return out
+
+
+def kind_log_loss(kind: Kind, forecast: KindForecast, label: str) -> float:
+    """The log loss of a forecast of ``kind`` whose answer was ``label`` (``forecasts.log_loss``)."""
+    return -math.log(max(forecast.probabilities[kind.index(label)], LOSS_FLOOR))
+
+
+def _kind_labels(loaded: Mapping[date, TrainingDay | None], kind: Kind) -> dict[str, Any]:
+    """``_labels`` of a kind's answers (#179)."""
+    by_day = {
+        day.isoformat(): sum(s.label is not None for s in found.of_kind(kind, ()))
+        for day, found in loaded.items()
+        if found is not None
+    }
+    recorded = sum(
+        by_day[day.isoformat()]
+        for day, found in loaded.items()
+        if found is not None and found.reference == "mid"
+    )
+    return {"samples": {"recorded": recorded, "bars": sum(by_day.values()) - recorded}, "by_day": by_day}
+
+
 def _mean(values: Sequence[float]) -> float:
     return sum(values) / len(values)
 
 
 def _validation(
-    challenger: Sequence[tuple[Sample, float]],
-    champion: Sequence[tuple[Sample, float]],
+    challenger: Sequence[tuple[Sample | KindSample, float]],
+    champion: Sequence[tuple[Sample | KindSample, float]],
     references: Mapping[date, str],
 ) -> dict[str, Any]:
     """The validation's losses by day and by reference price (``mid``, ``close``), and the
@@ -573,13 +700,13 @@ def _validation(
     outcomes overlap (None with fewer than two days).
     """
 
-    def key(sample: Sample) -> tuple[str, datetime]:
+    def key(sample: Sample | KindSample) -> tuple[str, datetime]:
         return sample.symbol, sample.bar_close
 
     by_champion = {key(s): loss for s, loss in champion}
 
-    def losses(day_of: Callable[[Sample], Any]) -> dict[str, dict[str, Any]]:
-        groups: dict[Any, list[tuple[Sample, float]]] = {}
+    def losses(day_of: Callable[[Sample | KindSample], Any]) -> dict[str, dict[str, Any]]:
+        groups: dict[Any, list[tuple[Sample | KindSample, float]]] = {}
         for sample, loss in challenger:
             groups.setdefault(day_of(sample), []).append((sample, loss))
         out = {}

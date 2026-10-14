@@ -30,18 +30,21 @@ four-minute outcome overlaps the next three bar closes', and the symbols move wi
 market. So each lift is also taken **by trading day**: a day's mean gain is one value, and
 the days' mean has a Student t interval and one-sided p-value (none from fewer than two
 days). The statuses (``lifecycle.py``) are decided by these; the paired ones only describe.
+
+The lifts, their adjustment and the ranking hold for any kind's predictions (#179): a kind's
+statistics (``kind_stats.py``) pair its records and rank its entries with the same code.
 """
 
 from __future__ import annotations
 
 import json
 import math
-from collections.abc import Collection, Iterator, Mapping, Sequence
+from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import date, datetime
 from functools import cache
 from statistics import NormalDist
-from typing import Any, TypeVar
+from typing import Any, Protocol, TypeVar
 
 from krx_quant.feeds.base import kst_day
 from krx_quant.pricing import SELL_TAX, Direction, most_likely
@@ -164,6 +167,20 @@ class Lift:
 
 
 Row = TypeVar("Row", bound=Mapping[str, Any])  # a stored prediction, as the store reads it
+
+
+class Paired(Protocol):
+    """A scored prediction, as a lift pairs it: by symbol and bar close, right or wrong. Any
+    kind's records (#179)."""
+
+    @property
+    def symbol(self) -> str: ...
+
+    @property
+    def bar_close(self) -> datetime: ...
+
+    @property
+    def correct(self) -> bool: ...
 
 
 def scored_by_algorithm(rows: Sequence[Mapping[str, Any]]) -> dict[str, list[Scored]]:
@@ -307,7 +324,7 @@ def _calibration(records: Sequence[Scored], classes: Sequence[Direction]) -> lis
     ]
 
 
-def _gains(records: Sequence[Scored], baseline: Sequence[Scored]) -> Iterator[tuple[datetime, float]]:
+def _gains(records: Sequence[Paired], baseline: Sequence[Paired]) -> Iterator[tuple[datetime, float]]:
     """Each bar close both predicted, and the accuracy gained over ``baseline`` there (1, 0 or -1)."""
     theirs = {(b.symbol, b.bar_close): b.correct for b in baseline}
     return (
@@ -317,7 +334,7 @@ def _gains(records: Sequence[Scored], baseline: Sequence[Scored]) -> Iterator[tu
     )
 
 
-def lift(records: Sequence[Scored], baseline: Sequence[Scored]) -> Lift:
+def lift(records: Sequence[Paired], baseline: Sequence[Paired]) -> Lift:
     """Accuracy gained over ``baseline`` on the bar closes both predicted."""
     gains = [gain for _, gain in _gains(records, baseline)]
     interval = mean_interval(gains)
@@ -333,7 +350,7 @@ def lift(records: Sequence[Scored], baseline: Sequence[Scored]) -> Lift:
     return Lift(interval.n, interval.value, interval.low, interval.high, p)
 
 
-def day_lift(records: Sequence[Scored], baseline: Sequence[Scored], level: float = 0.95) -> Lift | None:
+def day_lift(records: Sequence[Paired], baseline: Sequence[Paired], level: float = 0.95) -> Lift | None:
     """The lift over ``baseline`` taken a trading day at a time: each day's mean gain is one
     value, every day weighing the same, with a two-sided ``level`` interval. Its ``n`` is the
     days; None from fewer than two. Days that all gained the same have no spread: the
@@ -450,20 +467,13 @@ class Entry:
     @property
     def lift_low(self) -> float | None:
         """The lower bound of the weakest lift: better than every baseline, how surely."""
-        lows = [t.lift.low for t in self.lifts.values()]
-        if not lows or any(low is None for low in lows):
-            return None
-        return min(low for low in lows if low is not None)
+        return lift_low(self.lifts)
 
     @property
     def weakest_by_day(self) -> Lift | None:
         """The lift by trading day with the lowest lower bound: better than every baseline,
         day after day, how surely. None unless every baseline has one."""
-        by_day = [t.by_day for t in self.lifts.values()]
-        lows = [(d.low, d) for d in by_day if d is not None and d.low is not None]
-        if not by_day or len(lows) < len(by_day):
-            return None
-        return min(lows, key=lambda pair: pair[0])[1]
+        return weakest_by_day(self.lifts)
 
     @property
     def day_low(self) -> float | None:
@@ -474,10 +484,63 @@ class Entry:
     @property
     def weakest_lift(self) -> float | None:
         """The weakest lift: better than every baseline, by how much at least."""
-        values = [t.lift.value for t in self.lifts.values()]
-        if not values or any(v is None for v in values):
-            return None
-        return min(v for v in values if v is not None)
+        return weakest_lift(self.lifts)
+
+
+def lift_low(lifts: Mapping[str, Tested]) -> float | None:
+    """The lower bound of the weakest of ``lifts`` (``Entry.lift_low``)."""
+    lows = [t.lift.low for t in lifts.values()]
+    if not lows or any(low is None for low in lows):
+        return None
+    return min(low for low in lows if low is not None)
+
+
+def weakest_by_day(lifts: Mapping[str, Tested]) -> Lift | None:
+    """The lift by trading day of ``lifts`` with the lowest lower bound (``Entry.weakest_by_day``)."""
+    by_day = [t.by_day for t in lifts.values()]
+    lows = [(d.low, d) for d in by_day if d is not None and d.low is not None]
+    if not by_day or len(lows) < len(by_day):
+        return None
+    return min(lows, key=lambda pair: pair[0])[1]
+
+
+def weakest_lift(lifts: Mapping[str, Tested]) -> float | None:
+    """The weakest of ``lifts`` (``Entry.weakest_lift``)."""
+    values = [t.lift.value for t in lifts.values()]
+    if not values or any(v is None for v in values):
+        return None
+    return min(v for v in values if v is not None)
+
+
+class Counted(Protocol):
+    @property
+    def n(self) -> int: ...
+
+
+class Lifted(Protocol):
+    """An entry of any kind's statistics (#179), as the leaderboard ranks it and the lifecycle
+    judges it: how many it scored, and its lifts over the baselines."""
+
+    @property
+    def algorithm(self) -> str: ...
+
+    @property
+    def summary(self) -> Counted: ...
+
+    @property
+    def lifts(self) -> Mapping[str, Tested]: ...
+
+    @property
+    def lift_low(self) -> float | None: ...
+
+    @property
+    def weakest_by_day(self) -> Lift | None: ...
+
+    @property
+    def day_low(self) -> float | None: ...
+
+    @property
+    def weakest_lift(self) -> float | None: ...
 
 
 @dataclass(frozen=True)
@@ -508,11 +571,24 @@ def entry(
     return Entry(algorithm, versions, summarize(records, fee_rate), lifts)
 
 
-def enough(e: Entry, min_sample: int) -> bool:
+def enough(e: Lifted, min_sample: int) -> bool:
     """Whether ``e`` has the scored predictions, and pairs with each baseline, to be judged."""
     return (
         bool(e.lifts) and e.summary.n >= min_sample and all(t.lift.n >= min_sample for t in e.lifts.values())
     )
+
+
+def q_values(raw: Iterable[Lifted], candidates: Collection[str]) -> dict[tuple[str, str], float]:
+    """The candidates' lift tests adjusted together for the false discovery rate: the q-value by
+    (algorithm, baseline), of the lifts tested (with a p-value)."""
+    tests = [
+        (e.algorithm, name, t.lift.p)
+        for e in raw
+        if e.algorithm in candidates
+        for name, t in e.lifts.items()
+        if t.lift.p is not None
+    ]
+    return {(a, b): q for (a, b, _), q in zip(tests, benjamini_hochberg([p for *_, p in tests]), strict=True)}
 
 
 def leaderboard(
@@ -528,22 +604,13 @@ def leaderboard(
     """
     raw = [entry(name, records, baselines, fee_rate) for name, records in sorted(by_algorithm.items())]
     candidates = {e.algorithm for e in raw if enough(e, min_sample)}
-    tests = [
-        (e.algorithm, name, t.lift.p)
-        for e in raw
-        if e.algorithm in candidates
-        for name, t in e.lifts.items()
-        if t.lift.p is not None
-    ]
-    q_values = {
-        (a, b): q for (a, b, _), q in zip(tests, benjamini_hochberg([p for *_, p in tests]), strict=True)
-    }
+    adjusted_q = q_values(raw, candidates)
     adjusted = [
         Entry(
             e.algorithm,
             e.model_versions,
             e.summary,
-            {name: replace(t, q=q_values.get((e.algorithm, name))) for name, t in e.lifts.items()},
+            {name: replace(t, q=adjusted_q.get((e.algorithm, name))) for name, t in e.lifts.items()},
         )
         for e in raw
     ]
@@ -580,20 +647,25 @@ def entry_json(e: Entry) -> dict[str, Any]:
         },
     }
     if e.lifts:
-        out["lift"] = {
-            "low": e.lift_low,
-            "day_low": e.day_low,
-            "vs": {
-                name: {
-                    **_lift_json(t.lift),
-                    "q": t.q,
-                    "significant": t.significant,
-                    "by_day": None if t.by_day is None else _lift_json(t.by_day),
-                }
-                for name, t in e.lifts.items()
-            },
-        }
+        out["lift"] = lifts_json(e)
     return out
+
+
+def lifts_json(e: Lifted) -> dict[str, Any]:
+    """An entry's lifts as the API shows them (any kind's, #179)."""
+    return {
+        "low": e.lift_low,
+        "day_low": e.day_low,
+        "vs": {
+            name: {
+                **_lift_json(t.lift),
+                "q": t.q,
+                "significant": t.significant,
+                "by_day": None if t.by_day is None else _lift_json(t.by_day),
+            }
+            for name, t in e.lifts.items()
+        },
+    }
 
 
 def _lift_json(lift: Lift) -> dict[str, Any]:

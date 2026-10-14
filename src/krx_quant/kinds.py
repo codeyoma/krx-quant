@@ -1,0 +1,395 @@
+"""Prediction kinds (#179): what a predictor predicts at each bar close.
+
+The engine predicts the direction (``direction``: up, flat or down, the touch target of
+#160) and, beside it, other kinds of forecast: how far the mid-point moves (range, #177),
+which barrier is reached first (#178). Every kind's core output is three probabilities, so
+the Stats Engine's three-class statistics (accuracy, Brier score, calibration, lift, the
+lift by trading day, the false discovery rate) hold for any of them, and so do the
+lifecycle rules, judged within the kind against its own baselines.
+
+A kind declares in one place (``Kind``):
+
+- its name, and its three classes in order (the first, the middle and the third);
+- its action classes: the calls precision and coverage count (direction: up and down);
+- its answer function and answer version: the class of a bar close's four minutes, from
+  the quotes the Market View followed through them (``Followed``), and, for days with
+  one-minute bars only, a bar rule (``bar_answer``) to train on;
+- its baselines, the predictions every algorithm of the kind must beat;
+- its extra output fields beside the three probabilities, and their check;
+- its extra statistics, beside the three-class ones.
+
+A forecast's class is its most likely one; a tie goes to the middle class, then the
+first (as the direction's goes to flat, then up).
+
+The direction is registered as it always ran: its predictions, touch labels, baselines
+and consensus keep their own tables and code (``predictions``, ``touches``,
+``baselines.py``, ``consensus.py``). Every other kind's predictions and answers go to
+``kind_predictions`` and ``kind_answers``. A kind's answer is made once per (kind, symbol,
+bar close, answer version) at t + 4 minutes, and every predictor of the kind at that bar
+close is scored on it.
+
+Every kind's answer is made from the same quotes as the touch label (``touch.py``): the
+integrated best quotes received from t up to t + 4 minutes, WebSocket ones only; a crossed
+or one-sided quote is dropped; a window that received a REST snapshot of the book, went
+sixty seconds without a quote, or that the engine restarted in cannot be scored
+(``Followed.unscorable``), whatever the answer function says.
+
+The kinds are registered in ``KINDS``, in order: the direction first. A new kind's
+algorithms run after the direction's (``algorithms.KIND_ALGORITHMS``), so the CPU budget
+skips them first.
+"""
+
+from __future__ import annotations
+
+import math
+import re
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Any, NamedTuple, Protocol
+
+from krx_quant.cards import Card, Meaning
+from krx_quant.reference import Bar
+from krx_quant.touch import MISSING_MID, REST_QUOTES, SILENCE, SILENT, TARGET_VERSION, WINDOW
+
+DIRECTION = "direction"
+# Why a kind's answer function gave no class for a window the shared rules could score.
+NO_ANSWER = "no answer"
+# The status of a kind baseline's prediction it did not make (as ``baselines.NO_PREVIOUS``).
+NO_PREVIOUS = "no_previous"
+# A kind's name and class names: they go in URLs and JSON keys (``p_<class>``).
+_NAME = re.compile(r"^[a-z][a-z0-9_]*$")
+
+
+class Quote(NamedTuple):
+    """A best quote received in a window: an integrated one from the WebSocket, neither
+    crossed nor one-sided (#160)."""
+
+    received_at: datetime
+    bid: float
+    ask: float
+    bid_size: float | None  # from the book feed; None from a trade's quote
+    ask_size: float | None
+
+
+@dataclass(frozen=True)
+class Followed:
+    """The four minutes from a bar close as the Market View followed them (#167, #179): what a
+    kind's answer is made from, the same quotes the touch label is.
+
+    ``anchor`` is the mid-point at the bar close (the reference price), ``tick`` and ``k``
+    its tick size and flat band, ``bid_start`` and ``ask_start`` the best quote received
+    last before the bar close. ``quotes`` are the usable best quotes received in
+    [t, t + 4 minutes), in the order received; ``trades`` the integrated trades' (time,
+    price) there. ``unscorable`` says why the window cannot be scored (``touch.py``'s
+    reasons), None if it can."""
+
+    symbol: str
+    bar_close: datetime
+    anchor: float | None
+    tick: float | None
+    k: int | None
+    bid_start: float | None
+    ask_start: float | None
+    quotes: tuple[Quote, ...]
+    trades: tuple[tuple[datetime, float], ...]
+    unscorable: str | None
+
+    @property
+    def end(self) -> datetime:
+        return self.bar_close + WINDOW
+
+
+class QuoteLog:
+    """A symbol's best quotes, REST book snapshots and trades as received, for the kinds'
+    windows (#179): kept while a window may read them. The quotes are filtered as a touch
+    window filters them (``touch.TouchWindow``): a crossed or one-sided one is dropped."""
+
+    def __init__(self) -> None:
+        self._quotes: list[Quote] = []
+        self._rests: list[datetime] = []
+        self._trades: list[tuple[datetime, float]] = []
+
+    def quote(
+        self,
+        received_at: datetime,
+        bid: float | None,
+        ask: float | None,
+        bid_size: float | None,
+        ask_size: float | None,
+        rest: bool,
+    ) -> None:
+        if rest:
+            self._rests.append(received_at)
+            return
+        if not bid or not ask or bid <= 0 or ask <= 0 or ask < bid:
+            return  # crossed or one-sided: dropped, as for the reference price
+        self._quotes.append(Quote(received_at, bid, ask, bid_size, ask_size))
+
+    def trade(self, received_at: datetime, price: float | None) -> None:
+        if price:
+            self._trades.append((received_at, price))
+
+    def forget(self, before: datetime) -> None:
+        """Drop what was received before ``before``: no window kept reads it."""
+        self._quotes = [q for q in self._quotes if q.received_at >= before]
+        self._rests = [r for r in self._rests if r >= before]
+        self._trades = [t for t in self._trades if t[0] >= before]
+
+    def window(
+        self,
+        symbol: str,
+        bar_close: datetime,
+        anchor: float | None,
+        tick: float | None,
+        k: int | None,
+        bid_start: float | None,
+        ask_start: float | None,
+    ) -> Followed:
+        """The window from ``bar_close``, by the touch target's rules: the quotes received in
+        [t, t + 4 minutes); unscorable without a mid-point at t, with a REST snapshot in it,
+        or with sixty seconds or more without a quote (from t, between two, or up to the end).
+        """
+        start, end = bar_close, bar_close + WINDOW
+        quotes = tuple(q for q in self._quotes if start <= q.received_at < end)
+        rest = any(start <= r < end for r in self._rests)
+        trades = tuple(t for t in self._trades if start <= t[0] < end)
+        last, silent = start, False
+        for q in quotes:
+            if q.received_at - last >= SILENCE:
+                silent = True
+            last = q.received_at
+        if end - last >= SILENCE:
+            silent = True
+        unscorable = MISSING_MID if anchor is None else REST_QUOTES if rest else SILENT if silent else None
+        return Followed(symbol, bar_close, anchor, tick, k, bid_start, ask_start, quotes, trades, unscorable)
+
+
+@dataclass(frozen=True)
+class Answer:
+    """A kind's answer for a bar close: its class (None: it could not be scored, ``unscorable``
+    says why) and a summary of its path, as stored and served (JSON)."""
+
+    label: str | None
+    unscorable: str | None = None
+    path: Mapping[str, Any] = field(default_factory=dict)
+
+
+# A kind's answer from a window's quotes (called for every window, scorable or not; a
+# window the shared rules cannot score gets no class whatever it says).
+AnswerFunction = Callable[[Followed], Answer]
+# A kind's answer from one-minute bars, for days with no quotes (training only): the bar
+# that ended at the bar close, the bars of the four minutes after it (those with trades)
+# and the fee rate; None without one.
+BarAnswer = Callable[[Bar, Sequence[Bar], float], Answer | None]
+
+
+@dataclass(frozen=True)
+class KindForecast:
+    """A forecast of a kind: its three classes' probabilities, in the kind's order, and the
+    kind's extra fields."""
+
+    probabilities: tuple[float, float, float]
+    fields: Mapping[str, float] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class KindInputs:
+    """What a kind's baseline knows at a bar close."""
+
+    symbol: str
+    bar_close: datetime
+    mid: float | None  # the reference price at the bar close
+    tick: float | None
+    flat_ticks: int | None
+    # The answer of the window that ended at this bar close (t − 4 minutes to t); None when
+    # it could not be scored or was not followed (the day's first minutes, a restart).
+    previous: Answer | None
+    # The kind's answers of the symbol's windows over today, by class.
+    day_classes: Mapping[str, int]
+
+
+class KindBaseline(Protocol):
+    name: str
+    version: str
+    card: Card
+
+    def predict(self, inputs: KindInputs) -> KindForecast | None:
+        """The forecast; None where it does not predict (status ``NO_PREVIOUS``)."""
+        ...
+
+
+@dataclass(frozen=True)
+class KindScored:
+    """One scored prediction of a kind, on its bar close's answer."""
+
+    algorithm: str
+    model_version: str
+    symbol: str
+    bar_close: datetime
+    probabilities: tuple[float, float, float]
+    outcome: int  # the answer's class, by its place in the kind's classes
+    output: Mapping[str, float]  # the stored output: the probabilities and the kind's fields
+    path: Mapping[str, Any]  # the answer's path
+
+    @property
+    def predicted(self) -> int:
+        return most_likely(self.probabilities)
+
+    @property
+    def correct(self) -> bool:
+        return self.predicted == self.outcome
+
+
+def most_likely(probabilities: Sequence[float]) -> int:
+    """The class a forecast predicts, by its place: the most likely; a tie goes to the middle
+    class, then the first (``pricing.most_likely``'s flat, then up)."""
+    best = max(probabilities)
+    if probabilities[1] == best:
+        return 1
+    return 0 if probabilities[0] == best else 2
+
+
+# The check of a kind's output (the probabilities and its fields, as stored): why it breaks
+# the kind's contract, None if it keeps it.
+OutputCheck = Callable[[Mapping[str, float]], str | None]
+# A kind's statistics beside the three-class ones, from a predictor's scored predictions.
+ExtraStats = Callable[[Sequence[KindScored]], dict[str, Any]]
+
+
+@dataclass(frozen=True, eq=False)
+class Kind:
+    """A kind of prediction (#179), as registered: everything the engine, the Stats Engine,
+    the lifecycle, training and the Engine API need to know of it."""
+
+    name: str
+    title: str  # as the screen names it (Korean)
+    classes: tuple[str, str, str]  # in order: the first, the middle, the third
+    class_titles: tuple[str, str, str]  # as the screen names them
+    action: tuple[str, ...]  # the classes precision and coverage count
+    answer_version: int
+    # The answer of a window (None: the direction, whose touch label is ``touch.py``'s).
+    answer: AnswerFunction | None = None
+    # The answer of a day with one-minute bars only; None: such days are not trained on.
+    bar_answer: BarAnswer | None = None
+    baselines: tuple[KindBaseline, ...] = ()
+    # The output's fields beside the probabilities: what each is (its meaning and unit).
+    fields: Mapping[str, Meaning] = field(default_factory=dict)
+    check: OutputCheck | None = None
+    stats: ExtraStats | None = None
+
+    def index(self, label: str) -> int:
+        """A class's place in the kind's order."""
+        return self.classes.index(label)
+
+    def p_keys(self) -> tuple[str, str, str]:
+        """The output's keys of the three probabilities: ``p_<class>``."""
+        first, middle, third = (f"p_{c}" for c in self.classes)
+        return first, middle, third
+
+    def output(self, forecast: KindForecast) -> dict[str, float]:
+        """A forecast as stored and served: ``p_<class>`` for each class, then the fields."""
+        return {**dict(zip(self.p_keys(), forecast.probabilities, strict=True)), **forecast.fields}
+
+    def probabilities(self, output: Mapping[str, float]) -> tuple[float, float, float]:
+        """The three probabilities of a stored output, in the kind's order."""
+        first, middle, third = (float(output[k]) for k in self.p_keys())
+        return first, middle, third
+
+    def invalid(self, forecast: KindForecast) -> str | None:
+        """Why ``forecast`` breaks the kind's contract (an ``error``), None if it keeps it: the
+        probabilities a distribution, the kind's fields and no others, each finite, and the
+        kind's own check."""
+        p = forecast.probabilities
+        if len(p) != 3 or not all(0 <= x <= 1 for x in p) or not math.isclose(sum(p), 1, abs_tol=1e-6):
+            return f"probabilities {tuple(p)} are not a distribution"
+        if set(forecast.fields) != set(self.fields):
+            return f"fields {sorted(forecast.fields)}, not {sorted(self.fields)}"
+        if not all(math.isfinite(v) for v in forecast.fields.values()):
+            return f"fields {dict(forecast.fields)} are not all finite"
+        return None if self.check is None else self.check(self.output(forecast))
+
+    def answer_to(self, window: Followed) -> Answer:
+        """The kind's answer of ``window``: its answer function's, unless the shared rules
+        cannot score the window (``Followed.unscorable``), then no class and their reason."""
+        if self.answer is None:
+            raise ValueError(f"{self.name}: no answer function (the direction's is touch.py)")
+        given = self.answer(window)
+        if window.unscorable is not None:
+            return Answer(None, window.unscorable, given.path)
+        if given.label is None:
+            return Answer(None, given.unscorable or NO_ANSWER, given.path)
+        if given.label not in self.classes:
+            raise ValueError(f"{self.name}: answered {given.label!r}, not one of {self.classes}")
+        return Answer(given.label, None, given.path)
+
+    def as_dict(self, baselines: Sequence[tuple[str, Card]]) -> dict[str, Any]:
+        """As ``GET /v1/kinds`` shows it, with its baselines' cards."""
+        return {
+            "name": self.name,
+            "title": self.title,
+            "classes": list(self.classes),
+            "class_titles": list(self.class_titles),
+            "action": list(self.action),
+            "answer_version": self.answer_version,
+            "fields": {name: m.as_dict() for name, m in self.fields.items()},
+            "baselines": [{"name": name, "card": card.as_dict()} for name, card in baselines],
+        }
+
+
+class KindRegistrationError(ValueError):
+    pass
+
+
+def register_kinds(kinds: Sequence[Kind]) -> tuple[Kind, ...]:
+    """Check ``kinds`` in order; raises KindRegistrationError on the first refused: a name
+    taken or not URL-safe, classes not three different URL-safe names, action classes
+    not among them, a field named like a probability, a kind besides the direction
+    without an answer function, a baseline's name taken by another."""
+    names: set[str] = set()
+    baselines: set[str] = set()
+    for k in kinds:
+        if not _NAME.match(k.name) or k.name in names:
+            raise KindRegistrationError(f"{k.name!r}: taken, or not a lowercase name")
+        names.add(k.name)
+        if len(set(k.classes)) != 3 or not all(_NAME.match(c) for c in k.classes):
+            raise KindRegistrationError(f"{k.name}: its classes {k.classes} are not three lowercase names")
+        if not k.action or not set(k.action) <= set(k.classes):
+            raise KindRegistrationError(f"{k.name}: action classes {k.action} not among {k.classes}")
+        clash = sorted(set(k.fields) & set(k.p_keys()))
+        if clash:
+            raise KindRegistrationError(f"{k.name}: fields {', '.join(clash)} are named like probabilities")
+        if k.name != DIRECTION and k.answer is None:
+            raise KindRegistrationError(f"{k.name}: no answer function")
+        for b in k.baselines:
+            if b.name in baselines:
+                raise KindRegistrationError(f"{k.name}: baseline {b.name} is taken")
+            baselines.add(b.name)
+    return tuple(kinds)
+
+
+# The direction, as it always ran (#160, #170): its answer is the touch label (``touch.py``,
+# the ``touches`` table), its baselines ``baselines.baselines_for``.
+DIRECTION_KIND = Kind(
+    name=DIRECTION,
+    title="방향",
+    classes=("up", "flat", "down"),
+    class_titles=("상승", "보합", "하락"),
+    action=("up", "down"),
+    answer_version=TARGET_VERSION,
+    fields={
+        "expected_ticks": Meaning(
+            "4분 뒤 중간가 변화의 기대값. 세 확률과 함께 낸다.",
+            "틱",
+            "봉 마감에 낸다.",
+        )
+    },
+)
+
+# Every kind the engine predicts, in registration order: the direction first. A kind added
+# here (#180 range, #183 barrier) runs after it, and its algorithms after the direction's.
+KINDS: tuple[Kind, ...] = register_kinds([DIRECTION_KIND])
+
+
+def kind_named(name: str, kinds: Sequence[Kind] = KINDS) -> Kind | None:
+    return next((k for k in kinds if k.name == name), None)

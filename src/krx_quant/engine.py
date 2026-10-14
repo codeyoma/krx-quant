@@ -60,6 +60,18 @@ the last four minutes' direction is the label of the touch window that just ende
 from the Market View (not predicted, ``no_previous``, when it could not be scored), the
 random one draws in the day's touch labels' proportions, and the climate baseline calls
 its table's direction (``climate.py``), a model the morning swap installs.
+
+Beside the direction the engine predicts the other kinds registered (#179, ``kinds.py``),
+each at the same bar closes from the same Market View: a kind's baselines predict every
+symbol at once, once the algorithms have started, and its algorithms run with the
+direction's, in the same worker threads, under the same time limit and CPU budget,
+registered after them (the budget skips them first). A kind's predictions go to
+``kind_predictions``; at t + 4 minutes each window's answer, by the kind's answer function
+on the quotes the touch label reads, goes to ``kind_answers`` (special when a VI, circuit
+breaker or sidecar known at its bar close, or learned since, touches it) and scores every
+predictor of the kind there. The kinds have no consensus and no signals. Each daily review also
+judges each kind's algorithms against that kind's baselines, within the kind. A kind that
+fails (its answer function, a baseline) is logged and never holds up the direction.
 """
 
 from __future__ import annotations
@@ -69,13 +81,23 @@ import heapq
 import logging
 import math
 import time as timer
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta
 from functools import partial
-from typing import Any
+from typing import Any, TypeVar
 
-from krx_quant.algorithms import ALGORITHMS, Abstention, Algorithm, Model, NotPredicted, register
+from krx_quant.algorithms import (
+    ALGORITHMS,
+    KIND_ALGORITHMS,
+    Abstention,
+    Algorithm,
+    KindAlgorithm,
+    Model,
+    NotPredicted,
+    register,
+    register_kind_algorithms,
+)
 from krx_quant.algorithms.forecasts import forecasting
 from krx_quant.baselines import NO_PREVIOUS, Baseline, Forecast, Inputs, baselines_for
 from krx_quant.climate import CLIMATE
@@ -105,7 +127,11 @@ from krx_quant.feeds import (
     VI_STATUS,
 )
 from krx_quant.feeds.base import KST, LEVELS
-from krx_quant.lifecycle import RESTARTED, Rules, Stage, Standing, Status, review
+from krx_quant.kind_stats import kind_scoring
+from krx_quant.kinds import DIRECTION, DIRECTION_KIND, KINDS, KindForecast, KindInputs
+from krx_quant.kinds import NO_PREVIOUS as KIND_NO_PREVIOUS
+from krx_quant.kinds import Kind as PredictionKind
+from krx_quant.lifecycle import RESTARTED, Review, Rules, Stage, Standing, Status, review
 from krx_quant.lifecycle import stages as stages_now
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.market_view import (
@@ -116,7 +142,7 @@ from krx_quant.market_view import (
     MarketView,
     next_bar_close,
 )
-from krx_quant.predictions import NewPrediction, Pending, PredictionStore, Score
+from krx_quant.predictions import NewKindPrediction, NewPrediction, Pending, PredictionStore, Score
 from krx_quant.pricing import Direction, classify, flat_ticks, most_likely, tick_size
 from krx_quant.reference import Bar
 from krx_quant.signals import SENT, Blocked, Judged, Signals
@@ -127,6 +153,7 @@ from krx_quant.touch import TARGET_VERSION
 log = logging.getLogger(__name__)
 
 Event = tuple[str, dict[str, Any]]  # (feed TR ID, normalized row)
+_F = TypeVar("_F")  # a forecast: the direction's or another kind's (#179)
 Notify = Callable[[str], Awaitable[bool]]  # send an alert; whether it went
 
 
@@ -145,12 +172,33 @@ class OutcomesScored:
     ids: list[int]  # their predictions'
 
 
-Listener = Callable[[PredictionsStored | OutcomesScored], None]  # told of each, as it happens (the stream)
+@dataclass(frozen=True)
+class KindPredictionsStored:
+    """Predictions of a kind besides the direction just stored (#179): displayed now."""
+
+    kind: str
+    bar_close: datetime
+    ids: Mapping[str, list[int]]  # by predictor
+
+
+@dataclass(frozen=True)
+class KindAnswered:
+    """A kind's answers just stored (#179), by (symbol, bar close): what its predictions there
+    are scored on."""
+
+    kind: str
+    keys: list[tuple[str, datetime]]
+
+
+Change = PredictionsStored | OutcomesScored | KindPredictionsStored | KindAnswered
+Listener = Callable[[Change], None]  # told of each, as it happens (the stream)
 # A day's macro regime as decided before a time (the day's open); None unknown.
 Regimes = Callable[[date, datetime], str | None]
 
 # Each day's algorithm review runs this long after the close, when everything is scored.
 REVIEW_AFTER_CLOSE = timedelta(minutes=10)
+# How far back a starting engine looks for a kind's predictions left without their answer.
+_KIND_PENDING = timedelta(days=7)
 # Days with predictions a review reads back over: the longest rule counts 60 on the bench,
 # and a status can be older than that.
 _REVIEW_DAYS = MAX_REVIEW_DAY  # prediction days a review reads back
@@ -277,11 +325,13 @@ class PredictionEngine:
         leaders: Leaders | None = None,
         signals: Signals | None = None,
         regimes: Regimes | None = None,
-        admits: Callable[[Algorithm], bool] | None = None,
+        admits: Callable[[Algorithm | KindAlgorithm], bool] | None = None,
         commit: str = "unknown",
         review_rules: Rules | None = None,
         target_version: int = 1,
         climate: Model | None = None,
+        kinds: Sequence[PredictionKind] = KINDS,
+        kind_algorithms: Sequence[KindAlgorithm] = KIND_ALGORITHMS,
     ) -> None:
         self.store = store
         self.commit = commit  # the code it runs (the deploy's KRX_COMMIT)
@@ -297,10 +347,29 @@ class PredictionEngine:
         self.baselines: tuple[Baseline, ...] = baselines_for(target_version)
         self.baseline_names = frozenset(b.name for b in self.baselines)
         self.climate = climate or NO_CLIMATE  # the climate baseline's table (target version 2)
+        # The kinds predicted besides the direction (#179), in order, and their algorithms.
+        self.kinds: tuple[PredictionKind, ...] = tuple(k for k in kinds if k.name != DIRECTION)
+        clash = {b.name for k in self.kinds for b in k.baselines} & (
+            {a.name for a in self.registered} | self.baseline_names | set(NAMES)
+        )
+        if clash:
+            raise ValueError(
+                f"kind baselines named like the direction's predictors: {', '.join(sorted(clash))}"
+            )
+        self.kind_registered = register_kind_algorithms(
+            kind_algorithms,
+            (DIRECTION_KIND, *self.kinds),
+            taken={a.name for a in self.registered}
+            | self.baseline_names
+            | set(NAMES)
+            | {b.name for k in self.kinds for b in k.baselines},
+        )
         given = models or {}
-        self.models = {a.name: given.get(a.name) or a.default_model() for a in self.registered}
+        everyone: list[Algorithm | KindAlgorithm] = [*self.registered, *self.kind_registered]
+        self.models = {a.name: given.get(a.name) or a.default_model() for a in everyone}
         self._admits = admits  # without: every registered algorithm runs (replay, tests)
         self.algorithms: tuple[Algorithm, ...] = ()  # the registered ones that run, in order
+        self.kind_algorithms: tuple[KindAlgorithm, ...] = ()  # likewise, of the other kinds
         self._feature_names: list[str] = []
         self._told_waiting: set[str] = set()  # waiting algorithms already alerted
         self._budget = budget or Budget()
@@ -310,11 +379,21 @@ class PredictionEngine:
         self._special = SpecialSituations(calendar)
         self.leaders = leaders or Leaders()
         self._last_tick = clock.now()
-        self._market = MarketView(calendar, symbols, self.leaders, self._last_tick, self.fee_rate)
+        self._market = MarketView(
+            calendar, symbols, self.leaders, self._last_tick, self.fee_rate, kinds=self.kinds
+        )
         # Outcomes waiting for their target time: (target_at, prediction_id, pending).
         self._pending: list[tuple[datetime, int, Pending]] = []
         for p in store.pending():
             heapq.heappush(self._pending, (p.target_at, p.prediction_id, p))
+        # The kinds' predictions made before a restart without their answer (#179): (target
+        # time, kind, symbol, bar close). Their windows were not followed through: answered
+        # so (``restarted``) at their target time, as the touch labels are.
+        self._kind_pending: list[tuple[datetime, str, str, datetime]] = []
+        if self.kinds:
+            versions = {k.name: k.answer_version for k in self.kinds}
+            for kind, symbol, bar_close in store.kind_unanswered(versions, self._last_tick - _KIND_PENDING):
+                heapq.heappush(self._kind_pending, (bar_close + HORIZON, kind, symbol, bar_close))
         self.min_sample = min_sample
         self.consensus_timing = consensus_timing or Timing()
         self.weights: Weights = store.latest_weights() or NO_WEIGHTS
@@ -357,17 +436,35 @@ class PredictionEngine:
         probation."""
         known = self.store.statuses()
         admitted = [a for a in self.registered if a.name in known or self._admits is None or self._admits(a)]
-        if tuple(admitted) == self.algorithms:
+        kind_admitted = [
+            a for a in self.kind_registered if a.name in known or self._admits is None or self._admits(a)
+        ]
+        if tuple(admitted) == self.algorithms and tuple(kind_admitted) == self.kind_algorithms:
             return
-        for a in admitted:
+        running: list[Algorithm | KindAlgorithm] = [*admitted, *kind_admitted]
+        for a in running:
             if a.name not in known:
                 self.store.add_status(a.name, self.clock.now(), None, Status.PROBATION, "registered")
         self.algorithms = tuple(admitted)
-        self._feature_names = sorted({f for a in self.algorithms for f in a.features})
+        self.kind_algorithms = tuple(kind_admitted)
+        self._feature_names = sorted({f for a in running for f in a.features})
 
     def waiting(self) -> list[str]:
         """The registered algorithms not run yet: their pre-validation has not passed."""
-        return [a.name for a in self.registered if a not in self.algorithms]
+        return [a.name for a in self.registered if a not in self.algorithms] + [
+            a.name for a in self.kind_registered if a not in self.kind_algorithms
+        ]
+
+    def kind_named(self, name: str) -> PredictionKind | None:
+        """A kind the engine predicts, the direction included (#179)."""
+        return DIRECTION_KIND if name == DIRECTION else next((k for k in self.kinds if k.name == name), None)
+
+    def kind_of_algorithm(self, name: str) -> PredictionKind | None:
+        """The kind a registered algorithm predicts; None for a name not registered."""
+        if any(a.name == name for a in self.registered):
+            return DIRECTION_KIND
+        found = next((a for a in self.kind_registered if a.name == name), None)
+        return None if found is None else self.kind_named(found.kind)
 
     def on_event(self, feed: str, row: dict[str, Any]) -> None:
         self._market.on_event(feed, row)
@@ -387,6 +484,8 @@ class PredictionEngine:
         ]
         if self._pending:
             candidates.append(self._pending[0][0])
+        if self._kind_pending:
+            candidates.append(self._kind_pending[0][0])
         due = [c for c in candidates if c is not None]
         return min(due) if due else None
 
@@ -424,13 +523,13 @@ class PredictionEngine:
         changed = False
         for name, model in models.items():
             if name in self.models and self.models[name] != model:
-                if self._on_target(self.models[name]) and not self._on_target(model):
+                if self._on_target(self.models[name], name) and not self._on_target(model, name):
                     log.warning(
                         "%s keeps %s: %s was not trained on target %d",
                         name,
                         self.models[name].version,
                         model.version,
-                        self.target_version,
+                        self._target_of(name),
                     )
                     continue
                 log.info("%s now runs %s", name, model.version)
@@ -449,17 +548,24 @@ class PredictionEngine:
         active = _with_status(self.store.statuses(), Status.ACTIVE)
         return [a.name for a in self.algorithms if a.name in active and self._on_target(self.models[a.name])]
 
-    def _on_target(self, model: Model) -> bool:
-        """Whether ``model`` was trained on the target the engine scores (before #170 any is)."""
-        return self.target_version < 2 or (model.target_version or 1) == self.target_version
+    def _on_target(self, model: Model, name: str | None = None) -> bool:
+        """Whether ``model`` was trained on the target the engine scores (before #170 any is);
+        of a kind's algorithm ``name``, on the kind's answer version (#179), likewise."""
+        target = self._target_of(name)
+        return target < 2 or (model.target_version or 1) == target
+
+    def _target_of(self, name: str | None) -> int:
+        """The target the models of algorithm ``name`` learn: a kind's answer version, else the
+        engine's target version."""
+        kind = None if name is None else self.kind_of_algorithm(name)
+        return self.target_version if kind is None or kind is DIRECTION_KIND else kind.answer_version
 
     def cpu_use(self) -> CpuUse:
         """The CPU budget now: the algorithms that run, as timed so far, and today's skips."""
         retired = _with_status(self.store.statuses(), Status.RETIRED)
+        running: list[Algorithm | KindAlgorithm] = [*self.algorithms, *self.kind_algorithms]
         expected = {
-            a.name: self._cost[a.name]
-            for a in self.algorithms
-            if a.name in self._cost and a.name not in retired
+            a.name: self._cost[a.name] for a in running if a.name in self._cost and a.name not in retired
         }
         midnight = _start_of(self.clock.now().astimezone(KST).date())
         return CpuUse(self._budget, expected, self.store.count_runs("cpu_budget", midnight))
@@ -504,6 +610,26 @@ class PredictionEngine:
             rules=self.review_rules,
             baselines=self.baseline_names,
         )
+        # Each kind's algorithms, within the kind, against its baselines (#179).
+        for kind in self.kinds:
+            of_kind = [a.name for a in self.kind_algorithms if a.kind == kind.name]
+            if not of_kind:
+                continue
+            judged = await asyncio.to_thread(
+                review,
+                of_kind,
+                standings,
+                {a: self._kind_counted_from(kind, a, standings[a]) for a in of_kind if a in standings},
+                self.store.kind_prediction_days(kind.name, at.astimezone(KST).date(), _REVIEW_DAYS),
+                partial(self._kind_rows, kind),
+                min_sample=self.min_sample,
+                fee_rate=self.fee_rate,
+                alerted=alerted,
+                rules=self.review_rules,
+                baselines=frozenset(b.name for b in kind.baselines),
+                scoring=kind_scoring(kind),
+            )
+            result = Review(result.changes + judged.changes, result.candidates + judged.candidates)
         for c in result.changes:
             # Only from the status reviewed: a retire command may have landed meanwhile.
             if self.store.change_status(c.algorithm, at, c.previous, c.status, c.reason):
@@ -543,6 +669,8 @@ class PredictionEngine:
         if self.store.count_runs("budget_report", midnight, until=next_day):
             return
         timed_out = self.store.timeouts_by_algorithm(midnight, next_day)
+        if self.kinds:  # the kinds' algorithms too (#179), after the direction's
+            timed_out = {**timed_out, **self.store.kind_timeouts_by_algorithm(midnight, next_day)}
         skipped = self.store.runs_by_algorithm("cpu_budget", midnight, next_day)
         if not timed_out and not skipped:
             return
@@ -592,6 +720,20 @@ class PredictionEngine:
         started = self.store.first_on_target(name, standing.since, TARGET_VERSION)
         return None if started is None else max(first, started.astimezone(KST).date())
 
+    def _kind_counted_from(self, kind: PredictionKind, name: str, standing: Standing) -> date | None:
+        """``_counted_from`` of a kind's algorithm (#179): on probation or as a clone, from the
+        first trading day it predicted with a model trained on the kind's answers (its answer
+        version); its defaults' days are not counted, as a new direction algorithm's are not."""
+        first = self._first_counted(standing.since)
+        if standing.status not in (Status.PROBATION, Status.CLONE):
+            return first
+        started = self.store.first_kind_on_target(name, standing.since, kind.answer_version)
+        return None if started is None else max(first, started.astimezone(KST).date())
+
+    def _kind_rows(self, kind: PredictionKind, chosen: Sequence[date], special: bool) -> list[dict[str, Any]]:
+        """``kind``'s scored predictions made on ``chosen`` days, as the lifecycle reads them."""
+        return self.store.kind_scored(kind.name, kind.answer_version, chosen, None, special)
+
     async def stages(self) -> dict[str, Stage]:
         """Where each algorithm on probation or on the bench stands toward its next review
         (#165, ``lifecycle.stages``), as of the latest review: the days counted as the review
@@ -620,6 +762,28 @@ class PredictionEngine:
             rules=self.review_rules,
             baselines=self.baseline_names,  # the target's set, as the review judges by (#169)
         )
+        for kind in self.kinds:  # each kind's algorithms, as its review judges them (#179)
+            names = [a.name for a in self.kind_algorithms if a.kind == kind.name]
+            if not names:
+                continue
+            kind_days = self.store.kind_prediction_days(kind.name, today, _REVIEW_DAYS)
+            found |= await asyncio.to_thread(
+                stages_now,
+                names,
+                standings,
+                {
+                    name: self._kind_counted_from(kind, name, standings[name])
+                    for name in names
+                    if name in standings
+                },
+                [d for d in kind_days if next_day is None or d < next_day],
+                partial(self._kind_rows, kind),
+                min_sample=self.min_sample,
+                fee_rate=self.fee_rate,
+                rules=self.review_rules,
+                baselines=frozenset(b.name for b in kind.baselines),
+                scoring=kind_scoring(kind),
+            )
         dated = {name: replace(s, next_review_on=self._review_on(next_day, s)) for name, s in found.items()}
         self._stages = (key, dated)
         return dated
@@ -652,6 +816,7 @@ class PredictionEngine:
         standings = self.store.statuses()  # read each time: retiring is a command
         retired, active = _with_status(standings, Status.RETIRED), _with_status(standings, Status.ACTIVE)
         running = [a for a in self.algorithms if a.name not in retired]
+        kind_running = [a for a in self.kind_algorithms if a.name not in retired]
         members = [a.name for a in running if a.name in active]
         known = self._special.known(before=bar_close)
         regime = self._regime(bar_close)
@@ -695,11 +860,25 @@ class PredictionEngine:
             [(name, version, made, status) for (name, version, status), made in made_by.items()],
         )
         if not at_close:
+            self._predict_kinds(bar_close, at_close, stopped, kind_running)
             return
-        chosen = self._within_cpu_budget(bar_close, running)
-        runs = {a.name: asyncio.ensure_future(self._run(a, bar_close, at_close)) for a in chosen}
+        # The kinds' algorithms after the direction's: the budget skips them first (#179).
+        chosen = {a.name for a in self._within_cpu_budget(bar_close, [*running, *kind_running])}
+        runs = {
+            a.name: asyncio.ensure_future(self._run(a, bar_close, at_close))
+            for a in running
+            if a.name in chosen
+        }
+        kind_runs = [
+            asyncio.ensure_future(self._run_kind(a, bar_close, at_close))
+            for a in kind_running
+            if a.name in chosen
+        ]
         mine = [runs[m] for m in members if m in runs]
         try:
+            if self.kinds:
+                await asyncio.sleep(0)  # the algorithms start first: the kinds' baselines never hold them up
+                self._predict_kinds(bar_close, at_close, stopped, kind_running)
             # The fast consensus: the members done within a moment of starting.
             if mine:
                 await asyncio.wait(mine, timeout=self.consensus_timing.fast_seconds)
@@ -708,11 +887,84 @@ class PredictionEngine:
             if mine:
                 await asyncio.wait(mine)
             self._record_consensus(FINAL, bar_close, at_close, members, _finished(mine))
-            await asyncio.gather(*runs.values(), return_exceptions=True)
+            await asyncio.gather(*runs.values(), *kind_runs, return_exceptions=True)
         except BaseException:
-            for task in runs.values():  # shutting down: none may write after the store closes
+            for task in [*runs.values(), *kind_runs]:  # shutting down: none may write after the store closes
                 task.cancel()
             raise
+
+    def _predict_kinds(
+        self,
+        bar_close: datetime,
+        at_close: Mapping[str, _AtClose],
+        stopped: Sequence[str],
+        running: Sequence[KindAlgorithm],
+    ) -> None:
+        """Each kind's baselines' predictions of every symbol, at once, and every predictor's
+        empty prediction of the symbols in a VI (#179). A kind that fails is logged: the other
+        kinds and the direction go on."""
+        day_start = datetime.combine(bar_close.date(), time(), KST)
+        for kind in self.kinds:
+            try:
+                made_by: dict[tuple[str, str, str], dict[str, KindForecast | None]] = {}
+                for symbol, c in at_close.items():
+                    previous = self._market.kind_answer(kind, symbol, bar_close - HORIZON)
+                    inputs = KindInputs(
+                        symbol=symbol,
+                        bar_close=bar_close,
+                        mid=c.mid,
+                        tick=tick_size(c.mid) if c.mid is not None else None,
+                        flat_ticks=flat_ticks(c.mid, self.fee_rate) if c.mid is not None else None,
+                        previous=previous if previous.label is not None else None,
+                        # The windows over by now: their bar closes four minutes back or more.
+                        day_classes=self.store.day_kind_classes(
+                            kind.name, kind.answer_version, symbol, day_start, bar_close - HORIZON
+                        ),
+                    )
+                    for b in kind.baselines:
+                        forecast = b.predict(inputs)
+                        if forecast is not None and (why := kind.invalid(forecast)) is not None:
+                            raise ValueError(f"{b.name} at {bar_close}: {why}")
+                        status = "ok" if forecast is not None else KIND_NO_PREVIOUS
+                        made_by.setdefault((b.name, b.version, status), {})[symbol] = forecast
+                made = [(name, version, f, status) for (name, version, status), f in made_by.items()]
+                if stopped:
+                    nothing: dict[str, KindForecast | None] = dict.fromkeys(stopped)
+                    made += [(b.name, b.version, nothing, "vi") for b in kind.baselines]
+                    made += [
+                        (a.name, self.models[a.name].version, nothing, "vi")
+                        for a in running
+                        if a.kind == kind.name
+                    ]
+                self._record_kind(kind, bar_close, made)
+            except Exception:
+                log.exception("%s: its baselines failed at %s", kind.name, bar_close)
+
+    def _record_kind(
+        self,
+        kind: PredictionKind,
+        bar_close: datetime,
+        made: Sequence[tuple[str, str, Mapping[str, KindForecast | None], str]],
+    ) -> None:
+        """Store a kind's (name, model version, forecasts by symbol, status) entries as
+        displayed now (#179)."""
+        displayed_at = self.clock.now()
+        predictions = [
+            NewKindPrediction(
+                symbol=symbol,
+                algorithm=name,
+                model_version=version,
+                bar_close=bar_close,
+                displayed_at=displayed_at,
+                output=None if forecast is None else kind.output(forecast),
+                status=status,
+            )
+            for name, version, forecasts, status in made
+            for symbol, forecast in forecasts.items()
+        ]
+        if predictions:
+            ids = self.store.add_kind_predictions(kind.name, predictions)
+            self._tell(KindPredictionsStored(kind.name, bar_close, ids))
 
     def _regime(self, bar_close: datetime) -> str | None:
         """The day's macro regime, read once a day. A day without one, or with one this
@@ -833,7 +1085,9 @@ class PredictionEngine:
         """The version a baseline's predictions carry: the climate table's for the climate."""
         return self.climate.version if baseline.name == CLIMATE else baseline.version
 
-    def _within_cpu_budget(self, bar_close: datetime, running: Sequence[Algorithm]) -> list[Algorithm]:
+    def _within_cpu_budget(
+        self, bar_close: datetime, running: Sequence[Algorithm | KindAlgorithm]
+    ) -> list[Algorithm | KindAlgorithm]:
         """The algorithms to run: the last registered drop out while the expected work is over budget."""
         chosen = list(running)
         while chosen and sum(self._cost.get(a.name, 0.0) for a in chosen) > self._budget.cpu:
@@ -851,13 +1105,42 @@ class PredictionEngine:
     ) -> tuple[str, Mapping[str, Forecast | None]]:
         """Run and record one algorithm; its name and forecasts (none unless it finished)."""
         name, model = algorithm.name, self.models[algorithm.name]
-        made: Mapping[str, Forecast | None] = dict.fromkeys(at_close)  # nothing, unless it finishes
+        vectors = {s: FeatureVector(c.features, algorithm.features, c.touch) for s, c in at_close.items()}
+        made, declined, status = await self._timed(
+            name, bar_close, at_close, partial(_predict_symbols, algorithm, model, vectors)
+        )
+        self._record(bar_close, at_close, _entries(name, model.version, made, declined, status))
+        return name, made
+
+    async def _run_kind(
+        self, algorithm: KindAlgorithm, bar_close: datetime, at_close: Mapping[str, _AtClose]
+    ) -> None:
+        """Run and record one algorithm of a kind besides the direction (#179), as ``_run``."""
+        kind = self.kind_named(algorithm.kind)
+        assert kind is not None  # registered with its kind
+        name, model = algorithm.name, self.models[algorithm.name]
+        vectors = {s: FeatureVector(c.features, algorithm.features) for s, c in at_close.items()}
+        made, declined, status = await self._timed(
+            name, bar_close, at_close, partial(_predict_kind_symbols, kind, algorithm, model, vectors)
+        )
+        self._record_kind(kind, bar_close, _entries(name, model.version, made, declined, status))
+
+    async def _timed(
+        self,
+        name: str,
+        bar_close: datetime,
+        symbols: Iterable[str],
+        predict: Callable[[], tuple[Mapping[str, _F], Mapping[str, Abstention]]],
+    ) -> tuple[Mapping[str, _F | None], Mapping[str, Abstention], str]:
+        """Run one algorithm's ``predict`` in a worker thread within its time budget, timing it:
+        its forecasts by symbol (none unless it finished), the symbols it declined and why, and
+        its status (``ok``, ``timed_out``, ``error``)."""
+        made: Mapping[str, _F | None] = dict.fromkeys(symbols)  # nothing, unless it finishes
         status = "timed_out"
-        declined: dict[str, Abstention] = {}
+        declined: Mapping[str, Abstention] = {}
         if name not in self._busy:
-            vectors = {s: FeatureVector(c.features, algorithm.features, c.touch) for s, c in at_close.items()}
             started = timer.perf_counter()
-            work = asyncio.ensure_future(asyncio.to_thread(_predict_symbols, algorithm, model, vectors))
+            work = asyncio.ensure_future(asyncio.to_thread(predict))
             done, _ = await asyncio.wait({work}, timeout=self._budget.per_algorithm)
             if not done:
                 log.warning("%s took over %ss at %s; skipped", name, self._budget.per_algorithm, bar_close)
@@ -874,15 +1157,9 @@ class PredictionEngine:
                 self._cost[name] = (
                     elapsed if previous is None else (1 - _COST_WEIGHT) * previous + _COST_WEIGHT * elapsed
                 )
-        entries = [(name, model.version, made, status)] if made else []
-        for why in dict.fromkeys(declined.values()):  # each reason once, in the order met
-            entries.append(
-                (name, model.version, {s: None for s, w in declined.items() if w is why}, why.value)
-            )
-        self._record(bar_close, at_close, entries)
-        return name, made
+        return made, declined, status
 
-    def _finished_late(self, name: str, work: asyncio.Future[_Predicted]) -> None:
+    def _finished_late(self, name: str, work: asyncio.Future[Any]) -> None:
         self._busy.discard(name)
         if not work.cancelled() and work.exception() is not None:
             log.error("%s failed after its budget: %r", name, work.exception())
@@ -951,8 +1228,50 @@ class PredictionEngine:
         if scores:
             self.store.score_all(scores, now)
             self._tell(OutcomesScored([prediction_id for prediction_id, _ in scores]))
+        if self.kinds:
+            self._answer_kinds(due, list(windows), now)
 
-    def _tell(self, change: PredictionsStored | OutcomesScored) -> None:
+    def _answer_kinds(self, due: datetime, windows: Sequence[tuple[str, datetime]], now: datetime) -> None:
+        """Each kind's answer of every window over (#179), as the touch labels are, and of the
+        kind's predictions made before a restart (``restarted``): stored once, and told. A
+        window is special as a prediction made at its bar close would be: a VI, circuit
+        breaker or sidecar known then, or learned since in any version, touches it (as
+        training leaves such a bar close out); one learned later marks it then
+        (``PredictionStore.mark_special``). A kind that fails is logged."""
+        by_kind: dict[str, dict[tuple[str, datetime], None]] = {
+            k.name: dict.fromkeys(windows) for k in self.kinds
+        }
+        while self._kind_pending and self._kind_pending[0][0] <= due:
+            _, kind_name, symbol, close = heapq.heappop(self._kind_pending)
+            if kind_name in by_kind:
+                by_kind[kind_name][(symbol, close)] = None
+        special: dict[tuple[str, datetime], bool] = {}
+
+        def touched(symbol: str, close: datetime) -> bool:
+            if (symbol, close) not in special:
+                end = close + HORIZON
+                special[(symbol, close)] = touching(
+                    self._special.known(before=close), symbol, close, end
+                ) or touching(self._special.learned_since(close), symbol, close, end)
+            return special[(symbol, close)]
+
+        for kind in self.kinds:
+            keys = list(by_kind[kind.name])
+            if not keys:
+                continue
+            try:
+                answers = [
+                    (symbol, close, self._market.kind_answer(kind, symbol, close), touched(symbol, close))
+                    for symbol, close in keys
+                ]
+                written = self.store.add_kind_answers(kind.name, kind.answer_version, answers, now)
+            except Exception:
+                log.exception("%s: its answers failed at %s", kind.name, due)
+                continue
+            if written:
+                self._tell(KindAnswered(kind.name, written))
+
+    def _tell(self, change: Change) -> None:
         for listener in self.listeners:
             try:
                 listener(change)
@@ -1003,6 +1322,42 @@ def _predict_symbols(algorithm: Algorithm, model: Model, vectors: Mapping[str, F
             raise ValueError(f"{algorithm.name} expected {f.expected_ticks} ticks for {symbol}")
         forecasts[symbol] = f
     return forecasts, declined
+
+
+def _predict_kind_symbols(
+    kind: PredictionKind, algorithm: KindAlgorithm, model: Model, vectors: Mapping[str, FeatureVector]
+) -> tuple[dict[str, KindForecast], dict[str, Abstention]]:
+    """Runs in a worker thread: one algorithm of a kind on every symbol, each forecast checked
+    against the kind's contract (``Kind.invalid``)."""
+    forecasts: dict[str, KindForecast] = {}
+    declined: dict[str, Abstention] = {}
+    for symbol, features in vectors.items():
+        try:
+            f = algorithm.predict(features, model)
+        except NotPredicted as e:
+            declined[symbol] = e.why
+            continue
+        why = kind.invalid(f)
+        if why is not None:
+            raise ValueError(f"{algorithm.name} for {symbol}: {why}")
+        forecasts[symbol] = f
+    return forecasts, declined
+
+
+def _entries(
+    name: str,
+    version: str,
+    made: Mapping[str, _F | None],
+    declined: Mapping[str, Abstention],
+    status: str,
+) -> list[tuple[str, str, Mapping[str, _F | None], str]]:
+    """An algorithm's run as (name, model version, forecasts by symbol, status) entries to
+    record: what it made (or not, with its status), then the symbols it declined, by reason."""
+    entries = [(name, version, made, status)] if made else []
+    for why in dict.fromkeys(declined.values()):  # each reason once, in the order met
+        nothing: dict[str, _F | None] = {s: None for s, w in declined.items() if w is why}
+        entries.append((name, version, nothing, why.value))
+    return entries
 
 
 def _score(p: Pending, mid_target: float | None) -> Score:

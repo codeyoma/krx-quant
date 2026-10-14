@@ -26,7 +26,13 @@ ROUTES = {
     "/v1/consensus": "consensus",
     "/v1/macro": "macro",
     "/v1/calendar": "calendar",
+    # The kinds besides the direction (#179).
+    "/v1/kinds": "kinds",
+    "/v1/symbols/{symbol}/kinds/{kind}/latest": "kind_latest",
+    "/v1/symbols/{symbol}/kinds/{kind}/predictions": "kind_predictions",
 }
+# The routes of a kind besides the direction: answered only by an engine predicting one.
+KIND_ROUTES = {"kind_latest", "kind_predictions"}
 # The WebSocket route and the definition of each of its messages.
 STREAM = {"/v1/stream": "event"}
 

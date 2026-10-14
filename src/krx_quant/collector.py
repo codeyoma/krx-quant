@@ -16,7 +16,7 @@ import aiohttp
 from aiohttp import web
 
 from krx_quant import kis
-from krx_quant.algorithms import ALGORITHMS, load_models
+from krx_quant.algorithms import ALGORITHMS, KIND_ALGORITHMS, load_models
 from krx_quant.api import create_app
 from krx_quant.archive import NIGHTLY_ARCHIVE, archive
 from krx_quant.auth import TokenManager, tokens_and_client
@@ -208,7 +208,7 @@ async def run_collector(
         settings.symbols,
         settings.fee_rate,
         session_clock,
-        models=load_models(settings.state_dir, ALGORITHMS),
+        models=load_models(settings.state_dir, [*ALGORITHMS, *KIND_ALGORITHMS]),
         budget=Budget.of(settings),
         min_sample=settings.min_sample,
         leaders=Leaders.of(settings),
