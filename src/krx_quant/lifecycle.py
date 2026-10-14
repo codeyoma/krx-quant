@@ -26,6 +26,9 @@ the stats' 95% (98.3% by default), so that the three looks together let a lift o
 through no more often than one look at 95% did. A trading day counts when
 the engine predicted on it, from the first day reviewed after the status began: a status
 set after a day's review starts counting the next day.
+
+Where an algorithm on probation or on the bench stands toward its next review (``stages``,
+#165) is counted and judged by the same code, on the days reviewed so far.
 """
 
 from __future__ import annotations
@@ -38,6 +41,7 @@ from datetime import date, datetime
 from typing import TYPE_CHECKING, Any
 
 from krx_quant.baselines import BASELINE_NAMES
+from krx_quant.feeds.base import kst_day
 from krx_quant.stats import MIN_PAIRS_TESTED, Entry, Lift, enough, entry, scored_by_algorithm, split
 
 if TYPE_CHECKING:
@@ -220,9 +224,13 @@ class _Judge:
     def _judged(self, name: str, days: Sequence[date]) -> Entry | None:
         """``name``'s stats against the baselines on ``days``, if there are enough to judge by;
         its lifts by trading day at the rules' level."""
-        algorithms, baselines = split(scored_by_algorithm(self.rows(days, False), BASIS), self.baselines)
-        judged = entry(name, algorithms.get(name, []), baselines, self.fee_rate, self.rules.confidence)
+        judged = self.measure(name, days)
         return judged if enough(judged, self.min_sample) else None
+
+    def measure(self, name: str, days: Sequence[date]) -> Entry:
+        """``name``'s stats against the baselines on ``days``, enough to judge by or not."""
+        algorithms, baselines = split(scored_by_algorithm(self.rows(days, False), BASIS), self.baselines)
+        return entry(name, algorithms.get(name, []), baselines, self.fee_rate, self.rules.confidence)
 
     def _passed_by_day(self, name: str, days: Sequence[date]) -> Lift | None:
         """``name``'s weakest lift by trading day on ``days``, if its lower bound is above 0."""
@@ -257,3 +265,88 @@ def correlations(name: str, others: Sequence[str], rows: list[dict[str, Any]]) -
         except statistics.StatisticsError:
             continue  # one side never moves
     return measured
+
+
+@dataclass(frozen=True)
+class Stage:
+    """Where an algorithm on probation or on the bench stands toward the review that may make
+    it active (#165), as of the latest review: what that review counts and judges by."""
+
+    status: Status
+    began: date  # the day its status began
+    counted_from: date  # the first day counted: the next, for a status set after that day's review
+    days: int  # trading days counted, through the latest review
+    review_days: tuple[int, ...]  # the days counted it is judged on (``Rules``)
+    next_review: int | None  # the next of them; None past the last (a retirement candidate)
+    lift_days: int  # the days its lift is taken over: those counted (probation), the latest 20 (bench)
+    level: float  # the two-sided level of the lift-by-day interval (``Rules.confidence``)
+    weakest: tuple[str, Lift] | None  # its weakest lift by trading day there, and which baseline's
+    enough: bool  # whether those days hold enough scored predictions and pairs to decide on
+    # The day the next review falls on if every trading day from the next review on is predicted:
+    # the engine's to tell (it knows the calendar), None here.
+    next_review_on: date | None = None
+
+
+def stages(
+    algorithms: Sequence[str],
+    standings: Mapping[str, Standing],
+    counted_from: Mapping[str, date],
+    days: Sequence[date],
+    rows: Rows,
+    *,
+    min_sample: int,
+    fee_rate: float,
+    rules: Rules | None = None,
+    baselines: Collection[str] = BASELINE_NAMES,
+) -> dict[str, Stage]:
+    """Each algorithm on probation or on the bench, where it stands toward its next review (#165).
+
+    The arguments are ``review``'s, with ``days`` the days reviewed already, latest first: the
+    days are counted as the review counts them, and the weakest lift is taken by trading day
+    on the days the review takes it on, at the rules' level. The next review counts one day
+    more. The scored predictions are read once, for every algorithm.
+    """
+    rules = rules or Rules()
+    recent = list(days[:RECENT_DAYS])
+    on: dict[str, tuple[Standing, list[date], list[date]]] = {}  # standing, days counted, lift days
+    for name in algorithms:
+        standing = standings.get(name)
+        if standing is None or standing.status not in (Status.PROBATION, Status.BENCH):
+            continue
+        held = [d for d in days if d >= counted_from[name]]
+        on[name] = (standing, held, held if standing.status is Status.PROBATION else recent)
+    wanted = sorted({d for _, _, lift_days in on.values() for d in lift_days}, reverse=True)
+    read = rows(wanted, False) if wanted else []
+
+    def rows_on(chosen: Sequence[date], special: bool) -> list[dict[str, Any]]:
+        """``read``'s rows of ``chosen`` (special predictions are not in it)."""
+        keep = {d.isoformat() for d in chosen}
+        return [r for r in read if r["bar_close"][:10] in keep]
+
+    judge = _Judge(rows_on, recent, min_sample, fee_rate, rules, baselines)
+    out: dict[str, Stage] = {}
+    for name, (standing, held, lift_days) in on.items():
+        review_days = rules.probation_days if standing.status is Status.PROBATION else rules.bench_days
+        judged = judge.measure(name, lift_days)
+        out[name] = Stage(
+            standing.status,
+            kst_day(standing.since),
+            counted_from[name],
+            len(held),
+            review_days,
+            next((d for d in review_days if d > len(held)), None),
+            len(lift_days),
+            rules.confidence,
+            _weakest_by_day(judged),
+            enough(judged, min_sample),
+        )
+    return out
+
+
+def _weakest_by_day(judged: Entry) -> tuple[str, Lift] | None:
+    """The weakest lift by trading day (``Entry.weakest_by_day``), and its baseline."""
+    weakest = judged.weakest_by_day
+    for name, tested in judged.lifts.items():
+        if weakest is not None and tested.by_day is weakest:
+            return name, weakest
+    return None

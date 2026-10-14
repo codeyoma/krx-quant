@@ -397,7 +397,8 @@
       "description": "The fields of an algorithm, open so the detail can add to them.",
       "type": "object",
       "required": [
-        "name", "card", "features", "feature_meanings", "training_days", "model", "param_meanings", "status"
+        "name", "card", "features", "feature_meanings", "training_days", "model", "param_meanings", "status",
+        "validation", "stage"
       ],
       "properties": {
         "name": {"type": "string"},
@@ -421,17 +422,148 @@
         "training_days": {"type": "integer", "minimum": 1},
         "model": {
           "type": "object",
-          "required": ["version", "params", "trained", "trained_until"],
+          "required": ["version", "params", "trained", "trained_until", "training"],
           "additionalProperties": false,
           "properties": {
             "version": {"type": "string"},
             "params": {"type": "object", "additionalProperties": {"type": "number"}},
             "trained": {"type": ["string", "null"]},
-            "trained_until": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/day"}]}
+            "trained_until": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/day"}]},
+            "training": {"$ref": "#/$defs/model_training"}
           }
         },
-        "status": {"$ref": "#/$defs/standing"}
+        "status": {"$ref": "#/$defs/standing"},
+        "validation": {"$ref": "#/$defs/night_validation"},
+        "stage": {"$ref": "#/$defs/stage"}
       }
+    },
+    "model_training": {
+      "description": "What the model was trained on, as values (#165): trained's text. null for the defaults and for a model saved before #165.",
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "required": ["first_day", "last_day", "samples", "loss", "days"],
+          "additionalProperties": false,
+          "properties": {
+            "first_day": {"$ref": "#/$defs/day"},
+            "last_day": {"$ref": "#/$defs/day"},
+            "samples": {"type": "integer", "minimum": 1},
+            "loss": {"type": "number", "description": "mean log loss on its own training samples: not comparable with a validation loss"},
+            "days": {
+              "description": "The days trained on by where their labels came from: recorded (mid-points) and bars (one-minute closes). null when the samples did not say.",
+              "oneOf": [
+                {"type": "null"},
+                {
+                  "type": "object",
+                  "required": ["recorded", "bars"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "recorded": {"type": "integer", "minimum": 0},
+                    "bars": {"type": "integer", "minimum": 0}
+                  }
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "night_validation": {
+      "description": "The algorithm's report of the latest night's training (#165), as stored (reports/<day>/<algorithm>.json). null without a night, or without a report for it.",
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "required": ["day", "validation_days", "samples", "challenger", "champion", "promoted", "reason"],
+          "additionalProperties": false,
+          "properties": {
+            "day": {"$ref": "#/$defs/day"},
+            "validation_days": {"type": "array", "items": {"$ref": "#/$defs/day"}},
+            "samples": {"type": ["integer", "null"], "minimum": 0, "description": "validation samples; null where it did not get to validate"},
+            "challenger": {
+              "description": "The new model; null when it was not trained.",
+              "oneOf": [
+                {"type": "null"},
+                {
+                  "type": "object",
+                  "required": ["version", "loss"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "version": {"type": "string"},
+                    "loss": {"type": ["number", "null"]}
+                  }
+                }
+              ]
+            },
+            "champion": {
+              "description": "The model the server ran; null when there was nothing to validate on.",
+              "oneOf": [
+                {"type": "null"},
+                {
+                  "type": "object",
+                  "required": ["version", "loss", "trained_on_validation"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "version": {"type": "string"},
+                    "loss": {"type": ["number", "null"]},
+                    "trained_on_validation": {"type": ["boolean", "null"]}
+                  }
+                }
+              ]
+            },
+            "promoted": {"type": "boolean"},
+            "reason": {"type": "string"}
+          }
+        }
+      ]
+    },
+    "stage": {
+      "description": "Where an algorithm on probation or on the bench stands toward its next review (#165), as of the latest review. null in any other status.",
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "required": [
+            "status", "began", "counted_from", "days", "review_days", "next_review", "next_review_on",
+            "lift_days", "level", "weakest", "enough"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "status": {"enum": ["probation", "bench"]},
+            "began": {"$ref": "#/$defs/day"},
+            "counted_from": {"$ref": "#/$defs/day"},
+            "days": {"type": "integer", "minimum": 0, "description": "trading days counted through the latest review"},
+            "review_days": {"type": "array", "items": {"type": "integer", "minimum": 1}},
+            "next_review": {"type": ["integer", "null"], "minimum": 1, "description": "the next review day, as the day counted; null past the last"},
+            "next_review_on": {
+              "description": "The day it falls on if the engine predicts every trading day.",
+              "oneOf": [{"type": "null"}, {"$ref": "#/$defs/day"}]
+            },
+            "lift_days": {"type": "integer", "minimum": 0},
+            "level": {"type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1},
+            "weakest": {
+              "description": "The weakest lift by trading day over lift_days, at level; null unless every baseline has one (two days or more).",
+              "oneOf": [
+                {"type": "null"},
+                {
+                  "type": "object",
+                  "required": ["baseline", "n", "value", "low", "high"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "baseline": {"type": "string"},
+                    "n": {"type": "integer", "minimum": 2},
+                    "value": {"type": "number"},
+                    "low": {"type": "number"},
+                    "high": {"type": "number"}
+                  }
+                }
+              ]
+            },
+            "enough": {"type": "boolean", "description": "enough scored predictions and pairs over lift_days (min_sample) for the review to decide"}
+          }
+        }
+      ]
     },
     "standing": {
       "type": "object",

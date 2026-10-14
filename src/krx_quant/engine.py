@@ -23,7 +23,8 @@ algorithms done 2 seconds after they started, the final one once they are all do
 After each day's close (+10 minutes) the algorithms' statuses are reviewed by the
 lifecycle rules (``lifecycle.py``), the day's predictions lost to the time and CPU budgets
 are told once, a retired algorithm is no longer run, and the
-consensus weights are refitted.
+consensus weights are refitted. Where each algorithm on probation or on the bench stands
+toward its next review (``stages``, #165) is worked out by the same rules, as of that review.
 
 Live, a new algorithm runs only once ``admits`` lets it (its pre-validation passed,
 ``prevalidation.py``): from the next bar close it starts on probation. Until then it is
@@ -60,7 +61,7 @@ import logging
 import math
 import time as timer
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta
 from functools import partial
 from typing import Any
@@ -95,7 +96,8 @@ from krx_quant.feeds import (
     VI_STATUS,
 )
 from krx_quant.feeds.base import KST, LEVELS
-from krx_quant.lifecycle import Rules, Standing, Status, review
+from krx_quant.lifecycle import Rules, Stage, Standing, Status, review
+from krx_quant.lifecycle import stages as stages_now
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.market_view import (
     FUTURES_SERIES,
@@ -308,6 +310,10 @@ class PredictionEngine:
         self.weights: Weights = store.latest_weights() or NO_WEIGHTS
         self.notify = notify  # where alerts go (Telegram, live)
         self.training: dict[str, Any] | None = None  # the last night's training, as the swap saw it
+        # Each algorithm's report of that night, as stored (``nightly``), by algorithm (#165).
+        self.night_reports: dict[str, dict[str, Any]] = {}
+        # The statuses' stages and what they were computed for (``stages``).
+        self._stages: tuple[Any, dict[str, Stage]] | None = None
         self.listeners: list[Listener] = []
         self.signals = signals  # Telegram signal alerts, off without
         self._signals_resumed = False  # from the signals sent before a restart, at the first final
@@ -526,6 +532,50 @@ class PredictionEngine:
         session = self.calendar.session(day)
         if session is not None and since >= session.close + REVIEW_AFTER_CLOSE:
             return day + timedelta(days=1)
+        return day
+
+    async def stages(self) -> dict[str, Stage]:
+        """Where each algorithm on probation or on the bench stands toward its next review
+        (#165, ``lifecycle.stages``), as of the latest review: the days counted as the review
+        counts them, the weakest lift by trading day it judges by, and the day the next review
+        falls on if the engine predicts every trading day. Read off the event loop, and again
+        only once a review has run or a status changed: the days reviewed do not change.
+        """
+        standings = self.store.statuses()
+        upcoming = self._next_review(self._reviewed_through)
+        next_day = None if upcoming is None else upcoming.astimezone(KST).date()
+        key = (sorted((name, s.status.value, s.since) for name, s in standings.items()), next_day)
+        if self._stages is not None and self._stages[0] == key:
+            return self._stages[1]
+        today = self.clock.now().astimezone(KST).date()
+        days = self.store.prediction_days(today, _REVIEW_DAYS)
+        reviewed = [d for d in days if next_day is None or d < next_day]
+        found = await asyncio.to_thread(
+            stages_now,
+            [a.name for a in self.algorithms],
+            standings,
+            {name: self._first_counted(s.since) for name, s in standings.items()},
+            reviewed,
+            lambda chosen, special: self.store.scored_predictions(chosen, None, special),
+            min_sample=self.min_sample,
+            fee_rate=self.fee_rate,
+            rules=self.review_rules,
+            baselines=self.baseline_names,  # the target's set, as the review judges by (#169)
+        )
+        dated = {name: replace(s, next_review_on=self._review_on(next_day, s)) for name, s in found.items()}
+        self._stages = (key, dated)
+        return dated
+
+    def _review_on(self, next_day: date | None, stage: Stage) -> date | None:
+        """The trading day ``stage``'s next review falls on, counted from ``next_day``, the next
+        daily review's, which counts one day more than the latest; None without either."""
+        if next_day is None or stage.next_review is None:
+            return None
+        day = next_day
+        for _ in range(stage.next_review - stage.days - 1):
+            day += timedelta(days=1)
+            while not self.calendar.is_trading_day(day):
+                day += timedelta(days=1)
         return day
 
     async def _deliver(self, text: str) -> bool:

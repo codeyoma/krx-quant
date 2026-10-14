@@ -14,9 +14,11 @@ Endpoints (all under ``/v1``):
 - ``GET /symbols/{symbol}/candles?period=day|week|month|year&before=T&limit=N``: the last N
   stored candles of the period (default 400, at most 2000) that start before ``T`` (default
   now), oldest first, never the one holding today (``candles``);
-- ``GET /algorithms``: each registered algorithm's card, features, current model and status
-  (probation, active, bench, retired, clone) with its history, the meaning of each feature
-  and model parameter; and the baselines' and the consensus' cards;
+- ``GET /algorithms``: each registered algorithm's card, features, current model (with what
+  it trained on) and status (probation, active, bench, retired, clone) with its history, the
+  meaning of each feature and model parameter, its report of the latest night's training,
+  and, on probation or the bench, where it stands toward its next review (#165); and the
+  baselines' and the consensus' cards;
 - ``GET /algorithms/{name}``: one of them, with the models installed on the server for it;
 - ``GET /leaderboard?symbol=&period=&basis=&special=``: algorithms ranked by the lower
   bound of their weakest lift over the baselines, with their stats;
@@ -42,7 +44,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, time
 from functools import partial
@@ -63,6 +65,7 @@ from krx_quant.econ_calendar import calendar_answer, read_latest
 from krx_quant.engine import PredictionEngine
 from krx_quant.features import FEATURE_MEANINGS
 from krx_quant.feeds.base import KST, Row, kst_day
+from krx_quant.lifecycle import Stage
 from krx_quant.macro import LatestMacro, latest_macro, reading_before
 from krx_quant.model_shelf import Shelf
 from krx_quant.predictions import Excluded, iso
@@ -366,9 +369,10 @@ def _limit_query(request: web.Request, default: int, most: int) -> int:
 
 async def _algorithms(request: web.Request) -> web.Response:
     engine = request.app[ENGINE_KEY]
+    stages = await engine.stages()
     return _json(
         {
-            "algorithms": [_algorithm_json(engine, a) for a in engine.algorithms],
+            "algorithms": [_algorithm_json(engine, a, stages) for a in engine.algorithms],
             "baselines": [{"name": b.name, "card": b.card.as_dict()} for b in engine.baselines],
             "consensus": [
                 {"name": name, "card": card.as_dict()}
@@ -390,10 +394,11 @@ async def _algorithm(request: web.Request) -> web.Response:
         {"at": iso(datetime.fromisoformat(e["at"])), "version": e["version"], "why": e["why"]}
         for e in installed
     ]
-    return _json({**_algorithm_json(engine, algorithm), "model_history": history})
+    stages = await engine.stages()
+    return _json({**_algorithm_json(engine, algorithm, stages), "model_history": history})
 
 
-def _algorithm_json(engine: PredictionEngine, a: Algorithm) -> dict[str, Any]:
+def _algorithm_json(engine: PredictionEngine, a: Algorithm, stages: Mapping[str, Stage]) -> dict[str, Any]:
     return {
         "name": a.name,
         "card": a.card.as_dict(),
@@ -403,6 +408,56 @@ def _algorithm_json(engine: PredictionEngine, a: Algorithm) -> dict[str, Any]:
         "model": engine.models[a.name].as_dict(),
         "param_meanings": {p: m.as_dict() for p, m in a.param_meanings.items()},
         "status": _status_json(engine, a.name),
+        "validation": _validation_json(engine, a.name),
+        "stage": _stage_json(stages.get(a.name)),
+    }
+
+
+def _validation_json(engine: PredictionEngine, name: str) -> dict[str, Any] | None:
+    """``name``'s report of the latest night (#165), its values as stored; None without one."""
+    report = engine.night_reports.get(name)
+    if report is None or engine.training is None:
+        return None
+    champion, challenger = report.get("champion"), report.get("challenger")
+    return {
+        "day": report.get("day", engine.training["day"]),
+        "validation_days": report.get("validation_days", []),
+        "samples": (report.get("samples") or {}).get("validation"),
+        "challenger": None
+        if challenger is None
+        else {"version": challenger["version"], "loss": challenger.get("loss")},
+        "champion": None
+        if champion is None
+        else {
+            "version": champion["version"],
+            "loss": champion.get("loss"),
+            "trained_on_validation": champion.get("trained_on_validation"),
+        },
+        "promoted": report["promoted"],
+        "reason": report["reason"],
+    }
+
+
+def _stage_json(stage: Stage | None) -> dict[str, Any] | None:
+    """Where an algorithm on probation or on the bench stands toward its next review (#165)."""
+    if stage is None:
+        return None
+    weakest = None
+    if stage.weakest is not None:
+        baseline, lift = stage.weakest
+        weakest = {"baseline": baseline, "n": lift.n, "value": lift.value, "low": lift.low, "high": lift.high}
+    return {
+        "status": stage.status.value,
+        "began": stage.began.isoformat(),
+        "counted_from": stage.counted_from.isoformat(),
+        "days": stage.days,
+        "review_days": list(stage.review_days),
+        "next_review": stage.next_review,
+        "next_review_on": None if stage.next_review_on is None else stage.next_review_on.isoformat(),
+        "lift_days": stage.lift_days,
+        "level": stage.level,
+        "weakest": weakest,
+        "enough": stage.enough,
     }
 
 

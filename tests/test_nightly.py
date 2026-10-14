@@ -43,7 +43,8 @@ from krx_quant.recorder import ParquetRecorder
 from krx_quant.swap import morning_swap, publish_live
 from krx_quant.training import training_day
 from tests.algorithm_doubles import FrequencyAlgorithm
-from tests.replay_events import at, book, every, index_tick, trade
+from tests.api_schema import check
+from tests.replay_events import api, at, book, every, get_json, index_tick, trade
 from tests.synthetic_bars import trending
 from tests.test_replay import busy_morning
 from tests.test_replay_cli import record
@@ -412,6 +413,60 @@ async def test_a_promoted_model_runs_from_the_morning_and_defends_the_next_night
     assert read(store_root, f"reports/{NIGHT}/learner.json")["champion"]["version"] == promoted
 
 
+async def test_the_night_s_reports_and_what_the_model_trained_on_come_out_of_the_api_as_they_are(
+    store_root: Path, tmp_path: Path
+) -> None:
+    learner = FrequencyAlgorithm("learner", "velocity")
+    backwards = FrequencyAlgorithm("backwards", "volatility", inverted=True)
+    night(store_root, tmp_path, [learner, backwards])
+    morning = NIGHT + timedelta(days=1)  # a trading day, as the calendar below has it
+    engine = PredictionEngine(
+        PredictionStore(tmp_path / "engine.db"),
+        MarketCalendar(dict.fromkeys([*DAYS, morning], True)),
+        ("005930",),
+        FEE,
+        FakeClock(datetime.combine(morning, time(7), KST)),
+        algorithms=[learner, backwards],
+    )
+    async with api(engine) as client:
+        before = await get_json(client, "/v1/algorithms")
+    assert [a["validation"] for a in before["algorithms"]] == [None, None], "no night read yet"
+
+    store, shelf = LocalObjectStore(store_root), Shelf(tmp_path / "state")
+    await morning_swap(store, shelf, engine, today=morning, at=datetime.combine(morning, time(8), KST))
+    async with api(engine) as client:
+        body = await get_json(client, "/v1/algorithms")
+        detail = await get_json(client, "/v1/algorithms/learner")
+
+    check("algorithms", body)
+    check("algorithm_detail", detail)
+    listed = {a["name"]: a for a in body["algorithms"]}
+    for name in ("learner", "backwards"):
+        report = read(store_root, f"reports/{NIGHT}/{name}.json")
+        assert listed[name]["validation"] == {
+            "day": report["day"],
+            "validation_days": report["validation_days"],
+            "samples": report["samples"]["validation"],
+            "challenger": {"version": report["challenger"]["version"], "loss": report["challenger"]["loss"]},
+            "champion": report["champion"],
+            "promoted": report["promoted"],
+            "reason": report["reason"],
+        }
+    assert detail["validation"] == listed["learner"]["validation"]
+    # The learner's challenger won and runs: what it trained on, as the model file has it.
+    report = read(store_root, f"reports/{NIGHT}/learner.json")
+    stored = read(store_root, f"models/learner/{report['challenger']['version']}.json")
+    assert listed["learner"]["model"]["training"] == stored["training"]
+    assert stored["training"] == {
+        "first_day": report["training_days"][0],
+        "last_day": report["training_days"][-1],
+        "samples": learner.fitted_on[-1],
+        "loss": 0.0,  # the stand-in's
+        "days": {"recorded": 0, "bars": 4},
+    }
+    assert listed["backwards"]["model"]["training"] is None, "its defaults run on"
+
+
 def test_recorded_days_train_on_mid_points_and_the_report_says_which_days(
     store_root: Path, tmp_path: Path
 ) -> None:
@@ -430,6 +485,9 @@ def test_recorded_days_train_on_mid_points_and_the_report_says_which_days(
     # 09:01–09:56 of each recorded morning: the last book, at 09:59:48, counts for a minute.
     assert report["samples"]["validation"] == 3 * 56
     assert "녹화 중간가 4일, 백필 종가 3일" in result.summary()
+    # The challenger counts its training days by where their labels came from (#165).
+    challenger = read(store_root, f"models/learner/{report['challenger']['version']}.json")
+    assert challenger["training"]["days"] == {"recorded": 1, "bars": 3}
 
 
 def test_cached_days_no_night_needs_any_more_are_removed(store_root: Path, tmp_path: Path) -> None:

@@ -80,8 +80,12 @@ class TrainingDay:
     samples: list[Sample]
 
     def of(self, features: Sequence[str]) -> list[Sample]:
-        """The samples with only ``features``, as one algorithm declared them."""
-        return [replace(s, features=FeatureVector(s.features, features)) for s in self.samples]
+        """The samples with only ``features``, as one algorithm declared them, each naming the
+        day's reference price (a fitted model counts its days by it, #165)."""
+        return [
+            replace(s, features=FeatureVector(s.features, features), reference=self.reference)
+            for s in self.samples
+        ]
 
 
 def training_day(
@@ -443,7 +447,7 @@ def fit_algorithm(
         raise FileNotFoundError(
             f"no backfilled bars or recorded trades of {', '.join(settings.symbols)} in {settings.data_dir}"
         )
-    training = [s for found in loaded.values() for s in found.samples]
+    training = [s for found in loaded.values() for s in found.of(algorithm.features)]
     model = algorithm.fit(training)
     Shelf(settings.state_dir).install(name, model, "fit", local)
     return Fitted(

@@ -4,8 +4,9 @@
 server or KIS. It replays the same made-up events every time: three symbols wandering
 from 09:00 to 10:30 on 2026-10-12, KOSPI and KOSPI200 futures ticks, and a VI on one
 symbol. Every registered algorithm is set active, so the consensus has members, the
-last night's training shows as applied, the morning's macro read decided risk_off, Newton
-has a model installed and rolled back, and the KIS status is made up (one feed in a gap).
+last night's training shows as applied (each algorithm with a made-up validation), the
+morning's macro read decided risk_off, Newton has a model installed and rolled back, and
+the KIS status is made up (one feed in a gap).
 The clock stays at 10:30. Every answer is the same each run, except the CPU budget's
 timings, which are measured.
 
@@ -34,6 +35,7 @@ from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, date, datetime, time, timedelta
 from functools import partial
 from pathlib import Path
+from typing import Any
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -65,7 +67,7 @@ from krx_quant.predictions import DB_NAME, PredictionStore, iso
 from krx_quant.recorder import ParquetRecorder
 from krx_quant.regime import RegimeRules
 from krx_quant.replay import replay, replay_into
-from krx_quant.swap import NightStatus
+from krx_quant.swap import NightStatus, reports_by_algorithm
 
 DEMO_DAY = date(2026, 10, 12)
 DEMO_SYMBOLS = ("005930", "000660", "009150")
@@ -287,9 +289,9 @@ async def demo_app(db: Path, pace: float | None = None) -> web.Application:
         until=_at(_END if pace is None else _PACED_FROM),
         regimes=partial(day_regime, data_dir),
     )
-    reports = [{"algorithm": a.name, "promoted": False, "reason": "demo"} for a in ALGORITHMS]
-    night = Night(date(2026, 10, 9), "2026-10-09T21:31:40+09:00", {}, reports)
+    night = Night(date(2026, 10, 9), "2026-10-09T21:31:40+09:00", {}, demo_reports())
     engine.training = NightStatus(night, True, "applied").as_dict()
+    engine.night_reports = reports_by_algorithm(night)
     shelf = demo_shelf(data_dir / "state")
     app = create_app(
         engine, mode="demo", live_status=lambda: demo_kis(engine.clock.now()), data_dir=data_dir, shelf=shelf
@@ -333,6 +335,32 @@ def demo_morning(pace: float | None) -> str:
     if pace is None:
         return f"{DEMO_DAY} {_END:%H:%M}"
     return f"{DEMO_DAY} {_PACED_FROM:%H:%M} to {_END:%H:%M}, a minute every {pace:g} s"
+
+
+def demo_reports() -> list[dict[str, Any]]:
+    """The last night's made-up reports (#165), with what ``/v1/algorithms`` shows of the
+    nightly training's: every algorithm's challenger validated on the three days before and
+    not promoted, so the demo runs its defaults."""
+    reports = []
+    for i, a in enumerate(ALGORITHMS):
+        champion, challenger = 1.0 + i / 100, 1.0 + i / 100 + 0.0021
+        reports.append(
+            {
+                "algorithm": a.name,
+                "day": "2026-10-09",
+                "validation_days": ["2026-10-06", "2026-10-07", "2026-10-08"],
+                "champion": {
+                    "version": f"{a.name}-default",
+                    "loss": champion,
+                    "trained_on_validation": False,
+                },
+                "challenger": {"version": f"{a.name}-20261002-{i:06x}", "loss": challenger},
+                "promoted": False,
+                "reason": f"{challenger:.4f} ≥ {champion:.4f} ({a.name}-default)",
+                "samples": {"validation": 1854},
+            }
+        )
+    return reports
 
 
 def demo_shelf(state_dir: Path) -> Shelf:

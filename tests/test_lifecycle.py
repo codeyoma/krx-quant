@@ -27,6 +27,7 @@ from krx_quant.market_calendar import MarketCalendar
 from krx_quant.predictions import DB_NAME, NewPrediction, PredictionStore, Score
 from krx_quant.pricing import Direction
 from tests.algorithm_doubles import FixedAlgorithm
+from tests.api_schema import check
 from tests.replay_events import DAY, api, at, get_json, run
 from tests.test_leaderboard_api import OUTCOMES as FORTY_OUTCOMES
 from tests.test_leaderboard_api import SURE
@@ -339,6 +340,81 @@ async def test_the_bench_is_judged_on_its_twentieth_fortieth_and_sixtieth_days_o
     statuses = await listed(engine)
     assert statuses["alpha"]["status"]["status"] == "bench"  # good again, not a day it is judged on
     assert last_change(statuses["beta"])[:2] == ("bench", "active")
+
+
+async def test_the_stage_shows_the_days_counted_the_next_review_and_the_lift_it_judges_by(
+    tmp_path: Path,
+) -> None:
+    history = weekdays_before(DAY, 9)  # with the replayed day, ten days on probation: judged at 15:40
+
+    def with_history(db: Path) -> Path:
+        put_status(db, "alpha", "probation", history[0])
+        put_days(db, history[:4], {"alpha": MISSES_DOWNS})
+        put_days(db, history[4:], {"alpha": RIGHT})
+        return db
+
+    # At 15:00, before the day's review: the nine days reviewed, and the tenth judged today.
+    before = await run(
+        with_history(tmp_path / "before.db"), [], until=at("15:00:00"), algorithms=[ALPHA], min_sample=20
+    )
+    stage = (await listed(before))["alpha"]["stage"]
+    weakest = stage.pop("weakest")
+    assert stage == {
+        "status": "probation",
+        "began": str(history[0]),
+        "counted_from": str(history[0]),
+        "days": 9,
+        "review_days": [10, 20, 40],
+        "next_review": 10,
+        "next_review_on": str(DAY),
+        "lift_days": 9,
+        "level": 0.983,
+        "enough": True,  # 72 scored, and as many pairs with each baseline
+    }
+    # The lower bound the review works out (test_probation_ends_after_ten_days_better_than_every_baseline).
+    assert (weakest["baseline"], weakest["n"]) == ("baseline-flat", 9)
+    assert weakest["value"] == pytest.approx(0.3889, abs=5e-5)
+    assert weakest["low"] == pytest.approx(0.2570, abs=5e-5)
+
+    after = await review_day(with_history(tmp_path / "after.db"), [ALPHA])
+    alpha = (await listed(after))["alpha"]
+    assert last_change(alpha)[2] == (
+        f"10 days on probation; weakest lift low {weakest['low']:.4f} by trading day at 98.3%"
+        f" ({weakest['n']} days scored)"
+    )
+    assert alpha["stage"] is None, "active: no review ahead to be made active by"
+
+
+async def test_the_stage_counts_on_after_a_review_and_on_the_bench_takes_the_last_20_days(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "engine.db"
+    history = weekdays_before(DAY, 29)
+    put_status(db, "beta", "bench", history[0])  # with the replayed day, thirty days on the bench
+    put_days(db, history, {"beta": RIGHT})
+    put_status(db, "alpha", "probation", history[-6])  # and seven on probation
+    put_days(db, history[-6:], {"alpha": RIGHT}, with_baselines=False)
+
+    engine = await review_day(db, [ALPHA, BETA])  # the review at 15:40 judged neither
+
+    async with api(engine) as client:
+        body = await get_json(client, "/v1/algorithms")
+    check("algorithms", body)
+    stages = {a["name"]: a["stage"] for a in body["algorithms"]}
+    assert stages["alpha"]["status"] == "probation"
+    # Counted through today's review; the next counts the next trading day, Tuesday the 13th.
+    assert (stages["alpha"]["days"], stages["alpha"]["next_review"]) == (7, 10)
+    assert stages["alpha"]["next_review_on"] == "2026-10-15"
+    assert (stages["alpha"]["lift_days"], stages["alpha"]["weakest"]["n"]) == (7, 6), "today has no outcomes"
+    assert stages["alpha"]["enough"] is True
+    assert stages["beta"]["status"] == "bench"
+    assert (stages["beta"]["began"], stages["beta"]["days"]) == (str(history[0]), 30)
+    assert (stages["beta"]["review_days"], stages["beta"]["next_review"]) == ([20, 40, 60], 40)
+    assert stages["beta"]["next_review_on"] == "2026-10-26"
+    # Its lift over the last 20 days with predictions, as the bench's review takes it.
+    beta = stages["beta"]["weakest"]
+    assert (stages["beta"]["lift_days"], beta["n"], beta["baseline"]) == (20, 19, "baseline-flat")
+    assert beta["low"] == beta["value"] == 0.5
 
 
 async def test_a_status_set_after_the_review_counts_from_the_next_day(tmp_path: Path) -> None:

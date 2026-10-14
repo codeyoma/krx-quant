@@ -340,7 +340,7 @@
         }
       },
       "training_days": 20,
-      "model": {"version": "newton-default", "params": {"damping": 0.5, "threshold": 1.0}, "trained": null, "trained_until": null},
+      "model": {"version": "newton-default", "params": {"damping": 0.5, "threshold": 1.0}, "trained": null, "trained_until": null, "training": null},
       "param_meanings": {
         "damping": {
           "meaning": "감쇠율 γ: dv/dt = F − γv의 마찰. 클수록 추세가 빨리 꺾인다고 본다. …",
@@ -355,10 +355,30 @@
       "card": {"scientist": "Carl Friedrich Gauss", "character": "역추세", "unique_features": ["vwap_z", "reversion_speed"]},
       "features": ["vwap_gap", "vwap_z", "reversion_speed", "volatility", "flat_ticks"],
       "training_days": 20,
-      "model": {"version": "gauss-default", "params": {"speed": 0.05, "weight": 0.5, "threshold": 1.0}, "trained": null, "trained_until": null},
+      "model": {
+        "version": "gauss-20261007-3f9a1c", "params": {"speed": 0.0, "weight": 0.0, "threshold": 0.0},
+        "trained": "2026-09-08..2026-10-07, 27450 samples, log loss 0.8123", "trained_until": "2026-10-07",
+        "training": {
+          "first_day": "2026-09-08", "last_day": "2026-10-07", "samples": 27450, "loss": 0.8123,
+          "days": {"recorded": 0, "bars": 20}
+        }
+      },
       "status": {
         "status": "probation", "since": "2026-10-12T08:00:00+09:00",
         "history": [{"at": "2026-10-12T08:00:00+09:00", "from": null, "to": "probation", "reason": "registered"}]
+      },
+      "validation": {
+        "day": "2026-10-13", "validation_days": ["2026-10-08", "2026-10-12", "2026-10-13"], "samples": 4104,
+        "challenger": {"version": "gauss-20261007-3f9a1c", "loss": 0.8207},
+        "champion": {"version": "gauss-default", "loss": 0.8311, "trained_on_validation": false},
+        "promoted": true, "reason": "0.8207 < 0.8311 (gauss-default)"
+      },
+      "stage": {
+        "status": "probation", "began": "2026-10-12", "counted_from": "2026-10-12", "days": 2,
+        "review_days": [10, 20, 40], "next_review": 10, "next_review_on": "2026-10-23",
+        "lift_days": 2, "level": 0.983,
+        "weakest": {"baseline": "baseline-flat", "n": 2, "value": -0.0123, "low": -0.3867, "high": 0.3621},
+        "enough": true
       }
     }
   ],
@@ -396,6 +416,29 @@
 (글은 줄였다. 알고리즘 항목에는 모든 필드가 오고, 기준 예측은 셋, 합의는 둘이 다 온다.)
 
 - `model`: 지금 엔진이 돌리는 모델이다. `trained`는 학습한 날짜 범위, 표본 수, 학습 log loss를 적은 글이고(예: `2026-09-10..2026-10-08, 9120 samples, log loss 0.9312`), `trained_until`은 학습에 쓴 마지막 날(`YYYY-MM-DD`)이다. 기본 모델은 둘 다 `null`이다.
+- `model.training`(#165): `trained` 글을 값으로 준다. 모델 파일에 함께 저장된 값이다(아래 "학습").
+  - `first_day`, `last_day`: 학습한 첫날과 마지막 날.
+  - `samples`: 학습한 표본 수(정답이 있는 것).
+  - `loss`: 그 표본에서 잰 평균 log loss. 학습 데이터로 잰 값이라 `validation`의 검증 손실과 견줄 수 없다.
+  - `days`: 학습한 날을 정답 출처별로 센 수. `recorded`는 녹화된 날(지금 정답은 녹화 중간가), `bars`는 1분봉만 있는 날(지금 정답은 백필 종가)이다. 표본이 출처를 모르면(학습이 아닌 손으로 만든 모델) `null`이다.
+  - 기본 모델과 #165 전에 저장된 모델은 `training`이 `null`이다. 그런 모델도 `trained` 글은 그대로 있다. 다음에 학습해 설치하는 모델부터 값이 생긴다.
+- `validation`(#165): 엔진이 가진 가장 최근 밤 학습에서 그 알고리즘의 리포트(Object Store `reports/<날짜>/<알고리즘>.json`. 승격 목록 `promotions/<날짜>.json`에도 같은 것이 있다)의 값 그대로다. 밤 학습이 아직 없거나 그 밤에 이 알고리즘의 리포트가 없으면 `null`이다. 엔진이 리포트를 언제 읽는지는 [operations.md](operations.md#밤-학습과-모델-교체-22)에 있다. API 요청마다 Object Store를 읽지 않는다.
+  - `day`: 그 밤의 날짜(학습한 마지막 데이터의 날).
+  - `validation_days`: 검증일(학습에 쓰지 않은 최근 3거래일).
+  - `samples`: 검증 표본 수. 검증까지 가지 못했으면 `null`이다.
+  - `challenger`: 새 모델의 `version`과 검증 `loss`. 학습하지 못했으면 `null`이다.
+  - `champion`: 그 밤에 서버가 돌리던 모델의 `version`, 검증 `loss`, `trained_on_validation`(검증일까지 학습한 모델인지. 손으로 `fit`한 모델 등). 검증할 정답이 없었으면 `null`이다.
+  - `promoted`, `reason`: 승격했는지와 그 이유(예: `0.8207 < 0.8311 (gauss-default)`).
+  - 그 승격 모델이 지금 도는지는 `/v1/status`의 `training.applied`와 `model.version`으로 본다.
+- `stage`(#165): 수습(`probation`)과 벤치(`bench`)의 알고리즘이 정식이 되는 판정까지 어디쯤인지다. 정식·복제·은퇴와 상태가 없는 알고리즘은 `null`이다. 상태 점검(아래 "상태 관리")과 같은 코드(`lifecycle.stages`)로 센다. 값은 마지막 점검까지의 것이라 장중에는 바뀌지 않는다. 엔진은 점검이 돌거나 상태가 바뀔 때만 다시 계산한다.
+  - `began`: 지금 상태가 된 날. `counted_from`: 세기 시작한 날(그날 점검 뒤에 된 상태는 다음 날).
+  - `days`: 마지막 점검까지 센 거래일 수(엔진이 예측한 날).
+  - `review_days`: 판정일(`KRX_PROBATION_REVIEW_DAYS` 또는 `KRX_BENCH_REVIEW_DAYS`). `next_review`: 다음 판정일(몇 거래일째인지). 다음 점검은 하루를 더 센다. 마지막 판정일이 지났으면 `null`이다(은퇴 후보).
+  - `next_review_on`: 엔진이 거래일마다 예측한다고 볼 때 그 판정일이 되는 날(휴장일은 엔진의 거래 일정으로 건너뛴다).
+  - `lift_days`: lift를 잰 날 수. 수습은 센 날 모두, 벤치는 마지막 점검까지의 최근 20거래일이다. 판정일 점검은 그날을 넣어 다시 잰다.
+  - `level`: 구간의 신뢰수준(`KRX_REVIEW_CONFIDENCE`).
+  - `weakest`: 그 날들에서 기준 예측 대비 거래일 단위 lift 중 하한이 가장 낮은 것. `baseline`, `n`(채점된 짝이 있는 날 수), `value`, `low`, `high`. 기준 예측 셋 모두 거래일 단위 값(2일 이상)이 있어야 있고, 아니면 `null`이다.
+  - `enough`: 그 날들의 채점된 예측과 기준 예측마다의 짝이 `KRX_MIN_SAMPLE` 이상인지. 모자라면 판정일에도 상태를 그대로 둔다. 판정일에 `enough`이고 `weakest.low > 0`이면 정식이 된다.
 - `status`: 알고리즘마다 온다(위 예시는 한 곳만 보였다). 형식은 아래 "상태 관리".
 - `card`(#164): 성격 카드(아래 "규약"). `forecasting`은 세 확률을 만드는 방법이다: 공통 함수가 4분 변화의 정규분포를 세 확률로 바꾸는지(Newton, Gauss, Granger, Markov, Kalman), 정답으로 직접 학습한 분류기가 내는지(Shannon의 다항 로지스틱, Turing의 LightGBM), 쏠림을 순서형 로지스틱으로 바꾸는지(Poisson). `failure`는 틀리기 쉬운 장이다. 카드 글은 지금 정답(4분 뒤 중간가 변화)을 기준으로 쓴다. 정답이 바뀌면(#160) 카드 글도 고친다. 알고리즘 카드의 `scientist`는 늘 문자열이다.
 - `feature_meanings`(#164): `features`의 이름마다 `meaning`(뜻), `unit`(단위), `known`(언제 아는지: 봉 마감에 아는지, 개장 전에 정한 값인지, 녹화된 날에만 있는지)이다. 글은 피처 저장소의 것이다(아래 "피처").
@@ -405,14 +448,17 @@
 
 ### `GET /v1/algorithms/{name}`
 
-등록된 알고리즘 하나다(#19). `/v1/algorithms` 항목과 같고(카드, 피처·파라미터의 뜻 포함), 서버에 설치된 모델 이력 `model_history`가 붙는다. 등록된 알고리즘이 아닌 이름(기준 예측, 합의 포함)은 404다. 기준 예측과 합의의 카드는 `/v1/algorithms`의 `baselines`, `consensus`에 있다. 성적은 `/v1/algorithms/{name}/stats`에 있다.
+등록된 알고리즘 하나다(#19). `/v1/algorithms` 항목과 같고(카드, 피처·파라미터의 뜻, 학습 정보 `model.training`, 지난밤 검증 `validation`, 판정 단계 `stage` 포함), 서버에 설치된 모델 이력 `model_history`가 붙는다. 등록된 알고리즘이 아닌 이름(기준 예측, 합의 포함)은 404다. 기준 예측과 합의의 카드는 `/v1/algorithms`의 `baselines`, `consensus`에 있다. 성적은 `/v1/algorithms/{name}/stats`에 있다.
 
 ```json
 {
   "name": "newton",
   "card": {"scientist": "Isaac Newton", "character": "추세 추종"},
-  "model": {"version": "newton-default", "params": {"damping": 0.5, "threshold": 1.0}, "trained": null, "trained_until": null},
+  "model": {"version": "newton-default", "params": {"damping": 0.5, "threshold": 1.0}, "trained": null, "trained_until": null, "training": null},
   "status": {"status": "probation", "since": "2026-10-12T08:00:00+09:00", "history": []},
+  "validation": null,
+  "stage": {"status": "probation", "began": "2026-10-12", "counted_from": "2026-10-12", "days": 0, "review_days": [10, 20, 40],
+            "next_review": 10, "next_review_on": "2026-10-23", "lift_days": 0, "level": 0.983, "weakest": null, "enough": false},
   "model_history": [
     {"at": "2026-10-13T08:00:00+09:00", "version": "newton-20261012-abc123", "why": "promotion 2026-10-12"},
     {"at": "2026-10-13T09:10:00+09:00", "version": null, "why": "rollback from newton-20261012-abc123"}
@@ -607,6 +653,8 @@
 
 학습한 모델의 버전은 `<이름>-<마지막 학습일 YYYYMMDD>-<해시>`다(`Model.fitted`). 해시는 파라미터를 키 순서로 정렬한 JSON, 학습 첫날, 마지막 날, 표본 수를 이은 문자열의 SHA-256 앞 6자리다. 그래서 같은 값이면 늘 같은 버전이다.
 
+`Model.fitted`는 학습 글(`trained`)과 같은 것을 값으로도 남긴다(`training`, #165): 첫날, 마지막 날, 표본 수, 학습 손실, 정답 출처별 날 수. 날의 정답 출처는 학습 표본이 가진 그날의 기준가(`Sample.reference`: 녹화된 날 `mid`, 백필만 있는 날 `close`)로 센다. 밤 학습과 `fit`의 표본(`TrainingDay.of`)은 이 값을 가진다. 손으로 만든 표본은 갖지 않아 `days`가 `null`이다. `training`은 버전 해시에 들어가지 않는다.
+
 > **바뀜** (2026-10-09, #39): 해시에 넣는 파라미터가 Python `dict`의 문자열(넣은 순서대로) → 키 순서로 정렬한 JSON. 이유: 같은 값이면 늘 같은 버전이 나오게 하려고(68d979d). 그래서 같은 데이터로 다시 학습해도 Newton의 해시가 그 전과 다르다. 이미 저장한 모델은 자기 버전을 그대로 쓴다.
 
 ### 상태 관리 (#17)
@@ -634,6 +682,7 @@
 
   > **바뀜** (2026-10-12, #91): 수습 → 정식과 벤치 → 정식의 하한: 짝 단위 정규근사 하한 → 거래일 단위 t분포 하한. 정식 → 벤치(가장 약한 lift ≤ 0)는 그대로다. 이유: 짝 단위 구간은 겹치는 4분 정답과 종목 공통 움직임을 독립 표본으로 세어, 실제 lift가 0인 알고리즘도 합성 실험에서 13–19% 확률로 하한이 0을 넘었다(#78, #79). 판정을 매일 다시 하는 문제는 #87에서 다룬다.
 - 거래일은 엔진이 예측한 날이다. 상태가 시작된 날부터 센다. 그날 점검이 끝난 뒤에 시작된 상태(예: 저녁의 `unretire`)는 다음 날부터 센다.
+- 수습과 벤치의 알고리즘이 판정까지 어디쯤인지는 `/v1/algorithms`의 `stage`로 본다(#165): 마지막 점검까지 센 날, 다음 판정일과 그날이 되는 날, 판정에 쓰는 가장 약한 lift의 거래일 단위 구간. 점검과 같은 코드(`lifecycle.stages`, `_Judge`)와 같은 날들(수습은 센 날 모두, 벤치는 최근 20거래일)로 잰다.
 - 복제 판정은 은퇴하지 않은 먼저 등록된 알고리즘과만 비교한다. 짝이 30개 미만이거나 한쪽 값이 늘 같아 상관을 잴 수 없으면 상태를 그대로 둔다.
 - 점검 결과를 쓰기 직전에 상태를 다시 읽는다. 그 사이 은퇴 명령이 들어왔으면 점검의 변경은 버린다.
 - 은퇴 후보 알림은 텔레그램이 받았을 때만 보낸 것으로 친다. 보내지 못했거나 텔레그램이 설정되지 않았으면(로그에만 남는다) 다음 점검에서 다시 보낸다.
@@ -795,7 +844,7 @@ uv run krx-quant fit newton --days 60
 
 - 최근 `--days`개(기본 `training_days`)의 데이터 있는 날로 학습한다. 오늘은 녹화가 S3에 올라간 21:00 뒤에만 센다. 그 전에는 아직 녹화 중이다.
 - 출력에 녹화(중간가)로 학습한 날짜가 나온다. 예: `recorded days, on mid-points: 2026-10-08; the others on backfilled closes`.
-- 모델은 `state/models/<이름>.json`에 저장한다. 학습에 쓴 마지막 날(`trained_until`)도 적는다.
+- 모델은 `state/models/<이름>.json`에 저장한다. 학습에 쓴 마지막 날(`trained_until`)과 학습 정보(`training`: 첫날·마지막 날, 표본 수, 학습 손실, 정답 출처별 날 수, #165)도 적는다. `training`이 없는 예전 파일도 그대로 읽는다(`null`).
 - 엔진은 시작할 때 이 파일을 읽고, 없으면 기본 모델을 쓴다. 실행 중에 파일이 바뀌면(학습, 08:00 교체, `rollback`) 1분 안에 새 모델로 바꾼다.
 - 매일 밤 자동 학습(walk-forward, champion/challenger)과 08:00 교체, 롤백은 [operations.md](operations.md#밤-학습과-모델-교체-22)에 있다(#22).
 
