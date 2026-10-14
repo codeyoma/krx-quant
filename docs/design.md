@@ -66,7 +66,9 @@
 | `codeyoma/FinceptTerminal` | 공개 (GitHub fork는 비공개로 바꿀 수 없음) | Fincept 화면 코드만. 엔진 주소는 설정 파일에서 읽는다. |
 | `codeyoma/krx-quant` | 비공개 | 엔진, 알고리즘, 학습 파이프라인, 문서 |
 
-`krx-quant`는 fork를 `fincept/` submodule(`custom` 브랜치)로 포함한다. 그래서 `krx-quant`를 한 번 clone하면 두 저장소를 모두 받는다. 엔진 API 변경과 그에 맞는 화면 버전은 한 커밋으로 묶는다. 이렇게 하면 엔진과 화면 버전이 어긋나지 않는다. 비공개 저장소의 흔적은 공개 fork에 남지 않는다.
+`krx-quant`는 fork를 `fincept/` submodule(`custom` 브랜치)로 포함한다. 그래서 `krx-quant`를 한 번 clone하면 두 저장소를 모두 받는다. 포인터는 언제나 `custom`의 최신 커밋을 가리킨다(#186). fork의 `custom-krx-pointer` workflow가 `custom`에 push 될 때마다 krx-quant에 `repository_dispatch`를 보내고, krx-quant의 `fincept-pointer` workflow가 포인터만 바꾼 커밋을 `main`에 바로 push 한다. 매일 05:30 KST 실행과 손 실행이 놓친 것을 잡는다. 화면이 엔진 변경에 기대면 엔진 PR을 먼저 머지한다. 비공개 저장소의 흔적은 공개 fork에 남지 않는다. fork에는 엔진 코드와 비밀값이 없고, `krx-quant`라는 저장소 이름만 보인다.
+
+> **바뀜** (2026-10-14, #PRNUM): 엔진 API 변경과 그에 맞는 화면 버전(포인터)을 한 커밋으로 묶었다 → 포인터는 workflow가 `custom` 최신으로 옮기고, 화면 PR은 포인터를 건드리지 않는다. 이유: 화면 PR 둘이 동시에 열리면 포인터에서 충돌하고, fork PR을 squash 머지한 뒤 포인터를 다시 옮겨야 했다. krx-quant의 CI·배포·엔진은 `fincept/`를 읽지 않아 포인터는 기록일 뿐이다. 사용자가 늘 `custom` 최신을 가리키기로 정했다(#186).
 
 **fork 브랜치.**
 - `main`: upstream 미러. 직접 커밋하지 않는다.
@@ -537,6 +539,7 @@ v1에서는 쓰지 않는다. 조사 결과는 [paid-data.md](paid-data.md)에 �
 - Tailscale 가입, 맥·윈도우에 설치
 - fork의 `main` 자동 동기화와 upstream 릴리스 자동 반영용 fine-grained PAT. `codeyoma/FinceptTerminal`만, Contents와 Workflows 읽기·쓰기. fork의 `SYNC_TOKEN` secret으로 등록한다.
   > **바뀜** (2026-10-12, #94): 선택 → 필수. 이유: upstream 릴리스 자동 반영이 upstream workflow 변경과 태그를 push 해야 해서 이 토큰 없이는 issue로 끝난다(#93).
+- fork `custom`에서 krx-quant로 포인터 이동을 알리는 fine-grained PAT(#186). `codeyoma/krx-quant`만, Contents 읽기·쓰기. fork의 `KRX_QUANT_DISPATCH_TOKEN` secret으로 등록한다. 없으면 포인터가 매일 05:30 KST에만 따라간다.
 
 ## 13. 확인 필요 항목
 
