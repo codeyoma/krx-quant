@@ -235,8 +235,7 @@
       "type": "object",
       "required": [
         "mid_close", "mid_display", "mid_target", "flat_ticks", "class_a", "class_b",
-        "special", "unscorable", "scored_at"
-      ],
+        "special", "unscorable", "scored_at", "touch"],
       "additionalProperties": false,
       "properties": {
         "mid_close": {"$ref": "#/$defs/price"},
@@ -247,7 +246,48 @@
         "class_b": {"$ref": "#/$defs/class"},
         "special": {"type": "boolean"},
         "unscorable": {"type": ["string", "null"]},
-        "scored_at": {"$ref": "#/$defs/time"}
+        "scored_at": {"$ref": "#/$defs/time"},
+        "touch": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/touch"}]}
+      }
+    },
+    "touch": {
+      "description": "A bar close's touch label (#160, #167): recorded beside the outcome, not yet scored on.",
+      "type": "object",
+      "required": [
+        "target_version", "class", "unscorable", "anchor", "tick", "k", "upper", "lower",
+        "bid_start", "ask_start", "bid_end", "ask_end",
+        "upper_at", "upper_price", "upper_dwell", "upper_size",
+        "lower_at", "lower_price", "lower_dwell", "lower_size",
+        "max_bid", "max_bid_at", "min_ask", "min_ask_at", "trade_high", "trade_low"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "target_version": {"type": "integer", "minimum": 2},
+        "class": {"$ref": "#/$defs/class"},
+        "unscorable": {"type": ["string", "null"]},
+        "anchor": {"$ref": "#/$defs/price"},
+        "tick": {"type": ["number", "null"]},
+        "k": {"type": ["integer", "null"], "minimum": 1},
+        "upper": {"$ref": "#/$defs/price"},
+        "lower": {"$ref": "#/$defs/price"},
+        "bid_start": {"$ref": "#/$defs/price"},
+        "ask_start": {"$ref": "#/$defs/price"},
+        "bid_end": {"$ref": "#/$defs/price"},
+        "ask_end": {"$ref": "#/$defs/price"},
+        "upper_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]},
+        "upper_price": {"$ref": "#/$defs/price"},
+        "upper_dwell": {"type": ["number", "null"], "minimum": 0},
+        "upper_size": {"type": ["number", "null"]},
+        "lower_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]},
+        "lower_price": {"$ref": "#/$defs/price"},
+        "lower_dwell": {"type": ["number", "null"], "minimum": 0},
+        "lower_size": {"type": ["number", "null"]},
+        "max_bid": {"$ref": "#/$defs/price"},
+        "max_bid_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]},
+        "min_ask": {"$ref": "#/$defs/price"},
+        "min_ask_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]},
+        "trade_high": {"$ref": "#/$defs/price"},
+        "trade_low": {"$ref": "#/$defs/price"}
       }
     },
     "latest": {
