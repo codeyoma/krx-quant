@@ -29,9 +29,9 @@ Single-context: root `CONTEXT.md` + `docs/adr/`, plus the agreed system design i
 ## Repository layout
 
 - Engine code, algorithms and docs live in this repo. It is public: never commit secrets, `.env`, recorded market data or server addresses.
-  > **바뀜** (2026-10-14, #194): this repo was private → public. 이유: the private repo's GitHub Actions minutes ran out (public repos run free); the algorithms and models may be shown; its history, issues and PRs held no secrets, data files or server addresses (checked before the switch).
+  > **바뀜** (2026-10-14, #194): 이 저장소는 비공개였다 → 공개. 이유: 비공개 저장소의 GitHub Actions 시간이 바닥났고(공개 저장소는 무료다), 알고리즘과 모델은 보여도 된다고 정했다. 공개 전에 git 이력, 이슈, PR에 비밀값, 데이터 파일, 서버 주소가 없는 것을 확인했다.
 - `fincept/` is a git submodule: the public fork `codeyoma/FinceptTerminal`, tracking its `custom` branch. Only Fincept screen code goes there: engine code and algorithm details stay in this repo, so each lives in one place. Secrets go in neither; both are public.
-  > **바뀜** (2026-10-14, #194): "Never put engine code, algorithm details or secrets in `fincept/`; it is public" → engine code stays here to keep one place for it, secrets stay out of both. 이유: this repo is public too now.
+  > **바뀜** (2026-10-14, #194): "`fincept/`는 공개라 엔진 코드, 알고리즘 설명, 비밀값을 두지 않는다" → 엔진 코드는 한 곳에 두려고 이 저장소에 두고, 비밀값은 두 저장소 어디에도 두지 않는다. 이유: 이 저장소도 공개가 됐다.
 - The fork has its own rules and agent docs: `fincept/custom/README.md`, `fincept/custom/AGENTS.md`.
 - CI for this repo does not need the submodule; check out without submodules unless a job builds the screen.
 
