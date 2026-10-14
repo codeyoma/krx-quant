@@ -10,7 +10,10 @@ closes (``training``). For each algorithm, in registration order:
    rolling window (``training_days``) before them (walk-forward).
 2. The new model (challenger) and the one the server runs (champion: ``live.json``, else
    the defaults) both forecast the validation days. The challenger is promoted only if
-   its mean log loss there is lower.
+   its mean log loss there is lower, or whatever its loss when the champion learned
+   another target than the night's (#170: ``Model.target_version``; the defaults and a
+   model saved before it was recorded count as the four-minute move's): after the target
+   changes, every algorithm the night trains runs a model of the new one the next morning.
 3. The challenger and a report of both are stored. Besides the verdict, the report has
    what tells a real improvement from noise (#89): the losses by validation day and by
    reference price, the paired difference with its standard error over days, whether
@@ -21,6 +24,12 @@ closes (``training``). For each algorithm, in registration order:
 
 Once every algorithm is done the promotion list is stored, final: the algorithms whose
 challenger won, by version, and every report. The server applies it at 08:00 (``swap``).
+
+With the touch target (``KRX_TARGET_VERSION=2``, #169) the samples' outcomes are its
+labels (``training``): recorded days by their quotes, the others by the one-minute bar
+rule. Each report then counts the labelled samples by source (``labels``), and so does the
+Telegram summary. The climate baseline's table (``climate.py``) is refitted on the latest
+``CLIMATE_DAYS`` days after the algorithms, with a report of its own, and always promoted.
 
 Objects:
 
@@ -43,13 +52,15 @@ import shutil
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
+from functools import partial
 from pathlib import Path
 from typing import Any
 
 from krx_quant.algorithms import ALGORITHMS, Algorithm, Model
 from krx_quant.algorithms.contract import Sample, predicted
-from krx_quant.algorithms.forecasts import log_loss
+from krx_quant.algorithms.forecasts import forecasting, log_loss
 from krx_quant.backfill import MINUTE_BARS_TR, bars_key
+from krx_quant.climate import CLIMATE, CLIMATE_DAYS, fit_climate
 from krx_quant.config import Settings, SettingsError
 from krx_quant.engine import ENGINE_FEEDS, partitions
 from krx_quant.features import Leaders
@@ -93,6 +104,7 @@ def training_settings(settings: Settings) -> dict[str, str]:
         "KRX_US_SYMBOLS": ",".join(settings.us_symbols),
         "KRX_INDEX_CODES": ",".join(settings.index_codes),
         "KRX_FEE_PERCENT": f"{settings.fee_rate * 100:.10g}",
+        "KRX_TARGET_VERSION": str(settings.target_version),
     }
 
 
@@ -134,17 +146,25 @@ class Night:
         return cls(date.fromisoformat(data["day"]), data["finalized_at"], data["promoted"], data["reports"])
 
     def summary(self) -> str:
-        """The days' reference prices, and one line per algorithm, for Telegram."""
+        """The days' reference prices, the touch target's labelled samples by source (target
+        version 2), and one line per algorithm, for Telegram."""
         references: dict[str, str] = {}
+        labelled: dict[str, int] = {}
         for r in self.reports:
             references.update(r.get("reference_prices", {}))
+            labelled.update(r.get("labels", {}).get("by_day", {}))
         title = f"{self.day} 밤 학습"
         if references:
             recorded = sum(kind == "mid" for kind in references.values())
             title += f" (녹화 중간가 {recorded}일, 백필 종가 {len(references) - recorded}일)"
         lines = [title]
+        if labelled:
+            quotes = sum(n for day, n in labelled.items() if references.get(day) == "mid")
+            lines.append(f"정답 버전 2 표본: 녹화 호가 {quotes}개, 1분봉 {sum(labelled.values()) - quotes}개")
         for r in self.reports:
-            if r["promoted"]:
+            if r["promoted"] and r.get("forced"):
+                verdict = "승격(정답 바뀜, 성적 비교 없이)"
+            elif r["promoted"]:
                 verdict = "승격"
             elif r["challenger"] is None:
                 verdict = "학습 안 함"
@@ -166,10 +186,12 @@ def train_night(
     day: date | None = None,
     calendar: MarketCalendar | None = None,
     commit: str = "unknown",
+    target_version: int = 1,
 ) -> Night:
     """Train every algorithm for the night of ``day`` (default: the latest day with data) and
     store the promotion list. A night already finished is returned as it was. Each report
-    names ``commit``, the code that trained it.
+    names ``commit``, the code that trained it. The samples' outcomes are of
+    ``target_version``; with the touch target (2) the climate baseline is refitted too.
     """
     leaders = leaders or Leaders()
     bars, trades = (
@@ -196,18 +218,29 @@ def train_night(
     if finished is not None:
         log.info("the night of %s is already trained", night)
         return Night.from_dict(finished)
-    trainer = _Trainer(store, cache_dir, symbols, fee_rate, leaders, days, algorithms, calendar)
+    trainer = _Trainer(
+        store, cache_dir, symbols, fee_rate, leaders, days, algorithms, calendar, target_version
+    )
     live: dict[str, str] = get_json(store, LIVE) or {}
     reports = []
-    for algorithm in algorithms:
-        report = get_json(store, report_key(night, algorithm.name))
-        # A checkpoint an older version wrote lacks the evidence (#89): trained again.
-        if report is None or "commit" not in report:
-            report = {**trainer.train(algorithm, live.get(algorithm.name)), "commit": commit}
-            put_json(store, report_key(night, algorithm.name), report)
-            log.info("%s: %s", algorithm.name, report["reason"])
+    steps: list[tuple[str, Callable[[], dict[str, Any]]]] = [
+        (a.name, partial(trainer.train, a, live.get(a.name))) for a in algorithms
+    ]
+    if target_version >= 2:
+        steps.append((CLIMATE, trainer.climate))
+    for name, step in steps:
+        report = get_json(store, report_key(night, name))
+        # A checkpoint an older version wrote lacks the evidence (#89), and one of another
+        # target (#169; none written: the four-minute move, 1) labelled other outcomes:
+        # trained again.
+        if report is None or "commit" not in report or report.get("target_version", 1) != target_version:
+            report = {**step(), "commit": commit}
+            if target_version >= 2:
+                report["target_version"] = target_version
+            put_json(store, report_key(night, name), report)
+            log.info("%s: %s", name, report["reason"])
         else:
-            log.info("%s: trained earlier tonight; skipped", algorithm.name)
+            log.info("%s: trained earlier tonight; skipped", name)
         reports.append(report)
     result = Night(
         night,
@@ -239,6 +272,7 @@ async def run_training(settings: Settings, day: date | None = None) -> Night:
         day=day,
         calendar=calendar_store(settings).calendar,
         commit=settings.commit,
+        target_version=settings.target_version,
     )
     if not finished_before:
         await send_notice(settings, night.summary())
@@ -256,8 +290,10 @@ class _Trainer:
         days: Sequence[date],
         algorithms: Sequence[Algorithm],
         calendar: MarketCalendar | None = None,
+        target_version: int = 1,
     ) -> None:
         self._store = store
+        self._target_version = target_version
         self._cache = cache_dir
         self._symbols = tuple(symbols)
         self._fee_rate = fee_rate
@@ -292,6 +328,8 @@ class _Trainer:
         report["reference_prices"] = {
             day.isoformat(): found.reference for day, found in loaded.items() if found is not None
         }
+        if self._target_version >= 2:
+            report |= {"target_version": self._target_version, "labels": _labels(loaded)}
         try:
             challenger = algorithm.fit(self._samples(algorithm, training))
         except ValueError as e:
@@ -303,13 +341,32 @@ class _Trainer:
         challenger_losses = _losses(algorithm, challenger, self._samples(algorithm, validation))
         scored = [s for s, _ in challenger_losses]
         report["samples"] = {"validation": len(scored)}
+        # A champion of another target (#170) is replaced whatever the scores say.
+        champion_target = champion.target_version or 1
+        retarget = champion_target != self._target_version
+        changed = (
+            f"; {champion.version} learned target {champion_target}, the night target"
+            f" {self._target_version}: promoted without comparing"
+        )
         if not scored:
+            if retarget:
+                return {
+                    **report,
+                    "challenger": {
+                        "version": challenger.version,
+                        "loss": None,
+                        "trained": challenger.trained,
+                    },
+                    "promoted": True,
+                    "forced": True,
+                    "reason": "no outcomes to validate on" + changed,
+                }
             return {**report, "reason": "no outcomes to validate on"}
         champion_losses = _losses(algorithm, champion, scored)
         champion_loss = _mean([loss for _, loss in champion_losses])
         challenger_loss = _mean([loss for _, loss in challenger_losses])
-        promoted = challenger_loss < champion_loss
-        sign = "<" if promoted else "≥"
+        better = challenger_loss < champion_loss
+        sign = "<" if better else "≥"
         # A champion fitted by hand on the latest days may have learned the validation days:
         # it is then judged on what it saw, and is harder to beat than it should be.
         saw = champion.trained_until is not None and champion.trained_until >= validation[0]
@@ -321,14 +378,48 @@ class _Trainer:
                 "loss": challenger_loss,
                 "trained": challenger.trained,
             },
-            "promoted": promoted,
+            "promoted": better or retarget,
+            "forced": retarget,
             "validation": _validation(
                 challenger_losses,
                 champion_losses,
                 {day: found.reference for day, found in loaded.items() if found is not None},
             ),
             "reason": f"{challenger_loss:.4f} {sign} {champion_loss:.4f} ({champion.version}"
-            + (", trained on these days)" if saw else ")"),
+            + (", trained on these days)" if saw else ")")
+            + (changed if retarget else ""),
+        }
+
+    def climate(self) -> dict[str, Any]:
+        """The climate baseline's table refitted on the latest ``CLIMATE_DAYS`` days (the night's
+        included: it predicts the next day), stored and always promoted (#169)."""
+        night = self._days[-1]
+        days = self._days[-CLIMATE_DAYS:]
+        loaded = {day: self._day(day) for day in days}
+        report: dict[str, Any] = {
+            "algorithm": CLIMATE,
+            "day": night.isoformat(),
+            "training_days": [d.isoformat() for d in days],
+            "validation_days": [],
+            "champion": None,
+            "challenger": None,
+            "promoted": False,
+            "reference_prices": {
+                day.isoformat(): found.reference for day, found in loaded.items() if found is not None
+            },
+            "target_version": self._target_version,
+            "labels": _labels(loaded),
+        }
+        model = fit_climate([s for found in loaded.values() if found is not None for s in found.samples])
+        if model.trained is None:
+            return {**report, "reason": "not trained: no labelled samples"}
+        self._put_model(CLIMATE, model)
+        return {
+            **report,
+            "challenger": {"version": model.version, "trained": model.trained},
+            "promoted": True,
+            "reason": f"each symbol and 30-minute slot's most frequent touch label over {len(loaded)} days"
+            " (installed every night)",
         }
 
     def _samples(self, algorithm: Algorithm, days: Sequence[date]) -> list[Sample]:
@@ -339,7 +430,14 @@ class _Trainer:
         if day not in self._loaded:
             self._fetch(day)
             self._loaded[day] = training_day(
-                self._cache, day, self._calendar, self._symbols, self._names, self._fee_rate, self._leaders
+                self._cache,
+                day,
+                self._calendar,
+                self._symbols,
+                self._names,
+                self._fee_rate,
+                self._leaders,
+                target_version=self._target_version,
             )
         self._used.add(day)
         return self._loaded[day]
@@ -435,9 +533,29 @@ def _losses(algorithm: Algorithm, model: Model, samples: Sequence[Sample]) -> li
     """``model``'s log loss on each sample with an outcome that it predicts."""
     out = []
     for s in samples:
-        if s.outcome is not None and (f := predicted(algorithm, s.features, model)) is not None:
+        if s.outcome is None:
+            continue
+        with forecasting(s.features):  # of the target the sample was labelled with (#169)
+            f = predicted(algorithm, s.features, model)
+        if f is not None:
             out.append((s, log_loss(f, s.outcome)))
     return out
+
+
+def _labels(loaded: Mapping[date, TrainingDay | None]) -> dict[str, Any]:
+    """The labelled samples of the days ``loaded``, by day and by where their labels came
+    from (#169): ``recorded`` days by their quotes, ``bars`` days by the one-minute rule."""
+    by_day = {
+        day.isoformat(): sum(s.outcome is not None for s in found.samples)
+        for day, found in loaded.items()
+        if found is not None
+    }
+    recorded = sum(
+        by_day[day.isoformat()]
+        for day, found in loaded.items()
+        if found is not None and found.reference == "mid"
+    )
+    return {"samples": {"recorded": recorded, "bars": sum(by_day.values()) - recorded}, "by_day": by_day}
 
 
 def _mean(values: Sequence[float]) -> float:

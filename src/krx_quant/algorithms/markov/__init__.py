@@ -21,6 +21,8 @@ Personality card:
   default transitions from all days. The IV bounds split the training window's recorded
   bar closes in three equal parts, once five recorded days have the IV; each IV regime's
   scale is matched on its minutes' mean square move, pulled toward 1.
+- **Fails**: when the state turns within minutes (the filtered hour lags it), and on a day
+  whose macro regime is not the market's.
 
 Training measures moves on closes, which bounce between the bid and the ask, so the wild
 state learned on backfilled days is a little wilder than live, on mid-points.
@@ -33,9 +35,17 @@ import statistics
 from collections.abc import Mapping, Sequence
 from typing import NamedTuple
 
-from krx_quant.algorithms.contract import Card, Model, Sample
-from krx_quant.algorithms.forecasts import UNKNOWN, lowest_log_loss, normal_forecast, param, with_outcomes
+from krx_quant.algorithms.contract import Model, Sample
+from krx_quant.algorithms.forecasts import (
+    NORMAL_CLASSES,
+    UNKNOWN,
+    lowest_log_loss,
+    normal_forecast,
+    param,
+    with_outcomes,
+)
 from krx_quant.baselines import Forecast
+from krx_quant.cards import Card, Meaning, learned
 from krx_quant.features import REGIME_CODES, FeatureVector
 from krx_quant.reference import BAR
 
@@ -73,6 +83,66 @@ MIN_IV_DAYS = 5
 # A regime's scale counts this many minutes at 1 besides its own, so one seen little stays
 # near 1.
 SCALE_PRIOR = 60.0
+TRAINING_DAYS = 20
+
+
+def _param_meanings() -> dict[str, Meaning]:
+    """Every parameter a model can hold: the states' emissions, the IV regimes' scales and
+    bounds (bounds only once learned), and each regime's transitions."""
+    korean = {"quiet": "조용함", "up": "상승추세", "down": "하락추세", "wild": "급변동"}
+    states = [korean[s] for s in STATES]
+    regimes = {
+        "shock": "매크로 국면이 shock(충격)인 날",
+        "risk_off": "매크로 국면이 risk_off(위험 회피)인 날",
+        "risk_on": "매크로 국면이 risk_on(위험 선호)인 날",
+        "neutral": "매크로 국면이 neutral(중립)인 날",
+        DEFAULT: "매크로 국면이 없거나 모르는 날(기본 전이행렬, 모든 날로 배운다)",
+    }
+    iv_regimes = [{"low": "낮음", "normal": "보통", "high": "높음"}[r] for r in IV_REGIMES]
+    when = learned(TRAINING_DAYS)
+    out: dict[str, Meaning] = {}
+    for k, state in enumerate(states):
+        out[param("mean", k)] = Meaning(
+            f"{state} 국면의 1분 움직임 평균(IV 국면의 배율을 곱하기 전).", "틱", when
+        )
+        out[param("sd", k)] = Meaning(
+            f"{state} 국면의 1분 움직임 표준편차(IV 국면의 배율을 곱하기 전. 곱한 뒤 0.5틱 아래로 내려가지 "
+            "않는다).",
+            "틱",
+            when,
+        )
+    for r, iv in enumerate(iv_regimes):
+        text = f"IV {iv} 국면에서 4국면의 평균과 표준편차에 곱하는 배율. "
+        if r == NORMAL_IV:
+            text += "늘 1이다(IV를 모를 때와 같다)."
+        else:
+            text += "그 국면의 분이 적으면 1 쪽으로 당긴다."
+        out[param("iv_scale", r)] = Meaning(text, "배", when)
+    out[param("iv_cut", 0)] = Meaning(
+        "IV 국면의 아래 경계: 봉 마감 ATM IV가 이보다 낮으면 낮음 국면이다. 학습 표본의 IV를 셋으로 똑같이 "
+        "나누는 첫 값.",
+        "%",
+        f"{when} 학습 기간에 IV가 있는 날이 5거래일보다 적으면 없다(그동안 IV를 모르는 것처럼 동작한다).",
+    )
+    out[param("iv_cut", 1)] = Meaning(
+        "IV 국면의 위 경계: 봉 마감 ATM IV가 이 값 이상이면 높음 국면이다. 학습 표본의 IV를 셋으로 똑같이 "
+        "나누는 둘째 값.",
+        "%",
+        f"{when} 학습 기간에 IV가 있는 날이 5거래일보다 적으면 없다(그동안 IV를 모르는 것처럼 동작한다).",
+    )
+    for t in TRANSITIONS:
+        pulled = "" if t == DEFAULT else " 그 국면의 날이 적으면 기본 전이행렬 쪽으로 당긴다."
+        for i, before in enumerate(states):
+            for j, after in enumerate(states):
+                out[param(t, i, j)] = Meaning(
+                    f"{regimes[t]}, {before} 국면에서 1분 뒤 {after} 국면에 있을 확률(전이행렬).{pulled}",
+                    "확률 (0~1)",
+                    when,
+                )
+    return out
+
+
+PARAM_MEANINGS: Mapping[str, Meaning] = _param_meanings()
 
 
 def default_params() -> dict[str, float]:
@@ -173,7 +243,8 @@ class _Chain:
 class Markov:
     name = "markov"
     features: tuple[str, ...] = ("macro_regime", "minute_ticks", "flat_ticks", "atm_iv")
-    training_days = 20
+    training_days = TRAINING_DAYS
+    param_meanings = PARAM_MEANINGS
     card = Card(
         scientist="Andrey Markov",
         character="국면 탐정",
@@ -190,6 +261,18 @@ class Markov:
             "전이행렬은 매크로 국면마다 그 국면의 날로(날이 적으면 기본 행렬 쪽으로 당긴다), 기본 행렬은 "
             "모든 날로 배운다. IV 국면의 경계는 녹화된 봉 마감 IV의 3분위로(녹화 5거래일부터), 국면별 "
             "움직임 배율은 그 국면의 분들로 배운다."
+        ),
+        forecasting=(
+            "최근 1시간의 1분 움직임으로 거른 지금 국면의 확률에서, 그날 전이행렬로 4분을 따라가 4분 변화 "
+            "합의 평균과 분산을 정확히 계산한다(분마다의 분산과 국면이 이어지며 생기는 공분산 포함). IV "
+            "국면의 배율은 4국면의 평균과 표준편차에 곱한다. 4분 뒤 중간가 변화를 그 평균과 분산의 "
+            f"정규분포로 본다. {NORMAL_CLASSES} 기대수익은 그 평균이다. 보합 범위를 모르면 세 확률을 1/3씩 "
+            "둔다."
+        ),
+        failure=(
+            "국면이 몇 분 안에 바뀌는 장(갑작스러운 뉴스, 급반전)에서는 최근 1시간으로 거른 국면이 늦게 "
+            "따라가 틀리기 쉽다. 그날 매크로 국면이 장중 흐름과 다르거나 국면이 없는 날에는 전이행렬이 맞지 "
+            "않는다. 변동성이 장중에 갑자기 바뀌어도 IV 국면은 봉 마감의 값 하나로 1시간 전체를 본다."
         ),
     )
 

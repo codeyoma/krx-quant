@@ -60,8 +60,11 @@ from krx_quant.feeds import (
 from krx_quant.feeds.base import KST, LEVELS, kst_day
 from krx_quant.market_calendar import MarketCalendar, Session
 from krx_quant.reference import BAR, MAX_QUOTE_AGE, Bar, BarBuilder, ReferencePrice, Source
+from krx_quant.touch import WINDOW, TouchResult, TouchWindow, restarted
 
 HORIZON = timedelta(minutes=4)
+# Touch windows are kept this long after they end, for a score running late.
+_KEEP_WINDOWS = timedelta(minutes=10)
 # How far ahead to look for the next session (long holidays included).
 LOOKAHEAD_DAYS = 15
 INDEX_FEEDS = (INDEX.tr_id, INDEX_REST.tr_id)
@@ -442,9 +445,15 @@ class BarsAtClose:
 
 class MarketView:
     def __init__(
-        self, calendar: MarketCalendar, symbols: Sequence[str], leaders: Leaders, start: datetime
+        self,
+        calendar: MarketCalendar,
+        symbols: Sequence[str],
+        leaders: Leaders,
+        start: datetime,
+        fee_rate: float | None = None,
     ) -> None:
-        """A view with nothing received yet, whose first bar close is the first after ``start``."""
+        """A view with nothing received yet, whose first bar close is the first after ``start``.
+        With ``fee_rate`` it also follows each bar close's touch window (#167)."""
         self.calendar = calendar
         self.symbols = tuple(symbols)
         self.leaders = leaders
@@ -466,6 +475,12 @@ class MarketView:
         self._arrivals = {s: _Arrivals() for s in self.symbols}
         self._expiry: dict[date, int] = {}
         self._options = _Options()
+        self._fee_rate = fee_rate
+        # The touch windows followed (#167), by symbol and bar close, and each symbol's last
+        # integrated best quote (bid, ask), the one before a window opens.
+        self._windows: dict[str, dict[datetime, TouchWindow]] = {s: {} for s in self.symbols}
+        self._best: dict[str, tuple[float, float]] = {}
+        self._ended_through: datetime | None = None  # the last bar close whose windows were handed out
 
     def on_event(self, feed: str, row: dict[str, Any]) -> None:
         """Take an event into the bars, reference prices, microprices, order flow, flows or
@@ -491,6 +506,7 @@ class MarketView:
             return
         symbol, received_at = row["symbol"], row["received_at"]
         self._freeze_before(received_at)
+        self._follow(feed, symbol, received_at, row)
         if feed == TRADE.tr_id:
             self._bars.trade(symbol, row["event_time"], row["price"], row["qty"])
             self._reference.quote(symbol, Source.INTEGRATED, received_at, row["bid1"], row["ask1"])
@@ -514,6 +530,7 @@ class MarketView:
         else (nothing received since) as they are. Bars kept for earlier closes go, and none
         are kept for ``close`` from now on.
         """
+        self._open_windows(close)  # nothing received since the close: opened now
         frozen = self._frozen.pop(close, None)
         for stale in [c for c in self._frozen if c < close]:
             del self._frozen[stale]  # a close no longer predicted (the calendar changed)
@@ -650,6 +667,76 @@ class MarketView:
         """The reference price just before ``at``, or None if it is unknown."""
         return self._reference.mid(symbol, at)
 
+    def touch(self, symbol: str, bar_close: datetime) -> TouchResult:
+        """The touch label of ``symbol``'s window from ``bar_close`` (#167), as followed so far;
+        a window not followed (the engine started after its bar close) says so."""
+        window = self._windows.get(symbol, {}).get(bar_close)
+        return window.result() if window is not None else restarted(symbol, bar_close)
+
+    def quote_at(self, symbol: str, bar_close: datetime) -> tuple[float, float] | None:
+        """The best quote (bid, ask) ``symbol``'s touch window from ``bar_close`` starts from
+        (#169): the last integrated one received before it. None without one, or without
+        touch windows."""
+        window = self._windows.get(symbol, {}).get(bar_close)
+        if window is None or window.bid_start is None or window.ask_start is None:
+            return None
+        return window.bid_start, window.ask_start
+
+    def ended_windows(self, due: datetime) -> list[tuple[str, datetime]]:
+        """The touch windows over by ``due`` (#167), as (symbol, bar close), each handed out
+        once: every symbol's, predicted or not (a VI, a missing book)."""
+        closes = sorted(
+            {
+                c
+                for windows in self._windows.values()
+                for c in windows
+                if c + WINDOW <= due and (self._ended_through is None or c > self._ended_through)
+            }
+        )
+        if not closes:
+            return []
+        self._ended_through = closes[-1]
+        return [(s, c) for c in closes for s in self.symbols if c in self._windows[s]]
+
+    def _open_windows(self, close: datetime) -> None:
+        """Start following each symbol's touch window from the bar close ``close``, once."""
+        if self._fee_rate is None:
+            return
+        for symbol in self.symbols:
+            windows = self._windows[symbol]
+            if close in windows:
+                continue
+            best = self._best.get(symbol)
+            windows[close] = TouchWindow(
+                symbol,
+                close,
+                self._reference.mid(symbol, close),
+                self._fee_rate,
+                bid_start=best[0] if best else None,
+                ask_start=best[1] if best else None,
+            )
+            # Windows long over (kept a while for a late score): dropped.
+            for old in [c for c in windows if c + WINDOW + _KEEP_WINDOWS < close]:
+                del windows[old]
+
+    def _follow(self, feed: str, symbol: str, received_at: datetime, row: dict[str, Any]) -> None:
+        """Give the symbol's open touch windows a quote or trade (#167): the integrated feeds'
+        best quotes, a REST book snapshot (marked), the integrated trades' prices."""
+        if feed == KRX_TRADE.tr_id or self._fee_rate is None:
+            return  # the KRX-only quotes before NXT opens: not the integrated book
+        rest = feed == BOOK_SNAPSHOT.tr_id
+        if feed == TRADE.tr_id:
+            bid, ask, bid_size, ask_size = row["bid1"], row["ask1"], None, None
+        else:
+            bid, ask = row["bid_px_1"], row["ask_px_1"]
+            bid_size, ask_size = row.get("bid_qty_1"), row.get("ask_qty_1")
+        if not rest and bid and ask and 0 < bid <= ask:
+            self._best[symbol] = (float(bid), float(ask))
+        for window in self._windows[symbol].values():
+            window.quote(received_at, bid, ask, bid_size=bid_size, ask_size=ask_size, rest=rest)
+            if feed == TRADE.tr_id:
+                window.trade(received_at, row["price"])
+
     def latest_lead(self, series: str, now: datetime) -> tuple[float, datetime] | None:
         """A leading series' latest trade of ``now``'s day (``features.Leaders``): price and time."""
         return self._leader_bars.latest(series, now)
@@ -682,6 +769,7 @@ class MarketView:
         while (close := next_bar_close(self.calendar, self._frozen_through)) is not None:
             if received_at < close:
                 return
+            self._open_windows(close)
             self._frozen[close] = BarsAtClose(
                 close,
                 {s: [replace(b) for b in self._bars.closed(s, close)] for s in self.symbols},

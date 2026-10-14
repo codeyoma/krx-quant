@@ -14,13 +14,16 @@ Endpoints (all under ``/v1``):
 - ``GET /symbols/{symbol}/candles?period=day|week|month|year&before=T&limit=N``: the last N
   stored candles of the period (default 400, at most 2000) that start before ``T`` (default
   now), oldest first, never the one holding today (``candles``);
-- ``GET /algorithms``: each registered algorithm's card, features, current model and status
-  (probation, active, bench, retired, clone) with its history;
+- ``GET /algorithms``: each registered algorithm's card, features, current model (with what
+  it trained on) and status (probation, active, bench, retired, clone) with its history, the
+  meaning of each feature and model parameter, its report of the latest night's training,
+  and, on probation or the bench, where it stands toward its next review (#165); and the
+  baselines' and the consensus' cards;
 - ``GET /algorithms/{name}``: one of them, with the models installed on the server for it;
-- ``GET /leaderboard?symbol=&period=&basis=&special=``: algorithms ranked by the lower
-  bound of their weakest lift over the baselines, with their stats;
-- ``GET /algorithms/{name}/stats?symbol=&period=&basis=&special=``: one algorithm's
-  stats, by symbol, 30-minute slot and model version, with its calibration curve;
+- ``GET /leaderboard?symbol=&period=&special=``: algorithms ranked by the lower bound of
+  their weakest lift over the baselines, with their stats;
+- ``GET /algorithms/{name}/stats?symbol=&period=&special=``: one algorithm's stats, by
+  symbol, 30-minute slot and model version, with its calibration curve;
 - ``GET /consensus``: the consensus members now and the weights last fitted;
 - ``GET /macro``: the latest day's market regime and macro readings (``macro.py``);
 - ``GET /calendar?limit=``: the economic calendar from the start of today, as the collector
@@ -29,9 +32,12 @@ Endpoints (all under ``/v1``):
   status changes as they happen (``stream.py``).
 
 ``symbol`` is a symbol or ``all`` (default), ``period`` is ``today`` (default), ``5d`` or
-``20d`` (the latest days with predictions), ``basis`` is ``b`` (default: from when it was
-displayed) or ``a`` (from the bar close), and ``special`` is ``exclude`` (default) or
-``include`` (predictions with a VI or circuit breaker in their window).
+``20d`` (the latest days with predictions), and ``special`` is ``exclude`` (default) or
+``include`` (predictions with a VI or circuit breaker in their window). Every prediction is
+scored on its bar close's touch label (#170). For one release a screen from before still
+sends ``basis`` (``a`` or ``b``): it is accepted, ignored and echoed back as sent, so that
+screen, which asks again until the answer's ``basis`` is its own, is answered once
+(``LEGACY_BASES``). Without it the answer has no ``basis``.
 
 Times are ISO 8601 in KST. On the server, compose publishes it on the Tailscale address only.
 """
@@ -41,7 +47,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, time
 from functools import partial
@@ -53,14 +59,16 @@ from aiohttp import web
 
 from krx_quant.algorithms import Algorithm
 from krx_quant.backfill import stock_bars_path, stored_bars
-from krx_quant.baselines import BASELINE_NAMES, BASELINES
 from krx_quant.candles import PERIODS as CANDLE_PERIODS
 from krx_quant.candles import stored_candles
 from krx_quant.consensus import NAMES, slot
+from krx_quant.consensus import cards as consensus_cards
 from krx_quant.contracts import USD
 from krx_quant.econ_calendar import calendar_answer, read_latest
 from krx_quant.engine import PredictionEngine
+from krx_quant.features import FEATURE_MEANINGS
 from krx_quant.feeds.base import KST, Row, kst_day
+from krx_quant.lifecycle import Stage
 from krx_quant.macro import LatestMacro, latest_macro, reading_before
 from krx_quant.model_shelf import Shelf
 from krx_quant.predictions import Excluded, iso
@@ -75,6 +83,7 @@ from krx_quant.stats import (
     entry_json,
     interval_json,
     leaderboard,
+    on_target,
     scored_by_algorithm,
     split,
 )
@@ -104,6 +113,8 @@ CALENDAR_LIMIT = 100  # events by default
 MAX_CALENDAR_LIMIT = 1000
 STATS_CACHE_KEY = web.AppKey("stats_cache", dict)
 PERIODS = {"today": 1, "5d": 5, "20d": 20}  # days with predictions
+# The scoring bases a screen from before #170 still sends, accepted and echoed back for one release.
+LEGACY_BASES = ("a", "b")
 # Results kept per question until the store changes (the screen asks the same often).
 _CACHED_QUESTIONS = 64
 
@@ -364,7 +375,17 @@ def _limit_query(request: web.Request, default: int, most: int) -> int:
 
 async def _algorithms(request: web.Request) -> web.Response:
     engine = request.app[ENGINE_KEY]
-    return _json({"algorithms": [_algorithm_json(engine, a) for a in engine.algorithms]})
+    stages = await engine.stages()
+    return _json(
+        {
+            "algorithms": [_algorithm_json(engine, a, stages) for a in engine.algorithms],
+            "baselines": [{"name": b.name, "card": b.card.as_dict()} for b in engine.baselines],
+            "consensus": [
+                {"name": name, "card": card.as_dict()}
+                for name, card in consensus_cards(engine.consensus_timing).items()
+            ],
+        }
+    )
 
 
 async def _algorithm(request: web.Request) -> web.Response:
@@ -379,23 +400,71 @@ async def _algorithm(request: web.Request) -> web.Response:
         {"at": iso(datetime.fromisoformat(e["at"])), "version": e["version"], "why": e["why"]}
         for e in installed
     ]
-    return _json({**_algorithm_json(engine, algorithm), "model_history": history})
+    stages = await engine.stages()
+    return _json({**_algorithm_json(engine, algorithm, stages), "model_history": history})
 
 
-def _algorithm_json(engine: PredictionEngine, a: Algorithm) -> dict[str, Any]:
+def _algorithm_json(engine: PredictionEngine, a: Algorithm, stages: Mapping[str, Stage]) -> dict[str, Any]:
     return {
         "name": a.name,
-        "card": {
-            "scientist": a.card.scientist,
-            "character": a.card.character,
-            "logic": a.card.logic,
-            "unique_features": list(a.card.unique_features),
-            "training": a.card.training,
-        },
+        "card": a.card.as_dict(),
         "features": list(a.features),
+        "feature_meanings": {f: FEATURE_MEANINGS[f].as_dict() for f in a.features},
         "training_days": a.training_days,
         "model": engine.models[a.name].as_dict(),
+        "param_meanings": {p: m.as_dict() for p, m in a.param_meanings.items()},
         "status": _status_json(engine, a.name),
+        "validation": _validation_json(engine, a.name),
+        "stage": _stage_json(stages.get(a.name)),
+    }
+
+
+def _validation_json(engine: PredictionEngine, name: str) -> dict[str, Any] | None:
+    """``name``'s report of the latest night (#165), its values as stored; None without one."""
+    report = engine.night_reports.get(name)
+    if report is None or engine.training is None:
+        return None
+    champion, challenger = report.get("champion"), report.get("challenger")
+    return {
+        "day": report.get("day", engine.training["day"]),
+        "validation_days": report.get("validation_days", []),
+        "samples": (report.get("samples") or {}).get("validation"),
+        "challenger": None
+        if challenger is None
+        else {"version": challenger["version"], "loss": challenger.get("loss")},
+        "champion": None
+        if champion is None
+        else {
+            "version": champion["version"],
+            "loss": champion.get("loss"),
+            "trained_on_validation": champion.get("trained_on_validation"),
+        },
+        "promoted": report["promoted"],
+        "reason": report["reason"],
+    }
+
+
+def _stage_json(stage: Stage | None) -> dict[str, Any] | None:
+    """Where an algorithm on probation or on the bench stands toward its next review (#165)."""
+    if stage is None:
+        return None
+    weakest = None
+    if stage.weakest is not None:
+        baseline, lift = stage.weakest
+        weakest = {"baseline": baseline, "n": lift.n, "value": lift.value, "low": lift.low, "high": lift.high}
+    return {
+        "status": stage.status.value,
+        "began": stage.began.isoformat(),
+        # null while waiting for a model trained on the touch target (#170): nothing counted yet
+        "counted_from": None if stage.counted_from is None else stage.counted_from.isoformat(),
+        "days": stage.days,
+        "review_days": list(stage.review_days),
+        "next_review": stage.next_review,
+        "next_review_on": None if stage.next_review_on is None else stage.next_review_on.isoformat(),
+        "lift_days": stage.lift_days,
+        "level": stage.level,
+        "weakest": weakest,
+        "enough": stage.enough,
     }
 
 
@@ -530,7 +599,6 @@ class _Query:
     symbol: str | None  # None: every symbol
     period: str
     days: tuple[date, ...]
-    basis: str
     special: bool
 
     def describe(self) -> dict[str, Any]:
@@ -538,7 +606,6 @@ class _Query:
             "symbol": self.symbol or "all",
             "period": self.period,
             "days": [d.isoformat() for d in self.days],
-            "basis": self.basis,
             "special": "include" if self.special else "exclude",
         }
 
@@ -547,19 +614,32 @@ def _query(request: web.Request, engine: PredictionEngine) -> _Query:
     q = request.query
     symbol = q.get("symbol", "all")
     period = q.get("period", "today")
-    basis = q.get("basis", "b")
     special = q.get("special", "exclude")
     if symbol != "all" and symbol not in engine.symbols:
         raise _error(web.HTTPBadRequest, f"symbol must be all or one of {', '.join(engine.symbols)}")
     if period not in PERIODS:
         raise _error(web.HTTPBadRequest, f"period must be one of {', '.join(PERIODS)}")
-    if basis not in ("a", "b"):
-        raise _error(web.HTTPBadRequest, "basis must be a or b")
+    if "basis" in q and q["basis"] not in LEGACY_BASES:
+        raise _error(web.HTTPBadRequest, "basis is gone (#170): leave it out (a or b is still accepted)")
     if special not in ("exclude", "include"):
         raise _error(web.HTTPBadRequest, "special must be exclude or include")
     today = kst_day(engine.clock.now())
     days = (today,) if period == "today" else tuple(engine.store.prediction_days(today, PERIODS[period]))
-    return _Query(None if symbol == "all" else symbol, period, days, basis, special == "include")
+    return _Query(None if symbol == "all" else symbol, period, days, special == "include")
+
+
+def _echo_basis(request: web.Request, body: dict[str, Any]) -> dict[str, Any]:
+    """``body`` with the ``basis`` a screen from before #170 sent, as it sent it (``LEGACY_BASES``):
+    the order of the query's fields kept, after ``days``."""
+    basis = request.query.get("basis")
+    if basis is None:
+        return body
+    out: dict[str, Any] = {}
+    for key, value in body.items():
+        out[key] = value
+        if key == "days":
+            out["basis"] = basis
+    return out
 
 
 async def _leaderboard(request: web.Request) -> web.Response:
@@ -590,7 +670,8 @@ async def _leaderboard(request: web.Request) -> web.Response:
     def with_status(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return [{**e, "status": statuses.get(e["algorithm"])} for e in entries]
 
-    return _json({**body, "ranked": with_status(body["ranked"]), "unranked": with_status(body["unranked"])})
+    body = {**body, "ranked": with_status(body["ranked"]), "unranked": with_status(body["unranked"])}
+    return _json(_echo_basis(request, body))
 
 
 async def _algorithm_stats(request: web.Request) -> web.Response:
@@ -598,10 +679,7 @@ async def _algorithm_stats(request: web.Request) -> web.Response:
     name = request.match_info["name"]
     query = _query(request, engine)
     known = (
-        {a.name for a in engine.algorithms}
-        | {b.name for b in BASELINES}
-        | set(NAMES)
-        | engine.store.algorithms()
+        {a.name for a in engine.algorithms} | engine.baseline_names | set(NAMES) | engine.store.algorithms()
     )
     if name not in known:
         raise _error(web.HTTPNotFound, f"unknown algorithm {name!r}")
@@ -644,7 +722,7 @@ async def _algorithm_stats(request: web.Request) -> web.Response:
             "by_model_version": by(lambda r: r.model_version),
         }
 
-    return _json(await _stats(request, ("algorithm", name), query, build))
+    return _json(_echo_basis(request, await _stats(request, ("algorithm", name), query, build)))
 
 
 Build = Callable[[dict[str, list[Scored]], dict[str, list[Scored]], dict[str, Excluded]], dict[str, Any]]
@@ -665,10 +743,12 @@ async def _stats(
     def compute() -> dict[str, Any]:
         # Reading and computing both run in the worker: a long history must not hold up
         # the event loop that records and predicts.
-        rows, excluded = engine.store.scored_and_excluded(
-            query.days, query.symbol, query.special, query.basis
-        )
-        algorithms, baselines = split(scored_by_algorithm(rows, query.basis), BASELINE_NAMES)
+        rows, excluded = engine.store.scored_and_excluded(query.days, query.symbol, query.special)
+        if engine.target_version >= 2:
+            # As the statuses go by (#170): an algorithm's predictions by models trained on the
+            # touch target only, not an older model's scored on a label it did not learn.
+            rows = on_target(rows, engine.baseline_names | set(NAMES), engine.target_version)
+        algorithms, baselines = split(scored_by_algorithm(rows), engine.baseline_names)
         for a in engine.algorithms:
             algorithms.setdefault(a.name, [])
         return build(algorithms, baselines, excluded)

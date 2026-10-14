@@ -80,3 +80,52 @@ async def test_the_collector_predicts_from_live_events_and_serves_them(kis: Fake
     assert status["kis"]["connected"] is True
     [book_feed] = [f for f in status["kis"]["feeds"] if f["feed"] == "H0UNASP0"]
     assert book_feed["last_received_at"] == "2026-10-12T09:30:10+09:00"
+
+
+async def test_live_quotes_label_the_touch_target_four_minutes_on(kis: FakeKis, tmp_path: Path) -> None:
+    """The live market view follows each bar close's window as the frames arrive (#167): the
+    bid at 81,500 at 09:32:30 reaches the 09:31 window's upper target (81,450)."""
+    port = free_port()
+    settings = replace(settings_for(kis, tmp_path), api_port=port)
+    clock = FakeClock(at("09:30:10"))
+
+    def book(hhmmss: str, bid: int, ask: int) -> str:
+        return book_frame(
+            {"MKSC_SHRN_ISCD": "005930", "BSOP_HOUR": hhmmss, "BIDP1": str(bid), "ASKP1": str(ask)}
+        )
+
+    kis.script[("H0UNASP0", "005930")] = [book("093010", 81_200, 81_300)]
+    stop = asyncio.Event()
+    task = asyncio.create_task(run_collector(settings, stop=stop, clock=clock))
+    base = f"http://127.0.0.1:{port}/v1"
+    try:
+        await kis.wait_for_subscriptions(set(kis.script))
+        await kis.round_trip()
+        clock.set(at("09:30:50"))
+        await kis.push(book("093050", 81_200, 81_300))
+        await kis.round_trip()
+        clock.set(at("09:31:00.2"))  # the 09:31 bar close: its window opens
+        await poll(f"{base}/symbols/005930/latest", lambda b: b["bar_close"] == "2026-10-12T09:31:00+09:00")
+        for when, bid, ask in [
+            ("09:31:40", 81_200, 81_300),
+            ("09:32:30", 81_500, 81_600),  # the bid reaches 81,450
+            ("09:33:10", 81_200, 81_300),
+            ("09:33:50", 81_200, 81_300),
+            ("09:34:30", 81_200, 81_300),
+        ]:
+            clock.set(at(when))
+            await kis.push(book(when.replace(":", ""), bid, ask))
+            await kis.round_trip()
+        clock.set(at("09:35:00.5"))  # its four minutes are over: scored
+        made = await poll(
+            f"{base}/symbols/005930/predictions?bar_close=2026-10-12T09:31:00%2B09:00",
+            lambda b: any(p["outcome"] and p["outcome"]["touch"] for p in b["predictions"]),
+        )
+    finally:
+        stop.set()
+        await asyncio.wait_for(task, 5)
+
+    touch = next(p["outcome"]["touch"] for p in made["predictions"] if p["outcome"])
+    assert touch["class"] == "up"
+    assert touch["upper_at"] == "2026-10-12T09:32:30+09:00"
+    assert (touch["bid_start"], touch["ask_start"]) == (81_200, 81_300)

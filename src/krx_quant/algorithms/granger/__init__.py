@@ -18,6 +18,8 @@ Personality card:
   lowers the BIC of the regression on its own past: a Granger causality test. Then the
   coefficients of what is kept, by least squares. The four-minute moves of consecutive
   bar closes overlap, so the BIC counts a quarter as many independent ones.
+- **Fails**: when the lead breaks (news of the symbol's own, a silent lead series) or was a
+  chance of the training days.
 
 Training measures the symbol's own moves on closes, which bounce between the bid and the
 ask; a bounce is undone the next minute, so the own coefficients learned lean negative
@@ -30,9 +32,10 @@ import math
 from collections.abc import Mapping, Sequence
 from typing import NamedTuple
 
-from krx_quant.algorithms.contract import Card, Model, NothingToLearn, Sample
+from krx_quant.algorithms.contract import Model, NothingToLearn, Sample
 from krx_quant.algorithms.forecasts import (
     HORIZON_MINUTES,
+    NORMAL_CLASSES,
     UNKNOWN,
     Params,
     lowest_log_loss,
@@ -40,7 +43,9 @@ from krx_quant.algorithms.forecasts import (
     with_outcomes,
 )
 from krx_quant.baselines import Forecast
+from krx_quant.cards import Card, Meaning, learned
 from krx_quant.features import (
+    LEAD_GROUP_NAMES,
     LEAD_GROUPS,
     LEAD_LAGS,
     FeatureValue,
@@ -56,6 +61,35 @@ COEFFICIENTS = (*OWN, *(name for names in GROUPS.values() for name in names))
 # Without a fit: no move expected, and four minutes of a random walk around it, in one
 # minute's standard deviations. A fit sets the coefficients it keeps; the rest stay 0.
 DEFAULT_PARAMS = {**dict.fromkeys(COEFFICIENTS, 0.0), "residual": math.sqrt(HORIZON_MINUTES)}
+TRAINING_DAYS = 20
+_COEFFICIENT_UNIT = "1분 변동성 ÷ 표준편차"
+PARAM_MEANINGS: Mapping[str, Meaning] = {
+    **{
+        own_feature(lag): Meaning(
+            f"자기 lag {lag} 1분 수익률(`{own_feature(lag)}`)의 계수: 그 수익률이 1 표준편차일 때 4분 "
+            "움직임(1분 변동성 단위)에 더하는 값. 0이면 BIC가 그 시차를 고르지 않았다.",
+            _COEFFICIENT_UNIT,
+            learned(TRAINING_DAYS),
+        )
+        for lag in LEAD_LAGS
+    },
+    **{
+        lead_feature(group, lag): Meaning(
+            f"{LEAD_GROUP_NAMES[group]}의 lag {lag} 1분 수익률(`{lead_feature(group, lag)}`)의 계수: 그 "
+            "수익률이 1 표준편차일 때 4분 움직임(1분 변동성 단위)에 더하는 값. 0이면 그 묶음이 Granger "
+            "검정(자기 과거만 쓴 회귀보다 BIC가 낮음)을 통과하지 못했거나 그 시차를 고르지 않았다.",
+            _COEFFICIENT_UNIT,
+            learned(TRAINING_DAYS),
+        )
+        for group in LEAD_GROUPS
+        for lag in LEAD_LAGS
+    },
+    "residual": Meaning(
+        "회귀 잔차의 표준편차: 예측 분포의 폭(1분 변동성 단위). 학습 전 기본값 2는 4분 랜덤워크(√4)다.",
+        "1분 변동성",
+        learned(TRAINING_DAYS),
+    ),
+}
 # A group seen on fewer bar closes than this is not tested.
 MIN_SAMPLES = 100
 # Nor is one seen on less than this share of the bar closes that know the symbol's own past:
@@ -72,7 +106,8 @@ class _Row(NamedTuple):
 class Granger:
     name = "granger"
     features: tuple[str, ...] = (*COEFFICIENTS, "volatility", "flat_ticks")
-    training_days = 20
+    training_days = TRAINING_DAYS
+    param_meanings = PARAM_MEANINGS
     card = Card(
         scientist="Clive Granger",
         character="이웃 관찰",
@@ -86,6 +121,17 @@ class Granger:
             "최근 20거래일 1분봉으로 자기 시차 수를 BIC로 고르고, 묶음마다 시차(1–3분)를 BIC로 "
             "골라 자기 과거만 쓴 회귀보다 BIC를 낮추는 묶음만 남긴다(Granger 인과 검정). "
             "남긴 것의 계수는 최소제곱으로 맞춘다."
+        ),
+        forecasting=(
+            "4분 뒤 중간가 변화를 회귀가 낸 기대 움직임(1분 변동성 × Σ 계수 × 시차 수익률, 틱)을 중심으로, "
+            "폭이 1분 변동성 × 잔차 표준편차인 정규분포로 본다. 남긴 입력의 값을 모르면 그 몫을 0으로 두고 "
+            f"폭을 그 계수만큼 넓힌다(√(잔차² + Σ 계수²)). {NORMAL_CLASSES} 기대수익은 그 중심이다. "
+            "변동성이나 보합 범위를 모르면 세 확률을 1/3씩 둔다."
+        ),
+        failure=(
+            "선행 관계가 바뀌거나 끊기는 장(종목 고유 뉴스로 종목이 따로 움직일 때, 선행 시리즈가 쉬거나 "
+            "피드가 빌 때)에서 틀리기 쉽다. 학습 기간의 관계가 우연이었으면 계수가 잡음을 따른다. 남긴 "
+            "묶음의 값을 모르면 분포가 넓어져 방향 정보가 줄어든다."
         ),
     )
 

@@ -6,8 +6,8 @@ is stopped) and reads the recorded Parquet files. Run it after the close: the da
 recordings are then complete. A recording merged by the archive while it is read is
 listed again.
 
-1. Per predictor: the display delay (bar close to stored, of the ``ok`` predictions) and,
-   of those scored on both bases, how often basis A's class differs from basis B's.
+1. Per predictor: the display delay (bar close to stored, of the ``ok`` predictions) and
+   how many were scored (on the touch label, #170).
 2. The scored predictions' share of special ones, and every prediction's status.
 3. Per symbol: the integrated book's (``H0UNASP0``) spread in ticks at each bar close: the
    last valid book received within the minute before it, from the NXT open on. The
@@ -27,6 +27,7 @@ in turn, as float32 seconds, to stay within the server's memory.
 from __future__ import annotations
 
 import contextlib
+import json
 import sqlite3
 from collections import defaultdict
 from collections.abc import Iterable, Iterator, Sequence
@@ -51,10 +52,11 @@ from krx_quant.feeds.base import KST
 from krx_quant.macro import INDICATORS, MACRO, decided_before, read_partition
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.market_view import prediction_window
-from krx_quant.predictions import SCORED
-from krx_quant.pricing import tick_size
+from krx_quant.predictions import SCORED, TOUCH_JOIN
+from krx_quant.pricing import most_likely, tick_size
 from krx_quant.reference import BAR, KRX_ONLY, MAX_QUOTE_AGE
 from krx_quant.regime import NO_INDICATOR
+from krx_quant.touch import TARGET_VERSION
 
 DEFAULT_DAYS = 20
 QUANTILES = (0.5, 0.9, 0.99)
@@ -81,11 +83,15 @@ def diagnose(data_dir: Path, db: Path, calendar: MarketCalendar, days: int | Non
         if days is not None:
             chosen = chosen[-days:]
         sections = [
-            ("1. 알고리즘별 표시 지연(초, 봉 마감 → 저장)과 기준 A·B", _delays(conn, chosen)),
+            ("1. 알고리즘별 표시 지연(초, 봉 마감 → 저장)과 채점 수", _delays(conn, chosen)),
             ("2. 채점된 예측과 예측 상태", _statuses(conn, chosen)),
             ("3. 종목별 봉 마감 스프레드(틱, 통합 호가)", _spreads(data_dir, chosen, calendar)),
             ("4. 피드별 수신 지연(초, 수신 − 거래소 시각)", _receive_delays(data_dir, chosen)),
             ("5. 매크로 국면(개장 전 결정)", _macro(data_dir, chosen, calendar)),
+            (
+                "6. 도달 정답(#160): 분포·폭·체결가 대비·표시 전·머문 시간",
+                _touches(conn, chosen),
+            ),
         ]
     lines = [f"진단 {chosen[0]} – {chosen[-1]} ({len(chosen)}거래일)" if chosen else "진단: 데이터 없음"]
     for title, body in sections:
@@ -144,21 +150,19 @@ def _delays(conn: sqlite3.Connection | None, days: Sequence[date]) -> list[str]:
     ):
         seconds = (datetime.fromisoformat(displayed_at) - datetime.fromisoformat(bar_close)).total_seconds()
         delays[name].append(seconds)
-    scored: dict[str, tuple[int, int, int]] = {}
-    for name, n, both, other in conn.execute(
-        "SELECT p.algorithm, COUNT(*), SUM(o.class_a IS NOT NULL AND o.class_b IS NOT NULL),"
-        " SUM(o.class_a IS NOT NULL AND o.class_b IS NOT NULL AND o.class_a != o.class_b)"
-        f" FROM predictions p JOIN outcomes o ON o.prediction_id = p.id WHERE {SCORED} AND {where}"
-        " GROUP BY p.algorithm",
-        params,
-    ):
-        scored[name] = (n, both or 0, other or 0)
+    scored: dict[str, int] = dict(
+        conn.execute(
+            f"SELECT p.algorithm, COUNT(*) FROM predictions p JOIN outcomes o ON o.prediction_id = p.id"
+            f" {TOUCH_JOIN} WHERE {SCORED} AND {where} GROUP BY p.algorithm",
+            params,
+        ).fetchall()
+    )
     lines = []
     for name in sorted(delays):
-        n, both, other = scored.get(name, (0, 0, 0))
-        differ = f"A≠B {other / both:.1%} (둘 다 채점 {both})" if both else "A≠B —"
         values = pa.array(delays[name], pa.float64())
-        lines.append(f"{name}: 예측 {len(values)}, 지연 {_distribution(values, '.2f')} · 채점 {n}, {differ}")
+        lines.append(
+            f"{name}: 예측 {len(values)}, 지연 {_distribution(values, '.2f')} · 채점 {scored.get(name, 0)}"
+        )
     return lines
 
 
@@ -173,8 +177,8 @@ def _statuses(conn: sqlite3.Connection | None, days: Sequence[date]) -> list[str
     if not statuses:
         return []
     n, special = conn.execute(
-        "SELECT COUNT(*), COALESCE(SUM(o.special), 0)"
-        f" FROM predictions p JOIN outcomes o ON o.prediction_id = p.id WHERE {SCORED} AND {where}",
+        "SELECT COUNT(*), COALESCE(SUM(o.special), 0) FROM predictions p"
+        f" JOIN outcomes o ON o.prediction_id = p.id {TOUCH_JOIN} WHERE {SCORED} AND {where}",
         params,
     ).fetchone()
     share = f" ({special / n:.1%})" if n else ""
@@ -265,3 +269,106 @@ def _macro(data_dir: Path, days: Sequence[date], calendar: MarketCalendar) -> li
         f"일부 빠짐: {'; '.join(partial) or '없음'}",
         f"기록 없음: {', '.join(undecided) or '없음'}",
     ]
+
+
+def _touches(conn: sqlite3.Connection | None, days: Sequence[date]) -> list[str]:
+    """The touch labels recorded (#167): their classes by symbol and at the open, at other
+    widths, against the trade prints, touched before a hit was displayed, and how long the
+    quote stayed at the target."""
+    if conn is None or not days:
+        return []
+    cond, params = _on_days(days)
+    try:
+        rows = conn.execute(
+            "SELECT symbol, bar_close, class, unscorable, path FROM touches p"
+            f" WHERE target_version = {TARGET_VERSION} AND {cond} ORDER BY bar_close",
+            params,
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return []  # a DB from before the touch labels
+    if not rows:
+        return []
+
+    def share(k: int, n: int) -> str:
+        return f"{100 * k / n:.0f}%" if n else "—"
+
+    def split(classes: list[str]) -> str:
+        n = len(classes)
+        return " · ".join(f"{label} {share(classes.count(c), n)}" for c, label in _CLASSES) + f" ({n}창)"
+
+    scored = [(r[0], r[1], r[2], json.loads(r[4])) for r in rows if r[2] is not None]
+    unscorable: dict[str, int] = {}
+    for r in rows:
+        if r[2] is None:
+            unscorable[r[3]] = unscorable.get(r[3], 0) + 1
+    lines = []
+    for symbol in sorted({s for s, *_ in scored}):
+        lines.append(f"{symbol}: {split([c for s, _, c, _ in scored if s == symbol])}")
+    opening = [c for _, close, c, _ in scored if close[11:16] <= "09:30"]
+    later = [c for _, close, c, _ in scored if close[11:16] > "09:30"]
+    lines.append(f"09:01–09:30: {split(opening)} · 그 뒤: {split(later)}")
+    if unscorable:
+        lines.append("채점 불가: " + ", ".join(f"{why} {n}" for why, n in sorted(unscorable.items())))
+    # Other widths, from the highest bid and lowest ask (the same order rule: up first).
+    widths = []
+    for name, scale, extra in (("k", 1, 0), ("k+1", 1, 1), ("2k", 2, 0)):
+        classes = []
+        for *_, path in scored:
+            w = (scale * path["k"] + extra) * path["tick"]
+            up = path["max_bid"] is not None and path["max_bid"] >= path["anchor"] + w
+            down = path["min_ask"] is not None and path["min_ask"] <= path["anchor"] - w
+            classes.append("up" if up else "down" if down else "flat")
+        widths.append(f"{name} {split(classes)}")
+    lines.append("폭별: " + " | ".join(widths))
+    # The trade prints against the quote touch: a print at the target while the bid never got there.
+    print_only = sum(
+        1
+        for *_, p in scored
+        if (p["trade_high"] is not None and p["trade_high"] >= p["upper"] and p["upper_at"] is None)
+        or (p["trade_low"] is not None and p["trade_low"] <= p["lower"] and p["lower_at"] is None)
+    )
+    both = sum(1 for *_, p in scored if p["upper_at"] and p["lower_at"])
+    n = len(scored)
+    lines.append(
+        f"체결가만 목표에 닿고 호가는 닿지 않음 {share(print_only, n)} · 위아래 둘 다 닿음 {share(both, n)}"
+    )
+    lines += _touched_before_display(conn, cond, params)
+    dwells = [
+        p[f"{side}_dwell"]
+        for *_, p in scored
+        for side in ("upper", "lower")
+        if p[f"{side}_dwell"] is not None
+    ]
+    if dwells:
+        values = pa.array(sorted(dwells))
+        short = sum(1 for d in dwells if d < 1)
+        lines.append(
+            f"목표에 머문 시간(초): {_distribution(values, '.1f')} · 1초 미만 {share(short, len(dwells))}"
+        )
+    return lines
+
+
+_CLASSES = (("up", "상승"), ("flat", "보합"), ("down", "하락"))
+
+
+def _touched_before_display(conn: sqlite3.Connection, cond: str, params: list[str]) -> list[str]:
+    """Of the forecasts right on the touch label (up or down), those whose target was reached
+    before they were displayed: done before anyone could act on them."""
+    rows = conn.execute(
+        "SELECT p.p_up, p.p_flat, p.p_down, p.displayed_at, t.class, t.path FROM predictions p"
+        " JOIN touches t ON t.symbol = p.symbol AND t.bar_close = p.bar_close"
+        f" AND t.target_version = {TARGET_VERSION}"
+        f" WHERE p.status = 'ok' AND t.class IN ('up', 'down') AND {cond}",
+        params,
+    ).fetchall()
+    hits = before = 0
+    for p_up, p_flat, p_down, displayed_at, cls, path in rows:
+        if most_likely(p_up, p_flat, p_down).value != cls:
+            continue
+        hits += 1
+        reached = json.loads(path)["upper_at" if cls == "up" else "lower_at"]
+        if reached is not None and datetime.fromisoformat(reached) < datetime.fromisoformat(displayed_at):
+            before += 1
+    if not hits:
+        return []
+    return [f"맞은 상승·하락 예측 {hits}개 중 표시 전에 이미 닿음 {before}개 ({100 * before / hits:.1f}%)"]

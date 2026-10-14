@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import heapq
 import logging
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from functools import partial
@@ -21,6 +21,7 @@ import pyarrow.parquet as pq
 
 from krx_quant.algorithms import ALGORITHMS, Algorithm, Model, load_models
 from krx_quant.archive import partition_files
+from krx_quant.climate import CLIMATE, load_climate
 from krx_quant.clock import FakeClock
 from krx_quant.config import Settings
 from krx_quant.consensus import Timing
@@ -60,14 +61,17 @@ async def replay(
     regimes: Regimes | None = None,
     admits: Callable[[Algorithm], bool] | None = None,
     review_rules: Rules | None = None,
+    target_version: int = 1,
+    climate: Model | None = None,
 ) -> PredictionEngine:
     """Feed ``events`` (in receipt order) received by ``until`` to an engine storing into ``db``.
 
     The clock starts at ``start`` (default: midnight of ``until``'s day). Each bar close and
     scoring runs ``display_delay`` after its time, as a busy engine would: what it predicts
-    from stays what was received by the bar close, but it is displayed (and scored on
-    basis B) later. The clock stands still while algorithms work; their time budgets
-    count real time. The engine is returned with its clock at ``until``.
+    from stays what was received by the bar close, but it is displayed later (its basis B
+    outcome, still written, moves with it). The clock stands still while algorithms work; their time budgets
+    count real time. The engine is returned with its clock at ``until``. It forecasts
+    ``target_version``'s target, with the climate baseline's table ``climate`` (#169).
     """
     clock = FakeClock(start or datetime.combine(kst_day(until), time(), KST))
     engine = PredictionEngine(
@@ -87,6 +91,8 @@ async def replay(
         regimes=regimes,
         admits=admits,
         review_rules=review_rules,
+        target_version=target_version,
+        climate=climate,
     )
     await replay_into(engine, clock, events, until=until, display_delay=display_delay)
     return engine
@@ -123,17 +129,22 @@ async def _run_until(engine: PredictionEngine, clock: FakeClock, until: datetime
 
 
 def recorded_events(
-    data_dir: Path, day: date, symbols: Sequence[str], leaders: Leaders | None = None
+    data_dir: Path,
+    day: date,
+    symbols: Sequence[str],
+    leaders: Leaders | None = None,
+    feeds: Collection[str] | None = None,
 ) -> Iterator[Event]:
-    """The engine's events recorded on ``day``, in receipt order.
+    """The engine's events recorded on ``day``, in receipt order; of ``feeds`` only, if given.
 
     Each partition is read file by file, a batch at a time, with only the columns the
     engine uses, and the partitions are merged by receipt time: memory stays at about a
     batch per partition however long the day. Raises FileNotFoundError if none of them
     were recorded that day.
     """
+    read = {f: c for f, c in ENGINE_FEEDS.items() if feeds is None or f in feeds}
     streams: list[Iterator[Event]] = []
-    for feed, columns in ENGINE_FEEDS.items():
+    for feed, columns in read.items():
         root = data_dir / "events" / f"date={day.isoformat()}" / f"feed={feed}"
         for key in _keys(feed, root, symbols, leaders or Leaders()):
             partition = root / f"symbol={key}"
@@ -141,7 +152,7 @@ def recorded_events(
             if files:
                 streams.append(_partition_rows(feed, files, columns))
     if not streams:
-        raise FileNotFoundError(f"no events of {', '.join(ENGINE_FEEDS)} recorded on {day} in {data_dir}")
+        raise FileNotFoundError(f"no events of {', '.join(read)} recorded on {day} in {data_dir}")
     # Stable: rows received at the same instant keep the order of the streams.
     return heapq.merge(*streams, key=lambda event: event[1]["received_at"])
 
@@ -206,14 +217,18 @@ async def replay_day(settings: Settings, day: date, db: Path | None = None) -> R
         leftover.unlink(missing_ok=True)
     models: dict[str, Model] = {}
     set_aside: list[str] = []
-    for name, model in load_models(settings.state_dir, ALGORITHMS).items():
+    saved = load_models(settings.state_dir, ALGORITHMS)
+    if settings.target_version >= 2:
+        saved[CLIMATE] = load_climate(settings.state_dir)
+    for name, model in saved.items():
         if model.trained_until is not None and model.trained_until >= day:
             set_aside.append(
                 f"{model.version} was trained on data up to {model.trained_until}; using {name}'s default"
             )
         else:
             models[name] = model
-    engine = await replay_recorded(settings, day, events, db=db, models=models)
+    climate = models.pop(CLIMATE, None)
+    engine = await replay_recorded(settings, day, events, db=db, models=models, climate=climate)
     try:
         return ReplayedDay(db, engine.store.summary(), set_aside)
     finally:
@@ -229,9 +244,11 @@ async def replay_recorded(
     models: Mapping[str, Model],
     algorithms: Sequence[Algorithm] = ALGORITHMS,
     calendar: MarketCalendar | None = None,
+    climate: Model | None = None,
 ) -> PredictionEngine:
     """``day``'s recorded ``events``, all day, through an engine set up as the server's (its
-    settings, calendar and macro regimes) storing into ``db``."""
+    settings, calendar, macro regimes and target version) storing into ``db``; with the touch
+    target, the climate baseline's table ``climate`` (its defaults without)."""
     start = datetime.combine(day, time(), KST)
     return await replay(
         events,
@@ -248,6 +265,8 @@ async def replay_recorded(
         leaders=Leaders.of(settings),
         regimes=partial(day_regime, settings.data_dir),
         review_rules=Rules.of(settings),
+        target_version=settings.target_version,
+        climate=climate,
     )
 
 

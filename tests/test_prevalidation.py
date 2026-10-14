@@ -8,6 +8,7 @@ every four minutes, and a registry of stand-in algorithms. Output: the report
 from __future__ import annotations
 
 import json
+import sqlite3
 from collections.abc import Sequence
 from dataclasses import replace
 from datetime import date, datetime, time, timedelta
@@ -16,7 +17,7 @@ from typing import Any
 
 import pytest
 
-from krx_quant.algorithms import Algorithm, Card, Model, NothingToLearn, RegistrationError, Sample, save_model
+from krx_quant.algorithms import Algorithm, Model, NothingToLearn, RegistrationError, Sample, save_model
 from krx_quant.baselines import Forecast
 from krx_quant.cli import main
 from krx_quant.clock import FakeClock
@@ -31,7 +32,7 @@ from krx_quant.predictions import DB_NAME, PredictionStore
 from krx_quant.prevalidation import admits, code_digest, prevalidate, report_path
 from krx_quant.replay import replay_into
 from krx_quant.swap import reload_models
-from tests.algorithm_doubles import FixedAlgorithm
+from tests.algorithm_doubles import FixedAlgorithm, stand_in_card, stand_in_meanings
 from tests.replay_events import api, at, book, get_json, run, trade
 from tests.test_lifecycle import Outbox
 from tests.test_replay import busy_morning
@@ -67,7 +68,8 @@ class Contrarian:
     def __init__(self, name: str, own: str = "minute_ticks", lag: int = 4) -> None:
         self.name = name
         self.features: tuple[str, ...] = tuple(dict.fromkeys(("minute_ticks", own)))
-        self.card = Card(f"Test {name}", "test", "the last minutes undone", (own,), "nothing")
+        self.card = stand_in_card(name, "the last minutes undone", (own,), "nothing")
+        self.param_meanings = stand_in_meanings()
         self._lag = lag
         self.fitted: list[list[date]] = []  # the days each fit trained on
 
@@ -127,7 +129,14 @@ async def test_an_algorithm_that_beats_the_baselines_on_its_own_features_passes(
     }
     assert saved["timed_out"] == 0
     assert saved["stats"]["n"] > 200 and saved["stats"]["lift"]["low"] > 0
-    assert set(saved["stats"]["lift"]["vs"]) == {"baseline-flat", "baseline-persist", "baseline-random"}
+    # The touch target's four baselines, the default (#170).
+    assert set(saved["stats"]["lift"]["vs"]) == {
+        "baseline-flat",
+        "baseline-persist",
+        "baseline-random",
+        "baseline-climate",
+    }
+    assert saved["target_version"] == 2
     assert set(saved["correlations"]) <= {"alpha"}, "alpha never changes its mind: nothing to correlate"
 
 
@@ -224,7 +233,7 @@ async def listed(engine: PredictionEngine) -> dict[str, str]:
 async def test_a_new_algorithm_waits_for_its_prevalidation_then_starts_on_probation(tmp_path: Path) -> None:
     s = settings(tmp_path)
     registry: list[Algorithm] = [ALPHA, Contrarian("contrarian")]
-    gate = admits(s.state_dir)
+    gate = admits(s.state_dir, s.target_version)  # the engine's target, the touch target (#170)
     live_day = date(2026, 9, 28)  # the Monday after the ten days
     events = swings(live_day, end="10:00:00")
     morning = [e for e in events if e[1]["received_at"] < at("09:20:00", live_day)]
@@ -282,6 +291,19 @@ async def test_a_report_counts_only_for_the_code_that_passed(tmp_path: Path) -> 
     path.write_text(json.dumps({"passed": True, "code": code_digest(candidate)}))
     await replay_into(engine, engine.clock, [], until=at("09:08:00"))
     assert engine.waiting() == []
+
+
+def test_a_report_counts_only_for_the_target_it_was_scored_on(tmp_path: Path) -> None:
+    candidate = Contrarian("contrarian")
+    path = report_path(tmp_path / "state", "contrarian")
+    path.parent.mkdir(parents=True)
+    passed = {"passed": True, "code": code_digest(candidate)}
+    path.write_text(json.dumps(passed))  # before #169: the four-minute move
+    assert admits(tmp_path / "state")(candidate)
+    assert not admits(tmp_path / "state", target_version=2)(candidate), "not judged on the touch target"
+    path.write_text(json.dumps({**passed, "target_version": 2}))
+    assert admits(tmp_path / "state", target_version=2)(candidate)
+    assert not admits(tmp_path / "state")(candidate)
 
 
 async def test_an_algorithm_waiting_is_alerted_once_after_the_engine_starts(tmp_path: Path) -> None:
@@ -390,3 +412,52 @@ async def test_any_other_error_in_training_fails_the_pre_validation(tmp_path: Pa
         await prevalidate(s, "broken", algorithms=[ALPHA, Broken("broken")], now=AFTER)
 
     assert not report_path(s.state_dir, "broken").exists(), "no report: the engine never starts it"
+
+
+async def test_with_the_touch_target_it_trains_replays_and_is_judged_on_the_touch_label(
+    tmp_path: Path,
+) -> None:
+    class Watched(Contrarian):  # keeps what it was trained on
+        def fit(self, samples: Sequence[Sample]) -> Model:
+            self.samples = list(samples)
+            return super().fit(samples)
+
+    s = replace(settings(tmp_path, DAYS[:3]), target_version=2)
+    candidate = Watched("contrarian")
+
+    result = await prevalidate(s, "contrarian", algorithms=[ALPHA, candidate], now=AFTER)
+
+    # Trained on the touch target: its samples carry the terms of its forecast.
+    assert candidate.samples and all(x.features.touch is not None for x in candidate.samples)
+    assert set(result.stats.lifts) == {
+        "baseline-flat",
+        "baseline-persist",
+        "baseline-random",
+        "baseline-climate",
+    }
+    with sqlite3.connect(result.db) as db:
+        # Judged on the touch label: every prediction of it with a label and basis A's mid-points.
+        [(labelled,)] = db.execute(
+            "SELECT COUNT(*) FROM predictions p JOIN outcomes o ON o.prediction_id = p.id"
+            " JOIN touches t ON t.symbol = p.symbol AND t.bar_close = p.bar_close"
+            " WHERE p.algorithm = 'contrarian' AND p.status = 'ok' AND t.class IS NOT NULL"
+            " AND o.mid_close IS NOT NULL AND o.mid_target IS NOT NULL AND o.special = 0"
+        )
+        versions = dict(
+            db.execute(
+                "SELECT substr(bar_close, 1, 10), model_version FROM predictions"
+                " WHERE algorithm = 'baseline-climate' GROUP BY 1"
+            )
+        )
+        persist = {
+            v
+            for (v,) in db.execute(
+                "SELECT model_version FROM predictions WHERE algorithm = 'baseline-persist'"
+            )
+        }
+    assert result.stats.summary.n == labelled > 0
+    # The climate table, refitted before each day on the days before it.
+    assert versions[str(DAYS[0])] == "baseline-climate-default"
+    assert versions[str(DAYS[1])].startswith(f"baseline-climate-{DAYS[0]:%Y%m%d}-")
+    assert versions[str(DAYS[2])].startswith(f"baseline-climate-{DAYS[1]:%Y%m%d}-")
+    assert persist == {"v2"}

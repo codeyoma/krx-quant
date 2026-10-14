@@ -199,7 +199,7 @@
           "description": "null unless the status is ok: only those are scored.",
           "oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]
         },
-        "status": {"enum": ["ok", "timed_out", "error", "vi", "no_book", "no_members", "none_finished"]},
+        "status": {"enum": ["ok", "timed_out", "error", "vi", "no_book", "no_members", "none_finished", "no_previous"]},
         "blocked": {
           "description": "Why a final consensus is not to be acted on (#88); null for any other prediction.",
           "enum": [null, "special", "no_reference", "expired"]
@@ -235,19 +235,68 @@
       "type": "object",
       "required": [
         "mid_close", "mid_display", "mid_target", "flat_ticks", "class_a", "class_b",
-        "special", "unscorable", "scored_at"
-      ],
+        "special", "unscorable", "scored_at", "touch"],
       "additionalProperties": false,
       "properties": {
         "mid_close": {"$ref": "#/$defs/price"},
         "mid_display": {"$ref": "#/$defs/price"},
         "mid_target": {"$ref": "#/$defs/price"},
         "flat_ticks": {"type": ["integer", "null"], "minimum": 1},
-        "class_a": {"$ref": "#/$defs/class"},
-        "class_b": {"$ref": "#/$defs/class"},
+        "class_a": {
+          "description": "For one release (#170): the bar close's touch label, as touch.class (no longer basis A's class, which stays in the DB).",
+          "$ref": "#/$defs/class"
+        },
+        "class_b": {
+          "description": "For one release (#170): the touch label too, as class_a.",
+          "$ref": "#/$defs/class"
+        },
         "special": {"type": "boolean"},
+        "unscorable": {
+          "description": "Why the touch label is missing (#170): touch.unscorable, or 'no touch label' where the bar close has none; null when it is there.",
+          "type": ["string", "null"]
+        },
+        "scored_at": {"$ref": "#/$defs/time"},
+        "touch": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/touch"}]}
+      }
+    },
+    "touch": {
+      "description": "A bar close's touch label (#160, #167): what the outcome is scored on (#170).",
+      "type": "object",
+      "required": [
+        "target_version", "class", "unscorable", "anchor", "tick", "k", "upper", "lower",
+        "bid_start", "ask_start", "bid_end", "ask_end",
+        "upper_at", "upper_price", "upper_dwell", "upper_size",
+        "lower_at", "lower_price", "lower_dwell", "lower_size",
+        "max_bid", "max_bid_at", "min_ask", "min_ask_at", "trade_high", "trade_low"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "target_version": {"type": "integer", "minimum": 2},
+        "class": {"$ref": "#/$defs/class"},
         "unscorable": {"type": ["string", "null"]},
-        "scored_at": {"$ref": "#/$defs/time"}
+        "anchor": {"$ref": "#/$defs/price"},
+        "tick": {"type": ["number", "null"]},
+        "k": {"type": ["integer", "null"], "minimum": 1},
+        "upper": {"$ref": "#/$defs/price"},
+        "lower": {"$ref": "#/$defs/price"},
+        "bid_start": {"$ref": "#/$defs/price"},
+        "ask_start": {"$ref": "#/$defs/price"},
+        "bid_end": {"$ref": "#/$defs/price"},
+        "ask_end": {"$ref": "#/$defs/price"},
+        "upper_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]},
+        "upper_price": {"$ref": "#/$defs/price"},
+        "upper_dwell": {"type": ["number", "null"], "minimum": 0},
+        "upper_size": {"type": ["number", "null"]},
+        "lower_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]},
+        "lower_price": {"$ref": "#/$defs/price"},
+        "lower_dwell": {"type": ["number", "null"], "minimum": 0},
+        "lower_size": {"type": ["number", "null"]},
+        "max_bid": {"$ref": "#/$defs/price"},
+        "max_bid_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]},
+        "min_ask": {"$ref": "#/$defs/price"},
+        "min_ask_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]},
+        "trade_high": {"$ref": "#/$defs/price"},
+        "trade_low": {"$ref": "#/$defs/price"}
       }
     },
     "latest": {
@@ -356,36 +405,182 @@
     "algorithm_fields": {
       "description": "The fields of an algorithm, open so the detail can add to them.",
       "type": "object",
-      "required": ["name", "card", "features", "training_days", "model", "status"],
+      "required": [
+        "name", "card", "features", "feature_meanings", "training_days", "model", "param_meanings", "status",
+        "validation", "stage"
+      ],
       "properties": {
         "name": {"type": "string"},
         "card": {
-          "type": "object",
-          "required": ["scientist", "character", "logic", "unique_features", "training"],
-          "additionalProperties": false,
-          "properties": {
-            "scientist": {"type": "string"},
-            "character": {"type": "string"},
-            "logic": {"type": "string"},
-            "unique_features": {"type": "array", "items": {"type": "string"}},
-            "training": {"type": "string"}
-          }
+          "description": "An algorithm's card always names its scientist.",
+          "$ref": "#/$defs/card",
+          "properties": {"scientist": {"type": "string"}},
+          "unevaluatedProperties": false
         },
         "features": {"type": "array", "items": {"type": "string"}},
+        "feature_meanings": {
+          "description": "Each of its features (every name in features): what it is, its unit, when it is known.",
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/meaning"}
+        },
+        "param_meanings": {
+          "description": "Every parameter its model can hold (default or fitted; a superset of model.params' names).",
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/meaning"}
+        },
         "training_days": {"type": "integer", "minimum": 1},
         "model": {
           "type": "object",
-          "required": ["version", "params", "trained", "trained_until"],
+          "required": ["version", "params", "trained", "trained_until", "training", "target_version"],
           "additionalProperties": false,
           "properties": {
             "version": {"type": "string"},
             "params": {"type": "object", "additionalProperties": {"type": "number"}},
             "trained": {"type": ["string", "null"]},
-            "trained_until": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/day"}]}
+            "trained_until": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/day"}]},
+            "training": {"$ref": "#/$defs/model_training"},
+            "target_version": {
+              "description": "The target its labels were of (#170): 2 the touch target, 1 the four-minute move. null for the defaults and for a model saved before it was recorded (the four-minute move's). Only models of 2 count toward the statuses and the consensus weights.",
+              "type": ["integer", "null"],
+              "minimum": 1
+            }
           }
         },
-        "status": {"$ref": "#/$defs/standing"}
+        "status": {"$ref": "#/$defs/standing"},
+        "validation": {"$ref": "#/$defs/night_validation"},
+        "stage": {"$ref": "#/$defs/stage"}
       }
+    },
+    "model_training": {
+      "description": "What the model was trained on, as values (#165): trained's text. null for the defaults and for a model saved before #165.",
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "required": ["first_day", "last_day", "samples", "loss", "days"],
+          "additionalProperties": false,
+          "properties": {
+            "first_day": {"$ref": "#/$defs/day"},
+            "last_day": {"$ref": "#/$defs/day"},
+            "samples": {"type": "integer", "minimum": 1},
+            "loss": {"type": "number", "description": "mean log loss on its own training samples: not comparable with a validation loss"},
+            "days": {
+              "description": "The days trained on by where their labels came from: recorded (mid-points) and bars (one-minute closes). null when the samples did not say.",
+              "oneOf": [
+                {"type": "null"},
+                {
+                  "type": "object",
+                  "required": ["recorded", "bars"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "recorded": {"type": "integer", "minimum": 0},
+                    "bars": {"type": "integer", "minimum": 0}
+                  }
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "night_validation": {
+      "description": "The algorithm's report of the latest night's training (#165), as stored (reports/<day>/<algorithm>.json). null without a night, or without a report for it.",
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "required": ["day", "validation_days", "samples", "challenger", "champion", "promoted", "reason"],
+          "additionalProperties": false,
+          "properties": {
+            "day": {"$ref": "#/$defs/day"},
+            "validation_days": {"type": "array", "items": {"$ref": "#/$defs/day"}},
+            "samples": {"type": ["integer", "null"], "minimum": 0, "description": "validation samples; null where it did not get to validate"},
+            "challenger": {
+              "description": "The new model; null when it was not trained.",
+              "oneOf": [
+                {"type": "null"},
+                {
+                  "type": "object",
+                  "required": ["version", "loss"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "version": {"type": "string"},
+                    "loss": {"type": ["number", "null"]}
+                  }
+                }
+              ]
+            },
+            "champion": {
+              "description": "The model the server ran; null when there was nothing to validate on.",
+              "oneOf": [
+                {"type": "null"},
+                {
+                  "type": "object",
+                  "required": ["version", "loss", "trained_on_validation"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "version": {"type": "string"},
+                    "loss": {"type": ["number", "null"]},
+                    "trained_on_validation": {"type": ["boolean", "null"]}
+                  }
+                }
+              ]
+            },
+            "promoted": {"type": "boolean"},
+            "reason": {"type": "string"}
+          }
+        }
+      ]
+    },
+    "stage": {
+      "description": "Where an algorithm on probation or on the bench stands toward its next review (#165), as of the latest review. null in any other status.",
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "required": [
+            "status", "began", "counted_from", "days", "review_days", "next_review", "next_review_on",
+            "lift_days", "level", "weakest", "enough"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "status": {"enum": ["probation", "bench"]},
+            "began": {"$ref": "#/$defs/day"},
+            "counted_from": {
+              "description": "The first day counted; on probation, the first day it predicted with a model trained on the touch target (#170). null while it waits for one: nothing is counted yet.",
+              "oneOf": [{"type": "null"}, {"$ref": "#/$defs/day"}]
+            },
+            "days": {"type": "integer", "minimum": 0, "description": "trading days counted through the latest review"},
+            "review_days": {"type": "array", "items": {"type": "integer", "minimum": 1}},
+            "next_review": {"type": ["integer", "null"], "minimum": 1, "description": "the next review day, as the day counted; null past the last"},
+            "next_review_on": {
+              "description": "The day it falls on if the engine predicts every trading day.",
+              "oneOf": [{"type": "null"}, {"$ref": "#/$defs/day"}]
+            },
+            "lift_days": {"type": "integer", "minimum": 0},
+            "level": {"type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1},
+            "weakest": {
+              "description": "The weakest lift by trading day over lift_days, at level; null unless every baseline has one (two days or more).",
+              "oneOf": [
+                {"type": "null"},
+                {
+                  "type": "object",
+                  "required": ["baseline", "n", "value", "low", "high"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "baseline": {"type": "string"},
+                    "n": {"type": "integer", "minimum": 2},
+                    "value": {"type": "number"},
+                    "low": {"type": "number"},
+                    "high": {"type": "number"}
+                  }
+                }
+              ]
+            },
+            "enough": {"type": "boolean", "description": "enough scored predictions and pairs over lift_days (min_sample) for the review to decide"}
+          }
+        }
+      ]
     },
     "standing": {
       "type": "object",
@@ -411,9 +606,63 @@
     "algorithms": {
       "description": "GET /v1/algorithms",
       "type": "object",
-      "required": ["algorithms"],
+      "required": ["algorithms", "baselines", "consensus"],
       "additionalProperties": false,
-      "properties": {"algorithms": {"type": "array", "items": {"$ref": "#/$defs/algorithm"}}}
+      "properties": {
+        "algorithms": {"type": "array", "items": {"$ref": "#/$defs/algorithm"}},
+        "baselines": {
+          "description": "The baselines' cards: three, four with the touch target (KRX_TARGET_VERSION=2, #169: baseline-climate).",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "card"],
+            "additionalProperties": false,
+            "properties": {
+              "name": {"enum": ["baseline-flat", "baseline-persist", "baseline-random", "baseline-climate"]},
+              "card": {"$ref": "#/$defs/card"}
+            }
+          }
+        },
+        "consensus": {
+          "description": "The two consensus predictions' cards; their members and weights now are GET /v1/consensus.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "card"],
+            "additionalProperties": false,
+            "properties": {
+              "name": {"enum": ["consensus-fast", "consensus-final"]},
+              "card": {"$ref": "#/$defs/card"}
+            }
+          }
+        }
+      }
+    },
+    "card": {
+      "description": "A predictor's card (#164): written for the target now, the mid-point's change four minutes on.",
+      "type": "object",
+      "required": ["scientist", "character", "logic", "unique_features", "training", "forecasting", "failure"],
+      "additionalProperties": false,
+      "properties": {
+        "scientist": {"type": ["string", "null"], "description": "null: a baseline, named after no one"},
+        "character": {"type": "string"},
+        "logic": {"type": "string"},
+        "unique_features": {"type": "array", "items": {"type": "string"}},
+        "training": {"type": "string"},
+        "forecasting": {"type": "string", "description": "how the three probabilities are made"},
+        "failure": {"type": "string", "description": "the market it tends to be wrong in"}
+      }
+    },
+    "meaning": {
+      "description": "What a feature or a model parameter is (#164).",
+      "type": "object",
+      "required": ["meaning", "unit", "known"],
+      "additionalProperties": false,
+      "properties": {
+        "meaning": {"type": "string"},
+        "unit": {"type": "string"},
+        "known": {"type": "string", "description": "when it is known: at the bar close, before the open, learned overnight"}
+      }
     },
 
     "interval": {
@@ -538,7 +787,7 @@
         "unscorable": {"type": "integer", "minimum": 0},
         "status": {
           "type": "object",
-          "propertyNames": {"enum": ["timed_out", "error", "vi", "no_book", "no_members", "none_finished"]},
+          "propertyNames": {"enum": ["timed_out", "error", "vi", "no_book", "no_members", "none_finished", "no_previous"]},
           "additionalProperties": {"type": "integer", "minimum": 1}
         }
       }
@@ -564,12 +813,15 @@
     "query": {
       "description": "The query a leaderboard or stats answer was computed for, open so they can add to it.",
       "type": "object",
-      "required": ["symbol", "period", "days", "basis", "special", "min_sample"],
+      "required": ["symbol", "period", "days", "special", "min_sample"],
       "properties": {
         "symbol": {"type": "string"},
         "period": {"enum": ["today", "5d", "20d"]},
         "days": {"type": "array", "items": {"$ref": "#/$defs/day"}},
-        "basis": {"enum": ["a", "b"]},
+        "basis": {
+          "description": "Gone with #170 (every prediction is scored on its touch label): for one release the basis a screen from before sent, echoed back as sent; absent when none was sent.",
+          "enum": ["a", "b"]
+        },
         "special": {"enum": ["exclude", "include"]},
         "min_sample": {"type": "integer", "minimum": 1}
       }

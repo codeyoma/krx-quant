@@ -39,6 +39,7 @@ from krx_quant.notify import send_notice, send_test_alert
 from krx_quant.predictions import DB_NAME, PredictionStore
 from krx_quant.prevalidation import PREVALIDATION_DAYS, REGISTERED_BEFORE, prevalidate, report_path
 from krx_quant.replay import replay_day
+from krx_quant.rescore import EngineRunning, rescore
 from krx_quant.training import fit_algorithm
 
 
@@ -120,7 +121,7 @@ def _replay(day: date, db: Path | None) -> int:
     for line in replayed.set_aside:
         print(line, file=sys.stderr)
     summary = replayed.summary
-    print(f"replayed {day} into {replayed.db} (counts on basis A)")
+    print(f"replayed {day} into {replayed.db} (counts on the touch label)")
     for s in summary:
         print(
             f"{s.algorithm}: {s.predictions} predictions, {s.skipped} skipped, {s.scored} scored,"
@@ -130,6 +131,26 @@ def _replay(day: date, db: Path | None) -> int:
         s = summary[0]
         print(f"outcomes: {s.up} up, {s.flat} flat, {s.down} down")
     return 0
+
+
+def _rescore() -> int:
+    settings = Settings.from_env(require_kis=False)
+    try:
+        filled = rescore(settings, datetime.now(KST))
+    except EngineRunning as e:
+        print(e, file=sys.stderr)
+        return 1
+    if not filled:
+        print("no predicted day to rescore")
+    for f in filled:
+        if f.failed is not None:
+            print(f"{f.day}: not read ({f.failed}); its labels are kept", file=sys.stderr)
+            continue
+        line = f"{f.day}: {f.labeled} windows from {f.source or 'nowhere'}, {f.written} rows written"
+        if f.not_recorded:
+            line += f", {f.not_recorded} bar closes not recorded"
+        print(line)
+    return 1 if any(f.failed for f in filled) else 0
 
 
 def _fit(name: str, days: int | None) -> int:
@@ -194,7 +215,7 @@ def _rollback(name: str) -> int:
         print(f"unknown algorithm {name!r}", file=sys.stderr)
         return 1
     try:
-        model = Shelf(settings.state_dir).rollback(name, datetime.now(KST))
+        model = Shelf(settings.state_dir).rollback(name, datetime.now(KST), settings.target_version)
     except ValueError as e:
         print(e, file=sys.stderr)
         return 1
@@ -372,6 +393,10 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         help="database to write, replaced if it exists (default: state/replay-<day>.sqlite3)",
     )
+    sub.add_parser(
+        "rescore",
+        help="label every recorded day's bar closes again with the touch target (stop the engine first)",
+    )
     fit_cmd = sub.add_parser(
         "fit", help="train an algorithm on the latest recorded or backfilled days and save its model"
     )
@@ -455,6 +480,8 @@ def main(argv: list[str] | None = None) -> int:
             return asyncio.run(_archive(args.recheck))
         elif args.command == "replay":
             return _replay(args.day, args.db)
+        elif args.command == "rescore":
+            return _rescore()
         elif args.command == "fit":
             return _fit(args.algorithm, args.days)
         elif args.command == "prevalidate":

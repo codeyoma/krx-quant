@@ -36,6 +36,7 @@ from aiohttp import WSCloseCode, web
 from krx_quant.consensus import FAST, FINAL
 from krx_quant.engine import OutcomesScored, PredictionEngine, PredictionsStored
 from krx_quant.predictions import iso
+from krx_quant.touch import TARGET_VERSION
 
 log = logging.getLogger(__name__)
 
@@ -191,9 +192,21 @@ def _health_key(kis: dict[str, Any]) -> Any:
     return kis["connected"], sorted((f["feed"], f["key"], f["gap"] or "") for f in kis["feeds"])
 
 
+# Why a prediction scored without a touch label has none (#170): its bar close was never
+# labelled (before the recording began, 2026-10-12, or not filled in yet).
+NO_TOUCH = "no touch label"
+
+
 def prediction_json(row: dict[str, Any]) -> dict[str, Any]:
-    """A stored prediction as the API shows it."""
+    """A stored prediction as the API shows it.
+
+    Its outcome is scored on the bar close's touch label (#170, ``touch``). For one release
+    ``class_a`` and ``class_b`` both carry that label too, and ``unscorable`` why it has none,
+    so a screen from before reads the new label where it read the old bases; the mid-points
+    stay as stored."""
     scored = row["scored_at"] is not None
+    label = row.get("touch_class")
+    why = row.get("touch_unscorable") if row.get("touch_path") is not None else NO_TOUCH
     return {
         "algorithm": row["algorithm"],
         "model_version": row["model_version"],
@@ -217,10 +230,25 @@ def prediction_json(row: dict[str, Any]) -> dict[str, Any]:
             "mid_display": row["mid_display"],
             "mid_target": row["mid_target"],
             "flat_ticks": row["flat_ticks"],
-            "class_a": row["class_a"],
-            "class_b": row["class_b"],
+            "class_a": label,
+            "class_b": label,
             "special": bool(row["special"]),
-            "unscorable": row["unscorable"],
+            "unscorable": None if label is not None else why,
             "scored_at": row["scored_at"],
+            "touch": _touch_json(row),
         },
+    }
+
+
+def _touch_json(row: dict[str, Any]) -> dict[str, Any] | None:
+    """The bar close's touch label (#167), what the outcome is scored on (#170); none where it
+    was scored before the engine recorded it."""
+    path = row.get("touch_path")
+    if path is None:
+        return None
+    return {
+        "target_version": TARGET_VERSION,
+        "class": row["touch_class"],
+        "unscorable": row["touch_unscorable"],
+        **json.loads(path),
     }

@@ -14,6 +14,8 @@ Personality card:
   trained on the earlier trading days has the lowest log loss on the latest ones, about
   20% of the samples, whole days only: a four-minute outcome never spans the two. Then it
   is trained on all of them. The model keeps the penalty and the days it was validated on.
+- **Fails**: when the book and the tape do not lead the price (spoofed quotes, split
+  orders, a market moved by the index or news).
 
 The book and the trades' sides are recorded only (backfilled days have neither): on a
 day with backfilled bars only it does not learn, and at a bar close without the book it
@@ -29,10 +31,11 @@ from datetime import date
 
 import numpy as np
 
-from krx_quant.algorithms.contract import Abstention, Card, Model, NothingToLearn, NotPredicted, Sample
+from krx_quant.algorithms.contract import Abstention, Model, NothingToLearn, NotPredicted, Sample
 from krx_quant.algorithms.forecasts import CLASSES, class_moves, lowest_log_loss, number, param
 from krx_quant.baselines import Forecast
-from krx_quant.features import FeatureVector
+from krx_quant.cards import CLASS_NAMES, TOUCH_LABEL, Card, Meaning, class_move_meanings, learned
+from krx_quant.features import FEATURE_MEANINGS, FeatureVector
 from krx_quant.feeds.base import kst_day
 
 INPUTS = (
@@ -70,23 +73,82 @@ def default_params() -> dict[str, float]:
     return params
 
 
+TRAINING_DAYS = 20
+
+
+def _param_meanings() -> dict[str, Meaning]:
+    when = f"{learned(TRAINING_DAYS)} 녹화된 날(호가·체결)로만 배운다."
+    unvalidated = "0이면 검증하지 않았다(표본이 100개 미만이거나 날이 하루뿐이었거나 학습 전)."
+    out = {
+        "penalty": Meaning(
+            "고른 L1 강도: 가중치 절댓값에 거는 벌점. 0.1, 0.03, 0.01, 0.003, 0.001 중에서 최근 거래일 "
+            "검증의 로그손실로 고른다. 0이면 학습 전이다.",
+            "벌점 계수",
+            when,
+        ),
+        "validation_from": Meaning(
+            f"L1 강도를 고를 때 검증에 둔 첫 거래일(YYYYMMDD를 숫자로). {unvalidated}", "날짜", when
+        ),
+        "validation_to": Meaning(
+            f"L1 강도를 고를 때 검증에 둔 마지막 거래일(YYYYMMDD를 숫자로). {unvalidated}", "날짜", when
+        ),
+        "validation_days": Meaning(f"L1 강도를 고를 때 검증에 둔 거래일 수. {unvalidated}", "거래일", when),
+    }
+    for f in INPUTS:
+        unit = FEATURE_MEANINGS[f].unit
+        out[param("mean", f)] = Meaning(
+            f"입력 `{f}`의 학습 표본 평균. 입력을 표준화하는 데 쓴다.", unit, when
+        )
+        out[param("sd", f)] = Meaning(
+            f"입력 `{f}`의 학습 표본 표준편차. 입력을 표준화하는 데 쓴다(0에 가까우면 1).", unit, when
+        )
+    for c in CLASSES:
+        name = CLASS_NAMES[c.value]
+        out[param("bias", c.value)] = Meaning(f"{name} 클래스 점수의 절편.", "로짓", when)
+        for f in INPUTS:
+            out[param("w", c.value, f)] = Meaning(
+                f"표준화한 `{f}` 값이 1 늘 때 {name} 클래스 점수에 더하는 값. 0이면 L1이 지웠다.",
+                "로짓/표준편차",
+                when,
+            )
+    moves = {name: Meaning(m.text, m.unit, when) for name, m in class_move_meanings(TRAINING_DAYS).items()}
+    return out | moves
+
+
+PARAM_MEANINGS: Mapping[str, Meaning] = _param_meanings()
+
+
 class Shannon:
     name = "shannon"
     features: tuple[str, ...] = INPUTS
-    training_days = 20
+    training_days = TRAINING_DAYS
+    param_meanings = PARAM_MEANINGS
     card = Card(
         scientist="Claude Shannon",
         character="호가창 해독",
         logic=(
             "최근 1분·5분의 1호가 주문흐름 불균형(OFI), 봉 마감 시점 10단계 잔량 불균형, 최근 5분 체결의 "
             "매수·매도 불균형과 그 방향의 엔트로피, NXT 체결 비중, 프로그램매매·외국계 회원사 흐름으로 "
-            "4분 뒤 상승·보합·하락을 다항 로지스틱 회귀로 낸다. 호가가 비어 있으면 예측하지 않는다."
+            "4분 안의 상승·보합·하락(도달 정답)을 다항 로지스틱 회귀로 낸다. 호가가 비어 있으면 예측하지 "
+            "않는다."
         ),
         unique_features=("ofi_1", "ofi_5", "trade_entropy"),
         training=(
             "최근 20거래일의 녹화된 호가·체결로 L1 로지스틱 회귀를 다시 학습한다. "
             "표본의 약 20%가 되는 최근 거래일들을 통째로 검증에 두고, 그 전 날들로 학습해 "
             "검증 로그손실이 가장 작은 L1 강도를 골라, 전체로 다시 학습한다."
+        ),
+        forecasting=(
+            f"{TOUCH_LABEL}으로 직접 학습한 다항 로지스틱 회귀(소프트맥스)가 세 "
+            "확률을 낸다: 클래스마다 절편 + Σ 가중치 × 표준화한 입력으로 점수를 내고 소프트맥스로 바꾼다. "
+            "입력은 학습 표본의 평균과 표준편차로 표준화하고, 모르는 입력은 평균(0)으로 둔다. 기대수익은 "
+            "학습에서 클래스별 평균 4분 변화를 세 확률로 가중한 값이다. 봉 마감에 호가가 비어 있으면 "
+            "예측하지 않는다(no_book)."
+        ),
+        failure=(
+            "호가·체결 흐름이 가격을 이끌지 않는 장(허수 호가가 많을 때, 큰 주문이 쪼개져 들어올 때, "
+            "지수·뉴스가 가격을 끌 때)에서 틀리기 쉽다. 최근 20거래일의 녹화로 배운 관계라 장세가 바뀌면 "
+            "가중치가 맞지 않는다. L1이 가중치를 거의 다 지우면 클래스 비율에 가까운 확률만 낸다."
         ),
     )
 

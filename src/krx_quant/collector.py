@@ -21,6 +21,7 @@ from krx_quant.api import create_app
 from krx_quant.archive import NIGHTLY_ARCHIVE, archive
 from krx_quant.auth import TokenManager, tokens_and_client
 from krx_quant.backfill import keep_history
+from krx_quant.climate import load_climate
 from krx_quant.clock import SessionClock, SystemClock
 from krx_quant.config import Settings
 from krx_quant.cost_guard import keep_costs
@@ -63,6 +64,7 @@ from krx_quant.polling import CALL_ERRORS, NORMALIZE_ERRORS, Poller, PollJob
 from krx_quant.predictions import DB_NAME, PredictionStore, iso
 from krx_quant.prevalidation import admits
 from krx_quant.recorder import ParquetRecorder
+from krx_quant.rescore import EngineLock, keep_touches_filled
 from krx_quant.signals import Signals
 from krx_quant.stream import LiveStatus
 from krx_quant.swap import (
@@ -211,11 +213,19 @@ async def run_collector(
         min_sample=settings.min_sample,
         leaders=Leaders.of(settings),
         regimes=partial(day_regime, settings.data_dir),  # recorded by the 07:30 macro read
-        admits=admits(settings.state_dir),  # a new algorithm waits for its pre-validation
+        # A new algorithm waits for its pre-validation, on the target it runs.
+        admits=admits(settings.state_dir, settings.target_version),
         commit=settings.commit,
         review_rules=Rules.of(settings),
+        target_version=settings.target_version,  # the target learned and forecast (#169)
+        climate=load_climate(settings.state_dir) if settings.target_version >= 2 else None,
     )
     store.add_run("start", engine.started_at, None, json.dumps(started(settings)))
+    # Held while it runs: a rescore refuses to run beside it (#168). One running already
+    # does not stop the recording; the past touch labels are filled once it is done.
+    lock = EngineLock(settings.state_dir)
+    if not lock.acquire():
+        log.warning("%s is held: a rescore runs", lock.path)
 
     def on_event(feed: str, row: dict[str, Any]) -> None:
         # Recording comes first: a prediction bug must never stop it.
@@ -341,6 +351,9 @@ async def run_collector(
                     asyncio.create_task(keep_calendar(calendar_collector, settings.calendar_every))
                 )
             api = await _serve_api(settings, engine, _live_status(stream, health, now), alerts)
+            # The past bar closes' touch labels, once the API answers (#168): the 06:00 deploy
+            # checks it within 3 minutes, and the fill can take longer.
+            background.append(asyncio.create_task(keep_touches_filled(settings, engine, lock)))
             try:
                 await stream.run()
             finally:
@@ -357,6 +370,7 @@ async def run_collector(
         health.close()
         recorder.close()
         store.close()
+        lock.release()
 
 
 async def restart_each_day(

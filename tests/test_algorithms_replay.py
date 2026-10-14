@@ -95,17 +95,30 @@ async def test_a_trained_model_is_used_and_recorded(tmp_path: Path) -> None:
 
     assert {p["model_version"] for p in await predictions_of(engine, "newton")} == {"newton-20261009-abc123"}
     async with api(engine) as client:
-        listed = {a["name"]: a for a in (await get_json(client, "/v1/algorithms"))["algorithms"]}
+        body = await get_json(client, "/v1/algorithms")
+    listed = {a["name"]: a for a in body["algorithms"]}
     assert listed.keys() == {"newton", "gauss", "granger", "markov", "kalman", "shannon", "poisson", "turing"}
     newton = listed["newton"]
     assert listed["gauss"]["model"]["version"] == "gauss-default"
     assert newton["card"]["scientist"] == "Isaac Newton"
     assert set(newton["card"]["unique_features"]) <= set(newton["features"])
+    assert newton["card"]["forecasting"] and newton["card"]["failure"]
+    for a in listed.values():  # each feature and each parameter it holds, with its meaning (#164)
+        assert a["feature_meanings"].keys() == set(a["features"])
+        assert set(a["model"]["params"]) <= a["param_meanings"].keys()
+    assert newton["feature_meanings"]["velocity"]["unit"] == "틱/분"
+    assert newton["param_meanings"].keys() == {"damping", "threshold"}
+    assert [b["name"] for b in body["baselines"]] == ["baseline-flat", "baseline-persist", "baseline-random"]
+    assert [c["name"] for c in body["consensus"]] == ["consensus-fast", "consensus-final"]
+    assert body["baselines"][0]["card"]["scientist"] is None
+    assert all(c["card"]["forecasting"] for c in body["consensus"])
     assert newton["model"] == {
         "version": "newton-20261009-abc123",
         "params": dict(trained.params),
         "trained": None,
         "trained_until": None,
+        "training": None,
+        "target_version": None,  # made by hand: not said (#170)
     }
 
 
@@ -259,7 +272,10 @@ async def test_when_the_cpu_budget_runs_short_the_last_registered_is_skipped_fir
     assert third_closes == ["09:01", "09:03"]
     with sqlite3.connect(tmp_path / "engine.db") as conn:
         runs = conn.execute("SELECT kind, at, algorithm FROM runs").fetchall()
-    assert runs == [("cpu_budget", "2026-10-12T09:02:00+09:00", "third")]
+    assert runs == [
+        ("target", "2026-10-12T00:00:00+09:00", None),  # a new database goes by the touch target (#170)
+        ("cpu_budget", "2026-10-12T09:02:00+09:00", "third"),
+    ]
     async with api(engine) as client:
         cpu = (await get_json(client, "/v1/status"))["cpu"]
     assert (cpu["budget_seconds"], cpu["algorithm_seconds"], cpu["skipped_today"]) == (0.2, 10.0, 1)

@@ -28,6 +28,7 @@ from krx_quant.notify import Alerts
 from krx_quant.predictions import PredictionStore
 from krx_quant.replay import replay_into
 from krx_quant.signals import SignalRule, Signals
+from krx_quant.touch import TARGET_VERSION
 from tests.algorithm_doubles import FixedAlgorithm
 from tests.api_schema import check
 from tests.replay_events import (
@@ -90,6 +91,7 @@ async def morning(
         algorithms.append(FixedAlgorithm(f"m{n}", features=(feature,), unique=(feature,), forecast=forecast))
         if f"m{n}" not in registered:
             store.add_status(f"m{n}", at("08:00:00"), None, Status.ACTIVE, "test")
+    store.mark_target(TARGET_VERSION, at("08:00:00"))  # active on the touch target already (#170)
     clock = FakeClock(at(start))
     engine = PredictionEngine(store, CALENDAR, (SYMBOL,), FEE, clock, algorithms=algorithms, signals=signals)
     fed = busy_morning(end=until) if events is None else events
@@ -164,6 +166,7 @@ async def test_every_client_reads_why_a_final_consensus_is_not_to_be_acted_on(tm
     store = PredictionStore(tmp_path / "engine.db")
     algorithms = [FixedAlgorithm("m0", features=("velocity",), unique=("velocity",), forecast=UP)]
     store.add_status("m0", at("08:00:00"), None, Status.ACTIVE, "test")
+    store.mark_target(TARGET_VERSION, at("08:00:00"))
     clock = FakeClock(at("09:00:00"))
     engine = PredictionEngine(store, CALENDAR, (SYMBOL,), FEE, clock, algorithms=algorithms)
     events.sort(key=lambda e: e[1]["received_at"])

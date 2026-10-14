@@ -15,6 +15,7 @@ Personality card:
   four minutes of arrivals (the following samples' last minutes) under a linear,
   nonnegative intensity (EM). The arrivals are sizes over the mean, not whole counts, so it
   is a quasi-Poisson likelihood. Then k and c by the lowest log loss over a grid.
+- **Fails**: when one side's rush is taken in and undone, and when trades are few.
 
 The trades' sides are recorded only (backfilled bars have none): on a day with backfilled
 bars only it does not learn, and without any trade's side today it forecasts nothing in
@@ -28,9 +29,10 @@ from itertools import product
 
 import numpy as np
 
-from krx_quant.algorithms.contract import Card, Model, NothingToLearn, Sample
+from krx_quant.algorithms.contract import Model, NothingToLearn, Sample
 from krx_quant.algorithms.forecasts import CLASSES, LOSS_FLOOR, UNKNOWN, class_moves, lowest_log_loss, param
 from krx_quant.baselines import Forecast
+from krx_quant.cards import TOUCH_LABEL, Card, Meaning, class_move_meanings, learned
 from krx_quant.features import ARRIVAL_FEATURES, EXCITATION_FEATURES, SIDES, FeatureVector
 from krx_quant.pricing import Direction
 from krx_quant.reference import BAR
@@ -58,10 +60,53 @@ def default_params() -> dict[str, float]:
     return params | {param("move", d.value): 0.0 for d in Direction}
 
 
+TRAINING_DAYS = 20
+
+
+def _param_meanings() -> dict[str, Meaning]:
+    when = f"{learned(TRAINING_DAYS)} 녹화된 날(체결 방향)로만 배운다."
+    sides = {"buy": "매수", "sell": "매도"}
+    out = {
+        "slope": Meaning(
+            "순서형 로지스틱의 기울기 k: 클수록 작은 쏠림에도 확률이 한쪽으로 기운다. 0.5, 1, 2, 4, 8, 16 "
+            "중에서 로그손실로 고른다.",
+            "로짓 ÷ 쏠림",
+            when,
+        ),
+        "cut": Meaning(
+            "순서형 로지스틱의 문턱 c: 클수록 보합 확률이 커진다. 0, 0.25, 0.5, 1, 1.5, 2, 3 중에서 "
+            "로그손실로 고른다.",
+            "로짓",
+            when,
+        ),
+    }
+    for side in SIDES:
+        out[param("base", side)] = Meaning(
+            f"{sides[side]} 쪽 기준 강도: 흥분이 없을 때 다음 4분에 기대하는 {sides[side]} 시장가 체결 "
+            "크기의 합. 학습 전에는 4(1분에 평균 크기 하나)다.",
+            "평균 체결 크기의 배수 (4분)",
+            when,
+        )
+        for excitation in EXCITATIONS:
+            kind = "자기 흥분" if excitation.startswith(side) else "교차 흥분"
+            out[param("excite", side, excitation)] = Meaning(
+                f"봉 마감의 `{excitation}` 값이 1일 때 다음 4분 {sides[side]} 도착에 더하는 몫({kind}, 0 "
+                "이상).",
+                "4분 도착 ÷ 흥분",
+                when,
+            )
+    moves = {name: Meaning(m.text, m.unit, when) for name, m in class_move_meanings(TRAINING_DAYS).items()}
+    return out | moves
+
+
+PARAM_MEANINGS: Mapping[str, Meaning] = _param_meanings()
+
+
 class Poisson:
     name = "poisson"
     features: tuple[str, ...] = (*EXCITATIONS, *ARRIVALS)
-    training_days = 20
+    training_days = TRAINING_DAYS
+    param_meanings = PARAM_MEANINGS
     card = Card(
         scientist="Siméon Denis Poisson",
         character="쏠림 감지",
@@ -74,6 +119,18 @@ class Poisson:
         training=(
             "최근 20거래일의 녹화된 체결로, 표본마다 다음 4분의 매수·매도 도착을 선형 강도의 Poisson "
             "최대우도(EM)로 맞춰 기준 강도와 흥분 계수를 추정한다. 쏠림의 기울기와 문턱은 로그손실로 고른다."
+        ),
+        forecasting=(
+            "봉 마감의 흥분 4개로 다음 4분의 매수·매도 도착 기댓값(기준 강도 + Σ 흥분 계수 × 흥분)을 내고, "
+            "쏠림 = (매수 − 매도) ÷ (매수 + 매도)를 순서형 로지스틱으로 세 확률로 바꾼다: P(상승) = σ(k × "
+            "쏠림 − c), P(하락) = σ(−k × 쏠림 − c), 나머지가 보합. 기울기 k와 문턱 c는 "
+            f"{TOUCH_LABEL}에 대한 로그손실로 고른다. 기대수익은 학습에서 클래스별 평균 4분 변화를 세 확률로 "
+            "가중한 값이다. 그날 방향이 있는 체결을 받기 전(흥분을 모름)에는 세 확률을 1/3씩 둔다."
+        ),
+        failure=(
+            "한쪽 시장가 체결이 몰린 뒤 반대쪽이 받아 내며 되돌리는 장에서 쏠림을 따라 틀리기 쉽다. 체결이 "
+            "드문 시간(점심 무렵)에는 흥분이 작아 방향을 거의 말하지 않는다. 체결 쏠림 없이 호가나 "
+            "지수만으로 움직이는 가격은 보지 못한다."
         ),
     )
 

@@ -17,6 +17,13 @@ classified with the same flat band as live scoring. A day is read one of two way
   US daytime trades have no backfill, so their moves are unknown.
 
 A recorded day is read the first way even when it has backfilled bars too.
+
+With the touch target (``KRX_TARGET_VERSION=2``, #169) the outcome is its label instead:
+on a recorded day the engine's own touch window (``touch.py``) over the replayed quotes,
+exactly as the engine labels it; on a backfilled day the one-minute bar rule
+(``touch.bar_touch``). The move (``change_ticks``) stays the four-minute one. The features
+carry the touch target's terms (``FeatureVector.touch``): half the spread at the bar close
+on a recorded day, a one-tick spread's on a backfilled one.
 """
 
 from __future__ import annotations
@@ -38,17 +45,26 @@ from krx_quant.backfill import FUTURES_BARS_TR, MINUTE_BARS_TR, bars_key
 from krx_quant.config import Settings
 from krx_quant.contracts import KOSPI200, USD, days_to_expiry
 from krx_quant.engine import Event
-from krx_quant.features import LEAD_FEATURES, FeatureStore, FeatureVector, Leaders, Snapshot, Value
+from krx_quant.features import (
+    LEAD_FEATURES,
+    FeatureStore,
+    FeatureVector,
+    Leaders,
+    Snapshot,
+    TouchTerms,
+    Value,
+)
 from krx_quant.feeds import TRADE
 from krx_quant.feeds.base import KST
 from krx_quant.macro import day_regime
 from krx_quant.market_calendar import MarketCalendar, calendar_store
 from krx_quant.market_view import HORIZON, MarketView, prediction_window
 from krx_quant.model_shelf import Shelf
-from krx_quant.pricing import classify
+from krx_quant.pricing import Direction, classify
 from krx_quant.reference import BAR, Bar
 from krx_quant.replay import recorded_events
 from krx_quant.special import SpecialSituations, in_vi, touching
+from krx_quant.touch import bar_touch
 
 BarDays = Mapping[tuple[str, date], Sequence[Bar]]  # (symbol, day) -> bars, oldest first
 # The reference price a day's samples were made with: "mid" from recorded events, "close"
@@ -64,8 +80,12 @@ class TrainingDay:
     samples: list[Sample]
 
     def of(self, features: Sequence[str]) -> list[Sample]:
-        """The samples with only ``features``, as one algorithm declared them."""
-        return [replace(s, features=FeatureVector(s.features, features)) for s in self.samples]
+        """The samples with only ``features``, as one algorithm declared them, each naming the
+        day's reference price (a fitted model counts its days by it, #165)."""
+        return [
+            replace(s, features=FeatureVector(s.features, features), reference=self.reference)
+            for s in self.samples
+        ]
 
 
 def training_day(
@@ -76,23 +96,42 @@ def training_day(
     names: Sequence[str],
     fee_rate: float,
     leaders: Leaders,
+    *,
+    target_version: int = 1,
 ) -> TrainingDay | None:
     """``day``'s samples: from its recorded events if every symbol's trades were recorded,
     else from its backfilled bars if every symbol has them; None otherwise. A day never
-    trains on some symbols only.
+    trains on some symbols only. Their outcomes are of ``target_version`` (#169).
     """
     session = calendar.session(day)
     regime = day_regime(data_dir, day, session.open) if session is not None else None
     if is_recorded(data_dir, day, symbols):
         events = recorded_events(data_dir, day, symbols, leaders)
-        made = recorded_samples(events, calendar, day, symbols, names, fee_rate, leaders, regime=regime)
+        made = recorded_samples(
+            events,
+            calendar,
+            day,
+            symbols,
+            names,
+            fee_rate,
+            leaders,
+            regime=regime,
+            target_version=target_version,
+        )
         return TrainingDay("mid", made)
     bar_days = bar_days_on(data_dir, symbols, [day])
     if len(bar_days) < len(symbols):
         return None
     leader_days = load_leader_days(data_dir, leaders, [day]) if LEAD_FEATURES & set(names) else {}
     made = samples(
-        bar_days, calendar, names, fee_rate, leader_days=leader_days, leaders=leaders, regimes={day: regime}
+        bar_days,
+        calendar,
+        names,
+        fee_rate,
+        leader_days=leader_days,
+        leaders=leaders,
+        regimes={day: regime},
+        target_version=target_version,
     )
     return TrainingDay("close", made)
 
@@ -138,9 +177,11 @@ def samples(
     leader_days: BarDays | None = None,
     leaders: Leaders | None = None,
     regimes: Mapping[date, str | None] | None = None,
+    target_version: int = 1,
 ) -> list[Sample]:
     """A sample per bar close in each day's prediction window, in time order, from backfilled
-    bars: the reference price is the last close, the outcome the close four minutes later.
+    bars: the reference price is the last close, the outcome the close four minutes later;
+    with the touch target (``target_version`` 2, #169), the one-minute bar rule's label.
 
     ``leader_days`` holds the leading series' bars by (series, day); the other symbols of
     ``bar_days`` lead too. ``regimes`` holds each day's macro regime (none: unknown).
@@ -150,12 +191,14 @@ def samples(
     stocks = _by_day(bar_days)
     series = _by_day(leader_days or {})
     leading = bool(LEAD_FEATURES & set(names))  # leaders are sliced only when asked for
+    touch = TouchTerms() if target_version >= 2 else None  # no quotes: a one-tick spread
     out: list[Sample] = []
     for (symbol, day), bars in sorted(bar_days.items(), key=lambda item: (item[0][1], item[0][0])):
         session = calendar.session(day)
         if session is None:
             continue
         ends = [b.start + BAR for b in bars]
+        starts = [b.start for b in bars]
         closes = {b.start: b.close for b in bars}
         expiry = days_to_expiry(day, calendar)
         t, last = prediction_window(session)
@@ -178,7 +221,14 @@ def samples(
             )
             values = store.compute(snapshot, names)
             later = closes.get(t + HORIZON - BAR)  # the close of the bar ending at t + 4 minutes
-            out.append(_sample(snapshot, values, names, later))
+            sample = _sample(snapshot, values, names, later, touch)
+            if touch is not None:
+                # The label needs the bar that ended at t itself: an older close is not t's.
+                closing = done[-1] if done and done[-1].start + BAR == t else None
+                after = bars[bisect.bisect_left(starts, t) : bisect.bisect_left(starts, t + HORIZON)]
+                outcome = bar_touch(closing, after, fee_rate) if closing is not None else None
+                sample = replace(sample, outcome=outcome)
+            out.append(sample)
             t += BAR
     return out
 
@@ -194,29 +244,37 @@ def recorded_samples(
     store: FeatureStore | None = None,
     *,
     regime: str | None = None,
+    target_version: int = 1,
 ) -> list[Sample]:
     """A sample per bar close of ``day``'s prediction window and symbol, in time order, from
     the day's events (in receipt order) through the engine's Market View.
 
     At each bar close the features are computed before any event received at or after it,
     as the engine does. The outcome is the mid-point four minutes later against the one at
-    the bar close, as live scoring decides it on basis A. A symbol in a VI at a bar close
-    has no sample there (the engine does not predict it), and neither has a bar close whose
-    four minutes a VI, circuit breaker or sidecar touches (live statistics leave it out).
+    the bar close, as live scoring decides it on basis A; with the touch target
+    (``target_version`` 2, #169), the label of the bar close's touch window, as the engine
+    records it. A symbol in a VI at a bar close has no sample there (the engine does not
+    predict it), and neither has a bar close whose four minutes a VI, circuit breaker or
+    sidecar touches (live statistics leave it out).
     """
     session = calendar.session(day)
     if session is None:
         return []
     store = store or FeatureStore()
-    view = MarketView(calendar, symbols, leaders, datetime.combine(day, time(), KST))
+    to_touch = target_version >= 2
+    # With the touch target, the view follows the touch windows as the engine's does.
+    windows_fee = fee_rate if to_touch else None
+    view = MarketView(calendar, symbols, leaders, datetime.combine(day, time(), KST), windows_fee)
     special = SpecialSituations(calendar)
     first, last = prediction_window(session)
     # Every minute from the first bar close to the last target: a bar close to predict, a
     # target to look the mid-point up at, or both.
     minutes = deque(first + i * BAR for i in range((last + HORIZON - first) // BAR + 1))
-    # Each bar close's snapshot, features, and whether a window known then touched it.
-    seen: list[tuple[Snapshot, dict[str, Value], bool]] = []
+    # Each bar close's snapshot, features, whether a window known then touched it, and the
+    # touch target's terms there (target version 2).
+    seen: list[tuple[Snapshot, dict[str, Value], bool, TouchTerms | None]] = []
     mids: dict[tuple[str, datetime], float | None] = {}
+    labels: dict[tuple[str, datetime], Direction | None] = {}  # by bar close, once its window ended
 
     def reach(moment: datetime) -> None:
         """Everything due at the minutes up to ``moment``, before what is received then."""
@@ -230,10 +288,13 @@ def recorded_samples(
                         continue
                     snapshot = view.snapshot(frozen, symbol, fee_rate, regime)
                     marked = touching(known, symbol, minute, minute + HORIZON)
-                    seen.append((_bare(snapshot), store.compute(snapshot, names), marked))
+                    terms = TouchTerms.at(view.quote_at(symbol, minute), snapshot.tick) if to_touch else None
+                    seen.append((_bare(snapshot), store.compute(snapshot, names), marked, terms))
             if minute >= first + HORIZON:
                 for symbol in symbols:
                     mids[(symbol, minute)] = view.mid(symbol, minute)
+                    if to_touch:  # the window from four minutes back has just ended
+                        labels[(symbol, minute - HORIZON)] = view.touch(symbol, minute - HORIZON).direction
 
     for feed, row in events:
         reach(row["received_at"])
@@ -241,13 +302,16 @@ def recorded_samples(
         special.event(feed, row, symbols)
     reach(minutes[-1] if minutes else last)
     out = []
-    for snapshot, values, marked in seen:
+    for snapshot, values, marked, terms in seen:
         # Special as the engine marks it: by the windows known when it is made, or learned since.
         t = snapshot.bar_close
         if marked or touching(special.learned_since(t), snapshot.symbol, t, t + HORIZON):
             continue
         later = mids.get((snapshot.symbol, snapshot.bar_close + HORIZON))
-        out.append(_sample(snapshot, values, names, later))
+        sample = _sample(snapshot, values, names, later, terms)
+        if to_touch:
+            sample = replace(sample, outcome=labels.get((snapshot.symbol, t)))
+        out.append(sample)
     return out
 
 
@@ -265,15 +329,21 @@ def _bare(snapshot: Snapshot) -> Snapshot:
 
 
 def _sample(
-    snapshot: Snapshot, values: Mapping[str, Value], names: Sequence[str], later: float | None
+    snapshot: Snapshot,
+    values: Mapping[str, Value],
+    names: Sequence[str],
+    later: float | None,
+    touch: TouchTerms | None = None,
 ) -> Sample:
-    """A sample of ``snapshot``, with the price four minutes later classified against its own."""
+    """A sample of ``snapshot``, with the price four minutes later classified against its own;
+    its features carry the touch target's terms ``touch`` (target version 2)."""
     change = None
     outcome = None
     if later is not None and snapshot.price and snapshot.tick and snapshot.flat_ticks:
         change = (later - snapshot.price) / snapshot.tick
         outcome = classify(later - snapshot.price, snapshot.flat_ticks, snapshot.tick)
-    return Sample(snapshot.symbol, snapshot.bar_close, FeatureVector(values, names), outcome, change)
+    features = FeatureVector(values, names, touch)
+    return Sample(snapshot.symbol, snapshot.bar_close, features, outcome, change)
 
 
 class _DayBars:
@@ -362,7 +432,14 @@ def fit_algorithm(
     loaded: dict[date, TrainingDay] = {}
     for day in finished[-(days or algorithm.training_days) :]:
         found = training_day(
-            settings.data_dir, day, calendar, settings.symbols, algorithm.features, settings.fee_rate, leaders
+            settings.data_dir,
+            day,
+            calendar,
+            settings.symbols,
+            algorithm.features,
+            settings.fee_rate,
+            leaders,
+            target_version=settings.target_version,
         )
         if found is not None:
             loaded[day] = found
@@ -370,7 +447,7 @@ def fit_algorithm(
         raise FileNotFoundError(
             f"no backfilled bars or recorded trades of {', '.join(settings.symbols)} in {settings.data_dir}"
         )
-    training = [s for found in loaded.values() for s in found.samples]
+    training = [s for found in loaded.values() for s in found.of(algorithm.features)]
     model = algorithm.fit(training)
     Shelf(settings.state_dir).install(name, model, "fit", local)
     return Fitted(

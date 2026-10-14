@@ -15,7 +15,9 @@ bar close in the prediction window, from what was received before it:
   skipped first and the skip is recorded (``runs``); each skip halves the skipped one's
   expected time, so it is soon run (and timed) again.
 
-Four minutes later each prediction is scored on both bases.
+Four minutes later each bar close's touch label is recorded (``touches``), what every
+prediction is scored on (#170); the four-minute move's classes on bases A and B are still
+written beside it (``outcomes``), unread, so an engine rolled back to before runs on.
 
 Two consensus predictions follow (``consensus.py``): the fast one from the active
 algorithms done 2 seconds after they started, the final one once they are all done.
@@ -23,7 +25,15 @@ algorithms done 2 seconds after they started, the final one once they are all do
 After each day's close (+10 minutes) the algorithms' statuses are reviewed by the
 lifecycle rules (``lifecycle.py``), the day's predictions lost to the time and CPU budgets
 are told once, a retired algorithm is no longer run, and the
-consensus weights are refitted.
+consensus weights are refitted. Where each algorithm on probation or on the bench stands
+toward its next review (``stages``, #165) is worked out by the same rules, as of that review.
+
+The reviews and the weights count only the predictions of models trained on the touch
+target (#170): the engine keeps which target each model it runs learned
+(``model_targets``). The first time it opens a database it restarts every algorithm not
+retired on probation (``lifecycle.RESTARTED``, once: a ``target`` run marks it), and an
+algorithm's probation counts from the first trading day it predicted with such a model
+since: the day the morning swap installed it, nothing before, nothing while it waits.
 
 Live, a new algorithm runs only once ``admits`` lets it (its pre-validation passed,
 ``prevalidation.py``): from the next bar close it starts on probation. Until then it is
@@ -42,6 +52,14 @@ special, marked when it is made or as soon as the situation is learned.
 The prediction window is continuous trading, from the first bar close after the open
 until the last bar close whose target (t + 4 minutes) is still in continuous trading:
 09:01–15:16 on a normal day.
+
+With the touch target (``target_version`` 2, #169) the algorithms' features carry its
+terms at the bar close (half the spread there), so the shared normal forecast gives the
+chances of reaching the targets; the baselines are the touch target's (``baselines_for``):
+the last four minutes' direction is the label of the touch window that just ended, read
+from the Market View (not predicted, ``no_previous``, when it could not be scored), the
+random one draws in the day's touch labels' proportions, and the climate baseline calls
+its table's direction (``climate.py``), a model the morning swap installs.
 """
 
 from __future__ import annotations
@@ -52,18 +70,22 @@ import logging
 import math
 import time as timer
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta
 from functools import partial
 from typing import Any
 
 from krx_quant.algorithms import ALGORITHMS, Abstention, Algorithm, Model, NotPredicted, register
-from krx_quant.baselines import BASELINES, Forecast, Inputs
+from krx_quant.algorithms.forecasts import forecasting
+from krx_quant.baselines import NO_PREVIOUS, Baseline, Forecast, Inputs, baselines_for
+from krx_quant.climate import CLIMATE
+from krx_quant.climate import DEFAULT as NO_CLIMATE
+from krx_quant.climate import direction as climate_direction
 from krx_quant.clock import SessionClock
 from krx_quant.config import MAX_REVIEW_DAY, Settings
 from krx_quant.consensus import FAST, FINAL, NAMES, NO_WEIGHTS, SPANS, Timing, Weights, pool
 from krx_quant.consensus import fit as fit_weights
-from krx_quant.features import REGIME_CODES, FeatureStore, FeatureVector, Leaders, Value
+from krx_quant.features import REGIME_CODES, FeatureStore, FeatureVector, Leaders, TouchTerms, Value
 from krx_quant.feeds import (
     BOOK,
     BOOK_SNAPSHOT,
@@ -83,7 +105,8 @@ from krx_quant.feeds import (
     VI_STATUS,
 )
 from krx_quant.feeds.base import KST, LEVELS
-from krx_quant.lifecycle import Rules, Standing, Status, review
+from krx_quant.lifecycle import RESTARTED, Rules, Stage, Standing, Status, review
+from krx_quant.lifecycle import stages as stages_now
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.market_view import (
     FUTURES_SERIES,
@@ -99,6 +122,7 @@ from krx_quant.reference import Bar
 from krx_quant.signals import SENT, Blocked, Judged, Signals
 from krx_quant.special import KOSPI, Kind, SpecialSituations, Window, in_vi, touching
 from krx_quant.stats import DEFAULT_MIN_SAMPLE
+from krx_quant.touch import TARGET_VERSION
 
 log = logging.getLogger(__name__)
 
@@ -231,6 +255,7 @@ class _AtClose:
 
     mid: float | None
     features: Mapping[str, Value]
+    touch: TouchTerms | None = None  # the touch target's terms (target version 2)
 
 
 class PredictionEngine:
@@ -255,6 +280,8 @@ class PredictionEngine:
         admits: Callable[[Algorithm], bool] | None = None,
         commit: str = "unknown",
         review_rules: Rules | None = None,
+        target_version: int = 1,
+        climate: Model | None = None,
     ) -> None:
         self.store = store
         self.commit = commit  # the code it runs (the deploy's KRX_COMMIT)
@@ -265,6 +292,11 @@ class PredictionEngine:
         self.fee_rate = fee_rate
         self.clock = clock
         self.registered = register(algorithms)
+        # What is learned and forecast (KRX_TARGET_VERSION, #169), and the baselines of it.
+        self.target_version = target_version
+        self.baselines: tuple[Baseline, ...] = baselines_for(target_version)
+        self.baseline_names = frozenset(b.name for b in self.baselines)
+        self.climate = climate or NO_CLIMATE  # the climate baseline's table (target version 2)
         given = models or {}
         self.models = {a.name: given.get(a.name) or a.default_model() for a in self.registered}
         self._admits = admits  # without: every registered algorithm runs (replay, tests)
@@ -278,7 +310,7 @@ class PredictionEngine:
         self._special = SpecialSituations(calendar)
         self.leaders = leaders or Leaders()
         self._last_tick = clock.now()
-        self._market = MarketView(calendar, symbols, self.leaders, self._last_tick)
+        self._market = MarketView(calendar, symbols, self.leaders, self._last_tick, self.fee_rate)
         # Outcomes waiting for their target time: (target_at, prediction_id, pending).
         self._pending: list[tuple[datetime, int, Pending]] = []
         for p in store.pending():
@@ -288,6 +320,10 @@ class PredictionEngine:
         self.weights: Weights = store.latest_weights() or NO_WEIGHTS
         self.notify = notify  # where alerts go (Telegram, live)
         self.training: dict[str, Any] | None = None  # the last night's training, as the swap saw it
+        # Each algorithm's report of that night, as stored (``nightly``), by algorithm (#165).
+        self.night_reports: dict[str, dict[str, Any]] = {}
+        # The statuses' stages and what they were computed for (``stages``).
+        self._stages: tuple[Any, dict[str, Stage]] | None = None
         self.listeners: list[Listener] = []
         self.signals = signals  # Telegram signal alerts, off without
         self._signals_resumed = False  # from the signals sent before a restart, at the first final
@@ -295,7 +331,26 @@ class PredictionEngine:
         self._regime_days: dict[date, str | None] = {}
         # Reviews pick up where the last one left off: one missed while down runs at start.
         self._reviewed_through = store.last_run("review") or self._last_tick
+        self._restart_on_target()
         self._admit()
+        self._record_models(self.models)
+
+    def _restart_on_target(self) -> None:
+        """Once, when the statuses first go by the touch target (#170): every algorithm with
+        a status other than retired restarts on probation, its predictions so far (the old
+        target's) never judged again."""
+        if self.store.target_marked(TARGET_VERSION):
+            return
+        now = self.clock.now()
+        for name, standing in self.store.statuses().items():
+            if standing.status is not Status.RETIRED:
+                self.store.add_status(name, now, standing.status, Status.PROBATION, RESTARTED)
+                log.info("%s: %s -> probation (%s)", name, standing.status.value, RESTARTED)
+        self.store.mark_target(TARGET_VERSION, now)
+
+    def _record_models(self, models: Mapping[str, Model]) -> None:
+        """Keep the target each of ``models`` was trained on, for the reviews (#170)."""
+        self.store.record_models([(name, m.version, m.target_version) for name, m in models.items()])
 
     def _admit(self) -> None:
         """Run the algorithms enrolled before and the new ones admitted; a new one starts on
@@ -362,19 +417,41 @@ class PredictionEngine:
         return self._market.latest_lead(series, self.clock.now())
 
     def switch_models(self, models: Mapping[str, Model]) -> bool:
-        """Run ``models`` from the next bar close (a swap, a fit, a rollback); whether any changed."""
+        """Run ``models`` from the next bar close (a swap, a fit, a rollback); whether any changed.
+        On the touch target (#170) an algorithm running a model of it does not go back to one
+        of another target (the defaults included): that model would forecast other outcomes,
+        and its days would count toward a review that does not look at them."""
         changed = False
         for name, model in models.items():
             if name in self.models and self.models[name] != model:
+                if self._on_target(self.models[name]) and not self._on_target(model):
+                    log.warning(
+                        "%s keeps %s: %s was not trained on target %d",
+                        name,
+                        self.models[name].version,
+                        model.version,
+                        self.target_version,
+                    )
+                    continue
                 log.info("%s now runs %s", name, model.version)
                 self.models[name] = model
+                self._record_models({name: model})
+                changed = True
+            elif name == CLIMATE and name in self.baseline_names and self.climate != model:
+                log.info("%s now runs %s", name, model.version)
+                self.climate = model
                 changed = True
         return changed
 
     def members(self) -> list[str]:
-        """The consensus members now: the active algorithms, in registration order."""
+        """The consensus members now: the active algorithms running a model of the engine's
+        target (#170; one that is not sits out), in registration order."""
         active = _with_status(self.store.statuses(), Status.ACTIVE)
-        return [a.name for a in self.algorithms if a.name in active]
+        return [a.name for a in self.algorithms if a.name in active and self._on_target(self.models[a.name])]
+
+    def _on_target(self, model: Model) -> bool:
+        """Whether ``model`` was trained on the target the engine scores (before #170 any is)."""
+        return self.target_version < 2 or (model.target_version or 1) == self.target_version
 
     def cpu_use(self) -> CpuUse:
         """The CPU budget now: the algorithms that run, as timed so far, and today's skips."""
@@ -418,13 +495,14 @@ class PredictionEngine:
             review,
             [a.name for a in self.algorithms],
             standings,
-            {name: self._first_counted(s.since) for name, s in standings.items()},
+            {name: self._counted_from(name, s) for name, s in standings.items()},
             self.store.prediction_days(at.astimezone(KST).date(), _REVIEW_DAYS),
             lambda chosen, special: self.store.scored_predictions(chosen, None, special),
             min_sample=self.min_sample,
             fee_rate=self.fee_rate,
             alerted=alerted,
             rules=self.review_rules,
+            baselines=self.baseline_names,
         )
         for c in result.changes:
             # Only from the status reviewed: a retire command may have landed meanwhile.
@@ -503,6 +581,62 @@ class PredictionEngine:
             return day + timedelta(days=1)
         return day
 
+    def _counted_from(self, name: str, standing: Standing) -> date | None:
+        """The first day ``name``'s status counts for (``_first_counted``); on probation or as
+        a clone, no earlier than the first trading day it predicted with a model trained on the
+        touch target since (#170): the day the morning swap (or a fit) installed one. None
+        while it has not: a training that failed or a holiday counts nothing."""
+        first = self._first_counted(standing.since)
+        if standing.status not in (Status.PROBATION, Status.CLONE):
+            return first
+        started = self.store.first_on_target(name, standing.since, TARGET_VERSION)
+        return None if started is None else max(first, started.astimezone(KST).date())
+
+    async def stages(self) -> dict[str, Stage]:
+        """Where each algorithm on probation or on the bench stands toward its next review
+        (#165, ``lifecycle.stages``), as of the latest review: the days counted as the review
+        counts them, the weakest lift by trading day it judges by, and the day the next review
+        falls on if the engine predicts every trading day. Read off the event loop, and again
+        only once a review has run or a status changed: the days reviewed do not change.
+        """
+        standings = self.store.statuses()
+        upcoming = self._next_review(self._reviewed_through)
+        next_day = None if upcoming is None else upcoming.astimezone(KST).date()
+        key = (sorted((name, s.status.value, s.since) for name, s in standings.items()), next_day)
+        if self._stages is not None and self._stages[0] == key:
+            return self._stages[1]
+        today = self.clock.now().astimezone(KST).date()
+        days = self.store.prediction_days(today, _REVIEW_DAYS)
+        reviewed = [d for d in days if next_day is None or d < next_day]
+        found = await asyncio.to_thread(
+            stages_now,
+            [a.name for a in self.algorithms],
+            standings,
+            {name: self._counted_from(name, s) for name, s in standings.items()},
+            reviewed,
+            lambda chosen, special: self.store.scored_predictions(chosen, None, special),
+            min_sample=self.min_sample,
+            fee_rate=self.fee_rate,
+            rules=self.review_rules,
+            baselines=self.baseline_names,  # the target's set, as the review judges by (#169)
+        )
+        dated = {name: replace(s, next_review_on=self._review_on(next_day, s)) for name, s in found.items()}
+        self._stages = (key, dated)
+        return dated
+
+    def _review_on(self, next_day: date | None, stage: Stage) -> date | None:
+        """The trading day ``stage``'s next review falls on, counted from ``next_day``, the next
+        daily review's, which counts one day more than the latest; None without either, or
+        while nothing is counted yet (waiting for a model of the touch target, #170)."""
+        if next_day is None or stage.next_review is None or stage.counted_from is None:
+            return None
+        day = next_day
+        for _ in range(stage.next_review - stage.days - 1):
+            day += timedelta(days=1)
+            while not self.calendar.is_trading_day(day):
+                day += timedelta(days=1)
+        return day
+
     async def _deliver(self, text: str) -> bool:
         """Send an alert; whether it went (or there is nowhere to send it)."""
         if self.notify is None:
@@ -515,7 +649,6 @@ class PredictionEngine:
         day_start = datetime.combine(bar_close.date(), time(), KST)
         at_close: dict[str, _AtClose] = {}
         frozen = self._market.at_close(bar_close)
-        baselines: dict[tuple[str, str], dict[str, Forecast | None]] = {}
         standings = self.store.statuses()  # read each time: retiring is a command
         retired, active = _with_status(standings, Status.RETIRED), _with_status(standings, Status.ACTIVE)
         running = [a for a in self.algorithms if a.name not in retired]
@@ -525,12 +658,17 @@ class PredictionEngine:
         stopped = [s for s in self.symbols if in_vi(known, s, bar_close)]
         if stopped:
             self._record_not_predicted(bar_close, stopped, "vi", running)
+        to_touch = self.target_version >= 2
+        made_by: dict[tuple[str, str, str], dict[str, Forecast | None]] = {}
         for symbol in self.symbols:
             if symbol in stopped:
                 continue
             snapshot = self._market.snapshot(frozen, symbol, self.fee_rate, regime)
             mid = snapshot.price
-            at_close[symbol] = _AtClose(mid, self._features.compute(snapshot, self._feature_names))
+            touch = (
+                TouchTerms.at(self._market.quote_at(symbol, bar_close), snapshot.tick) if to_touch else None
+            )
+            at_close[symbol] = _AtClose(mid, self._features.compute(snapshot, self._feature_names), touch)
             inputs = Inputs(
                 symbol=symbol,
                 bar_close=bar_close,
@@ -538,12 +676,23 @@ class PredictionEngine:
                 mid_before=self._market.mid(symbol, bar_close - HORIZON),
                 flat_ticks=snapshot.flat_ticks,
                 tick=snapshot.tick,
-                day_classes=self.store.day_classes(symbol, day_start, bar_close),
+                day_classes=(
+                    # The windows over by now: their bar closes four minutes back or more.
+                    self.store.day_touches(symbol, day_start, bar_close - HORIZON)
+                    if to_touch
+                    else self.store.day_classes(symbol, day_start, bar_close)
+                ),
+                previous=self._market.touch(symbol, bar_close - HORIZON).direction if to_touch else None,
+                climate=climate_direction(self.climate, symbol, bar_close) if to_touch else None,
             )
-            for b in BASELINES:
-                baselines.setdefault((b.name, b.version), {})[symbol] = b.predict(inputs)
+            for b in self.baselines:
+                forecast = b.predict(inputs)
+                status = "ok" if forecast is not None else NO_PREVIOUS
+                made_by.setdefault((b.name, self._version(b), status), {})[symbol] = forecast
         self._record(
-            bar_close, at_close, [(name, version, made, "ok") for (name, version), made in baselines.items()]
+            bar_close,
+            at_close,
+            [(name, version, made, status) for (name, version, status), made in made_by.items()],
         )
         if not at_close:
             return
@@ -675,10 +824,14 @@ class PredictionEngine:
         """Every predictor's empty prediction for ``symbols``, recorded with why."""
         at_close = {s: _AtClose(self._market.mid(s, bar_close), {}) for s in symbols}
         nothing = dict.fromkeys(symbols)
-        made = [(b.name, b.version, nothing, status) for b in BASELINES]
+        made = [(b.name, self._version(b), nothing, status) for b in self.baselines]
         made += [(a.name, self.models[a.name].version, nothing, status) for a in running]
         made += [(name, self.weights.version, nothing, status) for name in NAMES]
         self._record(bar_close, at_close, made)
+
+    def _version(self, baseline: Baseline) -> str:
+        """The version a baseline's predictions carry: the climate table's for the climate."""
+        return self.climate.version if baseline.name == CLIMATE else baseline.version
 
     def _within_cpu_budget(self, bar_close: datetime, running: Sequence[Algorithm]) -> list[Algorithm]:
         """The algorithms to run: the last registered drop out while the expected work is over budget."""
@@ -702,7 +855,7 @@ class PredictionEngine:
         status = "timed_out"
         declined: dict[str, Abstention] = {}
         if name not in self._busy:
-            vectors = {s: FeatureVector(c.features, algorithm.features) for s, c in at_close.items()}
+            vectors = {s: FeatureVector(c.features, algorithm.features, c.touch) for s, c in at_close.items()}
             started = timer.perf_counter()
             work = asyncio.ensure_future(asyncio.to_thread(_predict_symbols, algorithm, model, vectors))
             done, _ = await asyncio.wait({work}, timeout=self._budget.per_algorithm)
@@ -783,12 +936,20 @@ class PredictionEngine:
 
     def _score_until(self, due: datetime) -> None:
         scores: list[tuple[int, Score]] = []
+        # The touch label of every window over (#167), predicted or not (a VI), and of each
+        # bar close scored (one from before a restart says so): recorded beside the outcomes,
+        # not yet what they are scored on.
+        windows = dict.fromkeys(self._market.ended_windows(due))
         while self._pending and self._pending[0][0] <= due:
             _, _, pending = heapq.heappop(self._pending)
             mid_target = self._market.mid(pending.symbol, pending.target_at)
             scores.append((pending.prediction_id, _score(pending, mid_target)))
+            windows[(pending.symbol, pending.target_at - HORIZON)] = None
+        now = self.clock.now()
+        if windows:
+            self.store.add_touches([self._market.touch(symbol, close) for symbol, close in windows], now)
         if scores:
-            self.store.score_all(scores, self.clock.now())
+            self.store.score_all(scores, now)
             self._tell(OutcomesScored([prediction_id for prediction_id, _ in scores]))
 
     def _tell(self, change: PredictionsStored | OutcomesScored) -> None:
@@ -827,7 +988,8 @@ def _predict_symbols(algorithm: Algorithm, model: Model, vectors: Mapping[str, F
     declined: dict[str, Abstention] = {}
     for symbol, features in vectors.items():
         try:
-            f = algorithm.predict(features, model)
+            with forecasting(features):  # of the target the features carry (#169)
+                f = algorithm.predict(features, model)
         except NotPredicted as e:
             declined[symbol] = e.why
             continue

@@ -14,7 +14,6 @@ from collections.abc import Sequence
 from krx_quant.algorithms.contract import (
     Abstention,
     Algorithm,
-    Card,
     Model,
     NothingToLearn,
     NotPredicted,
@@ -32,6 +31,7 @@ from krx_quant.algorithms.newton import Newton
 from krx_quant.algorithms.poisson import Poisson
 from krx_quant.algorithms.shannon import Shannon
 from krx_quant.algorithms.turing import Turing
+from krx_quant.cards import Card, Meaning
 from krx_quant.features import FEATURES
 
 
@@ -79,6 +79,7 @@ __all__ = [
     "Abstention",
     "Algorithm",
     "Card",
+    "Meaning",
     "Model",
     "NothingToLearn",
     "NotPredicted",
