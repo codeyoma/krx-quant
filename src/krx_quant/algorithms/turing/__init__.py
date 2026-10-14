@@ -19,7 +19,9 @@ Personality card:
 It began as the one-minute version (#16); the book's, the tape's and the options' features
 came once recordings had piled up (#55). A model trained before reads the features it was
 trained on, in their order. The series features (``minute_ticks``, ``microprice_ticks``,
-``kospi200f_moves``) are left to Markov and Kalman.
+``kospi200f_moves``) are left to Markov and Kalman, and the range's own features
+(``RANGE_FEATURES``, #181) to the range's Mandelbrot: they came after Turing, which learns
+the direction as it did.
 """
 
 from __future__ import annotations
@@ -34,7 +36,7 @@ from krx_quant.algorithms.contract import Model, Sample
 from krx_quant.algorithms.forecasts import UNKNOWN, class_moves, number, with_outcomes
 from krx_quant.baselines import Forecast
 from krx_quant.cards import TOUCH_LABEL, Card, Meaning, class_move_meanings
-from krx_quant.features import FEATURES, SERIES_FEATURES, FeatureVector
+from krx_quant.features import FEATURES, RANGE_FEATURES, SERIES_FEATURES, FeatureVector
 from krx_quant.pricing import Direction
 
 CLASSES = (Direction.DOWN, Direction.FLAT, Direction.UP)  # the trees' labels 0, 1, 2
@@ -84,8 +86,9 @@ PARAM_MEANINGS: Mapping[str, Meaning] = {
 
 class Turing:
     name = "turing"
-    # Every number the Feature Store has, at registration: register Turing last.
-    features: tuple[str, ...] = tuple(n for n in FEATURES if n not in SERIES_FEATURES)
+    # Every number the Feature Store has, at registration, but the range's (#181): register
+    # Turing last.
+    features: tuple[str, ...] = tuple(n for n in FEATURES if n not in SERIES_FEATURES | RANGE_FEATURES)
     training_days = TRAINING_DAYS
     param_meanings = PARAM_MEANINGS
     card = Card(

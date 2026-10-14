@@ -20,7 +20,7 @@ from krx_quant.algorithms import ALGORITHMS, KIND_ALGORITHMS, load_models
 from krx_quant.api import create_app
 from krx_quant.archive import NIGHTLY_ARCHIVE, archive
 from krx_quant.auth import TokenManager, tokens_and_client
-from krx_quant.backfill import keep_history
+from krx_quant.backfill import PreviousDay, keep_history
 from krx_quant.climate import load_climate, load_tables
 from krx_quant.clock import SessionClock, SystemClock
 from krx_quant.config import Settings
@@ -224,6 +224,8 @@ async def run_collector(
         review_rules=Rules.of(settings),
         target_version=settings.target_version,  # the target learned and forecast (#169)
         climate=load_climate(settings.state_dir) if settings.target_version >= 2 else None,
+        # The previous trading day's backfilled bars (range_prev_day, #181).
+        previous=PreviousDay(settings.data_dir, calendar.calendar),
     )
     store.add_run("start", engine.started_at, None, json.dumps(started(settings)))
     # Held while it runs: a rescore refuses to run beside it (#168). One running already

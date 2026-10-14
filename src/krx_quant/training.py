@@ -31,6 +31,10 @@ answers of its bar closes (``TrainingDay.answers``), what the kind's algorithms 
 Market View follows, as the engine answers them; on a backfilled day the kind's bar rule
 (``Kind.bar_answer``; none without one). The bar closes left out are the direction's (a VI,
 a special situation).
+
+The previous trading day's one-minute ranges (``range_prev_day``, #181) come from that day's
+backfilled bars (``backfill.PreviousDay``), on a recorded day as on a backfilled one, as the
+engine reads them.
 """
 
 from __future__ import annotations
@@ -41,22 +45,22 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time
 from pathlib import Path
-from typing import Any, Literal
-
-import pyarrow.parquet as pq
+from typing import Literal
 
 from krx_quant.algorithms import ALGORITHMS, KIND_ALGORITHMS, Algorithm, KindAlgorithm, Model, model_path
 from krx_quant.algorithms.contract import KindSample, Sample
 from krx_quant.archive import NIGHTLY_ARCHIVE, partition_files
-from krx_quant.backfill import FUTURES_BARS_TR, MINUTE_BARS_TR, bars_key
+from krx_quant.backfill import FUTURES_BARS_TR, MINUTE_BARS_TR, PreviousDay, bars_key, read_bars
 from krx_quant.config import Settings
 from krx_quant.contracts import KOSPI200, USD, days_to_expiry
 from krx_quant.engine import Event
 from krx_quant.features import (
     LEAD_FEATURES,
+    PREVIOUS_DAY_RANGE,
     FeatureStore,
     FeatureVector,
     Leaders,
+    PreviousRanges,
     Snapshot,
     TouchTerms,
     Value,
@@ -135,6 +139,8 @@ def training_day(
     """
     session = calendar.session(day)
     regime = day_regime(data_dir, day, session.open) if session is not None else None
+    # The previous trading day's ranges (#181), read only for a feature of them.
+    previous = PreviousDay(data_dir, calendar) if PREVIOUS_DAY_RANGE in names else None
     if is_recorded(data_dir, day, symbols):
         events = recorded_events(data_dir, day, symbols, leaders)
         made, answers = recorded_day(
@@ -148,6 +154,7 @@ def training_day(
             regime=regime,
             target_version=target_version,
             kinds=kinds,
+            previous=previous,
         )
         return TrainingDay("mid", made, answers)
     bar_days = bar_days_on(data_dir, symbols, [day])
@@ -163,6 +170,7 @@ def training_day(
         leaders=leaders,
         regimes={day: regime},
         target_version=target_version,
+        previous=previous,
     )
     return TrainingDay("close", made, bar_answers(bar_days, calendar, fee_rate, kinds))
 
@@ -209,6 +217,7 @@ def samples(
     leaders: Leaders | None = None,
     regimes: Mapping[date, str | None] | None = None,
     target_version: int = 1,
+    previous: PreviousRanges | None = None,
 ) -> list[Sample]:
     """A sample per bar close in each day's prediction window, in time order, from backfilled
     bars: the reference price is the last close, the outcome the close four minutes later;
@@ -216,6 +225,7 @@ def samples(
 
     ``leader_days`` holds the leading series' bars by (series, day); the other symbols of
     ``bar_days`` lead too. ``regimes`` holds each day's macro regime (none: unknown).
+    ``previous`` gives each symbol's previous trading day's ranges (#181; none: unknown).
     """
     store = store or FeatureStore()
     leaders = leaders or Leaders()
@@ -232,6 +242,7 @@ def samples(
         starts = [b.start for b in bars]
         closes = {b.start: b.close for b in bars}
         expiry = days_to_expiry(day, calendar)
+        ranges = previous(symbol, day) if previous is not None else None
         t, last = prediction_window(session)
         while t <= last:
             done = bars[: bisect.bisect_right(ends, t)]
@@ -249,6 +260,7 @@ def samples(
                 leaders=groups,
                 regime=(regimes or {}).get(day),
                 expiry_days=expiry,
+                previous_ranges=ranges,
             )
             values = store.compute(snapshot, names)
             later = closes.get(t + HORIZON - BAR)  # the close of the bar ending at t + 4 minutes
@@ -308,6 +320,7 @@ def recorded_day(
     regime: str | None = None,
     target_version: int = 1,
     kinds: Sequence[Kind] = (),
+    previous: PreviousRanges | None = None,
 ) -> tuple[list[Sample], Answers]:
     """A sample per bar close of ``day``'s prediction window and symbol, in time order, from
     the day's events (in receipt order) through the engine's Market View; and the ``kinds``'
@@ -319,7 +332,8 @@ def recorded_day(
     (``target_version`` 2, #169), the label of the bar close's touch window, as the engine
     records it. A symbol in a VI at a bar close has no sample there (the engine does not
     predict it), and neither has a bar close whose four minutes a VI, circuit breaker or
-    sidecar touches (live statistics leave it out).
+    sidecar touches (live statistics leave it out). ``previous`` gives each symbol's previous
+    trading day's ranges (#181), as the engine's does.
     """
     session = calendar.session(day)
     if session is None:
@@ -329,7 +343,13 @@ def recorded_day(
     # With the touch target or the kinds, the view follows the windows as the engine's does.
     windows_fee = fee_rate if to_touch or kinds else None
     view = MarketView(
-        calendar, symbols, leaders, datetime.combine(day, time(), KST), windows_fee, kinds=kinds
+        calendar,
+        symbols,
+        leaders,
+        datetime.combine(day, time(), KST),
+        windows_fee,
+        kinds=kinds,
+        previous=previous,
     )
     special = SpecialSituations(calendar)
     first, last = prediction_window(session)
@@ -481,7 +501,7 @@ def load_leader_days(data_dir: Path, leaders: Leaders, days: Iterable[date]) -> 
     out: dict[tuple[str, date], list[Bar]] = {}
     for day in days:
         for feed, name in leader_series(leaders):
-            bars = _read_bars(data_dir, day, feed, name)
+            bars = read_bars(data_dir, day, feed, name)
             if bars is not None:
                 out[(name, day)] = bars
     return out
@@ -494,18 +514,10 @@ def bar_days_on(
     out: dict[tuple[str, date], list[Bar]] = {}
     for day in days:
         for symbol in symbols:
-            bars = _read_bars(data_dir, day, MINUTE_BARS_TR, symbol)
+            bars = read_bars(data_dir, day, MINUTE_BARS_TR, symbol)
             if bars is not None:
                 out[(symbol, day)] = bars
     return out
-
-
-def _read_bars(data_dir: Path, day: date, feed: str, name: str) -> list[Bar] | None:
-    """A day's backfilled bars of a series, if it has a file."""
-    path = data_dir / bars_key(day, feed, name)
-    if not path.exists():
-        return None
-    return [_bar(row) for row in pq.read_table(path).to_pylist()]
 
 
 @dataclass(frozen=True)
@@ -582,19 +594,4 @@ def fit_algorithm(
         len(loaded),
         [day for day, found in loaded.items() if found.reference == "mid"],
         labelled,
-    )
-
-
-def _bar(row: dict[str, Any]) -> Bar:
-    start = row["bar_time"]
-    return Bar(
-        start=start,
-        open=row["open"],
-        high=row["high"],
-        low=row["low"],
-        close=row["close"],
-        volume=row["volume"],
-        trades=0,  # the backfill has no trade counts
-        first_at=start,
-        last_at=start,
     )
