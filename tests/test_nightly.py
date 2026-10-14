@@ -102,6 +102,7 @@ def night(
     algorithms: Sequence[Algorithm],
     leaders: Leaders | None = None,
     commit: str = "unknown",
+    target_version: int = 1,
 ) -> Any:
     return train_night(
         LocalObjectStore(store_root),
@@ -112,6 +113,7 @@ def night(
         leaders=leaders,
         now=lambda: FINISHED,
         commit=commit,
+        target_version=target_version,
     )
 
 
@@ -295,6 +297,32 @@ def test_a_checkpoint_an_older_version_wrote_is_trained_again(store_root: Path, 
     report = read(store_root, f"reports/{NIGHT}/learner.json")
     assert len(learner.fitted_on) == 1
     assert report["commit"] == "0123abc" and "validation" in report
+
+
+def test_a_checkpoint_of_another_target_is_trained_again(store_root: Path, tmp_path: Path) -> None:
+    learner = FrequencyAlgorithm("learner", "velocity")
+    # Written by a run on the four-minute move (no target_version: 1), then the night is
+    # resumed on the touch target (#169): its labels and losses were of other outcomes.
+    (store_root / "reports" / str(NIGHT)).mkdir(parents=True)
+    (store_root / "reports" / str(NIGHT) / "learner.json").write_text(
+        json.dumps(
+            {
+                "algorithm": "learner",
+                "day": str(NIGHT),
+                "champion": None,
+                "challenger": None,
+                "promoted": False,
+                "reason": "on the four-minute move",
+                "commit": "0123abc",
+            }
+        )
+    )
+
+    night(store_root, tmp_path, [learner], commit="0123abc", target_version=2)
+
+    report = read(store_root, f"reports/{NIGHT}/learner.json")
+    assert len(learner.fitted_on) == 1
+    assert report["target_version"] == 2
 
 
 class Reclaimed(RuntimeError):
@@ -514,3 +542,100 @@ def test_markov_learns_each_macro_regime_s_transitions_from_its_own_days(
 
     assert rows("shock") == rows("default"), "no shock day: the default transitions"
     assert rows("risk_on") != rows("default"), "learned from the risk_on days"
+
+
+def labelled(cache: Path, day: date, target_version: int = 2) -> list[Sample]:
+    """``day``'s samples with a label, as the night read them from its cache."""
+    found = training_day(
+        cache,
+        day,
+        MarketCalendar(dict.fromkeys(DAYS, True)),
+        ("005930",),
+        ["velocity"],
+        FEE,
+        Leaders(),
+        target_version=target_version,
+    )
+    assert found is not None
+    return [s for s in found.samples if s.outcome is not None]
+
+
+def test_with_the_touch_target_the_report_counts_the_labels_by_where_they_came_from(
+    store_root: Path, tmp_path: Path
+) -> None:
+    # The last training day and the validation days were recorded (mornings), the rest backfilled.
+    for day in DAYS[-4:]:
+        archive_events(store_root, day, busy_morning(day), tmp_path)
+
+    result = night(store_root, tmp_path, [FrequencyAlgorithm("learner", "velocity")], target_version=2)
+
+    report = read(store_root, f"reports/{NIGHT}/learner.json")
+    by_day = {str(d): len(labelled(tmp_path / "cache", d)) for d in DAYS[-7:]}
+    recorded = sum(by_day[str(d)] for d in DAYS[-4:])
+    assert report["target_version"] == 2
+    assert report["labels"] == {
+        "samples": {"recorded": recorded, "bars": sum(by_day.values()) - recorded},
+        "by_day": by_day,
+    }
+    assert recorded == 4 * 56, "09:01–09:56 of each recorded morning"
+    # It learned the touch labels: the stand-in's model is their frequencies.
+    trained = [s for d in DAYS[-7:-3] for s in labelled(tmp_path / "cache", d)]
+    params = read(store_root, f"models/learner/{report['challenger']['version']}.json")["params"]
+    assert params["up"] == pytest.approx(sum(s.outcome is Direction.UP for s in trained) / len(trained))
+    moving = [s for d in DAYS[-7:-3] for s in labelled(tmp_path / "cache", d, 1)]
+    assert params["up"] != pytest.approx(sum(s.outcome is Direction.UP for s in moving) / len(moving))
+    # Telegram: every day the night read (the climate's twenty reach back to the first).
+    everything = {str(d): len(labelled(tmp_path / "cache", d)) for d in DAYS}
+    quotes = sum(everything[str(d)] for d in DAYS[-4:])
+    bars = sum(everything.values()) - quotes
+    assert f"정답 버전 2 표본: 녹화 호가 {quotes}개, 1분봉 {bars}개" in result.summary()
+
+
+async def test_with_the_touch_target_the_climate_table_is_refitted_and_runs_from_the_morning(
+    store_root: Path, tmp_path: Path
+) -> None:
+    result = night(store_root, tmp_path, [FrequencyAlgorithm("learner", "velocity")], target_version=2)
+
+    version = result.promoted["baseline-climate"]
+    report = read(store_root, f"reports/{NIGHT}/baseline-climate.json")
+    assert report["promoted"] is True and report["challenger"]["version"] == version
+    assert report["training_days"] == [str(d) for d in DAYS], "the latest twenty: all eight here"
+    table = read(store_root, f"models/baseline-climate/{version}.json")["params"]
+    # The 09:00 slot's most frequent label, counted from the samples the night read.
+    first_slot = [
+        s
+        for d in DAYS
+        for s in labelled(tmp_path / "cache", d)
+        if s.bar_close <= datetime.combine(d, time(9, 30), KST)
+    ]
+    counts = {d: sum(s.outcome is d for s in first_slot) for d in Direction}
+    most = max(counts.values())
+    expected = next(d for d in (Direction.FLAT, Direction.UP, Direction.DOWN) if counts[d] == most)
+    assert table["005930.09:00"] == {Direction.UP: 1, Direction.FLAT: 0, Direction.DOWN: -1}[expected]
+    assert "- baseline-climate 승격:" in result.summary()
+
+    engine = PredictionEngine(
+        PredictionStore(tmp_path / "engine.db"),
+        MarketCalendar(dict.fromkeys(DAYS, True)),
+        ("005930",),
+        FEE,
+        FakeClock(FINISHED),
+        algorithms=[FrequencyAlgorithm("learner", "velocity")],
+        target_version=2,
+    )
+    monday = NIGHT + timedelta(days=3)
+    shelf = Shelf(tmp_path / "state")
+    await morning_swap(
+        LocalObjectStore(store_root), shelf, engine, today=monday, at=datetime.combine(monday, time(8), KST)
+    )
+    assert engine.climate.version == version
+
+
+def test_the_first_target_trains_no_climate_table(store_root: Path, tmp_path: Path) -> None:
+    result = night(store_root, tmp_path, [FrequencyAlgorithm("learner", "velocity")])
+
+    assert "baseline-climate" not in result.promoted
+    assert not (store_root / "reports" / str(NIGHT) / "baseline-climate.json").exists()
+    report = read(store_root, f"reports/{NIGHT}/learner.json")
+    assert "labels" not in report and "target_version" not in report
+    assert "정답 버전 2" not in result.summary()

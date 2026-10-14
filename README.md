@@ -76,6 +76,7 @@ uv run krx-quant archive
 - 알고리즘은 모두 수습으로 시작한다. 매일 장 마감 10분 뒤 상태(수습, 정식, 벤치, 은퇴, 복제)를 점검하고, 정식 알고리즘만 합의에 들어간다([docs/engine-api.md](docs/engine-api.md#상태-관리-17)).
 - 순위표(`/v1/leaderboard`)와 알고리즘 상세 통계(`/v1/algorithms/<이름>/stats`)를 낸다. 방향 정밀도, 커버리지, 기준 3종 대비 lift, 중간가 손익(연구용, 스프레드·체결 없음), Brier 점수, 보정 곡선을 신뢰구간과 함께 보여준다.
 - 알고리즘은 녹화된 날은 녹화 이벤트(중간가 기준)로, 백필만 있는 날은 1분봉(종가 기준)으로 학습한다. 모델은 `state/models/`에 저장되고, 실행 중인 엔진은 30초마다 확인해 바뀐 모델로 바꾼다.
+- `KRX_TARGET_VERSION=2`(#169, 기본 1)이면 학습 정답, 알고리즘의 공통 정규분포 함수(닿을 확률), 기준 예측(넷째 `baseline-climate` 포함), 사전 검증이 도달 정답(#160)을 따른다([docs/engine-api.md](docs/engine-api.md#학습)).
 
 ```bash
 uv run krx-quant fit newton

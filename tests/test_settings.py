@@ -45,6 +45,14 @@ def test_a_cost_budget_needs_the_schedules_it_turns_off() -> None:
     assert Settings.from_env(both, dotenv_path=None).training_schedules == ("a", "b")
 
 
+def test_the_target_is_the_four_minute_move_unless_the_touch_target_is_chosen() -> None:
+    assert Settings.from_env(KEYS, dotenv_path=None).target_version == 1
+    assert Settings.from_env({**KEYS, "KRX_TARGET_VERSION": "2"}, dotenv_path=None).target_version == 2
+    for bad in ("3", "0", "two", ""):
+        with pytest.raises(SettingsError, match="KRX_TARGET_VERSION"):
+            Settings.from_env({**KEYS, "KRX_TARGET_VERSION": bad}, dotenv_path=None)
+
+
 def test_the_commit_running_is_the_deploy_s_or_unknown() -> None:
     assert Settings.from_env(KEYS, dotenv_path=None).commit == "unknown"
     assert Settings.from_env({**KEYS, "KRX_COMMIT": "0123abc"}, dotenv_path=None).commit == "0123abc"

@@ -673,6 +673,15 @@ class MarketView:
         window = self._windows.get(symbol, {}).get(bar_close)
         return window.result() if window is not None else restarted(symbol, bar_close)
 
+    def quote_at(self, symbol: str, bar_close: datetime) -> tuple[float, float] | None:
+        """The best quote (bid, ask) ``symbol``'s touch window from ``bar_close`` starts from
+        (#169): the last integrated one received before it. None without one, or without
+        touch windows."""
+        window = self._windows.get(symbol, {}).get(bar_close)
+        if window is None or window.bid_start is None or window.ask_start is None:
+            return None
+        return window.bid_start, window.ask_start
+
     def ended_windows(self, due: datetime) -> list[tuple[str, datetime]]:
         """The touch windows over by ``due`` (#167), as (symbol, bar close), each handed out
         once: every symbol's, predicted or not (a VI, a missing book)."""

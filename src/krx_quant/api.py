@@ -54,7 +54,6 @@ from aiohttp import web
 
 from krx_quant.algorithms import Algorithm
 from krx_quant.backfill import stock_bars_path, stored_bars
-from krx_quant.baselines import BASELINE_NAMES, BASELINES
 from krx_quant.candles import PERIODS as CANDLE_PERIODS
 from krx_quant.candles import stored_candles
 from krx_quant.consensus import NAMES, slot
@@ -370,7 +369,7 @@ async def _algorithms(request: web.Request) -> web.Response:
     return _json(
         {
             "algorithms": [_algorithm_json(engine, a) for a in engine.algorithms],
-            "baselines": [{"name": b.name, "card": b.card.as_dict()} for b in BASELINES],
+            "baselines": [{"name": b.name, "card": b.card.as_dict()} for b in engine.baselines],
             "consensus": [
                 {"name": name, "card": card.as_dict()}
                 for name, card in consensus_cards(engine.consensus_timing).items()
@@ -606,10 +605,7 @@ async def _algorithm_stats(request: web.Request) -> web.Response:
     name = request.match_info["name"]
     query = _query(request, engine)
     known = (
-        {a.name for a in engine.algorithms}
-        | {b.name for b in BASELINES}
-        | set(NAMES)
-        | engine.store.algorithms()
+        {a.name for a in engine.algorithms} | engine.baseline_names | set(NAMES) | engine.store.algorithms()
     )
     if name not in known:
         raise _error(web.HTTPNotFound, f"unknown algorithm {name!r}")
@@ -676,7 +672,7 @@ async def _stats(
         rows, excluded = engine.store.scored_and_excluded(
             query.days, query.symbol, query.special, query.basis
         )
-        algorithms, baselines = split(scored_by_algorithm(rows, query.basis), BASELINE_NAMES)
+        algorithms, baselines = split(scored_by_algorithm(rows, query.basis), engine.baseline_names)
         for a in engine.algorithms:
             algorithms.setdefault(a.name, [])
         return build(algorithms, baselines, excluded)

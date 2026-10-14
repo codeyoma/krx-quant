@@ -21,6 +21,7 @@ from krx_quant.api import create_app
 from krx_quant.archive import NIGHTLY_ARCHIVE, archive
 from krx_quant.auth import TokenManager, tokens_and_client
 from krx_quant.backfill import keep_history
+from krx_quant.climate import load_climate
 from krx_quant.clock import SessionClock, SystemClock
 from krx_quant.config import Settings
 from krx_quant.cost_guard import keep_costs
@@ -212,9 +213,12 @@ async def run_collector(
         min_sample=settings.min_sample,
         leaders=Leaders.of(settings),
         regimes=partial(day_regime, settings.data_dir),  # recorded by the 07:30 macro read
-        admits=admits(settings.state_dir),  # a new algorithm waits for its pre-validation
+        # A new algorithm waits for its pre-validation, on the target it runs.
+        admits=admits(settings.state_dir, settings.target_version),
         commit=settings.commit,
         review_rules=Rules.of(settings),
+        target_version=settings.target_version,  # the target learned and forecast (#169)
+        climate=load_climate(settings.state_dir) if settings.target_version >= 2 else None,
     )
     store.add_run("start", engine.started_at, None, json.dumps(started(settings)))
     # Held while it runs: a rescore refuses to run beside it (#168). One running already

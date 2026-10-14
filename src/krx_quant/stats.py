@@ -122,14 +122,22 @@ class Lift:
     p: float | None  # one-sided: the chance of a lift this large with none really
 
 
+# The touch label (#160) as the basis: pre-validation with the touch target (#169).
+TOUCH_BASIS = "touch"
+
+
 def scored_by_algorithm(rows: Sequence[Mapping[str, Any]], basis: str) -> dict[str, list[Scored]]:
     """Each algorithm's stored predictions (``PredictionStore.scored_predictions``) scored
-    on ``basis`` (``a`` or ``b``); those its basis could not score are left out.
+    on ``basis`` (``a`` or ``b``; or ``TOUCH_BASIS``, the bar close's touch label, its
+    mid-points basis A's); those its basis could not score are left out.
     """
     out: dict[str, list[Scored]] = {}
     for r in rows:
-        outcome = r["class_a"] if basis == "a" else r["class_b"]
-        start = r["mid_close"] if basis == "a" else r["mid_display"]
+        if basis == TOUCH_BASIS:
+            outcome, start = r.get("touch_class"), r["mid_close"]
+        else:
+            outcome = r["class_a"] if basis == "a" else r["class_b"]
+            start = r["mid_close"] if basis == "a" else r["mid_display"]
         if outcome is None or start is None or r["mid_target"] is None:
             continue
         out.setdefault(r["algorithm"], []).append(
