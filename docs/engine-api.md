@@ -138,6 +138,7 @@
 | `pooled` | `prediction_id`, `position`, `algorithm`. 합의 예측(빠른·최종)에 확률을 보탠 정식 알고리즘, 등록 순서대로(#107). 합의를 만들 때 함께 쓴다. 따로 둔 표다 |
 | `votes` | `prediction_id`, `up`, `flat`, `down`. 합의 예측(빠른·최종)에 들어간 정식 알고리즘을 각자 가장 큰 확률의 방향으로 센 수(#106). 합의를 만들 때 함께 쓴다. `blocks`처럼 따로 둔 표다 |
 | `outcomes` | `prediction_id`, `target_at`(t + 4분), `mid_close`(A), `mid_display`(B), `mid_target`, `flat_ticks`(k), `class_a`, `class_b`(`up`/`flat`/`down`), `special`, `unscorable`, `scored_at`(채점 전에는 비어 있음) |
+| `touches` | `symbol`, `bar_close`, `target_version`(지금 2), `class`(`up`/`flat`/`down`, 채점할 수 없으면 비어 있음), `unscorable`(`missing mid`, `rest quotes`, `silent quotes`, `restarted`), `path`(JSON: 아래 `touch`의 경로 필드), `scored_at`. 봉 마감의 도달 정답(#160, #167). 예측이 아니라 (종목, 봉 마감)마다 하나다. `blocks`처럼 따로 둔 표라 옛 엔진도 DB를 연다. 이미 있는 봉 마감은 덮어쓰지 않는다 |
 | `runs` | `id`, `kind`(`cpu_budget`: CPU 예산으로 건너뜀, `review`: 일일 상태 점검, `retire_candidate`: 은퇴 후보 알림, `budget_report`: 그날 예산 때문에 빠진 예측을 알림(#71), `no_regime`: 그날 매크로 국면이 없거나 엔진이 모르는 이름이어서 기본 전이행렬로 돈 날, 첫 봉 마감에 하루 한 번(`detail`에 `(unknown: <이름>)`), `start`: 수집기가 엔진을 시작함(`detail`은 JSON: `commit`, `fee_rate`, `signal_rule`(`min_probability`, `min_agree`, 끄면 `null`), `algorithm_seconds`, `cpu_budget_seconds`. 성적을 코드와 설정별로 가르는 근거, #85), `signal_sent`: 보낸 텔레그램 신호, `signal_blocked`: 막힌 텔레그램 신호(둘 다 판정할 때마다 하나씩, `detail`은 JSON, 아래 "텔레그램 신호 알림", #80)), `at`, `algorithm`, `detail` |
 | `statuses` | `id`, `algorithm`, `at`, `previous`, `status`, `reason`: 알고리즘 상태 이력(#17) |
 | `consensus_fits` | `version`, `computed_at`: 합의 가중치를 계산한 기록(#18). 엔진은 시작할 때 마지막 버전을 읽는다. |
@@ -230,9 +231,27 @@
   "class_b": "up",
   "special": false,
   "unscorable": null,
-  "scored_at": "2026-10-12T09:35:00.003000+09:00"
+  "scored_at": "2026-10-12T09:35:00.003000+09:00",
+  "touch": {
+    "target_version": 2, "class": "up", "unscorable": null,
+    "anchor": 81250.0, "tick": 100, "k": 2, "upper": 81450.0, "lower": 81050.0,
+    "bid_start": 81200.0, "ask_start": 81300.0, "bid_end": 81200.0, "ask_end": 81300.0,
+    "upper_at": "2026-10-12T09:32:30+09:00", "upper_price": 81500.0, "upper_dwell": 1.5, "upper_size": 1200.0,
+    "lower_at": null, "lower_price": null, "lower_dwell": null, "lower_size": null,
+    "max_bid": 81500.0, "max_bid_at": "2026-10-12T09:32:30+09:00",
+    "min_ask": 81300.0, "min_ask_at": "2026-10-12T09:31:00.100000+09:00",
+    "trade_high": 81500.0, "trade_low": 81200.0
+  }
 }
 ```
+
+`touch`는 그 봉 마감의 도달 정답이다(#160, #167, 기록만). 그 봉 마감의 모든 예측이 같은 것을 가진다. 이 필드가 생기기 전에 채점된 예측은 `null`이다.
+
+- `class`: 4분 안에(받은 시각 기준) 통합 최우선 매수호가가 `upper`(= `anchor` + `k`·`tick`) 이상이 된 적이 있으면 `up`, 아니고 최우선 매도호가가 `lower` 이하가 된 적이 있으면 `down`, 아니면 `flat`. 채점할 수 없으면 `null`이고 `unscorable`이 이유다.
+- `anchor`: 봉 마감의 통합 중간가(기준 가격 규칙). `bid_start`·`ask_start`: 봉 마감 전에 받은 마지막 통합 1호가. `bid_end`·`ask_end`: 4분 안에 받은 마지막 1호가.
+- `upper_at`·`upper_price`: 위 목표에 처음 닿은 받은 시각과 그때 매수호가. `upper_dwell`: 처음 닿은 뒤 매수호가가 목표 아래로 내려갈 때까지의 초(내려가지 않으면 4분 끝까지). `upper_size`: 그때 매수 1호가 잔량(통합 호가 피드에서만, 체결에 실린 호가면 `null`). `lower_*`는 아래 목표의 같은 값(매도호가 기준).
+- `max_bid`·`min_ask`: 4분 안의 최고 매수호가와 최저 매도호가, 그 시각. `trade_high`·`trade_low`: 4분 안의 통합 체결 고가·저가(체결가 기준 정답과 견주는 진단용).
+- 아직 학습, 상태 판정, 합의, 통계, 신호, 화면의 ✓/✗는 `class_a`·`class_b`로 한다. 전환은 #170에서 한다.
 
 ### `GET /v1/symbols/{symbol}/predictions?limit=N&algorithm=A&before=T`, `?bar_close=T`
 
