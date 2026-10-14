@@ -27,10 +27,12 @@ labels (``fill_kind_answers``, #180): every bar close predicted since the record
 before today without the kind's answer of its answer version gets the one the Replay
 Harness gives it (its class, why it has none, its path, when it was scored and its special
 mark: the day's VI statuses, KOSPI index and futures are read for the mark, as the engine
-marks it). Only the missing rows are written; a bar close recorded nowhere is ``not
-recorded``. The baselines do not predict the past bar closes again: they were never shown
-then. The run is recorded in ``runs`` (``kind_fill``). ``rescore`` does not compute them
-again: a fixed answer rule takes a new answer version, whose rows are all missing.
+marks it; a kind with barriers, #183, has their width from the day's recorded trades and the
+previous trading day's backfilled bars in the data directory, as the engine fixes it). Only
+the missing rows are written; a bar close recorded nowhere is ``not recorded``. The
+baselines do not predict the past bar closes again: they were never shown then. The run is
+recorded in ``runs`` (``kind_fill``). ``rescore`` does not compute them again: a fixed answer
+rule takes a new answer version, whose rows are all missing.
 
 The running engine holds a lock on its state directory (``EngineLock``, ``flock``). A rescore
 beside it would leave the engine's cached leaderboards and consensus weights on the labels
@@ -55,9 +57,10 @@ from pathlib import Path
 from typing import IO, Any, TypeVar
 
 from krx_quant.archive import partition_files
+from krx_quant.backfill import PreviousDay
 from krx_quant.config import Settings
 from krx_quant.engine import Event, PredictionEngine
-from krx_quant.features import Leaders
+from krx_quant.features import Leaders, PreviousDays
 from krx_quant.feeds import BOOK, BOOK_SNAPSHOT, INDEX, INDEX_REST, KOSPI200_FUTURES, TRADE, VI_STATUS
 from krx_quant.feeds.base import KST, kst_day
 from krx_quant.kinds import DIRECTION, Answer, Kind
@@ -189,11 +192,14 @@ def answer_day(
     fee_rate: float,
     kinds: Sequence[Kind],
     halt: threading.Event | None = None,
+    previous: PreviousDays | None = None,
 ) -> list[Answered]:
     """Every window of ``symbols`` on ``day``'s bar closes answered by each of ``kinds`` (#180),
     from the day's events (in receipt order) through the engine's Market View, as the engine
     answers them; each special as the engine leaves it: a VI, circuit breaker or sidecar
-    known at its bar close, or learned since in any version, touches its four minutes."""
+    known at its bar close, or learned since in any version, touches its four minutes. A kind
+    with barriers has their widths from the previous trading days in ``previous`` too (#183),
+    as the engine's view has them."""
     special = SpecialSituations(calendar)
     ended: list[tuple[str, datetime, list[Answer]]] = []
     _follow_day(
@@ -208,6 +214,7 @@ def answer_day(
         ),
         halt=halt,
         also=lambda feed, row: special.event(feed, row, symbols),
+        previous=previous,
     )
     out: list[Answered] = []
     for symbol, close, answers in ended:
@@ -230,14 +237,17 @@ def _follow_day(
     *,
     halt: threading.Event | None = None,
     also: Callable[[str, dict[str, Any]], object] | None = None,
+    previous: PreviousDays | None = None,
 ) -> None:
     """Follow ``day``'s windows of ``symbols`` through the engine's Market View (with the
-    ``kinds``' quotes), giving each to ``ended`` when its four minutes are over, before
-    anything received then; each event goes to ``also`` too."""
+    ``kinds``' quotes, and the previous trading days in ``previous``), giving each to ``ended``
+    when its four minutes are over, before anything received then; each event goes to
+    ``also`` too."""
     session = calendar.session(day)
     if session is None:
         return
-    view = MarketView(calendar, symbols, Leaders(), datetime.combine(day, time(), KST), fee_rate, kinds=kinds)
+    start = datetime.combine(day, time(), KST)
+    view = MarketView(calendar, symbols, Leaders(), start, fee_rate, kinds=kinds, previous=previous)
     first, last = prediction_window(session)
     # Every minute from the first bar close to the last window's end: windows end on the
     # minute, and the engine scores at each one before it predicts the bar close there.
@@ -507,7 +517,16 @@ def _answer_day(
             symbols,
             KIND_FEEDS,
             MARKET_FEEDS,
-            lambda events, chosen: answer_day(events, calendar, day, chosen, settings.fee_rate, kinds, halt),
+            lambda events, chosen: answer_day(
+                events,
+                calendar,
+                day,
+                chosen,
+                settings.fee_rate,
+                kinds,
+                halt,
+                PreviousDay(settings.data_dir, calendar),
+            ),
         )
     except _Halted:
         raise

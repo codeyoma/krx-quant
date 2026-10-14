@@ -24,6 +24,12 @@ listed again.
    on the recorded days, from those days' backfilled bars (what chooses ``ranges.BAR_C``);
    how far the mid-point went up and down. Special windows are left out, as training leaves
    them out.
+8. The barrier answers (#183): their classes by symbol and 30-minute slot; the width w's
+   spread and how often it is k; how often the one-minute bar rule (``barriers.bar_barrier``,
+   the width from the backfilled bars of the day and the previous trading day) gives the
+   quote answer's class on the recorded days, and how often its barriers are both reached in
+   the same minute (left out of training); and the barrier P&L had every call been right
+   (research only). Special windows are left out, as for the range.
 
 A distribution shows a few quantiles and the maximum. A quantile is the lower of the two
 values around q·(n − 1) of the sorted values: no value is made up. Nothing is judged
@@ -47,6 +53,8 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.compute as pc
 
+from krx_quant.backfill import PreviousDay
+from krx_quant.barriers import BARRIER, SAME_MINUTE, TIMEOUT, barrier_profit
 from krx_quant.consensus import slot
 from krx_quant.feeds import (
     BOOK,
@@ -67,6 +75,7 @@ from krx_quant.pricing import most_likely, tick_size
 from krx_quant.ranges import ANSWER_VERSION, BAR_C, RANGE, bar_range
 from krx_quant.reference import BAR, KRX_ONLY, MAX_QUOTE_AGE
 from krx_quant.regime import NO_INDICATOR
+from krx_quant.stats import mean_interval
 from krx_quant.touch import TARGET_VERSION
 from krx_quant.training import bar_answers, bar_days_on
 
@@ -110,6 +119,10 @@ def diagnose(
             (
                 "7. 변동폭 정답(#180): 종목 × 시간대 분포·1분봉 규칙 일치율·위아래로 간 폭",
                 _ranges(conn, chosen, data_dir, calendar, fee_rate),
+            ),
+            (
+                "8. 장벽 정답(#183): 종목 × 시간대 분포·폭 w·1분봉 규칙 일치율·같은 분·미래를 안 손익",
+                _barriers(conn, chosen, data_dir, calendar, fee_rate),
             ),
         ]
     lines = [f"진단 {chosen[0]} – {chosen[-1]} ({len(chosen)}거래일)" if chosen else "진단: 데이터 없음"]
@@ -505,4 +518,119 @@ def _bar_rule(
     ]
     lines += [f"  {symbol}: {shown(symbol)}" for symbol in sorted({s for s, *_ in scored})]
     lines.append(f"1분봉 범위 − 호가 범위(틱, c = 0): {_distribution(pa.array(wider, pa.float64()), 'g')}")
+    return lines
+
+
+_BARRIER_CLASSES = (("up_first", "위 먼저"), ("timeout", "시간 만료"), ("down_first", "아래 먼저"))
+
+
+def _barriers(
+    conn: sqlite3.Connection | None,
+    days: Sequence[date],
+    data_dir: Path,
+    calendar: MarketCalendar,
+    fee_rate: float,
+) -> list[str]:
+    """The barrier answers stored (#183), special windows left out: their classes by symbol and
+    30-minute slot, the width w's spread and share at k by symbol, the bar rule against them on
+    the recorded days' backfilled bars (with the share of same-minute touches), and the barrier
+    P&L of a call always right."""
+    if conn is None or not days:
+        return []
+    cond, params = _on_days(days)
+    try:
+        rows = conn.execute(
+            "SELECT symbol, bar_close, class, unscorable, special, path FROM kind_answers p"
+            f" WHERE kind = ? AND answer_version = ? AND {cond} ORDER BY bar_close, symbol",
+            [BARRIER.name, BARRIER.answer_version, *params],
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return []  # a DB from before the kinds
+    if not rows:
+        return []
+    scored = [(r[0], r[1], r[2], json.loads(r[5])) for r in rows if r[2] is not None and not r[4]]
+    unscorable: dict[str, int] = {}
+    for r in rows:
+        if r[2] is None:
+            unscorable[r[3]] = unscorable.get(r[3], 0) + 1
+    special = sum(1 for r in rows if r[2] is not None and r[4])
+
+    def share(k: int, n: int) -> str:
+        return f"{100 * k / n:.0f}%" if n else "—"
+
+    lines = []
+    cells: dict[tuple[str, str], list[str]] = defaultdict(list)
+    for symbol, bar_close, cls, _ in scored:
+        cells[(symbol, slot_of(bar_close))].append(cls)
+    for (symbol, cell), classes in sorted(cells.items()):
+        split = " · ".join(
+            f"{label} {share(classes.count(c), len(classes))}" for c, label in _BARRIER_CLASSES
+        )
+        lines.append(f"{symbol} {cell}: {split} ({len(classes)}창)")
+    if special or unscorable:
+        lines.append(
+            f"특수 상황 {special}창(뺌)"
+            + "".join(f" · {why} {n}" for why, n in sorted(unscorable.items()))
+            + (" (채점 불가)" if unscorable else "")
+        )
+    for symbol in sorted({s for s, *_ in scored}):
+        paths = [p for s, _, _, p in scored if s == symbol and p.get("w") is not None]
+        if paths:
+            widths = _distribution(pa.array([p["w"] for p in paths], pa.float64()), "g")
+            at_k = sum(p["w"] == p["k"] for p in paths)
+            lines.append(f"{symbol} 폭 w(틱): {widths} · w = k {share(at_k, len(paths))} ({len(paths)}창)")
+    lines += _barrier_bar_rule(scored, data_dir, calendar, fee_rate)
+    for symbol in sorted({s for s, *_ in scored}):
+        trades = [
+            profit
+            for s, _, cls, p in scored
+            if s == symbol and cls != TIMEOUT and (profit := barrier_profit(cls, cls, p)) is not None
+        ]
+        mean = mean_interval(trades)
+        if mean is None:
+            continue
+        interval = (
+            f" (95% {mean.low:.2f}–{mean.high:.2f})" if mean.low is not None and mean.high is not None else ""
+        )
+        lines.append(
+            f"{symbol} 미래를 알았을 때의 장벽 손익(틱, 연구용): 거래 {len(trades)} · 합계 {sum(trades):.1f}"
+            f" · 거래당 {mean.value:.2f}{interval}"
+        )
+    return lines
+
+
+def _barrier_bar_rule(
+    scored: Sequence[tuple[str, str, str, dict[str, float]]],
+    data_dir: Path,
+    calendar: MarketCalendar,
+    fee_rate: float,
+) -> list[str]:
+    """How often the one-minute bar rule gives the quote answer's class, on the days with both
+    (the recorded days' backfilled bars, the width from them and the previous trading day's);
+    and how often it found both barriers reached in the same minute (no class: left out of
+    training), of the windows it answered."""
+    symbols = sorted({s for s, *_ in scored})
+    days = sorted({date.fromisoformat(b[:10]) for _, b, _, _ in scored})
+    bar_days = bar_days_on(data_dir, symbols, days)
+    by_bars = bar_answers(bar_days, calendar, fee_rate, [BARRIER], previous=PreviousDay(data_dir, calendar))
+    same: dict[str, list[bool]] = defaultdict(list)
+    both: dict[str, list[bool]] = defaultdict(list)
+    for symbol, bar_close, cls, _ in scored:
+        answer = by_bars.get((BARRIER.name, symbol, datetime.fromisoformat(bar_close)))
+        if answer is None:
+            continue
+        both[symbol].append(answer.unscorable == SAME_MINUTE)
+        if answer.label is not None:
+            same[symbol].append(answer.label == cls)
+    if not both:
+        return ["1분봉 규칙: 정답이 있는 날의 1분봉 없음"]
+
+    def shown(symbol: str | None) -> str:
+        hits = [h for s, values in same.items() if symbol in (None, s) for h in values]
+        twice = [h for s, values in both.items() if symbol in (None, s) for h in values]
+        agreement = f"{100 * sum(hits) / len(hits):.1f}% ({len(hits)}창)" if hits else "—"
+        return f"{agreement} · 같은 분 양쪽 닿음 {100 * sum(twice) / len(twice):.1f}% ({len(twice)}창 중)"
+
+    lines = [f"1분봉 규칙과 호가 정답의 클래스 일치율: {shown(None)}"]
+    lines += [f"  {symbol}: {shown(symbol)}" for symbol in sorted(both)]
     return lines

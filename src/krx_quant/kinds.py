@@ -14,6 +14,10 @@ A kind declares in one place (``Kind``):
 - its answer function and answer version: the class of a bar close's four minutes, from
   the quotes the Market View followed through them (``Followed``), and, for days with
   one-minute bars only, a bar rule (``bar_answer``) to train on;
+- for a kind with barriers (#183, the barrier), the rule of their width at a bar close
+  (``width``): the engine fixes it there from the bars it knows, the same for every predictor;
+  the answer reads it (``Followed.width``), the bar rule is given it, and every prediction keeps
+  it (``kind_predictions.width_ticks``);
 - its baselines, the predictions every algorithm of the kind must beat: some from what
   they know at the bar close, some from a table the nightly training refits on the kind's
   answers and the 08:00 swap installs (``TableBaseline``, #180);
@@ -38,8 +42,9 @@ sixty seconds without a quote, or that the engine restarted in cannot be scored
 (``Followed.unscorable``), whatever the answer function says.
 
 The kinds are registered in ``kind_registry.KINDS``, in order: the direction first, then
-the range (#180, ``ranges.py``). A new kind's algorithms run after the direction's
-(``algorithms.KIND_ALGORITHMS``), so the CPU budget skips them first.
+the range (#180, ``ranges.py``), then the barrier (#183, ``barriers.py``). A new kind's
+algorithms run after the direction's (``algorithms.KIND_ALGORITHMS``), so the CPU budget
+skips them first.
 """
 
 from __future__ import annotations
@@ -55,8 +60,9 @@ from krx_quant.cards import Card, Meaning
 from krx_quant.reference import Bar
 from krx_quant.touch import MISSING_MID, REST_QUOTES, SILENCE, SILENT, TARGET_VERSION, WINDOW
 
-if TYPE_CHECKING:  # the algorithm contract builds on this module: its types only
+if TYPE_CHECKING:  # the algorithm contract builds on this module: its types only, and the features'
     from krx_quant.algorithms.contract import KindSample, Model
+    from krx_quant.features import Snapshot, Width
 
 DIRECTION = "direction"
 # Why a kind's answer function gave no class for a window the shared rules could score.
@@ -88,7 +94,10 @@ class Followed:
     last before the bar close. ``quotes`` are the usable best quotes received in
     [t, t + 4 minutes), in the order received; ``trades`` the integrated trades' (time,
     price) there. ``unscorable`` says why the window cannot be scored (``touch.py``'s
-    reasons), None if it can."""
+    reasons), None if it can. ``cost`` is the round-trip cost at the reference price in ticks
+    (``pricing.cost_ticks``: k is it rounded up), and ``width`` the kind's barrier width fixed
+    at the bar close (``Kind.width``, #183); None without a reference price, or a kind without
+    barriers."""
 
     symbol: str
     bar_close: datetime
@@ -100,6 +109,8 @@ class Followed:
     quotes: tuple[Quote, ...]
     trades: tuple[tuple[datetime, float], ...]
     unscorable: str | None
+    cost: float | None = None
+    width: Width | None = None
 
     @property
     def end(self) -> datetime:
@@ -151,10 +162,14 @@ class QuoteLog:
         k: int | None,
         bid_start: float | None,
         ask_start: float | None,
+        *,
+        cost: float | None = None,
+        width: Width | None = None,
     ) -> Followed:
         """The window from ``bar_close``, by the touch target's rules: the quotes received in
         [t, t + 4 minutes); unscorable without a mid-point at t, with a REST snapshot in it,
         or with sixty seconds or more without a quote (from t, between two, or up to the end).
+        ``cost`` and ``width`` go with it as given (``Followed``).
         """
         start, end = bar_close, bar_close + WINDOW
         quotes = tuple(q for q in self._quotes if start <= q.received_at < end)
@@ -162,7 +177,9 @@ class QuoteLog:
         trades = tuple(t for t in self._trades if start <= t[0] < end)
         silent = went_silent(start, end, [q.received_at for q in quotes])
         unscorable = MISSING_MID if anchor is None else REST_QUOTES if rest else SILENT if silent else None
-        return Followed(symbol, bar_close, anchor, tick, k, bid_start, ask_start, quotes, trades, unscorable)
+        return Followed(
+            symbol, bar_close, anchor, tick, k, bid_start, ask_start, quotes, trades, unscorable, cost, width
+        )
 
 
 def went_silent(start: datetime, end: datetime, received: Sequence[datetime]) -> bool:
@@ -189,10 +206,25 @@ class Answer:
 # A kind's answer from a window's quotes (called for every window, scorable or not; a
 # window the shared rules cannot score gets no class whatever it says).
 AnswerFunction = Callable[[Followed], Answer]
-# A kind's answer from one-minute bars, for days with no quotes (training only): the bar
-# that ended at the bar close, the bars of the four minutes after it (those with trades)
-# and the fee rate; None without one.
-BarAnswer = Callable[[Bar, Sequence[Bar], float], Answer | None]
+
+
+class BarAnswer(Protocol):
+    """A kind's answer from one-minute bars, for days with no quotes (training only)."""
+
+    def __call__(
+        self, closing: Bar, after: Sequence[Bar], fee_rate: float, /, *, width: Width | None = None
+    ) -> Answer | None:
+        """The answer from the bar that ended at the bar close (``closing``), the bars of the
+        four minutes after it (``after``, those with trades) and the fee rate; for a kind with
+        barriers (#183), their width at the bar close from the bars up to it (``Kind.width``),
+        None for one without. None without an answer."""
+        ...
+
+
+# A kind's barrier width at a bar close (#183), from what is known there (the day's bars and
+# the previous trading day's, the reference price and k: ``features.Snapshot``); None without
+# a reference price.
+WidthRule = Callable[["Snapshot"], "Width | None"]
 
 
 @dataclass(frozen=True)
@@ -317,6 +349,8 @@ class Kind:
     answer: AnswerFunction | None = None
     # The answer of a day with one-minute bars only; None: such days are not trained on.
     bar_answer: BarAnswer | None = None
+    # The width of the kind's barriers at a bar close (#183); None: a kind without barriers.
+    width: WidthRule | None = None
     baselines: tuple[KindBaseline, ...] = ()
     # The output's fields beside the probabilities: what each is (its meaning and unit).
     fields: Mapping[str, Meaning] = field(default_factory=dict)

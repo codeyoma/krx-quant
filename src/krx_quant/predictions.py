@@ -18,7 +18,8 @@ on. Like ``touches`` they leave the schema version alone: an engine from before 
 opens the database (``_KIND_SCHEMA``). ``kind_predictions.flat_ticks`` (#200), the bar close's
 k each prediction was made with, is a column added the same way (``_ADDED_COLUMNS``): an
 engine from before it names the columns it writes, so it still opens and writes the
-database, and its rows have no k.
+database, and its rows have no k. So is ``kind_predictions.width_ticks`` (#183), the barrier
+width w of a kind with barriers at the bar close.
 
 Times are ISO 8601 strings in KST, which sort in time order.
 """
@@ -168,6 +169,9 @@ CREATE TABLE IF NOT EXISTS kind_predictions (  -- a prediction of a kind besides
     output TEXT,                      -- JSON: p_<class> of its three classes, then its fields; null unless ok
     flat_ticks INTEGER,               -- k at the bar close (#200): what its predictors were given; null
                                       -- without a mid-point there, and in rows stored before #200
+    width_ticks INTEGER,              -- a kind's barrier width w at the bar close (#183, the barrier's):
+                                      -- what its answer is made with; null for a kind without barriers,
+                                      -- without a mid-point there, and in rows stored before #183
     UNIQUE (kind, symbol, algorithm, bar_close)
 );
 CREATE INDEX IF NOT EXISTS kind_predictions_by_close ON kind_predictions (kind, bar_close);
@@ -190,7 +194,10 @@ CREATE TABLE IF NOT EXISTS kind_answers (  -- a kind's answer of a bar close's f
 # Columns added to a table after it was first made, without a schema version (#200): a
 # database made before has the table without them, and gets them when an engine opens it.
 # (table, column, type); new tables have them already (``_KIND_SCHEMA``).
-_ADDED_COLUMNS = (("kind_predictions", "flat_ticks", "INTEGER"),)
+_ADDED_COLUMNS = (
+    ("kind_predictions", "flat_ticks", "INTEGER"),
+    ("kind_predictions", "width_ticks", "INTEGER"),
+)
 
 
 def _added_columns(db: sqlite3.Connection) -> str:
@@ -326,6 +333,7 @@ class NewKindPrediction:
     output: Mapping[str, float] | None  # the probabilities and the kind's fields; None unless ok
     status: str = "ok"
     flat_ticks: int | None = None  # k at the bar close (#200); None without a mid-point there
+    width_ticks: int | None = None  # the kind's barrier width there (#183); None for a kind without
 
 
 @dataclass(frozen=True)
@@ -798,7 +806,8 @@ class PredictionStore:
             for p in predictions:
                 cursor = self._db.execute(
                     "INSERT INTO kind_predictions (kind, symbol, algorithm, model_version, bar_close,"
-                    " displayed_at, status, output, flat_ticks) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    " displayed_at, status, output, flat_ticks, width_ticks)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         kind,
                         p.symbol,
@@ -809,6 +818,7 @@ class PredictionStore:
                         p.status,
                         None if p.output is None else json.dumps(dict(p.output), separators=(",", ":")),
                         p.flat_ticks,
+                        p.width_ticks,
                     ),
                 )
                 assert cursor.lastrowid is not None

@@ -28,6 +28,7 @@ from krx_quant.algorithms.mandelbrot import NAME as MANDELBROT
 from krx_quant.algorithms.markov import Markov
 from krx_quant.archive import archive
 from krx_quant.backfill import BAR_SCHEMA, MINUTE_BARS_TR
+from krx_quant.barriers import CLIMATE as BARRIER_CLIMATE
 from krx_quant.cli import main
 from krx_quant.climate import CLIMATE
 from krx_quant.clock import FakeClock
@@ -453,14 +454,18 @@ def test_the_train_command_trains_every_registered_algorithm_from_the_store(
 
     promotions = read(store_root, f"promotions/{NIGHT}.json")
     # On the touch target, the default (#170): the climate baseline's table, then the range's
-    # (#180), of the range's answers (answer version 1), then the range's Mandelbrot (#181).
-    names = [a.name for a in ALGORITHMS] + [CLIMATE, RANGE_CLIMATE, MANDELBROT]
+    # (#180) and the barrier's (#183), each of its kind's answers (answer version 1), then the
+    # range's Mandelbrot (#181).
+    names = [a.name for a in ALGORITHMS] + [CLIMATE, RANGE_CLIMATE, BARRIER_CLIMATE, MANDELBROT]
     assert [r["algorithm"] for r in promotions["reports"]] == names
     assert {r["algorithm"]: r["target_version"] for r in promotions["reports"]} == {
         **dict.fromkeys(names, 2),
         RANGE_CLIMATE: 1,
+        BARRIER_CLIMATE: 1,
         MANDELBROT: 1,
     }
+    barrier = read(store_root, f"reports/{NIGHT}/{BARRIER_CLIMATE}.json")
+    assert (barrier["kind"], barrier["promoted"]) == ("barrier", True), "fitted on the bar rule's answers"
     assert {r["commit"] for r in promotions["reports"]} == {"0123abc"}, "the deploy's, as the engine's (#85)"
     out = capsys.readouterr().out
     assert f"{NIGHT} 밤 학습" in out

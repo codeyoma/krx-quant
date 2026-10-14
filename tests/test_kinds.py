@@ -83,7 +83,9 @@ def test_the_direction_is_the_first_kind_registered_as_it_always_ran() -> None:
     assert KINDS[0] is DIRECTION_KIND
     assert (DIRECTION_KIND.classes, DIRECTION_KIND.action) == (("up", "flat", "down"), ("up", "down"))
     assert DIRECTION_KIND.answer_version == 2  # the touch label (#170)
-    assert [k.name for k in KINDS] == ["direction", "range"], "the range after it (#180)"
+    assert [k.name for k in KINDS] == ["direction", "range", "barrier"], (
+        "the range, then the barrier (#180, #183)"
+    )
 
 
 def kind(**changes: Any) -> Kind:

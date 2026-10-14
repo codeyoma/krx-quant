@@ -50,9 +50,14 @@ def flat_ticks(price: float, fee_rate: float) -> int:
 
     ``fee_rate`` is the commission per side as a fraction (0.015% is 0.00015).
     """
-    cost = price * (SELL_TAX + 2 * fee_rate)
     # Rounded first so a cost of exactly whole ticks is not pushed up by float error.
-    return max(1, math.ceil(round(cost / tick_size(price), 9)))
+    return max(1, math.ceil(round(cost_ticks(price, fee_rate), 9)))
+
+
+def cost_ticks(price: float, fee_rate: float) -> float:
+    """The round-trip cost of trading at ``price`` (the sell tax and the commission on both
+    sides), in ticks of its tick size: what ``flat_ticks`` rounds up."""
+    return price * (SELL_TAX + 2 * fee_rate) / tick_size(price)
 
 
 def classify(change: float, k: int, tick: int) -> Direction:

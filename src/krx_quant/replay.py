@@ -27,7 +27,7 @@ from krx_quant.clock import FakeClock
 from krx_quant.config import Settings
 from krx_quant.consensus import Timing
 from krx_quant.engine import ENGINE_FEEDS, Budget, Event, Notify, PredictionEngine, Regimes, partitions
-from krx_quant.features import FeatureStore, Leaders, PreviousRanges
+from krx_quant.features import FeatureStore, Leaders, PreviousDays
 from krx_quant.feeds.base import KST, kst_day
 from krx_quant.kind_registry import KINDS
 from krx_quant.kinds import Kind
@@ -68,7 +68,7 @@ async def replay(
     climate: Model | None = None,
     kinds: Sequence[Kind] = KINDS,
     kind_algorithms: Sequence[KindAlgorithm] = KIND_ALGORITHMS,
-    previous: PreviousRanges | None = None,
+    previous: PreviousDays | None = None,
 ) -> PredictionEngine:
     """Feed ``events`` (in receipt order) received by ``until`` to an engine storing into ``db``.
 

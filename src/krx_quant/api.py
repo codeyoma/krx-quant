@@ -35,8 +35,9 @@ Endpoints (all under ``/v1``):
 - ``GET /symbols/{symbol}/kinds/{kind}/latest`` and
   ``GET /symbols/{symbol}/kinds/{kind}/predictions?limit=N&algorithm=A&before=T``,
   ``?bar_close=T``: a kind's predictions besides the direction's, as the direction's
-  ``latest`` and ``predictions``, each with its bar close's answer and the bar close's k it
-  was made with (``flat_ticks``, #200).
+  ``latest`` and ``predictions``, each with its bar close's answer, the bar close's k it
+  was made with (``flat_ticks``, #200) and, for a kind with barriers, their width there
+  (``width_ticks``, #183).
 
 An algorithm is of a kind (``kind`` in ``/algorithms``). ``/leaderboard?kind=`` ranks a kind's
 algorithms against its baselines (the direction's by default, as before); an algorithm's

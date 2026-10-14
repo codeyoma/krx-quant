@@ -302,29 +302,46 @@ def _stored_bar(row: Row) -> Bar:
 
 
 class PreviousDay:
-    """Each symbol's previous trading day's one-minute ranges by 30-minute slot (#181,
-    ``features.day_slot_ranges``: the range's ``range_prev_day``), from that day's backfilled
-    bars under the data directory; empty without them. The same on a recorded day and a
-    backfilled one: every finished trading day is backfilled (20:30). Read once per symbol and
-    day; a file that cannot be read is logged and counts as none (the engine predicts on)."""
+    """Each symbol's previous trading day (``features.PreviousDays``), from that day's
+    backfilled bars under the data directory: its one-minute ranges by 30-minute slot (#181,
+    ``features.day_slot_ranges``: the range's ``range_prev_day``) and its one-minute bars of
+    continuous trading, from the open to the closing auction (#183: the barrier's width); empty
+    without them. The same on a recorded day and a backfilled one: every finished trading day
+    is backfilled (20:30). Read once per symbol and day; a file that cannot be read is logged
+    and counts as none (the engine predicts on)."""
 
     def __init__(self, data_dir: Path, calendar: MarketCalendar) -> None:
         self._data_dir = data_dir
         self._calendar = calendar
-        self._read: dict[tuple[str, date], dict[str, float]] = {}
+        self._read: dict[tuple[str, date], tuple[dict[str, float], list[Bar]]] = {}
 
     def __call__(self, symbol: str, day: date) -> Mapping[str, float]:
+        return self._of(symbol, day)[0]
+
+    def bars(self, symbol: str, day: date) -> Sequence[Bar]:
+        return self._of(symbol, day)[1]
+
+    def _of(self, symbol: str, day: date) -> tuple[dict[str, float], list[Bar]]:
         if (symbol, day) not in self._read:
             before = self._calendar.previous_trading_day(day)
             session = self._calendar.session(before)
             try:
                 bars = read_bars(self._data_dir, before, MINUTE_BARS_TR, symbol)
             except Exception:
-                log.exception("cannot read %s's bars of %s; its range_prev_day is unknown", symbol, before)
+                log.exception(
+                    "cannot read %s's bars of %s; its range_prev_day and barrier width go without them",
+                    symbol,
+                    before,
+                )
                 bars = None
-            self._read[(symbol, day)] = (
-                {} if bars is None or session is None else day_slot_ranges(bars, session)
-            )
+            if bars is None or session is None:
+                self._read[(symbol, day)] = ({}, [])
+            else:
+                trading = sorted(
+                    (b for b in bars if session.open <= b.start < session.closing_auction),
+                    key=lambda b: b.start,
+                )
+                self._read[(symbol, day)] = (day_slot_ranges(bars, session), trading)
         return self._read[(symbol, day)]
 
 

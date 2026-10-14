@@ -393,12 +393,14 @@ def test_storing_labels_that_change_nothing_leaves_the_store_version(tmp_path: P
 # The kinds' answers (#180): the range's, filled at start.
 
 
-def kind_answers(db: Path) -> list[tuple[Any, ...]]:
-    """Every kind's answer stored, with its path, special mark and when it was scored."""
+def kind_answers(db: Path, kind: str = RANGE.name) -> list[tuple[Any, ...]]:
+    """Every answer of ``kind`` stored (the range's: the barrier's are #183's,
+    ``tests/test_barriers.py``), with its path, special mark and when it was scored."""
     with sqlite3.connect(db) as conn:
         return conn.execute(
             "SELECT kind, symbol, bar_close, answer_version, class, unscorable, special, path, scored_at"
-            " FROM kind_answers ORDER BY kind, bar_close, symbol"
+            " FROM kind_answers WHERE kind = ? ORDER BY bar_close, symbol",
+            (kind,),
         ).fetchall()
 
 
@@ -453,13 +455,15 @@ def test_the_kinds_fill_reads_the_object_store_and_keeps_the_answers_stored(
     db = server_db(s.state_dir, replayed, keep=1)
     with sqlite3.connect(db) as conn:
         conn.execute("DELETE FROM kind_predictions")
-        rows = conn.execute("SELECT rowid FROM kind_answers ORDER BY bar_close").fetchall()
+        rows = conn.execute(
+            "SELECT rowid FROM kind_answers WHERE kind = 'range' ORDER BY bar_close"
+        ).fetchall()
         conn.executemany("DELETE FROM kind_answers WHERE rowid = ?", [r for i, r in enumerate(rows) if i % 3])
         conn.execute(
             "UPDATE kind_answers SET class = NULL, unscorable = ?, path = '{}' WHERE bar_close = ?",
             (RESTARTED, "2026-10-12T09:31:00+09:00"),
         )
-        kept = len(conn.execute("SELECT 1 FROM kind_answers").fetchall())
+        kept = len(conn.execute("SELECT 1 FROM kind_answers WHERE kind = 'range'").fetchall())
 
     [filled] = fill_kind_answers(s, NEXT_MORNING, kinds=(RANGE,))
 
