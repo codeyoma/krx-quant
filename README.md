@@ -1,0 +1,1 @@
+Screenshots for pull requests (private: they may show the engine's card text).
