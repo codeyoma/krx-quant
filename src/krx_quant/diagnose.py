@@ -30,6 +30,16 @@ listed again.
    quote answer's class on the recorded days, and how often its barriers are both reached in
    the same minute (left out of training); and the barrier P&L had every call been right
    (research only). Special windows are left out, as for the range.
+9. The crossed quotes (#187): the integrated book's (``H0UNASP0``) updates whose best ask is
+   below the best bid, in continuous trading, by symbol, day and 30-minute slot (their share
+   of the updates and of the time), how long a spell lasts and how deep it is; the integrated
+   trades' (``H0UNCNT0``) best quotes crossed; the bar closes whose last quote was crossed and
+   the age of the valid quote the reference price used then (``reference.ReferencePrice``:
+   the book's and the trades' quotes, under a minute old); which venue's bid was above which
+   venue's ask, from the per-venue trades' (``H0STCNT0``, ``H0NXCNT0``) best quotes, and
+   whether trades printed at those prices; the VIs (``special.SpecialSituations``) and the
+   feeds' raw time codes during the spells. It only measures: how crossed quotes are used
+   is not changed here (#187 decides).
 
 A distribution shows a few quantiles and the maximum. A quantile is the lower of the two
 values around q·(n − 1) of the sorted values: no value is made up. Nothing is judged
@@ -42,10 +52,10 @@ from __future__ import annotations
 import contextlib
 import json
 import sqlite3
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Iterable, Iterator, Sequence
-from dataclasses import replace
-from datetime import date, datetime, time
+from dataclasses import dataclass, field, replace
+from datetime import date, datetime, time, timedelta
 from functools import partial
 from pathlib import Path
 
@@ -58,23 +68,28 @@ from krx_quant.barriers import BARRIER, SAME_MINUTE, TIMEOUT, barrier_profit
 from krx_quant.consensus import slot
 from krx_quant.feeds import (
     BOOK,
+    BOOK_SNAPSHOT,
     INDEX,
     INDEX_REST,
     KOSPI200_FUTURES,
+    KRX_TRADE,
+    NXT_TRADE,
     OPTION,
+    TRADE,
     US_TRADE,
     USD_FUTURES,
     VI_STATUS,
 )
 from krx_quant.feeds.base import KST
 from krx_quant.macro import INDICATORS, MACRO, decided_before, read_partition
-from krx_quant.market_calendar import MarketCalendar
+from krx_quant.market_calendar import MarketCalendar, Session
 from krx_quant.market_view import prediction_window
 from krx_quant.predictions import SCORED, TOUCH_JOIN
 from krx_quant.pricing import most_likely, tick_size
 from krx_quant.ranges import ANSWER_VERSION, BAR_C, RANGE, bar_range
 from krx_quant.reference import BAR, KRX_ONLY, MAX_QUOTE_AGE
 from krx_quant.regime import NO_INDICATOR
+from krx_quant.special import Kind, SpecialSituations
 from krx_quant.stats import mean_interval
 from krx_quant.touch import TARGET_VERSION
 from krx_quant.training import bar_answers, bar_days_on
@@ -123,6 +138,10 @@ def diagnose(
             (
                 "8. 장벽 정답(#183): 종목 × 시간대 분포·폭 w·1분봉 규칙 일치율·같은 분·미래를 안 손익",
                 _barriers(conn, chosen, data_dir, calendar, fee_rate),
+            ),
+            (
+                "9. 뒤집힌 호가(#187): 종목 × 날 × 30분 칸 비율·지속·깊이·봉 마감·거래소 귀속·체결·VI",
+                _crossed(data_dir, chosen, calendar),
             ),
         ]
     lines = [f"진단 {chosen[0]} – {chosen[-1]} ({len(chosen)}거래일)" if chosen else "진단: 데이터 없음"]
@@ -634,3 +653,362 @@ def _barrier_bar_rule(
     lines = [f"1분봉 규칙과 호가 정답의 클래스 일치율: {shown(None)}"]
     lines += [f"  {symbol}: {shown(symbol)}" for symbol in sorted(both)]
     return lines
+
+
+# 9. The crossed quotes (#187). Times are kept as integer microseconds since the epoch.
+_MICROS = 1_000_000
+_QUOTE_AGE = int(MAX_QUOTE_AGE.total_seconds()) * _MICROS  # the reference price's limit
+_KST_OFFSET = 9 * 3600  # seconds: Korea keeps no daylight saving
+_SLOT = 30 * 60  # seconds
+_LISTED = 10  # the spells over a minute listed, at most, by symbol
+_VENUE_FEEDS = (("KRX", KRX_TRADE.tr_id), ("NXT", NXT_TRADE.tr_id))
+# Which venue's bid was above which venue's ask: (the bid's venue, the ask's venue).
+_ACROSS = {("KRX", "NXT"): "KRX 매수 > NXT 매도", ("NXT", "KRX"): "NXT 매수 > KRX 매도"}
+_OWN = {"KRX": "KRX 자체 뒤집힘", "NXT": "NXT 자체 뒤집힘"}  # a venue's own best quotes crossed
+_MIXED, _UNMATCHED, _UNSEEN = "섞임", "통합과 맞지 않음", "거래소별 체결 없음"
+_ATTRIBUTIONS = (*_ACROSS.values(), *_OWN.values(), _MIXED, _UNMATCHED, _UNSEEN)
+_PER_VENUE = (
+    "거래소별 1호가는 거래소별 체결(H0STCNT0 KRX, H0NXCNT0 NXT)에 실린 것뿐이라"
+    " 그 거래소에 체결이 난 순간에만 있다. 귀속은 뒤집힌 동안 난 거래소별 체결마다"
+    " 그 거래소의 1호가를 그때의 통합 1호가와 견준 것이다."
+)
+
+
+@dataclass
+class _CrossedSymbol:
+    """A symbol's crossed quotes over the days read: the day lines, and what adds up."""
+
+    days: list[str] = field(default_factory=list)
+    durations: list[np.ndarray] = field(default_factory=list)  # seconds, a spell each
+    depths: list[np.ndarray] = field(default_factory=list)  # ticks, a crossed update each
+    long: list[str] = field(default_factory=list)  # the spells over a minute
+    closes: int = 0
+    crossed_closes: list[int] = field(default_factory=list)  # by day
+    ages: list[float] = field(default_factory=list)  # seconds, of the valid quote used then
+    no_mid: int = 0
+    spells: Counter[str] = field(default_factory=Counter)  # by attribution
+    seconds: dict[str, float] = field(default_factory=lambda: defaultdict(float))  # by attribution
+    # By cross-venue attribution: its spells, the high bid traded, the low ask traded, both.
+    traded: dict[str, list[int]] = field(default_factory=lambda: {a: [0, 0, 0, 0] for a in _ACROSS.values()})
+    vi_spells: int = 0
+    vi_seconds: float = 0.0
+    vis: int = 0
+    # The raw time codes, during a spell (True) or not: the book's, and the per-venue trades' by venue.
+    book_codes: dict[bool, Counter[str]] = field(default_factory=lambda: {True: Counter(), False: Counter()})
+    venue_codes: dict[bool, dict[str, Counter[str]]] = field(
+        default_factory=lambda: {True: defaultdict(Counter), False: defaultdict(Counter)}
+    )
+
+    def lines(self, symbol: str) -> list[str]:
+        out = list(self.days)
+        durations = np.concatenate(self.durations)
+        n = len(durations)
+        if n:
+            depths = np.concatenate(self.depths)
+            out.append(
+                f"{symbol} 한 번 뒤집혀 있는 시간(초, {n}번): {_distribution(pa.array(durations), '.1f')}"
+            )
+            out.append(
+                f"{symbol} 깊이(틱, 뒤집힌 호가 {len(depths)}건): {_distribution(pa.array(depths), 'g')}"
+            )
+            more = len(self.long) - _LISTED
+            listed = " · ".join(self.long[:_LISTED]) + (f" 외 {more}번" if more > 0 else "")
+            out.append(f"{symbol} 60초 넘게 뒤집힘: {listed or '없음'}")
+        else:
+            out.append(f"{symbol} 뒤집힌 통합 호가 없음")
+        crossed = sum(self.crossed_closes)
+        closing = (
+            f"{symbol} 봉 마감 직전 호가가 뒤집힘: {self.closes}개 중 {crossed}개"
+            f" (날마다 {min(self.crossed_closes)}–{max(self.crossed_closes)})"
+        )
+        if self.ages:
+            closing += (
+                f" · 그때 쓴 유효 호가의 나이(초): {_distribution(pa.array(self.ages, pa.float64()), '.1f')}"
+            )
+        if crossed:
+            closing += f" · 유효 호가 없음(중간가 모름) {self.no_mid}개"
+        out.append(closing)
+        if not n:
+            return out
+        total = sum(self.seconds.values())
+        shares = " · ".join(
+            f"{a} {_pct(self.spells[a], n)} (시간 {_pct(self.seconds[a], total)})" for a in _ATTRIBUTIONS
+        )
+        out.append(f"{symbol} 거래소 귀속(뒤집힘 {n}번): {shares}")
+        traded = " | ".join(
+            f"{label} {k}번 중 높은 매수호가({high})에 체결 {_pct(bid, k)} · 낮은 매도호가({low})에 체결"
+            f" {_pct(ask, k)} · 둘 다 {_pct(both, k)}"
+            for (high, low), label in _ACROSS.items()
+            for k, bid, ask, both in [self.traded[label]]
+        )
+        out.append(f"{symbol} 뒤집힌 가격에 체결: {traded}")
+        out.append(
+            f"{symbol} VI와 겹친 뒤집힘: {self.vi_spells}번 (뒤집힌 시간의 {_pct(self.vi_seconds, total)})"
+            f" · 그 날들의 VI {self.vis}번"
+        )
+        out.append(
+            f"{symbol} 통합 호가의 시간 구분 코드(원문): 뒤집힌 호가 {_codes(self.book_codes[True])}"
+            f" | 그 밖 {_codes(self.book_codes[False])}"
+        )
+
+        def by_venue(inside: bool) -> str:
+            codes = self.venue_codes[inside]
+            return ", ".join(f"{v} {_codes(codes[v])}" for v, _ in _VENUE_FEEDS if codes[v]) or "없음"
+
+        out.append(
+            f"{symbol} 거래소별 체결의 장운영/시간 구분 코드(원문): 뒤집힌 동안 {by_venue(True)}"
+            f" | 그 밖 {by_venue(False)}"
+        )
+        return out
+
+
+def _crossed(data_dir: Path, days: Sequence[date], calendar: MarketCalendar) -> list[str]:
+    """The crossed quotes (#187), read a symbol-day at a time and let go: only the spells'
+    lengths and depths, the bar closes' ages and the counts are kept."""
+    found: dict[str, _CrossedSymbol] = {}
+    for day, partition in _partitions(data_dir, days, BOOK.tr_id):
+        session = calendar.session(day)
+        if session is not None:
+            _crossed_day(data_dir, day, partition.name.removeprefix("symbol="), session, calendar, found)
+    lines = [line for symbol, seen in sorted(found.items()) for line in seen.lines(symbol)]
+    return [*lines, _PER_VENUE] if lines else []
+
+
+def _between(
+    data_dir: Path, day: date, feed: str, symbol: str, columns: Sequence[str], start: int, end: int
+) -> tuple[np.ndarray, pa.Table] | None:
+    """A symbol-day's rows of ``feed`` received in [start, end) (microseconds), in the order
+    received: their receipt times and ``columns``; None without any."""
+    partition = data_dir / "events" / f"date={day}" / f"feed={feed}" / f"symbol={symbol}"
+    table = read_partition(partition, ("received_at", *columns))
+    if table is None:
+        return None
+    at = pc.cast(pc.cast(table["received_at"], pa.timestamp("us", tz="UTC")), pa.int64()).to_numpy()
+    keep = np.flatnonzero((at >= start) & (at < end))
+    if len(keep) == 0:
+        return None
+    order = keep[np.argsort(at[keep], kind="stable")]
+    return at[order], table.take(pa.array(order)).combine_chunks()
+
+
+def _prices(table: pa.Table, column: str) -> np.ndarray:
+    """A price column as int64, a missing price 0 (an empty side)."""
+    prices: np.ndarray = pc.fill_null(table[column], 0).to_numpy().astype(np.int64)
+    return prices
+
+
+def _pct(k: float, n: float) -> str:
+    return f"{100 * k / n:.1f}%" if n else "—"
+
+
+def _count(counter: Counter[str], values: pa.ChunkedArray) -> None:
+    for item in pc.value_counts(values).to_pylist():
+        counter[item["values"] if item["values"] is not None else "-"] += item["counts"]
+
+
+def _codes(counter: Counter[str]) -> str:
+    total = sum(counter.values())
+    if not total:
+        return "없음"
+    return " · ".join(f"{code} {_pct(c, total)}" for code, c in counter.most_common()) + f" ({total}건)"
+
+
+def _crossed_day(
+    data_dir: Path,
+    day: date,
+    symbol: str,
+    session: Session,
+    calendar: MarketCalendar,
+    found: dict[str, _CrossedSymbol],
+) -> None:
+    """One symbol-day's crossed quotes in continuous trading (the open to the closing auction),
+    added to ``found``.
+
+    An integrated book update holds until the next one, a minute at most (the reference price's
+    limit: past it the book is taken as gone). A spell is a run of crossed updates, ended by an
+    update that is not crossed or by a minute's silence; a one-sided update is not crossed.
+    """
+    start, end = _micros(session.open), _micros(session.closing_auction)
+    book = _between(data_dir, day, BOOK.tr_id, symbol, ("bid_px_1", "ask_px_1", "hour_cls"), start, end)
+    if book is None:
+        return
+    seen = found.setdefault(symbol, _CrossedSymbol())
+    at, rows = book
+    bid, ask = _prices(rows, "bid_px_1"), _prices(rows, "ask_px_1")
+    gap = np.append(at[1:], end) - at
+    hold = np.minimum(gap, _QUOTE_AGE)
+    crossed = (bid > 0) & (ask > 0) & (ask < bid)
+    goes_on = np.concatenate(([False], crossed[:-1] & (gap[:-1] < _QUOTE_AGE)))
+    first = crossed & ~goes_on
+    starts = at[first]
+    spell_of = np.cumsum(first) - 1
+    lengths = np.bincount(spell_of[crossed], weights=hold[crossed], minlength=len(starts)).astype(np.int64)
+    ends = starts + lengths
+
+    # The day's shares, and by the 30-minute slot each update was received in.
+    slots = (at // _MICROS + _KST_OFFSET) % 86_400 // _SLOT
+    updates, crossed_updates = np.bincount(slots, minlength=48), np.bincount(slots[crossed], minlength=48)
+    held = np.bincount(slots, weights=hold, minlength=48)
+    crossed_held = np.bincount(slots[crossed], weights=hold[crossed], minlength=48)
+    cells = " · ".join(
+        f"{s * _SLOT // 3600:02d}:{s * _SLOT % 3600 // 60:02d}"
+        f" {_pct(crossed_updates[s], updates[s])}/{_pct(crossed_held[s], held[s])}"
+        for s in np.flatnonzero(updates)
+    )
+    trades = _between(data_dir, day, TRADE.tr_id, symbol, ("bid1", "ask1"), start, end)
+    quoted = "통합 체결 없음"
+    if trades is not None:
+        t_bid, t_ask = _prices(trades[1], "bid1"), _prices(trades[1], "ask1")
+        t_crossed = int(((t_bid > 0) & (t_ask > 0) & (t_ask < t_bid)).sum())
+        quoted = f"통합 체결 1호가 {len(t_bid)}건 중 뒤집힘 {_pct(t_crossed, len(t_bid))}"
+    seen.days += [
+        f"{symbol} {day}: 통합 호가 {len(at)}건 중 뒤집힘 {_pct(int(crossed.sum()), len(at))}"
+        f" · 시간 {_pct(float(hold[crossed].sum()), float(hold.sum()))} · 뒤집힘 {len(starts)}번 · {quoted}",
+        f"  30분 칸(호가/시간): {cells}",
+    ]
+    seen.durations.append(lengths / _MICROS)
+    mids = (bid[crossed] + ask[crossed]) / 2
+    ticks = np.array([tick_size(float(m)) for m in mids], dtype=np.float64)
+    seen.depths.append((bid[crossed] - ask[crossed]) / ticks)
+    for s in np.flatnonzero(lengths > _QUOTE_AGE):
+        began = datetime.fromtimestamp(starts[s] / _MICROS, KST).strftime("%H:%M:%S")
+        seen.long.append(f"{day} {began}부터 {lengths[s] / _MICROS:.1f}초")
+    _count(seen.book_codes[True], rows["hour_cls"].filter(pa.array(crossed)))
+    _count(seen.book_codes[False], rows["hour_cls"].filter(pa.array(~crossed)))
+
+    _crossed_closes(data_dir, day, symbol, session, (at, bid, ask), trades, seen)
+    _attribute(data_dir, day, symbol, (start, end), (at, bid, ask), (starts, ends, lengths), seen)
+    # The VIs, as the engine reads them (``special.SpecialSituations.vi``): did a spell meet one?
+    vi_rows = read_partition(
+        data_dir / "events" / f"date={day}" / f"feed={VI_STATUS.tr_id}" / f"symbol={symbol}",
+        ("symbol", "event_time", "received_at", "end_time", "active"),
+    )
+    situations = SpecialSituations(calendar)
+    for row in vi_rows.to_pylist() if vi_rows is not None else []:
+        situations.vi(row)
+    met = np.zeros(len(starts), dtype=bool)
+    for window in situations.known(datetime.combine(day + timedelta(days=1), time(), KST)):
+        if window.kind is Kind.VI:
+            seen.vis += 1
+            met |= (starts < _micros(window.end)) & (ends > _micros(window.start))
+    seen.vi_spells += int(met.sum())
+    seen.vi_seconds += float(lengths[met].sum()) / _MICROS
+
+
+def _crossed_closes(
+    data_dir: Path,
+    day: date,
+    symbol: str,
+    session: Session,
+    book: tuple[np.ndarray, np.ndarray, np.ndarray],
+    trades: tuple[np.ndarray, pa.Table] | None,
+    seen: _CrossedSymbol,
+) -> None:
+    """The bar closes whose last quote was crossed, and the valid quote the reference price used
+    then: of the integrated quotes it takes (the book's, the trades', a REST book snapshot's)
+    received from the NXT open, the last valid one received strictly before the close, if under
+    a minute old (else the mid-point is unknown)."""
+    start, end = _micros(session.open), _micros(session.closing_auction)
+    parts = [book]
+    if trades is not None:
+        parts.append((trades[0], _prices(trades[1], "bid1"), _prices(trades[1], "ask1")))
+    snapshots = _between(data_dir, day, BOOK_SNAPSHOT.tr_id, symbol, ("bid_px_1", "ask_px_1"), start, end)
+    if snapshots is not None:
+        parts.append((snapshots[0], _prices(snapshots[1], "bid_px_1"), _prices(snapshots[1], "ask_px_1")))
+    since = _micros(session.open + KRX_ONLY)
+    order = np.argsort(np.concatenate([p[0] for p in parts]), kind="stable")
+    at, bid, ask = (np.concatenate([p[i] for p in parts])[order] for i in range(3))
+    two_sided = (bid > 0) & (ask > 0) & (at >= since)
+    times, crossed = at[two_sided], (ask < bid)[two_sided]
+    valid = times[~crossed]
+    first, last = prediction_window(session)
+    closes = np.array(
+        [_micros(first + i * BAR) for i in range(int((last - first) / BAR) + 1)], dtype=np.int64
+    )
+    before = np.searchsorted(times, closes) - 1  # the last quote received strictly before
+    hit = before >= 0
+    hit[hit] = crossed[before[hit]]
+    at_close = closes[hit]
+    used = np.searchsorted(valid, at_close) - 1
+    fresh = used >= 0
+    fresh[fresh] = valid[used[fresh]] >= np.maximum(since, at_close[fresh] - _QUOTE_AGE)
+    seen.closes += len(closes)
+    seen.crossed_closes.append(int(hit.sum()))
+    seen.ages += ((at_close[fresh] - valid[used[fresh]]) / _MICROS).tolist()
+    seen.no_mid += int((~fresh).sum())
+
+
+def _attribute(
+    data_dir: Path,
+    day: date,
+    symbol: str,
+    hours: tuple[int, int],
+    book: tuple[np.ndarray, np.ndarray, np.ndarray],
+    spells: tuple[np.ndarray, np.ndarray, np.ndarray],
+    seen: _CrossedSymbol,
+) -> None:
+    """Which venue's bid was above which venue's ask in each spell, and whether those prices
+    traded, from the per-venue trades received during it.
+
+    Each such trade carries its venue's best quotes; the integrated ones in force (crossed: bid
+    B above ask A) are the higher bid and the lower ask of the two venues. The venue's bid at B
+    with its ask above A (or none) leaves A to the other venue: this venue's bid above the
+    other's ask; its ask at A with its bid below B, the other way round; its own bid above its
+    own ask, its own book crossed. Neither matching, the trade says nothing (the feeds arrive
+    apart). A spell takes its trades' one attribution, ``섞임`` if they differ. A trade at B on
+    the bid's venue, or at A on the ask's, printed at that price.
+    """
+    at, bid, ask = book
+    starts, ends, lengths = spells
+    labels: dict[int, set[str]] = defaultdict(set)
+    prints: dict[int, set[tuple[str, str]]] = defaultdict(set)
+    observed: set[int] = set()
+    columns = ("price", "bid1", "ask1", "session_code", "hour_cls")
+    for venue, feed in _VENUE_FEEDS:
+        found = _between(data_dir, day, feed, symbol, columns, *hours)
+        if found is None:
+            continue
+        v_at, rows = found
+        spell = np.searchsorted(starts, v_at, side="right") - 1
+        inside = spell >= 0
+        inside[inside] = v_at[inside] < ends[spell[inside]]
+        codes = pc.binary_join_element_wise(
+            pc.fill_null(rows["session_code"], "-"), pc.fill_null(rows["hour_cls"], "-"), "/"
+        )
+        _count(seen.venue_codes[True][venue], codes.filter(pa.array(inside)))
+        _count(seen.venue_codes[False][venue], codes.filter(pa.array(~inside)))
+        in_force = np.searchsorted(at, v_at, side="right") - 1  # the book update last received
+        price, v_bid, v_ask = _prices(rows, "price"), _prices(rows, "bid1"), _prices(rows, "ask1")
+        other = "NXT" if venue == "KRX" else "KRX"
+        for i in np.flatnonzero(inside):
+            s, j = int(spell[i]), int(in_force[i])
+            high, low = int(bid[j]), int(ask[j])
+            mine_bid, mine_ask = int(v_bid[i]), int(v_ask[i])
+            observed.add(s)
+            if mine_bid > 0 and mine_ask > 0 and mine_ask < mine_bid:
+                labels[s].add(_OWN[venue])
+            elif mine_bid == high and (mine_ask <= 0 or mine_ask > low):
+                labels[s].add(_ACROSS[(venue, other)])
+            elif mine_ask == low and mine_bid < high:
+                labels[s].add(_ACROSS[(other, venue)])
+            if price[i] == high:
+                prints[s].add((venue, "bid"))
+            if price[i] == low:
+                prints[s].add((venue, "ask"))
+    for s, length in enumerate(lengths / _MICROS):
+        found_labels = labels.get(s, set())
+        if found_labels:
+            label = next(iter(found_labels)) if len(found_labels) == 1 else _MIXED
+        else:
+            label = _UNMATCHED if s in observed else _UNSEEN
+        seen.spells[label] += 1
+        seen.seconds[label] += float(length)
+        for (high_venue, low_venue), across in _ACROSS.items():
+            if label == across:
+                printed = prints.get(s, set())
+                bid_traded, ask_traded = (high_venue, "bid") in printed, (low_venue, "ask") in printed
+                counts = seen.traded[across]
+                counts[0] += 1
+                counts[1] += bid_traded
+                counts[2] += ask_traded
+                counts[3] += bid_traded and ask_traded
