@@ -176,11 +176,11 @@ def _mean_json(values: Sequence[tuple[datetime, float]]) -> dict[str, Any]:
 
 
 def quantile_stats(
-    records: Sequence[KindScored], baselines: Mapping[str, Sequence[KindScored]]
+    algorithm: str, records: Sequence[KindScored], baselines: Mapping[str, Sequence[KindScored]]
 ) -> dict[str, Any]:
-    """A predictor's quantile statistics (module doc), from its scored range predictions; its
+    """``algorithm``'s quantile statistics (module doc), from its scored range predictions; its
     pinball loss less ``range-climate``'s on the bar closes both predicted, but for the climate
-    itself."""
+    itself (known by name, scored or not yet)."""
     scored = [
         (rec, float(rec.path["r"]))
         for rec in records
@@ -199,7 +199,7 @@ def quantile_stats(
         "vs_climate": None,
     }
     climate = baselines.get(CLIMATE)
-    if climate is None or any(rec.algorithm == CLIMATE for rec in records):
+    if climate is None or algorithm == CLIMATE:
         return out
     theirs = {(c.symbol, c.bar_close): c.output for c in climate}
     paired = [(rec, r, theirs[key]) for rec, r in scored if (key := (rec.symbol, rec.bar_close)) in theirs]

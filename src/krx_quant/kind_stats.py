@@ -130,10 +130,13 @@ def split(
 
 
 def summarize(
-    records: Sequence[KindScored], kind: Kind, baselines: Mapping[str, Sequence[KindScored]] | None = None
+    records: Sequence[KindScored],
+    kind: Kind,
+    baselines: Mapping[str, Sequence[KindScored]] | None = None,
+    algorithm: str = "",
 ) -> KindSummary:
-    """A predictor's statistics of ``kind``; its own (``Kind.stats``) with the kind's
-    ``baselines``' records beside, to compare against (#180)."""
+    """A predictor's (``algorithm``'s) statistics of ``kind``; its own (``Kind.stats``) with the
+    kind's ``baselines``' records beside, to compare against (#180)."""
     action = {kind.index(c) for c in kind.action}
     calls = [r for r in records if r.predicted in action]
     return KindSummary(
@@ -144,7 +147,7 @@ def summarize(
         brier=mean_interval([_brier(r) for r in records]),
         calibration=_calibration(records, (0, 1, 2)),
         calibration_by_class={c: _calibration(records, (i,)) for i, c in enumerate(kind.classes)},
-        extra=None if kind.stats is None else kind.stats(records, baselines or {}),
+        extra=None if kind.stats is None else kind.stats(algorithm, records, baselines or {}),
     )
 
 
@@ -194,7 +197,7 @@ def entry(
         }
     )
     versions = sorted({r.model_version for r in records})
-    return KindEntry(algorithm, versions, summarize(records, kind, baselines), lifts)
+    return KindEntry(algorithm, versions, summarize(records, kind, baselines, algorithm), lifts)
 
 
 def leaderboard(

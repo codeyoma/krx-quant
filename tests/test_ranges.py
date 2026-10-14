@@ -292,7 +292,7 @@ EXAMPLE = [
 
 
 def test_pinball_loss_coverage_and_the_median_s_error_as_worked_out_by_hand() -> None:
-    stats = quantile_stats(scored(EXAMPLE), {})
+    stats = quantile_stats("model", scored(EXAMPLE), {})
 
     assert stats["n"] == 4
     assert stats["pinball"]["q10"]["mean"]["value"] == pytest.approx(1.25 / 4)
@@ -320,13 +320,15 @@ def test_the_pinball_loss_against_the_climate_s_pairs_the_same_bar_closes() -> N
     day only, so none by day. The climate's own statistics have none."""
     climate = scored([(t, p, (0.0, 2.0, 4.0), r, c) for t, p, _, r, c in EXAMPLE[:2]], CLIMATE)
 
-    stats = quantile_stats(scored(EXAMPLE), {CLIMATE: climate})
+    stats = quantile_stats("model", scored(EXAMPLE), {CLIMATE: climate})
 
     vs = stats["vs_climate"]["q10"]
     assert (vs["mean"]["value"], vs["mean"]["n"]) == (pytest.approx(0.15), 2)
     assert vs["by_day"] is None
     assert stats["vs_climate"]["q50"]["mean"]["value"] == pytest.approx(0.0)  # q50 2 both
-    assert quantile_stats(climate, {CLIMATE: climate})["vs_climate"] is None
+    assert quantile_stats(CLIMATE, climate, {CLIMATE: climate})["vs_climate"] is None
+    # Before the climate has anything scored, it is still itself: no comparison (review on #197).
+    assert quantile_stats(CLIMATE, [], {CLIMATE: []})["vs_climate"] is None
     check("range_stats", stats)
 
 
