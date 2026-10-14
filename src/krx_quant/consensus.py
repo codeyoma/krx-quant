@@ -33,8 +33,8 @@ equal share, the others the rest as fitted.
 The fast consensus waits 2 seconds from when the algorithms start working, just after the
 bar close; an engine running late still gives them that long.
 
-Each of the two has a card like an algorithm's (``CARDS``); the members and the weights
-now are ``/v1/consensus``'s.
+Each of the two has a card like an algorithm's (``cards``, with the engine's own fast
+cutoff); the members and the weights now are ``/v1/consensus``'s.
 """
 
 from __future__ import annotations
@@ -70,10 +70,11 @@ class Timing:
     fast_seconds: float = 2.0  # after the algorithms start, just after the bar close
 
 
-def _cards() -> dict[str, Card]:
+def cards(timing: Timing | None = None) -> dict[str, Card]:
     """The two consensus predictions' cards: who is in, how the weights are set (per symbol
-    and 30-minute slot), and how they make the three probabilities."""
-    fast = f"{Timing().fast_seconds:g}"
+    and 30-minute slot), and how they make the three probabilities; the fast one's cutoff as
+    ``timing`` sets it (the engine's)."""
+    fast = f"{(timing or Timing()).fast_seconds:g}"
     members = (
         "구성원은 정식(active) 알고리즘뿐이다. 수습·벤치·은퇴·복제는 빠진다. 그 시점에 결과가 있는 구성원의 "
         "가중치만 합이 1이 되게 다시 나눈다."
@@ -129,7 +130,7 @@ def _cards() -> dict[str, Card]:
     }
 
 
-CARDS = _cards()
+CARDS = cards()  # with the default timing
 
 
 @dataclass(frozen=True)
