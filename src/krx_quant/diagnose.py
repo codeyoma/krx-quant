@@ -886,13 +886,30 @@ def _crossed_day(
     situations = SpecialSituations(calendar)
     for row in vi_rows.to_pylist() if vi_rows is not None else []:
         situations.vi(row)
-    met = np.zeros(len(starts), dtype=bool)
+    windows: list[tuple[int, int]] = []
     for window in situations.known(datetime.combine(day + timedelta(days=1), time(), KST)):
         if window.kind is Kind.VI:
             seen.vis += 1
-            met |= (starts < _micros(window.end)) & (ends > _micros(window.start))
+            windows.append((_micros(window.start), _micros(window.end)))
+    met = np.zeros(len(starts), dtype=bool)
+    overlap = np.zeros(len(starts), dtype=np.int64)
+    for low, high in _union(windows):  # disjoint, so a spell's overlaps add up without double counting
+        within = np.clip(np.minimum(ends, high) - np.maximum(starts, low), 0, None)
+        met |= (starts < high) & (ends > low)
+        overlap += within
     seen.vi_spells += int(met.sum())
-    seen.vi_seconds += float(lengths[met].sum()) / _MICROS
+    seen.vi_seconds += float(overlap.sum()) / _MICROS
+
+
+def _union(windows: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """``windows`` merged where they overlap or touch, in order."""
+    merged: list[tuple[int, int]] = []
+    for low, high in sorted(windows):
+        if merged and low <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], high))
+        else:
+            merged.append((low, high))
+    return merged
 
 
 def _crossed_closes(
@@ -918,9 +935,12 @@ def _crossed_closes(
     since = _micros(session.open + KRX_ONLY)
     order = np.argsort(np.concatenate([p[0] for p in parts]), kind="stable")
     at, bid, ask = (np.concatenate([p[i] for p in parts])[order] for i in range(3))
-    two_sided = (bid > 0) & (ask > 0) & (at >= since)
-    times, crossed = at[two_sided], (ask < bid)[two_sided]
-    valid = times[~crossed]
+    # The last quote is the last one received, one-sided too (not crossed); a trade carrying no
+    # quotes is none. The reference price falls back on the last valid (two-sided) one.
+    quoted = ((bid > 0) | (ask > 0)) & (at >= since)
+    two_sided = (bid > 0) & (ask > 0)
+    times, crossed = at[quoted], (two_sided & (ask < bid))[quoted]
+    valid = at[quoted & two_sided & (ask >= bid)]
     first, last = prediction_window(session)
     closes = np.array(
         [_micros(first + i * BAR) for i in range(int((last - first) / BAR) + 1)], dtype=np.int64

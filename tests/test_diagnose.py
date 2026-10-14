@@ -509,7 +509,8 @@ def test_crossed_quotes_are_measured_as_worked_out_by_hand(
         " · 낮은 매도호가(KRX)에 체결 0.0% · 둘 다 0.0%"
     )
     assert section[9:12] == [
-        "  000660 VI와 겹친 뒤집힘: 1번 (뒤집힌 시간의 93.3%) · 그 날들의 VI 1번",
+        # The 90 s spell from 10:00:00 overlaps the VI from 10:00:05: 85 s of 96.5.
+        "  000660 VI와 겹친 뒤집힘: 1번 (뒤집힌 시간의 88.1%) · 그 날들의 VI 1번",
         "  000660 통합 호가의 시간 구분 코드(원문): 뒤집힌 호가 0 62.5% · C 37.5% (8건)"
         " | 그 밖 0 100.0% (7건)",
         "  000660 거래소별 체결의 장운영/시간 구분 코드(원문): 뒤집힌 동안"
@@ -519,3 +520,29 @@ def test_crossed_quotes_are_measured_as_worked_out_by_hand(
     assert section[12].startswith("  거래소별 1호가는 거래소별 체결(H0STCNT0 KRX, H0NXCNT0 NXT)에 실린")
     assert len(section) == 13
     assert snapshot(tmp_path) == before, "nothing is written"
+
+
+def test_a_one_sided_quote_after_a_crossed_one_is_the_close_s_last_quote(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Input: a crossed update at 09:00:58, then a one-sided one (no ask) at 09:00:59, before the
+    09:01 close. Output: the close's last quote is the one-sided one, not crossed: no crossed
+    close, though the reference price still falls back on the valid quote of 09:00:40."""
+    data = tmp_path / "data"
+    record(
+        data,
+        [
+            crossed_book(at("09:00:40"), 81_200, 81_300),
+            crossed_book(at("09:00:58"), 81_300, 81_200),
+            crossed_book(at("09:00:59"), 81_300, 0),
+            crossed_book(at("09:01:30"), 81_200, 81_300),
+        ],
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("KRX_DATA_DIR", str(data))
+    monkeypatch.setenv("KRX_STATE_DIR", str(tmp_path / "state"))
+
+    assert main(["diagnose"]) == 0
+
+    section = capsys.readouterr().out.split("\n\n")[9].splitlines()
+    assert "  000660 봉 마감 직전 호가가 뒤집힘: 376개 중 0개 (날마다 0–0)" in section
