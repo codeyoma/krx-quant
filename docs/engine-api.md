@@ -489,7 +489,8 @@
   "model": {"version": "newton-default", "params": {"damping": 0.5, "threshold": 1.0}, "trained": null, "trained_until": null, "training": null, "target_version": null},
   "status": {"status": "probation", "since": "2026-10-12T08:00:00+09:00", "history": []},
   "validation": null,
-  "stage": {"status": "probation", "began": "2026-10-12", "counted_from": "2026-10-12", "days": 0, "next_review": 10},
+  "stage": {"status": "probation", "began": "2026-10-12", "counted_from": "2026-10-12", "days": 0, "review_days": [10, 20, 40],
+            "next_review": 10, "next_review_on": "2026-10-23", "lift_days": 0, "level": 0.983, "weakest": null, "enough": false},
   "model_history": [
     {"at": "2026-10-13T08:00:00+09:00", "version": "newton-20261012-abc123", "why": "promotion 2026-10-12"},
     {"at": "2026-10-13T09:10:00+09:00", "version": null, "why": "rollback from newton-20261012-abc123"}
