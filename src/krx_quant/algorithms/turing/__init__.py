@@ -33,7 +33,7 @@ import numpy as np
 from krx_quant.algorithms.contract import Model, Sample
 from krx_quant.algorithms.forecasts import UNKNOWN, class_moves, number, with_outcomes
 from krx_quant.baselines import Forecast
-from krx_quant.cards import Card, Meaning, class_move_meanings
+from krx_quant.cards import TOUCH_LABEL, Card, Meaning, class_move_meanings
 from krx_quant.features import FEATURES, SERIES_FEATURES, FeatureVector
 from krx_quant.pricing import Direction
 
@@ -92,7 +92,8 @@ class Turing:
         scientist="Alan Turing",
         character="만능 학습",
         logic=(
-            "LightGBM 그래디언트 부스팅 트리로 4분 뒤 상승·보합·하락을 분류한다. 피처 저장소의 모든 숫자 "
+            "LightGBM 그래디언트 부스팅 트리로 4분 안의 상승·보합·하락(도달 정답)을 분류한다. 피처 저장소의 "
+            "모든 숫자 "
             "피처(다른 알고리즘의 프로그램매매·외국계 회원사 흐름, 호가의 주문 흐름, 체결의 방향과 도착, "
             "옵션 내재변동성 포함)에 시간대, 옵션 만기까지 남은 거래일, 투자자별 추정 흐름, 최우선 호가의 "
             "스프레드·잔량 균형·잔량 변화를 더한다. 모르는 피처(백필만 있는 날의 호가)는 비워 두고 트리가 "
@@ -104,7 +105,7 @@ class Turing:
             "같은 표본이면 같은 트리가 나온다."
         ),
         forecasting=(
-            "정답(4분 뒤 중간가 변화의 상승·보합·하락)으로 직접 학습한 LightGBM 다중 분류 트리가 세 확률을 "
+            f"{TOUCH_LABEL}으로 직접 학습한 LightGBM 다중 분류 트리가 세 확률을 "
             "낸다(합이 1이 되게 나눈다). 모르는 피처는 비워 두고, 트리가 학습에서 정한 쪽으로 보낸다. "
             "기대수익은 학습에서 클래스별 평균 4분 변화를 세 확률로 가중한 값이다. 학습 전(트리 없음)에는 세 "
             "확률을 1/3씩 둔다."

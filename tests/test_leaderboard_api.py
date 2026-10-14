@@ -1,7 +1,8 @@
 """The leaderboard and algorithm stats in the Engine API.
 
-Input: scored predictions stored through the prediction store. Output: the API's
-leaderboard and per-algorithm stats.
+Input: scored predictions stored through the prediction store, with their bar closes'
+touch labels (#170: what every prediction is scored on). Output: the API's leaderboard
+and per-algorithm stats.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from krx_quant.engine import PredictionEngine
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.predictions import NewPrediction, PredictionStore, Score
 from krx_quant.pricing import Direction
+from krx_quant.touch import Reached, TouchResult
 from tests.api_schema import check
 from tests.replay_events import DAY, at, run
 from tests.test_replay import busy_morning
@@ -33,6 +35,32 @@ OUTCOMES = [UP, FLAT, DOWN, FLAT] * 10
 EARLIER = date(2026, 10, 8)
 
 
+def touch(symbol: str, t: datetime, label: Direction | None, unscorable: str | None = None) -> TouchResult:
+    """Bar close ``t``'s touch label: at 81,250 won between 81,200 and 81,300 (k = 2), the
+    upper target 81,450 reached a minute in for up, the lower 81,050 for down, neither for
+    flat; the quotes back where they started at the end. None: ``unscorable``."""
+    if label is None:
+        return TouchResult(symbol, t, None, unscorable or "silent quotes")
+    reached = Reached(t + timedelta(minutes=1), 81_450 if label is UP else 81_050, None)
+    return TouchResult(
+        symbol,
+        t,
+        label,
+        None,
+        anchor=81_250,
+        tick=100,
+        k=2,
+        upper=81_450,
+        lower=81_050,
+        bid_start=81_200,
+        ask_start=81_300,
+        bid_end=81_200,
+        ask_end=81_300,
+        upper_reached=reached if label is UP else None,
+        lower_reached=reached if label is DOWN else None,
+    )
+
+
 def store_scored(
     store: PredictionStore,
     algorithm: str,
@@ -41,10 +69,10 @@ def store_scored(
     symbol: str = "005930",
     day: date = DAY,
     version: str = "v1",
-    outcomes_b: Sequence[Direction] | None = None,
     special: bool = False,
 ) -> None:
-    """Store ``calls`` (one sure call per bar close from 09:01), scored against OUTCOMES."""
+    """Store ``calls`` (one sure call per bar close from 09:01), scored against OUTCOMES: the
+    bar closes' touch labels (and, unread, the old bases' classes)."""
     start = datetime.combine(day, at("09:01:00").timetz())
     for i, call in enumerate(calls):
         t = start + timedelta(minutes=i)
@@ -65,15 +93,17 @@ def store_scored(
                 )
             ]
         ).pending
-        a = OUTCOMES[i]
-        b = outcomes_b[i] if outcomes_b is not None else a
-        target = 81_250 + {UP: 300, FLAT: 0, DOWN: -300}[a]
-        store.score_all([(pending.prediction_id, Score(target, a, b, None))], t + timedelta(minutes=4))
+        label = OUTCOMES[i]
+        target = 81_250 + {UP: 300, FLAT: 0, DOWN: -300}[label]
+        store.score_all(
+            [(pending.prediction_id, Score(target, label, label, None))], t + timedelta(minutes=4)
+        )
+        store.add_touches([touch(symbol, t, label)])
 
 
 @contextlib.asynccontextmanager
 async def board(
-    tmp_path: Path, min_sample: int = 20
+    tmp_path: Path, min_sample: int = 20, target_version: int = 1
 ) -> AsyncIterator[tuple[PredictionEngine, TestClient[Any, Any]]]:
     # A holiday: the engine predicts nothing itself; the test stores what it needs.
     engine = await run(
@@ -82,6 +112,7 @@ async def board(
         until=at("16:00:00"),
         calendar=MarketCalendar({DAY: False}),
         symbols=("005930", "000660"),
+        target_version=target_version,
     )
     async with TestClient(TestServer(create_app(engine, min_sample=min_sample))) as client:
         yield engine, client
@@ -108,12 +139,17 @@ async def test_the_leaderboard_ranks_by_the_lower_bound_of_the_weakest_lift(tmp_
 
         body = await get(client, "/v1/leaderboard")
 
-    assert (body["symbol"], body["period"], body["basis"], body["min_sample"]) == ("all", "today", "b", 20)
+    assert (body["symbol"], body["period"], body["min_sample"]) == ("all", "today", 20)
+    assert "basis" not in body, "gone with #170: one label, the touch label"
     assert body["days"] == ["2026-10-12"]
     assert [(e["rank"], e["algorithm"]) for e in body["ranked"]] == [(1, "alpha"), (2, "beta")]
     alpha = body["ranked"][0]
     assert alpha["n"] == 40
     assert alpha["accuracy"]["value"] == 1.0
+    # The touch P&L (#170) of its 20 up and down calls, each right: in at 81,300 (out at 81,200),
+    # out at the target 81,450 (back at 81,050): 1.5 ticks less 1.86875 of cost each.
+    assert alpha["pnl"]["trades"] == 20
+    assert alpha["pnl"]["total_ticks"] == pytest.approx(20 * (1.5 - 1.86875))
     # Always-flat is right on the 20 flats: alpha gains 0.5 at every other bar close.
     vs_flat = alpha["lift"]["vs"]["baseline-flat"]
     assert (vs_flat["n"], vs_flat["value"]) == (40, 0.5)
@@ -131,30 +167,74 @@ async def test_the_leaderboard_ranks_by_the_lower_bound_of_the_weakest_lift(tmp_
     assert all("lift" not in b for b in body["baselines"])
 
 
-async def test_the_leaderboard_chooses_basis_symbol_period_and_leaves_out_special(tmp_path: Path) -> None:
+async def test_the_leaderboard_chooses_symbol_period_and_leaves_out_special(tmp_path: Path) -> None:
     async with board(tmp_path, min_sample=1) as (engine, client):
         baselines(engine.store)
-        # On basis B every outcome looked flat: alpha's directional calls missed.
-        store_scored(engine.store, "alpha", OUTCOMES, outcomes_b=[FLAT] * 40)
+        store_scored(engine.store, "alpha", OUTCOMES)
         store_scored(engine.store, "alpha", OUTCOMES[:8], symbol="000660")
         store_scored(engine.store, "alpha", OUTCOMES[:4], day=EARLIER)
         store_scored(engine.store, "delta", OUTCOMES[:4], special=True)
 
-        on_b = await get(client, "/v1/leaderboard")
-        on_a = await get(client, "/v1/leaderboard?basis=a&symbol=005930")
-        five_days = await get(client, "/v1/leaderboard?basis=a&symbol=005930&period=5d")
+        everything = await get(client, "/v1/leaderboard")
+        one_symbol = await get(client, "/v1/leaderboard?symbol=005930")
+        five_days = await get(client, "/v1/leaderboard?symbol=005930&period=5d")
         with_special = await get(client, "/v1/leaderboard?special=include")
 
     def alpha(body: Any) -> Any:
         return next(e for e in body["ranked"] + body["unranked"] if e["algorithm"] == "alpha")
 
-    assert alpha(on_b)["n"] == 48  # both symbols, today
-    assert alpha(on_b)["accuracy"]["value"] == pytest.approx((20 + 8) / 48)
-    assert alpha(on_a)["n"] == 40 and alpha(on_a)["accuracy"]["value"] == 1.0
+    assert alpha(everything)["n"] == 48  # both symbols, today
+    assert alpha(one_symbol)["n"] == 40 and alpha(one_symbol)["accuracy"]["value"] == 1.0
     assert five_days["days"] == ["2026-10-12", "2026-10-08"]
     assert alpha(five_days)["n"] == 44
-    assert all(e["algorithm"] != "delta" for e in on_b["ranked"] + on_b["unranked"])
+    assert all(e["algorithm"] != "delta" for e in everything["ranked"] + everything["unranked"])
     assert any(e["algorithm"] == "delta" for e in with_special["ranked"] + with_special["unranked"])
+
+
+async def test_on_the_touch_target_the_stats_count_only_models_trained_on_it(tmp_path: Path) -> None:
+    """Input: alpha's predictions by an older model (the four-minute move's), always wrong on
+    005930, and by a model trained on the touch target, always right on 000660. Output: the
+    leaderboard and alpha's stats count the second only, as the statuses do (#170)."""
+    async with board(tmp_path, target_version=2) as (engine, client):
+        baselines(engine.store)
+        store_scored(engine.store, "alpha", [DOWN] * 40, version="alpha-old")
+        store_scored(engine.store, "alpha", OUTCOMES, version="alpha-new", symbol="000660")
+        engine.store.record_models([("alpha", "alpha-old", 1), ("alpha", "alpha-new", 2)])
+
+        body = await get(client, "/v1/leaderboard")
+        stats = await get(client, "/v1/algorithms/alpha/stats")
+
+    alpha = next(e for e in body["ranked"] + body["unranked"] if e["algorithm"] == "alpha")
+    assert (alpha["n"], alpha["accuracy"]["value"]) == (40, 1.0)
+    assert list(stats["by_model_version"]) == ["alpha-new"]
+    assert {b["algorithm"] for b in body["baselines"]} >= {"baseline-flat", "baseline-climate"}
+
+
+async def test_a_screen_from_before_still_sends_a_basis_and_reads_it_back(tmp_path: Path) -> None:
+    """Input: a leaderboard and an algorithm's stats asked with basis=a or basis=b, as the
+    screen before #170 asks (it asks again until the answer's basis is its own). Output: the
+    same stats as without it, on the touch label, with ``basis`` echoed as sent, after
+    ``days``; any other basis is refused."""
+    async with board(tmp_path, min_sample=1) as (engine, client):
+        baselines(engine.store)
+        store_scored(engine.store, "alpha", OUTCOMES)
+
+        plain = await get(client, "/v1/leaderboard")
+        on_a = await get(client, "/v1/leaderboard?basis=a")
+        on_b = await get(client, "/v1/leaderboard?basis=b")
+        stats_plain = await get(client, "/v1/algorithms/alpha/stats")
+        stats_a = await get(client, "/v1/algorithms/alpha/stats?basis=a")
+        refused = await get(client, "/v1/leaderboard?basis=touch", status=400)
+
+    for body, basis in ((on_a, "a"), (on_b, "b")):
+        check("leaderboard", body)
+        assert body["basis"] == basis
+        assert list(body)[: list(body).index("basis") + 1][-2:] == ["days", "basis"]
+        assert {k: v for k, v in body.items() if k != "basis"} == plain
+    check("algorithm_stats", stats_a)
+    assert stats_a["basis"] == "a" and "basis" not in stats_plain
+    assert {k: v for k, v in stats_a.items() if k != "basis"} == stats_plain
+    assert "error" in refused
 
 
 # Alpha against always-flat, day by day: right throughout (a gain of 0.5), right at the
@@ -205,7 +285,7 @@ async def test_an_algorithms_stats_break_down_by_symbol_slot_and_model_version(t
         store_scored(engine.store, "alpha", OUTCOMES[:30], version="alpha-1")
         store_scored(engine.store, "alpha", OUTCOMES[:30], symbol="000660", version="alpha-2")
 
-        body = await get(client, "/v1/algorithms/alpha/stats?basis=a")
+        body = await get(client, "/v1/algorithms/alpha/stats")
 
     assert body["overall"]["n"] == 60
     assert set(body["by_symbol"]) == {"005930", "000660"}
@@ -221,6 +301,10 @@ async def test_an_algorithms_stats_break_down_by_symbol_slot_and_model_version(t
     assert (by_symbol["q"], by_symbol["significant"]) == (None, None)
 
 
+# Scored, but its bar close has no touch label: before the recording, not filled in yet.
+NO_LABEL = "no label"
+
+
 def store_one(
     store: PredictionStore,
     algorithm: str,
@@ -228,14 +312,17 @@ def store_one(
     *,
     forecast: Forecast | None = SURE[UP],
     status: str = "ok",
-    classes: tuple[Direction | None, Direction | None] | None = (UP, UP),
+    label: Direction | str | None = UP,
     special: bool = False,
+    symbol: str = "005930",
 ) -> None:
-    """One prediction at bar close ``t``, scored ``classes`` (A, B) unless None (pending)."""
+    """One prediction at bar close ``t``, scored: its touch label ``label``, a label it could
+    not be scored on (``None``, silent quotes), no label row at all (``NO_LABEL``), or, with
+    ``label`` ``"pending"``, not yet over."""
     added = store.add_all(
         [
             NewPrediction(
-                "005930",
+                symbol,
                 algorithm,
                 "v1",
                 t,
@@ -250,27 +337,27 @@ def store_one(
             )
         ]
     )
-    if classes is not None and added.pending:
-        a, b = classes
-        unscorable = None if a and b else "no mid-point"
-        store.score_all(
-            [(added.pending[0].prediction_id, Score(81_550, a, b, unscorable))], t + timedelta(minutes=4)
-        )
+    if label == "pending" or not added.pending:
+        return
+    store.score_all([(added.pending[0].prediction_id, Score(81_550, UP, UP, None))], t + timedelta(minutes=4))
+    if label != NO_LABEL:
+        store.add_touches([touch(symbol, t, Direction(label) if label else None)])
 
 
 async def test_calibration_is_also_shown_class_by_class(tmp_path: Path) -> None:
     async with board(tmp_path) as (engine, client):
         baselines(engine.store)
-        # Every class given 1/3, ten times, and the price went up every time.
+        # Every class given 1/3, ten times, and the price went up every time (after the
+        # baselines' bar closes: a bar close has one touch label, every predictor's).
         for i in range(10):
             store_one(
                 engine.store,
                 "even",
-                at("09:01:00") + timedelta(minutes=i),
+                at("10:01:00") + timedelta(minutes=i),
                 forecast=Forecast(1 / 3, 1 / 3, 1 / 3, 0),
             )
 
-        body = await get(client, "/v1/algorithms/even/stats?basis=a")
+        body = await get(client, "/v1/algorithms/even/stats")
 
     check("algorithm_stats", body)
     overall = body["overall"]
@@ -288,73 +375,56 @@ async def test_calibration_is_also_shown_class_by_class(tmp_path: Path) -> None:
 async def test_the_stats_count_what_they_leave_out(tmp_path: Path) -> None:
     async with board(tmp_path) as (engine, client):
         baselines(engine.store)
-        t = [at("09:01:00") + timedelta(minutes=i) for i in range(12)]
+        # After the baselines' bar closes: a bar close has one touch label, every predictor's.
+        t = [at("10:01:00") + timedelta(minutes=i) for i in range(12)]
         store = engine.store
         for i in range(3):
-            store_one(store, "alpha", t[i])  # scored on both bases
+            store_one(store, "alpha", t[i])  # scored on its touch label
         for i in range(3, 5):
             store_one(store, "alpha", t[i], special=True)  # a VI or breaker touched it
-        for i in range(5, 7):
-            store_one(store, "alpha", t[i], classes=(UP, None))  # basis B could not be scored
-        store_one(store, "alpha", t[7], classes=None)  # still pending: neither
+        store_one(store, "alpha", t[5], label=None)  # its bar close could not be labelled
+        store_one(store, "alpha", t[6], label=NO_LABEL)  # its bar close has no label at all
+        store_one(store, "alpha", t[7], label="pending")  # still pending: neither
         for i, status in zip(range(8, 12), ("vi", "vi", "timed_out", "no_book"), strict=True):
             store_one(store, "alpha", t[i], forecast=None, status=status)
-        store_one(
-            store, "alpha", t[2] + timedelta(seconds=1), special=True, classes=(UP, None)
-        )  # both: unscorable
+        store_one(store, "alpha", t[2] + timedelta(seconds=1), special=True, label=None)  # both: unscorable
         store_one(store, "alpha", at("09:01:00", EARLIER), status="error", forecast=None)  # another day
-        added = store.add_all(  # another symbol
-            [
-                NewPrediction(
-                    "000660",
-                    "alpha",
-                    "v1",
-                    t[0],
-                    t[0],
-                    None,
-                    t[0] + timedelta(minutes=4),
-                    None,
-                    None,
-                    None,
-                    "vi",
-                )
-            ]
-        )
-        assert added.ids
+        store_one(store, "alpha", t[0], forecast=None, status="vi", symbol="000660")  # another symbol
+        store_one(store, "alpha", t[1], symbol="000660", label=None)
 
-        b = await get(client, "/v1/leaderboard?basis=b&symbol=005930")
-        a = await get(client, "/v1/leaderboard?basis=a&special=include")
-        stats = await get(client, "/v1/algorithms/alpha/stats?basis=b&symbol=005930")
+        one = await get(client, "/v1/leaderboard?symbol=005930")
+        every = await get(client, "/v1/leaderboard?special=include")
+        stats = await get(client, "/v1/algorithms/alpha/stats?symbol=005930")
 
-    check("leaderboard", b)
-    check("leaderboard", a)
+    check("leaderboard", one)
+    check("leaderboard", every)
     check("algorithm_stats", stats)
-    [alpha_b] = [e for e in b["unranked"] if e["algorithm"] == "alpha"]
-    assert alpha_b["n"] == 3
-    # The one both special and unscorable on B counts once, as unscorable.
-    assert alpha_b["excluded"] == {
+    [alpha_one] = [e for e in one["unranked"] if e["algorithm"] == "alpha"]
+    assert alpha_one["n"] == 3
+    # The one both special and unscorable counts once, as unscorable.
+    assert alpha_one["excluded"] == {
         "special": 2,
         "unscorable": 3,
         "status": {"no_book": 1, "timed_out": 1, "vi": 2},
     }
-    # Every symbol on basis A: the other symbol's VI too; every scored one was scorable; with
-    # special included, the three are counted in.
-    [alpha_a] = [e for e in a["unranked"] if e["algorithm"] == "alpha"]
-    assert alpha_a["n"] == 8
-    assert alpha_a["excluded"] == {
-        "special": 3,
-        "unscorable": 0,
+    # Every symbol: the other symbol's VI and unscorable too; with special included, the two
+    # are counted in.
+    [alpha_every] = [e for e in every["unranked"] if e["algorithm"] == "alpha"]
+    assert alpha_every["n"] == 5
+    assert alpha_every["excluded"] == {
+        "special": 2,
+        "unscorable": 4,
         "status": {"no_book": 1, "timed_out": 1, "vi": 3},
     }
-    assert stats["overall"]["excluded"] == alpha_b["excluded"]
+    assert stats["overall"]["excluded"] == alpha_one["excluded"]
     # A baseline that left nothing out says so.
-    assert b["baselines"][0]["excluded"] == {"special": 0, "unscorable": 0, "status": {}}
+    assert one["baselines"][0]["excluded"] == {"special": 0, "unscorable": 0, "status": {}}
 
 
 async def test_bad_choices_and_unknown_algorithms_are_refused(tmp_path: Path) -> None:
     async with board(tmp_path) as (engine, client):
         store_scored(engine.store, "retired", OUTCOMES[:4], day=EARLIER)
-        for query in ("period=week", "basis=c", "symbol=999999", "special=maybe"):
+        for query in ("period=week", "basis=c", "symbol=999999", "special=maybe"):  # basis: a or b only
             assert "error" in await get(client, f"/v1/leaderboard?{query}", status=400)
         assert "error" in await get(client, "/v1/algorithms/einstein/stats", status=404)
         # Known from earlier days: today it simply has nothing.
@@ -380,8 +450,8 @@ async def test_a_replayed_morning_reaches_the_leaderboard(tmp_path: Path) -> Non
     engine = await run(tmp_path / "engine.db", busy_morning(), until=at("10:00:00"))
 
     async with TestClient(TestServer(create_app(engine, min_sample=50))) as client:
-        body = await get(client, "/v1/leaderboard?basis=a")
-        newton = await get(client, "/v1/algorithms/newton/stats?basis=a")
+        body = await get(client, "/v1/leaderboard")
+        newton = await get(client, "/v1/algorithms/newton/stats")
 
     # 09:01–09:56 are scored by 10:00 (09:57–10:00 wait for their targets).
     assert {(e["algorithm"], e["n"]) for e in body["ranked"]} == {

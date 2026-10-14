@@ -24,6 +24,7 @@ from krx_quant.engine import PredictionEngine
 from krx_quant.lifecycle import Status
 from krx_quant.predictions import PredictionStore
 from krx_quant.replay import replay_into
+from krx_quant.touch import TARGET_VERSION
 from tests.algorithm_doubles import FixedAlgorithm
 from tests.api_schema import check
 from tests.replay_events import CALENDAR, FEE, SYMBOL, at, trade
@@ -35,6 +36,7 @@ UP = Forecast(0.7, 0.2, 0.1, 2.0)
 def members(store: PredictionStore, *names: str) -> None:
     for name in names:
         store.add_status(name, at("08:00:00"), None, Status.ACTIVE, "test")
+    store.mark_target(TARGET_VERSION, at("08:00:00"))  # active on the touch target already (#170)
 
 
 def engine_at(db: Path, start: datetime) -> tuple[PredictionEngine, FakeClock]:

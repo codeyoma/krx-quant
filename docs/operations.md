@@ -199,7 +199,9 @@ curl http://krx-quant:8080/v1/macro
 | `KRX_PROBATION_REVIEW_DAYS` | `10,20,40` | 수습을 판정하는 날(수습 며칠째, 올라가는 정수, 400 이하). 마지막 날이 지나면 은퇴 후보 알림(#87) |
 | `KRX_BENCH_REVIEW_DAYS` | `20,40,60` | 벤치에서 회복을 판정하는 날(같은 형식). 마지막 날이 지나면 은퇴 후보 알림. 재생(`replay`, `prevalidate`)도 같은 설정을 쓴다 |
 | `KRX_REVIEW_CONFIDENCE` | 0.983 | 그 판정에 쓰는 거래일 단위 lift 구간의 신뢰수준(양쪽). 0.5 이상 0.9999 이하의 유한한 수. 판정 횟수가 늘면 높인다(본페로니) |
-| `KRX_TARGET_VERSION` | `1` | 엔진이 배우고 예측하는 정답(#169). `1`은 4분 뒤 중간가 변화, `2`는 도달 정답(#160). `2`이면 학습 정답(녹화일은 호가, 그 전 날은 1분봉 규칙), 알고리즘의 공통 정규분포 함수(닿을 확률), 기준 예측(`baseline-persist`·`baseline-random` `v2`, `baseline-climate`), 사전 검증이 도달 정답을 따르고, 밤 학습이 `baseline-climate` 표를 다시 맞춘다. 도달 정답 기록(`touches`)은 어느 쪽이든 한다. `1`, `2` 말고는 설정 오류다. 판정·통계·화면의 전환은 #170이다. 밤 학습을 Spot에서 하면 이 값도 S3(`training/settings.json`)로 넘어간다 |
+| `KRX_TARGET_VERSION` | `2` | 엔진이 배우고 예측하는 정답(#169). `2`(기본, #170)는 도달 정답(#160), `1`은 4분 뒤 중간가 변화. 학습 정답(녹화일은 호가, 그 전 날은 1분봉 규칙), 알고리즘의 공통 정규분포 함수(닿을 확률), 기준 예측(`baseline-persist`·`baseline-random` `v2`, `baseline-climate`), 사전 검증이 이것을 따르고, `2`이면 밤 학습이 `baseline-climate` 표를 다시 맞춘다. 채점(판정·합의 가중치·통계·화면)은 어느 쪽이든 도달 정답이고, 상태 판정과 합의 가중치는 도달 정답으로 학습한 모델의 예측만 본다. 그래서 `1`로 두면 어느 알고리즘의 수습도 세어지지 않는다. `1`은 한 릴리스 동안 옛 정답으로 다시 학습해 볼 때만 둔다. `1`, `2` 말고는 설정 오류다. 밤 학습을 Spot에서 하면 이 값도 S3(`training/settings.json`)로 넘어간다 |
+
+> **바뀜** (2026-10-14, #193): `KRX_TARGET_VERSION`의 기본값 `1` → `2`, 판정·통계·화면도 도달 정답으로. 이유: 배포가 곧 전환이 되게(#160). 서버 `.env`에 이 값을 두지 않았으면 할 일이 없다.
 | `KRX_TRAIN_AT` | `21:30` | 거래일 밤 학습 시각(KST, `HH:MM`). `off`나 빈 값이면 하지 않는다. `KRX_TRAIN_ON=spot`이면 Spot 스케줄(`deploy/training.yaml`의 `TrainAt`)과 같게 둔다 |
 | `KRX_TRAIN_ON` | `server` | 밤 학습을 돌리는 곳(#23). `server`는 이 서버의 별도 프로세스, `spot`은 AWS가 같은 시각에 띄우는 EC2 Spot이다. `spot`이면 서버는 학습에 필요한 설정과 휴장일 달력을 S3(`training/`)에 올리고, 결과를 다음 거래일 07:30까지 기다려 요약을 텔레그램으로 보낸다 |
 | `KRX_COST_BUDGET` | (없음) | 서버가 1시간마다 읽는 AWS Budgets 예산 이름(`krx-quant-monthly`, #23). 이달 비용이 예산의 50%와 80%를 넘으면 한 번씩 알리고, 100%에 닿으면 `KRX_TRAINING_SCHEDULES`를 그달 동안 끈다. 없으면 보지 않는다. 있으면 `KRX_TRAINING_SCHEDULES`도 있어야 한다(없으면 설정 오류) |
@@ -294,7 +296,7 @@ Lightsail은 버스트형 CPU다. 기준선보다 많이 쓰면 쌓아 둔 버�
 
 ### 진단 (#82)
 
-남은 결정(상태 판정 기준, 스프레드, 원천 지연, 매크로 결측)에 필요한 실측을 한 번에 텍스트로 받는다.
+남은 결정(스프레드, 원천 지연, 매크로 결측, 도달 정답의 폭)에 필요한 실측을 한 번에 텍스트로 받는다.
 
 - 엔진 DB는 쓰지 않고 읽는다. 엔진이 돌고 있으면 그 옆에서 읽기 전용으로 읽는다. 엔진이 멈춰 있으면 DB 옆에 파일(`-wal`, `-shm`)도 만들지 않는다.
 - 녹화는 `data/`의 Parquet로 읽는다. 장 마감 업로드가 파티션을 합치는 중이면 파일 목록을 한 번 다시 읽는다.
@@ -311,16 +313,18 @@ docker compose run --rm engine diagnose --days 5
 
 | 절 | 내용 |
 |---|---|
-| 1. 알고리즘별 표시 지연과 기준 A·B | `ok` 예측의 봉 마감 → 저장(`displayed_at`) 초. 채점된 예측 수와, 두 기준 모두 채점된 것 중 기준 A와 B의 클래스가 다른 비율 |
-| 2. 채점된 예측과 예측 상태 | 채점된 예측 중 특수 상황 비율, 상태(`ok`, `vi`, `no_book`, `timed_out`, `error` 등)별 예측 수 |
+| 1. 알고리즘별 표시 지연과 채점 수 | `ok` 예측의 봉 마감 → 저장(`displayed_at`) 초. 채점된 예측 수(도달 정답이 있는 것, #170) |
+| 2. 채점된 예측과 예측 상태 | 채점된 예측(도달 정답이 있는 것) 중 특수 상황 비율, 상태(`ok`, `vi`, `no_book`, `timed_out`, `error` 등)별 예측 수 |
 | 3. 종목별 봉 마감 스프레드 | 통합 호가(`H0UNASP0`)만 본다. 봉 마감(09:01–15:16)마다 그 전 1분 안(NXT 개장 09:00:30부터)에 받은 마지막 유효 호가의 스프레드(틱)다. 기준가는 체결에 실린 호가도 쓰므로 더 늦은 호가를 볼 수 있다 |
 | 4. 피드별 수신 지연 | 수신 시각 − 거래소 시각(초). 거래소 시각은 초 단위라 최대 1초 크게 나온다. 거래소 시각이 수신 초로 채워지는 행이 있는 피드는 줄 끝에 어떤 행인지 적는다: 업종지수 REST(모든 행), 업종지수(장 마감 기록), 선물·달러선물·옵션(REST 대체 행, 장 마감 기록), 미국 주간거래(REST 대체 행). VI 현황은 거래소 시각이 VI 시작이라 뺀다 |
 | 5. 매크로 국면 | 거래일마다 개장 전에 정한 국면(엔진과 학습이 쓰는 것)을 본다. 이유가 `지표 없음`뿐인 날, 일부 지표가 빠진(행이 없거나 값이 비어 있는) 날과 빠진 지표, 국면 기록이 없는 날 |
-| 6. 도달 정답(#167, 기록만) | `touches` 표에서 지금 정답 버전(`target_version` 2)의 행만 본다. 종목별·개장 30분과 그 뒤의 상승·보합·하락 비율, 채점 불가 이유별 수, 폭 k·k+1·2k에서의 비율(최고 매수·최저 매도호가로 다시 계산), 체결가만 목표에 닿고 호가는 닿지 않은 비율과 위아래 둘 다 닿은 비율, 맞은 상승·하락 예측 중 표시(`displayed_at`) 전에 이미 닿은 비율, 목표에 머문 시간의 분포와 1초 미만 비율. 폭을 다시 정하거나 깜빡임 닿음을 다룰 때 본다(#160) |
+| 6. 도달 정답(#167) | `touches` 표에서 지금 정답 버전(`target_version` 2)의 행만 본다. 종목별·개장 30분과 그 뒤의 상승·보합·하락 비율, 채점 불가 이유별 수, 폭 k·k+1·2k에서의 비율(최고 매수·최저 매도호가로 다시 계산), 체결가만 목표에 닿고 호가는 닿지 않은 비율과 위아래 둘 다 닿은 비율, 맞은 상승·하락 예측 중 표시(`displayed_at`) 전에 이미 닿은 비율, 목표에 머문 시간의 분포와 1초 미만 비율. 폭을 다시 정하거나 깜빡임 닿음을 다룰 때 본다(#160) |
 
 첫 결과(2026-10-13 장 마감 뒤)와 그것으로 내린 결정은 [design.md](design.md) 13장 "진단 실측"에 있다. 다시 돌리면 그 값과 비교한다. 녹화가 20거래일쯤 쌓이거나 무거운 알고리즘이 들어온 뒤가 그때다. 장중 녹화가 여러 날 쌓일수록 3과 4의 값이 의미 있다.
 
 > **바뀜** (2026-10-14, #157): 출력을 #90에 붙인다 → 첫 결과는 design.md 13장에 있고, 다시 돌린 결과는 그것과 비교한다. 이유: #90에서 결정을 내리고 실측을 문서에 옮겼다.
+
+> **바뀜** (2026-10-14, #193): 1절은 "알고리즘별 표시 지연과 기준 A·B"였고, 두 기준 모두 채점된 예측 중 기준 A와 B의 클래스가 다른 비율(`A≠B`)을 보였다. 2절과 같이 "채점됨"은 기준 A·B 중 하나로 채점된 것이었다 → 채점 수만, 채점은 도달 정답. 6절 제목의 "기록만"을 뺐다. 이유: 기준 A·B를 없앴다(#160). 상태 판정 기준을 고르려던 실측(#90)은 끝났다.
 
 ## 3. 매일 일어나는 일
 
@@ -337,7 +341,7 @@ docker compose run --rm engine diagnose --days 5
 | 장 마감 15분 뒤 (보통 15:45, 수능일 16:45) | 그날 녹화를 파티션마다 합쳐 S3에 올린다 |
 | 20:30 | 휴장일 정보를 갱신하고 1분봉 백필을 돌린 뒤, 그날 일봉과 새로 끝난 주·월·년봉을 더한다(`candles`, #111, #112). 처음에는 KIS에 있는 전체 기간을 받는다 |
 | 21:00 | 다시 올린다. NXT·애프터마켓의 늦은 데이터와 그날 1분봉, 바뀐 일·주·월·년봉 파일(`candles/period=<기간>/symbol=<종목>/candles.parquet`)이 들어간다 |
-| 21:30 (거래일) | 밤 학습(`KRX_TRAIN_AT`). 알고리즘마다 다시 학습하고, 이긴 모델만 승격 목록에 올린다. 결과를 텔레그램으로 보낸다. `KRX_TRAIN_ON=spot`이면 AWS가 같은 시각(평일)에 EC2 Spot을 띄우고, 00:30에 한 번 더 띄워 회수된 밤을 이어 간다. 서버는 결과를 기다려 요약을 보낸다 |
+| 21:30 (거래일) | 밤 학습(`KRX_TRAIN_AT`). 알고리즘마다 다시 학습하고, 이긴 모델(또는 지금 모델이 다른 정답 버전이면 성적과 상관없이 새 모델, #170)만 승격 목록에 올린다. 결과를 텔레그램으로 보낸다. `KRX_TRAIN_ON=spot`이면 AWS가 같은 시각(평일)에 EC2 Spot을 띄우고, 00:30에 한 번 더 띄워 회수된 밤을 이어 간다. 서버는 결과를 기다려 요약을 보낸다 |
 | 1시간마다 (`KRX_COST_BUDGET`이 있으면) | 이달 AWS 비용을 읽는다. 50%·80%에서 알리고, 100%에서 Spot 학습을 그달 동안 끈다. 다음 달 1일 첫 확인에서 다시 켠다 |
 | 30초마다 | 모델 파일(`state/models/<알고리즘>.json`)이 바뀌었는지 본다(`fit`, `rollback`). 바뀌었으면 엔진이 새 모델로 바꾸고, 지금 도는 모델을 S3(`live.json`, `models/`)에 올린다 |
 
@@ -358,9 +362,12 @@ docker compose run --rm engine diagnose --days 5
 > **바뀜** (2026-10-11, #67): "지금은 Lightsail 수집기가 띄운다(#23에서 EC2 Spot으로 옮긴다)" → 서버와 EC2 Spot 중에서 고른다(`KRX_TRAIN_ON`). 기본은 그대로 서버다. 이유: #23. Spot으로 옮기는 것은 AWS 비용이 드는 일이라 사용자가 스택을 배포하고 켠다.
 
 - 알고리즘마다 학습에 안 쓴 최근 3거래일로 새 모델(challenger)과 서버에서 돌고 있는 모델(champion)을 비교한다. log loss가 더 낮을 때만 승격한다. 학습 구간은 그 앞의 알고리즘별 거래일 수(기본 20)다.
+- **정답 버전이 다르면 강제 승격(#170).** champion이 그 밤의 정답 버전(`KRX_TARGET_VERSION`)과 다른 정답으로 학습한 모델이면(모델의 `target_version`. 기본 모델과 그것이 기록되기 전 모델은 1로 본다) 성적 비교 없이 challenger를 승격한다. 검증할 정답이 없어도 올린다. 리포트에 `forced: true`와 `reason` 끝의 `; <champion 버전> learned target 1, the night target 2: promoted without comparing`이, 텔레그램 요약에 `승격(정답 바뀜, 성적 비교 없이)`이 남는다. 정답이 바뀐 뒤 첫 밤에 모든 알고리즘이 새 정답 모델로 바뀌게 하려고다(그 뒤로는 평소처럼 비교한다). 학습하지 못한 알고리즘(`학습 안 함`)은 올라가지 않고, 그 알고리즘의 수습은 세어지지 않는다(아래 "정답이 바뀌는 날").
+
+  > **바뀜** (2026-10-14, #193): "log loss가 더 낮을 때만 승격한다"에 정답 버전이 다른 champion의 강제 승격을 더했다. 이유: 옛 정답 모델이 새 정답 검증에서도 이기면 새 정답 모델이 영영 올라가지 않는다(#160 "강제 승격").
 - 리포트에는 그 교체가 잡음인지 판단할 근거도 남는다(#89). 검증일별·기준가별 평균 손실, 두 모델이 모두 예측한 표본에서 짝지은 손실 차이(challenger − champion)의 평균과 그 평균의 표준오차(날 단위로 묶어 셈. 같은 날의 4분 정답은 서로 겹친다), champion이 검증일을 학습했는지, 학습한 코드의 커밋이다. 교체 규칙은 그대로 평균 log loss만 본다. 최소 개선폭과 champion이 검증일을 학습한 경우의 처리는 사용자가 정한 뒤 따로 한다.
 - S3의 `bars/`(백필)와 `events/`(녹화), 그리고 날마다의 매크로 국면(`macro/.../feed=regime/`, Markov가 쓴다, #14)을 읽는다. 녹화된 날은 중간가로, 백필만 있는 날은 종가로 학습한다([engine-api.md](engine-api.md#학습)). 리포트의 `reference_prices`에 날짜별로 `mid` 또는 `close`가 남는다. 텔레그램 요약 첫 줄에는 날 수가 나온다. 예: `2026-10-13 밤 학습 (녹화 중간가 4일, 백필 종가 19일)`.
-- 도달 정답(`KRX_TARGET_VERSION=2`, #169)이면 표본의 정답이 도달 정답이다. 녹화된 날은 엔진과 같은 정답 모듈로 녹화 호가에서, 백필만 있는 날은 1분봉 규칙으로 만든다([engine-api.md](engine-api.md#학습)). 그러면 리포트에 `target_version`(2)과 `labels`(정답 출처별 표본 수)가 남고, 텔레그램 요약 둘째 줄에 그 밤이 읽은 모든 날의 표본 수가 나온다. 예: `정답 버전 2 표본: 녹화 호가 3366개, 1분봉 15420개`. 알고리즘을 다 학습한 뒤 `baseline-climate` 표도 최근 20거래일(그 밤까지)로 다시 맞춘다. 성적 비교 없이 늘 승격 목록에 들어가고, 08:00 교체가 `state/models/baseline-climate.json`으로 설치한다(이력도 `history.json`에 남는다). 알고리즘이 아니라서 `rollback`으로 되돌리지 않는다. 다음 밤이 다시 맞춘다. 버전 1이면 셋 다 없다.
+- 도달 정답(`KRX_TARGET_VERSION=2`, 기본, #169, #170)이면 표본의 정답이 도달 정답이다. 녹화된 날은 엔진과 같은 정답 모듈로 녹화 호가에서, 백필만 있는 날은 1분봉 규칙으로 만든다([engine-api.md](engine-api.md#학습)). 그러면 리포트에 `target_version`(2)과 `labels`(정답 출처별 표본 수)가 남고, 텔레그램 요약 둘째 줄에 그 밤이 읽은 모든 날의 표본 수가 나온다. 예: `정답 버전 2 표본: 녹화 호가 3366개, 1분봉 15420개`. 알고리즘을 다 학습한 뒤 `baseline-climate` 표도 최근 20거래일(그 밤까지)로 다시 맞춘다. 성적 비교 없이 늘 승격 목록에 들어가고, 08:00 교체가 `state/models/baseline-climate.json`으로 설치한다(이력도 `history.json`에 남는다). 알고리즘이 아니라서 `rollback`으로 되돌리지 않는다. 다음 밤이 다시 맞춘다. 버전 1이면 셋 다 없다.
 - 가장 긴 학습 구간(Turing 60거래일)에 검증 3일을 더한 날들을 읽는다(#16 전에는 23일). 그래서 캐시, 학습 시간, 메모리가 그만큼 는다. 날마다 모든 알고리즘의 피처를 한 번에 계산해 두기 때문이다. Turing 모델 파일은 1MB 안팎이다.
 - 읽은 파일은 `state/training-cache/`에 복사해 두고 다음 밤에 다시 쓴다. 그 밤에 쓴 가장 오래된 날보다 오래된 날짜는 학습이 끝나면 지운다.
 - S3에 남는 것:
@@ -389,6 +396,9 @@ docker compose exec engine krx-quant rollback granger     # 직전 모델로 되
 ```
 
 - 되돌린 모델은 다음 승격까지 유지된다. 이미 적용한 승격 목록을 다시 적용하지 않는다.
+- 도달 정답(`KRX_TARGET_VERSION=2`)에서는 도달 정답으로 학습한 모델로만 되돌린다(#193). 직전이 옛 정답 모델이나 기본 모델이면 `rollback`은 이유를 말하고 거부한다(종료 코드 1). 그때는 `fit`으로 새로 학습하거나 밤 학습을 기다린다. 엔진도 도달 정답 모델을 돌리는 알고리즘을 다른 정답의 모델(기본 모델 포함)로 바꾸지 않고 로그에 남기며, 다른 정답의 모델을 돌리는 정식 알고리즘은 합의에서 뺀다.
+
+  > **바뀜** (2026-10-14, #193): 어느 모델로든 되돌렸다 → 도달 정답에서는 같은 정답의 모델로만. 이유: 옛 정답 모델로 되돌린 정식 알고리즘이 합의와 신호에 들어가고, 수습 날짜는 계속 세지만 그 예측은 판정에서 빠지는 일을 막으려고(리뷰).
 - 밤 학습을 끄려면 `.env`에 `KRX_TRAIN_AT=off`를 넣고 `docker compose up -d`를 실행한다.
 - 손으로 학습한 모델(`fit`)도 `history.json`에 남아서 되돌릴 수 있다.
 - 특정 밤을 다시 돌리려면 `docker compose run --rm --no-deps engine train --day 2026-10-12`. 이미 끝난 밤이면 그 결과를 그대로 보여 주고 텔레그램으로 다시 보내지 않는다.
@@ -491,7 +501,22 @@ docker compose run --rm --no-deps engine prevalidate <이름>
 
   > **바뀜** (2026-10-14, #191): 통과는 그때의 코드에만 유효했다 → 정답 버전도 같아야 한다. 이유: 다른 정답으로 판정받은 통과를 쓰지 않으려고(리뷰).
 - 같은 알고리즘을 동시에 두 번 돌리지 않는다. 같은 DB와 리포트 파일에 쓴다.
+- 기본이 도달 정답(`KRX_TARGET_VERSION=2`)이 되면서(#170) 정답 버전 1에서 통과한 리포트는 통하지 않는다. 아직 돌지 않는(상태가 없는) 알고리즘은 사전 검증을 다시 돌린다. 이미 도는 알고리즘은 그대로 돈다.
 - 도달 정답(`KRX_TARGET_VERSION=2`, #169)이면 검증 대상도 도달 정답으로 학습하고, 재생은 도달 정답의 기준 예측 넷으로 하며(`baseline-climate` 표는 날마다 그 전날까지의 최근 20거래일로 다시 맞춘다), `stats` 검사는 도달 정답으로 채점한다([engine-api.md](engine-api.md#사전-검증-24)).
+
+### 정답이 바뀌는 날 (#170)
+
+#170을 담은 엔진이 06:00 자동 배포로 처음 뜨는 날(D)이 전환일이다. 서버에서 손으로 할 일은 없다.
+
+- **06:00 배포.** 엔진이 DB를 처음 열 때 은퇴가 아닌 모든 알고리즘(정식, 벤치, 복제, 수습)을 수습으로 한 번 돌린다. 상태 이력의 이유는 `the target changed to the touch target (#170): probation restarts with a model trained on it`이고, DB `runs`에 `target`(`detail` `2`)이 남는다. 다시 띄워도 또 하지 않는다. 옛 정답 판정은 이날 멈춘다. 정식이 없어지므로 합의는 `no_members`이고 신호도 없다. 이어서 지난 예측의 도달 정답을 채운다(아래).
+- **D의 장중.** 알고리즘은 어젯밤 모델(옛 정답으로 학습)로 예측한다. 예측과 채점은 평소대로이고 순위표에도 나오지만, 이 예측은 판정과 합의 가중치에 들지 않는다. 화면의 상세 창 `stage`는 `counted_from`이 비어 있고 0일째다.
+- **D의 밤 학습(21:30).** 표본의 정답이 도달 정답이다. champion이 옛 정답 모델(또는 기본 모델)이라 모든 알고리즘의 새 모델이 성적 비교 없이 승격된다(위 "정답 버전이 다르면 강제 승격"). 텔레그램 요약에 `승격(정답 바뀜, 성적 비교 없이)`이 줄줄이 온다.
+- **다음 거래일 08:00 교체.** 새 모델이 깔리고 그날부터 알고리즘마다 수습을 센다(`stage.counted_from`이 그날). 학습이 실패한 알고리즘은 실제로 새 모델이 올라간 날부터 센다. D가 휴일이면 다음 거래일 밤 학습, 그다음 거래일 08:00 교체다.
+- **첫 판정.** 수습 10거래일째(`KRX_PROBATION_REVIEW_DAYS`의 첫 값)다. 그때까지 합의는 비어 있다.
+- **확인.** `curl -s http://krx-quant:8080/v1/algorithms | jq '.algorithms[] | {name, status: .status.status, target: .model.target_version, counted_from: .stage.counted_from}'`. D에는 `target`이 1이나 `null`이고 `counted_from`이 `null`, 교체 다음 날부터 `target` 2와 날짜다.
+- **사전 검증을 기다리던 알고리즘**은 정답 버전 1의 리포트로는 돌지 않는다. 장 시간 밖에 다시 돌린다(위 "새 알고리즘 사전 검증").
+- **되돌리기.** 이 커밋 전으로 되돌리면 옛 엔진은 새 표(`model_targets`)와 `runs`의 `target`을 무시하고 기준 B로 다시 판정한다. 수습은 D부터 다시 센 상태로 남는다. 다시 이 커밋으로 오면 `target` 표시가 있어서 한 번 더 돌리지 않는다.
+- **2주 뒤.** 신호 기준(`KRX_SIGNAL_MIN_PROBABILITY`, `KRX_SIGNAL_MIN_AGREE`)을 다시 본다([design.md](design.md) 13장).
 
 ### 지난 예측의 도달 정답 (#168)
 
@@ -534,6 +559,7 @@ docker compose start engine
 - 평일 07:50–20:10에는 손으로 실행해도 거부한다.
 - 새 엔진이 3분 안에 API에 답하지 않으면 이전 커밋으로 되돌려 다시 띄운다. 실패한 커밋은 서버의 `.auto-update-failed`에 남아서, main이 더 바뀔 때까지 다시 시도하지 않는다.
 - 새 엔진은 API를 연 뒤에 지난 예측의 도달 정답을 채운다(3장 "지난 예측의 도달 정답", #168). 채우기가 3분보다 오래 걸려도 이 확인에는 걸리지 않는다.
+- 정답을 도달 정답으로 바꾸는 배포(#170)는 그날이 전환일이다(3장 "정답이 바뀌는 날"). 엔진이 처음 뜰 때 상태를 수습으로 돌리고, `predictions`에 인덱스 하나를 만든다(스키마 버전은 그대로라 되돌려도 뜬다).
 - 결과는 텔레그램으로 온다(`krx-quant notify`): `[알림] 자동 업데이트: <이전> → <새 커밋>`과 커밋 제목(최대 10개), `[알림] 자동 업데이트 실패: …`, 그 밖의 오류(GitHub 접속 실패 등)는 `[알림] 자동 업데이트 오류: …`. 오류일 때 엔진은 그대로 돈다.
 - 업데이트가 끝나면 쓰지 않는 Docker 이미지를 지운다.
 - 이미지를 만들 때 그 커밋을 넘긴다(`KRX_COMMIT`, `compose.yaml`의 빌드 인자). 엔진은 `/v1/status`의 `commit`으로 보이고, 시작할 때마다 DB `runs`에 `start`로 커밋과 수수료율, 신호 규칙, 시간·CPU 예산을 남긴다(#85). 손으로 `docker compose up -d --build`하면 `unknown`이다. 커밋을 남기려면 `KRX_COMMIT=$(git rev-parse HEAD) docker compose up -d --build`로 띄운다.
@@ -596,7 +622,7 @@ docker compose logs --tail 200 engine
 | `[알림] 자동 업데이트: ...`에 `Spot 학습용 이미지를 올리지 못했습니다` | `deploy/push-image.sh`를 손으로 실행해 오류를 본다 | ECR 권한이나 연결 문제다. 다음 06:00에 다시 올린다. 그동안 Spot은 이전 이미지로 학습한다. |
 | AWS 호출이 `... with an explicit deny in a service control policy`로 거부됨 | 서버 `.env`의 `AWS_REGION`, 맥이면 `aws configure get region` | AWS Settings 프로젝트 계정은 시드니(`ap-southeast-2`) 밖의 리전을 막는다(1장). `AWS_REGION=ap-southeast-2`로 고치고 `docker compose up -d`. 리전이 맞는데도 거부되면 계정 정책이 그 동작 자체를 막는 것이다(예: Spot, 8장). 메시지 끝의 `Encoded authorization failure message`를 맥에서 `aws sts decode-authorization-message`로 풀면 막은 문(`Sid`)이 보인다. 2026-10-14에 서버의 `AWS_REGION=ap-northeast-2`(서울)가 이것으로 ECR 로그인을 막았다(#23). |
 | `[신호] <종목> 상승 64% · 정식 3개 중 2개 같은 방향 · 09:31 봉 마감, 09:35까지` | `/v1/symbols/<종목>/latest`의 `consensus-final` | `KRX_SIGNAL_ALERT=on`일 때만 온다. 장애가 아니라 예측 신호다. 같은 종목·방향은 4분 안에 다시 오지 않는다(엔진을 다시 시작해도). VI·서킷브레이커에 걸리거나, 기준가가 없거나, 목표 시각이 지난 신호는 오지 않고 로그에 `signal blocked (<이유>)`, DB `runs`에 `signal_blocked`로 남는다. 주문 코드는 없다. |
-| `[알림] <날짜> 밤 학습`과 알고리즘별 `승격`·`유지`·`학습 안 함` | | 매일 밤 학습의 요약이다. 할 일은 없다. 승격된 모델은 다음 거래일 08:00에 바뀐다. |
+| `[알림] <날짜> 밤 학습`과 알고리즘별 `승격`·`유지`·`학습 안 함` | | 매일 밤 학습의 요약이다. 할 일은 없다. 승격된 모델은 다음 거래일 08:00에 바뀐다. `승격(정답 바뀜, 성적 비교 없이)`은 지금 모델이 다른 정답 버전이라 성적과 상관없이 올린 것이다(#170, 3장 "정답이 바뀌는 날"). |
 | `[알림] 모델 교체 (<날짜> 밤 학습): <알고리즘> → <버전>` | `/v1/status`의 `training` | 08:00 교체가 됐다. 되돌리려면 `docker compose exec engine krx-quant rollback <이름>`. |
 | `[알림] <날짜> 밤 학습 결과를 쓰지 않습니다: <이유>` | `/v1/status`의 `training.reason` | 전날 모델이 계속 돈다. `final at ..., after 07:30`이면 다음 아침에 쓴다(더 새 밤이 없으면). `not in the store: ...`면 S3에 모델이 없는 것이다. 다음 아침에 다시 시도한다. |
 | `[알림] 자동 업데이트: <이전> → <새 커밋>` | | 06:00 자동 업데이트가 됐다. 할 일은 없다. |
@@ -685,7 +711,7 @@ docker compose logs --tail 200 engine
 | `raw/…/data.parquet`, `events/…/data.parquet`, `gaps/…/data.parquet` | 로컬 `data/`와 같은 경로. 장 마감 15분 뒤와 21:00에 올린다 |
 | `bars/…/bars.parquet` | 1분봉 백필. 로컬과 같은 경로 |
 | `models/<알고리즘>/<버전>.json` | 밤 학습의 challenger와 서버가 돌린 모델. 형식은 `state/models/<알고리즘>.json`과 같다 |
-| `reports/<날짜>/<알고리즘>.json` | 그 밤의 알고리즘별 검증 리포트이자 체크포인트: `algorithm`, `day`, `training_days`, `validation_days`, `champion`(`version`, `loss`, `trained_on_validation`: 검증일까지 학습한 모델인지. 손으로 `fit`한 모델 등), `challenger`(`version`, `loss`, `trained`), `promoted`, `reason`, `reference_prices`(학습·검증일마다 `mid`: 녹화 중간가, `close`: 백필 종가), `samples`(`validation`: 검증 표본 수, 검증까지 간 경우만), `validation`(검증까지 간 경우만, #89: `by_day`는 검증일마다, `by_reference`는 `mid`·`close`마다 `samples`·`challenger`·`champion` 평균 log loss. champion이 하나도 예측하지 않았으면 `champion`이 `null`. `paired`는 두 모델이 모두 예측한 표본 수 `samples`, 손실 차이(challenger − champion) 평균 `mean_difference`, 그 평균의 표준오차 `day_standard_error`(날마다 잔차를 더한 합들을 독립으로 본 클러스터 표준오차. 날의 표본 수가 같으면 검증일 평균들의 표준오차와 같다. 검증일이 2일보다 적으면 `null`)), `commit`(학습한 코드, 엔진처럼 `KRX_COMMIT`. 없으면 `unknown`, #85). 학습하지 못했거나 검증할 정답이 없으면 `champion`, `challenger`가 `null`이다. 도달 정답(`KRX_TARGET_VERSION=2`, #169)이면 `target_version`(2)과 `labels`도 있다: `samples`(학습·검증일의 정답 있는 표본 수, `recorded`는 녹화 호가로, `bars`는 1분봉 규칙으로 만든 것), `by_day`(날마다 정답 있는 표본 수) |
+| `reports/<날짜>/<알고리즘>.json` | 그 밤의 알고리즘별 검증 리포트이자 체크포인트: `algorithm`, `day`, `training_days`, `validation_days`, `champion`(`version`, `loss`, `trained_on_validation`: 검증일까지 학습한 모델인지. 손으로 `fit`한 모델 등), `challenger`(`version`, `loss`, `trained`), `promoted`, `reason`, `reference_prices`(학습·검증일마다 `mid`: 녹화 중간가, `close`: 백필 종가), `samples`(`validation`: 검증 표본 수, 검증까지 간 경우만), `forced`(champion이 다른 정답 버전이라 성적 비교 없이 승격했는지, #170. 검증까지 갔거나 강제 승격한 경우만), `validation`(검증까지 간 경우만, #89: `by_day`는 검증일마다, `by_reference`는 `mid`·`close`마다 `samples`·`challenger`·`champion` 평균 log loss. champion이 하나도 예측하지 않았으면 `champion`이 `null`. `paired`는 두 모델이 모두 예측한 표본 수 `samples`, 손실 차이(challenger − champion) 평균 `mean_difference`, 그 평균의 표준오차 `day_standard_error`(날마다 잔차를 더한 합들을 독립으로 본 클러스터 표준오차. 날의 표본 수가 같으면 검증일 평균들의 표준오차와 같다. 검증일이 2일보다 적으면 `null`)), `commit`(학습한 코드, 엔진처럼 `KRX_COMMIT`. 없으면 `unknown`, #85). 학습하지 못했거나 검증할 정답이 없으면 `champion`, `challenger`가 `null`이다. 도달 정답(`KRX_TARGET_VERSION=2`, #169)이면 `target_version`(2)과 `labels`도 있다: `samples`(학습·검증일의 정답 있는 표본 수, `recorded`는 녹화 호가로, `bars`는 1분봉 규칙으로 만든 것), `by_day`(날마다 정답 있는 표본 수) |
 | `reports/<날짜>/baseline-climate.json` | 도달 정답일 때만(#169): 그 밤에 다시 맞춘 `baseline-climate` 표의 리포트. 형식은 위와 같고, `training_days`는 표를 센 최근 20거래일, `validation_days`는 빈 목록, `champion`은 `null`, `challenger`는 `version`·`trained`, `promoted`는 늘 `true`(정답 있는 표본이 없으면 `false`)다. 알고리즘들 다음에 쓰는 체크포인트다 |
 | `models/baseline-climate/<버전>.json` | 그 표. 형식은 `state/models/baseline-climate.json`과 같다 |
 | `promotions/<날짜>.json` | 그 밤의 승격 목록: `day`, `finalized_at`(확정 시각), `promoted`(알고리즘 → 버전), `reports`(위 리포트 전부). 모든 알고리즘이 끝난 뒤 한 번 쓴다. 엔진은 가장 최근 것을 읽어 메모리에 두고 `/v1/status`의 `training`과 `/v1/algorithms`의 `validation`(#165)으로 보인다(3장 "밤 학습과 모델 교체") |

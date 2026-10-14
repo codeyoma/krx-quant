@@ -29,6 +29,7 @@ from tests.kis_frames import book_frame
 from tests.replay_events import LIVE_PREDICTORS, api, at, run
 from tests.test_collector import settings_for
 from tests.test_live_predictions import free_port, poll
+from tests.test_replay import busy_morning
 
 Get = Callable[[str], Awaitable[tuple[int, Any]]]  # a path to its status and JSON body
 
@@ -76,6 +77,7 @@ async def walk(get: Get) -> dict[str, int]:
         await ask(f"/v1/algorithms/{name}", "algorithm_detail")
     for name in [*algorithms, "baseline-flat", "consensus-final"]:
         await ask(f"/v1/algorithms/{name}/stats", "algorithm_stats")
+    await ask(f"/v1/algorithms/{algorithms[0]}/stats?basis=b", "algorithm_stats")  # a screen from before #170
     await ask("/v1/consensus", "consensus")
     await ask("/v1/macro", "macro")
     await ask("/v1/calendar", "calendar")
@@ -163,6 +165,33 @@ async def test_an_empty_morning_keeps_the_contract(tmp_path: Path) -> None:
         checked = await walk(through(client))
 
     assert checked["status"] == 1
+
+
+async def test_a_screen_from_before_reads_the_touch_label_where_it_read_the_bases(tmp_path: Path) -> None:
+    """For one release (#170). Input: a replayed morning on the touch target, read as the
+    screen before #170 reads it. Output: every scored outcome's ``class_a`` and ``class_b`` are
+    its bar close's touch label, ``unscorable`` why there is none; the leaderboard and the
+    stats echo the basis asked for; every answer within the contract."""
+    engine = await run(tmp_path / "engine.db", busy_morning(), until=at("10:00:00"), target_version=2)
+
+    async with api(engine) as client:
+        predictions = (await (await client.get("/v1/symbols/005930/predictions?limit=1000")).json())[
+            "predictions"
+        ]
+        board = await (await client.get("/v1/leaderboard?basis=b")).json()
+        stats = await (await client.get("/v1/algorithms/newton/stats?basis=a")).json()
+
+    check("predictions", {"symbol": "005930", "predictions": predictions})
+    check("leaderboard", board)
+    check("algorithm_stats", stats)
+    outcomes = [p["outcome"] for p in predictions if p["outcome"] is not None]
+    assert outcomes, "the morning's predictions are scored"
+    for o in outcomes:
+        label = o["touch"]["class"] if o["touch"] else None
+        assert o["class_a"] == o["class_b"] == label
+        assert o["unscorable"] == (None if label else (o["touch"] or {}).get("unscorable", "no touch label"))
+    assert {o["class_a"] for o in outcomes} - {None}, "labelled"
+    assert (board["basis"], stats["basis"]) == ("b", "a")
 
 
 async def test_the_demo_engine_keeps_the_contract(tmp_path: Path) -> None:

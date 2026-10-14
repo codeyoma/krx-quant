@@ -6,8 +6,8 @@ is stopped) and reads the recorded Parquet files. Run it after the close: the da
 recordings are then complete. A recording merged by the archive while it is read is
 listed again.
 
-1. Per predictor: the display delay (bar close to stored, of the ``ok`` predictions) and,
-   of those scored on both bases, how often basis A's class differs from basis B's.
+1. Per predictor: the display delay (bar close to stored, of the ``ok`` predictions) and
+   how many were scored (on the touch label, #170).
 2. The scored predictions' share of special ones, and every prediction's status.
 3. Per symbol: the integrated book's (``H0UNASP0``) spread in ticks at each bar close: the
    last valid book received within the minute before it, from the NXT open on. The
@@ -52,7 +52,7 @@ from krx_quant.feeds.base import KST
 from krx_quant.macro import INDICATORS, MACRO, decided_before, read_partition
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.market_view import prediction_window
-from krx_quant.predictions import SCORED
+from krx_quant.predictions import SCORED, TOUCH_JOIN
 from krx_quant.pricing import most_likely, tick_size
 from krx_quant.reference import BAR, KRX_ONLY, MAX_QUOTE_AGE
 from krx_quant.regime import NO_INDICATOR
@@ -83,13 +83,13 @@ def diagnose(data_dir: Path, db: Path, calendar: MarketCalendar, days: int | Non
         if days is not None:
             chosen = chosen[-days:]
         sections = [
-            ("1. 알고리즘별 표시 지연(초, 봉 마감 → 저장)과 기준 A·B", _delays(conn, chosen)),
+            ("1. 알고리즘별 표시 지연(초, 봉 마감 → 저장)과 채점 수", _delays(conn, chosen)),
             ("2. 채점된 예측과 예측 상태", _statuses(conn, chosen)),
             ("3. 종목별 봉 마감 스프레드(틱, 통합 호가)", _spreads(data_dir, chosen, calendar)),
             ("4. 피드별 수신 지연(초, 수신 − 거래소 시각)", _receive_delays(data_dir, chosen)),
             ("5. 매크로 국면(개장 전 결정)", _macro(data_dir, chosen, calendar)),
             (
-                "6. 도달 정답(#160, 기록만): 분포·폭·체결가 대비·표시 전·머문 시간",
+                "6. 도달 정답(#160): 분포·폭·체결가 대비·표시 전·머문 시간",
                 _touches(conn, chosen),
             ),
         ]
@@ -150,21 +150,19 @@ def _delays(conn: sqlite3.Connection | None, days: Sequence[date]) -> list[str]:
     ):
         seconds = (datetime.fromisoformat(displayed_at) - datetime.fromisoformat(bar_close)).total_seconds()
         delays[name].append(seconds)
-    scored: dict[str, tuple[int, int, int]] = {}
-    for name, n, both, other in conn.execute(
-        "SELECT p.algorithm, COUNT(*), SUM(o.class_a IS NOT NULL AND o.class_b IS NOT NULL),"
-        " SUM(o.class_a IS NOT NULL AND o.class_b IS NOT NULL AND o.class_a != o.class_b)"
-        f" FROM predictions p JOIN outcomes o ON o.prediction_id = p.id WHERE {SCORED} AND {where}"
-        " GROUP BY p.algorithm",
-        params,
-    ):
-        scored[name] = (n, both or 0, other or 0)
+    scored: dict[str, int] = dict(
+        conn.execute(
+            f"SELECT p.algorithm, COUNT(*) FROM predictions p JOIN outcomes o ON o.prediction_id = p.id"
+            f" {TOUCH_JOIN} WHERE {SCORED} AND {where} GROUP BY p.algorithm",
+            params,
+        ).fetchall()
+    )
     lines = []
     for name in sorted(delays):
-        n, both, other = scored.get(name, (0, 0, 0))
-        differ = f"A≠B {other / both:.1%} (둘 다 채점 {both})" if both else "A≠B —"
         values = pa.array(delays[name], pa.float64())
-        lines.append(f"{name}: 예측 {len(values)}, 지연 {_distribution(values, '.2f')} · 채점 {n}, {differ}")
+        lines.append(
+            f"{name}: 예측 {len(values)}, 지연 {_distribution(values, '.2f')} · 채점 {scored.get(name, 0)}"
+        )
     return lines
 
 
@@ -179,8 +177,8 @@ def _statuses(conn: sqlite3.Connection | None, days: Sequence[date]) -> list[str
     if not statuses:
         return []
     n, special = conn.execute(
-        "SELECT COUNT(*), COALESCE(SUM(o.special), 0)"
-        f" FROM predictions p JOIN outcomes o ON o.prediction_id = p.id WHERE {SCORED} AND {where}",
+        "SELECT COUNT(*), COALESCE(SUM(o.special), 0) FROM predictions p"
+        f" JOIN outcomes o ON o.prediction_id = p.id {TOUCH_JOIN} WHERE {SCORED} AND {where}",
         params,
     ).fetchone()
     share = f" ({special / n:.1%})" if n else ""

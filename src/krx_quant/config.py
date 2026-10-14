@@ -160,10 +160,11 @@ class Settings:
     probation_review_days: tuple[int, ...] = (10, 20, 40)  # days on probation it is judged on (#87)
     bench_review_days: tuple[int, ...] = (20, 40, 60)  # days on the bench it may recover on
     review_confidence: float = 0.983  # the lift-by-day interval's level those judgements need
-    # The target the engine learns and forecasts (KRX_TARGET_VERSION, #169): 1, the four-minute
-    # mid-point move; 2, the touch target (#160): training labels, the shared normal forecast
-    # and the baselines follow it. The touch labels are recorded either way (#167).
-    target_version: int = 1
+    # The target the engine learns and forecasts (KRX_TARGET_VERSION, #169): 2, the touch target
+    # (#160, the default since #170); 1, the four-minute mid-point move. Training labels, the
+    # shared normal forecast and the baselines follow it. Everything is scored on the touch
+    # label either way (#170): with 1 no model counts toward the statuses or the weights.
+    target_version: int = 2
 
     @classmethod
     def from_env(
@@ -356,7 +357,7 @@ class Settings:
             review_confidence=float(
                 number("KRX_REVIEW_CONFIDENCE", "0.983", float, minimum=0.5, maximum=0.9999)
             ),
-            target_version=int(_one_of("KRX_TARGET_VERSION", values.get("KRX_TARGET_VERSION", "1"), TARGETS)),
+            target_version=int(_one_of("KRX_TARGET_VERSION", values.get("KRX_TARGET_VERSION", "2"), TARGETS)),
         )
 
 

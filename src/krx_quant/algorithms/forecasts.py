@@ -37,10 +37,15 @@ LOSS_FLOOR = 1e-6
 CLASSES = (Direction.UP, Direction.FLAT, Direction.DOWN)
 # Without a flat band or a volatility there is nothing to say.
 UNKNOWN = Forecast(1 / 3, 1 / 3, 1 / 3, 0.0)
-# How ``normal_forecast`` makes the three probabilities, as the cards say it.
+# How ``normal_forecast`` makes the three probabilities, as the cards say it: of the touch target,
+# the default since #170 (with KRX_TARGET_VERSION=1 the endpoint's, which the cards do not tell).
 NORMAL_CLASSES = (
-    "공통 함수가 이 정규분포에서 4분 변화가 +k틱 이상일 확률을 상승, −k틱 이하일 확률을 하락, 그 사이를 "
-    "보합으로 낸다(k: 보합 범위. 폭은 0.5틱보다 좁아지지 않는다)."
+    "공통 함수가 이 분포를 4분 동안 그 평균만큼 흐르고 그 폭만큼 퍼지는 움직임(브라운 운동)으로 보고, 도달 "
+    "정답의 세 확률로 바꾼다. 상승은 4분 안에 매수 1호가가 위 목표(봉 마감 중간가 + k틱)에 한 번이라도 닿을 "
+    "확률로, 반사 원리로 구한다. 거리는 k틱 + 봉 마감 스프레드의 절반이다(매수 1호가는 중간가보다 그만큼 "
+    "아래에서 출발한다). 하락은 매도 1호가가 아래 목표(− k틱)에 닿을 확률 × 위에 닿지 않을 확률이다(위·아래 "
+    "둘 다 닿으면 상승이라서. 둘을 서로 독립으로 본 근사다). 나머지가 보합이다(k: 보합 범위. 폭은 0.5틱보다 "
+    "좁아지지 않는다)."
 )
 
 Params = Mapping[str, float]

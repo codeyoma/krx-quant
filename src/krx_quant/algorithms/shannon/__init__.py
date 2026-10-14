@@ -34,7 +34,7 @@ import numpy as np
 from krx_quant.algorithms.contract import Abstention, Model, NothingToLearn, NotPredicted, Sample
 from krx_quant.algorithms.forecasts import CLASSES, class_moves, lowest_log_loss, number, param
 from krx_quant.baselines import Forecast
-from krx_quant.cards import CLASS_NAMES, Card, Meaning, class_move_meanings, learned
+from krx_quant.cards import CLASS_NAMES, TOUCH_LABEL, Card, Meaning, class_move_meanings, learned
 from krx_quant.features import FEATURE_MEANINGS, FeatureVector
 from krx_quant.feeds.base import kst_day
 
@@ -129,7 +129,8 @@ class Shannon:
         logic=(
             "최근 1분·5분의 1호가 주문흐름 불균형(OFI), 봉 마감 시점 10단계 잔량 불균형, 최근 5분 체결의 "
             "매수·매도 불균형과 그 방향의 엔트로피, NXT 체결 비중, 프로그램매매·외국계 회원사 흐름으로 "
-            "4분 뒤 상승·보합·하락을 다항 로지스틱 회귀로 낸다. 호가가 비어 있으면 예측하지 않는다."
+            "4분 안의 상승·보합·하락(도달 정답)을 다항 로지스틱 회귀로 낸다. 호가가 비어 있으면 예측하지 "
+            "않는다."
         ),
         unique_features=("ofi_1", "ofi_5", "trade_entropy"),
         training=(
@@ -138,7 +139,7 @@ class Shannon:
             "검증 로그손실이 가장 작은 L1 강도를 골라, 전체로 다시 학습한다."
         ),
         forecasting=(
-            "정답(4분 뒤 중간가 변화의 상승·보합·하락)으로 직접 학습한 다항 로지스틱 회귀(소프트맥스)가 세 "
+            f"{TOUCH_LABEL}으로 직접 학습한 다항 로지스틱 회귀(소프트맥스)가 세 "
             "확률을 낸다: 클래스마다 절편 + Σ 가중치 × 표준화한 입력으로 점수를 내고 소프트맥스로 바꾼다. "
             "입력은 학습 표본의 평균과 표준편차로 표준화하고, 모르는 입력은 평균(0)으로 둔다. 기대수익은 "
             "학습에서 클래스별 평균 4분 변화를 세 확률로 가중한 값이다. 봉 마감에 호가가 비어 있으면 "

@@ -30,6 +30,7 @@ from krx_quant.baselines import Forecast
 from krx_quant.cards import Card, Meaning
 from krx_quant.features import FeatureVector
 from krx_quant.pricing import Direction
+from krx_quant.touch import TARGET_VERSION
 
 log = logging.getLogger(__name__)
 
@@ -94,7 +95,13 @@ class TrainedOn:
 @dataclass(frozen=True)
 class Model:
     """A versioned model: fitted parameters, or the defaults before any training. A learner
-    whose model is more than numbers (Turing's trees) keeps it as text in ``blob``."""
+    whose model is more than numbers (Turing's trees) keeps it as text in ``blob``.
+
+    ``target_version`` is the target its labels were of (#170): 2, the touch target, for a
+    model fitted on samples that carry its terms (``FeatureVector.touch``); 1, the
+    four-minute move, otherwise. None for the defaults (trained on nothing) and for models
+    saved before it was recorded (they learned the four-minute move). The statuses and the
+    consensus weights count only the predictions of models of the touch target."""
 
     version: str
     params: Mapping[str, float]
@@ -103,6 +110,7 @@ class Model:
     blob: str | None = field(default=None, repr=False)
     # The same as values (#165); None for the defaults and for models saved before it.
     training: TrainedOn | None = None
+    target_version: int | None = None  # the target it learned (#170); None: see above
 
     def as_dict(self, *, blob: bool = False) -> dict[str, Any]:
         """As the Engine API shows it; with the blob (``blob=True``) as stored."""
@@ -112,6 +120,7 @@ class Model:
             "trained": self.trained,
             "trained_until": self.trained_until.isoformat() if self.trained_until else None,
             "training": None if self.training is None else self.training.as_dict(),
+            "target_version": self.target_version,
         }
         if blob and self.blob is not None:
             out["blob"] = self.blob
@@ -131,13 +140,17 @@ class Model:
     ) -> Model:
         """A model fitted on ``scored``, versioned by its last day and what went into it; what
         it was trained on, as text and as values, the days by where their labels came from
-        where the samples say (``Sample.reference``)."""
+        where the samples say (``Sample.reference``), and the target of their labels (#170).
+        A touch target model's version digests its target too: the same parameters learned on
+        another target are another model."""
         first = min(s.bar_close for s in scored).date()
         last = max(s.bar_close for s in scored).date()
+        target = target_of(scored)
         canonical = json.dumps(dict(params), sort_keys=True)
         if blob is not None:
             canonical += "|" + hashlib.sha256(blob.encode()).hexdigest()
-        digest = hashlib.sha256(f"{canonical}|{first}|{last}|{len(scored)}".encode()).hexdigest()[:6]
+        marked = f"|target {target}" if target != 1 else ""
+        digest = hashlib.sha256(f"{canonical}|{first}|{last}|{len(scored)}{marked}".encode()).hexdigest()[:6]
         return cls(
             version=f"{name}-{last:%Y%m%d}-{digest}",
             params=dict(params),
@@ -145,6 +158,7 @@ class Model:
             trained_until=last,
             blob=blob,
             training=TrainedOn(first, last, len(scored), loss, _days_by_source(scored)),
+            target_version=target,
         )
 
     @classmethod
@@ -156,6 +170,7 @@ class Model:
         """A stored model; one saved before a field was added has it None."""
         until = data.get("trained_until")
         training = data.get("training")
+        target = data.get("target_version")
         return cls(
             str(data["version"]),
             {k: float(v) for k, v in data["params"].items()},
@@ -163,7 +178,15 @@ class Model:
             date.fromisoformat(until) if until else None,
             data.get("blob"),
             None if training is None else TrainedOn.from_dict(training),
+            None if target is None else int(target),
         )
+
+
+def target_of(samples: Sequence[Sample]) -> int:
+    """The target the samples' labels are of (#170): the touch target's when their features
+    carry its terms (``FeatureVector.touch``, as ``forecasts.forecasting`` reads them), else
+    the four-minute move's."""
+    return TARGET_VERSION if any(s.features.touch is not None for s in samples) else 1
 
 
 def _days_by_source(scored: Sequence[Sample]) -> dict[str, int] | None:

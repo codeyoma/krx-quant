@@ -16,11 +16,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+# The target the cards describe (#160, #170): the touch label, as a card names it.
+TOUCH_LABEL = (
+    "도달 정답(4분 안에 매수 1호가가 봉 마감 중간가 + k틱에 닿으면 상승, 아니고 매도 1호가가 − k틱에 "
+    "닿으면 하락, 둘 다 아니면 보합)"
+)
+
 
 @dataclass(frozen=True)
 class Card:
-    """A predictor's card. Card text describes the current target: the reference price's
-    (mid-point's) change over the next four minutes."""
+    """A predictor's card. Card text describes the current target, the touch label (#170,
+    ``TOUCH_LABEL``): with ``KRX_TARGET_VERSION=1`` the predictors learn and forecast the
+    four-minute move instead, which the cards do not tell."""
 
     scientist: str | None  # None: a baseline, named after no one
     character: str  # e.g. trend following

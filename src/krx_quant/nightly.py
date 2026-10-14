@@ -10,7 +10,10 @@ closes (``training``). For each algorithm, in registration order:
    rolling window (``training_days``) before them (walk-forward).
 2. The new model (challenger) and the one the server runs (champion: ``live.json``, else
    the defaults) both forecast the validation days. The challenger is promoted only if
-   its mean log loss there is lower.
+   its mean log loss there is lower, or whatever its loss when the champion learned
+   another target than the night's (#170: ``Model.target_version``; the defaults and a
+   model saved before it was recorded count as the four-minute move's): after the target
+   changes, every algorithm the night trains runs a model of the new one the next morning.
 3. The challenger and a report of both are stored. Besides the verdict, the report has
    what tells a real improvement from noise (#89): the losses by validation day and by
    reference price, the paired difference with its standard error over days, whether
@@ -159,7 +162,9 @@ class Night:
             quotes = sum(n for day, n in labelled.items() if references.get(day) == "mid")
             lines.append(f"정답 버전 2 표본: 녹화 호가 {quotes}개, 1분봉 {sum(labelled.values()) - quotes}개")
         for r in self.reports:
-            if r["promoted"]:
+            if r["promoted"] and r.get("forced"):
+                verdict = "승격(정답 바뀜, 성적 비교 없이)"
+            elif r["promoted"]:
                 verdict = "승격"
             elif r["challenger"] is None:
                 verdict = "학습 안 함"
@@ -336,13 +341,32 @@ class _Trainer:
         challenger_losses = _losses(algorithm, challenger, self._samples(algorithm, validation))
         scored = [s for s, _ in challenger_losses]
         report["samples"] = {"validation": len(scored)}
+        # A champion of another target (#170) is replaced whatever the scores say.
+        champion_target = champion.target_version or 1
+        retarget = champion_target != self._target_version
+        changed = (
+            f"; {champion.version} learned target {champion_target}, the night target"
+            f" {self._target_version}: promoted without comparing"
+        )
         if not scored:
+            if retarget:
+                return {
+                    **report,
+                    "challenger": {
+                        "version": challenger.version,
+                        "loss": None,
+                        "trained": challenger.trained,
+                    },
+                    "promoted": True,
+                    "forced": True,
+                    "reason": "no outcomes to validate on" + changed,
+                }
             return {**report, "reason": "no outcomes to validate on"}
         champion_losses = _losses(algorithm, champion, scored)
         champion_loss = _mean([loss for _, loss in champion_losses])
         challenger_loss = _mean([loss for _, loss in challenger_losses])
-        promoted = challenger_loss < champion_loss
-        sign = "<" if promoted else "≥"
+        better = challenger_loss < champion_loss
+        sign = "<" if better else "≥"
         # A champion fitted by hand on the latest days may have learned the validation days:
         # it is then judged on what it saw, and is harder to beat than it should be.
         saw = champion.trained_until is not None and champion.trained_until >= validation[0]
@@ -354,14 +378,16 @@ class _Trainer:
                 "loss": challenger_loss,
                 "trained": challenger.trained,
             },
-            "promoted": promoted,
+            "promoted": better or retarget,
+            "forced": retarget,
             "validation": _validation(
                 challenger_losses,
                 champion_losses,
                 {day: found.reference for day, found in loaded.items() if found is not None},
             ),
             "reason": f"{challenger_loss:.4f} {sign} {champion_loss:.4f} ({champion.version}"
-            + (", trained on these days)" if saw else ")"),
+            + (", trained on these days)" if saw else ")")
+            + (changed if retarget else ""),
         }
 
     def climate(self) -> dict[str, Any]:

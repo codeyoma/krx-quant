@@ -15,7 +15,9 @@ bar close in the prediction window, from what was received before it:
   skipped first and the skip is recorded (``runs``); each skip halves the skipped one's
   expected time, so it is soon run (and timed) again.
 
-Four minutes later each prediction is scored on both bases.
+Four minutes later each bar close's touch label is recorded (``touches``), what every
+prediction is scored on (#170); the four-minute move's classes on bases A and B are still
+written beside it (``outcomes``), unread, so an engine rolled back to before runs on.
 
 Two consensus predictions follow (``consensus.py``): the fast one from the active
 algorithms done 2 seconds after they started, the final one once they are all done.
@@ -25,6 +27,13 @@ lifecycle rules (``lifecycle.py``), the day's predictions lost to the time and C
 are told once, a retired algorithm is no longer run, and the
 consensus weights are refitted. Where each algorithm on probation or on the bench stands
 toward its next review (``stages``, #165) is worked out by the same rules, as of that review.
+
+The reviews and the weights count only the predictions of models trained on the touch
+target (#170): the engine keeps which target each model it runs learned
+(``model_targets``). The first time it opens a database it restarts every algorithm not
+retired on probation (``lifecycle.RESTARTED``, once: a ``target`` run marks it), and an
+algorithm's probation counts from the first trading day it predicted with such a model
+since: the day the morning swap installed it, nothing before, nothing while it waits.
 
 Live, a new algorithm runs only once ``admits`` lets it (its pre-validation passed,
 ``prevalidation.py``): from the next bar close it starts on probation. Until then it is
@@ -96,7 +105,7 @@ from krx_quant.feeds import (
     VI_STATUS,
 )
 from krx_quant.feeds.base import KST, LEVELS
-from krx_quant.lifecycle import Rules, Stage, Standing, Status, review
+from krx_quant.lifecycle import RESTARTED, Rules, Stage, Standing, Status, review
 from krx_quant.lifecycle import stages as stages_now
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.market_view import (
@@ -113,6 +122,7 @@ from krx_quant.reference import Bar
 from krx_quant.signals import SENT, Blocked, Judged, Signals
 from krx_quant.special import KOSPI, Kind, SpecialSituations, Window, in_vi, touching
 from krx_quant.stats import DEFAULT_MIN_SAMPLE
+from krx_quant.touch import TARGET_VERSION
 
 log = logging.getLogger(__name__)
 
@@ -321,7 +331,26 @@ class PredictionEngine:
         self._regime_days: dict[date, str | None] = {}
         # Reviews pick up where the last one left off: one missed while down runs at start.
         self._reviewed_through = store.last_run("review") or self._last_tick
+        self._restart_on_target()
         self._admit()
+        self._record_models(self.models)
+
+    def _restart_on_target(self) -> None:
+        """Once, when the statuses first go by the touch target (#170): every algorithm with
+        a status other than retired restarts on probation, its predictions so far (the old
+        target's) never judged again."""
+        if self.store.target_marked(TARGET_VERSION):
+            return
+        now = self.clock.now()
+        for name, standing in self.store.statuses().items():
+            if standing.status is not Status.RETIRED:
+                self.store.add_status(name, now, standing.status, Status.PROBATION, RESTARTED)
+                log.info("%s: %s -> probation (%s)", name, standing.status.value, RESTARTED)
+        self.store.mark_target(TARGET_VERSION, now)
+
+    def _record_models(self, models: Mapping[str, Model]) -> None:
+        """Keep the target each of ``models`` was trained on, for the reviews (#170)."""
+        self.store.record_models([(name, m.version, m.target_version) for name, m in models.items()])
 
     def _admit(self) -> None:
         """Run the algorithms enrolled before and the new ones admitted; a new one starts on
@@ -388,12 +417,25 @@ class PredictionEngine:
         return self._market.latest_lead(series, self.clock.now())
 
     def switch_models(self, models: Mapping[str, Model]) -> bool:
-        """Run ``models`` from the next bar close (a swap, a fit, a rollback); whether any changed."""
+        """Run ``models`` from the next bar close (a swap, a fit, a rollback); whether any changed.
+        On the touch target (#170) an algorithm running a model of it does not go back to one
+        of another target (the defaults included): that model would forecast other outcomes,
+        and its days would count toward a review that does not look at them."""
         changed = False
         for name, model in models.items():
             if name in self.models and self.models[name] != model:
+                if self._on_target(self.models[name]) and not self._on_target(model):
+                    log.warning(
+                        "%s keeps %s: %s was not trained on target %d",
+                        name,
+                        self.models[name].version,
+                        model.version,
+                        self.target_version,
+                    )
+                    continue
                 log.info("%s now runs %s", name, model.version)
                 self.models[name] = model
+                self._record_models({name: model})
                 changed = True
             elif name == CLIMATE and name in self.baseline_names and self.climate != model:
                 log.info("%s now runs %s", name, model.version)
@@ -402,9 +444,14 @@ class PredictionEngine:
         return changed
 
     def members(self) -> list[str]:
-        """The consensus members now: the active algorithms, in registration order."""
+        """The consensus members now: the active algorithms running a model of the engine's
+        target (#170; one that is not sits out), in registration order."""
         active = _with_status(self.store.statuses(), Status.ACTIVE)
-        return [a.name for a in self.algorithms if a.name in active]
+        return [a.name for a in self.algorithms if a.name in active and self._on_target(self.models[a.name])]
+
+    def _on_target(self, model: Model) -> bool:
+        """Whether ``model`` was trained on the target the engine scores (before #170 any is)."""
+        return self.target_version < 2 or (model.target_version or 1) == self.target_version
 
     def cpu_use(self) -> CpuUse:
         """The CPU budget now: the algorithms that run, as timed so far, and today's skips."""
@@ -448,7 +495,7 @@ class PredictionEngine:
             review,
             [a.name for a in self.algorithms],
             standings,
-            {name: self._first_counted(s.since) for name, s in standings.items()},
+            {name: self._counted_from(name, s) for name, s in standings.items()},
             self.store.prediction_days(at.astimezone(KST).date(), _REVIEW_DAYS),
             lambda chosen, special: self.store.scored_predictions(chosen, None, special),
             min_sample=self.min_sample,
@@ -534,6 +581,17 @@ class PredictionEngine:
             return day + timedelta(days=1)
         return day
 
+    def _counted_from(self, name: str, standing: Standing) -> date | None:
+        """The first day ``name``'s status counts for (``_first_counted``); on probation or as
+        a clone, no earlier than the first trading day it predicted with a model trained on the
+        touch target since (#170): the day the morning swap (or a fit) installed one. None
+        while it has not: a training that failed or a holiday counts nothing."""
+        first = self._first_counted(standing.since)
+        if standing.status not in (Status.PROBATION, Status.CLONE):
+            return first
+        started = self.store.first_on_target(name, standing.since, TARGET_VERSION)
+        return None if started is None else max(first, started.astimezone(KST).date())
+
     async def stages(self) -> dict[str, Stage]:
         """Where each algorithm on probation or on the bench stands toward its next review
         (#165, ``lifecycle.stages``), as of the latest review: the days counted as the review
@@ -554,7 +612,7 @@ class PredictionEngine:
             stages_now,
             [a.name for a in self.algorithms],
             standings,
-            {name: self._first_counted(s.since) for name, s in standings.items()},
+            {name: self._counted_from(name, s) for name, s in standings.items()},
             reviewed,
             lambda chosen, special: self.store.scored_predictions(chosen, None, special),
             min_sample=self.min_sample,
@@ -568,8 +626,9 @@ class PredictionEngine:
 
     def _review_on(self, next_day: date | None, stage: Stage) -> date | None:
         """The trading day ``stage``'s next review falls on, counted from ``next_day``, the next
-        daily review's, which counts one day more than the latest; None without either."""
-        if next_day is None or stage.next_review is None:
+        daily review's, which counts one day more than the latest; None without either, or
+        while nothing is counted yet (waiting for a model of the touch target, #170)."""
+        if next_day is None or stage.next_review is None or stage.counted_from is None:
             return None
         day = next_day
         for _ in range(stage.next_review - stage.days - 1):

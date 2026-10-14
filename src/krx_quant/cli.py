@@ -121,7 +121,7 @@ def _replay(day: date, db: Path | None) -> int:
     for line in replayed.set_aside:
         print(line, file=sys.stderr)
     summary = replayed.summary
-    print(f"replayed {day} into {replayed.db} (counts on basis A)")
+    print(f"replayed {day} into {replayed.db} (counts on the touch label)")
     for s in summary:
         print(
             f"{s.algorithm}: {s.predictions} predictions, {s.skipped} skipped, {s.scored} scored,"
@@ -215,7 +215,7 @@ def _rollback(name: str) -> int:
         print(f"unknown algorithm {name!r}", file=sys.stderr)
         return 1
     try:
-        model = Shelf(settings.state_dir).rollback(name, datetime.now(KST))
+        model = Shelf(settings.state_dir).rollback(name, datetime.now(KST), settings.target_version)
     except ValueError as e:
         print(e, file=sys.stderr)
         return 1

@@ -20,10 +20,10 @@ Endpoints (all under ``/v1``):
   and, on probation or the bench, where it stands toward its next review (#165); and the
   baselines' and the consensus' cards;
 - ``GET /algorithms/{name}``: one of them, with the models installed on the server for it;
-- ``GET /leaderboard?symbol=&period=&basis=&special=``: algorithms ranked by the lower
-  bound of their weakest lift over the baselines, with their stats;
-- ``GET /algorithms/{name}/stats?symbol=&period=&basis=&special=``: one algorithm's
-  stats, by symbol, 30-minute slot and model version, with its calibration curve;
+- ``GET /leaderboard?symbol=&period=&special=``: algorithms ranked by the lower bound of
+  their weakest lift over the baselines, with their stats;
+- ``GET /algorithms/{name}/stats?symbol=&period=&special=``: one algorithm's stats, by
+  symbol, 30-minute slot and model version, with its calibration curve;
 - ``GET /consensus``: the consensus members now and the weights last fitted;
 - ``GET /macro``: the latest day's market regime and macro readings (``macro.py``);
 - ``GET /calendar?limit=``: the economic calendar from the start of today, as the collector
@@ -32,9 +32,12 @@ Endpoints (all under ``/v1``):
   status changes as they happen (``stream.py``).
 
 ``symbol`` is a symbol or ``all`` (default), ``period`` is ``today`` (default), ``5d`` or
-``20d`` (the latest days with predictions), ``basis`` is ``b`` (default: from when it was
-displayed) or ``a`` (from the bar close), and ``special`` is ``exclude`` (default) or
-``include`` (predictions with a VI or circuit breaker in their window).
+``20d`` (the latest days with predictions), and ``special`` is ``exclude`` (default) or
+``include`` (predictions with a VI or circuit breaker in their window). Every prediction is
+scored on its bar close's touch label (#170). For one release a screen from before still
+sends ``basis`` (``a`` or ``b``): it is accepted, ignored and echoed back as sent, so that
+screen, which asks again until the answer's ``basis`` is its own, is answered once
+(``LEGACY_BASES``). Without it the answer has no ``basis``.
 
 Times are ISO 8601 in KST. On the server, compose publishes it on the Tailscale address only.
 """
@@ -80,6 +83,7 @@ from krx_quant.stats import (
     entry_json,
     interval_json,
     leaderboard,
+    on_target,
     scored_by_algorithm,
     split,
 )
@@ -109,6 +113,8 @@ CALENDAR_LIMIT = 100  # events by default
 MAX_CALENDAR_LIMIT = 1000
 STATS_CACHE_KEY = web.AppKey("stats_cache", dict)
 PERIODS = {"today": 1, "5d": 5, "20d": 20}  # days with predictions
+# The scoring bases a screen from before #170 still sends, accepted and echoed back for one release.
+LEGACY_BASES = ("a", "b")
 # Results kept per question until the store changes (the screen asks the same often).
 _CACHED_QUESTIONS = 64
 
@@ -449,7 +455,8 @@ def _stage_json(stage: Stage | None) -> dict[str, Any] | None:
     return {
         "status": stage.status.value,
         "began": stage.began.isoformat(),
-        "counted_from": stage.counted_from.isoformat(),
+        # null while waiting for a model trained on the touch target (#170): nothing counted yet
+        "counted_from": None if stage.counted_from is None else stage.counted_from.isoformat(),
         "days": stage.days,
         "review_days": list(stage.review_days),
         "next_review": stage.next_review,
@@ -592,7 +599,6 @@ class _Query:
     symbol: str | None  # None: every symbol
     period: str
     days: tuple[date, ...]
-    basis: str
     special: bool
 
     def describe(self) -> dict[str, Any]:
@@ -600,7 +606,6 @@ class _Query:
             "symbol": self.symbol or "all",
             "period": self.period,
             "days": [d.isoformat() for d in self.days],
-            "basis": self.basis,
             "special": "include" if self.special else "exclude",
         }
 
@@ -609,19 +614,32 @@ def _query(request: web.Request, engine: PredictionEngine) -> _Query:
     q = request.query
     symbol = q.get("symbol", "all")
     period = q.get("period", "today")
-    basis = q.get("basis", "b")
     special = q.get("special", "exclude")
     if symbol != "all" and symbol not in engine.symbols:
         raise _error(web.HTTPBadRequest, f"symbol must be all or one of {', '.join(engine.symbols)}")
     if period not in PERIODS:
         raise _error(web.HTTPBadRequest, f"period must be one of {', '.join(PERIODS)}")
-    if basis not in ("a", "b"):
-        raise _error(web.HTTPBadRequest, "basis must be a or b")
+    if "basis" in q and q["basis"] not in LEGACY_BASES:
+        raise _error(web.HTTPBadRequest, "basis is gone (#170): leave it out (a or b is still accepted)")
     if special not in ("exclude", "include"):
         raise _error(web.HTTPBadRequest, "special must be exclude or include")
     today = kst_day(engine.clock.now())
     days = (today,) if period == "today" else tuple(engine.store.prediction_days(today, PERIODS[period]))
-    return _Query(None if symbol == "all" else symbol, period, days, basis, special == "include")
+    return _Query(None if symbol == "all" else symbol, period, days, special == "include")
+
+
+def _echo_basis(request: web.Request, body: dict[str, Any]) -> dict[str, Any]:
+    """``body`` with the ``basis`` a screen from before #170 sent, as it sent it (``LEGACY_BASES``):
+    the order of the query's fields kept, after ``days``."""
+    basis = request.query.get("basis")
+    if basis is None:
+        return body
+    out: dict[str, Any] = {}
+    for key, value in body.items():
+        out[key] = value
+        if key == "days":
+            out["basis"] = basis
+    return out
 
 
 async def _leaderboard(request: web.Request) -> web.Response:
@@ -652,7 +670,8 @@ async def _leaderboard(request: web.Request) -> web.Response:
     def with_status(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return [{**e, "status": statuses.get(e["algorithm"])} for e in entries]
 
-    return _json({**body, "ranked": with_status(body["ranked"]), "unranked": with_status(body["unranked"])})
+    body = {**body, "ranked": with_status(body["ranked"]), "unranked": with_status(body["unranked"])}
+    return _json(_echo_basis(request, body))
 
 
 async def _algorithm_stats(request: web.Request) -> web.Response:
@@ -703,7 +722,7 @@ async def _algorithm_stats(request: web.Request) -> web.Response:
             "by_model_version": by(lambda r: r.model_version),
         }
 
-    return _json(await _stats(request, ("algorithm", name), query, build))
+    return _json(_echo_basis(request, await _stats(request, ("algorithm", name), query, build)))
 
 
 Build = Callable[[dict[str, list[Scored]], dict[str, list[Scored]], dict[str, Excluded]], dict[str, Any]]
@@ -724,10 +743,12 @@ async def _stats(
     def compute() -> dict[str, Any]:
         # Reading and computing both run in the worker: a long history must not hold up
         # the event loop that records and predicts.
-        rows, excluded = engine.store.scored_and_excluded(
-            query.days, query.symbol, query.special, query.basis
-        )
-        algorithms, baselines = split(scored_by_algorithm(rows, query.basis), engine.baseline_names)
+        rows, excluded = engine.store.scored_and_excluded(query.days, query.symbol, query.special)
+        if engine.target_version >= 2:
+            # As the statuses go by (#170): an algorithm's predictions by models trained on the
+            # touch target only, not an older model's scored on a label it did not learn.
+            rows = on_target(rows, engine.baseline_names | set(NAMES), engine.target_version)
+        algorithms, baselines = split(scored_by_algorithm(rows), engine.baseline_names)
         for a in engine.algorithms:
             algorithms.setdefault(a.name, [])
         return build(algorithms, baselines, excluded)
