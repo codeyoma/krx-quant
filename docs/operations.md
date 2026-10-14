@@ -598,6 +598,7 @@ docker compose start engine
 - 정답을 도달 정답으로 바꾸는 배포(#170)는 그날이 전환일이다(3장 "정답이 바뀌는 날"). 엔진이 처음 뜰 때 상태를 수습으로 돌리고, `predictions`에 인덱스 하나를 만든다(스키마 버전은 그대로라 되돌려도 뜬다).
 - 변동폭의 첫 모델 `mandelbrot`(#181)을 담은 엔진은 그 알고리즘을 바로 돌리지 않고 사전 검증을 기다린다(3장 "새 알고리즘 사전 검증"). 방향 예측과 변동폭의 기준 예측은 전과 같다. 밤 학습은 그날 밤부터 `mandelbrot`도 학습한다. 서버에서 손으로 할 일은 녹화 10거래일 뒤의 `prevalidate mandelbrot` 하나다.
 - 예측 종류 축(#179)을 담은 엔진은 처음 뜰 때 빈 표 둘(`kind_predictions`, `kind_answers`)과 인덱스를 만든다. 스키마 버전은 그대로라 되돌려도 뜬다. 다른 종류가 등록되지 않아서 예측, 채점, API의 방향 응답은 전과 같다(`/v1/algorithms` 항목에 `kind`가 더해지고, `/v1/kinds`가 생긴다). 서버에서 손으로 할 일은 없다.
+- 다른 종류의 예측에 봉 마감의 k를 붙이는 엔진(#200)은 처음 뜰 때 `kind_predictions`에 `flat_ticks` 열을 더한다. 스키마 버전은 그대로라 되돌려도 뜬다(옛 엔진이 쓰는 행은 그 열이 비어 있다). 그 전에 저장한 예측은 k가 없다(API의 `flat_ticks`가 `null`이고, 화면은 그때 `/v1/symbols`의 지금 k를 보인다). 서버에서 손으로 할 일은 없다.
 - 결과는 텔레그램으로 온다(`krx-quant notify`): `[알림] 자동 업데이트: <이전> → <새 커밋>`과 커밋 제목(최대 10개), `[알림] 자동 업데이트 실패: …`, 그 밖의 오류(GitHub 접속 실패 등)는 `[알림] 자동 업데이트 오류: …`. 오류일 때 엔진은 그대로 돈다.
 - 업데이트가 끝나면 쓰지 않는 Docker 이미지를 지운다.
 - 이미지를 만들 때 그 커밋을 넘긴다(`KRX_COMMIT`, `compose.yaml`의 빌드 인자). 엔진은 `/v1/status`의 `commit`으로 보이고, 시작할 때마다 DB `runs`에 `start`로 커밋과 수수료율, 신호 규칙, 시간·CPU 예산을 남긴다(#85). 손으로 `docker compose up -d --build`하면 `unknown`이다. 커밋을 남기려면 `KRX_COMMIT=$(git rev-parse HEAD) docker compose up -d --build`로 띄운다.

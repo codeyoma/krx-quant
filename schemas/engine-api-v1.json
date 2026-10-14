@@ -938,7 +938,7 @@
     "kind_prediction_fields": {
       "description": "The fields of a prediction of a kind besides the direction (#179), open so the stream's items can add the symbol.",
       "type": "object",
-      "required": ["algorithm", "model_version", "bar_close", "displayed_at", "target_at", "status", "output", "answer"],
+      "required": ["algorithm", "model_version", "bar_close", "displayed_at", "target_at", "status", "flat_ticks", "output", "answer"],
       "properties": {
         "algorithm": {"type": "string"},
         "model_version": {"type": "string"},
@@ -949,6 +949,11 @@
           "oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]
         },
         "status": {"enum": ["ok", "timed_out", "error", "vi", "no_book", "no_previous"]},
+        "flat_ticks": {
+          "description": "k at the bar close (#200): the flat band in ticks at its mid-point, what the kind's predictors were given and the range's answer counts; kept as the price moves on. Every status has it. null without a mid-point at the bar close, and for predictions stored before #200.",
+          "type": ["integer", "null"],
+          "minimum": 1
+        },
         "output": {
           "description": "p_<class> for each of the kind's three classes (GET /v1/kinds), a distribution, then the kind's fields; null unless the status is ok. The range's: range_output (#180).",
           "oneOf": [
