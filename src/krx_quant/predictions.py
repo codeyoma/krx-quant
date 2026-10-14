@@ -19,7 +19,9 @@ opens the database (``_KIND_SCHEMA``). ``kind_predictions.flat_ticks`` (#200), t
 k each prediction was made with, is a column added the same way (``_ADDED_COLUMNS``): an
 engine from before it names the columns it writes, so it still opens and writes the
 database, and its rows have no k. So is ``kind_predictions.width_ticks`` (#183), the barrier
-width w of a kind with barriers at the bar close.
+width w of a kind with barriers at the bar close, and so are ``kind_predictions.anchor`` and
+``kind_predictions.tick`` (#210), the bar close's mid-point and its tick size, the reference its
+answer is measured from (a barrier's U and L before its answer is in).
 
 Times are ISO 8601 strings in KST, which sort in time order.
 """
@@ -172,6 +174,9 @@ CREATE TABLE IF NOT EXISTS kind_predictions (  -- a prediction of a kind besides
     width_ticks INTEGER,              -- a kind's barrier width w at the bar close (#183, the barrier's):
                                       -- what its answer is made with; null for a kind without barriers,
                                       -- without a mid-point there, and in rows stored before #183
+    anchor REAL,                      -- the mid-point at the bar close (#210): its answer's reference;
+                                      -- null without one there, and in rows stored before #210
+    tick INTEGER,                     -- the tick size at that mid-point (#210); null likewise
     UNIQUE (kind, symbol, algorithm, bar_close)
 );
 CREATE INDEX IF NOT EXISTS kind_predictions_by_close ON kind_predictions (kind, bar_close);
@@ -197,6 +202,8 @@ CREATE TABLE IF NOT EXISTS kind_answers (  -- a kind's answer of a bar close's f
 _ADDED_COLUMNS = (
     ("kind_predictions", "flat_ticks", "INTEGER"),
     ("kind_predictions", "width_ticks", "INTEGER"),
+    ("kind_predictions", "anchor", "REAL"),
+    ("kind_predictions", "tick", "INTEGER"),
 )
 
 
@@ -334,6 +341,8 @@ class NewKindPrediction:
     status: str = "ok"
     flat_ticks: int | None = None  # k at the bar close (#200); None without a mid-point there
     width_ticks: int | None = None  # the kind's barrier width there (#183); None for a kind without
+    anchor: float | None = None  # the mid-point at the bar close (#210); None without one there
+    tick: int | None = None  # the tick size at that mid-point (#210); None likewise
 
 
 @dataclass(frozen=True)
@@ -806,8 +815,8 @@ class PredictionStore:
             for p in predictions:
                 cursor = self._db.execute(
                     "INSERT INTO kind_predictions (kind, symbol, algorithm, model_version, bar_close,"
-                    " displayed_at, status, output, flat_ticks, width_ticks)"
-                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    " displayed_at, status, output, flat_ticks, width_ticks, anchor, tick)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         kind,
                         p.symbol,
@@ -819,6 +828,8 @@ class PredictionStore:
                         None if p.output is None else json.dumps(dict(p.output), separators=(",", ":")),
                         p.flat_ticks,
                         p.width_ticks,
+                        p.anchor,
+                        p.tick,
                     ),
                 )
                 assert cursor.lastrowid is not None

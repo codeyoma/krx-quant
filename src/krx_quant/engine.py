@@ -66,7 +66,8 @@ each at the same bar closes from the same Market View: a kind's baselines predic
 symbol at once, once the algorithms have started, and its algorithms run with the
 direction's, in the same worker threads, under the same time limit and CPU budget,
 registered after them (the budget skips them first). A kind's predictions go to
-``kind_predictions``, each with the bar close's k it was made with (#200) and, for a kind with
+``kind_predictions``, each with the bar close's k it was made with (#200), its mid-point and tick
+size (``anchor``, ``tick``, #210: the reference its answer is measured from) and, for a kind with
 barriers (#183), their width fixed there (``width_ticks``); at t + 4 minutes
 each window's answer, by the kind's answer function on the quotes the touch label reads, goes
 to ``kind_answers`` (special when a VI, circuit breaker or sidecar known at its bar close, or
@@ -987,12 +988,18 @@ class PredictionEngine:
             b.using(self.kind_tables[b.name]) if isinstance(b, TableBaseline) else b for b in kind.baselines
         ]
 
-    def _close_k(self, symbol: str, bar_close: datetime, at_close: Mapping[str, _AtClose]) -> int | None:
-        """The flat band k at ``symbol``'s mid-point at the bar close, as the kinds' predictors
-        are given it (``KindInputs.flat_ticks``) and their answer counts it; from the reference
-        price there for a symbol not predicted (a VI). None without a mid-point."""
+    def _close_mid(self, symbol: str, bar_close: datetime, at_close: Mapping[str, _AtClose]) -> float | None:
+        """``symbol``'s mid-point at the bar close, as the kinds' predictors are given it
+        (``KindInputs.mid``) and their answers are measured from (the window's anchor); the
+        reference price there for a symbol not predicted (a VI). None without one."""
         c = at_close.get(symbol)
-        mid = c.mid if c is not None else self._market.mid(symbol, bar_close)
+        return c.mid if c is not None else self._market.mid(symbol, bar_close)
+
+    def _close_k(self, symbol: str, bar_close: datetime, at_close: Mapping[str, _AtClose]) -> int | None:
+        """The flat band k at ``symbol``'s mid-point at the bar close (``_close_mid``), as the
+        kinds' predictors are given it (``KindInputs.flat_ticks``) and their answer counts it.
+        None without a mid-point."""
+        mid = self._close_mid(symbol, bar_close, at_close)
         return flat_ticks(mid, self.fee_rate) if mid is not None else None
 
     def _record_kind(
@@ -1004,11 +1011,13 @@ class PredictionEngine:
     ) -> None:
         """Store a kind's (name, model version, forecasts by symbol, status) entries as
         displayed now (#179), each with its bar close's k (#200): the one the forecast was made
-        with, kept as the price moves on before the answer; and the kind's barrier width there
+        with, kept as the price moves on before the answer; its mid-point and tick size there
+        (#210), the reference its answer is measured from; and the kind's barrier width there
         (#183), the one its answer is made with."""
         displayed_at = self.clock.now()
         symbols = {symbol for _, _, forecasts, _ in made for symbol in forecasts}
-        ks = {symbol: self._close_k(symbol, bar_close, at_close) for symbol in symbols}
+        mids = {symbol: self._close_mid(symbol, bar_close, at_close) for symbol in symbols}
+        ks = {symbol: None if mid is None else flat_ticks(mid, self.fee_rate) for symbol, mid in mids.items()}
         widths = {symbol: self._market.kind_width(kind, symbol, bar_close) for symbol in symbols}
         predictions = [
             NewKindPrediction(
@@ -1021,6 +1030,8 @@ class PredictionEngine:
                 status=status,
                 flat_ticks=ks[symbol],
                 width_ticks=None if (width := widths[symbol]) is None else width.ticks,
+                anchor=mids[symbol],
+                tick=None if (mid := mids[symbol]) is None else tick_size(mid),
             )
             for name, version, forecasts, status in made
             for symbol, forecast in forecasts.items()

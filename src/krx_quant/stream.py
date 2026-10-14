@@ -309,7 +309,9 @@ def kind_prediction_json(row: dict[str, Any]) -> dict[str, Any]:
     target time: it is not scored. ``flat_ticks`` is the bar close's k it was made with
     (#200), None without a mid-point there and for one stored before; ``width_ticks`` the
     kind's barrier width there (#183), None for a kind without barriers, without a mid-point
-    there and for one stored before."""
+    there and for one stored before; ``anchor`` and ``tick`` the bar close's mid-point and its
+    tick size (#210), the reference its answer is measured from, None without a mid-point there
+    and for one stored before."""
     made = row["status"] == "ok"
     return {
         "algorithm": row["algorithm"],
@@ -320,6 +322,8 @@ def kind_prediction_json(row: dict[str, Any]) -> dict[str, Any]:
         "status": row["status"],
         "flat_ticks": row["flat_ticks"],
         "width_ticks": row["width_ticks"],
+        "anchor": row["anchor"],
+        "tick": row["tick"],
         "output": row["output"] if made else None,
         "answer": _answer_json(row) if made else None,
     }

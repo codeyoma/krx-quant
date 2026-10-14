@@ -38,6 +38,7 @@ from krx_quant.kinds import (
     register_kinds,
 )
 from krx_quant.predictions import PredictionStore
+from krx_quant.pricing import tick_size
 from krx_quant.replay import replay_into
 from krx_quant.touch import RESTARTED, TouchWindow
 from tests.algorithm_doubles import FixedAlgorithm
@@ -387,9 +388,10 @@ async def test_a_kind_that_fails_never_holds_up_the_direction(tmp_path: Path) ->
 async def test_a_bar_close_in_a_vi_gets_empty_kind_predictions_and_a_special_answer(tmp_path: Path) -> None:
     """Input: a VI from 09:30:20, seen at 09:30:24 (taken to last 3 minutes, to 09:33:20), seen
     released at 09:32:40 at 09:32:44. Output: at 09:31 and 09:32 every drift predictor's
-    prediction is ``vi`` (unscored) with its bar close's k (#200), the windows still get their
-    answers, and the answers of the windows the VI touches are special as the direction's
-    predictions there are: 09:27 to 09:32 (09:33's bar close came after the release)."""
+    prediction is ``vi`` (unscored) with its bar close's k (#200), mid-point and tick (#210), the
+    windows still get their answers, and the answers of the windows the VI touches are special as
+    the direction's predictions there are: 09:27 to 09:32 (09:33's bar close came after the
+    release)."""
     events = sorted(
         quiet("09:00:30", "09:45:00")
         + [vi(at("09:30:24"), "09:30:20"), vi(at("09:32:44"), "09:30:20", "09:32:40")],
@@ -406,6 +408,9 @@ async def test_a_bar_close_in_a_vi_gets_empty_kind_predictions_and_a_special_ans
     assert {p["status"] for p in made["predictions"]} == {"vi"}
     assert [p["answer"] for p in made["predictions"]] == [None] * 3
     assert {p["flat_ticks"] for p in made["predictions"]} == {2}, "k at 81,250, predicted or not"
+    assert {(p["anchor"], p["tick"]) for p in made["predictions"]} == {(81_250.0, 100)}, (
+        "the reference price there"
+    )
     stored_answers = answers(tmp_path / "engine.db")
     assert stored_answers["09:31"]["class"] == "held"
     special = [c for c, a in sorted(stored_answers.items()) if a["special"]]
@@ -587,8 +592,9 @@ async def test_the_bar_close_s_k_is_a_column_engines_before_and_after_it_both_op
     """#200. Input: a database an engine from before #200 made, with a drift prediction of the
     Friday before; the busy morning replayed into it with the drift; then a prediction written
     as an engine from before writes it. Output: the schema version stays 4; the engine adds the
-    column; the morning's drift predictions carry their bar close's k, the direction's k at the
-    same bar close; the Friday's and the one written as before have none (``null`` on the API)."""
+    columns; the morning's drift predictions carry their bar close's k, the direction's k at the
+    same bar close, and its mid-point and tick (#210), the direction's mid-point there; the
+    Friday's and the one written as before have none (``null`` on the API)."""
     db = tmp_path / "engine.db"
     with sqlite3.connect(db) as conn:
         before = predictions._SCHEMA + KIND_PREDICTIONS_BEFORE_200
@@ -599,18 +605,20 @@ async def test_the_bar_close_s_k_is_a_column_engines_before_and_after_it_both_op
     with sqlite3.connect(db) as conn:
         written_before_200(conn, "2026-10-12T09:11:00+09:00")
         assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
-        made = dict(
-            conn.execute(
-                "SELECT DISTINCT bar_close, flat_ticks FROM kind_predictions"
+        made = {
+            close: (k, anchor, tick)
+            for close, k, anchor, tick in conn.execute(
+                "SELECT DISTINCT bar_close, flat_ticks, anchor, tick FROM kind_predictions"
                 " WHERE bar_close > '2026-10-12' AND bar_close < '2026-10-12T09:11'"
-            ).fetchall()
-        )
-        direction = dict(
-            conn.execute(
-                "SELECT DISTINCT p.bar_close, o.flat_ticks FROM predictions p JOIN outcomes o"
+            )
+        }
+        direction = {
+            close: (k, mid, tick_size(mid))
+            for close, k, mid in conn.execute(
+                "SELECT DISTINCT p.bar_close, o.flat_ticks, o.mid_close FROM predictions p JOIN outcomes o"
                 " ON o.prediction_id = p.id"
-            ).fetchall()
-        )
+            )
+        }
     async with api(engine) as client:
         friday = await get_json(
             client, f"/v1/symbols/{SYMBOL}/kinds/drift/predictions?bar_close=2026-10-09T15:00:00%2B09:00"
@@ -619,12 +627,14 @@ async def test_the_bar_close_s_k_is_a_column_engines_before_and_after_it_both_op
     engine.store.close()
 
     assert len(made) == 10 and made == direction
-    assert all(k is not None for k in made.values())
+    assert all(None not in terms for terms in made.values())
     check("kind_predictions", friday)
     check("kind_latest", latest)
-    assert [p["flat_ticks"] for p in friday["predictions"]] == [None]
+    for before_it in (friday, latest):
+        assert [(p["flat_ticks"], p["anchor"], p["tick"]) for p in before_it["predictions"]] == [
+            (None, None, None)
+        ]
     assert latest["bar_close"] == "2026-10-12T09:11:00+09:00"
-    assert [p["flat_ticks"] for p in latest["predictions"]] == [None]
 
 
 def test_an_answer_is_stored_once_per_kind_symbol_bar_close_and_answer_version(tmp_path: Path) -> None:

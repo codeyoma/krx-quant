@@ -238,8 +238,8 @@ async def test_a_morning_with_the_range_and_the_barrier_keeps_the_contract(tmp_p
     and the barrier). Output: every endpoint within the contract; each kind's outputs, answer
     paths and own statistics within theirs (``range_output``, ``range_path``, ``range_stats``;
     ``barrier_output``, ``barrier_path``, ``barrier_stats``); a scored prediction's k
-    (``flat_ticks``, #200) is its answer's, and a barrier prediction's width (``width_ticks``)
-    its answer's w."""
+    (``flat_ticks``, #200) is its answer's, its mid-point and tick (``anchor``, ``tick``, #210)
+    its answer's, and a barrier prediction's width (``width_ticks``) its answer's w."""
     engine = await run(tmp_path / "engine.db", busy_morning(), until=at("10:00:00"), target_version=2)
 
     async with api(engine) as client:
@@ -262,6 +262,8 @@ async def test_a_morning_with_the_range_and_the_barrier_keeps_the_contract(tmp_p
             if p["answer"] is not None:
                 check(f"{kind}_path", p["answer"]["path"])
                 assert p["flat_ticks"] == p["answer"]["path"]["k"], "the bar close's k, the answer's (#200)"
+                reference = (p["answer"]["path"]["anchor"], p["answer"]["path"]["tick"])
+                assert (p["anchor"], p["tick"]) == reference, "the bar close's mid-point, the answer's (#210)"
                 if kind == "barrier":
                     assert p["width_ticks"] == p["answer"]["path"]["w"], "the bar close's width, the answer's"
                 else:

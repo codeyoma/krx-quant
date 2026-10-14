@@ -938,7 +938,7 @@
     "kind_prediction_fields": {
       "description": "The fields of a prediction of a kind besides the direction (#179), open so the stream's items can add the symbol.",
       "type": "object",
-      "required": ["algorithm", "model_version", "bar_close", "displayed_at", "target_at", "status", "flat_ticks", "width_ticks", "output", "answer"],
+      "required": ["algorithm", "model_version", "bar_close", "displayed_at", "target_at", "status", "flat_ticks", "width_ticks", "anchor", "tick", "output", "answer"],
       "properties": {
         "algorithm": {"type": "string"},
         "model_version": {"type": "string"},
@@ -956,6 +956,16 @@
         },
         "width_ticks": {
           "description": "The barrier width w at the bar close (#183), in ticks of its mid-point, for a kind with barriers (the barrier's): fixed there by the engine, what its answer is made with, the same for every predictor of the bar close; never below k. Every status has it. null for a kind without barriers (the range), without a mid-point at the bar close, and for predictions stored before #183.",
+          "type": ["integer", "null"],
+          "minimum": 1
+        },
+        "anchor": {
+          "description": "The integrated mid-point at the bar close (#210), the reference the kind's answer is measured from (its path's anchor), so a barrier's U and L, anchor ± width_ticks × tick, are known before its answer is in. Kept as the price moves on; every status has it. null without a mid-point at the bar close, and for predictions stored before #210.",
+          "type": ["number", "null"],
+          "exclusiveMinimum": 0
+        },
+        "tick": {
+          "description": "The tick size at anchor (#210), in won: its path's tick. null without a mid-point at the bar close, and for predictions stored before #210.",
           "type": ["integer", "null"],
           "minimum": 1
         },

@@ -43,6 +43,7 @@ from krx_quant.barriers import (
     barrier_profit,
     barrier_stats,
 )
+from krx_quant.clock import FakeClock
 from krx_quant.config import Settings
 from krx_quant.engine import Event
 from krx_quant.features import (
@@ -64,6 +65,7 @@ from krx_quant.predictions import DB_NAME, PredictionStore
 from krx_quant.pricing import cost_ticks, flat_ticks, tick_size
 from krx_quant.ranges import RANGE
 from krx_quant.reference import Bar
+from krx_quant.replay import replay_into
 from krx_quant.rescore import fill_kind_answers
 from krx_quant.touch import MISSING_MID, REST_QUOTES, RESTARTED, SILENT
 from krx_quant.training import bar_answers, training_day
@@ -813,6 +815,82 @@ async def test_a_restart_leaves_its_windows_unscorable_and_the_width_from_what_c
     assert made[("09:41", CLIMATE)]["width_ticks"] == 2
     assert made[("09:43", PERSIST)]["status"] == "no_previous", "the 09:39 window was not followed"
     assert made[("09:44", PERSIST)]["status"] == "ok", "the 09:40 window opened after the restart"
+
+
+def tick_crossing() -> list[Event]:
+    """The book at 49,900 / 49,950 (mid 49,925: tick 50, k = 3, and w = k = 3 without bars) every
+    10 s from 09:00:30 to 09:31:50, then at 50,100 / 50,200 (mid 50,150, over 50,000: tick 100,
+    k = 2) from 09:32:00 to 09:40."""
+    return steady_book(at("09:00:30"), at("09:31:50"), 49_900, 49_950) + steady_book(
+        at("09:32:00"), at("09:40:00"), 50_100, 50_200
+    )
+
+
+async def test_a_barrier_prediction_keeps_its_bar_close_s_mid_point_and_tick_after_the_price_moves(
+    tmp_path: Path,
+) -> None:
+    """#210. Input: the book above: in the 09:31 window the mid-point crosses 50,000, where the
+    tick goes from 50 to 100. Output: before its answer, every barrier prediction of the 09:31
+    bar close carries the bar close's mid-point 49,925 and tick 50 (``anchor``, ``tick``), so its
+    U = 49,925 + 3 × 50 = 50,075 and L = 49,775 are known, while ``/v1/symbols`` already shows
+    50,150 and 100 and the 09:33 bar close's predictions carry those; after its answer (up first
+    at 09:32:00: the best bid 50,100 at U or above) they still carry 49,925 and 50, the answer
+    path's anchor and tick, and its U and L. The stream's ``kind_prediction`` items carry their
+    own bar close's."""
+    db = tmp_path / "engine.db"
+    events = tick_crossing()
+    split = at("09:34:00")
+    engine = await run(db, [e for e in events if e[1]["received_at"] <= split], until=split, target_version=2)
+    at_0931 = f"/v1/symbols/{SYMBOL}/kinds/barrier/predictions?bar_close=2026-10-12T09:31:00%2B09:00"
+
+    async with api(engine) as client:
+        before = await get_json(client, at_0931)
+        at_0933 = await get_json(
+            client, f"/v1/symbols/{SYMBOL}/kinds/barrier/predictions?bar_close=2026-10-12T09:33:00%2B09:00"
+        )
+        symbols = await get_json(client, "/v1/symbols")
+        ws = await client.ws_connect("/v1/stream")
+        assert isinstance(engine.clock, FakeClock)
+        rest = [e for e in events if e[1]["received_at"] > split]
+        await replay_into(engine, engine.clock, rest, until=at("09:36:00"))
+        heard: list[dict[str, Any]] = []
+        last = "2026-10-12T09:36:00+09:00"
+
+        def barrier_made(e: dict[str, Any]) -> bool:
+            return bool(e["type"] == "kind_prediction" and e["prediction_kind"] == BARRIER.name)
+
+        async with asyncio.timeout(5):
+            while not any(barrier_made(e) and e["bar_close"] == last for e in heard):
+                heard.append(await ws.receive_json())
+                check("event", heard[-1])
+        await ws.close()
+        after = await get_json(client, at_0931)
+    engine.store.close()
+
+    check("kind_predictions", before)
+    check("kind_predictions", after)
+    assert {CLIMATE, PERSIST} <= {p["algorithm"] for p in before["predictions"]}
+    pending = {(p["anchor"], p["tick"], p["width_ticks"], p["answer"] is None) for p in before["predictions"]}
+    assert pending == {(49_925.0, 50, 3, True)}
+    (now,) = symbols["symbols"]
+    assert (now["mid"], now["tick"]) == (50_150.0, 100), "the mid-point now"
+    assert {(p["anchor"], p["tick"]) for p in at_0933["predictions"]} == {(50_150.0, 100)}
+    assert {(p["anchor"], p["tick"]) for p in after["predictions"]} == {(49_925.0, 50)}, (
+        "the bar close's, kept"
+    )
+    for p in after["predictions"]:
+        path = p["answer"]["path"]
+        assert (p["answer"]["class"], path["up_at"]) == ("up_first", at("09:32:00").isoformat())
+        assert (p["anchor"], p["tick"]) == (path["anchor"], path["tick"])
+        w = p["width_ticks"]
+        barriers = (p["anchor"] + w * p["tick"], p["anchor"] - w * p["tick"])
+        assert barriers == (path["upper"], path["lower"]) == (50_075.0, 49_775.0)
+    made = {
+        e["bar_close"][11:16]: {(p["anchor"], p["tick"]) for p in e["predictions"]}
+        for e in heard
+        if barrier_made(e)
+    }
+    assert made["09:35"] == made["09:36"] == {(50_150.0, 100)}
 
 
 def rows(db: Path, sql: str) -> list[tuple[Any, ...]]:
