@@ -29,7 +29,9 @@
 | `baseline-flat` | `v1` | 항상 보합(그대로) |
 | `baseline-persist` | `v2` | 직전 창(t − 4분 → t)의 도달 정답을 그대로 낸다. 저장된 예측이 아니라 시장 보기가 따라간 그 창에서 정한다. 그래서 그 봉 마감에 예측이 없었어도(VI 등) 된다. 그 창을 채점할 수 없으면(`missing mid`, `rest quotes`, `silent quotes`, 그 창을 따라가지 못함: 그날 처음 4분, 엔진 재시작) 예측하지 않는다. 상태가 `no_previous`이고 확률이 비어 있으며 채점하지 않는다. 기대수익은 직전 4분 중간가 변화의 틱 수(모르면 0)다 |
 | `baseline-random` | `v2` | 그날 그 종목에서 4분이 다 지난 창(봉 마감 + 4분 ≤ t)의 도달 정답 비율(각 클래스에 1을 더한 값)대로 뽑는다. `touches` 표에서 센다. 예측하지 않은 봉 마감(VI)의 창도 센다. 시드는 그대로다 |
-| `baseline-climate` | 표의 버전 | 종목 × 30분 시간대(합의 가중치와 같은 칸, 봉 마감 09:01–09:30은 `09:00`)마다 최근 20거래일의 도달 정답(녹화일은 호가, 그 전 날은 1분봉 규칙)에서 가장 많은 방향을 확률 1로 낸다. 동률이면 보합, 그다음 상승이다. 표는 밤 학습이 매일 다시 맞추고 08:00 교체가 설치한다(`climate.py`, `state/models/baseline-climate.json`). 예측의 `model_version`은 표의 버전(`baseline-climate-<마지막 날>-<해시>`)이고, 표가 없으면 `baseline-climate-default`로 모든 칸이 보합이다. 표에 없는 칸도 보합이다. 기대수익은 0이다 |
+| `baseline-climate` | 표의 버전 | 종목 × 30분 시간대(합의 가중치와 같은 칸, 봉 마감 09:01–09:30은 `09:00`)마다 최근 20거래일의 도달 정답(녹화일은 호가, 그 전 날은 1분봉 규칙)에서 가장 많은 방향을 확률 1로 낸다. 동률이면 보합, 그다음 상승이다. 표는 밤 학습이 매일 다시 맞추고 08:00 교체가 설치한다(`climate.py`, `state/models/baseline-climate.json`). 예측의 `model_version`은 표의 버전(`baseline-climate-<마지막 날>-<해시>`)이고, 표가 없으면 `baseline-climate-default`로 모든 칸이 보합이다. 표에 없는 칸은 그 종목 하루 전체의 최빈 방향(표의 `<종목>.all`), 그것도 없으면 보합이다(#193). 기대수익은 0이다 |
+
+  > **바뀜** (2026-10-14, #193): `baseline-climate`의 표에 없는 칸은 보합이었다 → 그 종목 하루 전체의 최빈 방향, 없으면 보합. 이유: 기준 예측은 모든 봉 마감에 내야 lift가 모든 예측과 짝지어지고, 아무 정보 없는 보합보다 그 종목의 하루 버릇이 기준에 맞다(2026-10-14 결정).
 
   > **바뀜** (2026-10-14, #191): 정답 버전 2에서만: `baseline-persist`는 직전 4분 중간가 변화를 채점 규칙으로 나눴고 중간가를 모르면 보합을 `ok`로 냈다 → 직전 창의 도달 정답을 내고, 채점할 수 없으면 예측하지 않는다(`no_previous`, 버전 `v2`). `baseline-random`은 그날 채점된 봉의 클래스(기준 A) 비율이었다 → 4분이 지난 창의 도달 정답 비율(`v2`). `baseline-climate`을 더했다. 이유: 기준 예측도 새 정답(4분 안에 그 가격에 시장가로 거래할 수 있었나, #160)으로 내야 lift가 같은 정답 위에서 비교된다. 시간대 기후 기준은 시간대·변동성만 맞혀서 이기는 모델을 거르려고 넣었다(#160 인터뷰).
 
@@ -168,7 +170,7 @@
 | `pooled` | `prediction_id`, `position`, `algorithm`. 합의 예측(빠른·최종)에 확률을 보탠 정식 알고리즘, 등록 순서대로(#107). 합의를 만들 때 함께 쓴다. 따로 둔 표다 |
 | `votes` | `prediction_id`, `up`, `flat`, `down`. 합의 예측(빠른·최종)에 들어간 정식 알고리즘을 각자 가장 큰 확률의 방향으로 센 수(#106). 합의를 만들 때 함께 쓴다. `blocks`처럼 따로 둔 표다 |
 | `outcomes` | `prediction_id`, `target_at`(t + 4분), `mid_close`(A), `mid_display`(B), `mid_target`, `flat_ticks`(k), `class_a`, `class_b`(`up`/`flat`/`down`), `special`, `unscorable`, `scored_at`(채점 전에는 비어 있음). #170부터 `special`과 `scored_at`(4분이 지났는지)만 읽고, 옛 기준의 값(`class_a`, `class_b`, `mid_target`, `unscorable`)은 쓰기만 한다. 옛 엔진으로 되돌려도 돌게 하려고다 |
-| `model_targets` | `algorithm`, `version`, `target_version`(1 또는 2, 기본 모델과 기록되기 전 모델은 비어 있음): 엔진이 돌린 모델마다 그 모델을 학습한 정답 버전(#170). 엔진이 시작할 때와 모델을 바꿀 때 쓴다. 상태 판정과 합의 가중치가 예측의 `model_version`을 이것으로 거른다. 따로 둔 표다 |
+| `model_targets` | `algorithm`, `version`, `target_version`(1 또는 2, 기본 모델과 기록되기 전 모델은 비어 있음): 엔진이 돌린 모델마다 그 모델을 학습한 정답 버전(#170). 엔진이 시작할 때와 모델을 바꿀 때 쓴다. 상태 판정, 합의 가중치, 순위표와 통계가 예측의 `model_version`을 이것으로 거른다. 따로 둔 표다 |
 | `touches` | `symbol`, `bar_close`, `target_version`(지금 2), `class`(`up`/`flat`/`down`, 채점할 수 없으면 비어 있음), `unscorable`(`missing mid`, `rest quotes`, `silent quotes`, `restarted`, `not recorded`), `path`(JSON: 아래 `touch`의 경로 필드), `scored_at`. 봉 마감의 도달 정답(#160, #167). 예측이 아니라 (종목, 봉 마감)마다 하나고, 예측하지 않은 봉 마감(VI 등)에도 있다. `blocks`처럼 따로 둔 표라 옛 엔진도 DB를 연다. 엔진은 이미 있는 봉 마감을 덮어쓰지 않는다. 지난 예측의 빠진 행은 엔진이 시작할 때 녹화로 채우고(`scored_at`은 그 4분이 끝난 시각), 다른 값으로 바꾸는 것은 `rescore`뿐이다(아래 "지난 예측의 도달 정답", #168) |
 | `runs` | `id`, `kind`(`cpu_budget`: CPU 예산으로 건너뜀, `review`: 일일 상태 점검, `retire_candidate`: 은퇴 후보 알림, `budget_report`: 그날 예산 때문에 빠진 예측을 알림(#71), `no_regime`: 그날 매크로 국면이 없거나 엔진이 모르는 이름이어서 기본 전이행렬로 돈 날, 첫 봉 마감에 하루 한 번(`detail`에 `(unknown: <이름>)`), `start`: 수집기가 엔진을 시작함(`detail`은 JSON: `commit`, `fee_rate`, `signal_rule`(`min_probability`, `min_agree`, 끄면 `null`), `algorithm_seconds`, `cpu_budget_seconds`. 성적을 코드와 설정별로 가르는 근거, #85), `signal_sent`: 보낸 텔레그램 신호, `signal_blocked`: 막힌 텔레그램 신호(둘 다 판정할 때마다 하나씩, `detail`은 JSON, 아래 "텔레그램 신호 알림", #80), `touch_fill`: 엔진이 시작할 때 지난 예측의 도달 정답을 채움(한 행이라도 썼을 때), `rescore`: `krx-quant rescore`를 돌림(둘 다 `detail`은 날마다 `day`, `source`(녹화를 읽은 곳), `labeled`(녹화로 낸 창 수), `written`(쓴 행 수), `not_recorded`, `failed`(읽지 못한 이유)의 JSON 목록, #168), `target`: 상태가 도달 정답으로 다시 시작됨(`detail` `2`. 엔진이 이 DB를 처음 열 때 한 번, #170)), `at`, `algorithm`, `detail` |
 | `statuses` | `id`, `algorithm`, `at`, `previous`, `status`, `reason`: 알고리즘 상태 이력(#17) |
@@ -503,7 +505,10 @@
 
 ### `GET /v1/leaderboard?symbol=&period=&special=`
 
-순위표다. 모든 예측을 도달 정답으로 채점한다(#170).
+순위표다. 모든 예측을 도달 정답으로 채점한다(#170). 알고리즘의 예측은 도달 정답으로 학습한 모델이 낸 것만 센다(`model_targets`, 상태 판정과 같다. #193). 옛 정답 모델과 기본 모델의 예측은 DB에 남지만 순위표와 `/v1/algorithms/{name}/stats`(모델 버전별 포함)에는 나오지 않는다. 기준 예측과 합의는 모두 센다.
+
+> **바뀜** (2026-10-14, #193): 순위표와 통계는 알고리즘의 모든 예측을 도달 정답으로 셌다 → 도달 정답으로 학습한 모델의 예측만. 이유: 끝점 방향을 배운 옛 모델을 도달 정답으로 채점하면 다른 문제의 성적이 섞이고, 상태 판정이 보는 것과 화면 숫자가 어긋난다(2026-10-14 결정).
+
 - `symbol`: 종목 또는 `all`(기본)
 - `period`: `today`(기본), `5d`, `20d`
 - `special`: `exclude`(기본) 또는 `include`

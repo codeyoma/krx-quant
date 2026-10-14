@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import random
 from collections.abc import Sequence
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -22,8 +23,10 @@ from krx_quant.algorithms import Model, Sample
 from krx_quant.algorithms.forecasts import normal_forecast
 from krx_quant.baselines import Forecast
 from krx_quant.climate import CLIMATE, fit_climate
+from krx_quant.climate import direction as climate_direction
 from krx_quant.engine import Event
 from krx_quant.features import FeatureVector
+from krx_quant.feeds import KST
 from krx_quant.pricing import Direction
 from tests.algorithm_doubles import stand_in_card, stand_in_meanings
 from tests.api_schema import check
@@ -156,9 +159,23 @@ def test_the_climate_table_holds_each_slots_most_frequent_label_ties_to_flat_the
             ("10:05", Direction.DOWN),
         ]
     )
-    assert dict(model.params) == {"005930.09:00": 1.0, "005930.09:30": 0.0, "005930.10:00": 1.0}
+    # And the symbol's whole day, the back-off: up 4, flat 2, down 2.
+    assert dict(model.params) == {
+        "005930.09:00": 1.0,
+        "005930.09:30": 0.0,
+        "005930.10:00": 1.0,
+        "005930.all": 1.0,
+    }
     assert model.version.startswith(f"{CLIMATE}-20261012-")
     assert model.trained_until is not None and model.trained is not None
+
+
+def test_a_slot_the_climate_table_lacks_backs_off_to_its_symbol_s_day_then_flat() -> None:
+    model = table([("09:05", Direction.DOWN), ("09:10", Direction.DOWN), ("09:31", Direction.FLAT)])
+    at_open, later = datetime(2026, 10, 13, 9, 5, tzinfo=KST), datetime(2026, 10, 13, 14, 5, tzinfo=KST)
+    assert climate_direction(model, "005930", at_open) is Direction.DOWN  # its slot
+    assert climate_direction(model, "005930", later) is Direction.DOWN  # no 14:00 slot: the day's
+    assert climate_direction(model, "000660", later) is None  # nothing known: the baseline calls flat
 
 
 async def test_the_climate_baseline_calls_its_tables_direction_for_the_slot(tmp_path: Path) -> None:
@@ -176,7 +193,8 @@ async def test_the_climate_baseline_calls_its_tables_direction_for_the_slot(tmp_
     assert forecast(climate["09:01"]) == ("ok", 1, 0, 0)
     assert forecast(climate["09:30"]) == ("ok", 1, 0, 0)
     assert forecast(climate["09:31"]) == ("ok", 0, 0, 1)
-    assert forecast(climate["10:01"]) == ("ok", 0, 1, 0), "a slot the table does not hold: flat"
+    # A slot the table does not hold: the symbol's day (up and down once each, a tie: up).
+    assert forecast(climate["10:01"]) == ("ok", 1, 0, 0)
     assert {p["model_version"] for p in climate.values()} == {model.version}
 
 

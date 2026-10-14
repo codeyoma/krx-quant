@@ -83,6 +83,7 @@ from krx_quant.stats import (
     entry_json,
     interval_json,
     leaderboard,
+    on_target,
     scored_by_algorithm,
     split,
 )
@@ -743,6 +744,10 @@ async def _stats(
         # Reading and computing both run in the worker: a long history must not hold up
         # the event loop that records and predicts.
         rows, excluded = engine.store.scored_and_excluded(query.days, query.symbol, query.special)
+        if engine.target_version >= 2:
+            # As the statuses go by (#170): an algorithm's predictions by models trained on the
+            # touch target only, not an older model's scored on a label it did not learn.
+            rows = on_target(rows, engine.baseline_names | set(NAMES), engine.target_version)
         algorithms, baselines = split(scored_by_algorithm(rows), engine.baseline_names)
         for a in engine.algorithms:
             algorithms.setdefault(a.name, [])

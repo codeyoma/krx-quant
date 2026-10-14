@@ -9,10 +9,13 @@ when the market moves does not beat it.
 
 The table is a model like an algorithm's (``Model``): its parameters are
 ``<symbol>.<slot>`` (``"005930.09:00"`` holds the bar closes 09:01–09:30) with the
-direction's code, 1 up, 0 flat, −1 down. The nightly training refits it every night and
-always installs it (``nightly.py``); the engine reads ``state/models/baseline-climate.json``
-and its defaults (no table: flat everywhere) without one. A tie goes to flat, then up, as
-a forecast's most likely class does.
+direction's code, 1 up, 0 flat, −1 down, and ``<symbol>.all``, the symbol's most frequent
+label over the whole day. A slot the table lacks backs off to its symbol's day, then to
+flat (a baseline calls every bar close, so the lifts pair it with every forecast). The
+nightly training refits it every night and always installs it (``nightly.py``); the
+engine reads ``state/models/baseline-climate.json`` and its defaults (no table: flat
+everywhere) without one. A tie goes to flat, then up, as a forecast's most likely class
+does.
 """
 
 from __future__ import annotations
@@ -41,6 +44,9 @@ _CODES = {Direction.UP: 1.0, Direction.FLAT: 0.0, Direction.DOWN: -1.0}
 _TIES = (Direction.FLAT, Direction.UP, Direction.DOWN)
 
 
+ALL_DAY = "all"  # the slot of a symbol's whole day, the table's back-off
+
+
 def key(symbol: str, bar_close: datetime) -> str:
     """The table's parameter for ``symbol`` at ``bar_close``: ``<symbol>.<slot>``."""
     return f"{symbol}.{slot(bar_close)}"
@@ -50,12 +56,14 @@ def fit_climate(samples: Sequence[Sample]) -> Model:
     """The table of ``samples``' labels: each symbol and slot's most frequent one. The
     defaults when none has a label."""
     counts: dict[str, Counter[Direction]] = {}
+    days: dict[str, Counter[Direction]] = {}  # by symbol, the whole day: the back-off
     for s in samples:
         if s.outcome is not None:
             counts.setdefault(key(s.symbol, s.bar_close), Counter())[s.outcome] += 1
+            days.setdefault(f"{s.symbol}.{ALL_DAY}", Counter())[s.outcome] += 1
     if not counts:
         return DEFAULT
-    params = {k: _CODES[_most_frequent(c)] for k, c in sorted(counts.items())}
+    params = {k: _CODES[_most_frequent(c)] for k, c in sorted({**counts, **days}.items())}
     labelled = [s for s in samples if s.outcome is not None]
     first = min(s.bar_close for s in labelled).astimezone(KST).date()
     last = max(s.bar_close for s in labelled).astimezone(KST).date()
@@ -78,8 +86,9 @@ def _most_frequent(counts: Counter[Direction]) -> Direction:
 
 
 def direction(model: Model, symbol: str, bar_close: datetime) -> Direction | None:
-    """The table's direction for ``symbol`` at ``bar_close``; None if it has none there."""
-    code = model.params.get(key(symbol, bar_close))
+    """The table's direction for ``symbol`` at ``bar_close``: its slot's, else its symbol's
+    whole day's; None if it has neither."""
+    code = model.params.get(key(symbol, bar_close), model.params.get(f"{symbol}.{ALL_DAY}"))
     if code is None:
         return None
     return Direction.UP if code > 0 else Direction.DOWN if code < 0 else Direction.FLAT

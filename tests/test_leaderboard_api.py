@@ -103,7 +103,7 @@ def store_scored(
 
 @contextlib.asynccontextmanager
 async def board(
-    tmp_path: Path, min_sample: int = 20
+    tmp_path: Path, min_sample: int = 20, target_version: int = 1
 ) -> AsyncIterator[tuple[PredictionEngine, TestClient[Any, Any]]]:
     # A holiday: the engine predicts nothing itself; the test stores what it needs.
     engine = await run(
@@ -112,6 +112,7 @@ async def board(
         until=at("16:00:00"),
         calendar=MarketCalendar({DAY: False}),
         symbols=("005930", "000660"),
+        target_version=target_version,
     )
     async with TestClient(TestServer(create_app(engine, min_sample=min_sample))) as client:
         yield engine, client
@@ -188,6 +189,25 @@ async def test_the_leaderboard_chooses_symbol_period_and_leaves_out_special(tmp_
     assert alpha(five_days)["n"] == 44
     assert all(e["algorithm"] != "delta" for e in everything["ranked"] + everything["unranked"])
     assert any(e["algorithm"] == "delta" for e in with_special["ranked"] + with_special["unranked"])
+
+
+async def test_on_the_touch_target_the_stats_count_only_models_trained_on_it(tmp_path: Path) -> None:
+    """Input: alpha's predictions by an older model (the four-minute move's), always wrong on
+    005930, and by a model trained on the touch target, always right on 000660. Output: the
+    leaderboard and alpha's stats count the second only, as the statuses do (#170)."""
+    async with board(tmp_path, target_version=2) as (engine, client):
+        baselines(engine.store)
+        store_scored(engine.store, "alpha", [DOWN] * 40, version="alpha-old")
+        store_scored(engine.store, "alpha", OUTCOMES, version="alpha-new", symbol="000660")
+        engine.store.record_models([("alpha", "alpha-old", 1), ("alpha", "alpha-new", 2)])
+
+        body = await get(client, "/v1/leaderboard")
+        stats = await get(client, "/v1/algorithms/alpha/stats")
+
+    alpha = next(e for e in body["ranked"] + body["unranked"] if e["algorithm"] == "alpha")
+    assert (alpha["n"], alpha["accuracy"]["value"]) == (40, 1.0)
+    assert list(stats["by_model_version"]) == ["alpha-new"]
+    assert {b["algorithm"] for b in body["baselines"]} >= {"baseline-flat", "baseline-climate"}
 
 
 async def test_a_screen_from_before_still_sends_a_basis_and_reads_it_back(tmp_path: Path) -> None:
