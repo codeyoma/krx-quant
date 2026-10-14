@@ -18,8 +18,9 @@ working, timed out or failed), ``none_finished``.
 
 1. For the last 5 and the last 20 days with predictions, the weights whose pool would
    have had the lowest log loss on the bar closes every member predicted, found by EM.
-   Scored from the bar close (basis A), so every member is judged on the same outcome;
-   special predictions are left out.
+   Scored on the bar close's touch label (#170), every member's alike; special predictions
+   are left out, and so are a member's predictions by a model not trained on the touch
+   target (``stats.on_target``): its old target's or its defaults'.
 2. Only a weight steady across both spans moves: above equal in both, it takes the
    smaller; below in both, the larger; otherwise equal. What the steady losers give up
    goes to the steady winners (or, with none, to the rest alike), so they add up to 1.
@@ -47,16 +48,14 @@ from typing import Any
 from krx_quant.baselines import Forecast
 from krx_quant.cards import Card
 from krx_quant.feeds.base import KST
-from krx_quant.stats import scored_by_algorithm
+from krx_quant.stats import on_target, scored_by_algorithm
+from krx_quant.touch import TARGET_VERSION
 
 FAST = "consensus-fast"
 FINAL = "consensus-final"
 NAMES = (FAST, FINAL)
 EQUAL_VERSION = "condorcet-equal"  # before any fit
 SPANS = (5, 20)  # days with predictions
-# The fit's outcomes: from the bar close (A), one per bar close for every member. On basis B
-# each member is scored from its own display, which a pool of them does not share.
-BASIS = "a"
 SHRINK = 200  # bar closes' worth of belief in equal weights
 _EM_ROUNDS = 200
 _EM_TOLERANCE = 1e-9
@@ -82,7 +81,9 @@ def cards(timing: Timing | None = None) -> dict[str, Card]:
     training = (
         "가중치는 종목 × 30분 시간대(봉 마감 09:01–09:30이 09:00 칸) 칸마다 매일 장 마감 뒤 상태 점검 직후 "
         f"다시 정한다. 최근 {SPANS[0]}일과 {SPANS[1]}일(예측이 있는 날) 각각에서 모든 구성원이 예측한 봉 "
-        "마감에 대해 합의의 로그손실이 가장 작은 가중치를 EM으로 구한다(봉 마감 기준 A, 특수 예측 제외). 두 "
+        "마감에 대해 합의의 로그손실이 가장 작은 가중치를 EM으로 구한다. 정답은 그 봉 마감의 도달 정답(4분 "
+        "안에 매수 1호가가 중간가 + k틱에 닿으면 상승, 아니고 매도 1호가가 − k틱에 닿으면 하락, 아니면 "
+        "보합)이고, 도달 정답으로 학습한 모델의 예측만 쓴다(특수 예측 제외). 두 "
         "기간 모두 균등(1/구성원 수)보다 높아야 올리고(둘 중 작은 값), 두 기간 모두 낮아야 내린다(둘 중 큰 "
         f"값). 엇갈리면 균등이다. 그다음 {SPANS[1]}일의 봉 마감 수 n에 n ÷ (n + {SHRINK})만 믿고 나머지는 "
         "균등 쪽으로 당긴다. 계산 전이나 가중치가 없는 칸은 균등이고, 계산 뒤에 정식이 된 알고리즘은 균등한 "
@@ -94,7 +95,8 @@ def cards(timing: Timing | None = None) -> dict[str, Card]:
     )
     shared_failure = (
         "구성원이 같은 쪽으로 함께 틀리는 장에서는 합쳐도 틀린다. 가중치는 전날까지의 성적이라 장세가 바뀐 "
-        "날에는 늦게 따라간다. 정식 알고리즘이 하나도 없으면(모두 수습일 때) 예측이 비어 있다(no_members)."
+        "날에는 늦게 따라간다. 정식 알고리즘이 하나도 없으면(모두 수습일 때, 정답이 바뀐 뒤 첫 판정 전까지) "
+        "예측이 비어 있다(no_members)."
     )
     return {
         FAST: Card(
@@ -123,8 +125,8 @@ def cards(timing: Timing | None = None) -> dict[str, Card]:
             training=training,
             forecasting=f"{forecasting} 결과가 있는 구성원이 하나도 없으면 비어 있다(none_finished).",
             failure=(
-                f"{shared_failure} 시간 예산에 걸리거나 실패한 구성원은 빠지고, 늦게 나와 표시 시점(B) "
-                "기준으로는 빠른 합의보다 불리할 수 있다."
+                f"{shared_failure} 시간 예산에 걸리거나 실패한 구성원은 빠지고, 늦게 나오는 만큼 그 사이 "
+                "목표에 이미 닿아(표시 전 닿음) 따라 하기 어려울 수 있다."
             ),
         ),
     }
@@ -180,10 +182,10 @@ def fit(
     rows: Sequence[Mapping[str, Any]], members: Sequence[str], days: Sequence[date], at: datetime
 ) -> Weights:
     """Weights for ``members`` from stored scored predictions (``rows``) of ``days`` (latest
-    first, the longest span).
+    first, the longest span): only those of models trained on the touch target (#170).
     """
     version = f"condorcet-{at.astimezone(KST):%Y%m%d}"
-    scored = scored_by_algorithm(rows, BASIS)
+    scored = scored_by_algorithm(on_target(rows, (), TARGET_VERSION))
     # Each bar close's probability of what happened, by member, in each cell.
     seen: dict[Cell, dict[datetime, dict[str, float]]] = {}
     for name in members:

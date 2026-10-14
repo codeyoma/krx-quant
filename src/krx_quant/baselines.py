@@ -8,12 +8,13 @@ Each predicts one class with certainty. The random one draws from a generator se
 the symbol and bar close, so the same input always gives the same prediction. Each has a
 card like an algorithm's (``cards.Card``), named after no scientist.
 
-With the touch target (``KRX_TARGET_VERSION=2``, #169, ``baselines_for``) the last four
-minutes' direction is the touch label of the window that just ended (none when it could
-not be scored: the baseline does not predict, status ``no_previous``), the random class
-is drawn in the proportions of the day's touch labels, and a fourth baseline calls each
-symbol and 30-minute slot's most frequent label over the training days (the climate,
-``climate.py``). Their versions go up from ``v1``.
+With the touch target (``KRX_TARGET_VERSION=2``, #169, the default since #170,
+``baselines_for``) the last four minutes' direction is the touch label of the window that
+just ended (none when it could not be scored: the baseline does not predict, status
+``no_previous``), the random class is drawn in the proportions of the day's touch labels,
+and a fourth baseline calls each symbol and 30-minute slot's most frequent label over the
+training days (the climate, ``climate.py``). Their versions go up from ``v1``; always flat
+keeps its rule and version, with its card of the touch target (#170).
 """
 
 from __future__ import annotations
@@ -170,6 +171,27 @@ class ClassRatioRandom:
         return Forecast.certain(rng.choices(classes, weights)[0])
 
 
+class TouchFlat(AlwaysFlat):
+    """Always flat, as the touch target names it (#170): the same rule, its card of that target."""
+
+    card = Card(
+        scientist=None,
+        character="기준 예측: 늘 보합",
+        logic=(
+            "어느 봉 마감에서나 4분 안에 매수 1호가가 위 목표(봉 마감 중간가 + k틱)에도, 매도 1호가가 아래 "
+            "목표(− k틱)에도 닿지 않는다고 본다. 아무 정보도 쓰지 않는다."
+        ),
+        unique_features=(),
+        training=_NOT_LEARNED,
+        forecasting="보합에 확률 1, 상승과 하락에 0을 준다. 기대수익은 0틱이다.",
+        failure=(
+            "4분 안에 호가가 어느 목표에든 닿을 때마다 틀린다: 변동이 큰 장, 개장 직후, 호가단위에 비해 "
+            "많이 움직이는 종목, 스프레드가 넓은 때. 조용한 종목과 시간대에서는 맞힌 비율이 높아 넘기 어려운 "
+            "기준이 된다."
+        ),
+    )
+
+
 class TouchPersistence:
     """The touch label of the four minutes that just ended continues (#169)."""
 
@@ -265,7 +287,7 @@ class Climate:
 BASELINES: tuple[Baseline, ...] = (AlwaysFlat(), Persistence(), ClassRatioRandom())
 BASELINE_NAMES = frozenset(b.name for b in BASELINES)
 # With the touch target (target version 2, #169).
-TOUCH_BASELINES: tuple[Baseline, ...] = (AlwaysFlat(), TouchPersistence(), TouchRatioRandom(), Climate())
+TOUCH_BASELINES: tuple[Baseline, ...] = (TouchFlat(), TouchPersistence(), TouchRatioRandom(), Climate())
 
 
 def baselines_for(target_version: int) -> tuple[Baseline, ...]:

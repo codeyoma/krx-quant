@@ -53,12 +53,17 @@ def by_algorithm(predictions: list[dict[str, Any]], bar_close: str) -> dict[str,
     return {p["algorithm"]: p for p in predictions if p["bar_close"] == f"2026-10-12T{bar_close}+09:00"}
 
 
-async def test_a_prediction_is_scored_from_the_bar_close_and_from_when_it_was_displayed(
+async def test_a_prediction_is_scored_on_its_bar_closes_touch_label_however_late_it_is_shown(
     tmp_path: Path,
 ) -> None:
+    """Input: the mid-point 81,250 at the 09:31 bar close (k = 2: the upper target 81,450), the
+    bid at 81,400 by the time the predictions are shown, 81,500 from 09:33. Output (#170): every
+    predictor's outcome is the touch label, up (the bid reached 81,450 at 09:33), in
+    ``class_a`` and ``class_b`` too for a screen from before; the mid-points stay as stored,
+    and so do the old bases' classes in the DB (up from the bar close, flat from the display)."""
     events = [
         *steady_book(at("09:29:00"), at("09:31:00"), bid=81_200, ask=81_300),  # mid 81,250
-        book(at("09:31:01"), bid=81_400, ask=81_500),  # 81,450 by the time it is displayed
+        *steady_book(at("09:31:01"), at("09:32:51"), bid=81_400, ask=81_500),  # 81,450 when displayed
         *steady_book(at("09:33:00"), at("09:35:30"), bid=81_500, ask=81_600),  # 81,550 at the target
     ]
 
@@ -68,19 +73,28 @@ async def test_a_prediction_is_scored_from_the_bar_close_and_from_when_it_was_di
 
     async with api(engine) as client:
         body = await get_json(client, f"/v1/symbols/{SYMBOL}/predictions")
-    flat = by_algorithm(body["predictions"], "09:31:00")["baseline-flat"]
+    at_close = by_algorithm(body["predictions"], "09:31:00")
+    flat = at_close["baseline-flat"]
     assert flat["displayed_at"] == "2026-10-12T09:31:02+09:00"
     outcome = flat["outcome"]
     assert (outcome["mid_close"], outcome["mid_display"], outcome["mid_target"]) == (81_250, 81_450, 81_550)
-    # k = 2 ticks of 100 won at 81,250: +300 won is up, +100 won is flat.
     assert outcome["flat_ticks"] == 2
-    assert (outcome["class_a"], outcome["class_b"]) == ("up", "flat")
+    assert (outcome["touch"]["class"], outcome["touch"]["upper_at"]) == ("up", "2026-10-12T09:33:00+09:00")
+    assert (outcome["class_a"], outcome["class_b"]) == ("up", "up")
     assert outcome["unscorable"] is None
     assert outcome["special"] is False
+    assert {p["outcome"]["class_a"] for p in at_close.values() if p["outcome"]} == {"up"}, "every predictor's"
+    with sqlite3.connect(tmp_path / "engine.db") as conn:
+        stored = conn.execute(
+            "SELECT o.class_a, o.class_b FROM outcomes o JOIN predictions p ON p.id = o.prediction_id"
+            " WHERE p.algorithm = 'baseline-flat' AND p.bar_close = '2026-10-12T09:31:00+09:00'"
+        ).fetchone()
+    # +300 won from the bar close is up, +100 won from the display flat: written, unread.
+    assert stored == ("up", "flat")
 
 
-async def test_a_prediction_whose_target_mid_is_missing_is_left_unscorable(tmp_path: Path) -> None:
-    # The book stops after 09:31:00: by 09:35 its last quote is over a minute old.
+async def test_a_prediction_whose_quotes_went_silent_is_left_unscorable(tmp_path: Path) -> None:
+    # The book stops after 09:31:00: its window goes a minute and more without a quote.
     events = steady_book(at("09:29:00"), at("09:31:00"), bid=81_200, ask=81_300)
 
     engine = await run(tmp_path / "engine.db", events, until=at("09:36:00"))
@@ -91,7 +105,7 @@ async def test_a_prediction_whose_target_mid_is_missing_is_left_unscorable(tmp_p
     assert outcome["mid_close"] == 81_250
     assert outcome["mid_target"] is None
     assert (outcome["class_a"], outcome["class_b"]) == (None, None)
-    assert outcome["unscorable"] == "missing mid: target"
+    assert outcome["unscorable"] == "silent quotes"  # the touch label's reason (#170)
 
 
 async def test_without_any_quote_a_prediction_is_still_made_and_left_unscorable(tmp_path: Path) -> None:
@@ -103,7 +117,7 @@ async def test_without_any_quote_a_prediction_is_still_made_and_left_unscorable(
     assert set(predictions) == PREDICTORS
     outcome = predictions["baseline-persist"]["outcome"]
     assert outcome["flat_ticks"] is None
-    assert outcome["unscorable"] == "missing mid: close, display, target"
+    assert outcome["unscorable"] == "missing mid"  # no mid-point at the bar close for the targets
 
 
 def bar_closes(predictions: list[dict[str, Any]]) -> list[str]:
@@ -347,9 +361,11 @@ async def test_a_restarted_engine_scores_what_was_pending(tmp_path: Path) -> Non
     async with api(restarted) as client:
         body = await get_json(client, f"/v1/symbols/{SYMBOL}/predictions?algorithm=baseline-flat")
     outcomes = {p["bar_close"][11:16]: p["outcome"] for p in body["predictions"]}
-    # Predicted before the restart, scored after it at 09:35 and 09:36.
-    assert outcomes["09:31"]["class_a"] == "flat"
-    assert outcomes["09:32"]["class_a"] == "flat"
+    # Predicted before the restart, scored after it at 09:35 and 09:36: their windows were not
+    # followed through, so their touch labels say so.
+    for close in ("09:31", "09:32"):
+        assert outcomes[close]["scored_at"] is not None
+        assert (outcomes[close]["class_a"], outcomes[close]["unscorable"]) == (None, "restarted")
     # 09:33 passed while the engine was down: no prediction for it.
     assert "09:33" not in outcomes
 

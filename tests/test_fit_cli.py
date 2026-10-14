@@ -146,6 +146,7 @@ def test_a_fitted_model_keeps_what_it_trained_on_as_values(env: Path) -> None:
     assert training is not None
     assert (training.first_day, training.last_day, training.samples) == (DAYS[-3], DAYS[-1], fitted.samples)
     assert training.days == {"recorded": 1, "bars": 2}, "by where the days' labels came from (#165)"
+    assert fitted.model.target_version == 2, "on the touch target's labels, the default (#170)"
     assert fitted.model.trained == (
         f"{DAYS[-3]}..{DAYS[-1]}, {training.samples} samples, log loss {training.loss:.4f}"
     )
@@ -165,8 +166,8 @@ def test_a_model_saved_before_its_training_values_loads_without_them(env: Path) 
 
     model = load_models(env / "state", ALGORITHMS)["newton"]
 
-    assert (model.version, model.training) == ("newton-20261008-5e1f0a", None)
-    assert model.as_dict() == {**saved, "training": None}
+    assert (model.version, model.training, model.target_version) == ("newton-20261008-5e1f0a", None, None)
+    assert model.as_dict() == {**saved, "training": None, "target_version": None}
 
 
 def test_fitting_needs_a_known_algorithm_and_backfilled_bars(

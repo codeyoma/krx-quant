@@ -28,6 +28,7 @@ from krx_quant.algorithms.markov import Markov
 from krx_quant.archive import archive
 from krx_quant.backfill import BAR_SCHEMA, MINUTE_BARS_TR
 from krx_quant.cli import main
+from krx_quant.climate import CLIMATE
 from krx_quant.clock import FakeClock
 from krx_quant.engine import Event, PredictionEngine
 from krx_quant.features import Leaders
@@ -160,6 +161,74 @@ def test_the_champion_is_the_model_the_server_runs(store_root: Path, tmp_path: P
     assert report["champion"]["version"] == falls.version
     assert report["challenger"]["loss"] > report["champion"]["loss"]
     assert read(store_root, f"promotions/{NIGHT}.json")["promoted"] == {}, "the live model stays"
+
+
+def live_falls(store_root: Path, target_version: int | None) -> Model:
+    """The days turned (the last three fell) and the server runs a model that expects falls,
+    trained on ``target_version`` (None: saved before it was recorded, the four-minute move)."""
+    for day in DAYS[-VALIDATION_DAYS:]:
+        archive_bars(store_root, day, ticks_per_minute=-1.0)
+    falls = Model(
+        f"learner-20260917-{target_version or 0:06d}",
+        {"up": 0.05, "flat": 0.15, "down": 0.8},
+        target_version=target_version,
+    )
+    (store_root / "models" / "learner").mkdir(parents=True)
+    (store_root / "models" / "learner" / f"{falls.version}.json").write_text(falls.to_json())
+    (store_root / "live.json").write_text(json.dumps({"learner": falls.version}))
+    return falls
+
+
+@pytest.mark.parametrize("champion_target", [None, 1])
+def test_a_champion_of_another_target_is_replaced_whatever_the_scores(
+    store_root: Path, tmp_path: Path, champion_target: int | None
+) -> None:
+    """Input: the server runs a model of the four-minute move (none recorded, or 1) that beats
+    the night's on its validation days; the night trains on the touch target (#170). Output:
+    the night's model is promoted all the same, of the touch target, and the report says why."""
+    falls = live_falls(store_root, champion_target)
+
+    result = night(store_root, tmp_path, [FrequencyAlgorithm("learner", "velocity")], target_version=2)
+
+    report = read(store_root, f"reports/{NIGHT}/learner.json")
+    assert report["champion"]["version"] == falls.version
+    assert report["challenger"]["loss"] > report["champion"]["loss"], "it lost, and still"
+    assert (report["promoted"], report["forced"]) == (True, True)
+    assert report["reason"].endswith(
+        f"; {falls.version} learned target 1, the night target 2: promoted without comparing"
+    )
+    promoted = result.promoted["learner"]
+    assert read(store_root, f"models/learner/{promoted}.json")["target_version"] == 2
+    assert "learner 승격(정답 바뀜, 성적 비교 없이)" in result.summary()
+
+
+def test_a_champion_of_the_same_target_is_still_compared(store_root: Path, tmp_path: Path) -> None:
+    """Input: the same, but the server's model learned the touch target too. Output: it stays."""
+    live_falls(store_root, 2)
+
+    night(store_root, tmp_path, [FrequencyAlgorithm("learner", "velocity")], target_version=2)
+
+    report = read(store_root, f"reports/{NIGHT}/learner.json")
+    assert (report["promoted"], report["forced"]) == (False, False)
+    promoted = read(store_root, f"promotions/{NIGHT}.json")["promoted"]
+    assert list(promoted) == [CLIMATE], "the live model stays (the climate table is always new)"
+
+
+def test_after_the_target_changes_the_defaults_give_way_too(store_root: Path, tmp_path: Path) -> None:
+    """Input: no model on the server (its defaults: trained on nothing) and a model that learned
+    the wrong way round, which loses to them. Output: on the touch target it is promoted, so
+    the algorithm runs a model of the target from the morning (its probation counts from
+    then, #170); on the four-minute move it is not, as before."""
+    backwards = FrequencyAlgorithm("backwards", "volatility", inverted=True)
+
+    old = night(store_root, tmp_path / "old", [backwards])
+    assert old.promoted == {}
+    (store_root / f"promotions/{NIGHT}.json").unlink()
+    new = night(store_root, tmp_path / "new", [backwards], target_version=2)
+
+    report = read(store_root, f"reports/{NIGHT}/backwards.json")
+    assert report["champion"]["version"] == "backwards-default"
+    assert report["forced"] is True and list(new.promoted) == ["backwards", CLIMATE]
 
 
 def outcomes(tmp_path: Path, day: date) -> list[Direction]:
@@ -374,7 +443,9 @@ def test_the_train_command_trains_every_registered_algorithm_from_the_store(
     assert main(["train"]) == 0, capsys.readouterr().err
 
     promotions = read(store_root, f"promotions/{NIGHT}.json")
-    assert [r["algorithm"] for r in promotions["reports"]] == [a.name for a in ALGORITHMS]
+    # On the touch target, the default (#170): the climate baseline's table last.
+    assert [r["algorithm"] for r in promotions["reports"]] == [a.name for a in ALGORITHMS] + [CLIMATE]
+    assert {r["target_version"] for r in promotions["reports"]} == {2}
     assert {r["commit"] for r in promotions["reports"]} == {"0123abc"}, "the deploy's, as the engine's (#85)"
     assert f"{NIGHT} 밤 학습" in capsys.readouterr().out
 

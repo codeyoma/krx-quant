@@ -20,17 +20,17 @@ It passes when all of these hold:
 - **budget**: no prediction over the time budget (``timed_out``);
 - **correlation**: its p_up − p_down moves with no other algorithm's above the clone
   threshold (0.9), on the bar closes both predicted;
-- **stats**: the leaderboard's statistics of the replay (basis B, special predictions left
-  out) have at least ``min_sample`` scored predictions and pairs with each baseline, and
-  its weakest lift over the baselines is above 0.
+- **stats**: the leaderboard's statistics of the replay (the touch label, special
+  predictions left out) have at least ``min_sample`` scored predictions and pairs with each
+  baseline, and its weakest lift over the baselines is above 0.
 
 The report is saved to ``state/prevalidations/<name>.json``, passed or not, with a digest
 of the algorithm's code; the engine reads it at each bar close.
 
-With the touch target (``KRX_TARGET_VERSION=2``, #169) the candidate trains on its labels,
-the replay forecasts it (the touch target's baselines, the climate table refitted before
-each day on the days before it, as the candidate is), and the stats are scored on the
-touch label instead of basis B.
+With the touch target (``KRX_TARGET_VERSION=2``, the default since #170) the candidate
+trains on its labels and the replay forecasts it (the touch target's baselines, the climate
+table refitted before each day on the days before it, as the candidate is). The stats are
+scored on the touch label either way (#170; before, basis B).
 """
 
 from __future__ import annotations
@@ -51,11 +51,11 @@ from krx_quant.climate import CLIMATE_DAYS, fit_climate
 from krx_quant.config import Settings
 from krx_quant.features import Leaders
 from krx_quant.feeds.base import KST
-from krx_quant.lifecycle import BASIS, CLONE_CORRELATION, correlations, most_correlated
+from krx_quant.lifecycle import CLONE_CORRELATION, correlations, most_correlated
 from krx_quant.market_calendar import MarketCalendar, calendar_store
 from krx_quant.predictions import PredictionStore
 from krx_quant.replay import recorded_events, replay_recorded, sqlite_files
-from krx_quant.stats import TOUCH_BASIS, Entry, enough, entry_json, leaderboard, scored_by_algorithm, split
+from krx_quant.stats import Entry, enough, entry_json, leaderboard, scored_by_algorithm, split
 from krx_quant.training import TrainingDay, finished_days, is_recorded, training_day
 
 log = logging.getLogger(__name__)
@@ -242,16 +242,13 @@ def _judge(
 ) -> Prevalidation:
     """The candidate's report, from what the replay stored in ``db``."""
     name = candidate.name
-    # The touch target's label and baselines with it (#169), else basis B's.
-    basis = TOUCH_BASIS if settings.target_version >= 2 else BASIS
+    # Scored on the touch label (#170), against the target's baselines (#169).
     names = {b.name for b in baselines_for(settings.target_version)}
     store = PredictionStore(db)
     try:
         statuses = store.status_counts(name)
         skipped = store.count_runs("cpu_budget", datetime.combine(replayed[0], time(), KST), name)
-        algos, baselines = split(
-            scored_by_algorithm(store.scored_predictions(replayed, None, False), basis), names
-        )
+        algos, baselines = split(scored_by_algorithm(store.scored_predictions(replayed, None, False)), names)
         measured = correlations(name, others, store.scored_predictions(replayed, None, True))
     finally:
         store.close()

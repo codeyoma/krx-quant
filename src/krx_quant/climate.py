@@ -29,6 +29,7 @@ from krx_quant.algorithms.contract import Model, Sample, model_path
 from krx_quant.consensus import slot
 from krx_quant.feeds.base import KST
 from krx_quant.pricing import Direction
+from krx_quant.touch import TARGET_VERSION
 
 log = logging.getLogger(__name__)
 
@@ -67,6 +68,7 @@ def fit_climate(samples: Sequence[Sample]) -> Model:
         params=params,
         trained=f"{first}..{last}, {len(labelled)} samples, {share:.1%} on each slot's most frequent",
         trained_until=last,
+        target_version=TARGET_VERSION,  # the touch target's labels, always (#170)
     )
 
 

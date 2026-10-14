@@ -94,10 +94,12 @@ def server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """A server's data and state directories, as the diagnose command reads them."""
     data, state = tmp_path / "data", tmp_path / "state"
     store = PredictionStore(state / DB_NAME)
-    # 2026-10-08: one prediction, displayed 10 s after its bar close, scored A up, B up.
+    # 2026-10-08: one prediction, displayed 10 s after its bar close, its four minutes over
+    # (bases A and B up), but its bar close has no touch label: not scored (#170).
     scored(store, predicted(store, at("09:01:00", EARLIER), 10.0), UP, UP)
-    # 2026-10-12: four displayed 0.5, 1, 2 and 4 s late; three scored (B differs once,
-    # one special), one still pending; and a prediction that timed out.
+    # 2026-10-12: four displayed 0.5, 1, 2 and 4 s late; three scored on their touch labels
+    # below (one special; the old bases, unread, differ once), one still pending; and a
+    # prediction that timed out.
     scored(store, predicted(store, at("09:01:00"), 0.5), UP, UP)
     scored(store, predicted(store, at("09:02:00"), 1.0), UP, FLAT)
     scored(store, predicted(store, at("09:03:00"), 2.0, special=True), DOWN, DOWN)
@@ -190,12 +192,10 @@ def test_the_measurements_are_reported_as_worked_out_by_hand(
     out = capsys.readouterr().out
     # Quantiles are the lower of the two values around q·(n − 1).
     assert "진단 2026-10-08 – 2026-10-12 (2거래일)" in out
-    # Delays 0.5, 1, 2, 4, 10 s; four scored on both bases, B differs from A once.
-    assert (
-        "  newton: 예측 5, 지연 p50 2.00 · p90 4.00 · p99 4.00 · 최대 10.00"
-        " · 채점 4, A≠B 25.0% (둘 다 채점 4)" in out
-    )
-    assert "  채점 4, 특수 상황 1 (25.0%)" in out
+    # Delays 0.5, 1, 2, 4, 10 s; three scored on their touch labels (#170: no A and B).
+    assert "  newton: 예측 5, 지연 p50 2.00 · p90 4.00 · p99 4.00 · 최대 10.00 · 채점 3\n" in out
+    assert "A≠B" not in out
+    assert "  채점 3, 특수 상황 1 (33.3%)" in out
     assert "  상태: ok 5, timed_out 1" in out
     # 09:01: 2 ticks (the 09:00:50 book); 09:02: 1 tick; 09:03 on: the book is over a minute old.
     assert "  005930: 봉 마감 2, p50 1 · p90 1 · p99 1 · 최대 2" in out
@@ -227,10 +227,7 @@ def test_days_narrows_the_range_to_the_latest_trading_days(
 
     out = capsys.readouterr().out
     assert "진단 2026-10-12 – 2026-10-12 (1거래일)" in out
-    assert (
-        "  newton: 예측 4, 지연 p50 1.00 · p90 2.00 · p99 2.00 · 최대 4.00 · 채점 3, A≠B 33.3% (둘 다 채점 3)"
-        in out
-    )
+    assert "  newton: 예측 4, 지연 p50 1.00 · p90 2.00 · p99 2.00 · 최대 4.00 · 채점 3\n" in out
     assert "  채점 3, 특수 상황 1 (33.3%)" in out
     assert "  상태: ok 4, timed_out 1" in out
     assert "  일부 빠짐: 없음" in out

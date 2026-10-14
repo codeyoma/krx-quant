@@ -121,7 +121,7 @@ def _replay(day: date, db: Path | None) -> int:
     for line in replayed.set_aside:
         print(line, file=sys.stderr)
     summary = replayed.summary
-    print(f"replayed {day} into {replayed.db} (counts on basis A)")
+    print(f"replayed {day} into {replayed.db} (counts on the touch label)")
     for s in summary:
         print(
             f"{s.algorithm}: {s.predictions} predictions, {s.skipped} skipped, {s.scored} scored,"

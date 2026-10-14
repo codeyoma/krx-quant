@@ -22,6 +22,7 @@ from krx_quant.consensus import Timing
 from krx_quant.lifecycle import Status
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.pricing import Direction
+from krx_quant.touch import TARGET_VERSION
 from tests.algorithm_doubles import FixedAlgorithm
 from tests.api_schema import check
 from tests.replay_events import DAY, SYMBOL, api, at, get_json, run
@@ -67,6 +68,7 @@ def put_statuses(db: Path, statuses: dict[str, Status]) -> None:
     with stored(db) as store:
         for name, status in statuses.items():
             store.add_status(name, morning(weekdays_before(DAY, 30)[0]), None, status, "set by the test")
+        store.mark_target(TARGET_VERSION, morning(weekdays_before(DAY, 30)[0]))  # already on it (#170)
 
 
 async def at_close(engine: Any, close: str) -> dict[str, dict[str, Any]]:
@@ -353,20 +355,34 @@ async def test_the_final_consensus_does_not_wait_for_algorithms_outside_it(tmp_p
     assert order.index("consensus-final") < order.index("late")  # stored while late still worked
 
 
-async def test_the_weights_are_fitted_on_what_happened_from_the_bar_close(tmp_path: Path) -> None:
-    # On basis B each member is scored from its own display; the pool needs one outcome per
-    # bar close, so the fit takes basis A's. Here B saw only flats (displays after the
-    # moves): fitted on B, the always-flat beta would win; on A, alpha is the right one.
+async def test_the_weights_are_fitted_only_on_models_of_the_touch_target(tmp_path: Path) -> None:
+    """Input: 25 days, the touch label at every bar close (one per bar close, every member's).
+    On the first 20 the members' models of the old target (the four-minute move) called the
+    moves, alpha's the wrong way, beta's the right way; on the last 5 their models of the
+    touch target did, alpha's right, beta's flat. Output (#170): the old models' predictions
+    are left out, so alpha is the better member over both spans and gains weight; counted,
+    beta would have won the 20-day span and both stayed equal."""
     db = tmp_path / "engine.db"
     put_statuses(db, {"alpha": Status.ACTIVE, "beta": Status.ACTIVE})
     flat = [Direction.FLAT] * len(RIGHT)
-    put_days(db, weekdays_before(DAY, 25), {"alpha": RIGHT, "beta": flat}, on_display=Direction.FLAT)
+    days = weekdays_before(DAY, 25)
+    put_days(db, days[:20], {"alpha": WRONG, "beta": RIGHT}, model="old", target_version=1)
+    put_days(db, days[20:], {"alpha": RIGHT, "beta": flat})
 
     engine = await run(db, [], until=at("15:45:00"), algorithms=[ALPHA, BETA])
 
     async with api(engine) as client:
         weights = (await get_json(client, "/v1/consensus"))["weights"][SYMBOL]["09:00"]
     assert weights["alpha"] > 0.5 > weights["beta"]
+
+    counted = tmp_path / "counted.db"  # the same, the old model counted as the touch target's
+    put_statuses(counted, {"alpha": Status.ACTIVE, "beta": Status.ACTIVE})
+    put_days(counted, days[:20], {"alpha": WRONG, "beta": RIGHT}, model="old")
+    put_days(counted, days[20:], {"alpha": RIGHT, "beta": flat})
+    engine = await run(counted, [], until=at("15:45:00"), algorithms=[ALPHA, BETA])
+    async with api(engine) as client:
+        weights = (await get_json(client, "/v1/consensus"))["weights"][SYMBOL]["09:00"]
+    assert weights == pytest.approx({"alpha": 0.5, "beta": 0.5})
 
 
 async def test_a_member_the_fit_did_not_know_gets_an_equal_share(tmp_path: Path) -> None:

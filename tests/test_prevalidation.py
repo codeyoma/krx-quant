@@ -129,7 +129,14 @@ async def test_an_algorithm_that_beats_the_baselines_on_its_own_features_passes(
     }
     assert saved["timed_out"] == 0
     assert saved["stats"]["n"] > 200 and saved["stats"]["lift"]["low"] > 0
-    assert set(saved["stats"]["lift"]["vs"]) == {"baseline-flat", "baseline-persist", "baseline-random"}
+    # The touch target's four baselines, the default (#170).
+    assert set(saved["stats"]["lift"]["vs"]) == {
+        "baseline-flat",
+        "baseline-persist",
+        "baseline-random",
+        "baseline-climate",
+    }
+    assert saved["target_version"] == 2
     assert set(saved["correlations"]) <= {"alpha"}, "alpha never changes its mind: nothing to correlate"
 
 
@@ -226,7 +233,7 @@ async def listed(engine: PredictionEngine) -> dict[str, str]:
 async def test_a_new_algorithm_waits_for_its_prevalidation_then_starts_on_probation(tmp_path: Path) -> None:
     s = settings(tmp_path)
     registry: list[Algorithm] = [ALPHA, Contrarian("contrarian")]
-    gate = admits(s.state_dir)
+    gate = admits(s.state_dir, s.target_version)  # the engine's target, the touch target (#170)
     live_day = date(2026, 9, 28)  # the Monday after the ten days
     events = swings(live_day, end="10:00:00")
     morning = [e for e in events if e[1]["received_at"] < at("09:20:00", live_day)]

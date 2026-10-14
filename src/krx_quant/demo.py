@@ -3,7 +3,8 @@
 ``krx-quant demo-engine`` is for building screens (the Fincept screen, #20) without the
 server or KIS. It replays the same made-up events every time: three symbols wandering
 from 09:00 to 10:30 on 2026-10-12, KOSPI and KOSPI200 futures ticks, and a VI on one
-symbol. Every registered algorithm is set active, so the consensus has members, the
+symbol, forecast and scored on the touch target as the server's default (#170: its four
+baselines). Every registered algorithm is set active, so the consensus has members, the
 last night's training shows as applied (each algorithm with a made-up validation), the
 morning's macro read decided risk_off, Newton has a model installed and rolled back, and
 the KIS status is made up (one feed in a gap).
@@ -68,6 +69,7 @@ from krx_quant.recorder import ParquetRecorder
 from krx_quant.regime import RegimeRules
 from krx_quant.replay import replay, replay_into
 from krx_quant.swap import NightStatus, reports_by_algorithm
+from krx_quant.touch import TARGET_VERSION
 
 DEMO_DAY = date(2026, 10, 12)
 DEMO_SYMBOLS = ("005930", "000660", "009150")
@@ -256,8 +258,10 @@ async def demo_app(db: Path, pace: float | None = None) -> web.Application:
         leftover.unlink(missing_ok=True)
     start = _at(time(0))
     store = PredictionStore(db)
+    first = datetime.combine(PAST_DAYS[0], time(), KST)
     for a in ALGORITHMS:  # active from the first day, so the consensus has members
-        store.add_status(a.name, datetime.combine(PAST_DAYS[0], time(), KST), None, Status.ACTIVE, "demo")
+        store.add_status(a.name, first, None, Status.ACTIVE, "demo")
+    store.mark_target(TARGET_VERSION, first)  # already on the touch target: no restart (#170)
     store.close()
     data_dir = db.with_name(f"{db.stem}-data")
     write_demo_macro(data_dir)  # first: Markov reads the morning's regime
@@ -276,6 +280,7 @@ async def demo_app(db: Path, pace: float | None = None) -> web.Application:
             fee_rate=_FEE,
             start=datetime.combine(day, _PAST_FROM, KST) - timedelta(minutes=1),
             until=datetime.combine(day, time(15, 30), KST),
+            target_version=TARGET_VERSION,
         )  # no macro read those mornings: no regime
         engine.store.close()
     events = demo_events()
@@ -288,6 +293,7 @@ async def demo_app(db: Path, pace: float | None = None) -> web.Application:
         start=start,
         until=_at(_END if pace is None else _PACED_FROM),
         regimes=partial(day_regime, data_dir),
+        target_version=TARGET_VERSION,  # the touch target, as the server's default (#170)
     )
     night = Night(date(2026, 10, 9), "2026-10-09T21:31:40+09:00", {}, demo_reports())
     engine.training = NightStatus(night, True, "applied").as_dict()

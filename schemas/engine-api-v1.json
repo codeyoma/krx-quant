@@ -242,16 +242,25 @@
         "mid_display": {"$ref": "#/$defs/price"},
         "mid_target": {"$ref": "#/$defs/price"},
         "flat_ticks": {"type": ["integer", "null"], "minimum": 1},
-        "class_a": {"$ref": "#/$defs/class"},
-        "class_b": {"$ref": "#/$defs/class"},
+        "class_a": {
+          "description": "For one release (#170): the bar close's touch label, as touch.class (no longer basis A's class, which stays in the DB).",
+          "$ref": "#/$defs/class"
+        },
+        "class_b": {
+          "description": "For one release (#170): the touch label too, as class_a.",
+          "$ref": "#/$defs/class"
+        },
         "special": {"type": "boolean"},
-        "unscorable": {"type": ["string", "null"]},
+        "unscorable": {
+          "description": "Why the touch label is missing (#170): touch.unscorable, or 'no touch label' where the bar close has none; null when it is there.",
+          "type": ["string", "null"]
+        },
         "scored_at": {"$ref": "#/$defs/time"},
         "touch": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/touch"}]}
       }
     },
     "touch": {
-      "description": "A bar close's touch label (#160, #167): recorded beside the outcome, not yet scored on.",
+      "description": "A bar close's touch label (#160, #167): what the outcome is scored on (#170).",
       "type": "object",
       "required": [
         "target_version", "class", "unscorable", "anchor", "tick", "k", "upper", "lower",
@@ -422,14 +431,19 @@
         "training_days": {"type": "integer", "minimum": 1},
         "model": {
           "type": "object",
-          "required": ["version", "params", "trained", "trained_until", "training"],
+          "required": ["version", "params", "trained", "trained_until", "training", "target_version"],
           "additionalProperties": false,
           "properties": {
             "version": {"type": "string"},
             "params": {"type": "object", "additionalProperties": {"type": "number"}},
             "trained": {"type": ["string", "null"]},
             "trained_until": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/day"}]},
-            "training": {"$ref": "#/$defs/model_training"}
+            "training": {"$ref": "#/$defs/model_training"},
+            "target_version": {
+              "description": "The target its labels were of (#170): 2 the touch target, 1 the four-minute move. null for the defaults and for a model saved before it was recorded (the four-minute move's). Only models of 2 count toward the statuses and the consensus weights.",
+              "type": ["integer", "null"],
+              "minimum": 1
+            }
           }
         },
         "status": {"$ref": "#/$defs/standing"},
@@ -532,7 +546,10 @@
           "properties": {
             "status": {"enum": ["probation", "bench"]},
             "began": {"$ref": "#/$defs/day"},
-            "counted_from": {"$ref": "#/$defs/day"},
+            "counted_from": {
+              "description": "The first day counted; on probation, the first day it predicted with a model trained on the touch target (#170). null while it waits for one: nothing is counted yet.",
+              "oneOf": [{"type": "null"}, {"$ref": "#/$defs/day"}]
+            },
             "days": {"type": "integer", "minimum": 0, "description": "trading days counted through the latest review"},
             "review_days": {"type": "array", "items": {"type": "integer", "minimum": 1}},
             "next_review": {"type": ["integer", "null"], "minimum": 1, "description": "the next review day, as the day counted; null past the last"},
@@ -796,12 +813,15 @@
     "query": {
       "description": "The query a leaderboard or stats answer was computed for, open so they can add to it.",
       "type": "object",
-      "required": ["symbol", "period", "days", "basis", "special", "min_sample"],
+      "required": ["symbol", "period", "days", "special", "min_sample"],
       "properties": {
         "symbol": {"type": "string"},
         "period": {"enum": ["today", "5d", "20d"]},
         "days": {"type": "array", "items": {"$ref": "#/$defs/day"}},
-        "basis": {"enum": ["a", "b"]},
+        "basis": {
+          "description": "Gone with #170 (every prediction is scored on its touch label): for one release the basis a screen from before sent, echoed back as sent; absent when none was sent.",
+          "enum": ["a", "b"]
+        },
         "special": {"enum": ["exclude", "include"]},
         "min_sample": {"type": "integer", "minimum": 1}
       }

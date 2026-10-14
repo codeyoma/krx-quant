@@ -32,7 +32,7 @@ import numpy as np
 from krx_quant.algorithms.contract import Model, NothingToLearn, Sample
 from krx_quant.algorithms.forecasts import CLASSES, LOSS_FLOOR, UNKNOWN, class_moves, lowest_log_loss, param
 from krx_quant.baselines import Forecast
-from krx_quant.cards import Card, Meaning, class_move_meanings, learned
+from krx_quant.cards import TOUCH_LABEL, Card, Meaning, class_move_meanings, learned
 from krx_quant.features import ARRIVAL_FEATURES, EXCITATION_FEATURES, SIDES, FeatureVector
 from krx_quant.pricing import Direction
 from krx_quant.reference import BAR
@@ -123,8 +123,8 @@ class Poisson:
         forecasting=(
             "봉 마감의 흥분 4개로 다음 4분의 매수·매도 도착 기댓값(기준 강도 + Σ 흥분 계수 × 흥분)을 내고, "
             "쏠림 = (매수 − 매도) ÷ (매수 + 매도)를 순서형 로지스틱으로 세 확률로 바꾼다: P(상승) = σ(k × "
-            "쏠림 − c), P(하락) = σ(−k × 쏠림 − c), 나머지가 보합. 기울기 k와 문턱 c는 정답(4분 뒤 중간가 "
-            "변화의 클래스)에 대한 로그손실로 고른다. 기대수익은 학습에서 클래스별 평균 4분 변화를 세 확률로 "
+            "쏠림 − c), P(하락) = σ(−k × 쏠림 − c), 나머지가 보합. 기울기 k와 문턱 c는 "
+            f"{TOUCH_LABEL}에 대한 로그손실로 고른다. 기대수익은 학습에서 클래스별 평균 4분 변화를 세 확률로 "
             "가중한 값이다. 그날 방향이 있는 체결을 받기 전(흥분을 모름)에는 세 확률을 1/3씩 둔다."
         ),
         failure=(

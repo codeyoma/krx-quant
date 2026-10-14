@@ -1,15 +1,19 @@
 """Stats Engine: how good the predictions were, with luck accounted for.
 
-Each scored prediction is judged on one basis (A: from the bar close, B: from when it
-was displayed). Its predicted class is the most likely one; a tie goes to flat, then up.
+Each scored prediction is judged on its bar close's touch label (#160, #170; ``touch.py``):
+up when the best bid reached the bar close's mid-point plus k ticks within the four
+minutes, else down when the best ask reached it minus k ticks, else flat. Every predictor
+of a bar close shares it, however late it was displayed. Its predicted class is the most
+likely one; a tie goes to flat, then up.
 
 - **accuracy**: the predicted class happened (3 classes);
 - **precision**: of the up and down calls, the share that happened; **coverage**: the
   share of predictions that called a direction;
 - **Brier score**: the squared distance between the probabilities and what happened,
   summed over the three classes (0 is perfect, 2 is sure and wrong);
-- **profit**: each up or down call traded in its direction from the start mid-point to
-  the target, in ticks, less the round-trip cost (sell tax and both commissions);
+- **profit** (the touch P&L, research only): each up or down call traded by the label's
+  own rule (``touch_profit``), in ticks, less the round-trip cost (sell tax and both
+  commissions);
 - **calibration**: every class probability binned by tenths, against how often that
   class happened; pooled over the three classes, and each class on its own (pooled, a
   forecast of 1/3 each when only rises happen looks perfect; on its own, up does not);
@@ -30,16 +34,17 @@ days). The statuses (``lifecycle.py``) are decided by these; the paired ones onl
 
 from __future__ import annotations
 
+import json
 import math
 from collections.abc import Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import date, datetime
 from functools import cache
 from statistics import NormalDist
-from typing import Any
+from typing import Any, TypeVar
 
 from krx_quant.feeds.base import kst_day
-from krx_quant.pricing import SELL_TAX, Direction, most_likely, tick_size
+from krx_quant.pricing import SELL_TAX, Direction, most_likely
 
 _Z = NormalDist().inv_cdf(0.975)
 FDR = 0.05  # the false discovery rate a significant lift is held to
@@ -51,8 +56,45 @@ DEFAULT_MIN_SAMPLE = 200
 
 
 @dataclass(frozen=True)
+class Prices:
+    """What the touch P&L of a bar close reads from its touch path (#170, ``touch.touch_path``):
+    the targets and whether each was reached, the best quotes at the bar close and at the end
+    of its four minutes, the tick and the reference price (the mid-point the targets are set
+    from) the cost is taken at."""
+
+    reference: float
+    tick: float
+    upper: float
+    lower: float
+    upper_reached: bool
+    lower_reached: bool
+    bid_start: float | None
+    ask_start: float | None
+    bid_end: float | None
+    ask_end: float | None
+
+    @classmethod
+    def of(cls, path: Mapping[str, Any]) -> Prices | None:
+        """The prices of a stored touch path; None without its targets."""
+        if None in (path.get("anchor"), path.get("tick"), path.get("upper"), path.get("lower")):
+            return None
+        return cls(
+            reference=path["anchor"],
+            tick=path["tick"],
+            upper=path["upper"],
+            lower=path["lower"],
+            upper_reached=path.get("upper_at") is not None,
+            lower_reached=path.get("lower_at") is not None,
+            bid_start=path.get("bid_start"),
+            ask_start=path.get("ask_start"),
+            bid_end=path.get("bid_end"),
+            ask_end=path.get("ask_end"),
+        )
+
+
+@dataclass(frozen=True)
 class Scored:
-    """One scored prediction, on one basis."""
+    """One scored prediction, on its bar close's touch label."""
 
     algorithm: str
     model_version: str
@@ -62,8 +104,7 @@ class Scored:
     p_flat: float
     p_down: float
     outcome: Direction
-    start_mid: float  # the bar close's (A) or the display's (B)
-    target_mid: float
+    prices: Prices | None = None  # its bar close's touch path, for the touch P&L
 
     @property
     def predicted(self) -> Direction:
@@ -122,24 +163,22 @@ class Lift:
     p: float | None  # one-sided: the chance of a lift this large with none really
 
 
-# The touch label (#160) as the basis: pre-validation with the touch target (#169).
-TOUCH_BASIS = "touch"
+Row = TypeVar("Row", bound=Mapping[str, Any])  # a stored prediction, as the store reads it
 
 
-def scored_by_algorithm(rows: Sequence[Mapping[str, Any]], basis: str) -> dict[str, list[Scored]]:
-    """Each algorithm's stored predictions (``PredictionStore.scored_predictions``) scored
-    on ``basis`` (``a`` or ``b``; or ``TOUCH_BASIS``, the bar close's touch label, its
-    mid-points basis A's); those its basis could not score are left out.
+def scored_by_algorithm(rows: Sequence[Mapping[str, Any]]) -> dict[str, list[Scored]]:
+    """Each algorithm's stored predictions (``PredictionStore.scored_predictions``) scored on
+    their bar close's touch label (#170), with its path's prices; those without a label are
+    left out.
     """
     out: dict[str, list[Scored]] = {}
+    prices: dict[str, Prices | None] = {}  # by stored path: every predictor of a bar close shares it
     for r in rows:
-        if basis == TOUCH_BASIS:
-            outcome, start = r.get("touch_class"), r["mid_close"]
-        else:
-            outcome = r["class_a"] if basis == "a" else r["class_b"]
-            start = r["mid_close"] if basis == "a" else r["mid_display"]
-        if outcome is None or start is None or r["mid_target"] is None:
+        outcome, path = r.get("touch_class"), r.get("touch_path")
+        if outcome is None:
             continue
+        if path is not None and path not in prices:
+            prices[path] = Prices.of(json.loads(path))
         out.setdefault(r["algorithm"], []).append(
             Scored(
                 algorithm=r["algorithm"],
@@ -150,11 +189,19 @@ def scored_by_algorithm(rows: Sequence[Mapping[str, Any]], basis: str) -> dict[s
                 p_flat=r["p_flat"],
                 p_down=r["p_down"],
                 outcome=Direction(outcome),
-                start_mid=start,
-                target_mid=r["mid_target"],
+                prices=None if path is None else prices[path],
             )
         )
     return out
+
+
+def on_target(rows: Sequence[Row], baselines: Collection[str], target_version: int) -> list[Row]:
+    """The stored predictions the statuses and the consensus weights go by (#170): the
+    baselines', and the others' made by a model trained on ``target_version`` (the touch
+    target they are scored on: ``model_target``, from ``model_targets``). An algorithm's
+    predictions from before its first such model (the old target's, its defaults') are left
+    out."""
+    return [r for r in rows if r["algorithm"] in baselines or r.get("model_target") == target_version]
 
 
 def split(
@@ -195,7 +242,7 @@ def _standard_error(values: Sequence[float], mean: float) -> float:
 
 def summarize(records: Sequence[Scored], fee_rate: float) -> Summary:
     directional = [r for r in records if r.predicted is not Direction.FLAT]
-    trades = [_profit(r, fee_rate) for r in directional]
+    trades = [p for r in directional if (p := touch_profit(r.predicted, r.prices, fee_rate)) is not None]
     return Summary(
         n=len(records),
         accuracy=wilson(sum(r.correct for r in records), len(records)),
@@ -212,11 +259,29 @@ def _brier(r: Scored) -> float:
     return sum((r.probability(d) - (d is r.outcome)) ** 2 for d in Direction)
 
 
-def _profit(r: Scored, fee_rate: float) -> float:
-    tick = tick_size(r.start_mid)
-    move = (r.target_mid - r.start_mid) / tick
-    cost = r.start_mid * (SELL_TAX + 2 * fee_rate) / tick
-    return (move if r.predicted is Direction.UP else -move) - cost
+def touch_profit(predicted: Direction, prices: Prices | None, fee_rate: float) -> float | None:
+    """The touch P&L of a call (#170, research only), in ticks, by the touch label's own rule:
+
+    - up: bought at the bar close's best ask; sold at the upper target if the best bid
+      reached it within the four minutes, else at the last best bid before they ended;
+    - down (an inverse product assumed): sold at the bar close's best bid; bought back at
+      the lower target if the best ask reached it, else at the last best ask;
+    - flat: no trade (None), as a call without the quotes it needs.
+
+    Less the round-trip cost, the sell tax and both commissions on the reference price, in
+    ticks. Every share fills at the best quote: queues, sizes and delays are left out."""
+    if prices is None or predicted is Direction.FLAT:
+        return None
+    if predicted is Direction.UP:
+        bought = prices.ask_start
+        sold = prices.upper if prices.upper_reached else prices.bid_end
+    else:
+        sold = prices.bid_start
+        bought = prices.lower if prices.lower_reached else prices.ask_end
+    if bought is None or sold is None:
+        return None
+    cost = prices.reference * (SELL_TAX + 2 * fee_rate)
+    return (sold - bought - cost) / prices.tick
 
 
 def _calibration(records: Sequence[Scored], classes: Sequence[Direction]) -> list[CalibrationBin]:

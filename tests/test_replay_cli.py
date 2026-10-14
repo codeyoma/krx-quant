@@ -67,7 +67,8 @@ def test_a_recorded_day_replays_like_the_same_events_given_by_hand(
     assert main(["replay", DAY.isoformat()]) == 0
 
     db = tmp_path / "state" / f"replay-{DAY}.sqlite3"
-    asyncio.run(run(tmp_path / "by-hand.db", events, until=END_OF_DAY))
+    # The server's target, the touch target by default (#170).
+    asyncio.run(run(tmp_path / "by-hand.db", events, until=END_OF_DAY, target_version=2))
     assert stored(db) == stored(tmp_path / "by-hand.db")
     out = capsys.readouterr().out
     assert f"replayed {DAY} into {db}" in out
@@ -156,7 +157,8 @@ def replays_like_by_hand(
     assert len(list(recorded_events(data, DAY, ["005930"]))) == (recorded or len(events))
     assert main(["replay", DAY.isoformat()]) == 0
 
-    asyncio.run(run(tmp_path / "by-hand.db", events, until=END_OF_DAY))
+    # The server's target, the touch target by default (#170).
+    asyncio.run(run(tmp_path / "by-hand.db", events, until=END_OF_DAY, target_version=2))
     assert stored(tmp_path / "state" / f"replay-{DAY}.sqlite3") == stored(tmp_path / "by-hand.db")
 
 

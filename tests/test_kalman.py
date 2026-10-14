@@ -27,6 +27,7 @@ from krx_quant.feeds import BOOK, KST
 from krx_quant.lifecycle import Status
 from krx_quant.predictions import PredictionStore
 from krx_quant.pricing import Direction
+from krx_quant.touch import TARGET_VERSION
 from krx_quant.training import recorded_samples
 from tests.algorithm_doubles import FixedAlgorithm
 from tests.api_schema import check
@@ -175,6 +176,7 @@ async def test_without_the_book_at_a_bar_close_kalman_declines_and_is_left_out(t
     db = tmp_path / "engine.db"
     store = PredictionStore(db)
     store.add_status("kalman", at("08:00:00"), None, Status.ACTIVE, "by hand")
+    store.mark_target(TARGET_VERSION, at("08:00:00"))  # active on the touch target already (#170)
     store.close()
     events = [e for e in a_book_morning() if not at("09:06:00") <= e[1]["received_at"] < at("09:07:30")]
 

@@ -68,8 +68,8 @@ async def replay(
 
     The clock starts at ``start`` (default: midnight of ``until``'s day). Each bar close and
     scoring runs ``display_delay`` after its time, as a busy engine would: what it predicts
-    from stays what was received by the bar close, but it is displayed (and scored on
-    basis B) later. The clock stands still while algorithms work; their time budgets
+    from stays what was received by the bar close, but it is displayed later (its basis B
+    outcome, still written, moves with it). The clock stands still while algorithms work; their time budgets
     count real time. The engine is returned with its clock at ``until``. It forecasts
     ``target_version``'s target, with the climate baseline's table ``climate`` (#169).
     """

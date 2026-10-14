@@ -24,10 +24,11 @@ the quote stayed there and the size then, the highest bid and lowest ask, the be
 t and at the end, and the trades' high and low. Other widths can be scored from it later
 without reading the window again.
 
-This step only records it: the reviews, the consensus and the chart's ✓/✗ still score on
-the four-minute mid-point move (#167). Training learns it with ``KRX_TARGET_VERSION=2``
-(#169): a recorded day labelled by these windows, replaying its quotes, as the engine
-labels it; a day with one-minute bars only by the bar rule (``bar_touch``).
+Every prediction is scored on it (#170): the statistics, the statuses, the consensus weights
+and the screen's ✓/✗, through the Engine API. Training learns it with
+``KRX_TARGET_VERSION=2``, the default (#169, #170): a recorded day labelled by these
+windows, replaying its quotes, as the engine labels it; a day with one-minute bars only by
+the bar rule (``bar_touch``).
 """
 
 from __future__ import annotations

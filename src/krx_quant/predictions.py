@@ -1,9 +1,14 @@
 """Prediction store: predictions and their outcomes in SQLite.
 
 ``predictions`` holds what each algorithm said at each bar close; ``outcomes`` holds the
-mid-points and classes it is scored by. The outcome row is written with the prediction
-(the mid-points at the bar close and at display time are known then) and completed at
-the target time, so a restarted engine can still score what was pending.
+mid-points and the four-minute move's classes on bases A and B, and when it was scored.
+The outcome row is written with the prediction (the mid-points at the bar close and at
+display time are known then) and completed at the target time, so a restarted engine can
+still score what was pending. ``touches`` holds each bar close's touch label (#167), what
+every prediction is scored on since #170: a prediction is scored once its four minutes are
+over (``outcomes.scored_at``) and its bar close's touch label is known. The classes on
+bases A and B are still written, unread, so an engine rolled back to before #170 runs on.
+``model_targets`` says which target each model a prediction names was trained on (#170).
 
 Times are ISO 8601 strings in KST, which sort in time order.
 """
@@ -115,6 +120,13 @@ CREATE TABLE IF NOT EXISTS statuses (  -- each algorithm's status changes, oldes
     reason TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS statuses_by_algorithm ON statuses (algorithm, id);
+CREATE TABLE IF NOT EXISTS model_targets (  -- the target each model run was trained on (#170): a table
+    algorithm TEXT NOT NULL,                 -- of its own, as touches
+    version TEXT NOT NULL,                   -- a prediction's model_version
+    target_version INTEGER,                  -- null: the defaults, or saved before it was recorded
+    PRIMARY KEY (algorithm, version)
+);
+CREATE INDEX IF NOT EXISTS predictions_by_algorithm ON predictions (algorithm, bar_close);
 CREATE TABLE IF NOT EXISTS consensus_fits (  -- the consensus weights refitted after each close (#18)
     version TEXT PRIMARY KEY,
     computed_at TEXT NOT NULL
@@ -141,8 +153,14 @@ ALTER TABLE predictions_v2 RENAME TO predictions;
 )
 
 
-# A prediction scored on either basis (outcomes ``o`` joined to predictions ``p``).
-SCORED = "p.status = 'ok' AND o.scored_at IS NOT NULL AND (o.class_a IS NOT NULL OR o.class_b IS NOT NULL)"
+# A prediction ``p``'s bar close's touch label ``t`` (#167): one per bar close, every predictor's.
+TOUCH_JOIN = (
+    "LEFT JOIN touches t ON t.symbol = p.symbol AND t.bar_close = p.bar_close"
+    f" AND t.target_version = {TARGET_VERSION}"
+)
+# A prediction scored (#170): made, its four minutes over (outcomes ``o``), and its bar close's
+# touch label (``t``, ``TOUCH_JOIN``) known.
+SCORED = "p.status = 'ok' AND o.scored_at IS NOT NULL AND t.class IS NOT NULL"
 
 
 def _made_on(days: Sequence[date], symbol: str | None) -> tuple[str, list[Any]]:
@@ -162,16 +180,14 @@ def _made_on(days: Sequence[date], symbol: str | None) -> tuple[str, list[Any]]:
     return where, params
 
 
-def _excluded(
-    days: Sequence[date], symbol: str | None, basis: str, db: sqlite3.Connection
-) -> dict[str, Excluded]:
-    """What the stats on ``basis`` leave out of the predictions made on ``days``, by predictor."""
+def _excluded(days: Sequence[date], symbol: str | None, db: sqlite3.Connection) -> dict[str, Excluded]:
+    """What the stats leave out of the predictions made on ``days``, by predictor: those over
+    without a touch label (#170), and the special ones."""
     on, params = _made_on(days, symbol)
-    outcome = "o.class_a" if basis == "a" else "o.class_b"
     out: dict[str, Excluded] = {}
     for name, special, unscorable in db.execute(
-        f"SELECT p.algorithm, SUM({outcome} IS NOT NULL AND o.special = 1), SUM({outcome} IS NULL)"
-        " FROM predictions p JOIN outcomes o ON o.prediction_id = p.id"
+        "SELECT p.algorithm, SUM(t.class IS NOT NULL AND o.special = 1), SUM(t.class IS NULL)"
+        f" FROM predictions p JOIN outcomes o ON o.prediction_id = p.id {TOUCH_JOIN}"
         f" WHERE {on} AND p.status = 'ok' AND o.scored_at IS NOT NULL GROUP BY p.algorithm",
         params,
     ):
@@ -197,8 +213,8 @@ def _midnight(day: date) -> datetime:
 class Excluded:
     """What a query's stats leave out of a predictor's predictions (#83)."""
 
-    special: int = 0  # scored on the basis, touched by a special situation
-    unscorable: int = 0  # made, but the basis could not score them
+    special: int = 0  # scored, touched by a special situation
+    unscorable: int = 0  # made and over, but without a touch label (#170)
     status: dict[str, int] = field(default_factory=dict)  # not made, by status (vi, no_book, ...)
 
 
@@ -247,7 +263,7 @@ class Added:
 
 @dataclass(frozen=True)
 class AlgorithmSummary:
-    """Counts on basis A."""
+    """Counts on the touch label (#170)."""
 
     algorithm: str
     predictions: int
@@ -376,6 +392,38 @@ class PredictionStore:
                 (algorithm, iso(at), previous.value, status.value, reason, algorithm, previous.value),
             )
         return cursor.rowcount == 1
+
+    def record_models(self, models: Sequence[tuple[str, str, int | None]]) -> None:
+        """Keep which target each model the engine runs was trained on (#170): (algorithm,
+        version, target version) entries; a model already known keeps its entry."""
+        with self._db:
+            self._db.executemany(
+                "INSERT OR IGNORE INTO model_targets (algorithm, version, target_version) VALUES (?, ?, ?)",
+                models,
+            )
+
+    def first_on_target(self, algorithm: str, since: datetime, target_version: int) -> datetime | None:
+        """The first bar close at or after ``since`` at which ``algorithm`` predicted (made or
+        not) with a model trained on ``target_version`` (#170); None before any."""
+        row = self._db.execute(
+            "SELECT p.bar_close FROM predictions p JOIN model_targets m"
+            " ON m.algorithm = p.algorithm AND m.version = p.model_version"
+            " WHERE p.algorithm = ? AND p.bar_close >= ? AND m.target_version = ?"
+            " ORDER BY p.bar_close LIMIT 1",
+            (algorithm, iso(since), target_version),
+        ).fetchone()
+        return None if row is None else datetime.fromisoformat(row[0])
+
+    def target_marked(self, target_version: int) -> bool:
+        """Whether the statuses were restarted for ``target_version`` (#170, ``mark_target``)."""
+        row = self._db.execute(
+            "SELECT 1 FROM runs WHERE kind = 'target' AND detail = ? LIMIT 1", (str(target_version),)
+        ).fetchone()
+        return row is not None
+
+    def mark_target(self, target_version: int, at: datetime) -> None:
+        """The statuses go by ``target_version``'s models from ``at`` (#170): a ``target`` run."""
+        self.add_run("target", at, None, str(target_version))
 
     def save_weights(self, weights: Weights) -> None:
         """Keep ``weights`` (replacing a fit of the same version: a review run again)."""
@@ -719,13 +767,16 @@ class PredictionStore:
         )
 
     def summary(self) -> list[AlgorithmSummary]:
+        """Each predictor's counts, scored on the touch label (#170)."""
+        over = "o.scored_at IS NOT NULL"
         rows = self._db.execute(
-            "SELECT p.algorithm, COUNT(*), TOTAL(p.status != 'ok'), COUNT(o.class_a),"
-            " TOTAL(o.scored_at IS NOT NULL AND o.class_a IS NULL),"
+            f"SELECT p.algorithm, COUNT(*), TOTAL(p.status != 'ok'), TOTAL({over} AND t.class IS NOT NULL),"
+            f" TOTAL({over} AND t.class IS NULL),"
             " TOTAL(o.prediction_id IS NOT NULL AND o.scored_at IS NULL),"
-            " TOTAL(o.class_a = 'up'), TOTAL(o.class_a = 'flat'), TOTAL(o.class_a = 'down')"
-            " FROM predictions p LEFT JOIN outcomes o ON o.prediction_id = p.id GROUP BY p.algorithm"
-            " ORDER BY p.algorithm"
+            f" TOTAL({over} AND t.class = 'up'), TOTAL({over} AND t.class = 'flat'),"
+            f" TOTAL({over} AND t.class = 'down')"
+            f" FROM predictions p LEFT JOIN outcomes o ON o.prediction_id = p.id {TOUCH_JOIN}"
+            " GROUP BY p.algorithm ORDER BY p.algorithm"
         ).fetchall()
         return [AlgorithmSummary(r[0], *(int(v) for v in r[1:])) for r in rows]
 
@@ -760,8 +811,8 @@ class PredictionStore:
     def scored_predictions(
         self, days: Sequence[date], symbol: str | None, include_special: bool
     ) -> list[dict[str, Any]]:
-        """Predictions made on ``days`` and scored on either basis, of one symbol or all,
-        read on a connection of its own (``_reading``)."""
+        """Predictions made on ``days`` and scored on their touch label (``SCORED``), of one
+        symbol or all, read on a connection of its own (``_reading``)."""
         if not days:
             return []
         with self._reading() as db:
@@ -778,10 +829,10 @@ class PredictionStore:
         return self._select(where, tuple(params), db)
 
     def scored_and_excluded(
-        self, days: Sequence[date], symbol: str | None, include_special: bool, basis: str
+        self, days: Sequence[date], symbol: str | None, include_special: bool
     ) -> tuple[list[dict[str, Any]], dict[str, Excluded]]:
-        """``scored_predictions`` and what the stats on ``basis`` (``a`` or ``b``) leave out of
-        the same predictions, by predictor, read in one transaction so they agree."""
+        """``scored_predictions`` and what the stats leave out of the same predictions, by
+        predictor, read in one transaction so they agree."""
         if not days:
             return [], {}
         with self._reading() as db:
@@ -789,7 +840,7 @@ class PredictionStore:
             db.row_factory = sqlite3.Row
             rows = self._scored(days, symbol, include_special, db)
             db.row_factory = None
-            excluded = _excluded(days, symbol, basis, db)
+            excluded = _excluded(days, symbol, db)
             db.execute("COMMIT")
         return rows, excluded
 
@@ -815,12 +866,14 @@ class PredictionStore:
                 "SELECT p.*, o.target_at, o.mid_close, o.mid_display, o.mid_target, o.flat_ticks,"
                 " o.class_a, o.class_b, o.special, o.unscorable, o.scored_at, b.reason AS blocked,"
                 " v.up AS votes_up, v.flat AS votes_flat, v.down AS votes_down,"
-                " t.class AS touch_class, t.unscorable AS touch_unscorable, t.path AS touch_path"
+                " t.class AS touch_class, t.unscorable AS touch_unscorable, t.path AS touch_path,"
+                " m.target_version AS model_target"
                 " FROM predictions p LEFT JOIN outcomes o ON o.prediction_id = p.id"
                 " LEFT JOIN blocks b ON b.prediction_id = p.id"
                 " LEFT JOIN votes v ON v.prediction_id = p.id"
-                " LEFT JOIN touches t ON t.symbol = p.symbol AND t.bar_close = p.bar_close"
-                f" AND t.target_version = {TARGET_VERSION} " + where,
+                f" {TOUCH_JOIN}"
+                " LEFT JOIN model_targets m ON m.algorithm = p.algorithm AND m.version = p.model_version "
+                + where,
                 params,
             )
             .fetchall()
