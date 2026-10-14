@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from collections.abc import Collection, Sequence
 
+from krx_quant.algorithms.breiman import Breiman
 from krx_quant.algorithms.contract import (
     Abstention,
     Algorithm,
@@ -116,10 +117,11 @@ ALGORITHMS: tuple[Algorithm, ...] = register(
 )
 
 # The algorithms of the kinds besides the direction (#179), in the kinds' order, all after
-# the direction's: the range's Mandelbrot (#181), registered after pre-validation existed (it
-# runs once it has passed); the barrier's (#183) come after it.
+# the direction's: the range's Mandelbrot (#181), then the barrier's Breiman (#184), both
+# registered after pre-validation existed (each runs once it has passed). The last is skipped
+# first when the CPU budget runs short.
 KIND_ALGORITHMS: tuple[KindAlgorithm, ...] = register_kind_algorithms(
-    [Mandelbrot()], taken={a.name for a in ALGORITHMS}
+    [Mandelbrot(), Breiman()], taken={a.name for a in ALGORITHMS}
 )
 
 __all__ = [

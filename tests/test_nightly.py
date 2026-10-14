@@ -23,6 +23,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from krx_quant.algorithms import ALGORITHMS, Algorithm, Model, Sample
+from krx_quant.algorithms.breiman import NAME as BREIMAN
 from krx_quant.algorithms.granger import Granger
 from krx_quant.algorithms.mandelbrot import NAME as MANDELBROT
 from krx_quant.algorithms.markov import Markov
@@ -455,14 +456,15 @@ def test_the_train_command_trains_every_registered_algorithm_from_the_store(
     promotions = read(store_root, f"promotions/{NIGHT}.json")
     # On the touch target, the default (#170): the climate baseline's table, then the range's
     # (#180) and the barrier's (#183), each of its kind's answers (answer version 1), then the
-    # range's Mandelbrot (#181).
-    names = [a.name for a in ALGORITHMS] + [CLIMATE, RANGE_CLIMATE, BARRIER_CLIMATE, MANDELBROT]
+    # range's Mandelbrot (#181) and the barrier's Breiman (#184).
+    names = [a.name for a in ALGORITHMS] + [CLIMATE, RANGE_CLIMATE, BARRIER_CLIMATE, MANDELBROT, BREIMAN]
     assert [r["algorithm"] for r in promotions["reports"]] == names
     assert {r["algorithm"]: r["target_version"] for r in promotions["reports"]} == {
         **dict.fromkeys(names, 2),
         RANGE_CLIMATE: 1,
         BARRIER_CLIMATE: 1,
         MANDELBROT: 1,
+        BREIMAN: 1,
     }
     barrier = read(store_root, f"reports/{NIGHT}/{BARRIER_CLIMATE}.json")
     assert (barrier["kind"], barrier["promoted"]) == ("barrier", True), "fitted on the bar rule's answers"
@@ -825,7 +827,9 @@ def test_the_range_s_climate_table_is_refitted_every_night_and_runs_from_the_mor
     """#180. Input: eight days of bars, the last four recorded mornings too; the range kind
     registered. Output: the range's climate table refitted on the range's answers of all eight
     days (recorded mornings by their quotes, the others by the bar rule), its report naming
-    the kind and counting the answers by where they came from, promoted whatever it scores;
+    the kind and counting the answers by where they came from and, by day, the bar closes left
+    out (#184: every bar close is one or the other; none on bar days, whose bar rule always
+    answers), promoted whatever it scores;
     the 09:00 cell's class shares are those of the night's answers; the summary has a line of
     the range's answers by source; the morning swap installs it for the engine."""
     for day in DAYS[-4:]:
@@ -841,10 +845,13 @@ def test_the_range_s_climate_table_is_refitted_every_night_and_runs_from_the_mor
     assert report["training_days"] == [str(d) for d in DAYS], "the latest twenty: all eight here"
     by_day = {str(d): len(answered(tmp_path / "cache", d)) for d in DAYS}
     quotes = sum(by_day[str(d)] for d in DAYS[-4:])
-    assert report["labels"] == {
+    labels = report["labels"]
+    assert {key: labels[key] for key in ("samples", "by_day")} == {
         "samples": {"recorded": quotes, "bars": sum(by_day.values()) - quotes},
         "by_day": by_day,
     }
+    assert all(labels["dropped_by_day"][str(d)] == {} for d in DAYS[:-4])
+    assert all(by_day[str(d)] + sum(labels["dropped_by_day"][str(d)].values()) == 376 for d in DAYS)
     table = read(store_root, f"models/{RANGE_CLIMATE}/{version}.json")
     first_slot = [
         (label, r)

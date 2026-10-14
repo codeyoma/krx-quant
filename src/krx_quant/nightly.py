@@ -36,7 +36,10 @@ those, the same way on their kind's answers (``training.TrainingDay.of_kind``): 
 of the kind's three classes, a champion of another answer version than the kind's replaced
 whatever the scores. Their reports name the kind (``kind``) and its answer version
 (``target_version``), and count the kind's labelled samples by source; the Telegram summary
-has a line of those per kind.
+has a line of those per kind. They also count the bar closes the kind's training left out, by
+why (#184): a VI or a special situation on a recorded day (no sample), an answer without a
+class (the bar rule's ``same minute``, an unscorable window) or no answer; the summary's line
+adds their total and reasons.
 
 A kind's baselines that predict from a table (#180, ``kinds.TableBaseline``: the range's
 climate) are refitted after the direction's climate, each on the kind's answers of its
@@ -61,6 +64,7 @@ import logging
 import math
 import os
 import shutil
+from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -79,7 +83,7 @@ from krx_quant.features import Leaders
 from krx_quant.feeds import TRADE
 from krx_quant.feeds.base import KST, kst_day
 from krx_quant.kind_registry import KINDS, kind_named
-from krx_quant.kinds import Kind, KindForecast, TableBaseline, table_baselines
+from krx_quant.kinds import NO_ANSWER, Kind, KindForecast, TableBaseline, table_baselines
 from krx_quant.macro import regime_prefix
 from krx_quant.market_calendar import MarketCalendar, calendar_store
 from krx_quant.notify import send_notice
@@ -162,14 +166,18 @@ class Night:
 
     def summary(self) -> str:
         """The days' reference prices, the touch target's labelled samples by source (target
-        version 2), and one line per algorithm, for Telegram."""
+        version 2), each kind's answered samples by source and those it left out (#184), and
+        one line per algorithm, for Telegram."""
         references: dict[str, str] = {}
         labelled: dict[str, int] = {}
         kinds: dict[str, dict[str, int]] = {}  # the kinds' labelled samples by day (#179)
+        dropped: dict[str, dict[str, dict[str, int]]] = {}  # the kinds' left out, by day and why (#184)
         for r in self.reports:
             references.update(r.get("reference_prices", {}))
             if "kind" in r:
                 kinds.setdefault(r["kind"], {}).update(r.get("labels", {}).get("by_day", {}))
+                if "dropped_by_day" in r.get("labels", {}):
+                    dropped.setdefault(r["kind"], {}).update(r["labels"]["dropped_by_day"])
             else:
                 labelled.update(r.get("labels", {}).get("by_day", {}))
         title = f"{self.day} 밤 학습"
@@ -182,7 +190,10 @@ class Night:
             lines.append(f"정답 버전 2 표본: 녹화 호가 {quotes}개, 1분봉 {sum(labelled.values()) - quotes}개")
         for kind, by_day in kinds.items():
             quotes = sum(n for day, n in by_day.items() if references.get(day) == "mid")
-            lines.append(f"{kind} 정답 표본: 녹화 호가 {quotes}개, 1분봉 {sum(by_day.values()) - quotes}개")
+            line = f"{kind} 정답 표본: 녹화 호가 {quotes}개, 1분봉 {sum(by_day.values()) - quotes}개"
+            if kind in dropped:  # reports before #184 do not count them
+                line += _dropped_text(dropped[kind])
+            lines.append(line)
         for r in self.reports:
             if r["promoted"] and r.get("forced"):
                 verdict = "승격(정답 바뀜, 성적 비교 없이)"
@@ -725,18 +736,50 @@ def kind_log_loss(kind: Kind, forecast: KindForecast, label: str) -> float:
 
 
 def _kind_labels(loaded: Mapping[date, TrainingDay | None], kind: Kind) -> dict[str, Any]:
-    """``_labels`` of a kind's answers (#179)."""
-    by_day = {
-        day.isoformat(): sum(s.label is not None for s in found.of_kind(kind, ()))
-        for day, found in loaded.items()
-        if found is not None
-    }
+    """``_labels`` of a kind's answers (#179), and the bar closes (and symbols) of the days its
+    training leaves out, by why (#184), in all (``dropped``) and by day (``dropped_by_day``):
+    those without a sample (a VI, a special situation: ``TrainingDay.left_out``, recorded days),
+    those whose answer has no class, by its reason (the bar rule's ``same minute``, an
+    unscorable window's), and those without an answer (``no answer``). With the answered ones,
+    they are every bar close and symbol of the days."""
+    by_day: dict[str, int] = {}
+    dropped_by_day: dict[str, dict[str, int]] = {}
+    for day, found in loaded.items():
+        if found is None:
+            continue
+        answered = found.of_kind(kind, ())
+        by_day[day.isoformat()] = sum(s.label is not None for s in answered)
+        why = Counter({reason: n for reason, n in found.left_out.items() if n})
+        why.update(
+            NO_ANSWER if s.answer is None else s.answer.unscorable or NO_ANSWER
+            for s in answered
+            if s.label is None
+        )
+        dropped_by_day[day.isoformat()] = dict(sorted(why.items()))
     recorded = sum(
         by_day[day.isoformat()]
         for day, found in loaded.items()
         if found is not None and found.reference == "mid"
     )
-    return {"samples": {"recorded": recorded, "bars": sum(by_day.values()) - recorded}, "by_day": by_day}
+    dropped: Counter[str] = Counter()
+    for reasons in dropped_by_day.values():
+        dropped.update(reasons)
+    return {
+        "samples": {"recorded": recorded, "bars": sum(by_day.values()) - recorded},
+        "by_day": by_day,
+        "dropped": dict(sorted(dropped.items())),
+        "dropped_by_day": dropped_by_day,
+    }
+
+
+def _dropped_text(by_day: Mapping[str, Mapping[str, int]]) -> str:
+    """A kind's left-out samples as the summary's line ends (#184): their total, then each
+    reason's count, the most first: `` · 뺀 표본 42개 (same minute 30, special 12)``."""
+    reasons: Counter[str] = Counter()
+    for why in by_day.values():
+        reasons.update(why)
+    listed = ", ".join(f"{reason} {n}" for reason, n in sorted(reasons.items(), key=lambda r: (-r[1], r[0])))
+    return f" · 뺀 표본 {sum(reasons.values())}개" + (f" ({listed})" if listed else "")
 
 
 def _mean(values: Sequence[float]) -> float:

@@ -377,7 +377,7 @@ def test_it_is_registered_with_the_range_and_waits_for_its_pre_validation(tmp_pa
     """Mandelbrot is the range's, after every direction algorithm; its own features are the
     four ranges; every parameter a model can hold has a meaning. It was registered after
     pre-validation existed: the engine runs it only once it has passed."""
-    assert [a.name for a in KIND_ALGORITHMS] == [NAME]
+    assert KIND_ALGORITHMS[0].name == NAME, "the first of the kinds' (the barrier's come after it)"
     assert MANDELBROT.kind == "range" and kind_named(MANDELBROT.kind) is RANGE
     assert set(MANDELBROT.card.unique_features) == RANGE_FEATURES
     card = MANDELBROT.card
@@ -395,7 +395,7 @@ def test_it_is_registered_with_the_range_and_waits_for_its_pre_validation(tmp_pa
         algorithms=[],
         admits=admits(tmp_path, 2),
     )
-    assert engine.waiting() == [NAME]
+    assert NAME in engine.waiting()
     engine.store.close()
 
 

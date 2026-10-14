@@ -27,6 +27,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+from krx_quant.algorithms import KIND_ALGORITHMS
 from krx_quant.algorithms.contract import KindSample, Model
 from krx_quant.algorithms.turing import Turing
 from krx_quant.backfill import BAR_SCHEMA, MINUTE_BARS_TR, PreviousDay, bars_key
@@ -826,7 +827,12 @@ async def test_the_direction_and_the_range_go_on_as_before_beside_the_barrier(tm
     the same; only the barrier is new."""
     before, after = tmp_path / "before.db", tmp_path / "after.db"
     old = await run(
-        before, busy_morning(), until=at("10:00:00"), target_version=2, kinds=(DIRECTION_KIND, RANGE)
+        before,
+        busy_morning(),
+        until=at("10:00:00"),
+        target_version=2,
+        kinds=(DIRECTION_KIND, RANGE),
+        kind_algorithms=[a for a in KIND_ALGORITHMS if a.kind == RANGE.name],  # the barrier's need it
     )
     new = await run(after, busy_morning(), until=at("10:00:00"), target_version=2)
     old.store.close()
