@@ -20,8 +20,9 @@ on:
 permissions:
   contents: write
 
-# One run at a time; a newer pending run replaces an older one, and each reads the
-# latest head anyway.
+# One run at a time: a run started meanwhile waits, and a newer waiting run replaces an
+# older waiting one (GitHub's concurrency groups; the running one is not cancelled). Each
+# reads the latest head anyway.
 concurrency:
   group: fincept-pointer
   cancel-in-progress: false
