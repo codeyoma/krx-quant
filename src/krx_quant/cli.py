@@ -215,7 +215,7 @@ def _rollback(name: str) -> int:
         print(f"unknown algorithm {name!r}", file=sys.stderr)
         return 1
     try:
-        model = Shelf(settings.state_dir).rollback(name, datetime.now(KST))
+        model = Shelf(settings.state_dir).rollback(name, datetime.now(KST), settings.target_version)
     except ValueError as e:
         print(e, file=sys.stderr)
         return 1

@@ -38,13 +38,22 @@ class Shelf:
         self._keep(name, model)
         self._record(name, model.version, why, at)
 
-    def rollback(self, name: str, at: datetime) -> Model | None:
-        """Go back to the model installed before the current one; None: the defaults."""
+    def rollback(self, name: str, at: datetime, target_version: int = 1) -> Model | None:
+        """Go back to the model installed before the current one; None: the defaults. On the
+        touch target (``target_version`` 2, #170) only to a model trained on it."""
         chain = self._chain(name)
         if not chain:
             raise ValueError(f"{name} runs its defaults: there is nothing to roll back")
         current = chain.pop()
         previous = chain[-1] if chain else None
+        if target_version >= 2:
+            earlier = Model.from_json(self._version(name, previous).read_text()) if previous else None
+            if earlier is None or (earlier.target_version or 1) != target_version:
+                raise ValueError(
+                    f"{name}: {previous or 'its defaults'} was not trained on target {target_version}; "
+                    f"rolling back to it would run a model of another target. Fit one instead "
+                    f"(krx-quant fit {name}) or wait for the night's training"
+                )
         if previous is None:
             model_path(self.state_dir, name).unlink(missing_ok=True)
             model = None

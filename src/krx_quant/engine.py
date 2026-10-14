@@ -417,10 +417,22 @@ class PredictionEngine:
         return self._market.latest_lead(series, self.clock.now())
 
     def switch_models(self, models: Mapping[str, Model]) -> bool:
-        """Run ``models`` from the next bar close (a swap, a fit, a rollback); whether any changed."""
+        """Run ``models`` from the next bar close (a swap, a fit, a rollback); whether any changed.
+        On the touch target (#170) an algorithm running a model of it does not go back to one
+        of another target (the defaults included): that model would forecast other outcomes,
+        and its days would count toward a review that does not look at them."""
         changed = False
         for name, model in models.items():
             if name in self.models and self.models[name] != model:
+                if self._on_target(self.models[name]) and not self._on_target(model):
+                    log.warning(
+                        "%s keeps %s: %s was not trained on target %d",
+                        name,
+                        self.models[name].version,
+                        model.version,
+                        self.target_version,
+                    )
+                    continue
                 log.info("%s now runs %s", name, model.version)
                 self.models[name] = model
                 self._record_models({name: model})
@@ -432,9 +444,14 @@ class PredictionEngine:
         return changed
 
     def members(self) -> list[str]:
-        """The consensus members now: the active algorithms, in registration order."""
+        """The consensus members now: the active algorithms running a model of the engine's
+        target (#170; one that is not sits out), in registration order."""
         active = _with_status(self.store.statuses(), Status.ACTIVE)
-        return [a.name for a in self.algorithms if a.name in active]
+        return [a.name for a in self.algorithms if a.name in active and self._on_target(self.models[a.name])]
+
+    def _on_target(self, model: Model) -> bool:
+        """Whether ``model`` was trained on the target the engine scores (before #170 any is)."""
+        return self.target_version < 2 or (model.target_version or 1) == self.target_version
 
     def cpu_use(self) -> CpuUse:
         """The CPU budget now: the algorithms that run, as timed so far, and today's skips."""

@@ -630,6 +630,40 @@ async def test_an_algorithm_waits_until_the_swap_runs_a_model_of_the_target(tmp_
         check("algorithms", await get_json(client, "/v1/algorithms"))
 
 
+async def test_a_model_of_another_target_neither_replaces_one_of_it_nor_joins_the_consensus(
+    tmp_path: Path,
+) -> None:
+    """Input: alpha and beta active; alpha runs a model of the touch target, beta one of the
+    four-minute move (a rollback by hand, say). Output: beta sits out of the consensus; alpha
+    does not switch back to an old-target model or to its defaults (#170)."""
+    db = tmp_path / "engine.db"
+    store = PredictionStore(db)  # both active on the touch target already
+    for name in ("alpha", "beta"):
+        store.add_status(name, morning(weekdays_before(DAY, 30)[0]), None, Status.ACTIVE, "set by the test")
+    store.mark_target(TARGET_VERSION, morning(weekdays_before(DAY, 30)[0]))
+    store.close()
+    engine = await run(
+        db,
+        [],
+        start=at("06:00:00"),
+        until=at("08:00:00"),
+        calendar=THREE_DAYS,
+        algorithms=[ALPHA, BETA],
+        models={
+            "alpha": Model("alpha-touch", {}, target_version=2),
+            "beta": Model("beta-old", {}, target_version=1),
+        },
+        target_version=2,
+    )
+
+    assert engine.members() == ["alpha"]
+    assert not engine.switch_models({"alpha": Model("alpha-old", {}, target_version=1)})
+    assert not engine.switch_models({"alpha": Model("alpha-default", {})})
+    assert engine.models["alpha"].version == "alpha-touch"
+    assert engine.switch_models({"beta": Model("beta-touch", {}, target_version=2)})
+    assert engine.members() == ["alpha", "beta"]
+
+
 async def test_the_reviews_see_only_predictions_of_models_of_the_target(tmp_path: Path) -> None:
     """Input: alpha active on the touch target. Over the last 20 days with predictions (DAY's
     own among them, unscored) it was never right on the first ten with a model of the

@@ -8,6 +8,7 @@ server publishes as live, and the training status it shows.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import date, datetime, time
 from pathlib import Path
 from typing import Any
@@ -153,8 +154,18 @@ def test_the_rollback_command_names_what_runs_now(
 ) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("KRX_STATE_DIR", str(tmp_path / "state"))
-    Shelf(tmp_path / "state").install("newton", TRAINED, "fit", at(NIGHT, "20:00"))
+    shelf = Shelf(tmp_path / "state")
+    on_touch = replace(TRAINED, version="newton-20261009-0a0b0c", target_version=2)
+    shelf.install("newton", on_touch, "fit", at(NIGHT, "20:00"))
 
+    # On the touch target (#170) the defaults were not trained on it: not rolled back to.
+    assert main(["rollback", "newton"]) == 1
+    assert "was not trained on target 2" in capsys.readouterr().err
+    shelf.install("newton", replace(on_touch, version="newton-20261010-0d0e0f"), "fit", at(NIGHT, "20:30"))
+    assert main(["rollback", "newton"]) == 0
+    assert "newton now runs newton-20261009-0a0b0c" in capsys.readouterr().out
+
+    monkeypatch.setenv("KRX_TARGET_VERSION", "1")  # before the switch any model goes
     assert main(["rollback", "newton"]) == 0
     assert "newton now runs its defaults" in capsys.readouterr().out
     assert main(["rollback", "newton"]) == 1
