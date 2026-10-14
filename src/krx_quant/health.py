@@ -149,8 +149,21 @@ class FeedHealth:
                 newly.append(key)
         return newly
 
-    def open_gaps(self, kind: GapKind) -> list[Key]:
-        return [key for key, gap in self._open.items() if gap.kind is kind]
+    def silent_feeds(self) -> list[str]:
+        """Feeds whose every expected key is in a stale gap.
+
+        A whole feed going quiet is a fault: a wrong subscription, a parser or the
+        connection. One quiet key of a busier feed is the market: a halt, a VI, an option
+        strike nobody trades.
+        """
+        keys: dict[str, list[Key]] = {}
+        for key in self._watched.keys() | self._last_seen.keys():
+            keys.setdefault(key[0], []).append(key)
+        return sorted(
+            feed
+            for feed, feed_keys in keys.items()
+            if all((gap := self._open.get(k)) is not None and gap.kind is GapKind.STALE for k in feed_keys)
+        )
 
     def snapshot(self) -> list[FeedState]:
         """Every expected or delivering feed: when it last delivered and any open gap."""

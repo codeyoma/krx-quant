@@ -21,9 +21,9 @@ def fast(settings: Settings) -> Settings:
     return replace(settings, reconnect_initial_seconds=0.05, reconnect_max_seconds=0.2)
 
 
-def fill(price: str) -> str:
+def fill(price: str, symbol: str = "005930") -> str:
     return trade_frame(
-        {"MKSC_SHRN_ISCD": "005930", "STCK_CNTG_HOUR": "093015", "STCK_PRPR": price, "BSOP_DATE": "20261008"}
+        {"MKSC_SHRN_ISCD": symbol, "STCK_CNTG_HOUR": "093015", "STCK_PRPR": price, "BSOP_DATE": "20261008"}
     )
 
 
@@ -167,10 +167,53 @@ async def test_a_feed_that_goes_quiet_in_market_hours_is_a_stale_gap_with_one_al
     await asyncio.wait_for(task, 5)
 
     texts = [m["text"] for m in kis.telegram_messages]
-    assert len(texts) == 2 and texts[0].startswith("[장애]") and "H0UNCNT0 005930" in texts[0], texts
-    assert texts[1].startswith("[복구]"), texts
+    assert len(texts) == 2 and texts[0].startswith("[장애]") and "stale H0UNCNT0" in texts[0], texts
+    assert texts[1] == "[복구] 데이터가 다시 들어오는 피드: stale H0UNCNT0", texts
     [gap] = [g for g in read(tmp_path, "gaps", "H0UNCNT0") if g["reason"] == "stale"]
     assert (gap["start"], gap["end"]) == (FIXED_NOW, FIXED_NOW + timedelta(minutes=6))
+
+
+async def test_one_quiet_key_is_only_a_gap_and_the_alert_waits_for_the_whole_feed(
+    kis: FakeKis, tmp_path: Path
+) -> None:
+    other = ("H0UNCNT0", "000660")
+    kis.script[TRADE_KEY] = [fill("81200")]
+    kis.script[other] = [fill("201000", "000660")]
+    clock = Clock(FIXED_NOW)  # Thursday 09:30:16 KST
+    stop = asyncio.Event()
+    settings = replace(
+        with_telegram(kis, settings_for(kis, tmp_path, ("005930", "000660"))), health_check_seconds=0.05
+    )
+    task = asyncio.create_task(run_collector(settings, stop=stop, clock=clock))
+    await kis.wait_for_subscriptions({TRADE_KEY, other})
+    await kis.round_trip()
+
+    clock.at = FIXED_NOW + timedelta(minutes=2)
+    await kis.push(fill("81300"))
+    await kis.round_trip()
+    clock.at = FIXED_NOW + timedelta(minutes=4)  # 000660 quiet for 4 minutes, 005930 for 2
+    await asyncio.sleep(0.3)
+    quiet_one = [m["text"] for m in kis.telegram_messages if "H0UNCNT0" in m["text"]]
+    clock.at = FIXED_NOW + timedelta(minutes=6)  # now both
+    await until(lambda: any("H0UNCNT0" in m["text"] for m in kis.telegram_messages))
+    await kis.push(fill("201500", "000660"))
+    await until(lambda: sum("H0UNCNT0" in m["text"] for m in kis.telegram_messages) >= 2)
+    stop.set()
+    await asyncio.wait_for(task, 5)
+
+    assert quiet_one == [], "one quiet stock is the market, not a fault"
+    texts = [m["text"] for m in kis.telegram_messages if "H0UNCNT0" in m["text"]]
+    assert texts[0].startswith("[장애] 구독한 키가 모두 끊긴 피드: ") and "stale H0UNCNT0" in texts[0], texts
+    assert texts[1:] == ["[복구] 데이터가 다시 들어오는 피드: stale H0UNCNT0"], "one key back: the feed works"
+    gaps = {
+        (g["symbol"], g["start"], g["end"])
+        for symbol in ("005930", "000660")
+        for g in read(tmp_path, "gaps", "H0UNCNT0", symbol)
+    }
+    assert gaps == {
+        ("000660", FIXED_NOW, FIXED_NOW + timedelta(minutes=6)),  # recorded though not alerted alone
+        ("005930", FIXED_NOW + timedelta(minutes=2), None),  # still quiet at shutdown
+    }
 
 
 async def test_after_a_reconnect_refused_subscriptions_stay_on_one_rest_poll(
