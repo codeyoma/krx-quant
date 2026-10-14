@@ -63,6 +63,7 @@ from krx_quant.polling import CALL_ERRORS, NORMALIZE_ERRORS, Poller, PollJob
 from krx_quant.predictions import DB_NAME, PredictionStore, iso
 from krx_quant.prevalidation import admits
 from krx_quant.recorder import ParquetRecorder
+from krx_quant.rescore import EngineLock, keep_touches_filled
 from krx_quant.signals import Signals
 from krx_quant.stream import LiveStatus
 from krx_quant.swap import (
@@ -216,6 +217,11 @@ async def run_collector(
         review_rules=Rules.of(settings),
     )
     store.add_run("start", engine.started_at, None, json.dumps(started(settings)))
+    # Held while it runs: a rescore refuses to run beside it (#168). One running already
+    # does not stop the recording; the past touch labels are filled once it is done.
+    lock = EngineLock(settings.state_dir)
+    if not lock.acquire():
+        log.warning("%s is held: a rescore runs", lock.path)
 
     def on_event(feed: str, row: dict[str, Any]) -> None:
         # Recording comes first: a prediction bug must never stop it.
@@ -341,6 +347,9 @@ async def run_collector(
                     asyncio.create_task(keep_calendar(calendar_collector, settings.calendar_every))
                 )
             api = await _serve_api(settings, engine, _live_status(stream, health, now), alerts)
+            # The past bar closes' touch labels, once the API answers (#168): the 06:00 deploy
+            # checks it within 3 minutes, and the fill can take longer.
+            background.append(asyncio.create_task(keep_touches_filled(settings, engine, lock)))
             try:
                 await stream.run()
             finally:
@@ -357,6 +366,7 @@ async def run_collector(
         health.close()
         recorder.close()
         store.close()
+        lock.release()
 
 
 async def restart_each_day(
