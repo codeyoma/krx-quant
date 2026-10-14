@@ -21,6 +21,11 @@ LOSS_FLOOR = 1e-6
 CLASSES = (Direction.UP, Direction.FLAT, Direction.DOWN)
 # Without a flat band or a volatility there is nothing to say.
 UNKNOWN = Forecast(1 / 3, 1 / 3, 1 / 3, 0.0)
+# How ``normal_forecast`` makes the three probabilities, as the cards say it.
+NORMAL_CLASSES = (
+    "공통 함수가 이 정규분포에서 4분 변화가 +k틱 이상일 확률을 상승, −k틱 이하일 확률을 하락, 그 사이를 "
+    "보합으로 낸다(k: 보합 범위. 폭은 0.5틱보다 좁아지지 않는다)."
+)
 
 Params = Mapping[str, float]
 

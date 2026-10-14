@@ -15,7 +15,8 @@ Endpoints (all under ``/v1``):
   stored candles of the period (default 400, at most 2000) that start before ``T`` (default
   now), oldest first, never the one holding today (``candles``);
 - ``GET /algorithms``: each registered algorithm's card, features, current model and status
-  (probation, active, bench, retired, clone) with its history;
+  (probation, active, bench, retired, clone) with its history, the meaning of each feature
+  and model parameter; and the baselines' and the consensus' cards;
 - ``GET /algorithms/{name}``: one of them, with the models installed on the server for it;
 - ``GET /leaderboard?symbol=&period=&basis=&special=``: algorithms ranked by the lower
   bound of their weakest lift over the baselines, with their stats;
@@ -56,10 +57,12 @@ from krx_quant.backfill import stock_bars_path, stored_bars
 from krx_quant.baselines import BASELINE_NAMES, BASELINES
 from krx_quant.candles import PERIODS as CANDLE_PERIODS
 from krx_quant.candles import stored_candles
+from krx_quant.consensus import CARDS as CONSENSUS_CARDS
 from krx_quant.consensus import NAMES, slot
 from krx_quant.contracts import USD
 from krx_quant.econ_calendar import calendar_answer, read_latest
 from krx_quant.engine import PredictionEngine
+from krx_quant.features import FEATURE_MEANINGS
 from krx_quant.feeds.base import KST, Row, kst_day
 from krx_quant.macro import LatestMacro, latest_macro, reading_before
 from krx_quant.model_shelf import Shelf
@@ -364,7 +367,13 @@ def _limit_query(request: web.Request, default: int, most: int) -> int:
 
 async def _algorithms(request: web.Request) -> web.Response:
     engine = request.app[ENGINE_KEY]
-    return _json({"algorithms": [_algorithm_json(engine, a) for a in engine.algorithms]})
+    return _json(
+        {
+            "algorithms": [_algorithm_json(engine, a) for a in engine.algorithms],
+            "baselines": [{"name": b.name, "card": b.card.as_dict()} for b in BASELINES],
+            "consensus": [{"name": name, "card": CONSENSUS_CARDS[name].as_dict()} for name in NAMES],
+        }
+    )
 
 
 async def _algorithm(request: web.Request) -> web.Response:
@@ -385,16 +394,12 @@ async def _algorithm(request: web.Request) -> web.Response:
 def _algorithm_json(engine: PredictionEngine, a: Algorithm) -> dict[str, Any]:
     return {
         "name": a.name,
-        "card": {
-            "scientist": a.card.scientist,
-            "character": a.card.character,
-            "logic": a.card.logic,
-            "unique_features": list(a.card.unique_features),
-            "training": a.card.training,
-        },
+        "card": a.card.as_dict(),
         "features": list(a.features),
+        "feature_meanings": {f: FEATURE_MEANINGS[f].as_dict() for f in a.features},
         "training_days": a.training_days,
         "model": engine.models[a.name].as_dict(),
+        "param_meanings": {p: m.as_dict() for p, m in a.param_meanings.items()},
         "status": _status_json(engine, a.name),
     }
 

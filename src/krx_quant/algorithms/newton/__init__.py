@@ -13,16 +13,18 @@ Personality card:
 - **Own features**: velocity, acceleration, relative volume.
 - **Learns**: the damping γ and the threshold θ, by grid search for the lowest log loss
   over the last 20 trading days.
+- **Fails**: in a range that keeps turning, and when a move on heavy volume turns at once.
 """
 
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
-from krx_quant.algorithms.contract import Card, Model, Sample
+from krx_quant.algorithms.contract import Model, Sample
 from krx_quant.algorithms.forecasts import (
     HORIZON_MINUTES,
+    NORMAL_CLASSES,
     UNKNOWN,
     Params,
     lowest_log_loss,
@@ -30,6 +32,7 @@ from krx_quant.algorithms.forecasts import (
     with_outcomes,
 )
 from krx_quant.baselines import Forecast
+from krx_quant.cards import Card, Meaning, learned
 from krx_quant.features import FeatureVector
 
 # Heavier than three times the usual volume adds no more mass.
@@ -37,6 +40,21 @@ MAX_MASS = 3.0
 DAMPINGS = (0.0, 0.1, 0.25, 0.5, 1.0, 2.0, 4.0)
 THRESHOLDS = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0)
 DEFAULT_PARAMS = {"damping": 0.5, "threshold": 1.0}
+TRAINING_DAYS = 20
+PARAM_MEANINGS: Mapping[str, Meaning] = {
+    "damping": Meaning(
+        "감쇠율 γ: dv/dt = F − γv의 마찰. 클수록 추세가 빨리 꺾인다고 본다. 0, 0.1, 0.25, 0.5, 1, 2, 4 "
+        "중에서 고른다.",
+        "1/분",
+        learned(TRAINING_DAYS),
+    ),
+    "threshold": Meaning(
+        "임계값 θ: 외삽한 4분 변위가 θ × 보합 범위 k보다 작으면 움직임이 없다고 본다. 0, 0.5, 1, 1.5, 2, 3 "
+        "중에서 고른다.",
+        "보합 범위 k의 배수",
+        learned(TRAINING_DAYS),
+    ),
+}
 
 
 def displacement(velocity: float, force: float, damping: float, horizon: float = HORIZON_MINUTES) -> float:
@@ -52,7 +70,8 @@ def displacement(velocity: float, force: float, damping: float, horizon: float =
 class Newton:
     name = "newton"
     features: tuple[str, ...] = ("velocity", "acceleration", "relative_volume", "volatility", "flat_ticks")
-    training_days = 20
+    training_days = TRAINING_DAYS
+    param_meanings = PARAM_MEANINGS
     card = Card(
         scientist="Isaac Newton",
         character="추세 추종",
@@ -62,6 +81,16 @@ class Newton:
         ),
         unique_features=("velocity", "acceleration", "relative_volume"),
         training="감쇠율과 임계값을 최근 20거래일 1분봉으로 격자 탐색해 log loss가 가장 작은 값을 고른다.",
+        forecasting=(
+            "4분 뒤 중간가 변화를 외삽한 변위(틱)를 중심으로, 폭이 1분 변동성 × √4인 정규분포로 본다. "
+            f"{NORMAL_CLASSES} 기대수익은 그 변위다. 속도·가속도·상대 거래량 중 하나라도 모르면 변위를 "
+            "0으로, 변동성이나 보합 범위를 모르면 세 확률을 1/3씩 둔다."
+        ),
+        failure=(
+            "방향이 자주 뒤집히는 박스권과 급등락 뒤 되돌림 장에서 직전 추세를 외삽해 틀리기 쉽다. 거래량이 "
+            "한꺼번에 몰린 봉 뒤에는 힘을 크게 잡아 꺾이는 순간을 놓친다. 체결이 드문 종목에서는 6개 봉 "
+            "종가로 맞춘 속도·가속도가 잡음이다."
+        ),
     )
 
     def default_model(self) -> Model:

@@ -14,16 +14,19 @@ Personality card:
 - **Learns**: the speed κ, by least squares of the four-minute moves on the gaps beyond
   the threshold; the weight of today's speed and the threshold θ, by grid search for the
   lowest log loss over the last 20 trading days.
+- **Fails**: when a trend runs on, away from the VWAP; and with no reversion in its
+  training days it learns κ = 0 and says nothing of the direction (#162).
 """
 
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
-from krx_quant.algorithms.contract import Card, Model, Sample
+from krx_quant.algorithms.contract import Model, Sample
 from krx_quant.algorithms.forecasts import (
     HORIZON_MINUTES,
+    NORMAL_CLASSES,
     UNKNOWN,
     Params,
     lowest_log_loss,
@@ -31,11 +34,33 @@ from krx_quant.algorithms.forecasts import (
     with_outcomes,
 )
 from krx_quant.baselines import Forecast
+from krx_quant.cards import Card, Meaning, learned
 from krx_quant.features import FeatureVector, ou_speed
 
 WEIGHTS = (0.0, 0.25, 0.5, 0.75, 1.0)  # of today's reversion speed against the learned one
 THRESHOLDS = (0.0, 0.5, 1.0, 1.5, 2.0, 2.5)  # |z| below this is noise
 DEFAULT_PARAMS = {"speed": 0.05, "weight": 0.5, "threshold": 1.0}
+TRAINING_DAYS = 20
+PARAM_MEANINGS: Mapping[str, Meaning] = {
+    "speed": Meaning(
+        "학습한 평균회귀 속도 κ: 4분 뒤 VWAP 대비 괴리가 e^(−4κ)배로 줄어든다고 본다. 0이면 되돌림이 없다. "
+        "임계값 밖 괴리의 4분 움직임에 최소제곱으로 맞춘다.",
+        "1/분",
+        learned(TRAINING_DAYS),
+    ),
+    "weight": Meaning(
+        "당일 속도(`reversion_speed`)의 가중치 w: 쓰는 κ = w × 당일 속도 + (1 − w) × 학습한 속도. 당일 "
+        "속도가 없으면 학습한 속도만 쓴다. 0, 0.25, 0.5, 0.75, 1 중에서 고른다.",
+        "비율 (0~1)",
+        learned(TRAINING_DAYS),
+    ),
+    "threshold": Meaning(
+        "z 임계값 θ: VWAP 대비 z-score의 절댓값이 θ보다 작으면 잡음으로 보고 되돌림을 0으로 둔다. 0, 0.5, 1, "
+        "1.5, 2, 2.5 중에서 고른다. κ와 w가 0이면 어느 θ에서나 예측이 같아 뜻이 없다.",
+        "표준편차",
+        learned(TRAINING_DAYS),
+    ),
+}
 
 
 def pullback(gap: float, speed: float, horizon: float = HORIZON_MINUTES) -> float:
@@ -60,7 +85,8 @@ def move_spread(volatility: float, speed: float, horizon: float = HORIZON_MINUTE
 class Gauss:
     name = "gauss"
     features: tuple[str, ...] = ("vwap_gap", "vwap_z", "reversion_speed", "volatility", "flat_ticks")
-    training_days = 20
+    training_days = TRAINING_DAYS
+    param_meanings = PARAM_MEANINGS
     card = Card(
         scientist="Carl Friedrich Gauss",
         character="역추세",
@@ -73,6 +99,18 @@ class Gauss:
             "OU 평균회귀 속도는 임계값 밖 괴리의 4분 움직임에 최소제곱으로 맞추고, "
             "당일 속도의 가중치와 z 임계값은 최근 20거래일 1분봉으로 격자 탐색해 "
             "log loss가 가장 작은 값을 고른다."
+        ),
+        forecasting=(
+            "4분 뒤 중간가 변화를 되돌림 기대값 −X × (1 − e^(−4κ))(X: VWAP 대비 괴리, 틱)를 중심으로, 폭이 "
+            "OU 과정이 4분 동안 퍼지는 만큼(1분 변동성 × √((1 − e^(−8κ)) ÷ (1 − e^(−2κ))), κ = 0이면 × √4)인 "
+            "정규분포로 본다. κ는 당일 속도와 학습한 속도를 가중치로 섞은 값이고, |z|가 임계값보다 작으면 "
+            f"중심을 0으로 둔다. {NORMAL_CLASSES} 기대수익은 그 중심이다. 변동성이나 보합 범위를 모르면 세 "
+            "확률을 1/3씩 둔다. κ = 0, w = 0을 배운 모델은 중심이 늘 0이라 상승·하락 확률이 같다."
+        ),
+        failure=(
+            "추세가 이어지는 장(뉴스, 지수 급변, 개장 직후 한 방향 흐름)에서 VWAP로의 되돌림을 기대해 틀리기 "
+            "쉽다. 개장 초에는 VWAP를 만든 봉이 적어 괴리와 z가 흔들린다. 되돌림이 없던 기간으로 학습하면 κ "
+            "= 0, w = 0을 배워 방향 정보 없이 0 중심 분포만 낸다."
         ),
     )
 

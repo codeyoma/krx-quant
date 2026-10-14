@@ -13,6 +13,8 @@ Personality card:
   changed over the last minute (#55).
 - **Learns**: over the last 60 trading days, a fixed number of boosting rounds, the same
   trees for the same samples (one thread, a fixed seed).
+- **Fails**: in a market unlike its 60 training days; trees do not reach past the values
+  they saw.
 
 It began as the one-minute version (#16); the book's, the tape's and the options' features
 came once recordings had piled up (#55). A model trained before reads the features it was
@@ -22,15 +24,16 @@ trained on, in their order. The series features (``minute_ticks``, ``microprice_
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import lightgbm as lgb
 import numpy as np
 
-from krx_quant.algorithms.contract import Card, Model, Sample
+from krx_quant.algorithms.contract import Model, Sample
 from krx_quant.algorithms.forecasts import UNKNOWN, class_moves, number, with_outcomes
 from krx_quant.baselines import Forecast
+from krx_quant.cards import Card, Meaning, class_move_meanings
 from krx_quant.features import FEATURES, SERIES_FEATURES, FeatureVector
 from krx_quant.pricing import Direction
 
@@ -67,13 +70,24 @@ BOOSTING: dict[str, Any] = {
 _FLOOR = 1e-6
 _TREES: dict[str, lgb.Booster] = {}  # read once per model version
 _KEPT = 4
+TRAINING_DAYS = 60
+# Its trees are text (the model's blob), not parameters: the API does not show them.
+PARAM_MEANINGS: Mapping[str, Meaning] = {
+    "rounds": Meaning(
+        f"부스팅 횟수(학습 설정, 늘 {ROUNDS}). 0이면 학습 전이라 트리가 없다.",
+        "번",
+        "밤 학습이 모델을 만들 때 적는다.",
+    ),
+    **class_move_meanings(TRAINING_DAYS),
+}
 
 
 class Turing:
     name = "turing"
     # Every number the Feature Store has, at registration: register Turing last.
     features: tuple[str, ...] = tuple(n for n in FEATURES if n not in SERIES_FEATURES)
-    training_days = 60
+    training_days = TRAINING_DAYS
+    param_meanings = PARAM_MEANINGS
     card = Card(
         scientist="Alan Turing",
         character="만능 학습",
@@ -88,6 +102,17 @@ class Turing:
         training=(
             "최근 60거래일 롤링으로 LightGBM을 정해진 횟수(200번) 부스팅한다. "
             "같은 표본이면 같은 트리가 나온다."
+        ),
+        forecasting=(
+            "정답(4분 뒤 중간가 변화의 상승·보합·하락)으로 직접 학습한 LightGBM 다중 분류 트리가 세 확률을 "
+            "낸다(합이 1이 되게 나눈다). 모르는 피처는 비워 두고, 트리가 학습에서 정한 쪽으로 보낸다. "
+            "기대수익은 학습에서 클래스별 평균 4분 변화를 세 확률로 가중한 값이다. 학습 전(트리 없음)에는 세 "
+            "확률을 1/3씩 둔다."
+        ),
+        failure=(
+            "학습한 60거래일과 다른 장세(국면 전환, 큰 이벤트가 있는 날)에서 틀리기 쉽다. 트리는 학습에서 본 "
+            "값의 범위 밖을 외삽하지 못한다. 녹화 전 날에는 호가·체결 피처가 비어 있어서, 녹화가 쌓일수록 그 "
+            "피처의 몫이 바뀐다."
         ),
     )
 

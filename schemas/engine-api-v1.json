@@ -356,22 +356,28 @@
     "algorithm_fields": {
       "description": "The fields of an algorithm, open so the detail can add to them.",
       "type": "object",
-      "required": ["name", "card", "features", "training_days", "model", "status"],
+      "required": [
+        "name", "card", "features", "feature_meanings", "training_days", "model", "param_meanings", "status"
+      ],
       "properties": {
         "name": {"type": "string"},
         "card": {
-          "type": "object",
-          "required": ["scientist", "character", "logic", "unique_features", "training"],
-          "additionalProperties": false,
-          "properties": {
-            "scientist": {"type": "string"},
-            "character": {"type": "string"},
-            "logic": {"type": "string"},
-            "unique_features": {"type": "array", "items": {"type": "string"}},
-            "training": {"type": "string"}
-          }
+          "description": "An algorithm's card always names its scientist.",
+          "$ref": "#/$defs/card",
+          "properties": {"scientist": {"type": "string"}},
+          "unevaluatedProperties": false
         },
         "features": {"type": "array", "items": {"type": "string"}},
+        "feature_meanings": {
+          "description": "Each of its features (every name in features): what it is, its unit, when it is known.",
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/meaning"}
+        },
+        "param_meanings": {
+          "description": "Every parameter its model can hold (default or fitted; a superset of model.params' names).",
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/meaning"}
+        },
         "training_days": {"type": "integer", "minimum": 1},
         "model": {
           "type": "object",
@@ -411,9 +417,63 @@
     "algorithms": {
       "description": "GET /v1/algorithms",
       "type": "object",
-      "required": ["algorithms"],
+      "required": ["algorithms", "baselines", "consensus"],
       "additionalProperties": false,
-      "properties": {"algorithms": {"type": "array", "items": {"$ref": "#/$defs/algorithm"}}}
+      "properties": {
+        "algorithms": {"type": "array", "items": {"$ref": "#/$defs/algorithm"}},
+        "baselines": {
+          "description": "The three baselines' cards.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "card"],
+            "additionalProperties": false,
+            "properties": {
+              "name": {"enum": ["baseline-flat", "baseline-persist", "baseline-random"]},
+              "card": {"$ref": "#/$defs/card"}
+            }
+          }
+        },
+        "consensus": {
+          "description": "The two consensus predictions' cards; their members and weights now are GET /v1/consensus.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "card"],
+            "additionalProperties": false,
+            "properties": {
+              "name": {"enum": ["consensus-fast", "consensus-final"]},
+              "card": {"$ref": "#/$defs/card"}
+            }
+          }
+        }
+      }
+    },
+    "card": {
+      "description": "A predictor's card (#164): written for the target now, the mid-point's change four minutes on.",
+      "type": "object",
+      "required": ["scientist", "character", "logic", "unique_features", "training", "forecasting", "failure"],
+      "additionalProperties": false,
+      "properties": {
+        "scientist": {"type": ["string", "null"], "description": "null: a baseline, named after no one"},
+        "character": {"type": "string"},
+        "logic": {"type": "string"},
+        "unique_features": {"type": "array", "items": {"type": "string"}},
+        "training": {"type": "string"},
+        "forecasting": {"type": "string", "description": "how the three probabilities are made"},
+        "failure": {"type": "string", "description": "the market it tends to be wrong in"}
+      }
+    },
+    "meaning": {
+      "description": "What a feature or a model parameter is (#164).",
+      "type": "object",
+      "required": ["meaning", "unit", "known"],
+      "additionalProperties": false,
+      "properties": {
+        "meaning": {"type": "string"},
+        "unit": {"type": "string"},
+        "known": {"type": "string", "description": "when it is known: at the bar close, before the open, learned overnight"}
+      }
     },
 
     "interval": {

@@ -1,8 +1,11 @@
 """Algorithm Contract: what an algorithm module provides.
 
-- a personality card: the scientist, the core logic, its own (unique) features and how
-  it learns;
-- the features it declares, the only ones it is given;
+- a personality card: the scientist, the core logic, its own (unique) features, how it
+  learns, how it makes its three probabilities and the market it tends to fail in
+  (``cards.Card``);
+- the features it declares, the only ones it is given (their meanings beside the Feature
+  Store's registry);
+- the meaning of every parameter its model can hold (``param_meanings``);
 - ``fit``: training samples in, a versioned model out;
 - ``predict``: one symbol's features and the model in, a forecast out; or, when the data
   it needs is missing at the bar close, ``NotPredicted`` with why (stored as the
@@ -24,6 +27,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from krx_quant.baselines import Forecast
+from krx_quant.cards import Card, Meaning
 from krx_quant.features import FeatureVector
 from krx_quant.pricing import Direction
 
@@ -47,17 +51,6 @@ class NotPredicted(Exception):
 class NothingToLearn(ValueError):
     """Raised by ``fit`` when its samples hold nothing it can learn from (no outcomes, no
     book): a gap in the data, not a defect. Any other error from ``fit`` is a failure."""
-
-
-@dataclass(frozen=True)
-class Card:
-    """The personality card."""
-
-    scientist: str
-    character: str  # e.g. trend following
-    logic: str
-    unique_features: tuple[str, ...]
-    training: str  # what is learned, and how
 
 
 @dataclass(frozen=True)
@@ -142,6 +135,8 @@ class Algorithm(Protocol):
     card: Card
     features: tuple[str, ...]
     training_days: int  # the rolling window it trains on
+    # Every parameter its model can hold, default or fitted: what it is, its unit, when known.
+    param_meanings: Mapping[str, Meaning]
 
     def default_model(self) -> Model: ...
 
