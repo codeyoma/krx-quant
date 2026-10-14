@@ -236,7 +236,8 @@ async def test_a_morning_with_another_kind_keeps_the_contract(tmp_path: Path) ->
 async def test_a_morning_with_the_range_keeps_the_contract(tmp_path: Path) -> None:
     """#180. Input: a replayed busy morning with the kinds the engine predicts (the range).
     Output: every endpoint within the contract; the range's outputs, answer paths and own
-    statistics within theirs (``range_output``, ``range_path``, ``range_stats``)."""
+    statistics within theirs (``range_output``, ``range_path``, ``range_stats``); a scored
+    prediction's k (``flat_ticks``, #200) is its answer's."""
     engine = await run(tmp_path / "engine.db", busy_morning(), until=at("10:00:00"), target_version=2)
 
     async with api(engine) as client:
@@ -251,6 +252,7 @@ async def test_a_morning_with_the_range_keeps_the_contract(tmp_path: Path) -> No
         check("range_output", p["output"])
         if p["answer"] is not None:
             check("range_path", p["answer"]["path"])
+            assert p["flat_ticks"] == p["answer"]["path"]["k"], "the bar close's k, the answer's (#200)"
     for e in board["baselines"]:
         check("range_stats", e["extra"])
 

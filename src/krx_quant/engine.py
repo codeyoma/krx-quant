@@ -66,15 +66,16 @@ each at the same bar closes from the same Market View: a kind's baselines predic
 symbol at once, once the algorithms have started, and its algorithms run with the
 direction's, in the same worker threads, under the same time limit and CPU budget,
 registered after them (the budget skips them first). A kind's predictions go to
-``kind_predictions``; at t + 4 minutes each window's answer, by the kind's answer function
-on the quotes the touch label reads, goes to ``kind_answers`` (special when a VI, circuit
-breaker or sidecar known at its bar close, or learned since, touches it) and scores every
-predictor of the kind there. The kinds have no consensus and no signals. Each daily review also
-judges each kind's algorithms against that kind's baselines, within the kind. A kind that
-fails (its answer function, a baseline) is logged and never holds up the direction. A kind
-baseline that predicts from a table (the range's climate, #180, ``kinds.TableBaseline``)
-runs the table the engine holds for it (``kind_tables``): its defaults, the one given at
-start, then whichever the morning swap installs, as the direction's climate table.
+``kind_predictions``, each with the bar close's k it was made with (#200); at t + 4 minutes
+each window's answer, by the kind's answer function on the quotes the touch label reads, goes
+to ``kind_answers`` (special when a VI, circuit breaker or sidecar known at its bar close, or
+learned since, touches it) and scores every predictor of the kind there. The kinds have no
+consensus and no signals. Each daily review also judges each kind's algorithms against that
+kind's baselines, within the kind. A kind that fails (its answer function, a baseline) is
+logged and never holds up the direction. A kind baseline that predicts from a table (the
+range's climate, #180, ``kinds.TableBaseline``) runs the table the engine holds for it
+(``kind_tables``): its defaults, the one given at start, then whichever the morning swap
+installs, as the direction's climate table.
 """
 
 from __future__ import annotations
@@ -952,7 +953,7 @@ class PredictionEngine:
                         bar_close=bar_close,
                         mid=c.mid,
                         tick=tick_size(c.mid) if c.mid is not None else None,
-                        flat_ticks=flat_ticks(c.mid, self.fee_rate) if c.mid is not None else None,
+                        flat_ticks=self._close_k(symbol, bar_close, at_close),
                         previous=previous if previous.label is not None else None,
                         # The windows over by now: their bar closes four minutes back or more.
                         day_classes=self.store.day_kind_classes(
@@ -974,7 +975,7 @@ class PredictionEngine:
                         for a in running
                         if a.kind == kind.name
                     ]
-                self._record_kind(kind, bar_close, made)
+                self._record_kind(kind, bar_close, at_close, made)
             except Exception:
                 log.exception("%s: its baselines failed at %s", kind.name, bar_close)
 
@@ -985,15 +986,27 @@ class PredictionEngine:
             b.using(self.kind_tables[b.name]) if isinstance(b, TableBaseline) else b for b in kind.baselines
         ]
 
+    def _close_k(self, symbol: str, bar_close: datetime, at_close: Mapping[str, _AtClose]) -> int | None:
+        """The flat band k at ``symbol``'s mid-point at the bar close, as the kinds' predictors
+        are given it (``KindInputs.flat_ticks``) and their answer counts it; from the reference
+        price there for a symbol not predicted (a VI). None without a mid-point."""
+        c = at_close.get(symbol)
+        mid = c.mid if c is not None else self._market.mid(symbol, bar_close)
+        return flat_ticks(mid, self.fee_rate) if mid is not None else None
+
     def _record_kind(
         self,
         kind: PredictionKind,
         bar_close: datetime,
+        at_close: Mapping[str, _AtClose],
         made: Sequence[tuple[str, str, Mapping[str, KindForecast | None], str]],
     ) -> None:
         """Store a kind's (name, model version, forecasts by symbol, status) entries as
-        displayed now (#179)."""
+        displayed now (#179), each with its bar close's k (#200): the one the forecast was made
+        with, kept as the price moves on before the answer."""
         displayed_at = self.clock.now()
+        symbols = {symbol for _, _, forecasts, _ in made for symbol in forecasts}
+        ks = {symbol: self._close_k(symbol, bar_close, at_close) for symbol in symbols}
         predictions = [
             NewKindPrediction(
                 symbol=symbol,
@@ -1003,6 +1016,7 @@ class PredictionEngine:
                 displayed_at=displayed_at,
                 output=None if forecast is None else kind.output(forecast),
                 status=status,
+                flat_ticks=ks[symbol],
             )
             for name, version, forecasts, status in made
             for symbol, forecast in forecasts.items()
@@ -1168,7 +1182,7 @@ class PredictionEngine:
         made, declined, status = await self._timed(
             name, bar_close, at_close, partial(_predict_kind_symbols, kind, algorithm, model, vectors)
         )
-        self._record_kind(kind, bar_close, _entries(name, model.version, made, declined, status))
+        self._record_kind(kind, bar_close, at_close, _entries(name, model.version, made, declined, status))
 
     async def _timed(
         self,

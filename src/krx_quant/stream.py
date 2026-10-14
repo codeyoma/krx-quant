@@ -306,7 +306,8 @@ def kind_prediction_json(row: dict[str, Any]) -> dict[str, Any]:
     output (the three probabilities, ``p_<class>`` in the kind's order, then the kind's
     fields) and, once its four minutes are over, its bar close's answer, every predictor's
     of the kind there. A prediction not made (status other than ``ok``) has neither, nor a
-    target time: it is not scored."""
+    target time: it is not scored. ``flat_ticks`` is the bar close's k it was made with
+    (#200), None without a mid-point there and for one stored before."""
     made = row["status"] == "ok"
     return {
         "algorithm": row["algorithm"],
@@ -315,6 +316,7 @@ def kind_prediction_json(row: dict[str, Any]) -> dict[str, Any]:
         "displayed_at": row["displayed_at"],
         "target_at": iso(datetime.fromisoformat(row["bar_close"]) + WINDOW) if made else None,
         "status": row["status"],
+        "flat_ticks": row["flat_ticks"],
         "output": row["output"] if made else None,
         "answer": _answer_json(row) if made else None,
     }

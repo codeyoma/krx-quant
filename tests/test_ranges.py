@@ -9,6 +9,7 @@ Prices: at 81,250 (bid 81,200, ask 81,300) the tick is 100 and the flat band k =
 
 from __future__ import annotations
 
+import asyncio
 import math
 from collections.abc import Sequence
 from datetime import date, datetime, timedelta
@@ -18,6 +19,7 @@ from typing import Any
 import pytest
 
 from krx_quant.algorithms.contract import KindSample, Model
+from krx_quant.clock import FakeClock
 from krx_quant.features import FeatureVector, Leaders
 from krx_quant.kind_registry import KINDS
 from krx_quant.kind_stats import summarize
@@ -38,6 +40,7 @@ from krx_quant.ranges import (
     quantile_stats,
 )
 from krx_quant.reference import Bar
+from krx_quant.replay import replay_into
 from krx_quant.training import bar_answers, training_day
 from tests.algorithm_doubles import stand_in_card, stand_in_meanings
 from tests.api_schema import check
@@ -544,6 +547,66 @@ async def test_the_climate_predicts_from_the_table_it_was_given(tmp_path: Path) 
     assert engine.kind_tables[CLIMATE] == newer
     assert not engine.switch_models({CLIMATE: newer})
     engine.store.close()
+
+
+def band_crossing() -> list[Any]:
+    """The book at 86,900 / 87,000 (mid 86,950: k = 2) every 10 s from 09:00:30 to 09:31:50,
+    then at 87,100 / 87,200 (mid 87,150, two ticks up, where k = 3) from 09:32:00 to 09:40."""
+    return steady_book(at("09:00:30"), at("09:31:50"), 86_900, 87_000) + steady_book(
+        at("09:32:00"), at("09:40:00"), 87_100, 87_200
+    )
+
+
+async def test_a_range_prediction_keeps_its_bar_close_s_k_after_the_price_moves_into_another_band(
+    tmp_path: Path,
+) -> None:
+    """#200. Input: the book above: in the 09:31 window the mid-point crosses the cost-rounding
+    boundary, from k = 2 to k = 3. Output: before its answer, every range prediction of the
+    09:31 bar close carries k = 2 (``flat_ticks``, what its predictors were given), while
+    ``/v1/symbols`` already shows 3 and the 09:33 bar close's predictions carry 3; after its
+    answer (r = 2: medium against k = 2, where k = 3 would call it small) they still carry 2,
+    the answer's k. The stream's ``kind_prediction`` items carry their own bar close's k."""
+    db = tmp_path / "engine.db"
+    events = band_crossing()
+    split = at("09:34:00")
+    engine = await run(db, [e for e in events if e[1]["received_at"] <= split], until=split, target_version=2)
+    at_0931 = f"/v1/symbols/{SYMBOL}/kinds/range/predictions?bar_close=2026-10-12T09:31:00%2B09:00"
+
+    async with api(engine) as client:
+        before = await get_json(client, at_0931)
+        at_0933 = await get_json(
+            client, f"/v1/symbols/{SYMBOL}/kinds/range/predictions?bar_close=2026-10-12T09:33:00%2B09:00"
+        )
+        symbols = await get_json(client, "/v1/symbols")
+        ws = await client.ws_connect("/v1/stream")
+        assert isinstance(engine.clock, FakeClock)
+        rest = [e for e in events if e[1]["received_at"] > split]
+        await replay_into(engine, engine.clock, rest, until=at("09:36:00"))
+        heard: list[dict[str, Any]] = []
+        last = "2026-10-12T09:36:00+09:00"
+        async with asyncio.timeout(5):
+            while not any(e["type"] == "kind_prediction" and e["bar_close"] == last for e in heard):
+                heard.append(await ws.receive_json())
+                check("event", heard[-1])
+        await ws.close()
+        after = await get_json(client, at_0931)
+
+    check("kind_predictions", before)
+    check("kind_predictions", after)
+    assert {CLIMATE, PERSIST} <= {p["algorithm"] for p in before["predictions"]}
+    assert {(p["flat_ticks"], p["answer"] is None) for p in before["predictions"]} == {(2, True)}
+    assert symbols["symbols"][0]["flat_ticks"] == 3, "k at the mid-point now"
+    assert {p["flat_ticks"] for p in at_0933["predictions"]} == {3}
+    assert {p["flat_ticks"] for p in after["predictions"]} == {2}, "the bar close's, kept"
+    answered = {(p["answer"]["class"], p["answer"]["path"]["r"]) for p in after["predictions"]}
+    assert answered == {("medium", 2.0)}, "two ticks against k = 2"
+    assert {p["answer"]["path"]["k"] for p in after["predictions"]} == {2}
+    made = {
+        e["bar_close"][11:16]: {p["flat_ticks"] for p in e["predictions"]}
+        for e in heard
+        if e["type"] == "kind_prediction" and e["prediction_kind"] == RANGE.name
+    }
+    assert made["09:35"] == made["09:36"] == {3}
 
 
 # Training and pre-validation.

@@ -15,7 +15,10 @@ The kinds besides the direction (#179, ``kinds.py``) have tables of their own:
 probabilities and the kind's fields, as JSON), ``kind_answers`` each window's answer, one per
 (kind, symbol, bar close, answer version), what every predictor of the kind there is scored
 on. Like ``touches`` they leave the schema version alone: an engine from before them still
-opens the database (``_KIND_SCHEMA``).
+opens the database (``_KIND_SCHEMA``). ``kind_predictions.flat_ticks`` (#200), the bar close's
+k each prediction was made with, is a column added the same way (``_ADDED_COLUMNS``): an
+engine from before it names the columns it writes, so it still opens and writes the
+database, and its rows have no k.
 
 Times are ISO 8601 strings in KST, which sort in time order.
 """
@@ -163,6 +166,8 @@ CREATE TABLE IF NOT EXISTS kind_predictions (  -- a prediction of a kind besides
     displayed_at TEXT NOT NULL,
     status TEXT NOT NULL,             -- as predictions.status: ok, timed_out, error, vi, no_book, no_previous
     output TEXT,                      -- JSON: p_<class> of its three classes, then its fields; null unless ok
+    flat_ticks INTEGER,               -- k at the bar close (#200): what its predictors were given; null
+                                      -- without a mid-point there, and in rows stored before #200
     UNIQUE (kind, symbol, algorithm, bar_close)
 );
 CREATE INDEX IF NOT EXISTS kind_predictions_by_close ON kind_predictions (kind, bar_close);
@@ -181,6 +186,22 @@ CREATE TABLE IF NOT EXISTS kind_answers (  -- a kind's answer of a bar close's f
     PRIMARY KEY (kind, symbol, bar_close, answer_version)
 );
 """
+
+# Columns added to a table after it was first made, without a schema version (#200): a
+# database made before has the table without them, and gets them when an engine opens it.
+# (table, column, type); new tables have them already (``_KIND_SCHEMA``).
+_ADDED_COLUMNS = (("kind_predictions", "flat_ticks", "INTEGER"),)
+
+
+def _added_columns(db: sqlite3.Connection) -> str:
+    """The statements adding ``_ADDED_COLUMNS`` a table already in ``db`` lacks."""
+    script = ""
+    for table, column, declared in _ADDED_COLUMNS:
+        have = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
+        if have and column not in have:  # none: the table is not there yet, and is made with it
+            script += f"ALTER TABLE {table} ADD COLUMN {column} {declared};"
+    return script
+
 
 # A kind's prediction ``p`` and its bar close's answer ``a`` of the version given (#179).
 KIND_ANSWER_JOIN = (
@@ -304,6 +325,7 @@ class NewKindPrediction:
     displayed_at: datetime
     output: Mapping[str, float] | None  # the probabilities and the kind's fields; None unless ok
     status: str = "ok"
+    flat_ticks: int | None = None  # k at the bar close (#200); None without a mid-point there
 
 
 @dataclass(frozen=True)
@@ -359,7 +381,11 @@ class PredictionStore:
         if version > _VERSION:
             raise RuntimeError(f"{path} was written by a newer engine (schema {version})")
         script = (
-            (_FROM_V1 if version == 1 else "") + _SCHEMA + _KIND_SCHEMA + f"PRAGMA user_version={_VERSION};"
+            (_FROM_V1 if version == 1 else "")
+            + _SCHEMA
+            + _KIND_SCHEMA
+            + _added_columns(self._db)
+            + f"PRAGMA user_version={_VERSION};"
         )
         self._db.executescript(f"BEGIN;{script}COMMIT;")
         # Bumped by every write, so derived results (statistics) know when to recompute.
@@ -772,7 +798,7 @@ class PredictionStore:
             for p in predictions:
                 cursor = self._db.execute(
                     "INSERT INTO kind_predictions (kind, symbol, algorithm, model_version, bar_close,"
-                    " displayed_at, status, output) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    " displayed_at, status, output, flat_ticks) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         kind,
                         p.symbol,
@@ -782,6 +808,7 @@ class PredictionStore:
                         iso(p.displayed_at),
                         p.status,
                         None if p.output is None else json.dumps(dict(p.output), separators=(",", ":")),
+                        p.flat_ticks,
                     ),
                 )
                 assert cursor.lastrowid is not None
