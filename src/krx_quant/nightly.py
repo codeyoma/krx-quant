@@ -75,7 +75,7 @@ from krx_quant.backfill import MINUTE_BARS_TR, bars_key
 from krx_quant.climate import CLIMATE, CLIMATE_DAYS, fit_climate
 from krx_quant.config import Settings, SettingsError
 from krx_quant.engine import ENGINE_FEEDS, partitions
-from krx_quant.features import PREVIOUS_DAY_RANGE, Leaders
+from krx_quant.features import Leaders
 from krx_quant.feeds import TRADE
 from krx_quant.feeds.base import KST, kst_day
 from krx_quant.kind_registry import KINDS, kind_named
@@ -84,7 +84,7 @@ from krx_quant.macro import regime_prefix
 from krx_quant.market_calendar import MarketCalendar, calendar_store
 from krx_quant.notify import send_notice
 from krx_quant.object_store import ObjectStore, file_digest, get_json, open_store, put_json
-from krx_quant.training import TrainingDay, leader_series, training_day
+from krx_quant.training import TrainingDay, leader_series, needs_previous_day, training_day
 
 log = logging.getLogger(__name__)
 
@@ -600,11 +600,12 @@ class _Trainer:
     def _fetch(self, day: date) -> None:
         """Copy a day's bars, the engine's recorded events and its macro regime from the store
         into the cache, where they are not there already; with a feature of the previous
-        trading day's ranges (#181), that day's bars of the symbols too.
+        trading day's ranges (#181) or a barrier's width (#183), that day's bars of the symbols
+        too.
         """
         series = [(MINUTE_BARS_TR, s) for s in self._symbols] + leader_series(self._leaders)
         keys = [bars_key(day, feed, name) for feed, name in series]
-        if PREVIOUS_DAY_RANGE in self._names:  # the previous trading day's ranges (#181)
+        if needs_previous_day(self._names, self._kinds):  # the previous trading day's (#181, #183)
             before = self._calendar.previous_trading_day(day)
             keys += [bars_key(before, MINUTE_BARS_TR, s) for s in self._symbols]
         keys += _engine_events(

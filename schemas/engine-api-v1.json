@@ -938,7 +938,7 @@
     "kind_prediction_fields": {
       "description": "The fields of a prediction of a kind besides the direction (#179), open so the stream's items can add the symbol.",
       "type": "object",
-      "required": ["algorithm", "model_version", "bar_close", "displayed_at", "target_at", "status", "flat_ticks", "output", "answer"],
+      "required": ["algorithm", "model_version", "bar_close", "displayed_at", "target_at", "status", "flat_ticks", "width_ticks", "output", "answer"],
       "properties": {
         "algorithm": {"type": "string"},
         "model_version": {"type": "string"},
@@ -954,8 +954,13 @@
           "type": ["integer", "null"],
           "minimum": 1
         },
+        "width_ticks": {
+          "description": "The barrier width w at the bar close (#183), in ticks of its mid-point, for a kind with barriers (the barrier's): fixed there by the engine, what its answer is made with, the same for every predictor of the bar close; never below k. Every status has it. null for a kind without barriers (the range), without a mid-point at the bar close, and for predictions stored before #183.",
+          "type": ["integer", "null"],
+          "minimum": 1
+        },
         "output": {
-          "description": "p_<class> for each of the kind's three classes (GET /v1/kinds), a distribution, then the kind's fields; null unless the status is ok. The range's: range_output (#180).",
+          "description": "p_<class> for each of the kind's three classes (GET /v1/kinds), a distribution, then the kind's fields; null unless the status is ok. The range's: range_output (#180); the barrier's: barrier_output (#183).",
           "oneOf": [
             {"type": "null"},
             {
@@ -993,7 +998,7 @@
         "unscorable": {"type": ["string", "null"]},
         "special": {"type": "boolean"},
         "scored_at": {"$ref": "#/$defs/time"},
-        "path": {"description": "The kind's summary of the window. The range's: range_path (#180).", "type": "object"}
+        "path": {"description": "The kind's summary of the window. The range's: range_path (#180); the barrier's: barrier_path (#183).", "type": "object"}
       }
     },
     "range_output": {
@@ -1071,6 +1076,73 @@
         "by_day": {"$ref": "#/$defs/interval"}
       }
     },
+    "barrier_output": {
+      "description": "A barrier prediction's output (#183, kind barrier): the three classes' probabilities (a distribution), up first, timeout, down first; no other field (the width is the prediction's width_ticks).",
+      "type": "object",
+      "required": ["p_up_first", "p_timeout", "p_down_first"],
+      "additionalProperties": false,
+      "properties": {
+        "p_up_first": {"type": "number", "minimum": 0, "maximum": 1},
+        "p_timeout": {"type": "number", "minimum": 0, "maximum": 1},
+        "p_down_first": {"type": "number", "minimum": 0, "maximum": 1}
+      }
+    },
+    "barrier_path": {
+      "description": "A barrier answer's path (#183): empty for a window not followed (restarted, not recorded); else the width w and the four-minute volatility sigma it came from (ticks; null when too few bars set w = k), k, the tick, the reference mid-point, the barriers U and L, the round-trip cost (ticks), the best quote at the bar close, when each barrier was first reached (by received time) and the best quote then, the last best quote received in the window, the quotes received and whether they went silent for 60 s. Without a mid-point at the bar close the barriers and the width are null.",
+      "oneOf": [
+        {"type": "object", "maxProperties": 0},
+        {
+          "type": "object",
+          "required": ["w", "sigma", "k", "tick", "anchor", "upper", "lower", "cost", "bid_start", "ask_start", "up_at", "up_bid", "up_ask", "down_at", "down_bid", "down_ask", "bid_end", "ask_end", "quotes", "silent"],
+          "additionalProperties": false,
+          "properties": {
+            "w": {"type": ["integer", "null"], "minimum": 1},
+            "sigma": {"type": ["number", "null"], "minimum": 0},
+            "k": {"type": ["integer", "null"], "minimum": 1},
+            "tick": {"type": ["number", "null"]},
+            "anchor": {"type": ["number", "null"]},
+            "upper": {"type": ["number", "null"]},
+            "lower": {"type": ["number", "null"]},
+            "cost": {"type": ["number", "null"], "minimum": 0},
+            "bid_start": {"type": ["number", "null"]},
+            "ask_start": {"type": ["number", "null"]},
+            "up_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]},
+            "up_bid": {"type": ["number", "null"]},
+            "up_ask": {"type": ["number", "null"]},
+            "down_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]},
+            "down_bid": {"type": ["number", "null"]},
+            "down_ask": {"type": ["number", "null"]},
+            "bid_end": {"type": ["number", "null"]},
+            "ask_end": {"type": ["number", "null"]},
+            "quotes": {"type": "integer", "minimum": 0},
+            "silent": {"type": "boolean"}
+          }
+        }
+      ]
+    },
+    "barrier_stats": {
+      "description": "A barrier predictor's own statistics (#183, a kind entry's extra): of its n scored predictions, the barrier P&L (research only) of its calls: a long on up_first, a short on down_first, none on timeout, all of them (pnl) and each side (long, short).",
+      "type": "object",
+      "required": ["n", "pnl", "long", "short"],
+      "additionalProperties": false,
+      "properties": {
+        "n": {"type": "integer", "minimum": 0},
+        "pnl": {"$ref": "#/$defs/barrier_pnl"},
+        "long": {"$ref": "#/$defs/barrier_pnl"},
+        "short": {"$ref": "#/$defs/barrier_pnl"}
+      }
+    },
+    "barrier_pnl": {
+      "description": "Barrier trades' P&L in ticks less the round-trip cost (#183, research only): how many, their total and the mean per trade with its normal 95% interval.",
+      "type": "object",
+      "required": ["trades", "total_ticks", "per_trade"],
+      "additionalProperties": false,
+      "properties": {
+        "trades": {"type": "integer", "minimum": 0},
+        "total_ticks": {"type": "number"},
+        "per_trade": {"$ref": "#/$defs/interval"}
+      }
+    },
     "kind_latest": {
       "description": "GET /v1/symbols/{symbol}/kinds/{kind}/latest (#179): the kind's predictions of the symbol's latest bar close.",
       "type": "object",
@@ -1112,7 +1184,7 @@
         "precision": {"description": "Of the calls of the kind's action classes, the share that happened.", "$ref": "#/$defs/interval"},
         "coverage": {"description": "The share of calls of the kind's action classes.", "$ref": "#/$defs/interval"},
         "brier": {"$ref": "#/$defs/interval"},
-        "extra": {"description": "The kind's own statistics; null for a kind without. The range's: range_stats (#180).", "type": ["object", "null"]},
+        "extra": {"description": "The kind's own statistics; null for a kind without. The range's: range_stats (#180); the barrier's: barrier_stats (#183).", "type": ["object", "null"]},
         "lift": {"$ref": "#/$defs/lift"}
       }
     },

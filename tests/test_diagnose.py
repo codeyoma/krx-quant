@@ -18,6 +18,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from krx_quant.backfill import BAR_SCHEMA, MINUTE_BARS_TR
+from krx_quant.barriers import AMBIGUOUS
 from krx_quant.baselines import Forecast
 from krx_quant.cli import main
 from krx_quant.kinds import Answer
@@ -136,6 +137,20 @@ def server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         ],
     )
     store.add_kind_answers("drift", 1, [(SYMBOL, at("09:01:00"), Answer("rose", None, {"r": 9.0}), False)])
+    # The barrier's answers (#183), at 81,250 (k = 2): 09:01 timeout (w 2), 09:02 up first (w 3),
+    # 09:31 up first and 09:41 down first (w 2); 09:03 special (left out), 09:04 ambiguous.
+    store.add_kind_answers(
+        "barrier",
+        1,
+        [
+            (SYMBOL, at("09:01:00"), barriered("timeout", 2), False),
+            (SYMBOL, at("09:02:00"), barriered("up_first", 3), False),
+            (SYMBOL, at("09:31:00"), barriered("up_first", 2), False),
+            (SYMBOL, at("09:41:00"), barriered("down_first", 2), False),
+            (SYMBOL, at("09:03:00"), barriered("down_first", 2), True),
+            (SYMBOL, at("09:04:00"), Answer(None, AMBIGUOUS, {}), False),
+        ],
+    )
     store.close()
     # An earlier target version's label of the same 09:01 window: not this version's, left out.
     conn = sqlite3.connect(state / DB_NAME)
@@ -170,6 +185,23 @@ def server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return tmp_path
 
 
+def barriered(label: str, w: int) -> Answer:
+    """A barrier answer at 81,250 (k = 2, the cost 1.86875 ticks) of width ``w``: bought at the
+    ask 81,300 or sold at the bid 81,200 at the bar close."""
+    path = {
+        "w": w,
+        "k": 2,
+        "tick": 100,
+        "anchor": 81_250.0,
+        "upper": 81_250.0 + w * 100,
+        "lower": 81_250.0 - w * 100,
+        "cost": 1.86875,
+        "bid_start": 81_200.0,
+        "ask_start": 81_300.0,
+    }
+    return Answer(label, None, path)
+
+
 def ranged(label: str, r: float, up: float, down: float) -> Answer:
     """A range answer at 81,250 (k = 2) of ``r`` ticks, ``up`` and ``down`` of it."""
     return Answer(label, None, {"r": r, "k": 2, "tick": 100, "anchor": 81_250.0, "up": up, "down": down})
@@ -179,6 +211,11 @@ def ranged(label: str, r: float, up: float, down: float) -> Answer:
 # 81,200): 81,400 to 81,200 by 09:04, 2 ticks (c = 0 medium as the quotes; c = 1 small); from
 # 09:02 (close 81,300): 81,300 to 81,200, 1 tick (small either way, as the quotes); from 09:31
 # (close 81,300): 81,700 to 81,300, 4 ticks (c = 0 large as the quotes; c = 1 medium).
+# The barrier's bar rule (#183), w = k = 2 (fewer than twenty bars, no Friday): from 09:01 (the
+# close 81,200 at its low: U 81,600, L 80,900) nothing reached, timeout as the quotes; from 09:02
+# (81,300, the next open the same: U 81,600, L 81,000) timeout, the quotes up first; from 09:31
+# (81,300 at its high: U 81,600, L 80,900) 09:31's 81,700, up first as the quotes; from 09:41
+# (81,300, one price: U 81,600, L 81,000) both in 09:41's bar: the same minute.
 BARS = [
     ("09:00:00", 81_300, 81_200, 81_200),
     ("09:01:00", 81_400, 81_200, 81_300),
@@ -189,6 +226,8 @@ BARS = [
     ("09:30:00", 81_300, 81_200, 81_300),
     ("09:31:00", 81_700, 81_300, 81_600),
     ("09:32:00", 81_600, 81_500, 81_500),
+    ("09:40:00", 81_300, 81_300, 81_300),
+    ("09:41:00", 81_800, 80_800, 81_300),
 ]
 
 
@@ -294,6 +333,21 @@ def test_the_measurements_are_reported_as_worked_out_by_hand(
         "  005930 위로 간 폭(틱): p50 1.5 · p90 1.5 · p99 1.5 · 최대 4"
         " | 아래로 간 폭(틱): p50 0.5 · p90 0.5 · p99 0.5 · 최대 1" in out
     )
+    # The barrier's answers (#183), the special one left out.
+    assert "  005930 09:00: 위 먼저 50% · 시간 만료 50% · 아래 먼저 0% (2창)" in out
+    assert "  005930 09:30: 위 먼저 50% · 시간 만료 0% · 아래 먼저 50% (2창)" in out
+    assert "  특수 상황 1창(뺌) · ambiguous 1 (채점 불가)" in out
+    assert "  005930 폭 w(틱): p50 2 · p90 2 · p99 2 · 최대 3 · w = k 75% (4창)" in out
+    # The bar rule: 09:01 and 09:31 as the quotes, 09:02 not; 09:41 in the same minute.
+    assert "  1분봉 규칙과 호가 정답의 클래스 일치율: 66.7% (3창) · 같은 분 양쪽 닿음 25.0% (4창 중)" in out
+    assert "    005930: 66.7% (3창) · 같은 분 양쪽 닿음 25.0% (4창 중)" in out
+    # Every call right: 09:02 long to U (81,550): 2.5 − 1.86875; 09:31 long (81,450) and 09:41
+    # short (81,050): 1.5 − 1.86875 each; 09:01 timeout, no trade. Their mean −0.035, its
+    # standard error 1/3: ± 1.96 / 3.
+    assert (
+        "  005930 미래를 알았을 때의 장벽 손익(틱, 연구용): 거래 3 · 합계 -0.1 · 거래당 -0.04"
+        " (95% -0.69–0.62)" in out
+    )
     assert snapshot(server) == before, "nothing is written, not even beside the DB"
 
 
@@ -332,5 +386,5 @@ def test_a_section_without_its_data_says_so(
     assert main(["diagnose"]) == 0
 
     out = capsys.readouterr().out
-    assert out.count("  없음") == 7
+    assert out.count("  없음") == 8
     assert not (tmp_path / "state").exists() and not (tmp_path / "data").exists()

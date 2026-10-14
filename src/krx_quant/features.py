@@ -2,8 +2,9 @@
 
 A feature is a function of a ``Snapshot``: the day's finished one-minute bars up to the
 bar close, the reference price there, when the session opened, the previous trading day's
-one-minute ranges by 30-minute slot (``day_slot_ranges``, #181: from its backfilled bars,
-on recorded and backfilled days alike), the bars of the series
+one-minute ranges by 30-minute slot (``day_slot_ranges``, #181) and its one-minute bars of
+continuous trading (#183, the barrier's width), both from its backfilled bars, on recorded
+and backfilled days alike, the bars of the series
 that may lead the symbol (``Leaders``), the microprices of its book at each minute's end
 and its order flow (``OrderFlow``: the book, the trades' sides and venues) and trade
 arrivals (``Arrivals``), recorded days only (``BOOK_FEATURES``, ``TAPE_FEATURES``:
@@ -30,6 +31,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from functools import cached_property
 from itertools import product
+from typing import NamedTuple, Protocol
 
 from krx_quant.cards import Meaning
 from krx_quant.config import Settings
@@ -45,9 +47,21 @@ from krx_quant.regime import Regime
 FeatureValue = float | None
 Series = tuple[float, ...]
 Value = FeatureValue | Series
-# A symbol's previous trading day's one-minute ranges by 30-minute slot, for a day
-# (``day_slot_ranges``, #181): what ``Snapshot.previous_ranges`` holds. Empty when unknown.
-PreviousRanges = Callable[[str, date], Mapping[str, float]]
+
+
+class PreviousDays(Protocol):
+    """A symbol's previous trading day, for a day (``backfill.PreviousDay``: from that day's
+    backfilled bars): what ``Snapshot.previous_ranges`` and ``Snapshot.previous_bars`` hold."""
+
+    def __call__(self, symbol: str, day: date) -> Mapping[str, float]:
+        """Its one-minute ranges by 30-minute slot (``day_slot_ranges``, #181); empty when unknown."""
+        ...
+
+    def bars(self, symbol: str, day: date) -> Sequence[Bar]:
+        """Its one-minute bars of continuous trading, oldest first (#183, the barrier's width);
+        empty when unknown."""
+        ...
+
 
 # The macro regimes (regime.py) as the numbers a feature holds: shock 0, risk_off 1,
 # risk_on 2, neutral 3.
@@ -148,6 +162,9 @@ class Snapshot:
     # The previous trading day's mean one-minute range (high − low, won) in each 30-minute
     # slot of its session (``day_slot_ranges``, #181), by slot; empty when unknown (no bars).
     previous_ranges: Mapping[str, float] = field(default_factory=dict)
+    # The previous trading day's one-minute bars of continuous trading, oldest first (#183,
+    # the barrier's width); empty when unknown (no bars).
+    previous_bars: Sequence[Bar] = ()
 
     @classmethod
     def at(
@@ -168,6 +185,7 @@ class Snapshot:
         arrivals: Arrivals | None = None,
         atm_iv: float | None = None,
         previous_ranges: Mapping[str, float] | None = None,
+        previous_bars: Sequence[Bar] = (),
     ) -> Snapshot:
         """A snapshot with the tick and flat band of ``price``."""
         lead, known = leaders or {}, flows or Flows()
@@ -189,7 +207,13 @@ class Snapshot:
             arrivals or Arrivals(),
             atm_iv,
             previous_ranges or {},
+            previous_bars,
         )
+
+    @cached_property
+    def barrier(self) -> Width | None:
+        """The barrier's width at the bar close (``barrier_width``, #183), computed once."""
+        return barrier_width(self.bars, self.previous_bars, self.session_open, self.price, self.flat_ticks)
 
     @cached_property
     def lead_moves(self) -> dict[str, list[FeatureValue]]:
@@ -670,6 +694,9 @@ def flat_ticks(s: Snapshot) -> FeatureValue:
 # out): the direction predicts as it did.
 RANGE_MINUTES = (4, 20, 60)
 PREVIOUS_DAY_RANGE = "range_prev_day"
+# The barrier's own features (#183): its width at the bar close, and that width over σ̂₄.
+BARRIER_WIDTH = "barrier_width"
+BARRIER_SIGMA = "barrier_sigma"
 
 
 def range_feature(minutes: int) -> str:
@@ -725,6 +752,100 @@ def range_prev_day(s: Snapshot) -> FeatureValue:
     ticks of the reference price: unknown without that day's bars or a trade in the slot."""
     width = s.previous_ranges.get(slot(s.bar_close))
     return None if width is None or s.tick is None else width / s.tick
+
+
+# The barrier's width (#178, #183): López de Prado's horizontal barriers, set at a multiple
+# (one) of a volatility estimate, never closer than the cost. The engine fixes it at each bar
+# close (``Snapshot.barrier``): the barrier's answer reads it, every barrier prediction keeps
+# it, and its algorithms get it as features. Turing leaves those out: the direction predicts as
+# it did.
+BARRIER_SPAN = 100  # the exponential weighting's span, in one-minute changes (López de Prado's)
+BARRIER_MIN_BARS = 20  # with fewer bars the width is k
+BARRIER_MINUTES = 4  # the time barrier: σ̂₄ = σ̂₁ × √4
+
+
+class Width(NamedTuple):
+    """A bar close's barrier width (#183): w in ticks of the reference price, and the
+    four-minute volatility σ̂₄ it came from, in ticks (None from too few bars: then w = k)."""
+
+    ticks: int
+    sigma: float | None
+
+
+def ewm_std(values: Sequence[float], span: int) -> float | None:
+    """The exponentially weighted standard deviation of ``values`` (oldest first) at the last
+    one, as pandas' ``ewm(span=span).std()`` gives it (``adjust=True``, bias-corrected): the
+    latest value weighs 1 and each older one ``1 − 2 / (span + 1)`` times the one after it;
+    the weighted mean is taken off, and the weighted squares are scaled by W / (W² − Σw²)
+    (W the weights' sum), as the unbiased variance is for equal weights. None from fewer than
+    two values. Two values give |x₁ − x₂| ÷ √2 whatever the span."""
+    n = len(values)
+    if n < 2:
+        return None
+    decay = 1 - 2 / (span + 1)
+    weights = [decay ** (n - 1 - i) for i in range(n)]
+    total = sum(weights)
+    mean = sum(w * x for w, x in zip(weights, values, strict=True)) / total
+    spread = sum(w * (x - mean) ** 2 for w, x in zip(weights, values, strict=True))
+    unbiased = total * total - sum(w * w for w in weights)
+    return math.sqrt(max(0.0, spread * total / unbiased))
+
+
+def minute_changes(bars: Sequence[Bar]) -> list[float]:
+    """The changes of the closes of ``bars`` (oldest first) between bars a minute apart: a move
+    across minutes without a bar (no trades) is not a one-minute change and is left out."""
+    return [
+        later.close - b.close
+        for b, later in zip(bars, bars[1:], strict=False)
+        if later.start - b.start == BAR
+    ]
+
+
+def barrier_width(
+    bars: Sequence[Bar],
+    previous: Sequence[Bar],
+    session_open: datetime | None,
+    price: float | None,
+    k: int | None,
+) -> Width | None:
+    """The barrier's width at a bar close (#183), from the day's one-minute bars finished by
+    then (``bars``, those from the open: continuous trading) and the previous trading day's of
+    continuous trading (``previous``), at the reference ``price`` and its flat band ``k``.
+
+    σ̂₁ is the exponentially weighted standard deviation (``ewm_std``, span ``BARRIER_SPAN``)
+    of the bars' one-minute changes of the close (``minute_changes``), in ticks of the
+    reference price, the previous day's first and then the day's, in order (the night between
+    them is no change): just after the open it rests on the previous day's last bars, and the
+    day's own take over as they come. σ̂₄ = σ̂₁ × √4. w is σ̂₄ rounded to whole ticks (half
+    up), and never below k. With fewer than ``BARRIER_MIN_BARS`` bars (both days together), or
+    fewer than two changes, w = k and σ̂₄ is unknown. None without a reference price."""
+    if price is None or k is None:
+        return None
+    today = [b for b in bars if session_open is None or b.start >= session_open]
+    if len(previous) + len(today) < BARRIER_MIN_BARS:
+        return Width(k, None)
+    tick = tick_size(price)
+    sigma = ewm_std([c / tick for c in (*minute_changes(previous), *minute_changes(today))], BARRIER_SPAN)
+    if sigma is None:
+        return Width(k, None)
+    sigma *= math.sqrt(BARRIER_MINUTES)
+    # Rounded first so a σ̂₄ of exactly half a tick more is not pulled down by float error.
+    return Width(max(k, math.floor(round(sigma, 9) + 0.5)), sigma)
+
+
+def barrier_width_feature(s: Snapshot) -> FeatureValue:
+    """The barrier's width w at the bar close (``Snapshot.barrier``), in ticks."""
+    width = s.barrier
+    return None if width is None else float(width.ticks)
+
+
+def barrier_sigma(s: Snapshot) -> FeatureValue:
+    """The barrier's width over the four-minute volatility it came from, w ÷ σ̂₄: about 1 where
+    σ̂₄ set it, above 1 where k did. Unknown without σ̂₄ (too few bars), or with σ̂₄ 0."""
+    width = s.barrier
+    if width is None or not width.sigma:
+        return None
+    return width.ticks / width.sigma
 
 
 def _moves(bars: Sequence[Bar], at: datetime) -> list[FeatureValue] | None:
@@ -830,10 +951,14 @@ FEATURES: dict[str, Feature] = {
     **{lead_feature(group, lag): _lead(group, lag) for group in LEAD_GROUPS for lag in LEAD_LAGS},
     **{range_feature(m): _range(m) for m in RANGE_MINUTES},
     PREVIOUS_DAY_RANGE: range_prev_day,
+    BARRIER_WIDTH: barrier_width_feature,
+    BARRIER_SIGMA: barrier_sigma,
 }
 LEAD_FEATURES = frozenset(lead_feature(group, lag) for group in LEAD_GROUPS for lag in LEAD_LAGS)
 # The range's own features (#181): no direction algorithm reads them.
 RANGE_FEATURES = frozenset({*(range_feature(m) for m in RANGE_MINUTES), PREVIOUS_DAY_RANGE})
+# The barrier's own features (#183): no direction algorithm reads them either.
+BARRIER_FEATURES = frozenset({BARRIER_WIDTH, BARRIER_SIGMA})
 # The features that are series of numbers.
 SERIES_FEATURES = frozenset({"minute_ticks", "microprice_ticks", "kospi200f_moves"})
 # The features from the book, and from the trades' sides and venues: none on a day with
@@ -1082,6 +1207,20 @@ FEATURE_MEANINGS: dict[str, Meaning] = {
         "틱",
         "그날 개장 전에 안다(전 거래일의 백필 1분봉). 녹화된 날과 백필 날에 모두 있다. 전 거래일의 백필이 "
         "없거나 그 시간대에 체결이 없었거나 기준가가 없으면 없다.",
+    ),
+    BARRIER_WIDTH: Meaning(
+        "장벽 폭 w: 봉 마감 전에 끝난 1분봉 종가의 1분 변화(봉 마감 기준가의 호가단위, 전 거래일 "
+        "연속매매 봉에 이어서)의 지수가중 표준편차(span 100) × √4를 반올림한 틱. k보다 작으면 k, 봉이 "
+        "20개 미만이면 k다. 장벽은 기준가 ± w틱이다.",
+        "틱",
+        f"{_BARS} 전 거래일 봉은 그날의 백필 1분봉이다. 녹화된 날과 백필 날에 모두 있다. 기준가가 "
+        "없으면 없다.",
+    ),
+    BARRIER_SIGMA: Meaning(
+        "장벽 폭 w ÷ 그 폭을 정한 4분 변동성 σ̂₄(1분 변화 지수가중 표준편차 × √4, 틱). 1 근처면 "
+        "변동성이, 1보다 크면 비용 k가 폭을 정했다.",
+        "배",
+        f"{_BARS} 녹화된 날과 백필 날에 모두 있다. 봉이 20개 미만이거나 σ̂₄가 0이거나 기준가가 없으면 없다.",
     ),
 }
 

@@ -32,9 +32,12 @@ Market View follows, as the engine answers them; on a backfilled day the kind's 
 (``Kind.bar_answer``; none without one). The bar closes left out are the direction's (a VI,
 a special situation).
 
-The previous trading day's one-minute ranges (``range_prev_day``, #181) come from that day's
-backfilled bars (``backfill.PreviousDay``), on a recorded day as on a backfilled one, as the
-engine reads them.
+The previous trading day's one-minute ranges (``range_prev_day``, #181) and bars (#183, the
+barrier's width) come from that day's backfilled bars (``backfill.PreviousDay``), on a recorded
+day as on a backfilled one, as the engine reads them. A kind with barriers (#183) has their
+width at each bar close from the bars up to it: on a recorded day the Market View's, as the
+engine fixes it; on a backfilled day the same rule on the backfilled bars, given to the bar
+rule (``Kind.width``, ``kinds.BarAnswer``).
 """
 
 from __future__ import annotations
@@ -55,12 +58,13 @@ from krx_quant.config import Settings
 from krx_quant.contracts import KOSPI200, USD, days_to_expiry
 from krx_quant.engine import Event
 from krx_quant.features import (
+    BARRIER_FEATURES,
     LEAD_FEATURES,
     PREVIOUS_DAY_RANGE,
     FeatureStore,
     FeatureVector,
     Leaders,
-    PreviousRanges,
+    PreviousDays,
     Snapshot,
     TouchTerms,
     Value,
@@ -139,8 +143,8 @@ def training_day(
     """
     session = calendar.session(day)
     regime = day_regime(data_dir, day, session.open) if session is not None else None
-    # The previous trading day's ranges (#181), read only for a feature of them.
-    previous = PreviousDay(data_dir, calendar) if PREVIOUS_DAY_RANGE in names else None
+    # The previous trading day's ranges and bars (#181, #183), read only when something uses them.
+    previous = PreviousDay(data_dir, calendar) if needs_previous_day(names, kinds) else None
     if is_recorded(data_dir, day, symbols):
         events = recorded_events(data_dir, day, symbols, leaders)
         made, answers = recorded_day(
@@ -172,7 +176,15 @@ def training_day(
         target_version=target_version,
         previous=previous,
     )
-    return TrainingDay("close", made, bar_answers(bar_days, calendar, fee_rate, kinds))
+    return TrainingDay("close", made, bar_answers(bar_days, calendar, fee_rate, kinds, previous=previous))
+
+
+def needs_previous_day(names: Iterable[str], kinds: Sequence[Kind] = ()) -> bool:
+    """Whether a day's samples of the features ``names`` and the ``kinds``' answers read the
+    previous trading day's backfilled bars: its ranges (``range_prev_day``, #181), the
+    barrier's width (its features, and a kind with barriers, #183)."""
+    named = set(names)
+    return PREVIOUS_DAY_RANGE in named or bool(BARRIER_FEATURES & named) or any(k.width for k in kinds)
 
 
 def is_recorded(data_dir: Path, day: date, symbols: Sequence[str]) -> bool:
@@ -217,7 +229,7 @@ def samples(
     leaders: Leaders | None = None,
     regimes: Mapping[date, str | None] | None = None,
     target_version: int = 1,
-    previous: PreviousRanges | None = None,
+    previous: PreviousDays | None = None,
 ) -> list[Sample]:
     """A sample per bar close in each day's prediction window, in time order, from backfilled
     bars: the reference price is the last close, the outcome the close four minutes later;
@@ -225,7 +237,8 @@ def samples(
 
     ``leader_days`` holds the leading series' bars by (series, day); the other symbols of
     ``bar_days`` lead too. ``regimes`` holds each day's macro regime (none: unknown).
-    ``previous`` gives each symbol's previous trading day's ranges (#181; none: unknown).
+    ``previous`` gives each symbol's previous trading day's ranges and bars (#181, #183; none:
+    unknown).
     """
     store = store or FeatureStore()
     leaders = leaders or Leaders()
@@ -243,6 +256,7 @@ def samples(
         closes = {b.start: b.close for b in bars}
         expiry = days_to_expiry(day, calendar)
         ranges = previous(symbol, day) if previous is not None else None
+        before = previous.bars(symbol, day) if previous is not None else ()
         t, last = prediction_window(session)
         while t <= last:
             done = bars[: bisect.bisect_right(ends, t)]
@@ -261,6 +275,7 @@ def samples(
                 regime=(regimes or {}).get(day),
                 expiry_days=expiry,
                 previous_ranges=ranges,
+                previous_bars=before,
             )
             values = store.compute(snapshot, names)
             later = closes.get(t + HORIZON - BAR)  # the close of the bar ending at t + 4 minutes
@@ -320,7 +335,7 @@ def recorded_day(
     regime: str | None = None,
     target_version: int = 1,
     kinds: Sequence[Kind] = (),
-    previous: PreviousRanges | None = None,
+    previous: PreviousDays | None = None,
 ) -> tuple[list[Sample], Answers]:
     """A sample per bar close of ``day``'s prediction window and symbol, in time order, from
     the day's events (in receipt order) through the engine's Market View; and the ``kinds``'
@@ -333,7 +348,7 @@ def recorded_day(
     records it. A symbol in a VI at a bar close has no sample there (the engine does not
     predict it), and neither has a bar close whose four minutes a VI, circuit breaker or
     sidecar touches (live statistics leave it out). ``previous`` gives each symbol's previous
-    trading day's ranges (#181), as the engine's does.
+    trading day's ranges and bars (#181, #183), as the engine's does.
     """
     session = calendar.session(day)
     if session is None:
@@ -407,12 +422,19 @@ def recorded_day(
 
 
 def bar_answers(
-    bar_days: BarDays, calendar: MarketCalendar, fee_rate: float, kinds: Sequence[Kind]
+    bar_days: BarDays,
+    calendar: MarketCalendar,
+    fee_rate: float,
+    kinds: Sequence[Kind],
+    *,
+    previous: PreviousDays | None = None,
 ) -> Answers:
     """The ``kinds``' answers of each bar close of the days ``bar_days`` holds, by their bar
     rules (#179, ``Kind.bar_answer``): from the bar that ended at the bar close and the bars of
-    the four minutes after it (those with trades). None without that bar; a kind without a
-    bar rule has none."""
+    the four minutes after it (those with trades); for a kind with barriers (#183), with their
+    width at the bar close (``Kind.width``) from the day's bars finished by then and the
+    previous trading day's from ``previous`` (none: unknown), at the bar close's close. None
+    without that bar; a kind without a bar rule has none."""
     ruled = [k for k in kinds if k.bar_answer is not None]
     out: Answers = {}
     if not ruled:
@@ -423,16 +445,24 @@ def bar_answers(
             continue
         ends = [b.start + BAR for b in bars]
         starts = [b.start for b in bars]
+        before = previous.bars(symbol, day) if previous is not None and any(k.width for k in ruled) else ()
         t, last = prediction_window(session)
         while t <= last:
             done = bars[: bisect.bisect_right(ends, t)]
             closing = done[-1] if done and done[-1].start + BAR == t else None
             after = bars[bisect.bisect_left(starts, t) : bisect.bisect_left(starts, t + HORIZON)]
+            snapshot = None
+            if closing is not None and any(k.width for k in ruled):
+                snapshot = Snapshot.at(
+                    symbol, t, done, closing.close, fee_rate, session_open=session.open, previous_bars=before
+                )
             for kind in ruled:
                 assert kind.bar_answer is not None
-                out[(kind.name, symbol, t)] = (
-                    None if closing is None else kind.bar_answer(closing, after, fee_rate)
-                )
+                if closing is None:
+                    out[(kind.name, symbol, t)] = None
+                    continue
+                width = kind.width(snapshot) if kind.width is not None and snapshot is not None else None
+                out[(kind.name, symbol, t)] = kind.bar_answer(closing, after, fee_rate, width=width)
             t += BAR
     return out
 

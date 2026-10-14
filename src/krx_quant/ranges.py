@@ -64,6 +64,7 @@ from krx_quant.stats import Interval, day_mean, interval_json, mean_interval, wi
 
 if TYPE_CHECKING:  # the algorithm contract builds on the kinds: its types only
     from krx_quant.algorithms.contract import KindSample, Model
+    from krx_quant.features import Width
 
 NAME = "range"
 CLASSES = ("small", "medium", "large")
@@ -126,11 +127,14 @@ def range_answer(window: Followed) -> Answer:
     return Answer(range_class(r, window.k), None, path)
 
 
-def bar_range(closing: Bar, after: Sequence[Bar], fee_rate: float, c: int = BAR_C) -> Answer | None:
+def bar_range(
+    closing: Bar, after: Sequence[Bar], fee_rate: float, c: int = BAR_C, *, width: Width | None = None
+) -> Answer | None:
     """The range answer of the four minutes after a bar close, from one-minute bars (training
     on a day without quotes): the bar that ended at the bar close (``closing``) and the bars of
     the four minutes from it (``after``, those with trades). None without a trade in those
-    minutes, as the touch label's bar rule.
+    minutes, as the touch label's bar rule. The range has no barriers: ``width`` is None, and
+    not read (``kinds.BarAnswer``).
 
     The close is the reference, and k the flat band at it. r is the highest high less the
     lowest low of the close and those bars, in ticks of the close's tick size, less ``c``
@@ -143,9 +147,9 @@ def bar_range(closing: Bar, after: Sequence[Bar], fee_rate: float, c: int = BAR_
     k = flat_ticks(price, fee_rate)
     high = max(price, *(b.high for b in after))
     low = min(price, *(b.low for b in after))
-    width = (high - low) / tick
-    r = max(0.0, width - c)
-    path = {"r": r, "k": k, "tick": tick, "anchor": price, "high": high, "low": low, "width": width, "c": c}
+    spread = (high - low) / tick
+    r = max(0.0, spread - c)
+    path = {"r": r, "k": k, "tick": tick, "anchor": price, "high": high, "low": low, "width": spread, "c": c}
     return Answer(range_class(r, k), None, path)
 
 

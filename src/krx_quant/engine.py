@@ -66,7 +66,8 @@ each at the same bar closes from the same Market View: a kind's baselines predic
 symbol at once, once the algorithms have started, and its algorithms run with the
 direction's, in the same worker threads, under the same time limit and CPU budget,
 registered after them (the budget skips them first). A kind's predictions go to
-``kind_predictions``, each with the bar close's k it was made with (#200); at t + 4 minutes
+``kind_predictions``, each with the bar close's k it was made with (#200) and, for a kind with
+barriers (#183), their width fixed there (``width_ticks``); at t + 4 minutes
 each window's answer, by the kind's answer function on the quotes the touch label reads, goes
 to ``kind_answers`` (special when a VI, circuit breaker or sidecar known at its bar close, or
 learned since, touches it) and scores every predictor of the kind there. The kinds have no
@@ -116,7 +117,7 @@ from krx_quant.features import (
     FeatureStore,
     FeatureVector,
     Leaders,
-    PreviousRanges,
+    PreviousDays,
     TouchTerms,
     Value,
 )
@@ -353,7 +354,7 @@ class PredictionEngine:
         climate: Model | None = None,
         kinds: Sequence[PredictionKind] = KINDS,
         kind_algorithms: Sequence[KindAlgorithm] = KIND_ALGORITHMS,
-        previous: PreviousRanges | None = None,
+        previous: PreviousDays | None = None,
     ) -> None:
         self.store = store
         self.commit = commit  # the code it runs (the deploy's KRX_COMMIT)
@@ -1003,10 +1004,12 @@ class PredictionEngine:
     ) -> None:
         """Store a kind's (name, model version, forecasts by symbol, status) entries as
         displayed now (#179), each with its bar close's k (#200): the one the forecast was made
-        with, kept as the price moves on before the answer."""
+        with, kept as the price moves on before the answer; and the kind's barrier width there
+        (#183), the one its answer is made with."""
         displayed_at = self.clock.now()
         symbols = {symbol for _, _, forecasts, _ in made for symbol in forecasts}
         ks = {symbol: self._close_k(symbol, bar_close, at_close) for symbol in symbols}
+        widths = {symbol: self._market.kind_width(kind, symbol, bar_close) for symbol in symbols}
         predictions = [
             NewKindPrediction(
                 symbol=symbol,
@@ -1017,6 +1020,7 @@ class PredictionEngine:
                 output=None if forecast is None else kind.output(forecast),
                 status=status,
                 flat_ticks=ks[symbol],
+                width_ticks=None if (width := widths[symbol]) is None else width.ticks,
             )
             for name, version, forecasts, status in made
             for symbol, forecast in forecasts.items()

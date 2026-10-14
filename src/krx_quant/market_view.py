@@ -15,6 +15,9 @@ that event changes them: a prediction made late never sees a trade it could not 
 With a fee rate the view follows each bar close's four minutes (#167): the touch window
 (``touch.TouchWindow``), and, for the kinds besides the direction (#179, ``kinds.py``), the
 same quotes logged (``kinds.QuoteLog``) for each kind's answer function, by the same rules.
+A kind with barriers (#183, the barrier) has their width fixed when the window opens, from
+the bars the bar close's snapshot holds (``Kind.width``): its answer reads it four minutes
+later, and the engine keeps it with every prediction of that bar close.
 """
 
 from __future__ import annotations
@@ -42,8 +45,9 @@ from krx_quant.features import (
     Flows,
     Leaders,
     OrderFlow,
-    PreviousRanges,
+    PreviousDays,
     Snapshot,
+    Width,
 )
 from krx_quant.feeds import (
     BOOK,
@@ -65,6 +69,7 @@ from krx_quant.feeds import (
 from krx_quant.feeds.base import KST, LEVELS, kst_day
 from krx_quant.kinds import Answer, Followed, Kind, QuoteLog
 from krx_quant.market_calendar import MarketCalendar, Session
+from krx_quant.pricing import cost_ticks
 from krx_quant.reference import BAR, MAX_QUOTE_AGE, Bar, BarBuilder, ReferencePrice, Source
 from krx_quant.touch import RESTARTED, WINDOW, TouchResult, TouchWindow, restarted
 
@@ -458,13 +463,13 @@ class MarketView:
         start: datetime,
         fee_rate: float | None = None,
         kinds: Sequence[Kind] = (),
-        previous: PreviousRanges | None = None,
+        previous: PreviousDays | None = None,
     ) -> None:
         """A view with nothing received yet, whose first bar close is the first after ``start``.
         With ``fee_rate`` it also follows each bar close's touch window (#167), and, given
-        ``kinds`` (besides the direction, #179), the quotes their answers are made from. Its
-        snapshots hold each symbol's previous trading day's ranges from ``previous`` (#181;
-        without: unknown)."""
+        ``kinds`` (besides the direction, #179), the quotes their answers are made from and the
+        widths of their barriers (#183). Its snapshots hold each symbol's previous trading day's
+        ranges and bars from ``previous`` (#181, #183; without: unknown)."""
         self.calendar = calendar
         self.symbols = tuple(symbols)
         self.leaders = leaders
@@ -497,6 +502,10 @@ class MarketView:
         self._logs: dict[str, QuoteLog] = (
             {s: QuoteLog() for s in self.symbols} if kinds and fee_rate is not None else {}
         )
+        # The kinds with barriers (#183), and each window's widths of them, by symbol, bar
+        # close and kind: fixed when the window opens, kept as long as it is.
+        self._barred = tuple(k for k in kinds if k.width is not None) if fee_rate is not None else ()
+        self._widths: dict[str, dict[datetime, dict[str, Width | None]]] = {s: {} for s in self.symbols}
 
     def on_event(self, feed: str, row: dict[str, Any]) -> None:
         """Take an event into the bars, reference prices, microprices, order flow, flows or
@@ -584,6 +593,7 @@ class MarketView:
             arrivals=self.arrivals(symbol, frozen.close),
             atm_iv=self._options.atm_iv(frozen.close),
             previous_ranges=self._previous(symbol, day) if self._previous is not None else None,
+            previous_bars=self._previous.bars(symbol, day) if self._previous is not None else (),
         )
 
     def arrivals(self, symbol: str, at: datetime) -> Arrivals:
@@ -699,15 +709,32 @@ class MarketView:
         log = self._logs.get(symbol)
         if window is None or log is None:
             return None
+        cost = cost_ticks(window.anchor, window.fee_rate) if window.anchor is not None else None
         return log.window(
-            symbol, bar_close, window.anchor, window.tick, window.k, window.bid_start, window.ask_start
+            symbol,
+            bar_close,
+            window.anchor,
+            window.tick,
+            window.k,
+            window.bid_start,
+            window.ask_start,
+            cost=cost,
         )
 
     def kind_answer(self, kind: Kind, symbol: str, bar_close: datetime) -> Answer:
-        """``kind``'s answer of ``symbol``'s window from ``bar_close`` (#179), as followed so far;
-        a window not followed says so (``restarted``), as its touch label does."""
+        """``kind``'s answer of ``symbol``'s window from ``bar_close`` (#179), as followed so far,
+        with the kind's barrier width fixed when it opened (#183); a window not followed says so
+        (``restarted``), as its touch label does."""
         window = self.followed(symbol, bar_close)
-        return Answer(None, RESTARTED) if window is None else kind.answer_to(window)
+        if window is None:
+            return Answer(None, RESTARTED)
+        return kind.answer_to(replace(window, width=self.kind_width(kind, symbol, bar_close)))
+
+    def kind_width(self, kind: Kind, symbol: str, bar_close: datetime) -> Width | None:
+        """The width of ``kind``'s barriers in ``symbol``'s window from ``bar_close`` (#183), fixed
+        when it opened; None for a kind without barriers, a window not followed, or without a
+        reference price."""
+        return self._widths.get(symbol, {}).get(bar_close, {}).get(kind.name)
 
     def quote_at(self, symbol: str, bar_close: datetime) -> tuple[float, float] | None:
         """The best quote (bid, ask) ``symbol``'s touch window from ``bar_close`` starts from
@@ -743,19 +770,40 @@ class MarketView:
             if close in windows:
                 continue
             best = self._best.get(symbol)
+            mid = self._reference.mid(symbol, close)
             windows[close] = TouchWindow(
                 symbol,
                 close,
-                self._reference.mid(symbol, close),
+                mid,
                 self._fee_rate,
                 bid_start=best[0] if best else None,
                 ask_start=best[1] if best else None,
             )
+            if self._barred:  # the barriers' widths, from the bars as they stand at the close
+                self._widths[symbol][close] = self._barrier_widths(symbol, close, mid)
             # Windows long over (kept a while for a late score): dropped.
             for old in [c for c in windows if c + WINDOW + _KEEP_WINDOWS < close]:
                 del windows[old]
+                self._widths[symbol].pop(old, None)
             if symbol in self._logs:  # and the quotes only they read
                 self._logs[symbol].forget(min(windows))
+
+    def _barrier_widths(self, symbol: str, close: datetime, mid: float | None) -> dict[str, Width | None]:
+        """Each barred kind's width at ``close`` (#183), from ``symbol``'s bars finished by then
+        and its previous trading day's, as the bar close's snapshot holds them."""
+        assert self._fee_rate is not None
+        day = close.astimezone(KST).date()
+        session = self.calendar.session(day)
+        snapshot = Snapshot.at(
+            symbol,
+            close,
+            self._bars.closed(symbol, close),
+            mid,
+            self._fee_rate,
+            session_open=session.open if session is not None else None,
+            previous_bars=self._previous.bars(symbol, day) if self._previous is not None else (),
+        )
+        return {k.name: k.width(snapshot) for k in self._barred if k.width is not None}
 
     def _follow(self, feed: str, symbol: str, received_at: datetime, row: dict[str, Any]) -> None:
         """Give the symbol's open touch windows a quote or trade (#167): the integrated feeds'

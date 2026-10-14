@@ -20,7 +20,7 @@ from typing import Any
 
 from krx_quant.algorithms import Card, Meaning, Model, NothingToLearn
 from krx_quant.algorithms.contract import KindSample
-from krx_quant.features import FeatureVector, Value
+from krx_quant.features import FeatureVector, Value, Width
 from krx_quant.kinds import Answer, Followed, Kind, KindForecast, KindInputs, KindScored
 from krx_quant.reference import Bar
 from tests.algorithm_doubles import stand_in_card, stand_in_meanings
@@ -42,7 +42,9 @@ def drift_of(window: Followed) -> Answer:
     )
 
 
-def drift_of_bars(closing: Bar, after: Sequence[Bar], fee_rate: float) -> Answer | None:
+def drift_of_bars(
+    closing: Bar, after: Sequence[Bar], fee_rate: float, *, width: Width | None = None
+) -> Answer | None:
     """The last close of the four minutes against the bar close's; None without a trade then."""
     if not after:
         return None
