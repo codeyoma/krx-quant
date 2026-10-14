@@ -10,6 +10,7 @@ drift's answer version, the night's reports, and the pre-validation's report.
 from __future__ import annotations
 
 import json
+import sqlite3
 from collections.abc import Sequence
 from dataclasses import replace
 from datetime import datetime, timedelta
@@ -210,6 +211,21 @@ async def test_a_kind_s_algorithm_is_prevalidated_on_its_kind(tmp_path: Path) ->
     assert saved["stats"]["lift"]["low"] > 0 and "pnl" not in saved["stats"]
     assert saved["correlations"] == {}, "no other drift algorithm: the contrarian is the direction's"
     assert len(turner.fitted) == 9, "retrained before each day but the first (no day before it)"
+    # The first day ran the default model, not trained on the drift's answers: it does not count.
+    conn = sqlite3.connect(saved["db"])
+    try:
+        by_day = dict(
+            conn.execute(
+                "SELECT substr(p.bar_close, 1, 10), COUNT(*) FROM kind_predictions p JOIN kind_answers a"
+                " ON a.kind = p.kind AND a.symbol = p.symbol AND a.bar_close = p.bar_close"
+                " WHERE p.algorithm = 'turner' AND p.status = 'ok' AND a.class IS NOT NULL AND a.special = 0"
+                " GROUP BY 1"
+            ).fetchall()
+        )
+    finally:
+        conn.close()
+    assert by_day[saved["days"][0]] > 0
+    assert saved["stats"]["n"] == sum(by_day.values()) - by_day[saved["days"][0]]
     gate = admits(s.state_dir, 2, (TEST_KIND,))
     assert gate(turner), "on the drift's answer version, not the engine's target"
     assert not admits(s.state_dir, 2)(turner), "an engine without the drift does not know it"

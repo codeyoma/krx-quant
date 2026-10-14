@@ -77,7 +77,16 @@ from krx_quant.lifecycle import CLONE_CORRELATION, correlations, most_correlated
 from krx_quant.market_calendar import MarketCalendar, calendar_store
 from krx_quant.predictions import PredictionStore
 from krx_quant.replay import recorded_events, replay_recorded, sqlite_files
-from krx_quant.stats import Entry, Lifted, enough, entry_json, leaderboard, scored_by_algorithm, split
+from krx_quant.stats import (
+    Entry,
+    Lifted,
+    enough,
+    entry_json,
+    leaderboard,
+    on_target,
+    scored_by_algorithm,
+    split,
+)
 from krx_quant.training import TrainingDay, finished_days, is_recorded, training_day
 
 log = logging.getLogger(__name__)
@@ -352,9 +361,12 @@ def _judge_kind(
     try:
         statuses = store.kind_status_counts(name)
         skipped = store.count_runs("cpu_budget", datetime.combine(replayed[0], time(), KST), name)
-        scored = store.kind_scored(kind.name, kind.answer_version, replayed, None, False)
+        # As the API and the statuses go by: only forecasts of models trained on the kind's
+        # answers (a default model, as on the first replayed day, or another version's sits out).
+        version = kind.answer_version
+        scored = on_target(store.kind_scored(kind.name, version, replayed, None, False), names, version)
         algos, baselines = kind_split(scored_of_kind(scored, kind), names)
-        every = store.kind_scored(kind.name, kind.answer_version, replayed, None, True)
+        every = on_target(store.kind_scored(kind.name, version, replayed, None, True), names, version)
         measured = correlations(name, others, every, kind_scoring(kind).lean)
     finally:
         store.close()
