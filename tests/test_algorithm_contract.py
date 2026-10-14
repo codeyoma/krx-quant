@@ -1,6 +1,8 @@
 """The contract every registered algorithm keeps, checked for each one automatically.
 
-- its card is filled in and names features it declared;
+- its card is filled in (how it makes its probabilities and when it fails, too) and names
+  features it declared;
+- every parameter its model can hold, and every registered feature, has a meaning (#164);
 - it reads only the features it declared;
 - its probabilities are each in [0, 1] and add up to 1, whatever the features, unless it
   declines the symbol with a reason (``NotPredicted``: the book missing);
@@ -21,13 +23,17 @@ from krx_quant.algorithms import (
     ALGORITHMS,
     Abstention,
     Algorithm,
+    Meaning,
     NotPredicted,
     load_models,
     predicted,
     save_model,
 )
+from krx_quant.baselines import BASELINES
+from krx_quant.consensus import CARDS, NAMES
 from krx_quant.features import (
     BOOK_FEATURES,
+    FEATURE_MEANINGS,
     FEATURES,
     SERIES_FEATURES,
     TAPE_FEATURES,
@@ -76,9 +82,38 @@ def algorithm(request: pytest.FixtureRequest) -> Algorithm:
 def test_the_card_is_filled_in(algorithm: Algorithm) -> None:
     card = algorithm.card
     assert card.scientist and card.character and card.logic and card.training
+    assert card.forecasting and card.failure, "how it makes its probabilities, and when it fails"
     assert card.unique_features
     assert set(card.unique_features) <= set(algorithm.features)
     assert algorithm.training_days > 0
+
+
+def filled(meaning: Meaning) -> bool:
+    return bool(meaning.text.strip() and meaning.unit.strip() and meaning.known.strip())
+
+
+def test_every_parameter_of_its_default_model_has_a_meaning(algorithm: Algorithm) -> None:
+    # Fitted models are checked in the training test below (and Markov's IV bounds, only
+    # fitted with enough recorded days, in test_markov).
+    missing = set(algorithm.default_model().params) - set(algorithm.param_meanings)
+
+    assert not missing, f"{algorithm.name}: parameters without a meaning: {sorted(missing)}"
+    assert all(filled(m) for m in algorithm.param_meanings.values())
+
+
+def test_every_registered_feature_has_a_meaning() -> None:
+    assert FEATURE_MEANINGS.keys() == FEATURES.keys(), "a feature without a meaning, or a stale meaning"
+    assert all(filled(m) for m in FEATURE_MEANINGS.values())
+
+
+def test_the_baselines_and_the_consensus_have_cards_too() -> None:
+    cards = [b.card for b in BASELINES] + [CARDS[name] for name in NAMES]
+
+    for card in cards:
+        assert card.character and card.logic and card.training and card.forecasting and card.failure
+        assert card.unique_features == ()
+    assert all(b.card.scientist is None for b in BASELINES), "named after no one"
+    assert all(CARDS[name].scientist for name in NAMES)
 
 
 @pytest.mark.parametrize("scenario", SCENARIOS, ids=str)
@@ -127,6 +162,7 @@ def test_training_gives_a_new_versioned_model_that_can_be_saved(algorithm: Algor
     default = algorithm.default_model()
     assert model.version != default.version
     assert model.params.keys() == default.params.keys()
+    assert set(model.params) <= set(algorithm.param_meanings), "every fitted parameter has a meaning"
     save_model(tmp_path, algorithm.name, model)
     assert load_models(tmp_path, [algorithm])[algorithm.name] == model
     for sample in training[:50]:

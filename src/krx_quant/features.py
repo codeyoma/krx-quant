@@ -15,6 +15,9 @@ can see the future.
 A feature is a number (or None, unknown), or a series of numbers (``SERIES_FEATURES``,
 read with ``FeatureVector.series``). Algorithms get a ``FeatureVector`` holding only the
 features they declared.
+
+Every registered feature has a meaning beside the registry (``FEATURE_MEANINGS``): what it
+is, its unit and when it is known, in Korean, as the Engine API shows it.
 """
 
 from __future__ import annotations
@@ -26,6 +29,7 @@ from datetime import datetime, timedelta
 from functools import cached_property
 from itertools import product
 
+from krx_quant.cards import Meaning
 from krx_quant.config import Settings
 from krx_quant.contracts import KOSPI200, USD
 from krx_quant.feeds.market import us_ticker
@@ -773,6 +777,217 @@ TAPE_FEATURES = frozenset(
 )
 # The features from the options' trades: none on a day with backfilled bars only either.
 OPTION_FEATURES = frozenset({"atm_iv"})
+
+# When a feature is known, as its meaning says it.
+_BARS = "봉 마감에 안다(그날 봉 마감까지 끝난 1분봉)."
+_BOOK = "봉 마감에 안다(봉 마감 직전에 받은 통합 호가). 녹화된 날에만 있다(백필에는 호가가 없다)."
+_TAPE = (
+    "봉 마감에 안다(봉 마감 전에 받은 통합 체결). 녹화된 날에만 있다(백필에는 체결 방향이 없다). 그동안 "
+    "체결이 없으면 없다."
+)
+_FLOW = (
+    "봉 마감에 안다(봉 마감 전에 받은 마지막 누적값과 그 5분 전 값). 녹화된 날에만 있다(백필이 없다). 그날 "
+    "흐름을 받기 전에는 없다."
+)
+_ESTIMATE = (
+    "봉 마감에 안다(봉 마감 전에 받은 가장 늦은 시간대의 장중 추정 가집계). 녹화된 날에만 있고, 그날 추정을 "
+    "받기 전에는 없다."
+)
+_ARRIVALS = (
+    "봉 마감에 안다(개장부터 봉 마감 전에 받은 통합 체결의 방향과 크기). 녹화된 날에만 있고, 그날 방향이 "
+    "있는 체결을 받기 전에는 없다."
+)
+_SIDE_NAMES = {"buy": "매수", "sell": "매도"}
+# The lead groups as the cards name them, and on which days each is known.
+LEAD_GROUP_NAMES = {
+    "peers": "다른 예측 종목",
+    "kospi200f": "KOSPI200 선물 최근월물",
+    "usdf": "달러선물 최근월물",
+    "indices": "지수",
+    "us": "미국 주간거래 종목",
+    "etfs": "KRX 상장 미국 ETF",
+}
+_LEAD_DAYS = {
+    "peers": "백필로도 있다.",
+    "kospi200f": "백필로도 있다(선물 연속 1분봉).",
+    "usdf": "백필로도 있다(선물 연속 1분봉).",
+    "indices": "녹화된 날에만 있다(백필이 없다).",
+    "us": "녹화된 날에만 있다(백필이 없다).",
+    "etfs": "백필로도 있다.",
+}
+_LAG = "lag 1은 봉 마감으로 끝나는 1분, 2와 3은 그 앞의 1분이다"
+
+FEATURE_MEANINGS: dict[str, Meaning] = {
+    "velocity": Meaning(
+        "가격의 속도: 마지막 6개 1분봉 종가에 맞춘 포물선의 마지막 기울기. 한 호가단위 구간에서 틱은 가격의 "
+        "일정 비율이라 수익률의 기울기와 같은 뜻이다.",
+        "틱/분",
+        f"{_BARS} 봉이 6개 미만이면 없다.",
+    ),
+    "acceleration": Meaning("가격의 가속도: 그 포물선의 곡률.", "틱/분²", f"{_BARS} 봉이 6개 미만이면 없다."),
+    "relative_volume": Meaning(
+        "최근 5개 봉의 봉당 거래량 ÷ 최근 60개 봉의 봉당 거래량. 1이 평소다.",
+        "배",
+        f"{_BARS} 봉이 10개 미만이면 없다.",
+    ),
+    "volatility": Meaning(
+        "최근 20개 1분 종가 변화의 표준편차.", "틱", f"{_BARS} 1분 변화가 6개 미만이면 없다."
+    ),
+    "flat_ticks": Meaning(
+        "보합 범위 k: 4분 변화가 k틱보다 작으면 보합이다. 왕복 거래비용(매도세와 수수료)을 덮는 가장 적은 틱 "
+        "수로, 봉 마감 기준가와 호가단위표로 정한다.",
+        "틱",
+        "봉 마감에 안다(봉 마감 기준가). 기준가가 없으면 없다.",
+    ),
+    "vwap_gap": Meaning(
+        "기준가가 당일 VWAP보다 몇 틱 위에 있는지(아래면 음수). VWAP는 개장부터의 1분봉 대표가((고가 + 저가 "
+        "+ 종가) ÷ 3)를 거래량으로 가중한다.",
+        "틱",
+        f"{_BARS} 개장 뒤 봉이 5개 미만이면 없다.",
+    ),
+    "vwap_z": Meaning(
+        "그 괴리를 VWAP 주변 체결가의 거래량 가중 표준편차로 나눈 값.",
+        "표준편차",
+        f"{_BARS} 개장 뒤 봉이 5개 미만이거나 표준편차가 반 틱 미만이면 없다.",
+    ),
+    "reversion_speed": Meaning(
+        "당일 평균회귀 속도 κ: 최근 30개 1분 종가 움직임을 1분 전 VWAP 대비 괴리에 맞춘 값(움직임 = −괴리 × "
+        "(1 − e^(−κ))). 0이면 되돌림이 없고, 가장 크면 3이다.",
+        "1/분",
+        f"{_BARS} 1분 움직임이 20개 미만이거나 괴리가 반 틱도 안 되면 없다.",
+    ),
+    "minute_ticks": Meaning(
+        "개장부터의 1분 종가 변화, 최근 60개, 오래된 것부터. 체결이 없는 분은 0이다.",
+        "틱 (숫자 60개까지의 열)",
+        _BARS,
+    ),
+    "microprice_ticks": Meaning(
+        "매분 끝 microprice가 봉 마감 기준가보다 몇 틱 위인지, 최근 1시간(최대 61개), 오래된 것부터. "
+        "microprice = (매수호가 × 매도잔량 + 매도호가 × 매수잔량) ÷ (두 잔량의 합).",
+        "틱 (숫자 61개까지의 열)",
+        "봉 마감에 안다(각 분 끝 직전에 받은 통합 호가). 녹화된 날에만 있다. 봉 마감에 호가가 비어 있으면 빈 "
+        "열이고, 열은 마지막으로 호가가 빈 분 뒤부터다.",
+    ),
+    "kospi200f_moves": Meaning(
+        "KOSPI200 선물 최근월물의 1분 움직임(로그수익률), 개장부터 최근 60개, 오래된 것부터. 체결이 없는 "
+        "분은 0이다.",
+        "bp (숫자 60개까지의 열)",
+        "봉 마감에 안다(봉 마감까지 끝난 선물 1분봉). 백필로도 있다.",
+    ),
+    **{
+        ofi_feature(m): Meaning(
+            f"최근 {m}분(개장부터) 통합 호가의 1호가 주문흐름 불균형(OFI)의 합 ÷ 그동안 1호가 평균 잔량. "
+            "양수면 매수 쪽 압력이다.",
+            "1호가 평균 잔량의 배수",
+            _BOOK,
+        )
+        for m in OFI_MINUTES
+    },
+    "depth_imbalance": Meaning(
+        "봉 마감 직전 호가 10단계 잔량의 (매수 합 − 매도 합) ÷ (둘의 합).", "비율 (−1~1)", _BOOK
+    ),
+    "spread_ticks": Meaning(
+        "봉 마감 직전 매도1호가 − 매수1호가(스프레드)를 봉 마감 기준가의 호가단위로 잰 값.",
+        "틱",
+        f"{_BOOK} 개장 전에 받은 호가는 쓰지 않는다.",
+    ),
+    "top_imbalance": Meaning(
+        "봉 마감 직전 1호가 잔량의 (매수 − 매도) ÷ (둘의 합). 다음 체결이 어느 쪽에서 날지에 가깝다.",
+        "비율 (−1~1)",
+        _BOOK,
+    ),
+    "top_size_change": Meaning(
+        "1호가 잔량(매수 + 매도)의 지난 1분 변화: ln(봉 마감 직전 ÷ 1분 전). 0보다 작으면 1호가가 얇아지는 "
+        "중이다.",
+        "로그 비율",
+        f"{_BOOK} 개장 첫 1분이나 1분 전에 호가가 비어 있었으면 없다.",
+    ),
+    "trade_imbalance": Meaning(
+        "최근 5분(개장부터) 통합 체결의 (매수 체결량 − 매도 체결량) ÷ 둘의 합. 방향은 체결의 매수·매도 "
+        "구분이다.",
+        "비율 (−1~1)",
+        _TAPE,
+    ),
+    "trade_entropy": Meaning(
+        "최근 5분 체결 방향(건수)의 Shannon 엔트로피: 한쪽뿐이면 0, 반반이면 1.", "비트 (0~1)", _TAPE
+    ),
+    "nxt_share": Meaning(
+        "최근 5분(개장부터) KRX 전용 체결과 NXT 전용 체결 수량 중 NXT의 비중.",
+        "비율 (0~1)",
+        "봉 마감에 안다(봉 마감 전에 받은 거래소별 체결). 녹화된 날에만 있고, 그날 두 거래소 중 하나라도 "
+        "체결을 받지 못했거나 5분 동안 둘 다 체결이 없으면 없다.",
+    ),
+    **{
+        excitation_feature(side, sec): Meaning(
+            f"개장부터 받은 {_SIDE_NAMES[side]} 시장가 체결마다 크기 ÷ 그날 평균 체결 크기를 e^(−경과초 ÷ "
+            f"{sec})로 줄여 더한 값(Hawkes 흥분, 감쇠 시간 {sec}초).",
+            "평균 체결 크기의 배수",
+            _ARRIVALS,
+        )
+        for side, sec in product(SIDES, EXCITATION_SECONDS)
+    },
+    **{
+        arrivals_feature(side): Meaning(
+            f"최근 1분 {_SIDE_NAMES[side]} 시장가 체결 크기 ÷ 그날 평균 체결 크기의 합.",
+            "평균 체결 크기의 배수",
+            _ARRIVALS,
+        )
+        for side in SIDES
+    },
+    "macro_regime": Meaning(
+        "그날 매크로 국면(SOX, VIX, 원/달러로 정한다): shock 0, risk_off 1, risk_on 2, neutral 3.",
+        "코드 (0~3)",
+        "그날 개장 전에 마지막으로 정한 값(07:30 수집). 장중에는 바뀌지 않는다. 정하지 못했거나 지표 없이 "
+        "정한 날은 없다.",
+    ),
+    "minutes_since_open": Meaning("개장부터 봉 마감까지의 분(시간대).", "분", "봉 마감에 안다."),
+    "days_to_expiry": Meaning(
+        "KOSPI200 옵션 월물 만기일(둘째 목요일, 휴장이면 그 앞 거래일)까지 남은 거래일. 만기일에는 0이다.",
+        "거래일",
+        "그날 거래 일정으로 미리 안다.",
+    ),
+    "atm_iv": Meaning(
+        "KOSPI200 옵션의 등가격 내재변동성: 델타가 0.5에 가장 가까운 콜과 −0.5에 가장 가까운 풋의 IV "
+        "평균(옵션마다 봉 마감 전 1분 체결의 중앙값, 없으면 마지막 체결).",
+        "% (연율)",
+        "봉 마감에 안다(봉 마감 전 10분 안에 받은 옵션 체결). 녹화된 날에만 있다.",
+    ),
+    "program_net": Meaning(
+        "프로그램매매 순매수 금액의 최근 5분 변화 ÷ 같은 5분의 거래대금(종가 × 거래량).",
+        "거래대금 대비 비율",
+        _FLOW,
+    ),
+    "member_foreign_net": Meaning(
+        "상위 5개 회원사 중 외국계의 순매수 수량의 최근 5분 변화 ÷ 같은 5분의 거래량.",
+        "거래량 대비 비율",
+        _FLOW,
+    ),
+    "investor_foreign": Meaning(
+        "외국인 추정 순매수 수량 ÷ 그날 개장부터의 거래량.", "그날 거래량 대비 비율", _ESTIMATE
+    ),
+    "investor_institution": Meaning(
+        "기관 추정 순매수 수량 ÷ 그날 개장부터의 거래량.", "그날 거래량 대비 비율", _ESTIMATE
+    ),
+    **{
+        own_feature(lag): Meaning(
+            f"종목 자신의 lag {lag} 1분 로그수익률 ÷ 최근 20개 1분 수익률의 표준편차({_LAG}).",
+            "표준편차",
+            f"{_BARS} 10분 넘게 체결이 없거나 최근 20분 중 봉이 있는 뒤의 분이 6개 미만이면 없다.",
+        )
+        for lag in LEAD_LAGS
+    },
+    **{
+        lead_feature(group, lag): Meaning(
+            f"{LEAD_GROUP_NAMES[group]}의 lag {lag} 1분 로그수익률(시리즈마다 최근 20개 1분 수익률의 "
+            f"표준편차 단위), 묶음 안 시리즈의 평균({_LAG}).",
+            "표준편차",
+            f"봉 마감에 안다(봉 마감까지 끝난 1분봉). {_LEAD_DAYS[group]} 시리즈가 모두 10분 넘게 체결이 "
+            "없거나 막 거래를 시작했으면 없다.",
+        )
+        for group in LEAD_GROUPS
+        for lag in LEAD_LAGS
+    },
+}
 
 
 class UndeclaredFeature(LookupError):

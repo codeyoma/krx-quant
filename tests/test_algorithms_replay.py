@@ -95,12 +95,23 @@ async def test_a_trained_model_is_used_and_recorded(tmp_path: Path) -> None:
 
     assert {p["model_version"] for p in await predictions_of(engine, "newton")} == {"newton-20261009-abc123"}
     async with api(engine) as client:
-        listed = {a["name"]: a for a in (await get_json(client, "/v1/algorithms"))["algorithms"]}
+        body = await get_json(client, "/v1/algorithms")
+    listed = {a["name"]: a for a in body["algorithms"]}
     assert listed.keys() == {"newton", "gauss", "granger", "markov", "kalman", "shannon", "poisson", "turing"}
     newton = listed["newton"]
     assert listed["gauss"]["model"]["version"] == "gauss-default"
     assert newton["card"]["scientist"] == "Isaac Newton"
     assert set(newton["card"]["unique_features"]) <= set(newton["features"])
+    assert newton["card"]["forecasting"] and newton["card"]["failure"]
+    for a in listed.values():  # each feature and each parameter it holds, with its meaning (#164)
+        assert a["feature_meanings"].keys() == set(a["features"])
+        assert set(a["model"]["params"]) <= a["param_meanings"].keys()
+    assert newton["feature_meanings"]["velocity"]["unit"] == "틱/분"
+    assert newton["param_meanings"].keys() == {"damping", "threshold"}
+    assert [b["name"] for b in body["baselines"]] == ["baseline-flat", "baseline-persist", "baseline-random"]
+    assert [c["name"] for c in body["consensus"]] == ["consensus-fast", "consensus-final"]
+    assert body["baselines"][0]["card"]["scientist"] is None
+    assert all(c["card"]["forecasting"] for c in body["consensus"])
     assert newton["model"] == {
         "version": "newton-20261009-abc123",
         "params": dict(trained.params),

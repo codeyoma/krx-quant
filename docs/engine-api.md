@@ -17,6 +17,8 @@
 | `baseline-persist` | 직전 4분(t − 4분 → t) 중간가 변화를 채점과 같은 규칙으로 분류해, 그 방향이 이어진다고 본다. 기대수익은 그 변화의 틱 수다. 중간가를 모르면 보합이다. |
 | `baseline-random` | 그날 이미 채점된 봉의 클래스 비율(각 클래스에 1을 더한 값)대로 무작위로 뽑는다. 종목과 t로 시드를 정해서, 같은 입력이면 늘 같은 값이 나온다. |
 
+- 기준 예측마다 알고리즘과 같은 형식의 카드가 있다(`baselines.py`, `/v1/algorithms`의 `baselines`, #164).
+
 - **알고리즘.** 등록된 알고리즘(지금은 `newton`, `gauss`, `granger`, `markov`, `kalman`, `shannon`, `poisson`, `turing`)이 종목마다 예측한다. `kalman`, `shannon`, `poisson`은 사전 검증을 통과해야 돈다(#24). 규약과 추가 방법은 아래 "알고리즘"에 있다.
   - 알고리즘은 작업 스레드에서 돈다. 그래서 오래 걸려도 녹화를 막지 않는다.
   - 한 봉 마감에 알고리즘 하나가 모든 종목을 예측하는 데 10초(`KRX_ALGORITHM_SECONDS`)를 넘기면, 그 회차는 `status`가 `timed_out`인 빈 예측으로 남고 채점하지 않는다. 그 계산이 끝날 때까지는 다음 회차도 `timed_out`이다.
@@ -45,6 +47,7 @@
   - 가중치가 없는 칸은 균등하게 친다. 계산 뒤에 정식이 된 알고리즘은 균등한 몫(1/구성원 수)을 받고, 나머지 구성원은 남은 몫을 계산된 비율대로 나눈다.
   - 빠른 합의 시각은 테스트에서 줄일 수 있다(`Timing`). 재생에서는 알고리즘이 도는 동안 재생 시계가 멈춰 있어서, "2초 안에 끝난" 여부는 실제로 걸린 시간으로 정한다. 시간 예산과 같다. 같은 이유로 재생에서는 빠른 합의와 최종 합의의 `displayed_at`이 같다.
   - 합의도 순위표에 다른 알고리즘처럼 나오고, 운 보정(FDR)의 검정 묶음에 들어간다.
+  - 두 합의도 알고리즘과 같은 형식의 카드가 있다(`consensus.py`의 `cards`, `/v1/algorithms`의 `consensus`, #164. 빠른 합의의 시간은 엔진 설정값 그대로): 구성원, 위의 가중치 규칙, 확률을 만드는 방법, 틀리기 쉬운 장.
 
   > **바뀜** (2026-10-10, #42): 사용자와 합의한 설계에서 바뀐 점이다. PR #42 본문의 "기준 B"는 머지 전에 기준 A로 바뀌었다.
   > - 빠른 합의: "봉 마감 +2초" → "계산 시작부터 2초". 이유: 엔진이 이미 2초 늦게 돌면(또는 재생의 표시 지연) 빠른 합의가 늘 빈다.
@@ -314,11 +317,28 @@
         "character": "추세 추종",
         "logic": "가격의 속도와 가속도에 거래량을 질량으로 곱해 운동량과 힘을 구하고, 마찰(감쇠)을 넣어 4분 뒤 움직임을 외삽한다.",
         "unique_features": ["velocity", "acceleration", "relative_volume"],
-        "training": "감쇠율과 임계값을 최근 20거래일 1분봉으로 격자 탐색해 log loss가 가장 작은 값을 고른다."
+        "training": "감쇠율과 임계값을 최근 20거래일 1분봉으로 격자 탐색해 log loss가 가장 작은 값을 고른다.",
+        "forecasting": "4분 뒤 중간가 변화를 외삽한 변위(틱)를 중심으로, 폭이 1분 변동성 × √4인 정규분포로 본다. 공통 함수가 이 정규분포에서 4분 변화가 +k틱 이상일 확률을 상승, …",
+        "failure": "방향이 자주 뒤집히는 박스권과 급등락 뒤 되돌림 장에서 직전 추세를 외삽해 틀리기 쉽다. …"
       },
       "features": ["velocity", "acceleration", "relative_volume", "volatility", "flat_ticks"],
+      "feature_meanings": {
+        "velocity": {
+          "meaning": "가격의 속도: 마지막 6개 1분봉 종가에 맞춘 포물선의 마지막 기울기. …",
+          "unit": "틱/분",
+          "known": "봉 마감에 안다(그날 봉 마감까지 끝난 1분봉). 봉이 6개 미만이면 없다."
+        }
+      },
       "training_days": 20,
-      "model": {"version": "newton-default", "params": {"damping": 0.5, "threshold": 1.0}, "trained": null, "trained_until": null}
+      "model": {"version": "newton-default", "params": {"damping": 0.5, "threshold": 1.0}, "trained": null, "trained_until": null},
+      "param_meanings": {
+        "damping": {
+          "meaning": "감쇠율 γ: dv/dt = F − γv의 마찰. 클수록 추세가 빨리 꺾인다고 본다. …",
+          "unit": "1/분",
+          "known": "밤 학습이 최근 20거래일로 정한다. 새 모델은 다음 거래일 08:00 교체 때부터 쓴다. 학습 전에는 기본값이다."
+        },
+        "threshold": {"meaning": "임계값 θ: …", "unit": "보합 범위 k의 배수", "known": "…"}
+      }
     },
     {
       "name": "gauss",
@@ -331,16 +351,51 @@
         "history": [{"at": "2026-10-12T08:00:00+09:00", "from": null, "to": "probation", "reason": "registered"}]
       }
     }
+  ],
+  "baselines": [
+    {
+      "name": "baseline-flat",
+      "card": {
+        "scientist": null,
+        "character": "기준 예측: 늘 보합",
+        "logic": "어느 봉 마감에서나 4분 뒤 중간가 변화가 보합 범위(k틱) 안에 머문다고 본다. 아무 정보도 쓰지 않는다.",
+        "unique_features": [],
+        "training": "배우지 않는다. 모든 알고리즘이 넘어야 하는 기준이라 규칙이 고정되어 있다.",
+        "forecasting": "보합에 확률 1, 상승과 하락에 0을 준다. 기대수익은 0틱이다.",
+        "failure": "4분 변화가 보합 범위를 넘을 때마다 틀린다: …"
+      }
+    }
+  ],
+  "consensus": [
+    {
+      "name": "consensus-final",
+      "card": {
+        "scientist": "Nicolas de Condorcet",
+        "character": "합의(최종)",
+        "logic": "봉 마감마다 정식 알고리즘의 확률을 가중 평균한다. 최종 합의는 구성원이 모두 끝나거나, 실패하거나, 각자의 시간 예산(기본 10초)에 걸리면 낸다. …",
+        "unique_features": [],
+        "training": "가중치는 종목 × 30분 시간대(봉 마감 09:01–09:30이 09:00 칸) 칸마다 매일 장 마감 뒤 상태 점검 직후 다시 정한다. …",
+        "forecasting": "구성원 세 확률의 가중 평균(선형 결합)이 그대로 세 확률이다. …",
+        "failure": "구성원이 같은 쪽으로 함께 틀리는 장에서는 합쳐도 틀린다. …"
+      }
+    }
   ]
 }
 ```
 
+(글은 줄였다. 알고리즘 항목에는 모든 필드가 오고, 기준 예측은 셋, 합의는 둘이 다 온다.)
+
 - `model`: 지금 엔진이 돌리는 모델이다. `trained`는 학습한 날짜 범위, 표본 수, 학습 log loss를 적은 글이고(예: `2026-09-10..2026-10-08, 9120 samples, log loss 0.9312`), `trained_until`은 학습에 쓴 마지막 날(`YYYY-MM-DD`)이다. 기본 모델은 둘 다 `null`이다.
 - `status`: 알고리즘마다 온다(위 예시는 한 곳만 보였다). 형식은 아래 "상태 관리".
+- `card`(#164): 성격 카드(아래 "규약"). `forecasting`은 세 확률을 만드는 방법이다: 공통 함수가 4분 변화의 정규분포를 세 확률로 바꾸는지(Newton, Gauss, Granger, Markov, Kalman), 정답으로 직접 학습한 분류기가 내는지(Shannon의 다항 로지스틱, Turing의 LightGBM), 쏠림을 순서형 로지스틱으로 바꾸는지(Poisson). `failure`는 틀리기 쉬운 장이다. 카드 글은 지금 정답(4분 뒤 중간가 변화)을 기준으로 쓴다. 정답이 바뀌면(#160) 카드 글도 고친다. 알고리즘 카드의 `scientist`는 늘 문자열이다.
+- `feature_meanings`(#164): `features`의 이름마다 `meaning`(뜻), `unit`(단위), `known`(언제 아는지: 봉 마감에 아는지, 개장 전에 정한 값인지, 녹화된 날에만 있는지)이다. 글은 피처 저장소의 것이다(아래 "피처").
+- `param_meanings`(#164): 그 알고리즘의 모델이 가질 수 있는 모든 파라미터의 뜻이다. 형식은 `feature_meanings`와 같다. 기본 모델과 학습한 모델의 파라미터를 모두 담아서 `model.params`의 이름은 늘 여기에 있다(Markov의 `iv_cut.*`처럼 학습해야 생기는 것도 미리 있다). `known`은 언제 정해지는지다(대개 밤 학습). Turing의 트리(`blob`)는 파라미터가 아니라서 나오지 않는다.
+- `baselines`(#164): 기준 예측 셋(`baseline-flat`, `baseline-persist`, `baseline-random`)의 카드다. 형식은 알고리즘 카드와 같다. 과학자가 없어서 `scientist`가 `null`이고, 고유 피처는 빈 목록이다.
+- `consensus`(#164): 합의 둘(`consensus-fast`, `consensus-final`)의 카드다. 구성원(정식 알고리즘), 가중치를 정하는 방법(종목 × 30분 시간대 칸), 확률을 만드는 방법을 적는다. 지금의 구성원과 칸별 가중치 값은 `/v1/consensus`에 있다.
 
 ### `GET /v1/algorithms/{name}`
 
-등록된 알고리즘 하나다(#19). `/v1/algorithms` 항목과 같고, 서버에 설치된 모델 이력 `model_history`가 붙는다. 등록된 알고리즘이 아닌 이름(기준 예측, 합의 포함)은 404다. 성적은 `/v1/algorithms/{name}/stats`에 있다.
+등록된 알고리즘 하나다(#19). `/v1/algorithms` 항목과 같고(카드, 피처·파라미터의 뜻 포함), 서버에 설치된 모델 이력 `model_history`가 붙는다. 등록된 알고리즘이 아닌 이름(기준 예측, 합의 포함)은 404다. 기준 예측과 합의의 카드는 `/v1/algorithms`의 `baselines`, `consensus`에 있다. 성적은 `/v1/algorithms/{name}/stats`에 있다.
 
 ```json
 {
@@ -528,12 +583,15 @@
 ### 규약
 
 알고리즘은 `src/krx_quant/algorithms/<이름>/` 모듈 하나다(`algorithms/contract.py`의 `Algorithm`). 다음을 갖는다.
-- `card`: 성격 카드. 과학자, 성격, 핵심 로직, 고유 피처, 학습 방법을 적는다.
+- `card`: 성격 카드(`cards.py`의 `Card`). 과학자, 성격, 핵심 로직, 고유 피처, 학습 방법, 예측 방식(세 확률을 만드는 방법), 실패 조건(틀리기 쉬운 장)을 한국어로 적는다. 화면이 그대로 보인다.
+- `param_meanings`: 모델이 가질 수 있는 모든 파라미터의 이름마다 뜻(`cards.Meaning`: 설명, 단위, 언제 정해지는지). 알고리즘 모듈의 `PARAM_MEANINGS`다. 모델에 뜻이 없는 파라미터가 있으면 테스트가 실패한다(`tests/test_algorithm_contract.py`).
 - `features`: 선언 피처. 예측과 학습에 이것만 받는다. 다른 피처를 읽으면 `UndeclaredFeature`가 난다.
 - `training_days`: 학습에 쓰는 최근 거래일 수
 - `default_model()`: 학습 전 기본 모델(`<이름>-default`)
 - `fit(samples)`: 학습 샘플로 버전이 붙은 모델을 만든다. 배울 것이 없으면(결과가 있는 표본이 없음, 호가가 없음) `NothingToLearn`을 던진다. 밤 학습은 그 알고리즘을 "학습 안 함"으로 두고, 사전 검증은 그날을 기본 모델로 예측한다. 다른 오류는 실패다(사전 검증은 리포트 없이 멈춘다).
 - `predict(features, model)`: 한 종목의 피처로 `{p_up, p_flat, p_down, expected_ticks}`를 낸다. 세 확률의 합은 1이다. 읽는 데이터가 봉 마감에 없으면 `NotPredicted(Abstention.NO_BOOK)`을 던져 그 종목을 예측하지 않는다(#25). 엔진은 이유를 예측의 `status`로 남기고, 밤 학습과 사전 검증은 그 표본을 검증에서 뺀다.
+
+> **바뀜** (2026-10-14, #189): 카드는 과학자, 성격, 핵심 로직, 고유 피처, 학습 방법 다섯 칸이었고 파라미터에는 뜻이 없었다 → 예측 방식(`forecasting`)과 실패 조건(`failure`)을 더했고, 파라미터마다 뜻(`param_meanings`)을 둔다. 기준 예측과 합의도 같은 형식의 카드를 가진다(`baselines.py`, `consensus.py`의 `cards`). 이유: 상세 창의 "학습·예측 방식"이 무엇을 정답으로 배우고 확률을 어떻게 만드는지, 어떤 장에서 틀리기 쉬운지, 이름이 무슨 뜻인지 다 말하게 하려고(2026-10-14 인터뷰, QUANT LETTER의 카드 형식).
 
 알고리즘은 다른 알고리즘의 출력을 받지 않는다.
 
@@ -582,7 +640,7 @@
 
 등록 검사는 엔진이 시작할 때(`ALGORITHMS`를 읽을 때) 한다. 그 뒤 새 알고리즘은 사전 검증을 통과해야 돈다(아래 "사전 검증").
 
-`tests/test_algorithm_contract.py`가 등록된 모든 알고리즘에 다음을 자동으로 확인한다. 성격 카드가 채워졌는지, 선언한 피처만 읽는지, 여러 피처 값(값 없음, 극단값 포함)에서 확률이 분포인지, 학습한 모델이 새 버전으로 저장되고 다시 읽히는지다.
+`tests/test_algorithm_contract.py`가 등록된 모든 알고리즘에 다음을 자동으로 확인한다. 성격 카드가 채워졌는지(예측 방식과 실패 조건 포함), 기본 모델과 학습한 모델의 파라미터마다 뜻이 있는지, 선언한 피처만 읽는지, 여러 피처 값(값 없음, 극단값 포함)에서 확률이 분포인지, 학습한 모델이 새 버전으로 저장되고 다시 읽히는지다. 등록된 피처마다 뜻이 있는지와 기준 예측·합의의 카드도 같은 파일이 확인한다(#164).
 
 ### 사전 검증 (#24)
 
@@ -628,6 +686,8 @@ docker compose run --rm --no-deps engine prevalidate <이름> --days 5  # 빨리
 엔진은 Markov(#53)를 위해 옵션 체결(`H0IOCNT0`, 등가격 ±2 행사가 콜·풋)의 내재변동성(`implied_vol`)과 델타(`delta`)도 읽는다. 시장 전체의 값이라 그날 녹화된 옵션 파티션을 모두 읽는다. 백필에는 옵션이 없어 녹화된 날에만 값이 있다.
 
 엔진은 Shannon(#26)을 위해 통합 체결의 체결 방향(`side`), NXT 전용 체결(`H0NXCNT0`)의 수량, 통합 호가의 10단계 잔량도 읽는다. Poisson(#27)도 통합 체결의 체결 방향과 수량을 쓴다.
+
+피처마다 뜻이 레지스트리 옆(`features.py`의 `FEATURE_MEANINGS`)에 있다: 한국어 설명, 단위, 언제 아는지(봉 마감에 아는지, 개장 전에 정한 값인지, 녹화된 날에만 있는지). `/v1/algorithms`의 `feature_meanings`로 화면에 간다(#164). 피처를 등록하면 뜻도 같이 넣어야 테스트를 지난다(`tests/test_algorithm_contract.py`). 아래 표는 같은 내용을 더 자세히 적은 것이다.
 
 엔진은 체결 피드로만 1분봉을 만든다: 종목은 통합 체결(`H0UNCNT0`), ETF는 KRX 전용 체결(`H0STCNT0`), 선행 시리즈는 선물·지수·미국 주간거래 피드다(지수는 REST 대체 `FHPUP02100000`도 읽는다). 선물과 미국 주간거래는 한도로 잘리면 REST 대체가 같은 피드 이름으로 들어온다(#28). 그 시세에는 체결 하나의 수량이 없어서, 그동안 선행 시리즈 1분봉의 거래량은 0이다. 세션 한도로 잘려 종목이나 ETF의 체결이 REST 시세(`FHKST01010100`)로 바뀌면 엔진은 그 시세를 읽지 않는다. 그러면 그 종목의 1분봉과 피처가 비고, ETF 묶음(`lead_etfs_*`)은 값이 없다. Granger는 그만큼 예측 폭을 넓힌다(PR #44 "Known limits"). 3종목 기본 계획(38건)에서는 잘리지 않는다.
 

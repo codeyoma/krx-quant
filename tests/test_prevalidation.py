@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 
-from krx_quant.algorithms import Algorithm, Card, Model, NothingToLearn, RegistrationError, Sample, save_model
+from krx_quant.algorithms import Algorithm, Model, NothingToLearn, RegistrationError, Sample, save_model
 from krx_quant.baselines import Forecast
 from krx_quant.cli import main
 from krx_quant.clock import FakeClock
@@ -31,7 +31,7 @@ from krx_quant.predictions import DB_NAME, PredictionStore
 from krx_quant.prevalidation import admits, code_digest, prevalidate, report_path
 from krx_quant.replay import replay_into
 from krx_quant.swap import reload_models
-from tests.algorithm_doubles import FixedAlgorithm
+from tests.algorithm_doubles import FixedAlgorithm, stand_in_card, stand_in_meanings
 from tests.replay_events import api, at, book, get_json, run, trade
 from tests.test_lifecycle import Outbox
 from tests.test_replay import busy_morning
@@ -67,7 +67,8 @@ class Contrarian:
     def __init__(self, name: str, own: str = "minute_ticks", lag: int = 4) -> None:
         self.name = name
         self.features: tuple[str, ...] = tuple(dict.fromkeys(("minute_ticks", own)))
-        self.card = Card(f"Test {name}", "test", "the last minutes undone", (own,), "nothing")
+        self.card = stand_in_card(name, "the last minutes undone", (own,), "nothing")
+        self.param_meanings = stand_in_meanings()
         self._lag = lag
         self.fitted: list[list[date]] = []  # the days each fit trained on
 

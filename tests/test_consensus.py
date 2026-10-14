@@ -160,6 +160,15 @@ async def test_a_consensus_stored_before_the_votes_shows_none(tmp_path: Path) ->
     assert (older["algorithm"], older["votes"], older["pooled"]) == ("consensus-final", None, None)
 
 
+async def test_the_fast_consensus_card_tells_the_engine_s_own_cutoff(tmp_path: Path) -> None:
+    engine = await run(tmp_path / "engine.db", busy_morning(), until=at("09:02:00"), consensus_timing=TIMING)
+
+    async with api(engine) as client:
+        body = await get_json(client, "/v1/algorithms")
+    fast = next(c["card"] for c in body["consensus"] if c["name"] == "consensus-fast")
+    assert "0.15초 안에 끝난 구성원만" in fast["logic"]  # not the default 2 s
+
+
 async def test_one_bar_close_s_predictions_every_one_of_them(tmp_path: Path) -> None:
     db = tmp_path / "engine.db"
     put_statuses(db, {"quick": Status.ACTIVE})

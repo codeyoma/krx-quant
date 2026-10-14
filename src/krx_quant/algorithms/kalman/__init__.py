@@ -13,6 +13,7 @@ Personality card:
 - **Learns**: expectation–maximization over the last 20 trading days' recorded books,
   each symbol's day cut into hours that do not overlap: the Kalman smoother's moments give
   the noises' variances, the trend's decay and the futures' share in closed form.
+- **Fails**: when the symbol and the futures part ways, and on a thin or jumpy book.
 
 The book is recorded only (backfilled days have none): on a day with backfilled bars only
 it does not learn, and at a bar close without the book it does not predict (``no_book``).
@@ -24,9 +25,16 @@ import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
-from krx_quant.algorithms.contract import Abstention, Card, Model, NothingToLearn, NotPredicted, Sample
-from krx_quant.algorithms.forecasts import UNKNOWN, lowest_log_loss, normal_forecast, with_outcomes
+from krx_quant.algorithms.contract import Abstention, Model, NothingToLearn, NotPredicted, Sample
+from krx_quant.algorithms.forecasts import (
+    NORMAL_CLASSES,
+    UNKNOWN,
+    lowest_log_loss,
+    normal_forecast,
+    with_outcomes,
+)
 from krx_quant.baselines import Forecast
+from krx_quant.cards import Card, Meaning, learned
 from krx_quant.features import FeatureVector
 from krx_quant.reference import BAR
 
@@ -34,6 +42,19 @@ STEPS = 4  # minutes ahead
 # Before any training: a fair price wandering about a tick a minute with a slight trend,
 # behind a quarter-tick of noise, not following the futures.
 DEFAULT_PARAMS: dict[str, float] = {"q_level": 0.5, "q_trend": 0.02, "r": 0.25, "phi": 0.8, "b": 0.0}
+TRAINING_DAYS = 20
+_LEARNED = f"{learned(TRAINING_DAYS)} 녹화된 날(호가)로만 배운다."
+PARAM_MEANINGS: Mapping[str, Meaning] = {
+    "q_level": Meaning("숨은 적정가가 1분에 받는 잡음의 분산.", "틱²", _LEARNED),
+    "q_trend": Meaning("적정가의 추세가 1분에 받는 잡음의 분산.", "(틱/분)²", _LEARNED),
+    "r": Meaning("microprice가 적정가 주변에 낀 관측 잡음의 분산.", "틱²", _LEARNED),
+    "phi": Meaning("추세가 1분 뒤 남는 비율 φ(0~0.99). 작을수록 추세가 빨리 사라진다.", "비율", _LEARNED),
+    "b": Meaning(
+        "1분 전 KOSPI200 선물이 1bp 움직일 때 적정가가 따라 움직이는 틱. 0이면 선물을 따르지 않는다.",
+        "틱/bp",
+        _LEARNED,
+    ),
+}
 # EM: at most this many rounds, stopping once the log-likelihood barely moves.
 ROUNDS = 50
 _TOLERANCE = 1e-6
@@ -133,7 +154,8 @@ def forecast_move(p: _Params, ys: Sequence[float], moves: Sequence[float]) -> tu
 class Kalman:
     name = "kalman"
     features: tuple[str, ...] = ("microprice_ticks", "kospi200f_moves", "flat_ticks")
-    training_days = 20
+    training_days = TRAINING_DAYS
+    param_meanings = PARAM_MEANINGS
     card = Card(
         scientist="Rudolf E. Kálmán",
         character="잡음 제거·선물 추종",
@@ -147,6 +169,19 @@ class Kalman:
         training=(
             "최근 20거래일의 녹화된 호가로 EM을 한다. 종목·날짜마다 겹치지 않는 1시간 구간을 칼만 "
             "스무더로 돌려, 적정가·추세·관측 잡음의 분산과 추세 감쇠, 선물 계수를 닫힌 해로 다시 추정한다."
+        ),
+        forecasting=(
+            "칼만 필터로 거른 봉 마감의 적정가와 추세를 4분 뒤로 옮긴다. 첫 분에는 봉 마감까지 1분의 선물 "
+            "움직임을 넣고, 그 뒤 분의 선물 움직임은 모르므로 b² × (최근 선물 움직임 제곱 평균)만큼 분산을 "
+            "더한다. 4분 뒤 중간가 변화를, 4분 뒤 적정가(봉 마감 기준가 대비 틱)를 평균으로 하고 그 분산에 "
+            f"관측 잡음 r을 더한 값을 분산으로 하는 정규분포로 본다. {NORMAL_CLASSES} 기대수익은 그 "
+            "평균이다. 봉 마감에 호가가 비어 있으면 예측하지 않고(no_book), 보합 범위를 모르면 세 확률을 "
+            "1/3씩 둔다."
+        ),
+        failure=(
+            "종목과 선물이 따로 움직이는 장(종목 고유 뉴스, 선물만 움직이는 때)에서 선물 계수를 따라 틀리기 "
+            "쉽다. 호가가 얇거나 자주 비는 종목, 호가가 크게 출렁이는 때에는 microprice가 잡음이라 적정가가 "
+            "흔들린다. 추세가 갑자기 꺾이면 걸러 낸 추세가 늦게 따라간다."
         ),
     )
 

@@ -172,6 +172,8 @@ def iv_days(count: int, start: date = date(2026, 9, 1)) -> list[Sample]:
 def test_training_learns_the_iv_bounds_and_how_much_more_each_regime_moves() -> None:
     model = MARKOV.fit(iv_days(12))
 
+    # Every parameter a model can hold, the bounds too, and nothing else has a meaning (#164).
+    assert set(model.params) == set(MARKOV.param_meanings)
     # The bounds split the recorded bar closes in three: between the days' levels.
     assert 15.4 < model.params["iv_cut.0"] < 20.0
     assert 20.4 < model.params["iv_cut.1"] < 28.0

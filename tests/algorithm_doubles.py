@@ -3,14 +3,24 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
-from krx_quant.algorithms import Card, Model, Sample
+from krx_quant.algorithms import Card, Meaning, Model, Sample
 from krx_quant.baselines import Forecast
 from krx_quant.features import SERIES_FEATURES, FeatureVector, Value
 from krx_quant.pricing import Direction
 
 CAUTIOUS = Forecast(0.2, 0.6, 0.2, 0.0)
+
+
+def stand_in_card(name: str, logic: str, unique: tuple[str, ...], training: str) -> Card:
+    """A stand-in's card: made-up text in every field."""
+    return Card(f"Test {name}", "test", logic, unique, training, "as it is told", "never")
+
+
+def stand_in_meanings(*params: str) -> Mapping[str, Meaning]:
+    """Made-up meanings of a stand-in's parameters."""
+    return {p: Meaning(f"test {p}", "none", "always") for p in params}
 
 
 class FixedAlgorithm:
@@ -32,7 +42,8 @@ class FixedAlgorithm:
     ) -> None:
         self.name = name
         self.features = features
-        self.card = Card(f"Test {name}", "test", "a fixed forecast", unique, "nothing")
+        self.card = stand_in_card(name, "a fixed forecast", unique, "nothing")
+        self.param_meanings = stand_in_meanings("samples")
         self._forecast = forecast
         self._seconds = seconds
         self._reads = features if reads is None else reads
@@ -66,7 +77,8 @@ class FrequencyAlgorithm:
     def __init__(self, name: str, feature: str, *, inverted: bool = False) -> None:
         self.name = name
         self.features: tuple[str, ...] = (feature,)
-        self.card = Card(f"Test {name}", "test", "class frequencies", (feature,), "counting")
+        self.card = stand_in_card(name, "class frequencies", (feature,), "counting")
+        self.param_meanings = stand_in_meanings("up", "flat", "down")
         self._inverted = inverted
         self.fitted_on: list[int] = []  # samples per fit
 
