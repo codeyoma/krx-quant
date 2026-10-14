@@ -145,9 +145,16 @@ def night_status(store: ObjectStore, shelf: Shelf, today: date) -> NightStatus |
 
 
 async def show_night(store: ObjectStore, shelf: Shelf, engine: PredictionEngine, today: date) -> None:
-    """Show the latest night in the engine's status."""
+    """Show the latest night in the engine's status, and each algorithm's report of it."""
     status = await asyncio.to_thread(night_status, store, shelf, today)
     engine.training = None if status is None else status.as_dict()
+    engine.night_reports = {} if status is None else reports_by_algorithm(status.night)
+
+
+def reports_by_algorithm(night: Night) -> dict[str, dict[str, Any]]:
+    """The night's reports as stored, by algorithm: ``/v1/algorithms`` shows each one's
+    validation from them (#165), from memory, never reading the store on a request."""
+    return {r["algorithm"]: r for r in night.reports}
 
 
 async def morning_swap(
@@ -157,6 +164,7 @@ async def morning_swap(
     status = await asyncio.to_thread(apply_promotions, store, shelf, today=today, at=at)
     if status is not None:
         engine.training = status.as_dict()
+        engine.night_reports = reports_by_algorithm(status.night)
     reload_models(engine, shelf)
     return status
 

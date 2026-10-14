@@ -117,6 +117,7 @@ async def test_a_trained_model_is_used_and_recorded(tmp_path: Path) -> None:
         "params": dict(trained.params),
         "trained": None,
         "trained_until": None,
+        "training": None,
     }
 
 

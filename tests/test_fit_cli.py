@@ -4,6 +4,7 @@ the engine loads.
 
 from __future__ import annotations
 
+import json
 import math
 import random
 from datetime import date, datetime, time, timedelta
@@ -13,7 +14,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from krx_quant.algorithms import ALGORITHMS, load_models
+from krx_quant.algorithms import ALGORITHMS, load_models, model_path
 from krx_quant.backfill import BAR_SCHEMA, FUTURES_BAR_SCHEMA, FUTURES_BARS_TR, MINUTE_BARS_TR
 from krx_quant.cli import main
 from krx_quant.config import Settings
@@ -131,6 +132,41 @@ def test_today_is_trained_on_only_once_its_recording_is_archived(env: Path) -> N
 
     assert during.recorded == [] and during.model.trained_until == DAYS[-2]
     assert archived.recorded == [DAYS[-1]] and archived.model.trained_until == DAYS[-1]
+
+
+def test_a_fitted_model_keeps_what_it_trained_on_as_values(env: Path) -> None:
+    for day in DAYS:
+        backfill(env / "data", day)
+    record(env / "data", busy_morning(DAYS[-1]), day=DAYS[-1])
+    settings = Settings.from_env(require_kis=False)
+
+    fitted = fit_algorithm(settings, "newton", 3, now=datetime.combine(DAYS[-1], time(21, 5), KST))
+
+    training = fitted.model.training
+    assert training is not None
+    assert (training.first_day, training.last_day, training.samples) == (DAYS[-3], DAYS[-1], fitted.samples)
+    assert training.days == {"recorded": 1, "bars": 2}, "by where the days' labels came from (#165)"
+    assert fitted.model.trained == (
+        f"{DAYS[-3]}..{DAYS[-1]}, {training.samples} samples, log loss {training.loss:.4f}"
+    )
+    assert load_models(env / "state", ALGORITHMS)["newton"] == fitted.model, "saved with them"
+
+
+def test_a_model_saved_before_its_training_values_loads_without_them(env: Path) -> None:
+    saved = {
+        "version": "newton-20261008-5e1f0a",
+        "params": {"damping": 0.25, "threshold": 1.5},
+        "trained": "2026-09-10..2026-10-08, 9120 samples, log loss 0.9312",
+        "trained_until": "2026-10-08",
+    }
+    path = model_path(env / "state", "newton")
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(saved))
+
+    model = load_models(env / "state", ALGORITHMS)["newton"]
+
+    assert (model.version, model.training) == ("newton-20261008-5e1f0a", None)
+    assert model.as_dict() == {**saved, "training": None}
 
 
 def test_fitting_needs_a_known_algorithm_and_backfilled_bars(

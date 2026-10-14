@@ -53,6 +53,44 @@ class NothingToLearn(ValueError):
     book): a gap in the data, not a defect. Any other error from ``fit`` is a failure."""
 
 
+# Where a day's labels came from (#165), by the reference price its samples were made with
+# (``training.TrainingDay``): a recorded day's mid-points, a backfilled day's closes.
+LABEL_SOURCES = {"mid": "recorded", "close": "bars"}
+
+
+@dataclass(frozen=True)
+class TrainedOn:
+    """What a fitted model was trained on (#165): ``Model.trained``'s text, as values."""
+
+    first_day: date
+    last_day: date
+    samples: int  # with an outcome
+    loss: float  # its mean log loss on those samples: the training data's, not a validation's
+    # The days by where their labels came from: ``recorded`` (mid-points) and ``bars``
+    # (one-minute closes). None when the samples did not say (made by hand, not by training).
+    days: Mapping[str, int] | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "first_day": self.first_day.isoformat(),
+            "last_day": self.last_day.isoformat(),
+            "samples": self.samples,
+            "loss": self.loss,
+            "days": None if self.days is None else dict(self.days),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> TrainedOn:
+        days = data.get("days")
+        return cls(
+            date.fromisoformat(data["first_day"]),
+            date.fromisoformat(data["last_day"]),
+            int(data["samples"]),
+            float(data["loss"]),
+            None if days is None else {str(k): int(v) for k, v in days.items()},
+        )
+
+
 @dataclass(frozen=True)
 class Model:
     """A versioned model: fitted parameters, or the defaults before any training. A learner
@@ -63,6 +101,8 @@ class Model:
     trained: str | None = None  # what it was trained on
     trained_until: date | None = None  # the last day of its training data
     blob: str | None = field(default=None, repr=False)
+    # The same as values (#165); None for the defaults and for models saved before it.
+    training: TrainedOn | None = None
 
     def as_dict(self, *, blob: bool = False) -> dict[str, Any]:
         """As the Engine API shows it; with the blob (``blob=True``) as stored."""
@@ -71,6 +111,7 @@ class Model:
             "params": dict(self.params),
             "trained": self.trained,
             "trained_until": self.trained_until.isoformat() if self.trained_until else None,
+            "training": None if self.training is None else self.training.as_dict(),
         }
         if blob and self.blob is not None:
             out["blob"] = self.blob
@@ -88,7 +129,9 @@ class Model:
         loss: float,
         blob: str | None = None,
     ) -> Model:
-        """A model fitted on ``scored``, versioned by its last day and what went into it."""
+        """A model fitted on ``scored``, versioned by its last day and what went into it; what
+        it was trained on, as text and as values, the days by where their labels came from
+        where the samples say (``Sample.reference``)."""
         first = min(s.bar_close for s in scored).date()
         last = max(s.bar_close for s in scored).date()
         canonical = json.dumps(dict(params), sort_keys=True)
@@ -101,6 +144,7 @@ class Model:
             trained=f"{first}..{last}, {len(scored)} samples, log loss {loss:.4f}",
             trained_until=last,
             blob=blob,
+            training=TrainedOn(first, last, len(scored), loss, _days_by_source(scored)),
         )
 
     @classmethod
@@ -109,14 +153,25 @@ class Model:
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> Model:
+        """A stored model; one saved before a field was added has it None."""
         until = data.get("trained_until")
+        training = data.get("training")
         return cls(
             str(data["version"]),
             {k: float(v) for k, v in data["params"].items()},
             data.get("trained"),
             date.fromisoformat(until) if until else None,
             data.get("blob"),
+            None if training is None else TrainedOn.from_dict(training),
         )
+
+
+def _days_by_source(scored: Sequence[Sample]) -> dict[str, int] | None:
+    """The days of ``scored`` by where their labels came from; None if no sample says."""
+    sources = {s.bar_close.date(): LABEL_SOURCES[s.reference] for s in scored if s.reference in LABEL_SOURCES}
+    if not sources:
+        return None
+    return {source: sum(kind == source for kind in sources.values()) for source in LABEL_SOURCES.values()}
 
 
 @dataclass(frozen=True)
@@ -128,6 +183,9 @@ class Sample:
     features: FeatureVector
     outcome: Direction | None  # None if the bars do not tell
     change_ticks: float | None  # the move behind the outcome, for algorithms that learn its size
+    # The reference price its day was made with (#165): "mid" on a recorded day, "close" on a
+    # backfilled one (``training.TrainingDay``); None when not made from a day of training data.
+    reference: str | None = None
 
 
 class Algorithm(Protocol):

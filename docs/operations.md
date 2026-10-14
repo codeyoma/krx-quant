@@ -372,10 +372,14 @@ docker compose run --rm engine diagnose --days 5
   > **바뀜** (2026-10-10, #45): 08:00 교체 규칙이 PR 안에서 세 번 바뀌었다. 처음(75fa527)은 "07:30까지 확정된 목록만", 다음(ef08287)은 "그 밤 바로 다음 거래일 아침의 목록만, 늦은 목록은 쓰지 않음", 지금(1590d11)은 위 규칙이다. PR #45 본문은 두 번째 규칙을 적고 있으니 이 문서를 따른다. 이유: 이른 `KRX_TRAIN_AT`이나 늦게 끝난 학습의 목록도 다음 아침에 쓰고, 모델이 빠진 목록을 반만 적용하지 않기 위해서다(1590d11).
 - `KRX_TRAIN_AT`을 21:00(그날 1분봉 업로드) 전으로 당기면 전 거래일까지의 데이터로 학습한다.
 - `/v1/status`의 `training.applied`는 지금 그 승격 모델이 돌고 있는지다. 적용 뒤 `rollback`이나 `fit`으로 바꾸면 `false`가 되고, `reason`에 지금 도는 버전이 나온다.
+- 엔진이 보이는 지난밤 학습은 Object Store의 가장 최근 승격 목록 `promotions/<날짜>.json`이다. 그 안에 알고리즘별 리포트가 모두 있다. 엔진은 이것을 읽어 메모리에 둔다(#165).
+  - 읽는 때: 수집기가 시작할 때, 08:00 교체, `fit`·`rollback`으로 모델 파일이 바뀐 뒤, 그 밤의 학습이 끝난 뒤(Spot이면 결과를 기다린 뒤).
+  - `/v1/status`의 `training`과 `/v1/algorithms`의 `validation`(알고리즘별 리포트의 검증 값)이 이것이다. API 요청은 Object Store를 읽지 않는다. 그래서 S3의 리포트를 손으로 고쳐도 다음에 읽을 때까지 그대로 보인다.
+  - 로컬 사본은 따로 두지 않는다. Object Store가 없으면(`KRX_OBJECT_STORE` 없음) 둘 다 `null`이다.
 - 수집기가 학습 시각 뒤 8시간 안에 다시 시작하면(배포, 장애) 그 밤의 학습을 바로 이어서 돌린다. 끝난 알고리즘은 건너뛴다. 학습이 6시간 안에 끝나지 않으면 멈추고 알린다.
 - 손으로 학습한 모델(`fit`)이 champion이면 검증일까지 학습했을 수 있다. 그러면 리포트의 `reason`에 `trained on these days`가 붙고, 이기기가 실제보다 어렵다.
 - 서버의 모델은 `state/models/<알고리즘>.json`이다. 설치한 버전은 `state/models/versions/`에, 언제 왜 바꿨는지는 `state/models/history.json`에 남는다.
-- 상태는 `curl http://krx-quant:8080/v1/status`의 `training`(지난밤 날짜, 적용 여부, 알고리즘별 결과)과 `/v1/algorithms`의 모델 버전으로 본다.
+- 상태는 `curl http://krx-quant:8080/v1/status`의 `training`(지난밤 날짜, 적용 여부, 알고리즘별 결과)과 `/v1/algorithms`의 모델 버전, 학습 정보(`model.training`), 검증 손실(`validation`)로 본다.
 
 ```bash
 docker compose run --rm --no-deps engine train            # 밤 학습을 지금 한 번 (끝난 밤이면 그대로 둔다)
@@ -649,7 +653,7 @@ docker compose logs --tail 200 engine
 | `.engine.lock` | 도는 엔진이 잡는 잠금 파일(`flock`, #168). 잡혀 있으면 `rescore`가 거부한다. 엔진이 끝나면 풀린다. 파일은 남아도 된다 |
 | `prevalidation-<알고리즘>.sqlite3` | `krx-quant prevalidate`가 재생한 예측과 채점. 다시 돌리면 새로 만든다 |
 | `prevalidations/<알고리즘>.json` | 사전 검증 리포트(`passed`, 검사별 결과, 통계). 엔진이 봉 마감마다 기다리는 알고리즘의 것을 읽는다([engine-api.md](engine-api.md#사전-검증-24)) |
-| `models/<알고리즘>.json` | 엔진이 지금 돌리는 모델: `version`, `params`, `trained`, `trained_until`. 없으면 기본 모델 |
+| `models/<알고리즘>.json` | 엔진이 지금 돌리는 모델: `version`, `params`, `trained`, `trained_until`, `training`(학습 정보: 첫날·마지막 날, 표본 수, 학습 손실, 정답 출처별 날 수. #165 전에 저장한 모델에는 없다), Turing은 `blob`(트리). 없으면 기본 모델 |
 | `models/versions/<알고리즘>/<버전>.json` | 설치한 적 있는 모든 모델. `rollback`이 여기서 읽는다 |
 | `models/history.json` | 설치와 되돌리기 이력. 항목마다 `at`, `algorithm`, `version`(기본 모델이면 `null`), `why`(`fit`, `promotion <날짜>`, `rollback from <버전>`, `installed before`) |
 | `models/applied.json` | `{"night": "<날짜>"}`: 마지막으로 적용한 승격 목록의 밤. 이 밤과 그 전의 목록은 다시 적용하지 않는다 |
@@ -676,7 +680,7 @@ docker compose logs --tail 200 engine
 | `bars/…/bars.parquet` | 1분봉 백필. 로컬과 같은 경로 |
 | `models/<알고리즘>/<버전>.json` | 밤 학습의 challenger와 서버가 돌린 모델. 형식은 `state/models/<알고리즘>.json`과 같다 |
 | `reports/<날짜>/<알고리즘>.json` | 그 밤의 알고리즘별 검증 리포트이자 체크포인트: `algorithm`, `day`, `training_days`, `validation_days`, `champion`(`version`, `loss`, `trained_on_validation`: 검증일까지 학습한 모델인지. 손으로 `fit`한 모델 등), `challenger`(`version`, `loss`, `trained`), `promoted`, `reason`, `reference_prices`(학습·검증일마다 `mid`: 녹화 중간가, `close`: 백필 종가), `samples`(`validation`: 검증 표본 수, 검증까지 간 경우만), `validation`(검증까지 간 경우만, #89: `by_day`는 검증일마다, `by_reference`는 `mid`·`close`마다 `samples`·`challenger`·`champion` 평균 log loss. champion이 하나도 예측하지 않았으면 `champion`이 `null`. `paired`는 두 모델이 모두 예측한 표본 수 `samples`, 손실 차이(challenger − champion) 평균 `mean_difference`, 그 평균의 표준오차 `day_standard_error`(날마다 잔차를 더한 합들을 독립으로 본 클러스터 표준오차. 날의 표본 수가 같으면 검증일 평균들의 표준오차와 같다. 검증일이 2일보다 적으면 `null`)), `commit`(학습한 코드, 엔진처럼 `KRX_COMMIT`. 없으면 `unknown`, #85). 학습하지 못했거나 검증할 정답이 없으면 `champion`, `challenger`가 `null`이다 |
-| `promotions/<날짜>.json` | 그 밤의 승격 목록: `day`, `finalized_at`(확정 시각), `promoted`(알고리즘 → 버전), `reports`(위 리포트 전부). 모든 알고리즘이 끝난 뒤 한 번 쓴다 |
+| `promotions/<날짜>.json` | 그 밤의 승격 목록: `day`, `finalized_at`(확정 시각), `promoted`(알고리즘 → 버전), `reports`(위 리포트 전부). 모든 알고리즘이 끝난 뒤 한 번 쓴다. 엔진은 가장 최근 것을 읽어 메모리에 두고 `/v1/status`의 `training`과 `/v1/algorithms`의 `validation`(#165)으로 보인다(3장 "밤 학습과 모델 교체") |
 | `live.json` | 서버가 지금 돌리는 버전(알고리즘 → 버전, 기본 모델이면 `<이름>-default`). 다음 밤의 champion이다. 사전 검증을 기다리는 알고리즘은 돌기 시작할 때 쓸 모델이다(#24) |
 | `training/settings.json` | `KRX_TRAIN_ON=spot`일 때 서버가 올리는 학습 설정(#23): `KRX_SYMBOLS`, `KRX_ETF_SYMBOLS`, `KRX_US_SYMBOLS`, `KRX_INDEX_CODES`, `KRX_FEE_PERCENT`. 비밀값은 없다. 수집기가 시작할 때와 밤마다 올린다 |
 | `training/market_calendar.json` | 같은 때 올리는 서버의 휴장일 달력(`state/market_calendar.json`과 같은 형식). Spot 학습이 옵션 만기를 서버와 같게 센다 |
