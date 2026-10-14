@@ -188,6 +188,10 @@ def iso(at: datetime) -> str:
     return at.astimezone(KST).isoformat()
 
 
+def _midnight(day: date) -> datetime:
+    return datetime.combine(day, time(), KST)
+
+
 @dataclass(frozen=True)
 class Excluded:
     """What a query's stats leave out of a predictor's predictions (#83)."""
@@ -523,28 +527,85 @@ class PredictionStore:
                 ],
             )
 
-    def add_touches(self, results: Sequence[TouchResult], scored_at: datetime) -> None:
-        """Store bar closes' touch labels (#167); one already stored for a bar close stays."""
-        if not results:
-            return
-        self.version += 1
-        with self._db:
-            self._db.executemany(
-                "INSERT OR IGNORE INTO touches (symbol, bar_close, target_version, class, unscorable, path,"
-                " scored_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                [
-                    (
-                        r.symbol,
-                        iso(r.bar_close),
-                        TARGET_VERSION,
-                        r.direction.value if r.direction else None,
-                        r.unscorable,
-                        json.dumps(touch_path(r), separators=(",", ":")),
-                        iso(scored_at),
-                    )
-                    for r in results
-                ],
+    def add_touches(
+        self, results: Sequence[TouchResult], scored_at: datetime | None = None, *, replace: bool = False
+    ) -> int:
+        """Store bar closes' touch labels (#167), scored at ``scored_at`` (default: when each
+        one's four minutes ended, as a replay scores it). One already stored for a bar close
+        stays; with ``replace`` (#168, a rescore) one whose label or path differs is replaced.
+        How many rows were written."""
+        rows = [
+            (
+                r.symbol,
+                iso(r.bar_close),
+                TARGET_VERSION,
+                r.direction.value if r.direction else None,
+                r.unscorable,
+                json.dumps(touch_path(r), separators=(",", ":")),
+                iso(scored_at or r.end),
             )
+            for r in results
+        ]
+        if not rows:
+            return 0
+        with self._db:
+            before = self._db.total_changes
+            if replace:
+                stored = self._stored_touches(min(r[1] for r in rows), max(r[1] for r in rows))
+                rows = [r for r in rows if stored.get((r[0], r[1])) != r[3:6]]
+            self._db.executemany(
+                f"INSERT OR {'REPLACE' if replace else 'IGNORE'} INTO touches"
+                " (symbol, bar_close, target_version, class, unscorable, path, scored_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                rows,
+            )
+            written = self._db.total_changes - before
+        if written:
+            self.version += 1  # only a change moves what is derived from it on
+        return written
+
+    def _stored_touches(self, first: str, last: str) -> dict[tuple[str, str], tuple[Any, ...]]:
+        """The labels of this target version stored for the bar closes ``first`` to ``last``:
+        (class, unscorable, path) by (symbol, bar close)."""
+        rows = self._db.execute(
+            "SELECT symbol, bar_close, class, unscorable, path FROM touches"
+            " WHERE target_version = ? AND bar_close BETWEEN ? AND ?",
+            (TARGET_VERSION, first, last),
+        )
+        return {(r[0], r[1]): (r[2], r[3], r[4]) for r in rows}
+
+    def untouched(self, since: date, before: date) -> list[tuple[str, datetime]]:
+        """The (symbol, bar close) pairs predicted on the days from ``since`` to before
+        ``before`` without a touch label of this target version (#168), in time order."""
+        rows = self._db.execute(
+            "SELECT DISTINCT p.symbol, p.bar_close FROM predictions p"
+            " WHERE p.bar_close >= ? AND p.bar_close < ? AND NOT EXISTS (SELECT 1 FROM touches t"
+            " WHERE t.symbol = p.symbol AND t.bar_close = p.bar_close AND t.target_version = ?)"
+            " ORDER BY p.bar_close, p.symbol",
+            (iso(_midnight(since)), iso(_midnight(before)), TARGET_VERSION),
+        )
+        return [(r[0], datetime.fromisoformat(r[1])) for r in rows]
+
+    def labeled_days(self, since: date, before: date) -> dict[date, set[str]]:
+        """The days from ``since`` to before ``before`` with predictions or touch labels of
+        this target version, and their symbols (#168)."""
+        params = (iso(_midnight(since)), iso(_midnight(before)))
+        rows = self._db.execute(
+            "SELECT DISTINCT substr(bar_close, 1, 10), symbol FROM predictions"
+            " WHERE bar_close >= ? AND bar_close < ?"
+            " UNION SELECT DISTINCT substr(bar_close, 1, 10), symbol FROM touches"
+            " WHERE bar_close >= ? AND bar_close < ? AND target_version = ?",
+            (*params, *params, TARGET_VERSION),
+        )
+        days: dict[date, set[str]] = {}
+        for day, symbol in rows:
+            days.setdefault(date.fromisoformat(day), set()).add(symbol)
+        return days
+
+    def changed(self) -> None:
+        """Another connection wrote to the database (the touch fill, #168): what is derived
+        from it (the cached statistics) is computed again."""
+        self.version += 1
 
     def touches(self, symbol: str | None = None) -> list[dict[str, Any]]:
         """The touch labels of this target version stored, oldest first, with their path
