@@ -204,7 +204,7 @@ Backfiller가 날마다 그날의 최근월물을 받아 연속 1분봉(`KOSPI20
 
 일봉 보기(#111)와 주·월·년봉 보기(#112)가 쓸 KIS 국내주식기간별시세(`FHKST03010100`)다. 2026-10-14 밤 서버에서 `krx-quant probe-candles`로 쟀다(아래 "실측"). 수집(`candles.py`, #111, #112)은 실측 전에 만든 규칙 그대로 맞았다. 다시 잴 때는 장 시간(08:00–20:00)과 20:30 백필을 피한다. 같은 앱키의 REST 초당 한도를 수집기와 나눠 쓰기 때문이다.
 
-> **바뀜** (2026-10-14, #PRNUM): "아직 실측하지 못했다 ⚠" → 실측 결과. 이유: probe 출력이 나왔다(#111).
+> **바뀜** (2026-10-14, #195): "아직 실측하지 못했다 ⚠" → 실측 결과. 이유: probe 출력이 나왔다(#111).
 
 - 경로: `/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice`. 파라미터: `FID_COND_MRKT_DIV_CODE`(`UN` 통합, `J` KRX, `NX` NXT), `FID_INPUT_ISCD`, `FID_INPUT_DATE_1`(시작일), `FID_INPUT_DATE_2`(종료일), `FID_PERIOD_DIV_CODE`(`D`·`W`·`M`·`Y`), `FID_ORG_ADJ_PRC`(`0` 수정주가, `1` 원주가). [koreainvestment/open-trading-api](https://github.com/koreainvestment/open-trading-api) 예제 기준이다.
 - 쓰는 곳: 일·주·월·년봉 수집(`candles.py`, #111, #112). 수정주가(`0`), 통합(`UN`)을 먼저 묻고 봉이 없으면 KRX(`J`)를 묻는다. 기간 끝(`FID_INPUT_DATE_2`)을 마지막 끝난 거래일로 두고, 받은 가장 오래된 날의 전날로 옮겨 가며 더 오래된 봉이 오지 않을 때까지 묻는다. 아래 실측 결과로 이 규칙을 확인한다.
