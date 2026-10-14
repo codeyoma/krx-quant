@@ -32,9 +32,9 @@ from krx_quant.config import Settings
 from krx_quant.engine import Event
 from krx_quant.fake_kis import FakeKis
 from krx_quant.object_store import LocalObjectStore
-from krx_quant.predictions import DB_NAME
+from krx_quant.predictions import DB_NAME, PredictionStore
 from krx_quant.rescore import EngineLock, EngineRunning, fill_touches, rescore
-from krx_quant.touch import NOT_RECORDED, RESTARTED
+from krx_quant.touch import NOT_RECORDED, RESTARTED, SILENT, TouchResult
 from tests.replay_events import DAY, SYMBOL, at, kospi, kospi200_futures, run
 from tests.test_collector import settings_for
 from tests.test_live_predictions import free_port, poll
@@ -369,3 +369,19 @@ def test_the_lock_is_free_once_its_holder_lets_go(tmp_path: Path) -> None:
     first.release()
     assert second.acquire()
     second.release()
+
+
+def test_storing_labels_that_change_nothing_leaves_the_store_version(tmp_path: Path) -> None:
+    store = PredictionStore(tmp_path / DB_NAME)
+    try:
+        labels = [TouchResult(SYMBOL, at("09:31:00"), None, SILENT)]
+        assert store.add_touches(labels) == 1
+        version = store.version
+        # Stored already: neither a fill nor a rescore writes, so the cached statistics stay.
+        assert store.add_touches(labels) == 0
+        assert store.add_touches(labels, replace=True) == 0
+        assert store.version == version
+        assert store.add_touches([TouchResult(SYMBOL, at("09:31:00"), None, RESTARTED)], replace=True) == 1
+        assert store.version == version + 1
+    finally:
+        store.close()

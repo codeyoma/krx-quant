@@ -548,7 +548,6 @@ class PredictionStore:
         ]
         if not rows:
             return 0
-        self.version += 1
         with self._db:
             before = self._db.total_changes
             if replace:
@@ -560,7 +559,10 @@ class PredictionStore:
                 " VALUES (?, ?, ?, ?, ?, ?, ?)",
                 rows,
             )
-            return self._db.total_changes - before
+            written = self._db.total_changes - before
+        if written:
+            self.version += 1  # only a change moves what is derived from it on
+        return written
 
     def _stored_touches(self, first: str, last: str) -> dict[tuple[str, str], tuple[Any, ...]]:
         """The labels of this target version stored for the bar closes ``first`` to ``last``:
