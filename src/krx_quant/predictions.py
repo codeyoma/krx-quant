@@ -10,6 +10,13 @@ over (``outcomes.scored_at``) and its bar close's touch label is known. The clas
 bases A and B are still written, unread, so an engine rolled back to before #170 runs on.
 ``model_targets`` says which target each model a prediction names was trained on (#170).
 
+The kinds besides the direction (#179, ``kinds.py``) have tables of their own:
+``kind_predictions`` holds each predictor's output at each bar close (the three
+probabilities and the kind's fields, as JSON), ``kind_answers`` each window's answer, one per
+(kind, symbol, bar close, answer version), what every predictor of the kind there is scored
+on. Like ``touches`` they leave the schema version alone: an engine from before them still
+opens the database (``_KIND_SCHEMA``).
+
 Times are ISO 8601 strings in KST, which sort in time order.
 """
 
@@ -27,6 +34,7 @@ from typing import Any
 from krx_quant.baselines import Forecast
 from krx_quant.consensus import Weights
 from krx_quant.feeds.base import KST
+from krx_quant.kinds import Answer
 from krx_quant.lifecycle import Standing, Status
 from krx_quant.pricing import Direction
 from krx_quant.touch import TARGET_VERSION, TouchResult, touch_path
@@ -142,6 +150,46 @@ CREATE TABLE IF NOT EXISTS consensus_weights (
 """
 )
 
+# The kinds besides the direction (#179): tables of their own, as touches, so an engine from
+# before them still opens the database; the schema version stays.
+_KIND_SCHEMA = """
+CREATE TABLE IF NOT EXISTS kind_predictions (  -- a prediction of a kind besides the direction
+    id INTEGER PRIMARY KEY,
+    kind TEXT NOT NULL,               -- kinds.Kind.name
+    symbol TEXT NOT NULL,
+    algorithm TEXT NOT NULL,          -- an algorithm or a baseline of the kind
+    model_version TEXT NOT NULL,
+    bar_close TEXT NOT NULL,          -- the prediction time t
+    displayed_at TEXT NOT NULL,
+    status TEXT NOT NULL,             -- as predictions.status: ok, timed_out, error, vi, no_book, no_previous
+    output TEXT,                      -- JSON: p_<class> of its three classes, then its fields; null unless ok
+    UNIQUE (kind, symbol, algorithm, bar_close)
+);
+CREATE INDEX IF NOT EXISTS kind_predictions_by_close ON kind_predictions (kind, bar_close);
+CREATE INDEX IF NOT EXISTS kind_predictions_by_time ON kind_predictions (kind, symbol, bar_close);
+CREATE INDEX IF NOT EXISTS kind_predictions_by_algorithm ON kind_predictions (algorithm, bar_close);
+CREATE TABLE IF NOT EXISTS kind_answers (  -- a kind's answer of a bar close's four minutes
+    kind TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    bar_close TEXT NOT NULL,
+    answer_version INTEGER NOT NULL,  -- the kind's (kinds.Kind.answer_version)
+    class TEXT,                       -- one of the kind's classes; null when it could not be scored
+    unscorable TEXT,                  -- why not: missing mid, rest quotes, silent quotes, restarted, ...
+    special INTEGER NOT NULL DEFAULT 0,  -- a VI, circuit breaker or sidecar touched the window
+    path TEXT NOT NULL,               -- JSON: the kind's summary of the window
+    scored_at TEXT NOT NULL,
+    PRIMARY KEY (kind, symbol, bar_close, answer_version)
+);
+"""
+
+# A kind's prediction ``p`` and its bar close's answer ``a`` of the version given (#179).
+KIND_ANSWER_JOIN = (
+    "LEFT JOIN kind_answers a ON a.kind = p.kind AND a.symbol = p.symbol AND a.bar_close = p.bar_close"
+    " AND a.answer_version = ?"
+)
+# A kind's prediction scored: made, and its bar close's answer has a class.
+KIND_SCORED = "p.status = 'ok' AND a.class IS NOT NULL"
+
 # Version 1 (#9) required probabilities; rebuild the table without that.
 _FROM_V1 = (
     _PREDICTIONS.format(name="predictions_v2")
@@ -246,6 +294,19 @@ class NewPrediction:
 
 
 @dataclass(frozen=True)
+class NewKindPrediction:
+    """A prediction of a kind besides the direction (#179), to store."""
+
+    symbol: str
+    algorithm: str
+    model_version: str
+    bar_close: datetime
+    displayed_at: datetime
+    output: Mapping[str, float] | None  # the probabilities and the kind's fields; None unless ok
+    status: str = "ok"
+
+
+@dataclass(frozen=True)
 class Pending:
     prediction_id: int
     symbol: str
@@ -297,11 +358,17 @@ class PredictionStore:
         version = self._db.execute("PRAGMA user_version").fetchone()[0]
         if version > _VERSION:
             raise RuntimeError(f"{path} was written by a newer engine (schema {version})")
-        script = (_FROM_V1 if version == 1 else "") + _SCHEMA + f"PRAGMA user_version={_VERSION};"
+        script = (
+            (_FROM_V1 if version == 1 else "") + _SCHEMA + _KIND_SCHEMA + f"PRAGMA user_version={_VERSION};"
+        )
         self._db.executescript(f"BEGIN;{script}COMMIT;")
         # Bumped by every write, so derived results (statistics) know when to recompute.
         self.version = 0
         self._algorithms = {r[0] for r in self._db.execute("SELECT DISTINCT algorithm FROM predictions")}
+        # Every predictor of a kind besides the direction that ever predicted, and its kind (#179).
+        self._kind_algorithms: dict[str, str] = dict(
+            self._db.execute("SELECT DISTINCT algorithm, kind FROM kind_predictions").fetchall()
+        )
 
     def close(self) -> None:
         self._db.close()
@@ -670,7 +737,8 @@ class PredictionStore:
 
     def mark_special(self, symbol: str | None, start: datetime, end: datetime, horizon: timedelta) -> None:
         """Mark special every prediction (of ``symbol``, or of every symbol if None) whose
-        window, ``horizon`` long, meets the open span from ``start`` to ``end``, scored or not.
+        window, ``horizon`` long, meets the open span from ``start`` to ``end``, scored or not;
+        and every kind's answer of such a window (#179).
         """
         self.version += 1
         where = "p.bar_close > ? AND p.bar_close < ? AND o.target_at > ?"
@@ -678,6 +746,11 @@ class PredictionStore:
         if symbol is not None:
             where += " AND p.symbol = ?"
             params.append(symbol)
+        answers = "bar_close > ? AND bar_close < ?"  # its end, bar close + horizon, after start
+        answered: list[str] = [iso(start - horizon), iso(end)]
+        if symbol is not None:
+            answers += " AND symbol = ?"
+            answered.append(symbol)
         with self._db:
             self._db.execute(
                 "UPDATE outcomes SET special = 1 WHERE prediction_id IN"
@@ -685,6 +758,318 @@ class PredictionStore:
                 f" WHERE {where})",
                 params,
             )
+            self._db.execute(f"UPDATE kind_answers SET special = 1 WHERE {answers}", answered)
+
+    # The kinds besides the direction (#179): their predictions and answers.
+
+    def add_kind_predictions(
+        self, kind: str, predictions: Sequence[NewKindPrediction]
+    ) -> dict[str, list[int]]:
+        """Store a kind's predictions in one transaction; their IDs, by predictor."""
+        self.version += 1
+        ids: dict[str, list[int]] = {}
+        with self._db:
+            for p in predictions:
+                cursor = self._db.execute(
+                    "INSERT INTO kind_predictions (kind, symbol, algorithm, model_version, bar_close,"
+                    " displayed_at, status, output) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        kind,
+                        p.symbol,
+                        p.algorithm,
+                        p.model_version,
+                        iso(p.bar_close),
+                        iso(p.displayed_at),
+                        p.status,
+                        None if p.output is None else json.dumps(dict(p.output), separators=(",", ":")),
+                    ),
+                )
+                assert cursor.lastrowid is not None
+                ids.setdefault(p.algorithm, []).append(cursor.lastrowid)
+                self._kind_algorithms.setdefault(p.algorithm, kind)
+        return ids
+
+    def add_kind_answers(
+        self,
+        kind: str,
+        answer_version: int,
+        answers: Sequence[tuple[str, datetime, Answer, bool]],
+        scored_at: datetime | None = None,
+    ) -> list[tuple[str, datetime]]:
+        """Store windows' answers of ``kind``: (symbol, bar close, answer, special) entries,
+        scored at ``scored_at`` (default: when each one's four minutes ended, as a replay or a
+        fill scores it). One stored already stays. The (symbol, bar close) of those written."""
+        written: list[tuple[str, datetime]] = []
+        with self._db:
+            for symbol, bar_close, answer, special in answers:
+                cursor = self._db.execute(
+                    "INSERT OR IGNORE INTO kind_answers (kind, symbol, bar_close, answer_version, class,"
+                    " unscorable, special, path, scored_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        kind,
+                        symbol,
+                        iso(bar_close),
+                        answer_version,
+                        answer.label,
+                        answer.unscorable,
+                        int(special),
+                        json.dumps(dict(answer.path), separators=(",", ":")),
+                        iso(scored_at or bar_close + timedelta(minutes=4)),
+                    ),
+                )
+                if cursor.rowcount:
+                    written.append((symbol, bar_close))
+        if written:
+            self.version += 1
+        return written
+
+    def kind_unanswered(
+        self, versions: Mapping[str, int], since: datetime
+    ) -> list[tuple[str, str, datetime]]:
+        """The (kind, symbol, bar close) of the kinds' predictions made from ``since`` without an
+        answer of the kind's version (``versions``, by kind): made before a restart, their
+        windows not followed through. In time order."""
+        out: list[tuple[str, str, datetime]] = []
+        for kind, version in versions.items():
+            rows = self._db.execute(
+                "SELECT DISTINCT p.symbol, p.bar_close FROM kind_predictions p"
+                " WHERE p.kind = ? AND p.bar_close >= ? AND p.status = 'ok' AND NOT EXISTS"
+                " (SELECT 1 FROM kind_answers a WHERE a.kind = p.kind AND a.symbol = p.symbol"
+                " AND a.bar_close = p.bar_close AND a.answer_version = ?)",
+                (kind, iso(since), version),
+            )
+            out += [(kind, r[0], datetime.fromisoformat(r[1])) for r in rows]
+        return sorted(out, key=lambda k: (k[2], k[0], k[1]))
+
+    def day_kind_classes(
+        self, kind: str, answer_version: int, symbol: str, since: datetime, until: datetime
+    ) -> dict[str, int]:
+        """A kind's answers of the symbol's bar closes in ``[since, until]`` stored so far, by
+        class, predicted or not (a kind baseline's ``day_classes``)."""
+        rows = self._db.execute(
+            "SELECT class, COUNT(*) FROM kind_answers WHERE kind = ? AND answer_version = ? AND symbol = ?"
+            " AND bar_close BETWEEN ? AND ? AND class IS NOT NULL GROUP BY class",
+            (kind, answer_version, symbol, iso(since), iso(until)),
+        ).fetchall()
+        return {r[0]: r[1] for r in rows}
+
+    def first_kind_on_target(self, algorithm: str, since: datetime, answer_version: int) -> datetime | None:
+        """``first_on_target`` of a kind's algorithm: its first bar close at or after ``since``
+        predicted with a model trained on its kind's ``answer_version``."""
+        row = self._db.execute(
+            "SELECT p.bar_close FROM kind_predictions p JOIN model_targets m"
+            " ON m.algorithm = p.algorithm AND m.version = p.model_version"
+            " WHERE p.algorithm = ? AND p.bar_close >= ? AND m.target_version = ?"
+            " ORDER BY p.bar_close LIMIT 1",
+            (algorithm, iso(since), answer_version),
+        ).fetchone()
+        return None if row is None else datetime.fromisoformat(row[0])
+
+    def kind_prediction_days(self, kind: str, until: date, limit: int) -> list[date]:
+        """``prediction_days`` of a kind: the latest ``limit`` days with its predictions, up to
+        ``until``, latest first."""
+        days: list[date] = []
+        before = iso(datetime.combine(until + timedelta(days=1), time(), KST))
+        while len(days) < limit:
+            value = self._db.execute(
+                "SELECT MAX(bar_close) FROM kind_predictions WHERE kind = ? AND bar_close < ?", (kind, before)
+            ).fetchone()[0]
+            if value is None:
+                break
+            day = date.fromisoformat(value[:10])
+            days.append(day)
+            before = iso(datetime.combine(day, time(), KST))
+        return days
+
+    def kind_algorithms(self) -> dict[str, str]:
+        """Every predictor of a kind besides the direction that ever predicted, and its kind."""
+        return dict(self._kind_algorithms)
+
+    def kind_status_counts(self, algorithm: str) -> dict[str, int]:
+        """``status_counts`` of a kind's predictor."""
+        rows = self._db.execute(
+            "SELECT status, COUNT(*) FROM kind_predictions WHERE algorithm = ? GROUP BY status", (algorithm,)
+        )
+        return {status: count for status, count in rows}
+
+    def kind_timeouts_by_algorithm(self, since: datetime, until: datetime) -> dict[str, int]:
+        """``timeouts_by_algorithm`` of the kinds' algorithms."""
+        rows = self._db.execute(
+            "SELECT algorithm, COUNT(DISTINCT bar_close) FROM kind_predictions"
+            " WHERE status = 'timed_out' AND bar_close >= ? AND bar_close < ?"
+            " GROUP BY algorithm ORDER BY algorithm",
+            (iso(since), iso(until)),
+        ).fetchall()
+        return {r[0]: r[1] for r in rows}
+
+    def kind_rows(self, kind: str, answer_version: int, ids: Sequence[int]) -> list[dict[str, Any]]:
+        """A kind's predictions with these IDs, with their answers, by symbol and predictor."""
+        if not ids:
+            return []
+        marks = ", ".join("?" * len(ids))
+        return self._kind_select(
+            answer_version,
+            f"WHERE p.kind = ? AND p.id IN ({marks}) ORDER BY p.symbol, p.algorithm",
+            (kind, *ids),
+        )
+
+    def kind_latest(self, kind: str, answer_version: int, symbol: str) -> list[dict[str, Any]]:
+        """A kind's predictions of the symbol's latest bar close."""
+        return self._kind_select(
+            answer_version,
+            "WHERE p.kind = ? AND p.symbol = ? AND p.bar_close = (SELECT MAX(bar_close) FROM kind_predictions"
+            " WHERE kind = ? AND symbol = ?) ORDER BY p.algorithm",
+            (kind, symbol, kind, symbol),
+        )
+
+    def kind_at_close(
+        self, kind: str, answer_version: int, symbol: str, bar_close: datetime, algorithm: str | None = None
+    ) -> list[dict[str, Any]]:
+        """A kind's predictions of the symbol at one bar close; of one predictor only if given."""
+        where, params = (
+            "WHERE p.kind = ? AND p.symbol = ? AND p.bar_close = ?",
+            [kind, symbol, iso(bar_close)],
+        )
+        if algorithm is not None:
+            where += " AND p.algorithm = ?"
+            params.append(algorithm)
+        return self._kind_select(answer_version, where + " ORDER BY p.algorithm", tuple(params))
+
+    def kind_recent(
+        self,
+        kind: str,
+        answer_version: int,
+        symbol: str,
+        limit: int,
+        algorithm: str | None = None,
+        before: datetime | None = None,
+    ) -> list[dict[str, Any]]:
+        """``recent`` of a kind: the predictions of the symbol's last ``limit`` bar closes of the
+        kind (before ``before`` if given), newest first; of one predictor only if given."""
+        until = iso(before) if before is not None else "9999"
+        if algorithm is None:
+            return self._kind_select(
+                answer_version,
+                "WHERE p.kind = ? AND p.symbol = ? AND p.bar_close IN (SELECT DISTINCT bar_close"
+                " FROM kind_predictions WHERE kind = ? AND symbol = ? AND bar_close < ?"
+                " ORDER BY bar_close DESC LIMIT ?) ORDER BY p.bar_close DESC, p.algorithm",
+                (kind, symbol, kind, symbol, until, limit),
+            )
+        return self._kind_select(
+            answer_version,
+            "WHERE p.kind = ? AND p.symbol = ? AND p.algorithm = ? AND p.bar_close < ?"
+            " ORDER BY p.bar_close DESC LIMIT ?",
+            (kind, symbol, algorithm, until, limit),
+        )
+
+    def kind_answers_at(
+        self, kind: str, answer_version: int, keys: Sequence[tuple[str, datetime]]
+    ) -> list[dict[str, Any]]:
+        """A kind's answers of these (symbol, bar close), with their path parsed, in time order."""
+        out: list[dict[str, Any]] = []
+        for symbol, bar_close in keys:
+            row = self._db.execute(
+                "SELECT symbol, bar_close, answer_version, class, unscorable, special, path, scored_at"
+                " FROM kind_answers WHERE kind = ? AND answer_version = ? AND symbol = ? AND bar_close = ?",
+                (kind, answer_version, symbol, iso(bar_close)),
+            ).fetchone()
+            if row is not None:
+                out.append({**dict(row), "special": bool(row["special"]), "path": json.loads(row["path"])})
+        return sorted(out, key=lambda r: (r["bar_close"], r["symbol"]))
+
+    def kind_answers(self, kind: str, symbol: str | None = None) -> list[dict[str, Any]]:
+        """Every answer of ``kind`` stored, oldest first, with its path parsed (tests, diagnosis)."""
+        where, params = ("AND symbol = ?", (kind, symbol)) if symbol else ("", (kind,))
+        rows = self._db.execute(
+            "SELECT symbol, bar_close, answer_version, class, unscorable, special, path, scored_at"
+            f" FROM kind_answers WHERE kind = ? {where} ORDER BY bar_close, symbol",
+            params,
+        ).fetchall()
+        return [{**dict(r), "special": bool(r["special"]), "path": json.loads(r["path"])} for r in rows]
+
+    def kind_scored(
+        self, kind: str, answer_version: int, days: Sequence[date], symbol: str | None, include_special: bool
+    ) -> list[dict[str, Any]]:
+        """A kind's predictions made on ``days`` and scored on their answer (``KIND_SCORED``), of
+        one symbol or all, read on a connection of its own (``_reading``)."""
+        if not days:
+            return []
+        with self._reading() as db:
+            db.row_factory = sqlite3.Row
+            return self._kind_scored(kind, answer_version, days, symbol, include_special, db)
+
+    def _kind_scored(
+        self,
+        kind: str,
+        answer_version: int,
+        days: Sequence[date],
+        symbol: str | None,
+        include_special: bool,
+        db: sqlite3.Connection,
+    ) -> list[dict[str, Any]]:
+        on, params = _made_on(days, symbol)
+        where = f"WHERE p.kind = ? AND {on} AND {KIND_SCORED}"
+        if not include_special:
+            where += " AND a.special = 0"
+        return self._kind_select(answer_version, where, (kind, *params), db)
+
+    def kind_scored_and_excluded(
+        self, kind: str, answer_version: int, days: Sequence[date], symbol: str | None, include_special: bool
+    ) -> tuple[list[dict[str, Any]], dict[str, Excluded]]:
+        """``kind_scored`` and what the stats leave out of the same predictions, by predictor,
+        read in one transaction so they agree: made ones whose answer is special or has no
+        class (``unscorable``), and those not made, by status."""
+        if not days:
+            return [], {}
+        with self._reading() as db:
+            db.execute("BEGIN")
+            db.row_factory = sqlite3.Row
+            rows = self._kind_scored(kind, answer_version, days, symbol, include_special, db)
+            db.row_factory = None
+            on, params = _made_on(days, symbol)
+            excluded: dict[str, Excluded] = {}
+            for name, special, unscorable in db.execute(
+                "SELECT p.algorithm, SUM(a.class IS NOT NULL AND a.special = 1), SUM(a.class IS NULL)"
+                f" FROM kind_predictions p JOIN kind_answers a ON a.kind = p.kind AND a.symbol = p.symbol"
+                f" AND a.bar_close = p.bar_close AND a.answer_version = ?"
+                f" WHERE p.kind = ? AND {on} AND p.status = 'ok' GROUP BY p.algorithm",
+                (answer_version, kind, *params),
+            ):
+                excluded[name] = Excluded(special, unscorable)
+            for name, status, n in db.execute(
+                f"SELECT p.algorithm, p.status, COUNT(*) FROM kind_predictions p WHERE p.kind = ? AND {on}"
+                " AND p.status != 'ok' GROUP BY p.algorithm, p.status ORDER BY p.status",
+                (kind, *params),
+            ):
+                excluded.setdefault(name, Excluded()).status[status] = n
+            db.execute("COMMIT")
+        return rows, excluded
+
+    def _kind_select(
+        self, answer_version: int, where: str, params: tuple[Any, ...], db: sqlite3.Connection | None = None
+    ) -> list[dict[str, Any]]:
+        """A kind's predictions ``p`` with their bar close's answer ``a`` of ``answer_version``,
+        their output and the answer's path parsed."""
+        rows = (
+            (db or self._db)
+            .execute(
+                "SELECT p.*, a.answer_version AS answer_version, a.class AS answer_class,"
+                " a.unscorable AS answer_unscorable, a.special AS answer_special, a.path AS answer_path,"
+                " a.scored_at AS answer_scored_at, m.target_version AS model_target"
+                f" FROM kind_predictions p {KIND_ANSWER_JOIN}"
+                " LEFT JOIN model_targets m ON m.algorithm = p.algorithm AND m.version = p.model_version "
+                + where,
+                (answer_version, *params),
+            )
+            .fetchall()
+        )
+        out = []
+        for r in rows:
+            row = dict(r)
+            row["output"] = None if row["output"] is None else json.loads(row["output"])
+            row["answer_path"] = None if row["answer_path"] is None else json.loads(row["answer_path"])
+            out.append(row)
+        return out
 
     def day_classes(self, symbol: str, since: datetime, until: datetime) -> Mapping[Direction, int]:
         """Classes (basis A) of the bar closes in ``[since, until]`` scored so far, once per bar."""

@@ -12,6 +12,11 @@
   prediction's status, unscored).
 
 Algorithms never see each other's output; only the consensus combines them.
+
+An algorithm predicts one kind (#179, ``kinds.py``): ``kind``, the direction when it does
+not say (every algorithm before #179). An algorithm of another kind (``KindAlgorithm``)
+learns that kind's answers (``KindSample``) and predicts its three probabilities and fields
+(``kinds.KindForecast``); everything else is the same contract.
 """
 
 from __future__ import annotations
@@ -29,6 +34,7 @@ from typing import Any, Protocol
 from krx_quant.baselines import Forecast
 from krx_quant.cards import Card, Meaning
 from krx_quant.features import FeatureVector
+from krx_quant.kinds import DIRECTION, Answer, KindForecast
 from krx_quant.pricing import Direction
 from krx_quant.touch import TARGET_VERSION
 
@@ -134,7 +140,7 @@ class Model:
         cls,
         name: str,
         params: Mapping[str, float],
-        scored: Sequence[Sample],
+        scored: Sequence[Sample | KindSample],
         loss: float,
         blob: str | None = None,
     ) -> Model:
@@ -182,14 +188,18 @@ class Model:
         )
 
 
-def target_of(samples: Sequence[Sample]) -> int:
-    """The target the samples' labels are of (#170): the touch target's when their features
-    carry its terms (``FeatureVector.touch``, as ``forecasts.forecasting`` reads them), else
-    the four-minute move's."""
+def target_of(samples: Sequence[Sample | KindSample]) -> int:
+    """The target the samples' labels are of (#170): a kind's samples, its answer version
+    (#179); else the touch target's when their features carry its terms
+    (``FeatureVector.touch``, as ``forecasts.forecasting`` reads them), else the four-minute
+    move's."""
+    answered = {s.answer_version for s in samples if isinstance(s, KindSample)}
+    if answered:
+        return max(answered)
     return TARGET_VERSION if any(s.features.touch is not None for s in samples) else 1
 
 
-def _days_by_source(scored: Sequence[Sample]) -> dict[str, int] | None:
+def _days_by_source(scored: Sequence[Sample | KindSample]) -> dict[str, int] | None:
     """The days of ``scored`` by where their labels came from; None if no sample says."""
     sources = {s.bar_close.date(): LABEL_SOURCES[s.reference] for s in scored if s.reference in LABEL_SOURCES}
     if not sources:
@@ -211,6 +221,25 @@ class Sample:
     reference: str | None = None
 
 
+@dataclass(frozen=True)
+class KindSample:
+    """One bar close of a kind's training data (#179), with the kind's answer of the four
+    minutes after it: on a recorded day the answer function's on the replayed quotes (what
+    the engine scores), on a day with one-minute bars only its bar rule's."""
+
+    symbol: str
+    bar_close: datetime
+    features: FeatureVector
+    answer: Answer | None  # None: no answer (not followed, no bars after it)
+    answer_version: int  # the kind's, the target its models learn (``Model.target_version``)
+    reference: str | None = None  # as ``Sample.reference``
+
+    @property
+    def label(self) -> str | None:
+        """The answer's class; None without one (unscorable, or no answer)."""
+        return None if self.answer is None else self.answer.label
+
+
 class Algorithm(Protocol):
     name: str
     card: Card
@@ -226,8 +255,39 @@ class Algorithm(Protocol):
     def predict(self, features: FeatureVector, model: Model) -> Forecast: ...
 
 
+class KindAlgorithm(Protocol):
+    """An algorithm of a kind besides the direction (#179): the same contract, on the kind's
+    answers and output."""
+
+    name: str
+    kind: str  # the kind it predicts (``kinds.Kind.name``), never the direction
+    card: Card
+    features: tuple[str, ...]
+    training_days: int
+    param_meanings: Mapping[str, Meaning]
+
+    def default_model(self) -> Model: ...
+
+    def fit(self, samples: Sequence[KindSample]) -> Model: ...
+
+    def predict(self, features: FeatureVector, model: Model) -> KindForecast: ...
+
+
+def kind_of(algorithm: Algorithm | KindAlgorithm) -> str:
+    """The kind an algorithm predicts: its ``kind``, the direction when it does not say."""
+    return str(getattr(algorithm, "kind", DIRECTION))
+
+
 def predicted(algorithm: Algorithm, features: FeatureVector, model: Model) -> Forecast | None:
     """``algorithm``'s forecast, or None where it does not predict (``NotPredicted``)."""
+    try:
+        return algorithm.predict(features, model)
+    except NotPredicted:
+        return None
+
+
+def kind_predicted(algorithm: KindAlgorithm, features: FeatureVector, model: Model) -> KindForecast | None:
+    """A kind algorithm's forecast, or None where it does not predict (``NotPredicted``)."""
     try:
         return algorithm.predict(features, model)
     except NotPredicted:
@@ -247,7 +307,7 @@ def save_model(state_dir: Path, name: str, model: Model) -> Path:
     return path
 
 
-def load_models(state_dir: Path, algorithms: Sequence[Algorithm]) -> dict[str, Model]:
+def load_models(state_dir: Path, algorithms: Sequence[Algorithm | KindAlgorithm]) -> dict[str, Model]:
     """Each algorithm's trained model if one is saved, else its defaults."""
     models: dict[str, Model] = {}
     for algorithm in algorithms:

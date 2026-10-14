@@ -5,19 +5,28 @@ names no feature of its own (unique), or when one it calls its own is already us
 registered algorithm. Later algorithms may share an earlier one's own features (Turing
 uses them all), so the check runs in registration order. Order is also priority: when
 the CPU budget runs short, the last registered is skipped first, whatever the ranking.
+
+An algorithm of a kind besides the direction (#179, ``kinds.py``) is registered in
+``KIND_ALGORITHMS``, after every direction algorithm: the CPU budget skips them first. Its
+name is its own among every algorithm's; the feature checks above look only within its
+kind (a range algorithm may call its own a feature a direction algorithm uses).
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 
 from krx_quant.algorithms.contract import (
     Abstention,
     Algorithm,
+    KindAlgorithm,
+    KindSample,
     Model,
     NothingToLearn,
     NotPredicted,
     Sample,
+    kind_of,
+    kind_predicted,
     load_models,
     model_path,
     predicted,
@@ -33,6 +42,7 @@ from krx_quant.algorithms.shannon import Shannon
 from krx_quant.algorithms.turing import Turing
 from krx_quant.cards import Card, Meaning
 from krx_quant.features import FEATURES
+from krx_quant.kinds import DIRECTION, KINDS, Kind
 
 
 class RegistrationError(ValueError):
@@ -41,7 +51,37 @@ class RegistrationError(ValueError):
 
 def register(algorithms: Sequence[Algorithm]) -> tuple[Algorithm, ...]:
     """Check ``algorithms`` in order; raises RegistrationError on the first refused."""
-    registered: list[Algorithm] = []
+    _check(algorithms)
+    return tuple(algorithms)
+
+
+def register_kinds(
+    algorithms: Sequence[KindAlgorithm], kinds: Sequence[Kind] = KINDS, taken: Collection[str] = ()
+) -> tuple[KindAlgorithm, ...]:
+    """Check the algorithms of the kinds besides the direction (#179), in order; raises
+    RegistrationError on the first refused: a kind not among ``kinds`` (or the direction), a
+    name taken (``taken``: the direction's algorithms', the baselines'), or, within its kind,
+    ``register``'s checks."""
+    known = {k.name for k in kinds if k.name != DIRECTION}
+    names = set(taken)
+    by_kind: dict[str, list[KindAlgorithm]] = {}
+    for a in algorithms:
+        if a.kind not in known:
+            raise RegistrationError(
+                f"{a.name}: kind {a.kind!r} is not a registered kind besides the direction"
+            )
+        if a.name in names:
+            raise RegistrationError(f"{a.name}: already registered")
+        names.add(a.name)
+        by_kind.setdefault(a.kind, []).append(a)
+    for group in by_kind.values():
+        _check(group)
+    return tuple(algorithms)
+
+
+def _check(algorithms: Sequence[Algorithm | KindAlgorithm]) -> None:
+    """The registration checks of algorithms of one kind, in order."""
+    registered: list[Algorithm | KindAlgorithm] = []
     for a in algorithms:
         unknown = sorted(set(a.features) - FEATURES.keys())
         if unknown:
@@ -62,7 +102,6 @@ def register(algorithms: Sequence[Algorithm]) -> tuple[Algorithm, ...]:
             if taken:
                 raise RegistrationError(f"{a.name}: its own features {', '.join(taken)} are used by {r.name}")
         registered.append(a)
-    return tuple(registered)
 
 
 # Turing reads every feature in the Feature Store, so it comes last: an algorithm's own
@@ -74,20 +113,30 @@ ALGORITHMS: tuple[Algorithm, ...] = register(
     [Newton(), Gauss(), Granger(), Markov(), Kalman(), Shannon(), Poisson(), Turing()]
 )
 
+# The algorithms of the kinds besides the direction (#179), in the kinds' order, all after
+# the direction's. None yet: the range's (#181) and the barrier's (#183) come here.
+KIND_ALGORITHMS: tuple[KindAlgorithm, ...] = register_kinds([], taken={a.name for a in ALGORITHMS})
+
 __all__ = [
     "ALGORITHMS",
+    "KIND_ALGORITHMS",
     "Abstention",
     "Algorithm",
     "Card",
+    "KindAlgorithm",
+    "KindSample",
     "Meaning",
     "Model",
     "NothingToLearn",
     "NotPredicted",
     "RegistrationError",
     "Sample",
+    "kind_of",
+    "kind_predicted",
     "load_models",
     "model_path",
     "predicted",
     "register",
+    "register_kinds",
     "save_model",
 ]

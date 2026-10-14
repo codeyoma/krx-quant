@@ -30,7 +30,7 @@ from typing import Any
 
 from botocore.exceptions import BotoCoreError, ClientError
 
-from krx_quant.algorithms import Algorithm, Model, load_models
+from krx_quant.algorithms import Algorithm, KindAlgorithm, Model, load_models
 from krx_quant.archive import NIGHTLY_ARCHIVE
 from krx_quant.climate import CLIMATE, load_climate
 from krx_quant.config import Settings
@@ -172,15 +172,16 @@ async def morning_swap(
 
 def reload_models(engine: PredictionEngine, shelf: Shelf) -> bool:
     """Switch the engine to the model files that changed; whether any did. Those of the
-    algorithms waiting for their pre-validation too, so they start on their latest; and,
-    with the touch target, the climate baseline's table (#169)."""
-    models = load_models(shelf.state_dir, engine.registered)
+    algorithms waiting for their pre-validation too, so they start on their latest, and of
+    the kinds besides the direction (#179); and, with the touch target, the climate
+    baseline's table (#169)."""
+    models = load_models(shelf.state_dir, [*engine.registered, *engine.kind_registered])
     if CLIMATE in engine.baseline_names:
         models[CLIMATE] = load_climate(shelf.state_dir)
     return engine.switch_models(models)
 
 
-def publish_live(store: ObjectStore, shelf: Shelf, algorithms: Sequence[Algorithm]) -> None:
+def publish_live(store: ObjectStore, shelf: Shelf, algorithms: Sequence[Algorithm | KindAlgorithm]) -> None:
     """Store the models the server runs, and which they are (``live.json``): those of the
     algorithms waiting for their pre-validation too, the models they will start on, so the
     night compares each challenger with the model installed."""
@@ -208,7 +209,7 @@ async def keep_models(
     if store is not None:
         try:
             await show_night(store, shelf, engine, kst_day(now()))
-            await asyncio.to_thread(publish_live, store, shelf, engine.registered)
+            await asyncio.to_thread(publish_live, store, shelf, [*engine.registered, *engine.kind_registered])
         except Exception:
             log.exception("could not read the last night or publish the live models")
     while True:
@@ -220,10 +221,14 @@ async def keep_models(
                 status = await morning_swap(store, shelf, engine, today=today, at=now())
                 if status is not None and (not status.applied or status.night.promoted):
                     await notify(_swap_notice(status))
-                await asyncio.to_thread(publish_live, store, shelf, engine.registered)
+                await asyncio.to_thread(
+                    publish_live, store, shelf, [*engine.registered, *engine.kind_registered]
+                )
             elif reload_models(engine, shelf) and store is not None:  # a fit or a rollback
                 await show_night(store, shelf, engine, kst_day(now()))
-                await asyncio.to_thread(publish_live, store, shelf, engine.registered)
+                await asyncio.to_thread(
+                    publish_live, store, shelf, [*engine.registered, *engine.kind_registered]
+                )
         except Exception:
             log.exception("the model swap failed")
 

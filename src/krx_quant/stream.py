@@ -12,7 +12,15 @@ was sent):
 - ``lifecycle``: an algorithm's status changed, by the daily review or a command run in
   another process;
 - ``bar``: a symbol's one-minute bar being made, its values so far (#110), at most once a
-  poll for each symbol and only when they changed.
+  poll for each symbol and only when they changed;
+- ``kind_prediction``: predictions of a kind besides the direction (#179) just displayed for
+  a bar close (its baselines, or an algorithm), the kind named ``prediction_kind``;
+- ``kind_answer``: a kind's answers just made (four minutes after their bar closes), what its
+  predictions there are scored on.
+
+The new kinds' events name their kind ``prediction_kind``: ``kind`` already says which
+consensus a ``consensus`` event carries. A client that does not know an event's ``type``
+ignores it (the screen does), so every connection gets them.
 
 Predictions are told by the engine as it stores them; status changes, the KIS status and
 the bars being made are polled (every second). Clients send nothing. A client that falls
@@ -28,15 +36,22 @@ import json
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime
 from functools import partial
 from typing import Any
 
 from aiohttp import WSCloseCode, web
 
 from krx_quant.consensus import FAST, FINAL
-from krx_quant.engine import OutcomesScored, PredictionEngine, PredictionsStored
+from krx_quant.engine import (
+    Change,
+    KindAnswered,
+    KindPredictionsStored,
+    OutcomesScored,
+    PredictionEngine,
+)
 from krx_quant.predictions import iso
-from krx_quant.touch import TARGET_VERSION
+from krx_quant.touch import TARGET_VERSION, WINDOW
 
 log = logging.getLogger(__name__)
 
@@ -67,12 +82,15 @@ class EventStream:
         self._last_status = engine.store.last_status_id()
         self._bars: dict[str, dict[str, Any]] = {}  # each symbol's bar as last sent
 
-    def changed(self, change: PredictionsStored | OutcomesScored) -> None:
+    def changed(self, change: Change) -> None:
         """The engine's listener."""
         if not self._clients:
             return
         if isinstance(change, OutcomesScored):
             self._publish({"type": "outcome", "outcomes": self._items(change.ids)})
+            return
+        if isinstance(change, KindPredictionsStored | KindAnswered):
+            self._kind_changed(change)
             return
         bar_close = iso(change.bar_close)
         made = [i for name, ids in change.ids.items() if name not in _KINDS for i in ids]
@@ -88,6 +106,35 @@ class EventStream:
     def _items(self, ids: list[int]) -> list[dict[str, Any]]:
         """The predictions as the stream shows them: with their symbol, as several go together."""
         return [{"symbol": row["symbol"], **prediction_json(row)} for row in self._engine.store.rows(ids)]
+
+    def _kind_changed(self, change: KindPredictionsStored | KindAnswered) -> None:
+        """A kind's predictions displayed, or its answers made (#179)."""
+        kind = self._engine.kind_named(change.kind)
+        if kind is None:
+            return
+        store = self._engine.store
+        if isinstance(change, KindAnswered):
+            answers = store.kind_answers_at(kind.name, kind.answer_version, change.keys)
+            if answers:
+                self._publish(
+                    {
+                        "type": "kind_answer",
+                        "prediction_kind": kind.name,
+                        "answers": [{"symbol": a["symbol"], **kind_answer_json(a)} for a in answers],
+                    }
+                )
+            return
+        ids = [i for made in change.ids.values() for i in made]
+        rows = store.kind_rows(kind.name, kind.answer_version, ids)
+        if rows:
+            self._publish(
+                {
+                    "type": "kind_prediction",
+                    "prediction_kind": kind.name,
+                    "bar_close": iso(change.bar_close),
+                    "predictions": [{"symbol": r["symbol"], **kind_prediction_json(r)} for r in rows],
+                }
+            )
 
     async def run(self) -> None:
         """Poll the status changes and the KIS status until cancelled."""
@@ -251,4 +298,51 @@ def _touch_json(row: dict[str, Any]) -> dict[str, Any] | None:
         "class": row["touch_class"],
         "unscorable": row["touch_unscorable"],
         **json.loads(path),
+    }
+
+
+def kind_prediction_json(row: dict[str, Any]) -> dict[str, Any]:
+    """A stored prediction of a kind besides the direction (#179) as the API shows it: its
+    output (the three probabilities, ``p_<class>`` in the kind's order, then the kind's
+    fields) and, once its four minutes are over, its bar close's answer, every predictor's
+    of the kind there. A prediction not made (status other than ``ok``) has neither, nor a
+    target time: it is not scored."""
+    made = row["status"] == "ok"
+    return {
+        "algorithm": row["algorithm"],
+        "model_version": row["model_version"],
+        "bar_close": row["bar_close"],
+        "displayed_at": row["displayed_at"],
+        "target_at": iso(datetime.fromisoformat(row["bar_close"]) + WINDOW) if made else None,
+        "status": row["status"],
+        "output": row["output"] if made else None,
+        "answer": _answer_json(row) if made else None,
+    }
+
+
+def _answer_json(row: dict[str, Any]) -> dict[str, Any] | None:
+    """A prediction's bar close's answer (``kind_answers``, joined as ``answer_*``); None before
+    its four minutes are over."""
+    if row.get("answer_scored_at") is None:
+        return None
+    return {
+        "answer_version": row["answer_version"],
+        "class": row["answer_class"],
+        "unscorable": row["answer_unscorable"],
+        "special": bool(row["answer_special"]),
+        "scored_at": row["answer_scored_at"],
+        "path": row["answer_path"],
+    }
+
+
+def kind_answer_json(answer: dict[str, Any]) -> dict[str, Any]:
+    """A kind's answer of a bar close (``PredictionStore.kind_answers_at``) as the API shows it."""
+    return {
+        "bar_close": answer["bar_close"],
+        "answer_version": answer["answer_version"],
+        "class": answer["class"],
+        "unscorable": answer["unscorable"],
+        "special": bool(answer["special"]),
+        "scored_at": answer["scored_at"],
+        "path": answer["path"],
     }

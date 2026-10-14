@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pyarrow.parquet as pq
 
-from krx_quant.algorithms import ALGORITHMS, Algorithm, Model, load_models
+from krx_quant.algorithms import ALGORITHMS, KIND_ALGORITHMS, Algorithm, KindAlgorithm, Model, load_models
 from krx_quant.archive import partition_files
 from krx_quant.climate import CLIMATE, load_climate
 from krx_quant.clock import FakeClock
@@ -28,6 +28,7 @@ from krx_quant.consensus import Timing
 from krx_quant.engine import ENGINE_FEEDS, Budget, Event, Notify, PredictionEngine, Regimes, partitions
 from krx_quant.features import FeatureStore, Leaders
 from krx_quant.feeds.base import KST, kst_day
+from krx_quant.kinds import KINDS, Kind
 from krx_quant.lifecycle import Rules
 from krx_quant.macro import day_regime
 from krx_quant.market_calendar import MarketCalendar, calendar_store
@@ -59,10 +60,12 @@ async def replay(
     consensus_timing: Timing | None = None,
     leaders: Leaders | None = None,
     regimes: Regimes | None = None,
-    admits: Callable[[Algorithm], bool] | None = None,
+    admits: Callable[[Algorithm | KindAlgorithm], bool] | None = None,
     review_rules: Rules | None = None,
     target_version: int = 1,
     climate: Model | None = None,
+    kinds: Sequence[Kind] = KINDS,
+    kind_algorithms: Sequence[KindAlgorithm] = KIND_ALGORITHMS,
 ) -> PredictionEngine:
     """Feed ``events`` (in receipt order) received by ``until`` to an engine storing into ``db``.
 
@@ -71,7 +74,8 @@ async def replay(
     from stays what was received by the bar close, but it is displayed later (its basis B
     outcome, still written, moves with it). The clock stands still while algorithms work; their time budgets
     count real time. The engine is returned with its clock at ``until``. It forecasts
-    ``target_version``'s target, with the climate baseline's table ``climate`` (#169).
+    ``target_version``'s target, with the climate baseline's table ``climate`` (#169), and
+    the ``kinds`` besides the direction with their algorithms (#179).
     """
     clock = FakeClock(start or datetime.combine(kst_day(until), time(), KST))
     engine = PredictionEngine(
@@ -93,6 +97,8 @@ async def replay(
         review_rules=review_rules,
         target_version=target_version,
         climate=climate,
+        kinds=kinds,
+        kind_algorithms=kind_algorithms,
     )
     await replay_into(engine, clock, events, until=until, display_delay=display_delay)
     return engine
@@ -217,7 +223,7 @@ async def replay_day(settings: Settings, day: date, db: Path | None = None) -> R
         leftover.unlink(missing_ok=True)
     models: dict[str, Model] = {}
     set_aside: list[str] = []
-    saved = load_models(settings.state_dir, ALGORITHMS)
+    saved = load_models(settings.state_dir, [*ALGORITHMS, *KIND_ALGORITHMS])
     if settings.target_version >= 2:
         saved[CLIMATE] = load_climate(settings.state_dir)
     for name, model in saved.items():
@@ -245,10 +251,13 @@ async def replay_recorded(
     algorithms: Sequence[Algorithm] = ALGORITHMS,
     calendar: MarketCalendar | None = None,
     climate: Model | None = None,
+    kinds: Sequence[Kind] = KINDS,
+    kind_algorithms: Sequence[KindAlgorithm] = KIND_ALGORITHMS,
 ) -> PredictionEngine:
     """``day``'s recorded ``events``, all day, through an engine set up as the server's (its
     settings, calendar, macro regimes and target version) storing into ``db``; with the touch
-    target, the climate baseline's table ``climate`` (its defaults without)."""
+    target, the climate baseline's table ``climate`` (its defaults without); the ``kinds``
+    besides the direction with their algorithms (#179)."""
     start = datetime.combine(day, time(), KST)
     return await replay(
         events,
@@ -267,6 +276,8 @@ async def replay_recorded(
         review_rules=Rules.of(settings),
         target_version=settings.target_version,
         climate=climate,
+        kinds=kinds,
+        kind_algorithms=kind_algorithms,
     )
 
 

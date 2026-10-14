@@ -24,7 +24,8 @@ from krx_quant.clock import FakeClock
 from krx_quant.collector import run_collector
 from krx_quant.demo import demo_app
 from krx_quant.fake_kis import FakeKis
-from tests.api_schema import ROUTES, SCHEMA, STREAM, check
+from tests.api_schema import KIND_ROUTES, ROUTES, SCHEMA, STREAM, check
+from tests.kind_doubles import TEST_KIND, FixedKindAlgorithm
 from tests.kis_frames import book_frame
 from tests.replay_events import LIVE_PREDICTORS, api, at, run
 from tests.test_collector import settings_for
@@ -82,6 +83,37 @@ async def walk(get: Get) -> dict[str, int]:
     await ask("/v1/macro", "macro")
     await ask("/v1/calendar", "calendar")
     await ask("/v1/calendar?limit=5", "calendar")
+    listed = (await ask("/v1/kinds", "kinds"))["kinds"]
+    kinds = [k["name"] for k in listed]
+    assert kinds[0] == "direction"
+    direction = await ask("/v1/leaderboard?kind=direction", "leaderboard")
+    assert direction == await ask("/v1/leaderboard", "leaderboard"), "the direction's, as before (#179)"
+    for kind in listed[1:]:  # the kinds besides the direction (#179)
+        name = kind["name"]
+        for symbol in symbols:
+            await ask(f"/v1/symbols/{symbol}/kinds/{name}/latest", "kind_latest")
+            await ask(f"/v1/symbols/{symbol}/kinds/{name}/predictions", "kind_predictions")
+            await ask(
+                f"/v1/symbols/{symbol}/kinds/{name}/predictions?limit=5&before=2026-10-12T10:00:00%2B09:00",
+                "kind_predictions",
+            )
+            await ask(
+                f"/v1/symbols/{symbol}/kinds/{name}/predictions?bar_close=2026-10-12T09:31:00%2B09:00",
+                "kind_predictions",
+            )
+        for query in ("", "&period=5d&special=include", f"&symbol={symbols[0]}&period=20d"):
+            check("kind_leaderboard", await ask(f"/v1/leaderboard?kind={name}{query}", "leaderboard"))
+        for baseline in kind["baselines"]:
+            check(
+                "kind_algorithm_stats",
+                await ask(f"/v1/algorithms/{baseline['name']}/stats", "algorithm_stats"),
+            )
+    for path, status in (
+        ("/v1/symbols/005930/kinds/direction/latest", 404),
+        ("/v1/symbols/005930/kinds/nothing/predictions", 404),
+        ("/v1/leaderboard?kind=nothing", 400),
+    ):
+        await ask(path, "error", status)
     for path, status in (
         ("/v1/symbols/999999/latest", 404),
         ("/v1/symbols/005930/predictions?limit=0", 400),
@@ -99,7 +131,8 @@ async def walk(get: Get) -> dict[str, int]:
         ("/v1/calendar?limit=0", 400),
     ):
         await ask(path, "error", status)
-    assert set(checked) == {*ROUTES.values(), "error"}, "every route asked"
+    asked = {*ROUTES.values(), "error"} - (set() if kinds[1:] else KIND_ROUTES)
+    assert set(checked) == asked, "every route asked"
     return checked
 
 
@@ -139,7 +172,16 @@ def test_the_schema_is_valid_and_closed() -> None:
     Draft202012Validator.check_schema(SCHEMA)
 
     # Fragments others extend with allOf, closing them with unevaluatedProperties.
-    fragments = {"/$defs/entry_fields", "/$defs/query", "/$defs/algorithm_fields", "/$defs/prediction_fields"}
+    fragments = {
+        "/$defs/entry_fields",
+        "/$defs/query",
+        "/$defs/algorithm_fields",
+        "/$defs/prediction_fields",
+        # The kinds besides the direction's (#179).
+        "/$defs/kind_entry_fields",
+        "/$defs/kind_prediction_fields",
+        "/$defs/kind_answer_fields",
+    }
 
     def open_objects(node: Any, path: str) -> list[str]:
         found = []
@@ -165,6 +207,30 @@ async def test_an_empty_morning_keeps_the_contract(tmp_path: Path) -> None:
         checked = await walk(through(client))
 
     assert checked["status"] == 1
+
+
+async def test_a_morning_with_another_kind_keeps_the_contract(tmp_path: Path) -> None:
+    """#179. Input: a replayed busy morning with the test kind (``drift``) and an algorithm of it.
+    Output: every endpoint, the kind's included (its predictions, its leaderboard, its
+    predictors' stats), within the contract."""
+    engine = await run(
+        tmp_path / "engine.db",
+        busy_morning(),
+        until=at("10:00:00"),
+        target_version=2,
+        kinds=(TEST_KIND,),
+        kind_algorithms=[FixedKindAlgorithm("drifter", features=("velocity",), unique=("velocity",))],
+    )
+
+    async with api(engine) as client:
+        checked = await walk(through(client))
+        latest = await (await client.get("/v1/symbols/005930/kinds/drift/latest")).json()
+        board = await (await client.get("/v1/leaderboard?kind=drift")).json()
+
+    assert checked["kind_latest"] == 1
+    assert {p["algorithm"] for p in latest["predictions"]} == {"drift-held", "drift-persist", "drifter"}
+    assert [e["algorithm"] for e in board["unranked"]] == ["drifter"]  # too few to rank
+    assert board["baselines"][0]["n"] > 0, "scored"
 
 
 async def test_a_screen_from_before_reads_the_touch_label_where_it_read_the_bases(tmp_path: Path) -> None:

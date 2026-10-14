@@ -24,6 +24,13 @@ exactly as the engine labels it; on a backfilled day the one-minute bar rule
 (``touch.bar_touch``). The move (``change_ticks``) stays the four-minute one. The features
 carry the touch target's terms (``FeatureVector.touch``): half the spread at the bar close
 on a recorded day, a one-tick spread's on a backfilled one.
+
+A day read for the kinds besides the direction (#179, ``kinds.py``) also holds each kind's
+answers of its bar closes (``TrainingDay.answers``), what the kind's algorithms learn
+(``TrainingDay.of_kind``): on a recorded day the kind's answer function on the windows the
+Market View follows, as the engine answers them; on a backfilled day the kind's bar rule
+(``Kind.bar_answer``; none without one). The bar closes left out are the direction's (a VI,
+a special situation).
 """
 
 from __future__ import annotations
@@ -31,15 +38,15 @@ from __future__ import annotations
 import bisect
 from collections import deque
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time
 from pathlib import Path
 from typing import Any, Literal
 
 import pyarrow.parquet as pq
 
-from krx_quant.algorithms import ALGORITHMS, Model, model_path
-from krx_quant.algorithms.contract import Sample
+from krx_quant.algorithms import ALGORITHMS, KIND_ALGORITHMS, Algorithm, KindAlgorithm, Model, model_path
+from krx_quant.algorithms.contract import KindSample, Sample
 from krx_quant.archive import NIGHTLY_ARCHIVE, partition_files
 from krx_quant.backfill import FUTURES_BARS_TR, MINUTE_BARS_TR, bars_key
 from krx_quant.config import Settings
@@ -56,6 +63,7 @@ from krx_quant.features import (
 )
 from krx_quant.feeds import TRADE
 from krx_quant.feeds.base import KST
+from krx_quant.kinds import KINDS, Answer, Kind, kind_named
 from krx_quant.macro import day_regime
 from krx_quant.market_calendar import MarketCalendar, calendar_store
 from krx_quant.market_view import HORIZON, MarketView, prediction_window
@@ -70,20 +78,39 @@ BarDays = Mapping[tuple[str, date], Sequence[Bar]]  # (symbol, day) -> bars, old
 # The reference price a day's samples were made with: "mid" from recorded events, "close"
 # from backfilled bars.
 Reference = Literal["mid", "close"]
+# The kinds' answers of a day's bar closes (#179), by (kind, symbol, bar close).
+Answers = dict[tuple[str, str, datetime], Answer | None]
 
 
 @dataclass(frozen=True)
 class TrainingDay:
-    """A day's samples, with every feature asked for, and the reference price they used."""
+    """A day's samples, with every feature asked for, and the reference price they used; with
+    the kinds asked for (#179), their answers of its bar closes."""
 
     reference: Reference
     samples: list[Sample]
+    answers: Mapping[tuple[str, str, datetime], Answer | None] = field(default_factory=dict)
 
     def of(self, features: Sequence[str]) -> list[Sample]:
         """The samples with only ``features``, as one algorithm declared them, each naming the
         day's reference price (a fitted model counts its days by it, #165)."""
         return [
             replace(s, features=FeatureVector(s.features, features), reference=self.reference)
+            for s in self.samples
+        ]
+
+    def of_kind(self, kind: Kind, features: Sequence[str]) -> list[KindSample]:
+        """A kind's samples (#179): the same bar closes with only ``features``, each labelled
+        with the kind's answer (none where the day has none)."""
+        return [
+            KindSample(
+                s.symbol,
+                s.bar_close,
+                FeatureVector(s.features, features),
+                self.answers.get((kind.name, s.symbol, s.bar_close)),
+                kind.answer_version,
+                self.reference,
+            )
             for s in self.samples
         ]
 
@@ -98,16 +125,18 @@ def training_day(
     leaders: Leaders,
     *,
     target_version: int = 1,
+    kinds: Sequence[Kind] = (),
 ) -> TrainingDay | None:
     """``day``'s samples: from its recorded events if every symbol's trades were recorded,
     else from its backfilled bars if every symbol has them; None otherwise. A day never
-    trains on some symbols only. Their outcomes are of ``target_version`` (#169).
+    trains on some symbols only. Their outcomes are of ``target_version`` (#169); with the
+    ``kinds`` besides the direction (#179), each one's answers of its bar closes too.
     """
     session = calendar.session(day)
     regime = day_regime(data_dir, day, session.open) if session is not None else None
     if is_recorded(data_dir, day, symbols):
         events = recorded_events(data_dir, day, symbols, leaders)
-        made = recorded_samples(
+        made, answers = recorded_day(
             events,
             calendar,
             day,
@@ -117,8 +146,9 @@ def training_day(
             leaders,
             regime=regime,
             target_version=target_version,
+            kinds=kinds,
         )
-        return TrainingDay("mid", made)
+        return TrainingDay("mid", made, answers)
     bar_days = bar_days_on(data_dir, symbols, [day])
     if len(bar_days) < len(symbols):
         return None
@@ -133,7 +163,7 @@ def training_day(
         regimes={day: regime},
         target_version=target_version,
     )
-    return TrainingDay("close", made)
+    return TrainingDay("close", made, bar_answers(bar_days, calendar, fee_rate, kinds))
 
 
 def is_recorded(data_dir: Path, day: date, symbols: Sequence[str]) -> bool:
@@ -247,7 +277,40 @@ def recorded_samples(
     target_version: int = 1,
 ) -> list[Sample]:
     """A sample per bar close of ``day``'s prediction window and symbol, in time order, from
-    the day's events (in receipt order) through the engine's Market View.
+    the day's events (in receipt order) through the engine's Market View (``recorded_day``).
+    """
+    made, _ = recorded_day(
+        events,
+        calendar,
+        day,
+        symbols,
+        names,
+        fee_rate,
+        leaders,
+        store,
+        regime=regime,
+        target_version=target_version,
+    )
+    return made
+
+
+def recorded_day(
+    events: Iterable[Event],
+    calendar: MarketCalendar,
+    day: date,
+    symbols: Sequence[str],
+    names: Sequence[str],
+    fee_rate: float,
+    leaders: Leaders,
+    store: FeatureStore | None = None,
+    *,
+    regime: str | None = None,
+    target_version: int = 1,
+    kinds: Sequence[Kind] = (),
+) -> tuple[list[Sample], Answers]:
+    """A sample per bar close of ``day``'s prediction window and symbol, in time order, from
+    the day's events (in receipt order) through the engine's Market View; and the ``kinds``'
+    answers of its windows (#179), as the engine answers them.
 
     At each bar close the features are computed before any event received at or after it,
     as the engine does. The outcome is the mid-point four minutes later against the one at
@@ -259,12 +322,14 @@ def recorded_samples(
     """
     session = calendar.session(day)
     if session is None:
-        return []
+        return [], {}
     store = store or FeatureStore()
     to_touch = target_version >= 2
-    # With the touch target, the view follows the touch windows as the engine's does.
-    windows_fee = fee_rate if to_touch else None
-    view = MarketView(calendar, symbols, leaders, datetime.combine(day, time(), KST), windows_fee)
+    # With the touch target or the kinds, the view follows the windows as the engine's does.
+    windows_fee = fee_rate if to_touch or kinds else None
+    view = MarketView(
+        calendar, symbols, leaders, datetime.combine(day, time(), KST), windows_fee, kinds=kinds
+    )
     special = SpecialSituations(calendar)
     first, last = prediction_window(session)
     # Every minute from the first bar close to the last target: a bar close to predict, a
@@ -275,6 +340,7 @@ def recorded_samples(
     seen: list[tuple[Snapshot, dict[str, Value], bool, TouchTerms | None]] = []
     mids: dict[tuple[str, datetime], float | None] = {}
     labels: dict[tuple[str, datetime], Direction | None] = {}  # by bar close, once its window ended
+    answers: Answers = {}  # the kinds' (#179), likewise
 
     def reach(moment: datetime) -> None:
         """Everything due at the minutes up to ``moment``, before what is received then."""
@@ -295,6 +361,10 @@ def recorded_samples(
                     mids[(symbol, minute)] = view.mid(symbol, minute)
                     if to_touch:  # the window from four minutes back has just ended
                         labels[(symbol, minute - HORIZON)] = view.touch(symbol, minute - HORIZON).direction
+                    for kind in kinds:
+                        answers[(kind.name, symbol, minute - HORIZON)] = view.kind_answer(
+                            kind, symbol, minute - HORIZON
+                        )
 
     for feed, row in events:
         reach(row["received_at"])
@@ -312,6 +382,37 @@ def recorded_samples(
         if to_touch:
             sample = replace(sample, outcome=labels.get((snapshot.symbol, t)))
         out.append(sample)
+    return out, answers
+
+
+def bar_answers(
+    bar_days: BarDays, calendar: MarketCalendar, fee_rate: float, kinds: Sequence[Kind]
+) -> Answers:
+    """The ``kinds``' answers of each bar close of the days ``bar_days`` holds, by their bar
+    rules (#179, ``Kind.bar_answer``): from the bar that ended at the bar close and the bars of
+    the four minutes after it (those with trades). None without that bar; a kind without a
+    bar rule has none."""
+    ruled = [k for k in kinds if k.bar_answer is not None]
+    out: Answers = {}
+    if not ruled:
+        return out
+    for (symbol, day), bars in bar_days.items():
+        session = calendar.session(day)
+        if session is None:
+            continue
+        ends = [b.start + BAR for b in bars]
+        starts = [b.start for b in bars]
+        t, last = prediction_window(session)
+        while t <= last:
+            done = bars[: bisect.bisect_right(ends, t)]
+            closing = done[-1] if done and done[-1].start + BAR == t else None
+            after = bars[bisect.bisect_left(starts, t) : bisect.bisect_left(starts, t + HORIZON)]
+            for kind in ruled:
+                assert kind.bar_answer is not None
+                out[(kind.name, symbol, t)] = (
+                    None if closing is None else kind.bar_answer(closing, after, fee_rate)
+                )
+            t += BAR
     return out
 
 
@@ -416,30 +517,47 @@ class Fitted:
 
 
 def fit_algorithm(
-    settings: Settings, name: str, days: int | None = None, now: datetime | None = None
+    settings: Settings,
+    name: str,
+    days: int | None = None,
+    now: datetime | None = None,
+    *,
+    kind_algorithms: Sequence[KindAlgorithm] = KIND_ALGORITHMS,
+    kinds: Sequence[Kind] = KINDS,
 ) -> Fitted:
     """Train an algorithm on the latest days with data and save the model for the engine,
     which switches to it within a minute. Today counts only once its recording is archived
-    (21:00): before that it is still being recorded.
+    (21:00): before that it is still being recorded. An algorithm of a kind besides the
+    direction (#179) learns its kind's answers.
     """
     algorithm = next((a for a in ALGORITHMS if a.name == name), None)
-    if algorithm is None:
-        raise ValueError(f"unknown algorithm {name!r}; registered: {', '.join(a.name for a in ALGORITHMS)}")
+    kind_algorithm = next((a for a in kind_algorithms if a.name == name), None)
+    kind = None if kind_algorithm is None else kind_named(kind_algorithm.kind, kinds)
+    chosen: Algorithm | KindAlgorithm
+    if algorithm is not None:
+        chosen = algorithm
+    elif kind_algorithm is not None and kind is not None:
+        chosen = kind_algorithm
+    else:
+        names = ", ".join([*(a.name for a in ALGORITHMS), *(a.name for a in kind_algorithms)])
+        raise ValueError(f"unknown algorithm {name!r}; registered: {names}")
+    features, training_days = chosen.features, chosen.training_days
     local = (now or datetime.now(KST)).astimezone(KST)
     finished = finished_days(settings.data_dir, settings.symbols, local)
     calendar = calendar_store(settings).calendar
     leaders = Leaders.of(settings)
     loaded: dict[date, TrainingDay] = {}
-    for day in finished[-(days or algorithm.training_days) :]:
+    for day in finished[-(days or training_days) :]:
         found = training_day(
             settings.data_dir,
             day,
             calendar,
             settings.symbols,
-            algorithm.features,
+            features,
             settings.fee_rate,
             leaders,
             target_version=settings.target_version,
+            kinds=() if kind is None else (kind,),
         )
         if found is not None:
             loaded[day] = found
@@ -447,15 +565,22 @@ def fit_algorithm(
         raise FileNotFoundError(
             f"no backfilled bars or recorded trades of {', '.join(settings.symbols)} in {settings.data_dir}"
         )
-    training = [s for found in loaded.values() for s in found.of(algorithm.features)]
-    model = algorithm.fit(training)
+    if algorithm is not None:
+        training = [s for found in loaded.values() for s in found.of(features)]
+        model = algorithm.fit(training)
+        labelled = sum(s.outcome is not None for s in training)
+    else:
+        assert kind_algorithm is not None and kind is not None
+        answered = [s for found in loaded.values() for s in found.of_kind(kind, features)]
+        model = kind_algorithm.fit(answered)
+        labelled = sum(s.label is not None for s in answered)
     Shelf(settings.state_dir).install(name, model, "fit", local)
     return Fitted(
         model,
         model_path(settings.state_dir, name),
         len(loaded),
         [day for day, found in loaded.items() if found.reference == "mid"],
-        sum(s.outcome is not None for s in training),
+        labelled,
     )
 
 

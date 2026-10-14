@@ -38,6 +38,12 @@ swap installed it.
 
 Where an algorithm on probation or on the bench stands toward its next review (``stages``,
 #165) is counted and judged by the same code, on the days reviewed so far.
+
+The algorithms of a kind besides the direction (#179, ``kinds.py``) are reviewed by the same
+rules, a kind at a time (``Scoring``: ``kind_stats.kind_scoring``): their stats against
+that kind's baselines, a clone looked for among the earlier algorithms of that kind only
+(by the first class's probability less the third's), and only the predictions of models
+trained on that kind's answers counted.
 """
 
 from __future__ import annotations
@@ -53,8 +59,8 @@ from krx_quant.baselines import BASELINE_NAMES
 from krx_quant.feeds.base import kst_day
 from krx_quant.stats import (
     MIN_PAIRS_TESTED,
-    Entry,
     Lift,
+    Lifted,
     enough,
     entry,
     on_target,
@@ -70,6 +76,37 @@ RECENT_DAYS = 20
 CLONE_CORRELATION = 0.9
 # The reason of the probation every algorithm not retired restarts on when the target changes (#170).
 RESTARTED = "the target changed to the touch target (#170): probation restarts with a model trained on it"
+
+# One predictor's stats against the baselines, from scored rows: (name, rows, baselines' names,
+# fee rate, the two-sided level of the lifts by trading day).
+Measure = Callable[[str, list[dict[str, Any]], Collection[str], float, float], Lifted]
+
+
+@dataclass(frozen=True)
+class Scoring:
+    """How a kind's stored predictions are judged (#179): one predictor's stats against the
+    kind's baselines (``measure``), what a clone moves with (``lean``: the first class's
+    probability less the third's), and the target whose models' predictions count."""
+
+    measure: Measure
+    lean: Callable[[Mapping[str, Any]], float]
+    lean_name: str  # as a clone's reason names it
+    target_version: int
+
+
+def _direction_measure(
+    name: str, rows: list[dict[str, Any]], baselines: Collection[str], fee_rate: float, level: float
+) -> Lifted:
+    algorithms, scored = split(scored_by_algorithm(rows), baselines)
+    return entry(name, algorithms.get(name, []), scored, fee_rate, level)
+
+
+def _direction_lean(row: Mapping[str, Any]) -> float:
+    return float(row["p_up"] - row["p_down"])
+
+
+# The direction's: the touch label (#170), p_up − p_down.
+DIRECTION_SCORING = Scoring(_direction_measure, _direction_lean, "p_up - p_down", TARGET_VERSION)
 
 
 class Status(enum.Enum):
@@ -146,6 +183,7 @@ def review(
     alerted: set[str],
     rules: Rules | None = None,
     baselines: Collection[str] = BASELINE_NAMES,
+    scoring: Scoring = DIRECTION_SCORING,
 ) -> Review:
     """The status changes due at a day's review.
 
@@ -155,7 +193,8 @@ def review(
     scored predictions, of which only the target's models' count (``stats.on_target``);
     ``alerted`` the benched algorithms already alerted as retirement candidates; ``rules``
     when to judge (defaults); ``baselines`` the baselines' names, the lifts' (those of the
-    target version, #169).
+    target version, #169). ``algorithms``, ``rows`` and ``baselines`` are of one kind, judged
+    by its ``scoring`` (#179: the direction's by default): a clone is looked for within them.
     """
     rules = rules or Rules()
     read: dict[tuple[tuple[date, ...], bool], list[dict[str, Any]]] = {}
@@ -163,10 +202,10 @@ def review(
     def cached(chosen: Sequence[date], special: bool) -> list[dict[str, Any]]:
         key = (tuple(chosen), special)
         if key not in read:
-            read[key] = on_target(rows(chosen, special), baselines, TARGET_VERSION)
+            read[key] = on_target(rows(chosen, special), baselines, scoring.target_version)
         return read[key]
 
-    judge = _Judge(cached, list(days[:RECENT_DAYS]), min_sample, fee_rate, rules, baselines)
+    judge = _Judge(cached, list(days[:RECENT_DAYS]), min_sample, fee_rate, rules, baselines, scoring)
     changes: list[Change] = []
     candidates: list[Candidate] = []
     for i, name in enumerate(algorithms):
@@ -194,16 +233,20 @@ class _Judge:
     fee_rate: float
     rules: Rules
     baselines: Collection[str] = BASELINE_NAMES
+    scoring: Scoring = DIRECTION_SCORING
 
     def decide(self, name: str, status: Status, held: list[date], earlier: list[str]) -> Change | None:
         """The change ``name``'s status is due for, if any."""
         if status in (Status.PROBATION, Status.CLONE):
-            measured = correlations(name, earlier, self.rows(held, True))
+            measured = correlations(name, earlier, self.rows(held, True), self.scoring.lean)
             twin = most_correlated(measured)
             if twin is not None and twin[1] > CLONE_CORRELATION:
                 if status is Status.PROBATION:
                     return Change(
-                        name, status, Status.CLONE, f"p_up - p_down moves with {twin[0]} (r = {twin[1]:.3f})"
+                        name,
+                        status,
+                        Status.CLONE,
+                        f"{self.scoring.lean_name} moves with {twin[0]} (r = {twin[1]:.3f})",
                     )
                 return None
             if status is Status.CLONE:
@@ -243,16 +286,17 @@ class _Judge:
                 )
         return None
 
-    def _judged(self, name: str, days: Sequence[date]) -> Entry | None:
+    def _judged(self, name: str, days: Sequence[date]) -> Lifted | None:
         """``name``'s stats against the baselines on ``days``, if there are enough to judge by;
         its lifts by trading day at the rules' level."""
         judged = self.measure(name, days)
         return judged if enough(judged, self.min_sample) else None
 
-    def measure(self, name: str, days: Sequence[date]) -> Entry:
+    def measure(self, name: str, days: Sequence[date]) -> Lifted:
         """``name``'s stats against the baselines on ``days``, enough to judge by or not."""
-        algorithms, baselines = split(scored_by_algorithm(self.rows(days, False)), self.baselines)
-        return entry(name, algorithms.get(name, []), baselines, self.fee_rate, self.rules.confidence)
+        return self.scoring.measure(
+            name, self.rows(days, False), self.baselines, self.fee_rate, self.rules.confidence
+        )
 
     def _passed_by_day(self, name: str, days: Sequence[date]) -> Lift | None:
         """``name``'s weakest lift by trading day on ``days``, if its lower bound is above 0."""
@@ -271,15 +315,19 @@ def most_correlated(measured: Mapping[str, float]) -> tuple[str, float] | None:
     return max(measured.items(), key=lambda kv: kv[1], default=None)
 
 
-def correlations(name: str, others: Sequence[str], rows: list[dict[str, Any]]) -> dict[str, float]:
-    """``name``'s correlation of p_up − p_down with each of ``others`` it can be measured
-    against: enough bar closes both predicted, and neither always the same.
+def correlations(
+    name: str,
+    others: Sequence[str],
+    rows: list[dict[str, Any]],
+    lean: Callable[[Mapping[str, Any]], float] = _direction_lean,
+) -> dict[str, float]:
+    """``name``'s correlation of p_up − p_down (a kind's ``lean``, #179: its first class's
+    probability less its third's) with each of ``others`` it can be measured against: enough
+    bar closes both predicted, and neither always the same.
     """
     scores: dict[str, dict[tuple[str, str], float]] = {}
     for row in rows:
-        scores.setdefault(row["algorithm"], {})[(row["symbol"], row["bar_close"])] = (
-            row["p_up"] - row["p_down"]
-        )
+        scores.setdefault(row["algorithm"], {})[(row["symbol"], row["bar_close"])] = lean(row)
     mine = scores.get(name, {})
     measured: dict[str, float] = {}
     for other in others:
@@ -327,13 +375,14 @@ def stages(
     fee_rate: float,
     rules: Rules | None = None,
     baselines: Collection[str] = BASELINE_NAMES,
+    scoring: Scoring = DIRECTION_SCORING,
 ) -> dict[str, Stage]:
     """Each algorithm on probation or on the bench, where it stands toward its next review (#165).
 
-    The arguments are ``review``'s, with ``days`` the days reviewed already, latest first: the
-    days are counted as the review counts them, and the weakest lift is taken by trading day
-    on the days the review takes it on, at the rules' level. The next review counts one day
-    more. The scored predictions are read once, for every algorithm.
+    The arguments are ``review``'s (one kind's, #179), with ``days`` the days reviewed already,
+    latest first: the days are counted as the review counts them, and the weakest lift is taken
+    by trading day on the days the review takes it on, at the rules' level. The next review
+    counts one day more. The scored predictions are read once, for every algorithm.
     """
     rules = rules or Rules()
     recent = list(days[:RECENT_DAYS])
@@ -345,14 +394,14 @@ def stages(
         held = _held(days, counted_from[name])
         on[name] = (standing, held, held if standing.status is Status.PROBATION else recent)
     wanted = sorted({d for _, _, lift_days in on.values() for d in lift_days}, reverse=True)
-    read = on_target(rows(wanted, False), baselines, TARGET_VERSION) if wanted else []
+    read = on_target(rows(wanted, False), baselines, scoring.target_version) if wanted else []
 
     def rows_on(chosen: Sequence[date], special: bool) -> list[dict[str, Any]]:
         """``read``'s rows of ``chosen`` (special predictions are not in it)."""
         keep = {d.isoformat() for d in chosen}
         return [r for r in read if r["bar_close"][:10] in keep]
 
-    judge = _Judge(rows_on, recent, min_sample, fee_rate, rules, baselines)
+    judge = _Judge(rows_on, recent, min_sample, fee_rate, rules, baselines, scoring)
     out: dict[str, Stage] = {}
     for name, (standing, held, lift_days) in on.items():
         review_days = rules.probation_days if standing.status is Status.PROBATION else rules.bench_days
@@ -372,7 +421,7 @@ def stages(
     return out
 
 
-def _weakest_by_day(judged: Entry) -> tuple[str, Lift] | None:
+def _weakest_by_day(judged: Lifted) -> tuple[str, Lift] | None:
     """The weakest lift by trading day (``Entry.weakest_by_day``), and its baseline."""
     weakest = judged.weakest_by_day
     for name, tested in judged.lifts.items():
