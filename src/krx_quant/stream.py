@@ -36,6 +36,7 @@ from aiohttp import WSCloseCode, web
 from krx_quant.consensus import FAST, FINAL
 from krx_quant.engine import OutcomesScored, PredictionEngine, PredictionsStored
 from krx_quant.predictions import iso
+from krx_quant.touch import TARGET_VERSION
 
 log = logging.getLogger(__name__)
 
@@ -222,5 +223,20 @@ def prediction_json(row: dict[str, Any]) -> dict[str, Any]:
             "special": bool(row["special"]),
             "unscorable": row["unscorable"],
             "scored_at": row["scored_at"],
+            "touch": _touch_json(row),
         },
+    }
+
+
+def _touch_json(row: dict[str, Any]) -> dict[str, Any] | None:
+    """The bar close's touch label (#167): recorded beside the outcome, none where it was scored
+    before the engine recorded it."""
+    path = row.get("touch_path")
+    if path is None:
+        return None
+    return {
+        "target_version": TARGET_VERSION,
+        "class": row["touch_class"],
+        "unscorable": row["touch_unscorable"],
+        **json.loads(path),
     }

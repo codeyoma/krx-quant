@@ -11,6 +11,7 @@ Times are ISO 8601 strings in KST, which sort in time order.
 from __future__ import annotations
 
 import contextlib
+import json
 import sqlite3
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -23,6 +24,7 @@ from krx_quant.consensus import Weights
 from krx_quant.feeds.base import KST
 from krx_quant.lifecycle import Standing, Status
 from krx_quant.pricing import Direction
+from krx_quant.touch import TARGET_VERSION, TouchResult, touch_path
 
 # The engine's database, in the state directory.
 DB_NAME = "engine.sqlite3"
@@ -83,6 +85,16 @@ CREATE TABLE IF NOT EXISTS outcomes (
     scored_at TEXT                    -- null while pending
 );
 CREATE INDEX IF NOT EXISTS outcomes_pending ON outcomes (scored_at, target_at);
+CREATE TABLE IF NOT EXISTS touches (  -- the touch target of a bar close (#160, #167): a table of its
+    symbol TEXT NOT NULL,             -- own, so an engine rolled back to before it still reads the DB
+    bar_close TEXT NOT NULL,
+    target_version INTEGER NOT NULL,  -- touch.TARGET_VERSION
+    class TEXT,                       -- up, flat or down; null when it could not be scored
+    unscorable TEXT,                  -- why not: missing mid, rest quotes, silent quotes, restarted
+    path TEXT NOT NULL,               -- JSON: the targets, where they were reached, the extremes
+    scored_at TEXT NOT NULL,
+    PRIMARY KEY (symbol, bar_close, target_version)
+);
 CREATE TABLE IF NOT EXISTS runs (
     id INTEGER PRIMARY KEY,
     kind TEXT NOT NULL,               -- cpu_budget: an algorithm skipped for the CPU budget;
@@ -511,6 +523,41 @@ class PredictionStore:
                 ],
             )
 
+    def add_touches(self, results: Sequence[TouchResult], scored_at: datetime) -> None:
+        """Store bar closes' touch labels (#167); one already stored for a bar close stays."""
+        if not results:
+            return
+        self.version += 1
+        with self._db:
+            self._db.executemany(
+                "INSERT OR IGNORE INTO touches (symbol, bar_close, target_version, class, unscorable, path,"
+                " scored_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                [
+                    (
+                        r.symbol,
+                        iso(r.bar_close),
+                        TARGET_VERSION,
+                        r.direction.value if r.direction else None,
+                        r.unscorable,
+                        json.dumps(touch_path(r), separators=(",", ":")),
+                        iso(scored_at),
+                    )
+                    for r in results
+                ],
+            )
+
+    def touches(self, symbol: str | None = None) -> list[dict[str, Any]]:
+        """The touch labels of this target version stored, oldest first, with their path
+        parsed (diagnosis, tests)."""
+        where, params = ("AND symbol = ?", (symbol,)) if symbol else ("", ())
+        rows = self._db.execute(
+            "SELECT symbol, bar_close, class, unscorable, path, scored_at FROM touches"
+            f" WHERE target_version = {TARGET_VERSION} {where}"
+            " ORDER BY bar_close, symbol",
+            params,
+        ).fetchall()
+        return [{**dict(r), "path": json.loads(r["path"])} for r in rows]
+
     def mark_special(self, symbol: str | None, start: datetime, end: datetime, horizon: timedelta) -> None:
         """Mark special every prediction (of ``symbol``, or of every symbol if None) whose
         window, ``horizon`` long, meets the open span from ``start`` to ``end``, scored or not.
@@ -695,10 +742,13 @@ class PredictionStore:
             .execute(
                 "SELECT p.*, o.target_at, o.mid_close, o.mid_display, o.mid_target, o.flat_ticks,"
                 " o.class_a, o.class_b, o.special, o.unscorable, o.scored_at, b.reason AS blocked,"
-                " v.up AS votes_up, v.flat AS votes_flat, v.down AS votes_down"
+                " v.up AS votes_up, v.flat AS votes_flat, v.down AS votes_down,"
+                " t.class AS touch_class, t.unscorable AS touch_unscorable, t.path AS touch_path"
                 " FROM predictions p LEFT JOIN outcomes o ON o.prediction_id = p.id"
                 " LEFT JOIN blocks b ON b.prediction_id = p.id"
-                " LEFT JOIN votes v ON v.prediction_id = p.id " + where,
+                " LEFT JOIN votes v ON v.prediction_id = p.id"
+                " LEFT JOIN touches t ON t.symbol = p.symbol AND t.bar_close = p.bar_close"
+                f" AND t.target_version = {TARGET_VERSION} " + where,
                 params,
             )
             .fetchall()

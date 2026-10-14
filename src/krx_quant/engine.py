@@ -278,7 +278,7 @@ class PredictionEngine:
         self._special = SpecialSituations(calendar)
         self.leaders = leaders or Leaders()
         self._last_tick = clock.now()
-        self._market = MarketView(calendar, symbols, self.leaders, self._last_tick)
+        self._market = MarketView(calendar, symbols, self.leaders, self._last_tick, self.fee_rate)
         # Outcomes waiting for their target time: (target_at, prediction_id, pending).
         self._pending: list[tuple[datetime, int, Pending]] = []
         for p in store.pending():
@@ -783,12 +783,20 @@ class PredictionEngine:
 
     def _score_until(self, due: datetime) -> None:
         scores: list[tuple[int, Score]] = []
+        # The touch label of every window over (#167), predicted or not (a VI), and of each
+        # bar close scored (one from before a restart says so): recorded beside the outcomes,
+        # not yet what they are scored on.
+        windows = dict.fromkeys(self._market.ended_windows(due))
         while self._pending and self._pending[0][0] <= due:
             _, _, pending = heapq.heappop(self._pending)
             mid_target = self._market.mid(pending.symbol, pending.target_at)
             scores.append((pending.prediction_id, _score(pending, mid_target)))
+            windows[(pending.symbol, pending.target_at - HORIZON)] = None
+        now = self.clock.now()
+        if windows:
+            self.store.add_touches([self._market.touch(symbol, close) for symbol, close in windows], now)
         if scores:
-            self.store.score_all(scores, self.clock.now())
+            self.store.score_all(scores, now)
             self._tell(OutcomesScored([prediction_id for prediction_id, _ in scores]))
 
     def _tell(self, change: PredictionsStored | OutcomesScored) -> None:

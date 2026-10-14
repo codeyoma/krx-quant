@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import sqlite3
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
@@ -17,9 +18,10 @@ import pytest
 from krx_quant.baselines import Forecast
 from krx_quant.cli import main
 from krx_quant.macro import INDICATORS, READING_SCHEMA, REGIME_SCHEMA
-from krx_quant.predictions import DB_NAME, NewPrediction, PredictionStore, Score
+from krx_quant.predictions import DB_NAME, NewPrediction, PredictionStore, Score, iso
 from krx_quant.pricing import Direction
 from krx_quant.recorder import ParquetRecorder
+from krx_quant.touch import SILENT, Reached, TouchResult
 from tests.replay_events import DAY, SYMBOL, at, book, futures_trade, trade
 from tests.test_replay_cli import record
 
@@ -101,7 +103,29 @@ def server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     scored(store, predicted(store, at("09:03:00"), 2.0, special=True), DOWN, DOWN)
     predicted(store, at("09:04:00"), 4.0)
     predicted(store, at("09:05:00"), 11.0, status="timed_out")
+    # Their touch labels (#167), at 81,250 (k = 2, targets 81,450 and 81,050): 09:01 up at
+    # 09:02:10, after it was displayed; 09:02 up at 09:02:00.4, before its display at 09:02:01;
+    # 09:03 flat, though a trade printed at 81,450; 09:04 silent.
+    store.add_touches(
+        [
+            touched(at("09:01:00"), up_at=at("09:02:10"), dwell=0.5, max_bid=81_500, trade_high=81_500),
+            touched(at("09:02:00"), up_at=at("09:02:00.4"), dwell=2.0, max_bid=81_450, trade_high=81_450),
+            touched(at("09:03:00"), up_at=None, dwell=None, max_bid=81_400, trade_high=81_450),
+            TouchResult(SYMBOL, at("09:04:00"), None, SILENT),
+        ],
+        at("09:10:00"),
+    )
     store.close()
+    # An earlier target version's label of the same 09:01 window: not this version's, left out.
+    conn = sqlite3.connect(state / DB_NAME)
+    with conn:
+        conn.execute(
+            "INSERT INTO touches (symbol, bar_close, target_version, class, unscorable, path, scored_at)"
+            " SELECT symbol, bar_close, 1, 'down', unscorable, path, scored_at FROM touches"
+            " WHERE bar_close = ?",
+            (iso(at("09:01:00")),),
+        )
+    conn.close()
     record(
         data,
         [
@@ -122,6 +146,33 @@ def server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("KRX_STATE_DIR", str(state))
     monkeypatch.setenv("KRX_SYMBOLS", SYMBOL)
     return tmp_path
+
+
+def touched(
+    close: datetime, *, up_at: datetime | None, dwell: float | None, max_bid: float, trade_high: float
+) -> TouchResult:
+    """A window at 81,250 (targets 81,450 and 81,050) whose ask never fell below 81,300."""
+    reached = (
+        Reached(up_at, max_bid, None, up_at + timedelta(seconds=dwell))
+        if up_at is not None and dwell is not None
+        else None
+    )
+    return TouchResult(
+        SYMBOL,
+        close,
+        UP if reached else FLAT,
+        None,
+        anchor=81_250,
+        tick=100,
+        k=2,
+        upper=81_450,
+        lower=81_050,
+        upper_reached=reached,
+        max_bid=max_bid,
+        min_ask=81_300,
+        trade_high=trade_high,
+        trade_low=81_200,
+    )
 
 
 def snapshot(root: Path) -> dict[str, bytes]:
@@ -158,6 +209,14 @@ def test_the_measurements_are_reported_as_worked_out_by_hand(
     assert "  지표 없음: 2026-10-12" in out
     assert "  일부 빠짐: 2026-10-08 (usdkrw, vix)" in out
     assert "  기록 없음: 없음" in out
+    # The touch labels: two up and one flat scored, one silent.
+    assert "  005930: 상승 67% · 보합 33% · 하락 0% (3창)" in out
+    assert "  채점 불가: silent quotes 1" in out
+    # At k + 1 (81,550) and 2k (81,650) none of the highest bids (81,500 at most) reach.
+    assert "k+1 상승 0% · 보합 100% · 하락 0% (3창)" in out
+    assert "  체결가만 목표에 닿고 호가는 닿지 않음 33% · 위아래 둘 다 닿음 0%" in out
+    assert "  맞은 상승·하락 예측 2개 중 표시 전에 이미 닿음 1개 (50.0%)" in out
+    assert "  목표에 머문 시간(초): p50 0.5 · p90 0.5 · p99 0.5 · 최대 2.0 · 1초 미만 50%" in out
     assert snapshot(server) == before, "nothing is written, not even beside the DB"
 
 
@@ -185,7 +244,7 @@ def test_only_the_sections_without_data_say_so(server: Path, capsys: pytest.Capt
     out = capsys.readouterr().out
     assert "  newton: 예측 5," in out
     sections = out.split("\n\n")
-    assert [s.splitlines()[1] for s in sections[3:]] == ["  없음", "  없음", "  없음"]
+    assert [s.splitlines()[1] for s in sections[3:6]] == ["  없음", "  없음", "  없음"]
 
 
 def test_a_section_without_its_data_says_so(
@@ -198,5 +257,5 @@ def test_a_section_without_its_data_says_so(
     assert main(["diagnose"]) == 0
 
     out = capsys.readouterr().out
-    assert out.count("  없음") == 5
+    assert out.count("  없음") == 6
     assert not (tmp_path / "state").exists() and not (tmp_path / "data").exists()
