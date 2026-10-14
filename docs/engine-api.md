@@ -180,10 +180,10 @@
 | `statuses` | `id`, `algorithm`, `at`, `previous`, `status`, `reason`: 알고리즘 상태 이력(#17) |
 | `consensus_fits` | `version`, `computed_at`: 합의 가중치를 계산한 기록(#18). 엔진은 시작할 때 마지막 버전을 읽는다. |
 | `consensus_weights` | `version`, `symbol`, `slot`, `algorithm`, `weight`: 그 버전의 칸별 가중치 |
-| `kind_predictions` | `id`, `kind`, `symbol`, `algorithm`(그 종류의 알고리즘이나 기준 예측), `model_version`, `bar_close`, `displayed_at`, `status`(`predictions`와 같은 값: `ok`, `timed_out`, `error`, `vi`, `no_book`, `no_previous`), `output`(JSON: `p_<클래스>` 셋과 종류의 추가 필드, `ok`가 아니면 비어 있음), `flat_ticks`(봉 마감의 k: 그 예측이 받은 보합 폭, #200. 상태와 상관없이 있다. 봉 마감 중간가가 없으면, 그리고 #200 전에 쓴 행은 비어 있음), `width_ticks`(장벽이 있는 종류의 봉 마감 장벽 폭 w, #183: 그 봉 마감의 정답이 쓰는 폭. 상태와 상관없이 있다. 장벽이 없는 종류(변동폭), 봉 마감 중간가가 없을 때, #183 전에 쓴 행은 비어 있음). 방향 말고 다른 종류의 예측(#179, 아래 "예측 종류"). (`kind`, `symbol`, `algorithm`, `bar_close`)마다 하나다. 따로 둔 표라 옛 엔진도 DB를 연다 |
+| `kind_predictions` | `id`, `kind`, `symbol`, `algorithm`(그 종류의 알고리즘이나 기준 예측), `model_version`, `bar_close`, `displayed_at`, `status`(`predictions`와 같은 값: `ok`, `timed_out`, `error`, `vi`, `no_book`, `no_previous`), `output`(JSON: `p_<클래스>` 셋과 종류의 추가 필드, `ok`가 아니면 비어 있음), `flat_ticks`(봉 마감의 k: 그 예측이 받은 보합 폭, #200. 상태와 상관없이 있다. 봉 마감 중간가가 없으면, 그리고 #200 전에 쓴 행은 비어 있음), `width_ticks`(장벽이 있는 종류의 봉 마감 장벽 폭 w, #183: 그 봉 마감의 정답이 쓰는 폭. 상태와 상관없이 있다. 장벽이 없는 종류(변동폭), 봉 마감 중간가가 없을 때, #183 전에 쓴 행은 비어 있음), `anchor`(봉 마감 통합 중간가, #210: 그 봉 마감 정답의 기준 가격. 상태와 상관없이 있다. 봉 마감 중간가가 없으면, 그리고 #210 전에 쓴 행은 비어 있음), `tick`(그 중간가의 호가단위, #210. `anchor`가 비면 비어 있음). 방향 말고 다른 종류의 예측(#179, 아래 "예측 종류"). (`kind`, `symbol`, `algorithm`, `bar_close`)마다 하나다. 따로 둔 표라 옛 엔진도 DB를 연다 |
 | `kind_answers` | `kind`, `symbol`, `bar_close`, `answer_version`, `class`(종류의 클래스 중 하나, 채점할 수 없으면 비어 있음), `unscorable`(`missing mid`, `rest quotes`, `silent quotes`, `restarted`, 정답 함수가 클래스를 내지 않으면 그 이유(장벽의 `ambiguous`, #183)나 `no answer`, 지난 정답을 채울 때 녹화가 없으면 `not recorded`(#180)), `special`(VI·서킷브레이커·사이드카가 4분에 닿음), `path`(JSON: 종류의 경로 요약), `scored_at`. 종류의 정답(#179). (종류, 종목, 봉 마감, 정답 버전)마다 하나이고 그 봉 마감의 그 종류 예측이 모두 이것으로 채점된다. 예측하지 않은 봉 마감에도 있다. 엔진은 이미 있는 행을 덮어쓰지 않는다. 지난 봉 마감의 빠진 행은 엔진이 시작할 때 녹화로 채운다(아래 "변동폭"의 "지난 정답", #180). 따로 둔 표다 |
 
-`predictions`에는 (`algorithm`, `bar_close`) 인덱스도 있다(#170, 알고리즘마다 도달 정답 모델의 첫 예측을 찾는다). `kind_predictions`에는 (`kind`, `bar_close`), (`kind`, `symbol`, `bar_close`), (`algorithm`, `bar_close`) 인덱스가 있다(#179). 새 표와 인덱스는 스키마 버전을 올리지 않는다. `kind_predictions.flat_ticks`(#200)도 스키마 버전을 올리지 않고 더한 열이다: 엔진이 열 때 그 열이 없는 DB(#200 전)에 `ALTER TABLE … ADD COLUMN`으로 더한다(`predictions._ADDED_COLUMNS`). 옛 엔진은 쓰는 열을 이름으로 적으므로 그 열이 있는 DB도 열고 쓴다. 그 행의 `flat_ticks`는 비어 있다. `kind_predictions.width_ticks`(#183)도 같은 방식으로 더한 열이다.
+`predictions`에는 (`algorithm`, `bar_close`) 인덱스도 있다(#170, 알고리즘마다 도달 정답 모델의 첫 예측을 찾는다). `kind_predictions`에는 (`kind`, `bar_close`), (`kind`, `symbol`, `bar_close`), (`algorithm`, `bar_close`) 인덱스가 있다(#179). 새 표와 인덱스는 스키마 버전을 올리지 않는다. `kind_predictions.flat_ticks`(#200)도 스키마 버전을 올리지 않고 더한 열이다: 엔진이 열 때 그 열이 없는 DB(#200 전)에 `ALTER TABLE … ADD COLUMN`으로 더한다(`predictions._ADDED_COLUMNS`). 옛 엔진은 쓰는 열을 이름으로 적으므로 그 열이 있는 DB도 열고 쓴다. 그 행의 `flat_ticks`는 비어 있다. `kind_predictions.width_ticks`(#183)와 `anchor`·`tick`(#210)도 같은 방식으로 더한 열이다.
 
 시각은 KST ISO 8601 문자열이다. 스키마 버전은 `PRAGMA user_version`에 있다(지금 4). 엔진이 시작할 때 예전 버전의 DB를 데이터를 지키며 올린다. 더 새 버전의 DB는 거부하고 시작하지 않는다(`... was written by a newer engine (schema N)`). 그래서 스키마를 올린 엔진을 배포한 뒤에는 옛 커밋으로 되돌려도 엔진이 뜨지 않는다([operations.md](operations.md#4-업데이트-배포) 4장).
 
@@ -719,6 +719,8 @@
       "status": "ok",
       "flat_ticks": 2,
       "width_ticks": null,
+      "anchor": 81250.0,
+      "tick": 100,
       "output": {"p_small": 0.2, "p_medium": 0.5, "p_large": 0.3, "q10": 1.0, "q50": 2.5, "q90": 5.0},
       "answer": {
         "answer_version": 1, "class": "medium", "unscorable": null, "special": false,
@@ -742,6 +744,7 @@
 - `output`: `p_<클래스>` 셋(분포)과 종류의 추가 필드. `status`가 `ok`가 아니면 `output`, `target_at`, `answer`가 모두 `null`이다. 채점하지 않기 때문이다.
 - `flat_ticks`(#200): 그 봉 마감의 k(봉 마감 통합 중간가의 보합 폭, 틱)다. 그 종류의 예측자가 받은 값(`kinds.KindInputs.flat_ticks`, 알고리즘의 피처 `flat_ticks`)이고, 변동폭 정답의 `path.k`와 같다. 4분 안에 가격이 호가단위나 비용 반올림 경계를 넘어도 그대로다. `GET /v1/symbols`의 `flat_ticks`는 지금 중간가의 k라서 그때는 다르다. `status`와 상관없이 있다(VI 중인 종목은 그 봉 마감 기준가로 센다). 봉 마감 중간가가 없으면, 그리고 #200 전에 저장한 예측은 `null`이다.
 - `width_ticks`(#183): 장벽이 있는 종류(장벽)의 그 봉 마감 장벽 폭 w(틱)다. 엔진이 봉 마감에 한 번 정해 그 봉 마감의 모든 예측자에게 같고, 그 정답의 `path.w`와 같다(아래 "장벽"의 "폭 w"). `flat_ticks`처럼 모델이 내는 값이 아니라 엔진이 붙이는 값이라 `output` 밖에 있고, `status`와 상관없이 있다. 장벽이 없는 종류(변동폭), 봉 마감 중간가가 없을 때, #183 전에 저장한 예측은 `null`이다.
+- `anchor`, `tick`(#210): 그 봉 마감의 통합 중간가(기준 가격)와 그 호가단위다. 그 종류 정답의 기준이고(`path.anchor`, `path.tick`과 같다), 기준 예측이 받은 값(`kinds.KindInputs.mid`, `tick`)이다. 4분 안에 가격이 움직이거나 호가단위 경계를 넘어도 그대로다(`GET /v1/symbols`의 `mid`, `tick`은 지금 값이다). 그래서 장벽은 정답 전에도 U = `anchor` + `width_ticks` × `tick`, L = `anchor` − `width_ticks` × `tick`을 안다(아래 "장벽"). `flat_ticks`처럼 엔진이 붙이는 값이라 `output` 밖에 있고 `status`와 상관없이 있다(VI 중인 종목은 그 봉 마감 기준가). 봉 마감 중간가가 없으면, 그리고 #210 전에 저장한 예측은 `null`이다.
 - `answer`: 그 봉 마감의 그 종류 정답이다. 그 봉 마감의 그 종류 예측이 모두 같은 것을 가진다. 4분이 지나기 전에는 `null`이다. `class`가 `null`이면 채점할 수 없고 `unscorable`이 이유다(아래 "예측 종류"의 "정답"). `special`이 `true`면 기본 통계에서 뺀다. `path`는 종류의 경로 요약이다.
 
 ### `GET /v1/symbols/{symbol}/kinds/{kind}/predictions?limit=N&algorithm=A&before=T`, `?bar_close=T` (#179)
@@ -848,7 +851,7 @@
 - 기준 예측이 모든 종목을 한 번에 낸다. 방향의 기준 예측 다음, 알고리즘들이 계산을 시작한 뒤다. 아는 것(`kinds.KindInputs`): 봉 마감 중간가, 호가단위, 보합 폭 k, 방금 끝난 창(t − 4분 → t)의 그 종류 정답(클래스가 없거나 그 창을 따라가지 못했으면 `None`), 그날 끝난 창(봉 마감 + 4분 ≤ t)의 클래스별 정답 수. `None`을 내면 그 종목은 `no_previous`다.
 - 알고리즘은 방향 알고리즘과 같은 피처 저장소 값(선언한 피처만), 같은 작업 스레드, 같은 시간 한도(`timed_out`), 같은 CPU 예산으로 돈다. 등록 순서상 방향 알고리즘 뒤라서 예산이 모자라면 먼저 건너뛰고 `runs`에 `cpu_budget`으로 남는다. 시간 초과는 일일 점검의 예산 알림에 함께 센다. 읽을 데이터가 없으면 `NotPredicted`(`no_book`)다.
 - 출력이 분포가 아니거나(세 확률의 합 1, 각각 0–1), 선언한 추가 필드와 다르거나, 유한하지 않거나, 종류의 `check`를 어기면 그 알고리즘의 그 회차는 `error`다.
-- 저장(`kind_predictions`)한 순간이 표시 시각이다. 예측마다 그 봉 마감의 k(`flat_ticks`, #200)를 함께 저장한다. 기준 예측과 알고리즘이 받은 k와 같은 값이고, VI 중인 종목의 빈 예측에도 있다. 장벽이 있는 종류는 그 봉 마감의 폭 w(`width_ticks`, #183)도 같은 식으로 저장한다. 다른 종류에는 합의와 신호가 없다.
+- 저장(`kind_predictions`)한 순간이 표시 시각이다. 예측마다 그 봉 마감의 k(`flat_ticks`, #200)를 함께 저장한다. 기준 예측과 알고리즘이 받은 k와 같은 값이고, VI 중인 종목의 빈 예측에도 있다. 장벽이 있는 종류는 그 봉 마감의 폭 w(`width_ticks`, #183)도 같은 식으로 저장한다. 봉 마감 중간가와 그 호가단위(`anchor`, `tick`, #210)도 모든 종류의 예측에 같은 식으로 저장한다. 다른 종류에는 합의와 신호가 없다.
 
 **정답.** 시장 보기가 봉 마감마다 종목별 창을 열고, 도달 정답의 창(`touch.TouchWindow`)과 같은 호가를 같은 규칙으로 기록한다(`kinds.QuoteLog`). t + 4분에 종류마다 정답 함수를 부른다(`MarketView.kind_answer`). 정답 함수가 받는 창(`kinds.Followed`):
 - `anchor`(봉 마감 통합 중간가), `tick`, `k`, `bid_start`·`ask_start`(봉 마감 전에 받은 마지막 통합 1호가): 도달 정답의 창과 같은 값.
@@ -943,7 +946,7 @@
 - 예(81,250원, w = 2: U 81,450, L 81,050): 09:32에 매수 1호가 81,500을 받으면 위 먼저다. 81,400 / 81,500은 중간가가 U(81,450)여도 매수 1호가가 U 아래라 닿지 않는다. 09:32에 매도 1호가 81,000, 09:33에 매수 1호가 81,500이면 아래 먼저다. 기준이 81,300원(정수 틱)이면 U = 81,500이라 매수 1호가 81,500에서 닿는다(손계산 표: `tests/test_barriers.py`).
 - 경로(`path`, 스키마 `barrier_path`): `w`, `sigma`(σ̂₄, 틱. w = k로 정해졌으면 `null`), `k`, `tick`, `anchor`(기준 중간가), `upper`(U), `lower`(L), `cost`(왕복 비용 = 기준 가격 × (매도세 + 수수료 × 2) ÷ 호가단위, 틱. k는 이것을 올림한 값), `bid_start`·`ask_start`(t 직전에 받은 통합 1호가), `up_at`·`up_bid`·`up_ask`(위를 처음 닿은 받은 시각과 그 호가의 매수·매도 1호가), `down_at`·`down_bid`·`down_ask`, `bid_end`·`ask_end`(구간에서 마지막으로 받은 1호가), `quotes`(받은 호가 수), `silent`(60초 넘게 호가가 끊겼는지). 기준 가격이 없으면 장벽과 폭이 `null`이고, 따라가지 못한 창(`restarted`, `not recorded`)은 빈 객체다. 아래 장벽 손익과 진단은 이 경로로 계산한다.
 
-**출력(스키마 `barrier_output`).** `p_up_first`, `p_timeout`, `p_down_first`(합 1)뿐이다. 다른 필드가 있거나 분포가 아니면 그 회차는 `error`다. 예측 클래스는 가장 큰 확률이다(동률이면 시간 만료, 그다음 위 먼저). 폭 w는 예측 항목의 `width_ticks`다(위 `latest`). 모델이 내는 값이 아니라 엔진이 붙이는 값이라 `output` 밖에 있다(#200의 `flat_ticks`와 같다). 그래서 정답 전에도, 예측하지 않은 항목(`no_previous`, `vi`)에도 그 봉 마감의 w가 있다. #178은 w를 `output.width_ticks`에 두기로 했었지만, #200이 엔진이 붙이는 값을 `output` 밖에 두는 선례를 만든 뒤라 그쪽을 따랐다(출력 계약은 세 확률뿐이다).
+**출력(스키마 `barrier_output`).** `p_up_first`, `p_timeout`, `p_down_first`(합 1)뿐이다. 다른 필드가 있거나 분포가 아니면 그 회차는 `error`다. 예측 클래스는 가장 큰 확률이다(동률이면 시간 만료, 그다음 위 먼저). 폭 w는 예측 항목의 `width_ticks`다(위 `latest`). 모델이 내는 값이 아니라 엔진이 붙이는 값이라 `output` 밖에 있다(#200의 `flat_ticks`와 같다). 그래서 정답 전에도, 예측하지 않은 항목(`no_previous`, `vi`)에도 그 봉 마감의 w가 있다. 기준 중간가와 호가단위도 예측 항목의 `anchor`, `tick`(#210)이라 정답 전에도 U = `anchor` + w × `tick`, L = `anchor` − w × `tick`이다(정답의 `path.upper`, `path.lower`와 같다). #178은 w를 `output.width_ticks`에 두기로 했었지만, #200이 엔진이 붙이는 값을 `output` 밖에 두는 선례를 만든 뒤라 그쪽을 따랐다(출력 계약은 세 확률뿐이다).
 
 **기준 예측.**
 
