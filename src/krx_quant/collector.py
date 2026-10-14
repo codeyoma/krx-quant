@@ -21,7 +21,7 @@ from krx_quant.api import create_app
 from krx_quant.archive import NIGHTLY_ARCHIVE, archive
 from krx_quant.auth import TokenManager, tokens_and_client
 from krx_quant.backfill import keep_history
-from krx_quant.climate import load_climate
+from krx_quant.climate import load_climate, load_tables
 from krx_quant.clock import SessionClock, SystemClock
 from krx_quant.config import Settings
 from krx_quant.cost_guard import keep_costs
@@ -53,6 +53,7 @@ from krx_quant.feeds import (
 )
 from krx_quant.feeds.base import kst_day
 from krx_quant.health import FeedHealth, FeedState
+from krx_quant.kind_registry import KINDS
 from krx_quant.lifecycle import Rules
 from krx_quant.macro import MacroCollector, day_regime, keep_macro, macro_recorder
 from krx_quant.market_calendar import MarketCalendar, Phase, calendar_store, next_on_trading_day
@@ -208,7 +209,11 @@ async def run_collector(
         settings.symbols,
         settings.fee_rate,
         session_clock,
-        models=load_models(settings.state_dir, [*ALGORITHMS, *KIND_ALGORITHMS]),
+        # The algorithms' models, and the kinds' baselines' tables (#180).
+        models={
+            **load_models(settings.state_dir, [*ALGORITHMS, *KIND_ALGORITHMS]),
+            **load_tables(settings.state_dir, KINDS),
+        },
         budget=Budget.of(settings),
         min_sample=settings.min_sample,
         leaders=Leaders.of(settings),

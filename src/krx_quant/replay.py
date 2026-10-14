@@ -21,14 +21,15 @@ import pyarrow.parquet as pq
 
 from krx_quant.algorithms import ALGORITHMS, KIND_ALGORITHMS, Algorithm, KindAlgorithm, Model, load_models
 from krx_quant.archive import partition_files
-from krx_quant.climate import CLIMATE, load_climate
+from krx_quant.climate import CLIMATE, load_climate, load_tables
 from krx_quant.clock import FakeClock
 from krx_quant.config import Settings
 from krx_quant.consensus import Timing
 from krx_quant.engine import ENGINE_FEEDS, Budget, Event, Notify, PredictionEngine, Regimes, partitions
 from krx_quant.features import FeatureStore, Leaders
 from krx_quant.feeds.base import KST, kst_day
-from krx_quant.kinds import KINDS, Kind
+from krx_quant.kind_registry import KINDS
+from krx_quant.kinds import Kind
 from krx_quant.lifecycle import Rules
 from krx_quant.macro import day_regime
 from krx_quant.market_calendar import MarketCalendar, calendar_store
@@ -226,6 +227,7 @@ async def replay_day(settings: Settings, day: date, db: Path | None = None) -> R
     saved = load_models(settings.state_dir, [*ALGORITHMS, *KIND_ALGORITHMS])
     if settings.target_version >= 2:
         saved[CLIMATE] = load_climate(settings.state_dir)
+    saved.update(load_tables(settings.state_dir, KINDS))  # the kinds' baselines' tables (#180)
     for name, model in saved.items():
         if model.trained_until is not None and model.trained_until >= day:
             set_aside.append(

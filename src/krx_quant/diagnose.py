@@ -17,6 +17,13 @@ listed again.
    second are flagged with which rows.
 5. Per trading day: the macro regime decided before the open, when it had no indicator
    or missed some; and the days without one.
+6. The touch labels (#167): their classes, at other widths, against the trade prints, before
+   a hit was displayed, and how long the quote stayed at the target.
+7. The range answers (#180): their classes and r by symbol and 30-minute slot; how often the
+   one-minute bar rule (c = 0 and c = 1, ``ranges.bar_range``) gives the quote answer's class
+   on the recorded days, from those days' backfilled bars (what chooses ``ranges.BAR_C``);
+   how far the mid-point went up and down. Special windows are left out, as training leaves
+   them out.
 
 A distribution shows a few quantiles and the maximum. A quantile is the lower of the two
 values around q·(n − 1) of the sorted values: no value is made up. Nothing is judged
@@ -31,13 +38,16 @@ import json
 import sqlite3
 from collections import defaultdict
 from collections.abc import Iterable, Iterator, Sequence
+from dataclasses import replace
 from datetime import date, datetime, time
+from functools import partial
 from pathlib import Path
 
 import numpy as np
 import pyarrow as pa
 import pyarrow.compute as pc
 
+from krx_quant.consensus import slot
 from krx_quant.feeds import (
     BOOK,
     INDEX,
@@ -54,9 +64,11 @@ from krx_quant.market_calendar import MarketCalendar
 from krx_quant.market_view import prediction_window
 from krx_quant.predictions import SCORED, TOUCH_JOIN
 from krx_quant.pricing import most_likely, tick_size
+from krx_quant.ranges import ANSWER_VERSION, BAR_C, RANGE, bar_range
 from krx_quant.reference import BAR, KRX_ONLY, MAX_QUOTE_AGE
 from krx_quant.regime import NO_INDICATOR
 from krx_quant.touch import TARGET_VERSION
+from krx_quant.training import bar_answers, bar_days_on
 
 DEFAULT_DAYS = 20
 QUANTILES = (0.5, 0.9, 0.99)
@@ -76,8 +88,11 @@ RECEIVE_SECOND = {
 NOT_SENT_AT = {VI_STATUS.tr_id}
 
 
-def diagnose(data_dir: Path, db: Path, calendar: MarketCalendar, days: int | None = DEFAULT_DAYS) -> str:
-    """The diagnosis of the latest ``days`` trading days with data (every one if None)."""
+def diagnose(
+    data_dir: Path, db: Path, calendar: MarketCalendar, days: int | None = DEFAULT_DAYS, *, fee_rate: float
+) -> str:
+    """The diagnosis of the latest ``days`` trading days with data (every one if None); the
+    bar rule's flat band at ``fee_rate``."""
     with _read_only(db) as conn:
         chosen = [d for d in _days(data_dir, conn) if calendar.is_trading_day(d)]
         if days is not None:
@@ -91,6 +106,10 @@ def diagnose(data_dir: Path, db: Path, calendar: MarketCalendar, days: int | Non
             (
                 "6. 도달 정답(#160): 분포·폭·체결가 대비·표시 전·머문 시간",
                 _touches(conn, chosen),
+            ),
+            (
+                "7. 변동폭 정답(#180): 종목 × 시간대 분포·1분봉 규칙 일치율·위아래로 간 폭",
+                _ranges(conn, chosen, data_dir, calendar, fee_rate),
             ),
         ]
     lines = [f"진단 {chosen[0]} – {chosen[-1]} ({len(chosen)}거래일)" if chosen else "진단: 데이터 없음"]
@@ -372,3 +391,118 @@ def _touched_before_display(conn: sqlite3.Connection, cond: str, params: list[st
     if not hits:
         return []
     return [f"맞은 상승·하락 예측 {hits}개 중 표시 전에 이미 닿음 {before}개 ({100 * before / hits:.1f}%)"]
+
+
+_RANGE_CLASSES = (("small", "작음"), ("medium", "보통"), ("large", "큼"))
+# The bar rule's corrections measured against the quote answers (#180).
+BAR_CS = (0, 1)
+
+
+def _ranges(
+    conn: sqlite3.Connection | None,
+    days: Sequence[date],
+    data_dir: Path,
+    calendar: MarketCalendar,
+    fee_rate: float,
+) -> list[str]:
+    """The range answers stored (#180), special windows left out: their classes and r by
+    symbol and 30-minute slot, how often the bar rule with each c gives their class on the
+    recorded days' backfilled bars, and how far the mid-point went up and down."""
+    if conn is None or not days:
+        return []
+    cond, params = _on_days(days)
+    try:
+        rows = conn.execute(
+            "SELECT symbol, bar_close, class, unscorable, special, path FROM kind_answers p"
+            f" WHERE kind = ? AND answer_version = ? AND {cond} ORDER BY bar_close, symbol",
+            [RANGE.name, ANSWER_VERSION, *params],
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return []  # a DB from before the kinds
+    if not rows:
+        return []
+    scored = [(r[0], r[1], r[2], json.loads(r[5])) for r in rows if r[2] is not None and not r[4]]
+    unscorable: dict[str, int] = {}
+    for r in rows:
+        if r[2] is None:
+            unscorable[r[3]] = unscorable.get(r[3], 0) + 1
+    special = sum(1 for r in rows if r[2] is not None and r[4])
+
+    def share(k: int, n: int) -> str:
+        return f"{100 * k / n:.0f}%" if n else "—"
+
+    lines = []
+    cells: dict[tuple[str, str], list[tuple[str, float]]] = defaultdict(list)
+    for symbol, bar_close, cls, path in scored:
+        cells[(symbol, slot_of(bar_close))].append((cls, path["r"]))
+    for (symbol, cell), seen in sorted(cells.items()):
+        classes = [c for c, _ in seen]
+        split = " · ".join(f"{label} {share(classes.count(c), len(classes))}" for c, label in _RANGE_CLASSES)
+        r = _distribution(pa.array([v for _, v in seen], pa.float64()), "g")
+        lines.append(f"{symbol} {cell}: {split} ({len(classes)}창) · r {r}")
+    if special or unscorable:
+        lines.append(
+            f"특수 상황 {special}창(뺌)"
+            + "".join(f" · {why} {n}" for why, n in sorted(unscorable.items()))
+            + (" (채점 불가)" if unscorable else "")
+        )
+    lines += _bar_rule(scored, data_dir, calendar, fee_rate)
+    for symbol in sorted({s for s, *_ in scored}):
+        ups = pa.array([p["up"] for s, _, _, p in scored if s == symbol], pa.float64())
+        downs = pa.array([p["down"] for s, _, _, p in scored if s == symbol], pa.float64())
+        up, down = _distribution(ups, "g"), _distribution(downs, "g")
+        lines.append(f"{symbol} 위로 간 폭(틱): {up} | 아래로 간 폭(틱): {down}")
+    return lines
+
+
+def slot_of(bar_close: str) -> str:
+    """The 30-minute slot of a bar close (``consensus.slot``): 09:01–09:30 is ``09:00``."""
+    return slot(datetime.fromisoformat(bar_close))
+
+
+def _bar_rule(
+    scored: Sequence[tuple[str, str, str, dict[str, float]]],
+    data_dir: Path,
+    calendar: MarketCalendar,
+    fee_rate: float,
+) -> list[str]:
+    """How often the one-minute bar rule with each c in ``BAR_CS`` gives the quote answer's
+    class, on the days with both (the recorded days' backfilled bars); and the bars' range
+    less the quotes' (c = 0)."""
+    symbols = sorted({s for s, *_ in scored})
+    days = sorted({date.fromisoformat(b[:10]) for _, b, _, _ in scored})
+    bar_days = bar_days_on(data_dir, symbols, days)
+    ruled = [replace(RANGE, name=f"c{c}", bar_answer=partial(bar_range, c=c)) for c in BAR_CS]
+    by_bars = bar_answers(bar_days, calendar, fee_rate, ruled)
+    same: dict[int, dict[str, list[bool]]] = {c: defaultdict(list) for c in BAR_CS}
+    wider: list[float] = []
+    for symbol, bar_close, cls, path in scored:
+        at = datetime.fromisoformat(bar_close)
+        for c in BAR_CS:
+            answer = by_bars.get((f"c{c}", symbol, at))
+            if answer is None or answer.label is None:
+                continue
+            same[c][symbol].append(answer.label == cls)
+            if c == 0:
+                wider.append(float(answer.path["r"]) - float(path["r"]))
+    if not wider:
+        return ["1분봉 규칙: 정답이 있는 날의 1분봉 없음"]
+
+    def agreement(c: int, symbol: str | None = None) -> tuple[int, int]:
+        hits = [h for s, values in same[c].items() if symbol in (None, s) for h in values]
+        return sum(hits), len(hits)
+
+    def shown(symbol: str | None) -> str:
+        parts = []
+        for c in BAR_CS:
+            hits, n = agreement(c, symbol)
+            parts.append(f"c = {c} {100 * hits / n:.1f}%" if n else f"c = {c} —")
+        return " · ".join(parts) + f" ({agreement(BAR_CS[0], symbol)[1]}창)"
+
+    best = max(BAR_CS, key=lambda c: (agreement(c)[0], -c))
+    lines = [
+        f"1분봉 규칙과 호가 정답의 구간 일치율: {shown(None)} · 더 많이 같은 c {best} (지금 BAR_C {BAR_C})"
+    ]
+    lines += [f"  {symbol}: {shown(symbol)}" for symbol in sorted({s for s, *_ in scored})]
+    lines.append(f"1분봉 범위 − 호가 범위(틱, c = 0): {_distribution(pa.array(wider, pa.float64()), 'g')}")
+    return lines

@@ -71,7 +71,10 @@ on the quotes the touch label reads, goes to ``kind_answers`` (special when a VI
 breaker or sidecar known at its bar close, or learned since, touches it) and scores every
 predictor of the kind there. The kinds have no consensus and no signals. Each daily review also
 judges each kind's algorithms against that kind's baselines, within the kind. A kind that
-fails (its answer function, a baseline) is logged and never holds up the direction.
+fails (its answer function, a baseline) is logged and never holds up the direction. A kind
+baseline that predicts from a table (the range's climate, #180, ``kinds.TableBaseline``)
+runs the table the engine holds for it (``kind_tables``): its defaults, the one given at
+start, then whichever the morning swap installs, as the direction's climate table.
 """
 
 from __future__ import annotations
@@ -127,8 +130,17 @@ from krx_quant.feeds import (
     VI_STATUS,
 )
 from krx_quant.feeds.base import KST, LEVELS
+from krx_quant.kind_registry import KINDS
 from krx_quant.kind_stats import kind_scoring
-from krx_quant.kinds import DIRECTION, DIRECTION_KIND, KINDS, KindForecast, KindInputs
+from krx_quant.kinds import (
+    DIRECTION,
+    DIRECTION_KIND,
+    KindBaseline,
+    KindForecast,
+    KindInputs,
+    TableBaseline,
+    table_baselines,
+)
 from krx_quant.kinds import NO_PREVIOUS as KIND_NO_PREVIOUS
 from krx_quant.kinds import Kind as PredictionKind
 from krx_quant.lifecycle import RESTARTED, Review, Rules, Stage, Standing, Status, review
@@ -367,6 +379,11 @@ class PredictionEngine:
         given = models or {}
         everyone: list[Algorithm | KindAlgorithm] = [*self.registered, *self.kind_registered]
         self.models = {a.name: given.get(a.name) or a.default_model() for a in everyone}
+        # The tables the kinds' table baselines predict from (#180), by name: given, else the
+        # defaults; a swap installs the night's (``switch_models``).
+        self.kind_tables: dict[str, Model] = {
+            b.name: given.get(b.name) or b.default_table() for _, b in table_baselines(self.kinds)
+        }
         self._admits = admits  # without: every registered algorithm runs (replay, tests)
         self.algorithms: tuple[Algorithm, ...] = ()  # the registered ones that run, in order
         self.kind_algorithms: tuple[KindAlgorithm, ...] = ()  # likewise, of the other kinds
@@ -539,6 +556,10 @@ class PredictionEngine:
             elif name == CLIMATE and name in self.baseline_names and self.climate != model:
                 log.info("%s now runs %s", name, model.version)
                 self.climate = model
+                changed = True
+            elif name in self.kind_tables and self.kind_tables[name] != model:  # a kind's (#180)
+                log.info("%s now runs %s", name, model.version)
+                self.kind_tables[name] = model
                 changed = True
         return changed
 
@@ -906,6 +927,7 @@ class PredictionEngine:
         day_start = datetime.combine(bar_close.date(), time(), KST)
         for kind in self.kinds:
             try:
+                baselines = self._kind_baselines(kind)
                 made_by: dict[tuple[str, str, str], dict[str, KindForecast | None]] = {}
                 for symbol, c in at_close.items():
                     previous = self._market.kind_answer(kind, symbol, bar_close - HORIZON)
@@ -921,7 +943,7 @@ class PredictionEngine:
                             kind.name, kind.answer_version, symbol, day_start, bar_close - HORIZON
                         ),
                     )
-                    for b in kind.baselines:
+                    for b in baselines:
                         forecast = b.predict(inputs)
                         if forecast is not None and (why := kind.invalid(forecast)) is not None:
                             raise ValueError(f"{b.name} at {bar_close}: {why}")
@@ -930,7 +952,7 @@ class PredictionEngine:
                 made = [(name, version, f, status) for (name, version, status), f in made_by.items()]
                 if stopped:
                     nothing: dict[str, KindForecast | None] = dict.fromkeys(stopped)
-                    made += [(b.name, b.version, nothing, "vi") for b in kind.baselines]
+                    made += [(b.name, b.version, nothing, "vi") for b in baselines]
                     made += [
                         (a.name, self.models[a.name].version, nothing, "vi")
                         for a in running
@@ -939,6 +961,13 @@ class PredictionEngine:
                 self._record_kind(kind, bar_close, made)
             except Exception:
                 log.exception("%s: its baselines failed at %s", kind.name, bar_close)
+
+    def _kind_baselines(self, kind: PredictionKind) -> list[KindBaseline]:
+        """``kind``'s baselines as they predict now: one of a table with the table the engine
+        runs (#180), its predictions carrying the table's version."""
+        return [
+            b.using(self.kind_tables[b.name]) if isinstance(b, TableBaseline) else b for b in kind.baselines
+        ]
 
     def _record_kind(
         self,

@@ -24,9 +24,9 @@ from krx_quant.api import create_app
 from krx_quant.cards import Meaning
 from krx_quant.engine import Budget, Event
 from krx_quant.feeds import BOOK_SNAPSHOT
+from krx_quant.kind_registry import KINDS
 from krx_quant.kinds import (
     DIRECTION_KIND,
-    KINDS,
     NO_ANSWER,
     Answer,
     Followed,
@@ -83,7 +83,7 @@ def test_the_direction_is_the_first_kind_registered_as_it_always_ran() -> None:
     assert KINDS[0] is DIRECTION_KIND
     assert (DIRECTION_KIND.classes, DIRECTION_KIND.action) == (("up", "flat", "down"), ("up", "down"))
     assert DIRECTION_KIND.answer_version == 2  # the touch label (#170)
-    assert [k.name for k in KINDS] == ["direction"], "no other kind ships with #179"
+    assert [k.name for k in KINDS] == ["direction", "range"], "the range after it (#180)"
 
 
 def kind(**changes: Any) -> Kind:
@@ -129,7 +129,7 @@ def test_a_kind_s_algorithm_is_checked_within_its_kind_only() -> None:
             [FixedKindAlgorithm("newton", features=("vwap_z",), unique=("vwap_z",))], kinds, {"newton"}
         )
     stray = FixedKindAlgorithm("stray", features=("vwap_z",), unique=("vwap_z",))
-    stray.kind = "range"  # not registered
+    stray.kind = "barrier"  # not registered
     with pytest.raises(RegistrationError, match="not a registered kind"):
         register_kind_algorithms([stray], kinds)
 

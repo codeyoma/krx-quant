@@ -950,7 +950,7 @@
         },
         "status": {"enum": ["ok", "timed_out", "error", "vi", "no_book", "no_previous"]},
         "output": {
-          "description": "p_<class> for each of the kind's three classes (GET /v1/kinds), a distribution, then the kind's fields; null unless the status is ok.",
+          "description": "p_<class> for each of the kind's three classes (GET /v1/kinds), a distribution, then the kind's fields; null unless the status is ok. The range's: range_output (#180).",
           "oneOf": [
             {"type": "null"},
             {
@@ -988,7 +988,82 @@
         "unscorable": {"type": ["string", "null"]},
         "special": {"type": "boolean"},
         "scored_at": {"$ref": "#/$defs/time"},
-        "path": {"description": "The kind's summary of the window.", "type": "object"}
+        "path": {"description": "The kind's summary of the window. The range's: range_path (#180).", "type": "object"}
+      }
+    },
+    "range_output": {
+      "description": "A range prediction's output (#180, kind range): the three classes' probabilities (a distribution) and the quantiles of r, the four minutes' integrated mid-point range in ticks, 0 <= q10 <= q50 <= q90.",
+      "type": "object",
+      "required": ["p_small", "p_medium", "p_large", "q10", "q50", "q90"],
+      "additionalProperties": false,
+      "properties": {
+        "p_small": {"type": "number", "minimum": 0, "maximum": 1},
+        "p_medium": {"type": "number", "minimum": 0, "maximum": 1},
+        "p_large": {"type": "number", "minimum": 0, "maximum": 1},
+        "q10": {"type": "number", "minimum": 0},
+        "q50": {"type": "number", "minimum": 0},
+        "q90": {"type": "number", "minimum": 0}
+      }
+    },
+    "range_path": {
+      "description": "A range answer's path (#180): empty for a window not followed (restarted, not recorded); else r (ticks, half-tick steps; null without a mid-point at the bar close), k, the tick, the reference mid-point, the highest and lowest mid-points of the window and when each was first received (the bar close for the reference), how far the mid-point went up and down (ticks), the quotes received, whether they went silent for 60 s, and the highest bid and lowest ask.",
+      "oneOf": [
+        {"type": "object", "maxProperties": 0},
+        {
+          "type": "object",
+          "required": ["r", "k", "tick", "anchor", "max_mid", "max_mid_at", "min_mid", "min_mid_at", "up", "down", "quotes", "silent", "max_bid", "min_ask"],
+          "additionalProperties": false,
+          "properties": {
+            "r": {"type": ["number", "null"], "minimum": 0},
+            "k": {"type": ["integer", "null"], "minimum": 1},
+            "tick": {"type": ["number", "null"]},
+            "anchor": {"type": ["number", "null"]},
+            "max_mid": {"type": ["number", "null"]},
+            "max_mid_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]},
+            "min_mid": {"type": ["number", "null"]},
+            "min_mid_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]},
+            "up": {"type": ["number", "null"], "minimum": 0},
+            "down": {"type": ["number", "null"], "minimum": 0},
+            "quotes": {"type": "integer", "minimum": 0},
+            "silent": {"type": "boolean"},
+            "max_bid": {"type": ["number", "null"]},
+            "min_ask": {"type": ["number", "null"]}
+          }
+        }
+      ]
+    },
+    "range_stats": {
+      "description": "A range predictor's own statistics (#180, a kind entry's extra): of its n scored predictions, each quantile's pinball loss, the share of r within q10-q90 (ideally 0.8, Wilson 95%), the mean absolute error of q50 (ticks), and the pinball loss less range-climate's on the same bar closes (null for range-climate itself; descriptive, never judged on).",
+      "type": "object",
+      "required": ["n", "pinball", "interval_coverage", "q50_abs_error", "vs_climate"],
+      "additionalProperties": false,
+      "properties": {
+        "n": {"type": "integer", "minimum": 0},
+        "pinball": {"$ref": "#/$defs/range_quantile_means"},
+        "interval_coverage": {"$ref": "#/$defs/interval"},
+        "q50_abs_error": {"$ref": "#/$defs/interval"},
+        "vs_climate": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/range_quantile_means"}]}
+      }
+    },
+    "range_quantile_means": {
+      "description": "A mean for each quantile of a range output (#180).",
+      "type": "object",
+      "required": ["q10", "q50", "q90"],
+      "additionalProperties": false,
+      "properties": {
+        "q10": {"$ref": "#/$defs/range_mean"},
+        "q50": {"$ref": "#/$defs/range_mean"},
+        "q90": {"$ref": "#/$defs/range_mean"}
+      }
+    },
+    "range_mean": {
+      "description": "A mean with its normal 95% interval, and taken by trading day (each day's mean one value, Student t 95%, n the days; null from fewer than two).",
+      "type": "object",
+      "required": ["mean", "by_day"],
+      "additionalProperties": false,
+      "properties": {
+        "mean": {"$ref": "#/$defs/interval"},
+        "by_day": {"$ref": "#/$defs/interval"}
       }
     },
     "kind_latest": {
@@ -1032,7 +1107,7 @@
         "precision": {"description": "Of the calls of the kind's action classes, the share that happened.", "$ref": "#/$defs/interval"},
         "coverage": {"description": "The share of calls of the kind's action classes.", "$ref": "#/$defs/interval"},
         "brier": {"$ref": "#/$defs/interval"},
-        "extra": {"description": "The kind's own statistics; null for a kind without.", "type": ["object", "null"]},
+        "extra": {"description": "The kind's own statistics; null for a kind without. The range's: range_stats (#180).", "type": ["object", "null"]},
         "lift": {"$ref": "#/$defs/lift"}
       }
     },

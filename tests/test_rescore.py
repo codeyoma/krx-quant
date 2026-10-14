@@ -1,4 +1,5 @@
-"""Past bar closes' touch labels (#168): filled from the recorded day at start, and by hand.
+"""Past bar closes' touch labels (#168): filled from the recorded day at start, and by hand;
+and the kinds' answers (#180, the range's), filled at start.
 
 Input: an engine database of the current schema (v4), as the server's was before #167: a
 recorded day's predictions and outcomes without touch labels. And that day's events, recorded
@@ -8,7 +9,8 @@ outcomes left as they were, and the Engine API of a collector started on that da
 
 The day is a wandering book and trades from 09:00 to 10:00 with a VI at 09:30 (every class,
 VI bar closes, quotes gone silent at 10:00, then no mid-point), and the KOSPI index and its
-futures, which the fill does not read: a circuit breaker at 09:41 marks predictions special.
+futures, which the touch fill does not read: a circuit breaker at 09:41 marks predictions
+special. The kinds' fill reads them, and the VI's, for its answers' special marks.
 """
 
 from __future__ import annotations
@@ -33,7 +35,8 @@ from krx_quant.engine import Event
 from krx_quant.fake_kis import FakeKis
 from krx_quant.object_store import LocalObjectStore
 from krx_quant.predictions import DB_NAME, PredictionStore
-from krx_quant.rescore import EngineLock, EngineRunning, fill_touches, rescore
+from krx_quant.ranges import RANGE
+from krx_quant.rescore import EngineLock, EngineRunning, fill_kind_answers, fill_touches, rescore
 from krx_quant.touch import NOT_RECORDED, RESTARTED, SILENT, TouchResult
 from tests.replay_events import DAY, SYMBOL, at, kospi, kospi200_futures, run
 from tests.test_collector import settings_for
@@ -385,3 +388,141 @@ def test_storing_labels_that_change_nothing_leaves_the_store_version(tmp_path: P
         assert store.version == version + 1
     finally:
         store.close()
+
+
+# The kinds' answers (#180): the range's, filled at start.
+
+
+def kind_answers(db: Path) -> list[tuple[Any, ...]]:
+    """Every kind's answer stored, with its path, special mark and when it was scored."""
+    with sqlite3.connect(db) as conn:
+        return conn.execute(
+            "SELECT kind, symbol, bar_close, answer_version, class, unscorable, special, path, scored_at"
+            " FROM kind_answers ORDER BY kind, bar_close, symbol"
+        ).fetchall()
+
+
+def before_the_range(db: Path) -> Path:
+    """The database as an engine before #180 left it: no kind's predictions nor answers."""
+    with sqlite3.connect(db) as conn:
+        conn.execute("DELETE FROM kind_answers")
+        conn.execute("DELETE FROM kind_predictions")
+    return db
+
+
+def test_the_kinds_fill_answers_a_recorded_day_as_a_fresh_replay_does_and_once(
+    tmp_path: Path, replayed: Path
+) -> None:
+    """Input: the server's database before #180 (its touch labels filled) and the day recorded
+    in the data directory. Output: one range answer per bar close, each the fresh replay's (its
+    class, path, scored_at and special mark: the VI's and the circuit breaker's windows); no
+    baseline predicts the past; a second run reads nothing."""
+    s = settings(tmp_path)
+    record(s.data_dir, day_events())
+    db = before_the_range(server_db(s.state_dir, replayed, keep=1))
+
+    first = fill_kind_answers(s, NEXT_MORNING, kinds=(RANGE,))
+
+    assert [(f.day, f.source, f.labeled, f.written, f.not_recorded) for f in first] == [
+        (DAY, "the data directory", BAR_CLOSES, BAR_CLOSES, 0)
+    ]
+    assert kind_answers(db) == kind_answers(replayed)
+    # The book wanders three ticks a cycle (medium at k = 2); silent from 10:00 (no class).
+    assert {row[4] for row in kind_answers(db)} == {"medium", None}
+    assert {row[6] for row in kind_answers(db)} == {0, 1}, "special: the VI and the breaker"
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM kind_predictions").fetchone() == (0,)
+
+    assert fill_kind_answers(s, NEXT_MORNING, kinds=(RANGE,)) == []  # nothing missing: no day read
+    assert kind_answers(db) == kind_answers(replayed)
+    with sqlite3.connect(db) as conn:
+        runs = conn.execute("SELECT kind FROM runs WHERE kind = 'kind_fill'").fetchall()
+    assert runs == [("kind_fill",)]  # the first run only
+
+
+def test_the_kinds_fill_reads_the_object_store_and_keeps_the_answers_stored(
+    tmp_path: Path, replayed: Path
+) -> None:
+    """Input: the day archived to the Object Store only (with the index, futures and VI
+    partitions); a third of the answers stored already, one of them ``restarted``. Output: those
+    stay; the others are the fresh replay's, special marks included."""
+    elsewhere = tmp_path / "elsewhere"
+    record(elsewhere, day_events())
+    asyncio.run(archive(elsewhere, LocalObjectStore(tmp_path / "store")))
+    s = settings(tmp_path, object_store=str(tmp_path / "store"))
+    db = server_db(s.state_dir, replayed, keep=1)
+    with sqlite3.connect(db) as conn:
+        conn.execute("DELETE FROM kind_predictions")
+        rows = conn.execute("SELECT rowid FROM kind_answers ORDER BY bar_close").fetchall()
+        conn.executemany("DELETE FROM kind_answers WHERE rowid = ?", [r for i, r in enumerate(rows) if i % 3])
+        conn.execute(
+            "UPDATE kind_answers SET class = NULL, unscorable = ?, path = '{}' WHERE bar_close = ?",
+            (RESTARTED, "2026-10-12T09:31:00+09:00"),
+        )
+        kept = len(conn.execute("SELECT 1 FROM kind_answers").fetchall())
+
+    [filled] = fill_kind_answers(s, NEXT_MORNING, kinds=(RANGE,))
+
+    assert filled.source == str((tmp_path / "store").resolve())
+    assert filled.written == BAR_CLOSES - kept
+    expected = [
+        (*row[:4], None, RESTARTED, row[6], "{}", row[8]) if row[2] == "2026-10-12T09:31:00+09:00" else row
+        for row in kind_answers(replayed)
+    ]
+    assert kind_answers(db) == expected
+
+
+def test_the_kinds_fill_leaves_a_day_recorded_nowhere_unscorable(
+    tmp_path: Path, replayed: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    s = settings(tmp_path, object_store=str(tmp_path / "store"))
+    db = before_the_range(server_db(s.state_dir, replayed, keep=1))
+
+    with caplog.at_level(logging.WARNING, logger="krx_quant.rescore"):
+        [filled] = fill_kind_answers(s, NEXT_MORNING, kinds=(RANGE,))
+
+    assert (filled.labeled, filled.written, filled.not_recorded) == (0, BAR_CLOSES, BAR_CLOSES)
+    assert {row[4:7] for row in kind_answers(db)} == {(None, NOT_RECORDED, 0)}
+    assert f"{DAY}: {BAR_CLOSES} predicted bar closes of {SYMBOL} have no recorded events" in caplog.text
+    assert fill_kind_answers(s, NEXT_MORNING, kinds=(RANGE,)) == []
+
+
+def test_the_kinds_fill_leaves_today_to_the_live_engine(tmp_path: Path, replayed: Path) -> None:
+    s = settings(tmp_path)
+    record(s.data_dir, day_events())
+    db = before_the_range(server_db(s.state_dir, replayed, keep=1))
+
+    assert fill_kind_answers(s, at("12:00:00"), kinds=(RANGE,)) == []
+    assert kind_answers(db) == []
+
+
+async def test_the_engine_answers_first_then_fills_the_kinds_answers(
+    kis: FakeKis, tmp_path: Path, replayed: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Input: the collector started at the 06:00 deploy on the server's database before #180,
+    the day recorded in its data directory, while a rescore holds the lock. Output: the Engine
+    API answers while no range answer is stored; once the lock is free, the engine fills them,
+    each the fresh replay's."""
+    port = free_port()
+    s = replace(settings_for(kis, tmp_path), api_port=port)
+    record(s.data_dir, day_events())
+    db = before_the_range(server_db(s.state_dir, replayed, keep=1))
+    monkeypatch.setattr(rescore_module, "LOCK_POLL_SECONDS", 0.05)
+    rescoring = EngineLock(s.state_dir)
+    assert rescoring.acquire()
+    stop = asyncio.Event()
+    task = asyncio.create_task(run_collector(s, stop=stop, clock=FakeClock(NEXT_MORNING)))
+    try:
+        status = await poll(f"http://127.0.0.1:{port}/v1/status", lambda b: True)
+        waiting = kind_answers(db)
+        rescoring.release()
+        async with asyncio.timeout(10):
+            while len(kind_answers(db)) < len(kind_answers(replayed)):
+                await asyncio.sleep(0.05)
+    finally:
+        rescoring.release()
+        stop.set()
+        await asyncio.wait_for(task, 5)
+
+    assert status["mode"] == "live" and waiting == []
+    assert kind_answers(db) == kind_answers(replayed)

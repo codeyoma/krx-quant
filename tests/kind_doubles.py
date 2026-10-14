@@ -55,7 +55,9 @@ def within_a_hundred(output: Mapping[str, float]) -> str | None:
     return None if abs(output["drift_ticks"]) <= 100 else f"drift_ticks {output['drift_ticks']} beyond ±100"
 
 
-def share_of_rises(records: Sequence[KindScored]) -> dict[str, Any]:
+def share_of_rises(
+    algorithm: str, records: Sequence[KindScored], baselines: Mapping[str, Sequence[KindScored]]
+) -> dict[str, Any]:
     rises = sum(r.outcome == CLASSES.index("rose") for r in records)
     return {"rises": rises, "rise_share": rises / len(records) if records else None}
 

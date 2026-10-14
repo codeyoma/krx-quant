@@ -13,10 +13,14 @@ import sqlite3
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
+from krx_quant.backfill import BAR_SCHEMA, MINUTE_BARS_TR
 from krx_quant.baselines import Forecast
 from krx_quant.cli import main
+from krx_quant.kinds import Answer
 from krx_quant.macro import INDICATORS, READING_SCHEMA, REGIME_SCHEMA
 from krx_quant.predictions import DB_NAME, NewPrediction, PredictionStore, Score, iso
 from krx_quant.pricing import Direction
@@ -117,6 +121,21 @@ def server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         ],
         at("09:10:00"),
     )
+    # The range's answers (#180), at 81,200–81,300 (k = 2): 09:01 medium (2.5 ticks: 1.5 up, 1
+    # down), 09:02 small (1: half up, half down), 09:31 large (4 up); 09:03 special (left out),
+    # 09:04 silent. And 09:01's answer of another kind, not the range's.
+    store.add_kind_answers(
+        "range",
+        1,
+        [
+            (SYMBOL, at("09:01:00"), ranged("medium", 2.5, 1.5, 1.0), False),
+            (SYMBOL, at("09:02:00"), ranged("small", 1.0, 0.5, 0.5), False),
+            (SYMBOL, at("09:31:00"), ranged("large", 4.0, 4.0, 0.0), False),
+            (SYMBOL, at("09:03:00"), ranged("medium", 3.0, 3.0, 0.0), True),
+            (SYMBOL, at("09:04:00"), Answer(None, SILENT, {}), False),
+        ],
+    )
+    store.add_kind_answers("drift", 1, [(SYMBOL, at("09:01:00"), Answer("rose", None, {"r": 9.0}), False)])
     store.close()
     # An earlier target version's label of the same 09:01 window: not this version's, left out.
     conn = sqlite3.connect(state / DB_NAME)
@@ -139,6 +158,7 @@ def server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
             futures_trade(at("09:01:40.25"), 352.5),
         ],
     )
+    backfilled(data)
     recorder = ParquetRecorder(data, flush_rows=100, flush_seconds=3600)
     macro_day(recorder, EARLIER, ["반도체 강세"], missing={"usdkrw"}, empty={"vix"})
     macro_day(recorder, DAY, ["지표 없음"], missing=set(), empty=set())
@@ -148,6 +168,48 @@ def server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("KRX_STATE_DIR", str(state))
     monkeypatch.setenv("KRX_SYMBOLS", SYMBOL)
     return tmp_path
+
+
+def ranged(label: str, r: float, up: float, down: float) -> Answer:
+    """A range answer at 81,250 (k = 2) of ``r`` ticks, ``up`` and ``down`` of it."""
+    return Answer(label, None, {"r": r, "k": 2, "tick": 100, "anchor": 81_250.0, "up": up, "down": down})
+
+
+# The day's backfilled bars (start, high, low, close): the bar rule's input. From 09:01 (close
+# 81,200): 81,400 to 81,200 by 09:04, 2 ticks (c = 0 medium as the quotes; c = 1 small); from
+# 09:02 (close 81,300): 81,300 to 81,200, 1 tick (small either way, as the quotes); from 09:31
+# (close 81,300): 81,700 to 81,300, 4 ticks (c = 0 large as the quotes; c = 1 medium).
+BARS = [
+    ("09:00:00", 81_300, 81_200, 81_200),
+    ("09:01:00", 81_400, 81_200, 81_300),
+    ("09:02:00", 81_300, 81_200, 81_300),
+    ("09:03:00", 81_300, 81_300, 81_300),
+    ("09:04:00", 81_300, 81_200, 81_200),
+    ("09:05:00", 81_200, 81_200, 81_200),
+    ("09:30:00", 81_300, 81_200, 81_300),
+    ("09:31:00", 81_700, 81_300, 81_600),
+    ("09:32:00", 81_600, 81_500, 81_500),
+]
+
+
+def backfilled(data: Path) -> None:
+    rows = [
+        {
+            "symbol": SYMBOL,
+            "bar_time": at(start),
+            "venue": "UN",
+            "open": close,
+            "high": high,
+            "low": low,
+            "close": close,
+            "volume": 10,
+            "cum_value": 0,
+        }
+        for start, high, low, close in BARS
+    ]
+    path = data / "bars" / f"date={DAY}" / f"feed={MINUTE_BARS_TR}" / f"symbol={SYMBOL}" / "bars.parquet"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pq.write_table(pa.Table.from_pylist(rows, schema=BAR_SCHEMA), path)
 
 
 def touched(
@@ -217,6 +279,21 @@ def test_the_measurements_are_reported_as_worked_out_by_hand(
     assert "  체결가만 목표에 닿고 호가는 닿지 않음 33% · 위아래 둘 다 닿음 0%" in out
     assert "  맞은 상승·하락 예측 2개 중 표시 전에 이미 닿음 1개 (50.0%)" in out
     assert "  목표에 머문 시간(초): p50 0.5 · p90 0.5 · p99 0.5 · 최대 2.0 · 1초 미만 50%" in out
+    # The range's answers (#180), the special one left out: by symbol and slot, r's spread.
+    assert "  005930 09:00: 작음 50% · 보통 50% · 큼 0% (2창) · r p50 1 · p90 1 · p99 1 · 최대 2.5" in out
+    assert "  005930 09:30: 작음 0% · 보통 0% · 큼 100% (1창) · r p50 4 · p90 4 · p99 4 · 최대 4" in out
+    assert "  특수 상황 1창(뺌) · silent quotes 1 (채점 불가)" in out
+    # The bar rule: c = 0 gives all three classes, c = 1 only 09:02's.
+    assert (
+        "  1분봉 규칙과 호가 정답의 구간 일치율: c = 0 100.0% · c = 1 33.3% (3창)"
+        " · 더 많이 같은 c 0 (지금 BAR_C 1)" in out
+    )
+    assert "    005930: c = 0 100.0% · c = 1 33.3% (3창)" in out
+    assert "  1분봉 범위 − 호가 범위(틱, c = 0): p50 0 · p90 0 · p99 0 · 최대 0" in out
+    assert (
+        "  005930 위로 간 폭(틱): p50 1.5 · p90 1.5 · p99 1.5 · 최대 4"
+        " | 아래로 간 폭(틱): p50 0.5 · p90 0.5 · p99 0.5 · 최대 1" in out
+    )
     assert snapshot(server) == before, "nothing is written, not even beside the DB"
 
 
@@ -242,6 +319,7 @@ def test_only_the_sections_without_data_say_so(server: Path, capsys: pytest.Capt
     assert "  newton: 예측 5," in out
     sections = out.split("\n\n")
     assert [s.splitlines()[1] for s in sections[3:6]] == ["  없음", "  없음", "  없음"]
+    assert "  1분봉 규칙: 정답이 있는 날의 1분봉 없음" in out, "the range's answers, without the bars"
 
 
 def test_a_section_without_its_data_says_so(
@@ -254,5 +332,5 @@ def test_a_section_without_its_data_says_so(
     assert main(["diagnose"]) == 0
 
     out = capsys.readouterr().out
-    assert out.count("  없음") == 6
+    assert out.count("  없음") == 7
     assert not (tmp_path / "state").exists() and not (tmp_path / "data").exists()
