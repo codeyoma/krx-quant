@@ -19,7 +19,7 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from krx_quant import predictions
-from krx_quant.algorithms import RegistrationError, register_kinds
+from krx_quant.algorithms import RegistrationError, register_kind_algorithms
 from krx_quant.api import create_app
 from krx_quant.cards import Meaning
 from krx_quant.engine import Budget, Event
@@ -35,9 +35,7 @@ from krx_quant.kinds import (
     KindRegistrationError,
     QuoteLog,
     most_likely,
-)
-from krx_quant.kinds import (
-    register_kinds as register_prediction_kinds,
+    register_kinds,
 )
 from krx_quant.predictions import PredictionStore
 from krx_quant.replay import replay_into
@@ -116,24 +114,24 @@ def kind(**changes: Any) -> Kind:
 )
 def test_a_kind_is_refused_when_it_breaks_the_registry_s_rules(refused: list[Kind], why: str) -> None:
     with pytest.raises(KindRegistrationError, match=why):
-        register_prediction_kinds([DIRECTION_KIND, *refused])
+        register_kinds([DIRECTION_KIND, *refused])
 
 
 def test_a_kind_s_algorithm_is_checked_within_its_kind_only() -> None:
     kinds = (DIRECTION_KIND, TEST_KIND)
     # velocity is Newton's own among the direction's: a drift algorithm may call it its own.
-    assert register_kinds([DRIFTER], kinds, taken={"newton"})
+    assert register_kind_algorithms([DRIFTER], kinds, taken={"newton"})
     twin = FixedKindAlgorithm("twin", features=("velocity",), unique=("velocity",))
     with pytest.raises(RegistrationError, match="the same features as drifter"):
-        register_kinds([DRIFTER, twin], kinds)
+        register_kind_algorithms([DRIFTER, twin], kinds)
     with pytest.raises(RegistrationError, match="already registered"):
-        register_kinds(
+        register_kind_algorithms(
             [FixedKindAlgorithm("newton", features=("vwap_z",), unique=("vwap_z",))], kinds, {"newton"}
         )
     stray = FixedKindAlgorithm("stray", features=("vwap_z",), unique=("vwap_z",))
     stray.kind = "range"  # not registered
     with pytest.raises(RegistrationError, match="not a registered kind"):
-        register_kinds([stray], kinds)
+        register_kind_algorithms([stray], kinds)
 
 
 def test_a_forecast_keeps_its_kind_s_contract_or_is_an_error() -> None:

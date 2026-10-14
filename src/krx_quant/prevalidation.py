@@ -61,7 +61,7 @@ from krx_quant.algorithms import (
     kind_of,
     load_models,
     register,
-    register_kinds,
+    register_kind_algorithms,
 )
 from krx_quant.baselines import baselines_for
 from krx_quant.climate import CLIMATE_DAYS, fit_climate
@@ -225,7 +225,7 @@ async def prevalidate(
         names = ", ".join([*(a.name for a in algorithms), *(a.name for a in kind_algorithms)])
         raise ValueError(f"unknown algorithm {name!r}; registered: {names}")
     register(algorithms)
-    register_kinds(kind_algorithms, kinds, taken={a.name for a in algorithms})
+    register_kind_algorithms(kind_algorithms, kinds, taken={a.name for a in algorithms})
     now = now or datetime.now(KST)
     available = finished_days(settings.data_dir, settings.symbols, now)
     replayed = [d for d in available if is_recorded(settings.data_dir, d, settings.symbols)][-days:]

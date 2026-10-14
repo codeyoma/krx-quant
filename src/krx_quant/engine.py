@@ -96,7 +96,7 @@ from krx_quant.algorithms import (
     Model,
     NotPredicted,
     register,
-    register_kinds,
+    register_kind_algorithms,
 )
 from krx_quant.algorithms.forecasts import forecasting
 from krx_quant.baselines import NO_PREVIOUS, Baseline, Forecast, Inputs, baselines_for
@@ -356,7 +356,7 @@ class PredictionEngine:
             raise ValueError(
                 f"kind baselines named like the direction's predictors: {', '.join(sorted(clash))}"
             )
-        self.kind_registered = register_kinds(
+        self.kind_registered = register_kind_algorithms(
             kind_algorithms,
             (DIRECTION_KIND, *self.kinds),
             taken={a.name for a in self.registered}

@@ -55,7 +55,7 @@ def register(algorithms: Sequence[Algorithm]) -> tuple[Algorithm, ...]:
     return tuple(algorithms)
 
 
-def register_kinds(
+def register_kind_algorithms(
     algorithms: Sequence[KindAlgorithm], kinds: Sequence[Kind] = KINDS, taken: Collection[str] = ()
 ) -> tuple[KindAlgorithm, ...]:
     """Check the algorithms of the kinds besides the direction (#179), in order; raises
@@ -115,7 +115,7 @@ ALGORITHMS: tuple[Algorithm, ...] = register(
 
 # The algorithms of the kinds besides the direction (#179), in the kinds' order, all after
 # the direction's. None yet: the range's (#181) and the barrier's (#183) come here.
-KIND_ALGORITHMS: tuple[KindAlgorithm, ...] = register_kinds([], taken={a.name for a in ALGORITHMS})
+KIND_ALGORITHMS: tuple[KindAlgorithm, ...] = register_kind_algorithms([], taken={a.name for a in ALGORITHMS})
 
 __all__ = [
     "ALGORITHMS",
@@ -137,6 +137,6 @@ __all__ = [
     "model_path",
     "predicted",
     "register",
-    "register_kinds",
+    "register_kind_algorithms",
     "save_model",
 ]
