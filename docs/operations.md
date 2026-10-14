@@ -536,7 +536,7 @@ docker compose logs --tail 200 engine
 | 증상 | 확인 | 조치 |
 |---|---|---|
 | `[장애] KIS WebSocket 연결이 끊겼습니다` | 로그의 `KIS WebSocket down (...)` 원인 | 1초에서 최대 60초 간격으로 스스로 재연결한다. 60초 넘게 붙어 있으면 `[복구]`가 온다. 오래 가면 KIS 점검 공지를 보고, 앱키가 유효한지 확인한다. |
-| `[장애] 구독한 키가 모두 끊긴 피드: stale <TR>` | 그 피드(TR)의 구독·조회 키가 전부 기준 시간(`health.STALE_SECONDS`)보다 오래 조용하다. 구독 키가 잘못됐거나(KIS는 잘못된 키도 구독 성공으로 답한다. 예: #113의 만기 지난 옵션 월물), 파싱이나 연결이 고장 났다. 여러 피드가 함께 오면 연결 문제다. | 키 하나라도 데이터가 다시 오면 `[복구] 데이터가 다시 들어오는 피드: stale <TR>`가 온다. 키 하나만 조용한 것(거래정지, VI, 체결이 드문 옵션 행사가)은 알리지 않는다. `gaps` 계층과 `/v1/status`의 `kis.feeds[].gap`에만 남는다. |
+| `[장애] 구독한 키가 모두 끊긴 피드: stale <TR>` | 그 피드(TR)의 구독·조회 키가 전부 기준 시간(`health.STALE_SECONDS`)보다 오래 조용하다. 그날 아직 한 번도 안 온 키 중 지연으로 치지 않는 키(미국 주간거래, KIS가 거래일을 확인하지 않은 날)는 세지 않는다. 구독 키가 잘못됐거나(KIS는 잘못된 키도 구독 성공으로 답한다. 예: #113의 만기 지난 옵션 월물), 파싱이나 연결이 고장 났다. 여러 피드가 함께 오면 연결 문제다. | 키 하나라도 데이터가 다시 오면 `[복구] 데이터가 다시 들어오는 피드: stale <TR>`가 온다. 키 하나만 조용한 것(거래정지, VI, 체결이 드문 옵션 행사가)은 알리지 않는다. `gaps` 계층과 `/v1/status`의 `kis.feeds[].gap`에만 남는다. |
 | `[장애] 장 마감 데이터 업로드가 ... 실패했습니다` | 로그의 `could not archive ...` | 1. AWS 키, `KRX_OBJECT_STORE` 버킷 이름, IAM 정책을 확인한다.<br>2. 고친 뒤 `docker compose run --rm engine archive`를 돌린다. 다시 돌려도 안전하다.<br>3. 다음 업로드가 성공하면 `[복구]`가 온다. |
 | `[장애] 엔진 API를 열지 못했습니다` | 로그의 `Engine API not started on ...` | 녹화와 예측은 계속한다. 다른 프로세스가 8080을 쓰는지 확인하고 `docker compose up -d`로 다시 띄운다. |
 | 알고리즘을 다시 학습하고 싶다 | 밤 학습 결과는 텔레그램과 `/v1/status`의 `training` | 밤 학습이 매일 한다. 당장 바꾸려면 알고리즘마다(`newton`, `gauss`, `granger`, `markov`, `kalman`, `shannon`, `poisson`, `turing`) `docker compose run --rm --no-deps engine fit <이름>`. 엔진이 1분 안에 새 모델로 바꾼다. 되돌리려면 `docker compose exec engine krx-quant rollback <이름>`(위 "밤 학습과 모델 교체"). |
