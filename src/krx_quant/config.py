@@ -36,6 +36,8 @@ MIN_CALENDAR_MINUTES = 5  # the feed is not ours: no faster than this
 # Where the scheduled jobs post their results (#215).
 DEFAULT_GITHUB_REPO = "codeyoma/krx-quant"
 DEFAULT_GITHUB_API_URL = "https://api.github.com"
+# The Toss Securities Open API, the daily supply data's secondary source (#226, #235).
+DEFAULT_TOSS_URL = "https://openapi.tossinvest.com"
 # The scheduled jobs' night runs from KRX_JOBS_AT to the next 05:30 (#215): from the NXT
 # after-market's close on, and over before the 06:00 deploy.
 JOBS_FROM = time(20, 0)
@@ -187,6 +189,12 @@ class Settings:
     # The server's Tailscale address compose publishes the Engine API on (KRX_BIND_ADDRESS);
     # the engine reads it only to keep it out of what the jobs post.
     bind_address: str | None = None
+    # The Toss Securities Open API client (TOSS_CLIENT_ID, TOSS_CLIENT_SECRET, made in Toss's
+    # WTS under 설정 > Open API; #235): the daily supply data's secondary source and the
+    # foreign holdings' primary one. Unset: nothing asks Toss.
+    toss_client_id: str | None = field(default=None, repr=False)
+    toss_client_secret: str | None = field(default=None, repr=False)
+    toss_url: str = DEFAULT_TOSS_URL
 
     @classmethod
     def from_env(
@@ -398,6 +406,9 @@ class Settings:
             github_repo=github_repo,
             github_api_url=values.get("KRX_GITHUB_API_URL", DEFAULT_GITHUB_API_URL).strip().rstrip("/"),
             bind_address=values.get("KRX_BIND_ADDRESS", "").strip() or None,
+            toss_client_id=values.get("TOSS_CLIENT_ID", "").strip() or None,
+            toss_client_secret=values.get("TOSS_CLIENT_SECRET", "").strip() or None,
+            toss_url=values.get("TOSS_URL", DEFAULT_TOSS_URL).strip().rstrip("/"),
         )
 
 

@@ -217,6 +217,90 @@ Backfiller가 날마다 그날의 최근월물을 받아 연속 1분봉(`KOSPI20
   - **수정주가.** `FID_ORG_ADJ_PRC=0`이 수정주가, `1`이 원주가다. 2018-05-04 액면분할(50:1) 앞의 종가가 `0`이면 51,900원(2018-04-23), `1`이면 2,595,000원이다. 분할 뒤는 둘 다 같다.
   - **필드.** `output2`(봉): `stck_bsop_date`, `stck_oprc`, `stck_hgpr`, `stck_lwpr`, `stck_clpr`, `acml_vol`, `acml_tr_pbmn`, `flng_cls_code`, `prtt_rate`, `mod_yn`, `prdy_vrss_sign`, `prdy_vrss`, `revl_issu_reas`. `output1`(종목 요약): 현재가·전일가·상하한가·PER·PBR·EPS·상장주식수 등. 수집은 `output2`만 쓴다.
 
+## 일별 수급 (#226)
+
+차트 하단 지표(#220)에 더할 일별 수급 지표 8종의 KIS 출처다. 아직 수집하지 않는다(#226의 다음 단계). KIS가 주 출처이고 토스증권 Open API가 보조다. 외국인 보유수량·지분율만 토스가 주 출처다. 토스 쪽은 [toss-feeds.md](toss-feeds.md)에 있다(#235).
+
+**출처와 확인.** 2026-10-15에 [koreainvestment/open-trading-api](https://github.com/koreainvestment/open-trading-api)에서 다음을 읽어 정리했다. 서버에서는 아직 부르지 않았다.
+- `examples_llm/domestic_stock/<이름>/<이름>.py`: TR, 경로, 파라미터, 한 번에 주는 건수의 설명.
+- 같은 폴더의 `chk_<이름>.py`: 응답 필드 이름과 한글 이름(`COLUMN_MAPPING`).
+- `MCP/KIS Code Assistant MCP/data.csv`: `examples_llm` 예제 전체(국내주식 156개)의 설명과 필드. 아래 "보유수량"은 이 156개 전부의 필드를 찾아본 결과다.
+- `legacy/postman/README.md`의 API 표와 실전·모의 Postman 컬렉션: 모의계좌에서 되는지.
+
+TR, 경로, 파라미터 이름, 필드 이름은 예제에 있는 그대로다. 예제에 없는 것은 ⚠다. 한 번에 주는 행 수(예제에 적힌 것 빼고), 거슬러 가는 끝, 시장 구분 코드가 받아들여지는지, 단위, 그날 값이 언제 나오는지가 그렇다. 예약 작업 `probe-supply-226`이 배포 뒤 첫 밤에 `krx-quant probe-supply`로 이것을 재고 결과를 #226에 남긴다([operations.md](operations.md#일별-수급-출처-확인-226)). 그 결과로 ⚠를 지운다.
+
+| 지표 | KIS 조회 | 값 필드 | 거슬러 가는 끝 | 모의계좌 |
+|---|---|---|---|---|
+| 일별 공매도 거래량 | `FHPST04830000` 국내주식 공매도 일별추이 | `ssts_cntg_qty` | ⚠ | 안 됨(실전만) |
+| 일별 개인 순매수량 | `FHPTJ04160001` 종목별 투자자매매동향(일별) | `prsn_ntby_qty` | ⚠ | ⚠ |
+| 일별 기관 순매수량 | 같음 | `orgn_ntby_qty`(기관계) | ⚠ | ⚠ |
+| 일별 외국인 순매수량 | 같음 | `frgn_ntby_qty` | ⚠ | ⚠ |
+| 일별 외국인 보유수량 | `FHKST01010100` 주식현재가 시세(보조. 주 출처는 토스 `foreignerHolding`) | `frgn_hldn_qty` | 오늘 한 값뿐 | 됨 |
+| 일별 기관·개인 보유수량 | **없음**. 지표에서 뺐다(아래 "보유수량") | | | |
+| 일별 외국인 지분율 | `FHKST01010400` 주식현재가 일자별(보조. 주 출처는 토스 `foreignerHolding.holdingRate`) | `hts_frgn_ehrt`(소진율) | 최근 30거래일 | 됨 |
+| 일별 대차잔고 수량 | `HHPST074500C0` 종목별 일별 대차거래추이 | `rmnd_stcn` | ⚠ | ⚠ |
+| 일별 신용잔고 수량 | `FHPST04760000` 국내주식 신용잔고 일별추이 | `whol_loan_rmnd_stcn` | ⚠ | 안 됨(실전만) |
+
+- 모의계좌: Postman README 표에서 모의 칸이 비어 있으면 "안 됨"이다. `FHPTJ04160001`과 `HHPST074500C0`은 표와 컬렉션에 없다(더 뒤에 생긴 TR). 이 시스템은 실전 앱키를 쓰므로 모의계좌 지원은 상관없다.
+- 호출 한도: 이 TR들에 따로 적힌 한도는 없다. 수집기와 같은 앱키의 초당 한도(위 "세션과 한도")를 나눠 쓴다. 예제는 쪽을 넘길 때마다 잠깐 쉰다(`smart_sleep`).
+- 경로는 모두 `GET /uapi/domestic-stock/v1/quotations/<경로>`다. 같은 날의 같은 값을 주는 조회가 둘 이상이면 서로 견준다(`probe-supply`의 마지막 절).
+
+### 공매도: `FHPST04830000` 국내주식 공매도 일별추이
+
+- 경로: `daily-short-sale`. 예제: `examples_llm/domestic_stock/daily_short_sale`.
+- 파라미터: `FID_COND_MRKT_DIV_CODE`(예제는 `J`. `UN`·`NX`를 받는지 ⚠), `FID_INPUT_ISCD`, `FID_INPUT_DATE_1`(시작일), `FID_INPUT_DATE_2`(종료일).
+- 응답: `output1`(현재가 요약 객체), `output2`(일별 행 목록). 행 필드:
+  - `stck_bsop_date`(영업일), `stck_clpr`, `stck_oprc`, `stck_hgpr`, `stck_lwpr`, `acml_vol`, `acml_tr_pbmn`, `avrg_prc`, `prdy_vrss`, `prdy_vrss_sign`, `prdy_ctrt`;
+  - **`ssts_cntg_qty` 공매도 체결 수량(주)**, `ssts_vol_rlim` 공매도 거래량 비중(% ⚠), `ssts_tr_pbmn` 공매도 거래 대금(단위 ⚠), `ssts_tr_pbmn_rlim`;
+  - `acml_ssts_cntg_qty`, `acml_ssts_cntg_qty_rlim`, `acml_ssts_tr_pbmn`, `acml_ssts_tr_pbmn_rlim`(누적 공매도. 무엇부터의 누적인지 ⚠), `stnd_vol_smtn`, `stnd_tr_pbmn_smtn`(기준 거래량·대금 합계).
+- 한 번에 주는 행 수와 순서: 예제에 없다 ⚠. 예제는 연속조회(`tr_cont`)를 하지 않는다. 기간을 옮겨 가며 묻는다.
+- 공매도 금지 기간(2023-11-06 – 2025-03-30)에 행이 있는지, 값이 0인지 ⚠. 시장조성자·유동성공급자의 공매도는 그 기간에도 있었다.
+
+### 투자자별 순매수: `FHPTJ04160001` 종목별 투자자매매동향(일별)
+
+- 경로: `investor-trade-by-stock-daily`. 예제: `examples_llm/domestic_stock/investor_trade_by_stock_daily`(2025-08-21).
+- 파라미터: `FID_COND_MRKT_DIV_CODE`(`J` KRX, `NX` NXT, `UN` 통합), `FID_INPUT_ISCD`, `FID_INPUT_DATE_1`(이날까지, 예: `20250812`), `FID_ORG_ADJ_PRC`·`FID_ETC_CLS_CODE`(빈 값).
+- 응답: `output1`(현재가 요약), `output2`(일별 행). 행 필드:
+  - **`prsn_ntby_qty` 개인, `orgn_ntby_qty` 기관계, `frgn_ntby_qty` 외국인 순매수 수량(주, 순매도면 음수 ⚠)**;
+  - 순매수 대금 `prsn_ntby_tr_pbmn`, `orgn_ntby_tr_pbmn`, `frgn_ntby_tr_pbmn`(단위 ⚠);
+  - 투자자별 매도·매수 거래량과 대금(`*_seln_vol`, `*_shnu_vol`, `*_seln_tr_pbmn`, `*_shnu_tr_pbmn`);
+  - 기관 세부: 증권 `scrt_`, 투자신탁 `ivtr_`, 사모펀드 `pe_fund_`, 은행 `bank_`, 보험 `insu_`, 종금 `mrbn_`, 기금 `fund_`, 기타 `etc_`, 기타법인 `etc_corp_`, 기타단체 `etc_orgt_`;
+  - 외국인 등록·비등록: `frgn_reg_ntby_qty`, `frgn_nreg_ntby_qty` 등.
+- 넘기기: 예제는 응답 헤더 `tr_cont`가 `M`·`F`면 같은 파라미터에 `tr_cont: N`을 붙여 다음 쪽을 묻는다. `FID_INPUT_DATE_1`을 옮겨 묻는 것도 되는지, 한 번에 몇 행인지 ⚠.
+- `FHKST01010900` 주식현재가 투자자(`inquire-investor`, 파라미터 `FID_COND_MRKT_DIV_CODE`(`J`·`NX`), `FID_INPUT_ISCD`)도 같은 세 필드를 일별 행(`output`)으로 준다. 날짜 인자가 없어 최근 몇십 일뿐이다(⚠ 정확한 수). 모의계좌도 된다. 예제 설명: 외국인은 등록 외국인과 기타 외국인의 합이고, 그날 값은 장 마감 뒤에 나온다.
+- 장중 추정치(`HHPTJ04160200`, 위 "피드별 메모")는 증권사 직원이 입력한 가집계라 일별 확정값이 아니다.
+
+### 외국인 보유수량과 지분율: `FHKST01010100`, `FHKST01010400`
+
+- `FHKST01010100` 주식현재가 시세(`inquire-price`, 수집기의 체결 REST 대체와 같은 조회): `output` 객체 하나. `frgn_hldn_qty` 외국인 보유 수량(주), `hts_frgn_ehrt` HTS 외국인 소진율(%), `lstn_stcn` 상장 주수, `frgn_ntby_qty`. 조회한 때의 한 값뿐이다. 장중에 그날 값인지 전 거래일 값인지 ⚠.
+- `FHKST01010400` 주식현재가 일자별(`inquire-daily-price`, 파라미터 `FID_COND_MRKT_DIV_CODE`(`J`·`NX`·`UN`), `FID_INPUT_ISCD`, `FID_PERIOD_DIV_CODE`(`D`), `FID_ORG_ADJ_PRC`): `output` 일별 행. `hts_frgn_ehrt`, `frgn_ntby_qty`가 있다. 예제 설명대로 최근 30거래일(주·월 30개)로 제한된다.
+- **소진율은 지분율과 다를 수 있다.** 소진율은 외국인 보유 ÷ 외국인 한도다. 한도가 상장주식의 100%인 종목(대부분)이면 지분율과 같다. 한도가 있는 종목(통신, 항공 등)은 다르다. `probe-supply`가 `frgn_hldn_qty ÷ lstn_stcn × 100`과 `hts_frgn_ehrt`가 같은지 본다 ⚠.
+
+### 대차잔고: `HHPST074500C0` 종목별 일별 대차거래추이
+
+- 경로: `daily-loan-trans`. 예제: `examples_llm/domestic_stock/daily_loan_trans`.
+- 파라미터: `MRKT_DIV_CLS_CODE`(`3` 종목, `1` 코스피 전체, `2` 코스닥 전체), `MKSC_SHRN_ISCD`, `START_DATE`, `END_DATE`, `CTS`(이전 조회 키, 빈 값).
+- 응답: `output1` 일별 행. `bsop_date`, `stck_prpr`(종가), `prdy_vrss`, `prdy_vrss_sign`, `prdy_ctrt`, `acml_vol`, `new_stcn`(당일 증가 주수, 체결), `rdmp_stcn`(당일 감소 주수, 상환), `prdy_rmnd_vrss`(증감), **`rmnd_stcn` 당일 잔고 주수(주)**, `rmnd_amt`(잔고 금액, 단위 ⚠).
+- 한 번에 최대 100건이다. 기간(`START_DATE`, `END_DATE`)을 옮겨 다음을 묻는다(예제 설명).
+- ETF에 행이 있는지 ⚠.
+
+### 신용잔고: `FHPST04760000` 국내주식 신용잔고 일별추이
+
+- 경로: `daily-credit-balance`. 예제: `examples_llm/domestic_stock/daily_credit_balance`. HTS [0476] 화면과 같다.
+- 파라미터: `FID_COND_MRKT_DIV_CODE`(`J`), `FID_COND_SCR_DIV_CODE`(`20476`), `FID_INPUT_ISCD`, `FID_INPUT_DATE_1`(**결제일자**).
+- 응답: `output` 일별 행. `deal_date`(매매일), `stlm_date`(결제일), `stck_prpr`, `acml_vol`, 융자(신용매수) `whol_loan_new_stcn`·`whol_loan_rdmp_stcn`·**`whol_loan_rmnd_stcn` 잔고 주수(주)**·`whol_loan_new_amt`·`whol_loan_rdmp_amt`·`whol_loan_rmnd_amt`(금액, 단위 ⚠)·`whol_loan_rmnd_rate`(잔고 비율, % ⚠)·`whol_loan_gvrt`(공여율), 대주(신용매도) `whol_stln_*` 같은 묶음.
+- 한 번에 최대 30건이다. `FID_INPUT_DATE_1`을 옮겨 다음을 묻는다. 예제는 `tr_cont`도 본다. 상환 수량은 매도상환과 현금상환의 합이다(예제 설명).
+- 결제일 기준으로 묻기 때문에 가장 최근 행의 매매일이 며칠 늦을 수 있다 ⚠. `probe-supply`는 결제일로 넘기고 매매일 범위를 같이 보인다.
+
+### 보유수량
+
+- **KIS에 있는 것.** 외국인 보유 수량의 지금 한 값(`FHKST01010100` `frgn_hldn_qty`. ETF/ETN 현재가에도 있다)과 외국인 소진율의 최근 30거래일(`FHKST01010400` `hts_frgn_ehrt`)뿐이다.
+- **KIS에 없는 것.** 과거 일별 외국인 보유 수량. 기관·개인 보유 수량은 어느 기간으로도 없다. `examples_llm` 국내주식 156개 전체의 필드에서 `hldn`, `보유`, `소진`, `지분`을 찾았다. 보유 수량이 나오는 국내주식 조회는 위 둘과 계좌 잔고 조회뿐이다.
+- 기관·개인 보유 수량은 다른 어느 출처에도 없다(#226 댓글: KRX OPEN API, KRX 정보데이터시스템, 공공데이터포털, KOFIA FreeSIS, 예탁결제원은 권리기준일에만 낸다).
+- **결정 (2026-10-15, #226).** 지표를 `일별 외국인 보유수량`으로 줄였다. 외국인 보유수량·지분율의 주 출처는 토스증권 Open API `investor-trading`의 `foreignerHolding`(일별 보유수량, 한도수량, 보유율)이고, KIS의 두 조회는 보조다([toss-feeds.md](toss-feeds.md#출처-결정-226-2026-10-15)). 다른 지표는 KIS가 주 출처, 토스가 보조다.
+
+  > **바뀜** (2026-10-15, #235): 보유수량 범위를 사용자가 정한다(외국인으로 줄이기, 빼기, 기관·개인은 누적 순매수로 대신하기 중 하나) → `일별 외국인 보유수량`으로 줄이고 토스를 주 출처로 쓴다. 이유: 기관·개인 보유수량은 어느 출처에도 없고, KIS에는 과거 일별 외국인 보유수량이 없지만 토스에는 있다(#226 결정).
+
 ## 최근월물 코드 찾기
 
 선물 코드는 새 형식(`A` + 상품 + 연도 + 월)이다. KOSPI200 선물은 분기마다, 달러선물은 매달 바뀐다. 그래서 수집기는 시작할 때 KIS가 매일 배포하는 마스터 파일을 받아 최근월물을 찾는다. `KRX_KOSPI200_FUTURES_CODE`, `KRX_USD_FUTURES_CODE`로 직접 지정할 수도 있다.

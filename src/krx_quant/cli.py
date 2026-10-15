@@ -49,6 +49,7 @@ from krx_quant.replay import replay_day
 from krx_quant.rescore import EngineRunning, rescore
 from krx_quant.signal_review import DEFAULT_DAYS as SIGNAL_REVIEW_DAYS
 from krx_quant.signal_review import signal_review
+from krx_quant.supply_probe import probe_supply
 from krx_quant.training import fit_algorithm
 
 
@@ -106,6 +107,11 @@ def _registry_password() -> int:
 async def _probe_candles() -> int:
     await probe_candles(Settings.from_env(), datetime.now(KST).date())
     return 0
+
+
+async def _probe_supply() -> int:
+    calls, failed = await probe_supply(Settings.from_env(), datetime.now(KST).date())
+    return 1 if failed == calls else 0  # nothing answered
 
 
 async def _backfill() -> None:
@@ -393,6 +399,10 @@ def main(argv: list[str] | None = None) -> int:
         help="measure what KIS's day/week/month/year chart query gives, read-only (safe beside collect)",
     )
     sub.add_parser(
+        "probe-supply",
+        help="ask where KIS gives the daily supply indicators (#226), read-only; prints no market value",
+    )
+    sub.add_parser(
         "registry-password",
         help="print the ECR registry's docker login password (deploy/push-image.sh, EC2 Spot training)",
     )
@@ -505,6 +515,8 @@ def main(argv: list[str] | None = None) -> int:
             return asyncio.run(_check_fallbacks())
         elif args.command == "probe-candles":
             return asyncio.run(_probe_candles())
+        elif args.command == "probe-supply":
+            return asyncio.run(_probe_supply())
         elif args.command == "registry-password":
             return _registry_password()
         elif args.command == "backfill":

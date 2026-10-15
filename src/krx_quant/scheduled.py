@@ -735,7 +735,39 @@ SIGNAL_REVIEW = Job(
     ),
 )
 
-# ③ The pre-validations (#204): a new algorithm runs live once its pre-validation has passed
+# ③ The daily supply sources (#226): where KIS, and the Toss Open API when its client is set
+# (#235), give the chart's daily supply indicators, asked once, on the first night after the
+# deploy that brings the job (trading or not: the probe asks for the latest trading day and
+# earlier ones). It only reads, spaced under each API's limit, with the cached access tokens
+# (the collector's KIS one; Toss's one-per-client token, shared), and prints no market value,
+# so its report can go on the public issue. KIS takes at most about 240 calls, Toss about 170,
+# a few minutes; the KIS part stops at 15 minutes and the Toss part at 8 (each call at 15
+# seconds), inside the half hour. Before the pre-validations, which may take the night.
+SUPPLY_PROBE_ISSUE = 226
+
+
+def _first_night(night: Night) -> bool:
+    """Once, on the first night it is asked on, trading or not."""
+    return not night.ran
+
+
+SUPPLY_PROBE = Job(
+    name="probe-supply-226",
+    due=_first_night,
+    command=("probe-supply",),
+    timeout=timedelta(minutes=30),
+    targets=(
+        Target(
+            SUPPLY_PROBE_ISSUE,
+            note=(
+                '에이전트가 이 출력으로 `docs/kis-feeds.md` "일별 수급 (#226)"과 `docs/toss-feeds.md`의 ⚠를 '
+                "지우거나 고친다. 출력에는 시세 값이 없다(필드 이름, 행 수, 날짜, 표시만)."
+            ),
+        ),
+    ),
+)
+
+# ④ The pre-validations (#204): a new algorithm runs live once its pre-validation has passed
 # (``prevalidation.py``). Once ``MIN_DAYS`` trading days are recorded, one waiting algorithm
 # is pre-validated a night, at most (``prevalidation_tonight``): a run replays 20 days beside
 # the live engine, on a 2 GB server with burst CPU. They go in this order, then any other
@@ -845,5 +877,6 @@ def _report_of(algorithm: str) -> str:
 JOBS: tuple[Job, ...] = (
     DIAGNOSE,
     SIGNAL_REVIEW,
+    SUPPLY_PROBE,
     *prevalidation_jobs([*(a.name for a in ALGORITHMS), *(a.name for a in KIND_ALGORITHMS)]),
 )

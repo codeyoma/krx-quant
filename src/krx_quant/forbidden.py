@@ -1,9 +1,9 @@
 """Patterns that must never appear in the repository (``scripts/check_forbidden.py``), nor in
 what the server posts to the public issue tracker (``redaction.py``, #215).
 
-The engine is signals-only: no KIS order TR IDs or order endpoints may ever appear in the
-repository. Secrets belong in ``.env`` on the server only. This file spells the patterns
-out, so the repository check skips it.
+The engine is signals-only: no KIS order TR IDs or order endpoints, and no Toss order
+endpoints (#235), may ever appear in the repository. Secrets belong in ``.env`` on the server
+only. This file spells the patterns out, so the repository check skips it.
 """
 
 from __future__ import annotations
@@ -20,6 +20,10 @@ RULES: list[tuple[str, re.Pattern[str]]] = [
     ("JWT / KIS access token", re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.")),
     ("private key", re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----")),
     ("KIS credential value", re.compile(r"KIS_APP_(?:KEY|SECRET)\s*=\s*['\"]?[A-Za-z0-9+/=]{16,}")),
+    # The Toss Open API also takes orders with the same client (#235): its order and
+    # conditional-order endpoints may never appear either, nor its client's values.
+    ("Toss order endpoint", re.compile(r"/api/v1/(?:conditional-)?orders\b")),
+    ("Toss credential value", re.compile(r"TOSS_CLIENT_(?:ID|SECRET)\s*=\s*['\"]?[A-Za-z0-9_+/=-]{16,}")),
     # Classic (ghp_, gho_, ...) and fine-grained (github_pat_) GitHub tokens (#215).
     ("GitHub token", re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{40,})\b")),
 ]

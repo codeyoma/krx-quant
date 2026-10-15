@@ -25,6 +25,9 @@ from aiohttp import WSMsgType, web
 from krx_quant.feeds.stock import TRADE_COLUMNS
 from krx_quant.kis import WS_PATH
 
+# A canned REST answer: the JSON body, or the body and response headers.
+RestAnswer = dict[str, Any] | tuple[dict[str, Any], dict[str, str]]
+
 
 @dataclass
 class FakeKis:
@@ -36,8 +39,10 @@ class FakeKis:
     pongs: list[bytes] = field(default_factory=list)
     # Registrations allowed per WebSocket session; None means unlimited.
     max_subscriptions: int | None = None
-    # REST: tr_id -> function of the query params returning the JSON body to send.
-    rest_responses: dict[str, Callable[[dict[str, str]], dict[str, Any]]] = field(default_factory=dict)
+    # REST: tr_id -> function of the query params returning the JSON body to send, or the body
+    # and response headers (e.g. KIS's continuation header ``tr_cont``). A request's own
+    # ``tr_cont`` header reaches the function as the param ``_tr_cont``.
+    rest_responses: dict[str, Callable[[dict[str, str]], RestAnswer]] = field(default_factory=dict)
     # Master files served under /master/<name>, e.g. "fo_idx_code_mts.mst.zip".
     masters: dict[str, bytes] = field(default_factory=dict)
     # Access tokens: each issuance returns a new token valid until token_expires (KST,
@@ -234,14 +239,18 @@ class FakeKis:
         respond = self.rest_responses.get(tr_id)
         if respond is None:
             return web.json_response({"rt_cd": "1", "msg_cd": "OPSQ0002", "msg1": f"unknown tr_id {tr_id}"})
+        params = dict(request.query)
+        if h.get("tr_cont"):
+            params["_tr_cont"] = h["tr_cont"]
         try:
-            body = respond(dict(request.query))
+            answer = respond(params)
         except ConnectionResetError:
             # Simulate KIS dropping the connection mid-request.
             assert request.transport is not None
             request.transport.close()
             raise
-        return web.json_response(body)
+        body, headers = answer if isinstance(answer, tuple) else (answer, {})
+        return web.json_response(body, headers=headers)
 
     async def _ws(self, request: web.Request) -> web.StreamResponse:
         if not self.accept_ws:

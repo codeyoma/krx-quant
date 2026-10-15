@@ -104,6 +104,8 @@ FORBIDDEN = {
     "JWT / KIS access token": "eyJ" + "a" * 12 + ".eyJ" + "b" * 12 + ".sig",
     "private key": "-----BEGIN " + "PRIVATE KEY-----",
     "KIS credential value": "KIS_APP_" + "KEY=" + "x" * 20,
+    "Toss order endpoint": "/api/v1/" + "orders",
+    "Toss credential value": "TOSS_CLIENT_" + "SECRET=" + "z" * 20,
     "GitHub token": "ghp_" + "y" * 36,
 }
 

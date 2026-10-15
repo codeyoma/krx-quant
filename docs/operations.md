@@ -37,6 +37,7 @@
 6. **AWS 자원 만들기**: 2.1절의 스크립트를 실행한다.
 7. **서버 개통**: 2.2절을 따라 한다.
 8. **GitHub 토큰** (선택, #218): 예약 작업이 결과를 이슈 댓글로 남기게 한다(3장 "예약 작업 (#215)"의 "토큰"). 없어도 작업은 돌고 결과는 서버에 남는다.
+9. **토스증권 Open API 클라이언트** (선택, #235): 일별 수급의 보조 출처이자 외국인 보유수량의 주 출처다. WTS 설정 > Open API에서 클라이언트를 만들고, 서버의 고정 공인 IP를 허용 IP에 넣고, 서버 `.env`에 `TOSS_CLIENT_ID`, `TOSS_CLIENT_SECRET`을 넣는다(2장 "토스증권 Open API 클라이언트 (#235)"). 없으면 토스 조회만 건너뛴다.
 
 ## 2. 개통
 
@@ -110,6 +111,7 @@ aws iam create-access-key --user-name krx-quant-engine
    | `KRX_BIND_ADDRESS` | 비워 둔다. 스크립트가 Tailscale 주소를 넣는다 |
    | `KRX_ECOS_API_KEY`, `KRX_FRED_API_KEY` | 1.5에서 받은 매크로 키(선택). 비워 두면 그 출처를 건너뛴다 |
    | `KRX_GITHUB_TOKEN` | 1.8의 GitHub 토큰(선택). 비워 두면 예약 작업의 결과가 서버(`state/scheduled.json`)에 남는다 |
+| `TOSS_CLIENT_ID`, `TOSS_CLIENT_SECRET` | 1.9의 토스증권 Open API 클라이언트(선택, #235). 비워 두면 토스 조회를 건너뛴다 |
 
    나머지 설정은 아래 "설정 값 전체"에 있다. `.env.example`에서 주석으로 둔 변수는 그대로 두면 기본값을 쓴다.
 7. 스크립트를 한 번 더 실행한다. 이번에는 엔진을 빌드하고 띄운다.
@@ -158,12 +160,14 @@ curl http://krx-quant:8080/v1/macro
 
 - 변수가 없으면 기본값을 쓴다. 값이 틀리면 명령이 `configuration error: ...`를 내고 끝난다(종료 코드 2).
 - 숫자는 따로 적지 않으면 0보다 커야 한다. 숫자 변수를 빈 값(`KRX_FEE_PERCENT=`)으로 두면 오류다.
-- 문자열 변수 중 `KRX_OBJECT_STORE`, AWS 키, 텔레그램 값, 선물 코드, `KRX_S3_ENDPOINT_URL`, `KRX_GITHUB_TOKEN`, `KRX_BIND_ADDRESS`는 빈 값이 "없음"이다.
+- 문자열 변수 중 `KRX_OBJECT_STORE`, AWS 키, 텔레그램 값, 선물 코드, `KRX_S3_ENDPOINT_URL`, `KRX_GITHUB_TOKEN`, `KRX_BIND_ADDRESS`, `TOSS_CLIENT_ID`, `TOSS_CLIENT_SECRET`은 빈 값이 "없음"이다.
 
 | 변수 | 기본값 | 뜻과 범위 |
 |---|---|---|
 | `KIS_APP_KEY`, `KIS_APP_SECRET` | 없음 | KIS 실전 앱키와 시크릿. `collect`, `backfill`, `archive`, `measure-subscriptions`, `test-alert`는 이 값이 없으면 시작하지 않는다 |
 | `KIS_REST_URL` | `https://openapi.koreainvestment.com:9443` | KIS REST 주소. 모의투자 주소는 `.env.example`에 있다 |
+| `TOSS_CLIENT_ID`, `TOSS_CLIENT_SECRET` | 없음 | 토스증권 Open API 클라이언트(#235, 비밀값). 일별 수급의 보조 출처이자 외국인 보유수량의 주 출처([toss-feeds.md](toss-feeds.md)). 없으면 토스를 부르지 않는다(`probe-supply`의 토스 절은 `skipped`). 예약 작업의 댓글에서 가린다 |
+| `TOSS_URL` | `https://openapi.tossinvest.com` | 토스증권 Open API 주소(테스트는 가짜 서버를 가리킨다) |
 | `KIS_WS_URL` | `ws://ops.koreainvestment.com:21000` | KIS WebSocket 주소 |
 | `KIS_MASTER_URL` | `https://new.real.download.dws.co.kr/common/master` | 최근월물을 찾는 KIS 마스터 파일 주소 |
 | `KIS_WS_MAX_SUBSCRIPTIONS` | 없음(KIS가 거절할 때까지 모두 구독) | 세션당 실시간 구독 수. 넘는 구독은 REST로 바꾸거나 뺀다. 1 이상. `.env.example`은 41 |
@@ -436,6 +440,130 @@ docker compose run --rm engine signal-review --days 20
   …
 ```
 
+### 일별 수급 출처 확인 (#226)
+
+차트의 일별 수급 지표(#226)를 어느 조회에서 받을지, 조사에서 찾은 KIS 조회 7개([kis-feeds.md](kis-feeds.md#일별-수급-226))와 토스증권 Open API 조회 5개([toss-feeds.md](toss-feeds.md), #235)를 서버에서 실제로 불러 확인한다. 결과로 두 문서의 ⚠를 지우고, 엔진의 수집(#226 다음 단계)을 만든다. KIS가 주 출처, 토스가 보조이고, 외국인 보유수량·지분율만 토스가 주 출처다(#226 결정).
+
+- 읽기만 하고 아무것도 쓰지 않는다(접근 토큰 캐시 빼고). 그래서 수집기가 도는 중에 돌려도 된다. 그래도 장 시간(08:00–20:00)과 20:30 백필은 피한다. KIS 앱키의 초당 한도를 수집기와 나눠 쓰기 때문이다.
+- **KIS 절**: 0.5초 간격으로 부르고, 캐시된 접근 토큰(`state/kis_token.json`)을 만료될 때까지 쓴다(만료 1시간 전 미리 바꾸기를 하지 않는다). 토큰이 없거나 만료됐을 때만 새로 받는다. 종목 3개와 ETF 하나면 많아야 240번쯤 부르고 2–3분 걸린다(종목은 `KRX_SYMBOLS`의 앞 5개까지). 한 조회의 쪽 넘기기는 25번, 그 뒤 가장 오래된 날 찾기(이분 탐색)는 20번까지다. 20번 잇달아 실패하거나 15분이 지나면 나머지는 부르지 않는다. 토큰을 받지 못하면 KIS 절만 멈추고 토스 절은 돈다.
+- **토스 절**: `TOSS_CLIENT_ID`, `TOSS_CLIENT_SECRET`이 없으면 `skipped: TOSS_CLIENT_ID/TOSS_CLIENT_SECRET not set`만 찍고 건너뛴다. 있으면 0.2초 간격(초당 5회, 그룹 한도의 절반)으로 부른다. 토큰은 `state/toss_token.json`에 캐시된 것을 쓰고, 없거나 만료됐을 때만 새로 받는다(토스는 클라이언트당 토큰이 하나라 새로 받으면 이전 것이 무효가 된다, [toss-feeds.md](toss-feeds.md#인증과-접속)). 엔드포인트 5개 × (종목마다 최신 1쪽 + 첫 종목 30쪽까지)로 많아야 170번쯤이다. 10번 잇달아 실패하거나 8분이 지나면 나머지는 부르지 않는다. 서버의 공인 IP가 허용 IP에 없으면 `the server's public IP is not in Toss's allowed IPs (WTS 설정 > Open API > 허용 IP 관리)`를 찍고 토스 절을 멈춘다.
+- 조회 하나는 15초까지 기다린다. 그래서 두 절을 합쳐도 23분 안에 끝나고, 예약 작업의 제한 시간 30분을 넘지 않는다.
+- **시세 값을 출력하지 않는다.** 출력이 공개 이슈에 올라가고, 토스 데이터는 제3자 배포가 금지돼 있기 때문이다. 필드 이름, 개수, 날짜, 표시(아래)만 나온다. 토큰과 클라이언트 값도 나오지 않는다. 테스트가 가짜 KIS·토스의 값과 토큰이 출력에 없는지 본다.
+- 종료 코드: 두 절을 합쳐 한 번이라도 답을 받으면 0, 하나도 못 받으면 1이다.
+
+```bash
+docker compose run --rm engine probe-supply
+```
+
+**KIS 절**은 조회마다(`[1]`–`[7]`) 다음을 출력한다.
+- **latest**: 오늘까지를 묻는다. 첫 종목은 그 조회가 받을 수 있는 시장 구분(`UN`·`J`·`NX`)을 모두, 다른 종목은 첫 시장 구분으로, ETF(`KRX_ETF_SYMBOLS`에서 종목 목록에 없는 첫 것)는 그 조회가 `J`를 받으면 `J`로 묻는다(ETF는 NXT에서 거래되지 않는다). 줄마다 `OK`와 행 수(응답의 어느 키인지), 행의 날짜 범위와 순서, 헤더 `tr_cont`, 원하는 필드의 표시다. 실패면 `error HTTP <상태> <msg_cd> <msg1>`만 보인다(응답의 나머지는 보이지 않는다).
+- **필드**: 처음 행이 온 응답의 필드를 표시별로 묶는다. `int`(정수: 수량·금액), `dec`(소수: 비율), `±`(음수가 있다), `date`, `text`, `zero`(모두 0), `empty`(모두 비었다), `missing`(응답에 없다).
+- **a year back**: 날짜를 받는 조회만. 1년 전 날까지를 묻는다.
+- **history**: 날짜를 받는 조회만. 첫 종목을 오늘부터 거슬러 쪽을 넘긴다. 다 넘기면 `nothing older`와 가장 오래된 날, 25번 안에 끝나지 않으면 `still going`과 이분 탐색으로 찾은 가장 오래된 날이다. 기간을 묻는 조회는 빈 1년 창이 3번 이어질 때까지 더 가 본다(그 사이의 빈 기간은 `a gap`). 첫 쪽이 `tr_cont` `M`·`F`면 `tr_cont: N`으로 다음 쪽을 한 번 묻는다.
+- 날짜를 받지 않는 조회(`FHKST01010900`, `FHKST01010400`, `FHKST01010100`)는 latest만 묻는다.
+- **cross-checks**: 첫 종목의 latest 응답끼리 같은 날의 값이 같은 날이 몇 날인지 센다(값은 보이지 않는다): 투자자 일별(`FHPTJ04160001`)과 주식현재가 투자자(`FHKST01010900`)의 `J`, 투자자 일별의 `UN`과 `J`(NXT가 더해지는지), 일자별(`FHKST01010400`)과 투자자 일별의 외국인 순매수, 일자별의 `UN`과 `J`. 그리고 `frgn_hldn_qty ÷ lstn_stcn × 100`이 `hts_frgn_ehrt`와 0.01 안에서 같은지 본다(소진율이 지분율인지).
+
+**토스 절**은 엔드포인트마다(`[T1]`–`[T5]`) 다음을 출력한다.
+- **latest**: 종목마다(ETF 포함) 최신 1쪽(`count` 100). 줄마다 `OK`와 기록 수, 날짜 범위와 순서, `nextUntil`, 원하는 필드의 표시(모두 null이면 `null`)다. 실패면 `error HTTP <상태> <code> <message>`다.
+- **history**: 첫 종목을 `nextUntil`로 30쪽(약 12년)까지 거슬러 간다. 기록 수, 가장 오래된 날, `nextUntil null, nothing older` 또는 `still going`, 10일이 넘는 빈 기간(`gaps over 10 days`)을 보인다.
+- **not null**: 기록의 부분(`individual`, `foreignerHolding`, `cfd`, `institution.breakdown`, `marginLoan`, `stockLoan`, 공매도 비율 등)마다 값이 처음 있는 날과 마지막 날, 값이 있는 날 수, 그 뒤에 null인 날 수다. "개인과 외국인 보유가 어느 날부터 있는지"를 여기서 본다.
+- **newest record**: 가장 새 기록이 오늘 것이면 잠정치이고 그 안에서 null인 부분을 적는다(토스는 개인, 기관 세부, 기타법인, 외국인 보유를 저녁에 채운다). 신용은 T+1이라 오늘 것이 아직 없다.
+- **cross-checks with KIS**: 첫 종목의 토스 기록(거슬러 받은 것 전부)과 KIS 절의 latest 응답에서 같은 날이 몇 날이고 그중 값이 같은 날이 몇 날인지 센다.
+  - 순매수: 토스 `individual`·`institution`·`foreigner`의 `netBuyVolume`과 KIS `FHPTJ04160001`의 `prsn_ntby_qty`·`orgn_ntby_qty`·`frgn_ntby_qty`·`frgn_reg_ntby_qty`(`UN`, `J`). 토스 외국인은 등록외국인만이다.
+  - 외국인 보유: 토스 `holdingRate × 100`과 `holdingQuantity ÷ limitQuantity × 100`을 KIS `FHKST01010400`의 `hts_frgn_ehrt`와 0.01 안에서. KIS `FHKST01010100`의 그날 `frgn_hldn_qty`와 `frgn_hldn_qty ÷ lstn_stcn × 100`이 토스의 어느 날 값과 같은지(날짜만).
+  - 공매도 `shortSellingVolume` ↔ `ssts_cntg_qty`, 대차 `balanceQuantity` ↔ `rmnd_stcn`, 신용 `marginLoan.balanceQuantity` ↔ `whol_loan_rmnd_stcn`(KIS의 매매일 `deal_date` 기준과 결제일 `stlm_date` 기준 둘 다).
+
+예(테스트의 가짜 KIS와 가짜 토스, 줄임):
+
+```
+probe-supply (#226) 2026-10-15: stocks 005930, 000660; ETF 133690
+No market values below: field names, row counts, days and flags only.
+…
+KIS (primary)
+
+[1] FHPST04830000 국내주식 공매도 일별추이: GET /uapi/domestic-stock/v1/quotations/daily-short-sale
+  for 일별 공매도 거래량; wanted: ssts_cntg_qty, ssts_vol_rlim
+  latest (asked to 2026-10-15):
+    005930 J: OK, 100 rows (output2), 2026-05-29..2026-10-15, newest first · ssts_cntg_qty int, ssts_vol_rlim dec
+    005930 UN: error HTTP 200 OPSQ1234 시장 구분 오류
+    005930 NX: OK, 0 rows (output2)
+    …
+  output2 fields (005930 J): int: ssts_cntg_qty, stck_clpr · dec: ssts_vol_rlim · date: stck_bsop_date · zero: acml_ssts_cntg_qty_rlim · empty: ssts_tr_pbmn
+  a year back (asked to 2025-10-15):
+    005930 J: OK, 100 rows (output2), 2025-05-29..2025-10-15, newest first · ssts_cntg_qty int, ssts_vol_rlim dec
+    …
+  history of 005930 J (paging back from 2026-10-15, at most 25 calls):
+    a gap: no rows from 2023-11-04 to 2025-03-30
+    1144 rows in 18 calls (at most 100 a call), oldest 2021-01-04: nothing older
+
+[2] FHPTJ04160001 종목별 투자자매매동향(일별): GET /uapi/domestic-stock/v1/quotations/investor-trade-by-stock-daily
+  …
+  history of 005930 UN (paging back from 2026-10-15, at most 25 calls):
+    750 rows in 25 calls (at most 30 a call), back to 2023-12-01: still going
+    oldest by bisection: 2015-01-02 (14 calls)
+    the first page said tr_cont M; the next (tr_cont N): OK, 30 rows (output2), 2026-07-24..2026-09-03, newest first, tr_cont M, older rows
+…
+cross-checks of 005930 (latest answers; counts of equal values only):
+  FHPTJ04160001 J vs FHKST01010900 J: 30 common days (2026-09-04..2026-10-15); equal on: prsn_ntby_qty 30, orgn_ntby_qty 30, frgn_ntby_qty 30
+  FHKST01010100 UN: frgn_hldn_qty / lstn_stcn x 100 = hts_frgn_ehrt (within 0.01 points)
+  …
+
+KIS: 137 calls, 4 failed
+
+Toss (secondary; foreign holdings primary, #235)
+  token: the cached one; shared through state/toss_token.json
+
+[T1] investor-trading 투자자별 매매동향: GET /api/v1/stocks/{symbol}/investor-trading
+  for 일별 개인·기관·외국인 순매수량, 일별 외국인 보유수량·지분율(주 출처); wanted: individual.netBuyVolume, institution.netBuyVolume, foreigner.netBuyVolume, foreignerHolding.holdingQuantity, foreignerHolding.limitQuantity, foreignerHolding.holdingRate
+  latest (count 100):
+    005930: OK, 100 records, 2026-05-29..2026-10-15, newest first, nextUntil 2026-05-28 · individual.netBuyVolume int±, institution.netBuyVolume int, foreigner.netBuyVolume int±, foreignerHolding.holdingQuantity int, foreignerHolding.limitQuantity int, foreignerHolding.holdingRate dec
+    …
+  history of 005930 (count 100, paging back by nextUntil, at most 30 calls):
+    2814 records in 29 calls (at most 100 a call), oldest 2016-01-04: nextUntil null, nothing older
+    gaps over 10 days: none
+    not null:
+      individual: from 2018-01-02 to 2026-10-14 (2292 of 2814 days; null on 1 later day)
+      foreignerHolding: from 2020-01-02 to 2026-10-14 (1770 of 2814 days; null on 1 later day)
+      cfd: null on every day
+      …
+    the newest record (2026-10-15) is today's: provisional, Toss completes it in the evening; null in it: individual, institution.breakdown, otherCorporation, foreignerHolding, cfd
+
+[T3] credit-trades 신용거래 동향: GET /api/v1/stocks/{symbol}/credit-trades
+  …
+    133690: error HTTP 404 stock-not-found
+  …
+    the newest record is 2026-10-14: today's is not out (yet)
+…
+cross-checks with KIS (005930; Toss's history against KIS's latest answers, counts only):
+  investor-trading individual.netBuyVolume vs FHPTJ04160001 J prsn_ntby_qty: 30 common days (2026-09-04..2026-10-15); equal on 29
+  investor-trading foreigner.netBuyVolume vs FHPTJ04160001 UN frgn_reg_ntby_qty: 30 common days (2026-09-04..2026-10-15); equal on 30
+  investor-trading foreignerHolding.holdingRate x100 vs FHKST01010400 UN hts_frgn_ehrt (within 0.01): 30 common days (2026-09-04..2026-10-15); equal on 29
+  credit-trades marginLoan.balanceQuantity vs FHPST04760000 J whol_loan_rmnd_stcn by deal_date: 30 common days (2026-09-02..2026-10-13); equal on 30
+  FHKST01010100 UN frgn_hldn_qty = foreignerHolding.holdingQuantity on: 2026-10-14 (Toss's newest day with holdings: 2026-10-14)
+  …
+
+Toss: 109 calls, 1 failed; tokens issued: 0
+
+246 calls, 5 failed
+```
+
+**예약 작업이 돌린다** (#215, 3장 "예약 작업 (#215)"). 이 명령을 담은 엔진이 배포된 뒤 첫 밤(거래일이 아니어도), 밤 학습이 끝난 뒤(22:30부터) 예약 작업 `probe-supply-226`이 `probe-supply`를 한 번 돌린다. 출력 전체를 #226에 댓글로 남기고 `ready-for-agent`로 바꾼다. 손으로 다시 돌릴 때는 위 명령이다(출력은 터미널에만 나온다). 예약 작업으로 한 번 더 돌게 하려면 3장 "예약 작업 (#215)"의 "손으로 다시 돌리기"대로 `state/scheduled.json`의 `jobs`에서 `probe-supply-226`을 지운다. 토스 클라이언트를 배포 뒤에 넣었다면(첫 밤의 출력이 `skipped`) 이렇게 다시 돌린다.
+
+**에이전트가 할 일.** `gh issue view 226 --comments`로 댓글을 읽고, 조회마다 OK인지, 한 번에 주는 행 수, 거슬러 가는 끝, 시장 구분, 원하는 필드가 비지 않았는지, 어느 날부터 null이 아닌지, 견주기 결과를 kis-feeds.md "일별 수급 (#226)"과 toss-feeds.md에 옮겨 ⚠를 지운다.
+
+> **바뀜** (2026-10-15, #235): 보유수량 범위는 사용자가 정한다 → `일별 외국인 보유수량`으로 줄였고, 토스증권 Open API를 보조 출처(외국인 보유는 주 출처)로 같이 확인한다. 이유: 기관·개인 보유수량은 어느 출처에도 없고, 사용자가 KIS 주·토스 보조로 정했다(#226).
+
+#### 토스증권 Open API 클라이언트 (#235)
+
+사용자가 한 번 한다(1장 9번).
+1. 토스증권 WTS에 로그인해 **설정 > Open API**에서 클라이언트를 만들고 `client_id`, `client_secret`을 복사한다(복사 버튼으로, 앞뒤 공백 없이).
+2. 서버의 공인 IP를 확인한다: 서버에서 `curl -s https://checkip.amazonaws.com`. Lightsail 인스턴스의 공인 IP는 인스턴스를 멈췄다 켜면 바뀐다. 바뀌지 않게 하려면 Lightsail 콘솔 → 네트워킹에서 고정 IP를 만들어 인스턴스에 붙인다(붙여 둔 고정 IP는 요금이 없다고 안내된다 ⚠). 그 IP를 저장소나 이슈에 적지 않는다.
+3. 같은 Open API 화면 아래 **허용 IP 관리**에 그 IP를 넣는다. 없는 IP에서 부르면 403이다.
+4. 서버 `.env`에 `TOSS_CLIENT_ID=<client_id>`, `TOSS_CLIENT_SECRET=<client_secret>`을 넣고 `docker compose up -d`를 한다. 값은 서버 `.env`에만 둔다. 예약 작업의 댓글에서는 가린다.
+5. 확인: 장 시간 밖에 `docker compose run --rm engine probe-supply`. 토스 절에 `token:` 줄과 `[T1]`–`[T5]`가 나오면 된다. `stopped: … allowed IPs`면 3을, `invalid_client`면 1의 값을 다시 본다.
+
+토큰은 `state/toss_token.json`(권한 600)에 하나만 둔다. 토스는 클라이언트당 토큰 하나만 유효해서, 같은 클라이언트로 다른 곳(맥의 스크립트 등)에서 토큰을 받으면 서버의 토큰이 무효가 된다. 그러면 서버는 다음 조회에서 한 번 새로 받는다.
+
 ## 3. 매일 일어나는 일
 
 | 시각 (KST) | 일 |
@@ -687,6 +815,7 @@ report: /state/prevalidations/mandelbrot.json
 |---|---|---|---|---|
 | `diagnose-203-187` | 이 작업을 담은 엔진(#215)이 배포된 뒤 첫 거래일 밤, 한 번 | `diagnose --days 20` | 1시간. 넉넉히 잡은 상한이다(진단은 피드를 하나씩 읽고 버린다) | #203: 출력 전체(7절로 `BAR_C`, 8절로 장벽 일치율). #187: 머리말과 9절(뒤집힌 호가)만 |
 | `signal-review-206` | 정식 알고리즘(합의 구성원)이 하나 이상인 첫 밤, 한 번(거래일이 아니어도). 도달 정답으로 다시 시작한 수습의 첫 판정 뒤, 2026-10-30쯤(2장 "신호 기준 검토 (#206)") | `signal-review --days 20` | 1시간. 넉넉히 잡은 상한이다(DB만 읽는다). 사전 검증보다 먼저 돈다 | #206: 출력 전체. 에이전트가 신호 기준의 추천값을 낸다 |
+| `probe-supply-226` | 이 작업을 담은 엔진(#226)이 배포된 뒤 첫 밤, 한 번(거래일이 아니어도. KIS와 토스가 가장 최근 거래일과 그 전을 준다) | `probe-supply` | 30분. KIS 절은 15분, 토스 절은 8분에서 멈춘다(보통 KIS 240번쯤, 토스 170번쯤 조회로 몇 분). 사전 검증보다 먼저 돈다 | #226: 출력 전체(시세 값 없음). 에이전트가 kis-feeds.md "일별 수급 (#226)"과 toss-feeds.md의 ⚠를 고친다(2장 "일별 수급 출처 확인 (#226)") |
 | `prevalidate-<이름>`: `mandelbrot`, `breiman`, `kalman`, `shannon`, `poisson`, 그 뒤 새 알고리즘(등록 순서) | 녹화 10거래일 이상, 엔진이 그 알고리즘을 기다림, 지금 코드·정답 버전으로 판정받지 않음. 한 밤에 하나, 이 순서로(#204, 위 "새 알고리즘 사전 검증 (#24)") | `prevalidate <이름>` | `breiman` 6시간, 나머지 5시간. 하루 재생의 20배쯤 걸리는 데에 버스트 CPU가 바닥난 때를 더한 상한이다 | #204: 출력과 리포트 JSON(`state/prevalidations/<이름>.json`, `<details>`) |
 
 댓글을 남긴 뒤 이슈마다 `ready-for-agent`를 붙이고 `ready-for-human`, `needs-triage`를 뗀다(작업마다 다른 라벨을 정할 수도 있다).
@@ -731,8 +860,8 @@ report: /state/prevalidations/mandelbrot.json
 ````
 
 **가림.** 저장소가 공개라 올리기 전에 다음을 `[가림]`으로 바꾼다(`src/krx_quant/redaction.py`의 `redact`).
-- 비밀 설정값과 같은 문자열: `KIS_APP_KEY`, `KIS_APP_SECRET`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `KRX_ECOS_API_KEY`, `KRX_FRED_API_KEY`, `KRX_GITHUB_TOKEN`, `KRX_OBJECT_STORE`(와 그 버킷 이름), `KRX_S3_ENDPOINT_URL`, `KRX_BIND_ADDRESS`. 8자보다 짧은 값은 같은 숫자를 망가뜨리지 않으려고 두지 않는다.
-- `scripts/check_forbidden.py`가 저장소에서 막는 패턴 전부(`src/krx_quant/forbidden.py`: KIS 주문 TR 코드와 엔드포인트, AWS 키, 텔레그램 토큰, JWT, GitHub 토큰, 개인 키).
+- 비밀 설정값과 같은 문자열: `KIS_APP_KEY`, `KIS_APP_SECRET`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `KRX_ECOS_API_KEY`, `KRX_FRED_API_KEY`, `KRX_GITHUB_TOKEN`, `TOSS_CLIENT_ID`, `TOSS_CLIENT_SECRET`(#235), `KRX_OBJECT_STORE`(와 그 버킷 이름), `KRX_S3_ENDPOINT_URL`, `KRX_BIND_ADDRESS`. 8자보다 짧은 값은 같은 숫자를 망가뜨리지 않으려고 두지 않는다.
+- `scripts/check_forbidden.py`가 저장소에서 막는 패턴 전부(`src/krx_quant/forbidden.py`: KIS 주문 TR 코드와 엔드포인트, 토스 주문 엔드포인트와 클라이언트 값(#235), AWS 키, 텔레그램 토큰, JWT, GitHub 토큰, 개인 키).
 - `*.ts.net` 이름, IPv4·IPv6 주소. 09:00:30 같은 시각은 그대로 둔다.
 
 **실패와 다시 올리기.**
@@ -831,7 +960,7 @@ docker compose start engine
 - 장벽(#183)을 담은 엔진은 처음 뜰 때 `kind_predictions`에 `width_ticks` 열을 더한다(스키마 버전은 그대로라 되돌려도 뜬다). 그날부터 장벽의 기준 예측 둘이 예측·채점되고(`/v1/leaderboard?kind=barrier`), 시작할 때 2026-10-12부터의 장벽 정답을 채운다(3장 "종류의 지난 정답"). 방향과 변동폭의 예측·채점은 전과 같다(변동폭 예측 항목에 `width_ticks: null`이 더해진다). 서버에서 손으로 할 일은 없다. 채워진 뒤 1분봉 규칙의 일치율을 잰다(2장 "장벽 1분봉 규칙의 일치율 재기").
 - 다른 종류의 예측에 봉 마감의 k를 붙이는 엔진(#200)은 처음 뜰 때 `kind_predictions`에 `flat_ticks` 열을 더한다. 스키마 버전은 그대로라 되돌려도 뜬다(옛 엔진이 쓰는 행은 그 열이 비어 있다). 그 전에 저장한 예측은 k가 없다(API의 `flat_ticks`가 `null`이고, 화면은 그때 `/v1/symbols`의 지금 k를 보인다). 서버에서 손으로 할 일은 없다.
 - 다른 종류의 예측에 봉 마감 중간가와 호가단위를 붙이는 엔진(#210)은 처음 뜰 때 `kind_predictions`에 `anchor`, `tick` 열을 더한다. 스키마 버전은 그대로라 되돌려도 뜬다(옛 엔진이 쓰는 행은 그 열이 비어 있다). 그 전에 저장한 예측은 둘 다 없다(API의 `anchor`, `tick`이 `null`이고, 화면은 그때 정답 전에 장벽의 U·L 없이 w만 보인다). 서버에서 손으로 할 일은 없다.
-- 예약 작업(#215)을 담은 엔진은 그날 밤 22:30부터 예약 작업을 본다(3장 "예약 작업 (#215)"). 첫 작업 `diagnose-203-187`은 첫 거래일 밤에 한 번 돈다. 사전 검증 작업(#204)을 담은 엔진은 녹화가 10거래일이 된 밤부터 기다리는 알고리즘을 밤마다 하나씩 사전 검증한다(3장 "새 알고리즘 사전 검증 (#24)"). 신호 기준 검토 작업(#206)을 담은 엔진은 정식 알고리즘이 처음 생긴 밤에 `signal-review`를 한 번 돌린다(2장 "신호 기준 검토 (#206)"). `KRX_GITHUB_TOKEN`이 없으면 결과는 서버(`state/scheduled.json`)에 남고 텔레그램으로 알린다. 토큰을 넣으면(#218) 엔진이 다음에 시작할 때 올린다. 서버에서 손으로 할 일은 토큰 하나다.
+- 예약 작업(#215)을 담은 엔진은 그날 밤 22:30부터 예약 작업을 본다(3장 "예약 작업 (#215)"). 첫 작업 `diagnose-203-187`은 첫 거래일 밤에 한 번 돈다. 사전 검증 작업(#204)을 담은 엔진은 녹화가 10거래일이 된 밤부터 기다리는 알고리즘을 밤마다 하나씩 사전 검증한다(3장 "새 알고리즘 사전 검증 (#24)"). 신호 기준 검토 작업(#206)을 담은 엔진은 정식 알고리즘이 처음 생긴 밤에 `signal-review`를 한 번 돌린다(2장 "신호 기준 검토 (#206)"). 일별 수급 출처 확인 작업(#226)을 담은 엔진은 배포 뒤 첫 밤에 `probe-supply`를 한 번 돌려 #226에 남긴다(2장 "일별 수급 출처 확인 (#226)"). 토스 절은 `TOSS_CLIENT_ID`, `TOSS_CLIENT_SECRET`이 있어야 돈다(1장 9번, #235). `KRX_GITHUB_TOKEN`이 없으면 결과는 서버(`state/scheduled.json`)에 남고 텔레그램으로 알린다. 토큰을 넣으면(#218) 엔진이 다음에 시작할 때 올린다. 서버에서 손으로 할 일은 토큰 하나다.
 - 결과는 텔레그램으로 온다(`krx-quant notify`): `[알림] 자동 업데이트: <이전> → <새 커밋>`과 커밋 제목(최대 10개), `[알림] 자동 업데이트 실패: …`, 그 밖의 오류(GitHub 접속 실패 등)는 `[알림] 자동 업데이트 오류: …`. 오류일 때 엔진은 그대로 돈다.
 - 업데이트가 끝나면 쓰지 않는 Docker 이미지를 지운다.
 - 이미지를 만들 때 그 커밋을 넘긴다(`KRX_COMMIT`, `compose.yaml`의 빌드 인자). 엔진은 `/v1/status`의 `commit`으로 보이고, 시작할 때마다 DB `runs`에 `start`로 커밋과 수수료율, 신호 규칙, 시간·CPU 예산을 남긴다(#85). 손으로 `docker compose up -d --build`하면 `unknown`이다. 커밋을 남기려면 `KRX_COMMIT=$(git rev-parse HEAD) docker compose up -d --build`로 띄운다.
