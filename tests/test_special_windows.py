@@ -277,17 +277,60 @@ def test_a_day_that_cannot_be_read_now_is_tried_again_next_time(
     assert kept(db) == KEPT
 
 
-def test_a_day_with_windows_kept_live_and_today_are_left_as_they_are(tmp_path: Path, replayed: Path) -> None:
-    """Input: the replayed database (its day's windows kept as the engine learned them); then
-    the database before #236 filled on the day itself (the engine restarted at noon). Output:
-    nothing read either time: the live engine keeps those."""
+def test_a_past_day_with_part_of_its_windows_kept_live_is_replayed_whole(
+    tmp_path: Path, replayed: Path
+) -> None:
+    """Input: the day's windows as an engine restarted at noon kept them: only the later ones,
+    one with a wrong start (the special situations live in memory). Output: the next morning's
+    fill replays the whole day and its windows replace those, as a fresh replay keeps them."""
     s = settings(tmp_path)
     record(s.data_dir, day_events())
     s.state_dir.mkdir(parents=True)
-    with sqlite3.connect(replayed) as source, sqlite3.connect(s.state_dir / DB_NAME) as target:
+    db = s.state_dir / DB_NAME
+    with sqlite3.connect(replayed) as source, sqlite3.connect(db) as target:
         source.backup(target)
+    with sqlite3.connect(db) as conn:
+        first = conn.execute(
+            "SELECT kind, symbol, start FROM special_windows ORDER BY start LIMIT 1"
+        ).fetchone()
+        conn.execute(
+            "DELETE FROM special_windows WHERE kind = ? AND ifnull(symbol, '') = ifnull(?, '') AND start = ?",
+            first,
+        )
+        conn.execute(
+            "UPDATE special_windows SET start = '2026-10-12T12:00:00+09:00' WHERE start ="
+            " (SELECT max(start) FROM special_windows)"
+        )
+        conn.execute("DELETE FROM special_days")
+    assert kept(db) != KEPT
 
+    [filled] = fill_special_windows(s, NEXT_MORNING)
+
+    assert (filled.source, filled.failed) == ("the data directory", None)
+    assert kept(db) == KEPT
     assert fill_special_windows(s, NEXT_MORNING) == []
+
+
+def test_a_past_day_recorded_nowhere_keeps_its_live_windows(tmp_path: Path, replayed: Path) -> None:
+    s = settings(tmp_path)
+    s.state_dir.mkdir(parents=True)
+    db = s.state_dir / DB_NAME
+    with sqlite3.connect(replayed) as source, sqlite3.connect(db) as target:
+        source.backup(target)
+    with sqlite3.connect(db) as conn:
+        conn.execute("DELETE FROM special_days")
+
+    [filled] = fill_special_windows(s, NEXT_MORNING)
+
+    assert filled.source is None
+    assert kept(db) == KEPT, "nothing recorded to replace them with"
+
+
+def test_today_is_left_to_the_live_engine(tmp_path: Path, replayed: Path) -> None:
+    """Input: the database before #236 filled on the day itself (the engine restarted at noon).
+    Output: nothing read: the live engine keeps today's windows."""
+    s = settings(tmp_path)
+    record(s.data_dir, day_events())
     db = before_236(tmp_path / "noon", replayed)
     assert fill_special_windows(replace(s, state_dir=tmp_path / "noon"), at("12:00:00")) == []
     assert (kept(db), decided(db)) == ([], [])

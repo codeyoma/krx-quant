@@ -957,14 +957,15 @@ class PredictionStore:
         return [dict(r) for r in rows]
 
     def special_undecided(self, since: date, before: date) -> dict[date, list[str]]:
-        """The days from ``since`` to before ``before`` with predictions, without a special window
-        kept and not yet decided from their recording (#236), with the symbols predicted on each."""
+        """The days from ``since`` to before ``before`` with predictions, not yet decided from
+        their recording (#236), with the symbols predicted on each. Windows the live engine kept
+        do not make a day decided: an engine restarted that day learned only part of it (its
+        special situations live in memory), so only a whole day's replay does."""
         decided = {
             r[0]
             for r in self._db.execute(
-                "SELECT day FROM special_days WHERE day >= ? AND day < ?"
-                " UNION SELECT substr(start, 1, 10) FROM special_windows WHERE start >= ? AND start < ?",
-                (since.isoformat(), before.isoformat(), iso(_midnight(since)), iso(_midnight(before))),
+                "SELECT day FROM special_days WHERE day >= ? AND day < ?",
+                (since.isoformat(), before.isoformat()),
             )
         }
         days: dict[date, list[str]] = {}
@@ -986,16 +987,18 @@ class PredictionStore:
     ) -> int:
         """Keep the windows of a past ``day`` decided from its recording (read from ``source``;
         None: recorded nowhere), each with when it was learned, and mark the day decided, in one
-        transaction; nothing if the day has a window kept or was decided already. The rows written."""
+        transaction; nothing if the day was decided already. The replay is the whole day, so it
+        replaces the windows the live engine kept that day (part of it, if it restarted); a day
+        recorded nowhere keeps them. The rows written."""
         first, last = iso(_midnight(day)), iso(_midnight(day + timedelta(days=1)))
         with self._db:
             taken = self._db.execute(
-                "SELECT 1 FROM special_days WHERE day = ?"
-                " UNION SELECT 1 FROM special_windows WHERE start >= ? AND start < ?",
-                (day.isoformat(), first, last),
+                "SELECT 1 FROM special_days WHERE day = ?", (day.isoformat(),)
             ).fetchone()
             if taken is not None:
                 return 0
+            if source is not None:
+                self._db.execute("DELETE FROM special_windows WHERE start >= ? AND start < ?", (first, last))
             written = sum(self._keep_special(w, learned_at) for learned_at, w in windows)
             self._db.execute(
                 "INSERT INTO special_days (day, source, windows, decided_at) VALUES (?, ?, ?, ?)",

@@ -36,11 +36,12 @@ rule takes a new answer version, whose rows are all missing.
 
 Last come the special situations' windows (#236, ``fill_special_windows``): the engine keeps
 each window it learns (``special_windows``), and a past day since the recording began with
-predictions, no window kept and not decided before (``special_days``) has its windows decided
-from its recording as the engine decides them live (``special.py``): the VI status of the
-symbols predicted that day, the KOSPI index and its futures, nothing else, one day at a time.
-The day is then marked decided, windows or not, so a quiet day is read once. The run is
-recorded in ``runs`` (``special_fill``).
+predictions and not decided before (``special_days``) has its windows decided from its
+recording as the engine decides them live (``special.py``): the VI status of the symbols
+predicted that day, the KOSPI index and its futures, nothing else, one day at a time. The
+replay replaces the windows the live engine kept that day (an engine restarted that day knew
+only part of it); a day recorded nowhere keeps them. The day is then marked decided, windows
+or not, so a quiet day is read once. The run is recorded in ``runs`` (``special_fill``).
 
 The running engine holds a lock on its state directory (``EngineLock``, ``flock``). A rescore
 beside it would leave the engine's cached leaderboards and consensus weights on the labels
@@ -602,10 +603,11 @@ def fill_special_windows(
     """The special windows of past days (#236), decided from their recordings, on a database
     connection of its own (a worker thread may run it beside the engine).
 
-    The days are those from ``RECORDING_START`` before ``now``'s day with predictions, no window
-    kept and not decided before (``special_days``). Each is decided as the engine decides it
-    live (``decide_day``), its VIs those of the symbols predicted that day, and stored with the
-    day marked decided: a quiet day is read once. A day recorded nowhere is marked decided
+    The days are those from ``RECORDING_START`` before ``now``'s day with predictions and not
+    decided before (``special_days``). Each is decided as the engine decides it live
+    (``decide_day``), its VIs those of the symbols predicted that day, and stored with the day
+    marked decided, in place of the windows the live engine kept that day: a quiet day is read
+    once. A day recorded nowhere is marked decided
     without windows, and logged; a day that cannot be read is logged and left for the next
     time. ``halt`` stops it between batches of events, writing nothing more.
     """
