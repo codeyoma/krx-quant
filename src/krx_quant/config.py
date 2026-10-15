@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import math
 import os
+import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import time, timedelta
 from pathlib import Path
 
@@ -32,6 +33,13 @@ DEFAULT_YAHOO_URL = "https://query1.finance.yahoo.com"
 DEFAULT_CALENDAR_URL = "https://economic-calendar.tradingview.com/events"
 DEFAULT_CALENDAR_COUNTRIES = "US,KR,CN,JP,EU,DE,GB"
 MIN_CALENDAR_MINUTES = 5  # the feed is not ours: no faster than this
+# Where the scheduled jobs post their results (#215).
+DEFAULT_GITHUB_REPO = "codeyoma/krx-quant"
+DEFAULT_GITHUB_API_URL = "https://api.github.com"
+# The scheduled jobs' night runs from KRX_JOBS_AT to the next 05:30 (#215): from the NXT
+# after-market's close on, and over before the 06:00 deploy.
+JOBS_FROM = time(20, 0)
+JOBS_UNTIL = time(5, 30)
 RULES = RegimeRules()  # the regime's default thresholds
 SIGNALS = SignalRule()  # the signal alerts' defaults
 
@@ -165,6 +173,17 @@ class Settings:
     # shared normal forecast and the baselines follow it. Everything is scored on the touch
     # label either way (#170): with 1 no model counts toward the statuses or the weights.
     target_version: int = 2
+    # The collector starts the night's scheduled jobs at this time (KST) every day, after the
+    # nightly training (KRX_JOBS_AT: 22:30 unless set; "off", #215). None here, as train_at.
+    jobs_at: time | None = None
+    # The jobs post their results as comments on this repository's issues, with this token
+    # (KRX_GITHUB_TOKEN: a fine-grained token, Issues read and write; unset: kept on the server).
+    github_token: str | None = field(default=None, repr=False)
+    github_repo: str = DEFAULT_GITHUB_REPO
+    github_api_url: str = DEFAULT_GITHUB_API_URL
+    # The server's Tailscale address compose publishes the Engine API on (KRX_BIND_ADDRESS);
+    # the engine reads it only to keep it out of what the jobs post.
+    bind_address: str | None = None
 
     @classmethod
     def from_env(
@@ -265,6 +284,18 @@ class Settings:
             raw = values.get("KRX_CALENDAR_COUNTRIES")
             raise SettingsError(f"KRX_CALENDAR_COUNTRIES must be two-letter country codes, got {raw!r}")
         macro_at = _time_or_off("KRX_MACRO_AT", values.get("KRX_MACRO_AT", "07:30"))
+        train_at = _time_or_off("KRX_TRAIN_AT", values.get("KRX_TRAIN_AT", "21:30"))
+        jobs_at = _at_night("KRX_JOBS_AT", values.get("KRX_JOBS_AT", "22:30"))
+        if jobs_at is not None and train_at is not None and _into_night(jobs_at) <= _into_night(train_at):
+            # The jobs wait for the night's training; a training starting after them would not
+            # wait for a job, and the two would share the server's 2GB.
+            raise SettingsError(
+                f"KRX_JOBS_AT ({jobs_at:%H:%M}) must be after KRX_TRAIN_AT ({train_at:%H:%M}): "
+                "the scheduled jobs wait for the night's training"
+            )
+        github_repo = values.get("KRX_GITHUB_REPO", DEFAULT_GITHUB_REPO).strip()
+        if not re.fullmatch(r"[\w.-]+/[\w.-]+", github_repo):
+            raise SettingsError(f"KRX_GITHUB_REPO must be owner/name, got {github_repo!r}")
         restart_at = _before_pre_market("KRX_RESTART_AT", values.get("KRX_RESTART_AT", "07:20"))
         if restart_at is not None and macro_at is not None and restart_at >= macro_at:
             # The new collector would read that morning's macro again, and a source failing
@@ -324,7 +355,7 @@ class Settings:
             algorithm_seconds=algorithm_seconds,
             cpu_budget_seconds=cpu_budget_seconds,
             min_sample=int(number("KRX_MIN_SAMPLE", str(DEFAULT_MIN_SAMPLE), int)),
-            train_at=_time_or_off("KRX_TRAIN_AT", values.get("KRX_TRAIN_AT", "21:30")),
+            train_at=train_at,
             train_on=_one_of("KRX_TRAIN_ON", values.get("KRX_TRAIN_ON", "server"), TRAIN_ON),
             cost_budget=values.get("KRX_COST_BUDGET", "").strip() or None,
             training_schedules=codes("KRX_TRAINING_SCHEDULES", ""),
@@ -358,6 +389,11 @@ class Settings:
                 number("KRX_REVIEW_CONFIDENCE", "0.983", float, minimum=0.5, maximum=0.9999)
             ),
             target_version=int(_one_of("KRX_TARGET_VERSION", values.get("KRX_TARGET_VERSION", "2"), TARGETS)),
+            jobs_at=jobs_at,
+            github_token=values.get("KRX_GITHUB_TOKEN", "").strip() or None,
+            github_repo=github_repo,
+            github_api_url=values.get("KRX_GITHUB_API_URL", DEFAULT_GITHUB_API_URL).strip().rstrip("/"),
+            bind_address=values.get("KRX_BIND_ADDRESS", "").strip() or None,
         )
 
 
@@ -390,6 +426,21 @@ def _before_pre_market(name: str, raw: str) -> time | None:
     if at is not None and at >= time(8, 0):
         raise SettingsError(f"{name} must be before 08:00 (the NXT pre-market) or off, got {raw!r}")
     return at
+
+
+def _at_night(name: str, raw: str) -> time | None:
+    """A time of day from 20:00 (the NXT after-market's close) to before 05:30, or off: the
+    scheduled jobs then never run in trading hours, and end before the 06:00 deploy."""
+    at = _time_or_off(name, raw)
+    if at is not None and JOBS_UNTIL <= at < JOBS_FROM:
+        raise SettingsError(f"{name} must be from 20:00 to before 05:30 or off, got {raw!r}")
+    return at
+
+
+def _into_night(at: time) -> timedelta:
+    """How far ``at`` is into the night that ends at 05:30: the order of the evening's work."""
+    minutes = (at.hour * 60 + at.minute - (JOBS_UNTIL.hour * 60 + JOBS_UNTIL.minute)) % (24 * 60)
+    return timedelta(minutes=minutes)
 
 
 def _minutes_or_off(name: str, raw: str, minimum: int) -> timedelta | None:

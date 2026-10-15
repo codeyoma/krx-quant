@@ -66,9 +66,11 @@ from krx_quant.predictions import DB_NAME, PredictionStore, iso
 from krx_quant.prevalidation import admits
 from krx_quant.recorder import ParquetRecorder
 from krx_quant.rescore import EngineLock, keep_touches_filled
+from krx_quant.scheduled import keep_jobs
 from krx_quant.signals import Signals
 from krx_quant.stream import LiveStatus
 from krx_quant.swap import (
+    NightTraining,
     await_spot_night,
     first_spot_wait,
     keep_models,
@@ -288,6 +290,7 @@ async def run_collector(
                 )
             object_store = open_store(settings)
             shelf = Shelf(settings.state_dir)
+            training = NightTraining()  # the scheduled jobs wait for the night's training (#215)
             background.append(
                 asyncio.create_task(
                     keep_models(object_store, shelf, engine, calendar.calendar, alerts.deliver, now)
@@ -326,6 +329,7 @@ async def run_collector(
                             refresh,
                             on_spot if spot else None,
                             first_spot_wait if spot else None,
+                            training,
                         )
                     )
                 )
@@ -342,6 +346,16 @@ async def run_collector(
                 background.append(
                     asyncio.create_task(
                         keep_macro(macro_collector, calendar.calendar, settings.macro_at, now)
+                    )
+                )
+            if settings.jobs_at is not None:
+                # After keep_training's task: at a start inside the night, the training it
+                # catches up is due before the jobs look.
+                background.append(
+                    asyncio.create_task(
+                        keep_jobs(
+                            settings, session, calendar.calendar, alerts, session_clock, training, engine
+                        )
                     )
                 )
             if settings.calendar_every is not None:

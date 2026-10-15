@@ -27,6 +27,11 @@ Single-context: root `CONTEXT.md` + `docs/adr/`, plus the agreed system design i
 - The reason is the one recorded in the PR or the commit. If none was recorded, write "이유 기록 없음".
 - Changes committed straight to `main` before PR #31 are cited by commit SHA instead of `#PR`.
 
+## Timed server work
+
+- Work that must run on the server on a given day or at a given time (a diagnosis after a deploy, a pre-validation once enough days are recorded, a measurement a decision waits for) is a scheduled job: add an entry to `JOBS` in `src/krx_quant/scheduled.py` in a PR, with its condition, command, time limit, issues and labels. Do not open a `ready-for-human` issue asking the user to remember a date and run a command.
+- The server runs it at night, after the nightly training, and posts the result as a comment on the job's issues, which then get `ready-for-agent`. Read it with `gh issue view <n> --comments`. See `docs/operations.md` "예약 작업 (#215)".
+
 ## Repository layout
 
 - Engine code, algorithms and docs live in this repo. It is public: never commit secrets, `.env`, recorded market data or server addresses.

@@ -1,31 +1,23 @@
 """Fail if tracked files contain KIS order code or secrets.
 
 The engine is signals-only: no KIS order TR IDs or order endpoints may ever
-appear in the repository. Secrets belong in `.env` on the server only.
+appear in the repository. Secrets belong in `.env` on the server only. The patterns are
+in `src/krx_quant/forbidden.py`; the scheduled jobs mask them out of what they post (#215).
 
 Usage: python scripts/check_forbidden.py [paths...]   (default: all git-tracked files)
 """
 
 from __future__ import annotations
 
-import re
 import subprocess
 import sys
 from pathlib import Path
 
-SELF = Path(__file__).resolve()
+from krx_quant.forbidden import RULES
 
-RULES: list[tuple[str, re.Pattern[str]]] = [
-    # KIS write/order TR IDs are four letters, four digits and "U" (reads end in "R"),
-    # e.g. TTTC0802U, VTTC0801U, TTTT1002U, CTSC0008U, OTFM3001U, STTN1101U.
-    ("KIS order TR ID", re.compile(r"\b[A-Z]{4}\d{4}U\b")),
-    ("KIS order endpoint", re.compile(r"/trading/order|\border-(?:cash|credit|rvsecncl|resv)\b")),
-    ("AWS access key", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
-    ("Telegram bot token", re.compile(r"\b\d{8,10}:[A-Za-z0-9_-]{35}\b")),
-    ("JWT / KIS access token", re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.")),
-    ("private key", re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----")),
-    ("KIS credential value", re.compile(r"KIS_APP_(?:KEY|SECRET)\s*=\s*['\"]?[A-Za-z0-9+/=]{16,}")),
-]
+SELF = Path(__file__).resolve()
+# The rules themselves, shared with what the server posts to the issue tracker (#215).
+RULES_FILE = SELF.parents[1] / "src" / "krx_quant" / "forbidden.py"
 
 
 def tracked_files() -> list[Path]:
@@ -34,7 +26,7 @@ def tracked_files() -> list[Path]:
 
 
 def scan(path: Path) -> list[str]:
-    if path.resolve() == SELF or not path.is_file():
+    if path.resolve() in (SELF, RULES_FILE) or not path.is_file():
         return []
     try:
         text = path.read_text(encoding="utf-8")
