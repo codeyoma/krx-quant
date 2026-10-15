@@ -69,6 +69,9 @@ async def test_bars_before_a_time_go_back_across_days_oldest_first(tmp_path: Pat
         nothing = await get_json(
             client, f"/v1/symbols/{SYMBOL}/bars?before=2026-10-07T09:00:00%2B09:00&limit=5"
         )
+        most = await get_json(
+            client, f"/v1/symbols/{SYMBOL}/bars?before=2026-10-12T09:32:00%2B09:00&limit={MAX_BARS}"
+        )
         bad = [
             await client.get(f"/v1/symbols/{SYMBOL}/bars?before={q}")
             for q in ("2026-10-12T09:32:00", "yesterday", "9999-12-31T23:59:59-12:00")
@@ -101,6 +104,9 @@ async def test_bars_before_a_time_go_back_across_days_oldest_first(tmp_path: Pat
     )
     assert stored["trades"] is None, "the backfill does not count trades"
     assert starts(nothing) == []
+    # The chart reads 300 bars of its view at a time (#239): of the hour view too, in one read.
+    assert MAX_BARS >= 300 * 60
+    assert len(starts(most)) == 7, "every bar before, the stored days' and today's"
     assert [r.status for r in bad] == [400] * 6, "no offset, no time, past the calendar in KST, bad limits"
 
 
