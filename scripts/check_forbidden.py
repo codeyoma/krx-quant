@@ -2,7 +2,7 @@
 
 The engine is signals-only: no KIS order TR IDs or order endpoints may ever
 appear in the repository. Secrets belong in `.env` on the server only. The patterns are
-in `src/krx_quant/forbidden.py`; the scheduled jobs mask them out of what they post (#214).
+in `src/krx_quant/forbidden.py`; the scheduled jobs mask them out of what they post (#215).
 
 Usage: python scripts/check_forbidden.py [paths...]   (default: all git-tracked files)
 """
@@ -16,7 +16,7 @@ from pathlib import Path
 from krx_quant.forbidden import RULES
 
 SELF = Path(__file__).resolve()
-# The rules themselves, shared with what the server posts to the issue tracker (#214).
+# The rules themselves, shared with what the server posts to the issue tracker (#215).
 RULES_FILE = SELF.parents[1] / "src" / "krx_quant" / "forbidden.py"
 
 

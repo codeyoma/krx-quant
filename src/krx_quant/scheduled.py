@@ -1,4 +1,4 @@
-"""Scheduled jobs (#214): the server runs a ``krx-quant`` command when its time comes and
+"""Scheduled jobs (#215): the server runs a ``krx-quant`` command when its time comes and
 leaves the result as a comment on GitHub issues, where people and agents read it.
 
 The jobs are listed here (``JOBS``), so what runs on the server, and when, is reviewed in

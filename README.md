@@ -26,7 +26,7 @@ uv sync
 uv run python scripts/check_forbidden.py && uv run ruff check && uv run mypy && uv run pytest -q
 ```
 
-`scripts/check_forbidden.py`는 KIS 주문 TR 코드, 주문 엔드포인트, 비밀값 패턴이 저장소에 들어오면 실패한다. CI도 같은 검사를 한다. 패턴은 `src/krx_quant/forbidden.py`에 있고, 예약 작업이 GitHub 이슈에 남기는 댓글에서도 같은 패턴을 가린다(#214).
+`scripts/check_forbidden.py`는 KIS 주문 TR 코드, 주문 엔드포인트, 비밀값 패턴이 저장소에 들어오면 실패한다. CI도 같은 검사를 한다. 패턴은 `src/krx_quant/forbidden.py`에 있고, 예약 작업이 GitHub 이슈에 남기는 댓글에서도 같은 패턴을 가린다(#215).
 
 ## 수집기 실행
 
@@ -96,7 +96,7 @@ uv run krx-quant train                 # 밤 학습 한 번: KRX_OBJECT_STORE의
 uv run krx-quant rollback granger      # 직전 모델로 되돌리기
 ```
 - 서버에서는 수집기가 매 거래일 21:30에 밤 학습을 돌리고, 다음 거래일 08:00에 이긴 모델로 바꾼다([docs/operations.md](docs/operations.md)).
-- 서버는 매일 밤 22:30부터, 밤 학습이 끝난 뒤 때가 된 예약 작업(진단 등)을 하나씩 돌리고 결과를 GitHub 이슈 댓글로 남긴다([docs/operations.md](docs/operations.md#예약-작업-214), #214).
+- 서버는 매일 밤 22:30부터, 밤 학습이 끝난 뒤 때가 된 예약 작업(진단 등)을 하나씩 돌리고 결과를 GitHub 이슈 댓글로 남긴다([docs/operations.md](docs/operations.md#예약-작업-214), #215).
 - 서버는 매일 06:00(KST)에 main의 새 커밋을 받아 스스로 다시 띄운다. 새 버전이 뜨지 않으면 이전 커밋으로 되돌리고 텔레그램으로 알린다(`deploy/auto-update.sh`).
 - 엔진 API는 `http://127.0.0.1:8080/v1/status`처럼 읽는다(`KRX_API_HOST`, `KRX_API_PORT`). 서버에서는 Tailscale 주소로만 열린다. 엔드포인트와 예측·채점 규칙은 [docs/engine-api.md](docs/engine-api.md)에 있다. 그날의 매크로 지표와 국면은 `/v1/macro`다. 예측, 합의, 채점, KIS 상태, 알고리즘 상태 변경은 WebSocket `/v1/stream`으로 바로 받는다.
 - 응답 형식은 JSON 스키마 [schemas/engine-api-v1.json](schemas/engine-api-v1.json)이 정한다. 화면과의 계약이다. 필드를 바꾸면 스키마도 고쳐야 계약 테스트(`tests/test_api_contract.py`)를 지난다.
@@ -168,7 +168,7 @@ uv run python -c "import glob, pyarrow.parquet as pq; d = sorted(glob.glob('data
 
 | 명령 | 하는 일 | KIS 키 |
 |---|---|---|
-| `collect` | 실시간 녹화, 예측·채점, 엔진 API, 업로드, 백필, 밤 학습 일정, 밤 예약 작업(#214). 시작할 때 API를 연 뒤 지난 예측의 빠진 도달 정답을 녹화로 채운다(#168). 멈출 때까지 돈다 | 필요 |
+| `collect` | 실시간 녹화, 예측·채점, 엔진 API, 업로드, 백필, 밤 학습 일정, 밤 예약 작업(#215). 시작할 때 API를 연 뒤 지난 예측의 빠진 도달 정답을 녹화로 채운다(#168). 멈출 때까지 돈다 | 필요 |
 | `measure-subscriptions` | 세션당 실시간 구독 한도를 잰다. 수집기를 멈추고 실행한다 | 필요 |
 | `probe-candles` | KIS 기간별 시세(`FHKST03010100`, 일·주·월·년봉)가 주는 것을 재서 출력한다(#111): 종목·ETF의 시장 구분(`UN`·`J`·`NX`)별 응답과 필드, 기간마다 한 번에 주는 개수와 거슬러 가는 끝, 수정주가 인자(`FID_ORG_ADJ_PRC`)의 차이. 읽기만 하고 0.5초 간격으로 부르므로 수집기가 도는 중에 실행해도 된다(2–3분, 300번 안팎). 결과는 [docs/kis-feeds.md](docs/kis-feeds.md#기간별-시세-일주월년봉)에 옮긴다 | 필요 |
 | `check-fallbacks` | 한도로 잘린 구독을 대신하는 REST 조회를 하나씩 한 번 부르고, 기록할 이벤트나 실패 이유를 출력한다. 기록하지 않고 REST만 써서 수집기가 도는 중에 실행해도 된다. 실패가 있으면 종료 코드 1([docs/kis-feeds.md](docs/kis-feeds.md#rest-대체-조회)) | 필요 |

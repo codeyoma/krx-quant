@@ -1,4 +1,4 @@
-"""Masking what the server posts to the public issue tracker (#214).
+"""Masking what the server posts to the public issue tracker (#215).
 
 A scheduled job's output is posted as a comment on a public repository's issue. Before
 that, everything that could name a secret or the server is replaced with ``[가림]``:

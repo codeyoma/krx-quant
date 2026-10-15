@@ -12,7 +12,7 @@ The nightly training runs at ``KRX_TRAIN_AT`` on trading days: here, in its own 
 (``KRX_TRAIN_ON=server``), or on EC2 Spot started by AWS at the same time (``spot``, #23).
 On Spot, the server publishes what the run needs from it, waits for the night's result in
 the store until the next trading day's 07:30, and sends its summary (the Spot run has no
-Telegram token). The scheduled jobs (#214) wait for the night either way (``NightTraining``).
+Telegram token). The scheduled jobs (#215) wait for the night either way (``NightTraining``).
 """
 
 from __future__ import annotations
@@ -69,7 +69,7 @@ SUMMARIZED_FILE = "spot_summarized.json"
 
 
 class NightTraining:
-    """The nightly training as the scheduled jobs see it (#214): they wait while it runs, or
+    """The nightly training as the scheduled jobs see it (#215): they wait while it runs, or
     is due to start, but no longer than ``TRAINING_TIMEOUT`` after it started. A training
     process here is stopped by then; a night on Spot whose result never comes (the Spot run
     failed, or the Cost Guard turned it off) must not hold the jobs all night.
@@ -293,7 +293,7 @@ async def keep_training(
     The process sends its own summary; a failure raises an alert, cleared by the next night
     that trains. With ``run_night`` (the training on EC2 Spot), that runs the night instead
     (None once done, else why not), and ``first`` picks the first night to run. ``training``
-    is told when each night is due, starts and ends (the scheduled jobs wait for it, #214).
+    is told when each night is due, starts and ends (the scheduled jobs wait for it, #215).
     """
     run = run_night or _train
     watch = training or NightTraining()

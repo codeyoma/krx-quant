@@ -1,4 +1,4 @@
-"""What a scheduled job posts on the public issue tracker is masked first (#214).
+"""What a scheduled job posts on the public issue tracker is masked first (#215).
 
 The secret-looking values here are put together at run time, so the repository's own check
 (``scripts/check_forbidden.py``) does not find them in this file.
@@ -98,7 +98,7 @@ def test_what_only_looks_like_an_address_stays(text: str) -> None:
 # One example of each forbidden pattern; a new rule needs one here.
 FORBIDDEN = {
     "KIS order TR ID": "TTTC" + "0802U",
-    "KIS order endpoint": "/uapi/domestic-stock/v1/trading/" + "order-cash",
+    "KIS order endpoint": "/uapi/domestic-stock/v1/trading/" + "order" + "-cash",
     "AWS access key": "AKIA" + "Z" * 16,
     "Telegram bot token": TELEGRAM_TOKEN,
     "JWT / KIS access token": "eyJ" + "a" * 12 + ".eyJ" + "b" * 12 + ".sig",

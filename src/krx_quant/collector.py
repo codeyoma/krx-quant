@@ -290,7 +290,7 @@ async def run_collector(
                 )
             object_store = open_store(settings)
             shelf = Shelf(settings.state_dir)
-            training = NightTraining()  # the scheduled jobs wait for the night's training (#214)
+            training = NightTraining()  # the scheduled jobs wait for the night's training (#215)
             background.append(
                 asyncio.create_task(
                     keep_models(object_store, shelf, engine, calendar.calendar, alerts.deliver, now)

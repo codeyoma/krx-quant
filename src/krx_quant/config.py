@@ -33,10 +33,10 @@ DEFAULT_YAHOO_URL = "https://query1.finance.yahoo.com"
 DEFAULT_CALENDAR_URL = "https://economic-calendar.tradingview.com/events"
 DEFAULT_CALENDAR_COUNTRIES = "US,KR,CN,JP,EU,DE,GB"
 MIN_CALENDAR_MINUTES = 5  # the feed is not ours: no faster than this
-# Where the scheduled jobs post their results (#214).
+# Where the scheduled jobs post their results (#215).
 DEFAULT_GITHUB_REPO = "codeyoma/krx-quant"
 DEFAULT_GITHUB_API_URL = "https://api.github.com"
-# The scheduled jobs' night runs from KRX_JOBS_AT to the next 05:30 (#214): from the NXT
+# The scheduled jobs' night runs from KRX_JOBS_AT to the next 05:30 (#215): from the NXT
 # after-market's close on, and over before the 06:00 deploy.
 JOBS_FROM = time(20, 0)
 JOBS_UNTIL = time(5, 30)
@@ -174,7 +174,7 @@ class Settings:
     # label either way (#170): with 1 no model counts toward the statuses or the weights.
     target_version: int = 2
     # The collector starts the night's scheduled jobs at this time (KST) every day, after the
-    # nightly training (KRX_JOBS_AT: 22:30 unless set; "off", #214). None here, as train_at.
+    # nightly training (KRX_JOBS_AT: 22:30 unless set; "off", #215). None here, as train_at.
     jobs_at: time | None = None
     # The jobs post their results as comments on this repository's issues, with this token
     # (KRX_GITHUB_TOKEN: a fine-grained token, Issues read and write; unset: kept on the server).

@@ -1,4 +1,4 @@
-"""The scheduled jobs' comments and labels on GitHub issues (#214), against a local stand-in."""
+"""The scheduled jobs' comments and labels on GitHub issues (#215), against a local stand-in."""
 
 from __future__ import annotations
 

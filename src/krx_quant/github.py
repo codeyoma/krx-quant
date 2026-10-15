@@ -1,5 +1,5 @@
 """Comments and labels on the repository's GitHub issues, where the scheduled jobs leave
-their results (#214).
+their results (#215).
 
 The REST API with a fine-grained token (``KRX_GITHUB_TOKEN``: this repository only, Issues
 read and write). A comment is the job's heading line, its notes, its output in a code block

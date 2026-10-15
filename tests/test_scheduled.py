@@ -1,4 +1,4 @@
-"""Scheduled jobs (#214, #215): when they run, what they remember, and what they post.
+"""Scheduled jobs (#215, #215): when they run, what they remember, and what they post.
 
 The clock is a fake one (``FakeClock``); the jobs' processes are stand-ins, except where
 the process itself is the point (``run_command``) and for the diagnosis job, whose real
