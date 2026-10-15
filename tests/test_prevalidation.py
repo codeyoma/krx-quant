@@ -29,7 +29,16 @@ from krx_quant.lifecycle import Status
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.model_shelf import Shelf
 from krx_quant.predictions import DB_NAME, PredictionStore
-from krx_quant.prevalidation import admits, code_digest, prevalidate, report_path
+from krx_quant.prevalidation import (
+    LastReport,
+    PrevalidationRunning,
+    _held,
+    admits,
+    code_digest,
+    last_report,
+    prevalidate,
+    report_path,
+)
 from krx_quant.replay import replay_into
 from krx_quant.swap import reload_models
 from tests.algorithm_doubles import FixedAlgorithm, stand_in_card, stand_in_meanings
@@ -308,6 +317,40 @@ def test_a_report_counts_only_for_the_target_it_was_scored_on(tmp_path: Path) ->
     assert not admits(tmp_path / "state")(candidate)
 
 
+def test_the_scheduled_job_reads_the_latest_report_as_the_engine_does(tmp_path: Path) -> None:
+    # Whether the code an algorithm runs now has been judged (#204): ``admits``'s test of the
+    # code and the target, and a refusal on fewer than ten days is a look, not a verdict.
+    candidate = Contrarian("contrarian")
+    state = tmp_path / "state"
+    assert last_report(state, candidate) is None
+    path = report_path(state, "contrarian")
+    path.parent.mkdir(parents=True)
+    path.write_text("{not json")
+    assert last_report(state, candidate) is None
+    made = datetime(2026, 10, 23, 23, 10, tzinfo=KST)
+    ten = [d.isoformat() for d in DAYS]
+    refused = {
+        "code": code_digest(candidate),
+        "prevalidated_at": made.isoformat(),
+        "passed": False,
+        "days": ten,
+        "target_version": 2,
+    }
+    path.write_text(json.dumps(refused))
+    judged = last_report(state, candidate, target_version=2)
+    assert judged == LastReport(made_at=made, current=True, passed=False, days=10) and judged.judged
+    on_another_target = last_report(state, candidate)
+    assert on_another_target is not None and not on_another_target.current and not on_another_target.judged
+    path.write_text(json.dumps({**refused, "code": "0123456789abcdef"}))
+    other_code = last_report(state, candidate, target_version=2)
+    assert other_code is not None and not other_code.current
+    path.write_text(json.dumps({**refused, "days": ten[:5]}))
+    look = last_report(state, candidate, target_version=2)
+    assert look is not None and look.current and not look.judged
+    path.write_text(json.dumps({"passed": True, "code": code_digest(candidate)}))  # before #204
+    assert last_report(state, candidate) == LastReport(made_at=None, current=True, passed=True, days=0)
+
+
 async def test_an_algorithm_waiting_is_alerted_once_after_the_engine_starts(tmp_path: Path) -> None:
     thursday, friday, monday = date(2026, 9, 17), date(2026, 9, 18), date(2026, 9, 21)
     outbox = Outbox()
@@ -463,3 +506,21 @@ async def test_with_the_touch_target_it_trains_replays_and_is_judged_on_the_touc
     assert versions[str(DAYS[1])].startswith(f"baseline-climate-{DAYS[0]:%Y%m%d}-")
     assert versions[str(DAYS[2])].startswith(f"baseline-climate-{DAYS[1]:%Y%m%d}-")
     assert persist == {"v2"}
+
+
+async def test_a_second_pre_validation_of_the_same_algorithm_waits_for_the_first(tmp_path: Path) -> None:
+    """Input: kalman's pre-validation under way (its lock held, #204: the scheduled job), and
+    its database. Output: a second one (by hand) stops at once and leaves the database; once
+    the first ends, it goes on (here: no recorded day)."""
+    s = settings(tmp_path, days=[])
+    db = s.state_dir / "prevalidation-kalman.sqlite3"
+    db.parent.mkdir(parents=True)
+    db.write_text("the first run's")
+
+    with _held(s.state_dir, "kalman"):
+        with pytest.raises(PrevalidationRunning, match="kalman runs already"):
+            await prevalidate(s, "kalman")
+        assert db.read_text() == "the first run's"
+
+    with pytest.raises(FileNotFoundError):
+        await prevalidate(s, "kalman")

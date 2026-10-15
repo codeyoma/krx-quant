@@ -2,17 +2,21 @@
 leaves the result as a comment on GitHub issues, where people and agents read it.
 
 The jobs are listed here (``JOBS``), so what runs on the server, and when, is reviewed in
-a PR. Each has a name (its key in the state file), a condition asked every night
-(``Night``: the day, whether it trades, this job's last run, every job's, and what the
-engine knows, ``Facts``), the command (``krx-quant`` arguments), a time limit, the issues
-its result goes to (each with the part of the output it gets) and the labels it sets.
+a PR; the pre-validations (#204) are built from the algorithm registries, one for each
+algorithm registered after pre-validation existed. Each has a name (its key in the state
+file), a condition asked every night (``Night``: the day, whether it trades, this job's
+last run, every job's, and what the engine knows, ``Facts``), the command (``krx-quant``
+arguments), a time limit, the issues its result goes to (each with the part of the output
+it gets), the files it writes that go with the result (``Attachment``) and the labels it
+sets.
 
 Every night (trading or not) from ``KRX_JOBS_AT`` (22:30) to 05:30, once the nightly
 training is over (``swap.NightTraining``), the jobs due run one at a time, in this list's
-order, each in its own process, as the nightly training does. One whose time limit would
-pass 05:30 is not started that night: the 06:00 deploy and the 07:20 restart stop the
-collector. A collector started inside the window (a restart at night) runs that night's
-jobs at once.
+order, each in its own process, as the nightly training does. A job's condition is asked
+when its turn comes, so it sees the runs of the jobs before it that night. One whose time
+limit would pass 05:30 is not started that night: the 06:00 deploy and the 07:20 restart
+stop the collector. A collector started inside the window (a restart at night) runs that
+night's jobs at once.
 
 The state (``state/scheduled.json``) keeps each job's last run: its night, outcome (``ok``,
 ``failed``, ``interrupted``; ``running`` while it runs), exit code, duration, commit and
@@ -41,6 +45,7 @@ from typing import Any
 
 import aiohttp
 
+from krx_quant.algorithms import ALGORITHMS, KIND_ALGORITHMS, Algorithm, KindAlgorithm
 from krx_quant.clock import SessionClock
 from krx_quant.config import JOBS_UNTIL, Settings
 from krx_quant.engine import PredictionEngine
@@ -48,6 +53,7 @@ from krx_quant.feeds.base import KST
 from krx_quant.github import GitHub, GitHubError, comment_body
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.notify import Alerts
+from krx_quant.prevalidation import MIN_DAYS, REGISTERED_BEFORE, LastReport, last_report, report_path
 from krx_quant.redaction import redact, secrets_of
 from krx_quant.swap import NightTraining
 from krx_quant.training import finished_days, is_recorded
@@ -92,6 +98,16 @@ class Target:
     issue: int
     part: Part = whole
     note: str = ""
+
+
+@dataclass(frozen=True)
+class Attachment:
+    """A file a job writes, folded under its output (``<details>``) on each of its issues once
+    it has ended, masked like the rest. Only if this run wrote it (it is new or changed since
+    the start): else a line says it is not there."""
+
+    title: str  # the fold's summary
+    path: str  # under the state directory (the state file's), e.g. prevalidations/kalman.json
 
 
 @dataclass
@@ -213,9 +229,11 @@ class JobState:
 class Facts:
     """What the engine knows that a condition may ask, read once a night."""
 
-    recorded_days: int = 0  # recorded days, as ``prevalidate`` counts them (MIN_DAYS, #216)
-    waiting: tuple[str, ...] = ()  # the algorithms waiting for their pre-validation (#216)
-    official: int = 0  # the consensus members: active algorithms on the engine's target (#217)
+    recorded_days: int = 0  # recorded days, as ``prevalidate`` counts them (MIN_DAYS, #204)
+    waiting: tuple[str, ...] = ()  # the algorithms waiting for their pre-validation (#204)
+    official: int = 0  # the consensus members: active algorithms on the engine's target (#206)
+    # The latest pre-validation report of each registered algorithm that has one (#204).
+    reports: Mapping[str, LastReport] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -247,6 +265,7 @@ class Job:
     targets: tuple[Target, ...]
     label: tuple[str, ...] = (READY_FOR_AGENT,)  # set on each issue once the comment is up
     unlabel: tuple[str, ...] = (READY_FOR_HUMAN, NEEDS_TRIAGE)  # taken off then
+    attach: tuple[Attachment, ...] = ()  # files it writes, posted with its output
 
 
 @dataclass(frozen=True)
@@ -441,6 +460,7 @@ class Scheduler:
         # Left RUNNING if the collector stops meanwhile: the next start calls it interrupted.
         self._state.jobs[job.name] = JobRecord(day, RUNNING, started, self._commit)
         self._state.save()
+        before = {a.path: _stamp(self._files / a.path) for a in job.attach}
         log.info("scheduled job %s: krx-quant %s", job.name, " ".join(job.command))
         began = monotonic()
         try:
@@ -453,13 +473,48 @@ class Scheduler:
         record = JobRecord(day, outcome, started, self._commit, ran.exit_code, seconds, ran.timed_out)
         self._state.jobs[job.name] = record
         log.info("scheduled job %s: %s (exit %s) in %.1fs", job.name, outcome, ran.exit_code, seconds)
-        results = [self._result(job, target, record, ran) for target in job.targets]
+        attached, absent = self._attachments(job, before)
+        results = [self._result(job, target, record, ran, attached, absent) for target in job.targets]
         self._state.unposted.extend(results)
         self._state.save()
         links, why_not = await self._post(results)
         await self._notify(_outcome_line(job, record, links, why_not))
 
-    def _result(self, job: Job, target: Target, record: JobRecord, ran: Ran) -> Unposted:
+    @property
+    def _files(self) -> Path:
+        """Where the jobs' attachments are: the state directory, the state file's."""
+        return self._state.path.parent
+
+    def _attachments(
+        self, job: Job, before: Mapping[str, tuple[int, int, int] | None]
+    ) -> tuple[list[tuple[str, str]], list[str]]:
+        """The files of ``job`` this run wrote, each (title, masked text); and a line for each
+        it did not (one left by an earlier run would pass for this run's)."""
+        attached: list[tuple[str, str]] = []
+        absent: list[str] = []
+        for attachment in job.attach:
+            path = self._files / attachment.path
+            stamp = _stamp(path)
+            if stamp is None or stamp == before.get(attachment.path):
+                absent.append(f"`state/{attachment.path}`은 이번 실행이 쓰지 않아 붙이지 않는다.")
+                continue
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError as e:
+                absent.append(f"`state/{attachment.path}`을 읽지 못해 붙이지 않는다({type(e).__name__}).")
+                continue
+            attached.append((attachment.title, redact(text, self._secrets)))
+        return attached, absent
+
+    def _result(
+        self,
+        job: Job,
+        target: Target,
+        record: JobRecord,
+        ran: Ran,
+        attached: Sequence[tuple[str, str]] = (),
+        absent: Sequence[str] = (),
+    ) -> Unposted:
         notes = [f"다시 돌리기: `docker compose run --rm engine {' '.join(job.command)}`"]
         part = target.part(ran.stdout)
         if part is None:
@@ -469,7 +524,10 @@ class Scheduler:
             notes.append(target.note)
         if ran.timed_out:
             notes.append(f"제한 시간 {_duration(job.timeout)}을 넘어 멈췄다. 그때까지의 출력이다.")
-        details = [("stderr", redact(ran.stderr, self._secrets))] if ran.stderr.strip() else []
+        notes.extend(absent)
+        details = list(attached)
+        if ran.stderr.strip():
+            details.append(("stderr", redact(ran.stderr, self._secrets)))
         body = comment_body(_heading(job, record), redact(part, self._secrets), notes=notes, details=details)
         return Unposted(job.name, record.day, target.issue, body, job.label, job.unlabel)
 
@@ -513,6 +571,15 @@ class Scheduler:
         for (name, day), links in posted.items():
             line = f"예약 작업 {name}({day} 밤)의 결과를 이제 올렸습니다. 댓글: {' '.join(links)}"
             await self._notify(line)
+
+
+def _stamp(path: Path) -> tuple[int, int, int] | None:
+    """Which version of the file at ``path`` is there (inode, change time, size); None if none."""
+    try:
+        found = path.stat()
+    except OSError:
+        return None
+    return found.st_ino, found.st_mtime_ns, found.st_size
 
 
 def _heading(job: Job, record: JobRecord) -> str:
@@ -559,6 +626,15 @@ def recorded_days(data_dir: Path, symbols: Sequence[str], now: datetime) -> int:
     return sum(1 for d in finished_days(data_dir, symbols, now) if is_recorded(data_dir, d, symbols))
 
 
+def prevalidation_reports(
+    state_dir: Path, algorithms: Sequence[Algorithm | KindAlgorithm], target_version: int
+) -> dict[str, LastReport]:
+    """The latest pre-validation report of each of ``algorithms`` that has one, as it stands for
+    the code and target it runs now."""
+    reports = {a.name: last_report(state_dir, a, target_version) for a in algorithms}
+    return {name: report for name, report in reports.items() if report is not None}
+
+
 async def keep_jobs(
     settings: Settings,
     session: aiohttp.ClientSession,
@@ -577,7 +653,11 @@ async def keep_jobs(
 
     async def facts() -> Facts:
         recorded = await asyncio.to_thread(recorded_days, settings.data_dir, settings.symbols, clock.now())
-        return Facts(recorded, tuple(engine.waiting()), len(engine.members()))
+        everyone: list[Algorithm | KindAlgorithm] = [*engine.registered, *engine.kind_registered]
+        reports = await asyncio.to_thread(
+            prevalidation_reports, settings.state_dir, everyone, settings.target_version
+        )
+        return Facts(recorded, tuple(engine.waiting()), len(engine.members()), reports)
 
     scheduler = Scheduler(
         JOBS if jobs is None else jobs,
@@ -625,4 +705,114 @@ DIAGNOSE = Job(
     ),
 )
 
-JOBS: tuple[Job, ...] = (DIAGNOSE,)
+# ② The pre-validations (#204): a new algorithm runs live once its pre-validation has passed
+# (``prevalidation.py``). Once ``MIN_DAYS`` trading days are recorded, one waiting algorithm
+# is pre-validated a night, at most (``prevalidation_tonight``): a run replays 20 days beside
+# the live engine, on a 2 GB server with burst CPU. They go in this order, then any other
+# waiting algorithm in the registry's. A verdict on the code and the target an algorithm runs
+# now (passed, or refused) is not asked for again: a deploy that changes its code, or the
+# target, asks again. A run that left no verdict on them (it crashed, or hit its time limit)
+# runs again after a new deploy, once the algorithms not tried yet have had their turn. A run
+# a restart cut runs again the next night (the scheduler).
+PREVALIDATE_FIRST = ("mandelbrot", "breiman", "kalman", "shannon", "poisson")
+PREVALIDATION_ISSUE = 204
+# A run takes about 20 times a day's replay (20 days, the algorithm retrained before each);
+# breiman retrains LightGBM each day and takes longest. Bounds, not estimates: room for the
+# burst CPU running out. Each must start by 05:30 less its limit (00:30, breiman 23:30).
+PREVALIDATION_TIMEOUT = timedelta(hours=5)
+PREVALIDATION_TIMEOUTS = {"breiman": timedelta(hours=6)}
+# An algorithm's turn tonight: never tried (or cut by a restart), or tried again.
+FRESH, AGAIN = "fresh", "again"
+
+
+def prevalidation_job_name(algorithm: str) -> str:
+    return f"prevalidate-{algorithm}"
+
+
+def prevalidation_order(names: Sequence[str]) -> tuple[str, ...]:
+    """The algorithms to pre-validate, in turn: those of ``PREVALIDATE_FIRST`` registered, then
+    any other registered after pre-validation existed (``names``: the registries' order)."""
+    new = [name for name in names if name not in REGISTERED_BEFORE]
+    return (*(n for n in PREVALIDATE_FIRST if n in new), *(n for n in new if n not in PREVALIDATE_FIRST))
+
+
+def prevalidation_turn(night: Night, algorithm: str) -> str | None:
+    """Whether ``algorithm`` would be pre-validated tonight: FRESH, AGAIN (its last run left
+    no verdict, on older code: it waits for the FRESH ones), or None (not tonight)."""
+    facts = night.facts
+    if facts.recorded_days < MIN_DAYS or algorithm not in facts.waiting:
+        return None
+    report = facts.reports.get(algorithm)
+    if report is not None and report.judged:
+        return None  # it judged the code and target the algorithm runs now: it would again
+    record = night.records.get(prevalidation_job_name(algorithm))
+    if record is None or record.outcome not in (OK, FAILED):
+        return FRESH  # never ran, or a restart cut it
+    if (
+        report is not None
+        and not report.current
+        and report.made_at is not None
+        and report.made_at >= record.started_at
+    ):
+        return FRESH  # the run left its report, and the code or the target has changed since
+    ended = record.started_at + timedelta(seconds=record.seconds or 0.0)
+    if report is not None and report.made_at is not None and report.made_at > ended:
+        # A run started after it (by hand, e.g. a look on fewer days) left the latest report,
+        # without a verdict on this code: ask again for one.
+        return FRESH
+    if record.commit == night.commit:
+        return None  # it ran on this code without a verdict: another deploy may give one
+    return AGAIN  # it crashed or ran out of time on older code
+
+
+def prevalidation_tonight(night: Night, order: Sequence[str]) -> str | None:
+    """The algorithm pre-validated tonight, of ``order``: none if one was tonight already
+    (whatever came of it); else the first FRESH, else the first AGAIN."""
+    if any(
+        (record := night.records.get(prevalidation_job_name(name))) is not None and record.day == night.day
+        for name in order
+    ):
+        return None
+    turns = [(name, prevalidation_turn(night, name)) for name in order]
+    return next((n for n, t in turns if t == FRESH), None) or next((n for n, t in turns if t == AGAIN), None)
+
+
+def _prevalidation_due(algorithm: str, order: tuple[str, ...]) -> Callable[[Night], bool]:
+    def due(night: Night) -> bool:
+        return prevalidation_tonight(night, order) == algorithm
+
+    return due
+
+
+def prevalidation_jobs(names: Sequence[str]) -> tuple[Job, ...]:
+    """A pre-validation job for each algorithm of ``names`` (the registries) registered after
+    pre-validation existed, in ``prevalidation_order``."""
+    order = prevalidation_order(names)
+    return tuple(
+        Job(
+            name=prevalidation_job_name(name),
+            due=_prevalidation_due(name, order),
+            command=("prevalidate", name),
+            timeout=PREVALIDATION_TIMEOUTS.get(name, PREVALIDATION_TIMEOUT),
+            targets=(Target(PREVALIDATION_ISSUE, note=_PREVALIDATION_NOTE),),
+            attach=(Attachment(f"리포트 state/{_report_of(name)}", _report_of(name)),),
+        )
+        for name in order
+    )
+
+
+_PREVALIDATION_NOTE = (
+    "통과(`passed`)하면 엔진이 다음 봉 마감부터 수습으로 돌린다. 거부(`refused`)되면 같은 코드·정답 "
+    "버전으로는 다시 돌지 않고, 고친 코드가 배포되면 다시 돈다."
+)
+
+
+def _report_of(algorithm: str) -> str:
+    """The report's path under the state directory."""
+    return report_path(Path(), algorithm).as_posix()
+
+
+JOBS: tuple[Job, ...] = (
+    DIAGNOSE,
+    *prevalidation_jobs([*(a.name for a in ALGORITHMS), *(a.name for a in KIND_ALGORITHMS)]),
+)
