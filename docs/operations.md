@@ -36,6 +36,7 @@
    - 키가 없으면 그 출처(ECOS: 원/달러·국고채, FRED: 미국 10년물·WTI)만 건너뛴다. 국면은 Yahoo(SOX, VIX)와 달러선물 종가로도 정해진다.
 6. **AWS 자원 만들기**: 2.1절의 스크립트를 실행한다.
 7. **서버 개통**: 2.2절을 따라 한다.
+8. **GitHub 토큰** (선택, #218): 예약 작업이 결과를 이슈 댓글로 남기게 한다(3장 "예약 작업 (#214)"의 "토큰"). 없어도 작업은 돌고 결과는 서버에 남는다.
 
 ## 2. 개통
 
@@ -108,6 +109,7 @@ aws iam create-access-key --user-name krx-quant-engine
    | `KRX_SYMBOLS`, `KIS_WS_MAX_SUBSCRIPTIONS` | `.env.example`의 값 그대로(`005930,000660,009150`, `41`). 지우면 코드 기본값(`005930` 한 종목, 구독 한도 없음)이 된다 |
    | `KRX_BIND_ADDRESS` | 비워 둔다. 스크립트가 Tailscale 주소를 넣는다 |
    | `KRX_ECOS_API_KEY`, `KRX_FRED_API_KEY` | 1.5에서 받은 매크로 키(선택). 비워 두면 그 출처를 건너뛴다 |
+   | `KRX_GITHUB_TOKEN` | 1.8의 GitHub 토큰(선택). 비워 두면 예약 작업의 결과가 서버(`state/scheduled.json`)에 남는다 |
 
    나머지 설정은 아래 "설정 값 전체"에 있다. `.env.example`에서 주석으로 둔 변수는 그대로 두면 기본값을 쓴다.
 7. 스크립트를 한 번 더 실행한다. 이번에는 엔진을 빌드하고 띄운다.
@@ -156,7 +158,7 @@ curl http://krx-quant:8080/v1/macro
 
 - 변수가 없으면 기본값을 쓴다. 값이 틀리면 명령이 `configuration error: ...`를 내고 끝난다(종료 코드 2).
 - 숫자는 따로 적지 않으면 0보다 커야 한다. 숫자 변수를 빈 값(`KRX_FEE_PERCENT=`)으로 두면 오류다.
-- 문자열 변수 중 `KRX_OBJECT_STORE`, AWS 키, 텔레그램 값, 선물 코드, `KRX_S3_ENDPOINT_URL`은 빈 값이 "없음"이다.
+- 문자열 변수 중 `KRX_OBJECT_STORE`, AWS 키, 텔레그램 값, 선물 코드, `KRX_S3_ENDPOINT_URL`, `KRX_GITHUB_TOKEN`, `KRX_BIND_ADDRESS`는 빈 값이 "없음"이다.
 
 | 변수 | 기본값 | 뜻과 범위 |
 |---|---|---|
@@ -204,6 +206,10 @@ curl http://krx-quant:8080/v1/macro
 > **바뀜** (2026-10-14, #193): `KRX_TARGET_VERSION`의 기본값 `1` → `2`, 판정·통계·화면도 도달 정답으로. 이유: 배포가 곧 전환이 되게(#160). 서버 `.env`에 이 값을 두지 않았으면 할 일이 없다.
 | `KRX_TRAIN_AT` | `21:30` | 거래일 밤 학습 시각(KST, `HH:MM`). `off`나 빈 값이면 하지 않는다. `KRX_TRAIN_ON=spot`이면 Spot 스케줄(`deploy/training.yaml`의 `TrainAt`)과 같게 둔다 |
 | `KRX_TRAIN_ON` | `server` | 밤 학습을 돌리는 곳(#23). `server`는 이 서버의 별도 프로세스, `spot`은 AWS가 같은 시각에 띄우는 EC2 Spot이다. `spot`이면 서버는 학습에 필요한 설정과 휴장일 달력을 S3(`training/`)에 올리고, 결과를 다음 거래일 07:30까지 기다려 요약을 텔레그램으로 보낸다 |
+| `KRX_JOBS_AT` | `22:30` | 예약 작업을 시작하는 시각(KST, `HH:MM`, #214). 거래일이 아니어도 매일 돈다. 20:00부터 05:30 전까지이고 `KRX_TRAIN_AT`보다 뒤여야 한다(자정 뒤 시각은 그 밤의 늦은 때로 본다). 아니면 설정 오류다. `off`나 빈 값이면 돌리지 않는다(3장 "예약 작업 (#214)") |
+| `KRX_GITHUB_TOKEN` | (없음) | 예약 작업이 이슈에 댓글을 남기고 라벨을 바꾸는 GitHub 토큰(#218). fine-grained, `codeyoma/krx-quant` 하나, Issues 읽기·쓰기만. 없으면 결과를 `state/scheduled.json`에 두고 텔레그램으로 알린다 |
+| `KRX_GITHUB_REPO` | `codeyoma/krx-quant` | 댓글을 남길 저장소(`owner/name`, 아니면 설정 오류) |
+| `KRX_GITHUB_API_URL` | `https://api.github.com` | GitHub API 주소. 테스트가 가짜 서버로 바꾼다 |
 | `KRX_COST_BUDGET` | (없음) | 서버가 1시간마다 읽는 AWS Budgets 예산 이름(`krx-quant-monthly`, #23). 이달 비용이 예산의 50%와 80%를 넘으면 한 번씩 알리고, 100%에 닿으면 `KRX_TRAINING_SCHEDULES`를 그달 동안 끈다. 없으면 보지 않는다. 있으면 `KRX_TRAINING_SCHEDULES`도 있어야 한다(없으면 설정 오류) |
 | `KRX_TRAINING_SCHEDULES` | (없음) | 상한에서 끄고 다음 달 1일에 다시 켤 EventBridge Scheduler 스케줄(쉼표로 구분, `krx-quant-training,krx-quant-training-resume`) |
 | `KRX_COST_CHECK_SECONDS` | 3600 | 비용을 읽는 간격(초). 60 이상 |
@@ -222,17 +228,19 @@ curl http://krx-quant:8080/v1/macro
 
 > **바뀜** (2026-10-12, #116): 텔레그램 신호는 최종 합의의 확률과 정식 알고리즘의 동의만 맞으면 보냈고, 엔진을 다시 시작하면 같은 신호가 4분 안에 다시 갈 수 있었다 → VI·서킷브레이커, 기준가 없음, 목표 시각 지남이면 보내지 않고, 보낸·막힌 신호를 `runs`에 남기며, 재시작해도 4분 안에 다시 보내지 않는다. 이유: 매매하면 안 되는 때에도 신호가 나갔다(#78, #80).
 
-compose와 스크립트가 읽는 변수다. 엔진은 읽지 않는다.
+compose와 스크립트가 읽는 변수다. 엔진은 `KRX_BIND_ADDRESS`를 예약 작업의 가림에만 읽고, 나머지는 읽지 않는다.
 
 | 변수 | 읽는 곳 | 기본값 | 뜻 |
 |---|---|---|---|
-| `KRX_BIND_ADDRESS` | `compose.yaml` | 없음(없으면 compose가 멈춘다) | 엔진 포트를 열 서버의 Tailscale IPv4. `deploy/setup-server.sh`가 쓴다 |
+| `KRX_BIND_ADDRESS` | `compose.yaml`, 엔진(가림만) | 없음(없으면 compose가 멈춘다) | 엔진 포트를 열 서버의 Tailscale IPv4. `deploy/setup-server.sh`가 쓴다. compose가 `.env`를 넘기므로 엔진도 받아, 예약 작업의 댓글에서 이 값을 가린다(#214) |
 | `KRX_ENGINE_PORT` | `compose.yaml`, `deploy/setup-server.sh`, `deploy/smoke-local.sh` | 8080 | 엔진 API를 여는 서버 쪽 포트. 컨테이너 안은 늘 8080 |
 | `TS_AUTHKEY` | `deploy/setup-server.sh` | 없음(브라우저 로그인) | Tailscale auth key |
 | `KRX_UPDATE_TRIES`, `KRX_UPDATE_PAUSE` | `deploy/auto-update.sh` | 36, 5 | 새 엔진이 API에 답하는지 이 횟수만큼, 이 초 간격으로 본다(기본 3분) |
 | `KRX_UPDATE_NOW` | `deploy/auto-update.sh` | 지금(KST) | `<요일 1–7> <HHMM>`. 장 시간 판정을 테스트에서 바꾼다 |
 | `AWS_REGION`, `ZONE`, `INSTANCE`, `BUNDLE`, `BLUEPRINT`, `IAM_USER`, `SNAPSHOT_UTC` | `deploy/create-aws.sh` | 2.1절 | AWS 자원 이름과 위치 |
 | `KEEP`, `SECONDS_TO_RECORD` | `deploy/smoke-local.sh` | 없음, 15 | `KEEP=1`이면 컨테이너와 볼륨을 남긴다. 녹화 시간(초) |
+
+> **바뀜** (2026-10-15, #215): `KRX_BIND_ADDRESS`는 compose만 읽었다 → 엔진도 읽는다(예약 작업의 댓글에서 가리는 데만 쓴다). 이유: 공개 저장소의 이슈 댓글에 서버 주소가 실리지 않게(#214).
 
 Docker 이미지는 `TZ=Asia/Seoul`, `KRX_DATA_DIR=/data`, `KRX_STATE_DIR=/state`로 돈다(`Dockerfile`).
 
@@ -311,6 +319,8 @@ docker compose run --rm engine diagnose --days 5
 - 분포는 p50, p90, p99와 최대로 보인다. 분위수는 정렬한 값에서 q·(n − 1) 위치의 아래쪽 값이다(값을 지어내지 않는다). 기준값으로 판정하지는 않는다.
 - 데이터가 없는 절만 `없음`이다. 그래도 종료 코드는 0이다.
 
+**예약 작업이 돌린다** (#215, 3장 "예약 작업 (#214)"). 9절(#213)을 담은 엔진이 배포된 뒤 첫 거래일 밤, 밤 학습이 끝난 뒤(22:30부터) 예약 작업 `diagnose-203-187`이 `diagnose --days 20`을 한 번 돌린다. 출력 전체를 #203에, 머리말과 9절을 #187에 댓글로 남기고 두 이슈를 `ready-for-agent`로 바꾼다. 아래 손 절차는 그대로다. 다시 재고 싶을 때 쓴다.
+
 | 절 | 내용 |
 |---|---|
 | 1. 알고리즘별 표시 지연과 채점 수 | `ok` 예측의 봉 마감 → 저장(`displayed_at`) 초. 채점된 예측 수(도달 정답이 있는 것, #170) |
@@ -334,7 +344,7 @@ docker compose run --rm engine diagnose --days 5
 1분봉만 있는 날의 변동폭 학습 정답은 r ≈ max(0, 1분봉 범위 − c)다([engine-api.md](engine-api.md#변동폭-177-180)). 지금 c는 1이고(`src/krx_quant/ranges.py`의 `BAR_C`) 잠정값이다. 녹화일의 호가 정답과 견줘 정한다. 배포에 손으로 할 일은 없고, 이것은 결정을 위한 실측이라 급하지 않다(c는 1분봉 날의 학습 정답과 `range-climate` 표에만 쓰인다. 실시간 채점은 늘 호가 정답이다).
 
 1. #180을 담은 엔진이 한 번 뜨면 2026-10-12부터의 변동폭 정답이 채워진다(아래 "종류의 지난 정답"). 로그에 `past kinds' answers: … rows written over … days`가 남으면 끝난 것이다.
-2. 장 마감 뒤 `docker compose run --rm engine diagnose --days 20`을 돌린다.
+2. 장 마감 뒤 `docker compose run --rm engine diagnose --days 20`을 돌린다. 예약 작업 `diagnose-203-187`이 배포 뒤 첫 거래일 밤에 이것을 돌려 출력 전체를 #203에 댓글로 남긴다(#215). 그 댓글이 있으면 그것을 본다.
 3. 7절의 `1분봉 규칙과 호가 정답의 구간 일치율: c = 0 …% · c = 1 …% (N창) · 더 많이 같은 c X (지금 BAR_C 1)`을 본다. 종목별 줄과 `1분봉 범위 − 호가 범위`의 분포(c = 0의 치우침)도 함께 본다.
 4. X가 지금 `BAR_C`와 다르면 PR로 `BAR_C`를 X로 바꾼다. 같아도 그 일치율과 잰 날(기간, 창 수)을 [design.md](design.md) 5장 "변동폭"과 13장, [engine-api.md](engine-api.md#변동폭-177-180)에 적고 "잠정"을 지운다.
 
@@ -345,7 +355,7 @@ c를 바꿔도 정답 버전은 그대로다. 채점하는 호가 정답은 바�
 1분봉만 있는 날의 장벽 학습 정답은 1분봉 규칙(종가 위치와 1틱 여유, 먼저 닿은 분)으로 만든다([engine-api.md](engine-api.md#장벽-178-183)). 녹화일에서 이 규칙이 호가 정답과 얼마나 같은지, 같은 분에 양쪽이 닿아 학습에서 빠지는 창이 얼마나 되는지는 아직 재지 않았다(서버의 녹화로만 잴 수 있다). 배포에 손으로 할 일은 없고, 결정을 위한 실측이라 급하지 않다(1분봉 규칙은 1분봉 날의 학습 정답과 `barrier-climate` 표에만 쓰인다. 실시간 채점은 늘 호가 정답이다).
 
 1. #183을 담은 엔진이 한 번 뜨면 2026-10-12부터의 장벽 정답이 채워진다(아래 "종류의 지난 정답"). 로그에 `past kinds' answers: … rows written over … days`가 남으면 끝난 것이다.
-2. 장 마감 뒤 `docker compose run --rm engine diagnose --days 20`을 돌린다.
+2. 장 마감 뒤 `docker compose run --rm engine diagnose --days 20`을 돌린다. 위 c와 같은 출력이다. 예약 작업이 #203에 남긴 댓글의 8절을 보면 된다(#215).
 3. 8절의 `1분봉 규칙과 호가 정답의 클래스 일치율: …% (N창) · 같은 분 양쪽 닿음 …% (M창 중)`과 종목별 줄을 본다. #160의 도달 정답 1분봉 규칙은 같은 여유로 93%였고, #178의 실측은 여유 없는 체결가 규칙 76~80%, 1분봉 1년치의 같은 분 양쪽 닿음 2~4%였다.
 4. 그 값과 잰 날(기간, 창 수)을 [design.md](design.md) 5장 "장벽"과 13장, [engine-api.md](engine-api.md#장벽-178-183)의 "1분봉 날의 정답"에 적고 "아직 재지 않았다(잠정)"를 지운다. 일치율이 #160보다 크게 낮으면 규칙(여유 틱 등)을 다시 정할 이슈를 연다.
 
@@ -355,7 +365,7 @@ c를 바꿔도 정답 버전은 그대로다. 채점하는 호가 정답은 바�
 
 통합 호가가 뒤집히는(최우선 매도호가 < 매수호가) 일이 000660·009150에서 연속매매 시간의 3~8%였다(3거래일 실측, [events.md](events.md#실데이터-관찰-2026-10-08-삼성전자-13시-전후-90초)). 지금은 뒤집힌 호가를 버리고 마지막 유효 호가를 계속 쓴다([engine-api.md](engine-api.md#기준가-통합-중간가)). 그것이 데이터 문제인지 실제로 거래할 수 있던 가격인지에 따라 지금 처리가 맞기도 틀리기도 하다. **처리 결정은 아직이다(#187).** 진단은 읽기만 하므로 배포에 손으로 할 일은 없다.
 
-1. 장 마감 뒤 `docker compose run --rm engine diagnose --days 20`을 돌린다.
+1. 장 마감 뒤 `docker compose run --rm engine diagnose --days 20`을 돌린다. 예약 작업 `diagnose-203-187`이 배포 뒤 첫 거래일 밤에 이것을 돌려 머리말과 9절을 #187에 댓글로 남긴다(#215). 그 댓글이 있으면 그것을 본다.
 2. 9절을 본다.
    - 종목 × 날의 비율과 30분 칸: 3거래일 실측(events.md의 표)과 견준다.
    - `거래소 귀속`: `KRX 매수 > NXT 매도`와 `NXT 매수 > KRX 매도`는 두 거래소의 호가가 서로 겹친 뒤집힘이다. `KRX 자체 뒤집힘`·`NXT 자체 뒤집힘`과 `VI와 겹친 뒤집힘`은 한 거래소가 단일가였을 수 있는 때다. `거래소별 체결 없음`이 크면 귀속을 모르는 몫이 크다.
@@ -382,6 +392,7 @@ c를 바꿔도 정답 버전은 그대로다. 채점하는 호가 정답은 바�
 | 20:30 | 휴장일 정보를 갱신하고 1분봉 백필을 돌린 뒤, 그날 일봉과 새로 끝난 주·월·년봉을 더한다(`candles`, #111, #112). 처음에는 KIS에 있는 전체 기간을 받는다 |
 | 21:00 | 다시 올린다. NXT·애프터마켓의 늦은 데이터와 그날 1분봉, 바뀐 일·주·월·년봉 파일(`candles/period=<기간>/symbol=<종목>/candles.parquet`)이 들어간다 |
 | 21:30 (거래일) | 밤 학습(`KRX_TRAIN_AT`). 알고리즘마다 다시 학습하고, 이긴 모델(또는 지금 모델이 다른 정답 버전이면 성적과 상관없이 새 모델, #170)만 승격 목록에 올린다. 결과를 텔레그램으로 보낸다. `KRX_TRAIN_ON=spot`이면 AWS가 같은 시각(평일)에 EC2 Spot을 띄우고, 00:30에 한 번 더 띄워 회수된 밤을 이어 간다. 서버는 결과를 기다려 요약을 보낸다 |
+| 22:30 (매일) | 예약 작업(`KRX_JOBS_AT`, #214). 밤 학습이 끝난 뒤 때가 된 작업을 하나씩 별도 프로세스로 돌리고 결과를 GitHub 이슈 댓글로 남긴다. 05:30 전에 끝나지 않을 작업은 다음 밤으로 미룬다(아래 "예약 작업 (#214)") |
 | 1시간마다 (`KRX_COST_BUDGET`이 있으면) | 이달 AWS 비용을 읽는다. 50%·80%에서 알리고, 100%에서 Spot 학습을 그달 동안 끈다. 다음 달 1일 첫 확인에서 다시 켠다 |
 | 30초마다 | 모델 파일(`state/models/<알고리즘>.json`)이 바뀌었는지 본다(`fit`, `rollback`). 바뀌었으면 엔진이 새 모델로 바꾸고, 지금 도는 모델을 S3(`live.json`, `models/`)에 올린다 |
 
@@ -561,6 +572,77 @@ docker compose run --rm --no-deps engine prevalidate <이름>
 - 변동폭의 `mandelbrot`(#181)이 다음 대상이다. 배포된 날부터 `사전 검증 대기` 알림에 `mandelbrot`이 들어간다. 녹화된 거래일이 10일이 된 날(10-12부터 빠짐없이 녹화했다면 2026-10-23) 21:00 업로드 뒤에 `docker compose run --rm --no-deps engine prevalidate mandelbrot`을 돌린다. 변동폭 정답으로 학습·채점하고, `stats` 검사의 lift는 `range-climate`, `range-persist` 대비다. 통과하면 다음 봉 마감부터 수습이다.
 - 장벽의 `breiman`(#184)도 같다. 배포된 날부터 `사전 검증 대기` 알림에 `breiman`이 들어가고, 녹화 10거래일이 된 날(같은 2026-10-23) 21:00 업로드 뒤에 `docker compose run --rm --no-deps engine prevalidate breiman`을 돌린다. `mandelbrot`과 동시에 돌리지 않는다(하나씩, 21:30 밤 학습과도 겹치지 않게). 날마다 LightGBM을 다시 학습해서 `mandelbrot`보다 오래 걸린다. 장벽 정답으로 학습·채점하고, `stats` 검사의 lift는 `barrier-climate`, `barrier-persist` 대비다. 통과하면 다음 봉 마감부터 수습이다.
 
+### 예약 작업 (#214)
+
+정해진 날·때에 서버에서 해야 하는 일(배포 뒤 진단, 녹화가 쌓인 뒤 사전 검증, 결정에 쓸 실측)을 사람이 날짜를 기억해 손으로 돌리지 않는다. 엔진(수집기)이 때가 되면 스스로 돌리고, 결과를 GitHub 이슈 댓글로 남긴다. 에이전트는 서버, S3, 텔레그램을 못 보지만 이슈는 읽으므로, 댓글이 사람과 에이전트가 같이 보는 결과 창구다. 새로 생기는 시간 맞춘 일은 목록에 한 줄을 더하는 PR로 한다(`AGENTS.md` "Timed server work"). 서버에서 손으로 할 일은 토큰 하나다(아래 "토큰").
+
+**목록.** 코드의 `JOBS`(`src/krx_quant/scheduled.py`)다. 바꾸려면 PR을 거치므로 무엇이 언제 서버에서 도는지 리뷰된다. 밤마다 위에서부터 차례로 조건을 묻는다.
+
+| 이름 | 언제(조건) | 명령 | 제한 시간 | 결과를 남길 이슈 |
+|---|---|---|---|---|
+| `diagnose-203-187` | 이 작업을 담은 엔진(#215)이 배포된 뒤 첫 거래일 밤, 한 번 | `diagnose --days 20` | 1시간. 넉넉히 잡은 상한이다(진단은 피드를 하나씩 읽고 버린다) | #203: 출력 전체(7절로 `BAR_C`, 8절로 장벽 일치율). #187: 머리말과 9절(뒤집힌 호가)만 |
+
+댓글을 남긴 뒤 이슈마다 `ready-for-agent`를 붙이고 `ready-for-human`, `needs-triage`를 뗀다(작업마다 다른 라벨을 정할 수도 있다).
+
+**언제 도는가.**
+- 매일(거래일이 아니어도) `KRX_JOBS_AT`(기본 22:30)부터 다음 날 05:30까지가 그날 밤이다. 작업이 보는 "날"은 그 밤이 시작한 저녁의 날짜다.
+- 밤 학습이 돌고 있거나 시작할 차례면 끝날 때까지 기다린다. `KRX_TRAIN_ON=spot`이면 서버가 Spot 결과를 기다리는 동안 기다린다. 어느 쪽이든 그 밤 학습이 시작한 뒤 6시간(서버 학습을 멈추는 `TRAINING_TIMEOUT`)까지만 기다린다. Spot 결과가 끝내 오지 않거나 비용 상한으로 Spot이 꺼진 밤에도 작업이 돌게 하려는 것이다.
+- 때가 된 작업을 목록 순서대로 하나씩, 밤 학습처럼 별도 프로세스(`python -m krx_quant.cli <명령>`)로 돌린다. 동시에 둘을 돌리지 않는다(메모리 2GB). 같은 컨테이너라 데이터(`/data`)와 상태(`/state`)가 엔진과 같다.
+- 지금 시작하면 시작 시각 + 제한 시간이 05:30을 넘는 작업은 그 밤에 시작하지 않고 다음 밤으로 미룬다(텔레그램으로 알린다). 06:00 배포와 07:20 재시작이 프로세스를 끊기 때문이다. 밤 학습이 그 작업의 마지막 시작 시각까지 끝나지 않아도 미룬다. 제한 시간을 넘긴 작업은 멈추고 실패로 친다(그때까지의 출력을 올린다).
+- 수집기가 밤(22:30–05:30) 사이에 시작하면(장애 뒤 재시작) 그 밤의 작업을 바로 본다. 06:00 배포나 07:20 재시작으로 시작한 수집기는 그날 22:30을 기다린다.
+- `KRX_JOBS_AT=off`면 돌리지 않는다. 시각은 20:00부터 05:30 전까지이고 `KRX_TRAIN_AT`보다 뒤여야 한다(작업은 밤 학습을 기다리지만 밤 학습은 작업을 기다리지 않는다).
+
+**상태 파일** `state/scheduled.json`(통째로 바꿔 쓴다).
+- `jobs.<이름>`: 마지막으로 돈 것. `day`(밤), `outcome`(`ok`, `failed`, `interrupted`, 도는 동안은 `running`), `started_at`, `commit`(돌린 엔진의 `KRX_COMMIT`), `exit_code`(시작하지 못했으면 `null`), `seconds`, `timed_out`, `comments`(이슈 번호 → 댓글 주소).
+- `unposted`: 아직 이슈에 못 올린 결과. `job`, `day`, `issue`, `body`(가린 댓글 본문), `label`, `unlabel`, `comment`(댓글은 올렸고 라벨만 남았으면 그 주소).
+- 성공과 실패 모두 돈 것으로 친다. 조건이 다시 돌기를 요구하는 작업만 다시 돈다(지금 목록에는 없다. 사전 검증(#216)은 알고리즘마다 한 번이다).
+- 재시작이나 배포로 끊긴 작업(`running`으로 남은 것)은 다음 시작 때 `interrupted`가 되고 텔레그램으로 알린다. 실패로 치지 않고 다음 밤에 다시 돈다. 같은 밤에는 다시 돌리지 않는다. 엔진을 죽이는 작업이 재시작마다 다시 도는 것을 막으려는 것이다.
+- 파일을 읽을 수 없으면 `scheduled.json.bad`로 옮기고 처음부터 시작한다. 그러면 돈 작업이 한 번 더 돌 수 있다.
+
+**댓글.**
+- 첫 줄: 작업 이름, 밤, 커밋(앞 12자리), 종료 코드, 걸린 시간.
+- 그 아래 줄들: 손으로 다시 돌리는 명령, 그 이슈에 출력의 일부만 실었으면 그 말, 제한 시간에 멈췄으면 그 말, 줄였으면 몇 자·몇 줄을 줄였는지.
+- 그 아래 출력(stdout)을 코드 블록으로. stderr(로그, 오류)가 있으면 `<details>`로 접어 붙인다. 사전 검증의 리포트 JSON은 #216에서 같은 방식으로 붙인다.
+- 그 이슈에 올릴 부분(예: 9절)을 출력에서 찾지 못하면(작업이 실패했을 때 등) 출력 전체를 싣고 그렇다고 적는다.
+- GitHub 한도(65,536자)를 넘으면 접어 붙인 것은 한도의 1/8까지, 출력은 남은 만큼 앞뒤를 줄 단위로 남기고 가운데를 줄인다.
+- 올린 뒤 라벨을 바꾼다. 없는 라벨을 떼는 것은 오류가 아니다.
+
+예(#187, 출력은 줄임):
+
+````
+**예약 작업 `diagnose-203-187`** · 2026-10-16 밤 · 커밋 `75b830ab1c2d` · 종료 코드 0 · 1분 12초
+
+다시 돌리기: `docker compose run --rm engine diagnose --days 20`
+출력 중 머리말과 9절(뒤집힌 호가)만 싣는다. 전체 출력은 #203에 있다.
+
+```
+진단 2026-09-17 – 2026-10-16 (20거래일)
+
+9. 뒤집힌 호가(#187): 종목 × 날 × 30분 칸 비율·지속·깊이·봉 마감·거래소 귀속·체결·VI
+  …
+```
+````
+
+**가림.** 저장소가 공개라 올리기 전에 다음을 `[가림]`으로 바꾼다(`src/krx_quant/redaction.py`의 `redact`).
+- 비밀 설정값과 같은 문자열: `KIS_APP_KEY`, `KIS_APP_SECRET`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `KRX_ECOS_API_KEY`, `KRX_FRED_API_KEY`, `KRX_GITHUB_TOKEN`, `KRX_OBJECT_STORE`(와 그 버킷 이름), `KRX_S3_ENDPOINT_URL`, `KRX_BIND_ADDRESS`. 8자보다 짧은 값은 같은 숫자를 망가뜨리지 않으려고 두지 않는다.
+- `scripts/check_forbidden.py`가 저장소에서 막는 패턴 전부(`src/krx_quant/forbidden.py`: KIS 주문 TR 코드와 엔드포인트, AWS 키, 텔레그램 토큰, JWT, GitHub 토큰, 개인 키).
+- `*.ts.net` 이름, IPv4·IPv6 주소. 09:00:30 같은 시각은 그대로 둔다.
+
+**실패와 다시 올리기.**
+- 토큰이 없으면 올리지 않는다. 결과는 `unposted`에 남고 텔레그램에 `… GitHub에 올리지 못했습니다(KRX_GITHUB_TOKEN이 없음) …`가 간다. GitHub가 거절하거나 닿지 않아도 같다(괄호 안에 이유가 나온다).
+- 남은 결과는 다음 밤 22:30과 엔진이 다시 뜰 때 다시 올린다. 올라가면 `… 결과를 이제 올렸습니다. 댓글: …`가 간다. 작업은 다시 돌지 않는다.
+- 댓글은 올랐는데 라벨이 실패하면 댓글 주소를 남겨 두고 다음에는 라벨만 바꾼다(댓글이 두 번 오르지 않는다).
+
+**텔레그램.** 작업마다 한 줄이다: `[알림] 예약 작업 <이름>(<날> 밤): 성공, 종료 코드 0, 1분 12초. 댓글: <주소> <주소>`. 실패면 `실패, 종료 코드 N`이나 `실패, 제한 시간 1시간을 넘어 멈춤`이다. 미룬 작업, 끊긴 작업, 나중에 올린 결과도 한 줄씩 온다(6장).
+
+**손으로 다시 돌리기.** 댓글의 둘째 줄 명령이다. 예: `docker compose run --rm engine diagnose --days 20`. 출력은 터미널에 나오고 이슈에는 올라가지 않는다. 예약 작업으로 한 번 더 돌게 하려면 장 시간 밖에 `docker compose stop engine`을 하고, `state/scheduled.json`의 `jobs`에서 그 작업을 지운 뒤 `docker compose start engine`을 한다. 그 밤(22:30–05:30) 안이면 바로, 아니면 그날 22:30에 조건을 다시 묻는다.
+
+**토큰** (#218). 저장소 주인이 한 번 만든다.
+1. https://github.com/settings/personal-access-tokens/new 에서 fine-grained token을 만든다. Repository access는 Only select repositories → `codeyoma/krx-quant` 하나, Repository permissions는 **Issues: Read and write**만 준다(Metadata: Read는 자동). 만료는 1년 정도로 두고 그 전에 다시 만든다.
+2. 서버 `.env`에 `KRX_GITHUB_TOKEN=<토큰>`을 넣고 `docker compose up -d`를 실행한다. 남은 결과가 있으면 엔진이 시작할 때 올린다.
+
+토큰이 없어도 작업은 돌고 결과는 서버에 남는다. 토큰은 서버 `.env`에만 둔다. 저장소에는 두지 않는다.
+
 ### 정답이 바뀌는 날 (#170)
 
 #170을 담은 엔진이 06:00 자동 배포로 처음 뜨는 날(D)이 전환일이다. 서버에서 손으로 할 일은 없다.
@@ -640,6 +722,7 @@ docker compose start engine
 - 장벽(#183)을 담은 엔진은 처음 뜰 때 `kind_predictions`에 `width_ticks` 열을 더한다(스키마 버전은 그대로라 되돌려도 뜬다). 그날부터 장벽의 기준 예측 둘이 예측·채점되고(`/v1/leaderboard?kind=barrier`), 시작할 때 2026-10-12부터의 장벽 정답을 채운다(3장 "종류의 지난 정답"). 방향과 변동폭의 예측·채점은 전과 같다(변동폭 예측 항목에 `width_ticks: null`이 더해진다). 서버에서 손으로 할 일은 없다. 채워진 뒤 1분봉 규칙의 일치율을 잰다(2장 "장벽 1분봉 규칙의 일치율 재기").
 - 다른 종류의 예측에 봉 마감의 k를 붙이는 엔진(#200)은 처음 뜰 때 `kind_predictions`에 `flat_ticks` 열을 더한다. 스키마 버전은 그대로라 되돌려도 뜬다(옛 엔진이 쓰는 행은 그 열이 비어 있다). 그 전에 저장한 예측은 k가 없다(API의 `flat_ticks`가 `null`이고, 화면은 그때 `/v1/symbols`의 지금 k를 보인다). 서버에서 손으로 할 일은 없다.
 - 다른 종류의 예측에 봉 마감 중간가와 호가단위를 붙이는 엔진(#210)은 처음 뜰 때 `kind_predictions`에 `anchor`, `tick` 열을 더한다. 스키마 버전은 그대로라 되돌려도 뜬다(옛 엔진이 쓰는 행은 그 열이 비어 있다). 그 전에 저장한 예측은 둘 다 없다(API의 `anchor`, `tick`이 `null`이고, 화면은 그때 정답 전에 장벽의 U·L 없이 w만 보인다). 서버에서 손으로 할 일은 없다.
+- 예약 작업(#215)을 담은 엔진은 그날 밤 22:30부터 예약 작업을 본다(3장 "예약 작업 (#214)"). 첫 작업 `diagnose-203-187`은 첫 거래일 밤에 한 번 돈다. `KRX_GITHUB_TOKEN`이 없으면 결과는 서버(`state/scheduled.json`)에 남고 텔레그램으로 알린다. 토큰을 넣으면(#218) 엔진이 다음에 시작할 때 올린다. 서버에서 손으로 할 일은 토큰 하나다.
 - 결과는 텔레그램으로 온다(`krx-quant notify`): `[알림] 자동 업데이트: <이전> → <새 커밋>`과 커밋 제목(최대 10개), `[알림] 자동 업데이트 실패: …`, 그 밖의 오류(GitHub 접속 실패 등)는 `[알림] 자동 업데이트 오류: …`. 오류일 때 엔진은 그대로 돈다.
 - 업데이트가 끝나면 쓰지 않는 Docker 이미지를 지운다.
 - 이미지를 만들 때 그 커밋을 넘긴다(`KRX_COMMIT`, `compose.yaml`의 빌드 인자). 엔진은 `/v1/status`의 `commit`으로 보이고, 시작할 때마다 DB `runs`에 `start`로 커밋과 수수료율, 신호 규칙, 시간·CPU 예산을 남긴다(#85). 손으로 `docker compose up -d --build`하면 `unknown`이다. 커밋을 남기려면 `KRX_COMMIT=$(git rev-parse HEAD) docker compose up -d --build`로 띄운다.
@@ -708,6 +791,10 @@ docker compose logs --tail 200 engine
 | `[알림] 자동 업데이트: <이전> → <새 커밋>` | | 06:00 자동 업데이트가 됐다. 할 일은 없다. |
 | `[알림] 자동 업데이트 실패: <커밋>이 시작되지 않아 ...` | `journalctl -u krx-quant-update -n 50`, `docker compose logs --tail 200 engine` | 새 커밋이 3분 안에 API에 답하지 않아 이전 커밋으로 되돌렸다. 고친 커밋을 main에 올리면 다음 06:00에 받는다. "되돌렸지만 엔진이 응답하지 않습니다"면 4장의 SQLite 스키마 주의를 본다. |
 | `[알림] 자동 업데이트 오류: <명령> (줄 N). 엔진은 그대로입니다.` | `journalctl -u krx-quant-update -n 50` | GitHub 접속 실패나 fast-forward가 안 되는 체크아웃 등이다. 엔진은 그대로 돈다. 원인을 고치고 다음 06:00을 기다리거나, 장 시간 밖에서 `deploy/auto-update.sh`를 실행한다. |
+| `[알림] 예약 작업 <이름>(<날> 밤): 성공(실패), … 댓글: <주소> …` | 그 이슈의 댓글 | 결과가 올라갔고 이슈는 `ready-for-agent`다. 에이전트에게 "결과 봐줘"라고 하면 된다. 실패면 댓글의 stderr를 본다. 다시 돌리려면 3장 "예약 작업 (#214)"의 "손으로 다시 돌리기" |
+| `[알림] 예약 작업 …: … GitHub에 올리지 못했습니다(<이유>). …` | `state/scheduled.json`의 `unposted`, 로그의 `could not post` | `KRX_GITHUB_TOKEN이 없음`이면 토큰을 넣는다(#218). `HTTP 401`·`403`·`404`면 토큰이 만료됐거나 권한(Issues: Read and write)이나 저장소(`KRX_GITHUB_REPO`)가 틀렸다. 고치고 `docker compose up -d`하면 시작할 때 올린다. 그 밖(`HTTP 5xx`, `not reachable`)은 다음 밤에 저절로 다시 올린다 |
+| `[알림] 예약 작업 <이름>(<날> 밤)이 엔진 재시작으로 끊겼습니다. 다음 밤에 다시 돕니다.` | 그 밤의 배포·재시작·장애 | 할 일은 없다. 다음 밤에 다시 돈다. 매번 끊기면 메모리를 본다(`docker stats`, 커널 로그의 OOM) |
+| `[알림] 예약 작업 <이름>(<날> 밤): … 다음 밤으로 미룹니다.` | 밤 학습이 늦게 끝났거나 엔진이 밤늦게 시작했다 | 할 일은 없다. 다음 밤에 돈다. 밤마다 미뤄지면 그 작업의 제한 시간을 줄이는 PR을 낸다 |
 | 녹화된 날의 예측을 다시 보고 싶다 | | `docker compose run --rm --no-deps engine replay 2026-10-12`. 결과는 `state/replay-2026-10-12.sqlite3`다. 실시간 DB는 건드리지 않는다. |
 | 로그의 `... have no recorded events in ...; left unscorable (not recorded)` | `ls -d data/events/date=<날짜>`, `aws s3 ls s3://<버킷>/engine/events/date=<날짜>/` | 그 날·종목의 녹화가 서버에도 S3에도 없어 지난 예측의 도달 정답을 채점 불가로 남겼다(3장 "지난 예측의 도달 정답"). 녹화를 되찾아 `data/events/`에 두거나 S3에 올렸으면 장 시간 밖에 엔진을 멈추고 `docker compose run --rm --no-deps engine rescore`. |
 | `rescore`가 `the engine is running ...`으로 거부된다 | `docker compose ps` | 엔진이 돌고 있다. `docker compose stop engine` 뒤 다시 돌리고 `docker compose start engine`. |
@@ -773,6 +860,7 @@ docker compose logs --tail 200 engine
 | `models/applied.json` | `{"night": "<날짜>"}`: 마지막으로 적용한 승격 목록의 밤. 이 밤과 그 전의 목록은 다시 적용하지 않는다 |
 | `training-cache/` | 밤 학습이 Object Store에서 받아 둔 백필 1분봉과 녹화 이벤트의 사본. 키 경로가 같다. 학습이 끝나면 그 밤에 쓴 가장 오래된 날보다 오래된 날짜를 지운다 |
 | `cost_guard.json` | Cost Guard가 이달 한 일(#23): `month`(UTC `YYYY-MM`), `warned`(알린 비율, %), `stopped`(Spot 스케줄을 끔), `stop_told`(끈 것을 알림), `spent`(이달 값으로 마지막에 읽은 비용), `carried`(지난달 마지막 비용. 이 값 이상이 보이는 동안은 지난달 값으로 본다). 재시작해도 다시 알리지 않으려고 둔다. 잃어도 다음 달 1일에 스케줄을 다시 켠다 |
+| `scheduled.json` | 예약 작업의 상태(#214): 작업마다 마지막으로 돈 것(`day`, `outcome`, `started_at`, `commit`, `exit_code`, `seconds`, `timed_out`, `comments`)과 아직 올리지 못한 결과(`unposted`). 형식은 3장 "예약 작업 (#214)". `.scheduled.json.tmp`는 쓰는 중인 임시 파일, `scheduled.json.bad`는 읽지 못해 옮겨 둔 것이다 |
 | `spot_summarized.json` | `{"night": "<날짜>"}`: 요약을 보낸 마지막 Spot 학습 밤(#23). 재시작해도 같은 요약을 다시 보내지 않는다. 보내지 못한 요약은 적지 않아서, 기한까지 다시 시도하고 다음 기다림(재시작)에도 보낸다 |
 
 > **바뀜** (2026-10-10, #48): 이전에는 `training-cache/`를 자동으로 지우지 않았다 → 지금은 밤마다 오래된 날짜를 지운다. 이유: 녹화 이벤트도 캐시하게 되어 크기가 커졌다.

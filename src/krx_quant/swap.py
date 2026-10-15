@@ -12,7 +12,7 @@ The nightly training runs at ``KRX_TRAIN_AT`` on trading days: here, in its own 
 (``KRX_TRAIN_ON=server``), or on EC2 Spot started by AWS at the same time (``spot``, #23).
 On Spot, the server publishes what the run needs from it, waits for the night's result in
 the store until the next trading day's 07:30, and sends its summary (the Spot run has no
-Telegram token).
+Telegram token). The scheduled jobs (#214) wait for the night either way (``NightTraining``).
 """
 
 from __future__ import annotations
@@ -66,6 +66,50 @@ _TRAINING_ALERT = "training"
 # last such night whose summary it sent (in the state directory).
 SPOT_POLL_SECONDS = 300.0
 SUMMARIZED_FILE = "spot_summarized.json"
+
+
+class NightTraining:
+    """The nightly training as the scheduled jobs see it (#214): they wait while it runs, or
+    is due to start, but no longer than ``TRAINING_TIMEOUT`` after it started. A training
+    process here is stopped by then; a night on Spot whose result never comes (the Spot run
+    failed, or the Cost Guard turned it off) must not hold the jobs all night.
+
+    ``keep_training`` tells it when the next night starts, and when one starts and ends.
+    """
+
+    def __init__(self) -> None:
+        self.next_start: datetime | None = None
+        self.running_since: datetime | None = None
+        self._changed = asyncio.Event()
+
+    def due(self, at: datetime) -> None:
+        self.next_start = at
+        self._change()
+
+    def started(self, at: datetime, next_start: datetime) -> None:
+        self.running_since, self.next_start = at, next_start
+        self._change()
+
+    def finished(self) -> None:
+        self.running_since = None
+        self._change()
+
+    def busy_until(self, now: datetime) -> datetime | None:
+        """Until when the jobs wait at ``now``; None if no training runs or is due."""
+        since = self.running_since
+        if since is None and self.next_start is not None and self.next_start <= now:
+            since = self.next_start  # due: keep_training starts it at once
+        if since is None or now >= since + TRAINING_TIMEOUT:
+            return None
+        return since + TRAINING_TIMEOUT
+
+    async def changed(self) -> None:
+        """Return once the training has started, ended or been scheduled anew."""
+        await self._changed.wait()
+
+    def _change(self) -> None:
+        changed, self._changed = self._changed, asyncio.Event()
+        changed.set()
 
 
 @dataclass(frozen=True)
@@ -242,24 +286,31 @@ async def keep_training(
     refresh: Callable[[], Awaitable[None]],
     run_night: Callable[[date], Awaitable[str | None]] | None = None,
     first: Callable[[MarketCalendar, time, datetime], datetime] | None = None,
+    training: NightTraining | None = None,
 ) -> None:
     """Start ``krx-quant train --day <day>`` in its own process at ``train_at`` each trading
     day, until cancelled; at once for a night a restart interrupted or missed (``CATCH_UP``).
     The process sends its own summary; a failure raises an alert, cleared by the next night
     that trains. With ``run_night`` (the training on EC2 Spot), that runs the night instead
-    (None once done, else why not), and ``first`` picks the first night to run.
+    (None once done, else why not), and ``first`` picks the first night to run. ``training``
+    is told when each night is due, starts and ends (the scheduled jobs wait for it, #214).
     """
     run = run_night or _train
+    watch = training or NightTraining()
     start = (first or _first_training)(calendar, train_at, now())
     while True:
+        watch.due(start)  # before the first await: a job catching up at start waits for it
         await asyncio.sleep(max(0.0, (start - now()).total_seconds()))
         day = night_to_train(calendar, start)
         start = next_on_trading_day(calendar, train_at, max(now(), start))
+        watch.started(now(), start)
         try:
             failure = await run(day)
         except Exception as e:
             log.exception("could not run the nightly training")
             failure = str(e)
+        finally:
+            watch.finished()
         if failure is None:
             alerts.resolve(_TRAINING_ALERT, "밤 학습이 다시 됩니다.")
         else:
