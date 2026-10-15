@@ -1,4 +1,4 @@
-"""Scheduled jobs (#215, #215): when they run, what they remember, and what they post.
+"""Scheduled jobs (#215): when they run, what they remember, and what they post.
 
 The clock is a fake one (``FakeClock``); the jobs' processes are stand-ins, except where
 the process itself is the point (``run_command``) and for the diagnosis job, whose real
@@ -467,6 +467,14 @@ async def test_a_job_is_stopped_at_its_time_limit_with_what_it_wrote(tmp_path: P
     ran = await run_command(["-c", script], timedelta(seconds=1), program=[sys.executable])
     assert ran.timed_out and ran.exit_code != 0
     assert ran.stdout == "started\n"
+
+
+async def test_a_job_that_closes_its_output_is_still_stopped_at_its_time_limit() -> None:
+    script = "import os, time; os.close(1); os.close(2); time.sleep(30)"
+    ran = await asyncio.wait_for(
+        run_command(["-c", script], timedelta(seconds=1), program=[sys.executable]), timeout=10
+    )
+    assert ran.timed_out and ran.exit_code != 0
 
 
 async def test_a_job_stops_with_the_collector(tmp_path: Path) -> None:

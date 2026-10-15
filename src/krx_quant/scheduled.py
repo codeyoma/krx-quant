@@ -269,23 +269,24 @@ async def run_command(args: Sequence[str], timeout: timedelta, program: Sequence
     process = await asyncio.create_subprocess_exec(*program, *args, stdin=DEVNULL, stdout=PIPE, stderr=PIPE)
     assert process.stdout is not None and process.stderr is not None
     out, err = bytearray(), bytearray()
-    pending: set[asyncio.Task[None]] = set()
     readers = [
         asyncio.create_task(_drain(process.stdout, out)),
         asyncio.create_task(_drain(process.stderr, err)),
     ]
+    # The process's end is timed too: one that closes its output early still stops at the limit.
+    ended = asyncio.create_task(process.wait())
     try:
-        _, pending = await asyncio.wait(readers, timeout=timeout.total_seconds())
+        _, pending = await asyncio.wait([*readers, ended], timeout=timeout.total_seconds())
         if pending:
             _kill(process)
-            await asyncio.wait(pending, timeout=_DRAIN_SECONDS)
-        code = await process.wait()
+            await asyncio.wait(readers, timeout=_DRAIN_SECONDS)
+        code = await ended
     except BaseException:  # cancelled: the job stops with the collector
         _kill(process)
         raise
     finally:
-        for reader in readers:
-            reader.cancel()
+        for task in (*readers, ended):
+            task.cancel()
     return Ran(code, out.decode(errors="replace"), err.decode(errors="replace"), timed_out=bool(pending))
 
 
