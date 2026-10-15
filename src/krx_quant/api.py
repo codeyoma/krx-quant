@@ -10,7 +10,8 @@ Endpoints (all under ``/v1``):
   last N bar closes (default 100, at most 1000; before ``T`` if given), newest first, with
   their outcomes; ``?bar_close=T`` gives that bar close's;
 - ``GET /symbols/{symbol}/bars``: today's finished one-minute bars, oldest first;
-  ``?before=T&limit=N``: the last N bars before ``T`` across days (the backfill's files);
+  ``?before=T&limit=N``: the last N bars before ``T`` across days (the backfill's files;
+  default 400, at most 20,000);
 - ``GET /symbols/{symbol}/candles?period=day|week|month|year&before=T&limit=N``: the last N
   stored candles of the period (default 400, at most 2000) that start before ``T`` (default
   now), oldest first, never the one holding today (``candles``);
@@ -147,7 +148,9 @@ DEFAULT_LIMIT = 100
 MAX_LIMIT = 1000
 # Bars before a time (#108): a trading day is up to 720 one-minute bars (08:00–20:00).
 DEFAULT_BARS = 400
-MAX_BARS = 2000
+# The chart reads 300 bars of its view at a time as one-minute bars (#239): an hour view's
+# 300 are 18,000, about 25 trading days.
+MAX_BARS = 20_000
 # Day candles (#111): the chart reads a screenful and scrolls back for more.
 DEFAULT_CANDLES = 400
 MAX_CANDLES = 2000
