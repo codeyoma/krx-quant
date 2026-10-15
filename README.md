@@ -171,7 +171,7 @@ uv run python -c "import glob, pyarrow.parquet as pq; d = sorted(glob.glob('data
 | `collect` | 실시간 녹화, 예측·채점, 엔진 API, 업로드, 백필, 밤 학습 일정, 밤 예약 작업(#215). 시작할 때 API를 연 뒤 지난 예측의 빠진 도달 정답을 녹화로 채운다(#168). 멈출 때까지 돈다 | 필요 |
 | `measure-subscriptions` | 세션당 실시간 구독 한도를 잰다. 수집기를 멈추고 실행한다 | 필요 |
 | `probe-candles` | KIS 기간별 시세(`FHKST03010100`, 일·주·월·년봉)가 주는 것을 재서 출력한다(#111): 종목·ETF의 시장 구분(`UN`·`J`·`NX`)별 응답과 필드, 기간마다 한 번에 주는 개수와 거슬러 가는 끝, 수정주가 인자(`FID_ORG_ADJ_PRC`)의 차이. 읽기만 하고 0.5초 간격으로 부르므로 수집기가 도는 중에 실행해도 된다(2–3분, 300번 안팎). 결과는 [docs/kis-feeds.md](docs/kis-feeds.md#기간별-시세-일주월년봉)에 옮긴다 | 필요 |
-| `probe-supply` | 일별 수급 지표 8종(#226)을 줄 KIS 조회 7개(공매도, 투자자별 순매수, 외국인 보유·소진율, 대차·신용잔고)를 불러 출력한다: 종목·ETF의 시장 구분별 응답, 한 번에 주는 행 수와 날짜, 필드마다 비었는지·0인지·정수(수량)인지·소수(비율)인지, 첫 종목을 거슬러 간 끝, 같은 값을 주는 조회끼리 같은 날 수. **시세 값은 출력하지 않는다**(공개 이슈에 올라간다). 읽기만 하고 0.5초 간격으로, 캐시된 토큰으로 부르므로 수집기가 도는 중에 실행해도 된다(2–3분). 서버에서는 예약 작업 `probe-supply-226`이 배포 뒤 첫 밤에 돌려 #226에 남긴다([docs/kis-feeds.md](docs/kis-feeds.md#일별-수급-226), [docs/operations.md](docs/operations.md#일별-수급-출처-확인-226)). 하나도 답을 못 받으면 종료 코드 1 | 필요 |
+| `probe-supply` | 일별 수급 지표(#226)를 줄 KIS 조회 7개(공매도, 투자자별 순매수, 외국인 보유·소진율, 대차·신용잔고)와, `TOSS_CLIENT_ID`·`TOSS_CLIENT_SECRET`이 있으면 토스증권 Open API 조회 5개(#235)를 불러 출력한다: 종목·ETF의 시장 구분별 응답, 한 번에 주는 행 수와 날짜, 필드마다 비었는지·0인지·정수(수량)인지·소수(비율)인지, 첫 종목을 거슬러 간 끝(토스는 기록의 부분마다 어느 날부터 null이 아닌지도), 같은 값을 주는 조회끼리(토스와 KIS도) 같은 날 수. **시세 값은 출력하지 않는다**(공개 이슈에 올라간다). 읽기만 하고 KIS는 0.5초, 토스는 0.2초 간격으로, 캐시된 토큰으로 부르므로 수집기가 도는 중에 실행해도 된다(몇 분). 서버에서는 예약 작업 `probe-supply-226`이 배포 뒤 첫 밤에 돌려 #226에 남긴다([docs/kis-feeds.md](docs/kis-feeds.md#일별-수급-226), [docs/toss-feeds.md](docs/toss-feeds.md), [docs/operations.md](docs/operations.md#일별-수급-출처-확인-226)). 하나도 답을 못 받으면 종료 코드 1 | 필요 |
 | `check-fallbacks` | 한도로 잘린 구독을 대신하는 REST 조회를 하나씩 한 번 부르고, 기록할 이벤트나 실패 이유를 출력한다. 기록하지 않고 REST만 써서 수집기가 도는 중에 실행해도 된다. 실패가 있으면 종료 코드 1([docs/kis-feeds.md](docs/kis-feeds.md#rest-대체-조회)) | 필요 |
 | `backfill` | 빠진 1분봉을 한 번 채운다. 수집기를 멈추고 실행한다 | 필요 |
 | `archive [--recheck]` | 녹화한 날을 합쳐 `KRX_OBJECT_STORE`에 올린다. `--recheck`는 모든 파일을 저장소와 비교한다 | 필요(쓰지는 않는다) |
@@ -197,6 +197,7 @@ uv run python -c "import glob, pyarrow.parquet as pq; d = sorted(glob.glob('data
 
 - [docs/design.md](docs/design.md): 설계 (목표, 구조와 모듈 지도, 데이터, 알고리즘, 학습, 인프라, 개발 단계). 바뀐 결정은 각 절의 **바뀜**·**삭제됨** 표시에 있다
 - [docs/kis-feeds.md](docs/kis-feeds.md): KIS 피드, 키, 한도, 최근월물 찾기
+- [docs/toss-feeds.md](docs/toss-feeds.md): 토스증권 Open API(일별 수급의 보조 출처, 외국인 보유의 주 출처), 토큰 규칙, 허용 IP(#235)
 - [docs/events.md](docs/events.md): 녹화 데이터와 1분봉 형식
 - [docs/engine-api.md](docs/engine-api.md): 엔진 API, 예측·채점 규칙, 저장 구조, 알고리즘 규약과 학습, 재생
 - [docs/operations.md](docs/operations.md): 서버 개통, 설정 값 전체, 매일 일정, 밤 학습과 모델 교체, 자동 업데이트, 키 교체, 장애 대응과 알림, 저장 위치

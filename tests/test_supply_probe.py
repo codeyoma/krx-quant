@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -20,6 +21,7 @@ import pytest
 from krx_quant import cli, supply_probe
 from krx_quant.fake_kis import FakeKis, RestAnswer
 from krx_quant.kis import KisError
+from krx_quant.probe_fields import flag
 from krx_quant.supply_probe import (
     CREDIT,
     DAILY_PRICE,
@@ -28,7 +30,6 @@ from krx_quant.supply_probe import (
     LOAN,
     PRICE,
     SHORT_SALE,
-    flag,
     kis_error,
     parse,
     probe_supply,
@@ -106,6 +107,7 @@ def investor_daily(params: dict[str, str]) -> RestAnswer:
             "prsn_ntby_qty": "-2718282" if market == "UN" else "-2718281",
             "orgn_ntby_qty": "14142135",
             "frgn_ntby_qty": "-7314159",
+            "frgn_reg_ntby_qty": "-7314158",
             "prsn_ntby_tr_pbmn": "",
         }
         for d in days
@@ -134,7 +136,7 @@ def daily_price(params: dict[str, str]) -> RestAnswer:
         {
             "stck_bsop_date": f"{d:%Y%m%d}",
             "stck_clpr": "271828",
-            "hts_frgn_ehrt": "61.8033",
+            "hts_frgn_ehrt": "47.28",
             "frgn_ntby_qty": "-7314159",
         }
         for d in weekdays(INVESTOR_FIRST, TODAY, 30)
@@ -170,6 +172,11 @@ def loan(params: dict[str, str]) -> RestAnswer:
     return ok(output1=rows)
 
 
+def credit_balance(deal: date) -> str:
+    """A credit balance that changes from day to day."""
+    return str(14142135 + deal.toordinal() % 5)
+
+
 def credit(params: dict[str, str]) -> RestAnswer:
     # A deal settles two days later; the rows are those settled by the day asked.
     deals = weekdays(CREDIT_FIRST, min(ymd(params["FID_INPUT_DATE_1"]), TODAY) - timedelta(days=2), 30)
@@ -177,7 +184,7 @@ def credit(params: dict[str, str]) -> RestAnswer:
         {
             "deal_date": f"{d:%Y%m%d}",
             "stlm_date": f"{d + timedelta(days=2):%Y%m%d}",
-            "whol_loan_rmnd_stcn": "14142135",
+            "whol_loan_rmnd_stcn": credit_balance(d),
             "whol_loan_rmnd_rate": "1.6180",
             "whol_stln_rmnd_stcn": "0",
         }
@@ -199,7 +206,9 @@ def answering(kis: FakeKis) -> None:
         kis.rest_responses[source.tr] = respond
 
 
-async def probed(kis: FakeKis, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[str, int, int]:
+async def probed(
+    kis: FakeKis, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **changes: Any
+) -> tuple[str, int, int]:
     monkeypatch.setattr(supply_probe, "PACE", 0)
     answering(kis)
     settings = replace(
@@ -207,10 +216,12 @@ async def probed(kis: FakeKis, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
         symbols=("005930", "000660"),
         etf_symbols=(ETF,),
         rest_max_per_second=1000,
+        **changes,
     )
     lines: list[str] = []
     calls, failed = await probe_supply(settings, TODAY, lines.append)
-    assert calls == len(kis.rest_requests)
+    if "toss_client_id" not in changes:
+        assert calls == len(kis.rest_requests)
     return "\n".join(lines), calls, failed
 
 
@@ -242,7 +253,7 @@ async def test_each_source_s_latest_day_a_year_back_and_fields(
     # Investors: integrated, KRX and NXT; signed net buys; the continuation header.
     assert (
         "    005930 UN: OK, 30 rows (output2), 2026-09-04..2026-10-15, newest first, tr_cont M"
-        " · prsn_ntby_qty int±, orgn_ntby_qty int, frgn_ntby_qty int±" in report
+        " · prsn_ntby_qty int±, orgn_ntby_qty int, frgn_ntby_qty int±, frgn_reg_ntby_qty int±" in report
     )
     # Today's queries take no date.
     assert "[3] FHKST01010900 주식현재가 투자자" in report
@@ -301,6 +312,12 @@ async def test_the_report_carries_no_market_value(
 ) -> None:
     report, _, _ = await probed(kis, tmp_path, monkeypatch)
     assert [s for s in SENTINELS if s in report] == []
+    # No long number at all, but in TR codes (symbols have six digits).
+    assert re.search(r"(?<![A-Za-z0-9])\d{7,}", report) is None
+    assert (
+        "Toss (secondary; foreign holdings primary, #235)\n"
+        "  skipped: TOSS_CLIENT_ID/TOSS_CLIENT_SECRET not set" in report
+    )
 
 
 async def test_the_cached_token_is_used_until_it_expires(

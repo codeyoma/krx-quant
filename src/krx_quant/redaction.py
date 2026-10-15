@@ -4,10 +4,10 @@ A scheduled job's output is posted as a comment on a public repository's issue. 
 that, everything that could name a secret or the server is replaced with ``[가림]``:
 
 - every secret setting's value (``secrets_of``): the KIS app key and secret, the Telegram
-  token and chat, the AWS keys, the macro API keys, the GitHub token, the Object Store
-  (and its bucket), the S3 endpoint and ``KRX_BIND_ADDRESS``. Values shorter than
-  ``MIN_SECRET`` characters are left alone: masking them would mangle numbers that only
-  happen to be equal;
+  token and chat, the AWS keys, the macro API keys, the GitHub token, the Toss client ID and
+  secret (#235), the Object Store (and its bucket), the S3 endpoint and ``KRX_BIND_ADDRESS``.
+  Values shorter than ``MIN_SECRET`` characters are left alone: masking them would mangle
+  numbers that only happen to be equal;
 - whatever the repository's own check forbids (``forbidden.RULES``: KIS order codes,
   AWS, Telegram, JWT, GitHub tokens, private keys);
 - Tailscale names (``*.ts.net``), IPv6 and IPv4 addresses.
@@ -48,6 +48,8 @@ def secrets_of(settings: Settings) -> tuple[str, ...]:
         settings.ecos_api_key,
         settings.fred_api_key,
         settings.github_token,
+        settings.toss_client_id,
+        settings.toss_client_secret,
         settings.object_store,
         settings.s3_endpoint_url,
         settings.bind_address,

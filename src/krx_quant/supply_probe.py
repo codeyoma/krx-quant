@@ -14,16 +14,22 @@ lending and credit balances), the KIS queries the survey found (docs/kis-feeds.m
   header (``tr_cont``) where it sends one;
 - whether the sources agree on the days they share (counts of equal values only).
 
+Then the Toss Securities Open API, the secondary source (#235, ``toss_probe.py``), is asked
+the same way and compared with these answers, when its client is set.
+
 It prints no market value: the report goes on a public issue (the scheduled job
 ``probe-supply-226``). Calls are spaced ``PACE`` seconds apart, under the REST limit the
 collector shares, and the cached access token is used while it is valid (no early refresh).
+The KIS part stops asking after ``KIS_BUDGET`` and each call after ``REQUEST_TIMEOUT``, so the
+whole probe ends well inside the job's time limit.
 """
 
 from __future__ import annotations
 
 import asyncio
 import re
-from collections.abc import Callable, Sequence
+import time
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
 from typing import Any
@@ -33,8 +39,12 @@ import aiohttp
 from krx_quant.auth import tokens_and_client
 from krx_quant.config import Settings
 from krx_quant.kis import KisError, RestClient
+from krx_quant.probe_fields import MISSING, day_of, describe, flags, order_of, present, same
+from krx_quant.toss_probe import probe_toss
 
 PACE = 0.5  # seconds between calls
+KIS_BUDGET = timedelta(minutes=15)  # the KIS part asks nothing more after this
+REQUEST_TIMEOUT = 15.0  # seconds a call may take (KIS and Toss)
 WINDOW = timedelta(days=365)  # a ranged query asks this far back from its last day
 YEAR = timedelta(days=365)  # "a year back"
 MAX_PAGES = 25  # a history pages back at most this many calls, then bisects
@@ -134,7 +144,7 @@ INVESTOR_DAILY = Source(
     path=f"{QUOTATIONS}/investor-trade-by-stock-daily",
     title="종목별 투자자매매동향(일별)",
     serves="일별 개인·기관·외국인 순매수량",
-    wanted=("prsn_ntby_qty", "orgn_ntby_qty", "frgn_ntby_qty"),
+    wanted=("prsn_ntby_qty", "orgn_ntby_qty", "frgn_ntby_qty", "frgn_reg_ntby_qty"),
     markets=("UN", "J", "NX"),
     query=investor_daily_query,
     takes_date=True,
@@ -211,50 +221,6 @@ COMPARISONS: tuple[tuple[tuple[Source, str], tuple[Source, str], tuple[str, ...]
     ((DAILY_PRICE, "UN"), (DAILY_PRICE, "J"), ("hts_frgn_ehrt", "frgn_ntby_qty")),
 )
 
-EMPTY, ZERO, MISSING = "empty", "zero", "missing"
-FLAG_ORDER = ("int", "int±", "dec", "dec±", "date", "text", ZERO, EMPTY)
-_NUMBER = re.compile(r"[+-]?(\d+(\.\d*)?|\.\d+)")
-
-
-def _present(value: Any) -> bool:
-    return value is not None and str(value).strip() != ""
-
-
-def flag(name: str, values: Sequence[Any]) -> str:
-    """What a field's values look like, without them: ``empty``, ``zero``, ``date``, ``int``
-    (whole numbers: counts, amounts), ``dec`` (decimals: ratios) or ``text``; a number field
-    with a negative value gets ``±``."""
-    present = [str(v).strip() for v in values if _present(v)]
-    if not present:
-        return EMPTY
-    if "date" in name:
-        return "date"
-    if not all(_NUMBER.fullmatch(v) for v in present):
-        return "text"
-    if all(float(v) == 0 for v in present):
-        return ZERO
-    kind = "dec" if any("." in v for v in present) else "int"
-    return kind + ("±" if any(v.startswith("-") for v in present) else "")
-
-
-def flags(rows: Sequence[dict[str, Any]]) -> dict[str, str]:
-    """Each field of the rows (any row having it), flagged over all of them."""
-    names = dict.fromkeys(name for row in rows for name in row)
-    return {name: flag(name, [row.get(name) for row in rows]) for name in names}
-
-
-def describe(fields: dict[str, str]) -> str:
-    """The fields grouped by flag: ``int: a, b · dec: c · empty: d``."""
-    groups = {f: sorted(n for n, g in fields.items() if g == f) for f in FLAG_ORDER}
-    return " · ".join(f"{f}: {', '.join(names)}" for f, names in groups.items() if names) or "none"
-
-
-def day_of(row: dict[str, Any], name: str) -> date | None:
-    try:
-        return datetime.strptime(str(row.get(name) or ""), "%Y%m%d").date()
-    except ValueError:
-        return None
-
 
 @dataclass
 class Answer:
@@ -281,13 +247,13 @@ def parse(source: Source, body: dict[str, Any], more: str) -> Answer:
             if isinstance(value, list) and len(value) == 1:  # an object wrapped in a list
                 value = value[0]
             if isinstance(value, dict):
-                rows = [value] if any(_present(v) for v in value.values()) else []
+                rows = [value] if any(present(v) for v in value.values()) else []
                 return Answer(key=key, rows=rows, more=more)
         return Answer(more=more, body_keys=tuple(sorted(body)))
     for key in (source.rows_key, "output2", "output1", "output"):
         value = body.get(key)
         if isinstance(value, list):
-            rows = [r for r in value if isinstance(r, dict) and any(_present(v) for v in r.values())]
+            rows = [r for r in value if isinstance(r, dict) and any(present(v) for v in r.values())]
             head_key = next(
                 (k for k in ("output1", "output") if k != key and isinstance(body.get(k), dict)), ""
             )
@@ -312,16 +278,6 @@ def kis_error(error: KisError) -> str:
     return "error " + (" ".join(p for p in parts if p) or "(no code)")
 
 
-def _order(days: Sequence[date]) -> str:
-    if len(set(days)) < 2:
-        return "one day" if days else "no day"
-    if list(days) == sorted(days, reverse=True):
-        return "newest first"
-    if list(days) == sorted(days):
-        return "oldest first"
-    return "unordered"
-
-
 def status(source: Source, answer: Answer, end: date | None = None) -> str:
     """One call's line: OK or the error, the rows and their days."""
     if answer.error is not None:
@@ -334,7 +290,7 @@ def status(source: Source, answer: Answer, end: date | None = None) -> str:
     days = answer.days(source)
     text = f"OK, {len(answer.rows)} rows ({answer.key})"
     if days:
-        text += f", {min(days)}..{max(days)}, {_order(days)}"
+        text += f", {min(days)}..{max(days)}, {order_of(days)}"
     if len(days) < len(answer.rows):
         text += f", {len(answer.rows) - len(days)} without a day in {source.date_field}"
     for name in source.other_dates:
@@ -356,15 +312,6 @@ def wanted(source: Source, answer: Answer) -> str:
     return " · " + ", ".join(f"{name} {fields.get(name, MISSING)}" for name in source.wanted)
 
 
-def _same(a: Any, b: Any) -> bool:
-    if not (_present(a) and _present(b)):
-        return False
-    try:
-        return float(a) == float(b)
-    except ValueError:
-        return str(a).strip() == str(b).strip()
-
-
 def agreement(source_a: Source, a: Answer, source_b: Source, b: Answer, names: Sequence[str]) -> str:
     """How many shared days have equal values, field by field (counts only)."""
     by_day_a = {d: row for row in a.rows if (d := day_of(row, source_a.date_field)) is not None}
@@ -373,7 +320,7 @@ def agreement(source_a: Source, a: Answer, source_b: Source, b: Answer, names: S
     if not common:
         return "no common day"
     equal = ", ".join(
-        f"{name} {sum(_same(by_day_a[d].get(name), by_day_b[d].get(name)) for d in common)}" for name in names
+        f"{name} {sum(same(by_day_a[d].get(name), by_day_b[d].get(name)) for d in common)}" for name in names
     )
     return f"{len(common)} common days ({common[0]}..{common[-1]}); equal on: {equal}"
 
@@ -399,17 +346,22 @@ def ownership_check(answer: Answer) -> str:
 
 
 class _Prober:
-    def __init__(self, client: RestClient, out: Out) -> None:
+    def __init__(self, client: RestClient, out: Out, budget: timedelta = KIS_BUDGET) -> None:
         self._client = client
         self._out = out
         self.calls = 0
         self.failed = 0
         self._failed_in_a_row = 0
+        self._budget = budget
+        self._deadline = time.monotonic() + budget.total_seconds()
         self.first: dict[tuple[str, str], Answer] = {}  # the first stock's latest answers
 
     async def ask(self, source: Source, market: str, symbol: str, end: date, tr_cont: str = "") -> Answer:
         if self._failed_in_a_row >= MAX_FAILED_IN_A_ROW:
             return Answer(error=f"not asked: {MAX_FAILED_IN_A_ROW} calls in a row failed")
+        if time.monotonic() >= self._deadline:
+            minutes = self._budget.total_seconds() / 60
+            return Answer(error=f"not asked: the KIS part's {minutes:g}-minute budget is used up")
         if self.calls:
             await asyncio.sleep(PACE)
         self.calls += 1
@@ -419,7 +371,7 @@ class _Prober:
             )
         except KisError as e:
             answer = Answer(error=kis_error(e))
-        except (aiohttp.ClientError, TimeoutError, ValueError) as e:
+        except (aiohttp.ClientError, OSError, ValueError) as e:  # OSError: timeouts too
             answer = Answer(error=f"error {type(e).__name__}")
         else:
             self._failed_in_a_row = 0
@@ -577,15 +529,21 @@ class _Prober:
                 self._out(f"  {PRICE.tr} {market}: {ownership_check(answer)}")
 
 
+def kis_rows(first: Mapping[tuple[str, str], Answer]) -> dict[tuple[str, str], list[dict[str, Any]]]:
+    """The first stock's latest KIS rows by (TR, market), for the Toss part's cross-checks."""
+    return {key: answer.rows for key, answer in first.items() if answer.error is None}
+
+
 async def probe_supply(settings: Settings, today: date, out: Out = print) -> tuple[int, int]:
-    """Ask each source and print the report; the calls made, and how many failed."""
+    """Ask each source, KIS then Toss, and print the report; the calls made, and how many
+    failed (both parts)."""
     stocks = settings.symbols[:MAX_SYMBOLS]
     etf = next((s for s in settings.etf_symbols if s not in settings.symbols), None)
     # The cached token while it is valid: no early refresh beside the running collector.
     settings = replace(settings, token_refresh_margin_seconds=0.0)
-    async with aiohttp.ClientSession() as session:
+    timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
         tokens, client = tokens_and_client(session, settings, lambda: datetime.now().astimezone())
-        await tokens.get()
         prober = _Prober(client, out)
         out(f"probe-supply (#226) {today}: stocks {', '.join(stocks)}; ETF {etf or '-'}")
         out("No market values below: field names, row counts, days and flags only.")
@@ -593,11 +551,28 @@ async def probe_supply(settings: Settings, today: date, out: Out = print) -> tup
             "Flags: int whole numbers (counts, amounts) · dec decimals (ratios) · ± some negative · "
             "date · text · zero all zero · empty all empty · missing not in the answer."
         )
-        for n, source in enumerate(SOURCES, 1):
+        out("")
+        out("KIS (primary)")
+        try:
+            await tokens.get()
+        except (KisError, aiohttp.ClientError, OSError, ValueError) as e:
+            prober.calls += 1
+            prober.failed += 1
+            reason = kis_error(e) if isinstance(e, KisError) else f"error {type(e).__name__}"
+            out(f"  stopped: no KIS access token: {reason}")
+        else:
+            for n, source in enumerate(SOURCES, 1):
+                out("")
+                await prober.source(n, source, stocks, etf, today)
             out("")
-            await prober.source(n, source, stocks, etf, today)
+            prober.cross_checks(stocks[0])
         out("")
-        prober.cross_checks(stocks[0])
+        out(f"KIS: {prober.calls} calls, {prober.failed} failed")
         out("")
-        out(f"{prober.calls} calls, {prober.failed} failed")
-    return prober.calls, prober.failed
+        toss_calls, toss_failed = await probe_toss(
+            session, settings, [*stocks, *([etf] if etf else [])], today, kis_rows(prober.first), out
+        )
+    calls, failed = prober.calls + toss_calls, prober.failed + toss_failed
+    out("")
+    out(f"{calls} calls, {failed} failed")
+    return calls, failed

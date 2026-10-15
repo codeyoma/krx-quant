@@ -961,8 +961,14 @@ async def test_the_collector_runs_the_night_s_jobs(kis: FakeKis, empty_server: P
         )
         stop = asyncio.Event()
         task = asyncio.create_task(run_collector(settings, stop=stop, clock=lambda: at(FRIDAY, "23:00")))
+
+        def posted() -> bool:
+            """Both comments are up and saved (the labels come between a comment and its save)."""
+            record = JobState.load(empty_server / "state" / STATE_FILE).jobs.get("diagnose-203-187")
+            return record is not None and record.comments.keys() == {203, 187}
+
         try:
-            await until(lambda: len(hub.comments) == 2, timeout=25)
+            await until(lambda: len(hub.comments) >= 2 and posted(), timeout=25)
         finally:
             stop.set()
             await asyncio.wait_for(task, 10)
