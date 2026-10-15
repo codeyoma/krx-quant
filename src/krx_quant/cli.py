@@ -47,6 +47,8 @@ from krx_quant.prevalidation import (
 )
 from krx_quant.replay import replay_day
 from krx_quant.rescore import EngineRunning, rescore
+from krx_quant.signal_review import DEFAULT_DAYS as SIGNAL_REVIEW_DAYS
+from krx_quant.signal_review import signal_review
 from krx_quant.training import fit_algorithm
 
 
@@ -310,6 +312,12 @@ def _diagnose(days: int) -> int:
     return 0
 
 
+def _signal_review(days: int) -> int:
+    settings = Settings.from_env(require_kis=False)
+    print(signal_review(settings.state_dir / DB_NAME, settings, datetime.now(KST).date(), days))
+    return 0
+
+
 def _macro() -> int:
     settings = Settings.from_env(require_kis=False)
     macro = asyncio.run(run_macro(settings, lambda: datetime.now(KST)))
@@ -458,6 +466,16 @@ def main(argv: list[str] | None = None) -> int:
         default=DEFAULT_DAYS,
         help=f"the latest N trading days with data (default {DEFAULT_DAYS})",
     )
+    signal_review_cmd = sub.add_parser(
+        "signal-review",
+        help="print what choosing the Telegram signal settings needs (#206); reads only, writes nothing",
+    )
+    signal_review_cmd.add_argument(
+        "--days",
+        type=_positive,
+        default=SIGNAL_REVIEW_DAYS,
+        help=f"the latest N days with predictions (default {SIGNAL_REVIEW_DAYS}, the leaderboard's 20d)",
+    )
     notify_cmd = sub.add_parser("notify", help="send a notice to the Telegram chat that receives alerts")
     notify_cmd.add_argument("text")
     fake = sub.add_parser("fake-kis", help="run a local fake KIS server for offline testing")
@@ -515,6 +533,8 @@ def main(argv: list[str] | None = None) -> int:
             return _macro()
         elif args.command == "diagnose":
             return _diagnose(args.days)
+        elif args.command == "signal-review":
+            return _signal_review(args.days)
         elif args.command == "test-alert":
             return asyncio.run(_test_alert())
         elif args.command == "fake-kis":

@@ -31,7 +31,7 @@ from __future__ import annotations
 import contextlib
 import json
 import sqlite3
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
@@ -282,6 +282,89 @@ def _excluded(days: Sequence[date], symbol: str | None, db: sqlite3.Connection) 
     ):
         out.setdefault(name, Excluded()).status[status] = n
     return out
+
+
+@contextlib.contextmanager
+def read_only(db: Path) -> Iterator[sqlite3.Connection | None]:
+    """The engine DB, read without writing (``diagnose``, ``signal-review``): while the engine
+    runs (its write-ahead log is there) as a reader beside it, else as a file nothing changes
+    (no ``-wal`` or ``-shm`` is made); None if there is no DB."""
+    if not db.exists():
+        yield None
+        return
+    live = db.with_name(db.name + "-wal").exists()
+    conn = sqlite3.connect(db.resolve().as_uri() + ("?mode=ro" if live else "?mode=ro&immutable=1"), uri=True)
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
+def select_predictions(db: sqlite3.Connection, where: str, params: Sequence[Any]) -> list[dict[str, Any]]:
+    """The predictions ``where`` selects (on ``p``), each with its outcome, block, votes, touch
+    label, model target and members (``pooled``), as the store and the API read them; ``db``'s
+    rows are ``sqlite3.Row``."""
+    rows = db.execute(
+        "SELECT p.*, o.target_at, o.mid_close, o.mid_display, o.mid_target, o.flat_ticks,"
+        " o.class_a, o.class_b, o.special, o.unscorable, o.scored_at, b.reason AS blocked,"
+        " v.up AS votes_up, v.flat AS votes_flat, v.down AS votes_down,"
+        " t.class AS touch_class, t.unscorable AS touch_unscorable, t.path AS touch_path,"
+        " m.target_version AS model_target"
+        " FROM predictions p LEFT JOIN outcomes o ON o.prediction_id = p.id"
+        " LEFT JOIN blocks b ON b.prediction_id = p.id"
+        " LEFT JOIN votes v ON v.prediction_id = p.id"
+        f" {TOUCH_JOIN}"
+        " LEFT JOIN model_targets m ON m.algorithm = p.algorithm AND m.version = p.model_version " + where,
+        tuple(params),
+    ).fetchall()
+    out = [dict(r) for r in rows]
+    # A consensus's members, as a list on its row (#107); None where none were stored.
+    ids = [r["id"] for r in out]
+    pooled: dict[int, list[str]] = {}
+    for start in range(0, len(ids), 500):  # under SQLite's limit on parameters
+        chunk = ids[start : start + 500]
+        marks = ",".join("?" * len(chunk))
+        for r in db.execute(
+            f"SELECT prediction_id, algorithm FROM pooled WHERE prediction_id IN ({marks})"
+            " ORDER BY prediction_id, position",
+            chunk,
+        ):
+            pooled.setdefault(r[0], []).append(r[1])
+    for r in out:
+        r["pooled"] = pooled.get(r["id"])
+    return out
+
+
+def scored_rows(
+    db: sqlite3.Connection, days: Sequence[date], symbol: str | None, include_special: bool
+) -> list[dict[str, Any]]:
+    """Predictions made on ``days`` (of ``symbol`` if given) and scored on their touch label
+    (``SCORED``), special ones only if ``include_special``: what the statistics are made of."""
+    if not days:
+        return []
+    on, params = _made_on(days, symbol)
+    where = f"WHERE {on} AND {SCORED}"
+    if not include_special:
+        where += " AND o.special = 0"
+    return select_predictions(db, where, params)
+
+
+def days_with_predictions(db: sqlite3.Connection, until: date, limit: int) -> list[date]:
+    """The latest ``limit`` days with predictions, up to ``until``, latest first.
+
+    Walks back a day at a time on the bar-close index rather than reading every row.
+    """
+    days: list[date] = []
+    before = iso(datetime.combine(until + timedelta(days=1), time(), KST))
+    while len(days) < limit:
+        latest = db.execute("SELECT MAX(bar_close) FROM predictions WHERE bar_close < ?", (before,))
+        value = latest.fetchone()[0]
+        if value is None:
+            break
+        day = date.fromisoformat(value[:10])
+        days.append(day)
+        before = iso(datetime.combine(day, time(), KST))
+    return days
 
 
 def iso(at: datetime) -> str:
@@ -1240,21 +1323,9 @@ class PredictionStore:
         return set(self._algorithms)
 
     def prediction_days(self, until: date, limit: int) -> list[date]:
-        """The latest ``limit`` days with predictions, up to ``until``, latest first.
-
-        Walks back a day at a time on the bar-close index rather than reading every row.
-        """
-        days: list[date] = []
-        before = iso(datetime.combine(until + timedelta(days=1), time(), KST))
-        while len(days) < limit:
-            latest = self._db.execute("SELECT MAX(bar_close) FROM predictions WHERE bar_close < ?", (before,))
-            value = latest.fetchone()[0]
-            if value is None:
-                break
-            day = date.fromisoformat(value[:10])
-            days.append(day)
-            before = iso(datetime.combine(day, time(), KST))
-        return days
+        """The latest ``limit`` days with predictions, up to ``until``, latest first
+        (``days_with_predictions``)."""
+        return days_with_predictions(self._db, until, limit)
 
     def scored_predictions(
         self, days: Sequence[date], symbol: str | None, include_special: bool
@@ -1270,11 +1341,7 @@ class PredictionStore:
     def _scored(
         self, days: Sequence[date], symbol: str | None, include_special: bool, db: sqlite3.Connection
     ) -> list[dict[str, Any]]:
-        on, params = _made_on(days, symbol)
-        where = f"WHERE {on} AND {SCORED}"
-        if not include_special:
-            where += " AND o.special = 0"
-        return self._select(where, tuple(params), db)
+        return scored_rows(db, days, symbol, include_special)
 
     def scored_and_excluded(
         self, days: Sequence[date], symbol: str | None, include_special: bool
@@ -1305,40 +1372,5 @@ class PredictionStore:
         count: int = self._db.execute("SELECT COUNT(*) FROM outcomes WHERE scored_at IS NULL").fetchone()[0]
         return count
 
-    def _select(
-        self, where: str, params: tuple[Any, ...], db: sqlite3.Connection | None = None
-    ) -> list[dict[str, Any]]:
-        rows = (
-            (db or self._db)
-            .execute(
-                "SELECT p.*, o.target_at, o.mid_close, o.mid_display, o.mid_target, o.flat_ticks,"
-                " o.class_a, o.class_b, o.special, o.unscorable, o.scored_at, b.reason AS blocked,"
-                " v.up AS votes_up, v.flat AS votes_flat, v.down AS votes_down,"
-                " t.class AS touch_class, t.unscorable AS touch_unscorable, t.path AS touch_path,"
-                " m.target_version AS model_target"
-                " FROM predictions p LEFT JOIN outcomes o ON o.prediction_id = p.id"
-                " LEFT JOIN blocks b ON b.prediction_id = p.id"
-                " LEFT JOIN votes v ON v.prediction_id = p.id"
-                f" {TOUCH_JOIN}"
-                " LEFT JOIN model_targets m ON m.algorithm = p.algorithm AND m.version = p.model_version "
-                + where,
-                params,
-            )
-            .fetchall()
-        )
-        out = [dict(r) for r in rows]
-        # A consensus's members, as a list on its row (#107); None where none were stored.
-        ids = [r["id"] for r in out]
-        pooled: dict[int, list[str]] = {}
-        for start in range(0, len(ids), 500):  # under SQLite's limit on parameters
-            chunk = ids[start : start + 500]
-            marks = ",".join("?" * len(chunk))
-            for r in (db or self._db).execute(
-                f"SELECT prediction_id, algorithm FROM pooled WHERE prediction_id IN ({marks})"
-                " ORDER BY prediction_id, position",
-                chunk,
-            ):
-                pooled.setdefault(r[0], []).append(r[1])
-        for r in out:
-            r["pooled"] = pooled.get(r["id"])
-        return out
+    def _select(self, where: str, params: tuple[Any, ...]) -> list[dict[str, Any]]:
+        return select_predictions(self._db, where, params)
