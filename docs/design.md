@@ -54,7 +54,7 @@
 | `signals.py` | 텔레그램 신호 알림(선택) |
 | `training.py`, `nightly.py`, `model_shelf.py`, `swap.py` | 학습 샘플, 밤 학습, 서버의 모델 이력, 08:00 교체와 모델 감시, Spot 학습 결과 기다리기 |
 | `cost_guard.py` | 월 AWS 비용 감시: 50%·80% 알림, 상한에서 Spot 학습 끄기(#23) |
-| `scheduled.py`, `github.py`, `redaction.py`, `forbidden.py` | 예약 작업(#215): 작업 목록(`JOBS`. 사전 검증 작업은 알고리즘 등록 목록에서 만든다, #204)과 밤마다 돌리는 스케줄러, 상태 파일, GitHub 이슈 댓글과 라벨, 올리기 전 가림, 저장소 검사(`scripts/check_forbidden.py`)와 가림이 같이 쓰는 금지 패턴([operations.md](operations.md#예약-작업-214)) |
+| `scheduled.py`, `github.py`, `redaction.py`, `forbidden.py` | 예약 작업(#215): 작업 목록(`JOBS`. 사전 검증 작업은 알고리즘 등록 목록에서 만든다, #204)과 밤마다 돌리는 스케줄러, 상태 파일, GitHub 이슈 댓글과 라벨, 올리기 전 가림, 저장소 검사(`scripts/check_forbidden.py`)와 가림이 같이 쓰는 금지 패턴([operations.md](operations.md#예약-작업-215)) |
 | `macro.py`, `regime.py` | 매크로 지표 수집(07:30), 일일 국면 |
 | `econ_calendar.py` | 경제 캘린더 수집(15분마다, TradingView), `/v1/calendar`의 답 (#150) |
 | `replay.py`, `demo.py`, `fake_kis.py`, `notify.py`, `cli.py` | 재생, 화면 개발용 데모 엔진, 가짜 KIS, 텔레그램 알림, 명령 |

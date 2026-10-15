@@ -231,7 +231,7 @@ class Facts:
 
     recorded_days: int = 0  # recorded days, as ``prevalidate`` counts them (MIN_DAYS, #204)
     waiting: tuple[str, ...] = ()  # the algorithms waiting for their pre-validation (#204)
-    official: int = 0  # the consensus members: active algorithms on the engine's target (#217)
+    official: int = 0  # the consensus members: active algorithms on the engine's target (#206)
     # The latest pre-validation report of each registered algorithm that has one (#204).
     reports: Mapping[str, LastReport] = field(default_factory=dict)
 
