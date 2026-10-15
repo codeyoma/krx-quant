@@ -164,6 +164,9 @@ class Settings:
     calendar_url: str = DEFAULT_CALENDAR_URL
     regime_rules: RegimeRules = RegimeRules()
     signal_rule: SignalRule | None = None  # Telegram signal alerts; None: off
+    # The signal settings (KRX_SIGNAL_MIN_PROBABILITY, KRX_SIGNAL_MIN_AGREE) whether the alerts
+    # are on or off: what ``signal-review`` (#206) shows and reviews.
+    signal_thresholds: SignalRule = SIGNALS
     commit: str = "unknown"  # the commit the image was built from (KRX_COMMIT, set by the deploy)
     probation_review_days: tuple[int, ...] = (10, 20, 40)  # days on probation it is judged on (#87)
     bench_review_days: tuple[int, ...] = (20, 40, 60)  # days on the bench it may recover on
@@ -382,6 +385,7 @@ class Settings:
             signal_rule=signal_rule
             if _on_or_off("KRX_SIGNAL_ALERT", values.get("KRX_SIGNAL_ALERT", "off"))
             else None,
+            signal_thresholds=signal_rule,
             commit=values.get("KRX_COMMIT", "").strip() or "unknown",
             probation_review_days=review_days("KRX_PROBATION_REVIEW_DAYS", "10,20,40"),
             bench_review_days=review_days("KRX_BENCH_REVIEW_DAYS", "20,40,60"),

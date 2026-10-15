@@ -705,7 +705,37 @@ DIAGNOSE = Job(
     ),
 )
 
-# ② The pre-validations (#204): a new algorithm runs live once its pre-validation has passed
+# ② The signal-threshold review (#206): on the first night with an official algorithm (the
+# first probation verdicts on the touch target, about ten trading days after it restarted
+# probation, #170), once. Before, the consensus has no member and no signal goes out. The
+# command reads the engine DB read-only, beside the running engine; the hour is a bound, not
+# an estimate. Before the pre-validations: it is short, and they may take the rest of the night.
+SIGNAL_REVIEW_ISSUE = 206
+
+
+def _first_official_night(night: Night) -> bool:
+    """Once, on the first night the consensus has a member (an official algorithm)."""
+    return night.facts.official > 0 and not night.ran
+
+
+SIGNAL_REVIEW = Job(
+    name="signal-review-206",
+    due=_first_official_night,
+    command=("signal-review", "--days", "20"),
+    timeout=timedelta(hours=1),
+    targets=(
+        Target(
+            SIGNAL_REVIEW_ISSUE,
+            note=(
+                "에이전트가 이 출력으로 신호 기준의 추천값(`KRX_SIGNAL_MIN_PROBABILITY`, "
+                "`KRX_SIGNAL_MIN_AGREE`)을 낸다. 사용자가 정하면 서버 `.env`의 두 값을 바꾸거나 기본값을 "
+                "PR로 바꾼다."
+            ),
+        ),
+    ),
+)
+
+# ③ The pre-validations (#204): a new algorithm runs live once its pre-validation has passed
 # (``prevalidation.py``). Once ``MIN_DAYS`` trading days are recorded, one waiting algorithm
 # is pre-validated a night, at most (``prevalidation_tonight``): a run replays 20 days beside
 # the live engine, on a 2 GB server with burst CPU. They go in this order, then any other
@@ -814,5 +844,6 @@ def _report_of(algorithm: str) -> str:
 
 JOBS: tuple[Job, ...] = (
     DIAGNOSE,
+    SIGNAL_REVIEW,
     *prevalidation_jobs([*(a.name for a in ALGORITHMS), *(a.name for a in KIND_ALGORITHMS)]),
 )

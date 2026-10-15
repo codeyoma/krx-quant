@@ -49,7 +49,6 @@ in turn, as float32 seconds, to stay within the server's memory.
 
 from __future__ import annotations
 
-import contextlib
 import json
 import sqlite3
 from collections import Counter, defaultdict
@@ -84,7 +83,7 @@ from krx_quant.feeds.base import KST
 from krx_quant.macro import INDICATORS, MACRO, decided_before, read_partition
 from krx_quant.market_calendar import MarketCalendar, Session
 from krx_quant.market_view import prediction_window
-from krx_quant.predictions import SCORED, TOUCH_JOIN
+from krx_quant.predictions import SCORED, TOUCH_JOIN, read_only
 from krx_quant.pricing import most_likely, tick_size
 from krx_quant.ranges import ANSWER_VERSION, BAR_C, RANGE, bar_range
 from krx_quant.reference import BAR, KRX_ONLY, MAX_QUOTE_AGE
@@ -117,7 +116,7 @@ def diagnose(
 ) -> str:
     """The diagnosis of the latest ``days`` trading days with data (every one if None); the
     bar rule's flat band at ``fee_rate``."""
-    with _read_only(db) as conn:
+    with read_only(db) as conn:
         chosen = [d for d in _days(data_dir, conn) if calendar.is_trading_day(d)]
         if days is not None:
             chosen = chosen[-days:]
@@ -148,21 +147,6 @@ def diagnose(
     for title, body in sections:
         lines += ["", title, *(f"  {line}" for line in body or ["없음"])]
     return "\n".join(lines)
-
-
-@contextlib.contextmanager
-def _read_only(db: Path) -> Iterator[sqlite3.Connection | None]:
-    """The engine DB, read without writing: while the engine runs (its write-ahead log is
-    there) as a reader beside it, else as a file nothing changes; None if there is no DB."""
-    if not db.exists():
-        yield None
-        return
-    live = db.with_name(db.name + "-wal").exists()
-    conn = sqlite3.connect(db.resolve().as_uri() + ("?mode=ro" if live else "?mode=ro&immutable=1"), uri=True)
-    try:
-        yield conn
-    finally:
-        conn.close()
 
 
 def _days(data_dir: Path, conn: sqlite3.Connection | None) -> list[date]:

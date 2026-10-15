@@ -35,6 +35,7 @@ from krx_quant.scheduled import (
     JOBS,
     OK,
     RUNNING,
+    SIGNAL_REVIEW,
     STATE_FILE,
     Attachment,
     Facts,
@@ -850,6 +851,77 @@ async def test_the_diagnosis_job_runs_the_real_command(empty_server: Path) -> No
     assert "진단: 데이터 없음" in whole and "8. 장벽 정답(#183)" in whole and "9. 뒤집힌 호가(#187)" in whole
     assert "진단: 데이터 없음\n\n9. 뒤집힌 호가(#187)" in crossed and "8. 장벽" not in crossed
     assert state.jobs["diagnose-203-187"].exit_code == 0
+
+
+def official(day: date, n: int, record: JobRecord | None = None) -> Night:
+    return Night(day, CALENDAR.is_trading_day(day), COMMIT, record, {}, Facts(official=n))
+
+
+def test_the_signal_review_runs_once_on_the_first_night_with_an_official_algorithm() -> None:
+    assert SIGNAL_REVIEW.command == ("signal-review", "--days", "20")
+    assert SIGNAL_REVIEW.timeout == timedelta(hours=1)
+    assert [t.issue for t in SIGNAL_REVIEW.targets] == [206]
+    assert SIGNAL_REVIEW.label == ("ready-for-agent",)
+    assert JOBS[:2] == (DIAGNOSE, SIGNAL_REVIEW)  # before the pre-validations, which may take the night
+    assert not SIGNAL_REVIEW.due(official(FRIDAY, 0))  # no member yet: no consensus, no signal
+    assert SIGNAL_REVIEW.due(official(FRIDAY, 1))
+    assert SIGNAL_REVIEW.due(official(SATURDAY, 2))  # any night, trading or not
+    ran = JobRecord(FRIDAY, OK, at(FRIDAY, "22:30"), COMMIT, 0, 30.0)
+    assert not SIGNAL_REVIEW.due(official(MONDAY, 2, ran))
+    assert not SIGNAL_REVIEW.due(official(MONDAY, 2, replace(ran, outcome=FAILED, exit_code=1)))
+    assert SIGNAL_REVIEW.due(official(MONDAY, 2, replace(ran, outcome=INTERRUPTED)))
+
+
+async def test_the_signal_review_waits_for_an_official_algorithm_then_runs_once(tmp_path: Path) -> None:
+    members = {THURSDAY: 0, FRIDAY: 1, SATURDAY: 1, SUNDAY: 2}
+    clock = FakeClock(at(THURSDAY, "22:00"))
+
+    def facts() -> Facts:  # the first verdicts make one official on Friday
+        night = (clock.now() - timedelta(hours=6)).date()
+        return Facts(official=members[night])
+
+    async with scheduling(tmp_path, at(THURSDAY, "22:00"), [SIGNAL_REVIEW], facts=facts, clock=clock) as (
+        _,
+        runs,
+        _,
+        state,
+    ):
+        clock.set(at(THURSDAY, "22:30"))
+        await settle()
+        assert runs.started == []
+        clock.set(at(FRIDAY, "22:30"))
+        await until(lambda: runs.started == [("signal-review", at(FRIDAY, "22:30"))])
+        await until(lambda: state.jobs["signal-review-206"].outcome == OK)
+        clock.set(at(SATURDAY, "22:30"))
+        clock.set(at(SUNDAY, "22:30"))
+        await settle()
+        assert runs.names() == ["signal-review"]
+
+
+async def test_the_signal_review_job_runs_the_real_command(empty_server: Path) -> None:
+    state = JobState.load(empty_server / STATE_FILE)
+
+    async def facts() -> Facts:
+        return Facts(official=1)
+
+    async with fake_github() as hub, aiohttp.ClientSession() as session:
+        scheduler = Scheduler(
+            [SIGNAL_REVIEW],
+            AT,
+            CALENDAR,
+            state,
+            GitHub(session, TOKEN, REPO, hub.url),
+            Told(),
+            FakeClock(at(FRIDAY, "23:00")),
+            commit=COMMIT,
+            facts=facts,
+        )
+        await asyncio.wait_for(scheduler.run_night(FRIDAY), 25)
+    [body] = hub.bodies(206)
+    assert "신호 기준 검토: 데이터 없음" in body and "1. 신호 설정과 엔진이 남긴 신호" in body
+    assert "KRX_SIGNAL_MIN_PROBABILITY 0.6 · KRX_SIGNAL_MIN_AGREE 2" in body
+    assert "추천값" in body  # what the agent does with it
+    assert state.jobs["signal-review-206"].exit_code == 0
 
 
 async def test_the_collector_runs_the_night_s_jobs(kis: FakeKis, empty_server: Path) -> None:
