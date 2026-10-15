@@ -23,6 +23,12 @@ width w of a kind with barriers at the bar close, and so are ``kind_predictions.
 ``kind_predictions.tick`` (#210), the bar close's mid-point and its tick size, the reference its
 answer is measured from (a barrier's U and L before its answer is in).
 
+``special_windows`` (#236) keeps every special situation's window the engine learns (a VI,
+a circuit breaker, a sidecar: ``special.py``), one row per window, its end changed when a
+later version is learned (a VI's release); ``special_days`` the past days whose windows were
+decided from their recordings (``rescore.fill_special_windows``). They are tables of their own,
+as ``touches``: an engine from before them still opens the database (``_SPECIAL_SCHEMA``).
+
 Times are ISO 8601 strings in KST, which sort in time order.
 """
 
@@ -43,6 +49,7 @@ from krx_quant.feeds.base import KST
 from krx_quant.kinds import Answer
 from krx_quant.lifecycle import Standing, Status
 from krx_quant.pricing import Direction
+from krx_quant.special import Window
 from krx_quant.touch import TARGET_VERSION, TouchResult, touch_path
 
 # The engine's database, in the state directory.
@@ -193,6 +200,27 @@ CREATE TABLE IF NOT EXISTS kind_answers (  -- a kind's answer of a bar close's f
     path TEXT NOT NULL,               -- JSON: the kind's summary of the window
     scored_at TEXT NOT NULL,
     PRIMARY KEY (kind, symbol, bar_close, answer_version)
+);
+"""
+
+# Special situations' windows (#236): tables of their own, as touches, so an engine from before
+# them still opens the database; the schema version stays.
+_SPECIAL_SCHEMA = """
+CREATE TABLE IF NOT EXISTS special_windows (  -- a special situation's window, as last learned
+    kind TEXT NOT NULL,               -- vi, circuit_breaker, sidecar (special.Kind)
+    symbol TEXT,                      -- a VI's symbol; null for the whole market
+    start TEXT NOT NULL,
+    end TEXT NOT NULL,                -- the release, or the least it lasts while that is not known
+    detail TEXT,                      -- a breaker's stage (1단계), a VI's type (static); else null
+    learned_at TEXT NOT NULL          -- when this version of it was received
+);
+CREATE UNIQUE INDEX IF NOT EXISTS special_windows_key ON special_windows (kind, ifnull(symbol, ''), start);
+CREATE INDEX IF NOT EXISTS special_windows_by_start ON special_windows (start);
+CREATE TABLE IF NOT EXISTS special_days (  -- a past day whose windows were decided from its recording
+    day TEXT PRIMARY KEY,             -- YYYY-MM-DD (KST)
+    source TEXT,                      -- where its events came from; null: recorded nowhere
+    windows INTEGER NOT NULL,         -- the windows decided
+    decided_at TEXT NOT NULL
 );
 """
 
@@ -484,6 +512,7 @@ class PredictionStore:
             (_FROM_V1 if version == 1 else "")
             + _SCHEMA
             + _KIND_SCHEMA
+            + _SPECIAL_SCHEMA
             + _added_columns(self._db)
             + f"PRAGMA user_version={_VERSION};"
         )
@@ -885,6 +914,97 @@ class PredictionStore:
                 params,
             )
             self._db.execute(f"UPDATE kind_answers SET special = 1 WHERE {answers}", answered)
+
+    # Special situations' windows (#236).
+
+    def keep_special(self, window: Window, learned_at: datetime) -> None:
+        """Keep a special window the engine learned at ``learned_at``: a new one, or a later
+        version of one kept (the same kind, symbol and start: a VI's release)."""
+        with self._db:
+            self._keep_special(window, learned_at)
+
+    def _keep_special(self, window: Window, learned_at: datetime) -> int:
+        """Store ``window`` in the transaction open; the rows written."""
+        key = (window.kind.value, window.symbol or "", iso(window.start))
+        values = (iso(window.end), window.detail, iso(learned_at))
+        cursor = self._db.execute(
+            "UPDATE special_windows SET end = ?, detail = ?, learned_at = ?"
+            " WHERE kind = ? AND ifnull(symbol, '') = ? AND start = ?",
+            (*values, *key),
+        )
+        if cursor.rowcount:
+            return cursor.rowcount
+        self._db.execute(
+            "INSERT INTO special_windows (kind, symbol, start, end, detail, learned_at)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (window.kind.value, window.symbol, iso(window.start), *values),
+        )
+        return 1
+
+    def special_windows(self, symbol: str | None, since: datetime, until: datetime) -> list[dict[str, Any]]:
+        """The windows kept that start in ``[since, until)``: ``symbol``'s VIs and the whole
+        market's (every window if ``symbol`` is None), in time order."""
+        where = "start >= ? AND start < ?"
+        params: list[Any] = [iso(since), iso(until)]
+        if symbol is not None:
+            where += " AND (symbol IS NULL OR symbol = ?)"
+            params.append(symbol)
+        rows = self._db.execute(
+            "SELECT kind, symbol, start, end, detail, learned_at FROM special_windows"
+            f" WHERE {where} ORDER BY start, kind, ifnull(symbol, '')",
+            params,
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def special_undecided(self, since: date, before: date) -> dict[date, list[str]]:
+        """The days from ``since`` to before ``before`` with predictions, not yet decided from
+        their recording (#236), with the symbols predicted on each. Windows the live engine kept
+        do not make a day decided: an engine restarted that day learned only part of it (its
+        special situations live in memory), so only a whole day's replay does."""
+        decided = {
+            r[0]
+            for r in self._db.execute(
+                "SELECT day FROM special_days WHERE day >= ? AND day < ?",
+                (since.isoformat(), before.isoformat()),
+            )
+        }
+        days: dict[date, list[str]] = {}
+        day = since
+        while day < before:
+            if day.isoformat() not in decided:
+                rows = self._db.execute(
+                    "SELECT DISTINCT symbol FROM predictions WHERE bar_close >= ? AND bar_close < ?"
+                    " ORDER BY symbol",
+                    (iso(_midnight(day)), iso(_midnight(day + timedelta(days=1)))),
+                ).fetchall()
+                if rows:
+                    days[day] = [r[0] for r in rows]
+            day += timedelta(days=1)
+        return days
+
+    def decide_special_day(
+        self, day: date, windows: Sequence[tuple[datetime, Window]], source: str | None, decided_at: datetime
+    ) -> int:
+        """Keep the windows of a past ``day`` decided from its recording (read from ``source``;
+        None: recorded nowhere), each with when it was learned, and mark the day decided, in one
+        transaction; nothing if the day was decided already. The replay is the whole day, so it
+        replaces the windows the live engine kept that day (part of it, if it restarted); a day
+        recorded nowhere keeps them. The rows written."""
+        first, last = iso(_midnight(day)), iso(_midnight(day + timedelta(days=1)))
+        with self._db:
+            taken = self._db.execute(
+                "SELECT 1 FROM special_days WHERE day = ?", (day.isoformat(),)
+            ).fetchone()
+            if taken is not None:
+                return 0
+            if source is not None:
+                self._db.execute("DELETE FROM special_windows WHERE start >= ? AND start < ?", (first, last))
+            written = sum(self._keep_special(w, learned_at) for learned_at, w in windows)
+            self._db.execute(
+                "INSERT INTO special_days (day, source, windows, decided_at) VALUES (?, ?, ?, ?)",
+                (day.isoformat(), source, len(windows), iso(decided_at)),
+            )
+        return written
 
     # The kinds besides the direction (#179): their predictions and answers.
 

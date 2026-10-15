@@ -4,10 +4,13 @@
 server or KIS. It replays the same made-up events every time: three symbols wandering
 from 09:00 to 10:30 on 2026-10-12, KOSPI and KOSPI200 futures ticks, and a VI on one
 symbol, forecast and scored on the touch target as the server's default (#170: its four
-baselines). Every registered algorithm is set active, so the consensus has members, the
-last night's training shows as applied (each algorithm with a made-up validation), the
-morning's macro read decided risk_off, Newton has a model installed and rolled back, and
-the KIS status is made up (one feed in a gap).
+baselines). The KOSPI falls 8.5% at 09:04, so a circuit breaker's first stage halts the
+market from 09:06 to 09:36 (#236): nothing trades nor quotes then, and the minute bars skip
+those 30 minutes. The VI is 000660's, from 09:40:10 to 09:42:20 (dynamic). The KOSPI200
+futures do not fall: no sidecar. Every registered algorithm is set active, so the consensus
+has members, the last night's training shows as applied (each algorithm with a made-up
+validation), the morning's macro read decided risk_off, Newton has a model installed and
+rolled back, and the KIS status is made up (one feed in a gap).
 The clock stays at 10:30. Every answer is the same each run, except the CPU budget's
 timings, which are measured.
 
@@ -82,6 +85,11 @@ _CALENDAR = MarketCalendar(
     {d: True for d in PAST_DAYS}
     | {date(2026, 10, 9): False, date(2026, 10, 10): False, date(2026, 10, 11): False, DEMO_DAY: True}
 )
+# The morning's crash (#236): the KOSPI this far (%) below its wander from CRASH_FROM. No breaker
+# is called in the first 5 minutes, so the minute held starts at 09:05 and the first stage is
+# called at 09:06, halting trading 20 minutes and a 10-minute single-price auction after: HALT.
+CRASH, CRASH_FROM = 8.5, time(9, 4)
+HALT = (time(9, 6), time(9, 36))
 _PACED_FROM = time(10, 0)  # a paced demo opens here and goes on a minute at a time…
 _STEPS = 6  # …in steps of 10 seconds
 _FEE = 0.00015
@@ -107,11 +115,27 @@ _USDF_CLOSE = _OVERNIGHT["usdf"][1]
 
 def demo_events() -> list[Event]:
     """The demo morning's events, in receipt order."""
-    events = _session_events(_at(_START), _at(_END), seed=0)
+    events = [_crashed(e) for e in _session_events(_at(_START), _at(_END), seed=0) if not _halted(e)]
     # 000660 in a VI from 09:40:10, released at 09:42:20.
     events.append(_vi(_at(time(9, 40, 11)), "000660", "094010", None))
     events.append(_vi(_at(time(9, 42, 21)), "000660", "094010", "094220"))
     return sorted(events, key=lambda e: e[1]["received_at"])
+
+
+def _halted(event: Event) -> bool:
+    """Whether ``event`` is a trade or a quote during the morning's circuit breaker (``HALT``):
+    none comes then. The walks go on unseen, so the market reopens where they are."""
+    feed, row = event
+    return feed in (TRADE.tr_id, BOOK.tr_id) and _at(HALT[0]) <= row["received_at"] < _at(HALT[1])
+
+
+def _crashed(event: Event) -> Event:
+    """``event``, a KOSPI tick from ``CRASH_FROM`` ``CRASH``% further down; any other as it is."""
+    feed, row = event
+    if feed != INDEX.tr_id or row["received_at"] < _at(CRASH_FROM):
+        return event
+    change = row["change_pct"] - CRASH
+    return _index(row["received_at"].astimezone(KST), row["symbol"], 2600 * (1 + change / 100), change)
 
 
 def past_events(day: date) -> list[Event]:

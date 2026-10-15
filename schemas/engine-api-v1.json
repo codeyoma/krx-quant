@@ -375,6 +375,60 @@
       }
     },
 
+    "special": {
+      "description": "GET /v1/symbols/{symbol}/special?from=YYYY-MM-DD&to=YYYY-MM-DD: the special situations' windows the engine kept (#236) that start on the days from to to (KST dates, both included; default the last five trading days to today, at most 60 days): the symbol's VIs and the whole market's circuit breakers and sidecars, by start.",
+      "type": "object",
+      "required": ["symbol", "from", "to", "special"],
+      "additionalProperties": false,
+      "properties": {
+        "symbol": {"type": "string"},
+        "from": {"$ref": "#/$defs/day"},
+        "to": {"$ref": "#/$defs/day"},
+        "special": {"type": "array", "items": {"$ref": "#/$defs/special_window"}}
+      }
+    },
+    "special_window": {
+      "description": "A special situation's window (#12, #236). end is the release; a VI whose release is not known yet lasts start + 3 minutes, and a third breaker stage to the end of the day. detail is a breaker's stage, a VI's type when known (static, dynamic, both), else null.",
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["kind", "symbol", "start", "end", "detail"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": {"const": "vi"},
+            "symbol": {"type": "string"},
+            "start": {"$ref": "#/$defs/time"},
+            "end": {"$ref": "#/$defs/time"},
+            "detail": {"enum": ["static", "dynamic", "both", null]}
+          }
+        },
+        {
+          "type": "object",
+          "required": ["kind", "symbol", "start", "end", "detail"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": {"const": "circuit_breaker"},
+            "symbol": {"type": "null"},
+            "start": {"$ref": "#/$defs/time"},
+            "end": {"$ref": "#/$defs/time"},
+            "detail": {"enum": ["1단계", "2단계", "3단계"]}
+          }
+        },
+        {
+          "type": "object",
+          "required": ["kind", "symbol", "start", "end", "detail"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": {"const": "sidecar"},
+            "symbol": {"type": "null"},
+            "start": {"$ref": "#/$defs/time"},
+            "end": {"$ref": "#/$defs/time"},
+            "detail": {"type": "null"}
+          }
+        }
+      ]
+    },
+
     "algorithm": {
       "description": "An item of GET /v1/algorithms.",
       "allOf": [{"$ref": "#/$defs/algorithm_fields"}],

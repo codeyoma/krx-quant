@@ -63,7 +63,7 @@
 | `signal_review.py` | 읽기 전용 신호 기준 검토 명령(`signal-review`, #206): 순위표와 정식 알고리즘의 성적, 기준 후보(최종 합의 확률 × 같은 방향 정식 수)마다 엔진의 신호 규칙(`signals.py`)을 저장된 합의에 그대로 돌린 신호 수와 적중률([operations.md](operations.md#신호-기준-검토-206)) |
 | `supply_probe.py`, `toss_probe.py`, `probe_fields.py` | 읽기 전용 일별 수급 출처 확인 명령(`probe-supply`, #226): 조사에서 찾은 KIS 조회 7개와 토스 조회 5개(#235)의 응답, 행 수와 날짜, 필드의 모양(값 없이), 거슬러 가는 끝, 토스와 KIS의 같은 날 값 견주기(개수만)([kis-feeds.md](kis-feeds.md#일별-수급-226), [toss-feeds.md](toss-feeds.md)) |
 | `toss.py` | 토스증권 Open API의 접근 토큰(클라이언트당 하나, `state/toss_token.json`에 두고 모든 프로세스가 같이 쓴다)과 시세 GET 호출(#235). 주문 엔드포인트는 두지 않는다 |
-| `touch.py`, `rescore.py` | 도달 정답 규칙(#167), 지난 예측의 도달 정답 채우기와 `rescore` 명령, 엔진 잠금(#168), 다른 종류의 지난 정답 채우기(#180) |
+| `touch.py`, `rescore.py` | 도달 정답 규칙(#167), 지난 예측의 도달 정답 채우기와 `rescore` 명령, 엔진 잠금(#168), 다른 종류의 지난 정답 채우기(#180), 지난날의 특수 상황 구간 채우기(#236) |
 | `kinds.py`, `kind_registry.py`, `kind_stats.py` | 예측 종류(#179): 종류의 틀(클래스, 행동 클래스, 정답 함수와 정답 버전, 장벽 폭 규칙(#183), 기준 예측(표에서 내는 것 포함, #180), 출력 필드와 검사, 추가 통계), 종류의 정답이 읽는 창, 등록한 종류 목록(`KINDS`, #180), 종류의 통계와 순위표(5장 "예측 종류") |
 | `ranges.py` | 변동폭 종류(#180): 정답, 1분봉 규칙, 출력 검사, 기준 예측 `range-climate`·`range-persist`, 분위수 통계(5장 "변동폭"). 변동폭의 알고리즘 `mandelbrot`(#181)은 `algorithms/mandelbrot/`에 있다 |
 | `barriers.py` | 장벽 종류(#183): 먼저 닿음 정답, 1분봉 규칙, 기준 예측 `barrier-climate`·`barrier-persist`, 장벽 손익(5장 "장벽"). 폭 규칙과 피처(`barrier_width`, `barrier_sigma`)는 `features.py`에, 장벽의 알고리즘 `breiman`(#184)은 `algorithms/breiman/`에 있다 |
@@ -229,7 +229,7 @@ v1에서는 쓰지 않는다. 조사 결과는 [paid-data.md](paid-data.md)에 �
 - 원본 체결·호가: 하루 단위 Parquet 파일로 저장하고, 장 마감 후 S3에 올린다. 영구 보관한다.
   - 거래일마다 장 마감 15분 뒤와 매일 21:00(NXT·애프터마켓 종료와 20:30 백필 뒤, 밤 학습 전)에 올린다. 파티션마다 파일 하나로 합치고, 다시 올려도 결과가 같다(#6).
   - 서버의 `.env`에는 이 버킷만 읽고 쓰는(삭제 불가) IAM 사용자 키를 둔다. 덮어쓰기는 막을 수 없어서 버킷 버전 관리를 켜고 이전 버전을 30일 보관한다.
-- 예측, 채점, 알고리즘 상태, 합의 가중치: 상시 서버의 SQLite(`state/engine.sqlite3`)에 저장한다. 저장 구조는 [engine-api.md](engine-api.md#저장-stateenginesqlite3)에 있다(#9). 방향 말고 다른 종류의 예측과 정답은 따로 둔 표 둘(`kind_predictions`, `kind_answers`)에 저장한다(5장 "예측 종류", #179).
+- 예측, 채점, 알고리즘 상태, 합의 가중치: 상시 서버의 SQLite(`state/engine.sqlite3`)에 저장한다. 저장 구조는 [engine-api.md](engine-api.md#저장-stateenginesqlite3)에 있다(#9). 방향 말고 다른 종류의 예측과 정답은 따로 둔 표 둘(`kind_predictions`, `kind_answers`)에 저장한다(5장 "예측 종류", #179). 특수 상황 구간도 따로 둔 표 둘(`special_windows`, `special_days`)에 저장한다(5장 "특수 상황", #236).
 - 피처와 통계는 저장하지 않는다. 피처는 봉 마감마다 메모리에서 계산하고, 통계는 API를 읽을 때 저장된 예측으로 계산한다.
 - 알고리즘, 모델 버전, 실행 기록은 스펙 #1의 SQLite 표 셋 대신 다음처럼 나눠 둔다.
   - **알고리즘:** 이름, 성격 카드, 선언 피처, 피처와 파라미터의 뜻은 코드(`algorithms/`, `features.py`, `/v1/algorithms`)에 있다. 기준 예측과 합의의 카드도 코드(`baselines.py`, `consensus.py`)에 있다(#164). 지금 상태와 상태 이력은 SQLite `statuses`에 있다.
@@ -298,6 +298,7 @@ v1에서는 쓰지 않는다. 조사 결과는 [paid-data.md](paid-data.md)에 �
   - VI 단일가매매 중에는 예측하지 않는다.
   - 4분 구간 안에 VI, 서킷브레이커, 사이드카가 끼면 그 예측은 "특수"로 따로 채점한다. 기본 통계에서는 뺀다.
   - VI는 KIS VI 현황을 REST로 조회해 안다. 서킷브레이커와 사이드카는 녹화한 지수와 선물로 거래소 규칙대로 판정한다. 판정 규칙은 [engine-api.md](engine-api.md#채점)에 있다(#12).
+  - 엔진은 알게 된 구간(서킷브레이커는 단계, VI는 종류와 함께)을 SQLite `special_windows`에 남기고, 그 전의 지난날은 시작할 때 녹화로 채운다. 화면은 기간의 구간을 `GET /v1/symbols/{symbol}/special`로 읽어 차트에 칠한다(#236).
 
 ### 예측 종류 (#179)
 

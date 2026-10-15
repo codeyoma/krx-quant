@@ -120,6 +120,7 @@
     > **바뀜** (2026-10-09, #40): 처음 버전(d56b0e7)은 거래소의 시간 제한을 일부러 넣지 않았다. "시장이 그만큼 움직였으면 정지가 없어도 특수로 보는 것이 맞다"고 봤다 → 위의 시간 제한을 따른다. 이유: 08:45부터 벌어진 선물 갭이 주식시장이 열기도 전에 그날 한 번뿐인 사이드카를 써 버렸다(bec0265).
   - 서킷브레이커와 사이드카는 KIS 신호를 읽지 않고 녹화한 지수와 선물로 판정한다. 그래서 재생에서도 같게 판정한다. 코스닥 서킷브레이커·사이드카는 아직 보지 않는다(지금 종목은 모두 코스피다).
   - 판정 상태(1분 지속, 발동한 단계)는 메모리에만 둔다. 엔진이 장중에 재시작하면 그 뒤에 받은 것으로 다시 판정한다. 1분봉과 같다.
+  - **구간 남기기(#236).** 엔진은 알게 된 구간을 DB `special_windows`에 구간마다 한 행으로 남긴다. 같은 구간(종류, 종목, 시작)의 새 판을 알면(VI의 해제 시각 등) 그 행을 바꾼다. 서킷브레이커는 단계(`1단계`, `2단계`, `3단계`)를, VI는 VI 현황의 종류(`static` 정적, `dynamic` 동적, `both` 둘 다)를 `detail`로 함께 남긴다. 지난날의 구간은 엔진이 시작할 때 녹화로 채운다(아래 "지난 특수 상황 구간"). 화면은 `GET /v1/symbols/{symbol}/special`로 읽는다.
   - 특수 표시는 한 번 붙으면 지우지 않는다. 해제를 몰라 3분으로 본 VI가 실제로 더 일찍 끝났어도 그 사이 표시한 예측은 특수로 남는다. 보수적인 쪽을 골랐다.
   - **특수 표시(`special`).** t → t + 4분 구간이 VI(그 종목), 서킷브레이커나 사이드카(모든 종목) 구간과 겹치면 `true`다. 예측을 저장할 때 이미 알던 구간으로 표시하고, 나중에 알게 된 구간(조회 실패로 늦게 받은 VI 등)도 받는 즉시 겹치는 예측을 채점 여부와 상관없이 표시한다. 기본 통계에서는 뺀다.
 
@@ -189,14 +190,16 @@
 | `outcomes` | `prediction_id`, `target_at`(t + 4분), `mid_close`(A), `mid_display`(B), `mid_target`, `flat_ticks`(k), `class_a`, `class_b`(`up`/`flat`/`down`), `special`, `unscorable`, `scored_at`(채점 전에는 비어 있음). #170부터 `special`과 `scored_at`(4분이 지났는지)만 읽고, 옛 기준의 값(`class_a`, `class_b`, `mid_target`, `unscorable`)은 쓰기만 한다. 옛 엔진으로 되돌려도 돌게 하려고다 |
 | `model_targets` | `algorithm`, `version`, `target_version`(1 또는 2, 기본 모델과 기록되기 전 모델은 비어 있음): 엔진이 돌린 모델마다 그 모델을 학습한 정답 버전(#170). 엔진이 시작할 때와 모델을 바꿀 때 쓴다. 상태 판정, 합의 가중치, 순위표와 통계가 예측의 `model_version`을 이것으로 거른다. 따로 둔 표다 |
 | `touches` | `symbol`, `bar_close`, `target_version`(지금 2), `class`(`up`/`flat`/`down`, 채점할 수 없으면 비어 있음), `unscorable`(`missing mid`, `rest quotes`, `silent quotes`, `restarted`, `not recorded`), `path`(JSON: 아래 `touch`의 경로 필드), `scored_at`. 봉 마감의 도달 정답(#160, #167). 예측이 아니라 (종목, 봉 마감)마다 하나고, 예측하지 않은 봉 마감(VI 등)에도 있다. `blocks`처럼 따로 둔 표라 옛 엔진도 DB를 연다. 엔진은 이미 있는 봉 마감을 덮어쓰지 않는다. 지난 예측의 빠진 행은 엔진이 시작할 때 녹화로 채우고(`scored_at`은 그 4분이 끝난 시각), 다른 값으로 바꾸는 것은 `rescore`뿐이다(아래 "지난 예측의 도달 정답", #168) |
-| `runs` | `id`, `kind`(`cpu_budget`: CPU 예산으로 건너뜀, `review`: 일일 상태 점검, `retire_candidate`: 은퇴 후보 알림, `budget_report`: 그날 예산 때문에 빠진 예측을 알림(#71), `no_regime`: 그날 매크로 국면이 없거나 엔진이 모르는 이름이어서 기본 전이행렬로 돈 날, 첫 봉 마감에 하루 한 번(`detail`에 `(unknown: <이름>)`), `start`: 수집기가 엔진을 시작함(`detail`은 JSON: `commit`, `fee_rate`, `signal_rule`(`min_probability`, `min_agree`, 끄면 `null`), `algorithm_seconds`, `cpu_budget_seconds`. 성적을 코드와 설정별로 가르는 근거, #85), `signal_sent`: 보낸 텔레그램 신호, `signal_blocked`: 막힌 텔레그램 신호(둘 다 판정할 때마다 하나씩, `detail`은 JSON, 아래 "텔레그램 신호 알림", #80), `touch_fill`: 엔진이 시작할 때 지난 예측의 도달 정답을 채움(한 행이라도 썼을 때), `rescore`: `krx-quant rescore`를 돌림(둘 다 `detail`은 날마다 `day`, `source`(녹화를 읽은 곳), `labeled`(녹화로 낸 창 수), `written`(쓴 행 수), `not_recorded`, `failed`(읽지 못한 이유)의 JSON 목록, #168), `kind_fill`: 엔진이 시작할 때 다른 종류의 지난 정답을 채움(한 행이라도 썼을 때. `detail`은 `touch_fill`과 같은 JSON 목록이고, `labeled`는 답한 창 수, `not_recorded`는 녹화가 없는 예측된 봉 마감 수다, #180), `target`: 상태가 도달 정답으로 다시 시작됨(`detail` `2`. 엔진이 이 DB를 처음 열 때 한 번, #170)), `at`, `algorithm`, `detail` |
+| `runs` | `id`, `kind`(`cpu_budget`: CPU 예산으로 건너뜀, `review`: 일일 상태 점검, `retire_candidate`: 은퇴 후보 알림, `budget_report`: 그날 예산 때문에 빠진 예측을 알림(#71), `no_regime`: 그날 매크로 국면이 없거나 엔진이 모르는 이름이어서 기본 전이행렬로 돈 날, 첫 봉 마감에 하루 한 번(`detail`에 `(unknown: <이름>)`), `start`: 수집기가 엔진을 시작함(`detail`은 JSON: `commit`, `fee_rate`, `signal_rule`(`min_probability`, `min_agree`, 끄면 `null`), `algorithm_seconds`, `cpu_budget_seconds`. 성적을 코드와 설정별로 가르는 근거, #85), `signal_sent`: 보낸 텔레그램 신호, `signal_blocked`: 막힌 텔레그램 신호(둘 다 판정할 때마다 하나씩, `detail`은 JSON, 아래 "텔레그램 신호 알림", #80), `touch_fill`: 엔진이 시작할 때 지난 예측의 도달 정답을 채움(한 행이라도 썼을 때), `rescore`: `krx-quant rescore`를 돌림(둘 다 `detail`은 날마다 `day`, `source`(녹화를 읽은 곳), `labeled`(녹화로 낸 창 수), `written`(쓴 행 수), `not_recorded`, `failed`(읽지 못한 이유)의 JSON 목록, #168), `kind_fill`: 엔진이 시작할 때 다른 종류의 지난 정답을 채움(한 행이라도 썼을 때. `detail`은 `touch_fill`과 같은 JSON 목록이고, `labeled`는 답한 창 수, `not_recorded`는 녹화가 없는 예측된 봉 마감 수다, #180), `target`: 상태가 도달 정답으로 다시 시작됨(`detail` `2`. 엔진이 이 DB를 처음 열 때 한 번, #170), `special_fill`: 엔진이 시작할 때 지난날의 특수 상황 구간을 채움(한 날이라도 판정했을 때. `detail`은 `touch_fill`과 같은 JSON 목록이고, `labeled`는 판정한 구간 수, `written`은 쓴 행 수, `source`가 `null`이면 그날 녹화가 어디에도 없었다, #236)), `at`, `algorithm`, `detail` |
 | `statuses` | `id`, `algorithm`, `at`, `previous`, `status`, `reason`: 알고리즘 상태 이력(#17) |
 | `consensus_fits` | `version`, `computed_at`: 합의 가중치를 계산한 기록(#18). 엔진은 시작할 때 마지막 버전을 읽는다. |
 | `consensus_weights` | `version`, `symbol`, `slot`, `algorithm`, `weight`: 그 버전의 칸별 가중치 |
 | `kind_predictions` | `id`, `kind`, `symbol`, `algorithm`(그 종류의 알고리즘이나 기준 예측), `model_version`, `bar_close`, `displayed_at`, `status`(`predictions`와 같은 값: `ok`, `timed_out`, `error`, `vi`, `no_book`, `no_previous`), `output`(JSON: `p_<클래스>` 셋과 종류의 추가 필드, `ok`가 아니면 비어 있음), `flat_ticks`(봉 마감의 k: 그 예측이 받은 보합 폭, #200. 상태와 상관없이 있다. 봉 마감 중간가가 없으면, 그리고 #200 전에 쓴 행은 비어 있음), `width_ticks`(장벽이 있는 종류의 봉 마감 장벽 폭 w, #183: 그 봉 마감의 정답이 쓰는 폭. 상태와 상관없이 있다. 장벽이 없는 종류(변동폭), 봉 마감 중간가가 없을 때, #183 전에 쓴 행은 비어 있음), `anchor`(봉 마감 통합 중간가, #210: 그 봉 마감 정답의 기준 가격. 상태와 상관없이 있다. 봉 마감 중간가가 없으면, 그리고 #210 전에 쓴 행은 비어 있음), `tick`(그 중간가의 호가단위, #210. `anchor`가 비면 비어 있음). 방향 말고 다른 종류의 예측(#179, 아래 "예측 종류"). (`kind`, `symbol`, `algorithm`, `bar_close`)마다 하나다. 따로 둔 표라 옛 엔진도 DB를 연다 |
 | `kind_answers` | `kind`, `symbol`, `bar_close`, `answer_version`, `class`(종류의 클래스 중 하나, 채점할 수 없으면 비어 있음), `unscorable`(`missing mid`, `rest quotes`, `silent quotes`, `restarted`, 정답 함수가 클래스를 내지 않으면 그 이유(장벽의 `ambiguous`, #183)나 `no answer`, 지난 정답을 채울 때 녹화가 없으면 `not recorded`(#180)), `special`(VI·서킷브레이커·사이드카가 4분에 닿음), `path`(JSON: 종류의 경로 요약), `scored_at`. 종류의 정답(#179). (종류, 종목, 봉 마감, 정답 버전)마다 하나이고 그 봉 마감의 그 종류 예측이 모두 이것으로 채점된다. 예측하지 않은 봉 마감에도 있다. 엔진은 이미 있는 행을 덮어쓰지 않는다. 지난 봉 마감의 빠진 행은 엔진이 시작할 때 녹화로 채운다(아래 "변동폭"의 "지난 정답", #180). 따로 둔 표다 |
+| `special_windows` | `kind`(`vi`, `circuit_breaker`, `sidecar`), `symbol`(VI의 종목, 시장 전체면 비어 있음), `start`, `end`(해제 시각. 해제를 아직 모르는 VI는 발동 + 3분, 서킷브레이커 3단계는 그날 끝), `detail`(서킷브레이커의 `1단계`·`2단계`·`3단계`, VI 종류 `static`·`dynamic`·`both`, 그 밖에는 비어 있음), `learned_at`(이 판을 받은 시각). 엔진이 알게 된 특수 상황 구간(#236, 위 "특수 상황"). (`kind`, `symbol`, `start`)마다 하나이고, 새 판을 알면 그 행의 `end`, `detail`, `learned_at`을 바꾼다. 지난날은 엔진이 시작할 때 녹화로 채운다(아래 "지난 특수 상황 구간"). 따로 둔 표다 |
+| `special_days` | `day`, `source`(녹화를 읽은 곳. 어디에도 없었으면 비어 있음), `windows`(판정한 구간 수), `decided_at`. 녹화로 특수 상황 구간을 판정한 지난날(#236). 구간이 없던 날도 남아서 다음 시작 때 다시 읽지 않는다. 따로 둔 표다 |
 
-`predictions`에는 (`algorithm`, `bar_close`) 인덱스도 있다(#170, 알고리즘마다 도달 정답 모델의 첫 예측을 찾는다). `kind_predictions`에는 (`kind`, `bar_close`), (`kind`, `symbol`, `bar_close`), (`algorithm`, `bar_close`) 인덱스가 있다(#179). 새 표와 인덱스는 스키마 버전을 올리지 않는다. `kind_predictions.flat_ticks`(#200)도 스키마 버전을 올리지 않고 더한 열이다: 엔진이 열 때 그 열이 없는 DB(#200 전)에 `ALTER TABLE … ADD COLUMN`으로 더한다(`predictions._ADDED_COLUMNS`). 옛 엔진은 쓰는 열을 이름으로 적으므로 그 열이 있는 DB도 열고 쓴다. 그 행의 `flat_ticks`는 비어 있다. `kind_predictions.width_ticks`(#183)와 `anchor`·`tick`(#210)도 같은 방식으로 더한 열이다.
+`predictions`에는 (`algorithm`, `bar_close`) 인덱스도 있다(#170, 알고리즘마다 도달 정답 모델의 첫 예측을 찾는다). `kind_predictions`에는 (`kind`, `bar_close`), (`kind`, `symbol`, `bar_close`), (`algorithm`, `bar_close`) 인덱스가 있다(#179). 새 표와 인덱스는 스키마 버전을 올리지 않는다. `kind_predictions.flat_ticks`(#200)도 스키마 버전을 올리지 않고 더한 열이다: 엔진이 열 때 그 열이 없는 DB(#200 전)에 `ALTER TABLE … ADD COLUMN`으로 더한다(`predictions._ADDED_COLUMNS`). 옛 엔진은 쓰는 열을 이름으로 적으므로 그 열이 있는 DB도 열고 쓴다. 그 행의 `flat_ticks`는 비어 있다. `kind_predictions.width_ticks`(#183)와 `anchor`·`tick`(#210)도 같은 방식으로 더한 열이다. `special_windows`(유일 인덱스 (`kind`, `ifnull(symbol, '')`, `start`)와 `start` 인덱스)와 `special_days`(#236)도 스키마 버전을 올리지 않은 새 표다.
 
 시각은 KST ISO 8601 문자열이다. 스키마 버전은 `PRAGMA user_version`에 있다(지금 4). 엔진이 시작할 때 예전 버전의 DB를 데이터를 지키며 올린다. 더 새 버전의 DB는 거부하고 시작하지 않는다(`... was written by a newer engine (schema N)`). 그래서 스키마를 올린 엔진을 배포한 뒤에는 옛 커밋으로 되돌려도 엔진이 뜨지 않는다([operations.md](operations.md#4-업데이트-배포) 4장).
 
@@ -210,7 +213,7 @@
 
 ### 계약 (JSON 스키마, #19)
 
-- `schemas/engine-api-v1.json`이 모든 `/v1` 응답의 형식이다(JSON Schema 2020-12). 엔드포인트마다 `$defs`에 정의가 하나씩 있다: `status`, `symbols`, `latest`, `predictions`, `bars`, `algorithms`, `algorithm_detail`, `leaderboard`, `algorithm_stats`, `consensus`, `macro`, `calendar`, `kinds`, `kind_latest`, `kind_predictions`, 오류는 `error`. 스트림의 메시지는 `event`(종류마다 `prediction_event` 등)다.
+- `schemas/engine-api-v1.json`이 모든 `/v1` 응답의 형식이다(JSON Schema 2020-12). 엔드포인트마다 `$defs`에 정의가 하나씩 있다: `status`, `symbols`, `latest`, `predictions`, `bars`, `candles`, `special`(항목은 `special_window`, #236), `algorithms`, `algorithm_detail`, `leaderboard`, `algorithm_stats`, `consensus`, `macro`, `calendar`, `kinds`, `kind_latest`, `kind_predictions`, 오류는 `error`. 스트림의 메시지는 `event`(종류마다 `prediction_event` 등)다.
 - 다른 종류 항목의 `output`, 정답의 `path`, 통계의 `extra`는 종류마다 형식이 다르다. 변동폭의 것은 `range_output`, `range_path`, `range_stats`다(#180, 아래 "변동폭"). 장벽의 것은 `barrier_output`, `barrier_path`, `barrier_stats`다(#183, 아래 "장벽").
 - `leaderboard`와 `algorithm_stats`는 둘 중 하나다(#179): 방향의 것(`direction_leaderboard`, `direction_algorithm_stats`, 이전과 같은 형식)과 다른 종류의 것(`kind_leaderboard`, `kind_algorithm_stats`, 맨 위에 `kind`가 있다).
 
@@ -232,7 +235,7 @@
 | `session` | 오늘 장의 `open`(연속매매 시작), `close`(종가 동시호가 끝). 휴장일은 `null` |
 | `last_bar_close` | 마지막으로 예측한 봉 마감 시각 |
 | `pending_outcomes` | 채점을 기다리는 예측 수 |
-| `special` | 오늘 알게 된 특수 상황. 항목마다 `kind`(`vi`, `circuit_breaker`, `sidecar`), `symbol`(VI의 종목, 시장 전체면 `null`), `start`, `end`. 해제를 아직 모르는 VI의 `end`는 발동 + 3분이다. |
+| `special` | 오늘 알게 된 특수 상황(엔진 메모리). 항목마다 `kind`(`vi`, `circuit_breaker`, `sidecar`), `symbol`(VI의 종목, 시장 전체면 `null`), `start`, `end`. 해제를 아직 모르는 VI의 `end`는 발동 + 3분이다. 지난날과 단계·VI 종류(`detail`)는 `GET /v1/symbols/{symbol}/special`에 있다(#236) |
 | `training` | 지난밤 학습(#22). `day`, `finalized_at`(승격 목록 확정 시각, KST), `applied`(그 승격이 지금 돌고 있는지), `reason`, `promoted`(알고리즘 → 버전), `reports`(알고리즘별 `promoted`, `reason`: 검증 log loss 비교). 정답 버전 2(#169)에서는 밤마다 다시 맞춘 `baseline-climate` 표도 `promoted`와 `reports`에 온다. 아직 없으면 `null` |
 | `cpu` | CPU 예산(#19). `budget_seconds`(`KRX_CPU_BUDGET_SECONDS`), `algorithm_seconds`(알고리즘 하나의 시간 예산, `KRX_ALGORITHM_SECONDS`), `algorithms`(은퇴하지 않은 알고리즘마다 봉 마감 한 번에 걸릴 것으로 보는 초. 한 번이라도 돈 것만), `expected_seconds`(그 합), `usage`(합 ÷ 예산. 예산이 0이면 `null`. 1을 넘으면 다음 봉 마감에 늦게 등록된 것부터 건너뛴다), `skipped_today`(오늘 CPU 예산으로 건너뛴 횟수) |
 | `usd_futures` | 달러선물 최근월물의 오늘 마지막 체결(#70). `price`, `at`(체결 시각), `previous_close`(그날 장 시작 전 마지막 매크로 읽기(보통 07:30)의 `usdf` 값, 곧 전 거래일 종가. 장 시작 뒤 `krx-quant macro`를 다시 돌려도 바뀌지 않는다. 국면과 같다), `change_pct`(전일 종가 대비 %). 오늘 매크로 읽기가 없거나, 그 읽기에 전 거래일의 달러선물 종가가 없으면(백필이 빠져 더 오래된 종가뿐이면) `previous_close`와 `change_pct`가 `null`이다. 오늘 체결이 아직 없으면(장 전, 휴장일) 통째로 `null`이다. 재생·데모 엔진도 같다 |
@@ -361,6 +364,30 @@
 - 오늘이 든 봉은 주지 않는다: 오늘의 일봉, 이번 주·달·해의 봉. 20:30 뒤 저장된 뒤에도 그렇다. 화면이 오늘의 1분봉과 실시간 봉, 그리고 이번 기간의 지난 일봉으로 만든다.
 - 가격은 수정주가다. `venue`는 봉이 온 시장이다: `UN`(통합 KRX+NXT)이면 화면은 오늘 봉을 그날의 모든 1분봉으로, `KRX`면 09:00–15:30 봉으로 만든다. 저장된 봉이 없으면 `venue`는 `null`, `candles`는 빈 목록이다.
 - 파일은 [events.md](events.md#candles-일주월년봉-rest-111-112)의 `candles` 계층이다. 데이터 디렉터리가 없는 재생 엔진은 빈 목록을 준다. 데모 엔진은 종목마다 10-08까지 만든 일봉 500개와, 그 일봉을 묶은 끝난 주·월·년봉을 준다.
+
+### `GET /v1/symbols/{symbol}/special?from=YYYY-MM-DD&to=YYYY-MM-DD` (#236)
+
+엔진이 남긴 특수 상황 구간(`special_windows`, 위 "채점"의 "특수 상황") 중 `from`부터 `to`까지의 날(KST, 둘 다 포함)에 시작한 것이다. 그 종목의 VI와 시장 전체의 서킷브레이커·사이드카가 시작 순으로 온다. 차트가 분 보기에 띠와 이름표로 칠한다.
+
+```json
+{
+  "symbol": "000660",
+  "from": "2026-10-05",
+  "to": "2026-10-12",
+  "special": [
+    {"kind": "circuit_breaker", "symbol": null, "start": "2026-10-12T09:06:00+09:00", "end": "2026-10-12T09:36:00+09:00", "detail": "1단계"},
+    {"kind": "vi", "symbol": "000660", "start": "2026-10-12T09:40:10+09:00", "end": "2026-10-12T09:42:20+09:00", "detail": "dynamic"}
+  ]
+}
+```
+
+- `from`, `to`: `YYYY-MM-DD`. `to`가 없으면 오늘(엔진 시계)이고, `from`이 없으면 `to`까지의 마지막 5거래일의 첫날이다(휴장일 정보가 없는 평일은 거래일로 본다). 응답의 `from`, `to`는 실제로 쓴 날이다. 날짜가 아니거나, `from`이 `to`보다 뒤거나, 둘 사이가 60일(둘 다 포함)을 넘으면 400이다. 모르는 종목은 404다.
+- `kind`: `vi`, `circuit_breaker`, `sidecar`. `symbol`: VI는 그 종목, 서킷브레이커와 사이드카는 `null`이다.
+- `start`, `end`: VI는 발동과 해제 시각이다. 해제를 아직 모르는 VI의 `end`는 발동 + 3분이고, 해제를 알면 바뀐다. 서킷브레이커 1·2단계는 발동부터 30분(매매 정지 20분 + 단일가 10분), 3단계는 그날 끝(`23:59:59.999999`)까지, 사이드카는 발동부터 5분이다.
+- `detail`: 서킷브레이커는 단계(`1단계`, `2단계`, `3단계`), VI는 VI 현황의 종류(`static` 정적, `dynamic` 동적, `both` 둘 다)다. 사이드카와 종류를 모르는 VI는 `null`이다.
+- 같은 순간에 시작한 구간은 `kind`, `symbol` 순이다.
+- 오늘 구간은 엔진이 알게 된 때부터 온다. 지난날은 그날 엔진이 남긴 것과, 엔진이 시작할 때 녹화로 채운 것이다(아래 "지난 특수 상황 구간"). 녹화가 시작된 2026-10-12 전의 날은 비어 있다.
+- 데모 엔진은 2026-10-12 09:06–09:36의 서킷브레이커 1단계(모든 종목)와 000660의 VI(09:40:10–09:42:20, `dynamic`)를 준다. 그 30분 동안 데모의 체결과 호가가 없어 1분봉도 없다. 사이드카는 없다.
 
 ### `GET /v1/algorithms`
 
@@ -1461,3 +1488,16 @@ uv run krx-quant replay 2026-10-12
 - **잠금.** 도는 엔진은 `state/.engine.lock`을 `flock`으로 잡는다. 잡혀 있으면 `rescore`는 거부한다. 다른 프로세스가 정답을 바꾸면 엔진의 순위표 캐시와 합의 가중치가 옛 값으로 남기 때문이다. rescore가 잡고 있을 때 시작한 엔진은 평소대로 돌고, 채우기만 rescore가 끝날 때까지 기다린다.
 - `touches` 표만 쓴다. `outcomes`(기준 A·B, 특수 표시)는 건드리지 않는다. 한 일은 `runs`의 `touch_fill`, `rescore`에 남는다.
 - 운영 절차는 [operations.md](operations.md#지난-예측의-도달-정답-168)에 있다.
+
+## 지난 특수 상황 구간 (#236)
+
+실시간 엔진은 #236부터 알게 된 특수 상황 구간을 `special_windows`에 남긴다(위 "채점"의 "특수 상황"). 그 전의 날은 구간이 엔진 메모리에만 있었다(예: 2026-10-15의 서킷브레이커). 그런 날은 엔진이 시작할 때 그날의 녹화로 채운다(`rescore.fill_special_windows`).
+
+- **대상.** 2026-10-12(`RECORDING_START`)부터 어제까지 예측이 있는 날 중 `special_days`에 없는 날이다. 그날 엔진이 남긴 구간이 있어도 대상이다. 특수 상황은 엔진 메모리에만 있어서, 그날 장중에 다시 시작한 엔진은 그날의 일부만 안다. 그래서 하루 전체를 녹화로 다시 판정한 것만 그날을 끝낸다. VI는 그날 예측한 종목의 것을 본다. 오늘은 실시간 엔진에 맡긴다.
+- **판정.** 그날의 VI 현황(`FHPST01390000`), 코스피 지수(`H0UPCNT0`와 REST 대체 `FHPUP02100000`, 업종 `0001`), 코스피200 선물(`H0IFCNT0`, 녹화된 월물 모두)만 받은 시각순으로 `special.py`에 흘린다. 실시간 엔진과 같은 규칙에 같은 순서다. 그래서 채운 구간(`start`, `end`, `detail`, `learned_at`)은 같은 날을 새로 재생한 엔진이 남기는 것과 같다. 구간마다 마지막 판을 남긴다.
+- **녹화를 찾는 곳.** 데이터 디렉터리의 `events/`에 그날 이 피드 중 하나라도 있으면 거기서 읽는다. 없으면 Object Store에서 이 파티션만 임시 폴더로 받아 읽는다. 둘 다 없으면 구간 없이 판정한 날로 남기고(`special_days.source`가 비어 있음) 경고한다. 읽다 실패한 날은 쓰지 않고 다음 시작 때 다시 한다.
+- **한 번만.** 구간과 그날 표시(`special_days`)를 한 트랜잭션으로 쓴다. 그래서 구간이 없던 날도 한 번만 읽고, 다시 시작해도 바뀌는 것이 없다. 녹화로 판정한 구간이 그날 엔진이 남긴 구간을 대신한다(그날 구간을 지우고 쓴다). 녹화가 어디에도 없는 날은 엔진이 남긴 구간을 그대로 둔다.
+- **비용.** 하루씩, 파티션마다 4096행 배치로 읽는다. 체결과 호가는 읽지 않는다.
+- 예측과 정답의 특수 표시(`outcomes.special`, `kind_answers.special`)는 건드리지 않는다. 그날 엔진이 구간을 알았을 때 이미 표시했다.
+- **잠금과 때.** 도달 정답 채우기(위)와 같다. 엔진 API를 연 뒤 작업 스레드에서, 지난 도달 정답과 종류의 정답을 채운 다음에 돈다. rescore가 잠금을 잡고 있으면 끝날 때까지 기다린다. 한 일은 `runs`의 `special_fill`에 남는다.
+- 운영 절차는 [operations.md](operations.md#지난-특수-상황-구간-236)에 있다.

@@ -21,7 +21,11 @@ received, and only what was received before a moment counts at that moment: live
 replay see the same thing. A window learned later replaces the one learned before it for
 the same start (a VI's release becomes known). The rules' state is kept in memory: an
 engine restarted during a breaker calls it again from what it receives after the
-restart, like the bars it builds.
+restart, like the bars it builds. The engine keeps every window it learns in its
+database (``special_windows``, #236), and fills past days' from their recordings.
+
+A window's detail says more where it is known: a breaker's stage (``1단계``, ``2단계``,
+``3단계``) and a VI's type as KIS gives it (``static``, ``dynamic`` or ``both``).
 """
 
 from __future__ import annotations
@@ -52,6 +56,8 @@ BREAKER_STEP = 1.0
 BREAKER_HALT = timedelta(minutes=30)  # 20 minutes' halt and the 10-minute auction after it
 SIDECAR_MOVE = 5.0
 SIDECAR_HALT = timedelta(minutes=5)
+# A VI's types as the VI status gives them (``feeds.stock._VI_KINDS``); another is not shown.
+VI_TYPES = ("static", "dynamic", "both")
 
 
 class Kind(enum.Enum):
@@ -66,6 +72,7 @@ class Window:
     symbol: str | None  # None: the whole market
     start: datetime
     end: datetime  # the release, or the least it can last while that is not known
+    detail: str | None = None  # a breaker's stage ("1단계"), a VI's type ("static"); else None
 
     def touches(self, symbol: str, start: datetime, end: datetime) -> bool:
         """Whether this window and the open span from ``start`` to ``end`` of ``symbol`` meet."""
@@ -173,7 +180,9 @@ class SpecialSituations:
             end = max(released or start, start + VI_LONGEST)
         else:
             end = released
-        return self._learn(row["received_at"], Window(Kind.VI, row["symbol"], start, end))
+        # Rows recorded or read without the type (diagnose) have none.
+        detail = row.get("kind") if row.get("kind") in VI_TYPES else None
+        return self._learn(row["received_at"], Window(Kind.VI, row["symbol"], start, end, detail))
 
     def index(self, row: dict[str, Any]) -> Window | None:
         """Take a market index tick; a circuit breaker's window if one is called."""
@@ -184,7 +193,8 @@ class SpecialSituations:
         called = self._breaker.update(change, row["event_time"], session)
         if called is None:
             return None
-        return self._learn(row["received_at"], Window(Kind.CIRCUIT_BREAKER, None, *called))
+        stage = f"{self._breaker.stage}단계"  # the stage just called
+        return self._learn(row["received_at"], Window(Kind.CIRCUIT_BREAKER, None, *called, stage))
 
     def futures(self, row: dict[str, Any]) -> Window | None:
         """Take a KOSPI200 futures trade; a sidecar's window if one is called."""
@@ -199,11 +209,16 @@ class SpecialSituations:
 
     def known(self, before: datetime) -> list[Window]:
         """The windows as known from what was received before ``before``: the latest of each."""
-        latest: dict[tuple[Kind, str | None, datetime], Window] = {}
+        return [w for _, w in self.latest(before)]
+
+    def latest(self, before: datetime | None = None) -> list[tuple[datetime, Window]]:
+        """The latest version of each window received before ``before`` (of all, if None), with
+        when it was received, in the order first learned: what the engine keeps (#236)."""
+        latest: dict[tuple[Kind, str | None, datetime], tuple[datetime, Window]] = {}
         for received_at, w in self._learned:
-            if received_at >= before:
+            if before is not None and received_at >= before:
                 break
-            latest[(w.kind, w.symbol, w.start)] = w
+            latest[(w.kind, w.symbol, w.start)] = (received_at, w)
         return list(latest.values())
 
     def learned_since(self, at: datetime) -> list[Window]:
