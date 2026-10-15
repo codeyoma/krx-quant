@@ -144,8 +144,9 @@ def section(text: str, number: int) -> list[str]:
     return [line.strip() for line in found.splitlines()[1:]]
 
 
-def cell(lines: Sequence[str], probability: float, agree: int) -> str:
-    head = f"확률 ≥ {probability:.2f} · 같은 방향 ≥ {agree}:"
+def cell(lines: Sequence[str], probability: float | str, agree: int) -> str:
+    shown = probability if isinstance(probability, str) else f"{probability:.2f}"
+    head = f"확률 ≥ {shown} · 같은 방향 ≥ {agree}:"
     [found] = [line for line in lines if line.startswith(head)]
     return found
 
@@ -191,6 +192,18 @@ def test_each_candidate_s_signals_and_hit_rate_as_worked_out_by_hand(tmp_path: P
         " · 하락 2번 적중 50.0% [9.5–90.5%] · 합쳐 80.0% [37.6–96.4%]"
     )
     assert rebuilt[0].startswith("최종 합의 9개(종목 × 봉 마감) · 2026-10-12 – 2026-10-13 2일")
+
+
+def test_a_setting_with_more_places_has_a_row_of_its_own(tmp_path: Path) -> None:
+    """Input: the setting 0.604 beside the candidate 0.60. Output: two rows, each labelled with
+    its own probability; the setting's is the one marked."""
+    hand_made(tmp_path / "engine.db")
+    settings = replace(SETTINGS, signal_thresholds=SignalRule(0.604, 2))
+
+    stored = section(signal_review(tmp_path / "engine.db", settings, DAY), 4)
+
+    assert not cell(stored, 0.6, 2).endswith("(지금 설정)")
+    assert cell(stored, "0.604", 2).endswith("(지금 설정)")
 
 
 def test_a_final_consensus_that_pooled_a_model_of_another_target_is_left_out(tmp_path: Path) -> None:

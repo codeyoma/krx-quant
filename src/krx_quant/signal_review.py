@@ -456,6 +456,13 @@ def rebuilt_closes(
 # Writing
 
 
+def _probability(p: float) -> str:
+    """A candidate's probability: two places, more when the setting has them (0.604 is not
+    0.60, a row of its own)."""
+    text = f"{p:.2f}"
+    return text if float(text) == p else repr(p)
+
+
 def _ratio(i: Interval | None) -> str:
     if i is None:
         return "—"
@@ -660,8 +667,8 @@ def _cell(
     mean = mean_interval(profits)
     return " · ".join(
         [
-            f"확률 ≥ {rule.min_probability:.2f} · 같은 방향 ≥ {rule.min_agree}: 신호 {len(sent):,}번"
-            f" (하루 {len(sent) / days:.1f}번)",
+            f"확률 ≥ {_probability(rule.min_probability)} · 같은 방향 ≥ {rule.min_agree}:"
+            f" 신호 {len(sent):,}번 (하루 {len(sent) / days:.1f}번)",
             f"막힘 {len(judged) - len(sent):,}",
             *(
                 f"{CALLED[d]} {sum(1 for s in sent if s.direction is d):,}번 적중 "
