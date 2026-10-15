@@ -29,7 +29,16 @@ from krx_quant.lifecycle import Status
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.model_shelf import Shelf
 from krx_quant.predictions import DB_NAME, PredictionStore
-from krx_quant.prevalidation import LastReport, admits, code_digest, last_report, prevalidate, report_path
+from krx_quant.prevalidation import (
+    LastReport,
+    PrevalidationRunning,
+    _held,
+    admits,
+    code_digest,
+    last_report,
+    prevalidate,
+    report_path,
+)
 from krx_quant.replay import replay_into
 from krx_quant.swap import reload_models
 from tests.algorithm_doubles import FixedAlgorithm, stand_in_card, stand_in_meanings
@@ -497,3 +506,21 @@ async def test_with_the_touch_target_it_trains_replays_and_is_judged_on_the_touc
     assert versions[str(DAYS[1])].startswith(f"baseline-climate-{DAYS[0]:%Y%m%d}-")
     assert versions[str(DAYS[2])].startswith(f"baseline-climate-{DAYS[1]:%Y%m%d}-")
     assert persist == {"v2"}
+
+
+async def test_a_second_pre_validation_of_the_same_algorithm_waits_for_the_first(tmp_path: Path) -> None:
+    """Input: kalman's pre-validation under way (its lock held, #204: the scheduled job), and
+    its database. Output: a second one (by hand) stops at once and leaves the database; once
+    the first ends, it goes on (here: no recorded day)."""
+    s = settings(tmp_path, days=[])
+    db = s.state_dir / "prevalidation-kalman.sqlite3"
+    db.parent.mkdir(parents=True)
+    db.write_text("the first run's")
+
+    with _held(s.state_dir, "kalman"):
+        with pytest.raises(PrevalidationRunning, match="kalman runs already"):
+            await prevalidate(s, "kalman")
+        assert db.read_text() == "the first run's"
+
+    with pytest.raises(FileNotFoundError):
+        await prevalidate(s, "kalman")

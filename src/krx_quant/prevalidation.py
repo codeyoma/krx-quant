@@ -45,11 +45,13 @@ answers of the days before it, as the night before would.
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import hashlib
 import inspect
 import json
 import logging
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time
 from pathlib import Path
@@ -272,6 +274,27 @@ class Prevalidation:
         return out
 
 
+class PrevalidationRunning(Exception):
+    """A pre-validation of the same algorithm runs already: it holds the algorithm's lock."""
+
+
+@contextlib.contextmanager
+def _held(state_dir: Path, name: str) -> Iterator[None]:
+    """Hold ``name``'s pre-validation lock (``prevalidation-<name>.lock``, ``flock``) while it
+    runs: a second one beside it (by hand while the scheduled job runs, #204) would delete its
+    database and write the same report. The kernel lets it go when the process ends."""
+    path = state_dir / f"prevalidation-{name}.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as f:
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise PrevalidationRunning(
+                f"a pre-validation of {name} runs already ({path.name} is held): wait for it to end"
+            ) from None
+        yield
+
+
 async def prevalidate(
     settings: Settings,
     name: str,
@@ -285,7 +308,8 @@ async def prevalidate(
     """Replay ``name`` on the latest ``days`` recorded trading days and save its report.
 
     Raises ValueError for an algorithm not registered (RegistrationError for a registry
-    that fails the registration check), FileNotFoundError when no day was recorded.
+    that fails the registration check), FileNotFoundError when no day was recorded,
+    PrevalidationRunning while another pre-validation of ``name`` runs.
     """
     candidate: Algorithm | KindAlgorithm | None = next((a for a in algorithms if a.name == name), None)
     if candidate is None:
@@ -300,29 +324,31 @@ async def prevalidate(
         raise ValueError(f"unknown algorithm {name!r}; registered: {names}")
     register(algorithms)
     register_kind_algorithms(kind_algorithms, kinds, taken={a.name for a in algorithms})
-    now = now or datetime.now(KST)
-    available = finished_days(settings.data_dir, settings.symbols, now)
-    replayed = [d for d in available if is_recorded(settings.data_dir, d, settings.symbols)][-days:]
-    if not replayed:
-        raise FileNotFoundError(f"no recorded day of {', '.join(settings.symbols)} in {settings.data_dir}")
-    db = settings.state_dir / f"prevalidation-{name}.sqlite3"
-    for leftover in sqlite_files(db):
-        leftover.unlink(missing_ok=True)
-    models = await _replay(
-        settings, candidate, kind, algorithms, kind_algorithms, kinds, available, replayed, db
-    )
-    if kind is None:
-        others = [a.name for a in algorithms if a is not candidate]
-        result = _judge(settings, candidate, others, replayed, models, db, now)
-    else:
-        same = [a.name for a in kind_algorithms if a.kind == kind.name and a is not candidate]
-        result = _judge_kind(settings, candidate, kind, same, replayed, models, db, now)
-    path = report_path(settings.state_dir, name)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(result.as_dict(), indent=2, ensure_ascii=False))
-    tmp.replace(path)
-    return result
+    with _held(settings.state_dir, name):
+        now = now or datetime.now(KST)
+        available = finished_days(settings.data_dir, settings.symbols, now)
+        replayed = [d for d in available if is_recorded(settings.data_dir, d, settings.symbols)][-days:]
+        if not replayed:
+            symbols = ", ".join(settings.symbols)
+            raise FileNotFoundError(f"no recorded day of {symbols} in {settings.data_dir}")
+        db = settings.state_dir / f"prevalidation-{name}.sqlite3"
+        for leftover in sqlite_files(db):
+            leftover.unlink(missing_ok=True)
+        models = await _replay(
+            settings, candidate, kind, algorithms, kind_algorithms, kinds, available, replayed, db
+        )
+        if kind is None:
+            others = [a.name for a in algorithms if a is not candidate]
+            result = _judge(settings, candidate, others, replayed, models, db, now)
+        else:
+            same = [a.name for a in kind_algorithms if a.kind == kind.name and a is not candidate]
+            result = _judge_kind(settings, candidate, kind, same, replayed, models, db, now)
+        path = report_path(settings.state_dir, name)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(result.as_dict(), indent=2, ensure_ascii=False))
+        tmp.replace(path)
+        return result
 
 
 async def _replay(

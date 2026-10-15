@@ -755,6 +755,11 @@ def prevalidation_turn(night: Night, algorithm: str) -> str | None:
         and report.made_at >= record.started_at
     ):
         return FRESH  # the run left its report, and the code or the target has changed since
+    ended = record.started_at + timedelta(seconds=record.seconds or 0.0)
+    if report is not None and report.made_at is not None and report.made_at > ended:
+        # A run started after it (by hand, e.g. a look on fewer days) left the latest report,
+        # without a verdict on this code: ask again for one.
+        return FRESH
     if record.commit == night.commit:
         return None  # it ran on this code without a verdict: another deploy may give one
     return AGAIN  # it crashed or ran out of time on older code

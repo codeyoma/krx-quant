@@ -185,8 +185,20 @@ def test_a_look_on_fewer_days_is_no_verdict() -> None:
     look = {"mandelbrot": report(days=5, made_at=at(THURSDAY, "19:00"))}  # run by hand early
     assert tonight(night(FRIDAY, reports=look)) == "mandelbrot"
     # The job left one itself (it counted the days otherwise): not again on the same code.
-    left = {"mandelbrot": report(days=5, made_at=at(FRIDAY, "23:10"))}
+    # A report's time is its run's start.
+    left = {"mandelbrot": report(days=5, made_at=at(FRIDAY, "22:31"))}
     assert tonight(night(SATURDAY, reports=left, runs={"mandelbrot": ran(FRIDAY)})) == "breiman"
+
+
+def test_a_look_by_hand_after_the_job_asks_for_a_verdict_again() -> None:
+    """Friday's job refused mandelbrot on 10 days; on Saturday someone looked again by hand on
+    5 days, on the same code, and that report replaced the verdict: Sunday asks again."""
+    look = {"mandelbrot": report(days=5, made_at=at(SATURDAY, "10:00"))}
+    refused = {"mandelbrot": ran(FRIDAY, OK)}
+    assert tonight(night(SUNDAY, reports=look, runs=refused)) == "mandelbrot"
+    # A look started while the job ran (it could not: the lock) would not count.
+    during = {"mandelbrot": report(days=5, made_at=at(FRIDAY, "22:35"))}
+    assert tonight(night(SUNDAY, reports=during, runs=refused)) == "breiman"
 
 
 def test_a_run_that_left_no_verdict_waits_for_a_deploy_then_for_the_others() -> None:

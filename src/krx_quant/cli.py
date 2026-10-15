@@ -38,7 +38,13 @@ from krx_quant.model_shelf import Shelf
 from krx_quant.nightly import from_the_server, run_training
 from krx_quant.notify import send_notice, send_test_alert
 from krx_quant.predictions import DB_NAME, PredictionStore
-from krx_quant.prevalidation import PREVALIDATION_DAYS, REGISTERED_BEFORE, prevalidate, report_path
+from krx_quant.prevalidation import (
+    PREVALIDATION_DAYS,
+    REGISTERED_BEFORE,
+    PrevalidationRunning,
+    prevalidate,
+    report_path,
+)
 from krx_quant.replay import replay_day
 from krx_quant.rescore import EngineRunning, rescore
 from krx_quant.training import fit_algorithm
@@ -192,6 +198,7 @@ def _prevalidate(name: str, days: int) -> int:
         FileNotFoundError,
         RegistrationError,
         ValueError,
+        PrevalidationRunning,
     ) as e:  # RegistrationError: named, though a ValueError
         print(e, file=sys.stderr)
         return 1
