@@ -240,7 +240,7 @@ compose와 스크립트가 읽는 변수다. 엔진은 `KRX_BIND_ADDRESS`를 예
 | `AWS_REGION`, `ZONE`, `INSTANCE`, `BUNDLE`, `BLUEPRINT`, `IAM_USER`, `SNAPSHOT_UTC` | `deploy/create-aws.sh` | 2.1절 | AWS 자원 이름과 위치 |
 | `KEEP`, `SECONDS_TO_RECORD` | `deploy/smoke-local.sh` | 없음, 15 | `KEEP=1`이면 컨테이너와 볼륨을 남긴다. 녹화 시간(초) |
 
-> **바뀜** (2026-10-15, #215): `KRX_BIND_ADDRESS`는 compose만 읽었다 → 엔진도 읽는다(예약 작업의 댓글에서 가리는 데만 쓴다). 이유: 공개 저장소의 이슈 댓글에 서버 주소가 실리지 않게(#215).
+> **바뀜** (2026-10-15, #219): `KRX_BIND_ADDRESS`는 compose만 읽었다 → 엔진도 읽는다(예약 작업의 댓글에서 가리는 데만 쓴다). 이유: 공개 저장소의 이슈 댓글에 서버 주소가 실리지 않게(#215).
 
 Docker 이미지는 `TZ=Asia/Seoul`, `KRX_DATA_DIR=/data`, `KRX_STATE_DIR=/state`로 돈다(`Dockerfile`).
 
