@@ -15,6 +15,10 @@ Endpoints (all under ``/v1``):
 - ``GET /symbols/{symbol}/candles?period=day|week|month|year&before=T&limit=N``: the last N
   stored candles of the period (default 400, at most 2000) that start before ``T`` (default
   now), oldest first, never the one holding today (``candles``);
+- ``GET /symbols/{symbol}/special?from=D&to=D``: the special situations' windows kept (#236)
+  that start on the days ``from`` to ``to`` (KST dates, both included; default the last five
+  trading days to today, at most 60 days): the symbol's VIs and the whole market's circuit
+  breakers and sidecars, oldest first;
 - ``GET /algorithms``: each registered algorithm's card, features, current model (with what
   it trained on) and status (probation, active, bench, retired, clone) with its history, the
   meaning of each feature and model parameter, its report of the latest night's training,
@@ -60,9 +64,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import re
 from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from functools import partial
 from pathlib import Path
 from time import monotonic
@@ -90,6 +95,7 @@ from krx_quant.kinds import DIRECTION, DIRECTION_KIND, KindScored
 from krx_quant.kinds import Kind as PredictionKind
 from krx_quant.lifecycle import Stage
 from krx_quant.macro import LatestMacro, latest_macro, reading_before
+from krx_quant.market_calendar import MarketCalendar
 from krx_quant.model_shelf import Shelf
 from krx_quant.predictions import Excluded, iso
 from krx_quant.pricing import flat_ticks, tick_size
@@ -148,6 +154,9 @@ MAX_BARS = 20_000
 # Day candles (#111): the chart reads a screenful and scrolls back for more.
 DEFAULT_CANDLES = 400
 MAX_CANDLES = 2000
+# Special windows (#236): the trading days asked for by default, and the most days one question spans.
+DEFAULT_SPECIAL_DAYS = 5
+MAX_SPECIAL_DAYS = 60
 
 
 def create_app(
@@ -200,6 +209,7 @@ def create_app(
     app.router.add_get("/v1/symbols/{symbol}/predictions", _predictions)
     app.router.add_get("/v1/symbols/{symbol}/bars", _bars)
     app.router.add_get("/v1/symbols/{symbol}/candles", _candles)
+    app.router.add_get("/v1/symbols/{symbol}/special", _special)
     app.router.add_get("/v1/algorithms", _algorithms)
     app.router.add_get("/v1/algorithms/{name}", _algorithm)
     app.router.add_get("/v1/leaderboard", _leaderboard)
@@ -356,6 +366,45 @@ async def _candles(request: web.Request) -> web.Response:
         for r in rows
     ]
     return _json({"symbol": symbol, "period": period, "venue": venue, "candles": candles})
+
+
+async def _special(request: web.Request) -> web.Response:
+    """The special windows kept (#236) that start on the days asked for: the symbol's VIs and
+    the whole market's circuit breakers and sidecars, oldest first."""
+    engine, symbol = _engine_and_symbol(request)
+    to = _day_query(request, "to") or kst_day(engine.clock.now())
+    since = _day_query(request, "from") or _trading_days_back(engine.calendar, to, DEFAULT_SPECIAL_DAYS)
+    if since > to:
+        raise _error(web.HTTPBadRequest, f"from must not be after to, got {since} and {to}")
+    if (span := (to - since).days + 1) > MAX_SPECIAL_DAYS:
+        raise _error(web.HTTPBadRequest, f"from and to span at most {MAX_SPECIAL_DAYS} days, got {span}")
+    rows = engine.store.special_windows(
+        symbol, datetime.combine(since, time(), KST), datetime.combine(to + timedelta(days=1), time(), KST)
+    )
+    fields = ("kind", "symbol", "start", "end", "detail")
+    windows = [{f: r[f] for f in fields} for r in rows]
+    return _json({"symbol": symbol, "from": since.isoformat(), "to": to.isoformat(), "special": windows})
+
+
+def _day_query(request: web.Request, name: str) -> date | None:
+    """The query's date ``name`` (YYYY-MM-DD), None if absent; 400 if it is not one."""
+    if (raw := request.query.get(name)) is None:
+        return None
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw):
+        with contextlib.suppress(ValueError):
+            return date.fromisoformat(raw)
+    raise _error(web.HTTPBadRequest, f"{name} must be a date YYYY-MM-DD, got {raw!r}")
+
+
+def _trading_days_back(calendar: MarketCalendar, end: date, days: int) -> date:
+    """The first of the last ``days`` trading days up to ``end`` (``end`` itself if it trades)."""
+    day, found = end, 0
+    while True:
+        if calendar.is_trading_day(day):
+            found += 1
+            if found == days:
+                return day
+        day -= timedelta(days=1)
 
 
 def _bar_json(b: Bar) -> dict[str, Any]:

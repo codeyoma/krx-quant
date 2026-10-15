@@ -34,6 +34,15 @@ baselines do not predict the past bar closes again: they were never shown then. 
 recorded in ``runs`` (``kind_fill``). ``rescore`` does not compute them again: a fixed answer
 rule takes a new answer version, whose rows are all missing.
 
+Last come the special situations' windows (#236, ``fill_special_windows``): the engine keeps
+each window it learns (``special_windows``), and a past day since the recording began with
+predictions and not decided before (``special_days``) has its windows decided from its
+recording as the engine decides them live (``special.py``): the VI status of the symbols
+predicted that day, the KOSPI index and its futures, nothing else, one day at a time. The
+replay replaces the windows the live engine kept that day (an engine restarted that day knew
+only part of it); a day recorded nowhere keeps them. The day is then marked decided, windows
+or not, so a quiet day is read once. The run is recorded in ``runs`` (``special_fill``).
+
 The running engine holds a lock on its state directory (``EngineLock``, ``flock``). A rescore
 beside it would leave the engine's cached leaderboards and consensus weights on the labels
 it replaced, so it refuses to run. An engine started while a rescore runs records, predicts
@@ -70,7 +79,7 @@ from krx_quant.object_store import ObjectStore, open_store
 from krx_quant.predictions import DB_NAME, PredictionStore
 from krx_quant.reference import BAR
 from krx_quant.replay import recorded_events
-from krx_quant.special import KOSPI, SpecialSituations, touching
+from krx_quant.special import KOSPI, SpecialSituations, Window, touching
 from krx_quant.touch import NOT_RECORDED, WINDOW, TouchResult
 
 log = logging.getLogger(__name__)
@@ -92,6 +101,8 @@ MARKET_FEEDS: dict[str, str | None] = {
     INDEX_REST.tr_id: KOSPI,
     KOSPI200_FUTURES.tr_id: None,
 }
+# The feeds the special windows' fill reads (#236): the symbols' VI status and the market's.
+SPECIAL_FEEDS = (VI_STATUS.tr_id, *MARKET_FEEDS)
 # How often an engine started beside a rescore looks whether it is done.
 LOCK_POLL_SECONDS = 5.0
 # Events between two looks at whether the fill should stop (the engine is shutting down).
@@ -565,13 +576,155 @@ def _answer_day(
     return Filled(day, source, windows, written, len({(symbol, close) for symbol, close, _ in left}))
 
 
+def decide_day(
+    events: Iterable[Event],
+    calendar: MarketCalendar,
+    symbols: Sequence[str],
+    halt: threading.Event | None = None,
+) -> list[tuple[datetime, Window]]:
+    """A day's special windows decided from its events (in receipt order) as the engine
+    decides them (#236): the VIs of ``symbols``, the circuit breakers and the sidecars, the
+    latest version of each with when it was received, as the engine keeps them."""
+    special = SpecialSituations(calendar)
+    for i, (feed, row) in enumerate(events):
+        if halt is not None and i % _HALT_EVERY == 0 and halt.is_set():
+            raise _Halted
+        special.event(feed, row, symbols)
+    return special.latest()
+
+
+def fill_special_windows(
+    settings: Settings,
+    now: datetime,
+    *,
+    halt: threading.Event | None = None,
+    calendar: MarketCalendar | None = None,
+) -> list[Filled]:
+    """The special windows of past days (#236), decided from their recordings, on a database
+    connection of its own (a worker thread may run it beside the engine).
+
+    The days are those from ``RECORDING_START`` before ``now``'s day with predictions and not
+    decided before (``special_days``). Each is decided as the engine decides it live
+    (``decide_day``), its VIs those of the symbols predicted that day, and stored with the day
+    marked decided, in place of the windows the live engine kept that day: a quiet day is read
+    once. A day recorded nowhere is marked decided
+    without windows, and logged; a day that cannot be read is logged and left for the next
+    time. ``halt`` stops it between batches of events, writing nothing more.
+    """
+    calendar = calendar or calendar_store(settings).calendar
+    store = PredictionStore(settings.state_dir / DB_NAME)
+    try:
+        days = store.special_undecided(RECORDING_START, kst_day(now))
+        if not days:
+            return []
+        object_store = open_store(settings)
+        filled: list[Filled] = []
+        for day in sorted(days):
+            if halt is not None and halt.is_set():
+                break
+            try:
+                filled.append(
+                    _decide_special_day(settings, store, object_store, calendar, day, days[day], now, halt)
+                )
+            except _Halted:
+                break
+        if any(f.failed is None for f in filled):
+            store.add_run("special_fill", now, None, json.dumps([_summary(f) for f in filled]))
+        return filled
+    finally:
+        store.close()
+
+
+def _decide_special_day(
+    settings: Settings,
+    store: PredictionStore,
+    object_store: ObjectStore | None,
+    calendar: MarketCalendar,
+    day: date,
+    symbols: Sequence[str],
+    now: datetime,
+    halt: threading.Event | None,
+) -> Filled:
+    """Decide ``day``'s special windows (VIs of ``symbols``) from its recording and keep them."""
+    try:
+        source, windows = _read_special_day(
+            settings, object_store, day, symbols, lambda events: decide_day(events, calendar, symbols, halt)
+        )
+    except _Halted:
+        raise
+    except Exception as e:  # an unreadable file, the Object Store out of reach: tried again later
+        log.exception(
+            "could not read the events recorded on %s; its special windows wait for the next try", day
+        )
+        return Filled(day, None, 0, 0, failed=f"{type(e).__name__}: {e}")
+    if source is None:
+        where = "the data directory" + (f" nor {object_store.name}" if object_store is not None else "")
+        log.warning(
+            "%s: no VI status, KOSPI index nor KOSPI200 futures recorded in %s; no special windows kept",
+            day,
+            where,
+        )
+    written = store.decide_special_day(day, windows, source, now)
+    log.info("special windows of %s from %s: %d windows, %d rows written", day, source, len(windows), written)
+    return Filled(day, source, len(windows), written)
+
+
+def _read_special_day(
+    settings: Settings,
+    object_store: ObjectStore | None,
+    day: date,
+    symbols: Sequence[str],
+    run: Callable[[Iterable[Event]], list[_T]],
+) -> tuple[str | None, list[_T]]:
+    """``run`` on ``day``'s events of ``SPECIAL_FEEDS`` (the VI status of ``symbols``, the
+    market's partitions): from the data directory if it has any of them, else from the Object
+    Store (copied to a temporary directory). What it gave and where the events came from;
+    None and nothing where neither has them."""
+    if _special_recorded(settings.data_dir, day, symbols):
+        events = recorded_events(settings.data_dir, day, symbols, feeds=SPECIAL_FEEDS)
+        return "the data directory", run(events)
+    if object_store is None:
+        return None, []
+    with tempfile.TemporaryDirectory(prefix="krx-quant-special-") as tmp:
+        root = Path(tmp)
+        for key in object_store.keys(f"events/date={day.isoformat()}/"):
+            parts = key.split("/")  # events, date=…, feed=…, symbol=…, file
+            if len(parts) != 5:
+                continue
+            feed, symbol = parts[2].removeprefix("feed="), parts[3].removeprefix("symbol=")
+            if feed in MARKET_FEEDS:
+                wanted = MARKET_FEEDS[feed] in (None, symbol)
+            else:
+                wanted = feed == VI_STATUS.tr_id and symbol in symbols
+            if wanted:
+                path = root / key
+                path.parent.mkdir(parents=True, exist_ok=True)
+                object_store.get(key, path)
+        if _special_recorded(root, day, symbols):
+            return object_store.name, run(recorded_events(root, day, symbols, feeds=SPECIAL_FEEDS))
+    return None, []
+
+
+def _special_recorded(data_dir: Path, day: date, symbols: Sequence[str]) -> bool:
+    """Whether any of ``SPECIAL_FEEDS`` was recorded on ``day`` under ``data_dir``: the VI
+    status of one of ``symbols``, the KOSPI index or its futures."""
+    root = data_dir / "events" / f"date={day.isoformat()}"
+    partitions = [root / f"feed={VI_STATUS.tr_id}" / f"symbol={s}" for s in symbols]
+    for feed, key in MARKET_FEEDS.items():
+        if key is None:  # whichever was recorded (the futures' front month)
+            partitions += sorted((root / f"feed={feed}").glob("symbol=*"))
+        else:
+            partitions.append(root / f"feed={feed}" / f"symbol={key}")
+    return any(p.is_dir() and partition_files(p) for p in partitions)
+
+
 async def keep_touches_filled(settings: Settings, engine: PredictionEngine, lock: EngineLock) -> None:
     """Fill the past bar closes' missing touch labels once, then the missing answers of the
-    engine's kinds besides the direction (#180), in a worker thread, as soon as this engine
-    holds the engine lock (a rescore may hold it); after each that wrote, move the store's
-    version on, so the cached statistics are computed again. The collector starts it after
-    the Engine API: recording, predicting and serving go on meanwhile. A failure is logged;
-    the next start tries again."""
+    engine's kinds besides the direction (#180), then the past days' special windows (#236), in
+    a worker thread, as soon as this engine holds the engine lock (a rescore may hold it); after
+    each that wrote, move the store's version on, so the cached statistics are computed again.
+    The collector starts it after the Engine API: recording, predicting and serving go on
+    meanwhile. A failure is logged; the next start tries again."""
     waiting = False
     while not lock.acquire():
         if not waiting:
@@ -588,6 +741,7 @@ async def keep_touches_filled(settings: Settings, engine: PredictionEngine, lock
             "kinds' answers",
             partial(fill_kind_answers, settings, now, kinds=engine.kinds, halt=halt, calendar=calendar),
         ),
+        ("special windows", partial(fill_special_windows, settings, now, halt=halt, calendar=calendar)),
     ]
     for what, fill in fills:
         try:

@@ -47,7 +47,8 @@ through the same view.
 
 Special situations (``special.py``): a symbol in a VI at a bar close is not predicted
 (``vi``), and a prediction whose four minutes a VI, circuit breaker or sidecar touches is
-special, marked when it is made or as soon as the situation is learned.
+special, marked when it is made or as soon as the situation is learned. Each window learned
+is kept in ``special_windows`` (#236), its later versions over it (a VI's release).
 
 The prediction window is continuous trading, from the first bar close after the open
 until the last bar close whose target (t + 4 minutes) is still in continuous trading:
@@ -249,7 +250,8 @@ ENGINE_FEEDS: dict[str, tuple[str, ...]] = {
     # NXT's trades, for its share of the volume (Shannon's).
     NXT_TRADE.tr_id: ("symbol", "received_at", "qty"),
     # A symbol's VIs: a bar close inside one is not predicted; a window touching one is special.
-    VI_STATUS.tr_id: ("symbol", "event_time", "received_at", "end_time", "active"),
+    # Their type is kept with the window (#236).
+    VI_STATUS.tr_id: ("symbol", "event_time", "received_at", "end_time", "active", "kind"),
     # The KOSPI index and KOSPI200 futures, for circuit breakers and sidecars; with the other
     # indices, USD futures and US daytime trades, they lead.
     INDEX.tr_id: ("symbol", "event_time", "received_at", "value", "change_pct"),
@@ -504,13 +506,15 @@ class PredictionEngine:
 
     def on_event(self, feed: str, row: dict[str, Any]) -> None:
         self._market.on_event(feed, row)
-        self._mark_special(self._special.event(feed, row, self.symbols))
+        self._mark_special(self._special.event(feed, row, self.symbols), row["received_at"])
 
-    def _mark_special(self, window: Window | None) -> None:
-        """A special window just learned: the predictions it touches are special, scored or not."""
+    def _mark_special(self, window: Window | None, learned_at: datetime) -> None:
+        """A special window just learned: the predictions it touches are special, scored or not,
+        and it is kept (#236)."""
         if window is not None:
             log.info("special situation: %s", window)
             self.store.mark_special(window.symbol, window.start, window.end, HORIZON)
+            self.store.keep_special(window, learned_at)
 
     def next_due(self) -> datetime | None:
         """When ``run_due`` next has work: a bar close to predict, an outcome to score, or a review."""
