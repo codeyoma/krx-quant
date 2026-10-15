@@ -37,6 +37,7 @@ from krx_quant.scheduled import (
     RUNNING,
     SIGNAL_REVIEW,
     STATE_FILE,
+    SUPPLY_PROBE,
     Attachment,
     Facts,
     Job,
@@ -870,6 +871,31 @@ def test_the_signal_review_runs_once_on_the_first_night_with_an_official_algorit
     assert not SIGNAL_REVIEW.due(official(MONDAY, 2, ran))
     assert not SIGNAL_REVIEW.due(official(MONDAY, 2, replace(ran, outcome=FAILED, exit_code=1)))
     assert SIGNAL_REVIEW.due(official(MONDAY, 2, replace(ran, outcome=INTERRUPTED)))
+
+
+def test_the_supply_probe_runs_once_on_the_first_night_trading_or_not() -> None:
+    assert SUPPLY_PROBE.command == ("probe-supply",)
+    assert SUPPLY_PROBE.timeout == timedelta(minutes=30)
+    assert [t.issue for t in SUPPLY_PROBE.targets] == [226]
+    assert SUPPLY_PROBE.label == ("ready-for-agent",)
+    assert JOBS[:3] == (DIAGNOSE, SIGNAL_REVIEW, SUPPLY_PROBE)  # before the pre-validations
+    assert SUPPLY_PROBE.due(night(FRIDAY))
+    assert SUPPLY_PROBE.due(night(SATURDAY))  # KIS answers for the latest trading day any night
+    ran = JobRecord(SATURDAY, OK, at(SATURDAY, "22:30"), COMMIT, 0, 150.0)
+    assert not SUPPLY_PROBE.due(night(MONDAY, ran))
+    assert not SUPPLY_PROBE.due(night(MONDAY, replace(ran, outcome=FAILED, exit_code=1)))
+    assert SUPPLY_PROBE.due(night(MONDAY, replace(ran, outcome=INTERRUPTED)))
+
+
+async def test_the_supply_probe_runs_on_the_first_night_then_never(tmp_path: Path) -> None:
+    async with scheduling(tmp_path, at(FRIDAY, "22:00"), [SUPPLY_PROBE]) as (clock, runs, _, state):
+        clock.set(at(FRIDAY, "22:30"))
+        await until(lambda: state.jobs.get("probe-supply-226") is not None)
+        await until(lambda: state.jobs["probe-supply-226"].outcome == OK)
+        clock.set(at(SATURDAY, "22:30"))
+        clock.set(at(MONDAY, "22:30"))
+        await settle()
+        assert runs.started == [("probe-supply", at(FRIDAY, "22:30"))]
 
 
 async def test_the_signal_review_waits_for_an_official_algorithm_then_runs_once(tmp_path: Path) -> None:

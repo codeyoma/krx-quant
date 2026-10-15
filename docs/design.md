@@ -61,6 +61,7 @@
 | `prevalidation.py` | 새 알고리즘 사전 검증: 최근 20거래일 재생과 엔진의 등록 관문(#24) |
 | `diagnose.py` | 읽기 전용 진단 명령: 남은 결정에 필요한 실측(#82) |
 | `signal_review.py` | 읽기 전용 신호 기준 검토 명령(`signal-review`, #206): 순위표와 정식 알고리즘의 성적, 기준 후보(최종 합의 확률 × 같은 방향 정식 수)마다 엔진의 신호 규칙(`signals.py`)을 저장된 합의에 그대로 돌린 신호 수와 적중률([operations.md](operations.md#신호-기준-검토-206)) |
+| `supply_probe.py` | 읽기 전용 KIS 일별 수급 출처 확인 명령(`probe-supply`, #226): 조사에서 찾은 조회 7개의 응답, 행 수와 날짜, 필드의 모양(값 없이), 거슬러 가는 끝([kis-feeds.md](kis-feeds.md#일별-수급-226)) |
 | `touch.py`, `rescore.py` | 도달 정답 규칙(#167), 지난 예측의 도달 정답 채우기와 `rescore` 명령, 엔진 잠금(#168), 다른 종류의 지난 정답 채우기(#180) |
 | `kinds.py`, `kind_registry.py`, `kind_stats.py` | 예측 종류(#179): 종류의 틀(클래스, 행동 클래스, 정답 함수와 정답 버전, 장벽 폭 규칙(#183), 기준 예측(표에서 내는 것 포함, #180), 출력 필드와 검사, 추가 통계), 종류의 정답이 읽는 창, 등록한 종류 목록(`KINDS`, #180), 종류의 통계와 순위표(5장 "예측 종류") |
 | `ranges.py` | 변동폭 종류(#180): 정답, 1분봉 규칙, 출력 검사, 기준 예측 `range-climate`·`range-persist`, 분위수 통계(5장 "변동폭"). 변동폭의 알고리즘 `mandelbrot`(#181)은 `algorithms/mandelbrot/`에 있다 |

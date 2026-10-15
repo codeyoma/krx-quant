@@ -176,14 +176,26 @@ class RestClient:
 
         A call KIS refuses for its per-second limit is sent again after a short pause.
         """
+        body, _ = await self.get_page(tr_id, path, params)
+        return body
+
+    async def get_page(
+        self, tr_id: str, path: str, params: dict[str, str], tr_cont: str = ""
+    ) -> tuple[dict[str, Any], str]:
+        """``get``, with KIS's continuation header: the answer's ``tr_cont`` (``M`` or ``F``:
+        KIS has another page; ``D`` or ``E``: the last). The next page is asked with the same
+        ``params`` and ``tr_cont="N"``."""
         for attempt in range(_BUSY_RETRIES + 1):
             token = await self._access_token()
             await self._limiter.acquire()
             headers = {**self._headers, "authorization": f"Bearer {token}", "tr_id": tr_id}
+            if tr_cont:
+                headers["tr_cont"] = tr_cont
             async with self._session.get(f"{self._rest_url}{path}", params=params, headers=headers) as resp:
                 body = await resp.json(content_type=None)
+                more = resp.headers.get("tr_cont", "")
             if isinstance(body, dict) and body.get("rt_cd") == "0":
-                return body
+                return body, more
             code = body.get("msg_cd") if isinstance(body, dict) else None
             if code == _BUSY and attempt < _BUSY_RETRIES:
                 await asyncio.sleep(_BUSY_PAUSE)

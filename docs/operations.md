@@ -436,6 +436,70 @@ docker compose run --rm engine signal-review --days 20
   …
 ```
 
+### 일별 수급 출처 확인 (#226)
+
+차트의 일별 수급 지표 8종(#226)을 어느 KIS 조회에서 받을지, 조사([kis-feeds.md](kis-feeds.md#일별-수급-226))에서 찾은 조회 7개를 서버에서 실제로 불러 확인한다. 결과로 kis-feeds.md의 ⚠를 지우고, 엔진의 수집(#226 다음 단계)을 만든다.
+
+- KIS를 읽기만 하고 아무것도 쓰지 않는다. 0.5초 간격으로 부르고, 캐시된 접근 토큰(`state/kis_token.json`)을 만료될 때까지 쓴다(만료 1시간 전 미리 바꾸기를 하지 않는다). 그래서 수집기가 도는 중에 돌려도 된다. 토큰이 없거나 만료됐을 때만 새로 받는다. 그래도 장 시간(08:00–20:00)과 20:30 백필은 피한다. 같은 앱키의 초당 한도를 나눠 쓰기 때문이다.
+- 종목 3개와 ETF 하나면 많아야 240번쯤 부르고 2–3분 걸린다(종목은 `KRX_SYMBOLS`의 앞 5개까지). 한 조회의 쪽 넘기기는 25번, 그 뒤 가장 오래된 날 찾기(이분 탐색)는 20번까지다. 20번 잇달아 실패하면 나머지는 부르지 않는다.
+- **시세 값을 출력하지 않는다.** 출력이 공개 이슈에 올라가기 때문이다. 필드 이름, 행 수, 날짜, 표시(아래)만 나온다. 테스트가 가짜 KIS의 값이 출력에 없는지 본다.
+- 종료 코드: 한 번이라도 답을 받으면 0, 하나도 못 받으면 1이다. 토큰을 못 받으면 `KIS error: …`와 1이다.
+
+```bash
+docker compose run --rm engine probe-supply
+```
+
+조회마다(`[1]`–`[7]`) 다음을 출력한다.
+- **latest**: 오늘까지를 묻는다. 첫 종목은 그 조회가 받을 수 있는 시장 구분(`UN`·`J`·`NX`)을 모두, 다른 종목은 첫 시장 구분으로, ETF(`KRX_ETF_SYMBOLS`에서 종목 목록에 없는 첫 것)는 그 조회가 `J`를 받으면 `J`로 묻는다(ETF는 NXT에서 거래되지 않는다). 줄마다 `OK`와 행 수(응답의 어느 키인지), 행의 날짜 범위와 순서, 헤더 `tr_cont`, 원하는 필드의 표시다. 실패면 `error HTTP <상태> <msg_cd> <msg1>`만 보인다(응답의 나머지는 보이지 않는다).
+- **필드**: 처음 행이 온 응답의 필드를 표시별로 묶는다. `int`(정수: 수량·금액), `dec`(소수: 비율), `±`(음수가 있다), `date`, `text`, `zero`(모두 0), `empty`(모두 비었다), `missing`(응답에 없다).
+- **a year back**: 날짜를 받는 조회만. 1년 전 날까지를 묻는다.
+- **history**: 날짜를 받는 조회만. 첫 종목을 오늘부터 거슬러 쪽을 넘긴다. 다 넘기면 `nothing older`와 가장 오래된 날, 25번 안에 끝나지 않으면 `still going`과 이분 탐색으로 찾은 가장 오래된 날이다. 기간을 묻는 조회는 빈 1년 창이 3번 이어질 때까지 더 가 본다(그 사이의 빈 기간은 `a gap`). 첫 쪽이 `tr_cont` `M`·`F`면 `tr_cont: N`으로 다음 쪽을 한 번 묻는다.
+- 날짜를 받지 않는 조회(`FHKST01010900`, `FHKST01010400`, `FHKST01010100`)는 latest만 묻는다.
+
+마지막 절 **cross-checks**는 첫 종목의 latest 응답끼리 같은 날의 값이 같은 날이 몇 날인지 센다(값은 보이지 않는다): 투자자 일별(`FHPTJ04160001`)과 주식현재가 투자자(`FHKST01010900`)의 `J`, 투자자 일별의 `UN`과 `J`(NXT가 더해지는지), 일자별(`FHKST01010400`)과 투자자 일별의 외국인 순매수, 일자별의 `UN`과 `J`. 그리고 `frgn_hldn_qty ÷ lstn_stcn × 100`이 `hts_frgn_ehrt`와 0.01 안에서 같은지 본다(소진율이 지분율인지).
+
+예(테스트의 가짜 KIS, 줄임):
+
+```
+probe-supply (#226) 2026-10-15: stocks 005930, 000660; ETF 133690
+No market values below: field names, row counts, days and flags only.
+…
+[1] FHPST04830000 국내주식 공매도 일별추이: GET /uapi/domestic-stock/v1/quotations/daily-short-sale
+  for 일별 공매도 거래량; wanted: ssts_cntg_qty, ssts_vol_rlim
+  latest (asked to 2026-10-15):
+    005930 J: OK, 100 rows (output2), 2026-05-29..2026-10-15, newest first · ssts_cntg_qty int, ssts_vol_rlim dec
+    005930 UN: error HTTP 200 OPSQ1234 시장 구분 오류
+    005930 NX: OK, 0 rows (output2)
+    000660 J: OK, 100 rows (output2), 2026-05-29..2026-10-15, newest first · ssts_cntg_qty int, ssts_vol_rlim dec
+    133690 J: OK, 100 rows (output2), 2026-05-29..2026-10-15, newest first · ssts_cntg_qty int, ssts_vol_rlim dec
+  output2 fields (005930 J): int: ssts_cntg_qty, stck_clpr · dec: ssts_vol_rlim · date: stck_bsop_date · zero: acml_ssts_cntg_qty_rlim · empty: ssts_tr_pbmn
+  beside them, output1 fields: int: acml_vol, stck_prpr
+  a year back (asked to 2025-10-15):
+    005930 J: OK, 100 rows (output2), 2025-05-29..2025-10-15, newest first · ssts_cntg_qty int, ssts_vol_rlim dec
+    …
+  history of 005930 J (paging back from 2026-10-15, at most 25 calls):
+    a gap: no rows from 2023-11-04 to 2025-03-30
+    1144 rows in 18 calls (at most 100 a call), oldest 2021-01-04: nothing older
+
+[2] FHPTJ04160001 종목별 투자자매매동향(일별): GET /uapi/domestic-stock/v1/quotations/investor-trade-by-stock-daily
+  …
+  history of 005930 UN (paging back from 2026-10-15, at most 25 calls):
+    750 rows in 25 calls (at most 30 a call), back to 2023-12-01: still going
+    oldest by bisection: 2015-01-02 (14 calls)
+    the first page said tr_cont M; the next (tr_cont N): OK, 30 rows (output2), 2026-07-24..2026-09-03, newest first, tr_cont M, older rows
+…
+cross-checks of 005930 (latest answers; counts of equal values only):
+  FHPTJ04160001 J vs FHKST01010900 J: 30 common days (2026-09-04..2026-10-15); equal on: prsn_ntby_qty 30, orgn_ntby_qty 30, frgn_ntby_qty 30
+  FHPTJ04160001 UN vs FHPTJ04160001 J: 30 common days (2026-09-04..2026-10-15); equal on: prsn_ntby_qty 0, orgn_ntby_qty 30, frgn_ntby_qty 30
+  FHKST01010100 UN: frgn_hldn_qty / lstn_stcn x 100 = hts_frgn_ehrt (within 0.01 points)
+
+137 calls, 4 failed
+```
+
+**예약 작업이 돌린다** (#215, 3장 "예약 작업 (#215)"). 이 명령을 담은 엔진이 배포된 뒤 첫 밤(거래일이 아니어도), 밤 학습이 끝난 뒤(22:30부터) 예약 작업 `probe-supply-226`이 `probe-supply`를 한 번 돌린다. 출력 전체를 #226에 댓글로 남기고 `ready-for-agent`로 바꾼다. 손으로 다시 돌릴 때는 위 명령이다(출력은 터미널에만 나온다). 예약 작업으로 한 번 더 돌게 하려면 3장 "예약 작업 (#215)"의 "손으로 다시 돌리기"대로 `state/scheduled.json`의 `jobs`에서 `probe-supply-226`을 지운다.
+
+**에이전트가 할 일.** `gh issue view 226 --comments`로 댓글을 읽고, 조회마다 OK인지, 한 번에 주는 행 수, 거슬러 가는 끝, 시장 구분, 원하는 필드가 비지 않았는지, 견주기 결과를 kis-feeds.md "일별 수급 (#226)"에 옮겨 ⚠를 지운다. 보유수량 범위는 사용자가 정한다(kis-feeds.md "보유수량").
+
 ## 3. 매일 일어나는 일
 
 | 시각 (KST) | 일 |
@@ -687,6 +751,7 @@ report: /state/prevalidations/mandelbrot.json
 |---|---|---|---|---|
 | `diagnose-203-187` | 이 작업을 담은 엔진(#215)이 배포된 뒤 첫 거래일 밤, 한 번 | `diagnose --days 20` | 1시간. 넉넉히 잡은 상한이다(진단은 피드를 하나씩 읽고 버린다) | #203: 출력 전체(7절로 `BAR_C`, 8절로 장벽 일치율). #187: 머리말과 9절(뒤집힌 호가)만 |
 | `signal-review-206` | 정식 알고리즘(합의 구성원)이 하나 이상인 첫 밤, 한 번(거래일이 아니어도). 도달 정답으로 다시 시작한 수습의 첫 판정 뒤, 2026-10-30쯤(2장 "신호 기준 검토 (#206)") | `signal-review --days 20` | 1시간. 넉넉히 잡은 상한이다(DB만 읽는다). 사전 검증보다 먼저 돈다 | #206: 출력 전체. 에이전트가 신호 기준의 추천값을 낸다 |
+| `probe-supply-226` | 이 작업을 담은 엔진(#226)이 배포된 뒤 첫 밤, 한 번(거래일이 아니어도. KIS가 가장 최근 거래일과 그 전을 준다) | `probe-supply` | 30분. 넉넉히 잡은 상한이다(많아야 240번쯤 조회, 2–3분). 사전 검증보다 먼저 돈다 | #226: 출력 전체(시세 값 없음). 에이전트가 kis-feeds.md "일별 수급 (#226)"의 ⚠를 고친다(2장 "일별 수급 출처 확인 (#226)") |
 | `prevalidate-<이름>`: `mandelbrot`, `breiman`, `kalman`, `shannon`, `poisson`, 그 뒤 새 알고리즘(등록 순서) | 녹화 10거래일 이상, 엔진이 그 알고리즘을 기다림, 지금 코드·정답 버전으로 판정받지 않음. 한 밤에 하나, 이 순서로(#204, 위 "새 알고리즘 사전 검증 (#24)") | `prevalidate <이름>` | `breiman` 6시간, 나머지 5시간. 하루 재생의 20배쯤 걸리는 데에 버스트 CPU가 바닥난 때를 더한 상한이다 | #204: 출력과 리포트 JSON(`state/prevalidations/<이름>.json`, `<details>`) |
 
 댓글을 남긴 뒤 이슈마다 `ready-for-agent`를 붙이고 `ready-for-human`, `needs-triage`를 뗀다(작업마다 다른 라벨을 정할 수도 있다).
@@ -831,7 +896,7 @@ docker compose start engine
 - 장벽(#183)을 담은 엔진은 처음 뜰 때 `kind_predictions`에 `width_ticks` 열을 더한다(스키마 버전은 그대로라 되돌려도 뜬다). 그날부터 장벽의 기준 예측 둘이 예측·채점되고(`/v1/leaderboard?kind=barrier`), 시작할 때 2026-10-12부터의 장벽 정답을 채운다(3장 "종류의 지난 정답"). 방향과 변동폭의 예측·채점은 전과 같다(변동폭 예측 항목에 `width_ticks: null`이 더해진다). 서버에서 손으로 할 일은 없다. 채워진 뒤 1분봉 규칙의 일치율을 잰다(2장 "장벽 1분봉 규칙의 일치율 재기").
 - 다른 종류의 예측에 봉 마감의 k를 붙이는 엔진(#200)은 처음 뜰 때 `kind_predictions`에 `flat_ticks` 열을 더한다. 스키마 버전은 그대로라 되돌려도 뜬다(옛 엔진이 쓰는 행은 그 열이 비어 있다). 그 전에 저장한 예측은 k가 없다(API의 `flat_ticks`가 `null`이고, 화면은 그때 `/v1/symbols`의 지금 k를 보인다). 서버에서 손으로 할 일은 없다.
 - 다른 종류의 예측에 봉 마감 중간가와 호가단위를 붙이는 엔진(#210)은 처음 뜰 때 `kind_predictions`에 `anchor`, `tick` 열을 더한다. 스키마 버전은 그대로라 되돌려도 뜬다(옛 엔진이 쓰는 행은 그 열이 비어 있다). 그 전에 저장한 예측은 둘 다 없다(API의 `anchor`, `tick`이 `null`이고, 화면은 그때 정답 전에 장벽의 U·L 없이 w만 보인다). 서버에서 손으로 할 일은 없다.
-- 예약 작업(#215)을 담은 엔진은 그날 밤 22:30부터 예약 작업을 본다(3장 "예약 작업 (#215)"). 첫 작업 `diagnose-203-187`은 첫 거래일 밤에 한 번 돈다. 사전 검증 작업(#204)을 담은 엔진은 녹화가 10거래일이 된 밤부터 기다리는 알고리즘을 밤마다 하나씩 사전 검증한다(3장 "새 알고리즘 사전 검증 (#24)"). 신호 기준 검토 작업(#206)을 담은 엔진은 정식 알고리즘이 처음 생긴 밤에 `signal-review`를 한 번 돌린다(2장 "신호 기준 검토 (#206)"). `KRX_GITHUB_TOKEN`이 없으면 결과는 서버(`state/scheduled.json`)에 남고 텔레그램으로 알린다. 토큰을 넣으면(#218) 엔진이 다음에 시작할 때 올린다. 서버에서 손으로 할 일은 토큰 하나다.
+- 예약 작업(#215)을 담은 엔진은 그날 밤 22:30부터 예약 작업을 본다(3장 "예약 작업 (#215)"). 첫 작업 `diagnose-203-187`은 첫 거래일 밤에 한 번 돈다. 사전 검증 작업(#204)을 담은 엔진은 녹화가 10거래일이 된 밤부터 기다리는 알고리즘을 밤마다 하나씩 사전 검증한다(3장 "새 알고리즘 사전 검증 (#24)"). 신호 기준 검토 작업(#206)을 담은 엔진은 정식 알고리즘이 처음 생긴 밤에 `signal-review`를 한 번 돌린다(2장 "신호 기준 검토 (#206)"). 일별 수급 출처 확인 작업(#226)을 담은 엔진은 배포 뒤 첫 밤에 `probe-supply`를 한 번 돌려 #226에 남긴다(2장 "일별 수급 출처 확인 (#226)"). `KRX_GITHUB_TOKEN`이 없으면 결과는 서버(`state/scheduled.json`)에 남고 텔레그램으로 알린다. 토큰을 넣으면(#218) 엔진이 다음에 시작할 때 올린다. 서버에서 손으로 할 일은 토큰 하나다.
 - 결과는 텔레그램으로 온다(`krx-quant notify`): `[알림] 자동 업데이트: <이전> → <새 커밋>`과 커밋 제목(최대 10개), `[알림] 자동 업데이트 실패: …`, 그 밖의 오류(GitHub 접속 실패 등)는 `[알림] 자동 업데이트 오류: …`. 오류일 때 엔진은 그대로 돈다.
 - 업데이트가 끝나면 쓰지 않는 Docker 이미지를 지운다.
 - 이미지를 만들 때 그 커밋을 넘긴다(`KRX_COMMIT`, `compose.yaml`의 빌드 인자). 엔진은 `/v1/status`의 `commit`으로 보이고, 시작할 때마다 DB `runs`에 `start`로 커밋과 수수료율, 신호 규칙, 시간·CPU 예산을 남긴다(#85). 손으로 `docker compose up -d --build`하면 `unknown`이다. 커밋을 남기려면 `KRX_COMMIT=$(git rev-parse HEAD) docker compose up -d --build`로 띄운다.
