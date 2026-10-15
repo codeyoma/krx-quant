@@ -11,7 +11,7 @@ import asyncio
 import json
 import os
 import sys
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import date, datetime, time, timedelta
@@ -36,6 +36,7 @@ from krx_quant.scheduled import (
     OK,
     RUNNING,
     STATE_FILE,
+    Attachment,
     Facts,
     Job,
     JobRecord,
@@ -83,8 +84,9 @@ def job(
     due: Callable[[Night], bool] = never_ran,
     timeout: timedelta = timedelta(hours=1),
     targets: tuple[Target, ...] = (Target(1),),
+    attach: tuple[Attachment, ...] = (),
 ) -> Job:
-    return Job(name=name, due=due, command=(name, "--flag"), timeout=timeout, targets=targets)
+    return Job(name=name, due=due, command=(name, "--flag"), timeout=timeout, targets=targets, attach=attach)
 
 
 class Runs:
@@ -115,6 +117,19 @@ class Runs:
         return self.ran
 
 
+class Writes(Runs):
+    """Stand-in runs that write files as they run: ``files`` gives each path its text."""
+
+    def __init__(self, clock: FakeClock, ran: Ran, files: Mapping[Path, str]) -> None:
+        super().__init__(clock, ran)
+        self.files = files
+
+    async def __call__(self, args: Sequence[str], timeout: timedelta) -> Ran:
+        for path, text in self.files.items():
+            path.write_text(text)
+        return await super().__call__(args, timeout)
+
+
 class Told(list[str]):
     async def __call__(self, text: str) -> bool:
         self.append(text)
@@ -134,7 +149,7 @@ async def scheduling(
     github: FakeGitHub | None = None,
     token: str | None = TOKEN,
     training: NightTraining | None = None,
-    facts: Facts | None = None,
+    facts: Facts | Callable[[], Facts] | None = None,
     told: Told | None = None,
     secrets: Sequence[str] = (),
     clock: FakeClock | None = None,
@@ -146,6 +161,8 @@ async def scheduling(
     state = JobState.load(tmp_path / STATE_FILE)
 
     async def read_facts() -> Facts:
+        if callable(facts):  # read each night, as the collector does
+            return facts()
         return facts or Facts()
 
     async with aiohttp.ClientSession() as session:
@@ -350,6 +367,23 @@ async def test_a_condition_sees_the_night_and_what_the_engine_knows(tmp_path: Pa
     assert seen[0].facts == facts and seen[0].commit == COMMIT and seen[0].record is None
     assert not seen[0].ran
     assert runs.started == []
+
+
+async def test_a_condition_is_asked_once_the_jobs_before_it_ran_that_night(tmp_path: Path) -> None:
+    # What a job that runs one of its kind a night relies on (the pre-validations, #204).
+    seen: list[JobRecord | None] = []
+
+    def second(night: Night) -> bool:
+        seen.append(night.records.get("first"))
+        return False
+
+    jobs = [job("first"), job("second", due=second)]
+    async with scheduling(tmp_path, at(FRIDAY, "22:00"), jobs) as (clock, runs, _, _):
+        clock.set(at(FRIDAY, "22:30"))
+        await until(lambda: bool(seen))
+    [first] = seen
+    assert first is not None and (first.day, first.outcome) == (FRIDAY, OK)
+    assert runs.names() == ["first"]
 
 
 async def test_a_condition_that_fails_skips_its_job_only(tmp_path: Path) -> None:
@@ -599,6 +633,57 @@ async def test_a_part_not_in_the_output_posts_it_whole_and_says_so(tmp_path: Pat
     assert "출력에서 이 이슈에 올릴 부분을 찾지 못해 출력 전체를 싣는다." in body
     assert "9절만 싣는다." not in body
     assert "Traceback (most recent call last)" in body
+
+
+async def test_a_file_the_run_wrote_goes_with_its_result_masked(tmp_path: Path) -> None:
+    clock = FakeClock(at(FRIDAY, "22:00"))
+    secret = "s3cr3t-" + "v" * 20
+    report = tmp_path / "reports" / "job.json"
+    report.parent.mkdir()
+    report.write_text('{"run": "an earlier one"}')
+    writes = Writes(clock, Ran(1, "refused\n", "a log line\n"), {report: f'{{"key": "{secret}"}}'})
+    attach = (Attachment("리포트 state/reports/job.json", "reports/job.json"),)
+    async with fake_github() as hub:
+        async with scheduling(
+            tmp_path,
+            at(FRIDAY, "22:00"),
+            [job(attach=attach)],
+            runs=writes,
+            github=hub,
+            clock=clock,
+            secrets=[secret],
+        ) as (_, _, told, _):
+            clock.set(at(FRIDAY, "22:30"))
+            await until(lambda: bool(told))
+    body = hub.bodies(1)[0]
+    assert secret not in body
+    summary = "<details><summary>리포트 state/reports/job.json</summary>"
+    folded = summary + '\n\n```\n{"key": "[가림]"}\n```\n\n</details>'
+    assert folded in body
+    assert body.index(folded) < body.index("<details><summary>stderr</summary>")  # the file first
+    assert "쓰지 않아" not in body
+
+
+async def test_a_file_the_run_did_not_write_is_not_attached(tmp_path: Path) -> None:
+    left = tmp_path / "left.json"
+    left.write_text('{"run": "an earlier one"}')  # an earlier run's: it would pass for this one's
+    attach = (Attachment("남은 것", "left.json"), Attachment("없는 것", "reports/none.json"))
+    async with fake_github() as hub:
+        async with scheduling(tmp_path, at(FRIDAY, "22:00"), [job(attach=attach)], github=hub) as (
+            clock,
+            _,
+            told,
+            _,
+        ):
+            clock.set(at(FRIDAY, "22:30"))
+            await until(lambda: bool(told))
+    body = hub.bodies(1)[0]
+    assert "<details>" not in body and "an earlier one" not in body
+    assert body.splitlines()[2:5] == [
+        "다시 돌리기: `docker compose run --rm engine job --flag`",
+        "`state/left.json`은 이번 실행이 쓰지 않아 붙이지 않는다.",
+        "`state/reports/none.json`은 이번 실행이 쓰지 않아 붙이지 않는다.",
+    ]
 
 
 async def test_a_timed_out_job_says_so(tmp_path: Path) -> None:

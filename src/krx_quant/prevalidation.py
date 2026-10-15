@@ -25,7 +25,9 @@ It passes when all of these hold:
   baseline, and its weakest lift over the baselines is above 0.
 
 The report is saved to ``state/prevalidations/<name>.json``, passed or not, with a digest
-of the algorithm's code; the engine reads it at each bar close.
+of the algorithm's code; the engine reads it at each bar close. The server's scheduled job
+runs this check itself, one waiting algorithm a night (``scheduled.py``, #204), and reads the
+report (``last_report``) to know whether the code it runs now has been judged already.
 
 With the touch target (``KRX_TARGET_VERSION=2``, the default since #170) the candidate
 trains on its labels and the replay forecasts it (the touch target's baselines, the climate
@@ -130,25 +132,85 @@ def admits(
     def admitted(algorithm: Algorithm | KindAlgorithm) -> bool:
         if algorithm.name in REGISTERED_BEFORE:
             return True
-        path = report_path(state_dir, algorithm.name)
-        try:
-            report = json.loads(path.read_text())
-        except FileNotFoundError:
+        report = _read_report(state_dir, algorithm.name)
+        if report is None or report.get("passed") is not True:
             return False
-        except (OSError, ValueError) as e:
-            log.error("cannot read %s (%s); %s waits", path, e, algorithm.name)
-            return False
-        if not isinstance(report, dict) or report.get("passed") is not True:
-            return False
-        if report.get("code") != code_digest(algorithm):
-            log.warning("%s passed with other code; it waits for a new pre-validation", algorithm.name)
-            return False
-        if report.get("target_version", 1) != _target(algorithm, target_version, kinds):
-            log.warning("%s passed on another target; it waits for a new pre-validation", algorithm.name)
+        stale = _stale(report, algorithm, target_version, kinds)
+        if stale is not None:
+            log.warning("%s passed %s; it waits for a new pre-validation", algorithm.name, stale)
             return False
         return True
 
     return admitted
+
+
+@dataclass(frozen=True)
+class LastReport:
+    """An algorithm's latest report, as the scheduled pre-validation reads it (#204)."""
+
+    made_at: datetime | None  # its ``prevalidated_at``; None in a report without one
+    current: bool  # made with the code, and on the target, the algorithm runs now
+    passed: bool
+    days: int  # the recorded days it replayed
+
+    @property
+    def judged(self) -> bool:
+        """It judged the code the algorithm runs now: passed, or refused on at least
+        ``MIN_DAYS`` days (on fewer it was a look, which never passes)."""
+        return self.current and (self.passed or self.days >= MIN_DAYS)
+
+
+def last_report(
+    state_dir: Path,
+    algorithm: Algorithm | KindAlgorithm,
+    target_version: int = 1,
+    kinds: Sequence[Kind] = KINDS,
+) -> LastReport | None:
+    """The algorithm's latest report as it stands for the code and target it runs now (the
+    same test as ``admits``); None without one, or with one that cannot be read."""
+    report = _read_report(state_dir, algorithm.name)
+    if report is None:
+        return None
+    try:
+        made_at: datetime | None = datetime.fromisoformat(str(report["prevalidated_at"]))
+    except (KeyError, ValueError):
+        made_at = None
+    if made_at is not None and made_at.tzinfo is None:
+        made_at = None  # not comparable with the scheduler's times
+    days = report.get("days")
+    return LastReport(
+        made_at=made_at,
+        current=_stale(report, algorithm, target_version, kinds) is None,
+        passed=report.get("passed") is True,
+        days=len(days) if isinstance(days, list) else 0,
+    )
+
+
+def _read_report(state_dir: Path, name: str) -> dict[str, Any] | None:
+    """``name``'s report as saved; None without one, or with one that cannot be read."""
+    path = report_path(state_dir, name)
+    try:
+        report = json.loads(path.read_text())
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as e:
+        log.error("cannot read %s (%s); %s waits", path, e, name)
+        return None
+    return report if isinstance(report, dict) else None
+
+
+def _stale(
+    report: Mapping[str, Any],
+    algorithm: Algorithm | KindAlgorithm,
+    target_version: int,
+    kinds: Sequence[Kind],
+) -> str | None:
+    """How ``report`` is not of the code and target the algorithm runs now; None if it is."""
+    if report.get("code") != code_digest(algorithm):
+        return "with other code"
+    if report.get("target_version", 1) != _target(algorithm, target_version, kinds):
+        return "on another target"
+    return None
 
 
 def _target(algorithm: Algorithm | KindAlgorithm, target_version: int, kinds: Sequence[Kind]) -> int | None:

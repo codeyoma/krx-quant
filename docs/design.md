@@ -31,7 +31,7 @@
    상시 서버가 다음 거래일 08:00에 새 모델로 교체
 
 [예약 작업] 매일 22:30, 밤 학습 뒤 (상시 서버의 별도 프로세스, #215)
-   krx-quant 명령(진단 등) ─► 출력 가림 ─► GitHub 이슈 댓글 + 라벨(ready-for-agent) ─► 에이전트가 읽음
+   krx-quant 명령(진단, 사전 검증 등) ─► 출력 가림 ─► GitHub 이슈 댓글 + 라벨(ready-for-agent) ─► 에이전트가 읽음
 ```
 
 학습하는 곳과 실시간으로 예측하는 곳을 분리한다. 학습은 PyTorch·LightGBM 등으로 하고, 실시간 예측은 ONNX Runtime 같은 가벼운 런타임으로 한다. 그래서 학습 장비를 바꿔도 상시 서버는 영향을 받지 않는다. 지금 알고리즘(Newton, Gauss, Granger, Markov)의 모델은 JSON 파라미터라서 엔진이 직접 계산한다. Turing은 LightGBM 트리를 텍스트로 모델 JSON에 넣고, 엔진이 LightGBM으로 그대로 예측한다(종목당 1ms 아래). ONNX는 신경망 알고리즘이 생기면 쓴다.
@@ -54,7 +54,7 @@
 | `signals.py` | 텔레그램 신호 알림(선택) |
 | `training.py`, `nightly.py`, `model_shelf.py`, `swap.py` | 학습 샘플, 밤 학습, 서버의 모델 이력, 08:00 교체와 모델 감시, Spot 학습 결과 기다리기 |
 | `cost_guard.py` | 월 AWS 비용 감시: 50%·80% 알림, 상한에서 Spot 학습 끄기(#23) |
-| `scheduled.py`, `github.py`, `redaction.py`, `forbidden.py` | 예약 작업(#215): 작업 목록(`JOBS`)과 밤마다 돌리는 스케줄러, 상태 파일, GitHub 이슈 댓글과 라벨, 올리기 전 가림, 저장소 검사(`scripts/check_forbidden.py`)와 가림이 같이 쓰는 금지 패턴([operations.md](operations.md#예약-작업-214)) |
+| `scheduled.py`, `github.py`, `redaction.py`, `forbidden.py` | 예약 작업(#215): 작업 목록(`JOBS`. 사전 검증 작업은 알고리즘 등록 목록에서 만든다, #204)과 밤마다 돌리는 스케줄러, 상태 파일, GitHub 이슈 댓글과 라벨, 올리기 전 가림, 저장소 검사(`scripts/check_forbidden.py`)와 가림이 같이 쓰는 금지 패턴([operations.md](operations.md#예약-작업-214)) |
 | `macro.py`, `regime.py` | 매크로 지표 수집(07:30), 일일 국면 |
 | `econ_calendar.py` | 경제 캘린더 수집(15분마다, TradingView), `/v1/calendar`의 답 (#150) |
 | `replay.py`, `demo.py`, `fake_kis.py`, `notify.py`, `cli.py` | 재생, 화면 개발용 데모 엔진, 가짜 KIS, 텔레그램 알림, 명령 |
@@ -523,10 +523,12 @@ v1에서는 쓰지 않는다. 조사 결과는 [paid-data.md](paid-data.md)에 �
 
 1. 모듈과 성격 카드(예측 방식과 실패 조건 포함), 파라미터의 뜻을 작성한다. 새 피처를 더하면 그 뜻도 `FEATURE_MEANINGS`에 넣는다.
 2. `ALGORITHMS`(다른 종류의 알고리즘은 `KIND_ALGORITHMS`, #179)에 등록하고 머지한다. 개성 검사(`register`, `register_kind_algorithms`)는 이때 한다. 배포된 엔진은 이 알고리즘을 돌리지 않고 사전 검증을 기다린다. 첫 일일 점검 때 텔레그램으로 한 번 알린다.
-3. 서버에서 장 시간 밖에 사전 검증을 돌린다: `krx-quant prevalidate <이름>`(#24). 녹화된 최근 20거래일(적어도 10거래일)을 재생해 실시간과 같은 채점·통계를 내고, 시간 예산, 기존 알고리즘과의 예측 상관, 피처 고유성을 확인한다. 기준은 [engine-api.md](engine-api.md#사전-검증-24)에 있다. 재생 결과는 별도 DB에 쓰여서 공식 성적에 들어가지 않는다.
+3. 서버의 예약 작업이 사전 검증을 돌린다: `krx-quant prevalidate <이름>`(#24). 녹화가 10거래일 이상이 된 밤부터 기다리는 알고리즘을 밤마다 하나씩 돌리고 결과를 #204에 댓글로 남긴다(#204, [operations.md](operations.md#새-알고리즘-사전-검증-24)). 손으로 다시 돌릴 수도 있다. 녹화된 최근 20거래일(적어도 10거래일)을 재생해 실시간과 같은 채점·통계를 내고, 시간 예산, 기존 알고리즘과의 예측 상관, 피처 고유성을 확인한다. 기준은 [engine-api.md](engine-api.md#사전-검증-24)에 있다. 재생 결과는 별도 DB에 쓰여서 공식 성적에 들어가지 않는다.
 4. 통과하면 엔진이 다음 봉 마감부터 수습으로 돌린다. 하나라도 기준을 넘지 못하면 등록되지 않는다. 고친 뒤 다시 돌린다. 공식 성적은 실시간 결과만 인정한다.
 
 > **바뀜** (2026-10-11, #57): 사전 검증 도구가 없어서 `krx-quant replay <날짜>`로 하루씩 돌려 보고, `ALGORITHMS`에 등록하면 바로 수습으로 돌았다 → `krx-quant prevalidate <이름>`이 최근 20거래일을 한 번에 재생해 판정하고, 통과해야 엔진이 돌린다. 이유: #24("통과해야 수습으로 등록된다"). 이 전에 등록된 Newton, Gauss, Granger, Markov, Turing은 검증 없이 돈다.
+
+> **바뀜** (2026-10-15, #204): 3단계는 사람이 서버에서 장 시간 밖에 `prevalidate`를 돌렸다 → 서버의 예약 작업이 녹화 10거래일부터 밤마다 하나씩 돌리고 결과를 #204에 남긴다. 이유: 날짜를 기억해 손으로 돌리지 않으려고(#214).
 
 ### 7.5 상태 관리
 
