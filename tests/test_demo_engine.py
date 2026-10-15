@@ -37,7 +37,7 @@ async def test_the_demo_engine_answers_what_a_screen_reads(tmp_path: Path) -> No
     assert status["mode"] == "demo"
     assert status["phase"] == "continuous"
     assert status["last_bar_close"] == "2026-10-12T10:30:00+09:00"
-    assert [w["kind"] for w in status["special"]] == ["vi"], "a VI, so a screen shows one"
+    assert [w["kind"] for w in status["special"]] == ["circuit_breaker", "vi"], "so a screen shows them"
     assert status["training"]["day"] == "2026-10-09"
     assert [s["symbol"] for s in symbols["symbols"]] == list(DEMO_SYMBOLS)
     assert (macro["day"], macro["regime"]) == ("2026-10-12", "risk_off"), "a macro row to show"
@@ -55,6 +55,44 @@ async def test_the_demo_engine_answers_what_a_screen_reads(tmp_path: Path) -> No
         made = {p["algorithm"]: p for p in body["predictions"]}
         assert set(made) >= {a.name for a in ALGORITHMS} | set(CONSENSUS)
         assert all(made[name]["status"] == "ok" for name in CONSENSUS), "the algorithms are active"
+
+
+async def test_the_demo_morning_halts_for_a_circuit_breaker_and_has_a_vi(tmp_path: Path) -> None:
+    """#236. Output: the special windows a chart shows (the circuit breaker's first stage from
+    09:06 to 09:36 for every symbol, 000660's VI from 09:40:10 to 09:42:20), and no trade
+    in the halt: the minute bars skip from 09:05 to 09:36."""
+    app = await demo_app(tmp_path / "demo.sqlite3")
+
+    async with TestClient(TestServer(app)) as client:
+        special = {s: await get_json(client, f"/v1/symbols/{s}/special") for s in DEMO_SYMBOLS}
+        bars = {s: await get_json(client, f"/v1/symbols/{s}/bars") for s in DEMO_SYMBOLS}
+
+    breaker = {
+        "kind": "circuit_breaker",
+        "symbol": None,
+        "start": "2026-10-12T09:06:00+09:00",
+        "end": "2026-10-12T09:36:00+09:00",
+        "detail": "1단계",
+    }
+    vi = {
+        "kind": "vi",
+        "symbol": "000660",
+        "start": "2026-10-12T09:40:10+09:00",
+        "end": "2026-10-12T09:42:20+09:00",
+        "detail": "dynamic",
+    }
+    assert special["000660"] == {
+        "symbol": "000660",
+        "from": "2026-10-05",
+        "to": "2026-10-12",
+        "special": [breaker, vi],
+    }
+    assert special["005930"]["special"] == special["009150"]["special"] == [breaker]
+    for symbol, body in bars.items():
+        starts = [b["start"][11:16] for b in body["bars"]]
+        assert [s for s in starts if "09:06" <= s < "09:36"] == [], symbol
+        assert starts[5:7] == ["09:05", "09:36"], symbol
+        assert all(b["volume"] > 0 for b in body["bars"])
 
 
 async def test_the_demo_scrolls_back_into_two_earlier_afternoons(tmp_path: Path) -> None:

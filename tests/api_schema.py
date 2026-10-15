@@ -19,6 +19,7 @@ ROUTES = {
     "/v1/symbols/{symbol}/predictions": "predictions",
     "/v1/symbols/{symbol}/bars": "bars",
     "/v1/symbols/{symbol}/candles": "candles",
+    "/v1/symbols/{symbol}/special": "special",  # #236
     "/v1/algorithms": "algorithms",
     "/v1/algorithms/{name}": "algorithm_detail",
     "/v1/algorithms/{name}/stats": "algorithm_stats",
