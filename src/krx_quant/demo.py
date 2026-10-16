@@ -19,7 +19,9 @@ it, 2026-10-07 and 2026-10-08 (Friday the 9th is Hangul Day, closed), so a chart
 (#108): their predictions are in the database, and their one-minute bars are stored as
 the backfill stores them, under ``<db stem>-data/bars/``. Each symbol also has two years of
 made-up day candles up to the 8th (``candles/``), for the chart's day view (#111), and the
-finished week, month and year candles made of them (#112).
+finished week, month and year candles made of them (#112), and made-up daily supply data on
+the same days (``state/supply/``, #226): the 12th's is not out yet, as on the server that
+morning.
 
 With a pace (``demo-engine --pace SECONDS``), the morning is replayed at once only up to
 10:00; the API opens there, and the rest goes on a minute every ``pace`` seconds, in steps
@@ -71,6 +73,7 @@ from krx_quant.predictions import DB_NAME, PredictionStore, iso
 from krx_quant.recorder import ParquetRecorder
 from krx_quant.regime import RegimeRules
 from krx_quant.replay import replay, replay_into
+from krx_quant.supply import KIS, TOSS, write_supply
 from krx_quant.swap import NightStatus, reports_by_algorithm
 from krx_quant.touch import TARGET_VERSION
 
@@ -248,6 +251,56 @@ def write_demo_candles(data_dir: Path) -> None:
                 write_candles(data_dir, period, symbol, _finished_periods(oldest_first, period))
 
 
+# Each demo symbol's made-up listed shares, foreign holdings at the first day and lending and
+# credit balances around which its supply wanders (#226).
+_SUPPLY = {
+    "005930": (4_000_000_000, 2_000_000_000, 90_000_000, 12_000_000),
+    "000660": (700_000_000, 380_000_000, 20_000_000, 3_000_000),
+    "009150": (75_000_000, 26_000_000, 4_000_000, 1_500_000),
+}
+
+
+def write_demo_supply(state_dir: Path) -> None:
+    """Each demo symbol's made-up daily supply data on the demo candles' days (up to the 8th),
+    stored as the collector stores it (``supply.py``): KIS's fields in its file, the foreign
+    holdings and ratio in Toss's. Made up: no Toss data is in the repository."""
+    shutil.rmtree(state_dir / "supply", ignore_errors=True)
+    days: list[date] = []
+    day = DEMO_DAY
+    while len(days) < _CANDLE_DAYS:
+        day = _CALENDAR.previous_trading_day(day)
+        days.append(day)
+    days.reverse()
+    for n, symbol in enumerate(DEMO_SYMBOLS):
+        rng = random.Random(200 + n)
+        listed, holding, lending, credit = _SUPPLY[symbol]
+        scale = listed // 4000  # a day's typical net buy
+        kis, toss = [], []
+        for day in days:
+            foreign = round(rng.gauss(0, 1) * scale)
+            institution = round(rng.gauss(0, 0.8) * scale)
+            individual = -foreign - institution + round(rng.gauss(0, 0.1) * scale)
+            holding = min(listed, max(0, holding + foreign))
+            lending = max(0, lending + round(rng.gauss(0, 0.02) * lending))
+            credit = max(0, credit + round(rng.gauss(0, 0.015) * credit))
+            kis.append(
+                {
+                    "date": day,
+                    "short_volume": round(abs(rng.gauss(0.05, 0.03)) * scale * 10),
+                    "individual_net": individual,
+                    "institution_net": institution,
+                    "foreign_net": foreign,
+                    "lending_balance": lending,
+                    "credit_balance": credit,
+                }
+            )
+            toss.append(
+                {"date": day, "foreign_holding": holding, "foreign_ratio": round(holding / listed * 100, 2)}
+            )
+        write_supply(state_dir, symbol, KIS, kis)
+        write_supply(state_dir, symbol, TOSS, toss)
+
+
 def _finished_periods(days: list[Row], period: str) -> list[Row]:
     """The candles of ``period`` made of day candles (oldest first), each dated by its first
     day, without the one holding the demo morning: as the collector stores them."""
@@ -325,6 +378,7 @@ async def demo_app(db: Path, pace: float | None = None) -> web.Application:
     engine.training = NightStatus(night, True, "applied").as_dict()
     engine.night_reports = reports_by_algorithm(night)
     shelf = demo_shelf(data_dir / "state")
+    write_demo_supply(data_dir / "state")
     app = create_app(
         engine,
         mode="demo",
@@ -332,6 +386,7 @@ async def demo_app(db: Path, pace: float | None = None) -> web.Application:
         data_dir=data_dir,
         shelf=shelf,
         names=DEMO_NAMES,
+        state_dir=data_dir / "state",
     )
     if pace is not None:
         app.cleanup_ctx.append(partial(_paced, engine, events, pace))

@@ -16,6 +16,11 @@ Endpoints (all under ``/v1``):
 - ``GET /symbols/{symbol}/candles?period=day|week|month|year&before=T&limit=N``: the last N
   stored candles of the period (default 400, at most 2000) that start before ``T`` (default
   now), oldest first, never the one holding today (``candles``);
+- ``GET /symbols/{symbol}/supply?from=D&to=D``: the symbol's daily supply data kept (#226,
+  ``supply``) on the days ``from`` to ``to`` (KST dates, both included; default the year to
+  today, at most 4,000 days), oldest first: the short-sale volume, the net buys of
+  individuals, institutions and foreigners, the foreign holdings and ratio, the stock lending
+  and credit balances;
 - ``GET /symbols/{symbol}/special?from=D&to=D``: the special situations' windows kept (#236)
   that start on the days ``from`` to ``to`` (KST dates, both included; default the last five
   trading days to today, at most 60 days): the symbol's VIs and the whole market's circuit
@@ -116,6 +121,8 @@ from krx_quant.stats import (
     split,
 )
 from krx_quant.stream import EventStream, LiveStatus, kind_prediction_json, prediction_json
+from krx_quant.supply import FIELDS as SUPPLY_FIELDS
+from krx_quant.supply import stored_supply
 
 ENGINE_KEY = web.AppKey("engine", PredictionEngine)
 # live: the collector; demo: `krx-quant demo-engine`; replay: tests.
@@ -130,6 +137,7 @@ _dumps = partial(json.dumps, ensure_ascii=False, indent=2)
 
 MIN_SAMPLE_KEY = web.AppKey("min_sample", int)
 DATA_DIR_KEY: web.AppKey[Path | None] = web.AppKey("data_dir")
+STATE_DIR_KEY: web.AppKey[Path | None] = web.AppKey("state_dir")
 SHELF_KEY: web.AppKey[Shelf | None] = web.AppKey("shelf")
 # /v1/macro is read again at most this often: it changes only with the morning's reads.
 MACRO_SECONDS = 30.0
@@ -161,6 +169,10 @@ MAX_CANDLES = 2000
 # Special windows (#236): the trading days asked for by default, and the most days one question spans.
 DEFAULT_SPECIAL_DAYS = 5
 MAX_SPECIAL_DAYS = 60
+# Daily supply (#226): the days asked for by default, and the most one question spans (the ten
+# years kept, ``supply.HISTORY_YEARS``, and more: a year view asks for all of it).
+DEFAULT_SUPPLY_DAYS = 365
+MAX_SUPPLY_DAYS = 4000
 
 
 def create_app(
@@ -173,9 +185,11 @@ def create_app(
     shelf: Shelf | None = None,
     stream_poll_seconds: float = 1.0,
     names: Mapping[str, str] | None = None,
+    state_dir: Path | None = None,
 ) -> web.Application:
-    """The Engine API of ``engine``. ``data_dir`` holds the macro readings and ``shelf`` the
-    models installed on the server; without them there is no macro and no model history.
+    """The Engine API of ``engine``. ``data_dir`` holds the macro readings, ``shelf`` the
+    models installed on the server and ``state_dir`` the daily supply data (#226); without
+    them there is no macro, no model history and no supply.
     Live and demo show the KIS status: they need ``live_status``. ``names`` are the symbols'
     company names, read as they are when asked (the collector fills them in later).
     """
@@ -187,6 +201,7 @@ def create_app(
     app[MIN_SAMPLE_KEY] = min_sample
     app[STATS_CACHE_KEY] = {}
     app[DATA_DIR_KEY] = data_dir
+    app[STATE_DIR_KEY] = state_dir
     app[SHELF_KEY] = shelf
     app[MACRO_CACHE_KEY] = {}
     app[USD_CLOSE_CACHE_KEY] = {}
@@ -217,6 +232,7 @@ def create_app(
     app.router.add_get("/v1/symbols/{symbol}/bars", _bars)
     app.router.add_get("/v1/symbols/{symbol}/candles", _candles)
     app.router.add_get("/v1/symbols/{symbol}/special", _special)
+    app.router.add_get("/v1/symbols/{symbol}/supply", _supply)
     app.router.add_get("/v1/algorithms", _algorithms)
     app.router.add_get("/v1/algorithms/{name}", _algorithm)
     app.router.add_get("/v1/leaderboard", _leaderboard)
@@ -394,6 +410,23 @@ async def _special(request: web.Request) -> web.Response:
     fields = ("kind", "symbol", "start", "end", "detail")
     windows = [{f: r[f] for f in fields} for r in rows]
     return _json({"symbol": symbol, "from": since.isoformat(), "to": to.isoformat(), "special": windows})
+
+
+async def _supply(request: web.Request) -> web.Response:
+    """The symbol's daily supply data kept (#226) on the days asked for, oldest first."""
+    engine, symbol = _engine_and_symbol(request)
+    to = _day_query(request, "to") or kst_day(engine.clock.now())
+    since = _day_query(request, "from") or to - timedelta(days=DEFAULT_SUPPLY_DAYS - 1)
+    if since > to:
+        raise _error(web.HTTPBadRequest, f"from must not be after to, got {since} and {to}")
+    if (span := (to - since).days + 1) > MAX_SUPPLY_DAYS:
+        raise _error(web.HTTPBadRequest, f"from and to span at most {MAX_SUPPLY_DAYS} days, got {span}")
+    state_dir = request.app[STATE_DIR_KEY]
+    rows: list[Row] = []
+    if state_dir is not None:  # files: off the event loop
+        rows = await asyncio.to_thread(stored_supply, state_dir, symbol, since, to)
+    days = [{"date": r["date"].isoformat(), **{f: r[f] for f in SUPPLY_FIELDS}} for r in rows]
+    return _json({"symbol": symbol, "from": since.isoformat(), "to": to.isoformat(), "days": days})
 
 
 def _day_query(request: web.Request, name: str) -> date | None:

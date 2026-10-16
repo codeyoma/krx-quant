@@ -80,7 +80,9 @@ def credit_record(day: date) -> dict[str, Any]:
     detail = {
         "newQuantity": "1234567",
         "returnQuantity": "2345678",
-        "balanceQuantity": credit_balance(day),  # as KIS's whol_loan_rmnd_stcn by its deal day
+        # As KIS's whol_loan_rmnd_stcn by its settlement day (the server's probe, #226): the
+        # balance of the deal two days before.
+        "balanceQuantity": credit_balance(day - timedelta(days=2)),
         "balanceRate": "0.01618",
         "tradingRate": "0.4728",
     }
@@ -239,11 +241,13 @@ async def test_toss_is_cross_checked_with_kis_by_counts_only(
     )
     lending = "HHPST074500C0 3 rmnd_stcn by bsop_date"
     assert check(report, "balanceQuantity", lending) == f": {hundred}; equal on 100"
-    # Credit balances are KIS's by its trading day, not by its settlement day.
+    # Credit balances are KIS's by its settlement day, not by its trading day (the server's probe on
+    # #226: equal on 30 of 30 days by stlm_date, on none by deal_date).
     credit = "FHPST04760000 J whol_loan_rmnd_stcn by"
+    by_settlement = check(report, "marginLoan.balanceQuantity", f"{credit} stlm_date")
+    assert re.fullmatch(r": (\d+) common days \(.+\); equal on \1", by_settlement), by_settlement
     by_deal = check(report, "marginLoan.balanceQuantity", f"{credit} deal_date")
-    assert by_deal == ": 30 common days (2026-09-02..2026-10-13); equal on 30"
-    assert check(report, "marginLoan.balanceQuantity", f"{credit} stlm_date").endswith("equal on 0")
+    assert by_deal == ": 30 common days (2026-09-02..2026-10-13); equal on 0"
     # KIS's holdings of the moment are Toss's of the day before.
     assert (
         "  FHKST01010100 UN frgn_hldn_qty = foreignerHolding.holdingQuantity on: 2026-10-14"

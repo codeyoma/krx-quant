@@ -7,7 +7,7 @@
 | `raw` | 받은 메시지 원문 그대로 | 정규화 로직이 바뀌어도 이벤트를 다시 만들 수 있게 한다 |
 | `events` | 피드별로 정규화한 이벤트 | 피처 계산, 재생, 학습의 입력 |
 
-그 밖에 `gaps`(결측 구간)와 `bars`(REST로 받은 1분봉) 계층이 있다. 둘 다 아래에 설명한다.
+그 밖에 `gaps`(결측 구간)와 `bars`(REST로 받은 1분봉) 계층이 있다. 둘 다 아래에 설명한다. 일·주·월·년봉(`candles`)과, 녹화 폴더가 아닌 상태 폴더에 두는 일별 수급(`state/supply/`, #226)도 아래에 있다.
 
 ## 저장 위치
 
@@ -286,6 +286,45 @@ KOSPI200 선물과 달러선물은 KIS 선물옵션 분봉조회(`FHKIF03020200`
 | `open`, `high`, `low`, `close` | int64 | `stck_oprc`, `stck_hgpr`, `stck_lwpr`, `stck_clpr` | 수정 시가, 고가, 저가, 종가(원) |
 | `volume` | int64 | `acml_vol` | 거래량(주) |
 | `value` | int64 | `acml_tr_pbmn` | 거래대금(원) |
+
+## supply: 일별 수급 (REST, #226)
+
+`SupplyKeeper`(`supply.py`)가 KIS와 토스증권 Open API에서 받은 일별 수급 8종이다. 차트의 하단 지표가 엔진 API `GET /v1/symbols/{s}/supply`로 읽는다([engine-api.md](engine-api.md)). 출처와 받는 규칙은 [kis-feeds.md](kis-feeds.md#수집-226)에 있다.
+
+```
+<KRX_STATE_DIR>/supply/symbol=<종목>/kis.parquet
+<KRX_STATE_DIR>/supply/symbol=<종목>/toss.parquet
+```
+
+- **데이터 폴더(`KRX_DATA_DIR`)가 아니라 상태 폴더(`KRX_STATE_DIR`)에 둔다.** 토스의 값은 사용자 자신의 매매에만 쓰고 제3자에게 넘기면 안 되기 때문이다([toss-feeds.md](toss-feeds.md#인증과-접속)). 업로드(`archive`)는 데이터 폴더만 올리므로 S3에 가지 않는다. 학습도 읽지 않는다. 저장소와 공개 이슈에도 올리지 않는다(테스트와 데모의 값은 지어낸 것이다).
+- 출처마다 파일 하나에 하루 한 행, 오래된 날부터 담는다. API가 두 파일을 날짜로 합친다: 필드마다 KIS 값이 있으면 그것, 없으면 토스 값이다(외국인 보유수량·지분율은 토스 파일에만, 외국인 순매수는 KIS 파일에만 있다).
+- 대상은 `KRX_SYMBOLS`(`/v1/symbols`의 종목)다. 마지막 끝난 거래일부터 10년 전까지만 남긴다.
+- 실행마다 조회의 가장 최근 쪽을 다시 받아 그 날들의 값을 바꾼다. 그래서 같은 날의 값이 나중에 바뀔 수 있다(출처가 고친 값). 파일은 통째로 바꾼다(임시 파일 `.<이름>.tmp`에 쓰고 이름 바꾸기). 받은 것이 없거나 바뀐 것이 없으면 쓰지 않는다.
+- 값이 모두 비는 날은 남기지 않는다. 신용잔고의 날은 결제일이다(KIS `stlm_date`, 토스 `date`).
+
+`kis.parquet`
+
+| 열 | 타입 | KIS 필드 | 설명 |
+|---|---|---|---|
+| `date` | date32 | `stck_bsop_date`, `bsop_date`, `stlm_date` | 그날(신용잔고는 결제일) |
+| `short_volume` | int64 | `FHPST04830000` `J`의 `ssts_cntg_qty` | 공매도 거래량(주) |
+| `individual_net`, `institution_net`, `foreign_net` | int64 | `FHPTJ04160001` `UN`의 `prsn_ntby_qty`, `orgn_ntby_qty`, `frgn_ntby_qty` | 개인·기관계·외국인 순매수량(주, 순매도는 음수) |
+| `lending_balance` | int64 | `HHPST074500C0`의 `rmnd_stcn` | 대차잔고(주) |
+| `credit_balance` | int64 | `FHPST04760000` `J`의 `whol_loan_rmnd_stcn` | 신용(융자)잔고(주) |
+
+`toss.parquet`
+
+| 열 | 타입 | 토스 필드 | 설명 |
+|---|---|---|---|
+| `date` | date32 | `date` | 그날 |
+| `short_volume` | int64 | `short-selling`의 `shortSellingVolume` | 공매도 거래량(주) |
+| `individual_net`, `institution_net` | int64 | `investor-trading`의 `individual.netBuyVolume`, `institution.netBuyVolume` | 개인·기관 순매수량(주) |
+| `foreign_holding` | int64 | `investor-trading`의 `foreignerHolding.holdingQuantity` | 외국인 보유수량(주) |
+| `foreign_ratio` | double | `foreignerHolding.holdingRate` × 100 | 외국인 지분율(상장주식수 대비 %) |
+| `lending_balance` | int64 | `securities-lending`의 `balanceQuantity` | 대차잔고(주) |
+| `credit_balance` | int64 | `credit-trades`의 `marginLoan.balanceQuantity` | 신용(융자)잔고(주) |
+
+빈 칸(그 출처가 그날 주지 않은 값)은 null이다.
 
 ## 실데이터 관찰 (2026-10-08, 삼성전자, 13시 전후 90초)
 

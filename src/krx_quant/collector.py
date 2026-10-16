@@ -70,6 +70,7 @@ from krx_quant.rescore import EngineLock, keep_touches_filled
 from krx_quant.scheduled import keep_jobs
 from krx_quant.signals import Signals
 from krx_quant.stream import LiveStatus
+from krx_quant.supply import toss_client_maker
 from krx_quant.swap import (
     NightTraining,
     await_spot_night,
@@ -280,7 +281,17 @@ async def run_collector(
                 asyncio.create_task(
                     _every(settings.health_check_seconds, stream.check_stale, "health check")
                 ),
-                asyncio.create_task(keep_history(settings, client, calendar, now)),
+                # The daily supply's Toss part (#226) reads the token's expiry by the real time,
+                # as the names do.
+                asyncio.create_task(
+                    keep_history(
+                        settings,
+                        client,
+                        calendar,
+                        now,
+                        toss_client_maker(session, settings, lambda: datetime.now().astimezone()),
+                    )
+                ),
                 asyncio.create_task(run_live(engine, session_clock)),
             ]
             if settings.object_store is None:
@@ -444,6 +455,7 @@ async def _serve_api(
             data_dir=settings.data_dir,
             shelf=Shelf(settings.state_dir),
             names=names,
+            state_dir=settings.state_dir,
         ),
         access_log=None,
     )

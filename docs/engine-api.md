@@ -213,7 +213,7 @@
 
 ### 계약 (JSON 스키마, #19)
 
-- `schemas/engine-api-v1.json`이 모든 `/v1` 응답의 형식이다(JSON Schema 2020-12). 엔드포인트마다 `$defs`에 정의가 하나씩 있다: `status`, `symbols`, `latest`, `predictions`, `bars`, `candles`, `special`(항목은 `special_window`, #236), `algorithms`, `algorithm_detail`, `leaderboard`, `algorithm_stats`, `consensus`, `macro`, `calendar`, `kinds`, `kind_latest`, `kind_predictions`, 오류는 `error`. 스트림의 메시지는 `event`(종류마다 `prediction_event` 등)다.
+- `schemas/engine-api-v1.json`이 모든 `/v1` 응답의 형식이다(JSON Schema 2020-12). 엔드포인트마다 `$defs`에 정의가 하나씩 있다: `status`, `symbols`, `latest`, `predictions`, `bars`, `candles`, `special`(항목은 `special_window`, #236), `supply`(항목은 `supply_day`, #226), `algorithms`, `algorithm_detail`, `leaderboard`, `algorithm_stats`, `consensus`, `macro`, `calendar`, `kinds`, `kind_latest`, `kind_predictions`, 오류는 `error`. 스트림의 메시지는 `event`(종류마다 `prediction_event` 등)다.
 - 다른 종류 항목의 `output`, 정답의 `path`, 통계의 `extra`는 종류마다 형식이 다르다. 변동폭의 것은 `range_output`, `range_path`, `range_stats`다(#180, 아래 "변동폭"). 장벽의 것은 `barrier_output`, `barrier_path`, `barrier_stats`다(#183, 아래 "장벽").
 - `leaderboard`와 `algorithm_stats`는 둘 중 하나다(#179): 방향의 것(`direction_leaderboard`, `direction_algorithm_stats`, 이전과 같은 형식)과 다른 종류의 것(`kind_leaderboard`, `kind_algorithm_stats`, 맨 위에 `kind`가 있다).
 
@@ -371,6 +371,31 @@
 - 오늘이 든 봉은 주지 않는다: 오늘의 일봉, 이번 주·달·해의 봉. 20:30 뒤 저장된 뒤에도 그렇다. 화면이 오늘의 1분봉과 실시간 봉, 그리고 이번 기간의 지난 일봉으로 만든다.
 - 가격은 수정주가다. `venue`는 봉이 온 시장이다: `UN`(통합 KRX+NXT)이면 화면은 오늘 봉을 그날의 모든 1분봉으로, `KRX`면 09:00–15:30 봉으로 만든다. 저장된 봉이 없으면 `venue`는 `null`, `candles`는 빈 목록이다.
 - 파일은 [events.md](events.md#candles-일주월년봉-rest-111-112)의 `candles` 계층이다. 데이터 디렉터리가 없는 재생 엔진은 빈 목록을 준다. 데모 엔진은 종목마다 10-08까지 만든 일봉 500개와, 그 일봉을 묶은 끝난 주·월·년봉을 준다.
+
+### `GET /v1/symbols/{symbol}/supply?from=YYYY-MM-DD&to=YYYY-MM-DD` (#226)
+
+엔진이 받아 둔 그 종목의 일별 수급 8종(`supply.py`) 중 `from`부터 `to`까지의 날(KST, 둘 다 포함)의 것이다. 날이 오래된 것부터 온다. 차트의 하단 지표가 읽는다(분 보기는 날마다 계단, 일 보기는 봉마다 한 값).
+
+```json
+{
+  "symbol": "005930",
+  "from": "2026-10-05",
+  "to": "2026-10-12",
+  "days": [
+    {"date": "2026-10-08", "short_volume": 227718, "individual_net": -54274, "institution_net": -138926, "foreign_net": 129496, "foreign_holding": 1988815054, "foreign_ratio": 49.72, "lending_balance": 102529138, "credit_balance": 14580010}
+  ]
+}
+```
+
+(값은 데모 엔진의 지어낸 것이다.)
+
+- `from`, `to`: `YYYY-MM-DD`. `to`가 없으면 오늘(엔진 시계)이고, `from`이 없으면 `to`까지의 1년(365일)의 첫날이다. 응답의 `from`, `to`는 실제로 쓴 날이다. 날짜가 아니거나, `from`이 `to`보다 뒤거나, 둘 사이가 4,000일(둘 다 포함)을 넘으면 400이다. 모르는 종목은 404다. 엔진은 10년을 가지고 있어 4,000일이면 다 들어간다(년 보기가 한 번에 묻는다).
+- 필드(모두 그날 값, 없으면 `null`): `short_volume` 공매도 거래량(주), `individual_net`·`institution_net`·`foreign_net` 개인·기관(기관계)·외국인(등록외국인과 기타외국인의 합) 순매수량(주, 순매도면 음수), `foreign_holding` 외국인 보유수량(주), `foreign_ratio` 외국인 지분율(상장주식수 대비 %, 소수), `lending_balance` 대차잔고(주), `credit_balance` 신용(융자)잔고(주).
+- 출처는 필드마다 KIS가 먼저이고, KIS에 그날이 없으면 토스다. 외국인 보유수량·지분율은 토스뿐이고, 외국인 순매수는 KIS뿐이다(규칙과 출처는 [kis-feeds.md](kis-feeds.md#수집-226)). 토스 클라이언트가 없는 서버에서는 외국인 보유수량·지분율이 늘 `null`이다.
+- 오늘 값은 없다: 엔진은 그날이 끝난 20:30부터 KIS의 그날 값을 받고, 토스의 그날 기록은 다음 실행(거래일이면 다음 날 아침)에 받는다. 신용잔고는 결제일의 날로 붙어(토스와 같은 날), 다른 지표보다 하루 늦게 들어온다.
+- 여덟 필드가 모두 `null`인 날은 오지 않는다. 휴장일도 오지 않는다.
+- 파일은 [events.md](events.md#supply-일별-수급-rest-226)의 `state/supply/`다. 상태 디렉터리가 없는 재생 엔진은 빈 목록을 준다. 데모 엔진은 종목마다 일봉과 같은 500일(10-08까지)의 지어낸 값을 준다(10-12 아침 그날의 값은 없다).
+- 토스의 값은 사용자 자신의 매매에만 쓴다(토스 이용 정책, [toss-feeds.md](toss-feeds.md#인증과-접속)). 이 응답을 다른 곳에 올리지 않는다.
 
 ### `GET /v1/symbols/{symbol}/special?from=YYYY-MM-DD&to=YYYY-MM-DD` (#236)
 

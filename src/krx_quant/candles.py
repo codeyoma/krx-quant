@@ -137,7 +137,7 @@ class CandleKeeper:
     async def run(self, now: datetime) -> int:
         """Bring every symbol's candles of every period up to the last finished trading day;
         return how many files changed. A symbol that fails is logged and left for the next run."""
-        last = self._last_finished(now)
+        last = last_finished(self._calendar, now)
         changed = 0
         for period in PERIODS:
             for symbol in self._symbols:
@@ -221,13 +221,14 @@ class CandleKeeper:
             raise ValueError(f"{symbol} {period} candles still going after {_MAX_QUERIES} queries")
         return [candles[d] for d in sorted(candles)]
 
-    def _last_finished(self, now: datetime) -> date:
-        """The last trading day whose candle is final: today only after the day's bars are."""
-        local = now.astimezone(KST)
-        today = local.date()
-        if self._calendar.is_trading_day(today) and local.time() >= BARS_FINAL_AT:
-            return today
-        return self._calendar.previous_trading_day(today)
+
+def last_finished(calendar: MarketCalendar, now: datetime) -> date:
+    """The last trading day that is over: today only once the day's bars are final (20:30)."""
+    local = now.astimezone(KST)
+    today = local.date()
+    if calendar.is_trading_day(today) and local.time() >= BARS_FINAL_AT:
+        return today
+    return calendar.previous_trading_day(today)
 
 
 def _market(venue: str) -> str:
