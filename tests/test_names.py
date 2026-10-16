@@ -93,6 +93,22 @@ async def test_without_toss_the_kis_masters_name_the_symbols(kis: FakeKis, tmp_p
     assert names == {"005930": "삼성전자", "247540": "에코프로비엠"}
 
 
+async def test_one_master_unread_does_not_keep_the_other_from_naming(
+    kis: FakeKis, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The KOSPI master is missing (404); the KOSDAQ one still names its symbols.
+    kis.masters = {k: v for k, v in masters({}, {"247540": "에코프로비엠"}).items() if k.startswith("kosdaq")}
+    settings = settings_for(kis, tmp_path, ("005930", "247540"))
+
+    async with aiohttp.ClientSession() as session:
+        with caplog.at_level(logging.WARNING):
+            names = await read_names(session, settings, settings.symbols, now)
+
+    assert names == {"247540": "에코프로비엠"}
+    assert "the KIS stock master kospi_code.mst.zip could not be read" in caplog.text
+    assert "no company name for 005930" in caplog.text
+
+
 async def test_toss_names_first_and_the_masters_name_the_rest(kis: FakeKis, tmp_path: Path) -> None:
     kis.masters = masters({"005930": "삼성전자(마스터)", "009150": "삼성전기"}, {})
     async with fake_toss(no_records) as toss:
@@ -150,7 +166,8 @@ async def test_a_symbol_no_source_names_is_left_out(
             names = await read_names(session, settings, settings.symbols, now)
 
     assert names == {}
-    assert "the KIS stock masters could not be read" in caplog.text
+    assert "the KIS stock master kospi_code.mst.zip could not be read" in caplog.text
+    assert "the KIS stock master kosdaq_code.mst.zip could not be read" in caplog.text
     assert "no company name for 005930" in caplog.text
 
 

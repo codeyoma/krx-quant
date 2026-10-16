@@ -88,13 +88,19 @@ async def toss_names(
 async def master_names(
     session: aiohttp.ClientSession, master_url: str, symbols: Sequence[str]
 ) -> dict[str, str]:
-    """The KIS stock masters' names of ``symbols``; raises MasterError."""
+    """The KIS stock masters' names of ``symbols``. A master that cannot be read is logged and
+    passed over, so the other market's still names its symbols."""
     names: dict[str, str] = {}
     for file, tail in STOCK_MASTERS:
         missing = set(symbols) - names.keys()
         if not missing:
             break
-        names.update(parse_stock_master(await download(session, f"{master_url}/{file}"), tail, missing))
+        try:
+            data = await download(session, f"{master_url}/{file}")
+        except (MasterError, aiohttp.ClientError, OSError, ValueError, TimeoutError) as e:
+            log.warning("the KIS stock master %s could not be read (%s)", file, e)
+            continue
+        names.update(parse_stock_master(data, tail, missing))
     return names
 
 
@@ -111,10 +117,7 @@ async def read_names(
             log.warning("Toss did not name the symbols (%s): the KIS masters name them", e)
     missing = [s for s in symbols if s not in names]
     if missing:
-        try:
-            names.update(await master_names(session, settings.master_url, missing))
-        except (MasterError, aiohttp.ClientError, OSError, ValueError, TimeoutError) as e:
-            log.warning("the KIS stock masters could not be read (%s)", e)
+        names.update(await master_names(session, settings.master_url, missing))
     unnamed = [s for s in symbols if s not in names]
     if unnamed:
         log.warning("no company name for %s: the screen shows the code", ", ".join(unnamed))
