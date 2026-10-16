@@ -1,6 +1,6 @@
 # 토스증권 Open API 레퍼런스
 
-일별 수급 지표(#226)의 보조 출처이자 외국인 보유수량·지분율의 주 출처인 토스증권 Open API를 정리한다. 2026-10-15에 공식 문서(스펙 `https://openapi.tossinvest.com/openapi-docs/latest/openapi.json` 1.2.24, [소개](https://openapi.tossinvest.com/openapi-docs/overview.md), [FAQ](https://openapi.tossinvest.com/openapi-docs/faq.md))를 읽어 적었다. 서버에서는 아직 부르지 않았다. 문서에 없는 것은 ⚠다. 예약 작업 `probe-supply-226`이 `krx-quant probe-supply`로 재고 결과를 #226에 남긴다([operations.md](operations.md#일별-수급-출처-확인-226)). 그 결과로 ⚠를 지운다.
+일별 수급 지표(#226)의 보조 출처이자 외국인 보유수량·지분율의 주 출처, 그리고 화면 종목 패널의 회사 이름(#250)의 주 출처인 토스증권 Open API를 정리한다. 2026-10-15에 공식 문서(스펙 `https://openapi.tossinvest.com/openapi-docs/latest/openapi.json` 1.2.24, [소개](https://openapi.tossinvest.com/openapi-docs/overview.md), [FAQ](https://openapi.tossinvest.com/openapi-docs/faq.md))를 읽어 적었다. 서버에서는 아직 부르지 않았다. 문서에 없는 것은 ⚠다. 예약 작업 `probe-supply-226`이 `krx-quant probe-supply`로 재고 결과를 #226에 남긴다([operations.md](operations.md#일별-수급-출처-확인-226)). 그 결과로 ⚠를 지운다.
 
 시세 데이터만 읽는다. 같은 클라이언트로 주문도 낼 수 있지만, 주문·조건주문 엔드포인트는 저장소에 둘 수 없다(`scripts/check_forbidden.py`가 막는다, #235).
 
@@ -28,6 +28,15 @@
 - **허용 IP.** 토스증권 WTS 설정 > Open API > 허용 IP 관리에 등록한 IP에서만 부를 수 있다. 다른 IP에서는 토큰 발급이 403 `access_denied`(`IP address not allowed`), 다른 엔드포인트가 403 `ip-not-allowed`다. `probe-supply`는 이것을 "the server's public IP is not in Toss's allowed IPs (WTS 설정 > Open API > 허용 IP 관리)"로 보이고 토스 조회를 멈춘다. 공인 IP가 바뀌는 환경이면 막힌다(FAQ). 서버(Lightsail)의 고정 IP를 등록한다.
 - 오류 본문: 시세 엔드포인트는 `{"error": {"requestId", "code", "message", "data"}}`, 토큰 엔드포인트는 OAuth2 형식 `{"error", "error_description"}`이다. 429는 `Retry-After`만큼 기다린다(`toss.py`는 5초까지, 3번).
 - **데이터 이용 정책(FAQ).** 받은 정보는 본인의 매매 목적에만 쓴다. 비상업적이어도 제3자에게 배포하면 안 된다. 그래서 공개 이슈·저장소에는 값을 올리지 않는다(`probe-supply`는 필드 이름, 개수, 날짜, 표시만 보인다).
+
+## 종목 정보 (#250)
+
+화면 종목 패널의 회사 이름이다(엔진 API `GET /v1/symbols`의 `name`, [engine-api.md](engine-api.md#get-v1symbols)).
+
+- `GET /api/v1/stocks?symbols=005930,000660`: 콤마로 최대 200종목. `STOCK` 그룹. 답은 `{"result": [{"symbol", "name", "englishName", "isinCode", "market", "securityType", "status", …}]}`이다. 문서 예시의 `name`은 `삼성전자`, `KODEX 200`이다.
+- 수집기가 시작할 때 한 번, 예측하는 종목을 모두 한 번에 묻는다(`src/krx_quant/names.py`). 토큰은 위의 공유 캐시를 쓴다. 클라이언트가 없거나, 허용 IP가 아니거나, 이름을 주지 않은 종목은 KIS 종목 마스터(`kospi_code.mst`, `kosdaq_code.mst`)의 한글 약칭을 쓴다. 2026-10-16에 005930, 000660, 009150, 133690, 381180의 두 이름이 같았다.
+- 로고는 Open API에 없다. tossinvest.com의 종목 화면이 쓰는 `https://static.toss.im/png-icons/securities/icn-sec-fill-<종목코드>.png`(480×480 PNG, 인증 없음, 없는 코드는 403)를 엔진이 주소로만 주고 화면이 받는다. 2026-10-16에 tossinvest.com의 삼성전자 화면에서 확인했다(사이트는 `images.tossinvest.com`으로 줄여 보이고, 주소 뒤에 `?20240508` 같은 갱신 표시가 붙은 종목도 있다).
+- 이름과 로고는 저장소와 디스크에 두지 않는다(아래 데이터 이용 정책). 화면은 실행 중 메모리에만 둔다.
 
 ## 일별 수급 엔드포인트
 

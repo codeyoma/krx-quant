@@ -76,6 +76,8 @@ from krx_quant.touch import TARGET_VERSION
 
 DEMO_DAY = date(2026, 10, 12)
 DEMO_SYMBOLS = ("005930", "000660", "009150")
+# Their company names, as the collector reads them from Toss or the KIS masters (#250).
+DEMO_NAMES = {"005930": "삼성전자", "000660": "SK하이닉스", "009150": "삼성전기"}
 _START, _END = time(9, 0), time(10, 30)
 _CANDLE_DAYS = 500  # about two years of trading days
 # The trading days before the morning, with the minutes of each a chart scrolls back into.
@@ -324,7 +326,12 @@ async def demo_app(db: Path, pace: float | None = None) -> web.Application:
     engine.night_reports = reports_by_algorithm(night)
     shelf = demo_shelf(data_dir / "state")
     app = create_app(
-        engine, mode="demo", live_status=lambda: demo_kis(engine.clock.now()), data_dir=data_dir, shelf=shelf
+        engine,
+        mode="demo",
+        live_status=lambda: demo_kis(engine.clock.now()),
+        data_dir=data_dir,
+        shelf=shelf,
+        names=DEMO_NAMES,
     )
     if pace is not None:
         app.cleanup_ctx.append(partial(_paced, engine, events, pace))

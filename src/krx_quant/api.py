@@ -4,7 +4,8 @@ Endpoints (all under ``/v1``):
 
 - ``GET /status``: the clock, the market phase, the last bar close, pending outcomes and,
   live, the KIS connection and when each feed last delivered;
-- ``GET /symbols``: the predicted symbols with their reference price and flat band now;
+- ``GET /symbols``: the predicted symbols with their company name, logo, reference price and
+  flat band now;
 - ``GET /symbols/{symbol}/latest``: the predictions of the symbol's latest bar close;
 - ``GET /symbols/{symbol}/predictions?limit=N&algorithm=A&before=T``: the predictions of the
   last N bar closes (default 100, at most 1000; before ``T`` if given), newest first, with
@@ -97,6 +98,7 @@ from krx_quant.lifecycle import Stage
 from krx_quant.macro import LatestMacro, latest_macro, reading_before
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.model_shelf import Shelf
+from krx_quant.names import logo_url
 from krx_quant.predictions import Excluded, iso
 from krx_quant.pricing import flat_ticks, tick_size
 from krx_quant.reference import Bar
@@ -120,6 +122,8 @@ ENGINE_KEY = web.AppKey("engine", PredictionEngine)
 Mode = Literal["live", "demo", "replay"]
 MODE_KEY = web.AppKey("mode", str)
 LIVE_STATUS_KEY: web.AppKey[LiveStatus] = web.AppKey("live_status")
+# The symbols' company names (#250): the collector fills them in after the API starts.
+NAMES_KEY: web.AppKey[Mapping[str, str]] = web.AppKey("names")
 
 # Readable as is (curl, logs): indented, and Korean as UTF-8 rather than \u escapes.
 _dumps = partial(json.dumps, ensure_ascii=False, indent=2)
@@ -168,10 +172,12 @@ def create_app(
     data_dir: Path | None = None,
     shelf: Shelf | None = None,
     stream_poll_seconds: float = 1.0,
+    names: Mapping[str, str] | None = None,
 ) -> web.Application:
     """The Engine API of ``engine``. ``data_dir`` holds the macro readings and ``shelf`` the
     models installed on the server; without them there is no macro and no model history.
-    Live and demo show the KIS status: they need ``live_status``.
+    Live and demo show the KIS status: they need ``live_status``. ``names`` are the symbols'
+    company names, read as they are when asked (the collector fills them in later).
     """
     if mode in ("live", "demo") and live_status is None:
         raise ValueError(f"the {mode} Engine API shows the kis status: give it live_status")
@@ -185,6 +191,7 @@ def create_app(
     app[MACRO_CACHE_KEY] = {}
     app[USD_CLOSE_CACHE_KEY] = {}
     app[CALENDAR_CACHE_KEY] = {}
+    app[NAMES_KEY] = {} if names is None else names
     stream = EventStream(engine, live_status, stream_poll_seconds)
 
     async def streaming(app: web.Application) -> AsyncIterator[None]:
@@ -266,12 +273,15 @@ async def _status(request: web.Request) -> web.Response:
 
 async def _symbols(request: web.Request) -> web.Response:
     engine = request.app[ENGINE_KEY]
+    names = request.app[NAMES_KEY]
     symbols = []
     for symbol in engine.symbols:
         mid = engine.mid(symbol)
         symbols.append(
             {
                 "symbol": symbol,
+                "name": names.get(symbol),
+                "logo_url": logo_url(symbol),
                 "mid": mid,
                 "tick": tick_size(mid) if mid is not None else None,
                 "flat_ticks": flat_ticks(mid, engine.fee_rate) if mid is not None else None,

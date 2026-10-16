@@ -37,7 +37,7 @@
 6. **AWS 자원 만들기**: 2.1절의 스크립트를 실행한다.
 7. **서버 개통**: 2.2절을 따라 한다.
 8. **GitHub 토큰** (선택, #218): 예약 작업이 결과를 이슈 댓글로 남기게 한다(3장 "예약 작업 (#215)"의 "토큰"). 없어도 작업은 돌고 결과는 서버에 남는다.
-9. **토스증권 Open API 클라이언트** (선택, #235): 일별 수급의 보조 출처이자 외국인 보유수량의 주 출처다. WTS 설정 > Open API에서 클라이언트를 만들고, 서버의 고정 공인 IP를 허용 IP에 넣고, 서버 `.env`에 `TOSS_CLIENT_ID`, `TOSS_CLIENT_SECRET`을 넣는다(2장 "토스증권 Open API 클라이언트 (#235)"). 없으면 토스 조회만 건너뛴다.
+9. **토스증권 Open API 클라이언트** (선택, #235): 일별 수급의 보조 출처이자 외국인 보유수량의 주 출처다. WTS 설정 > Open API에서 클라이언트를 만들고, 서버의 고정 공인 IP를 허용 IP에 넣고, 서버 `.env`에 `TOSS_CLIENT_ID`, `TOSS_CLIENT_SECRET`을 넣는다(2장 "토스증권 Open API 클라이언트 (#235)"). 없으면 토스 조회만 건너뛴다. 수집기는 시작할 때 이 클라이언트로 종목의 회사 이름도 읽고(#250), 없으면 KIS 종목 마스터의 이름을 쓴다.
 
 ## 2. 개통
 
@@ -166,10 +166,10 @@ curl http://krx-quant:8080/v1/macro
 |---|---|---|
 | `KIS_APP_KEY`, `KIS_APP_SECRET` | 없음 | KIS 실전 앱키와 시크릿. `collect`, `backfill`, `archive`, `measure-subscriptions`, `test-alert`는 이 값이 없으면 시작하지 않는다 |
 | `KIS_REST_URL` | `https://openapi.koreainvestment.com:9443` | KIS REST 주소. 모의투자 주소는 `.env.example`에 있다 |
-| `TOSS_CLIENT_ID`, `TOSS_CLIENT_SECRET` | 없음 | 토스증권 Open API 클라이언트(#235, 비밀값). 일별 수급의 보조 출처이자 외국인 보유수량의 주 출처([toss-feeds.md](toss-feeds.md)). 없으면 토스를 부르지 않는다(`probe-supply`의 토스 절은 `skipped`). 예약 작업의 댓글에서 가린다 |
+| `TOSS_CLIENT_ID`, `TOSS_CLIENT_SECRET` | 없음 | 토스증권 Open API 클라이언트(#235, 비밀값). 일별 수급의 보조 출처이자 외국인 보유수량의 주 출처([toss-feeds.md](toss-feeds.md)), 그리고 화면 종목 패널의 회사 이름의 주 출처(#250). 없으면 토스를 부르지 않는다(`probe-supply`의 토스 절은 `skipped`, 회사 이름은 KIS 종목 마스터의 것). 예약 작업의 댓글에서 가린다 |
 | `TOSS_URL` | `https://openapi.tossinvest.com` | 토스증권 Open API 주소(테스트는 가짜 서버를 가리킨다) |
 | `KIS_WS_URL` | `ws://ops.koreainvestment.com:21000` | KIS WebSocket 주소 |
-| `KIS_MASTER_URL` | `https://new.real.download.dws.co.kr/common/master` | 최근월물을 찾는 KIS 마스터 파일 주소 |
+| `KIS_MASTER_URL` | `https://new.real.download.dws.co.kr/common/master` | 최근월물을 찾는 KIS 마스터 파일 주소. 토스가 이름을 주지 않은 종목의 회사 이름도 여기의 종목 마스터(`kospi_code.mst.zip`, `kosdaq_code.mst.zip`)에서 읽는다(#250) |
 | `KIS_WS_MAX_SUBSCRIPTIONS` | 없음(KIS가 거절할 때까지 모두 구독) | 세션당 실시간 구독 수. 넘는 구독은 REST로 바꾸거나 뺀다. 1 이상. `.env.example`은 41 |
 | `KIS_REST_MAX_PER_SECOND` | 20 | REST 초당 호출 한도. 수집기 안의 조회와 백필이 나눠 쓴다. 1–20 |
 | `KRX_SYMBOLS` | `005930` | 예측하고 녹화할 종목(쉼표로 구분). 하나 이상 |

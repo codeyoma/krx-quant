@@ -199,7 +199,7 @@ uv run python -c "import glob, pyarrow.parquet as pq; d = sorted(glob.glob('data
 
 - [docs/design.md](docs/design.md): 설계 (목표, 구조와 모듈 지도, 데이터, 알고리즘, 학습, 인프라, 개발 단계). 바뀐 결정은 각 절의 **바뀜**·**삭제됨** 표시에 있다
 - [docs/kis-feeds.md](docs/kis-feeds.md): KIS 피드, 키, 한도, 최근월물 찾기
-- [docs/toss-feeds.md](docs/toss-feeds.md): 토스증권 Open API(일별 수급의 보조 출처, 외국인 보유의 주 출처), 토큰 규칙, 허용 IP(#235)
+- [docs/toss-feeds.md](docs/toss-feeds.md): 토스증권 Open API(일별 수급의 보조 출처, 외국인 보유의 주 출처, 종목 패널의 회사 이름과 로고(#250)), 토큰 규칙, 허용 IP(#235)
 - [docs/events.md](docs/events.md): 녹화 데이터와 1분봉 형식
 - [docs/engine-api.md](docs/engine-api.md): 엔진 API, 예측·채점 규칙, 저장 구조, 알고리즘 규약과 학습, 재생
 - [docs/operations.md](docs/operations.md): 서버 개통, 설정 값 전체, 매일 일정, 밤 학습과 모델 교체, 자동 업데이트, 키 교체, 장애 대응과 알림, 저장 위치

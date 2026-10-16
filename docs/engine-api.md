@@ -243,13 +243,18 @@
 
 ### `GET /v1/symbols`
 
-예측하는 종목과 지금의 기준가다.
+예측하는 종목과 회사 이름, 로고, 지금의 기준가다.
 
 ```json
-{"symbols": [{"symbol": "005930", "mid": 81250.0, "tick": 100, "flat_ticks": 2}]}
+{"symbols": [{"symbol": "005930", "name": "삼성전자",
+              "logo_url": "https://static.toss.im/png-icons/securities/icn-sec-fill-005930.png",
+              "mid": 81250.0, "tick": 100, "flat_ticks": 2}]}
 ```
 
 중간가를 모르면 `mid`, `tick`, `flat_ticks`가 `null`이다.
+
+- `name`(#250): 회사 이름. 수집기가 시작할 때 읽는다(`src/krx_quant/names.py`). 토스증권 클라이언트(`TOSS_CLIENT_ID`, `TOSS_CLIENT_SECRET`)가 있으면 토스 `GET /api/v1/stocks`의 `name`을 쓰고([toss-feeds.md](toss-feeds.md#종목-정보-250)), 토스가 없거나 답하지 않거나 이름을 주지 않은 종목은 KIS 종목 마스터(`kospi_code.mst`, `kosdaq_code.mst`)의 한글 약칭을 쓴다. 엔진 API는 이름을 읽기 전에 열리므로 시작하고 몇 초 동안은 `null`이고, 두 출처 모두 이름이 없으면 그날 내내 `null`이다(수집기는 거래일마다 다시 시작하며 다시 읽는다). 데모 엔진은 고정 이름(삼성전자, SK하이닉스, 삼성전기)을 준다. 재생 엔진은 `null`이다.
+- `logo_url`(#250): tossinvest.com이 보이는 회사 로고(480×480 정사각 PNG, 토스는 원으로 잘라 보인다). 종목 코드로 만드는 주소라 늘 있다. 토스에 로고가 없는 코드는 403이고, 화면은 이름 첫 글자의 원을 대신 그린다. 엔진은 이 그림을 받지도 저장하지도 않는다(토스 데이터는 본인 매매 목적만, 제3자 배포 금지).
 
 ### `GET /v1/symbols/{symbol}/latest`
 

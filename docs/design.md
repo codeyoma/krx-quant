@@ -62,6 +62,7 @@
 | `diagnose.py` | 읽기 전용 진단 명령: 남은 결정에 필요한 실측(#82) |
 | `signal_review.py` | 읽기 전용 신호 기준 검토 명령(`signal-review`, #206): 순위표와 정식 알고리즘의 성적, 기준 후보(최종 합의 확률 × 같은 방향 정식 수)마다 엔진의 신호 규칙(`signals.py`)을 저장된 합의에 그대로 돌린 신호 수와 적중률([operations.md](operations.md#신호-기준-검토-206)) |
 | `supply_probe.py`, `toss_probe.py`, `probe_fields.py` | 읽기 전용 일별 수급 출처 확인 명령(`probe-supply`, #226): 조사에서 찾은 KIS 조회 7개와 토스 조회 5개(#235)의 응답, 행 수와 날짜, 필드의 모양(값 없이), 거슬러 가는 끝, 토스와 KIS의 같은 날 값 견주기(개수만)([kis-feeds.md](kis-feeds.md#일별-수급-226), [toss-feeds.md](toss-feeds.md)) |
+| `names.py` | 종목의 회사 이름과 로고 주소(#250): 토스 `GET /api/v1/stocks`의 이름, 없으면 KIS 종목 마스터의 한글 약칭. 수집기가 시작할 때 읽어 `GET /v1/symbols`가 준다 |
 | `toss.py` | 토스증권 Open API의 접근 토큰(클라이언트당 하나, `state/toss_token.json`에 두고 모든 프로세스가 같이 쓴다)과 시세 GET 호출(#235). 주문 엔드포인트는 두지 않는다 |
 | `touch.py`, `rescore.py` | 도달 정답 규칙(#167), 지난 예측의 도달 정답 채우기와 `rescore` 명령, 엔진 잠금(#168), 다른 종류의 지난 정답 채우기(#180), 지난날의 특수 상황 구간 채우기(#236) |
 | `kinds.py`, `kind_registry.py`, `kind_stats.py` | 예측 종류(#179): 종류의 틀(클래스, 행동 클래스, 정답 함수와 정답 버전, 장벽 폭 규칙(#183), 기준 예측(표에서 내는 것 포함, #180), 출력 필드와 검사, 추가 통계), 종류의 정답이 읽는 창, 등록한 종류 목록(`KINDS`, #180), 종류의 통계와 순위표(5장 "예측 종류") |

@@ -116,10 +116,18 @@ def parse_commodity_master(text: str, underlying: str) -> str:
     raise MasterError(f"nearest {underlying} futures not found in fo_com_code")
 
 
-async def _download(session: aiohttp.ClientSession, url: str) -> str:
+async def download(session: aiohttp.ClientSession, url: str) -> bytes:
+    """The one file in the zip at ``url``, as bytes (the masters are cp949)."""
     async with session.get(url, timeout=aiohttp.ClientTimeout(total=60)) as resp:
         if resp.status != 200:
             raise MasterError(f"{url}: HTTP {resp.status}")
         data = await resp.read()
-    with zipfile.ZipFile(io.BytesIO(data)) as z:
-        return z.read(z.namelist()[0]).decode("cp949")
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as z:
+            return z.read(z.namelist()[0])
+    except (zipfile.BadZipFile, IndexError) as e:
+        raise MasterError(f"{url}: not a master zip ({e})") from e
+
+
+async def _download(session: aiohttp.ClientSession, url: str) -> str:
+    return (await download(session, url)).decode("cp949")
