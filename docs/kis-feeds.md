@@ -296,7 +296,7 @@ Backfiller가 날마다 그날의 최근월물을 받아 연속 1분봉(`KOSPI20
 - 경로: `daily-credit-balance`. 예제: `examples_llm/domestic_stock/daily_credit_balance`. HTS [0476] 화면과 같다.
 - 파라미터: `FID_COND_MRKT_DIV_CODE`(`J`·`UN` 모두 받는다), `FID_COND_SCR_DIV_CODE`(`20476`), `FID_INPUT_ISCD`, `FID_INPUT_DATE_1`(**결제일자**).
 - 응답: `output` 일별 행. 그 결제일까지의 30행을 최신순으로 준다. `FID_INPUT_DATE_1`을 옮겨 다음을 묻는다(25번 넘겨 2023-09-11까지 750행). 행 필드: `deal_date`(매매일), `stlm_date`(결제일), `stck_prpr`, `acml_vol`, 융자(신용매수) `whol_loan_new_stcn`·`whol_loan_rdmp_stcn`·**`whol_loan_rmnd_stcn` 잔고 주수(주)**·`whol_loan_new_amt`·`whol_loan_rdmp_amt`·`whol_loan_rmnd_amt`(금액, 단위 ⚠)·`whol_loan_rmnd_rate`(잔고 비율, 소수)·`whol_loan_gvrt`(공여율), 대주(신용매도) `whol_stln_*` 같은 묶음(`whol_stln_rmnd_rate`는 모두 0). 상환 수량은 매도상환과 현금상환의 합이다(예제 설명).
-- **날짜.** 2026-10-16 밤에 가장 최근 행은 결제일 10-15, 매매일 10-13이었다(매매일은 결제일의 2거래일 앞이다). 토스 `credit-trades`의 `marginLoan.balanceQuantity`는 KIS 결제일(`stlm_date`) 기준으로 30일 모두 `whol_loan_rmnd_stcn`과 같았고, 매매일(`deal_date`) 기준으로는 하루도 같지 않았다. 그래서 그날의 신용잔고는 `stlm_date`의 날로 저장한다(토스의 `date`와 같은 날).
+- **날짜.** 2026-10-16 밤에 가장 최근 행은 결제일 10-15, 매매일 10-13이었다(매매일은 결제일의 2거래일 앞이다). 토스 `credit-trades`의 `marginLoan.balanceQuantity`는 KIS 결제일(`stlm_date`) 기준으로 30일 모두 `whol_loan_rmnd_stcn`과 같았고, 매매일(`deal_date`) 기준으로는 하루도 같지 않았다. 그래서 그날의 신용잔고는 `stlm_date`의 날로 저장한다(토스의 `date`와 같은 날, `tests/test_supply.py`의 `test_the_credit_balance_is_kept_by_its_settlement_day`). `deal_date`로 저장하면 KIS 값이 2거래일 앞당겨져, 같은 날의 토스 값과 어긋난다. 테스트의 가짜 KIS·토스(`tests/test_toss_probe.py`)도 이 관계(결제일로 같다)를 따른다.
 
   > **바뀜** (2026-10-17, #258): "결제일 기준으로 묻기 때문에 가장 최근 행의 매매일이 며칠 늦을 수 있다 ⚠" → 위의 실측. 이유: probe 출력(#226).
 

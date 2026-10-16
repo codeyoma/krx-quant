@@ -542,7 +542,7 @@ cross-checks with KIS (005930; Toss's history against KIS's latest answers, coun
   investor-trading individual.netBuyVolume vs FHPTJ04160001 J prsn_ntby_qty: 30 common days (2026-09-04..2026-10-15); equal on 29
   investor-trading foreigner.netBuyVolume vs FHPTJ04160001 UN frgn_reg_ntby_qty: 30 common days (2026-09-04..2026-10-15); equal on 30
   investor-trading foreignerHolding.holdingRate x100 vs FHKST01010400 UN hts_frgn_ehrt (within 0.01): 30 common days (2026-09-04..2026-10-15); equal on 29
-  credit-trades marginLoan.balanceQuantity vs FHPST04760000 J whol_loan_rmnd_stcn by deal_date: 30 common days (2026-09-02..2026-10-13); equal on 30
+  credit-trades marginLoan.balanceQuantity vs FHPST04760000 J whol_loan_rmnd_stcn by stlm_date: 17 common days (2026-09-04..2026-10-14); equal on 17
   FHKST01010100 UN frgn_hldn_qty = foreignerHolding.holdingQuantity on: 2026-10-14 (Toss's newest day with holdings: 2026-10-14)
   …
 

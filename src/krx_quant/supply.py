@@ -175,7 +175,10 @@ CREDIT = KisQuery(
     path=f"{_QUOTATIONS}/daily-credit-balance",
     columns={"credit_balance": "whol_loan_rmnd_stcn"},
     rows_key="output",
-    date_field="stlm_date",  # the day the balance is of: as Toss's date (the probe)
+    # The day the balance is of. The server's probe (#226, 2026-10-16) found Toss's credit balance
+    # equal to this one by stlm_date on 30 of 30 days, and by deal_date (two trading days before)
+    # on none: keyed by deal_date, KIS's balances would land two days early, over Toss's.
+    date_field="stlm_date",
     # The 30 settlement days to the day asked.
     params=lambda symbol, end: {
         "FID_COND_MRKT_DIV_CODE": "J",
