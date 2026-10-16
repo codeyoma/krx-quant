@@ -377,6 +377,36 @@
       }
     },
 
+    "supply": {
+      "description": "GET /v1/symbols/{symbol}/supply?from=YYYY-MM-DD&to=YYYY-MM-DD: the symbol's daily supply data kept (#226) on the days from to to (KST dates, both included; default the year to today, at most 4000 days), oldest first, a day the sources have nothing of left out. Counts are shares, foreign_ratio a percentage of the listed shares; a value the sources lack that day is null.",
+      "type": "object",
+      "required": ["symbol", "from", "to", "days"],
+      "additionalProperties": false,
+      "properties": {
+        "symbol": {"type": "string"},
+        "from": {"$ref": "#/$defs/day"},
+        "to": {"$ref": "#/$defs/day"},
+        "days": {"type": "array", "items": {"$ref": "#/$defs/supply_day"}}
+      }
+    },
+    "supply_day": {
+      "description": "A day's supply data (#226): the short-sale volume, the net buys of individuals, institutions and foreigners (negative: net sold), the foreign holdings and their ratio to the listed shares (%), the stock lending balance and the credit (margin loan) balance.",
+      "type": "object",
+      "required": ["date", "short_volume", "individual_net", "institution_net", "foreign_net", "foreign_holding", "foreign_ratio", "lending_balance", "credit_balance"],
+      "additionalProperties": false,
+      "properties": {
+        "date": {"$ref": "#/$defs/day"},
+        "short_volume": {"type": ["integer", "null"], "minimum": 0},
+        "individual_net": {"type": ["integer", "null"]},
+        "institution_net": {"type": ["integer", "null"]},
+        "foreign_net": {"type": ["integer", "null"]},
+        "foreign_holding": {"type": ["integer", "null"], "minimum": 0},
+        "foreign_ratio": {"type": ["number", "null"], "minimum": 0, "maximum": 100},
+        "lending_balance": {"type": ["integer", "null"], "minimum": 0},
+        "credit_balance": {"type": ["integer", "null"], "minimum": 0}
+      }
+    },
+
     "special": {
       "description": "GET /v1/symbols/{symbol}/special?from=YYYY-MM-DD&to=YYYY-MM-DD: the special situations' windows the engine kept (#236) that start on the days from to to (KST dates, both included; default the last five trading days to today, at most 60 days): the symbol's VIs and the whole market's circuit breakers and sidecars, by start.",
       "type": "object",

@@ -20,6 +20,7 @@ from krx_quant.cli import main
 from krx_quant.consensus import NAMES as CONSENSUS
 from krx_quant.demo import DEMO_SYMBOLS, demo_app
 from krx_quant.macro import INDICATORS
+from tests.api_schema import check
 from tests.replay_events import get_json
 from tests.test_api_stream import receive_until
 
@@ -159,6 +160,27 @@ async def test_the_demo_has_finished_weeks_months_and_years_made_of_its_days(tmp
     assert weeks["candles"][-1]["volume"] == sum(c["volume"] for c in last_week)
 
 
+async def test_the_demo_has_daily_supply_on_its_candles_days_but_the_morning_s(tmp_path: Path) -> None:
+    """#226. Output: every symbol's eight daily values on the 500 candle days, none on the
+    morning (its day is not over), so a chart shows them in every view."""
+    app = await demo_app(tmp_path / "demo.sqlite3")
+
+    async with TestClient(TestServer(app)) as client:
+        supply = {
+            s: await get_json(client, f"/v1/symbols/{s}/supply?from=2016-01-01&to=2026-10-12")
+            for s in DEMO_SYMBOLS
+        }
+        candles = await get_json(client, "/v1/symbols/005930/candles?period=day&limit=2000")
+
+    for symbol, body in supply.items():
+        check("supply", body)
+        days = body["days"]
+        assert [d["date"] for d in days] == [c["date"] for c in candles["candles"]], symbol
+        assert all(v is not None for d in days for v in d.values()), "every value made up"
+        assert any(d["foreign_net"] < 0 for d in days) and any(d["foreign_net"] > 0 for d in days)
+        assert all(0 < d["foreign_ratio"] < 100 for d in days)
+
+
 async def test_the_demo_is_the_same_every_time(tmp_path: Path) -> None:
     first, second = await demo_app(tmp_path / "a.sqlite3"), await demo_app(tmp_path / "b.sqlite3")
 
@@ -168,6 +190,7 @@ async def test_the_demo_is_the_same_every_time(tmp_path: Path) -> None:
             "/v1/symbols/005930/predictions?limit=20&algorithm=newton",
             "/v1/symbols/005930/bars?limit=500",
             "/v1/symbols/005930/candles?period=day",
+            "/v1/symbols/005930/supply",
         ):
             assert await get_json(a, path) == await get_json(b, path)
 
