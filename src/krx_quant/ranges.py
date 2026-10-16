@@ -26,8 +26,9 @@ the highest bid and lowest ask (as the touch label's path has them).
 (the highest high − the lowest low of t's close and the bars of the four minutes from t)
 ÷ the tick − c), the reference and k from t's close. A one-minute range is about a tick wider
 than the mid-points' (005930: bars' median 3 ticks, recorded mid-points' 1 to 2), so c takes
-the bounce off: ``BAR_C`` is 1 for now; ``krx-quant diagnose`` measures, on the recorded
-days, how often each c's class is the quote answer's (section 7), to choose it.
+the bounce off: ``BAR_C`` is 1, the c whose class is more often the quote answer's on the
+recorded days (``krx-quant diagnose`` section 7, 2026-10-12 to 10-16: 85.5% against c = 0's
+59.2%, #203).
 
 **Output** (``quantiles_ordered``): the three probabilities ``p_small``, ``p_medium``,
 ``p_large`` and the quantiles ``q10``, ``q50``, ``q90`` of r, in ticks, with
@@ -71,9 +72,11 @@ CLASSES = ("small", "medium", "large")
 ANSWER_VERSION = 1
 # The output's quantiles of r and their levels.
 QUANTILES: tuple[tuple[str, float], ...] = (("q10", 0.1), ("q50", 0.5), ("q90", 0.9))
-# The bar rule's bounce correction, in ticks (``bar_range``). Provisional: chosen from
-# #177's measurement (one-minute ranges about a tick wider than the mid-points'), until
-# ``krx-quant diagnose`` measures c = 0 and 1 against the quote answers on the recorded days.
+# The bar rule's bounce correction, in ticks (``bar_range``). Chosen from #177's measurement
+# (one-minute ranges about a tick wider than the mid-points') and confirmed against the quote
+# answers on the recorded days (#203): ``krx-quant diagnose`` section 7 over 2026-10-12 to
+# 10-16 found c = 1's class the same as the quote answer's in 85.5% of 5,481 windows, c = 0's
+# in 59.2%, and c = 1 ahead for each symbol.
 BAR_C = 1
 
 CLIMATE = "range-climate"
