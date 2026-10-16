@@ -31,8 +31,9 @@ reviewed after the status began (a status set after a day's review starts counti
 next day) and, on probation or as a clone, the first day the algorithm predicted with a
 model of the touch target since (none before it: nothing is counted, no review is due).
 
-When the target changed (#170) every algorithm not retired restarted on probation
-(``RESTARTED``), waiting for a model trained on the new target: the night's training
+When the target changes (#170: to the touch target; #187: to its version 3, and the
+barrier's answer to its version 2) every algorithm of it not retired restarts on probation
+(``target_changed``), waiting for a model trained on the new target: the night's training
 promotes one whatever its score, and its probation counts from the trading day the morning
 swap installed it.
 
@@ -74,8 +75,14 @@ if TYPE_CHECKING:
 
 RECENT_DAYS = 20
 CLONE_CORRELATION = 0.9
-# The reason of the probation every algorithm not retired restarts on when the target changes (#170).
-RESTARTED = "the target changed to the touch target (#170): probation restarts with a model trained on it"
+
+
+def target_changed(kind: str, version: int) -> str:
+    """The reason of the probation every algorithm of ``kind`` not retired restarts on when its
+    target changes to ``version`` (#187: the direction's touch target to 3, the barrier's answer
+    to 2)."""
+    return f"the {kind} target changed to version {version}: probation restarts with a model trained on it"
+
 
 # One predictor's stats against the baselines, from scored rows: (name, rows, baselines' names,
 # fee rate, the two-sided level of the lifts by trading day).

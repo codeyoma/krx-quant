@@ -45,6 +45,7 @@ from krx_quant.scheduled import (
     prevalidation_tonight,
     prevalidation_turn,
 )
+from krx_quant.touch import TARGET_VERSION
 from tests.fake_github import REPO, TOKEN, fake_github
 from tests.test_scheduled import (
     AT,
@@ -223,7 +224,7 @@ def test_a_run_that_left_no_verdict_waits_for_a_deploy_then_for_the_others() -> 
 
 def refusal(algorithm: Algorithm | KindAlgorithm, made_at: datetime) -> dict[str, object]:
     """A report as ``prevalidate`` writes it: refused, on the code and target it runs now (the
-    engine's touch target, 2; a kind's answer version)."""
+    engine's touch target, ``TARGET_VERSION``; a kind's answer version)."""
     kind = None if kind_of(algorithm) == DIRECTION else kind_named(kind_of(algorithm))
     days = [(date(2026, 10, 1) + timedelta(days=i)).isoformat() for i in range(MIN_DAYS)]
     return {
@@ -233,7 +234,7 @@ def refusal(algorithm: Algorithm | KindAlgorithm, made_at: datetime) -> dict[str
         "passed": False,
         "days": days,
         "checks": [{"check": "stats", "passed": False, "detail": "weakest lift -0.0100 over 900 scored"}],
-        "target_version": 2 if kind is None else kind.answer_version,
+        "target_version": TARGET_VERSION if kind is None else kind.answer_version,
     }
 
 
@@ -260,7 +261,9 @@ async def test_one_algorithm_a_night_in_turn_each_refusal_on_204_with_its_report
     runs = Prevalidates(clock, tmp_path)  # the state file's directory is the state directory
 
     def facts() -> Facts:  # read each night, as the collector does
-        return Facts(MIN_DAYS, ORDER, 0, prevalidation_reports(tmp_path, list(EVERYONE.values()), 2))
+        return Facts(
+            MIN_DAYS, ORDER, 0, prevalidation_reports(tmp_path, list(EVERYONE.values()), TARGET_VERSION)
+        )
 
     def told(lines: int) -> Callable[[], bool]:
         return lambda: len(lines_told) == lines

@@ -14,12 +14,14 @@ put here as always rose) on two.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
 
 from krx_quant.feeds import KST
 from krx_quant.kinds import Answer, KindForecast
+from krx_quant.lifecycle import target_changed
 from krx_quant.predictions import NewKindPrediction
 from krx_quant.pricing import Direction
 from tests.algorithm_doubles import FixedAlgorithm
@@ -163,3 +165,45 @@ async def test_a_kind_s_defaults_are_not_counted_toward_its_probation(tmp_path: 
     seer = (await listed(engine))["seer"]
     assert seer["status"]["status"] == "probation"
     assert seer["stage"]["counted_from"] is None
+
+
+# A kind's answer version going up (#187: the barrier's, to 2, crossed quotes counted): its
+# algorithms restart on probation once, as the direction's did when its target changed (#170).
+
+DRIFT_V2 = replace(TEST_KIND, answer_version=2)
+CALM = replace(TEST_KIND, name="calm", baselines=())  # another kind, its answer version still 1
+
+
+class Calm(FixedKindAlgorithm):
+    kind = "calm"
+
+
+async def test_a_kind_s_algorithms_restart_once_when_its_answer_version_goes_up(tmp_path: Path) -> None:
+    """Input: alpha (the direction), the seer (the drift) and still (another kind, calm), all
+    active; the direction's target already marked; the drift's answer goes to version 2, the
+    calm one's stays at 1. Output: the seer is back on probation, the reason naming the drift's
+    new version, once (an engine started again leaves it be); alpha and still stay active; a
+    ``target`` run marks the drift's version 2."""
+    db = tmp_path / "engine.db"
+    since = weekdays_before(DAY, 30)[0]
+    for name in ("alpha", "seer", "still"):
+        put_status(db, name, "active", since)
+    still = Calm("still", features=("relative_volume",), unique=("relative_volume",))
+    options: dict[str, Any] = {
+        "algorithms": [ALPHA],
+        "kinds": (DRIFT_V2, CALM),
+        "kind_algorithms": [SEER, still],
+    }
+
+    await run(db, [], start=at("06:00:00"), until=at("06:01:00"), **options)
+    again = await run(db, [], start=at("06:30:00"), until=at("06:31:00"), **options)
+
+    statuses = await listed(again)
+    assert last_change(statuses["seer"]) == ("active", "probation", target_changed(DRIFT, 2))
+    assert statuses["seer"]["status"]["since"] == "2026-10-12T06:00:00+09:00", "once, at the deploy"
+    assert (statuses["alpha"]["status"]["status"], statuses["still"]["status"]["status"]) == (
+        "active",
+        "active",
+    )
+    with stored(db) as store:
+        assert store.target_marked(2, DRIFT) and not store.target_marked(1, "calm")

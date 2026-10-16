@@ -41,6 +41,7 @@ from krx_quant.prevalidation import (
 )
 from krx_quant.replay import replay_into
 from krx_quant.swap import reload_models
+from krx_quant.touch import TARGET_VERSION
 from tests.algorithm_doubles import FixedAlgorithm, stand_in_card, stand_in_meanings
 from tests.replay_events import api, at, book, get_json, run, trade
 from tests.test_lifecycle import Outbox
@@ -145,7 +146,7 @@ async def test_an_algorithm_that_beats_the_baselines_on_its_own_features_passes(
         "baseline-random",
         "baseline-climate",
     }
-    assert saved["target_version"] == 2
+    assert saved["target_version"] == TARGET_VERSION
     assert set(saved["correlations"]) <= {"alpha"}, "alpha never changes its mind: nothing to correlate"
 
 
@@ -311,9 +312,11 @@ def test_a_report_counts_only_for_the_target_it_was_scored_on(tmp_path: Path) ->
     passed = {"passed": True, "code": code_digest(candidate)}
     path.write_text(json.dumps(passed))  # before #169: the four-minute move
     assert admits(tmp_path / "state")(candidate)
-    assert not admits(tmp_path / "state", target_version=2)(candidate), "not judged on the touch target"
-    path.write_text(json.dumps({**passed, "target_version": 2}))
-    assert admits(tmp_path / "state", target_version=2)(candidate)
+    assert not admits(tmp_path / "state", target_version=TARGET_VERSION)(candidate), (
+        "not judged on the touch target"
+    )
+    path.write_text(json.dumps({**passed, "target_version": TARGET_VERSION}))
+    assert admits(tmp_path / "state", target_version=TARGET_VERSION)(candidate)
     assert not admits(tmp_path / "state")(candidate)
 
 
@@ -334,18 +337,18 @@ def test_the_scheduled_job_reads_the_latest_report_as_the_engine_does(tmp_path: 
         "prevalidated_at": made.isoformat(),
         "passed": False,
         "days": ten,
-        "target_version": 2,
+        "target_version": TARGET_VERSION,
     }
     path.write_text(json.dumps(refused))
-    judged = last_report(state, candidate, target_version=2)
+    judged = last_report(state, candidate, target_version=TARGET_VERSION)
     assert judged == LastReport(made_at=made, current=True, passed=False, days=10) and judged.judged
     on_another_target = last_report(state, candidate)
     assert on_another_target is not None and not on_another_target.current and not on_another_target.judged
     path.write_text(json.dumps({**refused, "code": "0123456789abcdef"}))
-    other_code = last_report(state, candidate, target_version=2)
+    other_code = last_report(state, candidate, target_version=TARGET_VERSION)
     assert other_code is not None and not other_code.current
     path.write_text(json.dumps({**refused, "days": ten[:5]}))
-    look = last_report(state, candidate, target_version=2)
+    look = last_report(state, candidate, target_version=TARGET_VERSION)
     assert look is not None and look.current and not look.judged
     path.write_text(json.dumps({"passed": True, "code": code_digest(candidate)}))  # before #204
     assert last_report(state, candidate) == LastReport(made_at=None, current=True, passed=True, days=0)
@@ -467,7 +470,7 @@ async def test_with_the_touch_target_it_trains_replays_and_is_judged_on_the_touc
             self.samples = list(samples)
             return super().fit(samples)
 
-    s = replace(settings(tmp_path, DAYS[:3]), target_version=2)
+    s = replace(settings(tmp_path, DAYS[:3]), target_version=TARGET_VERSION)
     candidate = Watched("contrarian")
 
     result = await prevalidate(s, "contrarian", algorithms=[ALPHA, candidate], now=AFTER)

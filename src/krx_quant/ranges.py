@@ -6,7 +6,9 @@ bid-ask bounce of trade prints would inflate it.
 **Answer** (answer version 1, ``range_answer``). The reference is the integrated mid-point at
 the bar close t (the reference price). The window's mid-points are the reference and those
 of the usable integrated best quotes received in [t, t + 4 minutes) (the touch label's
-quotes: ``kinds.Followed``). The range r is their highest less their lowest, in ticks of the
+quotes: ``kinds.Followed``, but without the crossed ones, which the touch label and the
+barrier count since #187: a crossed quote's mid-point is no price, as for the reference
+price; ``Kind.crossed`` is False). The range r is their highest less their lowest, in ticks of the
 reference's tick size: a multiple of half a tick. k is the reference's flat band
 (``pricing.flat_ticks``):
 
@@ -390,6 +392,7 @@ RANGE = Kind(
     answer_version=ANSWER_VERSION,
     answer=range_answer,
     bar_answer=bar_range,
+    crossed=False,  # mid-points: crossed quotes dropped, as for the reference price (#187)
     baselines=(RangeClimate(), RangePersist()),
     fields={
         "q10": _quantile_meaning("10% 분위수. 열에 하나는 이보다 작다."),

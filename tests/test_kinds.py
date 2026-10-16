@@ -21,8 +21,10 @@ from aiohttp.test_utils import TestClient, TestServer
 from krx_quant import predictions
 from krx_quant.algorithms import RegistrationError, register_kind_algorithms
 from krx_quant.api import create_app
+from krx_quant.barriers import BARRIER
 from krx_quant.cards import Meaning
 from krx_quant.engine import Budget, Event
+from krx_quant.features import Leaders
 from krx_quant.feeds import BOOK_SNAPSHOT
 from krx_quant.kind_registry import KINDS
 from krx_quant.kinds import (
@@ -37,14 +39,16 @@ from krx_quant.kinds import (
     most_likely,
     register_kinds,
 )
+from krx_quant.market_view import MarketView
 from krx_quant.predictions import PredictionStore
-from krx_quant.pricing import tick_size
+from krx_quant.pricing import Direction, tick_size
+from krx_quant.ranges import RANGE
 from krx_quant.replay import replay_into
-from krx_quant.touch import RESTARTED, TouchWindow
+from krx_quant.touch import RESTARTED, SILENT, TARGET_VERSION, TouchWindow
 from tests.algorithm_doubles import FixedAlgorithm
 from tests.api_schema import check
 from tests.kind_doubles import DRIFT, SURE_RISE, TEST_KIND, FixedKindAlgorithm, drift_of
-from tests.replay_events import FEE, SYMBOL, api, at, get_json, run, steady_book, vi
+from tests.replay_events import CALENDAR, FEE, SYMBOL, api, at, book, get_json, run, steady_book, vi
 from tests.test_replay import busy_morning, stored
 
 DRIFTER = FixedKindAlgorithm("drifter", features=("velocity",), unique=("velocity",))
@@ -83,7 +87,9 @@ def touches(db: Path) -> dict[str, dict[str, Any]]:
 def test_the_direction_is_the_first_kind_registered_as_it_always_ran() -> None:
     assert KINDS[0] is DIRECTION_KIND
     assert (DIRECTION_KIND.classes, DIRECTION_KIND.action) == (("up", "flat", "down"), ("up", "down"))
-    assert DIRECTION_KIND.answer_version == 2  # the touch label (#170)
+    assert (
+        DIRECTION_KIND.answer_version == TARGET_VERSION == 3
+    )  # the touch label (#170), crossed quotes counted (#187)
     assert [k.name for k in KINDS] == ["direction", "range", "barrier"], (
         "the range, then the barrier (#180, #183)"
     )
@@ -158,16 +164,21 @@ def test_a_forecast_s_class_is_the_most_likely_a_tie_the_middle_then_the_first()
 T = at("09:31:00")
 
 
-def follow(quotes: list[tuple[float, float | None, float | None, bool]]) -> tuple[TouchWindow, Followed]:
+def follow(
+    quotes: list[tuple[float, float | None, float | None, bool]], *, crossed: bool = True
+) -> tuple[TouchWindow, Followed]:
     """A touch window and a kind's window of the bar close T given the same (seconds after T,
-    bid, ask, REST) quotes, some before it and after its end."""
+    bid, ask, REST) quotes, some before it and after its end; the kind's counts crossed quotes,
+    as the touch window does (#187), unless ``crossed`` is False."""
     touch = TouchWindow(SYMBOL, T, 81_250.0, FEE, bid_start=81_200.0, ask_start=81_300.0)
     log = QuoteLog()
     for seconds, bid, ask, rest in quotes:
         when = T + timedelta(seconds=seconds)
         touch.quote(when, bid, ask, rest=rest)
         log.quote(when, bid, ask, None, None, rest)
-    return touch, log.window(SYMBOL, T, touch.anchor, touch.tick, touch.k, touch.bid_start, touch.ask_start)
+    return touch, log.window(
+        SYMBOL, T, touch.anchor, touch.tick, touch.k, touch.bid_start, touch.ask_start, crossed=crossed
+    )
 
 
 @pytest.mark.parametrize(
@@ -187,17 +198,72 @@ def test_a_kind_s_window_reads_the_quotes_the_touch_label_reads_by_its_rules(
 ) -> None:
     """Input: quotes by receipt time around a window: steady ones, gaps of 60 s, a REST
     snapshot, crossed and one-sided ones, some before T and at or after T + 4 min. Output: the
-    kind's window cannot be scored exactly when the touch window cannot, for the same reason,
-    and holds the quotes the touch window took (received in [T, T + 4 min), usable)."""
+    window of a kind that counts crossed quotes (#187) cannot be scored exactly when the touch
+    window cannot, for the same reason, and holds the quotes the touch window took (received in
+    [T, T + 4 min), two-sided, crossed or not); a kind that does not count them holds the same
+    without the crossed ones."""
     touch, window = follow(quotes)
 
     assert window.unscorable == touch.result().unscorable
     taken = [
-        T + timedelta(seconds=s)
-        for s, bid, ask, rest in quotes
-        if 0 <= s < 240 and not rest and bid and ask and ask >= bid
+        (T + timedelta(seconds=s), bid, ask) for s, bid, ask, rest in quotes if 0 <= s < 240 and not rest
     ]
-    assert [q.received_at for q in window.quotes] == taken
+    assert [q.received_at for q in window.quotes] == [t for t, bid, ask in taken if bid and ask]
+    _, uncrossed = follow(quotes, crossed=False)
+    assert [q.received_at for q in uncrossed.quotes] == [
+        t for t, bid, ask in taken if bid and ask and ask >= bid
+    ]
+
+
+def test_a_kind_that_drops_crossed_quotes_hears_silence_where_the_touch_label_hears_them() -> None:
+    """Input: the book at the spread every 20 s, crossed from 09:31:40 to 09:32:40 (four quotes,
+    a minute). Output: the touch window and a kind counting crossed quotes are scorable; a kind
+    dropping them (the range) went 60 s without one of its quotes: silent quotes (#187)."""
+    quotes: list[tuple[float, float | None, float | None, bool]] = [
+        (s, 81_300, 81_200, False) if 40 <= s <= 100 else (s, 81_200, 81_300, False)
+        for s in range(0, 240, 20)
+    ]
+    touch, counting = follow(quotes)
+    _, dropping = follow(quotes, crossed=False)
+    assert touch.result().unscorable is None and counting.unscorable is None
+    assert dropping.unscorable == SILENT
+
+
+def test_through_the_market_view_a_crossed_quote_touches_for_the_direction_and_the_barrier_only() -> None:
+    """Input: the book at 81,200 / 81,300 every 10 s from 09:30:30 (the mid-point 81,250, k = 2;
+    no trades, so the barrier's width is k), crossed at 09:32:05 at 81,500 / 81,400 (the bid at
+    the upper target and at U, 81,450) and at 09:33:05 at 81,100 / 81,000 (the ask at the lower
+    target and at L, 81,050). Output (#187): the touch label is up, both targets reached; the
+    barrier answer up first at 09:32:05; the range answer as without the crossed quotes: small,
+    r = 0 (their mid-points, 81,450 and 81,050, would have made it large)."""
+    events = [
+        *steady_book(at("09:30:30"), at("09:36:00"), 81_200, 81_300),
+        book(at("09:32:05"), 81_500, 81_400),
+        book(at("09:33:05"), 81_100, 81_000),
+    ]
+    view = MarketView(CALENDAR, (SYMBOL,), Leaders(), at("09:00:00"), FEE, kinds=(RANGE, BARRIER))
+    for feed, row in sorted(events, key=lambda e: e[1]["received_at"]):
+        view.on_event(feed, row)
+
+    touch = view.touch(SYMBOL, T)
+    assert (touch.direction, touch.upper, touch.lower) == (Direction.UP, 81_450, 81_050)
+    assert touch.upper_reached is not None and touch.upper_reached.at == at("09:32:05")
+    assert touch.lower_reached is not None and touch.lower_reached.at == at("09:33:05")
+    barrier = view.kind_answer(BARRIER, SYMBOL, T)
+    assert (barrier.label, barrier.path["w"], barrier.path["up_at"]) == (
+        "up_first",
+        2,
+        at("09:32:05").isoformat(),
+    )
+    assert (barrier.path["up_bid"], barrier.path["up_ask"]) == (81_500, 81_400)
+    ranged = view.kind_answer(RANGE, SYMBOL, T)
+    assert (ranged.label, ranged.path["r"], ranged.path["max_mid"], ranged.path["min_mid"]) == (
+        "small",
+        0.0,
+        81_250,
+        81_250,
+    )
+    assert ranged.path["quotes"] == barrier.path["quotes"] - 2
 
 
 def test_without_a_mid_point_at_the_bar_close_no_kind_can_score_the_window() -> None:
@@ -223,7 +289,12 @@ def quiet(start: str, end: str) -> list[Event]:
 
 
 async def run_kind(db: Path, events: list[Event], until: datetime, **options: Any) -> Any:
-    options = {"kinds": (TEST_KIND,), "kind_algorithms": [DRIFTER], "target_version": 2, **options}
+    options = {
+        "kinds": (TEST_KIND,),
+        "kind_algorithms": [DRIFTER],
+        "target_version": TARGET_VERSION,
+        **options,
+    }
     return await run(db, events, until=until, **options)
 
 
@@ -288,7 +359,9 @@ async def test_the_direction_is_stored_scored_and_ranked_the_same_with_another_k
     an algorithm of it. Output: the direction's predictions and outcomes, its touch labels, and
     the Engine API's direction answers (predictions, latest, leaderboard, an algorithm's
     stats) are the same."""
-    without = await run(tmp_path / "without.db", busy_morning(), until=at("10:00:00"), target_version=2)
+    without = await run(
+        tmp_path / "without.db", busy_morning(), until=at("10:00:00"), target_version=TARGET_VERSION
+    )
     with_kind = await run_kind(tmp_path / "with.db", busy_morning(), until=at("10:00:00"))
 
     direction = stored(tmp_path / "with.db")
@@ -376,7 +449,12 @@ async def test_a_kind_that_fails_never_holds_up_the_direction(tmp_path: Path) ->
         kinds=(TEST_KIND, broken),
         kind_algorithms=[over],
     )
-    await run(tmp_path / "without.db", busy_morning(end="09:20:00"), until=at("09:20:00"), target_version=2)
+    await run(
+        tmp_path / "without.db",
+        busy_morning(end="09:20:00"),
+        until=at("09:20:00"),
+        target_version=TARGET_VERSION,
+    )
 
     assert {r[5] for r in kind_rows(tmp_path / "engine.db") if r[1] == "over"} == {"error"}
     assert answers(tmp_path / "engine.db", "broken") == {}
@@ -520,7 +598,7 @@ async def test_a_client_that_knows_only_the_old_events_sees_them_as_without_the_
     without the drift; the drift's come as types it does not know (and ignores)."""
 
     async def heard(db: Path, **options: Any) -> list[dict[str, Any]]:
-        engine = await run(db, [], until=at("09:00:00"), target_version=2, **options)
+        engine = await run(db, [], until=at("09:00:00"), target_version=TARGET_VERSION, **options)
         async with TestClient(TestServer(create_app(engine, stream_poll_seconds=3600))) as client:
             ws = await client.ws_connect("/v1/stream")
             await _replay_more(engine, busy_morning(end="09:06:00"), at("09:06:00"))

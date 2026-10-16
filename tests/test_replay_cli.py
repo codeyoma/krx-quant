@@ -24,6 +24,7 @@ from krx_quant.lifecycle import Rules
 from krx_quant.object_store import LocalObjectStore
 from krx_quant.recorder import ParquetRecorder
 from krx_quant.replay import recorded_events, replay_recorded
+from krx_quant.touch import TARGET_VERSION
 from tests.replay_events import DAY, at, kospi, kospi200_futures, run
 from tests.test_replay import busy_morning, stored
 from tests.test_special import VI, held
@@ -68,7 +69,7 @@ def test_a_recorded_day_replays_like_the_same_events_given_by_hand(
 
     db = tmp_path / "state" / f"replay-{DAY}.sqlite3"
     # The server's target, the touch target by default (#170).
-    asyncio.run(run(tmp_path / "by-hand.db", events, until=END_OF_DAY, target_version=2))
+    asyncio.run(run(tmp_path / "by-hand.db", events, until=END_OF_DAY, target_version=TARGET_VERSION))
     assert stored(db) == stored(tmp_path / "by-hand.db")
     out = capsys.readouterr().out
     assert f"replayed {DAY} into {db}" in out
@@ -158,7 +159,7 @@ def replays_like_by_hand(
     assert main(["replay", DAY.isoformat()]) == 0
 
     # The server's target, the touch target by default (#170).
-    asyncio.run(run(tmp_path / "by-hand.db", events, until=END_OF_DAY, target_version=2))
+    asyncio.run(run(tmp_path / "by-hand.db", events, until=END_OF_DAY, target_version=TARGET_VERSION))
     assert stored(tmp_path / "state" / f"replay-{DAY}.sqlite3") == stored(tmp_path / "by-hand.db")
 
 

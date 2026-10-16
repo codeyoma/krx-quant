@@ -29,6 +29,7 @@ from krx_quant.object_store import LocalObjectStore
 from krx_quant.predictions import PredictionStore
 from krx_quant.prevalidation import admits, prevalidate
 from krx_quant.swap import reload_models
+from krx_quant.touch import TARGET_VERSION
 from krx_quant.training import bar_answers, fit_algorithm, training_day
 from tests.algorithm_doubles import stand_in_card, stand_in_meanings
 from tests.kind_doubles import DRIFT, TEST_KIND, DriftFrequency
@@ -52,7 +53,7 @@ async def test_a_recorded_day_trains_a_kind_on_the_answers_the_engine_scores(tmp
         tmp_path / "engine.db",
         events,
         until=at("10:00:00"),
-        target_version=2,
+        target_version=TARGET_VERSION,
         kinds=(TEST_KIND,),
         kind_algorithms=(),  # the range's Mandelbrot needs the range (#181)
     )
@@ -60,7 +61,15 @@ async def test_a_recorded_day_trains_a_kind_on_the_answers_the_engine_scores(tmp
     engine.store.close()
 
     day = training_day(
-        data, DAY, CALENDAR, (SYMBOL,), ("velocity",), FEE, Leaders(), target_version=2, kinds=(TEST_KIND,)
+        data,
+        DAY,
+        CALENDAR,
+        (SYMBOL,),
+        ("velocity",),
+        FEE,
+        Leaders(),
+        target_version=TARGET_VERSION,
+        kinds=(TEST_KIND,),
     )
 
     assert day is not None and day.reference == "mid"
@@ -174,7 +183,7 @@ def test_the_night_trains_a_kind_s_algorithm_on_its_answers(tmp_path: Path) -> N
         fee_rate=FEE,
         algorithms=[],
         now=lambda: FINISHED,
-        target_version=2,
+        target_version=TARGET_VERSION,
         kind_algorithms=[counter],
         kinds=(TEST_KIND,),
     )
@@ -186,7 +195,9 @@ def test_the_night_trains_a_kind_s_algorithm_on_its_answers(tmp_path: Path) -> N
     assert saved["challenger"]["loss"] < saved["champion"]["loss"]
     assert result.promoted["counter"] == saved["challenger"]["version"]
     assert f"drift 정답 표본: 녹화 호가 0개, 1분봉 {saved['labels']['samples']['bars']}개" in result.summary()
-    assert "정답 버전 2 표본" in result.summary(), "the direction's line, from the climate's report"
+    assert f"정답 버전 {TARGET_VERSION} 표본" in result.summary(), (
+        "the direction's line, from the climate's report"
+    )
     model = read(root, f"models/counter/{saved['challenger']['version']}.json")
     assert model["target_version"] == 1
 

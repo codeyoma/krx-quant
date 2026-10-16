@@ -1,4 +1,4 @@
-"""The engine with the touch target (``KRX_TARGET_VERSION=2``, #169), through the Replay
+"""The engine with the touch target (``KRX_TARGET_VERSION=3``, #169, #187), through the Replay
 Harness: the baselines and the shared normal forecast follow it.
 
 Input: hand-made integrated book updates and a fake clock. Output: the predictions stored
@@ -28,6 +28,7 @@ from krx_quant.engine import Event
 from krx_quant.features import FeatureVector
 from krx_quant.feeds import KST
 from krx_quant.pricing import Direction
+from krx_quant.touch import TARGET_VERSION
 from tests.algorithm_doubles import stand_in_card, stand_in_meanings
 from tests.api_schema import check
 from tests.replay_events import SYMBOL, api, at, book, get_json, run, steady_book
@@ -54,7 +55,9 @@ async def test_the_last_four_minutes_direction_is_the_touch_label_of_the_window_
 ) -> None:
     events = quiet_book("09:00:30", "09:45:00") + [book(at("09:32:30"), 81_500, 81_600)]
 
-    persist = await served(tmp_path / "engine.db", events, "09:45:00", "baseline-persist", target_version=2)
+    persist = await served(
+        tmp_path / "engine.db", events, "09:45:00", "baseline-persist", target_version=TARGET_VERSION
+    )
 
     # At 09:33 the window of 09:29 is over: up. At 09:37 that of 09:33: flat.
     assert forecast(persist["09:33"]) == ("ok", 1, 0, 0)
@@ -76,7 +79,9 @@ async def test_the_last_four_minutes_direction_is_not_predicted_after_a_window_i
     # Nothing received from 09:35:00 to 09:36:30: the windows of 09:32 to 09:35 are silent.
     events = quiet_book("09:00:30", "09:35:00") + quiet_book("09:36:30", "09:50:00")
 
-    persist = await served(tmp_path / "engine.db", events, "09:50:00", "baseline-persist", target_version=2)
+    persist = await served(
+        tmp_path / "engine.db", events, "09:50:00", "baseline-persist", target_version=TARGET_VERSION
+    )
 
     assert [persist[c]["status"] for c in ("09:35", "09:36", "09:39", "09:40")] == [
         "ok",  # 09:31's window ended at 09:35:00, before the gap
@@ -91,9 +96,13 @@ async def test_the_last_four_minutes_direction_starts_over_after_a_restart(tmp_p
     events = quiet_book("09:00:30", "09:45:00")
     restart = at("09:33:30")
 
-    await run(db, [e for e in events if e[1]["received_at"] < restart], until=restart, target_version=2)
+    await run(
+        db, [e for e in events if e[1]["received_at"] < restart], until=restart, target_version=TARGET_VERSION
+    )
     later = [e for e in events if e[1]["received_at"] >= restart]
-    persist = await served(db, later, "09:45:00", "baseline-persist", start=restart, target_version=2)
+    persist = await served(
+        db, later, "09:45:00", "baseline-persist", start=restart, target_version=TARGET_VERSION
+    )
 
     # The windows of 09:30–09:33 were not followed through: 09:34–09:37 cannot carry them on.
     assert [persist[c]["status"] for c in ("09:33", "09:34", "09:37", "09:38")] == [
@@ -110,7 +119,9 @@ async def test_the_random_baseline_draws_in_the_proportions_of_the_touch_labels_
     # A book that never moves: every window is flat.
     events = quiet_book("09:00:30", "10:30:00")
 
-    draws = await served(tmp_path / "engine.db", events, "10:30:00", "baseline-random", target_version=2)
+    draws = await served(
+        tmp_path / "engine.db", events, "10:30:00", "baseline-random", target_version=TARGET_VERSION
+    )
 
     late = [p for close, p in draws.items() if close >= "10:01"]
     assert len(late) == 30
@@ -127,7 +138,7 @@ async def test_the_random_baseline_counts_the_windows_over_by_its_bar_close(tmp_
         quiet_book("09:00:30", "09:20:00"),
         "09:20:00",
         "baseline-random",
-        target_version=2,
+        target_version=TARGET_VERSION,
     )
 
     for minute in range(1, 16):
@@ -186,7 +197,7 @@ async def test_the_climate_baseline_calls_its_tables_direction_for_the_slot(tmp_
         quiet_book("09:00:30", "10:10:00"),
         "10:10:00",
         CLIMATE,
-        target_version=2,
+        target_version=TARGET_VERSION,
         climate=model,
     )
 
@@ -200,7 +211,11 @@ async def test_the_climate_baseline_calls_its_tables_direction_for_the_slot(tmp_
 
 async def test_without_a_table_the_climate_baseline_calls_flat(tmp_path: Path) -> None:
     climate = await served(
-        tmp_path / "engine.db", quiet_book("09:00:30", "09:10:00"), "09:10:00", CLIMATE, target_version=2
+        tmp_path / "engine.db",
+        quiet_book("09:00:30", "09:10:00"),
+        "09:10:00",
+        CLIMATE,
+        target_version=TARGET_VERSION,
     )
     assert {forecast(p) for p in climate.values()} == {("ok", 0, 1, 0)}
     assert {p["model_version"] for p in climate.values()} == {f"{CLIMATE}-default"}
@@ -249,7 +264,10 @@ async def test_the_algorithms_forecast_the_engines_target(
 
 async def test_the_api_serves_the_touch_targets_baselines_within_its_contract(tmp_path: Path) -> None:
     engine = await run(
-        tmp_path / "engine.db", quiet_book("09:00:30", "09:10:00"), until=at("09:10:00"), target_version=2
+        tmp_path / "engine.db",
+        quiet_book("09:00:30", "09:10:00"),
+        until=at("09:10:00"),
+        target_version=TARGET_VERSION,
     )
     async with api(engine) as client:
         listed = await get_json(client, "/v1/algorithms")

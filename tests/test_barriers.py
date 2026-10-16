@@ -59,7 +59,16 @@ from krx_quant.features import (
 )
 from krx_quant.kind_registry import KINDS
 from krx_quant.kind_stats import summarize
-from krx_quant.kinds import DIRECTION_KIND, Answer, Followed, KindForecast, KindInputs, KindScored, QuoteLog
+from krx_quant.kinds import (
+    DIRECTION_KIND,
+    Answer,
+    Followed,
+    Kind,
+    KindForecast,
+    KindInputs,
+    KindScored,
+    QuoteLog,
+)
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.predictions import DB_NAME, PredictionStore
 from krx_quant.pricing import cost_ticks, flat_ticks, tick_size
@@ -67,7 +76,7 @@ from krx_quant.ranges import RANGE
 from krx_quant.reference import Bar
 from krx_quant.replay import replay_into
 from krx_quant.rescore import fill_kind_answers
-from krx_quant.touch import MISSING_MID, REST_QUOTES, RESTARTED, SILENT
+from krx_quant.touch import MISSING_MID, REST_QUOTES, RESTARTED, SILENT, TARGET_VERSION
 from krx_quant.training import bar_answers, training_day
 from tests.api_schema import check
 from tests.replay_events import CALENDAR, DAY, FEE, SYMBOL, api, at, get_json, run, steady_book, trade
@@ -235,8 +244,9 @@ def window(
 ) -> Followed:
     """The window of the bar close T (09:31) from ``anchor`` with the width ``w``: the book
     around the anchor (``spread`` wide) every ``every`` seconds from T to ``until``, and the
-    (time, bid, ask) ``quotes`` received besides, as the Market View logs them; the trades given;
-    a REST snapshot at ``rest_at``. The best quote before T: 81,200 / 81,300."""
+    (time, bid, ask) ``quotes`` received besides, as the Market View logs them and gives them to
+    the barrier (crossed ones included, #187); the trades given; a REST snapshot at ``rest_at``.
+    The best quote before T: 81,200 / 81,300."""
     log = QuoteLog()
     received: list[tuple[datetime, float, float]] = []
     if anchor is not None:
@@ -255,7 +265,9 @@ def window(
     k = flat_ticks(anchor, FEE) if anchor is not None else None
     cost = cost_ticks(anchor, FEE) if anchor is not None else None
     width = Width(w, 1.9) if anchor is not None else None
-    return log.window(SYMBOL, T, anchor, tick, k, 81_200, 81_300, cost=cost, width=width)
+    return log.window(
+        SYMBOL, T, anchor, tick, k, 81_200, 81_300, cost=cost, width=width, crossed=BARRIER.crossed
+    )
 
 
 UP_QUOTE = ("09:32:00", 81_500, 81_600)  # the bid at U (81,450 at 81,250, w = 2)
@@ -282,8 +294,13 @@ DOWN_QUOTE = ("09:33:00", 80_900, 81_000)  # the ask at L (81,050)
         ),
         # Neither.
         ([], {}, "timeout", None, None),
-        # A crossed quote (ask below bid) is dropped.
-        ([("09:32:00", 81_600, 81_500)], {}, "timeout", None, None),
+        # A crossed quote (ask below bid) counts (#187), each side a price one could trade at:
+        # its bid at U (81,500 ≥ 81,450, the ask a tick under it), or its ask at L (81,000 ≤
+        # 81,050, the bid a tick over it). Dropped before #187, both were timeouts.
+        ([("09:32:00", 81_500, 81_400)], {}, "up_first", "09:32:00", None),
+        ([("09:33:00", 81_100, 81_000)], {}, "down_first", None, "09:33:00"),
+        # Crossed, each side short of its barrier: neither.
+        ([("09:32:00", 81_400, 81_100)], {}, "timeout", None, None),
         # The ends: a quote received at T counts; one at T + 4 minutes does not.
         ([("09:31:00", 81_500, 81_600)], {}, "up_first", "09:31:00", None),
         ([("09:35:00", 81_500, 81_600)], {}, "timeout", None, None),
@@ -325,6 +342,47 @@ def test_both_barriers_first_reached_at_the_same_received_time_cannot_be_scored(
 
     assert (answer.label, answer.unscorable) == (None, AMBIGUOUS)
     assert answer.path["up_at"] == answer.path["down_at"] == at("09:32:00").isoformat()
+
+
+def test_one_crossed_quote_at_both_barriers_cannot_be_scored_either() -> None:
+    """Input: 81,500 / 81,000 at 09:32:00: one crossed quote whose bid is at U and whose ask is
+    at L (#187). Output: ambiguous, as two quotes received at the same time are: which side one
+    would have traded first is unknown."""
+    answer = BARRIER.answer_to(window([("09:32:00", 81_500, 81_000)]))
+
+    assert (answer.label, answer.unscorable) == (None, AMBIGUOUS)
+    assert (answer.path["up_bid"], answer.path["down_ask"]) == (81_500, 81_000)
+
+
+def test_on_one_crossed_sequence_the_barrier_answer_changes_and_the_range_answer_does_not() -> None:
+    """Input: one window's quotes logged once: the book at 81,250 every 30 s, crossed at
+    09:32:00 (81,500 / 81,400) and at 09:33:00 (81,100 / 81,000). Output (#187): the barrier
+    (answer version 2) counts them: up first at 09:32:00, where version 1, dropping them, said
+    timeout; the range answer is what it was: small, r = 0, its mid-points without the crossed
+    quotes (with them: 81,450 and 81,050, large)."""
+    crossed = [("09:32:00", 81_500, 81_400), ("09:33:00", 81_100, 81_000)]
+    log = QuoteLog()
+    for when, bid, ask in sorted(
+        [
+            *((T + timedelta(seconds=n), 81_200, 81_300) for n in range(0, 240, 30)),
+            *((at(t), b, a) for t, b, a in crossed),
+        ]
+    ):
+        log.quote(when, bid, ask, None, None, False)
+    cost = cost_ticks(81_250.0, FEE)
+
+    def answer(kind: Kind, crossed: bool) -> Answer:
+        followed = log.window(
+            SYMBOL, T, 81_250.0, 100, 2, 81_200, 81_300, cost=cost, width=Width(2, 1.9), crossed=crossed
+        )
+        return kind.answer_to(followed)
+
+    barrier, before = answer(BARRIER, BARRIER.crossed), answer(BARRIER, False)
+    assert (barrier.label, barrier.path["up_at"]) == ("up_first", at("09:32:00").isoformat())
+    assert (before.label, before.path["up_at"]) == ("timeout", None)
+    ranged = answer(RANGE, RANGE.crossed)
+    assert (ranged.label, ranged.path["r"]) == ("small", 0.0)
+    assert answer(RANGE, True).label == "large", "had the range counted them"
 
 
 def test_the_path_keeps_the_width_the_barriers_and_the_quotes_at_each_touch() -> None:
@@ -532,8 +590,9 @@ def test_the_barrier_is_registered_after_the_range() -> None:
     assert (BARRIER.classes, BARRIER.action, BARRIER.answer_version) == (
         ("up_first", "timeout", "down_first"),
         ("up_first", "down_first"),
-        1,
+        2,  # crossed quotes count (#187)
     )
+    assert BARRIER.crossed
     assert BARRIER.p_keys() == ("p_up_first", "p_timeout", "p_down_first")
     assert [b.name for b in BARRIER.baselines] == [CLIMATE, PERSIST]
     assert dict(BARRIER.fields) == {} and BARRIER.width is not None
@@ -656,7 +715,7 @@ def test_the_climate_counts_each_symbol_and_slot_s_classes() -> None:
     table = climate.fit(samples)
     bound = climate.using(table)
 
-    assert table.version.startswith(f"{CLIMATE}-20261012-") and table.target_version == 1
+    assert table.version.startswith(f"{CLIMATE}-20261012-") and table.target_version == BARRIER.answer_version
     assert table.params[f"{SYMBOL}.09:00.n"] == 4.0
     assert bound.predict(inputs(None, at("09:30:00"))).probabilities == pytest.approx((0.5, 0.25, 0.25))
     assert bound.predict(inputs(None, at("13:05:00"))).probabilities == pytest.approx((0.4, 0.4, 0.2))
@@ -718,7 +777,7 @@ async def test_both_baselines_predict_and_are_scored_on_the_barrier_with_the_bar
     predictor of a bar close shares its answer; the persistence carries each last window on and
     does not predict where it could not be scored; both on ``/v1/leaderboard?kind=barrier``."""
     db = tmp_path / "engine.db"
-    engine = await run(db, volatile_morning(), until=at("09:55:00"), target_version=2)
+    engine = await run(db, volatile_morning(), until=at("09:55:00"), target_version=TARGET_VERSION)
 
     answers = barrier_answers(db)
     made = barrier_predictions(db)
@@ -797,13 +856,15 @@ async def test_a_restart_leaves_its_windows_unscorable_and_the_width_from_what_c
     events = volatile_morning()
     restart = at("09:39:30")
 
-    await run(db, [e for e in events if e[1]["received_at"] < restart], until=restart, target_version=2)
+    await run(
+        db, [e for e in events if e[1]["received_at"] < restart], until=restart, target_version=TARGET_VERSION
+    )
     engine = await run(
         db,
         [e for e in events if e[1]["received_at"] >= restart],
         until=at("09:55:00"),
         start=restart,
-        target_version=2,
+        target_version=TARGET_VERSION,
     )
     engine.store.close()
 
@@ -840,7 +901,9 @@ async def test_a_barrier_prediction_keeps_its_bar_close_s_mid_point_and_tick_aft
     db = tmp_path / "engine.db"
     events = tick_crossing()
     split = at("09:34:00")
-    engine = await run(db, [e for e in events if e[1]["received_at"] <= split], until=split, target_version=2)
+    engine = await run(
+        db, [e for e in events if e[1]["received_at"] <= split], until=split, target_version=TARGET_VERSION
+    )
     at_0931 = f"/v1/symbols/{SYMBOL}/kinds/barrier/predictions?bar_close=2026-10-12T09:31:00%2B09:00"
 
     async with api(engine) as client:
@@ -908,11 +971,11 @@ async def test_the_direction_and_the_range_go_on_as_before_beside_the_barrier(tm
         before,
         busy_morning(),
         until=at("10:00:00"),
-        target_version=2,
+        target_version=TARGET_VERSION,
         kinds=(DIRECTION_KIND, RANGE),
         kind_algorithms=[a for a in KIND_ALGORITHMS if a.kind == RANGE.name],  # the barrier's need it
     )
-    new = await run(after, busy_morning(), until=at("10:00:00"), target_version=2)
+    new = await run(after, busy_morning(), until=at("10:00:00"), target_version=TARGET_VERSION)
     old.store.close()
     new.store.close()
 
@@ -939,7 +1002,7 @@ async def test_a_recorded_day_trains_on_the_barrier_answers_and_widths_the_engin
     events = busy_morning()
     data = tmp_path / "data"
     record(data, events)
-    engine = await run(tmp_path / "engine.db", events, until=at("10:00:00"), target_version=2)
+    engine = await run(tmp_path / "engine.db", events, until=at("10:00:00"), target_version=TARGET_VERSION)
     stored = {
         datetime.fromisoformat(a["bar_close"]): a for a in engine.store.kind_answers(BARRIER.name, SYMBOL)
     }
@@ -950,7 +1013,15 @@ async def test_a_recorded_day_trains_on_the_barrier_answers_and_widths_the_engin
     engine.store.close()
 
     day = training_day(
-        data, DAY, CALENDAR, (SYMBOL,), ("barrier_width",), FEE, Leaders(), target_version=2, kinds=(BARRIER,)
+        data,
+        DAY,
+        CALENDAR,
+        (SYMBOL,),
+        ("barrier_width",),
+        FEE,
+        Leaders(),
+        target_version=TARGET_VERSION,
+        kinds=(BARRIER,),
     )
 
     assert day is not None
@@ -982,7 +1053,15 @@ def test_a_backfilled_day_trains_on_the_bar_rule_its_same_minutes_left_out(tmp_p
     calendar = MarketCalendar({FRIDAY: True, DAY: True})
 
     day = training_day(
-        data, DAY, calendar, (SYMBOL,), ("barrier_width",), FEE, Leaders(), target_version=2, kinds=(BARRIER,)
+        data,
+        DAY,
+        calendar,
+        (SYMBOL,),
+        ("barrier_width",),
+        FEE,
+        Leaders(),
+        target_version=TARGET_VERSION,
+        kinds=(BARRIER,),
     )
 
     assert day is not None and day.reference == "close"
@@ -1066,6 +1145,41 @@ def test_the_fill_answers_a_recorded_day_as_a_fresh_replay_does_and_once(
 
     assert fill_kind_answers(s, NEXT_MORNING, kinds=(BARRIER,)) == []
     assert kind_answers(db, "barrier") == kind_answers(fresh, "barrier")
+
+
+def test_answers_of_version_1_stay_and_every_bar_close_gets_one_of_version_2(
+    tmp_path: Path, replayed: Path
+) -> None:
+    """Input: the server's database as an engine before #187 left it: every bar close's barrier
+    answer of version 1 (crossed quotes dropped; here all timeouts, to tell them apart). Output
+    (#187): the fill at the first start of version 2 writes a version 2 answer for every bar
+    close, each the fresh replay's; version 1's stay as they were, read by nothing."""
+    s = Settings(
+        kis_app_key="",
+        kis_app_secret="",
+        symbols=(SYMBOL,),
+        etf_symbols=(),
+        index_codes=(),
+        us_symbols=(),
+        data_dir=tmp_path / "data",
+        state_dir=tmp_path / "state",
+    )
+    record(s.data_dir, day_events())
+    store_bars(s.data_dir, FRIDAY, FRIDAY_BARS)
+    db = server_db(s.state_dir, replayed, keep=1)
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            "UPDATE kind_answers SET answer_version = 1, class = 'timeout', unscorable = NULL"
+            " WHERE kind = 'barrier'"
+        )
+    old = kind_answers(db, "barrier")
+
+    [filled] = fill_kind_answers(s, NEXT_MORNING, kinds=(BARRIER,))
+
+    assert BARRIER.answer_version == 2 and filled.written == 376
+    now = kind_answers(db, "barrier")
+    assert [row for row in now if row[3] == 1] == old
+    assert [row for row in now if row[3] == BARRIER.answer_version] == kind_answers(replayed, "barrier")
 
 
 def test_a_table_given_to_the_engine_is_what_the_climate_predicts_from() -> None:

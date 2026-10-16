@@ -18,7 +18,7 @@ classified with the same flat band as live scoring. A day is read one of two way
 
 A recorded day is read the first way even when it has backfilled bars too.
 
-With the touch target (``KRX_TARGET_VERSION=2``, #169) the outcome is its label instead:
+With the touch target (``KRX_TARGET_VERSION=3``, 2 before #187; #169) the outcome is its label instead:
 on a recorded day the engine's own touch window (``touch.py``) over the replayed quotes,
 exactly as the engine labels it; on a backfilled day the one-minute bar rule
 (``touch.bar_touch``). The move (``change_ticks``) stays the four-minute one. The features
@@ -242,7 +242,7 @@ def samples(
 ) -> list[Sample]:
     """A sample per bar close in each day's prediction window, in time order, from backfilled
     bars: the reference price is the last close, the outcome the close four minutes later;
-    with the touch target (``target_version`` 2, #169), the one-minute bar rule's label.
+    with the touch target (``target_version`` 3, #169, #187), the one-minute bar rule's label.
 
     ``leader_days`` holds the leading series' bars by (series, day); the other symbols of
     ``bar_days`` lead too. ``regimes`` holds each day's macro regime (none: unknown).
@@ -354,7 +354,7 @@ def recorded_day(
     At each bar close the features are computed before any event received at or after it,
     as the engine does. The outcome is the mid-point four minutes later against the one at
     the bar close, as live scoring decides it on basis A; with the touch target
-    (``target_version`` 2, #169), the label of the bar close's touch window, as the engine
+    (``target_version`` 3, #169, #187), the label of the bar close's touch window, as the engine
     records it. A symbol in a VI at a bar close has no sample there (the engine does not
     predict it), and neither has a bar close whose four minutes a VI, circuit breaker or
     sidecar touches (live statistics leave it out). ``previous`` gives each symbol's previous
@@ -382,7 +382,7 @@ def recorded_day(
     # target to look the mid-point up at, or both.
     minutes = deque(first + i * BAR for i in range((last + HORIZON - first) // BAR + 1))
     # Each bar close's snapshot, features, whether a window known then touched it, and the
-    # touch target's terms there (target version 2).
+    # touch target's terms there (target versions 2 and up).
     seen: list[tuple[Snapshot, dict[str, Value], bool, TouchTerms | None]] = []
     mids: dict[tuple[str, datetime], float | None] = {}
     labels: dict[tuple[str, datetime], Direction | None] = {}  # by bar close, once its window ended
@@ -501,7 +501,7 @@ def _sample(
     touch: TouchTerms | None = None,
 ) -> Sample:
     """A sample of ``snapshot``, with the price four minutes later classified against its own;
-    its features carry the touch target's terms ``touch`` (target version 2)."""
+    its features carry the touch target's terms ``touch`` (target versions 2 and up)."""
     change = None
     outcome = None
     if later is not None and snapshot.price and snapshot.tick and snapshot.flat_ticks:

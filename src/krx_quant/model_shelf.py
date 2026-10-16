@@ -40,7 +40,7 @@ class Shelf:
 
     def rollback(self, name: str, at: datetime, target_version: int = 1) -> Model | None:
         """Go back to the model installed before the current one; None: the defaults. On the
-        touch target (``target_version`` 2, #170) only to a model trained on it."""
+        touch target (``target_version`` 3, #170, #187) only to a model trained on it."""
         chain = self._chain(name)
         if not chain:
             raise ValueError(f"{name} runs its defaults: there is nothing to roll back")

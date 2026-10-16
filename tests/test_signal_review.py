@@ -36,7 +36,7 @@ from tests.test_replay import busy_morning
 
 UP, FLAT, DOWN = Direction.UP, Direction.FLAT, Direction.DOWN
 EARLIER, DAY = date(2026, 10, 12), date(2026, 10, 13)
-SETTINGS = Settings("key", "secret", signal_thresholds=SignalRule(0.6, 2), target_version=2)
+SETTINGS = Settings("key", "secret", signal_thresholds=SignalRule(0.6, 2), target_version=TARGET_VERSION)
 
 
 def on(day: date, hhmm: str) -> datetime:

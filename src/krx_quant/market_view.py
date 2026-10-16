@@ -14,7 +14,9 @@ that event changes them: a prediction made late never sees a trade it could not 
 
 With a fee rate the view follows each bar close's four minutes (#167): the touch window
 (``touch.TouchWindow``), and, for the kinds besides the direction (#179, ``kinds.py``), the
-same quotes logged (``kinds.QuoteLog``) for each kind's answer function, by the same rules.
+same quotes logged (``kinds.QuoteLog``) for each kind's answer function, by the same rules:
+crossed quotes count for the touch label and a kind that counts them (#187, the barrier),
+not for the others (the range), the reference price or the quote features.
 A kind with barriers (#183, the barrier) has their width fixed when the window opens, from
 the bars the bar close's snapshot holds (``Kind.width``): its answer reads it four minutes
 later, and the engine keeps it with every prediction of that bar close.
@@ -700,11 +702,11 @@ class MarketView:
         window = self._windows.get(symbol, {}).get(bar_close)
         return window.result() if window is not None else restarted(symbol, bar_close)
 
-    def followed(self, symbol: str, bar_close: datetime) -> Followed | None:
+    def followed(self, symbol: str, bar_close: datetime, *, crossed: bool = False) -> Followed | None:
         """``symbol``'s four minutes from ``bar_close`` as followed so far, for a kind's answer
         (#179): the touch window's start (mid-point, tick, k, best quote) and the quotes and
-        trades logged since; None for a window not followed (the engine started after its
-        bar close) or without kinds."""
+        trades logged since, the crossed quotes among them with ``crossed`` (#187); None for a
+        window not followed (the engine started after its bar close) or without kinds."""
         window = self._windows.get(symbol, {}).get(bar_close)
         log = self._logs.get(symbol)
         if window is None or log is None:
@@ -719,13 +721,15 @@ class MarketView:
             window.bid_start,
             window.ask_start,
             cost=cost,
+            crossed=crossed,
         )
 
     def kind_answer(self, kind: Kind, symbol: str, bar_close: datetime) -> Answer:
         """``kind``'s answer of ``symbol``'s window from ``bar_close`` (#179), as followed so far,
         with the kind's barrier width fixed when it opened (#183); a window not followed says so
-        (``restarted``), as its touch label does."""
-        window = self.followed(symbol, bar_close)
+        (``restarted``), as its touch label does. Its quotes are the kind's: crossed ones only
+        for a kind that counts them (``Kind.crossed``, #187)."""
+        window = self.followed(symbol, bar_close, crossed=kind.crossed)
         if window is None:
             return Answer(None, RESTARTED)
         return kind.answer_to(replace(window, width=self.kind_width(kind, symbol, bar_close)))
@@ -816,6 +820,8 @@ class MarketView:
         else:
             bid, ask = row["bid_px_1"], row["ask_px_1"]
             bid_size, ask_size = row.get("bid_qty_1"), row.get("ask_qty_1")
+        # The quote a window starts from stays the last uncrossed one (#187): the reference
+        # price's, which the touch target's half-spread term (a feature) is made from.
         if not rest and bid and ask and 0 < bid <= ask:
             self._best[symbol] = (float(bid), float(ask))
         for window in self._windows[symbol].values():

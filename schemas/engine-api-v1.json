@@ -273,7 +273,11 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "target_version": {"type": "integer", "minimum": 2},
+        "target_version": {
+          "description": "The touch label's version (touch.TARGET_VERSION): 3, crossed quotes counted (#187). Only the engine's current version is served; 2 (crossed quotes dropped) stays in the DB only.",
+          "type": "integer",
+          "minimum": 3
+        },
         "class": {"$ref": "#/$defs/class"},
         "unscorable": {"type": ["string", "null"]},
         "anchor": {"$ref": "#/$defs/price"},
@@ -501,7 +505,7 @@
             "trained_until": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/day"}]},
             "training": {"$ref": "#/$defs/model_training"},
             "target_version": {
-              "description": "The target its labels were of (#170): 2 the touch target, 1 the four-minute move. null for the defaults and for a model saved before it was recorded (the four-minute move's). Only models of 2 count toward the statuses and the consensus weights.",
+              "description": "The target its labels were of (#170): 3 the touch target counting crossed quotes (#187), 2 the touch target dropping them (before #187), 1 the four-minute move; a kind's algorithm, its kind's answer version. null for the defaults and for a model saved before it was recorded (the four-minute move's). Only models of the engine's target version (a kind's: its answer version) count toward the statuses and the consensus weights.",
               "type": ["integer", "null"],
               "minimum": 1
             }
@@ -672,7 +676,7 @@
       "properties": {
         "algorithms": {"type": "array", "items": {"$ref": "#/$defs/algorithm"}},
         "baselines": {
-          "description": "The baselines' cards: three, four with the touch target (KRX_TARGET_VERSION=2, #169: baseline-climate).",
+          "description": "The baselines' cards: three, four with the touch target (KRX_TARGET_VERSION=3, the default; #169: baseline-climate).",
           "type": "array",
           "items": {
             "type": "object",
@@ -1154,7 +1158,7 @@
       }
     },
     "barrier_path": {
-      "description": "A barrier answer's path (#183): empty for a window not followed (restarted, not recorded); else the width w and the four-minute volatility sigma it came from (ticks; null when too few bars set w = k), k, the tick, the reference mid-point, the barriers U and L, the round-trip cost (ticks), the best quote at the bar close, when each barrier was first reached (by received time) and the best quote then, the last best quote received in the window, the quotes received and whether they went silent for 60 s. Without a mid-point at the bar close the barriers and the width are null.",
+      "description": "A barrier answer's path (#183): empty for a window not followed (restarted, not recorded); else the width w and the four-minute volatility sigma it came from (ticks; null when too few bars set w = k), k, the tick, the reference mid-point, the barriers U and L, the round-trip cost (ticks), the best quote at the bar close, when each barrier was first reached (by received time) and the best quote then, the last best quote received in the window, the quotes received and whether they went silent for 60 s. Since answer version 2 (#187) the window's quotes include crossed ones (best ask below best bid): a barrier's quote, the last one and the count may be crossed. Without a mid-point at the bar close the barriers and the width are null.",
       "oneOf": [
         {"type": "object", "maxProperties": 0},
         {

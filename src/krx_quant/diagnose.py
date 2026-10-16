@@ -38,8 +38,12 @@ listed again.
    the book's and the trades' quotes, under a minute old); which venue's bid was above which
    venue's ask, from the per-venue trades' (``H0STCNT0``, ``H0NXCNT0``) best quotes, and
    whether trades printed at those prices; the VIs (``special.SpecialSituations``) and the
-   feeds' raw time codes during the spells. It only measures: how crossed quotes are used
-   is not changed here (#187 decides).
+   feeds' raw time codes during the spells. It only measures. #187 decided from it: the
+   touch label and the barrier answer count crossed quotes (target version 3, barrier answer
+   version 2); the reference price, the quote features and the range answer drop them.
+
+Sections 6, 7 and 8 read the answers of the version the code makes now (``touch.TARGET_VERSION``,
+the kinds' answer versions) and say which in their titles.
 
 A distribution shows a few quantiles and the maximum. A quantile is the lower of the two
 values around q·(n − 1) of the sorted values: no value is made up. Nothing is judged
@@ -127,15 +131,17 @@ def diagnose(
             ("4. 피드별 수신 지연(초, 수신 − 거래소 시각)", _receive_delays(data_dir, chosen)),
             ("5. 매크로 국면(개장 전 결정)", _macro(data_dir, chosen, calendar)),
             (
-                "6. 도달 정답(#160): 분포·폭·체결가 대비·표시 전·머문 시간",
+                f"6. 도달 정답(#160, 정답 버전 {TARGET_VERSION}): 분포·폭·체결가 대비·표시 전·머문 시간",
                 _touches(conn, chosen),
             ),
             (
-                "7. 변동폭 정답(#180): 종목 × 시간대 분포·1분봉 규칙 일치율·위아래로 간 폭",
+                f"7. 변동폭 정답(#180, 정답 버전 {ANSWER_VERSION}): 종목 × 시간대 분포·1분봉 규칙 일치율"
+                "·위아래로 간 폭",
                 _ranges(conn, chosen, data_dir, calendar, fee_rate),
             ),
             (
-                "8. 장벽 정답(#183): 종목 × 시간대 분포·폭 w·1분봉 규칙 일치율·같은 분·미래를 안 손익",
+                f"8. 장벽 정답(#183, 정답 버전 {BARRIER.answer_version}): 종목 × 시간대 분포·폭 w"
+                "·1분봉 규칙 일치율·같은 분·미래를 안 손익",
                 _barriers(conn, chosen, data_dir, calendar, fee_rate),
             ),
             (

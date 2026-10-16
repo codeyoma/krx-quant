@@ -1236,8 +1236,8 @@ DEFAULT_HALF_SPREAD = 0.5
 
 @dataclass(frozen=True)
 class TouchTerms:
-    """Beside the features, what a forecast of the touch target (target version 2, #160,
-    #169) needs at the bar close: half the spread there, in ticks of the reference price.
+    """Beside the features, what a forecast of the touch target (target versions 2 and 3,
+    #160, #169, #187) needs at the bar close: half the spread there, in ticks of the reference price.
     The best bid starts that far below the mid-point the targets are set from (the best ask
     as far above), so the upper target is k ticks and this much away for the bid to reach.
     """
@@ -1259,7 +1259,7 @@ class FeatureVector(Mapping[str, FeatureValue]):
     A number is read by name, a series with ``series``.
 
     ``touch`` carries the touch target's terms at the bar close when the engine forecasts
-    that target (target version 2); None for the four-minute move (version 1). A vector made
+    that target (target version 3, 2 before #187); None for the four-minute move (version 1). A vector made
     from another keeps its terms."""
 
     def __init__(

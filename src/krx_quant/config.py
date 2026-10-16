@@ -43,6 +43,11 @@ DEFAULT_TOSS_URL = "https://openapi.tossinvest.com"
 JOBS_FROM = time(20, 0)
 JOBS_UNTIL = time(5, 30)
 RULES = RegimeRules()  # the regime's default thresholds
+# The target versions (#169) one may choose: 1, the four-minute mid-point move; 3, the touch
+# target (#160) with crossed quotes counted (#187). ``TOUCH_TARGET`` is ``touch.TARGET_VERSION``
+# (the touch module reads the calendar, which reads this one; a test keeps the two equal).
+TOUCH_TARGET = 3
+TARGETS = ("1", str(TOUCH_TARGET))
 SIGNALS = SignalRule()  # the signal alerts' defaults
 
 
@@ -173,11 +178,13 @@ class Settings:
     probation_review_days: tuple[int, ...] = (10, 20, 40)  # days on probation it is judged on (#87)
     bench_review_days: tuple[int, ...] = (20, 40, 60)  # days on the bench it may recover on
     review_confidence: float = 0.983  # the lift-by-day interval's level those judgements need
-    # The target the engine learns and forecasts (KRX_TARGET_VERSION, #169): 2, the touch target
-    # (#160, the default since #170); 1, the four-minute mid-point move. Training labels, the
-    # shared normal forecast and the baselines follow it. Everything is scored on the touch
-    # label either way (#170): with 1 no model counts toward the statuses or the weights.
-    target_version: int = 2
+    # The target the engine learns and forecasts (KRX_TARGET_VERSION, #169): 3, the touch target
+    # with crossed quotes counted (#160, #187, the default); 1, the four-minute mid-point move.
+    # 2, the touch target with crossed quotes dropped (the default from #170 to #187), is gone:
+    # no code labels it any more. Training labels, the shared normal forecast and the
+    # baselines follow it. Everything is scored on the touch label either way (#170): with 1
+    # no model counts toward the statuses or the weights.
+    target_version: int = TOUCH_TARGET
     # The collector starts the night's scheduled jobs at this time (KST) every day, after the
     # nightly training (KRX_JOBS_AT: 22:30 unless set; "off", #215). None here, as train_at.
     jobs_at: time | None = None
@@ -400,7 +407,7 @@ class Settings:
             review_confidence=float(
                 number("KRX_REVIEW_CONFIDENCE", "0.983", float, minimum=0.5, maximum=0.9999)
             ),
-            target_version=int(_one_of("KRX_TARGET_VERSION", values.get("KRX_TARGET_VERSION", "2"), TARGETS)),
+            target_version=_target_version(values.get("KRX_TARGET_VERSION", str(TOUCH_TARGET))),
             jobs_at=jobs_at,
             github_token=values.get("KRX_GITHUB_TOKEN", "").strip() or None,
             github_repo=github_repo,
@@ -423,8 +430,18 @@ def _on_or_off(name: str, raw: str) -> bool:
 
 # Where the nightly training runs: on this server, or on EC2 Spot (#23).
 TRAIN_ON = ("server", "spot")
-# The target versions (#169): 1, the four-minute mid-point move; 2, the touch target (#160).
-TARGETS = ("1", "2")
+# The touch target before #187 (crossed quotes dropped): its rule is gone, so it is refused.
+GONE_TARGET = "2"
+
+
+def _target_version(raw: str) -> int:
+    """``KRX_TARGET_VERSION``: one of ``TARGETS``; 2 is refused with what to set instead."""
+    if raw.strip() == GONE_TARGET:
+        raise SettingsError(
+            f"KRX_TARGET_VERSION 2 (the touch target with crossed quotes dropped) is gone since #187; "
+            f"remove it for the default {TOUCH_TARGET} (crossed quotes counted), or set 1"
+        )
+    return int(_one_of("KRX_TARGET_VERSION", raw, TARGETS))
 
 
 def _one_of(name: str, raw: str, choices: tuple[str, ...]) -> str:

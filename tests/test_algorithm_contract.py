@@ -125,7 +125,8 @@ def test_the_baselines_and_the_consensus_have_cards_too() -> None:
 
 
 def test_the_touch_targets_baselines_have_cards_too() -> None:
-    # With KRX_TARGET_VERSION=2 (#169): the climate is new, persist and random say the new label.
+    # With the touch target (KRX_TARGET_VERSION=3, #169): the climate is new, persist and random
+    # say the new label.
     assert [b.name for b in TOUCH_BASELINES] == [
         "baseline-flat",
         "baseline-persist",

@@ -17,6 +17,7 @@ from krx_quant.macro import MACRO, REGIME_SCHEMA
 from krx_quant.predictions import PredictionStore
 from krx_quant.pricing import Direction, tick_size
 from krx_quant.recorder import ParquetRecorder
+from krx_quant.touch import TARGET_VERSION
 from krx_quant.training import recorded_samples, training_day
 from tests.algorithm_doubles import FixedAlgorithm
 from tests.replay_events import (
@@ -197,7 +198,9 @@ async def test_a_recorded_day_trains_on_the_touch_labels_the_engine_records(tmp_
     finally:
         store.close()
 
-    touching = recorded_samples(events, CALENDAR, DAY, (SYMBOL, PEER), NAMES, FEE, LEADERS, target_version=2)
+    touching = recorded_samples(
+        events, CALENDAR, DAY, (SYMBOL, PEER), NAMES, FEE, LEADERS, target_version=TARGET_VERSION
+    )
     moving = recorded_samples(events, CALENDAR, DAY, (SYMBOL, PEER), NAMES, FEE, LEADERS)
 
     # The windows over by the end of the replay: 09:01–10:26.

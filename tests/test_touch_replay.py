@@ -15,7 +15,7 @@ from pathlib import Path
 from krx_quant.consensus import NAMES as CONSENSUS
 from krx_quant.engine import Event
 from krx_quant.predictions import PredictionStore
-from krx_quant.touch import RESTARTED, SILENT
+from krx_quant.touch import RESTARTED, SILENT, TARGET_VERSION
 from tests.replay_events import SYMBOL, api, at, book, get_json, run, steady_book, vi
 
 
@@ -57,7 +57,7 @@ async def test_each_bar_close_gets_one_touch_label_on_its_four_minutes(tmp_path:
     scored = [p for p in made["predictions"] if p["outcome"] is not None]
     assert scored
     assert {p["outcome"]["touch"]["class"] for p in scored} == {"up"}
-    assert {p["outcome"]["touch"]["target_version"] for p in scored} == {2}
+    assert {p["outcome"]["touch"]["target_version"] for p in scored} == {TARGET_VERSION}
 
 
 async def test_a_minute_without_quotes_cannot_be_scored(tmp_path: Path) -> None:

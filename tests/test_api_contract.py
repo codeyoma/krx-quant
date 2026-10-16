@@ -24,6 +24,7 @@ from krx_quant.clock import FakeClock
 from krx_quant.collector import run_collector
 from krx_quant.demo import demo_app
 from krx_quant.fake_kis import FakeKis
+from krx_quant.touch import TARGET_VERSION
 from tests.api_schema import KIND_ROUTES, ROUTES, SCHEMA, STREAM, check
 from tests.kind_doubles import TEST_KIND, FixedKindAlgorithm
 from tests.kis_frames import book_frame
@@ -223,7 +224,7 @@ async def test_a_morning_with_another_kind_keeps_the_contract(tmp_path: Path) ->
         tmp_path / "engine.db",
         busy_morning(),
         until=at("10:00:00"),
-        target_version=2,
+        target_version=TARGET_VERSION,
         kinds=(TEST_KIND,),
         kind_algorithms=[FixedKindAlgorithm("drifter", features=("velocity",), unique=("velocity",))],
     )
@@ -246,7 +247,9 @@ async def test_a_morning_with_the_range_and_the_barrier_keeps_the_contract(tmp_p
     ``barrier_output``, ``barrier_path``, ``barrier_stats``); a scored prediction's k
     (``flat_ticks``, #200) is its answer's, its mid-point and tick (``anchor``, ``tick``, #210)
     its answer's, and a barrier prediction's width (``width_ticks``) its answer's w."""
-    engine = await run(tmp_path / "engine.db", busy_morning(), until=at("10:00:00"), target_version=2)
+    engine = await run(
+        tmp_path / "engine.db", busy_morning(), until=at("10:00:00"), target_version=TARGET_VERSION
+    )
 
     async with api(engine) as client:
         checked = await walk(through(client))
@@ -283,7 +286,9 @@ async def test_a_screen_from_before_reads_the_touch_label_where_it_read_the_base
     screen before #170 reads it. Output: every scored outcome's ``class_a`` and ``class_b`` are
     its bar close's touch label, ``unscorable`` why there is none; the leaderboard and the
     stats echo the basis asked for; every answer within the contract."""
-    engine = await run(tmp_path / "engine.db", busy_morning(), until=at("10:00:00"), target_version=2)
+    engine = await run(
+        tmp_path / "engine.db", busy_morning(), until=at("10:00:00"), target_version=TARGET_VERSION
+    )
 
     async with api(engine) as client:
         predictions = (await (await client.get("/v1/symbols/005930/predictions?limit=1000")).json())[
@@ -303,6 +308,26 @@ async def test_a_screen_from_before_reads_the_touch_label_where_it_read_the_base
         assert o["unscorable"] == (None if label else (o["touch"] or {}).get("unscorable", "no touch label"))
     assert {o["class_a"] for o in outcomes} - {None}, "labelled"
     assert (board["basis"], stats["basis"]) == ("b", "a")
+
+
+async def test_the_touch_label_served_is_of_version_3_and_the_contract_holds_it_there(tmp_path: Path) -> None:
+    """Input (#187): a replayed morning on the touch target. Output: every scored outcome's touch
+    label is of target version 3 (crossed quotes counted), and the contract refuses a label of
+    version 2 (crossed quotes dropped), which the engine keeps in its DB but never serves."""
+    engine = await run(
+        tmp_path / "engine.db", busy_morning(), until=at("10:00:00"), target_version=TARGET_VERSION
+    )
+
+    async with api(engine) as client:
+        predictions = (await (await client.get("/v1/symbols/005930/predictions?limit=1000")).json())[
+            "predictions"
+        ]
+
+    touches = [p["outcome"]["touch"] for p in predictions if p["outcome"] and p["outcome"]["touch"]]
+    assert touches and {t["target_version"] for t in touches} == {TARGET_VERSION} == {3}
+    check("touch", touches[0])
+    with pytest.raises(AssertionError, match="target_version"):
+        check("touch", {**touches[0], "target_version": 2})
 
 
 async def test_the_demo_engine_keeps_the_contract(tmp_path: Path) -> None:

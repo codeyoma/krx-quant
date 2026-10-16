@@ -6,7 +6,7 @@ features carry (``FeatureVector.touch``) and ``forecasting`` puts in force:
 
 - version 1, the four-minute move: up is the chance the move ends k ticks or more up,
   down k ticks or more down, flat the rest (the endpoint);
-- version 2, the touch target (#160): up is the chance the best bid reaches the upper
+- version 3 (2 before #187), the touch target (#160): up is the chance the best bid reaches the upper
   target at some time in the four minutes, by the reflection principle for a Brownian
   motion with that drift and spread; the distance is k ticks plus half the spread at the
   bar close (the bid starts half the spread below the mid-point). Down is the chance of
@@ -71,7 +71,7 @@ def class_moves(scored: Sequence[Sample]) -> dict[str, float]:
     return out
 
 
-# The touch target's terms of the bar close being forecast (target version 2); None: the
+# The touch target's terms of the bar close being forecast (target versions 2 and up); None: the
 # four-minute move (version 1).
 _TOUCH: ContextVar[TouchTerms | None] = ContextVar("touch", default=None)
 
@@ -79,7 +79,7 @@ _TOUCH: ContextVar[TouchTerms | None] = ContextVar("touch", default=None)
 @contextmanager
 def forecasting(features: FeatureVector) -> Iterator[None]:
     """Forecasts made inside are of ``features``' target: the touch target when they carry
-    its terms (target version 2), else the four-minute move."""
+    its terms (target versions 2 and up), else the four-minute move."""
     token = _TOUCH.set(features.touch)
     try:
         yield
@@ -120,7 +120,7 @@ def reach_probability(distance: float, drift: float, sigma: float) -> float:
 def normal_forecast(move: float, spread: float, flat_ticks: float) -> Forecast:
     """Up, flat and down for a move normally distributed around ``move`` with standard
     deviation ``spread`` (both in ticks), against the flat band ``flat_ticks``: of where the
-    move ends (target version 1), or of reaching the targets on the way (version 2, the
+    move ends (target version 1), or of reaching the targets on the way (versions 2 and up, the
     terms ``forecasting`` put in force).
     """
     sigma = max(spread, MIN_SPREAD_TICKS)

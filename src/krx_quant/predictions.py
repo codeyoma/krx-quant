@@ -245,6 +245,12 @@ def _added_columns(db: sqlite3.Connection) -> str:
     return script
 
 
+def _target_detail(target_version: int, kind: str | None) -> str:
+    """A ``target`` run's detail: the direction's target version, or a kind's name and answer
+    version (#187)."""
+    return str(target_version) if kind is None else f"{kind} {target_version}"
+
+
 # A kind's prediction ``p`` and its bar close's answer ``a`` of the version given (#179).
 KIND_ANSWER_JOIN = (
     "LEFT JOIN kind_answers a ON a.kind = p.kind AND a.symbol = p.symbol AND a.bar_close = p.bar_close"
@@ -636,16 +642,19 @@ class PredictionStore:
         ).fetchone()
         return None if row is None else datetime.fromisoformat(row[0])
 
-    def target_marked(self, target_version: int) -> bool:
-        """Whether the statuses were restarted for ``target_version`` (#170, ``mark_target``)."""
+    def target_marked(self, target_version: int, kind: str | None = None) -> bool:
+        """Whether the statuses were restarted for ``target_version`` (#170, ``mark_target``):
+        the direction's, or (``kind``) a kind's answer version (#187)."""
         row = self._db.execute(
-            "SELECT 1 FROM runs WHERE kind = 'target' AND detail = ? LIMIT 1", (str(target_version),)
+            "SELECT 1 FROM runs WHERE kind = 'target' AND detail = ? LIMIT 1",
+            (_target_detail(target_version, kind),),
         ).fetchone()
         return row is not None
 
-    def mark_target(self, target_version: int, at: datetime) -> None:
-        """The statuses go by ``target_version``'s models from ``at`` (#170): a ``target`` run."""
-        self.add_run("target", at, None, str(target_version))
+    def mark_target(self, target_version: int, at: datetime, kind: str | None = None) -> None:
+        """The statuses go by ``target_version``'s models from ``at`` (#170): a ``target`` run,
+        its detail the version (the direction's) or ``<kind> <version>`` (a kind's, #187)."""
+        self.add_run("target", at, None, _target_detail(target_version, kind))
 
     def save_weights(self, weights: Weights) -> None:
         """Keep ``weights`` (replacing a fit of the same version: a review run again)."""

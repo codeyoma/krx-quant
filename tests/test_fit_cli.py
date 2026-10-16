@@ -20,6 +20,7 @@ from krx_quant.cli import main
 from krx_quant.config import Settings
 from krx_quant.feeds import KST
 from krx_quant.reference import Bar
+from krx_quant.touch import TARGET_VERSION
 from krx_quant.training import fit_algorithm
 from tests.synthetic_bars import day_of_bars, random_walk, trending
 from tests.test_replay import busy_morning
@@ -146,7 +147,7 @@ def test_a_fitted_model_keeps_what_it_trained_on_as_values(env: Path) -> None:
     assert training is not None
     assert (training.first_day, training.last_day, training.samples) == (DAYS[-3], DAYS[-1], fitted.samples)
     assert training.days == {"recorded": 1, "bars": 2}, "by where the days' labels came from (#165)"
-    assert fitted.model.target_version == 2, "on the touch target's labels, the default (#170)"
+    assert fitted.model.target_version == TARGET_VERSION, "on the touch target's labels, the default (#170)"
     assert fitted.model.trained == (
         f"{DAYS[-3]}..{DAYS[-1]}, {training.samples} samples, log loss {training.loss:.4f}"
     )
