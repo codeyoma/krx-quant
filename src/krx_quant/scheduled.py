@@ -689,7 +689,8 @@ def _first_trading_night(night: Night) -> bool:
 # the first trading day's night. Sections 7 and 8 decide BAR_C and record the barrier bar
 # rule's agreement (#203); section 9 is the crossed quotes (#187). It reads the engine DB
 # read-only, safe beside the running engine, one feed at a time; the hour is a bound, not
-# an estimate.
+# an estimate. It ran on the night of 2026-10-16: BAR_C = 1 was confirmed and the barrier
+# bar rule's agreement measured (#203).
 DIAGNOSE = Job(
     name="diagnose-203-187",
     due=_first_trading_night,
