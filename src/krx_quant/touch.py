@@ -10,8 +10,14 @@ training, so they all label alike.
 
 - Up when a quote with the best bid at or above the upper target was received, at any time
   in the window; else down when a quote with the best ask at or below the lower target was;
-  else flat. Both reached is up: the order is not looked at.
-- A crossed or one-sided quote is dropped, as for the reference price; a locked one counts.
+  else flat. Both reached is up: the order is not looked at, nor whether one quote reached
+  both (a crossed one can).
+- A crossed quote (the best ask below the best bid) counts (#187): its best bid and best ask
+  are each a price one could trade at, the integrated book's best quotes coming from two
+  venues (the KRX bid above the NXT ask, or the other way round), and trades printed at
+  them. The reference price and the quote features still drop it (``reference.py``,
+  ``market_view._Book``). A one-sided quote (a side missing or not above 0) is dropped; a
+  locked one counts.
 - A REST snapshot of the book (the fallback when the WebSocket is refused) is not followed
   tick by tick: a window that received one cannot be scored.
 - Sixty seconds or more without a WebSocket quote, from t to the end, cannot be scored either:
@@ -26,9 +32,15 @@ without reading the window again.
 
 Every prediction is scored on it (#170): the statistics, the statuses, the consensus weights
 and the screen's ✓/✗, through the Engine API. Training learns it with
-``KRX_TARGET_VERSION=2``, the default (#169, #170): a recorded day labelled by these
+``KRX_TARGET_VERSION=3``, the default (#169, #170, #187): a recorded day labelled by these
 windows, replaying its quotes, as the engine labels it; a day with one-minute bars only by
 the bar rule (``bar_touch``).
+
+The target versions (``TARGET_VERSION``, the ``touches`` rows' and the models'
+``target_version``): 1, the four-minute mid-point move (no touch label; ``KRX_TARGET_VERSION=1``
+still learns it); 2, this touch label with crossed quotes dropped (#160 to #187: its rows
+stay in the DB, no code makes them any more); 3, this touch label with crossed quotes
+counted (#187), the one made now.
 """
 
 from __future__ import annotations
@@ -41,7 +53,7 @@ from krx_quant.feeds.base import KST
 from krx_quant.pricing import Direction, flat_ticks, tick_size
 from krx_quant.reference import Bar
 
-TARGET_VERSION = 2
+TARGET_VERSION = 3  # crossed quotes count (#187); 2 dropped them
 WINDOW = timedelta(minutes=4)
 SILENCE = timedelta(seconds=60)
 
@@ -156,8 +168,8 @@ class TouchWindow:
         if rest:
             self._rest = True
             return
-        if not bid or not ask or bid <= 0 or ask <= 0 or ask < bid:
-            return  # crossed or one-sided: dropped, as for the reference price
+        if not bid or not ask or bid <= 0 or ask <= 0:
+            return  # one-sided: dropped; a crossed one counts (#187), each side a real price
         self._heard(received_at)
         self._bid, self._ask = bid, ask
         if self._max_bid is None or bid > self._max_bid[0]:
@@ -279,7 +291,9 @@ def touch_path(r: TouchResult) -> dict[str, float | str | None]:
 # The one-minute bar rule (#160, #169), for a day with backfilled bars only: no quotes, so
 # the label is read from the trades' highs and lows. A best bid reaching a price shows in
 # the bars as a trade a tick above it, as a rule: the targets carry one tick more. On the
-# recorded days of 2026-10-12 and 13 it agreed with the quote label on 93.2% of windows.
+# recorded days of 2026-10-12 and 13 it agreed with the quote label on 93.2% of windows
+# (target version 2's, crossed quotes dropped). It is the rule of every touch target
+# version: counting crossed quotes (#187) changed the quote label, not the bars.
 BAR_BUFFER = 1  # ticks
 
 

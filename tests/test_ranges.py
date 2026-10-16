@@ -41,6 +41,7 @@ from krx_quant.ranges import (
 )
 from krx_quant.reference import Bar
 from krx_quant.replay import replay_into
+from krx_quant.touch import TARGET_VERSION
 from krx_quant.training import bar_answers, training_day
 from tests.algorithm_doubles import stand_in_card, stand_in_meanings
 from tests.api_schema import check
@@ -79,7 +80,7 @@ def window(
         log.quote(at(rest_at), 81_200, 81_300, None, None, True)
     tick = tick_size(anchor) if anchor is not None else None
     k = flat_ticks(anchor, FEE) if anchor is not None else None
-    return log.window(SYMBOL, T, anchor, tick, k, None, None)
+    return log.window(SYMBOL, T, anchor, tick, k, None, None, crossed=RANGE.crossed)
 
 
 # The answer, by hand.
@@ -90,7 +91,8 @@ def window(
     [
         # A locked quote (81,300 / 81,300) is a mid-point half a tick up: r 0.5.
         ([("09:32:00", 81_300, 81_300)], 81_250.0, "small", 0.5, 0.5, 0.0),
-        # A crossed quote (ask below bid) is dropped: it would make the mid 81,550 (3 up).
+        # A crossed quote (ask below bid) is dropped: it would make the mid 81,550 (3 up). It
+        # still is since #187, when the touch label and the barrier began counting it.
         ([("09:32:00", 81_600, 81_500)], 81_250.0, "small", 0.0, 0.0, 0.0),
         # The ends: a quote received at T counts (mid 81,050, 2 down); one at T + 4 min does not.
         ([("09:31:00", 81_000, 81_100), ("09:35:00", 81_600, 81_700)], 81_250.0, "medium", 2.0, 0.0, 2.0),
@@ -445,7 +447,7 @@ async def test_both_baselines_predict_and_are_scored_and_ranked_on_the_range(tmp
     (09:01: no window followed; 09:41: the 09:37 window went silent); the climate its defaults
     (no table: a third each, 0, k and 2k); both scored and on ``/v1/leaderboard?kind=range``."""
     db = tmp_path / "engine.db"
-    engine = await run(db, morning(), until=at("09:50:00"), target_version=2)
+    engine = await run(db, morning(), until=at("09:50:00"), target_version=TARGET_VERSION)
 
     answers = range_answers(db)
     shown = {
@@ -527,7 +529,9 @@ async def test_the_climate_predicts_from_the_table_it_was_given(tmp_path: Path) 
         target_version=1,
     )
     db = tmp_path / "engine.db"
-    engine = await run(db, morning(), until=at("09:35:00"), target_version=2, models={CLIMATE: table})
+    engine = await run(
+        db, morning(), until=at("09:35:00"), target_version=TARGET_VERSION, models={CLIMATE: table}
+    )
 
     made = range_predictions(db)
     assert made[("09:31", CLIMATE)]["model_version"] == table.version
@@ -569,7 +573,9 @@ async def test_a_range_prediction_keeps_its_bar_close_s_k_after_the_price_moves_
     db = tmp_path / "engine.db"
     events = band_crossing()
     split = at("09:34:00")
-    engine = await run(db, [e for e in events if e[1]["received_at"] <= split], until=split, target_version=2)
+    engine = await run(
+        db, [e for e in events if e[1]["received_at"] <= split], until=split, target_version=TARGET_VERSION
+    )
     at_0931 = f"/v1/symbols/{SYMBOL}/kinds/range/predictions?bar_close=2026-10-12T09:31:00%2B09:00"
 
     async with api(engine) as client:
@@ -618,14 +624,22 @@ async def test_a_recorded_day_trains_on_the_range_answers_the_engine_scores(tmp_
     events = busy_morning()
     data = tmp_path / "data"
     record(data, events)
-    engine = await run(tmp_path / "engine.db", events, until=at("10:00:00"), target_version=2)
+    engine = await run(tmp_path / "engine.db", events, until=at("10:00:00"), target_version=TARGET_VERSION)
     stored = {
         datetime.fromisoformat(a["bar_close"]): a for a in engine.store.kind_answers(RANGE.name, SYMBOL)
     }
     engine.store.close()
 
     day = training_day(
-        data, DAY, CALENDAR, (SYMBOL,), ("velocity",), FEE, Leaders(), target_version=2, kinds=(RANGE,)
+        data,
+        DAY,
+        CALENDAR,
+        (SYMBOL,),
+        ("velocity",),
+        FEE,
+        Leaders(),
+        target_version=TARGET_VERSION,
+        kinds=(RANGE,),
     )
 
     assert day is not None

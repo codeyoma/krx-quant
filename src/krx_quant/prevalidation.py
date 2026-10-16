@@ -29,7 +29,7 @@ of the algorithm's code; the engine reads it at each bar close. The server's sch
 runs this check itself, one waiting algorithm a night (``scheduled.py``, #204), and reads the
 report (``last_report``) to know whether the code it runs now has been judged already.
 
-With the touch target (``KRX_TARGET_VERSION=2``, the default since #170) the candidate
+With the touch target (``KRX_TARGET_VERSION=3``, the default since #170; 2 before #187) the candidate
 trains on its labels and the replay forecasts it (the touch target's baselines, the climate
 table refitted before each day on the days before it, as the candidate is). The stats are
 scored on the touch label either way (#170; before, basis B).

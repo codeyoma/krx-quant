@@ -30,9 +30,11 @@ toward its next review (``stages``, #165) is worked out by the same rules, as of
 
 The reviews and the weights count only the predictions of models trained on the touch
 target (#170): the engine keeps which target each model it runs learned
-(``model_targets``). The first time it opens a database it restarts every algorithm not
-retired on probation (``lifecycle.RESTARTED``, once: a ``target`` run marks it), and an
-algorithm's probation counts from the first trading day it predicted with such a model
+(``model_targets``). The first time it opens a database with a target version it has not
+met (the direction's ``touch.TARGET_VERSION``, or a kind's answer version past its first,
+#187) it restarts every algorithm of it not retired on probation
+(``lifecycle.target_changed``, once: a ``target`` run marks it), and an algorithm's
+probation counts from the first trading day it predicted with a model of that version
 since: the day the morning swap installed it, nothing before, nothing while it waits.
 
 Live, a new algorithm runs only once ``admits`` lets it (its pre-validation passed,
@@ -54,7 +56,7 @@ The prediction window is continuous trading, from the first bar close after the 
 until the last bar close whose target (t + 4 minutes) is still in continuous trading:
 09:01–15:16 on a normal day.
 
-With the touch target (``target_version`` 2, #169) the algorithms' features carry its
+With the touch target (``target_version`` 3, 2 before #187; #169) the algorithms' features carry its
 terms at the bar close (half the spread there), so the shared normal forecast gives the
 chances of reaching the targets; the baselines are the touch target's (``baselines_for``):
 the last four minutes' direction is the label of the touch window that just ended, read
@@ -155,7 +157,7 @@ from krx_quant.kinds import (
 )
 from krx_quant.kinds import NO_PREVIOUS as KIND_NO_PREVIOUS
 from krx_quant.kinds import Kind as PredictionKind
-from krx_quant.lifecycle import RESTARTED, Review, Rules, Stage, Standing, Status, review
+from krx_quant.lifecycle import Review, Rules, Stage, Standing, Status, review, target_changed
 from krx_quant.lifecycle import stages as stages_now
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.market_view import (
@@ -328,7 +330,12 @@ class _AtClose:
 
     mid: float | None
     features: Mapping[str, Value]
-    touch: TouchTerms | None = None  # the touch target's terms (target version 2)
+    touch: TouchTerms | None = None  # the touch target's terms (target versions 2 and up)
+
+
+def _marked_as(kind: PredictionKind) -> str | None:
+    """How a ``target`` run names ``kind`` (#187): the direction's carries no name, as #170's."""
+    return None if kind.name == DIRECTION else kind.name
 
 
 class PredictionEngine:
@@ -372,7 +379,7 @@ class PredictionEngine:
         self.target_version = target_version
         self.baselines: tuple[Baseline, ...] = baselines_for(target_version)
         self.baseline_names = frozenset(b.name for b in self.baselines)
-        self.climate = climate or NO_CLIMATE  # the climate baseline's table (target version 2)
+        self.climate = climate or NO_CLIMATE  # the climate baseline's table (the touch target)
         # The kinds predicted besides the direction (#179), in order, and their algorithms.
         self.kinds: tuple[PredictionKind, ...] = tuple(k for k in kinds if k.name != DIRECTION)
         clash = {b.name for k in self.kinds for b in k.baselines} & (
@@ -453,17 +460,31 @@ class PredictionEngine:
         self._record_models(self.models)
 
     def _restart_on_target(self) -> None:
-        """Once, when the statuses first go by the touch target (#170): every algorithm with
-        a status other than retired restarts on probation, its predictions so far (the old
-        target's) never judged again."""
-        if self.store.target_marked(TARGET_VERSION):
+        """Once per target version (#170, #187): when the statuses first go by the direction's
+        target version (``touch.TARGET_VERSION``), every direction algorithm with a status
+        other than retired restarts on probation, its predictions so far (the old target's)
+        never judged again; likewise a kind's algorithms when its answer version, past the
+        first, is new. A name no longer registered goes with the direction, as before #187."""
+        targets = [
+            (DIRECTION_KIND, TARGET_VERSION),
+            *((k, k.answer_version) for k in self.kinds if k.answer_version > 1),
+        ]
+        due = [(k, v) for k, v in targets if not self.store.target_marked(v, _marked_as(k))]
+        if not due:
             return
         now = self.clock.now()
-        for name, standing in self.store.statuses().items():
-            if standing.status is not Status.RETIRED:
-                self.store.add_status(name, now, standing.status, Status.PROBATION, RESTARTED)
-                log.info("%s: %s -> probation (%s)", name, standing.status.value, RESTARTED)
-        self.store.mark_target(TARGET_VERSION, now)
+        standings = self.store.statuses()
+        for kind, version in due:
+            reason = target_changed(kind.name, version)
+            for name, standing in standings.items():
+                if (
+                    standing.status is Status.RETIRED
+                    or (self.kind_of_algorithm(name) or DIRECTION_KIND).name != kind.name
+                ):
+                    continue
+                self.store.add_status(name, now, standing.status, Status.PROBATION, reason)
+                log.info("%s: %s -> probation (%s)", name, standing.status.value, reason)
+            self.store.mark_target(version, now, _marked_as(kind))
 
     def _record_models(self, models: Mapping[str, Model]) -> None:
         """Keep the target each of ``models`` was trained on, for the reviews (#170)."""

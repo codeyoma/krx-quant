@@ -14,6 +14,8 @@ A kind declares in one place (``Kind``):
 - its answer function and answer version: the class of a bar close's four minutes, from
   the quotes the Market View followed through them (``Followed``), and, for days with
   one-minute bars only, a bar rule (``bar_answer``) to train on;
+- whether its answer counts crossed quotes (``crossed``, #187): a touch's answer does (the
+  barrier), a mid-point's does not (the range);
 - for a kind with barriers (#183, the barrier), the rule of their width at a bar close
   (``width``): the engine fixes it there from the bars it knows, the same for every predictor;
   the answer reads it (``Followed.width``), the bar rule is given it, and every prediction keeps
@@ -36,10 +38,14 @@ bar close, answer version) at t + 4 minutes, and every predictor of the kind at 
 close is scored on it.
 
 Every kind's answer is made from the same quotes as the touch label (``touch.py``): the
-integrated best quotes received from t up to t + 4 minutes, WebSocket ones only; a crossed
-or one-sided quote is dropped; a window that received a REST snapshot of the book, went
-sixty seconds without a quote, or that the engine restarted in cannot be scored
-(``Followed.unscorable``), whatever the answer function says.
+integrated best quotes received from t up to t + 4 minutes, WebSocket ones only; a
+one-sided quote is dropped; a crossed one (the best ask below the best bid) is kept for a
+kind that counts it (``Kind.crossed``: the barrier, whose touches are trades one could have
+made at each side's price, as the touch label's, #187) and dropped for one that does not
+(the range, whose mid-points mean nothing across a crossing, as for the reference price);
+a window that received a REST snapshot of the book, went sixty seconds without one of the
+kind's quotes, or that the engine restarted in cannot be scored (``Followed.unscorable``),
+whatever the answer function says.
 
 The kinds are registered in ``kind_registry.KINDS``, in order: the direction first, then
 the range (#180, ``ranges.py``), then the barrier (#183, ``barriers.py``). A new kind's
@@ -74,14 +80,20 @@ _NAME = re.compile(r"^[a-z][a-z0-9_]*$")
 
 
 class Quote(NamedTuple):
-    """A best quote received in a window: an integrated one from the WebSocket, neither
-    crossed nor one-sided (#160)."""
+    """A best quote received in a window: an integrated one from the WebSocket, not
+    one-sided (#160); crossed (``crossed``) only in the window of a kind that counts it
+    (#187)."""
 
     received_at: datetime
     bid: float
     ask: float
     bid_size: float | None  # from the book feed; None from a trade's quote
     ask_size: float | None
+
+    @property
+    def crossed(self) -> bool:
+        """The best ask below the best bid: the two sides come from two venues (#187)."""
+        return self.ask < self.bid
 
 
 @dataclass(frozen=True)
@@ -92,7 +104,8 @@ class Followed:
     ``anchor`` is the mid-point at the bar close (the reference price), ``tick`` and ``k``
     its tick size and flat band, ``bid_start`` and ``ask_start`` the best quote received
     last before the bar close. ``quotes`` are the usable best quotes received in
-    [t, t + 4 minutes), in the order received; ``trades`` the integrated trades' (time,
+    [t, t + 4 minutes), in the order received, crossed ones among them for a kind that
+    counts them (``Kind.crossed``, #187); ``trades`` the integrated trades' (time,
     price) there. ``unscorable`` says why the window cannot be scored (``touch.py``'s
     reasons), None if it can. ``cost`` is the round-trip cost at the reference price in ticks
     (``pricing.cost_ticks``: k is it rounded up), and ``width`` the kind's barrier width fixed
@@ -119,8 +132,9 @@ class Followed:
 
 class QuoteLog:
     """A symbol's best quotes, REST book snapshots and trades as received, for the kinds'
-    windows (#179): kept while a window may read them. The quotes are filtered as a touch
-    window filters them (``touch.TouchWindow``): a crossed or one-sided one is dropped."""
+    windows (#179): kept while a window may read them. A one-sided quote is dropped, as a
+    touch window drops it (``touch.TouchWindow``); a crossed one is kept, and a window
+    gives it only to a kind that counts it (``window``, #187)."""
 
     def __init__(self) -> None:
         self._quotes: list[Quote] = []
@@ -139,8 +153,8 @@ class QuoteLog:
         if rest:
             self._rests.append(received_at)
             return
-        if not bid or not ask or bid <= 0 or ask <= 0 or ask < bid:
-            return  # crossed or one-sided: dropped, as for the reference price
+        if not bid or not ask or bid <= 0 or ask <= 0:
+            return  # one-sided: dropped; a crossed one is kept for the kinds that count it
         self._quotes.append(Quote(received_at, bid, ask, bid_size, ask_size))
 
     def trade(self, received_at: datetime, price: float | None) -> None:
@@ -165,14 +179,16 @@ class QuoteLog:
         *,
         cost: float | None = None,
         width: Width | None = None,
+        crossed: bool = False,
     ) -> Followed:
         """The window from ``bar_close``, by the touch target's rules: the quotes received in
-        [t, t + 4 minutes); unscorable without a mid-point at t, with a REST snapshot in it,
-        or with sixty seconds or more without a quote (from t, between two, or up to the end).
+        [t, t + 4 minutes), the crossed ones only with ``crossed`` (a kind that counts them,
+        #187); unscorable without a mid-point at t, with a REST snapshot in it, or with sixty
+        seconds or more without one of those quotes (from t, between two, or up to the end).
         ``cost`` and ``width`` go with it as given (``Followed``).
         """
         start, end = bar_close, bar_close + WINDOW
-        quotes = tuple(q for q in self._quotes if start <= q.received_at < end)
+        quotes = tuple(q for q in self._quotes if start <= q.received_at < end and (crossed or not q.crossed))
         rest = any(start <= r < end for r in self._rests)
         trades = tuple(t for t in self._trades if start <= t[0] < end)
         silent = went_silent(start, end, [q.received_at for q in quotes])
@@ -351,6 +367,10 @@ class Kind:
     bar_answer: BarAnswer | None = None
     # The width of the kind's barriers at a bar close (#183); None: a kind without barriers.
     width: WidthRule | None = None
+    # Whether its answer counts crossed quotes (#187): their best bid and best ask each a
+    # price one could trade at (a touch); False drops them, as the reference price does (a
+    # mid-point). It is part of the answer rule: changing it takes a new answer version.
+    crossed: bool = False
     baselines: tuple[KindBaseline, ...] = ()
     # The output's fields beside the probabilities: what each is (its meaning and unit).
     fields: Mapping[str, Meaning] = field(default_factory=dict)
@@ -448,7 +468,8 @@ def register_kinds(kinds: Sequence[Kind]) -> tuple[Kind, ...]:
 
 
 # The direction, as it always ran (#160, #170): its answer is the touch label (``touch.py``,
-# the ``touches`` table), its baselines ``baselines.baselines_for``.
+# the ``touches`` table), its baselines ``baselines.baselines_for``. The touch window counts
+# crossed quotes itself (#187): ``crossed`` says so here, and nothing reads it.
 DIRECTION_KIND = Kind(
     name=DIRECTION,
     title="방향",
@@ -456,6 +477,7 @@ DIRECTION_KIND = Kind(
     class_titles=("상승", "보합", "하락"),
     action=("up", "down"),
     answer_version=TARGET_VERSION,
+    crossed=True,
     fields={
         "expected_ticks": Meaning(
             "4분 뒤 중간가 변화의 기대값. 세 확률과 함께 낸다.",

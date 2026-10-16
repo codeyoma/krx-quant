@@ -1,7 +1,7 @@
 """The climate baseline's table (``baseline-climate``, #169): each symbol's most frequent
 touch label in each 30-minute slot of the latest training days.
 
-With the touch target (``KRX_TARGET_VERSION=2``) the baseline calls, at every bar close,
+With the touch target (``KRX_TARGET_VERSION=3``, 2 before #187) the baseline calls, at every bar close,
 the direction its symbol and slot took most often over the latest ``CLIMATE_DAYS``
 training days (recorded days by their quotes, the others by the one-minute bar rule),
 with certainty. It knows the time of day and nothing else: an algorithm that only learned

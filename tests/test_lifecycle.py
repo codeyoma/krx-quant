@@ -25,7 +25,7 @@ from krx_quant.algorithms import Model
 from krx_quant.cli import main
 from krx_quant.clock import FakeClock
 from krx_quant.feeds import KST
-from krx_quant.lifecycle import RESTARTED, Status
+from krx_quant.lifecycle import Status, target_changed
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.predictions import DB_NAME, NewPrediction, PredictionStore, Score
 from krx_quant.pricing import Direction
@@ -550,7 +550,11 @@ async def test_the_switch_restarts_every_algorithm_not_retired_on_probation_once
 
     statuses = await listed(again)
     for name, before in (("alpha", "active"), ("beta", "bench"), ("delta", "clone")):
-        assert last_change(statuses[name]) == (before, "probation", RESTARTED)
+        assert last_change(statuses[name]) == (
+            before,
+            "probation",
+            target_changed("direction", TARGET_VERSION),
+        )
         assert statuses[name]["status"]["since"] == "2026-10-12T06:00:00+09:00", "once, at the deploy"
     assert deployed.store.statuses()["gamma"].status is Status.RETIRED
     assert statuses["alpha"]["stage"]["counted_from"] is None, "waiting for a model of the touch target"
@@ -618,7 +622,9 @@ async def test_an_algorithm_waits_until_the_swap_runs_a_model_of_the_target(tmp_
         kind_algorithms=(),
         models=old,
     )
-    assert engine.switch_models({"alpha": Model("alpha-new", {}, target_version=2)})  # the morning swap
+    assert engine.switch_models(
+        {"alpha": Model("alpha-new", {}, target_version=TARGET_VERSION)}
+    )  # the morning swap
     assert isinstance(engine.clock, FakeClock)
     await replay_into(engine, engine.clock, [], until=at("15:45:00", NEXT_DAY))
 
@@ -627,9 +633,70 @@ async def test_an_algorithm_waits_until_the_swap_runs_a_model_of_the_target(tmp_
     assert (alpha["stage"]["counted_from"], alpha["stage"]["days"]) == (str(NEXT_DAY), 1)
     assert alpha["stage"]["next_review"] == 10
     assert (beta["stage"]["counted_from"], beta["stage"]["days"]) == (None, 0)
-    assert (alpha["model"]["target_version"], beta["model"]["target_version"]) == (2, 1)
+    assert (alpha["model"]["target_version"], beta["model"]["target_version"]) == (TARGET_VERSION, 1)
     async with api(engine) as client:
         check("algorithms", await get_json(client, "/v1/algorithms"))
+
+
+# The touch target's version 3 (#187): crossed quotes count. The deploy restarts the direction's
+# algorithms once more, as #170 did, and probation counts from a model of version 3, not 2.
+
+
+def version_2_engine_db(db: Path, statuses: dict[str, str], since: date) -> None:
+    """A database an engine from #170 to #187 wrote: ``statuses`` since the morning of ``since``,
+    restarted for the touch target's version 2 then (its mark)."""
+    old_engine_db(db, statuses, since)
+    with stored(db) as store:
+        store.mark_target(2, morning(since))
+
+
+async def test_version_3_restarts_every_direction_algorithm_not_retired_once(tmp_path: Path) -> None:
+    """Input: a database of version 2 (#170 to #187): alpha active, beta benched, gamma retired,
+    delta a clone. Output: the first engine of version 3 puts alpha, beta and delta back on
+    probation, the reason naming version 3, gamma stays retired; an engine opening it again
+    leaves them be; both versions' marks are kept."""
+    db = tmp_path / "engine.db"
+    since = weekdays_before(DAY, 30)[0]
+    version_2_engine_db(db, {"alpha": "active", "beta": "bench", "gamma": "retired", "delta": "clone"}, since)
+
+    deployed = await run(db, [], start=at("06:00:00"), until=at("06:01:00"), algorithms=[ALPHA, BETA, DELTA])
+    again = await run(db, [], start=at("06:30:00"), until=at("06:31:00"), algorithms=[ALPHA, BETA, DELTA])
+
+    statuses = await listed(again)
+    for name, before in (("alpha", "active"), ("beta", "bench"), ("delta", "clone")):
+        assert last_change(statuses[name]) == (before, "probation", target_changed("direction", 3))
+        assert statuses[name]["status"]["since"] == "2026-10-12T06:00:00+09:00", "once, at the deploy"
+        assert len(statuses[name]["status"]["history"]) == 2
+    assert deployed.store.statuses()["gamma"].status is Status.RETIRED
+    assert statuses["alpha"]["stage"]["counted_from"] is None, "waiting for a model of version 3"
+    with stored(db) as store:
+        assert store.target_marked(2) and store.target_marked(TARGET_VERSION)
+
+
+async def test_after_version_3_probation_counts_from_the_swap_of_a_model_of_it_not_of_version_2(
+    tmp_path: Path,
+) -> None:
+    """Input: alpha, active for weeks on a model of version 2, right throughout. Version 3 is
+    deployed on the morning of D0 (ten trading days before DAY): alpha predicts D0 with its
+    version 2 model; the morning swap of D1 installs one of version 3, right too. Output: DAY's
+    review is its tenth day on probation (D1 to DAY): judged and made active. D0's predictions,
+    a model of version 2's, are not counted."""
+    db = tmp_path / "engine.db"
+    days = weekdays_before(DAY, 10)
+    deploy = days[0]
+    version_2_engine_db(db, {"alpha": "active"}, weekdays_before(deploy, 20)[0])
+    put_days(db, weekdays_before(deploy, 15), {"alpha": RIGHT}, model="v2-model", target_version=2)
+    calendar = MarketCalendar(dict.fromkeys([deploy, DAY], True))
+    await run(db, [], start=at("06:00:00", deploy), until=at("06:01:00", deploy), calendar=calendar)
+    put_days(db, days[:1], {"alpha": RIGHT}, model="v2-model", target_version=2)  # D0: version 2's
+    put_days(db, days[1:], {"alpha": RIGHT}, model=NEW_MODEL)  # from D1: version 3's
+
+    engine = await review_day(db, [ALPHA])
+
+    alpha = (await listed(engine))["alpha"]
+    assert [h["to"] for h in alpha["status"]["history"]] == ["active", "probation", "active"]
+    assert alpha["status"]["history"][1]["reason"] == target_changed("direction", TARGET_VERSION)
+    assert last_change(alpha)[2].startswith("10 days on probation;")
 
 
 async def test_a_model_of_another_target_neither_replaces_one_of_it_nor_joins_the_consensus(
@@ -652,17 +719,17 @@ async def test_a_model_of_another_target_neither_replaces_one_of_it_nor_joins_th
         calendar=THREE_DAYS,
         algorithms=[ALPHA, BETA],
         models={
-            "alpha": Model("alpha-touch", {}, target_version=2),
+            "alpha": Model("alpha-touch", {}, target_version=TARGET_VERSION),
             "beta": Model("beta-old", {}, target_version=1),
         },
-        target_version=2,
+        target_version=TARGET_VERSION,
     )
 
     assert engine.members() == ["alpha"]
     assert not engine.switch_models({"alpha": Model("alpha-old", {}, target_version=1)})
     assert not engine.switch_models({"alpha": Model("alpha-default", {})})
     assert engine.models["alpha"].version == "alpha-touch"
-    assert engine.switch_models({"beta": Model("beta-touch", {}, target_version=2)})
+    assert engine.switch_models({"beta": Model("beta-touch", {}, target_version=TARGET_VERSION)})
     assert engine.members() == ["alpha", "beta"]
 
 

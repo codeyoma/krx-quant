@@ -48,6 +48,7 @@ from krx_quant.object_store import LocalObjectStore
 from krx_quant.predictions import PredictionStore
 from krx_quant.prevalidation import REGISTERED_BEFORE, admits, prevalidate
 from krx_quant.reference import Bar
+from krx_quant.touch import TARGET_VERSION
 from krx_quant.training import IN_VI, SPECIAL, training_day
 from tests.algorithm_doubles import stand_in_card, stand_in_meanings
 from tests.api_schema import check
@@ -295,7 +296,7 @@ async def test_a_recorded_day_trains_on_the_answers_the_engine_scores_without_it
         events,
         until=at("10:00:00"),
         calendar=calendar,
-        target_version=2,
+        target_version=TARGET_VERSION,
         kind_algorithms=[probe],
         previous=PreviousDay(data, calendar),
     )
@@ -379,11 +380,11 @@ def test_the_night_counts_its_answers_by_source_and_what_it_left_out(tmp_path: P
         fee_rate=FEE,
         algorithms=[],
         now=lambda: FINISHED,
-        target_version=2,
+        target_version=TARGET_VERSION,
     )
 
     saved = read(root, f"reports/{NIGHT}/{NAME}.json")
-    assert (saved["kind"], saved["target_version"]) == ("barrier", 1)
+    assert (saved["kind"], saved["target_version"]) == ("barrier", BARRIER.answer_version)
     labels = saved["labels"]
     bar_days = [d.isoformat() for d in NIGHT_DAYS[:-1]]  # its five training days and two validation
     assert set(labels["by_day"]) == {*bar_days, NIGHT.isoformat()}
@@ -397,7 +398,7 @@ def test_the_night_counts_its_answers_by_source_and_what_it_left_out(tmp_path: P
     assert labels["samples"] == {"recorded": quotes, "bars": bars}
     assert saved["promoted"] is True and saved["challenger"]["loss"] < saved["champion"]["loss"]
     model = read(root, f"models/{NAME}/{saved['challenger']['version']}.json")
-    assert model["target_version"] == 1 and model["blob"]
+    assert model["target_version"] == BARRIER.answer_version and model["blob"]
     assert model["training"]["days"] == {"recorded": 0, "bars": 5}
     assert set(model["params"]) <= set(PARAM_MEANINGS)
     # The barrier's climate table read the same eight days: the summary counts each day once.
@@ -432,7 +433,7 @@ async def test_it_is_prevalidated_on_the_barrier_s_answers_against_the_barrier_s
     await prevalidate(s, NAME, algorithms=[ALPHA], now=AFTER)
 
     saved = prevalidation_report(s, NAME)
-    assert (saved["kind"], saved["target_version"]) == ("barrier", 1)
+    assert (saved["kind"], saved["target_version"]) == ("barrier", BARRIER.answer_version)
     assert set(saved["stats"]["lift"]["vs"]) == {CLIMATE, PERSIST}
     check("barrier_stats", saved["stats"]["extra"])
     assert saved["stats"]["n"] > 0

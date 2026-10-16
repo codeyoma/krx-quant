@@ -18,6 +18,7 @@ from krx_quant.feeds import KST
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.pricing import Direction
 from krx_quant.reference import Bar
+from krx_quant.touch import TARGET_VERSION
 from krx_quant.training import samples
 
 DAY = date(2026, 10, 12)
@@ -63,7 +64,7 @@ def test_a_backfilled_day_is_labelled_by_the_one_minute_bar_rule() -> None:
 
 def test_only_the_label_changes_with_the_touch_target() -> None:
     bars = {("005930", DAY): day_of_bars()}
-    touching = samples(bars, CALENDAR, ("flat_ticks",), FEE, target_version=2)
+    touching = samples(bars, CALENDAR, ("flat_ticks",), FEE, target_version=TARGET_VERSION)
     moving = samples(bars, CALENDAR, ("flat_ticks",), FEE)
 
     assert [s.change_ticks for s in touching] == [s.change_ticks for s in moving]

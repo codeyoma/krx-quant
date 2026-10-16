@@ -20,6 +20,7 @@ from pathlib import Path
 import aiohttp
 import pytest
 
+from krx_quant.barriers import BARRIER
 from krx_quant.clock import FakeClock
 from krx_quant.collector import run_collector
 from krx_quant.config import Settings, SettingsError
@@ -849,7 +850,8 @@ async def test_the_diagnosis_job_runs_the_real_command(empty_server: Path) -> No
         )
         await asyncio.wait_for(scheduler.run_night(FRIDAY), 25)
     whole, crossed = hub.bodies(203)[-1], hub.bodies(187)[-1]
-    assert "진단: 데이터 없음" in whole and "8. 장벽 정답(#183)" in whole and "9. 뒤집힌 호가(#187)" in whole
+    barrier = f"8. 장벽 정답(#183, 정답 버전 {BARRIER.answer_version})"  # its version named (#187)
+    assert "진단: 데이터 없음" in whole and barrier in whole and "9. 뒤집힌 호가(#187)" in whole
     assert "진단: 데이터 없음\n\n9. 뒤집힌 호가(#187)" in crossed and "8. 장벽" not in crossed
     assert state.jobs["diagnose-203-187"].exit_code == 0
 

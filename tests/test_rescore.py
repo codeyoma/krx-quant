@@ -37,7 +37,7 @@ from krx_quant.object_store import LocalObjectStore
 from krx_quant.predictions import DB_NAME, PredictionStore
 from krx_quant.ranges import RANGE
 from krx_quant.rescore import EngineLock, EngineRunning, fill_kind_answers, fill_touches, rescore
-from krx_quant.touch import NOT_RECORDED, RESTARTED, SILENT, TouchResult
+from krx_quant.touch import NOT_RECORDED, RESTARTED, SILENT, TARGET_VERSION, TouchResult
 from tests.replay_events import DAY, SYMBOL, at, kospi, kospi200_futures, run
 from tests.test_collector import settings_for
 from tests.test_live_predictions import free_port, poll
@@ -177,6 +177,27 @@ def test_labels_an_older_engine_wrote_stay_and_only_the_missing_are_filled(
         for row in labels(replayed)
     ]
     assert labels(db) == expected
+
+
+def test_labels_of_version_2_stay_and_every_bar_close_gets_one_of_version_3(
+    tmp_path: Path, replayed: Path
+) -> None:
+    """Input: the server's database as an engine from #170 to #187 left it: every bar close
+    labeled on target version 2 (crossed quotes dropped; here all flat, to tell them apart).
+    Output (#187): the fill at the first start of version 3 writes a version 3 label for every
+    bar close, each the fresh replay's; version 2's stay as they were, read by nothing."""
+    s = settings(tmp_path)
+    record(s.data_dir, day_events())
+    db = server_db(s.state_dir, replayed, keep=1)
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE touches SET target_version = 2, class = 'flat', unscorable = NULL")
+    old = labels(db)
+
+    [filled] = fill_touches(s, NEXT_MORNING)
+
+    assert TARGET_VERSION == 3 and filled.written == BAR_CLOSES
+    assert [row for row in labels(db) if row[2] == 2] == old
+    assert [row for row in labels(db) if row[2] == TARGET_VERSION] == labels(replayed)
 
 
 def test_a_day_no_longer_in_the_data_directory_is_read_from_the_object_store(

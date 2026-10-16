@@ -18,7 +18,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from krx_quant.backfill import BAR_SCHEMA, MINUTE_BARS_TR
-from krx_quant.barriers import AMBIGUOUS
+from krx_quant.barriers import AMBIGUOUS, BARRIER
 from krx_quant.baselines import Forecast
 from krx_quant.cli import main
 from krx_quant.engine import Event
@@ -143,7 +143,7 @@ def server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # 09:31 up first and 09:41 down first (w 2); 09:03 special (left out), 09:04 ambiguous.
     store.add_kind_answers(
         "barrier",
-        1,
+        BARRIER.answer_version,
         [
             (SYMBOL, at("09:01:00"), barriered("timeout", 2), False),
             (SYMBOL, at("09:02:00"), barriered("up_first", 3), False),

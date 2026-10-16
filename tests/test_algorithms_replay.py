@@ -14,10 +14,12 @@ from typing import Any
 
 from krx_quant.algorithms import Model
 from krx_quant.algorithms.granger import DEFAULT_PARAMS as GRANGER_DEFAULTS
+from krx_quant.barriers import BARRIER
 from krx_quant.baselines import Forecast
 from krx_quant.engine import Budget, Event
 from krx_quant.features import FEATURES, FeatureStore, Leaders, Snapshot, Value
 from krx_quant.feeds import USD_FUTURES
+from krx_quant.touch import TARGET_VERSION
 from tests.algorithm_doubles import FixedAlgorithm
 from tests.replay_events import (
     SYMBOL,
@@ -284,11 +286,13 @@ async def test_when_the_cpu_budget_runs_short_the_last_registered_is_skipped_fir
     third_closes = sorted(p["bar_close"][11:16] for p in await predictions_of(engine, "third"))
     assert third_closes == ["09:01", "09:03"]
     with sqlite3.connect(tmp_path / "engine.db") as conn:
-        runs = conn.execute("SELECT kind, at, algorithm FROM runs").fetchall()
-    assert runs == [
-        ("target", "2026-10-12T00:00:00+09:00", None),  # a new database goes by the touch target (#170)
-        ("cpu_budget", "2026-10-12T09:02:00+09:00", "third"),
+        runs = conn.execute("SELECT kind, at, algorithm, detail FROM runs").fetchall()
+    # A new database goes by the touch target (#170) and the barrier's answer version (#187).
+    assert runs[:2] == [
+        ("target", "2026-10-12T00:00:00+09:00", None, str(TARGET_VERSION)),
+        ("target", "2026-10-12T00:00:00+09:00", None, f"barrier {BARRIER.answer_version}"),
     ]
+    assert [r[:3] for r in runs[2:]] == [("cpu_budget", "2026-10-12T09:02:00+09:00", "third")]
     async with api(engine) as client:
         cpu = (await get_json(client, "/v1/status"))["cpu"]
     assert (cpu["budget_seconds"], cpu["algorithm_seconds"], cpu["skipped_today"]) == (0.2, 10.0, 1)

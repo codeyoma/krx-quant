@@ -8,7 +8,7 @@ Each predicts one class with certainty. The random one draws from a generator se
 the symbol and bar close, so the same input always gives the same prediction. Each has a
 card like an algorithm's (``cards.Card``), named after no scientist.
 
-With the touch target (``KRX_TARGET_VERSION=2``, #169, the default since #170,
+With the touch target (``KRX_TARGET_VERSION=3``, #169, the default since #170; 2 before #187,
 ``baselines_for``) the last four minutes' direction is the touch label of the window that
 just ended (none when it could not be scored: the baseline does not predict, status
 ``no_previous``), the random class is drawn in the proportions of the day's touch labels,
@@ -288,7 +288,7 @@ class Climate:
 
 BASELINES: tuple[Baseline, ...] = (AlwaysFlat(), Persistence(), ClassRatioRandom())
 BASELINE_NAMES = frozenset(b.name for b in BASELINES)
-# With the touch target (target version 2, #169).
+# With the touch target (target version 3, 2 before #187; #169).
 TOUCH_BASELINES: tuple[Baseline, ...] = (TouchFlat(), TouchPersistence(), TouchRatioRandom(), Climate())
 
 

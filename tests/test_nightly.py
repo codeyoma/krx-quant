@@ -29,6 +29,7 @@ from krx_quant.algorithms.mandelbrot import NAME as MANDELBROT
 from krx_quant.algorithms.markov import Markov
 from krx_quant.archive import archive
 from krx_quant.backfill import BAR_SCHEMA, MINUTE_BARS_TR
+from krx_quant.barriers import BARRIER
 from krx_quant.barriers import CLIMATE as BARRIER_CLIMATE
 from krx_quant.cli import main
 from krx_quant.climate import CLIMATE
@@ -50,6 +51,7 @@ from krx_quant.ranges import CLIMATE as RANGE_CLIMATE
 from krx_quant.ranges import RANGE
 from krx_quant.recorder import ParquetRecorder
 from krx_quant.swap import morning_swap, publish_live
+from krx_quant.touch import TARGET_VERSION
 from krx_quant.training import training_day
 from tests.algorithm_doubles import FrequencyAlgorithm
 from tests.api_schema import check
@@ -199,25 +201,27 @@ def test_a_champion_of_another_target_is_replaced_whatever_the_scores(
     the night's model is promoted all the same, of the touch target, and the report says why."""
     falls = live_falls(store_root, champion_target)
 
-    result = night(store_root, tmp_path, [FrequencyAlgorithm("learner", "velocity")], target_version=2)
+    result = night(
+        store_root, tmp_path, [FrequencyAlgorithm("learner", "velocity")], target_version=TARGET_VERSION
+    )
 
     report = read(store_root, f"reports/{NIGHT}/learner.json")
     assert report["champion"]["version"] == falls.version
     assert report["challenger"]["loss"] > report["champion"]["loss"], "it lost, and still"
     assert (report["promoted"], report["forced"]) == (True, True)
     assert report["reason"].endswith(
-        f"; {falls.version} learned target 1, the night target 2: promoted without comparing"
+        f"; {falls.version} learned target 1, the night target {TARGET_VERSION}: promoted without comparing"
     )
     promoted = result.promoted["learner"]
-    assert read(store_root, f"models/learner/{promoted}.json")["target_version"] == 2
+    assert read(store_root, f"models/learner/{promoted}.json")["target_version"] == TARGET_VERSION
     assert "learner 승격(정답 바뀜, 성적 비교 없이)" in result.summary()
 
 
 def test_a_champion_of_the_same_target_is_still_compared(store_root: Path, tmp_path: Path) -> None:
     """Input: the same, but the server's model learned the touch target too. Output: it stays."""
-    live_falls(store_root, 2)
+    live_falls(store_root, TARGET_VERSION)
 
-    night(store_root, tmp_path, [FrequencyAlgorithm("learner", "velocity")], target_version=2)
+    night(store_root, tmp_path, [FrequencyAlgorithm("learner", "velocity")], target_version=TARGET_VERSION)
 
     report = read(store_root, f"reports/{NIGHT}/learner.json")
     assert (report["promoted"], report["forced"]) == (False, False)
@@ -235,7 +239,7 @@ def test_after_the_target_changes_the_defaults_give_way_too(store_root: Path, tm
     old = night(store_root, tmp_path / "old", [backwards])
     assert old.promoted == {}
     (store_root / f"promotions/{NIGHT}.json").unlink()
-    new = night(store_root, tmp_path / "new", [backwards], target_version=2)
+    new = night(store_root, tmp_path / "new", [backwards], target_version=TARGET_VERSION)
 
     report = read(store_root, f"reports/{NIGHT}/backwards.json")
     assert report["champion"]["version"] == "backwards-default"
@@ -399,11 +403,11 @@ def test_a_checkpoint_of_another_target_is_trained_again(store_root: Path, tmp_p
         )
     )
 
-    night(store_root, tmp_path, [learner], commit="0123abc", target_version=2)
+    night(store_root, tmp_path, [learner], commit="0123abc", target_version=TARGET_VERSION)
 
     report = read(store_root, f"reports/{NIGHT}/learner.json")
     assert len(learner.fitted_on) == 1
-    assert report["target_version"] == 2
+    assert report["target_version"] == TARGET_VERSION
 
 
 class Reclaimed(RuntimeError):
@@ -455,16 +459,17 @@ def test_the_train_command_trains_every_registered_algorithm_from_the_store(
 
     promotions = read(store_root, f"promotions/{NIGHT}.json")
     # On the touch target, the default (#170): the climate baseline's table, then the range's
-    # (#180) and the barrier's (#183), each of its kind's answers (answer version 1), then the
-    # range's Mandelbrot (#181) and the barrier's Breiman (#184).
+    # (#180) and the barrier's (#183), each of its kind's answers (the range's answer version 1,
+    # the barrier's 2 since #187), then the range's Mandelbrot (#181) and the barrier's Breiman
+    # (#184).
     names = [a.name for a in ALGORITHMS] + [CLIMATE, RANGE_CLIMATE, BARRIER_CLIMATE, MANDELBROT, BREIMAN]
     assert [r["algorithm"] for r in promotions["reports"]] == names
     assert {r["algorithm"]: r["target_version"] for r in promotions["reports"]} == {
-        **dict.fromkeys(names, 2),
+        **dict.fromkeys(names, TARGET_VERSION),
         RANGE_CLIMATE: 1,
-        BARRIER_CLIMATE: 1,
+        BARRIER_CLIMATE: BARRIER.answer_version,
         MANDELBROT: 1,
-        BREIMAN: 1,
+        BREIMAN: BARRIER.answer_version,
     }
     barrier = read(store_root, f"reports/{NIGHT}/{BARRIER_CLIMATE}.json")
     assert (barrier["kind"], barrier["promoted"]) == ("barrier", True), "fitted on the bar rule's answers"
@@ -726,12 +731,14 @@ def test_with_the_touch_target_the_report_counts_the_labels_by_where_they_came_f
     for day in DAYS[-4:]:
         archive_events(store_root, day, busy_morning(day), tmp_path)
 
-    result = night(store_root, tmp_path, [FrequencyAlgorithm("learner", "velocity")], target_version=2)
+    result = night(
+        store_root, tmp_path, [FrequencyAlgorithm("learner", "velocity")], target_version=TARGET_VERSION
+    )
 
     report = read(store_root, f"reports/{NIGHT}/learner.json")
     by_day = {str(d): len(labelled(tmp_path / "cache", d)) for d in DAYS[-7:]}
     recorded = sum(by_day[str(d)] for d in DAYS[-4:])
-    assert report["target_version"] == 2
+    assert report["target_version"] == TARGET_VERSION
     assert report["labels"] == {
         "samples": {"recorded": recorded, "bars": sum(by_day.values()) - recorded},
         "by_day": by_day,
@@ -747,13 +754,15 @@ def test_with_the_touch_target_the_report_counts_the_labels_by_where_they_came_f
     everything = {str(d): len(labelled(tmp_path / "cache", d)) for d in DAYS}
     quotes = sum(everything[str(d)] for d in DAYS[-4:])
     bars = sum(everything.values()) - quotes
-    assert f"정답 버전 2 표본: 녹화 호가 {quotes}개, 1분봉 {bars}개" in result.summary()
+    assert f"정답 버전 {TARGET_VERSION} 표본: 녹화 호가 {quotes}개, 1분봉 {bars}개" in result.summary()
 
 
 async def test_with_the_touch_target_the_climate_table_is_refitted_and_runs_from_the_morning(
     store_root: Path, tmp_path: Path
 ) -> None:
-    result = night(store_root, tmp_path, [FrequencyAlgorithm("learner", "velocity")], target_version=2)
+    result = night(
+        store_root, tmp_path, [FrequencyAlgorithm("learner", "velocity")], target_version=TARGET_VERSION
+    )
 
     version = result.promoted["baseline-climate"]
     report = read(store_root, f"reports/{NIGHT}/baseline-climate.json")
@@ -780,7 +789,7 @@ async def test_with_the_touch_target_the_climate_table_is_refitted_and_runs_from
         FEE,
         FakeClock(FINISHED),
         algorithms=[FrequencyAlgorithm("learner", "velocity")],
-        target_version=2,
+        target_version=TARGET_VERSION,
     )
     monday = NIGHT + timedelta(days=3)
     shelf = Shelf(tmp_path / "state")
@@ -810,7 +819,7 @@ def answered(cache: Path, day: date) -> list[tuple[datetime, str, float]]:
         [],
         FEE,
         Leaders(),
-        target_version=2,
+        target_version=TARGET_VERSION,
         kinds=(RANGE,),
     )
     assert found is not None
@@ -836,7 +845,11 @@ def test_the_range_s_climate_table_is_refitted_every_night_and_runs_from_the_mor
         archive_events(store_root, day, busy_morning(day), tmp_path)
 
     result = night(
-        store_root, tmp_path, [FrequencyAlgorithm("learner", "velocity")], target_version=2, kinds=KINDS
+        store_root,
+        tmp_path,
+        [FrequencyAlgorithm("learner", "velocity")],
+        target_version=TARGET_VERSION,
+        kinds=KINDS,
     )
 
     version = result.promoted[RANGE_CLIMATE]
@@ -876,7 +889,7 @@ def test_the_range_s_climate_table_is_refitted_every_night_and_runs_from_the_mor
         FEE,
         FakeClock(FINISHED),
         algorithms=[FrequencyAlgorithm("learner", "velocity")],
-        target_version=2,
+        target_version=TARGET_VERSION,
     )
     assert engine.kind_tables[RANGE_CLIMATE].version == f"{RANGE_CLIMATE}-default"
     monday = NIGHT + timedelta(days=3)

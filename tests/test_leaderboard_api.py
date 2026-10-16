@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import math
+import sqlite3
 from collections.abc import AsyncIterator, Sequence
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -23,7 +24,7 @@ from krx_quant.engine import PredictionEngine
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.predictions import NewPrediction, PredictionStore, Score
 from krx_quant.pricing import Direction
-from krx_quant.touch import Reached, TouchResult
+from krx_quant.touch import TARGET_VERSION, Reached, TouchResult
 from tests.api_schema import check
 from tests.replay_events import DAY, at, run
 from tests.test_replay import busy_morning
@@ -195,11 +196,11 @@ async def test_on_the_touch_target_the_stats_count_only_models_trained_on_it(tmp
     """Input: alpha's predictions by an older model (the four-minute move's), always wrong on
     005930, and by a model trained on the touch target, always right on 000660. Output: the
     leaderboard and alpha's stats count the second only, as the statuses do (#170)."""
-    async with board(tmp_path, target_version=2) as (engine, client):
+    async with board(tmp_path, target_version=TARGET_VERSION) as (engine, client):
         baselines(engine.store)
         store_scored(engine.store, "alpha", [DOWN] * 40, version="alpha-old")
         store_scored(engine.store, "alpha", OUTCOMES, version="alpha-new", symbol="000660")
-        engine.store.record_models([("alpha", "alpha-old", 1), ("alpha", "alpha-new", 2)])
+        engine.store.record_models([("alpha", "alpha-old", 1), ("alpha", "alpha-new", TARGET_VERSION)])
 
         body = await get(client, "/v1/leaderboard")
         stats = await get(client, "/v1/algorithms/alpha/stats")
@@ -208,6 +209,32 @@ async def test_on_the_touch_target_the_stats_count_only_models_trained_on_it(tmp
     assert (alpha["n"], alpha["accuracy"]["value"]) == (40, 1.0)
     assert list(stats["by_model_version"]) == ["alpha-new"]
     assert {b["algorithm"] for b in body["baselines"]} >= {"baseline-flat", "baseline-climate"}
+
+
+async def test_on_version_3_neither_version_2_s_models_nor_its_labels_count(tmp_path: Path) -> None:
+    """Input (#187): alpha's predictions on 005930 by a model of the touch target's version 2
+    (crossed quotes dropped), right throughout; on 000660 by a model of version 3, right on
+    version 3's labels; and every 000660 bar close's version 2 label too, always down (an
+    engine before #187 wrote them). Output: the leaderboard counts the version 3 model's 40,
+    scored on version 3's labels: all right."""
+    async with board(tmp_path, target_version=TARGET_VERSION) as (engine, client):
+        baselines(engine.store)
+        store_scored(engine.store, "alpha", OUTCOMES, version="alpha-v2")
+        store_scored(engine.store, "alpha", OUTCOMES, version="alpha-v3", symbol="000660")
+        engine.store.record_models([("alpha", "alpha-v2", 2), ("alpha", "alpha-v3", TARGET_VERSION)])
+        with contextlib.closing(sqlite3.connect(tmp_path / "engine.db")) as conn, conn:
+            conn.execute(
+                "INSERT INTO touches (symbol, bar_close, target_version, class, unscorable, path, scored_at)"
+                " SELECT symbol, bar_close, 2, 'down', NULL, path, scored_at FROM touches"
+                " WHERE symbol = '000660'"
+            )
+
+        body = await get(client, "/v1/leaderboard?symbol=000660")
+        everywhere = await get(client, "/v1/leaderboard")
+
+    for board_body in (body, everywhere):
+        alpha = next(e for e in board_body["ranked"] + board_body["unranked"] if e["algorithm"] == "alpha")
+        assert (alpha["n"], alpha["accuracy"]["value"]) == (40, 1.0)
 
 
 async def test_a_screen_from_before_still_sends_a_basis_and_reads_it_back(tmp_path: Path) -> None:

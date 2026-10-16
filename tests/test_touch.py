@@ -1,4 +1,4 @@
-"""The touch target's rules (#160, #167, #169), on windows worked out by hand.
+"""The touch target's rules (#160, #167, #169, #187), on windows worked out by hand.
 
 Input: a window's mid-point at its bar close and the quotes and trades given to it, by
 receipt time. Output: its class, why it could not be scored, and its path.
@@ -88,9 +88,77 @@ def test_the_best_ask_at_the_lower_target_is_down_unless_the_upper_was_reached()
     assert both.result().direction is Direction.UP
 
 
-def test_a_locked_quote_counts_and_a_crossed_one_is_dropped() -> None:
+def test_a_locked_quote_counts() -> None:
     assert play(window(), (30, 81_500, 81_500)).result().direction is Direction.UP
-    assert play(window(), (30, 81_600, 81_500)).result().direction is Direction.FLAT
+
+
+# Crossed quotes (#187): the integrated best bid above the best ask, one venue's bid above the
+# other's ask. Each side is a price one could trade at, so each touches as it would uncrossed.
+
+
+def test_a_crossed_quote_s_bid_at_the_upper_target_is_up() -> None:
+    """Input: 81,500 / 81,400 at 09:31:30 (the bid one tick above the ask, at the upper target
+    81,450). Output: up, reached then at the bid. Dropped before #187, it was flat."""
+    r = play(window(), (30, 81_500, 81_400)).result()
+    assert r.direction is Direction.UP
+    assert r.upper_reached is not None and (r.upper_reached.at, r.upper_reached.price) == (s(30), 81_500)
+    assert r.lower_reached is None
+
+
+def test_a_crossed_quote_s_ask_at_the_lower_target_is_down() -> None:
+    """Input: 81,100 / 81,000 at 09:31:30 (the ask at the lower target 81,050, under the bid).
+    Output: down, reached then at the ask."""
+    r = play(window(), (30, 81_100, 81_000)).result()
+    assert r.direction is Direction.DOWN
+    assert r.lower_reached is not None and (r.lower_reached.at, r.lower_reached.price) == (s(30), 81_000)
+
+
+def test_a_crossed_quote_reaching_both_targets_is_up_as_any_window_reaching_both() -> None:
+    """Input: 81,500 / 81,000 (the bid at the upper target and the ask at the lower one in one
+    quote, five ticks crossed). Output: up, both reached at the same time: both reached is up,
+    the order not looked at (``touch.py``), as for two quotes."""
+    r = play(window(), (30, 81_500, 81_000)).result()
+    assert r.direction is Direction.UP
+    assert r.upper_reached is not None and r.lower_reached is not None
+    assert r.upper_reached.at == r.lower_reached.at == s(30)
+
+
+def test_a_crossed_quote_short_of_the_targets_is_flat_and_moves_the_extremes() -> None:
+    """Input: 81,400 / 81,100 (crossed by three ticks, each side short of its target). Output:
+    flat; the highest bid and lowest ask are its own, real prices; the last quote is it."""
+    w = window()
+    for t, bid, ask in [
+        (0, 81_200, 81_300),
+        (30, 81_400, 81_100),
+        *((t, 81_200, 81_300) for t in range(40, 240, 20)),
+    ]:
+        w.quote(s(t), bid, ask)
+    w.quote(s(230), 81_300, 81_200)  # the last quote, crossed by a tick
+    r = w.result()
+    assert r.direction is Direction.FLAT
+    assert (r.max_bid, r.max_bid_at, r.min_ask, r.min_ask_at) == (81_400, s(30), 81_100, s(30))
+    assert (r.bid_end, r.ask_end) == (81_300, 81_200)
+
+
+def test_crossed_quotes_are_heard_a_one_sided_one_is_not() -> None:
+    """Input: a window whose quotes are all crossed (every 20 s), and one whose quotes after
+    09:31:10 are all one-sided (a side 0 or missing). Output: the first is scorable (flat), the
+    quotes were followed; the second went silent (no quote for 60 s or more) and its one-sided
+    bid at the upper target touched nothing."""
+    crossed = window()
+    for t in range(0, 240, 20):
+        crossed.quote(s(t), 81_300, 81_200)
+    r = crossed.result()
+    assert (r.direction, r.unscorable) == (Direction.FLAT, None)
+
+    one_sided = window()
+    one_sided.quote(s(0), 81_200, 81_300)
+    one_sided.quote(s(10), 81_200, 81_300)
+    for t in range(20, 240, 20):
+        one_sided.quote(s(t), 81_500, 0 if t % 40 else None)
+    r = one_sided.result()
+    assert (r.direction, r.unscorable) == (None, SILENT)
+    assert r.upper_reached is None and r.max_bid == 81_200
 
 
 def test_the_window_runs_from_the_bar_close_up_to_four_minutes_on() -> None:

@@ -25,7 +25,7 @@ closes (``training``). For each algorithm, in registration order:
 Once every algorithm is done the promotion list is stored, final: the algorithms whose
 challenger won, by version, and every report. The server applies it at 08:00 (``swap``).
 
-With the touch target (``KRX_TARGET_VERSION=2``, #169) the samples' outcomes are its
+With the touch target (``KRX_TARGET_VERSION=3``, 2 before #187; #169) the samples' outcomes are its
 labels (``training``): recorded days by their quotes, the others by the one-minute bar
 rule. Each report then counts the labelled samples by source (``labels``), and so does the
 Telegram summary. The climate baseline's table (``climate.py``) is refitted on the latest
@@ -88,6 +88,7 @@ from krx_quant.macro import regime_prefix
 from krx_quant.market_calendar import MarketCalendar, calendar_store
 from krx_quant.notify import send_notice
 from krx_quant.object_store import ObjectStore, file_digest, get_json, open_store, put_json
+from krx_quant.touch import TARGET_VERSION
 from krx_quant.training import TrainingDay, leader_series, needs_previous_day, training_day
 
 log = logging.getLogger(__name__)
@@ -165,11 +166,12 @@ class Night:
         return cls(date.fromisoformat(data["day"]), data["finalized_at"], data["promoted"], data["reports"])
 
     def summary(self) -> str:
-        """The days' reference prices, the touch target's labelled samples by source (target
-        version 2), each kind's answered samples by source and those it left out (#184), and
-        one line per algorithm, for Telegram."""
+        """The days' reference prices, the touch target's labelled samples by source (of the
+        target version its reports name: 3, 2 before #187), each kind's answered samples by
+        source and those it left out (#184), and one line per algorithm, for Telegram."""
         references: dict[str, str] = {}
         labelled: dict[str, int] = {}
+        target = TARGET_VERSION
         kinds: dict[str, dict[str, int]] = {}  # the kinds' labelled samples by day (#179)
         dropped: dict[str, dict[str, dict[str, int]]] = {}  # the kinds' left out, by day and why (#184)
         for r in self.reports:
@@ -180,6 +182,7 @@ class Night:
                     dropped.setdefault(r["kind"], {}).update(r["labels"]["dropped_by_day"])
             else:
                 labelled.update(r.get("labels", {}).get("by_day", {}))
+                target = r.get("target_version", target)
         title = f"{self.day} 밤 학습"
         if references:
             recorded = sum(kind == "mid" for kind in references.values())
@@ -187,7 +190,8 @@ class Night:
         lines = [title]
         if labelled:
             quotes = sum(n for day, n in labelled.items() if references.get(day) == "mid")
-            lines.append(f"정답 버전 2 표본: 녹화 호가 {quotes}개, 1분봉 {sum(labelled.values()) - quotes}개")
+            bars = sum(labelled.values()) - quotes
+            lines.append(f"정답 버전 {target} 표본: 녹화 호가 {quotes}개, 1분봉 {bars}개")
         for kind, by_day in kinds.items():
             quotes = sum(n for day, n in by_day.items() if references.get(day) == "mid")
             line = f"{kind} 정답 표본: 녹화 호가 {quotes}개, 1분봉 {sum(by_day.values()) - quotes}개"
@@ -226,7 +230,7 @@ def train_night(
     """Train every algorithm for the night of ``day`` (default: the latest day with data) and
     store the promotion list. A night already finished is returned as it was. Each report
     names ``commit``, the code that trained it. The samples' outcomes are of
-    ``target_version``; with the touch target (2) the climate baseline is refitted too, and
+    ``target_version``; with the touch target (3) the climate baseline is refitted too, and
     so are the tables of the ``kinds``' baselines (#180). The algorithms of the ``kinds``
     besides the direction train last, on their kind's answers (#179).
     """

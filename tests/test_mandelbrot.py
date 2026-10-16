@@ -46,6 +46,7 @@ from krx_quant.predictions import PredictionStore
 from krx_quant.prevalidation import REGISTERED_BEFORE, admits, prevalidate
 from krx_quant.ranges import CLIMATE, PERSIST, RANGE, range_class
 from krx_quant.reference import Bar
+from krx_quant.touch import TARGET_VERSION
 from krx_quant.training import training_day
 from tests.algorithm_doubles import stand_in_card, stand_in_meanings
 from tests.api_schema import check
@@ -458,7 +459,7 @@ async def test_a_recorded_day_trains_on_the_answers_the_engine_scores_without_it
         events,
         until=at("10:00:00"),
         calendar=calendar,
-        target_version=2,
+        target_version=TARGET_VERSION,
         kind_algorithms=[probe],
         previous=PreviousDay(data, calendar),
     )
@@ -534,7 +535,7 @@ def test_the_night_trains_it_on_recorded_and_bar_days_and_counts_both(tmp_path: 
         fee_rate=FEE,
         algorithms=[],
         now=lambda: FINISHED,
-        target_version=2,
+        target_version=TARGET_VERSION,
     )
 
     saved = read(root, f"reports/{NIGHT}/{NAME}.json")

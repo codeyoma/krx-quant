@@ -27,6 +27,7 @@ from krx_quant.model_shelf import Shelf
 from krx_quant.object_store import LocalObjectStore, ObjectStore
 from krx_quant.predictions import PredictionStore
 from krx_quant.swap import morning_swap, night_status, night_to_train, publish_live, reload_models
+from krx_quant.touch import TARGET_VERSION
 from tests.api_schema import check
 from tests.replay_events import api, get_json
 
@@ -155,12 +156,12 @@ def test_the_rollback_command_names_what_runs_now(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("KRX_STATE_DIR", str(tmp_path / "state"))
     shelf = Shelf(tmp_path / "state")
-    on_touch = replace(TRAINED, version="newton-20261009-0a0b0c", target_version=2)
+    on_touch = replace(TRAINED, version="newton-20261009-0a0b0c", target_version=TARGET_VERSION)
     shelf.install("newton", on_touch, "fit", at(NIGHT, "20:00"))
 
     # On the touch target (#170) the defaults were not trained on it: not rolled back to.
     assert main(["rollback", "newton"]) == 1
-    assert "was not trained on target 2" in capsys.readouterr().err
+    assert f"was not trained on target {TARGET_VERSION}" in capsys.readouterr().err
     shelf.install("newton", replace(on_touch, version="newton-20261010-0d0e0f"), "fit", at(NIGHT, "20:30"))
     assert main(["rollback", "newton"]) == 0
     assert "newton now runs newton-20261009-0a0b0c" in capsys.readouterr().out

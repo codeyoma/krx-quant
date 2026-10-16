@@ -103,11 +103,12 @@ class Model:
     """A versioned model: fitted parameters, or the defaults before any training. A learner
     whose model is more than numbers (Turing's trees) keeps it as text in ``blob``.
 
-    ``target_version`` is the target its labels were of (#170): 2, the touch target, for a
-    model fitted on samples that carry its terms (``FeatureVector.touch``); 1, the
-    four-minute move, otherwise. None for the defaults (trained on nothing) and for models
-    saved before it was recorded (they learned the four-minute move). The statuses and the
-    consensus weights count only the predictions of models of the touch target."""
+    ``target_version`` is the target its labels were of (#170): ``touch.TARGET_VERSION``, the
+    touch target (3; 2 before #187 dropped crossed quotes), for a model fitted on samples
+    that carry its terms (``FeatureVector.touch``); 1, the four-minute move, otherwise. None
+    for the defaults (trained on nothing) and for models saved before it was recorded (they
+    learned the four-minute move). The statuses and the consensus weights count only the
+    predictions of models of the touch target's version now."""
 
     version: str
     params: Mapping[str, float]

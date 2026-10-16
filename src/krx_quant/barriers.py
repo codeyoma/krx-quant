@@ -14,17 +14,24 @@ bars the bar close's snapshot holds, the same for every predictor: the answer re
 (``Followed.width``), every prediction keeps it (``kind_predictions.width_ticks``), and the
 algorithms get it as features (``barrier_width``, ``barrier_sigma``). No algorithm changes it.
 
-**Answer** (answer version 1, ``barrier_answer``). The reference is the integrated mid-point
+**Answer** (answer version 2, ``barrier_answer``). The reference is the integrated mid-point
 at the bar close t; the upper barrier U is the reference plus w ticks of its tick size, the
 lower L the reference less w ticks (half a tick off the grid when the reference is). Of the
 usable integrated best quotes received in [t, t + 4 minutes) (the touch label's quotes:
-``kinds.Followed``), U is reached when one's best bid is at or above it (one could have sold
-there at the market), L when one's best ask is at or below it (one could have bought there):
+``kinds.Followed``, crossed ones included, ``Kind.crossed``), U is reached when one's best
+bid is at or above it (one could have sold there at the market), L when one's best ask is at
+or below it (one could have bought there):
 
 - up_first: U was reached first (by received time), or L was not;
 - down_first: L was reached first, or U was not;
 - timeout: neither;
 - both first reached at the same received time: no class (``ambiguous``): the order is unknown.
+  One crossed quote can reach both (its bid at U and its ask at L): ``ambiguous`` too.
+
+The answer versions: 1 dropped crossed quotes (#183 to #187); 2 counts them (#187), as the
+touch label does (target version 3): a crossed quote's best bid and best ask are each a price
+one could trade at, from two venues. Answer version 1's rows stay in the DB; no code makes
+them any more.
 
 A window the shared rules cannot score (no mid-point at t, a REST snapshot, sixty seconds
 without a quote, a restart) has no class (#160). The path keeps w, σ̂₄ (``sigma``), k, the
@@ -38,7 +45,8 @@ k and w from t's close and the bars up to it; #160's close-position rule with it
 buffer (``touch.close_side``, ``touch.BAR_BUFFER``) sets the barriers' prices, and the first
 of the four minutes' bars whose high reaches the upper one (low the lower one) is the minute
 it was reached. The earlier minute wins; both in the same minute: no class (``same minute``),
-the order within it is unknown, so training leaves it out.
+the order within it is unknown, so training leaves it out. It is the rule of both answer
+versions: counting crossed quotes (#187) changed the quote answer, not the bars.
 
 **Output**: the three probabilities ``p_up_first``, ``p_timeout``, ``p_down_first``, and no
 other field. The width is the engine's, not the forecast's: it is kept beside the output.
@@ -78,7 +86,7 @@ if TYPE_CHECKING:  # the algorithm contract builds on the kinds: its types only
 NAME = "barrier"
 CLASSES = ("up_first", "timeout", "down_first")
 UP_FIRST, TIMEOUT, DOWN_FIRST = CLASSES
-ANSWER_VERSION = 1
+ANSWER_VERSION = 2  # crossed quotes count (#187); 1 dropped them
 # Why a window has no barrier class though the shared rules could score it.
 AMBIGUOUS = "ambiguous"  # both barriers first reached at the same received time
 SAME_MINUTE = "same minute"  # the bar rule: both reached within the same one-minute bar
@@ -100,7 +108,7 @@ def _first(quotes: Sequence[Quote], reached: Any) -> Quote | None:
 
 
 def barrier_answer(window: Followed) -> Answer:
-    """The barrier answer of a window (answer version 1): its class and path (module doc)."""
+    """The barrier answer of a window (answer version 2): its class and path (module doc)."""
     width, anchor, tick = window.width, window.anchor, window.tick
     upper = lower = None
     if width is not None and anchor is not None and tick is not None:
@@ -390,6 +398,7 @@ BARRIER = Kind(
     answer=barrier_answer,
     bar_answer=bar_barrier,
     width=barrier_width_at,
+    crossed=True,  # a touch (#187)
     baselines=(BarrierClimate(), BarrierPersist()),
     stats=barrier_stats,
 )
