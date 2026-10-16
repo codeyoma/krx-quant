@@ -41,6 +41,7 @@ from krx_quant.kis import KisError, RestClient
 from krx_quant.market_calendar import CalendarStore, MarketCalendar, calendar_store
 from krx_quant.ratelimit import RateLimiter
 from krx_quant.reference import Bar
+from krx_quant.toss import TossClient
 
 log = logging.getLogger(__name__)
 
@@ -408,24 +409,32 @@ def backfiller_for(settings: Settings, client: RestClient, store: CalendarStore)
 
 
 async def keep_history(
-    settings: Settings, client: RestClient, store: CalendarStore, now: Callable[[], datetime]
+    settings: Settings,
+    client: RestClient,
+    store: CalendarStore,
+    now: Callable[[], datetime],
+    toss: Callable[[], TossClient] | None = None,
 ) -> None:
     """The collector's history task: at start, then daily once the day's bars are final,
-    refresh the calendar, fill missing one-minute bars and add the new day candles
-    (``candles``). Runs until cancelled.
+    refresh the calendar, fill missing one-minute bars, add the new day candles (``candles``)
+    and the daily supply data (``supply``, from KIS and, given ``toss``, Toss). Runs until
+    cancelled.
     """
     from krx_quant.candles import CandleKeeper  # it builds on this module's markets
+    from krx_quant.supply import SupplyKeeper
 
     backfiller = backfiller_for(settings, client, store)
     candles = CandleKeeper(client, store.calendar, settings.data_dir, settings.symbols, backfiller.pace)
+    supply = SupplyKeeper(client, store.calendar, settings.state_dir, settings.symbols, backfiller.pace, toss)
     while True:
         started = now()
         try:
             await store.refresh(client, kst_day(started))
             await backfiller.run(started)
             await candles.run(started)
+            await supply.run(started)
         except Exception:
-            log.exception("calendar refresh, backfill or candles failed")
+            log.exception("calendar refresh, backfill, candles or supply failed")
         # The next final time after this run began: a run that started just before 20:30
         # and ended after it goes again at once for the day it could not take yet.
         await asyncio.sleep(max(0.0, (_next(BARS_FINAL_AT, started) - now()).total_seconds()))

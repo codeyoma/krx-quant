@@ -75,6 +75,8 @@ async def walk(get: Get) -> dict[str, int]:
         )
         await ask(f"/v1/symbols/{symbol}/special", "special")  # #236
         await ask(f"/v1/symbols/{symbol}/special?from=2026-10-01&to=2026-10-12", "special")
+        await ask(f"/v1/symbols/{symbol}/supply", "supply")  # #226
+        await ask(f"/v1/symbols/{symbol}/supply?from=2026-10-01&to=2026-10-12", "supply")
     for query in ("", "?period=5d&basis=a&special=include", f"?symbol={symbols[0]}&period=20d"):
         await ask(f"/v1/leaderboard{query}", "leaderboard")
     for name in algorithms:
@@ -132,6 +134,10 @@ async def walk(get: Get) -> dict[str, int]:
         ("/v1/symbols/005930/special?from=2026-10-1", 400),
         ("/v1/symbols/005930/special?from=2026-10-12&to=2026-10-11", 400),
         ("/v1/symbols/005930/special?from=2026-08-13&to=2026-10-12", 400),
+        ("/v1/symbols/999999/supply", 404),
+        ("/v1/symbols/005930/supply?to=2026-10-1", 400),
+        ("/v1/symbols/005930/supply?from=2026-10-12&to=2026-10-11", 400),
+        ("/v1/symbols/005930/supply?from=2015-01-01&to=2026-10-12", 400),
         ("/v1/leaderboard?period=week", 400),
         ("/v1/algorithms/nobody/stats", 404),
         ("/v1/algorithms/nobody", 404),
