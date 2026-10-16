@@ -158,10 +158,12 @@
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["symbol", "mid", "tick", "flat_ticks"],
+            "required": ["symbol", "name", "logo_url", "mid", "tick", "flat_ticks"],
             "additionalProperties": false,
             "properties": {
               "symbol": {"type": "string"},
+              "name": {"type": ["string", "null"], "description": "The company's name (#250); null until read, or when no source names it."},
+              "logo_url": {"type": "string", "description": "The company's square logo as Toss Securities shows it (#250); a code without one answers 403."},
               "mid": {"$ref": "#/$defs/price"},
               "tick": {"type": ["number", "null"]},
               "flat_ticks": {"type": ["integer", "null"], "minimum": 1}

@@ -14,6 +14,7 @@ from typing import Any
 from krx_quant.consensus import NAMES as CONSENSUS
 from krx_quant.engine import Event
 from krx_quant.market_calendar import MarketCalendar
+from krx_quant.names import logo_url
 from tests.replay_events import (
     DAY,
     PREDICTING,
@@ -202,6 +203,8 @@ async def test_a_locked_book_gives_its_price_and_a_crossed_one_is_ignored(tmp_pa
 
     assert await mid_now(await run(tmp_path / "locked.db", locked, until=at("10:00:10"))) == {
         "symbol": SYMBOL,
+        "name": None,  # a replay names no company (#250)
+        "logo_url": logo_url(SYMBOL),
         "mid": 81_300,
         "tick": 100,
         "flat_ticks": 2,

@@ -6,7 +6,7 @@ import asyncio
 import contextlib
 import json
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from functools import partial
@@ -59,6 +59,7 @@ from krx_quant.macro import MacroCollector, day_regime, keep_macro, macro_record
 from krx_quant.market_calendar import MarketCalendar, Phase, calendar_store, next_on_trading_day
 from krx_quant.masters import FrontMonths, MasterError, fetch_front_months
 from krx_quant.model_shelf import Shelf
+from krx_quant.names import fill_names
 from krx_quant.notify import Alerts
 from krx_quant.object_store import open_store
 from krx_quant.polling import CALL_ERRORS, NORMALIZE_ERRORS, Poller, PollJob
@@ -371,7 +372,13 @@ async def run_collector(
                 background.append(
                     asyncio.create_task(keep_calendar(calendar_collector, settings.calendar_every))
                 )
-            api = await _serve_api(settings, engine, _live_status(stream, health, now), alerts)
+            # The symbols' company names (#250), read while the API already answers: Toss's
+            # token expiry goes by the real time, as the supply probe's does.
+            names: dict[str, str] = {}
+            background.append(
+                asyncio.create_task(fill_names(names, session, settings, lambda: datetime.now().astimezone()))
+            )
+            api = await _serve_api(settings, engine, _live_status(stream, health, now), alerts, names)
             # The past bar closes' touch labels, once the API answers (#168): the 06:00 deploy
             # checks it within 3 minutes, and the fill can take longer.
             background.append(asyncio.create_task(keep_touches_filled(settings, engine, lock)))
@@ -423,6 +430,7 @@ async def _serve_api(
     engine: PredictionEngine,
     live_status: LiveStatus,
     alerts: Alerts,
+    names: Mapping[str, str],
 ) -> web.AppRunner | None:
     """Start the Engine API; if it cannot listen, alert and go on recording without it."""
     if settings.api_port is None:
@@ -435,6 +443,7 @@ async def _serve_api(
             min_sample=settings.min_sample,
             data_dir=settings.data_dir,
             shelf=Shelf(settings.state_dir),
+            names=names,
         ),
         access_log=None,
     )

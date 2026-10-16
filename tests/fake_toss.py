@@ -1,9 +1,11 @@
-"""A stand-in for the Toss Securities Open API's token and daily trading-trend endpoints (#235).
+"""A stand-in for the Toss Securities Open API's token, daily trading-trend (#235) and stock
+information (#250) endpoints.
 
 It keeps Toss's rules: one valid token per client (issuing revokes the one before, 401
 ``token-revoked``), the IP allowlist (403 ``access_denied`` from the token endpoint, 403
 ``ip-not-allowed`` from the others), pages of ``count`` records newest first up to ``until``
-with ``nextUntil`` the day before the last one given (null when nothing is older).
+with ``nextUntil`` the day before the last one given (null when nothing is older). Stock
+information lists the asked symbols it has a name for.
 """
 
 from __future__ import annotations
@@ -48,6 +50,7 @@ class FakeToss:
     # API requests: (monotonic time, path, query, the bearer token)
     requests: list[tuple[float, str, dict[str, str], str]] = field(default_factory=list)
     busy: int = 0  # the next this many API calls get 429
+    names: dict[str, str] = field(default_factory=dict)  # stock information: symbol -> name
 
     def accept(self, token: str) -> None:
         """Make ``token`` the valid one, as if issued (the one before is revoked)."""
@@ -84,7 +87,8 @@ class FakeToss:
             {"access_token": token, "token_type": "Bearer", "expires_in": self.expires_in}
         )
 
-    async def _trend(self, request: web.Request) -> web.Response:
+    def _refused(self, request: web.Request) -> web.Response | None:
+        """Toss's answer to a call it refuses: the address, the token, or too many calls."""
         token = request.headers.get("Authorization", "").removeprefix("Bearer ")
         self.requests.append((time.monotonic(), request.path, dict(request.query), token))
         if not (self.ip_allowed and self.api_ip_allowed):
@@ -100,6 +104,22 @@ class FakeToss:
             response = _error(429, "rate-limit-exceeded", "")
             response.headers["Retry-After"] = "0"
             return response
+        return None
+
+    async def _stocks(self, request: web.Request) -> web.Response:
+        if (refused := self._refused(request)) is not None:
+            return refused
+        asked = request.query.get("symbols", "").split(",")
+        found = [
+            {"symbol": s, "name": self.names[s], "market": "KOSPI", "status": "ACTIVE"}
+            for s in asked
+            if s in self.names
+        ]
+        return web.json_response({"result": found})
+
+    async def _trend(self, request: web.Request) -> web.Response:
+        if (refused := self._refused(request)) is not None:
+            return refused
         found = self.records(request.match_info["symbol"], request.match_info["name"])
         if isinstance(found, tuple):
             return _error(found[0], found[1], "")
@@ -109,6 +129,7 @@ class FakeToss:
     def app(self) -> web.Application:
         app = web.Application()
         app.router.add_post("/oauth2/token", self._token)
+        app.router.add_get("/api/v1/stocks", self._stocks)
         app.router.add_get("/api/v1/stocks/{symbol}/{name}", self._trend)
         return app
 

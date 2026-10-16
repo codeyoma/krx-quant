@@ -18,6 +18,7 @@ import aiohttp
 from krx_quant.clock import FakeClock
 from krx_quant.collector import run_collector
 from krx_quant.fake_kis import FakeKis
+from krx_quant.names import logo_url
 from tests.kis_frames import book_frame
 from tests.replay_events import LIVE_PREDICTORS, at
 from tests.test_collector import settings_for
@@ -73,8 +74,18 @@ async def test_the_collector_predicts_from_live_events_and_serves_them(kis: Fake
     assert latest["bar_close"] == "2026-10-12T09:31:00+09:00"
     assert {p["algorithm"] for p in latest["predictions"]} == LIVE_PREDICTORS
     assert {p["displayed_at"] for p in latest["predictions"]} == {"2026-10-12T09:31:00.200000+09:00"}
-    # The engine took the book from the live stream.
-    assert symbols["symbols"] == [{"symbol": "005930", "mid": 81_250, "tick": 100, "flat_ticks": 2}]
+    # The engine took the book from the live stream. The fake KIS serves no stock master and
+    # Toss is not set: no company name (#250).
+    assert symbols["symbols"] == [
+        {
+            "symbol": "005930",
+            "name": None,
+            "logo_url": logo_url("005930"),
+            "mid": 81_250,
+            "tick": 100,
+            "flat_ticks": 2,
+        }
+    ]
     assert status["mode"] == "live"
     assert status["phase"] == "continuous"
     assert status["kis"]["connected"] is True
