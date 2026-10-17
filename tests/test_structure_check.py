@@ -121,7 +121,8 @@ def test_ols_and_correlation() -> None:
     assert ols([(0.0, 0.0), (1.0, 1.0)]) is None
     beta, t = ols([(0.0, 1.0), (1.0, 0.0), (2.0, -1.0)]) or (0.0, 0.0)
     assert beta == pytest.approx(-1.0)
-    assert t == float("inf")
+    assert t == float("-inf")  # an exact take-back keeps its sign
+    assert ols([(0.0, 2.0), (1.0, 2.0), (2.0, 2.0)]) is None  # the second never moved: no t-value
     beta, t = ols([(0.0, 0.0), (1.0, 2.0), (2.0, 1.0), (3.0, 3.0)]) or (0.0, 0.0)
     # β = 4/5; residuals −0.3, 0.9, −0.9, 0.3: se = √(1.8 / 2 / 5) = 0.4243
     assert beta == pytest.approx(0.8)

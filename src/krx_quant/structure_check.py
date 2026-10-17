@@ -398,7 +398,9 @@ def _opposite(pairs: Iterable[tuple[float, float | None]]) -> str:
 
 def ols(pairs: Sequence[tuple[float, float]]) -> tuple[float, float] | None:
     """The slope of the second on the first and its t-value (classical standard error);
-    None from fewer than three pairs or without spread."""
+    None from fewer than three pairs, without spread, or when both the slope and its error
+    are 0 (the second never moves: no t-value). An exact fit's t-value is infinite, with the
+    slope's sign."""
     n = len(pairs)
     if n < 3:
         return None
@@ -410,7 +412,9 @@ def ols(pairs: Sequence[tuple[float, float]]) -> tuple[float, float] | None:
     beta = sum((x - mx) * (y - my) for x, y in pairs) / sxx
     residual = sum((y - my - beta * (x - mx)) ** 2 for x, y in pairs)
     se = math.sqrt(residual / (n - 2) / sxx)
-    return beta, (math.inf if se == 0 else beta / se)
+    if se == 0:
+        return None if beta == 0 else (beta, math.copysign(math.inf, beta))
+    return beta, beta / se
 
 
 def _slope(pairs: Sequence[tuple[float, float | None]]) -> str:
