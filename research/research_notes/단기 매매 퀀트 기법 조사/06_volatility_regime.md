@@ -173,7 +173,7 @@ ML은 HAR을 이기기도 하지만, 이득은 주로 추가 피처(시장 공�
 - 필터와 노출 축소: JM 국면으로 불리한 국면에 주식 비중을 줄임 — [Shu et al.](https://arxiv.org/abs/2402.05272). 모멘텀을 panic 상태에서 줄임 — [Daniel & Moskowitz](https://doi.org/10.1016/j.jfineco.2015.12.002)
 - 사이징: 목표 변동성 스케일링 — [Harvey et al.](https://doi.org/10.3905/jpm.2018.45.1.014), [Moreira & Muir](https://doi.org/10.1111/jofi.12513). OOS 한계 — [Cederburg et al.](https://doi.org/10.1016/j.jfineco.2020.04.015)
 - 전략 전환: CPD로 느린 추세와 빠른 역추세 사이를 오감 — [Wood et al.](https://arxiv.org/abs/2105.13727)
-- krx-quant 측정치: LightGBM 예측은 종목당 1ms 아래이고, 알고리즘 표시 지연은 p50 0.08초, p99 약 0.14초다 — `/Users/yoma/Projects/krx-quant/docs/design.md`
+- krx-quant 측정치: LightGBM 예측은 종목당 1ms 아래이고, 알고리즘 표시 지연은 p50 0.08초, p99 약 0.14초다 — `docs/design.md`
 
 ### Inferences (1분봉 마감마다의 대략 비용, 종목당)
 | 방법 | 매분 갱신 비용 | 매분 적합 |
