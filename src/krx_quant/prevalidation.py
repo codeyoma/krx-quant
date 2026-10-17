@@ -76,6 +76,7 @@ from krx_quant.features import Leaders
 from krx_quant.feeds.base import KST
 from krx_quant.kind_registry import KINDS, kind_named
 from krx_quant.kind_stats import KindEntry, kind_scoring, scored_of_kind
+from krx_quant.kind_stats import entry as kind_entry
 from krx_quant.kind_stats import entry_json as kind_entry_json
 from krx_quant.kind_stats import leaderboard as kind_leaderboard
 from krx_quant.kind_stats import split as kind_split
@@ -88,6 +89,7 @@ from krx_quant.stats import (
     Entry,
     Lifted,
     enough,
+    entry,
     entry_json,
     leaderboard,
     on_target,
@@ -102,6 +104,15 @@ PREVALIDATION_DAYS = 20
 MIN_DAYS = 10  # fewer recorded days can be replayed, for a look, but never pass
 # Registered before pre-validation existed (#24): they run without a report.
 REGISTERED_BEFORE = frozenset({"newton", "gauss", "granger", "markov", "turing"})
+# The two-sided level a rerun's weakest lift by trading day is held to, over every run on the
+# same days (#262): the N-th run's bound is at 1 − 0.05/N (Bonferroni).
+FAMILY_LEVEL = 0.95
+
+
+def tried_level(tries: int) -> float:
+    """The two-sided level of the lift-by-day interval the ``tries``-th pre-validation on the
+    same days is held to (#262): Bonferroni over the runs, 1 − 0.05/``tries``."""
+    return 1 - (1 - FAMILY_LEVEL) / tries
 
 
 def report_path(state_dir: Path, name: str) -> Path:
@@ -159,6 +170,9 @@ def _record_run(state_dir: Path, result: Prevalidation) -> None:
         "target_version": result.target_version,
         "passed": result.passed,
         "days": [d.isoformat() for d in result.days],
+        # Its stats (#262): what a best-of-the-runs correction would need.
+        "weakest_lift": result.stats.weakest_lift,
+        "day_low": result.stats.day_low,
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a+") as f:
@@ -403,14 +417,15 @@ async def prevalidate(
         models = await _replay(
             settings, candidate, kind, algorithms, kind_algorithms, kinds, available, replayed, db
         )
-        if kind is None:
-            others = [a.name for a in algorithms if a is not candidate]
-            result = _judge(settings, candidate, others, replayed, models, db, now)
-        else:
-            same = [a.name for a in kind_algorithms if a.kind == kind.name and a is not candidate]
-            result = _judge_kind(settings, candidate, kind, same, replayed, models, db, now)
         seed_history(settings.state_dir, name)
         before, on_days = earlier_runs(settings.state_dir, name, replayed)
+        tries = on_days + 1  # this run among those on any of these days: the bar it is held to
+        if kind is None:
+            others = [a.name for a in algorithms if a is not candidate]
+            result = _judge(settings, candidate, others, replayed, models, db, now, tries)
+        else:
+            same = [a.name for a in kind_algorithms if a.kind == kind.name and a is not candidate]
+            result = _judge_kind(settings, candidate, kind, same, replayed, models, db, now, tries)
         result = replace(result, earlier_runs=before, earlier_on_these_days=on_days)
         path = report_path(settings.state_dir, name)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -473,8 +488,10 @@ def _judge(
     models: Mapping[date, str],
     db: Path,
     now: datetime,
+    tries: int = 1,
 ) -> Prevalidation:
-    """The candidate's report, from what the replay stored in ``db``."""
+    """The candidate's report, from what the replay stored in ``db``; the ``tries``-th run on
+    these days (#262)."""
     name = candidate.name
     # Scored on the touch label (#170), against the target's baselines (#169).
     names = {b.name for b in baselines_for(settings.target_version)}
@@ -491,13 +508,19 @@ def _judge(
         {**algos, name: algos.get(name, [])}, baselines, settings.min_sample, settings.fee_rate
     )
     stats = next(e for e in [*board.ranked, *board.unranked] if e.algorithm == name)
+    # A rerun on these days (#262): its lifts by trading day again, at the Bonferroni level.
+    strict = (
+        None
+        if tries < 2
+        else entry(name, algos.get(name, []), baselines, settings.fee_rate, tried_level(tries)).day_low
+    )
     return Prevalidation(
         algorithm=name,
         code=code_digest(candidate),
         prevalidated_at=now,
         days=list(replayed),
         models=dict(models),
-        checks=_checks(candidate, replayed, statuses, measured, stats, settings.min_sample),
+        checks=_checks(candidate, replayed, statuses, measured, stats, settings.min_sample, tries, strict),
         stats=stats,
         correlations=measured,
         statuses=statuses,
@@ -516,9 +539,10 @@ def _judge_kind(
     models: Mapping[date, str],
     db: Path,
     now: datetime,
+    tries: int = 1,
 ) -> Prevalidation:
     """A kind's candidate's report (#179): scored on the kind's answers, against its baselines,
-    correlated with the other algorithms of its kind only."""
+    correlated with the other algorithms of its kind only; the ``tries``-th run on these days."""
     name = candidate.name
     names = {b.name for b in kind.baselines}
     store = PredictionStore(db)
@@ -536,13 +560,18 @@ def _judge_kind(
         store.close()
     board = kind_leaderboard({**algos, name: algos.get(name, [])}, baselines, settings.min_sample, kind)
     stats = next(e for e in [*board.ranked, *board.unranked] if e.algorithm == name)
+    strict = (
+        None
+        if tries < 2
+        else kind_entry(name, algos.get(name, []), baselines, kind, tried_level(tries)).day_low
+    )
     return Prevalidation(
         algorithm=name,
         code=code_digest(candidate),
         prevalidated_at=now,
         days=list(replayed),
         models=dict(models),
-        checks=_checks(candidate, replayed, statuses, measured, stats, settings.min_sample),
+        checks=_checks(candidate, replayed, statuses, measured, stats, settings.min_sample, tries, strict),
         stats=stats,
         correlations=measured,
         statuses=statuses,
@@ -560,6 +589,8 @@ def _checks(
     measured: Mapping[str, float],
     stats: Lifted,
     min_sample: int,
+    tries: int = 1,
+    strict_low: float | None = None,
 ) -> list[Check]:
     return [
         Check(
@@ -572,7 +603,7 @@ def _checks(
         ),
         _budget(statuses),
         _correlation(measured),
-        _stats(stats, min_sample),
+        _stats(stats, min_sample, tries, strict_low),
     ]
 
 
@@ -594,7 +625,11 @@ def _correlation(measured: Mapping[str, float]) -> Check:
     )
 
 
-def _stats(stats: Lifted, min_sample: int) -> Check:
+def _stats(stats: Lifted, min_sample: int, tries: int = 1, strict_low: float | None = None) -> Check:
+    """Enough scored predictions and pairs, and the weakest lift above 0. The ``tries``-th run on
+    the same days (#262), from the second, also needs ``strict_low`` above 0: the weakest lift
+    by trading day's lower bound at ``tried_level(tries)``, as a fix tried on days already seen
+    could pass by luck."""
     weakest = stats.weakest_lift
     if not enough(stats, min_sample) or weakest is None:
         pairs = min((t.lift.n for t in stats.lifts.values()), default=0)
@@ -603,8 +638,16 @@ def _stats(stats: Lifted, min_sample: int) -> Check:
             False,
             f"too few to judge: {stats.summary.n} scored, {pairs} pairs (at least {min_sample})",
         )
+    detail = f"weakest lift {weakest:.4f} over {stats.summary.n} scored predictions"
+    if tries < 2:
+        return Check("stats", weakest > 0, detail)
+    detail += f"; run {tries} on these days, held to {tried_level(tries):.2%} (Bonferroni): "
+    if strict_low is None:
+        return Check("stats", False, detail + "no lift by trading day (fewer than two days paired)")
     return Check(
-        "stats", weakest > 0, f"weakest lift {weakest:.4f} over {stats.summary.n} scored predictions"
+        "stats",
+        weakest > 0 and strict_low > 0,
+        detail + f"weakest lower bound by trading day {strict_low:.4f} (above 0 to pass)",
     )
 
 
