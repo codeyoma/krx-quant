@@ -105,9 +105,9 @@ from krx_quant.market_calendar import MarketCalendar
 from krx_quant.model_shelf import Shelf
 from krx_quant.names import logo_url
 from krx_quant.predictions import Excluded, iso
-from krx_quant.pricing import Direction, flat_ticks, tick_size
+from krx_quant.pricing import flat_ticks, tick_size
 from krx_quant.reference import Bar
-from krx_quant.skill import Skill, day_kappa, skill
+from krx_quant.skill import Skill, calls_by_day, day_kappa, skill
 from krx_quant.stats import (
     DEFAULT_MIN_SAMPLE,
     CalibrationBin,
@@ -911,14 +911,6 @@ def by_volatility(
         low, high = cuts[r.symbol]
         groups["low" if w <= low else "mid" if w <= high else "high"].append(r)
     return groups, cuts
-
-
-def calls_by_day(records: Sequence[Scored]) -> dict[date, list[tuple[Direction, Direction]]]:
-    """``records``' calls (called, happened) by trading day, for a kappa by trading day (#262)."""
-    out: dict[date, list[tuple[Direction, Direction]]] = {}
-    for r in records:
-        out.setdefault(kst_day(r.bar_close), []).append((r.predicted, r.outcome))
-    return out
 
 
 def skill_json(s: Skill | None, by_day: Lift | None = None) -> dict[str, Any] | None:
