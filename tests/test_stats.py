@@ -23,7 +23,7 @@ Every bar close has the same targets: a mid-point of 81,250 won between a best b
 - Brier: 5.375 / 10 = 0.5375;
 - the touch P&L of the trades (#1–5), in ticks, less c = 1.86875: up bought at the ask
   81,300 and sold at the upper target 81,450 when the bid reached it (#1: 1.5), else at the
-  last bid (#2: 81,300, 0; #3: 80,900, −4); down (an inverse product) sold at the bid
+  last bid (#2: 81,300, 0; #3: 80,900, −4); down (a short of the stock) sold at the bid
   81,200 and bought back at the lower target 81,050 when the ask reached it (#4: 1.5; #5
   too, though up won the label: both were reached). Total 1.5 + 0 − 4 + 1.5 + 1.5 − 5c =
   −8.84375, mean −1.76875 per trade; the deviations from the mean square to 22.7, a
@@ -146,7 +146,7 @@ def test_brier_score_and_the_touch_profit_in_ticks() -> None:
 
 
 def test_the_touch_profit_follows_the_labels_rule() -> None:
-    """Up: ask in, upper target out if reached, else the last bid. Down (inverse): bid in,
+    """Up: ask in, upper target out if reached, else the last bid. Down (a short of the stock): bid in,
     lower target back if reached, else the last ask. Less 1.86875 ticks of cost."""
     c = 1.86875
     assert touch_profit(UP, prices(UPPER), FEE) == pytest.approx(1.5 - c)
@@ -155,6 +155,27 @@ def test_the_touch_profit_follows_the_labels_rule() -> None:
     assert touch_profit(DOWN, prices(NEITHER, 81_100, 81_200), FEE) == pytest.approx(0 - c)
     # Both reached: the label is up, the inverse still bought back at the lower target.
     assert touch_profit(DOWN, prices(BOTH), FEE) == pytest.approx(1.5 - c)
+
+
+def test_the_inverse_touch_profit_drops_the_sell_tax_on_down_calls() -> None:
+    """#267: a down call through a −2x inverse product pays the commissions only, on half the
+    notional: 81,250 × 0.03% ÷ 2 = 0.121875 ticks; an up call is the stock's either way."""
+    c, inverse = 1.86875, 0.121875
+    assert touch_profit(DOWN, prices(LOWER), FEE, inverse_leverage=2) == pytest.approx(1.5 - inverse)
+    assert touch_profit(UP, prices(UPPER), FEE, inverse_leverage=2) == pytest.approx(1.5 - c)
+    s = summarize(ALGORITHM, FEE)
+    # Three up calls and two down calls: the two down calls each save the sell tax and half
+    # the commissions.
+    assert (s.pnl_inverse.trades, s.pnl.trades) == (5, 5)
+    assert s.pnl_inverse.total == pytest.approx(-8.84375 + 2 * (c - inverse))
+    # 009150 has no inverse product: its down calls are no trades there, the up calls stay.
+    other = summarize([replace(r, symbol="009150") for r in ALGORITHM], FEE)
+    assert (other.pnl_inverse.trades, other.pnl.trades) == (3, 5)
+    # Before the products were listed (2026-05-27), no down call could be traded through one.
+    early = [replace(r, bar_close=r.bar_close.replace(month=5, day=26)) for r in ALGORITHM]
+    assert summarize(early, FEE).pnl_inverse.trades == 3
+    listed = [replace(r, bar_close=r.bar_close.replace(month=5, day=27)) for r in ALGORITHM]
+    assert summarize(listed, FEE).pnl_inverse.trades == 5, "from the listing day on"
 
 
 def test_flat_calls_and_calls_without_their_quotes_are_no_trades() -> None:
