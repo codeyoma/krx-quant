@@ -94,3 +94,11 @@ def test_the_previous_days_come_from_the_backfilled_bars(tmp_path: Path) -> None
     assert len(found) == 2
     assert found[0] == {}
     assert found[1]["09:00"] == pytest.approx(20.0)
+
+
+def test_a_day_without_its_bars_is_asked_again(tmp_path: Path) -> None:
+    """The backfill may fill a missing day while the engine runs: it is not cached empty."""
+    previous = PreviousDay(tmp_path, CALENDAR)
+    assert previous.slot_returns(SYMBOL_, TUESDAY) == [{}]
+    store_bars(tmp_path, MONDAY, day_of(MONDAY), SYMBOL_)
+    assert previous.slot_returns(SYMBOL_, TUESDAY)[0]["09:00"] == pytest.approx(20.0)

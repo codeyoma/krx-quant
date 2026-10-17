@@ -641,10 +641,14 @@ class _Trainer:
             tmp.replace(path)
 
     def prune(self) -> None:
-        """Remove the cached days this night did not use: older ones no night needs again."""
+        """Remove the cached days this night did not use: older ones no night needs again. The
+        days before the oldest used one that its samples read (the slot returns' 20, #265) are
+        kept: the next night's oldest day reads them too."""
         if not self._used:
             return
         oldest = min(self._used)
+        for _ in range(previous_days_needed(self._names, self._kinds)):  # its days before (#265)
+            oldest = self._calendar.previous_trading_day(oldest)
         layers = ("bars", "events", "macro")
         for folder in [f for layer in layers for f in self._cache.glob(f"{layer}/date=*")]:
             try:

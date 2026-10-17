@@ -339,16 +339,20 @@ class PreviousDay:
         return out
 
     def _returns_of(self, symbol: str, day: date) -> dict[str, float]:
-        if (symbol, day) not in self._slot_returns:
-            session = self._calendar.session(day)
-            try:
-                bars = read_bars(self._data_dir, day, MINUTE_BARS_TR, symbol)
-            except Exception:
-                log.exception("cannot read %s's bars of %s; its slot returns go without them", symbol, day)
-                bars = None
-            found = {} if bars is None or session is None else day_slot_returns(bars, session)
-            self._slot_returns[(symbol, day)] = found
-        return self._slot_returns[(symbol, day)]
+        """A day's slot returns, read once; a day without its bars (or a session) is empty and
+        asked again next time: the backfill may fill it while the engine runs."""
+        if (symbol, day) in self._slot_returns:
+            return self._slot_returns[(symbol, day)]
+        session = self._calendar.session(day)
+        try:
+            bars = read_bars(self._data_dir, day, MINUTE_BARS_TR, symbol)
+        except Exception:
+            log.exception("cannot read %s's bars of %s; its slot returns go without them", symbol, day)
+            bars = None
+        if bars is None or session is None:
+            return {}
+        found = self._slot_returns[(symbol, day)] = day_slot_returns(bars, session)
+        return found
 
     def _of(self, symbol: str, day: date) -> tuple[dict[str, float], list[Bar]]:
         if (symbol, day) not in self._read:
