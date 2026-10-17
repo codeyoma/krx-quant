@@ -23,7 +23,7 @@ Every bar close has the same targets: a mid-point of 81,250 won between a best b
 - Brier: 5.375 / 10 = 0.5375;
 - the touch P&L of the trades (#1–5), in ticks, less c = 1.86875: up bought at the ask
   81,300 and sold at the upper target 81,450 when the bid reached it (#1: 1.5), else at the
-  last bid (#2: 81,300, 0; #3: 80,900, −4); down (an inverse product) sold at the bid
+  last bid (#2: 81,300, 0; #3: 80,900, −4); down (a short of the stock) sold at the bid
   81,200 and bought back at the lower target 81,050 when the ask reached it (#4: 1.5; #5
   too, though up won the label: both were reached). Total 1.5 + 0 − 4 + 1.5 + 1.5 − 5c =
   −8.84375, mean −1.76875 per trade; the deviations from the mean square to 22.7, a
@@ -146,7 +146,7 @@ def test_brier_score_and_the_touch_profit_in_ticks() -> None:
 
 
 def test_the_touch_profit_follows_the_labels_rule() -> None:
-    """Up: ask in, upper target out if reached, else the last bid. Down (inverse): bid in,
+    """Up: ask in, upper target out if reached, else the last bid. Down (a short of the stock): bid in,
     lower target back if reached, else the last ask. Less 1.86875 ticks of cost."""
     c = 1.86875
     assert touch_profit(UP, prices(UPPER), FEE) == pytest.approx(1.5 - c)

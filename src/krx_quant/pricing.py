@@ -27,8 +27,10 @@ class InverseProduct:
 
 # The symbols' single-stock inverse products (#267): the −2x ETFs on 005930 (PLUS
 # 삼성전자선물단일종목인버스2X) and 000660 (SOL SK하이닉스선물단일종목인버스2X), listed 2026-05-27.
-# 009150 has none. An ETF's sale pays no securities transaction tax (the tax falls on shares
-# only, 증권거래세법 제2조), so its round trip costs the commissions alone, on its own notional.
+# 009150 has none. Sources: 머니투데이 2026-08-03 (the 16 single-stock leveraged and inverse ETFs
+# listed 2026-05-27, two of them inverse), SBS Biz; product names from KIS's stock master
+# (2026-10-16). An ETF's sale pays no securities transaction tax (the tax falls on shares only,
+# 증권거래세법 제2조), so its round trip costs the commissions alone, on its own notional.
 INVERSE_PRODUCTS: Mapping[str, InverseProduct] = {
     "005930": InverseProduct(date(2026, 5, 27), 2),
     "000660": InverseProduct(date(2026, 5, 27), 2),
