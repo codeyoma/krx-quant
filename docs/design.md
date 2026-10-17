@@ -60,6 +60,7 @@
 | `replay.py`, `demo.py`, `fake_kis.py`, `notify.py`, `cli.py` | 재생, 화면 개발용 데모 엔진, 가짜 KIS, 텔레그램 알림, 명령 |
 | `prevalidation.py` | 새 알고리즘 사전 검증: 최근 20거래일 재생과 엔진의 등록 관문(#24) |
 | `diagnose.py` | 읽기 전용 진단 명령: 남은 결정에 필요한 실측(#82) |
+| `entry_delay.py` | 진입 지연(#262): 예측을 봉 마감 +1·+5·+30초에 따랐을 때의 목표 도달과 닿음 손익을 녹화 호가로 다시 잰다. `diagnose` 10절 |
 | `signal_review.py` | 읽기 전용 신호 기준 검토 명령(`signal-review`, #206): 순위표와 정식 알고리즘의 성적, 기준 후보(최종 합의 확률 × 같은 방향 정식 수)마다 엔진의 신호 규칙(`signals.py`)을 저장된 합의에 그대로 돌린 신호 수와 적중률([operations.md](operations.md#신호-기준-검토-206)) |
 | `skill.py` | 기준율 대비 실력(#262): 예측 × 정답 표의 kappa, Gerrity 점수, 균형 맞힘률, 독립성 검정(카이제곱), 거래일 단위 kappa(날마다 kappa, 날들의 t 구간). 알고리즘 상세 통계의 `overall.skill`([engine-api.md](engine-api.md#get-v1algorithmsnamestatssymbolperiodspecial)) |
 | `structure_check.py` | 읽기 전용 구조 실측 명령(`structure-check`, #270): 리서치가 문헌으로 정하지 못한 주장(단일종목 레버리지 ETF 상장 전후의 일 단위 구조와 마감 단일가, 기간·틱 크기별 4분 도달 정답, 월말·월초 × 외국인 순매수)을 1분봉, 일봉, KIS 일별 수급으로 잰다([operations.md](operations.md#구조-실측-270)) |

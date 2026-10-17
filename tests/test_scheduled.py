@@ -31,6 +31,7 @@ from krx_quant.market_calendar import MarketCalendar
 from krx_quant.notify import Alerts
 from krx_quant.scheduled import (
     DIAGNOSE,
+    ENTRY_DELAY,
     FAILED,
     INTERRUPTED,
     JOBS,
@@ -901,6 +902,30 @@ def test_the_structure_check_runs_once_on_the_first_night_trading_or_not() -> No
     assert not STRUCTURE_CHECK.due(night(MONDAY, ran))
     assert not STRUCTURE_CHECK.due(night(MONDAY, replace(ran, outcome=FAILED, exit_code=1)))
     assert STRUCTURE_CHECK.due(night(MONDAY, replace(ran, outcome=INTERRUPTED)))
+
+
+def test_the_entry_delay_runs_the_diagnosis_once_on_a_trading_night_and_posts_section_10() -> None:
+    # #262: the diagnosis's section 10 alone, with its header, goes to #262.
+    assert ENTRY_DELAY.command == ("diagnose", "--days", "20")
+    assert ENTRY_DELAY.timeout == timedelta(hours=1)
+    assert [t.issue for t in ENTRY_DELAY.targets] == [262]
+    assert JOBS[:5] == (DIAGNOSE, SIGNAL_REVIEW, SUPPLY_PROBE, STRUCTURE_CHECK, ENTRY_DELAY)
+    assert ENTRY_DELAY.due(night(FRIDAY))
+    assert not ENTRY_DELAY.due(night(SATURDAY))  # it waits for a trading day's recording
+    ran = JobRecord(FRIDAY, OK, at(FRIDAY, "22:30"), COMMIT, 0, 60.0)
+    assert not ENTRY_DELAY.due(night(MONDAY, ran))
+    output = "\n\n".join(
+        [
+            "진단 2026-09-21 – 2026-10-19 (20거래일)",
+            "9. 뒤집힌 호가(#187): 종목 × 날 × 30분 칸 비율\n  없음",
+            "10. 예측자별 실력과 진입 지연(#262, 정답 버전 3): 봉 마감·+1초·+5초·+30초에"
+            " 들어갔을 때의 목표 도달과 닿음 손익\n  newton: 채점 2 · 정답률 100.0%",
+        ]
+    )
+    part = ENTRY_DELAY.targets[0].part(output)
+    assert part is not None and part.startswith("진단 2026-09-21") and "9. 뒤집힌" not in part
+    assert part.endswith("newton: 채점 2 · 정답률 100.0%")
+    assert ENTRY_DELAY.targets[0].part("진단: 데이터 없음\n\n9. 뒤집힌 호가(#187)\n  없음") is None
 
 
 async def test_the_supply_probe_runs_on_the_first_night_then_never(tmp_path: Path) -> None:
