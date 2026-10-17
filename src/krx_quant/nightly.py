@@ -89,7 +89,7 @@ from krx_quant.market_calendar import MarketCalendar, calendar_store
 from krx_quant.notify import send_notice
 from krx_quant.object_store import ObjectStore, file_digest, get_json, open_store, put_json
 from krx_quant.touch import TARGET_VERSION
-from krx_quant.training import TrainingDay, leader_series, needs_previous_day, training_day
+from krx_quant.training import TrainingDay, leader_series, previous_days_needed, training_day
 
 log = logging.getLogger(__name__)
 
@@ -616,12 +616,13 @@ class _Trainer:
         """Copy a day's bars, the engine's recorded events and its macro regime from the store
         into the cache, where they are not there already; with a feature of the previous
         trading day's ranges (#181) or a barrier's width (#183), that day's bars of the symbols
-        too.
+        too, and with the slot returns (#265), the bars of the 20 trading days before.
         """
         series = [(MINUTE_BARS_TR, s) for s in self._symbols] + leader_series(self._leaders)
         keys = [bars_key(day, feed, name) for feed, name in series]
-        if needs_previous_day(self._names, self._kinds):  # the previous trading day's (#181, #183)
-            before = self._calendar.previous_trading_day(day)
+        before = day
+        for _ in range(previous_days_needed(self._names, self._kinds)):  # #181, #183, #265
+            before = self._calendar.previous_trading_day(before)
             keys += [bars_key(before, MINUTE_BARS_TR, s) for s in self._symbols]
         keys += _engine_events(
             self._store.keys(f"events/date={day.isoformat()}/"), self._symbols, self._leaders

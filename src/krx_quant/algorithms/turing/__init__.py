@@ -8,9 +8,11 @@ Personality card:
   arrivals, the options' implied volatility), and its own. A feature not known (the book on
   a backfilled day) is left missing, and the trees learn where missing ones go. The expected
   move is the classes' mean moves in training, weighted by their probabilities.
-- **Own features**: the time of day, the options expiry, the investor estimates, and the
+- **Own features**: the time of day, the options expiry, the investor estimates, the
   best quotes: their spread in ticks, the balance of their sizes and how those sizes
-  changed over the last minute (#55).
+  changed over the last minute (#55), and the same 10-minute slot's return on the days
+  before (``SLOT_RETURN_FEATURES``, #265: the previous day's, the last 5's and 20's means;
+  Breiman reads them too).
 - **Learns**: over the last 60 trading days, a fixed number of boosting rounds, the same
   trees for the same samples (one thread, a fixed seed).
 - **Fails**: in a market unlike its 60 training days; trees do not reach past the values
@@ -37,7 +39,15 @@ from krx_quant.algorithms.contract import Model, Sample
 from krx_quant.algorithms.forecasts import UNKNOWN, class_moves, number, with_outcomes
 from krx_quant.baselines import Forecast
 from krx_quant.cards import TOUCH_LABEL, Card, Meaning, class_move_meanings
-from krx_quant.features import BARRIER_FEATURES, FEATURES, RANGE_FEATURES, SERIES_FEATURES, FeatureVector
+from krx_quant.features import (
+    BARRIER_FEATURES,
+    FEATURES,
+    RANGE_FEATURES,
+    SERIES_FEATURES,
+    SLOT_RETURN_DAYS,
+    FeatureVector,
+    slot_return_feature,
+)
 from krx_quant.pricing import Direction
 
 CLASSES = (Direction.DOWN, Direction.FLAT, Direction.UP)  # the trees' labels 0, 1, 2
@@ -51,6 +61,7 @@ OWN = (
     "spread_ticks",
     "top_imbalance",
     "top_size_change",
+    *(slot_return_feature(d) for d in SLOT_RETURN_DAYS),
 )
 ROUNDS = 200
 BOOSTING: dict[str, Any] = {
@@ -102,8 +113,8 @@ class Turing:
             "모든 숫자 "
             "피처(다른 알고리즘의 프로그램매매·외국계 회원사 흐름, 호가의 주문 흐름, 체결의 방향과 도착, "
             "옵션 내재변동성 포함)에 시간대, 옵션 만기까지 남은 거래일, 투자자별 추정 흐름, 최우선 호가의 "
-            "스프레드·잔량 균형·잔량 변화를 더한다. 모르는 피처(백필만 있는 날의 호가)는 비워 두고 트리가 "
-            "다룬다."
+            "스프레드·잔량 균형·잔량 변화, 앞선 거래일들의 같은 10분 시간대 수익률(전일, 5일·20일 평균, "
+            "#265)을 더한다. 모르는 피처(백필만 있는 날의 호가)는 비워 두고 트리가 다룬다."
         ),
         unique_features=OWN,
         training=(

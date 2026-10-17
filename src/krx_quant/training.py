@@ -62,6 +62,8 @@ from krx_quant.features import (
     BARRIER_FEATURES,
     LEAD_FEATURES,
     PREVIOUS_DAY_RANGE,
+    SLOT_RETURN_DAYS,
+    SLOT_RETURN_FEATURES,
     FeatureStore,
     FeatureVector,
     Leaders,
@@ -193,7 +195,20 @@ def needs_previous_day(names: Iterable[str], kinds: Sequence[Kind] = ()) -> bool
     previous trading day's backfilled bars: its ranges (``range_prev_day``, #181), the
     barrier's width (its features, and a kind with barriers, #183)."""
     named = set(names)
-    return PREVIOUS_DAY_RANGE in named or bool(BARRIER_FEATURES & named) or any(k.width for k in kinds)
+    return (
+        PREVIOUS_DAY_RANGE in named
+        or bool((BARRIER_FEATURES | SLOT_RETURN_FEATURES) & named)
+        or any(k.width for k in kinds)
+    )
+
+
+def previous_days_needed(names: Iterable[str], kinds: Sequence[Kind] = ()) -> int:
+    """How many trading days before a day's samples read the symbols' backfilled bars of: the
+    longest of the slot returns (``SLOT_RETURN_DAYS``, #265), else the previous day's (#181,
+    #183), else none."""
+    if SLOT_RETURN_FEATURES & set(names):
+        return max(SLOT_RETURN_DAYS)
+    return 1 if needs_previous_day(names, kinds) else 0
 
 
 def is_recorded(data_dir: Path, day: date, symbols: Sequence[str]) -> bool:
@@ -266,6 +281,7 @@ def samples(
         expiry = days_to_expiry(day, calendar)
         ranges = previous(symbol, day) if previous is not None else None
         before = previous.bars(symbol, day) if previous is not None else ()
+        slot_returns = previous.slot_returns(symbol, day) if previous is not None else ()
         t, last = prediction_window(session)
         while t <= last:
             done = bars[: bisect.bisect_right(ends, t)]
@@ -285,6 +301,7 @@ def samples(
                 expiry_days=expiry,
                 previous_ranges=ranges,
                 previous_bars=before,
+                previous_slot_returns=slot_returns,
             )
             values = store.compute(snapshot, names)
             later = closes.get(t + HORIZON - BAR)  # the close of the bar ending at t + 4 minutes
