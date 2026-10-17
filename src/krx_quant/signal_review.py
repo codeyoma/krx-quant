@@ -56,6 +56,7 @@ from krx_quant.market_view import HORIZON
 from krx_quant.predictions import days_with_predictions, iso, read_only, scored_rows
 from krx_quant.pricing import Direction
 from krx_quant.signals import BLOCKED, SENT, Blocked, Judged, SignalRule, Signals
+from krx_quant.skill import calls_by_day, day_kappa, skill
 from krx_quant.stats import (
     Entry,
     Interval,
@@ -523,11 +524,34 @@ def _by_class(records: Sequence[Scored]) -> str:
     return " · ".join(parts)
 
 
+def _skill(records: Sequence[Scored]) -> str:
+    """Against the class rates (#262, ``skill.py``): the accuracy of calls made at the same
+    rates blind to the outcome, Cohen's kappa, by trading day too (the days' mean, its 95%
+    interval and the days), and Gerrity's score."""
+    s = skill([(r.predicted, r.outcome) for r in records])
+    if s is None:
+        return "실력 —"
+
+    def score(value: float | None) -> str:
+        return "—" if value is None else f"{value:+.3f}"
+
+    by_day = day_kappa(calls_by_day(records))
+    day = (
+        "—"
+        if by_day is None
+        else f"{score(by_day.value)} [{score(by_day.low)}, {score(by_day.high)}] {by_day.n}일"
+    )
+    return (
+        f"기대 정답률 {s.expected_accuracy:.1%} · kappa {score(s.kappa)} (거래일 {day}) · "
+        f"Gerrity {score(s.gerrity)}"
+    )
+
+
 def _entry_line(head: str, e: Entry, records: Sequence[Scored]) -> str:
     s = e.summary
     parts = [f"{head} 채점 {s.n:,}"]
     if s.n:
-        parts += [f"정답률 {_ratio(s.accuracy)}", _by_class(records)]
+        parts += [f"정답률 {_ratio(s.accuracy)}", _by_class(records), _skill(records)]
         if e.lifts:
             parts.append(
                 f"가장 약한 lift {_points(e.weakest_lift)} (짝 하한 {_points(e.lift_low)} · "

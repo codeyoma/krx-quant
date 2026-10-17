@@ -38,8 +38,9 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 
+from krx_quant.feeds.base import kst_day
 from krx_quant.pricing import Direction
-from krx_quant.stats import Lift, t_test
+from krx_quant.stats import Lift, Scored, t_test
 
 ORDER = (Direction.DOWN, Direction.FLAT, Direction.UP)  # the classes' order (Gerrity)
 MIN_EXPECTED = 5  # the fewest expected in a used cell for the chi-square test
@@ -85,6 +86,14 @@ def skill(calls: Sequence[tuple[Direction, Direction]]) -> Skill | None:
         df=df,
         p=None if chi2 is None else chi2_sf(chi2, df),
     )
+
+
+def calls_by_day(records: Sequence[Scored]) -> dict[date, list[tuple[Direction, Direction]]]:
+    """``records``' calls (called, happened) by trading day, for ``day_kappa``."""
+    out: dict[date, list[tuple[Direction, Direction]]] = {}
+    for r in records:
+        out.setdefault(kst_day(r.bar_close), []).append((r.predicted, r.outcome))
+    return out
 
 
 def day_kappa(

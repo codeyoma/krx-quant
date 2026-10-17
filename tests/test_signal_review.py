@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import re
 from collections.abc import Sequence
 from dataclasses import replace
 from datetime import date, datetime, timedelta
@@ -26,8 +27,17 @@ from krx_quant.lifecycle import Status
 from krx_quant.predictions import NewPrediction, PredictionStore, Score, read_only
 from krx_quant.pricing import Direction
 from krx_quant.replay import replay_into
-from krx_quant.signal_review import BarClose, read, rebuilt_closes, replay, signal_review, stored_closes
+from krx_quant.signal_review import (
+    BarClose,
+    _skill,
+    read,
+    rebuilt_closes,
+    replay,
+    signal_review,
+    stored_closes,
+)
 from krx_quant.signals import BLOCKED, SENT, SignalRule, Signals
+from krx_quant.stats import Scored
 from krx_quant.touch import TARGET_VERSION
 from tests.algorithm_doubles import FixedAlgorithm
 from tests.replay_events import CALENDAR, FEE, SYMBOL, at, vi
@@ -238,9 +248,30 @@ def test_the_settings_the_leaderboard_and_the_official_algorithms_records(tmp_pa
     [newton] = [line for line in board if " newton [정식] " in line]
     assert "newton [정식] 채점 9 · 정답률 66.7% [35.4–87.9%] · 상승 예측 6 적중 66.7% [30.0–90.3%]" in newton
     assert "보합 예측 0 적중 — · 하락 예측 3 적중 66.7% [20.8–93.9%]" in newton
+    # #262: its skill against the class rates, after the classes.
+    assert re.search(
+        r"하락 예측 3 적중 [^·]+ · 기대 정답률 \d+\.\d% · kappa [+-]\d\.\d{3} "
+        r"\(거래일 (—|[+-]\d\.\d{3} \[[^]]+\] \d+일)\) · Gerrity ([+-]\d\.\d{3}|—) · ",
+        newton,
+    ), newton
     assert any(line.startswith("기준 baseline-flat 채점 0") for line in board)
     [since] = [line for line in section(text, 3) if line.startswith("newton:")]
     assert since.startswith("newton: 2026-10-12 08:00부터 정식 · 2일 채점 9 · 정답률 66.7%")
+
+
+def test_the_skill_reads_against_the_class_rates_and_by_trading_day() -> None:
+    # #262: right on every bar close of two days (an up, a flat and a down each day).
+    sure = {UP: (1.0, 0.0, 0.0), FLAT: (0.0, 1.0, 0.0), DOWN: (0.0, 0.0, 1.0)}
+
+    def scored(day: date, minute: int, d: Direction) -> Scored:
+        return Scored("newton", "v1", SYMBOL, on(day, f"09:0{minute}"), *sure[d], d)
+
+    records = [scored(day, i + 1, d) for day in (EARLIER, DAY) for i, d in enumerate((UP, FLAT, DOWN))]
+    assert _skill(records) == (
+        "기대 정답률 33.3% · kappa +1.000 (거래일 +1.000 [+1.000, +1.000] 2일) · Gerrity +1.000"
+    )
+    assert _skill(records[:3]) == "기대 정답률 33.3% · kappa +1.000 (거래일 —) · Gerrity +1.000"  # one day
+    assert _skill([]) == "실력 —"
 
 
 def test_without_a_database_only_the_settings(tmp_path: Path) -> None:
