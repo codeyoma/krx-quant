@@ -975,7 +975,7 @@
         "by_slot": {"type": "object", "additionalProperties": {"$ref": "#/$defs/entry"}},
         "by_model_version": {"type": "object", "additionalProperties": {"$ref": "#/$defs/entry"}},
         "by_volatility": {
-          "description": "The calls split into volatility terciles by the barrier width w at their bar close, cut per symbol (#262); a tercile without calls is left out.",
+          "description": "The calls split into volatility terciles by the barrier width w at their bar close (basis points), per symbol by sorted order (ties by bar close); a tercile without calls is left out.",
           "type": "object",
           "additionalProperties": false,
           "properties": {
@@ -985,9 +985,9 @@
           }
         },
         "volatility_cuts": {
-          "description": "Each symbol's two cuts of w in ticks: low up to the first, mid up to the second, high above.",
+          "description": "Each symbol's two cuts of w in basis points of the mid-point: the widest w in low and in mid.",
           "type": "object",
-          "additionalProperties": {"type": "array", "items": {"type": "integer"}, "minItems": 2, "maxItems": 2}
+          "additionalProperties": {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2}
         }
       },
       "unevaluatedProperties": false
@@ -1006,7 +1006,7 @@
         "gerrity": {"type": ["number", "null"]},
         "balanced_accuracy": {"type": "number"},
         "independence": {
-          "description": "Pearson's chi-square on the table (Pesaran–Timmermann 2009 for independent observations); the overlapping windows make p too small: it describes.",
+          "description": "Pearson's chi-square on the table (Pesaran–Timmermann 2009 for independent observations); the overlapping windows make p too small: it describes. chi2 and p are null when a used cell expects fewer than 5.",
           "type": "object",
           "required": ["chi2", "df", "p"],
           "additionalProperties": false,

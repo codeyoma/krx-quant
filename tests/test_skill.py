@@ -19,9 +19,13 @@ def test_perfect_calls_score_one() -> None:
     assert (s.accuracy, s.kappa, s.balanced_accuracy) == (1.0, 1.0, 1.0)
     assert s.gerrity == pytest.approx(1.0)
     assert s.expected_accuracy == pytest.approx((10**2 + 30**2 + 10**2) / 50**2)
-    assert s.chi2 == pytest.approx(100.0)  # 2n for a perfect 3×3 table
-    assert s.df == 4
-    assert s.p is not None and s.p < 1e-15
+    # A cell expects 10 × 10 / 50 = 2, under 5: no chi-square (Cochran's rule).
+    assert (s.chi2, s.df, s.p) == (None, 4, None)
+    # Three times as many: every cell expects at least 30 × 30 / 150 = 6.
+    big = skill(list(zip(HAPPENED * 3, HAPPENED * 3, strict=True)))
+    assert big is not None
+    assert big.chi2 == pytest.approx(300.0)  # 2n for a perfect 3×3 table
+    assert big.p is not None and big.p < 1e-15
 
 
 def test_always_flat_scores_zero_however_accurate() -> None:
@@ -35,7 +39,7 @@ def test_always_flat_scores_zero_however_accurate() -> None:
 
 
 def test_gerrity_charges_a_call_two_classes_off_more() -> None:
-    # Four of the down windows called flat, or called up: the same accuracy and kappa.
+    # Four of the down windows called flat, or called up: the same accuracy.
     one_off = [(FLAT if h is DOWN and i < 44 else h, h) for i, h in enumerate(HAPPENED)]
     two_off = [(UP if h is DOWN and i < 44 else h, h) for i, h in enumerate(HAPPENED)]
     near, far = skill(one_off), skill(two_off)
@@ -43,6 +47,8 @@ def test_gerrity_charges_a_call_two_classes_off_more() -> None:
     assert near.accuracy == far.accuracy == pytest.approx(46 / 50)
     assert near.gerrity is not None and far.gerrity is not None
     assert near.gerrity > far.gerrity
+    assert near.kappa is not None and far.kappa is not None
+    assert near.kappa < far.kappa  # kappa does not see how far off a call is
 
 
 def test_undefined_values_are_none() -> None:

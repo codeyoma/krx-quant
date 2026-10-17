@@ -358,12 +358,15 @@ async def test_the_direction_is_stored_scored_and_ranked_the_same_with_another_k
     """Acceptance (#179). Input: the same busy morning replayed with and without the drift and
     an algorithm of it. Output: the direction's predictions and outcomes, its touch labels, and
     the Engine API's direction answers (predictions, latest, leaderboard, an algorithm's
-    stats) are the same; but an algorithm's calls split by volatility (#262), which read the
-    barrier kind's widths: the engine with the drift has the drift in place of the barrier."""
+    stats) are the same. Both run the range and the barrier: an algorithm's calls split by
+    volatility read the barrier kind's widths (#262)."""
     without = await run(
         tmp_path / "without.db", busy_morning(), until=at("10:00:00"), target_version=TARGET_VERSION
     )
-    with_kind = await run_kind(tmp_path / "with.db", busy_morning(), until=at("10:00:00"))
+    # The direction's stats split calls by the barrier's width (#262): both engines run it.
+    with_kind = await run_kind(
+        tmp_path / "with.db", busy_morning(), until=at("10:00:00"), kinds=(RANGE, BARRIER, TEST_KIND)
+    )
 
     direction = stored(tmp_path / "with.db")
     assert len(direction) == 60 * 14, "09:01-10:00: 4 baselines, 8 algorithms and 2 consensus"
@@ -379,13 +382,9 @@ async def test_the_direction_is_stored_scored_and_ranked_the_same_with_another_k
         "/v1/algorithms/newton/stats",
         "/v1/algorithms/baseline-flat/stats",
     ]
-    split = ("by_volatility", "volatility_cuts")
     async with api(without) as one, api(with_kind) as two:
         for path in paths:
-            first, second = await get_json(one, path), await get_json(two, path)
-            if path.endswith("/stats"):
-                first, second = ({k: v for k, v in b.items() if k not in split} for b in (first, second))
-            assert first == second, path
+            assert await get_json(one, path) == await get_json(two, path), path
 
 
 async def test_when_the_cpu_budget_runs_short_a_kind_s_algorithm_is_skipped_first(tmp_path: Path) -> None:

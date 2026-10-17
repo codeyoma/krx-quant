@@ -146,7 +146,9 @@ def seed_history(state_dir: Path, name: str) -> None:
         line["target_version"] = data.get("target_version")
     except (OSError, ValueError, KeyError, TypeError):
         return
-    history.write_text(json.dumps(line) + "\n")
+    tmp = history.with_name(f".{history.name}.tmp")
+    tmp.write_text(json.dumps(line) + "\n")
+    tmp.replace(history)  # whole or not at all: a cut-short seed would never be seeded again
 
 
 def _record_run(state_dir: Path, result: Prevalidation) -> None:
@@ -158,7 +160,13 @@ def _record_run(state_dir: Path, result: Prevalidation) -> None:
         "passed": result.passed,
         "days": [d.isoformat() for d in result.days],
     }
-    with path.open("a") as f:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+") as f:
+        f.seek(0, 2)
+        if f.tell():  # a last line cut short (no newline) must not swallow this one
+            f.seek(f.tell() - 1)
+            if f.read(1) != "\n":
+                f.write("\n")
         f.write(json.dumps(line) + "\n")
 
 
@@ -408,8 +416,10 @@ async def prevalidate(
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(result.as_dict(), indent=2, ensure_ascii=False))
-        tmp.replace(path)
+        # The run is recorded before its report replaces the last one: a stop between the two
+        # counts it once more, never once less (a rerun on the same days must not look fresh).
         _record_run(settings.state_dir, result)
+        tmp.replace(path)
         return result
 
 

@@ -884,26 +884,29 @@ TERCILES = ("low", "mid", "high")
 
 
 def by_volatility(
-    records: Sequence[Scored], widths: Mapping[tuple[str, str], int]
-) -> tuple[dict[str, list[Scored]], dict[str, list[int]]]:
+    records: Sequence[Scored], widths: Mapping[tuple[str, str], float]
+) -> tuple[dict[str, list[Scored]], dict[str, list[float]]]:
     """``records`` split into volatility terciles by the barrier width w at their bar close
-    (#262, ``PredictionStore.barrier_widths``), cut per symbol (ticks differ by price): low
-    up to the lower cut, mid up to the upper, high above; and each symbol's two cuts (the
-    widths at a third and two thirds of its sorted ones, lower of two). Records without a
-    width are left out. w is never narrower than k, so the low tercile may hold more."""
-    found: dict[str, list[tuple[int, Scored]]] = {}
+    (#262, ``PredictionStore.barrier_widths``, basis points of the mid-point): low up to a
+    symbol's lower cut, mid up to its upper, high above; and each symbol's two cuts. The cuts
+    come from every bar close of the period with a width (``widths``), not from the records,
+    so every predictor's terciles are the same bar closes and can be set side by side: the
+    widths at a third and two thirds of the symbol's sorted ones (the lower of two). Records
+    without a width are left out."""
+    by_symbol: dict[str, list[float]] = {}
+    for (symbol, _), width in widths.items():
+        by_symbol.setdefault(symbol, []).append(width)
+    cuts: dict[str, list[float]] = {}
+    for symbol, ws in sorted(by_symbol.items()):
+        ws.sort()
+        cuts[symbol] = [ws[(len(ws) - 1) // 3], ws[2 * (len(ws) - 1) // 3]]
+    groups: dict[str, list[Scored]] = {t: [] for t in TERCILES}
     for r in records:
         w = widths.get((r.symbol, iso(r.bar_close)))
-        if w is not None:
-            found.setdefault(r.symbol, []).append((w, r))
-    groups: dict[str, list[Scored]] = {t: [] for t in TERCILES}
-    cuts: dict[str, list[int]] = {}
-    for symbol, pairs in sorted(found.items()):
-        ws = sorted(w for w, _ in pairs)
-        low, high = ws[(len(ws) - 1) // 3], ws[2 * (len(ws) - 1) // 3]
-        cuts[symbol] = [low, high]
-        for w, r in pairs:
-            groups["low" if w <= low else "mid" if w <= high else "high"].append(r)
+        if w is None:
+            continue
+        low, high = cuts[r.symbol]
+        groups["low" if w <= low else "mid" if w <= high else "high"].append(r)
     return groups, cuts
 
 

@@ -18,7 +18,9 @@ a predictor that mostly calls flat on a mostly-flat day cannot look skilled:
   p-value. It is Pesaran and Timmermann's (2009) test of dependence between multi-category
   forecasts and outcomes for independent observations. The four-minute windows overlap
   and the symbols move together, so the p-value is too small: it describes, it does not
-  judge (as the paired lift's).
+  judge (as the paired lift's). None when a used cell expects fewer than ``MIN_EXPECTED``
+  (Cochran's rule: the chi-square approximation needs them; two right calls of a rare
+  class would otherwise look very significant).
 
 Every value is None where it is undefined (no prediction, a class rate of 0 or 1 where the
 formula divides by it).
@@ -33,6 +35,7 @@ from dataclasses import dataclass
 from krx_quant.pricing import Direction
 
 ORDER = (Direction.DOWN, Direction.FLAT, Direction.UP)  # the classes' order (Gerrity)
+MIN_EXPECTED = 5  # the fewest expected in a used cell for the chi-square test
 
 
 @dataclass(frozen=True)
@@ -106,7 +109,8 @@ def _chi2(
     table: Sequence[Sequence[int]], rows: Sequence[int], cols: Sequence[int], n: int
 ) -> tuple[float | None, int]:
     """Pearson's chi-square over the rows and columns with any count, and its degrees of
-    freedom; None (0 degrees) when either has fewer than two."""
+    freedom; None (0 degrees) when either has fewer than two, None when a cell expects fewer
+    than ``MIN_EXPECTED``."""
     used_rows = [i for i, r in enumerate(rows) if r]
     used_cols = [j for j, c in enumerate(cols) if c]
     df = (len(used_rows) - 1) * (len(used_cols) - 1)
@@ -116,6 +120,8 @@ def _chi2(
     for i in used_rows:
         for j in used_cols:
             expected = rows[i] * cols[j] / n
+            if expected < MIN_EXPECTED:
+                return None, df
             total += (table[i][j] - expected) ** 2 / expected
     return total, df
 

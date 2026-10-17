@@ -1488,22 +1488,25 @@ class PredictionStore:
             db.execute("COMMIT")
         return rows, excluded
 
-    def barrier_widths(self, days: Sequence[date], symbol: str | None) -> dict[tuple[str, str], int]:
-        """The barrier width w (ticks, #183) the barrier kind stored at each bar close of
-        ``days`` (of ``symbol`` if given), by (symbol, bar close): a volatility known at the
-        bar close (1-minute changes' σ × √4, no narrower than k), what the direction's stats
-        split their calls by (#262)."""
+    def barrier_widths(self, days: Sequence[date], symbol: str | None) -> dict[tuple[str, str], float]:
+        """The barrier width w the barrier kind stored at each bar close of ``days`` (of
+        ``symbol`` if given), in basis points of the bar close's mid-point (w ticks × the tick
+        ÷ the mid-point, #183, #210), by (symbol, bar close): a volatility known at the bar
+        close (1-minute changes' σ × √4, no narrower than k), what the direction's stats split
+        their calls by (#262). In basis points, not ticks: a tick changes size at band edges.
+        Rows without the mid-point (stored before #210) are left out."""
         if not days:
             return {}
         where, params = _made_on(days, symbol)
         with self._reading() as db:
             rows = db.execute(
-                "SELECT p.symbol, p.bar_close, MAX(p.width_ticks) FROM kind_predictions p"
-                f" WHERE p.kind = 'barrier' AND p.width_ticks IS NOT NULL AND {where}"
+                "SELECT p.symbol, p.bar_close, MAX(p.width_ticks * p.tick * 1e4 / p.anchor)"
+                " FROM kind_predictions p WHERE p.kind = 'barrier' AND p.width_ticks IS NOT NULL"
+                f" AND p.tick IS NOT NULL AND p.anchor > 0 AND {where}"
                 " GROUP BY p.symbol, p.bar_close",
                 params,
             ).fetchall()
-        return {(s, b): int(w) for s, b, w in rows}
+        return {(s, b): float(w) for s, b, w in rows}
 
     def _reading(self) -> contextlib.closing[sqlite3.Connection]:
         """A read-only connection of its own: a worker thread can read while the engine

@@ -347,6 +347,8 @@ async def test_an_algorithms_stats_show_its_skill_and_its_calls_by_volatility(tm
                     None,
                     "no_book",
                     width_ticks=2 + i // 10,
+                    anchor=81_250,
+                    tick=100,
                 )
                 for i in range(30)
             ],
@@ -359,7 +361,8 @@ async def test_an_algorithms_stats_show_its_skill_and_its_calls_by_volatility(tm
     assert skill["gerrity"] == pytest.approx(1.0)
     assert skill["expected_accuracy"] == pytest.approx((8**2 + 15**2 + 7**2) / 30**2)
     assert skill["independence"]["df"] == 4
-    assert body["volatility_cuts"] == {"005930": [2, 3]}
+    # In basis points of the mid-point: w ticks × 100 won ÷ 81,250 won.
+    assert body["volatility_cuts"] == {"005930": [pytest.approx(2e6 / 81_250), pytest.approx(3e6 / 81_250)]}
     assert {t: e["n"] for t, e in body["by_volatility"].items()} == {"low": 10, "mid": 10, "high": 10}
 
 
