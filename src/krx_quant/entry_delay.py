@@ -40,7 +40,7 @@ from krx_quant.feeds import BOOK, TRADE
 from krx_quant.macro import read_partition
 from krx_quant.predictions import scored_rows
 from krx_quant.pricing import Direction
-from krx_quant.skill import day_kappa, skill
+from krx_quant.skill import skill, skill_text
 from krx_quant.stats import Prices, Scored, on_target, scored_by_algorithm, touch_profit
 from krx_quant.touch import TARGET_VERSION, WINDOW
 
@@ -180,19 +180,8 @@ def _lines(name: str, t: Tally, calls: Mapping[date, Sequence[tuple[Direction, D
     s = skill([c for day in calls.values() for c in day])
     if s is None:
         return []
-
-    def score(value: float | None) -> str:
-        return "—" if value is None else f"{value:+.3f}"
-
-    by_day = day_kappa(calls)
-    day = (
-        "—"
-        if by_day is None
-        else f"{score(by_day.value)} [{score(by_day.low)}, {score(by_day.high)}] {by_day.n}일"
-    )
     lines = [
-        f"{name}: 채점 {s.n:,} · 정답률 {s.accuracy:.1%} · 기대 정답률 {s.expected_accuracy:.1%} · "
-        f"kappa {score(s.kappa)} (거래일 {day}) · Gerrity {score(s.gerrity)} · 상승·하락 예측 {t.calls:,}"
+        f"{name}: 채점 {s.n:,} · 정답률 {s.accuracy:.1%} · {skill_text(calls)} · 상승·하락 예측 {t.calls:,}"
     ]
     if not t.calls:
         return lines

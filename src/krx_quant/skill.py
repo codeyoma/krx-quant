@@ -108,6 +108,30 @@ def day_kappa(
     return t_test([s.kappa for s in days if s is not None and s.kappa is not None], level)
 
 
+def skill_text(calls_by_day: Mapping[date, Sequence[tuple[Direction, Direction]]]) -> str:
+    """The calls' skill as the commands print it (``signal-review``, ``diagnose``; #262): the
+    accuracy of calls made at the same rates blind to the outcome, Cohen's kappa, by trading day
+    too (the days' mean, its 95% interval and the days), and Gerrity's score; "실력 —" without
+    a call."""
+    s = skill([c for calls in calls_by_day.values() for c in calls])
+    if s is None:
+        return "실력 —"
+
+    def score(value: float | None) -> str:
+        return "—" if value is None else f"{value:+.3f}"
+
+    by_day = day_kappa(calls_by_day)
+    day = (
+        "—"
+        if by_day is None
+        else f"{score(by_day.value)} [{score(by_day.low)}, {score(by_day.high)}] {by_day.n}일"
+    )
+    return (
+        f"기대 정답률 {s.expected_accuracy:.1%} · kappa {score(s.kappa)} (거래일 {day}) · "
+        f"Gerrity {score(s.gerrity)}"
+    )
+
+
 def gerrity(table: Sequence[Sequence[int]]) -> float | None:
     """The Gerrity score of a K×K table (rows called, columns happened, in ``ORDER``); None
     when a cumulative class rate of the outcomes is 0 or 1 (the weights divide by it)."""
