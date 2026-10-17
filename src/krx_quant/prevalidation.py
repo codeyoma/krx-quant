@@ -52,7 +52,7 @@ import inspect
 import json
 import logging
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, time
 from pathlib import Path
 from typing import Any, cast
@@ -106,6 +106,68 @@ REGISTERED_BEFORE = frozenset({"newton", "gauss", "granger", "markov", "turing"}
 
 def report_path(state_dir: Path, name: str) -> Path:
     return state_dir / "prevalidations" / f"{name}.json"
+
+
+def history_path(state_dir: Path, name: str) -> Path:
+    """Every pre-validation of ``name``, a JSON line each, oldest first (#262): the report keeps
+    the last one only."""
+    return state_dir / "prevalidations" / f"{name}.history.jsonl"
+
+
+def earlier_runs(state_dir: Path, name: str, days: Sequence[date]) -> tuple[int, int]:
+    """How many pre-validations of ``name`` ran before, and how many of them replayed any of
+    ``days`` (#262): a day replayed again after a fix is no longer out of sample. Lines that
+    cannot be read are skipped."""
+    path = history_path(state_dir, name)
+    if not path.exists():
+        return 0, 0
+    asked = {d.isoformat() for d in days}
+    runs = same = 0
+    for line in path.read_text().splitlines():
+        try:
+            replayed = set(json.loads(line)["days"])
+        except (ValueError, KeyError, TypeError):
+            continue
+        runs += 1
+        same += bool(replayed & asked)
+    return runs, same
+
+
+def seed_history(state_dir: Path, name: str) -> None:
+    """Start ``name``'s run history from its report when the history does not exist yet: a
+    report from before the history (#262) is a run too. A report that cannot be read starts
+    none."""
+    history, report = history_path(state_dir, name), report_path(state_dir, name)
+    if history.exists() or not report.exists():
+        return
+    try:
+        data = json.loads(report.read_text())
+        line = {key: data[key] for key in ("prevalidated_at", "code", "passed", "days")}
+        line["target_version"] = data.get("target_version")
+    except (OSError, ValueError, KeyError, TypeError):
+        return
+    tmp = history.with_name(f".{history.name}.tmp")
+    tmp.write_text(json.dumps(line) + "\n")
+    tmp.replace(history)  # whole or not at all: a cut-short seed would never be seeded again
+
+
+def _record_run(state_dir: Path, result: Prevalidation) -> None:
+    path = history_path(state_dir, result.algorithm)
+    line = {
+        "prevalidated_at": result.prevalidated_at.isoformat(),
+        "code": result.code,
+        "target_version": result.target_version,
+        "passed": result.passed,
+        "days": [d.isoformat() for d in result.days],
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+") as f:
+        f.seek(0, 2)
+        if f.tell():  # a last line cut short (no newline) must not swallow this one
+            f.seek(f.tell() - 1)
+            if f.read(1) != "\n":
+                f.write("\n")
+        f.write(json.dumps(line) + "\n")
 
 
 def code_digest(algorithm: Algorithm | KindAlgorithm) -> str:
@@ -247,6 +309,8 @@ class Prevalidation:
     db: Path
     target_version: int = 1  # the target replayed and scored on (#169); a kind's answer version
     kind: str = DIRECTION  # the kind it predicts (#179)
+    earlier_runs: int = 0  # pre-validations of the algorithm before this one (#262)
+    earlier_on_these_days: int = 0  # of them, those that replayed any of these days
 
     @property
     def passed(self) -> bool:
@@ -268,6 +332,8 @@ class Prevalidation:
             "skipped_for_cpu": self.skipped_for_cpu,
             "db": str(self.db),
             "target_version": self.target_version,
+            "earlier_runs": self.earlier_runs,
+            "earlier_runs_on_these_days": self.earlier_on_these_days,
         }
         if self.kind != DIRECTION:
             out["kind"] = self.kind
@@ -343,10 +409,16 @@ async def prevalidate(
         else:
             same = [a.name for a in kind_algorithms if a.kind == kind.name and a is not candidate]
             result = _judge_kind(settings, candidate, kind, same, replayed, models, db, now)
+        seed_history(settings.state_dir, name)
+        before, on_days = earlier_runs(settings.state_dir, name, replayed)
+        result = replace(result, earlier_runs=before, earlier_on_these_days=on_days)
         path = report_path(settings.state_dir, name)
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(result.as_dict(), indent=2, ensure_ascii=False))
+        # The run is recorded before its report replaces the last one: a stop between the two
+        # counts it once more, never once less (a rerun on the same days must not look fresh).
+        _record_run(settings.state_dir, result)
         tmp.replace(path)
         return result
 

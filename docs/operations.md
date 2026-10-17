@@ -815,10 +815,10 @@ report: /state/prevalidations/mandelbrot.json
 ````
 
 - 녹화된 최근 20거래일을 하루씩 재생한다. 날마다 그 전날까지로 다시 학습하고, 등록된 모든 알고리즘을 같이 돌린다. 하루 재생(`replay`)의 20배쯤 걸리고 CPU를 많이 쓴다. 장중에는 실시간 예측과 CPU를 다투므로 돌리지 않는다. 21:30 밤 학습과도 겹치지 않게 한다. 메모리 2GB 서버에서 엔진과 같이 돌므로 처음 한 번은 `docker stats`로 메모리를 본다.
-- 출력은 검사 네 가지(`features`, `budget`, `correlation`, `stats`)의 결과다. 기준은 [engine-api.md](engine-api.md#사전-검증-24)에 있다.
+- 출력은 검사 네 가지(`features`, `budget`, `correlation`, `stats`)의 결과다. 기준은 [engine-api.md](engine-api.md#사전-검증-24)에 있다. 전에 돈 적이 있으면 `run before: N, M of them on any of these days`가 붙는다(#262): 고친 뒤 같은 날로 다시 돌린 날은 더는 표본 밖이 아니다.
 - 통과(`passed`, 종료 코드 0)하면 엔진이 다음 봉 마감부터 수습으로 돌린다. 장 시간 밖이면 다음 거래일 첫 봉 마감부터다. 재시작은 필요 없다.
 - 거부(`refused`, 종료 코드 1)되면 엔진은 계속 기다린다. 고친 커밋이 배포된 뒤 다시 돌린다.
-- 결과는 `state/prevalidations/<이름>.json`(리포트)과 `state/prevalidation-<이름>.sqlite3`(재생한 예측)에 남는다. 도는 동안에는 `state/prevalidation-<이름>.lock`(잠금, 아래)도 있다. 실시간 DB와 순위표는 바뀌지 않는다.
+- 결과는 `state/prevalidations/<이름>.json`(리포트), `state/prevalidations/<이름>.history.jsonl`(실행 기록, #262)과 `state/prevalidation-<이름>.sqlite3`(재생한 예측)에 남는다. 도는 동안에는 `state/prevalidation-<이름>.lock`(잠금, 아래)도 있다. 실시간 DB와 순위표는 바뀌지 않는다.
 - 녹화가 20거래일보다 적으면 있는 날만 쓴다. 10거래일보다 적으면 리포트는 남지만 통과하지 못한다(`days` 검사). 녹화는 2026-10-08에 시작했다.
 - 첫 대상은 Kalman(#25), Shannon(#26), Poisson(#27)이다. 배포된 날부터 엔진이 시작할 때마다 `사전 검증 대기: kalman, shannon, poisson` 알림이 온다. 알고리즘마다 따로 돌린다. 녹화된 거래일이 10일이 된 날 21:00 업로드 뒤에 돌릴 수 있다(10-12부터 빠짐없이 녹화했다면 2026-10-23). 그 전에 돌리면 `days` 검사에서 거부된다. 녹화된 날 수는 `ls -d data/events/date=* | wc -l`로 본다(휴장일 폴더가 있으면 그만큼 뺀다). 예약 작업이 `mandelbrot`, `breiman` 다음에 하나씩 돌린다(위).
 - 통과는 그때의 코드와 정답 버전(`KRX_TARGET_VERSION`)에만 유효하다. 통과한 뒤 엔진이 돌리기 전에 그 알고리즘의 코드가 바뀌어 배포되거나 정답 버전이 바뀌면 다시 기다린다. 다시 돌린다.
@@ -1148,6 +1148,7 @@ docker compose logs --tail 200 engine
 | `replay-<날짜>.sqlite3` | `krx-quant replay`의 결과 |
 | `.engine.lock` | 도는 엔진이 잡는 잠금 파일(`flock`, #168). 잡혀 있으면 `rescore`가 거부한다. 엔진이 끝나면 풀린다. 파일은 남아도 된다 |
 | `prevalidation-<알고리즘>.sqlite3` | `krx-quant prevalidate`가 재생한 예측과 채점. 다시 돌리면 새로 만든다 |
+| `prevalidations/<알고리즘>.history.jsonl` | 사전 검증 실행 기록(#262): 실행마다 한 줄(시각, 코드, 정답 버전, 통과, 재생한 날). 리포트의 `earlier_runs`가 여기서 센다. 기록이 없고 리포트가 있으면 그 리포트로 첫 줄을 만든다(지우면 리포트의 실행 하나부터 다시 센다) |
 | `prevalidations/<알고리즘>.json` | 사전 검증 리포트(`passed`, 검사별 결과, 통계, 정답 버전. 다른 종류의 알고리즘은 `kind`도, #179). 엔진이 봉 마감마다 기다리는 알고리즘의 것을 읽는다([engine-api.md](engine-api.md#사전-검증-24)). 예약 작업도 밤마다 읽어 지금 코드가 판정받았는지 보고, 사전 검증 작업이 쓴 것은 #204 댓글에 붙인다(#204) |
 | `models/<알고리즘>.json` | 엔진이 지금 돌리는 모델: `version`, `params`, `trained`, `trained_until`, `training`(학습 정보: 첫날·마지막 날, 표본 수, 학습 손실, 정답 출처별 날 수. #165 전에 저장한 모델에는 없다), Turing은 `blob`(트리). 없으면 기본 모델 |
 | `models/baseline-climate.json` | 도달 정답(`KRX_TARGET_VERSION=3`)의 기준 예측 `baseline-climate` 표(#169). 모델과 같은 형식이고, `params`는 `<종목>.<30분 시간대>` → 방향(1 상승, 0 보합, −1 하락)이다. 밤 학습이 늘 승격하고 08:00 교체가 설치한다. 없으면 모든 칸이 보합(`baseline-climate-default`)이다. 버전 1에서는 읽지 않는다 |

@@ -22,7 +22,7 @@ from krx_quant.api import create_app
 from krx_quant.baselines import Forecast
 from krx_quant.engine import PredictionEngine
 from krx_quant.market_calendar import MarketCalendar
-from krx_quant.predictions import NewPrediction, PredictionStore, Score
+from krx_quant.predictions import NewKindPrediction, NewPrediction, PredictionStore, Score
 from krx_quant.pricing import Direction
 from krx_quant.touch import TARGET_VERSION, Reached, TouchResult
 from tests.api_schema import check
@@ -329,6 +329,44 @@ async def test_an_algorithms_stats_break_down_by_symbol_slot_and_model_version(t
     assert body["overall"]["lift"]["vs"]["baseline-flat"]["q"] is not None
     by_symbol = body["by_symbol"]["005930"]["lift"]["vs"]["baseline-flat"]
     assert (by_symbol["q"], by_symbol["significant"]) == (None, None)
+
+
+async def test_an_algorithms_stats_show_its_skill_and_its_calls_by_volatility(tmp_path: Path) -> None:
+    """#262: alpha calls the first 30 bar closes right (8 up, 15 flat, 7 down); the barrier
+    width w there is 2, 3 and 4 ticks, ten bar closes each."""
+    async with board(tmp_path) as (engine, client):
+        baselines(engine.store)
+        store_scored(engine.store, "alpha", OUTCOMES[:30])
+        start = datetime.combine(DAY, at("09:01:00").timetz())
+        engine.store.add_kind_predictions(
+            "barrier",
+            [
+                NewKindPrediction(
+                    "005930",
+                    "barrier-climate",
+                    "v",
+                    start + timedelta(minutes=i),
+                    start,
+                    None,
+                    "no_book",
+                    width_ticks=2 + i // 10,
+                    anchor=81_250,
+                    tick=100,
+                )
+                for i in range(30)
+            ],
+        )
+
+        body = await get(client, "/v1/algorithms/alpha/stats")
+
+    skill = body["overall"]["skill"]
+    assert (skill["n"], skill["kappa"], skill["balanced_accuracy"]) == (30, 1.0, 1.0)
+    assert skill["gerrity"] == pytest.approx(1.0)
+    assert skill["expected_accuracy"] == pytest.approx((8**2 + 15**2 + 7**2) / 30**2)
+    assert skill["independence"]["df"] == 4
+    # In basis points of the mid-point: w ticks × 100 won ÷ 81,250 won.
+    assert body["volatility_cuts"] == {"005930": [pytest.approx(2e6 / 81_250), pytest.approx(3e6 / 81_250)]}
+    assert {t: e["n"] for t, e in body["by_volatility"].items()} == {"low": 10, "mid": 10, "high": 10}
 
 
 # Scored, but its bar close has no touch label: before the recording, not filled in yet.
