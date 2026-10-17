@@ -3,7 +3,7 @@ features Turing and Breiman read, and the previous days read from the backfilled
 
 from __future__ import annotations
 
-from datetime import date, datetime, time
+from datetime import UTC, date, datetime, time
 from pathlib import Path
 
 import pytest
@@ -70,7 +70,8 @@ SYMBOL_ = "005930"
 def test_the_features_read_the_bar_close_s_slot_on_the_days_before() -> None:
     days = [{"09:30": float(i)} for i in range(1, 21)]  # 1 bp the day before, 20 twenty days back
     values = {name: FEATURES[name](snapshot("09:31", days)) for name in SLOT_RETURN_FEATURES}
-    assert ten_minute_slot(datetime(2026, 10, 14, 9, 39)) == "09:30"
+    assert ten_minute_slot(datetime(2026, 10, 14, 9, 39, tzinfo=KST)) == "09:30"
+    assert ten_minute_slot(datetime(2026, 10, 14, 0, 39, tzinfo=UTC)) == "09:30", "read in KST"
     assert values == {
         slot_return_feature(1): 1.0,
         slot_return_feature(5): pytest.approx(3.0),

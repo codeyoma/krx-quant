@@ -785,7 +785,7 @@ def ten_minute_slot(at: datetime) -> str:
     """The 10-minute slot of the clock (KST) holding the minute that starts at ``at``:
     ``"09:00"`` is 09:00–09:09. A bar close's is that of the first of the four minutes it
     predicts (09:37 → ``"09:30"``)."""
-    local = at.astimezone(KST)
+    local = at if at.tzinfo is None else at.astimezone(KST)  # a naive time is KST already
     return f"{local.hour:02d}:{local.minute - local.minute % SLOT_MINUTES:02d}"
 
 
