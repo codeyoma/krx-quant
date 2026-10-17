@@ -151,6 +151,7 @@ async def test_the_leaderboard_ranks_by_the_lower_bound_of_the_weakest_lift(tmp_
     # out at the target 81,450 (back at 81,050): 1.5 ticks less 1.86875 of cost each.
     assert alpha["pnl"]["trades"] == 20
     assert alpha["pnl"]["total_ticks"] == pytest.approx(20 * (1.5 - 1.86875))
+    assert alpha["pnl_inverse"]["trades"] == 20
     # Always-flat is right on the 20 flats: alpha gains 0.5 at every other bar close.
     vs_flat = alpha["lift"]["vs"]["baseline-flat"]
     assert (vs_flat["n"], vs_flat["value"]) == (40, 0.5)

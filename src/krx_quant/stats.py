@@ -13,7 +13,10 @@ likely one; a tie goes to flat, then up.
   summed over the three classes (0 is perfect, 2 is sure and wrong);
 - **profit** (the touch P&L, research only): each up or down call traded by the label's
   own rule (``touch_profit``), in ticks, less the round-trip cost (sell tax and both
-  commissions);
+  commissions: a down call as a short of the stock);
+- **profit, inverse** (#267, research only): the same, a down call traded through the
+  symbol's single-stock inverse product (``pricing.INVERSE_SYMBOLS``), which pays no sell
+  tax: less both commissions only. A down call on a symbol without one is no trade;
 - **calibration**: every class probability binned by tenths, against how often that
   class happened; pooled over the three classes, and each class on its own (pooled, a
   forecast of 1/3 each when only rises happen looks perfect; on its own, up does not);
@@ -47,7 +50,7 @@ from statistics import NormalDist
 from typing import Any, Protocol, TypeVar
 
 from krx_quant.feeds.base import kst_day
-from krx_quant.pricing import SELL_TAX, Direction, most_likely
+from krx_quant.pricing import INVERSE_SYMBOLS, SELL_TAX, Direction, most_likely
 
 _Z = NormalDist().inv_cdf(0.975)
 FDR = 0.05  # the false discovery rate a significant lift is held to
@@ -152,7 +155,8 @@ class Summary:
     precision: Interval | None
     coverage: Interval | None
     brier: Interval | None
-    pnl: Profit
+    pnl: Profit  # a down call as a short of the stock: the sell tax paid
+    pnl_inverse: Profit  # a down call through an inverse product: no sell tax (#267)
     calibration: list[CalibrationBin]  # the three classes pooled
     calibration_by_class: dict[Direction, list[CalibrationBin]]
 
@@ -260,6 +264,7 @@ def _standard_error(values: Sequence[float], mean: float) -> float:
 def summarize(records: Sequence[Scored], fee_rate: float) -> Summary:
     directional = [r for r in records if r.predicted is not Direction.FLAT]
     trades = [p for r in directional if (p := touch_profit(r.predicted, r.prices, fee_rate)) is not None]
+    inverse = [p for r in directional if (p := _inverse_profit(r, fee_rate)) is not None]
     return Summary(
         n=len(records),
         accuracy=wilson(sum(r.correct for r in records), len(records)),
@@ -267,6 +272,7 @@ def summarize(records: Sequence[Scored], fee_rate: float) -> Summary:
         coverage=wilson(len(directional), len(records)),
         brier=mean_interval([_brier(r) for r in records]),
         pnl=Profit(len(trades), sum(trades), mean_interval(trades)),
+        pnl_inverse=Profit(len(inverse), sum(inverse), mean_interval(inverse)),
         calibration=_calibration(records, tuple(Direction)),
         calibration_by_class={d: _calibration(records, (d,)) for d in Direction},
     )
@@ -276,17 +282,22 @@ def _brier(r: Scored) -> float:
     return sum((r.probability(d) - (d is r.outcome)) ** 2 for d in Direction)
 
 
-def touch_profit(predicted: Direction, prices: Prices | None, fee_rate: float) -> float | None:
+def touch_profit(
+    predicted: Direction, prices: Prices | None, fee_rate: float, *, down_inverse: bool = False
+) -> float | None:
     """The touch P&L of a call (#170, research only), in ticks, by the touch label's own rule:
 
     - up: bought at the bar close's best ask; sold at the upper target if the best bid
       reached it within the four minutes, else at the last best bid before they ended;
-    - down (an inverse product assumed): sold at the bar close's best bid; bought back at
-      the lower target if the best ask reached it, else at the last best ask;
+    - down: sold at the bar close's best bid; bought back at the lower target if the best
+      ask reached it, else at the last best ask;
     - flat: no trade (None), as a call without the quotes it needs.
 
-    Less the round-trip cost, the sell tax and both commissions on the reference price, in
-    ticks. Every share fills at the best quote: queues, sizes and delays are left out."""
+    Less the round-trip cost on the reference price, in ticks: the sell tax and both
+    commissions, as a short of the stock; for a down call with ``down_inverse``, both
+    commissions only, as an inverse product (an ETF pays no sell tax, #267), its exposure
+    the same and its own spread, tracking and daily reset left out. Every share fills at the
+    best quote: queues, sizes and delays are left out."""
     if prices is None or predicted is Direction.FLAT:
         return None
     if predicted is Direction.UP:
@@ -297,8 +308,17 @@ def touch_profit(predicted: Direction, prices: Prices | None, fee_rate: float) -
         bought = prices.lower if prices.lower_reached else prices.ask_end
     if bought is None or sold is None:
         return None
-    cost = prices.reference * (SELL_TAX + 2 * fee_rate)
+    tax = 0.0 if down_inverse and predicted is Direction.DOWN else SELL_TAX
+    cost = prices.reference * (tax + 2 * fee_rate)
     return (sold - bought - cost) / prices.tick
+
+
+def _inverse_profit(r: Scored, fee_rate: float) -> float | None:
+    """A call's touch P&L with a down call traded through the symbol's inverse product; None
+    for a down call on a symbol without one (#267)."""
+    if r.predicted is Direction.DOWN and r.symbol not in INVERSE_SYMBOLS:
+        return None
+    return touch_profit(r.predicted, r.prices, fee_rate, down_inverse=True)
 
 
 def _calibration(records: Sequence[Scored], classes: Sequence[Direction]) -> list[CalibrationBin]:
@@ -653,15 +673,16 @@ def entry_json(e: Entry) -> dict[str, Any]:
         "precision": interval_json(s.precision),
         "coverage": interval_json(s.coverage),
         "brier": interval_json(s.brier),
-        "pnl": {
-            "trades": s.pnl.trades,
-            "total_ticks": s.pnl.total,
-            "per_trade": interval_json(s.pnl.per_trade),
-        },
+        "pnl": _profit_json(s.pnl),
+        "pnl_inverse": _profit_json(s.pnl_inverse),
     }
     if e.lifts:
         out["lift"] = lifts_json(e)
     return out
+
+
+def _profit_json(p: Profit) -> dict[str, Any]:
+    return {"trades": p.trades, "total_ticks": p.total, "per_trade": interval_json(p.per_trade)}
 
 
 def lifts_json(e: Lifted) -> dict[str, Any]:

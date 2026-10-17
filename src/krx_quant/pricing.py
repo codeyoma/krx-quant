@@ -13,6 +13,12 @@ import math
 # KOSDAQ 0.20%).
 SELL_TAX = 0.0020
 
+# The symbols a down call can be traded on through a single-stock inverse product (#267): the
+# −2x ETFs on 005930 (PLUS 삼성전자선물단일종목인버스2X) and 000660 (SOL SK하이닉스선물단일종목인버스2X),
+# listed 2026-05-27. 009150 has none. An ETF's sale pays no securities transaction tax (the
+# tax falls on shares only, 증권거래세법 제2조), so its round trip costs the commissions alone.
+INVERSE_SYMBOLS = frozenset({"005930", "000660"})
+
 # KRX tick sizes by price band, unified for KOSPI and KOSDAQ since 2023-01-25:
 # (lowest price of the band, tick).
 _TICK_BANDS = (
