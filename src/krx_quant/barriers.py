@@ -3,7 +3,7 @@ in the four minutes after a bar close. A kind of prediction (``kinds.py``) besid
 direction: López de Prado's triple barrier (*Advances in Financial Machine Learning*, 2018,
 ch. 3), with horizontal barriers at a multiple (one) of a volatility estimate, never closer
 than the cost, and a time barrier of four minutes. A scalper's trade read as a long: take
-profit, time out, stop out; as a short (an inverse product), the other way round.
+profit, time out, stop out; as a short (of the stock: the sell tax paid), the other way round.
 
 **Width** (fixed at the bar close, ``features.barrier_width``, ``Kind.width``): σ̂₁ is the
 exponentially weighted standard deviation (span 100) of the one-minute changes of the closes
@@ -204,7 +204,7 @@ def barrier_profit(predicted: str, outcome: str, path: Mapping[str, Any]) -> flo
     - up_first (a long): bought at the bar close's best ask; sold at U if U was reached first,
       at the best bid when L was reached if L was, else at the last best bid before the four
       minutes ended;
-    - down_first (a short, an inverse product assumed): sold at the bar close's best bid;
+    - down_first (a short of the stock): sold at the bar close's best bid;
       bought back at L if L was reached first, at the best ask when U was reached if U was,
       else at the last best ask;
     - timeout: no trade (None).
