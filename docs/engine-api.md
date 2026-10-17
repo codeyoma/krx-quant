@@ -1217,7 +1217,7 @@ docker compose run --rm --no-deps engine prevalidate <이름> --days 5  # 빨리
 
     > **바뀜** (2026-10-14, #193): "도달 정답이 있고 봉 마감과 4분 뒤 중간가를 아는 예측만 센다(손익 열은 기준 A의 중간가 손익이다)" → 도달 정답이 있는 예측, 닿음 손익. 이유: 통계가 4분 뒤 중간가를 더 쓰지 않는다.
 - **리포트**: `state/prevalidations/<이름>.json`. 통과하든 못 하든 마지막 결과로 덮어쓴다. `earlier_runs`(그 전에 돈 사전 검증 수)와 `earlier_runs_on_these_days`(그중 이번 날짜를 하나라도 재생한 수, #262)가 있다. 고친 뒤 같은 날로 다시 돌린 날은 더는 표본 밖이 아니다.
-- **실행 기록**(#262): `state/prevalidations/<이름>.history.jsonl`. 실행마다 한 줄(`prevalidated_at`, `code`, `target_version`, `passed`, `days`)을 덧붙인다. 리포트는 마지막 것만 남기므로, 몇 번 돌렸는지는 여기서 센다. 명령은 전에 돈 적이 있으면 `run before: N, M of them on any of these days`를 출력한다.
+- **실행 기록**(#262): `state/prevalidations/<이름>.history.jsonl`. 실행마다 한 줄(`prevalidated_at`, `code`, `target_version`, `passed`, `days`)을 덧붙인다. 리포트는 마지막 것만 남기므로, 몇 번 돌렸는지는 여기서 센다. 기록이 없는데 리포트가 있으면(이 기록이 생기기 전에 돈 사전 검증) 그 리포트를 첫 줄로 삼는다. 명령은 전에 돈 적이 있으면 `run before: N, M of them on any of these days`를 출력한다.
   - `algorithm`, `code`(재생한 코드의 digest), `prevalidated_at`, `passed`, `days`, `models`(날짜 → 모델 버전), `checks`(`check`, `passed`, `detail`)
   - `stats`: 순위표 항목과 같은 형식(`rank`, `n`, `accuracy`, `precision`, `coverage`, `brier`, `pnl`, `lift`). 재생한 알고리즘들끼리 매긴 순위와 FDR 보정(`q`, `significant`)이다. 종목·시간대별 분할은 없다
   - `correlations`(알고리즘 → r), `timed_out`, `statuses`(예측 상태별 개수), `skipped_for_cpu`(CPU 예산으로 건너뛴 봉 마감 수, 판정에는 쓰지 않는다), `db`, `target_version`(재생하고 채점한 정답 버전, #191. 없으면 1)

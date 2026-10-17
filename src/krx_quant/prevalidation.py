@@ -133,6 +133,22 @@ def earlier_runs(state_dir: Path, name: str, days: Sequence[date]) -> tuple[int,
     return runs, same
 
 
+def seed_history(state_dir: Path, name: str) -> None:
+    """Start ``name``'s run history from its report when the history does not exist yet: a
+    report from before the history (#262) is a run too. A report that cannot be read starts
+    none."""
+    history, report = history_path(state_dir, name), report_path(state_dir, name)
+    if history.exists() or not report.exists():
+        return
+    try:
+        data = json.loads(report.read_text())
+        line = {key: data[key] for key in ("prevalidated_at", "code", "passed", "days")}
+        line["target_version"] = data.get("target_version")
+    except (OSError, ValueError, KeyError, TypeError):
+        return
+    history.write_text(json.dumps(line) + "\n")
+
+
 def _record_run(state_dir: Path, result: Prevalidation) -> None:
     path = history_path(state_dir, result.algorithm)
     line = {
@@ -385,6 +401,7 @@ async def prevalidate(
         else:
             same = [a.name for a in kind_algorithms if a.kind == kind.name and a is not candidate]
             result = _judge_kind(settings, candidate, kind, same, replayed, models, db, now)
+        seed_history(settings.state_dir, name)
         before, on_days = earlier_runs(settings.state_dir, name, replayed)
         result = replace(result, earlier_runs=before, earlier_on_these_days=on_days)
         path = report_path(settings.state_dir, name)

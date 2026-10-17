@@ -40,6 +40,7 @@ from krx_quant.prevalidation import (
     last_report,
     prevalidate,
     report_path,
+    seed_history,
 )
 from krx_quant.replay import replay_into
 from krx_quant.swap import reload_models
@@ -445,6 +446,17 @@ def test_earlier_runs_count_those_on_any_of_the_days(tmp_path: Path) -> None:
     assert earlier_runs(tmp_path, "x", [date(2026, 9, 15)]) == (3, 2)
     assert earlier_runs(tmp_path, "x", [date(2026, 9, 17)]) == (3, 0)
     assert earlier_runs(tmp_path, "y", [date(2026, 9, 15)]) == (0, 0)
+
+
+def test_a_report_from_before_the_history_counts_as_a_run(tmp_path: Path) -> None:
+    report = report_path(tmp_path, "z")
+    report.parent.mkdir(parents=True)
+    earlier = {"prevalidated_at": "2026-10-10T22:30:00+09:00", "code": "abc", "passed": False}
+    report.write_text(json.dumps({**earlier, "days": ["2026-09-15"]}))
+    seed_history(tmp_path, "z")
+    assert earlier_runs(tmp_path, "z", [date(2026, 9, 15)]) == (1, 1)
+    seed_history(tmp_path, "z")  # once only: the history exists now
+    assert earlier_runs(tmp_path, "z", [date(2026, 9, 15)]) == (1, 1)
 
 
 def test_the_command_reports_a_registry_that_fails_the_registration_check_as_an_error(
