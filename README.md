@@ -206,7 +206,7 @@ uv run python -c "import glob, pyarrow.parquet as pq; d = sorted(glob.glob('data
 - [docs/engine-api.md](docs/engine-api.md): 엔진 API, 예측·채점 규칙, 저장 구조, 알고리즘 규약과 학습, 재생
 - [docs/operations.md](docs/operations.md): 서버 개통, 설정 값 전체, 매일 일정, 밤 학습과 모델 교체, 자동 업데이트, 키 교체, 장애 대응과 알림, 저장 위치
 - [docs/paid-data.md](docs/paid-data.md): 유료 데이터 조사
-- [research/](research/README.md): 결정 전의 조사 자료. 단기 매매(스캘핑·데이·스윙) 퀀트 기법, 퀀트 회사, 근거 논문 조사(2026-10-17)와 거기서 나온 제안 이슈 #262–#267
+- [research/](research/README.md): 결정 전의 조사 자료. 단기 매매(스캘핑·데이·스윙) 퀀트 기법, 퀀트 회사, 근거 논문 조사와 그 보강 조사(둘 다 2026-10-17), 거기서 나온 제안 이슈 #262–#267
 
 ## 진행 상황
 

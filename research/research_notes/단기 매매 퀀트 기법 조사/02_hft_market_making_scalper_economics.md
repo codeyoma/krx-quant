@@ -136,7 +136,7 @@ microsecond에서 millisecond 단위 경쟁(latency arb, queue 앞자리 market 
 - **호가단위**: 2023-01-25부터 코스피·코스닥·코넥스가 통일됐다. 10만–20만원 구간은 500원에서 100원으로 줄었다 — [MTN 2022-11-01](https://news.mtn.co.kr/news-detail/2022110114103274390)
 - **krx-quant 자체 비용 모델**: 왕복 비용은 매도세 0.20% + 수수료 0.015% × 2 = 0.23%다.
   - 예: 81,250원(매수 1호가 81,200, 매도 1호가 81,300, k = 2)에서 비용은 약 1.87 tick이다.
-  - 위 목표에 닿아 팔아도 1.5 − 1.87 = −0.37 tick이다. "맞혔는데 손해"인 셈이다 — `/Users/yoma/Projects/krx-quant/docs/engine-api.md`(닿음 손익 항목), `/Users/yoma/Projects/krx-quant/docs/design.md`
+  - 위 목표에 닿아 팔아도 1.5 − 1.87 = −0.37 tick이다. "맞혔는데 손해"인 셈이다 — `docs/engine-api.md`(닿음 손익 항목), `docs/design.md`
 
 ### Inferences
 - 대략적인 손익분기 계산 (추론): 8만원대 종목에서 1 tick(100원)은 약 12.5 bp다.
@@ -186,7 +186,7 @@ retail 신호 엔진이 현실적으로 노릴 수 있는 것은 수 분에서 �
 - 개인 day trader의 97% 이상이 잃는다 — [Chague et al.](https://ideas.repec.org/p/spa/wpaper/2019wpecon47.html), [Barber et al. 2020](https://ideas.repec.org/a/oup/rasset/v10y2020i1p61-93..html)
 - 국내에서 이긴 소수는 자동화된 당일 contrarian 매매자였고, 매도 쪽 성과가 좋았다 — [박수철·우민철 2023](https://smallake.kr/wp-content/uploads/2024/06/40-5-01_%eb%b0%95%ec%88%98%ec%b2%a0_%ec%9a%b0%eb%af%bc%ec%b2%a01-28.pdf)
 - LOB 신호의 수명은 가격 변화 몇 번 수준이다 — [Kolm et al.](https://papers.ssrn.com/abstract=3900141)
-- 프로젝트 비용 모델에서 k = 2 tick 목표는 맞혀도 −0.37 tick이다 — `/Users/yoma/Projects/krx-quant/docs/engine-api.md`
+- 프로젝트 비용 모델에서 k = 2 tick 목표는 맞혀도 −0.37 tick이다 — `docs/engine-api.md`
 
 ### Inferences
 - **현실적이지 않은 것**: market making(지정가로 spread 벌기), latency/cross-market arb(현물–선물 괴리를 ms 안에 잡기), rebate capture, 뉴스와 공시에 대한 속도 경쟁, 초 단위 scalping. 모두 retail latency와 매도세 0.20%에서 기대값이 음수일 가능성이 크다.
