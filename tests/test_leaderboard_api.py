@@ -24,6 +24,7 @@ from krx_quant.engine import PredictionEngine
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.predictions import NewKindPrediction, NewPrediction, PredictionStore, Score
 from krx_quant.pricing import Direction
+from krx_quant.skill import skill
 from krx_quant.touch import TARGET_VERSION, Reached, TouchResult
 from tests.api_schema import check
 from tests.replay_events import DAY, at, run
@@ -307,6 +308,17 @@ async def test_each_lift_is_also_judged_by_trading_day(tmp_path: Path) -> None:
     # One day says nothing of how the days differ.
     assert alpha(today)["lift"]["vs"]["baseline-flat"]["by_day"] is None
     assert alpha(today)["lift"]["day_low"] is None
+    # Kappa by trading day (#262): each day's kappa of its own calls, one value a day.
+    kappas = []
+    for calls in DAILY_CALLS:
+        s = skill(list(zip(calls, OUTCOMES, strict=False)))
+        assert s is not None and s.kappa is not None
+        kappas.append(s.kappa)
+    assert kappas[0] == 1.0 and kappas[2] == 0.0
+    by_day_kappa = stats["overall"]["skill"]["by_day"]
+    assert (by_day_kappa["n"], by_day_kappa["value"]) == (3, pytest.approx(sum(kappas) / 3))
+    spread = math.sqrt(sum((k - sum(kappas) / 3) ** 2 for k in kappas) / 2) / math.sqrt(3)
+    assert by_day_kappa["low"] == pytest.approx(sum(kappas) / 3 - T_975_2 * spread)
 
 
 async def test_an_algorithms_stats_break_down_by_symbol_slot_and_model_version(tmp_path: Path) -> None:
@@ -364,6 +376,7 @@ async def test_an_algorithms_stats_show_its_skill_and_its_calls_by_volatility(tm
     assert skill["gerrity"] == pytest.approx(1.0)
     assert skill["expected_accuracy"] == pytest.approx((8**2 + 15**2 + 7**2) / 30**2)
     assert skill["independence"]["df"] == 4
+    assert skill["by_day"] is None  # one day: nothing of how the days differ
     # In basis points of the mid-point: w ticks × 100 won ÷ 81,250 won.
     assert body["volatility_cuts"] == {"005930": [pytest.approx(2e6 / 81_250), pytest.approx(3e6 / 81_250)]}
     assert {t: e["n"] for t, e in body["by_volatility"].items()} == {"low": 10, "mid": 10, "high": 10}
