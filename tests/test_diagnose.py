@@ -28,7 +28,7 @@ from krx_quant.macro import INDICATORS, READING_SCHEMA, REGIME_SCHEMA
 from krx_quant.predictions import DB_NAME, NewPrediction, PredictionStore, Score, iso
 from krx_quant.pricing import Direction
 from krx_quant.recorder import ParquetRecorder
-from krx_quant.touch import SILENT, Reached, TouchResult
+from krx_quant.touch import SILENT, TARGET_VERSION, Reached, TouchResult
 from tests.replay_events import DAY, SYMBOL, at, book, futures_trade, trade, vi
 from tests.test_replay_cli import record
 
@@ -112,6 +112,7 @@ def server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     scored(store, predicted(store, at("09:03:00"), 2.0, special=True), DOWN, DOWN)
     predicted(store, at("09:04:00"), 4.0)
     predicted(store, at("09:05:00"), 11.0, status="timed_out")
+    store.record_models([("newton", "v1", TARGET_VERSION)])  # trained on the touch target (#170)
     # Their touch labels (#167), at 81,250 (k = 2, targets 81,450 and 81,050): 09:01 up at
     # 09:02:10, after it was displayed; 09:02 up at 09:02:00.4, before its display at 09:02:01;
     # 09:03 flat, though a trade printed at 81,450; 09:04 silent.
@@ -359,6 +360,17 @@ def test_the_measurements_are_reported_as_worked_out_by_hand(
         "  005930 뒤집힌 통합 호가 없음\n"
         "  005930 봉 마감 직전 호가가 뒤집힘: 376개 중 0개 (날마다 0–0)\n" in out
     )
+    # Skill and entry delay (#262): newton's two scored calls, both up and right (09:03's special
+    # left out). One class called and happened: no kappa, no Gerrity. At their bar closes both
+    # reached the upper target (the stored paths); acted on later they see the recorded quotes
+    # only: from 09:01:01 nothing reaches 81,450 (the book at 09:01:30.2 bids 81,200), and after
+    # 09:02 nothing was received. The stored paths keep no start quotes: no touch P&L.
+    assert (
+        "  newton: 채점 2 · 정답률 100.0% · 기대 정답률 100.0% · kappa — (거래일 —) · Gerrity —"
+        " · 상승·하락 예측 2\n"
+        "    목표 도달: 봉 마감 100.0% · +1초 0.0% · +5초 0.0% · +30초 0.0%\n"
+        "    닿음 손익(틱/번, 연구용): 봉 마감 (n 0) — · +1초 (n 0) — · +5초 (n 0) — · +30초 (n 0) —\n" in out
+    )
     assert snapshot(server) == before, "nothing is written, not even beside the DB"
 
 
@@ -383,7 +395,9 @@ def test_only_the_sections_without_data_say_so(server: Path, capsys: pytest.Capt
     out = capsys.readouterr().out
     assert "  newton: 예측 5," in out
     sections = out.split("\n\n")
-    assert [s.splitlines()[1] for s in sections[3:6] + sections[9:]] == ["  없음"] * 4
+    assert [s.splitlines()[1] for s in sections[3:6] + sections[9:10]] == ["  없음"] * 4
+    # Without the recorded quotes only the bar close is measured (#262).
+    assert "    목표 도달: 봉 마감 100.0% · +1초 (n 0) — · +5초 (n 0) — · +30초 (n 0) —" in out
     assert "  1분봉 규칙: 정답이 있는 날의 1분봉 없음" in out, "the range's answers, without the bars"
 
 
@@ -397,7 +411,7 @@ def test_a_section_without_its_data_says_so(
     assert main(["diagnose"]) == 0
 
     out = capsys.readouterr().out
-    assert out.count("  없음") == 9
+    assert out.count("  없음") == 10
     assert not (tmp_path / "state").exists() and not (tmp_path / "data").exists()
 
 

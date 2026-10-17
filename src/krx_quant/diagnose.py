@@ -41,6 +41,11 @@ listed again.
    feeds' raw time codes during the spells. It only measures. #187 decided from it: the
    touch label and the barrier answer count crossed quotes (target version 3, barrier answer
    version 2); the reference price, the quote features and the range answer drop them.
+10. Per predictor (#262): its skill against the class rates (``skill.py``: the expected
+   accuracy, kappa and kappa by trading day, Gerrity) and its up and down calls acted on at
+   the bar close and 1, 5 and 30 seconds after it, as a person reading a signal would: how
+   often each reached its target, and the touch P&L (``entry_delay.py``). Its scored
+   predictions as the leaderboard reads them.
 
 Sections 6, 7 and 8 read the answers of the version the code makes now (``touch.TARGET_VERSION``,
 the kinds' answer versions) and say which in their titles.
@@ -69,6 +74,7 @@ import pyarrow.compute as pc
 from krx_quant.backfill import PreviousDay
 from krx_quant.barriers import BARRIER, SAME_MINUTE, TIMEOUT, barrier_profit
 from krx_quant.consensus import slot
+from krx_quant.entry_delay import entry_delays
 from krx_quant.feeds import (
     BOOK,
     BOOK_SNAPSHOT,
@@ -147,6 +153,11 @@ def diagnose(
             (
                 "9. 뒤집힌 호가(#187): 종목 × 날 × 30분 칸 비율·지속·깊이·봉 마감·거래소 귀속·체결·VI",
                 _crossed(data_dir, chosen, calendar),
+            ),
+            (
+                f"10. 예측자별 실력과 진입 지연(#262, 정답 버전 {TARGET_VERSION}): 봉 마감·+1초·+5초·+30초에"
+                " 들어갔을 때의 목표 도달과 닿음 손익",
+                [] if conn is None else entry_delays(conn, data_dir, chosen, fee_rate),
             ),
         ]
     lines = [f"진단 {chosen[0]} – {chosen[-1]} ({len(chosen)}거래일)" if chosen else "진단: 데이터 없음"]

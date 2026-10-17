@@ -794,6 +794,28 @@ STRUCTURE_CHECK = Job(
     ),
 )
 
+# The entry delay (#262): after the engine with the diagnosis's section 10 is deployed, on the
+# first trading day's night, once: each predictor's skill against the class rates, and its up
+# and down calls acted on 1, 5 and 30 seconds after the bar close, over the 20 days. The whole
+# diagnosis runs (it is one command); only its header and section 10 go to #262. The hour is a
+# bound, as the diagnosis's above. Before the pre-validations.
+ENTRY_DELAY_ISSUE = 262
+
+ENTRY_DELAY = Job(
+    name="entry-delay-262",
+    due=_first_trading_night,
+    command=("diagnose", "--days", "20"),
+    timeout=timedelta(hours=1),
+    targets=(
+        Target(
+            ENTRY_DELAY_ISSUE,
+            sections("진단", "10. 예측자별 실력과 진입 지연(#262"),
+            "출력 중 머리말과 10절(예측자별 실력과 진입 지연)만 싣는다. 에이전트가 이것으로 #262의 진입 지연"
+            " 민감도를 정리한다. 목표 도달과 닿음 손익은 봉 마감, +1초, +5초, +30초에 들어갔을 때다.",
+        ),
+    ),
+)
+
 # ⑤ The pre-validations (#204): a new algorithm runs live once its pre-validation has passed
 # (``prevalidation.py``). Once ``MIN_DAYS`` trading days are recorded, one waiting algorithm
 # is pre-validated a night, at most (``prevalidation_tonight``): a run replays 20 days beside
@@ -906,5 +928,6 @@ JOBS: tuple[Job, ...] = (
     SIGNAL_REVIEW,
     SUPPLY_PROBE,
     STRUCTURE_CHECK,
+    ENTRY_DELAY,
     *prevalidation_jobs([*(a.name for a in ALGORITHMS), *(a.name for a in KIND_ALGORITHMS)]),
 )
