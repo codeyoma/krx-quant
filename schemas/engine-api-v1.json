@@ -799,7 +799,7 @@
           "$ref": "#/$defs/touch_pnl"
         },
         "pnl_inverse": {
-          "description": "The touch P&L in ticks (#267, research only), a down call through the symbol's single-stock inverse product: less both commissions only (an ETF pays no sell tax). A down call on a symbol without one is no trade.",
+          "description": "The touch P&L in ticks (#267, research only), a down call through the symbol's single-stock inverse product: less both commissions only (an ETF pays no sell tax), on the product's notional (half the stock's for a −2x product). A down call on a symbol without one, or before it was listed, is no trade.",
           "$ref": "#/$defs/touch_pnl"
         },
         "lift": {"$ref": "#/$defs/lift"}

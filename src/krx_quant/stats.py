@@ -15,8 +15,9 @@ likely one; a tie goes to flat, then up.
   own rule (``touch_profit``), in ticks, less the round-trip cost (sell tax and both
   commissions: a down call as a short of the stock);
 - **profit, inverse** (#267, research only): the same, a down call traded through the
-  symbol's single-stock inverse product (``pricing.INVERSE_SYMBOLS``), which pays no sell
-  tax: less both commissions only. A down call on a symbol without one is no trade;
+  symbol's single-stock inverse product (``pricing.INVERSE_PRODUCTS``), which pays no sell
+  tax: less both commissions on its notional only. A down call on a symbol without one, or
+  before it was listed, is no trade;
 - **calibration**: every class probability binned by tenths, against how often that
   class happened; pooled over the three classes, and each class on its own (pooled, a
   forecast of 1/3 each when only rises happen looks perfect; on its own, up does not);
@@ -50,7 +51,7 @@ from statistics import NormalDist
 from typing import Any, Protocol, TypeVar
 
 from krx_quant.feeds.base import kst_day
-from krx_quant.pricing import INVERSE_SYMBOLS, SELL_TAX, Direction, most_likely
+from krx_quant.pricing import INVERSE_PRODUCTS, SELL_TAX, Direction, most_likely
 
 _Z = NormalDist().inv_cdf(0.975)
 FDR = 0.05  # the false discovery rate a significant lift is held to
@@ -283,7 +284,7 @@ def _brier(r: Scored) -> float:
 
 
 def touch_profit(
-    predicted: Direction, prices: Prices | None, fee_rate: float, *, down_inverse: bool = False
+    predicted: Direction, prices: Prices | None, fee_rate: float, *, inverse_leverage: int | None = None
 ) -> float | None:
     """The touch P&L of a call (#170, research only), in ticks, by the touch label's own rule:
 
@@ -294,9 +295,10 @@ def touch_profit(
     - flat: no trade (None), as a call without the quotes it needs.
 
     Less the round-trip cost on the reference price, in ticks: the sell tax and both
-    commissions, as a short of the stock; for a down call with ``down_inverse``, both
-    commissions only, as an inverse product (an ETF pays no sell tax, #267), its exposure
-    the same and its own spread, tracking and daily reset left out. Every share fills at the
+    commissions, as a short of the stock; for a down call with ``inverse_leverage``, both
+    commissions only, on the inverse product's notional (an ETF pays no sell tax, #267): the
+    same exposure as a share costs 1/leverage of its price in a −leverage x product. The
+    product's own spread, tracking and daily reset are left out. Every share fills at the
     best quote: queues, sizes and delays are left out."""
     if prices is None or predicted is Direction.FLAT:
         return None
@@ -308,17 +310,22 @@ def touch_profit(
         bought = prices.lower if prices.lower_reached else prices.ask_end
     if bought is None or sold is None:
         return None
-    tax = 0.0 if down_inverse and predicted is Direction.DOWN else SELL_TAX
-    cost = prices.reference * (tax + 2 * fee_rate)
+    if inverse_leverage and predicted is Direction.DOWN:
+        cost = prices.reference * 2 * fee_rate / inverse_leverage
+    else:
+        cost = prices.reference * (SELL_TAX + 2 * fee_rate)
     return (sold - bought - cost) / prices.tick
 
 
 def _inverse_profit(r: Scored, fee_rate: float) -> float | None:
     """A call's touch P&L with a down call traded through the symbol's inverse product; None
-    for a down call on a symbol without one (#267)."""
-    if r.predicted is Direction.DOWN and r.symbol not in INVERSE_SYMBOLS:
+    for a down call on a symbol without one, or before it was listed (#267)."""
+    product = INVERSE_PRODUCTS.get(r.symbol)
+    if r.predicted is not Direction.DOWN:
+        return touch_profit(r.predicted, r.prices, fee_rate)
+    if product is None or kst_day(r.bar_close) < product.listed:
         return None
-    return touch_profit(r.predicted, r.prices, fee_rate, down_inverse=True)
+    return touch_profit(r.predicted, r.prices, fee_rate, inverse_leverage=product.leverage)
 
 
 def _calibration(records: Sequence[Scored], classes: Sequence[Direction]) -> list[CalibrationBin]:

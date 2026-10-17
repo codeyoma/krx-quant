@@ -158,11 +158,11 @@ def test_the_touch_profit_follows_the_labels_rule() -> None:
 
 
 def test_the_inverse_touch_profit_drops_the_sell_tax_on_down_calls() -> None:
-    """#267: a down call through an inverse product pays the commissions only, 81,250 ×
-    0.03% = 0.24375 ticks; an up call is the stock's either way."""
-    c, inverse = 1.86875, 0.24375
-    assert touch_profit(DOWN, prices(LOWER), FEE, down_inverse=True) == pytest.approx(1.5 - inverse)
-    assert touch_profit(UP, prices(UPPER), FEE, down_inverse=True) == pytest.approx(1.5 - c)
+    """#267: a down call through a −2x inverse product pays the commissions only, on half the
+    notional: 81,250 × 0.03% ÷ 2 = 0.121875 ticks; an up call is the stock's either way."""
+    c, inverse = 1.86875, 0.121875
+    assert touch_profit(DOWN, prices(LOWER), FEE, inverse_leverage=2) == pytest.approx(1.5 - inverse)
+    assert touch_profit(UP, prices(UPPER), FEE, inverse_leverage=2) == pytest.approx(1.5 - c)
     s = summarize(ALGORITHM, FEE)
     # Three up calls and two down calls: the two down calls each save the sell tax.
     assert (s.pnl_inverse.trades, s.pnl.trades) == (5, 5)
@@ -170,6 +170,9 @@ def test_the_inverse_touch_profit_drops_the_sell_tax_on_down_calls() -> None:
     # 009150 has no inverse product: its down calls are no trades there, the up calls stay.
     other = summarize([replace(r, symbol="009150") for r in ALGORITHM], FEE)
     assert (other.pnl_inverse.trades, other.pnl.trades) == (3, 5)
+    # Before the products were listed (2026-05-27), no down call could be traded through one.
+    early = [replace(r, bar_close=r.bar_close.replace(month=5, day=26)) for r in ALGORITHM]
+    assert summarize(early, FEE).pnl_inverse.trades == 3
 
 
 def test_flat_calls_and_calls_without_their_quotes_are_no_trades() -> None:
