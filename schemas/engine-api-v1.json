@@ -994,7 +994,7 @@
     "skill": {
       "description": "Skill against the class rates (#262), from the calls' table of called × happened classes; null without a scored prediction.",
       "type": ["object", "null"],
-      "required": ["n", "accuracy", "expected_accuracy", "kappa", "gerrity", "balanced_accuracy", "independence"],
+      "required": ["n", "accuracy", "expected_accuracy", "kappa", "gerrity", "balanced_accuracy", "independence", "by_day"],
       "additionalProperties": false,
       "properties": {
         "n": {"type": "integer", "minimum": 1},
@@ -1013,6 +1013,24 @@
             "df": {"type": "integer", "minimum": 0},
             "p": {"type": ["number", "null"]}
           }
+        },
+        "by_day": {
+          "description": "Cohen's kappa taken a trading day at a time: each day's kappa one value, the days' mean with a Student t 95% interval and the one-sided p of no skill (#262). n is the days with a kappa; null from fewer than two.",
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "required": ["n", "value", "low", "high", "p"],
+              "additionalProperties": false,
+              "properties": {
+                "n": {"type": "integer", "minimum": 2},
+                "value": {"type": "number"},
+                "low": {"type": "number"},
+                "high": {"type": "number"},
+                "p": {"type": "number"}
+              }
+            }
+          ]
         }
       }
     },

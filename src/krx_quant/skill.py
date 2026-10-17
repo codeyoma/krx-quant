@@ -24,15 +24,22 @@ a predictor that mostly calls flat on a mostly-flat day cannot look skilled:
 
 Every value is None where it is undefined (no prediction, a class rate of 0 or 1 where the
 formula divides by it).
+
+Kappa is also taken **by trading day** (``day_kappa``): each day's kappa is one value, and the
+days' mean has a Student t interval and a one-sided p-value, as a lift by trading day
+(``stats.day_lift``). The windows within a day overlap; the days are far closer to
+independent, so this p-value, unlike the independence test's, is not too small for it.
 """
 
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import date
 
 from krx_quant.pricing import Direction
+from krx_quant.stats import Lift, t_test
 
 ORDER = (Direction.DOWN, Direction.FLAT, Direction.UP)  # the classes' order (Gerrity)
 MIN_EXPECTED = 5  # the fewest expected in a used cell for the chi-square test
@@ -78,6 +85,18 @@ def skill(calls: Sequence[tuple[Direction, Direction]]) -> Skill | None:
         df=df,
         p=None if chi2 is None else chi2_sf(chi2, df),
     )
+
+
+def day_kappa(
+    calls_by_day: Mapping[date, Sequence[tuple[Direction, Direction]]], level: float = 0.95
+) -> Lift | None:
+    """Cohen's kappa taken a trading day at a time (#262): each day's kappa of its ``calls``
+    (called, happened) is one value, every day weighing the same, with a two-sided ``level``
+    Student t interval over the days and the one-sided p-value of "no better than the class
+    rates" (``stats.t_test``). Its ``n`` is the days with a kappa: a day whose calls and
+    outcomes were all one class has none and is left out. None from fewer than two."""
+    days = [skill(calls) for calls in calls_by_day.values()]
+    return t_test([s.kappa for s in days if s is not None and s.kappa is not None], level)
 
 
 def gerrity(table: Sequence[Sequence[int]]) -> float | None:

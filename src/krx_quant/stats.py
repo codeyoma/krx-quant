@@ -386,12 +386,20 @@ def day_lift(records: Sequence[Paired], baseline: Sequence[Paired], level: float
     by_day: dict[date, list[float]] = {}
     for at, gain in _gains(records, baseline):
         by_day.setdefault(kst_day(at), []).append(gain)
-    means = [sum(gains) / len(gains) for gains in by_day.values()]
-    n = len(means)
+    return t_test([sum(gains) / len(gains) for gains in by_day.values()], level)
+
+
+def t_test(values: Sequence[float], level: float = 0.95) -> Lift | None:
+    """The mean of ``values`` (each a trading day's, every day weighing the same) with a
+    two-sided ``level`` Student t interval and the one-sided p-value of "not above 0"
+    (``day_lift``; a kappa by trading day, ``skill.day_kappa``, #262). Its ``n`` is the values;
+    None from fewer than two. Values that are all the same have no spread: the interval is
+    that value alone."""
+    n = len(values)
     if n < 2:
         return None
-    mean = sum(means) / n
-    error = _standard_error(means, mean)
+    mean = sum(values) / n
+    error = _standard_error(values, mean)
     half = _t_quantile(1 - (1 - level) / 2, n - 1) * error
     if error == 0:
         p = 0.0 if mean > 0 else 1.0

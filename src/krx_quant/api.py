@@ -105,13 +105,14 @@ from krx_quant.market_calendar import MarketCalendar
 from krx_quant.model_shelf import Shelf
 from krx_quant.names import logo_url
 from krx_quant.predictions import Excluded, iso
-from krx_quant.pricing import flat_ticks, tick_size
+from krx_quant.pricing import Direction, flat_ticks, tick_size
 from krx_quant.reference import Bar
-from krx_quant.skill import Skill, skill
+from krx_quant.skill import Skill, day_kappa, skill
 from krx_quant.stats import (
     DEFAULT_MIN_SAMPLE,
     CalibrationBin,
     Entry,
+    Lift,
     Scored,
     entry,
     entry_json,
@@ -863,7 +864,9 @@ async def _algorithm_stats(request: web.Request) -> web.Response:
                     for d, bins in overall.summary.calibration_by_class.items()
                 },
                 "excluded": _excluded_json(excluded.get(name)),
-                "skill": skill_json(skill([(r.predicted, r.outcome) for r in records])),
+                "skill": skill_json(
+                    skill([(r.predicted, r.outcome) for r in records]), day_kappa(calls_by_day(records))
+                ),
             },
             "by_symbol": by(lambda r: r.symbol),
             "by_slot": by(lambda r: slot(r.bar_close)),
@@ -910,7 +913,15 @@ def by_volatility(
     return groups, cuts
 
 
-def skill_json(s: Skill | None) -> dict[str, Any] | None:
+def calls_by_day(records: Sequence[Scored]) -> dict[date, list[tuple[Direction, Direction]]]:
+    """``records``' calls (called, happened) by trading day, for a kappa by trading day (#262)."""
+    out: dict[date, list[tuple[Direction, Direction]]] = {}
+    for r in records:
+        out.setdefault(kst_day(r.bar_close), []).append((r.predicted, r.outcome))
+    return out
+
+
+def skill_json(s: Skill | None, by_day: Lift | None = None) -> dict[str, Any] | None:
     if s is None:
         return None
     return {
@@ -921,6 +932,9 @@ def skill_json(s: Skill | None) -> dict[str, Any] | None:
         "gerrity": s.gerrity,
         "balanced_accuracy": s.balanced_accuracy,
         "independence": {"chi2": s.chi2, "df": s.df, "p": s.p},
+        "by_day": None
+        if by_day is None
+        else {"n": by_day.n, "value": by_day.value, "low": by_day.low, "high": by_day.high, "p": by_day.p},
     }
 
 
