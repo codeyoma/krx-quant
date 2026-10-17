@@ -4,7 +4,8 @@ A feature is a function of a ``Snapshot``: the day's finished one-minute bars up
 bar close, the reference price there, when the session opened, the previous trading day's
 one-minute ranges by 30-minute slot (``day_slot_ranges``, #181) and its one-minute bars of
 continuous trading (#183, the barrier's width), both from its backfilled bars, on recorded
-and backfilled days alike, the bars of the series
+and backfilled days alike, the previous trading days' returns by 10-minute slot
+(``day_slot_returns``, #265), the bars of the series
 that may lead the symbol (``Leaders``), the microprices of its book at each minute's end
 and its order flow (``OrderFlow``: the book, the trades' sides and venues) and trade
 arrivals (``Arrivals``), recorded days only (``BOOK_FEATURES``, ``TAPE_FEATURES``:
@@ -37,6 +38,7 @@ from krx_quant.cards import Meaning
 from krx_quant.config import Settings
 from krx_quant.consensus import slot
 from krx_quant.contracts import KOSPI200, USD
+from krx_quant.feeds.base import KST
 from krx_quant.feeds.market import us_ticker
 from krx_quant.market_calendar import Session
 from krx_quant.pricing import flat_ticks as flat_band
@@ -50,8 +52,9 @@ Value = FeatureValue | Series
 
 
 class PreviousDays(Protocol):
-    """A symbol's previous trading day, for a day (``backfill.PreviousDay``: from that day's
-    backfilled bars): what ``Snapshot.previous_ranges`` and ``Snapshot.previous_bars`` hold."""
+    """A symbol's previous trading days, for a day (``backfill.PreviousDay``: from those days'
+    backfilled bars): what ``Snapshot.previous_ranges``, ``Snapshot.previous_bars`` and
+    ``Snapshot.previous_slot_returns`` hold."""
 
     def __call__(self, symbol: str, day: date) -> Mapping[str, float]:
         """Its one-minute ranges by 30-minute slot (``day_slot_ranges``, #181); empty when unknown."""
@@ -60,6 +63,12 @@ class PreviousDays(Protocol):
     def bars(self, symbol: str, day: date) -> Sequence[Bar]:
         """Its one-minute bars of continuous trading, oldest first (#183, the barrier's width);
         empty when unknown."""
+        ...
+
+    def slot_returns(self, symbol: str, day: date) -> Sequence[Mapping[str, float]]:
+        """The returns by 10-minute slot (``day_slot_returns``, #265) of the trading days before
+        ``day``, the latest first, as many as ``SLOT_RETURN_DAYS``' longest; a day without bars
+        is an empty mapping; empty when unknown."""
         ...
 
 
@@ -165,6 +174,9 @@ class Snapshot:
     # The previous trading day's one-minute bars of continuous trading, oldest first (#183,
     # the barrier's width); empty when unknown (no bars).
     previous_bars: Sequence[Bar] = ()
+    # The trading days before's returns by 10-minute slot (``day_slot_returns``, #265), the
+    # latest first; empty when unknown.
+    previous_slot_returns: Sequence[Mapping[str, float]] = ()
 
     @classmethod
     def at(
@@ -186,6 +198,7 @@ class Snapshot:
         atm_iv: float | None = None,
         previous_ranges: Mapping[str, float] | None = None,
         previous_bars: Sequence[Bar] = (),
+        previous_slot_returns: Sequence[Mapping[str, float]] = (),
     ) -> Snapshot:
         """A snapshot with the tick and flat band of ``price``."""
         lead, known = leaders or {}, flows or Flows()
@@ -208,6 +221,7 @@ class Snapshot:
             atm_iv,
             previous_ranges or {},
             previous_bars,
+            previous_slot_returns,
         )
 
     @cached_property
@@ -754,6 +768,71 @@ def range_prev_day(s: Snapshot) -> FeatureValue:
     return None if width is None or s.tick is None else width / s.tick
 
 
+# Intraday periodicity (#265, Heston, Korajczyk & Sadka 2010): the return of the same
+# 10-minute slot on the trading days before, the previous one's and the means over the last
+# 5 and 20. A shared feature: Turing and Breiman read it.
+SLOT_MINUTES = 10
+SLOT_RETURN_DAYS = (1, 5, 20)
+# A bar close reads the slot holding the middle of the four minutes it predicts.
+WINDOW_MIDDLE = timedelta(minutes=2)
+
+
+def slot_return_feature(days: int) -> str:
+    return f"slot_return_{days}d"
+
+
+def ten_minute_slot(at: datetime) -> str:
+    """The 10-minute slot of the clock (KST) holding the minute that starts at ``at``:
+    ``"09:00"`` is 09:00–09:09. A bar close's is that of the first of the four minutes it
+    predicts (09:37 → ``"09:30"``)."""
+    local = at if at.tzinfo is None else at.astimezone(KST)  # a naive time is KST already
+    return f"{local.hour:02d}:{local.minute - local.minute % SLOT_MINUTES:02d}"
+
+
+def day_slot_returns(bars: Sequence[Bar], session: Session) -> dict[str, float]:
+    """A day's return (basis points) in each 10-minute slot of its continuous session (#265):
+    from the last price before the slot (the first trade's open for the day's first slot) to
+    the last price in it, by ``ten_minute_slot``. A slot without a trade is 0 when a price came
+    before it; slots before the day's first trade are left out."""
+    trading = sorted(
+        (b for b in bars if session.open <= b.start < session.closing_auction), key=lambda b: b.start
+    )
+    if not trading:
+        return {}
+    out: dict[str, float] = {}
+    last = trading[0].open
+    i = 0
+    at = session.open
+    while at < session.closing_auction:
+        key = ten_minute_slot(at)
+        end = at + SLOT_MINUTES * BAR
+        start_price = last
+        while i < len(trading) and trading[i].start < end:
+            last = trading[i].close
+            i += 1
+        if i > 0 and start_price > 0:  # a trade has come by the slot's end (a blank price is 0)
+            out[key] = (last / start_price - 1) * 1e4
+        at = end
+    return out
+
+
+def _slot_return(days: int) -> Feature:
+    def feature(s: Snapshot) -> FeatureValue:
+        if len(s.previous_slot_returns) < days:
+            return None
+        key = ten_minute_slot(s.bar_close + WINDOW_MIDDLE)
+        found = [r[key] for r in s.previous_slot_returns[:days] if key in r]
+        return sum(found) / len(found) if found else None
+
+    feature.__doc__ = (
+        f"The mean return (basis points) of the bar close's 10-minute slot over the last {days} "
+        "trading day(s) before, over those with a value there: unknown with fewer days known, or "
+        "when none had a trade by the slot's end (a slot without a trade after an earlier price "
+        "is 0)."
+    )
+    return feature
+
+
 # The barrier's width (#178, #183): López de Prado's horizontal barriers, set at a multiple
 # (one) of a volatility estimate, never closer than the cost. The engine fixes it at each bar
 # close (``Snapshot.barrier``): the barrier's answer reads it, every barrier prediction keeps
@@ -951,6 +1030,7 @@ FEATURES: dict[str, Feature] = {
     **{lead_feature(group, lag): _lead(group, lag) for group in LEAD_GROUPS for lag in LEAD_LAGS},
     **{range_feature(m): _range(m) for m in RANGE_MINUTES},
     PREVIOUS_DAY_RANGE: range_prev_day,
+    **{slot_return_feature(d): _slot_return(d) for d in SLOT_RETURN_DAYS},
     BARRIER_WIDTH: barrier_width_feature,
     BARRIER_SIGMA: barrier_sigma,
 }
@@ -959,6 +1039,8 @@ LEAD_FEATURES = frozenset(lead_feature(group, lag) for group in LEAD_GROUPS for 
 RANGE_FEATURES = frozenset({*(range_feature(m) for m in RANGE_MINUTES), PREVIOUS_DAY_RANGE})
 # The barrier's own features (#183): no direction algorithm reads them either.
 BARRIER_FEATURES = frozenset({BARRIER_WIDTH, BARRIER_SIGMA})
+# The same 10-minute slot's returns on the days before (#265): read from the backfilled bars.
+SLOT_RETURN_FEATURES = frozenset(slot_return_feature(d) for d in SLOT_RETURN_DAYS)
 # The features that are series of numbers.
 SERIES_FEATURES = frozenset({"minute_ticks", "microprice_ticks", "kospi200f_moves"})
 # The features from the book, and from the trades' sides and venues: none on a day with
@@ -1208,6 +1290,21 @@ FEATURE_MEANINGS: dict[str, Meaning] = {
         "그날 개장 전에 안다(전 거래일의 백필 1분봉). 녹화된 날과 백필 날에 모두 있다. 전 거래일의 백필이 "
         "없거나 그 시간대에 체결이 없었거나 기준가가 없으면 없다.",
     ),
+    **{
+        slot_return_feature(d): Meaning(
+            f"전 거래일{'' if d == 1 else f' {d}일'}의 같은 10분 시간대 수익률"
+            f"{'' if d == 1 else '의 평균(그 시간대 값이 있는 날만)'}. 시간대는 봉 마감부터 예측하는 4분의 "
+            "가운데(봉 마감 + 2분)가 든 10분이다(봉 마감 09:37이면 09:30–09:39, 09:58이면 10:00–10:09). "
+            "하루의 시간대 수익률은 시간대 직전의 마지막 가격에서 시간대 안의 마지막 가격까지다(그날 첫 "
+            "시간대는 첫 체결의 시가부터). 연속매매의 분만 보고, 앞서 가격이 있는데 체결이 없는 시간대는 "
+            "0이다(#265, 장중 시간대 반복: Heston, Korajczyk & Sadka 2010).",
+            "bp",
+            f"그날 개장 전에 안다(전 거래일들의 백필 1분봉). 녹화된 날과 백필 날에 모두 있다. 앞선 거래일이 "
+            f"{d}일보다 적게 알려졌거나, 그 날들 모두 그 시간대가 끝날 때까지 체결이 없었으면(백필이 없는 날 "
+            "포함) 없다.",
+        )
+        for d in SLOT_RETURN_DAYS
+    },
     BARRIER_WIDTH: Meaning(
         "장벽 폭 w: 봉 마감 전에 끝난 1분봉 종가의 1분 변화(봉 마감 기준가의 호가단위, 전 거래일 "
         "연속매매 봉에 이어서)의 지수가중 표준편차(span 100) × √4를 반올림한 틱. k보다 작으면 k, 봉이 "

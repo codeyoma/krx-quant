@@ -8,10 +8,33 @@ from __future__ import annotations
 
 import enum
 import math
+from collections.abc import Mapping
+from dataclasses import dataclass
+from datetime import date
 
 # Securities transaction tax on the sell side in 2026 (KOSPI 0.05% + rural special tax 0.15%,
 # KOSDAQ 0.20%).
 SELL_TAX = 0.0020
+
+
+@dataclass(frozen=True)
+class InverseProduct:
+    """A single-stock inverse product a down call can be traded through (#267)."""
+
+    listed: date  # the first day it traded: a down call before it had none
+    leverage: int  # −2x: the stock's exposure for half the stock's notional
+
+
+# The symbols' single-stock inverse products (#267): the −2x ETFs on 005930 (PLUS
+# 삼성전자선물단일종목인버스2X) and 000660 (SOL SK하이닉스선물단일종목인버스2X), listed 2026-05-27.
+# 009150 has none. Sources: 머니투데이 2026-08-03 (the 16 single-stock leveraged and inverse ETFs
+# listed 2026-05-27, two of them inverse), SBS Biz; product names from KIS's stock master
+# (2026-10-16). An ETF's sale pays no securities transaction tax (the tax falls on shares only,
+# 증권거래세법 제2조), so its round trip costs the commissions alone, on its own notional.
+INVERSE_PRODUCTS: Mapping[str, InverseProduct] = {
+    "005930": InverseProduct(date(2026, 5, 27), 2),
+    "000660": InverseProduct(date(2026, 5, 27), 2),
+}
 
 # KRX tick sizes by price band, unified for KOSPI and KOSDAQ since 2023-01-25:
 # (lowest price of the band, tick).

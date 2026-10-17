@@ -10,7 +10,9 @@ Personality card:
   move is the classes' mean moves in training, weighted by their probabilities.
 - **Own features**: the time of day, the options expiry, the investor estimates, and the
   best quotes: their spread in ticks, the balance of their sizes and how those sizes
-  changed over the last minute (#55).
+  changed over the last minute (#55). It also reads the shared same-slot returns on the
+  days before (``SLOT_RETURN_FEATURES``, #265), which no other direction algorithm reads and
+  Breiman reads too.
 - **Learns**: over the last 60 trading days, a fixed number of boosting rounds, the same
   trees for the same samples (one thread, a fixed seed).
 - **Fails**: in a market unlike its 60 training days; trees do not reach past the values
@@ -102,8 +104,9 @@ class Turing:
             "모든 숫자 "
             "피처(다른 알고리즘의 프로그램매매·외국계 회원사 흐름, 호가의 주문 흐름, 체결의 방향과 도착, "
             "옵션 내재변동성 포함)에 시간대, 옵션 만기까지 남은 거래일, 투자자별 추정 흐름, 최우선 호가의 "
-            "스프레드·잔량 균형·잔량 변화를 더한다. 모르는 피처(백필만 있는 날의 호가)는 비워 두고 트리가 "
-            "다룬다."
+            "스프레드·잔량 균형·잔량 변화를 더한다. 공유 피처인 앞선 거래일들의 같은 10분 시간대 "
+            "수익률(전일, 5일·20일 평균, #265)도 읽는다. 모르는 피처(백필만 있는 날의 호가)는 비워 두고 "
+            "트리가 다룬다."
         ),
         unique_features=OWN,
         training=(

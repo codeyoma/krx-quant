@@ -215,6 +215,11 @@ def _prevalidate(name: str, days: int) -> int:
     print(f"{name}: {'passed' if result.passed else 'refused'} ({len(result.days)} recorded days, {span})")
     for c in result.checks:
         print(f"  {c.name}: {'ok' if c.passed else 'FAILED'} - {c.detail}")
+    if result.earlier_runs:
+        print(
+            f"run before: {result.earlier_runs}, {result.earlier_on_these_days} of them on any of these days"
+            " (a day replayed again after a fix is no longer out of sample)"
+        )
     print(f"report: {report_path(settings.state_dir, name)}")
     print(f"predictions: {result.db} (not in the official record)")
     if name in REGISTERED_BEFORE:

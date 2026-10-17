@@ -358,11 +358,15 @@ async def test_the_direction_is_stored_scored_and_ranked_the_same_with_another_k
     """Acceptance (#179). Input: the same busy morning replayed with and without the drift and
     an algorithm of it. Output: the direction's predictions and outcomes, its touch labels, and
     the Engine API's direction answers (predictions, latest, leaderboard, an algorithm's
-    stats) are the same."""
+    stats) are the same. Both run the range and the barrier: an algorithm's calls split by
+    volatility read the barrier kind's widths (#262)."""
     without = await run(
         tmp_path / "without.db", busy_morning(), until=at("10:00:00"), target_version=TARGET_VERSION
     )
-    with_kind = await run_kind(tmp_path / "with.db", busy_morning(), until=at("10:00:00"))
+    # The direction's stats split calls by the barrier's width (#262): both engines run it.
+    with_kind = await run_kind(
+        tmp_path / "with.db", busy_morning(), until=at("10:00:00"), kinds=(RANGE, BARRIER, TEST_KIND)
+    )
 
     direction = stored(tmp_path / "with.db")
     assert len(direction) == 60 * 14, "09:01-10:00: 4 baselines, 8 algorithms and 2 consensus"

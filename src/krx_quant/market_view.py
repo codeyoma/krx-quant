@@ -596,6 +596,9 @@ class MarketView:
             atm_iv=self._options.atm_iv(frozen.close),
             previous_ranges=self._previous(symbol, day) if self._previous is not None else None,
             previous_bars=self._previous.bars(symbol, day) if self._previous is not None else (),
+            previous_slot_returns=(
+                self._previous.slot_returns(symbol, day) if self._previous is not None else ()
+            ),
         )
 
     def arrivals(self, symbol: str, at: datetime) -> Arrivals:

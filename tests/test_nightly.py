@@ -607,6 +607,15 @@ def test_cached_days_no_night_needs_any_more_are_removed(store_root: Path, tmp_p
     assert cached == [f"date={d}" for d in DAYS[-7:]], "the four training and three validation days"
 
 
+def test_the_days_the_slot_returns_read_are_fetched_and_kept(store_root: Path, tmp_path: Path) -> None:
+    """#265: a learner reading the slot returns reads the 20 trading days before each day, so
+    the night fetches the stored days before its oldest one, and keeps them for the next."""
+    night(store_root, tmp_path, [FrequencyAlgorithm("learner", "slot_return_1d")])
+
+    cached = sorted(p.name for p in (tmp_path / "cache" / "bars").glob("date=*"))
+    assert cached == [f"date={d}" for d in DAYS], "the training days and every stored day before"
+
+
 def test_a_day_with_one_symbols_bars_and_anothers_trades_is_not_trained_on(tmp_path: Path) -> None:
     # 000660's backfill failed on one day, which has only its recording; 005930 the opposite.
     root, symbols = tmp_path / "store", ("005930", "000660")

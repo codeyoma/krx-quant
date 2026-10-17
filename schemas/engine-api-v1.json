@@ -784,7 +784,7 @@
     "entry_fields": {
       "description": "The fields of an entry, open so others can add to them (entry, ranked_entry, the stats' overall).",
       "type": "object",
-      "required": ["rank", "algorithm", "model_versions", "n", "accuracy", "precision", "coverage", "brier", "pnl"],
+      "required": ["rank", "algorithm", "model_versions", "n", "accuracy", "precision", "coverage", "brier", "pnl", "pnl_inverse"],
       "properties": {
         "rank": {"type": ["integer", "null"], "minimum": 1},
         "algorithm": {"type": "string"},
@@ -795,14 +795,12 @@
         "coverage": {"$ref": "#/$defs/interval"},
         "brier": {"$ref": "#/$defs/interval"},
         "pnl": {
-          "type": "object",
-          "required": ["trades", "total_ticks", "per_trade"],
-          "additionalProperties": false,
-          "properties": {
-            "trades": {"type": "integer", "minimum": 0},
-            "total_ticks": {"type": "number"},
-            "per_trade": {"$ref": "#/$defs/interval"}
-          }
+          "description": "The touch P&L in ticks (#170, research only), a down call as a short of the stock: less the sell tax and both commissions.",
+          "$ref": "#/$defs/touch_pnl"
+        },
+        "pnl_inverse": {
+          "description": "The touch P&L in ticks (#267, research only), a down call through the symbol's single-stock inverse product: less both commissions only (an ETF pays no sell tax), on the product's notional (half the stock's for a −2x product). A down call on a symbol without one, or before it was listed, is no trade.",
+          "$ref": "#/$defs/touch_pnl"
         },
         "lift": {"$ref": "#/$defs/lift"}
       }
@@ -947,13 +945,13 @@
       "description": "GET /v1/algorithms/{name}/stats of a direction predictor",
       "allOf": [{"$ref": "#/$defs/query"}],
       "type": "object",
-      "required": ["algorithm", "overall", "by_symbol", "by_slot", "by_model_version"],
+      "required": ["algorithm", "overall", "by_symbol", "by_slot", "by_model_version", "by_volatility", "volatility_cuts"],
       "properties": {
         "algorithm": {"type": "string"},
         "overall": {
           "allOf": [{"$ref": "#/$defs/entry_fields"}],
           "type": "object",
-          "required": ["calibration", "calibration_by_class", "excluded"],
+          "required": ["calibration", "calibration_by_class", "excluded", "skill"],
           "properties": {
             "calibration": {"$ref": "#/$defs/calibration"},
             "calibration_by_class": {
@@ -966,15 +964,57 @@
                 "down": {"$ref": "#/$defs/calibration"}
               }
             },
-            "excluded": {"$ref": "#/$defs/excluded"}
+            "excluded": {"$ref": "#/$defs/excluded"},
+            "skill": {"$ref": "#/$defs/skill"}
           },
           "unevaluatedProperties": false
         },
         "by_symbol": {"type": "object", "additionalProperties": {"$ref": "#/$defs/entry"}},
         "by_slot": {"type": "object", "additionalProperties": {"$ref": "#/$defs/entry"}},
-        "by_model_version": {"type": "object", "additionalProperties": {"$ref": "#/$defs/entry"}}
+        "by_model_version": {"type": "object", "additionalProperties": {"$ref": "#/$defs/entry"}},
+        "by_volatility": {
+          "description": "The calls split into volatility terciles by the barrier width w at their bar close (basis points), per symbol by sorted order (ties by bar close); a tercile without calls is left out.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "low": {"$ref": "#/$defs/entry"},
+            "mid": {"$ref": "#/$defs/entry"},
+            "high": {"$ref": "#/$defs/entry"}
+          }
+        },
+        "volatility_cuts": {
+          "description": "Each symbol's two cuts of w in basis points of the mid-point: the widest w in low and in mid.",
+          "type": "object",
+          "additionalProperties": {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2}
+        }
       },
       "unevaluatedProperties": false
+    },
+
+    "skill": {
+      "description": "Skill against the class rates (#262), from the calls' table of called × happened classes; null without a scored prediction.",
+      "type": ["object", "null"],
+      "required": ["n", "accuracy", "expected_accuracy", "kappa", "gerrity", "balanced_accuracy", "independence"],
+      "additionalProperties": false,
+      "properties": {
+        "n": {"type": "integer", "minimum": 1},
+        "accuracy": {"type": "number"},
+        "expected_accuracy": {"type": "number", "description": "What calls independent of the outcome, at the same class rates, get right."},
+        "kappa": {"type": ["number", "null"]},
+        "gerrity": {"type": ["number", "null"]},
+        "balanced_accuracy": {"type": "number"},
+        "independence": {
+          "description": "Pearson's chi-square on the table (Pesaran–Timmermann 2009 for independent observations); the overlapping windows make p too small: it describes. chi2 and p are null when a used cell expects fewer than 5.",
+          "type": "object",
+          "required": ["chi2", "df", "p"],
+          "additionalProperties": false,
+          "properties": {
+            "chi2": {"type": ["number", "null"]},
+            "df": {"type": "integer", "minimum": 0},
+            "p": {"type": ["number", "null"]}
+          }
+        }
+      }
     },
 
     "kinds": {
@@ -1230,6 +1270,16 @@
         "pnl": {"$ref": "#/$defs/barrier_pnl"},
         "long": {"$ref": "#/$defs/barrier_pnl"},
         "short": {"$ref": "#/$defs/barrier_pnl"}
+      }
+    },
+    "touch_pnl": {
+      "type": "object",
+      "required": ["trades", "total_ticks", "per_trade"],
+      "additionalProperties": false,
+      "properties": {
+        "trades": {"type": "integer", "minimum": 0},
+        "total_ticks": {"type": "number"},
+        "per_trade": {"$ref": "#/$defs/interval"}
       }
     },
     "barrier_pnl": {

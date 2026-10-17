@@ -89,7 +89,7 @@ from krx_quant.market_calendar import MarketCalendar, calendar_store
 from krx_quant.notify import send_notice
 from krx_quant.object_store import ObjectStore, file_digest, get_json, open_store, put_json
 from krx_quant.touch import TARGET_VERSION
-from krx_quant.training import TrainingDay, leader_series, needs_previous_day, training_day
+from krx_quant.training import TrainingDay, leader_series, previous_days_needed, training_day
 
 log = logging.getLogger(__name__)
 
@@ -376,6 +376,7 @@ class _Trainer:
         self._names = sorted({f for a in everyone for f in a.features})
         self._loaded: dict[date, TrainingDay | None] = {}
         self._used: set[date] = set()
+        self._checked: set[str] = set()  # keys fetched (or found missing) this night
 
     def train(self, algorithm: Algorithm, live_version: str | None) -> dict[str, Any]:
         """An algorithm's night: its challenger against its champion."""
@@ -616,18 +617,22 @@ class _Trainer:
         """Copy a day's bars, the engine's recorded events and its macro regime from the store
         into the cache, where they are not there already; with a feature of the previous
         trading day's ranges (#181) or a barrier's width (#183), that day's bars of the symbols
-        too.
+        too, and with the slot returns (#265), the bars of the 20 trading days before.
         """
         series = [(MINUTE_BARS_TR, s) for s in self._symbols] + leader_series(self._leaders)
         keys = [bars_key(day, feed, name) for feed, name in series]
-        if needs_previous_day(self._names, self._kinds):  # the previous trading day's (#181, #183)
-            before = self._calendar.previous_trading_day(day)
+        before = day
+        for _ in range(previous_days_needed(self._names, self._kinds)):  # #181, #183, #265
+            before = self._calendar.previous_trading_day(before)
             keys += [bars_key(before, MINUTE_BARS_TR, s) for s in self._symbols]
         keys += _engine_events(
             self._store.keys(f"events/date={day.isoformat()}/"), self._symbols, self._leaders
         )
         keys += self._store.keys(regime_prefix(day))  # Markov's
         for key in keys:
+            if key in self._checked:  # a day's lookback days are the next day's too (#265)
+                continue
+            self._checked.add(key)
             stored = self._store.digest(key)
             if stored is None:
                 continue
@@ -640,10 +645,14 @@ class _Trainer:
             tmp.replace(path)
 
     def prune(self) -> None:
-        """Remove the cached days this night did not use: older ones no night needs again."""
+        """Remove the cached days this night did not use: older ones no night needs again. The
+        days before the oldest used one that its samples read (the slot returns' 20, #265) are
+        kept: the next night's oldest day reads them too."""
         if not self._used:
             return
         oldest = min(self._used)
+        for _ in range(previous_days_needed(self._names, self._kinds)):  # its days before (#265)
+            oldest = self._calendar.previous_trading_day(oldest)
         layers = ("bars", "events", "macro")
         for folder in [f for layer in layers for f in self._cache.glob(f"{layer}/date=*")]:
             try:
