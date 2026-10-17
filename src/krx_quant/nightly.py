@@ -376,6 +376,7 @@ class _Trainer:
         self._names = sorted({f for a in everyone for f in a.features})
         self._loaded: dict[date, TrainingDay | None] = {}
         self._used: set[date] = set()
+        self._checked: set[str] = set()  # keys fetched (or found missing) this night
 
     def train(self, algorithm: Algorithm, live_version: str | None) -> dict[str, Any]:
         """An algorithm's night: its challenger against its champion."""
@@ -629,6 +630,9 @@ class _Trainer:
         )
         keys += self._store.keys(regime_prefix(day))  # Markov's
         for key in keys:
+            if key in self._checked:  # a day's lookback days are the next day's too (#265)
+                continue
+            self._checked.add(key)
             stored = self._store.digest(key)
             if stored is None:
                 continue

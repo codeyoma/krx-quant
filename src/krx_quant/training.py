@@ -34,8 +34,9 @@ a special situation); a day counts them by why (``TrainingDay.left_out``, #184),
 night's report.
 
 The previous trading day's one-minute ranges (``range_prev_day``, #181) and bars (#183, the
-barrier's width) come from that day's backfilled bars (``backfill.PreviousDay``), on a recorded
-day as on a backfilled one, as the engine reads them. A kind with barriers (#183) has their
+barrier's width), and the 20 trading days before's slot returns (#265), come from those days'
+backfilled bars (``backfill.PreviousDay``), on a recorded day as on a backfilled one, as the
+engine reads them. A kind with barriers (#183) has their
 width at each bar close from the bars up to it: on a recorded day the Market View's, as the
 engine fixes it; on a backfilled day the same rule on the backfilled bars, given to the bar
 rule (``Kind.width``, ``kinds.BarAnswer``).
@@ -154,7 +155,8 @@ def training_day(
     """
     session = calendar.session(day)
     regime = day_regime(data_dir, day, session.open) if session is not None else None
-    # The previous trading day's ranges and bars (#181, #183), read only when something uses them.
+    # The previous trading days' ranges, bars and slot returns (#181, #183, #265), read only when
+    # something uses them.
     previous = PreviousDay(data_dir, calendar) if needs_previous_day(names, kinds) else None
     if is_recorded(data_dir, day, symbols):
         events = recorded_events(data_dir, day, symbols, leaders)
@@ -192,8 +194,9 @@ def training_day(
 
 def needs_previous_day(names: Iterable[str], kinds: Sequence[Kind] = ()) -> bool:
     """Whether a day's samples of the features ``names`` and the ``kinds``' answers read the
-    previous trading day's backfilled bars: its ranges (``range_prev_day``, #181), the
-    barrier's width (its features, and a kind with barriers, #183)."""
+    previous trading days' backfilled bars: the previous day's ranges (``range_prev_day``,
+    #181), the barrier's width (its features, and a kind with barriers, #183), the slot
+    returns (#265, the 20 days before)."""
     named = set(names)
     return (
         PREVIOUS_DAY_RANGE in named

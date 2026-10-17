@@ -9,7 +9,8 @@ Personality card:
   bar close as up first, timeout or down first (the barrier's answer, ``barriers.py``) from
   the numbers Turing reads (every number of the Feature Store but the series and the range's:
   the flows, the book's order flow, the tape's sides and arrivals, the options' implied
-  volatility, the time of day), and its own: the barrier's width at the bar close
+  volatility, the time of day, the same-slot returns on the days before, #265), and its own:
+  the barrier's width at the bar close
   (``barrier_width``) and that width over the volatility it came from (``barrier_sigma``).
   A feature not known (the book on a backfilled day) is left missing, and the trees learn
   where missing ones go.
@@ -115,7 +116,8 @@ class Breiman:
             "LightGBM 그래디언트 부스팅 트리로 봉 마감 뒤 4분 동안 위·아래 장벽 중 어느 쪽에 먼저 닿을지(위 "
             "먼저·시간 만료·아래 먼저, 장벽 정답)를 분류한다. Turing이 읽는 피처 저장소의 숫자 피처(프로그램"
             "매매·외국계 회원사 흐름, 호가의 주문 흐름, 체결의 방향과 도착, 옵션 내재변동성, 시간대, 최우선 "
-            "호가 포함)에 그 봉 마감의 장벽 폭 w(`barrier_width`)와 폭 ÷ 4분 변동성(`barrier_sigma`)을 "
+            "호가, 앞선 거래일들의 같은 10분 시간대 수익률 포함)에 그 봉 마감의 장벽 폭 w(`barrier_width`)와 "
+            "폭 ÷ 4분 변동성(`barrier_sigma`)을 "
             "더한다. 삼중 장벽 정답에 트리 앙상블을 학습하는 López de Prado의 짝이다. 모르는 피처(백필만 "
             "있는 날의 호가·체결)는 비워 두고 트리가 다룬다."
         ),

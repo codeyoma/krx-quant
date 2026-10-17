@@ -49,7 +49,7 @@ from aiohttp import web
 
 from krx_quant.algorithms import ALGORITHMS, Model
 from krx_quant.api import create_app
-from krx_quant.backfill import BAR_SCHEMA, stock_bars_path
+from krx_quant.backfill import BAR_SCHEMA, PreviousDay, stock_bars_path
 from krx_quant.candles import PERIODS, period_start, write_candles
 from krx_quant.clock import FakeClock
 from krx_quant.engine import Event, PredictionEngine
@@ -360,6 +360,7 @@ async def demo_app(db: Path, pace: float | None = None) -> web.Application:
             start=datetime.combine(day, _PAST_FROM, KST) - timedelta(minutes=1),
             until=datetime.combine(day, time(15, 30), KST),
             target_version=TARGET_VERSION,
+            previous=PreviousDay(data_dir, _CALENDAR),  # range_prev_day, slot returns (#181, #265)
         )  # no macro read those mornings: no regime
         engine.store.close()
     events = demo_events()
@@ -373,6 +374,7 @@ async def demo_app(db: Path, pace: float | None = None) -> web.Application:
         until=_at(_END if pace is None else _PACED_FROM),
         regimes=partial(day_regime, data_dir),
         target_version=TARGET_VERSION,  # the touch target, as the server's default (#170)
+        previous=PreviousDay(data_dir, _CALENDAR),
     )
     night = Night(date(2026, 10, 9), "2026-10-09T21:31:40+09:00", {}, demo_reports())
     engine.training = NightStatus(night, True, "applied").as_dict()

@@ -76,8 +76,12 @@ def test_the_features_read_the_bar_close_s_slot_on_the_days_before() -> None:
         slot_return_feature(5): pytest.approx(3.0),
         slot_return_feature(20): pytest.approx(10.5),
     }
+    # Bar close 09:58 predicts 09:58–10:01: its middle (10:00) is in the 10:00 slot.
+    hour = [{"09:50": 1.0, "10:00": 7.0}]
+    assert FEATURES[slot_return_feature(1)](snapshot("09:58", hour)) == 7.0
+    assert FEATURES[slot_return_feature(1)](snapshot("09:57", hour)) == 1.0
     # The 09:40 slot was never traded; nor are 20 days known with 5.
-    assert FEATURES[slot_return_feature(1)](snapshot("09:41", days)) is None
+    assert FEATURES[slot_return_feature(1)](snapshot("09:39", days)) is None
     assert FEATURES[slot_return_feature(20)](snapshot("09:31", days[:5])) is None
     assert all(name in FEATURE_MEANINGS for name in SLOT_RETURN_FEATURES)
     assert needs_previous_day([slot_return_feature(5)])

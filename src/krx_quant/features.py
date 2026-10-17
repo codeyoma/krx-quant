@@ -38,6 +38,7 @@ from krx_quant.cards import Meaning
 from krx_quant.config import Settings
 from krx_quant.consensus import slot
 from krx_quant.contracts import KOSPI200, USD
+from krx_quant.feeds.base import KST
 from krx_quant.feeds.market import us_ticker
 from krx_quant.market_calendar import Session
 from krx_quant.pricing import flat_ticks as flat_band
@@ -51,8 +52,9 @@ Value = FeatureValue | Series
 
 
 class PreviousDays(Protocol):
-    """A symbol's previous trading day, for a day (``backfill.PreviousDay``: from that day's
-    backfilled bars): what ``Snapshot.previous_ranges`` and ``Snapshot.previous_bars`` hold."""
+    """A symbol's previous trading days, for a day (``backfill.PreviousDay``: from those days'
+    backfilled bars): what ``Snapshot.previous_ranges``, ``Snapshot.previous_bars`` and
+    ``Snapshot.previous_slot_returns`` hold."""
 
     def __call__(self, symbol: str, day: date) -> Mapping[str, float]:
         """Its one-minute ranges by 30-minute slot (``day_slot_ranges``, #181); empty when unknown."""
@@ -771,6 +773,8 @@ def range_prev_day(s: Snapshot) -> FeatureValue:
 # 5 and 20. A shared feature: Turing and Breiman read it.
 SLOT_MINUTES = 10
 SLOT_RETURN_DAYS = (1, 5, 20)
+# A bar close reads the slot holding the middle of the four minutes it predicts.
+WINDOW_MIDDLE = timedelta(minutes=2)
 
 
 def slot_return_feature(days: int) -> str:
@@ -778,9 +782,11 @@ def slot_return_feature(days: int) -> str:
 
 
 def ten_minute_slot(at: datetime) -> str:
-    """The 10-minute slot of the clock holding the minute that starts at ``at``: ``"09:00"`` is
-    09:00–09:09. A bar close's is that of the four minutes it predicts."""
-    return f"{at.hour:02d}:{at.minute - at.minute % SLOT_MINUTES:02d}"
+    """The 10-minute slot of the clock (KST) holding the minute that starts at ``at``:
+    ``"09:00"`` is 09:00–09:09. A bar close's is that of the first of the four minutes it
+    predicts (09:37 → ``"09:30"``)."""
+    local = at.astimezone(KST)
+    return f"{local.hour:02d}:{local.minute - local.minute % SLOT_MINUTES:02d}"
 
 
 def day_slot_returns(bars: Sequence[Bar], session: Session) -> dict[str, float]:
@@ -804,7 +810,7 @@ def day_slot_returns(bars: Sequence[Bar], session: Session) -> dict[str, float]:
         while i < len(trading) and trading[i].start < end:
             last = trading[i].close
             i += 1
-        if i > 0:  # a trade has come by the slot's end
+        if i > 0 and start_price > 0:  # a trade has come by the slot's end (a blank price is 0)
             out[key] = (last / start_price - 1) * 1e4
         at = end
     return out
@@ -814,13 +820,15 @@ def _slot_return(days: int) -> Feature:
     def feature(s: Snapshot) -> FeatureValue:
         if len(s.previous_slot_returns) < days:
             return None
-        key = ten_minute_slot(s.bar_close)
+        key = ten_minute_slot(s.bar_close + WINDOW_MIDDLE)
         found = [r[key] for r in s.previous_slot_returns[:days] if key in r]
         return sum(found) / len(found) if found else None
 
     feature.__doc__ = (
-        f"The mean return (basis points) of the bar close's 10-minute slot over the {days} trading "
-        f"days before: unknown with fewer days known, or without a trade in the slot on any of them."
+        f"The mean return (basis points) of the bar close's 10-minute slot over the last {days} "
+        "trading day(s) before, over those with a value there: unknown with fewer days known, or "
+        "when none had a trade by the slot's end (a slot without a trade after an earlier price "
+        "is 0)."
     )
     return feature
 
@@ -1284,14 +1292,16 @@ FEATURE_MEANINGS: dict[str, Meaning] = {
     ),
     **{
         slot_return_feature(d): Meaning(
-            f"전 거래일{'' if d == 1 else f' {d}일'}의 같은 10분 시간대(봉 마감부터 예측하는 4분이 든 시각의 "
-            "10분, 09:31이면 09:30–09:39) 수익률"
-            f"{'' if d == 1 else '의 평균'}. 시간대 직전의 마지막 가격에서 시간대 안의 마지막 가격까지다"
-            "(그날 첫 시간대는 첫 체결의 시가부터). 연속매매의 분만 보고, 체결이 없는 시간대는 0이다(#265, "
-            "장중 시간대 반복: Heston, Korajczyk & Sadka 2010).",
+            f"전 거래일{'' if d == 1 else f' {d}일'}의 같은 10분 시간대 수익률"
+            f"{'' if d == 1 else '의 평균(그 시간대 값이 있는 날만)'}. 시간대는 봉 마감부터 예측하는 4분의 "
+            "가운데(봉 마감 + 2분)가 든 10분이다(봉 마감 09:37이면 09:30–09:39, 09:58이면 10:00–10:09). "
+            "하루의 시간대 수익률은 시간대 직전의 마지막 가격에서 시간대 안의 마지막 가격까지다(그날 첫 "
+            "시간대는 첫 체결의 시가부터). 연속매매의 분만 보고, 앞서 가격이 있는데 체결이 없는 시간대는 "
+            "0이다(#265, 장중 시간대 반복: Heston, Korajczyk & Sadka 2010).",
             "bp",
             f"그날 개장 전에 안다(전 거래일들의 백필 1분봉). 녹화된 날과 백필 날에 모두 있다. 앞선 거래일이 "
-            f"{d}일보다 적게 알려졌거나, 그 날들 모두 그 시간대 전에 체결이 없었으면 없다.",
+            f"{d}일보다 적게 알려졌거나, 그 날들 모두 그 시간대가 끝날 때까지 체결이 없었으면(백필이 없는 날 "
+            "포함) 없다.",
         )
         for d in SLOT_RETURN_DAYS
     },

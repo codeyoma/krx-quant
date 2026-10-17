@@ -307,7 +307,8 @@ class PreviousDay:
     backfilled bars under the data directory: its one-minute ranges by 30-minute slot (#181,
     ``features.day_slot_ranges``: the range's ``range_prev_day``) and its one-minute bars of
     continuous trading, from the open to the closing auction (#183: the barrier's width); empty
-    without them. The same on a recorded day and a backfilled one: every finished trading day
+    without them. And the 20 trading days before's returns by 10-minute slot (#265,
+    ``slot_returns``). The same on a recorded day and a backfilled one: every finished trading day
     is backfilled (20:30). Read once per symbol and day; a file that cannot be read is logged
     and counts as none (the engine predicts on)."""
 
@@ -339,8 +340,9 @@ class PreviousDay:
         return out
 
     def _returns_of(self, symbol: str, day: date) -> dict[str, float]:
-        """A day's slot returns, read once; a day without its bars (or a session) is empty and
-        asked again next time: the backfill may fill it while the engine runs."""
+        """A day's slot returns, read once; a day without its bars file (or a session) is empty
+        and asked again next time: the backfill may fill it while the engine runs. A file that
+        cannot be read is logged once and counts as empty."""
         if (symbol, day) in self._slot_returns:
             return self._slot_returns[(symbol, day)]
         session = self._calendar.session(day)
@@ -348,7 +350,8 @@ class PreviousDay:
             bars = read_bars(self._data_dir, day, MINUTE_BARS_TR, symbol)
         except Exception:
             log.exception("cannot read %s's bars of %s; its slot returns go without them", symbol, day)
-            bars = None
+            self._slot_returns[(symbol, day)] = {}
+            return {}
         if bars is None or session is None:
             return {}
         found = self._slot_returns[(symbol, day)] = day_slot_returns(bars, session)
