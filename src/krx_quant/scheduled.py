@@ -769,7 +769,32 @@ SUPPLY_PROBE = Job(
     ),
 )
 
-# ④ The pre-validations (#204): a new algorithm runs live once its pre-validation has passed
+# ④ The structure check (#270): the research's market-structure claims (``structure_check``)
+# measured on the stored one-minute bars, day candles and KIS daily flows, once, on the first
+# night after the deploy that brings the job (trading or not: it reads finished days only).
+# It reads files and makes no call; its output holds no price, volume or flow value, so it can
+# go on the public issue. A year of bars for three symbols is a few minutes; the half hour is a
+# bound. Before the pre-validations, which may take the night.
+STRUCTURE_CHECK_ISSUE = 270
+
+STRUCTURE_CHECK = Job(
+    name="structure-check-270",
+    due=_first_night,
+    command=("structure-check",),
+    timeout=timedelta(minutes=30),
+    targets=(
+        Target(
+            STRUCTURE_CHECK_ISSUE,
+            note=(
+                "에이전트가 이 출력으로 리서치 보고서(`research/reports/`)와 #262(채점), "
+                "#264(하루 한 번 예측)에 반영할 것을 정리한다. 출력에는 가격·거래량·수급 값이 없다"
+                "(비율, 기울기, 개수, 중앙값만)."
+            ),
+        ),
+    ),
+)
+
+# ⑤ The pre-validations (#204): a new algorithm runs live once its pre-validation has passed
 # (``prevalidation.py``). Once ``MIN_DAYS`` trading days are recorded, one waiting algorithm
 # is pre-validated a night, at most (``prevalidation_tonight``): a run replays 20 days beside
 # the live engine, on a 2 GB server with burst CPU. They go in this order, then any other
@@ -880,5 +905,6 @@ JOBS: tuple[Job, ...] = (
     DIAGNOSE,
     SIGNAL_REVIEW,
     SUPPLY_PROBE,
+    STRUCTURE_CHECK,
     *prevalidation_jobs([*(a.name for a in ALGORITHMS), *(a.name for a in KIND_ALGORITHMS)]),
 )

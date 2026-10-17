@@ -38,6 +38,7 @@ from krx_quant.scheduled import (
     RUNNING,
     SIGNAL_REVIEW,
     STATE_FILE,
+    STRUCTURE_CHECK,
     SUPPLY_PROBE,
     Attachment,
     Facts,
@@ -887,6 +888,19 @@ def test_the_supply_probe_runs_once_on_the_first_night_trading_or_not() -> None:
     assert not SUPPLY_PROBE.due(night(MONDAY, ran))
     assert not SUPPLY_PROBE.due(night(MONDAY, replace(ran, outcome=FAILED, exit_code=1)))
     assert SUPPLY_PROBE.due(night(MONDAY, replace(ran, outcome=INTERRUPTED)))
+
+
+def test_the_structure_check_runs_once_on_the_first_night_trading_or_not() -> None:
+    assert STRUCTURE_CHECK.command == ("structure-check",)
+    assert STRUCTURE_CHECK.timeout == timedelta(minutes=30)
+    assert [t.issue for t in STRUCTURE_CHECK.targets] == [270]
+    assert JOBS[:4] == (DIAGNOSE, SIGNAL_REVIEW, SUPPLY_PROBE, STRUCTURE_CHECK)  # before the pre-validations
+    assert STRUCTURE_CHECK.due(night(FRIDAY))
+    assert STRUCTURE_CHECK.due(night(SATURDAY))  # it reads finished days only
+    ran = JobRecord(SATURDAY, OK, at(SATURDAY, "22:30"), COMMIT, 0, 120.0)
+    assert not STRUCTURE_CHECK.due(night(MONDAY, ran))
+    assert not STRUCTURE_CHECK.due(night(MONDAY, replace(ran, outcome=FAILED, exit_code=1)))
+    assert STRUCTURE_CHECK.due(night(MONDAY, replace(ran, outcome=INTERRUPTED)))
 
 
 async def test_the_supply_probe_runs_on_the_first_night_then_never(tmp_path: Path) -> None:
