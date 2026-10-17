@@ -61,6 +61,7 @@
 | `prevalidation.py` | 새 알고리즘 사전 검증: 최근 20거래일 재생과 엔진의 등록 관문(#24) |
 | `diagnose.py` | 읽기 전용 진단 명령: 남은 결정에 필요한 실측(#82) |
 | `signal_review.py` | 읽기 전용 신호 기준 검토 명령(`signal-review`, #206): 순위표와 정식 알고리즘의 성적, 기준 후보(최종 합의 확률 × 같은 방향 정식 수)마다 엔진의 신호 규칙(`signals.py`)을 저장된 합의에 그대로 돌린 신호 수와 적중률([operations.md](operations.md#신호-기준-검토-206)) |
+| `skill.py` | 기준율 대비 실력(#262): 예측 × 정답 표의 kappa, Gerrity 점수, 균형 맞힘률, 독립성 검정(카이제곱). 알고리즘 상세 통계의 `overall.skill`([engine-api.md](engine-api.md#get-v1algorithmsnamestatssymbolperiodspecial)) |
 | `supply_probe.py`, `toss_probe.py`, `probe_fields.py` | 읽기 전용 일별 수급 출처 확인 명령(`probe-supply`, #226): 조사에서 찾은 KIS 조회 7개와 토스 조회 5개(#235)의 응답, 행 수와 날짜, 필드의 모양(값 없이), 거슬러 가는 끝, 토스와 KIS의 같은 날 값 견주기(개수만)([kis-feeds.md](kis-feeds.md#일별-수급-226), [toss-feeds.md](toss-feeds.md)) |
 | `names.py` | 종목의 회사 이름과 로고 주소(#250): 토스 `GET /api/v1/stocks`의 이름, 없으면 KIS 종목 마스터의 한글 약칭. 수집기가 시작할 때 읽어 `GET /v1/symbols`가 준다 |
 | `supply.py` | 차트 하단 지표의 일별 수급 8종(#226): KIS(주 출처)와 토스(보조, 외국인 보유수량·지분율은 주 출처)의 일별 조회를 수집기의 이력 작업(시작할 때와 20:30, 일봉 다음)에서 받아 `state/supply/`에 출처마다 두고, `GET /v1/symbols/{s}/supply`가 필드마다 합쳐 준다([kis-feeds.md](kis-feeds.md#수집-226)) |

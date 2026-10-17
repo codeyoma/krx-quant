@@ -684,7 +684,14 @@
 알고리즘 하나(기준 예측도 된다)의 상세 통계다. 질의 값은 순위표와 같다(`basis`도 순위표처럼 받아서 그대로 돌려준다, #170). 모르는 이름은 404다. 다른 종류의 알고리즘이나 기준 예측이면 그 종류의 통계다(#179, 아래 "예측 종류"). 아래는 방향의 것이다.
 - 맨 위에는 `algorithm`(이름)과 질의 값 `symbol`, `period`, `days`(실제로 쓴 날짜 목록), `special`, 그리고 `min_sample`이 온다. 순위표 응답의 맨 위와 같다. 요청에 `basis`가 있으면 `days` 뒤에 그 값이 온다.
 - `overall`: 같은 질의의 순위표 항목(순위, q값, `excluded` 포함)에 `calibration`과 `calibration_by_class`(`up`, `flat`, `down`)를 더한다. 곡선은 10구간이고, 구간마다 `low`, `high`, `count`, `mean_p`와 `observed`(실제 비율과 Wilson 구간)가 있다.
+- `overall.skill`(#262): 기준율 대비 실력. 예측한 클래스 × 일어난 클래스 표(3 × 3)에서 낸다(`skill.py`). 채점된 예측이 없으면 `null`이다. 상태 판정과 순위에는 쓰지 않고 보여 주기만 한다.
+  - `accuracy`(맞힘률), `expected_accuracy`: 같은 비율로 결과와 상관없이 클래스를 냈을 때의 맞힘률 Σ P(그 클래스를 냄)·P(그 클래스가 일어남).
+  - `kappa`: Cohen's kappa, (맞힘률 − expected) ÷ (1 − expected). 늘 보합과 무작위는 0, 완벽은 1이다.
+  - `gerrity`: Gerrity(1992) 점수. 하락 < 보합 < 상승의 순서를 보고, 두 칸 틀림(하락에 상승)을 한 칸 틀림보다 더 깎는다. 어떤 상수 예측도, 무작위도 0, 완벽은 1이다. 일어난 클래스의 누적 비율이 0이나 1이면(한쪽 끝 클래스만 일어남) `null`이다.
+  - `balanced_accuracy`: 일어난 클래스마다 그것을 맞힌 비율의 평균. 세 클래스가 다 일어났으면 늘 보합은 1/3이다.
+  - `independence`: 표의 Pearson 카이제곱(`chi2`), 자유도(`df`), p값(`p`). 독립 관측일 때의 Pesaran–Timmermann(2009) 다범주 방향 검정이다. 4분 정답은 겹치고 종목들은 같이 움직여 p가 실제보다 작다. 설명용이다. 쓰인 행이나 열이 하나뿐이면 `chi2`·`p`가 `null`, `df`가 0이다.
 - `by_symbol`, `by_slot`, `by_model_version`: 종목별, 30분 시간대별, 모델 버전별 항목이다. 시간대는 예측한 봉의 시작 시각 기준이다(`"09:00"`은 09:01–09:30 마감). 이 항목들의 lift는 함께 검정하지 않으므로 `q`와 `significant`가 `null`이다. 거래일 단위 값(`by_day`)은 이 항목들에도 있다.
+- `by_volatility`(#262): 변동성 3분위별 항목(`low`, `mid`, `high`). 변동성은 그 봉 마감에 장벽 종류가 저장한 폭 w다(틱, 1분 변화의 지수가중 표준편차 × √4, k보다 좁지 않게, `kind_predictions.width_ticks`). 봉 마감에 아는 값이다. 종목마다 자른다(종목마다 틱이 다르다): w가 아래 경계 이하면 `low`, 위 경계 이하면 `mid`, 그 위면 `high`. 경계는 그 종목 예측들의 w를 정렬한 1/3과 2/3 자리 값(둘 사이면 아래 것)이고, `volatility_cuts`에 종목마다 `[아래, 위]`로 온다. w가 k로 바닥에 붙는 일이 많아 `low`가 클 수 있다. w가 없는 봉 마감(장벽 예측 전, 장벽 종류가 없던 엔진)의 예측은 넣지 않는다. 예측이 없는 칸은 빠진다. 변동성만 맞혀도 방향을 맞힌 것처럼 보일 수 있어(Christoffersen & Diebold 2006), 적중이 어느 변동성에서 나오는지 본다.
 - 예전에 예측한 적이 있는 알고리즘과 합의(`consensus-fast`, `consensus-final`)는 그 기간에 예측이 없어도 404가 아니라 빈 통계(`n` 0)를 낸다.
 
   > **바뀜** (2026-10-10, #51): 합의는 한 번도 예측하지 않은 엔진에서 404였다 → 기준 예측처럼 늘 아는 이름이다. 이유: 계약 테스트가 빈 엔진에서 404를 찾았다. 화면은 합의 성적을 늘 물을 수 있어야 한다.
@@ -1209,7 +1216,8 @@ docker compose run --rm --no-deps engine prevalidate <이름> --days 5  # 빨리
   - `stats`: 각 예측을 그 봉 마감의 도달 정답(`touches`)으로 채점한다. 도달 정답이 있는 예측을 센다(손익은 닿음 손익이다, #170). lift는 기준 예측 넷 대비다. 상관 검사는 그대로다.
 
     > **바뀜** (2026-10-14, #193): "도달 정답이 있고 봉 마감과 4분 뒤 중간가를 아는 예측만 센다(손익 열은 기준 A의 중간가 손익이다)" → 도달 정답이 있는 예측, 닿음 손익. 이유: 통계가 4분 뒤 중간가를 더 쓰지 않는다.
-- **리포트**: `state/prevalidations/<이름>.json`. 통과하든 못 하든 마지막 결과로 덮어쓴다.
+- **리포트**: `state/prevalidations/<이름>.json`. 통과하든 못 하든 마지막 결과로 덮어쓴다. `earlier_runs`(그 전에 돈 사전 검증 수)와 `earlier_runs_on_these_days`(그중 이번 날짜를 하나라도 재생한 수, #262)가 있다. 고친 뒤 같은 날로 다시 돌린 날은 더는 표본 밖이 아니다.
+- **실행 기록**(#262): `state/prevalidations/<이름>.history.jsonl`. 실행마다 한 줄(`prevalidated_at`, `code`, `target_version`, `passed`, `days`)을 덧붙인다. 리포트는 마지막 것만 남기므로, 몇 번 돌렸는지는 여기서 센다. 명령은 전에 돈 적이 있으면 `run before: N, M of them on any of these days`를 출력한다.
   - `algorithm`, `code`(재생한 코드의 digest), `prevalidated_at`, `passed`, `days`, `models`(날짜 → 모델 버전), `checks`(`check`, `passed`, `detail`)
   - `stats`: 순위표 항목과 같은 형식(`rank`, `n`, `accuracy`, `precision`, `coverage`, `brier`, `pnl`, `lift`). 재생한 알고리즘들끼리 매긴 순위와 FDR 보정(`q`, `significant`)이다. 종목·시간대별 분할은 없다
   - `correlations`(알고리즘 → r), `timed_out`, `statuses`(예측 상태별 개수), `skipped_for_cpu`(CPU 예산으로 건너뛴 봉 마감 수, 판정에는 쓰지 않는다), `db`, `target_version`(재생하고 채점한 정답 버전, #191. 없으면 1)

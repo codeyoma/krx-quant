@@ -947,13 +947,13 @@
       "description": "GET /v1/algorithms/{name}/stats of a direction predictor",
       "allOf": [{"$ref": "#/$defs/query"}],
       "type": "object",
-      "required": ["algorithm", "overall", "by_symbol", "by_slot", "by_model_version"],
+      "required": ["algorithm", "overall", "by_symbol", "by_slot", "by_model_version", "by_volatility", "volatility_cuts"],
       "properties": {
         "algorithm": {"type": "string"},
         "overall": {
           "allOf": [{"$ref": "#/$defs/entry_fields"}],
           "type": "object",
-          "required": ["calibration", "calibration_by_class", "excluded"],
+          "required": ["calibration", "calibration_by_class", "excluded", "skill"],
           "properties": {
             "calibration": {"$ref": "#/$defs/calibration"},
             "calibration_by_class": {
@@ -966,15 +966,57 @@
                 "down": {"$ref": "#/$defs/calibration"}
               }
             },
-            "excluded": {"$ref": "#/$defs/excluded"}
+            "excluded": {"$ref": "#/$defs/excluded"},
+            "skill": {"$ref": "#/$defs/skill"}
           },
           "unevaluatedProperties": false
         },
         "by_symbol": {"type": "object", "additionalProperties": {"$ref": "#/$defs/entry"}},
         "by_slot": {"type": "object", "additionalProperties": {"$ref": "#/$defs/entry"}},
-        "by_model_version": {"type": "object", "additionalProperties": {"$ref": "#/$defs/entry"}}
+        "by_model_version": {"type": "object", "additionalProperties": {"$ref": "#/$defs/entry"}},
+        "by_volatility": {
+          "description": "The calls split into volatility terciles by the barrier width w at their bar close, cut per symbol (#262); a tercile without calls is left out.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "low": {"$ref": "#/$defs/entry"},
+            "mid": {"$ref": "#/$defs/entry"},
+            "high": {"$ref": "#/$defs/entry"}
+          }
+        },
+        "volatility_cuts": {
+          "description": "Each symbol's two cuts of w in ticks: low up to the first, mid up to the second, high above.",
+          "type": "object",
+          "additionalProperties": {"type": "array", "items": {"type": "integer"}, "minItems": 2, "maxItems": 2}
+        }
       },
       "unevaluatedProperties": false
+    },
+
+    "skill": {
+      "description": "Skill against the class rates (#262), from the calls' table of called × happened classes; null without a scored prediction.",
+      "type": ["object", "null"],
+      "required": ["n", "accuracy", "expected_accuracy", "kappa", "gerrity", "balanced_accuracy", "independence"],
+      "additionalProperties": false,
+      "properties": {
+        "n": {"type": "integer", "minimum": 1},
+        "accuracy": {"type": "number"},
+        "expected_accuracy": {"type": "number", "description": "What calls independent of the outcome, at the same class rates, get right."},
+        "kappa": {"type": ["number", "null"]},
+        "gerrity": {"type": ["number", "null"]},
+        "balanced_accuracy": {"type": "number"},
+        "independence": {
+          "description": "Pearson's chi-square on the table (Pesaran–Timmermann 2009 for independent observations); the overlapping windows make p too small: it describes.",
+          "type": "object",
+          "required": ["chi2", "df", "p"],
+          "additionalProperties": false,
+          "properties": {
+            "chi2": {"type": ["number", "null"]},
+            "df": {"type": "integer", "minimum": 0},
+            "p": {"type": ["number", "null"]}
+          }
+        }
+      }
     },
 
     "kinds": {

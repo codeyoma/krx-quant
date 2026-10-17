@@ -35,6 +35,8 @@ from krx_quant.prevalidation import (
     _held,
     admits,
     code_digest,
+    earlier_runs,
+    history_path,
     last_report,
     prevalidate,
     report_path,
@@ -420,6 +422,29 @@ def test_the_command_reports_and_never_touches_the_live_engine_s_record(
     assert live.read_bytes() == before, "the live engine's database is never written"
     assert (s.state_dir / "prevalidation-newton.sqlite3").exists()
     assert report(s, "newton")["days"] == ["2026-09-15"]
+    # #262: every run is kept, and a run on days replayed before says so.
+    assert report(s, "newton")["earlier_runs"] == 0
+    assert "run before" not in out
+    main(["prevalidate", "newton", "--days", "1"])
+    again = capsys.readouterr().out
+    assert "run before: 1, 1 of them on any of these days" in again
+    assert (report(s, "newton")["earlier_runs"], report(s, "newton")["earlier_runs_on_these_days"]) == (1, 1)
+    assert len(history_path(s.state_dir, "newton").read_text().splitlines()) == 2
+
+
+def test_earlier_runs_count_those_on_any_of_the_days(tmp_path: Path) -> None:
+    path = history_path(tmp_path, "x")
+    path.parent.mkdir(parents=True)
+    lines = [
+        {"days": ["2026-09-14", "2026-09-15"]},
+        {"days": ["2026-09-16"]},
+        "not json",
+        {"days": ["2026-09-15", "2026-09-16"]},
+    ]
+    path.write_text("\n".join(x if isinstance(x, str) else json.dumps(x) for x in lines) + "\n")
+    assert earlier_runs(tmp_path, "x", [date(2026, 9, 15)]) == (3, 2)
+    assert earlier_runs(tmp_path, "x", [date(2026, 9, 17)]) == (3, 0)
+    assert earlier_runs(tmp_path, "y", [date(2026, 9, 15)]) == (0, 0)
 
 
 def test_the_command_reports_a_registry_that_fails_the_registration_check_as_an_error(

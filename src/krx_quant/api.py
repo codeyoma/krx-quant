@@ -71,7 +71,7 @@ import asyncio
 import contextlib
 import json
 import re
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from functools import partial
@@ -107,6 +107,7 @@ from krx_quant.names import logo_url
 from krx_quant.predictions import Excluded, iso
 from krx_quant.pricing import flat_ticks, tick_size
 from krx_quant.reference import Bar
+from krx_quant.skill import Skill, skill
 from krx_quant.stats import (
     DEFAULT_MIN_SAMPLE,
     CalibrationBin,
@@ -848,6 +849,8 @@ async def _algorithm_stats(request: web.Request) -> web.Response:
                 k: entry_json(entry(name, g, baselines, engine.fee_rate)) for k, g in sorted(groups.items())
             }
 
+        terciles, cuts = by_volatility(records, engine.store.barrier_widths(query.days, query.symbol))
+
         return {
             "algorithm": name,
             **query.describe(),
@@ -860,16 +863,62 @@ async def _algorithm_stats(request: web.Request) -> web.Response:
                     for d, bins in overall.summary.calibration_by_class.items()
                 },
                 "excluded": _excluded_json(excluded.get(name)),
+                "skill": skill_json(skill([(r.predicted, r.outcome) for r in records])),
             },
             "by_symbol": by(lambda r: r.symbol),
             "by_slot": by(lambda r: slot(r.bar_close)),
             "by_model_version": by(lambda r: r.model_version),
+            "by_volatility": {
+                k: entry_json(entry(name, g, baselines, engine.fee_rate)) for k, g in terciles.items() if g
+            },
+            "volatility_cuts": cuts,
         }
 
     return _json(_echo_basis(request, await _stats(request, ("algorithm", name), query, build)))
 
 
 Build = Callable[[dict[str, list[Scored]], dict[str, list[Scored]], dict[str, Excluded]], dict[str, Any]]
+
+
+TERCILES = ("low", "mid", "high")
+
+
+def by_volatility(
+    records: Sequence[Scored], widths: Mapping[tuple[str, str], int]
+) -> tuple[dict[str, list[Scored]], dict[str, list[int]]]:
+    """``records`` split into volatility terciles by the barrier width w at their bar close
+    (#262, ``PredictionStore.barrier_widths``), cut per symbol (ticks differ by price): low
+    up to the lower cut, mid up to the upper, high above; and each symbol's two cuts (the
+    widths at a third and two thirds of its sorted ones, lower of two). Records without a
+    width are left out. w is never narrower than k, so the low tercile may hold more."""
+    found: dict[str, list[tuple[int, Scored]]] = {}
+    for r in records:
+        w = widths.get((r.symbol, iso(r.bar_close)))
+        if w is not None:
+            found.setdefault(r.symbol, []).append((w, r))
+    groups: dict[str, list[Scored]] = {t: [] for t in TERCILES}
+    cuts: dict[str, list[int]] = {}
+    for symbol, pairs in sorted(found.items()):
+        ws = sorted(w for w, _ in pairs)
+        low, high = ws[(len(ws) - 1) // 3], ws[2 * (len(ws) - 1) // 3]
+        cuts[symbol] = [low, high]
+        for w, r in pairs:
+            groups["low" if w <= low else "mid" if w <= high else "high"].append(r)
+    return groups, cuts
+
+
+def skill_json(s: Skill | None) -> dict[str, Any] | None:
+    if s is None:
+        return None
+    return {
+        "n": s.n,
+        "accuracy": s.accuracy,
+        "expected_accuracy": s.expected_accuracy,
+        "kappa": s.kappa,
+        "gerrity": s.gerrity,
+        "balanced_accuracy": s.balanced_accuracy,
+        "independence": {"chi2": s.chi2, "df": s.df, "p": s.p},
+    }
 
 
 async def _stats(
