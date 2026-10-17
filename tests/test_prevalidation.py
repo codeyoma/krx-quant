@@ -10,13 +10,14 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections.abc import Sequence
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from krx_quant import stats
 from krx_quant.algorithms import Algorithm, Model, NothingToLearn, RegistrationError, Sample, save_model
 from krx_quant.baselines import Forecast
 from krx_quant.cli import main
@@ -33,6 +34,7 @@ from krx_quant.prevalidation import (
     LastReport,
     PrevalidationRunning,
     _held,
+    _stats,
     admits,
     code_digest,
     earlier_runs,
@@ -41,8 +43,10 @@ from krx_quant.prevalidation import (
     prevalidate,
     report_path,
     seed_history,
+    tried_level,
 )
 from krx_quant.replay import replay_into
+from krx_quant.stats import Lift
 from krx_quant.swap import reload_models
 from krx_quant.touch import TARGET_VERSION
 from tests.algorithm_doubles import FixedAlgorithm, stand_in_card, stand_in_meanings
@@ -446,6 +450,68 @@ def test_earlier_runs_count_those_on_any_of_the_days(tmp_path: Path) -> None:
     assert earlier_runs(tmp_path, "x", [date(2026, 9, 15)]) == (3, 2)
     assert earlier_runs(tmp_path, "x", [date(2026, 9, 17)]) == (3, 0)
     assert earlier_runs(tmp_path, "y", [date(2026, 9, 15)]) == (0, 0)
+
+
+@dataclass(frozen=True)
+class _Counted:
+    n: int
+
+
+@dataclass(frozen=True)
+class _Judged:
+    """A candidate's stats as the stats check reads them (``stats.Lifted``)."""
+
+    weakest_lift: float | None
+    day_low: float | None = None
+    algorithm: str = "x"
+    summary: _Counted = _Counted(300)
+    lifts: dict[str, stats.Tested] = field(
+        default_factory=lambda: {"baseline-flat": stats.Tested(Lift(300, 0.05, 0.01, 0.09, 0.01))}
+    )
+    lift_low: float | None = None
+    weakest_by_day: Lift | None = None
+
+
+def test_a_rerun_on_the_same_days_is_held_to_a_bonferroni_bound_by_trading_day() -> None:
+    # #262: the N-th run on any of these days needs the weakest lift by trading day's lower
+    # bound above 0 at 1 − 0.05/N; the first needs the weakest lift above 0, as before.
+    assert [tried_level(n) for n in (1, 2, 4)] == [
+        pytest.approx(0.95),
+        pytest.approx(0.975),
+        pytest.approx(0.9875),
+    ]
+    first = _stats(_Judged(0.05), 20)
+    assert first.passed and "run" not in first.detail
+    second = _stats(_Judged(0.05), 20, tries=2, strict_low=0.004)
+    assert second.passed
+    assert "run 2 on these days, held to 97.50% (Bonferroni)" in second.detail
+    assert "weakest lower bound by trading day 0.0040" in second.detail
+    assert not _stats(_Judged(0.05), 20, tries=2, strict_low=-0.002).passed
+    assert not _stats(_Judged(-0.01), 20, tries=2, strict_low=0.004).passed  # the lift itself still counts
+    unpaired = _stats(_Judged(0.05), 20, tries=3, strict_low=None)
+    assert not unpaired.passed and "fewer than two days paired" in unpaired.detail
+    assert "too few to judge" in _stats(_Judged(0.05), 500, tries=2, strict_low=0.004).detail
+
+
+async def test_a_rerun_records_its_stats_and_is_judged_by_trading_day(tmp_path: Path) -> None:
+    s = settings(tmp_path)
+    history = history_path(s.state_dir, "contrarian")
+    history.parent.mkdir(parents=True)
+    # A run before on two of these days: this one is the second on them.
+    history.write_text(
+        json.dumps({"days": [DAYS[0].isoformat(), DAYS[1].isoformat()], "passed": False}) + "\n"
+    )
+
+    result = await prevalidate(s, "contrarian", algorithms=[ALPHA, Contrarian("contrarian")], now=AFTER)
+
+    check = next(c for c in result.checks if c.name == "stats")
+    assert "run 2 on these days, held to 97.50% (Bonferroni)" in check.detail
+    bound = float(check.detail.rsplit("weakest lower bound by trading day ", 1)[1].split(" ")[0])
+    assert check.passed == (bound > 0 and (result.stats.weakest_lift or 0) > 0)
+    assert bound <= (result.stats.day_low or 0), "a wider interval: a lower bound no higher than at 95%"
+    last = json.loads(history.read_text().splitlines()[-1])
+    assert last["weakest_lift"] == pytest.approx(result.stats.weakest_lift)
+    assert last["day_low"] == pytest.approx(result.stats.day_low)
 
 
 def test_a_report_from_before_the_history_counts_as_a_run(tmp_path: Path) -> None:
