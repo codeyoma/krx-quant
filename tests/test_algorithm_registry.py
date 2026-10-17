@@ -13,7 +13,7 @@ from krx_quant.algorithms.newton import Newton
 from krx_quant.algorithms.poisson import Poisson
 from krx_quant.algorithms.shannon import Shannon
 from krx_quant.algorithms.turing import Turing
-from krx_quant.features import BOOK_FEATURES, SERIES_FEATURES
+from krx_quant.features import BOOK_FEATURES, SERIES_FEATURES, SLOT_RETURN_FEATURES
 from tests.algorithm_doubles import FixedAlgorithm
 
 
@@ -79,6 +79,9 @@ def test_each_registered_algorithm_has_a_personality_of_its_own() -> None:
     # Turing reads every number the others do, the book's, the tape's and the options' too
     # (#55), but not their series; and its own on top.
     others = before_shannon | set(Shannon.features) | set(Poisson.features)
-    assert set(Turing.features) == (others - SERIES_FEATURES) | set(Turing.card.unique_features)
+    # It also reads the shared slot returns (#265), which no other direction algorithm reads.
+    own = set(Turing.card.unique_features)
+    assert set(Turing.features) == (others - SERIES_FEATURES) | own | SLOT_RETURN_FEATURES
+    assert not SLOT_RETURN_FEATURES & set(Turing.card.unique_features), "shared, not Turing's own"
     assert set(Turing.card.unique_features) >= {"spread_ticks", "top_imbalance", "top_size_change"}
     assert {"spread_ticks", "top_imbalance", "top_size_change"} <= BOOK_FEATURES

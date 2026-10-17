@@ -35,7 +35,7 @@ import pyarrow.parquet as pq
 from krx_quant.auth import tokens_and_client
 from krx_quant.config import Settings
 from krx_quant.contracts import KOSPI200, USD, Product, front_month
-from krx_quant.features import day_slot_ranges
+from krx_quant.features import SLOT_RETURN_DAYS, day_slot_ranges, day_slot_returns
 from krx_quant.feeds.base import EVENT_TIME, KST, Row, kst, kst_day, to_float, to_int
 from krx_quant.kis import KisError, RestClient
 from krx_quant.market_calendar import CalendarStore, MarketCalendar, calendar_store
@@ -307,7 +307,8 @@ class PreviousDay:
     backfilled bars under the data directory: its one-minute ranges by 30-minute slot (#181,
     ``features.day_slot_ranges``: the range's ``range_prev_day``) and its one-minute bars of
     continuous trading, from the open to the closing auction (#183: the barrier's width); empty
-    without them. The same on a recorded day and a backfilled one: every finished trading day
+    without them. And the 20 trading days before's returns by 10-minute slot (#265,
+    ``slot_returns``). The same on a recorded day and a backfilled one: every finished trading day
     is backfilled (20:30). Read once per symbol and day; a file that cannot be read is logged
     and counts as none (the engine predicts on)."""
 
@@ -315,12 +316,46 @@ class PreviousDay:
         self._data_dir = data_dir
         self._calendar = calendar
         self._read: dict[tuple[str, date], tuple[dict[str, float], list[Bar]]] = {}
+        self._slot_returns: dict[tuple[str, date], dict[str, float]] = {}  # of the day itself
 
     def __call__(self, symbol: str, day: date) -> Mapping[str, float]:
         return self._of(symbol, day)[0]
 
     def bars(self, symbol: str, day: date) -> Sequence[Bar]:
         return self._of(symbol, day)[1]
+
+    def slot_returns(self, symbol: str, day: date) -> Sequence[Mapping[str, float]]:
+        """The returns by 10-minute slot (#265) of the ``max(SLOT_RETURN_DAYS)`` trading days
+        before ``day``, the latest first: each from its backfilled bars, read once; a day
+        without them is empty. A day before the calendar knows none ends the list."""
+        known = self._calendar.known()
+        first = min(known) if known else None
+        out: list[Mapping[str, float]] = []
+        before = day
+        for _ in range(max(SLOT_RETURN_DAYS)):
+            before = self._calendar.previous_trading_day(before)
+            if first is not None and before < first:
+                break
+            out.append(self._returns_of(symbol, before))
+        return out
+
+    def _returns_of(self, symbol: str, day: date) -> dict[str, float]:
+        """A day's slot returns, read once; a day without its bars file (or a session) is empty
+        and asked again next time: the backfill may fill it while the engine runs. A file that
+        cannot be read is logged once and counts as empty."""
+        if (symbol, day) in self._slot_returns:
+            return self._slot_returns[(symbol, day)]
+        session = self._calendar.session(day)
+        try:
+            bars = read_bars(self._data_dir, day, MINUTE_BARS_TR, symbol)
+        except Exception:
+            log.exception("cannot read %s's bars of %s; its slot returns go without them", symbol, day)
+            self._slot_returns[(symbol, day)] = {}
+            return {}
+        if bars is None or session is None:
+            return {}
+        found = self._slot_returns[(symbol, day)] = day_slot_returns(bars, session)
+        return found
 
     def _of(self, symbol: str, day: date) -> tuple[dict[str, float], list[Bar]]:
         if (symbol, day) not in self._read:
