@@ -49,6 +49,7 @@ from krx_quant.replay import replay_day
 from krx_quant.rescore import EngineRunning, rescore
 from krx_quant.signal_review import DEFAULT_DAYS as SIGNAL_REVIEW_DAYS
 from krx_quant.signal_review import signal_review
+from krx_quant.structure_check import structure_check
 from krx_quant.supply_probe import probe_supply
 from krx_quant.training import fit_algorithm
 
@@ -324,6 +325,22 @@ def _signal_review(days: int) -> int:
     return 0
 
 
+def _structure_check(days: int | None) -> int:
+    settings = Settings.from_env(require_kis=False)
+    calendar = calendar_store(settings).calendar
+    print(
+        structure_check(
+            settings.data_dir,
+            settings.state_dir,
+            calendar,
+            settings.symbols,
+            fee_rate=settings.fee_rate,
+            days=days,
+        )
+    )
+    return 0
+
+
 def _macro() -> int:
     settings = Settings.from_env(require_kis=False)
     macro = asyncio.run(run_macro(settings, lambda: datetime.now(KST)))
@@ -486,6 +503,16 @@ def main(argv: list[str] | None = None) -> int:
         default=SIGNAL_REVIEW_DAYS,
         help=f"the latest N days with predictions (default {SIGNAL_REVIEW_DAYS}, the leaderboard's 20d)",
     )
+    structure_cmd = sub.add_parser(
+        "structure-check",
+        help="measure the research's market-structure claims on the stored bars and candles; reads only",
+    )
+    structure_cmd.add_argument(
+        "--days",
+        type=_positive,
+        default=None,
+        help="the latest N trading days with one-minute bars (default: all)",
+    )
     notify_cmd = sub.add_parser("notify", help="send a notice to the Telegram chat that receives alerts")
     notify_cmd.add_argument("text")
     fake = sub.add_parser("fake-kis", help="run a local fake KIS server for offline testing")
@@ -547,6 +574,8 @@ def main(argv: list[str] | None = None) -> int:
             return _diagnose(args.days)
         elif args.command == "signal-review":
             return _signal_review(args.days)
+        elif args.command == "structure-check":
+            return _structure_check(args.days)
         elif args.command == "test-alert":
             return asyncio.run(_test_alert())
         elif args.command == "fake-kis":
