@@ -60,6 +60,23 @@ def test_a_longer_window_reads_its_own_minutes_of_quotes() -> None:
     assert ten.unscorable is None
 
 
+def test_a_window_reads_its_quotes_by_bisection_or_by_a_scan_when_one_came_late() -> None:
+    """The log is read by bisection while every quote came in receipt order; one received out
+    of order (a later one first) leaves the same windows to a scan."""
+    t = at("09:31:00")
+    ordered, late = QuoteLog(), QuoteLog()
+    for seconds in (0, 30, 60, 90, 240, 300):
+        ordered.quote(t + timedelta(seconds=seconds), 81_200, 81_300, None, None, False)
+    for seconds in (0, 60, 30, 90, 300, 240):
+        late.quote(t + timedelta(seconds=seconds), 81_200, 81_300, None, None, False)
+    for log in (ordered, late):
+        four = log.window(SYMBOL, t, 81_250.0, 100, 2, 81_200, 81_300)
+        assert sorted(q.received_at for q in four.quotes) == [
+            t + timedelta(seconds=s) for s in (0, 30, 60, 90)
+        ]
+        assert len(log.window(SYMBOL, t, 81_250.0, 100, 2, 81_200, 81_300, horizon=TEN).quotes) == 6
+
+
 async def test_a_longer_kind_is_answered_when_its_own_window_is_over(tmp_path: Path) -> None:
     """Input: the book at 81,200 / 81,300 (mid 81,250), from 09:32:30 at 81,400 / 81,500 (mid
     81,450). Output: ten-minute windows that reach past 09:32:30 end above their bar close's mid

@@ -256,7 +256,7 @@ def test_a_range_forecast_keeps_its_contract_or_is_an_error(forecast: KindForeca
 
 
 def test_the_range_is_registered_after_the_direction() -> None:
-    assert [k.name for k in KINDS] == ["direction", "range", "barrier"], "the barrier after it (#183)"
+    assert [k.name for k in KINDS][:3] == ["direction", "range", "barrier"], "the barrier after it (#183)"
     assert (RANGE.classes, RANGE.action, RANGE.answer_version) == (
         ("small", "medium", "large"),
         ("small", "large"),
@@ -505,7 +505,7 @@ async def test_both_baselines_predict_and_are_scored_and_ranked_on_the_range(tmp
         assert entry["extra"]["n"] == entry["n"], "every scored answer has its r"
     assert entries[CLIMATE]["extra"]["vs_climate"] is None
     assert entries[PERSIST]["extra"]["vs_climate"] is not None
-    assert [k["name"] for k in kinds["kinds"]] == ["direction", "range", "barrier"]
+    assert [k["name"] for k in kinds["kinds"]][:3] == ["direction", "range", "barrier"]
     assert [b["name"] for b in kinds["kinds"][1]["baselines"]] == [CLIMATE, PERSIST]
     for p in latest["predictions"]:
         check("range_output", p["output"])

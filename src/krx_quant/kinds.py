@@ -62,6 +62,7 @@ from __future__ import annotations
 
 import math
 import re
+from bisect import bisect_left
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -140,12 +141,18 @@ class QuoteLog:
     """A symbol's best quotes, REST book snapshots and trades as received, for the kinds'
     windows (#179): kept while a window may read them. A one-sided quote is dropped, as a
     touch window drops it (``touch.TouchWindow``); a crossed one is kept, and a window
-    gives it only to a kind that counts it (``window``, #187)."""
+    gives it only to a kind that counts it (``window``, #187).
+
+    A window reads its minutes of the log by bisection while everything came in receipt order,
+    as it does live and in a replay: the log holds the longest kind's window and more (an hour
+    with the barrier's horizon ladder, #263), so scanning all of it for each window would cost
+    that hour every time. Anything received out of order falls back to a scan."""
 
     def __init__(self) -> None:
         self._quotes: list[Quote] = []
         self._rests: list[datetime] = []
         self._trades: list[tuple[datetime, float]] = []
+        self._ordered = True  # each list in the order of its received times
 
     def quote(
         self,
@@ -157,14 +164,17 @@ class QuoteLog:
         rest: bool,
     ) -> None:
         if rest:
+            self._ordered &= not self._rests or self._rests[-1] <= received_at
             self._rests.append(received_at)
             return
         if not bid or not ask or bid <= 0 or ask <= 0:
             return  # one-sided: dropped; a crossed one is kept for the kinds that count it
+        self._ordered &= not self._quotes or self._quotes[-1].received_at <= received_at
         self._quotes.append(Quote(received_at, bid, ask, bid_size, ask_size))
 
     def trade(self, received_at: datetime, price: float | None) -> None:
         if price:
+            self._ordered &= not self._trades or self._trades[-1][0] <= received_at
             self._trades.append((received_at, price))
 
     def forget(self, before: datetime) -> None:
@@ -195,9 +205,23 @@ class QuoteLog:
         between two, or up to the end). ``cost`` and ``width`` go with it as given (``Followed``).
         """
         start, end = bar_close, bar_close + horizon
-        quotes = tuple(q for q in self._quotes if start <= q.received_at < end and (crossed or not q.crossed))
-        rest = any(start <= r < end for r in self._rests)
-        trades = tuple(t for t in self._trades if start <= t[0] < end)
+        if self._ordered:
+            got = self._quotes[
+                bisect_left(self._quotes, start, key=_received) : bisect_left(
+                    self._quotes, end, key=_received
+                )
+            ]
+            rests = self._rests[bisect_left(self._rests, start) : bisect_left(self._rests, end)]
+            traded = self._trades[
+                bisect_left(self._trades, start, key=_at) : bisect_left(self._trades, end, key=_at)
+            ]
+        else:
+            got = [q for q in self._quotes if start <= q.received_at < end]
+            rests = [r for r in self._rests if start <= r < end]
+            traded = [t for t in self._trades if start <= t[0] < end]
+        quotes = tuple(q for q in got if crossed or not q.crossed)
+        rest = bool(rests)
+        trades = tuple(traded)
         silent = went_silent(start, end, [q.received_at for q in quotes])
         unscorable = MISSING_MID if anchor is None else REST_QUOTES if rest else SILENT if silent else None
         return Followed(
@@ -215,6 +239,14 @@ class QuoteLog:
             width,
             horizon,
         )
+
+
+def _received(q: Quote) -> datetime:
+    return q.received_at
+
+
+def _at(trade: tuple[datetime, float]) -> datetime:
+    return trade[0]
 
 
 def went_silent(start: datetime, end: datetime, received: Sequence[datetime]) -> bool:

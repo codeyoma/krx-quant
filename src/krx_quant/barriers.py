@@ -56,6 +56,15 @@ shares over the latest 20 training days, a table the nightly training refits and
 swap installs. ``barrier-persist`` (``BarrierPersist``): the last window's answer goes on, with
 certainty; not predicted when that window could not be scored.
 
+**Horizon ladder** (#263, ``barrier_kind``, ``BARRIER_LADDER``): the same barrier with a time
+barrier of 15, 30 or 60 minutes, kinds ``barrier_15m``, ``barrier_30m`` and ``barrier_60m``
+(``Kind.horizon``). Everything above holds with H minutes for four: the width is σ̂₁ × √H
+(``features.barrier_width``, never below k), the answer reads the quotes of [t, t + H), the
+bar rule the bars of those minutes, and a bar close is predicted only when t + H is before the
+closing auction. Each has its own baselines, ``barrier-climate-<H>m`` (its table counts its own
+answers) and ``barrier-persist-<H>m`` (the window that ended at t, opened at t − H minutes). The
+algorithms' barrier features stay the four-minute barrier's.
+
 **Statistics** (``barrier_stats``), beside the three-class ones (action classes: up_first and
 down_first): the barrier P&L (research only, ``barrier_profit``) of the calls: a long on
 up_first, a short on down_first, nothing on timeout; the trades, their total and the mean per
@@ -69,14 +78,25 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping, Sequence
-from datetime import datetime
+from dataclasses import replace
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from krx_quant.cards import Card
 from krx_quant.consensus import slot
-from krx_quant.features import Snapshot, Width
+from krx_quant.features import BARRIER_MINUTES, Snapshot, Width, barrier_width
 from krx_quant.feeds.base import KST, kst_day
-from krx_quant.kinds import Answer, Followed, Kind, KindForecast, KindInputs, KindScored, Quote, went_silent
+from krx_quant.kinds import (
+    Answer,
+    Followed,
+    Kind,
+    KindForecast,
+    KindInputs,
+    KindScored,
+    Quote,
+    WidthRule,
+    went_silent,
+)
 from krx_quant.pricing import INVERSE_PRODUCTS, SELL_TAX, flat_ticks, tick_size
 from krx_quant.reference import Bar
 from krx_quant.stats import interval_json, mean_interval
@@ -152,9 +172,10 @@ def barrier_answer(window: Followed) -> Answer:
 def bar_barrier(
     closing: Bar, after: Sequence[Bar], fee_rate: float, *, width: Width | None = None
 ) -> Answer | None:
-    """The barrier answer of the four minutes after a bar close, from one-minute bars (training
-    on a day without quotes): the bar that ended at the bar close (``closing``), the bars of the
-    four minutes from it (``after``, those with trades, oldest first) and the width at the bar
+    """The barrier answer of the window after a bar close (four minutes, or the kind's horizon,
+    #263), from one-minute bars (training on a day without quotes): the bar that ended at the
+    bar close (``closing``), the bars of the window (``after``, those with trades, oldest
+    first) and the width at the bar
     close from the bars up to it (``width``). None without a trade in those minutes, or without
     a width.
 
@@ -204,8 +225,8 @@ def barrier_profit(predicted: str, outcome: str, path: Mapping[str, Any]) -> flo
     barrier's own rule, the answer being ``outcome`` and its path ``path``:
 
     - up_first (a long): bought at the bar close's best ask; sold at U if U was reached first,
-      at the best bid when L was reached if L was, else at the last best bid before the four
-      minutes ended;
+      at the best bid when L was reached if L was, else at the last best bid before the window
+      ended;
     - down_first (a short of the stock): sold at the bar close's best bid;
       bought back at L if L was reached first, at the best ask when U was reached if U was,
       else at the last best ask;
@@ -295,29 +316,36 @@ def _certain(label: str) -> KindForecast:
 
 
 class BarrierPersist:
-    """The last four minutes' barrier answer goes on (#183)."""
+    """The last window's barrier answer goes on (#183): the window one horizon back (four
+    minutes, or a longer barrier's, #263)."""
 
-    name = PERSIST
     version = "v1"
-    card = Card(
-        scientist=None,
-        character="기준 예측: 직전 4분 장벽",
-        logic=(
-            "직전 4분(t − 4분 → t) 창의 장벽 정답(그 창의 봉 마감 t − 4분에 정한 폭과 장벽으로, 같은 "
-            "규칙)이 다음 4분에도 그대로라고 본다. 저장된 예측이 아니라 시장 보기가 따라간 호가로 "
-            "정한다(그 봉 마감에 예측이 없었어도 된다). 그 창을 채점할 수 없으면(호가 끊김, REST 대체 "
-            "호가, 재시작, 두 장벽에 같은 받은 시각에 닿음, 그날 처음 4분) 예측하지 않는다."
-        ),
-        unique_features=(),
-        training="배우지 않는다.",
-        forecasting=(
-            "직전 창의 클래스에 확률 1, 나머지 둘에 0을 준다. 예측하지 않은 봉 마감은 상태가 no_previous다."
-        ),
-        failure=(
-            "추세가 꺾이거나, 조용하던 장이 움직이기 시작하거나, 움직이던 장이 잦아들 때 틀린다. 한 "
-            "방향으로 이어지는 추세나 변동성 군집이 강한 장에서는 맞기 쉬운 강한 기준이다."
-        ),
-    )
+
+    def __init__(self, minutes: int = BARRIER_MINUTES) -> None:
+        self.minutes = minutes
+        self.name = PERSIST if minutes == BARRIER_MINUTES else f"{PERSIST}-{minutes}m"
+        m = minutes
+        self.card = Card(
+            scientist=None,
+            character=f"기준 예측: 직전 {m}분 장벽",
+            logic=(
+                f"직전 {m}분(t − {m}분 → t) 창의 장벽 정답(그 창의 봉 마감 t − {m}분에 정한 폭과 "
+                f"장벽으로, 같은 규칙)이 다음 {m}분에도 그대로라고 본다. 저장된 예측이 아니라 시장 보기가 "
+                "따라간 호가로 정한다(그 봉 마감에 예측이 없었어도 된다). 그 창을 채점할 수 없으면(호가 "
+                f"끊김, REST 대체 호가, 재시작, 두 장벽에 같은 받은 시각에 닿음, 그날 처음 {m}분) 예측하지 "
+                "않는다."
+            ),
+            unique_features=(),
+            training="배우지 않는다.",
+            forecasting=(
+                "직전 창의 클래스에 확률 1, 나머지 둘에 0을 준다. 예측하지 않은 봉 마감은 상태가 "
+                "no_previous다."
+            ),
+            failure=(
+                "추세가 꺾이거나, 조용하던 장이 움직이기 시작하거나, 움직이던 장이 잦아들 때 틀린다. 한 "
+                "방향으로 이어지는 추세나 변동성 군집이 강한 장에서는 맞기 쉬운 강한 기준이다."
+            ),
+        )
 
     def predict(self, inputs: KindInputs) -> KindForecast | None:
         previous = inputs.previous
@@ -335,7 +363,6 @@ class BarrierClimate:
     day, then to a third each (a baseline predicts every bar close, so the lifts pair it with
     every forecast)."""
 
-    name = CLIMATE
     days = CLIMATE_DAYS
     card = Card(
         scientist=None,
@@ -366,17 +393,25 @@ class BarrierClimate:
         ),
     )
 
-    def __init__(self, table: Model | None = None) -> None:
+    def __init__(self, table: Model | None = None, minutes: int = BARRIER_MINUTES) -> None:
+        self.minutes = minutes  # its barrier's horizon (#263): its table counts that barrier's answers
+        self.name = CLIMATE if minutes == BARRIER_MINUTES else f"{CLIMATE}-{minutes}m"
+        if minutes != BARRIER_MINUTES:
+            self.card = replace(
+                self.card,
+                character=f"기준 예측: 장벽 {minutes}분 시간대 기후",
+                forecasting=self.card.forecasting.replace(CLIMATE, self.name),
+            )
         self.table = table
-        self.version = table.version if table is not None else CLIMATE_DEFAULT
+        self.version = table.version if table is not None else f"{self.name}-default"
 
     def using(self, table: Model) -> BarrierClimate:
-        return BarrierClimate(table)
+        return BarrierClimate(table, self.minutes)
 
     def default_table(self) -> Model:
         from krx_quant.algorithms.contract import Model  # the contract builds on the kinds
 
-        return Model(CLIMATE_DEFAULT, {})
+        return Model(f"{self.name}-default", {})
 
     def fit(self, samples: Sequence[KindSample]) -> Model:
         """The table of ``samples``' barrier answers (those with a class); the defaults when
@@ -402,7 +437,7 @@ class BarrierClimate:
         canonical = json.dumps(params, sort_keys=True)
         digest = hashlib.sha256(f"{canonical}|{first}|{last}|{len(answered)}".encode()).hexdigest()[:6]
         return Model(
-            version=f"{CLIMATE}-{last:%Y%m%d}-{digest}",
+            version=f"{self.name}-{last:%Y%m%d}-{digest}",
             params=params,
             trained=f"{first}..{last}, {len(answered)} samples, {len(cells)} cells",
             trained_until=last,
@@ -418,18 +453,43 @@ class BarrierClimate:
         return KindForecast((1 / 3, 1 / 3, 1 / 3))
 
 
-# The barrier, as registered (``kind_registry.KINDS``).
-BARRIER = Kind(
-    name=NAME,
-    title="장벽",
-    classes=CLASSES,
-    class_titles=("위 먼저", "시간 만료", "아래 먼저"),
-    action=(UP_FIRST, DOWN_FIRST),
-    answer_version=ANSWER_VERSION,
-    answer=barrier_answer,
-    bar_answer=bar_barrier,
-    width=barrier_width_at,
-    crossed=True,  # a touch (#187)
-    baselines=(BarrierClimate(), BarrierPersist()),
-    stats=barrier_stats,
-)
+def barrier_width_rule(minutes: int) -> WidthRule:
+    """The width rule of a barrier ``minutes`` long (#263): the snapshot's own four-minute
+    width (``Snapshot.barrier``, the feature's), or σ̂₁ × √``minutes`` from the same bars."""
+    if minutes == BARRIER_MINUTES:
+        return barrier_width_at
+
+    def width(s: Snapshot) -> Width | None:
+        return barrier_width(s.bars, s.previous_bars, s.session_open, s.price, s.flat_ticks, minutes)
+
+    return width
+
+
+def barrier_kind(minutes: int = BARRIER_MINUTES) -> Kind:
+    """The barrier kind of a time barrier ``minutes`` away (#183, #263): its answer, bar rule,
+    statistics and baselines, its width σ̂₁ × √``minutes`` (never below k), its windows that
+    long. Four minutes is the barrier as it always ran (``barrier``, its baselines' names
+    unchanged); a longer one is ``barrier_<minutes>m``, its baselines ``barrier-climate-<m>m``
+    and ``barrier-persist-<m>m``."""
+    four = minutes == BARRIER_MINUTES
+    return Kind(
+        name=NAME if four else f"{NAME}_{minutes}m",
+        title="장벽" if four else f"장벽 {minutes}분",
+        classes=CLASSES,
+        class_titles=("위 먼저", "시간 만료", "아래 먼저"),
+        action=(UP_FIRST, DOWN_FIRST),
+        answer_version=ANSWER_VERSION,
+        answer=barrier_answer,
+        bar_answer=bar_barrier,
+        width=barrier_width_rule(minutes),
+        crossed=True,  # a touch (#187)
+        baselines=(BarrierClimate(minutes=minutes), BarrierPersist(minutes)),
+        stats=barrier_stats,
+        horizon=timedelta(minutes=minutes),
+    )
+
+
+# The barrier, as registered (``kind_registry.KINDS``), and the horizon ladder's (#263).
+BARRIER = barrier_kind()
+LADDER_MINUTES = (15, 30, 60)
+BARRIER_LADDER: tuple[Kind, ...] = tuple(barrier_kind(m) for m in LADDER_MINUTES)

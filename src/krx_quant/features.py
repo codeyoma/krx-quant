@@ -886,18 +886,21 @@ def barrier_width(
     session_open: datetime | None,
     price: float | None,
     k: int | None,
+    minutes: int = BARRIER_MINUTES,
 ) -> Width | None:
-    """The barrier's width at a bar close (#183), from the day's one-minute bars finished by
-    then (``bars``, those from the open: continuous trading) and the previous trading day's of
-    continuous trading (``previous``), at the reference ``price`` and its flat band ``k``.
+    """The barrier's width at a bar close (#183), its time barrier ``minutes`` away (four, or a
+    longer kind's horizon, #263), from the day's one-minute bars finished by then (``bars``,
+    those from the open: continuous trading) and the previous trading day's of continuous
+    trading (``previous``), at the reference ``price`` and its flat band ``k``.
 
     σ̂₁ is the exponentially weighted standard deviation (``ewm_std``, span ``BARRIER_SPAN``)
     of the bars' one-minute changes of the close (``minute_changes``), in ticks of the
     reference price, the previous day's first and then the day's, in order (the night between
     them is no change): just after the open it rests on the previous day's last bars, and the
-    day's own take over as they come. σ̂₄ = σ̂₁ × √4. w is σ̂₄ rounded to whole ticks (half
-    up), and never below k. With fewer than ``BARRIER_MIN_BARS`` bars (both days together), or
-    fewer than two changes, w = k and σ̂₄ is unknown. None without a reference price."""
+    day's own take over as they come. σ̂₄ = σ̂₁ × √4 (σ̂_H = σ̂₁ × √H for ``minutes`` H). w is
+    it rounded to whole ticks (half up), and never below k. With fewer than
+    ``BARRIER_MIN_BARS`` bars (both days together), or fewer than two changes, w = k and σ̂₄
+    is unknown. None without a reference price."""
     if price is None or k is None:
         return None
     today = [b for b in bars if session_open is None or b.start >= session_open]
@@ -907,7 +910,7 @@ def barrier_width(
     sigma = ewm_std([c / tick for c in (*minute_changes(previous), *minute_changes(today))], BARRIER_SPAN)
     if sigma is None:
         return Width(k, None)
-    sigma *= math.sqrt(BARRIER_MINUTES)
+    sigma *= math.sqrt(minutes)
     # Rounded first so a σ̂₄ of exactly half a tick more is not pulled down by float error.
     return Width(max(k, math.floor(round(sigma, 9) + 0.5)), sigma)
 
