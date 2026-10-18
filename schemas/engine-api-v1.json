@@ -1281,13 +1281,15 @@
     "barrier_stats": {
       "description": "A barrier predictor's own statistics (#183, a kind entry's extra): of its n scored predictions, the barrier P&L (research only) of its calls: a long on up_first, a short on down_first, none on timeout, all of them (pnl) and each side (long, short).",
       "type": "object",
-      "required": ["n", "pnl", "long", "short"],
+      "required": ["n", "pnl", "long", "short", "pnl_inverse", "short_inverse"],
       "additionalProperties": false,
       "properties": {
         "n": {"type": "integer", "minimum": 0},
         "pnl": {"$ref": "#/$defs/barrier_pnl"},
         "long": {"$ref": "#/$defs/barrier_pnl"},
-        "short": {"$ref": "#/$defs/barrier_pnl"}
+        "short": {"$ref": "#/$defs/barrier_pnl"},
+        "pnl_inverse": {"description": "As pnl, the shorts through the symbol's single-stock inverse product (#267): no sell tax; a short on a symbol without one, or before it was listed, is no trade.", "$ref": "#/$defs/barrier_pnl"},
+        "short_inverse": {"description": "The shorts alone, through the inverse product (#267).", "$ref": "#/$defs/barrier_pnl"}
       }
     },
     "touch_pnl": {

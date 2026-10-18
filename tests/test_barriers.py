@@ -42,6 +42,7 @@ from krx_quant.barriers import (
     bar_barrier,
     barrier_profit,
     barrier_stats,
+    inverse_profit,
 )
 from krx_quant.clock import FakeClock
 from krx_quant.config import Settings
@@ -602,6 +603,7 @@ def test_the_barrier_is_registered_after_the_range() -> None:
 # bar close), U 81,450 and L 81,050, the cost 1.86875 ticks.
 
 PATH = {
+    "anchor": 81_250.0,
     "tick": 100,
     "cost": COST,
     "upper": 81_450.0,
@@ -659,6 +661,30 @@ EXAMPLE = [
 ]
 
 
+def test_a_short_through_an_inverse_product_needs_one_listed() -> None:
+    """#267: 009150 has no single-stock inverse product, and none was listed before 2026-05-27:
+    a short there is no trade; a long is as ever."""
+    short = (T, (0.1, 0.2, 0.7), 2)
+    assert inverse_profit("down_first", "down_first", PATH, "009150", T) is None
+    before = datetime(2026, 5, 26, 9, 31, tzinfo=T.tzinfo)
+    assert inverse_profit("down_first", "down_first", PATH, SYMBOL, before) is None
+    on = datetime(2026, 5, 27, 9, 31, tzinfo=T.tzinfo)
+    assert inverse_profit("down_first", "down_first", PATH, SYMBOL, on) == pytest.approx(
+        1.5 - 81_250 * 2 * FEE / 2 / 100
+    )
+    assert inverse_profit("up_first", "up_first", PATH, "009150", T) == barrier_profit(
+        "up_first", "up_first", PATH
+    )
+    other = [
+        KindScored(
+            "alg", "v1", "009150", close, p, outcome, dict(zip(BARRIER.p_keys(), p, strict=True)), PATH
+        )
+        for close, p, outcome in [short]
+    ]
+    stats = barrier_stats("alg", other, {})
+    assert stats["short"]["trades"] == 1 and stats["short_inverse"]["trades"] == 0
+
+
 def test_the_barrier_statistics_count_the_calls_and_their_p_and_l() -> None:
     """The example's three trades: 1.5, −4 and 1.5, each less 1.86875: a total of −1 − 3 × 1.86875;
     two longs, one short. Precision counts the up_first and down_first calls (2 right of 3),
@@ -670,6 +696,17 @@ def test_the_barrier_statistics_count_the_calls_and_their_p_and_l() -> None:
     assert stats["pnl"]["per_trade"]["value"] == pytest.approx((-1 - 3 * COST) / 3)
     assert (stats["long"]["trades"], stats["long"]["total_ticks"]) == (2, pytest.approx(-2.5 - 2 * COST))
     assert (stats["short"]["trades"], stats["short"]["total_ticks"]) == (1, pytest.approx(1.5 - COST))
+    # Through the inverse product (#267): the short pays both commissions on half a share's
+    # notional, 81,250 × 0.03% ÷ 2 = 0.121875 ticks, and no sell tax; the longs are the same.
+    inverse = 81_250 * 2 * FEE / 2 / 100
+    assert (stats["short_inverse"]["trades"], stats["short_inverse"]["total_ticks"]) == (
+        1,
+        pytest.approx(1.5 - inverse),
+    )
+    assert (stats["pnl_inverse"]["trades"], stats["pnl_inverse"]["total_ticks"]) == (
+        3,
+        pytest.approx(-2.5 - 2 * COST + 1.5 - inverse),
+    )
     check("barrier_stats", stats)
     summary = summarize(scored(EXAMPLE), BARRIER, {}, "alg")
     assert summary.precision is not None and summary.precision.n == 3
