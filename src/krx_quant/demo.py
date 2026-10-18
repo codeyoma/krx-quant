@@ -23,6 +23,11 @@ finished week, month and year candles made of them (#112), and made-up daily sup
 the same days (``state/supply/``, #226): the 12th's is not out yet, as on the server that
 morning.
 
+The daily kind ``open_to_close`` (#264) has KRX day candles of its own (``krx.parquet``, the
+same days, an open a tick off the integrated one's) and, for its last 20 days up to the 8th,
+the three baselines' and Cox's predictions at 08:50 and their answers at 20:35, Cox fitted on
+the days before them. The morning's 08:50 predictions are in too, waiting for their answer.
+
 With a pace (``demo-engine --pace SECONDS``), the morning is replayed at once only up to
 10:00; the API opens there, and the rest goes on a minute every ``pace`` seconds, in steps
 of 10 seconds, so the stream sends predictions, the consensus, outcomes and the bar being
@@ -41,17 +46,19 @@ from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, date, datetime, time, timedelta
 from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 from aiohttp import web
 
-from krx_quant.algorithms import ALGORITHMS, Model
+from krx_quant.algorithms import ALGORITHMS, DAILY_ALGORITHMS, Model
 from krx_quant.api import create_app
 from krx_quant.backfill import BAR_SCHEMA, PreviousDay, stock_bars_path
-from krx_quant.candles import PERIODS, period_start, write_candles
+from krx_quant.candles import PERIODS, period_start, write_candles, write_krx_days
 from krx_quant.clock import FakeClock
+from krx_quant.daily import StoredDays
+from krx_quant.daily_features import DAILY_FEATURES, LiveFeatures
 from krx_quant.engine import Event, PredictionEngine
 from krx_quant.feeds import BOOK, INDEX, KOSPI200_FUTURES, TRADE, USD_FUTURES, VI_STATUS, Feed
 from krx_quant.feeds.base import KST, Row
@@ -69,6 +76,7 @@ from krx_quant.macro import (
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.model_shelf import Shelf
 from krx_quant.nightly import Night
+from krx_quant.open_to_close import OPEN_TO_CLOSE
 from krx_quant.predictions import DB_NAME, PredictionStore, iso
 from krx_quant.recorder import ParquetRecorder
 from krx_quant.regime import RegimeRules
@@ -246,6 +254,15 @@ def write_demo_candles(data_dir: Path) -> None:
             close = max(tick, open_ + tick * round(open_ * rng.gauss(0, 0.004) / tick))  # the day before's
         oldest_first = list(reversed(rows))
         write_candles(data_dir, "day", symbol, oldest_first)
+        # The KRX market's (#264): an opening auction a tick off NXT's pre-market open, now and then.
+        write_krx_days(
+            data_dir,
+            symbol,
+            [
+                {**r, "venue": "KRX", "open": max(tick, cast(int, r["open"]) - tick * (i % 3 - 1))}
+                for i, r in enumerate(oldest_first)
+            ],
+        )
         for period in PERIODS:
             if period != "day":  # the finished ones, made of the days, as KIS's would be (#112)
                 write_candles(data_dir, period, symbol, _finished_periods(oldest_first, period))
@@ -346,6 +363,7 @@ async def demo_app(db: Path, pace: float | None = None) -> web.Application:
     write_demo_macro(data_dir)  # first: Markov reads the morning's regime
     shutil.rmtree(data_dir / "bars", ignore_errors=True)
     write_demo_candles(data_dir)
+    write_demo_supply(data_dir / "state")  # before the daily kind's days: Cox reads the flows
     for day in PAST_DAYS:
         # Each day by its own engine, ended before the daily review after the close, so
         # every algorithm stays active as on the morning.
@@ -363,6 +381,7 @@ async def demo_app(db: Path, pace: float | None = None) -> web.Application:
             previous=PreviousDay(data_dir, _CALENDAR),  # range_prev_day, slot returns (#181, #265)
         )  # no macro read those mornings: no regime
         engine.store.close()
+    cox = write_demo_daily(db, data_dir)  # the daily kind's last 20 days (#264)
     events = demo_events()
     engine = await replay(
         events,
@@ -375,12 +394,18 @@ async def demo_app(db: Path, pace: float | None = None) -> web.Application:
         regimes=partial(day_regime, data_dir),
         target_version=TARGET_VERSION,  # the touch target, as the server's default (#170)
         previous=PreviousDay(data_dir, _CALENDAR),
+        models={cox.version.split("-")[0]: cox},
+        daily=StoredDays(data_dir),  # the morning's 08:50 predictions (#264)
+        daily_algorithms=DAILY_ALGORITHMS,
+        daily_features=LiveFeatures(
+            OPEN_TO_CLOSE, data_dir, data_dir / "state", _CALENDAR, DEMO_SYMBOLS, _FEE
+        ),
+        daily_feature_names=DAILY_FEATURES,
     )
     night = Night(date(2026, 10, 9), "2026-10-09T21:31:40+09:00", {}, demo_reports())
     engine.training = NightStatus(night, True, "applied").as_dict()
     engine.night_reports = reports_by_algorithm(night)
     shelf = demo_shelf(data_dir / "state")
-    write_demo_supply(data_dir / "state")
     app = create_app(
         engine,
         mode="demo",
@@ -393,6 +418,68 @@ async def demo_app(db: Path, pace: float | None = None) -> web.Application:
     if pace is not None:
         app.cleanup_ctx.append(partial(_paced, engine, events, pace))
     return app
+
+
+# The daily kind's days shown answered (#264), up to the 8th.
+_DAILY_SHOWN = 20
+
+
+def write_demo_daily(db: Path, data_dir: Path) -> Model:
+    """The daily kind's last ``_DAILY_SHOWN`` days before the morning (#264): each day's 08:50
+    predictions of its baselines and of Cox (fitted on the days before them), and the day's
+    answer at 20:35, as the engine would have stored them. Cox's model, for the morning."""
+    from krx_quant.algorithms.cox import Cox  # the daily algorithm, and its features
+    from krx_quant.daily import DailyInputs
+    from krx_quant.daily_features import DailyFiles, band_of, samples
+    from krx_quant.kinds import Answer
+    from krx_quant.predictions import NewKindPrediction
+
+    files = DailyFiles(data_dir, data_dir / "state")
+    kind = OPEN_TO_CLOSE
+    found = samples(kind, files, DEMO_SYMBOLS, Cox.features, _FEE, calendar=_CALENDAR)
+    days = sorted({s.day for s in found})
+    shown = days[-_DAILY_SHOWN:]
+    model = Cox().fit([s for s in found if s.day < shown[0]])
+    store = PredictionStore(db)
+    store.record_models([("cox", model.version, model.target_version)])
+    by = {(s.symbol, s.day): s for s in found}
+    for day in shown:
+        at = kind.predicted_at(day)
+        made, answered = [], []
+        for symbol in DEMO_SYMBOLS:
+            sample = by.get((symbol, day))
+            if sample is None or sample.answer is None:
+                continue
+            band = band_of(sample.answer)
+            history = [d for d in files.days(symbol) if d.day < day]
+            assert kind.answers is not None
+            past = tuple((d.day, a.label) for d, a in zip(history, kind.answers(history, _FEE), strict=True))
+            inputs = DailyInputs(symbol, day, at, past[-260:], band, _CALENDAR.previous_trading_day(day))
+            forecasts = [(b.name, b.version, b.predict(inputs)) for b in kind.daily_baselines]
+            forecasts.append(("cox", model.version, Cox().predict(sample.features, model)))
+            for name, version, forecast in forecasts:
+                made.append(
+                    NewKindPrediction(
+                        symbol,
+                        name,
+                        version,
+                        at,
+                        at + timedelta(milliseconds=200),
+                        None if forecast is None else kind.output(forecast),
+                        "ok" if forecast is not None else "no_previous",
+                        band=None if band is None else band.value,
+                    )
+                )
+            answer = Answer(sample.answer.label, sample.answer.unscorable, {**sample.answer.path, "vi": 0})
+            answered.append((symbol, at, answer, False))
+        store.add_kind_predictions(kind.name, made)
+        store.add_kind_answers(kind.name, kind.answer_version, answered, scored_at=_at_on(day, time(20, 35)))
+    store.close()
+    return model
+
+
+def _at_on(day: date, t: time) -> datetime:
+    return datetime.combine(day, t, KST)
 
 
 async def _paced(

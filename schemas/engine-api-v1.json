@@ -1043,9 +1043,9 @@
       "properties": {"kinds": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/prediction_kind"}}}
     },
     "prediction_kind": {
-      "description": "A kind of prediction (#179): its three classes in order (a forecast's class is the most likely, a tie the middle one, then the first), the classes precision and coverage count, the fields of its output besides the probabilities, its answer version and its baselines' cards.",
+      "description": "A kind of prediction (#179): its three classes in order (a forecast's class is the most likely, a tie the middle one, then the first), the classes precision and coverage count, the fields of its output besides the probabilities, its answer version and its baselines' cards. A daily kind (#264) is predicted once a trading day: its horizon_minutes is null and daily says when.",
       "type": "object",
-      "required": ["name", "title", "classes", "class_titles", "action", "answer_version", "horizon_minutes", "fields", "baselines"],
+      "required": ["name", "title", "classes", "class_titles", "action", "answer_version", "horizon_minutes", "fields", "baselines", "daily"],
       "additionalProperties": false,
       "properties": {
         "name": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
@@ -1059,7 +1059,7 @@
         "class_titles": {"type": "array", "minItems": 3, "maxItems": 3, "items": {"type": "string"}},
         "action": {"type": "array", "minItems": 1, "items": {"type": "string"}},
         "answer_version": {"type": "integer", "minimum": 1},
-        "horizon_minutes": {"type": "integer", "minimum": 4, "description": "How long its windows run from the bar close (#263): 4, the touch target's, or a longer kind's."},
+        "horizon_minutes": {"type": ["integer", "null"], "minimum": 4, "description": "How long its windows run from the bar close (#263): 4, the touch target's, or a longer kind's; null for a daily kind (#264), which has no bar close."},
         "fields": {"type": "object", "additionalProperties": {"$ref": "#/$defs/meaning"}},
         "baselines": {
           "type": "array",
@@ -1069,6 +1069,28 @@
             "additionalProperties": false,
             "properties": {"name": {"type": "string"}, "card": {"$ref": "#/$defs/card"}}
           }
+        },
+        "daily": {
+          "description": "A daily kind's day (#264): when it is predicted (KST, each trading day), the auctions its window runs between, when its answers are first looked for (once the day's KRX day candle is stored), and the days with an answer its statuses are judged on; null for a kind predicted at each bar close.",
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "required": ["predict_at", "from", "to", "from_title", "to_title", "answer_from", "probation_days", "bench_days", "recent_days"],
+              "additionalProperties": false,
+              "properties": {
+                "predict_at": {"type": "string", "pattern": "^[0-2][0-9]:[0-5][0-9]$"},
+                "from": {"enum": ["open"]},
+                "to": {"enum": ["close"]},
+                "from_title": {"type": "string"},
+                "to_title": {"type": "string"},
+                "answer_from": {"type": "string", "pattern": "^[0-2][0-9]:[0-5][0-9]$"},
+                "probation_days": {"type": "array", "items": {"type": "integer", "minimum": 1}},
+                "bench_days": {"type": "array", "items": {"type": "integer", "minimum": 1}},
+                "recent_days": {"type": "integer", "minimum": 1}
+              }
+            }
+          ]
         }
       }
     },
@@ -1087,14 +1109,14 @@
     "kind_prediction_fields": {
       "description": "The fields of a prediction of a kind besides the direction (#179), open so the stream's items can add the symbol.",
       "type": "object",
-      "required": ["algorithm", "model_version", "bar_close", "displayed_at", "target_at", "status", "flat_ticks", "width_ticks", "anchor", "tick", "output", "answer"],
+      "required": ["algorithm", "model_version", "bar_close", "displayed_at", "target_at", "status", "flat_ticks", "width_ticks", "anchor", "tick", "band", "output", "answer"],
       "properties": {
         "algorithm": {"type": "string"},
         "model_version": {"type": "string"},
-        "bar_close": {"$ref": "#/$defs/time"},
+        "bar_close": {"description": "The bar close; a daily kind's (#264): its prediction time, 08:50 of the day.", "$ref": "#/$defs/time"},
         "displayed_at": {"$ref": "#/$defs/time"},
         "target_at": {
-          "description": "null unless the status is ok: only those are scored.",
+          "description": "null unless the status is ok: only those are scored. A daily kind's (#264): its day's close (the closing auction's end).",
           "oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]
         },
         "status": {"enum": ["ok", "timed_out", "error", "vi", "no_book", "no_previous"]},
@@ -1118,8 +1140,13 @@
           "type": ["integer", "null"],
           "minimum": 1
         },
+        "band": {
+          "description": "A daily kind's flat band of the day (#264): |close / open − 1| at most it is flat, set from the days before it and known at the prediction time (its answer's path band). null for a kind predicted at each bar close, and without days enough to set it.",
+          "type": ["number", "null"],
+          "minimum": 0
+        },
         "output": {
-          "description": "p_<class> for each of the kind's three classes (GET /v1/kinds), a distribution, then the kind's fields; null unless the status is ok. The range's: range_output (#180); the barrier's: barrier_output (#183).",
+          "description": "p_<class> for each of the kind's three classes (GET /v1/kinds), a distribution, then the kind's fields; null unless the status is ok. The range's: range_output (#180); the barrier's: barrier_output (#183); open_to_close's: open_to_close_output (#264).",
           "oneOf": [
             {"type": "null"},
             {
@@ -1157,7 +1184,7 @@
         "unscorable": {"type": ["string", "null"]},
         "special": {"type": "boolean"},
         "scored_at": {"$ref": "#/$defs/time"},
-        "path": {"description": "The kind's summary of the window. The range's: range_path (#180); the barrier's: barrier_path (#183).", "type": "object"}
+        "path": {"description": "The kind's summary of the window. The range's: range_path (#180); the barrier's: barrier_path (#183); open_to_close's: open_to_close_path (#264).", "type": "object"}
       }
     },
     "range_output": {
@@ -1314,6 +1341,64 @@
         "per_trade": {"$ref": "#/$defs/interval"}
       }
     },
+    "open_to_close_output": {
+      "description": "An open_to_close prediction's output (#264): the three classes' probabilities (a distribution), up, flat, down; no other field (the day's band is the prediction's band).",
+      "type": "object",
+      "required": ["p_up", "p_flat", "p_down"],
+      "additionalProperties": false,
+      "properties": {
+        "p_up": {"type": "number", "minimum": 0, "maximum": 1},
+        "p_flat": {"type": "number", "minimum": 0, "maximum": 1},
+        "p_down": {"type": "number", "minimum": 0, "maximum": 1}
+      }
+    },
+    "open_to_close_path": {
+      "description": "An open_to_close answer's path (#264): empty for a day whose KRX day candle never came (no candle); else the KRX opening and closing auctions' prices (won, adjusted as read), the change close / open − 1, the band it is classed by and the volatility and scale it came from (null without days enough to set it: no band), the fee rate (the P&L's costs), where it came from, and the day's VIs of the symbol.",
+      "oneOf": [
+        {"type": "object", "maxProperties": 0},
+        {
+          "type": "object",
+          "required": ["open", "close", "change", "band", "sigma", "scale", "fee_rate", "source", "vi"],
+          "additionalProperties": false,
+          "properties": {
+            "open": {"type": "number", "exclusiveMinimum": 0},
+            "close": {"type": "number", "exclusiveMinimum": 0},
+            "change": {"type": "number"},
+            "band": {"type": ["number", "null"], "minimum": 0},
+            "sigma": {"type": ["number", "null"], "minimum": 0},
+            "scale": {"type": ["number", "null"], "minimum": 0},
+            "fee_rate": {"type": "number", "minimum": 0},
+            "source": {"enum": ["krx_day_candle"]},
+            "vi": {"type": "integer", "minimum": 0}
+          }
+        }
+      ]
+    },
+    "open_to_close_stats": {
+      "description": "An open_to_close predictor's own statistics (#264, a kind entry's extra): of its n scored predictions, the P&L (research only) of following its calls from the opening auction to the closing auction: a long on up, a short of the stock on down, none on flat (pnl, long, short), and the downs through the symbol's single-stock inverse product (pnl_inverse, short_inverse; none for a symbol without one or a day before its listing).",
+      "type": "object",
+      "required": ["n", "pnl", "long", "short", "pnl_inverse", "short_inverse"],
+      "additionalProperties": false,
+      "properties": {
+        "n": {"type": "integer", "minimum": 0},
+        "pnl": {"$ref": "#/$defs/open_to_close_pnl"},
+        "long": {"$ref": "#/$defs/open_to_close_pnl"},
+        "short": {"$ref": "#/$defs/open_to_close_pnl"},
+        "pnl_inverse": {"$ref": "#/$defs/open_to_close_pnl"},
+        "short_inverse": {"$ref": "#/$defs/open_to_close_pnl"}
+      }
+    },
+    "open_to_close_pnl": {
+      "description": "open_to_close trades' P&L in basis points of the open less the round-trip cost (#264, research only): how many, their total and the mean per trade with its normal 95% interval.",
+      "type": "object",
+      "required": ["trades", "total_bp", "per_trade"],
+      "additionalProperties": false,
+      "properties": {
+        "trades": {"type": "integer", "minimum": 0},
+        "total_bp": {"type": "number"},
+        "per_trade": {"$ref": "#/$defs/interval"}
+      }
+    },
     "kind_latest": {
       "description": "GET /v1/symbols/{symbol}/kinds/{kind}/latest (#179): the kind's predictions of the symbol's latest bar close.",
       "type": "object",
@@ -1355,7 +1440,7 @@
         "precision": {"description": "Of the calls of the kind's action classes, the share that happened.", "$ref": "#/$defs/interval"},
         "coverage": {"description": "The share of calls of the kind's action classes.", "$ref": "#/$defs/interval"},
         "brier": {"$ref": "#/$defs/interval"},
-        "extra": {"description": "The kind's own statistics; null for a kind without. The range's: range_stats (#180); the barrier's: barrier_stats (#183).", "type": ["object", "null"]},
+        "extra": {"description": "The kind's own statistics; null for a kind without. The range's: range_stats (#180); the barrier's: barrier_stats (#183); open_to_close's: open_to_close_stats (#264).", "type": ["object", "null"]},
         "lift": {"$ref": "#/$defs/lift"}
       }
     },

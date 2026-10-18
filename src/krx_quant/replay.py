@@ -26,6 +26,8 @@ from krx_quant.climate import CLIMATE, load_climate, load_tables
 from krx_quant.clock import FakeClock
 from krx_quant.config import Settings
 from krx_quant.consensus import Timing
+from krx_quant.daily import DailyAlgorithm, DailySource
+from krx_quant.daily import Features as DailyFeatures
 from krx_quant.engine import (
     ENGINE_FEEDS,
     Admits,
@@ -78,6 +80,10 @@ async def replay(
     kinds: Sequence[Kind] = KINDS,
     kind_algorithms: Sequence[KindAlgorithm] = KIND_ALGORITHMS,
     previous: PreviousDays | None = None,
+    daily: DailySource | None = None,
+    daily_algorithms: Sequence[DailyAlgorithm] = (),
+    daily_features: DailyFeatures | None = None,
+    daily_feature_names: Collection[str] = (),
 ) -> PredictionEngine:
     """Feed ``events`` (in receipt order) received by ``until`` to an engine storing into ``db``.
 
@@ -88,7 +94,8 @@ async def replay(
     count real time. The engine is returned with its clock at ``until``. It forecasts
     ``target_version``'s target, with the climate baseline's table ``climate`` (#169), and
     the ``kinds`` besides the direction with their algorithms (#179); the symbols' previous
-    trading days' ranges from ``previous`` (#181; without: unknown).
+    trading days' ranges from ``previous`` (#181; without: unknown); the daily kinds (#264) only
+    given their KRX days (``daily``), with their algorithms and features.
     """
     clock = FakeClock(start or datetime.combine(kst_day(until), time(), KST))
     engine = PredictionEngine(
@@ -113,6 +120,10 @@ async def replay(
         kinds=kinds,
         kind_algorithms=kind_algorithms,
         previous=previous,
+        daily=daily,
+        daily_algorithms=daily_algorithms,
+        daily_features=daily_features,
+        daily_feature_names=daily_feature_names,
     )
     await replay_into(engine, clock, events, until=until, display_delay=display_delay)
     return engine

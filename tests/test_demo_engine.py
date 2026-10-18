@@ -181,6 +181,39 @@ async def test_the_demo_has_daily_supply_on_its_candles_days_but_the_morning_s(t
         assert all(0 < d["foreign_ratio"] < 100 for d in days)
 
 
+async def test_the_demo_has_the_daily_kinds_days_and_its_morning(tmp_path: Path) -> None:
+    """#264. Output: open_to_close's last 20 days up to the 8th, each with the three baselines' and
+    Cox's 08:50 predictions and the day's answer, and the morning's predictions waiting for theirs."""
+    app = await demo_app(tmp_path / "demo.sqlite3")
+
+    async with TestClient(TestServer(app)) as client:
+        kinds = await get_json(client, "/v1/kinds")
+        latest = await get_json(client, "/v1/symbols/005930/kinds/open_to_close/latest")
+        made = await get_json(client, "/v1/symbols/005930/kinds/open_to_close/predictions?limit=21")
+        board = await get_json(client, "/v1/leaderboard?kind=open_to_close&period=20d")
+        cox = await get_json(client, "/v1/algorithms/cox")
+
+    daily = next(k for k in kinds["kinds"] if k["name"] == "open_to_close")
+    assert daily["daily"]["predict_at"] == "08:50"
+    assert latest["bar_close"] == "2026-10-12T08:50:00+09:00"
+    assert {p["algorithm"] for p in latest["predictions"]} == {
+        "cox",
+        "otc-flat",
+        "otc-climate",
+        "otc-persist",
+    }
+    assert all(p["answer"] is None for p in latest["predictions"]), "the morning's day is not over"
+    days = sorted({p["bar_close"] for p in made["predictions"]})
+    assert len(days) == 21 and days[-2] == "2026-10-08T08:50:00+09:00"
+    answered = [p for p in made["predictions"] if p["bar_close"] < "2026-10-12"]
+    assert answered and all(p["answer"] is not None for p in answered)
+    for p in answered:
+        check("open_to_close_path", p["answer"]["path"])
+    assert {e["algorithm"] for e in board["baselines"]} == {"otc-flat", "otc-climate", "otc-persist"}
+    assert any(e["algorithm"] == "cox" and e["n"] > 0 for e in board["unranked"] + board["ranked"])
+    assert cox["kind"] == "open_to_close" and cox["model"]["version"].startswith("cox-2026")
+
+
 async def test_the_demo_is_the_same_every_time(tmp_path: Path) -> None:
     first, second = await demo_app(tmp_path / "a.sqlite3"), await demo_app(tmp_path / "b.sqlite3")
 
@@ -191,6 +224,7 @@ async def test_the_demo_is_the_same_every_time(tmp_path: Path) -> None:
             "/v1/symbols/005930/bars?limit=500",
             "/v1/symbols/005930/candles?period=day",
             "/v1/symbols/005930/supply",
+            "/v1/symbols/005930/kinds/open_to_close/predictions?limit=21",
         ):
             assert await get_json(a, path) == await get_json(b, path)
 

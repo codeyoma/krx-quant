@@ -496,6 +496,7 @@ class Kind:
             "horizon_minutes": int(self.horizon / timedelta(minutes=1)),  # #263
             "fields": {name: m.as_dict() for name, m in self.fields.items()},
             "baselines": [{"name": name, "card": card.as_dict()} for name, card in baselines],
+            "daily": None,  # a kind predicted once a day says when (#264, ``daily.DailyKind``)
         }
 
 

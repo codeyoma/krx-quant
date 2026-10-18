@@ -36,13 +36,14 @@ import json
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 from functools import partial
 from typing import Any
 
 from aiohttp import WSCloseCode, web
 
 from krx_quant.consensus import FAST, FINAL
+from krx_quant.daily import DailyKind
 from krx_quant.engine import (
     Change,
     KindAnswered,
@@ -50,6 +51,9 @@ from krx_quant.engine import (
     OutcomesScored,
     PredictionEngine,
 )
+from krx_quant.feeds.base import KST, kst_day
+from krx_quant.kinds import Kind
+from krx_quant.market_calendar import MarketCalendar
 from krx_quant.predictions import iso
 from krx_quant.touch import TARGET_VERSION, WINDOW
 
@@ -126,6 +130,7 @@ class EventStream:
             return
         ids = [i for made in change.ids.values() for i in made]
         rows = store.kind_rows(kind.name, kind.answer_version, ids)
+        target = kind_target(kind, self._engine.calendar)
         if rows:
             self._publish(
                 {
@@ -133,7 +138,7 @@ class EventStream:
                     "prediction_kind": kind.name,
                     "bar_close": iso(change.bar_close),
                     "predictions": [
-                        {"symbol": r["symbol"], **kind_prediction_json(r, kind.horizon)} for r in rows
+                        {"symbol": r["symbol"], **kind_prediction_json(r, target=target)} for r in rows
                     ],
                 }
             )
@@ -303,7 +308,27 @@ def _touch_json(row: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
-def kind_prediction_json(row: dict[str, Any], horizon: timedelta = WINDOW) -> dict[str, Any]:
+# A daily kind's day closes here on a day the calendar has no session for (#264).
+DAILY_CLOSE = time(15, 30)
+
+
+def kind_target(kind: Kind, calendar: MarketCalendar) -> Callable[[datetime], datetime]:
+    """When a kind's prediction made at ``bar_close`` is over: ``bar_close`` + its horizon, or
+    for a daily kind (#264) the close of its day (the closing auction's end, 15:30 on most)."""
+    if not isinstance(kind, DailyKind):
+        return lambda bar_close: bar_close + kind.horizon
+
+    def closes(bar_close: datetime) -> datetime:
+        day = kst_day(bar_close)
+        session = calendar.session(day)
+        return session.close if session is not None else datetime.combine(day, DAILY_CLOSE, KST)
+
+    return closes
+
+
+def kind_prediction_json(
+    row: dict[str, Any], horizon: timedelta = WINDOW, target: Callable[[datetime], datetime] | None = None
+) -> dict[str, Any]:
     """A stored prediction of a kind besides the direction (#179) as the API shows it: its output
     (the three probabilities, ``p_<class>`` in the kind's order, then the kind's fields)
     and, once its window (four minutes, or the kind's ``horizon``, #263) is over, its bar
@@ -313,19 +338,24 @@ def kind_prediction_json(row: dict[str, Any], horizon: timedelta = WINDOW) -> di
     before; ``width_ticks`` the kind's barrier width there (#183), None for a kind without
     barriers, without a mid-point there and for one stored before; ``anchor`` and ``tick``
     the bar close's mid-point and its tick size (#210), the reference its answer is measured
-    from, None without a mid-point there and for one stored before."""
+    from, None without a mid-point there and for one stored before. A daily kind's (#264) is
+    over at its day's close (``target``, ``kind_target``) and has its day's flat band (``band``,
+    None for the others)."""
     made = row["status"] == "ok"
+    bar_close = datetime.fromisoformat(row["bar_close"])
+    ends = target(bar_close) if target is not None else bar_close + horizon
     return {
         "algorithm": row["algorithm"],
         "model_version": row["model_version"],
         "bar_close": row["bar_close"],
         "displayed_at": row["displayed_at"],
-        "target_at": iso(datetime.fromisoformat(row["bar_close"]) + horizon) if made else None,
+        "target_at": iso(ends) if made else None,
         "status": row["status"],
         "flat_ticks": row["flat_ticks"],
         "width_ticks": row["width_ticks"],
         "anchor": row["anchor"],
         "tick": row["tick"],
+        "band": row.get("band"),
         "output": row["output"] if made else None,
         "answer": _answer_json(row) if made else None,
     }
