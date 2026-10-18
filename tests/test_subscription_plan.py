@@ -68,6 +68,8 @@ async def test_registers_every_feed_in_priority_order(kis: FakeKis, tmp_path: Pa
             # Market-wide context first, so it survives however many symbols are added.
             ("H0IFCNT0", "A01612"),  # KOSPI200 futures, nearest month from the master file
             ("H0CFCNT0", "A75610"),  # USD futures, nearest month from the master file
+            ("H0MFCNT0", "A01612"),  # KOSPI200 night futures (#264), the night's month by the rules
+            ("H0MFASP0", "A01612"),  # and their book
             ("HDFSCNT0", "RBAQNVDA"),  # US daytime session
             ("HDFSCNT0", "RBAQMU"),
             ("HDFSCNT0", "RBAQAMD"),

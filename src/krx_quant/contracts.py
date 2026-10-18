@@ -19,8 +19,9 @@ digit + month (``A01603``, ``A01703``). KIS answers nothing for the other format
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
+from krx_quant.feeds.base import KST
 from krx_quant.market_calendar import MarketCalendar
 
 NEW_CODES_FROM = 2026  # the first expiry year with new-format codes
@@ -51,6 +52,26 @@ def front_month(product: Product, day: date, calendar: MarketCalendar) -> str:
     while month not in product.months or last_trading_day(product, year, month, calendar) <= day:
         year, month = (year + 1, 1) if month == 12 else (year, month + 1)
     return contract_code(product, year, month)
+
+
+# The night session ends at 06:00: until then, the night going on is the previous evening's.
+NIGHT_END = timedelta(hours=6)
+
+
+def night_front_month(product: Product, at: datetime, calendar: MarketCalendar) -> str:
+    """The code of the ``product`` contract recorded in the night session going on at ``at``,
+    or in the next one (#264): the nearest month still trading in it.
+
+    KRX's night session runs from 18:00 to 06:00 the next morning and counts as the next
+    trading day's, with its regular session. A contract trades until the end of its last
+    trading day's regular session, and the next month starts in the night that begins that
+    evening (KRX, OPN01041402). So the night begun on an evening takes the month that
+    evening's day takes (``front_month``): the expiring month up to the night before its
+    last trading day, the next one from that day's night on. Before 06:00 the night going
+    on is the previous evening's.
+    """
+    evening = (at.astimezone(KST) - NIGHT_END).date()
+    return front_month(product, evening, calendar)
 
 
 def nominal_expiry(product: Product, year: int, month: int) -> date:

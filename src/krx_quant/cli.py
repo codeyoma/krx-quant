@@ -35,6 +35,7 @@ from krx_quant.lifecycle import Status
 from krx_quant.macro import run_macro
 from krx_quant.market_calendar import calendar_store
 from krx_quant.model_shelf import Shelf
+from krx_quant.night_probe import probe_night
 from krx_quant.nightly import from_the_server, run_training
 from krx_quant.notify import send_notice, send_test_alert
 from krx_quant.predictions import DB_NAME, PredictionStore
@@ -107,6 +108,11 @@ def _registry_password() -> int:
 
 async def _probe_candles() -> int:
     await probe_candles(Settings.from_env(), datetime.now(KST).date())
+    return 0
+
+
+async def _probe_night(day: date | None) -> int:
+    print(await probe_night(Settings.from_env(require_kis=False), datetime.now(KST), day))
     return 0
 
 
@@ -424,6 +430,15 @@ def main(argv: list[str] | None = None) -> int:
         "probe-supply",
         help="ask where KIS gives the daily supply indicators (#226), read-only; prints no market value",
     )
+    night_cmd = sub.add_parser(
+        "probe-night",
+        help="summarize a recorded KOSPI200 night session (#264), read-only; prints no market value",
+    )
+    night_cmd.add_argument(
+        "--day",
+        type=date.fromisoformat,
+        help="the evening whose night to read, YYYY-MM-DD (default: the latest one subscribed for)",
+    )
     sub.add_parser(
         "registry-password",
         help="print the ECR registry's docker login password (deploy/push-image.sh, EC2 Spot training)",
@@ -549,6 +564,8 @@ def main(argv: list[str] | None = None) -> int:
             return asyncio.run(_probe_candles())
         elif args.command == "probe-supply":
             return asyncio.run(_probe_supply())
+        elif args.command == "probe-night":
+            return asyncio.run(_probe_night(args.day))
         elif args.command == "registry-password":
             return _registry_password()
         elif args.command == "backfill":

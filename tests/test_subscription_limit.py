@@ -56,7 +56,7 @@ async def run_until(kis: FakeKis, settings: Any, condition: Callable[[], bool]) 
 async def test_subscriptions_rejected_for_the_limit_fall_back_to_rest_polling(
     kis: FakeKis, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    kis.max_subscriptions = 2
+    kis.max_subscriptions = 4  # the night futures (#264), then 005930's trades and book
     serve_snapshots(kis)
     settings = replace(settings_for(kis, tmp_path, symbols=("005930", "000660")), fallback_poll_seconds=0.1)
 
@@ -82,7 +82,7 @@ async def test_configured_subscription_cap_sends_the_rest_straight_to_rest(
     serve_snapshots(kis)
     settings = replace(
         settings_for(kis, tmp_path, symbols=("005930", "000660")),
-        ws_max_subscriptions=2,
+        ws_max_subscriptions=4,
         fallback_poll_seconds=0.1,
     )
 
@@ -90,7 +90,8 @@ async def test_configured_subscription_cap_sends_the_rest_straight_to_rest(
         kis, settings, lambda: polled(kis, QUOTE, "000660") and polled(kis, BOOK_SNAPSHOT, "000660")
     )
 
-    assert kis.subscribed_keys() == {("H0UNCNT0", "005930"), ("H0UNASP0", "005930")}
+    night = {("H0MFCNT0", "A01612"), ("H0MFASP0", "A01612")}  # first without the masters (#264)
+    assert kis.subscribed_keys() == night | {("H0UNCNT0", "005930"), ("H0UNASP0", "005930")}
 
 
 async def test_measuring_the_limit_reports_how_many_registrations_kis_accepts(
