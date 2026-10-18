@@ -25,6 +25,8 @@ from krx_quant.backfill import run_backfill
 from krx_quant.candle_probe import probe_candles
 from krx_quant.collector import check_fallbacks, measure_subscription_limit, run_collector
 from krx_quant.config import Settings, SettingsError
+from krx_quant.daily_check import DAYS as DAILY_CHECK_DAYS
+from krx_quant.daily_check import daily_check
 from krx_quant.demo import demo_app, demo_morning
 from krx_quant.diagnose import DEFAULT_DAYS, diagnose
 from krx_quant.fake_kis import FakeKis
@@ -330,6 +332,22 @@ def _signal_review(days: int) -> int:
     return 0
 
 
+def _daily_check(days: int) -> int:
+    settings = Settings.from_env(require_kis=False)
+    calendar = calendar_store(settings).calendar
+    print(
+        daily_check(
+            settings.data_dir,
+            settings.state_dir / DB_NAME,
+            calendar,
+            settings.symbols,
+            datetime.now(KST).date(),
+            days,
+        )
+    )
+    return 0
+
+
 def _structure_check(days: int | None) -> int:
     settings = Settings.from_env(require_kis=False)
     calendar = calendar_store(settings).calendar
@@ -508,6 +526,16 @@ def main(argv: list[str] | None = None) -> int:
         default=SIGNAL_REVIEW_DAYS,
         help=f"the latest N days with predictions (default {SIGNAL_REVIEW_DAYS}, the leaderboard's 20d)",
     )
+    daily_cmd = sub.add_parser(
+        "daily-check",
+        help="print what the daily kinds did on the latest trading days (#264); reads only, writes nothing",
+    )
+    daily_cmd.add_argument(
+        "--days",
+        type=_positive,
+        default=DAILY_CHECK_DAYS,
+        help=f"the latest N trading days (default {DAILY_CHECK_DAYS})",
+    )
     structure_cmd = sub.add_parser(
         "structure-check",
         help="measure the research's market-structure claims on the stored bars and candles; reads only",
@@ -581,6 +609,8 @@ def main(argv: list[str] | None = None) -> int:
             return _signal_review(args.days)
         elif args.command == "structure-check":
             return _structure_check(args.days)
+        elif args.command == "daily-check":
+            return _daily_check(args.days)
         elif args.command == "test-alert":
             return asyncio.run(_test_alert())
         elif args.command == "fake-kis":
