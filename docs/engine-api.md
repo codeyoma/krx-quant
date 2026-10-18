@@ -514,7 +514,9 @@
       },
       "status": {
         "status": "probation", "since": "2026-10-12T08:00:00+09:00",
-        "history": [{"at": "2026-10-12T08:00:00+09:00", "from": null, "to": "probation", "reason": "registered"}]
+        "history": [
+          {"at": "2026-10-12T08:00:00+09:00", "from": null, "to": "probation", "reason": "registered", "simulated": false}
+        ]
       },
       "validation": {
         "day": "2026-10-13", "validation_days": ["2026-10-08", "2026-10-12", "2026-10-13"], "samples": 4104,
@@ -527,8 +529,9 @@
         "review_days": [10, 20, 40], "next_review": 10, "next_review_on": "2026-10-23",
         "lift_days": 2, "level": 0.983,
         "weakest": {"baseline": "baseline-flat", "n": 2, "value": -0.0123, "low": -0.3867, "high": 0.3621},
-        "enough": true
-      }
+        "enough": true, "simulated": 0
+      },
+      "simulation": null
     }
   ],
   "baselines": [
@@ -595,7 +598,17 @@
   - `level`: 구간의 신뢰수준(`KRX_REVIEW_CONFIDENCE`).
   - `weakest`: 그 날들에서 기준 예측 대비 거래일 단위 lift 중 하한이 가장 낮은 것. `baseline`, `n`(채점된 짝이 있는 날 수), `value`, `low`, `high`. 기준 예측 모두 거래일 단위 값(2일 이상)이 있어야 있고, 아니면 `null`이다. 판정과 같이 도달 정답 모델의 예측만 센다.
   - `enough`: 그 날들의 채점된 예측과 기준 예측마다의 짝이 `KRX_MIN_SAMPLE` 이상인지. 모자라면 판정일에도 상태를 그대로 둔다. 판정일에 `enough`이고 `weakest.low > 0`이면 정식이 된다.
-- `status`: 알고리즘마다 온다(위 예시는 한 곳만 보였다). 형식은 아래 "상태 관리".
+  - `simulated`(#298): `days` 가운데 시뮬레이션한 날 수(아래 "상태 관리"의 "수습 시뮬레이션"). 시뮬레이션한 수습은 그 날들을 먼저 세고 그 뒤의 실시간 날을 더한다. 그래서 `counted_from`이 `null`(아직 실시간으로 센 날이 없음)이어도 `days`와 `next_review_on`이 있을 수 있다. 벤치와 시뮬레이션이 없는 수습은 0이다. `weakest`는 시뮬레이션 날에는 시뮬레이션 예측으로 잰다.
+- `simulation`(#298): 그 알고리즘의 가장 최근 수습 시뮬레이션. 없으면 `null`이다. 상태와 상관없이 남는다(통과해 정식이 된 뒤에도). 시뮬레이션 예측은 순위표와 상세 통계에 들지 않으므로 여기와 `stage`로만 보인다.
+  - `made_at`: 시뮬레이션한 시각. `probation_began`: 그것이 만들어진 수습이 시작된 시각(그 상태 이력 항목의 `at`).
+  - `cadence`: `daily`(하루 한 번 종류, 날마다 그 전날까지로 다시 학습) 또는 `bar_close`(4분 종류, 첫날 전까지로 한 번 학습). 시뮬레이션하지 못했으면 `null`.
+  - `days`, `first_day`, `last_day`: 재생한 날 수와 첫날·끝날. 시뮬레이션하지 못했으면 0과 `null`.
+  - `training`: 어떻게 학습했는지. `daily`는 `models`(날마다 그날 예측한 모델 버전), `bar_close`는 `model`, `target_version`, `first_day`·`last_day`(학습한 날들), `samples`, `days`(정답 출처별 날 수: `recorded`, `bars`).
+  - `review`: 바로 한 판정. `days`(센 날), `review_day`(그 날 수가 닿는 가장 큰 판정일, 첫 판정일보다 적으면 `null`), `scored`(채점된 예측 수), `enough`, `weakest`(`stage`의 것과 같은 형식), `status`(판정 뒤 상태), `reason`(바꾼 상태의 이유, 바꾸지 않았으면 `null`).
+  - `why`: 시뮬레이션하지 못한 이유(예: `nothing to learn before 2026-10-12 …`). 그 수습은 실시간으로 이어진다. 했으면 `null`.
+
+  > **바뀜** (2026-10-19, #301): `stage.simulated`와 `simulation`을 더했다. 이유: 수습 시뮬레이션(#298)의 날을 실시간 날과 구분해 보이게 하려고.
+- `status`: 알고리즘마다 온다(위 예시는 한 곳만 보였다). 형식은 아래 "상태 관리". 이력 항목의 `simulated`(#298)는 그 판정이 시뮬레이션 날을 셌는지다(이유가 `simulated probation …`으로 시작하는 바로 한 판정, 또는 `…; <K> of the days simulated`로 끝나는 실시간 판정). 명령의 변경과 #298 전의 변경은 `false`다.
 - `card`(#164): 성격 카드(아래 "규약"). `forecasting`은 세 확률을 만드는 방법이다: 공통 함수가 4분 변화의 정규분포를 닿을 확률로 바꾸는지(Newton, Gauss, Granger, Markov, Kalman), 도달 정답으로 직접 학습한 분류기가 내는지(Shannon의 다항 로지스틱, Turing의 LightGBM), 쏠림을 순서형 로지스틱으로 바꾸는지(Poisson). `failure`는 틀리기 쉬운 장이다. 카드 글은 도달 정답을 기준으로 쓴다(#170). 정답 버전 1로 돌리면 맞지 않는다. 알고리즘 카드의 `scientist`는 늘 문자열이다.
 
   > **바뀜** (2026-10-14, #193): "카드 글은 지금 정답(4분 뒤 중간가 변화)을 기준으로 쓴다. 정답이 바뀌면(#160) 카드 글도 고친다" → 도달 정답 기준으로 고쳤다. 이유: 정답이 바뀌었다(#160).
@@ -616,7 +629,9 @@
   "status": {"status": "probation", "since": "2026-10-12T08:00:00+09:00", "history": []},
   "validation": null,
   "stage": {"status": "probation", "began": "2026-10-12", "counted_from": "2026-10-12", "days": 0, "review_days": [10, 20, 40],
-            "next_review": 10, "next_review_on": "2026-10-23", "lift_days": 0, "level": 0.983, "weakest": null, "enough": false},
+            "next_review": 10, "next_review_on": "2026-10-23", "lift_days": 0, "level": 0.983, "weakest": null, "enough": false,
+            "simulated": 0},
+  "simulation": null,
   "model_history": [
     {"at": "2026-10-13T08:00:00+09:00", "version": "newton-20261012-abc123", "why": "promotion 2026-10-12"},
     {"at": "2026-10-13T09:10:00+09:00", "version": null, "why": "rollback from newton-20261012-abc123"}
@@ -946,7 +961,7 @@
 | `consensus` | 합의가 저장될 때 | `kind`(`fast`, `final`), `bar_close`, `predictions`(합의 예측, 종목마다 하나) |
 | `outcome` | 예측이 채점될 때(봉 마감 4분 뒤) | `outcomes`(채점된 예측. 항목 형식은 같고 `outcome`이 찬다. `outcome`의 `class_a`·`class_b`도 REST처럼 도달 정답이다, #170) |
 | `health` | 연결하자마자 한 번, 그리고 KIS 연결이나 피드의 결측 구간이 바뀔 때 | `kis`(`/v1/status`의 `kis`와 같다). 실시간과 데모만. 지연 초(`seconds_since`)가 바뀐 것만으로는 보내지 않는다 |
-| `lifecycle` | 알고리즘 상태가 바뀔 때. 일일 점검, 다른 프로세스의 `retire`·`unretire` 명령. 엔진이 시작할 때의 처음 등록은 스트림이 열리기 전이라 오지 않는다 | `algorithm`, `change`(`at`, `from`, `to`, `reason`: `/v1/algorithms`의 상태 이력 항목과 같다) |
+| `lifecycle` | 알고리즘 상태가 바뀔 때. 일일 점검, 다른 프로세스의 `retire`·`unretire` 명령과 수습 시뮬레이션(#298). 엔진이 시작할 때의 처음 등록은 스트림이 열리기 전이라 오지 않는다 | `algorithm`, `change`(`at`, `from`, `to`, `reason`, `simulated`: `/v1/algorithms`의 상태 이력 항목과 같다). 수습 시뮬레이션(#298)의 판정은 다른 프로세스(`krx-quant simulate`)가 쓰므로 그 상태 변경도 이것으로 온다(`simulated` `true`). 시뮬레이션 예측 자체는 스트림으로 보내지 않는다 |
 | `bar` (#110) | 종목의 지금 만들어지는 1분봉이 바뀌었을 때. 1초마다 살펴 종목마다 많아야 한 번, 그사이 마지막 값으로 보낸다. 바뀌지 않으면 보내지 않는다 | `symbol`, `bar`(`start`, `open`, `high`, `low`, `close`, `volume`, `trades`: `/v1/symbols/{symbol}/bars`의 봉과 같은 형식. 그날 시작한 가장 최근 봉이라, 새 분에 체결이 아직 없으면 끝난 앞 봉이 그대로다) |
 | `kind_prediction` (#179) | 다른 종류의 예측이 저장(표시)될 때. 그 종류의 기준 예측은 한 번에, 알고리즘은 각자 끝났을 때 | `prediction_kind`(종류 이름), `bar_close`, `predictions`(항목은 `/v1/symbols/{symbol}/kinds/{kind}/latest`의 항목에 `symbol`을 더한 것) |
 | `kind_answer` (#179) | 다른 종류의 정답이 쓰일 때(봉 마감 4분 뒤) | `prediction_kind`, `answers`(종목·봉 마감마다 하나: `symbol`, `bar_close`와 예측 항목의 `answer`와 같은 필드) |
@@ -1348,7 +1363,9 @@
     - **사전 검증의 재생은 다시 쓰지 않는다.** 사전 검증은 날마다 그 전날까지로 다시 학습하는 walk-forward라 정한 학습 방식("첫날 전까지 한 번")과 다르고, 재생한 날도 수습이 시작되기 전의 날이다. 다른 알고리즘은 서버가 돌리는 모델(재생한 날을 배웠을 수 있다)로 돈다. 그래서 정한 방식으로 다시 재생한다.
   - **판정.** 재생이 끝나면 그 날 수가 닿는 가장 큰 판정일의 판정을 바로 한다(`lifecycle.review_at_once`): 하루 한 번 종류는 20일째, 4분 종류는 10–19일이면 10일째, 20일이면 20일째. 기준은 그대로다: 그 날들 전체에서 가장 약한 lift의 거래일 단위 하한이 98.3%에서 0보다 커야 한다. 복제 검사도 그 날들로 한다. 통과하면 지금부터 `active`이고, 못 하면 수습이 이어져 실시간 날이 N+1일째부터 더해지고 다음 판정일에 그 날들과 함께 판정한다. 시뮬레이션의 판정이 바꾼 상태의 이유는 `simulated probation <첫날>..<끝날> (<N> days): …`로 시작한다. 시뮬레이션 날을 센 실시간 판정의 이유는 `…; <K> of the days simulated`로 끝난다. 둘 다 `statuses.simulated`가 1이다.
   - **세는 법.** 그 수습의 날은 시뮬레이션한 날들, 그 뒤의 실시간 날 순이다. 재생한 날에 실시간으로도 수습을 돌았으면 그날은 한 번만(시뮬레이션으로) 센다. 시뮬레이션 날에는 그 알고리즘과 그 종류의 기준 예측, 같이 재생한 알고리즘의 예측을 시뮬레이션의 것으로 읽고, 다른 알고리즘(복제 검사의 상대)은 실시간 예측을 읽는다. 정식 → 벤치와 벤치 회복의 최근 기간도 그 알고리즘의 시뮬레이션 날에는 시뮬레이션 예측을 읽는다. 수습을 통과한 날들이 곧바로 실시간 며칠의 잡음만으로 판정되지 않게, 실시간만으로 통과한 알고리즘(최근 기간에 수습 날이 들어 있다)과 같게 하려는 것이다.
-  - **따로 둔다.** 시뮬레이션 예측은 실시간 예측과 따로 저장한다(아래 "저장"의 `simulation_runs`, `simulations`, `sim_kind_predictions`). 순위표, 상세 통계, 합의 가중치, 스트림의 예측, 진단은 실시간 예측만 읽는다. 그래서 순위표의 기간(오늘·5일·20일)에 시뮬레이션 날은 들지 않는다. 시뮬레이션 날은 수습의 `stage`(센 날과 그중 시뮬레이션 날)와 상태 이력으로만 보인다.
+  - **따로 둔다.** 시뮬레이션 예측은 실시간 예측과 따로 저장한다(위 "저장"의 `simulation_runs`, `simulations`, `sim_predictions`, `sim_kind_predictions`). 순위표, 상세 통계, 합의 가중치, 스트림의 예측, 진단은 실시간 예측만 읽는다. 그래서 순위표의 기간(오늘·5일·20일)에 시뮬레이션 날은 들지 않는다. 시뮬레이션 날은 `/v1/algorithms`의 `simulation`(가장 최근 시뮬레이션: 날, 학습, 바로 한 판정), 수습의 `stage`(센 날과 그중 시뮬레이션 날 `simulated`), 상태 이력과 스트림의 `lifecycle`(`simulated`)으로만 보인다(위 "`GET /v1/algorithms`").
+
+    > **바뀜** (2026-10-19, #301): "수습의 `stage`와 상태 이력으로만 보인다" → API의 `simulation`, `stage.simulated`, 상태 이력과 스트림의 `simulated`로 보인다. 이유: #298의 API PR이다.
 - 수습과 벤치의 알고리즘이 판정까지 어디쯤인지는 `/v1/algorithms`의 `stage`로 본다(#165): 마지막 점검까지 센 날, 다음 판정일과 그날이 되는 날, 판정에 쓰는 가장 약한 lift의 거래일 단위 구간. 점검과 같은 코드(`lifecycle.stages`, `_Judge`)와 같은 날들(수습은 센 날 모두, 벤치는 최근 20거래일)로 잰다.
 - 복제 판정은 같은 종류에서 은퇴하지 않은 먼저 등록된 알고리즘과만 비교한다. 짝이 30개 미만이거나 한쪽 값이 늘 같아 상관을 잴 수 없으면 상태를 그대로 둔다.
 - 다른 종류의 알고리즘(#179)도 같은 규칙과 날짜로 점검한다. 같은 점검에서 종류마다 따로, 그 종류의 예측이 있는 날과 그 종류의 기준 예측으로 본다(위 "예측 종류"). 하루 한 번 예측 종류(#264)의 알고리즘은 같은 점검에서 그 종류의 날로 본다: 정답이 있는 날 20·40·60일째에 판정하고, 정식 → 벤치와 벤치 회복은 최근 20일, 판정에 필요한 표본과 짝은 60개다(위 "하루 한 번 예측 종류"의 "상태").

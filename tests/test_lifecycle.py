@@ -386,6 +386,7 @@ async def test_the_stage_shows_the_days_counted_the_next_review_and_the_lift_it_
         "lift_days": 9,
         "level": 0.983,
         "enough": True,  # 72 scored, and as many pairs with each baseline
+        "simulated": 0,  # none of them simulated (#298)
     }
     # The lower bound the review works out (test_probation_ends_after_ten_days_better_than_every_baseline).
     assert (weakest["baseline"], weakest["n"]) == ("baseline-flat", 9)

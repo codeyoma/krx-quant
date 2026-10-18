@@ -154,6 +154,7 @@ class EventStream:
                         "from": row["previous"],
                         "to": row["status"],
                         "reason": row["reason"],
+                        "simulated": row["simulated"],  # its review counted simulated days (#298)
                     }
                     self._publish({"type": "lifecycle", "algorithm": row["algorithm"], "change": change})
                 self._publish_bars()
