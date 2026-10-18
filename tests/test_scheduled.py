@@ -41,6 +41,7 @@ from krx_quant.scheduled import (
     SIGNAL_REVIEW,
     STATE_FILE,
     STRUCTURE_CHECK,
+    STRUCTURE_SUPPLY,
     SUPPLY_PROBE,
     Attachment,
     Facts,
@@ -903,6 +904,31 @@ def test_the_structure_check_runs_once_on_the_first_night_trading_or_not() -> No
     assert not STRUCTURE_CHECK.due(night(MONDAY, ran))
     assert not STRUCTURE_CHECK.due(night(MONDAY, replace(ran, outcome=FAILED, exit_code=1)))
     assert STRUCTURE_CHECK.due(night(MONDAY, replace(ran, outcome=INTERRUPTED)))
+
+
+def test_the_structure_check_runs_again_once_and_posts_its_turn_of_the_month_to_264() -> None:
+    # #270: the first run counted KIS's 0 net buys as figures; the second shows where they begin.
+    assert STRUCTURE_SUPPLY.command == ("structure-check",)
+    assert STRUCTURE_SUPPLY.timeout == timedelta(minutes=30)
+    assert [t.issue for t in STRUCTURE_SUPPLY.targets] == [264]
+    assert STRUCTURE_SUPPLY.label == ("ready-for-agent",)
+    assert STRUCTURE_SUPPLY in JOBS and STRUCTURE_SUPPLY.name != STRUCTURE_CHECK.name
+    first = next(i for i, j in enumerate(JOBS) if j.name.startswith("prevalidate-"))
+    assert JOBS.index(STRUCTURE_SUPPLY) < first, "before the pre-validations"
+    assert STRUCTURE_SUPPLY.due(night(SATURDAY))
+    ran = JobRecord(SATURDAY, OK, at(SATURDAY, "22:30"), COMMIT, 0, 120.0)
+    assert not STRUCTURE_SUPPLY.due(night(MONDAY, ran))
+    output = "\n\n".join(
+        [
+            "구조 실측 2025-10-10 – 2026-10-16 (1분봉 249거래일, 005930)\n  기간: …",
+            "1. 일 단위 구조(정규장 시가·종가, 1분봉)\n  없음",
+            "4. 월말·월초 × 전날 외국인 순매수(일봉 전체, KIS 수급)\n  005930 일봉 1985-01-04 – 2026-10-16,"
+            " 외국인 순매수 395일(2025-03-04 – 2026-10-16)",
+        ]
+    )
+    part = STRUCTURE_SUPPLY.targets[0].part(output)
+    assert part is not None and part.startswith("구조 실측") and "1. 일 단위" not in part
+    assert part.endswith("외국인 순매수 395일(2025-03-04 – 2026-10-16)")
 
 
 def test_the_entry_delay_runs_the_diagnosis_once_on_a_trading_night_and_posts_section_10() -> None:
