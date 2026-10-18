@@ -480,6 +480,37 @@ def test_stored_supply_merges_the_sources_by_day_within_the_days_asked(tmp_path:
     assert stored_supply(state, "000660", date(2026, 10, 1), date(2026, 10, 7)) == []
 
 
+def test_kis_s_net_buys_of_0_are_no_figure_and_take_toss_s_even_from_a_file_written_before(
+    tmp_path: Path,
+) -> None:
+    """KIS's integrated investor query answers 0 shares for each net buy before NXT opened
+    (2025-03-04, #270); the files the keeper wrote before keep those zeros."""
+    state = tmp_path / "state"
+    day, later = date(2025, 2, 28), date(2025, 3, 4)
+    write_supply(
+        state,
+        SYMBOL,
+        KIS,
+        [
+            {"date": day, "short_volume": 5, "individual_net": 0, "institution_net": 0, "foreign_net": 0},
+            {"date": later, "short_volume": 6, "individual_net": -3, "institution_net": 0, "foreign_net": 3},
+        ],
+    )
+    write_supply(state, SYMBOL, TOSS, [{"date": day, "individual_net": -7, "institution_net": 8}])
+
+    rows = read_supply(state, SYMBOL, KIS)
+
+    assert [(r["individual_net"], r["institution_net"], r["foreign_net"]) for r in rows] == [
+        (None, None, None),
+        (-3, None, 3),
+    ]
+    assert [r["short_volume"] for r in rows] == [5, 6], "the other queries' values stay"
+    first = stored_supply(state, SYMBOL, day, day)[0]
+    assert (first["individual_net"], first["institution_net"], first["foreign_net"]) == (-7, 8, None), (
+        "Toss's where it has the day; no secondary for the foreign net buy"
+    )
+
+
 async def test_the_api_gives_the_days_asked_oldest_first_and_refuses_bad_ranges(tmp_path: Path) -> None:
     state = tmp_path / "state"
     days = trading_days(date(2025, 9, 1), date(2026, 10, 8))

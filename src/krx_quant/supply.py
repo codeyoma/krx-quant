@@ -18,7 +18,9 @@ Toss only there:
   ``orgn_ntby_qty``, ``frgn_ntby_qty``; Toss ``investor-trading`` ``individual`` and
   ``institution`` equalled the first two on all 30 days. Toss's ``foreigner`` is the
   registered foreigners only (KIS's ``frgn_reg_ntby_qty``), not KIS's foreigners, so the
-  foreign net buy has no secondary;
+  foreign net buy has no secondary. KIS answers 0 shares for each net buy of a day it has no
+  integrated figure of: the days before NXT opened (2025-03-04). A net buy of 0 is kept as none
+  (``NET_BUYS``, ``no_figure``), so such a day takes Toss's value where Toss has one;
 - the foreign holdings and ratio: Toss ``investor-trading`` ``foreignerHolding``
   (``holdingQuantity``; ``holdingRate`` × 100, of the listed shares). KIS's are today's one
   value and a ratio of the foreign limit: none is used;
@@ -91,6 +93,13 @@ SOURCES: Mapping[str, tuple[str, ...]] = {
     "lending_balance": (KIS, TOSS),
     "credit_balance": (KIS, TOSS),
 }
+# KIS's net buys (``INVESTORS``). Before NXT opened (2025-03-04) its integrated query answers 0
+# shares for each: the structure check (#270, 2026-10-18) found 2,452 stored days of each
+# symbol's foreign net buy and only 395 of them, the same count for all three symbols, other
+# than 0, about the trading days since. A stock that traded has a net buy other than 0 from
+# each of the three, so a 0 is kept as no figure (None), as fetched and as read from a file
+# written before (``no_figure``), never as a day nobody bought on balance.
+NET_BUYS = ("individual_net", "institution_net", "foreign_net")
 HISTORY_YEARS = 10  # the first run's depth: about 2,450 trading days, the day view's 2,000 and more
 _MAX_CALLS = 400  # a query's pages in one run: 10 years of 30-row pages is 83
 _WINDOW = timedelta(days=365)  # a ranged KIS query's span, ending at the day asked
@@ -220,12 +229,19 @@ def supply_path(state_dir: Path, symbol: str, source: str) -> Path:
 
 
 def read_supply(state_dir: Path, symbol: str, source: str) -> list[Row]:
-    """A source's stored days, oldest first; none if there is no file."""
+    """A source's stored days, oldest first; none if there is no file. KIS's net buys of 0 are
+    none (``no_figure``: a file written before kept them)."""
     path = supply_path(state_dir, symbol, source)
     if not path.exists():
         return []
     rows: list[Row] = pq.read_table(path).to_pylist()
-    return rows
+    return [no_figure(r) for r in rows] if source == KIS else rows
+
+
+def no_figure(row: Row) -> Row:
+    """KIS's ``row`` with each net buy of 0 shares as none (``NET_BUYS``)."""
+    zeros = [f for f in NET_BUYS if row.get(f) == 0]
+    return {**row, **dict.fromkeys(zeros)} if zeros else row
 
 
 def write_supply(state_dir: Path, symbol: str, source: str, rows: Sequence[Row]) -> None:
@@ -431,7 +447,7 @@ class SupplyKeeper:
                 day = _day(row.get(query.date_field), "%Y%m%d") if isinstance(row, Mapping) else None
                 if day is None or day > last or day in found:
                     continue
-                new[day] = {name: _whole(row.get(field)) for name, field in query.columns.items()}
+                new[day] = no_figure({name: _whole(row.get(field)) for name, field in query.columns.items()})
             if not new:
                 break
             found.update(new)

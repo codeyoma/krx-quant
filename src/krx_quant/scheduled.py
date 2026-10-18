@@ -851,6 +851,29 @@ DAILY_CHECK = Job(
     ),
 )
 
+# The structure check's turn of the month again (#270, #264): its first run counted KIS's 0 net
+# buys (every day before NXT opened) as figures. They are none now (``supply.no_figure``), and
+# section 4 heads each symbol with the days that have a foreign figure, the first and the last,
+# which shows on the server's files where KIS's figures begin: the days Cox's flows have (#264).
+# Once, on the first night after the deploy that brings it (trading or not); its header and
+# section 4 go to #264. As the first run's, it reads files only; the half hour is a bound.
+# Before the pre-validations.
+STRUCTURE_SUPPLY = Job(
+    name="structure-check-supply-264",
+    due=_first_night,
+    command=("structure-check",),
+    timeout=timedelta(minutes=30),
+    targets=(
+        Target(
+            DAILY_CHECK_ISSUE,
+            sections("구조 실측", "4. 월말·월초"),
+            "출력 중 머리말과 4절(월말·월초 × 전날 외국인 순매수)만 싣는다. 에이전트가 이것으로 KIS 외국인 "
+            "순매수가 있는 첫날(NXT 개장 2025-03-04로 본다, #270)을 확인하고 `docs/kis-feeds.md`와 "
+            "Cox의 수급 입력 설명에 남긴다. 출력에는 수급 값이 없다(개수, 날짜, 비율만).",
+        ),
+    ),
+)
+
 # The night futures (#264): the collector records the KOSPI200 night session's trades and book
 # (18:00–06:00) from the deploy that brings it; what only the server shows is whether KIS
 # streams them for this app key, under the contract code asked for, in the layout of KIS's
@@ -1056,6 +1079,7 @@ JOBS: tuple[Job, ...] = (
     ENTRY_DELAY,
     NIGHT_PROBE,
     DAILY_CHECK,
+    STRUCTURE_SUPPLY,
     *daily_prevalidation_jobs([a.name for a in DAILY_ALGORITHMS]),
     *prevalidation_jobs([*(a.name for a in ALGORITHMS), *(a.name for a in KIND_ALGORITHMS)]),
 )

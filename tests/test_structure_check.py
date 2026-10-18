@@ -217,7 +217,8 @@ def test_turn_of_month_section(tmp_path: Path) -> None:
     write_supply(state, SYMBOL, KIS, [{"date": d, "foreign_net": n} for d, n in nets.items()])
     out = structure_check(tmp_path, state, MarketCalendar(), [SYMBOL], fee_rate=FEE)
     section = out.split("\n\n")[4]
-    assert f"{SYMBOL} 일봉 2026-05-26 – 2026-06-05, 수급 7일" in section
+    # KIS's 0 is no figure (#270): the 2nd's is left out of the days with one.
+    assert f"{SYMBOL} 일봉 2026-05-26 – 2026-06-05, 외국인 순매수 6일(2026-05-26 – 2026-06-04)" in section
     turn = next(line for line in section.splitlines() if "월말·월초:" in line)
     assert "월말·월초: 4일 평균" in turn and "상승 50.0%" in turn.split(" · ")[0]
     assert "외국인 + 2일" in turn and "외국인 − 1일" in turn

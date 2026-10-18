@@ -24,7 +24,10 @@ on 2026-09-14):
 4. The turn of the month (the last trading day of a month and the first three of the
    next) against the other days, over the whole day-candle history, and split by the
    foreign investors' net buying the day before (KIS's daily figure only: Toss's values
-   never leave the server).
+   never leave the server). KIS answers 0 for the days before NXT opened (2025-03-04): no
+   figure (``supply.no_figure``, #270), so the split covers the days since, which the line
+   heading each symbol counts and dates. The first run (2026-10-18) counted the zeros among
+   the days (2,452 a symbol, of which 395 were split).
 
 It prints ratios, slopes, counts and medians: no price, volume or flow value, so its
 output can go on the public issue. Nothing is judged against a threshold. A section without
@@ -327,6 +330,7 @@ def _tom_section(data_dir: Path, state_dir: Path, symbols: Sequence[str]) -> lis
         ]
         if len(candles) < 2:
             continue
+        # The days with a figure: KIS's 0 net buys (every day before NXT opened) are none (#270).
         foreign = {
             r["date"]: r["foreign_net"]
             for r in read_supply(state_dir, symbol, KIS)
@@ -338,9 +342,10 @@ def _tom_section(data_dir: Path, state_dir: Path, symbols: Sequence[str]) -> lis
             change = _change(close, before)
             net = foreign.get(before_day)
             groups[(day in turn, None)].append(change)
-            if net is not None and net != 0:
+            if net is not None:
                 groups[(day in turn, _sign(net))].append(change)
-        lines.append(f"{symbol} 일봉 {candles[0][0]} – {candles[-1][0]}, 수급 {len(foreign):,}일")
+        figures = f"{len(foreign):,}일({min(foreign)} – {max(foreign)})" if foreign else "없음"
+        lines.append(f"{symbol} 일봉 {candles[0][0]} – {candles[-1][0]}, 외국인 순매수 {figures}")
         for is_turn in (True, False):
             parts = [f"{'월말·월초' if is_turn else '그 밖'}: {_returns(groups.get((is_turn, None), []))}"]
             for sign, name in ((1, "외국인 +"), (-1, "외국인 −")):

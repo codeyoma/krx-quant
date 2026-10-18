@@ -13,7 +13,9 @@ a model is trained on the values it is given:
   training, the stored closes (``us_daily.move_before``, the macro read's rule).
 - **Flows** (``foreign_net``, ``institution_net``): the previous trading day's net buys from
   KIS's daily supply (``state/supply``, #226; stored at 20:30 that day), as a share of that
-  day's integrated volume (the KRX one where there is none). Toss's values are not read.
+  day's integrated volume (the KRX one where there is none). Toss's values are not read. KIS
+  has no figure before NXT opened (2025-03-04): its 0 there is none (``supply.no_figure``,
+  #270), so those days' flows are missing, not 0.
 - **The days before** (``oc_1``, ``cc_1``, ``gap_1``, ``range_1``, ``oc_5``, ``vol_ratio``,
   ``sigma``, ``climate_up``, ``climate_down``): the previous trading day's open→close,
   close→close, overnight gap and range, the last five days' mean open→close, each over the
