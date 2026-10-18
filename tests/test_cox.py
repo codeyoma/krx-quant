@@ -287,3 +287,41 @@ def test_a_days_features_know_nothing_of_it_or_after(tmp_path: Path) -> None:
     assert after.keys() == before.keys() == set(SYMBOLS)
     for symbol in SYMBOLS:
         assert after[symbol] == pytest.approx(before[symbol], nan_ok=True), symbol
+
+
+def test_a_missing_candle_on_the_previous_trading_day_stays_missing_in_training_as_live(
+    tmp_path: Path,
+) -> None:
+    """005930 has no KRX candle on Thursday the 15th (a halt, or a gap at KIS): Friday's training
+    sample must not take Wednesday's candle as the previous day's. The previous trading day is the
+    market's (the other symbols traded), as the engine's calendar gives it live, so the previous
+    day's features are missing in both, and the night's US move and flows are the market day's."""
+    data, state = tmp_path / "data", tmp_path / "state"
+    made_history(data, state, LAST, 650, signal=1.0)
+    thursday = date(2026, 10, 15)
+    write_krx_days(data, "005930", [r for r in read_krx_days(data, "005930") if r["date"] != thursday])
+    files = DailyFiles(data, state)
+    friday = {s.symbol: s for s in samples(OPEN_TO_CLOSE, files, SYMBOLS, FEATURES, FEE) if s.day == LAST}
+    gap = friday["005930"].features
+    for name in ("oc_1", "cc_1", "gap_1", "range_1", "premarket_gap"):
+        assert gap[name] is None, name
+    assert gap["us_sox"] == friday["000660"].features["us_sox"], "the night since the market's previous day"
+    assert friday["000660"].features["oc_1"] is not None, "the others' Thursday is there"
+
+    live = LiveFeatures(OPEN_TO_CLOSE, data, state, CALENDAR, SYMBOLS, FEE)
+    history = [d for d in files.days("005930") if d.day < LAST]
+    got = live(Cox(), "005930", LAST, history, OPEN_TO_CLOSE.band(history)).as_dict()  # type: ignore[misc]
+    assert got == pytest.approx(gap.as_dict(), nan_ok=True)
+
+    from krx_quant.daily_features import TradingDays
+    from krx_quant.daily_training import _baselines
+
+    walked = _baselines(OPEN_TO_CLOSE, files, SYMBOLS, FEE, LAST, LAST)
+    persisted = {r.symbol for r in walked["otc-persist"]}
+    assert persisted == {"000660", "009150"}, "the walk-forward's persistence has no Thursday for 005930"
+
+    market = TradingDays([date(2026, 10, 14), date(2026, 10, 16)], CALENDAR)
+    assert market.previous(date(2026, 10, 16)) == date(2026, 10, 14), "the 15th is no trading day here"
+    assert market.previous(date(2026, 10, 19)) == date(2026, 10, 16), "past the candles: the calendar"
+    assert market.previous(date(2026, 10, 14)) is None
+    assert not market.trades(date(2026, 10, 15)) and market.trades(date(2026, 10, 19))

@@ -42,7 +42,8 @@ price (``feeds.stock``). A missing value is None; the model handles it (``algori
 from __future__ import annotations
 
 import math
-from collections.abc import Callable, Mapping, Sequence
+from bisect import bisect_left
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
@@ -390,6 +391,37 @@ def _us_values(
     return out
 
 
+class TradingDays:
+    """The market's trading days as training knows them (#264): the days any of the symbols has a
+    KRX day candle (a market holiday has none; the symbols have never all been halted at once),
+    and past the newest of them the calendar's (KIS's holidays, else weekdays). KIS's holiday
+    calendar covers about a year, so ten years back come from the candles. A day's previous
+    trading day is the market's, as the engine's calendar gives it live: a symbol's missing
+    candle on it stays missing, never the candle before."""
+
+    def __init__(self, days: Iterable[date], calendar: MarketCalendar | None = None) -> None:
+        self._days = sorted(set(days))
+        self._set = set(self._days)
+        self._calendar = calendar
+
+    def trades(self, day: date) -> bool:
+        if self._days and day <= self._days[-1]:
+            return day in self._set
+        return self._calendar.is_trading_day(day) if self._calendar is not None else day.weekday() < 5
+
+    def previous(self, day: date) -> date | None:
+        """The last trading day before ``day``; None before the first known."""
+        i = bisect_left(self._days, day)
+        if i < len(self._days) or not self._days:
+            return self._days[i - 1] if i else None
+        if self._calendar is not None:
+            return self._calendar.previous_trading_day(day)
+        back = day - timedelta(days=1)
+        while back.weekday() >= 5:
+            back -= timedelta(days=1)
+        return back
+
+
 def samples(
     kind: DailyKind,
     files: DailyFiles,
@@ -404,25 +436,20 @@ def samples(
 ) -> list[DailySample]:
     """Every day's sample of each symbol from ``first`` to ``last`` (both included, default:
     all), oldest first: the features ``names`` as of the day's prediction time, from the days
-    before it, and the day's answer by the kind's rule. A day's month flags come from the
-    stored trading days, then the ``calendar`` past them."""
+    before it, and the day's answer by the kind's rule. A day's previous trading day and month
+    flags are the market's (``TradingDays``: the symbols' candle days, then the ``calendar``),
+    as the engine's calendar gives them live."""
     us = files.us()
     nights: dict[date, float | None] = {}
     out: list[DailySample] = []
+    stored = {s: [d for d in files.days(s) if last is None or d.day <= last] for s in symbols}
+    market = TradingDays((d.day for days in stored.values() for d in days), calendar)
     for symbol in symbols:
-        days = [d for d in files.days(symbol) if last is None or d.day <= last]
+        days = stored[symbol]
         if not days:
             continue
         answers = kind.answers(days, fee_rate) if kind.answers is not None else []
         labels = [a.label for a in answers]
-        traded = {d.day for d in days}
-        newest = days[-1].day
-
-        def trades(day: date, traded: set[date] = traded, newest: date = newest) -> bool:
-            if day <= newest:
-                return day in traded
-            return calendar.is_trading_day(day) if calendar is not None else day.weekday() < 5
-
         flows = (
             flows_by_day(files.data_dir, files.state_dir, symbol)
             if "foreign_net" in names or ("institution_net" in names)
@@ -433,8 +460,8 @@ def samples(
         for i, day in enumerate(days):
             if first is not None and day.day < first:
                 continue
-            previous = days[i - 1].day if i else None
-            end, start = month_flags(day.day, trades)
+            previous = market.previous(day.day)
+            end, start = month_flags(day.day, market.trades)
             ctx = DayContext(
                 symbol=symbol,
                 day=day.day,

@@ -46,7 +46,7 @@ from krx_quant.algorithms import DAILY_ALGORITHMS, Model, NothingToLearn
 from krx_quant.algorithms.forecasts import LOSS_FLOOR
 from krx_quant.config import Settings
 from krx_quant.daily import DailyAlgorithm, DailyInputs, DailyKind, DailySample, DayPrices
-from krx_quant.daily_features import DailyFiles, band_of, samples
+from krx_quant.daily_features import DailyFiles, TradingDays, band_of, samples
 from krx_quant.feeds.base import KST
 from krx_quant.kind_registry import DAILY_KINDS, daily_kind_named
 from krx_quant.kind_stats import entry as kind_entry
@@ -255,16 +255,20 @@ def _baselines(
     out: dict[str, list[KindScored]] = {b.name: [] for b in kind.daily_baselines}
     if first is None or kind.answers is None:
         return out
+    stored = {s: [d for d in files.days(s) if d.day <= last] for s in symbols}
+    market = TradingDays(d.day for days in stored.values() for d in days)
     for symbol in symbols:
-        days: list[DayPrices] = [d for d in files.days(symbol) if d.day <= last]
+        days: list[DayPrices] = stored[symbol]
         answers = kind.answers(days, fee_rate)
         for i, day in enumerate(days):
             answer = answers[i]
             if day.day < first or answer.label is None:
                 continue
             past = tuple((days[j].day, answers[j].label) for j in range(max(0, i - _PAST), i))
-            previous = days[i - 1].day if i else None
-            inputs = DailyInputs(symbol, day.day, kind.predicted_at(day.day), past, band_of(answer), previous)
+            # The market's previous trading day, as live (a symbol's missing candle stays missing).
+            inputs = DailyInputs(
+                symbol, day.day, kind.predicted_at(day.day), past, band_of(answer), market.previous(day.day)
+            )
             for b in kind.daily_baselines:
                 forecast = b.predict(inputs)
                 if forecast is None:
