@@ -365,7 +365,7 @@ KOSPI200 선물과 달러선물은 KIS 선물옵션 분봉조회(`FHKIF03020200`
 | `individual_net`, `institution_net`, `foreign_net` | int64 | `FHPTJ04160001`의 `prsn_ntby_qty`, `orgn_ntby_qty`, `frgn_ntby_qty`: NXT 개장(2025-03-04)부터 `UN`, 그 전 `J`(#297) | 개인·기관계·외국인 순매수량(주, 순매도는 음수). KIS가 값이 없어 0주로 준 것은 `null`이다(`supply.no_figure`, 어느 시장의 답이든): NXT 개장(2025-03-04) 전 날의 0, 그리고 세 순매수가 모두 0인 날의 0. NXT 개장 뒤 한 투자자만 0인 것은 실제 0으로 둔다([kis-feeds.md](kis-feeds.md) "투자자별 순매수"). 전에 쓴 파일의 0도 읽을 때 같은 규칙으로 본다 |
 | `lending_balance` | int64 | `HHPST074500C0`의 `rmnd_stcn` | 대차잔고(주) |
 | `credit_balance` | int64 | `FHPST04760000` `J`의 `whol_loan_rmnd_stcn` | 신용(융자)잔고(주) |
-| `net_market` | string | (조회의 `FID_COND_MRKT_DIV_CODE`) | 그날 순매수가 온 시장: `UN`(통합, NXT 개장부터) 또는 `J`(KRX, 그 전). 순매수 조회가 그날 행을 주지 않았으면 `null`. 이 열이 없는 파일(#297 전)은 모든 날이 `UN`이다(`read_supply`가 그렇게 채운다). 개장 전 날에 `J`가 하나라도 있으면 수집은 `J`를 다시 묻지 않는다 |
+| `net_market` | string | (조회의 `FID_COND_MRKT_DIV_CODE`) | 그날 순매수를 물은 시장: `UN`(통합, NXT 개장부터) 또는 `J`(KRX, 그 전. `J`의 걸음이 성공하면 개장 전 날은 모두 `J`이고, `J`가 행을 주지 않은 날은 순매수가 `null`). 순매수 조회가 그날 행을 주지 않았으면 `null`. 이 열이 없는 파일(#297 전)은 모든 날이 `UN`이다(`read_supply`가 그렇게 채운다). 개장 전 날에 `J`가 하나라도 있으면 수집은 `J`를 다시 묻지 않는다 |
 
 > **바뀜** (2026-10-19, #297): 순매수 열은 모든 날이 `UN`의 값이었고 시장을 남기지 않았다 → NXT 개장 전은 `J`의 값이고, `net_market` 열이 날마다 시장을 남긴다. 이유: `UN`은 개장 전 날들에 값이 없고(0주), 그때는 KRX가 시장 전체였다([kis-feeds.md](kis-feeds.md) "투자자별 순매수"). `J`도 그 날들을 0주로 주면 순매수는 지금처럼 `null`이고 `net_market`만 `J`다.
 

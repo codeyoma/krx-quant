@@ -412,6 +412,20 @@ def _span(query: KisQuery, stored: Sequence[Row], last: date, floor: date) -> tu
     return last, max(_newest(stored, list(query.columns)) or floor, floor, query.since or floor)
 
 
+def krx_history_stored(state_dir: Path, symbols: Sequence[str]) -> bool:
+    """Whether every symbol's KIS file holds KRX's net buys before NXT opened (#297): it has
+    days, and each before NXT was asked of ``J`` (``INVESTORS_KRX``; whether ``J`` gave a figure
+    or not). False while the keeper has not stored that history, e.g. after a failed walk: the
+    data the flows' version 2 means (``daily_features``) is not on this server yet."""
+    for symbol in symbols:
+        rows = read_supply(state_dir, symbol, KIS)
+        if not rows or any(
+            r["date"] < NXT_OPENED and r.get(NET_MARKET) != INVESTORS_KRX.net_market for r in rows
+        ):
+            return False
+    return True
+
+
 def _refused(error: TossError) -> bool:
     """Toss refused the address or the client (its token): no other call would answer."""
     return error.ip_not_allowed or error.status in (401, 403)
@@ -481,6 +495,15 @@ class SupplyKeeper:
                 continue
             for day, values in got.items():
                 fetched.setdefault(day, {}).update(values)
+            if query.before is not None:
+                # The closed history is in: every day before it was asked of this market, also
+                # one it gave no row for (its net buys none), so the history counts as stored
+                # (``krx_history_stored``) and is not asked again.
+                for day in {r["date"] for r in stored} | fetched.keys():
+                    if day < query.before and day not in got:
+                        fetched.setdefault(day, {}).update(
+                            {**dict.fromkeys(query.columns), NET_MARKET: query.net_market}
+                        )
         return self._save(symbol, KIS, stored, fetched, floor)
 
     async def _update_toss(self, toss: TossClient, symbol: str, last: date, floor: date) -> bool:

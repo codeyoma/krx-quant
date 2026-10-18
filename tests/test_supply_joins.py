@@ -35,7 +35,7 @@ from krx_quant.market_calendar import MarketCalendar
 from krx_quant.open_to_close import OPEN_TO_CLOSE, SIGMA_DAYS
 from krx_quant.ratelimit import RateLimiter
 from krx_quant.structure_check import structure_check
-from krx_quant.supply import INVESTORS, KIS, NET_MARKET, SupplyKeeper, read_supply
+from krx_quant.supply import INVESTORS, KIS, NET_MARKET, SupplyKeeper, krx_history_stored, read_supply
 from krx_quant.us_daily import US_DAILY, write_us_daily
 from tests.kis_rest import rest_client
 from tests.test_candles import candles_api, kis_candles
@@ -143,6 +143,7 @@ async def test_the_supply_days_join_the_candle_days_and_kis_s_zeros_are_no_figur
     # other queries' values of those days stay.
     before = [r for r in supply if r["date"] < NXT_OPEN]
     assert before and all(r[NET_MARKET] == "J" for r in before)
+    assert krx_history_stored(state, [SYMBOL]), "asked of KRX, figures or not: Cox's version 2 data"
     if krx == "figures":
         assert [(r["individual_net"], r["institution_net"], r["foreign_net"]) for r in before] == [
             krx_net_buys(r["date"]) for r in before

@@ -186,16 +186,17 @@ class _Asker:
         except (aiohttp.ClientError, OSError, ValueError) as e:  # OSError: timeouts too
             error = f"error {type(e).__name__}"
         else:
-            self._failed_in_a_row = 0
             answer = parse(INVESTOR_DAILY, body, more)
-            if answer.body_keys:
-                return Asked(error=f"OK, 행 목록이 아니다(본문 키: {', '.join(answer.body_keys)})")
-            rows: dict[date, Mapping[str, Any]] = {}
-            for row in answer.rows:
-                day = day_of(row, INVESTOR_DAILY.date_field)
-                if day is not None and day <= end:
-                    rows.setdefault(day, row)
-            return Asked(rows=rows)
+            if not answer.body_keys:
+                self._failed_in_a_row = 0
+                rows: dict[date, Mapping[str, Any]] = {}
+                for row in answer.rows:
+                    day = day_of(row, INVESTOR_DAILY.date_field)
+                    if day is not None and day <= end:
+                        rows.setdefault(day, row)
+                return Asked(rows=rows)
+            # KIS said OK, but the rows are not where they belong: no usable answer, a failure.
+            error = f"OK, 행 목록이 아니다(본문 키: {', '.join(answer.body_keys)})"
         self.failed += 1
         self._failed_in_a_row += 1
         return Asked(error=error)
@@ -203,7 +204,7 @@ class _Asker:
 
 async def probe_net_buys(settings: Settings, today: date, out: Out = print) -> tuple[int, int]:
     """Ask J and UN for each symbol and window, print the report and the stored days; the calls
-    made, and how many failed."""
+    made, and how many failed (KIS's errors, and answers without the row list)."""
     symbols = settings.symbols[:MAX_SYMBOLS]
     # The cached token while it is valid: no early refresh beside the running collector.
     settings = replace(settings, token_refresh_margin_seconds=0.0)

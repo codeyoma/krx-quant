@@ -5,6 +5,7 @@ histories."""
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
@@ -16,7 +17,14 @@ from krx_quant.cli import main
 from krx_quant.clock import FakeClock
 from krx_quant.config import Settings
 from krx_quant.daily import StoredDays
-from krx_quant.daily_features import DAILY_FEATURES, DailyFiles, LiveFeatures, input_versions, samples
+from krx_quant.daily_features import (
+    DAILY_FEATURES,
+    DailyFiles,
+    LiveFeatures,
+    input_versions,
+    pending_inputs,
+    samples,
+)
 from krx_quant.daily_training import WALK_MIN_DAYS, DailyTrainer, prevalidate_daily
 from krx_quant.engine import PredictionEngine
 from krx_quant.feeds.base import KST
@@ -47,8 +55,12 @@ NOW = datetime(2026, 10, 16, 22, 30, tzinfo=KST)
 DAYS = 1_300  # 550 days out of sample: above WALK_MIN_DAYS
 
 
-def settings(tmp_path: Path, signal: float, days: int = DAYS, seed: int = 264) -> Settings:
-    made_history(tmp_path / "data", tmp_path / "state", LAST, days, signal=signal, seed=seed)
+def settings(
+    tmp_path: Path, signal: float, days: int = DAYS, seed: int = 264, krx_history: bool = True
+) -> Settings:
+    made_history(
+        tmp_path / "data", tmp_path / "state", LAST, days, signal=signal, seed=seed, krx_history=krx_history
+    )
     return Settings(
         kis_app_key="",
         kis_app_secret="",
@@ -137,6 +149,43 @@ def test_a_report_on_older_inputs_waits_for_a_new_run_and_the_job_runs_it(tmp_pa
     # A version 1 feature in the report is as good as none listed: only raised ones count.
     path.write_text(json.dumps({**report, "inputs": {"us_sox": 1, "foreign_net": 2, "institution_net": 2}}))
     assert admits(state)(cox)
+
+
+def test_a_run_before_the_krx_history_is_stored_records_the_old_version_and_the_job_waits(
+    tmp_path: Path,
+) -> None:
+    """#297 review: if the keeper has not stored KRX's net buys before NXT (both of the day's
+    attempts failed), a pre-validation reads the old flows, so its report says version 1, never
+    the registry's 2, and the gate does not take it. The scheduled job waits for the history;
+    once the keeper has stored it, a new run records version 2 and is current."""
+    s = settings(tmp_path, signal=0.6, days=900, krx_history=False)
+    cox = DAILY_ALGORITHMS[0]
+    assert pending_inputs(FEATURES, s.state_dir, s.symbols) == ["foreign_net", "institution_net"]
+
+    prevalidate_daily(s, "cox", now=NOW)
+
+    report = json.loads(report_path(s.state_dir, "cox").read_text())
+    assert (report["inputs"]["foreign_net"], report["inputs"]["institution_net"]) == (1, 1)
+    found = last_report(s.state_dir, cox)
+    assert found is not None and not found.current and not found.judged
+    assert not admits(s.state_dir)(cox)
+    [job] = [j for j in JOBS if j.name == "prevalidate-cox"]
+    ran = JobRecord(LAST, OK, NOW - timedelta(minutes=30), "abc", 1, 60.0)
+    pending = ("foreign_net", "institution_net")
+    night = JobNight(
+        LAST + timedelta(days=1), True, "abc", ran, {job.name: ran}, Facts(0, ("cox",), 0, {"cox": found})
+    )
+    assert job.due(night), "its data is in: it runs"
+    assert not job.due(replace(night, facts=replace(night.facts, pending_inputs=pending))), "it waits"
+
+    # The keeper's later run stores the history: a new run is on version 2.
+    made_history(s.data_dir, s.state_dir, LAST, 900, signal=0.6, seed=264)
+    assert pending_inputs(FEATURES, s.state_dir, s.symbols) == []
+    prevalidate_daily(s, "cox", now=NOW + timedelta(days=1))
+    report = json.loads(report_path(s.state_dir, "cox").read_text())
+    assert report["inputs"] == input_versions(FEATURES)
+    found = last_report(s.state_dir, cox)
+    assert found is not None and found.current
 
 
 def test_a_model_on_noise_is_refused_on_its_lift_by_trading_day(tmp_path: Path) -> None:

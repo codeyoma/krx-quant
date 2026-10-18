@@ -19,7 +19,7 @@ import pytest
 
 from krx_quant import cli, supply_probe
 from krx_quant.fake_kis import FakeKis
-from krx_quant.net_buys_probe import WINDOWS, probe_net_buys
+from krx_quant.net_buys_probe import MAX_FAILED_IN_A_ROW, WINDOWS, probe_net_buys
 from krx_quant.supply import INVESTORS, KIS, NET_MARKET, NXT_OPENED, TOSS, write_supply
 from tests.test_collector import settings_for
 
@@ -184,6 +184,29 @@ async def test_the_report_carries_no_market_value(
     report, _, _ = await probed(kis, tmp_path, monkeypatch)
     assert [s for s in SENTINELS if s in report] == []
     assert re.search(r"(?<![A-Za-z0-9])\d{7,}", report) is None, "no long number but in TR codes"
+
+
+async def test_answers_without_the_row_list_are_failures_and_stop_the_probe(
+    kis: FakeKis, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#297 review: KIS's OK without the rows where they belong is no usable answer: a failed
+    call, counted toward the cutoff, so that nothing usable exits 1."""
+    monkeypatch.setattr(supply_probe, "PACE", 0)
+    kis.rest_responses[INVESTORS.tr] = lambda params: {
+        "rt_cd": "0",
+        "msg_cd": "MCA00000",
+        "output2": {"x": "1"},
+    }
+    settings = replace(settings_for(kis, tmp_path), symbols=SYMBOLS, rest_max_per_second=1000)
+    lines: list[str] = []
+
+    calls, failed = await probe_net_buys(settings, TODAY, lines.append)
+
+    report = "\n".join(lines)
+    assert calls == failed == MAX_FAILED_IN_A_ROW == len(kis.rest_requests)
+    assert "  005930 2016(~2016-12-30) J: OK, 행 목록이 아니다(본문 키: msg_cd, output2, rt_cd)" in report
+    assert f"묻지 않음: {MAX_FAILED_IN_A_ROW}번 잇달아 실패" in report
+    assert f"KIS: {calls}번 조회, {failed}번 실패" in report
 
 
 def test_the_command_exits_1_only_when_nothing_answered(

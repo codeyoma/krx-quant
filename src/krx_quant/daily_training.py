@@ -46,7 +46,7 @@ from krx_quant.algorithms import DAILY_ALGORITHMS, Model, NothingToLearn
 from krx_quant.algorithms.forecasts import LOSS_FLOOR
 from krx_quant.config import Settings
 from krx_quant.daily import DailyAlgorithm, DailyInputs, DailyKind, DailySample, DayPrices
-from krx_quant.daily_features import DailyFiles, TradingDays, band_of, samples
+from krx_quant.daily_features import DailyFiles, TradingDays, band_of, samples, stored_versions
 from krx_quant.feeds.base import KST
 from krx_quant.kind_registry import DAILY_KINDS, daily_kind_named
 from krx_quant.kind_stats import entry as kind_entry
@@ -60,7 +60,6 @@ from krx_quant.prevalidation import (
     _record_run,
     code_digest,
     earlier_runs,
-    inputs_of,
     report_path,
     seed_history,
     tried_level,
@@ -391,6 +390,9 @@ def prevalidate_daily(
                 f"no KRX day candles of {', '.join(settings.symbols)} in {settings.data_dir}"
             )
         calendar = calendar_store(settings).calendar
+        # The versions of the data it reads (#297): a backfill not in yet is recorded as such,
+        # so the gate never takes this run for data it did not see.
+        inputs = stored_versions(algorithm.features, settings.state_dir, settings.symbols)
         run = walk_forward(algorithm, kind, files, settings.symbols, settings.fee_rate, calendar=calendar)
         mine = run.records.get(name, [])
         baselines = {b.name: run.records.get(b.name, []) for b in kind.daily_baselines}
@@ -426,7 +428,7 @@ def prevalidate_daily(
                 "present": run.present,
                 **_breakdown(kind, mine),
             },
-            inputs=inputs_of(algorithm),
+            inputs=inputs,
         )
         result = replace(result, earlier_runs=before, earlier_on_these_days=on_days)
         path = report_path(settings.state_dir, name)

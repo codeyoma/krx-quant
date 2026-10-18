@@ -39,6 +39,7 @@ from krx_quant.supply import (
     TOSS,
     SupplyKeeper,
     history_floor,
+    krx_history_stored,
     read_supply,
     stored_supply,
     write_supply,
@@ -694,6 +695,7 @@ async def test_a_file_written_before_takes_krx_s_history_at_the_next_run(
         else supplied.investors(params)
     )
     await keep(kis, tmp_path, SPRING)
+    assert not krx_history_stored(state, [SYMBOL]), "the walk failed: not stored"
     assert len(investor_calls(kis, "UN")) == 1, "a page: the newest day held is the 30th"
     assert all(
         nets(r)[:3] == (None, None, None) for r in read_supply(state, SYMBOL, KIS) if r["date"] < NXT_OPENED
@@ -708,6 +710,42 @@ async def test_a_file_written_before_takes_krx_s_history_at_the_next_run(
     )
     assert nets(by_day[NXT_OPENED]) == (*(kis_value(f, NXT_OPENED) for f in supply.NET_BUYS), "UN")
     assert {r[NET_MARKET] for r in by_day.values()} == {"J", "UN"}
+    assert krx_history_stored(state, [SYMBOL])
+
+
+async def test_every_day_before_nxt_is_marked_asked_of_krx_also_one_krx_gives_no_row(
+    kis: FakeKis, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """KRX's answers may stop short of the floor while the other queries go further: those
+    days were asked of KRX all the same (net buys none), so the history counts as stored and
+    KRX is not asked again."""
+    monkeypatch.setattr(supply, "HISTORY_YEARS", 1)
+    supplied = KisSupply(trading_days(date(2024, 3, 4), date(2025, 4, 30)))
+    supplied.serve(kis)
+    first_row = date(2025, 1, 2)
+
+    def investors(params: dict[str, str]) -> dict[str, Any]:
+        answer = supplied.investors(params)
+        if params["FID_COND_MRKT_DIV_CODE"] == "J":
+            answer["output2"] = [r for r in answer["output2"] if r["stck_bsop_date"] >= ymd(first_row)]
+        return answer
+
+    kis.rest_responses[INVESTORS.tr] = investors
+    state = tmp_path / "state"
+    assert not krx_history_stored(state, [SYMBOL]), "no file yet"
+    await keep(kis, tmp_path, SPRING)
+    calls = len(investor_calls(kis, "J"))
+    await keep(kis, tmp_path, NEXT_EVENING)
+
+    rows = read_supply(state, SYMBOL, KIS)
+    before = [r for r in rows if r["date"] < NXT_OPENED]
+    assert before[0]["date"] < first_row and all(r[NET_MARKET] == "J" for r in before)
+    assert all(nets(r)[:3] == (None, None, None) for r in before if r["date"] < first_row)
+    assert nets(next(r for r in before if r["date"] == first_row))[:3] == tuple(
+        krx_value(f, first_row) for f in supply.NET_BUYS
+    )
+    assert krx_history_stored(state, [SYMBOL])
+    assert len(investor_calls(kis, "J")) == calls, "not asked again"
 
 
 async def test_the_api_gives_the_days_asked_oldest_first_and_refuses_bad_ranges(tmp_path: Path) -> None:

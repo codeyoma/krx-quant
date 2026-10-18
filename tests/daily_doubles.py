@@ -18,7 +18,7 @@ from pathlib import Path
 from krx_quant.candles import write_candles, write_krx_days
 from krx_quant.macro import Observation
 from krx_quant.market_calendar import MarketCalendar
-from krx_quant.supply import KIS, write_supply
+from krx_quant.supply import KIS, NET_MARKET, NXT_OPENED, write_supply
 from krx_quant.us_daily import write_us_daily
 
 SYMBOLS = ("005930", "000660", "009150")
@@ -50,6 +50,7 @@ def made_history(
     seed: int = 264,
     symbols: Sequence[str] = SYMBOLS,
     calendar: MarketCalendar | None = None,
+    krx_history: bool = True,
 ) -> Made:
     calendar = calendar or MarketCalendar()
     krx = trading_days(calendar, last, days)
@@ -106,6 +107,9 @@ def made_history(
                     "foreign_net": round(foreign * volume * 0.02),
                     "institution_net": round(rng.gauss(0, 1) * volume * 0.02),
                     "individual_net": 0,
+                    # The market the keeper asked (#297); without the KRX history (a backfill
+                    # not in yet) the days before NXT opened have none.
+                    NET_MARKET: "UN" if d >= NXT_OPENED else ("J" if krx_history else None),
                 }
             )
             foreign_yesterday = foreign
