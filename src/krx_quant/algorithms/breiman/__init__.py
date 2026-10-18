@@ -26,11 +26,18 @@ Personality card:
 
 Its trees are the model's blob, as Turing's: a model trained before reads the features it was
 trained on, in their order.
+
+**The horizon ladder** (#263): one Breiman a barrier kind, ``Breiman(kind)``. On the barrier
+of 15, 30 or 60 minutes (``barriers.BARRIER_LADDER``) it is ``breiman-<H>m``: the same trees,
+features and settings, trained on that kind's answers (the windows H minutes long) and scored
+against that kind's baselines. Its own features stay the four-minute barrier's width and
+ratio: the longer width is σ̂₁ × √H of the same bars, so it adds nothing they do not hold.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from typing import Any
 
 import lightgbm as lgb
@@ -48,7 +55,7 @@ from krx_quant.features import (
     SERIES_FEATURES,
     FeatureVector,
 )
-from krx_quant.kinds import KindForecast
+from krx_quant.kinds import Kind, KindForecast
 
 NAME = "breiman"
 TRAINING_DAYS = 20
@@ -101,9 +108,25 @@ PARAM_MEANINGS: Mapping[str, Meaning] = {
 }
 
 
+def _logic(minutes: int) -> str:
+    longer = minutes != 4
+    return (
+        f"LightGBM 그래디언트 부스팅 트리로 봉 마감 뒤 {minutes}분 동안 위·아래 장벽 중 어느 쪽에 먼저 "
+        f"닿을지(위 먼저·시간 만료·아래 먼저, {f'장벽 {minutes}분' if longer else '장벽'} 정답)를 분류한다. "
+        "Turing이 읽는 피처 저장소의 숫자 피처(프로그램"
+        "매매·외국계 회원사 흐름, 호가의 주문 흐름, 체결의 방향과 도착, 옵션 내재변동성, 시간대, 최우선 "
+        "호가, 앞선 거래일들의 같은 10분 시간대 수익률 포함)에 그 봉 마감의 장벽 폭 w(`barrier_width`)와 "
+        "폭 ÷ 4분 변동성(`barrier_sigma`)을 "
+        "더한다"
+        + (f"(4분 장벽의 것이다. {minutes}분 장벽의 폭은 같은 봉의 σ̂₁ × √{minutes}다)" if longer else "")
+        + ". 삼중 장벽 정답에 트리 앙상블을 학습하는 López de Prado의 짝이다. 모르는 피처(백필만 "
+        "있는 날의 호가·체결)는 비워 두고 트리가 다룬다."
+    )
+
+
 class Breiman:
-    name = NAME
-    kind = BARRIER.name
+    """The barrier's trees (#184); ``kind`` another barrier of the horizon ladder (#263)."""
+
     # The numbers Turing reads (every number of the Feature Store but the series and the
     # range's, #181), and its own, the barrier's (#183).
     features: tuple[str, ...] = tuple(n for n in FEATURES if n not in SERIES_FEATURES | RANGE_FEATURES)
@@ -112,15 +135,7 @@ class Breiman:
     card = Card(
         scientist="Leo Breiman",
         character="트리 앙상블",
-        logic=(
-            "LightGBM 그래디언트 부스팅 트리로 봉 마감 뒤 4분 동안 위·아래 장벽 중 어느 쪽에 먼저 닿을지(위 "
-            "먼저·시간 만료·아래 먼저, 장벽 정답)를 분류한다. Turing이 읽는 피처 저장소의 숫자 피처(프로그램"
-            "매매·외국계 회원사 흐름, 호가의 주문 흐름, 체결의 방향과 도착, 옵션 내재변동성, 시간대, 최우선 "
-            "호가, 앞선 거래일들의 같은 10분 시간대 수익률 포함)에 그 봉 마감의 장벽 폭 w(`barrier_width`)와 "
-            "폭 ÷ 4분 변동성(`barrier_sigma`)을 "
-            "더한다. 삼중 장벽 정답에 트리 앙상블을 학습하는 López de Prado의 짝이다. 모르는 피처(백필만 "
-            "있는 날의 호가·체결)는 비워 두고 트리가 다룬다."
-        ),
+        logic=_logic(4),
         unique_features=OWN,
         training=(
             "최근 20거래일의 장벽 정답(녹화된 날은 호가의 정답, 그 전 날은 1분봉 규칙)으로 LightGBM을 "
@@ -141,6 +156,18 @@ class Breiman:
             "조금 다르고, 그 날에는 호가·체결 피처가 비어 있어서 녹화가 쌓일수록 그 피처의 몫이 바뀐다."
         ),
     )
+
+    def __init__(self, kind: Kind = BARRIER) -> None:
+        minutes = round(kind.horizon.total_seconds() / 60)
+        self.kind = kind.name
+        self.name = NAME if kind.name == BARRIER.name else f"{NAME}-{minutes}m"
+        if kind.name != BARRIER.name:
+            self.card = replace(
+                self.card,
+                character=f"트리 앙상블 ({kind.title})",
+                logic=_logic(minutes),
+                training=self.card.training.replace("장벽 정답", f"{kind.title} 정답", 1),
+            )
 
     def default_model(self) -> Model:
         """No trees before training: a third each."""

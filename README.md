@@ -76,7 +76,7 @@ uv run krx-quant archive
 - 알고리즘은 모두 수습으로 시작한다. 매일 장 마감 10분 뒤 상태(수습, 정식, 벤치, 은퇴, 복제)를 점검하고, 정식 알고리즘만 합의에 들어간다([docs/engine-api.md](docs/engine-api.md#상태-관리-17)). 판정과 합의 가중치는 도달 정답으로 학습한 모델의 예측만 본다. 정답이 바뀐 날(#170 배포) 모든 알고리즘이 수습으로 돌아가, 새 정답 모델이 올라간 거래일부터 다시 센다([docs/operations.md](docs/operations.md#정답이-바뀌는-날-170)).
 - 순위표(`/v1/leaderboard`)와 알고리즘 상세 통계(`/v1/algorithms/<이름>/stats`)를 낸다. 방향 정밀도, 커버리지, 기준 예측 대비 lift, 닿음 손익(정답과 같은 규칙, 연구용. 하락을 주식 공매도로 친 것과 인버스 상품으로 친 것, #267), Brier 점수, 보정 곡선을 신뢰구간과 함께 보여준다. 상세 통계는 기준율 대비 실력(kappa, Gerrity, 균형 맞힘률, 독립성 검정)과 변동성 3분위별 성적도 낸다(#262).
 - 같은 봉 마감에 방향 말고 변동폭(4분 동안 통합 중간가의 최고 − 최저, #180)도 예측한다: 기준 예측 2종(시간대 기후, 직전 4분 지속)과 첫 모델 Mandelbrot(#181, HAR 방식 로그 범위 회귀). Mandelbrot은 사전 검증(`prevalidate mandelbrot`)을 통과해야 돈다. 순위표는 `/v1/leaderboard?kind=range`다([docs/engine-api.md](docs/engine-api.md#변동폭-177-180)).
-- 장벽(#183)도 예측한다: 봉 마감 중간가 ± 폭 w(1분 변화의 지수가중 표준편차 × √4, 비용 k보다 좁지 않게)에 둔 위·아래 장벽 중 4분 안에 어느 쪽에 먼저 닿을지(위 먼저·시간 만료·아래 먼저, 삼중 장벽). 기준 예측 2종(시간대 기후, 직전 4분 지속)과 첫 모델 Breiman(#184, LightGBM 3분류)이 예측하고, 연구용 장벽 손익을 함께 낸다. Breiman은 사전 검증(`prevalidate breiman`)을 통과해야 돈다. 순위표는 `/v1/leaderboard?kind=barrier`다([docs/engine-api.md](docs/engine-api.md#장벽-178-183)). 같은 장벽을 시간 장벽 15·30·60분으로 둔 `barrier_15m`, `barrier_30m`, `barrier_60m`(#263, 폭은 σ̂₁ × √H)도 기준 예측 2종씩으로 예측한다.
+- 장벽(#183)도 예측한다: 봉 마감 중간가 ± 폭 w(1분 변화의 지수가중 표준편차 × √4, 비용 k보다 좁지 않게)에 둔 위·아래 장벽 중 4분 안에 어느 쪽에 먼저 닿을지(위 먼저·시간 만료·아래 먼저, 삼중 장벽). 기준 예측 2종(시간대 기후, 직전 4분 지속)과 첫 모델 Breiman(#184, LightGBM 3분류)이 예측하고, 연구용 장벽 손익을 함께 낸다. Breiman은 사전 검증(`prevalidate breiman`)을 통과해야 돈다. 순위표는 `/v1/leaderboard?kind=barrier`다([docs/engine-api.md](docs/engine-api.md#장벽-178-183)). 같은 장벽을 시간 장벽 15·30·60분으로 둔 `barrier_15m`, `barrier_30m`, `barrier_60m`(#263, 폭은 σ̂₁ × √H)도 기준 예측 2종씩과 지평마다의 Breiman(`breiman-15m`, `breiman-30m`, `breiman-60m`, 사전 검증 뒤)으로 예측한다.
 
   > **바뀜** (2026-10-15, #209): "지금은 기준 예측 2종(시간대 기후, 직전 4분 지속)이 예측하고" → 첫 모델 Breiman도 예측한다(사전 검증 뒤 수습). 이유: #184가 넣었다.
 - 알고리즘은 녹화된 날은 녹화 이벤트(호가로 만든 도달 정답)로, 백필만 있는 날은 1분봉(1분봉 규칙의 도달 정답)으로 학습한다. 모델은 `state/models/`에 저장되고, 실행 중인 엔진은 30초마다 확인해 바뀐 모델로 바꾼다.
@@ -94,6 +94,7 @@ uv run krx-quant fit markov
 uv run krx-quant fit turing
 uv run krx-quant fit mandelbrot        # 변동폭(#181): 변동폭 정답으로
 uv run krx-quant fit breiman           # 장벽(#184): 장벽 정답으로
+uv run krx-quant fit breiman-15m       # 15분 장벽(#263): 그 종류의 정답으로
 uv run krx-quant train                 # 밤 학습 한 번: KRX_OBJECT_STORE의 최근 날로 학습·검증·승격 목록
 uv run krx-quant rollback granger      # 직전 모델로 되돌리기
 ```
@@ -181,7 +182,7 @@ uv run python -c "import glob, pyarrow.parquet as pq; d = sorted(glob.glob('data
 | `archive [--recheck]` | 녹화한 날을 합쳐 `KRX_OBJECT_STORE`에 올린다. `--recheck`는 모든 파일을 저장소와 비교한다 | 필요(쓰지는 않는다) |
 | `replay <YYYY-MM-DD> [--db 경로]` | 녹화한 하루를 엔진으로 다시 돌려 별도 DB에 쓴다. 요약은 도달 정답으로 센 채점 수다(#170, 전에는 기준 A) | 없어도 된다 |
 | `rescore` | 2026-10-12부터의 지난 예측의 도달 정답(`touches`)을 녹화로 다시 계산해, 다른 행만 바꾼다. 옛 채점(`class_a`·`class_b`)과 특수 표시는 그대로다. 엔진이 돌고 있으면 거부한다(종료 코드 1). 엔진을 멈추고 장 시간 밖에 돌린다. 빠진 정답은 엔진이 시작할 때 저절로 채운다([docs/operations.md](docs/operations.md#지난-예측의-도달-정답-168), #168) | 없어도 된다 |
-| `fit <알고리즘> [--days N]` | 최근 날들로 학습해 `state/models/`에 설치한다. 녹화된 날은 녹화 이벤트(중간가), 백필만 있는 날은 1분봉(종가)으로. 다른 종류의 알고리즘(변동폭의 `mandelbrot`, #181, 장벽의 `breiman`, #184)은 그 종류의 정답으로 | 없어도 된다 |
+| `fit <알고리즘> [--days N]` | 최근 날들로 학습해 `state/models/`에 설치한다. 녹화된 날은 녹화 이벤트(중간가), 백필만 있는 날은 1분봉(종가)으로. 다른 종류의 알고리즘(변동폭의 `mandelbrot`, #181, 장벽의 `breiman`, #184, 15·30·60분 장벽의 `breiman-15m` 등, #263)은 그 종류의 정답으로 | 없어도 된다 |
 | `prevalidate <알고리즘> [--days N]` | 새 알고리즘을 녹화된 최근 20거래일(최소 10일)로 재생해 사전 검증한다. 통과하면 엔진이 다음 봉 마감부터 수습으로 돌린다. 거부되면 종료 코드 1([docs/engine-api.md](docs/engine-api.md#사전-검증-24)). 변동폭의 `mandelbrot`(#181)과 장벽의 `breiman`(#184)도 이것으로 검증한다. 서버에서는 예약 작업이 녹화 10거래일부터 밤마다 하나씩 돌려 결과를 #204에 남긴다(#204). 실행마다 `state/prevalidations/<이름>.history.jsonl`에 한 줄을 남기고, 전에 돈 적이 있으면 그 횟수와 같은 날을 재생한 횟수를 출력한다(#262). 같은 날로 다시 돌리면 통과 기준이 더 엄격하다(거래일 단위 하한, Bonferroni) | 없어도 된다 |
 | `train [--day YYYY-MM-DD] [--from-store]` | 밤 학습 한 번. `--day`가 없으면 Object Store에 모든 종목의 백필 1분봉이나 녹화된 체결이 있는 가장 최근 날. `--from-store`는 서버가 S3에 올린 설정과 휴장일 달력으로 학습한다(EC2 Spot, #23) | 없어도 된다 |
 | `registry-password` | ECR 레지스트리의 `docker login` 암호를 출력한다. `deploy/push-image.sh`가 쓴다(#23) | 없어도 된다 |

@@ -828,10 +828,13 @@ ENTRY_DELAY = Job(
 PREVALIDATE_FIRST = ("mandelbrot", "breiman", "kalman", "shannon", "poisson")
 PREVALIDATION_ISSUE = 204
 # A run takes about 20 times a day's replay (20 days, the algorithm retrained before each);
-# breiman retrains LightGBM each day and takes longest. Bounds, not estimates: room for the
-# burst CPU running out. Each must start by 05:30 less its limit (00:30, breiman 23:30).
+# breiman retrains LightGBM each day and takes longest, and so does each Breiman of the
+# barrier's horizon ladder (#263). Bounds, not estimates: room for the burst CPU running out.
+# Each must start by 05:30 less its limit (00:30, the Breimans 23:30).
 PREVALIDATION_TIMEOUT = timedelta(hours=5)
-PREVALIDATION_TIMEOUTS = {"breiman": timedelta(hours=6)}
+PREVALIDATION_TIMEOUTS = {
+    name: timedelta(hours=6) for name in ("breiman", "breiman-15m", "breiman-30m", "breiman-60m")
+}
 # An algorithm's turn tonight: never tried (or cut by a restart), or tried again.
 FRESH, AGAIN = "fresh", "again"
 

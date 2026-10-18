@@ -35,7 +35,7 @@ from krx_quant.algorithms.breiman import BOOSTING, NAME, PARAM_MEANINGS, ROUNDS,
 from krx_quant.algorithms.mandelbrot import NAME as MANDELBROT
 from krx_quant.algorithms.turing import Turing
 from krx_quant.backfill import BAR_SCHEMA, MINUTE_BARS_TR, PreviousDay, bars_key
-from krx_quant.barriers import BARRIER, CLIMATE, PERSIST, SAME_MINUTE
+from krx_quant.barriers import BARRIER, BARRIER_LADDER, CLIMATE, PERSIST, SAME_MINUTE
 from krx_quant.clock import FakeClock
 from krx_quant.engine import PredictionEngine
 from krx_quant.features import BARRIER_FEATURES, BOOK_FEATURES, TAPE_FEATURES, FeatureVector, Leaders
@@ -190,7 +190,7 @@ def test_it_is_registered_with_the_barrier_and_waits_for_its_pre_validation(tmp_
     first when the CPU budget runs short); its card is filled in and every parameter a model
     can hold has a meaning. It was registered after pre-validation existed: the engine runs it
     only once it has passed."""
-    assert [a.name for a in KIND_ALGORITHMS] == [MANDELBROT, NAME]
+    assert [a.name for a in KIND_ALGORITHMS] == [MANDELBROT, NAME, *(f"{NAME}-{m}m" for m in (15, 30, 60))]
     assert BREIMAN.kind == "barrier" and kind_named(BREIMAN.kind) is BARRIER
     card = BREIMAN.card
     assert card.scientist == "Leo Breiman" and card.logic and card.training and card.forecasting
@@ -210,6 +210,24 @@ def test_it_is_registered_with_the_barrier_and_waits_for_its_pre_validation(tmp_
     )
     assert NAME in engine.waiting()
     engine.store.close()
+
+
+def test_each_barrier_of_the_horizon_ladder_has_a_breiman_of_its_own(tmp_path: Path) -> None:
+    """#263. On the barrier at 15, 30 and 60 minutes, Breiman is ``breiman-<H>m``, that kind's,
+    with the barrier's features and own features; its card says its minutes; each waits for
+    its own pre-validation. The four-minute one is as it was."""
+    ladder = [a for a in KIND_ALGORITHMS if a.name.startswith(f"{NAME}-")]
+    assert [(a.name, a.kind) for a in ladder] == [(f"{NAME}-{k.name[8:]}", k.name) for k in BARRIER_LADDER]
+    for a, kind in zip(ladder, BARRIER_LADDER, strict=True):
+        minutes = round(kind.horizon.total_seconds() / 60)
+        assert isinstance(a, Breiman) and kind_named(a.kind) is kind
+        assert a.features == BREIMAN.features and a.card.unique_features == BREIMAN.card.unique_features
+        assert (a.card.scientist, a.card.character) == ("Leo Breiman", f"트리 앙상블 (장벽 {minutes}분)")
+        assert f"봉 마감 뒤 {minutes}분 동안" in a.card.logic and f"σ̂₁ × √{minutes}" in a.card.logic
+        assert a.card.training.startswith(f"최근 20거래일의 장벽 {minutes}분 정답")
+        assert a.default_model().version == f"{a.name}-default"
+        assert a.name not in REGISTERED_BEFORE and not admits(tmp_path)(a)
+    assert Breiman(BARRIER).card == BREIMAN.card and "봉 마감 뒤 4분 동안" in BREIMAN.card.logic
 
 
 # Training.
@@ -272,6 +290,31 @@ def test_a_bar_day_trains_on_the_bar_rule_its_same_minutes_left_out(tmp_path: Pa
     model = BREIMAN.fit(samples)
     assert model.training is not None and model.training.samples == BAR_CLOSES - 4
     assert model.training.days == {"recorded": 0, "bars": 1}
+
+
+def test_a_breiman_of_the_ladder_trains_on_its_own_kind_s_bar_rule(tmp_path: Path) -> None:
+    """#263. Input: the jolted Monday above (w = k at every horizon: the closes never move).
+    Output: the 15-minute barrier has a sample for each bar close to 15:05, the last whose
+    window ends by the closing auction; the 15 windows whose minutes hold 09:31 reach both
+    barriers in it (``same minute``); ``breiman-15m`` trains on the others, its version its
+    own."""
+    friday = DAY - timedelta(days=3)
+    calendar = MarketCalendar({friday: True, DAY: True})
+    store_bars(tmp_path, friday, jolted(friday))
+    store_bars(tmp_path, DAY, jolted(DAY))
+    fifteen = BARRIER_LADDER[0]
+
+    day = training_day(tmp_path, DAY, calendar, (SYMBOL,), BREIMAN.features, FEE, Leaders(), kinds=(fifteen,))
+
+    assert day is not None
+    samples = [s for s in day.of_kind(fifteen, BREIMAN.features) if s.answer is not None]
+    assert max(s.bar_close for s in samples) == at("15:05:00")
+    unordered = {s.bar_close for s in samples if s.label is None}
+    assert unordered == {at("09:17:00") + timedelta(minutes=m) for m in range(15)}
+    assert {s.answer.unscorable for s in samples if s.label is None and s.answer is not None} == {SAME_MINUTE}
+    model = Breiman(fifteen).fit(samples)
+    assert model.version.startswith(f"{NAME}-15m-2026")
+    assert model.training is not None and model.training.samples == len(samples) - 15
 
 
 async def test_a_recorded_day_trains_on_the_answers_the_engine_scores_without_its_vi(tmp_path: Path) -> None:

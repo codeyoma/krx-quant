@@ -43,6 +43,7 @@ from krx_quant.algorithms.neyman import Neyman
 from krx_quant.algorithms.poisson import Poisson
 from krx_quant.algorithms.shannon import Shannon
 from krx_quant.algorithms.turing import Turing
+from krx_quant.barriers import BARRIER_LADDER
 from krx_quant.cards import Card, Meaning
 from krx_quant.features import FEATURES
 from krx_quant.kind_registry import KINDS
@@ -119,11 +120,12 @@ ALGORITHMS: tuple[Algorithm, ...] = register(
 )
 
 # The algorithms of the kinds besides the direction (#179), in the kinds' order, all after
-# the direction's: the range's Mandelbrot (#181), then the barrier's Breiman (#184), both
-# registered after pre-validation existed (each runs once it has passed). The last is skipped
-# first when the CPU budget runs short.
+# the direction's: the range's Mandelbrot (#181), the barrier's Breiman (#184), then a Breiman
+# for each barrier of the horizon ladder (#263, breiman-15m, -30m, -60m), all registered after
+# pre-validation existed (each runs once it has passed). The last is skipped first when the
+# CPU budget runs short.
 KIND_ALGORITHMS: tuple[KindAlgorithm, ...] = register_kind_algorithms(
-    [Mandelbrot(), Breiman()], taken={a.name for a in ALGORITHMS}
+    [Mandelbrot(), Breiman(), *(Breiman(k) for k in BARRIER_LADDER)], taken={a.name for a in ALGORITHMS}
 )
 
 __all__ = [
