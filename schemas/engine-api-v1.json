@@ -497,7 +497,7 @@
       "type": "object",
       "required": [
         "name", "kind", "card", "features", "feature_meanings", "training_days", "model", "param_meanings",
-        "status", "validation", "stage"
+        "status", "validation", "stage", "simulation"
       ],
       "properties": {
         "name": {"type": "string"},
@@ -543,7 +543,8 @@
         },
         "status": {"$ref": "#/$defs/standing"},
         "validation": {"$ref": "#/$defs/night_validation"},
-        "stage": {"$ref": "#/$defs/stage"}
+        "stage": {"$ref": "#/$defs/stage"},
+        "simulation": {"$ref": "#/$defs/simulation"}
       }
     },
     "model_training": {
@@ -635,7 +636,7 @@
           "type": "object",
           "required": [
             "status", "began", "counted_from", "days", "review_days", "next_review", "next_review_on",
-            "lift_days", "level", "weakest", "enough"
+            "lift_days", "level", "weakest", "enough", "simulated"
           ],
           "additionalProperties": false,
           "properties": {
@@ -672,7 +673,8 @@
                 }
               ]
             },
-            "enough": {"type": "boolean", "description": "enough scored predictions and pairs over lift_days (min_sample) for the review to decide"}
+            "enough": {"type": "boolean", "description": "enough scored predictions and pairs over lift_days (min_sample) for the review to decide"},
+            "simulated": {"type": "integer", "minimum": 0, "description": "Of days, those simulated (#298): a simulated probation's first days, counted ahead of the live days after them. 0 on the bench and without a simulation."}
           }
         }
       ]
@@ -689,14 +691,73 @@
     },
     "status_change": {
       "type": "object",
-      "required": ["at", "from", "to", "reason"],
+      "required": ["at", "from", "to", "reason", "simulated"],
       "additionalProperties": false,
       "properties": {
         "at": {"$ref": "#/$defs/time"},
         "from": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/lifecycle_status"}]},
         "to": {"$ref": "#/$defs/lifecycle_status"},
-        "reason": {"type": "string"}
+        "reason": {"type": "string"},
+        "simulated": {"type": "boolean", "description": "Its review counted simulated days (#298): a simulated probation's review at once (its reason starts with \"simulated probation\"), or a later review counting them (its reason ends with \"of the days simulated\"). False otherwise, and for every change made before #298."}
       }
+    },
+    "simulation": {
+      "description": "An algorithm's latest simulated probation (#298): the latest trading days replayed as if it had been on probation, kept apart from the live predictions (the leaderboard and the statistics never count them), and the review it made at once. null when none of its probations was simulated.",
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "required": ["made_at", "probation_began", "cadence", "days", "first_day", "last_day", "training", "review", "why"],
+          "additionalProperties": false,
+          "properties": {
+            "made_at": {"$ref": "#/$defs/time"},
+            "probation_began": {"description": "When the probation it was made for began: its status change's at.", "$ref": "#/$defs/time"},
+            "cadence": {"description": "daily: refitted before each day on the days before it; bar_close: trained once before the days. null when it could not be simulated.", "oneOf": [{"type": "null"}, {"enum": ["daily", "bar_close"]}]},
+            "days": {"type": "integer", "minimum": 0, "description": "the days replayed; 0 when it could not be simulated"},
+            "first_day": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/day"}]},
+            "last_day": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/day"}]},
+            "training": {"description": "How it was trained: cadence, then a daily kind's model of each day (models, by day) or a bar-close kind's one model (model, target_version, first_day, last_day, samples, days by where their labels came from: recorded, bars). null when it could not be simulated.", "type": ["object", "null"]},
+            "review": {
+              "description": "The review it made at once; null when it could not be simulated.",
+              "oneOf": [
+                {"type": "null"},
+                {
+                  "type": "object",
+                  "required": ["days", "review_day", "scored", "enough", "weakest", "status", "reason"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "days": {"type": "integer", "minimum": 0},
+                    "review_day": {"type": ["integer", "null"], "minimum": 1, "description": "the largest review day its days reach; null below the first"},
+                    "scored": {"type": "integer", "minimum": 0},
+                    "enough": {"type": "boolean"},
+                    "weakest": {
+                      "description": "its weakest lift by trading day over the days, at the review's level",
+                      "oneOf": [
+                        {"type": "null"},
+                        {
+                          "type": "object",
+                          "required": ["baseline", "n", "value", "low", "high"],
+                          "additionalProperties": false,
+                          "properties": {
+                            "baseline": {"type": "string"},
+                            "n": {"type": "integer", "minimum": 2},
+                            "value": {"type": "number"},
+                            "low": {"type": ["number", "null"]},
+                            "high": {"type": ["number", "null"]}
+                          }
+                        }
+                      ]
+                    },
+                    "status": {"$ref": "#/$defs/lifecycle_status"},
+                    "reason": {"type": ["string", "null"], "description": "its status change's reason; null when it made none"}
+                  }
+                }
+              ]
+            },
+            "why": {"type": ["string", "null"], "description": "why it could not be simulated; null when it was"}
+          }
+        }
+      ]
     },
     "algorithms": {
       "description": "GET /v1/algorithms",

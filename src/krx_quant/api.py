@@ -106,7 +106,7 @@ from krx_quant.macro import LatestMacro, latest_macro, reading_before
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.model_shelf import Shelf
 from krx_quant.names import logo_url
-from krx_quant.predictions import Excluded, iso
+from krx_quant.predictions import Excluded, SimulationRecord, iso
 from krx_quant.pricing import flat_ticks, tick_size
 from krx_quant.reference import Bar
 from krx_quant.skill import Skill, calls_by_day, day_kappa, skill
@@ -497,6 +497,7 @@ def _limit_query(request: web.Request, default: int, most: int) -> int:
 async def _algorithms(request: web.Request) -> web.Response:
     engine = request.app[ENGINE_KEY]
     stages = await engine.stages()
+    simulations = engine.store.simulations()
     running: list[Algorithm | KindAlgorithm | DailyAlgorithm] = [
         *engine.algorithms,
         *engine.kind_algorithms,
@@ -504,7 +505,7 @@ async def _algorithms(request: web.Request) -> web.Response:
     ]
     return _json(
         {
-            "algorithms": [_algorithm_json(engine, a, stages) for a in running],
+            "algorithms": [_algorithm_json(engine, a, stages, simulations) for a in running],
             "baselines": [{"name": b.name, "card": b.card.as_dict()} for b in engine.baselines],
             "consensus": [
                 {"name": name, "card": card.as_dict()}
@@ -532,11 +533,15 @@ async def _algorithm(request: web.Request) -> web.Response:
         for e in installed
     ]
     stages = await engine.stages()
-    return _json({**_algorithm_json(engine, algorithm, stages), "model_history": history})
+    simulations = engine.store.simulations()
+    return _json({**_algorithm_json(engine, algorithm, stages, simulations), "model_history": history})
 
 
 def _algorithm_json(
-    engine: PredictionEngine, a: Algorithm | KindAlgorithm | DailyAlgorithm, stages: Mapping[str, Stage]
+    engine: PredictionEngine,
+    a: Algorithm | KindAlgorithm | DailyAlgorithm,
+    stages: Mapping[str, Stage],
+    simulations: Mapping[str, SimulationRecord],
 ) -> dict[str, Any]:
     return {
         "name": a.name,
@@ -554,6 +559,26 @@ def _algorithm_json(
         "status": _status_json(engine, a.name),
         "validation": _validation_json(engine, a.name),
         "stage": _stage_json(stages.get(a.name)),
+        "simulation": _simulation_json(simulations.get(a.name)),
+    }
+
+
+def _simulation_json(record: SimulationRecord | None) -> dict[str, Any] | None:
+    """An algorithm's latest simulated probation (#298), as stored: its days, how it was trained,
+    and the review it made at once; null without one."""
+    if record is None:
+        return None
+    detail = record.detail
+    return {
+        "made_at": iso(record.made_at),
+        "probation_began": iso(record.stint),
+        "cadence": record.cadence,
+        "days": len(record.days),
+        "first_day": record.days[0].isoformat() if record.days else None,
+        "last_day": record.days[-1].isoformat() if record.days else None,
+        "training": detail.get("training"),
+        "review": detail.get("review"),
+        "why": detail.get("why"),
     }
 
 
@@ -603,6 +628,8 @@ def _stage_json(stage: Stage | None) -> dict[str, Any] | None:
         "level": stage.level,
         "weakest": weakest,
         "enough": stage.enough,
+        # Of ``days``, those simulated (#298): the probation's first, judged at once.
+        "simulated": stage.simulated,
     }
 
 
@@ -719,7 +746,14 @@ def _status_json(engine: PredictionEngine, name: str) -> dict[str, Any]:
         "status": history[-1]["status"] if history else None,
         "since": history[-1]["at"] if history else None,
         "history": [
-            {"at": h["at"], "from": h["previous"], "to": h["status"], "reason": h["reason"]} for h in history
+            {
+                "at": h["at"],
+                "from": h["previous"],
+                "to": h["status"],
+                "reason": h["reason"],
+                "simulated": h["simulated"],  # its review counted simulated days (#298)
+            }
+            for h in history
         ],
     }
 

@@ -108,6 +108,7 @@ async def test_a_status_change_from_another_process_is_streamed(tmp_path: Path) 
         "from": "active",
         "to": "retired",
         "reason": "retired by command",
+        "simulated": False,
     }
 
 
