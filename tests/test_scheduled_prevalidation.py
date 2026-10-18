@@ -112,8 +112,9 @@ def tonight(n: Night) -> str | None:
 
 def test_the_order_is_the_five_then_the_registry_s() -> None:
     registry = [a.name for a in ALGORITHMS] + [a.name for a in KIND_ALGORITHMS]
-    assert prevalidation_order(registry) == ORDER
-    assert [j.name for j in PREVALIDATIONS] == [f"prevalidate-{name}" for name in ORDER]
+    # The five, then the registry's others not run before pre-validation: Neyman (#266).
+    assert prevalidation_order(registry) == (*ORDER, "neyman")
+    assert [j.name for j in PREVALIDATIONS] == [f"prevalidate-{name}" for name in (*ORDER, "neyman")]
     # A new algorithm gets its job from the registries; one registered before needs none.
     names = ["newton", "zeta", "kalman", "turing", "mandelbrot", "alpha"]
     assert prevalidation_order(names) == ("mandelbrot", "kalman", "zeta", "alpha")
