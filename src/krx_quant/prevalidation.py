@@ -41,6 +41,13 @@ its third's with the other algorithms of its kind only, and its report holds the
 the kind's answer version, which the engine's ``admits`` checks. Its kind's baselines that
 predict from a table (#180, the range's climate) are refitted before each day on the kind's
 answers of the days before it, as the night before would.
+
+A daily kind's algorithm (#264, ``daily_training``) is judged on the data its features read as
+well as on its code: its report holds its inputs' versions (``inputs``,
+``daily_features.DailyFeature.version``), and ``admits`` takes it only on the versions its
+features have now. A feature's version is raised when what it reads changes (the flows' days
+before NXT opened from KRX, #297), so the algorithm waits for a new pre-validation on the new
+data, held to the stricter level of a rerun on the same days (#262).
 """
 
 from __future__ import annotations
@@ -73,6 +80,7 @@ from krx_quant.baselines import baselines_for
 from krx_quant.climate import CLIMATE_DAYS, fit_climate
 from krx_quant.config import Settings
 from krx_quant.daily import DailyAlgorithm
+from krx_quant.daily_features import input_versions
 from krx_quant.features import Leaders
 from krx_quant.feeds.base import KST
 from krx_quant.kind_registry import KINDS, daily_kind_named, kind_named
@@ -285,12 +293,31 @@ def _stale(
     target_version: int,
     kinds: Sequence[Kind],
 ) -> str | None:
-    """How ``report`` is not of the code and target the algorithm runs now; None if it is."""
+    """How ``report`` is not of the code, target and inputs the algorithm runs now; None if
+    it is."""
     if report.get("code") != code_digest(algorithm):
         return "with other code"
     if report.get("target_version", 1) != _target(algorithm, target_version, kinds):
         return "on another target"
+    if _raised(report.get("inputs")) != _raised(inputs_of(algorithm)):
+        return "on other inputs"
     return None
+
+
+def inputs_of(algorithm: Algorithm | KindAlgorithm | DailyAlgorithm) -> dict[str, int]:
+    """The versions of a daily kind's algorithm's inputs (#264, ``daily_features``), feature
+    by feature; none for the other kinds' (their features have no version)."""
+    if daily_kind_named(str(getattr(algorithm, "kind", DIRECTION))) is None:
+        return {}
+    return input_versions(algorithm.features)
+
+
+def _raised(inputs: Any) -> dict[str, int]:
+    """The inputs whose version is not 1: a report without ``inputs`` (before #297) was on
+    version 1 of each."""
+    if not isinstance(inputs, Mapping):
+        return {}
+    return {str(name): int(v) for name, v in inputs.items() if isinstance(v, int) and v != 1}
 
 
 def _target(
@@ -331,6 +358,8 @@ class Prevalidation:
     earlier_on_these_days: int = 0  # of them, those that replayed any of these days
     # A daily kind's walk-forward (#264, ``daily_training``): its folds, by symbol and by year.
     walk_forward: dict[str, Any] | None = None
+    # A daily kind's algorithm's inputs' versions (``inputs_of``, #297); None for the others.
+    inputs: dict[str, int] | None = None
 
     @property
     def passed(self) -> bool:
@@ -359,6 +388,8 @@ class Prevalidation:
             out["kind"] = self.kind
         if self.walk_forward is not None:
             out["walk_forward"] = self.walk_forward
+        if self.inputs is not None:
+            out["inputs"] = self.inputs
         return out
 
 

@@ -15,6 +15,8 @@ from pathlib import Path
 from typing import Any
 
 import aiohttp
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
@@ -31,6 +33,8 @@ from krx_quant.supply import (
     INVESTORS,
     KIS,
     LENDING,
+    NET_MARKET,
+    NXT_OPENED,
     SHORT_SALE,
     TOSS,
     SupplyKeeper,
@@ -78,6 +82,15 @@ def kis_value(name: str, day: date) -> int:
     }[name]
 
 
+def krx_value(name: str, day: date) -> int:
+    """KIS's KRX (``J``) net buys of a day: KRX alone, another number than the integrated one."""
+    return {
+        "individual_net": -(12_000 + n(day)),
+        "institution_net": 13_000 + n(day),
+        "foreign_net": -(14_000 + n(day)),
+    }[name]
+
+
 def toss_value(name: str, day: date) -> int | float:
     return {
         "short_volume": 7_000 + n(day),
@@ -99,7 +112,8 @@ def ok(**body: Any) -> dict[str, Any]:
 class KisSupply:
     """KIS's four daily supply queries over ``days`` (oldest first), as the probe saw them:
     the newest rows up to the day asked, newest first, 100 (short sale, lending) or 30
-    (investors, credit) a call, padded with a blank row."""
+    (investors, credit) a call, padded with a blank row. The investor query answers both
+    markets: integrated (``UN``, ``kis_value``) and KRX (``J``, ``krx_value``)."""
 
     days: list[date]
     credit_days: list[date] | None = None  # the settlement days the credit has (default: days)
@@ -119,14 +133,16 @@ class KisSupply:
         return ok(output1={"stck_prpr": "1"}, output2=[*rows, {"stck_bsop_date": "", "ssts_cntg_qty": ""}])
 
     def investors(self, params: dict[str, str]) -> dict[str, Any]:
-        assert params["FID_COND_MRKT_DIV_CODE"] == "UN"
+        market = params["FID_COND_MRKT_DIV_CODE"]
+        assert market in ("UN", "J")
+        value = kis_value if market == "UN" else krx_value
         last = params["FID_INPUT_DATE_1"]
         rows = [
             {
                 "stck_bsop_date": ymd(d),
-                "prsn_ntby_qty": str(kis_value("individual_net", d)),
-                "orgn_ntby_qty": str(kis_value("institution_net", d)),
-                "frgn_ntby_qty": str(kis_value("foreign_net", d)),
+                "prsn_ntby_qty": str(value("individual_net", d)),
+                "orgn_ntby_qty": str(value("institution_net", d)),
+                "frgn_ntby_qty": str(value("foreign_net", d)),
                 "frgn_reg_ntby_qty": str(toss_value("foreign_registered", d)),
             }
             for d in reversed(self.days)
@@ -231,6 +247,11 @@ def toss_calls(toss: FakeToss, name: str) -> list[dict[str, str]]:
     return [query for _, path, query, _ in toss.requests if path.endswith(f"/{name}")]
 
 
+def investor_calls(kis: FakeKis, market: str) -> list[dict[str, str]]:
+    """The investor query's calls of one market (``UN`` or ``J``)."""
+    return [q for q in requests_for(kis, INVESTORS.tr) if q["FID_COND_MRKT_DIV_CODE"] == market]
+
+
 def pages(days: list[date], per_call: int, floor: date) -> int:
     """The calls paging back ``days`` (oldest first) ``per_call`` at a time, from the newest,
     until a page reaches ``floor``."""
@@ -269,6 +290,17 @@ async def test_the_first_run_takes_the_history_of_each_kis_query_paging_back(
             for f in FIELDS
             if f not in ("foreign_holding", "foreign_ratio")
         },
+        NET_MARKET: "UN",
+    }
+    before = date(2025, 3, 3)  # the last day before NXT opened: its net buys are KRX's
+    assert next(r for r in stored if r["date"] == before) == {
+        "date": before,
+        **{
+            f: (krx_value if f.endswith("_net") else kis_value)(f, before)
+            for f in FIELDS
+            if f not in ("foreign_holding", "foreign_ratio")
+        },
+        NET_MARKET: "J",
     }
     # Each query pages back from the last finished day, from the day before its oldest row,
     # until a page reaches the floor.
@@ -276,9 +308,14 @@ async def test_the_first_run_takes_the_history_of_each_kis_query_paging_back(
     assert (short[0]["FID_INPUT_DATE_1"], short[0]["FID_INPUT_DATE_2"]) == ("20251013", "20261013")
     assert short[1]["FID_INPUT_DATE_2"] == ymd(days[-100] - timedelta(days=1))
     assert len(short) == pages(days, 100, floor)
-    investors = requests_for(kis, INVESTORS.tr)
-    assert [q["FID_INPUT_DATE_1"] for q in investors[:2]] == ["20261013", ymd(days[-30] - timedelta(days=1))]
-    assert len(investors) == pages(days, 30, floor)
+    # The net buys: integrated back to NXT's opening, KRX from the day before it to the floor.
+    integrated = investor_calls(kis, "UN")
+    assert [q["FID_INPUT_DATE_1"] for q in integrated[:2]] == ["20261013", ymd(days[-30] - timedelta(days=1))]
+    assert len(integrated) == pages(days, 30, NXT_OPENED)
+    krx = investor_calls(kis, "J")
+    assert krx[0]["FID_INPUT_DATE_1"] == "20250303"
+    assert len(krx) == pages([d for d in days if d < NXT_OPENED], 30, floor)
+    assert len(requests_for(kis, INVESTORS.tr)) == len(integrated) + len(krx)
     assert len(requests_for(kis, LENDING.tr)) == pages(days, 100, floor)
     assert len(requests_for(kis, CREDIT.tr)) == pages(days, 30, floor)
     assert not read_supply(tmp_path / "state", SYMBOL, TOSS)
@@ -551,6 +588,126 @@ async def test_the_keeper_stores_kis_s_no_figure_zeros_as_none(kis: FakeKis, tmp
     assert by_day[date(2025, 3, 4)]["foreign_net"] == kis_value("foreign_net", date(2025, 3, 4))
     assert by_day[date(2025, 3, 5)]["institution_net"] == 0, "a real 0 after NXT opened"
     assert by_day[date(2025, 2, 24)]["short_volume"] == kis_value("short_volume", date(2025, 2, 24))
+
+
+# The net buys' date split (#264, #297): KRX (J) before NXT opened, integrated (UN) from it.
+SPRING = datetime(2025, 4, 30, 21, 0, tzinfo=KST)  # a Wednesday, the day over
+NEXT_EVENING = datetime(2025, 5, 2, 21, 0, tzinfo=KST)  # Friday (the 1st is a weekday here too)
+
+
+def nets(row: dict[str, Any]) -> tuple[Any, ...]:
+    return (row["individual_net"], row["institution_net"], row["foreign_net"], row[NET_MARKET])
+
+
+async def test_the_net_buys_are_krx_s_before_nxt_opened_and_integrated_after_krx_asked_once(
+    kis: FakeKis, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(supply, "HISTORY_YEARS", 1)
+    supplied = KisSupply(trading_days(date(2024, 3, 4), date(2025, 4, 30)))
+    supplied.serve(kis)
+
+    await keep(kis, tmp_path, SPRING)
+
+    by_day = {r["date"]: r for r in read_supply(tmp_path / "state", SYMBOL, KIS)}
+    assert min(by_day) == date(2024, 4, 30), "back to the floor"
+    for day, row in by_day.items():
+        value, market = (krx_value, "J") if day < NXT_OPENED else (kis_value, "UN")
+        assert nets(row) == (*(value(f, day) for f in supply.NET_BUYS), market), day
+        assert row["short_volume"] == kis_value("short_volume", day), "the other queries' days stay"
+    # UN is never asked for a day before NXT opened, nor J for one after.
+    assert min(q["FID_INPUT_DATE_1"] for q in investor_calls(kis, "UN")) >= "20250304"
+    assert max(q["FID_INPUT_DATE_1"] for q in investor_calls(kis, "J")) == "20250303"
+    krx_calls = len(investor_calls(kis, "J"))
+    # KRX's history is closed: the next run tops up the integrated days only.
+    supplied.days = trading_days(date(2024, 3, 4), date(2025, 5, 2))
+    first = len(investor_calls(kis, "UN"))
+    await keep(kis, tmp_path, NEXT_EVENING)
+    assert len(investor_calls(kis, "J")) == krx_calls
+    assert len(investor_calls(kis, "UN")) == first + 1, "a page"
+    assert nets(by_day[date(2025, 3, 3)]) == nets(
+        {r["date"]: r for r in read_supply(tmp_path / "state", SYMBOL, KIS)}[date(2025, 3, 3)]
+    )
+
+
+async def test_krx_zeros_before_nxt_opened_stay_no_figure_and_are_not_asked_again(
+    kis: FakeKis, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If KRX also has no figure before NXT opened, nothing changes: the days stay none (Toss's
+    values where Toss has them), and KRX is not asked again."""
+    monkeypatch.setattr(supply, "HISTORY_YEARS", 1)
+    supplied = KisSupply(trading_days(date(2024, 3, 4), date(2025, 4, 30)))
+    supplied.serve(kis)
+
+    def investors(params: dict[str, str]) -> dict[str, Any]:
+        answer = supplied.investors(params)
+        if params["FID_COND_MRKT_DIV_CODE"] == "J":
+            for row in answer["output2"]:
+                row |= {"prsn_ntby_qty": "0", "orgn_ntby_qty": "0", "frgn_ntby_qty": "0"}
+        return answer
+
+    kis.rest_responses[INVESTORS.tr] = investors
+    await keep(kis, tmp_path, SPRING)
+    krx_calls = len(investor_calls(kis, "J"))
+    await keep(kis, tmp_path, NEXT_EVENING)
+
+    rows = read_supply(tmp_path / "state", SYMBOL, KIS)
+    before = [r for r in rows if r["date"] < NXT_OPENED]
+    assert before and all(nets(r) == (None, None, None, "J") for r in before)
+    assert all(r["short_volume"] is not None for r in before)
+    assert all(
+        nets(r)[:3] == tuple(kis_value(f, r["date"]) for f in supply.NET_BUYS) for r in rows[len(before) :]
+    )
+    assert krx_calls > 1 and len(investor_calls(kis, "J")) == krx_calls, "asked once"
+
+
+async def test_a_file_written_before_takes_krx_s_history_at_the_next_run(
+    kis: FakeKis, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The server's files from before: every day's net buys from UN, those before NXT opened its
+    0 (none). The next run asks KRX for the days before NXT, back to the floor, and tops up the
+    integrated days by a page; a KRX query KIS refuses is asked again the run after."""
+    monkeypatch.setattr(supply, "HISTORY_YEARS", 1)
+    state = tmp_path / "state"
+    days = trading_days(date(2024, 3, 4), date(2025, 4, 30))
+    old = pa.schema([("date", pa.date32())] + [(f, pa.int64()) for f in supply.KIS_SCHEMA.names[1:-1]])
+    path = supply.supply_path(state, SYMBOL, KIS)
+    path.parent.mkdir(parents=True)
+    rows = [
+        {
+            "date": d,
+            "short_volume": kis_value("short_volume", d),
+            **{f: 0 if d < NXT_OPENED else kis_value(f, d) for f in supply.NET_BUYS},
+        }
+        for d in days
+        if d >= date(2024, 4, 30)
+    ]
+    pq.write_table(pa.Table.from_pylist(rows, schema=old), path)
+    written = read_supply(state, SYMBOL, KIS)
+    assert {r[NET_MARKET] for r in written} == {"UN"}, "from UN, the one investor query then"
+    assert all(nets(r)[:3] == (None, None, None) for r in written if r["date"] < NXT_OPENED)
+
+    supplied = KisSupply(days)
+    supplied.serve(kis)
+    kis.rest_responses[INVESTORS.tr] = lambda params: (
+        {"rt_cd": "1", "msg_cd": "OPSQ0002", "msg1": "없는 서비스"}
+        if params["FID_COND_MRKT_DIV_CODE"] == "J"
+        else supplied.investors(params)
+    )
+    await keep(kis, tmp_path, SPRING)
+    assert len(investor_calls(kis, "UN")) == 1, "a page: the newest day held is the 30th"
+    assert all(
+        nets(r)[:3] == (None, None, None) for r in read_supply(state, SYMBOL, KIS) if r["date"] < NXT_OPENED
+    )
+
+    supplied.serve(kis)
+    await keep(kis, tmp_path, SPRING)
+    by_day = {r["date"]: r for r in read_supply(state, SYMBOL, KIS)}
+    assert nets(by_day[date(2024, 4, 30)]) == (
+        *(krx_value(f, date(2024, 4, 30)) for f in supply.NET_BUYS),
+        "J",
+    )
+    assert nets(by_day[NXT_OPENED]) == (*(kis_value(f, NXT_OPENED) for f in supply.NET_BUYS), "UN")
+    assert {r[NET_MARKET] for r in by_day.values()} == {"J", "UN"}
 
 
 async def test_the_api_gives_the_days_asked_oldest_first_and_refuses_bad_ranges(tmp_path: Path) -> None:

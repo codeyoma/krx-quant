@@ -16,7 +16,7 @@ from krx_quant.cli import main
 from krx_quant.clock import FakeClock
 from krx_quant.config import Settings
 from krx_quant.daily import StoredDays
-from krx_quant.daily_features import DAILY_FEATURES, DailyFiles, LiveFeatures, samples
+from krx_quant.daily_features import DAILY_FEATURES, DailyFiles, LiveFeatures, input_versions, samples
 from krx_quant.daily_training import WALK_MIN_DAYS, DailyTrainer, prevalidate_daily
 from krx_quant.engine import PredictionEngine
 from krx_quant.feeds.base import KST
@@ -26,7 +26,7 @@ from krx_quant.market_calendar import MarketCalendar
 from krx_quant.nightly import Night
 from krx_quant.open_to_close import OPEN_TO_CLOSE
 from krx_quant.predictions import PredictionStore
-from krx_quant.prevalidation import admits, history_path, last_report, report_path
+from krx_quant.prevalidation import admits, code_digest, history_path, last_report, report_path
 from krx_quant.replay import replay_into
 from krx_quant.scheduled import (
     FAILED,
@@ -84,6 +84,12 @@ def test_a_model_that_reads_the_night_passes_the_walk_forward_and_the_gate_lets_
     assert set(report["walk_forward"]["by_symbol"]) == set(SYMBOLS)
     assert set(report["stats"]["lift"]["vs"]) == {"otc-flat", "otc-climate", "otc-persist"}
     assert set(report["stats"]["extra"]) == {"n", "pnl", "long", "short", "pnl_inverse", "short_inverse"}
+    # The inputs it was judged on (#297): each feature's version, and how many samples had it.
+    assert report["inputs"] == input_versions(FEATURES)
+    assert report["inputs"]["foreign_net"] == report["inputs"]["institution_net"] == 2
+    walk = report["walk_forward"]
+    assert set(walk["present"]) == set(FEATURES) and walk["samples"] >= max(walk["present"].values())
+    assert walk["present"]["foreign_net"] > 0 and walk["present"]["weekday"] == walk["samples"]
     assert admits(s.state_dir)(cox), "passed with the code it runs, on its kind's answer version"
     found = last_report(s.state_dir, cox)
     assert found is not None and found.judged and found.current
@@ -94,6 +100,43 @@ def test_a_model_that_reads_the_night_passes_the_walk_forward_and_the_gate_lets_
         "run 2 on these days, by trading day at 97.50%" in {c.name: c for c in again.checks}["stats"].detail
     )
     assert len(history_path(s.state_dir, "cox").read_text().splitlines()) == 2
+
+
+def test_a_report_on_older_inputs_waits_for_a_new_run_and_the_job_runs_it(tmp_path: Path) -> None:
+    """A report from before the flows' version 2 (#297: KRX's net buys before NXT opened) has no
+    ``inputs``: it was on version 1 of each. Cox reads the flows, so the gate waits for a new
+    pre-validation, and the scheduled job runs it on the next night; a report on the versions
+    Cox's features have now lets it in."""
+    state = tmp_path / "state"
+    cox = DAILY_ALGORITHMS[0]
+    report = {
+        "algorithm": "cox",
+        "code": code_digest(cox),
+        "prevalidated_at": NOW.isoformat(),
+        "passed": True,
+        "days": [LAST.isoformat()] * 600,
+        "target_version": OPEN_TO_CLOSE.answer_version,
+        "kind": "open_to_close",
+    }
+    path = report_path(state, "cox")
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(report))
+
+    assert not admits(state)(cox), "judged on the flows' version 1"
+    found = last_report(state, cox)
+    assert found is not None and found.passed and not found.current and not found.judged
+    [job] = [j for j in JOBS if j.name == "prevalidate-cox"]
+    ran = JobRecord(LAST, OK, NOW - timedelta(minutes=30), "abc", 0, 600.0)
+    assert job.due(job_night(LAST + timedelta(days=1), ("cox",), found, ran)), "on the same commit too"
+
+    path.write_text(json.dumps({**report, "inputs": input_versions(FEATURES)}))
+    assert admits(state)(cox)
+    found = last_report(state, cox)
+    assert found is not None and found.current and found.judged
+    assert not job.due(job_night(LAST + timedelta(days=1), ("cox",), found, ran))
+    # A version 1 feature in the report is as good as none listed: only raised ones count.
+    path.write_text(json.dumps({**report, "inputs": {"us_sox": 1, "foreign_net": 2, "institution_net": 2}}))
+    assert admits(state)(cox)
 
 
 def test_a_model_on_noise_is_refused_on_its_lift_by_trading_day(tmp_path: Path) -> None:

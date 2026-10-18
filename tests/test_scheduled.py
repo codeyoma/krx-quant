@@ -35,6 +35,7 @@ from krx_quant.scheduled import (
     FAILED,
     INTERRUPTED,
     JOBS,
+    NET_BUYS_PROBE,
     NIGHT_PROBE,
     OK,
     RUNNING,
@@ -929,6 +930,27 @@ def test_the_structure_check_runs_again_once_and_posts_its_turn_of_the_month_to_
     part = STRUCTURE_SUPPLY.targets[0].part(output)
     assert part is not None and part.startswith("구조 실측") and "1. 일 단위" not in part
     assert part.endswith("외국인 순매수 395일(2025-03-04 – 2026-10-16)")
+
+
+def test_the_net_buys_probe_runs_once_on_the_first_night_before_cox_s_pre_validation() -> None:
+    # #297: whether KIS's KRX query has the net buys before NXT, and what the keeper stored of
+    # them at the deploy's start, on the night Cox's pre-validation runs again on them.
+    assert NET_BUYS_PROBE.name == "probe-net-buys-j-264"
+    assert NET_BUYS_PROBE.command == ("probe-net-buys",)
+    assert NET_BUYS_PROBE.timeout == timedelta(minutes=30)
+    assert [t.issue for t in NET_BUYS_PROBE.targets] == [264]
+    assert NET_BUYS_PROBE.label == ("ready-for-agent",)
+    names = [j.name for j in JOBS]
+    assert names.index(NET_BUYS_PROBE.name) < names.index("prevalidate-cox"), "before the re-run it informs"
+    assert NET_BUYS_PROBE.due(night(FRIDAY))
+    assert NET_BUYS_PROBE.due(night(SATURDAY)), "any night: KIS answers past days"
+    ran = JobRecord(SATURDAY, OK, at(SATURDAY, "22:30"), COMMIT, 0, 40.0)
+    assert not NET_BUYS_PROBE.due(night(MONDAY, ran))
+    assert not NET_BUYS_PROBE.due(night(MONDAY, replace(ran, outcome=FAILED, exit_code=1)))
+    assert NET_BUYS_PROBE.due(night(MONDAY, replace(ran, outcome=INTERRUPTED)))
+    output = "KIS 투자자 순매수 KRX(J)·통합(UN) 확인 (#264) 2026-10-20: 종목 005930\n\n1. 조회\n\n2. 저장된"
+    assert NET_BUYS_PROBE.targets[0].part(output) == output, "the whole output"
+    assert "시세 값이 없다" in NET_BUYS_PROBE.targets[0].note
 
 
 def test_the_entry_delay_runs_the_diagnosis_once_on_a_trading_night_and_posts_section_10() -> None:

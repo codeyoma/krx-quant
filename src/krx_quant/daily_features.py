@@ -13,9 +13,11 @@ a model is trained on the values it is given:
   training, the stored closes (``us_daily.move_before``, the macro read's rule).
 - **Flows** (``foreign_net``, ``institution_net``): the previous trading day's net buys from
   KIS's daily supply (``state/supply``, #226; stored at 20:30 that day), as a share of that
-  day's integrated volume (the KRX one where there is none). Toss's values are not read. KIS
-  has no figure before NXT opened (2025-03-04): its 0 there is none (``supply.no_figure``,
-  #270), so those days' flows are missing, not 0.
+  day's integrated volume (the KRX one where there is none). Toss's values are not read. From
+  NXT's opening (2025-03-04) KIS's figures are integrated; before it, KRX's (``J``, #264),
+  the whole market then. A 0 that is KIS's "no figure" is none (``supply.no_figure``, #270),
+  so such a day's flows are missing, not 0. Their version is 2 (``DailyFeature.version``):
+  in version 1 the days before NXT opened had no figure.
 - **The days before** (``oc_1``, ``cc_1``, ``gap_1``, ``range_1``, ``oc_5``, ``vol_ratio``,
   ``sigma``, ``climate_up``, ``climate_down``): the previous trading day's open→close,
   close→close, overnight gap and range, the last five days' mean open→close, each over the
@@ -115,6 +117,12 @@ class DayContext:
 class DailyFeature:
     meaning: Meaning
     value: Callable[[DayContext], float | None]
+    # Raised when the data the feature reads changes (its source, how far back it has values),
+    # not only its code: a pre-validation's report records its algorithm's inputs' versions
+    # (``input_versions``), and a report on other versions waits for a new run, as one on other
+    # code does (``prevalidation.admits``). 2 for the flows (#264, #297): the days before NXT
+    # opened have KRX's figures.
+    version: int = 1
 
 
 def _over_sigma(x: float | None, ctx: DayContext) -> float | None:
@@ -216,10 +224,12 @@ DAILY_FEATURES: dict[str, DailyFeature] = {
             "전 거래일 20:30에 받는다.",
         ),
         lambda c: c.flows.get("foreign"),
+        version=2,
     ),
     "institution_net": DailyFeature(
         Meaning("전 거래일 기관 순매수량 ÷ 그날 통합 거래량.", "비율", "전 거래일 20:30에 받는다."),
         lambda c: c.flows.get("institution"),
+        version=2,
     ),
     "oc_1": DailyFeature(Meaning("전 거래일 시가 단일가 → 종가 단일가 변화 ÷ 그날의 σ̂.", "σ̂", _KNOWN), _oc_1),
     "cc_1": DailyFeature(Meaning("전 거래일 종가 → 종가 변화 ÷ σ̂.", "σ̂", _KNOWN), _cc_1),
@@ -269,6 +279,11 @@ DAILY_FEATURES: dict[str, DailyFeature] = {
         lambda c: c.night_futures,
     ),
 }
+
+
+def input_versions(names: Sequence[str]) -> dict[str, int]:
+    """The version of each of the features ``names`` (``DailyFeature.version``)."""
+    return {n: DAILY_FEATURES[n].version for n in names}
 
 
 def vector(names: Sequence[str], ctx: DayContext) -> FeatureVector:

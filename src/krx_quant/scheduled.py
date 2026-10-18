@@ -874,6 +874,33 @@ STRUCTURE_SUPPLY = Job(
     ),
 )
 
+# KRX's net buys before NXT opened (#264, #297): the supply keeper asks the days before NXT of
+# KIS's KRX investor query (``J``) once, at the collector's first start after the deploy that
+# brings it (06:00); whether ``J`` has figures that far back only the server shows. Once, on the
+# first night after that deploy (trading or not): ``probe-net-buys`` asks ``J`` and ``UN`` for
+# 30 days to each of six days per symbol (36 calls for three, spaced as the supply probe's, a
+# minute or so) and counts what the keeper stored. It prints counts, days and field looks, no
+# market value, so it can go on the public issue. The half hour is a bound. Before the
+# pre-validations: its count of the stored days before NXT says what Cox's re-run (the flows'
+# version 2, ``daily_features``) was given that night.
+NET_BUYS_PROBE = Job(
+    name="probe-net-buys-j-264",
+    due=_first_night,
+    command=("probe-net-buys",),
+    timeout=timedelta(minutes=30),
+    targets=(
+        Target(
+            DAILY_CHECK_ISSUE,
+            note=(
+                "에이전트가 이 출력으로 KIS `J`가 NXT 개장(2025-03-04) 전의 순매수를 주는지, 수집이 "
+                '그 날들을 저장했는지 확인하고 `docs/kis-feeds.md` "투자자별 순매수"의 ⚠와 Cox의 수급 입력 '
+                "설명에 남긴다. 같은 밤의 `prevalidate-cox`가 이 저장으로 돈다. 출력에는 시세 값이 없다"
+                "(행 수, 날짜, 개수, 필드 모양만)."
+            ),
+        ),
+    ),
+)
+
 # The night futures (#264): the collector records the KOSPI200 night session's trades and book
 # (18:00–06:00) from the deploy that brings it; what only the server shows is whether KIS
 # streams them for this app key, under the contract code asked for, in the layout of KIS's
@@ -1080,6 +1107,7 @@ JOBS: tuple[Job, ...] = (
     NIGHT_PROBE,
     DAILY_CHECK,
     STRUCTURE_SUPPLY,
+    NET_BUYS_PROBE,
     *daily_prevalidation_jobs([a.name for a in DAILY_ALGORITHMS]),
     *prevalidation_jobs([*(a.name for a in ALGORITHMS), *(a.name for a in KIND_ALGORITHMS)]),
 )

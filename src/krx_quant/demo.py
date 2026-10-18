@@ -81,7 +81,7 @@ from krx_quant.predictions import DB_NAME, PredictionStore, iso
 from krx_quant.recorder import ParquetRecorder
 from krx_quant.regime import RegimeRules
 from krx_quant.replay import replay, replay_into
-from krx_quant.supply import KIS, TOSS, write_supply
+from krx_quant.supply import KIS, NET_MARKET, NXT_OPENED, TOSS, write_supply
 from krx_quant.swap import NightStatus, reports_by_algorithm
 from krx_quant.touch import TARGET_VERSION
 
@@ -309,6 +309,7 @@ def write_demo_supply(state_dir: Path) -> None:
                     "foreign_net": foreign,
                     "lending_balance": lending,
                     "credit_balance": credit,
+                    NET_MARKET: "J" if day < NXT_OPENED else "UN",  # as the keeper splits them
                 }
             )
             toss.append(

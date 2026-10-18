@@ -24,10 +24,11 @@ on 2026-09-14):
 4. The turn of the month (the last trading day of a month and the first three of the
    next) against the other days, over the whole day-candle history, and split by the
    foreign investors' net buying the day before (KIS's daily figure only: Toss's values
-   never leave the server). KIS answers 0 for the days before NXT opened (2025-03-04): no
-   figure (``supply.no_figure``, #270), so the split covers the days since, which the line
-   heading each symbol counts and dates. The first run (2026-10-18) counted the zeros among
-   the days (2,452 a symbol, of which 395 were split).
+   never leave the server). KIS's integrated query answers 0 for the days before NXT opened
+   (2025-03-04): no figure (``supply.no_figure``, #270). Those days are asked of KRX (``J``,
+   #297) now; where it has no figure either, the split covers the days with one, which the
+   line heading each symbol counts and dates. The first run (2026-10-18) counted the zeros
+   among the days (2,452 a symbol, of which 395 were split).
 
 It prints ratios, slopes, counts and medians: no price, volume or flow value, so its
 output can go on the public issue. Nothing is judged against a threshold. A section without

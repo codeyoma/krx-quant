@@ -37,7 +37,7 @@ import math
 import time as timer
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -60,6 +60,7 @@ from krx_quant.prevalidation import (
     _record_run,
     code_digest,
     earlier_runs,
+    inputs_of,
     report_path,
     seed_history,
     tried_level,
@@ -169,6 +170,9 @@ class WalkForward:
     models: dict[date, str]  # each fold's first day -> the model it predicted with
     folds: int
     slowest: float  # the slowest day's forecasts of every symbol, seconds
+    samples: int = 0  # the samples walked over (symbol × day)
+    # Of them, those with each feature's value (#297: the flows' days before NXT opened show here).
+    present: dict[str, int] = field(default_factory=dict)
 
 
 def walk_forward(
@@ -224,7 +228,8 @@ def walk_forward(
     first_predicted = predicted[0] if predicted else None
     for name, scored in _baselines(kind, files, symbols, fee_rate, first_predicted, newest).items():
         records[name] = scored
-    return WalkForward(dict(records), predicted, models, folds, slowest)
+    present = {f: sum(1 for s in found if s.features[f] is not None) for f in algorithm.features}
+    return WalkForward(dict(records), predicted, models, folds, slowest, len(found), present)
 
 
 def _scored(
@@ -417,8 +422,11 @@ def prevalidate_daily(
                 "min_train_days": WALK_MIN_TRAIN,
                 "training_days": algorithm.training_days,
                 "years": WALK_YEARS,
+                "samples": run.samples,
+                "present": run.present,
                 **_breakdown(kind, mine),
             },
+            inputs=inputs_of(algorithm),
         )
         result = replace(result, earlier_runs=before, earlier_on_these_days=on_days)
         path = report_path(settings.state_dir, name)
