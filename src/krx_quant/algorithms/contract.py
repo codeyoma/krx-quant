@@ -274,6 +274,15 @@ class KindAlgorithm(Protocol):
     def predict(self, features: FeatureVector, model: Model) -> KindForecast: ...
 
 
+class Named(Protocol):
+    """What loading a model needs of an algorithm, of any kind (a daily one too, #264)."""
+
+    @property
+    def name(self) -> str: ...
+
+    def default_model(self) -> Model: ...
+
+
 def kind_of(algorithm: Algorithm | KindAlgorithm) -> str:
     """The kind an algorithm predicts: its ``kind``, the direction when it does not say."""
     return str(getattr(algorithm, "kind", DIRECTION))
@@ -308,7 +317,7 @@ def save_model(state_dir: Path, name: str, model: Model) -> Path:
     return path
 
 
-def load_models(state_dir: Path, algorithms: Sequence[Algorithm | KindAlgorithm]) -> dict[str, Model]:
+def load_models(state_dir: Path, algorithms: Sequence[Named]) -> dict[str, Model]:
     """Each algorithm's trained model if one is saved, else its defaults."""
     models: dict[str, Model] = {}
     for algorithm in algorithms:

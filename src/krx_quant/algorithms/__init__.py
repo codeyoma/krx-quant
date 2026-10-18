@@ -10,6 +10,9 @@ An algorithm of a kind besides the direction (#179, ``kinds.py``) is registered 
 ``KIND_ALGORITHMS``, after every direction algorithm: the CPU budget skips them first. Its
 name is its own among every algorithm's; the feature checks above look only within its
 kind (a range algorithm may call its own a feature a direction algorithm uses).
+
+An algorithm of a daily kind (#264, ``daily.py``) is registered in ``DAILY_ALGORITHMS``, its
+features of the daily features' registry (``daily_features.DAILY_FEATURES``).
 """
 
 from __future__ import annotations
@@ -33,6 +36,7 @@ from krx_quant.algorithms.contract import (
     predicted,
     save_model,
 )
+from krx_quant.algorithms.cox import Cox
 from krx_quant.algorithms.gauss import Gauss
 from krx_quant.algorithms.granger import Granger
 from krx_quant.algorithms.kalman import Kalman
@@ -45,8 +49,10 @@ from krx_quant.algorithms.shannon import Shannon
 from krx_quant.algorithms.turing import Turing
 from krx_quant.barriers import BARRIER_LADDER
 from krx_quant.cards import Card, Meaning
+from krx_quant.daily import DailyAlgorithm, register_daily_algorithms
+from krx_quant.daily_features import DAILY_FEATURES
 from krx_quant.features import FEATURES
-from krx_quant.kind_registry import KINDS
+from krx_quant.kind_registry import DAILY_KINDS, KINDS
 from krx_quant.kinds import DIRECTION, Kind
 
 
@@ -128,7 +134,21 @@ KIND_ALGORITHMS: tuple[KindAlgorithm, ...] = register_kind_algorithms(
     [Mandelbrot(), Breiman(), *(Breiman(k) for k in BARRIER_LADDER)], taken={a.name for a in ALGORITHMS}
 )
 
+# The algorithms of the daily kinds (#264), predicted once a trading day: open_to_close's Cox.
+# Registered after pre-validation existed: it runs once it has passed (its walk-forward over the
+# KRX days, ``daily_prevalidation``).
+DAILY_ALGORITHMS: tuple[DailyAlgorithm, ...] = register_daily_algorithms(
+    [Cox()],
+    DAILY_KINDS,
+    taken={a.name for a in ALGORITHMS}
+    | {a.name for a in KIND_ALGORITHMS}
+    | {b.name for k in KINDS for b in k.baselines}
+    | {b.name for k in DAILY_KINDS for b in k.daily_baselines},
+    features=DAILY_FEATURES,
+)
+
 __all__ = [
+    "DAILY_ALGORITHMS",
     "ALGORITHMS",
     "KIND_ALGORITHMS",
     "Abstention",
