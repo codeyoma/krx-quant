@@ -330,7 +330,7 @@ def _tom_section(data_dir: Path, state_dir: Path, symbols: Sequence[str]) -> lis
         ]
         if len(candles) < 2:
             continue
-        # The days with a figure: KIS's 0 net buys (every day before NXT opened) are none (#270).
+        # The days with a figure: KIS's 0 that means none (before NXT opened) is none (#270).
         foreign = {
             r["date"]: r["foreign_net"]
             for r in read_supply(state_dir, symbol, KIS)
@@ -342,7 +342,7 @@ def _tom_section(data_dir: Path, state_dir: Path, symbols: Sequence[str]) -> lis
             change = _change(close, before)
             net = foreign.get(before_day)
             groups[(day in turn, None)].append(change)
-            if net is not None:
+            if net is not None and net != 0:  # a real 0 has no sign
                 groups[(day in turn, _sign(net))].append(change)
         figures = f"{len(foreign):,}일({min(foreign)} – {max(foreign)})" if foreign else "없음"
         lines.append(f"{symbol} 일봉 {candles[0][0]} – {candles[-1][0]}, 외국인 순매수 {figures}")

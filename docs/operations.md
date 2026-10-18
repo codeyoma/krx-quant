@@ -461,7 +461,7 @@ docker compose run --rm engine signal-review --days 20
 docker compose run --rm engine structure-check
 ```
 
-- 읽는 것: 1분봉(`data/bars/`, 백필 1년치), 일봉(`data/candles/period=day/`), KIS 일별 수급(`state/supply/`의 KIS 파일, `foreign_net`만. KIS가 0주로 준 날, 곧 NXT 개장 2025-03-04 전은 값이 없다, [kis-feeds.md](kis-feeds.md) "투자자별 순매수"). 토스 값은 읽지 않는다(서버 밖으로 내보내지 않는다, [design.md](design.md) 4.1). 엔진 DB와 녹화 이벤트는 읽지 않는다. 쓰는 것도, 부르는 API도 없다. 엔진이 도는 중에 돌려도 된다.
+- 읽는 것: 1분봉(`data/bars/`, 백필 1년치), 일봉(`data/candles/period=day/`), KIS 일별 수급(`state/supply/`의 KIS 파일, `foreign_net`만. KIS가 값이 없어 0주로 준 날, 곧 NXT 개장 2025-03-04 전은 값이 없다. 개장 뒤의 실제 0은 값이지만 부호가 없어 나누지 않는다, [kis-feeds.md](kis-feeds.md) "투자자별 순매수"). 토스 값은 읽지 않는다(서버 밖으로 내보내지 않는다, [design.md](design.md) 4.1). 엔진 DB와 녹화 이벤트는 읽지 않는다. 쓰는 것도, 부르는 API도 없다. 엔진이 도는 중에 돌려도 된다.
 - 종목은 `KRX_SYMBOLS`, 1분봉 규칙의 보합 폭은 `KRX_FEE_PERCENT`를 따른다.
 - 기간 넷으로 나눈다: 2026-05-27(삼성전자·SK하이닉스 단일종목 ±2배 ETF 16종 상장) 전, 그 뒤, 2026-07-31(금융위 리밸런싱 요청과 기본예탁금 규제) 뒤, 2026-09-14(KRX 애프터마켓) 뒤.
 - 절:

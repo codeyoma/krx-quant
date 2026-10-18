@@ -4,10 +4,11 @@
 The structure check's first run (#270, 2026-10-18) found 2,452 stored days of each symbol's
 foreign net buys, but only 395 of them, the same count for all three symbols, joined to a day
 candle with a figure: about the trading days since NXT opened (2025-03-04). KIS's integrated
-(``UN``) investor query answers 0 shares for each net buy on the days before, when there was no
+(``UN``) investor query answers 0 shares for the net buys on the days before, when there was no
 integrated market. Here the fake KIS answers so, the keepers write the files (``CandleKeeper``,
 ``SupplyKeeper``: the dates as they store them), and the structure check and Cox read them: the
-days join by date, and a 0 net buy is no figure (None), never a day of no net buying.
+days join by date, and KIS's 0 before NXT is no figure (None), never a day of no net buying,
+while a real 0 after NXT (``REAL_ZERO``) stays 0.
 
 Every number is made up.
 """
@@ -42,6 +43,7 @@ SYMBOL = "005930"
 FEE = 0.015 / 100
 NXT_OPEN = date(2025, 3, 4)  # KIS's integrated investor figures begin
 LAST = date(2025, 6, 30)  # a Monday
+REAL_ZERO = date(2025, 4, 15)  # institutions bought and sold as many shares: a real 0
 EVENING = datetime(2025, 6, 30, 21, 0, tzinfo=KST)  # the day over (after 20:30)
 
 
@@ -58,7 +60,8 @@ def net_buys(day: date) -> tuple[int, int, int]:
     foreign one's sign alternates with the day."""
     k = day.toordinal()
     foreign = (1_000 + k % 500) * (1 if k % 2 else -1)
-    return -foreign - 300, 300, foreign
+    institution = 0 if day == REAL_ZERO else 300
+    return -foreign - institution, institution, foreign
 
 
 def investors_api(days: list[date]) -> Callable[[dict[str, str]], dict[str, Any]]:
@@ -122,6 +125,7 @@ async def test_the_supply_days_join_the_candle_days_and_kis_s_zeros_are_no_figur
     assert [(r["individual_net"], r["institution_net"], r["foreign_net"]) for r in after] == [
         net_buys(r["date"]) for r in after
     ]
+    assert next(r for r in after if r["date"] == REAL_ZERO)["institution_net"] == 0, "a real 0 stays"
 
 
 async def test_the_turn_of_the_month_splits_every_day_with_a_foreign_figure(
@@ -170,6 +174,8 @@ async def test_cox_s_flows_are_missing_before_nxt_opened_not_zero_live_as_in_tra
             _, institution, foreign = net_buys(previous)
             assert features["foreign_net"] == pytest.approx(foreign / volumes[previous]), day
             assert features["institution_net"] == pytest.approx(institution / volumes[previous]), day
+            if previous == REAL_ZERO:
+                assert features["institution_net"] == 0.0, "a real 0, not missing"
         # The other inputs join by day too.
         assert all(features[f] is not None for f in ("us_sox", "us_nvda", "us_mu", "vix")), day
         if i > SIGMA_DAYS:  # σ̂ scales them: 60 days before

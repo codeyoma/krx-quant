@@ -18,9 +18,10 @@ Toss only there:
   ``orgn_ntby_qty``, ``frgn_ntby_qty``; Toss ``investor-trading`` ``individual`` and
   ``institution`` equalled the first two on all 30 days. Toss's ``foreigner`` is the
   registered foreigners only (KIS's ``frgn_reg_ntby_qty``), not KIS's foreigners, so the
-  foreign net buy has no secondary. KIS answers 0 shares for each net buy of a day it has no
-  integrated figure of: the days before NXT opened (2025-03-04). A net buy of 0 is kept as none
-  (``NET_BUYS``, ``no_figure``), so such a day takes Toss's value where Toss has one;
+  foreign net buy has no secondary. KIS answers 0 shares for a net buy it has no integrated
+  figure of: the days before NXT opened (2025-03-04). Such a 0 is kept as none (``no_figure``:
+  before NXT opened, and on a day all three are 0), so the day takes Toss's value where Toss
+  has one; a 0 after NXT opened beside another class's figure is a real 0 and stays;
 - the foreign holdings and ratio: Toss ``investor-trading`` ``foreignerHolding``
   (``holdingQuantity``; ``holdingRate`` × 100, of the listed shares). KIS's are today's one
   value and a ratio of the foreign limit: none is used;
@@ -93,13 +94,20 @@ SOURCES: Mapping[str, tuple[str, ...]] = {
     "lending_balance": (KIS, TOSS),
     "credit_balance": (KIS, TOSS),
 }
-# KIS's net buys (``INVESTORS``). Before NXT opened (2025-03-04) its integrated query answers 0
-# shares for each: the structure check (#270, 2026-10-18) found 2,452 stored days of each
-# symbol's foreign net buy and only 395 of them, the same count for all three symbols, other
-# than 0, about the trading days since. A stock that traded has a net buy other than 0 from
-# each of the three, so a 0 is kept as no figure (None), as fetched and as read from a file
-# written before (``no_figure``), never as a day nobody bought on balance.
+# KIS's net buys (``INVESTORS``). Before NXT opened its integrated query answers 0 shares where
+# it has no figure: the structure check (#270, 2026-10-18) found 2,452 stored days of each
+# symbol's foreign net buy and only 395 of them other than 0, the same count for all three
+# symbols, about the trading days since 2025-03-04 (396 by the holidays known here). The zeros
+# are the days before; whether KIS also gave the individual and institution net buys as 0 then
+# was not measured (only the foreign one was). So a 0 is kept as no figure (None), as fetched
+# and as read from a file written before (``no_figure``), on two conditions:
+# - on a day before NXT opened (``NXT_OPENED``), each net buy of 0;
+# - on any day, the three at once at 0: no stock that traded has that, and it is the same
+#   answer as before NXT (a day at the boundary, a halt).
+# After NXT opened, one class at 0 beside another's figure is a real 0 (an institution can buy
+# and sell as many shares in a day) and stays.
 NET_BUYS = ("individual_net", "institution_net", "foreign_net")
+NXT_OPENED = date(2025, 3, 4)  # NXT's first trading day: KIS's integrated figures begin
 HISTORY_YEARS = 10  # the first run's depth: about 2,450 trading days, the day view's 2,000 and more
 _MAX_CALLS = 400  # a query's pages in one run: 10 years of 30-row pages is 83
 _WINDOW = timedelta(days=365)  # a ranged KIS query's span, ending at the day asked
@@ -235,13 +243,16 @@ def read_supply(state_dir: Path, symbol: str, source: str) -> list[Row]:
     if not path.exists():
         return []
     rows: list[Row] = pq.read_table(path).to_pylist()
-    return [no_figure(r) for r in rows] if source == KIS else rows
+    return [no_figure(r, r["date"]) for r in rows] if source == KIS else rows
 
 
-def no_figure(row: Row) -> Row:
-    """KIS's ``row`` with each net buy of 0 shares as none (``NET_BUYS``)."""
+def no_figure(row: Row, day: date) -> Row:
+    """KIS's ``row`` of ``day`` with its net buys of 0 shares that are KIS's "no figure" as none:
+    each before NXT opened, and all three on a day they are all 0 (``NET_BUYS``)."""
     zeros = [f for f in NET_BUYS if row.get(f) == 0]
-    return {**row, **dict.fromkeys(zeros)} if zeros else row
+    if zeros and (day < NXT_OPENED or len(zeros) == len(NET_BUYS)):
+        return {**row, **dict.fromkeys(zeros)}
+    return row
 
 
 def write_supply(state_dir: Path, symbol: str, source: str, rows: Sequence[Row]) -> None:
@@ -447,7 +458,8 @@ class SupplyKeeper:
                 day = _day(row.get(query.date_field), "%Y%m%d") if isinstance(row, Mapping) else None
                 if day is None or day > last or day in found:
                     continue
-                new[day] = no_figure({name: _whole(row.get(field)) for name, field in query.columns.items()})
+                values = {name: _whole(row.get(field)) for name, field in query.columns.items()}
+                new[day] = no_figure(values, day)
             if not new:
                 break
             found.update(new)
