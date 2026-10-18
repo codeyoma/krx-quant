@@ -16,7 +16,7 @@ import aiohttp
 from aiohttp import web
 
 from krx_quant import kis
-from krx_quant.algorithms import ALGORITHMS, KIND_ALGORITHMS, load_models
+from krx_quant.algorithms import ALGORITHMS, DAILY_ALGORITHMS, KIND_ALGORITHMS, load_models
 from krx_quant.api import create_app
 from krx_quant.archive import NIGHTLY_ARCHIVE, archive
 from krx_quant.auth import TokenManager, tokens_and_client
@@ -27,6 +27,7 @@ from krx_quant.config import Settings
 from krx_quant.contracts import KOSPI200, night_front_month
 from krx_quant.cost_guard import keep_costs
 from krx_quant.daily import StoredDays
+from krx_quant.daily_features import DAILY_FEATURES, LiveFeatures
 from krx_quant.econ_calendar import CalendarCollector, keep_calendar
 from krx_quant.engine import Budget, PredictionEngine, run_live
 from krx_quant.features import Leaders
@@ -66,6 +67,7 @@ from krx_quant.model_shelf import Shelf
 from krx_quant.names import fill_names
 from krx_quant.notify import Alerts
 from krx_quant.object_store import open_store
+from krx_quant.open_to_close import OPEN_TO_CLOSE
 from krx_quant.polling import CALL_ERRORS, NORMALIZE_ERRORS, Poller, PollJob
 from krx_quant.predictions import DB_NAME, PredictionStore, iso
 from krx_quant.prevalidation import admits
@@ -239,7 +241,7 @@ async def run_collector(
         session_clock,
         # The algorithms' models, and the kinds' baselines' tables (#180).
         models={
-            **load_models(settings.state_dir, [*ALGORITHMS, *KIND_ALGORITHMS]),
+            **load_models(settings.state_dir, [*ALGORITHMS, *KIND_ALGORITHMS, *DAILY_ALGORITHMS]),
             **load_tables(settings.state_dir, KINDS),
         },
         budget=Budget.of(settings),
@@ -254,8 +256,19 @@ async def run_collector(
         climate=load_climate(settings.state_dir) if settings.target_version >= 2 else None,
         # The previous trading day's backfilled bars (range_prev_day, #181).
         previous=PreviousDay(settings.data_dir, calendar.calendar),
-        # The KRX day candles the daily kinds are predicted from and answered on (#264).
+        # The KRX day candles the daily kinds are predicted from and answered on (#264), their
+        # algorithms and their features at 08:50.
         daily=StoredDays(settings.data_dir),
+        daily_algorithms=DAILY_ALGORITHMS,
+        daily_features=LiveFeatures(
+            OPEN_TO_CLOSE,
+            settings.data_dir,
+            settings.state_dir,
+            calendar.calendar,
+            settings.symbols,
+            settings.fee_rate,
+        ),
+        daily_feature_names=DAILY_FEATURES,
     )
     store.add_run("start", engine.started_at, None, json.dumps(started(settings)))
     # Held while it runs: a rescore refuses to run beside it (#168). One running already

@@ -503,7 +503,9 @@ class PredictionEngine:
         # Reviews pick up where the last one left off: one missed while down runs at start.
         self._reviewed_through = store.last_run("review") or self._last_tick
         self._daily: DailyRunner | None = None
+        self._daily_events: Callable[[str, dict[str, Any]], None] | None = None
         if self.daily_kinds:
+            self._daily_events = getattr(daily_features, "on_event", None)
             self._daily = DailyRunner(
                 self.daily_kinds,
                 store,
@@ -621,6 +623,8 @@ class PredictionEngine:
     def on_event(self, feed: str, row: dict[str, Any]) -> None:
         self._market.on_event(feed, row)
         self._mark_special(self._special.event(feed, row, self.symbols), row["received_at"])
+        if self._daily_events is not None:  # the daily features' pre-market trades (#264)
+            self._daily_events(feed, row)
 
     def _mark_special(self, window: Window | None, learned_at: datetime) -> None:
         """A special window just learned: the predictions it touches are special, scored or not,

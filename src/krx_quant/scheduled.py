@@ -45,9 +45,10 @@ from typing import Any
 
 import aiohttp
 
-from krx_quant.algorithms import ALGORITHMS, KIND_ALGORITHMS, Algorithm, KindAlgorithm
+from krx_quant.algorithms import ALGORITHMS, DAILY_ALGORITHMS, KIND_ALGORITHMS, Algorithm, KindAlgorithm
 from krx_quant.clock import SessionClock
 from krx_quant.config import JOBS_UNTIL, Settings
+from krx_quant.daily import DailyAlgorithm
 from krx_quant.engine import PredictionEngine
 from krx_quant.feeds.base import KST
 from krx_quant.github import GitHub, GitHubError, comment_body
@@ -631,7 +632,7 @@ def recorded_days(data_dir: Path, symbols: Sequence[str], now: datetime) -> int:
 
 
 def prevalidation_reports(
-    state_dir: Path, algorithms: Sequence[Algorithm | KindAlgorithm], target_version: int
+    state_dir: Path, algorithms: Sequence[Algorithm | KindAlgorithm | DailyAlgorithm], target_version: int
 ) -> dict[str, LastReport]:
     """The latest pre-validation report of each of ``algorithms`` that has one, as it stands for
     the code and target it runs now."""
@@ -657,7 +658,11 @@ async def keep_jobs(
 
     async def facts() -> Facts:
         recorded = await asyncio.to_thread(recorded_days, settings.data_dir, settings.symbols, clock.now())
-        everyone: list[Algorithm | KindAlgorithm] = [*engine.registered, *engine.kind_registered]
+        everyone: list[Algorithm | KindAlgorithm | DailyAlgorithm] = [
+            *engine.registered,
+            *engine.kind_registered,
+            *engine.daily_registered,
+        ]
         reports = await asyncio.to_thread(
             prevalidation_reports, settings.state_dir, everyone, settings.target_version
         )
@@ -978,6 +983,60 @@ def prevalidation_jobs(names: Sequence[str]) -> tuple[Job, ...]:
     )
 
 
+# The daily kinds' algorithms' pre-validations (#264): a walk-forward over ten years of KRX day
+# candles (``daily_training``), not a replay of the recorded days, so neither the recorded days'
+# count nor the one-a-night turn of the bar-close ones holds them back: each runs on the first
+# night it waits without a verdict on the code it runs (and again once a deploy changes it, or
+# after a run that left no verdict, on newer code). Minutes, not hours; the hour is a bound.
+# Before the bar-close pre-validations, which may take the rest of the night. Its result goes to
+# #204, with them, and to #264, the daily kind's issue.
+DAILY_PREVALIDATION_TIMEOUT = timedelta(hours=1)
+
+
+def _daily_prevalidation_due(algorithm: str) -> Callable[[Night], bool]:
+    def due(night: Night) -> bool:
+        facts = night.facts
+        if algorithm not in facts.waiting:
+            return False
+        report = facts.reports.get(algorithm)
+        if report is not None and report.judged:
+            return False  # it judged the code the algorithm runs now
+        record = night.records.get(prevalidation_job_name(algorithm))
+        if record is None or record.outcome not in (OK, FAILED):
+            return True  # never ran, or a restart cut it
+        if report is not None and not report.current and report.made_at is not None:
+            if report.made_at >= record.started_at:
+                return True  # the run left its report, and the code has changed since
+        return record.commit != night.commit  # it ran without a verdict: again on new code
+
+    return due
+
+
+def daily_prevalidation_jobs(names: Sequence[str]) -> tuple[Job, ...]:
+    """A pre-validation job for each daily algorithm of ``names`` (#264)."""
+    return tuple(
+        Job(
+            name=prevalidation_job_name(name),
+            due=_daily_prevalidation_due(name),
+            command=("prevalidate", name),
+            timeout=DAILY_PREVALIDATION_TIMEOUT,
+            targets=(
+                Target(PREVALIDATION_ISSUE, note=_DAILY_PREVALIDATION_NOTE),
+                Target(DAILY_CHECK_ISSUE, note=_DAILY_PREVALIDATION_NOTE),
+            ),
+            attach=(Attachment(f"리포트 state/{_report_of(name)}", _report_of(name)),),
+        )
+        for name in names
+    )
+
+
+_DAILY_PREVALIDATION_NOTE = (
+    "하루 한 번 예측 종류의 알고리즘(#264)의 사전 검증: KRX 일봉 10년의 walk-forward다. 통과(`passed`)하면 "
+    "엔진이 다음 08:50부터 수습으로 돌린다(판정은 정답이 있는 날 60일째부터). 거부(`refused`)되면 같은 "
+    "코드로는 다시 돌지 않는다."
+)
+
+
 _PREVALIDATION_NOTE = (
     "통과(`passed`)하면 엔진이 다음 봉 마감부터 수습으로 돌린다. 거부(`refused`)되면 같은 코드·정답 "
     "버전으로는 다시 돌지 않고, 고친 코드가 배포되면 다시 돈다."
@@ -997,5 +1056,6 @@ JOBS: tuple[Job, ...] = (
     ENTRY_DELAY,
     NIGHT_PROBE,
     DAILY_CHECK,
+    *daily_prevalidation_jobs([a.name for a in DAILY_ALGORITHMS]),
     *prevalidation_jobs([*(a.name for a in ALGORITHMS), *(a.name for a in KIND_ALGORITHMS)]),
 )

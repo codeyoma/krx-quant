@@ -324,11 +324,13 @@ class Prevalidation:
     correlations: dict[str, float]  # with each other algorithm it could be measured against
     statuses: dict[str, int]  # its predictions by status
     skipped_for_cpu: int  # bar closes it was skipped at for the CPU budget
-    db: Path
+    db: Path | None  # the replay's database; None for a daily kind's walk-forward (#264)
     target_version: int = 1  # the target replayed and scored on (#169); a kind's answer version
     kind: str = DIRECTION  # the kind it predicts (#179)
     earlier_runs: int = 0  # pre-validations of the algorithm before this one (#262)
     earlier_on_these_days: int = 0  # of them, those that replayed any of these days
+    # A daily kind's walk-forward (#264, ``daily_training``): its folds, by symbol and by year.
+    walk_forward: dict[str, Any] | None = None
 
     @property
     def passed(self) -> bool:
@@ -348,13 +350,15 @@ class Prevalidation:
             "timed_out": self.statuses.get("timed_out", 0),
             "statuses": self.statuses,
             "skipped_for_cpu": self.skipped_for_cpu,
-            "db": str(self.db),
+            "db": None if self.db is None else str(self.db),
             "target_version": self.target_version,
             "earlier_runs": self.earlier_runs,
             "earlier_runs_on_these_days": self.earlier_on_these_days,
         }
         if self.kind != DIRECTION:
             out["kind"] = self.kind
+        if self.walk_forward is not None:
+            out["walk_forward"] = self.walk_forward
         return out
 
 

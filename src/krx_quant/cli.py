@@ -27,6 +27,7 @@ from krx_quant.collector import check_fallbacks, measure_subscription_limit, run
 from krx_quant.config import Settings, SettingsError
 from krx_quant.daily_check import DAYS as DAILY_CHECK_DAYS
 from krx_quant.daily_check import daily_check
+from krx_quant.daily_training import daily_algorithm, fit_daily, prevalidate_daily
 from krx_quant.demo import demo_app, demo_morning
 from krx_quant.diagnose import DEFAULT_DAYS, diagnose
 from krx_quant.fake_kis import FakeKis
@@ -178,6 +179,15 @@ def _rescore() -> int:
 
 
 def _fit(name: str, days: int | None) -> int:
+    if daily_algorithm(name) is not None:  # a daily kind's (#264): on the KRX days
+        try:
+            daily = fit_daily(Settings.from_env(require_kis=False), name)
+        except (FileNotFoundError, ValueError) as e:
+            print(e, file=sys.stderr)
+            return 1
+        print(f"{daily.model.version}: trained on {daily.samples} labelled days: {daily.model.trained}")
+        print(f"saved to {daily.path}; the running engine switches to it within a minute")
+        return 0
     try:
         fitted = fit_algorithm(Settings.from_env(require_kis=False), name, days)
     except (FileNotFoundError, ValueError) as e:
@@ -189,6 +199,36 @@ def _fit(name: str, days: int | None) -> int:
     print(f"recorded days, on mid-points: {recorded}; the others on backfilled closes")
     print(f"saved to {fitted.path}; the running engine switches to it within a minute")
     return 0
+
+
+def _prevalidate_daily(settings: Settings, name: str) -> int:
+    try:
+        result = prevalidate_daily(settings, name)
+    except (FileNotFoundError, ValueError, PrevalidationRunning) as e:
+        print(e, file=sys.stderr)
+        return 1
+    span = f"{result.days[0]}..{result.days[-1]}" if result.days else "none"
+    walked = result.walk_forward or {}
+    print(
+        f"{name}: {'passed' if result.passed else 'refused'} (walk-forward over the KRX days: "
+        f"{len(result.days)} days out of sample, {span}, {walked.get('folds', 0)} folds)"
+    )
+    for c in result.checks:
+        print(f"  {c.name}: {'ok' if c.passed else 'FAILED'} - {c.detail}")
+    for symbol, got in walked.get("by_symbol", {}).items():
+        accuracy = got["accuracy"]
+        print(f"  {symbol}: {got['n']} days, accuracy {'-' if accuracy is None else f'{accuracy:.3f}'}")
+    if result.earlier_runs:
+        print(
+            f"run before: {result.earlier_runs}, {result.earlier_on_these_days} of them on any of these days"
+            " (a day walked again after a fix is no longer out of sample)"
+        )
+    print(f"report: {report_path(settings.state_dir, name)}")
+    if result.passed:
+        print(f"the engine starts {name} on probation at its next 08:50, unless it runs it already")
+    else:
+        print(f"the engine does not start {name}; fix it and run this again")
+    return 0 if result.passed else 1
 
 
 def _train(day: date | None, from_store: bool) -> int:
@@ -209,6 +249,8 @@ def _train(day: date | None, from_store: bool) -> int:
 
 def _prevalidate(name: str, days: int) -> int:
     settings = Settings.from_env(require_kis=False)
+    if daily_algorithm(name) is not None:  # a daily kind's: its walk-forward (#264)
+        return _prevalidate_daily(settings, name)
     try:
         result = asyncio.run(prevalidate(settings, name, days=days))
     except (
