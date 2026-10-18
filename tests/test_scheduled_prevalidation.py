@@ -112,9 +112,11 @@ def tonight(n: Night) -> str | None:
 
 def test_the_order_is_the_five_then_the_registry_s() -> None:
     registry = [a.name for a in ALGORITHMS] + [a.name for a in KIND_ALGORITHMS]
-    # The five, then the registry's others not run before pre-validation: Neyman (#266).
-    assert prevalidation_order(registry) == (*ORDER, "neyman")
-    assert [j.name for j in PREVALIDATIONS] == [f"prevalidate-{name}" for name in (*ORDER, "neyman")]
+    # The five, then the registry's others not run before pre-validation: Neyman (#266) and
+    # the Breimans of the barrier's horizon ladder (#263).
+    rest = ("neyman", "breiman-15m", "breiman-30m", "breiman-60m")
+    assert prevalidation_order(registry) == (*ORDER, *rest)
+    assert [j.name for j in PREVALIDATIONS] == [f"prevalidate-{name}" for name in (*ORDER, *rest)]
     # A new algorithm gets its job from the registries; one registered before needs none.
     names = ["newton", "zeta", "kalman", "turing", "mandelbrot", "alpha"]
     assert prevalidation_order(names) == ("mandelbrot", "kalman", "zeta", "alpha")
@@ -125,7 +127,7 @@ def test_each_job_prevalidates_its_algorithm_and_posts_on_204() -> None:
     for listed in PREVALIDATIONS:
         name = listed.command[1]
         assert listed.command == ("prevalidate", name)
-        assert listed.timeout == timedelta(hours=6 if name == "breiman" else 5)
+        assert listed.timeout == timedelta(hours=6 if name.startswith("breiman") else 5)
         assert [t.issue for t in listed.targets] == [204]
         assert [(a.title, a.path) for a in listed.attach] == [
             (f"리포트 state/prevalidations/{name}.json", f"prevalidations/{name}.json")

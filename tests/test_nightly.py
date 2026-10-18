@@ -470,6 +470,7 @@ def test_the_train_command_trains_every_registered_algorithm_from_the_store(
         *ladder,
         MANDELBROT,
         BREIMAN,
+        *(f"{BREIMAN}-{m}m" for m in (15, 30, 60)),  # a Breiman for each of the ladder (#263)
     ]
     assert [r["algorithm"] for r in promotions["reports"]] == names
     assert {r["algorithm"]: r["target_version"] for r in promotions["reports"]} == {
@@ -479,6 +480,7 @@ def test_the_train_command_trains_every_registered_algorithm_from_the_store(
         **dict.fromkeys(ladder, BARRIER.answer_version),
         MANDELBROT: 1,
         BREIMAN: BARRIER.answer_version,
+        **{f"{BREIMAN}-{m}m": BARRIER.answer_version for m in (15, 30, 60)},
     }
     barrier = read(store_root, f"reports/{NIGHT}/{BARRIER_CLIMATE}.json")
     assert (barrier["kind"], barrier["promoted"]) == ("barrier", True), "fitted on the bar rule's answers"

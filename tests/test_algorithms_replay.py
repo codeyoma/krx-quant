@@ -111,6 +111,9 @@ async def test_a_trained_model_is_used_and_recorded(tmp_path: Path) -> None:
         "neyman",  # Turing's trees and a second opinion (#266)
         "mandelbrot",  # the range's (#181)
         "breiman",  # the barrier's (#184)
+        "breiman-15m",  # the horizon ladder's (#263)
+        "breiman-30m",
+        "breiman-60m",
     }
     newton = listed["newton"]
     assert listed["gauss"]["model"]["version"] == "gauss-default"
