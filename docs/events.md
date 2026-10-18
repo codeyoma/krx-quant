@@ -354,13 +354,15 @@ KOSPI200 선물과 달러선물은 KIS 선물옵션 분봉조회(`FHKIF03020200`
 - 실행마다 조회의 가장 최근 쪽을 다시 받아 그 날들의 값을 바꾼다. 그래서 같은 날의 값이 나중에 바뀔 수 있다(출처가 고친 값). 파일은 통째로 바꾼다(임시 파일 `.<이름>.tmp`에 쓰고 이름 바꾸기). 받은 것이 없거나 바뀐 것이 없으면 쓰지 않는다.
 - 값이 모두 비는 날은 남기지 않는다. 신용잔고의 날은 결제일이다(KIS `stlm_date`, 토스 `date`).
 
+  > **바뀜** (2026-10-18, #295): KIS 파일의 순매수 0주는 그대로였다 → `null`로 쓰고 읽는다. 이유: KIS가 NXT 개장(2025-03-04) 전 날들의 순매수를 0주로 줘서, 그 날들이 값 없음이 아니라 "순매수 0"으로 읽혔다(#270).
+
 `kis.parquet`
 
 | 열 | 타입 | KIS 필드 | 설명 |
 |---|---|---|---|
 | `date` | date32 | `stck_bsop_date`, `bsop_date`, `stlm_date` | 그날(신용잔고는 결제일) |
 | `short_volume` | int64 | `FHPST04830000` `J`의 `ssts_cntg_qty` | 공매도 거래량(주) |
-| `individual_net`, `institution_net`, `foreign_net` | int64 | `FHPTJ04160001` `UN`의 `prsn_ntby_qty`, `orgn_ntby_qty`, `frgn_ntby_qty` | 개인·기관계·외국인 순매수량(주, 순매도는 음수) |
+| `individual_net`, `institution_net`, `foreign_net` | int64 | `FHPTJ04160001` `UN`의 `prsn_ntby_qty`, `orgn_ntby_qty`, `frgn_ntby_qty` | 개인·기관계·외국인 순매수량(주, 순매도는 음수). KIS가 0주로 준 값은 `null`이다: NXT 개장(2025-03-04) 전의 날들([kis-feeds.md](kis-feeds.md) "투자자별 순매수"). 전에 쓴 파일의 0은 읽을 때 `null`로 본다(`supply.no_figure`) |
 | `lending_balance` | int64 | `HHPST074500C0`의 `rmnd_stcn` | 대차잔고(주) |
 | `credit_balance` | int64 | `FHPST04760000` `J`의 `whol_loan_rmnd_stcn` | 신용(융자)잔고(주) |
 
