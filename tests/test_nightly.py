@@ -471,6 +471,7 @@ def test_the_train_command_trains_every_registered_algorithm_from_the_store(
         MANDELBROT,
         BREIMAN,
         *(f"{BREIMAN}-{m}m" for m in (15, 30, 60)),  # a Breiman for each of the ladder (#263)
+        "cox",  # the daily kind's (#264), last, on this server's KRX day candles: none here
     ]
     assert [r["algorithm"] for r in promotions["reports"]] == names
     assert {r["algorithm"]: r["target_version"] for r in promotions["reports"]} == {
@@ -481,7 +482,11 @@ def test_the_train_command_trains_every_registered_algorithm_from_the_store(
         MANDELBROT: 1,
         BREIMAN: BARRIER.answer_version,
         **{f"{BREIMAN}-{m}m": BARRIER.answer_version for m in (15, 30, 60)},
+        "cox": 1,
     }
+    cox = read(store_root, f"reports/{NIGHT}/cox.json")
+    assert (cox["cadence"], cox["promoted"]) == ("daily", False)
+    assert cox["reason"].startswith("not trained: 0 labelled days")
     barrier = read(store_root, f"reports/{NIGHT}/{BARRIER_CLIMATE}.json")
     assert (barrier["kind"], barrier["promoted"]) == ("barrier", True), "fitted on the bar rule's answers"
     assert {r["commit"] for r in promotions["reports"]} == {"0123abc"}, "the deploy's, as the engine's (#85)"

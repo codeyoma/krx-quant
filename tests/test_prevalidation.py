@@ -586,6 +586,7 @@ async def test_with_the_touch_target_it_trains_replays_and_is_judged_on_the_touc
         "baseline-random",
         "baseline-climate",
     }
+    assert result.db is not None
     with sqlite3.connect(result.db) as db:
         # Judged on the touch label: every prediction of it with a label and basis A's mid-points.
         [(labelled,)] = db.execute(

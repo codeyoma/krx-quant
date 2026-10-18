@@ -18,7 +18,14 @@ from pathlib import Path
 import aiohttp
 import pytest
 
-from krx_quant.algorithms import ALGORITHMS, KIND_ALGORITHMS, Algorithm, KindAlgorithm, kind_of
+from krx_quant.algorithms import (
+    ALGORITHMS,
+    DAILY_ALGORITHMS,
+    KIND_ALGORITHMS,
+    Algorithm,
+    KindAlgorithm,
+    kind_of,
+)
 from krx_quant.clock import FakeClock
 from krx_quant.github import GitHub
 from krx_quant.kind_registry import kind_named
@@ -69,7 +76,12 @@ EVERYONE: dict[str, Algorithm | KindAlgorithm] = {
     **{a.name: a for a in ALGORITHMS},
     **{a.name: a for a in KIND_ALGORITHMS},
 }
-PREVALIDATIONS = [j for j in JOBS if j.command[0] == "prevalidate"]
+# The bar-close algorithms' (the daily kinds', #264, run apart: ``test_daily_prevalidation``).
+PREVALIDATIONS = [
+    j
+    for j in JOBS
+    if j.command[0] == "prevalidate" and j.command[1] not in {a.name for a in DAILY_ALGORITHMS}
+]
 NEW = "fedcba9876543210fedc"  # a later deploy's commit
 TUESDAY, WEDNESDAY = date(2026, 10, 20), date(2026, 10, 21)
 

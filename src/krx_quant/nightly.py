@@ -46,6 +46,11 @@ climate) are refitted after the direction's climate, each on the kind's answers 
 latest ``days`` days, with a report of its own (naming the kind), and always promoted, as
 the direction's climate table is.
 
+The daily kinds' algorithms (#264, ``daily_training``) come last, given the server's own files
+(``daily``: the KRX day candles, the US daily closes, KIS's supply; a night without them, as on
+another machine, does not train them): each refitted on its latest days up to the night and
+always promoted, its report naming the kind and ``cadence`` ``daily``.
+
 Objects:
 
 - ``bars/...``: archived one-minute bars, and ``events/...``: recorded events of the feeds
@@ -72,17 +77,27 @@ from functools import partial
 from pathlib import Path
 from typing import Any, TypeVar
 
-from krx_quant.algorithms import ALGORITHMS, KIND_ALGORITHMS, Algorithm, KindAlgorithm, Model
+from krx_quant.algorithms import (
+    ALGORITHMS,
+    DAILY_ALGORITHMS,
+    KIND_ALGORITHMS,
+    Algorithm,
+    KindAlgorithm,
+    Model,
+)
 from krx_quant.algorithms.contract import KindSample, Sample, kind_predicted, predicted
 from krx_quant.algorithms.forecasts import LOSS_FLOOR, forecasting, log_loss
 from krx_quant.backfill import MINUTE_BARS_TR, bars_key
 from krx_quant.climate import CLIMATE, CLIMATE_DAYS, fit_climate
 from krx_quant.config import Settings, SettingsError
+from krx_quant.daily import DailyAlgorithm, DailyKind
+from krx_quant.daily_features import DailyFiles
+from krx_quant.daily_training import DailyTrainer, recent_json
 from krx_quant.engine import ENGINE_FEEDS, partitions
 from krx_quant.features import Leaders
 from krx_quant.feeds import TRADE
 from krx_quant.feeds.base import KST, kst_day
-from krx_quant.kind_registry import KINDS, kind_named
+from krx_quant.kind_registry import KINDS, daily_kind_named, kind_named
 from krx_quant.kinds import NO_ANSWER, Kind, KindForecast, TableBaseline, table_baselines
 from krx_quant.macro import regime_prefix
 from krx_quant.market_calendar import MarketCalendar, calendar_store
@@ -174,9 +189,16 @@ class Night:
         target = TARGET_VERSION
         kinds: dict[str, dict[str, int]] = {}  # the kinds' labelled samples by day (#179)
         dropped: dict[str, dict[str, dict[str, int]]] = {}  # the kinds' left out, by day and why (#184)
+        daily: list[str] = []  # the daily kinds' (#264): one line each
         for r in self.reports:
             references.update(r.get("reference_prices", {}))
-            if "kind" in r:
+            if r.get("cadence") == "daily":
+                span = r.get("training_days") or []
+                line = f"{r['kind']} 정답 표본: KRX 일봉 {r['labels']['samples']['candles']}개"
+                if len(span) == 2:
+                    line += f" ({span[0]} – {span[1]})"
+                daily.append(line + recent_json(r))
+            elif "kind" in r:
                 kinds.setdefault(r["kind"], {}).update(r.get("labels", {}).get("by_day", {}))
                 if "dropped_by_day" in r.get("labels", {}):
                     dropped.setdefault(r["kind"], {}).update(r["labels"]["dropped_by_day"])
@@ -198,6 +220,7 @@ class Night:
             if kind in dropped:  # reports before #184 do not count them
                 line += _dropped_text(dropped[kind])
             lines.append(line)
+        lines += daily
         for r in self.reports:
             if r["promoted"] and r.get("forced"):
                 verdict = "승격(정답 바뀜, 성적 비교 없이)"
@@ -226,13 +249,16 @@ def train_night(
     target_version: int = 1,
     kind_algorithms: Sequence[KindAlgorithm] = KIND_ALGORITHMS,
     kinds: Sequence[Kind] = KINDS,
+    daily: DailyTrainer | None = None,
+    daily_algorithms: Sequence[DailyAlgorithm] = DAILY_ALGORITHMS,
 ) -> Night:
     """Train every algorithm for the night of ``day`` (default: the latest day with data) and
     store the promotion list. A night already finished is returned as it was. Each report
     names ``commit``, the code that trained it. The samples' outcomes are of
     ``target_version``; with the touch target (3) the climate baseline is refitted too, and
     so are the tables of the ``kinds``' baselines (#180). The algorithms of the ``kinds``
-    besides the direction train last, on their kind's answers (#179).
+    besides the direction train after them, on their kind's answers (#179), and the daily kinds'
+    algorithms last, given ``daily`` (#264).
     """
     leaders = leaders or Leaders()
     bars, trades = (
@@ -290,6 +316,17 @@ def train_night(
         steps.append(
             (a.name, kind.answer_version, True, partial(trainer.train_kind, a, kind, live.get(a.name)))
         )
+    if daily is not None:  # the daily kinds' algorithms, on this server's files (#264)
+        for d in daily_algorithms:
+            if (daily_kind := daily_kind_named(d.kind)) is not None:
+                steps.append(
+                    (
+                        d.name,
+                        daily_kind.answer_version,
+                        True,
+                        partial(trainer.train_daily, daily, d, daily_kind),
+                    )
+                )
     for name, version, of_kind, step in steps:
         report = get_json(store, report_key(night, name))
         # A checkpoint an older version wrote lacks the evidence (#89), and one of another
@@ -323,6 +360,11 @@ async def run_training(settings: Settings, day: date | None = None) -> Night:
     if store is None:
         raise SettingsError("KRX_OBJECT_STORE is not set: nightly training reads and writes it")
     finished_before = day is not None and store.digest(promotions_key(day)) is not None
+    calendar = calendar_store(settings).calendar
+    # The daily kinds' algorithms (#264) train on this server's files, where it has them.
+    daily = DailyTrainer(
+        DailyFiles(settings.data_dir, settings.state_dir), settings.symbols, settings.fee_rate, calendar
+    )
     night = await asyncio.to_thread(
         train_night,
         store,
@@ -332,9 +374,10 @@ async def run_training(settings: Settings, day: date | None = None) -> Night:
         now=lambda: datetime.now(KST),
         leaders=Leaders.of(settings),
         day=day,
-        calendar=calendar_store(settings).calendar,
+        calendar=calendar,
         commit=settings.commit,
         target_version=settings.target_version,
+        daily=daily if settings.train_on == "server" else None,
     )
     if not finished_before:
         await send_notice(settings, night.summary())
@@ -394,6 +437,14 @@ class _Trainer:
             algorithm.fit,
             partial(_losses, algorithm),
         )
+
+    def train_daily(self, daily: DailyTrainer, algorithm: DailyAlgorithm, kind: DailyKind) -> dict[str, Any]:
+        """A daily kind's algorithm's night (#264): refitted and always promoted
+        (``daily_training``)."""
+        report, model = daily.train(algorithm, kind, self._days[-1])
+        if model is not None:
+            self._put_model(algorithm.name, model)
+        return report
 
     def train_kind(self, algorithm: KindAlgorithm, kind: Kind, live_version: str | None) -> dict[str, Any]:
         """A kind's algorithm's night (#179), on the kind's answers: the target is the kind's
