@@ -481,7 +481,9 @@ def fill_kind_answers(
     The days are those from ``RECORDING_START`` before ``now``'s day with a predicted bar
     close lacking a kind's answer of its answer version. Every window of their symbols that
     day is answered, as a fresh replay answers it, and only the missing rows are stored; a
-    predicted bar close its day's recording does not answer is ``not recorded``. A day that
+    predicted bar close its day's recording does not answer is ``not recorded``. A kind longer
+    than four minutes lacks none of the bar closes whose window would reach the closing auction
+    (#263): it never answers them. Each answer is scored when its window ended. A day that
     cannot be read is logged and left for the next time. ``halt`` stops it between batches of
     events, writing nothing more.
     """
@@ -496,6 +498,9 @@ def fill_kind_answers(
         missing: dict[date, dict[tuple[str, datetime], set[str]]] = {}
         for kind in answered:
             for symbol, close in store.unanswered(kind.name, kind.answer_version, RECORDING_START, today):
+                session = calendar.session(kst_day(close))
+                if session is not None and close + kind.horizon > session.closing_auction:
+                    continue  # its window would reach the closing auction: it never has one (#263)
                 missing.setdefault(kst_day(close), {}).setdefault((symbol, close), set()).add(kind.name)
         if not missing:
             return []
@@ -579,7 +584,9 @@ def _answer_day(
             where,
             NOT_RECORDED,
         )
-    written = sum(len(store.add_kind_answers(k.name, k.answer_version, rows[k.name])) for k in kinds)
+    written = sum(
+        len(store.add_kind_answers(k.name, k.answer_version, rows[k.name], horizon=k.horizon)) for k in kinds
+    )
     windows = len({(a.symbol, a.bar_close) for a in answers})
     if answers:
         log.info("kinds' answers of %s from %s: %d windows, %d rows written", day, source, windows, written)

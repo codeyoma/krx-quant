@@ -1070,10 +1070,12 @@ class PredictionStore:
         answer_version: int,
         answers: Sequence[tuple[str, datetime, Answer, bool]],
         scored_at: datetime | None = None,
+        horizon: timedelta = timedelta(minutes=4),
     ) -> list[tuple[str, datetime]]:
         """Store windows' answers of ``kind``: (symbol, bar close, answer, special) entries,
-        scored at ``scored_at`` (default: when each one's four minutes ended, as a replay or a
-        fill scores it). One stored already stays. The (symbol, bar close) of those written."""
+        scored at ``scored_at`` (default: when each one's window, ``horizon`` long, ended, as a
+        replay or a fill scores it, #263). One stored already stays. The (symbol, bar close) of
+        those written."""
         written: list[tuple[str, datetime]] = []
         with self._db:
             for symbol, bar_close, answer, special in answers:
@@ -1089,7 +1091,7 @@ class PredictionStore:
                         answer.unscorable,
                         int(special),
                         json.dumps(dict(answer.path), separators=(",", ":")),
-                        iso(scored_at or bar_close + timedelta(minutes=4)),
+                        iso(scored_at or bar_close + horizon),
                     ),
                 )
                 if cursor.rowcount:
