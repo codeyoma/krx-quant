@@ -49,6 +49,7 @@ from krx_quant.algorithms import ALGORITHMS, DAILY_ALGORITHMS, KIND_ALGORITHMS, 
 from krx_quant.clock import SessionClock
 from krx_quant.config import JOBS_UNTIL, Settings
 from krx_quant.daily import DailyAlgorithm
+from krx_quant.daily_features import pending_inputs
 from krx_quant.engine import PredictionEngine
 from krx_quant.feeds.base import KST
 from krx_quant.github import GitHub, GitHubError, comment_body
@@ -239,6 +240,9 @@ class Facts:
     # The trading days of the week before the night whose night session (18:00–06:00) the
     # collector subscribed the KOSPI200 night futures for before it began (#264).
     night_futures: tuple[date, ...] = ()
+    # The daily features whose data on this server is behind their version (#297,
+    # ``daily_features.pending_inputs``): a pre-validation reading them waits for it.
+    pending_inputs: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -667,7 +671,11 @@ async def keep_jobs(
             prevalidation_reports, settings.state_dir, everyone, settings.target_version
         )
         nights = await asyncio.to_thread(subscribed_nights, settings.data_dir, calendar, evening(clock.now()))
-        return Facts(recorded, tuple(engine.waiting()), len(engine.members()), reports, tuple(nights))
+        daily = sorted({f for a in engine.daily_registered for f in a.features})
+        pending = await asyncio.to_thread(pending_inputs, daily, settings.state_dir, settings.symbols)
+        return Facts(
+            recorded, tuple(engine.waiting()), len(engine.members()), reports, tuple(nights), tuple(pending)
+        )
 
     scheduler = Scheduler(
         JOBS if jobs is None else jobs,
@@ -874,6 +882,33 @@ STRUCTURE_SUPPLY = Job(
     ),
 )
 
+# KRX's net buys before NXT opened (#264, #297): the supply keeper asks the days before NXT of
+# KIS's KRX investor query (``J``) once, at the collector's first start after the deploy that
+# brings it (06:00); whether ``J`` has figures that far back only the server shows. Once, on the
+# first night after that deploy (trading or not): ``probe-net-buys`` asks ``J`` and ``UN`` for
+# 30 days to each of six days per symbol (36 calls for three, spaced as the supply probe's, a
+# minute or so) and counts what the keeper stored. It prints counts, days and field looks, no
+# market value, so it can go on the public issue. The half hour is a bound. Before the
+# pre-validations: its count of the stored days before NXT says whether Cox's re-run (the flows'
+# version 2, ``daily_features``) runs that night or waits for them (``Facts.pending_inputs``).
+NET_BUYS_PROBE = Job(
+    name="probe-net-buys-j-264",
+    due=_first_night,
+    command=("probe-net-buys",),
+    timeout=timedelta(minutes=30),
+    targets=(
+        Target(
+            DAILY_CHECK_ISSUE,
+            note=(
+                "에이전트가 이 출력으로 KIS `J`가 NXT 개장(2025-03-04) 전의 순매수를 주는지, 수집이 "
+                '그 날들을 저장했는지 확인하고 `docs/kis-feeds.md` "투자자별 순매수"의 ⚠와 Cox의 수급 입력 '
+                "설명에 남긴다. 저장됐으면 같은 밤 `prevalidate-cox`가 그것으로 돌고, 아니면 기다린다. "
+                "출력에는 시세 값이 없다(행 수, 날짜, 개수, 필드 모양만)."
+            ),
+        ),
+    ),
+)
+
 # The night futures (#264): the collector records the KOSPI200 night session's trades and book
 # (18:00–06:00) from the deploy that brings it; what only the server shows is whether KIS
 # streams them for this app key, under the contract code asked for, in the layout of KIS's
@@ -1009,18 +1044,22 @@ def prevalidation_jobs(names: Sequence[str]) -> tuple[Job, ...]:
 # The daily kinds' algorithms' pre-validations (#264): a walk-forward over ten years of KRX day
 # candles (``daily_training``), not a replay of the recorded days, so neither the recorded days'
 # count nor the one-a-night turn of the bar-close ones holds them back: each runs on the first
-# night it waits without a verdict on the code it runs (and again once a deploy changes it, or
-# after a run that left no verdict, on newer code). Minutes, not hours; the hour is a bound.
-# Before the bar-close pre-validations, which may take the rest of the night. Its result goes to
-# #204, with them, and to #264, the daily kind's issue.
+# night it waits without a verdict on the code and inputs it runs (and again once a deploy changes
+# them, or after a run that left no verdict, on newer code). While the data of one of its
+# features is behind the feature's version on this server (#297: KRX's net buys before NXT, until
+# the keeper has stored them), it waits: a run then would be judged on the old data. Minutes, not
+# hours; the hour is a bound. Before the bar-close pre-validations, which may take the rest of the
+# night. Its result goes to #204, with them, and to #264, the daily kind's issue.
 DAILY_PREVALIDATION_TIMEOUT = timedelta(hours=1)
 
 
-def _daily_prevalidation_due(algorithm: str) -> Callable[[Night], bool]:
+def _daily_prevalidation_due(algorithm: str, features: Sequence[str] = ()) -> Callable[[Night], bool]:
     def due(night: Night) -> bool:
         facts = night.facts
         if algorithm not in facts.waiting:
             return False
+        if set(features) & set(facts.pending_inputs):
+            return False  # its data is not all in yet (#297): it would be judged on the old
         report = facts.reports.get(algorithm)
         if report is not None and report.judged:
             return False  # it judged the code the algorithm runs now
@@ -1035,12 +1074,14 @@ def _daily_prevalidation_due(algorithm: str) -> Callable[[Night], bool]:
     return due
 
 
-def daily_prevalidation_jobs(names: Sequence[str]) -> tuple[Job, ...]:
+def daily_prevalidation_jobs(
+    names: Sequence[str], features: Mapping[str, Sequence[str]] | None = None
+) -> tuple[Job, ...]:
     """A pre-validation job for each daily algorithm of ``names`` (#264)."""
     return tuple(
         Job(
             name=prevalidation_job_name(name),
-            due=_daily_prevalidation_due(name),
+            due=_daily_prevalidation_due(name, (features or {}).get(name, ())),
             command=("prevalidate", name),
             timeout=DAILY_PREVALIDATION_TIMEOUT,
             targets=(
@@ -1080,6 +1121,9 @@ JOBS: tuple[Job, ...] = (
     NIGHT_PROBE,
     DAILY_CHECK,
     STRUCTURE_SUPPLY,
-    *daily_prevalidation_jobs([a.name for a in DAILY_ALGORITHMS]),
+    NET_BUYS_PROBE,
+    *daily_prevalidation_jobs(
+        [a.name for a in DAILY_ALGORITHMS], {a.name: a.features for a in DAILY_ALGORITHMS}
+    ),
     *prevalidation_jobs([*(a.name for a in ALGORITHMS), *(a.name for a in KIND_ALGORITHMS)]),
 )

@@ -13,9 +13,11 @@ a model is trained on the values it is given:
   training, the stored closes (``us_daily.move_before``, the macro read's rule).
 - **Flows** (``foreign_net``, ``institution_net``): the previous trading day's net buys from
   KIS's daily supply (``state/supply``, #226; stored at 20:30 that day), as a share of that
-  day's integrated volume (the KRX one where there is none). Toss's values are not read. KIS
-  has no figure before NXT opened (2025-03-04): its 0 there is none (``supply.no_figure``,
-  #270), so those days' flows are missing, not 0.
+  day's integrated volume (the KRX one where there is none). Toss's values are not read. From
+  NXT's opening (2025-03-04) KIS's figures are integrated; before it, KRX's (``J``, #264),
+  the whole market then. A 0 that is KIS's "no figure" is none (``supply.no_figure``, #270),
+  so such a day's flows are missing, not 0. Their version is 2 (``DailyFeature.version``):
+  in version 1 the days before NXT opened had no figure.
 - **The days before** (``oc_1``, ``cc_1``, ``gap_1``, ``range_1``, ``oc_5``, ``vol_ratio``,
   ``sigma``, ``climate_up``, ``climate_down``): the previous trading day's open→close,
   close→close, overnight gap and range, the last five days' mean open→close, each over the
@@ -69,7 +71,7 @@ from krx_quant.feeds.base import KST
 from krx_quant.kinds import Answer
 from krx_quant.macro import Observation, read_partition, reading_before
 from krx_quant.market_calendar import MarketCalendar
-from krx_quant.supply import KIS, read_supply
+from krx_quant.supply import KIS, krx_history_stored, read_supply
 from krx_quant.us_daily import US_DAILY, level_before, move_before, read_us_daily
 
 # The night futures' session: from 18:00 of an evening to 06:00 the next morning (#264).
@@ -115,6 +117,16 @@ class DayContext:
 class DailyFeature:
     meaning: Meaning
     value: Callable[[DayContext], float | None]
+    # Raised when the data the feature reads changes (its source, how far back it has values),
+    # not only its code: the gate takes an algorithm only on a pre-validation of its features'
+    # versions (``input_versions``), as on its code (``prevalidation.admits``). 2 for the flows
+    # (#264, #297): the days before NXT opened have KRX's figures.
+    version: int = 1
+    # The version of the data stored on this server, (state dir, symbols) -> version, when it
+    # can lag ``version`` (a backfill that has not run or failed); None: always ``version``. A
+    # pre-validation records what it read (``stored_versions``), never more, and the scheduled
+    # one waits while it lags (``pending_inputs``).
+    stored: Callable[[Path, Sequence[str]], int] | None = None
 
 
 def _over_sigma(x: float | None, ctx: DayContext) -> float | None:
@@ -187,6 +199,11 @@ def _vix(ctx: DayContext) -> float | None:
     return None if level is None or level <= 0 else math.log(level)
 
 
+def _flows_version(state_dir: Path, symbols: Sequence[str]) -> int:
+    """2 once KRX's net buys before NXT opened are stored for every symbol (#297), else 1."""
+    return 2 if krx_history_stored(state_dir, symbols) else 1
+
+
 _KNOWN = "08:50에 안다."
 DAILY_FEATURES: dict[str, DailyFeature] = {
     "us_sox": DailyFeature(
@@ -216,10 +233,14 @@ DAILY_FEATURES: dict[str, DailyFeature] = {
             "전 거래일 20:30에 받는다.",
         ),
         lambda c: c.flows.get("foreign"),
+        version=2,
+        stored=_flows_version,
     ),
     "institution_net": DailyFeature(
         Meaning("전 거래일 기관 순매수량 ÷ 그날 통합 거래량.", "비율", "전 거래일 20:30에 받는다."),
         lambda c: c.flows.get("institution"),
+        version=2,
+        stored=_flows_version,
     ),
     "oc_1": DailyFeature(Meaning("전 거래일 시가 단일가 → 종가 단일가 변화 ÷ 그날의 σ̂.", "σ̂", _KNOWN), _oc_1),
     "cc_1": DailyFeature(Meaning("전 거래일 종가 → 종가 변화 ÷ σ̂.", "σ̂", _KNOWN), _cc_1),
@@ -269,6 +290,34 @@ DAILY_FEATURES: dict[str, DailyFeature] = {
         lambda c: c.night_futures,
     ),
 }
+
+
+def input_versions(names: Sequence[str]) -> dict[str, int]:
+    """The version of each of the features ``names`` (``DailyFeature.version``): what the
+    code reads, and the gate wants a pre-validation of."""
+    return {n: DAILY_FEATURES[n].version for n in names}
+
+
+def stored_versions(names: Sequence[str], state_dir: Path, symbols: Sequence[str]) -> dict[str, int]:
+    """The version of each of the features ``names`` that the data on this server has
+    (``DailyFeature.stored``; ``version`` where the data cannot lag)."""
+    out: dict[str, int] = {}
+    seen: dict[Callable[[Path, Sequence[str]], int], int] = {}
+    for n in names:
+        stored = DAILY_FEATURES[n].stored
+        if stored is None:
+            out[n] = DAILY_FEATURES[n].version
+            continue
+        if stored not in seen:
+            seen[stored] = stored(state_dir, symbols)
+        out[n] = seen[stored]
+    return out
+
+
+def pending_inputs(names: Sequence[str], state_dir: Path, symbols: Sequence[str]) -> list[str]:
+    """The features of ``names`` whose data on this server is behind their version."""
+    have = stored_versions(names, state_dir, symbols)
+    return [n for n in names if have[n] < DAILY_FEATURES[n].version]
 
 
 def vector(names: Sequence[str], ctx: DayContext) -> FeatureVector:

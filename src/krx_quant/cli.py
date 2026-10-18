@@ -38,6 +38,7 @@ from krx_quant.lifecycle import Status
 from krx_quant.macro import run_macro
 from krx_quant.market_calendar import calendar_store
 from krx_quant.model_shelf import Shelf
+from krx_quant.net_buys_probe import probe_net_buys
 from krx_quant.night_probe import probe_night
 from krx_quant.nightly import from_the_server, run_training
 from krx_quant.notify import send_notice, send_test_alert
@@ -121,6 +122,11 @@ async def _probe_night(day: date | None) -> int:
 
 async def _probe_supply() -> int:
     calls, failed = await probe_supply(Settings.from_env(), datetime.now(KST).date())
+    return 1 if failed == calls else 0  # nothing answered
+
+
+async def _probe_net_buys() -> int:
+    calls, failed = await probe_net_buys(Settings.from_env(), datetime.now(KST).date())
     return 1 if failed == calls else 0  # nothing answered
 
 
@@ -490,6 +496,11 @@ def main(argv: list[str] | None = None) -> int:
         "probe-supply",
         help="ask where KIS gives the daily supply indicators (#226), read-only; prints no market value",
     )
+    sub.add_parser(
+        "probe-net-buys",
+        help="compare KIS's KRX (J) and integrated (UN) investor net buys by era and count the stored"
+        " ones (#264), read-only; prints no market value",
+    )
     night_cmd = sub.add_parser(
         "probe-night",
         help="summarize a recorded KOSPI200 night session (#264), read-only; prints no market value",
@@ -634,6 +645,8 @@ def main(argv: list[str] | None = None) -> int:
             return asyncio.run(_probe_candles())
         elif args.command == "probe-supply":
             return asyncio.run(_probe_supply())
+        elif args.command == "probe-net-buys":
+            return asyncio.run(_probe_net_buys())
         elif args.command == "probe-night":
             return asyncio.run(_probe_night(args.day))
         elif args.command == "registry-password":
