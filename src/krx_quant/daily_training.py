@@ -80,6 +80,12 @@ def _first_day(last: date) -> date:
     return last - timedelta(days=round(365.25 * WALK_YEARS))
 
 
+def training_first(algorithm: DailyAlgorithm, night: date) -> date:
+    """The first day the night of ``night`` reads samples from: its ``training_days`` and room
+    for holidays (the algorithm keeps its latest ``training_days`` of them)."""
+    return night - timedelta(days=round(algorithm.training_days * 1.5) + 120)
+
+
 def _log_loss(kind: DailyKind, forecast: KindForecast, label: str) -> float:
     return -math.log(max(forecast.probabilities[kind.index(label)], LOSS_FLOOR))
 
@@ -97,7 +103,6 @@ class DailyTrainer:
         self, algorithm: DailyAlgorithm, kind: DailyKind, night: date
     ) -> tuple[dict[str, Any], Model | None]:
         """The night's report of ``algorithm`` and its model (None if it learned nothing)."""
-        span = timedelta(days=round(algorithm.training_days * 1.5) + 120)
         found = samples(
             kind,
             self.files,
@@ -105,7 +110,7 @@ class DailyTrainer:
             algorithm.features,
             self.fee_rate,
             calendar=self.calendar,
-            first=night - span,
+            first=training_first(algorithm, night),
             last=night,
         )
         report: dict[str, Any] = {
@@ -225,7 +230,7 @@ def walk_forward(
                 if s.answer is not None and s.label is not None:
                     records[algorithm.name].append(_scored(kind, algorithm.name, model.version, s, forecast))
     first_predicted = predicted[0] if predicted else None
-    for name, scored in _baselines(kind, files, symbols, fee_rate, first_predicted, newest).items():
+    for name, scored in baseline_forecasts(kind, files, symbols, fee_rate, first_predicted, newest).items():
         records[name] = scored
     present = {f: sum(1 for s in found if s.features[f] is not None) for f in algorithm.features}
     return WalkForward(dict(records), predicted, models, folds, slowest, len(found), present)
@@ -247,7 +252,7 @@ def _scored(
     )
 
 
-def _baselines(
+def baseline_forecasts(
     kind: DailyKind,
     files: DailyFiles,
     symbols: Sequence[str],
@@ -255,7 +260,8 @@ def _baselines(
     first: date | None,
     last: date,
 ) -> dict[str, list[KindScored]]:
-    """The kind's baselines' forecasts of every day from ``first`` to ``last``, as at 08:50."""
+    """The kind's baselines' forecasts of every day from ``first`` to ``last``, as at 08:50, each
+    scored on the day's answer (the walk-forward's, a simulated probation's, #298)."""
     out: dict[str, list[KindScored]] = {b.name: [] for b in kind.daily_baselines}
     if first is None or kind.answers is None:
         return out

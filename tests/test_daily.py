@@ -355,31 +355,64 @@ def add_day(store: PredictionStore, day: date, rng: random.Random) -> None:
     store.add_kind_answers(OPEN_TO_CLOSE.name, 1, answered, scored_at=at(day, "20:35"))
 
 
-async def test_a_daily_algorithm_is_judged_on_its_60th_day_with_an_answer(tmp_path: Path) -> None:
-    """The first probation review of a daily kind's algorithm is on its 60th answered day,
-    against the kind's three baselines, by trading day at 98.3% (#264): not on the 59th."""
+async def test_a_daily_algorithm_is_judged_on_its_20th_40th_and_60th_days_with_an_answer(
+    tmp_path: Path,
+) -> None:
+    """The probation reviews of a daily kind's algorithm are on its 20th, 40th and 60th answered
+    days (#298: from 60, 120 and 180), against the kind's three baselines, by trading day at
+    98.3% (#264): not on the 19th. One that has not passed by the 20th is judged again on the
+    40th."""
     store = PredictionStore(tmp_path / "e.sqlite3")
     first = date(2026, 6, 1)
-    days = [d for d in (first + timedelta(days=i) for i in range(120)) if CALENDAR.is_trading_day(d)][:61]
+    days = [d for d in (first + timedelta(days=i) for i in range(120)) if CALENDAR.is_trading_day(d)][:42]
     store.add_status("leaning", at(first, "07:00"), None, Status.PROBATION, "registered")
     store.record_models([("leaning", "leaning-v1", 1)])
     rng = random.Random(5)
-    for day in days[:59]:
-        add_day(store, day, rng)
-    clock = FakeClock(at(days[59], "15:39"))
+    for day in days[:19]:
+        add_flat_day(store, day, rng)
+    clock = FakeClock(at(days[19], "15:39"))
     e = engine(tmp_path / "e.sqlite3", clock, Source({}), algorithms=[Leaning()])
-    assert e.store.kind_answered_days(OPEN_TO_CLOSE.name, 1, days[59], 100)[:2] == [days[58], days[57]]
-    await e._review(at(days[59], "15:40"))
-    assert e.store.statuses()["leaning"].status is Status.PROBATION, "59 days with an answer: not judged yet"
+    await e._review(at(days[19], "15:40"))
+    assert e.store.statuses()["leaning"].status is Status.PROBATION, "19 days with an answer: not judged yet"
 
-    add_day(e.store, days[59], rng)
-    clock.set(at(days[60], "15:39"))
-    await e._review(at(days[60], "15:40"))
+    add_flat_day(e.store, days[19], rng)
+    clock.set(at(days[20], "15:39"))
+    await e._review(at(days[20], "15:40"))
+    assert e.store.statuses()["leaning"].status is Status.PROBATION, "20 days, no lift: not passed"
+    stage = (await e.stages())["leaning"]
+    assert (stage.days, stage.next_review, stage.review_days) == (20, 40, (20, 40, 60))
+
+    for i in range(20, 39):
+        add_day(e.store, days[i], rng)
+        clock.set(at(days[i + 1], "15:39"))
+        await e._review(at(days[i + 1], "15:40"))
+        assert e.store.statuses()["leaning"].status is Status.PROBATION, f"{i + 1} days: not a review day"
+    add_day(e.store, days[39], rng)
+    clock.set(at(days[40], "15:39"))
+    await e._review(at(days[40], "15:40"))
     changed = e.store.status_history("leaning")[-1]
     assert changed["status"] == "active"
-    assert changed["reason"].startswith("60 days on probation; weakest lift low")
+    assert changed["reason"].startswith("40 days on probation; weakest lift low")
+    assert changed["simulated"] is False
     stages = await e.stages()
     assert "leaning" not in stages, "active: no stage"
+
+
+def add_flat_day(store: PredictionStore, day: date, rng: random.Random) -> None:
+    """A made-up day on which ``leaning`` calls flat as the baselines do: no lift."""
+    made, answered = [], []
+    for symbol in SYMBOLS:
+        label = rng.choice(OPEN_TO_CLOSE.classes)
+        flat = {"p_up": 0.0, "p_flat": 1.0, "p_down": 0.0}
+        for name, version in (("leaning", "leaning-v1"), (FLAT_NAME, "v1"), (CLIMATE, "v1"), (PERSIST, "v1")):
+            made.append(
+                NewKindPrediction(
+                    symbol, name, version, OPEN_TO_CLOSE.predicted_at(day), at(day, "08:50"), flat
+                )
+            )
+        answered.append((symbol, OPEN_TO_CLOSE.predicted_at(day), Answer(label, None, {}), False))
+    store.add_kind_predictions(OPEN_TO_CLOSE.name, made)
+    store.add_kind_answers(OPEN_TO_CLOSE.name, 1, answered, scored_at=at(day, "20:35"))
 
 
 class Named:

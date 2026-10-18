@@ -16,8 +16,9 @@ What it shares with the other kinds:
   time, 08:50 of the day) and its answers to ``kind_answers``, one per (kind, symbol, day,
   answer version), every predictor of the day scored on it;
 - the lifecycle rules, with its own days (``DailyKind.review_rules``): a day is one value per
-  symbol, so a status is judged on 60, 120 and 180 trading days with an answer, never on the
-  10 days of a bar-close kind's probation.
+  symbol, so a status is judged on 20, 40 and 60 trading days with an answer, never on the 10
+  days of a bar-close kind's probation; its probation begins with the latest 20 trading days
+  simulated (#298, ``simulation.py``), so the first of them is judged at once.
 
 **Prediction.** On each trading day at ``predict_at`` the runner gives every daily kind's
 baselines and its algorithms (``DailyAlgorithm``, admitted as any algorithm is: pre-validated)
@@ -87,13 +88,15 @@ NO_BAND = "no band"  # too few days before it to set the flat band
 HISTORY_DAYS = 1_000
 
 # The lifecycle of a daily kind's algorithms (#264): a trading day is one value per symbol, so
-# a status is judged once 60 trading days have an answer, then at 120 and 180 (probation), and
-# on the bench likewise; the level is the bar-close kinds' (98.3%, three looks).
-DAILY_RULES = Rules(probation_days=(60, 120, 180), bench_days=(60, 120, 180), confidence=0.983)
+# a status is judged once 20 trading days have an answer, then at 40 and 60 (probation), and on
+# the bench likewise; the level is the bar-close kinds' (98.3%, three looks). A probation's
+# first 20 days are simulated (#298): the latest 20 trading days replayed as if it had been on
+# probation, judged at once.
+DAILY_RULES = Rules(probation_days=(20, 40, 60), bench_days=(20, 40, 60), confidence=0.983)
 # The latest days an active algorithm is benched on, and a benched one recovers on.
-DAILY_RECENT_DAYS = 60
+DAILY_RECENT_DAYS = 20
 # The scored predictions, and the pairs with each baseline, a decision needs at least: the
-# 60 days of one symbol (three symbols give 180 by the first review).
+# 20 days of three symbols (the first review's).
 DAILY_MIN_SAMPLE = 60
 
 

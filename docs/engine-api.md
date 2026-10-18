@@ -218,7 +218,10 @@
 | `model_targets` | `algorithm`, `version`, `target_version`(1, 2 또는 3. 다른 종류의 알고리즘은 그 종류의 정답 버전. 기본 모델과 기록되기 전 모델은 비어 있음): 엔진이 돌린 모델마다 그 모델을 학습한 정답 버전(#170). 엔진이 시작할 때와 모델을 바꿀 때 쓴다. 상태 판정, 합의 가중치, 순위표와 통계가 예측의 `model_version`을 이것으로 거른다. 따로 둔 표다 |
 | `touches` | `symbol`, `bar_close`, `target_version`(지금 3. 2는 #187 전에 쓴 행으로 남는다), `class`(`up`/`flat`/`down`, 채점할 수 없으면 비어 있음), `unscorable`(`missing mid`, `rest quotes`, `silent quotes`, `restarted`, `not recorded`), `path`(JSON: 아래 `touch`의 경로 필드), `scored_at`. 봉 마감의 도달 정답(#160, #167). 예측이 아니라 (종목, 봉 마감)마다 하나고, 예측하지 않은 봉 마감(VI 등)에도 있다. `blocks`처럼 따로 둔 표라 옛 엔진도 DB를 연다. 엔진은 이미 있는 봉 마감을 덮어쓰지 않는다. 지난 예측의 빠진 행은 엔진이 시작할 때 녹화로 채우고(`scored_at`은 그 4분이 끝난 시각), 다른 값으로 바꾸는 것은 `rescore`뿐이다(아래 "지난 예측의 도달 정답", #168) |
 | `runs` | `id`, `kind`(`cpu_budget`: CPU 예산으로 건너뜀, `review`: 일일 상태 점검, `retire_candidate`: 은퇴 후보 알림, `budget_report`: 그날 예산 때문에 빠진 예측을 알림(#71), `no_regime`: 그날 매크로 국면이 없거나 엔진이 모르는 이름이어서 기본 전이행렬로 돈 날, 첫 봉 마감에 하루 한 번(`detail`에 `(unknown: <이름>)`), `start`: 수집기가 엔진을 시작함(`detail`은 JSON: `commit`, `fee_rate`, `signal_rule`(`min_probability`, `min_agree`, 끄면 `null`), `algorithm_seconds`, `cpu_budget_seconds`. 성적을 코드와 설정별로 가르는 근거, #85), `signal_sent`: 보낸 텔레그램 신호, `signal_blocked`: 막힌 텔레그램 신호(둘 다 판정할 때마다 하나씩, `detail`은 JSON, 아래 "텔레그램 신호 알림", #80), `touch_fill`: 엔진이 시작할 때 지난 예측의 도달 정답을 채움(한 행이라도 썼을 때), `rescore`: `krx-quant rescore`를 돌림(둘 다 `detail`은 날마다 `day`, `source`(녹화를 읽은 곳), `labeled`(녹화로 낸 창 수), `written`(쓴 행 수), `not_recorded`, `failed`(읽지 못한 이유)의 JSON 목록, #168), `kind_fill`: 엔진이 시작할 때 다른 종류의 지난 정답을 채움(한 행이라도 썼을 때. `detail`은 `touch_fill`과 같은 JSON 목록이고, `labeled`는 답한 창 수, `not_recorded`는 녹화가 없는 예측된 봉 마감 수다, #180), `target`: 상태가 도달 정답으로 다시 시작됨(`detail` `2`. 엔진이 이 DB를 처음 열 때 한 번, #170), `special_fill`: 엔진이 시작할 때 지난날의 특수 상황 구간을 채움(한 날이라도 판정했을 때. `detail`은 `touch_fill`과 같은 JSON 목록이고, `labeled`는 판정한 구간 수, `written`은 쓴 행 수, `source`가 `null`이면 그날 녹화가 어디에도 없었다, #236)), `at`, `algorithm`, `detail` |
-| `statuses` | `id`, `algorithm`, `at`, `previous`, `status`, `reason`: 알고리즘 상태 이력(#17) |
+| `statuses` | `id`, `algorithm`, `at`, `previous`, `status`, `reason`, `simulated`(그 판정이 시뮬레이션 날을 셌으면 1, #298): 알고리즘 상태 이력(#17) |
+| `simulation_runs` | `id`, `made_at`, `cadence`(`daily`: 날마다 다시 학습), `days`(JSON: 재생한 날, 오래된 것부터): 수습 시뮬레이션의 재생 한 번(#298, 위 "상태 관리"). 따로 둔 표다 |
+| `simulations` | `algorithm`, `stint`(그 수습이 시작된 시각, 그 상태의 `statuses.at`), `kind`, `run`(`simulation_runs.id`. 시뮬레이션하지 못했으면 비어 있음), `made_at`, `detail`(JSON: `training`(어떻게 학습했는지. 하루 한 번 종류는 날마다의 모델 `models`), `review`(바로 한 판정: `days`, `review_day`, `scored`, `enough`, `weakest`, `status`, `reason`), 시뮬레이션하지 못했으면 `why`). (알고리즘, 수습)마다 하나다. 따로 둔 표다 |
+| `sim_kind_predictions` | `run`, `kind`, `symbol`, `algorithm`(시뮬레이션한 알고리즘, 그 종류의 기준 예측), `model_version`, `model_target`(그 모델이 학습한 정답 버전, 기본 모델은 비어 있음), `bar_close`, `status`, `output`, `flat_ticks`, `width_ticks`, `anchor`, `tick`, `band`(`kind_predictions`와 같다), `answer_version`, `answer_class`, `answer_unscorable`, `answer_special`, `answer_path`(그 예측을 채점한 정답, `kind_answers`와 같은 값): 시뮬레이션의 다른 종류(하루 한 번 종류 포함) 예측. 실시간 표(`kind_predictions`, `kind_answers`)와 따로 둔다. 순위표와 통계는 읽지 않고 상태 판정만 읽는다. 따로 둔 표다 |
 | `consensus_fits` | `version`, `computed_at`: 합의 가중치를 계산한 기록(#18). 엔진은 시작할 때 마지막 버전을 읽는다. |
 | `consensus_weights` | `version`, `symbol`, `slot`, `algorithm`, `weight`: 그 버전의 칸별 가중치 |
 | `kind_predictions` | `id`, `kind`, `symbol`, `algorithm`(그 종류의 알고리즘이나 기준 예측), `model_version`, `bar_close`, `displayed_at`, `status`(`predictions`와 같은 값: `ok`, `timed_out`, `error`, `vi`, `no_book`, `no_previous`), `output`(JSON: `p_<클래스>` 셋과 종류의 추가 필드, `ok`가 아니면 비어 있음), `flat_ticks`(봉 마감의 k: 그 예측이 받은 보합 폭, #200. 상태와 상관없이 있다. 봉 마감 중간가가 없으면, 그리고 #200 전에 쓴 행은 비어 있음), `width_ticks`(장벽이 있는 종류의 봉 마감 장벽 폭 w, #183: 그 봉 마감의 정답이 쓰는 폭. 상태와 상관없이 있다. 장벽이 없는 종류(변동폭), 봉 마감 중간가가 없을 때, #183 전에 쓴 행은 비어 있음), `anchor`(봉 마감 통합 중간가, #210: 그 봉 마감 정답의 기준 가격. 상태와 상관없이 있다. 봉 마감 중간가가 없으면, 그리고 #210 전에 쓴 행은 비어 있음), `tick`(그 중간가의 호가단위, #210. `anchor`가 비면 비어 있음), `band`(하루 한 번 예측 종류의 그날 보합 폭, #264: 종가 ÷ 시가 − 1의 크기로, 그날 전의 날로 정한 값. 봉 마감 종류와 보합 폭을 정할 날이 모자란 날은 비어 있음). 방향 말고 다른 종류의 예측(#179, 아래 "예측 종류"). 하루 한 번 예측 종류(#264)는 `bar_close`가 그날의 예측 시각(08:50)이다. (`kind`, `symbol`, `algorithm`, `bar_close`)마다 하나다. 따로 둔 표라 옛 엔진도 DB를 연다 |
@@ -226,7 +229,7 @@
 | `special_windows` | `kind`(`vi`, `circuit_breaker`, `sidecar`), `symbol`(VI의 종목, 시장 전체면 비어 있음), `start`, `end`(해제 시각. 해제를 아직 모르는 VI는 발동 + 3분, 서킷브레이커 3단계는 그날 끝), `detail`(서킷브레이커의 `1단계`·`2단계`·`3단계`, VI 종류 `static`·`dynamic`·`both`, 그 밖에는 비어 있음), `learned_at`(이 판을 받은 시각). 엔진이 알게 된 특수 상황 구간(#236, 위 "특수 상황"). (`kind`, `symbol`, `start`)마다 하나이고, 새 판을 알면 그 행의 `end`, `detail`, `learned_at`을 바꾼다. 지난날은 엔진이 시작할 때 녹화로 채운다(아래 "지난 특수 상황 구간"). 따로 둔 표다 |
 | `special_days` | `day`, `source`(녹화를 읽은 곳. 어디에도 없었으면 비어 있음), `windows`(판정한 구간 수), `decided_at`. 녹화로 특수 상황 구간을 판정한 지난날(#236). 구간이 없던 날도 남아서 다음 시작 때 다시 읽지 않는다. 따로 둔 표다 |
 
-`predictions`에는 (`algorithm`, `bar_close`) 인덱스도 있다(#170, 알고리즘마다 도달 정답 모델의 첫 예측을 찾는다). `kind_predictions`에는 (`kind`, `bar_close`), (`kind`, `symbol`, `bar_close`), (`algorithm`, `bar_close`) 인덱스가 있다(#179). 새 표와 인덱스는 스키마 버전을 올리지 않는다. `kind_predictions.flat_ticks`(#200)도 스키마 버전을 올리지 않고 더한 열이다: 엔진이 열 때 그 열이 없는 DB(#200 전)에 `ALTER TABLE … ADD COLUMN`으로 더한다(`predictions._ADDED_COLUMNS`). 옛 엔진은 쓰는 열을 이름으로 적으므로 그 열이 있는 DB도 열고 쓴다. 그 행의 `flat_ticks`는 비어 있다. `kind_predictions.width_ticks`(#183)와 `anchor`·`tick`(#210), `band`(#264)도 같은 방식으로 더한 열이다. `special_windows`(유일 인덱스 (`kind`, `ifnull(symbol, '')`, `start`)와 `start` 인덱스)와 `special_days`(#236)도 스키마 버전을 올리지 않은 새 표다.
+`predictions`에는 (`algorithm`, `bar_close`) 인덱스도 있다(#170, 알고리즘마다 도달 정답 모델의 첫 예측을 찾는다). `kind_predictions`에는 (`kind`, `bar_close`), (`kind`, `symbol`, `bar_close`), (`algorithm`, `bar_close`) 인덱스가 있다(#179). 새 표와 인덱스는 스키마 버전을 올리지 않는다. `kind_predictions.flat_ticks`(#200)도 스키마 버전을 올리지 않고 더한 열이다: 엔진이 열 때 그 열이 없는 DB(#200 전)에 `ALTER TABLE … ADD COLUMN`으로 더한다(`predictions._ADDED_COLUMNS`). 옛 엔진은 쓰는 열을 이름으로 적으므로 그 열이 있는 DB도 열고 쓴다. 그 행의 `flat_ticks`는 비어 있다. `kind_predictions.width_ticks`(#183)와 `anchor`·`tick`(#210), `band`(#264)도 같은 방식으로 더한 열이다. `special_windows`(유일 인덱스 (`kind`, `ifnull(symbol, '')`, `start`)와 `start` 인덱스)와 `special_days`(#236)도 스키마 버전을 올리지 않은 새 표다. 수습 시뮬레이션의 표 `simulation_runs`, `simulations`, `sim_kind_predictions`(인덱스 (`run`, `kind`, `bar_close`))도 그렇고, `statuses.simulated`(#298)는 `band`처럼 더한 열이다(기본 0).
 
 시각은 KST ISO 8601 문자열이다. 스키마 버전은 `PRAGMA user_version`에 있다(지금 4). 엔진이 시작할 때 예전 버전의 DB를 데이터를 지키며 올린다. 더 새 버전의 DB는 거부하고 시작하지 않는다(`... was written by a newer engine (schema N)`). 그래서 스키마를 올린 엔진을 배포한 뒤에는 옛 커밋으로 되돌려도 엔진이 뜨지 않는다([operations.md](operations.md#4-업데이트-배포) 4장).
 
@@ -849,7 +852,7 @@
       ],
       "daily": {
         "predict_at": "08:50", "from": "open", "to": "close", "from_title": "시가 단일가", "to_title": "종가 단일가",
-        "answer_from": "20:35", "probation_days": [60, 120, 180], "bench_days": [60, 120, 180], "recent_days": 60
+        "answer_from": "20:35", "probation_days": [20, 40, 60], "bench_days": [20, 40, 60], "recent_days": 20
       }
     }
   ]
@@ -1216,7 +1219,9 @@
 
     > **바뀜** (2026-10-18, #293): "스트림의 `kind_prediction`·`kind_answer`는 아직 보내지 않는다" → 보낸다. 이유: #264의 엔진 API PR이다.
 - **API.** 다른 종류의 엔드포인트를 그대로 쓴다.
-  - `GET /v1/kinds`: 봉 마감 종류 다음에 온다. `horizon_minutes`가 `null`이고(봉 마감이 없다), `daily`가 그날의 시각을 말한다: `predict_at`(`"08:50"`, KST, 거래일마다), `from`·`to`(`open`·`close`: 시가 단일가에서 종가 단일가까지), `from_title`·`to_title`(화면용 이름), `answer_from`(`"20:35"`: 정답을 처음 보는 시각), `probation_days`·`bench_days`(판정하는 정답 있는 날, `[60, 120, 180]`), `recent_days`(60). 봉 마감 종류의 `daily`는 `null`이다.
+  - `GET /v1/kinds`: 봉 마감 종류 다음에 온다. `horizon_minutes`가 `null`이고(봉 마감이 없다), `daily`가 그날의 시각을 말한다: `predict_at`(`"08:50"`, KST, 거래일마다), `from`·`to`(`open`·`close`: 시가 단일가에서 종가 단일가까지), `from_title`·`to_title`(화면용 이름), `answer_from`(`"20:35"`: 정답을 처음 보는 시각), `probation_days`·`bench_days`(판정하는 정답 있는 날, `[20, 40, 60]`), `recent_days`(20). 봉 마감 종류의 `daily`는 `null`이다.
+
+    > **바뀜** (2026-10-19, #299): `probation_days`·`bench_days` `[60, 120, 180]`, `recent_days` 60 → `[20, 40, 60]`, 20. 이유: 아래 "상태"와 같다(#298).
   - `GET /v1/symbols/{symbol}/kinds/open_to_close/latest`, `…/predictions`: 항목의 `bar_close`가 예측 시각(그날 08:50), `target_at`이 그날 장 마감(종가 단일가 끝, 보통 15:30, 수능일 16:30)이다. `band`가 그날의 보합 폭이다(봉 마감 종류는 `null`). `flat_ticks`, `width_ticks`, `anchor`, `tick`은 `null`이다. `answer`는 그날 KRX 일봉이 저장되어 정답을 쓴 뒤(20:35부터) 찬다. `?bar_close=2026-10-12T08:50:00+09:00`으로 그날 것을 읽는다. `limit`은 날(예측 시각)의 개수다.
   - `GET /v1/leaderboard?kind=open_to_close`, `GET /v1/algorithms/{cox, otc-flat, otc-climate, otc-persist}/stats`: 다른 종류와 같다. `period`의 `5d`·`20d`는 예측이 있는 최근 날이다(오늘 정답은 20:35 뒤). `extra`는 `open_to_close_stats`(아래 "시가→종가"의 "통계"). 상세 통계의 `by_slot`은 예측 시각의 30분 칸이라 늘 `08:30` 하나다.
   - `GET /v1/algorithms`: 돌기 시작한 `cox`가 `kind` `open_to_close`로 나온다. `feature_meanings`는 하루 한 번 예측의 피처(`daily_features.DAILY_FEATURES`)의 뜻이다. `validation`은 그 밤 리포트(늘 승격, `champion`이 `null`)다. `stage`는 정답이 있는 날로 센다.
@@ -1224,10 +1229,13 @@
   - 데모 엔진: 10-08까지 마지막 20거래일의 기준 예측 셋과 `cox`(그 전 날로 학습한 모델)의 예측과 정답(20:35), 그리고 10-12 08:50의 예측(정답 전)이 있다. KRX 일봉(`krx.parquet`)은 데모 일봉과 같은 날에 시가가 가끔 한 틱 다르다.
 - **특수 상황.** 그날 서킷브레이커나 사이드카(시장 전체의 구간, `special_windows`)가 있었으면 그날 모든 종목의 정답이 특수(`special`)이고, 다른 종류처럼 기본 통계에서 빠진다. VI는 특수가 아니다: 한 종목의 2분 단일가이고, 두 끝(시가 단일가와 종가 단일가)의 가격은 그대로 정해진다. 4분 창은 VI가 창의 절반을 멈추지만, 하루 창에서는 몇 분이다. VI가 잦은 날을 빼면 큰 날만 통계에서 빠진다. 그래서 정답의 경로에 그날 그 종목의 VI 수(`vi`)만 남긴다.
 - **상태.** 위 "상태 관리"의 규칙을 그 종류의 날로 쓴다(`DailyKind.review_rules`, `recent_days`, `min_sample`).
-  - 하루는 종목마다 값 하나다. 그래서 수습 판정은 정답이 있는 날 60·120·180일째에만, 벤치 회복도 벤치 60·120·180일째에만 한다. 정식 → 벤치와 벤치 회복은 최근 60일로 본다. 신뢰수준(98.3%, 세 번 보는 본페로니)은 같다.
-  - 판정에 필요한 채점된 예측 수와 기준 예측마다의 짝은 `KRX_MIN_SAMPLE`(200) 대신 60이다. 세 종목이면 60일에 180개다.
-  - 날은 정답이 있는 날만 센다(`PredictionStore.kind_answered_days`). 15:40 점검 때 그날 정답은 아직 없다(20:35 뒤에 쓴다). 그래서 60번째 날의 판정은 그다음 거래일 점검이다.
-  - 실시간 성적(통계)은 첫날부터 쌓인다. 판정만 60일을 기다린다.
+  - 하루는 종목마다 값 하나다. 그래서 수습 판정은 정답이 있는 날 20·40·60일째에만, 벤치 회복도 벤치 20·40·60일째에만 한다. 정식 → 벤치와 벤치 회복은 최근 20일로 본다. 신뢰수준(98.3%, 세 번 보는 본페로니)은 같다.
+  - 판정에 필요한 채점된 예측 수와 기준 예측마다의 짝은 `KRX_MIN_SAMPLE`(200) 대신 60이다. 세 종목이면 20일에 60개다. 그래서 첫 판정은 한 종목이라도 하루가 빠지면 하지 못하고 40일째로 넘어간다.
+  - 수습의 첫 20일은 시뮬레이션이다(위 "상태 관리"의 "수습 시뮬레이션"): 사전 검증을 통과한 그 밤에 최근 20거래일을 그 알고리즘이 수습으로 돌았다고 치고 다시 재생하고, 20일째 판정을 바로 한다. 통과하면 다음 08:50부터 정식이고, 못 하면 실시간 날이 21일째부터 더해져 40일째에 다시 판정한다.
+  - 날은 정답이 있는 날만 센다(`PredictionStore.kind_answered_days`). 15:40 점검 때 그날 정답은 아직 없다(20:35 뒤에 쓴다). 그래서 40번째 날의 판정은 그다음 거래일 점검이다.
+  - 실시간 성적(통계)은 첫날부터 쌓인다. 시뮬레이션 날은 실시간 통계에 들지 않는다.
+
+  > **바뀜** (2026-10-19, #299): 수습·벤치 판정 60·120·180일째, 최근 60일 → 20·40·60일째, 최근 20일. 수습의 첫 20일은 시뮬레이션으로 바로 판정한다. 표본 60개는 그대로다(이제 20일 × 3종목). 이유: 수습을 실시간으로 몇 주씩 기다리지 않으려고 최근 거래일을 재생해 바로 판정하기로 했고, 하루 한 번 종류도 4분 종류와 같은 수준의 판정 기간으로 줄이기로 사용자가 정했다(2026-10-19, #298). 20일 × 3종목 = 60개라 통과가 어렵다는 것은 알고 정했다.
 
 ## 시가→종가 (#264)
 
@@ -1328,9 +1336,17 @@
 
   > **바뀜** (2026-10-14, #193): 수습은 상태가 시작된 날(점검 뒤면 다음 날)부터 셌다 → 도달 정답 모델로 처음 예측한 날부터. 이유: 정답이 바뀐 날 옛 정답 모델로 돈 날을 세지 않으려고(#160 "수습 시작").
 - **정답이 바뀌는 날(#170, #187).** 엔진이 DB를 처음 열 때(배포한 날) 그 DB가 모르는 정답 버전이면 은퇴가 아닌 그 정답의 모든 알고리즘(정식, 벤치, 복제, 수습)이 수습으로 한 번 돌아간다. 방향은 도달 정답의 버전(`touch.TARGET_VERSION`), 다른 종류는 그 종류의 정답 버전(2 이상)이다. 이유는 `the <종류> target changed to version <버전>: probation restarts with a model trained on it`(#187: 방향은 `the direction target changed to version 3: …`, 장벽 알고리즘은 `the barrier target changed to version 2: …`)이고, `runs`에 `target`(`detail`은 방향이 `3`, 다른 종류가 `barrier 2`처럼 이름과 버전)이 남아 다시 하지 않는다. 정답 버전이 그대로인 종류(변동폭)의 알고리즘은 돌아가지 않는다. #170 때(정답 버전 2)의 이유는 `the target changed to the touch target (#170): probation restarts with a model trained on it`, `detail`은 `2`였다. 옛 정답 판정은 그날 멈춘다. 그날 밤 학습은 champion이 다른 정답 버전의 모델이면 성적 비교 없이 새 모델을 올린다(아래 "학습", [operations.md](operations.md#밤-학습과-모델-교체-22)). 그래서 보통 다음 거래일 08:00 교체가 도달 정답 모델을 올리고, 그날부터 수습을 센다. 학습이 실패했거나 교체되지 않은 알고리즘, 휴일 배포는 실제로 올라간 날까지 세지 않는다. 정식이 없으므로 첫 판정(수습 10거래일째)까지 합의는 `no_members`이고 신호도 없다.
+- **수습 시뮬레이션(#298, `simulation.py`).** 수습을 실시간으로 몇 주씩 기다리지 않고 바로 판정한다. 최근 거래일을 "그 알고리즘이 그때 수습으로 돌았다"고 치고 다시 재생해, 그 날들을 수습의 첫 날들로 센다.
+  - **언제.** 사전 검증을 통과해 수습이 시작될 때(이유 `registered`)와 정답 버전이 바뀌어 수습이 다시 시작될 때(`target_changed`, #170, #187)다. 명령으로 되돌린 수습(`unretire`)과 복제에서 돌아온 수습은 시뮬레이션하지 않는다. 수습 하나에 한 번이다(`simulations`, 알고리즘과 그 수습이 시작된 시각마다). 시뮬레이션할 수 없었던 수습(예: 그 날들 앞의 데이터로 배울 것이 없음)은 그 이유와 함께 남고 실시간으로 이어진다. 서버에서는 예약 작업이 돌린다([operations.md](operations.md#예약-작업-215)): 하루 한 번 종류는 `simulate-daily-298`(사전 검증을 통과한 그 밤).
+  - **하루 한 번 종류**(`krx-quant simulate daily`). 정답이 있는 최근 20거래일이다. 날마다 그 전 거래일 밤의 학습처럼(그 날까지의 최근 `training_days`) 다시 맞춘 모델로, 그날 08:50까지 알던 피처(`daily_features.samples`, 실시간과 같은 계산)로 예측한다. 배울 것이 없는 밤(`NothingToLearn`)은 실시간처럼 그 전 밤의 모델을 그대로 쓴다. 첫 밤부터 배울 것이 없으면 기본 모델이 예측해 어느 날도 세지 않으므로 시뮬레이션하지 않는다. 그 종류의 기준 예측도 08:50에 냈을 대로 예측한다. 정답은 지금 정답 버전의 규칙으로 KRX 일봉에서 만들고, 그날 서킷브레이커나 사이드카가 있었으면 특수다(실시간과 같다). 사전 검증을 통과했지만 엔진이 아직 수습에 올리지 않은 알고리즘(엔진은 다음 시작이나 08:50에 리포트를 읽는다)은 이 명령이 엔진처럼 수습에 올린다(`registered`). 그래서 통과한 그 밤에 판정까지 끝난다.
+  - **판정.** 재생이 끝나면 그 날 수가 닿는 가장 큰 판정일의 판정을 바로 한다(`lifecycle.review_at_once`): 하루 한 번 종류는 20일째. 기준은 그대로다: 그 날들 전체에서 가장 약한 lift의 거래일 단위 하한이 98.3%에서 0보다 커야 한다. 복제 검사도 그 날들로 한다. 통과하면 지금부터 `active`이고, 못 하면 수습이 이어져 실시간 날이 N+1일째부터 더해지고 다음 판정일에 그 날들과 함께 판정한다. 시뮬레이션의 판정이 바꾼 상태의 이유는 `simulated probation <첫날>..<끝날> (<N> days): …`로 시작한다. 시뮬레이션 날을 센 실시간 판정의 이유는 `…; <K> of the days simulated`로 끝난다. 둘 다 `statuses.simulated`가 1이다.
+  - **세는 법.** 그 수습의 날은 시뮬레이션한 날들, 그 뒤의 실시간 날 순이다. 재생한 날에 실시간으로도 수습을 돌았으면 그날은 한 번만(시뮬레이션으로) 센다. 시뮬레이션 날에는 그 알고리즘과 그 종류의 기준 예측, 같이 재생한 알고리즘의 예측을 시뮬레이션의 것으로 읽고, 다른 알고리즘(복제 검사의 상대)은 실시간 예측을 읽는다. 정식 → 벤치와 벤치 회복의 최근 기간도 그 알고리즘의 시뮬레이션 날에는 시뮬레이션 예측을 읽는다. 수습을 통과한 날들이 곧바로 실시간 며칠의 잡음만으로 판정되지 않게, 실시간만으로 통과한 알고리즘(최근 기간에 수습 날이 들어 있다)과 같게 하려는 것이다.
+  - **따로 둔다.** 시뮬레이션 예측은 실시간 예측과 따로 저장한다(아래 "저장"의 `simulation_runs`, `simulations`, `sim_kind_predictions`). 순위표, 상세 통계, 합의 가중치, 스트림의 예측, 진단은 실시간 예측만 읽는다. 그래서 순위표의 기간(오늘·5일·20일)에 시뮬레이션 날은 들지 않는다. 시뮬레이션 날은 수습의 `stage`(센 날과 그중 시뮬레이션 날)와 상태 이력으로만 보인다.
 - 수습과 벤치의 알고리즘이 판정까지 어디쯤인지는 `/v1/algorithms`의 `stage`로 본다(#165): 마지막 점검까지 센 날, 다음 판정일과 그날이 되는 날, 판정에 쓰는 가장 약한 lift의 거래일 단위 구간. 점검과 같은 코드(`lifecycle.stages`, `_Judge`)와 같은 날들(수습은 센 날 모두, 벤치는 최근 20거래일)로 잰다.
 - 복제 판정은 같은 종류에서 은퇴하지 않은 먼저 등록된 알고리즘과만 비교한다. 짝이 30개 미만이거나 한쪽 값이 늘 같아 상관을 잴 수 없으면 상태를 그대로 둔다.
-- 다른 종류의 알고리즘(#179)도 같은 규칙과 날짜로 점검한다. 같은 점검에서 종류마다 따로, 그 종류의 예측이 있는 날과 그 종류의 기준 예측으로 본다(위 "예측 종류"). 하루 한 번 예측 종류(#264)의 알고리즘은 같은 점검에서 그 종류의 날로 본다: 정답이 있는 날 60·120·180일째에 판정하고, 정식 → 벤치와 벤치 회복은 최근 60일, 판정에 필요한 표본과 짝은 60개다(위 "하루 한 번 예측 종류"의 "상태").
+- 다른 종류의 알고리즘(#179)도 같은 규칙과 날짜로 점검한다. 같은 점검에서 종류마다 따로, 그 종류의 예측이 있는 날과 그 종류의 기준 예측으로 본다(위 "예측 종류"). 하루 한 번 예측 종류(#264)의 알고리즘은 같은 점검에서 그 종류의 날로 본다: 정답이 있는 날 20·40·60일째에 판정하고, 정식 → 벤치와 벤치 회복은 최근 20일, 판정에 필요한 표본과 짝은 60개다(위 "하루 한 번 예측 종류"의 "상태").
+
+  > **바뀜** (2026-10-19, #299): 하루 한 번 예측 종류는 60·120·180일, 최근 60일 → 20·40·60일, 최근 20일. 이유: 수습 시뮬레이션(아래)으로 첫 판정을 바로 하고, 판정 기간을 4분 종류와 같은 수준으로 줄이기로 사용자가 정했다(2026-10-19, #298).
 
   > **바뀜** (2026-10-18, #291): 모든 종류가 같은 날짜(수습 10·20·40일, 최근 20일, `KRX_MIN_SAMPLE`)로 판정됐다 → 하루 한 번 예측 종류는 60·120·180일, 최근 60일, 표본 60개. 이유: 하루에 종목마다 값이 하나라 10거래일 수습은 너무 짧다. 정식 판정은 60거래일 이상 쌓인 뒤에 하기로 사용자가 정했다(2026-10-18, #264).
 

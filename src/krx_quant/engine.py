@@ -86,8 +86,14 @@ The daily kinds (#264, ``daily.py``: ``open_to_close``) are run apart from the b
 ``daily.DailyRunner``: once a trading day at their time (08:50) their baselines and admitted
 algorithms predict every symbol from the KRX days before, and once the day's KRX day candles
 are stored (after 20:30) each day's answer is written. Each daily review judges a daily kind's
-algorithms by its own days (``DailyKind.review_rules``: 60, 120 and 180 days with an answer).
+algorithms by its own days (``DailyKind.review_rules``: 20, 40 and 60 days with an answer).
 An engine given no source of the KRX days (``daily``: replays, tests) runs no daily kind.
+
+A probation that begins for a new algorithm or a new target can be simulated (#298,
+``simulation.py``, by a scheduled job): the latest trading days replayed as if the algorithm had
+been on probation, kept apart from the live predictions (``sim_kind_predictions``). The reviews
+and the stages count those days first, then the live days after them (``lifecycle.Simulated``);
+the leaderboard, the statistics and the consensus weights read the live predictions only.
 """
 
 from __future__ import annotations
@@ -173,7 +179,17 @@ from krx_quant.kinds import (
 )
 from krx_quant.kinds import NO_PREVIOUS as KIND_NO_PREVIOUS
 from krx_quant.kinds import Kind as PredictionKind
-from krx_quant.lifecycle import Review, Rules, Stage, Standing, Status, review, target_changed
+from krx_quant.lifecycle import (
+    REGISTERED,
+    Review,
+    Rules,
+    Simulated,
+    Stage,
+    Standing,
+    Status,
+    review,
+    target_changed,
+)
 from krx_quant.lifecycle import stages as stages_now
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.market_view import (
@@ -574,7 +590,7 @@ class PredictionEngine:
         running: list[Algorithm | KindAlgorithm] = [*admitted, *kind_admitted]
         for a in [*running, *daily_admitted]:
             if a.name not in known:
-                self.store.add_status(a.name, self.clock.now(), None, Status.PROBATION, "registered")
+                self.store.add_status(a.name, self.clock.now(), None, Status.PROBATION, REGISTERED)
         self.algorithms = tuple(admitted)
         self.kind_algorithms = tuple(kind_admitted)
         self.daily_algorithms = tuple(daily_admitted)
@@ -587,6 +603,18 @@ class PredictionEngine:
             + [a.name for a in self.kind_registered if a not in self.kind_algorithms]
             + [a.name for a in self.daily_registered if a not in self.daily_algorithms]
         )
+
+    def to_simulate(self) -> tuple[list[str], list[str]]:
+        """The algorithms on a probation that waits for its simulation (#298,
+        ``PredictionStore.to_simulate``): the bar-close kinds', then the daily kinds'."""
+        bar_close = [a.name for a in self.registered] + [a.name for a in self.kind_registered]
+        daily = [a.name for a in self.daily_registered]
+        return self.store.to_simulate(bar_close), self.store.to_simulate(daily)
+
+    def simulated(self, kind: PredictionKind) -> dict[str, Simulated]:
+        """The algorithms of ``kind`` with a simulated probation (#298), as the reviews and the
+        stages count its days (``PredictionStore.simulated``)."""
+        return self.store.simulated(kind.name, kind.answer_version)
 
     def daily_kind_named(self, name: str) -> DailyKind | None:
         """A daily kind the engine predicts (#264)."""
@@ -779,6 +807,7 @@ class PredictionEngine:
             alerted=alerted,
             rules=self.review_rules,
             baselines=self.baseline_names,
+            simulated=self.simulated(DIRECTION_KIND),
         )
         # Each kind's algorithms, within the kind, against its baselines (#179).
         for kind in self.kinds:
@@ -798,6 +827,7 @@ class PredictionEngine:
                 rules=self.review_rules,
                 baselines=frozenset(b.name for b in kind.baselines),
                 scoring=kind_scoring(kind),
+                simulated=self.simulated(kind),
             )
             result = Review(result.changes + judged.changes, result.candidates + judged.candidates)
         # Each daily kind's algorithms, by its own days (#264): those with an answer.
@@ -819,11 +849,14 @@ class PredictionEngine:
                 baselines=daily.baseline_names(),
                 scoring=kind_scoring(daily),
                 recent=daily.recent_days,
+                simulated=self.simulated(daily),
             )
             result = Review(result.changes + judged.changes, result.candidates + judged.candidates)
         for c in result.changes:
             # Only from the status reviewed: a retire command may have landed meanwhile.
-            if self.store.change_status(c.algorithm, at, c.previous, c.status, c.reason):
+            if self.store.change_status(
+                c.algorithm, at, c.previous, c.status, c.reason, simulated=c.simulated
+            ):
                 log.info("%s: %s -> %s (%s)", c.algorithm, c.previous.value, c.status.value, c.reason)
             else:
                 log.info("%s: %s not applied, its status changed meanwhile", c.algorithm, c.status.value)
@@ -942,7 +975,11 @@ class PredictionEngine:
         standings = self.store.statuses()
         upcoming = self._next_review(self._reviewed_through)
         next_day = None if upcoming is None else upcoming.astimezone(KST).date()
-        key = (sorted((name, s.status.value, s.since) for name, s in standings.items()), next_day)
+        key = (
+            sorted((name, s.status.value, s.since) for name, s in standings.items()),
+            next_day,
+            self.store.simulation_mark(),  # a simulation kept since (#298)
+        )
         if self._stages is not None and self._stages[0] == key:
             return self._stages[1]
         today = self.clock.now().astimezone(KST).date()
@@ -959,6 +996,7 @@ class PredictionEngine:
             fee_rate=self.fee_rate,
             rules=self.review_rules,
             baselines=self.baseline_names,  # the target's set, as the review judges by (#169)
+            simulated=self.simulated(DIRECTION_KIND),
         )
         for kind in self.kinds:  # each kind's algorithms, as its review judges them (#179)
             names = [a.name for a in self.kind_algorithms if a.kind == kind.name]
@@ -981,6 +1019,7 @@ class PredictionEngine:
                 rules=self.review_rules,
                 baselines=frozenset(b.name for b in kind.baselines),
                 scoring=kind_scoring(kind),
+                simulated=self.simulated(kind),
             )
         for daily in self.daily_kinds:  # each daily kind's algorithms, by its days (#264)
             names = [a.name for a in self.daily_algorithms if a.kind == daily.name]
@@ -1003,6 +1042,7 @@ class PredictionEngine:
                 baselines=daily.baseline_names(),
                 scoring=kind_scoring(daily),
                 recent=daily.recent_days,
+                simulated=self.simulated(daily),
             )
         dated = {name: replace(s, next_review_on=self._review_on(next_day, s)) for name, s in found.items()}
         self._stages = (key, dated)
@@ -1011,8 +1051,11 @@ class PredictionEngine:
     def _review_on(self, next_day: date | None, stage: Stage) -> date | None:
         """The trading day ``stage``'s next review falls on, counted from ``next_day``, the next
         daily review's, which counts one day more than the latest; None without either, or
-        while nothing is counted yet (waiting for a model of the touch target, #170)."""
-        if next_day is None or stage.next_review is None or stage.counted_from is None:
+        while nothing is counted yet (waiting for a model of the touch target, #170, and no day
+        simulated, #298)."""
+        if next_day is None or stage.next_review is None:
+            return None
+        if stage.counted_from is None and not stage.simulated:
             return None
         day = next_day
         for _ in range(stage.next_review - stage.days - 1):

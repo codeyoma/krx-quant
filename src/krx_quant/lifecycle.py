@@ -45,6 +45,17 @@ rules, a kind at a time (``Scoring``: ``kind_stats.kind_scoring``): their stats 
 that kind's baselines, a clone looked for among the earlier algorithms of that kind only
 (by the first class's probability less the third's), and only the predictions of models
 trained on that kind's answers counted.
+
+A probation begun for a new algorithm (``REGISTERED``) or a new target (``target_changed``) can
+be simulated (#298, ``simulation.py``): the latest trading days replayed as if the algorithm had
+been on probation, its predictions and their answers kept apart from the live ones
+(``Simulated``). Those days are its probation's first days, ahead of the live days after them
+(a live day they replayed is superseded), and on them its rows and its kind's baselines' are the
+simulation's, the other algorithms' (a clone's twin) the live ones. A simulation is judged as soon
+as it is stored (``review_at_once``), as at the largest review day its days reach; one that does
+not pass stays on probation, and the live days count on toward the next review day. The active
+and bench checks of the latest days read the simulation's rows on its days too, as the probation
+it came out of did; the leaderboard and the statistics never do.
 """
 
 from __future__ import annotations
@@ -52,7 +63,7 @@ from __future__ import annotations
 import enum
 import statistics
 from collections.abc import Callable, Collection, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -75,13 +86,26 @@ if TYPE_CHECKING:
 
 RECENT_DAYS = 20
 CLONE_CORRELATION = 0.9
+# The reason of a new algorithm's first status: on probation once its pre-validation passed.
+REGISTERED = "registered"
+# How a restart on a new target's reason ends (#170, #187).
+_RESTARTS = ": probation restarts with a model trained on it"
+# How a simulation's review starts its reasons (#298, ``review_at_once``).
+SIMULATED = "simulated probation"
 
 
 def target_changed(kind: str, version: int) -> str:
     """The reason of the probation every algorithm of ``kind`` not retired restarts on when its
     target changes to ``version`` (#187: the direction's touch target to 3, the barrier's answer
     to 2)."""
-    return f"the {kind} target changed to version {version}: probation restarts with a model trained on it"
+    return f"the {kind} target changed to version {version}{_RESTARTS}"
+
+
+def starts_simulation(reason: str) -> bool:
+    """Whether a probation begun for ``reason`` is simulated (#298): a new algorithm's, once its
+    pre-validation passed (``REGISTERED``), and a restart on a new target (#170, #187). Not one
+    put back by command (``unretire``) or a clone's return."""
+    return reason == REGISTERED or reason.endswith(_RESTARTS)
 
 
 # One predictor's stats against the baselines, from scored rows: (name, rows, baselines' names,
@@ -128,6 +152,7 @@ class Status(enum.Enum):
 class Standing:
     status: Status
     since: datetime
+    reason: str = field(default="", compare=False)  # why the status began (``statuses.reason``)
 
 
 @dataclass(frozen=True)
@@ -136,6 +161,27 @@ class Change:
     previous: Status
     status: Status
     reason: str
+    simulated: bool = False  # it counted simulated days (#298): ``statuses.simulated``
+
+
+Rows = Callable[[Sequence[date], bool], list[dict[str, Any]]]  # (days, with special) -> scored rows
+
+
+@dataclass(frozen=True)
+class Simulated:
+    """An algorithm's simulated probation (#298, ``simulation.py``), as the reviews count it: the
+    latest trading days replayed as if it had been on probation.
+
+    ``days`` (latest first) count as the first days of the probation begun at ``stint``, ahead of
+    the live days after them. On them, ``rows`` reads the simulation's scored predictions (special
+    ones too, if asked): the algorithm's, its kind's baselines' and those of the algorithms
+    simulated with it, each with the answer it was scored on; ``predictors`` are their names. The
+    other predictors' rows there are the live ones."""
+
+    days: tuple[date, ...]
+    stint: datetime
+    rows: Rows
+    predictors: frozenset[str]
 
 
 @dataclass(frozen=True)
@@ -175,9 +221,6 @@ class Review:
     candidates: list[Candidate]
 
 
-Rows = Callable[[Sequence[date], bool], list[dict[str, Any]]]  # (days, with special) -> scored rows
-
-
 def review(
     algorithms: Sequence[str],
     standings: Mapping[str, Standing],
@@ -192,6 +235,7 @@ def review(
     baselines: Collection[str] = BASELINE_NAMES,
     scoring: Scoring = DIRECTION_SCORING,
     recent: int = RECENT_DAYS,
+    simulated: Mapping[str, Simulated] | None = None,
 ) -> Review:
     """The status changes due at a day's review.
 
@@ -204,17 +248,11 @@ def review(
     target version, #169). ``algorithms``, ``rows`` and ``baselines`` are of one kind, judged
     by its ``scoring`` (#179: the direction's by default): a clone is looked for within them.
     An active algorithm is benched, and a benched one recovers, on the ``recent`` latest days
-    (20; a daily kind's 60, #264).
+    (20, a daily kind's too since #298). ``simulated`` are the algorithms with a simulated
+    probation (#298), whose days count as the module doc says.
     """
     rules = rules or Rules()
-    read: dict[tuple[tuple[date, ...], bool], list[dict[str, Any]]] = {}
-
-    def cached(chosen: Sequence[date], special: bool) -> list[dict[str, Any]]:
-        key = (tuple(chosen), special)
-        if key not in read:
-            read[key] = on_target(rows(chosen, special), baselines, scoring.target_version)
-        return read[key]
-
+    cached = _cached(rows, baselines, scoring.target_version)
     judge = _Judge(cached, list(days[:recent]), min_sample, fee_rate, rules, baselines, scoring)
     changes: list[Change] = []
     candidates: list[Candidate] = []
@@ -222,17 +260,142 @@ def review(
         standing = standings.get(name)
         if standing is None or standing.status is Status.RETIRED:
             continue
-        held = _held(days, counted_from[name])
+        sim = (simulated or {}).get(name)
+        held = _counted(days, counted_from[name], standing, sim)
         earlier = [
             a for a in algorithms[:i] if (s := standings.get(a)) is None or s.status is not Status.RETIRED
         ]
-        change = judge.decide(name, standing.status, held, earlier)
+        change = _with(judge, sim, scoring).decide(name, standing.status, held, earlier)
         last = {Status.PROBATION: rules.max_probation, Status.BENCH: rules.max_bench}.get(standing.status)
         if change is not None:
+            replayed = len(set(held) & set(sim.days)) if sim is not None else 0
+            if replayed and standing.status is Status.PROBATION:
+                change = replace(
+                    change, reason=f"{change.reason}; {replayed} of the days simulated", simulated=True
+                )
             changes.append(change)
         elif last is not None and len(held) >= last and name not in alerted:
             candidates.append(Candidate(name, len(held), standing.status))
     return Review(changes, candidates)
+
+
+@dataclass(frozen=True)
+class AtOnce:
+    """A simulation's review (#298, ``review_at_once``): the review day its days reach, what it
+    measured there and the change it made, if any."""
+
+    algorithm: str
+    days: int  # the days counted: its simulated days
+    review_day: int | None  # the largest review day they reach; None below the first
+    weakest: tuple[str, Lift] | None  # its weakest lift by trading day, and which baseline's
+    scored: int  # its scored predictions on those days
+    enough: bool  # enough of them, and pairs, to decide on (``stats.enough``)
+    change: Change | None
+
+
+def review_at_once(
+    names: Collection[str],
+    algorithms: Sequence[str],
+    standings: Mapping[str, Standing],
+    simulated: Mapping[str, Simulated],
+    rows: Rows,
+    *,
+    min_sample: int,
+    fee_rate: float,
+    rules: Rules | None = None,
+    baselines: Collection[str] = BASELINE_NAMES,
+    scoring: Scoring = DIRECTION_SCORING,
+) -> list[AtOnce]:
+    """The review a simulation makes as soon as it is stored (#298): each of ``names`` still on
+    the probation its simulation was made for, judged on the days counted, its simulated days (a
+    simulation replays the latest finished days, so no live day follows them yet), as at the
+    largest review day they reach, whatever their number: not judged below the first. A clone is
+    looked for as at any review, among the earlier ``algorithms`` (of the kind, in registration
+    order). The arguments are ``review``'s; each change's reason starts with ``SIMULATED`` and its
+    days.
+    """
+    rules = rules or Rules()
+    judge = _Judge(
+        _cached(rows, baselines, scoring.target_version), [], min_sample, fee_rate, rules, baselines, scoring
+    )
+    out: list[AtOnce] = []
+    for i, name in enumerate(algorithms):
+        standing, sim = standings.get(name), simulated.get(name)
+        if name not in names or standing is None or sim is None or not sim.days:
+            continue
+        if standing.status is not Status.PROBATION or standing.since != sim.stint:
+            continue
+        held = list(sim.days)
+        reached = [d for d in rules.probation_days if d <= len(held)]
+        earlier = [
+            a for a in algorithms[:i] if (s := standings.get(a)) is None or s.status is not Status.RETIRED
+        ]
+        own = _with(judge, sim, scoring)
+        change = own.decide(name, standing.status, held, earlier, due=bool(reached))
+        if change is not None:
+            span = f"{min(held)}..{max(held)}"
+            change = replace(
+                change, reason=f"{SIMULATED} {span} ({len(held)} days): {change.reason}", simulated=True
+            )
+        judged = own.measure(name, held)
+        out.append(
+            AtOnce(
+                name,
+                len(held),
+                reached[-1] if reached else None,
+                _weakest_by_day(judged),
+                judged.summary.n,
+                enough(judged, min_sample),
+                change,
+            )
+        )
+    return out
+
+
+def _cached(rows: Rows, baselines: Collection[str], target_version: int) -> Rows:
+    """``rows`` read once per set of days, only the target's models' kept (``stats.on_target``)."""
+    read: dict[tuple[tuple[date, ...], bool], list[dict[str, Any]]] = {}
+
+    def cached(chosen: Sequence[date], special: bool) -> list[dict[str, Any]]:
+        key = (tuple(chosen), special)
+        if key not in read:
+            read[key] = on_target(rows(chosen, special), baselines, target_version)
+        return read[key]
+
+    return cached
+
+
+def _counted(
+    days: Sequence[date], counted_from: date | None, standing: Standing, sim: Simulated | None
+) -> list[date]:
+    """The days ``standing`` counts, latest first: of ``days``, those from ``counted_from``; on the
+    probation a simulation was made for (#298), its simulated days, after the live days that
+    follow them (those it replayed are not counted twice)."""
+    held = _held(days, counted_from)
+    if sim is None or not sim.days or standing.status is not Status.PROBATION or standing.since != sim.stint:
+        return held
+    last = max(sim.days)
+    return [d for d in held if d > last] + sorted(sim.days, reverse=True)
+
+
+def _with(judge: _Judge, sim: Simulated | None, scoring: Scoring) -> _Judge:
+    """``judge`` reading, on ``sim``'s days, the simulation's rows of its predictors and the live
+    rows of the others (#298); ``judge`` itself without a simulation."""
+    if sim is None or not sim.days:
+        return judge
+    live = judge.rows
+    simulated_days = set(sim.days)
+    replayed = _cached(sim.rows, judge.baselines, scoring.target_version)
+
+    def rows(chosen: Sequence[date], special: bool) -> list[dict[str, Any]]:
+        mine = [d for d in chosen if d in simulated_days]
+        out = live([d for d in chosen if d not in simulated_days], special) if len(mine) < len(chosen) else []
+        if mine:
+            out = out + [r for r in live(mine, special) if r["algorithm"] not in sim.predictors]
+            out += replayed(mine, special)
+        return out
+
+    return replace(judge, rows=rows)
 
 
 @dataclass
@@ -245,8 +408,11 @@ class _Judge:
     baselines: Collection[str] = BASELINE_NAMES
     scoring: Scoring = DIRECTION_SCORING
 
-    def decide(self, name: str, status: Status, held: list[date], earlier: list[str]) -> Change | None:
-        """The change ``name``'s status is due for, if any."""
+    def decide(
+        self, name: str, status: Status, held: list[date], earlier: list[str], *, due: bool | None = None
+    ) -> Change | None:
+        """The change ``name``'s status is due for, if any; on probation judged on a review day
+        of ``held``'s count, or as ``due`` says (a simulation's review at once, #298)."""
         if status in (Status.PROBATION, Status.CLONE):
             measured = correlations(name, earlier, self.rows(held, True), self.scoring.lean)
             twin = most_correlated(measured)
@@ -263,7 +429,7 @@ class _Judge:
                 if not measured:
                     return None  # too few pairs to tell: it stays
                 return Change(name, status, Status.PROBATION, "no longer moves with an earlier algorithm")
-            if len(held) in self.rules.probation_days:
+            if len(held) in self.rules.probation_days if due is None else due:
                 passed = self._passed_by_day(name, held)
                 if passed is not None:
                     return Change(
@@ -372,6 +538,7 @@ class Stage:
     # The day the next review falls on if every trading day from the next review on is predicted:
     # the engine's to tell (it knows the calendar), None here.
     next_review_on: date | None = None
+    simulated: int = 0  # of the days counted, those simulated (#298)
 
 
 def stages(
@@ -387,13 +554,15 @@ def stages(
     baselines: Collection[str] = BASELINE_NAMES,
     scoring: Scoring = DIRECTION_SCORING,
     recent: int = RECENT_DAYS,
+    simulated: Mapping[str, Simulated] | None = None,
 ) -> dict[str, Stage]:
     """Each algorithm on probation or on the bench, where it stands toward its next review (#165).
 
     The arguments are ``review``'s (one kind's, #179), with ``days`` the days reviewed already,
-    latest first: the days are counted as the review counts them, and the weakest lift is taken
-    by trading day on the days the review takes it on, at the rules' level. The next review
-    counts one day more. The scored predictions are read once, for every algorithm.
+    latest first: the days are counted as the review counts them (a simulated probation's too,
+    #298), and the weakest lift is taken by trading day on the days the review takes it on, at
+    the rules' level. The next review counts one day more. The live scored predictions are read
+    once, for every algorithm.
     """
     rules = rules or Rules()
     latest = list(days[:recent])
@@ -402,7 +571,7 @@ def stages(
         standing = standings.get(name)
         if standing is None or standing.status not in (Status.PROBATION, Status.BENCH):
             continue
-        held = _held(days, counted_from[name])
+        held = _counted(days, counted_from[name], standing, (simulated or {}).get(name))
         on[name] = (standing, held, held if standing.status is Status.PROBATION else latest)
     wanted = sorted({d for _, _, lift_days in on.values() for d in lift_days}, reverse=True)
     read = on_target(rows(wanted, False), baselines, scoring.target_version) if wanted else []
@@ -416,7 +585,8 @@ def stages(
     out: dict[str, Stage] = {}
     for name, (standing, held, lift_days) in on.items():
         review_days = rules.probation_days if standing.status is Status.PROBATION else rules.bench_days
-        judged = judge.measure(name, lift_days)
+        sim = (simulated or {}).get(name)
+        judged = _with(judge, sim, scoring).measure(name, lift_days)
         out[name] = Stage(
             standing.status,
             kst_day(standing.since),
@@ -428,6 +598,7 @@ def stages(
             rules.confidence,
             _weakest_by_day(judged),
             enough(judged, min_sample),
+            simulated=0 if sim is None else len(set(held) & set(sim.days)),
         )
     return out
 
