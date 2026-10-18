@@ -1236,7 +1236,7 @@
 
 > **바뀜** (2026-10-15, #209): "지금은 변동폭의 `mandelbrot`, #181" → 장벽의 `breiman`(#184)이 그 뒤에 등록되어 있다. 이유: 장벽의 첫 모델이다(#178).
 
-> **바뀜** (2026-10-18, #PR3): "`mandelbrot`, `breiman` 순서" → 그 뒤로 `breiman-15m`, `breiman-30m`, `breiman-60m`. 이유: 장벽의 지평 사다리(#263)마다 LightGBM을 두기로 사용자가 정했다(2026-10-18).
+> **바뀜** (2026-10-18, #289): "`mandelbrot`, `breiman` 순서" → 그 뒤로 `breiman-15m`, `breiman-30m`, `breiman-60m`. 이유: 장벽의 지평 사다리(#263)마다 LightGBM을 두기로 사용자가 정했다(2026-10-18).
 
 등록 검사는 엔진이 시작할 때(`ALGORITHMS`를 읽을 때) 한다. 그 뒤 새 알고리즘은 사전 검증을 통과해야 돈다(아래 "사전 검증").
 
@@ -1623,7 +1623,7 @@ uv run krx-quant fit newton --days 60
 - 엔진은 `breiman`이 돌 때만 그 피처를 계산한다(Turing과 같은 피처는 한 번만 계산해 나눈다). CPU 예산이 모자라면 `KIND_ALGORITHMS`의 뒤에서부터 건너뛴다: 지평 사다리의 Breiman 셋(아래), 그다음 `breiman`이다.
 - 모델 파일은 Turing처럼 트리 텍스트라 크다.
 
-  > **바뀜** (2026-10-18, #PR3): "`KIND_ALGORITHMS`의 마지막이라 CPU 예산이 모자라면 가장 먼저 건너뛴다" → 지평 사다리의 Breiman 셋 다음이다. 이유: 그 셋이 뒤에 등록되었다(#263).
+  > **바뀜** (2026-10-18, #289): "`KIND_ALGORITHMS`의 마지막이라 CPU 예산이 모자라면 가장 먼저 건너뛴다" → 지평 사다리의 Breiman 셋 다음이다. 이유: 그 셋이 뒤에 등록되었다(#263).
 
 **지평 사다리의 Breiman(#263, `Breiman(kind)`).** 15·30·60분 장벽(위 "장벽"의 "지평 사다리")마다 하나씩 있다: `breiman-15m`(`kind` `barrier_15m`), `breiman-30m`(`barrier_30m`), `breiman-60m`(`barrier_60m`).
 - 위 `breiman`과 같은 트리, 피처, 설정이다. 고유 피처 `barrier_width`, `barrier_sigma`도 4분 장벽의 것 그대로다: H분 장벽의 폭은 같은 봉의 σ̂₁ × √H라, 4분 폭과 그 비율이 이미 담고 있다.
