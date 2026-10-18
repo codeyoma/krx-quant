@@ -68,6 +68,7 @@ from krx_quant.algorithms import (
     Model,
     NothingToLearn,
     kind_of,
+    load_models,
     register,
     register_kind_algorithms,
 )
@@ -518,7 +519,10 @@ async def simulate_bar_close(
                 held = sum(1 for d in window if d in set(recorded))
                 ready.append(_Candidate(a, kind, stint, model, window, held))
             if ready:
-                done += await _replay_bar_close(store, settings, ready, available, days, calendar, now)
+                replayed = _sharing_the_budget(everyone, standings, ready)
+                done += await _replay_bar_close(
+                    store, settings, ready, replayed, kinds, available, days, calendar, now
+                )
                 ruled = _judge_bar_close(store, settings, everyone, ready, kinds, now)
                 done = [ruled.get(s.algorithm, s) for s in done]
             return SimulationRun(simulations=done, recorded_days=len(recorded))
@@ -526,34 +530,61 @@ async def simulate_bar_close(
             store.close()
 
 
+def _sharing_the_budget(
+    everyone: Sequence[Algorithm | KindAlgorithm],
+    standings: Mapping[str, Any],
+    ready: Sequence[_Candidate],
+) -> list[Algorithm | KindAlgorithm]:
+    """The algorithms to replay, in the CPU budget's order (``everyone``'s: the direction's, then the
+    other kinds', in registration order): the candidates, and beside them each algorithm the engine
+    runs live (enrolled, not retired) whose cost can push a candidate out of the budget (#298
+    review): those before the last candidate. The budget drops the last registered first, so those
+    after it never cost a candidate its turn. Their predictions are not kept."""
+    candidates = {c.algorithm.name for c in ready}
+    order = [
+        a
+        for a in everyone
+        if a.name in candidates
+        or ((s := standings.get(a.name)) is not None and s.status is not Status.RETIRED)
+    ]
+    last = max(i for i, a in enumerate(order) if a.name in candidates)
+    return order[: last + 1]
+
+
 async def _replay_bar_close(
     store: PredictionStore,
     settings: Settings,
     ready: Sequence[_Candidate],
+    replayed: Sequence[Algorithm | KindAlgorithm],
+    registered_kinds: Sequence[Kind],
     available: Sequence[date],
     days: Sequence[date],
     calendar: MarketCalendar,
     now: datetime,
 ) -> list[Simulation]:
-    """Replay ``days`` with the ``ready`` algorithms on their once-trained models and their kinds'
-    baselines, and keep what they predicted, each with its answer."""
+    """Replay ``days`` with the ``replayed`` algorithms (``_sharing_the_budget``): the ``ready``
+    ones on their once-trained models, the others on the server's, with their kinds' baselines;
+    keep what the candidates and their kinds' baselines predicted, each with its answer."""
     db = settings.state_dir / "simulation-bar-close.sqlite3"
     for leftover in sqlite_files(db):
         leftover.unlink(missing_ok=True)
-    direction = [cast(Algorithm, c.algorithm) for c in ready if c.kind is None]
-    of_kinds = [cast(KindAlgorithm, c.algorithm) for c in ready if c.kind is not None]
-    kinds = list({c.kind.name: c.kind for c in ready if c.kind is not None}.values())
+    candidates = {c.algorithm.name for c in ready}
+    beside = [a for a in replayed if a.name not in candidates]
+    direction = [cast(Algorithm, a) for a in replayed if kind_of(a) == DIRECTION]
+    of_kinds = [cast(KindAlgorithm, a) for a in replayed if kind_of(a) != DIRECTION]
+    named = {k.name: k for k in registered_kinds}
+    kinds = [named[name] for name in dict.fromkeys(kind_of(a) for a in of_kinds) if name in named]
     leaders = Leaders.of(settings)
     # The baselines' tables, refitted before each day on its days before (the candidates' trainers,
     # with their samples, are let go: a fresh one reads the answers only).
     tables_of = [
         _WalkForward(
-            settings, next(c.algorithm for c in ready if c.kind is k), available, calendar, leaders, k
+            settings, next(a for a in of_kinds if kind_of(a) == k.name), available, calendar, leaders, k
         )
         for k in kinds
     ]
     climate_of = _WalkForward(settings, ready[0].algorithm, available, calendar, leaders)
-    models = {c.algorithm.name: c.model for c in ready}
+    models = {**load_models(settings.state_dir, beside), **{c.algorithm.name: c.model for c in ready}}
     for day in days:
         tables: dict[str, Model] = {}
         for trainer in tables_of:
@@ -573,24 +604,25 @@ async def _replay_bar_close(
             kind_algorithms=of_kinds,
         )
         engine.store.close()
-        log.info("simulated %s with %s", day, ", ".join(models))
+        log.info("simulated %s with %s", day, ", ".join(c.algorithm.name for c in ready))
     run = store.add_simulation_run(now, BAR_CLOSE, days)
-    replayed = PredictionStore(db)
+    replay_db = PredictionStore(db)
     try:
-        if direction:
-            names = {a.name for a in direction} | {b.name for b in baselines_for(settings.target_version)}
-            rows = [r for r in replayed.made_on(days) if r["algorithm"] in names]
+        if any(c.kind is None for c in ready):
+            names = {c.algorithm.name for c in ready if c.kind is None}
+            names |= {b.name for b in baselines_for(settings.target_version)}
+            rows = [r for r in replay_db.made_on(days) if r["algorithm"] in names]
             store.add_sim_predictions(run, rows, TARGET_VERSION)
-        for kind in kinds:
+        for kind in {c.kind.name: c.kind for c in ready if c.kind is not None}.values():
             names = {c.algorithm.name for c in ready if c.kind is kind} | {b.name for b in kind.baselines}
             kept = [
                 _sim_kind_row(r)
-                for r in replayed.kind_made_on(kind.name, kind.answer_version, days)
+                for r in replay_db.kind_made_on(kind.name, kind.answer_version, days)
                 if r["algorithm"] in names
             ]
             store.add_sim_kind_predictions(run, kind.name, kind.answer_version, kept)
     finally:
-        replayed.close()
+        replay_db.close()
     out: list[Simulation] = []
     for c in ready:
         training = _training_json(c)

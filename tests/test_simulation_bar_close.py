@@ -10,6 +10,7 @@ a new target, the engine's stage, and the scheduled job.
 
 from __future__ import annotations
 
+import time as timer
 from collections.abc import Sequence
 from dataclasses import replace
 from datetime import date, datetime, time, timedelta
@@ -20,6 +21,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+from krx_quant import simulation
 from krx_quant.backfill import BAR_SCHEMA, MINUTE_BARS_TR, bars_key
 from krx_quant.cli import main
 from krx_quant.clock import FakeClock
@@ -467,3 +469,60 @@ async def test_the_nightly_facts_tell_the_bar_close_probations_waiting(tmp_path:
 
     assert (facts.simulating, facts.simulating_daily, facts.recorded_days) == (("contrarian",), (), 10)
     engine.store.close()
+
+
+class SlowContrarian(Contrarian):
+    """The contrarian, ``seconds`` a bar close: a cost the CPU budget counts."""
+
+    def __init__(self, name: str, seconds: float) -> None:
+        super().__init__(name)
+        self.seconds = seconds
+
+    def predict(self, features: Any, model: Any) -> Any:
+        timer.sleep(self.seconds)
+        return super().predict(features, model)
+
+
+async def test_the_replay_shares_the_cpu_budget_with_the_live_algorithms_as_live(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#300 review: live, an active algorithm registered before a candidate takes its share of the
+    CPU budget, and the candidate, registered last, drops out when the two are over it. The replay
+    runs that algorithm beside it (its predictions not kept), so the candidate drops out there too;
+    with it retired, the candidate runs at every bar close."""
+    monkeypatch.setattr(simulation, "MIN_DAYS", 1)  # one replayed day keeps the timing test short
+    days = RECORDED[:1]
+
+    async def predicted(root: Path, heavy_status: Status) -> tuple[int, int]:
+        s = replace(settings(root, days), algorithm_seconds=1.0, cpu_budget_seconds=0.0055)
+        store = PredictionStore(s.state_dir / DB_NAME)
+        store.add_status("heavy", night_after(days) - timedelta(days=30), None, heavy_status, "set")
+        store.close()
+        on_probation(s, "candidate")
+        heavy = FixedAlgorithm("heavy", features=("velocity",), unique=("velocity",), seconds=0.004)
+        await simulate_bar_close(
+            s,
+            algorithms=[heavy, SlowContrarian("candidate", 0.003)],
+            kind_algorithms=[],
+            now=night_after(days),
+        )
+        replay = PredictionStore(s.state_dir / "simulation-bar-close.sqlite3")
+        kept = PredictionStore(s.state_dir / DB_NAME)
+        try:
+            skipped = replay.runs_by_algorithm(
+                "cpu_budget", night_after(days) - timedelta(days=2), night_after(days)
+            )
+            rows = kept._db.execute(
+                "SELECT algorithm, COUNT(*) FROM sim_predictions GROUP BY algorithm"
+            ).fetchall()
+        finally:
+            replay.close()
+            kept.close()
+        counted = {r[0]: r[1] for r in rows}
+        assert "heavy" not in counted, "beside the candidate for the budget only: not kept"
+        return counted.get("candidate", 0), skipped.get("candidate", 0)
+
+    shared, skipped = await predicted(tmp_path / "shared", Status.ACTIVE)
+    alone, never = await predicted(tmp_path / "alone", Status.RETIRED)
+    assert skipped > 0 and never == 0
+    assert shared < 0.8 * alone, (shared, alone)
