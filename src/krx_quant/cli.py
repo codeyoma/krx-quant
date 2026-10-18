@@ -32,7 +32,7 @@ from krx_quant.demo import demo_app, demo_morning
 from krx_quant.diagnose import DEFAULT_DAYS, diagnose
 from krx_quant.fake_kis import FakeKis
 from krx_quant.feeds.base import KST
-from krx_quant.kind_registry import kind_named
+from krx_quant.kind_registry import DAILY_KINDS, kind_named
 from krx_quant.kis import KisError
 from krx_quant.lifecycle import Status
 from krx_quant.macro import run_macro
@@ -54,6 +54,7 @@ from krx_quant.replay import replay_day
 from krx_quant.rescore import EngineRunning, rescore
 from krx_quant.signal_review import DEFAULT_DAYS as SIGNAL_REVIEW_DAYS
 from krx_quant.signal_review import signal_review
+from krx_quant.simulation import DAILY, SimulationRunning, report, simulate_daily
 from krx_quant.structure_check import structure_check
 from krx_quant.supply_probe import probe_supply
 from krx_quant.training import fit_algorithm
@@ -285,6 +286,22 @@ def _prevalidate(name: str, days: int) -> int:
     else:
         print(f"the engine does not start {name}; fix it and run this again")
     return 0 if result.passed else 1
+
+
+def _simulate(which: str) -> int:
+    """Simulate the probations that wait for it (#298), print what came of them; exit 1 if one
+    could not run."""
+    settings = Settings.from_env(require_kis=False)
+    try:
+        run = simulate_daily(settings)
+    except (FileNotFoundError, SimulationRunning) as e:
+        print(e, file=sys.stderr)
+        return 1
+    level = next((k.review_rules.confidence for k in DAILY_KINDS), settings.review_confidence)
+    print(f"simulated probation (#298), {which}:")
+    for line in report(run, level):
+        print(line)
+    return 0
 
 
 def _rollback(name: str) -> int:
@@ -567,6 +584,12 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="train with the settings and market calendar the server published (EC2 Spot)",
     )
+    simulate_cmd = sub.add_parser(
+        "simulate",
+        help="replay the latest trading days as the probation of each algorithm that waits for it (#298),"
+        " and judge it at once (safe beside the engine)",
+    )
+    simulate_cmd.add_argument("which", choices=[DAILY], help="daily: the daily kinds' algorithms")
     rollback_cmd = sub.add_parser("rollback", help="put an algorithm back on the model it ran before")
     rollback_cmd.add_argument("algorithm")
     retire_cmd = sub.add_parser("retire", help="retire an algorithm: it is no longer run; its records stay")
@@ -665,6 +688,8 @@ def main(argv: list[str] | None = None) -> int:
             return _prevalidate(args.algorithm, args.days)
         elif args.command == "train":
             return _train(args.day, args.from_store)
+        elif args.command == "simulate":
+            return _simulate(args.which)
         elif args.command == "rollback":
             return _rollback(args.algorithm)
         elif args.command == "retire":

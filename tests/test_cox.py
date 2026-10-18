@@ -314,9 +314,9 @@ def test_a_missing_candle_on_the_previous_trading_day_stays_missing_in_training_
     assert got == pytest.approx(gap.as_dict(), nan_ok=True)
 
     from krx_quant.daily_features import TradingDays
-    from krx_quant.daily_training import _baselines
+    from krx_quant.daily_training import baseline_forecasts
 
-    walked = _baselines(OPEN_TO_CLOSE, files, SYMBOLS, FEE, LAST, LAST)
+    walked = baseline_forecasts(OPEN_TO_CLOSE, files, SYMBOLS, FEE, LAST, LAST)
     persisted = {r.symbol for r in walked["otc-persist"]}
     assert persisted == {"000660", "009150"}, "the walk-forward's persistence has no Thursday for 005930"
 

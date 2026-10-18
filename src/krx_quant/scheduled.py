@@ -243,6 +243,9 @@ class Facts:
     # The daily features whose data on this server is behind their version (#297,
     # ``daily_features.pending_inputs``): a pre-validation reading them waits for it.
     pending_inputs: tuple[str, ...] = ()
+    # The daily algorithms on a probation that waits for its simulation (#298,
+    # ``PredictionEngine.to_simulate``).
+    simulating_daily: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -673,8 +676,15 @@ async def keep_jobs(
         nights = await asyncio.to_thread(subscribed_nights, settings.data_dir, calendar, evening(clock.now()))
         daily = sorted({f for a in engine.daily_registered for f in a.features})
         pending = await asyncio.to_thread(pending_inputs, daily, settings.state_dir, settings.symbols)
+        _, simulating_daily = await asyncio.to_thread(engine.to_simulate)
         return Facts(
-            recorded, tuple(engine.waiting()), len(engine.members()), reports, tuple(nights), tuple(pending)
+            recorded,
+            tuple(engine.waiting()),
+            len(engine.members()),
+            reports,
+            tuple(nights),
+            tuple(pending),
+            simulating_daily=tuple(simulating_daily),
         )
 
     scheduler = Scheduler(
@@ -1096,8 +1106,63 @@ def daily_prevalidation_jobs(
 
 _DAILY_PREVALIDATION_NOTE = (
     "하루 한 번 예측 종류의 알고리즘(#264)의 사전 검증: KRX 일봉 10년의 walk-forward다. 통과(`passed`)하면 "
-    "엔진이 다음 08:50부터 수습으로 돌린다(판정은 정답이 있는 날 60일째부터). 거부(`refused`)되면 같은 "
-    "코드로는 다시 돌지 않는다."
+    "그 밤 `simulate-daily-298`이 수습에 올리고 최근 20거래일을 시뮬레이션해 바로 판정한다(#298, 판정은 "
+    "20·40·60일째). 거부(`refused`)되면 같은 코드로는 다시 돌지 않는다."
+)
+
+
+# The daily kinds' simulated probations (#298, ``simulation.py``): a daily algorithm starts on
+# probation with its latest 20 trading days replayed (refitted before each, as its nights would),
+# judged at once. The job runs right after the daily pre-validations: on the night one passes, it
+# enrolls the algorithm on probation (the engine would at its next start) and simulates it, so it
+# is active by the next 08:50 if it passes. It also runs on a night a daily probation waits for it
+# (begun by the engine, or a run cut short). Once a night; a run that failed waits for new code (or
+# a new pass), as a pre-validation that left no verdict does. Cox fits in seconds: 20 fits and ten
+# years of samples are minutes; the hour is a bound. Its result goes to #298 and #264.
+SIMULATION_ISSUE = 298
+DAILY_SIMULATION_TIMEOUT = timedelta(hours=1)
+
+
+def _daily_simulation_due(names: Sequence[str]) -> Callable[[Night], bool]:
+    def due(night: Night) -> bool:
+        record = night.record
+        if record is not None and record.day == night.day:
+            return False  # once a night
+        passed = any(
+            (r := night.records.get(prevalidation_job_name(name))) is not None
+            and r.day == night.day
+            and r.outcome == OK
+            for name in names
+        )
+        if passed:
+            return True  # a daily algorithm passed tonight: enrolled and simulated at once
+        if not night.facts.simulating_daily:
+            return False
+        return not (record is not None and record.outcome == FAILED and record.commit == night.commit)
+
+    return due
+
+
+DAILY_SIMULATION = Job(
+    name="simulate-daily-298",
+    due=_daily_simulation_due([a.name for a in DAILY_ALGORITHMS]),
+    command=("simulate", "daily"),
+    timeout=DAILY_SIMULATION_TIMEOUT,
+    targets=(
+        Target(
+            SIMULATION_ISSUE,
+            note=(
+                "하루 한 번 예측 종류의 수습 시뮬레이션(#298): 최근 20거래일을 그 알고리즘이 수습으로 "
+                "돌았다고 치고 다시 재생했다(날마다 그 전날까지로 다시 학습). 그 판정을 바로 했다. 통과하면 "
+                "지금부터 정식이고, 못 하면 수습이 이어진다(다음 판정 40일째). 출력에는 시세 값이 없다"
+                "(날짜, 개수, lift만)."
+            ),
+        ),
+        Target(
+            DAILY_CHECK_ISSUE,
+            note="수습 시뮬레이션(#298)의 결과. 자세한 것은 #298.",
+        ),
+    ),
 )
 
 
@@ -1125,5 +1190,6 @@ JOBS: tuple[Job, ...] = (
     *daily_prevalidation_jobs(
         [a.name for a in DAILY_ALGORITHMS], {a.name: a.features for a in DAILY_ALGORITHMS}
     ),
+    DAILY_SIMULATION,
     *prevalidation_jobs([*(a.name for a in ALGORITHMS), *(a.name for a in KIND_ALGORITHMS)]),
 )

@@ -32,6 +32,15 @@ later version is learned (a VI's release); ``special_days`` the past days whose 
 decided from their recordings (``rescore.fill_special_windows``). They are tables of their own,
 as ``touches``: an engine from before them still opens the database (``_SPECIAL_SCHEMA``).
 
+A simulated probation (#298, ``simulation.py``) keeps its predictions apart from the live ones,
+in tables of its own (``_SIMULATION_SCHEMA``), each with the answer it was scored on:
+``simulation_runs`` a replay of the latest trading days, ``simulations`` the probation each
+algorithm's replay was made for, ``sim_kind_predictions`` a kind's predictions of a replay (a
+daily kind's too). Nothing that reads the live tables (the leaderboard, the statistics, the
+consensus weights, the stream) reads them; the lifecycle does (``lifecycle.Simulated``).
+``statuses.simulated`` marks a status change whose review counted simulated days, a column added
+as ``kind_predictions.band`` was.
+
 Times are ISO 8601 strings in KST, which sort in time order.
 """
 
@@ -49,8 +58,8 @@ from typing import Any
 from krx_quant.baselines import Forecast
 from krx_quant.consensus import Weights
 from krx_quant.feeds.base import KST
-from krx_quant.kinds import Answer
-from krx_quant.lifecycle import Standing, Status
+from krx_quant.kinds import DIRECTION, Answer
+from krx_quant.lifecycle import Simulated, Standing, Status, starts_simulation
 from krx_quant.pricing import Direction
 from krx_quant.special import Window
 from krx_quant.touch import TARGET_VERSION, TouchResult, touch_path
@@ -141,7 +150,8 @@ CREATE TABLE IF NOT EXISTS statuses (  -- each algorithm's status changes, oldes
     at TEXT NOT NULL,
     previous TEXT,                    -- null for the first
     status TEXT NOT NULL,             -- probation, active, bench, retired, clone
-    reason TEXT NOT NULL
+    reason TEXT NOT NULL,
+    simulated INTEGER NOT NULL DEFAULT 0  -- its review counted simulated days (#298)
 );
 CREATE INDEX IF NOT EXISTS statuses_by_algorithm ON statuses (algorithm, id);
 CREATE TABLE IF NOT EXISTS model_targets (  -- the target each model run was trained on (#170): a table
@@ -229,6 +239,49 @@ CREATE TABLE IF NOT EXISTS special_days (  -- a past day whose windows were deci
 );
 """
 
+# Simulated probations (#298): tables of their own, as touches, so an engine from before them
+# still opens the database; the schema version stays.
+_SIMULATION_SCHEMA = """
+CREATE TABLE IF NOT EXISTS simulation_runs (  -- a replay of the latest trading days (#298)
+    id INTEGER PRIMARY KEY,
+    made_at TEXT NOT NULL,
+    cadence TEXT NOT NULL,            -- daily: refitted before each day; bar_close: trained once
+    days TEXT NOT NULL                -- JSON: the days replayed, oldest first
+);
+CREATE TABLE IF NOT EXISTS simulations (  -- the probation an algorithm's replay was made for
+    algorithm TEXT NOT NULL,
+    stint TEXT NOT NULL,              -- when that probation began (its statuses.at)
+    kind TEXT NOT NULL,               -- the kind it predicts: direction, a kind, a daily kind
+    run INTEGER REFERENCES simulation_runs (id),  -- null: not simulated, detail says why
+    made_at TEXT NOT NULL,
+    detail TEXT NOT NULL,             -- JSON: how it was trained, its review at once
+    PRIMARY KEY (algorithm, stint)
+);
+CREATE TABLE IF NOT EXISTS sim_kind_predictions (  -- a replay's predictions of a kind besides the
+    run INTEGER NOT NULL REFERENCES simulation_runs (id),  -- direction (a daily kind's too), each with
+    kind TEXT NOT NULL,               -- the answer it was scored on
+    symbol TEXT NOT NULL,
+    algorithm TEXT NOT NULL,
+    model_version TEXT NOT NULL,
+    model_target INTEGER,             -- the answer version its model learned; null: the defaults
+    bar_close TEXT NOT NULL,
+    status TEXT NOT NULL,             -- as kind_predictions.status
+    output TEXT,                      -- as kind_predictions.output
+    flat_ticks INTEGER,
+    width_ticks INTEGER,
+    anchor REAL,
+    tick INTEGER,
+    band REAL,
+    answer_version INTEGER NOT NULL,  -- the kind's when it was replayed
+    answer_class TEXT,                -- its answer's class; null when it could not be scored
+    answer_unscorable TEXT,
+    answer_special INTEGER NOT NULL DEFAULT 0,
+    answer_path TEXT,                 -- JSON, as kind_answers.path
+    PRIMARY KEY (run, kind, symbol, algorithm, bar_close)
+);
+CREATE INDEX IF NOT EXISTS sim_kind_predictions_by_close ON sim_kind_predictions (run, kind, bar_close);
+"""
+
 # Columns added to a table after it was first made, without a schema version (#200): a
 # database made before has the table without them, and gets them when an engine opens it.
 # (table, column, type); new tables have them already (``_KIND_SCHEMA``).
@@ -238,6 +291,7 @@ _ADDED_COLUMNS = (
     ("kind_predictions", "anchor", "REAL"),
     ("kind_predictions", "tick", "INTEGER"),
     ("kind_predictions", "band", "REAL"),
+    ("statuses", "simulated", "INTEGER NOT NULL DEFAULT 0"),
 )
 
 
@@ -470,6 +524,40 @@ class NewKindPrediction:
 
 
 @dataclass(frozen=True)
+class SimKindPrediction:
+    """A simulated prediction of a kind (#298), with the answer it was scored on, to store."""
+
+    symbol: str
+    algorithm: str
+    model_version: str
+    model_target: int | None  # the answer version its model learned; None for the defaults
+    bar_close: datetime
+    output: Mapping[str, float] | None  # None unless ok
+    answer: Answer | None  # None: no answer
+    special: bool = False
+    status: str = "ok"
+    flat_ticks: int | None = None
+    width_ticks: int | None = None
+    anchor: float | None = None
+    tick: int | None = None
+    band: float | None = None
+
+
+@dataclass(frozen=True)
+class SimulationRecord:
+    """An algorithm's latest simulated probation (#298), as stored."""
+
+    algorithm: str
+    stint: datetime  # when the probation it was made for began
+    kind: str
+    run: int | None  # None: not simulated (``detail["why"]``)
+    made_at: datetime
+    days: tuple[date, ...]  # oldest first; none when not simulated
+    cadence: str | None
+    detail: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
 class Pending:
     prediction_id: int
     symbol: str
@@ -526,6 +614,7 @@ class PredictionStore:
             + _SCHEMA
             + _KIND_SCHEMA
             + _SPECIAL_SCHEMA
+            + _SIMULATION_SCHEMA
             + _added_columns(self._db)
             + f"PRAGMA user_version={_VERSION};"
         )
@@ -614,17 +703,35 @@ class PredictionStore:
             )
 
     def change_status(
-        self, algorithm: str, at: datetime, previous: Status, status: Status, reason: str
+        self,
+        algorithm: str,
+        at: datetime,
+        previous: Status,
+        status: Status,
+        reason: str,
+        *,
+        simulated: bool = False,
     ) -> bool:
         """Change ``algorithm``'s status if it is still ``previous``, in one statement (another
-        process may be changing it too); whether it changed.
+        process may be changing it too); whether it changed. ``simulated``: the review counted
+        simulated days (#298).
         """
         self.version += 1
         with self._db:
             cursor = self._db.execute(
-                "INSERT INTO statuses (algorithm, at, previous, status, reason) SELECT ?, ?, ?, ?, ?"
+                "INSERT INTO statuses (algorithm, at, previous, status, reason, simulated)"
+                " SELECT ?, ?, ?, ?, ?, ?"
                 " WHERE (SELECT status FROM statuses WHERE algorithm = ? ORDER BY id DESC LIMIT 1) = ?",
-                (algorithm, iso(at), previous.value, status.value, reason, algorithm, previous.value),
+                (
+                    algorithm,
+                    iso(at),
+                    previous.value,
+                    status.value,
+                    reason,
+                    int(simulated),
+                    algorithm,
+                    previous.value,
+                ),
             )
         return cursor.rowcount == 1
 
@@ -699,19 +806,24 @@ class PredictionStore:
         return Weights(latest["version"], datetime.fromisoformat(latest["computed_at"]), cells)
 
     def statuses(self) -> dict[str, Standing]:
-        """Each algorithm's current status and since when."""
+        """Each algorithm's current status, since when and why."""
         rows = self._db.execute(
-            "SELECT algorithm, status, at FROM statuses"
+            "SELECT algorithm, status, at, reason FROM statuses"
             " WHERE id IN (SELECT MAX(id) FROM statuses GROUP BY algorithm)"
         ).fetchall()
-        return {r["algorithm"]: Standing(Status(r["status"]), datetime.fromisoformat(r["at"])) for r in rows}
+        return {
+            r["algorithm"]: Standing(Status(r["status"]), datetime.fromisoformat(r["at"]), r["reason"])
+            for r in rows
+        }
 
     def status_history(self, algorithm: str) -> list[dict[str, Any]]:
-        """The algorithm's status changes, oldest first."""
+        """The algorithm's status changes, oldest first, each with whether its review counted
+        simulated days (#298)."""
         rows = self._db.execute(
-            "SELECT at, previous, status, reason FROM statuses WHERE algorithm = ? ORDER BY id", (algorithm,)
+            "SELECT at, previous, status, reason, simulated FROM statuses WHERE algorithm = ? ORDER BY id",
+            (algorithm,),
         ).fetchall()
-        return [dict(r) for r in rows]
+        return [{**dict(r), "simulated": bool(r["simulated"])} for r in rows]
 
     def ran_since(self, kind: str, algorithm: str, since: datetime) -> bool:
         """Whether a ``kind`` run of ``algorithm`` was recorded at or after ``since``."""
@@ -1395,6 +1507,183 @@ class PredictionStore:
             out.append(row)
         return out
 
+    # Simulated probations (#298): their replays' predictions, apart from the live ones.
+
+    def add_simulation_run(self, made_at: datetime, cadence: str, days: Sequence[date]) -> int:
+        """A new replay of ``days`` (oldest first), by ``cadence`` (``daily``: refitted before each
+        day; ``bar_close``: trained once before them); its ID."""
+        with self._db:
+            cursor = self._db.execute(
+                "INSERT INTO simulation_runs (made_at, cadence, days) VALUES (?, ?, ?)",
+                (iso(made_at), cadence, json.dumps([d.isoformat() for d in sorted(days)])),
+            )
+        assert cursor.lastrowid is not None
+        return cursor.lastrowid
+
+    def add_sim_kind_predictions(
+        self, run: int, kind: str, answer_version: int, predictions: Sequence[SimKindPrediction]
+    ) -> None:
+        """Keep a replay's predictions of ``kind`` with their answers (of ``answer_version``), in
+        one transaction."""
+        with self._db:
+            self._db.executemany(
+                "INSERT OR REPLACE INTO sim_kind_predictions (run, kind, symbol, algorithm, model_version,"
+                " model_target, bar_close, status, output, flat_ticks, width_ticks, anchor, tick, band,"
+                " answer_version, answer_class, answer_unscorable, answer_special, answer_path)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                [
+                    (
+                        run,
+                        kind,
+                        p.symbol,
+                        p.algorithm,
+                        p.model_version,
+                        p.model_target,
+                        iso(p.bar_close),
+                        p.status,
+                        None if p.output is None else json.dumps(dict(p.output), separators=(",", ":")),
+                        p.flat_ticks,
+                        p.width_ticks,
+                        p.anchor,
+                        p.tick,
+                        p.band,
+                        answer_version,
+                        None if p.answer is None else p.answer.label,
+                        None if p.answer is None else p.answer.unscorable,
+                        int(p.special),
+                        None if p.answer is None else json.dumps(dict(p.answer.path), separators=(",", ":")),
+                    )
+                    for p in predictions
+                ],
+            )
+
+    def add_simulation(
+        self,
+        algorithm: str,
+        stint: datetime,
+        kind: str,
+        run: int | None,
+        made_at: datetime,
+        detail: Mapping[str, Any],
+    ) -> None:
+        """Keep ``algorithm``'s simulated probation begun at ``stint``: its replay (``run``; None
+        when it was not simulated, ``detail["why"]`` saying why), replacing one kept before."""
+        self.version += 1
+        with self._db:
+            self._db.execute(
+                "INSERT OR REPLACE INTO simulations (algorithm, stint, kind, run, made_at, detail)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    algorithm,
+                    iso(stint),
+                    kind,
+                    run,
+                    iso(made_at),
+                    json.dumps(dict(detail), ensure_ascii=False),
+                ),
+            )
+
+    def simulations(self) -> dict[str, SimulationRecord]:
+        """Each algorithm's latest simulated probation (the probation begun last it was made for)."""
+        rows = self._db.execute(
+            "SELECT s.algorithm, s.stint, s.kind, s.run, s.made_at, s.detail, r.cadence, r.days"
+            " FROM simulations s LEFT JOIN simulation_runs r ON r.id = s.run ORDER BY s.stint, s.made_at"
+        ).fetchall()
+        out: dict[str, SimulationRecord] = {}
+        for r in rows:
+            out[r["algorithm"]] = SimulationRecord(
+                algorithm=r["algorithm"],
+                stint=datetime.fromisoformat(r["stint"]),
+                kind=r["kind"],
+                run=r["run"],
+                made_at=datetime.fromisoformat(r["made_at"]),
+                days=tuple(date.fromisoformat(d) for d in json.loads(r["days"] or "[]")),
+                cadence=r["cadence"],
+                detail=json.loads(r["detail"]),
+            )
+        return out
+
+    def simulated_stints(self) -> set[tuple[str, datetime]]:
+        """The (algorithm, start) of every probation a simulation was kept for, simulated or not."""
+        rows = self._db.execute("SELECT algorithm, stint FROM simulations").fetchall()
+        return {(r[0], datetime.fromisoformat(r[1])) for r in rows}
+
+    def simulation_mark(self) -> tuple[int, str | None]:
+        """What changes whenever a simulation is kept: what the stages are cached for."""
+        row = self._db.execute("SELECT COUNT(*), MAX(made_at) FROM simulations").fetchone()
+        return int(row[0]), row[1]
+
+    def to_simulate(self, names: Sequence[str]) -> list[str]:
+        """Of ``names``, in order, the algorithms on a probation that waits for its simulation
+        (#298): begun for a reason that is simulated (``lifecycle.starts_simulation``: a new
+        algorithm's, a new target's), no simulation kept for it yet."""
+        standings, done = self.statuses(), self.simulated_stints()
+        return [
+            n
+            for n in names
+            if (s := standings.get(n)) is not None
+            and s.status is Status.PROBATION
+            and starts_simulation(s.reason)
+            and (n, s.since) not in done
+        ]
+
+    def simulated(self, kind: str, answer_version: int) -> dict[str, Simulated]:
+        """The algorithms of ``kind`` with a simulated probation (#298), their latest replay as the
+        lifecycle counts it (``lifecycle.Simulated``): its days, the probation it was made for, its
+        scored predictions of the kind's ``answer_version``, read from their own table."""
+        out: dict[str, Simulated] = {}
+        for name, record in self.simulations().items():
+            if record.kind != kind or record.run is None or not record.days or kind == DIRECTION:
+                continue
+            run = record.run
+
+            def rows(chosen: Sequence[date], special: bool, run: int = run) -> list[dict[str, Any]]:
+                return self.sim_kind_scored(run, kind, answer_version, chosen, None, special)
+
+            days = tuple(sorted(record.days, reverse=True))
+            out[name] = Simulated(days, record.stint, rows, self.sim_predictors(run, kind))
+        return out
+
+    def sim_predictors(self, run: int, kind: str) -> frozenset[str]:
+        """The predictors a replay has predictions of, of ``kind``."""
+        rows = self._db.execute(
+            "SELECT DISTINCT algorithm FROM sim_kind_predictions WHERE run = ? AND kind = ?", (run, kind)
+        ).fetchall()
+        return frozenset(r[0] for r in rows)
+
+    def sim_kind_scored(
+        self,
+        run: int,
+        kind: str,
+        answer_version: int,
+        days: Sequence[date],
+        symbol: str | None,
+        include_special: bool,
+    ) -> list[dict[str, Any]]:
+        """``kind_scored`` of a replay: its predictions of ``kind`` made on ``days`` and scored on
+        their answer of ``answer_version``, as the lifecycle reads them (the rows' keys are
+        ``kind_scored``'s), read on a connection of its own (``_reading``: the reviews read in a
+        worker thread)."""
+        if not days:
+            return []
+        on, params = _made_on(days, symbol)
+        where = f"p.run = ? AND p.kind = ? AND p.answer_version = ? AND {on} AND p.status = 'ok'"
+        where += " AND p.answer_class IS NOT NULL"
+        if not include_special:
+            where += " AND p.answer_special = 0"
+        with self._reading() as db:
+            db.row_factory = sqlite3.Row
+            rows = db.execute(
+                f"SELECT p.* FROM sim_kind_predictions p WHERE {where}", (run, kind, answer_version, *params)
+            ).fetchall()
+        out = []
+        for r in rows:
+            row = dict(r)
+            row["output"] = None if row["output"] is None else json.loads(row["output"])
+            row["answer_path"] = None if row["answer_path"] is None else json.loads(row["answer_path"])
+            out.append(row)
+        return out
+
     def day_classes(self, symbol: str, since: datetime, until: datetime) -> Mapping[Direction, int]:
         """Classes (basis A) of the bar closes in ``[since, until]`` scored so far, once per bar."""
         rows = self._db.execute(
@@ -1426,10 +1715,11 @@ class PredictionStore:
     def status_changes(self, after: int) -> list[dict[str, Any]]:
         """The status changes recorded after the one with ID ``after``, oldest first."""
         rows = self._db.execute(
-            "SELECT id, algorithm, at, previous, status, reason FROM statuses WHERE id > ? ORDER BY id",
+            "SELECT id, algorithm, at, previous, status, reason, simulated FROM statuses WHERE id > ?"
+            " ORDER BY id",
             (after,),
         ).fetchall()
-        return [dict(r) for r in rows]
+        return [{**dict(r), "simulated": bool(r["simulated"])} for r in rows]
 
     def last_status_id(self) -> int:
         last: int | None = self._db.execute("SELECT MAX(id) FROM statuses").fetchone()[0]

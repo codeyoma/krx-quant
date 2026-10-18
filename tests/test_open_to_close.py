@@ -56,7 +56,15 @@ def test_open_to_close_is_registered_as_a_daily_kind_apart_from_the_bar_close_ki
     assert (kind.classes, kind.action, kind.answer_version) == (("up", "flat", "down"), ("up", "down"), 1)
     assert kind.predict_at.isoformat() == "08:50:00"
     assert [b.name for b in kind.daily_baselines] == [FLAT_NAME, CLIMATE, PERSIST]
-    assert (kind.review_rules.probation_days, kind.recent_days, kind.min_sample) == ((60, 120, 180), 60, 60)
+    # Judged on 20, 40 and 60 days with an answer, the latest 20 for the bench (#298: from 60, 120
+    # and 180, and 60): the first 20 are simulated at once.
+    rules = kind.review_rules
+    assert (rules.probation_days, rules.bench_days, kind.recent_days, kind.min_sample) == (
+        (20, 40, 60),
+        (20, 40, 60),
+        20,
+        60,
+    )
     shown = kind.as_dict(kind.baseline_cards())
     assert shown["horizon_minutes"] is None
     assert shown["daily"] == {
@@ -66,9 +74,9 @@ def test_open_to_close_is_registered_as_a_daily_kind_apart_from_the_bar_close_ki
         "from_title": "시가 단일가",
         "to_title": "종가 단일가",
         "answer_from": "20:35",
-        "probation_days": [60, 120, 180],
-        "bench_days": [60, 120, 180],
-        "recent_days": 60,
+        "probation_days": [20, 40, 60],
+        "bench_days": [20, 40, 60],
+        "recent_days": 20,
     }
 
 
