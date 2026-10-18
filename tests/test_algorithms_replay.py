@@ -227,8 +227,17 @@ async def test_the_days_predictions_lost_to_the_budgets_are_told_after_the_close
         return True
 
     # The morning: slow is over its limit at each bar close; with it counted at its limit,
-    # heavy (registered last) no longer fits in the CPU budget.
-    await run(db, busy_morning(), until=at("09:03:30"), algorithms=algorithms, budget=budget, notify=notify)
+    # heavy (registered last) no longer fits in the CPU budget. The direction's only: the kinds'
+    # algorithms would be skipped first (#179), and how often depends on the machine's speed.
+    await run(
+        db,
+        busy_morning(),
+        until=at("09:03:30"),
+        algorithms=algorithms,
+        kind_algorithms=(),
+        budget=budget,
+        notify=notify,
+    )
     assert sent == []
     with sqlite3.connect(db) as conn:
         skipped = conn.execute("SELECT COUNT(*) FROM runs WHERE kind = 'cpu_budget' AND algorithm = 'heavy'")
@@ -242,6 +251,7 @@ async def test_the_days_predictions_lost_to_the_budgets_are_told_after_the_close
         start=at("15:39:00"),
         until=at("15:45:00"),
         algorithms=algorithms,
+        kind_algorithms=(),
         budget=budget,
         notify=notify,
     )
