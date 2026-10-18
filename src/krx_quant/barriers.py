@@ -59,7 +59,9 @@ certainty; not predicted when that window could not be scored.
 **Statistics** (``barrier_stats``), beside the three-class ones (action classes: up_first and
 down_first): the barrier P&L (research only, ``barrier_profit``) of the calls: a long on
 up_first, a short on down_first, nothing on timeout; the trades, their total and the mean per
-trade with its normal 95% interval, all calls and each side.
+trade with its normal 95% interval, all calls and each side. The shorts are costed as shorts of
+the stock (the sell tax paid); beside them (#267, ``inverse_profit``), the shorts through the
+symbol's single-stock inverse product, which pays no sell tax, and all calls with those.
 """
 
 from __future__ import annotations
@@ -73,9 +75,9 @@ from typing import TYPE_CHECKING, Any
 from krx_quant.cards import Card
 from krx_quant.consensus import slot
 from krx_quant.features import Snapshot, Width
-from krx_quant.feeds.base import KST
+from krx_quant.feeds.base import KST, kst_day
 from krx_quant.kinds import Answer, Followed, Kind, KindForecast, KindInputs, KindScored, Quote, went_silent
-from krx_quant.pricing import flat_ticks, tick_size
+from krx_quant.pricing import INVERSE_PRODUCTS, SELL_TAX, flat_ticks, tick_size
 from krx_quant.reference import Bar
 from krx_quant.stats import interval_json, mean_interval
 from krx_quant.touch import BAR_BUFFER, close_side
@@ -230,6 +232,26 @@ def barrier_profit(predicted: str, outcome: str, path: Mapping[str, Any]) -> flo
     return (float(sold) - float(bought)) / float(tick) - float(cost)
 
 
+def inverse_profit(
+    predicted: str, outcome: str, path: Mapping[str, Any], symbol: str, bar_close: datetime
+) -> float | None:
+    """A call's barrier P&L with a short traded through ``symbol``'s single-stock inverse product
+    (#267, ``pricing.INVERSE_PRODUCTS``), as the direction's ``pnl_inverse``: the same prices and
+    fills, less both commissions on the product's notional only (no sell tax on an ETF; a
+    −leverage x product gives a share's exposure for 1/leverage of its price). None for a short
+    on a symbol without one, or before it was listed. A long is as ``barrier_profit``."""
+    profit = barrier_profit(predicted, outcome, path)
+    if profit is None or predicted != DOWN_FIRST:
+        return profit
+    product = INVERSE_PRODUCTS.get(symbol)
+    anchor = path.get("anchor")
+    if product is None or kst_day(bar_close) < product.listed or anchor is None:
+        return None
+    cost, tick = float(path["cost"]), float(path["tick"])
+    commissions = cost - float(anchor) * SELL_TAX / tick  # both commissions on a share, ticks
+    return profit + cost - commissions / product.leverage
+
+
 def _pnl_json(trades: Sequence[float]) -> dict[str, Any]:
     """Trades' P&L as the direction's touch P&L shows it: how many, their total and the mean
     per trade with its normal 95% interval (ticks)."""
@@ -246,15 +268,24 @@ def barrier_stats(
     """``algorithm``'s barrier P&L (module doc), from its scored barrier predictions: of all its
     trades (``pnl``), its longs (up_first calls) and its shorts (down_first calls)."""
     sides: dict[str, list[float]] = {UP_FIRST: [], DOWN_FIRST: []}
+    inverse_shorts: list[float] = []
     for r in records:
         predicted, outcome = CLASSES[r.predicted], CLASSES[r.outcome]
         if (profit := barrier_profit(predicted, outcome, r.path)) is not None:
             sides[predicted].append(profit)
+        if (
+            predicted == DOWN_FIRST
+            and (inverse := inverse_profit(predicted, outcome, r.path, r.symbol, r.bar_close)) is not None
+        ):
+            inverse_shorts.append(inverse)
     return {
         "n": len(records),
         "pnl": _pnl_json([*sides[UP_FIRST], *sides[DOWN_FIRST]]),
         "long": _pnl_json(sides[UP_FIRST]),
         "short": _pnl_json(sides[DOWN_FIRST]),
+        # The shorts through the inverse product (#267), and every trade with them.
+        "pnl_inverse": _pnl_json([*sides[UP_FIRST], *inverse_shorts]),
+        "short_inverse": _pnl_json(inverse_shorts),
     }
 
 
