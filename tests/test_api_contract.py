@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from jsonschema import Draft202012Validator
 
 from krx_quant.api import create_app
+from krx_quant.barriers import BARRIER_LADDER
 from krx_quant.clock import FakeClock
 from krx_quant.collector import run_collector
 from krx_quant.demo import demo_app
@@ -247,12 +249,15 @@ async def test_a_morning_with_another_kind_keeps_the_contract(tmp_path: Path) ->
 
 
 async def test_a_morning_with_the_range_and_the_barrier_keeps_the_contract(tmp_path: Path) -> None:
-    """#180, #183. Input: a replayed busy morning with the kinds the engine predicts (the range
-    and the barrier). Output: every endpoint within the contract; each kind's outputs, answer
-    paths and own statistics within theirs (``range_output``, ``range_path``, ``range_stats``;
-    ``barrier_output``, ``barrier_path``, ``barrier_stats``); a scored prediction's k
-    (``flat_ticks``, #200) is its answer's, its mid-point and tick (``anchor``, ``tick``, #210)
-    its answer's, and a barrier prediction's width (``width_ticks``) its answer's w."""
+    """#180, #183, #263. Input: a replayed busy morning with the kinds the engine predicts (the
+    range, the barrier and its horizon ladder). Output: every endpoint within the contract; each
+    kind's outputs, answer paths and own statistics within theirs (``range_output``,
+    ``range_path``, ``range_stats``; ``barrier_output``, ``barrier_path``, ``barrier_stats``, the
+    ladder's too); every window over by 10:00 answered; a scored prediction's k (``flat_ticks``,
+    #200) is its answer's, its mid-point and tick (``anchor``, ``tick``, #210) its answer's, and
+    a barrier prediction's width (``width_ticks``) its answer's w."""
+    horizons = {"range": timedelta(minutes=4), "barrier": timedelta(minutes=4)}
+    horizons |= {k.name: k.horizon for k in BARRIER_LADDER}
     engine = await run(
         tmp_path / "engine.db", busy_morning(), until=at("10:00:00"), target_version=TARGET_VERSION
     )
@@ -261,30 +266,29 @@ async def test_a_morning_with_the_range_and_the_barrier_keeps_the_contract(tmp_p
         checked = await walk(through(client))
         made = {
             kind: await (await client.get(f"/v1/symbols/005930/kinds/{kind}/predictions?limit=60")).json()
-            for kind in ("range", "barrier")
+            for kind in horizons
         }
-        boards = {
-            kind: await (await client.get(f"/v1/leaderboard?kind={kind}")).json()
-            for kind in ("range", "barrier")
-        }
+        boards = {kind: await (await client.get(f"/v1/leaderboard?kind={kind}")).json() for kind in horizons}
 
-    assert checked["kind_latest"] == 2
-    for kind in ("range", "barrier"):
+    assert checked["kind_latest"] == len(horizons)
+    for kind, horizon in horizons.items():
+        family = "range" if kind == "range" else "barrier"
         ok = [p for p in made[kind]["predictions"] if p["status"] == "ok"]
-        assert ok and all(p["answer"] is not None for p in ok if p["bar_close"] < "2026-10-12T09:56")
+        over = [p for p in ok if datetime.fromisoformat(p["bar_close"]) + horizon < at("10:00:00")]
+        assert ok and all(p["answer"] is not None for p in over), kind
         for p in ok:
-            check(f"{kind}_output", p["output"])
+            check(f"{family}_output", p["output"])
             if p["answer"] is not None:
-                check(f"{kind}_path", p["answer"]["path"])
+                check(f"{family}_path", p["answer"]["path"])
                 assert p["flat_ticks"] == p["answer"]["path"]["k"], "the bar close's k, the answer's (#200)"
                 reference = (p["answer"]["path"]["anchor"], p["answer"]["path"]["tick"])
                 assert (p["anchor"], p["tick"]) == reference, "the bar close's mid-point, the answer's (#210)"
-                if kind == "barrier":
+                if family == "barrier":
                     assert p["width_ticks"] == p["answer"]["path"]["w"], "the bar close's width, the answer's"
                 else:
                     assert p["width_ticks"] is None, "the range has no barriers"
         for e in boards[kind]["baselines"]:
-            check(f"{kind}_stats", e["extra"])
+            check(f"{family}_stats", e["extra"])
 
 
 async def test_a_screen_from_before_reads_the_touch_label_where_it_read_the_bases(tmp_path: Path) -> None:
