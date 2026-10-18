@@ -701,6 +701,7 @@ Toss: 109 calls, 1 failed; tokens issued: 0
   - **미국 일봉.** 이력 작업이 시작할 때와 20:30에 받는다(매크로 읽기를 켰을 때). 08:50의 실시간 피처는 그날 07:30 매크로 읽기를 먼저 쓰고, 없으면 이 파일을 쓴다.
   - **손으로 학습.** `docker compose run --rm --no-deps engine fit cox`: 마지막 KRX 일봉까지로 학습해 `state/models/cox.json`에 쓴다. 엔진이 1분 안에 바꾼다.
 - **엔진 API.** `curl http://krx-quant:8080/v1/symbols/005930/kinds/open_to_close/latest`(그날 08:50의 예측과, 20:35 뒤면 그 정답), `…/v1/leaderboard?kind=open_to_close&period=20d`(순위표), `…/v1/kinds`(그날의 시각, `daily`). 형식은 [engine-api.md](engine-api.md#하루-한-번-예측-종류-264)의 "API".
+- **화면.** KRX 화면의 예측 종류 **시가→종가**(codeyoma/FinceptTerminal#92): 예측 패널이 그날 08:50의 예측과 그날 밤의 정답, 순위표와 상세 통계 창이 `kind=open_to_close`, 일 보기가 날마다의 예측 아이콘과 결과다. 순위표의 "오늘"은 그날 정답(20:35 뒤)까지 비어 있으니 5일·20일로 본다. 자세한 것은 `fincept/custom/README.md`.
 
   > **바뀜** (2026-10-18, #293): "엔진 API는 이 PR에는 없다. 그 전에는 위 명령으로 본다" → API로 본다. 이유: #264의 엔진 API PR이다.
 
