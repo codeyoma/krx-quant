@@ -461,13 +461,22 @@ def test_the_train_command_trains_every_registered_algorithm_from_the_store(
     # On the touch target, the default (#170): the climate baseline's table, then the range's
     # (#180) and the barrier's (#183), each of its kind's answers (the range's answer version 1,
     # the barrier's 2 since #187), then the range's Mandelbrot (#181) and the barrier's Breiman
-    # (#184).
-    names = [a.name for a in ALGORITHMS] + [CLIMATE, RANGE_CLIMATE, BARRIER_CLIMATE, MANDELBROT, BREIMAN]
+    # (#184). The barrier's horizon ladder has a climate table each (#263), after the barrier's.
+    ladder = [f"{BARRIER_CLIMATE}-{m}m" for m in (15, 30, 60)]
+    names = [a.name for a in ALGORITHMS] + [
+        CLIMATE,
+        RANGE_CLIMATE,
+        BARRIER_CLIMATE,
+        *ladder,
+        MANDELBROT,
+        BREIMAN,
+    ]
     assert [r["algorithm"] for r in promotions["reports"]] == names
     assert {r["algorithm"]: r["target_version"] for r in promotions["reports"]} == {
         **dict.fromkeys(names, TARGET_VERSION),
         RANGE_CLIMATE: 1,
         BARRIER_CLIMATE: BARRIER.answer_version,
+        **dict.fromkeys(ladder, BARRIER.answer_version),
         MANDELBROT: 1,
         BREIMAN: BARRIER.answer_version,
     }

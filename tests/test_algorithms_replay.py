@@ -288,12 +288,17 @@ async def test_when_the_cpu_budget_runs_short_the_last_registered_is_skipped_fir
     assert third_closes == ["09:01", "09:03"]
     with sqlite3.connect(tmp_path / "engine.db") as conn:
         runs = conn.execute("SELECT kind, at, algorithm, detail FROM runs").fetchall()
-    # A new database goes by the touch target (#170) and the barrier's answer version (#187).
-    assert runs[:2] == [
+    # A new database goes by the touch target (#170) and the barriers' answer version (#187,
+    # the horizon ladder's too, #263).
+    targets = [r for r in runs if r[0] == "target"]
+    assert targets == [
         ("target", "2026-10-12T00:00:00+09:00", None, str(TARGET_VERSION)),
-        ("target", "2026-10-12T00:00:00+09:00", None, f"barrier {BARRIER.answer_version}"),
+        *(
+            ("target", "2026-10-12T00:00:00+09:00", None, f"{name} {BARRIER.answer_version}")
+            for name in ("barrier", "barrier_15m", "barrier_30m", "barrier_60m")
+        ),
     ]
-    assert [r[:3] for r in runs[2:]] == [("cpu_budget", "2026-10-12T09:02:00+09:00", "third")]
+    assert [r[:3] for r in runs if r[0] != "target"] == [("cpu_budget", "2026-10-12T09:02:00+09:00", "third")]
     async with api(engine) as client:
         cpu = (await get_json(client, "/v1/status"))["cpu"]
     assert (cpu["budget_seconds"], cpu["algorithm_seconds"], cpu["skipped_today"]) == (0.2, 10.0, 1)
