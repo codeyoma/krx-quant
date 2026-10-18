@@ -607,8 +607,10 @@ class PredictionEngine:
             self._tell(KindAnswered(stored.kind, stored.keys))
 
     def kind_named(self, name: str) -> PredictionKind | None:
-        """A kind the engine predicts, the direction included (#179)."""
-        return DIRECTION_KIND if name == DIRECTION else next((k for k in self.kinds if k.name == name), None)
+        """A kind the engine predicts, the direction (#179) and the daily kinds (#264) included."""
+        if name == DIRECTION:
+            return DIRECTION_KIND
+        return next((k for k in self.kinds if k.name == name), None) or self.daily_kind_named(name)
 
     def kind_of_algorithm(self, name: str) -> PredictionKind | None:
         """The kind a registered algorithm predicts; None for a name not registered."""

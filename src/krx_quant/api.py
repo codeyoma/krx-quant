@@ -81,13 +81,15 @@ from typing import Any, Literal
 
 from aiohttp import web
 
-from krx_quant.algorithms import Algorithm, KindAlgorithm, kind_of
+from krx_quant.algorithms import Algorithm, KindAlgorithm
 from krx_quant.backfill import stock_bars_path, stored_bars
 from krx_quant.candles import PERIODS as CANDLE_PERIODS
 from krx_quant.candles import stored_candles
 from krx_quant.consensus import NAMES, slot
 from krx_quant.consensus import cards as consensus_cards
 from krx_quant.contracts import USD
+from krx_quant.daily import DailyAlgorithm
+from krx_quant.daily_features import DAILY_FEATURES
 from krx_quant.econ_calendar import calendar_answer, read_latest
 from krx_quant.engine import PredictionEngine
 from krx_quant.features import FEATURE_MEANINGS
@@ -122,7 +124,7 @@ from krx_quant.stats import (
     scored_by_algorithm,
     split,
 )
-from krx_quant.stream import EventStream, LiveStatus, kind_prediction_json, prediction_json
+from krx_quant.stream import EventStream, LiveStatus, kind_prediction_json, kind_target, prediction_json
 from krx_quant.supply import FIELDS as SUPPLY_FIELDS
 from krx_quant.supply import stored_supply
 
@@ -495,7 +497,11 @@ def _limit_query(request: web.Request, default: int, most: int) -> int:
 async def _algorithms(request: web.Request) -> web.Response:
     engine = request.app[ENGINE_KEY]
     stages = await engine.stages()
-    running: list[Algorithm | KindAlgorithm] = [*engine.algorithms, *engine.kind_algorithms]
+    running: list[Algorithm | KindAlgorithm | DailyAlgorithm] = [
+        *engine.algorithms,
+        *engine.kind_algorithms,
+        *engine.daily_algorithms,
+    ]
     return _json(
         {
             "algorithms": [_algorithm_json(engine, a, stages) for a in running],
@@ -511,7 +517,11 @@ async def _algorithms(request: web.Request) -> web.Response:
 async def _algorithm(request: web.Request) -> web.Response:
     engine = request.app[ENGINE_KEY]
     name = request.match_info["name"]
-    running: list[Algorithm | KindAlgorithm] = [*engine.algorithms, *engine.kind_algorithms]
+    running: list[Algorithm | KindAlgorithm | DailyAlgorithm] = [
+        *engine.algorithms,
+        *engine.kind_algorithms,
+        *engine.daily_algorithms,
+    ]
     algorithm = next((a for a in running if a.name == name), None)
     if algorithm is None:
         raise _error(web.HTTPNotFound, f"unknown algorithm {name!r}")
@@ -526,14 +536,18 @@ async def _algorithm(request: web.Request) -> web.Response:
 
 
 def _algorithm_json(
-    engine: PredictionEngine, a: Algorithm | KindAlgorithm, stages: Mapping[str, Stage]
+    engine: PredictionEngine, a: Algorithm | KindAlgorithm | DailyAlgorithm, stages: Mapping[str, Stage]
 ) -> dict[str, Any]:
     return {
         "name": a.name,
-        "kind": kind_of(a),  # the kind it predicts (#179)
+        "kind": str(getattr(a, "kind", DIRECTION)),  # the kind it predicts (#179)
         "card": a.card.as_dict(),
         "features": list(a.features),
-        "feature_meanings": {f: FEATURE_MEANINGS[f].as_dict() for f in a.features},
+        # A daily kind's algorithm's are the daily features' (#264).
+        "feature_meanings": {
+            f: (FEATURE_MEANINGS[f] if f in FEATURE_MEANINGS else DAILY_FEATURES[f].meaning).as_dict()
+            for f in a.features
+        },
         "training_days": a.training_days,
         "model": engine.models[a.name].as_dict(),
         "param_meanings": {p: m.as_dict() for p, m in a.param_meanings.items()},
@@ -764,7 +778,7 @@ def _kind_query(request: web.Request, engine: PredictionEngine) -> PredictionKin
     name = request.query.get("kind", DIRECTION)
     kind = engine.kind_named(name)
     if kind is None:
-        names = ", ".join([DIRECTION, *(k.name for k in engine.kinds)])
+        names = ", ".join([DIRECTION, *(k.name for k in engine.kinds), *(k.name for k in engine.daily_kinds)])
         raise _error(web.HTTPBadRequest, f"kind must be one of {names}, got {name!r}")
     return None if kind is DIRECTION_KIND else kind
 
@@ -978,8 +992,8 @@ KindBuild = Callable[
 def _kind_of(engine: PredictionEngine, name: str) -> PredictionKind | None:
     """The kind besides the direction a predictor's name is of: an algorithm's or a baseline's
     the engine runs, or one that predicted before; None if none."""
-    for kind in engine.kinds:
-        if any(b.name == name for b in kind.baselines):
+    for kind in [*engine.kinds, *engine.daily_kinds]:  # the daily kinds' too (#264)
+        if name in kind.baseline_names():
             return kind
     found = engine.kind_of_algorithm(name)
     if found is not None and found is not DIRECTION_KIND:
@@ -994,7 +1008,7 @@ async def _kind_stats(
     """A kind's statistics for ``query`` (#179), as ``_stats``: its predictions scored on its
     answers, of models trained on them (its answer version) and its baselines'."""
     engine = request.app[ENGINE_KEY]
-    names = frozenset(b.name for b in kind.baselines)
+    names = kind.baseline_names()
 
     def compute() -> dict[str, Any]:
         rows, excluded = engine.store.kind_scored_and_excluded(
@@ -1002,9 +1016,10 @@ async def _kind_stats(
         )
         rows = on_target(rows, names, kind.answer_version)
         algorithms, baselines = kind_split(scored_of_kind(rows, kind), names)
-        for a in engine.kind_algorithms:
-            if a.kind == kind.name:
-                algorithms.setdefault(a.name, [])
+        of_kind = [a.name for a in engine.kind_algorithms if a.kind == kind.name]
+        of_kind += [a.name for a in engine.daily_algorithms if a.kind == kind.name]
+        for name in of_kind:
+            algorithms.setdefault(name, [])
         return build(algorithms, baselines, excluded)
 
     return await _cached(request, (kind.name, question, query), compute)
@@ -1098,7 +1113,8 @@ async def _kinds(request: web.Request) -> web.Response:
     """``/v1/kinds``: every kind the engine predicts, the direction first (#179)."""
     engine = request.app[ENGINE_KEY]
     kinds = [DIRECTION_KIND.as_dict([(b.name, b.card) for b in engine.baselines])]
-    kinds += [k.as_dict([(b.name, b.card) for b in k.baselines]) for k in engine.kinds]
+    kinds += [k.as_dict(k.baseline_cards()) for k in engine.kinds]
+    kinds += [k.as_dict(k.baseline_cards()) for k in engine.daily_kinds]  # once a day (#264)
     return _json({"kinds": kinds})
 
 
@@ -1126,7 +1142,7 @@ async def _kind_latest(request: web.Request) -> web.Response:
             "symbol": symbol,
             "kind": kind.name,
             "bar_close": rows[0]["bar_close"] if rows else None,
-            "predictions": [kind_prediction_json(r, kind.horizon) for r in rows],
+            "predictions": [kind_prediction_json(r, target=kind_target(kind, engine.calendar)) for r in rows],
         }
     )
 
@@ -1145,7 +1161,7 @@ async def _kind_predictions(request: web.Request) -> web.Response:
         {
             "symbol": symbol,
             "kind": kind.name,
-            "predictions": [kind_prediction_json(r, kind.horizon) for r in rows],
+            "predictions": [kind_prediction_json(r, target=kind_target(kind, engine.calendar)) for r in rows],
         }
     )
 
