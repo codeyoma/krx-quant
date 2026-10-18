@@ -243,7 +243,7 @@ async def test_a_us_symbol_that_never_traded_today_does_not_hide_the_whole_feed_
 async def test_after_a_reconnect_refused_subscriptions_stay_on_one_rest_poll(
     kis: FakeKis, tmp_path: Path
 ) -> None:
-    kis.max_subscriptions = 1  # the trade feed fits, the book feed is refused
+    kis.max_subscriptions = 3  # the night futures (#264) and the trade feed fit, the book feed is refused
     kis.rest_responses["FHKST01010200"] = lambda q: {"rt_cd": "1", "msg1": "not needed here"}
     kis.script[TRADE_KEY] = []
     stop = asyncio.Event()

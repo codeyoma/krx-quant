@@ -111,6 +111,30 @@ FUTURES_COLUMNS = (
 ).split()
 
 
+# KRX야간선물 실시간종목체결 (H0MFCNT0), examples_llm/domestic_futureoption/krx_ngt_futures_ccnl:
+# the day futures' list without dscs_bltr_acml_qty.
+NIGHT_FUTURES_COLUMNS = (
+    "futs_shrn_iscd bsop_hour futs_prdy_vrss prdy_vrss_sign futs_prdy_ctrt futs_prpr futs_oprc "
+    "futs_hgpr futs_lwpr last_cnqn acml_vol acml_tr_pbmn hts_thpr mrkt_basis dprt nmsc_fctn_stpl_prc "
+    "fmsc_fctn_stpl_prc spead_prc hts_otst_stpl_qty otst_stpl_qty_icdc oprc_hour oprc_vrss_prpr_sign "
+    "oprc_vrss_nmix_prpr hgpr_hour hgpr_vrss_prpr_sign hgpr_vrss_nmix_prpr lwpr_hour "
+    "lwpr_vrss_prpr_sign lwpr_vrss_nmix_prpr shnu_rate cttr esdg otst_stpl_rgbf_qty_icdc thpr_basis "
+    "futs_askp1 futs_bidp1 askp_rsqn1 bidp_rsqn1 seln_cntg_csnu shnu_cntg_csnu ntby_cntg_csnu "
+    "seln_cntg_smtn shnu_cntg_smtn total_askp_rsqn total_bidp_rsqn prdy_vol_vrss_acml_vol_rate "
+    "dynm_mxpr dynm_llam dynm_prc_limt_yn"
+).split()
+
+# KRX야간선물 실시간호가 (H0MFASP0), examples_llm/domestic_futureoption/krx_ngt_futures_asking_price.
+NIGHT_BOOK_COLUMNS = (
+    "futs_shrn_iscd bsop_hour futs_askp1 futs_askp2 futs_askp3 futs_askp4 futs_askp5 futs_bidp1 "
+    "futs_bidp2 futs_bidp3 futs_bidp4 futs_bidp5 askp_csnu1 askp_csnu2 askp_csnu3 askp_csnu4 "
+    "askp_csnu5 bidp_csnu1 bidp_csnu2 bidp_csnu3 bidp_csnu4 bidp_csnu5 askp_rsqn1 askp_rsqn2 "
+    "askp_rsqn3 askp_rsqn4 askp_rsqn5 bidp_rsqn1 bidp_rsqn2 bidp_rsqn3 bidp_rsqn4 bidp_rsqn5 "
+    "total_askp_csnu total_bidp_csnu total_askp_rsqn total_bidp_rsqn total_askp_rsqn_icdc "
+    "total_bidp_rsqn_icdc"
+).split()
+
+
 US_TRADE_COLUMNS = (
     "RSYM SYMB ZDIV TYMD XYMD XHMS KYMD KHMS OPEN HIGH LOW LAST SIGN DIFF RATE PBID PASK VBID VASK "
     "EVOL TVOL TAMT BIVL ASVL STRN MTYP"
@@ -144,6 +168,14 @@ def index_frame(*records: Mapping[str, str]) -> str:
 
 def futures_frame(tr_id: str, *records: Mapping[str, str]) -> str:
     return frame(tr_id, FUTURES_COLUMNS, *records)
+
+
+def night_futures_frame(*records: Mapping[str, str]) -> str:
+    return frame("H0MFCNT0", NIGHT_FUTURES_COLUMNS, *records)
+
+
+def night_book_frame(*records: Mapping[str, str]) -> str:
+    return frame("H0MFASP0", NIGHT_BOOK_COLUMNS, *records)
 
 
 def us_trade_frame(*records: Mapping[str, str]) -> str:

@@ -1,7 +1,9 @@
-"""Market context feeds: sector indices, KOSPI200 and USD futures, US daytime trades, option IV."""
+"""Market context feeds: sector indices, KOSPI200 and USD futures, the KOSPI200 night futures,
+US daytime trades, option IV."""
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import date, datetime
 from typing import Any
 
@@ -14,6 +16,7 @@ from krx_quant.feeds.base import (
     RestFeed,
     Row,
     kst,
+    kst_nearest,
     kst_or_received,
     received_second,
     to_float,
@@ -129,10 +132,12 @@ FUTURES_SCHEMA = pa.schema(
 )
 
 
-def _normalize_futures(f: dict[str, str], received_at: datetime) -> Row:
+def _normalize_futures(
+    f: dict[str, str], received_at: datetime, when: Callable[[str, datetime], datetime] = kst_or_received
+) -> Row:
     return {
         "symbol": f["futs_shrn_iscd"],
-        "event_time": kst_or_received(f["bsop_hour"], received_at),
+        "event_time": when(f["bsop_hour"], received_at),
         "received_at": received_at,
         # KIS sends float noise for currency futures (e.g. 1337.20000117); 2 decimals cover every tick.
         "price": round(to_float(f["futs_prpr"]), 2),
@@ -153,6 +158,88 @@ def _normalize_futures(f: dict[str, str], received_at: datetime) -> Row:
 
 KOSPI200_FUTURES = Feed("H0IFCNT0", tuple(FUTURES_COLUMNS), FUTURES_SCHEMA, _normalize_futures)
 USD_FUTURES = Feed("H0CFCNT0", tuple(FUTURES_COLUMNS), FUTURES_SCHEMA, _normalize_futures)
+
+
+# H0MFCNT0, the KOSPI200 futures of KRX's night session, 18:00 to 06:00 the next morning
+# (KIS: "KRX야간선물 실시간종목체결", examples_llm/domestic_futureoption/krx_ngt_futures_ccnl,
+# 2025-06-01). The day futures' layout less dscs_bltr_acml_qty: 49 fields. Recorded in the
+# day futures' schema. Its times carry no date and the session crosses midnight, so a time
+# goes on the day nearest the time it was received (#264).
+NIGHT_FUTURES_COLUMNS = tuple(c for c in FUTURES_COLUMNS if c != "dscs_bltr_acml_qty")
+
+
+def _normalize_night_futures(f: dict[str, str], received_at: datetime) -> Row:
+    return _normalize_futures(f, received_at, kst_nearest)
+
+
+NIGHT_FUTURES = Feed("H0MFCNT0", NIGHT_FUTURES_COLUMNS, FUTURES_SCHEMA, _normalize_night_futures)
+
+# H0MFASP0, the night session's book: five levels, with the number of orders at each
+# (KIS: "KRX야간선물 실시간호가", examples_llm/domestic_futureoption/krx_ngt_futures_asking_price;
+# the same 38 fields as the day futures' H0IFASP0, which is not recorded). KIS filters
+# futures and options books to one per 0.2 seconds.
+FUTURES_LEVELS = range(1, 6)
+NIGHT_BOOK_COLUMNS = (
+    "futs_shrn_iscd",
+    "bsop_hour",
+    *(f"futs_askp{i}" for i in FUTURES_LEVELS),
+    *(f"futs_bidp{i}" for i in FUTURES_LEVELS),
+    *(f"askp_csnu{i}" for i in FUTURES_LEVELS),
+    *(f"bidp_csnu{i}" for i in FUTURES_LEVELS),
+    *(f"askp_rsqn{i}" for i in FUTURES_LEVELS),
+    *(f"bidp_rsqn{i}" for i in FUTURES_LEVELS),
+    "total_askp_csnu",
+    "total_bidp_csnu",
+    "total_askp_rsqn",
+    "total_bidp_rsqn",
+    "total_askp_rsqn_icdc",
+    "total_bidp_rsqn_icdc",
+)
+
+NIGHT_BOOK_SCHEMA = pa.schema(
+    [
+        ("symbol", pa.string()),
+        ("event_time", EVENT_TIME),
+        ("received_at", RECEIVED_AT),
+        *((f"ask_px_{i}", pa.float64()) for i in FUTURES_LEVELS),
+        *((f"bid_px_{i}", pa.float64()) for i in FUTURES_LEVELS),
+        *((f"ask_count_{i}", pa.int64()) for i in FUTURES_LEVELS),
+        *((f"bid_count_{i}", pa.int64()) for i in FUTURES_LEVELS),
+        *((f"ask_qty_{i}", pa.int64()) for i in FUTURES_LEVELS),
+        *((f"bid_qty_{i}", pa.int64()) for i in FUTURES_LEVELS),
+        ("total_ask_count", pa.int64()),
+        ("total_bid_count", pa.int64()),
+        ("total_ask_qty", pa.int64()),
+        ("total_bid_qty", pa.int64()),
+        ("total_ask_qty_change", pa.int64()),
+        ("total_bid_qty_change", pa.int64()),
+    ]
+)
+
+
+def _normalize_night_book(f: dict[str, str], received_at: datetime) -> Row:
+    row: Row = {
+        "symbol": f["futs_shrn_iscd"],
+        "event_time": kst_nearest(f["bsop_hour"], received_at),
+        "received_at": received_at,
+    }
+    for i in FUTURES_LEVELS:
+        row[f"ask_px_{i}"] = round(to_float(f[f"futs_askp{i}"]), 2)
+        row[f"bid_px_{i}"] = round(to_float(f[f"futs_bidp{i}"]), 2)
+        row[f"ask_count_{i}"] = to_int(f[f"askp_csnu{i}"])
+        row[f"bid_count_{i}"] = to_int(f[f"bidp_csnu{i}"])
+        row[f"ask_qty_{i}"] = to_int(f[f"askp_rsqn{i}"])
+        row[f"bid_qty_{i}"] = to_int(f[f"bidp_rsqn{i}"])
+    row["total_ask_count"] = to_int(f["total_askp_csnu"])
+    row["total_bid_count"] = to_int(f["total_bidp_csnu"])
+    row["total_ask_qty"] = to_int(f["total_askp_rsqn"])
+    row["total_bid_qty"] = to_int(f["total_bidp_rsqn"])
+    row["total_ask_qty_change"] = to_int(f["total_askp_rsqn_icdc"])
+    row["total_bid_qty_change"] = to_int(f["total_bidp_rsqn_icdc"])
+    return row
+
+
+NIGHT_FUTURES_BOOK = Feed("H0MFASP0", NIGHT_BOOK_COLUMNS, NIGHT_BOOK_SCHEMA, _normalize_night_book)
 
 
 def _contract_quote(body: dict[str, Any]) -> Any:

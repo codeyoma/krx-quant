@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -82,6 +82,29 @@ def kst_or_received(hhmmss: str, received_at: datetime) -> datetime:
     if hhmmss == CLOSING_TIME:
         return received_second(received_at)
     return kst(kst_day(received_at), hhmmss)
+
+
+# A night's records are at most this far from when they are received, either way.
+_HALF_DAY = timedelta(hours=12)
+
+
+def kst_nearest(hhmmss: str, received_at: datetime) -> datetime:
+    """``hhmmss`` on the day that puts it nearest the time received, or the second received
+    for a closing record: for a session across midnight (the night futures, 18:00–06:00),
+    whose records carry a time but no date. A trade at 23:59:59 received just after
+    midnight is the evening's, not the next evening's.
+
+    Any other value that is not a time raises ValueError, so the record stays raw only.
+    """
+    if hhmmss == CLOSING_TIME:
+        return received_second(received_at)
+    local = received_at.astimezone(KST)
+    at = kst(local.date(), hhmmss)
+    if at - local > _HALF_DAY:
+        return at - timedelta(days=1)
+    if local - at > _HALF_DAY:
+        return at + timedelta(days=1)
+    return at
 
 
 def kst_day(received_at: datetime) -> date:
