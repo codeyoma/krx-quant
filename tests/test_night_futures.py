@@ -185,25 +185,27 @@ async def test_without_masters_the_night_futures_come_first(kis: FakeKis, tmp_pa
     ("started", "code"),
     [
         (datetime(2026, 10, 15, 7, 20, tzinfo=KST), "A01612"),
-        # December expires on Thursday the 10th: the night before clears with that day's
-        # session, which takes March already, as the backfill does.
-        (datetime(2026, 12, 9, 7, 20, tzinfo=KST), "A01703"),
+        # December last trades on Thursday the 10th, through that day's regular session
+        # (KRX, OPN01041402): the night before still trades it.
+        (datetime(2026, 12, 9, 7, 20, tzinfo=KST), "A01612"),
+        (datetime(2026, 12, 10, 5, 0, tzinfo=KST), "A01612"),  # that night, before 06:00
+        # March starts in the night that begins on the 10th, and goes on after it.
         (datetime(2026, 12, 10, 7, 20, tzinfo=KST), "A01703"),
-        # Before 06:00 the night going on is the previous evening's (the 8th's: December).
-        (datetime(2026, 12, 9, 5, 0, tzinfo=KST), "A01612"),
+        (datetime(2026, 12, 11, 7, 20, tzinfo=KST), "A01703"),
+        (datetime(2026, 12, 11, 3, 0, tzinfo=KST), "A01703"),  # the expiry day's night, going on
     ],
 )
-def test_a_night_takes_the_month_of_the_session_it_clears_with(started: datetime, code: str) -> None:
+def test_a_night_takes_the_month_still_trading_in_it(started: datetime, code: str) -> None:
     assert night_front_month(KOSPI200, started, MarketCalendar()) == code
 
 
 def test_an_expiry_a_holiday_moved_moves_the_night_s_roll() -> None:
     # Were Thursday 2026-12-10 a holiday, December would last trade on Wednesday the 9th:
-    # Tuesday's night clears with it and takes March; Monday's still takes December.
+    # Tuesday's night still takes December, Wednesday's takes March.
     calendar = MarketCalendar({date(2026, 12, 10): False})
-    assert night_front_month(KOSPI200, datetime(2026, 12, 8, 7, 20, tzinfo=KST), calendar) == "A01703"
-    assert night_front_month(KOSPI200, datetime(2026, 12, 7, 7, 20, tzinfo=KST), calendar) == "A01612"
-    # Friday's night clears on Monday.
+    assert night_front_month(KOSPI200, datetime(2026, 12, 8, 7, 20, tzinfo=KST), calendar) == "A01612"
+    assert night_front_month(KOSPI200, datetime(2026, 12, 9, 7, 20, tzinfo=KST), calendar) == "A01703"
+    # Friday's night, which counts as Monday's trading, takes the month Friday does.
     assert night_front_month(KOSPI200, datetime(2026, 12, 4, 22, 0, tzinfo=KST), calendar) == "A01612"
 
 

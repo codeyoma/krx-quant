@@ -60,19 +60,18 @@ NIGHT_END = timedelta(hours=6)
 
 def night_front_month(product: Product, at: datetime, calendar: MarketCalendar) -> str:
     """The code of the ``product`` contract recorded in the night session going on at ``at``,
-    or in the next one (#264).
+    or in the next one (#264): the nearest month still trading in it.
 
-    KRX's night session runs from 18:00 to 06:00 the next morning, and its trades clear with
-    the regular session right after it (KRX, 2026-09-09): the night after Friday's session
-    clears on Monday. So a night takes the month of that next trading day, as its bars would
-    (``front_month``): from the night before an expiry on, the next month. Before 06:00 the
-    night going on is the previous evening's.
+    KRX's night session runs from 18:00 to 06:00 the next morning and counts as the next
+    trading day's, with its regular session. A contract trades until the end of its last
+    trading day's regular session, and the next month starts in the night that begins that
+    evening (KRX, OPN01041402). So the night begun on an evening takes the month that
+    evening's day takes (``front_month``): the expiring month up to the night before its
+    last trading day, the next one from that day's night on. Before 06:00 the night going
+    on is the previous evening's.
     """
     evening = (at.astimezone(KST) - NIGHT_END).date()
-    day = evening + timedelta(days=1)
-    while not calendar.is_trading_day(day):
-        day += timedelta(days=1)
-    return front_month(product, day, calendar)
+    return front_month(product, evening, calendar)
 
 
 def nominal_expiry(product: Product, year: int, month: int) -> date:
