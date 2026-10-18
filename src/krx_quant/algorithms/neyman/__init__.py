@@ -5,11 +5,12 @@ Personality card:
 - **Logic**: meta-labeling (López de Prado 2018, ch. 3). A first model, gradient-boosted trees
   set up as Turing's on Turing's features, calls up, flat or down. A second, a logistic
   regression, says how likely an up or down call is to be right, from the call's own
-  probabilities, the volatility at the bar close (the barrier's width and sigma) and the
+  probabilities, the volatility at the bar close (the barrier's width w, and w over the
+  four-minute volatility σ̂₄ it came from) and the
   spread and time of day. The up and down probabilities are multiplied by that chance, the
   rest goes to flat: a call it doubts becomes a flat one. Fewer up and down calls, more of
   them right.
-- **Own features**: the barrier's width and sigma (``BARRIER_FEATURES``, #183), which no other
+- **Own features**: the barrier's width w and w ÷ σ̂₄ (``BARRIER_FEATURES``, #183), which no other
   direction algorithm reads (the barrier's Breiman, of another kind, does).
 - **Learns**: over the last 60 trading days, the first model on all of them; the second on
   the first model's out-of-sample calls: the days cut into four runs of consecutive days,
@@ -56,7 +57,10 @@ _INPUT_MEANINGS = {
     FLAT: ("1차 모델이 낸 보합 확률", "확률(0–1)"),
     UP: ("그 방향이 상승이면 1, 하락이면 0", "0/1"),
     BARRIER_WIDTH: ("봉 마감의 장벽 폭 w", "틱"),
-    BARRIER_SIGMA: ("봉 마감의 1분 변화 지수가중 표준편차", "틱"),
+    BARRIER_SIGMA: (
+        "봉 마감의 장벽 폭 w ÷ 4분 변동성 σ̂₄(1 근처면 변동성이, 1보다 크면 비용 k가 폭을 정함)",
+        "배",
+    ),
     "spread_ticks": ("봉 마감의 최우선 호가 스프레드", "틱"),
     "minutes_since_open": ("장 시작 뒤 지난 분", "분"),
 }
@@ -116,7 +120,7 @@ class Neyman:
             "meta-labeling(López de Prado 2018, 3장). 1차 모델은 Turing과 같은 설정의 LightGBM이 "
             "Turing의 피처로 상승·보합·하락을 가른다. 2차 모델(로지스틱 회귀)이 1차의 상승·하락 "
             "예측마다 그 예측이 맞을 확률을 낸다. 입력은 그 방향과 보합의 1차 확률, 방향, 봉 마감의 "
-            "변동성(장벽 폭 w와 σ), 스프레드, 장 시작 뒤 지난 분이다. 맞을 확률이 낮은 예측은 "
+            "변동성(장벽 폭 w와 w ÷ 4분 변동성 σ̂₄), 스프레드, 장 시작 뒤 지난 분이다. 맞을 확률이 낮은 예측은 "
             "보합으로 바뀐다. 상승·하락 예측 수를 줄이고 맞는 비율을 올린다."
         ),
         unique_features=(BARRIER_WIDTH, BARRIER_SIGMA),
