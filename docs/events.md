@@ -16,6 +16,7 @@
 ```
 
 - `date`는 메시지를 받은 시각의 한국 날짜다.
+  - 야간선물(18:00–다음 날 06:00, #264)도 같다. 그래서 한 밤이 두 날짜에 걸친다: 저녁 날짜의 18:00–23:59와 다음 날짜의 00:00–06:00. 금요일 밤의 새벽은 토요일 파티션이다. 한 밤을 읽으려면 두 날짜를 받은 시각(`received_at`)으로 거른다(`krx-quant probe-night`가 그렇게 읽는다).
 - `feed`는 KIS TR ID다(예: `H0UNCNT0`). 피드 목록과 키는 [kis-feeds.md](kis-feeds.md)에 있다. KIS 제어 메시지(구독 응답, PINGPONG)는 `raw` 계층의 `feed=_system`에 남는다. 형식을 알아볼 수 없는 메시지는 `raw` 계층의 `feed=_unparsed`에 남는다.
 - 한도로 잘린 프로그램매매, 선물, 달러선물, 미국 주간거래, 옵션을 대신하는 REST 조회는 events를 대신하는 WebSocket 피드 이름으로 쓴다. 그래서 이 다섯 피드의 events에는 REST로 받은 행도 있을 수 있다. 그 응답 원문은 raw의 REST TR 이름(`FHPPG04650101`, `FHMIF10000000`, `HHDFS00000300`)에 남는다(#28).
 - events의 `symbol` 파티션은 이벤트의 `symbol`이다. REST 응답의 raw는 조회한 키로 쓴다.
@@ -28,6 +29,7 @@
   - `data.parquet`의 Parquet 메타데이터(`krx_quant.parts`)에 합친 part 파일 이름이 남는다. 그래서 합친 뒤 지우지 못한 part 파일이 있어도 두 번 합치지 않는다. 그 뒤에 생긴 part 파일은 다음 업로드 때 합친다.
   - 파티션의 `.uploaded.json`에 올린 파일의 크기, 수정 시각, SHA-256을 남긴다. 바뀌지 않은 파일은 다시 올리지 않는다.
   - 10분 넘게 남아 있는 `.tmp` 파일(쓰다가 죽은 흔적)은 이때 지운다.
+  - 밤의 야간선물은 저녁 날짜의 21:00 업로드에 그때까지의 행이 들어가고, 나머지(21:00–23:59)와 다음 날짜의 새벽(00:00–06:00)은 다음 날의 장 마감 15분 뒤와 21:00 업로드에 들어간다. 업로드는 휴장일에도 21:00에 돈다.
 - 디렉터리는 Hive 파티션 형식이라 `pyarrow.dataset`이나 DuckDB로 바로 읽을 수 있다.
 
 ## raw
@@ -144,6 +146,32 @@ KIS 레코드 하나가 이벤트 하나다. 한 메시지에 레코드가 여�
 
 한도로 잘리면 REST `FHMIF10000000`(선물옵션 시세, KOSPI200 `F`, 달러선물 `CF`)이 이 피드를 대신한다. 응답에 시각이 없어 `event_time`은 수신 시각이다. `price`, `change_pct`, `cum_volume`, `open_interest`, `theory_price`, `market_basis`는 같은 이름의 필드에서 온다. `qty`와 호가 열(`ask1` … `total_bid_qty`)은 응답에 없어 null이다.
 
+## events: 야간선물 체결 (`H0MFCNT0`, #264)
+
+KRX 야간시장(18:00–다음 날 06:00)의 KOSPI200 선물 체결이다. 스키마는 위 "선물"과 같다. 열마다 같은 KIS 필드에서 온다. KIS 필드는 49개로 주간의 50개에서 `dscs_bltr_acml_qty`만 빠졌다([kis-feeds.md](kis-feeds.md#야간선물-264)).
+
+- `event_time`: `bsop_hour`에는 날짜가 없고 밤은 자정을 넘는다. 그래서 받은 시각(`received_at`)에 가장 가까운 날의 그 시각이다. 00:00:00.4에 받은 23:59:59 체결은 전날 23:59:59다. 파티션 날짜(받은 날)와 `event_time`의 날짜가 다를 수 있다. `999999`는 받은 초다.
+- REST 대체가 없다. 그래서 이 피드의 행은 모두 WebSocket에서 왔다(`qty`와 호가 열이 비지 않는다).
+
+## events: 야간선물 호가 (`H0MFASP0`, #264)
+
+KRX 야간시장의 KOSPI200 선물 5단계 호가다. KIS는 0.2초 간격으로 거른다. 가격은 소수 둘째 자리로 반올림한다. `event_time`은 위 체결과 같은 규칙이다.
+
+| 열 | 타입 | KIS 필드 | 설명 |
+|---|---|---|---|
+| `symbol` | string | `futs_shrn_iscd` | 선물 코드 |
+| `event_time` | timestamp(s, Asia/Seoul) | `bsop_hour` | 호가 시각(받은 시각에 가장 가까운 날) |
+| `received_at` | timestamp(us, UTC) | | 수신 시각 |
+| `ask_px_1` … `ask_px_5` | float64 | `futs_askp1` … `futs_askp5` | 매도호가 1–5단계 |
+| `bid_px_1` … `bid_px_5` | float64 | `futs_bidp1` … `futs_bidp5` | 매수호가 1–5단계 |
+| `ask_count_1` … `ask_count_5` | int64 | `askp_csnu1` … `askp_csnu5` | 매도호가 건수 |
+| `bid_count_1` … `bid_count_5` | int64 | `bidp_csnu1` … `bidp_csnu5` | 매수호가 건수 |
+| `ask_qty_1` … `ask_qty_5` | int64 | `askp_rsqn1` … `askp_rsqn5` | 매도호가 잔량(계약) |
+| `bid_qty_1` … `bid_qty_5` | int64 | `bidp_rsqn1` … `bidp_rsqn5` | 매수호가 잔량(계약) |
+| `total_ask_count`, `total_bid_count` | int64 | `total_askp_csnu`, `total_bidp_csnu` | 총 매도·매수호가 건수 |
+| `total_ask_qty`, `total_bid_qty` | int64 | `total_askp_rsqn`, `total_bidp_rsqn` | 총 매도·매수호가 잔량 |
+| `total_ask_qty_change`, `total_bid_qty_change` | int64 | `total_askp_rsqn_icdc`, `total_bidp_rsqn_icdc` | 총 잔량 증감 |
+
 ## events: 미국 주식 (`HDFSCNT0`)
 
 `symbol`은 티커(`NVDA`)이고 `key`는 KIS 키(`RBAQNVDA`)다. raw 계층의 `symbol` 파티션은 키다.
@@ -197,6 +225,7 @@ REST 응답 원문은 raw 계층에 `{"tr_id", "params", "body"}` JSON으로 남
   - 시작은 개장 시각, 구독(또는 REST 조회)을 시작한 시각, 마지막 수신 시각 중 가장 늦은 시각이다. 그래서 NXT 프리마켓에 받은 데이터는 침묵 시간에 들어가지 않는다.
   - 그날 한 번도 데이터가 오지 않은 피드는 KIS가 거래일이라고 확인한 날에만 판정한다. 휴장일에는 판정하지 않는다.
   - 미국 주간거래(`HDFSCNT0`)는 자기 시간표(미국 서머타임이 아니면 10:00 시작, 미국 휴일 휴장)를 따라서, 그날 데이터가 한 번 온 뒤에만 판정한다.
+  - 야간선물(`H0MFCNT0`, `H0MFASP0`, #264)은 판정하지 않는다. 18:00–06:00에만 오므로 연속매매 시간 내내 조용하다. 끊긴 구간(`disconnected`)은 다른 피드처럼 남는다.
 - 수집기가 멈출 때까지 열려 있던 구간은 `end`가 비어 있다.
 - **호가와 틱 체결의 결측은 채울 수 없다.** 과거 호가·틱을 주는 곳이 없어서, 이 계층의 구간은 그대로 남는다. 같은 구간의 1분봉은 `bars` 계층에 REST로 다시 받아 둔다.
 - 결측 구간의 1분봉 채움 여부는 `bars` 계층에 그날 그 종목 파일이 있는지로 안다. 결측 구간은 아직 SQLite(`data_gaps`)로 옮기지 않았다.
