@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import heapq
 import logging
-from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from functools import partial
@@ -26,7 +26,16 @@ from krx_quant.climate import CLIMATE, load_climate, load_tables
 from krx_quant.clock import FakeClock
 from krx_quant.config import Settings
 from krx_quant.consensus import Timing
-from krx_quant.engine import ENGINE_FEEDS, Budget, Event, Notify, PredictionEngine, Regimes, partitions
+from krx_quant.engine import (
+    ENGINE_FEEDS,
+    Admits,
+    Budget,
+    Event,
+    Notify,
+    PredictionEngine,
+    Regimes,
+    partitions,
+)
 from krx_quant.features import FeatureStore, Leaders, PreviousDays
 from krx_quant.feeds.base import KST, kst_day
 from krx_quant.kind_registry import KINDS
@@ -62,7 +71,7 @@ async def replay(
     consensus_timing: Timing | None = None,
     leaders: Leaders | None = None,
     regimes: Regimes | None = None,
-    admits: Callable[[Algorithm | KindAlgorithm], bool] | None = None,
+    admits: Admits | None = None,
     review_rules: Rules | None = None,
     target_version: int = 1,
     climate: Model | None = None,

@@ -21,7 +21,10 @@ engine from before it names the columns it writes, so it still opens and writes 
 database, and its rows have no k. So is ``kind_predictions.width_ticks`` (#183), the barrier
 width w of a kind with barriers at the bar close, and so are ``kind_predictions.anchor`` and
 ``kind_predictions.tick`` (#210), the bar close's mid-point and its tick size, the reference its
-answer is measured from (a barrier's U and L before its answer is in).
+answer is measured from (a barrier's U and L before its answer is in). So is
+``kind_predictions.band`` (#264): a daily kind's flat band of the day, as a change (close ÷
+open − 1), known at the prediction time; a daily kind's ``bar_close`` is its prediction time
+(08:50 of the day) and its answer is the day's (``daily.py``).
 
 ``special_windows`` (#236) keeps every special situation's window the engine learns (a VI,
 a circuit breaker, a sidecar: ``special.py``), one row per window, its end changed when a
@@ -184,6 +187,8 @@ CREATE TABLE IF NOT EXISTS kind_predictions (  -- a prediction of a kind besides
     anchor REAL,                      -- the mid-point at the bar close (#210): its answer's reference;
                                       -- null without one there, and in rows stored before #210
     tick INTEGER,                     -- the tick size at that mid-point (#210); null likewise
+    band REAL,                        -- a daily kind's flat band of the day (#264), a change;
+                                      -- null for the bar-close kinds and without one
     UNIQUE (kind, symbol, algorithm, bar_close)
 );
 CREATE INDEX IF NOT EXISTS kind_predictions_by_close ON kind_predictions (kind, bar_close);
@@ -232,6 +237,7 @@ _ADDED_COLUMNS = (
     ("kind_predictions", "width_ticks", "INTEGER"),
     ("kind_predictions", "anchor", "REAL"),
     ("kind_predictions", "tick", "INTEGER"),
+    ("kind_predictions", "band", "REAL"),
 )
 
 
@@ -460,6 +466,7 @@ class NewKindPrediction:
     width_ticks: int | None = None  # the kind's barrier width there (#183); None for a kind without
     anchor: float | None = None  # the mid-point at the bar close (#210); None without one there
     tick: int | None = None  # the tick size at that mid-point (#210); None likewise
+    band: float | None = None  # a daily kind's flat band of the day (#264); None for the others
 
 
 @dataclass(frozen=True)
@@ -1042,8 +1049,8 @@ class PredictionStore:
             for p in predictions:
                 cursor = self._db.execute(
                     "INSERT INTO kind_predictions (kind, symbol, algorithm, model_version, bar_close,"
-                    " displayed_at, status, output, flat_ticks, width_ticks, anchor, tick)"
-                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    " displayed_at, status, output, flat_ticks, width_ticks, anchor, tick, band)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         kind,
                         p.symbol,
@@ -1057,6 +1064,7 @@ class PredictionStore:
                         p.width_ticks,
                         p.anchor,
                         p.tick,
+                        p.band,
                     ),
                 )
                 assert cursor.lastrowid is not None
@@ -1132,6 +1140,30 @@ class PredictionStore:
             (iso(_midnight(since)), iso(_midnight(before)), kind, answer_version),
         )
         return [(r[0], datetime.fromisoformat(r[1])) for r in rows]
+
+    def daily_unanswered(self, kind: str, answer_version: int, since: date) -> list[tuple[str, date]]:
+        """The (symbol, day) a daily kind predicted from ``since`` on without an answer of
+        ``answer_version`` (#264), in time order: its answers wait for the day's candle."""
+        rows = self._db.execute(
+            "SELECT DISTINCT p.symbol, p.bar_close FROM kind_predictions p"
+            " WHERE p.kind = ? AND p.bar_close >= ? AND NOT EXISTS (SELECT 1 FROM kind_answers a"
+            " WHERE a.kind = p.kind AND a.symbol = p.symbol AND a.bar_close = p.bar_close"
+            " AND a.answer_version = ?) ORDER BY p.bar_close, p.symbol",
+            (kind, iso(_midnight(since)), answer_version),
+        )
+        return [(r[0], date.fromisoformat(r[1][:10])) for r in rows]
+
+    def kind_answered_days(self, kind: str, answer_version: int, until: date, limit: int) -> list[date]:
+        """The latest ``limit`` days up to ``until`` with an answer of a daily kind's predictions,
+        latest first (#264): the days its lifecycle counts, each a day scored."""
+        rows = self._db.execute(
+            "SELECT DISTINCT substr(a.bar_close, 1, 10) AS day FROM kind_answers a WHERE a.kind = ?"
+            " AND a.answer_version = ? AND a.bar_close < ? AND EXISTS (SELECT 1 FROM kind_predictions p"
+            " WHERE p.kind = a.kind AND p.symbol = a.symbol AND p.bar_close = a.bar_close)"
+            " ORDER BY day DESC LIMIT ?",
+            (kind, answer_version, iso(_midnight(until + timedelta(days=1))), limit),
+        )
+        return [date.fromisoformat(r[0]) for r in rows]
 
     def day_kind_classes(
         self, kind: str, answer_version: int, symbol: str, since: datetime, until: datetime

@@ -81,6 +81,13 @@ logged and never holds up the direction. A kind baseline that predicts from a ta
 range's climate, #180, ``kinds.TableBaseline``) runs the table the engine holds for it
 (``kind_tables``): its defaults, the one given at start, then whichever the morning swap
 installs, as the direction's climate table.
+
+The daily kinds (#264, ``daily.py``: ``open_to_close``) are run apart from the bar closes, by a
+``daily.DailyRunner``: once a trading day at their time (08:50) their baselines and admitted
+algorithms predict every symbol from the KRX days before, and once the day's KRX day candles
+are stored (after 20:30) each day's answer is written. Each daily review judges a daily kind's
+algorithms by its own days (``DailyKind.review_rules``: 60, 120 and 180 days with an answer).
+An engine given no source of the KRX days (``daily``: replays, tests) runs no daily kind.
 """
 
 from __future__ import annotations
@@ -116,6 +123,15 @@ from krx_quant.clock import SessionClock
 from krx_quant.config import MAX_REVIEW_DAY, Settings
 from krx_quant.consensus import FAST, FINAL, NAMES, NO_WEIGHTS, SPANS, Timing, Weights, pool
 from krx_quant.consensus import fit as fit_weights
+from krx_quant.daily import (
+    DailyAlgorithm,
+    DailyKind,
+    DailyRunner,
+    DailySource,
+    DailyStored,
+    register_daily_algorithms,
+)
+from krx_quant.daily import Features as DailyFeatures
 from krx_quant.features import (
     REGIME_CODES,
     FeatureStore,
@@ -144,7 +160,7 @@ from krx_quant.feeds import (
     VI_STATUS,
 )
 from krx_quant.feeds.base import KST, LEVELS
-from krx_quant.kind_registry import KINDS
+from krx_quant.kind_registry import DAILY_KINDS, KINDS
 from krx_quant.kind_stats import kind_scoring
 from krx_quant.kinds import (
     DIRECTION,
@@ -218,6 +234,8 @@ class KindAnswered:
 
 Change = PredictionsStored | OutcomesScored | KindPredictionsStored | KindAnswered
 Listener = Callable[[Change], None]  # told of each, as it happens (the stream)
+# Whether the engine may start a new algorithm (``prevalidation.admits``).
+Admits = Callable[[Algorithm | KindAlgorithm | DailyAlgorithm], bool]
 # A day's macro regime as decided before a time (the day's open); None unknown.
 Regimes = Callable[[date, datetime], str | None]
 
@@ -357,7 +375,7 @@ class PredictionEngine:
         leaders: Leaders | None = None,
         signals: Signals | None = None,
         regimes: Regimes | None = None,
-        admits: Callable[[Algorithm | KindAlgorithm], bool] | None = None,
+        admits: Admits | None = None,
         commit: str = "unknown",
         review_rules: Rules | None = None,
         target_version: int = 1,
@@ -365,6 +383,11 @@ class PredictionEngine:
         kinds: Sequence[PredictionKind] = KINDS,
         kind_algorithms: Sequence[KindAlgorithm] = KIND_ALGORITHMS,
         previous: PreviousDays | None = None,
+        daily: DailySource | None = None,
+        daily_kinds: Sequence[DailyKind] = DAILY_KINDS,
+        daily_algorithms: Sequence[DailyAlgorithm] = (),
+        daily_features: DailyFeatures | None = None,
+        daily_feature_names: Collection[str] = (),
     ) -> None:
         self.store = store
         self.commit = commit  # the code it runs (the deploy's KRX_COMMIT)
@@ -397,8 +420,31 @@ class PredictionEngine:
             | set(NAMES)
             | {b.name for k in self.kinds for b in k.baselines},
         )
+        # The daily kinds (#264), run only with a source of the KRX days, and their algorithms.
+        self.daily_kinds: tuple[DailyKind, ...] = tuple(daily_kinds) if daily is not None else ()
+        taken: set[str] = (
+            {a.name for a in self.registered}
+            | {a.name for a in self.kind_registered}
+            | self.baseline_names
+            | set(NAMES)
+            | {b.name for k in self.kinds for b in k.baselines}
+        )
+        daily_clash = {b.name for k in self.daily_kinds for b in k.daily_baselines} & taken
+        if daily_clash:
+            raise ValueError(f"daily baselines named like other predictors: {', '.join(sorted(daily_clash))}")
+        self.daily_registered = register_daily_algorithms(
+            daily_algorithms if self.daily_kinds else (),
+            self.daily_kinds,
+            taken=taken | {b.name for k in self.daily_kinds for b in k.daily_baselines},
+            features=daily_feature_names,
+        )
+        self.daily_algorithms: tuple[DailyAlgorithm, ...] = ()  # those admitted, as the others
         given = models or {}
-        everyone: list[Algorithm | KindAlgorithm] = [*self.registered, *self.kind_registered]
+        everyone: list[Algorithm | KindAlgorithm | DailyAlgorithm] = [
+            *self.registered,
+            *self.kind_registered,
+            *self.daily_registered,
+        ]
         self.models = {a.name: given.get(a.name) or a.default_model() for a in everyone}
         # The tables the kinds' table baselines predict from (#180), by name: given, else the
         # defaults; a swap installs the night's (``switch_models``).
@@ -456,6 +502,21 @@ class PredictionEngine:
         self._regime_days: dict[date, str | None] = {}
         # Reviews pick up where the last one left off: one missed while down runs at start.
         self._reviewed_through = store.last_run("review") or self._last_tick
+        self._daily: DailyRunner | None = None
+        if self.daily_kinds:
+            self._daily = DailyRunner(
+                self.daily_kinds,
+                store,
+                calendar,
+                symbols,
+                fee_rate,
+                daily,  # type: ignore[arg-type]  # not None with daily kinds
+                clock.now,
+                tell=self._tell_daily,
+                running=self._running_daily,
+                features=daily_features,
+                seconds=self._budget.per_algorithm,
+            )
         self._restart_on_target()
         self._admit()
         self._record_models(self.models)
@@ -499,21 +560,49 @@ class PredictionEngine:
         kind_admitted = [
             a for a in self.kind_registered if a.name in known or self._admits is None or self._admits(a)
         ]
-        if tuple(admitted) == self.algorithms and tuple(kind_admitted) == self.kind_algorithms:
+        daily_admitted = [
+            a for a in self.daily_registered if a.name in known or self._admits is None or self._admits(a)
+        ]
+        if (
+            tuple(admitted) == self.algorithms
+            and tuple(kind_admitted) == self.kind_algorithms
+            and tuple(daily_admitted) == self.daily_algorithms
+        ):
             return
         running: list[Algorithm | KindAlgorithm] = [*admitted, *kind_admitted]
-        for a in running:
+        for a in [*running, *daily_admitted]:
             if a.name not in known:
                 self.store.add_status(a.name, self.clock.now(), None, Status.PROBATION, "registered")
         self.algorithms = tuple(admitted)
         self.kind_algorithms = tuple(kind_admitted)
+        self.daily_algorithms = tuple(daily_admitted)
         self._feature_names = sorted({f for a in running for f in a.features})
 
     def waiting(self) -> list[str]:
         """The registered algorithms not run yet: their pre-validation has not passed."""
-        return [a.name for a in self.registered if a not in self.algorithms] + [
-            a.name for a in self.kind_registered if a not in self.kind_algorithms
-        ]
+        return (
+            [a.name for a in self.registered if a not in self.algorithms]
+            + [a.name for a in self.kind_registered if a not in self.kind_algorithms]
+            + [a.name for a in self.daily_registered if a not in self.daily_algorithms]
+        )
+
+    def daily_kind_named(self, name: str) -> DailyKind | None:
+        """A daily kind the engine predicts (#264)."""
+        return next((k for k in self.daily_kinds if k.name == name), None)
+
+    def _running_daily(self) -> list[tuple[DailyAlgorithm, Model]]:
+        """The daily algorithms that predict now: admitted (``_admit``), not retired, each with
+        its model."""
+        self._admit()
+        retired = _with_status(self.store.statuses(), Status.RETIRED)
+        return [(a, self.models[a.name]) for a in self.daily_algorithms if a.name not in retired]
+
+    def _tell_daily(self, stored: DailyStored) -> None:
+        """The daily runner's predictions and answers, told as the other kinds' are (#264)."""
+        if stored.ids:
+            self._tell(KindPredictionsStored(stored.kind, stored.at, stored.ids))
+        if stored.keys:
+            self._tell(KindAnswered(stored.kind, stored.keys))
 
     def kind_named(self, name: str) -> PredictionKind | None:
         """A kind the engine predicts, the direction included (#179)."""
@@ -524,7 +613,10 @@ class PredictionEngine:
         if any(a.name == name for a in self.registered):
             return DIRECTION_KIND
         found = next((a for a in self.kind_registered if a.name == name), None)
-        return None if found is None else self.kind_named(found.kind)
+        if found is not None:
+            return self.kind_named(found.kind)
+        daily = next((a for a in self.daily_registered if a.name == name), None)
+        return None if daily is None else self.daily_kind_named(daily.kind)
 
     def on_event(self, feed: str, row: dict[str, Any]) -> None:
         self._market.on_event(feed, row)
@@ -550,6 +642,8 @@ class PredictionEngine:
             candidates.append(self._pending[0][0])
         if self._kind_pending:
             candidates.append(self._kind_pending[0][0])
+        if self._daily is not None:  # a daily kind's prediction or answers (#264)
+            candidates.append(self._daily.next_due())
         due = [c for c in candidates if c is not None]
         return min(due) if due else None
 
@@ -564,6 +658,8 @@ class PredictionEngine:
             if due == self._next_review(self._reviewed_through):
                 self._reviewed_through = due
                 await self._review(due)
+            if self._daily is not None and due == self._daily.next_due():
+                await self._daily.run(due)
 
     def bars(self, symbol: str) -> list[Bar]:
         return self._market.bars(symbol, self.clock.now())
@@ -698,6 +794,27 @@ class PredictionEngine:
                 scoring=kind_scoring(kind),
             )
             result = Review(result.changes + judged.changes, result.candidates + judged.candidates)
+        # Each daily kind's algorithms, by its own days (#264): those with an answer.
+        for daily in self.daily_kinds:
+            of_daily = [a.name for a in self.daily_algorithms if a.kind == daily.name]
+            if not of_daily:
+                continue
+            judged = await asyncio.to_thread(
+                review,
+                of_daily,
+                standings,
+                {a: self._kind_counted_from(daily, a, standings[a]) for a in of_daily if a in standings},
+                self._daily_days(daily, at.astimezone(KST).date()),
+                partial(self._kind_rows, daily),
+                min_sample=daily.min_sample,
+                fee_rate=self.fee_rate,
+                alerted=alerted,
+                rules=daily.review_rules,
+                baselines=daily.baseline_names(),
+                scoring=kind_scoring(daily),
+                recent=daily.recent_days,
+            )
+            result = Review(result.changes + judged.changes, result.candidates + judged.candidates)
         for c in result.changes:
             # Only from the status reviewed: a retire command may have landed meanwhile.
             if self.store.change_status(c.algorithm, at, c.previous, c.status, c.reason):
@@ -802,6 +919,13 @@ class PredictionEngine:
         """``kind``'s scored predictions made on ``chosen`` days, as the lifecycle reads them."""
         return self.store.kind_scored(kind.name, kind.answer_version, chosen, None, special)
 
+    def _daily_days(self, kind: DailyKind, until: date) -> list[date]:
+        """The days a daily kind's lifecycle counts up to ``until`` (#264): those with an answer,
+        latest first, as many as its longest rule reads back."""
+        rules = kind.review_rules
+        longest = max(rules.max_probation, rules.max_bench, kind.recent_days)
+        return self.store.kind_answered_days(kind.name, kind.answer_version, until, longest + 20)
+
     async def stages(self) -> dict[str, Stage]:
         """Where each algorithm on probation or on the bench stands toward its next review
         (#165, ``lifecycle.stages``), as of the latest review: the days counted as the review
@@ -851,6 +975,28 @@ class PredictionEngine:
                 rules=self.review_rules,
                 baselines=frozenset(b.name for b in kind.baselines),
                 scoring=kind_scoring(kind),
+            )
+        for daily in self.daily_kinds:  # each daily kind's algorithms, by its days (#264)
+            names = [a.name for a in self.daily_algorithms if a.kind == daily.name]
+            if not names:
+                continue
+            found |= await asyncio.to_thread(
+                stages_now,
+                names,
+                standings,
+                {
+                    name: self._kind_counted_from(daily, name, standings[name])
+                    for name in names
+                    if name in standings
+                },
+                self._daily_days(daily, today),
+                partial(self._kind_rows, daily),
+                min_sample=daily.min_sample,
+                fee_rate=self.fee_rate,
+                rules=daily.review_rules,
+                baselines=daily.baseline_names(),
+                scoring=kind_scoring(daily),
+                recent=daily.recent_days,
             )
         dated = {name: replace(s, next_review_on=self._review_on(next_day, s)) for name, s in found.items()}
         self._stages = (key, dated)

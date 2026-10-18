@@ -18,6 +18,13 @@ days of a period not stored yet) from the day candles and the day's one-minute b
 The market is the integrated one (KRX + NXT) where KIS has it, else KRX's, as for the
 one-minute bars; a symbol keeps the market of its first history. The queries share the
 backfill's pace inside the REST limit.
+
+Beside them each symbol keeps its day candles of the KRX market alone (``J``, #264), in the day
+folder's ``krx.parquet``: an integrated day candle opens at NXT's 08:00 pre-market open, not at
+the KRX opening auction (its high, low and close are KRX's, docs/kis-feeds.md), and the daily
+``open_to_close`` kind is answered and trained on the KRX auctions' open and close. They are
+kept by the same rules: the whole history at first, the new finished days after, all of it
+again when the last stored day changed at KIS (adjusted).
 """
 
 from __future__ import annotations
@@ -48,6 +55,9 @@ PERIODS = {"day": "D", "week": "W", "month": "M", "year": "Y"}
 _FIRST_DAY = date(1900, 1, 1)
 # A history is at most this many queries (60,000 candles); more means KIS keeps repeating.
 _MAX_QUERIES = 600
+# The KRX market's day candles (#264): beside the integrated ones, in the day folder.
+KRX_DAYS_FILE = "krx.parquet"
+KRX_MARKET = "J"
 
 CANDLE_SCHEMA = pa.schema(
     [
@@ -87,9 +97,22 @@ def candles_path(data_dir: Path, period: str, symbol: str) -> Path:
     return data_dir / "candles" / f"period={period}" / f"symbol={symbol}" / "candles.parquet"
 
 
+def krx_days_path(data_dir: Path, symbol: str) -> Path:
+    """A symbol's day candles of the KRX market alone (#264), beside its day candles."""
+    return candles_path(data_dir, "day", symbol).with_name(KRX_DAYS_FILE)
+
+
 def read_candles(data_dir: Path, period: str, symbol: str) -> list[Row]:
     """The stored candles, oldest first; none if there is no file."""
-    path = candles_path(data_dir, period, symbol)
+    return _read(candles_path(data_dir, period, symbol))
+
+
+def read_krx_days(data_dir: Path, symbol: str) -> list[Row]:
+    """The stored KRX day candles (#264), oldest first; none if there is no file."""
+    return _read(krx_days_path(data_dir, symbol))
+
+
+def _read(path: Path) -> list[Row]:
     if not path.exists():
         return []
     rows: list[Row] = pq.read_table(path).to_pylist()
@@ -98,7 +121,15 @@ def read_candles(data_dir: Path, period: str, symbol: str) -> list[Row]:
 
 def write_candles(data_dir: Path, period: str, symbol: str, rows: Sequence[Row]) -> None:
     """Replace the stored candles, whole or not at all."""
-    path = candles_path(data_dir, period, symbol)
+    _write(candles_path(data_dir, period, symbol), rows)
+
+
+def write_krx_days(data_dir: Path, symbol: str, rows: Sequence[Row]) -> None:
+    """Replace the stored KRX day candles (#264), whole or not at all."""
+    _write(krx_days_path(data_dir, symbol), rows)
+
+
+def _write(path: Path, rows: Sequence[Row]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.tmp")
     pq.write_table(pa.Table.from_pylist(list(rows), schema=CANDLE_SCHEMA), tmp)
@@ -135,8 +166,9 @@ class CandleKeeper:
         self._pace = pace
 
     async def run(self, now: datetime) -> int:
-        """Bring every symbol's candles of every period up to the last finished trading day;
-        return how many files changed. A symbol that fails is logged and left for the next run."""
+        """Bring every symbol's candles of every period, and its KRX day candles (#264), up to
+        the last finished trading day; return how many files changed. A symbol that fails is
+        logged and left for the next run."""
         last = last_finished(self._calendar, now)
         changed = 0
         for period in PERIODS:
@@ -145,6 +177,11 @@ class CandleKeeper:
                     changed += await self.update(period, symbol, last)
                 except (KisError, aiohttp.ClientError, OSError, ValueError, KeyError, TimeoutError) as e:
                     log.warning("%s candles of %s not updated: %s", period, symbol, e)
+        for symbol in self._symbols:
+            try:
+                changed += await self.update_krx_days(symbol, last)
+            except (KisError, aiohttp.ClientError, OSError, ValueError, KeyError, TimeoutError) as e:
+                log.warning("KRX day candles of %s not updated: %s", symbol, e)
         return changed
 
     async def update(self, period: str, symbol: str, last: date) -> bool:
@@ -177,6 +214,34 @@ class CandleKeeper:
             log.info("no %s candles of %s at KIS yet; the next run asks again", period, symbol)
             return False
         write_candles(self._data_dir, period, symbol, history)
+        return True
+
+    async def update_krx_days(self, symbol: str, last: date) -> bool:
+        """``update`` of the symbol's KRX day candles (#264): the KRX market (``J``) only, so the
+        open is the opening auction's; True if the file changed."""
+        stored = read_krx_days(self._data_dir, symbol)
+        if stored:
+            newest = stored[-1]
+            fresh = await self._walk("day", KRX_MARKET, symbol, newest["date"], max(last, newest["date"]))
+            again = next((r for r in fresh if r["date"] == newest["date"]), None)
+            if again is not None and _prices(again) == _prices(newest):
+                new = [r for r in fresh if newest["date"] < r["date"] <= last]
+                if not new:
+                    return False
+                write_krx_days(self._data_dir, symbol, [*stored, *new])
+                return True
+            log.info(
+                "KRX day candles of %s changed at %s (adjusted?): taking them all again",
+                symbol,
+                newest["date"],
+            )
+        history = [
+            r for r in await self._walk("day", KRX_MARKET, symbol, _FIRST_DAY, last) if r["date"] <= last
+        ]
+        if not history:
+            log.info("no KRX day candles of %s at KIS yet; the next run asks again", symbol)
+            return False
+        write_krx_days(self._data_dir, symbol, history)
         return True
 
     async def _history(self, period: str, symbol: str, last: date) -> list[Row]:

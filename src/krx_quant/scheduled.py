@@ -821,6 +821,31 @@ ENTRY_DELAY = Job(
     ),
 )
 
+# The daily kinds (#264): after the engine with open_to_close is deployed, on the first trading
+# day's night, once: its 08:50 predictions and the answers written once the day's KRX day candle
+# was stored (after 20:30), and that candle's open and close against the recorded KRX trades'
+# opening and closing auction prints. It reads the engine DB read-only, the candles and the
+# day's recording; it prints no price. Minutes at most; the half hour is a bound. Before the
+# pre-validations, which may take the night.
+DAILY_CHECK_ISSUE = 264
+
+DAILY_CHECK = Job(
+    name="daily-check-264",
+    due=_first_trading_night,
+    command=("daily-check", "--days", "1"),
+    timeout=timedelta(minutes=30),
+    targets=(
+        Target(
+            DAILY_CHECK_ISSUE,
+            note=(
+                "에이전트가 이 출력으로 첫 거래일의 08:50 예측과 채점이 돌았는지, KRX 일봉의 시가·종가가 "
+                '녹화한 KRX 체결의 시가·종가 단일가와 같은지 확인하고 `docs/engine-api.md`의 "시가→종가"에 '
+                "남긴다. 출력에는 가격이 없다(같음·다름과 개수만)."
+            ),
+        ),
+    ),
+)
+
 # The night futures (#264): the collector records the KOSPI200 night session's trades and book
 # (18:00–06:00) from the deploy that brings it; what only the server shows is whether KIS
 # streams them for this app key, under the contract code asked for, in the layout of KIS's
@@ -971,5 +996,6 @@ JOBS: tuple[Job, ...] = (
     STRUCTURE_CHECK,
     ENTRY_DELAY,
     NIGHT_PROBE,
+    DAILY_CHECK,
     *prevalidation_jobs([*(a.name for a in ALGORITHMS), *(a.name for a in KIND_ALGORITHMS)]),
 )

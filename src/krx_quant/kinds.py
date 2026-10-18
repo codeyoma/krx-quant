@@ -476,6 +476,14 @@ class Kind:
             raise ValueError(f"{self.name}: answered {given.label!r}, not one of {self.classes}")
         return Answer(given.label, None, given.path)
 
+    def baseline_cards(self) -> list[tuple[str, Card]]:
+        """Its baselines' names and cards (a daily kind's are its own, #264)."""
+        return [(b.name, b.card) for b in self.baselines]
+
+    def baseline_names(self) -> frozenset[str]:
+        """Its baselines' names, the lifts' (a daily kind's are its own, #264)."""
+        return frozenset(b.name for b in self.baselines)
+
     def as_dict(self, baselines: Sequence[tuple[str, Card]]) -> dict[str, Any]:
         """As ``GET /v1/kinds`` shows it, with its baselines' cards."""
         return {

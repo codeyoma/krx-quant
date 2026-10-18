@@ -15,8 +15,10 @@ from krx_quant.api import MAX_CANDLES, create_app
 from krx_quant.candles import (
     CANDLES_TR,
     CandleKeeper,
+    krx_days_path,
     period_start,
     read_candles,
+    read_krx_days,
     stored_candles,
     write_candles,
 )
@@ -130,7 +132,20 @@ def closes(data_dir: Path, symbol: str = "005930", period: str = "day") -> list[
 
 
 def day_queries(kis: FakeKis) -> list[dict[str, str]]:
-    return [q for q in requests_for(kis, CANDLES_TR) if q["FID_PERIOD_DIV_CODE"] == "D"]
+    """The day candles' queries, but the KRX day candles' (#264: the market J beside them)."""
+    return [
+        q
+        for q in requests_for(kis, CANDLES_TR)
+        if q["FID_PERIOD_DIV_CODE"] == "D" and q["FID_COND_MRKT_DIV_CODE"] == "UN"
+    ]
+
+
+def krx_day_queries(kis: FakeKis) -> list[dict[str, str]]:
+    return [
+        q
+        for q in requests_for(kis, CANDLES_TR)
+        if q["FID_PERIOD_DIV_CODE"] == "D" and q["FID_COND_MRKT_DIV_CODE"] == "J"
+    ]
 
 
 async def test_the_first_run_takes_every_candle_kis_has_paging_back_100_at_a_time(
@@ -140,7 +155,7 @@ async def test_the_first_run_takes_every_candle_kis_has_paging_back_100_at_a_tim
     history = kis_candles(days)
     kis.rest_responses[CANDLES_TR] = candles_api(lambda market, symbol: history)
 
-    assert await keep(kis, tmp_path, AFTER_HOURS) == 4, "a file each of days, weeks, months, years"
+    assert await keep(kis, tmp_path, AFTER_HOURS) == 5, "a file each of days, weeks, months, years, KRX days"
 
     stored = read_candles(tmp_path, "day", "005930")
     assert [r["date"] for r in stored] == days
@@ -159,7 +174,9 @@ async def test_the_first_run_takes_every_candle_kis_has_paging_back_100_at_a_tim
     assert len(asked) == math.ceil(len(days) / PER_QUERY) + 1, "every page, then one that finds nothing older"
     second_end = days[-PER_QUERY] - timedelta(days=1)
     assert [q["FID_INPUT_DATE_2"] for q in asked[:2]] == ["20261013", second_end.strftime("%Y%m%d")]
-    assert {q["FID_COND_MRKT_DIV_CODE"] for q in requests_for(kis, CANDLES_TR)} == {"UN"}
+    assert {
+        q["FID_COND_MRKT_DIV_CODE"] for q in requests_for(kis, CANDLES_TR) if q not in krx_day_queries(kis)
+    } == {"UN"}
 
 
 async def test_the_next_day_only_the_new_candle_is_added(kis: FakeKis, tmp_path: Path) -> None:
@@ -170,7 +187,7 @@ async def test_the_next_day_only_the_new_candle_is_added(kis: FakeKis, tmp_path:
     kis.rest_requests.clear()
 
     next_night = datetime(2026, 10, 14, 21, 0, tzinfo=KST)
-    assert await keep(kis, tmp_path, next_night) == 1
+    assert await keep(kis, tmp_path, next_night) == 2, "the days and the KRX days"
 
     assert closes(tmp_path)[-2:] == [(date(2026, 10, 13), 50_000 + 10 * (len(days) - 2))] + [
         (date(2026, 10, 14), 50_000 + 10 * (len(days) - 1))
@@ -221,7 +238,7 @@ async def test_a_past_adjusted_before_any_new_candle_is_taken_again_at_once(
 
     answer["history"] = kis_candles(days, base=50_000)  # a split effective at the 14th's open
     restart = datetime(2026, 10, 14, 7, 20, tzinfo=KST)  # the morning's restart: no new candle yet
-    assert await keep(kis, tmp_path, restart) == 3, "the days, weeks and months (no year is over yet)"
+    assert await keep(kis, tmp_path, restart) == 4, "the days, weeks, months (no year is over yet), KRX days"
 
     assert closes(tmp_path) == [(d, 50_000 + 10 * i) for i, d in enumerate(days)]
 
@@ -254,7 +271,7 @@ async def test_a_symbol_kis_has_nothing_for_is_asked_again_next_run(kis: FakeKis
     assert read_candles(tmp_path, "day", "005930") == []
 
     answer["history"] = kis_candles(trading_days(date(2026, 10, 1), date(2026, 10, 13)))
-    assert await keep(kis, tmp_path, AFTER_HOURS) == 2, "the days and the finished weeks"
+    assert await keep(kis, tmp_path, AFTER_HOURS) == 3, "the days, the finished weeks and the KRX days"
 
 
 async def test_a_failing_symbol_does_not_stop_the_others(kis: FakeKis, tmp_path: Path) -> None:
@@ -267,7 +284,9 @@ async def test_a_failing_symbol_does_not_stop_the_others(kis: FakeKis, tmp_path:
 
     kis.rest_responses[CANDLES_TR] = respond
 
-    assert await keep(kis, tmp_path, AFTER_HOURS, symbols=("000660", "005930")) == 2  # 005930's days, weeks
+    assert (
+        await keep(kis, tmp_path, AFTER_HOURS, symbols=("000660", "005930")) == 3
+    )  # 005930's days, weeks, KRX
     assert closes(tmp_path)[-1][0] == date(2026, 10, 13)
 
 
@@ -282,6 +301,7 @@ async def test_the_queries_keep_the_backfill_pace_inside_the_rest_limit(
 
     assert len(let_through) == len(requests_for(kis, CANDLES_TR))
     assert len(day_queries(kis)) == 2 * (math.ceil(len(days) / PER_QUERY) + 1)
+    assert len(krx_day_queries(kis)) == 2 * (math.ceil(len(days) / PER_QUERY) + 1)
     assert max(sum(1 for u in let_through if t <= u < t + 1.0) for t in let_through) <= 20
 
 
@@ -454,3 +474,40 @@ async def test_the_api_gives_stored_candles_before_a_time_oldest_first_never_tod
     assert [c["date"] for c in older["candles"]] == ["2026-10-05", "2026-10-06"]
     assert none == {"symbol": "005930", "period": "day", "venue": None, "candles": []}
     assert bad == [400] * 4
+
+
+async def test_the_krx_day_candles_are_kept_beside_the_integrated_ones(kis: FakeKis, tmp_path: Path) -> None:
+    """#264: the KRX market's day candles (J), whose open is the opening auction's (the integrated
+    one opens at NXT's 08:00 pre-market), in the day folder's krx.parquet; the next day adds the
+    new one, and an adjusted past takes them all again."""
+    days = trading_days(date(2026, 8, 3), date(2026, 10, 14))
+    answer = {"base": 50_000}
+
+    def candles(market: str, symbol: str) -> list[dict[str, str]]:
+        rows = kis_candles(days, base=answer["base"])
+        if market == "UN":  # the integrated open is NXT's pre-market's
+            return [{**r, "stck_oprc": str(int(r["stck_oprc"]) + 300)} for r in rows]
+        return rows
+
+    kis.rest_responses[CANDLES_TR] = candles_api(candles)
+    await keep(kis, tmp_path, AFTER_HOURS)  # the 13th's night
+
+    krx = read_krx_days(tmp_path, "005930")
+    assert krx_days_path(tmp_path, "005930") == tmp_path / "candles/period=day/symbol=005930/krx.parquet"
+    assert [r["date"] for r in krx] == days[:-1]
+    assert {r["venue"] for r in krx} == {"KRX"}
+    integrated = read_candles(tmp_path, "day", "005930")
+    assert [r["open"] - k["open"] for r, k in zip(integrated, krx, strict=True)] == [300] * len(krx)
+    assert [r["close"] for r in integrated] == [k["close"] for k in krx]
+
+    kis.rest_requests.clear()
+    assert await keep(kis, tmp_path, datetime(2026, 10, 14, 21, 0, tzinfo=KST)) == 2
+    assert read_krx_days(tmp_path, "005930")[-1]["date"] == date(2026, 10, 14)
+    [asked] = krx_day_queries(kis)
+    assert (asked["FID_INPUT_DATE_1"], asked["FID_INPUT_DATE_2"]) == ("20261013", "20261014")
+
+    answer["base"] = 1_000  # a 50:1 split: KIS adjusts the past
+    await keep(kis, tmp_path, datetime(2026, 10, 15, 7, 20, tzinfo=KST))
+    assert [r["close"] for r in read_krx_days(tmp_path, "005930")] == [
+        1_000 + 10 * i for i in range(len(days))
+    ]

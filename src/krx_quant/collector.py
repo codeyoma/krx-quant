@@ -26,6 +26,7 @@ from krx_quant.clock import SessionClock, SystemClock
 from krx_quant.config import Settings
 from krx_quant.contracts import KOSPI200, night_front_month
 from krx_quant.cost_guard import keep_costs
+from krx_quant.daily import StoredDays
 from krx_quant.econ_calendar import CalendarCollector, keep_calendar
 from krx_quant.engine import Budget, PredictionEngine, run_live
 from krx_quant.features import Leaders
@@ -253,6 +254,8 @@ async def run_collector(
         climate=load_climate(settings.state_dir) if settings.target_version >= 2 else None,
         # The previous trading day's backfilled bars (range_prev_day, #181).
         previous=PreviousDay(settings.data_dir, calendar.calendar),
+        # The KRX day candles the daily kinds are predicted from and answered on (#264).
+        daily=StoredDays(settings.data_dir),
     )
     store.add_run("start", engine.started_at, None, json.dumps(started(settings)))
     # Held while it runs: a rescore refuses to run beside it (#168). One running already
