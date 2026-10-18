@@ -10,10 +10,11 @@ from krx_quant.algorithms.granger import Granger
 from krx_quant.algorithms.kalman import Kalman
 from krx_quant.algorithms.markov import Markov
 from krx_quant.algorithms.newton import Newton
+from krx_quant.algorithms.neyman import Neyman
 from krx_quant.algorithms.poisson import Poisson
 from krx_quant.algorithms.shannon import Shannon
 from krx_quant.algorithms.turing import Turing
-from krx_quant.features import BOOK_FEATURES, SERIES_FEATURES, SLOT_RETURN_FEATURES
+from krx_quant.features import BARRIER_FEATURES, BOOK_FEATURES, SERIES_FEATURES, SLOT_RETURN_FEATURES
 from tests.algorithm_doubles import FixedAlgorithm
 
 
@@ -67,6 +68,7 @@ def test_each_registered_algorithm_has_a_personality_of_its_own() -> None:
         "shannon",
         "poisson",
         "turing",
+        "neyman",
     ]
     assert not set(Gauss.card.unique_features) & set(Newton.features)
     assert not set(Granger.card.unique_features) & (set(Newton.features) | set(Gauss.features))
@@ -85,3 +87,7 @@ def test_each_registered_algorithm_has_a_personality_of_its_own() -> None:
     assert not SLOT_RETURN_FEATURES & set(Turing.card.unique_features), "shared, not Turing's own"
     assert set(Turing.card.unique_features) >= {"spread_ticks", "top_imbalance", "top_size_change"}
     assert {"spread_ticks", "top_imbalance", "top_size_change"} <= BOOK_FEATURES
+    # Neyman (#266) reads Turing's and the barrier's two, its own: no direction algorithm before reads them.
+    assert set(Neyman.features) == set(Turing.features) | BARRIER_FEATURES
+    assert set(Neyman.card.unique_features) == BARRIER_FEATURES
+    assert not BARRIER_FEATURES & (others | set(Turing.features))

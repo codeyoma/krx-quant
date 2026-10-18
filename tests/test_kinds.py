@@ -369,7 +369,7 @@ async def test_the_direction_is_stored_scored_and_ranked_the_same_with_another_k
     )
 
     direction = stored(tmp_path / "with.db")
-    assert len(direction) == 60 * 14, "09:01-10:00: 4 baselines, 8 algorithms and 2 consensus"
+    assert len(direction) == 60 * 15, "09:01-10:00: 4 baselines, 9 algorithms and 2 consensus"
     assert direction == stored(tmp_path / "without.db")
     assert touches(tmp_path / "without.db") == touches(tmp_path / "with.db")
     assert kind_rows(tmp_path / "with.db"), "the drift was predicted"
