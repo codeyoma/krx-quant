@@ -380,3 +380,41 @@ async def test_a_daily_algorithm_is_judged_on_its_60th_day_with_an_answer(tmp_pa
     assert changed["reason"].startswith("60 days on probation; weakest lift low")
     stages = await e.stages()
     assert "leaning" not in stages, "active: no stage"
+
+
+class Named:
+    """A baseline that only has a name (registration reads no more)."""
+
+    version = "v1"
+    card = OPEN_TO_CLOSE.daily_baselines[0].card
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    def predict(self, inputs: Any) -> KindForecast | None:
+        return None
+
+
+def test_daily_kind_and_baseline_names_never_collide() -> None:
+    """Kinds and baselines share one set of names, in either order: a baseline named like a
+    kind (a bar-close kind, the daily kind itself) and a kind named like a baseline (a bar-close
+    kind's, an earlier daily kind's) are refused."""
+    from dataclasses import replace as changed
+
+    from krx_quant.daily import register_daily_kinds
+    from krx_quant.kind_registry import KINDS
+
+    bar_close = changed(DIRECTION_KIND, name="plain_kind", baselines=(Named("plain_baseline"),))
+    taken = (*KINDS, bar_close)
+    assert register_daily_kinds([OPEN_TO_CLOSE], taken) == (OPEN_TO_CLOSE,)
+    # A baseline named like a kind.
+    with pytest.raises(DailyRegistrationError, match="baseline range is taken"):
+        register_daily_kinds([changed(OPEN_TO_CLOSE, daily_baselines=(Named("range"),))], taken)
+    with pytest.raises(DailyRegistrationError, match="baseline open_to_close is taken"):
+        register_daily_kinds([changed(OPEN_TO_CLOSE, daily_baselines=(Named("open_to_close"),))], taken)
+    # A kind named like a baseline.
+    with pytest.raises(DailyRegistrationError, match="'plain_baseline': taken"):
+        register_daily_kinds([changed(OPEN_TO_CLOSE, name="plain_baseline")], taken)
+    earlier = changed(OPEN_TO_CLOSE, daily_baselines=(Named("later_kind"),))
+    with pytest.raises(DailyRegistrationError, match="'later_kind': taken"):
+        register_daily_kinds([earlier, changed(OPEN_TO_CLOSE, name="later_kind", daily_baselines=())], taken)

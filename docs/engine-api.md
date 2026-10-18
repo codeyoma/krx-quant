@@ -1164,6 +1164,7 @@
 봉 마감마다 내는 종류(위 "예측 종류")와 달리, 거래일마다 정해진 시각에 한 번 내고 그날 장이 끝난 뒤 그날의 KRX 단일가 가격으로 채점하는 종류다(`daily.py`의 `DailyKind`, 설계는 [design.md](design.md#하루-한-번-예측-종류-264)). 첫 종류는 `open_to_close`다(아래 "시가→종가"). 등록 목록을 봉 마감 종류(`kind_registry.KINDS`)와 따로 둔다(`kind_registry.DAILY_KINDS`). 그래서 시장 보기, 봉 마감 회차, 봉 마감 종류의 창·정답·지평, 지난 정답 채우기(`rescore`)는 이 종류를 보지 않는다. 4분·15·30·60분 종류는 그대로다.
 
 - **같은 것.** 세 클래스와 순서, 행동 클래스, 정답 버전, 3클래스 통계(맞힘률, Brier, 보정 곡선, lift와 거래일 단위 lift, FDR, `kind_stats.py`), 저장 표(`kind_predictions`, `kind_answers`), 사전 검증 관문(리포트의 `kind`와 그 종류의 정답 버전, `prevalidation.admits`)이다. `DailyKind`는 `Kind`를 이어받아 이것들을 그대로 쓴다. 봉 마감 칸(`answer`, `bar_answer`, `width`, `baselines`, `horizon`)은 쓰지 않는다.
+- **이름.** 종류의 이름과 기준 예측의 이름은 한 묶음이다(`register_daily_kinds`): 봉 마감 종류와 그 기준 예측, 먼저 등록된 하루 한 번 종류와 그 기준 예측의 이름 어느 것과도 겹치지 않는다(종류가 기준 예측의 이름을 쓰거나 그 반대도 거부한다). 종류와 클래스의 이름은 봉 마감 종류처럼 소문자 영어다.
 - **예측(`daily.DailyRunner`).** 거래일마다 그 종류의 시각(`DailyKind.predict_at`, `open_to_close`는 08:50 KST)에 종목마다 그 종류의 기준 예측(`daily_baselines`)과 돌기 시작한 알고리즘(아래)을 한 번에 돌려 저장한다.
   - 입력은 그 시각까지 알던 것뿐이다. 기준 예측은 그 종목의 그 전 날들의 정답(그 종류의 정답 규칙으로 KRX 일봉에서 다시 만든 것, `DailyInputs.past`), 그날의 보합 폭, 달력의 전 거래일을 받는다.
   - 예측의 `bar_close`는 그 예측 시각(그날 08:50)이고, `displayed_at`은 저장한 순간이다. `flat_ticks`, `width_ticks`, `anchor`, `tick`은 비어 있다. 대신 그날의 보합 폭을 함께 저장한다(`band`, 그날 전의 날로 정한 값, 아래 "시가→종가"). 보합 폭을 정할 날이 모자라면 비어 있다.

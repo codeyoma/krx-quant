@@ -46,6 +46,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import re
 import time as timer
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -66,6 +67,8 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+# A kind's name and class names: they go in URLs and JSON keys, as the bar-close kinds' do.
+_NAME = re.compile(r"^[a-z][a-z0-9_]*$")
 # When a daily kind is predicted, KST, each trading day (#264).
 PREDICT_AT = time(8, 50)
 # When its answers are first looked for: the day's KRX day candle is stored after 20:30
@@ -291,24 +294,29 @@ class DailyRegistrationError(ValueError):
 
 
 def register_daily_kinds(kinds: Sequence[DailyKind], taken: Sequence[Kind] = ()) -> tuple[DailyKind, ...]:
-    """Check the daily kinds in order (``kinds.register_kinds``' rules for a name, classes,
-    action classes and fields), against the bar-close kinds ``taken``: a name or a baseline's
-    name of theirs, or of another daily kind, is refused, and so is one without an answer or a
-    band rule."""
-    names = {k.name for k in taken}
-    baselines = {b.name for k in taken for b in k.baselines}
+    """Check the daily kinds in order (``kinds.register_kinds``' rules for a name, classes and
+    action classes), against the bar-close kinds ``taken``. A kind's name and its baselines'
+    names share one set with every name before them, the bar-close kinds' and their baselines'
+    included, so no name stands for two things (a kind and a baseline, in either order); one
+    without an answer or a band rule is refused too."""
+    names = {k.name for k in taken} | {name for k in taken for name in k.baseline_names()}
     for k in kinds:
-        if k.name in names:
-            raise DailyRegistrationError(f"{k.name!r}: taken")
+        if not _NAME.match(k.name) or k.name in names:
+            raise DailyRegistrationError(f"{k.name!r}: taken, or not a lowercase name")
         names.add(k.name)
-        if len(set(k.classes)) != 3 or not set(k.action) <= set(k.classes) or not k.action:
+        if (
+            len(set(k.classes)) != 3
+            or not all(_NAME.match(c) for c in k.classes)
+            or not k.action
+            or not set(k.action) <= set(k.classes)
+        ):
             raise DailyRegistrationError(f"{k.name}: classes {k.classes}, action {k.action}")
         if k.answers is None or k.band is None:
             raise DailyRegistrationError(f"{k.name}: no answer or band rule")
         for b in k.daily_baselines:
-            if b.name in baselines:
+            if b.name in names:
                 raise DailyRegistrationError(f"{k.name}: baseline {b.name} is taken")
-            baselines.add(b.name)
+            names.add(b.name)
     return tuple(kinds)
 
 
