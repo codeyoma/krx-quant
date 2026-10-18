@@ -35,6 +35,7 @@ from krx_quant.scheduled import (
     FAILED,
     INTERRUPTED,
     JOBS,
+    NIGHT_PROBE,
     OK,
     RUNNING,
     SIGNAL_REVIEW,
@@ -926,6 +927,56 @@ def test_the_entry_delay_runs_the_diagnosis_once_on_a_trading_night_and_posts_se
     assert part is not None and part.startswith("진단 2026-09-21") and "9. 뒤집힌" not in part
     assert part.endswith("newton: 채점 2 · 정답률 100.0%")
     assert ENTRY_DELAY.targets[0].part("진단: 데이터 없음\n\n9. 뒤집힌 호가(#187)\n  없음") is None
+
+
+def subscribed(day: date, nights: tuple[date, ...], record: JobRecord | None = None) -> Night:
+    return Night(day, CALENDAR.is_trading_day(day), COMMIT, record, {}, Facts(night_futures=nights))
+
+
+def test_the_night_probe_runs_once_after_a_night_subscribed_for() -> None:
+    # #264: the first night the collector recorded from its start is read the next evening.
+    assert NIGHT_PROBE.command == ("probe-night",)
+    assert NIGHT_PROBE.timeout == timedelta(minutes=30)
+    assert [t.issue for t in NIGHT_PROBE.targets] == [264]
+    assert NIGHT_PROBE.label == ("ready-for-agent",)
+    assert JOBS[:6] == (DIAGNOSE, SIGNAL_REVIEW, SUPPLY_PROBE, STRUCTURE_CHECK, ENTRY_DELAY, NIGHT_PROBE)
+    assert not NIGHT_PROBE.due(subscribed(THURSDAY, ()))  # the deploy's evening: none recorded yet
+    assert not NIGHT_PROBE.due(subscribed(THURSDAY, (THURSDAY,)))  # tonight's is not over
+    assert NIGHT_PROBE.due(subscribed(FRIDAY, (THURSDAY,)))
+    assert NIGHT_PROBE.due(subscribed(SUNDAY, (FRIDAY,)))  # any night after one
+    ran = JobRecord(FRIDAY, OK, at(FRIDAY, "22:30"), COMMIT, 0, 5.0)
+    assert not NIGHT_PROBE.due(subscribed(MONDAY, (THURSDAY, FRIDAY), ran))
+    assert not NIGHT_PROBE.due(subscribed(MONDAY, (FRIDAY,), replace(ran, outcome=FAILED, exit_code=1)))
+    assert NIGHT_PROBE.due(subscribed(MONDAY, (FRIDAY,), replace(ran, outcome=INTERRUPTED)))
+
+
+async def test_the_night_probe_job_runs_the_real_command(
+    empty_server: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("KIS_MASTER_URL", "http://127.0.0.1:9/master")  # nothing listens: no network
+    state = JobState.load(empty_server / STATE_FILE)
+
+    async def facts() -> Facts:
+        return Facts(night_futures=(THURSDAY,))
+
+    async with fake_github() as hub, aiohttp.ClientSession() as session:
+        scheduler = Scheduler(
+            [NIGHT_PROBE],
+            AT,
+            CALENDAR,
+            state,
+            GitHub(session, TOKEN, REPO, hub.url),
+            Told(),
+            FakeClock(at(FRIDAY, "23:00")),
+            commit=COMMIT,
+            facts=facts,
+        )
+        await asyncio.wait_for(scheduler.run_night(FRIDAY), 25)
+    [body] = hub.bodies(264)
+    assert "야간선물 녹화 확인 (#264)" in body and "2. H0MFCNT0 체결" in body
+    assert "fo_cme_code.mst를 읽지 못했다" in body  # said, not fatal
+    assert "시세 값이 없다" in body  # the note: what the output holds
+    assert state.jobs["probe-night-264"].exit_code == 0
 
 
 async def test_the_supply_probe_runs_on_the_first_night_then_never(tmp_path: Path) -> None:

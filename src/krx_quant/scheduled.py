@@ -52,6 +52,7 @@ from krx_quant.engine import PredictionEngine
 from krx_quant.feeds.base import KST
 from krx_quant.github import GitHub, GitHubError, comment_body
 from krx_quant.market_calendar import MarketCalendar
+from krx_quant.night_probe import evening, subscribed_nights
 from krx_quant.notify import Alerts
 from krx_quant.prevalidation import MIN_DAYS, REGISTERED_BEFORE, LastReport, last_report, report_path
 from krx_quant.redaction import redact, secrets_of
@@ -234,6 +235,9 @@ class Facts:
     official: int = 0  # the consensus members: active algorithms on the engine's target (#206)
     # The latest pre-validation report of each registered algorithm that has one (#204).
     reports: Mapping[str, LastReport] = field(default_factory=dict)
+    # The trading days of the week before the night whose night session (18:00–06:00) the
+    # collector subscribed the KOSPI200 night futures for before it began (#264).
+    night_futures: tuple[date, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -657,7 +661,8 @@ async def keep_jobs(
         reports = await asyncio.to_thread(
             prevalidation_reports, settings.state_dir, everyone, settings.target_version
         )
-        return Facts(recorded, tuple(engine.waiting()), len(engine.members()), reports)
+        nights = await asyncio.to_thread(subscribed_nights, settings.data_dir, calendar, evening(clock.now()))
+        return Facts(recorded, tuple(engine.waiting()), len(engine.members()), reports, tuple(nights))
 
     scheduler = Scheduler(
         JOBS if jobs is None else jobs,
@@ -841,6 +846,39 @@ DAILY_CHECK = Job(
     ),
 )
 
+# The night futures (#264): the collector records the KOSPI200 night session's trades and book
+# (18:00–06:00) from the deploy that brings it; what only the server shows is whether KIS
+# streams them for this app key, under the contract code asked for, in the layout of KIS's
+# example. Once, on the first night after a night the collector subscribed for from its start
+# (the evening after the first trading day's night): ``probe-night`` reads that night's files,
+# and the masters. It prints counts, times, field names and codes, no market value, so it can
+# go on the public issue. One night's frames take seconds to read; the half hour is a bound.
+# Before the pre-validations.
+NIGHT_PROBE_ISSUE = 264
+
+
+def _after_a_subscribed_night(night: Night) -> bool:
+    """Once, on the first night after one the night futures were subscribed for from 18:00."""
+    return not night.ran and any(day < night.day for day in night.facts.night_futures)
+
+
+NIGHT_PROBE = Job(
+    name="probe-night-264",
+    due=_after_a_subscribed_night,
+    command=("probe-night",),
+    timeout=timedelta(minutes=30),
+    targets=(
+        Target(
+            NIGHT_PROBE_ISSUE,
+            note=(
+                '에이전트가 이 출력으로 `docs/kis-feeds.md` "야간선물 (#264)"의 ⚠(종목코드 규칙, '
+                "실제로 오는지, 필드 배치, 시각 형식)를 고친다. 출력에는 시세 값이 없다"
+                "(개수, 시각, 필드 이름, 종목코드만)."
+            ),
+        ),
+    ),
+)
+
 # ⑤ The pre-validations (#204): a new algorithm runs live once its pre-validation has passed
 # (``prevalidation.py``). Once ``MIN_DAYS`` trading days are recorded, one waiting algorithm
 # is pre-validated a night, at most (``prevalidation_tonight``): a run replays 20 days beside
@@ -957,6 +995,7 @@ JOBS: tuple[Job, ...] = (
     SUPPLY_PROBE,
     STRUCTURE_CHECK,
     ENTRY_DELAY,
+    NIGHT_PROBE,
     DAILY_CHECK,
     *prevalidation_jobs([*(a.name for a in ALGORITHMS), *(a.name for a in KIND_ALGORITHMS)]),
 )

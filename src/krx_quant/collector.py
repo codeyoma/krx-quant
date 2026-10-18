@@ -24,6 +24,7 @@ from krx_quant.backfill import PreviousDay, keep_history
 from krx_quant.climate import load_climate, load_tables
 from krx_quant.clock import SessionClock, SystemClock
 from krx_quant.config import Settings
+from krx_quant.contracts import KOSPI200, night_front_month
 from krx_quant.cost_guard import keep_costs
 from krx_quant.daily import StoredDays
 from krx_quant.econ_calendar import CalendarCollector, keep_calendar
@@ -39,6 +40,8 @@ from krx_quant.feeds import (
     KRX_TRADE,
     KST,
     MEMBER,
+    NIGHT_FUTURES,
+    NIGHT_FUTURES_BOOK,
     NXT_TRADE,
     OPTION,
     PROGRAM,
@@ -102,15 +105,21 @@ _APPROVAL_MAX_AGE = timedelta(hours=20)
 _TICK_SECONDS = 1.0
 
 
-def subscription_plan(settings: Settings, fronts: FrontMonths | None) -> list[tuple[Feed, str]]:
+def subscription_plan(
+    settings: Settings, fronts: FrontMonths | None, night: str | None = None
+) -> list[tuple[Feed, str]]:
     """WebSocket registrations in priority order; the session limit cuts from the end.
 
     Market-wide context comes first so it survives however many symbols are added,
-    then each stock's trades, book and program trading, then the tier-2 feeds.
+    then each stock's trades, book and program trading, then the tier-2 feeds. ``night`` is
+    the KOSPI200 night futures contract (#264): registered all day like the rest, it
+    delivers from 18:00 to 06:00 only, and has no REST fallback.
     """
     plan: list[tuple[Feed, str]] = []
     if fronts is not None:
         plan += [(KOSPI200_FUTURES, fronts.kospi200_futures), (USD_FUTURES, fronts.usd_futures)]
+    if night is not None:
+        plan += [(NIGHT_FUTURES, night), (NIGHT_FUTURES_BOOK, night)]
     plan += [(US_TRADE, us_daytime_key(t)) for t in settings.us_symbols]
     plan += [(feed, sym) for sym in settings.symbols for feed in (TRADE, BOOK, PROGRAM)]
     plan += [(MEMBER, sym) for sym in settings.symbols]
@@ -174,6 +183,20 @@ async def front_months(
     )
     log.info("nearest contracts: %s", fronts)
     return fronts
+
+
+def night_contract(at: datetime, calendar: MarketCalendar) -> str | None:
+    """The KOSPI200 night futures contract a collector started at ``at`` records (#264): the
+    night going on or the next one, by the expiry rules, so it needs no master file. The same
+    code as the day session's contract: KRX's night session trades the listed contracts.
+    None, and no night recording, for a day the rules have no code for."""
+    try:
+        code = night_front_month(KOSPI200, at, calendar)
+    except ValueError as e:
+        log.error("night futures skipped: %s", e)
+        return None
+    log.info("night futures contract: %s", code)
+    return code
 
 
 def started(settings: Settings) -> dict[str, Any]:
@@ -268,7 +291,7 @@ async def run_collector(
                 on_event=on_event,
             )
             fronts = await front_months(session, settings, kst_day(now()), calendar.calendar)
-            plan = subscription_plan(settings, fronts)
+            plan = subscription_plan(settings, fronts, night_contract(now(), calendar.calendar))
             cap = len(plan) if settings.ws_max_subscriptions is None else settings.ws_max_subscriptions
             for feed, key in plan[cap:]:
                 _fall_back(poller, settings, feed.tr_id, key, "beyond the configured cap")
@@ -659,8 +682,9 @@ async def check_fallbacks(settings: Settings, now: Clock | None = None) -> list[
     checks: list[FallbackCheck] = []
     async with aiohttp.ClientSession() as session:
         _, client = tokens_and_client(session, settings, clock)
-        fronts = await front_months(session, settings, kst_day(clock()), calendar_store(settings).calendar)
-        plan = subscription_plan(settings, fronts)
+        calendar = calendar_store(settings).calendar
+        fronts = await front_months(session, settings, kst_day(clock()), calendar)
+        plan = subscription_plan(settings, fronts, night_contract(clock(), calendar))
         # A derivative left out of the plan (its contract not found) is not checked: a failure.
         planned = {feed.tr_id for feed, _ in plan}
         for feed in (KOSPI200_FUTURES, USD_FUTURES, OPTION):

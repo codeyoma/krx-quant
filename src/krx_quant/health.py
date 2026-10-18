@@ -65,6 +65,13 @@ DEFAULT_STALE_SECONDS = 300.0
 # summer time and skips US holidays): silence counts only once they delivered that day.
 OWN_HOURS = frozenset({"HDFSCNT0"})
 
+# The KOSPI200 night futures' trades and book (#264): they deliver from 18:00 to 06:00 only,
+# so they are quiet all through continuous trading and their silence never counts. KRX
+# also closes some nights it does not announce through the holiday API (the evening before
+# a long holiday). A disconnect still opens their gaps; a night's recording is looked at
+# by ``krx-quant probe-night``.
+NIGHT_FEEDS = frozenset({"H0MFCNT0", "H0MFASP0"})
+
 
 @dataclass
 class _Gap:
@@ -128,7 +135,8 @@ class FeedHealth:
 
         Silence counts from the open, or from when the feed was registered or last
         delivered if later. A feed that has not delivered at all today counts only on a day
-        KIS confirmed as a trading day, and never for feeds that keep their own hours.
+        KIS confirmed as a trading day, and never for feeds that keep their own hours. The
+        night feeds never count.
         """
         at = self._now()
         today = kst_day(at)
@@ -170,7 +178,9 @@ class FeedHealth:
         )
 
     def _counts_silence(self, key: Key, today: date, confirmed: bool) -> bool:
-        """Whether ``key`` can go stale today (see ``check_stale``)."""
+        """Whether ``key`` can go stale today (see ``check_stale``); never for a night feed."""
+        if key[0] in NIGHT_FEEDS:
+            return False
         seen = self._last_seen.get(key)
         if seen is not None and kst_day(seen) == today:
             return True

@@ -266,7 +266,7 @@
 | `training` | 지난밤 학습(#22). `day`, `finalized_at`(승격 목록 확정 시각, KST), `applied`(그 승격이 지금 돌고 있는지), `reason`, `promoted`(알고리즘 → 버전), `reports`(알고리즘별 `promoted`, `reason`: 검증 log loss 비교). 도달 정답(#169, 기본 정답 버전 3)에서는 밤마다 다시 맞춘 `baseline-climate` 표도 `promoted`와 `reports`에 온다. 아직 없으면 `null` |
 | `cpu` | CPU 예산(#19). `budget_seconds`(`KRX_CPU_BUDGET_SECONDS`), `algorithm_seconds`(알고리즘 하나의 시간 예산, `KRX_ALGORITHM_SECONDS`), `algorithms`(은퇴하지 않은 알고리즘마다 봉 마감 한 번에 걸릴 것으로 보는 초. 한 번이라도 돈 것만), `expected_seconds`(그 합), `usage`(합 ÷ 예산. 예산이 0이면 `null`. 1을 넘으면 다음 봉 마감에 늦게 등록된 것부터 건너뛴다), `skipped_today`(오늘 CPU 예산으로 건너뛴 횟수) |
 | `usd_futures` | 달러선물 최근월물의 오늘 마지막 체결(#70). `price`, `at`(체결 시각), `previous_close`(그날 장 시작 전 마지막 매크로 읽기(보통 07:30)의 `usdf` 값, 곧 전 거래일 종가. 장 시작 뒤 `krx-quant macro`를 다시 돌려도 바뀌지 않는다. 국면과 같다), `change_pct`(전일 종가 대비 %). 오늘 매크로 읽기가 없거나, 그 읽기에 전 거래일의 달러선물 종가가 없으면(백필이 빠져 더 오래된 종가뿐이면) `previous_close`와 `change_pct`가 `null`이다. 오늘 체결이 아직 없으면(장 전, 휴장일) 통째로 `null`이다. 재생·데모 엔진도 같다 |
-| `kis` | 실시간 모드와 데모 엔진(가상 값)에만 있고, 둘에서는 늘 있다(없으면 엔진 API가 시작하지 않는다). `connected`(KIS가 현재 연결에서 구독에 답했는지), `feeds`(구독·조회별 `feed`, `key`, `last_received_at`, `seconds_since`, 열린 결측 구간의 `gap`: `stale` 또는 `disconnected: <이유>`) |
+| `kis` | 실시간 모드와 데모 엔진(가상 값)에만 있고, 둘에서는 늘 있다(없으면 엔진 API가 시작하지 않는다). `connected`(KIS가 현재 연결에서 구독에 답했는지), `feeds`(구독·조회별 `feed`, `key`, `last_received_at`, `seconds_since`, 열린 결측 구간의 `gap`: `stale` 또는 `disconnected: <이유>`). 야간선물(`H0MFCNT0`, `H0MFASP0`, #264)은 18:00–06:00에만 와서 낮에는 `seconds_since`가 크다. `gap`은 `stale`이 되지 않는다 |
 
 ### `GET /v1/symbols`
 
