@@ -414,8 +414,14 @@ async def prevalidate(
         db = settings.state_dir / f"prevalidation-{name}.sqlite3"
         for leftover in sqlite_files(db):
             leftover.unlink(missing_ok=True)
+        # The direction and the candidate's own kind only (#263): the checks read nothing of
+        # the other kinds, and each one would make every replayed day longer (the barrier's
+        # horizon ladder alone doubles the kinds' writes). The direction's algorithms all run,
+        # as their CPU comes first in the budget.
+        own = [k for k in kinds if k.name == DIRECTION or (kind is not None and k.name == kind.name)]
+        own_algorithms = [a for a in kind_algorithms if kind is not None and a.kind == kind.name]
         models = await _replay(
-            settings, candidate, kind, algorithms, kind_algorithms, kinds, available, replayed, db
+            settings, candidate, kind, algorithms, own_algorithms, own, available, replayed, db
         )
         seed_history(settings.state_dir, name)
         before, on_days = earlier_runs(settings.state_dir, name, replayed)
