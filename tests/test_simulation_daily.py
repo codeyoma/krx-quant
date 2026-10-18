@@ -19,7 +19,7 @@ from typing import Any
 
 import pytest
 
-from krx_quant.algorithms import DAILY_ALGORITHMS, Model
+from krx_quant.algorithms import DAILY_ALGORITHMS, Model, NothingToLearn
 from krx_quant.algorithms.cox import FEATURES
 from krx_quant.candles import krx_days_path, read_krx_days, write_krx_days
 from krx_quant.cards import Card, Meaning
@@ -435,3 +435,77 @@ def test_a_new_algorithm_and_a_new_target_start_a_simulated_probation_a_command_
         assert store.to_simulate(["a", "b"]) == ["b"], "a probation is simulated once, or kept as not"
     finally:
         store.close()
+
+
+class Flaky(AgainstTheNight):
+    """Learns nothing on the nights ``fails`` names (the last day of their samples)."""
+
+    def __init__(self, name: str, fails: set[date] | None = None) -> None:
+        super().__init__(name)
+        self.fails = fails
+
+    def fit(self, samples: Sequence[DailySample]) -> Model:
+        last = max(s.day for s in samples)
+        if self.fails is None or last in self.fails:
+            raise NothingToLearn(f"nothing on {last}")
+        return super().fit(samples)
+
+
+def test_a_night_that_learns_nothing_keeps_the_model_before_it_as_live(tmp_path: Path) -> None:
+    """#298 review: live, a failed night leaves the night before's model installed; so does the
+    replay, and every simulated day is predicted by a model of the kind's answers."""
+    s = settings(tmp_path, signal=0.0, seed=5)
+    probe = AgainstTheNight("probe")
+    enroll(s, probe.name)
+    [first] = simulate_daily(s, algorithms=[probe], now=NIGHT).simulations
+    nights = probe.fitted  # the night before each simulated day
+    flaky = Flaky("flaky", fails={nights[4]})
+    enroll(s, flaky.name)
+
+    [sim] = simulate_daily(s, algorithms=[flaky], now=NIGHT).simulations
+
+    models = sim.training["models"]
+    assert models[first.days[4].isoformat()] == models[first.days[3].isoformat()], "day 5: day 4's model"
+    assert models[first.days[5].isoformat()] == f"flaky-{nights[5]:%Y%m%d}"
+    store = store_of(s)
+    try:
+        targets = store._db.execute(
+            "SELECT DISTINCT model_target FROM sim_kind_predictions WHERE algorithm = 'flaky'"
+        ).fetchall()
+    finally:
+        store.close()
+    assert [tuple(t) for t in targets] == [(1,)], "no day by a target-less default"
+
+
+def test_one_whose_first_night_learns_nothing_is_not_simulated(tmp_path: Path) -> None:
+    s = settings(tmp_path, signal=0.0, seed=5)
+    enroll(s, "barren")
+
+    [sim] = simulate_daily(s, algorithms=[Flaky("barren")], now=NIGHT).simulations
+
+    assert sim.days == [] and sim.why is not None and sim.why.startswith("nothing to learn before")
+    store = store_of(s)
+    try:
+        assert store.statuses()["barren"].status is Status.PROBATION
+        assert store.to_simulate(["barren"]) == [], "kept as not simulated: its probation goes on live"
+        assert store.simulated(OPEN_TO_CLOSE.name, 1) == {}
+    finally:
+        store.close()
+
+
+async def test_the_nightly_facts_read_the_engine_s_database_on_its_thread(tmp_path: Path) -> None:
+    """#298 review: the scheduler reads the facts in the collector's event loop; a read of the
+    engine's database in a worker thread would raise (its connection belongs to the loop's thread),
+    and every fact would be lost for the night. A daily probation waiting is among them."""
+    from krx_quant.scheduled import read_facts
+
+    s = settings(tmp_path, signal=0.0, seed=5)
+    against = AgainstTheNight()
+    enroll(s, against.name)
+    clock = FakeClock(NIGHT)
+    e = engine_on(s, clock, [against])
+
+    facts = await read_facts(s, CALENDAR, clock, e)
+
+    assert facts.simulating_daily == (against.name,)
+    e.store.close()

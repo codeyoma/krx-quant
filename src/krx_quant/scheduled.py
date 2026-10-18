@@ -39,6 +39,7 @@ from asyncio.subprocess import DEVNULL, PIPE
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
+from functools import partial
 from pathlib import Path
 from time import monotonic
 from typing import Any
@@ -647,6 +648,36 @@ def prevalidation_reports(
     return {name: report for name, report in reports.items() if report is not None}
 
 
+async def read_facts(
+    settings: Settings, calendar: MarketCalendar, clock: SessionClock, engine: PredictionEngine
+) -> Facts:
+    """What the jobs' conditions ask tonight (``Facts``). The files are read in worker threads; the
+    engine's database only on the event loop's (its connection belongs to it), and those reads are
+    a few small queries."""
+    recorded = await asyncio.to_thread(recorded_days, settings.data_dir, settings.symbols, clock.now())
+    everyone: list[Algorithm | KindAlgorithm | DailyAlgorithm] = [
+        *engine.registered,
+        *engine.kind_registered,
+        *engine.daily_registered,
+    ]
+    reports = await asyncio.to_thread(
+        prevalidation_reports, settings.state_dir, everyone, settings.target_version
+    )
+    nights = await asyncio.to_thread(subscribed_nights, settings.data_dir, calendar, evening(clock.now()))
+    daily = sorted({f for a in engine.daily_registered for f in a.features})
+    pending = await asyncio.to_thread(pending_inputs, daily, settings.state_dir, settings.symbols)
+    _, simulating_daily = engine.to_simulate()  # the engine's database: on this thread (#298 review)
+    return Facts(
+        recorded,
+        tuple(engine.waiting()),
+        len(engine.members()),
+        reports,
+        tuple(nights),
+        tuple(pending),
+        simulating_daily=tuple(simulating_daily),
+    )
+
+
 async def keep_jobs(
     settings: Settings,
     session: aiohttp.ClientSession,
@@ -663,30 +694,6 @@ async def keep_jobs(
     if not github.configured:
         log.warning("KRX_GITHUB_TOKEN is not set: the scheduled jobs keep their results on the server")
 
-    async def facts() -> Facts:
-        recorded = await asyncio.to_thread(recorded_days, settings.data_dir, settings.symbols, clock.now())
-        everyone: list[Algorithm | KindAlgorithm | DailyAlgorithm] = [
-            *engine.registered,
-            *engine.kind_registered,
-            *engine.daily_registered,
-        ]
-        reports = await asyncio.to_thread(
-            prevalidation_reports, settings.state_dir, everyone, settings.target_version
-        )
-        nights = await asyncio.to_thread(subscribed_nights, settings.data_dir, calendar, evening(clock.now()))
-        daily = sorted({f for a in engine.daily_registered for f in a.features})
-        pending = await asyncio.to_thread(pending_inputs, daily, settings.state_dir, settings.symbols)
-        _, simulating_daily = await asyncio.to_thread(engine.to_simulate)
-        return Facts(
-            recorded,
-            tuple(engine.waiting()),
-            len(engine.members()),
-            reports,
-            tuple(nights),
-            tuple(pending),
-            simulating_daily=tuple(simulating_daily),
-        )
-
     scheduler = Scheduler(
         JOBS if jobs is None else jobs,
         settings.jobs_at,
@@ -698,7 +705,7 @@ async def keep_jobs(
         commit=settings.commit,
         secrets=secrets_of(settings),
         training=training,
-        facts=facts,
+        facts=partial(read_facts, settings, calendar, clock, engine),
     )
     await scheduler.run()
 

@@ -19,7 +19,8 @@ is marked (``statuses.simulated``).
 (20) trading days with an answer. Before each day the algorithm is fitted as the night before it
 would have been (``daily_training.DailyTrainer``: its latest ``training_days`` up to the trading
 day before), on the samples ``daily_features.samples`` makes (the features as of the day's 08:50,
-from the days before it); its kind's baselines predict each day as at 08:50
+from the days before it); a night that learns nothing keeps the model before it, as live (one
+whose first night learns nothing is not simulated); its kind's baselines predict each day as at 08:50
 (``daily_training.baseline_forecasts``). A day a circuit breaker or a sidecar touched is special,
 as live. A daily algorithm whose pre-validation passed but that the engine has not enrolled yet
 (its report is read at the engine's next start or 08:50) is enrolled here, as the engine would: the
@@ -42,7 +43,7 @@ from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
 
-from krx_quant.algorithms import DAILY_ALGORITHMS, NothingToLearn
+from krx_quant.algorithms import DAILY_ALGORITHMS, Model, NothingToLearn
 from krx_quant.config import Settings
 from krx_quant.daily import DailyAlgorithm, DailyKind, DailySample
 from krx_quant.daily_features import DailyFiles, samples
@@ -191,6 +192,7 @@ def _daily(
     answers = {(s.symbol, s.day): _answer(store, s) for d in days for s in by_day[d]}
     made: list[SimKindPrediction] = []
     models: dict[str, str] = {}
+    model: Model | None = None
     for day in days:
         night = nights.get(day)
         training = [
@@ -199,8 +201,12 @@ def _daily(
         try:
             model = algorithm.fit(training)
         except NothingToLearn as e:
-            log.warning("%s not trained before %s, its defaults predict: %s", algorithm.name, day, e)
-            model = algorithm.default_model()
+            # As live: a night that learns nothing leaves the model the night before installed
+            # (#298 review). Without one, the days would be predicted by defaults, never counted.
+            if model is None:
+                why = f"nothing to learn before {day} ({e}): its defaults would predict, which never count"
+                return _not_simulated(store, algorithm.name, kind.name, stint, now, why)
+            log.warning("%s not refitted before %s, the model before predicts: %s", algorithm.name, day, e)
         models[day.isoformat()] = model.version
         for sample in by_day[day]:
             forecast = algorithm.predict(sample.features, model)
