@@ -35,11 +35,12 @@ as ``touches``: an engine from before them still opens the database (``_SPECIAL_
 A simulated probation (#298, ``simulation.py``) keeps its predictions apart from the live ones,
 in tables of its own (``_SIMULATION_SCHEMA``), each with the answer it was scored on:
 ``simulation_runs`` a replay of the latest trading days, ``simulations`` the probation each
-algorithm's replay was made for, ``sim_kind_predictions`` a kind's predictions of a replay (a
-daily kind's too). Nothing that reads the live tables (the leaderboard, the statistics, the
-consensus weights, the stream) reads them; the lifecycle does (``lifecycle.Simulated``).
-``statuses.simulated`` marks a status change whose review counted simulated days, a column added
-as ``kind_predictions.band`` was.
+algorithm's replay was made for, ``sim_predictions`` the direction's predictions of a replay with
+their touch labels, ``sim_kind_predictions`` a kind's (a daily kind's too) with their answers.
+Nothing that reads the live tables (the leaderboard, the statistics, the consensus weights, the
+stream) reads them; the lifecycle does (``lifecycle.Simulated``). ``statuses.simulated`` marks a
+status change whose review counted simulated days, a column added as ``kind_predictions.band``
+was.
 
 Times are ISO 8601 strings in KST, which sort in time order.
 """
@@ -280,6 +281,26 @@ CREATE TABLE IF NOT EXISTS sim_kind_predictions (  -- a replay's predictions of 
     PRIMARY KEY (run, kind, symbol, algorithm, bar_close)
 );
 CREATE INDEX IF NOT EXISTS sim_kind_predictions_by_close ON sim_kind_predictions (run, kind, bar_close);
+CREATE TABLE IF NOT EXISTS sim_predictions (  -- a replay's direction predictions, each with the touch
+    run INTEGER NOT NULL REFERENCES simulation_runs (id),  -- label it was scored on (#298)
+    symbol TEXT NOT NULL,
+    algorithm TEXT NOT NULL,          -- a simulated algorithm or a baseline
+    model_version TEXT NOT NULL,
+    model_target INTEGER,             -- the target its model learned; null: the defaults
+    bar_close TEXT NOT NULL,
+    status TEXT NOT NULL,             -- as predictions.status
+    p_up REAL,
+    p_flat REAL,
+    p_down REAL,
+    expected_ticks REAL,
+    special INTEGER NOT NULL DEFAULT 0,  -- as outcomes.special
+    touch_version INTEGER NOT NULL,   -- the touch target's when it was replayed
+    touch_class TEXT,                 -- as touches.class; null when it could not be scored
+    touch_unscorable TEXT,
+    touch_path TEXT,                  -- as touches.path
+    PRIMARY KEY (run, symbol, algorithm, bar_close)
+);
+CREATE INDEX IF NOT EXISTS sim_predictions_by_close ON sim_predictions (run, bar_close);
 """
 
 # Columns added to a table after it was first made, without a schema version (#200): a
@@ -1557,6 +1578,73 @@ class PredictionStore:
                 ],
             )
 
+    def add_sim_predictions(self, run: int, rows: Sequence[Mapping[str, Any]], touch_version: int) -> None:
+        """Keep a replay's direction predictions (``select_predictions``' rows: each with its
+        outcome's ``special`` and its bar close's touch label of ``touch_version``), in one
+        transaction."""
+        with self._db:
+            self._db.executemany(
+                "INSERT OR REPLACE INTO sim_predictions (run, symbol, algorithm, model_version,"
+                " model_target, bar_close, status, p_up, p_flat, p_down, expected_ticks, special,"
+                " touch_version, touch_class, touch_unscorable, touch_path)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                [
+                    (
+                        run,
+                        r["symbol"],
+                        r["algorithm"],
+                        r["model_version"],
+                        r.get("model_target"),
+                        r["bar_close"],
+                        r["status"],
+                        r.get("p_up"),
+                        r.get("p_flat"),
+                        r.get("p_down"),
+                        r.get("expected_ticks"),
+                        int(bool(r.get("special"))),
+                        touch_version,
+                        r.get("touch_class"),
+                        r.get("touch_unscorable"),
+                        r.get("touch_path"),
+                    )
+                    for r in rows
+                ],
+            )
+
+    def sim_scored(
+        self, run: int, days: Sequence[date], symbol: str | None, include_special: bool
+    ) -> list[dict[str, Any]]:
+        """``scored_predictions`` of a replay: its direction predictions made on ``days`` and
+        scored on their touch label of this version (``touch.TARGET_VERSION``), as the lifecycle
+        reads them (the rows' keys are ``scored_predictions``'), read on a connection of its own."""
+        if not days:
+            return []
+        on, params = _made_on(days, symbol)
+        where = f"p.run = ? AND {on} AND p.status = 'ok' AND p.touch_class IS NOT NULL"
+        where += f" AND p.touch_version = {TARGET_VERSION}"
+        if not include_special:
+            where += " AND p.special = 0"
+        with self._reading() as db:
+            db.row_factory = sqlite3.Row
+            rows = db.execute(f"SELECT p.* FROM sim_predictions p WHERE {where}", (run, *params)).fetchall()
+        return [dict(r) for r in rows]
+
+    def made_on(self, days: Sequence[date]) -> list[dict[str, Any]]:
+        """Every direction prediction made on ``days``, made or not, with its outcome and touch
+        label (``select_predictions``): what a simulation keeps of its replay (#298)."""
+        if not days:
+            return []
+        on, params = _made_on(days, None)
+        return self._select(f"WHERE {on} ORDER BY p.bar_close, p.symbol, p.algorithm", tuple(params))
+
+    def kind_made_on(self, kind: str, answer_version: int, days: Sequence[date]) -> list[dict[str, Any]]:
+        """Every prediction of ``kind`` made on ``days``, made or not, with its answer of
+        ``answer_version`` (``_kind_select``): what a simulation keeps of its replay (#298)."""
+        if not days:
+            return []
+        on, params = _made_on(days, None)
+        return self._kind_select(answer_version, f"WHERE p.kind = ? AND {on}", (kind, *params))
+
     def add_simulation(
         self,
         algorithm: str,
@@ -1633,11 +1721,13 @@ class PredictionStore:
         scored predictions of the kind's ``answer_version``, read from their own table."""
         out: dict[str, Simulated] = {}
         for name, record in self.simulations().items():
-            if record.kind != kind or record.run is None or not record.days or kind == DIRECTION:
+            if record.kind != kind or record.run is None or not record.days:
                 continue
             run = record.run
 
             def rows(chosen: Sequence[date], special: bool, run: int = run) -> list[dict[str, Any]]:
+                if kind == DIRECTION:
+                    return self.sim_scored(run, chosen, None, special)
                 return self.sim_kind_scored(run, kind, answer_version, chosen, None, special)
 
             days = tuple(sorted(record.days, reverse=True))
@@ -1645,11 +1735,14 @@ class PredictionStore:
         return out
 
     def sim_predictors(self, run: int, kind: str) -> frozenset[str]:
-        """The predictors a replay has predictions of, of ``kind``."""
-        rows = self._db.execute(
-            "SELECT DISTINCT algorithm FROM sim_kind_predictions WHERE run = ? AND kind = ?", (run, kind)
-        ).fetchall()
-        return frozenset(r[0] for r in rows)
+        """The predictors a replay has predictions of, of ``kind`` (the direction's too)."""
+        if kind == DIRECTION:
+            rows = self._db.execute("SELECT DISTINCT algorithm FROM sim_predictions WHERE run = ?", (run,))
+        else:
+            rows = self._db.execute(
+                "SELECT DISTINCT algorithm FROM sim_kind_predictions WHERE run = ? AND kind = ?", (run, kind)
+            )
+        return frozenset(r[0] for r in rows.fetchall())
 
     def sim_kind_scored(
         self,

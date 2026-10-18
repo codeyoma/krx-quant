@@ -26,6 +26,22 @@ as live. A daily algorithm whose pre-validation passed but that the engine has n
 (its report is read at the engine's next start or 08:50) is enrolled here, as the engine would: the
 scheduled job runs right after its pre-validation, so it is simulated the same night.
 
+**Bar-close kinds** (``simulate_bar_close``, ``krx-quant simulate bar-close``: the direction, the
+range, the barrier and its horizon ladder): their inputs are the recorded quotes, so the days are
+the latest recorded ones, as many as there are up to ``BAR_CLOSE_DAYS`` (20), at least
+``prevalidation.MIN_DAYS`` (10): with fewer, nothing is simulated and the probations go on live
+(the scheduled job waits for 10). Each algorithm is trained once, on its ``training_days`` before
+the first of them (``prevalidation._WalkForward``: backfilled days as the nightly training reads
+them), and predicts them all: a little harsher than its live nights. One whose training learns
+nothing before them (its defaults would predict, which never count) is not simulated. The days are
+replayed with the live engine and feature code (``replay.replay_recorded``), the algorithms waiting
+for it together, with their kinds' baselines, whose tables are refitted before each day on the
+days before it as the night before would; the replay goes to ``state/simulation-bar-close.sqlite3``
+(made anew each run) and its predictions of those algorithms and baselines, with their touch labels
+and answers, are kept. The answers are the current answer versions' (the touch target's,
+``touch.TARGET_VERSION``; each kind's). Pre-validation's replay is not reused: it refits before
+each day (walk-forward), not once before the days, and it replays the days before the probation.
+
 A probation is simulated once (``simulations``, by the algorithm and when its probation began):
 one that could not be (its training learned nothing before the days, say) is kept as such, with
 why, and its probation goes on live.
@@ -41,26 +57,46 @@ from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
-from krx_quant.algorithms import DAILY_ALGORITHMS, Model, NothingToLearn
+from krx_quant.algorithms import (
+    ALGORITHMS,
+    DAILY_ALGORITHMS,
+    KIND_ALGORITHMS,
+    Algorithm,
+    KindAlgorithm,
+    Model,
+    NothingToLearn,
+    kind_of,
+    load_models,
+    register,
+    register_kind_algorithms,
+)
+from krx_quant.baselines import baselines_for
 from krx_quant.config import Settings
 from krx_quant.daily import DailyAlgorithm, DailyKind, DailySample
 from krx_quant.daily_features import DailyFiles, samples
 from krx_quant.daily_training import baseline_forecasts, training_first
+from krx_quant.features import Leaders
 from krx_quant.feeds.base import KST
-from krx_quant.kind_registry import DAILY_KINDS
+from krx_quant.kind_registry import DAILY_KINDS, KINDS
 from krx_quant.kind_stats import kind_scoring
-from krx_quant.kinds import Answer
-from krx_quant.lifecycle import REGISTERED, AtOnce, Status, review_at_once
+from krx_quant.kinds import DIRECTION, Answer, Kind
+from krx_quant.lifecycle import DIRECTION_SCORING, REGISTERED, AtOnce, Rows, Rules, Status, review_at_once
 from krx_quant.market_calendar import MarketCalendar, calendar_store
 from krx_quant.predictions import DB_NAME, PredictionStore, SimKindPrediction
-from krx_quant.prevalidation import admits
+from krx_quant.prevalidation import MIN_DAYS, _WalkForward, admits
+from krx_quant.replay import recorded_events, replay_recorded, sqlite_files
+from krx_quant.touch import TARGET_VERSION
+from krx_quant.training import finished_days, is_recorded
 
 log = logging.getLogger(__name__)
 
 DAILY_DAYS = 20  # a daily kind's simulated days: its first review day (``daily.DAILY_RULES``)
+BAR_CLOSE_DAYS = 20  # a bar-close kind's, at most: the recorded days there are, at least MIN_DAYS
 DAILY, BAR_CLOSE = "daily", "bar_close"  # how a replay trains (``simulation_runs.cadence``)
+# The command's argument for each (``krx-quant simulate <which>``).
+BAR_CLOSE_COMMAND = "bar-close"
 
 
 @dataclass(frozen=True)
@@ -82,6 +118,7 @@ class SimulationRun:
 
     enrolled: list[str] = field(default_factory=list)  # daily algorithms enrolled on probation here
     simulations: list[Simulation] = field(default_factory=list)
+    recorded_days: int | None = None  # a bar-close simulation's: the recorded days there were
 
 
 class SimulationRunning(Exception):
@@ -361,7 +398,12 @@ def report(run: SimulationRun, level: float) -> list[str]:
     """The command's lines: what was enrolled, then each simulation and its review at once
     (counts, days and lifts only: no market value)."""
     lines = [f"enrolled on probation (pre-validation passed): {name}" for name in run.enrolled]
-    if not run.simulations:
+    if run.recorded_days is not None and run.recorded_days < MIN_DAYS:
+        lines.append(
+            f"{run.recorded_days} recorded days, fewer than {MIN_DAYS}: no simulation;"
+            " the probations go on live"
+        )
+    elif not run.simulations:
         lines.append("no probation waits for its simulation")
     for s in run.simulations:
         if not s.days:
@@ -405,6 +447,278 @@ def report(run: SimulationRun, level: float) -> list[str]:
 
 def _once(training: Mapping[str, Any]) -> str:
     """A bar-close replay's training, in words (#298: trained once before the days)."""
-    model = training.get("model")
-    until = training.get("trained_until")
-    return f"trained once ({model}, data up to {until})"
+    days = training.get("days") or {}
+    sources = ", ".join(f"{n} {source}" for source, n in sorted(days.items())) or "no day"
+    return (
+        f"trained once before them ({training.get('model')}: {training.get('first_day')}.."
+        f"{training.get('last_day')}, {sources})"
+    )
+
+
+@dataclass(frozen=True)
+class _Candidate:
+    """A bar-close algorithm whose probation waits for its simulation, with its once-trained model."""
+
+    algorithm: Algorithm | KindAlgorithm
+    kind: Kind | None  # None: the direction
+    stint: datetime
+    model: Model
+    window: list[date]  # the days before the replayed ones it was trained on
+    recorded: int  # of them, the recorded ones (the others backfilled)
+
+
+async def simulate_bar_close(
+    settings: Settings,
+    *,
+    algorithms: Sequence[Algorithm] = ALGORITHMS,
+    kind_algorithms: Sequence[KindAlgorithm] = KIND_ALGORITHMS,
+    kinds: Sequence[Kind] = KINDS,
+    now: datetime | None = None,
+) -> SimulationRun:
+    """Simulate every bar-close probation that waits for it, all in one replay of the latest
+    recorded days (module doc), and judge each at once. With fewer than ``MIN_DAYS`` recorded days
+    nothing is simulated (``SimulationRun.days`` says how many there are). Raises
+    ``SimulationRunning`` while another runs."""
+    now = now or datetime.now(KST)
+    register(algorithms)
+    register_kind_algorithms(kind_algorithms, kinds, taken={a.name for a in algorithms})
+    with _held(settings.state_dir, BAR_CLOSE):
+        store = PredictionStore(settings.state_dir / DB_NAME)
+        try:
+            everyone: list[Algorithm | KindAlgorithm] = [*algorithms, *kind_algorithms]
+            waiting = store.to_simulate([a.name for a in everyone])
+            available = finished_days(settings.data_dir, settings.symbols, now)
+            recorded = [d for d in available if is_recorded(settings.data_dir, d, settings.symbols)]
+            if not waiting or len(recorded) < MIN_DAYS:
+                return SimulationRun(recorded_days=len(recorded))
+            days = recorded[-BAR_CLOSE_DAYS:]
+            calendar = calendar_store(settings).calendar
+            leaders = Leaders.of(settings)
+            standings = store.statuses()
+            done: list[Simulation] = []
+            ready: list[_Candidate] = []
+            for a in everyone:
+                if a.name not in waiting:
+                    continue
+                kind = (
+                    None
+                    if kind_of(a) == DIRECTION
+                    else next((k for k in kinds if k.name == kind_of(a)), None)
+                )
+                stint = standings[a.name].since
+                if kind_of(a) != DIRECTION and kind is None:
+                    continue
+                trainer = _WalkForward(settings, a, available, calendar, leaders, kind)
+                model = trainer.before(days[0])
+                target = settings.target_version if kind is None else kind.answer_version
+                if model.target_version != target:
+                    why = f"nothing to learn before {days[0]} (its defaults would predict, which never count)"
+                    done.append(_not_simulated(store, a.name, kind_of(a), stint, now, why))
+                    continue
+                window = [d for d in available if d < days[0]][-a.training_days :]
+                held = sum(1 for d in window if d in set(recorded))
+                ready.append(_Candidate(a, kind, stint, model, window, held))
+            if ready:
+                replayed = _sharing_the_budget(everyone, standings, ready)
+                done += await _replay_bar_close(
+                    store, settings, ready, replayed, kinds, available, days, calendar, now
+                )
+                ruled = _judge_bar_close(store, settings, everyone, ready, kinds, now)
+                done = [ruled.get(s.algorithm, s) for s in done]
+            return SimulationRun(simulations=done, recorded_days=len(recorded))
+        finally:
+            store.close()
+
+
+def _sharing_the_budget(
+    everyone: Sequence[Algorithm | KindAlgorithm],
+    standings: Mapping[str, Any],
+    ready: Sequence[_Candidate],
+) -> list[Algorithm | KindAlgorithm]:
+    """The algorithms to replay, in the CPU budget's order (``everyone``'s: the direction's, then the
+    other kinds', in registration order): the candidates, and beside them each algorithm the engine
+    runs live (enrolled, not retired) whose cost can push a candidate out of the budget (#298
+    review): those before the last candidate. The budget drops the last registered first, so those
+    after it never cost a candidate its turn. Their predictions are not kept."""
+    candidates = {c.algorithm.name for c in ready}
+    order = [
+        a
+        for a in everyone
+        if a.name in candidates
+        or ((s := standings.get(a.name)) is not None and s.status is not Status.RETIRED)
+    ]
+    last = max(i for i, a in enumerate(order) if a.name in candidates)
+    return order[: last + 1]
+
+
+async def _replay_bar_close(
+    store: PredictionStore,
+    settings: Settings,
+    ready: Sequence[_Candidate],
+    replayed: Sequence[Algorithm | KindAlgorithm],
+    registered_kinds: Sequence[Kind],
+    available: Sequence[date],
+    days: Sequence[date],
+    calendar: MarketCalendar,
+    now: datetime,
+) -> list[Simulation]:
+    """Replay ``days`` with the ``replayed`` algorithms (``_sharing_the_budget``): the ``ready``
+    ones on their once-trained models, the others on the server's, with their kinds' baselines;
+    keep what the candidates and their kinds' baselines predicted, each with its answer."""
+    db = settings.state_dir / "simulation-bar-close.sqlite3"
+    for leftover in sqlite_files(db):
+        leftover.unlink(missing_ok=True)
+    candidates = {c.algorithm.name for c in ready}
+    beside = [a for a in replayed if a.name not in candidates]
+    direction = [cast(Algorithm, a) for a in replayed if kind_of(a) == DIRECTION]
+    of_kinds = [cast(KindAlgorithm, a) for a in replayed if kind_of(a) != DIRECTION]
+    named = {k.name: k for k in registered_kinds}
+    kinds = [named[name] for name in dict.fromkeys(kind_of(a) for a in of_kinds) if name in named]
+    leaders = Leaders.of(settings)
+    # The baselines' tables, refitted before each day on its days before (the candidates' trainers,
+    # with their samples, are let go: a fresh one reads the answers only).
+    tables_of = [
+        _WalkForward(
+            settings, next(a for a in of_kinds if kind_of(a) == k.name), available, calendar, leaders, k
+        )
+        for k in kinds
+    ]
+    climate_of = _WalkForward(settings, ready[0].algorithm, available, calendar, leaders)
+    models = {**load_models(settings.state_dir, beside), **{c.algorithm.name: c.model for c in ready}}
+    for day in days:
+        tables: dict[str, Model] = {}
+        for trainer in tables_of:
+            tables.update(trainer.tables_before(day))
+        climate = climate_of.climate_before(day) if settings.target_version >= 2 else None
+        events = recorded_events(settings.data_dir, day, settings.symbols, leaders)
+        engine = await replay_recorded(
+            settings,
+            day,
+            events,
+            db=db,
+            models={**tables, **models},
+            algorithms=direction,
+            calendar=calendar,
+            climate=climate,
+            kinds=kinds,
+            kind_algorithms=of_kinds,
+        )
+        engine.store.close()
+        log.info("simulated %s with %s", day, ", ".join(c.algorithm.name for c in ready))
+    run = store.add_simulation_run(now, BAR_CLOSE, days)
+    replay_db = PredictionStore(db)
+    try:
+        if any(c.kind is None for c in ready):
+            names = {c.algorithm.name for c in ready if c.kind is None}
+            names |= {b.name for b in baselines_for(settings.target_version)}
+            rows = [r for r in replay_db.made_on(days) if r["algorithm"] in names]
+            store.add_sim_predictions(run, rows, TARGET_VERSION)
+        for kind in {c.kind.name: c.kind for c in ready if c.kind is not None}.values():
+            names = {c.algorithm.name for c in ready if c.kind is kind} | {b.name for b in kind.baselines}
+            kept = [
+                _sim_kind_row(r)
+                for r in replay_db.kind_made_on(kind.name, kind.answer_version, days)
+                if r["algorithm"] in names
+            ]
+            store.add_sim_kind_predictions(run, kind.name, kind.answer_version, kept)
+    finally:
+        replay_db.close()
+    out: list[Simulation] = []
+    for c in ready:
+        training = _training_json(c)
+        store.add_simulation(
+            c.algorithm.name, c.stint, kind_of(c.algorithm), run, now, {"training": training}
+        )
+        out.append(Simulation(c.algorithm.name, kind_of(c.algorithm), list(days), training))
+    return out
+
+
+def _sim_kind_row(row: Mapping[str, Any]) -> SimKindPrediction:
+    """A replayed prediction of a kind (``kind_made_on``'s row), with its answer, to keep."""
+    answer = None
+    if row.get("answer_version") is not None:
+        answer = Answer(row["answer_class"], row["answer_unscorable"], row.get("answer_path") or {})
+    return SimKindPrediction(
+        symbol=row["symbol"],
+        algorithm=row["algorithm"],
+        model_version=row["model_version"],
+        model_target=row.get("model_target"),
+        bar_close=datetime.fromisoformat(row["bar_close"]),
+        output=row.get("output"),
+        answer=answer,
+        special=bool(row.get("answer_special")),
+        status=row["status"],
+        flat_ticks=row.get("flat_ticks"),
+        width_ticks=row.get("width_ticks"),
+        anchor=row.get("anchor"),
+        tick=row.get("tick"),
+        band=row.get("band"),
+    )
+
+
+def _training_json(candidate: _Candidate) -> dict[str, Any]:
+    """How a bar-close algorithm was trained for its simulation: once, on its ``training_days``
+    before the replayed days, by where their labels came from (#165: ``recorded``, ``bars``)."""
+    model, window = candidate.model, candidate.window
+    days = {"recorded": candidate.recorded, "bars": len(window) - candidate.recorded}
+    return {
+        "cadence": BAR_CLOSE,
+        "model": model.version,
+        "target_version": model.target_version,
+        "first_day": window[0].isoformat() if window else None,
+        "last_day": window[-1].isoformat() if window else None,
+        "samples": None if model.training is None else model.training.samples,
+        "days": {source: n for source, n in days.items() if n},
+    }
+
+
+def _judge_bar_close(
+    store: PredictionStore,
+    settings: Settings,
+    everyone: Sequence[Algorithm | KindAlgorithm],
+    ready: Sequence[_Candidate],
+    kinds: Sequence[Kind],
+    now: datetime,
+) -> dict[str, Simulation]:
+    """Each simulated bar-close algorithm's review at once, applied, kind by kind (the direction
+    first); a clone looked for among the earlier algorithms of its kind with a status, in the
+    registries' order, on their live predictions of the simulated days."""
+    out: dict[str, Simulation] = {}
+    rules = Rules.of(settings)
+    standings = store.statuses()
+    for kind in [None, *kinds]:
+        names = [c.algorithm.name for c in ready if c.kind is kind]
+        if not names:
+            continue
+        kind_name = DIRECTION if kind is None else kind.name
+        of_kind = [a.name for a in everyone if kind_of(a) == kind_name and a.name in standings]
+        simulated = store.simulated(kind_name, TARGET_VERSION if kind is None else kind.answer_version)
+        if kind is None:
+            baselines = frozenset(b.name for b in baselines_for(settings.target_version))
+            scoring = DIRECTION_SCORING
+        else:
+            baselines = frozenset(b.name for b in kind.baselines)
+            scoring = kind_scoring(kind)
+        live = _live_rows(store, kind)
+        verdicts = review_at_once(
+            names,
+            of_kind,
+            standings,
+            simulated,
+            live,
+            min_sample=settings.min_sample,
+            fee_rate=settings.fee_rate,
+            rules=rules,
+            baselines=baselines,
+            scoring=scoring,
+        )
+        out.update(_apply(store, verdicts, kind_name, now))
+    return out
+
+
+def _live_rows(store: PredictionStore, kind: Kind | None) -> Rows:
+    """The live scored predictions of ``kind`` (None: the direction's), as the reviews read them."""
+    if kind is None:
+        return lambda chosen, special: store.scored_predictions(chosen, None, special)
+    name, version = kind.name, kind.answer_version
+    return lambda chosen, special: store.kind_scored(name, version, chosen, None, special)
