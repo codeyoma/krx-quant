@@ -452,15 +452,18 @@ async def keep_history(
 ) -> None:
     """The collector's history task: at start, then daily once the day's bars are final,
     refresh the calendar, fill missing one-minute bars, add the new day candles (``candles``)
-    and the daily supply data (``supply``, from KIS and, given ``toss``, Toss). Runs until
-    cancelled.
+    and the daily supply data (``supply``, from KIS and, given ``toss``, Toss), and, with the
+    macro reads on (``KRX_MACRO_AT``), the US daily closes the daily kinds learn from
+    (``us_daily``, #264). Runs until cancelled.
     """
     from krx_quant.candles import CandleKeeper  # it builds on this module's markets
     from krx_quant.supply import SupplyKeeper
+    from krx_quant.us_daily import UsDailyKeeper
 
     backfiller = backfiller_for(settings, client, store)
     candles = CandleKeeper(client, store.calendar, settings.data_dir, settings.symbols, backfiller.pace)
     supply = SupplyKeeper(client, store.calendar, settings.state_dir, settings.symbols, backfiller.pace, toss)
+    us = UsDailyKeeper(settings) if settings.macro_at is not None else None
     while True:
         started = now()
         try:
@@ -468,8 +471,10 @@ async def keep_history(
             await backfiller.run(started)
             await candles.run(started)
             await supply.run(started)
+            if us is not None:
+                await us.run(started)
         except Exception:
-            log.exception("calendar refresh, backfill, candles or supply failed")
+            log.exception("calendar refresh, backfill, candles, supply or US daily closes failed")
         # The next final time after this run began: a run that started just before 20:30
         # and ended after it goes again at once for the day it could not take yet.
         await asyncio.sleep(max(0.0, (_next(BARS_FINAL_AT, started) - now()).total_seconds()))
