@@ -756,7 +756,7 @@
 
 엔진이 예측하는 종류다. 방향이 처음이고 그 뒤로 등록 순서다(아래 "예측 종류"). 방향, 변동폭(#180), 장벽(#183), 장벽의 지평 사다리 `barrier_15m`, `barrier_30m`, `barrier_60m`(#263), 그 뒤로 하루 한 번 예측 종류 `open_to_close`(#264, 아래 "하루 한 번 예측 종류")다.
 
-> **바뀜** (2026-10-18, #__PR3__): 목록은 장벽의 지평 사다리에서 끝났다 → 그 뒤에 `open_to_close`. 모든 항목에 `daily`가 생겼고(봉 마감 종류는 `null`), `horizon_minutes`가 `null`일 수 있다(하루 한 번 예측 종류). 이유: #264.
+> **바뀜** (2026-10-18, #293): 목록은 장벽의 지평 사다리에서 끝났다 → 그 뒤에 `open_to_close`. 모든 항목에 `daily`가 생겼고(봉 마감 종류는 `null`), `horizon_minutes`가 `null`일 수 있다(하루 한 번 예측 종류). 이유: #264.
 
 > **바뀜** (2026-10-15, #197): "지금은 방향 하나다" → 방향과 변동폭. 이유: 변동폭이 첫 종류다.
 
@@ -1208,7 +1208,7 @@
   - 예측하지 않은 날(엔진이 08:50에 꺼져 있었음)은 정답도 쓰지 않는다.
   - 스트림은 저장하는 순간 다른 종류처럼 보낸다: 08:50에 `kind_prediction`(`prediction_kind` `open_to_close`, `bar_close`가 그날 08:50), 정답을 쓰는 순간 `kind_answer`(아래 "API").
 
-    > **바뀜** (2026-10-18, #__PR3__): "스트림의 `kind_prediction`·`kind_answer`는 아직 보내지 않는다" → 보낸다. 이유: #264의 엔진 API PR이다.
+    > **바뀜** (2026-10-18, #293): "스트림의 `kind_prediction`·`kind_answer`는 아직 보내지 않는다" → 보낸다. 이유: #264의 엔진 API PR이다.
 - **API.** 다른 종류의 엔드포인트를 그대로 쓴다.
   - `GET /v1/kinds`: 봉 마감 종류 다음에 온다. `horizon_minutes`가 `null`이고(봉 마감이 없다), `daily`가 그날의 시각을 말한다: `predict_at`(`"08:50"`, KST, 거래일마다), `from`·`to`(`open`·`close`: 시가 단일가에서 종가 단일가까지), `from_title`·`to_title`(화면용 이름), `answer_from`(`"20:35"`: 정답을 처음 보는 시각), `probation_days`·`bench_days`(판정하는 정답 있는 날, `[60, 120, 180]`), `recent_days`(60). 봉 마감 종류의 `daily`는 `null`이다.
   - `GET /v1/symbols/{symbol}/kinds/open_to_close/latest`, `…/predictions`: 항목의 `bar_close`가 예측 시각(그날 08:50), `target_at`이 그날 장 마감(종가 단일가 끝, 보통 15:30, 수능일 16:30)이다. `band`가 그날의 보합 폭이다(봉 마감 종류는 `null`). `flat_ticks`, `width_ticks`, `anchor`, `tick`은 `null`이다. `answer`는 그날 KRX 일봉이 저장되어 정답을 쓴 뒤(20:35부터) 찬다. `?bar_close=2026-10-12T08:50:00+09:00`으로 그날 것을 읽는다. `limit`은 날(예측 시각)의 개수다.

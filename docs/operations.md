@@ -702,7 +702,7 @@ Toss: 109 calls, 1 failed; tokens issued: 0
   - **손으로 학습.** `docker compose run --rm --no-deps engine fit cox`: 마지막 KRX 일봉까지로 학습해 `state/models/cox.json`에 쓴다. 엔진이 1분 안에 바꾼다.
 - **엔진 API.** `curl http://krx-quant:8080/v1/symbols/005930/kinds/open_to_close/latest`(그날 08:50의 예측과, 20:35 뒤면 그 정답), `…/v1/leaderboard?kind=open_to_close&period=20d`(순위표), `…/v1/kinds`(그날의 시각, `daily`). 형식은 [engine-api.md](engine-api.md#하루-한-번-예측-종류-264)의 "API".
 
-  > **바뀜** (2026-10-18, #__PR3__): "엔진 API는 이 PR에는 없다. 그 전에는 위 명령으로 본다" → API로 본다. 이유: #264의 엔진 API PR이다.
+  > **바뀜** (2026-10-18, #293): "엔진 API는 이 PR에는 없다. 그 전에는 위 명령으로 본다" → API로 본다. 이유: #264의 엔진 API PR이다.
 
 ### 밤 학습과 모델 교체 (#22)
 
