@@ -72,9 +72,10 @@ from krx_quant.algorithms import (
 from krx_quant.baselines import baselines_for
 from krx_quant.climate import CLIMATE_DAYS, fit_climate
 from krx_quant.config import Settings
+from krx_quant.daily import DailyAlgorithm
 from krx_quant.features import Leaders
 from krx_quant.feeds.base import KST
-from krx_quant.kind_registry import KINDS, kind_named
+from krx_quant.kind_registry import KINDS, daily_kind_named, kind_named
 from krx_quant.kind_stats import KindEntry, kind_scoring, scored_of_kind
 from krx_quant.kind_stats import entry as kind_entry
 from krx_quant.kind_stats import entry_json as kind_entry_json
@@ -184,7 +185,7 @@ def _record_run(state_dir: Path, result: Prevalidation) -> None:
         f.write(json.dumps(line) + "\n")
 
 
-def code_digest(algorithm: Algorithm | KindAlgorithm) -> str:
+def code_digest(algorithm: Algorithm | KindAlgorithm | DailyAlgorithm) -> str:
     """A digest of the algorithm's own code: its module, or every module of its package."""
     module = inspect.getmodule(type(algorithm))
     if module is None or module.__file__ is None:
@@ -201,13 +202,14 @@ def code_digest(algorithm: Algorithm | KindAlgorithm) -> str:
 
 def admits(
     state_dir: Path, target_version: int = 1, kinds: Sequence[Kind] = KINDS
-) -> Callable[[Algorithm | KindAlgorithm], bool]:
+) -> Callable[[Algorithm | KindAlgorithm | DailyAlgorithm], bool]:
     """Whether the engine may start a new algorithm: registered before pre-validation, or
     its latest report passed with the code it runs now, on the target it runs now (#169; a
     report without one was on the four-minute move, 1). An algorithm of a kind besides the
-    direction (#179) passed on its kind's answer version (one of ``kinds``)."""
+    direction (#179) passed on its kind's answer version (one of ``kinds``, or a daily kind's,
+    #264)."""
 
-    def admitted(algorithm: Algorithm | KindAlgorithm) -> bool:
+    def admitted(algorithm: Algorithm | KindAlgorithm | DailyAlgorithm) -> bool:
         if algorithm.name in REGISTERED_BEFORE:
             return True
         report = _read_report(state_dir, algorithm.name)
@@ -240,7 +242,7 @@ class LastReport:
 
 def last_report(
     state_dir: Path,
-    algorithm: Algorithm | KindAlgorithm,
+    algorithm: Algorithm | KindAlgorithm | DailyAlgorithm,
     target_version: int = 1,
     kinds: Sequence[Kind] = KINDS,
 ) -> LastReport | None:
@@ -279,7 +281,7 @@ def _read_report(state_dir: Path, name: str) -> dict[str, Any] | None:
 
 def _stale(
     report: Mapping[str, Any],
-    algorithm: Algorithm | KindAlgorithm,
+    algorithm: Algorithm | KindAlgorithm | DailyAlgorithm,
     target_version: int,
     kinds: Sequence[Kind],
 ) -> str | None:
@@ -291,13 +293,15 @@ def _stale(
     return None
 
 
-def _target(algorithm: Algorithm | KindAlgorithm, target_version: int, kinds: Sequence[Kind]) -> int | None:
+def _target(
+    algorithm: Algorithm | KindAlgorithm | DailyAlgorithm, target_version: int, kinds: Sequence[Kind]
+) -> int | None:
     """The target an algorithm's report must have passed on: the engine's, or its kind's answer
-    version (#179); None for a kind not registered (it never passes)."""
-    name = kind_of(algorithm)
+    version (#179; a daily kind's, #264); None for a kind not registered (it never passes)."""
+    name = str(getattr(algorithm, "kind", DIRECTION))
     if name == DIRECTION:
         return target_version
-    kind = kind_named(name, kinds)
+    kind = kind_named(name, kinds) or daily_kind_named(name)
     return None if kind is None else kind.answer_version
 
 

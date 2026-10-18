@@ -191,6 +191,7 @@ def review(
     rules: Rules | None = None,
     baselines: Collection[str] = BASELINE_NAMES,
     scoring: Scoring = DIRECTION_SCORING,
+    recent: int = RECENT_DAYS,
 ) -> Review:
     """The status changes due at a day's review.
 
@@ -202,6 +203,8 @@ def review(
     when to judge (defaults); ``baselines`` the baselines' names, the lifts' (those of the
     target version, #169). ``algorithms``, ``rows`` and ``baselines`` are of one kind, judged
     by its ``scoring`` (#179: the direction's by default): a clone is looked for within them.
+    An active algorithm is benched, and a benched one recovers, on the ``recent`` latest days
+    (20; a daily kind's 60, #264).
     """
     rules = rules or Rules()
     read: dict[tuple[tuple[date, ...], bool], list[dict[str, Any]]] = {}
@@ -212,7 +215,7 @@ def review(
             read[key] = on_target(rows(chosen, special), baselines, scoring.target_version)
         return read[key]
 
-    judge = _Judge(cached, list(days[:RECENT_DAYS]), min_sample, fee_rate, rules, baselines, scoring)
+    judge = _Judge(cached, list(days[:recent]), min_sample, fee_rate, rules, baselines, scoring)
     changes: list[Change] = []
     candidates: list[Candidate] = []
     for i, name in enumerate(algorithms):
@@ -383,6 +386,7 @@ def stages(
     rules: Rules | None = None,
     baselines: Collection[str] = BASELINE_NAMES,
     scoring: Scoring = DIRECTION_SCORING,
+    recent: int = RECENT_DAYS,
 ) -> dict[str, Stage]:
     """Each algorithm on probation or on the bench, where it stands toward its next review (#165).
 
@@ -392,14 +396,14 @@ def stages(
     counts one day more. The scored predictions are read once, for every algorithm.
     """
     rules = rules or Rules()
-    recent = list(days[:RECENT_DAYS])
+    latest = list(days[:recent])
     on: dict[str, tuple[Standing, list[date], list[date]]] = {}  # standing, days counted, lift days
     for name in algorithms:
         standing = standings.get(name)
         if standing is None or standing.status not in (Status.PROBATION, Status.BENCH):
             continue
         held = _held(days, counted_from[name])
-        on[name] = (standing, held, held if standing.status is Status.PROBATION else recent)
+        on[name] = (standing, held, held if standing.status is Status.PROBATION else latest)
     wanted = sorted({d for _, _, lift_days in on.values() for d in lift_days}, reverse=True)
     read = on_target(rows(wanted, False), baselines, scoring.target_version) if wanted else []
 
@@ -408,7 +412,7 @@ def stages(
         keep = {d.isoformat() for d in chosen}
         return [r for r in read if r["bar_close"][:10] in keep]
 
-    judge = _Judge(rows_on, recent, min_sample, fee_rate, rules, baselines, scoring)
+    judge = _Judge(rows_on, latest, min_sample, fee_rate, rules, baselines, scoring)
     out: dict[str, Stage] = {}
     for name, (standing, held, lift_days) in on.items():
         review_days = rules.probation_days if standing.status is Status.PROBATION else rules.bench_days
