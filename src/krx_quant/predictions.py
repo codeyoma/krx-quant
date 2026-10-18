@@ -899,10 +899,18 @@ class PredictionStore:
         ).fetchall()
         return [{**dict(r), "path": json.loads(r["path"])} for r in rows]
 
-    def mark_special(self, symbol: str | None, start: datetime, end: datetime, horizon: timedelta) -> None:
+    def mark_special(
+        self,
+        symbol: str | None,
+        start: datetime,
+        end: datetime,
+        horizon: timedelta,
+        kind_horizons: Mapping[str, timedelta] | None = None,
+    ) -> None:
         """Mark special every prediction (of ``symbol``, or of every symbol if None) whose
         window, ``horizon`` long, meets the open span from ``start`` to ``end``, scored or not;
-        and every kind's answer of such a window (#179).
+        and every kind's answer of such a window (#179), a kind's window its own horizon long
+        where ``kind_horizons`` names it (#263), ``horizon`` otherwise.
         """
         self.version += 1
         where = "p.bar_close > ? AND p.bar_close < ? AND o.target_at > ?"
@@ -910,11 +918,11 @@ class PredictionStore:
         if symbol is not None:
             where += " AND p.symbol = ?"
             params.append(symbol)
-        answers = "bar_close > ? AND bar_close < ?"  # its end, bar close + horizon, after start
-        answered: list[str] = [iso(start - horizon), iso(end)]
-        if symbol is not None:
-            answers += " AND symbol = ?"
-            answered.append(symbol)
+        own = dict(kind_horizons or {})
+        marks = [
+            ("kind NOT IN ({})".format(", ".join("?" * len(own))) if own else "1 = 1", list(own), horizon)
+        ]
+        marks += [("kind = ?", [name], h) for name, h in own.items()]
         with self._db:
             self._db.execute(
                 "UPDATE outcomes SET special = 1 WHERE prediction_id IN"
@@ -922,7 +930,14 @@ class PredictionStore:
                 f" WHERE {where})",
                 params,
             )
-            self._db.execute(f"UPDATE kind_answers SET special = 1 WHERE {answers}", answered)
+            for which, names, length in marks:
+                # Its end, bar close + its horizon, after start.
+                answers = f"{which} AND bar_close > ? AND bar_close < ?"
+                answered: list[str] = [*names, iso(start - length), iso(end)]
+                if symbol is not None:
+                    answers += " AND symbol = ?"
+                    answered.append(symbol)
+                self._db.execute(f"UPDATE kind_answers SET special = 1 WHERE {answers}", answered)
 
     # Special situations' windows (#236).
 

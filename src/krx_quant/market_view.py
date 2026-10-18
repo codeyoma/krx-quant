@@ -90,9 +90,10 @@ VENUES = ("KRX", "NXT")
 FLOW_FEEDS = (PROGRAM.tr_id, MEMBER.tr_id, MEMBER_REST.tr_id, FOREIGN_ESTIMATE.tr_id)
 
 
-def prediction_window(session: Session) -> tuple[datetime, datetime]:
-    """The first and last bar close predicted in a session."""
-    return session.open + BAR, session.closing_auction - HORIZON
+def prediction_window(session: Session, horizon: timedelta = HORIZON) -> tuple[datetime, datetime]:
+    """The first and last bar close predicted in a session: the last whose window, four
+    minutes long or a kind's ``horizon`` (#263), ends by the closing auction."""
+    return session.open + BAR, session.closing_auction - horizon
 
 
 def next_bar_close(calendar: MarketCalendar, after: datetime) -> datetime | None:
@@ -499,7 +500,12 @@ class MarketView:
         # integrated best quote (bid, ask), the one before a window opens.
         self._windows: dict[str, dict[datetime, TouchWindow]] = {s: {} for s in self.symbols}
         self._best: dict[str, tuple[float, float]] = {}
-        self._ended_through: datetime | None = None  # the last bar close whose windows were handed out
+        # The last bar close whose windows were handed out, by window length (#263): the touch
+        # windows' four minutes, and each longer kind's horizon.
+        self._ended_through: dict[timedelta, datetime] = {}
+        # How long a window's start (its mid-point, k, best quote) and quotes are kept: the
+        # longest kind's horizon (#263), four minutes without a longer one.
+        self._horizon = max([WINDOW, *(k.horizon for k in kinds)])
         # The kinds' quotes (#179): each symbol's, kept as long as its touch windows.
         self._logs: dict[str, QuoteLog] = (
             {s: QuoteLog() for s in self.symbols} if kinds and fee_rate is not None else {}
@@ -705,11 +711,14 @@ class MarketView:
         window = self._windows.get(symbol, {}).get(bar_close)
         return window.result() if window is not None else restarted(symbol, bar_close)
 
-    def followed(self, symbol: str, bar_close: datetime, *, crossed: bool = False) -> Followed | None:
-        """``symbol``'s four minutes from ``bar_close`` as followed so far, for a kind's answer
-        (#179): the touch window's start (mid-point, tick, k, best quote) and the quotes and
-        trades logged since, the crossed quotes among them with ``crossed`` (#187); None for a
-        window not followed (the engine started after its bar close) or without kinds."""
+    def followed(
+        self, symbol: str, bar_close: datetime, *, crossed: bool = False, horizon: timedelta = WINDOW
+    ) -> Followed | None:
+        """``symbol``'s window from ``bar_close`` as followed so far, four minutes or a kind's
+        ``horizon`` (#263), for a kind's answer (#179): the touch window's start (mid-point,
+        tick, k, best quote) and the quotes and trades logged since, the crossed quotes among
+        them with ``crossed`` (#187); None for a window not followed (the engine started after
+        its bar close) or without kinds."""
         window = self._windows.get(symbol, {}).get(bar_close)
         log = self._logs.get(symbol)
         if window is None or log is None:
@@ -725,6 +734,7 @@ class MarketView:
             window.ask_start,
             cost=cost,
             crossed=crossed,
+            horizon=horizon,
         )
 
     def kind_answer(self, kind: Kind, symbol: str, bar_close: datetime) -> Answer:
@@ -732,7 +742,7 @@ class MarketView:
         with the kind's barrier width fixed when it opened (#183); a window not followed says so
         (``restarted``), as its touch label does. Its quotes are the kind's: crossed ones only
         for a kind that counts them (``Kind.crossed``, #187)."""
-        window = self.followed(symbol, bar_close, crossed=kind.crossed)
+        window = self.followed(symbol, bar_close, crossed=kind.crossed, horizon=kind.horizon)
         if window is None:
             return Answer(None, RESTARTED)
         return kind.answer_to(replace(window, width=self.kind_width(kind, symbol, bar_close)))
@@ -752,21 +762,32 @@ class MarketView:
             return None
         return window.bid_start, window.ask_start
 
-    def ended_windows(self, due: datetime) -> list[tuple[str, datetime]]:
-        """The touch windows over by ``due`` (#167), as (symbol, bar close), each handed out
-        once: every symbol's, predicted or not (a VI, a missing book)."""
+    def ended_windows(self, due: datetime, horizon: timedelta = WINDOW) -> list[tuple[str, datetime]]:
+        """The windows over by ``due``, as (symbol, bar close), each handed out once per window
+        length: the touch windows' four minutes (#167), or a longer kind's ``horizon`` (#263),
+        then only those that end by the closing auction (a longer one would run into it: the
+        kind does not predict there). Every symbol's, predicted or not (a VI, a missing book)."""
+        through = self._ended_through.get(horizon)
         closes = sorted(
             {
                 c
                 for windows in self._windows.values()
                 for c in windows
-                if c + WINDOW <= due and (self._ended_through is None or c > self._ended_through)
+                if c + horizon <= due and (through is None or c > through)
             }
         )
         if not closes:
             return []
-        self._ended_through = closes[-1]
+        self._ended_through[horizon] = closes[-1]
+        if horizon != WINDOW:
+            closes = [c for c in closes if self.within_session(c, horizon)]
         return [(s, c) for c in closes for s in self.symbols if c in self._windows[s]]
+
+    def within_session(self, bar_close: datetime, horizon: timedelta) -> bool:
+        """Whether the window from ``bar_close``, ``horizon`` long, ends by its session's closing
+        auction (#263): a kind of that horizon predicts and answers that bar close."""
+        session = self.calendar.session(bar_close.astimezone(KST).date())
+        return session is not None and bar_close + horizon <= session.closing_auction
 
     def _open_windows(self, close: datetime) -> None:
         """Start following each symbol's touch window from the bar close ``close``, once."""
@@ -788,8 +809,8 @@ class MarketView:
             )
             if self._barred:  # the barriers' widths, from the bars as they stand at the close
                 self._widths[symbol][close] = self._barrier_widths(symbol, close, mid)
-            # Windows long over (kept a while for a late score): dropped.
-            for old in [c for c in windows if c + WINDOW + _KEEP_WINDOWS < close]:
+            # Windows long over (kept a while for a late score), the longest kind's too: dropped.
+            for old in [c for c in windows if c + self._horizon + _KEEP_WINDOWS < close]:
                 del windows[old]
                 self._widths[symbol].pop(old, None)
             if symbol in self._logs:  # and the quotes only they read
@@ -834,7 +855,7 @@ class MarketView:
         log = self._logs.get(symbol)
         # The kinds' windows read the same (#179): kept while a window open now reads it (every
         # window an event falls in is open by the time it is followed, ``_freeze_before``).
-        if log is not None and any(c <= received_at < c + WINDOW for c in self._windows[symbol]):
+        if log is not None and any(c <= received_at < c + self._horizon for c in self._windows[symbol]):
             log.quote(received_at, bid, ask, bid_size, ask_size, rest)
             if feed == TRADE.tr_id:
                 log.trade(received_at, row["price"])

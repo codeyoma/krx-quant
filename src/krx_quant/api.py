@@ -1126,7 +1126,7 @@ async def _kind_latest(request: web.Request) -> web.Response:
             "symbol": symbol,
             "kind": kind.name,
             "bar_close": rows[0]["bar_close"] if rows else None,
-            "predictions": [kind_prediction_json(r) for r in rows],
+            "predictions": [kind_prediction_json(r, kind.horizon) for r in rows],
         }
     )
 
@@ -1142,7 +1142,11 @@ async def _kind_predictions(request: web.Request) -> web.Response:
         before = _time_query(request, "before")
         rows = engine.store.kind_recent(kind.name, kind.answer_version, symbol, limit, algorithm, before)
     return _json(
-        {"symbol": symbol, "kind": kind.name, "predictions": [kind_prediction_json(r) for r in rows]}
+        {
+            "symbol": symbol,
+            "kind": kind.name,
+            "predictions": [kind_prediction_json(r, kind.horizon) for r in rows],
+        }
     )
 
 
