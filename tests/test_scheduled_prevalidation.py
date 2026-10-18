@@ -312,8 +312,9 @@ async def test_one_algorithm_a_night_in_turn_each_refusal_on_204_with_its_report
         "**예약 작업 `prevalidate-mandelbrot`** · 2026-10-16 밤 · 커밋 `0123456789ab` · 종료 코드 1 · 0초",
         "",
         "다시 돌리기: `docker compose run --rm engine prevalidate mandelbrot`",
-        "통과(`passed`)하면 엔진이 다음 봉 마감부터 수습으로 돌린다. 거부(`refused`)되면 같은 코드·정답 "
-        "버전으로는 다시 돌지 않고, 고친 코드가 배포되면 다시 돈다.",
+        "통과(`passed`)하면 엔진이 다음 봉 마감부터 수습으로 돌리고, 수습이 시작된 그 밤 "
+        "`simulate-bar-close-298`이 최근 녹화일로 수습을 시뮬레이션해 바로 판정한다(#298). "
+        "거부(`refused`)되면 같은 코드·정답 버전으로는 다시 돌지 않고, 고친 코드가 배포되면 다시 돈다.",
     ]
     assert (
         f"```\nmandelbrot: refused ({MIN_DAYS} recorded days)\n  stats: FAILED - weakest lift\n```" in first

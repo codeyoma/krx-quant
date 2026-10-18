@@ -247,6 +247,8 @@ class Facts:
     # The daily algorithms on a probation that waits for its simulation (#298,
     # ``PredictionEngine.to_simulate``).
     simulating_daily: tuple[str, ...] = ()
+    # The bar-close kinds' algorithms on a probation that waits for its simulation (#298).
+    simulating: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -666,7 +668,7 @@ async def read_facts(
     nights = await asyncio.to_thread(subscribed_nights, settings.data_dir, calendar, evening(clock.now()))
     daily = sorted({f for a in engine.daily_registered for f in a.features})
     pending = await asyncio.to_thread(pending_inputs, daily, settings.state_dir, settings.symbols)
-    _, simulating_daily = engine.to_simulate()  # the engine's database: on this thread (#298 review)
+    simulating, simulating_daily = engine.to_simulate()  # the engine's database: on this thread
     return Facts(
         recorded,
         tuple(engine.waiting()),
@@ -675,6 +677,7 @@ async def read_facts(
         tuple(nights),
         tuple(pending),
         simulating_daily=tuple(simulating_daily),
+        simulating=tuple(simulating),
     )
 
 
@@ -1173,9 +1176,58 @@ DAILY_SIMULATION = Job(
 )
 
 
+# The bar-close kinds' simulated probations (#298, ``simulation.py``): the direction's, the range's
+# and the barriers' algorithms start on probation with the latest recorded days replayed (10 to 20:
+# as many as there are), each trained once before them, judged at once. Due on a night a bar-close
+# probation waits for it (a pre-validation passed, the engine enrolled it at the next bar close; a
+# new target's restart) once 10 days are recorded (``MIN_DAYS``: with fewer there is nothing to
+# simulate and the probation goes on live). The algorithms waiting are replayed together, in one
+# run: the replay of a day's events through the Market View, which they share, is most of the cost,
+# and live the engine runs them all at each bar close anyway; one run a night also leaves the rest of
+# the night to a pre-validation. It goes before the pre-validations: it can make algorithms already
+# running official at once, and a pre-validation that would not end by 05:30 waits a night. A run
+# that failed waits for new code, as a pre-validation that left no verdict does. The limit is a
+# pre-validation's: up to 20 days' replay (without its 20 retrainings), plus the burst CPU running
+# out; it starts by 00:30. Its result goes to #298 and #204.
+SIMULATION_TIMEOUT = timedelta(hours=5)
+
+
+def _bar_close_simulation_due(night: Night) -> bool:
+    facts = night.facts
+    if facts.recorded_days < MIN_DAYS or not facts.simulating:
+        return False
+    record = night.record
+    if record is None or record.outcome not in (OK, FAILED):
+        return True  # never ran, or a restart cut it
+    if record.day == night.day:
+        return False  # once a night
+    return not (record.outcome == FAILED and record.commit == night.commit)
+
+
+BAR_CLOSE_SIMULATION = Job(
+    name="simulate-bar-close-298",
+    due=_bar_close_simulation_due,
+    command=("simulate", "bar-close"),
+    timeout=SIMULATION_TIMEOUT,
+    targets=(
+        Target(
+            SIMULATION_ISSUE,
+            note=(
+                "4분(봉 마감) 종류의 수습 시뮬레이션(#298): 녹화된 최근 거래일(10–20일)을 그 알고리즘들이 "
+                "수습으로 돌았다고 치고 다시 재생했다(첫날 전까지로 한 번 학습). 그 판정을 바로 했다. "
+                "통과하면 지금부터 정식이고, 못 하면 수습이 이어진다(다음 판정일까지 실시간 날이 더해진다). "
+                "출력에는 시세 값이 없다(날짜, 개수, lift만)."
+            ),
+        ),
+        Target(PREVALIDATION_ISSUE, note="수습 시뮬레이션(#298)의 결과. 자세한 것은 #298."),
+    ),
+)
+
+
 _PREVALIDATION_NOTE = (
-    "통과(`passed`)하면 엔진이 다음 봉 마감부터 수습으로 돌린다. 거부(`refused`)되면 같은 코드·정답 "
-    "버전으로는 다시 돌지 않고, 고친 코드가 배포되면 다시 돈다."
+    "통과(`passed`)하면 엔진이 다음 봉 마감부터 수습으로 돌리고, 수습이 시작된 그 밤 "
+    "`simulate-bar-close-298`이 최근 녹화일로 수습을 시뮬레이션해 바로 판정한다(#298). "
+    "거부(`refused`)되면 같은 코드·정답 버전으로는 다시 돌지 않고, 고친 코드가 배포되면 다시 돈다."
 )
 
 
@@ -1198,5 +1250,6 @@ JOBS: tuple[Job, ...] = (
         [a.name for a in DAILY_ALGORITHMS], {a.name: a.features for a in DAILY_ALGORITHMS}
     ),
     DAILY_SIMULATION,
+    BAR_CLOSE_SIMULATION,
     *prevalidation_jobs([*(a.name for a in ALGORITHMS), *(a.name for a in KIND_ALGORITHMS)]),
 )

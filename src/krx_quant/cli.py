@@ -54,7 +54,14 @@ from krx_quant.replay import replay_day
 from krx_quant.rescore import EngineRunning, rescore
 from krx_quant.signal_review import DEFAULT_DAYS as SIGNAL_REVIEW_DAYS
 from krx_quant.signal_review import signal_review
-from krx_quant.simulation import DAILY, SimulationRunning, report, simulate_daily
+from krx_quant.simulation import (
+    BAR_CLOSE_COMMAND,
+    DAILY,
+    SimulationRunning,
+    report,
+    simulate_bar_close,
+    simulate_daily,
+)
 from krx_quant.structure_check import structure_check
 from krx_quant.supply_probe import probe_supply
 from krx_quant.training import fit_algorithm
@@ -293,11 +300,15 @@ def _simulate(which: str) -> int:
     could not run."""
     settings = Settings.from_env(require_kis=False)
     try:
-        run = simulate_daily(settings)
-    except (FileNotFoundError, SimulationRunning) as e:
+        run = simulate_daily(settings) if which == DAILY else asyncio.run(simulate_bar_close(settings))
+    except (FileNotFoundError, RegistrationError, SimulationRunning) as e:
         print(e, file=sys.stderr)
         return 1
-    level = next((k.review_rules.confidence for k in DAILY_KINDS), settings.review_confidence)
+    level = (
+        next((k.review_rules.confidence for k in DAILY_KINDS), settings.review_confidence)
+        if which == DAILY
+        else settings.review_confidence
+    )
     print(f"simulated probation (#298), {which}:")
     for line in report(run, level):
         print(line)
@@ -589,7 +600,12 @@ def main(argv: list[str] | None = None) -> int:
         help="replay the latest trading days as the probation of each algorithm that waits for it (#298),"
         " and judge it at once (safe beside the engine)",
     )
-    simulate_cmd.add_argument("which", choices=[DAILY], help="daily: the daily kinds' algorithms")
+    simulate_cmd.add_argument(
+        "which",
+        choices=[DAILY, BAR_CLOSE_COMMAND],
+        help="daily: the daily kinds' algorithms; bar-close: the direction's and the other kinds'"
+        " (the latest recorded days, 10 to 20)",
+    )
     rollback_cmd = sub.add_parser("rollback", help="put an algorithm back on the model it ran before")
     rollback_cmd.add_argument("algorithm")
     retire_cmd = sub.add_parser("retire", help="retire an algorithm: it is no longer run; its records stay")
