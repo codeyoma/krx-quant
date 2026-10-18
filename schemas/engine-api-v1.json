@@ -1045,7 +1045,7 @@
     "prediction_kind": {
       "description": "A kind of prediction (#179): its three classes in order (a forecast's class is the most likely, a tie the middle one, then the first), the classes precision and coverage count, the fields of its output besides the probabilities, its answer version and its baselines' cards.",
       "type": "object",
-      "required": ["name", "title", "classes", "class_titles", "action", "answer_version", "fields", "baselines"],
+      "required": ["name", "title", "classes", "class_titles", "action", "answer_version", "horizon_minutes", "fields", "baselines"],
       "additionalProperties": false,
       "properties": {
         "name": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
@@ -1059,6 +1059,7 @@
         "class_titles": {"type": "array", "minItems": 3, "maxItems": 3, "items": {"type": "string"}},
         "action": {"type": "array", "minItems": 1, "items": {"type": "string"}},
         "answer_version": {"type": "integer", "minimum": 1},
+        "horizon_minutes": {"type": "integer", "minimum": 4, "description": "How long its windows run from the bar close (#263): 4, the touch target's, or a longer kind's."},
         "fields": {"type": "object", "additionalProperties": {"$ref": "#/$defs/meaning"}},
         "baselines": {
           "type": "array",

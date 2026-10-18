@@ -27,6 +27,11 @@ A kind declares in one place (``Kind``):
 - its extra statistics, beside the three-class ones (with the kind's baselines' records,
   to compare against).
 
+A kind has a horizon (``Kind.horizon``, #263): its windows run from the bar close for that
+long. Four minutes, the touch target's, unless the kind says otherwise; the direction's is
+always four. A longer one is answered at t + horizon, its quotes kept as long, and its last
+bar close predicted is the one whose window ends by the closing auction.
+
 A forecast's class is its most likely one; a tie goes to the middle class, then the
 first (as the direction's goes to flat, then up).
 
@@ -59,7 +64,7 @@ import math
 import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, runtime_checkable
 
 from krx_quant.cards import Card, Meaning
@@ -124,10 +129,11 @@ class Followed:
     unscorable: str | None
     cost: float | None = None
     width: Width | None = None
+    horizon: timedelta = WINDOW  # the kind's (#263): the window is [t, t + horizon)
 
     @property
     def end(self) -> datetime:
-        return self.bar_close + WINDOW
+        return self.bar_close + self.horizon
 
 
 class QuoteLog:
@@ -180,21 +186,34 @@ class QuoteLog:
         cost: float | None = None,
         width: Width | None = None,
         crossed: bool = False,
+        horizon: timedelta = WINDOW,
     ) -> Followed:
         """The window from ``bar_close``, by the touch target's rules: the quotes received in
-        [t, t + 4 minutes), the crossed ones only with ``crossed`` (a kind that counts them,
-        #187); unscorable without a mid-point at t, with a REST snapshot in it, or with sixty
-        seconds or more without one of those quotes (from t, between two, or up to the end).
-        ``cost`` and ``width`` go with it as given (``Followed``).
+        [t, t + ``horizon``) (four minutes, or a kind's own, #263), the crossed ones only with
+        ``crossed`` (a kind that counts them, #187); unscorable without a mid-point at t, with a
+        REST snapshot in it, or with sixty seconds or more without one of those quotes (from t,
+        between two, or up to the end). ``cost`` and ``width`` go with it as given (``Followed``).
         """
-        start, end = bar_close, bar_close + WINDOW
+        start, end = bar_close, bar_close + horizon
         quotes = tuple(q for q in self._quotes if start <= q.received_at < end and (crossed or not q.crossed))
         rest = any(start <= r < end for r in self._rests)
         trades = tuple(t for t in self._trades if start <= t[0] < end)
         silent = went_silent(start, end, [q.received_at for q in quotes])
         unscorable = MISSING_MID if anchor is None else REST_QUOTES if rest else SILENT if silent else None
         return Followed(
-            symbol, bar_close, anchor, tick, k, bid_start, ask_start, quotes, trades, unscorable, cost, width
+            symbol,
+            bar_close,
+            anchor,
+            tick,
+            k,
+            bid_start,
+            ask_start,
+            quotes,
+            trades,
+            unscorable,
+            cost,
+            width,
+            horizon,
         )
 
 
@@ -372,6 +391,9 @@ class Kind:
     # mid-point). It is part of the answer rule: changing it takes a new answer version.
     crossed: bool = False
     baselines: tuple[KindBaseline, ...] = ()
+    # How long its windows run from the bar close (#263): the touch target's four minutes, or
+    # longer for a kind of a longer horizon. Whole minutes; the direction's is four.
+    horizon: timedelta = WINDOW
     # The output's fields beside the probabilities: what each is (its meaning and unit).
     fields: Mapping[str, Meaning] = field(default_factory=dict)
     check: OutputCheck | None = None
@@ -431,6 +453,7 @@ class Kind:
             "class_titles": list(self.class_titles),
             "action": list(self.action),
             "answer_version": self.answer_version,
+            "horizon_minutes": int(self.horizon / timedelta(minutes=1)),  # #263
             "fields": {name: m.as_dict() for name, m in self.fields.items()},
             "baselines": [{"name": name, "card": card.as_dict()} for name, card in baselines],
         }
@@ -460,6 +483,11 @@ def register_kinds(kinds: Sequence[Kind]) -> tuple[Kind, ...]:
             raise KindRegistrationError(f"{k.name}: fields {', '.join(clash)} are named like probabilities")
         if k.name != DIRECTION and k.answer is None:
             raise KindRegistrationError(f"{k.name}: no answer function")
+        minutes = k.horizon / timedelta(minutes=1)
+        if minutes != int(minutes) or k.horizon < WINDOW or (k.name == DIRECTION and k.horizon != WINDOW):
+            raise KindRegistrationError(
+                f"{k.name}: its horizon {k.horizon} is not whole minutes of four or more"
+            )
         for b in k.baselines:
             if b.name in baselines:
                 raise KindRegistrationError(f"{k.name}: baseline {b.name} is taken")

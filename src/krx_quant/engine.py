@@ -90,7 +90,7 @@ import heapq
 import logging
 import math
 import time as timer
-from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta
 from functools import partial
@@ -174,7 +174,7 @@ from krx_quant.reference import Bar
 from krx_quant.signals import SENT, Blocked, Judged, Signals
 from krx_quant.special import KOSPI, Kind, SpecialSituations, Window, in_vi, touching
 from krx_quant.stats import DEFAULT_MIN_SAMPLE
-from krx_quant.touch import TARGET_VERSION
+from krx_quant.touch import TARGET_VERSION, WINDOW
 
 log = logging.getLogger(__name__)
 
@@ -437,8 +437,9 @@ class PredictionEngine:
         self._kind_pending: list[tuple[datetime, str, str, datetime]] = []
         if self.kinds:
             versions = {k.name: k.answer_version for k in self.kinds}
+            horizons = {k.name: k.horizon for k in self.kinds}  # each kind's (#263)
             for kind, symbol, bar_close in store.kind_unanswered(versions, self._last_tick - _KIND_PENDING):
-                heapq.heappush(self._kind_pending, (bar_close + HORIZON, kind, symbol, bar_close))
+                heapq.heappush(self._kind_pending, (bar_close + horizons[kind], kind, symbol, bar_close))
         self.min_sample = min_sample
         self.consensus_timing = consensus_timing or Timing()
         self.weights: Weights = store.latest_weights() or NO_WEIGHTS
@@ -534,7 +535,9 @@ class PredictionEngine:
         and it is kept (#236)."""
         if window is not None:
             log.info("special situation: %s", window)
-            self.store.mark_special(window.symbol, window.start, window.end, HORIZON)
+            self.store.mark_special(
+                window.symbol, window.start, window.end, HORIZON, {k.name: k.horizon for k in self.kinds}
+            )
             self.store.keep_special(window, learned_at)
 
     def next_due(self) -> datetime | None:
@@ -881,7 +884,14 @@ class PredictionEngine:
         standings = self.store.statuses()  # read each time: retiring is a command
         retired, active = _with_status(standings, Status.RETIRED), _with_status(standings, Status.ACTIVE)
         running = [a for a in self.algorithms if a.name not in retired]
-        kind_running = [a for a in self.kind_algorithms if a.name not in retired]
+        # A kind whose window from here would end after the closing auction (#263) predicts nothing.
+        session = self.calendar.session(bar_close.astimezone(KST).date())
+        late = {
+            k.name
+            for k in self.kinds
+            if session is not None and bar_close + k.horizon > session.closing_auction
+        }
+        kind_running = [a for a in self.kind_algorithms if a.name not in retired and a.kind not in late]
         members = [a.name for a in running if a.name in active]
         known = self._special.known(before=bar_close)
         regime = self._regime(bar_close)
@@ -925,7 +935,7 @@ class PredictionEngine:
             [(name, version, made, status) for (name, version, status), made in made_by.items()],
         )
         if not at_close:
-            self._predict_kinds(bar_close, at_close, stopped, kind_running)
+            self._predict_kinds(bar_close, at_close, stopped, kind_running, late)
             return
         # The kinds' algorithms after the direction's: the budget skips them first (#179).
         chosen = {a.name for a in self._within_cpu_budget(bar_close, [*running, *kind_running])}
@@ -943,7 +953,7 @@ class PredictionEngine:
         try:
             if self.kinds:
                 await asyncio.sleep(0)  # the algorithms start first: the kinds' baselines never hold them up
-                self._predict_kinds(bar_close, at_close, stopped, kind_running)
+                self._predict_kinds(bar_close, at_close, stopped, kind_running, late)
             # The fast consensus: the members done within a moment of starting.
             if mine:
                 await asyncio.wait(mine, timeout=self.consensus_timing.fast_seconds)
@@ -964,17 +974,22 @@ class PredictionEngine:
         at_close: Mapping[str, _AtClose],
         stopped: Sequence[str],
         running: Sequence[KindAlgorithm],
+        late: Collection[str] = (),
     ) -> None:
         """Each kind's baselines' predictions of every symbol, at once, and every predictor's
-        empty prediction of the symbols in a VI (#179). A kind that fails is logged: the other
+        empty prediction of the symbols in a VI (#179); none of a kind in ``late`` (its window
+        would end after the closing auction, #263). A kind that fails is logged: the other
         kinds and the direction go on."""
         day_start = datetime.combine(bar_close.date(), time(), KST)
         for kind in self.kinds:
+            if kind.name in late:
+                continue
             try:
                 baselines = self._kind_baselines(kind)
                 made_by: dict[tuple[str, str, str], dict[str, KindForecast | None]] = {}
                 for symbol, c in at_close.items():
-                    previous = self._market.kind_answer(kind, symbol, bar_close - HORIZON)
+                    # The last window over by now, its own horizon back (#263).
+                    previous = self._market.kind_answer(kind, symbol, bar_close - kind.horizon)
                     inputs = KindInputs(
                         symbol=symbol,
                         bar_close=bar_close,
@@ -982,9 +997,9 @@ class PredictionEngine:
                         tick=tick_size(c.mid) if c.mid is not None else None,
                         flat_ticks=self._close_k(symbol, bar_close, at_close),
                         previous=previous if previous.label is not None else None,
-                        # The windows over by now: their bar closes four minutes back or more.
+                        # The windows over by now: their bar closes the kind's horizon back or more.
                         day_classes=self.store.day_kind_classes(
-                            kind.name, kind.answer_version, symbol, day_start, bar_close - HORIZON
+                            kind.name, kind.answer_version, symbol, day_start, bar_close - kind.horizon
                         ),
                     )
                     for b in baselines:
@@ -1337,22 +1352,25 @@ class PredictionEngine:
         breaker or sidecar known then, or learned since in any version, touches it (as
         training leaves such a bar close out); one learned later marks it then
         (``PredictionStore.mark_special``). A kind that fails is logged."""
+        # The windows over: the touch windows' for a four-minute kind, a longer kind's own (#263).
+        # Each window length handed out once: two kinds of one horizon share its windows.
+        longer = {h: self._market.ended_windows(due, h) for h in {k.horizon for k in self.kinds} - {WINDOW}}
         by_kind: dict[str, dict[tuple[str, datetime], None]] = {
-            k.name: dict.fromkeys(windows) for k in self.kinds
+            k.name: dict.fromkeys(windows if k.horizon == WINDOW else longer[k.horizon]) for k in self.kinds
         }
         while self._kind_pending and self._kind_pending[0][0] <= due:
             _, kind_name, symbol, close = heapq.heappop(self._kind_pending)
             if kind_name in by_kind:
                 by_kind[kind_name][(symbol, close)] = None
-        special: dict[tuple[str, datetime], bool] = {}
+        special: dict[tuple[str, datetime, timedelta], bool] = {}
 
-        def touched(symbol: str, close: datetime) -> bool:
-            if (symbol, close) not in special:
-                end = close + HORIZON
-                special[(symbol, close)] = touching(
+        def touched(symbol: str, close: datetime, horizon: timedelta) -> bool:
+            if (symbol, close, horizon) not in special:
+                end = close + horizon
+                special[(symbol, close, horizon)] = touching(
                     self._special.known(before=close), symbol, close, end
                 ) or touching(self._special.learned_since(close), symbol, close, end)
-            return special[(symbol, close)]
+            return special[(symbol, close, horizon)]
 
         for kind in self.kinds:
             keys = list(by_kind[kind.name])
@@ -1360,7 +1378,12 @@ class PredictionEngine:
                 continue
             try:
                 answers = [
-                    (symbol, close, self._market.kind_answer(kind, symbol, close), touched(symbol, close))
+                    (
+                        symbol,
+                        close,
+                        self._market.kind_answer(kind, symbol, close),
+                        touched(symbol, close, kind.horizon),
+                    )
                     for symbol, close in keys
                 ]
                 written = self.store.add_kind_answers(kind.name, kind.answer_version, answers, now)

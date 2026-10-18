@@ -19,7 +19,7 @@ import asyncio
 import logging
 import sqlite3
 from dataclasses import replace
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -38,7 +38,8 @@ from krx_quant.predictions import DB_NAME, PredictionStore
 from krx_quant.ranges import RANGE
 from krx_quant.rescore import EngineLock, EngineRunning, fill_kind_answers, fill_touches, rescore
 from krx_quant.touch import NOT_RECORDED, RESTARTED, SILENT, TARGET_VERSION, TouchResult
-from tests.replay_events import DAY, SYMBOL, at, kospi, kospi200_futures, run
+from tests.kind_doubles import DRIFT, TEST_KIND
+from tests.replay_events import CALENDAR, DAY, SYMBOL, at, kospi, kospi200_futures, run
 from tests.test_collector import settings_for
 from tests.test_live_predictions import free_port, poll
 from tests.test_replay import busy_morning
@@ -423,6 +424,30 @@ def kind_answers(db: Path, kind: str = RANGE.name) -> list[tuple[Any, ...]]:
             " FROM kind_answers WHERE kind = ? ORDER BY bar_close, symbol",
             (kind,),
         ).fetchall()
+
+
+def test_the_fill_answers_a_longer_kind_only_where_it_has_windows(tmp_path: Path, replayed: Path) -> None:
+    """#263. Input: the server's database of the recorded day (the direction predicted 09:01 to
+    15:16) and a kind of a ten-minute horizon it has no answer of. Output: its windows are
+    answered to ten minutes before the closing auction, each scored when its ten minutes
+    ended; the bar closes after get nothing, not even ``not recorded`` (it never answers them)."""
+    s = settings(tmp_path)
+    record(s.data_dir, day_events())
+    db = server_db(s.state_dir, replayed, keep=1)
+    long = replace(TEST_KIND, horizon=timedelta(minutes=10))
+    session = CALENDAR.session(DAY)
+    assert session is not None
+    last = session.closing_auction - timedelta(minutes=10)
+
+    [filled] = fill_kind_answers(s, NEXT_MORNING, kinds=(long,))
+
+    rows = kind_answers(db, DRIFT)
+    assert (filled.labeled, filled.written, filled.not_recorded) == (BAR_CLOSES - 6, BAR_CLOSES - 6, 0)
+    assert rows[-1][2] == last.isoformat(), "15:11 to 15:16 would reach the closing auction"
+    assert NOT_RECORDED not in {row[5] for row in rows}
+    for row in rows:
+        assert row[8] == (datetime.fromisoformat(row[2]) + timedelta(minutes=10)).isoformat()
+    assert fill_kind_answers(s, NEXT_MORNING, kinds=(long,)) == [], "nothing missing"
 
 
 def before_the_range(db: Path) -> Path:

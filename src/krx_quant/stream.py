@@ -36,7 +36,7 @@ import json
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from functools import partial
 from typing import Any
 
@@ -132,7 +132,9 @@ class EventStream:
                     "type": "kind_prediction",
                     "prediction_kind": kind.name,
                     "bar_close": iso(change.bar_close),
-                    "predictions": [{"symbol": r["symbol"], **kind_prediction_json(r)} for r in rows],
+                    "predictions": [
+                        {"symbol": r["symbol"], **kind_prediction_json(r, kind.horizon)} for r in rows
+                    ],
                 }
             )
 
@@ -301,24 +303,24 @@ def _touch_json(row: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
-def kind_prediction_json(row: dict[str, Any]) -> dict[str, Any]:
-    """A stored prediction of a kind besides the direction (#179) as the API shows it: its
-    output (the three probabilities, ``p_<class>`` in the kind's order, then the kind's
-    fields) and, once its four minutes are over, its bar close's answer, every predictor's
-    of the kind there. A prediction not made (status other than ``ok``) has neither, nor a
-    target time: it is not scored. ``flat_ticks`` is the bar close's k it was made with
-    (#200), None without a mid-point there and for one stored before; ``width_ticks`` the
-    kind's barrier width there (#183), None for a kind without barriers, without a mid-point
-    there and for one stored before; ``anchor`` and ``tick`` the bar close's mid-point and its
-    tick size (#210), the reference its answer is measured from, None without a mid-point there
-    and for one stored before."""
+def kind_prediction_json(row: dict[str, Any], horizon: timedelta = WINDOW) -> dict[str, Any]:
+    """A stored prediction of a kind besides the direction (#179) as the API shows it: its output
+    (the three probabilities, ``p_<class>`` in the kind's order, then the kind's fields)
+    and, once its window (four minutes, or the kind's ``horizon``, #263) is over, its bar
+    close's answer, every predictor's of the kind there. A prediction not made (status other
+    than ``ok``) has neither, nor a target time: it is not scored. ``flat_ticks`` is the bar
+    close's k it was made with (#200), None without a mid-point there and for one stored
+    before; ``width_ticks`` the kind's barrier width there (#183), None for a kind without
+    barriers, without a mid-point there and for one stored before; ``anchor`` and ``tick``
+    the bar close's mid-point and its tick size (#210), the reference its answer is measured
+    from, None without a mid-point there and for one stored before."""
     made = row["status"] == "ok"
     return {
         "algorithm": row["algorithm"],
         "model_version": row["model_version"],
         "bar_close": row["bar_close"],
         "displayed_at": row["displayed_at"],
-        "target_at": iso(datetime.fromisoformat(row["bar_close"]) + WINDOW) if made else None,
+        "target_at": iso(datetime.fromisoformat(row["bar_close"]) + horizon) if made else None,
         "status": row["status"],
         "flat_ticks": row["flat_ticks"],
         "width_ticks": row["width_ticks"],

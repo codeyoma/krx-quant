@@ -154,7 +154,7 @@ class Answered:
     symbol: str
     bar_close: datetime
     answer: Answer
-    special: bool  # a VI, circuit breaker or sidecar touched its four minutes
+    special: bool  # a VI, circuit breaker or sidecar touched its window (four minutes, or its kind's horizon)
 
 
 @dataclass(frozen=True)
@@ -189,7 +189,7 @@ def label_day(
         symbols,
         fee_rate,
         (),
-        lambda view, symbol, close: labeled.append(view.touch(symbol, close)),
+        lambda view, symbol, close, _: labeled.append(view.touch(symbol, close)),
         halt=halt,
     )
     return labeled
@@ -212,7 +212,7 @@ def answer_day(
     with barriers has their widths from the previous trading days in ``previous`` too (#183),
     as the engine's view has them."""
     special = SpecialSituations(calendar)
-    ended: list[tuple[str, datetime, list[Answer]]] = []
+    ended: list[tuple[str, datetime, timedelta, list[tuple[Kind, Answer]]]] = []
     _follow_day(
         events,
         calendar,
@@ -220,20 +220,27 @@ def answer_day(
         symbols,
         fee_rate,
         kinds,
-        lambda view, symbol, close: ended.append(
-            (symbol, close, [view.kind_answer(kind, symbol, close) for kind in kinds])
+        # Each kind's windows when its own horizon is over (#263).
+        lambda view, symbol, close, horizon: ended.append(
+            (
+                symbol,
+                close,
+                horizon,
+                [(k, view.kind_answer(k, symbol, close)) for k in kinds if k.horizon == horizon],
+            )
         ),
         halt=halt,
         also=lambda feed, row: special.event(feed, row, symbols),
         previous=previous,
+        horizons=sorted({k.horizon for k in kinds}),
     )
     out: list[Answered] = []
-    for symbol, close, answers in ended:
-        end = close + WINDOW
+    for symbol, close, horizon, answers in ended:
+        end = close + horizon
         marked = touching(special.known(before=close), symbol, close, end) or touching(
             special.learned_since(close), symbol, close, end
         )
-        out += [Answered(k.name, symbol, close, a, marked) for k, a in zip(kinds, answers, strict=True)]
+        out += [Answered(k.name, symbol, close, a, marked) for k, a in answers]
     return out
 
 
@@ -244,16 +251,18 @@ def _follow_day(
     symbols: Sequence[str],
     fee_rate: float,
     kinds: Sequence[Kind],
-    ended: Callable[[MarketView, str, datetime], object],
+    ended: Callable[[MarketView, str, datetime, timedelta], object],
     *,
     halt: threading.Event | None = None,
     also: Callable[[str, dict[str, Any]], object] | None = None,
     previous: PreviousDays | None = None,
+    horizons: Sequence[timedelta] = (WINDOW,),
 ) -> None:
     """Follow ``day``'s windows of ``symbols`` through the engine's Market View (with the
     ``kinds``' quotes, and the previous trading days in ``previous``), giving each to ``ended``
-    when its four minutes are over, before anything received then; each event goes to
-    ``also`` too."""
+    with its length when it is over, once per length in ``horizons`` (the touch windows' four
+    minutes, a longer kind's horizon, #263; one that would run into the closing auction is not
+    given), before anything received then; each event goes to ``also`` too."""
     session = calendar.session(day)
     if session is None:
         return
@@ -267,8 +276,9 @@ def _follow_day(
     def reach(moment: datetime) -> None:
         while minutes and minutes[0] <= moment:
             minute = minutes.popleft()
-            for symbol, close in view.ended_windows(minute):
-                ended(view, symbol, close)
+            for horizon in horizons:
+                for symbol, close in view.ended_windows(minute, horizon):
+                    ended(view, symbol, close, horizon)
             if minute <= last:
                 view.at_close(minute)
 
@@ -471,7 +481,9 @@ def fill_kind_answers(
     The days are those from ``RECORDING_START`` before ``now``'s day with a predicted bar
     close lacking a kind's answer of its answer version. Every window of their symbols that
     day is answered, as a fresh replay answers it, and only the missing rows are stored; a
-    predicted bar close its day's recording does not answer is ``not recorded``. A day that
+    predicted bar close its day's recording does not answer is ``not recorded``. A kind longer
+    than four minutes lacks none of the bar closes whose window would reach the closing auction
+    (#263): it never answers them. Each answer is scored when its window ended. A day that
     cannot be read is logged and left for the next time. ``halt`` stops it between batches of
     events, writing nothing more.
     """
@@ -486,6 +498,9 @@ def fill_kind_answers(
         missing: dict[date, dict[tuple[str, datetime], set[str]]] = {}
         for kind in answered:
             for symbol, close in store.unanswered(kind.name, kind.answer_version, RECORDING_START, today):
+                session = calendar.session(kst_day(close))
+                if session is not None and close + kind.horizon > session.closing_auction:
+                    continue  # its window would reach the closing auction: it never has one (#263)
                 missing.setdefault(kst_day(close), {}).setdefault((symbol, close), set()).add(kind.name)
         if not missing:
             return []
@@ -569,7 +584,9 @@ def _answer_day(
             where,
             NOT_RECORDED,
         )
-    written = sum(len(store.add_kind_answers(k.name, k.answer_version, rows[k.name])) for k in kinds)
+    written = sum(
+        len(store.add_kind_answers(k.name, k.answer_version, rows[k.name], horizon=k.horizon)) for k in kinds
+    )
     windows = len({(a.symbol, a.bar_close) for a in answers})
     if answers:
         log.info("kinds' answers of %s from %s: %d windows, %d rows written", day, source, windows, written)

@@ -430,15 +430,30 @@ def recorded_day(
                     if to_touch:  # the window from four minutes back has just ended
                         labels[(symbol, minute - HORIZON)] = view.touch(symbol, minute - HORIZON).direction
                     for kind in kinds:
-                        answers[(kind.name, symbol, minute - HORIZON)] = view.kind_answer(
-                            kind, symbol, minute - HORIZON
-                        )
+                        # The window from the kind's horizon back has just ended (#263): one that
+                        # ends by the closing auction, as every minute here does.
+                        if minute >= first + kind.horizon:
+                            answers[(kind.name, symbol, minute - kind.horizon)] = view.kind_answer(
+                                kind, symbol, minute - kind.horizon
+                            )
 
     for feed, row in events:
         reach(row["received_at"])
         view.on_event(feed, row)
         special.event(feed, row, symbols)
     reach(minutes[-1] if minutes else last)
+    # A longer kind's window (#263) touched by a special window, known then or learned since,
+    # beyond the four minutes the samples were left out for: no answer to train on.
+    for kind in kinds:
+        if kind.horizon == HORIZON:
+            continue
+        for key in [key for key in answers if key[0] == kind.name]:
+            _, symbol, t = key
+            end = t + kind.horizon
+            if touching(special.known(before=t), symbol, t, end) or touching(
+                special.learned_since(t), symbol, t, end
+            ):
+                answers[key] = None
     out = []
     for snapshot, values, marked, terms in seen:
         # Special as the engine marks it: by the windows known when it is made, or learned since.
@@ -483,7 +498,6 @@ def bar_answers(
         while t <= last:
             done = bars[: bisect.bisect_right(ends, t)]
             closing = done[-1] if done and done[-1].start + BAR == t else None
-            after = bars[bisect.bisect_left(starts, t) : bisect.bisect_left(starts, t + HORIZON)]
             snapshot = None
             if closing is not None and any(k.width for k in ruled):
                 snapshot = Snapshot.at(
@@ -491,9 +505,13 @@ def bar_answers(
                 )
             for kind in ruled:
                 assert kind.bar_answer is not None
+                if t + kind.horizon > session.closing_auction:
+                    continue  # a longer kind's window would run into the closing auction (#263)
                 if closing is None:
                     out[(kind.name, symbol, t)] = None
                     continue
+                # The bars of the kind's horizon after it (four minutes, or longer, #263).
+                after = bars[bisect.bisect_left(starts, t) : bisect.bisect_left(starts, t + kind.horizon)]
                 width = kind.width(snapshot) if kind.width is not None and snapshot is not None else None
                 out[(kind.name, symbol, t)] = kind.bar_answer(closing, after, fee_rate, width=width)
             t += BAR
