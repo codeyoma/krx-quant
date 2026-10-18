@@ -700,7 +700,9 @@ Toss: 109 calls, 1 failed; tokens issued: 0
   - **밤 학습.** 21:30 학습의 맨 끝에 서버의 파일(KRX 일봉, `data/us_daily/`, KIS 수급, 1분봉, 야간선물 녹화)로 다시 맞추고 늘 승격한다. 텔레그램 요약에 `open_to_close 정답 표본: KRX 일봉 N개 (…) · 최근 60일 표본 밖 log loss x`와 `- cox 승격: …`이 붙는다. `KRX_TRAIN_ON=spot`이면 학습하지 않는다(Spot에는 이 파일이 없다).
   - **미국 일봉.** 이력 작업이 시작할 때와 20:30에 받는다(매크로 읽기를 켰을 때). 08:50의 실시간 피처는 그날 07:30 매크로 읽기를 먼저 쓰고, 없으면 이 파일을 쓴다.
   - **손으로 학습.** `docker compose run --rm --no-deps engine fit cox`: 마지막 KRX 일봉까지로 학습해 `state/models/cox.json`에 쓴다. 엔진이 1분 안에 바꾼다.
-- **엔진 API.** 이 PR에는 없다. `GET /v1/kinds`, `…/kinds/open_to_close/latest`, 순위표의 `kind=open_to_close`는 #264의 다음 PR이 연다. 그 전에는 위 명령으로 본다.
+- **엔진 API.** `curl http://krx-quant:8080/v1/symbols/005930/kinds/open_to_close/latest`(그날 08:50의 예측과, 20:35 뒤면 그 정답), `…/v1/leaderboard?kind=open_to_close&period=20d`(순위표), `…/v1/kinds`(그날의 시각, `daily`). 형식은 [engine-api.md](engine-api.md#하루-한-번-예측-종류-264)의 "API".
+
+  > **바뀜** (2026-10-18, #__PR3__): "엔진 API는 이 PR에는 없다. 그 전에는 위 명령으로 본다" → API로 본다. 이유: #264의 엔진 API PR이다.
 
 ### 밤 학습과 모델 교체 (#22)
 

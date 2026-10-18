@@ -754,7 +754,9 @@
 
 ### `GET /v1/kinds` (#179)
 
-엔진이 예측하는 종류다. 방향이 처음이고 그 뒤로 등록 순서다(아래 "예측 종류"). 방향, 변동폭(#180), 장벽(#183), 장벽의 지평 사다리 `barrier_15m`, `barrier_30m`, `barrier_60m`(#263)이다.
+엔진이 예측하는 종류다. 방향이 처음이고 그 뒤로 등록 순서다(아래 "예측 종류"). 방향, 변동폭(#180), 장벽(#183), 장벽의 지평 사다리 `barrier_15m`, `barrier_30m`, `barrier_60m`(#263), 그 뒤로 하루 한 번 예측 종류 `open_to_close`(#264, 아래 "하루 한 번 예측 종류")다.
+
+> **바뀜** (2026-10-18, #__PR3__): 목록은 장벽의 지평 사다리에서 끝났다 → 그 뒤에 `open_to_close`. 모든 항목에 `daily`가 생겼고(봉 마감 종류는 `null`), `horizon_minutes`가 `null`일 수 있다(하루 한 번 예측 종류). 이유: #264.
 
 > **바뀜** (2026-10-15, #197): "지금은 방향 하나다" → 방향과 변동폭. 이유: 변동폭이 첫 종류다.
 
@@ -774,7 +776,8 @@
       "answer_version": 3,
       "horizon_minutes": 4,
       "fields": {"expected_ticks": {"meaning": "4분 뒤 중간가 변화의 기대값. 세 확률과 함께 낸다.", "unit": "틱", "known": "봉 마감에 낸다."}},
-      "baselines": [{"name": "baseline-flat", "card": {"scientist": null, "character": "기준 예측: 늘 보합", "...": "..."}}]
+      "baselines": [{"name": "baseline-flat", "card": {"scientist": null, "character": "기준 예측: 늘 보합", "...": "..."}}],
+      "daily": null
     },
     {
       "name": "range",
@@ -823,7 +826,26 @@
       ]
     },
     {"name": "barrier_30m", "title": "장벽 30분", "horizon_minutes": 30, "...": "..."},
-    {"name": "barrier_60m", "title": "장벽 60분", "horizon_minutes": 60, "...": "..."}
+    {"name": "barrier_60m", "title": "장벽 60분", "horizon_minutes": 60, "...": "..."},
+    {
+      "name": "open_to_close",
+      "title": "시가→종가",
+      "classes": ["up", "flat", "down"],
+      "class_titles": ["상승", "보합", "하락"],
+      "action": ["up", "down"],
+      "answer_version": 1,
+      "horizon_minutes": null,
+      "fields": {},
+      "baselines": [
+        {"name": "otc-flat", "card": {"scientist": null, "character": "기준 예측: 늘 보합", "...": "..."}},
+        {"name": "otc-climate", "card": {"scientist": null, "character": "기준 예측: 시가→종가 기후", "...": "..."}},
+        {"name": "otc-persist", "card": {"scientist": null, "character": "기준 예측: 어제 방향 잇기", "...": "..."}}
+      ],
+      "daily": {
+        "predict_at": "08:50", "from": "open", "to": "close", "from_title": "시가 단일가", "to_title": "종가 단일가",
+        "answer_from": "20:35", "probation_days": [60, 120, 180], "bench_days": [60, 120, 180], "recent_days": 60
+      }
+    }
   ]
 }
 ```
@@ -831,7 +853,8 @@
 - `classes`: 세 클래스의 순서(첫째, 가운데, 셋째). 예측 클래스는 가장 큰 확률이고, 동률이면 가운데, 그다음 첫째다. 출력의 확률 키는 `p_<클래스>`다.
 - `action`: 정밀도와 커버리지를 세는 클래스(행동 클래스).
 - `answer_version`: 그 종류의 정답 버전. 방향은 도달 정답(3, 뒤집힌 호가도 셈), 변동폭은 1, 장벽은 2(뒤집힌 호가도 셈, #187)다.
-- `horizon_minutes`(#263): 그 종류의 창이 봉 마감부터 이어지는 분(지평). 방향, 변동폭, 장벽은 4이고, 장벽의 지평 사다리는 15, 30, 60이다. 아래 "예측 종류"의 `horizon`.
+- `horizon_minutes`(#263): 그 종류의 창이 봉 마감부터 이어지는 분(지평). 방향, 변동폭, 장벽은 4이고, 장벽의 지평 사다리는 15, 30, 60이다. 아래 "예측 종류"의 `horizon`. 하루 한 번 예측 종류(#264)는 봉 마감이 없어 `null`이다.
+- `daily`(#264): 하루 한 번 예측 종류의 그날 시각(`predict_at`, `from`·`to`, `from_title`·`to_title`, `answer_from`, `probation_days`·`bench_days`, `recent_days`, 아래 "하루 한 번 예측 종류"의 "API"). 봉 마감 종류는 `null`이다.
 
   > **바뀜** (2026-10-17, #260): 방향 2, 장벽 1 → 방향 3, 장벽 2. 이유: 닿음이 뒤집힌 호가도 센다(#187).
 - `fields`: 세 확률 말고 내는 출력 필드와 그 뜻(`meaning`, `unit`, `known`).
@@ -858,6 +881,7 @@
       "width_ticks": null,
       "anchor": 81250.0,
       "tick": 100,
+      "band": null,
       "output": {"p_small": 0.2, "p_medium": 0.5, "p_large": 0.3, "q10": 1.0, "q50": 2.5, "q90": 5.0},
       "answer": {
         "answer_version": 1, "class": "medium", "unscorable": null, "special": false,
@@ -881,6 +905,7 @@
 - `output`: `p_<클래스>` 셋(분포)과 종류의 추가 필드. `status`가 `ok`가 아니면 `output`, `target_at`, `answer`가 모두 `null`이다. 채점하지 않기 때문이다.
 - `flat_ticks`(#200): 그 봉 마감의 k(봉 마감 통합 중간가의 보합 폭, 틱)다. 그 종류의 예측자가 받은 값(`kinds.KindInputs.flat_ticks`, 알고리즘의 피처 `flat_ticks`)이고, 변동폭 정답의 `path.k`와 같다. 4분 안에 가격이 호가단위나 비용 반올림 경계를 넘어도 그대로다. `GET /v1/symbols`의 `flat_ticks`는 지금 중간가의 k라서 그때는 다르다. `status`와 상관없이 있다(VI 중인 종목은 그 봉 마감 기준가로 센다). 봉 마감 중간가가 없으면, 그리고 #200 전에 저장한 예측은 `null`이다.
 - `width_ticks`(#183): 장벽이 있는 종류(장벽)의 그 봉 마감 장벽 폭 w(틱)다. 엔진이 봉 마감에 한 번 정해 그 봉 마감의 모든 예측자에게 같고, 그 정답의 `path.w`와 같다(아래 "장벽"의 "폭 w"). `flat_ticks`처럼 모델이 내는 값이 아니라 엔진이 붙이는 값이라 `output` 밖에 있고, `status`와 상관없이 있다. 장벽이 없는 종류(변동폭), 봉 마감 중간가가 없을 때, #183 전에 저장한 예측은 `null`이다.
+- `band`(#264): 하루 한 번 예측 종류의 그날 보합 폭(종가 ÷ 시가 − 1의 크기)이다. 그날 전의 날로 정해 예측 시각에 알고, 그 정답의 `path.band`와 같다. 봉 마감 종류와 보합 폭을 정할 날이 모자란 날은 `null`이다.
 - `anchor`, `tick`(#210): 그 봉 마감의 통합 중간가(기준 가격)와 그 호가단위다. 그 종류 정답의 기준이고(`path.anchor`, `path.tick`과 같다), 기준 예측이 받은 값(`kinds.KindInputs.mid`, `tick`)이다. 4분 안에 가격이 움직이거나 호가단위 경계를 넘어도 그대로다(`GET /v1/symbols`의 `mid`, `tick`은 지금 값이다). 그래서 장벽은 정답 전에도 U = `anchor` + `width_ticks` × `tick`, L = `anchor` − `width_ticks` × `tick`을 안다(아래 "장벽"). `flat_ticks`처럼 엔진이 붙이는 값이라 `output` 밖에 있고 `status`와 상관없이 있다(VI 중인 종목은 그 봉 마감 기준가). 봉 마감 중간가가 없으면, 그리고 #210 전에 저장한 예측은 `null`이다.
 - `answer`: 그 봉 마감의 그 종류 정답이다. 그 봉 마감의 그 종류 예측이 모두 같은 것을 가진다. 4분이 지나기 전에는 `null`이다. `class`가 `null`이면 채점할 수 없고 `unscorable`이 이유다(아래 "예측 종류"의 "정답"). `special`이 `true`면 기본 통계에서 뺀다. `path`는 종류의 경로 요약이다.
 
@@ -1181,7 +1206,16 @@
   - 일봉이 아직 없는 종목은 기다린다. 7일(`ANSWER_GIVE_UP`)이 지나도 오지 않으면 클래스 없이 `no candle`로 쓴다.
   - 엔진이 시작하면 최근 30일(`PENDING_DAYS`)의 예측 중 정답이 없는 날을 바로 한 번 보고, 그 뒤 위처럼 본다.
   - 예측하지 않은 날(엔진이 08:50에 꺼져 있었음)은 정답도 쓰지 않는다.
-  - 스트림의 `kind_prediction`·`kind_answer`는 아직 보내지 않는다(엔진 API는 #264의 다른 PR이다).
+  - 스트림은 저장하는 순간 다른 종류처럼 보낸다: 08:50에 `kind_prediction`(`prediction_kind` `open_to_close`, `bar_close`가 그날 08:50), 정답을 쓰는 순간 `kind_answer`(아래 "API").
+
+    > **바뀜** (2026-10-18, #__PR3__): "스트림의 `kind_prediction`·`kind_answer`는 아직 보내지 않는다" → 보낸다. 이유: #264의 엔진 API PR이다.
+- **API.** 다른 종류의 엔드포인트를 그대로 쓴다.
+  - `GET /v1/kinds`: 봉 마감 종류 다음에 온다. `horizon_minutes`가 `null`이고(봉 마감이 없다), `daily`가 그날의 시각을 말한다: `predict_at`(`"08:50"`, KST, 거래일마다), `from`·`to`(`open`·`close`: 시가 단일가에서 종가 단일가까지), `from_title`·`to_title`(화면용 이름), `answer_from`(`"20:35"`: 정답을 처음 보는 시각), `probation_days`·`bench_days`(판정하는 정답 있는 날, `[60, 120, 180]`), `recent_days`(60). 봉 마감 종류의 `daily`는 `null`이다.
+  - `GET /v1/symbols/{symbol}/kinds/open_to_close/latest`, `…/predictions`: 항목의 `bar_close`가 예측 시각(그날 08:50), `target_at`이 그날 장 마감(종가 단일가 끝, 보통 15:30, 수능일 16:30)이다. `band`가 그날의 보합 폭이다(봉 마감 종류는 `null`). `flat_ticks`, `width_ticks`, `anchor`, `tick`은 `null`이다. `answer`는 그날 KRX 일봉이 저장되어 정답을 쓴 뒤(20:35부터) 찬다. `?bar_close=2026-10-12T08:50:00+09:00`으로 그날 것을 읽는다. `limit`은 날(예측 시각)의 개수다.
+  - `GET /v1/leaderboard?kind=open_to_close`, `GET /v1/algorithms/{cox, otc-flat, otc-climate, otc-persist}/stats`: 다른 종류와 같다. `period`의 `5d`·`20d`는 예측이 있는 최근 날이다(오늘 정답은 20:35 뒤). `extra`는 `open_to_close_stats`(아래 "시가→종가"의 "통계"). 상세 통계의 `by_slot`은 예측 시각의 30분 칸이라 늘 `08:30` 하나다.
+  - `GET /v1/algorithms`: 돌기 시작한 `cox`가 `kind` `open_to_close`로 나온다. `feature_meanings`는 하루 한 번 예측의 피처(`daily_features.DAILY_FEATURES`)의 뜻이다. `validation`은 그 밤 리포트(늘 승격, `champion`이 `null`)다. `stage`는 정답이 있는 날로 센다.
+  - 스키마: `prediction_kind`의 `horizon_minutes`(`null` 가능)와 `daily`, `kind_prediction_fields`의 `band`, 출력·경로·통계 `open_to_close_output`, `open_to_close_path`, `open_to_close_stats`(`open_to_close_pnl`, bp).
+  - 데모 엔진: 10-08까지 마지막 20거래일의 기준 예측 셋과 `cox`(그 전 날로 학습한 모델)의 예측과 정답(20:35), 그리고 10-12 08:50의 예측(정답 전)이 있다. KRX 일봉(`krx.parquet`)은 데모 일봉과 같은 날에 시가가 가끔 한 틱 다르다.
 - **특수 상황.** 그날 서킷브레이커나 사이드카(시장 전체의 구간, `special_windows`)가 있었으면 그날 모든 종목의 정답이 특수(`special`)이고, 다른 종류처럼 기본 통계에서 빠진다. VI는 특수가 아니다: 한 종목의 2분 단일가이고, 두 끝(시가 단일가와 종가 단일가)의 가격은 그대로 정해진다. 4분 창은 VI가 창의 절반을 멈추지만, 하루 창에서는 몇 분이다. VI가 잦은 날을 빼면 큰 날만 통계에서 빠진다. 그래서 정답의 경로에 그날 그 종목의 VI 수(`vi`)만 남긴다.
 - **상태.** 위 "상태 관리"의 규칙을 그 종류의 날로 쓴다(`DailyKind.review_rules`, `recent_days`, `min_sample`).
   - 하루는 종목마다 값 하나다. 그래서 수습 판정은 정답이 있는 날 60·120·180일째에만, 벤치 회복도 벤치 60·120·180일째에만 한다. 정식 → 벤치와 벤치 회복은 최근 60일로 본다. 신뢰수준(98.3%, 세 번 보는 본페로니)은 같다.
