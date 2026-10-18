@@ -17,7 +17,9 @@ Personality card:
   first model's out-of-sample calls. The recorded days and the days with backfilled bars
   only are each cut into four runs of consecutive days; each pair of runs is forecast by a
   first model trained on the other days, the day after each held day left out too (an
-  embargo: the same-slot returns of later days read the held days). A four-minute label
+  embargo: the next day's previous-day slot return and volatility read the held day; the 5-
+  and 20-day slot returns of the days after still hold it, a twentieth to a fifth, a mild
+  leak left as it is). A four-minute label
   never crosses a day.
 - **Fails**: where trees fail (a market unlike its 20 days), and on days unlike those its
   second model saw; with few out-of-sample days or calls, the second model is the share that
