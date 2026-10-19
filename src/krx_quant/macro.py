@@ -497,6 +497,34 @@ def latest_macro(data_dir: Path, today: date) -> LatestMacro | None:
     )
 
 
+def macro_json(latest: LatestMacro | None) -> dict[str, Any]:
+    """``/v1/macro``'s answer of ``latest`` (and the pre-open briefing's, #304): nulls before any."""
+    if latest is None:
+        empty: dict[str, Any] = {"day": None, "decided_at": None, "regime": None, "reasons": []}
+        return {**empty, "readings": [], "failed": {}, "skipped": []}
+    readings = [
+        {
+            "indicator": indicator.name,
+            "label": indicator.label,
+            "source": row["source"],
+            "series": row["series"],
+            "as_of": row["as_of"].isoformat() if row["as_of"] else None,
+            "value": row["value"],
+            "change_pct": row["change_pct"],
+        }
+        for indicator, row in latest.readings
+    ]
+    return {
+        "day": latest.day.isoformat(),
+        "decided_at": latest.decided_at.astimezone(KST).isoformat(),
+        "regime": latest.regime,
+        "reasons": latest.reasons,
+        "readings": readings,
+        "failed": latest.failed,
+        "skipped": latest.skipped,
+    }
+
+
 def _rows(partition: Path) -> list[dict[str, Any]]:
     """A partition's rows, in the order written."""
     table = read_partition(partition)

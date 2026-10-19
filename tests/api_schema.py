@@ -28,6 +28,7 @@ ROUTES = {
     "/v1/consensus": "consensus",
     "/v1/macro": "macro",
     "/v1/calendar": "calendar",
+    "/v1/briefing": "briefing",  # #304
     # The kinds besides the direction (#179).
     "/v1/kinds": "kinds",
     "/v1/symbols/{symbol}/kinds/{kind}/latest": "kind_latest",

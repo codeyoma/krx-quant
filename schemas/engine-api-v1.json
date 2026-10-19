@@ -1640,6 +1640,235 @@
       }
     },
 
+    "briefing": {
+      "description": "GET /v1/briefing?day=YYYY-MM-DD (#304): the pre-open briefing of a day (default: today, or the next trading day on a closed day). Every part is there, with nulls (or recorded false) where its data is not.",
+      "type": "object",
+      "required": ["day", "as_of", "phase", "trading_day", "session", "previous_day", "overnight", "night_futures", "symbols", "open_to_close", "schedule"],
+      "additionalProperties": false,
+      "properties": {
+        "day": {"$ref": "#/$defs/day"},
+        "as_of": {"$ref": "#/$defs/time"},
+        "phase": {"enum": ["closed", "pre_open", "opening_auction", "continuous", "closing_auction", "after_close"]},
+        "trading_day": {"type": "boolean"},
+        "session": {
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "required": ["open", "close", "special"],
+              "additionalProperties": false,
+              "properties": {
+                "open": {"$ref": "#/$defs/time"},
+                "close": {"$ref": "#/$defs/time"},
+                "special": {"enum": ["exam_day", "first_day", null]}
+              }
+            }
+          ]
+        },
+        "previous_day": {"$ref": "#/$defs/day"},
+        "overnight": {
+          "type": "object",
+          "required": ["macro", "us"],
+          "additionalProperties": false,
+          "properties": {
+            "macro": {"$ref": "#/$defs/macro"},
+            "us": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["indicator", "closes"],
+                "additionalProperties": false,
+                "properties": {
+                  "indicator": {"enum": ["sox", "nvda", "mu", "vix"]},
+                  "closes": {
+                    "type": "array",
+                    "maxItems": 5,
+                    "items": {
+                      "type": "object",
+                      "required": ["day", "close", "change_pct"],
+                      "additionalProperties": false,
+                      "properties": {
+                        "day": {"$ref": "#/$defs/day"},
+                        "close": {"type": "number"},
+                        "change_pct": {"type": ["number", "null"]}
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "night_futures": {
+          "type": "object",
+          "required": ["evening", "from", "to", "recorded", "contract", "last", "change_pct", "high", "low", "volume", "last_trade_at", "minutes"],
+          "additionalProperties": false,
+          "properties": {
+            "evening": {"$ref": "#/$defs/day"},
+            "from": {"$ref": "#/$defs/time"},
+            "to": {"$ref": "#/$defs/time"},
+            "recorded": {"type": "boolean"},
+            "contract": {"type": ["string", "null"]},
+            "last": {"type": ["number", "null"]},
+            "change_pct": {"type": ["number", "null"]},
+            "high": {"type": ["number", "null"]},
+            "low": {"type": ["number", "null"]},
+            "volume": {"type": ["integer", "null"]},
+            "last_trade_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]},
+            "minutes": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["at", "price"],
+                "additionalProperties": false,
+                "properties": {"at": {"$ref": "#/$defs/time"}, "price": {"type": "number"}}
+              }
+            }
+          }
+        },
+        "symbols": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["symbol", "previous_close", "after_hours", "premarket", "expected_open", "supply"],
+            "additionalProperties": false,
+            "properties": {
+              "symbol": {"type": "string"},
+              "previous_close": {"type": ["number", "null"]},
+              "after_hours": {
+                "oneOf": [
+                  {"type": "null"},
+                  {
+                    "type": "object",
+                    "required": ["price", "at", "change_pct"],
+                    "additionalProperties": false,
+                    "properties": {
+                      "price": {"type": "number"},
+                      "at": {"$ref": "#/$defs/time"},
+                      "change_pct": {"type": ["number", "null"]}
+                    }
+                  }
+                ]
+              },
+              "premarket": {
+                "oneOf": [
+                  {"type": "null"},
+                  {
+                    "type": "object",
+                    "required": ["price", "at", "window", "change_pct"],
+                    "additionalProperties": false,
+                    "properties": {
+                      "price": {"type": "number"},
+                      "at": {"$ref": "#/$defs/time"},
+                      "window": {"enum": ["08:40-08:50", "08:00-08:30"]},
+                      "change_pct": {"type": ["number", "null"]}
+                    }
+                  }
+                ]
+              },
+              "expected_open": {
+                "oneOf": [
+                  {"type": "null"},
+                  {
+                    "type": "object",
+                    "required": ["price", "qty", "venue_code", "at", "change_pct", "final"],
+                    "additionalProperties": false,
+                    "properties": {
+                      "price": {"type": "number"},
+                      "qty": {"type": ["integer", "null"]},
+                      "venue_code": {"type": ["string", "null"]},
+                      "at": {"$ref": "#/$defs/time"},
+                      "change_pct": {"type": ["number", "null"]},
+                      "final": {"type": "boolean"}
+                    }
+                  }
+                ]
+              },
+              "supply": {
+                "type": "object",
+                "required": ["day", "foreign_net", "institution_net", "days", "foreign_net_sum", "institution_net_sum"],
+                "additionalProperties": false,
+                "properties": {
+                  "day": {"$ref": "#/$defs/day"},
+                  "foreign_net": {"type": ["number", "null"]},
+                  "institution_net": {"type": ["number", "null"]},
+                  "days": {"type": "integer", "minimum": 0},
+                  "foreign_net_sum": {"type": ["number", "null"]},
+                  "institution_net_sum": {"type": ["number", "null"]}
+                }
+              }
+            }
+          }
+        },
+        "open_to_close": {
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "required": ["kind", "day", "predicted_at", "previous", "symbols"],
+              "additionalProperties": false,
+              "properties": {
+                "kind": {"const": "open_to_close"},
+                "day": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/day"}]},
+                "predicted_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]},
+                "previous": {"type": "boolean"},
+                "symbols": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": ["symbol", "predictions", "inputs"],
+                    "additionalProperties": false,
+                    "properties": {
+                      "symbol": {"type": "string"},
+                      "predictions": {"type": "array", "items": {"$ref": "#/$defs/kind_prediction"}},
+                      "inputs": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "required": ["algorithm", "model_version", "bias", "inputs"],
+                          "additionalProperties": false,
+                          "properties": {
+                            "algorithm": {"type": "string"},
+                            "model_version": {"type": "string"},
+                            "bias": {"oneOf": [{"type": "null"}, {"type": "object", "additionalProperties": {"type": "number"}}]},
+                            "inputs": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "required": ["name", "value", "z", "scores"],
+                                "additionalProperties": false,
+                                "properties": {
+                                  "name": {"type": "string"},
+                                  "value": {"type": ["number", "null"]},
+                                  "z": {"type": ["number", "null"]},
+                                  "scores": {"oneOf": [{"type": "null"}, {"type": "object", "additionalProperties": {"type": "number"}}]}
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "schedule": {
+          "type": "object",
+          "required": ["events", "option_expiry", "futures_expiry", "month_end", "month_start"],
+          "additionalProperties": false,
+          "properties": {
+            "events": {"type": "array", "items": {"$ref": "#/$defs/calendar/properties/events/items"}},
+            "option_expiry": {"type": "boolean"},
+            "futures_expiry": {"type": "boolean"},
+            "month_end": {"type": "boolean"},
+            "month_start": {"type": "boolean"}
+          }
+        }
+      }
+    },
     "event": {
       "description": "A message of GET /v1/stream (WebSocket), one JSON text each.",
       "oneOf": [

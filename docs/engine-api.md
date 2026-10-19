@@ -225,12 +225,12 @@
 | `sim_kind_predictions` | `run`, `kind`, `symbol`, `algorithm`(시뮬레이션한 알고리즘, 그 종류의 기준 예측), `model_version`, `model_target`(그 모델이 학습한 정답 버전, 기본 모델은 비어 있음), `bar_close`, `status`, `output`, `flat_ticks`, `width_ticks`, `anchor`, `tick`, `band`(`kind_predictions`와 같다), `answer_version`, `answer_class`, `answer_unscorable`, `answer_special`, `answer_path`(그 예측을 채점한 정답, `kind_answers`와 같은 값): 시뮬레이션의 다른 종류(하루 한 번 종류 포함) 예측. 실시간 표(`kind_predictions`, `kind_answers`)와 따로 둔다. 순위표와 통계는 읽지 않고 상태 판정만 읽는다. 따로 둔 표다 |
 | `consensus_fits` | `version`, `computed_at`: 합의 가중치를 계산한 기록(#18). 엔진은 시작할 때 마지막 버전을 읽는다. |
 | `consensus_weights` | `version`, `symbol`, `slot`, `algorithm`, `weight`: 그 버전의 칸별 가중치 |
-| `kind_predictions` | `id`, `kind`, `symbol`, `algorithm`(그 종류의 알고리즘이나 기준 예측), `model_version`, `bar_close`, `displayed_at`, `status`(`predictions`와 같은 값: `ok`, `timed_out`, `error`, `vi`, `no_book`, `no_previous`), `output`(JSON: `p_<클래스>` 셋과 종류의 추가 필드, `ok`가 아니면 비어 있음), `flat_ticks`(봉 마감의 k: 그 예측이 받은 보합 폭, #200. 상태와 상관없이 있다. 봉 마감 중간가가 없으면, 그리고 #200 전에 쓴 행은 비어 있음), `width_ticks`(장벽이 있는 종류의 봉 마감 장벽 폭 w, #183: 그 봉 마감의 정답이 쓰는 폭. 상태와 상관없이 있다. 장벽이 없는 종류(변동폭), 봉 마감 중간가가 없을 때, #183 전에 쓴 행은 비어 있음), `anchor`(봉 마감 통합 중간가, #210: 그 봉 마감 정답의 기준 가격. 상태와 상관없이 있다. 봉 마감 중간가가 없으면, 그리고 #210 전에 쓴 행은 비어 있음), `tick`(그 중간가의 호가단위, #210. `anchor`가 비면 비어 있음), `band`(하루 한 번 예측 종류의 그날 보합 폭, #264: 종가 ÷ 시가 − 1의 크기로, 그날 전의 날로 정한 값. 봉 마감 종류와 보합 폭을 정할 날이 모자란 날은 비어 있음). 방향 말고 다른 종류의 예측(#179, 아래 "예측 종류"). 하루 한 번 예측 종류(#264)는 `bar_close`가 그날의 예측 시각(08:50)이다. (`kind`, `symbol`, `algorithm`, `bar_close`)마다 하나다. 따로 둔 표라 옛 엔진도 DB를 연다 |
+| `kind_predictions` | `id`, `kind`, `symbol`, `algorithm`(그 종류의 알고리즘이나 기준 예측), `model_version`, `bar_close`, `displayed_at`, `status`(`predictions`와 같은 값: `ok`, `timed_out`, `error`, `vi`, `no_book`, `no_previous`), `output`(JSON: `p_<클래스>` 셋과 종류의 추가 필드, `ok`가 아니면 비어 있음), `flat_ticks`(봉 마감의 k: 그 예측이 받은 보합 폭, #200. 상태와 상관없이 있다. 봉 마감 중간가가 없으면, 그리고 #200 전에 쓴 행은 비어 있음), `width_ticks`(장벽이 있는 종류의 봉 마감 장벽 폭 w, #183: 그 봉 마감의 정답이 쓰는 폭. 상태와 상관없이 있다. 장벽이 없는 종류(변동폭), 봉 마감 중간가가 없을 때, #183 전에 쓴 행은 비어 있음), `anchor`(봉 마감 통합 중간가, #210: 그 봉 마감 정답의 기준 가격. 상태와 상관없이 있다. 봉 마감 중간가가 없으면, 그리고 #210 전에 쓴 행은 비어 있음), `tick`(그 중간가의 호가단위, #210. `anchor`가 비면 비어 있음), `band`(하루 한 번 예측 종류의 그날 보합 폭, #264: 종가 ÷ 시가 − 1의 크기로, 그날 전의 날로 정한 값. 봉 마감 종류와 보합 폭을 정할 날이 모자란 날은 비어 있음), `inputs`(JSON, #304: 하루 한 번 종류의 알고리즘이 그 예측에 쓴 입력. `values`는 선언한 피처마다 그 시각의 값(없으면 `null`), `explanation`은 알고리즘이 스스로 설명할 수 있을 때 클래스마다의 절편(`bias`)과 피처마다 표준화 값(`z`)과 클래스 점수에 더한 몫(`scores`)이다. 기준 예측, 봉 마감 종류, 만들지 못한 예측, #304 전에 쓴 행은 비어 있음). 방향 말고 다른 종류의 예측(#179, 아래 "예측 종류"). 하루 한 번 예측 종류(#264)는 `bar_close`가 그날의 예측 시각(08:50)이다. (`kind`, `symbol`, `algorithm`, `bar_close`)마다 하나다. 따로 둔 표라 옛 엔진도 DB를 연다 |
 | `kind_answers` | `kind`, `symbol`, `bar_close`, `answer_version`, `class`(종류의 클래스 중 하나, 채점할 수 없으면 비어 있음), `unscorable`(`missing mid`, `rest quotes`, `silent quotes`, `restarted`, 정답 함수가 클래스를 내지 않으면 그 이유(장벽의 `ambiguous`, #183)나 `no answer`, 지난 정답을 채울 때 녹화가 없으면 `not recorded`(#180), 하루 한 번 예측 종류의 `no band`·`no candle`(#264)), `special`(VI·서킷브레이커·사이드카가 4분에 닿음), `path`(JSON: 종류의 경로 요약), `scored_at`. 종류의 정답(#179). (종류, 종목, 봉 마감, 정답 버전)마다 하나이고 그 봉 마감의 그 종류 예측이 모두 이것으로 채점된다. 예측하지 않은 봉 마감에도 있다. 엔진은 이미 있는 행을 덮어쓰지 않는다. 지난 봉 마감의 빠진 행은 엔진이 시작할 때 녹화로 채운다(아래 "변동폭"의 "지난 정답", #180). 따로 둔 표다 |
 | `special_windows` | `kind`(`vi`, `circuit_breaker`, `sidecar`), `symbol`(VI의 종목, 시장 전체면 비어 있음), `start`, `end`(해제 시각. 해제를 아직 모르는 VI는 발동 + 3분, 서킷브레이커 3단계는 그날 끝), `detail`(서킷브레이커의 `1단계`·`2단계`·`3단계`, VI 종류 `static`·`dynamic`·`both`, 그 밖에는 비어 있음), `learned_at`(이 판을 받은 시각). 엔진이 알게 된 특수 상황 구간(#236, 위 "특수 상황"). (`kind`, `symbol`, `start`)마다 하나이고, 새 판을 알면 그 행의 `end`, `detail`, `learned_at`을 바꾼다. 지난날은 엔진이 시작할 때 녹화로 채운다(아래 "지난 특수 상황 구간"). 따로 둔 표다 |
 | `special_days` | `day`, `source`(녹화를 읽은 곳. 어디에도 없었으면 비어 있음), `windows`(판정한 구간 수), `decided_at`. 녹화로 특수 상황 구간을 판정한 지난날(#236). 구간이 없던 날도 남아서 다음 시작 때 다시 읽지 않는다. 따로 둔 표다 |
 
-`predictions`에는 (`algorithm`, `bar_close`) 인덱스도 있다(#170, 알고리즘마다 도달 정답 모델의 첫 예측을 찾는다). `kind_predictions`에는 (`kind`, `bar_close`), (`kind`, `symbol`, `bar_close`), (`algorithm`, `bar_close`) 인덱스가 있다(#179). 새 표와 인덱스는 스키마 버전을 올리지 않는다. `kind_predictions.flat_ticks`(#200)도 스키마 버전을 올리지 않고 더한 열이다: 엔진이 열 때 그 열이 없는 DB(#200 전)에 `ALTER TABLE … ADD COLUMN`으로 더한다(`predictions._ADDED_COLUMNS`). 옛 엔진은 쓰는 열을 이름으로 적으므로 그 열이 있는 DB도 열고 쓴다. 그 행의 `flat_ticks`는 비어 있다. `kind_predictions.width_ticks`(#183)와 `anchor`·`tick`(#210), `band`(#264)도 같은 방식으로 더한 열이다. `special_windows`(유일 인덱스 (`kind`, `ifnull(symbol, '')`, `start`)와 `start` 인덱스)와 `special_days`(#236)도 스키마 버전을 올리지 않은 새 표다. 수습 시뮬레이션의 표 `simulation_runs`, `simulations`, `sim_predictions`(인덱스 (`run`, `bar_close`)), `sim_kind_predictions`(인덱스 (`run`, `kind`, `bar_close`))도 그렇고, `statuses.simulated`(#298)는 `band`처럼 더한 열이다(기본 0).
+`predictions`에는 (`algorithm`, `bar_close`) 인덱스도 있다(#170, 알고리즘마다 도달 정답 모델의 첫 예측을 찾는다). `kind_predictions`에는 (`kind`, `bar_close`), (`kind`, `symbol`, `bar_close`), (`algorithm`, `bar_close`) 인덱스가 있다(#179). 새 표와 인덱스는 스키마 버전을 올리지 않는다. `kind_predictions.flat_ticks`(#200)도 스키마 버전을 올리지 않고 더한 열이다: 엔진이 열 때 그 열이 없는 DB(#200 전)에 `ALTER TABLE … ADD COLUMN`으로 더한다(`predictions._ADDED_COLUMNS`). 옛 엔진은 쓰는 열을 이름으로 적으므로 그 열이 있는 DB도 열고 쓴다. 그 행의 `flat_ticks`는 비어 있다. `kind_predictions.width_ticks`(#183)와 `anchor`·`tick`(#210), `band`(#264), `inputs`(#304)도 같은 방식으로 더한 열이다. `special_windows`(유일 인덱스 (`kind`, `ifnull(symbol, '')`, `start`)와 `start` 인덱스)와 `special_days`(#236)도 스키마 버전을 올리지 않은 새 표다. 수습 시뮬레이션의 표 `simulation_runs`, `simulations`, `sim_predictions`(인덱스 (`run`, `bar_close`)), `sim_kind_predictions`(인덱스 (`run`, `kind`, `bar_close`))도 그렇고, `statuses.simulated`(#298)는 `band`처럼 더한 열이다(기본 0).
 
 시각은 KST ISO 8601 문자열이다. 스키마 버전은 `PRAGMA user_version`에 있다(지금 4). 엔진이 시작할 때 예전 버전의 DB를 데이터를 지키며 올린다. 더 새 버전의 DB는 거부하고 시작하지 않는다(`... was written by a newer engine (schema N)`). 그래서 스키마를 올린 엔진을 배포한 뒤에는 옛 커밋으로 되돌려도 엔진이 뜨지 않는다([operations.md](operations.md#4-업데이트-배포) 4장).
 
@@ -777,6 +777,70 @@
 - 엔진은 수집기가 남긴 파일을 그대로 넘기지 않고 한 번 읽어 다시 쓴다. 그래서 파일이 망가지거나 손으로 고쳐져도 답은 이 형식을 지키고, 읽을 수 없는 일정은 빠진다.
 - 엔진은 수집기가 쓴 파일을 많아야 30초마다 다시 읽는다.
 
+### `GET /v1/briefing` (#304)
+
+장전 브리핑 화면이 읽는 그날의 재료다. 그날 시가를 가늠하는 것을 한 답에 모은다. 값마다 엔진이 남긴 파일에서 읽고, 08:50 `open_to_close` 예측의 입력과 같은 규칙으로 만든다(`briefing.py`, `daily_features.py`). 그래서 화면과 모델이 다른 숫자를 말하지 않는다.
+
+```json
+{
+  "day": "2026-10-19",
+  "as_of": "2026-10-19T08:51:00+09:00",
+  "phase": "opening_auction",
+  "trading_day": true,
+  "session": {"open": "2026-10-19T09:00:00+09:00", "close": "2026-10-19T15:30:00+09:00", "special": null},
+  "previous_day": "2026-10-16",
+  "overnight": {
+    "macro": {"day": "2026-10-19", "decided_at": "2026-10-19T07:30:00+09:00", "regime": "risk_off", "reasons": ["SOX -1.4% (-1% 이하)"], "readings": [], "failed": {}, "skipped": []},
+    "us": [{"indicator": "sox", "closes": [{"day": "2026-10-16", "close": 6080.0, "change_pct": -0.65}]}]
+  },
+  "night_futures": {"evening": "2026-10-16", "from": "2026-10-16T18:00:00+09:00", "to": "2026-10-17T06:00:00+09:00", "recorded": true, "contract": "A01612", "last": 393.0, "change_pct": 0.77, "high": 395.5, "low": 391.0, "volume": 1500, "last_trade_at": "2026-10-17T05:59:00+09:00", "minutes": [{"at": "2026-10-16T18:00:00+09:00", "price": 391.0}]},
+  "symbols": [
+    {
+      "symbol": "005930",
+      "previous_close": 81200,
+      "after_hours": {"price": 81800, "at": "2026-10-16T19:59:00+09:00", "change_pct": 0.74},
+      "premarket": {"price": 81500.0, "at": "2026-10-19T08:45:00+09:00", "window": "08:40-08:50", "change_pct": 0.37},
+      "expected_open": {"price": 81600, "qty": 5000, "venue_code": "1", "at": "2026-10-19T08:59:50+09:00", "change_pct": 0.49, "final": false},
+      "supply": {"day": "2026-10-16", "foreign_net": 129496, "institution_net": -138926, "days": 5, "foreign_net_sum": -255135.0, "institution_net_sum": -1260915.0}
+    }
+  ],
+  "open_to_close": {
+    "kind": "open_to_close", "day": "2026-10-19", "predicted_at": "2026-10-19T08:50:00+09:00", "previous": false,
+    "symbols": [
+      {
+        "symbol": "005930",
+        "predictions": [{"algorithm": "cox", "model_version": "cox-20261016-3fa9c1", "bar_close": "2026-10-19T08:50:00+09:00", "…": "…"}],
+        "inputs": [{"algorithm": "cox", "model_version": "cox-20261016-3fa9c1", "bias": {"up": -0.003, "down": -0.025}, "inputs": [{"name": "gap_1", "value": -0.35, "z": -1.05, "scores": {"up": 0.022, "down": -0.011}}]}]
+      }
+    ]
+  },
+  "schedule": {"events": [], "option_expiry": false, "futures_expiry": false, "month_end": false, "month_start": false}
+}
+```
+
+- `day`: `YYYY-MM-DD`. 빼면 엔진 시계의 오늘이 거래일이면 오늘, 아니면 다음 거래일이다. 날짜가 아니면 400이다. 거래일이 아닌 날을 물으면 `trading_day`가 `false`이고 `session`이 `null`이다.
+- `phase`는 지금(엔진 시계) 장 단계다. `session.special`은 늦게 여는 날(`exam_day` 수능일, `first_day` 연초 첫 거래일)이다. `previous_day`는 그날 전 거래일이다.
+- **`overnight`**
+  - `macro`는 그날 아침 매크로 읽기다(`/v1/macro`와 같은 모양). 그날이나 그 전 10일 안에 정한 가장 최근 날이고, 그 날짜가 `macro.day`다. 없으면 `/v1/macro`처럼 `null`이다.
+  - `us`는 SOX, NVDA, MU, VIX마다 그날 전의 마지막 종가 5개다(`data/us_daily/`). `change_pct`는 앞 종가 대비(%)이고, 첫 줄은 그 앞 종가가 있을 때만 있다. NQ는 일봉 이력이 없어 `macro.readings`에만 있다.
+- **`night_futures`**는 전 거래일 저녁에 시작한 KOSPI200 야간선물(18:00–다음 날 06:00, `H0MFCNT0` 녹화)이다. 받은 시각으로 거른다.
+  - `contract`는 녹화한 월물 코드다. `last`, `high`, `low`는 그 밤의 체결가다. `change_pct`는 마지막 체결의 KIS 전일 대비(%)다. `volume`은 마지막 체결의 누적 거래량이다.
+  - `minutes`는 분마다 마지막 체결가다.
+  - 녹화가 없으면 `recorded`가 `false`이고 값은 `null`, `minutes`는 빈 목록이다.
+- **`symbols[]`**(엔진 종목마다)
+  - `previous_close`: 전 거래일 KRX 종가(시장 `J` 일봉, 시가→종가 정답과 같은 출처). 일봉이 없으면 `null`이다.
+  - `after_hours`: 전 거래일 장 마감부터 20:00 전까지의 마지막 통합 1분봉(백필 `bars`). NXT와 KRX 애프터마켓의 가격이다. 그 시간의 봉이 없으면 `null`이다. 애프터마켓은 예측이나 특수 상황에는 쓰지 않는다.
+  - `premarket`: NXT 프리마켓의 마지막 체결. `cox`의 `premarket_gap`과 같은 규칙이다(`daily_features.premarket_window`): 08:40–08:50 구간, 없으면 08:00–08:30 구간에서 체결 시각이 가장 늦은 통합 체결(`H0UNCNT0` 녹화). 08:50 전에 받은 것만 친다. 08:30–08:40은 KRX 장전 시간외 체결(전일 종가)이라 넣지 않는다. `window`가 쓴 구간이다. `cox`는 이 가격을 `ln(가격 ÷ 전일 종가) ÷ σ̂`로 읽는다.
+  - `expected_open`: 시가 단일가(개장 30분 전부터 개장 전까지)에 받은 마지막 예상 체결(통합 호가의 `expected_px`, #304, [events.md](events.md) "호가"). `qty`는 예상 체결량, `venue_code`는 예상 체결의 거래소 구분 코드(원문)다. 개장 시각이 지나면 `final`이 `true`다(단일가가 끝났다). 그 구간에 예상가가 없거나 #304 전 녹화뿐이면 `null`이다. 통합 피드의 예상가가 KRX 단일가의 것인지는 예약 작업 `probe-expected-open-304`가 잰다.
+  - `supply`: 전 거래일의 외국인·기관 순매수(주, KIS 일별 수급)와, 그날까지 저장된 마지막 5거래일(`days`)의 합. KIS가 값이 없어 0으로 준 날은 값 없음이라 합에서 빠지고, 그날 값이면 `null`이다(#295).
+  - `change_pct`는 모두 전일 KRX 종가 대비(%)다. 종가가 없으면 `null`이다.
+- **`open_to_close`**: 엔진이 이 종류를 예측하지 않으면 `null`이다.
+  - 그날 08:50 예측(`predictions`, `/v1/symbols/{symbol}/kinds/open_to_close/predictions`의 항목과 같다)이다. 그날 것이 아직 없으면(08:50 전, 그날 예측하지 못함) 그 전 가장 최근 날의 것이고, 그때 `previous`가 `true`다. `day`와 `predicted_at`이 보이는 예측의 날과 시각이다.
+  - `inputs`: 하루 한 번 종류의 알고리즘마다 그 예측에 쓴 입력(`kind_predictions.inputs`). `inputs[]`는 선언한 피처 순서로 `name`, `value`(그 시각의 값, 없으면 `null`), `z`(모델이 읽은 표준화 값, ±5에서 자름. 값이 없거나 모델이 읽지 않는 피처, 요일은 `null`), `scores`(클래스마다 보합 대비 점수에 더한 몫)다. `bias`는 클래스마다 절편이다. 상승 확률은 softmax(`bias.up` + Σ`scores.up`, 0, `bias.down` + Σ`scores.down`)의 첫째다. 알고리즘이 스스로 설명하지 못하면(기본 모델) `bias`와 `scores`가 `null`이다. 기준 예측은 입력이 없어 목록에 없다. #304 전에 쓴 예측도 없다.
+- **`schedule`**: 그날(KST 0시–24시)의 경제 캘린더 일정(`/v1/calendar`의 항목과 같다)과 표시. `option_expiry`는 KOSPI200 옵션의 최종거래일(매월 둘째 목요일, 휴장이면 앞 거래일), `futures_expiry`는 그중 분기월(선물 만기)이다. `month_end`, `month_start`는 `cox`의 월말·월초와 같다(달의 마지막 거래일, 첫 3거래일).
+- 오늘의 답은 많아야 20초마다, 또는 예측 저장소가 바뀌면 다시 만든다. 새 스트림 메시지는 없다. 화면이 읽어 간다.
+- 데모 엔진에는 그 아침의 야간선물, 프리마켓 체결, 예상 시가, 그날 일정, 미국 종가가 있다. 데모는 그 파일을 아침 재생 뒤에 써서, 데모의 08:50 `cox` 입력에는 프리마켓과 야간선물이 없다.
+
 ### `GET /v1/kinds` (#179)
 
 엔진이 예측하는 종류다. 방향이 처음이고 그 뒤로 등록 순서다(아래 "예측 종류"). 방향, 변동폭(#180), 장벽(#183), 장벽의 지평 사다리 `barrier_15m`, `barrier_30m`, `barrier_60m`(#263), 그 뒤로 하루 한 번 예측 종류 `open_to_close`(#264, 아래 "하루 한 번 예측 종류")다.
@@ -1217,7 +1281,7 @@
 - **이름.** 종류의 이름과 기준 예측의 이름은 한 묶음이다(`register_daily_kinds`): 봉 마감 종류와 그 기준 예측, 먼저 등록된 하루 한 번 종류와 그 기준 예측의 이름 어느 것과도 겹치지 않는다(종류가 기준 예측의 이름을 쓰거나 그 반대도 거부한다). 종류와 클래스의 이름은 봉 마감 종류처럼 소문자 영어다.
 - **예측(`daily.DailyRunner`).** 거래일마다 그 종류의 시각(`DailyKind.predict_at`, `open_to_close`는 08:50 KST)에 종목마다 그 종류의 기준 예측(`daily_baselines`)과 돌기 시작한 알고리즘(아래)을 한 번에 돌려 저장한다.
   - 입력은 그 시각까지 알던 것뿐이다. 기준 예측은 그 종목의 그 전 날들의 정답(그 종류의 정답 규칙으로 KRX 일봉에서 다시 만든 것, `DailyInputs.past`), 그날의 보합 폭, 달력의 전 거래일을 받는다.
-  - 예측의 `bar_close`는 그 예측 시각(그날 08:50)이고, `displayed_at`은 저장한 순간이다. `flat_ticks`, `width_ticks`, `anchor`, `tick`은 비어 있다. 대신 그날의 보합 폭을 함께 저장한다(`band`, 그날 전의 날로 정한 값, 아래 "시가→종가"). 보합 폭을 정할 날이 모자라면 비어 있다.
+  - 예측의 `bar_close`는 그 예측 시각(그날 08:50)이고, `displayed_at`은 저장한 순간이다. `flat_ticks`, `width_ticks`, `anchor`, `tick`은 비어 있다. 대신 그날의 보합 폭을 함께 저장한다(`band`, 그날 전의 날로 정한 값, 아래 "시가→종가"). 보합 폭을 정할 날이 모자라면 비어 있다. 알고리즘의 예측은 그 입력도 함께 저장한다(`inputs`, #304, 위 "저장"의 `kind_predictions`, `GET /v1/briefing`).
   - 기준 예측이 낼 수 없는 종목은 `no_previous`다(다른 종류와 같다).
   - 엔진이 그 시각 뒤에 시작하면 그날은 예측하지 않는다. 늦게 내면 그 시각에 알던 것만 쓴 예측이 아니기 때문이다. 06:00 배포와 07:20 재시작은 08:50 전이다. 휴장일에는 예측하지 않는다.
   - KRX 일봉을 읽을 곳(`daily=StoredDays(KRX_DATA_DIR)`)을 받은 엔진만 이 종류를 돌린다. 수집기의 엔진은 받는다. `krx-quant replay`, 데모 전의 재생, 사전 검증의 재생, 테스트의 엔진은 받지 않아 돌리지 않는다.
@@ -1853,6 +1917,8 @@ uv run krx-quant fit newton --days 60
 - **예측.** 상승·하락 로짓과 보합의 0을 소프트맥스한 세 확률. 기본 모델(학습 전)은 1/3씩이다. 피처가 없어도 예측한다(없음 표시).
 - **파라미터.** `lambda`, `samples`, `b.up`, `b.down`, 열마다 `mean.<열>`, `scale.<열>`, `w.up.<열>`, `w.down.<열>`. 뜻은 `/v1/algorithms`의 `param_meanings`(엔진 API PR 뒤)와 `algorithms/cox/__init__.py`의 `param_meanings`에 있다.
 - **사전 검증.** 위 "사전 검증"의 "하루 한 번 예측 종류의 알고리즘": KRX 일봉 10년의 walk-forward다. 통과하면 다음 08:50부터 수습이다.
+
+- **입력별 기여(#304).** `cox`는 예측마다 입력이 그 확률을 어떻게 만들었는지 낸다(`explain`, 하루 한 번 알고리즘 규약의 선택 기능 `daily.Explains`). 엔진이 예측과 함께 저장하고(`kind_predictions.inputs`) `/v1/briefing`이 보인다. 피처마다 그 열들(값과 빠짐 표시, 요일은 넷)이 상승·하락 점수에 더한 몫(가중치 × 표준화 값의 합)이고, 표준화 값은 모델이 읽은 것(학습 평균과 표준편차, ±5에서 자름)이다. 학습에서 빠진 열(늘 빠지거나 움직이지 않음)은 몫이 0이다. 절편과 모든 몫을 더하면 예측의 로짓이 된다(테스트로 확인). 기본 모델은 설명이 없다.
 
 ## 재생
 

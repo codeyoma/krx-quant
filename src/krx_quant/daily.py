@@ -221,9 +221,62 @@ class DailySample:
         return None if self.answer is None else self.answer.label
 
 
+@dataclass(frozen=True)
+class InputEffect:
+    """One input's part in a daily forecast (#304): its value standardized as the model reads it
+    (None where the value is missing or the model does not read it), and what it added to each
+    class's score against the reference class."""
+
+    z: float | None
+    scores: Mapping[str, float]  # class -> its added score (a logit)
+
+
+@dataclass(frozen=True)
+class Explanation:
+    """How a daily algorithm's forecast came from its inputs (#304): each class's score against
+    the reference class is its ``bias`` plus every input's part."""
+
+    bias: Mapping[str, float]  # class -> intercept
+    inputs: Mapping[str, InputEffect]  # declared feature -> its part
+
+
+class Explains(Protocol):
+    """A daily algorithm that can tell how its forecast came from its inputs (#304)."""
+
+    def explain(self, features: FeatureVector, model: Model) -> Explanation | None:
+        """How ``model``'s forecast of ``features`` came from them; None where it cannot (its
+        default model, say)."""
+        ...
+
+
+def inputs_json(
+    features: FeatureVector, names: Sequence[str], explanation: Explanation | None
+) -> dict[str, Any]:
+    """A daily algorithm's inputs as stored with its prediction (``kind_predictions.inputs``):
+    every declared feature's value in the order declared (``names``; None where missing), and
+    the explanation if any."""
+    given = features.as_dict()
+    values = {}
+    for name in names:
+        value = given[name]
+        number = None if value is None or isinstance(value, tuple) else float(value)
+        values[name] = number if number is not None and math.isfinite(number) else None
+    explained = None
+    if explanation is not None:
+        explained = {
+            "bias": dict(explanation.bias),
+            "inputs": {
+                name: {"z": effect.z, "scores": dict(effect.scores)}
+                for name, effect in explanation.inputs.items()
+            },
+        }
+    return {"values": values, "explanation": explained}
+
+
 class DailyAlgorithm(Protocol):
     """An algorithm of a daily kind (#264): the contract of the other kinds' algorithms
-    (``algorithms.contract.KindAlgorithm``), on a day's features and the kind's answers."""
+    (``algorithms.contract.KindAlgorithm``), on a day's features and the kind's answers. One that
+    can tell how a forecast came from its inputs also has ``explain`` (``Explains``, #304)."""
 
     name: str
     kind: str  # a daily kind's name
@@ -443,7 +496,7 @@ class DailyRunner:
         histories = await asyncio.to_thread(self._histories, day)
         bands = {s: _band(kind, h) for s, h in histories.items()}
         past = await asyncio.to_thread(self._past, kind, histories)
-        made: list[tuple[str, str, Mapping[str, KindForecast | None], str]] = []
+        made: list[_Made] = []
         previous = self.calendar.previous_trading_day(day)
         for baseline in kind.daily_baselines:
             forecasts: dict[str, KindForecast | None] = {}
@@ -472,34 +525,39 @@ class DailyRunner:
         day: date,
         histories: Mapping[str, list[DayPrices]],
         bands: Mapping[str, Band | None],
-    ) -> list[tuple[str, str, Mapping[str, KindForecast | None], str]]:
+    ) -> list[_Made]:
         """``algorithm``'s forecasts of every symbol, in a worker thread, within its time limit:
         ``timed_out`` past it, ``error`` for an exception or a forecast that breaks the kind's
-        contract (every symbol alike, as an algorithm's bar close)."""
+        contract (every symbol alike, as an algorithm's bar close). Each forecast made keeps the
+        inputs it was made from, explained if the algorithm can (#304)."""
         features = self._features
         if features is None:
-            return [(algorithm.name, model.version, dict.fromkeys(self.symbols), "error")]
+            return [_Made(algorithm.name, model.version, dict.fromkeys(self.symbols), "error")]
+        explain = getattr(algorithm, "explain", None)
 
-        def forecasts() -> dict[str, KindForecast | None]:
+        def forecasts() -> tuple[dict[str, KindForecast | None], dict[str, dict[str, Any]]]:
             out: dict[str, KindForecast | None] = {}
+            inputs: dict[str, dict[str, Any]] = {}
             for symbol in self.symbols:
                 vector = features(algorithm, symbol, day, histories[symbol], bands[symbol])
                 out[symbol] = forecast = algorithm.predict(vector, model)
                 if (why := kind.invalid(forecast)) is not None:
                     raise ValueError(why)
-            return out
+                explained = None if explain is None else explain(vector, model)
+                inputs[symbol] = inputs_json(vector, algorithm.features, explained)
+            return out, inputs
 
         started = timer.monotonic()
         try:
-            found = await asyncio.wait_for(asyncio.to_thread(forecasts), self._seconds)
+            found, inputs = await asyncio.wait_for(asyncio.to_thread(forecasts), self._seconds)
         except TimeoutError:
             log.warning("%s: over its %gs on %s", algorithm.name, self._seconds, day)
-            return [(algorithm.name, model.version, dict.fromkeys(self.symbols), "timed_out")]
+            return [_Made(algorithm.name, model.version, dict.fromkeys(self.symbols), "timed_out")]
         except Exception:
             log.exception("%s: its daily forecast failed on %s", algorithm.name, day)
-            return [(algorithm.name, model.version, dict.fromkeys(self.symbols), "error")]
+            return [_Made(algorithm.name, model.version, dict.fromkeys(self.symbols), "error")]
         log.info("%s predicted %s in %.3fs", algorithm.name, day, timer.monotonic() - started)
-        return [(algorithm.name, model.version, found, "ok")]
+        return [_Made(algorithm.name, model.version, found, "ok", inputs)]
 
     def _histories(self, day: date) -> dict[str, list[DayPrices]]:
         return {s: history_before(self.source.days(s), day) for s in self.symbols}
@@ -519,7 +577,7 @@ class DailyRunner:
         self,
         kind: DailyKind,
         at: datetime,
-        made: Sequence[tuple[str, str, Mapping[str, KindForecast | None], str]],
+        made: Sequence[_Made],
         bands: Mapping[str, Band | None],
     ) -> None:
         from krx_quant.predictions import NewKindPrediction  # the store's types
@@ -528,16 +586,17 @@ class DailyRunner:
         predictions = [
             NewKindPrediction(
                 symbol=symbol,
-                algorithm=name,
-                model_version=version,
+                algorithm=m.name,
+                model_version=m.version,
                 bar_close=at,
                 displayed_at=displayed_at,
                 output=None if forecast is None else kind.output(forecast),
-                status=status,
+                status=m.status,
                 band=None if (band := bands.get(symbol)) is None else band.value,
+                inputs=m.inputs.get(symbol),
             )
-            for name, version, forecasts, status in made
-            for symbol, forecast in forecasts.items()
+            for m in made
+            for symbol, forecast in m.forecasts.items()
         ]
         if predictions:
             ids = self.store.add_kind_predictions(kind.name, predictions)
@@ -594,17 +653,27 @@ def _with_vis(answer: Answer, store: PredictionStore, symbol: str, day: date) ->
     return Answer(answer.label, answer.unscorable, {**answer.path, "vi": len(vis)})
 
 
-def _by_status(
-    name: str, version: str, forecasts: Mapping[str, KindForecast | None]
-) -> list[tuple[str, str, Mapping[str, KindForecast | None], str]]:
+@dataclass(frozen=True)
+class _Made:
+    """A predictor's forecasts of a day, by symbol, with one status, and the inputs each was made
+    from (a daily algorithm's, #304; none for a baseline or a forecast not made)."""
+
+    name: str
+    version: str
+    forecasts: Mapping[str, KindForecast | None]
+    status: str
+    inputs: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
+
+
+def _by_status(name: str, version: str, forecasts: Mapping[str, KindForecast | None]) -> list[_Made]:
     """A baseline's forecasts by status: those it made (``ok``), those it did not (``NO_PREVIOUS``)."""
     made = {s: f for s, f in forecasts.items() if f is not None}
     missing: dict[str, KindForecast | None] = {s: None for s, f in forecasts.items() if f is None}
-    out: list[tuple[str, str, Mapping[str, KindForecast | None], str]] = []
+    out: list[_Made] = []
     if made:
-        out.append((name, version, made, "ok"))
+        out.append(_Made(name, version, made, "ok"))
     if missing:
-        out.append((name, version, missing, NO_PREVIOUS))
+        out.append(_Made(name, version, missing, NO_PREVIOUS))
     return out
 
 

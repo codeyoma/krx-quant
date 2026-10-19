@@ -375,6 +375,15 @@ def night_move(data_dir: Path, evening: date) -> float | None:
     return None if last is None else last[1]
 
 
+def premarket_window(at: time) -> int | None:
+    """Which of the pre-market's windows (``PREMARKET``, the later first) a trade at ``at`` (KST)
+    counts in; None outside them."""
+    for i, (start, end) in enumerate(PREMARKET):
+        if start <= at < end:
+            return i
+    return None
+
+
 def premarket_from_bars(data_dir: Path, day: date, symbol: str) -> float | None:
     """The NXT pre-market's last price of ``day`` from its kept one-minute bars (``PREMARKET``)."""
     bars = read_bars(data_dir, day, MINUTE_BARS_TR, symbol)
@@ -570,12 +579,11 @@ class LiveFeatures:
         cut = datetime.combine(local.date(), self.kind.predict_at, KST)
         if received >= cut:
             return
-        for i, (start, end) in enumerate(PREMARKET):
-            if start <= local.time() < end:
-                key = (row["symbol"], local.date(), i)
-                kept = self._premarket.get(key)
-                if kept is None or at >= kept[0]:
-                    self._premarket[key] = (at, float(row["price"]))
+        if (i := premarket_window(local.time())) is not None:
+            key = (row["symbol"], local.date(), i)
+            kept = self._premarket.get(key)
+            if kept is None or at >= kept[0]:
+                self._premarket[key] = (at, float(row["price"]))
 
     def _night(self, row: Mapping[str, Any]) -> None:
         if row.get("change_pct") is None:

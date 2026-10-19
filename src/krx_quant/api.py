@@ -83,12 +83,14 @@ from aiohttp import web
 
 from krx_quant.algorithms import Algorithm, KindAlgorithm
 from krx_quant.backfill import stock_bars_path, stored_bars
+from krx_quant.briefing import Sources as BriefingSources
+from krx_quant.briefing import briefing, day_predictions, default_day
 from krx_quant.candles import PERIODS as CANDLE_PERIODS
 from krx_quant.candles import stored_candles
 from krx_quant.consensus import NAMES, slot
 from krx_quant.consensus import cards as consensus_cards
 from krx_quant.contracts import USD
-from krx_quant.daily import DailyAlgorithm
+from krx_quant.daily import DailyAlgorithm, DailyKind
 from krx_quant.daily_features import DAILY_FEATURES
 from krx_quant.econ_calendar import calendar_answer, read_latest
 from krx_quant.engine import PredictionEngine
@@ -102,10 +104,11 @@ from krx_quant.kind_stats import split as kind_split
 from krx_quant.kinds import DIRECTION, DIRECTION_KIND, KindScored
 from krx_quant.kinds import Kind as PredictionKind
 from krx_quant.lifecycle import Stage
-from krx_quant.macro import LatestMacro, latest_macro, reading_before
+from krx_quant.macro import latest_macro, macro_json, reading_before
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.model_shelf import Shelf
 from krx_quant.names import logo_url
+from krx_quant.open_to_close import OPEN_TO_CLOSE
 from krx_quant.predictions import Excluded, SimulationRecord, iso
 from krx_quant.pricing import flat_ticks, tick_size
 from krx_quant.reference import Bar
@@ -153,6 +156,10 @@ CALENDAR_SECONDS = 30.0
 CALENDAR_CACHE_KEY = web.AppKey("calendar_cache", dict)
 CALENDAR_LIMIT = 100  # events by default
 MAX_CALENDAR_LIMIT = 1000
+# /v1/briefing (#304) is read again at most this often, or once the store changes: its files
+# change with the pre-market's trades and book.
+BRIEFING_SECONDS = 20.0
+BRIEFING_CACHE_KEY = web.AppKey("briefing_cache", dict)
 STATS_CACHE_KEY = web.AppKey("stats_cache", dict)
 PERIODS = {"today": 1, "5d": 5, "20d": 20}  # days with predictions
 # The scoring bases a screen from before #170 still sends, accepted and echoed back for one release.
@@ -210,6 +217,7 @@ def create_app(
     app[MACRO_CACHE_KEY] = {}
     app[USD_CLOSE_CACHE_KEY] = {}
     app[CALENDAR_CACHE_KEY] = {}
+    app[BRIEFING_CACHE_KEY] = {}
     app[NAMES_KEY] = {} if names is None else names
     stream = EventStream(engine, live_status, stream_poll_seconds)
 
@@ -244,6 +252,7 @@ def create_app(
     app.router.add_get("/v1/consensus", _consensus)
     app.router.add_get("/v1/macro", _macro)
     app.router.add_get("/v1/calendar", _calendar)
+    app.router.add_get("/v1/briefing", _briefing)
     app.router.add_get("/v1/stream", stream.handle)
     app.router.add_get("/v1/kinds", _kinds)
     app.router.add_get("/v1/symbols/{symbol}/kinds/{kind}/latest", _kind_latest)
@@ -665,7 +674,7 @@ async def _macro_now(request: web.Request) -> dict[str, Any]:
         data_dir = request.app[DATA_DIR_KEY]
         latest = None if data_dir is None else await asyncio.to_thread(latest_macro, data_dir, today)
         cache.clear()
-        cached = cache[today] = (monotonic(), _macro_json(latest))
+        cached = cache[today] = (monotonic(), macro_json(latest))
     return cached[1]
 
 
@@ -679,6 +688,34 @@ async def _calendar(request: web.Request) -> web.Response:
         kept = None if data_dir is None else await asyncio.to_thread(read_latest, data_dir)
         cached = cache["kept"] = (monotonic(), kept)
     return _json(calendar_answer(cached[1], engine.clock.now(), limit))
+
+
+async def _briefing(request: web.Request) -> web.Response:
+    """The pre-open briefing of ``day`` (#304, ``briefing.briefing``); by default today's, or the
+    next trading day's on a closed day."""
+    engine = request.app[ENGINE_KEY]
+    now = engine.clock.now()
+    day = _day_query(request, "day") or default_day(engine.calendar, now)
+    cache: dict[date, tuple[float, int, dict[str, Any]]] = request.app[BRIEFING_CACHE_KEY]
+    cached = cache.get(day)
+    if cached is None or monotonic() - cached[0] >= BRIEFING_SECONDS or cached[1] != engine.store.version:
+        kind = engine.kind_named(OPEN_TO_CLOSE.name)
+        sources = BriefingSources(
+            data_dir=request.app[DATA_DIR_KEY],
+            state_dir=request.app[STATE_DIR_KEY],
+            store=engine.store,
+            calendar=engine.calendar,
+            symbols=tuple(engine.symbols),
+            open_to_close=kind if isinstance(kind, DailyKind) else None,
+            now=now,
+        )
+        version = engine.store.version
+        predictions = day_predictions(sources, day)  # the store is read on its own thread
+        body = await asyncio.to_thread(briefing, sources, day, predictions)
+        if len(cache) >= _CACHED_QUESTIONS:
+            cache.clear()
+        cached = cache[day] = (monotonic(), version, body)
+    return _json(cached[2])
 
 
 async def _usd_futures(request: web.Request) -> dict[str, Any] | None:
@@ -711,33 +748,6 @@ async def _previous_usd_close(request: web.Request, today: date) -> float | None
         cache.clear()
         cached = cache[today] = (monotonic(), close)
     return cached[1]
-
-
-def _macro_json(latest: LatestMacro | None) -> dict[str, Any]:
-    if latest is None:
-        empty: dict[str, Any] = {"day": None, "decided_at": None, "regime": None, "reasons": []}
-        return {**empty, "readings": [], "failed": {}, "skipped": []}
-    readings = [
-        {
-            "indicator": indicator.name,
-            "label": indicator.label,
-            "source": row["source"],
-            "series": row["series"],
-            "as_of": row["as_of"].isoformat() if row["as_of"] else None,
-            "value": row["value"],
-            "change_pct": row["change_pct"],
-        }
-        for indicator, row in latest.readings
-    ]
-    return {
-        "day": latest.day.isoformat(),
-        "decided_at": iso(latest.decided_at),
-        "regime": latest.regime,
-        "reasons": latest.reasons,
-        "readings": readings,
-        "failed": latest.failed,
-        "skipped": latest.skipped,
-    }
 
 
 def _status_json(engine: PredictionEngine, name: str) -> dict[str, Any]:

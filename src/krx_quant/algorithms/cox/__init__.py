@@ -49,7 +49,7 @@ import numpy as np
 
 from krx_quant.algorithms.contract import Model, NothingToLearn, TrainedOn
 from krx_quant.cards import Card, Meaning
-from krx_quant.daily import DailySample
+from krx_quant.daily import DailySample, Explanation, InputEffect
 from krx_quant.daily_features import DAILY_FEATURES
 from krx_quant.features import FeatureVector
 from krx_quant.kinds import KindForecast
@@ -286,17 +286,40 @@ class Cox:
         params = model.params
         if f"b.{UP}" not in params:
             return KindForecast((1 / 3, 1 / 3, 1 / 3))
-        row = _row(features, self.features)
         z_up, z_down = params[f"b.{UP}"], params[f"b.{DOWN}"]
-        for col, value in row.items():
-            if f"w.{UP}.{col}" not in params:
-                continue  # dropped in training: always missing, or never moving
-            scale = params[f"scale.{col}"]
-            x = min(CLIP, max(-CLIP, (value - params[f"mean.{col}"]) / scale))
+        for col, x in _standardized(_row(features, self.features), params).items():
             z_up += params[f"w.{UP}.{col}"] * x
             z_down += params[f"w.{DOWN}.{col}"] * x
         up, flat, down = (float(v) for v in _softmax(np.array([z_up]), np.array([z_down]))[0])
         return KindForecast((up, flat, down))
+
+    def explain(self, features: FeatureVector, model: Model) -> Explanation | None:
+        """Each feature's part in the forecast (#304): what its columns (its value and missing
+        indicator, the weekday's four) added to the up and down scores against flat, and its
+        value as the model read it (standardized, clipped). None for the default model."""
+        params = model.params
+        if f"b.{UP}" not in params:
+            return None
+        row = _row(features, self.features)
+        parts = _standardized(row, params)
+        inputs = {}
+        for name in self.features:
+            cols = [c for c in columns((name,)) if c in parts]
+            missing = name != "weekday" and row.get(f"{name}.missing") == 1.0
+            z = None if missing or name not in parts or name == "weekday" else parts[name]
+            scores = {cls: float(sum(params[f"w.{cls}.{c}"] * parts[c] for c in cols)) for cls in (UP, DOWN)}
+            inputs[name] = InputEffect(z, scores)
+        return Explanation({UP: params[f"b.{UP}"], DOWN: params[f"b.{DOWN}"]}, inputs)
+
+
+def _standardized(row: Mapping[str, float], params: Mapping[str, float]) -> dict[str, float]:
+    """``row``'s columns the model reads, standardized and clipped as it learned them; a column
+    dropped in training (always missing, or never moving) is not read."""
+    return {
+        col: min(CLIP, max(-CLIP, (value - params[f"mean.{col}"]) / params[f"scale.{col}"]))
+        for col, value in row.items()
+        if f"w.{UP}.{col}" in params
+    }
 
 
 def _standardizer(
