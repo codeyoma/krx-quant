@@ -830,10 +830,14 @@ class PredictionEngine:
                 simulated=self.simulated(kind),
             )
             result = Review(result.changes + judged.changes, result.candidates + judged.candidates)
-        # Each daily kind's algorithms, by its own days (#264): those with an answer.
+        # Each daily kind's algorithms, by its own days (#264): those with an answer. A kind whose
+        # judging is held (``DailyKind.judging_held``) is not reviewed: its answers may be wrong.
         for daily in self.daily_kinds:
             of_daily = [a.name for a in self.daily_algorithms if a.kind == daily.name]
             if not of_daily:
+                continue
+            if daily.judging_held is not None:
+                log.info("%s: its algorithms are not reviewed: %s", daily.name, daily.judging_held)
                 continue
             judged = await asyncio.to_thread(
                 review,

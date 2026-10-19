@@ -24,7 +24,9 @@ whose first night learns nothing is not simulated); its kind's baselines predict
 (``daily_training.baseline_forecasts``). A day a circuit breaker or a sidecar touched is special,
 as live. A daily algorithm whose pre-validation passed but that the engine has not enrolled yet
 (its report is read at the engine's next start or 08:50) is enrolled here, as the engine would: the
-scheduled job runs right after its pre-validation, so it is simulated the same night.
+scheduled job runs right after its pre-validation, so it is simulated the same night. A kind
+whose judging is held (``DailyKind.judging_held``, #264: its answers may be wrong) is not
+simulated: its algorithms' probations wait, unsimulated, and are simulated once the hold is lifted.
 
 **Bar-close kinds** (``simulate_bar_close``, ``krx-quant simulate bar-close``: the direction, the
 range, the barrier and its horizon ladder): their inputs are the recorded quotes, so the days are
@@ -118,6 +120,9 @@ class SimulationRun:
 
     enrolled: list[str] = field(default_factory=list)  # daily algorithms enrolled on probation here
     simulations: list[Simulation] = field(default_factory=list)
+    # Daily algorithms whose probation waits for its simulation, not simulated: their kind's
+    # judging is held (``DailyKind.judging_held``, #264). Algorithm -> why.
+    held: dict[str, str] = field(default_factory=dict)
     recorded_days: int | None = None  # a bar-close simulation's: the recorded days there were
 
 
@@ -157,15 +162,20 @@ def simulate_daily(
             files = DailyFiles(settings.data_dir, settings.state_dir)
             calendar = calendar_store(settings).calendar
             done: list[Simulation] = []
+            held: dict[str, str] = {}
             for algorithm in algorithms:
                 kind = next((k for k in kinds if k.name == algorithm.kind), None)
                 if algorithm.name not in waiting or kind is None:
                     continue
+                if kind.judging_held is not None:
+                    # Its answers may be wrong (#264): it waits, still unsimulated, for them.
+                    held[algorithm.name] = kind.judging_held
+                    continue
                 stint = store.statuses()[algorithm.name].since
                 done.append(_daily(store, settings, files, calendar, algorithm, kind, stint, now))
-            simulated = [a for a in algorithms if a.name in waiting]
+            simulated = [a for a in algorithms if a.name in waiting and a.name not in held]
             ruled = _judge_daily(store, algorithms, simulated, kinds, settings.fee_rate, now)
-            return SimulationRun(enrolled, [ruled.get(s.algorithm, s) for s in done])
+            return SimulationRun(enrolled, [ruled.get(s.algorithm, s) for s in done], held=held)
         finally:
             store.close()
 
@@ -403,8 +413,10 @@ def report(run: SimulationRun, level: float) -> list[str]:
             f"{run.recorded_days} recorded days, fewer than {MIN_DAYS}: no simulation;"
             " the probations go on live"
         )
-    elif not run.simulations:
+    elif not run.simulations and not run.held:
         lines.append("no probation waits for its simulation")
+    for name, why in run.held.items():
+        lines.append(f"{name}: its simulation waits - {why}; its probation goes on live, not judged")
     for s in run.simulations:
         if not s.days:
             lines.append(f"{s.algorithm} ({s.kind}): not simulated - {s.why}; its probation goes on live")

@@ -98,6 +98,21 @@ DAILY_RECENT_DAYS = 20
 # The scored predictions, and the pairs with each baseline, a decision needs at least: the
 # 20 days of three symbols (the first review's).
 DAILY_MIN_SAMPLE = 60
+# The daily kinds whose algorithms are not judged now, and why (#264): their reviews, live (the
+# 15:40 review) and simulated (#298, ``simulation.simulate_daily``, the scheduled job
+# ``simulate-daily-298``), wait, while they go on predicting on probation and their days are
+# answered. ``open_to_close``: the 2026-10-19 daily check found its KRX day candle's close unlike
+# the recorded closing auction print (its open alike). Since KRX's after-market opened
+# (2026-09-14) the candle's close may be the after-market's last price, so the answers and labels
+# of those days may not be the closing auction's; its algorithms wait until the close is fixed.
+JUDGING_HELD: dict[str, str] = {
+    "open_to_close": "its close may be the after-market's, not the closing auction's (#264)",
+}
+
+
+def judging_held(kind: str) -> str | None:
+    """Why the daily kind ``kind``'s algorithms are not judged now, None when they are."""
+    return JUDGING_HELD.get(kind)
 
 
 @dataclass(frozen=True)
@@ -309,6 +324,11 @@ class DailyKind(Kind):
     review_rules: Rules = DAILY_RULES
     recent_days: int = DAILY_RECENT_DAYS
     min_sample: int = DAILY_MIN_SAMPLE
+
+    @property
+    def judging_held(self) -> str | None:
+        """Why its algorithms are not judged now (``JUDGING_HELD``), None when they are."""
+        return judging_held(self.name)
 
     def baseline_cards(self) -> list[tuple[str, Card]]:
         return [(b.name, b.card) for b in self.daily_baselines]

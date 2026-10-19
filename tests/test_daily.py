@@ -16,6 +16,7 @@ from krx_quant.algorithms import Model
 from krx_quant.cards import Card, Meaning
 from krx_quant.clock import FakeClock
 from krx_quant.daily import (
+    JUDGING_HELD,
     NO_CANDLE,
     DailyAlgorithm,
     DailyRegistrationError,
@@ -41,6 +42,16 @@ FEE = 0.015 / 100
 MONDAY = date(2026, 10, 12)
 THURSDAY = date(2026, 10, 8)  # the trading day before: Friday the 9th is Hangul Day
 CALENDAR = MarketCalendar({date(2026, 10, 9): False})
+
+
+# The hold on open_to_close's judging (#264, ``daily.JUDGING_HELD``), as deployed; the tests below
+# judge its algorithms as the engine will once its close is fixed, unless one puts it back.
+HELD = dict(JUDGING_HELD)
+
+
+@pytest.fixture(autouse=True)
+def judged(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("krx_quant.daily.JUDGING_HELD", {})
 
 
 def at(day: date, hhmm: str) -> datetime:
@@ -396,6 +407,34 @@ async def test_a_daily_algorithm_is_judged_on_its_20th_40th_and_60th_days_with_a
     assert changed["simulated"] is False
     stages = await e.stages()
     assert "leaning" not in stages, "active: no stage"
+
+
+async def test_a_daily_algorithm_is_not_judged_while_its_kinds_judging_is_held(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """open_to_close's judging is held (#264): its close may be the after-market's since
+    2026-09-14. The 15:40 review leaves its algorithms on probation, even on a review day that
+    would make one active; once the hold is lifted, the same review judges it."""
+    assert HELD.keys() == {OPEN_TO_CLOSE.name}, "deployed held"
+    monkeypatch.setattr("krx_quant.daily.JUDGING_HELD", HELD)
+    assert OPEN_TO_CLOSE.judging_held is not None
+    store = PredictionStore(tmp_path / "e.sqlite3")
+    first = date(2026, 6, 1)
+    days = [d for d in (first + timedelta(days=i) for i in range(120)) if CALENDAR.is_trading_day(d)][:42]
+    store.add_status("leaning", at(first, "07:00"), None, Status.PROBATION, "registered")
+    store.record_models([("leaning", "leaning-v1", 1)])
+    rng = random.Random(5)
+    for day in days[:40]:
+        add_day(store, day, rng)
+    clock = FakeClock(at(days[40], "15:39"))
+    e = engine(tmp_path / "e.sqlite3", clock, Source({}), algorithms=[Leaning()])
+    await e._review(at(days[40], "15:40"))
+    assert e.store.statuses()["leaning"].status is Status.PROBATION, "held: not judged on day 40"
+    assert [r["status"] for r in e.store.status_history("leaning")] == ["probation"]
+
+    monkeypatch.setattr("krx_quant.daily.JUDGING_HELD", {})
+    await e._review(at(days[40], "15:40"))
+    assert e.store.statuses()["leaning"].status is Status.ACTIVE, "lifted: the same review judges it"
 
 
 def add_flat_day(store: PredictionStore, day: date, rng: random.Random) -> None:
