@@ -30,6 +30,8 @@ from krx_quant.daily_check import daily_check
 from krx_quant.daily_training import daily_algorithm, fit_daily, prevalidate_daily
 from krx_quant.demo import demo_app, demo_morning
 from krx_quant.diagnose import DEFAULT_DAYS, diagnose
+from krx_quant.expected_open_probe import DAYS as EXPECTED_OPEN_DAYS
+from krx_quant.expected_open_probe import probe_expected_open
 from krx_quant.fake_kis import FakeKis
 from krx_quant.feeds.base import KST
 from krx_quant.kind_registry import DAILY_KINDS, kind_named
@@ -125,6 +127,11 @@ async def _probe_candles() -> int:
 
 async def _probe_night(day: date | None) -> int:
     print(await probe_night(Settings.from_env(require_kis=False), datetime.now(KST), day))
+    return 0
+
+
+def _probe_expected_open(days: int) -> int:
+    print(probe_expected_open(Settings.from_env(require_kis=False), datetime.now(KST), days))
     return 0
 
 
@@ -538,6 +545,17 @@ def main(argv: list[str] | None = None) -> int:
         type=date.fromisoformat,
         help="the evening whose night to read, YYYY-MM-DD (default: the latest one subscribed for)",
     )
+    expected_cmd = sub.add_parser(
+        "probe-expected-open",
+        help="count what the recorded books carried of the auctions' expected fill (#304), read-only;"
+        " prints no market value",
+    )
+    expected_cmd.add_argument(
+        "--days",
+        type=int,
+        default=EXPECTED_OPEN_DAYS,
+        help=f"the latest recorded trading days to read (default {EXPECTED_OPEN_DAYS})",
+    )
     sub.add_parser(
         "registry-password",
         help="print the ECR registry's docker login password (deploy/push-image.sh, EC2 Spot training)",
@@ -688,6 +706,8 @@ def main(argv: list[str] | None = None) -> int:
             return asyncio.run(_probe_net_buys())
         elif args.command == "probe-night":
             return asyncio.run(_probe_night(args.day))
+        elif args.command == "probe-expected-open":
+            return _probe_expected_open(args.days)
         elif args.command == "registry-password":
             return _registry_password()
         elif args.command == "backfill":

@@ -32,6 +32,7 @@ from krx_quant.notify import Alerts
 from krx_quant.scheduled import (
     DIAGNOSE,
     ENTRY_DELAY,
+    EXPECTED_OPEN_PROBE,
     FAILED,
     INTERRUPTED,
     JOBS,
@@ -975,6 +976,26 @@ def test_the_entry_delay_runs_the_diagnosis_once_on_a_trading_night_and_posts_se
     assert part is not None and part.startswith("진단 2026-09-21") and "9. 뒤집힌" not in part
     assert part.endswith("newton: 채점 2 · 정답률 100.0%")
     assert ENTRY_DELAY.targets[0].part("진단: 데이터 없음\n\n9. 뒤집힌 호가(#187)\n  없음") is None
+
+
+def test_the_expected_open_probe_runs_once_on_the_first_trading_night_and_posts_to_304() -> None:
+    # #304: whether the integrated book carries KRX's expected opening price, from the raw
+    # frames already recorded and the deploy day's normalized rows.
+    assert EXPECTED_OPEN_PROBE.name == "probe-expected-open-304"
+    assert EXPECTED_OPEN_PROBE.command == ("probe-expected-open",)
+    assert EXPECTED_OPEN_PROBE.timeout == timedelta(minutes=30)
+    assert [t.issue for t in EXPECTED_OPEN_PROBE.targets] == [304]
+    assert EXPECTED_OPEN_PROBE.label == ("ready-for-agent",)
+    first = next(i for i, j in enumerate(JOBS) if j.name.startswith("prevalidate-"))
+    assert JOBS.index(EXPECTED_OPEN_PROBE) < first, "before the pre-validations"
+    assert EXPECTED_OPEN_PROBE.due(night(FRIDAY))
+    assert not EXPECTED_OPEN_PROBE.due(night(SATURDAY)), "it waits for a day recorded with the new columns"
+    ran = JobRecord(FRIDAY, OK, at(FRIDAY, "22:30"), COMMIT, 0, 90.0)
+    assert not EXPECTED_OPEN_PROBE.due(night(MONDAY, ran))
+    assert EXPECTED_OPEN_PROBE.due(night(MONDAY, replace(ran, outcome=INTERRUPTED)))
+    output = "예상 체결 녹화 확인 (#304): 2026-10-07 – 2026-10-20, 거래일 10일, 종목 005930\n\n1. 통합 호가"
+    assert EXPECTED_OPEN_PROBE.targets[0].part(output) == output, "the whole output"
+    assert "시세 값이 없다" in EXPECTED_OPEN_PROBE.targets[0].note
 
 
 def subscribed(day: date, nights: tuple[date, ...], record: JobRecord | None = None) -> Night:
