@@ -22,6 +22,9 @@ DEFAULT_WS_URL = "ws://ops.koreainvestment.com:21000"
 DEFAULT_MASTER_URL = "https://new.real.download.dws.co.kr/common/master"
 # KIS allows 20 REST calls per second on a real account.
 MAX_REST_PER_SECOND = 20
+# The shortest WebSocket silence taken as a dead connection (#308): KIS's idle PINGPONG
+# comes about every 10.8 s, so this leaves room for one missed.
+WS_SILENCE_MIN_SECONDS = 20.0
 # The prediction days a status review reads back: its review days must stay within them.
 MAX_REVIEW_DAY = 400
 DEFAULT_TELEGRAM_API_URL = "https://api.telegram.org"
@@ -101,6 +104,9 @@ class Settings:
     # WebSocket reconnect backoff: starts here, doubles per failed attempt, capped at the max.
     reconnect_initial_seconds: float = 1.0
     reconnect_max_seconds: float = 60.0
+    # A KIS WebSocket that delivers no frame at all (no data, no PINGPONG, no reply) for this
+    # long is taken as dead and reconnected (#308): a half-open connection never closes.
+    ws_silence_seconds: float = 60.0
     # Poll interval for feeds that fell back from WebSocket to REST.
     fallback_poll_seconds: float = 5.0
     # One-minute bars are kept for trading days this far back (KIS keeps about a year).
@@ -355,6 +361,9 @@ class Settings:
             recovery_hold_seconds=float(number("KRX_RECOVERY_HOLD_SECONDS", "60", float)),
             reconnect_initial_seconds=float(number("KRX_RECONNECT_INITIAL_SECONDS", "1", float)),
             reconnect_max_seconds=float(number("KRX_RECONNECT_MAX_SECONDS", "60", float)),
+            ws_silence_seconds=float(
+                number("KRX_WS_SILENCE_SECONDS", "60", float, minimum=WS_SILENCE_MIN_SECONDS)
+            ),
             backfill_days=int(number("KRX_BACKFILL_DAYS", "365", int)),
             backfill_max_per_second=float(
                 number("KRX_BACKFILL_MAX_PER_SECOND", "8", float, maximum=MAX_REST_PER_SECOND)

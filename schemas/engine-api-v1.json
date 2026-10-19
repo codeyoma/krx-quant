@@ -126,10 +126,12 @@
     "kis": {
       "description": "Live and demo (made up) only: the KIS connection and each feed's latest delivery.",
       "type": "object",
-      "required": ["connected", "feeds"],
+      "required": ["connected", "last_frame_at", "seconds_since_frame", "feeds"],
       "additionalProperties": false,
       "properties": {
         "connected": {"type": "boolean"},
+        "last_frame_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]},
+        "seconds_since_frame": {"type": ["number", "null"]},
         "feeds": {
           "type": "array",
           "items": {

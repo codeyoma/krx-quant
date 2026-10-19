@@ -4,8 +4,9 @@ It implements just enough of KIS to drive the collector: access-token and
 WebSocket approval-key issuance, REST quotation endpoints answered from
 canned responses, and a WebSocket endpoint that acknowledges subscriptions
 (up to an optional per-session limit), pushes scripted data frames, and
-sends PINGPONG heartbeats. Everything it receives is recorded so tests can
-assert on what the collector sent.
+sends PINGPONG heartbeats. It can also go silent on its open connections
+without closing them, as a half-open TCP connection does. Everything it
+receives is recorded so tests can assert on what the collector sent.
 """
 
 from __future__ import annotations
@@ -68,6 +69,9 @@ class FakeKis:
     _runner: web.AppRunner | None = None
     _site: web.SockSite | None = None
     _sockets: list[web.WebSocketResponse] = field(default_factory=list)
+    _transports: dict[web.WebSocketResponse, asyncio.Transport] = field(default_factory=dict)
+    # Connections gone silent (go_silent): neither written to nor read from, until stop.
+    _silent: list[asyncio.Transport] = field(default_factory=list)
     _pong_event: asyncio.Event = field(default_factory=asyncio.Event)
     _subscribed: asyncio.Condition = field(default_factory=asyncio.Condition)
     port: int = 0
@@ -104,6 +108,8 @@ class FakeKis:
         await self._site.start()
 
     async def stop(self) -> None:
+        for transport in self._silent:
+            transport.abort()  # its handler would wait for ever on a connection it no longer reads
         for ws in list(self._sockets):
             await ws.close()
         if self._runner is not None:
@@ -152,6 +158,18 @@ class FakeKis:
         """Drop every client connection, as KIS does on maintenance or errors."""
         for ws in list(self._sockets):
             await ws.close()
+
+    def go_silent(self) -> None:
+        """Stop talking on every open connection without closing it, as a connection that
+        died half-open does (#308): nothing more is sent on it (no data, no PINGPONG), and
+        nothing the client sends is read, a close included, so no close reply comes back.
+        New connections are served as usual.
+        """
+        for ws in list(self._sockets):
+            self._sockets.remove(ws)
+            transport = self._transports.pop(ws)
+            transport.pause_reading()
+            self._silent.append(transport)
 
     async def send_demo_trades(self, at: datetime) -> None:
         """One synthetic integrated trade for every subscribed ``H0UNCNT0`` key (offline runs)."""
@@ -262,6 +280,8 @@ class FakeKis:
             await ws.close()
             return ws
         self._sockets.append(ws)
+        assert request.transport is not None
+        self._transports[ws] = request.transport
         active: set[tuple[str, str]] = set()
         try:
             async for msg in ws:
@@ -273,7 +293,9 @@ class FakeKis:
                     self.pongs.append(msg.data)
                     self._pong_event.set()
         finally:
-            self._sockets.remove(ws)
+            if ws in self._sockets:  # a silent one left the list already
+                self._sockets.remove(ws)
+            self._transports.pop(ws, None)
         return ws
 
     async def _on_subscribe(
