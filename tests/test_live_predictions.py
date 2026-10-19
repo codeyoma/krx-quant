@@ -14,7 +14,9 @@ from pathlib import Path
 from typing import Any
 
 import aiohttp
+import pytest
 
+from krx_quant import collector
 from krx_quant.clock import FakeClock
 from krx_quant.collector import run_collector
 from krx_quant.fake_kis import FakeKis
@@ -89,8 +91,45 @@ async def test_the_collector_predicts_from_live_events_and_serves_them(kis: Fake
     assert status["mode"] == "live"
     assert status["phase"] == "continuous"
     assert status["kis"]["connected"] is True
+    # The last frame of any kind was the round trip's PINGPONG, at 09:30:10 (#308).
+    assert status["kis"]["last_frame_at"] == "2026-10-12T09:30:10+09:00"
+    assert status["kis"]["seconds_since_frame"] == pytest.approx(50.2)
     [book_feed] = [f for f in status["kis"]["feeds"] if f["feed"] == "H0UNASP0"]
     assert book_feed["last_received_at"] == "2026-10-12T09:30:10+09:00"
+
+
+async def test_the_status_shows_a_connection_gone_silent(
+    kis: FakeKis, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On 2026-10-19 ``kis.connected`` stayed true on a connection dead since 16:33 (#308).
+    Input: KIS goes silent without closing and refuses the reconnect. Output: the status
+    shows how long ago the last frame came, and once the watchdog closes the connection it
+    is not connected and every subscription is in a silent disconnect gap."""
+    monkeypatch.setattr(collector, "WS_CLOSE_SECONDS", 0.2)
+    port = free_port()
+    settings = replace(settings_for(kis, tmp_path), api_port=port, ws_silence_seconds=0.5)
+    clock = FakeClock(at("16:33:43"))
+    stop = asyncio.Event()
+    task = asyncio.create_task(run_collector(settings, stop=stop, clock=clock))
+    try:
+        await kis.wait_for_subscriptions({("H0UNCNT0", "005930")})
+        await kis.round_trip()
+        base = f"http://127.0.0.1:{port}/v1"
+        await poll(f"{base}/status", lambda b: b["kis"]["connected"])
+
+        kis.accept_ws = False  # the reconnect is refused: the status stays down
+        kis.go_silent()
+        clock.set(at("16:34:43"))
+        status = await poll(f"{base}/status", lambda b: not b["kis"]["connected"])
+    finally:
+        stop.set()
+        await asyncio.wait_for(task, 5)
+
+    assert status["kis"]["last_frame_at"] == "2026-10-12T16:33:43+09:00"
+    assert status["kis"]["seconds_since_frame"] == 60.0
+    feeds = {(f["feed"], f["gap"]) for f in status["kis"]["feeds"]}
+    assert ("H0UNCNT0", "disconnected: silent 0.5s") in feeds
+    assert ("H0UNASP0", "disconnected: silent 0.5s") in feeds
 
 
 async def test_live_quotes_label_the_touch_target_four_minutes_on(kis: FakeKis, tmp_path: Path) -> None:

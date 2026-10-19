@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
@@ -11,6 +12,8 @@ from zoneinfo import ZoneInfo
 import pyarrow as pa
 
 KST = ZoneInfo("Asia/Seoul")
+
+log = logging.getLogger(__name__)
 
 Row = dict[str, Any]
 
@@ -74,14 +77,28 @@ def received_second(received_at: datetime) -> datetime:
     return received_at.astimezone(KST).replace(microsecond=0)
 
 
-def kst_or_received(hhmmss: str, received_at: datetime) -> datetime:
-    """``hhmmss`` on the day received, or the second received for a closing record.
+# The values kst_or_received took for no time of day, so each is logged once.
+_ODD_TIMES: set[str] = set()
 
-    Any other value that is not a time raises ValueError, so the record stays raw only.
+
+def kst_or_received(hhmmss: str, received_at: datetime) -> datetime:
+    """``hhmmss`` on the day received, or the second received for a closing record or any
+    value that is not a time of day.
+
+    KIS documents the field only as the time (영업시간). Besides ``999999`` it sent index
+    records with an hour of 24 or more just after the 15:30 close (2026-10-19, #308): a real
+    time record received now happened now, so it is kept, timed by its receipt, rather than
+    left raw only. Each such value is logged once; the raw frame keeps it.
     """
     if hhmmss == CLOSING_TIME:
         return received_second(received_at)
-    return kst(kst_day(received_at), hhmmss)
+    try:
+        return kst(kst_day(received_at), hhmmss)
+    except ValueError:
+        if hhmmss not in _ODD_TIMES:
+            _ODD_TIMES.add(hhmmss)
+            log.warning("KIS time %r is not a time of day: such records are timed by their receipt", hhmmss)
+        return received_second(received_at)
 
 
 # A night's records are at most this far from when they are received, either way.

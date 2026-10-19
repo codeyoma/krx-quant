@@ -667,7 +667,13 @@ def demo_kis(now: datetime) -> dict[str, object]:
         }
         for (feed, key), at in last.items()
     ]
-    return {"connected": True, "feeds": feeds}
+    frame = now - timedelta(seconds=1)  # the last frame of any kind: the book's
+    return {
+        "connected": True,
+        "last_frame_at": iso(frame),
+        "seconds_since_frame": (now - frame).total_seconds(),
+        "feeds": feeds,
+    }
 
 
 def write_demo_macro(data_dir: Path) -> None:

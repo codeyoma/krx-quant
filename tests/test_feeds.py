@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Callable
 from dataclasses import replace
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from krx_quant.collector import check_fallbacks, run_collector
 from krx_quant.fake_kis import FakeKis
+from krx_quant.feeds.base import kst_or_received
 from tests.kis_frames import (
     futures_frame,
     index_frame,
@@ -118,15 +122,37 @@ async def test_the_closing_index_record_without_a_time_takes_the_time_received(
     assert (i["event_time"], i["value"], i["change_pct"]) == (FIXED_NOW, 6625.93, -2.62)
 
 
-async def test_an_index_record_with_a_malformed_time_stays_raw_only(kis: FakeKis, tmp_path: Path) -> None:
+@pytest.mark.parametrize("bsop_hour", ["240000", "243210", "25ab00", ""])
+async def test_an_index_record_whose_time_is_no_time_of_day_takes_the_time_received(
+    kis: FakeKis, tmp_path: Path, bsop_hour: str
+) -> None:
+    """Input: an index record with an hour of 24 or more, as KIS sent after the 15:30 close on
+    2026-10-19 (#308), or a garbled time. Output: the event is recorded at the second
+    received instead of being left raw only, and the raw frame keeps the original value."""
     kis.script[("H0UPCNT0", "0001")] = [
-        index_frame({"bstp_cls_code": "0001", "bsop_hour": "25ab00", "prpr_nmix": "6625.93"})
+        index_frame({"bstp_cls_code": "0001", "bsop_hour": bsop_hour, "prpr_nmix": "6625.93"})
     ]
 
     await collect(kis, replace(settings_for(kis, tmp_path), index_codes=("0001",)))
 
-    assert read(tmp_path, "raw", "H0UPCNT0", symbol="0001"), "kept for investigation"
-    assert not (tmp_path / "events" / "date=2026-10-08" / "feed=H0UPCNT0").exists()
+    [i] = read(tmp_path, "events", "H0UPCNT0", symbol="0001")
+    assert (i["event_time"], i["value"]) == (FIXED_NOW, 6625.93)
+    [raw] = read(tmp_path, "raw", "H0UPCNT0", symbol="0001")
+    assert f"^{bsop_hour}^" in raw["message"]
+
+
+def test_a_time_that_is_no_time_of_day_is_the_second_received_and_logged_once(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    received = datetime(2026, 10, 19, 6, 32, 5, 700_000, tzinfo=UTC)  # 15:32:05.7 KST
+    with caplog.at_level(logging.WARNING, logger="krx_quant.feeds.base"):
+        times = [kst_or_received(hhmmss, received) for hhmmss in ("241532", "241532", "153205")]
+
+    second = datetime(2026, 10, 19, 15, 32, 5, tzinfo=KST)
+    assert times == [second, second, second]
+    assert [r.getMessage() for r in caplog.records] == [
+        "KIS time '241532' is not a time of day: such records are timed by their receipt"
+    ]
 
 
 async def test_usd_futures(kis: FakeKis, tmp_path: Path) -> None:

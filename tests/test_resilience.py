@@ -7,10 +7,13 @@ from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import pytest
+
+from krx_quant import collector
 from krx_quant.collector import run_collector
 from krx_quant.config import Settings
 from krx_quant.fake_kis import FakeKis
-from tests.kis_frames import trade_frame, us_trade_frame
+from tests.kis_frames import book_frame, trade_frame, us_trade_frame
 from tests.test_collector import FIXED_NOW, read, settings_for
 from tests.test_subscription_limit import until
 
@@ -315,3 +318,135 @@ async def test_silence_counts_from_the_open_not_from_the_nxt_pre_market(kis: Fak
     [gap] = read(tmp_path, "gaps", "H0UNCNT0")
     assert gap["reason"] == "stale"
     assert gap["start"] == pre_market.replace(hour=9, minute=0, second=0)
+
+
+async def test_a_connection_that_goes_silent_without_closing_is_reconnected_with_a_gap_and_an_alert(
+    kis: FakeKis, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Input: KIS stops sending on a connection without closing it (half-open, as on
+    2026-10-19 at 16:33, #308), and never answers the close. Output: after the silence limit
+    the collector reconnects and registers every subscription again, a disconnect gap runs
+    from the last frame to the new registration, and one alert pair goes out."""
+    monkeypatch.setattr(collector, "WS_CLOSE_SECONDS", 0.2)  # the dead side never replies
+    kis.script[TRADE_KEY] = [fill("81200")]
+    clock = Clock(FIXED_NOW)  # 09:30:16; the watchdog's silence is real time, not this clock
+    stop = asyncio.Event()
+    settings = replace(with_telegram(kis, fast(settings_for(kis, tmp_path))), ws_silence_seconds=0.3)
+    task = asyncio.create_task(run_collector(settings, stop=stop, clock=clock))
+    await kis.wait_for_subscription_count(TRADE_KEY, 1)
+    await kis.round_trip()  # the last frame: a PINGPONG at FIXED_NOW
+    first_round = len(kis.subscriptions)
+
+    kis.script[TRADE_KEY] = [fill("81300")]
+    clock.at = FIXED_NOW + timedelta(seconds=75)
+    kis.go_silent()
+    # 0.3 s of silence, then the close waits 0.2 s for a reply that never comes (aiohttp's own
+    # default would hold the reconnect 10 s).
+    await kis.wait_for_subscription_count(TRADE_KEY, 2, timeout=3)
+    await kis.round_trip()
+    await until(lambda: len(kis.telegram_messages) >= 2)
+    stop.set()
+    await asyncio.wait_for(task, 5)
+
+    assert kis.ws_connections == 2
+    again = {
+        (r["body"]["input"]["tr_id"], r["body"]["input"]["tr_key"]) for r in kis.subscriptions[first_round:]
+    }
+    assert again == kis.subscribed_keys(), "every subscription is registered again"
+    assert [t["price"] for t in read(tmp_path, "events", "H0UNCNT0")] == [81200, 81300]
+    [gap] = read(tmp_path, "gaps", "H0UNCNT0")
+    assert gap["reason"] == "disconnected: silent 0.3s"
+    assert (gap["start"], gap["end"]) == (FIXED_NOW, FIXED_NOW + timedelta(seconds=75))
+    texts = [m["text"] for m in kis.telegram_messages]
+    assert len(texts) == 2, texts
+    assert texts[0] == "[장애] KIS WebSocket 연결이 끊겼습니다 (silent 0.3s). 재연결을 시도합니다.", texts
+    assert texts[1].startswith("[복구]") and "WebSocket" in texts[1]
+
+
+async def test_a_silent_connection_is_marked_lost_before_its_close_is_waited_for(
+    kis: FakeKis, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Closing a dead connection waits for a reply that never comes (up to WS_CLOSE_SECONDS).
+    Input: KIS goes silent in continuous trading, then, while that close waits, the feeds pass
+    their stale thresholds (the book's is 60 s, the watchdog's default too) under the 5-second
+    health check. Output: the connection was marked lost when the silence was noticed, so the
+    gaps are the silent disconnect, not stale, and only the WebSocket alert goes out."""
+    monkeypatch.setattr(collector, "WS_CLOSE_SECONDS", 1.5)
+    book = ("H0UNASP0", "005930")
+    kis.script[TRADE_KEY] = [fill("81200")]
+    kis.script[book] = [
+        book_frame({"MKSC_SHRN_ISCD": "005930", "BSOP_HOUR": "093016", "BIDP1": "81200", "ASKP1": "81300"})
+    ]
+    clock = Clock(FIXED_NOW)  # Thursday 09:30:16, continuous trading
+    stop = asyncio.Event()
+    settings = replace(
+        with_telegram(kis, fast(settings_for(kis, tmp_path))),
+        ws_silence_seconds=0.3,
+        health_check_seconds=0.05,
+    )
+    task = asyncio.create_task(run_collector(settings, stop=stop, clock=clock))
+    await kis.wait_for_subscriptions({TRADE_KEY, book})
+    await kis.round_trip()
+
+    kis.go_silent()
+    await until(lambda: len(kis.telegram_messages) >= 1, timeout=1.0)  # before the 1.5 s close ends
+    assert kis.ws_connections == 1, "the close still waits for the dead side"
+    clock.at = FIXED_NOW + timedelta(seconds=90)  # the book and the trades past their thresholds
+    await asyncio.sleep(0.3)  # health checks while the close still waits
+    assert kis.ws_connections == 1
+    await kis.wait_for_subscription_count(TRADE_KEY, 2)
+    await kis.round_trip()
+    stop.set()
+    await asyncio.wait_for(task, 5)
+
+    texts = [m["text"] for m in kis.telegram_messages]
+    assert texts[0] == "[장애] KIS WebSocket 연결이 끊겼습니다 (silent 0.3s). 재연결을 시도합니다.", texts
+    assert not any("stale" in t for t in texts), texts
+    for tr_id in (TRADE_KEY[0], book[0]):
+        [gap] = read(tmp_path, "gaps", tr_id)
+        assert (gap["reason"], gap["start"]) == ("disconnected: silent 0.3s", FIXED_NOW), tr_id
+
+
+async def test_the_silence_alert_goes_out_of_market_hours_too(
+    kis: FakeKis, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The incident's silence began at 16:33, after the close, when no stale check runs."""
+    monkeypatch.setattr(collector, "WS_CLOSE_SECONDS", 0.2)
+    kis.script[TRADE_KEY] = []
+    evening = FIXED_NOW.replace(hour=16, minute=33, second=43)
+    stop = asyncio.Event()
+    settings = replace(with_telegram(kis, fast(settings_for(kis, tmp_path))), ws_silence_seconds=0.3)
+    task = asyncio.create_task(run_collector(settings, stop=stop, clock=lambda: evening))
+    await kis.wait_for_subscription_count(TRADE_KEY, 1)
+    kis.go_silent()
+    await until(lambda: len(kis.telegram_messages) >= 1)
+    stop.set()
+    await asyncio.wait_for(task, 5)
+
+    assert kis.telegram_messages[0]["text"].startswith("[장애] KIS WebSocket 연결이 끊겼습니다 (silent 0.3s)")
+
+
+async def test_a_quiet_connection_that_still_gets_pingpong_or_data_is_not_reconnected(
+    kis: FakeKis, tmp_path: Path
+) -> None:
+    """Idle, KIS sends a PINGPONG about every 10.8 s; in the sessions, data flows. Here each
+    comes a third of the silence limit apart, for four times the limit: no reconnect."""
+    kis.script[TRADE_KEY] = []
+    stop = asyncio.Event()
+    settings = replace(with_telegram(kis, fast(settings_for(kis, tmp_path))), ws_silence_seconds=0.3)
+    task = asyncio.create_task(run_collector(settings, stop=stop, clock=lambda: FIXED_NOW))
+    await kis.wait_for_subscription_count(TRADE_KEY, 1)
+    for _ in range(6):  # 1.2 s of PINGPONG only
+        await kis.round_trip()
+        await asyncio.sleep(0.1)
+    for _ in range(6):  # then 1.2 s of data only
+        await kis.push(fill("81200"))
+        await asyncio.sleep(0.1)
+    await kis.round_trip()
+    stop.set()
+    await asyncio.wait_for(task, 5)
+
+    assert kis.ws_connections == 1
+    assert kis.subscription_count(TRADE_KEY) == 1
+    assert kis.telegram_messages == []
+    assert not (tmp_path / "gaps").exists()

@@ -99,3 +99,15 @@ def test_one_algorithms_limit_is_below_the_cpu_budget() -> None:
             Settings.from_env(
                 {**KEYS, "KRX_ALGORITHM_SECONDS": limit, "KRX_CPU_BUDGET_SECONDS": budget}, dotenv_path=None
             )
+
+
+def test_the_websocket_silence_limit_stays_above_kis_s_idle_heartbeat() -> None:
+    """KIS sends a PINGPONG about every 10.8 s while nothing else flows (#308): a limit under
+    20 s would close healthy idle connections."""
+    assert Settings.from_env(KEYS, dotenv_path=None).ws_silence_seconds == 60.0
+    assert (
+        Settings.from_env({**KEYS, "KRX_WS_SILENCE_SECONDS": "30"}, dotenv_path=None).ws_silence_seconds == 30
+    )
+    for bad in ("10", "0", "soon"):
+        with pytest.raises(SettingsError, match="KRX_WS_SILENCE_SECONDS"):
+            Settings.from_env({**KEYS, "KRX_WS_SILENCE_SECONDS": bad}, dotenv_path=None)

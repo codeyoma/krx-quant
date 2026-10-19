@@ -1,7 +1,7 @@
 """Feed health: gaps in what was recorded, and why.
 
-A gap opens for a WebSocket subscription when the connection drops (closed again
-once KIS acknowledges the subscription after the reconnect) and when a feed goes
+A gap opens for a WebSocket subscription when the connection drops or goes silent
+(closed again once KIS acknowledges the subscription after the reconnect) and when a feed goes
 quiet in continuous trading, per the Market Calendar, for longer than its threshold
 (closed by the next message).
 Closed gaps are written to the ``gaps`` layer; gaps still open at shutdown are
@@ -107,8 +107,11 @@ class FeedHealth:
         """``key`` is registered or polled from now on, so it should deliver in market hours."""
         self._watched.setdefault(key, self._now())
 
-    def connection_lost(self, keys: Iterable[Key], detail: str) -> None:
-        at = self._now()
+    def connection_lost(self, keys: Iterable[Key], detail: str, since: datetime | None = None) -> None:
+        """A disconnect gap for each of ``keys`` from now, or from ``since`` when the
+        connection was dead before it was noticed (a silent one, #308). A key already in a
+        gap keeps its start."""
+        at = self._now() if since is None else since
         for key in keys:
             self._open.setdefault(key, _Gap(GapKind.DISCONNECTED, at, detail))
 
