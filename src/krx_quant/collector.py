@@ -764,12 +764,16 @@ async def _close_within(ws: aiohttp.ClientWebSocketResponse, seconds: float) -> 
 
 
 class _Silent(kis.KisError):
-    """The KIS WebSocket carried no frame for ``seconds``: taken as dead (#308). ``since`` is
-    its last sign of life, where the disconnect gap starts."""
+    """The KIS WebSocket carried no frame for ``seconds``: taken as dead (#308). It was marked
+    lost (gap, alert) when the silence was noticed, before its close was waited for."""
 
-    def __init__(self, seconds: float, since: datetime | None) -> None:
-        super().__init__(f"silent {seconds:g}s")
-        self.since = since
+    def __init__(self, seconds: float) -> None:
+        super().__init__(silence(seconds))
+
+
+def silence(seconds: float) -> str:
+    """Why a silent connection was dropped, as its gap and alert give it: ``silent 60s``."""
+    return f"silent {seconds:g}s"
 
 
 class _Stream:
@@ -801,7 +805,12 @@ class _Stream:
         self._on_event = on_event
         self._approval: str | None = None
         self._approval_at: datetime | None = None
-        self._acknowledged = False  # KIS answered a registration on the current connection
+        # KIS answered a registration on the current connection and it was not marked lost
+        # since: ``connected``.
+        self._acknowledged = False
+        # KIS answered on the current connection, even if it was marked lost later (a silent
+        # one, #308): the backoff starts over after a connection that worked.
+        self._answered = False
         self._recovery: asyncio.Task[None] | None = None
         # The last frame of any kind, on any connection (engine clock; for the status).
         self._last_frame_at: datetime | None = None
@@ -820,7 +829,7 @@ class _Stream:
         settings = self._settings
         delay = settings.reconnect_initial_seconds
         while not self._stop.is_set():
-            self._acknowledged = False
+            self._acknowledged = self._answered = False
             try:
                 await self._ensure_approval()
                 # Any close aiohttp makes (a refused approval key's included) waits at most
@@ -839,9 +848,10 @@ class _Stream:
             except (kis.KisError, aiohttp.ClientError, OSError) as e:
                 if self._stop.is_set():
                     return
-                if self._acknowledged:
+                if self._answered:
                     delay = settings.reconnect_initial_seconds
-                self._connection_lost(str(e), e.since if isinstance(e, _Silent) else None)
+                if not isinstance(e, _Silent):  # a silent one was marked lost when noticed
+                    self._connection_lost(str(e))
                 log.warning("KIS WebSocket down (%s); reconnecting in %.1fs", e, delay)
                 with contextlib.suppress(TimeoutError):
                     await asyncio.wait_for(self._stop.wait(), delay)
@@ -907,6 +917,7 @@ class _Stream:
             self._last_frame_at = self._heard_wall
 
     def _acknowledged_on_this_connection(self) -> None:
+        self._answered = True
         if self._acknowledged:
             return
         self._acknowledged = True
@@ -928,8 +939,9 @@ class _Stream:
         The watchdog is for a connection that dies without a close (half-open, #308): the
         read would wait on it for ever. KIS sends a PINGPONG about every 10.8 s while no
         data flows and data all through the sessions, so a healthy connection is never
-        quiet for the default 60 s. The watchdog's close only ends the read (aiohttp wakes
-        it locally); ``run`` then closes the dead socket in at most WS_CLOSE_SECONDS.
+        quiet for the default 60 s. The watchdog marks the connection lost at once (gaps
+        from the last frame, the alert), and its close only ends the read (aiohttp wakes it
+        locally); ``run`` then closes the dead socket in at most WS_CLOSE_SECONDS.
         """
         limit = self._settings.ws_silence_seconds
         loop = asyncio.get_running_loop()
@@ -950,6 +962,10 @@ class _Stream:
                 limit,
                 self._heard_wall,
             )
+            # Marked lost now, not once the close is done: that waits for the dead side's
+            # reply (up to WS_CLOSE_SECONDS), and meanwhile the stale check would take the
+            # subscriptions (the book's threshold is 60 s too) for quiet feeds and alert.
+            self._connection_lost(silence(limit), since=self._heard_wall)
             await ws.close()
 
         helpers = [asyncio.create_task(close_on_stop()), asyncio.create_task(close_when_silent())]
@@ -963,7 +979,7 @@ class _Stream:
             if self._stop.is_set():
                 return
             if silent:
-                raise _Silent(limit, self._heard_wall)
+                raise _Silent(limit)
             raise kis.KisError(f"websocket closed by KIS (code {ws.close_code})")
         finally:
             for helper in helpers:
