@@ -113,14 +113,19 @@ def member_rows(data_dir: Path | None, day: date, symbol: str) -> list[dict[str,
     return sorted(rows, key=lambda r: r["received_at"])
 
 
-def estimates(data_dir: Path | None, day: date, symbol: str) -> list[dict[str, Any]]:
+def estimates(
+    data_dir: Path | None, day: date, symbol: str, until: datetime | None = None
+) -> list[dict[str, Any]]:
     """The day's estimate slots, in the order they first had a value: when that was, and each
-    investor's latest value in it (None until entered)."""
+    investor's latest value in it (None until entered); of the polls received by ``until`` only, if
+    given, so a slot revised later shows what was known then."""
     slots: dict[str, dict[str, Any]] = {}
     rows = sorted(
         _rows(data_dir, day, FOREIGN_ESTIMATE.tr_id, symbol, _ESTIMATE_COLUMNS),
         key=lambda r: r["received_at"],
     )
+    if until is not None:
+        rows = [r for r in rows if r["received_at"] <= until]
     for r in rows:
         foreign, institution = r["foreign_net_qty"], r["institution_net_qty"]
         if foreign is None and institution is None:
@@ -188,7 +193,7 @@ def _totals(data_dir: Path | None, day: date, symbol: str, until: datetime) -> d
     """Each flow's day total as last recorded by ``until`` (that day's clock)."""
     program = _last_until(program_rows(data_dir, day, symbol), "event_time", until)
     member = _last_until(member_rows(data_dir, day, symbol), "received_at", until)
-    known = [s for s in estimates(data_dir, day, symbol) if s["received_at"] <= until]
+    known = estimates(data_dir, day, symbol, until)  # the polls by then: no later revision
     foreign = next((s["foreign_net_qty"] for s in reversed(known) if s["foreign_net_qty"] is not None), None)
     institution = next(
         (s["institution_net_qty"] for s in reversed(known) if s["institution_net_qty"] is not None), None

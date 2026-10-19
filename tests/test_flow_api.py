@@ -219,6 +219,8 @@ async def test_today_s_flows_read_the_engine_s_bars_and_the_totals_by_now(tmp_pa
             program("09:20:00", 600),
             program("09:10:00", 100, FRIDAY),
             program("09:30:00", 999, FRIDAY),  # after Monday's clock: not counted
+            estimate("09:20:00", "1", 500, None, FRIDAY),
+            estimate("09:40:00", "1", 900, None, FRIDAY),  # a revision after it: not seen at 09:25
         ],
     )
     engine, clock = engine_at(tmp_path, at("08:59"))
@@ -235,6 +237,8 @@ async def test_today_s_flows_read_the_engine_s_bars_and_the_totals_by_now(tmp_pa
     assert body["totals"]["program_net_value"] == 600
     previous = body["previous_day_same_time"]
     assert previous["at"] == "2026-10-16T09:25:00+09:00" and previous["program_net_value"] == 100
+    # Friday's slot came in at 09:20 and was revised at 09:40: at 09:25 the first figure was known.
+    assert previous["estimate_foreign_net_qty"] == 500
     assert body["final"] is None and body["members"] is None and body["estimates"] == []
 
 
