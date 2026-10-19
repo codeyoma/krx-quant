@@ -24,9 +24,12 @@ whose first night learns nothing is not simulated); its kind's baselines predict
 (``daily_training.baseline_forecasts``). A day a circuit breaker or a sidecar touched is special,
 as live. A daily algorithm whose pre-validation passed but that the engine has not enrolled yet
 (its report is read at the engine's next start or 08:50) is enrolled here, as the engine would: the
-scheduled job runs right after its pre-validation, so it is simulated the same night. A kind
-whose judging is held (``DailyKind.judging_held``, #264: its answers may be wrong) is not
-simulated: its algorithms' probations wait, unsimulated, and are simulated once the hold is lifted.
+scheduled job runs right after its pre-validation, so it is simulated the same night. Two wait,
+their probations unsimulated, and are simulated on a later night (#264): an algorithm whose
+pre-validation does not stand for the code, answer version and inputs it runs (the engine does
+not run it on probation then), and one whose kind's answers of the latest days are not all in
+on this server (``DailyKind.pending``: ``open_to_close``'s closing auction prices), as the days
+replayed would not be the latest.
 
 **Bar-close kinds** (``simulate_bar_close``, ``krx-quant simulate bar-close``: the direction, the
 range, the barrier and its horizon ladder): their inputs are the recorded quotes, so the days are
@@ -55,7 +58,7 @@ import contextlib
 import fcntl
 import logging
 from collections import defaultdict
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
@@ -120,8 +123,9 @@ class SimulationRun:
 
     enrolled: list[str] = field(default_factory=list)  # daily algorithms enrolled on probation here
     simulations: list[Simulation] = field(default_factory=list)
-    # Daily algorithms whose probation waits for its simulation, not simulated: their kind's
-    # judging is held (``DailyKind.judging_held``, #264). Algorithm -> why.
+    # Daily algorithms whose probation waits for its simulation, not simulated tonight (#264):
+    # their pre-validation does not stand, or their kind's latest answers are not all in.
+    # Algorithm -> why.
     held: dict[str, str] = field(default_factory=dict)
     recorded_days: int | None = None  # a bar-close simulation's: the recorded days there were
 
@@ -161,15 +165,16 @@ def simulate_daily(
             waiting = set(store.to_simulate([a.name for a in algorithms]))
             files = DailyFiles(settings.data_dir, settings.state_dir)
             calendar = calendar_store(settings).calendar
+            admitted = admits(settings.state_dir, settings.target_version)
             done: list[Simulation] = []
             held: dict[str, str] = {}
             for algorithm in algorithms:
                 kind = next((k for k in kinds if k.name == algorithm.kind), None)
                 if algorithm.name not in waiting or kind is None:
                     continue
-                if kind.judging_held is not None:
-                    # Its answers may be wrong (#264): it waits, still unsimulated, for them.
-                    held[algorithm.name] = kind.judging_held
+                why = _waits(settings, calendar, algorithm, kind, admitted, now)
+                if why is not None:
+                    held[algorithm.name] = why  # it waits, still unsimulated (#264)
                     continue
                 stint = store.statuses()[algorithm.name].since
                 done.append(_daily(store, settings, files, calendar, algorithm, kind, stint, now))
@@ -178,6 +183,24 @@ def simulate_daily(
             return SimulationRun(enrolled, [ruled.get(s.algorithm, s) for s in done], held=held)
         finally:
             store.close()
+
+
+def _waits(
+    settings: Settings,
+    calendar: MarketCalendar,
+    algorithm: DailyAlgorithm,
+    kind: DailyKind,
+    admitted: Callable[[DailyAlgorithm], bool],
+    now: datetime,
+) -> str | None:
+    """Why ``algorithm``'s probation is not simulated tonight (#264), None when it is: its
+    pre-validation does not stand for what it runs (the engine runs it once one does), or its
+    kind's answers of the latest days are not all in (``DailyKind.pending``)."""
+    if not admitted(algorithm):
+        return "its pre-validation does not stand for the code, answer version and inputs it runs"
+    if kind.pending is None:
+        return None
+    return kind.pending(settings.data_dir, calendar, settings.symbols, now)
 
 
 def _enroll(
@@ -416,7 +439,7 @@ def report(run: SimulationRun, level: float) -> list[str]:
     elif not run.simulations and not run.held:
         lines.append("no probation waits for its simulation")
     for name, why in run.held.items():
-        lines.append(f"{name}: its simulation waits - {why}; its probation goes on live, not judged")
+        lines.append(f"{name}: its simulation waits - {why}")
     for s in run.simulations:
         if not s.days:
             lines.append(f"{s.algorithm} ({s.kind}): not simulated - {s.why}; its probation goes on live")

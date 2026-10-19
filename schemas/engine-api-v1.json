@@ -1416,7 +1416,7 @@
       }
     },
     "open_to_close_path": {
-      "description": "An open_to_close answer's path (#264): empty for a day whose KRX day candle never came (no candle); else the KRX opening and closing auctions' prices (won, adjusted as read), the change close / open − 1, the band it is classed by and the volatility and scale it came from (null without days enough to set it: no band), the fee rate (the P&L's costs), where it came from, and the day's VIs of the symbol.",
+      "description": "An open_to_close answer's path (#264): empty for a day whose prices never came (answer version 2: no closing auction; version 1: no candle); else the KRX opening and closing auctions' prices (won, adjusted as the KRX day candle is), the change close / open − 1, the band it is classed by and the volatility and scale it came from (null without days enough to set it: no band), the fee rate (the P&L's costs), where the close came from (version 2: KRX's one-minute bar of the closing auction, else the recorded print, or the KRX day candle on a day before the after-market without either; version 1: the KRX day candle), and the day's VIs of the symbol.",
       "oneOf": [
         {"type": "object", "maxProperties": 0},
         {
@@ -1431,7 +1431,7 @@
             "sigma": {"type": ["number", "null"], "minimum": 0},
             "scale": {"type": ["number", "null"], "minimum": 0},
             "fee_rate": {"type": "number", "minimum": 0},
-            "source": {"enum": ["krx_day_candle"]},
+            "source": {"enum": ["krx_minute_bar", "recorded_print", "krx_day_candle"]},
             "vi": {"type": "integer", "minimum": 0}
           }
         }

@@ -14,7 +14,9 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
+from typing import Any
 
+from krx_quant.auctions import KEEP_DAYS, MINUTE_BAR, write_auctions
 from krx_quant.candles import write_candles, write_krx_days
 from krx_quant.macro import Observation
 from krx_quant.market_calendar import MarketCalendar
@@ -51,6 +53,7 @@ def made_history(
     symbols: Sequence[str] = SYMBOLS,
     calendar: MarketCalendar | None = None,
     krx_history: bool = True,
+    auctions: bool = True,
 ) -> Made:
     calendar = calendar or MarketCalendar()
     krx = trading_days(calendar, last, days)
@@ -117,4 +120,13 @@ def made_history(
         write_krx_days(data_dir, symbol, krx_rows)
         write_candles(data_dir, "day", symbol, un_rows)
         write_supply(state_dir, symbol, KIS, supply)
+        if auctions:
+            # The auction keeper's last year (#264): KRX's minute bars of the auctions, here the
+            # candle's open and close (so the made-up days' answers are the candles').
+            kept: dict[date, dict[str, Any]] = {
+                d: {"symbol": symbol, "date": d, "open": r["open"], "close": r["close"], "source": MINUTE_BAR}
+                for d, r in zip(krx, krx_rows, strict=True)
+                if d > last - KEEP_DAYS
+            }
+            write_auctions(data_dir, symbol, kept)
     return Made(krx, us_days)

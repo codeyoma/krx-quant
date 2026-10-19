@@ -40,7 +40,9 @@ since: the day the morning swap installed it, nothing before, nothing while it w
 Live, a new algorithm runs only once ``admits`` lets it (its pre-validation passed,
 ``prevalidation.py``): from the next bar close it starts on probation. Until then it is
 not run, listed or reviewed; the first review after the engine starts alerts it once.
-An algorithm the engine has already enrolled always runs.
+An algorithm the engine has already enrolled always runs, but for a daily kind's on probation
+(#264): it runs only while ``admits`` lets it, so a new answer version, code or inputs have its
+walk-forward run again before it predicts again.
 
 The symbols' bars and reference prices, and the bars of the series that may lead them
 (``features.Leaders``: futures, indices, US daytime trades, ETFs), come from the Market
@@ -578,8 +580,16 @@ class PredictionEngine:
         kind_admitted = [
             a for a in self.kind_registered if a.name in known or self._admits is None or self._admits(a)
         ]
+        # A daily algorithm on probation runs only while its pre-validation stands for the code,
+        # the answer version and the inputs it runs now (#264): its walk-forward takes a minute,
+        # so a change (``open_to_close``'s answer version 2) has it judged again first, that
+        # night. One judged live already (active, on the bench) runs on, as any algorithm does.
         daily_admitted = [
-            a for a in self.daily_registered if a.name in known or self._admits is None or self._admits(a)
+            a
+            for a in self.daily_registered
+            if (a.name in known and known[a.name].status is not Status.PROBATION)
+            or self._admits is None
+            or self._admits(a)
         ]
         if (
             tuple(admitted) == self.algorithms
@@ -606,9 +616,10 @@ class PredictionEngine:
 
     def to_simulate(self) -> tuple[list[str], list[str]]:
         """The algorithms on a probation that waits for its simulation (#298,
-        ``PredictionStore.to_simulate``): the bar-close kinds', then the daily kinds'."""
+        ``PredictionStore.to_simulate``): the bar-close kinds', then the daily kinds' that run
+        (a daily one on probation waits for its pre-validation otherwise, #264)."""
         bar_close = [a.name for a in self.registered] + [a.name for a in self.kind_registered]
-        daily = [a.name for a in self.daily_registered]
+        daily = [a.name for a in self.daily_algorithms]
         return self.store.to_simulate(bar_close), self.store.to_simulate(daily)
 
     def simulated(self, kind: PredictionKind) -> dict[str, Simulated]:
@@ -830,14 +841,10 @@ class PredictionEngine:
                 simulated=self.simulated(kind),
             )
             result = Review(result.changes + judged.changes, result.candidates + judged.candidates)
-        # Each daily kind's algorithms, by its own days (#264): those with an answer. A kind whose
-        # judging is held (``DailyKind.judging_held``) is not reviewed: its answers may be wrong.
+        # Each daily kind's algorithms, by its own days (#264): those with an answer.
         for daily in self.daily_kinds:
             of_daily = [a.name for a in self.daily_algorithms if a.kind == daily.name]
             if not of_daily:
-                continue
-            if daily.judging_held is not None:
-                log.info("%s: its algorithms are not reviewed: %s", daily.name, daily.judging_held)
                 continue
             judged = await asyncio.to_thread(
                 review,

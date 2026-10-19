@@ -7,6 +7,7 @@ import re
 from datetime import date
 from pathlib import Path
 
+from krx_quant.auctions import MINUTE_BAR, write_auctions
 from krx_quant.candles import CANDLE_SCHEMA, write_candles, write_krx_days
 from krx_quant.daily_check import daily_check
 from krx_quant.feeds import KRX_TRADE
@@ -38,8 +39,10 @@ def candle(symbol: str, venue: str, opened: int, close: int) -> dict[str, object
 
 
 def test_the_check_tells_the_predictions_answers_and_auction_prints(tmp_path: Path) -> None:
+    """As on 2026-10-19 (#264): the KRX day candle's close is the after-market's last trade, not
+    the closing auction's print; the kept closing auction price the answers end at is the print."""
     data, db = tmp_path / "data", tmp_path / "engine.sqlite3"
-    write_krx_days(data, "005930", [candle("005930", "KRX", 81_200, 82_000)])
+    write_krx_days(data, "005930", [candle("005930", "KRX", 81_200, 82_300)])
     write_candles(data, "day", "005930", [candle("005930", "UN", 81_600, 82_000)])  # NXT's pre-market open
     write_krx_days(data, "000660", [candle("000660", "KRX", 201_000, 199_500)])
     recorder = ParquetRecorder(data, flush_rows=100, flush_seconds=3600)
@@ -55,6 +58,12 @@ def test_the_check_tells_the_predictions_answers_and_auction_prints(tmp_path: Pa
     ]:
         recorder.record("events", DAY, feed, row["symbol"], row, KRX_TRADE.schema)
     recorder.close()
+    for symbol, closed in (("005930", 82_000), ("000660", 199_400)):
+        write_auctions(
+            data,
+            symbol,
+            {DAY: {"symbol": symbol, "date": DAY, "open": None, "close": closed, "source": MINUTE_BAR}},
+        )
     store = PredictionStore(db)
     t = OPEN_TO_CLOSE.predicted_at(DAY)
     store.add_kind_predictions(
@@ -69,12 +78,12 @@ def test_the_check_tells_the_predictions_answers_and_auction_prints(tmp_path: Pa
     )
     store.add_kind_answers(
         OPEN_TO_CLOSE.name,
-        1,
+        OPEN_TO_CLOSE.answer_version,
         [
-            ("005930", t, Answer("up", None, {"source": "krx_day_candle"}), False),
-            ("000660", t, Answer("down", None, {"source": "krx_day_candle"}), True),
+            ("005930", t, Answer("up", None, {"source": MINUTE_BAR}), False),
+            ("000660", t, Answer("down", None, {"source": MINUTE_BAR}), True),
         ],
-        scored_at=at("20:35:00"),
+        scored_at=at("15:45:00"),
     )
     store.close()
 
@@ -85,12 +94,15 @@ def test_the_check_tells_the_predictions_answers_and_auction_prints(tmp_path: Pa
         "2026-10-12: 예측 4개 (otc-flat ok 2, otc-persist ok 2), 보합 폭 4/4, 표시 08:50:00–08:50:00" in text
     )
     assert (
-        "2026-10-12: 정답 2/2 (up 1, flat 0, down 1) · 출처 krx_day_candle 2 · 특수 1"
-        " · 채점 10-12 20:35–10-12 20:35" in text
+        "2026-10-12: 정답 2/2 (up 1, flat 0, down 1) · 출처 krx_minute_bar 2 · 특수 1"
+        " · 채점 10-12 15:45–10-12 15:45" in text
     )
-    assert "2026-10-12 005930: 시가 같음, 종가 같음, 통합 일봉 시가 다름" in text
-    assert "2026-10-12 000660: 시가 다름, 종가 같음" in text
-    assert "요약: 시가 같음 1, 시가 다름 1, 종가 같음 2, 통합 시가 다름 1" in text
+    assert "2026-10-12 005930: 시가 같음, 종가 다름, 정답 종가 같음, 통합 일봉 시가 다름" in text
+    assert "2026-10-12 000660: 시가 다름, 종가 같음, 정답 종가 다름" in text
+    assert (
+        "요약: 시가 같음 1, 시가 다름 1, 정답 종가 같음 1, 정답 종가 다름 1, 종가 같음 1, 종가 다름 1,"
+        " 통합 시가 다름 1" in text
+    )
     assert not re.search(
         r"\d{5,}", text.replace("2026-10-12", "").replace("005930", "").replace("000660", "")
     ), "no price in the output"

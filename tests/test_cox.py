@@ -120,7 +120,7 @@ def fitted(tmp_path: Path, signal: float, days: int = 800) -> tuple[Model, list]
 def test_cox_learns_the_planted_lean_and_its_model_round_trips(tmp_path: Path) -> None:
     model, found = fitted(tmp_path, signal=1.0)
     assert model.version.startswith("cox-20261016-")
-    assert model.target_version == 1 and model.trained_until == LAST
+    assert model.target_version == OPEN_TO_CLOSE.answer_version and model.trained_until == LAST
     assert model.params["lambda"] in (0.001, 0.01, 0.03, 0.1, 0.3, 1.0)
     # The day leans against the night's SOX move: up's weight on it is below down's.
     assert model.params["w.up.us_sox"] < 0 < model.params["w.down.us_sox"]
