@@ -79,6 +79,8 @@ async def walk(get: Get) -> dict[str, int]:
         await ask(f"/v1/symbols/{symbol}/special?from=2026-10-01&to=2026-10-12", "special")
         await ask(f"/v1/symbols/{symbol}/supply", "supply")  # #226
         await ask(f"/v1/symbols/{symbol}/supply?from=2026-10-01&to=2026-10-12", "supply")
+        await ask(f"/v1/symbols/{symbol}/flow", "flow")  # #306
+        await ask(f"/v1/symbols/{symbol}/flow?day=2026-10-08", "flow")
     for query in ("", "?period=5d&basis=a&special=include", f"?symbol={symbols[0]}&period=20d"):
         await ask(f"/v1/leaderboard{query}", "leaderboard")
     for name in algorithms:
@@ -147,6 +149,9 @@ async def walk(get: Get) -> dict[str, int]:
         ("/v1/algorithms/nobody", 404),
         ("/v1/calendar?limit=0", 400),
         ("/v1/briefing?day=2026-10-1", 400),
+        ("/v1/symbols/999999/flow", 404),
+        ("/v1/symbols/005930/flow?day=2026-10-1", 400),
+        ("/v1/symbols/005930/flow?day=2026-10-11", 404),  # a Sunday
     ):
         await ask(path, "error", status)
     asked = {*ROUTES.values(), "error"} - (set() if kinds[1:] else KIND_ROUTES)
@@ -199,6 +204,7 @@ def test_the_schema_is_valid_and_closed() -> None:
         "/$defs/kind_entry_fields",
         "/$defs/kind_prediction_fields",
         "/$defs/kind_answer_fields",
+        "/$defs/flow_totals_fields",  # the flow's totals, now and the day before (#306)
     }
 
     def open_objects(node: Any, path: str) -> list[str]:
