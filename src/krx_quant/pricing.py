@@ -68,6 +68,15 @@ def tick_size(price: float) -> int:
     return next(tick for low, tick in _TICK_BANDS if price >= low)
 
 
+def tick_band(price: float) -> tuple[int, int | None]:
+    """The edges of the band ``price`` falls in (#307): its lowest price, and the next band's
+    lowest (None for the top band). A price at an edge is in the band above it."""
+    for i, (low, _) in enumerate(_TICK_BANDS):
+        if price >= low:
+            return low, _TICK_BANDS[i - 1][0] if i > 0 else None
+    raise ValueError(f"no tick band for {price}")
+
+
 def flat_ticks(price: float, fee_rate: float) -> int:
     """The fewest ticks at ``price`` that cover the round-trip cost.
 

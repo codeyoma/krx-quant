@@ -486,6 +486,7 @@ def barrier_kind(minutes: int = BARRIER_MINUTES) -> Kind:
         baselines=(BarrierClimate(minutes=minutes), BarrierPersist(minutes)),
         stats=barrier_stats,
         horizon=timedelta(minutes=minutes),
+        sides=(UP_FIRST, DOWN_FIRST),  # a long's barrier first, a short's (#307)
     )
 
 

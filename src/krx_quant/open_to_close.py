@@ -293,6 +293,7 @@ OPEN_TO_CLOSE = DailyKind(
     class_titles=("상승", "보합", "하락"),
     action=(UP, DOWN),
     answer_version=ANSWER_VERSION,
+    sides=(UP, DOWN),
     stats=open_to_close_stats,
     daily_baselines=(OtcFlat(), OtcClimate(), OtcPersist()),
     answers=answers,

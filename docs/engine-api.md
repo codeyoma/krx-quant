@@ -772,6 +772,90 @@
 
   > **바뀜** (2026-10-10, #51): 합의는 한 번도 예측하지 않은 엔진에서 404였다 → 기준 예측처럼 늘 아는 이름이다. 이유: 계약 테스트가 빈 엔진에서 404를 찾았다. 화면은 합의 성적을 늘 물을 수 있어야 한다.
 
+### `GET /v1/cost-map?symbol=&period=&special=` (#307)
+
+비용 지도다. 상승·하락 신호가 왕복 비용을 갚으려면 얼마나 맞혀야 하는지를, 엔진이 예측하는 지평마다 실제 맞힘률 옆에 놓는다(`cost_map.py`). 지평·비용 화면이 읽는다. 리서치의 결론(`research/reports/`)이 바탕이다: 대칭 목표 ±W틱, 왕복 비용 C틱이면 P(상승|신호) − P(하락|신호) ≥ C/W여야 본전이고, 맞힘률로 말하면 p* = (W + C) ÷ 2W를 넘어야 한다. W < C면 다 맞혀도 손해다.
+
+질의 값은 순위표와 같다(`symbol`, `period`, `special`. `kind`와 `basis`는 받지 않는다). 잘못된 값은 400이다. `symbol`을 빼면(`all`) 모든 종목이다.
+
+```json
+{
+  "symbol": "all", "period": "20d", "special": "exclude", "as_of": "2026-10-12T10:30:00+09:00",
+  "min_sample": 200, "fee_rate": 0.00015, "spread_ticks": 1,
+  "symbols": [
+    {"symbol": "000660", "name": "SK하이닉스", "price": 209000.0, "price_at": "2026-10-12T10:30:00+09:00", "live": true,
+     "costs": {"tick": 500, "tick_bp": 23.92, "k": 1, "sell_tax_bp": 20.0, "fees_bp": 3.0, "spread_bp": 23.92,
+               "limit": {"bp": 23.0, "ticks": 0.96}, "market": {"bp": 46.92, "ticks": 1.96},
+               "inverse": {"leverage": 2, "listed": "2026-05-27", "bp": 1.5, "ticks": 0.063, "omits": ["spread", "premium", "basis"]},
+               "below": {"edge": 200000, "price": 199900, "tick": 100, "k": 5},
+               "above": {"edge": 500000, "price": 500000, "tick": 1000, "k": 2}}}
+  ],
+  "rows": [
+    {"kind": "barrier_15m", "title": "장벽 15분", "horizon_minutes": 15, "rule": "봉 마감 중간가 ± w틱 장벽 가운데 15분 안에 먼저 닿은 쪽, …",
+     "days": ["2026-10-08", "2026-10-12"], "unit": "ticks", "bar_closes": 501,
+     "width": 12.0, "reference_price": 79750.0, "tick": 100, "cost": {"limit": 1.83, "market": 2.83},
+     "breakeven": {"limit": {"c_over_w": 0.153, "p_star": 0.576}, "market": {"c_over_w": 0.236, "p_star": 0.618}},
+     "breakeven_missing": null,
+     "consensus": null,
+     "top": {"algorithm": "breiman-15m", "rank": 1, "calls": 240, "precision": {"value": 0.66, "low": 0.60, "high": 0.72, "n": 240},
+             "edge": 0.41, "pnl": {"trades": 240, "per_trade": {"value": 0.8, "low": -0.2, "high": 1.8, "n": 240}},
+             "pnl_inverse": {"trades": 240, "per_trade": {"value": 1.1, "low": 0.1, "high": 2.1, "n": 240}},
+             "verdict": {"limit": "pass", "market": "fail"}},
+     "baseline": {"algorithm": "barrier-persist-15m", "rank": null, "calls": 217, "precision": {"value": 0.32, "low": 0.26, "high": 0.38, "n": 217},
+                  "edge": 0.08, "pnl": {"trades": 217, "per_trade": {"value": -4.8, "low": -6.9, "high": -2.6, "n": 217}},
+                  "pnl_inverse": {"trades": 217, "per_trade": {"value": -4.5, "low": -6.6, "high": -2.4, "n": 217}},
+                  "verdict": {"limit": "fail", "market": "fail"}}}
+  ],
+  "regimes": {"computed_at": "2026-10-11T20:30:41+09:00", "first_day": "2025-10-13", "last_day": "2026-10-08",
+              "rows": [{"symbol": "005930", "period": "애프터마켓 뒤(09-14~)", "from": "2026-09-14", "to": null, "days": 20, "windows": 7500,
+                        "up": 0.259, "flat": 0.503, "down": 0.238, "k": 2, "persist": 0.543, "persist_windows": 7420}]},
+  "regimes_missing": null
+}
+```
+
+(값은 예시다.)
+
+**비용 카드 `symbols[]`.** 종목마다 기준가에서의 비용이다. 화면용 상수를 따로 두지 않고 엔진의 가격 규칙(`pricing.py`: 매도세 `SELL_TAX`, 수수료 `KRX_FEE_PERCENT`, 호가단위표, k, 인버스 상품 `INVERSE_PRODUCTS`)을 그대로 쓴다. 채점과 연구용 손익이 쓰는 비용과 같다.
+
+- `price`, `price_at`, `live`: 연속매매 중이면 지금의 통합 중간가(`/v1/symbols`의 `mid`)와 지금(`live` `true`), 아니면 그 종목의 가장 늦은 봉 마감의 중간가(도달 정답 경로의 `anchor`)와 그 봉 마감(`live` `false`)이다. 둘 다 없으면 `price`, `price_at`, `costs`가 `null`이다.
+- `tick`, `tick_bp`: 그 가격의 호가단위와 그것의 bp(호가단위 ÷ 가격 × 10⁴).
+- `sell_tax_bp`, `fees_bp`, `spread_bp`: 매도세(20bp), 수수료 양쪽(0.015%면 3bp), 스프레드 1틱(`spread_ticks`, 리서치의 비용표와 같은 가정이다. 실제 스프레드는 재지 않는다).
+- `limit`, `market`: 지정가 왕복(매도세 + 수수료 양쪽: k가 덮는 것, `pricing.cost_ticks`)과 시장가 왕복(스프레드 1틱 더: 매도 호가에 사서 매수 호가에 판다). bp와 틱.
+- `k`: 그 가격의 정답 문턱(`pricing.flat_ticks`). k < `market.ticks`인 종목은 4분 방향이 시장가로 본전이 될 수 없다.
+- `inverse`: 하락을 단일종목 인버스 2X로 칠 때의 왕복을 기초 주식의 움직임으로 환산한 것(#267): 상품 명목에 수수료 양쪽만(ETF 매도에는 거래세가 없다), 배율로 나눈다(`bp` = 2 × 수수료 ÷ 배율 × 10⁴, `ticks`는 그것을 주식의 틱으로). 연구용 손익(`pnl_inverse`)과 같은 규칙이다. 상품의 스프레드, 괴리(`premium`), 선물 basis는 빠졌다(`omits`). 그래서 하한이다. 상품이 없는 종목(009150)은 `null`이다(화면은 "거래 수단 없음").
+- `below`, `above`: 위·아래 가장 가까운 호가단위 구간 경계(`edge`, `pricing.tick_band`)와 그 너머 첫 가격(`price`: 아래는 경계 − 아래 구간의 호가단위, 위는 경계 자체), 그 가격의 호가단위와 k. 맨 아래 구간이면 `below`, 맨 위 구간(50만 원 이상)이면 `above`가 `null`이다. 예: 199,900원은 호가단위 100원(5.0bp), k 5이고, 20만 원을 넘으면 500원(25bp), k 1이 된다.
+
+**지평 줄 `rows[]`.** 방향이 있는 예측 종류(`Kind.sides`가 있는 것)마다 한 줄이다. 순서는 종류 등록 순서다: 방향, 장벽, 15·30·60분 장벽, 시가→종가. 변동폭은 방향이 없어 없다. 새 종류가 `sides`를 가지면 같은 규칙으로 줄이 생긴다.
+
+- `kind`, `title`, `horizon_minutes`(하루 한 번 종류는 `null`), `rule`(정답 규칙 한 줄, 화면의 줄 머리 툴팁), `days`(그 종류의 질의 날짜: 순위표의 `days`와 같다).
+- `unit`: `ticks`(방향, 장벽) 또는 `bp`(하루 한 번 종류). 폭을 읽을 수 없는 종류면 `null`이다.
+- `bar_closes`: 폭과 기준가를 읽은 봉 마감 수(봉 마감마다 한 번, 누가 예측했든).
+- `width`, `reference_price`, `tick`, `cost`: 폭 W와 비용 C(`limit`, `market`).
+  - 틱 단위 줄은 그 기간의 봉 마감 가운데 지정가 C/W가 가운데인 봉 마감(둘이면 아래 것) 하나의 값이다: W는 그 봉 마감의 k(방향)나 장벽 폭 w(장벽, 정답 경로의 `w`), C는 그 봉 마감 중간가(`reference_price`)에서의 왕복이다. 한 종목 안에서는 C가 거의 같아 W의 중앙값과 같다. 모든 종목(`all`)이면 한 종목의 봉 마감이다. 호가단위가 다른 종목의 값을 섞지 않으려는 것이다.
+  - 시가→종가(`bp`)는 W가 보합 폭 b의 중앙값(bp, 정답 경로의 `band`), C가 매도세 + 수수료 양쪽(bp)이다. 시가·종가 단일가는 모든 주문이 한 가격에 체결되므로 시장가도 스프레드가 없어 `market`이 `limit`과 같다. `reference_price`는 시가의 중앙값, `tick`은 `null`이다.
+  - 근사다. 봉 마감마다 폭과 가격이 다른데 한 값으로 대신한다.
+- `breakeven`: 대칭 ±W 정답(방향의 도달 정답, 장벽)이면 비용마다 `c_over_w`(C/W)와 `p_star`(p* = (W + C) ÷ 2W)다. 신호가 맞을 확률 p, 반대로 틀릴 확률 q면 평균 총이익이 W(p − q)다. 셋째 결과(보합, 시간 만료)가 없으면 q = 1 − p라 p ≥ p*가 본전이고, 있으면 q < 1 − p라 p ≥ p*면 넉넉히 본전이다. p*가 1을 넘으면 다 맞혀도 손해다. 시가→종가는 `null`이고 이유가 `breakeven_missing`에 온다("대칭 장벽이 아님": 보합 폭은 거래를 닫는 자리가 아니다). 폭이 없으면 "폭을 읽을 정답이 없음"이다.
+- `consensus`, `top`, `baseline`: 세 예측자. 없으면 `null`이다.
+  - `consensus`: 최종 합의(`consensus-final`). 방향에만 있다. 다른 종류에는 합의가 없다.
+  - `top`: 그 종류 순위표의 순위가 가장 높은 알고리즘(합의 둘은 뺀다).
+  - `baseline`: 그 종류 기준 예측 가운데 상승·하락 신호 맞힘률의 신뢰구간 하한이 가장 높은 것(같으면 이름순 앞). 늘 보합처럼 신호를 내지 않는 기준 예측은 고르지 않는다.
+- 예측자마다:
+  - `precision`: 상승·하락 신호의 맞힘률과 Wilson 95% 구간. 순위표·상세 통계의 `precision`과 같은 값이다(같은 통계 함수, 같은 질의).
+  - `calls`: 상승·하락 신호 수.
+  - `edge`: 신호 가운데 맞은 몫 − 반대로 틀린 몫. 상승 신호면 P(상승|신호) − P(하락|신호), 하락 신호면 그 반대다. `c_over_w`와 견준다. 신호가 없으면 `null`이다.
+  - `pnl`, `pnl_inverse`: 연구용 손익의 거래 수와 거래당 평균(Wilson이 아닌 정규 95% 구간). 줄의 단위다(틱, 시가→종가는 bp). 방향은 닿음 손익(`pnl`, `pnl_inverse`), 다른 종류는 그 종류 통계(`extra`의 `pnl`, `pnl_inverse`)다. 없는 종류면 `null`이다.
+  - `verdict`: 비용마다 `pass`(맞힘률의 신뢰구간 하한 > p*), `fail`(아니면), `few`(신호 수가 순위표의 최소 표본 `min_sample`보다 적다). 맞힘률 자체가 아니라 하한으로 판정해 우연히 넘은 줄을 넘음으로 보지 않는다. p*가 없으면 `null`이다.
+- 통계는 순위표처럼 작업 스레드에서 계산하고 예측 저장소가 바뀔 때까지 둔다(종류마다 따로).
+
+**기간 기준율 `regimes`.** 4분 도달 정답의 기간별 기준율이다(`base_rates.py`). `structure-check`의 3절(#270)과 같은 기간(`structure_check.PERIODS`: 상장 전 ~05-26, 상장 뒤 05-27~07-30, 규제 뒤 07-31~09-13, 애프터마켓 뒤 09-14~), 같은 정답(1분봉 규칙 `touch.bar_touch`, 엔진이 예측하는 모든 봉 마감), 같은 함수(`structure_check.label_shares`)다.
+
+- `computed_at`, `first_day`, `last_day`: 계산한 때와 읽은 1분봉의 첫날·마지막 날.
+- `rows[]`: 종목·기간마다 `days`(1분봉 날 수), `windows`(창 수), `up`·`flat`·`down`(클래스 비율. 늘 보합의 맞힘률은 `flat`이다), `k`(중앙값, 둘이면 아래 것), `persist`(직전 창 정답이 맞은 비율, 직전 창이 있는 창 `persist_windows` 가운데. 없으면 `null`). 창이 없는 기간은 빠진다. `symbol`을 고르면 그 종목 줄만 온다.
+- 수집기의 이력 작업이 시작할 때와 매일 20:30 백필 뒤에 저장된 모든 1분봉으로 계산해 `state/base_rates.json`에 둔다([operations.md](operations.md)). 엔드포인트는 그 파일을 읽기만 한다. 아직 없으면 `regimes`가 `null`이고 `regimes_missing`에 이유가 온다(읽지 못한 파일이면 그 이유).
+- 비율과 수, k만 있다. 가격은 없다.
+
+새 스트림 메시지는 없다. 화면이 읽어 간다. 데모 엔진은 그 아침의 예측·정답으로 줄을 채우고, 기간 기준율은 지어낸 값(세 종목 × 네 기간)이다.
+
 ### `GET /v1/macro`
 
 그날의 매크로 지표와 국면이다(#8, #19). 수집기가 `macro` 계층에 기록한 것을 읽는다([design.md](design.md#45-매크로-지표)).
@@ -1137,6 +1221,7 @@
 | `fields`, `check` | 세 확률 말고 내는 출력 필드와 그 뜻(`cards.Meaning`), 출력 전체의 검사(어기면 그 이유) |
 | `horizon` | 지평(#263): 창이 봉 마감부터 이어지는 시간(`timedelta`). 기본은 도달 정답의 4분이고, 4분 이상의 온 분이어야 한다. 방향은 늘 4분이다. 지평이 길면 그 종류의 창, 정답, 기준 예측이 읽는 직전 창, 예측 구간의 끝, 특수 상황 표시가 모두 그 지평을 따른다(아래 "지평") |
 | `stats` | 추가 통계: 그 예측자의 채점된 예측(`kinds.KindScored`)과 그 종류 기준 예측들의 채점된 예측(이름마다)에서 JSON 객체를 낸다. 통계 항목의 `extra`가 된다 |
+| `sides` | 오름과 내림의 클래스(#307), 첫째와 셋째 클래스 그 순서다: 첫째를 내면 매수, 둘째를 내면 매도(공매도나 인버스) 신호다. 비용 지도(`GET /v1/cost-map`)가 이 종류의 맞힘률을 비용과 견준다. 방향이 없는 종류(변동폭)는 `None`이다. 방향 `up`·`down`, 장벽 `up_first`·`down_first`, 시가→종가 `up`·`down` |
 
 > **바뀜** (2026-10-15, #197): `stats`는 그 예측자의 채점된 예측만 받았다 → 그 종류 기준 예측들의 것도 받는다. 이유: 변동폭의 `range-climate` 대비 pinball loss 차이를 내려고(#177).
 
