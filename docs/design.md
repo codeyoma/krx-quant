@@ -747,7 +747,9 @@ v1에서는 쓰지 않는다. 조사 결과는 [paid-data.md](paid-data.md)에 �
 - **신호 알림.** Condorcet 확률이 기준값 이상이고 N개 이상의 알고리즘이 같은 방향이면 데스크톱 알림과 소리를 낸다. 기준값과 N은 화면에서 조정한다. 텔레그램 신호 알림은 옵션이다.
 - **언어.** 한국어. 알고리즘 이름은 영어로 쓴다.
 - **경제 캘린더 (#150).** KRX 화면에 엔진 주소(`krx_quant/base_url`)를 넣으면, 대시보드의 Economic Calendar 위젯은 Fincept 서버(`api.fincept.in/macro/upcoming-events`, 크레딧을 쓴다) 대신 엔진의 `/v1/calendar`를 읽는다(4.5의 "경제 캘린더"). 시각은 KST로 보인다. 엔진 주소가 없으면 원래대로 Fincept 서버를 읽는다. 자세한 것은 `fincept/custom/README.md`의 "경제 캘린더"에 있다.
-- **수급 흐름 (#306).** 새 화면 "KRX 수급 흐름"이 한 종목의 그날 장중 수급(외국인·기관 추정 가집계, 프로그램매매, 외국계 회원사)을 1분 가격 위에 겹쳐 보인다. 엔진은 `GET /v1/symbols/{symbol}/flow`로 준다([engine-api.md](engine-api.md#get-v1symbolssymbolflowdayyyyy-mm-dd-306)). 예측 신호가 아니라 관찰용이다. 화면(fork)은 #306의 다음 PR이다.
+- **수급 흐름 (#306).** 새 화면 "KRX 수급 흐름"이 한 종목의 그날 장중 수급(외국인·기관 추정 가집계, 프로그램매매, 외국계 회원사)을 1분 가격 위에 겹쳐 보인다. 엔진은 `GET /v1/symbols/{symbol}/flow`로 준다([engine-api.md](engine-api.md#get-v1symbolssymbolflowdayyyyy-mm-dd-306)). 예측 신호가 아니라 관찰용이다. Navigate → Trading & Portfolio에서 연다(명령 팔레트 "krx", "수급"). 흐름마다 자기 눈금이고 값이 없는 분은 선을 끊는다. 추정은 계단이다. 끌어 확대하고 마우스를 올리면 그 분의 값을 본다. 옆에 지금까지의 합과 전 거래일 같은 시각의 합, 확정 수급 대 추정, 회원사 상위 5가 있다. 장중에는 30초마다, 그 밖에는 5분마다 다시 읽는다. 자세한 것은 `fincept/custom/README.md`의 "KRX 수급 흐름"에 있다(codeyoma/FinceptTerminal#96).
+
+  > **바뀜** (2026-10-20, #317): "화면(fork)은 #306의 다음 PR이다" → 화면이 위처럼 보인다. 이유: #306의 화면(codeyoma/FinceptTerminal#96).
 - **장전 브리핑 (#304).** 새 화면 "KRX 장전 브리핑"이 개장 전(07:30–09:00) 그날의 재료를 한 화면에 보인다. 엔진은 `GET /v1/briefing`으로 준다([engine-api.md](engine-api.md#get-v1briefing-304)): 밤사이 미국(SOX·NVDA·MU·VIX 최근 5일)과 그날 국면, KOSPI200 야간선물, 종목마다 장 마감 뒤 가격·NXT 프리마켓·KRX 예상 시가·전일 수급, 08:50 시가→종가 예측과 `cox`의 입력별 기여, 그날 일정. Navigate → Trading & Portfolio에서 연다(명령 팔레트 "krx", "브리핑"). 화면은 07:00–09:10에 30초마다, 그 밖에는 5분마다 다시 읽고, 숨으면 읽지 않는다. 날을 옮겨 지난날의 브리핑과 결과를 본다. 입력 기여 패널은 고른 종목의 예측이 입력마다 받은 몫(상승·하락 점수에 더한 값)을 큰 순서로 보인다. 판단 재료이고 검증된 신호가 아니다. 자세한 것은 `fincept/custom/README.md`의 "KRX 장전 브리핑"에 있다(codeyoma/FinceptTerminal#95).
 
   > **바뀜** (2026-10-19, #313): "화면(fork)은 #304의 다음 PR이다" → 화면이 위처럼 보인다. 이유: #304의 셋째 PR(codeyoma/FinceptTerminal#95).
