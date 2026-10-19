@@ -962,6 +962,35 @@ NIGHT_PROBE = Job(
     ),
 )
 
+# The auctions' expected fill (#304): the pre-open briefing shows KRX's expected opening price
+# from 08:30 to 09:00, read from the integrated book's ANTC_* fields, which the collector
+# normalizes from the deploy that brings it. The raw layer kept every frame before that, so the
+# days already recorded show whether the feed carries the price then, and whether it is KRX's
+# auction's (against the KRX day candle's open and close, in ticks). Once, on the first trading
+# day's night, so that day's normalized rows show the new columns too. It prints counts, times,
+# codes and tick differences, no market value, so it can go on the public issue. Ten days of
+# raw book frames take a few minutes to read; the half hour is a bound. Before the
+# pre-validations.
+EXPECTED_OPEN_ISSUE = 304
+
+EXPECTED_OPEN_PROBE = Job(
+    name="probe-expected-open-304",
+    due=_first_trading_night,
+    command=("probe-expected-open",),
+    timeout=timedelta(minutes=30),
+    targets=(
+        Target(
+            EXPECTED_OPEN_ISSUE,
+            note=(
+                "에이전트가 이 출력으로 통합 호가의 예상 체결(`ANTC_*`)이 08:30–09:00에 오는지, KRX 시가 "
+                '단일가의 것인지 보고 `docs/events.md` "호가"의 예상 체결 열 설명과 `docs/kis-feeds.md`에 '
+                "남긴다. 장전 브리핑(#304)의 예상 시가는 그 결과를 따른다. 출력에는 시세 값이 없다"
+                "(개수, 시각, 코드, 틱 차이만)."
+            ),
+        ),
+    ),
+)
+
 # ⑤ The pre-validations (#204): a new algorithm runs live once its pre-validation has passed
 # (``prevalidation.py``). Once ``MIN_DAYS`` trading days are recorded, one waiting algorithm
 # is pre-validated a night, at most (``prevalidation_tonight``): a run replays 20 days beside
@@ -1243,6 +1272,7 @@ JOBS: tuple[Job, ...] = (
     STRUCTURE_CHECK,
     ENTRY_DELAY,
     NIGHT_PROBE,
+    EXPECTED_OPEN_PROBE,
     DAILY_CHECK,
     STRUCTURE_SUPPLY,
     NET_BUYS_PROBE,

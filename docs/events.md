@@ -82,6 +82,14 @@ KIS 레코드 하나가 이벤트 하나다. 한 메시지에 레코드가 여�
 | `nxt_midpoint_px` | int64 | `NMID_PRC` | NXT 중간가 주문 가격 |
 | `nxt_midpoint_qty` | int64 | `NMID_TOTAL_RSQN` | NXT 중간가 주문 총 잔량 |
 | `nxt_midpoint_cls` | string | `NMID_CLS_CODE` | NXT 중간가 구분 코드(원문, 의미 미확인) |
+| `expected_px` | int64 | `ANTC_CNPR` | 단일가의 예상 체결가(원). 단일가가 아닐 때는 0이다(#304) |
+| `expected_qty` | int64 | `ANTC_CNQN` | 예상 체결량(주, #304) |
+| `expected_volume` | int64 | `ANTC_VOL` | 예상 거래량(주, #304) |
+| `expected_exch_cls` | string | `ANTC_EXCH_CLS_CODE` | 예상 체결의 거래소 구분 코드(원문, 의미 미확인, #304) |
+
+- 예상 체결 네 열(#304)은 장전 브리핑(#304)이 KRX 예상 시가를 보이려고 남긴다. 그 전 파일에는 이 열이 없고, 읽으면 `null`이다(하루를 합칠 때 없는 열은 `null`로 채운다). 통합 피드의 예상 체결이 언제 오는지, KRX 단일가의 것인지는 예약 작업 `probe-expected-open-304`가 잰다([operations.md](operations.md) "예상 체결 녹화 확인 (#304)"). 잰 결과가 오면 이 설명을 고친다.
+
+  > **바뀜** (2026-10-19, #304): 통합 호가의 예상 체결 필드(`ANTC_*`)는 raw에만 남았다 → events의 호가 행에도 네 열로 남긴다. 이유: 장전 브리핑이 08:30–09:00의 KRX 예상 시가를 보인다.
 
 ## events: 프로그램매매 (`H0UNPGM0`, 통합)
 
@@ -205,7 +213,7 @@ KRX 야간시장의 KOSPI200 선물 5단계 호가다. KIS는 0.2초 간격으�
 | 피드 | 열 |
 |---|---|
 | `FHKST01010100` 시세(체결 대체) | `symbol`, `received_at`, `price`, `cum_volume`, `change_pct`. 주식은 통합(`UN`), ETF는 KRX(`J`) 시장으로 조회한다. |
-| `FHKST01010200` 호가 스냅샷(호가 대체) | `symbol`, `event_time`(`aspr_acpt_hour`), `received_at`, `price`, `ask_px_1..10`, `bid_px_1..10`, `ask_qty_1..10`, `bid_qty_1..10`, `total_ask_qty`, `total_bid_qty`, `vi_cls_code` |
+| `FHKST01010200` 호가 스냅샷(호가 대체) | `symbol`, `event_time`(`aspr_acpt_hour`), `received_at`, `price`, `ask_px_1..10`, `bid_px_1..10`, `ask_qty_1..10`, `bid_qty_1..10`, `total_ask_qty`, `total_bid_qty`, `vi_cls_code`, `expected_px`(`antc_cnpr`), `expected_volume`(`antc_vol`). 예상 체결 두 열(#304)은 답에 그 필드가 없으면 `null`이다. ⚠ 답에 오는지 아직 재지 않았다(`probe-expected-open`이 raw로 센다) |
 | `HHPTJ04160200` 추정 가집계 | `symbol`, `received_at`, `slot`(`bsop_hour_gb`), `foreign_net_qty`, `institution_net_qty`, `total_net_qty` |
 | `FHPST01390000` VI 현황 | 응답의 VI마다 한 행: `symbol`, `event_time`(발동 시각 `cntg_vi_hour`), `received_at`, `end_time`(해제 시각 `vi_cncl_hour`, 아직이면 비어 있음), `active`(`vi_cls_code`가 `N`이 아님), `kind`(`static`, `dynamic`, `both`), `price`(발동 가격), `count`(그날 그 종목의 VI 횟수) |
 

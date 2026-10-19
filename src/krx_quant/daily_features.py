@@ -39,8 +39,9 @@ a model is trained on the values it is given:
   (``events/date=…/feed=H0MFCNT0``). The recording began with #290, so every day before it has
   none, and the model learns it only as it accumulates.
 
-The KRX expected opening price is not a feature: the engine's book records keep no expected
-price (``feeds.stock``). A missing value is None; the model handles it (``algorithms.cox``).
+The KRX expected opening price is not a feature: the book records keep it from #304 on
+(``expected_px``, ``feeds.stock``), too short a history to learn from. A missing value is
+None; the model handles it (``algorithms.cox``).
 """
 
 from __future__ import annotations

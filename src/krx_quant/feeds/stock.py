@@ -123,6 +123,11 @@ BOOK_SCHEMA = pa.schema(
         ("nxt_midpoint_px", pa.int64()),
         ("nxt_midpoint_qty", pa.int64()),
         ("nxt_midpoint_cls", pa.string()),
+        # The single-price auction's expected fill (ANTC_*, #304): 0 when no auction is on.
+        ("expected_px", pa.int64()),
+        ("expected_qty", pa.int64()),
+        ("expected_volume", pa.int64()),
+        ("expected_exch_cls", pa.string()),
     ]
 )
 
@@ -148,6 +153,10 @@ def _normalize_book(f: dict[str, str], received_at: datetime) -> Row:
         "nxt_midpoint_px": to_int(f["NMID_PRC"]),
         "nxt_midpoint_qty": to_int(f["NMID_TOTAL_RSQN"]),
         "nxt_midpoint_cls": f["NMID_CLS_CODE"],
+        "expected_px": to_int(f["ANTC_CNPR"]),
+        "expected_qty": to_int(f["ANTC_CNQN"]),
+        "expected_volume": to_int(f["ANTC_VOL"]),
+        "expected_exch_cls": f["ANTC_EXCH_CLS_CODE"],
     }
 
 
@@ -209,6 +218,9 @@ BOOK_SNAPSHOT_SCHEMA = pa.schema(
         ("total_ask_qty", pa.int64()),
         ("total_bid_qty", pa.int64()),
         ("vi_cls_code", pa.string()),
+        # The auction's expected fill (#304), if the answer carries it; null when it does not.
+        ("expected_px", pa.int64()),
+        ("expected_volume", pa.int64()),
     ]
 )
 
@@ -228,8 +240,15 @@ def _normalize_book_snapshot(body: dict[str, Any], key: str, received_at: dateti
             "total_ask_qty": to_int(book["total_askp_rsqn"]),
             "total_bid_qty": to_int(book["total_bidp_rsqn"]),
             "vi_cls_code": str(quote.get("vi_cls_code", "")),
+            "expected_px": _optional_int(quote, "antc_cnpr"),
+            "expected_volume": _optional_int(quote, "antc_vol"),
         }
     ]
+
+
+def _optional_int(out: dict[str, Any], key: str) -> int | None:
+    """``out[key]`` as ``to_int`` reads it, or None when the answer has no such field."""
+    return to_int(out[key]) if key in out else None
 
 
 # FHKST01010200, "주식현재가 호가/예상체결": a 10-level book snapshot plus price and VI status.

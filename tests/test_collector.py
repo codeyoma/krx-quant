@@ -158,6 +158,30 @@ async def test_book_frame_is_recorded_with_ten_levels_per_side(kis: FakeKis, tmp
     assert (book["nxt_midpoint_px"], book["nxt_midpoint_qty"], book["nxt_midpoint_cls"]) == (81250, 45, "2")
 
 
+async def test_book_frame_records_the_auction_s_expected_fill(kis: FakeKis, tmp_path: Path) -> None:
+    # #304: during a single-price auction the integrated book carries its expected fill.
+    kis.script[("H0UNASP0", "005930")] = [
+        book_frame(
+            {
+                "MKSC_SHRN_ISCD": "005930",
+                "BSOP_HOUR": "085530",
+                "ANTC_CNPR": "81300",
+                "ANTC_CNQN": "41250",
+                "ANTC_VOL": "52000",
+                "ANTC_EXCH_CLS_CODE": "1",
+            }
+        ),
+        book_frame({"MKSC_SHRN_ISCD": "005930", "BSOP_HOUR": "093016"}),  # no auction on
+    ]
+
+    await collect(kis, settings_for(kis, tmp_path))
+
+    auction, continuous = read(tmp_path, "events", "H0UNASP0")
+    expected = ("expected_px", "expected_qty", "expected_volume", "expected_exch_cls")
+    assert tuple(auction[c] for c in expected) == (81300, 41250, 52000, "1")
+    assert tuple(continuous[c] for c in expected) == (0, 0, 0, "0")
+
+
 async def test_raw_frames_are_recorded_verbatim(kis: FakeKis, tmp_path: Path) -> None:
     sent = trade_frame({"MKSC_SHRN_ISCD": "005930", "STCK_CNTG_HOUR": "093015", "BSOP_DATE": "20261008"})
     kis.script[("H0UNCNT0", "005930")] = [sent]

@@ -22,13 +22,14 @@ def ok(output: dict[str, Any] | None, **extra: Any) -> dict[str, Any]:
     return {"rt_cd": "0", "msg_cd": "MCA00000", "msg1": "정상처리 되었습니다.", "output": output, **extra}
 
 
-def serve_snapshots(kis: FakeKis) -> None:
+def serve_snapshots(kis: FakeKis, **quote: str) -> None:
     kis.rest_responses[QUOTE] = lambda q: ok({"stck_prpr": "190500", "acml_vol": "1000", "prdy_ctrt": "0.5"})
     book = {f"askp{i}": str(190500 + 500 * i) for i in range(1, 11)}
     book |= {f"bidp{i}": str(190500 - 500 * (i - 1)) for i in range(1, 11)}
     book |= {f"askp_rsqn{i}": "10" for i in range(1, 11)} | {f"bidp_rsqn{i}": "20" for i in range(1, 11)}
     book |= {"aspr_acpt_hour": "093016", "total_askp_rsqn": "100", "total_bidp_rsqn": "200"}
-    kis.rest_responses[BOOK_SNAPSHOT] = lambda q: ok(None, output1=book, output2={"stck_prpr": "190500"})
+    output2 = {"stck_prpr": "190500", **quote}
+    kis.rest_responses[BOOK_SNAPSHOT] = lambda q: ok(None, output1=book, output2=output2)
 
 
 async def until(condition: Callable[[], bool], timeout: float = 5.0) -> None:
@@ -73,7 +74,22 @@ async def test_subscriptions_rejected_for_the_limit_fall_back_to_rest_polling(
         10,
         20,
     )
+    assert (snapshot["expected_px"], snapshot["expected_volume"]) == (None, None), "not in this answer"
     assert "H0UNCNT0 000660" in caplog.text and "REST" in caplog.text
+
+
+async def test_a_book_snapshot_records_the_auction_s_expected_fill_when_its_answer_has_it(
+    kis: FakeKis, tmp_path: Path
+) -> None:
+    # #304: KIS's "호가/예상체결" answer may carry the auction's expected price and volume.
+    kis.max_subscriptions = 4
+    serve_snapshots(kis, antc_cnpr="190600", antc_vol="5200")
+    settings = replace(settings_for(kis, tmp_path, symbols=("005930", "000660")), fallback_poll_seconds=0.1)
+
+    await run_until(kis, settings, lambda: polled(kis, BOOK_SNAPSHOT, "000660"))
+
+    [snapshot, *_] = read(tmp_path, "events", BOOK_SNAPSHOT, symbol="000660")
+    assert (snapshot["expected_px"], snapshot["expected_volume"]) == (190600, 5200)
 
 
 async def test_configured_subscription_cap_sends_the_rest_straight_to_rest(
