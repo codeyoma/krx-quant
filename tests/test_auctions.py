@@ -134,6 +134,61 @@ def test_a_days_close_is_the_closing_auction_price_kept_and_the_candles_before_t
     )
 
 
+def test_a_split_never_sets_a_raw_close_against_an_adjusted_open() -> None:
+    """#317 review: the candles are adjusted, the kept auction prices are not. After a 2:1 split
+    every candle is halved; a day's move stays its two auctions' as traded, its close is on the
+    candles' scale (so close to close across days holds, as the features read it), and a day kept
+    without its opening price is left out from the after-market and keeps its candle's close
+    before it: a raw close is never set against the adjusted open."""
+    days = [date(2026, 9, 10), date(2026, 9, 11), AFTER_MARKET_OPENED, date(2026, 9, 15), date(2026, 9, 16)]
+    raw = {d: (70_000 + 1_000 * i, 70_600 + 1_200 * i) for i, d in enumerate(days)}  # as traded
+    candles = [candle(d, o // 2, c // 2 + 150) for d, (o, c) in raw.items()]  # halved, the evening's close
+    prices = {d: kept(d, o, c) for d, (o, c) in raw.items()}
+    for d in (days[1], days[4]):  # no opening price kept: no opening bar, no recording
+        prices[d] = kept(d, None, raw[d][1])
+
+    got = {d.day: d for d in days_of(candles, prices)}
+
+    assert sorted(got) == days[:4], "from the after-market, a close without its open is no price"
+    for d in (days[0], days[2], days[3]):
+        opened, closed = raw[d]
+        assert got[d].open == opened / 2 and got[d].close == pytest.approx(closed / 2)
+        assert got[d].change == pytest.approx(closed / opened - 1), "the auctions' move as traded"
+    assert (got[days[1]].close, got[days[1]].source) == (candles[1]["close"], DAY_CANDLE)
+    assert got[days[3]].close / got[days[2]].close == pytest.approx(raw[days[3]][1] / raw[days[2]][1])
+    assert got[days[3]].open / got[days[2]].close == pytest.approx(raw[days[3]][0] / raw[days[2]][1])
+    answers = OPEN_TO_CLOSE.answers(list(got.values()), FEE)  # type: ignore[misc]
+    assert [a.path["change"] for a in answers] == pytest.approx([d.change for d in got.values()])
+
+
+async def test_without_the_opening_bar_the_recorded_opening_print_and_else_no_open(
+    kis: FakeKis, tmp_path: Path
+) -> None:
+    """#317 review: KIS has the closing auction's bar but not the opening one. The recorded opening
+    print stands in (as traded too); without a recording the day is kept with no open, which no
+    answer sets against the adjusted candle."""
+    data = tmp_path / "data"
+    recorded = date(2026, 10, 16)
+    recorder = ParquetRecorder(data, flush_rows=100, flush_seconds=3600)
+    feed, row = krx_trade(at("09:00:00.3", recorded), 80_100, bid=80_000, ask=80_200)
+    recorder.record("events", recorded, feed, row["symbol"], row, KRX_TRADE.schema)
+    recorder.close()
+
+    def bars(market: str, symbol: str, day: date) -> list[dict[str, str]]:
+        return krx_bars(day, 80_000, 80_500)[1:]  # no 09:00 bar, any day
+
+    kis.rest_responses[MINUTE_BARS] = minute_bars_api(bars)
+    now = datetime.combine(MONDAY, time(15, 40), KST)
+    async with rest_client(kis, data, now) as client:
+        keeper = AuctionKeeper(client, RECENT, data, ("005930",), RateLimiter(1, 0.0, margin=0))
+        await keeper.run(now)
+    prices = read_auctions(data, "005930")
+    assert prices[recorded] == kept(recorded, 80_100, 80_500)
+    assert prices[MONDAY] == kept(MONDAY, None, 80_500)
+    monday = [candle(MONDAY, 40_000, 40_400)]  # adjusted since: a raw close would halve the move
+    assert days_of(monday, prices) == [], "no open of its own: no day"
+
+
 async def test_the_keeper_keeps_the_closing_auction_bar_not_the_after_markets_last(
     kis: FakeKis, tmp_path: Path
 ) -> None:

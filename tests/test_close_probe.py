@@ -74,7 +74,7 @@ async def test_the_probe_tells_the_after_markets_last_price_from_the_closing_auc
     assert "일봉 종가 = 종가 단일가 봉 종가: 같음 0 · 다름 2" in after
     assert "일봉 종가 = 그날 마지막 봉 종가: 같음 2 · 다름 0" in after
     assert "일봉 종가가 같은 것: 마지막 봉과만 2" in after
-    assert "일봉 시가 = 시가 단일가 봉(개장부터 10분 안의 첫 봉) 시가: 같음 2 · 다름 0" in after
+    assert "일봉 시가 = 시가 단일가 봉(개장 분의 봉) 시가: 같음 2 · 다름 0" in after
     assert (
         "녹화한 종가 단일가(녹화 있는 날 1): = 단일가 봉 종가 같음 1 · 다름 0 · = 일봉 종가 같음 0 · 다름 1"
         in after

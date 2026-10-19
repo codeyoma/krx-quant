@@ -17,7 +17,8 @@ reach it, and the page to the opening's. It counts:
   minutes) and when it starts;
 - the candle's close against that bar's close, and against the day's last bar's close, and which
   of the two it equals (only the auction's, only the last bar's, both: the same price, neither);
-- the candle's open against the opening auction's bar's open (``auctions.days_of`` scales a kept
+- the candle's open against the opening auction's bar's open (the bar of the open's minute,
+  ``auctions.opening_bar``; ``auctions.days_of`` scales a kept
   close by the two opens: they should be the same on a day not adjusted since);
 - on the recorded days (``auctions.recorded_prints``), the recorded closing print against the
   auction's bar and against the candle.
@@ -40,7 +41,14 @@ from pathlib import Path
 
 import aiohttp
 
-from krx_quant.auctions import AFTER_MARKET_OPENED, PRINT_WITHIN, bars_page, print_bar, recorded_prints
+from krx_quant.auctions import (
+    AFTER_MARKET_OPENED,
+    PRINT_WITHIN,
+    bars_page,
+    opening_bar,
+    print_bar,
+    recorded_prints,
+)
 from krx_quant.auth import tokens_and_client
 from krx_quant.candles import read_krx_days
 from krx_quant.config import Settings
@@ -113,8 +121,7 @@ class Tally:
                 which["둘 다 아님"] += 1
         out.append("    일봉 종가가 같은 것: " + _counts(which))
         out.append(
-            "    일봉 시가 = 시가 단일가 봉(개장부터 10분 안의 첫 봉) 시가: "
-            + _same([d.open_same for d in with_bars])
+            "    일봉 시가 = 시가 단일가 봉(개장 분의 봉) 시가: " + _same([d.open_same for d in with_bars])
         )
         recorded = [d for d in days if d.recorded_candle is not None]
         if recorded:
@@ -194,7 +201,7 @@ async def _day(asker: _Asker, data_dir: Path, calendar: MarketCalendar, symbol: 
     except _Failed as e:
         return Day(error=str(e))
     auction = print_bar(closing, session.close)
-    first = print_bar(opening, session.open)
+    first = opening_bar(opening, session)
     last = latest[-1]
     found = Day(
         bars=True,

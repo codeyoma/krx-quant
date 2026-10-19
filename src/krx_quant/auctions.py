@@ -13,13 +13,15 @@ at (the user's decision, #264), so its close is that auction's price.
 A bar is labelled by the minute it starts and an auction's print is its first trade, so the
 closing auction's price is the close of the first bar from the session's close within
 ``PRINT_WITHIN`` (10 minutes: the post-close trades at the closing price begin at 15:40), and the
-opening auction's the open of the first bar from the session's open within as long. Each is one
-query, the bars at or before ``PRINT_WITHIN`` less a second after the time. Where KIS has no such
+opening auction's the open of the bar of the open's minute (``opening_bar``: a later bar's open is
+a continuous trade). Each is one query, the bars at or before ``PRINT_WITHIN`` less a second after
+the time. Where KIS has no such
 bar, the day's recorded KRX trades (``H0STCNT0``, recorded from 2026-10-12) give the prints
 (``recorded_prints``, as the daily check reads them).
 
 **Kept** in ``data/candles/period=day/symbol=<s>/auctions.parquet``, beside the KRX day candles,
-a row a day: the two prices as traded (KIS does not adjust its minute bars), and where they came
+a row a day: the two prices as traded (KIS does not adjust its minute bars; the opening one from the
+recorded print where KIS has no opening bar, null if neither has it), and where they came
 from (``source``: ``krx_minute_bar``, ``recorded_print``, or ``none`` for a day settled without a
 closing price). The collector's history task keeps it (``AuctionKeeper``): at its start and at
 20:30, every trading day of the last ``KEEP_DAYS`` (KIS keeps about a year of minute bars) not kept
@@ -32,10 +34,15 @@ after-market (its candle's close stands, ``days_of``); otherwise it is asked aga
 each KRX day candle with its close replaced by the kept closing auction price. The candle's prices
 are adjusted (``candles``) and the auction's are not, so the close is the candle's open times the
 auction's close over its open (the day's move between the auctions); on a day not adjusted since,
-the two opens are the same and the close is the auction's as traded. A day without a kept price
-keeps its candle's close before the after-market and is left out from it (no answer, no features
-of it). A day kept past the newest candle (the day itself, before the 20:30 candles) is the two
-auction prices alone.
+the two opens are the same and the close is the auction's as traded. The close is never set
+against the adjusted open alone: a day kept without its opening auction price (no opening bar, no
+recorded print) counts as one without a kept price. A day without a kept price keeps its candle's
+close before the after-market and is left out from it (no answer, no features of it). Every ratio
+the kind reads is then of one scale: a day's move is the two auctions' as traded, and the closes,
+opens, highs and lows across days are all the candle's adjusted ones. A day kept past the newest
+candle (the day itself, before the 20:30 candles) is the two auction prices alone, as traded: it is
+the newest day, on the scale of the candles before it until an adjustment, and an adjustment has
+the candles taken again, that day's with them.
 """
 
 from __future__ import annotations
@@ -67,6 +74,9 @@ AFTER_MARKET_OPENED = date(2026, 9, 14)  # KRX's after-market (16:00–20:00) op
 # An auction's print is the first trade within this of its time: the post-close trades at the
 # closing price begin at 15:40.
 PRINT_WITHIN = timedelta(minutes=10)
+# The opening auction's print is in the bar of the open's minute: after it, the trades are
+# continuous (a day without that bar had no opening auction trade).
+OPENING_BAR = timedelta(minutes=1)
 # When the day's closing auction price is asked, KST, on a trading day.
 CLOSE_AT = time(15, 40)
 # How far back the keeper fills: KIS keeps about a year of minute bars.
@@ -128,9 +138,12 @@ def days_of(candles: Sequence[Row], kept: Mapping[date, Row]) -> list[DayPrices]
         if day is None:
             continue
         price = kept.get(day.day)
-        if price is not None and price.get("close"):
-            closed, opened = price["close"], price.get("open")
-            moved = float(closed) if not opened or opened == day.open else day.open * closed / opened
+        if price is not None and price.get("close") and price.get("open"):
+            # Both auctions as traded: their ratio onto the candle's adjusted open. A close without
+            # the same source's open is never set against the adjusted open (#317 review): the
+            # day has no kept price then.
+            closed, opened = price["close"], price["open"]
+            moved = float(closed) if opened == day.open else day.open * closed / opened
             out[day.day] = replace(day, close=moved, source=str(price["source"]))
         elif day.day < AFTER_MARKET_OPENED:
             out[day.day] = day
@@ -231,9 +244,15 @@ async def bars_page(
     return sorted(rows, key=lambda r: r["bar_time"])
 
 
-def print_bar(bars: Sequence[Row], at: datetime) -> Row | None:
-    """The bar holding an auction's print at ``at``: the first from ``at`` within ``PRINT_WITHIN``."""
-    return next((b for b in bars if at <= b["bar_time"] < at + PRINT_WITHIN), None)
+def print_bar(bars: Sequence[Row], at: datetime, within: timedelta = PRINT_WITHIN) -> Row | None:
+    """The bar holding an auction's print at ``at``: the first from ``at`` within ``within``."""
+    return next((b for b in bars if at <= b["bar_time"] < at + within), None)
+
+
+def opening_bar(bars: Sequence[Row], session: Session) -> Row | None:
+    """The bar of the open's minute (``OPENING_BAR``): the opening auction's print is its first
+    trade. A later bar's open would be a continuous trade, not the auction (#317 review)."""
+    return print_bar(bars, session.open, OPENING_BAR)
 
 
 def _row(symbol: str, day: date, opened: Any, closed: Any, source: str) -> Row:
@@ -301,8 +320,12 @@ class AuctionKeeper:
         bar = print_bar(closing, session.close)
         if bar is not None:
             opening = await self._page(symbol, day, session.open + PRINT_WITHIN - timedelta(seconds=1))
-            first = print_bar(opening, session.open)
-            return _row(symbol, day, None if first is None else first["open"], bar["close"], MINUTE_BAR)
+            first = opening_bar(opening, session)
+            opened = None if first is None else first["open"]
+            if opened is None:  # the recorded opening print, as traded too
+                prints = recorded_prints(self._data_dir, day, symbol, session)
+                opened = None if prints is None else prints[0]
+            return _row(symbol, day, opened, bar["close"], MINUTE_BAR)
         prints = recorded_prints(self._data_dir, day, symbol, session)
         if prints is not None and prints[1] is not None:
             return _row(symbol, day, prints[0], prints[1], RECORDED)
