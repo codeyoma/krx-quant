@@ -437,6 +437,45 @@
 - 파일은 [events.md](events.md#supply-일별-수급-rest-226)의 `state/supply/`다. 상태 디렉터리가 없는 재생 엔진은 빈 목록을 준다. 데모 엔진은 종목마다 일봉과 같은 500일(10-08까지)의 지어낸 값을 준다(10-12 아침 그날의 값은 없다).
 - 토스의 값은 사용자 자신의 매매에만 쓴다(토스 이용 정책, [toss-feeds.md](toss-feeds.md#인증과-접속)). 이 응답을 다른 곳에 올리지 않는다.
 
+### `GET /v1/symbols/{symbol}/flow?day=YYYY-MM-DD` (#306)
+
+한 종목의 그날 장중 수급 흐름이다. 수급 흐름 화면이 1분 가격 위에 겹쳐 그린다. 엔진이 녹화하는 피드 셋을 읽는다(`flow.py`, [events.md](events.md)): 프로그램매매(`H0UNPGM0`, REST 대체도 같은 피드에 쓴다), 회원사(`H0UNMBC0`와 REST 스냅샷 `FHKST01010600`), 외국인·기관 추정 가집계(`HHPTJ04160200`, 5분마다). 예측 신호가 아니라 관찰용이다.
+
+```json
+{
+  "symbol": "005930", "day": "2026-10-16", "as_of": "2026-10-19T08:00:00+09:00", "recorded": true,
+  "open": "2026-10-16T09:00:00+09:00", "close": "2026-10-16T15:30:00+09:00",
+  "minutes": [
+    {"at": "2026-10-16T09:00:00+09:00", "price": 81000, "program_net_value": 700, "program_buy_value": 1700, "program_sell_value": 1000, "program_net_qty": 7, "program_source": "ws", "member_foreign_net_qty": -30, "member_source": "ws"},
+    {"at": "2026-10-16T09:01:00+09:00", "price": 81100, "program_net_value": null, "program_buy_value": null, "program_sell_value": null, "program_net_qty": null, "program_source": null, "member_foreign_net_qty": -50, "member_source": "rest"}
+  ],
+  "estimates": [{"slot": "1", "received_at": "2026-10-16T09:31:00+09:00", "foreign_net_qty": 1500, "institution_net_qty": null}],
+  "members": {"received_at": "2026-10-16T15:00:00+09:00", "source": "ws",
+              "sell": [{"no": "005", "name": "미래에셋", "qty": 5015, "foreign": false}],
+              "buy": [{"no": "040", "name": "JP모간", "qty": 4435, "foreign": true}]},
+  "totals": {"program_net_value": 4000, "member_foreign_net_qty": 80, "estimate_foreign_net_qty": 1500, "estimate_institution_net_qty": -300},
+  "previous_day_same_time": {"day": "2026-10-15", "at": "2026-10-15T15:30:00+09:00", "program_net_value": 2000, "member_foreign_net_qty": null, "estimate_foreign_net_qty": null, "estimate_institution_net_qty": null},
+  "final": {"foreign_net": 1800, "institution_net": null},
+  "special": []
+}
+```
+
+- `day`: `YYYY-MM-DD`. 빼면 엔진 시계의 오늘이 거래일이면 오늘, 아니면 지난 거래일이다. 날짜가 아니면 400, 거래일이 아니면 404, 모르는 종목은 404다.
+- `recorded`: 서버의 로컬 녹화(`data/events/`)에 그날 세 피드 가운데 하나라도 있는지. Object Store는 읽지 않는다. 없으면 `false`이고 흐름 값은 모두 `null`이다.
+- **`minutes[]`**: 그날 장 시각(`open`부터 `close`까지, 종가 단일가 체결의 분 포함)의 1분마다다.
+  - `price`: 그 분 1분봉의 종가. 오늘은 엔진 메모리의 봉(20:30 백필이 하루를 저장하기 전), 지난날은 백필 `bars`다(`/bars`와 같은 출처).
+  - `program_*`: 그 분(체결 시각)의 마지막 프로그램매매 행의 하루 누적 순매수·매수·매도 금액과 순매수 수량. 값과 단위는 KIS가 주는 그대로다. `program_source`는 WebSocket(`ws`)이나 REST 대체(`rest`, 호가 잔량이 없는 행)다.
+  - `member_foreign_net_qty`: 그 분(받은 시각)의 마지막 회원사 행의 외국계 회원사 하루 누적 순매수(주). `member_source`는 `ws`(`H0UNMBC0`)나 `rest`(`FHKST01010600`)다.
+  - 그 분에 행이 없으면 그 칸은 `null`이다. 앞 분의 값을 끌어오지 않는다. 피드가 끊긴 동안이 평평한 흐름처럼 보이지 않게 하려는 것이다.
+- **`estimates[]`**: 추정 가집계의 구간(`slot`, KIS의 `bsop_hour_gb` 원문)마다, 처음 값이 들어온 때(`received_at`)와 투자자마다 가장 늦게 받은 값(주, 아직 입력 전이면 `null`)이다. 값이 들어온 순서다. 가집계는 증권사가 입력한 추정치라 일별 확정값과 다르다.
+- **`members`**: 그날 마지막 회원사 행의 매도·매수 상위 5개 창구(번호, 이름, 누적 수량, 외국계 여부). 다섯이 안 되면 그만큼만 있다. 행이 없으면 `null`이다.
+- **`totals`**: 각 흐름의 그날 합(마지막 값). 오늘은 지금까지, 지난날은 장 마감까지다.
+- **`previous_day_same_time`**: 전 거래일의 같은 시계 시각(오늘이면 지금, 지난날이면 장 마감)까지의 같은 합이다. 오늘 흐름이 평소보다 센지 견준다.
+- **`final`**: 그날 확정 일별 수급(KIS, 외국인·기관 순매수, 주). 20:30 이력 작업 전이나 없으면 `null`이다. 가집계와 견준다.
+- **`special`**: 그날 특수 상황 구간(`/special`의 항목과 같다).
+- 오늘의 답은 많아야 30초마다, 지난날은 10분마다, 또는 예측 저장소가 바뀌면 다시 만든다. 새 스트림 메시지는 없다. 화면이 읽어 간다.
+- 데모 엔진에는 그 아침(09:00–10:30)과 8일 하루의 세 피드가 있다. 서킷브레이커 동안은 비고, 10:00–10:10은 REST 대체로 쓴 행이다.
+
 ### `GET /v1/symbols/{symbol}/special?from=YYYY-MM-DD&to=YYYY-MM-DD` (#236)
 
 엔진이 남긴 특수 상황 구간(`special_windows`, 위 "채점"의 "특수 상황") 중 `from`부터 `to`까지의 날(KST, 둘 다 포함)에 시작한 것이다. 그 종목의 VI와 시장 전체의 서킷브레이커·사이드카가 시작 순으로 온다. 차트가 분 보기에 띠와 이름표로 칠한다.

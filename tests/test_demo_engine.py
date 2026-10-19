@@ -239,6 +239,29 @@ async def test_the_demo_has_a_briefing_of_its_morning(tmp_path: Path) -> None:
         assert inputs["algorithm"] == "cox" and inputs["bias"] is not None
 
 
+async def test_the_demo_has_its_morning_s_flows(tmp_path: Path) -> None:
+    """#306. Output: each symbol's program trading and member firms through the morning, nothing
+    during the halt, the REST stand-ins from 10:00 to 10:10, two estimate slots, and the 8th's
+    totals at 10:30."""
+    app = await demo_app(tmp_path / "demo.sqlite3")
+
+    async with TestClient(TestServer(app)) as client:
+        body = await get_json(client, "/v1/symbols/000660/flow")
+
+    check("flow", body)
+    assert (body["day"], body["recorded"]) == ("2026-10-12", True)
+    minutes = {m["at"][11:16]: m for m in body["minutes"]}
+    assert minutes["09:00"]["program_source"] == "ws" and minutes["09:00"]["program_net_value"] is not None
+    assert minutes["09:20"]["program_net_value"] is None, "the circuit breaker's halt"
+    assert (minutes["10:05"]["program_source"], minutes["10:05"]["member_source"]) == ("rest", "rest")
+    assert minutes["11:00"]["program_net_value"] is None, "the clock stays at 10:30"
+    assert [e["slot"] for e in body["estimates"]] == ["1", "2"]
+    assert len(body["members"]["sell"]) == 5 and any(m["foreign"] for m in body["members"]["buy"])
+    assert body["previous_day_same_time"]["at"] == "2026-10-08T10:30:00+09:00"
+    assert body["previous_day_same_time"]["program_net_value"] is not None
+    assert [w["kind"] for w in body["special"]] == ["circuit_breaker", "vi"]
+
+
 async def test_the_demo_is_the_same_every_time(tmp_path: Path) -> None:
     first, second = await demo_app(tmp_path / "a.sqlite3"), await demo_app(tmp_path / "b.sqlite3")
 
@@ -251,6 +274,7 @@ async def test_the_demo_is_the_same_every_time(tmp_path: Path) -> None:
             "/v1/symbols/005930/supply",
             "/v1/symbols/005930/kinds/open_to_close/predictions?limit=21",
             "/v1/briefing",
+            "/v1/symbols/000660/flow",
         ):
             assert await get_json(a, path) == await get_json(b, path)
 

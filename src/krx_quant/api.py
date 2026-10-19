@@ -82,7 +82,7 @@ from typing import Any, Literal
 from aiohttp import web
 
 from krx_quant.algorithms import Algorithm, KindAlgorithm
-from krx_quant.backfill import stock_bars_path, stored_bars
+from krx_quant.backfill import MINUTE_BARS_TR, read_bars, stock_bars_path, stored_bars
 from krx_quant.briefing import Sources as BriefingSources
 from krx_quant.briefing import briefing, day_predictions, default_day
 from krx_quant.candles import PERIODS as CANDLE_PERIODS
@@ -96,6 +96,8 @@ from krx_quant.econ_calendar import calendar_answer, read_latest
 from krx_quant.engine import PredictionEngine
 from krx_quant.features import FEATURE_MEANINGS
 from krx_quant.feeds.base import KST, Row, kst_day
+from krx_quant.flow import Window as FlowWindow
+from krx_quant.flow import flow as flow_answer
 from krx_quant.kind_stats import KindEntry, scored_of_kind
 from krx_quant.kind_stats import entry as kind_entry
 from krx_quant.kind_stats import entry_json as kind_entry_json
@@ -156,6 +158,11 @@ CALENDAR_SECONDS = 30.0
 CALENDAR_CACHE_KEY = web.AppKey("calendar_cache", dict)
 CALENDAR_LIMIT = 100  # events by default
 MAX_CALENDAR_LIMIT = 1000
+# /v1/symbols/{symbol}/flow (#306): today's answer is read again at most this often (the feeds'
+# files are written every 30 s), a past day's this often; at most this many are kept.
+FLOW_SECONDS = 30.0
+FLOW_PAST_SECONDS = 600.0
+FLOW_CACHE_KEY = web.AppKey("flow_cache", dict)
 # /v1/briefing (#304) is read again at most this often, or once the store changes: its files
 # change with the pre-market's trades and book.
 BRIEFING_SECONDS = 20.0
@@ -218,6 +225,7 @@ def create_app(
     app[USD_CLOSE_CACHE_KEY] = {}
     app[CALENDAR_CACHE_KEY] = {}
     app[BRIEFING_CACHE_KEY] = {}
+    app[FLOW_CACHE_KEY] = {}
     app[NAMES_KEY] = {} if names is None else names
     stream = EventStream(engine, live_status, stream_poll_seconds)
 
@@ -245,6 +253,7 @@ def create_app(
     app.router.add_get("/v1/symbols/{symbol}/candles", _candles)
     app.router.add_get("/v1/symbols/{symbol}/special", _special)
     app.router.add_get("/v1/symbols/{symbol}/supply", _supply)
+    app.router.add_get("/v1/symbols/{symbol}/flow", _flow)
     app.router.add_get("/v1/algorithms", _algorithms)
     app.router.add_get("/v1/algorithms/{name}", _algorithm)
     app.router.add_get("/v1/leaderboard", _leaderboard)
@@ -423,6 +432,49 @@ async def _special(request: web.Request) -> web.Response:
     fields = ("kind", "symbol", "start", "end", "detail")
     windows = [{f: r[f] for f in fields} for r in rows]
     return _json({"symbol": symbol, "from": since.isoformat(), "to": to.isoformat(), "special": windows})
+
+
+async def _flow(request: web.Request) -> web.Response:
+    """A symbol's intraday flows of a day (#306, ``flow.flow``); by default today's, or the last
+    trading day's on a closed day. 404 for a day KRX did not trade."""
+    engine, symbol = _engine_and_symbol(request)
+    now = engine.clock.now()
+    today = kst_day(now)
+    day = _day_query(request, "day")
+    if day is None:
+        day = today if engine.calendar.is_trading_day(today) else engine.calendar.previous_trading_day(today)
+    session = engine.calendar.session(day)
+    if session is None:
+        raise _error(web.HTTPNotFound, f"{day} is not a trading day")
+    cache: dict[tuple[str, date], tuple[float, int, dict[str, Any]]] = request.app[FLOW_CACHE_KEY]
+    kept = cache.get((symbol, day))
+    ttl = FLOW_SECONDS if day >= today else FLOW_PAST_SECONDS
+    if kept is not None and monotonic() - kept[0] < ttl and kept[1] == engine.store.version:
+        return _json(kept[2])
+    data_dir = request.app[DATA_DIR_KEY]
+    previous_day = engine.calendar.previous_trading_day(day)
+    before = engine.calendar.session(previous_day)
+    start = datetime.combine(day, time(), KST)
+    rows = engine.store.special_windows(symbol, start, start + timedelta(days=1))  # on the store's thread
+    special = [{f: r[f] for f in ("kind", "symbol", "start", "end", "detail")} for r in rows]
+    stored = data_dir is not None and stock_bars_path(data_dir, day, symbol).exists()
+    memory = [(b.start, b.close) for b in engine.bars(symbol)] if day == today and not stored else []
+
+    def answer() -> dict[str, Any]:
+        prices = memory
+        if not prices and data_dir is not None:
+            prices = [(b.start, b.close) for b in read_bars(data_dir, day, MINUTE_BARS_TR, symbol) or []]
+        window = FlowWindow(day, session.open, session.close)
+        previous = None if before is None else FlowWindow(previous_day, before.open, before.close)
+        state_dir = request.app[STATE_DIR_KEY]
+        return flow_answer(data_dir, state_dir, symbol, window, previous, prices, now, special)
+
+    version = engine.store.version
+    body = await asyncio.to_thread(answer)
+    if len(cache) >= _CACHED_QUESTIONS:
+        cache.clear()
+    cache[(symbol, day)] = (monotonic(), version, body)
+    return _json(body)
 
 
 async def _supply(request: web.Request) -> web.Response:

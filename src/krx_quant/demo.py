@@ -61,7 +61,22 @@ from krx_quant.clock import FakeClock
 from krx_quant.daily import StoredDays
 from krx_quant.daily_features import DAILY_FEATURES, LiveFeatures
 from krx_quant.engine import Event, PredictionEngine
-from krx_quant.feeds import BOOK, INDEX, KOSPI200_FUTURES, NIGHT_FUTURES, TRADE, USD_FUTURES, VI_STATUS, Feed
+from krx_quant.feeds import (
+    BOOK,
+    FOREIGN_ESTIMATE,
+    INDEX,
+    KOSPI200_FUTURES,
+    MEMBER,
+    MEMBER_REST,
+    NIGHT_FUTURES,
+    PROGRAM,
+    PROGRAM_REST,
+    TRADE,
+    USD_FUTURES,
+    VI_STATUS,
+    Feed,
+    RestFeed,
+)
 from krx_quant.feeds.base import KST, Row, kst_day
 from krx_quant.lifecycle import Status
 from krx_quant.macro import (
@@ -406,6 +421,7 @@ async def demo_app(db: Path, pace: float | None = None) -> web.Application:
         daily_feature_names=DAILY_FEATURES,
     )
     write_demo_briefing(data_dir)  # after the morning: Cox's 08:50 inputs stay as they were
+    write_demo_flow(data_dir)  # into the events the briefing's writer began (#306)
     night = Night(date(2026, 10, 9), "2026-10-09T21:31:40+09:00", {}, demo_reports())
     engine.training = NightStatus(night, True, "applied").as_dict()
     engine.night_reports = reports_by_algorithm(night)
@@ -507,6 +523,116 @@ def write_demo_briefing(data_dir: Path) -> None:
     path = data_dir / "calendar" / "latest.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(body, ensure_ascii=False))
+
+
+def write_demo_flow(data_dir: Path) -> None:
+    """The flow screen's recordings (#306), as the collector writes them: each symbol's program
+    trading and member firms through the morning (09:00–10:30 on the 12th, nothing during the
+    circuit breaker's halt; 10:00–10:10 by the REST stand-ins, as when the feeds are cut), the
+    investor estimates of the 09:30 slot, and the whole of the 8th for the same-time comparison.
+    Written after the morning is replayed: the algorithms read none of it."""
+    recorder = ParquetRecorder(data_dir, flush_rows=10_000, flush_seconds=3600)
+    rng = random.Random(306)
+
+    def record(feed: Feed | RestFeed, schema_feed: Feed | RestFeed, day: date, symbol: str, row: Row) -> None:
+        full = dict.fromkeys(schema_feed.schema.names) | row | {"symbol": symbol}
+        recorder.record(
+            "events",
+            day,
+            feed.tr_id if isinstance(feed, Feed) else feed.events_feed,
+            symbol,
+            full,
+            schema_feed.schema,
+        )
+
+    days = ((PAST_DAYS[-1], time(9, 0), time(15, 30)), (DEMO_DAY, time(9, 0), _END))
+    for i, symbol in enumerate(DEMO_SYMBOLS):
+        mid, _ = _OPENS[symbol]
+        for day, start, end in days:
+            buy = sell = foreign = 0
+            at = datetime.combine(day, start, KST)
+            while at <= datetime.combine(day, end, KST):
+                local = at.time()
+                if day == DEMO_DAY and HALT[0] <= local < HALT[1]:
+                    at += timedelta(minutes=1)
+                    continue  # the market halted: nothing traded
+                rest = day == DEMO_DAY and time(10, 0) <= local < time(10, 10)
+                buy += rng.randint(200, 900) * mid // 100
+                sell += rng.randint(200, 900 - 120 * i) * mid // 100
+                program = {
+                    "event_time": at,
+                    "received_at": at + timedelta(seconds=1),
+                    "buy_value": buy,
+                    "sell_value": sell,
+                    "net_value": buy - sell,
+                    "buy_qty": buy // mid,
+                    "sell_qty": sell // mid,
+                    "net_qty": (buy - sell) // mid,
+                }
+                if not rest:
+                    program |= {"sell_order_qty": 0, "buy_order_qty": 0, "whole_net_qty": 0}
+                record(PROGRAM_REST if rest else PROGRAM, PROGRAM, day, symbol, program)
+                foreign += rng.randint(-400, 600) - 100 * i
+                member = {
+                    "received_at": at + timedelta(seconds=2),
+                    "foreign_net_qty": foreign,
+                    "foreign_buy_qty": max(foreign, 0) + 5_000,
+                    "foreign_sell_qty": max(-foreign, 0) + 5_000,
+                }
+                for side, names in (("sell", _SELLERS), ("buy", _BUYERS)):
+                    for k, (no, name, glob) in enumerate(names, start=1):
+                        member |= {
+                            f"{side}_member_{k}_no": no,
+                            f"{side}_member_{k}_name": name,
+                            f"{side}_member_{k}_qty": (6 - k) * 1_000 + rng.randint(0, 500),
+                            f"{side}_member_{k}_foreign": glob,
+                        }
+                record(MEMBER_REST if rest else MEMBER, MEMBER, day, symbol, member)
+                at += timedelta(minutes=1)
+            for t, foreign_net, institution_net in (
+                (time(9, 31), 12_000 - 9_000 * i, None),
+                (time(10, 2), 15_000 - 9_000 * i, -4_000 + 2_000 * i),
+            ):
+                if datetime.combine(day, t, KST) > datetime.combine(day, end, KST):
+                    continue
+                received = datetime.combine(day, t, KST)
+                # Each poll gives every slot so far: the 09:30 slot's foreign figure, then the 10:00 slot's
+                # institutional one too.
+                slots = [("1", foreign_net, None)] + (
+                    [("2", None, institution_net)] if institution_net else []
+                )
+                for slot, f, inst in slots:
+                    record(
+                        FOREIGN_ESTIMATE,
+                        FOREIGN_ESTIMATE,
+                        day,
+                        symbol,
+                        {
+                            "received_at": received,
+                            "slot": slot,
+                            "foreign_net_qty": f,
+                            "institution_net_qty": inst,
+                            "total_net_qty": None,
+                        },
+                    )
+    recorder.close()
+
+
+# The top five member firms of the demo's flows (#306): number, name, foreign.
+_SELLERS = (
+    ("005", "미래에셋", False),
+    ("044", "모건스탠리", True),
+    ("036", "한국투자", False),
+    ("029", "골드만삭스", True),
+    ("030", "NH투자", False),
+)
+_BUYERS = (
+    ("003", "삼성", False),
+    ("040", "JP모간", True),
+    ("002", "키움", False),
+    ("042", "메릴린치", True),
+    ("004", "KB증권", False),
+)
 
 
 # The daily kind's days shown answered (#264), up to the 8th.

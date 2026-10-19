@@ -1871,6 +1871,112 @@
         }
       }
     },
+    "flow": {
+      "description": "GET /v1/symbols/{symbol}/flow?day=YYYY-MM-DD (#306): a symbol's intraday flows of a day from the recorded feeds (program trading, member firms, investor estimates), a minute at a time over the regular session; values as KIS gives them, cumulative over the day; a minute without a record is null.",
+      "type": "object",
+      "required": ["symbol", "day", "as_of", "recorded", "open", "close", "minutes", "estimates", "members", "totals", "previous_day_same_time", "final", "special"],
+      "additionalProperties": false,
+      "properties": {
+        "symbol": {"type": "string"},
+        "day": {"$ref": "#/$defs/day"},
+        "as_of": {"$ref": "#/$defs/time"},
+        "recorded": {"type": "boolean"},
+        "open": {"$ref": "#/$defs/time"},
+        "close": {"$ref": "#/$defs/time"},
+        "minutes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["at", "price", "program_net_value", "program_buy_value", "program_sell_value", "program_net_qty", "program_source", "member_foreign_net_qty", "member_source"],
+            "additionalProperties": false,
+            "properties": {
+              "at": {"$ref": "#/$defs/time"},
+              "price": {"type": ["number", "null"]},
+              "program_net_value": {"type": ["integer", "null"]},
+              "program_buy_value": {"type": ["integer", "null"]},
+              "program_sell_value": {"type": ["integer", "null"]},
+              "program_net_qty": {"type": ["integer", "null"]},
+              "program_source": {"enum": ["ws", "rest", null]},
+              "member_foreign_net_qty": {"type": ["integer", "null"]},
+              "member_source": {"enum": ["ws", "rest", null]}
+            }
+          }
+        },
+        "estimates": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["slot", "received_at", "foreign_net_qty", "institution_net_qty"],
+            "additionalProperties": false,
+            "properties": {
+              "slot": {"type": "string"},
+              "received_at": {"$ref": "#/$defs/time"},
+              "foreign_net_qty": {"type": ["integer", "null"]},
+              "institution_net_qty": {"type": ["integer", "null"]}
+            }
+          }
+        },
+        "members": {
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "required": ["received_at", "source", "sell", "buy"],
+              "additionalProperties": false,
+              "properties": {
+                "received_at": {"$ref": "#/$defs/time"},
+                "source": {"enum": ["ws", "rest"]},
+                "sell": {"type": "array", "maxItems": 5, "items": {"$ref": "#/$defs/flow_member"}},
+                "buy": {"type": "array", "maxItems": 5, "items": {"$ref": "#/$defs/flow_member"}}
+              }
+            }
+          ]
+        },
+        "totals": {"allOf": [{"$ref": "#/$defs/flow_totals_fields"}], "unevaluatedProperties": false},
+        "previous_day_same_time": {
+          "oneOf": [
+            {"type": "null"},
+            {
+              "allOf": [{"$ref": "#/$defs/flow_totals_fields"}],
+              "type": "object",
+              "required": ["day", "at"],
+              "properties": {"day": {"$ref": "#/$defs/day"}, "at": {"$ref": "#/$defs/time"}},
+              "unevaluatedProperties": false
+            }
+          ]
+        },
+        "final": {
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "required": ["foreign_net", "institution_net"],
+              "additionalProperties": false,
+              "properties": {"foreign_net": {"type": ["number", "null"]}, "institution_net": {"type": ["number", "null"]}}
+            }
+          ]
+        },
+        "special": {"type": "array", "items": {"$ref": "#/$defs/special_window"}}
+      }
+    },
+    "flow_member": {
+      "description": "A member firm among the day's top five sellers or buyers of a symbol (#306).",
+      "type": "object",
+      "required": ["no", "name", "qty", "foreign"],
+      "additionalProperties": false,
+      "properties": {"no": {"type": "string"}, "name": {"type": "string"}, "qty": {"type": ["integer", "null"]}, "foreign": {"type": "boolean"}}
+    },
+    "flow_totals_fields": {
+      "description": "Each flow's day total as last recorded by a time (#306); a fragment the flow answer's totals extend.",
+      "type": "object",
+      "required": ["program_net_value", "member_foreign_net_qty", "estimate_foreign_net_qty", "estimate_institution_net_qty"],
+      "properties": {
+        "program_net_value": {"type": ["integer", "null"]},
+        "member_foreign_net_qty": {"type": ["integer", "null"]},
+        "estimate_foreign_net_qty": {"type": ["integer", "null"]},
+        "estimate_institution_net_qty": {"type": ["integer", "null"]}
+      }
+    },
     "event": {
       "description": "A message of GET /v1/stream (WebSocket), one JSON text each.",
       "oneOf": [
