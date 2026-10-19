@@ -1955,14 +1955,13 @@ class PredictionStore:
     def last_reference(self, symbol: str) -> tuple[float, datetime] | None:
         """The mid-point at the symbol's latest bar close with one (its touch path's ``anchor``)
         and that bar close (#307: the cost map's price out of continuous trading); None without."""
-        rows = self._db.execute(
-            "SELECT bar_close, path FROM touches WHERE symbol = ? ORDER BY bar_close DESC LIMIT 50", (symbol,)
-        )
-        for bar_close, path in rows:
-            anchor = json.loads(path).get("anchor")
-            if anchor is not None:
-                return float(anchor), datetime.fromisoformat(bar_close)
-        return None
+        row = self._db.execute(
+            "SELECT bar_close, json_extract(path, '$.anchor') FROM touches"
+            " WHERE symbol = ? AND json_extract(path, '$.anchor') IS NOT NULL"
+            " ORDER BY bar_close DESC LIMIT 1",
+            (symbol,),
+        ).fetchone()
+        return None if row is None else (float(row[1]), datetime.fromisoformat(row[0]))
 
     def last_bar_close(self) -> str | None:
         value: str | None = self._db.execute("SELECT MAX(bar_close) FROM predictions").fetchone()[0]

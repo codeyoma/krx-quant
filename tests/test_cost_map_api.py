@@ -148,6 +148,24 @@ async def test_a_symbols_card_is_its_costs_at_its_latest_mid_point(tmp_path: Pat
     assert cards["009150"]["costs"]["inverse"] is None, "no single-stock inverse product"
 
 
+async def test_the_latest_mid_point_is_found_behind_any_number_of_bar_closes_without_one(
+    tmp_path: Path,
+) -> None:
+    """A long quote outage: 80 bar closes after 15:00 with no mid-point; the card's is still 15:00's."""
+    async with cost_map(tmp_path) as (engine, client):
+        priced_at = priced(engine.store, "005930", 81_250, 100)
+        engine.store.add_touches(
+            [
+                TouchResult("005930", priced_at + timedelta(minutes=1 + i), None, "silent quotes")
+                for i in range(80)
+            ]
+        )
+        body = await ask(client, "?symbol=005930")
+
+    [card] = body["symbols"]
+    assert (card["price"], card["price_at"]) == (81_250, priced_at.isoformat())
+
+
 async def test_the_direction_s_row_sets_its_hit_rates_against_its_breakeven(tmp_path: Path) -> None:
     """At 81,250 won (tick 100) k is 2 and the round trip 1.86875 ticks, 2.86875 at the market:
     p* = (2 + 1.86875) / 4 and (2 + 2.86875) / 4. Alpha calls the 20 rises and falls right."""
