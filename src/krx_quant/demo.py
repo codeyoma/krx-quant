@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import random
 import shutil
 from collections import defaultdict
@@ -60,8 +61,8 @@ from krx_quant.clock import FakeClock
 from krx_quant.daily import StoredDays
 from krx_quant.daily_features import DAILY_FEATURES, LiveFeatures
 from krx_quant.engine import Event, PredictionEngine
-from krx_quant.feeds import BOOK, INDEX, KOSPI200_FUTURES, TRADE, USD_FUTURES, VI_STATUS, Feed
-from krx_quant.feeds.base import KST, Row
+from krx_quant.feeds import BOOK, INDEX, KOSPI200_FUTURES, NIGHT_FUTURES, TRADE, USD_FUTURES, VI_STATUS, Feed
+from krx_quant.feeds.base import KST, Row, kst_day
 from krx_quant.lifecycle import Status
 from krx_quant.macro import (
     INDICATORS,
@@ -84,6 +85,7 @@ from krx_quant.replay import replay, replay_into
 from krx_quant.supply import KIS, NET_MARKET, NXT_OPENED, TOSS, write_supply
 from krx_quant.swap import NightStatus, reports_by_algorithm
 from krx_quant.touch import TARGET_VERSION
+from krx_quant.us_daily import write_us_daily
 
 DEMO_DAY = date(2026, 10, 12)
 DEMO_SYMBOLS = ("005930", "000660", "009150")
@@ -403,6 +405,7 @@ async def demo_app(db: Path, pace: float | None = None) -> web.Application:
         ),
         daily_feature_names=DAILY_FEATURES,
     )
+    write_demo_briefing(data_dir)  # after the morning: Cox's 08:50 inputs stay as they were
     night = Night(date(2026, 10, 9), "2026-10-09T21:31:40+09:00", {}, demo_reports())
     engine.training = NightStatus(night, True, "applied").as_dict()
     engine.night_reports = reports_by_algorithm(night)
@@ -419,6 +422,91 @@ async def demo_app(db: Path, pace: float | None = None) -> web.Application:
     if pace is not None:
         app.cleanup_ctx.append(partial(_paced, engine, events, pace))
     return app
+
+
+def write_demo_briefing(data_dir: Path) -> None:
+    """What the pre-open briefing (#304) reads of the morning beyond the replay, as the collector
+    records it (``events/``, replaced): the KOSPI200 night session begun on the 8th (to 06:00 on
+    the 9th), NXT's pre-market trades and the opening auction's expected prices on the 12th, and
+    the 12th's economic calendar (``calendar/latest.json``) and two weeks of US closes
+    (``us_daily/``, Friday the 9th's included: New York traded). Written after the morning is
+    replayed, so the engine's 08:50 predictions read none of it: Cox's ``premarket_gap`` and
+    ``night_futures`` show as missing. The 8th's bars end at 15:20, so there is no after-hours
+    price."""
+    shutil.rmtree(data_dir / "events", ignore_errors=True)
+    recorder = ParquetRecorder(data_dir, flush_rows=10_000, flush_seconds=3600)
+
+    def record(feed: Feed, day: date, symbol: str, row: Row) -> None:
+        full = dict.fromkeys(feed.schema.names) | row | {"symbol": symbol}
+        recorder.record("events", day, feed.tr_id, symbol, full, feed.schema)
+
+    evening = PAST_DAYS[-1]
+    start = datetime.combine(evening, time(18, 0), KST)
+    price, volume = 380.0, 0
+    for n in range(12 * 6):  # every 10 minutes, 18:00 to 05:50
+        at = start + timedelta(minutes=10 * n)
+        price = round(price + (0.35 if n % 5 < 3 else -0.4), 2)
+        volume += 150 + 10 * (n % 7)
+        change = round((price / 380 - 1) * 100, 2)
+        night = {"event_time": at, "received_at": at, "price": price, "change_pct": change}
+        record(NIGHT_FUTURES, kst_day(at), "A01612", night | {"qty": 10, "cum_volume": volume})
+    for i, symbol in enumerate(DEMO_SYMBOLS):
+        mid, tick = _OPENS[symbol]
+        for t, ticks in ((time(8, 5), -2), (time(8, 20), -1), (time(8, 42), 1 + i), (time(8, 48), 2 + i)):
+            at = _at(t)
+            trade = {"event_time": at, "received_at": at, "venue": "UN", "price": mid + ticks * tick}
+            record(TRADE, DEMO_DAY, symbol, trade | {"qty": 30})
+        for t, ticks in ((time(8, 31), 0), (time(8, 45), 1), (time(8, 59, 50), 2)):
+            at = _at(t)
+            book = {"event_time": at, "received_at": at, "expected_px": mid + ticks * tick}
+            record(BOOK, DEMO_DAY, symbol, book | {"expected_qty": 4_000 + 500 * i, "expected_exch_cls": "1"})
+    recorder.close()
+    for name, last, step in (
+        ("sox", 6_120.0, -40.0),
+        ("nvda", 182.5, -1.1),
+        ("mu", 168.0, -1.5),
+        ("vix", 18.4, 0.6),
+    ):
+        closes = [
+            Observation(evening - timedelta(days=d), round(last - step * d, 2)) for d in range(9, -1, -1)
+        ]
+        write_us_daily(
+            data_dir,
+            name,
+            [c for c in closes if c.day.weekday() < 5] + [Observation(date(2026, 10, 9), last + step)],
+        )
+    events = [
+        ("demo-kr-gdp", time(8, 0), "KR", "GDP Growth Rate QoQ Adv", "high"),
+        ("demo-us-retail", time(21, 30), "US", "Retail Sales MoM", "high"),
+    ]
+    body = {
+        "fetched_at": _at(time(7, 45)).isoformat(),
+        "countries": ["KR", "US"],
+        "events": [
+            {
+                "id": ident,
+                "at": _at(t).isoformat(),
+                "country": country,
+                "title": title,
+                "indicator": None,
+                "category": None,
+                "period": None,
+                "actual": None,
+                "forecast": None,
+                "previous": None,
+                "unit": "%",
+                "scale": None,
+                "currency": None,
+                "importance": importance,
+                "source": None,
+                "source_url": None,
+            }
+            for ident, t, country, title, importance in events
+        ],
+    }
+    path = data_dir / "calendar" / "latest.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(body, ensure_ascii=False))
 
 
 # The daily kind's days shown answered (#264), up to the 8th.

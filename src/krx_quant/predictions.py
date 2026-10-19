@@ -200,6 +200,8 @@ CREATE TABLE IF NOT EXISTS kind_predictions (  -- a prediction of a kind besides
     tick INTEGER,                     -- the tick size at that mid-point (#210); null likewise
     band REAL,                        -- a daily kind's flat band of the day (#264), a change;
                                       -- null for the bar-close kinds and without one
+    inputs TEXT,                      -- JSON (#304): a daily algorithm's inputs at its time and how
+                                      -- they moved its forecast; null for the others and before #304
     UNIQUE (kind, symbol, algorithm, bar_close)
 );
 CREATE INDEX IF NOT EXISTS kind_predictions_by_close ON kind_predictions (kind, bar_close);
@@ -312,6 +314,7 @@ _ADDED_COLUMNS = (
     ("kind_predictions", "anchor", "REAL"),
     ("kind_predictions", "tick", "INTEGER"),
     ("kind_predictions", "band", "REAL"),
+    ("kind_predictions", "inputs", "TEXT"),
     ("statuses", "simulated", "INTEGER NOT NULL DEFAULT 0"),
 )
 
@@ -542,6 +545,8 @@ class NewKindPrediction:
     anchor: float | None = None  # the mid-point at the bar close (#210); None without one there
     tick: int | None = None  # the tick size at that mid-point (#210); None likewise
     band: float | None = None  # a daily kind's flat band of the day (#264); None for the others
+    # A daily algorithm's inputs and their effects (#304, ``daily.inputs_json``); None for the others.
+    inputs: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -1182,8 +1187,8 @@ class PredictionStore:
             for p in predictions:
                 cursor = self._db.execute(
                     "INSERT INTO kind_predictions (kind, symbol, algorithm, model_version, bar_close,"
-                    " displayed_at, status, output, flat_ticks, width_ticks, anchor, tick, band)"
-                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    " displayed_at, status, output, flat_ticks, width_ticks, anchor, tick, band, inputs)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         kind,
                         p.symbol,
@@ -1198,6 +1203,7 @@ class PredictionStore:
                         p.anchor,
                         p.tick,
                         p.band,
+                        None if p.inputs is None else json.dumps(dict(p.inputs), separators=(",", ":")),
                     ),
                 )
                 assert cursor.lastrowid is not None
@@ -1525,6 +1531,7 @@ class PredictionStore:
             row = dict(r)
             row["output"] = None if row["output"] is None else json.loads(row["output"])
             row["answer_path"] = None if row["answer_path"] is None else json.loads(row["answer_path"])
+            row["inputs"] = None if row.get("inputs") is None else json.loads(row["inputs"])
             out.append(row)
         return out
 

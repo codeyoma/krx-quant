@@ -214,6 +214,31 @@ async def test_the_demo_has_the_daily_kinds_days_and_its_morning(tmp_path: Path)
     assert cox["kind"] == "open_to_close" and cox["model"]["version"].startswith("cox-2026")
 
 
+async def test_the_demo_has_a_briefing_of_its_morning(tmp_path: Path) -> None:
+    """#304. Output: the night begun on the 8th, each symbol's pre-market and the auction's last
+    expected price, the morning's economic calendar, US closes and Cox's 08:50 inputs."""
+    app = await demo_app(tmp_path / "demo.sqlite3")
+
+    async with TestClient(TestServer(app)) as client:
+        body = await get_json(client, "/v1/briefing")
+
+    check("briefing", body)
+    assert (body["day"], body["previous_day"]) == ("2026-10-12", "2026-10-08")
+    assert body["night_futures"]["recorded"] and body["night_futures"]["evening"] == "2026-10-08"
+    for symbol in body["symbols"]:
+        assert symbol["premarket"]["window"] == "08:40-08:50"
+        assert symbol["expected_open"]["final"] is True, "the clock is past the open"
+        assert symbol["after_hours"] is None, "the 8th's bars end at 15:20"
+    assert [e["country"] for e in body["schedule"]["events"]] == ["KR", "US"]
+    assert all(len(u["closes"]) == 5 for u in body["overnight"]["us"])
+    assert body["overnight"]["macro"]["regime"] == "risk_off"
+    otc = body["open_to_close"]
+    assert otc["day"] == "2026-10-12" and not otc["previous"]
+    for symbol in otc["symbols"]:
+        [inputs] = symbol["inputs"]
+        assert inputs["algorithm"] == "cox" and inputs["bias"] is not None
+
+
 async def test_the_demo_is_the_same_every_time(tmp_path: Path) -> None:
     first, second = await demo_app(tmp_path / "a.sqlite3"), await demo_app(tmp_path / "b.sqlite3")
 
@@ -225,6 +250,7 @@ async def test_the_demo_is_the_same_every_time(tmp_path: Path) -> None:
             "/v1/symbols/005930/candles?period=day",
             "/v1/symbols/005930/supply",
             "/v1/symbols/005930/kinds/open_to_close/predictions?limit=21",
+            "/v1/briefing",
         ):
             assert await get_json(a, path) == await get_json(b, path)
 

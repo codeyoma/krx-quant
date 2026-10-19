@@ -9,7 +9,7 @@ from pathlib import Path
 from krx_quant.baselines import Forecast
 from krx_quant.feeds import KST
 from krx_quant.lifecycle import Standing, Status
-from krx_quant.predictions import NewPrediction, PredictionStore, Score
+from krx_quant.predictions import NewKindPrediction, NewPrediction, PredictionStore, Score, iso
 from krx_quant.pricing import Direction
 from krx_quant.touch import TouchResult
 
@@ -86,3 +86,36 @@ def test_a_status_changes_only_from_the_status_it_was_read_as(tmp_path: Path) ->
     assert store.statuses()["alpha"].status is Status.RETIRED
     store.close()
     other.close()
+
+
+def test_a_kind_prediction_keeps_a_daily_algorithm_s_inputs_and_an_older_table_gets_the_column(
+    tmp_path: Path,
+) -> None:
+    # #304: kind_predictions.inputs, added to a table made before it.
+    db = tmp_path / "engine.sqlite3"
+    PredictionStore(db).close()
+    with sqlite3.connect(db) as conn:
+        conn.execute("ALTER TABLE kind_predictions DROP COLUMN inputs")
+        conn.execute(
+            "INSERT INTO kind_predictions (kind, symbol, algorithm, model_version, bar_close,"
+            " displayed_at, status) VALUES ('open_to_close', '005930', 'cox', 'cox-old', ?, ?, 'error')",
+            (iso(T), iso(T)),
+        )
+    store = PredictionStore(db)
+    inputs = {"values": {"us_sox": -0.01}, "explanation": None}
+    store.add_kind_predictions(
+        "open_to_close",
+        [
+            NewKindPrediction(
+                "000660", "cox", "cox-new", T, T, {"p_up": 0.4, "p_flat": 0.3, "p_down": 0.3}, inputs=inputs
+            ),
+            NewKindPrediction("000660", "otc-flat", "v1", T, T, {"p_up": 0.0, "p_flat": 1.0, "p_down": 0.0}),
+        ],
+    )
+
+    [old] = store.kind_at_close("open_to_close", 1, "005930", T)
+    assert old["inputs"] is None, "stored before #304"
+    cox, flat = store.kind_at_close("open_to_close", 1, "000660", T)
+    assert (cox["algorithm"], cox["inputs"]) == ("cox", inputs)
+    assert (flat["algorithm"], flat["inputs"]) == ("otc-flat", None), "a baseline has no inputs"
+    store.close()

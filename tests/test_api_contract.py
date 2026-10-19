@@ -90,6 +90,8 @@ async def walk(get: Get) -> dict[str, int]:
     await ask("/v1/macro", "macro")
     await ask("/v1/calendar", "calendar")
     await ask("/v1/calendar?limit=5", "calendar")
+    await ask("/v1/briefing", "briefing")  # #304
+    await ask("/v1/briefing?day=2026-10-12", "briefing")
     listed = (await ask("/v1/kinds", "kinds"))["kinds"]
     kinds = [k["name"] for k in listed]
     assert kinds[0] == "direction"
@@ -144,6 +146,7 @@ async def walk(get: Get) -> dict[str, int]:
         ("/v1/algorithms/nobody/stats", 404),
         ("/v1/algorithms/nobody", 404),
         ("/v1/calendar?limit=0", 400),
+        ("/v1/briefing?day=2026-10-1", 400),
     ):
         await ask(path, "error", status)
     asked = {*ROUTES.values(), "error"} - (set() if kinds[1:] else KIND_ROUTES)
