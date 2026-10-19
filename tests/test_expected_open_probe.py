@@ -9,8 +9,10 @@ from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 
 from krx_quant.candles import write_krx_days
+from krx_quant.cli import main
 from krx_quant.expected_open_probe import report
 from krx_quant.feeds import BOOK, BOOK_SNAPSHOT, RAW_SCHEMA
 from krx_quant.feeds.base import KST
@@ -139,6 +141,14 @@ def test_the_probe_reads_only_the_trading_days_over_and_the_latest_ones(tmp_path
     tonight = datetime.combine(later, time(22, 30), KST)
     assert "2026-10-13 – 2026-10-13, 거래일 1일" in report(data, CALENDAR, ("005930",), tonight, days=1)
     assert "2026-10-12 – 2026-10-13, 거래일 2일" in report(data, CALENDAR, ("005930",), tonight)
+
+
+def test_the_probe_reads_at_least_one_day(tmp_path: Path) -> None:
+    # A slice of the last 0 days would be every recorded day: refused, not read.
+    with pytest.raises(ValueError, match="at least 1"):
+        report(tmp_path, CALENDAR, ("005930",), NIGHT, days=0)
+    with pytest.raises(SystemExit):
+        main(["probe-expected-open", "--days", "0"])
 
 
 def test_without_recorded_books_the_probe_says_so(tmp_path: Path) -> None:

@@ -552,7 +552,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     expected_cmd.add_argument(
         "--days",
-        type=int,
+        type=_positive,
         default=EXPECTED_OPEN_DAYS,
         help=f"the latest recorded trading days to read (default {EXPECTED_OPEN_DAYS})",
     )

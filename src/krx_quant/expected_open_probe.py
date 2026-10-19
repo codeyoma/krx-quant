@@ -311,7 +311,9 @@ def _time(at: datetime) -> str:
 def report(
     data_dir: Path, calendar: MarketCalendar, symbols: Sequence[str], now: datetime, days: int = DAYS
 ) -> str:
-    """The report on the latest ``days`` recorded trading days over by ``now``."""
+    """The report on the latest ``days`` (at least 1) recorded trading days over by ``now``."""
+    if days < 1:
+        raise ValueError(f"days must be at least 1, got {days}")
     recorded = recorded_days(data_dir, calendar, now, days)
     title = "예상 체결 녹화 확인 (#304)"
     if not recorded:
