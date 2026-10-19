@@ -25,7 +25,7 @@ morning.
 
 The daily kind ``open_to_close`` (#264) has KRX day candles of its own (``krx.parquet``, the
 same days, an open a tick off the integrated one's) and, for its last 20 days up to the 8th,
-the three baselines' and Cox's predictions at 08:50 and their answers at 20:35, Cox fitted on
+the three baselines' and Cox's predictions at 08:50 and their answers at 15:45, Cox fitted on
 the days before them. The morning's 08:50 predictions are in too, waiting for their answer.
 
 With a pace (``demo-engine --pace SECONDS``), the morning is replayed at once only up to
@@ -55,10 +55,11 @@ from aiohttp import web
 
 from krx_quant.algorithms import ALGORITHMS, DAILY_ALGORITHMS, Model
 from krx_quant.api import create_app
+from krx_quant.auctions import KEEP_DAYS, MINUTE_BAR, write_auctions
 from krx_quant.backfill import BAR_SCHEMA, PreviousDay, stock_bars_path
 from krx_quant.candles import PERIODS, period_start, write_candles, write_krx_days
 from krx_quant.clock import FakeClock
-from krx_quant.daily import StoredDays
+from krx_quant.daily import ANSWER_FROM, StoredDays
 from krx_quant.daily_features import DAILY_FEATURES, LiveFeatures
 from krx_quant.engine import Event, PredictionEngine
 from krx_quant.feeds import BOOK, INDEX, KOSPI200_FUTURES, NIGHT_FUTURES, TRADE, USD_FUTURES, VI_STATUS, Feed
@@ -257,14 +258,25 @@ def write_demo_candles(data_dir: Path) -> None:
         oldest_first = list(reversed(rows))
         write_candles(data_dir, "day", symbol, oldest_first)
         # The KRX market's (#264): an opening auction a tick off NXT's pre-market open, now and then.
-        write_krx_days(
-            data_dir,
-            symbol,
-            [
-                {**r, "venue": "KRX", "open": max(tick, cast(int, r["open"]) - tick * (i % 3 - 1))}
-                for i, r in enumerate(oldest_first)
-            ],
-        )
+        krx = [
+            {**r, "venue": "KRX", "open": max(tick, cast(int, r["open"]) - tick * (i % 3 - 1))}
+            for i, r in enumerate(oldest_first)
+        ]
+        write_krx_days(data_dir, symbol, krx)
+        # The auctions' prices the history task keeps (#264, the last year): the candle's here.
+        newest = cast(date, krx[-1]["date"])
+        kept: dict[date, dict[str, Any]] = {}
+        for r in krx:
+            day = cast(date, r["date"])
+            if day > newest - KEEP_DAYS:
+                kept[day] = {
+                    "symbol": symbol,
+                    "date": day,
+                    "open": r["open"],
+                    "close": r["close"],
+                    "source": MINUTE_BAR,
+                }
+        write_auctions(data_dir, symbol, kept)
         for period in PERIODS:
             if period != "day":  # the finished ones, made of the days, as KIS's would be (#112)
                 write_candles(data_dir, period, symbol, _finished_periods(oldest_first, period))
@@ -516,7 +528,8 @@ _DAILY_SHOWN = 20
 def write_demo_daily(db: Path, data_dir: Path) -> Model:
     """The daily kind's last ``_DAILY_SHOWN`` days before the morning (#264): each day's 08:50
     predictions of its baselines and of Cox (fitted on the days before them), and the day's
-    answer at 20:35, as the engine would have stored them. Cox's model, for the morning."""
+    answer at 15:45 (``daily.ANSWER_FROM``), as the engine would have stored them. Cox's model,
+    for the morning."""
     from krx_quant.algorithms.cox import Cox  # the daily algorithm, and its features
     from krx_quant.daily import DailyInputs
     from krx_quant.daily_features import DailyFiles, band_of, samples
@@ -562,7 +575,7 @@ def write_demo_daily(db: Path, data_dir: Path) -> Model:
             answer = Answer(sample.answer.label, sample.answer.unscorable, {**sample.answer.path, "vi": 0})
             answered.append((symbol, at, answer, False))
         store.add_kind_predictions(kind.name, made)
-        store.add_kind_answers(kind.name, kind.answer_version, answered, scored_at=_at_on(day, time(20, 35)))
+        store.add_kind_answers(kind.name, kind.answer_version, answered, scored_at=_at_on(day, ANSWER_FROM))
     store.close()
     return model
 

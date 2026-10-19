@@ -23,6 +23,7 @@ from krx_quant.algorithms import ALGORITHMS, KIND_ALGORITHMS, RegistrationError
 from krx_quant.archive import run_archive
 from krx_quant.backfill import run_backfill
 from krx_quant.candle_probe import probe_candles
+from krx_quant.close_probe import probe_close
 from krx_quant.collector import check_fallbacks, measure_subscription_limit, run_collector
 from krx_quant.config import Settings, SettingsError
 from krx_quant.daily_check import DAYS as DAILY_CHECK_DAYS
@@ -142,6 +143,11 @@ async def _probe_supply() -> int:
 
 async def _probe_net_buys() -> int:
     calls, failed = await probe_net_buys(Settings.from_env(), datetime.now(KST).date())
+    return 1 if failed == calls else 0  # nothing answered
+
+
+async def _probe_close() -> int:
+    calls, failed = await probe_close(Settings.from_env(), datetime.now(KST).date())
     return 1 if failed == calls else 0  # nothing answered
 
 
@@ -536,6 +542,11 @@ def main(argv: list[str] | None = None) -> int:
         help="compare KIS's KRX (J) and integrated (UN) investor net buys by era and count the stored"
         " ones (#264), read-only; prints no market value",
     )
+    sub.add_parser(
+        "probe-close",
+        help="compare the KRX day candle's close with KRX's one-minute bars and the recorded closing"
+        " auction (#264), read-only; prints no market value",
+    )
     night_cmd = sub.add_parser(
         "probe-night",
         help="summarize a recorded KOSPI200 night session (#264), read-only; prints no market value",
@@ -704,6 +715,8 @@ def main(argv: list[str] | None = None) -> int:
             return asyncio.run(_probe_supply())
         elif args.command == "probe-net-buys":
             return asyncio.run(_probe_net_buys())
+        elif args.command == "probe-close":
+            return asyncio.run(_probe_close())
         elif args.command == "probe-night":
             return asyncio.run(_probe_night(args.day))
         elif args.command == "probe-expected-open":

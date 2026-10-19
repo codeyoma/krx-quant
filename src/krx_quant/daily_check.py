@@ -9,9 +9,15 @@ auctions' prices.
 3. The KRX day candles (``candles.krx_days_path``) against the recorded KRX trades
    (``H0STCNT0``) of the day: its open against the opening auction's print (the first KRX trade
    from the session's open, within its first 10 minutes), its close against the closing
-   auction's (the last KRX trade from the closing auction's start to a minute after the close),
-   and the integrated day candle's open against the KRX one (they differ when NXT's pre-market
-   traded). Only same or different: the output holds no price, so it can go on the public issue.
+   auction's (the last KRX trade from the closing auction's start to a minute after the close,
+   ``auctions.recorded_prints``), the kept closing auction price the answers end at
+   (``auctions``, #264: KRX's one-minute bar of it) against that print too, and the integrated
+   day candle's open against the KRX one (they differ when NXT's pre-market traded). Only same or
+   different: the output holds no price, so it can go on the public issue.
+
+   > On 2026-10-19 (the scheduled job ``daily-check-264``) the candle's open was the print and its
+   > close was not, on all three symbols: since KRX's after-market (2026-09-14) the candle's close
+   > is most likely its last price, so the answers end at the kept closing auction price instead.
 
 It reads the engine DB read-only, the stored candles and the recorded events; it writes nothing
 and calls nothing, so it may run beside the engine.
@@ -25,20 +31,15 @@ from collections.abc import Sequence
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
+from krx_quant.auctions import read_auctions, recorded_prints
 from krx_quant.candles import read_candles, read_krx_days
 from krx_quant.daily import DailyKind
-from krx_quant.feeds import KRX_TRADE
 from krx_quant.feeds.base import KST
 from krx_quant.kind_registry import DAILY_KINDS
-from krx_quant.market_calendar import MarketCalendar, Session
+from krx_quant.market_calendar import MarketCalendar
 from krx_quant.predictions import read_only
-from krx_quant.replay import recorded_events
 
 DAYS = 5
-# The opening auction's print is the first KRX trade within this of the open.
-OPENING_PRINT_WITHIN = timedelta(minutes=10)
-# The closing auction's print is the last KRX trade up to this after the close.
-CLOSING_PRINT_WITHIN = timedelta(minutes=1)
 
 
 def daily_check(
@@ -137,22 +138,28 @@ def _auctions(
     for symbol in symbols:
         krx = {r["date"]: r for r in read_krx_days(data_dir, symbol)}
         integrated = {r["date"]: r for r in read_candles(data_dir, "day", symbol)}
+        kept = read_auctions(data_dir, symbol)
         for day in days:
             session = calendar.session(day)
             candle = krx.get(day)
             if session is None or candle is None:
                 out.append(f"{day} {symbol}: KRX 일봉 없음")
                 continue
-            prints = _prints(data_dir, day, symbol, session)
+            prints = recorded_prints(data_dir, day, symbol, session)
             parts = []
             if prints is None:
                 parts.append("녹화 없음")
             else:
                 opening, closing = prints
+                auction = kept.get(day, {}).get("close")
                 for name, printed, stored in (
                     ("시가", opening, candle["open"]),
                     ("종가", closing, candle["close"]),
+                    ("정답 종가", closing, auction),
                 ):
+                    if name == "정답 종가" and stored is None:
+                        parts.append("정답 종가 없음")
+                        continue
                     same = printed is not None and printed == stored
                     tally[f"{name} {'같음' if same else '다름'}"] += 1
                     parts.append(
@@ -167,24 +174,3 @@ def _auctions(
     if tally:
         out.append("요약: " + ", ".join(f"{k} {n}" for k, n in sorted(tally.items())))
     return out
-
-
-def _prints(data_dir: Path, day: date, symbol: str, session: Session) -> tuple[int | None, int | None] | None:
-    """The day's opening and closing auction prints of ``symbol`` in its recorded KRX trades
-    (by their exchange time); None without a recording."""
-    try:
-        events = recorded_events(data_dir, day, [symbol], feeds={KRX_TRADE.tr_id})
-        trades = [row for feed, row in events if row["symbol"] == symbol and row.get("price")]
-    except FileNotFoundError:
-        return None
-    timed = sorted(trades, key=lambda r: r["event_time"])
-    opening = next(
-        (r["price"] for r in timed if session.open <= r["event_time"] < session.open + OPENING_PRINT_WITHIN),
-        None,
-    )
-    closing = [
-        r["price"]
-        for r in timed
-        if session.closing_auction <= r["event_time"] < session.close + CLOSING_PRINT_WITHIN
-    ]
-    return opening, closing[-1] if closing else None

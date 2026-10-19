@@ -11,6 +11,7 @@ from datetime import date, datetime, timedelta
 
 import pytest
 
+from krx_quant.auctions import closes_pending
 from krx_quant.daily import NO_BAND, DailyInputs, DayPrices
 from krx_quant.feeds.base import KST
 from krx_quant.kind_registry import DAILY_KINDS, KINDS
@@ -53,7 +54,9 @@ def test_open_to_close_is_registered_as_a_daily_kind_apart_from_the_bar_close_ki
     assert [k.name for k in DAILY_KINDS] == ["open_to_close"]
     assert "open_to_close" not in [k.name for k in KINDS]
     kind = DAILY_KINDS[0]
-    assert (kind.classes, kind.action, kind.answer_version) == (("up", "flat", "down"), ("up", "down"), 1)
+    # Answer version 2 (#264): the close is the closing auction's, not the KRX day candle's.
+    assert (kind.classes, kind.action, kind.answer_version) == (("up", "flat", "down"), ("up", "down"), 2)
+    assert kind.pending is closes_pending, "its latest closes kept before a simulation or a walk-forward"
     assert kind.predict_at.isoformat() == "08:50:00"
     assert [b.name for b in kind.daily_baselines] == [FLAT_NAME, CLIMATE, PERSIST]
     # Judged on 20, 40 and 60 days with an answer, the latest 20 for the bench (#298: from 60, 120
@@ -73,7 +76,7 @@ def test_open_to_close_is_registered_as_a_daily_kind_apart_from_the_bar_close_ki
         "to": "close",
         "from_title": "시가 단일가",
         "to_title": "종가 단일가",
-        "answer_from": "20:35",
+        "answer_from": "15:45",
         "probation_days": [20, 40, 60],
         "bench_days": [20, 40, 60],
         "recent_days": 20,

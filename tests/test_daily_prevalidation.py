@@ -88,7 +88,7 @@ def test_a_model_that_reads_the_night_passes_the_walk_forward_and_the_gate_lets_
     report = json.loads(report_path(s.state_dir, "cox").read_text())
     assert (report["kind"], report["target_version"], report["passed"], report["db"]) == (
         "open_to_close",
-        1,
+        OPEN_TO_CLOSE.answer_version,
         True,
         None,
     )
@@ -213,7 +213,7 @@ def test_the_night_refits_cox_on_the_krx_days_and_always_promotes_it(tmp_path: P
         "open_to_close",
         "daily",
         True,
-        1,
+        OPEN_TO_CLOSE.answer_version,
     )
     assert report["challenger"]["version"] == model.version
     assert report["training_days"][1] == LAST.isoformat()
@@ -318,4 +318,73 @@ def test_the_night_trains_cox_last_and_puts_it_on_the_promotion_list(tmp_path: P
     [report] = [r for r in night.reports if r["algorithm"] == "cox"]
     assert (report["cadence"], report["day"]) == ("daily", night_day.isoformat())
     stored = json.loads((root / f"models/cox/{night.promoted['cox']}.json").read_text())
-    assert stored["target_version"] == 1
+    assert stored["target_version"] == OPEN_TO_CLOSE.answer_version
+
+
+def _engine(s: Settings, clock: FakeClock) -> PredictionEngine:
+    return PredictionEngine(
+        PredictionStore(s.state_dir / "engine.sqlite3"),
+        MarketCalendar(),
+        SYMBOLS,
+        FEE,
+        clock,
+        algorithms=(),
+        kinds=(DIRECTION_KIND,),
+        kind_algorithms=(),
+        daily=StoredDays(s.data_dir),
+        daily_algorithms=DAILY_ALGORITHMS,
+        daily_feature_names=DAILY_FEATURES,
+        admits=admits(s.state_dir),
+    )
+
+
+def test_a_report_on_answer_version_1_has_cox_on_probation_judged_again_before_it_runs(
+    tmp_path: Path,
+) -> None:
+    """#264: answer version 2 ends the day at the closing auction. Cox's report of version 1
+    (2026-10-19's) no longer stands, and Cox, enrolled on probation, does not run until a new
+    pre-validation passes: it waits for one, and the scheduled job runs it, once its kind's closes
+    are all kept (``Facts.pending_answers``). One judged live already (active) runs on."""
+    s = settings(tmp_path, signal=0.6, days=900)
+    cox = DAILY_ALGORITHMS[0]
+    report = {
+        "algorithm": "cox",
+        "code": code_digest(cox),
+        "prevalidated_at": NOW.isoformat(),
+        "passed": True,
+        "days": [LAST.isoformat()] * 600,
+        "target_version": 1,
+        "kind": "open_to_close",
+        "inputs": input_versions(FEATURES),
+    }
+    path = report_path(s.state_dir, "cox")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(report))
+    store = PredictionStore(s.state_dir / "engine.sqlite3")
+    store.add_status("cox", NOW - timedelta(days=1), None, Status.PROBATION, "registered")
+    store.close()
+    clock = FakeClock(datetime.combine(LAST + timedelta(days=3), time(7), KST))
+
+    e = _engine(s, clock)
+    assert e.daily_algorithms == () and e.waiting() == ["cox"], "on probation, judged on version 1: waits"
+    found = last_report(s.state_dir, cox)
+    assert found is not None and not found.current
+    [job] = [j for j in JOBS if j.name == "prevalidate-cox"]
+    ran = JobRecord(LAST, OK, NOW - timedelta(minutes=30), "abc", 0, 60.0)
+    night = JobNight(
+        LAST + timedelta(days=3), True, "abc", ran, {job.name: ran}, Facts(0, ("cox",), 0, {"cox": found})
+    )
+    assert job.due(night), "judged again on version 2"
+    waiting = replace(night, facts=replace(night.facts, pending_answers=("open_to_close",)))
+    assert not job.due(waiting), "not before its closes are all kept"
+    e.store.close()
+
+    path.write_text(json.dumps({**report, "target_version": OPEN_TO_CLOSE.answer_version}))
+    e = _engine(s, clock)
+    assert [a.name for a in e.daily_algorithms] == ["cox"] and e.waiting() == [], "passed on version 2: runs"
+    e.store.change_status("cox", clock.now(), Status.PROBATION, Status.ACTIVE, "test")
+    e.store.close()
+    path.write_text(json.dumps(report))
+    e = _engine(s, clock)
+    assert [a.name for a in e.daily_algorithms] == ["cox"], "active: runs on, as any algorithm"
+    e.store.close()

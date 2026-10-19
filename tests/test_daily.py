@@ -13,11 +13,11 @@ from typing import Any
 import pytest
 
 from krx_quant.algorithms import Model
+from krx_quant.auctions import MINUTE_BAR
 from krx_quant.cards import Card, Meaning
 from krx_quant.clock import FakeClock
 from krx_quant.daily import (
-    JUDGING_HELD,
-    NO_CANDLE,
+    NO_CLOSE,
     DailyAlgorithm,
     DailyRegistrationError,
     DailySample,
@@ -44,16 +44,6 @@ THURSDAY = date(2026, 10, 8)  # the trading day before: Friday the 9th is Hangul
 CALENDAR = MarketCalendar({date(2026, 10, 9): False})
 
 
-# The hold on open_to_close's judging (#264, ``daily.JUDGING_HELD``), as deployed; the tests below
-# judge its algorithms as the engine will once its close is fixed, unless one puts it back.
-HELD = dict(JUDGING_HELD)
-
-
-@pytest.fixture(autouse=True)
-def judged(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("krx_quant.daily.JUDGING_HELD", {})
-
-
 def at(day: date, hhmm: str) -> datetime:
     return datetime.combine(day, time.fromisoformat(hhmm), KST)
 
@@ -77,8 +67,9 @@ def history(last: date, n: int, seed: int) -> list[DayPrices]:
 
 
 def the_day(prices: Sequence[DayPrices], day: date, change: float) -> DayPrices:
+    """The day as the engine reads it once the auction keeper kept its prices (#264)."""
     opened = prices[-1].close
-    return DayPrices(day, opened, opened * 1.03, opened * 0.97, opened * (1 + change), 1_000)
+    return DayPrices(day, opened, opened * 1.03, opened * 0.97, opened * (1 + change), 1_000, MINUTE_BAR)
 
 
 class Source:
@@ -142,7 +133,7 @@ class Leaning:
         self.sleep = sleep
 
     def default_model(self) -> Model:
-        return Model(f"{self.name}-v1", {}, target_version=1)
+        return Model(f"{self.name}-v1", {}, target_version=OPEN_TO_CLOSE.answer_version)
 
     def fit(self, samples: Sequence[DailySample]) -> Model:
         return self.default_model()
@@ -161,11 +152,11 @@ class Leaning:
 def predictions(store: PredictionStore) -> list[dict[str, Any]]:
     out = []
     for symbol in SYMBOLS:
-        out += store.kind_recent(OPEN_TO_CLOSE.name, 1, symbol, 100)
+        out += store.kind_recent(OPEN_TO_CLOSE.name, OPEN_TO_CLOSE.answer_version, symbol, 100)
     return sorted(out, key=lambda r: (r["bar_close"], r["symbol"], r["algorithm"]))
 
 
-async def test_a_day_is_predicted_at_0850_and_answered_once_its_krx_day_candle_is_stored(
+async def test_a_day_is_predicted_at_0850_and_answered_once_its_closing_auction_price_is_kept(
     tmp_path: Path,
 ) -> None:
     pasts = {s: history(THURSDAY, 700, seed=i) for i, s in enumerate(SYMBOLS)}
@@ -190,28 +181,28 @@ async def test_a_day_is_predicted_at_0850_and_answered_once_its_krx_day_candle_i
         thursday = answers(pasts[symbol], FEE)[-1].label
         assert persisted[symbol] == {f"p_{c}": float(c == thursday) for c in OPEN_TO_CLOSE.classes}
 
-    # The day's candle is not stored at 20:35: no answer yet.
-    await replay_into(e, clock, [], until=at(MONDAY, "20:40"))
+    # The day's closing auction price is not kept at 15:45 (#264): no answer yet.
+    await replay_into(e, clock, [], until=at(MONDAY, "15:50"))
     assert e.store.kind_answers(OPEN_TO_CLOSE.name) == []
     source.stored["005930"].append(the_day(pasts["005930"], MONDAY, 0.05))
-    await replay_into(e, clock, [], until=at(MONDAY, "20:50"))
+    await replay_into(e, clock, [], until=at(MONDAY, "16:00"))
     [answered] = e.store.kind_answers(OPEN_TO_CLOSE.name)
     assert (answered["symbol"], answered["bar_close"], answered["class"]) == (
         "005930",
         "2026-10-12T08:50:00+09:00",
         "up",
     )
-    assert answered["scored_at"] == "2026-10-12T20:45:00+09:00", "the first look after it was stored"
-    assert answered["path"]["source"] == "krx_day_candle"
+    assert answered["scored_at"] == "2026-10-12T15:55:00+09:00", "the first look after it was kept"
+    assert answered["path"]["source"] == "krx_minute_bar"
     assert answered["path"]["change"] == pytest.approx(0.05)
     assert (answered["path"]["vi"], answered["special"]) == (0, False)
 
     source.stored["000660"].append(the_day(pasts["000660"], MONDAY, 0.0))
-    await replay_into(e, clock, [], until=at(MONDAY, "21:00"))
+    await replay_into(e, clock, [], until=at(MONDAY, "16:10"))
     flat = [a for a in e.store.kind_answers(OPEN_TO_CLOSE.name) if a["symbol"] == "000660"]
     assert [a["class"] for a in flat] == ["flat"]
-    assert e.next_due() != at(MONDAY, "21:05"), "nothing waits: no more looking"
-    scored = e.store.kind_scored(OPEN_TO_CLOSE.name, 1, [MONDAY], None, False)
+    assert e.next_due() != at(MONDAY, "16:15"), "nothing waits: no more looking"
+    scored = e.store.kind_scored(OPEN_TO_CLOSE.name, OPEN_TO_CLOSE.answer_version, [MONDAY], None, False)
     assert len(scored) == 6, "every predictor of both symbols, on the day's answer"
 
 
@@ -226,7 +217,7 @@ async def test_a_circuit_breaker_marks_the_day_special_and_a_vi_is_counted(tmp_p
     )
     for s in SYMBOLS:
         source.stored[s].append(the_day(pasts[s], MONDAY, 0.01))
-    await replay_into(e, clock, [], until=at(MONDAY, "20:36"))
+    await replay_into(e, clock, [], until=at(MONDAY, "15:46"))
     answered = {a["symbol"]: a for a in e.store.kind_answers(OPEN_TO_CLOSE.name)}
     assert (answered["005930"]["path"]["vi"], answered["005930"]["special"]) == (1, False), (
         "a VI is not special"
@@ -247,7 +238,7 @@ async def test_a_circuit_breaker_marks_the_day_special_and_a_vi_is_counted(tmp_p
     await replay_into(e2, clock2, [], until=at(date(2026, 10, 13), "09:00"))
     for s in SYMBOLS:
         source.stored[s].append(the_day(source.stored[s], date(2026, 10, 13), -0.01))
-    await replay_into(e2, clock2, [], until=at(date(2026, 10, 13), "20:36"))
+    await replay_into(e2, clock2, [], until=at(date(2026, 10, 13), "15:46"))
     tuesday = [
         a for a in e2.store.kind_answers(OPEN_TO_CLOSE.name) if a["bar_close"].startswith("2026-10-13")
     ]
@@ -281,18 +272,20 @@ async def test_an_engine_started_after_0850_does_not_predict_the_day_and_a_resta
     assert {a["scored_at"] for a in answered} == {"2026-10-13T07:20:00+09:00"}
 
 
-async def test_a_day_whose_candle_never_comes_is_given_up_after_seven_days(tmp_path: Path) -> None:
+async def test_a_day_whose_closing_auction_price_never_comes_is_given_up_after_seven_days(
+    tmp_path: Path,
+) -> None:
     source = Source({s: history(THURSDAY, 300, seed=i) for i, s in enumerate(SYMBOLS)})
     clock = FakeClock(at(MONDAY, "08:00"))
     e = engine(tmp_path / "e.sqlite3", clock, source)
     await replay_into(e, clock, [], until=at(MONDAY, "09:00"))
     e.store.close()
-    later = FakeClock(at(date(2026, 10, 19), "20:34"))
+    later = FakeClock(at(date(2026, 10, 19), "15:44"))
     e2 = engine(tmp_path / "e.sqlite3", later, source)
-    await replay_into(e2, later, [], until=at(date(2026, 10, 19), "20:36"))
+    await replay_into(e2, later, [], until=at(date(2026, 10, 19), "15:46"))
     answered = e2.store.kind_answers(OPEN_TO_CLOSE.name)
     monday = [a for a in answered if a["bar_close"].startswith("2026-10-12")]
-    assert [(a["class"], a["unscorable"]) for a in monday] == [(None, NO_CANDLE)] * 2
+    assert [(a["class"], a["unscorable"]) for a in monday] == [(None, NO_CLOSE)] * 2
 
 
 async def test_a_daily_algorithm_predicts_at_0850_and_its_failures_are_kept(tmp_path: Path) -> None:
@@ -363,7 +356,9 @@ def add_day(store: PredictionStore, day: date, rng: random.Random) -> None:
             )
         answered.append((symbol, OPEN_TO_CLOSE.predicted_at(day), Answer(label, None, {}), False))
     store.add_kind_predictions(OPEN_TO_CLOSE.name, made)
-    store.add_kind_answers(OPEN_TO_CLOSE.name, 1, answered, scored_at=at(day, "20:35"))
+    store.add_kind_answers(
+        OPEN_TO_CLOSE.name, OPEN_TO_CLOSE.answer_version, answered, scored_at=at(day, "15:45")
+    )
 
 
 async def test_a_daily_algorithm_is_judged_on_its_20th_40th_and_60th_days_with_an_answer(
@@ -377,7 +372,7 @@ async def test_a_daily_algorithm_is_judged_on_its_20th_40th_and_60th_days_with_a
     first = date(2026, 6, 1)
     days = [d for d in (first + timedelta(days=i) for i in range(120)) if CALENDAR.is_trading_day(d)][:42]
     store.add_status("leaning", at(first, "07:00"), None, Status.PROBATION, "registered")
-    store.record_models([("leaning", "leaning-v1", 1)])
+    store.record_models([("leaning", "leaning-v1", OPEN_TO_CLOSE.answer_version)])
     rng = random.Random(5)
     for day in days[:19]:
         add_flat_day(store, day, rng)
@@ -409,34 +404,6 @@ async def test_a_daily_algorithm_is_judged_on_its_20th_40th_and_60th_days_with_a
     assert "leaning" not in stages, "active: no stage"
 
 
-async def test_a_daily_algorithm_is_not_judged_while_its_kinds_judging_is_held(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """open_to_close's judging is held (#264): its close may be the after-market's since
-    2026-09-14. The 15:40 review leaves its algorithms on probation, even on a review day that
-    would make one active; once the hold is lifted, the same review judges it."""
-    assert HELD.keys() == {OPEN_TO_CLOSE.name}, "deployed held"
-    monkeypatch.setattr("krx_quant.daily.JUDGING_HELD", HELD)
-    assert OPEN_TO_CLOSE.judging_held is not None
-    store = PredictionStore(tmp_path / "e.sqlite3")
-    first = date(2026, 6, 1)
-    days = [d for d in (first + timedelta(days=i) for i in range(120)) if CALENDAR.is_trading_day(d)][:42]
-    store.add_status("leaning", at(first, "07:00"), None, Status.PROBATION, "registered")
-    store.record_models([("leaning", "leaning-v1", 1)])
-    rng = random.Random(5)
-    for day in days[:40]:
-        add_day(store, day, rng)
-    clock = FakeClock(at(days[40], "15:39"))
-    e = engine(tmp_path / "e.sqlite3", clock, Source({}), algorithms=[Leaning()])
-    await e._review(at(days[40], "15:40"))
-    assert e.store.statuses()["leaning"].status is Status.PROBATION, "held: not judged on day 40"
-    assert [r["status"] for r in e.store.status_history("leaning")] == ["probation"]
-
-    monkeypatch.setattr("krx_quant.daily.JUDGING_HELD", {})
-    await e._review(at(days[40], "15:40"))
-    assert e.store.statuses()["leaning"].status is Status.ACTIVE, "lifted: the same review judges it"
-
-
 def add_flat_day(store: PredictionStore, day: date, rng: random.Random) -> None:
     """A made-up day on which ``leaning`` calls flat as the baselines do: no lift."""
     made, answered = [], []
@@ -451,7 +418,9 @@ def add_flat_day(store: PredictionStore, day: date, rng: random.Random) -> None:
             )
         answered.append((symbol, OPEN_TO_CLOSE.predicted_at(day), Answer(label, None, {}), False))
     store.add_kind_predictions(OPEN_TO_CLOSE.name, made)
-    store.add_kind_answers(OPEN_TO_CLOSE.name, 1, answered, scored_at=at(day, "20:35"))
+    store.add_kind_answers(
+        OPEN_TO_CLOSE.name, OPEN_TO_CLOSE.answer_version, answered, scored_at=at(day, "15:45")
+    )
 
 
 class Named:

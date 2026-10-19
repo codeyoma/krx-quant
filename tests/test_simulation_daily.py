@@ -20,13 +20,13 @@ from typing import Any
 import pytest
 
 from krx_quant.algorithms import DAILY_ALGORITHMS, Model, NothingToLearn
-from krx_quant.algorithms.cox import FEATURES
+from krx_quant.auctions import read_auctions, write_auctions
 from krx_quant.candles import krx_days_path, read_krx_days, write_krx_days
 from krx_quant.cards import Card, Meaning
 from krx_quant.cli import main
 from krx_quant.clock import FakeClock
 from krx_quant.config import Settings
-from krx_quant.daily import JUDGING_HELD, DailySample
+from krx_quant.daily import DailyAlgorithm, DailySample
 from krx_quant.daily_features import input_versions
 from krx_quant.engine import PredictionEngine
 from krx_quant.features import FeatureVector
@@ -50,16 +50,6 @@ NIGHT = datetime(2026, 10, 16, 23, 0, tzinfo=KST)  # that night's scheduled jobs
 CALENDAR = MarketCalendar()
 
 
-# The hold on open_to_close's judging (#264, ``daily.JUDGING_HELD``), as deployed; the tests below
-# judge its algorithms as the engine will once its close is fixed, unless one puts it back.
-HELD = dict(JUDGING_HELD)
-
-
-@pytest.fixture(autouse=True)
-def judged(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("krx_quant.daily.JUDGING_HELD", {})
-
-
 def settings(tmp_path: Path, signal: float, days: int = 420, seed: int = 298) -> Settings:
     made_history(tmp_path / "data", tmp_path / "state", LAST, days, signal=signal, seed=seed)
     return Settings(
@@ -74,22 +64,23 @@ def settings(tmp_path: Path, signal: float, days: int = 420, seed: int = 298) ->
     )
 
 
-def passed_report(s: Settings, name: str = "cox") -> None:
-    """A passed pre-validation of the code and inputs Cox runs now: the engine's gate admits it."""
-    cox = DAILY_ALGORITHMS[0]
+def passed_report(s: Settings, name: str = "cox", algorithm: DailyAlgorithm | None = None) -> None:
+    """A passed pre-validation of the code and inputs ``algorithm`` (Cox) runs now: the engine's
+    gate admits it."""
+    algorithm = algorithm or DAILY_ALGORITHMS[0]
     path = report_path(s.state_dir, name)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(
             {
                 "algorithm": name,
-                "code": code_digest(cox),
+                "code": code_digest(algorithm),
                 "prevalidated_at": NIGHT.isoformat(),
                 "passed": True,
                 "days": [LAST.isoformat()] * 600,
                 "target_version": OPEN_TO_CLOSE.answer_version,
                 "kind": OPEN_TO_CLOSE.name,
-                "inputs": input_versions(FEATURES),
+                "inputs": input_versions(algorithm.features),
             }
         )
     )
@@ -119,7 +110,9 @@ class AgainstTheNight:
     def fit(self, samples: Sequence[DailySample]) -> Model:
         last = max(s.day for s in samples)
         self.fitted.append(last)
-        return Model(f"{self.name}-{last:%Y%m%d}", {}, trained_until=last, target_version=1)
+        return Model(
+            f"{self.name}-{last:%Y%m%d}", {}, trained_until=last, target_version=OPEN_TO_CLOSE.answer_version
+        )
 
     def predict(self, features: FeatureVector, model: Model) -> KindForecast:
         sox = features["us_sox"]
@@ -129,7 +122,10 @@ class AgainstTheNight:
 
 
 def enroll(s: Settings, name: str, at: datetime = NIGHT - timedelta(hours=14)) -> datetime:
-    """``name`` on probation since ``at``, as the engine enrolls it (``registered``)."""
+    """``name`` (one of this module's made-up algorithms) on probation since ``at``, as the engine
+    enrolls it (``registered``), its pre-validation passed on what it runs (#264: a daily one on
+    probation runs, and is simulated, only so)."""
+    passed_report(s, name, AgainstTheNight(name))
     store = store_of(s)
     try:
         store.add_status(name, at, None, Status.PROBATION, REGISTERED)
@@ -172,7 +168,7 @@ def test_cox_on_a_planted_signal_is_enrolled_simulated_and_active_the_same_night
         assert all(v.startswith("cox-") for v in models.values())
         assert models[LAST.isoformat()].startswith(f"cox-{sim.days[-2]:%Y%m%d}-")
         # Nothing reached the live tables: the leaderboard and the statistics never see it.
-        assert store.kind_scored(OPEN_TO_CLOSE.name, 1, sim.days, None, True) == []
+        assert store.kind_scored(OPEN_TO_CLOSE.name, OPEN_TO_CLOSE.answer_version, sim.days, None, True) == []
         assert store.to_simulate(["cox"]) == [], "simulated once"
     finally:
         store.close()
@@ -298,7 +294,9 @@ def add_live_day(store: PredictionStore, name: str, day: date, rng: random.Rando
             made.append(NewKindPrediction(symbol, who, version, at, at, output))
         answered.append((symbol, at, Answer(label, None, {}), False))
     store.add_kind_predictions(OPEN_TO_CLOSE.name, made)
-    store.add_kind_answers(OPEN_TO_CLOSE.name, 1, answered, scored_at=at + timedelta(hours=12))
+    store.add_kind_answers(
+        OPEN_TO_CLOSE.name, OPEN_TO_CLOSE.answer_version, answered, scored_at=at + timedelta(hours=12)
+    )
 
 
 class Source:
@@ -340,7 +338,7 @@ async def test_the_engine_counts_the_simulated_days_first_then_the_live_days_to_
     assert sim.status is Status.PROBATION
     live = [d for d in (LAST + timedelta(days=i) for i in range(1, 60)) if CALENDAR.is_trading_day(d)][:21]
     store = store_of(s)
-    store.record_models([(against.name, f"{against.name}-live", 1)])
+    store.record_models([(against.name, f"{against.name}-live", OPEN_TO_CLOSE.answer_version)])
     rng = random.Random(1)
     clock = FakeClock(datetime.combine(live[0], time(16), KST))
     e = engine_on(s, clock, [against])
@@ -401,42 +399,60 @@ def test_the_scheduled_job_runs_after_a_daily_pass_or_while_a_probation_waits() 
     assert job.due(night_of(day, failed, passed)), "a new pass asks again"
 
 
-def test_while_open_to_close_is_held_its_probation_waits_unsimulated(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """open_to_close's judging is held (#264): the command still enrolls Cox (the engine would)
-    but neither simulates nor judges it; its probation still waits for its simulation, which is
-    made once the hold is lifted. The scheduled job is not due meanwhile, even the night Cox
-    passed."""
-    monkeypatch.setattr("krx_quant.daily.JUDGING_HELD", HELD)
+def known_calendar(s: Settings) -> None:
+    """The server's KIS holidays: every weekday from a year before ``LAST`` trades."""
+    first = LAST - timedelta(days=400)
+    days = {
+        (first + timedelta(days=i)).isoformat(): (first + timedelta(days=i)).weekday() < 5 for i in range(420)
+    }
+    path = s.state_dir / "market_calendar.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"refreshed_on": LAST.isoformat(), "open_days": days}))
+
+
+def test_a_probation_waits_while_its_kinds_closes_are_not_all_kept(tmp_path: Path) -> None:
+    """#264: the latest days replayed must be the latest. While an after-market day's closing
+    auction price is not kept, that day has no answer, so Cox waits, still unsimulated, and is
+    simulated once it is kept; the scheduled job waits meanwhile (``Facts.pending_answers``)."""
     s = settings(tmp_path, signal=4.0)
+    known_calendar(s)
     passed_report(s)
+    saved = read_auctions(s.data_dir, "000660")
+    write_auctions(s.data_dir, "000660", {d: r for d, r in saved.items() if d != LAST})
+
     run = simulate_daily(s, now=NIGHT)
-    assert run.enrolled == ["cox"]
-    assert run.simulations == []
-    assert run.held == {"cox": HELD[OPEN_TO_CLOSE.name]}
-    lines = report(run, 0.983)
-    assert lines[1].startswith("cox: its simulation waits - its close may be the after-market's")
+    assert (run.enrolled, run.simulations) == (["cox"], [])
+    assert run.held == {"cox": f"closing auction prices not kept yet: 000660 1 days from {LAST}"}
+    assert report(run, 0.983)[1] == f"cox: its simulation waits - {run.held['cox']}"
     store = store_of(s)
     try:
-        assert store.statuses()["cox"].status is Status.PROBATION
-        assert store.to_simulate(["cox"]) == ["cox"], "still waits for its simulation"
-        assert store.simulations() == {}
+        assert store.to_simulate(["cox"]) == ["cox"] and store.simulations() == {}
     finally:
         store.close()
-
     [job] = [j for j in JOBS if j.name == "simulate-daily-298"]
-    day = date(2026, 10, 20)
-    passed = {
-        prevalidation_job_name("cox"): JobRecord(day, OK, datetime.combine(day, time(23), KST), "abc", 0, 60)
-    }
-    assert not job.due(night_of(day, None, passed)), "held: not the night it passed"
-    assert not job.due(night_of(day, None, {}, simulating_daily=("cox",))), "held: not while it waits"
+    day = LAST
+    passed = {prevalidation_job_name("cox"): JobRecord(day, OK, NIGHT, "abc", 0, 60.0)}
+    pending = ("open_to_close",)
+    assert not job.due(night_of(day, None, passed, pending_answers=pending)), "not even the night it passed"
+    assert not job.due(night_of(day, None, {}, simulating_daily=("cox",), pending_answers=pending))
 
-    monkeypatch.setattr("krx_quant.daily.JUDGING_HELD", {})
-    assert job.due(night_of(day, None, {}, simulating_daily=("cox",))), "lifted: due"
-    [sim] = simulate_daily(s, now=NIGHT + timedelta(days=1)).simulations
-    assert sim.algorithm == "cox" and len(sim.days) == DAILY_DAYS
+    write_auctions(s.data_dir, "000660", saved)
+    [sim] = simulate_daily(s, now=NIGHT + timedelta(hours=1)).simulations
+    assert sim.algorithm == "cox" and sim.days[-1] == LAST and len(sim.days) == DAILY_DAYS
+
+
+def test_a_probation_whose_pre_validation_does_not_stand_is_not_simulated(tmp_path: Path) -> None:
+    """#264: an algorithm on probation whose report is not of what it runs (another answer
+    version, code or inputs) does not run, and is not simulated until a new one passes."""
+    s = settings(tmp_path, signal=4.0)
+    against = AgainstTheNight()
+    enroll(s, against.name)
+    report_path(s.state_dir, against.name).unlink()
+    run = simulate_daily(s, algorithms=[against], now=NIGHT)
+    assert run.simulations == []
+    assert run.held == {
+        against.name: "its pre-validation does not stand for the code, answer version and inputs it runs"
+    }
 
 
 def test_the_command_prints_what_it_did(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any) -> None:
@@ -522,7 +538,7 @@ def test_a_night_that_learns_nothing_keeps_the_model_before_it_as_live(tmp_path:
         ).fetchall()
     finally:
         store.close()
-    assert [tuple(t) for t in targets] == [(1,)], "no day by a target-less default"
+    assert [tuple(t) for t in targets] == [(OPEN_TO_CLOSE.answer_version,)], "no day by a target-less default"
 
 
 def test_one_whose_first_night_learns_nothing_is_not_simulated(tmp_path: Path) -> None:

@@ -49,11 +49,12 @@ import aiohttp
 from krx_quant.algorithms import ALGORITHMS, DAILY_ALGORITHMS, KIND_ALGORITHMS, Algorithm, KindAlgorithm
 from krx_quant.clock import SessionClock
 from krx_quant.config import JOBS_UNTIL, Settings
-from krx_quant.daily import DailyAlgorithm, judging_held
+from krx_quant.daily import DailyAlgorithm
 from krx_quant.daily_features import pending_inputs
 from krx_quant.engine import PredictionEngine
 from krx_quant.feeds.base import KST
 from krx_quant.github import GitHub, GitHubError, comment_body
+from krx_quant.kind_registry import DAILY_KINDS
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.night_probe import evening, subscribed_nights
 from krx_quant.notify import Alerts
@@ -247,6 +248,10 @@ class Facts:
     # The daily algorithms on a probation that waits for its simulation (#298,
     # ``PredictionEngine.to_simulate``).
     simulating_daily: tuple[str, ...] = ()
+    # The daily kinds whose answers of the latest days are not all in on this server
+    # (``DailyKind.pending``, #264: ``open_to_close``'s closing auction prices): their algorithms'
+    # simulation and scheduled walk-forward wait for them.
+    pending_answers: tuple[str, ...] = ()
     # The bar-close kinds' algorithms on a probation that waits for its simulation (#298).
     simulating: tuple[str, ...] = ()
 
@@ -668,6 +673,7 @@ async def read_facts(
     nights = await asyncio.to_thread(subscribed_nights, settings.data_dir, calendar, evening(clock.now()))
     daily = sorted({f for a in engine.daily_registered for f in a.features})
     pending = await asyncio.to_thread(pending_inputs, daily, settings.state_dir, settings.symbols)
+    answers = await asyncio.to_thread(pending_answers, settings, calendar, clock.now())
     simulating, simulating_daily = engine.to_simulate()  # the engine's database: on this thread
     return Facts(
         recorded,
@@ -678,7 +684,21 @@ async def read_facts(
         tuple(pending),
         simulating_daily=tuple(simulating_daily),
         simulating=tuple(simulating),
+        pending_answers=tuple(answers),
     )
+
+
+def pending_answers(settings: Settings, calendar: MarketCalendar, now: datetime) -> list[str]:
+    """The daily kinds whose answers of the latest days are not all in (``Facts.pending_answers``)."""
+    out = []
+    for kind in DAILY_KINDS:
+        why = (
+            None if kind.pending is None else kind.pending(settings.data_dir, calendar, settings.symbols, now)
+        )
+        if why is not None:
+            log.info("%s: %s", kind.name, why)
+            out.append(kind.name)
+    return out
 
 
 async def keep_jobs(
@@ -929,6 +949,33 @@ NET_BUYS_PROBE = Job(
     ),
 )
 
+# What the KRX day candle's close is (#264): the 2026-10-19 daily check found it unlike the
+# recorded closing auction print (its open alike), and KRX's after-market opened on 2026-09-14.
+# Once, on the first night after the deploy that brings it (trading or not: KIS gives the past
+# days): ``probe-close`` asks KIS for each symbol's KRX one-minute bars of the last year's days
+# (two or three pages a day, about 1,600 calls for three symbols, spaced a quarter second: seven
+# minutes or so) and counts, before and from that day, whether the candle's close is the closing
+# auction bar's or the day's last bar's, and the recorded print's. It prints counts and bar times,
+# no price, so it can go on the public issue. The half hour is a bound. Before the
+# pre-validations.
+CLOSE_PROBE = Job(
+    name="probe-close-264",
+    due=_first_night,
+    command=("probe-close",),
+    timeout=timedelta(minutes=30),
+    targets=(
+        Target(
+            DAILY_CHECK_ISSUE,
+            note=(
+                "에이전트가 이 출력으로 KRX 일봉의 종가가 무엇인지(애프터마켓의 마지막 가격인지, "
+                "15:30 종가 단일가인지) 애프터마켓(2026-09-14) 전과 뒤로 나눠 확인하고, "
+                '`docs/engine-api.md` "시가→종가"와 `docs/kis-feeds.md`에 남긴다. 출력에는 가격이 없다'
+                "(같음·다름과 개수, 봉 시각만)."
+            ),
+        ),
+    ),
+)
+
 # The night futures (#264): the collector records the KOSPI200 night session's trades and book
 # (18:00–06:00) from the deploy that brings it; what only the server shows is whether KIS
 # streams them for this app key, under the contract code asked for, in the layout of KIS's
@@ -1104,13 +1151,17 @@ def prevalidation_jobs(names: Sequence[str]) -> tuple[Job, ...]:
 DAILY_PREVALIDATION_TIMEOUT = timedelta(hours=1)
 
 
-def _daily_prevalidation_due(algorithm: str, features: Sequence[str] = ()) -> Callable[[Night], bool]:
+def _daily_prevalidation_due(
+    algorithm: str, features: Sequence[str] = (), kind: str | None = None
+) -> Callable[[Night], bool]:
     def due(night: Night) -> bool:
         facts = night.facts
         if algorithm not in facts.waiting:
             return False
         if set(features) & set(facts.pending_inputs):
             return False  # its data is not all in yet (#297): it would be judged on the old
+        if kind in facts.pending_answers:
+            return False  # its kind's latest answers are not all in (#264): fewer days than there are
         report = facts.reports.get(algorithm)
         if report is not None and report.judged:
             return False  # it judged the code the algorithm runs now
@@ -1126,13 +1177,16 @@ def _daily_prevalidation_due(algorithm: str, features: Sequence[str] = ()) -> Ca
 
 
 def daily_prevalidation_jobs(
-    names: Sequence[str], features: Mapping[str, Sequence[str]] | None = None
+    names: Sequence[str],
+    features: Mapping[str, Sequence[str]] | None = None,
+    kinds: Mapping[str, str] | None = None,
 ) -> tuple[Job, ...]:
-    """A pre-validation job for each daily algorithm of ``names`` (#264)."""
+    """A pre-validation job for each daily algorithm of ``names`` (#264), waiting for its
+    ``features``' data and its kind's answers (``kinds``: algorithm -> kind)."""
     return tuple(
         Job(
             name=prevalidation_job_name(name),
-            due=_daily_prevalidation_due(name, (features or {}).get(name, ())),
+            due=_daily_prevalidation_due(name, (features or {}).get(name, ()), (kinds or {}).get(name)),
             command=("prevalidate", name),
             timeout=DAILY_PREVALIDATION_TIMEOUT,
             targets=(
@@ -1160,17 +1214,17 @@ _DAILY_PREVALIDATION_NOTE = (
 # (begun by the engine, or a run cut short). Once a night; a run that failed waits for new code (or
 # a new pass), as a pre-validation that left no verdict does. Cox fits in seconds: 20 fits and ten
 # years of samples are minutes; the hour is a bound. Its result goes to #298 and #264. It waits for
-# the algorithms of a kind whose judging is held (``DailyKind.judging_held``, #264): their
-# simulation would be judged on answers that may be wrong (``daily.JUDGING_HELD``).
+# the algorithms of a kind whose answers of the latest days are not all in on this server
+# (``Facts.pending_answers``, #264: ``open_to_close``'s closing auction prices).
 SIMULATION_ISSUE = 298
 DAILY_SIMULATION_TIMEOUT = timedelta(hours=1)
 
 
 def _daily_simulation_due(algorithms: Sequence[DailyAlgorithm]) -> Callable[[Night], bool]:
     def due(night: Night) -> bool:
-        # Not for an algorithm whose kind's judging is held (#264): it would be judged on answers
-        # that may be wrong.
-        names = [a.name for a in algorithms if judging_held(a.kind) is None]
+        # Not for an algorithm whose kind's latest answers are not all in on this server (#264):
+        # the days replayed would not be the latest.
+        names = [a.name for a in algorithms if a.kind not in night.facts.pending_answers]
         if not names:
             return False
         record = night.record
@@ -1285,8 +1339,11 @@ JOBS: tuple[Job, ...] = (
     DAILY_CHECK,
     STRUCTURE_SUPPLY,
     NET_BUYS_PROBE,
+    CLOSE_PROBE,
     *daily_prevalidation_jobs(
-        [a.name for a in DAILY_ALGORITHMS], {a.name: a.features for a in DAILY_ALGORITHMS}
+        [a.name for a in DAILY_ALGORITHMS],
+        {a.name: a.features for a in DAILY_ALGORITHMS},
+        {a.name: a.kind for a in DAILY_ALGORITHMS},
     ),
     DAILY_SIMULATION,
     BAR_CLOSE_SIMULATION,

@@ -26,14 +26,17 @@ the symbol's KRX day candles of the days before (``DailySource``), and stores wh
 with the day's flat band (``kind_predictions.band``). An engine started after that time does not
 predict the day: a prediction must be made from what was known at its time.
 
-**Answer.** The day's answer is read from its KRX day candle (``candles.krx_days_path``: the
-KRX market alone, so its open is the opening auction's and its close the closing auction's),
-which the collector's history task stores after 20:30. The runner looks for it from
-``ANSWER_FROM`` (20:35) every ``ANSWER_EVERY`` (10 minutes); a symbol whose candle is not there
-waits, and is written unscorable (``NO_CANDLE``) once ``ANSWER_GIVE_UP`` (7 days) has passed. A
-starting engine answers its predictions of the latest ``PENDING_DAYS`` days still without one
-the same way. Training reads the same candles, so the labels it learns are the answers it is
-scored on.
+**Answer.** The day's answer is read from its KRX days (``auctions.days_of``): its open is the
+opening auction's (the KRX day candle's, the KRX market alone), its close the 15:30 closing
+auction's, from KRX's one-minute bar of it, else the recorded print (#264: since KRX's
+after-market opened on 2026-09-14 the day candle's close is not that auction's). The collector's
+history task keeps the auction prices at 15:40 (``auctions.AuctionKeeper``), so the runner looks
+from ``ANSWER_FROM`` (15:45) every ``ANSWER_EVERY`` (10 minutes); a symbol whose day is not there
+waits, and is written unscorable (``NO_CLOSE``) once ``ANSWER_GIVE_UP`` (7 days) has passed. A
+starting engine answers its predictions of the latest ``PENDING_DAYS`` days still without an
+answer of the kind's answer version the same way: a new answer version (``open_to_close``'s 2,
+#264) is answered for the days predicted before it so. Training reads the same days, so the
+labels it learns are the answers it is scored on.
 
 **Special days.** A circuit breaker or a sidecar on the day (``special_windows``: the market's,
 learned live or filled from the recording, #236) marks its answer special: out of the default
@@ -72,16 +75,17 @@ log = logging.getLogger(__name__)
 _NAME = re.compile(r"^[a-z][a-z0-9_]*$")
 # When a daily kind is predicted, KST, each trading day (#264).
 PREDICT_AT = time(8, 50)
-# When its answers are first looked for: the day's KRX day candle is stored after 20:30
-# (``backfill.BARS_FINAL_AT``), by the collector's history task.
-ANSWER_FROM = time(20, 35)
+# When its answers are first looked for: the collector's history task keeps the day's auction
+# prices at 15:40 (``auctions.CLOSE_AT``, #264).
+ANSWER_FROM = time(15, 45)
 ANSWER_EVERY = timedelta(minutes=10)
-# A day whose candle has not come by then is answered unscorable (``NO_CANDLE``).
+# A day whose prices have not come by then is answered unscorable (``NO_CLOSE``).
 ANSWER_GIVE_UP = timedelta(days=7)
 # A starting engine answers its predictions of these latest days still without one.
 PENDING_DAYS = 30
 # Why a daily answer has no class.
-NO_CANDLE = "no candle"  # the day's KRX day candle never came
+NO_CANDLE = "no candle"  # answer version 1: the day's KRX day candle never came
+NO_CLOSE = "no closing auction"  # the day's closing auction price never came (#264)
 NO_BAND = "no band"  # too few days before it to set the flat band
 # The KRX days a prediction or an answer is given, at most: enough for the bands and the
 # baselines' year (``open_to_close``), far less than the 40 years KIS keeps.
@@ -98,28 +102,13 @@ DAILY_RECENT_DAYS = 20
 # The scored predictions, and the pairs with each baseline, a decision needs at least: the
 # 20 days of three symbols (the first review's).
 DAILY_MIN_SAMPLE = 60
-# The daily kinds whose algorithms are not judged now, and why (#264): their reviews, live (the
-# 15:40 review) and simulated (#298, ``simulation.simulate_daily``, the scheduled job
-# ``simulate-daily-298``), wait, while they go on predicting on probation and their days are
-# answered. ``open_to_close``: the 2026-10-19 daily check found its KRX day candle's close unlike
-# the recorded closing auction print (its open alike). Since KRX's after-market opened
-# (2026-09-14) the candle's close may be the after-market's last price, so the answers and labels
-# of those days may not be the closing auction's; its algorithms wait until the close is fixed.
-JUDGING_HELD: dict[str, str] = {
-    "open_to_close": "its close may be the after-market's, not the closing auction's (#264)",
-}
-
-
-def judging_held(kind: str) -> str | None:
-    """Why the daily kind ``kind``'s algorithms are not judged now, None when they are."""
-    return JUDGING_HELD.get(kind)
 
 
 @dataclass(frozen=True)
 class DayPrices:
-    """A symbol's KRX day (#264), from its KRX day candle: the opening auction's price, the
-    day's high and low, the closing auction's price. Adjusted prices (``candles.py``): a past
-    split divides them all alike, so a day's ratios hold."""
+    """A symbol's KRX day (#264): the opening auction's price, the day's high and low, the
+    closing auction's price (``auctions.days_of``), and where the close came from. Adjusted prices
+    (``candles.py``): a past split divides them all alike, so a day's ratios hold."""
 
     day: date
     open: float
@@ -127,6 +116,7 @@ class DayPrices:
     low: float
     close: float
     volume: int
+    source: str = "krx_day_candle"  # the close's: ``auctions.MINUTE_BAR``, ``RECORDED`` or this
 
     @classmethod
     def of(cls, row: Mapping[str, Any]) -> DayPrices | None:
@@ -158,27 +148,36 @@ class DailySource(Protocol):
 
 
 class StoredDays:
-    """The KRX day candles the collector stores (``candles.read_krx_days``), read again only
-    when the file changed."""
+    """The KRX days the collector stores: the KRX day candles (``candles.read_krx_days``) with
+    the kept closing auction prices as their closes (``auctions.days_of``, #264), read again only
+    when a file changed. The engine answers and predicts from them, and training reads them
+    (``daily_features.DailyFiles``): one definition of a day live and in training."""
 
     def __init__(self, data_dir: Path) -> None:
         self.data_dir = data_dir
-        self._read: dict[str, tuple[tuple[int, int], list[DayPrices]]] = {}
+        self._read: dict[str, tuple[tuple[tuple[int, int] | None, ...], list[DayPrices]]] = {}
 
     def days(self, symbol: str) -> list[DayPrices]:
-        from krx_quant.candles import krx_days_path, read_krx_days  # it reads the candles' files
+        from krx_quant.auctions import auctions_path, days_of, read_auctions  # they read the files
+        from krx_quant.candles import krx_days_path, read_krx_days
 
-        path = krx_days_path(self.data_dir, symbol)
-        try:
-            stat = path.stat()
-        except FileNotFoundError:
+        paths = (krx_days_path(self.data_dir, symbol), auctions_path(self.data_dir, symbol))
+        stamp = tuple(_stamp(p) for p in paths)
+        if stamp == (None, None):
             return []
-        stamp = (stat.st_mtime_ns, stat.st_size)
         cached = self._read.get(symbol)
         if cached is None or cached[0] != stamp:
-            found = [d for r in read_krx_days(self.data_dir, symbol) if (d := DayPrices.of(r)) is not None]
+            found = days_of(read_krx_days(self.data_dir, symbol), read_auctions(self.data_dir, symbol))
             cached = self._read[symbol] = (stamp, found)
         return cached[1]
+
+
+def _stamp(path: Path) -> tuple[int, int] | None:
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        return None
+    return (stat.st_mtime_ns, stat.st_size)
 
 
 @dataclass(frozen=True)
@@ -216,6 +215,8 @@ class DailyBaseline(Protocol):
 # A daily kind's answers of its days (oldest first, one each), each set from the days before
 # it only, with the fee rate for the research P&L's costs in the path.
 DayAnswers = Callable[[Sequence[DayPrices], float], list[Answer]]
+# Why a daily kind's answers of the latest days are not all in yet (``DailyKind.pending``).
+Pending = Callable[[Path, "MarketCalendar", Sequence[str], datetime], "str | None"]
 # A daily kind's band of the day after ``days`` (oldest first), from them only.
 DayBand = Callable[[Sequence[DayPrices]], "Band | None"]
 
@@ -324,11 +325,10 @@ class DailyKind(Kind):
     review_rules: Rules = DAILY_RULES
     recent_days: int = DAILY_RECENT_DAYS
     min_sample: int = DAILY_MIN_SAMPLE
-
-    @property
-    def judging_held(self) -> str | None:
-        """Why its algorithms are not judged now (``JUDGING_HELD``), None when they are."""
-        return judging_held(self.name)
+    # Why its answers of the latest days are not all in on this server yet (data dir, calendar,
+    # symbols, now), None once they are: a simulated probation (#298) or a scheduled walk-forward
+    # of its algorithms waits for them (#264: ``open_to_close``'s closing auction prices).
+    pending: Pending | None = None
 
     def baseline_cards(self) -> list[tuple[str, Card]]:
         return [(b.name, b.card) for b in self.daily_baselines]
@@ -422,7 +422,7 @@ Told = Callable[[DailyStored], None]
 
 class DailyRunner:
     """The daily kinds in the engine (#264): each trading day's predictions at their time, and
-    the answers once the day's KRX day candles are stored (module doc)."""
+    the answers once the day's auction prices are kept (module doc)."""
 
     def __init__(
         self,
@@ -623,8 +623,8 @@ class DailyRunner:
             self._tell(DailyStored(kind.name, at, ids=ids))
 
     async def answer(self, now: datetime) -> None:
-        """The answers of the days waiting whose KRX day candle is stored, and of those given up
-        on; then when to look again."""
+        """The answers of the days waiting whose KRX day is stored (its closing auction price
+        kept, #264), and of those given up on; then when to look again."""
         waiting = sorted(self._pending, key=lambda p: (p[2], p[0], p[1]))
         days = await asyncio.to_thread(lambda: {s: self.source.days(s) for s in {p[1] for p in waiting}})
         by_kind: dict[str, list[tuple[str, datetime, Answer, bool]]] = {}
@@ -640,7 +640,7 @@ class DailyRunner:
                 answer = kind.answer_of(found[-HISTORY_DAYS:], self.fee_rate)
                 answer = _with_vis(answer, self.store, symbol, day)
             elif now >= datetime.combine(day, ANSWER_FROM, KST) + ANSWER_GIVE_UP:
-                answer = Answer(None, NO_CANDLE, {})
+                answer = Answer(None, NO_CLOSE, {})
             else:
                 continue
             special = self._special_day(day)

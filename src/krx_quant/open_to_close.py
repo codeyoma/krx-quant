@@ -5,10 +5,11 @@ Both ends are single-price auctions: an order at the open or the close is filled
 whole, so the move between them is one a market-on-open buy and a market-on-close sell made
 (the P&L below has no spread).
 
-**Answer** (answer version 1, ``answers``). The day's change is c = close / open − 1, both from
-its KRX day candle (the KRX market alone: the integrated candle opens at NXT's 08:00
-pre-market, docs/kis-feeds.md). Up when c > b, down when c < −b, flat otherwise (|c| ≤ b),
-with b the day's flat band:
+**Answer** (answer version 2, ``answers``). The day's change is c = close / open − 1: the open is
+the KRX opening auction's, its KRX day candle's (the KRX market alone: the integrated candle
+opens at NXT's 08:00 pre-market, docs/kis-feeds.md), and the close the 15:30 KRX closing
+auction's, from KRX's one-minute bar of it, else the recorded print (``auctions``). Up when
+c > b, down when c < −b, flat otherwise (|c| ≤ b), with b the day's flat band:
 
 - σ̂ is the root mean square of c over the ``SIGMA_DAYS`` (60) trading days before the day
   (at least ``SIGMA_MIN_DAYS``, 20; else no band, and no class: ``daily.NO_BAND``);
@@ -25,9 +26,20 @@ not crowd out flat). Every term is of the days before: the band is known at 08:5
 training label is the answer a day would have been given. A price adjustment (a split)
 divides a day's open and close alike, so c, σ̂ and b do not move.
 
-The path: ``open``, ``close`` (the candle's, adjusted as read), ``change`` (c), ``band`` (b),
-``sigma``, ``scale``, ``fee_rate`` (the engine's, for the P&L's costs), ``source``
-(``krx_day_candle``) and, written by the engine, ``vi`` (the day's VIs of the symbol).
+The path: ``open``, ``close`` (adjusted as the candle is, ``auctions.days_of``), ``change`` (c),
+``band`` (b), ``sigma``, ``scale``, ``fee_rate`` (the engine's, for the P&L's costs), ``source``
+(where the close came from: ``krx_minute_bar``, ``recorded_print``, or ``krx_day_candle`` on a day
+before the after-market without a kept price) and, written by the engine, ``vi`` (the day's VIs
+of the symbol).
+
+**Version 1** (to #264's fix) took the close from the KRX day candle too. On 2026-10-19 the
+daily check found that candle's close unlike the recorded closing auction print on all three
+symbols (its open alike): since KRX's after-market opened (2026-09-14, 16:00–20:00) the candle's
+close is most likely the after-market's last price. Version 2 ends the day at the closing
+auction, which can be traded; the answers of version 1 are kept, and the days predicted are
+answered again in version 2 (``daily.PENDING_DAYS``). Its closes of the days from the
+after-market's opening must all be kept before its algorithms' probation is simulated or a
+scheduled walk-forward runs (``pending``: ``auctions.closes_pending``).
 
 **Baselines.** ``otc-flat``: always flat. ``otc-climate``: the class shares of the symbol's
 latest ``CLIMATE_DAYS`` (250) answered days, each class counted once more. ``otc-persist``: the
@@ -54,6 +66,7 @@ from typing import Any
 
 import numpy as np
 
+from krx_quant.auctions import closes_pending
 from krx_quant.cards import Card
 from krx_quant.daily import NO_BAND, Band, DailyInputs, DailyKind, DayPrices
 from krx_quant.feeds.base import kst_day
@@ -64,7 +77,7 @@ from krx_quant.stats import interval_json, mean_interval
 NAME = "open_to_close"
 CLASSES = ("up", "flat", "down")
 UP, FLAT, DOWN = CLASSES
-ANSWER_VERSION = 1
+ANSWER_VERSION = 2  # 1 to #264's fix: the close was the KRX day candle's (module doc)
 SIGMA_DAYS = 60
 SIGMA_MIN_DAYS = 20
 SCALE_DAYS = 500
@@ -73,7 +86,6 @@ SCALE_MIN_DAYS = 120
 FLAT_SHARE = 1 / 3
 NORMAL_SCALE = NormalDist().inv_cdf(0.5 + FLAT_SHARE / 2)
 CLIMATE_DAYS = 250
-SOURCE = "krx_day_candle"
 BP = 10_000  # basis points in one
 
 FLAT_NAME = "otc-flat"
@@ -128,7 +140,7 @@ def answers(days: Sequence[DayPrices], fee_rate: float) -> list[Answer]:
             "close": day.close,
             "change": float(changes[i]),
             "fee_rate": fee_rate,
-            "source": SOURCE,
+            "source": day.source,
         }
         if math.isnan(sigma[i]):
             out.append(Answer(None, NO_BAND, {**path, "band": None, "sigma": None, "scale": None}))
@@ -285,4 +297,5 @@ OPEN_TO_CLOSE = DailyKind(
     daily_baselines=(OtcFlat(), OtcClimate(), OtcPersist()),
     answers=answers,
     band=band,
+    pending=closes_pending,
 )

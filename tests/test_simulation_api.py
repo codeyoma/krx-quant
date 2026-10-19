@@ -10,7 +10,6 @@ from datetime import datetime, time, timedelta
 from pathlib import Path
 from typing import Any
 
-import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from krx_quant.api import create_app
@@ -32,13 +31,6 @@ from tests.test_simulation_daily import (
     passed_report,
     settings,
 )
-
-
-@pytest.fixture(autouse=True)
-def judged(monkeypatch: pytest.MonkeyPatch) -> None:
-    """These tests judge open_to_close's algorithms, as the engine will once its close is fixed
-    (#264, ``daily.JUDGING_HELD``)."""
-    monkeypatch.setattr("krx_quant.daily.JUDGING_HELD", {})
 
 
 async def listed(engine: Any) -> dict[str, Any]:

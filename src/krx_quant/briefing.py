@@ -30,6 +30,7 @@ from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
 
+from krx_quant.auctions import days_of, read_auctions
 from krx_quant.backfill import MINUTE_BARS_TR, read_bars
 from krx_quant.candles import read_krx_days
 from krx_quant.contracts import KOSPI200, last_trading_day
@@ -197,7 +198,9 @@ def _symbol(src: Sources, symbol: str, day: date, previous: date) -> dict[str, A
     data_dir = src.data_dir
     close = None
     if data_dir is not None:
-        close = next((r["close"] for r in read_krx_days(data_dir, symbol) if r["date"] == previous), None)
+        # The day's KRX close as open_to_close reads it (#264): the closing auction's price.
+        days = days_of(read_krx_days(data_dir, symbol), read_auctions(data_dir, symbol))
+        close = next((d.close for d in days if d.day == previous), None)
     return {
         "symbol": symbol,
         "previous_close": close,

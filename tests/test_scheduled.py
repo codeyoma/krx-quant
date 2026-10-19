@@ -30,6 +30,7 @@ from krx_quant.github import GitHub
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.notify import Alerts
 from krx_quant.scheduled import (
+    CLOSE_PROBE,
     DIAGNOSE,
     ENTRY_DELAY,
     EXPECTED_OPEN_PROBE,
@@ -952,6 +953,25 @@ def test_the_net_buys_probe_runs_once_on_the_first_night_before_cox_s_pre_valida
     output = "KIS 투자자 순매수 KRX(J)·통합(UN) 확인 (#264) 2026-10-20: 종목 005930\n\n1. 조회\n\n2. 저장된"
     assert NET_BUYS_PROBE.targets[0].part(output) == output, "the whole output"
     assert "시세 값이 없다" in NET_BUYS_PROBE.targets[0].note
+
+
+def test_the_close_probe_runs_once_on_the_first_night_and_posts_to_264() -> None:
+    # #264: what the KRX day candle's close is, before and from the after-market (2026-09-14).
+    assert CLOSE_PROBE.name == "probe-close-264"
+    assert CLOSE_PROBE.command == ("probe-close",)
+    assert CLOSE_PROBE.timeout == timedelta(minutes=30)
+    assert [t.issue for t in CLOSE_PROBE.targets] == [264]
+    assert CLOSE_PROBE.label == ("ready-for-agent",)
+    names = [j.name for j in JOBS]
+    assert names.index(CLOSE_PROBE.name) < names.index("prevalidate-cox")
+    assert CLOSE_PROBE.due(night(FRIDAY)) and CLOSE_PROBE.due(night(SATURDAY)), (
+        "any night: KIS gives past days"
+    )
+    ran = JobRecord(SATURDAY, OK, at(SATURDAY, "22:30"), COMMIT, 0, 400.0)
+    assert not CLOSE_PROBE.due(night(MONDAY, ran))
+    output = "KRX 일봉 종가 확인 (#264) 2026-10-20: 종목 005930\n\n005930: 저장된 KRX 일봉 245일"
+    assert CLOSE_PROBE.targets[0].part(output) == output, "the whole output"
+    assert "가격이 없다" in CLOSE_PROBE.targets[0].note
 
 
 def test_the_entry_delay_runs_the_diagnosis_once_on_a_trading_night_and_posts_section_10() -> None:
