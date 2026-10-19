@@ -35,6 +35,9 @@ Endpoints (all under ``/v1``):
   their weakest lift over the baselines, with their stats;
 - ``GET /algorithms/{name}/stats?symbol=&period=&special=``: one algorithm's stats, by
   symbol, 30-minute slot and model version, with its calibration curve;
+- ``GET /cost-map?symbol=&period=&special=``: each symbol's round-trip costs, and each kind
+  with a direction's breakeven hit rate beside the leaderboard's hit rates (#307,
+  ``cost_map.py``), with the period base rates (``base_rates.py``);
 - ``GET /consensus``: the consensus members now and the weights last fitted;
 - ``GET /macro``: the latest day's market regime and macro readings (``macro.py``);
 - ``GET /calendar?limit=``: the economic calendar from the start of today, as the collector
@@ -83,6 +86,7 @@ from aiohttp import web
 
 from krx_quant.algorithms import Algorithm, KindAlgorithm
 from krx_quant.backfill import MINUTE_BARS_TR, read_bars, stock_bars_path, stored_bars
+from krx_quant.base_rates import read_base_rates
 from krx_quant.briefing import Sources as BriefingSources
 from krx_quant.briefing import briefing, day_predictions, default_day
 from krx_quant.candles import PERIODS as CANDLE_PERIODS
@@ -90,6 +94,7 @@ from krx_quant.candles import stored_candles
 from krx_quant.consensus import NAMES, slot
 from krx_quant.consensus import cards as consensus_cards
 from krx_quant.contracts import USD
+from krx_quant.cost_map import SPREAD_TICKS, cost_card, direction_row, kind_row
 from krx_quant.daily import DailyAlgorithm, DailyKind
 from krx_quant.daily_features import DAILY_FEATURES
 from krx_quant.econ_calendar import calendar_answer, read_latest
@@ -258,6 +263,7 @@ def create_app(
     app.router.add_get("/v1/algorithms/{name}", _algorithm)
     app.router.add_get("/v1/leaderboard", _leaderboard)
     app.router.add_get("/v1/algorithms/{name}/stats", _algorithm_stats)
+    app.router.add_get("/v1/cost-map", _cost_map)
     app.router.add_get("/v1/consensus", _consensus)
     app.router.add_get("/v1/macro", _macro)
     app.router.add_get("/v1/calendar", _calendar)
@@ -1203,6 +1209,79 @@ async def _kind_algorithm_stats(request: web.Request, name: str, kind: Predictio
 
     body = await _kind_stats(request, kind, ("algorithm", name), query, build)
     return _json(_echo_basis(request, body))
+
+
+async def _cost_map(request: web.Request) -> web.Response:
+    """``/v1/cost-map`` (#307, ``cost_map.py``): the symbols' cost cards, a row each kind with
+    a direction, from its leaderboard's statistics for the query (each kind's days its own,
+    computed and kept as the leaderboard's), and the period base rates kept
+    (``base_rates.py``)."""
+    engine = request.app[ENGINE_KEY]
+    query = _query(request, engine)
+    min_sample = request.app[MIN_SAMPLE_KEY]
+    fee = engine.fee_rate
+
+    def direction(
+        algorithms: dict[str, list[Scored]], baselines: dict[str, list[Scored]], excluded: dict[str, Excluded]
+    ) -> dict[str, Any]:
+        board = leaderboard(algorithms, baselines, min_sample, fee)
+        return direction_row(DIRECTION_KIND, board, {**algorithms, **baselines}, fee, min_sample, query.days)
+
+    rows = [await _stats(request, ("cost-map",), query, direction)]
+    for kind in [*engine.kinds, *engine.daily_kinds]:
+        if kind.sides is None:
+            continue  # no direction: no long nor short to cost (the range)
+        of_kind = _query(request, engine, kind)
+
+        def build(
+            algorithms: dict[str, list[KindScored]],
+            baselines: dict[str, list[KindScored]],
+            excluded: dict[str, Excluded],
+            kind: PredictionKind = kind,
+            days: tuple[date, ...] = of_kind.days,
+        ) -> dict[str, Any]:
+            board = kind_leaderboard(algorithms, baselines, min_sample, kind)
+            return kind_row(kind, board, {**algorithms, **baselines}, fee, min_sample, days)
+
+        rows.append(await _kind_stats(request, kind, ("cost-map",), of_kind, build))
+    names = request.app[NAMES_KEY]
+    symbols = []
+    for symbol in [query.symbol] if query.symbol is not None else engine.symbols:
+        price: float | None = engine.mid(symbol)
+        at: datetime | None = engine.clock.now()
+        live = price is not None
+        if price is None:  # out of continuous trading: the latest bar close's mid-point
+            last = engine.store.last_reference(symbol)
+            price, at = (None, None) if last is None else last
+        symbols.append(
+            {
+                "symbol": symbol,
+                "name": names.get(symbol),
+                "price": price,
+                "price_at": None if at is None else iso(at),
+                "live": live,
+                "costs": None if price is None else cost_card(symbol, price, fee),
+            }
+        )
+    regimes, missing = await asyncio.to_thread(read_base_rates, request.app[STATE_DIR_KEY])
+    if regimes is not None and query.symbol is not None:
+        regimes = {**regimes, "rows": [r for r in regimes["rows"] if r["symbol"] == query.symbol]}
+    described = query.describe()
+    return _json(
+        {
+            "symbol": described["symbol"],
+            "period": described["period"],
+            "special": described["special"],
+            "as_of": iso(engine.clock.now()),
+            "min_sample": min_sample,
+            "fee_rate": fee,
+            "spread_ticks": SPREAD_TICKS,
+            "symbols": symbols,
+            "rows": rows,
+            "regimes": regimes,
+            "regimes_missing": missing,
+        }
+    )
 
 
 async def _kinds(request: web.Request) -> web.Response:

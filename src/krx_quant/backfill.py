@@ -454,11 +454,13 @@ async def keep_history(
     refresh the calendar, fill missing one-minute bars, add the new day candles (``candles``)
     and the daily supply data (``supply``, from KIS and, given ``toss``, Toss), and, with the
     macro reads on (``KRX_MACRO_AT``), the US daily closes the daily kinds learn from
-    (``us_daily``, #264). Each run then keeps the KRX auctions' prices of the days not kept yet
-    (``auctions``, #264), and so does a run of that alone at ``auctions.CLOSE_AT`` (15:40), so the
-    day is answered from 15:45. Runs until cancelled.
+    (``us_daily``, #264), then computes the period base rates of every stored day's one-minute
+    bars (``base_rates``, #307). Each run then keeps the KRX auctions' prices of the days not kept
+    yet (``auctions``, #264), and so does a run of that alone at ``auctions.CLOSE_AT`` (15:40), so
+    the day is answered from 15:45. Runs until cancelled.
     """
     from krx_quant.auctions import CLOSE_AT, AuctionKeeper
+    from krx_quant.base_rates import keep_base_rates  # it reads the bars this module stores
     from krx_quant.candles import CandleKeeper  # it builds on this module's markets
     from krx_quant.supply import SupplyKeeper
     from krx_quant.us_daily import UsDailyKeeper
@@ -481,6 +483,18 @@ async def keep_history(
                     await us.run(started)
             except Exception:
                 log.exception("calendar refresh, backfill, candles, supply or US daily closes failed")
+            try:  # a year of bars read: off the event loop
+                await asyncio.to_thread(
+                    keep_base_rates,
+                    settings.data_dir,
+                    settings.state_dir,
+                    store.calendar,
+                    settings.symbols,
+                    settings.fee_rate,
+                    now(),
+                )
+            except Exception:
+                log.exception("the period base rates failed")
         try:
             await auctions.run(started)
         except Exception:

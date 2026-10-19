@@ -430,6 +430,10 @@ class Kind:
     fields: Mapping[str, Meaning] = field(default_factory=dict)
     check: OutputCheck | None = None
     stats: ExtraStats | None = None
+    # Its classes of a rise and of a fall, in that order (#307): a call of the first is a long, of
+    # the second a short, and the cost map (``cost_map.py``) sets their hit rate against the cost.
+    # None for a kind without a direction (the range: its small and large moves).
+    sides: tuple[str, str] | None = None
 
     def index(self, label: str) -> int:
         """A class's place in the kind's order."""
@@ -519,6 +523,8 @@ def register_kinds(kinds: Sequence[Kind]) -> tuple[Kind, ...]:
             raise KindRegistrationError(f"{k.name}: its classes {k.classes} are not three lowercase names")
         if not k.action or not set(k.action) <= set(k.classes):
             raise KindRegistrationError(f"{k.name}: action classes {k.action} not among {k.classes}")
+        if k.sides is not None and k.sides != (k.classes[0], k.classes[2]):
+            raise KindRegistrationError(f"{k.name}: its sides {k.sides} are not its first and third classes")
         clash = sorted(set(k.fields) & set(k.p_keys()))
         if clash:
             raise KindRegistrationError(f"{k.name}: fields {', '.join(clash)} are named like probabilities")
@@ -547,6 +553,7 @@ DIRECTION_KIND = Kind(
     action=("up", "down"),
     answer_version=TARGET_VERSION,
     crossed=True,
+    sides=("up", "down"),
     fields={
         "expected_ticks": Meaning(
             "4분 뒤 중간가 변화의 기대값. 세 확률과 함께 낸다.",

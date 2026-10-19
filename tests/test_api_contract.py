@@ -83,6 +83,8 @@ async def walk(get: Get) -> dict[str, int]:
         await ask(f"/v1/symbols/{symbol}/flow?day=2026-10-08", "flow")
     for query in ("", "?period=5d&basis=a&special=include", f"?symbol={symbols[0]}&period=20d"):
         await ask(f"/v1/leaderboard{query}", "leaderboard")
+    for query in ("", "?period=5d&special=include", f"?symbol={symbols[0]}&period=20d"):
+        await ask(f"/v1/cost-map{query}", "cost_map")  # #307
     for name in algorithms:
         await ask(f"/v1/algorithms/{name}", "algorithm_detail")
     for name in [*algorithms, "baseline-flat", "consensus-final"]:
@@ -145,6 +147,8 @@ async def walk(get: Get) -> dict[str, int]:
         ("/v1/symbols/005930/supply?from=2026-10-12&to=2026-10-11", 400),
         ("/v1/symbols/005930/supply?from=2015-01-01&to=2026-10-12", 400),
         ("/v1/leaderboard?period=week", 400),
+        ("/v1/cost-map?period=week", 400),
+        ("/v1/cost-map?symbol=999999", 400),
         ("/v1/algorithms/nobody/stats", 404),
         ("/v1/algorithms/nobody", 404),
         ("/v1/calendar?limit=0", 400),

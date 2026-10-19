@@ -21,7 +21,8 @@ the backfill stores them, under ``<db stem>-data/bars/``. Each symbol also has t
 made-up day candles up to the 8th (``candles/``), for the chart's day view (#111), and the
 finished week, month and year candles made of them (#112), and made-up daily supply data on
 the same days (``state/supply/``, #226): the 12th's is not out yet, as on the server that
-morning.
+morning. The cost map's period base rates (``state/base_rates.json``, #307) are made up too,
+each symbol's four periods.
 
 The daily kind ``open_to_close`` (#264) has KRX day candles of its own (``krx.parquet``, the
 same days, an open a tick off the integrated one's) and, for its last 20 days up to the 8th,
@@ -57,6 +58,7 @@ from krx_quant.algorithms import ALGORITHMS, DAILY_ALGORITHMS, Model
 from krx_quant.api import create_app
 from krx_quant.auctions import KEEP_DAYS, MINUTE_BAR, write_auctions
 from krx_quant.backfill import BAR_SCHEMA, PreviousDay, stock_bars_path
+from krx_quant.base_rates import write_base_rates
 from krx_quant.candles import PERIODS, period_start, write_candles, write_krx_days
 from krx_quant.clock import FakeClock
 from krx_quant.daily import ANSWER_FROM, StoredDays
@@ -98,6 +100,7 @@ from krx_quant.predictions import DB_NAME, PredictionStore, iso
 from krx_quant.recorder import ParquetRecorder
 from krx_quant.regime import RegimeRules
 from krx_quant.replay import replay, replay_into
+from krx_quant.structure_check import PERIODS as BASE_RATE_PERIODS
 from krx_quant.supply import KIS, NET_MARKET, NXT_OPENED, TOSS, write_supply
 from krx_quant.swap import NightStatus, reports_by_algorithm
 from krx_quant.touch import TARGET_VERSION
@@ -348,6 +351,51 @@ def write_demo_supply(state_dir: Path) -> None:
         write_supply(state_dir, symbol, TOSS, toss)
 
 
+# Each demo symbol's made-up flat share and median k in the four base-rate periods (#307), in
+# the order of ``structure_check.PERIODS``, and the trading days with bars in each.
+_BASE_RATES = {
+    "005930": ((0.893, 0.742, 0.615, 0.503), (2, 2, 2, 2)),
+    "000660": ((0.709, 0.481, 0.312, 0.172), (5, 5, 1, 1)),
+    "009150": ((0.621, 0.552, 0.474, 0.398), (3, 3, 4, 4)),
+}
+_BASE_RATE_DAYS = (238, 45, 31, 20)
+
+
+def write_demo_base_rates(state_dir: Path) -> None:
+    """Made-up period base rates (#307), kept as the collector keeps them (``base_rates.py``):
+    each symbol's four periods, computed after the backfill of the evening before the morning.
+    The up and down labels split the rest about evenly."""
+    rows = []
+    for symbol, (flats, ks) in _BASE_RATES.items():
+        periods = zip(BASE_RATE_PERIODS, flats, ks, _BASE_RATE_DAYS, strict=True)
+        for (name, first, end), flat, k, days in periods:
+            windows = days * 375  # 09:01–15:15 a day
+            up = round((1 - flat) * 0.52, 3)
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "period": name,
+                    "from": None if first is None else first.isoformat(),
+                    "to": None if end is None else (end - timedelta(days=1)).isoformat(),
+                    "days": days,
+                    "windows": windows,
+                    "up": up,
+                    "flat": flat,
+                    "down": round(1 - flat - up, 3),
+                    "k": k,
+                    "persist": round(min(0.95, flat + 0.04), 3),
+                    "persist_windows": windows - 4 * days,  # a day's first four windows have none
+                }
+            )
+    body = {
+        "computed_at": "2026-10-11T20:30:41+09:00",
+        "first_day": "2025-10-13",
+        "last_day": "2026-10-08",
+        "rows": rows,
+    }
+    write_base_rates(state_dir, body)
+
+
 def _finished_periods(days: list[Row], period: str) -> list[Row]:
     """The candles of ``period`` made of day candles (oldest first), each dated by its first
     day, without the one holding the demo morning: as the collector stores them."""
@@ -394,6 +442,7 @@ async def demo_app(db: Path, pace: float | None = None) -> web.Application:
     shutil.rmtree(data_dir / "bars", ignore_errors=True)
     write_demo_candles(data_dir)
     write_demo_supply(data_dir / "state")  # before the daily kind's days: Cox reads the flows
+    write_demo_base_rates(data_dir / "state")  # the cost map's (#307)
     for day in PAST_DAYS:
         # Each day by its own engine, ended before the daily review after the close, so
         # every algorithm stays active as on the morning.

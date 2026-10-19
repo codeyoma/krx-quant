@@ -385,8 +385,9 @@ def register_daily_kinds(kinds: Sequence[DailyKind], taken: Sequence[Kind] = ())
             or not all(_NAME.match(c) for c in k.classes)
             or not k.action
             or not set(k.action) <= set(k.classes)
+            or (k.sides is not None and k.sides != (k.classes[0], k.classes[2]))
         ):
-            raise DailyRegistrationError(f"{k.name}: classes {k.classes}, action {k.action}")
+            raise DailyRegistrationError(f"{k.name}: classes {k.classes}, action {k.action}, sides {k.sides}")
         if k.answers is None or k.band is None:
             raise DailyRegistrationError(f"{k.name}: no answer or band rule")
         for b in k.daily_baselines:

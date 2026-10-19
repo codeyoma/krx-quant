@@ -1952,6 +1952,18 @@ class PredictionStore:
         keeps writing (WAL lets them work at once)."""
         return contextlib.closing(sqlite3.connect(self._path.resolve().as_uri() + "?mode=ro", uri=True))
 
+    def last_reference(self, symbol: str) -> tuple[float, datetime] | None:
+        """The mid-point at the symbol's latest bar close with one (its touch path's ``anchor``)
+        and that bar close (#307: the cost map's price out of continuous trading); None without."""
+        rows = self._db.execute(
+            "SELECT bar_close, path FROM touches WHERE symbol = ? ORDER BY bar_close DESC LIMIT 50", (symbol,)
+        )
+        for bar_close, path in rows:
+            anchor = json.loads(path).get("anchor")
+            if anchor is not None:
+                return float(anchor), datetime.fromisoformat(bar_close)
+        return None
+
     def last_bar_close(self) -> str | None:
         value: str | None = self._db.execute("SELECT MAX(bar_close) FROM predictions").fetchone()[0]
         return value

@@ -262,6 +262,36 @@ async def test_the_demo_has_its_morning_s_flows(tmp_path: Path) -> None:
     assert [w["kind"] for w in body["special"]] == ["circuit_breaker", "vi"]
 
 
+async def test_the_demo_has_a_cost_map(tmp_path: Path) -> None:
+    """#307. Output: each symbol's card at its mid-point at 10:30, a row each kind with a
+    direction (the range has none), every row's breakeven but the daily kind's, and the made-up
+    base rates of the four periods."""
+    app = await demo_app(tmp_path / "demo.sqlite3")
+
+    async with TestClient(TestServer(app)) as client:
+        body = await get_json(client, "/v1/cost-map?period=20d")
+
+    check("cost_map", body)
+    cards = {s["symbol"]: s for s in body["symbols"]}
+    assert all(s["live"] and s["costs"] is not None for s in cards.values())
+    assert cards["009150"]["costs"]["inverse"] is None
+    assert cards["000660"]["costs"]["below"]["edge"] == 200_000
+    rows = {r["kind"]: r for r in body["rows"]}
+    assert list(rows) == [
+        "direction",
+        "barrier",
+        "barrier_15m",
+        "barrier_30m",
+        "barrier_60m",
+        "open_to_close",
+    ]
+    assert all(r["breakeven"] is not None for k, r in rows.items() if k != "open_to_close")
+    assert rows["direction"]["consensus"]["algorithm"] == "consensus-final"
+    assert rows["open_to_close"]["unit"] == "bp" and rows["open_to_close"]["bar_closes"] > 0
+    regimes = body["regimes"]
+    assert len(regimes["rows"]) == 12, "three symbols, four periods"
+
+
 async def test_the_demo_is_the_same_every_time(tmp_path: Path) -> None:
     first, second = await demo_app(tmp_path / "a.sqlite3"), await demo_app(tmp_path / "b.sqlite3")
 
@@ -275,6 +305,7 @@ async def test_the_demo_is_the_same_every_time(tmp_path: Path) -> None:
             "/v1/symbols/005930/kinds/open_to_close/predictions?limit=21",
             "/v1/briefing",
             "/v1/symbols/000660/flow",
+            "/v1/cost-map?period=20d",
         ):
             assert await get_json(a, path) == await get_json(b, path)
 

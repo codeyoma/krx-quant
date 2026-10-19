@@ -1977,6 +1977,210 @@
         "estimate_institution_net_qty": {"type": ["integer", "null"]}
       }
     },
+    "cost_map": {
+      "description": "GET /v1/cost-map?symbol=&period=&special= (#307): each symbol's round-trip costs, a row each kind with a direction (its sides) with the breakeven hit rate beside the hit rates of its final consensus, first-ranked algorithm and strongest baseline (the leaderboard's statistics for the same query), and the period base rates kept (null before they are computed, with why).",
+      "type": "object",
+      "required": ["symbol", "period", "special", "as_of", "min_sample", "fee_rate", "spread_ticks", "symbols", "rows", "regimes", "regimes_missing"],
+      "additionalProperties": false,
+      "properties": {
+        "symbol": {"type": "string"},
+        "period": {"enum": ["today", "5d", "20d"]},
+        "special": {"enum": ["exclude", "include"]},
+        "as_of": {"$ref": "#/$defs/time"},
+        "min_sample": {"type": "integer", "minimum": 1},
+        "fee_rate": {"type": "number", "minimum": 0},
+        "spread_ticks": {"type": "integer", "minimum": 0},
+        "symbols": {"type": "array", "items": {"$ref": "#/$defs/cost_symbol"}},
+        "rows": {"type": "array", "items": {"$ref": "#/$defs/cost_row"}},
+        "regimes": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/base_rates"}]},
+        "regimes_missing": {"type": ["string", "null"]}
+      }
+    },
+    "cost_symbol": {
+      "description": "A symbol's cost card (#307): its reference price (the mid-point now in continuous trading, live; else the latest bar close's, with that bar close), and its costs there (null without a price).",
+      "type": "object",
+      "required": ["symbol", "name", "price", "price_at", "live", "costs"],
+      "additionalProperties": false,
+      "properties": {
+        "symbol": {"type": "string"},
+        "name": {"type": ["string", "null"]},
+        "price": {"type": ["number", "null"]},
+        "price_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]},
+        "live": {"type": "boolean"},
+        "costs": {
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "required": ["tick", "tick_bp", "k", "sell_tax_bp", "fees_bp", "spread_bp", "limit", "market", "inverse", "below", "above"],
+              "additionalProperties": false,
+              "properties": {
+                "tick": {"type": "integer", "minimum": 1},
+                "tick_bp": {"type": "number"},
+                "k": {"type": "integer", "minimum": 1},
+                "sell_tax_bp": {"type": "number"},
+                "fees_bp": {"type": "number"},
+                "spread_bp": {"type": "number"},
+                "limit": {"$ref": "#/$defs/cost_round_trip"},
+                "market": {"$ref": "#/$defs/cost_round_trip"},
+                "inverse": {
+                  "oneOf": [
+                    {"type": "null"},
+                    {
+                      "type": "object",
+                      "required": ["leverage", "listed", "bp", "ticks", "omits"],
+                      "additionalProperties": false,
+                      "properties": {
+                        "leverage": {"type": "integer", "minimum": 1},
+                        "listed": {"$ref": "#/$defs/day"},
+                        "bp": {"type": "number"},
+                        "ticks": {"type": "number"},
+                        "omits": {"type": "array", "items": {"enum": ["spread", "premium", "basis"]}}
+                      }
+                    }
+                  ]
+                },
+                "below": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/tick_edge"}]},
+                "above": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/tick_edge"}]}
+              }
+            }
+          ]
+        }
+      }
+    },
+    "cost_round_trip": {
+      "type": "object",
+      "required": ["bp", "ticks"],
+      "additionalProperties": false,
+      "properties": {"bp": {"type": "number"}, "ticks": {"type": "number"}}
+    },
+    "tick_edge": {
+      "description": "A tick-band edge near the price (#307): the edge, the first price past it, and the tick and k there.",
+      "type": "object",
+      "required": ["edge", "price", "tick", "k"],
+      "additionalProperties": false,
+      "properties": {
+        "edge": {"type": "integer"},
+        "price": {"type": "integer"},
+        "tick": {"type": "integer", "minimum": 1},
+        "k": {"type": "integer", "minimum": 1}
+      }
+    },
+    "cost_row": {
+      "description": "A kind with a direction on the cost map (#307): its width W and cost C (limit and market orders) at the bar close whose C/W is the median, ticks (a daily kind's median band and its cost, basis points), the breakeven C/W and p* = (W + C) / 2W for a symmetric answer (null with why for the others), and its three predictors (null for none).",
+      "type": "object",
+      "required": ["kind", "title", "horizon_minutes", "rule", "days", "unit", "bar_closes", "width", "reference_price", "tick", "cost", "breakeven", "breakeven_missing", "consensus", "top", "baseline"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {"type": "string"},
+        "title": {"type": "string"},
+        "horizon_minutes": {"type": ["integer", "null"]},
+        "rule": {"type": "string"},
+        "days": {"type": "array", "items": {"$ref": "#/$defs/day"}},
+        "unit": {"enum": ["ticks", "bp", null]},
+        "bar_closes": {"type": "integer", "minimum": 0},
+        "width": {"type": ["number", "null"]},
+        "reference_price": {"type": ["number", "null"]},
+        "tick": {"type": ["integer", "null"]},
+        "cost": {
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "required": ["limit", "market"],
+              "additionalProperties": false,
+              "properties": {"limit": {"type": "number"}, "market": {"type": "number"}}
+            }
+          ]
+        },
+        "breakeven": {
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "required": ["limit", "market"],
+              "additionalProperties": false,
+              "properties": {"limit": {"$ref": "#/$defs/breakeven"}, "market": {"$ref": "#/$defs/breakeven"}}
+            }
+          ]
+        },
+        "breakeven_missing": {"type": ["string", "null"]},
+        "consensus": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/cost_predictor"}]},
+        "top": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/cost_predictor"}]},
+        "baseline": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/cost_predictor"}]}
+      }
+    },
+    "breakeven": {
+      "type": "object",
+      "required": ["c_over_w", "p_star"],
+      "additionalProperties": false,
+      "properties": {"c_over_w": {"type": "number"}, "p_star": {"type": "number"}}
+    },
+    "cost_predictor": {
+      "description": "A predictor on a cost-map row (#307): its hit rate of rise and fall calls (the leaderboard's precision), the edge (the share right less the share wrong the other way), its calls, its research P&L per trade in the row's unit (null for a kind without one), and its verdict against each cost's p* (pass, fail, few calls; null without p*).",
+      "type": "object",
+      "required": ["algorithm", "rank", "calls", "precision", "edge", "pnl", "pnl_inverse", "verdict"],
+      "additionalProperties": false,
+      "properties": {
+        "algorithm": {"type": "string"},
+        "rank": {"type": ["integer", "null"]},
+        "calls": {"type": "integer", "minimum": 0},
+        "precision": {"$ref": "#/$defs/interval"},
+        "edge": {"type": ["number", "null"]},
+        "pnl": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/cost_pnl"}]},
+        "pnl_inverse": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/cost_pnl"}]},
+        "verdict": {
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "required": ["limit", "market"],
+              "additionalProperties": false,
+              "properties": {"limit": {"enum": ["pass", "fail", "few"]}, "market": {"enum": ["pass", "fail", "few"]}}
+            }
+          ]
+        }
+      }
+    },
+    "cost_pnl": {
+      "type": "object",
+      "required": ["trades", "per_trade"],
+      "additionalProperties": false,
+      "properties": {"trades": {"type": "integer", "minimum": 0}, "per_trade": {"$ref": "#/$defs/interval"}}
+    },
+    "base_rates": {
+      "description": "The period base rates kept (#307, state/base_rates.json): the four-minute touch labels by the one-minute bar rule, a row a symbol and period (structure-check's section 3).",
+      "type": "object",
+      "required": ["computed_at", "first_day", "last_day", "rows"],
+      "additionalProperties": false,
+      "properties": {
+        "computed_at": {"$ref": "#/$defs/time"},
+        "first_day": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/day"}]},
+        "last_day": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/day"}]},
+        "rows": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["symbol", "period", "from", "to", "days", "windows", "up", "flat", "down", "k", "persist", "persist_windows"],
+            "additionalProperties": false,
+            "properties": {
+              "symbol": {"type": "string"},
+              "period": {"type": "string"},
+              "from": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/day"}]},
+              "to": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/day"}]},
+              "days": {"type": "integer", "minimum": 1},
+              "windows": {"type": "integer", "minimum": 1},
+              "up": {"type": "number", "minimum": 0, "maximum": 1},
+              "flat": {"type": "number", "minimum": 0, "maximum": 1},
+              "down": {"type": "number", "minimum": 0, "maximum": 1},
+              "k": {"type": "integer", "minimum": 1},
+              "persist": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+              "persist_windows": {"type": "integer", "minimum": 0}
+            }
+          }
+        }
+      }
+    },
     "event": {
       "description": "A message of GET /v1/stream (WebSocket), one JSON text each.",
       "oneOf": [

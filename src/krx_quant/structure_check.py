@@ -155,7 +155,7 @@ def structure_check(
 ) -> str:
     """The check over the latest ``days`` trading days with one-minute bars (every one if
     None); the turn of the month over the whole day-candle history."""
-    chosen = _bar_days(data_dir, symbols, calendar)
+    chosen = bar_days(data_dir, symbols, calendar)
     if days is not None:
         chosen = chosen[-days:]
     prices: dict[str, list[DayPrices]] = {}
@@ -192,7 +192,7 @@ def structure_check(
     return "\n".join(lines)
 
 
-def _bar_days(data_dir: Path, symbols: Sequence[str], calendar: MarketCalendar) -> list[date]:
+def bar_days(data_dir: Path, symbols: Sequence[str], calendar: MarketCalendar) -> list[date]:
     """The trading days with a symbol's one-minute bars, oldest first."""
     found: set[date] = set()
     for partition in (data_dir / "bars").glob("date=*"):
@@ -305,19 +305,40 @@ def _labels_section(labels: Mapping[str, Sequence[Label]]) -> list[str]:
     return lines[1:] and lines
 
 
-def _label_line(rows: Sequence[Label]) -> str:
+@dataclass(frozen=True)
+class LabelShares:
+    """Section 3's figures of some windows' labels (the cost map's period base rates too, #307)."""
+
+    windows: int
+    up: float  # the share of up labels
+    flat: float  # of flat ones: how often always-flat was right
+    down: float
+    k: int  # the median k (the lower of two)
+    previous: float | None  # how often the previous window's label was right; None without one
+    paired: int  # the windows with a previous window's label
+
+
+def label_shares(rows: Sequence[Label]) -> LabelShares:
+    """The figures of ``rows`` (at least one)."""
     counts = Counter(x.label for x in rows)
     n = len(rows)
-    shares = "/".join(f"{100 * counts[d] / n:.1f}" for d in (Direction.UP, Direction.FLAT, Direction.DOWN))
     paired = [x for x in rows if x.previous is not None]
-    previous = (
-        f"{100 * sum(x.previous == x.label for x in paired) / len(paired):.1f}% (n={len(paired):,})"
-        if paired
-        else "없음"
+    return LabelShares(
+        windows=n,
+        up=counts[Direction.UP] / n,
+        flat=counts[Direction.FLAT] / n,
+        down=counts[Direction.DOWN] / n,
+        k=statistics.median_low(x.k for x in rows),
+        previous=sum(x.previous == x.label for x in paired) / len(paired) if paired else None,
+        paired=len(paired),
     )
-    k = statistics.median_low(x.k for x in rows)
-    flat = 100 * counts[Direction.FLAT] / n
-    return f"{n:,}창 · {shares}% · k {k} · 직전 창 {previous} · 늘 보합 {flat:.1f}%"
+
+
+def _label_line(rows: Sequence[Label]) -> str:
+    f = label_shares(rows)
+    shares = "/".join(f"{100 * share:.1f}" for share in (f.up, f.flat, f.down))
+    previous = f"{100 * f.previous:.1f}% (n={f.paired:,})" if f.previous is not None else "없음"
+    return f"{f.windows:,}창 · {shares}% · k {f.k} · 직전 창 {previous} · 늘 보합 {100 * f.flat:.1f}%"
 
 
 def _tom_section(data_dir: Path, state_dir: Path, symbols: Sequence[str]) -> list[str]:
