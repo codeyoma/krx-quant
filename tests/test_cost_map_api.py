@@ -257,7 +257,12 @@ async def test_the_daily_kind_s_row_is_in_basis_points_without_a_breakeven(tmp_p
         t = OPEN_TO_CLOSE.predicted_at(DAY)
         made, answered = [], []
         for symbol, band, change in zip(SYMBOLS, (0.004, 0.005, 0.006), (0.01, -0.01, 0.0), strict=True):
-            path = {"open": 100_000, "close": 100_000 * (1 + change), "change": change, "band": band}
+            path: dict[str, Any] = {
+                "open": 100_000,
+                "close": 100_000 * (1 + change),
+                "change": change,
+                "band": band,
+            }
             path |= {"sigma": band * 2, "scale": 0.43, "fee_rate": FEE, "source": "krx_minute_bar"}
             label = "up" if change > band else "down" if change < -band else "flat"
             output = dict(zip(OPEN_TO_CLOSE.p_keys(), (0.5, 0.25, 0.25), strict=True))
