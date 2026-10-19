@@ -270,7 +270,9 @@
 | `training` | 지난밤 학습(#22). `day`, `finalized_at`(승격 목록 확정 시각, KST), `applied`(그 승격이 지금 돌고 있는지), `reason`, `promoted`(알고리즘 → 버전), `reports`(알고리즘별 `promoted`, `reason`: 검증 log loss 비교). 도달 정답(#169, 기본 정답 버전 3)에서는 밤마다 다시 맞춘 `baseline-climate` 표도 `promoted`와 `reports`에 온다. 아직 없으면 `null` |
 | `cpu` | CPU 예산(#19). `budget_seconds`(`KRX_CPU_BUDGET_SECONDS`), `algorithm_seconds`(알고리즘 하나의 시간 예산, `KRX_ALGORITHM_SECONDS`), `algorithms`(은퇴하지 않은 알고리즘마다 봉 마감 한 번에 걸릴 것으로 보는 초. 한 번이라도 돈 것만), `expected_seconds`(그 합), `usage`(합 ÷ 예산. 예산이 0이면 `null`. 1을 넘으면 다음 봉 마감에 늦게 등록된 것부터 건너뛴다), `skipped_today`(오늘 CPU 예산으로 건너뛴 횟수) |
 | `usd_futures` | 달러선물 최근월물의 오늘 마지막 체결(#70). `price`, `at`(체결 시각), `previous_close`(그날 장 시작 전 마지막 매크로 읽기(보통 07:30)의 `usdf` 값, 곧 전 거래일 종가. 장 시작 뒤 `krx-quant macro`를 다시 돌려도 바뀌지 않는다. 국면과 같다), `change_pct`(전일 종가 대비 %). 오늘 매크로 읽기가 없거나, 그 읽기에 전 거래일의 달러선물 종가가 없으면(백필이 빠져 더 오래된 종가뿐이면) `previous_close`와 `change_pct`가 `null`이다. 오늘 체결이 아직 없으면(장 전, 휴장일) 통째로 `null`이다. 재생·데모 엔진도 같다 |
-| `kis` | 실시간 모드와 데모 엔진(가상 값)에만 있고, 둘에서는 늘 있다(없으면 엔진 API가 시작하지 않는다). `connected`(KIS가 현재 연결에서 구독에 답했는지), `feeds`(구독·조회별 `feed`, `key`, `last_received_at`, `seconds_since`, 열린 결측 구간의 `gap`: `stale` 또는 `disconnected: <이유>`). 야간선물(`H0MFCNT0`, `H0MFASP0`, #264)은 18:00–06:00에만 와서 낮에는 `seconds_since`가 크다. `gap`은 `stale`이 되지 않는다 |
+| `kis` | 실시간 모드와 데모 엔진(가상 값)에만 있고, 둘에서는 늘 있다(없으면 엔진 API가 시작하지 않는다). `connected`(KIS가 현재 연결에서 구독에 답했는지. 연결이 끊기거나 침묵 감시가 닫으면 `false`, 다음 연결에서 KIS가 답하면 다시 `true`), `last_frame_at`(KIS WebSocket에서 마지막으로 받은 프레임의 시각. 데이터, PINGPONG, 구독 응답 모두 센다. 아직 없으면 `null`, #308), `seconds_since_frame`(그 뒤로 지난 초. 엔진 시계 기준, 없으면 `null`. 건강한 연결은 쉴 때도 PINGPONG이 약 10.8초마다 와서 11초쯤을 넘지 않는다. 60초(`KRX_WS_SILENCE_SECONDS`)를 넘으면 수집기가 그 연결을 닫는다), `feeds`(구독·조회별 `feed`, `key`, `last_received_at`, `seconds_since`, 열린 결측 구간의 `gap`: `stale` 또는 `disconnected: <이유>`). 야간선물(`H0MFCNT0`, `H0MFASP0`, #264)은 18:00–06:00에만 와서 낮에는 `seconds_since`가 크다. `gap`은 `stale`이 되지 않는다 |
+
+> **바뀜** (2026-10-19, #311): `kis`는 `connected`와 `feeds`뿐이었다 → `last_frame_at`, `seconds_since_frame`을 더했다(필수 필드, 스키마의 `kis`). `connected`의 뜻은 그대로지만, 이제 침묵 감시가 죽은 연결을 닫으면 `false`가 된다. 이유: 2026-10-19 16:33에 연결이 닫힘 없이 죽었는데 `connected`는 내내 `true`였다. 화면은 `seconds_since_frame`이 커지는 것으로 죽어 가는 연결을 볼 수 있다(#308).
 
 ### `GET /v1/symbols`
 
@@ -960,7 +962,7 @@
 | `prediction` | 예측이 저장(표시)될 때. 기준 예측(4종, 버전 1은 3종)은 한 번에, 알고리즘은 각자 끝났을 때 | `bar_close`, `predictions`(항목은 `latest`의 예측 항목에 `symbol`을 더한 것) |
 | `consensus` | 합의가 저장될 때 | `kind`(`fast`, `final`), `bar_close`, `predictions`(합의 예측, 종목마다 하나) |
 | `outcome` | 예측이 채점될 때(봉 마감 4분 뒤) | `outcomes`(채점된 예측. 항목 형식은 같고 `outcome`이 찬다. `outcome`의 `class_a`·`class_b`도 REST처럼 도달 정답이다, #170) |
-| `health` | 연결하자마자 한 번, 그리고 KIS 연결이나 피드의 결측 구간이 바뀔 때 | `kis`(`/v1/status`의 `kis`와 같다). 실시간과 데모만. 지연 초(`seconds_since`)가 바뀐 것만으로는 보내지 않는다 |
+| `health` | 연결하자마자 한 번, 그리고 KIS 연결이나 피드의 결측 구간이 바뀔 때 | `kis`(`/v1/status`의 `kis`와 같다). 실시간과 데모만. 지연 초(`seconds_since`, `seconds_since_frame`)나 `last_frame_at`이 바뀐 것만으로는 보내지 않는다 |
 | `lifecycle` | 알고리즘 상태가 바뀔 때. 일일 점검, 다른 프로세스의 `retire`·`unretire` 명령과 수습 시뮬레이션(#298). 엔진이 시작할 때의 처음 등록은 스트림이 열리기 전이라 오지 않는다 | `algorithm`, `change`(`at`, `from`, `to`, `reason`, `simulated`: `/v1/algorithms`의 상태 이력 항목과 같다). 수습 시뮬레이션(#298)의 판정은 다른 프로세스(`krx-quant simulate`)가 쓰므로 그 상태 변경도 이것으로 온다(`simulated` `true`). 시뮬레이션 예측 자체는 스트림으로 보내지 않는다 |
 | `bar` (#110) | 종목의 지금 만들어지는 1분봉이 바뀌었을 때. 1초마다 살펴 종목마다 많아야 한 번, 그사이 마지막 값으로 보낸다. 바뀌지 않으면 보내지 않는다 | `symbol`, `bar`(`start`, `open`, `high`, `low`, `close`, `volume`, `trades`: `/v1/symbols/{symbol}/bars`의 봉과 같은 형식. 그날 시작한 가장 최근 봉이라, 새 분에 체결이 아직 없으면 끝난 앞 봉이 그대로다) |
 | `kind_prediction` (#179) | 다른 종류의 예측이 저장(표시)될 때. 그 종류의 기준 예측은 한 번에, 알고리즘은 각자 끝났을 때 | `prediction_kind`(종류 이름), `bar_close`, `predictions`(항목은 `/v1/symbols/{symbol}/kinds/{kind}/latest`의 항목에 `symbol`을 더한 것) |

@@ -185,6 +185,7 @@ curl http://krx-quant:8080/v1/macro
 | `KRX_HEALTH_CHECK_SECONDS` | 5 | 피드 지연(`stale`)을 판정하는 간격(초) |
 | `KRX_RECOVERY_HOLD_SECONDS` | 60 | 재연결 뒤 이만큼 유지되어야 `[복구]` 알림을 보낸다(초) |
 | `KRX_RECONNECT_INITIAL_SECONDS`, `KRX_RECONNECT_MAX_SECONDS` | 1, 60 | WebSocket 재연결 간격의 처음과 최대(초). 실패할 때마다 두 배로 늘린다 |
+| `KRX_WS_SILENCE_SECONDS` | 60 | KIS WebSocket에 프레임(데이터, PINGPONG, 구독 응답)이 이만큼 하나도 오지 않으면 죽은 연결로 보고 닫은 뒤 재연결한다(초, #308). 20 이상. KIS는 쉴 때도 약 10.8초마다 PINGPONG을 보낸다([kis-feeds.md](kis-feeds.md#websocket-침묵-감시-308)) |
 | `KRX_BACKFILL_DAYS` | 365 | 1분봉을 채우는 기간(일) |
 | `KRX_BACKFILL_MAX_PER_SECOND` | 8 | 백필 조회 속도(초당). 20 이하 |
 | `KRX_DATA_DIR` | `data` (compose `/data`) | Parquet 녹화 위치. 서버에서는 저장소의 `data/` |
@@ -1213,7 +1214,7 @@ docker compose logs --tail 200 engine
 
 | 증상 | 확인 | 조치 |
 |---|---|---|
-| `[장애] KIS WebSocket 연결이 끊겼습니다` | 로그의 `KIS WebSocket down (...)` 원인 | 1초에서 최대 60초 간격으로 스스로 재연결한다. 60초 넘게 붙어 있으면 `[복구]`가 온다. 오래 가면 KIS 점검 공지를 보고, 앱키가 유효한지 확인한다. |
+| `[장애] KIS WebSocket 연결이 끊겼습니다` | 로그의 `KIS WebSocket down (...)` 원인. 괄호 안이 `silent 60s`면 KIS가 연결을 닫지 않은 채 60초(`KRX_WS_SILENCE_SECONDS`) 동안 PINGPONG까지 아무것도 보내지 않아 수집기가 닫은 것이다(#308). 그 앞에 `KIS WebSocket silent for 60s` WARNING이 있다 | 1초에서 최대 60초 간격으로 스스로 재연결한다. 60초 넘게 붙어 있으면 `[복구]`가 온다. 장 시간과 상관없이 온다. 오래 가면 KIS 점검 공지를 보고, 앱키가 유효한지 확인한다. |
 | `[장애] 구독한 키가 모두 끊긴 피드: stale <TR>` | 그 피드(TR)의 구독·조회 키가 전부 기준 시간(`health.STALE_SECONDS`)보다 오래 조용하다. 그날 아직 한 번도 안 온 키 중 지연으로 치지 않는 키(미국 주간거래, KIS가 거래일을 확인하지 않은 날)는 세지 않는다. 구독 키가 잘못됐거나(KIS는 잘못된 키도 구독 성공으로 답한다. 예: #113의 만기 지난 옵션 월물), 파싱이나 연결이 고장 났다. 여러 피드가 함께 오면 연결 문제다. | 키 하나라도 데이터가 다시 오면 `[복구] 데이터가 다시 들어오는 피드: stale <TR>`가 온다. 키 하나만 조용한 것(거래정지, VI, 체결이 드문 옵션 행사가)은 알리지 않는다. `gaps` 계층과 `/v1/status`의 `kis.feeds[].gap`에만 남는다. |
 | `[장애] 장 마감 데이터 업로드가 ... 실패했습니다` | 로그의 `could not archive ...` | 1. AWS 키, `KRX_OBJECT_STORE` 버킷 이름, IAM 정책을 확인한다.<br>2. 고친 뒤 `docker compose run --rm engine archive`를 돌린다. 다시 돌려도 안전하다.<br>3. 다음 업로드가 성공하면 `[복구]`가 온다. |
 | `[장애] 엔진 API를 열지 못했습니다` | 로그의 `Engine API not started on ...` | 녹화와 예측은 계속한다. 다른 프로세스가 8080을 쓰는지 확인하고 `docker compose up -d`로 다시 띄운다. |
