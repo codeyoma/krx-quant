@@ -971,10 +971,12 @@ NIGHT_PROBE = Job(
 # codes and tick differences, no market value, so it can go on the public issue. Ten days of
 # raw book frames take a few minutes to read; the half hour is a bound. Before the
 # pre-validations.
-EXPECTED_OPEN_ISSUE = 304
+# The result goes to #314 (the follow-up of #304, which closed with the screen): what to do with
+# it is written there.
+EXPECTED_OPEN_ISSUE = 314
 
 EXPECTED_OPEN_PROBE = Job(
-    name="probe-expected-open-304",
+    name="probe-expected-open-314",
     due=_first_trading_night,
     command=("probe-expected-open",),
     timeout=timedelta(minutes=30),
@@ -984,8 +986,8 @@ EXPECTED_OPEN_PROBE = Job(
             note=(
                 "에이전트가 이 출력으로 통합 호가의 예상 체결(`ANTC_*`)이 08:30–09:00에 오는지, KRX 시가 "
                 '단일가의 것인지 보고 `docs/events.md` "호가"의 예상 체결 열 설명과 `docs/kis-feeds.md`에 '
-                "남긴다. 장전 브리핑(#304)의 예상 시가는 그 결과를 따른다. 출력에는 시세 값이 없다"
-                "(개수, 시각, 코드, 틱 차이만)."
+                '남긴다. 장전 브리핑(#304)의 예상 시가는 그 결과를 따른다(이 이슈의 "에이전트가 할 일"). '
+                "출력에는 시세 값이 없다(개수, 시각, 코드, 틱 차이만)."
             ),
         ),
     ),

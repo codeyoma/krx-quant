@@ -978,13 +978,13 @@ def test_the_entry_delay_runs_the_diagnosis_once_on_a_trading_night_and_posts_se
     assert ENTRY_DELAY.targets[0].part("진단: 데이터 없음\n\n9. 뒤집힌 호가(#187)\n  없음") is None
 
 
-def test_the_expected_open_probe_runs_once_on_the_first_trading_night_and_posts_to_304() -> None:
+def test_the_expected_open_probe_runs_once_on_the_first_trading_night_and_posts_to_314() -> None:
     # #304: whether the integrated book carries KRX's expected opening price, from the raw
     # frames already recorded and the deploy day's normalized rows.
-    assert EXPECTED_OPEN_PROBE.name == "probe-expected-open-304"
+    assert EXPECTED_OPEN_PROBE.name == "probe-expected-open-314"
     assert EXPECTED_OPEN_PROBE.command == ("probe-expected-open",)
     assert EXPECTED_OPEN_PROBE.timeout == timedelta(minutes=30)
-    assert [t.issue for t in EXPECTED_OPEN_PROBE.targets] == [304]
+    assert [t.issue for t in EXPECTED_OPEN_PROBE.targets] == [314]  # #304's follow-up
     assert EXPECTED_OPEN_PROBE.label == ("ready-for-agent",)
     first = next(i for i, j in enumerate(JOBS) if j.name.startswith("prevalidate-"))
     assert JOBS.index(EXPECTED_OPEN_PROBE) < first, "before the pre-validations"
