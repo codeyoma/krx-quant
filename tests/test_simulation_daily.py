@@ -26,7 +26,7 @@ from krx_quant.cards import Card, Meaning
 from krx_quant.cli import main
 from krx_quant.clock import FakeClock
 from krx_quant.config import Settings
-from krx_quant.daily import DailySample
+from krx_quant.daily import JUDGING_HELD, DailySample
 from krx_quant.daily_features import input_versions
 from krx_quant.engine import PredictionEngine
 from krx_quant.features import FeatureVector
@@ -48,6 +48,16 @@ FEE = 0.015 / 100
 LAST = date(2026, 10, 16)  # a Friday: the last made-up KRX day
 NIGHT = datetime(2026, 10, 16, 23, 0, tzinfo=KST)  # that night's scheduled jobs
 CALENDAR = MarketCalendar()
+
+
+# The hold on open_to_close's judging (#264, ``daily.JUDGING_HELD``), as deployed; the tests below
+# judge its algorithms as the engine will once its close is fixed, unless one puts it back.
+HELD = dict(JUDGING_HELD)
+
+
+@pytest.fixture(autouse=True)
+def judged(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("krx_quant.daily.JUDGING_HELD", {})
 
 
 def settings(tmp_path: Path, signal: float, days: int = 420, seed: int = 298) -> Settings:
@@ -389,6 +399,44 @@ def test_the_scheduled_job_runs_after_a_daily_pass_or_while_a_probation_waits() 
     assert not job.due(night_of(day, failed, {}, simulating_daily=("cox",))), "failed on this code"
     assert job.due(night_of(day, replace(failed, commit="older"), {}, simulating_daily=("cox",)))
     assert job.due(night_of(day, failed, passed)), "a new pass asks again"
+
+
+def test_while_open_to_close_is_held_its_probation_waits_unsimulated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """open_to_close's judging is held (#264): the command still enrolls Cox (the engine would)
+    but neither simulates nor judges it; its probation still waits for its simulation, which is
+    made once the hold is lifted. The scheduled job is not due meanwhile, even the night Cox
+    passed."""
+    monkeypatch.setattr("krx_quant.daily.JUDGING_HELD", HELD)
+    s = settings(tmp_path, signal=4.0)
+    passed_report(s)
+    run = simulate_daily(s, now=NIGHT)
+    assert run.enrolled == ["cox"]
+    assert run.simulations == []
+    assert run.held == {"cox": HELD[OPEN_TO_CLOSE.name]}
+    lines = report(run, 0.983)
+    assert lines[1].startswith("cox: its simulation waits - its close may be the after-market's")
+    store = store_of(s)
+    try:
+        assert store.statuses()["cox"].status is Status.PROBATION
+        assert store.to_simulate(["cox"]) == ["cox"], "still waits for its simulation"
+        assert store.simulations() == {}
+    finally:
+        store.close()
+
+    [job] = [j for j in JOBS if j.name == "simulate-daily-298"]
+    day = date(2026, 10, 20)
+    passed = {
+        prevalidation_job_name("cox"): JobRecord(day, OK, datetime.combine(day, time(23), KST), "abc", 0, 60)
+    }
+    assert not job.due(night_of(day, None, passed)), "held: not the night it passed"
+    assert not job.due(night_of(day, None, {}, simulating_daily=("cox",))), "held: not while it waits"
+
+    monkeypatch.setattr("krx_quant.daily.JUDGING_HELD", {})
+    assert job.due(night_of(day, None, {}, simulating_daily=("cox",))), "lifted: due"
+    [sim] = simulate_daily(s, now=NIGHT + timedelta(days=1)).simulations
+    assert sim.algorithm == "cox" and len(sim.days) == DAILY_DAYS
 
 
 def test_the_command_prints_what_it_did(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any) -> None:

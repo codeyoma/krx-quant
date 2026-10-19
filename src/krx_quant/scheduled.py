@@ -49,7 +49,7 @@ import aiohttp
 from krx_quant.algorithms import ALGORITHMS, DAILY_ALGORITHMS, KIND_ALGORITHMS, Algorithm, KindAlgorithm
 from krx_quant.clock import SessionClock
 from krx_quant.config import JOBS_UNTIL, Settings
-from krx_quant.daily import DailyAlgorithm
+from krx_quant.daily import DailyAlgorithm, judging_held
 from krx_quant.daily_features import pending_inputs
 from krx_quant.engine import PredictionEngine
 from krx_quant.feeds.base import KST
@@ -1159,13 +1159,20 @@ _DAILY_PREVALIDATION_NOTE = (
 # is active by the next 08:50 if it passes. It also runs on a night a daily probation waits for it
 # (begun by the engine, or a run cut short). Once a night; a run that failed waits for new code (or
 # a new pass), as a pre-validation that left no verdict does. Cox fits in seconds: 20 fits and ten
-# years of samples are minutes; the hour is a bound. Its result goes to #298 and #264.
+# years of samples are minutes; the hour is a bound. Its result goes to #298 and #264. It waits for
+# the algorithms of a kind whose judging is held (``DailyKind.judging_held``, #264): their
+# simulation would be judged on answers that may be wrong (``daily.JUDGING_HELD``).
 SIMULATION_ISSUE = 298
 DAILY_SIMULATION_TIMEOUT = timedelta(hours=1)
 
 
-def _daily_simulation_due(names: Sequence[str]) -> Callable[[Night], bool]:
+def _daily_simulation_due(algorithms: Sequence[DailyAlgorithm]) -> Callable[[Night], bool]:
     def due(night: Night) -> bool:
+        # Not for an algorithm whose kind's judging is held (#264): it would be judged on answers
+        # that may be wrong.
+        names = [a.name for a in algorithms if judging_held(a.kind) is None]
+        if not names:
+            return False
         record = night.record
         if record is not None and record.day == night.day:
             return False  # once a night
@@ -1177,7 +1184,7 @@ def _daily_simulation_due(names: Sequence[str]) -> Callable[[Night], bool]:
         )
         if passed:
             return True  # a daily algorithm passed tonight: enrolled and simulated at once
-        if not night.facts.simulating_daily:
+        if not set(night.facts.simulating_daily) & set(names):
             return False
         return not (record is not None and record.outcome == FAILED and record.commit == night.commit)
 
@@ -1186,7 +1193,7 @@ def _daily_simulation_due(names: Sequence[str]) -> Callable[[Night], bool]:
 
 DAILY_SIMULATION = Job(
     name="simulate-daily-298",
-    due=_daily_simulation_due([a.name for a in DAILY_ALGORITHMS]),
+    due=_daily_simulation_due(DAILY_ALGORITHMS),
     command=("simulate", "daily"),
     timeout=DAILY_SIMULATION_TIMEOUT,
     targets=(
