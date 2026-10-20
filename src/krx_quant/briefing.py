@@ -11,8 +11,8 @@ prediction (``daily_features``), so the screen and the model never show two numb
 - **each symbol**: the previous trading day's KRX close (its KRX day candle), the integrated
   price at 20:00 that evening (the kept one-minute bars), the NXT pre-market's last trade
   (``daily_features.premarket_window``: 08:40–08:50, else 08:00–08:30, received before 08:50),
-  the opening auction's last expected price (the book's ``expected_px``, #304) and the previous
-  trading day's net buys (KIS's daily supply);
+  the opening auction's last expected price (the book's ``expected_px``, #304; KRX's only, #314)
+  and the previous trading day's net buys (KIS's daily supply);
 - **open to close**: the day's 08:50 predictions as ``/v1/symbols/{symbol}/kinds/open_to_close``
   gives them, with each daily algorithm's inputs and their parts in its forecast (#304); before
   the day's are made, the latest day's before it;
@@ -50,6 +50,11 @@ US_DAYS = 5  # the US closes shown before the day
 SUPPLY_DAYS = 5  # the trading days the net buys are summed over
 AFTER_HOURS_END = time(20, 0)  # the integrated market's last minute: KRX's and NXT's after-market
 EXPECTED_FROM = OPENING_AUCTION  # before the open: KRX takes the auction's orders from 08:30
+# The book's expected-fill venue code (``ANTC_EXCH_CLS_CODE``) of KRX's auctions. Measured
+# 2026-10-12 – 10-20 (#314): '1' carried KRX's opening and closing auctions (08:50–09:00 and
+# 15:20–15:30); '2' came outside them, and for one symbol in the opening auction's window and
+# before 08:30 too, when only NXT's pre-market is open: NXT's, not the price the open settles at.
+KRX_EXPECTED = "1"
 _MAX_EVENTS = 1000
 
 
@@ -268,8 +273,8 @@ def _premarket(data_dir: Path | None, symbol: str, day: date, close: float | Non
 
 
 def _expected_open(src: Sources, symbol: str, day: date, close: float | None) -> dict[str, Any] | None:
-    """The opening auction's last expected fill recorded before the open (the integrated book's
-    ``expected_px``, #304); ``final`` once the auction is over."""
+    """KRX's opening auction's last expected fill recorded before the open (the integrated book's
+    ``expected_px`` with KRX's venue code, #304, #314); ``final`` once the auction is over."""
     session = src.calendar.session(day)
     if src.data_dir is None or session is None:
         return None
@@ -281,7 +286,8 @@ def _expected_open(src: Sources, symbol: str, day: date, close: float | None) ->
     start = session.open - EXPECTED_FROM
     last = None
     for row in table.to_pylist():
-        if row["expected_px"] and start <= row["received_at"] < session.open:
+        krx = (row["expected_exch_cls"] or "").strip() == KRX_EXPECTED
+        if row["expected_px"] and krx and start <= row["received_at"] < session.open:
             if last is None or row["received_at"] >= last["received_at"]:
                 last = row
     if last is None:

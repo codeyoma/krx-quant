@@ -100,25 +100,30 @@ async def briefed(tmp_path: Path, now: str = "08:51") -> tuple[dict[str, Any], P
             (at("05:59:00", date(2026, 10, 17)), 393.0, 0.77, 1500),
         )
     ]
+    # The venue code '1' is KRX's auction; '2' came outside KRX's auctions and, for one symbol, in
+    # the opening auction's window too: NXT's, not the price the open settles at (#314).
     book = [
         (
             BOOK.tr_id,
             row_of(
                 BOOK,
-                symbol="005930",
+                symbol=symbol,
                 event_time=t,
                 received_at=t,
                 expected_px=p,
                 expected_qty=q,
-                expected_exch_cls="1",
+                expected_exch_cls=venue,
             ),
         )
-        for t, p, q in (
-            (at("08:29:00"), close - 500, 10),  # before the opening auction
-            (at("08:31:00"), close + 200, 2_000),
-            (at("08:59:50"), close + 400, 5_000),  # the last before the open
-            (at("09:00:05"), close + 700, 9_000),  # after it
-            (at("09:30:00"), 0, 0),  # continuous trading: no auction on
+        for symbol, t, p, q, venue in (
+            ("005930", at("08:29:00"), close - 500, 10, "1"),  # before the opening auction
+            ("005930", at("08:31:00"), close + 200, 2_000, "1"),
+            ("005930", at("08:59:50"), close + 400, 5_000, "1"),  # KRX's last before the open
+            ("005930", at("08:59:55"), close + 900, 7_000, "2"),  # later, but not KRX's
+            ("005930", at("09:00:05"), close + 700, 9_000, "1"),  # after the open
+            ("005930", at("09:30:00"), 0, 0, "1"),  # continuous trading: no auction on
+            ("000660", at("08:44:39"), close, 300, "2"),  # only NXT's in the window: none
+            ("000660", at("08:55:00"), close, 300, "2"),
         )
     ]
     record(data, [*morning, *night, *book])
@@ -215,7 +220,8 @@ async def test_the_briefing_reads_the_night_the_pre_market_and_the_book(tmp_path
     assert (expected["price"], expected["qty"], expected["venue_code"]) == (close + 400, 5_000, "1")
     assert expected["at"] == "2026-10-19T08:59:50+09:00" and expected["final"] is False
     others = body["symbols"][1]
-    assert others["premarket"] is None and others["expected_open"] is None and others["after_hours"] is None
+    assert others["expected_open"] is None, "NXT's expected prices are not KRX's expected open"
+    assert others["premarket"] is None and others["after_hours"] is None
 
     supply = samsung["supply"]
     assert supply["day"] == "2026-10-16" and supply["days"] == 5
