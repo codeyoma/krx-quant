@@ -604,6 +604,11 @@ class DayOverlap:
 INDEPENDENT = DayOverlap()
 
 
+def gains_by_day(records: Sequence[Paired], baseline: Sequence[Paired]) -> dict[date, list[float]]:
+    """The accuracy gained over ``baseline`` on each pair (1, 0 or −1), by trading day."""
+    return _gains_by_day(records, baseline)
+
+
 def _gains_by_day(records: Sequence[Paired], baseline: Sequence[Paired]) -> dict[date, list[float]]:
     by_day: dict[date, list[float]] = {}
     for at, gain in _gains(records, baseline):

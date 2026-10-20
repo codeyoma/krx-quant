@@ -1442,7 +1442,7 @@
 
     > **바뀜** (2026-10-18, #293): "스트림의 `kind_prediction`·`kind_answer`는 아직 보내지 않는다" → 보낸다. 이유: #264의 엔진 API PR이다.
 - **API.** 다른 종류의 엔드포인트를 그대로 쓴다.
-  - `GET /v1/kinds`: 봉 마감 종류 다음에 온다. `horizon_minutes`가 `null`이고(봉 마감이 없다), `daily`가 그날의 시각을 말한다: `predict_at`(`"08:50"`, KST, 거래일마다), `from`·`to`(`open`·`close`: 시가 단일가에서 종가 단일가까지), `from_title`·`to_title`(화면용 이름), `sessions`(창의 세션 수, #310: `open_to_close` 1, `open_to_close_5d` 5), `answer_from`(정답을 창의 끝날 처음 보는 시각: `open_to_close` `"15:45"`, `open_to_close_5d` `"20:35"`), `probation_days`·`bench_days`(판정하는 정답 있는 날, `open_to_close`는 `[20, 40, 60]`), `recent_days`(20), `awaiting`(돌지 않는 종류의 이유, #338: 측정이 끝나지 않은 데이터를 읽는 종류는 목록에만 나오고 예측·채점·학습·사전 검증을 하지 않는다. 도는 종류는 `null`). 봉 마감 종류의 `daily`는 `null`이다.
+  - `GET /v1/kinds`: 봉 마감 종류 다음에 온다. `horizon_minutes`가 `null`이고(봉 마감이 없다), `daily`가 그날의 시각을 말한다: `predict_at`(`"08:50"`, KST, 거래일마다), `from`·`to`(`open`·`close`: 시가 단일가에서 종가 단일가까지), `from_title`·`to_title`(화면용 이름), `sessions`(창의 세션 수, #310: `open_to_close` 1, `open_to_close_5d` 5), `answer_from`(정답을 창의 끝날 처음 보는 시각: `open_to_close` `"15:45"`, `open_to_close_5d` `"20:35"`), `probation_days`·`bench_days`(판정하는 정답 있는 날, `open_to_close`는 `[20, 40, 60]`), `recent_days`(20), `review_hold`(판정일을 정하기 전이라 그 종류의 알고리즘이 수습에 오르지 않는 이유, #310. 없으면 `null`), `awaiting`(돌지 않는 종류의 이유, #338: 측정이 끝나지 않은 데이터를 읽는 종류는 목록에만 나오고 예측·채점·학습·사전 검증을 하지 않는다. 도는 종류는 `null`). 봉 마감 종류의 `daily`는 `null`이다.
 
     > **바뀜** (2026-10-20, #317): `answer_from` `"20:35"` → `"15:45"`. 이유: 위 "정답"과 같다.
 
@@ -1578,9 +1578,12 @@
 | 판정일 | 40·80·120 | 60·120·180 | 80·160·240 | 100·200·300 | 120·240·360 |
 
 - VR = 1이어도 40일인 것은 자유도를 독립 창 수(⌊날 수 ÷ 5⌋ − 1)로 두었기 때문이다.
-- VR은 이 종류의 첫 알고리즘(`cox-5d`, #310의 다음 PR)의 사전 검증에서 잰다. 그 전에는 겹침만의 이론값 VR = 5(1 + 2 × (0.8 + 0.6 + 0.4 + 0.2))로 규칙이 주는 100·200·300일이다(`open_to_close_5d.UNMEASURED_RATIO`). 이 종류에는 아직 알고리즘이 없어 이 값으로 판정하는 일은 없다.
+- VR은 이 종류의 첫 알고리즘 `cox-5d`(아래 "알고리즘"의 "Cox-5d")의 사전 검증에서 잰다(리포트의 `walk_forward.overlap`, 위 "사전 검증"). 그 값으로 판정일을 코드에 고정하는 PR을 연다(`open_to_close_5d.UNMEASURED_RATIO`를 잰 값으로 바꾸고 아래 보류를 지운다). 그 전에는 겹침만의 이론값 VR = 5(1 + 2 × (0.8 + 0.6 + 0.4 + 0.2))로 규칙이 주는 100·200·300일이 들어 있지만 쓰이지 않는다:
+  - **판정일 보류(`DailyKind.review_hold`, #310).** 판정일을 고정하기 전에는 이 종류의 알고리즘이 사전 검증을 통과해도 수습에 오르지 않는다(엔진이 돌리지 않고, `simulate daily`가 수습에 올리지도 시뮬레이션하지도 않는다. `/v1/kinds`의 `daily.review_hold`가 이유다). 통과한 알고리즘은 "사전 검증 대기"가 아니라 "판정일 보류"다(#339 리뷰): 엔진의 `waiting()`에 들지 않고(`held()`), 엔진이 시작한 뒤 첫 점검에서 한 번 "판정일 보류: <이름>. 사전 검증은 통과했지만 …" 알림을 보낸다. 사전 검증은 돈다(VR을 잰다, 위 "지금은 돌지 않는다"가 풀린 뒤). spec은 "그 전에는 이 종류의 알고리즘이 수습에 들어가지 않는다(사전 검증이 먼저다)"였는데, 예약된 사전 검증이 통과하면 엔진이 그 아침 바로 수습에 올리고 그 밤 시뮬레이션해 판정한다. 그래서 보류가 따로 있어야 spec의 순서가 지켜진다.
+  - 다음 알고리즘이 이 종류에 들어오면 그 사전 검증 리포트에도 VR이 남는다. 그 VR로 규칙을 적용해 지금 판정일보다 긴 날이 나오면 판정일을 다시 정하는 이슈를 연다.
+- **수습 시뮬레이션(#298).** 수습의 첫 D₁일은 시뮬레이션이다: 이미 끝난 최근 창 D₁개(시작일 ≤ 그 밤 − 5)를 재생해 D₁일째 판정을 바로 한다. 날마다 그 전 거래일 밤까지 끝난 창으로 다시 학습한다(위 "여러 세션 창"의 "학습에서 겹침"). D₁일에 독립인 창은 ⌊D₁ ÷ 5⌋개뿐이라 자유도가 작고, 판정은 그만큼 넓은 구간으로 한다(규칙이 D₁을 그 폭에 맞춰 정한 것이다).
 
-**API.** 다른 종류의 엔드포인트를 그대로 쓴다(`/v1/kinds`, `…/kinds/open_to_close_5d/latest`·`predictions`, `leaderboard?kind=open_to_close_5d`, `algorithms/{otc5-flat, otc5-climate, otc5-persist}/stats`, 스트림의 `kind_prediction`·`kind_answer`). `/v1/kinds`의 `daily`는 `sessions` 5, `answer_from` `"20:35"`, `to_title` `"다섯째 거래일 종가 단일가"`, `awaiting`(돌지 않는 이유, 위 "지금은 돌지 않는다")이다. 예측의 `target_at`은 거래 일정으로 정한 끝날의 장 마감이다. 통계 항목의 `overlap_sessions`는 5, `independent_days`는 ⌊날 수 ÷ 5⌋다.
+**API.** 다른 종류의 엔드포인트를 그대로 쓴다(`/v1/kinds`, `…/kinds/open_to_close_5d/latest`·`predictions`, `leaderboard?kind=open_to_close_5d`, `algorithms/{otc5-flat, otc5-climate, otc5-persist}/stats`, 스트림의 `kind_prediction`·`kind_answer`). `/v1/kinds`의 `daily`는 `sessions` 5, `answer_from` `"20:35"`, `to_title` `"다섯째 거래일 종가 단일가"`, `awaiting`(돌지 않는 이유, 위 "지금은 돌지 않는다"), `review_hold`(판정일 보류의 이유, 위 "상태")이다. 예측의 `target_at`은 거래 일정으로 정한 끝날의 장 마감이다. 통계 항목의 `overlap_sessions`는 5, `independent_days`는 ⌊날 수 ÷ 5⌋다.
 
 ## 알고리즘
 
@@ -1766,6 +1769,14 @@ docker compose run --rm --no-deps engine prevalidate <이름> --days 5  # 빨리
       > **바뀜** (2026-10-20, #317): "한 번 돌기 시작한 알고리즘은 리포트와 상관없이 돈다. 버전이 오른 뒤 처음 배포될 때 아직 돌지 않던 알고리즘만 다시 판정받는다" → 수습 중이면 다시 판정받을 때까지 돌지 않는다. 이유: 정답 버전 2(#264)로 수습 중인 `cox`를 다시 판정받게 하려고.
     - 예약 작업은 그 종류의 최근 정답이 다 들어올 때까지도 기다린다(`Facts.pending_answers`, `DailyKind.pending`): `open_to_close`는 애프터마켓(2026-09-14)부터 마지막 끝난 날까지 모든 종목의 종가 단일가 가격이 저장되어야 한다(아래 "시가→종가"). 그 전에는 그 날들에 정답이 없어 walk-forward가 날을 덜 읽는다. 손으로 돌린 실행은 기다리지 않는다(정답이 없는 날은 빠진다).
   - 합성 실험(`tests/test_daily_prevalidation.py`, 1,300거래일 × 세 종목): 밤사이 SOX와 반대로, 전일 외국인 순매수와 같은 쪽으로 기우는 날은 통과하고, 잡음만 있는 날은 거래일 단위 하한에서 거부된다.
+  - **여러 세션 창의 종류(#310, `open_to_close_5d`의 `cox-5d`).** walk-forward의 각 재학습은 그 구간의 첫 예측일 전에 창이 끝난 표본만 맞춘다(그 전 H − 1일에 시작한 창은 뺀다, 위 "하루 한 번 예측 종류"의 "여러 세션 창"). 관문의 거래일 단위 하한은 겹침을 보정한 것이다(Newey–West, 위 "통계와 순위표"의 "겹치는 창"). 리포트의 `walk_forward.overlap`(`daily_training.overlap_report`)이 겹침을 잰다:
+    - `sessions`(5), `lag`(8), `days`(채점된 예측이 있는 날), `independent_days`(⌊날 ÷ 5⌋).
+    - `variance_ratio`: 기준 예측마다 그 알고리즘의 거래일 단위 이득 계열의 분산 배율 VR(시차 8 Newey–West 장기분산 ÷ γ₀, `stats.variance_ratio`). `variance_ratio_max`: 그중 가장 큰 것. 판정이 가장 약한 lift로 하므로 보수적으로 고른다.
+    - `baselines_variance_ratio`: 첫 기준 예측(`otc5-flat`) 대비 다른 기준 예측의 이득의 VR(`otc5-climate - otc5-flat`, `otc5-persist - otc5-flat`, 보기용).
+    - `review_days`: `variance_ratio_max`로 규칙이 주는 판정일(`variance_ratio` 규칙에 넣은 값, `first` D₁, `probation_days`, `bench_days`, `recent_days`, `min_sample`, 아래 "5거래일 시가→종가"의 "상태"). VR이 1보다 작으면(기준 예측마다 이득이 날마다 엇갈림) 1로 넣는다(#339 리뷰): 판정의 구간은 독립 가정보다 좁아지지 않으므로(위 "겹치는 창"), 1 밑의 VR로 판정일을 줄이면 너무 이르게 판정한다. 잰 VR(`variance_ratio`, `variance_ratio_max`)은 그대로 남긴다.
+    - `phases`: 위상 다섯(그 통계의 거래일 자리를 5로 나눈 나머지)마다 날 수, 기준 예측마다의 lift와 거래일 단위 95% 하한(한 위상의 창은 겹치지 않아 독립 가정이 맞다), 가장 약한 lift. 보기용이고 관문이 아니다.
+    - 명령의 출력에도 같은 것이 한 줄씩 나온다(`overlap:`, `variance ratio by baseline:`, `review days by the rule (#310):`, `phase N:`).
+    - 합성 10년(2,450거래일 × 세 종목, `daily_doubles.made_history`, 1,696일 채점) 세 번: 가장 큰 VR 2.55·1.68·1.97(기준 예측 셋 중 늘 기후가 가장 컸다), 규칙이 주는 D₁은 셋 모두 60이다. 잡음만 있는 둘은 거래일 단위 하한에서 거부되고, 밤사이 SOX에 기우는 날은 통과했다. 겹침 보정 시험(위 "통계와 순위표")의 무작위 예측도 VR 1.9–2.6이었다.
 
 
 ### 피처 (Feature Store)
@@ -2149,6 +2160,16 @@ uv run krx-quant fit newton --days 60
 - **사전 검증.** 위 "사전 검증"의 "하루 한 번 예측 종류의 알고리즘": KRX 일봉 10년의 walk-forward다. 통과하면 다음 08:50부터 수습이다. 2026-10-19 밤 정답 버전 1로 통과했고(1,701일, 86 fold, 가장 약한 lift 0.0355, 거래일 단위 하한 0.0155), 2026-10-20 06:00부터 수습이었다. 정답 버전 2(#317) 배포 뒤에는 수습이라 다시 판정받을 때까지 돌지 않고, 그 밤 `prevalidate-cox`가 고친 정답으로 다시 돈다. 같은 날들의 두 번째 실행이라 거래일 단위 하한은 97.5%다(#262).
 
 - **입력별 기여(#304).** `cox`는 예측마다 입력이 그 확률을 어떻게 만들었는지 낸다(`explain`, 하루 한 번 알고리즘 규약의 선택 기능 `daily.Explains`). 엔진이 예측과 함께 저장하고(`kind_predictions.inputs`) `/v1/briefing`이 보인다. 피처마다 그 열들(값과 빠짐 표시, 요일은 넷)이 상승·하락 점수에 더한 몫(가중치 × 표준화 값의 합)이고, 표준화 값은 모델이 읽은 것(학습 평균과 표준편차, ±5에서 자름)이다. 학습에서 빠진 열(늘 빠지거나 움직이지 않음)은 몫이 0이다. 절편과 모든 몫을 더하면 예측의 로짓이 된다(테스트로 확인). 기본 모델은 설명이 없다.
+
+### Cox-5d (5거래일 시가→종가, #310)
+
+`algorithms/cox5d/`의 `Cox5d`, 이름 `cox-5d`, 종류 `open_to_close_5d`. `cox`(위)와 같은 모델이다: 다항 로지스틱 회귀, 능선 벌점, 보합이 기준 클래스, 같은 피처(`daily_features`)와 설정(최근 2,450거래일, λ 후보, 80/20). `breiman-15m`이 `breiman`의 지평별 짝인 것과 같은 관계다. 다른 것:
+- 이 종류의 정답(5세션 창의 방향)으로 학습한다. 모델의 `target_version`은 이 종류의 정답 버전(1)이다.
+- 피처 코드는 같지만 종류를 따라 값이 그 종류의 것이다: σ̂로 나누는 입력(`oc_1` 등)과 `sigma`는 5세션 창의 σ̂, `climate_up`·`climate_down`은 그날 전에 끝난 창의 클래스 비율이다.
+- λ를 고르는 시간순 80/20 분할 사이에 4거래일을 비운다: 앞 부분은 뒤 부분의 첫날 전에 창이 끝난 표본만 맞추고(그 전 4일에 시작한 창은 뺀다), 뒤 부분으로 검증한다. 고른 λ로 모든 표본을 다시 맞춘다(테스트로 확인).
+- 코드 digest(`prevalidation.code_digest`)는 자기 패키지에 `cox`의 패키지를 더한 것이다(`code_from`). `cox`의 코드가 바뀌면 `cox-5d`도 다시 사전 검증을 받는다. `cox`의 digest는 그대로다(같은 실행으로 다시 판정받지 않는다).
+- 주간 지평에 맞는 피처 후보(5·20일 수익률, 5일 누적 외국인·기관 순매수, 창 안의 옵션 만기·월말·FOMC)는 첫 버전에 넣지 않았다. 사전 검증 결과를 본 뒤 정한다(#310).
+- 사전 검증과 수습: 이 종류가 돌기 시작한 뒤(위 "5거래일 시가→종가"의 "지금은 돌지 않는다") 예약 작업 `prevalidate-cox-5d`가 10년 walk-forward를 돌려 #204와 #310에 남긴다. 리포트가 VR과 규칙이 주는 판정일을 잰다. 판정일을 코드에 고정하기 전에는 통과해도 수습에 오르지 않는다(판정일 보류).
 
 ## 재생
 

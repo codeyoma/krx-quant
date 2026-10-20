@@ -15,21 +15,24 @@ each with the answer it was scored on: the leaderboard, the statistics, the cons
 the stream never read them; the lifecycle does, and the status change a simulation's review makes
 is marked (``statuses.simulated``).
 
-**Daily kinds** (``simulate_daily``, ``krx-quant simulate daily``): the latest ``DAILY_DAYS``
-(20) trading days with an answer. Before each day the algorithm is fitted as the night before it
-would have been (``daily_training.DailyTrainer``: its latest ``training_days`` up to the trading
-day before), on the samples ``daily_features.samples`` makes (the features as of the day's 08:50,
-from the days before it); a night that learns nothing keeps the model before it, as live (one
-whose first night learns nothing is not simulated); its kind's baselines predict each day as at 08:50
-(``daily_training.baseline_forecasts``). A day a circuit breaker or a sidecar touched is special,
-as live. A daily algorithm whose pre-validation passed but that the engine has not enrolled yet
-(its report is read at the engine's next start or 08:50) is enrolled here, as the engine would: the
-scheduled job runs right after its pre-validation, so it is simulated the same night. Two wait,
+**Daily kinds** (``simulate_daily``, ``krx-quant simulate daily``): the latest trading days with an
+answer, as many as the kind's first review day (``DAILY_DAYS``, 20, for ``open_to_close``; D₁ for a
+kind of windows of several sessions, #310: the windows that have ended, their training those ended
+by each night before, ``daily_training``). Before each day the algorithm is fitted as the night
+before it would have been (``daily_training.DailyTrainer``: its latest ``training_days`` up to the
+trading day before), on the samples ``daily_features.samples`` makes (the features as of the day's
+08:50, from the days before it); a night that learns nothing keeps the model before it, as live (one
+whose first night learns nothing is not simulated); its kind's baselines predict each day as at
+08:50 (``daily_training.baseline_forecasts``). A day a circuit breaker or a sidecar touched is
+special, as live. A daily algorithm whose pre-validation passed but that the engine has not enrolled
+yet (its report is read at the engine's next start or 08:50) is enrolled here, as the engine would:
+the scheduled job runs right after its pre-validation, so it is simulated the same night. Two wait,
 their probations unsimulated, and are simulated on a later night (#264): an algorithm whose
-pre-validation does not stand for the code, answer version and inputs it runs (the engine does
-not run it on probation then), and one whose kind's answers of the latest days are not all in
-on this server (``DailyKind.pending``: ``open_to_close``'s closing auction prices), as the days
-replayed would not be the latest.
+pre-validation does not stand for the code, answer version and inputs it runs (the engine does not
+run it on probation then), and one whose kind's answers of the latest days are not all in on this
+server (``DailyKind.pending``: ``open_to_close``'s closing auction prices), as the days replayed
+would not be the latest. One of a kind whose review days are not fixed yet (#310,
+``DailyKind.review_hold``) is neither enrolled nor simulated: its probation waits for them.
 
 **Bar-close kinds** (``simulate_bar_close``, ``krx-quant simulate bar-close``: the direction, the
 range, the barrier and its horizon ladder): their inputs are the recorded quotes, so the days are
@@ -97,7 +100,7 @@ from krx_quant.training import finished_days, is_recorded
 
 log = logging.getLogger(__name__)
 
-DAILY_DAYS = 20  # a daily kind's simulated days: its first review day (``daily.DAILY_RULES``)
+DAILY_DAYS = 20  # open_to_close's simulated days: its first review day (``daily.DAILY_RULES``)
 BAR_CLOSE_DAYS = 20  # a bar-close kind's, at most: the recorded days there are, at least MIN_DAYS
 DAILY, BAR_CLOSE = "daily", "bar_close"  # how a replay trains (``simulation_runs.cadence``)
 # The command's argument for each (``krx-quant simulate <which>``).
@@ -194,12 +197,16 @@ def _waits(
     now: datetime,
 ) -> str | None:
     """Why ``algorithm``'s probation is not simulated tonight (#264), None when it is: its
-    pre-validation does not stand for what it runs (the engine runs it once one does), or its
-    kind's answers of the latest days are not all in (``DailyKind.pending``)."""
+    pre-validation does not stand for what it runs (the engine runs it once one does), its kind
+    is not run yet (#310, ``DailyKind.awaiting``) or its review days are not fixed yet
+    (``DailyKind.review_hold``), or its kind's answers of the latest days are not all in
+    (``DailyKind.pending``)."""
     if not kind.runs:
         return f"its kind waits for {kind.awaiting}"  # #310
     if not admitted(algorithm):
         return "its pre-validation does not stand for the code, answer version and inputs it runs"
+    if kind.review_hold is not None:
+        return kind.review_hold  # #310: its review days are not fixed yet
     if kind.pending is None:
         return None
     return kind.pending(settings.data_dir, calendar, settings.symbols, now)
@@ -213,12 +220,12 @@ def _enroll(
     kinds: Sequence[DailyKind] = DAILY_KINDS,
 ) -> list[str]:
     """Put on probation the algorithms with no status that the engine's gate admits (its
-    ``_admit``): their pre-validation passed with the code and inputs they run, and their kind
-    runs (#310, ``DailyKind.awaiting``)."""
+    ``_admit``): their pre-validation passed with the code and inputs they run, their kind runs
+    (#310, ``DailyKind.awaiting``) and its review days are fixed (``DailyKind.review_hold``)."""
     known = store.statuses()
     admitted = admits(settings.state_dir, settings.target_version)
-    waiting = {k.name for k in kinds if not k.runs}
-    enrolled = [a.name for a in algorithms if a.name not in known and admitted(a) and a.kind not in waiting]
+    held = {k.name for k in kinds if not k.runs or k.review_hold is not None}
+    enrolled = [a.name for a in algorithms if a.name not in known and admitted(a) and a.kind not in held]
     for name in enrolled:
         store.add_status(name, now, None, Status.PROBATION, REGISTERED)
         log.info("%s: enrolled on probation (its pre-validation passed)", name)
@@ -235,7 +242,9 @@ def _daily(
     stint: datetime,
     now: datetime,
 ) -> Simulation:
-    """Replay ``algorithm``'s latest ``DAILY_DAYS`` days, refitted before each, and keep them."""
+    """Replay ``algorithm``'s latest days, as many as its kind's first review day (``DAILY_DAYS``
+    for ``open_to_close``; D₁ for a kind of windows of several sessions, #310), refitted before
+    each, and keep them."""
     assert kind.answers is not None
     symbols = settings.symbols
     stored = {s: files.days(s) for s in symbols}
@@ -247,9 +256,10 @@ def _daily(
             if a.label
         }
     )
-    days = answered[-DAILY_DAYS:]
-    if len(days) < DAILY_DAYS:
-        why = f"{len(days)} trading days with an answer, fewer than {DAILY_DAYS}"
+    wanted = kind.review_rules.probation_days[0]  # its first review day: DAILY_DAYS, or D₁ (#310)
+    days = answered[-wanted:]
+    if len(days) < wanted:
+        why = f"{len(days)} trading days with an answer, fewer than {wanted}"
         return _not_simulated(store, algorithm.name, kind.name, stint, now, why)
     market = sorted({d.day for found in stored.values() for d in found})
     nights = {d: max(m for m in market if m < d) for d in days if any(m < d for m in market)}

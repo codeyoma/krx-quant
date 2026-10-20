@@ -1139,7 +1139,7 @@
             {"type": "null"},
             {
               "type": "object",
-              "required": ["predict_at", "from", "to", "from_title", "to_title", "sessions", "answer_from", "probation_days", "bench_days", "recent_days", "awaiting"],
+              "required": ["predict_at", "from", "to", "from_title", "to_title", "sessions", "answer_from", "probation_days", "bench_days", "recent_days", "awaiting", "review_hold"],
               "additionalProperties": false,
               "properties": {
                 "predict_at": {"type": "string", "pattern": "^[0-2][0-9]:[0-5][0-9]$"},
@@ -1152,7 +1152,8 @@
                 "probation_days": {"type": "array", "items": {"type": "integer", "minimum": 1}},
                 "bench_days": {"type": "array", "items": {"type": "integer", "minimum": 1}},
                 "recent_days": {"type": "integer", "minimum": 1},
-                "awaiting": {"description": "Why the kind is not run yet (#310): what a probe has not settled of the data its answers read; it is listed, but not predicted, answered, trained or pre-validated. null for a kind that runs.", "type": ["string", "null"]}
+                "awaiting": {"description": "Why the kind is not run yet (#310): what a probe has not settled of the data its answers read; it is listed, but not predicted, answered, trained or pre-validated. null for a kind that runs.", "type": ["string", "null"]},
+                "review_hold": {"description": "Why the kind's algorithms are held out of probation (#310: an overlapping kind's review days are fixed from the variance ratio its first pre-validation measures, and until then one that passed is not run); null when they are not.", "type": ["string", "null"]}
               }
             }
           ]

@@ -53,12 +53,21 @@ from typing import Any
 from krx_quant.algorithms import DAILY_ALGORITHMS, Model, NothingToLearn
 from krx_quant.algorithms.forecasts import LOSS_FLOOR
 from krx_quant.config import Settings
-from krx_quant.daily import DailyAlgorithm, DailyInputs, DailyKind, DailySample, DayPrices, window_end
+from krx_quant.daily import (
+    DailyAlgorithm,
+    DailyInputs,
+    DailyKind,
+    DailySample,
+    DayPrices,
+    overlap_review,
+    window_end,
+)
 from krx_quant.daily_features import DailyFiles, TradingDays, band_of, samples, stored_versions
-from krx_quant.feeds.base import KST
+from krx_quant.feeds.base import KST, kst_day
 from krx_quant.kind_registry import DAILY_KINDS, daily_kind_named
 from krx_quant.kind_stats import entry as kind_entry
 from krx_quant.kind_stats import leaderboard as kind_leaderboard
+from krx_quant.kind_stats import sessions_of
 from krx_quant.kinds import KindForecast, KindScored
 from krx_quant.market_calendar import MarketCalendar, calendar_store
 from krx_quant.prevalidation import (
@@ -72,7 +81,14 @@ from krx_quant.prevalidation import (
     seed_history,
     tried_level,
 )
-from krx_quant.stats import enough
+from krx_quant.stats import (
+    enough,
+    gains_by_day,
+    independent_days,
+    overlap_lag,
+    t_test,
+    variance_ratio,
+)
 
 log = logging.getLogger(__name__)
 
@@ -403,6 +419,90 @@ def _breakdown(kind: DailyKind, records: Sequence[KindScored]) -> dict[str, Any]
     }
 
 
+def overlap_report(
+    kind: DailyKind,
+    records: Sequence[KindScored],
+    baselines: Mapping[str, Sequence[KindScored]],
+    calendar: MarketCalendar | None = None,
+) -> dict[str, Any]:
+    """What a walk-forward of a kind of windows of several sessions measured of their overlap
+    (#310), for the report (``walk_forward.overlap``): the sessions and the Newey–West lag; each
+    baseline's variance ratio of the algorithm's gains by trading day (VR: the long-run variance
+    at lag 2(H − 1) over γ₀, ``stats.variance_ratio``), the largest (the review days' rule takes
+    it: the statuses go by the weakest lift), and, to look at, each other baseline's over the
+    first (``otc5-persist``'s and ``otc5-climate``'s over ``otc5-flat``); the review days the rule
+    gives the largest, taken as 1 below 1 (``daily.overlap_review``: the intervals never shrink
+    below the independent ones); and the lift over each baseline on each of the H
+    phases (every H-th day, the windows of a phase do not overlap: a look, never a gate)."""
+    overlap = kind.overlap
+    sessions = sessions_of(records, baselines, calendar)
+
+    def ratio(a: Sequence[KindScored], b: Sequence[KindScored]) -> float | None:
+        by_day = gains_by_day(a, b)
+        days = sorted(by_day)
+        means = [sum(by_day[d]) / len(by_day[d]) for d in days]
+        return variance_ratio(means, [sessions[d] for d in days], overlap)
+
+    ratios = {name: ratio(records, b) for name, b in baselines.items()}
+    known = [r for r in ratios.values() if r is not None]
+    largest = max(known) if known else None
+    names = list(baselines)
+    between = {f"{other} - {names[0]}": ratio(baselines[other], baselines[names[0]]) for other in names[1:]}
+    review = None
+    if largest is not None:
+        # Never below 1 (#339 review): the statuses' intervals never take a standard error below
+        # the independent one (``stats.overlap_t_test``), so a ratio under 1 (every baseline's gains
+        # alternating) must not shorten the review days below the independent days' rule.
+        used = max(largest, 1.0)
+        found = overlap_review(used, overlap)
+        review = {
+            "variance_ratio": used,
+            "first": found.first,
+            "probation_days": list(found.rules.probation_days),
+            "bench_days": list(found.rules.bench_days),
+            "recent_days": found.recent_days,
+            "min_sample": found.min_sample,
+        }
+    phases = []
+    for phase in range(overlap):
+
+        def of_phase(group: Sequence[KindScored], phase: int = phase) -> list[KindScored]:
+            return [r for r in group if sessions[kst_day(r.bar_close)] % overlap == phase]
+
+        mine = of_phase(records)
+        lifts = {}
+        for name, b in baselines.items():
+            paired = gains_by_day(mine, of_phase(b))
+            gains = [g for values in paired.values() for g in values]
+            by_day = t_test([sum(v) / len(v) for v in paired.values()])
+            lifts[name] = {
+                "value": sum(gains) / len(gains) if gains else None,
+                "day_low": None if by_day is None else by_day.low,
+                "days": len(paired),
+            }
+        values = [v for lift in lifts.values() if (v := lift["value"]) is not None]
+        phases.append(
+            {
+                "phase": phase,
+                "days": len({kst_day(r.bar_close) for r in mine}),
+                "weakest_lift": min(values) if values and len(values) == len(lifts) else None,
+                "lifts": lifts,
+            }
+        )
+    days = len({kst_day(r.bar_close) for r in records})
+    return {
+        "sessions": overlap,
+        "lag": overlap_lag(overlap),
+        "days": days,
+        "independent_days": independent_days(days, overlap),
+        "variance_ratio": ratios,
+        "variance_ratio_max": largest,
+        "baselines_variance_ratio": between,
+        "review_days": review,
+        "phases": phases,
+    }
+
+
 def daily_algorithm(name: str) -> tuple[DailyAlgorithm, DailyKind] | None:
     """A registered daily algorithm and its kind, by name."""
     found = next((a for a in DAILY_ALGORITHMS if a.name == name), None)
@@ -474,6 +574,7 @@ def prevalidate_daily(
                 "samples": run.samples,
                 "present": run.present,
                 **_breakdown(kind, mine),
+                **({"overlap": overlap_report(kind, mine, baselines, calendar)} if kind.overlap > 1 else {}),
             },
             inputs=inputs,
         )
