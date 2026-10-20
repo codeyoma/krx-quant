@@ -13,8 +13,8 @@ latest bar close's):
 - the round trip of a limit order (the sell tax and both commissions: what k covers,
   ``pricing.cost_ticks``) and of a market order (the spread more: bought at the ask, sold at the
   bid), in basis points and ticks, and k (``pricing.flat_ticks``);
-- a short through the symbol's single-stock inverse product (#267, ``pricing.INVERSE_PRODUCTS``):
-  both commissions on its notional only, in the stock's terms (÷ its leverage), as the research
+- a short through the symbol's single-stock inverse product (#267, ``products.INVERSE_PRODUCTS``):
+  both commissions on its notional only, in the stock's terms (÷ its exposure, |L|), as the research
   P&L counts it. The product's spread, its premium or discount to its value and the futures
   basis are left out (``omits``): it is a floor. None for a symbol without one;
 - the nearest tick-band edges below and above the price (``pricing.tick_band``), with the tick
@@ -65,7 +65,6 @@ from krx_quant.daily import DailyKind
 from krx_quant.kind_stats import KindBoard, KindEntry
 from krx_quant.kinds import DIRECTION, Kind, KindScored
 from krx_quant.pricing import (
-    INVERSE_PRODUCTS,
     SELL_TAX,
     Direction,
     cost_ticks,
@@ -73,6 +72,7 @@ from krx_quant.pricing import (
     tick_band,
     tick_size,
 )
+from krx_quant.products import INVERSE_PRODUCTS
 from krx_quant.stats import Entry, Interval, Leaderboard, Scored, interval_json
 
 BP = 10_000
@@ -92,9 +92,9 @@ def cost_card(symbol: str, price: float, fee_rate: float) -> dict[str, Any]:
     product = INVERSE_PRODUCTS.get(symbol)
     inverse = None
     if product is not None:
-        commissions = 2 * fee_rate / product.leverage  # of the stock's notional
+        commissions = 2 * fee_rate / product.exposure  # of the stock's notional
         inverse = {
-            "leverage": product.leverage,
+            "leverage": product.exposure,
             "listed": product.listed.isoformat(),
             "bp": commissions * BP,
             "ticks": commissions * price / tick,

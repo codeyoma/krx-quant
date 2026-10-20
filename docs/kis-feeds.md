@@ -398,6 +398,35 @@ Backfiller가 날마다 그날의 최근월물을 받아 연속 1분봉(`KOSPI20
 - 간격은 1분봉 백필·일봉과 같은 제한기 하나를 쓴다(`KRX_BACKFILL_MAX_PER_SECOND`, 기본 초당 8번). 토스는 0.2초 간격이다(`toss.py`).
 - 실패: 조회 하나가 실패하면 그 조회만 로그를 남기고 건너뛰며, 받은 다른 조회의 날은 저장한다. 다음 실행에 다시 묻는다. 토스가 주소나 클라이언트를 거절하면(403, 401) 그 실행의 토스 조회를 멈춘다. `TOSS_CLIENT_ID`, `TOSS_CLIENT_SECRET`이 없으면 토스를 부르지 않는다(외국인 보유수량·지분율이 없다).
 
+## ETF 순자산 (#305)
+
+KRX 마감 흐름(#305)이 상품마다 쓸 전 거래일 순자산 A의 KIS 후보다. 상품은 `src/krx_quant/products.py`의 `PRODUCTS`(005930·000660의 단일종목 ±2배 ETF 16종, [design.md](design.md#42-종목))다. **아직 어느 것도 확인하지 않았다 ⚠.** 엔진은 순자산을 받지도 쓰지도 않는다. 예약 작업 `probe-nav-305`가 배포 뒤 첫 거래일 밤에 `krx-quant probe-nav`로 재 #305에 남긴다([operations.md](operations.md#etf-순자산-출처-확인-305)). 그 결과로 출처를 정하고 이 절의 ⚠를 고친다. KIS가 아닌 출처(KRX 정보데이터시스템, 운용사)는 사용자가 정한다(설계 4.1). 결과가 오기 전에는 순자산을 쓰지 않는다(`CODING_STANDARDS.md` "External data is probed before it is used").
+
+**출처.** 2026-10-20에 [koreainvestment/open-trading-api](https://github.com/koreainvestment/open-trading-api)에서 다음을 읽어 정리했다.
+- `examples_llm/etfetn/<이름>/<이름>.py`: TR, 경로, 파라미터, 한 번에 주는 건수의 설명. 같은 폴더의 `chk_<이름>.py`: 응답 필드 이름과 한글 이름.
+- `MCP/KIS Code Assistant MCP/data.csv`: `examples_llm` 전체에서 `lstn_stcn`, `ntas`, `crcl_stcn`, `nav`가 나오는 조회를 찾았다.
+- `legacy/postman/README.md`의 API 표: 아래 조회는 모두 실전계좌만 된다(모의 칸이 비어 있다). 서버는 실전 앱키를 쓰므로 상관없다. 이 앱키로 실제로 답하는지는 모른다 ⚠.
+
+| 후보 | KIS 조회 | 경로(`GET /uapi/etfetn/v1/quotations/…`) | 파라미터 | 필드(예제 기준) | 지난날 |
+|---|---|---|---|---|---|
+| (a) 현재가의 순자산 총액 | `FHPST02400000` ETF/ETN 현재가 [v1_국내주식-068] | `inquire-price` | `FID_COND_MRKT_DIV_CODE`(`J` KRX, `NX`, `UN`), `FID_INPUT_ISCD` | `output`(객체): `etf_ntas_ttam` ETF 순자산 총액, `etf_crcl_ntas_ttam` 유통 순자산 총액, `nav`, `prdy_last_nav` 전일 최종 NAV, `lstn_stcn` 상장 주수, `etf_crcl_stcn` 유통 주수, `etf_trc_ert_mltp` 추적 수익률 배수, `stck_lstn_date` 상장 일자 등 | 없음. 날짜를 받지 않는다(오늘 값만) |
+| (b) NAV 추이, 일별 | `FHPST02440200` NAV 비교추이(일) [v1_국내주식-071] | `nav-comparison-daily-trend` | 시장(`J`), 종목, `FID_INPUT_DATE_1`(시작일), `FID_INPUT_DATE_2`(종료일) | `output`(행 목록): `stck_bsop_date`, `stck_clpr`, `nav`, `nav_prdy_vrss`, `nav_prdy_ctrt`, `dprt` 괴리율, `nav_vrss_prpr` 등. 실전계좌는 한 번에 100행까지 | 기간으로 묻는다. 상장일(2026-05-27)까지 가는지 ⚠ |
+| (b) NAV 추이, 종목 | `FHPST02440000` NAV 비교추이(종목) [v1_국내주식-069] | `nav-comparison-trend` | 시장(`J`), 종목 | `output1`, `output2`(객체 둘): 주식 현재가 쪽 필드와 `nav`, `prdy_clpr_nav` NAV 전일 종가, `oprc_nav`·`hprc_nav`·`lprc_nav`. 어느 필드가 어느 객체에 있는지 ⚠ | 없음(오늘 값만) |
+| (b) NAV 추이, 분별 | `FHPST02440100` NAV 비교추이(분) [v1_국내주식-070] | `nav-comparison-time-trend` | 시장(예제는 `E`), 종목, `FID_HOUR_CLS_CODE`(`60` 1분 … `7200` 120분) | `output`(행 목록): `bsop_hour`, `nav`, `stck_prpr`, `dprt` 등. 실전계좌는 최근 30행. 날짜 필드가 없다 | 없음(그날만) |
+| (c) 상장 주수 × NAV | (a)의 `lstn_stcn` × `nav`(또는 `prdy_last_nav`) | | | 계산 | 상장 주수는 (a)의 오늘 값뿐이다. 날마다의 주수를 주는 KIS 조회는 찾지 못했다(위 `data.csv`). 그래서 지난날의 (c)는 오늘 주수 × 그날 NAV라, 설정·환매로 주수가 바뀐 날에는 맞지 않는다 |
+
+- 실시간 `H0STNAV0`(국내ETF NAV추이 [실시간-051]: `nav`, `oprc_nav` 등)도 있다. 장중 스트림이라 지난날도 전일 순자산도 주지 않고, 16종을 구독하면 세션 한도(41건, 위 "구독 계획")를 넘는다. 그래서 후보로 재지 않는다.
+- ETF 구성종목시세(`FHKST121600C0`, `inquire-component-stock-price`)의 `output1`에도 `etf_ntas_ttam`이 있다. 예제의 필드 매핑이 다른 조회의 것과 섞여 있어(`etf_ntas_ttam`을 "전체 융자 잔고 주수"로 적었다) 재지 않는다 ⚠.
+- 순자산 총액의 단위(원, 백만원, 억원)와 그것이 어느 날의 값인지(그날 마감인지 전 거래일인지) 모른다 ⚠. 탐사가 (c)와 견줘 단위와 날을 가늠한다.
+- KIS가 값이 없어 0을 주면 값 없음으로 친다(#295와 같은 규칙). 탐사도 0을 값으로 세지 않는다.
+
+**탐사가 재는 것** (`krx-quant probe-nav`, `src/krx_quant/nav_probe.py`). 상품마다 위 네 조회를 묻는다. 일별은 2026-05-01(상장 전)부터 오늘까지, 받은 가장 오래된 날 앞으로 거슬러 묻는다(한 상품에 5번까지). 값은 싣지 않는다(개수, 날짜, 시각, 필드 모양, 같음·다름만).
+1. (a): 답하는지, 필드 모양, 값이 있는(0이 아닌) 상품 수. 그리고 `etf_trc_ert_mltp`가 상품 목록의 배율 L과, `stck_lstn_date`가 상장일과 같은지(상품 목록의 확인).
+2. (b) 일별: 행 수, 첫날과 마지막 날, 행 순서, `nav` 값이 있는 날, 상장일까지 가는지, 상장일부터 빠진 거래일(서버의 거래 일정과 견준다).
+3. (b) 종목, 4. (b) 분별: 답하는지, 필드 모양, 분별 마지막 시각. 분별은 예제의 `E`로 묻고, 안 되면 `J`로 묻는다.
+5. 그날 값이 언제 나오나: 물은 시각, 일별 최신 행이 마지막 거래일의 것인지, (a)의 `nav`·`prdy_last_nav`와 (b) 종목의 `nav`·`prdy_clpr_nav`가 일별의 어느 날 `nav`와 같은지. 장 전(08:00–09:00)에 무엇이 나오는지와 그날 값이 몇 시에 처음 바뀌는지는 밤 한 번으로 알 수 없다. 다른 시각의 관찰이 하나 더 필요하다 ⚠.
+6. (a)와 (c): `etf_ntas_ttam`이 `lstn_stcn × nav`와 `lstn_stcn × prdy_last_nav`의, `etf_crcl_ntas_ttam`이 `etf_crcl_stcn × nav`의 어느 단위(원, 천원, 백만원, 억원)에서 같은지. 단위를 맞춰 0.5% 안이거나 그 단위의 반 안이면 같다. 상품 수만 센다.
+
 ## 최근월물 코드 찾기
 
 선물 코드는 새 형식(`A` + 상품 + 연도 + 월)이다. KOSPI200 선물은 분기마다, 달러선물은 매달 바뀐다. 그래서 수집기는 시작할 때 KIS가 매일 배포하는 마스터 파일을 받아 최근월물을 찾는다. `KRX_KOSPI200_FUTURES_CODE`, `KRX_USD_FUTURES_CODE`로 직접 지정할 수도 있다.

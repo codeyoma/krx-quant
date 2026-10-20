@@ -15,7 +15,7 @@ likely one; a tie goes to flat, then up.
   own rule (``touch_profit``), in ticks, less the round-trip cost (sell tax and both
   commissions: a down call as a short of the stock);
 - **profit, inverse** (#267, research only): the same, a down call traded through the
-  symbol's single-stock inverse product (``pricing.INVERSE_PRODUCTS``), which pays no sell
+  symbol's single-stock inverse product (``products.INVERSE_PRODUCTS``), which pays no sell
   tax: less both commissions on its notional only. A down call on a symbol without one, or
   before it was listed, is no trade;
 - **calibration**: every class probability binned by tenths, against how often that
@@ -51,7 +51,8 @@ from statistics import NormalDist
 from typing import Any, Protocol, TypeVar
 
 from krx_quant.feeds.base import kst_day
-from krx_quant.pricing import INVERSE_PRODUCTS, SELL_TAX, Direction, most_likely
+from krx_quant.pricing import SELL_TAX, Direction, most_likely
+from krx_quant.products import INVERSE_PRODUCTS
 
 _Z = NormalDist().inv_cdf(0.975)
 FDR = 0.05  # the false discovery rate a significant lift is held to
@@ -325,7 +326,7 @@ def _inverse_profit(r: Scored, fee_rate: float) -> float | None:
         return touch_profit(r.predicted, r.prices, fee_rate)
     if product is None or kst_day(r.bar_close) < product.listed:
         return None
-    return touch_profit(r.predicted, r.prices, fee_rate, inverse_leverage=product.leverage)
+    return touch_profit(r.predicted, r.prices, fee_rate, inverse_leverage=product.exposure)
 
 
 def _calibration(records: Sequence[Scored], classes: Sequence[Direction]) -> list[CalibrationBin]:

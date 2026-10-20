@@ -37,6 +37,7 @@ from krx_quant.scheduled import (
     FAILED,
     INTERRUPTED,
     JOBS,
+    NAV_PROBE,
     NET_BUYS_PROBE,
     NIGHT_PROBE,
     OK,
@@ -972,6 +973,26 @@ def test_the_close_probe_runs_once_on_the_first_night_and_posts_to_264() -> None
     output = "KRX 일봉 종가 확인 (#264) 2026-10-20: 종목 005930\n\n005930: 저장된 KRX 일봉 245일"
     assert CLOSE_PROBE.targets[0].part(output) == output, "the whole output"
     assert "가격이 없다" in CLOSE_PROBE.targets[0].note
+
+
+def test_the_nav_probe_runs_once_on_the_first_trading_night_and_posts_to_305() -> None:
+    # #305: where KIS gives the single-stock ETFs' net assets, before the closing flow uses any.
+    assert NAV_PROBE.name == "probe-nav-305"
+    assert NAV_PROBE.command == ("probe-nav",)
+    assert NAV_PROBE.timeout == timedelta(minutes=30)
+    assert [t.issue for t in NAV_PROBE.targets] == [305]
+    assert NAV_PROBE.label == ("ready-for-agent",)
+    names = [j.name for j in JOBS]
+    assert names.index(NAV_PROBE.name) < names.index("prevalidate-cox"), "before the pre-validations"
+    assert NAV_PROBE.due(night(FRIDAY))
+    assert not NAV_PROBE.due(night(SATURDAY)), "a trading day's night: whether that day's values are in"
+    ran = JobRecord(FRIDAY, OK, at(FRIDAY, "22:30"), COMMIT, 0, 60.0)
+    assert not NAV_PROBE.due(night(MONDAY, ran))
+    assert not NAV_PROBE.due(night(MONDAY, replace(ran, outcome=FAILED, exit_code=1)))
+    assert NAV_PROBE.due(night(MONDAY, replace(ran, outcome=INTERRUPTED)))
+    output = "KIS ETF 순자산 출처 확인 (#305) 2026-10-21 23:41 KST: 상품 16종\n\n1. (a) FHPST02400000"
+    assert NAV_PROBE.targets[0].part(output) == output, "the whole output"
+    assert "시세 값이 없다" in NAV_PROBE.targets[0].note
 
 
 def test_the_entry_delay_runs_the_diagnosis_once_on_a_trading_night_and_posts_section_10() -> None:

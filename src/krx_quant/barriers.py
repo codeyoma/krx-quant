@@ -97,7 +97,8 @@ from krx_quant.kinds import (
     WidthRule,
     went_silent,
 )
-from krx_quant.pricing import INVERSE_PRODUCTS, SELL_TAX, flat_ticks, tick_size
+from krx_quant.pricing import SELL_TAX, flat_ticks, tick_size
+from krx_quant.products import INVERSE_PRODUCTS
 from krx_quant.reference import Bar
 from krx_quant.stats import interval_json, mean_interval
 from krx_quant.touch import BAR_BUFFER, close_side
@@ -257,9 +258,9 @@ def inverse_profit(
     predicted: str, outcome: str, path: Mapping[str, Any], symbol: str, bar_close: datetime
 ) -> float | None:
     """A call's barrier P&L with a short traded through ``symbol``'s single-stock inverse product
-    (#267, ``pricing.INVERSE_PRODUCTS``), as the direction's ``pnl_inverse``: the same prices and
-    fills, less both commissions on the product's notional only (no sell tax on an ETF; a
-    −leverage x product gives a share's exposure for 1/leverage of its price). None for a short
+    (#267, ``products.INVERSE_PRODUCTS``), as the direction's ``pnl_inverse``: the same prices and
+    fills, less both commissions on the product's notional only (no sell tax on an ETF; an
+    L-times inverse product gives a share's exposure for 1/|L| of its price). None for a short
     on a symbol without one, or before it was listed. A long is as ``barrier_profit``."""
     profit = barrier_profit(predicted, outcome, path)
     if profit is None or predicted != DOWN_FIRST:
@@ -270,7 +271,7 @@ def inverse_profit(
         return None
     cost, tick = float(path["cost"]), float(path["tick"])
     commissions = cost - float(anchor) * SELL_TAX / tick  # both commissions on a share, ticks
-    return profit + cost - commissions / product.leverage
+    return profit + cost - commissions / product.exposure
 
 
 def _pnl_json(trades: Sequence[float]) -> dict[str, Any]:

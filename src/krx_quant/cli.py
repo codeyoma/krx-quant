@@ -42,6 +42,7 @@ from krx_quant.lifecycle import Status
 from krx_quant.macro import run_macro
 from krx_quant.market_calendar import calendar_store
 from krx_quant.model_shelf import Shelf
+from krx_quant.nav_probe import probe_nav
 from krx_quant.net_buys_probe import probe_net_buys
 from krx_quant.night_probe import probe_night
 from krx_quant.nightly import from_the_server, run_training
@@ -149,6 +150,11 @@ async def _probe_net_buys() -> int:
 
 async def _probe_close() -> int:
     calls, failed = await probe_close(Settings.from_env(), datetime.now(KST).date())
+    return 1 if failed == calls else 0  # nothing answered
+
+
+async def _probe_nav() -> int:
+    calls, failed = await probe_nav(Settings.from_env(), datetime.now(KST))
     return 1 if failed == calls else 0  # nothing answered
 
 
@@ -555,6 +561,11 @@ def main(argv: list[str] | None = None) -> int:
         help="compare the KRX day candle's close with KRX's one-minute bars and the recorded closing"
         " auction (#264), read-only; prints no market value",
     )
+    sub.add_parser(
+        "probe-nav",
+        help="ask where KIS gives the single-stock leveraged and inverse ETFs' net assets (#305),"
+        " read-only; prints no market value",
+    )
     night_cmd = sub.add_parser(
         "probe-night",
         help="summarize a recorded KOSPI200 night session (#264), read-only; prints no market value",
@@ -735,6 +746,8 @@ def main(argv: list[str] | None = None) -> int:
             return asyncio.run(_probe_net_buys())
         elif args.command == "probe-close":
             return asyncio.run(_probe_close())
+        elif args.command == "probe-nav":
+            return asyncio.run(_probe_nav())
         elif args.command == "probe-night":
             return asyncio.run(_probe_night(args.day))
         elif args.command == "probe-expected-open":
