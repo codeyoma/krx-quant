@@ -649,6 +649,12 @@ def overlap_day_lift(
     return overlap_t_test(means, [sessions[d] for d in days], overlap, level)
 
 
+def t_quantile(q: float, df: int) -> float:
+    """The ``q`` quantile (above the median) of Student's t with ``df`` degrees of freedom (the
+    review days of an overlapping kind, ``daily.first_review_day``, #310)."""
+    return _t_quantile(q, df)
+
+
 def _t_above(x: float, df: int) -> float:
     """P(T > x) for Student's t with ``df`` degrees of freedom."""
     tail = 0.5 * _incomplete_beta(df / 2, 0.5, df / (df + x * x))

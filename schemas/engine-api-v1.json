@@ -1134,12 +1134,12 @@
           }
         },
         "daily": {
-          "description": "A daily kind's day (#264): when it is predicted (KST, each trading day), the auctions its window runs between, when its answers are first looked for (once the day's KRX day candle is stored), and the days with an answer its statuses are judged on; null for a kind predicted at each bar close.",
+          "description": "A daily kind's day (#264): when it is predicted (KST, each trading day), the auctions its window runs between and over how many sessions (#310: 1, the day; 5, the day to the close of its fifth session), when its answers are first looked for on the window's last session (once its closing auction price is kept; a window of several sessions also waits for that day's KRX day candle), and the days with an answer its statuses are judged on; null for a kind predicted at each bar close.",
           "oneOf": [
             {"type": "null"},
             {
               "type": "object",
-              "required": ["predict_at", "from", "to", "from_title", "to_title", "answer_from", "probation_days", "bench_days", "recent_days"],
+              "required": ["predict_at", "from", "to", "from_title", "to_title", "sessions", "answer_from", "probation_days", "bench_days", "recent_days", "awaiting"],
               "additionalProperties": false,
               "properties": {
                 "predict_at": {"type": "string", "pattern": "^[0-2][0-9]:[0-5][0-9]$"},
@@ -1147,10 +1147,12 @@
                 "to": {"enum": ["close"]},
                 "from_title": {"type": "string"},
                 "to_title": {"type": "string"},
+                "sessions": {"type": "integer", "minimum": 1},
                 "answer_from": {"type": "string", "pattern": "^[0-2][0-9]:[0-5][0-9]$"},
                 "probation_days": {"type": "array", "items": {"type": "integer", "minimum": 1}},
                 "bench_days": {"type": "array", "items": {"type": "integer", "minimum": 1}},
-                "recent_days": {"type": "integer", "minimum": 1}
+                "recent_days": {"type": "integer", "minimum": 1},
+                "awaiting": {"description": "Why the kind is not run yet (#310): what a probe has not settled of the data its answers read; it is listed, but not predicted, answered, trained or pre-validated. null for a kind that runs.", "type": ["string", "null"]}
               }
             }
           ]

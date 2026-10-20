@@ -729,8 +729,8 @@ def write_demo_daily(db: Path, data_dir: Path) -> Model:
                 continue
             band = band_of(sample.answer)
             history = [d for d in files.days(symbol) if d.day < day]
-            assert kind.answers is not None
-            past = tuple((d.day, a.label) for d, a in zip(history, kind.answers(history, _FEE), strict=True))
+            answers = kind.answers_of(history, _FEE, _CALENDAR)
+            past = tuple((d.day, a.label) for d, a in zip(history, answers, strict=True))
             inputs = DailyInputs(symbol, day, at, past[-260:], band, _CALENDAR.previous_trading_day(day))
             forecasts = [(b.name, b.version, b.predict(inputs)) for b in kind.daily_baselines]
             forecasts.append(("cox", model.version, Cox().predict(sample.features, model)))

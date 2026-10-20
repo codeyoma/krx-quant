@@ -24,7 +24,15 @@ lift comes out above 0 by luck. Also: at least
 ``WALK_MIN_DAYS`` (500) days predicted out of sample, no day's forecasts of every symbol over the
 time budget (``KRX_ALGORITHM_SECONDS``), no other algorithm of the kind it moves with. No day is
 special (circuit breakers and sidecars are not kept before 2026-10-12): the few in ten years are
-in. The report (``state/prevalidations/<name>.json``, ``kind``, the kind's answer version) is
+in.
+
+**Windows of several sessions** (#310, ``DailyKind.sessions``): a sample's label holds the prices
+up to its window's end (``DailySample.ends``), so every fit takes only the windows that ended
+before what it is judged on. The night's fit on the night of N, those ended by N; its recent look,
+those ended before the first of the latest 60 days; a walk-forward's fold from day d, those ended
+before d (begun by d − H: the H − 1 days before d are purged, their labels holding days from d
+on); the baselines' past, the windows ended before the day. With H = 1 every window ends on its
+day, as before. The report (``state/prevalidations/<name>.json``, ``kind``, the kind's answer version) is
 what the engine's gate reads (``prevalidation.admits``), with the walk-forward's folds, symbols
 and years beside it.
 """
@@ -45,7 +53,7 @@ from typing import Any
 from krx_quant.algorithms import DAILY_ALGORITHMS, Model, NothingToLearn
 from krx_quant.algorithms.forecasts import LOSS_FLOOR
 from krx_quant.config import Settings
-from krx_quant.daily import DailyAlgorithm, DailyInputs, DailyKind, DailySample, DayPrices
+from krx_quant.daily import DailyAlgorithm, DailyInputs, DailyKind, DailySample, DayPrices, window_end
 from krx_quant.daily_features import DailyFiles, TradingDays, band_of, samples, stored_versions
 from krx_quant.feeds.base import KST
 from krx_quant.kind_registry import DAILY_KINDS, daily_kind_named
@@ -102,7 +110,17 @@ class DailyTrainer:
     def train(
         self, algorithm: DailyAlgorithm, kind: DailyKind, night: date
     ) -> tuple[dict[str, Any], Model | None]:
-        """The night's report of ``algorithm`` and its model (None if it learned nothing)."""
+        """The night's report of ``algorithm`` and its model (None if it learned nothing, and for a
+        kind awaiting a probe's result, #310: no sample is made of it)."""
+        if not kind.runs:
+            return {
+                "algorithm": algorithm.name,
+                "kind": kind.name,
+                "cadence": "daily",
+                "day": night.isoformat(),
+                "promoted": False,
+                "reason": f"not trained: its kind waits for {kind.awaiting}",
+            }, None
         found = samples(
             kind,
             self.files,
@@ -113,6 +131,8 @@ class DailyTrainer:
             first=training_first(algorithm, night),
             last=night,
         )
+        # The windows ended by the night (#310): one not over has no label yet.
+        found = [s for s in found if s.ended_by(night)]
         report: dict[str, Any] = {
             "algorithm": algorithm.name,
             "kind": kind.name,
@@ -151,7 +171,7 @@ class DailyTrainer:
             return None
         cut = days[-RECENT_DAYS]
         try:
-            model = algorithm.fit([s for s in found if s.day < cut])
+            model = algorithm.fit([s for s in found if s.ended_before(cut)])  # #310: purged
         except NothingToLearn:
             return None
         recent = [s for s in found if s.day >= cut and s.label is not None]
@@ -214,7 +234,9 @@ def walk_forward(
     folds = 0
     for start in range(WALK_MIN_TRAIN, len(days), WALK_REFIT):
         window = days[max(0, start - algorithm.training_days) : start]
-        training = [s for d in window for s in by_day[d]]
+        # Only the windows ended before the fold's first day (#310): the ones begun in the H − 1
+        # days before it end within the days it predicts.
+        training = [s for d in window for s in by_day[d] if s.ended_before(days[start])]
         try:
             model = algorithm.fit(training)
         except NothingToLearn:
@@ -230,7 +252,9 @@ def walk_forward(
                 if s.answer is not None and s.label is not None:
                     records[algorithm.name].append(_scored(kind, algorithm.name, model.version, s, forecast))
     first_predicted = predicted[0] if predicted else None
-    for name, scored in baseline_forecasts(kind, files, symbols, fee_rate, first_predicted, newest).items():
+    for name, scored in baseline_forecasts(
+        kind, files, symbols, fee_rate, first_predicted, newest, calendar=calendar
+    ).items():
         records[name] = scored
     present = {f: sum(1 for s in found if s.features[f] is not None) for f in algorithm.features}
     return WalkForward(dict(records), predicted, models, folds, slowest, len(found), present)
@@ -259,9 +283,12 @@ def baseline_forecasts(
     fee_rate: float,
     first: date | None,
     last: date,
+    *,
+    calendar: MarketCalendar | None = None,
 ) -> dict[str, list[KindScored]]:
     """The kind's baselines' forecasts of every day from ``first`` to ``last``, as at 08:50, each
-    scored on the day's answer (the walk-forward's, a simulated probation's, #298)."""
+    scored on the day's answer (the walk-forward's, a simulated probation's, #298), each knowing
+    the windows that ended before the day (#310)."""
     out: dict[str, list[KindScored]] = {b.name: [] for b in kind.daily_baselines}
     if first is None or kind.answers is None:
         return out
@@ -269,15 +296,27 @@ def baseline_forecasts(
     market = TradingDays(d.day for days in stored.values() for d in days)
     for symbol in symbols:
         days: list[DayPrices] = stored[symbol]
-        answers = kind.answers(days, fee_rate)
+        answers = kind.answers_of(days, fee_rate, calendar)
+        ends = [window_end(d.day, a) for d, a in zip(days, answers, strict=True)]
         for i, day in enumerate(days):
             answer = answers[i]
             if day.day < first or answer.label is None:
                 continue
-            past = tuple((days[j].day, answers[j].label) for j in range(max(0, i - _PAST), i))
+            ended = [
+                (j, end)
+                for j in range(max(0, i - _PAST), i)
+                if (end := ends[j]) is not None and end < day.day
+            ]
+            past = tuple((days[j].day, answers[j].label) for j, _ in ended)
             # The market's previous trading day, as live (a symbol's missing candle stays missing).
             inputs = DailyInputs(
-                symbol, day.day, kind.predicted_at(day.day), past, band_of(answer), market.previous(day.day)
+                symbol,
+                day.day,
+                kind.predicted_at(day.day),
+                past,
+                band_of(answer),
+                market.previous(day.day),
+                tuple(end for _, end in ended),
             )
             for b in kind.daily_baselines:
                 forecast = b.predict(inputs)
@@ -388,6 +427,8 @@ def prevalidate_daily(
         raise ValueError(
             f"unknown daily algorithm {name!r}; registered: {', '.join(a.name for a in algorithms)}"
         )
+    if not kind.runs:  # #310: its answers would read data a probe has not settled
+        raise ValueError(f"{name}: its kind {kind.name} waits for {kind.awaiting}; not pre-validated")
     with _held(settings.state_dir, name):
         now = now or datetime.now(KST)
         files = DailyFiles(settings.data_dir, settings.state_dir)

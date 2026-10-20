@@ -297,6 +297,7 @@ async def test_the_daily_kind_s_row_is_in_basis_points_without_a_breakeven(tmp_p
         "barrier_30m",
         "barrier_60m",
         "open_to_close",
+        "open_to_close_5d",
     ], "the range has no direction"
     otc = row(body, "open_to_close")
     assert (otc["unit"], otc["horizon_minutes"], otc["bar_closes"]) == ("bp", None, 3)

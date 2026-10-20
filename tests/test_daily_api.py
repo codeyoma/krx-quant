@@ -84,7 +84,7 @@ async def test_the_daily_kind_through_the_kind_endpoints(tmp_path: Path) -> None
             return body
 
         kinds = (await get("/v1/kinds", "kinds"))["kinds"]
-        assert [k["name"] for k in kinds] == ["direction", "open_to_close"]
+        assert [k["name"] for k in kinds] == ["direction", "open_to_close", "open_to_close_5d"]
         assert kinds[0]["daily"] is None
         daily = kinds[1]
         assert daily["horizon_minutes"] is None
@@ -148,11 +148,13 @@ async def test_the_stream_sends_the_daily_predictions_and_answers_as_they_are_st
             await listening
         await ws.close()
 
-    [made] = [e for e in received if e["type"] == "kind_prediction"]
+    [made] = [
+        e for e in received if e["type"] == "kind_prediction" and e["prediction_kind"] == "open_to_close"
+    ]
     assert (made["prediction_kind"], made["bar_close"]) == ("open_to_close", "2026-10-19T08:50:00+09:00")
     assert {p["symbol"] for p in made["predictions"]} == set(SYMBOLS)
     assert {p["target_at"] for p in made["predictions"]} == {"2026-10-19T15:30:00+09:00"}
-    [answer] = [e for e in received if e["type"] == "kind_answer"]
+    [answer] = [e for e in received if e["type"] == "kind_answer" and e["prediction_kind"] == "open_to_close"]
     assert answer["prediction_kind"] == "open_to_close"
     assert {(a["symbol"], a["class"]) for a in answer["answers"]} == {(s, "down") for s in SYMBOLS}
 
