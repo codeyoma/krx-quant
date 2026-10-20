@@ -169,6 +169,8 @@
   - 인버스 비용(#267: 닿음·장벽·시가→종가의 `pnl_inverse`, 비용 지도의 `inverse`)이 쓰는 종목마다의 인버스 상품은 이 목록의 −2배 상품이다(`products.INVERSE_PRODUCTS`: 005930의 0193L0, 000660의 0197X0). 비용은 배율의 크기(`exposure`, 2)로 나눈다. 구조 실측(`structure-check`)의 "상장 뒤" 기간도 이 목록의 상장일에서 시작한다.
   - 순자산은 아직 받지 않는다. 출처를 재는 예약 작업 `probe-nav-305`의 결과를 기다린다([kis-feeds.md](kis-feeds.md#etf-순자산-305)).
 
+  > **바뀜** (2026-10-20, #336): 인버스 상품 2종의 상장일과 배율은 `pricing.INVERSE_PRODUCTS`에 따로 있었다 → 16종 목록 `products.PRODUCTS` 하나에 두고, 종목마다의 인버스 상품은 거기서 읽는다(`products.INVERSE_PRODUCTS`). 구조 실측의 상장일(`structure_check.LISTING`)도 이 목록의 것이다. 비용 계산은 그대로다. 이유: 상품 정보가 한 곳에만 있게 하려고(#305 "구현 결정").
+
 ### 4.3 실시간 피드
 
 구독 순서와 키, REST 대체는 [kis-feeds.md](kis-feeds.md)에 정리했다. 요약하면 다음과 같다.
