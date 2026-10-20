@@ -39,6 +39,8 @@ MIN_CALENDAR_MINUTES = 5  # the feed is not ours: no faster than this
 # Where the scheduled jobs post their results (#215).
 DEFAULT_GITHUB_REPO = "codeyoma/krx-quant"
 DEFAULT_GITHUB_API_URL = "https://api.github.com"
+# The collector looks for issues asking for a server snapshot (#322) no faster than this.
+MIN_SNAPSHOT_MINUTES = 1
 # The Toss Securities Open API, the daily supply data's secondary source (#226, #235).
 DEFAULT_TOSS_URL = "https://openapi.tossinvest.com"
 # The scheduled jobs' night runs from KRX_JOBS_AT to the next 05:30 (#215): from the NXT
@@ -199,6 +201,13 @@ class Settings:
     github_token: str | None = field(default=None, repr=False)
     github_repo: str = DEFAULT_GITHUB_REPO
     github_api_url: str = DEFAULT_GITHUB_API_URL
+    # The collector looks this often for open issues labelled ``needs-server-snapshot`` and
+    # posts the server's summary (``krx-quant doctor``) on each (KRX_SNAPSHOT_EVERY: 3 minutes
+    # unless set; "off", #322); at most once an issue in ``snapshot_issue_minutes`` and
+    # ``snapshot_per_hour`` times in any hour. None here, as jobs_at: a test's collector never looks.
+    snapshot_every: timedelta | None = None
+    snapshot_issue_minutes: int = 10
+    snapshot_per_hour: int = 6
     # The server's Tailscale address compose publishes the Engine API on (KRX_BIND_ADDRESS);
     # the engine reads it only to keep it out of what the jobs post.
     bind_address: str | None = None
@@ -222,10 +231,7 @@ class Settings:
         Without ``require_kis`` the KIS keys may be missing, for commands that never call
         KIS (replay).
         """
-        values: dict[str, str] = {}
-        if dotenv_path is not None and dotenv_path.exists():
-            values.update({k: v for k, v in dotenv_values(dotenv_path).items() if v is not None})
-        values.update(os.environ if env is None else env)
+        values = read_values(env, dotenv_path)
 
         def required(name: str) -> str:
             value = values.get(name, "").strip()
@@ -317,6 +323,9 @@ class Settings:
                 f"KRX_JOBS_AT ({jobs_at:%H:%M}) must be after KRX_TRAIN_AT ({train_at:%H:%M}): "
                 "the scheduled jobs wait for the night's training"
             )
+        snapshot_every = _minutes_or_off(
+            "KRX_SNAPSHOT_EVERY", values.get("KRX_SNAPSHOT_EVERY", "3"), MIN_SNAPSHOT_MINUTES
+        )
         github_repo = values.get("KRX_GITHUB_REPO", DEFAULT_GITHUB_REPO).strip()
         if not re.fullmatch(r"[\w.-]+/[\w.-]+", github_repo):
             raise SettingsError(f"KRX_GITHUB_REPO must be owner/name, got {github_repo!r}")
@@ -421,11 +430,23 @@ class Settings:
             github_token=values.get("KRX_GITHUB_TOKEN", "").strip() or None,
             github_repo=github_repo,
             github_api_url=values.get("KRX_GITHUB_API_URL", DEFAULT_GITHUB_API_URL).strip().rstrip("/"),
+            snapshot_every=snapshot_every,
+            snapshot_issue_minutes=int(number("KRX_SNAPSHOT_ISSUE_MINUTES", "10", int)),
+            snapshot_per_hour=int(number("KRX_SNAPSHOT_PER_HOUR", "6", int)),
             bind_address=values.get("KRX_BIND_ADDRESS", "").strip() or None,
             toss_client_id=values.get("TOSS_CLIENT_ID", "").strip() or None,
             toss_client_secret=values.get("TOSS_CLIENT_SECRET", "").strip() or None,
             toss_url=values.get("TOSS_URL", DEFAULT_TOSS_URL).strip().rstrip("/"),
         )
+
+
+def read_values(env: Mapping[str, str] | None, dotenv_path: Path | None) -> dict[str, str]:
+    """The raw settings: ``env`` (default: os.environ) layered over ``dotenv_path``."""
+    values: dict[str, str] = {}
+    if dotenv_path is not None and dotenv_path.exists():
+        values.update({k: v for k, v in dotenv_values(dotenv_path).items() if v is not None})
+    values.update(os.environ if env is None else env)
+    return values
 
 
 def _on_or_off(name: str, raw: str) -> bool:

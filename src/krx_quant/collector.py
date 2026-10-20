@@ -28,6 +28,7 @@ from krx_quant.contracts import KOSPI200, night_front_month
 from krx_quant.cost_guard import keep_costs
 from krx_quant.daily import StoredDays
 from krx_quant.daily_features import DAILY_FEATURES, LiveFeatures
+from krx_quant.doctor import RecentLog, engine_status, report
 from krx_quant.econ_calendar import CalendarCollector, keep_calendar
 from krx_quant.engine import Budget, PredictionEngine, run_live
 from krx_quant.features import Leaders
@@ -75,6 +76,7 @@ from krx_quant.recorder import ParquetRecorder
 from krx_quant.rescore import EngineLock, keep_touches_filled
 from krx_quant.scheduled import keep_jobs
 from krx_quant.signals import Signals
+from krx_quant.snapshot import keep_snapshots
 from krx_quant.stream import LiveStatus
 from krx_quant.supply import toss_client_maker
 from krx_quant.swap import (
@@ -281,6 +283,9 @@ async def run_collector(
     lock = EngineLock(settings.state_dir)
     if not lock.acquire():
         log.warning("%s is held: a rescore runs", lock.path)
+    # The latest WARNING and ERROR lines, for the snapshots an issue asks for (#322).
+    recent = RecentLog()
+    logging.getLogger().addHandler(recent)
 
     def on_event(feed: str, row: dict[str, Any]) -> None:
         # Recording comes first: a prediction bug must never stop it.
@@ -427,13 +432,23 @@ async def run_collector(
                 background.append(
                     asyncio.create_task(keep_calendar(calendar_collector, settings.calendar_every))
                 )
+            live = _live_status(stream, health, now)
+            if settings.snapshot_every is not None:
+
+                async def snapshot() -> str:
+                    """The server's summary (``krx-quant doctor``) for an issue that asks (#322):
+                    the engine read on this thread, the files in a worker's."""
+                    status = engine_status(engine, live)
+                    return await asyncio.to_thread(report, settings, now(), status, recent, process="엔진")
+
+                background.append(asyncio.create_task(keep_snapshots(settings, session, snapshot, now)))
             # The symbols' company names (#250), read while the API already answers: Toss's
             # token expiry goes by the real time, as the supply probe's does.
             names: dict[str, str] = {}
             background.append(
                 asyncio.create_task(fill_names(names, session, settings, lambda: datetime.now().astimezone()))
             )
-            api = await _serve_api(settings, engine, _live_status(stream, health, now), alerts, names)
+            api = await _serve_api(settings, engine, live, alerts, names)
             # The past bar closes' touch labels, once the API answers (#168): the 06:00 deploy
             # checks it within 3 minutes, and the fill can take longer.
             background.append(asyncio.create_task(keep_touches_filled(settings, engine, lock)))
@@ -450,6 +465,7 @@ async def run_collector(
                 await poller.close()
                 await alerts.close()
     finally:
+        logging.getLogger().removeHandler(recent)
         health.close()
         recorder.close()
         store.close()

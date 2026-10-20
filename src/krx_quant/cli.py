@@ -31,6 +31,7 @@ from krx_quant.daily_check import daily_check
 from krx_quant.daily_training import daily_algorithm, fit_daily, prevalidate_daily
 from krx_quant.demo import demo_app, demo_morning
 from krx_quant.diagnose import DEFAULT_DAYS, diagnose
+from krx_quant.doctor import doctor, doctor_settings
 from krx_quant.expected_open_probe import DAYS as EXPECTED_OPEN_DAYS
 from krx_quant.expected_open_probe import probe_expected_open
 from krx_quant.fake_kis import FakeKis
@@ -421,6 +422,13 @@ def _diagnose(days: int) -> int:
     return 0
 
 
+async def _doctor(api: str | None) -> int:
+    """The summary even when a setting keeps the engine from starting: the error is in it."""
+    settings, error = doctor_settings()
+    print(await doctor(settings, datetime.now(KST), api, config_error=error), end="")
+    return 0
+
+
 def _signal_review(days: int) -> int:
     settings = Settings.from_env(require_kis=False)
     print(signal_review(settings.state_dir / DB_NAME, settings, datetime.now(KST).date(), days))
@@ -652,6 +660,16 @@ def main(argv: list[str] | None = None) -> int:
         default=DEFAULT_DAYS,
         help=f"the latest N trading days with data (default {DEFAULT_DAYS})",
     )
+    doctor_cmd = sub.add_parser(
+        "doctor",
+        help="print the server's state, masked (engine, KIS, PINGPONG, scheduled jobs, disk, memory, #322);"
+        " reads only, prints no market value",
+    )
+    doctor_cmd.add_argument(
+        "--api",
+        help="the Engine API to ask, e.g. http://127.0.0.1:8080 (default: this container's, then compose's"
+        " engine service)",
+    )
     signal_review_cmd = sub.add_parser(
         "signal-review",
         help="print what choosing the Telegram signal settings needs (#206); reads only, writes nothing",
@@ -751,6 +769,8 @@ def main(argv: list[str] | None = None) -> int:
             return _macro()
         elif args.command == "diagnose":
             return _diagnose(args.days)
+        elif args.command == "doctor":
+            return asyncio.run(_doctor(args.api))
         elif args.command == "signal-review":
             return _signal_review(args.days)
         elif args.command == "structure-check":

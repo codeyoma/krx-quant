@@ -8,9 +8,17 @@ Issues and specs live in GitHub Issues for `codeyoma/krx-quant` (via the `gh` CL
 
 Default five-role vocabulary: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`. See `docs/agents/triage-labels.md`.
 
+### Server state
+
+Agents cannot reach the server. To see it, add the `needs-server-snapshot` label to an open issue and read the comment the server posts within minutes (`krx-quant doctor`, masked). See `docs/agents/server-snapshot.md`.
+
 ### Domain docs
 
 Single-context: root `CONTEXT.md` + `docs/adr/`, plus the agreed system design in `docs/design.md`. See `docs/agents/domain.md`.
+
+### Coding standards
+
+Reviewers apply `CODING_STANDARDS.md` to every diff: external data is probed before it is used, and tests wait for conditions.
 
 ### PR checklist
 
@@ -21,6 +29,11 @@ Worktree, checks, commits, docs, PRs, reviews and stacked PRs: `docs/agents/pr-c
 - Never push to `main` directly. Start each change on a branch from `origin/main`, push the branch, open a pull request against `main` (`Closes #N` for the issue it implements), and merge it from the PR once CI passes.
 - The one exception is the `fincept-pointer` workflow: it pushes commits that change only the `fincept` pointer straight to `main` (Submodule workflow, step 4).
 - The `fincept/` fork follows its own rules (`fincept/custom/AGENTS.md`).
+
+## Shared checkouts
+
+- Several sessions work in this repository at once. The main checkout and its `fincept/` belong to whoever opened them: work in your own worktree (`git worktree add <scratchpad>/<name> -b <branch> origin/main`, the fork's off `origin/custom`), and delete only your own branches, one at a time.
+- `.claude/hooks/guard_main_checkout.py` (#325) refuses, in a main checkout, switching branches (except back to `main` or the fork's `custom`), deleting several branches at once, `git reset --hard`, `git clean -f` and `git stash`.
 
 ## Documentation
 
