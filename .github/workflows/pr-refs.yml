@@ -6,6 +6,9 @@ name: pr-refs
 # A workflow of its own, not a job in ci.yml: it runs again when the body is edited. In ci.yml
 # an edit would start the 11-22 minute test job again, or, skipped, the job's "skipped" result
 # would take the place of an earlier failure on the same commit.
+#
+# Linking an issue in the PR's Development sidebar does not start this workflow (no such
+# pull_request activity type); such a link is seen only at the next run.
 on:
   pull_request:
     types: [opened, edited, synchronize, reopened]

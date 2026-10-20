@@ -32,7 +32,7 @@ uv run python scripts/check_forbidden.py && uv run ruff check && uv run ruff for
 
 > **바뀜** (2026-10-20, #328): 검사는 주문 코드와 비밀값만 봤다 → PR 번호 자리표시도 본다(저장소 검사에만). 이유: PR을 열기 전에 쓴 자리표시가 남은 채 리뷰에 온 PR이 일곱 개였다(#321).
 
-PR에는 `pr-refs` 검사(`.github/workflows/pr-refs.yml`, `scripts/check_pr_refs.py`)가 따로 돈다. 본문에서 "Refs" 뒤에 적은 이슈를 머지가 닫으면 실패하고, 어느 이슈가 어떤 구절 때문에 닫히는지 출력한다. 닫힌다고 보는 경우는 둘이다: GitHub GraphQL API의 `closingIssuesReferences`에 그 이슈가 있거나, 본문에 닫는 키워드(close, closes, closed, fix, fixes, fixed, resolve, resolves, resolved)와 그 이슈 번호가 이어 붙어 있을 때다. GitHub는 백틱 안이나 "not" 뒤의 키워드도 읽어서, #340과 #341의 머지가 예약 작업이 아직 댓글을 다는 #310과 #314를 닫았다. 본문을 고치면 검사가 다시 돈다. PR을 API로 읽으므로 위의 로컬 검사에는 없다. 열린 PR은 `python3 scripts/check_pr_refs.py codeyoma/krx-quant <PR 번호>`로 확인한다.
+PR에는 `pr-refs` 검사(`.github/workflows/pr-refs.yml`, `scripts/check_pr_refs.py`)가 따로 돈다. 본문에서 "Refs" 뒤에 적은 이슈를 머지가 닫으면 실패하고, 어느 이슈가 어떤 구절 때문에 닫히는지 출력한다. 닫힌다고 보는 경우는 둘이다: GitHub GraphQL API의 `closingIssuesReferences`에 그 이슈가 있거나, 본문에 닫는 키워드(close, closes, closed, fix, fixes, fixed, resolve, resolves, resolved)와 그 이슈 번호가 이어 붙어 있을 때다. GitHub는 백틱 안이나 "not" 뒤의 키워드도 읽어서, #340과 #341의 머지가 예약 작업이 아직 댓글을 다는 #310과 #314를 닫았다. 본문을 고치면 검사가 다시 돈다. PR의 Development 사이드바에서 이슈를 잇거나 끊는 것은 검사를 다시 돌리지 않는다(GitHub의 `pull_request` 이벤트에 그런 종류가 없다). 그런 링크는 다음 실행(push, 본문 수정, 다시 열기) 때에야 잡히므로, 검사가 지키는 것은 본문이다. 사이드바에서 이슈를 이었을 수 있으면 머지 전에 아래 명령으로 다시 확인한다. PR을 API로 읽으므로 위의 로컬 검사에는 없다. 열린 PR은 `python3 scripts/check_pr_refs.py codeyoma/krx-quant <PR 번호>`로 확인한다.
 
 ## 수집기 실행
 

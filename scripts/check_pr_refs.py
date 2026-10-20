@@ -11,6 +11,12 @@ The check reads the pull request's body and the issues GitHub will close on merg
 one of them, or when the body has a closing keyword before that issue's number: the second
 catches the phrase even if GitHub has not yet updated its list after an edit.
 
+An issue linked in the pull request's Development sidebar is in `closingIssuesReferences` too,
+but linking or unlinking one does not start the workflow: GitHub's `pull_request` event has no
+such activity type. The check sees a sidebar link only at its next run (a push, a body edit,
+reopening), so it enforces the body, not the sidebar. Run the script by hand before merging if
+someone may have linked an issue there.
+
 Usage: python3 scripts/check_pr_refs.py <owner/repo> <pr number>   (needs `gh` and GH_TOKEN)
 
 Standard library only, so CI runs it without installing the project.
