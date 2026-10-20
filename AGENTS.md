@@ -8,6 +8,10 @@ Issues and specs live in GitHub Issues for `codeyoma/krx-quant` (via the `gh` CL
 
 Default five-role vocabulary: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`. See `docs/agents/triage-labels.md`.
 
+### Server state
+
+Agents cannot reach the server. To see it, add the `needs-server-snapshot` label to an open issue and read the comment the server posts within minutes (`krx-quant doctor`, masked). See `docs/agents/server-snapshot.md`.
+
 ### Domain docs
 
 Single-context: root `CONTEXT.md` + `docs/adr/`, plus the agreed system design in `docs/design.md`. See `docs/agents/domain.md`.

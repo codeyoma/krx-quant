@@ -36,7 +36,7 @@
    - 키가 없으면 그 출처(ECOS: 원/달러·국고채, FRED: 미국 10년물·WTI)만 건너뛴다. 국면은 Yahoo(SOX, VIX)와 달러선물 종가로도 정해진다.
 6. **AWS 자원 만들기**: 2.1절의 스크립트를 실행한다.
 7. **서버 개통**: 2.2절을 따라 한다.
-8. **GitHub 토큰** (선택, #218): 예약 작업이 결과를 이슈 댓글로 남기게 한다(3장 "예약 작업 (#215)"의 "토큰"). 없어도 작업은 돌고 결과는 서버에 남는다.
+8. **GitHub 토큰** (선택, #218): 예약 작업이 결과를 이슈 댓글로 남기게 한다(3장 "예약 작업 (#215)"의 "토큰"). 없어도 작업은 돌고 결과는 서버에 남는다. 에이전트가 라벨로 요청하는 서버 요약(#322, 6장 "서버 상태 보기 (#322)")도 이 토큰으로 올린다. 없으면 요청을 보지 않는다.
 9. **토스증권 Open API 클라이언트** (선택, #235): 일별 수급의 보조 출처이자 외국인 보유수량의 주 출처다. WTS 설정 > Open API에서 클라이언트를 만들고, 서버의 고정 공인 IP를 허용 IP에 넣고, 서버 `.env`에 `TOSS_CLIENT_ID`, `TOSS_CLIENT_SECRET`을 넣는다(2장 "토스증권 Open API 클라이언트 (#235)"). 없으면 토스 조회만 건너뛴다. 그러면 차트의 일별 수급 지표 중 외국인 보유수량·지분율이 비고, 다른 여섯은 KIS로만 채운다(#226). 수집기는 시작할 때 이 클라이언트로 종목의 회사 이름도 읽고(#250), 없으면 KIS 종목 마스터의 이름을 쓴다.
 
 ## 2. 개통
@@ -214,9 +214,12 @@ curl http://krx-quant:8080/v1/macro
 | `KRX_TRAIN_AT` | `21:30` | 거래일 밤 학습 시각(KST, `HH:MM`). `off`나 빈 값이면 하지 않는다. `KRX_TRAIN_ON=spot`이면 Spot 스케줄(`deploy/training.yaml`의 `TrainAt`)과 같게 둔다 |
 | `KRX_TRAIN_ON` | `server` | 밤 학습을 돌리는 곳(#23). `server`는 이 서버의 별도 프로세스, `spot`은 AWS가 같은 시각에 띄우는 EC2 Spot이다. `spot`이면 서버는 학습에 필요한 설정과 휴장일 달력을 S3(`training/`)에 올리고, 결과를 다음 거래일 07:30까지 기다려 요약을 텔레그램으로 보낸다 |
 | `KRX_JOBS_AT` | `22:30` | 예약 작업을 시작하는 시각(KST, `HH:MM`, #215). 거래일이 아니어도 매일 돈다. 20:00부터 05:30 전까지이고 `KRX_TRAIN_AT`보다 뒤여야 한다(자정 뒤 시각은 그 밤의 늦은 때로 본다). 아니면 설정 오류다. `off`나 빈 값이면 돌리지 않는다(3장 "예약 작업 (#215)") |
-| `KRX_GITHUB_TOKEN` | (없음) | 예약 작업이 이슈에 댓글을 남기고 라벨을 바꾸는 GitHub 토큰(#218). fine-grained, `codeyoma/krx-quant` 하나, Issues 읽기·쓰기만. 없으면 결과를 `state/scheduled.json`에 두고 텔레그램으로 알린다 |
+| `KRX_GITHUB_TOKEN` | (없음) | 예약 작업(#215)과 서버 요약(#322)이 이슈에 댓글을 남기고 라벨을 바꾸는 GitHub 토큰(#218). fine-grained, `codeyoma/krx-quant` 하나, Issues 읽기·쓰기만. 서버 요약은 이 권한으로 라벨이 붙은 열린 이슈를 찾고, 저장소에 `needs-server-snapshot` 라벨이 없으면 만든다. 없으면 예약 작업의 결과를 `state/scheduled.json`에 두고 텔레그램으로 알리고, 서버 요약 요청은 보지 않는다 |
 | `KRX_GITHUB_REPO` | `codeyoma/krx-quant` | 댓글을 남길 저장소(`owner/name`, 아니면 설정 오류) |
 | `KRX_GITHUB_API_URL` | `https://api.github.com` | GitHub API 주소. 테스트가 가짜 서버로 바꾼다 |
+| `KRX_SNAPSHOT_EVERY` | 3 | 수집기가 `needs-server-snapshot` 라벨이 붙은 열린 이슈를 찾는 간격(분, #322). 찾으면 서버 요약(`krx-quant doctor`)을 댓글로 남기고 라벨을 뗀다. 1 이상의 정수. `off`나 빈 값이면 찾지 않는다. `KRX_GITHUB_TOKEN`이 없어도 찾지 않는다(6장 "서버 상태 보기 (#322)") |
+| `KRX_SNAPSHOT_ISSUE_MINUTES` | 10 | 한 이슈에 서버 요약을 다시 올리기까지의 최소 간격(분). 1 이상. 그 안에 라벨이 다시 붙으면 라벨을 둔 채 기다렸다가 올린다 |
+| `KRX_SNAPSHOT_PER_HOUR` | 6 | 서버 전체로 지난 1시간에 올리는 서버 요약의 최대 수. 1 이상. 넘는 요청은 라벨을 둔 채 기다린다 |
 | `KRX_COST_BUDGET` | (없음) | 서버가 1시간마다 읽는 AWS Budgets 예산 이름(`krx-quant-monthly`, #23). 이달 비용이 예산의 50%와 80%를 넘으면 한 번씩 알리고, 100%에 닿으면 `KRX_TRAINING_SCHEDULES`를 그달 동안 끈다. 없으면 보지 않는다. 있으면 `KRX_TRAINING_SCHEDULES`도 있어야 한다(없으면 설정 오류) |
 | `KRX_TRAINING_SCHEDULES` | (없음) | 상한에서 끄고 다음 달 1일에 다시 켤 EventBridge Scheduler 스케줄(쉼표로 구분, `krx-quant-training,krx-quant-training-resume`) |
 | `KRX_COST_CHECK_SECONDS` | 3600 | 비용을 읽는 간격(초). 60 이상 |
@@ -235,6 +238,8 @@ curl http://krx-quant:8080/v1/macro
 
 > **바뀜** (2026-10-12, #116): 텔레그램 신호는 최종 합의의 확률과 정식 알고리즘의 동의만 맞으면 보냈고, 엔진을 다시 시작하면 같은 신호가 4분 안에 다시 갈 수 있었다 → VI·서킷브레이커, 기준가 없음, 목표 시각 지남이면 보내지 않고, 보낸·막힌 신호를 `runs`에 남기며, 재시작해도 4분 안에 다시 보내지 않는다. 이유: 매매하면 안 되는 때에도 신호가 나갔다(#78, #80).
 
+> **바뀜** (2026-10-20, #PRNUM): `KRX_GITHUB_TOKEN`은 예약 작업만 썼다 → 서버 요약(#322)도 쓴다: 라벨이 붙은 열린 이슈를 찾고, 댓글을 남기고, 라벨을 떼고, 저장소에 라벨이 없으면 만든다. 권한(Issues: Read and write)은 그대로다. 이유: 에이전트는 서버를 볼 수 없어, 2026-10-19 WebSocket 침묵 장애(#308) 때 사용자가 명령 다섯 개의 출력을 붙여 넣어야 했다.
+
 compose와 스크립트가 읽는 변수다. 엔진은 `KRX_BIND_ADDRESS`를 예약 작업의 가림에만 읽고, 나머지는 읽지 않는다.
 
 | 변수 | 읽는 곳 | 기본값 | 뜻 |
@@ -249,7 +254,9 @@ compose와 스크립트가 읽는 변수다. 엔진은 `KRX_BIND_ADDRESS`를 예
 
 > **바뀜** (2026-10-15, #219): `KRX_BIND_ADDRESS`는 compose만 읽었다 → 엔진도 읽는다(예약 작업의 댓글에서 가리는 데만 쓴다). 이유: 공개 저장소의 이슈 댓글에 서버 주소가 실리지 않게(#215).
 
-Docker 이미지는 `TZ=Asia/Seoul`, `KRX_DATA_DIR=/data`, `KRX_STATE_DIR=/state`로 돈다(`Dockerfile`).
+Docker 이미지는 `TZ=Asia/Seoul`, `KRX_DATA_DIR=/data`, `KRX_STATE_DIR=/state`로 돈다(`Dockerfile`). `PATH`의 맨 앞은 앱의 venv(`/app/.venv/bin`)다(#322). 그래서 `docker compose exec engine krx-quant <명령>`이 명령을 찾고, 컨테이너 안의 `python`이 앱의 파이썬(`/app/.venv/bin/python`)이다. 엔트리포인트는 `/app/.venv/bin/krx-quant`라 `docker compose run --rm engine <명령>`은 늘 됐다.
+
+> **바뀜** (2026-10-20, #PRNUM): 이미지의 `PATH`에 앱의 venv가 없었다 → 맨 앞에 둔다. 이유: `docker compose exec engine krx-quant <명령>`이 `krx-quant`를 찾지 못했고, 컨테이너의 `python`은 앱의 패키지(`pyarrow` 등)가 없는 이미지의 기본 파이썬이었다. #308 때 에이전트가 그 `python`으로 명령을 줘 틀렸다(#322).
 
 ### 2.3 첫 거래일 확인 (#7)
 
@@ -1105,6 +1112,8 @@ report: /state/prevalidations/mandelbrot.json
 
 토큰이 없어도 작업은 돌고 결과는 서버에 남는다. 토큰은 서버 `.env`에만 둔다. 저장소에는 두지 않는다.
 
+날·때가 정해지지 않은 "지금 서버가 어떤가"는 예약 작업이 아니라 서버 요약이다. 이슈에 `needs-server-snapshot` 라벨을 붙이면 몇 분 안에 댓글로 온다(6장 "서버 상태 보기 (#322)").
+
 ### 수습 시뮬레이션 (#298)
 
 수습이 시작되면(사전 검증 통과, 정답 버전이 바뀐 재시작) 최근 거래일을 그 알고리즘이 수습으로 돌았다고 치고 다시 재생해, 그 날들을 수습의 첫 날들로 세고 판정을 바로 한다([engine-api.md](engine-api.md#상태-관리-17)의 "수습 시뮬레이션"). 서버에서 손으로 할 일은 없다. 하루 한 번 예측 종류는 위 "하루 한 번 예측 (#264)"의 "수습 시뮬레이션"이다. 아래는 4분(봉 마감) 종류다.
@@ -1272,10 +1281,11 @@ sudo systemctl disable --now krx-quant-update.timer   # 자동 업데이트 끄�
 
 ## 6. 장애 대응
 
-먼저 상태와 로그를 본다.
+먼저 상태와 로그를 본다. 서버를 볼 수 없는 에이전트는 이슈에 `needs-server-snapshot` 라벨을 붙여 요약을 받는다(아래 "서버 상태 보기 (#322)").
 
 ```bash
 docker compose ps
+docker compose exec engine krx-quant doctor   # 엔진, KIS, PINGPONG, 예약 작업, 디스크·메모리 요약(#322)
 docker compose logs --tail 200 engine
 ```
 
@@ -1324,6 +1334,55 @@ docker compose logs --tail 200 engine
 > **바뀜** (2026-10-12, #116): 위 표의 `[신호]` 행은 "같은 종목·방향은 4분 안에 다시 오지 않는다"뿐이었다 → 엔진을 다시 시작해도 4분 안에 다시 오지 않고, 막힌 신호는 오지 않고 기록만 남는다. 이유: 매매하면 안 되는 때에도 신호가 나갔고, 재시작하면 같은 신호가 다시 나갈 수 있었다(#80).
 
 > **바뀜** (2026-10-14, #175): `[장애] 장중 데이터가 끊긴 피드: stale <TR> <키>`가 키마다 왔다 → 한 피드의 키가 모두 조용할 때만 `[장애] 구독한 키가 모두 끊긴 피드: stale <TR>`가 온다. 키 하나의 결측은 기록만 한다. 이유: 체결이 30분 넘게 없는 옵션 행사가처럼 시장 때문에 조용한 키마다 알림이 와서, 운영자가 고장일 때만 알림을 받기로 했다(#174).
+
+### 서버 상태 보기 (#322)
+
+서버가 지금 어떤지를 한 번에 보는 요약이다. 읽기만 하고, 시세 값(가격, 거래량, 수급)은 싣지 않으며, 예약 작업의 댓글과 같이 가린다(3장 "예약 작업 (#215)"의 "가림").
+
+**서버에서.** 도는 엔진 컨테이너 안에서 돌린다.
+
+```bash
+docker compose exec engine krx-quant doctor
+```
+
+엔진이 멈췄으면 새 컨테이너로 돌린다. 데이터와 상태 폴더는 같고, 엔진 API는 compose 네트워크의 `engine:8080`으로 묻는다.
+
+```bash
+docker compose run --rm engine doctor
+```
+
+`--api <주소>`로 물을 엔진 API를 줄 수 있다(예: `--api http://127.0.0.1:8080`). 종료 코드는 늘 0이다. 엔진에 닿지 않았는지는 출력의 1절이 말한다.
+
+**출력.** 머리줄(시각) 아래 여섯 절이다. 필드 이름은 `/v1/status`의 것 그대로다.
+1. 엔진: `commit`, `started_at`(그리고 지난 시간), `mode`, `phase`, `now`. 엔진 API는 이 컨테이너의 것(`127.0.0.1:8080`), 그다음 compose의 `engine` 서비스 순서로 묻는다. 둘 다 닿지 않으면 각각의 이유, DB `runs`의 마지막 `start`(시각과 커밋), 이 명령 이미지의 `KRX_COMMIT`을 적는다.
+2. KIS: `kis.connected`, `kis.last_frame_at`, `kis.seconds_since_frame`(#311), 피드·키 수와 60초 넘게 조용하거나 아직 안 온 키 수, 열린 `gap` 수, 그리고 피드·키마다 `feed key last_received_at seconds_since gap` 한 줄(오늘이면 시각만, 아니면 날짜도).
+3. PINGPONG: 오늘의 `raw/date=<오늘>/feed=_system/symbol=_`에서 센 KIS 하트비트의 합계, 마지막 시각, 두 PINGPONG 사이 가장 긴 간격, 시간별 수. 녹화는 `KRX_FLUSH_SECONDS`(30초)마다 파일로 쓰여 그 뒤에 온 것은 아직 없을 수 있다.
+4. 최근 WARNING·ERROR 로그: 수집기는 시작한 뒤의 WARNING·ERROR 줄 최근 200개를 메모리에 두고, 서버 요약에는 그 수와 마지막 20줄을 싣는다. 줄은 시각, 수준, 로거, 메시지의 첫 줄(예외면 그 종류와 첫 줄)이고 300자에서 자른다. `doctor` 명령은 엔진과 다른 프로세스라 엔진 로그를 읽지 못한다(Docker가 로그를 컨테이너 밖에 둔다). 그렇다고 적고, 서버에서 볼 명령(`docker compose logs --since 2h engine | grep -E ' (WARNING|ERROR) '`)을 적는다. 컨테이너 안에서 docker를 부르지 않는다.
+5. 예약 작업: `state/scheduled.json`의 마지막 실행 최근 12개(이름, 밤, `outcome`, 종료 코드, 걸린 시간, 커밋, 댓글을 남긴 이슈), 목록(`JOBS`) 중 끝까지(`ok`·`failed`) 돈 적 없는 작업(조건이 아직 안 된 것도 든다), 아직 올리지 못한 결과(`unposted`). 파일을 읽지 못하면 그렇다고만 적는다. 스케줄러와 달리 `.bad`로 옮기지 않는다.
+6. 디스크와 메모리: 데이터와 상태 폴더의 여유·전체 용량(같은 디스크면 그렇다고), `/proc/meminfo`의 사용 가능·전체 메모리와 스왑, 컨테이너의 cgroup 사용량과 한도, 그 프로세스의 `VmRSS`(명령이면 그 명령, 서버 요약이면 엔진).
+
+한 절을 읽다 실패하면 그 절에 이유를 적고 나머지 절은 그대로 낸다.
+
+**에이전트가 볼 때(라벨).** 에이전트는 서버에 들어갈 수 없다. 대신 열린 이슈에 `needs-server-snapshot` 라벨을 붙이면 수집기가 몇 분 안에 같은 요약을 그 이슈에 댓글로 남기고 라벨을 뗀다. 수집기 안에서 만든 요약이라 엔진을 API 없이 바로 읽고, 4절에 엔진의 최근 로그 줄이 실린다. 에이전트 쪽 쓰는 법은 [agents/server-snapshot.md](agents/server-snapshot.md)에 있다.
+- 수집기가 `KRX_SNAPSHOT_EVERY`(3분)마다 `KRX_GITHUB_REPO`의 열린 이슈 중 이 라벨이 붙은 것(번호 순, 한 번에 20개까지)을 찾는다. 수집기가 시작하고 한 간격 뒤에 처음 본다.
+- 라벨만 요청이다. 이슈의 제목, 본문, 댓글은 읽지 않는다(누구나 쓸 수 있는 글이다). 다른 라벨은 아무 일도 하지 않는다. PR에 붙은 라벨은 보지 않는다. 라벨은 저장소에 triage 이상의 권한이 있는 사람만 붙일 수 있다.
+- 한도: 한 이슈에 `KRX_SNAPSHOT_ISSUE_MINUTES`(10분)에 한 번, 서버 전체로 지난 1시간에 `KRX_SNAPSHOT_PER_HOUR`(6번)까지. 넘는 요청은 라벨을 둔 채 기다렸다가 될 때 올린다. 라벨이 붙어 있는 동안은 기다리는 중이다. 한 번 볼 때 여러 이슈에 올리면 요약은 한 번만 만든다.
+- 댓글: 첫 줄은 "서버 상태 (`krx-quant doctor`)", 시각(KST), 엔진 커밋의 앞 12자리다. 그 아래 라벨을 뗐다는 말과 한도, 서버에서 직접 보는 명령, 그리고 요약을 코드 블록으로 싣는다. 요약을 만들다 실패하거나 60초를 넘기면 `서버 요약을 만들지 못했다: <이유>`를 대신 올리고 라벨을 뗀다.
+- 상태 파일 `state/snapshots.json`: 지난 1시간(이슈마다 간격이 더 길면 그만큼)에 올린 이슈와 시각, 댓글은 올렸는데 라벨을 떼지 못한 이슈. 재시작해도 한도가 이어지고, 라벨만 남은 이슈는 다음에 볼 때 댓글 없이 라벨만 뗀다. 읽지 못하면 비어 있는 것으로 보고 다시 시작한다.
+- 라벨: 저장소에 없으면 처음 볼 때 만든다(색 `0e8a16`, 설명 `The server posts its status (krx-quant doctor) here in a few minutes, then removes this`). 토큰이 만들지 못하면 로그에 `could not make sure the needs-server-snapshot label exists` 경고가 한 번 남고, 찾기는 그대로 한다. 그때는 한 번 손으로 만든다.
+  ```bash
+  gh label create needs-server-snapshot --repo codeyoma/krx-quant --color 0e8a16 \
+    --description "The server posts its status (krx-quant doctor) here in a few minutes, then removes this"
+  ```
+- 실패가 수집기를 건드리지 않는다. GitHub가 거절하거나 닿지 않으면 로그에 `server snapshots: GitHub failed (...)` 경고를 한 번 남기고(다시 답하면 `GitHub answers again`) 다음 간격에 다시 본다. 댓글이 실패하면 세지 않고 라벨도 둔다. 녹화, 예측, 예약 작업은 그대로 돈다.
+- `KRX_GITHUB_TOKEN`이 없거나 `KRX_SNAPSHOT_EVERY=off`면 찾지 않는다. 텔레그램 알림은 없다.
+
+**함정.** 에이전트가 서버에서 돌릴 명령을 줄 때 틀리기 쉬운 것이다(#308 때 실제로 틀렸다).
+- 컨테이너 안의 파이썬은 `/app/.venv/bin/python`이다. 이 배포 전 이미지의 `python`은 앱의 패키지가 없는 기본 파이썬이라 `import pyarrow`가 실패했다. 지금은 `PATH`의 맨 앞이 venv라 `python`도 같지만, 전체 경로가 언제나 맞다. `docker compose run`으로 파이썬을 바로 돌리려면 `--entrypoint /app/.venv/bin/python`을 준다(엔트리포인트가 `/app/.venv/bin/krx-quant`다. 2.3절의 예).
+- `/v1/status`의 피드별 필드는 `kis.feeds[]`의 `feed`, `key`, `last_received_at`, `seconds_since`, `gap`이다. `last_received`가 아니다. 연결 전체의 마지막 프레임은 `kis.last_frame_at`, `kis.seconds_since_frame`이다(#311, [engine-api.md](engine-api.md#get-v1status)).
+- 엔진 API는 컨테이너 안에서 `http://127.0.0.1:8080`, 맥에서는 Tailscale로 `http://krx-quant:8080`이다. 서버 셸에서는 Tailscale 주소(`KRX_BIND_ADDRESS`)의 `KRX_ENGINE_PORT`에만 열린다(`localhost`가 아니다).
+- `docker compose run --rm engine <명령>`은 엔진과 다른 새 컨테이너다. 데이터와 상태 폴더는 같지만 엔진의 메모리(연결 상태, 로그)는 없다. 엔진의 것을 보려면 `docker compose exec engine …`이나 엔진 API를 쓴다.
+- 엔진 로그는 `docker compose logs engine`으로만 본다(서버 셸에서). 컨테이너 안에는 로그 파일이 없다.
 
 ## 7. 비용
 
@@ -1381,6 +1440,7 @@ docker compose logs --tail 200 engine
 | `training-cache/` | 밤 학습이 Object Store에서 받아 둔 백필 1분봉과 녹화 이벤트의 사본. 키 경로가 같다. 학습이 끝나면 그 밤에 쓴 가장 오래된 날보다 오래된 날짜를 지운다  그 날의 표본이 읽는 앞선 날(시간대 수익률이면 20거래일, #274)은 남긴다 |
 | `cost_guard.json` | Cost Guard가 이달 한 일(#23): `month`(UTC `YYYY-MM`), `warned`(알린 비율, %), `stopped`(Spot 스케줄을 끔), `stop_told`(끈 것을 알림), `spent`(이달 값으로 마지막에 읽은 비용), `carried`(지난달 마지막 비용. 이 값 이상이 보이는 동안은 지난달 값으로 본다). 재시작해도 다시 알리지 않으려고 둔다. 잃어도 다음 달 1일에 스케줄을 다시 켠다 |
 | `scheduled.json` | 예약 작업의 상태(#215): 작업마다 마지막으로 돈 것(`day`, `outcome`, `started_at`, `commit`, `exit_code`, `seconds`, `timed_out`, `comments`)과 아직 올리지 못한 결과(`unposted`). 형식은 3장 "예약 작업 (#215)". `.scheduled.json.tmp`는 쓰는 중인 임시 파일, `scheduled.json.bad`는 읽지 못해 옮겨 둔 것이다 |
+| `snapshots.json` | 서버 요약(#322): 지난 1시간에 요약을 올린 이슈와 시각(`posted`: `issue`, `at`), 댓글은 올렸는데 `needs-server-snapshot` 라벨을 떼지 못한 이슈(`unlabel`). 재시작해도 한도가 이어지게 둔다. 통째로 바꿔 쓴다(`.snapshots.json.tmp`). 잃으면 한도가 처음부터 다시 센다(6장 "서버 상태 보기 (#322)") |
 | `supply/symbol=<종목>/kis.parquet`, `…/toss.parquet` | 일별 수급 8종(#226): 출처마다 하루 한 행, 마지막 끝난 거래일부터 10년(형식은 [events.md](events.md#supply-일별-수급-rest-226)). 토스의 값은 사용자 자신의 매매에만 쓰므로 데이터 폴더가 아닌 여기에 두고 S3에 올리지 않는다. 잃으면 다음 시작 때 다시 받는다. `.<이름>.tmp`는 쓰는 중인 임시 파일이다 |
 | `base_rates.json` | 기간 기준율(#307): 4분 도달 정답(1분봉 규칙)의 종목·기간별 창 수, 상승·보합·하락 비율, k 중앙값, 직전 창 정답이 맞은 비율, 계산한 때와 읽은 1분봉의 첫날·마지막 날. `structure-check` 3절과 같은 계산이다. 수집기의 이력 작업이 시작할 때와 매일 20:30 백필 뒤에 통째로 바꿔 쓴다(쓰는 동안 읽는 쪽은 옛 파일을 본다). `GET /v1/cost-map`이 읽기만 한다. 비율과 수만 있고 가격은 없다. 지워도 다음 실행이 다시 만든다 |
 | `spot_summarized.json` | `{"night": "<날짜>"}`: 요약을 보낸 마지막 Spot 학습 밤(#23). 재시작해도 같은 요약을 다시 보내지 않는다. 보내지 못한 요약은 적지 않아서, 기한까지 다시 시도하고 다음 기다림(재시작)에도 보낸다 |
