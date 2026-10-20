@@ -1525,7 +1525,7 @@
 - 하락 예측(주식 공매도로): 시가에 팔고 종가에 되산다. −c − (매도세 + 수수료율 × 2).
 - 하락 예측(인버스 상품으로, `pnl_inverse`, `short_inverse`, #267): 그 종목의 단일종목 −2배 인버스 상품으로 친다. −c − 수수료율 × 2 ÷ 2(상품 금액이 주식 노출의 절반, 매도세 없음). 인버스 상품이 없는 종목(009150)과 상장일(2026-05-27) 전의 날은 거래에 넣지 않는다. 방향의 `pnl_inverse`와 같은 규칙이다.
 - 보합 예측은 거래하지 않는다.
-- 형식: `n`(채점된 예측 수), `pnl`(모든 거래: `trades`, `total_bp`, `per_trade` 거래당 평균과 정규근사 95% 구간), `long`, `short`, `pnl_inverse`, `short_inverse`. 장벽의 `barrier_stats`와 같은 모양이고 단위만 bp다.
+- 형식: `n`(채점된 예측 수), `pnl`(모든 거래: `trades`, `total_bp`, `per_trade` 거래당 평균과 정규근사 95% 구간. 5거래일 창(`open_to_close_5d`)은 같은 형식에 Driscoll–Kraay 구간이다, 아래), `long`, `short`, `pnl_inverse`, `short_inverse`. 장벽의 `barrier_stats`와 같은 모양이고 단위만 bp다.
 - 예(손계산, `tests/test_open_to_close.py`, 수수료율 0.015%): c = +1%를 맞힌 롱은 100 − 23 = 77bp, c = −1%를 맞힌 공매도도 77bp, 틀린 공매도(c = +1%)는 −123bp, 인버스 상품으로 맞힌 하락은 100 − 1.5 = 98.5bp다.
 
 ## 5거래일 시가→종가 (#310)
@@ -1579,7 +1579,7 @@
 - **수습 시뮬레이션(#298).** 수습의 첫 D₁일은 시뮬레이션이다: 이미 끝난 최근 창 D₁개(시작일 ≤ 그 밤 − 5)를 재생해 D₁일째 판정을 바로 한다. 날마다 그 전 거래일 밤까지 끝난 창으로 다시 학습한다(위 "여러 세션 창"의 "학습에서 겹침"). D₁일에 독립인 창은 ⌊D₁ ÷ 5⌋개뿐이라 자유도가 작고, 판정은 그만큼 넓은 구간으로 한다(규칙이 D₁을 그 폭에 맞춰 정한 것이다).
 
 **API.** 다른 종류의 엔드포인트를 그대로 쓴다(`/v1/kinds`, `…/kinds/open_to_close_5d/latest`·`predictions`, `leaderboard?kind=open_to_close_5d`, `algorithms/{otc5-flat, otc5-climate, otc5-persist}/stats`, 스트림의 `kind_prediction`·`kind_answer`). `/v1/kinds`의 `daily`는 `sessions` 5, `answer_from` `"20:35"`, `to_title` `"다섯째 거래일 종가 단일가"`, `awaiting`(돌지 않는 이유, 위 "지금은 돌지 않는다"), `review_hold`(판정일 보류의 이유, 위 "상태")이다. 예측의 `target_at`은 거래 일정으로 정한 끝날의 장 마감이다. 통계 항목의 `overlap_sessions`는 5, `independent_days`는 ⌊날 수 ÷ 5⌋다.
-- 스키마: 출력은 `open_to_close_output`(세 확률, `open_to_close`와 같다), 경로는 `open_to_close_5d_path`, 항목의 `extra`는 `open_to_close_5d_stats`(`open_to_close_stats`와 같은 필드, 거래당 구간은 Driscoll–Kraay). `tests/test_daily_api_5d.py`가 돌게 한 종류(`awaiting` 없음)로 확인한다: 월요일 08:50 예측의 `target_at`이 금요일 15:30이고, 정답이 금요일 20:35에 오며, 경로와 순위표의 `extra`가 스키마에 맞는다.
+- 스키마: 출력은 `open_to_close_output`(세 확률, `open_to_close`와 같다), 경로는 `open_to_close_5d_path`(`sessions`는 5, `closes`는 다섯 개), 항목의 `extra`는 `open_to_close_5d_stats`(`open_to_close_stats`와 같은 필드, 거래당 구간은 Driscoll–Kraay: `open_to_close_pnl`의 설명). `tests/test_daily_api_5d.py`가 돌게 한 종류(`awaiting` 없음)로 확인한다: 월요일 08:50 예측의 `target_at`이 금요일 15:30이고, 정답이 금요일 20:35에 오며, 경로와 순위표의 `extra`가 스키마에 맞는다.
 - 지금(돌지 않는 동안)은 `/v1/kinds`에 `awaiting`·`review_hold`와 함께 나오고, `…/kinds/open_to_close_5d/latest`는 빈 예측(`predictions: []`), 순위표는 빈 항목이다.
 - 데모 엔진: 목록에만 나온다(돌지 않는 종류라 예측과 정답이 없다). 문이 열리는 PR이 데모의 예측과 정답을 더한다.
 

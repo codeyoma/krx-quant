@@ -1397,7 +1397,7 @@
       }
     },
     "barrier_pnl": {
-      "description": "Barrier trades' P&L in ticks less the round-trip cost (#183, research only): how many, their total and the mean per trade with its 95% interval (normal; Driscoll–Kraay for open_to_close_5d, #310).",
+      "description": "Barrier trades' P&L in ticks less the round-trip cost (#183, research only): how many, their total and the mean per trade with its normal 95% interval.",
       "type": "object",
       "required": ["trades", "total_ticks", "per_trade"],
       "additionalProperties": false,
@@ -1458,8 +1458,8 @@
             "fee_rate": {"type": "number", "minimum": 0},
             "source": {"enum": ["krx_minute_bar", "recorded_print", "krx_day_candle"]},
             "end_day": {"$ref": "#/$defs/day"},
-            "sessions": {"type": "integer", "minimum": 2},
-            "closes": {"type": "array", "items": {"type": ["number", "null"], "exclusiveMinimum": 0}},
+            "sessions": {"const": 5},
+            "closes": {"type": "array", "minItems": 5, "maxItems": 5, "items": {"type": ["number", "null"], "exclusiveMinimum": 0}},
             "previous_close": {"type": ["number", "null"], "exclusiveMinimum": 0},
             "ex_dividend": {"type": ["boolean", "null"]},
             "vi": {"type": "integer", "minimum": 0}
@@ -1486,7 +1486,7 @@
       }
     },
     "open_to_close_pnl": {
-      "description": "open_to_close trades' P&L in basis points of the open less the round-trip cost (#264, research only): how many, their total and the mean per trade with its normal 95% interval.",
+      "description": "open_to_close trades' P&L in basis points of the open less the round-trip cost (#264, research only): how many, their total and the mean per trade with its 95% interval: normal for open_to_close, Driscoll–Kraay for open_to_close_5d (#310: the windows of neighbouring days overlap).",
       "type": "object",
       "required": ["trades", "total_bp", "per_trade"],
       "additionalProperties": false,

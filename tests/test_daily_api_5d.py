@@ -11,6 +11,7 @@ from datetime import date, datetime, time
 from pathlib import Path
 from typing import Any
 
+import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from krx_quant.api import create_app
@@ -109,6 +110,15 @@ async def test_once_it_runs_its_window_ends_on_its_fifth_session_and_is_answered
             assert answer["scored_at"] == "2026-10-23T20:35:00+09:00"
             check("open_to_close_5d_path", answer["path"])
             assert answer["path"]["end_day"] == "2026-10-23" and len(answer["path"]["closes"]) == 5
+        # The contract holds the path to its five sessions (#340 review): another count fails.
+        path = monday["predictions"][0]["answer"]["path"]
+        for broken in (
+            {**path, "sessions": 4},
+            {**path, "closes": path["closes"][:4]},
+            {**path, "closes": [*path["closes"], path["close"]]},
+        ):
+            with pytest.raises(AssertionError, match="open_to_close_5d_path"):
+                check("open_to_close_5d_path", broken)
         board = await get(client, "/v1/leaderboard?kind=open_to_close_5d", "leaderboard")
         check("kind_leaderboard", board)
         for entry in board["baselines"]:
