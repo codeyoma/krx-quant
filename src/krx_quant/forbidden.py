@@ -1,5 +1,6 @@
 """Patterns that must never appear in the repository (``scripts/check_forbidden.py``), nor in
-what the server posts to the public issue tracker (``redaction.py``, #215).
+what the server posts to the public issue tracker (``redaction.py``, #215). ``REPOSITORY_RULES``
+are the repository check's alone (#321).
 
 The engine is signals-only: no KIS order TR IDs or order endpoints, and no Toss order
 endpoints (#235), may ever appear in the repository. Secrets belong in ``.env`` on the server
@@ -26,4 +27,15 @@ RULES: list[tuple[str, re.Pattern[str]]] = [
     ("Toss credential value", re.compile(r"TOSS_CLIENT_(?:ID|SECRET)\s*=\s*['\"]?[A-Za-z0-9_+/=-]{16,}")),
     # Classic (ghp_, gho_, ...) and fine-grained (github_pat_) GitHub tokens (#215).
     ("GitHub token", re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{40,})\b")),
+]
+
+# The repository check alone (#321), not the redaction of posted output: a change note's PR
+# number is only known once the PR is open, so a note is written with a stand-in first. One
+# left in a merged PR names no change: #PRNUM, #NNN, #PRB, #PRDOCS and #__PR3__ each came to
+# review that way. A real number (#123) and the format's own "#PR" in AGENTS.md pass.
+REPOSITORY_RULES: list[tuple[str, re.Pattern[str]]] = [
+    (
+        "PR number placeholder",
+        re.compile(r"#(?:PR[A-Z0-9_]+|N{3,}|X{3,}|TBD|_+PR[A-Za-z0-9_]*_+)(?![A-Za-z0-9_])"),
+    ),
 ]

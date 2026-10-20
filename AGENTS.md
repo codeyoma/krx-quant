@@ -25,6 +25,7 @@ Single-context: root `CONTEXT.md` + `docs/adr/`, plus the agreed system design i
   - `> **삭제됨** (YYYY-MM-DD, #PR): 무엇이 없어졌는지. 이유: …. 대신: ….`
   - `> **바뀜** (YYYY-MM-DD, #PR): 이전 → 지금. 이유: ….`
 - The reason is the one recorded in the PR or the commit. If none was recorded, write "이유 기록 없음".
+- `#PR` is the real number: open the PR, then put its number in the notes. CI's forbidden-pattern check fails while a stand-in for it is left (#321).
 - Changes committed straight to `main` before PR #31 are cited by commit SHA instead of `#PR`.
 
 ## Timed server work
