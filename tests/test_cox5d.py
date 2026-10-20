@@ -286,3 +286,73 @@ def test_once_its_days_are_fixed_it_is_simulated_on_its_first_review_day_of_ende
         night = max(d for d in days if d < replayed)
         assert fit and all(x.ended_by(night) for x in fit), "only windows ended by the night before"
     assert sim.days[-1] == date(2026, 10, 12), "the latest window to end by Friday began on Monday"
+
+
+def test_the_review_days_never_take_a_ratio_below_one() -> None:
+    """#339 review: every baseline's gains alternating day by day make every ratio < 1; the report
+    keeps them, but the review days are the rule's at 1 (the intervals never shrink below the
+    independent ones, ``stats.overlap_t_test``): 40, not 20."""
+    from krx_quant.daily_training import overlap_report
+    from krx_quant.kinds import KindScored
+
+    def scored(name: str, day: int, right: bool) -> KindScored:
+        at = datetime(2026, 1, 5, 8, 50, tzinfo=KST) + timedelta(days=day)
+        return KindScored(name, "v1", "005930", at, (0.0, 1.0, 0.0), 1 if right else 0, {}, {})
+
+    mine = [scored("alg", d, d % 2 == 0) for d in range(200)]
+    baselines = {
+        name: [scored(name, d, d % 2 == 1) for d in range(200)]
+        for name in ("otc5-flat", "otc5-climate", "otc5-persist")
+    }
+    report = overlap_report(RUNNING, mine, baselines)
+    assert all(r is not None and r < 1 for r in report["variance_ratio"].values())
+    assert report["variance_ratio_max"] < 1, "kept as measured"
+    assert report["review_days"]["variance_ratio"] == 1.0
+    assert (
+        report["review_days"]["first"] == 40 and overlap_review(report["variance_ratio_max"], 5).first == 20
+    )
+
+
+async def test_a_passed_algorithm_held_for_its_review_days_is_not_said_to_wait_after_a_restart(
+    tmp_path: Path,
+) -> None:
+    """#339 review: once its pre-validation passed, an algorithm of a kind holding its review days
+    is held, not waiting for a pre-validation: a restart's review says it is held, never "검증을
+    통과해야 돌기 시작합니다"."""
+    from krx_quant.daily import StoredDays
+    from krx_quant.replay import replay_into
+    from tests.test_lifecycle import Outbox
+
+    s = settings(tmp_path, 420)
+    monday = date(2026, 10, 19)
+
+    def engine(outbox: Outbox, start: datetime) -> tuple[PredictionEngine, FakeClock]:
+        clock = FakeClock(start)
+        return PredictionEngine(
+            PredictionStore(s.state_dir / DB_NAME),
+            CALENDAR,
+            SYMBOLS,
+            FEE,
+            clock,
+            algorithms=(),
+            kinds=(DIRECTION_KIND,),
+            kind_algorithms=(),
+            daily=StoredDays(s.data_dir),
+            daily_kinds=(RUNNING,),
+            daily_algorithms=[Stand()],
+            daily_features=lambda a, sym, d, p, b: FeatureVector(dict.fromkeys(a.features), a.features),
+            daily_feature_names={"us_sox"},
+            admits=lambda a: True,  # its report passed
+            notify=outbox,
+        ), clock
+
+    for day in (monday, monday + timedelta(days=1)):  # the second: a restart the next morning
+        outbox = Outbox()
+        e, clock = engine(outbox, datetime.combine(day, datetime.min.time(), KST).replace(hour=7, minute=20))
+        assert e.waiting() == [] and e.held() == ["stand"] and e.daily_algorithms == ()
+        review = datetime.combine(day, datetime.min.time(), KST).replace(hour=15, minute=45)
+        await replay_into(e, clock, [], until=review)
+        about = [m for m in outbox.sent if "stand" in m]
+        assert len(about) == 1 and about[0].startswith("판정일 보류: stand."), "one alert, the held one"
+        assert "사전 검증 대기" not in about[0]
+        e.store.close()
