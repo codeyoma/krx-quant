@@ -41,6 +41,10 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 # Collector tests drive real sockets and timers; fail a stuck one instead of hanging CI.
 timeout = 30
+# A test past its limit ends the run with every thread's stack. The signal method raises the
+# timeout in the main thread; landing in an asyncio callback, it is dropped and the run waits
+# forever (tests/test_timeouts.py).
+timeout_method = "thread"
 
 [tool.mypy]
 python_version = "3.11"

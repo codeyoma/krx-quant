@@ -27,7 +27,10 @@ A test waits for the state it needs before it checks anything: a request to a pa
 
 A test that measures a time budget uses stand-in algorithms with fixed costs, not real algorithms, whose speed depends on the machine.
 
+A test's time limit is pytest-timeout's, 30 s by default (`pyproject.toml`). A test that passes it ends the whole run with every thread's stack (`timeout_method = "thread"`). The tests after it do not run, so fix the stuck test first. A test that needs longer by design gets its own `@pytest.mark.timeout(N)` and a comment saying why. The method stays `thread`: the `signal` method raises its exception wherever the main thread is, and asyncio drops one raised in a callback, so the test waits forever (`tests/test_timeouts.py`).
+
 Seen here:
 
 - `tst_krx_cost` waited for requests in a fixed order (fork #99).
 - `test_algorithms_replay` ran the real Mandelbrot and Breiman ladder against a 0.6 s budget and failed on slower runners (#327).
+- At load averages of 150–600, a run of the replay tests that went past their limits stopped for good at 0% CPU, in 3 of about 70 runs. pytest-timeout's `signal` method had raised its timeout inside the asyncio callback that hands a worker thread's result to the loop (`_chain_future._set_state`); asyncio logged it and went on. Other runs ended in a pytest `INTERNALERROR` while it formatted such a timeout's traceback.
