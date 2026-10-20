@@ -1445,7 +1445,7 @@
   - `GET /v1/symbols/{symbol}/kinds/open_to_close/latest`, `…/predictions`: 항목의 `bar_close`가 예측 시각(그날 08:50), `target_at`이 그날 장 마감(종가 단일가 끝, 보통 15:30, 수능일 16:30)이다. 여러 세션 창(`open_to_close_5d`)은 거래 일정으로 정한 끝날의 장 마감이다(#310). `band`가 그날의 보합 폭이다(봉 마감 종류는 `null`). `flat_ticks`, `width_ticks`, `anchor`, `tick`은 `null`이다. `answer`는 그날 종가 단일가 가격이 저장되어 정답을 쓴 뒤(15:45부터) 찬다. `?bar_close=2026-10-12T08:50:00+09:00`으로 그날 것을 읽는다. `limit`은 날(예측 시각)의 개수다.
   - `GET /v1/leaderboard?kind=open_to_close`, `GET /v1/algorithms/{cox, otc-flat, otc-climate, otc-persist}/stats`: 다른 종류와 같다. `period`의 `5d`·`20d`는 예측이 있는 최근 날이다(오늘 정답은 15:45 뒤). `extra`는 `open_to_close_stats`(아래 "시가→종가"의 "통계"). 상세 통계의 `by_slot`은 예측 시각의 30분 칸이라 늘 `08:30` 하나다.
   - `GET /v1/algorithms`: 돌기 시작한 `cox`가 `kind` `open_to_close`로 나온다. `feature_meanings`는 하루 한 번 예측의 피처(`daily_features.DAILY_FEATURES`)의 뜻이다. `validation`은 그 밤 리포트(늘 승격, `champion`이 `null`)다. `stage`는 정답이 있는 날로 센다.
-  - 스키마: `prediction_kind`의 `horizon_minutes`(`null` 가능)와 `daily`, `kind_prediction_fields`의 `band`, 출력·경로·통계 `open_to_close_output`, `open_to_close_path`, `open_to_close_stats`(`open_to_close_pnl`, bp).
+  - 스키마: `prediction_kind`의 `horizon_minutes`(`null` 가능)와 `daily`(#310부터 `sessions`, `awaiting`, `review_hold`), `kind_prediction_fields`의 `band`, 출력·경로·통계 `open_to_close_output`, `open_to_close_path`, `open_to_close_stats`(`open_to_close_pnl`, bp). 5거래일 창은 `open_to_close_5d_path`, `open_to_close_5d_stats`(아래 "5거래일 시가→종가").
   - 데모 엔진: 10-08까지 마지막 20거래일의 기준 예측 셋과 `cox`(그 전 날로 학습한 모델)의 예측과 정답(15:45), 그리고 10-12 08:50의 예측(정답 전)이 있다. KRX 일봉(`krx.parquet`)은 데모 일봉과 같은 날에 시가가 가끔 한 틱 다르다. 단일가 가격(`auctions.parquet`)은 최근 1년이 KRX 일봉의 시가·종가와 같다.
 - **여러 세션 창(#310, `DailyKind.sessions`: H).** 창이 그날(D) 시가 단일가에서 그날을 첫날로 센 H번째 세션의 종가 단일가까지인 종류다(`open_to_close`는 1, `open_to_close_5d`는 5). 위 규칙은 H = 1일 때와 결과가 같다(테스트). H > 1이면:
   - **창의 끝.** 예측할 때는 거래 일정으로 정한다(`DailyKind.scheduled_end`, API의 `target_at`). 채점할 때는 KRX가 실제로 연 세션을 센다(`daily.sessions_of`: 그 종목이 가진 날과, 엔진의 거래 일정이 KIS에서 받은 거래일. KIS 일정은 약 1년이라 그보다 오래된 날은 그 종목의 날만 센다). KIS가 쉰다고 알린 예정에 없던 휴장은 세지 않아, 다섯째로 실제 연 날이 끝이다. KRX가 열었지만 그 종목에 날이 없는 날(종일 정지, 종가 단일가 가격을 끝내 받지 못한 날)도 세션이다. 그날이 끝날이면 정답이 없다. 경로에 실제 끝날(`end_day`)을 남긴다.
@@ -1579,6 +1579,9 @@
 - **수습 시뮬레이션(#298).** 수습의 첫 D₁일은 시뮬레이션이다: 이미 끝난 최근 창 D₁개(시작일 ≤ 그 밤 − 5)를 재생해 D₁일째 판정을 바로 한다. 날마다 그 전 거래일 밤까지 끝난 창으로 다시 학습한다(위 "여러 세션 창"의 "학습에서 겹침"). D₁일에 독립인 창은 ⌊D₁ ÷ 5⌋개뿐이라 자유도가 작고, 판정은 그만큼 넓은 구간으로 한다(규칙이 D₁을 그 폭에 맞춰 정한 것이다).
 
 **API.** 다른 종류의 엔드포인트를 그대로 쓴다(`/v1/kinds`, `…/kinds/open_to_close_5d/latest`·`predictions`, `leaderboard?kind=open_to_close_5d`, `algorithms/{otc5-flat, otc5-climate, otc5-persist}/stats`, 스트림의 `kind_prediction`·`kind_answer`). `/v1/kinds`의 `daily`는 `sessions` 5, `answer_from` `"20:35"`, `to_title` `"다섯째 거래일 종가 단일가"`, `awaiting`(돌지 않는 이유, 위 "지금은 돌지 않는다"), `review_hold`(판정일 보류의 이유, 위 "상태")이다. 예측의 `target_at`은 거래 일정으로 정한 끝날의 장 마감이다. 통계 항목의 `overlap_sessions`는 5, `independent_days`는 ⌊날 수 ÷ 5⌋다.
+- 스키마: 출력은 `open_to_close_output`(세 확률, `open_to_close`와 같다), 경로는 `open_to_close_5d_path`, 항목의 `extra`는 `open_to_close_5d_stats`(`open_to_close_stats`와 같은 필드, 거래당 구간은 Driscoll–Kraay). `tests/test_daily_api_5d.py`가 돌게 한 종류(`awaiting` 없음)로 확인한다: 월요일 08:50 예측의 `target_at`이 금요일 15:30이고, 정답이 금요일 20:35에 오며, 경로와 순위표의 `extra`가 스키마에 맞는다.
+- 지금(돌지 않는 동안)은 `/v1/kinds`에 `awaiting`·`review_hold`와 함께 나오고, `…/kinds/open_to_close_5d/latest`는 빈 예측(`predictions: []`), 순위표는 빈 항목이다.
+- 데모 엔진: 목록에만 나온다(돌지 않는 종류라 예측과 정답이 없다). 문이 열리는 PR이 데모의 예측과 정답을 더한다.
 
 ## 알고리즘
 

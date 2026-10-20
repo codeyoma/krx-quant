@@ -1212,7 +1212,7 @@
           "minimum": 0
         },
         "output": {
-          "description": "p_<class> for each of the kind's three classes (GET /v1/kinds), a distribution, then the kind's fields; null unless the status is ok. The range's: range_output (#180); the barrier's: barrier_output (#183); open_to_close's: open_to_close_output (#264).",
+          "description": "p_<class> for each of the kind's three classes (GET /v1/kinds), a distribution, then the kind's fields; null unless the status is ok. The range's: range_output (#180); the barrier's: barrier_output (#183); open_to_close's and open_to_close_5d's (#310): open_to_close_output (#264).",
           "oneOf": [
             {"type": "null"},
             {
@@ -1250,7 +1250,7 @@
         "unscorable": {"type": ["string", "null"]},
         "special": {"type": "boolean"},
         "scored_at": {"$ref": "#/$defs/time"},
-        "path": {"description": "The kind's summary of the window. The range's: range_path (#180); the barrier's: barrier_path (#183); open_to_close's: open_to_close_path (#264).", "type": "object"}
+        "path": {"description": "The kind's summary of the window. The range's: range_path (#180); the barrier's: barrier_path (#183); open_to_close's: open_to_close_path (#264); open_to_close_5d's: open_to_close_5d_path (#310).", "type": "object"}
       }
     },
     "range_output": {
@@ -1397,7 +1397,7 @@
       }
     },
     "barrier_pnl": {
-      "description": "Barrier trades' P&L in ticks less the round-trip cost (#183, research only): how many, their total and the mean per trade with its normal 95% interval.",
+      "description": "Barrier trades' P&L in ticks less the round-trip cost (#183, research only): how many, their total and the mean per trade with its 95% interval (normal; Driscoll–Kraay for open_to_close_5d, #310).",
       "type": "object",
       "required": ["trades", "total_ticks", "per_trade"],
       "additionalProperties": false,
@@ -1439,6 +1439,37 @@
           }
         }
       ]
+    },
+    "open_to_close_5d_path": {
+      "description": "An open_to_close_5d answer's path (#310): empty for a window whose end day's candle never came (no candle); else the first session's opening auction price and the fifth's closing auction price (won, adjusted as the KRX day candles of one fetch are), the change close / open − 1, the band it is classed by with the volatility and scale it came from (null without ended windows enough: no band), the fee rate, where the close came from, the window's last session as KRX held it, its sessions (5), the five sessions' closes (null for one the symbol has none of) and the previous session's close (the inverse product's daily reset), whether an ex-dividend date falls after the first session (null: no dividend calendar is kept yet), and the five sessions' VIs of the symbol.",
+      "oneOf": [
+        {"type": "object", "maxProperties": 0},
+        {
+          "type": "object",
+          "required": ["open", "close", "change", "band", "sigma", "scale", "fee_rate", "source", "end_day", "sessions", "closes", "previous_close", "ex_dividend", "vi"],
+          "additionalProperties": false,
+          "properties": {
+            "open": {"type": "number", "exclusiveMinimum": 0},
+            "close": {"type": "number", "exclusiveMinimum": 0},
+            "change": {"type": "number"},
+            "band": {"type": ["number", "null"], "minimum": 0},
+            "sigma": {"type": ["number", "null"], "minimum": 0},
+            "scale": {"type": ["number", "null"], "minimum": 0},
+            "fee_rate": {"type": "number", "minimum": 0},
+            "source": {"enum": ["krx_minute_bar", "recorded_print", "krx_day_candle"]},
+            "end_day": {"$ref": "#/$defs/day"},
+            "sessions": {"type": "integer", "minimum": 2},
+            "closes": {"type": "array", "items": {"type": ["number", "null"], "exclusiveMinimum": 0}},
+            "previous_close": {"type": ["number", "null"], "exclusiveMinimum": 0},
+            "ex_dividend": {"type": ["boolean", "null"]},
+            "vi": {"type": "integer", "minimum": 0}
+          }
+        }
+      ]
+    },
+    "open_to_close_5d_stats": {
+      "description": "An open_to_close_5d predictor's own statistics (#310, a kind entry's extra): open_to_close_stats's fields over the five sessions, the per-trade intervals Driscoll–Kraay ones (the windows of neighbouring days overlap); the inverse product's P&L is its five sessions' daily reset −2x, on the stock's notional.",
+      "allOf": [{"$ref": "#/$defs/open_to_close_stats"}]
     },
     "open_to_close_stats": {
       "description": "An open_to_close predictor's own statistics (#264, a kind entry's extra): of its n scored predictions, the P&L (research only) of following its calls from the opening auction to the closing auction: a long on up, a short of the stock on down, none on flat (pnl, long, short), and the downs through the symbol's single-stock inverse product (pnl_inverse, short_inverse; none for a symbol without one or a day before its listing).",
@@ -1506,7 +1537,7 @@
         "precision": {"description": "Of the calls of the kind's action classes, the share that happened.", "$ref": "#/$defs/interval"},
         "coverage": {"description": "The share of calls of the kind's action classes.", "$ref": "#/$defs/interval"},
         "brier": {"$ref": "#/$defs/interval"},
-        "extra": {"description": "The kind's own statistics; null for a kind without. The range's: range_stats (#180); the barrier's: barrier_stats (#183); open_to_close's: open_to_close_stats (#264).", "type": ["object", "null"]},
+        "extra": {"description": "The kind's own statistics; null for a kind without. The range's: range_stats (#180); the barrier's: barrier_stats (#183); open_to_close's: open_to_close_stats (#264); open_to_close_5d's: open_to_close_5d_stats (#310).", "type": ["object", "null"]},
         "overlap_sessions": {"description": "How many trading sessions the kind's windows run (#310): 1 for every kind but a daily kind of several sessions, whose neighbouring days' windows share sessions; then its accuracy, precision, coverage, Brier score, lifts and P&L intervals are Driscoll–Kraay ones and its lifts by trading day Newey–West ones (its calibration bins are not corrected).", "type": "integer", "minimum": 1},
         "independent_days": {"description": "About how many independent windows the entry's trading days hold (#310): the days with a scored prediction ÷ overlap_sessions, rounded down.", "type": "integer", "minimum": 0},
         "lift": {"$ref": "#/$defs/lift"}
