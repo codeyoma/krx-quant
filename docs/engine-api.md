@@ -1437,7 +1437,7 @@
 
     > **바뀜** (2026-10-18, #293): "스트림의 `kind_prediction`·`kind_answer`는 아직 보내지 않는다" → 보낸다. 이유: #264의 엔진 API PR이다.
 - **API.** 다른 종류의 엔드포인트를 그대로 쓴다.
-  - `GET /v1/kinds`: 봉 마감 종류 다음에 온다. `horizon_minutes`가 `null`이고(봉 마감이 없다), `daily`가 그날의 시각을 말한다: `predict_at`(`"08:50"`, KST, 거래일마다), `from`·`to`(`open`·`close`: 시가 단일가에서 종가 단일가까지), `from_title`·`to_title`(화면용 이름), `sessions`(창의 세션 수, #310: `open_to_close` 1, `open_to_close_5d` 5), `answer_from`(정답을 창의 끝날 처음 보는 시각: `open_to_close` `"15:45"`, `open_to_close_5d` `"20:35"`), `probation_days`·`bench_days`(판정하는 정답 있는 날, `open_to_close`는 `[20, 40, 60]`), `recent_days`(20). 봉 마감 종류의 `daily`는 `null`이다.
+  - `GET /v1/kinds`: 봉 마감 종류 다음에 온다. `horizon_minutes`가 `null`이고(봉 마감이 없다), `daily`가 그날의 시각을 말한다: `predict_at`(`"08:50"`, KST, 거래일마다), `from`·`to`(`open`·`close`: 시가 단일가에서 종가 단일가까지), `from_title`·`to_title`(화면용 이름), `sessions`(창의 세션 수, #310: `open_to_close` 1, `open_to_close_5d` 5), `answer_from`(정답을 창의 끝날 처음 보는 시각: `open_to_close` `"15:45"`, `open_to_close_5d` `"20:35"`), `probation_days`·`bench_days`(판정하는 정답 있는 날, `open_to_close`는 `[20, 40, 60]`), `recent_days`(20), `awaiting`(돌지 않는 종류의 이유, #338: 측정이 끝나지 않은 데이터를 읽는 종류는 목록에만 나오고 예측·채점·학습·사전 검증을 하지 않는다. 도는 종류는 `null`). 봉 마감 종류의 `daily`는 `null`이다.
 
     > **바뀜** (2026-10-20, #317): `answer_from` `"20:35"` → `"15:45"`. 이유: 위 "정답"과 같다.
 
@@ -1532,6 +1532,8 @@
 
 둘째 하루 한 번 종류이고, 첫 여러 세션 창이다(`open_to_close_5d.py`의 `OPEN_TO_CLOSE_5D`, 이름 `open_to_close_5d`, 화면용 이름 `5거래일 시가→종가`). 거래일마다 08:50에, 그날(D) KRX 시가 단일가(09:00)에서 그날을 첫날로 센 다섯째 거래일(D+4)의 KRX 종가 단일가(15:30)까지의 방향을 상승·보합·하락으로 예측한다. 월 시가 → 금 종가와 같은 길이다. 매일 새 창이 열려 이웃한 날의 창이 4세션씩 겹친다(위 "하루 한 번 예측 종류"의 "여러 세션 창"). 사용자가 정했다(2026-10-19, #310): 매일 08:50, 그날 시가 단일가 → 다섯째 거래일 종가 단일가, 겹치는 창의 통계 보정을 같이 넣고, 주 1회 창(월 시가 → 금 종가)은 쓰지 않는다.
 
+**지금은 돌지 않는다(#338).** 등록은 되어 있어 `/v1/kinds`에 나오지만, 배당 확인(아래 "배당")의 결과가 들어올 때까지 엔진이 예측하지도 채점하지도 않는다. 그 종류의 알고리즘도 돌지 않고, 학습·사전 검증·수습 시뮬레이션을 하지 않는다(`DailyKind.awaiting`, `open_to_close_5d.AWAITING`). 창의 두 끝을 KIS 수정주가 일봉에서 날을 건너 읽는데, 그 수정이 현금배당을 빼는지 아직 모르기 때문이다(CODING_STANDARDS.md "External data is probed before it is used": 측정 전의 외부 데이터는 정답·학습·판정에 쓰지 않는다). `ex_dividend`를 `null`로 남기는 것만으로는 채점을 막지 못한다(#338 리뷰). `probe-dividends-310`의 결과를 읽은 뒤 작은 PR이 이 문을 연다. 수정이 배당을 빼면 문만 연다. 빼지 않으면 spec의 대안(`ex_dividend` 표시, 또는 사용자가 정하면 배당락일이 낀 창을 빼기)과 함께 연다. 어느 쪽인지는 그 결과를 보고 정한다.
+
 **정답(정답 버전 1, `answers`).**
 - c = (D+4의 종가) ÷ (D의 시가) − 1. 두 값은 `open_to_close`가 하루를 읽는 그대로 읽는다(`auctions.days_of`, #317). D의 시가는 KRX 일봉(시장 `J`)의 시가다. D+4의 종가는 받아 둔 15:30 종가 단일가 가격을 일봉의 수정주가에 얹은 것이고, 1분봉 이력(약 1년)보다 오래된 날은 일봉 종가다(애프터마켓 전이라 단일가였다고 본다). 두 값은 한 번 받은 일봉 파일의 같은 수정주가다. 나중의 수정은 두 값을 같은 배율로 바꿔 c가 그대로이고, 창 안의 분할도 수정주가가 다룬다. 원래 가격과 수정주가를 한 비율에 섞지 않는다: 단일가 가격만의 그날(일봉 전)은 끝날로 쓰지 않고 그날 일봉을 기다린다.
 
@@ -1573,7 +1575,7 @@
 - VR = 1이어도 40일인 것은 자유도를 독립 창 수(⌊날 수 ÷ 5⌋ − 1)로 두었기 때문이다.
 - VR은 이 종류의 첫 알고리즘(`cox-5d`, #310의 다음 PR)의 사전 검증에서 잰다. 그 전에는 겹침만의 이론값 VR = 5(1 + 2 × (0.8 + 0.6 + 0.4 + 0.2))로 규칙이 주는 100·200·300일이다(`open_to_close_5d.UNMEASURED_RATIO`). 이 종류에는 아직 알고리즘이 없어 이 값으로 판정하는 일은 없다.
 
-**API.** 다른 종류의 엔드포인트를 그대로 쓴다(`/v1/kinds`, `…/kinds/open_to_close_5d/latest`·`predictions`, `leaderboard?kind=open_to_close_5d`, `algorithms/{otc5-flat, otc5-climate, otc5-persist}/stats`, 스트림의 `kind_prediction`·`kind_answer`). `/v1/kinds`의 `daily`는 `sessions` 5, `answer_from` `"20:35"`, `to_title` `"다섯째 거래일 종가 단일가"`다. 예측의 `target_at`은 거래 일정으로 정한 끝날의 장 마감이다. 통계 항목의 `overlap_sessions`는 5, `independent_days`는 ⌊날 수 ÷ 5⌋다.
+**API.** 다른 종류의 엔드포인트를 그대로 쓴다(`/v1/kinds`, `…/kinds/open_to_close_5d/latest`·`predictions`, `leaderboard?kind=open_to_close_5d`, `algorithms/{otc5-flat, otc5-climate, otc5-persist}/stats`, 스트림의 `kind_prediction`·`kind_answer`). `/v1/kinds`의 `daily`는 `sessions` 5, `answer_from` `"20:35"`, `to_title` `"다섯째 거래일 종가 단일가"`, `awaiting`(돌지 않는 이유, 위 "지금은 돌지 않는다")이다. 예측의 `target_at`은 거래 일정으로 정한 끝날의 장 마감이다. 통계 항목의 `overlap_sessions`는 5, `independent_days`는 ⌊날 수 ÷ 5⌋다.
 
 ## 알고리즘
 

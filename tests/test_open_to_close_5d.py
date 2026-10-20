@@ -5,7 +5,7 @@ training that never learns a window not over by the day it is judged on."""
 from __future__ import annotations
 
 import random
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
@@ -13,7 +13,9 @@ from typing import Any
 
 import pytest
 
+from krx_quant.algorithms import Model
 from krx_quant.auctions import MINUTE_BAR
+from krx_quant.cards import Card, Meaning
 from krx_quant.clock import FakeClock
 from krx_quant.daily import (
     DAILY_RULES,
@@ -22,6 +24,7 @@ from krx_quant.daily import (
     PENDING,
     DailyInputs,
     DailyRegistrationError,
+    DailySample,
     DayPrices,
     first_review_day,
     overlap_review,
@@ -30,9 +33,10 @@ from krx_quant.daily import (
     window_end,
 )
 from krx_quant.engine import PredictionEngine
+from krx_quant.features import FeatureVector
 from krx_quant.feeds.base import KST
 from krx_quant.kind_registry import DAILY_KINDS, daily_kind_named
-from krx_quant.kinds import DIRECTION_KIND, KindScored
+from krx_quant.kinds import DIRECTION_KIND, KindForecast, KindScored
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.open_to_close import OPEN_TO_CLOSE, classify
 from krx_quant.open_to_close_5d import (
@@ -59,6 +63,8 @@ from krx_quant.stats import DayOverlap, interval_json, session_index
 
 FEE = 0.015 / 100
 SYMBOLS = ("005930", "000660")
+# The kind as it runs once the dividend probe's result lets it (#310 review, #338): its behaviour.
+RELEASED = replace(OPEN_TO_CLOSE_5D, awaiting=None)
 # 2026-10-09 (Friday) is Hangul Day: the window begun Monday the 5th ends Monday the 12th.
 HANGUL_DAY = date(2026, 10, 9)
 CALENDAR = MarketCalendar({HANGUL_DAY: False})
@@ -271,7 +277,7 @@ def engine(db: Path, clock: FakeClock, source: Source) -> PredictionEngine:
         kinds=(DIRECTION_KIND,),
         kind_algorithms=(),
         daily=source,
-        daily_kinds=(OPEN_TO_CLOSE_5D,),
+        daily_kinds=(RELEASED,),
     )
 
 
@@ -382,26 +388,20 @@ class Recording:
     kind = OPEN_TO_CLOSE_5D.name
     features: tuple[str, ...] = ("oc_1", "climate_up")
     training_days = 400
-    param_meanings: dict[str, Any] = {}
-    card = None
+    param_meanings: Mapping[str, Meaning] = {}
+    card = Card("Test", "test", "test", ("oc_1",), "test", "test", "test")
 
     def __init__(self) -> None:
-        self.fits: list[list[Any]] = []
+        self.fits: list[list[DailySample]] = []
 
-    def default_model(self) -> Any:
-        from krx_quant.algorithms import Model
-
+    def default_model(self) -> Model:
         return Model("recording-default", {}, target_version=1)
 
-    def fit(self, samples: Any) -> Any:
-        from krx_quant.algorithms import Model
-
+    def fit(self, samples: Sequence[DailySample]) -> Model:
         self.fits.append(list(samples))
         return Model(f"recording-{len(self.fits)}", {}, target_version=1)
 
-    def predict(self, features: Any, model: Any) -> Any:
-        from krx_quant.kinds import KindForecast
-
+    def predict(self, features: FeatureVector, model: Model) -> KindForecast:
         return KindForecast((1 / 3, 1 / 3, 1 / 3))
 
 
@@ -426,11 +426,11 @@ def test_training_never_learns_a_window_not_over_by_the_day_it_is_judged_on(tmp_
     live = LiveFeatures(OPEN_TO_CLOSE_5D, data, state, calendar, MADE, FEE)
     for s in [x for x in found if x.day == last]:
         history = [d for d in files.days(s.symbol) if d.day < last]
-        got = live(Recording(), s.symbol, last, history, OPEN_TO_CLOSE_5D.band_after(history, calendar))  # type: ignore[arg-type]
+        got = live(Recording(), s.symbol, last, history, OPEN_TO_CLOSE_5D.band_after(history, calendar))
         assert got.as_dict() == pytest.approx(s.features.as_dict(), nan_ok=True)
     # The walk-forward's folds: every sample fitted on ended before the fold's first day.
     algorithm = Recording()
-    run = walk_forward(algorithm, OPEN_TO_CLOSE_5D, files, MADE, FEE, calendar=calendar, last=last)  # type: ignore[arg-type]
+    run = walk_forward(algorithm, OPEN_TO_CLOSE_5D, files, MADE, FEE, calendar=calendar, last=last)
     assert run.folds == len(algorithm.fits)
     for fold, fitted in zip(range(WALK_MIN_TRAIN, len(by_day), WALK_REFIT), algorithm.fits, strict=True):
         first = by_day[fold]
@@ -441,8 +441,71 @@ def test_training_never_learns_a_window_not_over_by_the_day_it_is_judged_on(tmp_
     # The night's fit: the windows ended by the night; its recent look, those before its 60 days.
     night = by_day[-1]
     nightly = Recording()
-    DailyTrainer(files, MADE, FEE, calendar).train(nightly, OPEN_TO_CLOSE_5D, night)  # type: ignore[arg-type]
+    DailyTrainer(files, MADE, FEE, calendar).train(nightly, RELEASED, night)
     full, recent = nightly.fits
     assert all(s.ends is not None and s.ends <= night for s in full)
     cut = sorted({s.day for s in full if s.label is not None})[-60]
     assert all(s.ends is not None and s.ends < cut for s in recent)
+
+
+async def test_the_kind_is_listed_but_not_run_until_the_dividend_probe_s_result(tmp_path: Path) -> None:
+    """#310 review (#338): its answers read KIS's adjusted candles across sessions, and whether they
+    take cash dividends out waits for ``probe-dividends-310``. Until then the kind is listed with the
+    reason, and nothing of it is predicted, answered, trained or pre-validated."""
+    from krx_quant.daily_features import DailyFiles
+    from krx_quant.daily_training import DailyTrainer, prevalidate_daily
+    from krx_quant.open_to_close_5d import AWAITING
+    from krx_quant.scheduled import Facts, Night, daily_prevalidation_jobs
+    from tests.daily_doubles import made_history
+    from tests.test_daily_prevalidation import settings as walk_settings
+
+    assert not OPEN_TO_CLOSE_5D.runs and OPEN_TO_CLOSE_5D.awaiting == AWAITING and OPEN_TO_CLOSE.runs
+    assert OPEN_TO_CLOSE_5D.as_dict([])["daily"]["awaiting"] == AWAITING
+    pasts = {s: history(THURSDAY, 400, seed=i) for i, s in enumerate(SYMBOLS)}
+    source = Source(pasts)
+    clock = FakeClock(at(MONDAY, "07:20"))
+    algorithm = Recording()
+    e = PredictionEngine(
+        PredictionStore(tmp_path / "e.sqlite3"),
+        CALENDAR,
+        SYMBOLS,
+        FEE,
+        clock,
+        algorithms=(),
+        kinds=(DIRECTION_KIND,),
+        kind_algorithms=(),
+        daily=source,
+        daily_algorithms=[algorithm],
+        daily_features=lambda a, s, d, p, b: FeatureVector(dict.fromkeys(a.features), a.features),
+        daily_feature_names={"oc_1", "climate_up"},
+    )
+    assert OPEN_TO_CLOSE_5D in e.daily_kinds, "listed: /v1/kinds shows it, with the reason"
+    for day in (MONDAY, date(2026, 10, 13), date(2026, 10, 14), date(2026, 10, 15), date(2026, 10, 16)):
+        await replay_into(e, clock, [], until=at(day, "08:51"))
+        for s in SYMBOLS:
+            source.stored[s].append(next_day(source.stored[s], day))
+    await replay_into(e, clock, [], until=at(date(2026, 10, 16), "21:00"))
+    assert e.store.kind_recent(OPEN_TO_CLOSE.name, OPEN_TO_CLOSE.answer_version, "005930", 10), (
+        "the other runs"
+    )
+    assert e.store.kind_recent(OPEN_TO_CLOSE_5D.name, 1, "005930", 10) == [], "no prediction"
+    assert e.store.kind_answers(OPEN_TO_CLOSE_5D.name) == [], "no answer"
+    assert algorithm.name not in e.store.statuses() and algorithm.name in e.waiting(), "not run, not enrolled"
+    # No training rows, no pre-validation, no job for it.
+    data, state = tmp_path / "data", tmp_path / "state"
+    made_history(data, state, date(2026, 10, 16), 300)
+    report, model = DailyTrainer(DailyFiles(data, state), SYMBOLS, FEE).train(
+        algorithm,
+        OPEN_TO_CLOSE_5D,
+        date(2026, 10, 16),
+    )
+    assert model is None and algorithm.fits == [] and "waits for" in report["reason"]
+    with pytest.raises(ValueError, match="waits for"):
+        prevalidate_daily(
+            walk_settings(tmp_path / "walk", 0.0, days=300),
+            algorithm.name,
+            algorithms=[algorithm],
+        )
+    [job] = daily_prevalidation_jobs([algorithm.name], {}, {algorithm.name: OPEN_TO_CLOSE_5D.name})
+    night = Night(date(2026, 10, 16), True, "c", None, {}, Facts(waiting=(algorithm.name,)))
+    assert not job.due(night)

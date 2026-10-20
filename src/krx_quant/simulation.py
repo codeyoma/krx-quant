@@ -161,7 +161,7 @@ def simulate_daily(
     with _held(settings.state_dir, DAILY):
         store = PredictionStore(settings.state_dir / DB_NAME)
         try:
-            enrolled = _enroll(store, settings, algorithms, now)
+            enrolled = _enroll(store, settings, algorithms, now, kinds)
             waiting = set(store.to_simulate([a.name for a in algorithms]))
             files = DailyFiles(settings.data_dir, settings.state_dir)
             calendar = calendar_store(settings).calendar
@@ -196,6 +196,8 @@ def _waits(
     """Why ``algorithm``'s probation is not simulated tonight (#264), None when it is: its
     pre-validation does not stand for what it runs (the engine runs it once one does), or its
     kind's answers of the latest days are not all in (``DailyKind.pending``)."""
+    if not kind.runs:
+        return f"its kind waits for {kind.awaiting}"  # #310
     if not admitted(algorithm):
         return "its pre-validation does not stand for the code, answer version and inputs it runs"
     if kind.pending is None:
@@ -204,13 +206,19 @@ def _waits(
 
 
 def _enroll(
-    store: PredictionStore, settings: Settings, algorithms: Sequence[DailyAlgorithm], now: datetime
+    store: PredictionStore,
+    settings: Settings,
+    algorithms: Sequence[DailyAlgorithm],
+    now: datetime,
+    kinds: Sequence[DailyKind] = DAILY_KINDS,
 ) -> list[str]:
     """Put on probation the algorithms with no status that the engine's gate admits (its
-    ``_admit``): their pre-validation passed with the code and inputs they run."""
+    ``_admit``): their pre-validation passed with the code and inputs they run, and their kind
+    runs (#310, ``DailyKind.awaiting``)."""
     known = store.statuses()
     admitted = admits(settings.state_dir, settings.target_version)
-    enrolled = [a.name for a in algorithms if a.name not in known and admitted(a)]
+    waiting = {k.name for k in kinds if not k.runs}
+    enrolled = [a.name for a in algorithms if a.name not in known and admitted(a) and a.kind not in waiting]
     for name in enrolled:
         store.add_status(name, now, None, Status.PROBATION, REGISTERED)
         log.info("%s: enrolled on probation (its pre-validation passed)", name)

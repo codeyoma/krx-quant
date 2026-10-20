@@ -522,10 +522,12 @@ class PredictionEngine:
         self._reviewed_through = store.last_run("review") or self._last_tick
         self._daily: DailyRunner | None = None
         self._daily_events: Callable[[str, dict[str, Any]], None] | None = None
-        if self.daily_kinds:
+        # A daily kind awaiting a probe's result (#310, ``DailyKind.awaiting``) is listed, not run.
+        running_kinds = [k for k in self.daily_kinds if k.runs]
+        if running_kinds:
             self._daily_events = getattr(daily_features, "on_event", None)
             self._daily = DailyRunner(
-                self.daily_kinds,
+                running_kinds,
                 store,
                 calendar,
                 symbols,
@@ -584,12 +586,16 @@ class PredictionEngine:
         # the answer version and the inputs it runs now (#264): its walk-forward takes a minute,
         # so a change (``open_to_close``'s answer version 2) has it judged again first, that
         # night. One judged live already (active, on the bench) runs on, as any algorithm does.
+        # One of a kind not run yet (#310, ``DailyKind.awaiting``) is not run either.
         daily_admitted = [
             a
             for a in self.daily_registered
-            if (a.name in known and known[a.name].status is not Status.PROBATION)
-            or self._admits is None
-            or self._admits(a)
+            if self._kind_runs(a)
+            and (
+                (a.name in known and known[a.name].status is not Status.PROBATION)
+                or self._admits is None
+                or self._admits(a)
+            )
         ]
         if (
             tuple(admitted) == self.algorithms
@@ -605,6 +611,10 @@ class PredictionEngine:
         self.kind_algorithms = tuple(kind_admitted)
         self.daily_algorithms = tuple(daily_admitted)
         self._feature_names = sorted({f for a in running for f in a.features})
+
+    def _kind_runs(self, algorithm: DailyAlgorithm) -> bool:
+        kind = self.daily_kind_named(algorithm.kind)
+        return kind is not None and kind.runs
 
     def waiting(self) -> list[str]:
         """The registered algorithms not run yet: their pre-validation has not passed."""

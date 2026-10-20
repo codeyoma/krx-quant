@@ -428,6 +428,16 @@ class DailyKind(Kind):
     answer_from: time = ANSWER_FROM
     # Why an answer that never came is given up, ``ANSWER_GIVE_UP`` after its end day's look.
     gives_up: str = NO_CLOSE
+    # Why the kind is not run yet, None once it is (#310): its answers would read data whose meaning
+    # a probe has not settled (CODING_STANDARDS.md "External data is probed before it is used").
+    # While set, the engine neither predicts nor answers it, and its algorithms are neither run,
+    # trained, pre-validated nor simulated (``runs``); ``GET /v1/kinds`` lists it with the reason.
+    awaiting: str | None = None
+
+    @property
+    def runs(self) -> bool:
+        """Whether the kind is run: not ``awaiting`` a probe's result (#310)."""
+        return self.awaiting is None
 
     def baseline_cards(self) -> list[tuple[str, Card]]:
         return [(b.name, b.card) for b in self.daily_baselines]
@@ -492,6 +502,7 @@ class DailyKind(Kind):
             "probation_days": list(self.review_rules.probation_days),
             "bench_days": list(self.review_rules.bench_days),
             "recent_days": self.recent_days,
+            "awaiting": self.awaiting,  # #310
         }
         return out
 

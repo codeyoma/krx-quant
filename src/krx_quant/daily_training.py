@@ -110,7 +110,17 @@ class DailyTrainer:
     def train(
         self, algorithm: DailyAlgorithm, kind: DailyKind, night: date
     ) -> tuple[dict[str, Any], Model | None]:
-        """The night's report of ``algorithm`` and its model (None if it learned nothing)."""
+        """The night's report of ``algorithm`` and its model (None if it learned nothing, and for a
+        kind awaiting a probe's result, #310: no sample is made of it)."""
+        if not kind.runs:
+            return {
+                "algorithm": algorithm.name,
+                "kind": kind.name,
+                "cadence": "daily",
+                "day": night.isoformat(),
+                "promoted": False,
+                "reason": f"not trained: its kind waits for {kind.awaiting}",
+            }, None
         found = samples(
             kind,
             self.files,
@@ -417,6 +427,8 @@ def prevalidate_daily(
         raise ValueError(
             f"unknown daily algorithm {name!r}; registered: {', '.join(a.name for a in algorithms)}"
         )
+    if not kind.runs:  # #310: its answers would read data a probe has not settled
+        raise ValueError(f"{name}: its kind {kind.name} waits for {kind.awaiting}; not pre-validated")
     with _held(settings.state_dir, name):
         now = now or datetime.now(KST)
         files = DailyFiles(settings.data_dir, settings.state_dir)

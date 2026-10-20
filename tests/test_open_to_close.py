@@ -81,6 +81,7 @@ def test_open_to_close_is_registered_as_a_daily_kind_apart_from_the_bar_close_ki
         "probation_days": [20, 40, 60],
         "bench_days": [20, 40, 60],
         "recent_days": 20,
+        "awaiting": None,  # #310
     }
 
 

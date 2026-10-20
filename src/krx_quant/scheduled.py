@@ -54,7 +54,7 @@ from krx_quant.daily_features import pending_inputs
 from krx_quant.engine import PredictionEngine
 from krx_quant.feeds.base import KST
 from krx_quant.github import GitHub, GitHubError, comment_body
-from krx_quant.kind_registry import DAILY_KINDS
+from krx_quant.kind_registry import DAILY_KINDS, daily_kind_named
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.night_probe import evening, subscribed_nights
 from krx_quant.notify import Alerts
@@ -1212,10 +1212,14 @@ DAILY_PREVALIDATION_TIMEOUT = timedelta(hours=1)
 def _daily_prevalidation_due(
     algorithm: str, features: Sequence[str] = (), kind: str | None = None
 ) -> Callable[[Night], bool]:
+    of_kind = daily_kind_named(kind) if kind is not None else None
+
     def due(night: Night) -> bool:
         facts = night.facts
         if algorithm not in facts.waiting:
             return False
+        if of_kind is not None and not of_kind.runs:
+            return False  # its kind awaits a probe's result (#310): it is not pre-validated
         if set(features) & set(facts.pending_inputs):
             return False  # its data is not all in yet (#297): it would be judged on the old
         if kind in facts.pending_answers:

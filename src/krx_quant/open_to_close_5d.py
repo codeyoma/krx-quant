@@ -380,6 +380,15 @@ def open_to_close_5d_stats(
     }
 
 
+# Not run until the dividend probe's result is in (#310 review, #338): its answers read KIS's
+# adjusted candles across sessions, and whether that adjustment takes cash dividends out is not
+# known (CODING_STANDARDS.md "External data is probed before it is used"). A PR made after reading
+# the probe's comment on #310 lifts it, alone (adjusted) or with the spec's fallback.
+AWAITING = (
+    "the dividend probe (#310, probe-dividends-310): "
+    "whether KIS's adjusted day candles take cash dividends out"
+)
+
 # Its review days until the variance ratio is measured (#310): the rule's at five sessions' overlap.
 _REVIEW = overlap_review(UNMEASURED_RATIO, SESSIONS)
 
@@ -404,4 +413,5 @@ OPEN_TO_CLOSE_5D = DailyKind(
     sessions=SESSIONS,
     answer_from=ANSWER_FROM,
     gives_up=NO_CANDLE,
+    awaiting=AWAITING,
 )
