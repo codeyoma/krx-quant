@@ -257,7 +257,7 @@ async def test_the_briefing_shows_cox_s_inputs_as_it_predicted_from_them(tmp_pat
 
     # The pre-market price the briefing shows is the one Cox read (in sigmas of the day's band).
     history = history_before(StoredDays(data).days("005930"), MONDAY)
-    band = OPEN_TO_CLOSE.band(history)  # type: ignore[misc]
+    band = OPEN_TO_CLOSE.band_after(history)
     assert band is not None
     gap = (
         math.log(body["symbols"][0]["premarket"]["price"] / body["symbols"][0]["previous_close"]) / band.sigma

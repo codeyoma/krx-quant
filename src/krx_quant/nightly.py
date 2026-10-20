@@ -318,7 +318,8 @@ def train_night(
         )
     if daily is not None:  # the daily kinds' algorithms, on this server's files (#264)
         for d in daily_algorithms:
-            if (daily_kind := daily_kind_named(d.kind)) is not None:
+            # Not one of a kind awaiting a probe's result (#310, ``DailyKind.awaiting``).
+            if (daily_kind := daily_kind_named(d.kind)) is not None and daily_kind.runs:
                 steps.append(
                     (
                         d.name,

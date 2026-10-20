@@ -54,7 +54,7 @@ from krx_quant.daily_features import pending_inputs
 from krx_quant.engine import PredictionEngine
 from krx_quant.feeds.base import KST
 from krx_quant.github import GitHub, GitHubError, comment_body
-from krx_quant.kind_registry import DAILY_KINDS
+from krx_quant.kind_registry import DAILY_KINDS, daily_kind_named
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.night_probe import evening, subscribed_nights
 from krx_quant.notify import Alerts
@@ -1005,6 +1005,35 @@ NAV_PROBE = Job(
     ),
 )
 
+# Cash dividends and the adjusted prices (#310): open_to_close_5d reads its window's two ends from
+# KIS's adjusted KRX day candles; whether that adjustment takes cash dividends out, and whether
+# KIS's rows flag the ex-dividend days, only KIS's answers show. Once, on the first night after the
+# deploy that brings it (trading or not: KIS gives the past days): ``probe-dividends`` asks each
+# symbol's ten years of KRX day candles adjusted and as traded (about 150 calls spaced half a
+# second, a minute or two) and counts where their ratio steps, by size and month, with the steps'
+# dates and the rows' ex-date flags. It prints counts, dates and flag values, no price, so it can go
+# on the public issue. The half hour is a bound. Before the pre-validations.
+DIVIDEND_PROBE_ISSUE = 310
+
+DIVIDEND_PROBE = Job(
+    name="probe-dividends-310",
+    due=_first_night,
+    command=("probe-dividends",),
+    timeout=timedelta(minutes=30),
+    targets=(
+        Target(
+            DIVIDEND_PROBE_ISSUE,
+            note=(
+                "에이전트가 이 출력으로 KIS 수정주가가 현금배당을 빼는지(배당락일마다 작은 계단이 있는지), "
+                "KIS 일봉의 `flng_cls_code`가 배당락일을 알려 주는지 보고 `docs/kis-feeds.md`와 "
+                '`docs/engine-api.md` "5거래일 시가→종가"의 배당에 남긴다. 빼지 않고 배당락 표시가 있으면 '
+                "수집이 그 값을 KRX 일봉에 두고 정답 경로의 `ex_dividend`를 채우는 PR을 연다. 출력에는 "
+                "가격이 없다(개수, 날짜, 필드 값, 계단 크기의 구간만)."
+            ),
+        ),
+    ),
+)
+
 # The night futures (#264): the collector records the KOSPI200 night session's trades and book
 # (18:00–06:00) from the deploy that brings it; what only the server shows is whether KIS
 # streams them for this app key, under the contract code asked for, in the layout of KIS's
@@ -1183,10 +1212,14 @@ DAILY_PREVALIDATION_TIMEOUT = timedelta(hours=1)
 def _daily_prevalidation_due(
     algorithm: str, features: Sequence[str] = (), kind: str | None = None
 ) -> Callable[[Night], bool]:
+    of_kind = daily_kind_named(kind) if kind is not None else None
+
     def due(night: Night) -> bool:
         facts = night.facts
         if algorithm not in facts.waiting:
             return False
+        if of_kind is not None and not of_kind.runs:
+            return False  # its kind awaits a probe's result (#310): it is not pre-validated
         if set(features) & set(facts.pending_inputs):
             return False  # its data is not all in yet (#297): it would be judged on the old
         if kind in facts.pending_answers:
@@ -1370,6 +1403,7 @@ JOBS: tuple[Job, ...] = (
     NET_BUYS_PROBE,
     CLOSE_PROBE,
     NAV_PROBE,
+    DIVIDEND_PROBE,
     *daily_prevalidation_jobs(
         [a.name for a in DAILY_ALGORITHMS],
         {a.name: a.features for a in DAILY_ALGORITHMS},

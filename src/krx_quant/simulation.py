@@ -161,7 +161,7 @@ def simulate_daily(
     with _held(settings.state_dir, DAILY):
         store = PredictionStore(settings.state_dir / DB_NAME)
         try:
-            enrolled = _enroll(store, settings, algorithms, now)
+            enrolled = _enroll(store, settings, algorithms, now, kinds)
             waiting = set(store.to_simulate([a.name for a in algorithms]))
             files = DailyFiles(settings.data_dir, settings.state_dir)
             calendar = calendar_store(settings).calendar
@@ -196,6 +196,8 @@ def _waits(
     """Why ``algorithm``'s probation is not simulated tonight (#264), None when it is: its
     pre-validation does not stand for what it runs (the engine runs it once one does), or its
     kind's answers of the latest days are not all in (``DailyKind.pending``)."""
+    if not kind.runs:
+        return f"its kind waits for {kind.awaiting}"  # #310
     if not admitted(algorithm):
         return "its pre-validation does not stand for the code, answer version and inputs it runs"
     if kind.pending is None:
@@ -204,13 +206,19 @@ def _waits(
 
 
 def _enroll(
-    store: PredictionStore, settings: Settings, algorithms: Sequence[DailyAlgorithm], now: datetime
+    store: PredictionStore,
+    settings: Settings,
+    algorithms: Sequence[DailyAlgorithm],
+    now: datetime,
+    kinds: Sequence[DailyKind] = DAILY_KINDS,
 ) -> list[str]:
     """Put on probation the algorithms with no status that the engine's gate admits (its
-    ``_admit``): their pre-validation passed with the code and inputs they run."""
+    ``_admit``): their pre-validation passed with the code and inputs they run, and their kind
+    runs (#310, ``DailyKind.awaiting``)."""
     known = store.statuses()
     admitted = admits(settings.state_dir, settings.target_version)
-    enrolled = [a.name for a in algorithms if a.name not in known and admitted(a)]
+    waiting = {k.name for k in kinds if not k.runs}
+    enrolled = [a.name for a in algorithms if a.name not in known and admitted(a) and a.kind not in waiting]
     for name in enrolled:
         store.add_status(name, now, None, Status.PROBATION, REGISTERED)
         log.info("%s: enrolled on probation (its pre-validation passed)", name)
@@ -235,7 +243,7 @@ def _daily(
         {
             d.day
             for s, days in stored.items()
-            for d, a in zip(days, kind.answers(days, settings.fee_rate), strict=True)
+            for d, a in zip(days, kind.answers_of(days, settings.fee_rate, calendar), strict=True)
             if a.label
         }
     )
@@ -265,8 +273,12 @@ def _daily(
     model: Model | None = None
     for day in days:
         night = nights.get(day)
+        # The windows ended by the night before (#310: one begun in the H − 1 days before it ends
+        # after it), as the night's training takes them.
         training = [
-            s for s in found if night is not None and training_first(algorithm, night) <= s.day <= night
+            s
+            for s in found
+            if night is not None and training_first(algorithm, night) <= s.day and s.ended_by(night)
         ]
         try:
             model = algorithm.fit(training)
@@ -297,7 +309,7 @@ def _daily(
                 )
             )
     for name, scored in baseline_forecasts(
-        kind, files, symbols, settings.fee_rate, days[0], days[-1]
+        kind, files, symbols, settings.fee_rate, days[0], days[-1], calendar=calendar
     ).items():
         for r in scored:
             day = r.bar_close.astimezone(KST).date()
@@ -325,10 +337,12 @@ def _daily(
 
 
 def _answer(store: PredictionStore, sample: DailySample) -> tuple[Answer | None, bool]:
-    """A day's answer as the engine writes it: the day's VIs of the symbol in its path
-    (``daily._with_vis``), special when a circuit breaker or a sidecar touched the day."""
+    """A day's answer as the engine writes it: the VIs of the symbol over its window's sessions in
+    its path (``daily._with_vis``), special when a circuit breaker or a sidecar touched one of them
+    (the day alone for a window of one session; #310)."""
     start = datetime.combine(sample.day, time(), KST)
-    windows = store.special_windows(None, start, start + timedelta(days=1))
+    until = datetime.combine(sample.ends or sample.day, time(), KST) + timedelta(days=1)
+    windows = store.special_windows(None, start, until)
     special = any(w["symbol"] is None for w in windows)
     if sample.answer is None:
         return None, special

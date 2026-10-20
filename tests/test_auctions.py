@@ -157,7 +157,7 @@ def test_a_split_never_sets_a_raw_close_against_an_adjusted_open() -> None:
     assert (got[days[1]].close, got[days[1]].source) == (candles[1]["close"], DAY_CANDLE)
     assert got[days[3]].close / got[days[2]].close == pytest.approx(raw[days[3]][1] / raw[days[2]][1])
     assert got[days[3]].open / got[days[2]].close == pytest.approx(raw[days[3]][0] / raw[days[2]][1])
-    answers = OPEN_TO_CLOSE.answers(list(got.values()), FEE)  # type: ignore[misc]
+    answers = OPEN_TO_CLOSE.answers_of(list(got.values()), FEE)
     assert [a.path["change"] for a in answers] == pytest.approx([d.change for d in got.values()])
 
 
@@ -304,7 +304,7 @@ def test_live_and_training_read_the_same_days_and_label_them_by_the_closing_auct
     for symbol in SYMBOLS:
         days = live.days(symbol)
         assert days == files.days(symbol)
-        answers = OPEN_TO_CLOSE.answers(days, FEE)  # type: ignore[misc]
+        answers = OPEN_TO_CLOSE.answers_of(days, FEE)
         for day, answer in zip(days, answers, strict=True):
             if (symbol, day.day) in by_day:
                 trained = by_day[(symbol, day.day)].answer

@@ -31,6 +31,7 @@ from krx_quant.daily_check import daily_check
 from krx_quant.daily_training import daily_algorithm, fit_daily, prevalidate_daily
 from krx_quant.demo import demo_app, demo_morning
 from krx_quant.diagnose import DEFAULT_DAYS, diagnose
+from krx_quant.dividend_probe import probe_dividends
 from krx_quant.doctor import doctor, doctor_settings
 from krx_quant.expected_open_probe import DAYS as EXPECTED_OPEN_DAYS
 from krx_quant.expected_open_probe import probe_expected_open
@@ -150,6 +151,11 @@ async def _probe_net_buys() -> int:
 
 async def _probe_close() -> int:
     calls, failed = await probe_close(Settings.from_env(), datetime.now(KST).date())
+    return 1 if failed == calls else 0  # nothing answered
+
+
+async def _probe_dividends() -> int:
+    calls, failed = await probe_dividends(Settings.from_env(), datetime.now(KST).date())
     return 1 if failed == calls else 0  # nothing answered
 
 
@@ -562,6 +568,11 @@ def main(argv: list[str] | None = None) -> int:
         " auction (#264), read-only; prints no market value",
     )
     sub.add_parser(
+        "probe-dividends",
+        help="compare KIS's adjusted and as-traded KRX day candles and count their ex-date flags (#310),"
+        " read-only; prints no market value",
+    )
+    sub.add_parser(
         "probe-nav",
         help="ask where KIS gives the single-stock leveraged and inverse ETFs' net assets (#305),"
         " read-only; prints no market value",
@@ -746,6 +757,8 @@ def main(argv: list[str] | None = None) -> int:
             return asyncio.run(_probe_net_buys())
         elif args.command == "probe-close":
             return asyncio.run(_probe_close())
+        elif args.command == "probe-dividends":
+            return asyncio.run(_probe_dividends())
         elif args.command == "probe-nav":
             return asyncio.run(_probe_nav())
         elif args.command == "probe-night":

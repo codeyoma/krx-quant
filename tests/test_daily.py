@@ -173,7 +173,7 @@ async def test_a_day_is_predicted_at_0850_and_answered_once_its_closing_auction_
     assert {r["bar_close"] for r in made} == {"2026-10-12T08:50:00+09:00"}
     assert {r["status"] for r in made} == {"ok"}
     for r in made:
-        expected = OPEN_TO_CLOSE.band(pasts[r["symbol"]])  # type: ignore[misc]
+        expected = OPEN_TO_CLOSE.band_after(pasts[r["symbol"]])
         assert expected is not None and r["band"] == pytest.approx(expected.value)
         assert (r["flat_ticks"], r["width_ticks"], r["anchor"], r["tick"]) == (None, None, None, None)
     persisted = {r["symbol"]: r["output"] for r in made if r["algorithm"] == PERSIST}
