@@ -447,6 +447,9 @@ def test_a_night_cut_short_resumes_after_the_algorithms_it_finished(store_root: 
     assert len(learner.fitted_on) == 1
 
 
+# Every registered algorithm trained on eight days: about 10 s on a laptop, near the 30 s default
+# (``pyproject.toml``) on a loaded CI runner (#327).
+@pytest.mark.timeout(120)
 def test_the_train_command_trains_every_registered_algorithm_from_the_store(
     store_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -652,6 +655,10 @@ def test_a_day_with_one_symbols_bars_and_anothers_trades_is_not_trained_on(tmp_p
             algorithms=[FrequencyAlgorithm("learner", "velocity")],
             now=lambda: FINISHED,
             day=day,
+            # The stand-in only: the kinds' and the daily kind's real algorithms would train beside
+            # it, two thirds of the test's time (#327).
+            kind_algorithms=(),
+            daily_algorithms=(),
         )
 
     with pytest.raises(FileNotFoundError, match="bars missing: 000660; trades missing: 005930"):

@@ -54,6 +54,7 @@ from tests.replay_events import CALENDAR, DAY, FEE, SYMBOL, at, run, vi
 from tests.test_nightly import DAYS as NIGHT_DAYS
 from tests.test_nightly import FINISHED, NIGHT, archive_bars, archive_events, read
 from tests.test_prevalidation import AFTER, ALPHA
+from tests.test_prevalidation import DAYS as PREVALIDATION_DAYS
 from tests.test_prevalidation import report as prevalidation_report
 from tests.test_prevalidation import settings as prevalidation_settings
 from tests.test_replay import busy_morning
@@ -554,10 +555,12 @@ def test_the_night_trains_it_on_recorded_and_bar_days_and_counts_both(tmp_path: 
 async def test_it_is_prevalidated_on_the_range_s_answers_against_the_range_s_baselines(
     tmp_path: Path,
 ) -> None:
-    """Input: ten recorded days of a swinging market. Output: Mandelbrot is replayed on them,
+    """Input: three recorded days of a swinging market. Output: Mandelbrot is replayed on them,
     retrained before each day on the days before it; its report names the range, its lifts
-    are over the range's two baselines and its own statistics are the range's."""
-    s = prevalidation_settings(tmp_path)
+    are over the range's two baselines and its own statistics are the range's. Three days, not
+    the ten that could pass: nothing here waits for a pass, and each day is a whole session
+    replayed (#327)."""
+    s = prevalidation_settings(tmp_path, PREVALIDATION_DAYS[:3])
 
     await prevalidate(s, NAME, algorithms=[ALPHA], now=AFTER)
 

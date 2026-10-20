@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextvars
 import time
+import weakref
 from collections.abc import Mapping, Sequence
 
 from krx_quant.algorithms import Card, Meaning, Model, Sample
@@ -11,6 +14,48 @@ from krx_quant.features import SERIES_FEATURES, FeatureVector, Value
 from krx_quant.pricing import Direction
 
 CAUTIOUS = Forecast(0.2, 0.6, 0.2, 0.0)
+
+
+class _Tally:
+    """The seconds the stand-ins declared while one run was timed."""
+
+    def __init__(self) -> None:
+        self.seconds = 0.0
+
+
+_TALLY: contextvars.ContextVar[_Tally] = contextvars.ContextVar("stand_in_tally")
+
+
+class FixedCosts:
+    """The engine's timer (``krx_quant.engine.timer``) in a CPU budget test: a run takes the
+    seconds its stand-ins declare (``spend``), never what a loaded machine adds to them (#327).
+
+    The engine times each algorithm's run in an asyncio task of its own, and the run's worker
+    thread works in a copy of that task's context. So the first reading in a task opens the
+    task's tally, and a stand-in that spends adds to the tally of the run that called it. The
+    time limits still count real time: a stand-in over its limit sleeps through it.
+    """
+
+    def __init__(self) -> None:
+        self._tallies: weakref.WeakKeyDictionary[asyncio.Task[object], _Tally] = weakref.WeakKeyDictionary()
+
+    def perf_counter(self) -> float:
+        task = asyncio.current_task()
+        if task is None:
+            raise RuntimeError("the engine times its runs in asyncio tasks")
+        tally = self._tallies.get(task)
+        if tally is None:
+            tally = self._tallies[task] = _Tally()
+            _TALLY.set(tally)
+        return tally.seconds
+
+
+def spend(seconds: float) -> None:
+    """Sleep ``seconds``, and count them to the run that called, when ``FixedCosts`` times it."""
+    time.sleep(seconds)
+    tally = _TALLY.get(None)
+    if tally is not None:
+        tally.seconds += seconds
 
 
 def stand_in_card(name: str, logic: str, unique: tuple[str, ...], training: str) -> Card:
@@ -25,7 +70,7 @@ def stand_in_meanings(*params: str) -> Mapping[str, Meaning]:
 
 class FixedAlgorithm:
     """Predicts ``forecast``, after reading ``reads`` (default: what it declared) and
-    sleeping ``seconds``.
+    spending ``seconds`` (``spend``).
     """
 
     training_days = 20
@@ -63,7 +108,7 @@ class FixedAlgorithm:
             }
         )
         if self._seconds:
-            time.sleep(self._seconds)
+            spend(self._seconds)
         return self._forecast
 
 

@@ -292,6 +292,9 @@ async def test_the_demo_has_a_cost_map(tmp_path: Path) -> None:
     assert len(regimes["rows"]) == 12, "three symbols, four periods"
 
 
+# Two demos built: about 9 s on a laptop, near the 30 s default (``pyproject.toml``) on a loaded
+# CI runner (#327).
+@pytest.mark.timeout(120)
 async def test_the_demo_is_the_same_every_time(tmp_path: Path) -> None:
     first, second = await demo_app(tmp_path / "a.sqlite3"), await demo_app(tmp_path / "b.sqlite3")
 
@@ -310,6 +313,9 @@ async def test_the_demo_is_the_same_every_time(tmp_path: Path) -> None:
             assert await get_json(a, path) == await get_json(b, path)
 
 
+# Two demos built, one of them paced: about 10 s on a laptop, near the 30 s default
+# (``pyproject.toml``) on a loaded CI runner (#327).
+@pytest.mark.timeout(120)
 async def test_a_paced_demo_streams_its_last_half_hour_as_it_goes(tmp_path: Path) -> None:
     paced = await demo_app(tmp_path / "paced.sqlite3", pace=0.05)
 

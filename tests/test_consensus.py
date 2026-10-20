@@ -95,6 +95,7 @@ async def test_the_fast_consensus_takes_the_active_finished_soon_and_the_final_t
         busy_morning(),
         until=at("09:06:00"),
         algorithms=[QUICK, SLOW, NEW, *others],
+        kind_algorithms=(),  # the stand-ins only: the kinds' real ones would hold the GIL they need (#327)
         consensus_timing=TIMING,
     )
 
@@ -133,6 +134,7 @@ async def test_a_consensus_counts_its_members_directions(tmp_path: Path) -> None
         busy_morning(),
         until=at("09:06:00"),
         algorithms=[QUICK, SLOW, NEW, steady, tied],
+        kind_algorithms=(),  # the stand-ins only: the kinds' real ones would hold the GIL they need (#327)
         consensus_timing=TIMING,
     )
 
@@ -346,7 +348,14 @@ async def test_the_final_consensus_does_not_wait_for_algorithms_outside_it(tmp_p
     late = FixedAlgorithm("late", features=("acceleration",), unique=("acceleration",), seconds=0.4)
     put_statuses(db, {"quick": Status.ACTIVE, "late": Status.PROBATION})
 
-    await run(db, busy_morning(), until=at("09:01:30"), algorithms=[QUICK, late], consensus_timing=TIMING)
+    await run(
+        db,
+        busy_morning(),
+        until=at("09:01:30"),
+        algorithms=[QUICK, late],
+        kind_algorithms=(),  # the stand-ins only: the kinds' real ones would hold the GIL they need (#327)
+        consensus_timing=TIMING,
+    )
 
     with sqlite3.connect(db) as conn:
         order = [

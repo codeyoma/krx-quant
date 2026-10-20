@@ -47,6 +47,7 @@ from tests.algorithm_doubles import stand_in_card, stand_in_meanings
 from tests.api_schema import check
 from tests.replay_events import CALENDAR, DAY, FEE, SYMBOL, api, at, get_json, run, steady_book
 from tests.test_prevalidation import AFTER, ALPHA
+from tests.test_prevalidation import DAYS as PREVALIDATION_DAYS
 from tests.test_prevalidation import report as prevalidation_report
 from tests.test_prevalidation import settings as prevalidation_settings
 from tests.test_replay import busy_morning
@@ -677,11 +678,12 @@ class RangeShares:
 async def test_a_range_algorithm_is_prevalidated_against_a_climate_refitted_before_each_day(
     tmp_path: Path,
 ) -> None:
-    """Input: ten recorded days of a swinging market, and a range stand-in. Output: its report
+    """Input: three recorded days of a swinging market, and a range stand-in. Output: its report
     names the range and its answer version, its lifts are over the range's two baselines, its
     own statistics are the range's; the climate's table of each day replayed was fitted on the
-    days before it (the first day none: its defaults)."""
-    s = prevalidation_settings(tmp_path)
+    days before it (the first day none: its defaults). Three days, not the ten that could pass:
+    nothing here waits for a pass, and each day is a whole session replayed (#327)."""
+    s = prevalidation_settings(tmp_path, PREVALIDATION_DAYS[:3])
 
     await prevalidate(s, "shares", algorithms=[ALPHA], kind_algorithms=[RangeShares()], now=AFTER)
 

@@ -388,7 +388,9 @@ async def test_the_direction_is_stored_scored_and_ranked_the_same_with_another_k
             assert await get_json(one, path) == await get_json(two, path), path
 
 
-async def test_when_the_cpu_budget_runs_short_a_kind_s_algorithm_is_skipped_first(tmp_path: Path) -> None:
+async def test_when_the_cpu_budget_runs_short_a_kind_s_algorithm_is_skipped_first(
+    tmp_path: Path, fixed_costs: None
+) -> None:
     """Input: two direction algorithms (0.05 s each) and a drift algorithm (0.2 s) registered
     after them, 0.3 s together, over a CPU budget of 0.28 s. Output: from 09:02 the drift's
     is skipped (and recorded) whenever they are over the budget together; the direction's run

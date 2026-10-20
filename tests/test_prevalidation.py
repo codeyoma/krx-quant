@@ -17,7 +17,7 @@ from typing import Any
 
 import pytest
 
-from krx_quant import stats
+from krx_quant import prevalidation, stats
 from krx_quant.algorithms import Algorithm, Model, NothingToLearn, RegistrationError, Sample, save_model
 from krx_quant.baselines import Forecast
 from krx_quant.cli import main
@@ -33,6 +33,7 @@ from krx_quant.predictions import DB_NAME, PredictionStore
 from krx_quant.prevalidation import (
     LastReport,
     PrevalidationRunning,
+    _checks,
     _held,
     _stats,
     admits,
@@ -128,6 +129,10 @@ def report(s: Settings, name: str) -> dict[str, Any]:
     return data
 
 
+# Ten recorded days are the fewest that pass (``MIN_DAYS``), each a whole session replayed:
+# about 10 s on a laptop, and past the 30 s default (``pyproject.toml``) on a loaded CI runner
+# (#327). The other tests here replay fewer.
+@pytest.mark.timeout(120)
 async def test_an_algorithm_that_beats_the_baselines_on_its_own_features_passes(tmp_path: Path) -> None:
     s = settings(tmp_path)
     candidate = Contrarian("contrarian")
@@ -204,12 +209,18 @@ async def test_too_few_scored_predictions_to_judge_are_refused(tmp_path: Path) -
 
 
 async def test_fewer_than_ten_recorded_days_never_pass(tmp_path: Path) -> None:
-    s = settings(tmp_path, DAYS[:9])
+    # Three days replayed, not nine: each is a whole session (#327). Nine, one short, are judged
+    # below on what the three gave: only the days are counted again.
+    s = settings(tmp_path, DAYS[:3])
+    candidate = Contrarian("contrarian")
 
-    result = await prevalidate(s, "contrarian", algorithms=[ALPHA, Contrarian("contrarian")], now=AFTER)
+    result = await prevalidate(s, "contrarian", algorithms=[ALPHA, candidate], now=AFTER)
 
     assert [c.name for c in result.checks if not c.passed] == ["days"]
-    assert "9 recorded days (at least 10" in result.checks[0].detail
+    assert "3 recorded days (at least 10" in result.checks[0].detail
+    nine = _checks(candidate, DAYS[:9], result.statuses, result.correlations, result.stats, s.min_sample)
+    assert [c.name for c in nine if not c.passed] == ["days"]
+    assert "9 recorded days (at least 10" in nine[0].detail
 
 
 async def test_a_registry_failing_the_registration_check_is_not_replayed(tmp_path: Path) -> None:
@@ -247,11 +258,15 @@ async def listed(engine: PredictionEngine) -> dict[str, str]:
     return {a["name"]: a["status"]["status"] for a in body["algorithms"]}
 
 
-async def test_a_new_algorithm_waits_for_its_prevalidation_then_starts_on_probation(tmp_path: Path) -> None:
-    s = settings(tmp_path)
+async def test_a_new_algorithm_waits_for_its_prevalidation_then_starts_on_probation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The gate, not the day count: two replayed days pass here, as ten would (#327).
+    monkeypatch.setattr(prevalidation, "MIN_DAYS", 2)
+    s = settings(tmp_path, DAYS[:2])
     registry: list[Algorithm] = [ALPHA, Contrarian("contrarian")]
     gate = admits(s.state_dir, s.target_version)  # the engine's target, the touch target (#170)
-    live_day = date(2026, 9, 28)  # the Monday after the ten days
+    live_day = date(2026, 9, 28)  # the Monday after the recorded days
     events = swings(live_day, end="10:00:00")
     morning = [e for e in events if e[1]["received_at"] < at("09:20:00", live_day)]
     later = [e for e in events if e[1]["received_at"] >= at("09:20:00", live_day)]
@@ -272,7 +287,7 @@ async def test_a_new_algorithm_waits_for_its_prevalidation_then_starts_on_probat
     assert engine.waiting() == ["contrarian"]
     assert not engine.store.status_counts("contrarian"), "not run"
 
-    await prevalidate(s, "contrarian", algorithms=registry, now=AFTER)
+    assert (await prevalidate(s, "contrarian", algorithms=registry, now=AFTER)).passed
     # Trained (at night, or by hand) while it waited: it starts on that model.
     trained = Model("contrarian-20260925-abcdef", {}, None, DAYS[-1])
     save_model(s.state_dir, "contrarian", trained)
@@ -494,7 +509,7 @@ def test_a_rerun_on_the_same_days_is_held_to_a_bonferroni_bound_by_trading_day()
 
 
 async def test_a_rerun_records_its_stats_and_is_judged_by_trading_day(tmp_path: Path) -> None:
-    s = settings(tmp_path)
+    s = settings(tmp_path, DAYS[:3])  # judged by trading day on three as on ten (#327)
     history = history_path(s.state_dir, "contrarian")
     history.parent.mkdir(parents=True)
     # A run before on two of these days: this one is the second on them.

@@ -189,6 +189,9 @@ def test_a_night_on_a_friday_is_waited_for_until_monday_morning() -> None:
     assert spot_night_deadline(MarketCalendar({friday: True, monday: True}), friday) == at(monday, "07:30")
 
 
+# Every registered algorithm trained, as the Spot machine would: about 9 s on a laptop, near the
+# 30 s default (``pyproject.toml``) on a loaded CI runner (#327).
+@pytest.mark.timeout(120)
 def test_a_spot_run_trains_with_the_server_s_symbols_and_calendar(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
