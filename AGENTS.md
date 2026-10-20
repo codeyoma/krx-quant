@@ -20,6 +20,10 @@ Single-context: root `CONTEXT.md` + `docs/adr/`, plus the agreed system design i
 
 Reviewers apply `CODING_STANDARDS.md` to every diff: external data is probed before it is used, and tests wait for conditions.
 
+### PR checklist
+
+Worktree, checks, commits, docs, PRs, reviews and stacked PRs: `docs/agents/pr-checklist.md`. A task handed to an agent points there.
+
 ## Git workflow
 
 - Never push to `main` directly. Start each change on a branch from `origin/main`, push the branch, open a pull request against `main` (`Closes #N` for the issue it implements), and merge it from the PR once CI passes.
