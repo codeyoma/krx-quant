@@ -122,8 +122,8 @@ async def keep_files(kis: FakeKis, tmp_path: Path, krx: str = "zeros") -> tuple[
     pace = RateLimiter(1, 0.001, margin=0)
     async with rest_client(kis, tmp_path, EVENING) as client:
         candles = CandleKeeper(client, CALENDAR, data, (SYMBOL,), pace)
-        assert await candles.update("day", SYMBOL, LAST)
-        assert await candles.update_krx_days(SYMBOL, LAST)
+        assert await candles.update("day", SYMBOL, LAST, EVENING)
+        assert await candles.update_krx_days(SYMBOL, LAST, EVENING)
         assert await SupplyKeeper(client, CALENDAR, state, (SYMBOL,), pace).run(EVENING) == 1
     return data, state
 

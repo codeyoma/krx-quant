@@ -34,9 +34,11 @@ of the symbol).
 
 **Version 1** (to #264's fix) took the close from the KRX day candle too. On 2026-10-19 the
 daily check found that candle's close unlike the recorded closing auction print on all three
-symbols (its open alike): since KRX's after-market opened (2026-09-14, 16:00–20:00) the candle's
-close is most likely the after-market's last price. Version 2 ends the day at the closing
-auction, which can be traded; the answers of version 1 are kept, and the days predicted are
+symbols (its open alike). That candle was stored the same evening, while KIS's was still
+provisional, its close the latest trade (from 2026-09-14 the after-market's); the close KIS
+finalizes is the closing auction's (``probe-close-264``, 2026-10-20, ``candles``). Version 2 ends
+the day at the closing auction, which can be traded, read from the minute bars at 15:40 without
+waiting for KIS to finalize the candle; the answers of version 1 are kept, and the days predicted are
 answered again in version 2 (``daily.PENDING_DAYS``). Its closes of the days from the
 after-market's opening must all be kept before its algorithms' probation is simulated or a
 scheduled walk-forward runs (``pending``: ``auctions.closes_pending``).

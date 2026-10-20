@@ -4,10 +4,13 @@ auction's, which the daily kind ``open_to_close`` runs between.
 **Why.** The kind was answered and trained on the KRX day candle (``candles.krx_days_path``, KIS
 market ``J``). On 2026-10-19 the daily check (``daily_check``, the scheduled job
 ``daily-check-264``) found its open equal to the recorded opening auction print and its close
-unlike the closing auction's, on all three symbols. Since KRX's after-market opened
-(``AFTER_MARKET_OPENED``, 2026-09-14, 16:00–20:00) the candle's close is most likely the
-after-market's last price. The kind's day ends at the 15:30 closing auction, a price one can trade
-at (the user's decision, #264), so its close is that auction's price.
+unlike the closing auction's, on all three symbols. That candle was stored the same evening, while
+KIS's was still provisional: its close was the latest trade, since KRX's after-market opened
+(``AFTER_MARKET_OPENED``, 2026-09-14, 16:00–20:00) the after-market's. The close KIS finalizes is
+the closing auction's (``probe-close-264``, 2026-10-20; ``candles`` now asks the last stored days
+again). The kind's day ends at the 15:30 closing auction, a price one can trade at (the user's
+decision, #264), so its close is that auction's price, kept from 15:40 without waiting for KIS to
+finalize the day's candle.
 
 **Where from.** KIS's day of one-minute bars (``FHKST03010230``) of the KRX market alone (``J``).
 A bar is labelled by the minute it starts and an auction's print is its first trade, so the

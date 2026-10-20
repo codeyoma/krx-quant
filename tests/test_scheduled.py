@@ -31,6 +31,7 @@ from krx_quant.market_calendar import MarketCalendar
 from krx_quant.notify import Alerts
 from krx_quant.scheduled import (
     CLOSE_PROBE,
+    CLOSE_REFRESH_PROBE,
     DIAGNOSE,
     DIVIDEND_PROBE,
     ENTRY_DELAY,
@@ -974,6 +975,26 @@ def test_the_close_probe_runs_once_on_the_first_night_and_posts_to_264() -> None
     output = "KRX 일봉 종가 확인 (#264) 2026-10-20: 종목 005930\n\n005930: 저장된 KRX 일봉 245일"
     assert CLOSE_PROBE.targets[0].part(output) == output, "the whole output"
     assert "가격이 없다" in CLOSE_PROBE.targets[0].note
+
+
+def test_the_close_probe_runs_again_on_the_first_trading_night_after_the_refresh() -> None:
+    # #264: the day candles asked again each run, and checked whole once: on a trading day's night
+    # that evening's candle is stored provisional and the morning's check has replaced the rest.
+    assert CLOSE_REFRESH_PROBE.name == "probe-close-refresh-264" != CLOSE_PROBE.name
+    assert CLOSE_REFRESH_PROBE.command == ("probe-close",)
+    assert CLOSE_REFRESH_PROBE.timeout == timedelta(minutes=45), "the first run took 17 minutes"
+    assert [t.issue for t in CLOSE_REFRESH_PROBE.targets] == [264]
+    names = [j.name for j in JOBS]
+    assert (
+        names.index(CLOSE_PROBE.name) < names.index(CLOSE_REFRESH_PROBE.name) < names.index("prevalidate-cox")
+    )
+    assert CLOSE_REFRESH_PROBE.due(night(FRIDAY))
+    assert not CLOSE_REFRESH_PROBE.due(night(SATURDAY)), (
+        "a trading day's night: its candle stored that evening"
+    )
+    ran = JobRecord(FRIDAY, OK, at(FRIDAY, "22:30"), COMMIT, 0, 1020.0)
+    assert not CLOSE_REFRESH_PROBE.due(night(MONDAY, ran))
+    assert "가격이 없다" in CLOSE_REFRESH_PROBE.targets[0].note
 
 
 def test_the_nav_probe_runs_once_on_the_first_trading_night_and_posts_to_305() -> None:
