@@ -1128,6 +1128,32 @@ EXPECTED_OPEN_PROBE = Job(
     ),
 )
 
+# The same probe again, KRX's own (#314). The first run (the night of 2026-10-20) counted section
+# 4's times and section 5's gaps over every venue code; for 009150 the opening auction's window
+# also carried NXT's '2', so its gaps to the open may be NXT's. From the deploy that brings this,
+# sections 4 and 5 are KRX's ('1') only and the other codes' times are shown apart. Once, on the
+# first trading day's night after it, over the latest recorded days; the half hour as above.
+EXPECTED_OPEN_KRX_PROBE = Job(
+    name="probe-expected-open-krx-314",
+    due=_first_trading_night,
+    command=("probe-expected-open",),
+    timeout=timedelta(minutes=30),
+    targets=(
+        Target(
+            EXPECTED_OPEN_ISSUE,
+            note=(
+                "첫 출력(2026-10-20 밤)의 4·5절은 거래소 구분 코드와 상관없이 셌다. 이번 4·5절은 "
+                "KRX(`1`) 것만 세고, 다른 코드의 시각은 괄호로 따로 보인다. 에이전트가 이 출력으로 "
+                '009150의 시가 차이를 고치고 `docs/kis-feeds.md` "피드별 메모"의 "거르지 않은 값" 표시를 '
+                "지운다(005930·000660은 그 구간에 `1`만 있었다). 종가 쪽 차이는 #342가 다시 받은 "
+                "일봉과 견준 것이다. 그날 저녁 저장한 날만 잠정 종가이므로 그날을 빼고 "
+                '"종가 쪽" 문단을 고친다. 출력에는 시세 값이 없다'
+                "(개수, 시각, 코드, 틱 차이만)."
+            ),
+        ),
+    ),
+)
+
 # ⑤ The pre-validations (#204): a new algorithm runs live once its pre-validation has passed
 # (``prevalidation.py``). Once ``MIN_DAYS`` trading days are recorded, one waiting algorithm
 # is pre-validated a night, at most (``prevalidation_tonight``): a run replays 20 days beside
@@ -1452,6 +1478,7 @@ JOBS: tuple[Job, ...] = (
     ENTRY_DELAY,
     NIGHT_PROBE,
     EXPECTED_OPEN_PROBE,
+    EXPECTED_OPEN_KRX_PROBE,
     DAILY_CHECK,
     STRUCTURE_SUPPLY,
     NET_BUYS_PROBE,
