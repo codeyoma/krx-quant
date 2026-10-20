@@ -49,7 +49,7 @@ def day(
 
 
 def test_cox_is_registered_with_features_of_its_own() -> None:
-    assert [a.name for a in DAILY_ALGORITHMS] == ["cox"]
+    assert [a.name for a in DAILY_ALGORITHMS] == ["cox", "cox-5d"]  # #310: its five-session twin after it
     cox = DAILY_ALGORITHMS[0]
     assert cox.kind == "open_to_close"
     assert set(cox.features) <= set(DAILY_FEATURES)
@@ -236,7 +236,7 @@ def test_a_days_features_are_the_same_live_and_in_training(tmp_path: Path) -> No
     cox = Cox()
     for sample in trained:
         history = [d for d in files.days(sample.symbol) if d.day < LAST]
-        band = OPEN_TO_CLOSE.band(history)  # type: ignore[misc]
+        band = OPEN_TO_CLOSE.band_after(history)
         got = live(cox, sample.symbol, LAST, history, band).as_dict()
         assert got == pytest.approx(sample.features.as_dict(), nan_ok=True), sample.symbol
     by_symbol = {s.symbol: s.features for s in trained}
@@ -310,7 +310,7 @@ def test_a_missing_candle_on_the_previous_trading_day_stays_missing_in_training_
 
     live = LiveFeatures(OPEN_TO_CLOSE, data, state, CALENDAR, SYMBOLS, FEE)
     history = [d for d in files.days("005930") if d.day < LAST]
-    got = live(Cox(), "005930", LAST, history, OPEN_TO_CLOSE.band(history)).as_dict()  # type: ignore[misc]
+    got = live(Cox(), "005930", LAST, history, OPEN_TO_CLOSE.band_after(history)).as_dict()
     assert got == pytest.approx(gap.as_dict(), nan_ok=True)
 
     from krx_quant.daily_features import TradingDays

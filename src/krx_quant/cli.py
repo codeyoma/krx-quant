@@ -14,6 +14,7 @@ import sys
 from collections.abc import Callable
 from datetime import date, datetime
 from pathlib import Path
+from typing import Any
 
 import boto3
 from aiohttp import web
@@ -31,6 +32,7 @@ from krx_quant.daily_check import daily_check
 from krx_quant.daily_training import daily_algorithm, fit_daily, prevalidate_daily
 from krx_quant.demo import demo_app, demo_morning
 from krx_quant.diagnose import DEFAULT_DAYS, diagnose
+from krx_quant.dividend_probe import probe_dividends
 from krx_quant.doctor import doctor, doctor_settings
 from krx_quant.expected_open_probe import DAYS as EXPECTED_OPEN_DAYS
 from krx_quant.expected_open_probe import probe_expected_open
@@ -153,6 +155,11 @@ async def _probe_close() -> int:
     return 1 if failed == calls else 0  # nothing answered
 
 
+async def _probe_dividends() -> int:
+    calls, failed = await probe_dividends(Settings.from_env(), datetime.now(KST).date())
+    return 1 if failed == calls else 0  # nothing answered
+
+
 async def _probe_nav() -> int:
     calls, failed = await probe_nav(Settings.from_env(), datetime.now(KST))
     return 1 if failed == calls else 0  # nothing answered
@@ -252,17 +259,52 @@ def _prevalidate_daily(settings: Settings, name: str) -> int:
     for symbol, got in walked.get("by_symbol", {}).items():
         accuracy = got["accuracy"]
         print(f"  {symbol}: {got['n']} days, accuracy {'-' if accuracy is None else f'{accuracy:.3f}'}")
+    overlap = walked.get("overlap")
+    if overlap is not None:  # a kind of windows of several sessions (#310)
+        print(_overlap_lines(overlap))
     if result.earlier_runs:
         print(
             f"run before: {result.earlier_runs}, {result.earlier_on_these_days} of them on any of these days"
             " (a day walked again after a fix is no longer out of sample)"
         )
     print(f"report: {report_path(settings.state_dir, name)}")
-    if result.passed:
+    found = daily_algorithm(name)
+    held = None if found is None else found[1].review_hold
+    if result.passed and held is not None:
+        print(f"the engine does not start {name} yet: {held}")
+    elif result.passed:
         print(f"the engine starts {name} on probation at its next 08:50, unless it runs it already")
     else:
         print(f"the engine does not start {name}; fix it and run this again")
     return 0 if result.passed else 1
+
+
+def _overlap_lines(overlap: dict[str, Any]) -> str:
+    """A pre-validation's measure of its windows' overlap (#310, ``daily_training.overlap_report``)."""
+
+    def number(value: float | None) -> str:
+        return "-" if value is None else f"{value:.3f}"
+
+    ratios = ", ".join(f"{k} {number(v)}" for k, v in overlap["variance_ratio"].items())
+    between = ", ".join(f"{k} {number(v)}" for k, v in overlap["baselines_variance_ratio"].items())
+    lines = [
+        f"  overlap: {overlap['sessions']} sessions, Newey-West lag {overlap['lag']},"
+        f" {overlap['days']} days ({overlap['independent_days']} independent)",
+        f"  variance ratio by baseline: {ratios}; largest {number(overlap['variance_ratio_max'])}",
+        f"  variance ratio between baselines (a look): {between or '-'}",
+    ]
+    review = overlap["review_days"]
+    if review is not None:
+        lines.append(
+            f"  review days by the rule (#310): {review['probation_days']} (recent {review['recent_days']},"
+            f" at least {review['min_sample']} scored)"
+        )
+    for phase in overlap["phases"]:
+        lines.append(
+            f"  phase {phase['phase']}: {phase['days']} days,"
+            f" weakest lift {number(phase['weakest_lift'])} (a look)"
+        )
+    return "\n".join(lines)
 
 
 def _train(day: date | None, from_store: bool) -> int:
@@ -562,6 +604,11 @@ def main(argv: list[str] | None = None) -> int:
         " auction (#264), read-only; prints no market value",
     )
     sub.add_parser(
+        "probe-dividends",
+        help="compare KIS's adjusted and as-traded KRX day candles and count their ex-date flags (#310),"
+        " read-only; prints no market value",
+    )
+    sub.add_parser(
         "probe-nav",
         help="ask where KIS gives the single-stock leveraged and inverse ETFs' net assets (#305),"
         " read-only; prints no market value",
@@ -746,6 +793,8 @@ def main(argv: list[str] | None = None) -> int:
             return asyncio.run(_probe_net_buys())
         elif args.command == "probe-close":
             return asyncio.run(_probe_close())
+        elif args.command == "probe-dividends":
+            return asyncio.run(_probe_dividends())
         elif args.command == "probe-nav":
             return asyncio.run(_probe_nav())
         elif args.command == "probe-night":

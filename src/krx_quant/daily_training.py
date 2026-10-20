@@ -24,7 +24,15 @@ lift comes out above 0 by luck. Also: at least
 ``WALK_MIN_DAYS`` (500) days predicted out of sample, no day's forecasts of every symbol over the
 time budget (``KRX_ALGORITHM_SECONDS``), no other algorithm of the kind it moves with. No day is
 special (circuit breakers and sidecars are not kept before 2026-10-12): the few in ten years are
-in. The report (``state/prevalidations/<name>.json``, ``kind``, the kind's answer version) is
+in.
+
+**Windows of several sessions** (#310, ``DailyKind.sessions``): a sample's label holds the prices
+up to its window's end (``DailySample.ends``), so every fit takes only the windows that ended
+before what it is judged on. The night's fit on the night of N, those ended by N; its recent look,
+those ended before the first of the latest 60 days; a walk-forward's fold from day d, those ended
+before d (begun by d − H: the H − 1 days before d are purged, their labels holding days from d
+on); the baselines' past, the windows ended before the day. With H = 1 every window ends on its
+day, as before. The report (``state/prevalidations/<name>.json``, ``kind``, the kind's answer version) is
 what the engine's gate reads (``prevalidation.admits``), with the walk-forward's folds, symbols
 and years beside it.
 """
@@ -45,12 +53,21 @@ from typing import Any
 from krx_quant.algorithms import DAILY_ALGORITHMS, Model, NothingToLearn
 from krx_quant.algorithms.forecasts import LOSS_FLOOR
 from krx_quant.config import Settings
-from krx_quant.daily import DailyAlgorithm, DailyInputs, DailyKind, DailySample, DayPrices
+from krx_quant.daily import (
+    DailyAlgorithm,
+    DailyInputs,
+    DailyKind,
+    DailySample,
+    DayPrices,
+    overlap_review,
+    window_end,
+)
 from krx_quant.daily_features import DailyFiles, TradingDays, band_of, samples, stored_versions
-from krx_quant.feeds.base import KST
+from krx_quant.feeds.base import KST, kst_day
 from krx_quant.kind_registry import DAILY_KINDS, daily_kind_named
 from krx_quant.kind_stats import entry as kind_entry
 from krx_quant.kind_stats import leaderboard as kind_leaderboard
+from krx_quant.kind_stats import sessions_of
 from krx_quant.kinds import KindForecast, KindScored
 from krx_quant.market_calendar import MarketCalendar, calendar_store
 from krx_quant.prevalidation import (
@@ -64,7 +81,14 @@ from krx_quant.prevalidation import (
     seed_history,
     tried_level,
 )
-from krx_quant.stats import enough
+from krx_quant.stats import (
+    enough,
+    gains_by_day,
+    independent_days,
+    overlap_lag,
+    t_test,
+    variance_ratio,
+)
 
 log = logging.getLogger(__name__)
 
@@ -102,7 +126,17 @@ class DailyTrainer:
     def train(
         self, algorithm: DailyAlgorithm, kind: DailyKind, night: date
     ) -> tuple[dict[str, Any], Model | None]:
-        """The night's report of ``algorithm`` and its model (None if it learned nothing)."""
+        """The night's report of ``algorithm`` and its model (None if it learned nothing, and for a
+        kind awaiting a probe's result, #310: no sample is made of it)."""
+        if not kind.runs:
+            return {
+                "algorithm": algorithm.name,
+                "kind": kind.name,
+                "cadence": "daily",
+                "day": night.isoformat(),
+                "promoted": False,
+                "reason": f"not trained: its kind waits for {kind.awaiting}",
+            }, None
         found = samples(
             kind,
             self.files,
@@ -113,6 +147,8 @@ class DailyTrainer:
             first=training_first(algorithm, night),
             last=night,
         )
+        # The windows ended by the night (#310): one not over has no label yet.
+        found = [s for s in found if s.ended_by(night)]
         report: dict[str, Any] = {
             "algorithm": algorithm.name,
             "kind": kind.name,
@@ -151,7 +187,7 @@ class DailyTrainer:
             return None
         cut = days[-RECENT_DAYS]
         try:
-            model = algorithm.fit([s for s in found if s.day < cut])
+            model = algorithm.fit([s for s in found if s.ended_before(cut)])  # #310: purged
         except NothingToLearn:
             return None
         recent = [s for s in found if s.day >= cut and s.label is not None]
@@ -214,7 +250,9 @@ def walk_forward(
     folds = 0
     for start in range(WALK_MIN_TRAIN, len(days), WALK_REFIT):
         window = days[max(0, start - algorithm.training_days) : start]
-        training = [s for d in window for s in by_day[d]]
+        # Only the windows ended before the fold's first day (#310): the ones begun in the H − 1
+        # days before it end within the days it predicts.
+        training = [s for d in window for s in by_day[d] if s.ended_before(days[start])]
         try:
             model = algorithm.fit(training)
         except NothingToLearn:
@@ -230,7 +268,9 @@ def walk_forward(
                 if s.answer is not None and s.label is not None:
                     records[algorithm.name].append(_scored(kind, algorithm.name, model.version, s, forecast))
     first_predicted = predicted[0] if predicted else None
-    for name, scored in baseline_forecasts(kind, files, symbols, fee_rate, first_predicted, newest).items():
+    for name, scored in baseline_forecasts(
+        kind, files, symbols, fee_rate, first_predicted, newest, calendar=calendar
+    ).items():
         records[name] = scored
     present = {f: sum(1 for s in found if s.features[f] is not None) for f in algorithm.features}
     return WalkForward(dict(records), predicted, models, folds, slowest, len(found), present)
@@ -259,9 +299,12 @@ def baseline_forecasts(
     fee_rate: float,
     first: date | None,
     last: date,
+    *,
+    calendar: MarketCalendar | None = None,
 ) -> dict[str, list[KindScored]]:
     """The kind's baselines' forecasts of every day from ``first`` to ``last``, as at 08:50, each
-    scored on the day's answer (the walk-forward's, a simulated probation's, #298)."""
+    scored on the day's answer (the walk-forward's, a simulated probation's, #298), each knowing
+    the windows that ended before the day (#310)."""
     out: dict[str, list[KindScored]] = {b.name: [] for b in kind.daily_baselines}
     if first is None or kind.answers is None:
         return out
@@ -269,15 +312,27 @@ def baseline_forecasts(
     market = TradingDays(d.day for days in stored.values() for d in days)
     for symbol in symbols:
         days: list[DayPrices] = stored[symbol]
-        answers = kind.answers(days, fee_rate)
+        answers = kind.answers_of(days, fee_rate, calendar)
+        ends = [window_end(d.day, a) for d, a in zip(days, answers, strict=True)]
         for i, day in enumerate(days):
             answer = answers[i]
             if day.day < first or answer.label is None:
                 continue
-            past = tuple((days[j].day, answers[j].label) for j in range(max(0, i - _PAST), i))
+            ended = [
+                (j, end)
+                for j in range(max(0, i - _PAST), i)
+                if (end := ends[j]) is not None and end < day.day
+            ]
+            past = tuple((days[j].day, answers[j].label) for j, _ in ended)
             # The market's previous trading day, as live (a symbol's missing candle stays missing).
             inputs = DailyInputs(
-                symbol, day.day, kind.predicted_at(day.day), past, band_of(answer), market.previous(day.day)
+                symbol,
+                day.day,
+                kind.predicted_at(day.day),
+                past,
+                band_of(answer),
+                market.previous(day.day),
+                tuple(end for _, end in ended),
             )
             for b in kind.daily_baselines:
                 forecast = b.predict(inputs)
@@ -364,6 +419,90 @@ def _breakdown(kind: DailyKind, records: Sequence[KindScored]) -> dict[str, Any]
     }
 
 
+def overlap_report(
+    kind: DailyKind,
+    records: Sequence[KindScored],
+    baselines: Mapping[str, Sequence[KindScored]],
+    calendar: MarketCalendar | None = None,
+) -> dict[str, Any]:
+    """What a walk-forward of a kind of windows of several sessions measured of their overlap
+    (#310), for the report (``walk_forward.overlap``): the sessions and the Newey–West lag; each
+    baseline's variance ratio of the algorithm's gains by trading day (VR: the long-run variance
+    at lag 2(H − 1) over γ₀, ``stats.variance_ratio``), the largest (the review days' rule takes
+    it: the statuses go by the weakest lift), and, to look at, each other baseline's over the
+    first (``otc5-persist``'s and ``otc5-climate``'s over ``otc5-flat``); the review days the rule
+    gives the largest, taken as 1 below 1 (``daily.overlap_review``: the intervals never shrink
+    below the independent ones); and the lift over each baseline on each of the H
+    phases (every H-th day, the windows of a phase do not overlap: a look, never a gate)."""
+    overlap = kind.overlap
+    sessions = sessions_of(records, baselines, calendar)
+
+    def ratio(a: Sequence[KindScored], b: Sequence[KindScored]) -> float | None:
+        by_day = gains_by_day(a, b)
+        days = sorted(by_day)
+        means = [sum(by_day[d]) / len(by_day[d]) for d in days]
+        return variance_ratio(means, [sessions[d] for d in days], overlap)
+
+    ratios = {name: ratio(records, b) for name, b in baselines.items()}
+    known = [r for r in ratios.values() if r is not None]
+    largest = max(known) if known else None
+    names = list(baselines)
+    between = {f"{other} - {names[0]}": ratio(baselines[other], baselines[names[0]]) for other in names[1:]}
+    review = None
+    if largest is not None:
+        # Never below 1 (#339 review): the statuses' intervals never take a standard error below
+        # the independent one (``stats.overlap_t_test``), so a ratio under 1 (every baseline's gains
+        # alternating) must not shorten the review days below the independent days' rule.
+        used = max(largest, 1.0)
+        found = overlap_review(used, overlap)
+        review = {
+            "variance_ratio": used,
+            "first": found.first,
+            "probation_days": list(found.rules.probation_days),
+            "bench_days": list(found.rules.bench_days),
+            "recent_days": found.recent_days,
+            "min_sample": found.min_sample,
+        }
+    phases = []
+    for phase in range(overlap):
+
+        def of_phase(group: Sequence[KindScored], phase: int = phase) -> list[KindScored]:
+            return [r for r in group if sessions[kst_day(r.bar_close)] % overlap == phase]
+
+        mine = of_phase(records)
+        lifts = {}
+        for name, b in baselines.items():
+            paired = gains_by_day(mine, of_phase(b))
+            gains = [g for values in paired.values() for g in values]
+            by_day = t_test([sum(v) / len(v) for v in paired.values()])
+            lifts[name] = {
+                "value": sum(gains) / len(gains) if gains else None,
+                "day_low": None if by_day is None else by_day.low,
+                "days": len(paired),
+            }
+        values = [v for lift in lifts.values() if (v := lift["value"]) is not None]
+        phases.append(
+            {
+                "phase": phase,
+                "days": len({kst_day(r.bar_close) for r in mine}),
+                "weakest_lift": min(values) if values and len(values) == len(lifts) else None,
+                "lifts": lifts,
+            }
+        )
+    days = len({kst_day(r.bar_close) for r in records})
+    return {
+        "sessions": overlap,
+        "lag": overlap_lag(overlap),
+        "days": days,
+        "independent_days": independent_days(days, overlap),
+        "variance_ratio": ratios,
+        "variance_ratio_max": largest,
+        "baselines_variance_ratio": between,
+        "review_days": review,
+        "phases": phases,
+    }
+
+
 def daily_algorithm(name: str) -> tuple[DailyAlgorithm, DailyKind] | None:
     """A registered daily algorithm and its kind, by name."""
     found = next((a for a in DAILY_ALGORITHMS if a.name == name), None)
@@ -388,6 +527,8 @@ def prevalidate_daily(
         raise ValueError(
             f"unknown daily algorithm {name!r}; registered: {', '.join(a.name for a in algorithms)}"
         )
+    if not kind.runs:  # #310: its answers would read data a probe has not settled
+        raise ValueError(f"{name}: its kind {kind.name} waits for {kind.awaiting}; not pre-validated")
     with _held(settings.state_dir, name):
         now = now or datetime.now(KST)
         files = DailyFiles(settings.data_dir, settings.state_dir)
@@ -433,6 +574,7 @@ def prevalidate_daily(
                 "samples": run.samples,
                 "present": run.present,
                 **_breakdown(kind, mine),
+                **({"overlap": overlap_report(kind, mine, baselines, calendar)} if kind.overlap > 1 else {}),
             },
             inputs=inputs,
         )

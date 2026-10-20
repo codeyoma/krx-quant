@@ -229,5 +229,5 @@ async def test_cox_s_flows_before_nxt_opened_are_krx_s_or_missing_never_zero_liv
         LAST,
     ):
         history = [d for d in files.days(SYMBOL) if d.day < day]
-        got = live(Cox(), SYMBOL, day, history, OPEN_TO_CLOSE.band(history))  # type: ignore[misc]
+        got = live(Cox(), SYMBOL, day, history, OPEN_TO_CLOSE.band_after(history))
         assert got.as_dict() == pytest.approx(found[day].as_dict(), nan_ok=True), day

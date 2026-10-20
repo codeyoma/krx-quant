@@ -51,7 +51,7 @@ def made_days(changes: Sequence[float], first: date = FIRST, price: float = 10_0
 
 
 def test_open_to_close_is_registered_as_a_daily_kind_apart_from_the_bar_close_kinds() -> None:
-    assert [k.name for k in DAILY_KINDS] == ["open_to_close"]
+    assert [k.name for k in DAILY_KINDS] == ["open_to_close", "open_to_close_5d"]  # #310 after it
     assert "open_to_close" not in [k.name for k in KINDS]
     kind = DAILY_KINDS[0]
     # Answer version 2 (#264): the close is the closing auction's, not the KRX day candle's.
@@ -76,10 +76,13 @@ def test_open_to_close_is_registered_as_a_daily_kind_apart_from_the_bar_close_ki
         "to": "close",
         "from_title": "시가 단일가",
         "to_title": "종가 단일가",
+        "sessions": 1,  # #310
         "answer_from": "15:45",
         "probation_days": [20, 40, 60],
         "bench_days": [20, 40, 60],
         "recent_days": 20,
+        "awaiting": None,  # #310
+        "review_hold": None,
     }
 
 

@@ -474,6 +474,7 @@ class PredictionEngine:
         self.kind_algorithms: tuple[KindAlgorithm, ...] = ()  # likewise, of the other kinds
         self._feature_names: list[str] = []
         self._told_waiting: set[str] = set()  # waiting algorithms already alerted
+        self._told_held: set[str] = set()  # held for their review days, already alerted (#310)
         self._budget = budget or Budget()
         self._features = feature_store or FeatureStore()
         self._cost: dict[str, float] = {}  # expected seconds per bar close, by algorithm
@@ -522,10 +523,12 @@ class PredictionEngine:
         self._reviewed_through = store.last_run("review") or self._last_tick
         self._daily: DailyRunner | None = None
         self._daily_events: Callable[[str, dict[str, Any]], None] | None = None
-        if self.daily_kinds:
+        # A daily kind awaiting a probe's result (#310, ``DailyKind.awaiting``) is listed, not run.
+        running_kinds = [k for k in self.daily_kinds if k.runs]
+        if running_kinds:
             self._daily_events = getattr(daily_features, "on_event", None)
             self._daily = DailyRunner(
-                self.daily_kinds,
+                running_kinds,
                 store,
                 calendar,
                 symbols,
@@ -584,12 +587,19 @@ class PredictionEngine:
         # the answer version and the inputs it runs now (#264): its walk-forward takes a minute,
         # so a change (``open_to_close``'s answer version 2) has it judged again first, that
         # night. One judged live already (active, on the bench) runs on, as any algorithm does.
+        # One of a kind not run yet (#310, ``DailyKind.awaiting``) is not run either, nor one of a
+        # kind whose review days are not fixed yet (``DailyKind.review_hold``), its pre-validation
+        # passed or not: its probation would be judged on other days.
         daily_admitted = [
             a
             for a in self.daily_registered
-            if (a.name in known and known[a.name].status is not Status.PROBATION)
-            or self._admits is None
-            or self._admits(a)
+            if self._kind_runs(a)
+            and not self._review_held(a)
+            and (
+                (a.name in known and known[a.name].status is not Status.PROBATION)
+                or self._admits is None
+                or self._admits(a)
+            )
         ]
         if (
             tuple(admitted) == self.algorithms
@@ -606,13 +616,40 @@ class PredictionEngine:
         self.daily_algorithms = tuple(daily_admitted)
         self._feature_names = sorted({f for a in running for f in a.features})
 
+    def _kind_runs(self, algorithm: DailyAlgorithm) -> bool:
+        kind = self.daily_kind_named(algorithm.kind)
+        return kind is not None and kind.runs
+
+    def _review_held(self, algorithm: DailyAlgorithm) -> bool:
+        kind = self.daily_kind_named(algorithm.kind)
+        return kind is not None and kind.review_hold is not None
+
     def waiting(self) -> list[str]:
-        """The registered algorithms not run yet: their pre-validation has not passed."""
+        """The registered algorithms not run yet: their pre-validation has not passed (what the
+        scheduled pre-validations run, and the alert names). Not one of a daily kind not run yet
+        (#310, ``DailyKind.awaiting``): it is not pre-validated before its kind runs."""
         return (
             [a.name for a in self.registered if a not in self.algorithms]
             + [a.name for a in self.kind_registered if a not in self.kind_algorithms]
-            + [a.name for a in self.daily_registered if a not in self.daily_algorithms]
+            + [
+                a.name
+                for a in self.daily_registered
+                if a not in self.daily_algorithms and self._kind_runs(a) and not self._passed_and_held(a)
+            ]
         )
+
+    def held(self) -> list[str]:
+        """The daily algorithms whose pre-validation passed but whose kind's review days are not
+        fixed yet (#310, ``DailyKind.review_hold``): held out of probation, not waiting for a
+        pre-validation (the scheduler will not run it again on the same code)."""
+        return [
+            a.name
+            for a in self.daily_registered
+            if a not in self.daily_algorithms and self._kind_runs(a) and self._passed_and_held(a)
+        ]
+
+    def _passed_and_held(self, algorithm: DailyAlgorithm) -> bool:
+        return self._review_held(algorithm) and (self._admits is None or self._admits(algorithm))
 
     def to_simulate(self) -> tuple[list[str], list[str]]:
         """The algorithms on a probation that waits for its simulation (#298,
@@ -890,6 +927,23 @@ class PredictionEngine:
             )
             if await self._deliver(text):
                 self._told_waiting.update(untold)
+        unsaid = [name for name in self.held() if name not in self._told_held]
+        if unsaid:
+            kinds = sorted(
+                {
+                    k.name
+                    for a in self.daily_registered
+                    if a.name in unsaid
+                    if (k := self.daily_kind_named(a.kind))
+                }
+            )
+            text = (
+                f"판정일 보류: {', '.join(unsaid)}. 사전 검증은 통과했지만 {', '.join(kinds)}의 "
+                "판정일을 실측한 분산 배율로 코드에 고정하기 전이라 수습에 오르지 않습니다(#310). "
+                "리포트의 walk_forward.overlap으로 판정일을 고정하는 PR이 필요합니다."
+            )
+            if await self._deliver(text):
+                self._told_held.update(unsaid)
         await self._report_budgets(at)
         await self._refit_weights(at)
         # Last: a review that failed part way is run again after a restart.

@@ -45,7 +45,9 @@ the kind reads is then of one scale: a day's move is the two auctions' as traded
 opens, highs and lows across days are all the candle's adjusted ones. A day kept past the newest
 candle (the day itself, before the 20:30 candles) is the two auction prices alone, as traded: it is
 the newest day, on the scale of the candles before it until an adjustment, and an adjustment has
-the candles taken again, that day's with them.
+the candles taken again, that day's with them. Such a day says so (``DayPrices.candle`` False): a
+window of several sessions (#310) waits for its end day's candle, as its ratio crosses days and a
+split on that day would have the two ends on two scales until the candles are taken again.
 """
 
 from __future__ import annotations
@@ -156,7 +158,14 @@ def days_of(candles: Sequence[Row], kept: Mapping[date, Row]) -> list[DayPrices]
             continue  # a day's candle comes after 20:30: before it, the auctions alone
         opened, closed = float(price["open"]), float(price["close"])
         out[when] = DayPrices(
-            when, opened, max(opened, closed), min(opened, closed), closed, 0, str(price["source"])
+            when,
+            opened,
+            max(opened, closed),
+            min(opened, closed),
+            closed,
+            0,
+            str(price["source"]),
+            candle=False,
         )
     return [out[d] for d in sorted(out)]
 

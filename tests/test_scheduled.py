@@ -33,6 +33,7 @@ from krx_quant.scheduled import (
     CLOSE_PROBE,
     CLOSE_REFRESH_PROBE,
     DIAGNOSE,
+    DIVIDEND_PROBE,
     ENTRY_DELAY,
     EXPECTED_OPEN_PROBE,
     FAILED,
@@ -1197,3 +1198,17 @@ async def test_the_collector_runs_the_night_s_jobs(kis: FakeKis, empty_server: P
             await asyncio.wait_for(task, 10)
     record = JobState.load(empty_server / "state" / STATE_FILE).jobs["diagnose-203-187"]
     assert record.outcome == OK and record.day == FRIDAY and record.comments.keys() == {203, 187}
+
+
+def test_the_dividend_probe_runs_once_on_the_first_night_and_posts_to_310() -> None:
+    # #310: whether KIS's adjusted day candles take cash dividends out, and its ex-date flags.
+    assert DIVIDEND_PROBE.name == "probe-dividends-310"
+    assert DIVIDEND_PROBE.command == ("probe-dividends",)
+    assert DIVIDEND_PROBE.timeout == timedelta(minutes=30)
+    assert [t.issue for t in DIVIDEND_PROBE.targets] == [310]
+    names = [j.name for j in JOBS]
+    assert names.index(DIVIDEND_PROBE.name) < names.index("prevalidate-cox"), "before the pre-validations"
+    assert DIVIDEND_PROBE.due(night(FRIDAY)) and DIVIDEND_PROBE.due(night(SATURDAY)), "KIS gives the past"
+    ran = JobRecord(SATURDAY, OK, at(SATURDAY, "22:30"), COMMIT, 0, 90.0)
+    assert not DIVIDEND_PROBE.due(night(MONDAY, ran))
+    assert "가격이 없다" in DIVIDEND_PROBE.targets[0].note

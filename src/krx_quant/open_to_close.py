@@ -121,8 +121,9 @@ def _bands(days: Sequence[DayPrices]) -> tuple[np.ndarray, np.ndarray, np.ndarra
     return changes, sigma, scale
 
 
-def band(days: Sequence[DayPrices]) -> Band | None:
-    """The flat band of the day after ``days`` (oldest first), from them only."""
+def band(days: Sequence[DayPrices], sessions: Sequence[date] = ()) -> Band | None:
+    """The flat band of the day after ``days`` (oldest first), from them only (``sessions``: as
+    ``answers``)."""
     _, sigma, scale = _bands(days)
     if math.isnan(sigma[-1]):
         return None
@@ -134,8 +135,9 @@ def classify(change: float, value: float) -> str:
     return UP if change > value else DOWN if change < -value else FLAT
 
 
-def answers(days: Sequence[DayPrices], fee_rate: float) -> list[Answer]:
-    """Each day's answer (oldest first), its band from the days before it."""
+def answers(days: Sequence[DayPrices], fee_rate: float, sessions: Sequence[date] = ()) -> list[Answer]:
+    """Each day's answer (oldest first), its band from the days before it. A day's window is the
+    day itself: the market's ``sessions`` (#310, a window of several) do not change it."""
     changes, sigma, scale = _bands(days)
     out = []
     for i, day in enumerate(days):

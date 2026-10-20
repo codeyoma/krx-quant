@@ -43,6 +43,25 @@ learned live or filled from the recording, #236) marks its answer special: out o
 statistics, as a window of the other kinds a special situation touches. A VI does not: it pauses
 one symbol for two minutes of a day, and both ends are still the auctions' prices (the path
 counts the day's VIs, ``vi``).
+
+**Windows of several sessions** (#310, ``DailyKind.sessions``: H, ``open_to_close_5d``'s 5). A
+day's window then runs from its opening auction to the closing auction of its H-th session,
+counting the day: the day predicted is where it starts (``bar_close`` is its 08:50), and every
+trading day opens one, so H − 1 days' windows are always waiting for their end. Its end is set by
+the trading calendar when it is predicted (``DailyKind.scheduled_end``: what the API calls its
+``target_at``) and by the sessions KRX actually held when it is answered (``sessions_of``: the
+days the symbol has, and the trading days KIS reported). Its answer waits for its end day and
+that day's KRX day candle (``DailyKind.answer_from``: the 5-session window's from 20:35, after the
+20:30 candles; its ratio crosses days, so both ends must be on one adjusted scale, which a day
+kept from the auctions alone before its candle is not, ``DayPrices.candle``); the 7 days before it
+is given up count from that end (``DailyKind.gives_up``), and a starting engine answers the
+predictions of ``PENDING_DAYS`` plus the window's sessions back. A circuit breaker or a sidecar on
+any of its sessions makes it special; its path counts the VIs of all of them. A baseline knows
+only the windows that ended by its prediction time (``DailyInputs.past``, with their end days,
+``ends``), and training learns only from windows that ended before what it is judged on
+(``DailySample.ends``: a night's fit on those ended by that night, a walk-forward's on those ended
+before its first day predicted): the label of a window begun the day before holds prices of days
+after the one predicted (#310 "학습에서 겹침"). With H = 1 every rule is the one above.
 """
 
 from __future__ import annotations
@@ -79,7 +98,8 @@ PREDICT_AT = time(8, 50)
 # prices at 15:40 (``auctions.CLOSE_AT``, #264).
 ANSWER_FROM = time(15, 45)
 ANSWER_EVERY = timedelta(minutes=10)
-# A day whose prices have not come by then is answered unscorable (``NO_CLOSE``).
+# A day whose prices have not come by then is answered unscorable (``NO_CLOSE``; a window of
+# several sessions: from its end, #310).
 ANSWER_GIVE_UP = timedelta(days=7)
 # A starting engine answers its predictions of these latest days still without one.
 PENDING_DAYS = 30
@@ -87,6 +107,9 @@ PENDING_DAYS = 30
 NO_CANDLE = "no candle"  # answer version 1: the day's KRX day candle never came
 NO_CLOSE = "no closing auction"  # the day's closing auction price never came (#264)
 NO_BAND = "no band"  # too few days before it to set the flat band
+# A window of several sessions (#310) whose end day, or that day's KRX day candle, is not stored yet:
+# no answer yet, not one that will never come.
+PENDING = "window not over"
 # The KRX days a prediction or an answer is given, at most: enough for the bands and the
 # baselines' year (``open_to_close``), far less than the 40 years KIS keeps.
 HISTORY_DAYS = 1_000
@@ -105,6 +128,52 @@ DAILY_MIN_SAMPLE = 60
 
 
 @dataclass(frozen=True)
+class OverlapReview:
+    """The review days of a daily kind whose windows run several sessions (#310), from the variance
+    ratio of its days' gains (``stats.variance_ratio``): judged on its first review day D₁ and on
+    2D₁ and 3D₁ (probation and bench alike, at ``DAILY_RULES``' level), benched or recovered on its
+    latest D₁ days, with 3 × D₁ scored predictions and pairs (three symbols) at least."""
+
+    variance_ratio: float
+    sessions: int
+    first: int  # D₁
+
+    @property
+    def rules(self) -> Rules:
+        days = (self.first, 2 * self.first, 3 * self.first)
+        return Rules(probation_days=days, bench_days=days, confidence=DAILY_RULES.confidence)
+
+    @property
+    def recent_days(self) -> int:
+        return self.first
+
+    @property
+    def min_sample(self) -> int:
+        return DAILY_MIN_SAMPLE * self.first // DAILY_RULES.probation_days[0]
+
+
+def first_review_day(variance_ratio: float, sessions: int) -> int:
+    """D₁ (#310): the fewest days, a multiple of ``open_to_close``'s first review day (20), whose
+    lift by trading day's half width t(q, ⌊D ÷ H⌋ − 1) × √(VR ÷ D) is no wider than that review's,
+    t(q, 19) × √(1 ÷ 20), q the review level's (98.3%: 0.9915). The overlap's degrees of freedom
+    (``stats.overlap_df``) make it 40 even at VR 1."""
+    from krx_quant.stats import overlap_df, t_quantile  # the review's statistics
+
+    step = DAILY_RULES.probation_days[0]
+    q = 1 - (1 - DAILY_RULES.confidence) / 2
+    reference = t_quantile(q, step - 1) * math.sqrt(1 / step)
+    days = step
+    while t_quantile(q, overlap_df(days, sessions)) * math.sqrt(variance_ratio / days) > reference:
+        days += step
+    return days
+
+
+def overlap_review(variance_ratio: float, sessions: int) -> OverlapReview:
+    """The review days the rule gives ``variance_ratio`` (``first_review_day``)."""
+    return OverlapReview(variance_ratio, sessions, first_review_day(variance_ratio, sessions))
+
+
+@dataclass(frozen=True)
 class DayPrices:
     """A symbol's KRX day (#264): the opening auction's price, the day's high and low, the
     closing auction's price (``auctions.days_of``), and where the close came from. Adjusted prices
@@ -117,6 +186,12 @@ class DayPrices:
     close: float
     volume: int
     source: str = "krx_day_candle"  # the close's: ``auctions.MINUTE_BAR``, ``RECORDED`` or this
+    # From a KRX day candle (adjusted); False: the day kept from the auctions alone, as traded,
+    # before its candle (``auctions.days_of``). A ratio across days needs both ends on one scale.
+    candle: bool = True
+    # Whether the day is a cash dividend's ex-date; None: not known (#310: no dividend calendar
+    # is kept until the dividend probe says what KIS gives, ``dividend_probe``).
+    ex_dividend: bool | None = None
 
     @classmethod
     def of(cls, row: Mapping[str, Any]) -> DayPrices | None:
@@ -197,9 +272,12 @@ class DailyInputs:
     symbol: str
     day: date
     at: datetime
-    past: tuple[tuple[date, str | None], ...]  # (day, class), None for a day without one
+    # (day, class) of the windows that ended by ``at``, None for one without a class; a window of
+    # several sessions (#310) begun later is not among them (its answer is the future).
+    past: tuple[tuple[date, str | None], ...]
     band: Band | None
     previous_day: date | None = None  # the trading day before ``day``, by the calendar
+    ends: tuple[date, ...] = ()  # each of ``past``'s windows' end day (#310); empty: each its day
 
 
 class DailyBaseline(Protocol):
@@ -212,13 +290,15 @@ class DailyBaseline(Protocol):
         ...
 
 
-# A daily kind's answers of its days (oldest first, one each), each set from the days before
-# it only, with the fee rate for the research P&L's costs in the path.
-DayAnswers = Callable[[Sequence[DayPrices], float], list[Answer]]
+# A daily kind's answers of its days (oldest first, one each: the window that starts on the day),
+# each set from the windows ended before it only, with the fee rate for the research P&L's costs in
+# the path, and the KRX sessions a window of several counts (#310, ``sessions_of``).
+DayAnswers = Callable[[Sequence[DayPrices], float, Sequence[date]], list[Answer]]
 # Why a daily kind's answers of the latest days are not all in yet (``DailyKind.pending``).
 Pending = Callable[[Path, "MarketCalendar", Sequence[str], datetime], "str | None"]
-# A daily kind's band of the day after ``days`` (oldest first), from them only.
-DayBand = Callable[[Sequence[DayPrices]], "Band | None"]
+# A daily kind's band of the day after ``days`` (oldest first), from them only: from the windows
+# that ended by their last, counting the KRX sessions (#310, ``sessions_of``).
+DayBand = Callable[[Sequence[DayPrices], Sequence[date]], "Band | None"]
 
 
 @dataclass(frozen=True)
@@ -231,10 +311,21 @@ class DailySample:
     features: FeatureVector
     answer: Answer | None
     answer_version: int
+    # The day its window ended (#310); None while it has not. A window of one session ends on its
+    # day. Training takes a sample only once its window ended before what it is judged on.
+    ends: date | None = None
 
     @property
     def label(self) -> str | None:
         return None if self.answer is None else self.answer.label
+
+    def ended_by(self, day: date) -> bool:
+        """Whether its window had ended by ``day``'s night (#310: the night's training)."""
+        return self.ends is not None and self.ends <= day
+
+    def ended_before(self, day: date) -> bool:
+        """Whether its window had ended before ``day`` (#310: known at its 08:50)."""
+        return self.ends is not None and self.ends < day
 
 
 @dataclass(frozen=True)
@@ -311,10 +402,10 @@ class DailyAlgorithm(Protocol):
 @dataclass(frozen=True, eq=False)
 class DailyKind(Kind):
     """A kind predicted once a trading day (#264): its time, its window (from the opening
-    auction to the close), its rule of a day's answer and band, its baselines and the
-    lifecycle's days of it. The ``Kind`` fields it has are a kind's (classes, action, answer
-    version, statistics); its bar-close fields (``answer``, ``bar_answer``, ``width``,
-    ``baselines``, ``horizon``) are unused."""
+    auction to the close of its last session), its rule of a day's answer and band, its
+    baselines and the lifecycle's days of it. The ``Kind`` fields it has are a kind's (classes,
+    action, answer version, statistics, ``overlap``: its ``sessions``); its bar-close fields
+    (``answer``, ``bar_answer``, ``width``, ``baselines``, ``horizon``) are unused."""
 
     predict_at: time = PREDICT_AT
     window: tuple[str, str] = ("open", "close")  # the auction it starts at, the one it ends at
@@ -329,6 +420,29 @@ class DailyKind(Kind):
     # symbols, now), None once they are: a simulated probation (#298) or a scheduled walk-forward
     # of its algorithms waits for them (#264: ``open_to_close``'s closing auction prices).
     pending: Pending | None = None
+    # The trading sessions its window runs, the day predicted the first (#310, H); ``overlap``
+    # is the same number, so its statistics count the overlap of its days' windows.
+    sessions: int = 1
+    # When its answers are first looked for on its window's end day, KST (#310): the day's
+    # closing auction price is kept at 15:40; a window across days also needs the day's candle.
+    answer_from: time = ANSWER_FROM
+    # Why an answer that never came is given up, ``ANSWER_GIVE_UP`` after its end day's look.
+    gives_up: str = NO_CLOSE
+    # Why the kind is not run yet, None once it is (#310): its answers would read data whose meaning
+    # a probe has not settled (CODING_STANDARDS.md "External data is probed before it is used").
+    # While set, the engine neither predicts nor answers it, and its algorithms are neither run,
+    # trained, pre-validated nor simulated (``runs``); ``GET /v1/kinds`` lists it with the reason.
+    awaiting: str | None = None
+    # Why its algorithms are held out of probation, None when they are not (#310): an overlapping
+    # kind's review days are fixed in code from the variance ratio its first pre-validation
+    # measures, so until then one that passed is neither run nor enrolled nor simulated. Its
+    # pre-validation still runs (once the kind runs): it measures the ratio.
+    review_hold: str | None = None
+
+    @property
+    def runs(self) -> bool:
+        """Whether the kind is run: not ``awaiting`` a probe's result (#310)."""
+        return self.awaiting is None
 
     def baseline_cards(self) -> list[tuple[str, Card]]:
         return [(b.name, b.card) for b in self.daily_baselines]
@@ -340,15 +454,46 @@ class DailyKind(Kind):
         """The prediction time of ``day``: ``bar_close`` of its predictions."""
         return datetime.combine(day, self.predict_at, KST)
 
-    def answer_of(self, days: Sequence[DayPrices], fee_rate: float) -> Answer:
-        """The answer of the last of ``days`` (oldest first), from the ones before it."""
+    def answers_of(
+        self, days: Sequence[DayPrices], fee_rate: float, calendar: MarketCalendar | None = None
+    ) -> list[Answer]:
+        """The answer of each of ``days`` (oldest first): the window that starts on it, its band
+        from the windows ended before it, counting the sessions KRX held (``sessions_of``: the
+        days, and the ``calendar``'s reported trading days). A window not ended within ``days`` is
+        ``PENDING``."""
         if self.answers is None:
             raise ValueError(f"{self.name}: no answer rule")
-        return self.answers(days, fee_rate)[-1]
+        return self.answers(days, fee_rate, sessions_of(days, calendar))
+
+    def band_after(self, days: Sequence[DayPrices], calendar: MarketCalendar | None = None) -> Band | None:
+        """The flat band of the day after ``days`` (oldest first), from them only: the windows that
+        ended by the last of them, counting the sessions KRX held (``sessions_of``)."""
+        if self.band is None:
+            raise ValueError(f"{self.name}: no band rule")
+        return self.band(days, sessions_of(days, calendar)) if days else None
+
+    def scheduled_end(self, day: date, calendar: MarketCalendar) -> date:
+        """The last session of the window that starts on ``day`` by the trading calendar, as
+        known when it is predicted (#310): ``day`` itself for a window of one session."""
+        end = day
+        for _ in range(self.sessions - 1):
+            end += timedelta(days=1)
+            while not calendar.is_trading_day(end):
+                end += timedelta(days=1)
+        return end
+
+    def first_unanswered(self, today: date, calendar: MarketCalendar) -> date:
+        """The first day a starting engine answers the predictions of (``PENDING_DAYS`` back, and
+        the window's sessions before that, #310)."""
+        day = today - timedelta(days=PENDING_DAYS)
+        for _ in range(self.sessions - 1):
+            day = calendar.previous_trading_day(day)
+        return day
 
     def as_dict(self, baselines: Sequence[tuple[str, Card]]) -> dict[str, Any]:
         """As ``GET /v1/kinds`` shows it: a kind's fields, no horizon (it has no bar close), and
-        its day (``daily``)."""
+        its day (``daily``): when, between which auctions over how many sessions (#310), when its
+        answers are first looked for on its window's end day, and its review days."""
         out = super().as_dict(baselines)
         out["horizon_minutes"] = None
         out["daily"] = {
@@ -357,10 +502,13 @@ class DailyKind(Kind):
             "to": self.window[1],
             "from_title": self.window_titles[0],
             "to_title": self.window_titles[1],
-            "answer_from": ANSWER_FROM.strftime("%H:%M"),
+            "sessions": self.sessions,  # #310
+            "answer_from": self.answer_from.strftime("%H:%M"),
             "probation_days": list(self.review_rules.probation_days),
             "bench_days": list(self.review_rules.bench_days),
             "recent_days": self.recent_days,
+            "awaiting": self.awaiting,  # #310
+            "review_hold": self.review_hold,  # #310
         }
         return out
 
@@ -374,7 +522,7 @@ def register_daily_kinds(kinds: Sequence[DailyKind], taken: Sequence[Kind] = ())
     action classes), against the bar-close kinds ``taken``. A kind's name and its baselines'
     names share one set with every name before them, the bar-close kinds' and their baselines'
     included, so no name stands for two things (a kind and a baseline, in either order); one
-    without an answer or a band rule, or whose windows' overlap (#310) is not a session count, is
+    without an answer or a band rule, or whose windows' overlap (#310) is not its sessions, is
     refused too."""
     names = {k.name for k in taken} | {name for k in taken for name in k.baseline_names()}
     for k in kinds:
@@ -391,13 +539,35 @@ def register_daily_kinds(kinds: Sequence[DailyKind], taken: Sequence[Kind] = ())
             raise DailyRegistrationError(f"{k.name}: classes {k.classes}, action {k.action}, sides {k.sides}")
         if k.answers is None or k.band is None:
             raise DailyRegistrationError(f"{k.name}: no answer or band rule")
-        if k.overlap < 1:
-            raise DailyRegistrationError(f"{k.name}: its windows' overlap {k.overlap} is not a session count")
+        if k.overlap < 1 or k.sessions != k.overlap:
+            raise DailyRegistrationError(
+                f"{k.name}: its windows' overlap {k.overlap} is not its {k.sessions} sessions"
+            )
         for b in k.daily_baselines:
             if b.name in names:
                 raise DailyRegistrationError(f"{k.name}: baseline {b.name} is taken")
             names.add(b.name)
     return tuple(kinds)
+
+
+def sessions_of(days: Sequence[DayPrices], calendar: MarketCalendar | None = None) -> list[date]:
+    """The KRX sessions over a symbol's ``days`` (oldest first) that a window of several sessions
+    counts (#310): every day it has (KRX traded it) and the trading days the ``calendar`` has from
+    KIS between its first and its last (a day KRX traded that the symbol has none of: a halt, a
+    closing auction price never kept). A KIS calendar keeps a year; older days are the symbol's."""
+    have = {d.day for d in days}
+    if calendar is not None and days:
+        have.update(calendar.trading_days(days[0].day, days[-1].day))
+    return sorted(have)
+
+
+def window_end(day: date, answer: Answer) -> date | None:
+    """The day the window begun on ``day`` ended (#310): its path's ``end_day``, ``day`` itself for
+    a window of one session (whose path has none); None while it has not (``PENDING``)."""
+    if answer.unscorable == PENDING:
+        return None
+    end = answer.path.get("end_day")
+    return day if end is None else date.fromisoformat(str(end))
 
 
 def history_before(days: Sequence[DayPrices], day: date, limit: int = HISTORY_DAYS) -> list[DayPrices]:
@@ -457,10 +627,11 @@ class DailyRunner:
         started_at = now()
         # The last prediction time handled: a start after a day's time skips that day.
         self._predicted_through = started_at
-        # (kind, symbol, day) predicted and not answered yet: answered from ANSWER_FROM on.
+        # (kind, symbol, day) predicted and not answered yet: answered from its window's end day's
+        # ``DailyKind.answer_from`` on (the day itself for a window of one session, #310).
         self._pending: set[tuple[str, str, date]] = set()
-        since = kst_day(started_at) - timedelta(days=PENDING_DAYS)
         for k in self.kinds:
+            since = k.first_unanswered(kst_day(started_at), calendar)
             for symbol, day in store.daily_unanswered(k.name, k.answer_version, since):
                 self._pending.add((k.name, symbol, day))
         self._next_look = self._first_look(started_at, at_once=True) if self._pending else None
@@ -485,12 +656,19 @@ class DailyRunner:
             day += timedelta(days=1)
         return None
 
+    def _look_from(self, name: str, day: date) -> datetime:
+        """When the answer of ``name``'s window begun on ``day`` is first looked for: its scheduled
+        end day's ``answer_from`` (#310)."""
+        kind = self.kind_named(name)
+        if kind is None:
+            return datetime.combine(day, ANSWER_FROM, KST)
+        return datetime.combine(kind.scheduled_end(day, self.calendar), kind.answer_from, KST)
+
     def _first_look(self, after: datetime, *, at_once: bool = False) -> datetime:
         """The first look for answers from ``after``: the next ``ANSWER_EVERY`` step (``after``
-        itself ``at_once``, as a starting engine looks), never before the earliest waiting day's
-        ``ANSWER_FROM``."""
-        earliest = min(day for _, _, day in self._pending)
-        start = datetime.combine(earliest, ANSWER_FROM, KST)
+        itself ``at_once``, as a starting engine looks), never before the earliest waiting
+        window's first look (``_look_from``)."""
+        start = min(self._look_from(name, day) for name, _, day in self._pending)
         if after < start:
             return start
         if at_once:
@@ -518,14 +696,15 @@ class DailyRunner:
 
     async def _predict_kind(self, kind: DailyKind, day: date, at: datetime) -> None:
         histories = await asyncio.to_thread(self._histories, day)
-        bands = {s: _band(kind, h) for s, h in histories.items()}
+        bands = {s: _band(kind, h, self.calendar) for s, h in histories.items()}
         past = await asyncio.to_thread(self._past, kind, histories)
         made: list[_Made] = []
         previous = self.calendar.previous_trading_day(day)
         for baseline in kind.daily_baselines:
             forecasts: dict[str, KindForecast | None] = {}
             for symbol in self.symbols:
-                inputs = DailyInputs(symbol, day, at, past[symbol], bands[symbol], previous)
+                ended, ends = past[symbol]
+                inputs = DailyInputs(symbol, day, at, ended, bands[symbol], previous, ends)
                 forecast = baseline.predict(inputs)
                 if forecast is not None and (why := kind.invalid(forecast)) is not None:
                     raise ValueError(f"{baseline.name}: {why}")
@@ -538,7 +717,7 @@ class DailyRunner:
         self._record(kind, at, made, bands)
         for symbol in self.symbols:
             self._pending.add((kind.name, symbol, day))
-        look = datetime.combine(day, ANSWER_FROM, KST)
+        look = self._look_from(kind.name, day)
         self._next_look = look if self._next_look is None else min(self._next_look, look)
 
     async def _algorithm(
@@ -588,13 +767,18 @@ class DailyRunner:
 
     def _past(
         self, kind: DailyKind, histories: Mapping[str, list[DayPrices]]
-    ) -> dict[str, tuple[tuple[date, str | None], ...]]:
-        """Each symbol's answers of the days before, by the kind's rule."""
-        assert kind.answers is not None
-        out: dict[str, tuple[tuple[date, str | None], ...]] = {}
+    ) -> dict[str, tuple[tuple[tuple[date, str | None], ...], tuple[date, ...]]]:
+        """Each symbol's answers of the windows that ended by the days before, by the kind's
+        rule, and their end days (#310: a window not over yet is left out)."""
+        out: dict[str, tuple[tuple[tuple[date, str | None], ...], tuple[date, ...]]] = {}
         for symbol, history in histories.items():
-            answers = kind.answers(history, self.fee_rate) if history else []
-            out[symbol] = tuple((d.day, a.label) for d, a in zip(history, answers, strict=True))
+            answers = kind.answers_of(history, self.fee_rate, self.calendar) if history else []
+            ended = [
+                (d.day, a, end)
+                for d, a in zip(history, answers, strict=True)
+                if (end := window_end(d.day, a))
+            ]
+            out[symbol] = (tuple((day, a.label) for day, a, _ in ended), tuple(end for *_, end in ended))
         return out
 
     def _record(
@@ -627,8 +811,9 @@ class DailyRunner:
             self._tell(DailyStored(kind.name, at, ids=ids))
 
     async def answer(self, now: datetime) -> None:
-        """The answers of the days waiting whose KRX day is stored (its closing auction price
-        kept, #264), and of those given up on; then when to look again."""
+        """The answers of the windows waiting whose end day is stored (its closing auction price
+        kept, #264; its KRX day candle too for a window of several sessions, #310), and of those
+        given up on; then when to look again."""
         waiting = sorted(self._pending, key=lambda p: (p[2], p[0], p[1]))
         days = await asyncio.to_thread(lambda: {s: self.source.days(s) for s in {p[1] for p in waiting}})
         by_kind: dict[str, list[tuple[str, datetime, Answer, bool]]] = {}
@@ -637,17 +822,18 @@ class DailyRunner:
             if kind is None:
                 self._pending.discard((name, symbol, day))
                 continue
-            if now < datetime.combine(day, ANSWER_FROM, KST):
+            look = self._look_from(name, day)
+            if now < look:
                 continue
-            found = [d for d in days[symbol] if d.day <= day]
-            if found and found[-1].day == day:
-                answer = kind.answer_of(found[-HISTORY_DAYS:], self.fee_rate)
-                answer = _with_vis(answer, self.store, symbol, day)
-            elif now >= datetime.combine(day, ANSWER_FROM, KST) + ANSWER_GIVE_UP:
-                answer = Answer(None, NO_CLOSE, {})
+            answer = self._answer_of(kind, days[symbol], day)
+            if answer is not None:
+                end = window_end(day, answer) or day
+                answer = _with_vis(answer, self.store, symbol, day, end)
+            elif now >= look + ANSWER_GIVE_UP:
+                answer, end = Answer(None, kind.gives_up, {}), kind.scheduled_end(day, self.calendar)
             else:
                 continue
-            special = self._special_day(day)
+            special = self._special_days(day, end)
             by_kind.setdefault(name, []).append((symbol, kind.predicted_at(day), answer, special))
             self._pending.discard((name, symbol, day))
         for name, answers in by_kind.items():
@@ -658,22 +844,37 @@ class DailyRunner:
                 self._tell(DailyStored(name, now, keys=written))
         self._next_look = self._first_look(now) if self._pending else None
 
-    def _special_day(self, day: date) -> bool:
-        """Whether a circuit breaker or a sidecar (a window of the whole market) touched ``day``."""
-        start = datetime.combine(day, time(), KST)
-        windows = self.store.special_windows(None, start, start + timedelta(days=1))
+    def _answer_of(self, kind: DailyKind, stored: Sequence[DayPrices], day: date) -> Answer | None:
+        """The answer of the window begun on ``day``, from the KRX days ``stored``: None while its
+        start day is not stored or it is not over (``PENDING``)."""
+        upto = [d for d in stored if d.day <= day][-HISTORY_DAYS:]
+        if not upto or upto[-1].day != day:
+            return None
+        after = [d for d in stored if d.day > day] if kind.sessions > 1 else []
+        answer = kind.answers_of([*upto, *after], self.fee_rate, self.calendar)[len(upto) - 1]
+        return None if answer.unscorable == PENDING else answer
+
+    def _special_days(self, start: date, end: date) -> bool:
+        """Whether a circuit breaker or a sidecar (a window of the whole market) touched a day from
+        ``start`` to ``end`` (a window's sessions, #310)."""
+        since = datetime.combine(start, time(), KST)
+        until = datetime.combine(end, time(), KST) + timedelta(days=1)
+        windows = self.store.special_windows(None, since, until)
         return any(w["symbol"] is None for w in windows)
 
 
-def _band(kind: DailyKind, history: Sequence[DayPrices]) -> Band | None:
-    assert kind.band is not None
-    return kind.band(history) if history else None
+def _band(kind: DailyKind, history: Sequence[DayPrices], calendar: MarketCalendar) -> Band | None:
+    return kind.band_after(history, calendar)
 
 
-def _with_vis(answer: Answer, store: PredictionStore, symbol: str, day: date) -> Answer:
-    """``answer`` with the day's VIs of ``symbol`` counted in its path (``vi``)."""
+def _with_vis(
+    answer: Answer, store: PredictionStore, symbol: str, day: date, end: date | None = None
+) -> Answer:
+    """``answer`` with the VIs of ``symbol`` from ``day`` to ``end`` (its window's sessions, #310;
+    the day alone by default) counted in its path (``vi``)."""
     start = datetime.combine(day, time(), KST)
-    vis = [w for w in store.special_windows(symbol, start, start + timedelta(days=1)) if w["kind"] == "vi"]
+    until = datetime.combine(end or day, time(), KST) + timedelta(days=1)
+    vis = [w for w in store.special_windows(symbol, start, until) if w["kind"] == "vi"]
     return Answer(answer.label, answer.unscorable, {**answer.path, "vi": len(vis)})
 
 

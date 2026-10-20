@@ -604,6 +604,11 @@ class DayOverlap:
 INDEPENDENT = DayOverlap()
 
 
+def gains_by_day(records: Sequence[Paired], baseline: Sequence[Paired]) -> dict[date, list[float]]:
+    """The accuracy gained over ``baseline`` on each pair (1, 0 or −1), by trading day."""
+    return _gains_by_day(records, baseline)
+
+
 def _gains_by_day(records: Sequence[Paired], baseline: Sequence[Paired]) -> dict[date, list[float]]:
     by_day: dict[date, list[float]] = {}
     for at, gain in _gains(records, baseline):
@@ -647,6 +652,12 @@ def overlap_day_lift(
     days = sorted(by_day)
     means = [sum(by_day[d]) / len(by_day[d]) for d in days]
     return overlap_t_test(means, [sessions[d] for d in days], overlap, level)
+
+
+def t_quantile(q: float, df: int) -> float:
+    """The ``q`` quantile (above the median) of Student's t with ``df`` degrees of freedom (the
+    review days of an overlapping kind, ``daily.first_review_day``, #310)."""
+    return _t_quantile(q, df)
 
 
 def _t_above(x: float, df: int) -> float:
