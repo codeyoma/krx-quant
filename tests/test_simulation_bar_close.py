@@ -10,7 +10,6 @@ a new target, the engine's stage, and the scheduled job.
 
 from __future__ import annotations
 
-import time as timer
 from collections.abc import Sequence
 from dataclasses import replace
 from datetime import date, datetime, time, timedelta
@@ -35,7 +34,7 @@ from krx_quant.predictions import DB_NAME, PredictionStore
 from krx_quant.scheduled import FAILED, JOBS, OK, Facts, JobRecord, Night
 from krx_quant.simulation import BAR_CLOSE_DAYS, SimulationRun, report, simulate_bar_close
 from krx_quant.touch import TARGET_VERSION
-from tests.algorithm_doubles import FixedAlgorithm
+from tests.algorithm_doubles import FixedAlgorithm, spend
 from tests.test_prevalidation import Contrarian, swings
 from tests.test_replay_cli import record
 
@@ -56,6 +55,9 @@ def weekdays(first: date, n: int) -> list[date]:
 # Two backfilled days, then the recorded ones from Monday 14 September 2026.
 BACKFILLED = [date(2026, 9, 10), date(2026, 9, 11)]
 RECORDED = weekdays(date(2026, 9, 14), 22)
+# A simulation replays ten recorded days at least (``simulation.MIN_DAYS``), each a whole session:
+# 10-15 s on a laptop, and past the 30 s default (``pyproject.toml``) on a loaded CI runner (#327).
+TEN_DAYS = pytest.mark.timeout(120)
 
 
 def backfill(data: Path, day: date) -> None:
@@ -133,6 +135,7 @@ def statuses(s: Settings) -> dict[str, Any]:
         store.close()
 
 
+@TEN_DAYS
 async def test_ten_recorded_days_are_simulated_trained_once_before_them_and_judged_on_day_10(
     tmp_path: Path,
 ) -> None:
@@ -268,6 +271,7 @@ async def test_no_replayed_day_is_predicted_with_what_came_after_it(tmp_path: Pa
     assert outputs(first) and outputs(first) == outputs(other)
 
 
+@TEN_DAYS
 async def test_the_clone_check_reads_the_simulated_days(tmp_path: Path) -> None:
     """Two algorithms simulated together that call alike: the later one is a clone of the earlier,
     on their simulated days."""
@@ -288,6 +292,7 @@ async def test_the_clone_check_reads_the_simulated_days(tmp_path: Path) -> None:
     assert found["contrarian"].status is Status.ACTIVE
 
 
+@TEN_DAYS
 async def test_a_restart_on_a_new_target_is_simulated(tmp_path: Path) -> None:
     """An algorithm active on an old target goes back on probation when the engine first opens
     the database on a new one (#187); that probation is simulated."""
@@ -328,6 +333,7 @@ async def test_a_restart_on_a_new_target_is_simulated(tmp_path: Path) -> None:
     engine.store.close()
 
 
+@TEN_DAYS
 async def test_the_engine_s_stage_counts_the_simulated_days_and_the_next_review_is_day_20(
     tmp_path: Path,
 ) -> None:
@@ -412,6 +418,7 @@ def test_nothing_waiting_on_ten_recorded_days_says_so() -> None:
     assert report(SimulationRun(recorded_days=12), 0.983) == ["no probation waits for its simulation"]
 
 
+@TEN_DAYS
 async def test_a_kind_s_algorithm_is_simulated_on_its_kind_s_answers_against_its_baselines(
     tmp_path: Path,
 ) -> None:
@@ -472,19 +479,19 @@ async def test_the_nightly_facts_tell_the_bar_close_probations_waiting(tmp_path:
 
 
 class SlowContrarian(Contrarian):
-    """The contrarian, ``seconds`` a bar close: a cost the CPU budget counts."""
+    """The contrarian, ``seconds`` a bar close (``spend``): a cost the CPU budget counts."""
 
     def __init__(self, name: str, seconds: float) -> None:
         super().__init__(name)
         self.seconds = seconds
 
     def predict(self, features: Any, model: Any) -> Any:
-        timer.sleep(self.seconds)
+        spend(self.seconds)
         return super().predict(features, model)
 
 
 async def test_the_replay_shares_the_cpu_budget_with_the_live_algorithms_as_live(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fixed_costs: None
 ) -> None:
     """#300 review: live, an active algorithm registered before a candidate takes its share of the
     CPU budget, and the candidate, registered last, drops out when the two are over it. The replay

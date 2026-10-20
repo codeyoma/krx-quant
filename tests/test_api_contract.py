@@ -353,6 +353,9 @@ async def test_the_touch_label_served_is_of_version_3_and_the_contract_holds_it_
         check("touch", {**touches[0], "target_version": 2})
 
 
+# The demo's morning built, then every path walked: about 13 s on a laptop, and past the 30 s
+# default (``pyproject.toml``) on a loaded CI runner (#327).
+@pytest.mark.timeout(120)
 async def test_the_demo_engine_keeps_the_contract(tmp_path: Path) -> None:
     app = await demo_app(tmp_path / "demo.sqlite3")
 

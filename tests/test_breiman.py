@@ -57,6 +57,7 @@ from tests.synthetic_bars import random_walk
 from tests.test_nightly import DAYS as NIGHT_DAYS
 from tests.test_nightly import FINISHED, NIGHT, archive_events, read
 from tests.test_prevalidation import AFTER, ALPHA
+from tests.test_prevalidation import DAYS as PREVALIDATION_DAYS
 from tests.test_prevalidation import report as prevalidation_report
 from tests.test_prevalidation import settings as prevalidation_settings
 from tests.test_replay import busy_morning
@@ -467,11 +468,12 @@ def test_the_night_counts_its_answers_by_source_and_what_it_left_out(tmp_path: P
 async def test_it_is_prevalidated_on_the_barrier_s_answers_against_the_barrier_s_baselines(
     tmp_path: Path,
 ) -> None:
-    """Input: ten recorded days of a swinging market. Output: Breiman is replayed on them,
+    """Input: three recorded days of a swinging market. Output: Breiman is replayed on them,
     retrained before each day on the days before it; its report names the barrier, its lifts
     are over the barrier's two baselines and its own statistics are the barrier's (with the
-    barrier P&L)."""
-    s = prevalidation_settings(tmp_path)
+    barrier P&L). Three days, not the ten that could pass: nothing here waits for a pass, and
+    each day is a whole session replayed (#327)."""
+    s = prevalidation_settings(tmp_path, PREVALIDATION_DAYS[:3])
 
     await prevalidate(s, NAME, algorithms=[ALPHA], now=AFTER)
 
