@@ -1087,7 +1087,7 @@ report: /state/prevalidations/mandelbrot.json
 
 **가림.** 저장소가 공개라 올리기 전에 다음을 `[가림]`으로 바꾼다(`src/krx_quant/redaction.py`의 `redact`).
 - 비밀 설정값과 같은 문자열: `KIS_APP_KEY`, `KIS_APP_SECRET`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `KRX_ECOS_API_KEY`, `KRX_FRED_API_KEY`, `KRX_GITHUB_TOKEN`, `TOSS_CLIENT_ID`, `TOSS_CLIENT_SECRET`(#235), `KRX_OBJECT_STORE`(와 그 버킷 이름), `KRX_S3_ENDPOINT_URL`, `KRX_BIND_ADDRESS`. 8자보다 짧은 값은 같은 숫자를 망가뜨리지 않으려고 두지 않는다.
-- `scripts/check_forbidden.py`가 저장소에서 막는 패턴 전부(`src/krx_quant/forbidden.py`: KIS 주문 TR 코드와 엔드포인트, 토스 주문 엔드포인트와 클라이언트 값(#235), AWS 키, 텔레그램 토큰, JWT, GitHub 토큰, 개인 키).
+- `scripts/check_forbidden.py`가 저장소에서 막는 주문·비밀값 패턴(`src/krx_quant/forbidden.py`의 `RULES`: KIS 주문 TR 코드와 엔드포인트, 토스 주문 엔드포인트와 클라이언트 값(#235), AWS 키, 텔레그램 토큰, JWT, GitHub 토큰, 개인 키). 같은 파일의 `REPOSITORY_RULES`(PR 번호 자리표시, #321)는 저장소 검사에만 쓰고 가리지 않는다.
 - `*.ts.net` 이름, IPv4·IPv6 주소. 09:00:30 같은 시각은 그대로 둔다.
 
 **실패와 다시 올리기.**
