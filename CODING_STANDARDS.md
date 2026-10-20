@@ -20,7 +20,7 @@ Seen here:
 - KIS's integrated (`UN`) investor query returns `0` for days before NXT opened, meaning no figure. Training read it as zero for about 84% of Cox's rows (#295, #297).
 - One day's check found the KRX (`J`) day candle's close unlike the 15:30 closing auction once the after-market had started on 2026-09-14, and #317 read it as the after-market's last price. The year's probe then showed the close KIS finalizes is still the closing auction's: the day that differed had been stored the same evening, while KIS's candle was provisional (#264).
 
-  > **바뀜** (2026-10-21, #PRNUM): "the KRX (`J`) day candle's close stopped being the 15:30 closing auction once the after-market started" → the stored candle of the same evening is KIS's provisional one; the finalized close is the auction's. 이유: 2026-10-20 밤 `probe-close-264`.
+  > **바뀜** (2026-10-21, #342): "the KRX (`J`) day candle's close stopped being the 15:30 closing auction once the after-market started" → the stored candle of the same evening is KIS's provisional one; the finalized close is the auction's. 이유: 2026-10-20 밤 `probe-close-264`.
 - The credit balance matches Toss by settlement date, not trade date. A review based on pre-probe fixtures asked for the opposite; the probe settled it (#258).
 
 ## Tests wait for conditions
