@@ -976,6 +976,36 @@ CLOSE_PROBE = Job(
     ),
 )
 
+# The day candles asked again (#264): ``probe-close-264`` (2026-10-20) found the KRX day candle's
+# close the closing auction's on every stored day but one per symbol, the one stored the same
+# evening, while KIS's candle was still provisional. The collector now asks KIS again for each
+# file's newest stored candles every run and replaced the stored ones KIS has otherwise once, at
+# the first run after the deploy (``candles``). Once, on the first trading day's night after that
+# deploy, so that evening's candle is stored provisional: ``probe-close`` again, which now also
+# lists the days whose close is not the auction's, the newest stored days against KIS's candle as
+# it is now, and the candles the collector replaced (the run and the fields). It prints counts,
+# dates, bar times and field names, no price. The first run took 17 minutes; the 45 are a bound.
+# Before the pre-validations.
+CLOSE_REFRESH_PROBE = Job(
+    name="probe-close-refresh-264",
+    due=_first_trading_night,
+    command=("probe-close",),
+    timeout=timedelta(minutes=45),
+    targets=(
+        Target(
+            DAILY_CHECK_ISSUE,
+            note=(
+                "에이전트가 이 출력으로 일봉 다시 받기(#264)가 됐는지 확인한다: 애프터마켓 뒤에 "
+                "종가가 단일가 봉과 다른 날이 그날 저녁 저장한 날뿐인지, 그날 밤 KIS의 일봉이 아직 잠정인지, "
+                "수집기가 바꾼 봉이 어느 실행(아침 시작 또는 20:30)에서 어느 필드였는지. "
+                "그 결과를 `docs/kis-feeds.md` "
+                '"기간별 시세"와 `docs/engine-api.md` "시가→종가"에 남긴다. 출력에는 가격이 없다'
+                "(같음·다름과 개수, 날짜, 봉 시각, 필드 이름만)."
+            ),
+        ),
+    ),
+)
+
 # The single-stock ETFs' net assets (#305): the closing flow's demand of a product is
 # A·(L² − L)·r, with A its net assets on the previous trading day, and no KIS query for them was
 # measured. Once, on the first trading day's night after the deploy that brings it, so the night
@@ -1369,6 +1399,7 @@ JOBS: tuple[Job, ...] = (
     STRUCTURE_SUPPLY,
     NET_BUYS_PROBE,
     CLOSE_PROBE,
+    CLOSE_REFRESH_PROBE,
     NAV_PROBE,
     *daily_prevalidation_jobs(
         [a.name for a in DAILY_ALGORITHMS],

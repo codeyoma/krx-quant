@@ -8,17 +8,26 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from krx_quant.api import MAX_CANDLES, create_app
 from krx_quant.candles import (
+    CANDLE_SCHEMA,
     CANDLES_TR,
+    CHECKED,
+    NOTED,
     CandleKeeper,
+    Notes,
+    Replaced,
+    candles_path,
     krx_days_path,
     period_start,
     read_candles,
     read_krx_days,
+    read_notes,
     stored_candles,
     write_candles,
 )
@@ -194,8 +203,9 @@ async def test_the_next_day_only_the_new_candle_is_added(kis: FakeKis, tmp_path:
     ]
     assert len(closes(tmp_path)) == len(days)
     [asked] = day_queries(kis)
-    assert (asked["FID_INPUT_DATE_1"], asked["FID_INPUT_DATE_2"]) == ("20261013", "20261014"), (
-        "the last stored day, to see that KIS did not adjust it, and the new one"
+    assert (asked["FID_INPUT_DATE_1"], asked["FID_INPUT_DATE_2"]) == ("20261006", "20261014"), (
+        "the last five stored days (the 9th closed), to see that KIS did not adjust the oldest and"
+        " to replace any it finalized since (#264), and the new one"
     )
 
 
@@ -350,9 +360,9 @@ async def test_a_week_is_added_once_it_is_over(kis: FakeKis, tmp_path: Path) -> 
     assert [d for d, _ in closes(tmp_path, period="week")][-2:] == [date(2026, 10, 5), date(2026, 10, 12)]
     weekly = [q for q in requests_for(kis, CANDLES_TR) if q["FID_PERIOD_DIV_CODE"] == "W"]
     assert [(q["FID_INPUT_DATE_1"], q["FID_INPUT_DATE_2"]) for q in weekly] == [
-        ("20261005", "20261016"),
-        ("20261005", "20261019"),
-    ], "from the last stored week, once a run"
+        ("20260907", "20261016"),
+        ("20260907", "20261019"),
+    ], "from the last five stored weeks, once a run"
 
 
 async def test_the_api_gives_finished_weeks_months_and_years_never_the_one_going(tmp_path: Path) -> None:
@@ -504,10 +514,157 @@ async def test_the_krx_day_candles_are_kept_beside_the_integrated_ones(kis: Fake
     assert await keep(kis, tmp_path, datetime(2026, 10, 14, 21, 0, tzinfo=KST)) == 2
     assert read_krx_days(tmp_path, "005930")[-1]["date"] == date(2026, 10, 14)
     [asked] = krx_day_queries(kis)
-    assert (asked["FID_INPUT_DATE_1"], asked["FID_INPUT_DATE_2"]) == ("20261013", "20261014")
+    assert (asked["FID_INPUT_DATE_1"], asked["FID_INPUT_DATE_2"]) == ("20261006", "20261014")
 
     answer["base"] = 1_000  # a 50:1 split: KIS adjusts the past
     await keep(kis, tmp_path, datetime(2026, 10, 15, 7, 20, tzinfo=KST))
     assert [r["close"] for r in read_krx_days(tmp_path, "005930")] == [
         1_000 + 10 * i for i in range(len(days))
     ]
+
+
+def provisional(rows: list[dict[str, str]], day: date) -> list[dict[str, str]]:
+    """KIS's candles with ``day``'s as KIS gives it the evening it ends (#264): the close is the
+    latest trade (the after-market's), and the high and volume take the evening's trades in."""
+    ymd = day.strftime("%Y%m%d")
+    return [
+        {
+            **r,
+            "stck_clpr": str(int(r["stck_clpr"]) + 70),
+            "stck_hgpr": str(int(r["stck_hgpr"]) + 70),
+            "acml_vol": str(int(r["acml_vol"]) + 5),
+        }
+        if r["stck_bsop_date"] == ymd
+        else r
+        for r in rows
+    ]
+
+
+async def test_a_day_stored_the_evening_it_ends_has_its_provisional_close_replaced_the_next_run(
+    kis: FakeKis, tmp_path: Path
+) -> None:
+    """#264: at 20:30 KIS's candle of the day is provisional, and KIS finalizes it later (the KRX
+    day candle's close to the 15:30 closing auction). The next run asks the last stored days
+    again and replaces the day, in the integrated and the KRX day candles alike, without taking
+    the whole history again, and the file notes the day, the run and the fields."""
+    days = trading_days(date(2026, 6, 1), date(2026, 10, 13))
+    final = kis_candles(days)
+    answer = {"history": provisional(final, date(2026, 10, 13))}
+    kis.rest_responses[CANDLES_TR] = candles_api(lambda market, symbol: answer["history"])
+    await keep(kis, tmp_path, AFTER_HOURS)  # the 13th, 21:00
+    evening = {r["date"]: r for r in read_krx_days(tmp_path, "005930")}[date(2026, 10, 13)]
+    assert evening["close"] == int(final[-1]["stck_clpr"]) + 70, "stored as KIS gave it that evening"
+
+    answer["history"] = final  # KIS finalized it overnight
+    kis.rest_requests.clear()
+    morning = datetime(2026, 10, 14, 7, 20, tzinfo=KST)  # the morning's restart: no new day yet
+    assert await keep(kis, tmp_path, morning) == 2, "the days and the KRX days; no week is over"
+
+    for rows in (read_candles(tmp_path, "day", "005930"), read_krx_days(tmp_path, "005930")):
+        assert [r["date"] for r in rows] == days
+        assert rows[-1]["close"] == int(final[-1]["stck_clpr"])
+        assert rows[-1]["high"] == int(final[-1]["stck_hgpr"])
+        assert rows[-1]["volume"] == int(final[-1]["acml_vol"])
+    assert len(day_queries(kis)) == 1 and len(krx_day_queries(kis)) == 1, "one query each, not the history"
+    for path in (candles_path(tmp_path, "day", "005930"), krx_days_path(tmp_path, "005930")):
+        assert read_notes(path) == Notes(
+            CHECKED, (Replaced(date(2026, 10, 13), morning, ("high", "close", "volume")),)
+        )
+    assert read_notes(candles_path(tmp_path, "week", "005930")) == Notes(CHECKED, ())
+
+
+async def test_a_day_kis_finalizes_after_the_next_one_is_stored_is_still_replaced(
+    kis: FakeKis, tmp_path: Path
+) -> None:
+    """#264: before, a run asked only the newest stored day again, so a day KIS finalized once the
+    next one was stored, still provisional, kept its provisional close. Now it is asked again
+    while it is one of the last five stored."""
+    days = trading_days(date(2026, 9, 1), date(2026, 10, 15))
+    final = kis_candles(days)
+    the_13th, the_14th, the_15th = date(2026, 10, 13), date(2026, 10, 14), date(2026, 10, 15)
+    answer = {"history": provisional(provisional(final, the_13th), the_14th)}
+    kis.rest_responses[CANDLES_TR] = candles_api(lambda market, symbol: answer["history"])
+    await keep(kis, tmp_path, AFTER_HOURS)  # the 13th stored provisional
+    await keep(kis, tmp_path, datetime(2026, 10, 14, 21, 0, tzinfo=KST))  # the 14th too; the 13th still so
+
+    # The 13th final now, the 14th and the 15th still provisional: the newest stored (the 14th) is
+    # unchanged, so the old rule added the 15th and kept the 13th as it was.
+    answer["history"] = provisional(provisional(final, the_14th), the_15th)
+    kis.rest_requests.clear()
+    await keep(kis, tmp_path, datetime(2026, 10, 15, 21, 0, tzinfo=KST))
+
+    closes_now = {r["date"]: r["close"] for r in read_krx_days(tmp_path, "005930")}
+    finals = {d: int(r["stck_clpr"]) for d, r in zip(days, final, strict=True)}
+    assert closes_now[the_13th] == finals[the_13th]
+    assert (closes_now[the_14th], closes_now[the_15th]) == (finals[the_14th] + 70, finals[the_15th] + 70)
+    assert [r.day for r in read_notes(krx_days_path(tmp_path, "005930")).replaced] == [the_13th]
+    assert len(krx_day_queries(kis)) == 1, "one query, not the history"
+
+    answer["history"] = final
+    await keep(kis, tmp_path, datetime(2026, 10, 16, 7, 20, tzinfo=KST))
+    assert [r["close"] for r in read_krx_days(tmp_path, "005930")] == [finals[d] for d in days]
+
+
+async def test_a_file_written_before_the_refresh_is_checked_whole_once(kis: FakeKis, tmp_path: Path) -> None:
+    """#264: a file from before carries no check note. Its next run asks KIS for the whole
+    history, replaces each stored candle KIS has otherwise (here a provisional day weeks back),
+    keeps one KIS does not answer, and adds the new day; the run after asks the last few only."""
+    days = trading_days(date(2026, 3, 2), date(2026, 10, 13))
+    final = kis_candles(days)
+    old = [{**r, "venue": "KRX"} for r in _candles_of(provisional(final, date(2026, 9, 15))[:-1])]
+    gone = {**old[0], "date": date(2026, 2, 27)}  # a day KIS no longer answers
+    for path in (krx_days_path(tmp_path, "005930"), candles_path(tmp_path, "day", "005930")):
+        venue = "KRX" if path.name == "krx.parquet" else "UN"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        rows = [{**r, "venue": venue} for r in [gone, *old]]
+        pq.write_table(pa.Table.from_pylist(rows, schema=CANDLE_SCHEMA), path)  # no notes
+    kis.rest_responses[CANDLES_TR] = candles_api(lambda market, symbol: final)
+
+    await keep(kis, tmp_path, AFTER_HOURS)
+
+    pages = math.ceil(len(days) / PER_QUERY) + 1
+    assert len(krx_day_queries(kis)) == pages and len(day_queries(kis)) == pages, "the whole history"
+    for path in (krx_days_path(tmp_path, "005930"), candles_path(tmp_path, "day", "005930")):
+        rows = pq.read_table(path).to_pylist()
+        assert [r["date"] for r in rows] == [date(2026, 2, 27), *days]
+        assert [r["close"] for r in rows[1:]] == [int(r["stck_clpr"]) for r in final]
+        notes = read_notes(path)
+        assert notes.checked == CHECKED
+        assert [(r.day, r.at, r.fields) for r in notes.replaced] == [
+            (date(2026, 9, 15), AFTER_HOURS, ("high", "close", "volume"))
+        ]
+
+    kis.rest_requests.clear()
+    await keep(kis, tmp_path, datetime(2026, 10, 14, 7, 20, tzinfo=KST))
+    assert len(krx_day_queries(kis)) == 1 and len(day_queries(kis)) == 1, "checked: the last few only"
+
+
+def _candles_of(rows: list[dict[str, str]]) -> list[dict[str, Any]]:
+    """KIS's day candles as the keeper stores them (the integrated venue)."""
+    return [
+        {
+            "symbol": "005930",
+            "date": datetime.strptime(r["stck_bsop_date"], "%Y%m%d").date(),
+            "venue": "UN",
+            "open": int(r["stck_oprc"]),
+            "high": int(r["stck_hgpr"]),
+            "low": int(r["stck_lwpr"]),
+            "close": int(r["stck_clpr"]),
+            "volume": int(r["acml_vol"]),
+            "value": int(r["acml_tr_pbmn"]),
+        }
+        for r in rows
+    ]
+
+
+def test_a_file_notes_its_last_replaced_candles_only(tmp_path: Path) -> None:
+    path = candles_path(tmp_path, "day", "005930")
+    at_night = datetime(2026, 10, 13, 21, 0, tzinfo=KST)
+    replaced = [
+        Replaced(date(2026, 1, 1) + timedelta(days=i), at_night, ("close",)) for i in range(NOTED + 5)
+    ]
+
+    write_candles(tmp_path, "day", "005930", [], replaced)
+
+    assert read_notes(path).replaced == tuple(replaced[-NOTED:])
+    assert read_notes(tmp_path / "none.parquet") == Notes()
