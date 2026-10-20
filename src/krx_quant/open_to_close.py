@@ -61,6 +61,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping, Sequence
+from datetime import date
 from statistics import NormalDist
 from typing import Any
 
@@ -73,7 +74,7 @@ from krx_quant.feeds.base import kst_day
 from krx_quant.kinds import Answer, KindForecast, KindScored
 from krx_quant.pricing import SELL_TAX
 from krx_quant.products import INVERSE_PRODUCTS
-from krx_quant.stats import interval_json, mean_interval
+from krx_quant.stats import INDEPENDENT, DayOverlap, interval_json
 
 NAME = "open_to_close"
 CLASSES = ("up", "flat", "down")
@@ -234,13 +235,14 @@ class OtcPersist:
         return _certain(inputs.past[-1][1])
 
 
-def _pnl_json(trades: Sequence[float]) -> dict[str, Any]:
-    """Trades' P&L: how many, their total and the mean per trade with its normal 95% interval,
-    in basis points of the open."""
+def _pnl_json(trades: Sequence[tuple[date, float]], overlap: DayOverlap = INDEPENDENT) -> dict[str, Any]:
+    """Trades' P&L, each of its day: how many, their total and the mean per trade with its 95%
+    interval (normal; Driscoll–Kraay for a kind whose windows overlap, #310), in basis points of
+    the open."""
     return {
         "trades": len(trades),
-        "total_bp": sum(trades),
-        "per_trade": interval_json(mean_interval(trades)),
+        "total_bp": sum(v for _, v in trades),
+        "per_trade": interval_json(overlap.mean_interval(trades)),
     }
 
 
@@ -266,24 +268,28 @@ def inverse_profit(predicted: str, path: Mapping[str, Any], symbol: str, day: An
 
 
 def open_to_close_stats(
-    algorithm: str, records: Sequence[KindScored], baselines: Mapping[str, Sequence[KindScored]]
+    algorithm: str,
+    records: Sequence[KindScored],
+    baselines: Mapping[str, Sequence[KindScored]],
+    overlap: DayOverlap = INDEPENDENT,
 ) -> dict[str, Any]:
-    """``algorithm``'s research P&L from the open to the close (module doc)."""
-    sides: dict[str, list[float]] = {UP: [], DOWN: []}
-    inverse_shorts: list[float] = []
+    """``algorithm``'s research P&L from the open to the close (module doc), its intervals by
+    ``overlap`` (#310: Driscoll–Kraay ones for a kind whose windows overlap)."""
+    sides: dict[str, list[tuple[date, float]]] = {UP: [], DOWN: []}
+    inverse_shorts: list[tuple[date, float]] = []
     for r in records:
-        predicted = CLASSES[r.predicted]
+        predicted, day = CLASSES[r.predicted], kst_day(r.bar_close)
         if (profit := call_profit(predicted, r.path)) is not None:
-            sides[predicted].append(profit)
-        if (inverse := inverse_profit(predicted, r.path, r.symbol, kst_day(r.bar_close))) is not None:
-            inverse_shorts.append(inverse)
+            sides[predicted].append((day, profit))
+        if (inverse := inverse_profit(predicted, r.path, r.symbol, day)) is not None:
+            inverse_shorts.append((day, inverse))
     return {
         "n": len(records),
-        "pnl": _pnl_json([*sides[UP], *sides[DOWN]]),
-        "long": _pnl_json(sides[UP]),
-        "short": _pnl_json(sides[DOWN]),
-        "pnl_inverse": _pnl_json([*sides[UP], *inverse_shorts]),
-        "short_inverse": _pnl_json(inverse_shorts),
+        "pnl": _pnl_json([*sides[UP], *sides[DOWN]], overlap),
+        "long": _pnl_json(sides[UP], overlap),
+        "short": _pnl_json(sides[DOWN], overlap),
+        "pnl_inverse": _pnl_json([*sides[UP], *inverse_shorts], overlap),
+        "short_inverse": _pnl_json(inverse_shorts, overlap),
     }
 
 

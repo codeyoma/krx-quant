@@ -324,7 +324,7 @@ async def test_a_paced_demo_streams_its_last_half_hour_as_it_goes(tmp_path: Path
         events = await receive_until(ws, _a_final_consensus_and_an_outcome_seen(), timeout=30)
         await ws.close()
         status = await _until_the_demo_ends(client)
-        made = await get_json(client, "/v1/symbols/005930/predictions?limit=40&algorithm=newton")
+        made = await _until_the_morning_is_stored(client)
 
     assert any(e["type"] == "prediction" for e in events)
     assert all(e["at"] >= "2026-10-12T10:00:00+09:00" for e in events if e["type"] != "health"), "after 10:00"
@@ -381,6 +381,27 @@ async def _until_the_demo_ends(client: TestClient[Any, Any]) -> dict[str, Any]:
             status: dict[str, Any] = await get_json(client, "/v1/status")
             if status["now"] >= "2026-10-12T10:30:00+09:00":
                 return status
+            await asyncio.sleep(0.05)
+
+
+async def _until_the_morning_is_stored(client: TestClient[Any, Any]) -> dict[str, Any]:
+    """Newton's predictions of 005930 once the paced morning's last bar close is stored: its 10:30
+    prediction, and the outcome of every one made whose four minutes ended by 10:30. The clock reaching
+    10:30 is not that: the bar close's predictions are made and stored after it (#337 CI)."""
+    path = "/v1/symbols/005930/predictions?limit=40&algorithm=newton"
+    async with asyncio.timeout(30):
+        while True:
+            made: dict[str, Any] = await get_json(client, path)
+            listed = made["predictions"]
+            last = "2026-10-12T10:30:00+09:00"
+            if (
+                listed
+                and listed[0]["bar_close"] == last
+                and all(
+                    p["outcome"] is not None for p in listed if p["status"] == "ok" and p["target_at"] <= last
+                )
+            ):
+                return made
             await asyncio.sleep(0.05)
 
 

@@ -100,7 +100,7 @@ from krx_quant.kinds import (
 from krx_quant.pricing import SELL_TAX, flat_ticks, tick_size
 from krx_quant.products import INVERSE_PRODUCTS
 from krx_quant.reference import Bar
-from krx_quant.stats import interval_json, mean_interval
+from krx_quant.stats import INDEPENDENT, DayOverlap, interval_json, mean_interval
 from krx_quant.touch import BAR_BUFFER, close_side
 
 if TYPE_CHECKING:  # the algorithm contract builds on the kinds: its types only
@@ -285,10 +285,14 @@ def _pnl_json(trades: Sequence[float]) -> dict[str, Any]:
 
 
 def barrier_stats(
-    algorithm: str, records: Sequence[KindScored], baselines: Mapping[str, Sequence[KindScored]]
+    algorithm: str,
+    records: Sequence[KindScored],
+    baselines: Mapping[str, Sequence[KindScored]],
+    overlap: DayOverlap = INDEPENDENT,
 ) -> dict[str, Any]:
     """``algorithm``'s barrier P&L (module doc), from its scored barrier predictions: of all its
-    trades (``pnl``), its longs (up_first calls) and its shorts (down_first calls)."""
+    trades (``pnl``), its longs (up_first calls) and its shorts (down_first calls). A bar-close
+    kind's windows end within a day (``Kind.overlap`` 1, #310): ``overlap`` is ``INDEPENDENT``."""
     sides: dict[str, list[float]] = {UP_FIRST: [], DOWN_FIRST: []}
     inverse_shorts: list[float] = []
     for r in records:

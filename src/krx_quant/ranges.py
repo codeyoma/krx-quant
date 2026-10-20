@@ -63,7 +63,7 @@ from krx_quant.feeds.base import KST, kst_day
 from krx_quant.kinds import Answer, Followed, Kind, KindForecast, KindInputs, KindScored, went_silent
 from krx_quant.pricing import flat_ticks, tick_size
 from krx_quant.reference import Bar
-from krx_quant.stats import Interval, day_mean, interval_json, mean_interval, wilson
+from krx_quant.stats import INDEPENDENT, DayOverlap, Interval, day_mean, interval_json, mean_interval, wilson
 
 if TYPE_CHECKING:  # the algorithm contract builds on the kinds: its types only
     from krx_quant.algorithms.contract import KindSample, Model
@@ -185,11 +185,15 @@ def _mean_json(values: Sequence[tuple[datetime, float]]) -> dict[str, Any]:
 
 
 def quantile_stats(
-    algorithm: str, records: Sequence[KindScored], baselines: Mapping[str, Sequence[KindScored]]
+    algorithm: str,
+    records: Sequence[KindScored],
+    baselines: Mapping[str, Sequence[KindScored]],
+    overlap: DayOverlap = INDEPENDENT,
 ) -> dict[str, Any]:
     """``algorithm``'s quantile statistics (module doc), from its scored range predictions; its
     pinball loss less ``range-climate``'s on the bar closes both predicted, but for the climate
-    itself (known by name, scored or not yet)."""
+    itself (known by name, scored or not yet). A bar-close kind's windows end within a day
+    (``Kind.overlap`` 1, #310): ``overlap`` is ``INDEPENDENT``."""
     scored = [
         (rec, float(rec.path["r"]))
         for rec in records

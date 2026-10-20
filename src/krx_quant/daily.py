@@ -374,7 +374,8 @@ def register_daily_kinds(kinds: Sequence[DailyKind], taken: Sequence[Kind] = ())
     action classes), against the bar-close kinds ``taken``. A kind's name and its baselines'
     names share one set with every name before them, the bar-close kinds' and their baselines'
     included, so no name stands for two things (a kind and a baseline, in either order); one
-    without an answer or a band rule is refused too."""
+    without an answer or a band rule, or whose windows' overlap (#310) is not a session count, is
+    refused too."""
     names = {k.name for k in taken} | {name for k in taken for name in k.baseline_names()}
     for k in kinds:
         if not _NAME.match(k.name) or k.name in names:
@@ -390,6 +391,8 @@ def register_daily_kinds(kinds: Sequence[DailyKind], taken: Sequence[Kind] = ())
             raise DailyRegistrationError(f"{k.name}: classes {k.classes}, action {k.action}, sides {k.sides}")
         if k.answers is None or k.band is None:
             raise DailyRegistrationError(f"{k.name}: no answer or band rule")
+        if k.overlap < 1:
+            raise DailyRegistrationError(f"{k.name}: its windows' overlap {k.overlap} is not a session count")
         for b in k.daily_baselines:
             if b.name in names:
                 raise DailyRegistrationError(f"{k.name}: baseline {b.name} is taken")

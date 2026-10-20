@@ -18,32 +18,53 @@ one; a tie goes to the middle class, then the first.
 
 There is no touch P&L: it is the direction's. The lifecycle judges a kind's algorithms by
 these, against the kind's baselines, within the kind (``kind_scoring``).
+
+A kind whose windows run several sessions (#310, ``Kind.overlap``: a daily kind's window of
+five) has two days' windows share sessions, so its accuracy, precision, coverage and Brier score
+have Driscoll–Kraay intervals (``stats.overlap_interval``, not Wilson's), its paired lifts the
+same (``stats.overlap_lift``), and its lifts by trading day a Newey–West one
+(``stats.overlap_day_lift``), each over about the independent windows (``stats.overlap_df``). The
+days are placed among the trading days any of the predictors given predicted on
+(``stats.session_index``), so a day one did not predict is a blank. The calibration bins keep
+their Wilson intervals: they are not corrected for the overlap. Every entry says how many
+sessions its kind's windows run (``overlap_sessions``) and about how many independent windows
+its days hold (``independent_days``).
 """
 
 from __future__ import annotations
 
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
+from krx_quant.feeds.base import kst_day
 from krx_quant.kinds import Kind, KindScored
 from krx_quant.lifecycle import Scoring
+from krx_quant.market_calendar import MarketCalendar
 from krx_quant.stats import (
     CALIBRATION_BINS,
+    INDEPENDENT,
     CalibrationBin,
+    DayOverlap,
     Interval,
     Lift,
     Lifted,
+    Sessions,
     Tested,
     day_lift,
     enough,
+    independent_days,
     interval_json,
     lift,
     lift_low,
     lifts_json,
     mean_interval,
+    overlap_day_lift,
+    overlap_interval,
+    overlap_lift,
     q_values,
+    session_index,
     weakest_by_day,
     weakest_lift,
     wilson,
@@ -60,6 +81,8 @@ class KindSummary:
     calibration: list[CalibrationBin]  # the three classes pooled
     calibration_by_class: dict[str, list[CalibrationBin]]  # by class name, in the kind's order
     extra: dict[str, Any] | None  # the kind's own statistics; None for a kind without
+    days: int = 0  # the trading days with a scored prediction
+    overlap: int = 1  # the sessions its kind's windows run (#310, ``Kind.overlap``)
 
 
 @dataclass(frozen=True)
@@ -129,25 +152,74 @@ def split(
     return algorithms, baselines
 
 
+def sessions_of(
+    records: Sequence[KindScored],
+    baselines: Mapping[str, Sequence[KindScored]] | None = None,
+    calendar: MarketCalendar | None = None,
+) -> dict[date, int]:
+    """The KRX sessions an overlapping kind's statistics pair days by (#310), each by its place
+    (``stats.session_index``): the trading days the ``calendar`` has from KIS over the days
+    ``records`` and the ``baselines``' were made on, and those days themselves (KIS's calendar
+    keeps a year: the walk-forward's older days are those any predictor has). A day left out of
+    the statistics (special, unscorable) stays a session, so its neighbours keep their distance."""
+    groups = [records, *(baselines or {}).values()]
+    days = {kst_day(r.bar_close) for group in groups for r in group}
+    if calendar is not None and days:
+        days.update(calendar.trading_days(min(days), max(days)))
+    return session_index(days)
+
+
+def _by_day(records: Sequence[KindScored], value: Callable[[KindScored], float]) -> dict[date, list[float]]:
+    out: dict[date, list[float]] = {}
+    for r in records:
+        out.setdefault(kst_day(r.bar_close), []).append(value(r))
+    return out
+
+
 def summarize(
     records: Sequence[KindScored],
     kind: Kind,
     baselines: Mapping[str, Sequence[KindScored]] | None = None,
     algorithm: str = "",
+    sessions: Sessions | None = None,
 ) -> KindSummary:
     """A predictor's (``algorithm``'s) statistics of ``kind``; its own (``Kind.stats``) with the
-    kind's ``baselines``' records beside, to compare against (#180)."""
+    kind's ``baselines``' records beside, to compare against (#180). A kind whose windows overlap
+    (#310) has Driscoll–Kraay intervals, its own statistics' too (``stats.DayOverlap``), its days
+    placed among ``sessions`` (default: every day of ``records`` and the ``baselines``')."""
     action = {kind.index(c) for c in kind.action}
     calls = [r for r in records if r.predicted in action]
+    days = len({kst_day(r.bar_close) for r in records})
+    overlap = INDEPENDENT
+    if kind.overlap > 1:
+        at = sessions if sessions is not None else sessions_of(records, baselines)
+        overlap = DayOverlap(kind.overlap, at)
+
+        def interval(
+            group: Sequence[KindScored], value: Callable[[KindScored], float], ratio: bool
+        ) -> Interval | None:
+            return overlap_interval(_by_day(group, value), at, kind.overlap, ratio=ratio)
+
+        accuracy = interval(records, lambda r: float(r.correct), True)
+        precision = interval(calls, lambda r: float(r.correct), True)
+        coverage = interval(records, lambda r: float(r.predicted in action), True)
+        brier = interval(records, _brier, False)
+    else:
+        accuracy = wilson(sum(r.correct for r in records), len(records))
+        precision = wilson(sum(r.correct for r in calls), len(calls))
+        coverage = wilson(len(calls), len(records))
+        brier = mean_interval([_brier(r) for r in records])
     return KindSummary(
         n=len(records),
-        accuracy=wilson(sum(r.correct for r in records), len(records)),
-        precision=wilson(sum(r.correct for r in calls), len(calls)),
-        coverage=wilson(len(calls), len(records)),
-        brier=mean_interval([_brier(r) for r in records]),
+        accuracy=accuracy,
+        precision=precision,
+        coverage=coverage,
+        brier=brier,
         calibration=_calibration(records, (0, 1, 2)),
         calibration_by_class={c: _calibration(records, (i,)) for i, c in enumerate(kind.classes)},
-        extra=None if kind.stats is None else kind.stats(algorithm, records, baselines or {}),
+        extra=None if kind.stats is None else kind.stats(algorithm, records, baselines or {}, overlap),
+        days=days,
+        overlap=kind.overlap,
     )
 
 
@@ -185,19 +257,26 @@ def entry(
     baselines: dict[str, list[KindScored]],
     kind: Kind,
     day_level: float = 0.95,
+    calendar: MarketCalendar | None = None,
 ) -> KindEntry:
     """One predictor's stats of ``kind``, with its lift over each of the kind's baselines; by
-    trading day, a ``day_level`` interval."""
-    lifts = (
-        {}
-        if algorithm in baselines
-        else {
-            name: Tested(lift(records, b), by_day=day_lift(records, b, day_level))
-            for name, b in baselines.items()
-        }
-    )
+    trading day, a ``day_level`` interval. A kind whose windows overlap (#310) pairs the days
+    among the KRX sessions over every day ``records`` and the ``baselines``' were made on, the
+    ``calendar``'s trading days among them (``sessions_of``)."""
+    sessions = sessions_of(records, baselines, calendar) if kind.overlap > 1 else None
+
+    def tested(b: Sequence[KindScored]) -> Tested:
+        if sessions is None:
+            return Tested(lift(records, b), by_day=day_lift(records, b, day_level))
+        return Tested(
+            overlap_lift(records, b, sessions, kind.overlap),
+            by_day=overlap_day_lift(records, b, sessions, kind.overlap, day_level),
+        )
+
+    lifts = {} if algorithm in baselines else {name: tested(b) for name, b in baselines.items()}
     versions = sorted({r.model_version for r in records})
-    return KindEntry(algorithm, versions, summarize(records, kind, baselines, algorithm), lifts)
+    summary = summarize(records, kind, baselines, algorithm, sessions)
+    return KindEntry(algorithm, versions, summary, lifts)
 
 
 def leaderboard(
@@ -205,12 +284,17 @@ def leaderboard(
     baselines: dict[str, list[KindScored]],
     min_sample: int,
     kind: Kind,
+    calendar: MarketCalendar | None = None,
 ) -> KindBoard:
     """A kind's algorithms ranked by the lower bound of their weakest lift, as the direction's
     (``stats.leaderboard``): the candidates have at least ``min_sample`` scored predictions
     and as many pairs with each of the kind's baselines; their lifts share one FDR adjustment.
+    An overlapping kind's days are placed among the ``calendar``'s sessions too (#310, ``entry``).
     """
-    raw = [entry(name, records, baselines, kind) for name, records in sorted(by_algorithm.items())]
+    raw = [
+        entry(name, records, baselines, kind, calendar=calendar)
+        for name, records in sorted(by_algorithm.items())
+    ]
     candidates = {e.algorithm for e in raw if enough(e, min_sample)}
     adjusted_q = q_values(raw, candidates)
     adjusted = [
@@ -224,13 +308,17 @@ def leaderboard(
     return KindBoard(
         ranked,
         [e for e in adjusted if e.algorithm not in chosen],
-        [entry(name, records, baselines, kind) for name, records in sorted(baselines.items())],
+        [
+            entry(name, records, baselines, kind, calendar=calendar)
+            for name, records in sorted(baselines.items())
+        ],
     )
 
 
 def entry_json(e: KindEntry) -> dict[str, Any]:
-    """A kind's entry as the API shows it: the direction's fields without the touch P&L, and
-    the kind's own statistics (``extra``)."""
+    """A kind's entry as the API shows it: the direction's fields without the touch P&L, the
+    kind's own statistics (``extra``), and its windows' overlap (#310): the sessions they run and
+    about how many independent windows its days hold."""
     s = e.summary
     out: dict[str, Any] = {
         "rank": e.rank,
@@ -242,23 +330,27 @@ def entry_json(e: KindEntry) -> dict[str, Any]:
         "coverage": interval_json(s.coverage),
         "brier": interval_json(s.brier),
         "extra": s.extra,
+        "overlap_sessions": s.overlap,  # #310
+        "independent_days": independent_days(s.days, s.overlap),
     }
     if e.lifts:
         out["lift"] = lifts_json(e)
     return out
 
 
-def kind_scoring(kind: Kind) -> Scoring:
+def kind_scoring(kind: Kind, calendar: MarketCalendar | None = None) -> Scoring:
     """How the lifecycle judges ``kind``'s algorithms (#179): their stats against the kind's
     baselines, a clone by the first class's probability less the third's, and only the
-    predictions of models trained on the kind's answers (its answer version)."""
+    predictions of models trained on the kind's answers (its answer version). An overlapping
+    kind's days are placed among the ``calendar``'s sessions too (#310): a day the review leaves
+    out (special, unscorable) is a gap, not a neighbour."""
     first, _, third = kind.p_keys()
 
     def measure(
         name: str, rows: list[dict[str, Any]], baselines: Collection[str], fee_rate: float, level: float
     ) -> Lifted:
         algorithms, scored = split(scored_of_kind(rows, kind), baselines)
-        return entry(name, algorithms.get(name, []), scored, kind, level)
+        return entry(name, algorithms.get(name, []), scored, kind, level, calendar)
 
     def lean(row: Mapping[str, Any]) -> float:
         output = row["output"]

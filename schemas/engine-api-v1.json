@@ -1491,9 +1491,9 @@
       "unevaluatedProperties": false
     },
     "kind_entry_fields": {
-      "description": "The fields of a kind's entry (#179), open so others can add to them: the direction's without the touch P&L, and the kind's own statistics.",
+      "description": "The fields of a kind's entry (#179), open so others can add to them: the direction's without the touch P&L, the kind's own statistics, and its windows' overlap (#310).",
       "type": "object",
-      "required": ["rank", "algorithm", "model_versions", "n", "accuracy", "precision", "coverage", "brier", "extra"],
+      "required": ["rank", "algorithm", "model_versions", "n", "accuracy", "precision", "coverage", "brier", "extra", "overlap_sessions", "independent_days"],
       "properties": {
         "rank": {"type": ["integer", "null"], "minimum": 1},
         "algorithm": {"type": "string"},
@@ -1504,6 +1504,8 @@
         "coverage": {"description": "The share of calls of the kind's action classes.", "$ref": "#/$defs/interval"},
         "brier": {"$ref": "#/$defs/interval"},
         "extra": {"description": "The kind's own statistics; null for a kind without. The range's: range_stats (#180); the barrier's: barrier_stats (#183); open_to_close's: open_to_close_stats (#264).", "type": ["object", "null"]},
+        "overlap_sessions": {"description": "How many trading sessions the kind's windows run (#310): 1 for every kind but a daily kind of several sessions, whose neighbouring days' windows share sessions; then its accuracy, precision, coverage, Brier score, lifts and P&L intervals are Driscoll–Kraay ones and its lifts by trading day Newey–West ones (its calibration bins are not corrected).", "type": "integer", "minimum": 1},
+        "independent_days": {"description": "About how many independent windows the entry's trading days hold (#310): the days with a scored prediction ÷ overlap_sessions, rounded down.", "type": "integer", "minimum": 0},
         "lift": {"$ref": "#/$defs/lift"}
       }
     },
