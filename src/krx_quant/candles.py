@@ -4,10 +4,25 @@ the chart (#111, #112).
 The chart's day, week, month and year views scroll back as far as KIS has candles, so the
 collector keeps every predicted symbol's whole history of finished candles of each period
 (``FHKST03010100``, at most 100 a query). The first run takes all of it, paging back from
-the last finished trading day; later runs ask from the last stored candle on and add what
-is new. Prices are adjusted (``FID_ORG_ADJ_PRC=0``), as on a broker's chart: when KIS
-adjusts the past (a split, say), the last stored candle no longer matches KIS's, and the
-whole history is taken again.
+the last finished trading day. Later runs ask again from the last ``REFRESH_CANDLES`` stored
+candles on, replace those KIS has changed since, and add what is new. Prices are adjusted
+(``FID_ORG_ADJ_PRC=0``), as on a broker's chart: when KIS adjusts the past (a split, say), the
+oldest of the candles asked again no longer matches KIS's, and the whole history is taken again.
+
+**Why the last few are asked again (#264).** A day's candle is stored the evening it ends (from
+20:30), while KIS's candle of that day is still provisional: its close is the latest trade (from
+2026-09-14 the KRX after-market's) until KIS finalizes it to the 15:30 closing auction. The
+scheduled job ``probe-close-264`` (2026-10-20) found the stored KRX day candle's close equal to
+the closing auction's on every day of the year but one per symbol, which equalled the day's last
+bar. Before, a run asked only the newest stored candle again and took a change in it for an
+adjustment. So a day was fixed only while it was still the newest, by taking the whole history
+again.
+
+**Checked once (#264).** A file written before this carries no ``CHECKED`` note (in the parquet
+schema's metadata). Its next run asks KIS for the whole history and replaces each stored candle
+KIS now has otherwise, so no provisional day kept from before stays. Each file also notes the
+last ``NOTED`` candles a run replaced because KIS had changed them (the day, the run's time, the
+fields). ``probe-close`` prints them: when KIS finalizes a day, and what it changes.
 
 A candle is stored by the day its period starts (KST): the day itself, the week's Monday,
 the month's 1st, the year's 1 January, whatever day KIS labels it with. Only finished
@@ -23,16 +38,19 @@ Beside them each symbol keeps its day candles of the KRX market alone (``J``, #2
 folder's ``krx.parquet``: an integrated day candle opens at NXT's 08:00 pre-market open, not at
 the KRX opening auction (its high, low and close are KRX's, docs/kis-feeds.md), and the daily
 ``open_to_close`` kind is answered and trained on the KRX auctions' open and close. They are
-kept by the same rules: the whole history at first, the new finished days after, all of it
-again when the last stored day changed at KIS (adjusted).
+kept by the same rules: the whole history at first, then the last few asked again and the new
+finished days added, all of it again when KIS adjusted the past.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
+from typing import Any
 
 import aiohttp
 import pyarrow as pa
@@ -58,6 +76,18 @@ _MAX_QUERIES = 600
 # The KRX market's day candles (#264): beside the integrated ones, in the day folder.
 KRX_DAYS_FILE = "krx.parquet"
 KRX_MARKET = "J"
+# Each run asks KIS again for this many of a file's newest stored candles (#264): one query, as
+# before. The oldest of them is the anchor: as stored, KIS did not adjust the past, and the newer
+# ones are replaced where KIS changed them (a day stored provisional the evening it ended); not,
+# the whole history is taken again. A day stays in it for five trading days, ten runs or so.
+REFRESH_CANDLES = 5
+# The fields a replaced candle is noted with when KIS changed them.
+FIELDS = ("open", "high", "low", "close", "volume", "value")
+# The file's notes, in its parquet schema's metadata (#264): the whole-file check it has had, and
+# the last candles a run replaced.
+_NOTES_KEY = b"krx_quant"
+CHECKED = 1  # a file without it (written before #264's refresh) is checked whole once
+NOTED = 30  # the replaced candles a file notes, newest last
 
 CANDLE_SCHEMA = pa.schema(
     [
@@ -72,6 +102,31 @@ CANDLE_SCHEMA = pa.schema(
         ("value", pa.int64()),  # traded value in won
     ]
 )
+
+
+@dataclass(frozen=True)
+class Replaced:
+    """A stored candle a run replaced because KIS had changed it since (#264)."""
+
+    day: date  # the candle's date (its period's first day)
+    at: datetime  # the run that replaced it
+    fields: tuple[str, ...]  # which of ``FIELDS`` KIS changed
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"date": self.day.isoformat(), "at": self.at.isoformat(), "fields": list(self.fields)}
+
+    @classmethod
+    def of(cls, d: dict[str, Any]) -> Replaced:
+        return cls(date.fromisoformat(d["date"]), datetime.fromisoformat(d["at"]), tuple(d["fields"]))
+
+
+@dataclass(frozen=True)
+class Notes:
+    """A candle file's notes (#264): the whole-file check it has had (0: none) and the last
+    candles a run replaced, oldest first."""
+
+    checked: int = 0
+    replaced: tuple[Replaced, ...] = ()
 
 
 def period_start(day: date, period: str) -> date:
@@ -119,20 +174,39 @@ def _read(path: Path) -> list[Row]:
     return rows
 
 
-def write_candles(data_dir: Path, period: str, symbol: str, rows: Sequence[Row]) -> None:
-    """Replace the stored candles, whole or not at all."""
-    _write(candles_path(data_dir, period, symbol), rows)
+def read_notes(path: Path) -> Notes:
+    """A candle file's notes (#264); none for a file without them, or no file."""
+    if not path.exists():
+        return Notes()
+    raw = (pq.read_schema(path).metadata or {}).get(_NOTES_KEY)
+    if raw is None:
+        return Notes()
+    notes = json.loads(raw)
+    return Notes(int(notes.get("checked", 0)), tuple(Replaced.of(r) for r in notes.get("replaced", ())))
 
 
-def write_krx_days(data_dir: Path, symbol: str, rows: Sequence[Row]) -> None:
-    """Replace the stored KRX day candles (#264), whole or not at all."""
-    _write(krx_days_path(data_dir, symbol), rows)
+def write_candles(
+    data_dir: Path, period: str, symbol: str, rows: Sequence[Row], replaced: Sequence[Replaced] = ()
+) -> None:
+    """Replace the stored candles, whole or not at all, noted as checked with ``replaced``."""
+    _write(candles_path(data_dir, period, symbol), rows, replaced)
 
 
-def _write(path: Path, rows: Sequence[Row]) -> None:
+def write_krx_days(
+    data_dir: Path, symbol: str, rows: Sequence[Row], replaced: Sequence[Replaced] = ()
+) -> None:
+    """Replace the stored KRX day candles (#264), whole or not at all, noted as ``write_candles``."""
+    _write(krx_days_path(data_dir, symbol), rows, replaced)
+
+
+def _write(path: Path, rows: Sequence[Row], replaced: Sequence[Replaced] = ()) -> None:
+    """Write the file whole (a temporary file renamed), noted as checked, with the last
+    ``NOTED`` of ``replaced``."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.tmp")
-    pq.write_table(pa.Table.from_pylist(list(rows), schema=CANDLE_SCHEMA), tmp)
+    notes = {"checked": CHECKED, "replaced": [r.as_dict() for r in list(replaced)[-NOTED:]]}
+    schema = CANDLE_SCHEMA.with_metadata({_NOTES_KEY: json.dumps(notes).encode()})
+    pq.write_table(pa.Table.from_pylist(list(rows), schema=schema), tmp)
     tmp.rename(path)
 
 
@@ -146,6 +220,27 @@ def stored_candles(
     now = period_start(today, period)
     found = [r for r in rows if datetime.combine(r["date"], time(), KST) < before and r["date"] < now]
     return (rows[-1]["venue"] if rows else None), found[-limit:]
+
+
+async def candles_page(
+    client: RestClient, period: str, market: str, symbol: str, first: date, last: date
+) -> list[tuple[date, Row]]:
+    """One query: the candles KIS labels from ``first`` to ``last`` (at most 100, the newest), each
+    with KIS's label and stored by its period's first day; KIS's blank padding left out."""
+    params = {
+        "FID_COND_MRKT_DIV_CODE": market,
+        "FID_INPUT_ISCD": symbol,
+        "FID_INPUT_DATE_1": first.strftime("%Y%m%d"),
+        "FID_INPUT_DATE_2": last.strftime("%Y%m%d"),
+        "FID_PERIOD_DIV_CODE": PERIODS[period],
+        "FID_ORG_ADJ_PRC": "0",  # adjusted prices
+    }
+    body = await client.get(CANDLES_TR, CANDLES_PATH, params)
+    return [
+        (d, _candle(symbol, MARKETS[market], period_start(d, period), r))
+        for r in body.get("output2") or []
+        if (d := _date(r)) is not None and first <= d <= last
+    ]
 
 
 class CandleKeeper:
@@ -174,74 +269,86 @@ class CandleKeeper:
         for period in PERIODS:
             for symbol in self._symbols:
                 try:
-                    changed += await self.update(period, symbol, last)
+                    changed += await self.update(period, symbol, last, now)
                 except (KisError, aiohttp.ClientError, OSError, ValueError, KeyError, TimeoutError) as e:
                     log.warning("%s candles of %s not updated: %s", period, symbol, e)
         for symbol in self._symbols:
             try:
-                changed += await self.update_krx_days(symbol, last)
+                changed += await self.update_krx_days(symbol, last, now)
             except (KisError, aiohttp.ClientError, OSError, ValueError, KeyError, TimeoutError) as e:
                 log.warning("KRX day candles of %s not updated: %s", symbol, e)
         return changed
 
-    async def update(self, period: str, symbol: str, last: date) -> bool:
-        """Add the finished candles up to ``last`` that are not stored yet; True if the file
-        changed.
+    async def update(self, period: str, symbol: str, last: date, now: datetime) -> bool:
+        """Bring the symbol's candles of ``period`` up to ``last`` (``_keep``); True if the file
+        changed. The market is the one the stored history came from."""
+        return await self._keep(candles_path(self._data_dir, period, symbol), period, None, symbol, last, now)
 
-        The last stored candle is asked again every run, a new one due or not, so a past
-        KIS adjusted (a split before the open, say) is taken again at once.
-        """
-        stored = read_candles(self._data_dir, period, symbol)
+    async def update_krx_days(self, symbol: str, last: date, now: datetime) -> bool:
+        """The same for the symbol's KRX day candles (#264): the KRX market (``J``) only, so the
+        open is the opening auction's; True if the file changed."""
+        return await self._keep(krx_days_path(self._data_dir, symbol), "day", KRX_MARKET, symbol, last, now)
+
+    async def _keep(
+        self, path: Path, period: str, market: str | None, symbol: str, last: date, now: datetime
+    ) -> bool:
+        """Ask KIS again for the last ``REFRESH_CANDLES`` stored candles and the finished ones up
+        to ``last``: replace the stored ones KIS changed since (a day stored provisional), add the
+        new ones. If KIS changed the oldest of them (it adjusted the past), take the whole history
+        again; a file not checked yet (``CHECKED``) is compared whole once. True if it changed."""
+        label = "KRX day" if market == KRX_MARKET else period
+        stored = _read(path)
+        notes = read_notes(path)
         if stored:
-            newest = stored[-1]
-            market = _market(newest["venue"])
-            fresh = await self._walk(period, market, symbol, newest["date"], max(last, newest["date"]))
-            again = next((r for r in fresh if r["date"] == newest["date"]), None)
-            if again is not None and _prices(again) == _prices(newest):
-                new = [r for r in fresh if r["date"] > newest["date"] and finished(period, r["date"], last)]
-                if not new:
+            asked = market or _market(stored[-1]["venue"])
+            end = max(last, stored[-1]["date"])
+            if notes.checked < CHECKED:
+                fresh = await self._walk(period, asked, symbol, _FIRST_DAY, end)
+                if not fresh:
+                    log.info("no %s candles of %s at KIS to check the stored ones against", label, symbol)
                     return False
-                write_candles(self._data_dir, period, symbol, [*stored, *new])
+                rows, changes = _merged(stored, fresh, period, last)
+                log.info(
+                    "%s candles of %s checked whole against KIS (#264): %s replaced, %s added",
+                    label,
+                    symbol,
+                    len(changes),
+                    len(rows) - len(stored),
+                )
+                _write(path, rows, _noted(notes, changes, now))
+                return True
+            anchor = stored[-min(REFRESH_CANDLES, len(stored))]
+            fresh = await self._walk(period, asked, symbol, anchor["date"], end)
+            again = next((r for r in fresh if r["date"] == anchor["date"]), None)
+            if again is not None and _prices(again) == _prices(anchor):
+                rows, changes = _merged(stored, fresh, period, last)
+                if rows == stored:
+                    return False
+                for day, fields in changes:
+                    log.info(
+                        "%s candle of %s on %s changed at KIS since it was stored (%s): replaced",
+                        label,
+                        symbol,
+                        day,
+                        ", ".join(fields),
+                    )
+                _write(path, rows, _noted(notes, changes, now))
                 return True
             log.info(
                 "%s candles of %s changed at %s (adjusted?): taking the whole history again",
-                period,
+                label,
                 symbol,
-                newest["date"],
+                anchor["date"],
             )
-        history = [r for r in await self._history(period, symbol, last) if finished(period, r["date"], last)]
+        if market is None:
+            taken = await self._history(period, symbol, last)
+        else:
+            taken = await self._walk(period, market, symbol, _FIRST_DAY, last)
+        history = [r for r in taken if finished(period, r["date"], last)]
         if not history:
-            log.info("no %s candles of %s at KIS yet; the next run asks again", period, symbol)
+            log.info("no %s candles of %s at KIS yet; the next run asks again", label, symbol)
             return False
-        write_candles(self._data_dir, period, symbol, history)
-        return True
-
-    async def update_krx_days(self, symbol: str, last: date) -> bool:
-        """``update`` of the symbol's KRX day candles (#264): the KRX market (``J``) only, so the
-        open is the opening auction's; True if the file changed."""
-        stored = read_krx_days(self._data_dir, symbol)
-        if stored:
-            newest = stored[-1]
-            fresh = await self._walk("day", KRX_MARKET, symbol, newest["date"], max(last, newest["date"]))
-            again = next((r for r in fresh if r["date"] == newest["date"]), None)
-            if again is not None and _prices(again) == _prices(newest):
-                new = [r for r in fresh if newest["date"] < r["date"] <= last]
-                if not new:
-                    return False
-                write_krx_days(self._data_dir, symbol, [*stored, *new])
-                return True
-            log.info(
-                "KRX day candles of %s changed at %s (adjusted?): taking them all again",
-                symbol,
-                newest["date"],
-            )
-        history = [
-            r for r in await self._walk("day", KRX_MARKET, symbol, _FIRST_DAY, last) if r["date"] <= last
-        ]
-        if not history:
-            log.info("no KRX day candles of %s at KIS yet; the next run asks again", symbol)
-            return False
-        write_krx_days(self._data_dir, symbol, history)
+        _write(path, history, notes.replaced)
         return True
 
     async def _history(self, period: str, symbol: str, last: date) -> list[Row]:
@@ -258,22 +365,8 @@ class CandleKeeper:
         candles: dict[date, Row] = {}
         end = last
         for _ in range(_MAX_QUERIES):
-            params = {
-                "FID_COND_MRKT_DIV_CODE": market,
-                "FID_INPUT_ISCD": symbol,
-                "FID_INPUT_DATE_1": first.strftime("%Y%m%d"),
-                "FID_INPUT_DATE_2": end.strftime("%Y%m%d"),
-                "FID_PERIOD_DIV_CODE": PERIODS[period],
-                "FID_ORG_ADJ_PRC": "0",  # adjusted prices
-            }
             await self._pace.acquire()
-            body = await self._client.get(CANDLES_TR, CANDLES_PATH, params)
-            # KIS pads an answer with blank rows; keep the dated ones in the range.
-            labelled = [
-                (d, _candle(symbol, MARKETS[market], period_start(d, period), r))
-                for r in body.get("output2") or []
-                if (d := _date(r)) is not None and first <= d <= last
-            ]
+            labelled = await candles_page(self._client, period, market, symbol, first, end)
             new = [(d, r) for d, r in labelled if r["date"] not in candles]
             candles.update((r["date"], r) for _, r in new)
             if not new:
@@ -294,6 +387,32 @@ def last_finished(calendar: MarketCalendar, now: datetime) -> date:
     if calendar.is_trading_day(today) and local.time() >= BARS_FINAL_AT:
         return today
     return calendar.previous_trading_day(today)
+
+
+def _merged(
+    stored: Sequence[Row], fresh: Sequence[Row], period: str, last: date
+) -> tuple[list[Row], list[tuple[date, tuple[str, ...]]]]:
+    """The stored candles with KIS's finished ones over them, oldest first, and the stored ones
+    KIS changed (each with the fields). A stored candle KIS did not answer stays."""
+    by_day = {r["date"]: r for r in stored}
+    changes: list[tuple[date, tuple[str, ...]]] = []
+    for r in fresh:
+        if not finished(period, r["date"], last):
+            continue
+        old = by_day.get(r["date"])
+        if old is not None:
+            fields = tuple(f for f in FIELDS if old[f] != r[f])
+            if not fields:
+                continue
+            changes.append((r["date"], fields))
+        by_day[r["date"]] = r
+    return [by_day[d] for d in sorted(by_day)], changes
+
+
+def _noted(notes: Notes, changes: Sequence[tuple[date, tuple[str, ...]]], now: datetime) -> list[Replaced]:
+    """The file's replaced candles with this run's after them."""
+    at = now.astimezone(KST)
+    return [*notes.replaced, *(Replaced(day, at, fields) for day, fields in changes)]
 
 
 def _market(venue: str) -> str:

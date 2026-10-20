@@ -16,8 +16,11 @@ auctions' prices.
    different: the output holds no price, so it can go on the public issue.
 
    > On 2026-10-19 (the scheduled job ``daily-check-264``) the candle's open was the print and its
-   > close was not, on all three symbols: since KRX's after-market (2026-09-14) the candle's close
-   > is most likely its last price, so the answers end at the kept closing auction price instead.
+   > close was not, on all three symbols, so the answers end at the kept closing auction price
+   > instead (#317). That evening's candle was KIS's provisional one, its close the after-market's
+   > last trade; the close KIS finalizes is the closing auction's (``probe-close-264``,
+   > 2026-10-20), and the collector now asks the last stored days again (``candles``). A day
+   > checked the evening it ended still shows the provisional close.
 
 It reads the engine DB read-only, the stored candles and the recorded events; it writes nothing
 and calls nothing, so it may run beside the engine.

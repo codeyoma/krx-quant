@@ -23,11 +23,20 @@ reach it, and the page to the opening's. It counts:
 - on the recorded days (``auctions.recorded_prints``), the recorded closing print against the
   auction's bar and against the candle.
 
-If the candle's close equals the last bar's and not the auction's on the days from the
-after-market and the auction's on the days before, it is the after-market's last price. It prints
-counts and bar times only, no price, so its report can go on the public issue (the scheduled job
-``probe-close-264``). Calls are spaced ``PACE`` apart, under the REST limit the collector shares,
-with the cached access token while it is valid (no early refresh).
+It ran on 2026-10-20 (``probe-close-264``): the candle's close was the auction bar's on every day
+before the after-market and on all but one day from it per symbol, that one the last bar's, so the
+close KIS finalizes is the closing auction's, and the day that differed most likely the one
+stored the same evening, still provisional (``candles``, #264). So it also lists, from the after-market on,
+the days whose candle's close is not the auction bar's, and, for the last ``RECENT`` stored days,
+KIS's KRX day candle as it is now (one query a symbol) against the stored one and against the
+auction bar: whether the refresh replaced a provisional day, and whether KIS's newest day is
+still provisional at night. Last, the candles the collector replaced since they were stored, from
+each file's notes (``candles.read_notes``): the day, the run that saw KIS's change and the fields.
+
+It prints counts, dates, bar times and field names only, no price, so its report can go on the
+public issue (the scheduled jobs ``probe-close-264`` and ``probe-close-refresh-264``). Calls are
+spaced ``PACE`` apart, under the REST limit the collector shares, with the cached access token
+while it is valid (no early refresh).
 """
 
 from __future__ import annotations
@@ -50,7 +59,17 @@ from krx_quant.auctions import (
     recorded_prints,
 )
 from krx_quant.auth import tokens_and_client
-from krx_quant.candles import read_krx_days
+from krx_quant.candles import (
+    FIELDS,
+    KRX_MARKET,
+    PERIODS,
+    Notes,
+    candles_page,
+    candles_path,
+    krx_days_path,
+    read_krx_days,
+    read_notes,
+)
 from krx_quant.config import Settings
 from krx_quant.feeds.base import KST, Row
 from krx_quant.kis import KisError, RestClient
@@ -63,6 +82,8 @@ PACE = 0.25  # seconds between calls: three symbols' year is about 1,600 calls, 
 YEAR = timedelta(days=365)
 MAX_SYMBOLS = 5
 MAX_FAILED_IN_A_ROW = 10  # then KIS is down or refusing: the rest is not asked
+RECENT = 10  # the newest stored days asked of KIS's day candles again (one query a symbol)
+DATES_SHOWN = 10  # the days listed by date, the newest; the rest counted
 _DAY_END = time(23, 59, 59)
 
 
@@ -70,6 +91,7 @@ _DAY_END = time(23, 59, 59)
 class Day:
     """What one day's bars said, against its candle (and its recording)."""
 
+    day: date | None = None
     bars: bool = False  # KIS had bars that day
     last_at: str | None = None  # the last bar's time, HH:MM
     auction_at: str | None = None  # the closing auction's bar's time, HH:MM
@@ -79,6 +101,7 @@ class Day:
     recorded_auction: bool | None = None  # the recorded closing print = the auction's bar's close
     recorded_candle: bool | None = None  # the recorded closing print = the candle's close
     error: str | None = None
+    auction_close: int | None = None  # the auction bar's close, kept to compare, never printed
 
 
 @dataclass
@@ -123,6 +146,9 @@ class Tally:
         out.append(
             "    일봉 시가 = 시가 단일가 봉(개장 분의 봉) 시가: " + _same([d.open_same for d in with_bars])
         )
+        unlike = [d.day for d in with_bars if d.close_auction is False and d.day is not None]
+        if unlike:
+            out.append("    일봉 종가가 단일가 봉과 다른 날: " + _dates(unlike))
         recorded = [d for d in days if d.recorded_candle is not None]
         if recorded:
             out.append(
@@ -139,6 +165,13 @@ def _same(flags: Sequence[bool | None]) -> str:
     different = sum(1 for f in flags if f is False)
     missing = sum(1 for f in flags if f is None)
     return f"같음 {same} · 다름 {different}" + (f" · 견줄 것 없음 {missing}" if missing else "")
+
+
+def _dates(days: Sequence[date]) -> str:
+    """The days, the newest ``DATES_SHOWN`` by date and the rest counted."""
+    shown = sorted(days)[-DATES_SHOWN:]
+    more = len(days) - len(shown)
+    return ", ".join(d.isoformat() for d in shown) + (f" 외 {more}일" if more else "")
 
 
 def _counts(counter: Counter[str]) -> str:
@@ -180,6 +213,25 @@ class _Asker:
         self._failed_in_a_row += 1
         raise _Failed(reason)
 
+    async def candles(self, symbol: str, first: date, last: date) -> dict[date, Row]:
+        """KIS's KRX (``J``) day candles from ``first`` to ``last`` as they are now, by day; raises
+        ``_Failed`` with KIS's refusal."""
+        if self.calls:
+            await asyncio.sleep(PACE)
+        self.calls += 1
+        try:
+            labelled = await candles_page(self._client, "day", KRX_MARKET, symbol, first, last)
+        except KisError as e:
+            reason = kis_error(e)
+        except (aiohttp.ClientError, OSError, ValueError, KeyError) as e:  # OSError: timeouts too
+            reason = f"error {type(e).__name__}"
+        else:
+            self._failed_in_a_row = 0
+            return {r["date"]: r for _, r in labelled}
+        self.failed += 1
+        self._failed_in_a_row += 1
+        raise _Failed(reason)
+
 
 class _Failed(Exception):
     pass
@@ -189,27 +241,29 @@ async def _day(asker: _Asker, data_dir: Path, calendar: MarketCalendar, symbol: 
     day: date = candle["date"]
     session = calendar.session(day)
     if session is None:
-        return Day(error="세션 없음")
+        return Day(day, error="세션 없음")
     try:
         latest = await asker.page(symbol, day, datetime.combine(day, _DAY_END, KST))
         if not latest:
-            return Day()
+            return Day(day)
         closing = latest
         if latest[0]["bar_time"] > session.close:  # the latest page does not reach the auction
             closing = await asker.page(symbol, day, session.close + PRINT_WITHIN - timedelta(seconds=1))
         opening = await asker.page(symbol, day, session.open + PRINT_WITHIN - timedelta(seconds=1))
     except _Failed as e:
-        return Day(error=str(e))
+        return Day(day, error=str(e))
     auction = print_bar(closing, session.close)
     first = opening_bar(opening, session)
     last = latest[-1]
     found = Day(
+        day=day,
         bars=True,
         last_at=_hhmm(last),
         auction_at=_hhmm(auction),
         close_auction=None if auction is None else auction["close"] == candle["close"],
         close_last=last["close"] == candle["close"],
         open_same=None if first is None else first["open"] == candle["open"],
+        auction_close=None if auction is None else auction["close"],
     )
     prints = recorded_prints(data_dir, day, symbol, session)
     if prints is not None and prints[1] is not None:
@@ -248,7 +302,7 @@ async def probe_close(settings: Settings, today: date, out: Out = print) -> tupl
             before, after = Tally(), Tally()
             for candle in candles:
                 if asker.stopped:
-                    found = Day(error=f"묻지 않음: {MAX_FAILED_IN_A_ROW}번 잇달아 실패")
+                    found = Day(candle["date"], error=f"묻지 않음: {MAX_FAILED_IN_A_ROW}번 잇달아 실패")
                 else:
                     found = await _day(asker, settings.data_dir, calendar, symbol, candle)
                 (after if candle["date"] >= AFTER_MARKET_OPENED else before).days.append(found)
@@ -258,6 +312,68 @@ async def probe_close(settings: Settings, today: date, out: Out = print) -> tupl
                 out(line)
             for line in after.lines(f"애프터마켓 뒤({AFTER_MARKET_OPENED}~)"):
                 out(line)
+            days = {d.day: d for d in (*before.days, *after.days) if d.day is not None}
+            for line in await _recent(asker, symbol, candles[-RECENT:], days):
+                out(line)
+            for line in _replaced(settings.data_dir, symbol):
+                out(line)
     out("")
     out(f"KIS: {asker.calls}번 조회, {asker.failed}번 실패")
     return asker.calls, asker.failed
+
+
+async def _recent(asker: _Asker, symbol: str, stored: Sequence[Row], days: dict[date, Day]) -> list[str]:
+    """The newest stored days against KIS's KRX day candle as it is now (one query) and that
+    against the auction bar: a line a day, the fields that differ named, no price."""
+    if not stored:
+        return []
+    title = f"  KIS가 지금 주는 KRX 일봉(최근 {len(stored)}일, 다시 받음)"
+    if asker.stopped:
+        return [f"{title}: 묻지 않음: {MAX_FAILED_IN_A_ROW}번 잇달아 실패"]
+    try:
+        now = await asker.candles(symbol, stored[0]["date"], stored[-1]["date"])
+    except _Failed as e:
+        return [f"{title}: 조회 실패 {e}"]
+    out = [title + ": 저장한 봉과 다른 필드 · KIS 종가와 종가 단일가 봉"]
+    for candle in stored:
+        day: date = candle["date"]
+        fresh = now.get(day)
+        if fresh is None:
+            out.append(f"    {day}: KIS에 없음")
+            continue
+        fields = [f for f in FIELDS if fresh[f] != candle[f]]
+        found = days.get(day)
+        auction = None if found is None else found.auction_close
+        against = "봉 없음" if auction is None else ("같음" if fresh["close"] == auction else "다름")
+        same = f"다름({', '.join(fields)})" if fields else "같음"
+        out.append(f"    {day}: 저장 = KIS {same} · 종가 {against}")
+    return out
+
+
+def _replaced(data_dir: Path, symbol: str) -> list[str]:
+    """The candles the collector replaced since it stored them, from each file's notes: the day,
+    the run (KST) and the fields."""
+    files = [("KRX 일봉", krx_days_path(data_dir, symbol))] + [
+        (f"통합 {name}", candles_path(data_dir, period, symbol))
+        for period, name in zip(PERIODS, ("일봉", "주봉", "월봉", "년봉"), strict=True)
+    ]
+    out = ["  수집기가 저장 뒤 KIS가 바꿔 바꾼 봉(파일의 기록, 최근 것부터): 봉 날짜 ← 바꾼 실행 · 필드"]
+    for name, path in files:
+        notes: Notes = read_notes(path)
+        if not path.exists():
+            out.append(f"    {name}: 파일 없음")
+        elif not notes.checked:
+            out.append(f"    {name}: 기록 없음(아직 한 번 전체 대조 전)")
+        elif not notes.replaced:
+            out.append(f"    {name}: 없음")
+        else:
+            shown = list(reversed(notes.replaced))[:DATES_SHOWN]
+            more = len(notes.replaced) - len(shown)
+            out.append(
+                f"    {name} {len(notes.replaced)}개: "
+                + "; ".join(
+                    f"{r.day} ← {r.at.astimezone(KST):%m-%d %H:%M} · {', '.join(r.fields)}" for r in shown
+                )
+                + (f" 외 {more}개" if more else "")
+            )
+    return out
