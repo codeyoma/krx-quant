@@ -12,6 +12,10 @@ Default five-role vocabulary: `needs-triage`, `needs-info`, `ready-for-agent`, `
 
 Single-context: root `CONTEXT.md` + `docs/adr/`, plus the agreed system design in `docs/design.md`. See `docs/agents/domain.md`.
 
+### PR checklist
+
+Worktree, checks, commits, docs, PRs, reviews and stacked PRs: `docs/agents/pr-checklist.md`. A task handed to an agent points there.
+
 ## Git workflow
 
 - Never push to `main` directly. Start each change on a branch from `origin/main`, push the branch, open a pull request against `main` (`Closes #N` for the issue it implements), and merge it from the PR once CI passes.
