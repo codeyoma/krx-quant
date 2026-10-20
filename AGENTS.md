@@ -26,6 +26,11 @@ Reviewers apply `CODING_STANDARDS.md` to every diff: external data is probed bef
 - The one exception is the `fincept-pointer` workflow: it pushes commits that change only the `fincept` pointer straight to `main` (Submodule workflow, step 4).
 - The `fincept/` fork follows its own rules (`fincept/custom/AGENTS.md`).
 
+## Shared checkouts
+
+- Several sessions work in this repository at once. The main checkout and its `fincept/` belong to whoever opened them: work in your own worktree (`git worktree add <scratchpad>/<name> -b <branch> origin/main`, the fork's off `origin/custom`), and delete only your own branches, one at a time.
+- `.claude/hooks/guard_main_checkout.py` (#325) refuses, in a main checkout, switching branches (except back to `main` or the fork's `custom`), deleting several branches at once, `git reset --hard`, `git clean -f` and `git stash`.
+
 ## Documentation
 
 - Other agents learn the system from `docs/`, `README.md` and `.env.example`, not from chat history. Every PR updates the docs for what it adds or changes: settings, commands, API fields, stored files and keys, schedules, alerts and decisions.
