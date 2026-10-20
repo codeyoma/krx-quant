@@ -4,10 +4,14 @@ Every change to this repository or the fork goes through these steps. A task han
 
 ## Worktree
 
-Work in your own worktree; the main checkouts are shared (AGENTS.md "Shared checkouts").
+Work in your own worktree; the main checkouts are shared (AGENTS.md "Shared checkouts", #325). `$main` is the main checkout, wherever this machine keeps it; set it from any worktree of the repository:
 
-- krx-quant: `git -C ~/Projects/krx-quant fetch origin && git -C ~/Projects/krx-quant worktree add <scratchpad>/<name> -b <branch> origin/main`
-- Fork: `git -C ~/Projects/krx-quant/fincept fetch origin && git -C ~/Projects/krx-quant/fincept worktree add <scratchpad>/<name> -b <branch> origin/custom`
+```bash
+main=$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")
+```
+
+- krx-quant: `git -C "$main" fetch origin && git -C "$main" worktree add <scratchpad>/<name> -b <branch> origin/main`
+- Fork: `git -C "$main/fincept" fetch origin && git -C "$main/fincept" worktree add <scratchpad>/<name> -b <branch> origin/custom`
 
 After the merge, remove the worktree and delete the branch, locally and on the remote, one branch at a time.
 
