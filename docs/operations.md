@@ -238,7 +238,7 @@ curl http://krx-quant:8080/v1/macro
 
 > **바뀜** (2026-10-12, #116): 텔레그램 신호는 최종 합의의 확률과 정식 알고리즘의 동의만 맞으면 보냈고, 엔진을 다시 시작하면 같은 신호가 4분 안에 다시 갈 수 있었다 → VI·서킷브레이커, 기준가 없음, 목표 시각 지남이면 보내지 않고, 보낸·막힌 신호를 `runs`에 남기며, 재시작해도 4분 안에 다시 보내지 않는다. 이유: 매매하면 안 되는 때에도 신호가 나갔다(#78, #80).
 
-> **바뀜** (2026-10-20, #PRNUM): `KRX_GITHUB_TOKEN`은 예약 작업만 썼다 → 서버 요약(#322)도 쓴다: 라벨이 붙은 열린 이슈를 찾고, 댓글을 남기고, 라벨을 떼고, 저장소에 라벨이 없으면 만든다. 권한(Issues: Read and write)은 그대로다. 이유: 에이전트는 서버를 볼 수 없어, 2026-10-19 WebSocket 침묵 장애(#308) 때 사용자가 명령 다섯 개의 출력을 붙여 넣어야 했다.
+> **바뀜** (2026-10-20, #329): `KRX_GITHUB_TOKEN`은 예약 작업만 썼다 → 서버 요약(#322)도 쓴다: 라벨이 붙은 열린 이슈를 찾고, 댓글을 남기고, 라벨을 떼고, 저장소에 라벨이 없으면 만든다. 권한(Issues: Read and write)은 그대로다. 이유: 에이전트는 서버를 볼 수 없어, 2026-10-19 WebSocket 침묵 장애(#308) 때 사용자가 명령 다섯 개의 출력을 붙여 넣어야 했다.
 
 compose와 스크립트가 읽는 변수다. 엔진은 `KRX_BIND_ADDRESS`를 예약 작업의 가림에만 읽고, 나머지는 읽지 않는다.
 
@@ -256,7 +256,7 @@ compose와 스크립트가 읽는 변수다. 엔진은 `KRX_BIND_ADDRESS`를 예
 
 Docker 이미지는 `TZ=Asia/Seoul`, `KRX_DATA_DIR=/data`, `KRX_STATE_DIR=/state`로 돈다(`Dockerfile`). `PATH`의 맨 앞은 앱의 venv(`/app/.venv/bin`)다(#322). 그래서 `docker compose exec engine krx-quant <명령>`이 명령을 찾고, 컨테이너 안의 `python`이 앱의 파이썬(`/app/.venv/bin/python`)이다. 엔트리포인트는 `/app/.venv/bin/krx-quant`라 `docker compose run --rm engine <명령>`은 늘 됐다.
 
-> **바뀜** (2026-10-20, #PRNUM): 이미지의 `PATH`에 앱의 venv가 없었다 → 맨 앞에 둔다. 이유: `docker compose exec engine krx-quant <명령>`이 `krx-quant`를 찾지 못했고, 컨테이너의 `python`은 앱의 패키지(`pyarrow` 등)가 없는 이미지의 기본 파이썬이었다. #308 때 에이전트가 그 `python`으로 명령을 줘 틀렸다(#322).
+> **바뀜** (2026-10-20, #329): 이미지의 `PATH`에 앱의 venv가 없었다 → 맨 앞에 둔다. 이유: `docker compose exec engine krx-quant <명령>`이 `krx-quant`를 찾지 못했고, 컨테이너의 `python`은 앱의 패키지(`pyarrow` 등)가 없는 이미지의 기본 파이썬이었다. #308 때 에이전트가 그 `python`으로 명령을 줘 틀렸다(#322).
 
 ### 2.3 첫 거래일 확인 (#7)
 
