@@ -56,3 +56,4 @@ Single-context: root `CONTEXT.md` + `docs/adr/`, plus the agreed system design i
    > **바뀜** (2026-10-14, #194, fork codeyoma/FinceptTerminal#46): workflow가 merge 뒤 시험 빌드를 바로 시작했고, `custom`에 push 될 때마다 개인 빌드가 나왔다 → 시험 빌드와 개인 빌드 모두 손으로 시작한다. 이유: 업데이트마다 맥·윈도우 빌드가 돌았고, 빌드는 필요할 때만 있으면 된다(2026-10-14 결정).
    > **바뀜** (2026-10-15, #202, fork codeyoma/FinceptTerminal#51): 시험 빌드와 개인 빌드를 손으로 시작했다 → 다시 저절로 돈다. 이유: fork는 공개 저장소라 Actions가 무료이고, 한도를 쓴 것은 비공개였던 krx-quant의 CI였다(지금은 공개).
    > **바뀜** (2026-10-14, #188): 포인터는 `fincept/`를 건드리는 다음 krx-quant 커밋이 올렸다 → `fincept-pointer` workflow가 바로 올린다. 이유: 위 4번과 같다(#186).
+7. A fork PR against `custom` runs checks by itself: the Windows build check, the KRX tests (Linux, clang, `-Werror`) and the placeholder check on `custom/README.md` (#324, fork codeyoma/FinceptTerminal#100; `fincept/custom/README.md`, "PR 검사"). Merge it once they pass; the Windows check takes about 40 minutes.
