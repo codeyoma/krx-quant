@@ -134,3 +134,39 @@ def test_the_hook_exits_2_with_its_reason_and_0_otherwise(place: dict[str, Path]
     assert blocked.returncode == 2
     assert "worktree" in blocked.stderr
     assert run("git status").returncode == 0
+
+
+def test_each_git_call_is_judged_in_its_own_checkout(place: dict[str, Path]) -> None:
+    """A `-C` elsewhere earlier in the command does not cover a later call in the main checkout."""
+    root, worktree = place["root"], place["worktree"]
+    assert refused("git -C /tmp status; git reset --hard", root, root) is not None
+    assert refused(f"git -C {worktree} status && git stash", root, root) is not None
+    assert refused(f"cd {worktree} && git stash", root, root) is None
+    assert refused(f"cd {worktree} && git status; cd {root} && git switch feat/x", root, root) is not None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git -c advice.detachedHead=false switch feature",
+        "git --no-pager checkout feature",
+        "git -c core.pager=cat -C . reset --hard",
+        "git --git-dir=.git --no-optional-locks stash",
+    ],
+)
+def test_global_options_before_the_subcommand_are_consumed(command: str, place: dict[str, Path]) -> None:
+    assert refused(command, place["root"], place["root"]) is not None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git switch --detach main",
+        "git checkout -f main",
+        "git checkout --force main",
+        "git switch --discard-changes main",
+    ],
+)
+def test_going_back_to_the_default_branch_must_be_plain(command: str, place: dict[str, Path]) -> None:
+    assert refused(command, place["root"], place["root"]) is not None
+    assert refused("git switch -q main", place["root"], place["root"]) is None
