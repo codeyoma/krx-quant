@@ -82,12 +82,18 @@ KIS 레코드 하나가 이벤트 하나다. 한 메시지에 레코드가 여�
 | `nxt_midpoint_px` | int64 | `NMID_PRC` | NXT 중간가 주문 가격 |
 | `nxt_midpoint_qty` | int64 | `NMID_TOTAL_RSQN` | NXT 중간가 주문 총 잔량 |
 | `nxt_midpoint_cls` | string | `NMID_CLS_CODE` | NXT 중간가 구분 코드(원문, 의미 미확인) |
-| `expected_px` | int64 | `ANTC_CNPR` | 단일가의 예상 체결가(원). 단일가가 아닐 때는 0이다(#304) |
+| `expected_px` | int64 | `ANTC_CNPR` | 단일가의 예상 체결가(원, #304). 예상가가 없는 레코드는 0이다(연속매매 레코드의 99% 이상) |
 | `expected_qty` | int64 | `ANTC_CNQN` | 예상 체결량(주, #304) |
 | `expected_volume` | int64 | `ANTC_VOL` | 예상 거래량(주, #304) |
-| `expected_exch_cls` | string | `ANTC_EXCH_CLS_CODE` | 예상 체결의 거래소 구분 코드(원문, 의미 미확인, #304) |
+| `expected_exch_cls` | string | `ANTC_EXCH_CLS_CODE` | 예상 체결의 거래소 구분 코드(원문, #304). 실측으로 `1`은 KRX 단일가, `2`는 NXT의 예상가로 본다(#314, 아래) |
 
-- 예상 체결 네 열(#304)은 장전 브리핑(#304)이 KRX 예상 시가를 보이려고 남긴다. 그 전 파일에는 이 열이 없고, 읽으면 `null`이다(하루를 합칠 때 없는 열은 `null`로 채운다). 통합 피드의 예상 체결이 언제 오는지, KRX 단일가의 것인지는 예약 작업 `probe-expected-open-314`가 잰다([operations.md](operations.md) "예상 체결 녹화 확인 (#304)"). 잰 결과가 오면 이 설명을 고친다.
+- 예상 체결 네 열(#304)은 장전 브리핑(#304)이 KRX 예상 시가를 보이려고 남긴다. 그 전 파일에는 이 열이 없고, 읽으면 `null`이다(하루를 합칠 때 없는 열은 `null`로 채운다). 2026-10-20부터 있다(#309 배포).
+- 2026-10-12 – 10-20의 7거래일 실측(`probe-expected-open-314`, #314. 자세한 개수는 [kis-feeds.md](kis-feeds.md) "피드별 메모"의 "통합 호가의 예상 체결"):
+  - KRX 예상가(`expected_exch_cls` `1`)는 시가 단일가에 08:50:00–08:59:59(`hour_cls` `B`), 종가 단일가에 15:20:00–15:29:59(`A`)에 온다. 7일 모두, 세 종목 모두다. 08:30–08:50에는 없다(그때는 NXT 프리마켓이 열려 있고, 통합 호가의 `hour_cls`는 `0`이다).
+  - `2`는 연속매매와 장 마감 뒤에 오고(`hour_cls` `C`), 009150은 08:30 전과 시가 단일가 시간대에도 왔다. NXT의 예상가로 보고, 장전 브리핑은 `1`만 쓴다.
+  - 시가 단일가의 마지막 예상가(08:59:59)는 그날 실제 시가(KRX 시가 단일가 체결)와 7일 중 2일만 같았다. 나머지 날은 대개 1–5틱, 한 번(009150) 6틱 이상 달랐다. 그래서 브리핑은 이 값을 참고로 보인다.
+
+  > **바뀜** (2026-10-21, #341): "통합 피드의 예상 체결이 언제 오는지, KRX 단일가의 것인지는 예약 작업 `probe-expected-open-314`가 잰다. 잰 결과가 오면 이 설명을 고친다", `expected_exch_cls`의 "의미 미확인" → 위의 실측. 이유: `probe-expected-open-314` 출력(#314).
 
   > **바뀜** (2026-10-19, #309): 통합 호가의 예상 체결 필드(`ANTC_*`)는 raw에만 남았다 → events의 호가 행에도 네 열로 남긴다. 이유: 장전 브리핑이 08:30–09:00의 KRX 예상 시가를 보인다.
 
@@ -215,9 +221,11 @@ KRX 야간시장의 KOSPI200 선물 5단계 호가다. KIS는 0.2초 간격으�
 | 피드 | 열 |
 |---|---|
 | `FHKST01010100` 시세(체결 대체) | `symbol`, `received_at`, `price`, `cum_volume`, `change_pct`. 주식은 통합(`UN`), ETF는 KRX(`J`) 시장으로 조회한다. |
-| `FHKST01010200` 호가 스냅샷(호가 대체) | `symbol`, `event_time`(`aspr_acpt_hour`), `received_at`, `price`, `ask_px_1..10`, `bid_px_1..10`, `ask_qty_1..10`, `bid_qty_1..10`, `total_ask_qty`, `total_bid_qty`, `vi_cls_code`, `expected_px`(`antc_cnpr`), `expected_volume`(`antc_vol`). 예상 체결 두 열(#304)은 답에 그 필드가 없으면 `null`이다. ⚠ 답에 오는지 아직 재지 않았다(`probe-expected-open`이 raw로 센다) |
+| `FHKST01010200` 호가 스냅샷(호가 대체) | `symbol`, `event_time`(`aspr_acpt_hour`), `received_at`, `price`, `ask_px_1..10`, `bid_px_1..10`, `ask_qty_1..10`, `bid_qty_1..10`, `total_ask_qty`, `total_bid_qty`, `vi_cls_code`, `expected_px`(`antc_cnpr`), `expected_volume`(`antc_vol`). 예상 체결 두 열(#304)은 답에 그 필드가 없으면 `null`이다. 이 조회는 통합 호가 구독이 KIS 세션 한도나 `KIS_WS_MAX_SUBSCRIPTIONS`로 잘렸을 때만 돈다. 2026-10-12 – 10-20에는 한 번도 돌지 않았다(세 종목 모두 raw 응답 0, `probe-expected-open-314`, #314): 3종목 기본 계획 40건이 한도 41건 안이고 통합 호가는 앞쪽이라 잘리지 않았다([kis-feeds.md](kis-feeds.md) "구독 계획"). 그래서 답에 예상 체결 필드가 오는지는 아직 모른다 ⚠. 단일가 동안(08:50–09:00) `krx-quant check-fallbacks`를 돌리면 한 번 물어 정규화한 행을 보인다(기록하지 않는다) |
 | `HHPTJ04160200` 추정 가집계 | `symbol`, `received_at`, `slot`(`bsop_hour_gb`), `foreign_net_qty`, `institution_net_qty`, `total_net_qty` |
 | `FHPST01390000` VI 현황 | 응답의 VI마다 한 행: `symbol`, `event_time`(발동 시각 `cntg_vi_hour`), `received_at`, `end_time`(해제 시각 `vi_cncl_hour`, 아직이면 비어 있음), `active`(`vi_cls_code`가 `N`이 아님), `kind`(`static`, `dynamic`, `both`), `price`(발동 가격), `count`(그날 그 종목의 VI 횟수) |
+
+> **바뀜** (2026-10-21, #341): 호가 스냅샷의 "⚠ 답에 오는지 아직 재지 않았다(`probe-expected-open`이 raw로 센다)" → 이 기간에는 조회가 한 번도 돌지 않아 재지 못했다(위). 이유: `probe-expected-open-314`의 6절이 세 종목 모두 "응답 없음"이었다(#314). 이 조회는 대체 조회라 구독이 잘리지 않으면 돌지 않는다.
 
 > **바뀜** (2026-10-11, #56): 추정 가집계의 빈 칸(그 시간대에 아직 입력되지 않은 투자자)을 0으로 기록했다 → null로 기록한다. 이유: 외국인과 기관은 입력 시각이 달라서(외국인 09:30, 기관 10:00 등), 0으로 두면 Turing이 앞 시간대의 실제 추정 대신 0을 읽었다. 그 전에 녹화된 날의 0은 빈 칸일 수 있다.
 
