@@ -1,4 +1,4 @@
-"""Fail if tracked files contain KIS order code or secrets.
+"""Fail if tracked files contain KIS order code, secrets or a PR number placeholder.
 
 The engine is signals-only: no KIS order TR IDs or order endpoints may ever
 appear in the repository. Secrets belong in `.env` on the server only. The patterns are
@@ -13,7 +13,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from krx_quant.forbidden import RULES
+from krx_quant.forbidden import REPOSITORY_RULES, RULES
 
 SELF = Path(__file__).resolve()
 # The rules themselves, shared with what the server posts to the issue tracker (#215).
@@ -34,7 +34,7 @@ def scan(path: Path) -> list[str]:
         return []
     hits = []
     for lineno, line in enumerate(text.splitlines(), 1):
-        for name, pattern in RULES:
+        for name, pattern in (*RULES, *REPOSITORY_RULES):
             if pattern.search(line):
                 hits.append(f"{path}:{lineno}: {name}")
     return hits
