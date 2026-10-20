@@ -38,6 +38,7 @@ After the merge, remove the worktree and delete the branch, locally and on the r
 
 - Against `main` (krx-quant) or `custom` (fork). Never push to either directly; never enable auto-merge.
 - English title and body: what changed and why, tests, what the next 06:00 deploy does, and decisions left for the user. `Closes #N` for the issue it finishes, `Refs #N` for a part of it. A fork PR names `codeyoma/krx-quant#N`.
+  - A PR that keeps its issue open never writes a closing keyword (close, closes, closed, fix, fixes, fixed, resolve, resolves, resolved) followed by the issue's number anywhere in the body: GitHub closes the issue on merge even inside backticks or after "not" (#340, #341). Quote it as "Closes" without the number if you must mention it. The `pr-refs` check (`.github/workflows/pr-refs.yml`) fails such a PR and runs again when the body is edited.
 - End the body with the attribution line the session's instructions give.
 - Both repositories are public: no secrets, `.env` values, server addresses, account numbers or market data, in code, tests, docs, screenshots or PR text. Tests use made-up values.
 
