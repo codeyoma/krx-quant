@@ -37,6 +37,13 @@ days). The statuses (``lifecycle.py``) are decided by these; the paired ones onl
 
 The lifts, their adjustment and the ranking hold for any kind's predictions (#179): a kind's
 statistics (``kind_stats.py``) pair its records and rank its entries with the same code.
+
+A daily kind whose window runs several sessions (#310, ``kinds.Kind.overlap``) opens a window
+every trading day, so the days are not independent either: two days' windows share sessions.
+Its lift by trading day takes the days' standard error by Newey–West (``overlap_t_test``), and
+its paired lift and its accuracy, precision, coverage, Brier score and P&L intervals by
+Driscoll–Kraay (``overlap_lift``, ``overlap_interval``), each with about the independent
+windows' number of degrees of freedom. With windows of one session they are the ones above.
 """
 
 from __future__ import annotations
@@ -49,6 +56,8 @@ from datetime import date, datetime
 from functools import cache
 from statistics import NormalDist
 from typing import Any, Protocol, TypeVar
+
+import numpy as np
 
 from krx_quant.feeds.base import kst_day
 from krx_quant.pricing import SELL_TAX, Direction, most_likely
@@ -420,6 +429,201 @@ def day_mean(by_day: Mapping[date, Sequence[float]], level: float = 0.95) -> Int
     mean = sum(means) / n
     half = _t_quantile(1 - (1 - level) / 2, n - 1) * _standard_error(means, mean)
     return Interval(mean, mean - half, mean + half, n)
+
+
+# Windows of several sessions (#310, ``kinds.Kind.overlap``). A daily kind whose window runs H
+# sessions opens a window every trading day, so the windows of two days k apart share H − k
+# sessions: the days' gains are not independent (with independent daily moves the changes of
+# two windows k days apart correlate about (H − k) ÷ H). Their intervals are taken with that in
+# mind: the days' standard error by Newey–West at lag 2(H − 1), never below the independent
+# one, and a Student t with about the independent windows' number of degrees of freedom.
+# Sessions: each trading day's place among the market's sessions, so that two days k sessions
+# apart are k apart however many days between them have no value (a blank, not a neighbour).
+Sessions = Mapping[date, int]
+
+
+def overlap_lag(overlap: int) -> int:
+    """The Newey–West lag of windows of ``overlap`` sessions (#310): 2(H − 1). At H − 1 the
+    Bartlett weights (0.8 … 0.2) count the windows' (H − k) ÷ H autocorrelation at about 3.4
+    times the independent variance in expectation, against 5; at 2(H − 1), about 4.1."""
+    return 2 * (overlap - 1)
+
+
+def independent_days(days: int, overlap: int) -> int:
+    """About how many independent windows ``days`` trading days of windows of ``overlap``
+    sessions hold (#310): ⌊days ÷ H⌋."""
+    return days // max(1, overlap)
+
+
+def overlap_df(days: int, overlap: int) -> int:
+    """The degrees of freedom of a Student t over ``days`` trading days of windows of
+    ``overlap`` sessions (#310): the independent windows less one, at least 1."""
+    return max(1, independent_days(days, overlap) - 1)
+
+
+def session_index(days: Iterable[date]) -> dict[date, int]:
+    """Each of ``days`` by its place among them (``Sessions``): the trading days a statistic's
+    predictions were made on, every predictor's, stand for the market's sessions (#310)."""
+    return {d: i for i, d in enumerate(sorted(set(days)))}
+
+
+def long_run_variance(values: Sequence[float], positions: Sequence[int], lag: int) -> tuple[float, float]:
+    """(γ₀, the Newey–West long-run variance) of ``values`` about their mean, each at its trading
+    day's place (``positions``, increasing): γ_k pairs the values k places apart (a place without
+    a value is a blank: the list's neighbours are not lag 1), summed and divided by the values'
+    number; the long-run variance is γ₀ + 2 Σ_{k=1..L} (1 − k ÷ (L + 1)) γ_k (Bartlett)."""
+    n = len(values)
+    if n == 0:
+        return 0.0, 0.0
+    x = np.asarray(values, dtype=float)
+    z = x - x.mean()
+    at = np.asarray(positions, dtype=np.int64)
+    if len(at) != n or (n > 1 and not bool(np.all(np.diff(at) > 0))):
+        raise ValueError("positions must be increasing, one for each value")
+    dense = np.zeros(int(at[-1] - at[0]) + 1)
+    dense[at - at[0]] = z
+    gamma0 = float(z @ z) / n
+    total = gamma0
+    for k in range(1, min(lag, len(dense) - 1) + 1):
+        total += 2 * (1 - k / (lag + 1)) * float(dense[:-k] @ dense[k:]) / n
+    return gamma0, total
+
+
+def variance_ratio(values: Sequence[float], positions: Sequence[int], overlap: int) -> float | None:
+    """The long-run variance of the days' ``values`` over their variance (#310, VR): how much the
+    overlap of windows of ``overlap`` sessions inflates the variance of their mean (1: as if
+    independent). None from fewer than two values or without spread."""
+    gamma0, total = long_run_variance(values, positions, overlap_lag(overlap))
+    if len(values) < 2 or gamma0 <= 0:
+        return None
+    return total / gamma0
+
+
+def overlap_t_test(
+    values: Sequence[float], positions: Sequence[int], overlap: int, level: float = 0.95
+) -> Lift | None:
+    """``t_test`` of the trading days' ``values`` (at their ``positions``) for windows of
+    ``overlap`` sessions (#310): the standard error is the Newey–West one at lag 2(H − 1)
+    (``long_run_variance``: √(long-run variance ÷ days)), never below the independent one, so a
+    negative autocorrelation cannot narrow it; the t has ``overlap_df`` degrees of freedom. With
+    ``overlap`` 1 it is ``t_test``. None from fewer than two values."""
+    if overlap <= 1:
+        return t_test(values, level)
+    n = len(values)
+    if n < 2:
+        return None
+    mean = sum(values) / n
+    _, total = long_run_variance(values, positions, overlap_lag(overlap))
+    error = max(math.sqrt(max(total, 0.0) / n), _standard_error(values, mean))
+    df = overlap_df(n, overlap)
+    half = _t_quantile(1 - (1 - level) / 2, df) * error
+    if error == 0:
+        p = 0.0 if mean > 0 else 1.0
+    else:
+        p = _t_above(mean / error, df)
+    return Lift(n, mean, mean - half, mean + half, p)
+
+
+@dataclass(frozen=True)
+class OverlapMean:
+    """A mean of values grouped by trading day, its Driscoll–Kraay standard error (#310): each
+    day's sum of (value − mean) is a series, its Newey–West long-run variance (lag 2(H − 1),
+    blanks for days without values) times the days, over the values' number squared; never
+    below the independent standard error."""
+
+    mean: float
+    error: float
+    n: int  # the values
+    days: int  # the trading days with values
+
+    def interval(self, overlap: int, level: float = 0.95) -> tuple[float, float]:
+        half = _t_quantile(1 - (1 - level) / 2, overlap_df(self.days, overlap)) * self.error
+        return self.mean - half, self.mean + half
+
+
+def overlap_mean(
+    by_day: Mapping[date, Sequence[float]], sessions: Sessions, overlap: int
+) -> OverlapMean | None:
+    """The Driscoll–Kraay mean of the values of ``by_day`` (``OverlapMean``), the days at their
+    places in ``sessions``; None without values."""
+    days = sorted(d for d, values in by_day.items() if values)
+    flat = [v for d in days for v in by_day[d]]
+    n = len(flat)
+    if n == 0:
+        return None
+    mean = sum(flat) / n
+    independent = _standard_error(flat, mean) if n > 1 else 0.0
+    sums = [sum(v - mean for v in by_day[d]) for d in days]
+    _, total = long_run_variance(sums, [sessions[d] for d in days], overlap_lag(overlap))
+    driscoll_kraay = math.sqrt(max(total, 0.0) * len(days)) / n
+    return OverlapMean(mean, max(driscoll_kraay, independent), n, len(days))
+
+
+def overlap_interval(
+    by_day: Mapping[date, Sequence[float]],
+    sessions: Sessions,
+    overlap: int,
+    *,
+    ratio: bool = False,
+    level: float = 0.95,
+) -> Interval | None:
+    """``mean_interval`` (a ``ratio``: ``wilson``, kept within [0, 1]) of values grouped by trading
+    day for windows of ``overlap`` sessions (#310): the Driscoll–Kraay interval (``overlap_mean``)
+    with ``overlap_df`` degrees of freedom. None without values; no bounds from one value."""
+    found = overlap_mean(by_day, sessions, overlap)
+    if found is None:
+        return None
+    if found.n == 1:
+        return Interval(found.mean, None, None, 1)
+    low, high = found.interval(overlap, level)
+    if ratio:
+        low, high = max(0.0, low), min(1.0, high)
+    return Interval(found.mean, low, high, found.n)
+
+
+def _gains_by_day(records: Sequence[Paired], baseline: Sequence[Paired]) -> dict[date, list[float]]:
+    by_day: dict[date, list[float]] = {}
+    for at, gain in _gains(records, baseline):
+        by_day.setdefault(kst_day(at), []).append(gain)
+    return by_day
+
+
+def overlap_lift(
+    records: Sequence[Paired], baseline: Sequence[Paired], sessions: Sessions, overlap: int
+) -> Lift:
+    """``lift`` for windows of ``overlap`` sessions (#310): the pairs' mean gain with the
+    Driscoll–Kraay interval (``overlap_mean``) and its one-sided p from the same t, tested only on
+    ``MIN_PAIRS_TESTED`` pairs or more. The leaderboard ranks by its lower bound and its p goes to
+    the false discovery rate, so neither may count the overlapping pairs as independent."""
+    found = overlap_mean(_gains_by_day(records, baseline), sessions, overlap)
+    if found is None:
+        return Lift(0, None, None, None, None)
+    if found.n == 1:
+        return Lift(1, found.mean, None, None, None)
+    low, high = found.interval(overlap)
+    if found.n < MIN_PAIRS_TESTED:
+        return Lift(found.n, found.mean, low, high, None)
+    if found.error == 0:
+        p = 0.0 if found.mean > 0 else 1.0
+    else:
+        p = _t_above(found.mean / found.error, overlap_df(found.days, overlap))
+    return Lift(found.n, found.mean, low, high, p)
+
+
+def overlap_day_lift(
+    records: Sequence[Paired],
+    baseline: Sequence[Paired],
+    sessions: Sessions,
+    overlap: int,
+    level: float = 0.95,
+) -> Lift | None:
+    """``day_lift`` for windows of ``overlap`` sessions (#310): the days' mean gains, every day
+    weighing the same, by ``overlap_t_test`` at the days' places in ``sessions``. What the
+    statuses, the pre-validation's gate and the leaderboard's ``day_low`` go by."""
+    by_day = _gains_by_day(records, baseline)
+    days = sorted(by_day)
+    means = [sum(by_day[d]) / len(by_day[d]) for d in days]
+    return overlap_t_test(means, [sessions[d] for d in days], overlap, level)
 
 
 def _t_above(x: float, df: int) -> float:
