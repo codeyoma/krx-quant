@@ -431,7 +431,8 @@ def overlap_report(
     at lag 2(H − 1) over γ₀, ``stats.variance_ratio``), the largest (the review days' rule takes
     it: the statuses go by the weakest lift), and, to look at, each other baseline's over the
     first (``otc5-persist``'s and ``otc5-climate``'s over ``otc5-flat``); the review days the rule
-    gives the largest (``daily.overlap_review``); and the lift over each baseline on each of the H
+    gives the largest, taken as 1 below 1 (``daily.overlap_review``: the intervals never shrink
+    below the independent ones); and the lift over each baseline on each of the H
     phases (every H-th day, the windows of a phase do not overlap: a look, never a gate)."""
     overlap = kind.overlap
     sessions = sessions_of(records, baselines, calendar)
@@ -449,9 +450,13 @@ def overlap_report(
     between = {f"{other} - {names[0]}": ratio(baselines[other], baselines[names[0]]) for other in names[1:]}
     review = None
     if largest is not None:
-        found = overlap_review(largest, overlap)
+        # Never below 1 (#339 review): the statuses' intervals never take a standard error below
+        # the independent one (``stats.overlap_t_test``), so a ratio under 1 (every baseline's gains
+        # alternating) must not shorten the review days below the independent days' rule.
+        used = max(largest, 1.0)
+        found = overlap_review(used, overlap)
         review = {
-            "variance_ratio": largest,
+            "variance_ratio": used,
             "first": found.first,
             "probation_days": list(found.rules.probation_days),
             "bench_days": list(found.rules.bench_days),
