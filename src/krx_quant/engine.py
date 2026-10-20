@@ -1301,7 +1301,10 @@ class PredictionEngine:
             if regime is None and "macro_regime" in self._feature_names:
                 if not self.store.count_runs("no_regime", midnight):  # once, restarts too
                     detail = f"no macro regime for {day}" + (f" (unknown: {read})" if read else "")
-                    log.warning(detail)
+                    if read:
+                        log.warning("no macro regime for %s (unknown: %s)", day, read)
+                    else:
+                        log.warning("no macro regime for %s", day)
                     self.store.add_run("no_regime", bar_close, None, detail)
         return self._regime_days[day]
 

@@ -1,4 +1,5 @@
-"""A stand-in for GitHub's issue comments and labels REST API (#215), on a local port."""
+"""A stand-in for GitHub's issue comments and labels REST API (#215), and its issue list and
+repository labels (#322), on a local port."""
 
 from __future__ import annotations
 
@@ -22,6 +23,13 @@ class FakeGitHub:
     requests: list[tuple[str, str, dict[str, str]]] = field(default_factory=list)  # method, path, headers
     fail_comments: int = 0  # the next this many comment posts fail (HTTP 502)
     fail_labels: int = 0  # likewise the label changes
+    fail_unlabels: int = 0  # likewise taking a label off
+    fail_lists: int = 0  # likewise the issue lists
+    pulls: set[int] = field(default_factory=set)  # the numbers that are pull requests
+    closed: set[int] = field(default_factory=set)
+    repo_labels: dict[str, dict[str, str]] = field(default_factory=dict)  # name -> the label
+    refuse_label_create: bool = False  # making a label is refused (HTTP 403)
+    titles: dict[int, str] = field(default_factory=dict)  # an issue's title, anyone's text
 
     def bodies(self, issue: int) -> list[str]:
         return [body for n, body in self.comments if n == issue]
@@ -54,11 +62,59 @@ class FakeGitHub:
 
     async def _remove_label(self, request: web.Request) -> web.Response:
         self._log(request)
+        if self.fail_unlabels:
+            self.fail_unlabels -= 1
+            return web.Response(status=502, text="Bad Gateway")
         issue, name = int(request.match_info["issue"]), request.match_info["name"]
         if name not in self.labels.get(issue, set()):
             return web.json_response({"message": "Label does not exist"}, status=404)
         self.labels[issue].discard(name)
         return web.json_response([{"name": n} for n in sorted(self.labels[issue])])
+
+    async def _list_issues(self, request: web.Request) -> web.Response:
+        """Open issues and pull requests carrying every label of ``labels``, as GitHub lists them."""
+        self._log(request)
+        if not self._authorized(request):
+            return web.json_response({"message": "Bad credentials"}, status=401)
+        if self.fail_lists:
+            self.fail_lists -= 1
+            return web.Response(status=502, text="Bad Gateway")
+        wanted = {n for n in request.query.get("labels", "").split(",") if n}
+        state = request.query.get("state", "open")
+        items = []
+        for number in sorted(self.labels):
+            if wanted - self.labels[number] or (state == "open" and number in self.closed):
+                continue
+            item: dict[str, Any] = {
+                "number": number,
+                "state": "closed" if number in self.closed else "open",
+                "title": self.titles.get(number, f"issue {number}"),
+                "body": "",
+                "labels": [{"name": n} for n in sorted(self.labels[number])],
+            }
+            if number in self.pulls:
+                item["pull_request"] = {"url": f"https://api.github.com/repos/{REPO}/pulls/{number}"}
+            items.append(item)
+        return web.json_response(items[: int(request.query.get("per_page", "30"))])
+
+    async def _get_label(self, request: web.Request) -> web.Response:
+        self._log(request)
+        label = self.repo_labels.get(request.match_info["name"])
+        if label is None:
+            return web.json_response({"message": "Not Found"}, status=404)
+        return web.json_response(label)
+
+    async def _create_label(self, request: web.Request) -> web.Response:
+        self._log(request)
+        if self.refuse_label_create:
+            return web.json_response(
+                {"message": "Resource not accessible by personal access token"}, status=403
+            )
+        body: dict[str, Any] = await request.json()
+        if body["name"] in self.repo_labels:
+            return web.json_response({"message": "Validation Failed"}, status=422)
+        self.repo_labels[body["name"]] = {k: str(v) for k, v in body.items()}
+        return web.json_response(self.repo_labels[body["name"]], status=201)
 
     def _log(self, request: web.Request) -> None:
         self.requests.append((request.method, request.path, dict(request.headers)))
@@ -69,6 +125,9 @@ class FakeGitHub:
         app.router.add_post(f"{base}/comments", self._comment)
         app.router.add_post(f"{base}/labels", self._add_labels)
         app.router.add_delete(f"{base}/labels/{{name}}", self._remove_label)
+        app.router.add_get("/repos/{owner}/{repo}/issues", self._list_issues)
+        app.router.add_get("/repos/{owner}/{repo}/labels/{name}", self._get_label)
+        app.router.add_post("/repos/{owner}/{repo}/labels", self._create_label)
         return app
 
 

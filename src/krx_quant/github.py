@@ -1,5 +1,5 @@
 """Comments and labels on the repository's GitHub issues, where the scheduled jobs leave
-their results (#215).
+their results (#215), and the issues a label asks the server's summary on (#322).
 
 The REST API with a fine-grained token (``KRX_GITHUB_TOKEN``: this repository only, Issues
 read and write). A comment is the job's heading line, its notes, its output in a code block
@@ -13,7 +13,7 @@ from __future__ import annotations
 import re
 from collections.abc import Sequence
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 import aiohttp
 
@@ -62,6 +62,35 @@ class GitHub:
             await self._call("POST", f"/issues/{issue}/labels", {"labels": list(add)})
         for name in remove:
             await self._call("DELETE", f"/issues/{issue}/labels/{quote(name, safe='')}", missing_ok=True)
+
+    async def labelled(self, label: str, limit: int = 20) -> list[int]:
+        """The numbers of the open issues (pull requests left out) that carry ``label``, oldest
+        first, at most ``limit``. Nothing else of an issue is read: its text is anyone's."""
+        query = urlencode(
+            {"labels": label, "state": "open", "sort": "created", "direction": "asc", "per_page": limit}
+        )
+        data = await self._call("GET", f"/issues?{query}")
+        if not isinstance(data, list):
+            raise GitHubError(f"GET /issues: not a list of issues ({type(data).__name__})")
+        found = []
+        for item in data:
+            if (
+                not isinstance(item, dict)
+                or "pull_request" in item
+                or not isinstance(item.get("number"), int)
+            ):
+                continue
+            names = {tag.get("name") for tag in item.get("labels") or () if isinstance(tag, dict)}
+            if label in names:  # as asked: the filter is GitHub's, the check is ours
+                found.append(item["number"])
+        return found
+
+    async def ensure_label(self, name: str, color: str, description: str) -> bool:
+        """Make the repository's label ``name`` unless it is there; True if it was made."""
+        if await self._call("GET", f"/labels/{quote(name, safe='')}", missing_ok=True) is not None:
+            return False
+        await self._call("POST", "/labels", {"name": name, "color": color, "description": description})
+        return True
 
     async def _call(
         self, method: str, path: str, payload: dict[str, Any] | None = None, *, missing_ok: bool = False

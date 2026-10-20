@@ -24,6 +24,9 @@ RUN useradd --create-home --uid 10001 engine && mkdir -p /data /state /archive \
 USER engine
 # /state holds the cached KIS access token; keep it on a volume so restarts reuse it.
 ENV KRX_DATA_DIR=/data KRX_STATE_DIR=/state
+# The app's venv first on PATH (#322): `docker compose exec engine krx-quant <command>` finds the
+# command, and `python` there is the app's (the image's own lacks its packages, e.g. pyarrow).
+ENV PATH=/app/.venv/bin:$PATH
 # The commit the image is built from (deploy/auto-update.sh passes it), last: it changes
 # with every build and must not invalidate the layers above.
 ARG KRX_COMMIT=unknown
