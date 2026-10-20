@@ -26,7 +26,9 @@ uv sync
 uv run python scripts/check_forbidden.py && uv run ruff check && uv run mypy && uv run pytest -q
 ```
 
-`scripts/check_forbidden.py`는 KIS 주문 TR 코드, 주문 엔드포인트, 비밀값 패턴이 저장소에 들어오면 실패한다. CI도 같은 검사를 한다. 패턴은 `src/krx_quant/forbidden.py`에 있고, 예약 작업이 GitHub 이슈에 남기는 댓글에서도 같은 패턴을 가린다(#215).
+`scripts/check_forbidden.py`는 KIS 주문 TR 코드, 주문 엔드포인트, 비밀값 패턴(`RULES`)과 바뀜·삭제됨 노트에 남은 PR 번호 자리표시(`REPOSITORY_RULES`, #321)가 저장소에 들어오면 실패한다. CI도 같은 검사를 한다. 패턴은 `src/krx_quant/forbidden.py`에 있다. 예약 작업이 GitHub 이슈에 남기는 댓글에서는 `RULES`만 가린다(#215).
+
+> **바뀜** (2026-10-20, #328): 검사는 주문 코드와 비밀값만 봤다 → PR 번호 자리표시도 본다(저장소 검사에만). 이유: PR을 열기 전에 쓴 자리표시가 남은 채 리뷰에 온 PR이 일곱 개였다(#321).
 
 ## 수집기 실행
 
