@@ -23,8 +23,10 @@ uv sync
 검사와 테스트:
 
 ```bash
-uv run python scripts/check_forbidden.py && uv run ruff check && uv run mypy && uv run pytest -q
+uv run python scripts/check_forbidden.py && uv run ruff check && uv run ruff format --check && uv run mypy && uv run pytest -q
 ```
+
+테스트 하나가 시간 한도(`pyproject.toml`의 `timeout`, 30초)를 넘으면 `pytest`는 모든 스레드의 스택을 출력하고 그 자리에서 실행 전체를 끝낸다(`timeout_method = "thread"`, #335). 그 뒤의 테스트는 돌지 않는다. 더 오래 걸려야 하는 테스트는 `@pytest.mark.timeout(N)`과 이유를 단다. CI의 테스트 job은 60분을 넘으면 멈춘다(`timeout-minutes`, 평소 11–22분).
 
 `scripts/check_forbidden.py`는 KIS 주문 TR 코드, 주문 엔드포인트, 비밀값 패턴(`RULES`)과 바뀜·삭제됨 노트에 남은 PR 번호 자리표시(`REPOSITORY_RULES`, #321)가 저장소에 들어오면 실패한다. CI도 같은 검사를 한다. 패턴은 `src/krx_quant/forbidden.py`에 있다. 예약 작업이 GitHub 이슈에 남기는 댓글에서는 `RULES`만 가린다(#215).
 

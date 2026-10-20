@@ -18,6 +18,7 @@ After the merge, remove the worktree and delete the branch, locally and on the r
 ## Checks
 
 - krx-quant runs what CI runs (`.github/workflows/ci.yml`): `uv run python scripts/check_forbidden.py`, `uv run ruff check`, `uv run ruff format --check`, `uv run mypy`, `uv run pytest -q`. All pass before the PR is opened.
+  - A test past its time limit ends the pytest run with every thread's stack, and the tests after it do not run (CODING_STANDARDS.md, "Tests wait for conditions"). Fix that test and run again.
 - Fork: a dev build with `CI=1` (`-Werror`) and `ctest -R krx` (`fincept/custom/README.md`).
   - MSVC treats warnings as errors and macOS clang misses some of them: pass `f` literals to Qt float parameters (`setAlphaF(0.3f)`), and avoid narrowing double → float.
   - Until fork PRs run checks of their own (#324), run the Windows branch check before merging: `gh workflow run custom-release.yml --repo codeyoma/FinceptTerminal --ref <branch>`.

@@ -11,6 +11,8 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # About four times a usual run (11-22 minutes): a stuck job fails here, not after 6 hours.
+    timeout-minutes: 60
     steps:
       # The fincept/ submodule is not needed for engine checks.
       - uses: actions/checkout@v4
