@@ -1353,11 +1353,19 @@ docker compose run --rm engine doctor
 
 `--api <주소>`로 물을 엔진 API를 줄 수 있다(예: `--api http://127.0.0.1:8080`). 종료 코드는 늘 0이다. 엔진에 닿지 않았는지는 출력의 1절이 말한다.
 
+설정이 틀려 엔진이 뜨지 못할 때(`configuration error`)도 `doctor`는 돈다. 다른 명령과 달리 설정 오류로 끝나지 않고, 머리줄 아래 `설정 오류: <오류>`로 적은 뒤 데이터·상태 폴더(`KRX_DATA_DIR`, `KRX_STATE_DIR`), 엔진 API 주소(`KRX_API_HOST`, `KRX_API_PORT`), `KRX_COMMIT`, 가릴 비밀값만 그대로 읽어 나머지 절을 낸다. 다른 설정은 모르므로 5절의 `KRX_JOBS_AT`은 `?`다.
+
 **출력.** 머리줄(시각) 아래 여섯 절이다. 필드 이름은 `/v1/status`의 것 그대로다.
 1. 엔진: `commit`, `started_at`(그리고 지난 시간), `mode`, `phase`, `now`. 엔진 API는 이 컨테이너의 것(`127.0.0.1:8080`), 그다음 compose의 `engine` 서비스 순서로 묻는다. 둘 다 닿지 않으면 각각의 이유, DB `runs`의 마지막 `start`(시각과 커밋), 이 명령 이미지의 `KRX_COMMIT`을 적는다.
 2. KIS: `kis.connected`, `kis.last_frame_at`, `kis.seconds_since_frame`(#311), 피드·키 수와 60초 넘게 조용하거나 아직 안 온 키 수, 열린 `gap` 수, 그리고 피드·키마다 `feed key last_received_at seconds_since gap` 한 줄(오늘이면 시각만, 아니면 날짜도).
 3. PINGPONG: 오늘의 `raw/date=<오늘>/feed=_system/symbol=_`에서 센 KIS 하트비트의 합계, 마지막 시각, 두 PINGPONG 사이 가장 긴 간격, 시간별 수. 녹화는 `KRX_FLUSH_SECONDS`(30초)마다 파일로 쓰여 그 뒤에 온 것은 아직 없을 수 있다.
-4. 최근 WARNING·ERROR 로그: 수집기는 시작한 뒤의 WARNING·ERROR 줄 최근 200개를 메모리에 두고, 서버 요약에는 그 수와 마지막 20줄을 싣는다. 줄은 시각, 수준, 로거, 메시지의 첫 줄(예외면 그 종류와 첫 줄)이고 300자에서 자른다. `doctor` 명령은 엔진과 다른 프로세스라 엔진 로그를 읽지 못한다(Docker가 로그를 컨테이너 밖에 둔다). 그렇다고 적고, 서버에서 볼 명령(`docker compose logs --since 2h engine | grep -E ' (WARNING|ERROR) '`)을 적는다. 컨테이너 안에서 docker를 부르지 않는다.
+4. 최근 WARNING·ERROR 로그: 수집기는 시작한 뒤의 WARNING·ERROR 줄 최근 200개를 메모리에 두고, 서버 요약에는 그 수와 마지막 20줄을 싣는다. 줄은 시각, 수준, 로거, 메시지, 예외의 종류이고 300자에서 자른다. 실행 중에 생긴 글은 싣지 않는다. 그래서 시세 값이 들어갈 수 없다(예: 알아볼 수 없는 KIS 프레임의 앞부분이 든 오류, 가격이 든 예외 메시지):
+   - 메시지는 엔진(`krx_quant`) 로거의 것만, 코드가 쓴 틀(`log.warning("... %s", 값)`의 첫 인자, 첫 줄)이다. 엔진의 로그 호출은 모두 틀을 문자열 그대로 쓴다(f-string이나 실행 중에 만든 글이 아니다. 테스트가 확인한다).
+   - 틀의 값은 날짜·시각, 참거짓, `None`, 이름 모양의 글자(문자로 시작하고 공백 없이 40자까지: `H0UNCNT0`, `kalman`)만 그대로 싣고, 나머지(숫자, 종목 코드, 메시지, 행, 프레임)는 `…`로 바꾼다.
+   - 예외는 종류만 싣고 메시지는 싣지 않는다. 다른 라이브러리(`aiohttp`, `asyncio` 등)의 줄은 로거와 수준만 싣는다.
+   - 전체 줄은 서버에서 `docker compose logs engine`으로 본다.
+
+   `doctor` 명령은 엔진과 다른 프로세스라 엔진 로그를 읽지 못한다(Docker가 로그를 컨테이너 밖에 둔다). 그렇다고 적고, 서버에서 볼 명령(`docker compose logs --since 2h engine | grep -E ' (WARNING|ERROR) '`)을 적는다. 컨테이너 안에서 docker를 부르지 않는다.
 5. 예약 작업: `state/scheduled.json`의 마지막 실행 최근 12개(이름, 밤, `outcome`, 종료 코드, 걸린 시간, 커밋, 댓글을 남긴 이슈), 목록(`JOBS`) 중 끝까지(`ok`·`failed`) 돈 적 없는 작업(조건이 아직 안 된 것도 든다), 아직 올리지 못한 결과(`unposted`). 파일을 읽지 못하면 그렇다고만 적는다. 스케줄러와 달리 `.bad`로 옮기지 않는다.
 6. 디스크와 메모리: 데이터와 상태 폴더의 여유·전체 용량(같은 디스크면 그렇다고), `/proc/meminfo`의 사용 가능·전체 메모리와 스왑, 컨테이너의 cgroup 사용량과 한도, 그 프로세스의 `VmRSS`(명령이면 그 명령, 서버 요약이면 엔진).
 

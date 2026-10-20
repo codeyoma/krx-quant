@@ -31,7 +31,7 @@ from krx_quant.daily_check import daily_check
 from krx_quant.daily_training import daily_algorithm, fit_daily, prevalidate_daily
 from krx_quant.demo import demo_app, demo_morning
 from krx_quant.diagnose import DEFAULT_DAYS, diagnose
-from krx_quant.doctor import doctor
+from krx_quant.doctor import doctor, doctor_settings
 from krx_quant.expected_open_probe import DAYS as EXPECTED_OPEN_DAYS
 from krx_quant.expected_open_probe import probe_expected_open
 from krx_quant.fake_kis import FakeKis
@@ -423,7 +423,9 @@ def _diagnose(days: int) -> int:
 
 
 async def _doctor(api: str | None) -> int:
-    print(await doctor(Settings.from_env(require_kis=False), datetime.now(KST), api), end="")
+    """The summary even when a setting keeps the engine from starting: the error is in it."""
+    settings, error = doctor_settings()
+    print(await doctor(settings, datetime.now(KST), api, config_error=error), end="")
     return 0
 
 

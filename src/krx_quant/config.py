@@ -231,10 +231,7 @@ class Settings:
         Without ``require_kis`` the KIS keys may be missing, for commands that never call
         KIS (replay).
         """
-        values: dict[str, str] = {}
-        if dotenv_path is not None and dotenv_path.exists():
-            values.update({k: v for k, v in dotenv_values(dotenv_path).items() if v is not None})
-        values.update(os.environ if env is None else env)
+        values = read_values(env, dotenv_path)
 
         def required(name: str) -> str:
             value = values.get(name, "").strip()
@@ -441,6 +438,15 @@ class Settings:
             toss_client_secret=values.get("TOSS_CLIENT_SECRET", "").strip() or None,
             toss_url=values.get("TOSS_URL", DEFAULT_TOSS_URL).strip().rstrip("/"),
         )
+
+
+def read_values(env: Mapping[str, str] | None, dotenv_path: Path | None) -> dict[str, str]:
+    """The raw settings: ``env`` (default: os.environ) layered over ``dotenv_path``."""
+    values: dict[str, str] = {}
+    if dotenv_path is not None and dotenv_path.exists():
+        values.update({k: v for k, v in dotenv_values(dotenv_path).items() if v is not None})
+    values.update(os.environ if env is None else env)
+    return values
 
 
 def _on_or_off(name: str, raw: str) -> bool:

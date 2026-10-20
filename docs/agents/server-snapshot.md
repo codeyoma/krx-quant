@@ -20,7 +20,7 @@ The output of `krx-quant doctor`, masked (secrets, server addresses), with no ma
 1. Engine: `commit`, `started_at`, `mode`, `phase`.
 2. KIS: `kis.connected`, `kis.last_frame_at`, `kis.seconds_since_frame`, then one line per feed and key: `feed key last_received_at seconds_since gap`.
 3. Today's PINGPONG heartbeats: total, the last one, the longest silence between two, the count per hour.
-4. The engine's latest WARNING and ERROR log lines (the last 20 since it started).
+4. The engine's latest WARNING and ERROR log lines (the last 20 since it started). Only the code's message templates: values other than dates, times, booleans and name-shaped words show as `…`, exceptions as their type, other libraries' lines as logger and level. For full lines, ask the user for `docker compose logs --since 2h engine`.
 5. Scheduled jobs: last runs, jobs that never ran to an end, results not posted yet.
 6. Disk free under the data and state directories, and memory.
 
@@ -32,6 +32,8 @@ The engine may be down or restarting (the 06:00 deploy, the 07:20 restart), or `
 
 - `docker compose exec engine krx-quant doctor` (the engine is running)
 - `docker compose run --rm engine doctor` (the engine is down)
+
+`doctor` still prints when a malformed setting keeps the engine from starting: the error comes right under its heading (`설정 오류: …`).
 
 ## Commands you give the user
 

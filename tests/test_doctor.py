@@ -6,6 +6,7 @@ The secret-looking values here are put together at run time, so the repository's
 
 from __future__ import annotations
 
+import ast
 import json
 import logging
 from collections.abc import AsyncIterator
@@ -20,6 +21,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
+from krx_quant import kis
 from krx_quant.cli import main
 from krx_quant.config import Settings
 from krx_quant.doctor import (
@@ -28,6 +30,7 @@ from krx_quant.doctor import (
     Status,
     api_candidates,
     doctor,
+    doctor_settings,
     engine_status,
     fetch_status,
     report,
@@ -36,7 +39,7 @@ from krx_quant.feeds import RAW_SCHEMA
 from krx_quant.feeds.base import KST
 from krx_quant.predictions import DB_NAME, PredictionStore
 from krx_quant.recorder import ParquetRecorder
-from krx_quant.redaction import MASK
+from krx_quant.redaction import MASK, secrets_of
 from krx_quant.scheduled import JOBS, STATE_FILE
 
 NOW = datetime(2026, 10, 20, 10, 30, 0, tzinfo=KST)
@@ -237,9 +240,120 @@ def test_a_log_line_is_one_line_with_its_error_and_cut_when_long(tmp_path: Path)
     finally:
         logger.removeHandler(recent)
     first, second = recent.lines()  # the oldest went: two are kept
-    assert first.endswith("ERROR krx_quant.test_doctor.long: could not normalize | ValueError: bad frame")
+    assert first.endswith("ERROR krx_quant.test_doctor.long: could not normalize | ValueError")
     assert len(second) == 300 and second.endswith("…")
     assert recent.counts() == {"WARNING": 1, "ERROR": 2}
+
+
+def test_no_market_value_reaches_the_retained_log_lines(tmp_path: Path) -> None:
+    # A malformed KIS frame's parse error carries the frame's head, prices in it (#322 review).
+    frame = "0|H0UNCNT0|x1|005930^093000^71234^5^-100^-0.14^71210.00^71000^71500^70900^71240^71230^3"
+    with pytest.raises(kis.KisError) as caught:
+        kis.parse_message(frame)
+    assert "71234" in str(caught.value)
+    recent = RecentLog()
+    engine_log = logging.getLogger("krx_quant.collector")
+    library_log = logging.getLogger("asyncio")
+    engine_log.addHandler(recent)
+    library_log.addHandler(recent)
+    try:
+        engine_log.warning("unparseable message kept raw: %s", caught.value)  # as _Stream._handle does
+        try:
+            raise ValueError(f"row {frame}")
+        except ValueError:
+            engine_log.exception("could not normalize %s frame; kept raw only", "H0UNCNT0")
+        engine_log.warning("auction prices of %s on %s not kept: %d", "005930", NOW.date(), 71234)
+        engine_log.warning("KIS WebSocket silent for %gs (since %s): %s", 60.0, NOW, True)
+        library_log.error("Task exception was never retrieved: %s", frame)
+    finally:
+        engine_log.removeHandler(recent)
+        library_log.removeHandler(recent)
+    lines = recent.lines()
+    assert not [line for line in lines if "71234" in line or "005930" in line or "71210" in line]
+    unparseable, normalize, auction, silent, library = (line.split(": ", 1)[1] for line in lines)
+    assert unparseable == "unparseable message kept raw: …"
+    assert normalize == "could not normalize H0UNCNT0 frame; kept raw only | ValueError"
+    assert auction == "auction prices of … on 2026-10-20 not kept: …"
+    assert silent == "KIS WebSocket silent for …s (since 2026-10-20 10:30:00): True"
+    assert library == "(krx_quant 밖의 로거라 메시지는 싣지 않는다)"
+    text = report(server(tmp_path), NOW, Status(status_body(), "엔진 프로세스"), recent)
+    assert "71234" not in text and "unparseable message kept raw: …" in text
+    assert "코드의 메시지 틀만 싣는다" in text
+
+
+def test_every_engine_log_message_is_a_literal_template() -> None:
+    """What keeps runtime text out of the retained lines: a log call's message is the code's
+    own literal, its values given apart (``log.warning("... %s", value)``), never an f-string or
+    a string made at run time."""
+    levels = {"debug", "info", "warning", "warn", "error", "exception", "critical", "log"}
+    found = []
+    for path in sorted(Path(__file__).parents[1].joinpath("src", "krx_quant").rglob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text())):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+                continue
+            owner = node.func.value
+            if node.func.attr not in levels or not (
+                (isinstance(owner, ast.Name) and owner.id in ("log", "logger", "logging"))
+                or (isinstance(owner, ast.Call) and "getLogger" in ast.unparse(owner.func))
+            ):
+                continue
+            args = node.args[1:] if node.func.attr == "log" else node.args
+            if not (args and isinstance(args[0], ast.Constant) and isinstance(args[0].value, str)):
+                found.append(f"{path.name}:{node.lineno}: {ast.unparse(node)[:80]}")
+    assert found == []
+
+
+def test_a_malformed_setting_is_a_finding_not_the_end(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A setting the engine refuses (it is down for it): the summary still prints (#322 review).
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("KRX_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("KRX_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("KRX_TRAIN_AT", "late")
+    monkeypatch.setenv("KIS_APP_KEY", APP_KEY)
+    monkeypatch.setenv("KRX_COMMIT", COMMIT)
+    (tmp_path / "state").mkdir()
+    store = PredictionStore(tmp_path / "state" / DB_NAME)
+    store.add_run("start", NOW, None, json.dumps({"commit": COMMIT}))
+    store.close()
+    assert main(["doctor", "--api", "http://127.0.0.1:9"]) == 0
+    out = capsys.readouterr().out
+    assert "설정 오류: KRX_TRAIN_AT must be HH:MM or off, got 'late'" in out
+    assert "엔진은 이 설정으로 시작하지 못한다" in out
+    assert f"DB의 마지막 시작(runs, kind start): 2026-10-20T10:30:00+09:00, commit {COMMIT}" in out
+    assert f"이 명령의 이미지 커밋(KRX_COMMIT): {COMMIT}" in out
+    assert "5. 예약 작업 (state/scheduled.json, KRX_JOBS_AT ?" in out and "6. 디스크와 메모리" in out
+    assert APP_KEY not in out
+
+
+def test_the_lenient_settings_mask_what_the_full_ones_do(tmp_path: Path) -> None:
+    env = {
+        "KIS_APP_KEY": APP_KEY,
+        "KIS_APP_SECRET": "S" + "s" * 179,
+        "TELEGRAM_BOT_TOKEN": "1234567890" + ":" + "A" * 35,
+        "TELEGRAM_CHAT_ID": "987654321",
+        "AWS_ACCESS_KEY_ID": "AKIA" + "Q" * 16,
+        "AWS_SECRET_ACCESS_KEY": "w" * 40,
+        "KRX_ECOS_API_KEY": "E" * 20,
+        "KRX_FRED_API_KEY": "f" * 32,
+        "KRX_GITHUB_TOKEN": GITHUB_TOKEN,
+        "TOSS_CLIENT_ID": "T" * 24,
+        "TOSS_CLIENT_SECRET": "t" * 48,
+        "KRX_OBJECT_STORE": "s3://krx-quant-example/engine",
+        "KRX_S3_ENDPOINT_URL": "https://objects.example.test",
+        "KRX_BIND_ADDRESS": BIND_ADDRESS,
+        "KRX_DATA_DIR": str(tmp_path / "data"),
+        "KRX_API_PORT": "8081",
+    }
+    full, error = doctor_settings(env, None)
+    assert error is None
+    lenient, error = doctor_settings({**env, "KRX_TARGET_VERSION": "2"}, None)
+    assert error is not None and error.startswith("KRX_TARGET_VERSION 2")
+    assert secrets_of(lenient) == secrets_of(full) and len(secrets_of(full)) == 15
+    assert (lenient.data_dir, lenient.state_dir, lenient.api_port) == (tmp_path / "data", Path("state"), 8081)
+    bad_port, _ = doctor_settings({**env, "KRX_API_PORT": "soon"}, None)
+    assert bad_port.api_port == 8080
 
 
 def test_the_command_cannot_read_the_engine_s_log_and_says_how_to(tmp_path: Path) -> None:

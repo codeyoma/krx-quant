@@ -12,10 +12,20 @@ server, or an agent reading an issue, looks at first when something seems wrong.
    (``raw/date=<today>/feed=_system/symbol=_``).
 4. The latest WARNING and ERROR log lines, where the process can read the engine's log: the
    collector keeps its own (``RecentLog``); the command, a process of its own, cannot (Docker
-   keeps the log outside the container), and says so.
+   keeps the log outside the container), and says so. No runtime text reaches them, so no
+   market value can (a raw KIS frame's excerpt in a parse error, a price in an exception): a
+   line is the template the code logged with (``krx_quant``'s loggers only; every engine log
+   call's message is a literal, a test checks), its values shown only when they are a date or
+   time, a truth value, None or a name-shaped word (``H0UNCNT0``, ``kalman``) and ``…``
+   otherwise, and an exception's type without its message. Another library's line shows its
+   logger and level only.
 5. The scheduled jobs (``state/scheduled.json``, #215): their last runs, the jobs that have not
    run to an end yet, the results not posted.
 6. The free disk under the data and state directories, and the memory.
+
+The command reads the settings leniently (``doctor_settings``): a malformed one, which keeps
+the engine from starting, is a finding at the top, and the rest comes from the data and state
+directories, the API's address and the secrets to mask, read as they are.
 
 The engine's state comes from its own API (``/v1/status``): this container's
 (``docker compose exec engine krx-quant doctor``), else compose's engine service
@@ -30,12 +40,14 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import threading
 from collections import Counter, deque
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, time, timedelta
+from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -45,7 +57,7 @@ import pyarrow.parquet as pq
 
 from krx_quant import kis
 from krx_quant.archive import partition_files
-from krx_quant.config import Settings
+from krx_quant.config import Settings, SettingsError, read_values
 from krx_quant.feeds.base import KST
 from krx_quant.predictions import DB_NAME, iso, read_only
 from krx_quant.redaction import redact, secrets_of
@@ -155,22 +167,115 @@ class RecentLog(logging.Handler):
             return dict(self._counts)
 
 
+# The engine's own loggers: their messages are literal templates (a test checks).
+ENGINE_LOGGER = "krx_quant"
+HIDDEN = "…"  # a logged value not shown
+# A printf conversion in a log template (``%s``, ``%.1f``, ``%(name)s``, ``%%``).
+_SPEC = re.compile(r"%(?:\([^)]*\))?[#0\- +]*(?:\*|\d+)?(?:\.(?:\*|\d+))?[hlL]?([diouxXeEfFgGcrsa%])")
+# A value shown as it is: a name, such as a TR ID, a feed or an algorithm (a letter first, so no
+# number, price or symbol code; no space, so no message).
+_NAME = re.compile(r"[A-Za-z][A-Za-z0-9_.-]{0,39}")
+
+
 def _log_line(record: logging.LogRecord) -> str:
+    """A record as the snapshot may show it: no runtime text, so no market value (#322)."""
     at = datetime.fromtimestamp(record.created, KST)
-    text = _first_line(record.getMessage())
+    if record.name == ENGINE_LOGGER or record.name.startswith(f"{ENGINE_LOGGER}."):
+        text = _template(record)
+    else:
+        text = "(krx_quant 밖의 로거라 메시지는 싣지 않는다)"
     if record.exc_info and record.exc_info[1] is not None:
-        error = record.exc_info[1]
-        text += f" | {type(error).__name__}: {_first_line(str(error))}"
+        text += f" | {type(record.exc_info[1]).__name__}"  # its message may hold anything
     line = f"{at:%m-%d %H:%M:%S} {record.levelname} {record.name}: {text}"
     return line if len(line) <= LOG_WIDTH else line[: LOG_WIDTH - 1] + "…"
 
 
-async def doctor(settings: Settings, now: datetime, api: str | None = None) -> str:
+def _template(record: logging.LogRecord) -> str:
+    """The record's message template with each value shown only if it is safe (``_shown``)."""
+    if not isinstance(record.msg, str):
+        return HIDDEN
+    args = record.args
+    values = iter(args) if isinstance(args, tuple) else iter(())
+
+    def fill(match: re.Match[str]) -> str:
+        if match.group(1) == "%":
+            return "%"
+        if isinstance(args, Mapping):
+            return HIDDEN
+        return _shown(next(values, HIDDEN))
+
+    return _first_line(_SPEC.sub(fill, record.msg))
+
+
+def _shown(value: object) -> str:
+    """A logged value as the snapshot shows it: a date or time, a truth value, None, or a
+    name-shaped word as it is; anything else (numbers, messages, rows, frames) ``…``."""
+    if value is None or isinstance(value, bool):
+        return str(value)
+    if isinstance(value, datetime):
+        return f"{value.astimezone(KST):%Y-%m-%d %H:%M:%S}" if value.tzinfo else value.isoformat()
+    if isinstance(value, date | time | timedelta):
+        return str(value)
+    if isinstance(value, Enum):
+        value = value.value
+    if isinstance(value, str) and _NAME.fullmatch(value):
+        return value
+    return HIDDEN
+
+
+def doctor_settings(
+    env: Mapping[str, str] | None = None, dotenv_path: Path | None = Path(".env")
+) -> tuple[Settings, str | None]:
+    """The settings ``doctor`` reads, and the configuration error if there is one. A setting
+    that keeps the engine from starting must not keep its summary from printing: then only
+    what the summary reads is taken, as it is (the directories, the API's address, the commit,
+    the secrets to mask), and the error is returned to be shown."""
+    try:
+        return Settings.from_env(env, dotenv_path, require_kis=False), None
+    except SettingsError as e:
+        error = str(e)
+    values = read_values(env, dotenv_path)
+    try:
+        port = int(values.get("KRX_API_PORT", "8080"))
+    except ValueError:
+        port = 8080
+
+    def text(name: str) -> str | None:
+        return values.get(name, "").strip() or None
+
+    settings = Settings(
+        kis_app_key=text("KIS_APP_KEY") or "",
+        kis_app_secret=text("KIS_APP_SECRET") or "",
+        # Every secret ``redaction.secrets_of`` masks (a test keeps the two alike).
+        telegram_bot_token=text("TELEGRAM_BOT_TOKEN"),
+        telegram_chat_id=text("TELEGRAM_CHAT_ID"),
+        aws_access_key_id=text("AWS_ACCESS_KEY_ID"),
+        aws_secret_access_key=text("AWS_SECRET_ACCESS_KEY"),
+        ecos_api_key=text("KRX_ECOS_API_KEY"),
+        fred_api_key=text("KRX_FRED_API_KEY"),
+        github_token=text("KRX_GITHUB_TOKEN"),
+        toss_client_id=text("TOSS_CLIENT_ID"),
+        toss_client_secret=text("TOSS_CLIENT_SECRET"),
+        object_store=text("KRX_OBJECT_STORE"),
+        s3_endpoint_url=text("KRX_S3_ENDPOINT_URL"),
+        bind_address=text("KRX_BIND_ADDRESS"),
+        data_dir=Path(values.get("KRX_DATA_DIR", "data")),
+        state_dir=Path(values.get("KRX_STATE_DIR", "state")),
+        api_host=values.get("KRX_API_HOST", "127.0.0.1"),
+        api_port=port if 0 < port < 65536 else 8080,
+        commit=text("KRX_COMMIT") or "unknown",
+    )
+    return settings, error
+
+
+async def doctor(
+    settings: Settings, now: datetime, api: str | None = None, *, config_error: str | None = None
+) -> str:
     """The command's summary: the engine read through its API (``api``, or the candidates)."""
     candidates = [("--api로 준 엔진 API", api)] if api else api_candidates(settings)
     async with aiohttp.ClientSession() as session:
         status = await fetch_status(session, candidates)
-    return report(settings, now, status)
+    return report(settings, now, status, config_error=config_error)
 
 
 def report(
@@ -180,19 +285,27 @@ def report(
     logs: RecentLog | None = None,
     *,
     process: str = "이 명령",
+    config_error: str | None = None,
 ) -> str:
     """The summary, masked; ``logs`` are the engine's (None: this process cannot read them),
-    ``process`` names whose memory ``VmRSS`` is."""
+    ``process`` names whose memory ``VmRSS`` is, ``config_error`` is the settings' error
+    (``doctor_settings``)."""
     head = (
         f"서버 상태 {now.astimezone(KST):%Y-%m-%d %H:%M:%S} KST "
         "(krx-quant doctor: 읽기만 한다, 시세 값은 싣지 않는다)"
     )
+    if config_error is not None:
+        head += (
+            f"\n\n설정 오류: {config_error}\n"
+            "  엔진은 이 설정으로 시작하지 못한다(configuration error, 종료 코드 2). 아래는 데이터·상태 폴더,"
+            " 엔진 API 주소, 가릴 비밀값만 그대로 읽어 낸 것이다(KRX_JOBS_AT 등 나머지 설정은 모른다)"
+        )
     parts: list[tuple[str, Callable[[], list[str]]]] = [
         ("1. 엔진", lambda: _engine(settings, status, now)),
         ("2. KIS", lambda: _kis(status, now)),
         ("3. PINGPONG", lambda: _pingpong(settings, now)),
         ("4. 최근 WARNING·ERROR 로그", lambda: _logs(logs)),
-        ("5. 예약 작업", lambda: _jobs(settings)),
+        ("5. 예약 작업", lambda: _jobs(settings, known=config_error is None)),
         ("6. 디스크와 메모리", lambda: _resources(settings, process)),
     ]
     sections = [head]
@@ -337,12 +450,17 @@ def _logs(logs: RecentLog | None) -> list[str]:
     if not lines:
         return [f"{title}): 없음"]
     shown = lines[-LOG_LINES:]
-    return [f"{title}, 마지막 {len(shown)}줄)", *(f"  {line}" for line in shown)]
+    return [
+        f"{title}, 마지막 {len(shown)}줄)",
+        "  코드의 메시지 틀만 싣는다: 값은 날짜·시각, 참거짓, 이름 모양의 글자만, 나머지는 …, 예외는 종류만."
+        " 전체는 서버의 docker compose logs engine",
+        *(f"  {line}" for line in shown),
+    ]
 
 
-def _jobs(settings: Settings) -> list[str]:
+def _jobs(settings: Settings, *, known: bool = True) -> list[str]:
     path = settings.state_dir / STATE_FILE
-    jobs_at = "off" if settings.jobs_at is None else f"{settings.jobs_at:%H:%M}"
+    jobs_at = "?" if not known else "off" if settings.jobs_at is None else f"{settings.jobs_at:%H:%M}"
     title = f"5. 예약 작업 (state/{STATE_FILE}, KRX_JOBS_AT {jobs_at}, 목록 {len(JOBS)}개)"
     try:
         data = json.loads(path.read_text())  # read as it is: never set aside, as the scheduler would
