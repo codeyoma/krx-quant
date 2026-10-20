@@ -14,7 +14,6 @@ Its baselines: always level (``drift-held``) and the last window's answer goes o
 from __future__ import annotations
 
 import math
-import time
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -23,7 +22,7 @@ from krx_quant.algorithms.contract import KindSample
 from krx_quant.features import FeatureVector, Value, Width
 from krx_quant.kinds import Answer, Followed, Kind, KindForecast, KindInputs, KindScored
 from krx_quant.reference import Bar
-from tests.algorithm_doubles import stand_in_card, stand_in_meanings
+from tests.algorithm_doubles import spend, stand_in_card, stand_in_meanings
 
 DRIFT = "drift"
 CLASSES = ("fell", "held", "rose")
@@ -110,7 +109,7 @@ SURE_RISE = KindForecast((0.1, 0.2, 0.7), {"drift_ticks": 1.0})
 
 
 class FixedKindAlgorithm:
-    """Predicts ``forecast`` of the test kind after sleeping ``seconds``."""
+    """Predicts ``forecast`` of the test kind after spending ``seconds`` (``spend``)."""
 
     kind = DRIFT
     training_days = 20
@@ -142,7 +141,7 @@ class FixedKindAlgorithm:
     def predict(self, features: FeatureVector, model: Model) -> KindForecast:
         self.seen.append({name: features[name] for name in self.features})
         if self._seconds:
-            time.sleep(self._seconds)
+            spend(self._seconds)
         return self._forecast
 
 

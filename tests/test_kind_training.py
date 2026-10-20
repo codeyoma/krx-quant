@@ -17,6 +17,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from krx_quant.algorithms import Model
 from krx_quant.algorithms.contract import KindSample
 from krx_quant.clock import FakeClock
@@ -202,6 +204,10 @@ def test_the_night_trains_a_kind_s_algorithm_on_its_answers(tmp_path: Path) -> N
     assert model["target_version"] == 1
 
 
+# Ten recorded days are the fewest that pass (``prevalidation.MIN_DAYS``), each a whole session
+# replayed: about 10 s on a laptop, and past the 30 s default (``pyproject.toml``) on a loaded
+# CI runner (#327).
+@pytest.mark.timeout(120)
 async def test_a_kind_s_algorithm_is_prevalidated_on_its_kind(tmp_path: Path) -> None:
     """Input: ten recorded days of a market swinging up and down every four minutes, the
     drift's turner and the direction's contrarian, both calling the swing back. Output: the

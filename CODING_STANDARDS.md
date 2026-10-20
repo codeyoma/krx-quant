@@ -25,9 +25,10 @@ Seen here:
 
 A test waits for the state it needs before it checks anything: a request to a path arriving, `reading()` turning false, a row being written. That readiness condition is never the order of requests, a fixed request count or wall-clock time: requests made in parallel arrive in any order, and a read asked while the same read is under way joins it. Once the work is done, the test may assert counts and order where they are the behaviour under test (pagination, retries, caching, fan-out).
 
-A test that measures a time budget uses stand-in algorithms with fixed costs, not real algorithms, whose speed depends on the machine.
+A test that measures a time budget uses stand-in algorithms with fixed costs, not real algorithms, whose speed depends on the machine. A sleep alone is not a fixed cost: a loaded machine wakes it late, and the engine counts the wait. A CPU budget test takes the `fixed_costs` fixture (`tests/conftest.py`), which times each stand-in by the seconds it spends (`spend` in `tests/algorithm_doubles.py`). Time limits still count real time, so a stand-in meant to go over one sleeps well past it.
 
 Seen here:
 
 - `tst_krx_cost` waited for requests in a fixed order (fork #99).
 - `test_algorithms_replay` ran the real Mandelbrot and Breiman ladder against a 0.6 s budget and failed on slower runners (#327).
+- `test_the_replay_shares_the_cpu_budget_with_the_live_algorithms_as_live` slept 3 ms and 4 ms against a 5.5 ms budget. On a loaded machine the late wake-ups alone went over it (#327).

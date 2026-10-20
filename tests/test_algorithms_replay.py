@@ -1,6 +1,7 @@
 """Algorithms on the prediction path, through the Replay Harness.
 
-Input: hand-made events, a fake clock, and registered algorithms (Newton or stand-ins).
+Input: hand-made events, a fake clock, and registered algorithms (Newton or stand-ins); the
+CPU budget's tests time the stand-ins by the seconds they spend (``FixedCosts``, #327).
 Output: Engine API responses and what is stored in SQLite.
 """
 
@@ -11,6 +12,8 @@ from collections import Counter
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 from krx_quant.algorithms import Model
 from krx_quant.algorithms.granger import DEFAULT_PARAMS as GRANGER_DEFAULTS
@@ -178,6 +181,7 @@ async def test_an_algorithm_over_its_time_budget_is_skipped_and_recorded(tmp_pat
         busy_morning(),
         until=at("09:01:30"),
         algorithms=[quick, slow],
+        kind_algorithms=(),  # the stand-ins only: the kinds' real ones would hold the GIL quick needs (#327)
         budget=Budget(per_algorithm=0.1),
     )
 
@@ -188,7 +192,9 @@ async def test_an_algorithm_over_its_time_budget_is_skipped_and_recorded(tmp_pat
     assert (made["status"], made["p_flat"]) == ("ok", 0.6)
 
 
-async def test_one_algorithm_at_its_time_limit_leaves_the_others_room(tmp_path: Path) -> None:
+async def test_one_algorithm_at_its_time_limit_leaves_the_others_room(
+    tmp_path: Path, fixed_costs: None
+) -> None:
     # The default budgets in proportion, shrunk 50 times so the test is quick.
     budget = Budget(per_algorithm=Budget().per_algorithm / 50, cpu=Budget().cpu / 50)
     slow = FixedAlgorithm(
@@ -202,6 +208,9 @@ async def test_one_algorithm_at_its_time_limit_leaves_the_others_room(tmp_path: 
         busy_morning(),
         until=at("09:03:30"),
         algorithms=[slow, second, third],
+        # The three stand-ins only, at the costs they spend: the kinds' real algorithms went over
+        # the room left on a slow runner (#327).
+        kind_algorithms=(),
         budget=budget,
     )
 
@@ -213,7 +222,9 @@ async def test_one_algorithm_at_its_time_limit_leaves_the_others_room(tmp_path: 
         assert conn.execute("SELECT COUNT(*) FROM runs WHERE kind = 'cpu_budget'").fetchone()[0] == 0
 
 
-async def test_the_days_predictions_lost_to_the_budgets_are_told_after_the_close(tmp_path: Path) -> None:
+async def test_the_days_predictions_lost_to_the_budgets_are_told_after_the_close(
+    tmp_path: Path, fixed_costs: None
+) -> None:
     db = tmp_path / "engine.db"
     budget = Budget(per_algorithm=0.3, cpu=0.35)
     quick = FixedAlgorithm("quick", features=("velocity",), unique=("velocity",))
@@ -279,7 +290,9 @@ async def test_a_day_without_predictions_lost_to_the_budgets_tells_nothing(tmp_p
     assert sent == []
 
 
-async def test_when_the_cpu_budget_runs_short_the_last_registered_is_skipped_first(tmp_path: Path) -> None:
+async def test_when_the_cpu_budget_runs_short_the_last_registered_is_skipped_first(
+    tmp_path: Path, fixed_costs: None
+) -> None:
     first = FixedAlgorithm("first", features=("velocity",), unique=("velocity",), seconds=0.01)
     second = FixedAlgorithm("second", features=("acceleration",), unique=("acceleration",), seconds=0.01)
     third = FixedAlgorithm("third", features=("relative_volume",), unique=("relative_volume",), seconds=0.3)
@@ -316,6 +329,8 @@ async def test_when_the_cpu_budget_runs_short_the_last_registered_is_skipped_fir
         cpu = (await get_json(client, "/v1/status"))["cpu"]
     assert (cpu["budget_seconds"], cpu["algorithm_seconds"], cpu["skipped_today"]) == (0.2, 10.0, 1)
     assert set(cpu["algorithms"]) == {"first", "second", "third"}
+    # Timed by what they spend (#327), not by how long a loaded machine took.
+    assert (cpu["algorithms"]["first"], cpu["algorithms"]["second"]) == pytest.approx((0.01, 0.01))
     # Third was timed again at 09:03: the three are expected over the budget once more.
     assert cpu["expected_seconds"] > 0.2
     assert cpu["usage"] == cpu["expected_seconds"] / 0.2
