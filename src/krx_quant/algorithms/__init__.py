@@ -37,6 +37,7 @@ from krx_quant.algorithms.contract import (
     save_model,
 )
 from krx_quant.algorithms.cox import Cox
+from krx_quant.algorithms.cox5d import Cox5d
 from krx_quant.algorithms.gauss import Gauss
 from krx_quant.algorithms.granger import Granger
 from krx_quant.algorithms.kalman import Kalman
@@ -134,11 +135,11 @@ KIND_ALGORITHMS: tuple[KindAlgorithm, ...] = register_kind_algorithms(
     [Mandelbrot(), Breiman(), *(Breiman(k) for k in BARRIER_LADDER)], taken={a.name for a in ALGORITHMS}
 )
 
-# The algorithms of the daily kinds (#264), predicted once a trading day: open_to_close's Cox.
-# Registered after pre-validation existed: it runs once it has passed (its walk-forward over the
-# KRX days, ``daily_prevalidation``).
+# The algorithms of the daily kinds (#264), predicted once a trading day: open_to_close's Cox,
+# then open_to_close_5d's Cox-5d (#310). Registered after pre-validation existed: each runs once it
+# has passed (its walk-forward over the KRX days, ``daily_prevalidation``).
 DAILY_ALGORITHMS: tuple[DailyAlgorithm, ...] = register_daily_algorithms(
-    [Cox()],
+    [Cox(), Cox5d()],
     DAILY_KINDS,
     taken={a.name for a in ALGORITHMS}
     | {a.name for a in KIND_ALGORITHMS}

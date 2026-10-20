@@ -391,6 +391,12 @@ AWAITING = (
 
 # Its review days until the variance ratio is measured (#310): the rule's at five sessions' overlap.
 _REVIEW = overlap_review(UNMEASURED_RATIO, SESSIONS)
+# Until then its algorithms are held out of probation (``DailyKind.review_hold``): their first
+# pre-validation measures the ratio (``daily_training``), and the days the rule gives it are fixed
+# here in a PR before any of them is judged on them.
+REVIEW_HOLD = (
+    "its review days are fixed from the variance ratio its first pre-validation measures (#310): not yet"
+)
 
 OPEN_TO_CLOSE_5D = DailyKind(
     name=NAME,
@@ -414,4 +420,5 @@ OPEN_TO_CLOSE_5D = DailyKind(
     answer_from=ANSWER_FROM,
     gives_up=NO_CANDLE,
     awaiting=AWAITING,
+    review_hold=REVIEW_HOLD,
 )

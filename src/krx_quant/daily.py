@@ -433,6 +433,11 @@ class DailyKind(Kind):
     # While set, the engine neither predicts nor answers it, and its algorithms are neither run,
     # trained, pre-validated nor simulated (``runs``); ``GET /v1/kinds`` lists it with the reason.
     awaiting: str | None = None
+    # Why its algorithms are held out of probation, None when they are not (#310): an overlapping
+    # kind's review days are fixed in code from the variance ratio its first pre-validation
+    # measures, so until then one that passed is neither run nor enrolled nor simulated. Its
+    # pre-validation still runs (once the kind runs): it measures the ratio.
+    review_hold: str | None = None
 
     @property
     def runs(self) -> bool:
@@ -503,6 +508,7 @@ class DailyKind(Kind):
             "bench_days": list(self.review_rules.bench_days),
             "recent_days": self.recent_days,
             "awaiting": self.awaiting,  # #310
+            "review_hold": self.review_hold,  # #310
         }
         return out
 
