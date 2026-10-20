@@ -155,3 +155,30 @@ def test_without_recorded_books_the_probe_says_so(tmp_path: Path) -> None:
     assert report(tmp_path, CALENDAR, ("005930",), NIGHT) == (
         "예상 체결 녹화 확인 (#304): raw에 통합 호가(H0UNASP0)가 있는 거래일이 없다"
     )
+
+
+def test_the_auction_s_times_and_gaps_are_krx_s_and_other_codes_are_shown_apart(tmp_path: Path) -> None:
+    # #314: venue code '1' is KRX's auction. Another code's expected price in the window (NXT's
+    # '2') is counted in section 2 but is neither KRX's first or last nor its gap to the open.
+    data = tmp_path / "data"
+    record_raw(
+        data,
+        [
+            (BOOK.tr_id, "005930", at("08:44:39"), book("08:44:39", "81900", "2", "C")),
+            (BOOK.tr_id, "005930", at("08:50:00"), book("08:50:00", "81200", "1", "B")),
+            (BOOK.tr_id, "005930", at("08:59:58"), book("08:59:58", "81300", "1", "B")),
+            (BOOK.tr_id, "005930", at("08:59:59"), book("08:59:59", "82000", "2", "C")),
+            (BOOK.tr_id, "005930", at("15:29:59"), book("15:29:59", "82100", "2", "C")),
+        ],
+    )
+    write_krx_days(data, "005930", [candle(81_300, 82_000)])
+
+    output = report(data, CALENDAR, ("005930",), NIGHT)
+
+    assert "005930: 시가 단일가 '1' 2 · '2' 2 / 종가 단일가 '2' 1" in output
+    assert "005930 2026-10-12: 시가 단일가 08:50:00–08:59:58 (다른 코드 08:44:39–08:59:59)" in output
+    assert "종가 단일가 KRX 예상가 없음 (다른 코드 15:29:59–15:29:59)" in output
+    assert "005930 시가 단일가: 같음 1" in output, "KRX's 81,300 against the open, not NXT's later 82,000"
+    assert "005930 종가 단일가: 예상가 없음 1" in output
+    for price in PRICES:
+        assert price not in output.replace(",", "")

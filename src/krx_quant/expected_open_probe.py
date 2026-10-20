@@ -14,9 +14,10 @@ For each of the last recorded trading days and each symbol it prints:
   opening auction, continuous trading, the closing auction, after the close) and how many
   carry an expected price;
 - the venue codes and time codes (``HOUR_CLS_CODE``) of those records;
-- when an expected price was first and last seen in each auction;
-- how the last expected price before each auction's end compares with that day's KRX day
-  candle (open, close), in ticks;
+- when KRX's expected price (venue code '1') was first and last seen in each auction, and
+  apart from it any other code's (#314);
+- how KRX's last expected price before each auction's end compares with that day's KRX day
+  candle (open, close), in ticks (#314: before, the last of any code was compared);
 - the REST book snapshots (``FHKST01010200``, recorded when the feed is cut) and whether
   their answers carry ``antc_cnpr``;
 - the normalized book rows' new columns (``expected_px``), once the collector records them.
@@ -45,6 +46,7 @@ from krx_quant.candles import read_krx_days
 from krx_quant.config import Settings
 from krx_quant.feeds import BOOK, BOOK_SNAPSHOT
 from krx_quant.feeds.base import KST
+from krx_quant.feeds.stock import KRX_EXPECTED
 from krx_quant.market_calendar import OPENING_AUCTION, MarketCalendar, Session, calendar_store
 from krx_quant.pricing import tick_size
 
@@ -95,8 +97,9 @@ class Book:
     priced: Counter[str] = field(default_factory=Counter)  # with an expected price, by part
     venues: dict[str, Counter[str]] = field(default_factory=dict)  # ANTC_EXCH_CLS_CODE, by part
     hours: dict[str, Counter[str]] = field(default_factory=dict)  # HOUR_CLS_CODE, by part
-    first: dict[str, datetime] = field(default_factory=dict)  # an expected price first seen, by part
-    last: dict[str, tuple[datetime, int]] = field(default_factory=dict)  # last seen, and the price
+    first: dict[str, datetime] = field(default_factory=dict)  # KRX's expected price first seen, by part
+    last: dict[str, tuple[datetime, int]] = field(default_factory=dict)  # KRX's last seen, and the price
+    other: dict[str, tuple[datetime, datetime]] = field(default_factory=dict)  # another code's, first-last
     unreadable: int = 0
 
     def record(self, part: str, at: datetime, fields: Sequence[str]) -> None:
@@ -106,8 +109,13 @@ class Book:
         if not price:
             return
         self.priced[part] += 1
-        self.venues.setdefault(part, Counter())[fields[_EXCH].strip() or "(빈칸)"] += 1
-        self.first.setdefault(part, at)
+        venue = fields[_EXCH].strip()
+        self.venues.setdefault(part, Counter())[venue or "(빈칸)"] += 1
+        if venue != KRX_EXPECTED:  # not KRX's auction (NXT's '2', #314): its span only
+            seen = self.other.get(part, (at, at))
+            self.other[part] = (min(seen[0], at), max(seen[1], at))
+            return
+        self.first[part] = min(self.first.get(part, at), at)
         if part not in self.last or at >= self.last[part][0]:
             self.last[part] = (at, price)
 
@@ -212,8 +220,8 @@ SECTIONS = (
     "1. 통합 호가 레코드와 예상가가 있는 레코드 (raw, 시간대별)",
     "2. 예상가가 있는 레코드의 ANTC_EXCH_CLS_CODE (시간대별)",
     "3. HOUR_CLS_CODE (시간대별, 모든 레코드)",
-    "4. 예상가를 처음·마지막으로 본 시각 (단일가마다)",
-    "5. 단일가 끝 직전 마지막 예상가와 그날 KRX 일봉의 차이 (틱)",
+    f"4. KRX('{KRX_EXPECTED}') 예상가를 처음·마지막으로 본 시각 (단일가마다, 괄호는 다른 거래소 구분 코드)",
+    f"5. 단일가 끝 직전 마지막 KRX('{KRX_EXPECTED}') 예상가와 그날 KRX 일봉의 차이 (틱)",
     f"6. REST 호가 스냅샷 {BOOK_SNAPSHOT.tr_id} 응답 (raw)",
     "7. 정규화한 호가 행의 새 열 expected_px (events)",
 )
@@ -247,10 +255,14 @@ class _Symbol:
             self.hours.setdefault(part, Counter()).update(counter)
         spans = []
         for part, column in ((OPENING, "open"), (CLOSING, "close")):
+            other = book.other.get(part)
+            apart = f" (다른 코드 {_time(other[0])}–{_time(other[1])})" if other else ""
             if part not in book.last:
                 self.gaps[part]["예상가 없음"] += 1
+                if other:
+                    spans.append(f"{part} KRX 예상가 없음{apart}")
                 continue
-            spans.append(f"{part} {_time(book.first[part])}–{_time(book.last[part][0])}")
+            spans.append(f"{part} {_time(book.first[part])}–{_time(book.last[part][0])}{apart}")
             if candle is None:
                 self.gaps[part]["일봉 없음"] += 1
             else:

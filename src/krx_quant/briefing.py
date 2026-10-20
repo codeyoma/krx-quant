@@ -39,6 +39,7 @@ from krx_quant.daily_features import PREMARKET, month_flags, night_window, prema
 from krx_quant.econ_calendar import calendar_answer, read_latest
 from krx_quant.feeds import BOOK, NIGHT_FUTURES, TRADE
 from krx_quant.feeds.base import KST, kst_day
+from krx_quant.feeds.stock import KRX_EXPECTED
 from krx_quant.macro import latest_macro, macro_json, read_partition
 from krx_quant.market_calendar import EXAM_DAYS, OPENING_AUCTION, MarketCalendar
 from krx_quant.predictions import PredictionStore, iso
@@ -50,11 +51,6 @@ US_DAYS = 5  # the US closes shown before the day
 SUPPLY_DAYS = 5  # the trading days the net buys are summed over
 AFTER_HOURS_END = time(20, 0)  # the integrated market's last minute: KRX's and NXT's after-market
 EXPECTED_FROM = OPENING_AUCTION  # before the open: KRX takes the auction's orders from 08:30
-# The book's expected-fill venue code (``ANTC_EXCH_CLS_CODE``) of KRX's auctions. Measured
-# 2026-10-12 – 10-20 (#314): '1' carried KRX's opening and closing auctions (08:50–09:00 and
-# 15:20–15:30); '2' came outside them, and for one symbol in the opening auction's window and
-# before 08:30 too, when only NXT's pre-market is open: NXT's, not the price the open settles at.
-KRX_EXPECTED = "1"
 _MAX_EVENTS = 1000
 
 

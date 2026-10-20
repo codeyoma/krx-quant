@@ -131,6 +131,12 @@ BOOK_SCHEMA = pa.schema(
     ]
 )
 
+# The expected fill's venue code (``ANTC_EXCH_CLS_CODE``, ``expected_exch_cls``) of KRX's
+# auctions. Measured 2026-10-12 – 10-20 (#314): '1' came in the numbers of the opening and closing
+# auctions' time codes; '2' came outside them, and for one symbol before 08:30 too, when only
+# NXT's pre-market is open: NXT's, not the price the open settles at.
+KRX_EXPECTED = "1"
+
 
 def _normalize_book(f: dict[str, str], received_at: datetime) -> Row:
     # Book frames carry only a time of day; take the date from the receipt time in KST.

@@ -34,6 +34,7 @@ from krx_quant.scheduled import (
     DIAGNOSE,
     DIVIDEND_PROBE,
     ENTRY_DELAY,
+    EXPECTED_OPEN_KRX_PROBE,
     EXPECTED_OPEN_PROBE,
     FAILED,
     INTERRUPTED,
@@ -1038,6 +1039,23 @@ def test_the_expected_open_probe_runs_once_on_the_first_trading_night_and_posts_
     output = "예상 체결 녹화 확인 (#304): 2026-10-07 – 2026-10-20, 거래일 10일, 종목 005930\n\n1. 통합 호가"
     assert EXPECTED_OPEN_PROBE.targets[0].part(output) == output, "the whole output"
     assert "시세 값이 없다" in EXPECTED_OPEN_PROBE.targets[0].note
+
+
+def test_the_expected_open_probe_runs_again_with_krx_s_own_figures_and_posts_to_314() -> None:
+    # #314: the first run counted sections 4 and 5 over every venue code; for 009150 the opening
+    # auction's window also had NXT's '2'. The same command, now KRX's ('1') only, once more.
+    assert EXPECTED_OPEN_KRX_PROBE.name == "probe-expected-open-krx-314"
+    assert EXPECTED_OPEN_KRX_PROBE.command == EXPECTED_OPEN_PROBE.command
+    assert EXPECTED_OPEN_KRX_PROBE.timeout == EXPECTED_OPEN_PROBE.timeout
+    assert [t.issue for t in EXPECTED_OPEN_KRX_PROBE.targets] == [314]
+    assert EXPECTED_OPEN_KRX_PROBE.label == ("ready-for-agent",)
+    assert JOBS.index(EXPECTED_OPEN_PROBE) + 1 == JOBS.index(EXPECTED_OPEN_KRX_PROBE)
+    assert EXPECTED_OPEN_KRX_PROBE.due(night(FRIDAY))
+    assert not EXPECTED_OPEN_KRX_PROBE.due(night(SATURDAY)), "a trading day's night, its rows recorded"
+    ran = JobRecord(FRIDAY, OK, at(FRIDAY, "22:30"), COMMIT, 0, 90.0)
+    assert not EXPECTED_OPEN_KRX_PROBE.due(night(MONDAY, ran))
+    note = EXPECTED_OPEN_KRX_PROBE.targets[0].note
+    assert "009150" in note and "시세 값이 없다" in note
 
 
 def subscribed(day: date, nights: tuple[date, ...], record: JobRecord | None = None) -> Night:
