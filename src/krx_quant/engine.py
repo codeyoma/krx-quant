@@ -617,11 +617,13 @@ class PredictionEngine:
         return kind is not None and kind.runs
 
     def waiting(self) -> list[str]:
-        """The registered algorithms not run yet: their pre-validation has not passed."""
+        """The registered algorithms not run yet: their pre-validation has not passed (what the
+        scheduled pre-validations run, and the alert names). Not one of a daily kind not run yet
+        (#310, ``DailyKind.awaiting``): it is not pre-validated before its kind runs."""
         return (
             [a.name for a in self.registered if a not in self.algorithms]
             + [a.name for a in self.kind_registered if a not in self.kind_algorithms]
-            + [a.name for a in self.daily_registered if a not in self.daily_algorithms]
+            + [a.name for a in self.daily_registered if a not in self.daily_algorithms and self._kind_runs(a)]
         )
 
     def to_simulate(self) -> tuple[list[str], list[str]]:

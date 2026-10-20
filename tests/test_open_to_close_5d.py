@@ -490,7 +490,10 @@ async def test_the_kind_is_listed_but_not_run_until_the_dividend_probe_s_result(
     )
     assert e.store.kind_recent(OPEN_TO_CLOSE_5D.name, 1, "005930", 10) == [], "no prediction"
     assert e.store.kind_answers(OPEN_TO_CLOSE_5D.name) == [], "no answer"
-    assert algorithm.name not in e.store.statuses() and algorithm.name in e.waiting(), "not run, not enrolled"
+    assert algorithm.name not in e.store.statuses(), "not run, not enrolled"
+    assert algorithm.name not in e.waiting(), (
+        "nor waiting for a pre-validation: none runs before its kind does"
+    )
     # No training rows, no pre-validation, no job for it.
     data, state = tmp_path / "data", tmp_path / "state"
     made_history(data, state, date(2026, 10, 16), 300)
