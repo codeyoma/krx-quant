@@ -5,6 +5,7 @@ training that never learns a window not over by the day it is judged on."""
 from __future__ import annotations
 
 import random
+from collections.abc import Sequence
 from dataclasses import replace
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
@@ -160,15 +161,16 @@ def test_a_window_waits_for_its_end_day_s_candle() -> None:
     )
 
 
-def inputs(past: list[tuple[date, str | None]], ends: list[date], previous: date) -> DailyInputs:
+def inputs(past: Sequence[tuple[date, str | None]], ends: Sequence[date], previous: date) -> DailyInputs:
     return DailyInputs("005930", MONDAY, at(MONDAY, "08:50"), tuple(past), None, previous, tuple(ends))
 
 
 def test_the_baselines_know_only_the_windows_that_ended() -> None:
     previous = THURSDAY
-    ended = [(date(2026, 10, 1), "up")]
+    ended: list[tuple[date, str | None]] = [(date(2026, 10, 1), "up")]
     persist = Otc5Persist()
-    assert persist.predict(inputs(ended, [THURSDAY], previous)).probabilities == (1.0, 0.0, 0.0)  # type: ignore[union-attr]
+    carried = persist.predict(inputs(ended, [THURSDAY], previous))
+    assert carried is not None and carried.probabilities == (1.0, 0.0, 0.0)
     assert persist.predict(inputs(ended, [date(2026, 10, 7)], previous)) is None, "none ended the day before"
     assert persist.predict(inputs([(date(2026, 10, 1), None)], [THURSDAY], previous)) is None
     climate = Otc5Climate().predict(
@@ -327,13 +329,13 @@ async def test_a_window_is_predicted_at_0850_and_answered_on_its_fifth_session_s
     for s in SYMBOLS:
         source.stored[s][-1] = replace(source.stored[s][-1], candle=True)
     await replay_into(e, clock, [], until=at(friday, "20:51"))
-    monday = {
+    answered = {
         a["symbol"]: a
         for a in e.store.kind_answers(OPEN_TO_CLOSE_5D.name)
         if a["bar_close"].startswith("2026-10-12")
     }
-    assert set(monday) == set(SYMBOLS)
-    first = monday["005930"]
+    assert set(answered) == set(SYMBOLS)
+    first = answered["005930"]
     assert first["scored_at"] == "2026-10-16T20:45:00+09:00", "the first look after its candle"
     assert first["path"]["end_day"] == "2026-10-16" and first["path"]["vi"] == 1, "the five sessions' VIs"
     assert first["special"] is False
