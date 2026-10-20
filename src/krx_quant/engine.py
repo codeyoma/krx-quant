@@ -586,11 +586,14 @@ class PredictionEngine:
         # the answer version and the inputs it runs now (#264): its walk-forward takes a minute,
         # so a change (``open_to_close``'s answer version 2) has it judged again first, that
         # night. One judged live already (active, on the bench) runs on, as any algorithm does.
-        # One of a kind not run yet (#310, ``DailyKind.awaiting``) is not run either.
+        # One of a kind not run yet (#310, ``DailyKind.awaiting``) is not run either, nor one of a
+        # kind whose review days are not fixed yet (``DailyKind.review_hold``), its pre-validation
+        # passed or not: its probation would be judged on other days.
         daily_admitted = [
             a
             for a in self.daily_registered
             if self._kind_runs(a)
+            and not self._review_held(a)
             and (
                 (a.name in known and known[a.name].status is not Status.PROBATION)
                 or self._admits is None
@@ -615,6 +618,10 @@ class PredictionEngine:
     def _kind_runs(self, algorithm: DailyAlgorithm) -> bool:
         kind = self.daily_kind_named(algorithm.kind)
         return kind is not None and kind.runs
+
+    def _review_held(self, algorithm: DailyAlgorithm) -> bool:
+        kind = self.daily_kind_named(algorithm.kind)
+        return kind is not None and kind.review_hold is not None
 
     def waiting(self) -> list[str]:
         """The registered algorithms not run yet: their pre-validation has not passed (what the

@@ -195,18 +195,27 @@ def _record_run(state_dir: Path, result: Prevalidation) -> None:
 
 
 def code_digest(algorithm: Algorithm | KindAlgorithm | DailyAlgorithm) -> str:
-    """A digest of the algorithm's own code: its module, or every module of its package."""
-    module = inspect.getmodule(type(algorithm))
+    """A digest of the algorithm's own code: its module, or every module of its package; then, for
+    one that runs another algorithm's code (``code_from``: those algorithms' classes, #310:
+    ``cox-5d`` fits as ``cox`` does), that code too, so a change to it asks for a new verdict."""
+    digest = hashlib.sha256()
+    _digest_code(digest, type(algorithm), algorithm.name)
+    for shared in getattr(type(algorithm), "code_from", ()):
+        digest.update(b"\0code_from\0")
+        _digest_code(digest, shared, algorithm.name)
+    return digest.hexdigest()[:16]
+
+
+def _digest_code(digest: Any, cls: type, name: str) -> None:
+    module = inspect.getmodule(cls)
     if module is None or module.__file__ is None:
-        raise ValueError(f"{algorithm.name}: no source file to check")
+        raise ValueError(f"{name}: no source file to check")
     path = Path(module.__file__)
     root = path.parent if path.name == "__init__.py" else None
     files = sorted(root.rglob("*.py")) if root is not None else [path]
-    digest = hashlib.sha256()
     for f in files:
         digest.update(f.name.encode() if root is None else f.relative_to(root).as_posix().encode())
         digest.update(f.read_bytes())
-    return digest.hexdigest()[:16]
 
 
 def admits(
