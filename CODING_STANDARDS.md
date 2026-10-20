@@ -23,7 +23,7 @@ Seen here:
 
 ## Tests wait for conditions
 
-A test waits for the state it needs: a request to a path arriving, `reading()` turning false, a row being written. It never relies on the order or the number of requests, or on wall-clock time. Requests made in parallel can arrive in any order, and a read asked while the same read is under way joins it.
+A test waits for the state it needs before it checks anything: a request to a path arriving, `reading()` turning false, a row being written. That readiness condition is never the order of requests, a fixed request count or wall-clock time: requests made in parallel arrive in any order, and a read asked while the same read is under way joins it. Once the work is done, the test may assert counts and order where they are the behaviour under test (pagination, retries, caching, fan-out).
 
 A test that measures a time budget uses stand-in algorithms with fixed costs, not real algorithms, whose speed depends on the machine.
 
