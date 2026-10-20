@@ -16,6 +16,10 @@ Agents cannot reach the server. To see it, add the `needs-server-snapshot` label
 
 Single-context: root `CONTEXT.md` + `docs/adr/`, plus the agreed system design in `docs/design.md`. See `docs/agents/domain.md`.
 
+### Coding standards
+
+Reviewers apply `CODING_STANDARDS.md` to every diff: external data is probed before it is used, and tests wait for conditions.
+
 ## Git workflow
 
 - Never push to `main` directly. Start each change on a branch from `origin/main`, push the branch, open a pull request against `main` (`Closes #N` for the issue it implements), and merge it from the PR once CI passes.
