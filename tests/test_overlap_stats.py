@@ -286,7 +286,7 @@ def test_only_a_daily_kind_s_windows_may_run_several_sessions() -> None:
     assert register_kinds([kind(1)])
     with pytest.raises(DailyRegistrationError, match="overlap"):
         register_daily_kinds([replace(OPEN_TO_CLOSE, overlap=0)])
-    assert register_daily_kinds([replace(OPEN_TO_CLOSE, overlap=H)])
+    assert register_daily_kinds([replace(OPEN_TO_CLOSE, overlap=H, sessions=H)])
 
 
 def test_a_day_left_out_of_the_statistics_stays_a_session_between_its_neighbours() -> None:

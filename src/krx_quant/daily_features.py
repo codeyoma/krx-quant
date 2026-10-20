@@ -65,6 +65,7 @@ from krx_quant.daily import (
     DayPrices,
     StoredDays,
     history_before,
+    window_end,
 )
 from krx_quant.features import FeatureVector
 from krx_quant.feeds import NIGHT_FUTURES, TRADE
@@ -327,7 +328,8 @@ def vector(names: Sequence[str], ctx: DayContext) -> FeatureVector:
 
 
 def band_of(answer: Answer) -> Band | None:
-    """The band an ``open_to_close`` answer was made with (its path's), None without one."""
+    """The band a daily answer was made with (its path's: ``open_to_close``'s, and a window's
+    not over yet, #310), None without one."""
     value, sigma, scale = (answer.path.get(k) for k in ("band", "sigma", "scale"))
     if value is None or sigma is None or scale is None:
         return None
@@ -509,8 +511,9 @@ def samples(
         days = stored[symbol]
         if not days:
             continue
-        answers = kind.answers(days, fee_rate) if kind.answers is not None else []
+        answers = kind.answers_of(days, fee_rate, calendar) if kind.answers is not None else []
         labels = [a.label for a in answers]
+        ends = [window_end(d.day, a) for d, a in zip(days, answers, strict=True)]
         flows = (
             flows_by_day(files.data_dir, files.state_dir, symbol)
             if "foreign_net" in names or ("institution_net" in names)
@@ -523,11 +526,17 @@ def samples(
                 continue
             previous = market.previous(day.day)
             end, start = month_flags(day.day, market.trades)
+            back = max(0, i - CLIMATE_DAYS - 5)
             ctx = DayContext(
                 symbol=symbol,
                 day=day.day,
                 history=days[max(0, i - VOL_LONG - 5) : i],
-                labels=labels[max(0, i - CLIMATE_DAYS - 5) : i],
+                # The classes of the windows that ended before the day (#310: one begun in the
+                # last H − 1 days is not over at its 08:50), as live (``LiveFeatures``).
+                labels=[
+                    label if end is not None and end < day.day else None
+                    for label, end in zip(labels[back:i], ends[back:i], strict=True)
+                ],
                 previous_day=previous,
                 band=band_of(answers[i]),
                 us=_us_values(us, day.day, previous),
@@ -537,7 +546,9 @@ def samples(
                 month_start=start,
                 night_futures=nights.get(previous) if previous is not None else None,
             )
-            out.append(DailySample(symbol, day.day, vector(names, ctx), answers[i], kind.answer_version))
+            out.append(
+                DailySample(symbol, day.day, vector(names, ctx), answers[i], kind.answer_version, ends[i])
+            )
     return sorted(out, key=lambda s: (s.day, s.symbol))
 
 
@@ -618,7 +629,9 @@ class LiveFeatures:
     ) -> FeatureVector:
         previous = self.calendar.previous_trading_day(day)
         before = history_before(history, day)
-        answers = self.kind.answers(before, self.fee_rate) if before and self.kind.answers else []
+        answers = (
+            self.kind.answers_of(before, self.fee_rate, self.calendar) if before and self.kind.answers else []
+        )
         end, start = month_flags(day, self.calendar.is_trading_day)
         ctx = DayContext(
             symbol=symbol,

@@ -235,7 +235,7 @@ def _daily(
         {
             d.day
             for s, days in stored.items()
-            for d, a in zip(days, kind.answers(days, settings.fee_rate), strict=True)
+            for d, a in zip(days, kind.answers_of(days, settings.fee_rate, calendar), strict=True)
             if a.label
         }
     )
@@ -265,8 +265,12 @@ def _daily(
     model: Model | None = None
     for day in days:
         night = nights.get(day)
+        # The windows ended by the night before (#310: one begun in the H − 1 days before it ends
+        # after it), as the night's training takes them.
         training = [
-            s for s in found if night is not None and training_first(algorithm, night) <= s.day <= night
+            s
+            for s in found
+            if night is not None and training_first(algorithm, night) <= s.day and s.ended_by(night)
         ]
         try:
             model = algorithm.fit(training)
@@ -297,7 +301,7 @@ def _daily(
                 )
             )
     for name, scored in baseline_forecasts(
-        kind, files, symbols, settings.fee_rate, days[0], days[-1]
+        kind, files, symbols, settings.fee_rate, days[0], days[-1], calendar=calendar
     ).items():
         for r in scored:
             day = r.bar_close.astimezone(KST).date()
@@ -325,10 +329,12 @@ def _daily(
 
 
 def _answer(store: PredictionStore, sample: DailySample) -> tuple[Answer | None, bool]:
-    """A day's answer as the engine writes it: the day's VIs of the symbol in its path
-    (``daily._with_vis``), special when a circuit breaker or a sidecar touched the day."""
+    """A day's answer as the engine writes it: the VIs of the symbol over its window's sessions in
+    its path (``daily._with_vis``), special when a circuit breaker or a sidecar touched one of them
+    (the day alone for a window of one session; #310)."""
     start = datetime.combine(sample.day, time(), KST)
-    windows = store.special_windows(None, start, start + timedelta(days=1))
+    until = datetime.combine(sample.ends or sample.day, time(), KST) + timedelta(days=1)
+    windows = store.special_windows(None, start, until)
     special = any(w["symbol"] is None for w in windows)
     if sample.answer is None:
         return None, special

@@ -315,12 +315,13 @@ DAILY_CLOSE = time(15, 30)
 
 def kind_target(kind: Kind, calendar: MarketCalendar) -> Callable[[datetime], datetime]:
     """When a kind's prediction made at ``bar_close`` is over: ``bar_close`` + its horizon, or
-    for a daily kind (#264) the close of its day (the closing auction's end, 15:30 on most)."""
+    for a daily kind (#264) the close of its day (the closing auction's end, 15:30 on most): of its
+    window's last session by the trading calendar for a window of several (#310)."""
     if not isinstance(kind, DailyKind):
         return lambda bar_close: bar_close + kind.horizon
 
     def closes(bar_close: datetime) -> datetime:
-        day = kst_day(bar_close)
+        day = kind.scheduled_end(kst_day(bar_close), calendar)
         session = calendar.session(day)
         return session.close if session is not None else datetime.combine(day, DAILY_CLOSE, KST)
 
