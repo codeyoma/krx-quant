@@ -179,7 +179,7 @@ def simulate_daily(
                 stint = store.statuses()[algorithm.name].since
                 done.append(_daily(store, settings, files, calendar, algorithm, kind, stint, now))
             simulated = [a for a in algorithms if a.name in waiting and a.name not in held]
-            ruled = _judge_daily(store, algorithms, simulated, kinds, settings.fee_rate, now)
+            ruled = _judge_daily(store, algorithms, simulated, kinds, settings.fee_rate, now, calendar)
             return SimulationRun(enrolled, [ruled.get(s.algorithm, s) for s in done], held=held)
         finally:
             store.close()
@@ -354,6 +354,7 @@ def _judge_daily(
     kinds: Sequence[DailyKind],
     fee_rate: float,
     now: datetime,
+    calendar: MarketCalendar | None = None,
 ) -> dict[str, Simulation]:
     """Each of the ``judged`` daily algorithms' review at once, applied, kind by kind; a clone
     looked for among the earlier of ``algorithms`` (the registry's order) with a status."""
@@ -379,7 +380,7 @@ def _judge_daily(
             fee_rate=fee_rate,
             rules=kind.review_rules,
             baselines=kind.baseline_names(),
-            scoring=kind_scoring(kind),
+            scoring=kind_scoring(kind, calendar),
         )
         out.update(_apply(store, verdicts, kind.name, now))
     return out

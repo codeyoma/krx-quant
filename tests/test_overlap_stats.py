@@ -287,3 +287,82 @@ def test_only_a_daily_kind_s_windows_may_run_several_sessions() -> None:
     with pytest.raises(DailyRegistrationError, match="overlap"):
         register_daily_kinds([replace(OPEN_TO_CLOSE, overlap=0)])
     assert register_daily_kinds([replace(OPEN_TO_CLOSE, overlap=H)])
+
+
+def test_a_day_left_out_of_the_statistics_stays_a_session_between_its_neighbours() -> None:
+    """A special or unscorable day is left out for every predictor (#310 review): placed among the
+    calendar's sessions, the days on either side keep their distance of two, not one."""
+    from krx_quant.kind_stats import kind_scoring
+    from krx_quant.market_calendar import MarketCalendar
+
+    windows, alg, base, rows = kind(H), [], [], []
+    left_out = 20
+    for d in range(40):
+        if d == left_out:
+            continue
+        for s, symbol in enumerate(("005930", "000660", "009150")):
+            outcome = (d // 3 + s) % 3
+            base.append(scored("flat", d, symbol, 1, outcome))
+            alg.append(scored("alg", d, symbol, (d // 4 + s) % 3, outcome))
+    calendar = MarketCalendar({(DAY0 + timedelta(days=d)): True for d in range(40)})
+    every_session = session_index(DAY0 + timedelta(days=d) for d in range(40))
+    assert sessions_of(alg, {"flat": base}, calendar) == every_session
+    e = entry("alg", alg, {"flat": base}, windows, calendar=calendar)
+    assert e.lifts["flat"].by_day == overlap_day_lift(alg, base, every_session, H)
+    assert e.lifts["flat"].lift == overlap_lift(alg, base, every_session, H)
+    closed_up = entry("alg", alg, {"flat": base}, windows)  # without the calendar: neighbours
+    assert closed_up.lifts["flat"].by_day != e.lifts["flat"].by_day
+    for r in [*alg, *base]:
+        rows.append(
+            {
+                "algorithm": r.algorithm,
+                "model_version": "v1",
+                "symbol": r.symbol,
+                "bar_close": r.bar_close.isoformat(),
+                "output": dict(zip(windows.p_keys(), r.probabilities, strict=True)),
+                "answer_class": windows.classes[r.outcome],
+                "answer_path": {},
+            }
+        )
+    judged = kind_scoring(windows, calendar).measure("alg", rows, {"flat"}, 0.0, 0.95)
+    assert judged.weakest_by_day == e.lifts["flat"].by_day  # the lifecycle's too
+
+
+def test_an_overlapping_kind_s_own_p_and_l_has_driscoll_kraay_intervals() -> None:
+    """``open_to_close``'s research P&L as a kind of five-session windows (#310 review): its per-trade
+    interval is the Driscoll–Kraay one over the days, wider than the independent one when
+    neighbouring days' trades move together."""
+    from dataclasses import replace
+
+    from krx_quant.open_to_close import OPEN_TO_CLOSE, call_profit
+    from krx_quant.stats import DayOverlap, interval_json, mean_interval
+
+    five = replace(OPEN_TO_CLOSE, overlap=H)
+    records = []
+    for d in range(60):
+        change = 0.01 * math.sin(d / 5)  # neighbouring days alike
+        for symbol in ("005930", "000660", "009150"):
+            records.append(
+                KindScored(
+                    "alg",
+                    "v1",
+                    symbol,
+                    at(d),
+                    (1.0, 0.0, 0.0),
+                    0,
+                    {},
+                    {"change": change, "fee_rate": 0.00015},
+                )
+            )
+    extra = summarize(records, five, {}, "alg").extra
+    assert extra is not None
+    dated = [(r.bar_close.date(), call_profit("up", r.path)) for r in records]
+    places = session_index(day for day, _ in dated)
+    overlapping = DayOverlap(H, places).mean_interval([(d, v) for d, v in dated if v is not None])
+    assert extra["long"]["per_trade"] == interval_json(overlapping)
+    independent = mean_interval([v for _, v in dated if v is not None])
+    assert overlapping is not None and independent is not None
+    assert overlapping.low is not None and independent.low is not None
+    assert overlapping.low < independent.low
+    one = summarize(records, OPEN_TO_CLOSE, {}, "alg").extra
+    assert one is not None and one["long"]["per_trade"] == interval_json(independent)  # one session

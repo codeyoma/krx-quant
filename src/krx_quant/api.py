@@ -1138,7 +1138,7 @@ async def _kind_leaderboard(request: web.Request, kind: PredictionKind) -> web.R
         baselines: dict[str, list[KindScored]],
         excluded: dict[str, Excluded],
     ) -> dict[str, Any]:
-        board = kind_leaderboard(algorithms, baselines, min_sample, kind)
+        board = kind_leaderboard(algorithms, baselines, min_sample, kind, engine.calendar)
 
         def listed(entries: list[KindEntry]) -> list[dict[str, Any]]:
             return [
@@ -1176,16 +1176,20 @@ async def _kind_algorithm_stats(request: web.Request, name: str, kind: Predictio
         excluded: dict[str, Excluded],
     ) -> dict[str, Any]:
         records = baselines[name] if name in baselines else algorithms.get(name, [])
-        board = kind_leaderboard(algorithms, baselines, min_sample, kind)
+        board = kind_leaderboard(algorithms, baselines, min_sample, kind, engine.calendar)
         listed = board.ranked + board.unranked + board.baselines
-        overall = next((e for e in listed if e.algorithm == name), kind_entry(name, records, baselines, kind))
+        overall = next(
+            (e for e in listed if e.algorithm == name),
+            kind_entry(name, records, baselines, kind, calendar=engine.calendar),
+        )
 
         def by(key: Callable[[KindScored], str]) -> dict[str, Any]:
             groups: dict[str, list[KindScored]] = {}
             for r in records:
                 groups.setdefault(key(r), []).append(r)
             return {
-                k: kind_entry_json(kind_entry(name, g, baselines, kind)) for k, g in sorted(groups.items())
+                k: kind_entry_json(kind_entry(name, g, baselines, kind, calendar=engine.calendar))
+                for k, g in sorted(groups.items())
             }
 
         return {
@@ -1240,7 +1244,7 @@ async def _cost_map(request: web.Request) -> web.Response:
             kind: PredictionKind = kind,
             days: tuple[date, ...] = of_kind.days,
         ) -> dict[str, Any]:
-            board = kind_leaderboard(algorithms, baselines, min_sample, kind)
+            board = kind_leaderboard(algorithms, baselines, min_sample, kind, engine.calendar)
             return kind_row(kind, board, {**algorithms, **baselines}, fee, min_sample, days)
 
         rows.append(await _kind_stats(request, kind, ("cost-map",), of_kind, build))

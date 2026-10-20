@@ -405,9 +405,9 @@ def prevalidate_daily(
         seed_history(settings.state_dir, name)
         before, on_days = earlier_runs(settings.state_dir, name, run.days)
         tries = on_days + 1
-        board = kind_leaderboard({name: mine}, baselines, settings.min_sample, kind)
+        board = kind_leaderboard({name: mine}, baselines, settings.min_sample, kind, calendar)
         stats = next(e for e in [*board.ranked, *board.unranked] if e.algorithm == name)
-        strict = kind_entry(name, mine, baselines, kind, tried_level(tries)).day_low
+        strict = kind_entry(name, mine, baselines, kind, tried_level(tries), calendar).day_low
         result = Prevalidation(
             algorithm=name,
             code=code_digest(algorithm),

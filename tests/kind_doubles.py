@@ -22,6 +22,7 @@ from krx_quant.algorithms.contract import KindSample
 from krx_quant.features import FeatureVector, Value, Width
 from krx_quant.kinds import Answer, Followed, Kind, KindForecast, KindInputs, KindScored
 from krx_quant.reference import Bar
+from krx_quant.stats import INDEPENDENT, DayOverlap
 from tests.algorithm_doubles import spend, stand_in_card, stand_in_meanings
 
 DRIFT = "drift"
@@ -57,7 +58,10 @@ def within_a_hundred(output: Mapping[str, float]) -> str | None:
 
 
 def share_of_rises(
-    algorithm: str, records: Sequence[KindScored], baselines: Mapping[str, Sequence[KindScored]]
+    algorithm: str,
+    records: Sequence[KindScored],
+    baselines: Mapping[str, Sequence[KindScored]],
+    overlap: DayOverlap = INDEPENDENT,
 ) -> dict[str, Any]:
     rises = sum(r.outcome == CLASSES.index("rose") for r in records)
     return {"rises": rises, "rise_share": rises / len(records) if records else None}

@@ -75,6 +75,7 @@ from krx_quant.touch import MISSING_MID, REST_QUOTES, SILENCE, SILENT, TARGET_VE
 if TYPE_CHECKING:  # the algorithm contract builds on this module: its types only, and the features'
     from krx_quant.algorithms.contract import KindSample, Model
     from krx_quant.features import Snapshot, Width
+    from krx_quant.stats import DayOverlap
 
 DIRECTION = "direction"
 # Why a kind's answer function gave no class for a window the shared rules could score.
@@ -397,8 +398,12 @@ def most_likely(probabilities: Sequence[float]) -> int:
 # the kind's contract, None if it keeps it.
 OutputCheck = Callable[[Mapping[str, float]], str | None]
 # A kind's statistics beside the three-class ones: of the predictor named, from its scored
-# predictions and the kind's baselines' (by name, to compare against; #180).
-ExtraStats = Callable[[str, Sequence[KindScored], Mapping[str, Sequence[KindScored]]], dict[str, Any]]
+# predictions and the kind's baselines' (by name, to compare against; #180), and how its trading
+# days overlap (#310, ``stats.DayOverlap``: its intervals are Driscoll–Kraay ones when its windows
+# run several sessions).
+ExtraStats = Callable[
+    [str, Sequence[KindScored], Mapping[str, Sequence[KindScored]], "DayOverlap"], dict[str, Any]
+]
 
 
 @dataclass(frozen=True, eq=False)

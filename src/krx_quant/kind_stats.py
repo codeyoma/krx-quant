@@ -41,9 +41,12 @@ from typing import Any
 from krx_quant.feeds.base import kst_day
 from krx_quant.kinds import Kind, KindScored
 from krx_quant.lifecycle import Scoring
+from krx_quant.market_calendar import MarketCalendar
 from krx_quant.stats import (
     CALIBRATION_BINS,
+    INDEPENDENT,
     CalibrationBin,
+    DayOverlap,
     Interval,
     Lift,
     Lifted,
@@ -150,12 +153,20 @@ def split(
 
 
 def sessions_of(
-    records: Sequence[KindScored], baselines: Mapping[str, Sequence[KindScored]] | None = None
+    records: Sequence[KindScored],
+    baselines: Mapping[str, Sequence[KindScored]] | None = None,
+    calendar: MarketCalendar | None = None,
 ) -> dict[date, int]:
-    """The trading days ``records`` and the ``baselines``' were made on, each by its place
-    (``stats.session_index``, #310): the sessions an overlapping kind's statistics pair days by."""
+    """The KRX sessions an overlapping kind's statistics pair days by (#310), each by its place
+    (``stats.session_index``): the trading days the ``calendar`` has from KIS over the days
+    ``records`` and the ``baselines``' were made on, and those days themselves (KIS's calendar
+    keeps a year: the walk-forward's older days are those any predictor has). A day left out of
+    the statistics (special, unscorable) stays a session, so its neighbours keep their distance."""
     groups = [records, *(baselines or {}).values()]
-    return session_index(kst_day(r.bar_close) for group in groups for r in group)
+    days = {kst_day(r.bar_close) for group in groups for r in group}
+    if calendar is not None and days:
+        days.update(calendar.trading_days(min(days), max(days)))
+    return session_index(days)
 
 
 def _by_day(records: Sequence[KindScored], value: Callable[[KindScored], float]) -> dict[date, list[float]]:
@@ -174,13 +185,15 @@ def summarize(
 ) -> KindSummary:
     """A predictor's (``algorithm``'s) statistics of ``kind``; its own (``Kind.stats``) with the
     kind's ``baselines``' records beside, to compare against (#180). A kind whose windows overlap
-    (#310) has Driscoll–Kraay intervals, its days placed among ``sessions`` (default: every day
-    of ``records`` and the ``baselines``')."""
+    (#310) has Driscoll–Kraay intervals, its own statistics' too (``stats.DayOverlap``), its days
+    placed among ``sessions`` (default: every day of ``records`` and the ``baselines``')."""
     action = {kind.index(c) for c in kind.action}
     calls = [r for r in records if r.predicted in action]
     days = len({kst_day(r.bar_close) for r in records})
+    overlap = INDEPENDENT
     if kind.overlap > 1:
         at = sessions if sessions is not None else sessions_of(records, baselines)
+        overlap = DayOverlap(kind.overlap, at)
 
         def interval(
             group: Sequence[KindScored], value: Callable[[KindScored], float], ratio: bool
@@ -204,7 +217,7 @@ def summarize(
         brier=brier,
         calibration=_calibration(records, (0, 1, 2)),
         calibration_by_class={c: _calibration(records, (i,)) for i, c in enumerate(kind.classes)},
-        extra=None if kind.stats is None else kind.stats(algorithm, records, baselines or {}),
+        extra=None if kind.stats is None else kind.stats(algorithm, records, baselines or {}, overlap),
         days=days,
         overlap=kind.overlap,
     )
@@ -244,11 +257,13 @@ def entry(
     baselines: dict[str, list[KindScored]],
     kind: Kind,
     day_level: float = 0.95,
+    calendar: MarketCalendar | None = None,
 ) -> KindEntry:
     """One predictor's stats of ``kind``, with its lift over each of the kind's baselines; by
     trading day, a ``day_level`` interval. A kind whose windows overlap (#310) pairs the days
-    among every day ``records`` and the ``baselines``' were made on (``sessions_of``)."""
-    sessions = sessions_of(records, baselines) if kind.overlap > 1 else None
+    among the KRX sessions over every day ``records`` and the ``baselines``' were made on, the
+    ``calendar``'s trading days among them (``sessions_of``)."""
+    sessions = sessions_of(records, baselines, calendar) if kind.overlap > 1 else None
 
     def tested(b: Sequence[KindScored]) -> Tested:
         if sessions is None:
@@ -269,12 +284,17 @@ def leaderboard(
     baselines: dict[str, list[KindScored]],
     min_sample: int,
     kind: Kind,
+    calendar: MarketCalendar | None = None,
 ) -> KindBoard:
     """A kind's algorithms ranked by the lower bound of their weakest lift, as the direction's
     (``stats.leaderboard``): the candidates have at least ``min_sample`` scored predictions
     and as many pairs with each of the kind's baselines; their lifts share one FDR adjustment.
+    An overlapping kind's days are placed among the ``calendar``'s sessions too (#310, ``entry``).
     """
-    raw = [entry(name, records, baselines, kind) for name, records in sorted(by_algorithm.items())]
+    raw = [
+        entry(name, records, baselines, kind, calendar=calendar)
+        for name, records in sorted(by_algorithm.items())
+    ]
     candidates = {e.algorithm for e in raw if enough(e, min_sample)}
     adjusted_q = q_values(raw, candidates)
     adjusted = [
@@ -288,7 +308,10 @@ def leaderboard(
     return KindBoard(
         ranked,
         [e for e in adjusted if e.algorithm not in chosen],
-        [entry(name, records, baselines, kind) for name, records in sorted(baselines.items())],
+        [
+            entry(name, records, baselines, kind, calendar=calendar)
+            for name, records in sorted(baselines.items())
+        ],
     )
 
 
@@ -315,17 +338,19 @@ def entry_json(e: KindEntry) -> dict[str, Any]:
     return out
 
 
-def kind_scoring(kind: Kind) -> Scoring:
+def kind_scoring(kind: Kind, calendar: MarketCalendar | None = None) -> Scoring:
     """How the lifecycle judges ``kind``'s algorithms (#179): their stats against the kind's
     baselines, a clone by the first class's probability less the third's, and only the
-    predictions of models trained on the kind's answers (its answer version)."""
+    predictions of models trained on the kind's answers (its answer version). An overlapping
+    kind's days are placed among the ``calendar``'s sessions too (#310): a day the review leaves
+    out (special, unscorable) is a gap, not a neighbour."""
     first, _, third = kind.p_keys()
 
     def measure(
         name: str, rows: list[dict[str, Any]], baselines: Collection[str], fee_rate: float, level: float
     ) -> Lifted:
         algorithms, scored = split(scored_of_kind(rows, kind), baselines)
-        return entry(name, algorithms.get(name, []), scored, kind, level)
+        return entry(name, algorithms.get(name, []), scored, kind, level, calendar)
 
     def lean(row: Mapping[str, Any]) -> float:
         output = row["output"]

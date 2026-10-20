@@ -581,6 +581,29 @@ def overlap_interval(
     return Interval(found.mean, low, high, found.n)
 
 
+@dataclass(frozen=True)
+class DayOverlap:
+    """How a kind's predictions of neighbouring trading days overlap (#310), as its own statistics
+    (``kinds.Kind.stats``) are given it: its windows' sessions and the trading days' places. One
+    session (``INDEPENDENT``): every day independent, the intervals as they always were."""
+
+    sessions: int = 1
+    places: Sessions | None = None
+
+    def mean_interval(self, dated: Sequence[tuple[date, float]]) -> Interval | None:
+        """``mean_interval`` of values each made on a trading day: for windows of several sessions,
+        the Driscoll–Kraay interval (``overlap_interval``) over the days' places."""
+        if self.sessions <= 1 or self.places is None:
+            return mean_interval([v for _, v in dated])
+        by_day: dict[date, list[float]] = {}
+        for day, value in dated:
+            by_day.setdefault(day, []).append(value)
+        return overlap_interval(by_day, self.places, self.sessions)
+
+
+INDEPENDENT = DayOverlap()
+
+
 def _gains_by_day(records: Sequence[Paired], baseline: Sequence[Paired]) -> dict[date, list[float]]:
     by_day: dict[date, list[float]] = {}
     for at, gain in _gains(records, baseline):

@@ -858,7 +858,7 @@ class PredictionEngine:
                 alerted=alerted,
                 rules=daily.review_rules,
                 baselines=daily.baseline_names(),
-                scoring=kind_scoring(daily),
+                scoring=kind_scoring(daily, self.calendar),
                 recent=daily.recent_days,
                 simulated=self.simulated(daily),
             )
@@ -1051,7 +1051,7 @@ class PredictionEngine:
                 fee_rate=self.fee_rate,
                 rules=daily.review_rules,
                 baselines=daily.baseline_names(),
-                scoring=kind_scoring(daily),
+                scoring=kind_scoring(daily, self.calendar),
                 recent=daily.recent_days,
                 simulated=self.simulated(daily),
             )

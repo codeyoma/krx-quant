@@ -109,8 +109,11 @@ class MarketCalendar:
         return before
 
     def trading_days(self, start: date, end: date) -> list[date]:
-        """Days in ``[start, end]`` that KIS reported as trading days (guesses excluded)."""
-        return sorted(d for d, is_open in self._open.items() if is_open and start <= d <= end)
+        """Days in ``[start, end]`` that KIS reported as trading days (guesses excluded). Read from
+        a copy taken at once: the statistics read it in worker threads (#310) while the loop may
+        refresh it."""
+        known = list(self._open.items())
+        return sorted(d for d, is_open in known if is_open and start <= d <= end)
 
     def known_days(self) -> dict[date, bool]:
         return dict(self._open)
