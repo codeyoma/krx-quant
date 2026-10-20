@@ -51,12 +51,13 @@ from krx_quant.candles import read_candles
 from krx_quant.market_calendar import MarketCalendar, Session
 from krx_quant.market_view import HORIZON, prediction_window
 from krx_quant.pricing import Direction, flat_ticks, tick_size
+from krx_quant.products import LISTED
 from krx_quant.reference import BAR, Bar
 from krx_quant.supply import KIS, read_supply
 from krx_quant.touch import bar_touch
 
 # The periods compared: (name, first day, first day of the next).
-LISTING = date(2026, 5, 27)  # the 16 single-stock ±2x ETFs on 005930 and 000660 listed
+LISTING = LISTED  # the 16 single-stock ±2x ETFs on 005930 and 000660 listed (products.py)
 RULES = date(2026, 7, 31)  # the FSC asked to rebalance earlier (07-28); the deposit rule began
 AFTER_MARKET = date(2026, 9, 14)  # the KRX after-market (16:00–20:00) opened
 PERIODS: tuple[tuple[str, date | None, date | None], ...] = (

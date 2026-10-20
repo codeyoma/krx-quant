@@ -71,7 +71,8 @@ from krx_quant.cards import Card
 from krx_quant.daily import NO_BAND, Band, DailyInputs, DailyKind, DayPrices
 from krx_quant.feeds.base import kst_day
 from krx_quant.kinds import Answer, KindForecast, KindScored
-from krx_quant.pricing import INVERSE_PRODUCTS, SELL_TAX
+from krx_quant.pricing import SELL_TAX
+from krx_quant.products import INVERSE_PRODUCTS
 from krx_quant.stats import interval_json, mean_interval
 
 NAME = "open_to_close"
@@ -255,13 +256,13 @@ def call_profit(predicted: str, path: Mapping[str, Any]) -> float | None:
 
 def inverse_profit(predicted: str, path: Mapping[str, Any], symbol: str, day: Any) -> float | None:
     """A down call through the symbol's single-stock inverse product (#267): the stock's move
-    the other way, less both commissions on the product's notional (the stock's ÷ its leverage);
+    the other way, less both commissions on the product's notional (the stock's ÷ its exposure, |L|);
     None for another call, a symbol without one, or a day before its listing."""
     product = INVERSE_PRODUCTS.get(symbol)
     change, fee = path.get("change"), path.get("fee_rate")
     if predicted != DOWN or product is None or day < product.listed or change is None or fee is None:
         return None
-    return (-float(change) - 2 * float(fee) / product.leverage) * BP
+    return (-float(change) - 2 * float(fee) / product.exposure) * BP
 
 
 def open_to_close_stats(

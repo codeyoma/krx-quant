@@ -976,6 +976,35 @@ CLOSE_PROBE = Job(
     ),
 )
 
+# The single-stock ETFs' net assets (#305): the closing flow's demand of a product is
+# A·(L² − L)·r, with A its net assets on the previous trading day, and no KIS query for them was
+# measured. Once, on the first trading day's night after the deploy that brings it, so the night
+# shows whether that day's values are in by then: ``probe-nav`` asks KIS's ETF/ETN current price,
+# its daily, product and minute NAV trends for each of the 16 products of ``products.PRODUCTS``
+# (about 100 calls spaced half a second, a minute or so) and compares the net asset total with
+# the listed units × NAV. It prints counts, dates, times and field looks, no market value, so it
+# can go on the public issue. The half hour is a bound. Before the pre-validations.
+NAV_PROBE_ISSUE = 305
+
+NAV_PROBE = Job(
+    name="probe-nav-305",
+    due=_first_trading_night,
+    command=("probe-nav",),
+    timeout=timedelta(minutes=30),
+    targets=(
+        Target(
+            NAV_PROBE_ISSUE,
+            note=(
+                "에이전트가 이 출력으로 상품마다 어느 조회가 순자산을 주는지, 지난날을 상장일"
+                "(2026-05-27)까지 주는지, 그날 값이 언제 나오는지 정리해 `docs/kis-feeds.md` "
+                '"ETF 순자산 (#305)"의 ⚠를 고치고, 순자산 출처를 정한다(KIS가 아닌 출처는 사용자가 정한다). '
+                "그 전에는 순자산을 쓰지 않는다(2단계는 이 결과를 기다린다). 출력에는 시세 값이 없다"
+                "(개수, 날짜, 시각, 필드 모양, 같음·다름만)."
+            ),
+        ),
+    ),
+)
+
 # The night futures (#264): the collector records the KOSPI200 night session's trades and book
 # (18:00–06:00) from the deploy that brings it; what only the server shows is whether KIS
 # streams them for this app key, under the contract code asked for, in the layout of KIS's
@@ -1340,6 +1369,7 @@ JOBS: tuple[Job, ...] = (
     STRUCTURE_SUPPLY,
     NET_BUYS_PROBE,
     CLOSE_PROBE,
+    NAV_PROBE,
     *daily_prevalidation_jobs(
         [a.name for a in DAILY_ALGORITHMS],
         {a.name: a.features for a in DAILY_ALGORITHMS},
