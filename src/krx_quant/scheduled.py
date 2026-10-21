@@ -1064,6 +1064,38 @@ DIVIDEND_PROBE = Job(
     ),
 )
 
+# The WebSocket's gaps day by day (#344): on 2026-10-21 the silence watchdog (#311) closed the
+# connection at 15:30:33, no frame having come since 15:29:33, around the closing auction's print.
+# Whether that silence comes at every close (the watchdog would then cut the connection there every
+# day, and its 60 seconds need another look: the user's decision) only the recording shows. Once, on
+# the first night after the deploy that brings it (trading or not: it reads the days already
+# recorded): ``probe-gaps`` summarizes every recorded day's gaps and the closing auction window's
+# frames, trades and bars. It reads files only and prints no market value, so it can go on the
+# public issue. A minute or two; the quarter hour is a bound, kept short as it runs before the
+# simulations and pre-validations, which must start by 00:30 (the Breimans by 23:30). It is listed
+# after the other probes, so on a night they are due too it never holds back the results #314,
+# #264, #305 and #310 wait on.
+GAPS_PROBE_ISSUE = 344
+
+GAPS_PROBE = Job(
+    name="probe-gaps-344",
+    due=_first_night,
+    command=("probe-gaps",),
+    timeout=timedelta(minutes=15),
+    targets=(
+        Target(
+            GAPS_PROBE_ISSUE,
+            note=(
+                "에이전트가 이 출력으로 15:30 무렵의 침묵이 매일 종가 단일가 때 오는지(날마다 종가 단일가 "
+                "구간의 가장 긴 침묵과 겹친 끊김), 그날 종가 단일가 체결과 1분봉 채움이 녹화에 있는지, "
+                "끊김이 언제 무슨 이유로 몇 피드에 왔는지 #344에 정리한다. 60초 기준"
+                "(`KRX_WS_SILENCE_SECONDS`)과 종가 단일가 구간의 처리를 바꿀지는 사용자가 정한다. "
+                "출력에는 시세 값이 없다(개수, 시각, 코드, 피드 이름, 키만)."
+            ),
+        ),
+    ),
+)
+
 # The night futures (#264): the collector records the KOSPI200 night session's trades and book
 # (18:00–06:00) from the deploy that brings it; what only the server shows is whether KIS
 # streams them for this app key, under the contract code asked for, in the layout of KIS's
@@ -1486,6 +1518,7 @@ JOBS: tuple[Job, ...] = (
     CLOSE_REFRESH_PROBE,
     NAV_PROBE,
     DIVIDEND_PROBE,
+    GAPS_PROBE,
     *daily_prevalidation_jobs(
         [a.name for a in DAILY_ALGORITHMS],
         {a.name: a.features for a in DAILY_ALGORITHMS},

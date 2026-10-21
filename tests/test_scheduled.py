@@ -38,6 +38,7 @@ from krx_quant.scheduled import (
     EXPECTED_OPEN_KRX_PROBE,
     EXPECTED_OPEN_PROBE,
     FAILED,
+    GAPS_PROBE,
     INTERRUPTED,
     JOBS,
     NAV_PROBE,
@@ -1216,6 +1217,54 @@ async def test_the_collector_runs_the_night_s_jobs(kis: FakeKis, empty_server: P
             await asyncio.wait_for(task, 10)
     record = JobState.load(empty_server / "state" / STATE_FILE).jobs["diagnose-203-187"]
     assert record.outcome == OK and record.day == FRIDAY and record.comments.keys() == {203, 187}
+
+
+def test_the_gaps_probe_runs_once_on_the_first_night_and_posts_to_344() -> None:
+    # #344: whether the silence the watchdog closed the connection on at 15:30 on 2026-10-21 comes
+    # at every closing auction, from the days already recorded.
+    assert GAPS_PROBE.name == "probe-gaps-344"
+    assert GAPS_PROBE.command == ("probe-gaps",)
+    assert GAPS_PROBE.timeout == timedelta(minutes=15), "short: the simulations and pre-validations follow"
+    assert [t.issue for t in GAPS_PROBE.targets] == [344]
+    assert GAPS_PROBE.label == ("ready-for-agent",)
+    waited_on = (EXPECTED_OPEN_KRX_PROBE, CLOSE_REFRESH_PROBE, NAV_PROBE, DIVIDEND_PROBE)
+    assert all(JOBS.index(probe) < JOBS.index(GAPS_PROBE) for probe in waited_on), "they go first"
+    first = next(i for i, j in enumerate(JOBS) if j.name.startswith(("prevalidate-", "simulate-")))
+    assert JOBS.index(GAPS_PROBE) < first, "before the simulations and pre-validations"
+    assert GAPS_PROBE.due(night(FRIDAY)) and GAPS_PROBE.due(night(SATURDAY)), "it reads the days recorded"
+    ran = JobRecord(FRIDAY, OK, at(FRIDAY, "22:30"), COMMIT, 0, 60.0)
+    assert not GAPS_PROBE.due(night(MONDAY, ran))
+    assert not GAPS_PROBE.due(night(MONDAY, replace(ran, outcome=FAILED, exit_code=1)))
+    assert GAPS_PROBE.due(night(MONDAY, replace(ran, outcome=INTERRUPTED)))
+    output = "WebSocket 결측과 종가 단일가 녹화 (#344): 2026-10-20 – 2026-10-22\n\n1. 날마다 요약"
+    assert GAPS_PROBE.targets[0].part(output) == output, "the whole output"
+    assert "시세 값이 없다" in GAPS_PROBE.targets[0].note
+
+
+async def test_the_gaps_probe_job_runs_the_real_command(empty_server: Path) -> None:
+    state = JobState.load(empty_server / STATE_FILE)
+    async with fake_github() as hub, aiohttp.ClientSession() as session:
+        scheduler = Scheduler(
+            [GAPS_PROBE],
+            AT,
+            CALENDAR,
+            state,
+            GitHub(session, TOKEN, REPO, hub.url),
+            Told(),
+            FakeClock(at(FRIDAY, "23:00")),
+            commit=COMMIT,
+        )
+        await asyncio.wait_for(scheduler.run_night(FRIDAY), 25)
+    body = hub.bodies(344)[-1]
+    assert (
+        "**예약 작업 `probe-gaps-344`**" in body
+        and "다시 돌리기: `docker compose run --rm engine probe-gaps`" in body
+    )
+    assert (
+        "WebSocket 결측과 종가 단일가 녹화 (#344): raw에 WebSocket 프레임이 있거나 gaps가 있는 날이 없다"
+        in body
+    )
+    assert state.jobs["probe-gaps-344"].exit_code == 0
 
 
 def test_the_dividend_probe_runs_once_on_the_first_night_and_posts_to_310() -> None:
