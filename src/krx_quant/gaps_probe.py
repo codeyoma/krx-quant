@@ -14,9 +14,11 @@ look. That decision is the user's; this probe gives it the counts, over every re
 2. on each trading day, the closing auction window (the session's ``closing_auction`` to a minute
    after its ``close``: 15:20–15:31 on most days): the last frame received in it per WebSocket feed
    (``raw``, every key; ``_system`` holds KIS's PINGPONGs and replies, which the watchdog counts
-   too) and how many; the longest silence between any two of them that overlaps the window (the
-   frames are read from ``PRINT_WITHIN`` before the window to ``PRINT_WITHIN`` after the close, so
-   one that began before or runs past it shows its ends); the gaps that overlap the window; for
+   too) and how many; the longest silence between any two of them that overlaps the window, from
+   the day's last frame before the window (one that began before it shows its start; with none
+   that day, it is said so) to ``PRINT_WITHIN`` after the close, or to the run's time if earlier
+   (one that runs past the window shows its end, and a run at 15:35 does not count the minutes to
+   come); the gaps that overlap the window; for
    each symbol of the KRX (``H0STCNT0``) and the integrated (``H0UNCNT0``) trades
    (``events``), the first trade at or after the close within the window, with its exchange and
    receipt times and its raw codes, or when the first one after the close came; and whether
@@ -223,12 +225,20 @@ def recorded_days(data_dir: Path, now: datetime) -> list[date]:
     return sorted(d for d in days if d <= today)
 
 
-def frames(
-    data_dir: Path, day: date, start: datetime, end: datetime, unread: Unread
-) -> dict[str, list[datetime]]:
+@dataclass
+class Frames:
+    """The day's WebSocket frames around the closing auction window."""
+
+    by_feed: dict[str, list[datetime]]  # receipt times read, by feed (every key), sorted
+    before: datetime | None  # the day's last frame before the read, of any feed; None: none
+
+
+def frames(data_dir: Path, day: date, start: datetime, end: datetime, unread: Unread) -> Frames:
     """The receipt times of the day's WebSocket frames from ``start`` to before ``end``, by feed
-    (every key), sorted; a feed recorded that day without one there has an empty list."""
-    out: dict[str, list[datetime]] = {}
+    (a feed recorded that day without one there has an empty list), and the day's last frame
+    before ``start``, so a silence that began before the read shows its start."""
+    by_feed: dict[str, list[datetime]] = {}
+    before: datetime | None = None
     for feed in WS_RAW:
         root = data_dir / "raw" / f"date={day.isoformat()}" / f"feed={feed}"
         if not root.is_dir():
@@ -237,29 +247,41 @@ def frames(
         for partition in sorted(root.glob("symbol=*")):
             for batch in _batches(partition, (_RECEIVED,), unread):
                 values = _timestamps(batch, _RECEIVED, unread, f"raw {feed}")
-                if values is not None:
-                    times += pc.filter(values, _between(values, start, end)).to_pylist()
-        out[feed] = sorted(times)
-    return out
+                if values is None:
+                    continue
+                times += pc.filter(values, _between(values, start, end)).to_pylist()
+                earlier = pc.max(pc.filter(values, pc.less(values, pa.scalar(start, type=values.type))))
+                last = earlier.as_py()
+                if last is not None and (before is None or last > before):
+                    before = last
+        by_feed[feed] = sorted(times)
+    return Frames(by_feed, before)
+
+
+# A silence: its first frame (None: no frame that day before it) and the frame that ended it
+# (None: none came before the read's end).
+Silence = tuple[datetime | None, datetime | None]
 
 
 def longest_silence(
-    times: Sequence[datetime], start: datetime, end: datetime, until: datetime
-) -> tuple[datetime, datetime | None] | None:
-    """The longest silence between consecutive ``times`` (sorted) that overlaps ``start`` to
-    ``end``: its first and last frame, the last None when no frame came after it before ``until``
-    (the read's end); None if no silence read overlaps the window."""
-    best: tuple[timedelta, datetime, datetime | None] | None = None
-    for i, at in enumerate(times):
-        if at >= end:
+    times: Sequence[datetime], before: datetime | None, start: datetime, end: datetime, until: datetime
+) -> Silence:
+    """The longest silence that overlaps ``start`` to ``end``, between the frames ``times`` (sorted,
+    read from ``start`` to ``until``) and ``before``, the day's last frame before them. A silence
+    with no frame before it is counted from the day's start."""
+    opened = datetime.combine(start.astimezone(KST).date(), datetime.min.time(), KST)
+    edges: list[datetime | None] = [before, *times, None]
+    best: tuple[timedelta, Silence] | None = None
+    for first, after in zip(edges, edges[1:], strict=False):
+        if first is not None and first >= end:
             break
-        after = times[i + 1] if i + 1 < len(times) else None
         if after is not None and after <= start:
             continue
-        span = (after or until) - at
+        span = (after or until) - (first or opened)
         if best is None or span > best[0]:
-            best = (span, at, after)
-    return None if best is None else (best[1], best[2])
+            best = (span, (first, after))
+    assert best is not None, "the edges overlap the window"
+    return best[1]
 
 
 @dataclass(frozen=True)
@@ -383,10 +405,10 @@ def _by_reason(groups: Sequence[Group]) -> str:
 
 @dataclass
 class Closing:
-    """What one trading day's closing auction window held: the longest silence (its first and
-    last frame, the last None if none came after it; None without a frame) and the lines."""
+    """What one trading day's closing auction window held: its longest silence, said, and the
+    lines."""
 
-    silence: tuple[datetime, datetime | None] | None
+    silence: str
     lines: list[str]
 
 
@@ -400,25 +422,28 @@ def closing(
     groups: Sequence[Group],
     stocks: Sequence[str],
     etfs: Sequence[str],
+    now: datetime,
     unread: Unread,
 ) -> Closing:
-    """The closing auction window of ``session``'s day (``SECTIONS`` 2). Frames are read from
-    ``PRINT_WITHIN`` before the window, so a silence that began before it shows its start, to
-    ``PRINT_WITHIN`` after the close, so one that runs past the window shows its end."""
+    """The closing auction window of ``session``'s day (``SECTIONS`` 2), over by ``now``. Frames
+    are read to ``PRINT_WITHIN`` after the close (or to ``now``, if earlier), so a silence that runs
+    past the window shows its end, and the day's last frame before the window gives the start of
+    one that began before it."""
     day = session.day
     start, end = _window(session)
-    until = session.close + PRINT_WITHIN
-    read = frames(data_dir, day, start - PRINT_WITHIN, until, unread)
-    silence = longest_silence(sorted(t for times in read.values() for t in times), start, end, until)
-    within = {feed: [t for t in times if start <= t < end] for feed, times in read.items()}
+    until = min(session.close + PRINT_WITHIN, now)
+    read = frames(data_dir, day, start, until, unread)
+    every = sorted(t for times in read.by_feed.values() for t in times)
+    silence = _silence(longest_silence(every, read.before, start, end, until), until, day)
+    within = {feed: [t for t in times if t < end] for feed, times in read.by_feed.items()}
     heard = [f"{feed} {_time(times[-1], day)} · {len(times):,}" for feed, times in within.items() if times]
     lines = ["WebSocket 프레임(피드별 마지막 받은 시각 · 수): " + (" / ".join(heard) or "없음")]
     quiet = [feed for feed, times in within.items() if not times]
     if quiet:
         lines.append("이 구간에 프레임이 없는 피드(그날 녹화는 있다): " + " ".join(quiet))
     lines.append(
-        f"가장 긴 침묵(모든 WebSocket 프레임 사이, 구간 {_minutes(PRINT_WITHIN)} 전부터 마감 "
-        f"{_minutes(PRINT_WITHIN)} 뒤까지 읽는다): {_silence(silence, until, day)}"
+        "가장 긴 침묵(모든 WebSocket 프레임 사이, 구간 앞의 마지막 프레임부터 마감 "
+        f"{_minutes(PRINT_WITHIN)} 뒤까지 본다): {silence}"
     )
     overlapping = [g for g in groups if g.overlaps(start, end)]
     lines += [f"겹친 결측: {group_line(g, day)}" for g in overlapping] or ["겹친 결측: 없음"]
@@ -443,14 +468,19 @@ def _minutes(span: timedelta) -> str:
     return f"{round(span.total_seconds() / 60)}분"
 
 
-def _silence(silence: tuple[datetime, datetime | None] | None, until: datetime, day: date) -> str:
-    if silence is None:
-        return "이 구간에 프레임 없음"
+def _silence(silence: Silence, until: datetime, day: date) -> str:
     first, after = silence
+    if first is None and after is None:
+        return f"그날 {_time(until, day)}까지 프레임 없음"
+    if first is None:
+        assert after is not None
+        return f"{_time(after, day)} 전에는 그날 프레임 없음"
     if after is None:
         return f"{_time(first, day)}부터 {_time(until, day)}까지 프레임 없음({_length(until - first)} 넘게)"
     # In seconds, to set against the watchdog's (``KRX_WS_SILENCE_SECONDS``, 60 by default).
-    return f"{(after - first).total_seconds():.1f}초({_time(first, day)}–{_time(after, day)})"
+    span = after - first
+    said = f"{span.total_seconds():.1f}초" if span < timedelta(hours=1) else _length(span)
+    return f"{said}({_time(first, day)}–{_time(after, day)})"
 
 
 def _trade(recorded: bool, trade: Trade | None, end: datetime, day: date) -> str:
@@ -510,11 +540,9 @@ def report(
             if now < end:
                 line += f" · 종가 단일가 {span}: 아직 지나지 않음"
             else:
-                seen = closing(data_dir, session, groups, stocks, etfs, unread)
+                seen = closing(data_dir, session, groups, stocks, etfs, now, unread)
                 overlapping = sum(1 for g in groups if g.disconnect and g.overlaps(start, end))
-                line += f" · 종가 단일가 {span}: 가장 긴 침묵 " + _silence(
-                    seen.silence, session.close + PRINT_WITHIN, day
-                )
+                line += f" · 종가 단일가 {span}: 가장 긴 침묵 {seen.silence}"
                 line += f", 겹친 끊김 {overlapping}번" if overlapping else ", 겹친 끊김 없음"
                 windows += [f"{day} {_time(start, day)}–{_time(end, day)}", *(f"  {x}" for x in seen.lines)]
         summary.append(line)

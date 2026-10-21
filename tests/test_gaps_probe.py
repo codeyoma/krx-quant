@@ -225,16 +225,58 @@ def test_the_closing_window_shows_frames_silence_trades_and_bars(recorded: Path)
     )
 
 
+def books(*times: str) -> list[tuple[str, str, str, str]]:
+    return [(BOOK.tr_id, "005930", t, book_frame({"MKSC_SHRN_ISCD": "005930"})) for t in times]
+
+
+# Frames every half minute from before the window to 15:29:33, then none.
+TO_15_29_33 = (*(f"15:{m}:{s:02d}" for m in range(19, 30) for s in (0, 30)), "15:29:33")
+
+
+def silence_of(output: str) -> str:
+    return output.split("가장 긴 침묵 ")[1].split(", 겹친 끊김")[0]
+
+
 def test_a_silence_running_past_the_window_shows_that_no_frame_came(tmp_path: Path) -> None:
     data = tmp_path / "data"
-    record_raw(data, [(BOOK.tr_id, "005930", "15:29:33", book_frame({"MKSC_SHRN_ISCD": "005930"}))])
+    record_raw(data, books(*TO_15_29_33))
 
     output = report(data, CALENDAR, STOCKS, (), NIGHT)
 
-    assert "가장 긴 침묵 15:29:33부터 15:40:00까지 프레임 없음(10분 27초 넘게), 겹친 끊김 없음" in output
+    assert silence_of(output) == "15:29:33부터 15:40:00까지 프레임 없음(10분 27초 넘게)"
     assert "  2026-10-21 거래일: 결측 없음" in output
     assert "    겹친 결측: 없음" in output
     assert "005930 녹화 없음" in output
+
+
+def test_a_silence_that_began_before_the_window_counts_from_the_day_s_last_frame(tmp_path: Path) -> None:
+    # Codex review on #345: frames from 15:10 to 15:30 none, then every second; read from 15:20 only,
+    # the window would look healthy.
+    data = tmp_path / "data"
+    after = [f"15:30:{s:02d}" for s in range(60)] + [f"15:31:{s:02d}" for s in range(0, 60, 5)]
+    record_raw(data, books("09:00:00", "15:10:00", *after))
+
+    assert silence_of(report(data, CALENDAR, STOCKS, (), NIGHT)) == "1200.0초(15:10:00–15:30:00)"
+
+
+def test_a_day_whose_first_frame_is_after_the_window_says_none_came_before(tmp_path: Path) -> None:
+    data = tmp_path / "data"
+    record_raw(data, books("15:35:00", "15:35:01"))
+
+    output = report(data, CALENDAR, STOCKS, (), NIGHT)
+
+    assert silence_of(output) == "15:35:00 전에는 그날 프레임 없음"
+    assert "    WebSocket 프레임(피드별 마지막 받은 시각 · 수): 없음" in output
+
+
+def test_a_run_before_the_read_s_end_measures_to_now(tmp_path: Path) -> None:
+    # Codex review on #345: at 15:32 the frames to 15:40 are not in yet.
+    data = tmp_path / "data"
+    record_raw(data, books(*TO_15_29_33))
+
+    output = report(data, CALENDAR, STOCKS, (), at("15:32:00"))
+
+    assert silence_of(output) == "15:29:33부터 15:32:00까지 프레임 없음(2분 27초 넘게)"
 
 
 def test_a_window_not_over_yet_is_said_so(recorded: Path) -> None:
