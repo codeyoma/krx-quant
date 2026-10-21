@@ -386,7 +386,7 @@ def open_to_close_5d_stats(
 
 # It ran only once the dividend probe's result was in (#310 review, #338: ``DailyKind.awaiting``).
 # The probe found the adjustment takes no dividend out and KIS marks the ex-dividend days, so it runs
-# with the spec's fallback: the answer as it is, the window marked (``ex_dividend``, #PRNUM).
+# with the spec's fallback: the answer as it is, the window marked (``ex_dividend``, #347).
 
 # Its review days until the variance ratio is measured (#310): the rule's at five sessions' overlap.
 _REVIEW = overlap_review(UNMEASURED_RATIO, SESSIONS)

@@ -328,7 +328,7 @@ KOSPI200 선물과 달러선물은 KIS 선물옵션 분봉조회(`FHKIF03020200`
 > **바뀜** (2026-10-18, #291): 일봉은 종목마다 파일 하나(`candles.parquet`, 통합)였다 → 같은 폴더에 KRX 시장 일봉 `krx.parquet`도 둔다. 이유: 하루 한 번 예측 종류 `open_to_close`(#264)가 KRX 시가 단일가 → 종가 단일가로 채점하고 학습한다.
 
 - **락 구분(`krx.parquet`만, #310).** KRX 일봉은 아래 표의 열에 `ex_code`(string)를 더 둔다: KIS 행의 락 구분(`flng_cls_code`)을 받은 그대로다. KIS 수정주가는 현금배당을 빼지 않고(2026-10-21 `probe-dividends-310`), 이 값이 배당락일을 알려 준다: `02` 배당락(연말), `05` 중간배당락(분기), 그 밖의 날 `00`([kis-feeds.md](kis-feeds.md#기간별-시세-일주월년봉)의 "수정주가"). 5거래일 창(`open_to_close_5d`)의 경로 `ex_dividend`가 이것을 읽는다(`daily.ex_dividend_of`: `02`·`05`는 배당락일, `00`은 아님, 그 밖의 값과 `null`은 모름). 통합 일봉과 주·월·년봉에는 이 열이 없다. `null`은 이 열 전에 저장한 봉 중 KIS가 다시 답하지 않은 것이다.
-  - **한 번 채우기.** 이 열 전에 쓴 `krx.parquet`(기록의 `checked`가 1인 파일, 아래 "파일의 기록")은 그다음 실행이 위 "한 번 전체 대조"처럼 전체 기간을 한 번 더 받아, KIS가 답한 모든 봉에 락 구분을 채운다. 채운 것은 KIS가 바꾼 봉이 아니라 `replaced`에 남기지 않는다(앞의 기록은 그대로다). 로그는 `KRX day candles of <종목> checked whole against KIS (#264): N replaced, M added, ex-date codes filled in K (#310)`다. 서버에서는 이 PR(#PRNUM)을 담은 배포의 첫 실행(06:00 시작)이고, 종목마다 KRX 일봉 전체 기간 한 번(005930은 110번쯤 조회, 1분봉 백필과 같은 속도로 몇십 초)이다. 통합 일봉과 주·월·년봉은 다시 받지 않는다.
+  - **한 번 채우기.** 이 열 전에 쓴 `krx.parquet`(기록의 `checked`가 1인 파일, 아래 "파일의 기록")은 그다음 실행이 위 "한 번 전체 대조"처럼 전체 기간을 한 번 더 받아, KIS가 답한 모든 봉에 락 구분을 채운다. 채운 것은 KIS가 바꾼 봉이 아니라 `replaced`에 남기지 않는다(앞의 기록은 그대로다). 로그는 `KRX day candles of <종목> checked whole against KIS (#264): N replaced, M added, ex-date codes filled in K (#310)`다. 서버에서는 이 PR(#347)을 담은 배포의 첫 실행(06:00 시작)이고, 종목마다 KRX 일봉 전체 기간 한 번(005930은 110번쯤 조회, 1분봉 백필과 같은 속도로 몇십 초)이다. 통합 일봉과 주·월·년봉은 다시 받지 않는다.
   - 그 뒤 다시 받기에서 KIS가 저장된 봉의 락 구분을 바꾸면, 다른 필드처럼 그 봉을 바꾸고 기록의 `fields`에 `ex_code`를 남긴다.
 
 - 봉의 날짜(`date`)는 기간이 시작하는 날이다: 일봉은 그날, 주봉은 월요일, 월봉은 1일, 년봉은 1월 1일. KIS가 기간의 첫날로 붙이든 마지막 거래일로 붙이든 이렇게 맞춘다.
@@ -362,7 +362,7 @@ KOSPI200 선물과 달러선물은 KIS 선물옵션 분봉조회(`FHKIF03020200`
 | `value` | int64 | `acml_tr_pbmn` | 거래대금(원) |
 | `ex_code` | string | `flng_cls_code` | `krx.parquet`만(#310): KIS의 락 구분 그대로(`00` 없음, `02` 배당락, `05` 중간배당락). 이 열 전에 저장한 봉 중 KIS가 다시 답하지 않은 것은 `null` |
 
-> **바뀜** (2026-10-22, #PRNUM): `krx.parquet`의 열이 일봉과 같았다 → `ex_code`를 더 둔다. `checked`는 `krx.parquet`만 2다. 이유: KIS 수정주가가 현금배당을 빼지 않아(2026-10-21 `probe-dividends-310`), 5거래일 창의 배당락 표시(`ex_dividend`)가 KIS의 락 구분을 읽는다(#310).
+> **바뀜** (2026-10-22, #347): `krx.parquet`의 열이 일봉과 같았다 → `ex_code`를 더 둔다. `checked`는 `krx.parquet`만 2다. 이유: KIS 수정주가가 현금배당을 빼지 않아(2026-10-21 `probe-dividends-310`), 5거래일 창의 배당락 표시(`ex_dividend`)가 KIS의 락 구분을 읽는다(#310).
 
 ## auctions: 단일가 가격 (REST, #264)
 
