@@ -15,10 +15,12 @@ import pytest
 
 from krx_quant.algorithms import Model
 from krx_quant.auctions import MINUTE_BAR
+from krx_quant.candles import CANDLES_TR
 from krx_quant.cards import Card, Meaning
 from krx_quant.clock import FakeClock
 from krx_quant.daily import (
     DAILY_RULES,
+    EX_DIVIDEND_CODES,
     NO_BAND,
     NO_CANDLE,
     PENDING,
@@ -26,6 +28,7 @@ from krx_quant.daily import (
     DailyRegistrationError,
     DailySample,
     DayPrices,
+    ex_dividend_of,
     first_review_day,
     overlap_review,
     register_daily_kinds,
@@ -33,6 +36,7 @@ from krx_quant.daily import (
     window_end,
 )
 from krx_quant.engine import PredictionEngine
+from krx_quant.fake_kis import FakeKis
 from krx_quant.features import FeatureVector
 from krx_quant.feeds.base import KST
 from krx_quant.kind_registry import DAILY_KINDS, daily_kind_named
@@ -63,8 +67,6 @@ from krx_quant.stats import DayOverlap, interval_json, session_index
 
 FEE = 0.015 / 100
 SYMBOLS = ("005930", "000660")
-# The kind as it runs once the dividend probe's result lets it (#310 review, #338): its behaviour.
-RELEASED = replace(OPEN_TO_CLOSE_5D, awaiting=None)
 # 2026-10-09 (Friday) is Hangul Day: the window begun Monday the 5th ends Monday the 12th.
 HANGUL_DAY = date(2026, 10, 9)
 CALENDAR = MarketCalendar({HANGUL_DAY: False})
@@ -108,7 +110,7 @@ def test_the_window_runs_from_the_day_s_open_to_its_fifth_session_s_close() -> N
     assert monday_5th.path["change"] == pytest.approx(days[i + 4].close / days[i].open - 1)
     assert monday_5th.path["closes"] == [d.close for d in days[i : i + 5]]
     assert monday_5th.path["previous_close"] == days[i - 1].close
-    assert monday_5th.path["ex_dividend"] is None, "no dividend calendar is kept yet"
+    assert monday_5th.path["ex_dividend"] is None, "days without KIS's 락 구분: not known"
     assert monday_5th.label == classify(monday_5th.path["change"], monday_5th.path["band"])
     # The last four days' windows are not over: no answer yet, but the band they were predicted with.
     assert [a.unscorable for a in got[-4:]] == [PENDING] * 4
@@ -165,6 +167,74 @@ def test_a_window_waits_for_its_end_day_s_candle() -> None:
     assert OPEN_TO_CLOSE.answers_of([*days[:-1], kept_alone], FEE)[-1].label is not None, (
         "a day's own move needs no candle (#264)"
     )
+
+
+def test_kis_s_ex_date_codes_say_whether_a_day_is_a_cash_dividend_s_ex_date() -> None:
+    """#310, ``probe-dividends-310`` (2026-10-21): 02 (배당락) and 05 (중간배당락) mark the ex-dividend
+    days, 00 every other day; a code the probe never saw (KIS's documentation lists 01 권리락, 03,
+    04, …) or none at all is not known."""
+    assert EX_DIVIDEND_CODES == {"02", "05"}
+    assert {c: ex_dividend_of(c) for c in ("02", "05", "00", "01", "03", "04", "", None)} == {
+        "02": True,
+        "05": True,
+        "00": False,
+        "01": None,
+        "03": None,
+        "04": None,
+        "": None,
+        None: None,
+    }
+    row: dict[str, Any] = {"date": MONDAY, "open": 100, "high": 101, "low": 99, "close": 100, "volume": 1}
+    read = [DayPrices.of({**row, "ex_code": c}) for c in ("05", "00", "01", None)]
+    assert [None if d is None else d.ex_dividend for d in read] == [True, False, None, None]
+    old = DayPrices.of(row)  # a candle stored before #310 that KIS has not answered again
+    assert old is not None and old.ex_dividend is None
+
+
+def test_a_window_with_an_ex_dividend_day_after_its_first_session_is_marked() -> None:
+    """#310: the answer stays as it is (KIS's adjusted prices take no dividend out), and the path's
+    ``ex_dividend`` says whether one of sessions two to five is an ex-dividend day: the first's open
+    is ex already. False once all four are marked 00; null for one not known."""
+    days = [replace(d, ex_dividend=False) for d in history(MONDAY, 200, seed=6)]
+    ex = days.index(next(d for d in days if d.day == date(2026, 9, 29)))  # a Tuesday
+    marked = [*days[:ex], replace(days[ex], ex_dividend=True), *days[ex + 1 :]]
+    got = OPEN_TO_CLOSE_5D.answers_of(marked, FEE, CALENDAR)
+    plain = OPEN_TO_CLOSE_5D.answers_of(days, FEE, CALENDAR)
+    flags = {days[i].day: got[i].path["ex_dividend"] for i in range(ex - 6, ex + 2)}
+    assert [flags[days[i].day] for i in range(ex - 4, ex)] == [True] * 4, "the day is session 2–5"
+    assert flags[days[ex].day] is False, "its own window opens ex: no lean"
+    assert flags[days[ex - 5].day] is False and flags[days[ex + 1].day] is False, "it is outside"
+    assert [a.label for a in got] == [a.label for a in plain], "the answers stay as they are"
+    unknown = [*marked[: ex - 2], replace(marked[ex - 2], ex_dividend=None), *marked[ex - 1 :]]
+    got = OPEN_TO_CLOSE_5D.answers_of(unknown, FEE, CALENDAR)
+    assert got[ex - 4].path["ex_dividend"] is True, "a known ex-date in the window: marked"
+    assert got[ex - 6].path["ex_dividend"] is None, "no ex-date known, one session not known"
+
+
+async def test_the_kept_krx_day_candles_mark_the_windows_over_kis_s_ex_dividend_days(
+    kis: FakeKis, tmp_path: Path
+) -> None:
+    """#310, through the fake KIS: the collector keeps KIS's 락 구분 in the KRX day candles, and the
+    answers read from them (``StoredDays``, as the engine and training do) mark the windows whose
+    sessions two to five hold a 02 (year-end) or 05 (interim) day."""
+    from krx_quant.daily import StoredDays
+    from tests.test_candles import candles_api, keep, kis_candles, trading_days, with_ex_codes
+
+    days = trading_days(date(2025, 10, 1), date(2026, 4, 30))  # before the after-market: candles' closes
+    marks = {date(2025, 12, 29): "02", date(2026, 3, 30): "05"}
+    kis.rest_responses[CANDLES_TR] = candles_api(
+        lambda market, symbol: with_ex_codes(kis_candles(days), marks)
+    )
+    await keep(kis, tmp_path, datetime(2026, 4, 30, 21, 0, tzinfo=KST))
+
+    stored = StoredDays(tmp_path).days("005930")
+    assert [d.day for d in stored] == days
+    assert {d.day for d in stored if d.ex_dividend} == set(marks)
+    got = {d.day: a for d, a in zip(stored, OPEN_TO_CLOSE_5D.answers_of(stored, FEE), strict=True)}
+    marked = {day for day, a in got.items() if a.path.get("ex_dividend") is True}
+    expected = {days[days.index(m) - k] for m in marks for k in range(1, 5)}
+    assert marked == expected, "the four windows begun one to four sessions before each"
+    assert all(got[d].path["ex_dividend"] is False for d in days[:-4] if d not in expected)
 
 
 def inputs(past: Sequence[tuple[date, str | None]], ends: Sequence[date], previous: date) -> DailyInputs:
@@ -277,7 +347,7 @@ def engine(db: Path, clock: FakeClock, source: Source) -> PredictionEngine:
         kinds=(DIRECTION_KIND,),
         kind_algorithms=(),
         daily=source,
-        daily_kinds=(RELEASED,),
+        daily_kinds=(OPEN_TO_CLOSE_5D,),
     )
 
 
@@ -441,26 +511,28 @@ def test_training_never_learns_a_window_not_over_by_the_day_it_is_judged_on(tmp_
     # The night's fit: the windows ended by the night; its recent look, those before its 60 days.
     night = by_day[-1]
     nightly = Recording()
-    DailyTrainer(files, MADE, FEE, calendar).train(nightly, RELEASED, night)
+    DailyTrainer(files, MADE, FEE, calendar).train(nightly, OPEN_TO_CLOSE_5D, night)
     full, recent = nightly.fits
     assert all(s.ends is not None and s.ends <= night for s in full)
     cut = sorted({s.day for s in full if s.label is not None})[-60]
     assert all(s.ends is not None and s.ends < cut for s in recent)
 
 
-async def test_the_kind_is_listed_but_not_run_until_the_dividend_probe_s_result(tmp_path: Path) -> None:
-    """#310 review (#338): its answers read KIS's adjusted candles across sessions, and whether they
-    take cash dividends out waits for ``probe-dividends-310``. Until then the kind is listed with the
-    reason, and nothing of it is predicted, answered, trained or pre-validated."""
+async def test_a_kind_awaiting_a_probe_is_listed_but_not_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#310 review (#338): a daily kind whose answers read data a probe has not settled
+    (``DailyKind.awaiting``, as ``open_to_close_5d`` was until ``probe-dividends-310``'s result) is
+    listed with the reason, and nothing of it is predicted, answered, trained or pre-validated."""
+    import krx_quant.scheduled as scheduled
     from krx_quant.daily_features import DailyFiles
     from krx_quant.daily_training import DailyTrainer, prevalidate_daily
-    from krx_quant.open_to_close_5d import AWAITING
     from krx_quant.scheduled import Facts, Night, daily_prevalidation_jobs
     from tests.daily_doubles import made_history
     from tests.test_daily_prevalidation import settings as walk_settings
 
-    assert not OPEN_TO_CLOSE_5D.runs and OPEN_TO_CLOSE_5D.awaiting == AWAITING and OPEN_TO_CLOSE.runs
-    assert OPEN_TO_CLOSE_5D.as_dict([])["daily"]["awaiting"] == AWAITING
+    gated = replace(OPEN_TO_CLOSE_5D, awaiting="a probe (test)")
+    assert not gated.runs and gated.as_dict([])["daily"]["awaiting"] == "a probe (test)"
     pasts = {s: history(THURSDAY, 400, seed=i) for i, s in enumerate(SYMBOLS)}
     source = Source(pasts)
     clock = FakeClock(at(MONDAY, "07:20"))
@@ -475,11 +547,12 @@ async def test_the_kind_is_listed_but_not_run_until_the_dividend_probe_s_result(
         kinds=(DIRECTION_KIND,),
         kind_algorithms=(),
         daily=source,
+        daily_kinds=(OPEN_TO_CLOSE, gated),
         daily_algorithms=[algorithm],
         daily_features=lambda a, s, d, p, b: FeatureVector(dict.fromkeys(a.features), a.features),
         daily_feature_names={"oc_1", "climate_up"},
     )
-    assert OPEN_TO_CLOSE_5D in e.daily_kinds, "listed: /v1/kinds shows it, with the reason"
+    assert gated in e.daily_kinds, "listed: /v1/kinds shows it, with the reason"
     for day in (MONDAY, date(2026, 10, 13), date(2026, 10, 14), date(2026, 10, 15), date(2026, 10, 16)):
         await replay_into(e, clock, [], until=at(day, "08:51"))
         for s in SYMBOLS:
@@ -488,8 +561,8 @@ async def test_the_kind_is_listed_but_not_run_until_the_dividend_probe_s_result(
     assert e.store.kind_recent(OPEN_TO_CLOSE.name, OPEN_TO_CLOSE.answer_version, "005930", 10), (
         "the other runs"
     )
-    assert e.store.kind_recent(OPEN_TO_CLOSE_5D.name, 1, "005930", 10) == [], "no prediction"
-    assert e.store.kind_answers(OPEN_TO_CLOSE_5D.name) == [], "no answer"
+    assert e.store.kind_recent(gated.name, 1, "005930", 10) == [], "no prediction"
+    assert e.store.kind_answers(gated.name) == [], "no answer"
     assert algorithm.name not in e.store.statuses(), "not run, not enrolled"
     assert algorithm.name not in e.waiting(), (
         "nor waiting for a pre-validation: none runs before its kind does"
@@ -499,7 +572,7 @@ async def test_the_kind_is_listed_but_not_run_until_the_dividend_probe_s_result(
     made_history(data, state, date(2026, 10, 16), 300)
     report, model = DailyTrainer(DailyFiles(data, state), SYMBOLS, FEE).train(
         algorithm,
-        OPEN_TO_CLOSE_5D,
+        gated,
         date(2026, 10, 16),
     )
     assert model is None and algorithm.fits == [] and "waits for" in report["reason"]
@@ -508,7 +581,67 @@ async def test_the_kind_is_listed_but_not_run_until_the_dividend_probe_s_result(
             walk_settings(tmp_path / "walk", 0.0, days=300),
             algorithm.name,
             algorithms=[algorithm],
+            kinds=[OPEN_TO_CLOSE, gated],
         )
-    [job] = daily_prevalidation_jobs([algorithm.name], {}, {algorithm.name: OPEN_TO_CLOSE_5D.name})
+    monkeypatch.setattr(scheduled, "daily_kind_named", lambda name: gated)
+    [job] = daily_prevalidation_jobs([algorithm.name], {}, {algorithm.name: gated.name})
     night = Night(date(2026, 10, 16), True, "c", None, {}, Facts(waiting=(algorithm.name,)))
     assert not job.due(night)
+
+
+async def test_the_kind_runs_now_that_the_dividend_probe_s_result_is_in(tmp_path: Path) -> None:
+    """#310: ``probe-dividends-310`` (2026-10-21) found KIS's adjusted prices take no cash dividend
+    out and its 락 구분 marking the ex-dividend days, so the kind runs with the spec's fallback (the
+    answer as it is, the window marked ``ex_dividend``). Its baselines predict at 08:50; its
+    algorithm waits for a pre-validation, which the scheduled job runs that night; it is trained at
+    night; and while its review days are held, a pass neither enrolls nor simulates it."""
+    from krx_quant.algorithms.cox5d import Cox5d
+    from krx_quant.daily_features import DailyFiles
+    from krx_quant.daily_training import DailyTrainer
+    from krx_quant.scheduled import JOBS, OK, Facts, JobRecord, Night, _daily_simulation_due
+
+    assert OPEN_TO_CLOSE_5D.runs and OPEN_TO_CLOSE_5D.awaiting is None
+    assert OPEN_TO_CLOSE_5D.as_dict([])["daily"]["awaiting"] is None
+    assert all(k.runs for k in DAILY_KINDS)
+    pasts = {s: history(THURSDAY, 400, seed=i) for i, s in enumerate(SYMBOLS)}
+    clock = FakeClock(at(MONDAY, "07:20"))
+    algorithm = Recording()
+    e = PredictionEngine(
+        PredictionStore(tmp_path / "e.sqlite3"),
+        CALENDAR,
+        SYMBOLS,
+        FEE,
+        clock,
+        algorithms=(),
+        kinds=(DIRECTION_KIND,),
+        kind_algorithms=(),
+        daily=Source(pasts),
+        daily_algorithms=[algorithm],
+        daily_features=lambda a, s, d, p, b: FeatureVector(dict.fromkeys(a.features), a.features),
+        daily_feature_names={"oc_1", "climate_up"},
+        admits=lambda a: False,  # no pre-validation report yet
+    )
+    await replay_into(e, clock, [], until=at(MONDAY, "08:51"))
+    made = e.store.kind_recent(OPEN_TO_CLOSE_5D.name, 1, "005930", 10)
+    assert {r["algorithm"] for r in made} == {FLAT_NAME, CLIMATE, PERSIST}
+    assert algorithm.name in e.waiting(), "its pre-validation comes first"
+    assert algorithm.name not in e.store.statuses(), "not run before it passes"
+    # Trained at night.
+    from tests.daily_doubles import made_history
+
+    data, state = tmp_path / "data", tmp_path / "state"
+    made_history(data, state, date(2026, 10, 16), 300)
+    report, model = DailyTrainer(DailyFiles(data, state), SYMBOLS, FEE).train(
+        algorithm, OPEN_TO_CLOSE_5D, date(2026, 10, 16)
+    )
+    assert model is not None and algorithm.fits, report["reason"]
+    # The scheduled pre-validation of cox-5d is due the first night it waits.
+    [job] = [j for j in JOBS if j.name == "prevalidate-cox-5d"]
+    night = Night(date(2026, 10, 23), True, "c", None, {}, Facts(waiting=("cox-5d",)))
+    assert job.due(night)
+    assert not job.due(
+        replace(night, facts=Facts(waiting=("cox-5d",), pending_answers=(OPEN_TO_CLOSE_5D.name,)))
+    )
+    # A pass tonight: held for its review days, neither enrolled nor simulated.
+    passed = {job.name: JobRecord(date(2026, 10, 23), OK, at(date(2026, 10, 23), "22:31"), "c", 0, 60.0)}
+    assert not _daily_simulation_due([Cox5d()])(replace(night, records=passed))

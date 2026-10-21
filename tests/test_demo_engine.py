@@ -214,6 +214,40 @@ async def test_the_demo_has_the_daily_kinds_days_and_its_morning(tmp_path: Path)
     assert cox["kind"] == "open_to_close" and cox["model"]["version"].startswith("cox-2026")
 
 
+async def test_the_demo_has_the_five_session_kind_s_windows(tmp_path: Path) -> None:
+    """#310. Output: open_to_close_5d's windows begun on the last 20 days up to the 8th, each with
+    its three baselines' 08:50 predictions; those ended by the 8th answered at their end day's
+    20:35, the four begun from the 5th and the morning's waiting for their end; and the windows over
+    005930's made-up interim ex-dividend day (2026-09-29, 락 구분 05) marked ``ex_dividend``."""
+    app = await demo_app(tmp_path / "demo.sqlite3")
+
+    async with TestClient(TestServer(app)) as client:
+        kinds = await get_json(client, "/v1/kinds")
+        latest = await get_json(client, "/v1/symbols/005930/kinds/open_to_close_5d/latest")
+        made = await get_json(client, "/v1/symbols/005930/kinds/open_to_close_5d/predictions?limit=21")
+        board = await get_json(client, "/v1/leaderboard?kind=open_to_close_5d&period=20d")
+
+    daily = next(k for k in kinds["kinds"] if k["name"] == "open_to_close_5d")["daily"]
+    assert daily["awaiting"] is None and daily["review_hold"] is not None
+    baselines = {"otc5-flat", "otc5-climate", "otc5-persist"}
+    assert latest["bar_close"] == "2026-10-12T08:50:00+09:00"
+    assert {p["algorithm"] for p in latest["predictions"]} == baselines, "cox-5d is held"
+    assert all(p["target_at"] == "2026-10-16T15:30:00+09:00" for p in latest["predictions"])
+    assert len({p["bar_close"] for p in made["predictions"]}) == 21
+    waiting = sorted({p["bar_close"][:10] for p in made["predictions"] if p["answer"] is None})
+    assert waiting == ["2026-10-05", "2026-10-06", "2026-10-07", "2026-10-08", "2026-10-12"]
+    answered = [p for p in made["predictions"] if p["answer"] is not None]
+    for p in answered:
+        check("open_to_close_5d_path", p["answer"]["path"])
+        assert p["answer"]["scored_at"] == f"{p['answer']['path']['end_day']}T20:35:00+09:00"
+    marked = sorted({p["bar_close"][:10] for p in answered if p["answer"]["path"]["ex_dividend"]})
+    assert marked == ["2026-09-23", "2026-09-24", "2026-09-25", "2026-09-28"], "sessions 2–5 hold the 29th"
+    assert all(
+        p["answer"]["path"]["ex_dividend"] is False for p in answered if p["bar_close"][:10] not in marked
+    )
+    assert {e["algorithm"] for e in board["baselines"]} == baselines
+
+
 async def test_the_demo_has_a_briefing_of_its_morning(tmp_path: Path) -> None:
     """#304. Output: the night begun on the 8th, each symbol's pre-market and the auction's last
     expected price, the morning's economic calendar, US closes and Cox's 08:50 inputs."""

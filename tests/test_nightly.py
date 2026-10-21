@@ -45,6 +45,7 @@ from krx_quant.model_shelf import Shelf
 from krx_quant.nightly import VALIDATION_DAYS, train_night
 from krx_quant.object_store import LocalObjectStore
 from krx_quant.open_to_close import OPEN_TO_CLOSE
+from krx_quant.open_to_close_5d import OPEN_TO_CLOSE_5D
 from krx_quant.predictions import PredictionStore
 from krx_quant.pricing import Direction
 from krx_quant.ranges import CLASSES as RANGE_CLASSES
@@ -476,6 +477,7 @@ def test_the_train_command_trains_every_registered_algorithm_from_the_store(
         BREIMAN,
         *(f"{BREIMAN}-{m}m" for m in (15, 30, 60)),  # a Breiman for each of the ladder (#263)
         "cox",  # the daily kind's (#264), last, on this server's KRX day candles: none here
+        "cox-5d",  # the five-session kind's (#310), trained once its kind runs
     ]
     assert [r["algorithm"] for r in promotions["reports"]] == names
     assert {r["algorithm"]: r["target_version"] for r in promotions["reports"]} == {
@@ -487,6 +489,7 @@ def test_the_train_command_trains_every_registered_algorithm_from_the_store(
         BREIMAN: BARRIER.answer_version,
         **{f"{BREIMAN}-{m}m": BARRIER.answer_version for m in (15, 30, 60)},
         "cox": OPEN_TO_CLOSE.answer_version,
+        "cox-5d": OPEN_TO_CLOSE_5D.answer_version,
     }
     cox = read(store_root, f"reports/{NIGHT}/cox.json")
     assert (cox["cadence"], cox["promoted"]) == ("daily", False)

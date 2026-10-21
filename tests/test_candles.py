@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 from collections.abc import Callable
 from datetime import date, datetime, timedelta
@@ -18,6 +19,9 @@ from krx_quant.candles import (
     CANDLE_SCHEMA,
     CANDLES_TR,
     CHECKED,
+    EX_CODE,
+    KRX_CHECKED,
+    KRX_DAY_SCHEMA,
     NOTED,
     CandleKeeper,
     Notes,
@@ -566,9 +570,12 @@ async def test_a_day_stored_the_evening_it_ends_has_its_provisional_close_replac
         assert rows[-1]["high"] == int(final[-1]["stck_hgpr"])
         assert rows[-1]["volume"] == int(final[-1]["acml_vol"])
     assert len(day_queries(kis)) == 1 and len(krx_day_queries(kis)) == 1, "one query each, not the history"
-    for path in (candles_path(tmp_path, "day", "005930"), krx_days_path(tmp_path, "005930")):
+    for path, level in (
+        (candles_path(tmp_path, "day", "005930"), CHECKED),
+        (krx_days_path(tmp_path, "005930"), KRX_CHECKED),
+    ):
         assert read_notes(path) == Notes(
-            CHECKED, (Replaced(date(2026, 10, 13), morning, ("high", "close", "volume")),)
+            level, (Replaced(date(2026, 10, 13), morning, ("high", "close", "volume")),)
         )
     assert read_notes(candles_path(tmp_path, "week", "005930")) == Notes(CHECKED, ())
 
@@ -629,7 +636,7 @@ async def test_a_file_written_before_the_refresh_is_checked_whole_once(kis: Fake
         assert [r["date"] for r in rows] == [date(2026, 2, 27), *days]
         assert [r["close"] for r in rows[1:]] == [int(r["stck_clpr"]) for r in final]
         notes = read_notes(path)
-        assert notes.checked == CHECKED
+        assert notes.checked == (KRX_CHECKED if path.name == "krx.parquet" else CHECKED)
         assert [(r.day, r.at, r.fields) for r in notes.replaced] == [
             (date(2026, 9, 15), AFTER_HOURS, ("high", "close", "volume"))
         ]
@@ -655,6 +662,88 @@ def _candles_of(rows: list[dict[str, str]]) -> list[dict[str, Any]]:
         }
         for r in rows
     ]
+
+
+def with_ex_codes(rows: list[dict[str, str]], codes: dict[date, str]) -> list[dict[str, str]]:
+    """KIS's candles with its 락 구분 (``flng_cls_code``, #310): ``codes``' days as given, 00 on the
+    others, as the probe found KIS gives them."""
+    return [
+        {**r, "flng_cls_code": codes.get(datetime.strptime(r["stck_bsop_date"], "%Y%m%d").date(), "00")}
+        for r in rows
+    ]
+
+
+async def test_the_krx_day_candles_keep_kis_s_ex_date_code(kis: FakeKis, tmp_path: Path) -> None:
+    """#310: KIS's adjusted prices take no cash dividend out, and its 락 구분 marks the ex-dividend
+    days (02 year-end, 05 interim): the KRX day candles keep it as given (``ex_code``), the
+    integrated ones keep no such column. A code KIS changes on a day asked again is replaced and
+    noted with the field."""
+    days = trading_days(date(2026, 8, 3), date(2026, 10, 13))
+    marks = {date(2026, 9, 29): "05", date(2026, 10, 8): "02"}
+    answer = {"history": with_ex_codes(kis_candles(days), marks)}
+    kis.rest_responses[CANDLES_TR] = candles_api(lambda market, symbol: answer["history"])
+
+    await keep(kis, tmp_path, AFTER_HOURS)
+
+    krx = read_krx_days(tmp_path, "005930")
+    assert [r["date"] for r in krx] == days
+    assert {r["date"]: r[EX_CODE] for r in krx if r[EX_CODE] != "00"} == marks
+    assert pq.read_schema(krx_days_path(tmp_path, "005930")).names == KRX_DAY_SCHEMA.names
+    assert pq.read_schema(candles_path(tmp_path, "day", "005930")).names == CANDLE_SCHEMA.names
+    assert EX_CODE not in read_candles(tmp_path, "day", "005930")[-1]
+    assert read_notes(krx_days_path(tmp_path, "005930")) == Notes(KRX_CHECKED, ())
+
+    answer["history"] = with_ex_codes(kis_candles(days), {**marks, date(2026, 10, 13): "01"})
+    kis.rest_requests.clear()
+    morning = datetime(2026, 10, 14, 7, 20, tzinfo=KST)
+    await keep(kis, tmp_path, morning)
+
+    assert read_krx_days(tmp_path, "005930")[-1][EX_CODE] == "01"
+    assert read_notes(krx_days_path(tmp_path, "005930")).replaced == (
+        Replaced(date(2026, 10, 13), morning, (EX_CODE,)),
+    )
+    assert len(krx_day_queries(kis)) == 1, "the last few only"
+
+
+async def test_a_krx_day_file_from_before_the_ex_date_code_is_filled_once_whole(
+    kis: FakeKis, tmp_path: Path
+) -> None:
+    """#310: a KRX day file written before it (#264's check noted, no ``ex_code`` column) is asked
+    whole once more: every candle KIS answers gets its code, one KIS does not answer stays without,
+    the fills are not noted as KIS's changes (the earlier note stays), and the run after asks the
+    last few only. The integrated file is not asked whole again."""
+    days = trading_days(date(2026, 3, 2), date(2026, 10, 13))
+    marks = {date(2026, 3, 30): "05", date(2026, 6, 29): "05", date(2026, 9, 29): "05"}
+    final = kis_candles(days)
+    gone = {**_candles_of(final[:1])[0], "date": date(2026, 2, 27)}  # a day KIS no longer answers
+    earlier = Replaced(date(2026, 10, 12), datetime(2026, 10, 13, 7, 20, tzinfo=KST), ("close",))
+    notes = {b"krx_quant": json.dumps({"checked": CHECKED, "replaced": [earlier.as_dict()]}).encode()}
+    for path in (krx_days_path(tmp_path, "005930"), candles_path(tmp_path, "day", "005930")):
+        venue = "KRX" if path.name == "krx.parquet" else "UN"
+        rows = [{**r, "venue": venue} for r in [gone, *_candles_of(final)]]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pq.write_table(pa.Table.from_pylist(rows, schema=CANDLE_SCHEMA.with_metadata(notes)), path)  # #342's
+    assert read_notes(krx_days_path(tmp_path, "005930")).checked == CHECKED < KRX_CHECKED
+    kis.rest_responses[CANDLES_TR] = candles_api(lambda market, symbol: with_ex_codes(final, marks))
+
+    await keep(kis, tmp_path, AFTER_HOURS)
+
+    assert len(krx_day_queries(kis)) == math.ceil(len(days) / PER_QUERY) + 1, "the whole history"
+    assert len(day_queries(kis)) == 1, "the integrated file was checked before: the last few only"
+    krx = read_krx_days(tmp_path, "005930")
+    assert [r["date"] for r in krx] == [date(2026, 2, 27), *days]
+    assert krx[0][EX_CODE] is None, "KIS did not answer it: no code"
+    assert {r["date"]: r[EX_CODE] for r in krx[1:] if r[EX_CODE] != "00"} == marks
+    assert all(r[EX_CODE] == "00" for r in krx[1:] if r["date"] not in marks)
+    assert [r["close"] for r in krx[1:]] == [int(r["stck_clpr"]) for r in final]
+    assert read_notes(krx_days_path(tmp_path, "005930")) == Notes(KRX_CHECKED, (earlier,)), (
+        "filled, not changed by KIS"
+    )
+    assert pq.read_schema(candles_path(tmp_path, "day", "005930")).names == CANDLE_SCHEMA.names
+
+    kis.rest_requests.clear()
+    await keep(kis, tmp_path, datetime(2026, 10, 14, 7, 20, tzinfo=KST))
+    assert len(krx_day_queries(kis)) == 1, "filled: the last few only"
 
 
 def test_a_file_notes_its_last_replaced_candles_only(tmp_path: Path) -> None:
