@@ -424,32 +424,49 @@ Backfiller가 날마다 그날의 최근월물을 받아 연속 1분봉(`KOSPI20
 
 ## ETF 순자산 (#305)
 
-KRX 마감 흐름(#305)이 상품마다 쓸 전 거래일 순자산 A의 KIS 후보다. 상품은 `src/krx_quant/products.py`의 `PRODUCTS`(005930·000660의 단일종목 ±2배 ETF 16종, [design.md](design.md#42-종목))다. **아직 어느 것도 확인하지 않았다 ⚠.** 엔진은 순자산을 받지도 쓰지도 않는다. 예약 작업 `probe-nav-305`가 배포 뒤 첫 거래일 밤에 `krx-quant probe-nav`로 재 #305에 남긴다([operations.md](operations.md#etf-순자산-출처-확인-305)). 그 결과로 출처를 정하고 이 절의 ⚠를 고친다. KIS가 아닌 출처(KRX 정보데이터시스템, 운용사)는 사용자가 정한다(설계 4.1). 결과가 오기 전에는 순자산을 쓰지 않는다(`CODING_STANDARDS.md` "External data is probed before it is used").
+KRX 마감 흐름(#305)이 상품마다 쓰는 전 거래일 순자산 A의 출처다. 상품은 `src/krx_quant/products.py`의 `PRODUCTS`(005930·000660의 단일종목 ±2배 ETF 16종, [design.md](design.md#42-종목))다. 2026-10-21 밤 예약 작업 `probe-nav-305`(`krx-quant probe-nav`, 23:50, 16종, 조회 80번 실패 0번)가 아래 후보 넷을 쟀다([operations.md](operations.md#etf-순자산-출처-확인-305), #305 댓글). 그 결과로 엔진은 (a)의 순자산 총액 `etf_ntas_ttam`을 받는다(아래 "수집", `src/krx_quant/net_assets.py`). KIS는 지난날의 순자산도 상장 주수도 주지 않는다. 사용자는 지난날의 순자산을 KRX Open API의 ETF 일별매매정보(`etf_bydd_trd`)에서 받기로 정했다(2026-10-22, 설계 4.1). 그 수집은 키가 생기면 프로브부터 더한다.
+
+> **바뀜** (2026-10-22, #PRA): "아직 어느 것도 확인하지 않았다 ⚠. 엔진은 순자산을 받지도 쓰지도 않는다. … 그 결과로 출처를 정하고 이 절의 ⚠를 고친다" → 실측 결과와 수집. 이유: 2026-10-21 밤 `probe-nav-305`와 2026-10-22 사용자 결정(#305).
 
 **출처.** 2026-10-20에 [koreainvestment/open-trading-api](https://github.com/koreainvestment/open-trading-api)에서 다음을 읽어 정리했다.
 - `examples_llm/etfetn/<이름>/<이름>.py`: TR, 경로, 파라미터, 한 번에 주는 건수의 설명. 같은 폴더의 `chk_<이름>.py`: 응답 필드 이름과 한글 이름.
 - `MCP/KIS Code Assistant MCP/data.csv`: `examples_llm` 전체에서 `lstn_stcn`, `ntas`, `crcl_stcn`, `nav`가 나오는 조회를 찾았다.
-- `legacy/postman/README.md`의 API 표: 아래 조회는 모두 실전계좌만 된다(모의 칸이 비어 있다). 서버는 실전 앱키를 쓰므로 상관없다. 이 앱키로 실제로 답하는지는 모른다 ⚠.
+- `legacy/postman/README.md`의 API 표: 아래 조회는 모두 실전계좌만 된다(모의 칸이 비어 있다). 서버는 실전 앱키를 쓴다. 이 앱키로 넷 다 16종 모두 답했다(실측).
 
-| 후보 | KIS 조회 | 경로(`GET /uapi/etfetn/v1/quotations/…`) | 파라미터 | 필드(예제 기준) | 지난날 |
+  > **바뀜** (2026-10-22, #PRA): "이 앱키로 실제로 답하는지는 모른다 ⚠" → 답했다. 이유: `probe-nav-305`.
+
+| 후보 | KIS 조회 | 경로(`GET /uapi/etfetn/v1/quotations/…`) | 파라미터 | 필드(실측) | 지난날 |
 |---|---|---|---|---|---|
-| (a) 현재가의 순자산 총액 | `FHPST02400000` ETF/ETN 현재가 [v1_국내주식-068] | `inquire-price` | `FID_COND_MRKT_DIV_CODE`(`J` KRX, `NX`, `UN`), `FID_INPUT_ISCD` | `output`(객체): `etf_ntas_ttam` ETF 순자산 총액, `etf_crcl_ntas_ttam` 유통 순자산 총액, `nav`, `prdy_last_nav` 전일 최종 NAV, `lstn_stcn` 상장 주수, `etf_crcl_stcn` 유통 주수, `etf_trc_ert_mltp` 추적 수익률 배수, `stck_lstn_date` 상장 일자 등 | 없음. 날짜를 받지 않는다(오늘 값만) |
-| (b) NAV 추이, 일별 | `FHPST02440200` NAV 비교추이(일) [v1_국내주식-071] | `nav-comparison-daily-trend` | 시장(`J`), 종목, `FID_INPUT_DATE_1`(시작일), `FID_INPUT_DATE_2`(종료일) | `output`(행 목록): `stck_bsop_date`, `stck_clpr`, `nav`, `nav_prdy_vrss`, `nav_prdy_ctrt`, `dprt` 괴리율, `nav_vrss_prpr` 등. 실전계좌는 한 번에 100행까지 | 기간으로 묻는다. 상장일(2026-05-27)까지 가는지 ⚠ |
-| (b) NAV 추이, 종목 | `FHPST02440000` NAV 비교추이(종목) [v1_국내주식-069] | `nav-comparison-trend` | 시장(`J`), 종목 | `output1`, `output2`(객체 둘): 주식 현재가 쪽 필드와 `nav`, `prdy_clpr_nav` NAV 전일 종가, `oprc_nav`·`hprc_nav`·`lprc_nav`. 어느 필드가 어느 객체에 있는지 ⚠ | 없음(오늘 값만) |
-| (b) NAV 추이, 분별 | `FHPST02440100` NAV 비교추이(분) [v1_국내주식-070] | `nav-comparison-time-trend` | 시장(예제는 `E`), 종목, `FID_HOUR_CLS_CODE`(`60` 1분 … `7200` 120분) | `output`(행 목록): `bsop_hour`, `nav`, `stck_prpr`, `dprt` 등. 실전계좌는 최근 30행. 날짜 필드가 없다 | 없음(그날만) |
+| (a) 현재가의 순자산 총액 | `FHPST02400000` ETF/ETN 현재가 [v1_국내주식-068] | `inquire-price` | `FID_COND_MRKT_DIV_CODE`(`J` KRX, `NX`, `UN`), `FID_INPUT_ISCD` | `output`(객체): `etf_ntas_ttam` ETF 순자산 총액(정수, 억원), `etf_crcl_ntas_ttam` 유통 순자산 총액, `nav`(소수), `prdy_last_nav` 전일 최종 NAV(소수), `lstn_stcn` 상장 주수, `etf_crcl_stcn` 유통 주수, `etf_trc_ert_mltp` 추적 수익률 배수, `stck_lstn_date` 상장 일자 등 | 없음. 날짜를 받지 않는다(오늘 값만) |
+| (b) NAV 추이, 일별 | `FHPST02440200` NAV 비교추이(일) [v1_국내주식-071] | `nav-comparison-daily-trend` | 시장(`J`), 종목, `FID_INPUT_DATE_1`(시작일), `FID_INPUT_DATE_2`(종료일) | `output`(행 목록, 최신 날부터): `stck_bsop_date`, `stck_clpr`, `nav`(소수), `nav_prdy_vrss`, `nav_prdy_ctrt`, `dprt` 괴리율, `nav_vrss_prpr` 등. 한 번에 100행까지 | 기간으로 묻는다. 16종 모두 상장일(2026-05-27)부터 99거래일, 빠진 거래일 없이 왔다(2번 조회) |
+| (b) NAV 추이, 종목 | `FHPST02440000` NAV 비교추이(종목) [v1_국내주식-069] | `nav-comparison-trend` | 시장(`J`), 종목 | `output1`(주식 현재가 쪽 12개 필드), `output2`(8개: `nav`, `prdy_clpr_nav` NAV 전일 종가, `oprc_nav`·`hprc_nav`·`lprc_nav` 등) | 없음(오늘 값만) |
+| (b) NAV 추이, 분별 | `FHPST02440100` NAV 비교추이(분) [v1_국내주식-070] | `nav-comparison-time-trend` | 시장(`E`), 종목, `FID_HOUR_CLS_CODE`(`60` 1분 … `7200` 120분) | `output`(행 목록): `bsop_hour`, `nav`, `stck_prpr`, `dprt` 등. 최근 30행. 날짜 필드가 없다 | 없음(그날만) |
 | (c) 상장 주수 × NAV | (a)의 `lstn_stcn` × `nav`(또는 `prdy_last_nav`) | | | 계산 | 상장 주수는 (a)의 오늘 값뿐이다. 날마다의 주수를 주는 KIS 조회는 찾지 못했다(위 `data.csv`). 그래서 지난날의 (c)는 오늘 주수 × 그날 NAV라, 설정·환매로 주수가 바뀐 날에는 맞지 않는다 |
 
-- 실시간 `H0STNAV0`(국내ETF NAV추이 [실시간-051]: `nav`, `oprc_nav` 등)도 있다. 장중 스트림이라 지난날도 전일 순자산도 주지 않고, 16종을 구독하면 세션 한도(41건, 위 "구독 계획")를 넘는다. 그래서 후보로 재지 않는다.
-- ETF 구성종목시세(`FHKST121600C0`, `inquire-component-stock-price`)의 `output1`에도 `etf_ntas_ttam`이 있다. 예제의 필드 매핑이 다른 조회의 것과 섞여 있어(`etf_ntas_ttam`을 "전체 융자 잔고 주수"로 적었다) 재지 않는다 ⚠.
-- 순자산 총액의 단위(원, 백만원, 억원)와 그것이 어느 날의 값인지(그날 마감인지 전 거래일인지) 모른다 ⚠. 탐사가 (c)와 견줘 단위와 날을 가늠한다.
-- KIS가 값이 없어 0을 주면 값 없음으로 친다(#295와 같은 규칙). 탐사도 0을 값으로 세지 않는다.
+- 실시간 `H0STNAV0`(국내ETF NAV추이 [실시간-051]: `nav`, `oprc_nav` 등)도 있다. 장중 스트림이라 지난날도 전일 순자산도 주지 않고, 16종을 구독하면 세션 한도(41건, 위 "구독 계획")를 넘는다. 그래서 후보로 재지 않았다.
+- ETF 구성종목시세(`FHKST121600C0`, `inquire-component-stock-price`)의 `output1`에도 `etf_ntas_ttam`이 있다. 예제의 필드 매핑이 다른 조회의 것과 섞여 있어(`etf_ntas_ttam`을 "전체 융자 잔고 주수"로 적었다) 재지 않았다. (a)로 충분하다.
+- KIS가 값이 없어 0을 주면 값 없음으로 친다(#295와 같은 규칙). 탐사도 0을 값으로 세지 않았고, 수집도 그 상품의 그날 행을 두지 않는다.
 
-**탐사가 재는 것** (`krx-quant probe-nav`, `src/krx_quant/nav_probe.py`). 상품마다 위 네 조회를 묻는다. 일별은 2026-05-01(상장 전)부터 오늘까지, 받은 가장 오래된 날 앞으로 거슬러 묻는다(한 상품에 5번까지). 값은 싣지 않는다(개수, 날짜, 시각, 필드 모양, 같음·다름만).
-1. (a): 답하는지, 필드 모양, 값이 있는(0이 아닌) 상품 수. 그리고 `etf_trc_ert_mltp`가 상품 목록의 배율 L과, `stck_lstn_date`가 상장일과 같은지(상품 목록의 확인).
-2. (b) 일별: 행 수, 첫날과 마지막 날, 행 순서, `nav` 값이 있는 날, 상장일까지 가는지, 상장일부터 빠진 거래일(서버의 거래 일정과 견준다).
-3. (b) 종목, 4. (b) 분별: 답하는지, 필드 모양, 분별 마지막 시각. 분별은 예제의 `E`로 묻고, 안 되면 `J`로 묻는다.
-5. 그날 값이 언제 나오나: 물은 시각, 일별 최신 행이 마지막 거래일의 것인지, (a)의 `nav`·`prdy_last_nav`와 (b) 종목의 `nav`·`prdy_clpr_nav`가 일별의 어느 날 `nav`와 같은지. 장 전(08:00–09:00)에 무엇이 나오는지와 그날 값이 몇 시에 처음 바뀌는지는 밤 한 번으로 알 수 없다. 다른 시각의 관찰이 하나 더 필요하다 ⚠.
-6. (a)와 (c): `etf_ntas_ttam`이 `lstn_stcn × nav`와 `lstn_stcn × prdy_last_nav`의, `etf_crcl_ntas_ttam`이 `etf_crcl_stcn × nav`의 어느 단위(원, 천원, 백만원, 억원)에서 같은지. 단위를 맞춰 0.5% 안이거나 그 단위의 반 안이면 같다. 상품 수만 센다.
+**실측 (2026-10-21 23:50 KST, `probe-nav-305`).** 시세 값 없이 개수, 날짜, 시각, 필드 모양만 남겼다(#305 댓글).
+1. (a) 16종 모두 답했다. 값이 있는(비어 있지 않고 0이 아닌) 상품은 `etf_ntas_ttam`·`nav`·`prdy_last_nav`·`lstn_stcn`·`etf_crcl_stcn` 16종, `etf_crcl_ntas_ttam` 10종이다(0193W0, 0194M0, 0193T0, 0194T0, 0197W0, 0197X0은 0). 상품 목록 확인: `etf_trc_ert_mltp`가 배율 L과, `stck_lstn_date`가 상장일과 16종 모두 같았다(`products.py`는 고칠 것이 없다).
+2. (b) 일별: 16종 모두 2026-05-27–2026-10-21의 99행이다. 최신 날부터 오고, 상장일부터 빠진 거래일이 없고, 상장 전 행은 없다.
+3. (b) 종목: 16종 모두 답했다. `nav`, `prdy_clpr_nav`는 `output2`에 있다.
+4. (b) 분별: 시장 `E`로 16종 모두 30행(19:31–20:00)이 왔다.
+5. **그날 값이 언제 나오나.** 23:50에 (b) 일별의 가장 최근 행은 16종 모두 마지막 거래일(10-21)이었다. (a)의 `nav`와 (b) 종목의 `nav`는 그날의 일별 NAV와, (a)의 `prdy_last_nav`와 (b) 종목의 `prdy_clpr_nav`는 그 전 거래일(10-20)의 일별 NAV와 16종 모두 같았다. 그래서 KIS의 그날은 23:50에도 아직 10-21이다. 장 전(08:00–09:00)에 무엇을 주는지, KIS가 언제 다음 날로 넘어가는지는 이 한 번으로 모른다 ⚠. 수집이 행마다 처음 받은 시각을 남겨 보인다(아래 "수집").
+6. **(a)와 (c).** `etf_ntas_ttam`은 `lstn_stcn × prdy_last_nav`와 억원 단위에서 14종이 같았고(0.5% 안, 또는 0.5억 안), 2종이 달랐다. `lstn_stcn × nav`와는 어느 단위에서도 0종이 같았다. `etf_crcl_ntas_ttam`은 `etf_crcl_stcn × nav`와 같은 상품이 없었다(값 없음 6, 다름 10). 그래서 `etf_ntas_ttam`은 억원이고, `prdy_last_nav`의 날(전 거래일)의 순자산이다. 다른 2종은 그날 설정·환매로 상장 주수가 바뀌었는데 순자산 총액은 아직 전 거래일 것이라 본다(추정).
+
+  > **바뀜** (2026-10-22, #PRA): "순자산 총액의 단위(원, 백만원, 억원)와 그것이 어느 날의 값인지(그날 마감인지 전 거래일인지) 모른다 ⚠" → 억원이고 `prdy_last_nav`의 날의 값이다. "장 전(08:00–09:00)에 무엇이 나오는지와 그날 값이 몇 시에 처음 바뀌는지는 밤 한 번으로 알 수 없다 ⚠"는 위 5에 남겼다. 이유: `probe-nav-305`.
+
+  > **바뀜** (2026-10-22, #PRA): "탐사가 재는 것"(탐사의 여섯 절 설명) → 그 실측 결과(위 1–6). 탐사가 무엇을 묻고 내는지는 [operations.md](operations.md#etf-순자산-출처-확인-305)에 그대로 있다. 이유: 결과가 나왔다.
+
+**수집 (#305, `net_assets.py`).** 마감 흐름의 수요가 읽는 A다.
+- **무엇을.** (a)를 `J`로 묻고 `etf_ntas_ttam` × 1억을 원으로 둔다. (c) `lstn_stcn × prdy_last_nav`를 원으로 계산하지 않는 것은, 다른 2종처럼 주수가 바뀐 날 오늘 주수와 전일 NAV가 섞이기 때문이다. 억원으로 반올림한 차이(0.5억 안)는 수요와 비율이 가를 수 있는 것보다 훨씬 작다.
+- **어느 날의 값인가.** 받은 시각이 아니라 그 순자산의 날로 둔다: 같은 상품의 (b) 일별(받는 날까지 2주)에서 `prdy_last_nav`와 NAV가 같은 날이다. 받는 날 자신은 빼고(장 전에 KIS가 그날 행을 미리 둘 수 있다), 그런 날이 꼭 하루일 때만 둔다(둘이면 가를 수 없다). 위 5대로 KIS가 다음 날로 넘어가기 전에는 그 전날의 값이 다시 나온다. 거래일 t의 15:20 수요는 t의 전 거래일 행을 쓴다.
+- **언제.** 수집기가 시작할 때와 매일 20:30에 16종 모두(일별 수급과 같은 때, #305). 그리고 거래일에는 06:00부터 그날 종가 단일가 시작(15:20)까지 10분마다, 전 거래일 행이 아직 없는 상품만 다시 묻는다. KIS가 다음 날로 넘어가는 시각을 재지 않아서다: 20:30의 조회는 그날 t의 A(t−1)를 다시 받을 뿐 t+1의 A는 주지 않고, 아침 시작(06:00 배포나 07:20 재시작)이 KIS가 넘어간 뒤인지 모른다. 한 번에 상품마다 2번(현재가, 일별) 묻고, 백필과 같은 간격(`KRX_BACKFILL_MAX_PER_SECOND`)으로 간다.
+- **값.** 0이나 빈 값은 값 없음이라 행을 두지 않는다. 다시 받은 같은 값은 그대로 둔다(처음 받은 시각 `fetched_at`도). 다른 값이면 바꾼다. 그래서 날마다 첫 행의 `fetched_at`이 KIS가 그 날의 값을 처음 준 때(10분 안)를 보인다.
+- **지난날.** KIS에는 없어서 받지 않는다. 이 수집을 담은 엔진이 배포된 날의 전 거래일 값부터 쌓인다. 그 전의 날은 KRX Open API로 채운다(키가 생기면, 위).
+- 저장: `state/closing_flow/net_assets.parquet`([events.md](events.md#closing_flow-etf-순자산-rest-305)).
+- 실패: 상품 하나가 실패하면 로그를 남기고 건너뛰며, 다른 상품은 저장한다. 다음 때에 다시 묻는다.
 
 ## 최근월물 코드 찾기
 
