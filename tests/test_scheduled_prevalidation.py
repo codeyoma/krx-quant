@@ -264,7 +264,7 @@ class Prevalidates(Runs):
         super().__init__(clock)
         self.state_dir = state_dir
 
-    async def __call__(self, args: Sequence[str], timeout: timedelta) -> Ran:
+    async def __call__(self, args: Sequence[str], timeout: timedelta, log_file: Path | None = None) -> Ran:
         assert args[0] == "prevalidate"
         name = args[1]
         path = report_path(self.state_dir, name)

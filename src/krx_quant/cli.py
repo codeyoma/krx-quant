@@ -9,6 +9,7 @@ import itertools
 import json
 import logging
 import math
+import re
 import signal
 import sys
 from collections.abc import Callable
@@ -27,7 +28,7 @@ from krx_quant.candle_probe import probe_candles
 from krx_quant.close_probe import probe_close
 from krx_quant.closing_flow_check import check_closing_flow
 from krx_quant.collector import check_fallbacks, measure_subscription_limit, run_collector
-from krx_quant.config import Settings, SettingsError
+from krx_quant.config import Settings, SettingsError, read_values
 from krx_quant.daily_check import DAYS as DAILY_CHECK_DAYS
 from krx_quant.daily_check import daily_check
 from krx_quant.daily_training import daily_algorithm, fit_daily, prevalidate_daily
@@ -44,6 +45,10 @@ from krx_quant.kind_registry import DAILY_KINDS, kind_named
 from krx_quant.kis import KisError
 from krx_quant.krx_etf_probe import probe_krx_etf
 from krx_quant.lifecycle import Status
+from krx_quant.log_files import FORMAT as LOG_FORMAT
+from krx_quant.log_files import open_process_log
+from krx_quant.logs_bundle import DEFAULT_DAYS as BUNDLE_DAYS
+from krx_quant.logs_bundle import Period, make_bundle, since
 from krx_quant.macro import run_macro
 from krx_quant.market_calendar import calendar_store
 from krx_quant.model_shelf import Shelf
@@ -498,6 +503,39 @@ async def _doctor(api: str | None) -> int:
     return 0
 
 
+def _logs_bundle(days: int | None, when: str | None, grep: re.Pattern[str] | None) -> int:
+    """The log files, masked, in one archive for an agent (#356); read leniently as ``doctor``
+    reads the settings: the logs are wanted most when a setting is wrong."""
+    settings, _ = doctor_settings()
+    now = datetime.now(KST)
+    period = Period.since(when, now) if when is not None else Period.days(days or BUNDLE_DAYS, now)
+    bundle = make_bundle(settings, period, grep)
+    if bundle is None:
+        print(
+            f"no log line in {period.how} under {settings.state_dir / 'logs'}: no bundle written",
+            file=sys.stderr,
+        )
+        return 1
+    print(bundle.summary())
+    return 0
+
+
+def _since(text: str) -> str:
+    """``--since``: checked as it is given (the time it names is read when the bundle is made)."""
+    try:
+        since(text, datetime.now(KST))
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(str(e)) from None
+    return text
+
+
+def _pattern(text: str) -> re.Pattern[str]:
+    try:
+        return re.compile(text)
+    except re.error as e:
+        raise argparse.ArgumentTypeError(f"not a regular expression ({e}): {text!r}") from None
+
+
 def _signal_review(days: int) -> int:
     settings = Settings.from_env(require_kis=False)
     print(signal_review(settings.state_dir / DB_NAME, settings, datetime.now(KST).date(), days))
@@ -765,6 +803,23 @@ def main(argv: list[str] | None = None) -> int:
         help="the Engine API to ask, e.g. http://127.0.0.1:8080 (default: this container's, then compose's"
         " engine service)",
     )
+    bundle_cmd = sub.add_parser(
+        "logs-bundle",
+        help="pack the log files under state/logs, masked (secrets, server addresses; market values stay),"
+        " into state/logs/bundles/krx-logs-<time>.tar.gz for an agent (#356); never for a public place",
+    )
+    period = bundle_cmd.add_mutually_exclusive_group()
+    period.add_argument(
+        "--days",
+        type=_positive,
+        help=f"the files of the last N KST days, today's included (default {BUNDLE_DAYS})",
+    )
+    period.add_argument(
+        "--since",
+        type=_since,
+        help="the lines from then on: YYYY-MM-DD, YYYY-MM-DDTHH:MM (KST), or 90m, 6h, 2d before now",
+    )
+    bundle_cmd.add_argument("--grep", type=_pattern, help="only the lines this regular expression finds")
     signal_review_cmd = sub.add_parser(
         "signal-review",
         help="print what choosing the Telegram signal settings needs (#206); reads only, writes nothing",
@@ -814,89 +869,110 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
+    # This process's lines also go to its file under state/logs (#356), with its exit code.
+    files = open_process_log(
+        args.command, sys.argv[1:] if argv is None else argv, read_values(None, Path(".env"))
+    )
+    code, why = 1, None
     try:
-        if args.command == "collect":
-            asyncio.run(_collect())
-        elif args.command == "measure-subscriptions":
-            asyncio.run(_measure())
-        elif args.command == "check-fallbacks":
-            return asyncio.run(_check_fallbacks())
-        elif args.command == "probe-candles":
-            return asyncio.run(_probe_candles())
-        elif args.command == "probe-supply":
-            return asyncio.run(_probe_supply())
-        elif args.command == "probe-net-buys":
-            return asyncio.run(_probe_net_buys())
-        elif args.command == "probe-close":
-            return asyncio.run(_probe_close())
-        elif args.command == "probe-dividends":
-            return asyncio.run(_probe_dividends())
-        elif args.command == "probe-nav":
-            return asyncio.run(_probe_nav())
-        elif args.command == "probe-krx-etf":
-            return asyncio.run(_probe_krx_etf())
-        elif args.command == "probe-night":
-            return asyncio.run(_probe_night(args.day))
-        elif args.command == "probe-expected-open":
-            return _probe_expected_open(args.days)
-        elif args.command == "probe-gaps":
-            return _probe_gaps()
-        elif args.command == "check-closing-flow":
-            return asyncio.run(_check_closing_flow())
-        elif args.command == "registry-password":
-            return _registry_password()
-        elif args.command == "backfill":
-            asyncio.run(_backfill())
-        elif args.command == "archive":
-            return asyncio.run(_archive(args.recheck))
-        elif args.command == "replay":
-            return _replay(args.day, args.db)
-        elif args.command == "rescore":
-            return _rescore()
-        elif args.command == "fit":
-            return _fit(args.algorithm, args.days)
-        elif args.command == "prevalidate":
-            return _prevalidate(args.algorithm, args.days)
-        elif args.command == "train":
-            return _train(args.day, args.from_store)
-        elif args.command == "simulate":
-            return _simulate(args.which)
-        elif args.command == "rollback":
-            return _rollback(args.algorithm)
-        elif args.command == "retire":
-            return _retire(args.algorithm)
-        elif args.command == "unretire":
-            return _unretire(args.algorithm)
-        elif args.command == "notify":
-            return asyncio.run(_notify(args.text))
-        elif args.command == "macro":
-            return _macro()
-        elif args.command == "diagnose":
-            return _diagnose(args.days)
-        elif args.command == "doctor":
-            return asyncio.run(_doctor(args.api))
-        elif args.command == "signal-review":
-            return _signal_review(args.days)
-        elif args.command == "structure-check":
-            return _structure_check(args.days)
-        elif args.command == "daily-check":
-            return _daily_check(args.days)
-        elif args.command == "test-alert":
-            return asyncio.run(_test_alert())
-        elif args.command == "fake-kis":
-            asyncio.run(_fake_kis(args.port, args.host, args.trades))
-        elif args.command == "demo-engine":
-            return asyncio.run(_demo_engine(args.port, args.host, args.db, args.pace))
+        code, why = _command(args), None
     except SettingsError as e:
         print(f"configuration error: {e}", file=sys.stderr)
-        return 2
+        code, why = 2, f"configuration error: {e}"
     except KisError as e:
         # Non-zero so a supervisor (Docker restart policy) restarts the collector.
         print(f"KIS error: {e}", file=sys.stderr)
-        return 1
+        code, why = 1, f"KIS error: {e}"
     except KeyboardInterrupt:
-        pass
+        code, why = 0, "interrupted"
+    except BaseException as e:  # its traceback goes to the file too, then on to stderr
+        if files is not None:
+            files.close(None, e)
+            files = None
+        raise
+    finally:
+        if files is not None:
+            files.close(code, why)
+    return code
+
+
+def _command(args: argparse.Namespace) -> int:
+    """Run the command ``args`` name; its exit code."""
+    if args.command == "collect":
+        asyncio.run(_collect())
+    elif args.command == "measure-subscriptions":
+        asyncio.run(_measure())
+    elif args.command == "check-fallbacks":
+        return asyncio.run(_check_fallbacks())
+    elif args.command == "probe-candles":
+        return asyncio.run(_probe_candles())
+    elif args.command == "probe-supply":
+        return asyncio.run(_probe_supply())
+    elif args.command == "probe-net-buys":
+        return asyncio.run(_probe_net_buys())
+    elif args.command == "probe-close":
+        return asyncio.run(_probe_close())
+    elif args.command == "probe-dividends":
+        return asyncio.run(_probe_dividends())
+    elif args.command == "probe-nav":
+        return asyncio.run(_probe_nav())
+    elif args.command == "probe-krx-etf":
+        return asyncio.run(_probe_krx_etf())
+    elif args.command == "probe-night":
+        return asyncio.run(_probe_night(args.day))
+    elif args.command == "probe-expected-open":
+        return _probe_expected_open(args.days)
+    elif args.command == "probe-gaps":
+        return _probe_gaps()
+    elif args.command == "check-closing-flow":
+        return asyncio.run(_check_closing_flow())
+    elif args.command == "registry-password":
+        return _registry_password()
+    elif args.command == "backfill":
+        asyncio.run(_backfill())
+    elif args.command == "archive":
+        return asyncio.run(_archive(args.recheck))
+    elif args.command == "replay":
+        return _replay(args.day, args.db)
+    elif args.command == "rescore":
+        return _rescore()
+    elif args.command == "fit":
+        return _fit(args.algorithm, args.days)
+    elif args.command == "prevalidate":
+        return _prevalidate(args.algorithm, args.days)
+    elif args.command == "train":
+        return _train(args.day, args.from_store)
+    elif args.command == "simulate":
+        return _simulate(args.which)
+    elif args.command == "rollback":
+        return _rollback(args.algorithm)
+    elif args.command == "retire":
+        return _retire(args.algorithm)
+    elif args.command == "unretire":
+        return _unretire(args.algorithm)
+    elif args.command == "notify":
+        return asyncio.run(_notify(args.text))
+    elif args.command == "macro":
+        return _macro()
+    elif args.command == "diagnose":
+        return _diagnose(args.days)
+    elif args.command == "doctor":
+        return asyncio.run(_doctor(args.api))
+    elif args.command == "signal-review":
+        return _signal_review(args.days)
+    elif args.command == "structure-check":
+        return _structure_check(args.days)
+    elif args.command == "daily-check":
+        return _daily_check(args.days)
+    elif args.command == "test-alert":
+        return asyncio.run(_test_alert())
+    elif args.command == "fake-kis":
+        asyncio.run(_fake_kis(args.port, args.host, args.trades))
+    elif args.command == "demo-engine":
+        return asyncio.run(_demo_engine(args.port, args.host, args.db, args.pace))
+    elif args.command == "logs-bundle":
+        return _logs_bundle(args.days, args.since, args.grep)
     return 0
 
 

@@ -62,6 +62,7 @@ from krx_quant.feeds.base import kst_day
 from krx_quant.health import FeedHealth, FeedState
 from krx_quant.kind_registry import KINDS
 from krx_quant.lifecycle import Rules
+from krx_quant.log_files import Keep, keep_logs, root_of
 from krx_quant.macro import MacroCollector, day_regime, keep_macro, macro_recorder
 from krx_quant.market_calendar import MarketCalendar, Phase, calendar_store, next_on_trading_day
 from krx_quant.masters import FrontMonths, MasterError, fetch_front_months
@@ -421,9 +422,12 @@ async def run_collector(
                             on_spot if spot else None,
                             first_spot_wait if spot else None,
                             training,
+                            logs=root_of(settings),
                         )
                     )
                 )
+            if (logs := root_of(settings)) is not None:  # the log files' days and cap (#356)
+                background.append(asyncio.create_task(keep_logs(logs, Keep.of(settings), now)))
             if settings.cost_budget is not None:
                 background.append(asyncio.create_task(keep_costs(settings, alerts, now)))
             if settings.restart_at is not None:

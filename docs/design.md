@@ -57,7 +57,8 @@
 | `training.py`, `nightly.py`, `model_shelf.py`, `swap.py` | 학습 샘플, 밤 학습, 서버의 모델 이력, 08:00 교체와 모델 감시, Spot 학습 결과 기다리기 |
 | `cost_guard.py` | 월 AWS 비용 감시: 50%·80% 알림, 상한에서 Spot 학습 끄기(#23) |
 | `scheduled.py`, `github.py`, `redaction.py`, `forbidden.py` | 예약 작업(#215): 작업 목록(`JOBS`. 사전 검증 작업은 알고리즘 등록 목록에서 만든다, #204)과 밤마다 돌리는 스케줄러, 상태 파일, GitHub 이슈 댓글과 라벨, 올리기 전 가림, 저장소 검사(`scripts/check_forbidden.py`)와 가림이 같이 쓰는 금지 패턴([operations.md](operations.md#예약-작업-215)) |
-| `doctor.py`, `snapshot.py` | 서버 요약(#322): 읽기 전용 `krx-quant doctor`(엔진의 커밋과 시작 시각, KIS 연결과 피드·키별 마지막 수신, 오늘의 PINGPONG, 최근 WARNING·ERROR 로그, 예약 작업, 디스크와 메모리를 시세 값 없이 가려서)와, `needs-server-snapshot` 라벨이 붙은 이슈에 그 요약을 댓글로 남기고 라벨을 떼는 수집기의 확인(3분마다, 이슈마다·시간마다 한도)([operations.md](operations.md#서버-상태-보기-322)) |
+| `doctor.py`, `snapshot.py` | 서버 요약(#322): 읽기 전용 `krx-quant doctor`(엔진의 커밋과 시작 시각, KIS 연결과 피드·키별 마지막 수신, 오늘의 PINGPONG, 최근 WARNING·ERROR 로그, 예약 작업, 디스크와 메모리, 로그 폴더(#356)를 시세 값 없이 가려서)와, `needs-server-snapshot` 라벨이 붙은 이슈에 그 요약을 댓글로 남기고 라벨을 떼는 수집기의 확인(3분마다, 이슈마다·시간마다 한도)([operations.md](operations.md#서버-상태-보기-322)) |
+| `log_files.py`, `logs_bundle.py` | 로그 파일(#356): 프로세스 종류마다 하루 한 파일(`state/logs/engine/<날>.log`, 엔진이 띄운 밤 학습·예약 작업의 출력 전체가 든 `training/<밤>.log`, `jobs/<작업>/<밤>.log`, 손으로 돌린 명령의 `commands/<명령>/<날>.log`), `KRX_LOG_DAYS`·`KRX_LOG_MAX_MB` 안에서 지우기, 가린 꾸러미 `krx-quant logs-bundle`([operations.md](operations.md#로그-파일과-꾸러미-356)) |
 | `macro.py`, `regime.py` | 매크로 지표 수집(07:30), 일일 국면 |
 | `econ_calendar.py` | 경제 캘린더 수집(15분마다, TradingView), `/v1/calendar`의 답 (#150) |
 | `flow.py` | `/v1/symbols/{symbol}/flow`의 답(#306): 녹화한 프로그램매매, 회원사, 외국인·기관 추정 가집계를 그날 1분마다(앞 값을 끌어오지 않는다), 추정 구간, 상위 5개 창구, 지금까지의 합과 전 거래일 같은 시각의 합, 확정 일별 수급 |

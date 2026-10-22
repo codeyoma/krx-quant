@@ -10,9 +10,10 @@ server, or an agent reading an issue, looks at first when something seems wrong.
    ``seconds_since`` and open ``gap``, as ``/v1/status`` names them.
 3. Today's PINGPONG heartbeats by hour, the last one and the longest silence between two
    (``raw/date=<today>/feed=_system/symbol=_``).
-4. The latest WARNING and ERROR log lines, where the process can read the engine's log: the
-   collector keeps its own (``RecentLog``); the command, a process of its own, cannot (Docker
-   keeps the log outside the container), and says so. No runtime text reaches them, so no
+4. The latest WARNING and ERROR log lines, where the process can read the engine's memory: the
+   collector keeps its own (``RecentLog``); the command, a process of its own, cannot, and says
+   where the engine's whole lines are (``docker compose logs``, its file under ``state/logs``,
+   #356). No runtime text reaches them, so no
    market value can (a raw KIS frame's excerpt in a parse error, a price in an exception): a
    line is the template the code logged with (``krx_quant``'s loggers only; every engine log
    call's message is a literal, a test checks), its values shown only when they are a date or
@@ -22,6 +23,10 @@ server, or an agent reading an issue, looks at first when something seems wrong.
 5. The scheduled jobs (``state/scheduled.json``, #215): their last runs, the jobs that have not
    run to an end yet, the results not posted.
 6. The free disk under the data and state directories, and the memory.
+7. The log files under ``state/logs`` (#356, ``log_files.py``): for each kind (the engine's, the
+   nightly training's, the scheduled jobs', the commands'), the files, their size, the oldest
+   and the latest day; their total against ``KRX_LOG_MAX_MB``; the bundles made for an agent.
+   Counts, sizes and dates only: never a line of them.
 
 The command reads the settings leniently (``doctor_settings``): a malformed one, which keeps
 the engine from starting, is a finding at the top, and the rest comes from the data and state
@@ -59,6 +64,8 @@ from krx_quant import kis
 from krx_quant.archive import partition_files
 from krx_quant.config import Settings, SettingsError, read_values
 from krx_quant.feeds.base import KST
+from krx_quant.log_files import BUNDLES, LOGS, NESTED, bundle_files, day_logs, kinds_of, size_text
+from krx_quant.log_files import JOBS as JOB_LOGS
 from krx_quant.predictions import DB_NAME, iso, read_only
 from krx_quant.redaction import redact, secrets_of
 from krx_quant.scheduled import JOBS, STATE_FILE
@@ -308,6 +315,7 @@ def report(
         ("4. 최근 WARNING·ERROR 로그", lambda: _logs(logs)),
         ("5. 예약 작업", lambda: _jobs(settings, known=config_error is None)),
         ("6. 디스크와 메모리", lambda: _resources(settings, process)),
+        ("7. 로그 파일", lambda: _log_files(settings, known=config_error is None)),
     ]
     sections = [head]
     for title, part in parts:
@@ -437,9 +445,10 @@ def _pingpongs(partition: Path) -> Iterator[datetime]:
 def _logs(logs: RecentLog | None) -> list[str]:
     if logs is None:
         return [
-            "4. 최근 WARNING·ERROR 로그: 이 명령은 엔진과 다른 프로세스라 엔진 로그를 읽지 못한다"
-            "(Docker가 컨테이너 밖에 둔다)",
+            "4. 최근 WARNING·ERROR 로그: 이 명령은 엔진과 다른 프로세스라 엔진이 기억하는 줄을 읽지 못한다",
             "  서버에서: docker compose logs --since 2h engine | grep -E ' (WARNING|ERROR) '",
+            "  엔진의 전체 줄은 state/logs/engine/<날>.log에도 있다(7절)."
+            " 에이전트에게는 krx-quant logs-bundle로 준다",
             "  이슈에 needs-server-snapshot 라벨을 붙여 받는 요약에는 엔진이 기억하는 최근 줄이 실린다",
         ]
     counts = logs.counts()
@@ -454,7 +463,7 @@ def _logs(logs: RecentLog | None) -> list[str]:
     return [
         f"{title}, 마지막 {len(shown)}줄)",
         "  코드의 메시지 틀만 싣는다: 값은 날짜·시각, 참거짓, 이름 모양의 글자만, 나머지는 …, 예외는 종류만."
-        " 전체는 서버의 docker compose logs engine",
+        " 전체는 서버의 state/logs/engine/<날>.log(krx-quant logs-bundle)와 docker compose logs engine",
         *(f"  {line}" for line in shown),
     ]
 
@@ -547,6 +556,39 @@ def _resources(settings: Settings, process: str) -> list[str]:
     rss = _meminfo(Path("/proc/self/status")).get("VmRSS")
     if rss is not None:
         lines.append(f"  {process} 프로세스(VmRSS): {_mb(rss)}")
+    return lines
+
+
+def _log_files(settings: Settings, *, known: bool = True) -> list[str]:
+    """The log folders (#356): files, size and days for each kind; the bundles. No line of them."""
+    if not known:
+        keep = "KRX_LOG_DAYS ? · KRX_LOG_MAX_MB ?"
+    elif settings.log_days is None:
+        keep = "KRX_LOG_DAYS off: 쓰지 않는다"
+    else:
+        keep = f"KRX_LOG_DAYS {settings.log_days} · KRX_LOG_MAX_MB {settings.log_max_mb}"
+    root = settings.state_dir / LOGS
+    title = f"7. 로그 파일 (state/{LOGS}, {keep})"
+    files, bundles = day_logs(root), bundle_files(root)
+    if not files and not bundles:
+        return [f"{title}: 없음"]
+    lines = [title]
+    for kind, of_kind in kinds_of(files):
+        names = len({f.name for f in of_kind})
+        what = f"{'작업' if kind == JOB_LOGS else '명령'} {names}개 · " if kind in NESTED else ""
+        lines.append(
+            f"  {kind}: {what}파일 {len(of_kind)}개 · {size_text(sum(f.size for f in of_kind))}"
+            f" · 가장 오래된 날 {of_kind[0].day} · 최근 {of_kind[-1].day}"
+        )
+    total = sum(f.size for f in files)
+    cap = f" / 상한 {settings.log_max_mb} MB" if known and settings.log_days is not None else ""
+    lines.append(f"  합계 {size_text(total)}{cap}")
+    if bundles:
+        latest = bundles[-1]
+        lines.append(
+            f"  꾸러미({BUNDLES}/) {len(bundles)}개 · 최근 {latest.name} ({size_text(latest.stat().st_size)})"
+        )
+    lines.append('  에이전트에게 줄 꾸러미: krx-quant logs-bundle (docs/operations.md "로그 파일과 꾸러미")')
     return lines
 
 

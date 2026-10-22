@@ -9,7 +9,8 @@ running engine notices a model file that changed (the swap, ``krx-quant fit``,
 publishes what it runs (``live.json`` and the models), the champions of the next night.
 
 The nightly training runs at ``KRX_TRAIN_AT`` on trading days: here, in its own process
-(``KRX_TRAIN_ON=server``), or on EC2 Spot started by AWS at the same time (``spot``, #23).
+(``KRX_TRAIN_ON=server``; its whole output and exit code in ``state/logs/training/<day>.log``,
+#356), or on EC2 Spot started by AWS at the same time (``spot``, #23).
 On Spot, the server publishes what the run needs from it, waits for the night's result in
 the store until the next trading day's 07:30, and sends its summary (the Spot run has no
 Telegram token). The scheduled jobs (#215) wait for the night either way (``NightTraining``).
@@ -20,11 +21,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import sys
-from asyncio.subprocess import PIPE, STDOUT
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +38,8 @@ from krx_quant.cost_guard import training_stopped
 from krx_quant.daily import DailyAlgorithm
 from krx_quant.engine import PredictionEngine
 from krx_quant.feeds.base import KST, kst_day
+from krx_quant.log_files import KRX_QUANT, night_file, run_logged
+from krx_quant.log_files import TRAINING as TRAINING_LOGS
 from krx_quant.market_calendar import MarketCalendar, next_on_trading_day
 from krx_quant.model_shelf import Shelf
 from krx_quant.nightly import (
@@ -304,6 +306,7 @@ async def keep_training(
     run_night: Callable[[date], Awaitable[str | None]] | None = None,
     first: Callable[[MarketCalendar, time, datetime], datetime] | None = None,
     training: NightTraining | None = None,
+    logs: Path | None = None,
 ) -> None:
     """Start ``krx-quant train --day <day>`` in its own process at ``train_at`` each trading
     day, until cancelled; at once for a night a restart interrupted or missed (``CATCH_UP``).
@@ -311,8 +314,9 @@ async def keep_training(
     that trains. With ``run_night`` (the training on EC2 Spot), that runs the night instead
     (None once done, else why not), and ``first`` picks the first night to run. ``training``
     is told when each night is due, starts and ends (the scheduled jobs wait for it, #215).
+    ``logs`` (``state/logs``) gets each night's training output here (#356).
     """
-    run = run_night or _train
+    run = run_night or partial(_train, logs=logs)
     watch = training or NightTraining()
     start = (first or _first_training)(calendar, train_at, now())
     while True:
@@ -338,23 +342,23 @@ async def keep_training(
             log.exception("could not read the night's result")
 
 
-async def _train(day: date) -> str | None:
-    """Run the night's training; None if it finished, else why not."""
-    process = await asyncio.create_subprocess_exec(
-        sys.executable, "-m", "krx_quant.cli", "train", "--day", day.isoformat(), stdout=PIPE, stderr=STDOUT
+async def _train(day: date, logs: Path | None = None) -> str | None:
+    """Run the night's training; None if it finished, else why not. Its whole output and exit
+    code also go to the night's file as they come (``training/<day>.log`` under ``logs``, #356)."""
+    ran = await run_logged(
+        (*KRX_QUANT, "train", "--day", day.isoformat()),
+        TRAINING_TIMEOUT,
+        night_file(logs, TRAINING_LOGS, day),
+        merge=True,  # stdout and stderr in the order written
     )
-    try:
-        output, _ = await asyncio.wait_for(process.communicate(), TRAINING_TIMEOUT.total_seconds())
-    except TimeoutError:
-        process.kill()
-        await process.wait()
+    if ran.timed_out:
         return f"not done in {TRAINING_TIMEOUT}"
-    text = output.decode(errors="replace").strip()
-    if process.returncode == 0:
+    text = ran.stdout.strip()
+    if ran.exit_code == 0:
         log.info("nightly training of %s finished:\n%s", day, text)
         return None
-    log.error("nightly training of %s failed (exit %s):\n%s", day, process.returncode, text)
-    return text.splitlines()[-1] if text else f"exit {process.returncode}"
+    log.error("nightly training of %s failed (exit %s):\n%s", day, ran.exit_code, text)
+    return text.splitlines()[-1] if text else f"exit {ran.exit_code}"
 
 
 def publish_training_inputs(store: ObjectStore, settings: Settings) -> None:
