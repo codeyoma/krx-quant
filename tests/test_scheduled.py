@@ -27,9 +27,9 @@ from krx_quant.config import Settings, SettingsError
 from krx_quant.fake_kis import FakeKis
 from krx_quant.feeds.base import KST
 from krx_quant.github import GitHub
-from krx_quant.log_files import Child
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.notify import Alerts
+from krx_quant.process_log import Child
 from krx_quant.scheduled import (
     CLOSE_PROBE,
     CLOSE_REFRESH_PROBE,
@@ -132,7 +132,6 @@ class Runs:
         self,
         args: Sequence[str],
         timeout: timedelta,
-        log_file: Path | None = None,
         child: Child | None = None,
     ) -> Ran:
         self.started.append((args[0], self.clock.now()))
@@ -152,12 +151,11 @@ class Writes(Runs):
         self,
         args: Sequence[str],
         timeout: timedelta,
-        log_file: Path | None = None,
         child: Child | None = None,
     ) -> Ran:
         for path, text in self.files.items():
             path.write_text(text)
-        return await super().__call__(args, timeout, log_file, child)
+        return await super().__call__(args, timeout, child)
 
 
 class Told(list[str]):

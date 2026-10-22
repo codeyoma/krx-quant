@@ -7,13 +7,12 @@ import pytest
 from krx_quant import loki
 from krx_quant.fake_kis import FakeKis
 from tests.algorithm_doubles import FixedCosts
+from tests.loki_fake import FakeLoki, serving
 
 
 @pytest.fixture(autouse=True)
-def no_log_files(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A command a test runs (``cli.main``) writes no log file under ``state/logs`` (#356) unless
-    the test turns them on: its state folder may be the working directory's."""
-    monkeypatch.setenv("KRX_LOG_DAYS", "off")
+def not_a_child(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The tests run as a process of their own, not one the engine started (``process_log``)."""
     monkeypatch.delenv("KRX_LOG_BY_PARENT", raising=False)
 
 
@@ -25,6 +24,13 @@ def no_loki(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
         monkeypatch.setenv(name, "")
     yield
     loki.stop(0)
+
+
+@pytest.fixture
+async def fake_loki() -> AsyncIterator[FakeLoki]:
+    """A fake Grafana Cloud Loki (``tests/loki_fake.py``)."""
+    async with serving() as found:
+        yield found
 
 
 @pytest.fixture

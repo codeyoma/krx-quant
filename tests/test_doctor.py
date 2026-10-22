@@ -170,7 +170,7 @@ def logs_with(*messages: tuple[int, str]) -> RecentLog:
     return recent
 
 
-def test_the_summary_has_its_nine_parts_with_the_fields_as_the_api_names_them(tmp_path: Path) -> None:
+def test_the_summary_has_its_eight_parts_with_the_fields_as_the_api_names_them(tmp_path: Path) -> None:
     settings = server(tmp_path)
     record_pingpongs(
         settings.data_dir,
@@ -182,7 +182,8 @@ def test_the_summary_has_its_nine_parts_with_the_fields_as_the_api_names_them(tm
     text = report(settings, NOW, Status(status_body(), "이 컨테이너의 엔진 API"), logs)
 
     titles = [line for line in text.splitlines() if line[:2] in {f"{n}." for n in range(1, 10)}]
-    assert [t[:2] for t in titles] == ["1.", "2.", "3.", "4.", "5.", "6.", "7.", "8.", "9."]
+    assert [t[:2] for t in titles] == ["1.", "2.", "3.", "4.", "5.", "6.", "7.", "8."]
+    assert titles[-1].startswith("8. Loki 전송"), "the log folders' section went in #360"
     assert text.startswith("서버 상태 2026-10-20 10:30:00 KST")
     assert f"commit {COMMIT} · started_at 2026-10-20T06:00:31+09:00 (4시간 29분 전)" in text
     assert "mode live · phase regular" in text
@@ -367,7 +368,8 @@ def test_the_command_cannot_read_the_engine_s_log_and_says_how_to(tmp_path: Path
     text = report(server(tmp_path), NOW, Status(status_body(), "x"))
     assert "엔진이 기억하는 줄을 읽지 못한다" in text
     assert "docker compose logs --since 2h engine" in text
-    assert "state/logs/engine/<날>.log" in text and "krx-quant logs-bundle" in text  # #356
+    assert "엔진의 전체 줄은 Grafana Cloud Loki에 있다(8절, docs/agents/server-logs.md)" in text  # #358
+    assert "state/logs" not in text and "logs-bundle" not in text  # gone in #360
 
 
 def test_without_the_api_it_says_why_and_reads_the_last_start_from_the_db(tmp_path: Path) -> None:

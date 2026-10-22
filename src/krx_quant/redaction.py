@@ -14,8 +14,7 @@ that, everything that could name a secret or the server is replaced with ``[к∞Ал
 - Tailscale names (``*.ts.net``), IPv6 and IPv4 addresses.
 
 ``redact`` is a pure function: it is the one place that decides what a comment may show, and
-what the log bundle an agent is handed (``redact_counted``, #356) and the lines sent to Loki
-(``loki.py``, #358) may.
+what the lines sent to Loki may (``loki.py``, #358).
 """
 
 from __future__ import annotations
@@ -77,7 +76,7 @@ def redact(text: str, secrets: Iterable[str] = ()) -> str:
 
 
 def redact_counted(text: str, secrets: Iterable[str] = ()) -> tuple[str, int]:
-    """``redact``'s text, and how many values it replaced (the log bundle counts them, #356)."""
+    """``redact``'s text, and how many values it replaced."""
     count = 0
     for secret in sorted({s for s in secrets if len(s) >= MIN_SECRET}, key=len, reverse=True):
         found = text.count(secret)

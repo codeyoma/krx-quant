@@ -1,39 +1,44 @@
-"""Log lines to Grafana Cloud Loki (#358): a copy of each process's lines, where an agent queries
+"""Log lines to Grafana Cloud Loki (#358): where each process's lines are kept, an agent queries
 them (docs/agents/server-logs.md) and Grafana's alert rules read them (docs/operations.md
 "Grafana Cloud Loki로 보내는 로그 (#358)").
 
-The files under ``state/logs`` (#356, ``log_files.py``) stay the lines' source of truth; Loki holds
-a copy. Each process sends its own lines over HTTPS to ``<KRX_LOKI_URL>/loki/api/v1/push`` (basic
-auth ``KRX_LOKI_USER`` and ``KRX_LOKI_TOKEN``), from a thread of its own: no collecting agent runs
-beside the engine (the server has 2 GB), and nothing listens on the server for it. All three
-settings set, or nothing is sent.
+Beside it there is only stdout, which ``docker compose logs`` keeps until the 06:00 deploy makes a
+new container (the files under ``state/logs``, #356, went in #360). Each process sends its own
+lines over HTTPS to ``<KRX_LOKI_URL>/loki/api/v1/push`` (basic auth ``KRX_LOKI_USER`` and
+``KRX_LOKI_TOKEN``), from a thread of its own: no collecting agent runs beside the engine (the
+server has 2 GB), and nothing listens on the server for it. All three settings set, or nothing is
+sent.
 
 - What goes: the engine's lines (``collect``), those of a command run by hand, and the output of
-  the processes the engine starts (the nightly training, the scheduled jobs), as the engine copies
-  it into their files (``log_files.run_logged``), stdout and stderr as printed. A process the
-  engine started sends nothing itself (``log_files.BY_PARENT``).
+  the processes the engine starts (the nightly training, the scheduled jobs), as the engine reads
+  it (``process_log.run_logged``), stdout and stderr as printed. A process the engine started
+  sends nothing itself (``process_log.BY_PARENT``).
 - The labels are few and fixed (Loki indexes each set as a stream): ``service="krx-quant"``,
   ``process`` (``engine``, ``training``, ``job``, ``command``) and ``level`` (``debug`` …
-  ``critical``; a child's line without a level of its own, such as a traceback's, takes the one
-  before it). What varies goes in the line: a job's starts with ``job=<name> night=<night>``, a
-  training's with ``night=<night>``, a command's with ``command=<name>``; the rest is the line of
-  the file as it is.
-- Masked before it goes, by ``doctor``'s rules (``redaction.redact`` with the settings' secrets),
-  then cut to ``LINE_BYTES`` (a longer line is cut at a space first, ``bounded``). A record
-  logged with ``extra=TEMPLATE_ONLY`` goes as its template, its values ``…``: what it
-  may carry (a Toss figure in an exception's message) stays on the server (design.md 4.7).
+  ``critical``; a line without a level of its own, such as a traceback's or a record's later
+  lines, takes the one before it). What varies goes in the line: a job's starts with
+  ``job=<name> night=<night>``, a training's with ``night=<night>``, a command's with
+  ``command=<name>``; the rest is the stdout line as it is. A record of several lines goes as one
+  entry a line.
+- A line over ``LINE_BYTES`` is cut at its last space within them before it waits (``bounded``),
+  then masked by ``doctor``'s rules (``redaction.redact`` with the settings' secrets) and cut to
+  ``LINE_BYTES`` again when it goes (``cut``). A record logged with ``extra=TEMPLATE_ONLY`` goes as
+  its template, its values ``…``: what it may carry (a Toss figure in an exception's message)
+  stays on the server (design.md 4.7).
 - Sent in batches of ``BATCH_LINES`` lines or ``BATCH_BYTES``, or what has waited
   ``BATCH_SECONDS``; one batch at a time, in order. A failure is tried again after 1, 2, 4 … up to
   ``MAX_RETRY`` seconds (jittered); a batch Loki refuses for what it is (a 4xx other than 408 and
-  429) is dropped. The buffer holds at most ``MAX_LINES`` lines and ``MAX_BYTES``: past either,
-  the oldest lines are dropped and counted. A line is handed over and the thread sends it: nothing
-  waits for Loki, and no failure of Loki's reaches the process.
+  429) is dropped. The buffer holds at most ``MAX_LINES`` lines and ``MAX_BYTES`` (UTF-8): past
+  either, the oldest lines are dropped and counted. A line is handed over and the thread sends it:
+  nothing waits for Loki, and no failure of Loki's reaches the process.
 - At the process's end what is left is sent within ``EXIT_SECONDS``; the engine asks for a child's
-  lines to be sent at once when the child ends. What could not be sent by then, and the last lines
-  of a process killed outright (SIGKILL, the kernel's out-of-memory kill), are in the files only.
+  lines to be sent at once when the child ends. Two gaps the user accepted (2026-10-23): what
+  could not be sent by then or was dropped past the cap while Loki was unreachable, and the last
+  lines of a process killed outright (SIGKILL, the kernel's out-of-memory kill), never reach Loki.
+  Only stdout had them: ``docker compose logs``, until the next deploy.
 - The engine also sends a line of its own every ``HEARTBEAT_SECONDS`` from its event loop
   (``keep_heartbeat``), to Loki only: the log-absence alert reads it when the engine is quiet.
-- ``status_json`` is ``/v1/status``'s ``loki`` and ``doctor``'s section 9.
+- ``status_json`` is ``/v1/status``'s ``loki`` and ``doctor``'s section 8.
 """
 
 from __future__ import annotations
@@ -76,12 +81,12 @@ REQUEST_SECONDS = 10.0
 EXIT_SECONDS = 5.0  # what is left is sent within this at the process's end
 HEARTBEAT_SECONDS = 60.0
 # ``log.warning(..., extra=TEMPLATE_ONLY)``: the line goes to Loki as its template, the values
-# ``…``; the files and stdout have it whole.
+# ``…``; stdout has it whole.
 VALUES = "loki_values"
 TEMPLATE_ONLY: Mapping[str, Any] = {VALUES: False}
 LEVELS = {"DEBUG": "debug", "INFO": "info", "WARNING": "warning", "ERROR": "error", "CRITICAL": "critical"}
 _LOCAL = frozenset({"localhost", "127.0.0.1", "::1"})  # http:// is allowed for these only (tests)
-# A log line's start as ``log_files.FORMAT`` writes it: its time and level.
+# A log line's start as ``process_log.FORMAT`` writes it: its time and level.
 _STAMPED = re.compile(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} (DEBUG|INFO|WARNING|ERROR|CRITICAL) ")
 # A printf conversion in a log template (``%s``, ``%.1f``, ``%(name)s``, ``%%``), as doctor's.
 _SPEC = re.compile(r"%(?:\([^)]*\))?[#0\- +]*(?:\*|\d+)?(?:\.(?:\*|\d+))?[hlL]?([diouxXeEfFgGcrsa%])")
@@ -130,7 +135,7 @@ def target_of(values: Mapping[str, str]) -> tuple[Target | None, str | None]:
 
 
 def level_of(line: str, previous: str = "info") -> str:
-    """The ``level`` label of a line a child printed: its own (``log_files.FORMAT``), else the
+    """The ``level`` label of a line a child printed: its own (``process_log.FORMAT``), else the
     line before's (a traceback, a report's lines)."""
     found = _STAMPED.match(line)
     return previous if found is None else LEVELS[found.group(1)]
@@ -151,14 +156,17 @@ def error_kind(error: BaseException) -> str:
     return type(error).__name__
 
 
-def bounded(line: str, limit: int = 2 * LINE_BYTES) -> str:
-    """A line of more than ``limit`` characters cut before it is masked, at its last space
-    within them: the masking's work stays bounded, and no value it masks (none holds a space) is
-    cut in two to show a part of it. A line without such a space goes as a note of its length."""
-    if len(line) <= limit:
+def bounded(line: str, limit: int = LINE_BYTES) -> str:
+    """A line of more than ``limit`` bytes (UTF-8) cut before it waits and is masked, at its last
+    space within them: the buffer and the masking's work stay bounded, and no value the masking
+    takes (none holds a space) is cut in two to show a part of it. A line without such a space goes
+    as a note of its length."""
+    data = line.encode("utf-8", errors="replace")
+    if len(data) <= limit:
         return line
-    space = max(line.rfind(c, 0, limit) for c in " \t\n")
-    return (line[:space] if space > 0 else "") + f" … (cut: {len(line):,} characters)"
+    head = data[: limit - _CUT_NOTE].decode("utf-8", errors="ignore")
+    space = max(head.rfind(" "), head.rfind("\t"))
+    return (head[:space] if space > 0 else "") + f" … (cut: {len(data):,} bytes)"
 
 
 def cut(line: str, limit: int = LINE_BYTES) -> str:
@@ -248,9 +256,11 @@ class Shipper:
         self._thread.start()
 
     def put(self, process: str, level: str, line: str, at: float | None = None) -> None:
-        """Hand ``line`` over (``at``: its time, seconds since the epoch; now if None)."""
+        """Hand ``line`` over (``at``: its time, seconds since the epoch; now if None), cut to
+        ``LINE_BYTES`` (``bounded``) and counted in its UTF-8 bytes."""
         ns = time.time_ns() if at is None else int(at * 1_000_000_000)
-        size = len(line) + _OVERHEAD
+        line = bounded(line)
+        size = len(line.encode("utf-8", errors="replace")) + _OVERHEAD
         with self._cond:
             if self._closing:
                 self._dropped += 1
@@ -259,12 +269,10 @@ class Shipper:
             self._last_ns = ns
             self._buffer.append(_Entry(process, level, ns, line, time.monotonic(), size))
             self._bytes += size
-            while len(self._buffer) > self._max_lines or (
-                self._bytes > self._max_bytes and len(self._buffer) > 1
-            ):
+            while self._buffer and (len(self._buffer) > self._max_lines or self._bytes > self._max_bytes):
                 self._bytes -= self._buffer.popleft().size
                 self._dropped += 1
-            if len(self._buffer) == 1 or self._full():
+            if len(self._buffer) <= 1 or self._full():
                 self._cond.notify()
 
     def flush(self) -> None:
@@ -324,7 +332,7 @@ class Shipper:
                 self._dropped_said += newly_dropped
             if newly_dropped:
                 log.warning(
-                    "Loki: %d lines dropped (the buffer was full or Loki refused them); the files have them",
+                    "Loki: %d lines dropped (the buffer was full or Loki refused them); only stdout had them",
                     newly_dropped,
                 )
             try:
@@ -429,7 +437,7 @@ class Shipper:
         """The push's JSON: a stream for each label set, its lines masked and cut, in order."""
         streams: dict[tuple[str, str], list[list[str]]] = {}
         for entry in batch:
-            line = cut(redact(bounded(entry.line), self._secrets))
+            line = cut(redact(entry.line, self._secrets))  # bounded when it was put
             streams.setdefault((entry.process, entry.level), []).append([str(entry.ns), line])
         body = {
             "streams": [
@@ -459,7 +467,7 @@ def _at(seconds: float | None) -> datetime | None:
 
 
 class LokiHandler(logging.Handler):
-    """This process's records to its ``Shipper``, as ``formatter`` writes them (the files'
+    """This process's records to its ``Shipper``, as ``formatter`` writes them (stdout's
     format), each line starting with ``fields`` if any."""
 
     def __init__(self, shipper: Shipper, process: str, fields: str, formatter: logging.Formatter) -> None:
@@ -470,18 +478,18 @@ class LokiHandler(logging.Handler):
         self.setFormatter(formatter)
 
     def emit(self, record: logging.LogRecord) -> None:
+        """The record as stdout has it, an entry a line (a traceback's, a multiline message's)."""
         try:
             shown = record if getattr(record, VALUES, True) else _template(record)
-            line = self.format(shown)
             level = LEVELS.get(record.levelname, "info")
-            self.shipper.put(
-                self.process, level, f"{self.fields} {line}" if self.fields else line, record.created
-            )
+            for line in self.format(shown).split("\n"):
+                text = f"{self.fields} {line}" if self.fields else line
+                self.shipper.put(self.process, level, text, record.created)
         except Exception:
             self.handleError(record)
 
     def beat(self) -> None:
-        """The heartbeat line, to Loki only (not the root logger: no file has it)."""
+        """The heartbeat line, to Loki only (not the root logger: stdout does not have it)."""
         s = self.shipper.status()
         self.handle(
             logging.LogRecord(
@@ -508,7 +516,7 @@ def _template(record: logging.LogRecord) -> logging.LogRecord:
     return logging.makeLogRecord({**record.__dict__, **fields, "stack_info": None})
 
 
-# This process's shipping: started by ``log_files.open_process_log``, stopped at its end.
+# This process's shipping: started by ``process_log.open_process_log``, stopped at its end.
 
 _handler: LokiHandler | None = None
 _off: str = "not started"  # why nothing is sent, while nothing is

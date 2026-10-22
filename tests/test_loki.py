@@ -3,8 +3,9 @@ that doubles, a capped buffer that drops the oldest and counts them, masked befo
 nothing sent without the three settings, a child's lines under its own labels, and what is left
 sent at a process's end.
 
-The fake Loki is an aiohttp server on the test's event loop; the shipper's thread posts to it, so
-a test that runs a command (``cli.main``, which blocks) runs it in a worker thread.
+The fake Loki (``tests/loki_fake.py``) is an aiohttp server on the test's event loop; the
+shipper's thread posts to it, so a test that runs a command (``cli.main``, which blocks) runs it in
+a worker thread. A child's lines through the engine's runner are ``tests/test_process_log.py``'s.
 
 The secret-looking values here are put together at run time, so the repository's own check
 (``scripts/check_forbidden.py``) does not find them in this file.
@@ -14,34 +15,23 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import json
 import logging
 import re
-import sys
 import urllib.error
-from collections import deque
-from collections.abc import AsyncIterator, Callable, Iterator
-from datetime import date, datetime, time, timedelta
-from functools import partial
+from collections.abc import Callable, Iterator
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
-import aiohttp
 import pytest
-from aiohttp import web
-from aiohttp.test_utils import TestServer
 
 from krx_quant import loki
 from krx_quant.cli import main
-from krx_quant.clock import FakeClock
 from krx_quant.config import Settings
 from krx_quant.doctor import Status, report
 from krx_quant.feeds.base import KST
-from krx_quant.github import GitHub
-from krx_quant.log_files import FORMAT, Child, formatter, run_logged
 from krx_quant.loki import (
     LINE_BYTES,
-    PUSH,
     TEMPLATE_ONLY,
     Shipper,
     Target,
@@ -52,15 +42,12 @@ from krx_quant.loki import (
     level_of,
     target_of,
 )
-from krx_quant.market_calendar import MarketCalendar
+from krx_quant.process_log import formatter
 from krx_quant.redaction import MASK
-from krx_quant.scheduled import Job, JobState, Scheduler, run_command
-from krx_quant.scheduled import Target as IssueTarget
+from tests.loki_fake import TOKEN, USER, FakeLoki
 from tests.test_subscription_limit import until
 
 NIGHT = date(2026, 10, 22)
-USER = "123456"
-TOKEN = "glc_" + "Z" * 40  # a made-up Grafana Cloud token
 APP_KEY = "P" + "k" * 35
 GITHUB_TOKEN = "github_pat_" + "B" * 22 + "_" + "C" * 59
 BIND_ADDRESS = "100.101.102.103"
@@ -68,53 +55,9 @@ TAILNET = "krx-quant.tail" + "1234" + ".ts.net"
 TIME = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?\+09:00$")  # the schema's
 
 
-class FakeLoki:
-    """Takes pushes at ``PUSH``: each request's body, auth and answer; ``answers`` are given in
-    turn (204 once they run out)."""
-
-    def __init__(self) -> None:
-        self.url = ""
-        self.bodies: list[bytes] = []
-        self.auth: list[str | None] = []
-        self.answers: deque[int] = deque()
-        self.taken: list[dict[str, Any]] = []
-
-    async def push(self, request: web.Request) -> web.Response:
-        body = await request.read()
-        self.bodies.append(body)
-        self.auth.append(request.headers.get("Authorization"))
-        status = self.answers.popleft() if self.answers else 204
-        if status == 204:
-            self.taken.append(json.loads(body))
-        return web.Response(status=status)
-
-    def lines(self) -> list[tuple[dict[str, str], str]]:
-        """Each line taken, with its stream's labels, in time order."""
-        found = [
-            (int(ns), stream["stream"], line)
-            for push in self.taken
-            for stream in push["streams"]
-            for ns, line in stream["values"]
-        ]
-        return [(labels, line) for _, labels, line in sorted(found, key=lambda f: f[0])]
-
-    def batches(self) -> list[int]:
-        return [sum(len(s["values"]) for s in push["streams"]) for push in self.taken]
-
-    def values(self) -> dict[str, str]:
-        return {loki.URL: self.url, loki.USER: USER, loki.TOKEN: TOKEN}
-
-
 @pytest.fixture
-async def fake() -> AsyncIterator[FakeLoki]:
-    found = FakeLoki()
-    app = web.Application()
-    app.router.add_post(PUSH, found.push)
-    server = TestServer(app, host="127.0.0.1")
-    await server.start_server(access_log=None)  # its lines would go to the files and to Loki too
-    found.url = str(server.make_url("")).rstrip("/")
-    yield found
-    await server.close()
+def fake(fake_loki: FakeLoki) -> FakeLoki:
+    return fake_loki
 
 
 @pytest.fixture
@@ -338,12 +281,51 @@ def test_a_long_line_is_cut_and_says_so() -> None:
     assert len(shown.encode()) <= LINE_BYTES and shown.endswith(f"(cut: {3 * LINE_BYTES:,} bytes)")
 
 
-def test_a_very_long_line_is_cut_at_a_space_before_it_is_masked() -> None:
+def test_a_long_line_is_cut_at_a_space_before_it_waits_and_is_masked() -> None:
     # The cut never splits a value the masking takes: what is left of it would show.
     line = "a " * 10 + APP_KEY + "z" * 100
-    assert bounded(line, limit=40) == "a a a a a a a a a a" + f" … (cut: {len(line):,} characters)"
-    assert bounded("x" * 100, limit=40) == " … (cut: 100 characters)"
+    assert bounded(line, limit=80) == "a a a a a a a a a a" + f" … (cut: {len(line):,} bytes)"
+    assert bounded("x" * 100, limit=60) == " … (cut: 100 bytes)"
     assert bounded("short") == "short"
+    korean = "가나 " * 30_000  # 7 bytes a word: about 210 KB in 90,000 characters
+    cut_korean = bounded(korean)
+    assert len(cut_korean.encode()) <= LINE_BYTES and cut_korean.endswith(f"(cut: {7 * 30_000:,} bytes)")
+
+
+async def test_an_oversized_record_waits_cut_counted_in_bytes_and_within_the_cap(
+    fake: FakeLoki, shippers: Callable[..., Shipper]
+) -> None:
+    # A training's whole output logged as one record (swap._train), in Korean: three bytes a letter.
+    shipper = shippers(fake.url, every=60.0, max_bytes=LINE_BYTES * 5 // 2)  # two cut lines fit
+    shipper.put(loki.ENGINE, "info", "학습 " * 200_000)  # 1.4 MB
+    status = shipper.status()
+    assert (status.buffered, status.dropped) == (1, 0)
+    for _ in range(3):
+        shipper.put(loki.ENGINE, "info", "가나 " * 15_000)  # 105 KB each, counted so, cut to 64 KB
+    status = shipper.status()
+    assert (status.dropped, status.buffered) == (2, 2), "the cap counts bytes, and holds"
+    shipper.flush()
+    await until(lambda: shipper.status().sent == 2)
+    for _, line in fake.lines():
+        assert len(line.encode()) <= LINE_BYTES and line.endswith("bytes)")
+
+
+async def test_a_record_of_several_lines_goes_as_an_entry_a_line(fake: FakeLoki) -> None:
+    handler, _ = loki.start(fake.values(), (), loki.COMMAND, "command=train", formatter(), every=60.0)
+    assert handler is not None
+    try:
+        raise ZeroDivisionError("division by zero")
+    except ZeroDivisionError:
+        logging.getLogger("krx_quant.swap").exception("nightly training of %s failed:\n%s", NIGHT, "a\nb")
+    assert await asyncio.to_thread(loki.stop) == 0
+    taken = fake.lines()
+    assert taken[0][1].startswith("command=train 20") and taken[0][1].endswith(
+        "ERROR krx_quant.swap: nightly training of 2026-10-22 failed:"
+    )
+    assert [line for _, line in taken[1:3]] == ["command=train a", "command=train b"]
+    assert taken[3][1] == "command=train Traceback (most recent call last):"
+    assert taken[-1][1] == "command=train ZeroDivisionError: division by zero"
+    assert {labels["level"] for labels, _ in taken} == {"error"}
 
 
 async def test_a_record_marked_template_only_goes_without_its_values(
@@ -362,7 +344,7 @@ async def test_a_record_marked_template_only_goes_without_its_values(
     )
     assert "1,234" not in marked and "005930" not in marked
     assert plain.endswith("WARNING krx_quant.supply: 50% done")
-    assert "'1,234'" in caplog.text, "the file and stdout keep it whole"
+    assert "'1,234'" in caplog.text, "stdout keeps it whole"
 
 
 # What goes, and labelled how
@@ -373,88 +355,6 @@ def test_a_child_s_line_takes_its_own_level_or_the_one_before() -> None:
     assert level_of("Traceback (most recent call last):", "error") == "error"
     assert level_of("a report line") == "info"
     assert level_of("2026-10-22 21:30:00,123 WARNING krx_quant.x: y", "error") == "warning"
-
-
-CHILD = (
-    "import logging, sys\n"
-    f"logging.basicConfig(level=logging.INFO, format={FORMAT!r})\n"
-    "log = logging.getLogger('krx_quant.nightly')\n"
-    "log.info('started step %s', 'newton')\n"
-    "print('a report line', flush=True)\n"
-    "try:\n"
-    "    1 / 0\n"
-    "except ZeroDivisionError:\n"
-    "    log.exception('step %s failed', 'turing')\n"
-    "sys.exit(3)\n"
-)
-
-
-async def test_the_training_s_lines_go_as_process_training_with_its_night_sent_at_its_end(
-    fake: FakeLoki, tmp_path: Path
-) -> None:
-    # As the engine: its own shipping on, never sending by time here, so only the child's end does.
-    handler, _ = loki.start(fake.values(), (), loki.ENGINE, "", formatter(), every=60.0)
-    assert handler is not None
-    ran = await run_logged(
-        [sys.executable, "-c", CHILD],
-        timedelta(seconds=20),
-        tmp_path / "training" / "2026-10-22.log",
-        merge=True,
-        child=Child.training(NIGHT),
-    )
-    assert ran.exit_code == 3
-    await until(lambda: any("ended: exit 3" in line for _, line in fake.lines()))
-    taken = fake.lines()
-    assert {labels["process"] for labels, _ in taken} == {"training"}
-    assert all(line.startswith("night=2026-10-22 ") for _, line in taken)
-    by_text = [(labels["level"], line.removeprefix("night=2026-10-22 ")) for labels, line in taken]
-    assert by_text[0][0] == "info" and "started (pid " in by_text[0][1]
-    assert by_text[1][0] == "info" and by_text[1][1].endswith("INFO krx_quant.nightly: started step newton")
-    assert by_text[2] == ("info", "a report line")
-    failed = next(i for i, (_, text) in enumerate(by_text) if "step turing failed" in text)
-    assert by_text[failed][0] == "error"
-    assert [level for level, _ in by_text[failed + 1 : -1]] == ["error"] * (len(by_text) - failed - 2), (
-        "the traceback's lines take the error's level"
-    )
-    assert by_text[-1][0] == "error" and "ended: exit 3 after" in by_text[-1][1]
-    file = (tmp_path / "training" / "2026-10-22.log").read_text().splitlines()
-    assert file == [line for _, line in by_text], "Loki has the file's lines"
-
-
-async def test_a_scheduled_job_s_lines_go_as_process_job_with_its_name_and_night(
-    fake: FakeLoki, tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
-    caplog.set_level(logging.INFO)  # the engine's own lines, as the engine logs them
-    handler, _ = loki.start(fake.values(), (), loki.ENGINE, "", formatter(), every=60.0)
-    assert handler is not None
-    calendar = MarketCalendar({NIGHT: True, NIGHT + timedelta(days=1): True})
-    clock = FakeClock(datetime.combine(NIGHT, time(23, 0), KST))
-    script = "import sys; print('found 3 days'); print('a warning', file=sys.stderr)"
-    job = Job("probe-x", lambda night: True, ("-c", script), timedelta(minutes=1), (IssueTarget(1),))
-    async with aiohttp.ClientSession() as session:
-
-        async def told(text: str) -> bool:
-            return True
-
-        scheduler = Scheduler(
-            [job],
-            time(22, 30),
-            calendar,
-            JobState.load(tmp_path / "scheduled.json"),
-            GitHub(session, None, "codeyoma/krx-quant", "http://127.0.0.1:9"),
-            told,
-            clock,
-            runner=partial(run_command, program=[sys.executable]),
-            logs=None,  # no file: Loki still gets them
-        )
-        await scheduler.run_night(NIGHT)
-    await until(lambda: any("ended: exit 0" in line for _, line in fake.lines()))  # sent at its end
-    assert await asyncio.to_thread(loki.stop) == 0  # and the engine's own lines after it
-    job_lines = [(labels, line) for labels, line in fake.lines() if labels["process"] == "job"]
-    assert all(line.startswith("job=probe-x night=2026-10-22 ") for _, line in job_lines)
-    assert sorted(line.split(" ", 2)[2] for _, line in job_lines[1:-1]) == ["a warning", "found 3 days"]
-    engine = [line for labels, line in fake.lines() if labels["process"] == "engine"]
-    assert any("scheduled job probe-x: ok (exit 0)" in line for line in engine), "the engine's own, apart"
 
 
 async def test_the_engine_sends_a_heartbeat_to_loki_only(
@@ -470,7 +370,7 @@ async def test_the_engine_sends_a_heartbeat_to_loki_only(
     labels, line = next((labels, line) for labels, line in fake.lines() if "heartbeat" in line)
     assert labels == {"service": "krx-quant", "process": "engine", "level": "info"}
     assert re.search(r" INFO krx_quant\.loki: heartbeat: sent \d+, dropped 0, buffered \d+$", line)
-    assert "heartbeat" not in caplog.text, "no file or stdout has it"
+    assert "heartbeat" not in caplog.text, "stdout does not have it"
 
 
 # A command, from its start to its end
@@ -480,7 +380,6 @@ def command_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, values: dict[st
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("KRX_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setenv("KRX_DATA_DIR", str(tmp_path / "data"))
-    monkeypatch.setenv("KRX_LOG_DAYS", "14")
     for name, value in values.items():
         monkeypatch.setenv(name, value)
 
@@ -499,10 +398,10 @@ async def test_a_command_s_lines_go_by_its_end_with_its_start_and_end_lines(
         taken[-1][0]["level"] == "info"
         and "krx-quant doctor --api http://localhost:9 ended: exit 0" in taken[-1][1]
     )
-    (path,) = (tmp_path / "state" / "logs" / "commands" / "doctor").iterdir()
-    file = path.read_text().splitlines()
-    assert [line.removeprefix("command=doctor ") for _, line in taken] == file
-    assert "INFO krx_quant.log_files: sending the log lines to Loki too (process=command)" in file[1]
+    assert any(
+        line.endswith("INFO krx_quant.process_log: sending the log lines to Loki too (process=command)")
+        for _, line in taken
+    )
     assert loki.active() is None
 
 
@@ -516,18 +415,19 @@ async def test_nothing_is_sent_without_all_three_settings(
     assert loki.status_json()["enabled"] is False
 
 
-async def test_a_command_whose_loki_does_not_answer_ends_and_its_file_says_what_loki_missed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+async def test_a_command_whose_loki_does_not_answer_ends_and_says_what_loki_missed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     command_env(monkeypatch, tmp_path, {loki.URL: "http://127.0.0.1:9", loki.USER: USER, loki.TOKEN: TOKEN})
     monkeypatch.setattr(loki, "EXIT_SECONDS", 0.3)
     assert await asyncio.to_thread(main, ["doctor", "--api", "http://localhost:9"]) == 0
-    (path,) = (tmp_path / "state" / "logs" / "commands" / "doctor").iterdir()
-    file = path.read_text()
-    assert "Loki: could not send the log lines (URLError(ConnectionRefusedError))" in file
-    assert re.search(r"WARNING krx_quant\.log_files: \d+ log lines were not sent to Loki", file)
-    assert "krx-quant doctor --api http://localhost:9 ended: exit 0 after" in file.splitlines()[-1]
-    assert TOKEN not in file
+    said = [r.getMessage() for r in caplog.records if r.name.startswith("krx_quant.")]
+    assert "Loki: could not send the log lines (URLError(ConnectionRefusedError)); trying again," in " ".join(
+        said
+    )
+    assert any(re.fullmatch(r"\d+ log lines were not sent to Loki; only stdout had them", m) for m in said)
+    assert TOKEN not in caplog.text
+    assert loki.active() is None
 
 
 # The status
@@ -578,13 +478,13 @@ def test_doctor_shows_the_engine_s_shipping(tmp_path: Path) -> None:
         "last_error_at": "2026-10-23T03:00:01+09:00",
     }
     text = report(settings, now, doctor_status(shipping))
-    assert "9. Loki 전송 (#358, /v1/status의 loki)" in text
+    assert "8. Loki 전송 (#358, /v1/status의 loki)" in text
     assert "켜짐 · 보낸 줄 12,345 · 버린 줄 7 · 버퍼 3줄" in text
     assert "마지막 성공 09:59:57 (3초 전)" in text
     assert "마지막 오류 HTTP 503 (03:00:01)" in text
     off = {**shipping, "enabled": False, "reason": "KRX_LOKI_TOKEN is not set: all three are needed"}
     text = report(settings, now, doctor_status(off))
-    assert "9. Loki 전송 (#358, /v1/status의 loki): 꺼짐(KRX_LOKI_TOKEN is not set" in text
+    assert "8. Loki 전송 (#358, /v1/status의 loki): 꺼짐(KRX_LOKI_TOKEN is not set" in text
     text = report(settings, now, Status(None, "", ("x: refused",)))
     assert "엔진 API에 닿지 않아 엔진의 전송 상태는 모른다" in text
     assert "이 명령이 읽은 설정: 꺼짐(KRX_LOKI_URL, KRX_LOKI_USER and KRX_LOKI_TOKEN are not set)" in text

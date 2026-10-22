@@ -13,8 +13,7 @@ sets.
 Every night (trading or not) from ``KRX_JOBS_AT`` (22:30) to 05:30, once the nightly
 training is over (``swap.NightTraining``), the jobs due run one at a time, in this list's
 order, each in its own process, as the nightly training does; its whole output also goes to
-``state/logs/jobs/<job>/<night>.log`` as it comes (``log_files.py``, #356), and to Loki when it is
-set (``loki.py``, #358). A job's condition is asked
+Loki as it comes when it is set (``process_log.py``, ``loki.py``, #358). A job's condition is asked
 when its turn comes, so it sees the runs of the jobs before it that night. One whose time
 limit would pass 05:30 is not started that night: the 06:00 deploy and the 07:20 restart
 stop the collector. A collector started inside the window (a restart at night) runs that
@@ -55,13 +54,12 @@ from krx_quant.engine import PredictionEngine
 from krx_quant.feeds.base import KST
 from krx_quant.github import GitHub, GitHubError, comment_body
 from krx_quant.kind_registry import DAILY_KINDS, daily_kind_named
-from krx_quant.log_files import JOBS as JOB_LOGS
-from krx_quant.log_files import KRX_QUANT, Child, night_file, root_of, run_logged
-from krx_quant.log_files import Ran as Ran  # a job's process, once it ended
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.night_probe import evening, subscribed_nights
 from krx_quant.notify import Alerts
 from krx_quant.prevalidation import MIN_DAYS, REGISTERED_BEFORE, LastReport, last_report, report_path
+from krx_quant.process_log import KRX_QUANT, Child, run_logged
+from krx_quant.process_log import Ran as Ran  # a job's process, once it ended
 from krx_quant.redaction import redact, secrets_of
 from krx_quant.swap import NightTraining
 from krx_quant.training import finished_days, is_recorded
@@ -291,15 +289,11 @@ class Job:
 
 
 class Runner(Protocol):
-    """Runs a job's ``krx-quant`` arguments within its time limit, its output also into its log
-    file (``jobs/<job>/<night>.log``, #356; None: none) and to Loki as ``child`` labels it (#358)."""
+    """Runs a job's ``krx-quant`` arguments within its time limit, its output also to Loki as
+    ``child`` labels it (#358)."""
 
     def __call__(
-        self,
-        args: Sequence[str],
-        timeout: timedelta,
-        log_file: Path | None = None,
-        child: Child | None = None,
+        self, args: Sequence[str], timeout: timedelta, child: Child | None = None
     ) -> Awaitable[Ran]: ...
 
 
@@ -309,15 +303,14 @@ Notify = Callable[[str], Awaitable[bool]]
 async def run_command(
     args: Sequence[str],
     timeout: timedelta,
-    log_file: Path | None = None,
     child: Child | None = None,
     *,
     program: Sequence[str] = KRX_QUANT,
 ) -> Ran:
-    """Run ``program`` with ``args`` and read its output, each line also into ``log_file`` and
-    to Loki as ``child``; killed at ``timeout`` (what it wrote by then is kept), and when the
-    collector stops (cancelled)."""
-    return await run_logged([*program, *args], timeout, log_file, child=child)
+    """Run ``program`` with ``args`` and read its output, each line also to Loki as ``child``;
+    killed at ``timeout`` (what it wrote by then is kept), and when the collector stops
+    (cancelled)."""
+    return await run_logged([*program, *args], timeout, child=child)
 
 
 def window(day: date, at: time) -> tuple[datetime, datetime]:
@@ -355,7 +348,6 @@ class Scheduler:
         training: NightTraining | None = None,
         facts: Callable[[], Awaitable[Facts]] | None = None,
         runner: Runner = run_command,
-        logs: Path | None = None,
     ) -> None:
         self._jobs = jobs
         self._at = at
@@ -369,7 +361,6 @@ class Scheduler:
         self._training = training or NightTraining()
         self._facts = facts
         self._runner = runner
-        self._logs = logs  # state/logs: each run's output goes to jobs/<job>/<night>.log (#356)
 
     async def run(self) -> None:
         """Every night's jobs, until cancelled; first what the last collector left."""
@@ -470,7 +461,6 @@ class Scheduler:
             ran = await self._runner(
                 job.command,
                 job.timeout,
-                night_file(self._logs, JOB_LOGS, day, job.name),
                 Child.job(job.name, day),
             )
         except Exception as e:
@@ -718,7 +708,6 @@ async def keep_jobs(
         secrets=secrets_of(settings),
         training=training,
         facts=partial(read_facts, settings, calendar, clock, engine),
-        logs=root_of(settings),
     )
     await scheduler.run()
 

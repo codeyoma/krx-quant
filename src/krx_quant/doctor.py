@@ -12,8 +12,8 @@ server, or an agent reading an issue, looks at first when something seems wrong.
    (``raw/date=<today>/feed=_system/symbol=_``).
 4. The latest WARNING and ERROR log lines, where the process can read the engine's memory: the
    collector keeps its own (``RecentLog``); the command, a process of its own, cannot, and says
-   where the engine's whole lines are (``docker compose logs``, its file under ``state/logs``,
-   #356). No runtime text reaches them, so no
+   where the engine's whole lines are (Loki, #358; ``docker compose logs``). No runtime text
+   reaches them, so no
    market value can (a raw KIS frame's excerpt in a parse error, a price in an exception): a
    line is the template the code logged with (``krx_quant``'s loggers only; every engine log
    call's message is a literal, a test checks), its values shown only when they are a date or
@@ -26,14 +26,10 @@ server, or an agent reading an issue, looks at first when something seems wrong.
 7. The nightly training (#355, ``training_nights``): the last night the morning swap applied,
    the trading nights not applied since and the failures among them, and the latest night's
    outcome: its exit code and the last step it started.
-8. The log files under ``state/logs`` (#356, ``log_files.py``): for each kind (the engine's, the
-   nightly training's, the scheduled jobs', the commands'), the files, their size, the oldest
-   and the latest day; their total against ``KRX_LOG_MAX_MB``; the bundles made for an agent.
-   Counts, sizes and dates only: never a line of them.
-9. The log lines' copy in Grafana Cloud Loki (#358, ``loki.py``), as ``/v1/status``'s ``loki``
+8. The log lines sent to Grafana Cloud Loki (#358, ``loki.py``), as ``/v1/status``'s ``loki``
    says: on or off (and why), the lines sent, dropped and waiting, the last success and the last
    failure's kind (``HTTP 503``, never its text). Without the engine, what this command's
-   settings say.
+   settings say. (Section 8 was the log files under ``state/logs`` until #360 removed them.)
 
 The command reads the settings leniently (``doctor_settings``): a malformed one, which keeps
 the engine from starting, is a finding at the top, and the rest comes from the data and state
@@ -71,8 +67,6 @@ from krx_quant import kis, loki
 from krx_quant.archive import partition_files
 from krx_quant.config import Settings, SettingsError, read_values
 from krx_quant.feeds.base import KST
-from krx_quant.log_files import BUNDLES, LOGS, NESTED, bundle_files, day_logs, kinds_of, size_text
-from krx_quant.log_files import JOBS as JOB_LOGS
 from krx_quant.market_calendar import calendar_store
 from krx_quant.predictions import DB_NAME, iso, read_only
 from krx_quant.redaction import redact, secrets_of
@@ -332,8 +326,7 @@ def report(
         ("5. 예약 작업", lambda: _jobs(settings, known=config_error is None)),
         ("6. 디스크와 메모리", lambda: _resources(settings, process)),
         ("7. 밤 학습", lambda: _training(settings, now)),
-        ("8. 로그 파일", lambda: _log_files(settings, known=config_error is None)),
-        ("9. Loki 전송", lambda: _loki(settings, status, now)),
+        ("8. Loki 전송", lambda: _loki(settings, status, now)),
     ]
     sections = [head]
     for title, part in parts:
@@ -464,9 +457,8 @@ def _logs(logs: RecentLog | None) -> list[str]:
     if logs is None:
         return [
             "4. 최근 WARNING·ERROR 로그: 이 명령은 엔진과 다른 프로세스라 엔진이 기억하는 줄을 읽지 못한다",
+            "  엔진의 전체 줄은 Grafana Cloud Loki에 있다(8절, docs/agents/server-logs.md)",
             "  서버에서: docker compose logs --since 2h engine | grep -E ' (WARNING|ERROR) '",
-            "  엔진의 전체 줄은 state/logs/engine/<날>.log에도 있다(8절)."
-            " 에이전트에게는 krx-quant logs-bundle로 준다",
             "  이슈에 needs-server-snapshot 라벨을 붙여 받는 요약에는 엔진이 기억하는 최근 줄이 실린다",
         ]
     counts = logs.counts()
@@ -481,7 +473,7 @@ def _logs(logs: RecentLog | None) -> list[str]:
     return [
         f"{title}, 마지막 {len(shown)}줄)",
         "  코드의 메시지 틀만 싣는다: 값은 날짜·시각, 참거짓, 이름 모양의 글자만, 나머지는 …, 예외는 종류만."
-        " 전체는 서버의 state/logs/engine/<날>.log(krx-quant logs-bundle)와 docker compose logs engine",
+        " 전체는 Grafana Cloud Loki(8절)와 서버의 docker compose logs engine",
         *(f"  {line}" for line in shown),
     ]
 
@@ -606,43 +598,10 @@ def _resources(settings: Settings, process: str) -> list[str]:
     return lines
 
 
-def _log_files(settings: Settings, *, known: bool = True) -> list[str]:
-    """The log folders (#356): files, size and days for each kind; the bundles. No line of them."""
-    if not known:
-        keep = "KRX_LOG_DAYS ? · KRX_LOG_MAX_MB ?"
-    elif settings.log_days is None:
-        keep = "KRX_LOG_DAYS off: 쓰지 않는다"
-    else:
-        keep = f"KRX_LOG_DAYS {settings.log_days} · KRX_LOG_MAX_MB {settings.log_max_mb}"
-    root = settings.state_dir / LOGS
-    title = f"8. 로그 파일 (state/{LOGS}, {keep})"
-    files, bundles = day_logs(root), bundle_files(root)
-    if not files and not bundles:
-        return [f"{title}: 없음"]
-    lines = [title]
-    for kind, of_kind in kinds_of(files):
-        names = len({f.name for f in of_kind})
-        what = f"{'작업' if kind == JOB_LOGS else '명령'} {names}개 · " if kind in NESTED else ""
-        lines.append(
-            f"  {kind}: {what}파일 {len(of_kind)}개 · {size_text(sum(f.size for f in of_kind))}"
-            f" · 가장 오래된 날 {of_kind[0].day} · 최근 {of_kind[-1].day}"
-        )
-    total = sum(f.size for f in files)
-    cap = f" / 상한 {settings.log_max_mb} MB" if known and settings.log_days is not None else ""
-    lines.append(f"  합계 {size_text(total)}{cap}")
-    if bundles:
-        latest = bundles[-1]
-        lines.append(
-            f"  꾸러미({BUNDLES}/) {len(bundles)}개 · 최근 {latest.name} ({size_text(latest.stat().st_size)})"
-        )
-    lines.append('  에이전트에게 줄 꾸러미: krx-quant logs-bundle (docs/operations.md "로그 파일과 꾸러미")')
-    return lines
-
-
 def _loki(settings: Settings, status: Status, now: datetime) -> list[str]:
     """The lines' copy in Loki (#358): the engine's ``/v1/status`` ``loki``; without it, what this
     command's settings say. Counts, times and the failure's kind only."""
-    title = "9. Loki 전송 (#358, /v1/status의 loki)"
+    title = "8. Loki 전송 (#358, /v1/status의 loki)"
     shipping = None if status.body is None else status.body.get("loki")
     if not isinstance(shipping, Mapping):
         target, why = loki.target_of(
@@ -659,7 +618,7 @@ def _loki(settings: Settings, status: Status, now: datetime) -> list[str]:
         setting = "켜짐(KRX_LOKI_URL·KRX_LOKI_USER·KRX_LOKI_TOKEN 있음)" if target else f"꺼짐({why})"
         return [title, f"  {known}", f"  이 명령이 읽은 설정: {setting}"]
     if not shipping.get("enabled"):
-        return [f"{title}: 꺼짐({shipping.get('reason')}). 로그는 서버의 state/logs에만 있다"]
+        return [f"{title}: 꺼짐({shipping.get('reason')}). 로그는 stdout(docker compose logs)에만 있다"]
     today = now.astimezone(KST).date()
     lines = [
         title,
@@ -680,7 +639,10 @@ def _loki(settings: Settings, status: Status, now: datetime) -> list[str]:
         if error
         else "  마지막 오류: 없음"
     )
-    lines.append("  버린 줄과 보내지 못한 줄은 서버의 state/logs에만 있다. 조회: docs/agents/server-logs.md")
+    lines.append(
+        "  버린 줄과 보내지 못한 줄은 Loki에 없다(stdout에만 있었다: docker compose logs)."
+        " 조회: docs/agents/server-logs.md"
+    )
     return lines
 
 
