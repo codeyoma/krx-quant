@@ -429,7 +429,10 @@ def test_the_job_waits_for_the_key_then_runs_once_any_night() -> None:
     assert KRX_ETF_PROBE.due(night(FRIDAY, keyed)) and KRX_ETF_PROBE.due(night(SATURDAY, keyed))
     ran = JobRecord(FRIDAY, OK, at(FRIDAY, "22:30"), COMMIT, 0, 60.0)
     assert not KRX_ETF_PROBE.due(night(MONDAY, keyed, ran))
-    assert not KRX_ETF_PROBE.due(night(MONDAY, keyed, replace(ran, outcome=FAILED, exit_code=1)))
+    failed = replace(ran, outcome=FAILED, exit_code=1)
+    assert KRX_ETF_PROBE.due(night(MONDAY, keyed, failed)), "a failed run (401) runs again"
+    assert not KRX_ETF_PROBE.due(night(FRIDAY, keyed, failed)), "but not the same night"
+    assert not KRX_ETF_PROBE.due(night(MONDAY, Facts(), failed)), "nor once the key is gone"
     assert KRX_ETF_PROBE.due(night(MONDAY, keyed, replace(ran, outcome=INTERRUPTED)))
     output = "KRX Open API ETF 일별매매정보 확인 (#305) 2026-10-22 23:40 KST\n\n1. 날마다의 답"
     assert KRX_ETF_PROBE.targets[0].part(output) == output, "the whole output"

@@ -1082,8 +1082,13 @@ KRX_ETF_PROBE_ISSUE = 305
 
 
 def _first_night_with_the_krx_key(night: Night) -> bool:
-    """Once, on the first night ``KRX_OPENAPI_KEY`` is set, trading or not."""
-    return night.facts.krx_openapi and not night.ran
+    """Once, on the first night ``KRX_OPENAPI_KEY`` is set, trading or not; again each later
+    night while its last run failed (a key whose service is not approved yet answers 401), so
+    fixing the application needs no edit of the state file."""
+    if not night.facts.krx_openapi:
+        return False
+    record = night.record
+    return not night.ran or (record is not None and record.outcome == FAILED and record.day < night.day)
 
 
 KRX_ETF_PROBE = Job(
