@@ -12,6 +12,9 @@ the company's name, and the code under it. ``GET /v1/symbols`` gives both.
 - Logo: the square PNG tossinvest.com shows (``LOGO_URL``, 480×480; Toss crops it round). A
   code Toss has no logo for answers 403, and the screen draws its own.
 
+The closing flow (#305) shows its products' names the same way: the collector reads them with
+the symbols'. A product neither names shows its code.
+
 The collector reads the names once when it starts; it restarts every trading day. Nothing is
 stored: Toss's data is for the user's own trading only, so neither the names nor the logos go
 into the repository or onto the disk.
@@ -31,6 +34,7 @@ import aiohttp
 
 from krx_quant.config import Settings
 from krx_quant.masters import MasterError, download
+from krx_quant.products import products_of
 from krx_quant.toss import STOCKS, TossClient, TossError, TossTokens
 
 log = logging.getLogger(__name__)
@@ -130,6 +134,8 @@ async def fill_names(
     settings: Settings,
     now: Callable[[], datetime],
 ) -> None:
-    """Fill ``names`` (the Engine API's) with the symbols' names, in the background of a start."""
-    names.update(await read_names(session, settings, settings.symbols, now))
+    """Fill ``names`` (the Engine API's) with the symbols' names and their single-stock ETFs'
+    (``products.PRODUCTS``, the closing flow's table, #305), in the background of a start."""
+    codes = [*settings.symbols, *(p.code for s in settings.symbols for p in products_of(s))]
+    names.update(await read_names(session, settings, codes, now))
     log.info("company names: %s", ", ".join(f"{s} {n}" for s, n in names.items()))

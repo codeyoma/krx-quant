@@ -86,6 +86,9 @@ class DayPrices:
     drift_from: float  # the last price 20 minutes before the closing auction
     pre_close: float  # the last price before the closing auction
     close: float  # the closing auction's print
+    # The volume of the bar holding it: with ``close``, the closing auction's value when no
+    # trade of it was recorded (the closing flow's denominator, #305).
+    auction_volume: int = 0
 
 
 def day_prices(bars: Sequence[Bar], session: Session) -> DayPrices | None:
@@ -103,6 +106,7 @@ def day_prices(bars: Sequence[Bar], session: Session) -> DayPrices | None:
         drift_from=(before_drift[-1] if before_drift else trading[0]).close,
         pre_close=trading[-1].close,
         close=auction[-1].close,
+        auction_volume=auction[-1].volume,
     )
 
 
@@ -253,40 +257,63 @@ def _days_section(prices: Mapping[str, Sequence[DayPrices]], calendar: MarketCal
     return lines[1:] and lines
 
 
+@dataclass(frozen=True)
+class AuctionDay:
+    """A day of section 2: a day whose trading day before has prices too (no day missing between),
+    with the next day's moves where that one follows it too. The closing flow's days (#305) are
+    these."""
+
+    day: date
+    move: float  # the closing auction's: close / the last price before it − 1
+    ticks: float  # the same in ticks of that price
+    drift: float  # the 20 minutes before the auction: its last price / the one 20 minutes before − 1
+    flow: float  # the day to the auction: its last price before it / the day before's close − 1
+    next_gap: float | None  # the next day's open / the close − 1
+    next_close: float | None  # the next day's close / the close − 1
+
+
+def auction_days(days: Sequence[DayPrices], calendar: MarketCalendar) -> list[AuctionDay]:
+    """Section 2's days of one symbol's prices (oldest first)."""
+    out = []
+    for before, day, after in zip(days, days[1:], [*days[2:], None], strict=False):
+        if not _follows(calendar, before, day):
+            continue
+        nxt = after if after is not None and _follows(calendar, day, after) else None
+        out.append(
+            AuctionDay(
+                day=day.day,
+                move=_change(day.close, day.pre_close),
+                ticks=(day.close - day.pre_close) / tick_size(day.pre_close),
+                drift=_change(day.pre_close, day.drift_from),
+                flow=_change(day.pre_close, before.close),
+                next_gap=_change(nxt.open, day.close) if nxt is not None else None,
+                next_close=_change(nxt.close, day.close) if nxt is not None else None,
+            )
+        )
+    return out
+
+
 def _auction_section(prices: Mapping[str, Sequence[DayPrices]], calendar: MarketCalendar) -> list[str]:
     lines = [
         "일수 · |단일가 움직임| 중앙(bp, 틱) · 15:00–15:20과 같은 방향 · 그날 15:20까지(전일 종가 대비)와"
         " 같은 방향 · 다음날 시가 갭이 반대 · β(다음날 갭 ← 단일가) · 다음날 종가까지 반대"
     ]
     for symbol, days in prices.items():
-        rows: dict[str, list[tuple[float, float, float, float, float | None, float | None]]] = defaultdict(
-            list
-        )
-        for before, day, after in zip(days, days[1:], [*days[2:], None], strict=False):
-            if not _follows(calendar, before, day):
-                continue
-            nxt = after if after is not None and _follows(calendar, day, after) else None
-            rows[period_of(day.day)].append(
-                (
-                    _change(day.close, day.pre_close),
-                    (day.close - day.pre_close) / tick_size(day.pre_close),
-                    _change(day.pre_close, day.drift_from),
-                    _change(day.pre_close, before.close),
-                    _change(nxt.open, day.close) if nxt is not None else None,
-                    _change(nxt.close, day.close) if nxt is not None else None,
-                )
-            )
+        rows: dict[str, list[AuctionDay]] = defaultdict(list)
+        for found_day in auction_days(days, calendar):
+            rows[period_of(found_day.day)].append(found_day)
         for name, _, _ in PERIODS:
             found = rows.get(name)
             if not found:
                 continue
-            gaps = [(r[0], r[4]) for r in found if r[4] is not None]
-            nexts = [(r[0], r[5]) for r in found if r[5] is not None]
+            gaps = [(r.move, r.next_gap) for r in found if r.next_gap is not None]
+            nexts = [(r.move, r.next_close) for r in found if r.next_close is not None]
+            median_bp = statistics.median(abs(r.move) * 1e4 for r in found)
             lines.append(
-                f"{symbol} {name}: {len(found)}일 · {statistics.median(abs(r[0]) * 1e4 for r in found):.1f}bp"
-                f" {statistics.median(abs(r[1]) for r in found):.1f}틱"
-                f" · 15:00–15:20과 {_same([(r[2], r[0]) for r in found])}"
-                f" · 그날 흐름과 {_same([(r[3], r[0]) for r in found])}"
+                f"{symbol} {name}: {len(found)}일 · {median_bp:.1f}bp"
+                f" {statistics.median(abs(r.ticks) for r in found):.1f}틱"
+                f" · 15:00–15:20과 {_same([(r.drift, r.move) for r in found])}"
+                f" · 그날 흐름과 {_same([(r.flow, r.move) for r in found])}"
                 f" · 다음날 갭 반대 {_opposite(gaps)} · β {_slope(gaps)}"
                 f" · 다음날 종가 반대 {_opposite(nexts)}"
             )
@@ -406,22 +433,34 @@ def _pct(x: float, *, signed: bool = False) -> str:
     return f"{100 * x:+.2f}%" if signed else f"{100 * x:.2f}%"
 
 
-def _same(pairs: Iterable[tuple[float, float | None]]) -> str:
-    """How often the second went the first's way, of the pairs where both moved."""
+def same_share(pairs: Iterable[tuple[float, float | None]]) -> tuple[float, int] | None:
+    """How often the second went the first's way, of the pairs where both moved, and how many
+    those were; None without one. The closing flow's summary (#305) reads it too."""
     moved = [(a, b) for a, b in pairs if b is not None and a != 0 and b != 0]
     if not moved:
-        return "없음"
-    same = sum(_sign(a) == _sign(b) for a, b in moved)
-    return f"{100 * same / len(moved):.1f}% (n={len(moved)})"
+        return None
+    return sum(_sign(a) == _sign(b) for a, b in moved) / len(moved), len(moved)
+
+
+def opposite_share(pairs: Iterable[tuple[float, float | None]]) -> tuple[float, int] | None:
+    """How often the second went against the first, of the pairs where both moved, and how many
+    those were; None without one."""
+    moved = [(a, b) for a, b in pairs if b is not None and a != 0 and b != 0]
+    if not moved:
+        return None
+    return sum(_sign(a) != _sign(b) for a, b in moved) / len(moved), len(moved)
+
+
+def _share(found: tuple[float, int] | None) -> str:
+    return "없음" if found is None else f"{100 * found[0]:.1f}% (n={found[1]})"
+
+
+def _same(pairs: Iterable[tuple[float, float | None]]) -> str:
+    return _share(same_share(pairs))
 
 
 def _opposite(pairs: Iterable[tuple[float, float | None]]) -> str:
-    """How often the second went against the first, of the pairs where both moved."""
-    moved = [(a, b) for a, b in pairs if b is not None and a != 0 and b != 0]
-    if not moved:
-        return "없음"
-    against = sum(_sign(a) != _sign(b) for a, b in moved)
-    return f"{100 * against / len(moved):.1f}% (n={len(moved)})"
+    return _share(opposite_share(pairs))
 
 
 def ols(pairs: Sequence[tuple[float, float]]) -> tuple[float, float] | None:

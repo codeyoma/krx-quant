@@ -21,6 +21,13 @@ Endpoints (all under ``/v1``):
   today, at most 4,000 days), oldest first: the short-sale volume, the net buys of
   individuals, institutions and foreigners, the foreign holdings and ratio, the stock lending
   and credit balances;
+- ``GET /symbols/{symbol}/closing-flow``: the day's closing rebalancing demand of the symbol's
+  single-stock ±2x ETFs (#305, ``closing_flow``): A·(L² − L)·r at the minute (the 15:20 one from
+  the closing auction on), by structure and in all, its ratio to the 20-day median closing auction
+  value, each product's row; ``GET /symbols/{symbol}/closing-flow/days?from=D&to=D``: the days
+  kept (default the year to today, at most 4,000 days), each with its 15:20 demand and ratio, the
+  closing auction's move, whether it went the demand's way, the next day's gap and close, and
+  their summary by period and by tertile of the ratio;
 - ``GET /symbols/{symbol}/special?from=D&to=D``: the special situations' windows kept (#236)
   that start on the days ``from`` to ``to`` (KST dates, both included; default the last five
   trading days to today, at most 60 days): the symbol's VIs and the whole market's circuit
@@ -91,11 +98,12 @@ from krx_quant.briefing import Sources as BriefingSources
 from krx_quant.briefing import briefing, day_predictions, default_day
 from krx_quant.candles import PERIODS as CANDLE_PERIODS
 from krx_quant.candles import stored_candles
+from krx_quant.closing_flow import days_answer, demand_moment, read_days, read_demand, today_answer
 from krx_quant.consensus import NAMES, slot
 from krx_quant.consensus import cards as consensus_cards
 from krx_quant.contracts import USD
 from krx_quant.cost_map import SPREAD_TICKS, cost_card, direction_row, kind_row
-from krx_quant.daily import DailyAlgorithm, DailyKind
+from krx_quant.daily import DailyAlgorithm, DailyKind, StoredDays
 from krx_quant.daily_features import DAILY_FEATURES
 from krx_quant.econ_calendar import calendar_answer, read_latest
 from krx_quant.engine import PredictionEngine
@@ -115,6 +123,7 @@ from krx_quant.macro import latest_macro, macro_json, reading_before
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.model_shelf import Shelf
 from krx_quant.names import logo_url
+from krx_quant.net_assets import read_net_assets
 from krx_quant.open_to_close import OPEN_TO_CLOSE
 from krx_quant.predictions import Excluded, SimulationRecord, iso
 from krx_quant.pricing import flat_ticks, tick_size
@@ -196,6 +205,12 @@ MAX_SPECIAL_DAYS = 60
 # years kept, ``supply.HISTORY_YEARS``, and more: a year view asks for all of it).
 DEFAULT_SUPPLY_DAYS = 365
 MAX_SUPPLY_DAYS = 4000
+# The closing flow's days (#305): the days asked for by default, and the most one question spans.
+DEFAULT_CLOSING_DAYS = 365
+MAX_CLOSING_DAYS = 4000
+# The KRX days (``auctions.days_of``) the closing flow's previous close is read from, re-read
+# when their files change.
+KRX_DAYS_KEY: web.AppKey[StoredDays | None] = web.AppKey("krx_days")
 
 
 def create_app(
@@ -231,6 +246,7 @@ def create_app(
     app[CALENDAR_CACHE_KEY] = {}
     app[BRIEFING_CACHE_KEY] = {}
     app[FLOW_CACHE_KEY] = {}
+    app[KRX_DAYS_KEY] = None if data_dir is None else StoredDays(data_dir)
     app[NAMES_KEY] = {} if names is None else names
     stream = EventStream(engine, live_status, stream_poll_seconds)
 
@@ -259,6 +275,8 @@ def create_app(
     app.router.add_get("/v1/symbols/{symbol}/special", _special)
     app.router.add_get("/v1/symbols/{symbol}/supply", _supply)
     app.router.add_get("/v1/symbols/{symbol}/flow", _flow)
+    app.router.add_get("/v1/symbols/{symbol}/closing-flow", _closing_flow)
+    app.router.add_get("/v1/symbols/{symbol}/closing-flow/days", _closing_flow_days)
     app.router.add_get("/v1/algorithms", _algorithms)
     app.router.add_get("/v1/algorithms/{name}", _algorithm)
     app.router.add_get("/v1/leaderboard", _leaderboard)
@@ -481,6 +499,44 @@ async def _flow(request: web.Request) -> web.Response:
         cache.clear()
     cache[(symbol, day)] = (monotonic(), version, body)
     return _json(body)
+
+
+async def _closing_flow(request: web.Request) -> web.Response:
+    """The day's closing rebalancing demand of the symbol's single-stock ETFs (#305,
+    ``closing_flow.today_answer``): the minute's in continuous trading, else the 15:20 one."""
+    engine, symbol = _engine_and_symbol(request)
+    now = engine.clock.now()
+    day, at = demand_moment(engine.calendar, now)
+    price = None if at is None else engine.mid_at(symbol, at)  # the engine's quotes: on its thread
+    state_dir, krx_days = request.app[STATE_DIR_KEY], request.app[KRX_DAYS_KEY]
+    names = request.app[NAMES_KEY]
+
+    def answer() -> dict[str, Any]:
+        days = [] if krx_days is None else krx_days.days(symbol)
+        net = [] if state_dir is None else read_net_assets(state_dir)
+        demands = [] if state_dir is None else read_demand(state_dir)
+        kept = None if state_dir is None else read_days(state_dir)
+        return today_answer(symbol, day, at, price, now, engine.calendar, days, net, demands, kept, names)
+
+    return _json(await asyncio.to_thread(answer))
+
+
+async def _closing_flow_days(request: web.Request) -> web.Response:
+    """The closing flow's days kept (#305, ``closing_flow.days_answer``) from ``from`` to ``to``,
+    with their summary."""
+    engine, symbol = _engine_and_symbol(request)
+    to = _day_query(request, "to") or kst_day(engine.clock.now())
+    since = _day_query(request, "from") or to - timedelta(days=DEFAULT_CLOSING_DAYS - 1)
+    if since > to:
+        raise _error(web.HTTPBadRequest, f"from must not be after to, got {since} and {to}")
+    if (span := (to - since).days + 1) > MAX_CLOSING_DAYS:
+        raise _error(web.HTTPBadRequest, f"from and to span at most {MAX_CLOSING_DAYS} days, got {span}")
+    state_dir = request.app[STATE_DIR_KEY]
+
+    def answer() -> dict[str, Any]:
+        return days_answer(symbol, None if state_dir is None else read_days(state_dir), since, to)
+
+    return _json(await asyncio.to_thread(answer))
 
 
 async def _supply(request: web.Request) -> web.Response:

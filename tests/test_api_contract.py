@@ -81,6 +81,11 @@ async def walk(get: Get) -> dict[str, int]:
         await ask(f"/v1/symbols/{symbol}/supply?from=2026-10-01&to=2026-10-12", "supply")
         await ask(f"/v1/symbols/{symbol}/flow", "flow")  # #306
         await ask(f"/v1/symbols/{symbol}/flow?day=2026-10-08", "flow")
+        await ask(f"/v1/symbols/{symbol}/closing-flow", "closing_flow")  # #305
+        await ask(f"/v1/symbols/{symbol}/closing-flow/days", "closing_flow_days")
+        await ask(
+            f"/v1/symbols/{symbol}/closing-flow/days?from=2026-09-01&to=2026-10-12", "closing_flow_days"
+        )
     for query in ("", "?period=5d&basis=a&special=include", f"?symbol={symbols[0]}&period=20d"):
         await ask(f"/v1/leaderboard{query}", "leaderboard")
     for query in ("", "?period=5d&special=include", f"?symbol={symbols[0]}&period=20d"):
@@ -156,6 +161,11 @@ async def walk(get: Get) -> dict[str, int]:
         ("/v1/symbols/999999/flow", 404),
         ("/v1/symbols/005930/flow?day=2026-10-1", 400),
         ("/v1/symbols/005930/flow?day=2026-10-11", 404),  # a Sunday
+        ("/v1/symbols/999999/closing-flow", 404),
+        ("/v1/symbols/999999/closing-flow/days", 404),
+        ("/v1/symbols/005930/closing-flow/days?from=2026-10-1", 400),
+        ("/v1/symbols/005930/closing-flow/days?from=2026-10-12&to=2026-10-11", 400),
+        ("/v1/symbols/005930/closing-flow/days?from=2015-01-01&to=2026-10-12", 400),
     ):
         await ask(path, "error", status)
     asked = {*ROUTES.values(), "error"} - (set() if kinds[1:] else KIND_ROUTES)

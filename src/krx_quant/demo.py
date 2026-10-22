@@ -65,8 +65,9 @@ from krx_quant.api import create_app
 from krx_quant.auctions import KEEP_DAYS, MINUTE_BAR, write_auctions
 from krx_quant.backfill import BAR_SCHEMA, PreviousDay, stock_bars_path
 from krx_quant.base_rates import write_base_rates
-from krx_quant.candles import EX_CODE, PERIODS, period_start, write_candles, write_krx_days
+from krx_quant.candles import EX_CODE, PERIODS, period_start, read_candles, write_candles, write_krx_days
 from krx_quant.clock import FakeClock
+from krx_quant.closing_flow import DayInput, day_rows, demand_row, write_days, write_demand
 from krx_quant.daily import ANSWER_FROM, NO_EX_CODE, StoredDays
 from krx_quant.daily_features import DAILY_FEATURES, LiveFeatures
 from krx_quant.engine import Event, PredictionEngine
@@ -100,14 +101,18 @@ from krx_quant.macro import (
 )
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.model_shelf import Shelf
+from krx_quant.net_assets import KIS as NET_ASSETS_KIS
+from krx_quant.net_assets import net_assets_for, write_net_assets
 from krx_quant.nightly import Night
 from krx_quant.open_to_close import OPEN_TO_CLOSE
 from krx_quant.open_to_close_5d import OPEN_TO_CLOSE_5D
 from krx_quant.predictions import DB_NAME, PredictionStore, iso
+from krx_quant.products import PRODUCTS
 from krx_quant.recorder import ParquetRecorder
 from krx_quant.regime import RegimeRules
 from krx_quant.replay import replay, replay_into
 from krx_quant.structure_check import PERIODS as BASE_RATE_PERIODS
+from krx_quant.structure_check import DayPrices
 from krx_quant.supply import KIS, NET_MARKET, NXT_OPENED, TOSS, write_supply
 from krx_quant.swap import NightStatus, reports_by_algorithm
 from krx_quant.touch import TARGET_VERSION
@@ -502,6 +507,7 @@ async def demo_app(db: Path, pace: float | None = None) -> web.Application:
     )
     write_demo_briefing(data_dir)  # after the morning: Cox's 08:50 inputs stay as they were
     write_demo_flow(data_dir)  # into the events the briefing's writer began (#306)
+    write_demo_closing_flow(data_dir)  # from the day candles (#305)
     night = Night(date(2026, 10, 9), "2026-10-09T21:31:40+09:00", {}, demo_reports())
     engine.training = NightStatus(night, True, "applied").as_dict()
     engine.night_reports = reports_by_algorithm(night)
@@ -512,7 +518,7 @@ async def demo_app(db: Path, pace: float | None = None) -> web.Application:
         live_status=lambda: demo_kis(engine.clock.now()),
         data_dir=data_dir,
         shelf=shelf,
-        names=DEMO_NAMES,
+        names={**DEMO_NAMES, **DEMO_PRODUCT_NAMES},
         state_dir=data_dir / "state",
     )
     if pace is not None:
@@ -713,6 +719,95 @@ _BUYERS = (
     ("042", "메릴린치", True),
     ("004", "KB증권", False),
 )
+
+
+# The closing flow's days shown (#305), up to the 8th, the last of them with a stored 15:20
+# demand; the product without net assets on the 8th; the day of a VI.
+_CLOSING_DAYS = 21
+_CLOSING_LIVE = 8
+_CLOSING_MISSING = "0198D0"
+_CLOSING_VI = ("000660", date(2026, 9, 24))
+# The products' made-up names: the collector reads the real ones from the masters (#250).
+DEMO_PRODUCT_NAMES = {
+    p.code: f"{DEMO_NAMES[p.underlying]} {'인버스 ' if p.inverse else ''}2X 데모 {p.code}" for p in PRODUCTS
+}
+
+
+def write_demo_closing_flow(data_dir: Path) -> None:
+    """The closing flow's state (#305), made up as the collector keeps it: the 16 products' net
+    assets on the ``_CLOSING_DAYS`` trading days up to the 8th (but one product's on the 8th), the
+    15:20 demand stored on the last ``_CLOSING_LIVE`` of them, and the days computed from the day
+    candles (``closing_flow.day_rows``: each day's last price before the auction a few ticks off its
+    close, its auction's volume made up; the 8th's closing auction value from recorded trades).
+    The morning's demand is the engine's at 10:30, read when asked."""
+    state = data_dir / "state"
+    shutil.rmtree(state / "closing_flow", ignore_errors=True)
+    rng = random.Random(305)
+    days: list[date] = []
+    day = DEMO_DAY
+    while len(days) < _CLOSING_DAYS:
+        day = _CALENDAR.previous_trading_day(day)
+        days.append(day)
+    days.reverse()
+    fetched_on = dict(zip(days, [*days[1:], DEMO_DAY], strict=True))
+    base = {p.code: rng.randint(500, 6_000) * 100_000_000 for p in PRODUCTS}
+    assets = [
+        {
+            "code": p.code,
+            "date": d,
+            "source": NET_ASSETS_KIS,
+            "net_assets": round(base[p.code] * (1 + 0.004 * i)),
+            # Fetched the next trading day's morning (the last at the demo morning's start).
+            "fetched_at": _at_on(fetched_on[d], time(7, 40)),
+        }
+        for i, d in enumerate(days)
+        for p in PRODUCTS
+        if (p.code, d) != (_CLOSING_MISSING, days[-1])
+    ]
+    write_net_assets(state, assets)
+    demands: list[Row] = []
+    computed: dict[str, Any] = {"computed_at": "2026-10-12T06:01:30+09:00", "symbols": {}}
+    for symbol in DEMO_SYMBOLS:
+        mid, tick = _OPENS[symbol]
+        candles = {r["date"]: r for r in read_candles(data_dir, "day", symbol)}
+        inputs = []
+        for d in days:
+            candle = candles[d]
+            close = int(candle["close"])
+            pre_close = close - tick * rng.choice((-4, -2, -1, 0, 1, 2, 3))
+            volume = rng.randint(400_000, 1_200_000) * 81_250 // mid
+            prices = DayPrices(
+                d, float(candle["open"]), float(candle["open"]), float(pre_close), float(close), volume
+            )
+            recorded = d == days[-1]
+            special = ("vi",) if (symbol, d) == _CLOSING_VI else ()
+            inputs.append(
+                DayInput(
+                    prices,
+                    volume * close * (1.02 if recorded else 1.0),
+                    "recorded" if recorded else "bar",
+                    special,
+                )
+            )
+        for before, now in zip(inputs, inputs[1:], strict=False):
+            if now.prices.day not in days[-_CLOSING_LIVE:]:
+                continue
+            held = net_assets_for(assets, _CALENDAR, now.prices.day)
+            price = now.prices.pre_close + tick * rng.choice((-1, 0, 1)) / 2  # the mid-point, about
+            row = demand_row(
+                symbol, now.prices.day, _at_on(now.prices.day, time(15, 20)), price, before.prices.close, held
+            )
+            if row is not None:
+                demands.append(row)
+        computed["symbols"][symbol] = {
+            "days": day_rows(symbol, inputs, _CALENDAR, assets, demands),
+            "auction_values": {
+                i.prices.day.isoformat(): {"value": i.auction_value, "source": i.auction_value_source}
+                for i in inputs
+            },
+        }
+    write_demand(state, demands)
+    write_days(state, computed)
 
 
 # The daily kind's days shown answered (#264), up to the 8th.

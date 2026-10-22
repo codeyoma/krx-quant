@@ -753,6 +753,11 @@ class PredictionEngine:
     def mid(self, symbol: str) -> float | None:
         return self._market.mid(symbol, self.clock.now())
 
+    def mid_at(self, symbol: str, at: datetime) -> float | None:
+        """The reference price just before ``at`` in continuous trading (the quotes of the last
+        minutes are kept: the closing flow's minute and its 15:20, #305)."""
+        return self._market.mid(symbol, at)
+
     def latest_lead(self, series: str) -> tuple[float, datetime] | None:
         """A leading series' latest trade today (e.g. the USD futures): price and time."""
         return self._market.latest_lead(series, self.clock.now())

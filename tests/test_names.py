@@ -21,7 +21,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from krx_quant.api import create_app
 from krx_quant.config import Settings
 from krx_quant.fake_kis import FakeKis
-from krx_quant.names import STOCK_MASTERS, logo_url, parse_stock_master, read_names
+from krx_quant.names import STOCK_MASTERS, fill_names, logo_url, parse_stock_master, read_names
 from tests.api_schema import check
 from tests.fake_toss import fake_toss
 from tests.replay_events import at, run
@@ -91,6 +91,17 @@ async def test_without_toss_the_kis_masters_name_the_symbols(kis: FakeKis, tmp_p
         names = await read_names(session, settings, settings.symbols, now)
 
     assert names == {"005930": "삼성전자", "247540": "에코프로비엠"}
+
+
+async def test_the_start_names_the_symbols_and_their_single_stock_etfs(kis: FakeKis, tmp_path: Path) -> None:
+    # #305: the closing flow's table names its products as the symbols are named.
+    kis.masters = masters({"005930": "삼성전자", "0193W0": "가 삼성전자 2X", "0197X0": "나 하이닉스 -2X"}, {})
+    names: dict[str, str] = {}
+
+    async with aiohttp.ClientSession() as session:
+        await fill_names(names, session, settings_for(kis, tmp_path, ("005930",)), now)
+
+    assert names == {"005930": "삼성전자", "0193W0": "가 삼성전자 2X"}, "005930's products only"
 
 
 async def test_one_master_unread_does_not_keep_the_other_from_naming(

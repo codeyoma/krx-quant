@@ -32,6 +32,7 @@ from krx_quant.notify import Alerts
 from krx_quant.scheduled import (
     CLOSE_PROBE,
     CLOSE_REFRESH_PROBE,
+    CLOSING_FLOW_CHECK,
     DIAGNOSE,
     DIVIDEND_PROBE,
     ENTRY_DELAY,
@@ -1265,6 +1266,22 @@ async def test_the_gaps_probe_job_runs_the_real_command(empty_server: Path) -> N
         in body
     )
     assert state.jobs["probe-gaps-344"].exit_code == 0
+
+
+def test_the_closing_flow_check_runs_once_on_the_first_trading_night_and_posts_to_305() -> None:
+    # #305: when KIS moves the ETF net assets to the new day, and the bar's closing auction value
+    # against the recorded one: the morning's retries, the 15:20 row and the evening's days first.
+    assert CLOSING_FLOW_CHECK.name == "check-closing-flow-305"
+    assert CLOSING_FLOW_CHECK.command == ("check-closing-flow",)
+    assert CLOSING_FLOW_CHECK.timeout == timedelta(minutes=15)
+    assert [t.issue for t in CLOSING_FLOW_CHECK.targets] == [305]
+    assert JOBS.index(GAPS_PROBE) < JOBS.index(CLOSING_FLOW_CHECK)
+    first = next(i for i, j in enumerate(JOBS) if j.name.startswith(("prevalidate-", "simulate-")))
+    assert JOBS.index(CLOSING_FLOW_CHECK) < first, "before the simulations and pre-validations"
+    assert CLOSING_FLOW_CHECK.due(night(FRIDAY)) and not CLOSING_FLOW_CHECK.due(night(SATURDAY))
+    ran = JobRecord(FRIDAY, OK, at(FRIDAY, "22:30"), COMMIT, 0, 5.0)
+    assert not CLOSING_FLOW_CHECK.due(night(MONDAY, ran))
+    assert "시세 값이 없다" in CLOSING_FLOW_CHECK.targets[0].note
 
 
 def test_the_dividend_probe_runs_once_on_the_first_night_and_posts_to_310() -> None:

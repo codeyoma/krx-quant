@@ -23,6 +23,7 @@ from krx_quant.auth import TokenManager, tokens_and_client
 from krx_quant.backfill import PreviousDay, keep_history
 from krx_quant.climate import load_climate, load_tables
 from krx_quant.clock import SessionClock, SystemClock
+from krx_quant.closing_flow import keep_days, keep_demand, store_closing_demand
 from krx_quant.config import Settings
 from krx_quant.contracts import KOSPI200, night_front_month
 from krx_quant.cost_guard import keep_costs
@@ -342,6 +343,15 @@ async def run_collector(
                         calendar,
                         now,
                         toss_client_maker(session, settings, lambda: datetime.now().astimezone()),
+                        # The closing flow's days (#305), from the bars just filled.
+                        partial(
+                            keep_days,
+                            settings.data_dir,
+                            settings.state_dir,
+                            calendar.calendar,
+                            settings.symbols,
+                            engine.store.special_windows,
+                        ),
                     )
                 ),
                 asyncio.create_task(run_live(engine, session_clock)),
@@ -353,6 +363,16 @@ async def run_collector(
                 pace = RateLimiter(1, 1 / settings.backfill_max_per_second, margin=0)  # as the history task's
                 keeper = NetAssetKeeper(client, calendar.calendar, settings.state_dir, products, pace)
                 background.append(asyncio.create_task(keep_net_assets(keeper, now)))
+                # Their 15:20 demand, from the engine's reference price then (#305).
+                store_at = partial(
+                    store_closing_demand,
+                    engine.mid_at,
+                    settings.data_dir,
+                    settings.state_dir,
+                    calendar.calendar,
+                    settings.symbols,
+                )
+                background.append(asyncio.create_task(keep_demand(store_at, calendar.calendar, now)))
             if settings.object_store is None:
                 log.warning("KRX_OBJECT_STORE is not set: recorded days are not archived nor trained on")
             else:

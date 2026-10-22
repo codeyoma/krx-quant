@@ -22,6 +22,8 @@ ROUTES = {
     "/v1/symbols/{symbol}/special": "special",  # #236
     "/v1/symbols/{symbol}/supply": "supply",  # #226
     "/v1/symbols/{symbol}/flow": "flow",  # #306
+    "/v1/symbols/{symbol}/closing-flow": "closing_flow",  # #305
+    "/v1/symbols/{symbol}/closing-flow/days": "closing_flow_days",
     "/v1/algorithms": "algorithms",
     "/v1/algorithms/{name}": "algorithm_detail",
     "/v1/algorithms/{name}/stats": "algorithm_stats",

@@ -2013,6 +2013,144 @@
         "estimate_institution_net_qty": {"type": ["integer", "null"]}
       }
     },
+    "closing_flow": {
+      "description": "GET /v1/symbols/{symbol}/closing-flow (#305): the day's closing rebalancing demand of the symbol's single-stock ±2x ETFs, A × (L² − L) × r, in won (+ buy, − sell): at the minute (the reference price just before it, over the previous trading day's KRX close) in continuous trading, the 15:20 one from the closing auction on; by structure (spot_futures, futures) and in all; ratio is spot_futures over the median closing auction value of the 20 trading days before (an upper bound), ratio_total the total's; a product without its net assets is in missing and out of the sums. The day is today if it trades, else the last trading day. A null demand comes with its reason.",
+      "type": "object",
+      "required": ["symbol", "day", "as_of", "at", "source", "price", "previous_close", "r", "demand", "spot_futures", "futures", "ratio", "ratio_total", "denominator", "denominator_days", "products", "missing", "reason"],
+      "additionalProperties": false,
+      "properties": {
+        "symbol": {"type": "string"},
+        "day": {"$ref": "#/$defs/day"},
+        "as_of": {"$ref": "#/$defs/time"},
+        "at": {"oneOf": [{"$ref": "#/$defs/time"}, {"type": "null"}]},
+        "source": {"enum": ["live", "stored", null]},
+        "price": {"type": ["number", "null"]},
+        "previous_close": {"type": ["number", "null"]},
+        "r": {"type": ["number", "null"]},
+        "demand": {"type": ["integer", "null"]},
+        "spot_futures": {"type": ["integer", "null"]},
+        "futures": {"type": ["integer", "null"]},
+        "ratio": {"type": ["number", "null"]},
+        "ratio_total": {"type": ["number", "null"]},
+        "denominator": {"type": ["number", "null"], "minimum": 0},
+        "denominator_days": {"type": "integer", "minimum": 0, "maximum": 20},
+        "products": {"type": "array", "items": {"$ref": "#/$defs/closing_flow_product"}},
+        "missing": {"type": "array", "items": {"type": "string"}},
+        "reason": {"enum": ["no_products", "before_open", "no_price", "no_previous_close", "no_net_assets", null]}
+      }
+    },
+    "closing_flow_product": {
+      "description": "A single-stock ETF's row (#305): its leverage L, structure, L² − L, net assets on the previous trading day (won; null: not kept), their day and source, and its demand (won).",
+      "type": "object",
+      "required": ["code", "name", "leverage", "structure", "coefficient", "net_assets", "net_assets_date", "net_assets_source", "demand"],
+      "additionalProperties": false,
+      "properties": {
+        "code": {"type": "string"},
+        "name": {"type": ["string", "null"]},
+        "leverage": {"type": "integer"},
+        "structure": {"enum": ["spot_futures", "futures"]},
+        "coefficient": {"type": "integer"},
+        "net_assets": {"type": ["integer", "null"], "minimum": 0},
+        "net_assets_date": {"oneOf": [{"$ref": "#/$defs/day"}, {"type": "null"}]},
+        "net_assets_source": {"type": ["string", "null"]},
+        "demand": {"type": ["integer", "null"]}
+      }
+    },
+    "closing_flow_days": {
+      "description": "GET /v1/symbols/{symbol}/closing-flow/days?from=YYYY-MM-DD&to=YYYY-MM-DD (#305): the closing flow's days kept (computed once a day after the 20:30 backfill; computed_at null before the first) from from to to (KST dates, both included; default the year to today, at most 4000 days), oldest first, and their summary by period and by tertile of the ratio's size, each with the special situations' days in and out.",
+      "type": "object",
+      "required": ["symbol", "from", "to", "computed_at", "days", "summary"],
+      "additionalProperties": false,
+      "properties": {
+        "symbol": {"type": "string"},
+        "from": {"$ref": "#/$defs/day"},
+        "to": {"$ref": "#/$defs/day"},
+        "computed_at": {"oneOf": [{"$ref": "#/$defs/time"}, {"type": "null"}]},
+        "days": {"type": "array", "items": {"$ref": "#/$defs/closing_flow_day"}},
+        "summary": {
+          "type": "object",
+          "required": ["periods", "tertiles"],
+          "additionalProperties": false,
+          "properties": {
+            "periods": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["period", "from", "to", "all", "without_special"],
+                "additionalProperties": false,
+                "properties": {
+                  "period": {"type": "string"},
+                  "from": {"oneOf": [{"$ref": "#/$defs/day"}, {"type": "null"}]},
+                  "to": {"oneOf": [{"$ref": "#/$defs/day"}, {"type": "null"}]},
+                  "all": {"$ref": "#/$defs/closing_flow_stats"},
+                  "without_special": {"$ref": "#/$defs/closing_flow_stats"}
+                }
+              }
+            },
+            "tertiles": {
+              "type": "array",
+              "maxItems": 3,
+              "items": {
+                "type": "object",
+                "required": ["tertile", "ratio_from", "ratio_to", "all", "without_special"],
+                "additionalProperties": false,
+                "properties": {
+                  "tertile": {"enum": [1, 2, 3]},
+                  "ratio_from": {"type": "number", "minimum": 0},
+                  "ratio_to": {"type": "number", "minimum": 0},
+                  "all": {"$ref": "#/$defs/closing_flow_stats"},
+                  "without_special": {"$ref": "#/$defs/closing_flow_stats"}
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "closing_flow_day": {
+      "description": "A day of the closing flow (#305): its 15:20 demand (won; live: stored at 15:20, bars: from its net assets and the bars' flow; null without either) and ratios as the answer's, the median closing auction value of the 20 trading days before and how many had one, its own closing auction value and where from (recorded trades or the auction's one-minute bar), the closing auction's move, the day's flow to it and the next day's gap and close-to-close in bp (#270's definitions), whether the auction went the demand's way (the flow's on a day without one; null if either did not move), and the special situations begun that day.",
+      "type": "object",
+      "required": ["date", "period", "demand", "spot_futures", "futures", "demand_source", "ratio", "ratio_total", "denominator", "denominator_days", "auction_value", "auction_value_source", "auction_bp", "auction_ticks", "flow_bp", "compared_with", "agree", "next_gap_bp", "next_close_bp", "special"],
+      "additionalProperties": false,
+      "properties": {
+        "date": {"$ref": "#/$defs/day"},
+        "period": {"type": "string"},
+        "demand": {"type": ["integer", "null"]},
+        "spot_futures": {"type": ["integer", "null"]},
+        "futures": {"type": ["integer", "null"]},
+        "demand_source": {"enum": ["live", "bars", null]},
+        "ratio": {"type": ["number", "null"]},
+        "ratio_total": {"type": ["number", "null"]},
+        "denominator": {"type": ["number", "null"], "minimum": 0},
+        "denominator_days": {"type": "integer", "minimum": 0, "maximum": 20},
+        "auction_value": {"type": ["number", "null"], "minimum": 0},
+        "auction_value_source": {"enum": ["recorded", "bar", null]},
+        "auction_bp": {"type": "number"},
+        "auction_ticks": {"type": "number"},
+        "flow_bp": {"type": "number"},
+        "compared_with": {"enum": ["demand", "flow"]},
+        "agree": {"type": ["boolean", "null"]},
+        "next_gap_bp": {"type": ["number", "null"]},
+        "next_close_bp": {"type": ["number", "null"]},
+        "special": {"type": "array", "items": {"enum": ["vi", "circuit_breaker", "sidecar"]}}
+      }
+    },
+    "closing_flow_stats": {
+      "description": "A summary cell of the closing flow's days (#305), as structure-check section 2 counts (#270): the days, the median |closing auction move| in bp, how often the auction went the demand's (else the flow's) way and how often the next day's gap and close went against it, each of the days where both moved, with that count.",
+      "type": "object",
+      "required": ["days", "auction_bp_median", "agree", "agree_n", "next_gap_opposite", "next_gap_n", "next_close_opposite", "next_close_n"],
+      "additionalProperties": false,
+      "properties": {
+        "days": {"type": "integer", "minimum": 0},
+        "auction_bp_median": {"type": ["number", "null"], "minimum": 0},
+        "agree": {"$ref": "#/$defs/probability"},
+        "agree_n": {"type": "integer", "minimum": 0},
+        "next_gap_opposite": {"$ref": "#/$defs/probability"},
+        "next_gap_n": {"type": "integer", "minimum": 0},
+        "next_close_opposite": {"$ref": "#/$defs/probability"},
+        "next_close_n": {"type": "integer", "minimum": 0}
+      }
+    },
     "cost_map": {
       "description": "GET /v1/cost-map?symbol=&period=&special= (#307): each symbol's round-trip costs, a row each kind with a direction (its sides) with the breakeven hit rate beside the hit rates of its final consensus, first-ranked algorithm and strongest baseline (the leaderboard's statistics for the same query), and the period base rates kept (null before they are computed, with why).",
       "type": "object",

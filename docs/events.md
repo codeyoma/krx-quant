@@ -476,6 +476,30 @@ KOSPI200 선물과 달러선물은 KIS 선물옵션 분봉조회(`FHKIF03020200`
 | `net_assets` | int64 | `etf_ntas_ttam` × 1억 | 순자산(원) |
 | `fetched_at` | timestamp(s, Asia/Seoul) | | 이 값을 처음 받은 때. 같은 값을 다시 받으면 그대로 둔다 |
 
+## closing_flow: 마감 수요와 지난날 (#305)
+
+KRX 마감 흐름(`closing_flow.py`)이 쓰는 두 파일이다. 엔진 API `GET /v1/symbols/{s}/closing-flow`와 `/closing-flow/days`가 읽는다([engine-api.md](engine-api.md#get-v1symbolssymbolclosing-flow-305)). 위 순자산과 같은 폴더에 둔다(업로드하지 않는다).
+
+```
+<KRX_STATE_DIR>/closing_flow/demand.parquet
+<KRX_STATE_DIR>/closing_flow/days.json
+```
+
+**`demand.parquet`**: 15:20 수요. 수집기가 거래일마다 종가 단일가 시작 5초 뒤(보통 15:20:05)에 상품이 있는 종목마다 한 행을 쓴다(`keep_demand`). 같은 종목·날의 행은 바꾼다. 그 시각 엔진에 기준가나 전일 종가가 없으면 그 종목의 행을 쓰지 않는다(로그만 남는다). 날, 종목 순으로 통째로 바꾼다(`.demand.parquet.tmp`).
+
+| 열 | 타입 | 설명 |
+|---|---|---|
+| `symbol` | string | 종목 |
+| `date` | date32 | 그날 |
+| `at` | timestamp(s, Asia/Seoul) | 종가 단일가 시작(가격은 그 직전 기준가) |
+| `price` | double | 기준가(통합 중간가) |
+| `previous_close` | double | 전 거래일 KRX 종가(종가 단일가) |
+| `r` | double | `price ÷ previous_close − 1` |
+| `demand`, `spot_futures`, `futures` | int64 | 수요 합(원, + 매수 − 매도)과 현물+선물형·선물형의 합. 그 구조의 상품에 순자산이 하나도 없으면 null |
+| `products`, `missing` | int64 | 순자산이 있어 센 상품 수, 없어 뺀 상품 수 |
+
+**`days.json`**: 지난날 표. 수집기가 시작할 때와 매일 20:30 이력 작업의 끝(1분봉 백필, 일봉, 기간 기준율 뒤)에 다시 계산해 통째로 바꾼다(`.days.json.tmp`). `{"computed_at": 시각, "symbols": {종목: {"days": [...], "auction_values": {날: {"value", "source"}}}}}`이다. `days`의 항목은 엔진 API `/closing-flow/days`의 `days[]`와 같다. `auction_values`는 1분봉이 있는 모든 날의 종가 단일가 체결대금과 출처(`recorded`, `bar`)다. 그날의 비율 분모(전 20거래일 중앙값)를 이것으로 계산한다. 읽는 1분봉은 백필의 1년이다.
+
 ## 실데이터 관찰 (2026-10-08, 삼성전자, 13시 전후 90초)
 
 - 체결 1,714건, 호가 409건을 받았다. 필드 수는 모든 메시지에서 문서와 같았다(체결 47개, 호가 66개).
