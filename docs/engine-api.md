@@ -2198,7 +2198,7 @@ uv run krx-quant fit newton --days 60
 
     (테스트의 만든 녹화 4일, 한 종목에서 줄인 것이다. 시세가 4분마다 오르내리는 만든 장이라 1차가 늘 상승·하락을 낸다. 실제 값이 아니다.)
   - 진단이 실패하면(오류) 사전 검증은 그대로 돌고 판정도 같다. 리포트의 `diagnostics`는 `{"error": "<어디서>: <오류>"}`이고 출력은 `neyman diagnostics: not measured (…)`다. 실패한 뒤로는 Neyman의 `fit`이 학습한다.
-  - 진단의 코드는 Neyman 패키지 밖(`src/krx_quant/neyman_diagnostics.py`)이라 Neyman의 코드 digest에 들지 않는다. 진단만 고쳐서는 사전 검증을 다시 묻지 않는다(다시 재려면 손으로 돌리고, 같은 날의 실행으로 센다, #262). 진단의 학습은 Neyman의 `fitted`(`fit`이 부르는 것)를 그대로 불러 같은 모델을 낸다(테스트로 확인). 이 진단을 넣으면서(#283) Neyman의 `fit`을 `fitted`로 옮겨 Neyman의 digest가 바뀌었다. Neyman은 아직 사전 검증을 돈 적이 없어(리포트 없음) 다시 돌 것이 없다. 다른 알고리즘의 digest는 그대로라 그 사전 검증도 다시 묻지 않는다.
+  - 진단의 코드는 Neyman 패키지 밖(`src/krx_quant/neyman_diagnostics.py`)이라 Neyman의 코드 digest에 들지 않는다. 진단만 고쳐서는 사전 검증을 다시 묻지 않는다(다시 재려면 손으로 돌리고, 같은 날의 실행으로 센다, #262). 진단의 학습은 Neyman의 `fitted`(`fit`이 부르는 것)를 그대로 불러 같은 모델을 낸다(테스트로 확인). 이 진단을 넣으면서(#283, #354) Neyman의 `fit`을 `fitted`로 옮겨 Neyman의 digest가 바뀌었다. Neyman은 아직 사전 검증을 돈 적이 없어(리포트 없음) 다시 돌 것이 없다. 다른 알고리즘의 digest는 그대로라 그 사전 검증도 다시 묻지 않는다.
   - **에이전트가 할 일.** Neyman의 결과가 #204에 오면(`prevalidate-neyman`, 댓글의 노트가 말한다), 이 숫자를 #283에 요약한다: 종목마다 뒤집힘 수와 그 정밀도를 뒤집히지 않은 예측의 정밀도(같은 날)와 견주고, 동률 수, 표본 밖 대 표본 안·실시간 분포의 KS와 분위수를 적는다. 사용자가 그것으로 #283의 모델 변경 순서를 정한다.
 
 ### Mandelbrot (변동폭, #181)
