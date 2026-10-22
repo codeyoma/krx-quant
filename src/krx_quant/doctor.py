@@ -23,7 +23,10 @@ server, or an agent reading an issue, looks at first when something seems wrong.
 5. The scheduled jobs (``state/scheduled.json``, #215): their last runs, the jobs that have not
    run to an end yet, the results not posted.
 6. The free disk under the data and state directories, and the memory.
-7. The log files under ``state/logs`` (#356, ``log_files.py``): for each kind (the engine's, the
+7. The nightly training (#355, ``training_nights``): the last night the morning swap applied,
+   the trading nights not applied since and the failures among them, and the latest night's
+   outcome: its exit code and the last step it started.
+8. The log files under ``state/logs`` (#356, ``log_files.py``): for each kind (the engine's, the
    nightly training's, the scheduled jobs', the commands'), the files, their size, the oldest
    and the latest day; their total against ``KRX_LOG_MAX_MB``; the bundles made for an agent.
    Counts, sizes and dates only: never a line of them.
@@ -66,9 +69,13 @@ from krx_quant.config import Settings, SettingsError, read_values
 from krx_quant.feeds.base import KST
 from krx_quant.log_files import BUNDLES, LOGS, NESTED, bundle_files, day_logs, kinds_of, size_text
 from krx_quant.log_files import JOBS as JOB_LOGS
+from krx_quant.market_calendar import calendar_store
 from krx_quant.predictions import DB_NAME, iso, read_only
 from krx_quant.redaction import redact, secrets_of
 from krx_quant.scheduled import JOBS, STATE_FILE
+from krx_quant.swap import SWAP_AT
+from krx_quant.training_nights import FILE as NIGHTS_FILE
+from krx_quant.training_nights import TrainingNights
 
 if TYPE_CHECKING:
     from krx_quant.engine import PredictionEngine
@@ -83,6 +90,7 @@ LOG_KEEP = 200  # how many the collector keeps
 LOG_WIDTH = 300  # a line longer than this is cut
 QUIET_SECONDS = 60.0  # a feed key quiet this long is counted apart
 LAST_RUNS = 12  # the scheduled jobs' latest runs shown
+LAST_NIGHTS = 5  # the nightly training's latest nights shown
 HOURS_PER_ROW = 8
 _MB = 1024 * 1024
 _GB = 1024 * _MB
@@ -315,7 +323,8 @@ def report(
         ("4. 최근 WARNING·ERROR 로그", lambda: _logs(logs)),
         ("5. 예약 작업", lambda: _jobs(settings, known=config_error is None)),
         ("6. 디스크와 메모리", lambda: _resources(settings, process)),
-        ("7. 로그 파일", lambda: _log_files(settings, known=config_error is None)),
+        ("7. 밤 학습", lambda: _training(settings, now)),
+        ("8. 로그 파일", lambda: _log_files(settings, known=config_error is None)),
     ]
     sections = [head]
     for title, part in parts:
@@ -447,7 +456,7 @@ def _logs(logs: RecentLog | None) -> list[str]:
         return [
             "4. 최근 WARNING·ERROR 로그: 이 명령은 엔진과 다른 프로세스라 엔진이 기억하는 줄을 읽지 못한다",
             "  서버에서: docker compose logs --since 2h engine | grep -E ' (WARNING|ERROR) '",
-            "  엔진의 전체 줄은 state/logs/engine/<날>.log에도 있다(7절)."
+            "  엔진의 전체 줄은 state/logs/engine/<날>.log에도 있다(8절)."
             " 에이전트에게는 krx-quant logs-bundle로 준다",
             "  이슈에 needs-server-snapshot 라벨을 붙여 받는 요약에는 엔진이 기억하는 최근 줄이 실린다",
         ]
@@ -515,6 +524,35 @@ def _jobs(settings: Settings, *, known: bool = True) -> list[str]:
     return lines
 
 
+def _training(settings: Settings, now: datetime) -> list[str]:
+    nights = TrainingNights(settings.state_dir)
+    found = nights.fields(calendar_store(settings).calendar, SWAP_AT, now)
+    today = now.astimezone(KST).date()
+    lines = [f"7. 밤 학습 (state/{NIGHTS_FILE}, state/models/applied.json)"]
+    missed = found["not_applied"]
+    lines.append(
+        f"  마지막으로 적용된 밤 {found['last_applied'] or '없음'}"
+        f" · 그 뒤 적용되지 않은 거래일 밤 {found['nights_not_applied']}번"
+        + (f": {', '.join(missed)}" if missed else "")
+    )
+    outcomes = nights.outcomes()
+    if not outcomes:
+        lines.append("  기록된 밤 없음(이 기록은 #355부터)")
+        return lines
+    shown = [outcomes[d] for d in sorted(outcomes)[-LAST_NIGHTS:]]
+    lines.append(f"  최근 밤(최근 {len(shown)}개):")
+    for o in reversed(shown):
+        if o.ok:
+            lines.append(f"    {o.day} 끝남 · {_clock(o.ended_at.isoformat(), today)}")
+            continue
+        code = "없음" if o.exit_code is None else o.exit_code
+        lines.append(
+            f"    {o.day} 실패 · {_clock(o.ended_at.isoformat(), today)} · 종료 코드 {code}"
+            f" · 마지막으로 시작한 단계 {o.step or '없음'}"
+        )
+    return lines
+
+
 def _resources(settings: Settings, process: str) -> list[str]:
     lines = ["6. 디스크와 메모리"]
     seen: dict[int, str] = {}
@@ -568,7 +606,7 @@ def _log_files(settings: Settings, *, known: bool = True) -> list[str]:
     else:
         keep = f"KRX_LOG_DAYS {settings.log_days} · KRX_LOG_MAX_MB {settings.log_max_mb}"
     root = settings.state_dir / LOGS
-    title = f"7. 로그 파일 (state/{LOGS}, {keep})"
+    title = f"8. 로그 파일 (state/{LOGS}, {keep})"
     files, bundles = day_logs(root), bundle_files(root)
     if not files and not bundles:
         return [f"{title}: 없음"]

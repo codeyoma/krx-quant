@@ -22,7 +22,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from krx_quant.algorithms import ALGORITHMS, Algorithm, Model, Sample
+from krx_quant.algorithms import ALGORITHMS, KIND_ALGORITHMS, Algorithm, Model, Sample
 from krx_quant.algorithms.breiman import NAME as BREIMAN
 from krx_quant.algorithms.granger import Granger
 from krx_quant.algorithms.mandelbrot import NAME as MANDELBROT
@@ -32,17 +32,17 @@ from krx_quant.backfill import BAR_SCHEMA, MINUTE_BARS_TR
 from krx_quant.barriers import BARRIER
 from krx_quant.barriers import CLIMATE as BARRIER_CLIMATE
 from krx_quant.cli import main
-from krx_quant.climate import CLIMATE
+from krx_quant.climate import CLIMATE, fit_climate
 from krx_quant.clock import FakeClock
 from krx_quant.engine import Event, PredictionEngine
 from krx_quant.features import Leaders
 from krx_quant.feeds import KST
-from krx_quant.kind_registry import KINDS
-from krx_quant.kinds import DIRECTION_KIND, Kind
+from krx_quant.kind_registry import KINDS, kind_named
+from krx_quant.kinds import DIRECTION_KIND, Kind, table_baselines
 from krx_quant.macro import MACRO, REGIME_SCHEMA
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.model_shelf import Shelf
-from krx_quant.nightly import VALIDATION_DAYS, train_night
+from krx_quant.nightly import STARTED_STEP, VALIDATION_DAYS, train_night
 from krx_quant.object_store import LocalObjectStore
 from krx_quant.open_to_close import OPEN_TO_CLOSE
 from krx_quant.open_to_close_5d import OPEN_TO_CLOSE_5D
@@ -54,7 +54,7 @@ from krx_quant.ranges import RANGE
 from krx_quant.recorder import ParquetRecorder
 from krx_quant.swap import morning_swap, publish_live
 from krx_quant.touch import TARGET_VERSION
-from krx_quant.training import training_day
+from krx_quant.training import TrainingDay, training_day
 from tests.algorithm_doubles import FrequencyAlgorithm
 from tests.api_schema import check
 from tests.replay_events import api, at, book, every, get_json, index_tick, trade
@@ -938,3 +938,191 @@ def test_the_range_s_climate_table_is_refitted_every_night_and_runs_from_the_mor
     )
     asyncio.run(swap)
     assert engine.kind_tables[RANGE_CLIMATE].version == version
+
+
+# The day cache keeps only what the steps still to run read (#355)
+
+
+class Fingerprint:
+    """A stand-in that keeps what it learned from and what it was asked to forecast, as text: a
+    sample's symbol, bar close, outcome, move, reference price, and its features (their names in
+    order, their values, the touch target's terms)."""
+
+    def __init__(self, name: str, features: tuple[str, ...], training_days: int) -> None:
+        self.name = name
+        self.features = features
+        self.training_days = training_days
+        self.card = FrequencyAlgorithm(name, features[-1]).card
+        self.param_meanings = FrequencyAlgorithm(name, features[-1]).param_meanings
+        self.learned: list[str] = []
+        self.asked: list[str] = []
+
+    def default_model(self) -> Model:
+        return Model(f"{self.name}-default", {})
+
+    def fit(self, samples: Sequence[Sample]) -> Model:
+        self.learned = [fingerprint(s) for s in samples]
+        return Model(f"{self.name}-{len(samples)}", {"samples": float(len(samples))})
+
+    def predict(self, features: Any, model: Model) -> Any:
+        self.asked.append(repr((list(features), features.as_dict(), features.touch)))
+        return FrequencyAlgorithm(self.name, self.features[-1]).predict(
+            features, Model("x", {"up": 0.3, "flat": 0.4, "down": 0.3})
+        )
+
+
+def whole_days(
+    cache: Path, names: Sequence[str], target_version: int, kinds: Sequence[Kind] = ()
+) -> dict[date, TrainingDay]:
+    """Each day as the night reads it at first: every feature and kind (the oracle, #355)."""
+    calendar = MarketCalendar(dict.fromkeys(DAYS, True))
+    out = {}
+    for d in DAYS:
+        found = training_day(
+            cache, d, calendar, ("005930",), names, FEE, Leaders(), target_version=target_version, kinds=kinds
+        )
+        assert found is not None
+        out[d] = found
+    return out
+
+
+def fingerprint(s: Sample) -> str:
+    return repr(
+        (
+            s.symbol,
+            s.bar_close,
+            s.outcome,
+            s.change_ticks,
+            s.reference,
+            list(s.features),
+            s.features.as_dict(),
+            s.features.touch,
+        )
+    )
+
+
+@pytest.mark.parametrize("target_version", [1, TARGET_VERSION])
+def test_each_algorithm_learns_and_validates_on_the_samples_whole_days_give_it(
+    store_root: Path, tmp_path: Path, target_version: int
+) -> None:
+    """#355. Input: eight days, the last four recorded mornings; three stand-ins of other
+    windows and features (a series among them). Output: each learned from, and forecast, the
+    very samples that days read with every feature give it (``TrainingDay.of``), the features in
+    the same order; a day no later step reads is let go after its last."""
+    for day in DAYS[-4:]:
+        archive_events(store_root, day, busy_morning(day), tmp_path)
+    short = Fingerprint("short", ("velocity",), 2)  # DAYS[3:5], then the validation days
+    long = Fingerprint("long", ("minute_ticks", "velocity"), 5)  # DAYS[0:5]
+    last = Fingerprint("last", ("spread_ticks", "volatility", "velocity"), 1)  # DAYS[4:5]
+    algorithms = [short, long, last]
+
+    night(store_root, tmp_path, algorithms, target_version=target_version)
+
+    names = sorted({f for a in algorithms for f in a.features})
+    whole = whole_days(tmp_path / "cache", names, target_version)
+    for a in algorithms:
+        training, validation = DAYS[:-VALIDATION_DAYS][-a.training_days :], DAYS[-VALIDATION_DAYS:]
+        learned = [fingerprint(s) for d in training for s in whole[d].of(a.features)]
+        asked = [
+            repr((list(s.features), s.features.as_dict(), s.features.touch))
+            for d in validation
+            for s in whole[d].of(a.features)
+            if s.outcome is not None
+        ]
+        assert a.learned == learned, a.name
+        assert a.asked == asked * 2, f"{a.name}: the challenger's, then the champion's"
+    cached = {
+        r["algorithm"]: r["resources"]["days_cached"]
+        for r in read(store_root, f"promotions/{NIGHT}.json")["reports"]
+    }
+    # short reads DAYS[3:], long all eight; after long, last reads DAYS[4:] only, unless the
+    # climate's twenty days (the touch target's) reach back to the first.
+    if target_version == 1:
+        assert cached == {"short": 5, "long": 4, "last": 0}
+    else:
+        assert cached == {"short": 5, "long": 8, "last": 8, CLIMATE: 0}
+
+
+# Every registered algorithm trained twice on eight days, the night's way and the oracle's: about
+# 20 s on a laptop, more on a loaded CI runner (#327).
+@pytest.mark.timeout(240)
+def test_the_registered_algorithms_train_the_models_whole_days_give_them(
+    store_root: Path, tmp_path: Path
+) -> None:
+    """#355. Input: eight days, the last four recorded mornings; every registered algorithm and
+    kind. Output: each model the night stored (the direction's, the climate's, the kinds' tables
+    and algorithms) is the one fitting it on days read with every feature and kind gives."""
+    for day in DAYS[-4:]:
+        archive_events(store_root, day, busy_morning(day), tmp_path)
+    night(store_root, tmp_path, ALGORITHMS, target_version=TARGET_VERSION, kinds=KINDS)
+
+    of_kinds = [(a, k) for a in KIND_ALGORITHMS if (k := kind_named(a.kind, KINDS)) is not None]
+    tables = table_baselines([k for k in KINDS if k.answer is not None])
+    kinds = tuple({k.name: k for k in [*(k for _, k in of_kinds), *(k for k, _ in tables)]}.values())
+    names = sorted(
+        {f for a in ALGORITHMS for f in a.features} | {f for a in KIND_ALGORITHMS for f in a.features}
+    )
+    whole = whole_days(tmp_path / "cache", names, TARGET_VERSION, kinds)
+    training = DAYS[:-VALIDATION_DAYS]
+    expected: dict[str, Model] = {}
+    for a in ALGORITHMS:
+        try:
+            expected[a.name] = a.fit(
+                [s for d in training[-a.training_days :] for s in whole[d].of(a.features)]
+            )
+        except ValueError:
+            continue  # not trained the night's way either
+    expected[CLIMATE] = fit_climate([s for d in DAYS[-20:] for s in whole[d].samples])
+    for kind, table in tables:
+        expected[table.name] = table.fit([s for d in DAYS[-table.days :] for s in whole[d].of_kind(kind, ())])
+    for ka, kind in of_kinds:
+        try:
+            expected[ka.name] = ka.fit(
+                [s for d in training[-ka.training_days :] for s in whole[d].of_kind(kind, ka.features)]
+            )
+        except ValueError:
+            continue
+    stored = {
+        r["algorithm"]: read(store_root, f"models/{r['algorithm']}/{r['challenger']['version']}.json")
+        for r in read(store_root, f"promotions/{NIGHT}.json")["reports"]
+        if r["challenger"] is not None
+    }
+    assert set(stored) == set(expected)
+    for name, model in expected.items():
+        assert stored[name] == json.loads(json.dumps(model.as_dict(blob=True))), name
+
+
+def test_each_step_says_when_it_starts_and_reports_its_time_and_memory(
+    store_root: Path, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#355. Output: a ``started step <name>`` line before each step's work (a night killed in
+    one ends its output on it), and each report's ``resources``: its time, its peak memory and
+    its phases', the days it read and those cached after it."""
+    caplog.set_level("INFO", logger="krx_quant")
+    night(
+        store_root,
+        tmp_path,
+        [FrequencyAlgorithm("learner", "velocity"), FrequencyAlgorithm("second", "volatility")],
+    )
+
+    lines = [r.getMessage() for r in caplog.records if r.name == "krx_quant.nightly"]
+    started = [i for i, line in enumerate(lines) if line.startswith(STARTED_STEP)]
+    assert [lines[i] for i in started] == ["started step learner", "started step second"]
+    read_days = [i for i, line in enumerate(lines) if line.startswith("read 2026-")]
+    assert started[0] < min(read_days), "the step's line comes before the days it reads"
+    first = read(store_root, f"reports/{NIGHT}/learner.json")["resources"]
+    assert set(first) == {
+        "seconds",
+        "peak_rss_mb",
+        "rss_mb",
+        "peak_since",
+        "days_read",
+        "days_cached",
+        "phases",
+    }
+    assert set(first["phases"]) == {"days", "samples", "fit", "validation"}
+    assert (first["days_read"], first["days_cached"]) == (7, 7)
+    second = read(store_root, f"reports/{NIGHT}/second.json")["resources"]
+    assert (second["days_read"], second["days_cached"]) == (0, 0), "read once; none needed after it"
+    assert first["peak_rss_mb"] > 0 and first["seconds"] >= 0
+    assert "최대 메모리" in night(store_root, tmp_path, [FrequencyAlgorithm("learner", "velocity")]).summary()

@@ -154,7 +154,7 @@ def test_the_engine_writes_engine_and_a_command_writes_its_own_folder(tmp_path: 
         start, line, end = lines(path)
         assert start.endswith(f"krx-quant {command} started (pid {os.getpid()}, commit abcdef012345)")
         assert line.endswith(f"WARNING krx_quant.test: a line of {command}")
-        assert " INFO krx_quant.log_files: " in end and f"krx-quant {command} ended: exit code 0 after" in end
+        assert " INFO krx_quant.log_files: " in end and f"krx-quant {command} ended: exit 0 after" in end
 
 
 def test_no_file_of_its_own_for_a_process_the_engine_started_nor_when_off(
@@ -177,7 +177,7 @@ def test_a_command_s_file_ends_with_its_exit_code_and_why(
     (path,) = (tmp_path / "state" / "logs" / "commands" / "train").iterdir()
     start, end = lines(path)
     assert f"INFO krx_quant.log_files: krx-quant train started (pid {os.getpid()}, commit " in start
-    assert " ERROR krx_quant.log_files: krx-quant train ended: exit code 2 (configuration error: " in end
+    assert " ERROR krx_quant.log_files: krx-quant train ended: exit 2 (configuration error: " in end
 
 
 def test_a_command_ended_by_an_error_leaves_its_traceback_in_its_file(
@@ -303,7 +303,7 @@ async def test_a_child_s_output_lands_in_its_file_between_its_start_and_its_exit
     first, *middle, last = lines(path)
     assert f" INFO krx_quant.log_files: {sys.executable} -c " in first and "started (pid " in first
     assert sorted(middle) == sorted(["a report line", "no newline at the end", ran.stderr.strip()])
-    assert " ERROR krx_quant.log_files: " in last and "ended: exit code 3 after" in last
+    assert " ERROR krx_quant.log_files: " in last and "ended: exit 3 after" in last
 
 
 async def test_a_child_stopped_at_its_time_limit_says_so_in_its_file(tmp_path: Path) -> None:
@@ -312,7 +312,7 @@ async def test_a_child_stopped_at_its_time_limit_says_so_in_its_file(tmp_path: P
     ran = await run_logged([sys.executable, "-c", script], timedelta(seconds=1), path, merge=True)
     assert ran.timed_out and ran.stdout == "started\n"
     assert lines(path)[1] == "started"
-    assert "stopped at its time limit (0:00:01): exit code -9 (SIGKILL) after" in lines(path)[-1]
+    assert "stopped at its time limit (0:00:01): exit -9 (SIGKILL) after" in lines(path)[-1]
 
 
 async def test_a_child_is_told_the_engine_writes_its_output(tmp_path: Path) -> None:
@@ -331,13 +331,43 @@ async def test_the_nightly_training_s_whole_output_and_exit_code_go_to_the_night
     monkeypatch.setenv("KRX_LOG_DAYS", "14")  # the child would write a file of its own, if not told
     monkeypatch.delenv("KRX_OBJECT_STORE", raising=False)
     logs = tmp_path / "state" / "logs"
-    why = await _train(NIGHT, logs)
-    assert why is not None and why.startswith("configuration error: ")
+    failure = await _train(NIGHT, logs=logs)
+    assert failure is not None and failure.exit_code == 2
     first, *_, last = lines(logs / "training" / "2026-10-22.log")
     assert "INFO krx_quant.log_files: krx-quant train --day 2026-10-22 started (pid" in first
-    assert why in (logs / "training" / "2026-10-22.log").read_text()
-    assert "krx-quant train --day 2026-10-22 ended: exit code 2 after" in last
+    assert (
+        "configuration error: KRX_OBJECT_STORE is not set"
+        in (logs / "training" / "2026-10-22.log").read_text()
+    )
+    assert "krx-quant train --day 2026-10-22 ended: exit 2 after" in last
     assert not (logs / "commands").exists(), "the child wrote no file of its own"
+
+
+async def test_the_training_s_steps_and_the_kill_that_ended_it_land_in_the_night_s_file(
+    tmp_path: Path,
+) -> None:
+    # #355's step lines, logged in the train process as nightly.py logs them, then the OOM kill.
+    steps = (
+        "import logging, os, signal\n"
+        f"logging.basicConfig(level=logging.INFO, format={FORMAT!r})\n"
+        "log = logging.getLogger('krx_quant.nightly')\n"
+        "log.info('started step %s', 'newton')\n"
+        "log.info('%s: %.1f s, peak %s MB (since the %s), %d days read, %d days cached',"
+        " 'newton', 41.2, 812, 'step', 23, 3)\n"
+        "log.info('started step %s', 'turing')\n"
+        "os.kill(os.getpid(), signal.SIGKILL)\n"
+    )
+    logs = tmp_path / "logs"
+    failure = await _train(NIGHT, [sys.executable, "-c", steps], logs=logs)
+    assert failure is not None and (failure.exit_code, failure.step) == (-9, "turing")
+    first, *middle, last = lines(logs / "training" / "2026-10-22.log")
+    assert "started (pid " in first
+    assert [line.split(": ", 1)[1] for line in middle] == [
+        "started step newton",
+        "newton: 41.2 s, peak 812 MB (since the step), 23 days read, 3 days cached",
+        "started step turing",
+    ]
+    assert " ERROR krx_quant.log_files: " in last and "ended: exit -9 (SIGKILL) after" in last
 
 
 async def test_a_scheduled_job_s_run_goes_to_its_night_s_file(tmp_path: Path) -> None:
@@ -364,7 +394,7 @@ async def test_a_scheduled_job_s_run_goes_to_its_night_s_file(tmp_path: Path) ->
         await scheduler.run_night(NIGHT)
     first, *middle, last = lines(tmp_path / "logs" / "jobs" / "probe-x" / "2026-10-22.log")
     assert "started (pid " in first and sorted(middle) == ["a warning", "found 3 days"]
-    assert "ended: exit code 0 after" in last
+    assert "ended: exit 0 after" in last
 
 
 # The bundle
@@ -395,7 +425,7 @@ def logged(root: Path) -> None:
         "2026-10-22 21:30:00,000 INFO krx_quant.log_files: krx-quant train --day 2026-10-22 started (pid 7)\n"
         f"newton: 1.0888 >= 1.0880, mid {PRICE}\n"
         "2026-10-22 23:46:33,000 ERROR krx_quant.log_files: krx-quant train --day 2026-10-22 ended:"
-        " exit code -9 (SIGKILL) after 2h16m\n",
+        " exit -9 (SIGKILL) after 2h16m\n",
     )
     write(root / "engine" / "2026-10-01.log", "2026-10-01 10:00:00,000 INFO krx_quant.x: long ago\n")
 
@@ -561,8 +591,8 @@ def test_doctor_shows_the_log_folders_and_no_line_of_them(tmp_path: Path) -> Non
     write(root / "jobs" / "probe-y" / "2026-10-21.log")
     write(root / "bundles" / "krx-logs-20261023-101500.tar.gz", "z" * 2048)
     text = report(settings, at(TODAY, "10:30"), Status(None, ""))
-    part = text[text.index("7. 로그 파일") :]
-    assert part.startswith("7. 로그 파일 (state/logs, KRX_LOG_DAYS 14 · KRX_LOG_MAX_MB 500)")
+    part = text[text.index("8. 로그 파일") :]
+    assert part.startswith("8. 로그 파일 (state/logs, KRX_LOG_DAYS 14 · KRX_LOG_MAX_MB 500)")
     assert "  engine: 파일 2개 · 1 KB · 가장 오래된 날 2026-10-01 · 최근 2026-10-23" in part
     assert "  training: 파일 1개 · 1 KB · 가장 오래된 날 2026-10-22 · 최근 2026-10-22" in part
     assert "  jobs: 작업 2개 · 파일 2개 · 1 KB · 가장 오래된 날 2026-10-21 · 최근 2026-10-22" in part
@@ -570,6 +600,6 @@ def test_doctor_shows_the_log_folders_and_no_line_of_them(tmp_path: Path) -> Non
     assert "  꾸러미(bundles/) 1개 · 최근 krx-logs-20261023-101500.tar.gz (2 KB)" in part
     assert APP_KEY not in text and PRICE not in text
     off = report(replace(settings, log_days=None), at(TODAY, "10:30"), Status(None, ""))
-    assert "7. 로그 파일 (state/logs, KRX_LOG_DAYS off: 쓰지 않는다)" in off
+    assert "8. 로그 파일 (state/logs, KRX_LOG_DAYS off: 쓰지 않는다)" in off
     empty = report(replace(settings, state_dir=tmp_path / "none"), at(TODAY, "10:30"), Status(None, ""))
-    assert "7. 로그 파일 (state/logs, KRX_LOG_DAYS 14 · KRX_LOG_MAX_MB 500): 없음" in empty
+    assert "8. 로그 파일 (state/logs, KRX_LOG_DAYS 14 · KRX_LOG_MAX_MB 500): 없음" in empty

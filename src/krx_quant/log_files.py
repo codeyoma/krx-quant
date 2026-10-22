@@ -35,7 +35,6 @@ import logging
 import os
 import re
 import shlex
-import signal
 import sys
 import time
 from asyncio.subprocess import DEVNULL, PIPE, STDOUT
@@ -47,6 +46,7 @@ from typing import TextIO
 
 from krx_quant.config import DEFAULT_LOG_DAYS, DEFAULT_LOG_MAX_MB, Settings, SettingsError, log_keep
 from krx_quant.feeds.base import KST
+from krx_quant.training_nights import exit_text
 
 log = logging.getLogger(__name__)
 
@@ -178,7 +178,7 @@ class ProcessLog:
         else:
             reason = f" ({why})" if why else ""
             level = logging.INFO if code == 0 else logging.ERROR
-            self.handler.note(level, f"{self.what} ended: exit code {code}{reason} after {after}")
+            self.handler.note(level, f"{self.what} ended: {_exit(code)}{reason} after {after}")
         logging.getLogger().removeHandler(self.handler)
         self.handler.close()
 
@@ -464,15 +464,20 @@ async def run_logged(
     if pending:
         out.note(
             logging.ERROR,
-            f"{what} stopped at its time limit ({timeout}): exit code {exit_text(code)} after {after}",
+            f"{what} stopped at its time limit ({timeout}): {_exit(code)} after {after}",
         )
     else:
         level = logging.INFO if code == 0 else logging.ERROR
-        out.note(level, f"{what} ended: exit code {exit_text(code)} after {after}")
+        out.note(level, f"{what} ended: {_exit(code)} after {after}")
     out.close()
     return Ran(
         code, stdout.decode(errors="replace"), stderr.decode(errors="replace"), timed_out=bool(pending)
     )
+
+
+def _exit(code: int | None) -> str:
+    """``exit 3``, ``exit -9 (SIGKILL)`` (the kernel's out-of-memory killer sends it)."""
+    return "exit none" if code is None else exit_text(code)
 
 
 def _kill(process: asyncio.subprocess.Process) -> None:
@@ -490,17 +495,6 @@ def shown(command: Sequence[str]) -> list[str]:
 def command_text(parts: Sequence[str]) -> str:
     """A command line as one line: quoted as a shell would, a newline in it shown as ``\\n``."""
     return shlex.join(parts).replace("\n", "\\n")
-
-
-def exit_text(code: int | None) -> str:
-    """An exit code, with the signal that ended the process if one did (-9: SIGKILL, what the
-    kernel's out-of-memory killer sends)."""
-    if code is None or code >= 0:
-        return str(code)
-    try:
-        return f"{code} ({signal.Signals(-code).name})"
-    except ValueError:
-        return str(code)
 
 
 def size_text(size: int) -> str:
