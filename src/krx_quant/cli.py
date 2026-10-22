@@ -38,6 +38,7 @@ from krx_quant.expected_open_probe import DAYS as EXPECTED_OPEN_DAYS
 from krx_quant.expected_open_probe import probe_expected_open
 from krx_quant.fake_kis import FakeKis
 from krx_quant.feeds.base import KST
+from krx_quant.gaps_probe import probe_gaps
 from krx_quant.kind_registry import DAILY_KINDS, kind_named
 from krx_quant.kis import KisError
 from krx_quant.lifecycle import Status
@@ -137,6 +138,11 @@ async def _probe_night(day: date | None) -> int:
 
 def _probe_expected_open(days: int) -> int:
     print(probe_expected_open(Settings.from_env(require_kis=False), datetime.now(KST), days))
+    return 0
+
+
+def _probe_gaps() -> int:
+    print(probe_gaps(Settings.from_env(require_kis=False), datetime.now(KST)))
     return 0
 
 
@@ -634,6 +640,11 @@ def main(argv: list[str] | None = None) -> int:
         help=f"the latest recorded trading days to read (default {EXPECTED_OPEN_DAYS})",
     )
     sub.add_parser(
+        "probe-gaps",
+        help="summarize every recorded day's gaps and the closing auction window's frames, trades and"
+        " bars (#344), read-only; prints no market value",
+    )
+    sub.add_parser(
         "registry-password",
         help="print the ECR registry's docker login password (deploy/push-image.sh, EC2 Spot training)",
     )
@@ -801,6 +812,8 @@ def main(argv: list[str] | None = None) -> int:
             return asyncio.run(_probe_night(args.day))
         elif args.command == "probe-expected-open":
             return _probe_expected_open(args.days)
+        elif args.command == "probe-gaps":
+            return _probe_gaps()
         elif args.command == "registry-password":
             return _registry_password()
         elif args.command == "backfill":
