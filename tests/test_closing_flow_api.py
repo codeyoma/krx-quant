@@ -140,16 +140,17 @@ ASSETS = {p.code: (i + 1) * 10_000_000_000 for i, p in enumerate(SAMSUNG) if p.c
 
 async def test_the_minute_s_demand_by_product_and_structure_and_its_ratio(tmp_path: Path) -> None:
     """Input: Thursday's net assets of seven of 005930's eight products, its KRX close 80,000, the
-    20 days before Monday with closing auction values 1..20 × 10억 (their median 10.5 × 10억), and
+    20 days before Monday with recorded closing auction values 1..20 × 10억 (their median 10.5 ×
+    10억; the bars' auction volume is not used), and
     Monday's quotes around 81,000 at 10:30: r = 1.25%. Output: each product's A·(L² − L)·r, 2·A·r
     at 2x and 6·A·r for the inverse 0193L0, the sums by structure, the missing product, ratios."""
     data, state = tmp_path / "data", tmp_path / "state"
     net_assets(state, THURSDAY, ASSETS)
     closes(data, "005930", {THURSDAY: 80_000})
     for n, day in enumerate(trading_days_before(MONDAY, 21)):
-        bars(
-            data, "005930", day, 80_000, 80_000, 80_000, (n * 1_000_000_000) // 80_000
-        )  # n × 10억 (the first: none)
+        bars(data, "005930", day, 80_000, 80_000, 80_000, 999_999)
+        if n:  # n × 10억 (the first: none)
+            record_print(data, "005930", day, 80_000, n * 12_500)
     engine, clock = engine_at(tmp_path, at("09:00"))
     await keep_days(data, state, CALENDAR, SYMBOLS, engine.store.special_windows, at("06:00"))
     await replay_into(engine, clock, quotes(at("10:00"), at("10:30"), 80_950, 81_050), until=at("10:30:20"))
@@ -188,7 +189,11 @@ async def test_the_minute_s_demand_by_product_and_structure_and_its_ratio(tmp_pa
     assert body["spot_futures"] == 2 * (1 + 2 + 3 + 4 + 5) * 10_000_000_000 * 0.0125
     assert body["futures"] == (2 * 6 + 6 * 8) * 10_000_000_000 * 0.0125
     assert body["demand"] == body["spot_futures"] + body["futures"]
-    assert (body["denominator"], body["denominator_days"]) == (10_500_000_000, 20)
+    assert (body["denominator"], body["denominator_days"], body["denominator_reason"]) == (
+        10_500_000_000,
+        20,
+        None,
+    )
     assert body["ratio"] == pytest.approx(body["spot_futures"] / 10_500_000_000)
     assert body["ratio_total"] == pytest.approx(body["demand"] / 10_500_000_000)
     assert body["reason"] is None
@@ -214,6 +219,7 @@ async def test_a_falling_day_sells_and_a_symbol_without_products_says_so(tmp_pat
     assert by_code["0193W0"]["demand"] == -250_000_000, "2·A·r, the way the stock moved: a sell"
     assert by_code["0193L0"]["demand"] == -6_000_000_000, "6·A·r for the inverse: a sell too"
     assert body["demand"] < 0 and body["denominator"] is None and body["ratio"] is None
+    assert body["denominator_reason"] == "not_computed", "no days computed yet"
     assert (none["products"], none["demand"], none["reason"]) == ([], None, "no_products")
     assert none["r"] == pytest.approx(0.0)
 
@@ -318,7 +324,7 @@ DAYS = {
     date(2026, 8, 6): (81_900, 81_500, 81_400),
     date(2026, 8, 7): (81_500, 81_700, 81_900),
 }
-RECORDED_DAY, VI_DAY, LIVE_DAY = date(2026, 8, 5), date(2026, 7, 29), date(2026, 8, 6)
+UNRECORDED_DAY, VI_DAY, LIVE_DAY = date(2026, 8, 3), date(2026, 7, 29), date(2026, 8, 6)
 
 
 def record_print(data: Path, symbol: str, day: date, price: int, qty: int) -> None:
@@ -357,7 +363,9 @@ async def test_the_days_measure_as_structure_check_and_add_the_demand(tmp_path: 
     for symbol in SYMBOLS:
         for i, (day, (o, pre, c)) in enumerate(DAYS.items()):
             bars(data, symbol, day, o, pre, c, 1_000 + 100 * i)
-    record_print(data, "005930", RECORDED_DAY, 82_000, 5_000)
+    for i, (day, (_, _, c)) in enumerate(DAYS.items()):
+        if day != UNRECORDED_DAY:  # 005930's closing prints recorded but one day's
+            record_print(data, "005930", day, c, 1_000 + 100 * i)
     days = list(DAYS)
     write_net_assets(
         state,
@@ -413,6 +421,11 @@ async def test_the_days_measure_as_structure_check_and_add_the_demand(tmp_path: 
     assert d["next_gap_bp"] == pytest.approx((80_900 / 80_700 - 1) * 1e4)
     assert d["next_close_bp"] == pytest.approx((81_400 / 80_700 - 1) * 1e4)
     assert (d["compared_with"], d["agree"], d["demand"]) == ("flow", True, None)
+    assert (d["auction_value"], d["denominator"], d["denominator_reason"]) == (
+        None,
+        None,
+        "no_recorded_auction",
+    )
     assert rows["2026-08-04"]["agree"] is None, "the auction did not move"
     assert rows["2026-08-07"]["next_gap_bp"] is None, "no next day yet"
     text = structure_check(data, state, CALENDAR, ("009150",), fee_rate=FEE)
@@ -433,13 +446,17 @@ async def test_the_days_measure_as_structure_check_and_add_the_demand(tmp_path: 
     assert bars_day["demand_source"] == "bars"
     assert bars_day["spot_futures"] == 5 * round(2 * 10_000_000_000 * flow)
     assert bars_day["futures"] == 2 * round(2 * 10_000_000_000 * flow) + round(6 * 10_000_000_000 * flow)
-    assert (bars_day["auction_value"], bars_day["auction_value_source"]) == (82_000 * 5_000, "recorded")
-    earlier = sorted((1_000 + 100 * i) * c for i, (o, pre, c) in enumerate(DAYS.values()) if i < 7)
-    assert (bars_day["denominator"], bars_day["denominator_days"]) == (earlier[3], 7)
-    assert bars_day["ratio"] == pytest.approx(bars_day["spot_futures"] / earlier[3])
-    assert (
-        rows["2026-08-03"]["auction_value"] == (1_000 + 500) * 81_800
-        and rows["2026-08-03"]["auction_value_source"] == "bar"
+    assert (bars_day["auction_value"], bars_day["auction_value_source"]) == (82_000 * 1_700, "recorded")
+    earlier = sorted(
+        (1_000 + 100 * i) * c
+        for i, (d, (o, pre, c)) in enumerate(DAYS.items())
+        if i < 7 and d != UNRECORDED_DAY
+    )
+    assert (bars_day["denominator"], bars_day["denominator_days"]) == ((earlier[2] + earlier[3]) / 2, 6)
+    assert bars_day["ratio"] == pytest.approx(bars_day["spot_futures"] / bars_day["denominator"])
+    unrecorded = rows[UNRECORDED_DAY.isoformat()]
+    assert (unrecorded["auction_value"], unrecorded["auction_value_source"]) == (None, None), (
+        "no recorded print: the bar's volume is not used"
     )
     live = rows["2026-08-06"]
     assert (live["demand_source"], live["demand"], live["compared_with"]) == ("live", 300_000_000, "demand")

@@ -1097,13 +1097,14 @@ GAPS_PROBE = Job(
 )
 
 # The closing flow (#305): when KIS moves its ETF current price to the new day (the net assets'
-# retries, ``net_assets``) and whether the auction's integrated one-minute bar gives the closing
-# auction value the recorded trades do (``closing_flow``) only the server's files show. Once, on
-# the first trading day's night after the deploy that brings it, so the morning's retries, the
-# 15:20 row and the evening's days are in: ``check-closing-flow`` summarizes the net asset rows by
-# day with when they first came, the 15:20 rows, the days kept, and the two auction values on the
-# days with both. It reads files only and prints no market value. Seconds; the quarter hour is a
-# bound. After the gaps probe.
+# retries, ``net_assets``), and which one-minute bar, the integrated or the KRX one, gives the
+# closing auction value the recorded trades do (the denominator takes recorded prints only until
+# then, ``closing_flow``), only the server shows. Once, on the first trading day's night after the
+# deploy that brings it, so the morning's retries, the 15:20 row and the evening's days are in:
+# ``check-closing-flow`` summarizes the net asset rows by day with when they first came, the 15:20
+# rows, the days kept, and on each day with a recorded print both bars' values against it (the KRX
+# bar asked of KIS, one call a symbol and day, half a second apart). It prints no market value.
+# Seconds; the quarter hour is a bound. After the gaps probe.
 CLOSING_FLOW_ISSUE = 305
 
 CLOSING_FLOW_CHECK = Job(
@@ -1116,10 +1117,10 @@ CLOSING_FLOW_CHECK = Job(
             CLOSING_FLOW_ISSUE,
             note=(
                 "에이전트가 이 출력으로 KIS가 ETF 순자산을 언제 다음 날로 넘기는지(날마다 처음 받은 때)와 "
-                "순자산을 쌓기 시작한 첫날, 1분봉의 단일가 봉이 녹화한 종가 단일가 체결대금과 같은지 보고 "
-                '`docs/kis-feeds.md` "ETF 순자산 (#305)"과 `docs/engine-api.md` "closing-flow"의 ⚠를 고친다. '
-                "다르면 분모를 KRX(`J`) 1분봉으로 재는 PR을 연다. 출력에는 시세 값이 없다"
-                "(개수, 날짜, 시각, 두 체결대금의 비율만)."
+                "순자산을 쌓기 시작한 첫날, 통합(UN)·KRX(J) 1분봉의 단일가 봉이 녹화한 종가 단일가 "
+                '체결대금과 같은지 보고 `docs/kis-feeds.md` "ETF 순자산 (#305)"의 ⚠를 고친다. 녹화와 늘 같은 '
+                "봉이 있으면 그 봉으로 녹화가 없는 날의 분모를 채우는 PR을 연다(`docs/engine-api.md` "
+                '"closing-flow"의 ⚠). 출력에는 시세 값이 없다(개수, 날짜, 시각, 봉과 녹화의 체결대금 비율만).'
             ),
         ),
     ),

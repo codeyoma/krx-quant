@@ -147,8 +147,8 @@ def _probe_gaps() -> int:
     return 0
 
 
-def _check_closing_flow() -> int:
-    print(check_closing_flow(Settings.from_env(require_kis=False), datetime.now(KST)))
+async def _check_closing_flow() -> int:
+    print(await check_closing_flow(Settings.from_env(), datetime.now(KST)))
     return 0
 
 
@@ -653,7 +653,8 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser(
         "check-closing-flow",
         help="summarize what the closing flow kept (#305): the net assets by day and when they came,"
-        " the 15:20 rows, the days, the recorded and bar closing auction values; read-only, no market value",
+        " the 15:20 rows, the days, and the integrated and KRX one-minute bars' closing auction values"
+        " against the recorded prints (asks KIS for the KRX bars); writes nothing, no market value",
     )
     sub.add_parser(
         "registry-password",
@@ -826,7 +827,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "probe-gaps":
             return _probe_gaps()
         elif args.command == "check-closing-flow":
-            return _check_closing_flow()
+            return asyncio.run(_check_closing_flow())
         elif args.command == "registry-password":
             return _registry_password()
         elif args.command == "backfill":

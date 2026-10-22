@@ -498,7 +498,7 @@ KRX 마감 흐름(`closing_flow.py`)이 쓰는 두 파일이다. 엔진 API `GET
 | `demand`, `spot_futures`, `futures` | int64 | 수요 합(원, + 매수 − 매도)과 현물+선물형·선물형의 합. 그 구조의 상품에 순자산이 하나도 없으면 null |
 | `products`, `missing` | int64 | 순자산이 있어 센 상품 수, 없어 뺀 상품 수 |
 
-**`days.json`**: 지난날 표. 수집기가 시작할 때와 매일 20:30 이력 작업의 끝(1분봉 백필, 일봉, 기간 기준율 뒤)에 다시 계산해 통째로 바꾼다(`.days.json.tmp`). `{"computed_at": 시각, "symbols": {종목: {"days": [...], "auction_values": {날: {"value", "source"}}}}}`이다. `days`의 항목은 엔진 API `/closing-flow/days`의 `days[]`와 같다. `auction_values`는 1분봉이 있는 모든 날의 종가 단일가 체결대금과 출처(`recorded`, `bar`)다. 그날의 비율 분모(전 20거래일 중앙값)를 이것으로 계산한다. 읽는 1분봉은 백필의 1년이다.
+**`days.json`**: 지난날 표. 수집기가 시작할 때와 매일 20:30 이력 작업의 끝(1분봉 백필, 일봉, 기간 기준율 뒤)에 다시 계산해 통째로 바꾼다(`.days.json.tmp`). `{"computed_at": 시각, "symbols": {종목: {"days": [...], "auction_values": {날: {"value", "source"}}}}}`이다. `days`의 항목은 엔진 API `/closing-flow/days`의 `days[]`와 같다. `auction_values`는 1분봉이 있는 날 가운데 녹화한 종가 단일가가 있는 날의 체결대금과 출처(`recorded`)다. 그날의 비율 분모(전 20거래일 중앙값)를 이것으로 계산한다. 읽는 1분봉은 백필의 1년이다.
 
 ## 실데이터 관찰 (2026-10-08, 삼성전자, 13시 전후 90초)
 

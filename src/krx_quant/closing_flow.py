@@ -23,11 +23,16 @@ ratio (``ratio_total``) is given too. A product without its A is left out of the
 (``missing``).
 
 **Denominator.** The median closing auction value of the 20 trading days before the day
-(``DENOMINATOR_DAYS``), of the days with one. A day's value is its closing auction's trades: the
-recorded KRX trades (``H0STCNT0``) from the closing auction's start to a minute after the close,
-price × quantity (``recorded``), else the one-minute bar holding the auction's print, volume ×
-close (``bar``: ``structure_check.day_prices``'s auction bar, of the backfill's integrated bars, so
-NXT's trades of that minute may be in it, not measured ⚠). Each day keeps which.
+(``DENOMINATOR_DAYS``), of the days with one; None, with ``NO_RECORDED_AUCTION`` as the reason,
+when none of them has one. A day's value is its closing auction's trades in the recording: the KRX
+trades (``H0STCNT0``) from the closing auction's start to a minute after the close, price ×
+quantity (``recorded``). A day without that print in the recording (every day before it began on
+2026-10-12, and a day the connection was cut around 15:30, #344) has no value. The issue's
+fallback, the auction's one-minute bar (volume × close), is not used yet: the backfill's bars are
+the integrated ones, whose 15:30 bar may hold NXT's after-market trades of that minute, and the
+KRX (``J``) bar's volume was never measured (#317 and #342 measured its close only). The
+scheduled job ``check-closing-flow-305`` compares both bars with the recorded prints first
+(``closing_flow_check``, CODING_STANDARDS.md "External data is probed before it is used").
 
 **The days.** Each day of the backfill's bars that follows a day with them (no day missing
 between), as #270's ``structure-check`` section 2 reads them, with the same functions
@@ -84,7 +89,10 @@ from krx_quant.structure_check import (
 log = logging.getLogger(__name__)
 
 DENOMINATOR_DAYS = 20
-RECORDED, BAR = "recorded", "bar"  # where a day's closing auction value came from
+RECORDED = "recorded"  # where a day's closing auction value came from: the recorded KRX trades
+# Why a denominator is None: no day of the 20 before has a recorded closing auction value (the
+# bars' fallback waits for its probe, module doc); the days not computed yet (the answer's).
+NO_RECORDED_AUCTION, NOT_COMPUTED = "no_recorded_auction", "not_computed"
 LIVE, BARS = "live", "bars"  # where a day's demand came from: the 15:20 store, the bars
 STORED = "stored"  # the answer's 15:20 demand read back
 # The 15:20 demand is stored this long after the closing auction's start: the quotes received
@@ -335,7 +343,7 @@ class DayInput:
 
     prices: DayPrices  # #270's, of the day's bars
     auction_value: float | None
-    auction_value_source: str | None  # ``RECORDED``, ``BAR``
+    auction_value_source: str | None  # ``RECORDED``; None without a value
     special: tuple[str, ...] = ()  # the kinds of the special windows begun that day
 
 
@@ -353,13 +361,8 @@ def gather(
         prices = day_prices(bars, session)
         if prices is None:
             continue
-        value: float | None = recorded_auction_value(
-            data_dir, day, symbol, session.closing_auction, session.close
-        )
-        source: str | None = RECORDED
-        if value is None:
-            value = prices.auction_volume * prices.close or None
-            source = BAR if value is not None else None
+        value = recorded_auction_value(data_dir, day, symbol, session.closing_auction, session.close)
+        source = None if value is None else RECORDED
         found.append(DayInput(prices, value, source, tuple(sorted(set(special.get(day, ()))))))
     return found
 
@@ -410,6 +413,7 @@ def day_rows(
                 "ratio_total": _ratio(demand, base),
                 "denominator": base,
                 "denominator_days": base_days,
+                "denominator_reason": None if base is not None else NO_RECORDED_AUCTION,
                 "auction_value": given.auction_value,
                 "auction_value_source": given.auction_value_source,
                 "auction_bp": _bp(a.move),
@@ -661,6 +665,11 @@ def today_answer(
         "ratio_total": _ratio(found.total, base),
         "denominator": base,
         "denominator_days": base_days,
+        "denominator_reason": None
+        if base is not None
+        else NOT_COMPUTED
+        if kept is None
+        else NO_RECORDED_AUCTION,
         "products": [{**row, "name": names.get(row["code"])} for row in found.products],
         "missing": found.missing,
         "reason": reason,

@@ -67,7 +67,7 @@ from krx_quant.backfill import BAR_SCHEMA, PreviousDay, stock_bars_path
 from krx_quant.base_rates import write_base_rates
 from krx_quant.candles import EX_CODE, PERIODS, period_start, read_candles, write_candles, write_krx_days
 from krx_quant.clock import FakeClock
-from krx_quant.closing_flow import DayInput, day_rows, demand_row, write_days, write_demand
+from krx_quant.closing_flow import RECORDED, DayInput, day_rows, demand_row, write_days, write_demand
 from krx_quant.daily import ANSWER_FROM, NO_EX_CODE, StoredDays
 from krx_quant.daily_features import DAILY_FEATURES, LiveFeatures
 from krx_quant.engine import Event, PredictionEngine
@@ -725,6 +725,7 @@ _BUYERS = (
 # demand; the product without net assets on the 8th; the day of a VI.
 _CLOSING_DAYS = 21
 _CLOSING_LIVE = 8
+_CLOSING_UNRECORDED = 6  # the first days without a recorded closing print (no auction value)
 _CLOSING_MISSING = "0198D0"
 _CLOSING_VI = ("000660", date(2026, 9, 24))
 # The products' made-up names: the collector reads the real ones from the masters (#250).
@@ -738,7 +739,7 @@ def write_demo_closing_flow(data_dir: Path) -> None:
     assets on the ``_CLOSING_DAYS`` trading days up to the 8th (but one product's on the 8th), the
     15:20 demand stored on the last ``_CLOSING_LIVE`` of them, and the days computed from the day
     candles (``closing_flow.day_rows``: each day's last price before the auction a few ticks off its
-    close, its auction's volume made up; the 8th's closing auction value from recorded trades).
+    close, its recorded closing auction's volume made up, none on the first ``_CLOSING_UNRECORDED``).
     The morning's demand is the engine's at 10:30, read when asked."""
     state = data_dir / "state"
     shutil.rmtree(state / "closing_flow", ignore_errors=True)
@@ -779,16 +780,10 @@ def write_demo_closing_flow(data_dir: Path) -> None:
             prices = DayPrices(
                 d, float(candle["open"]), float(candle["open"]), float(pre_close), float(close), volume
             )
-            recorded = d == days[-1]
+            recorded = d >= days[_CLOSING_UNRECORDED]  # the earlier ones' prints were not recorded
             special = ("vi",) if (symbol, d) == _CLOSING_VI else ()
-            inputs.append(
-                DayInput(
-                    prices,
-                    volume * close * (1.02 if recorded else 1.0),
-                    "recorded" if recorded else "bar",
-                    special,
-                )
-            )
+            value = volume * close if recorded else None
+            inputs.append(DayInput(prices, value, RECORDED if recorded else None, special))
         for before, now in zip(inputs, inputs[1:], strict=False):
             if now.prices.day not in days[-_CLOSING_LIVE:]:
                 continue
@@ -804,6 +799,7 @@ def write_demo_closing_flow(data_dir: Path) -> None:
             "auction_values": {
                 i.prices.day.isoformat(): {"value": i.auction_value, "source": i.auction_value_source}
                 for i in inputs
+                if i.auction_value is not None
             },
         }
     write_demand(state, demands)

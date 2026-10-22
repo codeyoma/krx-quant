@@ -2014,9 +2014,9 @@
       }
     },
     "closing_flow": {
-      "description": "GET /v1/symbols/{symbol}/closing-flow (#305): the day's closing rebalancing demand of the symbol's single-stock ±2x ETFs, A × (L² − L) × r, in won (+ buy, − sell): at the minute (the reference price just before it, over the previous trading day's KRX close) in continuous trading, the 15:20 one from the closing auction on; by structure (spot_futures, futures) and in all; ratio is spot_futures over the median closing auction value of the 20 trading days before (an upper bound), ratio_total the total's; a product without its net assets is in missing and out of the sums. The day is today if it trades, else the last trading day. A null demand comes with its reason.",
+      "description": "GET /v1/symbols/{symbol}/closing-flow (#305): the day's closing rebalancing demand of the symbol's single-stock ±2x ETFs, A × (L² − L) × r, in won (+ buy, − sell): at the minute (the reference price just before it, over the previous trading day's KRX close) in continuous trading, the 15:20 one from the closing auction on; by structure (spot_futures, futures) and in all; ratio is spot_futures over the median recorded closing auction value of the 20 trading days before (an upper bound; null, with denominator_reason, without one), ratio_total the total's; a product without its net assets is in missing and out of the sums. The day is today if it trades, else the last trading day. A null demand comes with its reason.",
       "type": "object",
-      "required": ["symbol", "day", "as_of", "at", "source", "price", "previous_close", "r", "demand", "spot_futures", "futures", "ratio", "ratio_total", "denominator", "denominator_days", "products", "missing", "reason"],
+      "required": ["symbol", "day", "as_of", "at", "source", "price", "previous_close", "r", "demand", "spot_futures", "futures", "ratio", "ratio_total", "denominator", "denominator_days", "denominator_reason", "products", "missing", "reason"],
       "additionalProperties": false,
       "properties": {
         "symbol": {"type": "string"},
@@ -2034,6 +2034,7 @@
         "ratio_total": {"type": ["number", "null"]},
         "denominator": {"type": ["number", "null"], "minimum": 0},
         "denominator_days": {"type": "integer", "minimum": 0, "maximum": 20},
+        "denominator_reason": {"enum": ["no_recorded_auction", "not_computed", null]},
         "products": {"type": "array", "items": {"$ref": "#/$defs/closing_flow_product"}},
         "missing": {"type": "array", "items": {"type": "string"}},
         "reason": {"enum": ["no_products", "before_open", "no_price", "no_previous_close", "no_net_assets", null]}
@@ -2108,9 +2109,9 @@
       }
     },
     "closing_flow_day": {
-      "description": "A day of the closing flow (#305): its 15:20 demand (won; live: stored at 15:20, bars: from its net assets and the bars' flow; null without either) and ratios as the answer's, the median closing auction value of the 20 trading days before and how many had one, its own closing auction value and where from (recorded trades or the auction's one-minute bar), the closing auction's move, the day's flow to it and the next day's gap and close-to-close in bp (#270's definitions), whether the auction went the demand's way (the flow's on a day without one; null if either did not move), and the special situations begun that day.",
+      "description": "A day of the closing flow (#305): its 15:20 demand (won; live: stored at 15:20, bars: from its net assets and the bars' flow; null without either) and ratios as the answer's, the median closing auction value of the 20 trading days before and how many had one, its own closing auction value from the recorded KRX trades (null without the print recorded; the one-minute bar's fallback waits for check-closing-flow-305), the closing auction's move, the day's flow to it and the next day's gap and close-to-close in bp (#270's definitions), whether the auction went the demand's way (the flow's on a day without one; null if either did not move), and the special situations begun that day.",
       "type": "object",
-      "required": ["date", "period", "demand", "spot_futures", "futures", "demand_source", "ratio", "ratio_total", "denominator", "denominator_days", "auction_value", "auction_value_source", "auction_bp", "auction_ticks", "flow_bp", "compared_with", "agree", "next_gap_bp", "next_close_bp", "special"],
+      "required": ["date", "period", "demand", "spot_futures", "futures", "demand_source", "ratio", "ratio_total", "denominator", "denominator_days", "denominator_reason", "auction_value", "auction_value_source", "auction_bp", "auction_ticks", "flow_bp", "compared_with", "agree", "next_gap_bp", "next_close_bp", "special"],
       "additionalProperties": false,
       "properties": {
         "date": {"$ref": "#/$defs/day"},
@@ -2123,8 +2124,9 @@
         "ratio_total": {"type": ["number", "null"]},
         "denominator": {"type": ["number", "null"], "minimum": 0},
         "denominator_days": {"type": "integer", "minimum": 0, "maximum": 20},
+        "denominator_reason": {"enum": ["no_recorded_auction", null]},
         "auction_value": {"type": ["number", "null"], "minimum": 0},
-        "auction_value_source": {"enum": ["recorded", "bar", null]},
+        "auction_value_source": {"enum": ["recorded", null]},
         "auction_bp": {"type": "number"},
         "auction_ticks": {"type": "number"},
         "flow_bp": {"type": "number"},

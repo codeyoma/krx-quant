@@ -333,7 +333,8 @@ async def test_the_demo_has_a_cost_map(tmp_path: Path) -> None:
 async def test_the_demo_has_its_closing_flow(tmp_path: Path) -> None:
     """#305. Output: the morning's demand at 10:30 by the engine's price, its products named, one
     without its net assets; the 20 days before, the last 8 with their stored 15:20 demand, the
-    others from the bars, a VI day, a recorded closing auction value, and 009150 without demand."""
+    others from the bars, a VI day, the first five without a recorded closing auction value, and
+    009150 without demand."""
     app = await demo_app(tmp_path / "demo.sqlite3")
 
     async with TestClient(TestServer(app)) as client:
@@ -344,7 +345,8 @@ async def test_the_demo_has_its_closing_flow(tmp_path: Path) -> None:
     check("closing_flow", today)
     check("closing_flow_days", days)
     assert (today["day"], today["at"], today["source"]) == ("2026-10-12", "2026-10-12T10:30:00+09:00", "live")
-    assert today["demand"] is not None and today["ratio"] is not None and today["denominator_days"] == 20
+    assert today["demand"] is not None and today["ratio"] is not None
+    assert today["denominator_days"] == 15, "the 20 days before, but the five without a recorded print"
     assert today["missing"] == ["0198D0"]
     assert all(p["name"] for p in today["products"]) and len(today["products"]) == 8
     rows = days["days"]
@@ -352,6 +354,8 @@ async def test_the_demo_has_its_closing_flow(tmp_path: Path) -> None:
     assert [r["demand_source"] for r in rows].count("live") == 8
     assert {r["demand_source"] for r in rows[:-8]} == {"bars"}
     assert rows[-1]["auction_value_source"] == "recorded" and rows[-1]["next_gap_bp"] is None
+    assert [r["auction_value"] for r in rows[:5]] == [None] * 5
+    assert rows[0]["denominator_reason"] == "no_recorded_auction" and rows[-1]["denominator_days"] == 14
     assert [r["date"] for r in rows if r["special"]] == ["2026-09-24"]
     assert len(days["summary"]["tertiles"]) == 3
     assert (control["demand"], control["reason"]) == (None, "no_products")
