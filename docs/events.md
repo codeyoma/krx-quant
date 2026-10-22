@@ -455,6 +455,27 @@ KOSPI200 선물과 달러선물은 KIS 선물옵션 분봉조회(`FHKIF03020200`
 
 빈 칸(그 출처가 그날 주지 않은 값)은 null이다.
 
+## closing_flow: ETF 순자산 (REST, #305)
+
+`NetAssetKeeper`(`net_assets.py`)가 KIS ETF/ETN 현재가(`FHPST02400000`)에서 받은 단일종목 ±2배 ETF 16종(`products.PRODUCTS`)의 순자산이다. KRX 마감 흐름(#305)의 수요 A·(L² − L)·r이 거래일 t에 t의 전 거래일 행을 A로 읽는다. 출처, 날을 정하는 규칙, 받는 때는 [kis-feeds.md](kis-feeds.md#etf-순자산-305)에 있다.
+
+```
+<KRX_STATE_DIR>/closing_flow/net_assets.parquet
+```
+
+- **상태 폴더에 둔다.** 지난날의 순자산은 KRX Open API(`etf_bydd_trd`)에서 받기로 했고([design.md](design.md#41-출처) 4.1), 그 데이터는 제3자에게 넘기면 안 된다. 같은 파일에 출처마다 행을 두므로 업로드하는 데이터 폴더가 아니라 여기에 둔다. 서버 밖으로 나가지 않는다.
+- 상품, 날, 출처마다 한 행이다. 다른 출처의 행은 `source`를 달리해 같은 파일에 더한다(스키마는 그대로). 읽을 때는 출처 순서(`net_assets.SOURCES`, 지금은 `kis`뿐)의 첫 출처 행을 쓴다.
+- 파일은 통째로 바꾼다(임시 파일 `.net_assets.parquet.tmp`에 쓰고 이름을 바꾼다). 상품, 날, 출처 순이다.
+- 값이 없는 날(KIS가 0이나 빈 값을 준 날)은 행이 없다. 지운 행은 없다(10년이 지나도 남는다. 하루 16행이라 작다).
+
+| 열 | 타입 | KIS 필드 | 설명 |
+|---|---|---|---|
+| `code` | string | (조회의 `FID_INPUT_ISCD`) | 상품 코드(예: `0193W0`) |
+| `date` | date32 | `FHPST02440200`의 `stck_bsop_date` | 순자산의 날: 일별 NAV가 현재가의 `prdy_last_nav`와 같은 받기 전 거래일 |
+| `source` | string | | 출처: `kis` |
+| `net_assets` | int64 | `etf_ntas_ttam` × 1억 | 순자산(원) |
+| `fetched_at` | timestamp(s, Asia/Seoul) | | 이 값을 처음 받은 때. 같은 값을 다시 받으면 그대로 둔다 |
+
 ## 실데이터 관찰 (2026-10-08, 삼성전자, 13시 전후 90초)
 
 - 체결 1,714건, 호가 409건을 받았다. 필드 수는 모든 메시지에서 문서와 같았다(체결 47개, 호가 66개).

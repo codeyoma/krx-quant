@@ -66,12 +66,15 @@ from krx_quant.market_calendar import MarketCalendar, Phase, calendar_store, nex
 from krx_quant.masters import FrontMonths, MasterError, fetch_front_months
 from krx_quant.model_shelf import Shelf
 from krx_quant.names import fill_names
+from krx_quant.net_assets import NetAssetKeeper, keep_net_assets
 from krx_quant.notify import Alerts
 from krx_quant.object_store import open_store
 from krx_quant.open_to_close import OPEN_TO_CLOSE
 from krx_quant.polling import CALL_ERRORS, NORMALIZE_ERRORS, Poller, PollJob
 from krx_quant.predictions import DB_NAME, PredictionStore, iso
 from krx_quant.prevalidation import admits
+from krx_quant.products import products_of
+from krx_quant.ratelimit import RateLimiter
 from krx_quant.recorder import ParquetRecorder
 from krx_quant.rescore import EngineLock, keep_touches_filled
 from krx_quant.scheduled import keep_jobs
@@ -343,6 +346,13 @@ async def run_collector(
                 ),
                 asyncio.create_task(run_live(engine, session_clock)),
             ]
+            # The single-stock ETFs' net assets the closing flow reads (#305): at start, at 20:30
+            # and on trading-day mornings until the previous day's are in (``net_assets``).
+            products = [p for symbol in settings.symbols for p in products_of(symbol)]
+            if products:
+                pace = RateLimiter(1, 1 / settings.backfill_max_per_second, margin=0)  # as the history task's
+                keeper = NetAssetKeeper(client, calendar.calendar, settings.state_dir, products, pace)
+                background.append(asyncio.create_task(keep_net_assets(keeper, now)))
             if settings.object_store is None:
                 log.warning("KRX_OBJECT_STORE is not set: recorded days are not archived nor trained on")
             else:
