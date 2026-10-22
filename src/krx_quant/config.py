@@ -43,6 +43,8 @@ DEFAULT_GITHUB_API_URL = "https://api.github.com"
 MIN_SNAPSHOT_MINUTES = 1
 # The Toss Securities Open API, the daily supply data's secondary source (#226, #235).
 DEFAULT_TOSS_URL = "https://openapi.tossinvest.com"
+# The KRX Open API (openapi.krx.co.kr): the ETFs' daily net assets and listed units (#305).
+DEFAULT_KRX_OPENAPI_URL = "https://data-dbg.krx.co.kr"
 # The scheduled jobs' night runs from KRX_JOBS_AT to the next 05:30 (#215): from the NXT
 # after-market's close on, and over before the 06:00 deploy.
 JOBS_FROM = time(20, 0)
@@ -217,6 +219,11 @@ class Settings:
     toss_client_id: str | None = field(default=None, repr=False)
     toss_client_secret: str | None = field(default=None, repr=False)
     toss_url: str = DEFAULT_TOSS_URL
+    # The KRX Open API key (KRX_OPENAPI_KEY, from openapi.krx.co.kr, each service applied for and
+    # approved there; #305): the single-stock ETFs' daily net assets and listed units. Unset:
+    # nothing asks KRX, and the scheduled probe of it (``probe-krx-etf-305``) waits.
+    krx_openapi_key: str | None = field(default=None, repr=False)
+    krx_openapi_url: str = DEFAULT_KRX_OPENAPI_URL
 
     @classmethod
     def from_env(
@@ -437,6 +444,8 @@ class Settings:
             toss_client_id=values.get("TOSS_CLIENT_ID", "").strip() or None,
             toss_client_secret=values.get("TOSS_CLIENT_SECRET", "").strip() or None,
             toss_url=values.get("TOSS_URL", DEFAULT_TOSS_URL).strip().rstrip("/"),
+            krx_openapi_key=values.get("KRX_OPENAPI_KEY", "").strip() or None,
+            krx_openapi_url=values.get("KRX_OPENAPI_URL", DEFAULT_KRX_OPENAPI_URL).strip().rstrip("/"),
         )
 
 

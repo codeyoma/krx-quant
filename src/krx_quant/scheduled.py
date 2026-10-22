@@ -254,6 +254,8 @@ class Facts:
     pending_answers: tuple[str, ...] = ()
     # The bar-close kinds' algorithms on a probation that waits for its simulation (#298).
     simulating: tuple[str, ...] = ()
+    # Whether ``KRX_OPENAPI_KEY`` is set on this server (#305): the KRX Open API probe waits for it.
+    krx_openapi: bool = False
 
 
 @dataclass(frozen=True)
@@ -685,6 +687,7 @@ async def read_facts(
         simulating_daily=tuple(simulating_daily),
         simulating=tuple(simulating),
         pending_answers=tuple(answers),
+        krx_openapi=settings.krx_openapi_key is not None,
     )
 
 
@@ -1059,6 +1062,44 @@ DIVIDEND_PROBE = Job(
                 '`docs/engine-api.md` "5거래일 시가→종가"의 배당에 남긴다. 빼지 않고 배당락 표시가 있으면 '
                 "수집이 그 값을 KRX 일봉에 두고 정답 경로의 `ex_dividend`를 채우는 PR을 연다. 출력에는 "
                 "가격이 없다(개수, 날짜, 필드 값, 계단 크기의 구간만)."
+            ),
+        ),
+    ),
+)
+
+# The KRX Open API's ETF daily trading service (#305): KIS gives the products' net assets and
+# listed units for today only (``probe-nav-305``), so the user chose KRX's ``etf_bydd_trd`` (ETF
+# 일별매매정보) for the days before (2026-10-22). Its key is the user's to apply for; once it is in
+# the server's ``.env`` (``KRX_OPENAPI_KEY``, ``Facts.krx_openapi``), once, on the first night
+# (trading or not: KRX gives a day from 08:00 on the next business day): ``probe-krx-etf`` asks the
+# day before the listing, the listing day, a day a week and the last five trading days (about 30
+# calls spaced a second), and KIS's current price and daily NAV for each product (about 60 calls
+# spaced half a second), a minute or two. It prints counts, dates, field names and looks, same or
+# different, no market value (KRX's terms forbid giving the data to anyone else), so it can go on
+# the public issue. It stops asking at 10 minutes; the quarter hour is a bound, kept short as it
+# runs before the simulations and pre-validations. A night without the key it waits, harmlessly.
+KRX_ETF_PROBE_ISSUE = 305
+
+
+def _first_night_with_the_krx_key(night: Night) -> bool:
+    """Once, on the first night ``KRX_OPENAPI_KEY`` is set, trading or not."""
+    return night.facts.krx_openapi and not night.ran
+
+
+KRX_ETF_PROBE = Job(
+    name="probe-krx-etf-305",
+    due=_first_night_with_the_krx_key,
+    command=("probe-krx-etf",),
+    timeout=timedelta(minutes=15),
+    targets=(
+        Target(
+            KRX_ETF_PROBE_ISSUE,
+            note=(
+                "에이전트가 이 출력으로 `docs/krx-openapi.md`의 ⚠(주소와 인증, 필드와 모양, 종목코드, "
+                "상장일부터의 행, 값이 나오는 때, 상장좌수가 날마다인지, 순자산총액의 단위, KIS와 같은지)를 "
+                "실측으로 고친다. 401·403이면 인증키나 서비스 이용 신청을 사용자에게 묻는다. 그다음 "
+                "상장일부터의 순자산 채우기(백필)와 날마다의 수집을 만든다. 출력에는 시세 값이 없다"
+                "(개수, 날짜, 필드 이름과 모양, 같음·다름만)."
             ),
         ),
     ),
@@ -1518,6 +1559,7 @@ JOBS: tuple[Job, ...] = (
     CLOSE_REFRESH_PROBE,
     NAV_PROBE,
     DIVIDEND_PROBE,
+    KRX_ETF_PROBE,
     GAPS_PROBE,
     *daily_prevalidation_jobs(
         [a.name for a in DAILY_ALGORITHMS],
