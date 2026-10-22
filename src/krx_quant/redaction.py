@@ -5,7 +5,8 @@ that, everything that could name a secret or the server is replaced with ``[к∞Ал
 
 - every secret setting's value (``secrets_of``): the KIS app key and secret, the Telegram
   token and chat, the AWS keys, the macro API keys, the GitHub token, the Toss client ID and
-  secret (#235), the Object Store (and its bucket), the S3 endpoint and ``KRX_BIND_ADDRESS``.
+  secret (#235), the KRX Open API key (#305), the Object Store (and its bucket), the S3 endpoint
+  and ``KRX_BIND_ADDRESS``.
   Values shorter than ``MIN_SECRET`` characters are left alone: masking them would mangle
   numbers that only happen to be equal;
 - whatever the repository's own check forbids (``forbidden.RULES``: KIS order codes,
@@ -50,6 +51,7 @@ def secrets_of(settings: Settings) -> tuple[str, ...]:
         settings.github_token,
         settings.toss_client_id,
         settings.toss_client_secret,
+        settings.krx_openapi_key,
         settings.object_store,
         settings.s3_endpoint_url,
         settings.bind_address,
