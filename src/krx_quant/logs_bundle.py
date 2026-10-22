@@ -18,7 +18,8 @@ for the user to hand over privately: never a public issue, the repository or S3.
 It writes ``state/logs/bundles/krx-logs-<KST time>.tar.gz``: a folder ``krx-logs-<time>/`` with the
 files at their paths under ``state/logs`` (a file with no line left is left out) and
 ``MANIFEST.txt``. The latest ``KEEP_BUNDLES`` are kept. It prints the path, the period, each
-file's lines and masks, and the totals.
+file's lines and masks, and the totals; that summary, which the manifest holds too, is masked
+as the lines are, and a ``--grep`` pattern that names anything masked shows as ``MASK``.
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ import re
 import tarfile
 import tempfile
 from collections.abc import Iterable, Iterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta
 from pathlib import Path
 from typing import IO
@@ -47,7 +48,7 @@ from krx_quant.log_files import (
     day_logs,
     size_text,
 )
-from krx_quant.redaction import MASK, redact_counted, secrets_of
+from krx_quant.redaction import MASK, redact, redact_counted, secrets_of
 
 log = logging.getLogger(__name__)
 
@@ -121,6 +122,7 @@ class Bundle:
     read: int  # the files of the period read
     members: tuple[Member, ...]
     removed: tuple[str, ...]  # older bundles removed
+    secrets: tuple[str, ...] = field(default=(), repr=False)  # what the summary masks too
 
     @property
     def lines(self) -> int:
@@ -132,7 +134,8 @@ class Bundle:
 
     def summary(self, *, written: bool = True) -> str:
         """What the command prints (``written``: the bundle's size too), and the bundle's
-        ``MANIFEST.txt`` holds."""
+        ``MANIFEST.txt`` holds; masked as the lines are, for what was asked may name a secret or
+        an address (``--grep``)."""
         size = f" ({size_text(self.path.stat().st_size)})" if written else ""
         start, end = self.period.start.astimezone(KST), self.period.end.astimezone(KST)
         cut = ", 그 전 시각의 줄은 뺐다" if self.period.by_line else ""
@@ -141,7 +144,7 @@ class Bundle:
             f"기간: {start:%Y-%m-%d %H:%M} – {end:%Y-%m-%d %H:%M} KST ({self.period.how}{cut})",
         ]
         if self.grep is not None:
-            lines.append(f"고른 줄: --grep {self.grep!r}에 맞는 줄만")
+            lines.append(f"고른 줄: --grep {shown_pattern(self.grep, self.secrets)!r}에 맞는 줄만")
         lines.append(
             f"파일 {len(self.members)}개(기간의 파일 {self.read}개 중 줄이 남은 것)"
             f" · 줄 {self.lines:,} · 가림 {self.masked:,}"
@@ -156,7 +159,16 @@ class Bundle:
         if self.removed:
             removed = ", ".join(self.removed)
             lines.append(f"지운 옛 꾸러미 {len(self.removed)}개(최근 {KEEP_BUNDLES}개만 둔다): {removed}")
-        return "\n".join(lines)
+        return redact("\n".join(lines), self.secrets)
+
+
+def shown_pattern(pattern: str, secrets: Sequence[str]) -> str:
+    """A ``--grep`` pattern as the summary shows it: ``MASK`` whole if it holds anything the
+    masking takes, as typed or with its escapes taken out (``100\\.101\\.102\\.103``)."""
+    plain = pattern.replace("\\", "")
+    if redact(pattern, secrets) != pattern or redact(plain, secrets) != plain:
+        return MASK
+    return pattern
 
 
 MANIFEST_NOTE = """\
@@ -196,7 +208,7 @@ def make_bundle(
                     members.append(member)
             if not members:
                 raise _Empty
-            listed = Bundle(path, period, pattern, len(files), tuple(members), ())
+            listed = Bundle(path, period, pattern, len(files), tuple(members), (), secrets)
             manifest = (listed.summary(written=False) + "\n\n" + MANIFEST_NOTE).encode()
             with tempfile.SpooledTemporaryFile(max_size=_SPOOL) as spool:
                 spool.write(manifest)
@@ -209,7 +221,7 @@ def make_bundle(
         tmp.unlink(missing_ok=True)
         raise
     removed = _keep_latest(root)
-    return Bundle(path, period, pattern, len(files), tuple(members), tuple(removed))
+    return Bundle(path, period, pattern, len(files), tuple(members), tuple(removed), secrets)
 
 
 class _Empty(Exception):

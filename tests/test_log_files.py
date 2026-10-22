@@ -483,6 +483,27 @@ def test_grep_keeps_the_matching_lines_and_no_line_writes_no_bundle(tmp_path: Pa
     assert len(list((settings.state_dir / "logs" / "bundles").iterdir())) == 1, "nor a half-written one"
 
 
+def test_a_grep_pattern_naming_an_address_or_a_secret_is_masked_in_the_summary_and_manifest(
+    tmp_path: Path,
+) -> None:
+    # Looking for the lines of an address or a key must not put it in the archive (#359 review).
+    import re
+
+    settings = server(tmp_path)
+    logged(settings.state_dir / "logs")
+    now = at(TODAY, "10:15:00")
+    for n, pattern in enumerate((f"{BIND_ADDRESS}|{APP_KEY}", re.escape(BIND_ADDRESS), TAILNET)):
+        bundle = make_bundle(settings, Period.days(2, now + timedelta(seconds=n)), re.compile(pattern))
+        assert bundle is not None, pattern
+        texts = [bundle.summary(), *(p.read_text() for p in unpacked(bundle.path, tmp_path / f"out{n}"))]
+        for text in texts:
+            for hidden in (BIND_ADDRESS, re.escape(BIND_ADDRESS), APP_KEY, TAILNET):
+                assert hidden not in text, (pattern, hidden)
+        assert f"고른 줄: --grep '{MASK}'에 맞는 줄만" in texts[0]
+    plain = make_bundle(settings, Period.days(2, now + timedelta(seconds=9)), re.compile(" ERROR "))
+    assert plain is not None and "고른 줄: --grep ' ERROR '에 맞는 줄만" in plain.summary()
+
+
 def test_only_the_latest_bundles_are_kept(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     settings = server(tmp_path)
     logged(settings.state_dir / "logs")
