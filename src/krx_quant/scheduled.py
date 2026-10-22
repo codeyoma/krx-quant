@@ -1142,6 +1142,36 @@ GAPS_PROBE = Job(
     ),
 )
 
+# The closing flow (#305): when KIS moves its ETF current price to the new day (the net assets'
+# retries, ``net_assets``), and which one-minute bar, the integrated or the KRX one, gives the
+# closing auction value the recorded trades do (the denominator takes recorded prints only until
+# then, ``closing_flow``), only the server shows. Once, on the first trading day's night after the
+# deploy that brings it, so the morning's retries, the 15:20 row and the evening's days are in:
+# ``check-closing-flow`` summarizes the net asset rows by day with when they first came, the 15:20
+# rows, the days kept, and on each day with a recorded print both bars' values against it (the KRX
+# bar asked of KIS, one call a symbol and day, half a second apart). It prints no market value.
+# Seconds; the quarter hour is a bound. After the gaps probe.
+CLOSING_FLOW_ISSUE = 305
+
+CLOSING_FLOW_CHECK = Job(
+    name="check-closing-flow-305",
+    due=_first_trading_night,
+    command=("check-closing-flow",),
+    timeout=timedelta(minutes=15),
+    targets=(
+        Target(
+            CLOSING_FLOW_ISSUE,
+            note=(
+                "에이전트가 이 출력으로 KIS가 ETF 순자산을 언제 다음 날로 넘기는지(날마다 처음 받은 때)와 "
+                "순자산을 쌓기 시작한 첫날, 통합(UN)·KRX(J) 1분봉의 단일가 봉이 녹화한 종가 단일가 "
+                '체결대금과 같은지 보고 `docs/kis-feeds.md` "ETF 순자산 (#305)"의 ⚠를 고친다. 녹화와 늘 같은 '
+                "봉이 있으면 그 봉으로 녹화가 없는 날의 분모를 채우는 PR을 연다(`docs/engine-api.md` "
+                '"closing-flow"의 ⚠). 출력에는 시세 값이 없다(개수, 날짜, 시각, 봉과 녹화의 체결대금 비율만).'
+            ),
+        ),
+    ),
+)
+
 # The night futures (#264): the collector records the KOSPI200 night session's trades and book
 # (18:00–06:00) from the deploy that brings it; what only the server shows is whether KIS
 # streams them for this app key, under the contract code asked for, in the layout of KIS's
@@ -1566,6 +1596,7 @@ JOBS: tuple[Job, ...] = (
     DIVIDEND_PROBE,
     KRX_ETF_PROBE,
     GAPS_PROBE,
+    CLOSING_FLOW_CHECK,
     *daily_prevalidation_jobs(
         [a.name for a in DAILY_ALGORITHMS],
         {a.name: a.features for a in DAILY_ALGORITHMS},

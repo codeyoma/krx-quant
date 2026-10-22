@@ -479,6 +479,81 @@
 - 오늘의 답은 많아야 30초마다, 지난날은 10분마다, 또는 예측 저장소가 바뀌면 다시 만든다. 새 스트림 메시지는 없다. 화면이 읽어 간다.
 - 데모 엔진에는 그 아침(09:00–10:30)과 8일 하루의 세 피드가 있다. 서킷브레이커 동안은 비고, 10:00–10:10은 REST 대체로 쓴 행이다.
 
+### `GET /v1/symbols/{symbol}/closing-flow` (#305)
+
+KRX 마감 흐름 화면이 읽는 그날의 마감 리밸런싱 수요다(`closing_flow.py`). 단일종목 ±2배 ETF(`products.PRODUCTS`, [design.md](design.md#42-종목))는 장 마감에 노출을 순자산의 L배로 맞추려고 정해진 양을 사고판다. 엔진은 그 양을 공식으로 계산한다. 실제 집행이 아니다(금융위원회가 2026-07-28 리밸런싱을 앞당겨 나누라고 요청한 뒤의 집행 시각은 모른다). 홍콩 상품과 ETN은 넣지 않아 실제 수요는 더 클 수 있다.
+
+**수요.** 상품 k의 수요 d_k = A_k × (L_k² − L_k) × r. 2배는 2·A·r, −2배(인버스)는 6·A·r이고, 둘 다 r과 같은 부호다(+ 매수, − 매도, 원).
+- A_k: 그 상품의 전 거래일 순자산(원, `state/closing_flow/net_assets.parquet`, [kis-feeds.md](kis-feeds.md#etf-순자산-305)). 그날 t의 수요는 t의 전 거래일 행을 쓴다. 행이 없는 상품은 `demand`가 `null`이고 `missing`에 들며 합에서 빠진다.
+- r: 그 종목의 기준가(통합 중간가, 위 "기준가") ÷ 전 거래일 KRX 종가 − 1. KRX 종가는 종가 단일가 가격이다(`auctions.days_of`, 장전 브리핑의 `previous_close`와 같다).
+- 연속매매 동안에는 물을 때의 분(초를 버린 시각) 직전 기준가로 계산한다. 화면이 1분마다 읽으면 1분마다 다시 계산된다. 종가 단일가 시작(15:20)부터는 15:20 직전 기준가로 계산한 값이다. 수집기가 15:20:05에 종목마다 하루 한 행으로 저장한다(`state/closing_flow/demand.parquet`, [events.md](events.md#closing_flow-마감-수요와-지난날-305)). 장 전에는 계산하지 않는다(`reason: before_open`).
+- **구조별 합.** `spot_futures`(현물+선물형)와 `futures`(선물형)의 합, 그리고 둘의 합 `demand`. 선물형은 개별주식선물(15:45까지)로 집행하므로 단일가 비율의 분자에 넣지 않는다. 현물+선물형은 현물에 선물을 더하는 구조라 단일가와 선물의 나눔을 모른다. 그래서 그 합 전부를 분자로 쓴다: `ratio`는 상한이다.
+- **비율.** `ratio` = `spot_futures` ÷ `denominator`, `ratio_total` = `demand` ÷ `denominator`. `denominator`는 그날 전 20거래일의 녹화한 종가 단일가 체결대금의 중앙값(원)이고, `denominator_days`는 그 20일 가운데 값이 있던 날 수다. 날마다의 체결대금은 아래 `/closing-flow/days`의 `auction_value`다. 값이 있는 날이 없으면 `denominator`와 비율이 `null`이고 `denominator_reason`이 `no_recorded_auction`이다(녹화는 2026-10-12에 시작했다). 지난날 표를 아직 계산하지 않았으면 `not_computed`다.
+
+```json
+{
+  "symbol": "005930", "day": "2026-10-12", "as_of": "2026-10-12T10:30:00+09:00",
+  "at": "2026-10-12T10:30:00+09:00", "source": "live",
+  "price": 81000.0, "previous_close": 80000.0, "r": 0.0125,
+  "demand": 11250000000, "spot_futures": 3750000000, "futures": 7500000000,
+  "ratio": 0.357, "ratio_total": 1.071, "denominator": 10500000000.0, "denominator_days": 20, "denominator_reason": null,
+  "products": [
+    {"code": "0193W0", "name": "…", "leverage": 2, "structure": "spot_futures", "coefficient": 2,
+     "net_assets": 10000000000, "net_assets_date": "2026-10-08", "net_assets_source": "kis", "demand": 250000000},
+    {"code": "0198B0", "name": "…", "leverage": 2, "structure": "futures", "coefficient": 2,
+     "net_assets": null, "net_assets_date": null, "net_assets_source": null, "demand": null}
+  ],
+  "missing": ["0198B0"],
+  "reason": null
+}
+```
+
+- `day`: 엔진 시계의 오늘이 거래일이면 오늘, 아니면 지난 거래일이다. 모르는 종목은 404다.
+- `at`: 수요를 계산한 시각(그 직전 기준가). 장 전이면 `null`이다. `source`: `live`(엔진의 기준가로 지금 계산), `stored`(15:20부터: 저장한 15:20 행의 가격과 전일 종가), 계산하지 못했으면 `null`.
+- `products[]`: 그 종목의 상품마다 코드, 이름(KIS 종목 마스터나 토스에서 수집기가 시작할 때 읽는다. 없으면 `null`), 배율 L, 구조, 계수 L² − L, 순자산과 그 날·출처, 수요. 순서는 `PRODUCTS`의 순서다.
+- `reason`: `demand`가 `null`인 이유. `no_products`(상품이 없는 종목: 009150), `before_open`, `no_price`(그 시각 기준가가 없다. 15:20 행이 저장되지 않았고 엔진에도 그때 호가가 없다), `no_previous_close`, `no_net_assets`(순자산이 있는 상품이 없다). 009150도 `denominator`와 `r`은 준다.
+- 데모 엔진: 10:30의 엔진 기준가로 계산한다. 10-08의 순자산(0198D0 하나는 없다)과 지난 20거래일 표가 있다(그 가운데 처음 5일은 녹화한 종가 단일가가 없어 `denominator_days`가 15다). 상품 이름은 지어낸 것이다.
+
+### `GET /v1/symbols/{symbol}/closing-flow/days?from=YYYY-MM-DD&to=YYYY-MM-DD` (#305)
+
+지난날마다의 15:20 수요와 그 뒤의 종가 단일가·다음날이다. `from`부터 `to`까지(KST, 둘 다 포함, 기본은 오늘까지 1년, 많아야 4,000일)의 날이 오래된 날부터 오고, 그 날들로 계산한 요약이 붙는다. 날짜가 아니거나 `from`이 `to`보다 늦거나 범위가 넘치면 400, 모르는 종목은 404다.
+
+- **계산.** 수집기가 시작할 때와 매일 20:30 이력 작업(1분봉 백필) 뒤에 한 번 계산해 `state/closing_flow/days.json`에 둔다. 읽을 때는 그것을 준다(`computed_at`, 계산 전이면 `null`). 그래서 그날의 줄은 그날 20:30 뒤에, 다음날 칸은 다음날 20:30 뒤에 채워진다.
+- **날.** 백필 1분봉(`bars`)이 있는 날 가운데 전 거래일에도 1분봉이 있는 날이다. 정의는 구조 실측(#270, `structure-check` 2절)과 같고, 같은 함수를 부른다(`structure_check.auction_days`, `day_prices`, `period_of`, `same_share`, `opposite_share`). 그래서 같은 데이터에서 요약의 숫자가 `structure-check`의 숫자와 같다.
+  - `auction_bp`: 종가 단일가 움직임 = 종가 ÷ 15:20 직전가 − 1(bp). `auction_ticks`: 같은 움직임의 틱 수. `flow_bp`: 그날 15:20까지의 흐름 = 15:20 직전가 ÷ 전 거래일 종가 − 1. `next_gap_bp`: 다음날 시가 ÷ 종가 − 1. `next_close_bp`: 다음날 종가 ÷ 종가 − 1(다음날이 아직 없으면 `null`). 가격은 1분봉(통합)의 것이다.
+  - `demand`, `spot_futures`, `futures`: 그날의 15:20 수요. `demand_source`가 `live`면 그날 저장한 15:20 행이고, `bars`면 저장한 행이 없는 날을 그날 쓸 순자산과 1분봉의 `flow_bp`(r 대신)로 계산한 값이다. 순자산이 없는 날(배포 전, 그리고 KRX Open API로 채우기 전)과 009150은 `null`이다.
+  - `ratio`, `ratio_total`, `denominator`, `denominator_days`, `denominator_reason`: 위와 같다(그날 전 20거래일의 중앙값).
+  - `auction_value`: 그날 종가 단일가 체결대금(원). 녹화한 KRX 체결(`H0STCNT0`)의 종가 단일가 시작부터 장 마감 1분 뒤까지 가격 × 수량의 합이다(`auction_value_source: recorded`). 녹화에 그 체결이 없는 날(녹화를 시작한 2026-10-12 전의 모든 날, 15:30 무렵 연결이 끊긴 날, #344)은 `null`이다. #305가 정한 대체(1분봉의 단일가 봉, 거래량 × 종가)는 아직 쓰지 않는다. 백필 1분봉은 통합 봉이라 그 분의 NXT 애프터마켓 체결이 섞일 수 있고, KRX(`J`) 1분봉은 종가만 녹화와 같다고 쟀고(#317, #342) 거래량은 잰 적이 없다. 예약 작업 `check-closing-flow-305`가 녹화가 있는 날마다 두 봉을 녹화와 견준다([operations.md](operations.md#krx-마감-흐름-확인-305)). 같은 봉이 있으면 그 봉으로 녹화 전의 날도 채운다 ⚠.
+  - `agree`: 단일가가 수요의 방향으로 움직였는지(sign(수요) = sign(단일가 움직임)). 수요가 없는 날은 그날 흐름과 견준다(`compared_with: flow`, #270과 같은 비교). 둘 중 하나가 움직이지 않았으면 `null`이다.
+  - `special`: 그날 시작한 특수 상황 구간의 종류(`vi`, `circuit_breaker`, `sidecar`, 엔진이 남긴 `special_windows`). 녹화를 시작하기 전의 날은 늘 빈 목록이다.
+- **요약(`summary`).** 고른 날로 계산한다.
+  - `periods[]`: 구조 실측의 기간(상장 전, 상장 뒤 05-27~07-30, 규제 뒤 07-31~09-13, 애프터마켓 뒤 09-14~)마다, 날이 있는 기간만. `all`과 `without_special`(특수 상황이 있던 날을 뺀 것) 둘 다 준다.
+  - `tertiles[]`: `ratio`가 있는 날을 `|ratio|`의 크기로 세 묶음(앞 묶음부터 하나씩 더 많게)으로 나눈 것. `ratio_from`·`ratio_to`가 그 묶음의 `|ratio|` 범위다. 3일 미만이면 빈 목록이다.
+  - 칸마다: `days`, `auction_bp_median`(|단일가 움직임|의 중앙값, bp), `agree`와 `agree_n`(둘 다 움직인 날 가운데 같은 방향 비율과 그 날 수), `next_gap_opposite`·`next_gap_n`과 `next_close_opposite`·`next_close_n`(다음날 갭, 다음날 종가가 단일가와 반대인 비율과 날 수). 화면은 표본이 적은 칸(예: 20일 미만)을 흐리게 보인다.
+
+```json
+{
+  "symbol": "005930", "from": "2025-10-23", "to": "2026-10-22", "computed_at": "2026-10-21T20:41:12+09:00",
+  "days": [
+    {"date": "2026-10-20", "period": "애프터마켓 뒤(09-14~)", "demand": 160163959925, "spot_futures": 77742474211,
+     "futures": 82421485714, "demand_source": "live", "ratio": 1.016, "ratio_total": 2.094,
+     "denominator": 76494829950.0, "denominator_days": 7, "denominator_reason": null,
+     "auction_value": 95017832000.0, "auction_value_source": "recorded", "auction_bp": 12.3, "auction_ticks": 1.0, "flow_bp": 173.2,
+     "compared_with": "demand", "agree": true, "next_gap_bp": -36.5, "next_close_bp": -121.6, "special": []}
+  ],
+  "summary": {
+    "periods": [{"period": "애프터마켓 뒤(09-14~)", "from": "2026-09-14", "to": null,
+                 "all": {"days": 26, "auction_bp_median": 12.4, "agree": 0.47, "agree_n": 15,
+                         "next_gap_opposite": 0.43, "next_gap_n": 14, "next_close_opposite": 0.43, "next_close_n": 14},
+                 "without_special": {"…": "같은 필드"}}],
+    "tertiles": [{"tertile": 1, "ratio_from": 0.04, "ratio_to": 0.40, "all": {"…": "같은 필드"}, "without_special": {"…": "같은 필드"}}]
+  }
+}
+```
+
+- 상태 디렉터리가 없는 재생 엔진은 빈 목록과 빈 요약을 준다. 데모 엔진에는 10-08까지 20거래일이 있다: 마지막 8일은 저장한 15:20 수요, 그 앞은 순자산과 1분봉으로 계산한 수요다. 000660의 09-24에 VI가 있고, 처음 5일은 녹화한 종가 단일가가 없다(체결대금 `null`). 일봉에서 지어낸 값이다.
+- 새 스트림 메시지는 없다. 화면이 읽어 간다.
+
 ### `GET /v1/symbols/{symbol}/special?from=YYYY-MM-DD&to=YYYY-MM-DD` (#236)
 
 엔진이 남긴 특수 상황 구간(`special_windows`, 위 "채점"의 "특수 상황") 중 `from`부터 `to`까지의 날(KST, 둘 다 포함)에 시작한 것이다. 그 종목의 VI와 시장 전체의 서킷브레이커·사이드카가 시작 순으로 온다. 차트가 분 보기에 띠와 이름표로 칠한다.

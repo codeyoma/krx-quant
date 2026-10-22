@@ -25,6 +25,7 @@ from krx_quant.archive import run_archive
 from krx_quant.backfill import run_backfill
 from krx_quant.candle_probe import probe_candles
 from krx_quant.close_probe import probe_close
+from krx_quant.closing_flow_check import check_closing_flow
 from krx_quant.collector import check_fallbacks, measure_subscription_limit, run_collector
 from krx_quant.config import Settings, SettingsError
 from krx_quant.daily_check import DAYS as DAILY_CHECK_DAYS
@@ -144,6 +145,11 @@ def _probe_expected_open(days: int) -> int:
 
 def _probe_gaps() -> int:
     print(probe_gaps(Settings.from_env(require_kis=False), datetime.now(KST)))
+    return 0
+
+
+async def _check_closing_flow() -> int:
+    print(await check_closing_flow(Settings.from_env(), datetime.now(KST)))
     return 0
 
 
@@ -657,6 +663,12 @@ def main(argv: list[str] | None = None) -> int:
         " bars (#344), read-only; prints no market value",
     )
     sub.add_parser(
+        "check-closing-flow",
+        help="summarize what the closing flow kept (#305): the net assets by day and when they came,"
+        " the 15:20 rows, the days, and the integrated and KRX one-minute bars' closing auction values"
+        " against the recorded prints (asks KIS for the KRX bars); writes nothing, no market value",
+    )
+    sub.add_parser(
         "registry-password",
         help="print the ECR registry's docker login password (deploy/push-image.sh, EC2 Spot training)",
     )
@@ -828,6 +840,8 @@ def main(argv: list[str] | None = None) -> int:
             return _probe_expected_open(args.days)
         elif args.command == "probe-gaps":
             return _probe_gaps()
+        elif args.command == "check-closing-flow":
+            return asyncio.run(_check_closing_flow())
         elif args.command == "registry-password":
             return _registry_password()
         elif args.command == "backfill":

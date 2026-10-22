@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from functools import partial
@@ -449,13 +449,15 @@ async def keep_history(
     store: CalendarStore,
     now: Callable[[], datetime],
     toss: Callable[[], TossClient] | None = None,
+    after: Callable[[datetime], Awaitable[None]] | None = None,
 ) -> None:
     """The collector's history task: at start, then daily once the day's bars are final,
     refresh the calendar, fill missing one-minute bars, add the new day candles (``candles``)
     and the daily supply data (``supply``, from KIS and, given ``toss``, Toss), and, with the
     macro reads on (``KRX_MACRO_AT``), the US daily closes the daily kinds learn from
     (``us_daily``, #264), then computes the period base rates of every stored day's one-minute
-    bars (``base_rates``, #307). Each run then keeps the KRX auctions' prices of the days not kept
+    bars (``base_rates``, #307), and ``after`` (the closing flow's days, #305). Each run then keeps
+    the KRX auctions' prices of the days not kept
     yet (``auctions``, #264), and so does a run of that alone at ``auctions.CLOSE_AT`` (15:40), so
     the day is answered from 15:45. Runs until cancelled.
     """
@@ -495,6 +497,11 @@ async def keep_history(
                 )
             except Exception:
                 log.exception("the period base rates failed")
+            if after is not None:
+                try:
+                    await after(now())
+                except Exception:
+                    log.exception("the history task's last step failed")
         try:
             await auctions.run(started)
         except Exception:
