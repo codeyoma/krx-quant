@@ -5,8 +5,8 @@ that, everything that could name a secret or the server is replaced with ``[가�
 
 - every secret setting's value (``secrets_of``): the KIS app key and secret, the Telegram
   token and chat, the AWS keys, the macro API keys, the GitHub token, the Toss client ID and
-  secret (#235), the KRX Open API key (#305), the Object Store (and its bucket), the S3 endpoint
-  and ``KRX_BIND_ADDRESS``.
+  secret (#235), the KRX Open API key (#305), the Object Store (and its bucket), the S3 endpoint,
+  ``KRX_BIND_ADDRESS`` and Grafana Cloud Loki's address, user and token (#358).
   Values shorter than ``MIN_SECRET`` characters are left alone: masking them would mangle
   numbers that only happen to be equal;
 - whatever the repository's own check forbids (``forbidden.RULES``: KIS order codes,
@@ -14,7 +14,8 @@ that, everything that could name a secret or the server is replaced with ``[가�
 - Tailscale names (``*.ts.net``), IPv6 and IPv4 addresses.
 
 ``redact`` is a pure function: it is the one place that decides what a comment may show, and
-what the log bundle an agent is handed may (``redact_counted``, #356).
+what the log bundle an agent is handed (``redact_counted``, #356) and the lines sent to Loki
+(``loki.py``, #358) may.
 """
 
 from __future__ import annotations
@@ -30,7 +31,11 @@ from krx_quant.forbidden import RULES
 MASK = "[가림]"
 MIN_SECRET = 8
 
-_TAILNET = re.compile(r"[\w-]+(?:\.[\w-]+)*\.ts\.net\b", re.IGNORECASE)
+# A Tailscale name ends in ``.ts.net``: found by that end, then read back over its labels
+# (``_tailnets``). The one pattern ``[\w-]+(?:\.[\w-]+)*\.ts\.net\b`` it replaced took time
+# quadratic in a long run of word characters and dots: seconds for a 64 KB line, holding the
+# interpreter all the while (#358: the engine masks its lines for Loki on a thread of its own).
+_TS_NET = re.compile(r"\.ts\.net\b", re.IGNORECASE)
 _OCTET = r"(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)"
 _IPV4 = re.compile(rf"(?<![\d.]){_OCTET}(?:\.{_OCTET}){{3}}(?!\.?\d)")
 # Anything shaped like an IPv6 address (two colons or more among hex digits); kept only if
@@ -56,6 +61,9 @@ def secrets_of(settings: Settings) -> tuple[str, ...]:
         settings.object_store,
         settings.s3_endpoint_url,
         settings.bind_address,
+        settings.loki_url,
+        settings.loki_user,
+        settings.loki_token,
     ]
     if settings.object_store and settings.object_store.startswith("s3://"):
         values.append(urlsplit(settings.object_store).netloc)  # the bucket, named alone
@@ -76,9 +84,11 @@ def redact_counted(text: str, secrets: Iterable[str] = ()) -> tuple[str, int]:
         if found:
             text = text.replace(secret, MASK)
             count += found
-    for _, pattern in (*RULES, ("Tailscale name", _TAILNET)):
+    for _, pattern in RULES:
         text, found = pattern.subn(MASK, text)
         count += found
+    text, found = _tailnets(text)
+    count += found
     masked = 0
 
     def ipv6(match: re.Match[str]) -> str:
@@ -90,6 +100,29 @@ def redact_counted(text: str, secrets: Iterable[str] = ()) -> tuple[str, int]:
     text = _IPV6.sub(ipv6, text)
     text, found = _IPV4.subn(MASK, text)
     return text, count + masked + found
+
+
+def _tailnets(text: str) -> tuple[str, int]:
+    """``text`` with each Tailscale name (labels of word characters and hyphens, dotted, then
+    ``.ts.net``) masked, and how many; in time linear in ``text``."""
+    parts: list[str] = []
+    done = 0  # the text before this is settled
+    found = 0
+    for end in _TS_NET.finditer(text):
+        start = end.start()
+        while start > done and (text[start - 1] in "_-." or text[start - 1].isalnum()):
+            start -= 1
+        while start < end.start() and text[start] == ".":
+            start += 1
+        if start == end.start():  # no label before it
+            continue
+        parts += [text[done:start], MASK]
+        done = end.end()
+        found += 1
+    if not found:
+        return text, 0
+    parts.append(text[done:])
+    return "".join(parts), found
 
 
 def _ipv6(match: re.Match[str]) -> str:

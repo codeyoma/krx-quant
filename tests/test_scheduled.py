@@ -27,6 +27,7 @@ from krx_quant.config import Settings, SettingsError
 from krx_quant.fake_kis import FakeKis
 from krx_quant.feeds.base import KST
 from krx_quant.github import GitHub
+from krx_quant.log_files import Child
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.notify import Alerts
 from krx_quant.scheduled import (
@@ -127,7 +128,13 @@ class Runs:
     def names(self) -> list[str]:
         return [name for name, _ in self.started]
 
-    async def __call__(self, args: Sequence[str], timeout: timedelta, log_file: Path | None = None) -> Ran:
+    async def __call__(
+        self,
+        args: Sequence[str],
+        timeout: timedelta,
+        log_file: Path | None = None,
+        child: Child | None = None,
+    ) -> Ran:
         self.started.append((args[0], self.clock.now()))
         await self.held.wait()
         self.ended.append(args[0])
@@ -141,10 +148,16 @@ class Writes(Runs):
         super().__init__(clock, ran)
         self.files = files
 
-    async def __call__(self, args: Sequence[str], timeout: timedelta, log_file: Path | None = None) -> Ran:
+    async def __call__(
+        self,
+        args: Sequence[str],
+        timeout: timedelta,
+        log_file: Path | None = None,
+        child: Child | None = None,
+    ) -> Ran:
         for path, text in self.files.items():
             path.write_text(text)
-        return await super().__call__(args, timeout, log_file)
+        return await super().__call__(args, timeout, log_file, child)
 
 
 class Told(list[str]):

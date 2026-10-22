@@ -30,6 +30,10 @@ server, or an agent reading an issue, looks at first when something seems wrong.
    nightly training's, the scheduled jobs', the commands'), the files, their size, the oldest
    and the latest day; their total against ``KRX_LOG_MAX_MB``; the bundles made for an agent.
    Counts, sizes and dates only: never a line of them.
+9. The log lines' copy in Grafana Cloud Loki (#358, ``loki.py``), as ``/v1/status``'s ``loki``
+   says: on or off (and why), the lines sent, dropped and waiting, the last success and the last
+   failure's kind (``HTTP 503``, never its text). Without the engine, what this command's
+   settings say.
 
 The command reads the settings leniently (``doctor_settings``): a malformed one, which keeps
 the engine from starting, is a finding at the top, and the rest comes from the data and state
@@ -63,7 +67,7 @@ import aiohttp
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from krx_quant import kis
+from krx_quant import kis, loki
 from krx_quant.archive import partition_files
 from krx_quant.config import Settings, SettingsError, read_values
 from krx_quant.feeds.base import KST
@@ -151,6 +155,7 @@ def engine_status(engine: PredictionEngine, live: LiveStatus | None) -> Status:
     }
     if live is not None:
         body["kis"] = live()
+    body["loki"] = loki.status_json()  # this process's: the engine's (#358)
     return Status(body, "엔진 프로세스")
 
 
@@ -275,6 +280,9 @@ def doctor_settings(
         object_store=text("KRX_OBJECT_STORE"),
         s3_endpoint_url=text("KRX_S3_ENDPOINT_URL"),
         bind_address=text("KRX_BIND_ADDRESS"),
+        loki_url=text("KRX_LOKI_URL"),
+        loki_user=text("KRX_LOKI_USER"),
+        loki_token=text("KRX_LOKI_TOKEN"),
         data_dir=Path(values.get("KRX_DATA_DIR", "data")),
         state_dir=Path(values.get("KRX_STATE_DIR", "state")),
         api_host=values.get("KRX_API_HOST", "127.0.0.1"),
@@ -325,6 +333,7 @@ def report(
         ("6. 디스크와 메모리", lambda: _resources(settings, process)),
         ("7. 밤 학습", lambda: _training(settings, now)),
         ("8. 로그 파일", lambda: _log_files(settings, known=config_error is None)),
+        ("9. Loki 전송", lambda: _loki(settings, status, now)),
     ]
     sections = [head]
     for title, part in parts:
@@ -628,6 +637,55 @@ def _log_files(settings: Settings, *, known: bool = True) -> list[str]:
         )
     lines.append('  에이전트에게 줄 꾸러미: krx-quant logs-bundle (docs/operations.md "로그 파일과 꾸러미")')
     return lines
+
+
+def _loki(settings: Settings, status: Status, now: datetime) -> list[str]:
+    """The lines' copy in Loki (#358): the engine's ``/v1/status`` ``loki``; without it, what this
+    command's settings say. Counts, times and the failure's kind only."""
+    title = "9. Loki 전송 (#358, /v1/status의 loki)"
+    shipping = None if status.body is None else status.body.get("loki")
+    if not isinstance(shipping, Mapping):
+        target, why = loki.target_of(
+            {
+                loki.URL: settings.loki_url or "",
+                loki.USER: settings.loki_user or "",
+                loki.TOKEN: settings.loki_token or "",
+            }
+        )
+        if status.body is None:
+            known = "엔진 API에 닿지 않아 엔진의 전송 상태는 모른다"
+        else:
+            known = "/v1/status에 loki가 없다(#358 전의 엔진)"
+        setting = "켜짐(KRX_LOKI_URL·KRX_LOKI_USER·KRX_LOKI_TOKEN 있음)" if target else f"꺼짐({why})"
+        return [title, f"  {known}", f"  이 명령이 읽은 설정: {setting}"]
+    if not shipping.get("enabled"):
+        return [f"{title}: 꺼짐({shipping.get('reason')}). 로그는 서버의 state/logs에만 있다"]
+    today = now.astimezone(KST).date()
+    lines = [
+        title,
+        f"  켜짐 · 보낸 줄 {_count(shipping.get('sent'))} · 버린 줄 {_count(shipping.get('dropped'))}"
+        f" · 버퍼 {_count(shipping.get('buffered'))}줄",
+    ]
+    success = _when(shipping.get("last_success_at"))
+    if success is None:
+        lines.append("  마지막 성공: 아직 없음")
+    else:
+        lines.append(
+            f"  마지막 성공 {_clock(shipping.get('last_success_at'), today)}"
+            f" ({_span((now - success).total_seconds())} 전)"
+        )
+    error = shipping.get("last_error")
+    lines.append(
+        f"  마지막 오류 {error} ({_clock(shipping.get('last_error_at'), today)})"
+        if error
+        else "  마지막 오류: 없음"
+    )
+    lines.append("  버린 줄과 보내지 못한 줄은 서버의 state/logs에만 있다. 조회: docs/agents/server-logs.md")
+    return lines
+
+
+def _count(value: Any) -> str:
+    return f"{value:,}" if isinstance(value, int) and not isinstance(value, bool) else "?"
 
 
 def _meminfo(path: Path) -> dict[str, int]:

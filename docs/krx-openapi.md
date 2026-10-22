@@ -58,6 +58,7 @@
 - 이용 기간은 저절로 갱신되지 않는다. 만료 30일 전부터 마이페이지 → 이용현황 → API 이용현황에서 다시 신청한다. 갱신하면 이전 인증키는 쓸 수 없다(FAQ).
 - 서버 `.env`의 `KRX_OPENAPI_KEY`에 둔다(`.env.example`). 저장소, 이슈, 로그에는 두지 않는다. 예약 작업의 댓글과 `krx-quant doctor`에서 가린다(`redaction.secrets_of`).
 - 약관: 비상업 목적(개인 연구·투자)만, 제3자 제공·재배포 금지, 이용 기간이 끝나면 받은 데이터를 쓰지 않음, 화면에 "한국거래소 통계정보" 표시(#305 조사 댓글). 그래서 받은 값은 서버 밖으로 내보내지 않는다(토스 값과 같은 규칙, [design.md](design.md) 4.7). 탐사도 시세 값을 내지 않는다.
+- 로그 줄은 Grafana Cloud Loki로도 간다(#358). 그래서 이 서비스의 값을 로그에 찍지 않는다. 2026-10-23에 확인했다: 엔진은 아직 이 값을 받지도 쓰지도 않고, 탐사의 출력에는 값이 없다. 값을 받는 코드를 더하면 그 줄은 값을 찍지 않거나 `extra=loki.TEMPLATE_ONLY`(Loki에는 틀만)로 찍는다([operations.md](operations.md#grafana-cloud-loki로-보내는-로그-358)).
 
 ## 탐사가 재는 것 (`krx-quant probe-krx-etf`, `src/krx_quant/krx_etf_probe.py`)
 

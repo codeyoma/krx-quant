@@ -91,6 +91,7 @@ from typing import Any, Literal
 
 from aiohttp import web
 
+from krx_quant import loki
 from krx_quant.algorithms import Algorithm, KindAlgorithm
 from krx_quant.backfill import MINUTE_BARS_TR, read_bars, stock_bars_path, stored_bars
 from krx_quant.base_rates import read_base_rates
@@ -332,6 +333,8 @@ async def _status(request: web.Request) -> web.Response:
     live_status = request.app.get(LIVE_STATUS_KEY)
     if live_status is not None:
         body["kis"] = live_status()
+    if request.app[MODE_KEY] == "live":  # the collector's log lines' copy in Loki (#358)
+        body["loki"] = loki.status_json()
     return _json(body)
 
 

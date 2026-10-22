@@ -15,7 +15,7 @@ from typing import Any
 import aiohttp
 from aiohttp import web
 
-from krx_quant import kis
+from krx_quant import kis, loki
 from krx_quant.algorithms import ALGORITHMS, DAILY_ALGORITHMS, KIND_ALGORITHMS, load_models
 from krx_quant.api import create_app
 from krx_quant.archive import NIGHTLY_ARCHIVE, archive
@@ -437,6 +437,8 @@ async def run_collector(
                 )
             if (logs := root_of(settings)) is not None:  # the log files' days and cap (#356)
                 background.append(asyncio.create_task(keep_logs(logs, Keep.of(settings), now)))
+            if loki.active() is not None:  # the log-absence alert's line, from this loop (#358)
+                background.append(asyncio.create_task(loki.keep_heartbeat()))
             if settings.cost_budget is not None:
                 background.append(asyncio.create_task(keep_costs(settings, alerts, now)))
             if settings.restart_at is not None:

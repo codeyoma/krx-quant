@@ -21,6 +21,7 @@ import boto3
 from aiohttp import web
 from botocore.exceptions import BotoCoreError, ClientError
 
+from krx_quant import loki
 from krx_quant.algorithms import ALGORITHMS, KIND_ALGORITHMS, RegistrationError
 from krx_quant.archive import run_archive
 from krx_quant.backfill import run_backfill
@@ -65,6 +66,7 @@ from krx_quant.prevalidation import (
     prevalidate,
     report_path,
 )
+from krx_quant.redaction import secrets_of
 from krx_quant.replay import replay_day
 from krx_quant.rescore import EngineRunning, rescore
 from krx_quant.signal_review import DEFAULT_DAYS as SIGNAL_REVIEW_DAYS
@@ -870,9 +872,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
-    # This process's lines also go to its file under state/logs (#356), with its exit code.
+    # This process's lines also go to its file under state/logs (#356), with its exit code, and
+    # to Loki when it is set (#358), masked.
+    values = read_values(None, Path(".env"))
     files = open_process_log(
-        args.command, sys.argv[1:] if argv is None else argv, read_values(None, Path(".env"))
+        args.command, sys.argv[1:] if argv is None else argv, values, _log_secrets(values)
     )
     code, why = 1, None
     try:
@@ -895,6 +899,16 @@ def main(argv: list[str] | None = None) -> int:
         if files is not None:
             files.close(code, why)
     return code
+
+
+def _log_secrets(values: dict[str, str]) -> tuple[str, ...]:
+    """What the lines sent to Loki mask (#358): the settings' secrets, read leniently as
+    ``doctor`` reads them (a malformed setting is the command's to report). None to mask
+    unless Loki is set."""
+    if not loki.configured(values):
+        return ()
+    settings, _ = doctor_settings(values, None)
+    return secrets_of(settings)
 
 
 def _command(args: argparse.Namespace) -> int:

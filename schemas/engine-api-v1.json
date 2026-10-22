@@ -92,10 +92,12 @@
             }
           ]
         },
-        "kis": {"$ref": "#/$defs/kis"}
+        "kis": {"$ref": "#/$defs/kis"},
+        "loki": {"$ref": "#/$defs/loki"}
       },
       "if": {"properties": {"mode": {"enum": ["live", "demo"]}}},
-      "then": {"required": ["kis"]}
+      "then": {"required": ["kis"]},
+      "allOf": [{"if": {"properties": {"mode": {"const": "live"}}}, "then": {"required": ["loki"]}}]
     },
     "training": {
       "description": "The latest night's training as the 08:00 swap saw it. #355: on a server that trains, also before any night's list was stored: day and finalized_at null, promoted and reports empty, applied false.",
@@ -147,6 +149,22 @@
             }
           }
         }
+      }
+    },
+    "loki": {
+      "description": "Live only (#358): the collector's log lines' copy in Grafana Cloud Loki. Off: enabled false, the reason, the counts 0 and the times null.",
+      "type": "object",
+      "required": ["enabled", "reason", "sent", "dropped", "buffered", "last_success_at", "last_error", "last_error_at"],
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "reason": {"type": ["string", "null"], "description": "Why nothing is sent; null while it sends"},
+        "sent": {"type": "integer", "minimum": 0},
+        "dropped": {"type": "integer", "minimum": 0},
+        "buffered": {"type": "integer", "minimum": 0},
+        "last_success_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]},
+        "last_error": {"type": ["string", "null"], "description": "The last failure's kind: HTTP 503, URLError(TimeoutError); never its text"},
+        "last_error_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]}
       }
     },
     "kis": {

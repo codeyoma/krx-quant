@@ -41,7 +41,7 @@ from krx_quant.cost_guard import training_stopped
 from krx_quant.daily import DailyAlgorithm
 from krx_quant.engine import PredictionEngine
 from krx_quant.feeds.base import KST, kst_day
-from krx_quant.log_files import KRX_QUANT, night_file, run_logged
+from krx_quant.log_files import KRX_QUANT, Child, night_file, run_logged
 from krx_quant.log_files import TRAINING as TRAINING_LOGS
 from krx_quant.market_calendar import MarketCalendar, next_on_trading_day
 from krx_quant.model_shelf import Shelf
@@ -481,12 +481,14 @@ async def _train(
 ) -> Failure | None:
     """Run the night's training; None if it finished, else why not: the exit code and the last
     step it started (#355), also when it is stopped at ``timeout``. Its whole output and exit
-    code also go to the night's file as they come (``training/<day>.log`` under ``logs``, #356)."""
+    code also go to the night's file as they come (``training/<day>.log`` under ``logs``, #356),
+    and to Loki when it is set, labelled ``process="training"`` (#358)."""
     ran = await run_logged(  # read as it comes: what it wrote is kept if it is stopped
         (*command, "--day", day.isoformat()),
         timeout,
         night_file(logs, TRAINING_LOGS, day),
         merge=True,  # stdout and stderr in the order written
+        child=Child.training(day),  # its lines' copy in Loki (#358)
     )
     code = None if ran.timed_out else ran.exit_code
     text = ran.stdout.strip()

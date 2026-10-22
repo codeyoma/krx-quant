@@ -20,11 +20,12 @@ The output of `krx-quant doctor`, masked (secrets, server addresses), with no ma
 1. Engine: `commit`, `started_at`, `mode`, `phase`.
 2. KIS: `kis.connected`, `kis.last_frame_at`, `kis.seconds_since_frame`, then one line per feed and key: `feed key last_received_at seconds_since gap`.
 3. Today's PINGPONG heartbeats: total, the last one, the longest silence between two, the count per hour.
-4. The engine's latest WARNING and ERROR log lines (the last 20 since it started). Only the code's message templates: values other than dates, times, booleans and name-shaped words show as `…`, exceptions as their type, other libraries' lines as logger and level. For full lines, ask the user for a log bundle (below).
+4. The engine's latest WARNING and ERROR log lines (the last 20 since it started). Only the code's message templates: values other than dates, times, booleans and name-shaped words show as `…`, exceptions as their type, other libraries' lines as logger and level. For full lines, query Loki ([server-logs.md](server-logs.md)), else ask the user for a log bundle (below).
 5. Scheduled jobs: last runs, jobs that never ran to an end, results not posted yet.
 6. Disk free under the data and state directories, and memory.
 7. The nightly training (#355): the last night the morning swap applied, the trading nights not applied since, and the latest nights' outcomes (exit code, last step started), from `state/training_nights.json`.
 8. The log files under `state/logs` (#356): per kind (`engine`, `training`, `jobs`, `commands`) the number of files, their size, the oldest and the latest day; the bundles. Counts only, never a line.
+9. The log lines' copy in Grafana Cloud Loki (#358), as `/v1/status`'s `loki` says: on or off (and why), lines sent, dropped and buffered, the last success, the last failure's kind (`HTTP 503`).
 
 Full description: `docs/operations.md`, "서버 상태 보기 (#322)".
 
@@ -38,6 +39,8 @@ The engine may be down or restarting (the 06:00 deploy, the 07:20 restart), or `
 `doctor` still prints when a malformed setting keeps the engine from starting: the error comes right under its heading (`설정 오류: …`).
 
 ## Reading a log bundle
+
+Look in Loki first: the same lines, masked the same way, are queryable there without asking the user ([server-logs.md](server-logs.md)). Ask for a bundle when Loki lacks them: before #358 was deployed, a killed process's last seconds, lines dropped while Loki was unreachable, or more than Loki's 14 days.
 
 The server keeps every process's log lines in `state/logs/` (#356): `engine/<KST day>.log`, `training/<night>.log` (the nightly training's whole output and exit code), `jobs/<job>/<night>.log` (a scheduled job's run), `commands/<command>/<KST day>.log` (commands run by hand). They outlive the daily deploy, unlike `docker compose logs`. When you need them, ask the user for a bundle; the steps are in `docs/operations.md`, "로그 파일과 꾸러미 (#356)":
 

@@ -59,6 +59,7 @@
 | `scheduled.py`, `github.py`, `redaction.py`, `forbidden.py` | 예약 작업(#215): 작업 목록(`JOBS`. 사전 검증 작업은 알고리즘 등록 목록에서 만든다, #204)과 밤마다 돌리는 스케줄러, 상태 파일, GitHub 이슈 댓글과 라벨, 올리기 전 가림, 저장소 검사(`scripts/check_forbidden.py`)와 가림이 같이 쓰는 금지 패턴([operations.md](operations.md#예약-작업-215)) |
 | `doctor.py`, `snapshot.py` | 서버 요약(#322): 읽기 전용 `krx-quant doctor`(엔진의 커밋과 시작 시각, KIS 연결과 피드·키별 마지막 수신, 오늘의 PINGPONG, 최근 WARNING·ERROR 로그, 예약 작업, 디스크와 메모리, 밤 학습(#355), 로그 폴더(#356)를 시세 값 없이 가려서)와, `needs-server-snapshot` 라벨이 붙은 이슈에 그 요약을 댓글로 남기고 라벨을 떼는 수집기의 확인(3분마다, 이슈마다·시간마다 한도)([operations.md](operations.md#서버-상태-보기-322)) |
 | `log_files.py`, `logs_bundle.py` | 로그 파일(#356): 프로세스 종류마다 하루 한 파일(`state/logs/engine/<날>.log`, 엔진이 띄운 밤 학습·예약 작업의 출력 전체가 든 `training/<밤>.log`, `jobs/<작업>/<밤>.log`, 손으로 돌린 명령의 `commands/<명령>/<날>.log`), `KRX_LOG_DAYS`·`KRX_LOG_MAX_MB` 안에서 지우기, 가린 꾸러미 `krx-quant logs-bundle`([operations.md](operations.md#로그-파일과-꾸러미-356)) |
+| `loki.py` | 로그 줄의 사본을 Grafana Cloud Loki로(#358): 프로세스마다 스레드 하나가 가려서 묶어 보내고, 실패하면 물러났다 다시 보내고, 버퍼가 넘치면 버리고 센다. 레이블은 `service`, `process`, `level`뿐. 엔진이 띄운 학습·작업의 줄은 엔진이 파일에 옮기는 자리에서 보낸다. 엔진의 1분 heartbeat, `doctor` 9절과 `/v1/status`의 `loki`([operations.md](operations.md#grafana-cloud-loki로-보내는-로그-358)) |
 | `macro.py`, `regime.py` | 매크로 지표 수집(07:30), 일일 국면 |
 | `econ_calendar.py` | 경제 캘린더 수집(15분마다, TradingView), `/v1/calendar`의 답 (#150) |
 | `flow.py` | `/v1/symbols/{symbol}/flow`의 답(#306): 녹화한 프로그램매매, 회원사, 외국인·기관 추정 가집계를 그날 1분마다(앞 값을 끌어오지 않는다), 추정 구간, 상위 5개 창구, 지금까지의 합과 전 거래일 같은 시각의 합, 확정 일별 수급 |
@@ -818,6 +819,12 @@ v1에서는 쓰지 않는다. 조사 결과는 [paid-data.md](paid-data.md)에 �
   - AWS 프로젝트 지출 한도($100)는 아직 걸려 있다. 한도에 닿으면 프로젝트 전체가 일시정지되어 상시 서버도 멈춘다. Cost Guard가 꺼진 지금은 이 한도만 비용을 막으므로 낮추거나 없애지 않는다. Spot 학습과 Cost Guard를 다시 켜면, Cost Guard가 먼저 반응하도록 한도를 상한보다 높게 올릴지 그때 사용자가 정한다.
 
   > **바뀜** (2026-10-11, #67): "AWS Budgets로 $50과 $80에 텔레그램 알림, $100에서 Spot 학습 정지(계획)" → AWS Budgets 알림 대신 상시 서버가 예산을 읽어 알리고 스케줄을 끄고 켠다. 이유: 텔레그램 토큰을 서버 `.env` 밖(Lambda, SSM)에 두지 않기 위해서다(사용자와 정함). 서버가 꺼져 있으면 알림도 상한도 서버가 다시 뜰 때까지 늦는다.
+- **관측(로그).** 모든 프로세스의 로그 줄은 stdout과 상태 폴더의 파일에 남는다(`state/logs/`, 하루 한 파일, #356). 이 파일이 원본이다. 에이전트는 서버에 들어갈 수 없어서(#322), 같은 줄을 가려서 Grafana Cloud Loki(무료: 월 50 GB 수집, 14일 보관, 스택은 Japan `ap-northeast-1`)로도 보내고 에이전트가 거기서 질의한다(#358, 2026-10-23 사용자 결정).
+  - 프로세스 안에서 HTTPS로 Loki의 push API에 보낸다. 수집 에이전트(Grafana Alloy, Promtail)는 2 GB 서버에 무거워 두지 않는다. 서버는 밖으로만 연결한다.
+  - 레이블은 적고 고정이다(`service`, `process`, `level`). 작업 이름, 밤, 종목은 줄 안에 둔다(Loki의 카디널리티).
+  - 묶음(크기와 3초), 재시도(1–60초 물러남), 버퍼 상한(넘치면 버리고 센다). 이벤트 루프는 Loki를 기다리지 않고, Loki의 실패가 엔진을 세우지 않는다. 끝날 때 남은 것을 5초 안에 보낸다. SIGKILL로 죽은 프로세스의 마지막 몇 초는 파일에만 남는다.
+  - 비밀값과 서버 주소는 `doctor`의 규칙으로 가린다. KIS 시세 값은 사용자의 비공개 스택이라 남는다. 토스와 KRX Open API의 값은 보내지 않는다(4.7: 토스의 값이 들 수 있는 줄은 틀만, KRX Open API 값은 엔진이 줄에 찍지 않는다).
+  - 알림: 엔진의 텔레그램 알림은 그대로 두고, Grafana의 알림 규칙 셋이 엔진이 스스로 보내지 못하는 것(엔진 로그 끊김, 엔진이 알리지 않는 ERROR, 엔진이 알리지 못한 밤 학습 실패)만 같은 텔레그램 대화로 보낸다([operations.md](operations.md#grafana-알림-규칙-358)). 규칙은 사용자의 확인을 받고 에이전트가 만든다.
 - **장애 알림.** 텔레그램 봇으로 보낸다. 대상은 KIS 연결 끊김(닫힘 없이 60초 조용한 연결 포함, #308), 데이터 지연, 장 마감 업로드 실패, 엔진 API 실패, 밤 학습 실패다. 밤 학습 요약, 모델 교체, 은퇴 후보, 서버 자동 업데이트 결과도 보낸다. 예측 신호(`[신호]`, 최종 합의가 충분히 확실하고 정식 알고리즘 N개 이상이 같은 방향일 때. VI·서킷브레이커, 기준가 없음, 목표 시각 지남이면 막는다, #80)는 선택이고 기본은 끈다(#19, `KRX_SIGNAL_ALERT`). 전체 목록은 [operations.md](operations.md#6-장애-대응)에 있다. 비용 경고와 Spot 학습 결과가 오지 않은 것도 알린다(#23). 시간 초과나 CPU 예산으로 예측이 빠진 날은 장 마감 뒤 한 번 알린다(#73).
 
 ## 10. Fincept 화면

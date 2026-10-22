@@ -30,6 +30,7 @@ from krx_quant.clock import FakeClock
 from krx_quant.github import GitHub
 from krx_quant.kind_registry import kind_named
 from krx_quant.kinds import DIRECTION
+from krx_quant.log_files import Child
 from krx_quant.prevalidation import MIN_DAYS, REGISTERED_BEFORE, LastReport, code_digest, report_path
 from krx_quant.scheduled import (
     AGAIN,
@@ -264,7 +265,13 @@ class Prevalidates(Runs):
         super().__init__(clock)
         self.state_dir = state_dir
 
-    async def __call__(self, args: Sequence[str], timeout: timedelta, log_file: Path | None = None) -> Ran:
+    async def __call__(
+        self,
+        args: Sequence[str],
+        timeout: timedelta,
+        log_file: Path | None = None,
+        child: Child | None = None,
+    ) -> Ran:
         assert args[0] == "prevalidate"
         name = args[1]
         path = report_path(self.state_dir, name)

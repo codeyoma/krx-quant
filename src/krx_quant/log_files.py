@@ -25,6 +25,10 @@ training and jobs write theirs past midnight). A process prunes when it starts, 
 every hour (``keep_logs``); each removal is logged. ``krx-quant logs-bundle`` packs them, masked,
 into ``bundles/`` (``logs_bundle.py``), which is not pruned here and keeps its own few.
 ``KRX_LOG_DAYS=off`` writes and removes nothing.
+
+The same lines also go to Grafana Cloud Loki when it is set (``loki.py``, #358): a process's own
+from its start line to its end line (``open_process_log``), and those of a process the engine
+starts as they are copied here (``run_logged``'s ``child``), labelled with what it is (``Child``).
 """
 
 from __future__ import annotations
@@ -44,6 +48,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import TextIO
 
+from krx_quant import loki
 from krx_quant.config import DEFAULT_LOG_DAYS, DEFAULT_LOG_MAX_MB, Settings, SettingsError, log_keep
 from krx_quant.feeds.base import KST
 from krx_quant.training_nights import exit_text
@@ -144,8 +149,7 @@ class DayFile(logging.Handler):
 
     def note(self, level: int, text: str, error: BaseException | None = None) -> None:
         """A line of the process's own, in its file only (its start and its end)."""
-        exc_info = None if error is None else (type(error), error, error.__traceback__)
-        self.handle(logging.LogRecord(__name__, level, __file__, 0, text, None, exc_info))
+        self.handle(own_line(level, text, error))
 
     def _close_file(self) -> None:
         if self._stream is not None:
@@ -162,51 +166,96 @@ class DayFile(logging.Handler):
         super().close()
 
 
-class ProcessLog:
-    """A process's own file (the engine's, a command's) from its start line to its end line."""
+def own_line(level: int, text: str, error: BaseException | None = None) -> logging.LogRecord:
+    """A line of the process's own (its start and its end), for its handlers only."""
+    exc_info = None if error is None else (type(error), error, error.__traceback__)
+    return logging.LogRecord(__name__, level, __file__, 0, text, None, exc_info)
 
-    def __init__(self, handler: DayFile, what: str) -> None:
+
+class ProcessLog:
+    """A process's own file (the engine's, a command's) and its copy in Loki (#358), from its
+    start line to its end line."""
+
+    def __init__(self, handler: DayFile | None, what: str, shipped: loki.LokiHandler | None = None) -> None:
         self.handler = handler
+        self.shipped = shipped
         self.what = what
         self._began = time.monotonic()
 
     def close(self, code: int | None, why: BaseException | str | None = None) -> None:
-        """The end line (the exit code and why, or the exception that ended it), and no more lines."""
+        """The end line (the exit code and why, or the exception that ended it), and no more
+        lines. Loki gets it first, with what is left within ``loki.EXIT_SECONDS``; the file then
+        says how many lines Loki did not get, and ends with it."""
         after = duration(time.monotonic() - self._began)
         if isinstance(why, BaseException):
-            self.handler.note(logging.ERROR, f"{self.what} ended by {type(why).__name__} after {after}", why)
+            level, text, error = (
+                logging.ERROR,
+                f"{self.what} ended by {type(why).__name__} after {after}",
+                why,
+            )
         else:
             reason = f" ({why})" if why else ""
             level = logging.INFO if code == 0 else logging.ERROR
-            self.handler.note(level, f"{self.what} ended: {_exit(code)}{reason} after {after}")
-        logging.getLogger().removeHandler(self.handler)
-        self.handler.close()
+            text, error = f"{self.what} ended: {_exit(code)}{reason} after {after}", None
+        end = own_line(level, text, error)
+        if self.shipped is not None:
+            self.shipped.handle(end)
+            unsent = loki.stop()
+            if unsent:
+                log.warning("%d log lines were not sent to Loki; this process's file has them", unsent)
+        if self.handler is not None:
+            self.handler.handle(end)
+            logging.getLogger().removeHandler(self.handler)
+            self.handler.close()
 
 
-def open_process_log(command: str, argv: Sequence[str], values: Mapping[str, str]) -> ProcessLog | None:
-    """This process's file: the engine's (``collect``) or the command's, with a start line; the
-    folder pruned first. None if the engine started this process (it writes what this one does)
-    or ``KRX_LOG_DAYS`` is off. ``values`` are the raw settings (``config.read_values``): a
-    malformed one is the command's to report, and the files meanwhile go by the defaults."""
+def open_process_log(
+    command: str, argv: Sequence[str], values: Mapping[str, str], secrets: Sequence[str] = ()
+) -> ProcessLog | None:
+    """This process's file, the engine's (``collect``) or the command's, with a start line, the
+    folder pruned first; and its lines sent to Loki if it is set (``loki.start``, masked with
+    ``secrets``). None if the engine started this process (it writes and sends what this one
+    does), or neither is on. ``values`` are the raw settings (``config.read_values``): a malformed
+    one is the command's to report, and the files meanwhile go by the defaults."""
     if os.environ.get(BY_PARENT):
         return None
     try:
         days, max_mb = log_keep(values)
     except SettingsError:
         days, max_mb = DEFAULT_LOG_DAYS, DEFAULT_LOG_MAX_MB
-    if days is None:
-        return None
     root = Path(values.get("KRX_STATE_DIR", "state")) / LOGS
-    handler = DayFile(root / ENGINE if command == "collect" else root / COMMANDS / command)
-    logging.getLogger().addHandler(handler)
+    handler = None
+    if days is not None:
+        handler = DayFile(root / ENGINE if command == "collect" else root / COMMANDS / command)
+        logging.getLogger().addHandler(handler)
+    engine = command == "collect"
+    shipped, why_not = loki.start(
+        values,
+        secrets,
+        loki.ENGINE if engine else loki.COMMAND,
+        "" if engine else f"command={command}",
+        formatter(),
+    )
+    if handler is None and shipped is None:
+        if loki.configured(values):
+            log.warning("not sending the log lines to Loki: %s", why_not)
+        return None
     what = command_text(["krx-quant", *argv])
     commit = values.get("KRX_COMMIT", "").strip() or "unknown"
-    handler.note(logging.INFO, f"{what} started (pid {os.getpid()}, commit {commit[:12]})")
-    try:
-        prune(root, Keep(days, max_mb * MB), datetime.now(KST).date())
-    except Exception:
-        log.exception("could not prune the log files")
-    return ProcessLog(handler, what)
+    start = own_line(logging.INFO, f"{what} started (pid {os.getpid()}, commit {commit[:12]})")
+    for each in (handler, shipped):
+        if each is not None:
+            each.handle(start)
+    if shipped is not None:
+        log.info("sending the log lines to Loki too (process=%s)", shipped.process)
+    elif loki.configured(values):
+        log.warning("not sending the log lines to Loki: %s", why_not)
+    if days is not None:
+        try:
+            prune(root, Keep(days, max_mb * MB), datetime.now(KST).date())
+        except Exception:
+            log.exception("could not prune the log files")
+    return ProcessLog(handler, what, shipped)
 
 
 # Retention
@@ -368,21 +417,46 @@ class Ran:
     timed_out: bool = False
 
 
-class ChildLog:
-    """The file of a process the engine started (None: no file): its lines as they come."""
+@dataclass(frozen=True)
+class Child:
+    """What a process the engine starts is, for its lines' copy in Loki (#358): the ``process``
+    label, and the fields each of its lines starts with (its night, its job)."""
 
-    def __init__(self, path: Path | None) -> None:
+    process: str
+    fields: str
+
+    @classmethod
+    def training(cls, night: date) -> Child:
+        return cls(loki.TRAINING, f"night={night.isoformat()}")
+
+    @classmethod
+    def job(cls, name: str, night: date) -> Child:
+        return cls(loki.JOB, f"job={name} night={night.isoformat()}")
+
+
+class ChildLog:
+    """The file of a process the engine started (None: no file): its lines as they come; and
+    their copy in Loki, labelled as ``child`` says (None: none)."""
+
+    def __init__(self, path: Path | None, child: Child | None = None) -> None:
         self.path = path
+        self.child = child
         self._file: TextIO | None = None
         self._format = formatter()
-        self._done = path is None
+        self._writing = path is not None
+        self._done = False
 
     def note(self, level: int, text: str) -> None:
         """A line of the engine's about the process (its start and its end), as a log line."""
-        self.write(self._format.format(logging.LogRecord(__name__, level, __file__, 0, text, None, None)))
+        line = self._format.format(logging.LogRecord(__name__, level, __file__, 0, text, None, None))
+        self.write(line, loki.LEVELS[logging.getLevelName(level)])
 
-    def write(self, line: str) -> None:
-        if self._done or self.path is None:
+    def write(self, line: str, level: str = "info") -> None:
+        """A line into the file, and to Loki at ``level``."""
+        if self._done:
+            return
+        self._ship(line, level)
+        if not self._writing or self.path is None:
             return
         try:
             if self._file is None:
@@ -391,36 +465,57 @@ class ChildLog:
             self._file.write(line + "\n")
             self._file.flush()
         except OSError as e:  # the process runs on; its output is still read
-            self.close()
+            self._close_file()
             log.warning("could not write the log file %s: %s", self.path, e)
 
+    def _ship(self, line: str, level: str) -> None:
+        if self.child is not None and (shipper := loki.active()) is not None:
+            shipper.put(self.child.process, level, f"{self.child.fields} {line}")
+
     async def copy(self, stream: asyncio.StreamReader, sink: bytearray) -> None:
-        """Read ``stream`` to its end into ``sink``, each whole line into the file too."""
+        """Read ``stream`` to its end into ``sink``, each whole line into the file too; a line
+        without a level of its own goes to Loki at the one before it."""
         pending = b""
+        level = "info"
         while chunk := await stream.read(1 << 16):
             sink += chunk
             *lines, pending = (pending + chunk).split(b"\n")
-            for line in lines:
-                self.write(line.rstrip(b"\r").decode(errors="replace"))
+            for raw in lines:
+                line = raw.rstrip(b"\r").decode(errors="replace")
+                level = loki.level_of(line, level)
+                self.write(line, level)
         if pending:
-            self.write(pending.decode(errors="replace"))
+            line = pending.decode(errors="replace")
+            self.write(line, loki.level_of(line, level))
 
-    def close(self) -> None:
-        self._done = True
+    def _close_file(self) -> None:
+        self._writing = False
         if self._file is not None:
             with contextlib.suppress(OSError):
                 self._file.close()
             self._file = None
 
+    def close(self) -> None:
+        """No more lines; what Loki has not been sent of them goes now."""
+        self._done = True
+        self._close_file()
+        if self.child is not None and (shipper := loki.active()) is not None:
+            shipper.flush()
+
 
 async def run_logged(
-    command: Sequence[str], timeout: timedelta, path: Path | None = None, *, merge: bool = False
+    command: Sequence[str],
+    timeout: timedelta,
+    path: Path | None = None,
+    *,
+    merge: bool = False,
+    child: Child | None = None,
 ) -> Ran:
     """Run ``command``, a process of the engine's (``BY_PARENT``), and read its output; each
-    line also goes to ``path``, between a start line and one with its exit code. ``merge`` puts
-    stderr into stdout, in the order written. It is killed at ``timeout`` (what it wrote by then
-    is kept), and when the engine stops (cancelled)."""
-    out = ChildLog(path)
+    line also goes to ``path``, between a start line and one with its exit code, and to Loki as
+    ``child`` labels it (#358). ``merge`` puts stderr into stdout, in the order written. It is
+    killed at ``timeout`` (what it wrote by then is kept), and when the engine stops (cancelled)."""
+    out = ChildLog(path, child)
     what = command_text(shown(command))
     try:
         process = await asyncio.create_subprocess_exec(

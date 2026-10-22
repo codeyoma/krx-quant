@@ -236,6 +236,14 @@ class Settings:
     # writes none.
     log_days: int | None = None
     log_max_mb: int = DEFAULT_LOG_MAX_MB
+    # Grafana Cloud Loki (#358): each process's log lines also go to
+    # ``<KRX_LOKI_URL>/loki/api/v1/push`` (basic auth KRX_LOKI_USER and KRX_LOKI_TOKEN, a
+    # ``logs:write`` token), a copy an agent queries (``loki.py``). All three set, or nothing is
+    # sent. Read again from the raw settings where the lines are sent (``loki.target_of``): a
+    # malformed one turns the copy off, never the process. Masked as secrets.
+    loki_url: str | None = field(default=None, repr=False)
+    loki_user: str | None = field(default=None, repr=False)
+    loki_token: str | None = field(default=None, repr=False)
 
     @classmethod
     def from_env(
@@ -461,6 +469,9 @@ class Settings:
             krx_openapi_url=values.get("KRX_OPENAPI_URL", DEFAULT_KRX_OPENAPI_URL).strip().rstrip("/"),
             log_days=log_days,
             log_max_mb=log_max_mb,
+            loki_url=values.get("KRX_LOKI_URL", "").strip() or None,
+            loki_user=values.get("KRX_LOKI_USER", "").strip() or None,
+            loki_token=values.get("KRX_LOKI_TOKEN", "").strip() or None,
         )
 
 
