@@ -553,6 +553,27 @@ def test_the_command_reports_a_registry_that_fails_the_registration_check_as_an_
     assert "twin: the same features as contrarian" in capsys.readouterr().err
 
 
+async def test_it_trains_on_samples_that_say_their_day_was_recorded_as_the_nightly_training_does(
+    tmp_path: Path,
+) -> None:
+    class Tracing(Contrarian):  # what a fold-cutting algorithm (Neyman) reads: which days were recorded
+        references: list[set[str | None]] = []
+
+        def fit(self, samples: Sequence[Sample]) -> Model:
+            self.references.append({s.reference for s in samples})
+            return super().fit(samples)
+
+    s = settings(tmp_path, DAYS[:3])
+    candidate = Tracing("tracing")
+
+    result = await prevalidate(s, "tracing", algorithms=[ALPHA, candidate], now=AFTER)
+
+    assert result.days == DAYS[:3]
+    assert candidate.references == [{"mid"}, {"mid"}], "recorded days, as the nightly training says"
+    model = report(s, "tracing")["models"][DAYS[2].isoformat()]
+    assert model.startswith("tracing-20260915-"), "versions do not read the reference"
+
+
 async def test_a_day_with_nothing_the_algorithm_can_learn_from_is_predicted_by_its_defaults(
     tmp_path: Path,
 ) -> None:

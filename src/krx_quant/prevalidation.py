@@ -834,7 +834,10 @@ class _WalkForward:
                 if not any(s.label is not None for s in answered):
                     return self._algorithm.default_model()
                 return kind_algorithm.fit(answered)
-            training = [s for found in days for s in found.samples]
+            # As the nightly training does (``nightly._samples``): each sample names its day's
+            # reference price, recorded ("mid") or backfilled ("close"), which Neyman's folds
+            # and a model's days by source read (#283).
+            training = [s for found in days for s in found.of(self._algorithm.features)]
             if not any(s.outcome is not None for s in training):
                 return self._algorithm.default_model()
             return (self._fit or cast(Algorithm, self._algorithm).fit)(training)
