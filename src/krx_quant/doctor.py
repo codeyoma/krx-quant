@@ -256,6 +256,7 @@ def doctor_settings(
         github_token=text("KRX_GITHUB_TOKEN"),
         toss_client_id=text("TOSS_CLIENT_ID"),
         toss_client_secret=text("TOSS_CLIENT_SECRET"),
+        krx_openapi_key=text("KRX_OPENAPI_KEY"),
         object_store=text("KRX_OBJECT_STORE"),
         s3_endpoint_url=text("KRX_S3_ENDPOINT_URL"),
         bind_address=text("KRX_BIND_ADDRESS"),
