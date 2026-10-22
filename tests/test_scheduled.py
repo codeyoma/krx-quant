@@ -42,6 +42,7 @@ from krx_quant.scheduled import (
     GAPS_PROBE,
     INTERRUPTED,
     JOBS,
+    KRX_ETF_PROBE,
     NAV_PROBE,
     NET_BUYS_PROBE,
     NIGHT_PROBE,
@@ -1228,7 +1229,7 @@ def test_the_gaps_probe_runs_once_on_the_first_night_and_posts_to_344() -> None:
     assert GAPS_PROBE.timeout == timedelta(minutes=15), "short: the simulations and pre-validations follow"
     assert [t.issue for t in GAPS_PROBE.targets] == [344]
     assert GAPS_PROBE.label == ("ready-for-agent",)
-    waited_on = (EXPECTED_OPEN_KRX_PROBE, CLOSE_REFRESH_PROBE, NAV_PROBE, DIVIDEND_PROBE)
+    waited_on = (EXPECTED_OPEN_KRX_PROBE, CLOSE_REFRESH_PROBE, NAV_PROBE, DIVIDEND_PROBE, KRX_ETF_PROBE)
     assert all(JOBS.index(probe) < JOBS.index(GAPS_PROBE) for probe in waited_on), "they go first"
     first = next(i for i, j in enumerate(JOBS) if j.name.startswith(("prevalidate-", "simulate-")))
     assert JOBS.index(GAPS_PROBE) < first, "before the simulations and pre-validations"

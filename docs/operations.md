@@ -38,6 +38,11 @@
 7. **서버 개통**: 2.2절을 따라 한다.
 8. **GitHub 토큰** (선택, #218): 예약 작업이 결과를 이슈 댓글로 남기게 한다(3장 "예약 작업 (#215)"의 "토큰"). 없어도 작업은 돌고 결과는 서버에 남는다. 에이전트가 라벨로 요청하는 서버 요약(#322, 6장 "서버 상태 보기 (#322)")도 이 토큰으로 올린다. 없으면 요청을 보지 않는다.
 9. **토스증권 Open API 클라이언트** (선택, #235): 일별 수급의 보조 출처이자 외국인 보유수량의 주 출처다. WTS 설정 > Open API에서 클라이언트를 만들고, 서버의 고정 공인 IP를 허용 IP에 넣고, 서버 `.env`에 `TOSS_CLIENT_ID`, `TOSS_CLIENT_SECRET`을 넣는다(2장 "토스증권 Open API 클라이언트 (#235)"). 없으면 토스 조회만 건너뛴다. 그러면 차트의 일별 수급 지표 중 외국인 보유수량·지분율이 비고, 다른 여섯은 KIS로만 채운다(#226). 수집기는 시작할 때 이 클라이언트로 종목의 회사 이름도 읽고(#250), 없으면 KIS 종목 마스터의 이름을 쓴다.
+10. **KRX Open API 인증키** (선택, #305): 단일종목 ±2배 ETF의 지난날 순자산과 상장좌수를 KRX의 "ETF 일별매매정보"(`etf_bydd_trd`)에서 받는다([krx-openapi.md](krx-openapi.md)). 무료이고 비상업 이용만 된다.
+    1. KRX Data Marketplace에 가입하고, https://openapi.krx.co.kr 의 마이페이지에서 API 인증키를 신청한다.
+    2. 서비스 이용 → 증권상품 → ETF 일별매매정보 → API 이용신청(12M, 신청 목적 "개인 연구")을 한다. 인증키와 서비스 둘 다 KRX의 승인을 기다린다(영업일 09:00부터). 인증키만으로는 부를 수 없다(401).
+    3. 서비스가 승인되면 서버 `.env`에 `KRX_OPENAPI_KEY=<인증키>`를 넣고 `docker compose up -d`를 한다(2장 "설정 값 전체"). 그 밤 예약 작업 `probe-krx-etf-305`가 한 번 돌아 #305에 남긴다. 실패하면(예: 서비스가 아직 승인되지 않아 401) 그다음 밤마다 다시 돈다(3장 "예약 작업 (#215)", 2장 "KRX Open API ETF 일별매매정보 확인 (#305)").
+    4. 해마다 이용 기간이 끝나기 전에 다시 신청한다(만료 30일 전부터, 저절로 갱신되지 않는다). 새 인증키를 받으면 `.env`의 값을 바꾼다. 이용 기간이 끝나면 받은 데이터도 쓸 수 없다(약관).
 
 ## 2. 개통
 
@@ -112,6 +117,7 @@ aws iam create-access-key --user-name krx-quant-engine
    | `KRX_ECOS_API_KEY`, `KRX_FRED_API_KEY` | 1.5에서 받은 매크로 키(선택). 비워 두면 그 출처를 건너뛴다 |
    | `KRX_GITHUB_TOKEN` | 1.8의 GitHub 토큰(선택). 비워 두면 예약 작업의 결과가 서버(`state/scheduled.json`)에 남는다 |
 | `TOSS_CLIENT_ID`, `TOSS_CLIENT_SECRET` | 1.9의 토스증권 Open API 클라이언트(선택, #235). 비워 두면 토스 조회를 건너뛴다 |
+| `KRX_OPENAPI_KEY` | 1.10의 KRX Open API 인증키(선택, #305). 비워 두면 KRX를 부르지 않고, 예약 작업 `probe-krx-etf-305`는 기다린다 |
 
    나머지 설정은 아래 "설정 값 전체"에 있다. `.env.example`에서 주석으로 둔 변수는 그대로 두면 기본값을 쓴다.
 7. 스크립트를 한 번 더 실행한다. 이번에는 엔진을 빌드하고 띄운다.
@@ -160,7 +166,7 @@ curl http://krx-quant:8080/v1/macro
 
 - 변수가 없으면 기본값을 쓴다. 값이 틀리면 명령이 `configuration error: ...`를 내고 끝난다(종료 코드 2).
 - 숫자는 따로 적지 않으면 0보다 커야 한다. 숫자 변수를 빈 값(`KRX_FEE_PERCENT=`)으로 두면 오류다.
-- 문자열 변수 중 `KRX_OBJECT_STORE`, AWS 키, 텔레그램 값, 선물 코드, `KRX_S3_ENDPOINT_URL`, `KRX_GITHUB_TOKEN`, `KRX_BIND_ADDRESS`, `TOSS_CLIENT_ID`, `TOSS_CLIENT_SECRET`은 빈 값이 "없음"이다.
+- 문자열 변수 중 `KRX_OBJECT_STORE`, AWS 키, 텔레그램 값, 선물 코드, `KRX_S3_ENDPOINT_URL`, `KRX_GITHUB_TOKEN`, `KRX_BIND_ADDRESS`, `TOSS_CLIENT_ID`, `TOSS_CLIENT_SECRET`, `KRX_OPENAPI_KEY`는 빈 값이 "없음"이다.
 
 | 변수 | 기본값 | 뜻과 범위 |
 |---|---|---|
@@ -168,6 +174,8 @@ curl http://krx-quant:8080/v1/macro
 | `KIS_REST_URL` | `https://openapi.koreainvestment.com:9443` | KIS REST 주소. 모의투자 주소는 `.env.example`에 있다 |
 | `TOSS_CLIENT_ID`, `TOSS_CLIENT_SECRET` | 없음 | 토스증권 Open API 클라이언트(#235, 비밀값). 일별 수급의 보조 출처이자 외국인 보유수량의 주 출처([toss-feeds.md](toss-feeds.md)), 그리고 화면 종목 패널의 회사 이름의 주 출처(#250). 없으면 토스를 부르지 않는다(`probe-supply`의 토스 절은 `skipped`, 일별 수급의 외국인 보유수량·지분율은 없음(#226), 회사 이름은 KIS 종목 마스터의 것). 예약 작업의 댓글에서 가린다 |
 | `TOSS_URL` | `https://openapi.tossinvest.com` | 토스증권 Open API 주소(테스트는 가짜 서버를 가리킨다) |
+| `KRX_OPENAPI_KEY` | 없음 | KRX Open API 인증키(#305, 비밀값). 서비스 "ETF 일별매매정보"(`etf_bydd_trd`)의 이용 신청이 승인된 것이어야 한다([krx-openapi.md](krx-openapi.md)). 요청 헤더 `AUTH_KEY`로만 보내고 주소와 출력에는 두지 않는다. 없으면 KRX를 부르지 않는다(`probe-krx-etf`는 `멈춤: KRX_OPENAPI_KEY가 없다`, 예약 작업 `probe-krx-etf-305`는 기다린다). 예약 작업의 댓글과 `doctor`에서 가린다 |
+| `KRX_OPENAPI_URL` | `https://data-dbg.krx.co.kr` | KRX Open API 주소(테스트는 가짜 서버를 가리킨다). 경로 `/svc/apis/etp/etf_bydd_trd.json`을 붙인다 |
 | `KIS_WS_URL` | `ws://ops.koreainvestment.com:21000` | KIS WebSocket 주소 |
 | `KIS_MASTER_URL` | `https://new.real.download.dws.co.kr/common/master` | 최근월물을 찾는 KIS 마스터 파일 주소. 토스가 이름을 주지 않은 종목의 회사 이름도 여기의 종목 마스터(`kospi_code.mst.zip`, `kosdaq_code.mst.zip`)에서 읽는다(#250) |
 | `KIS_WS_MAX_SUBSCRIPTIONS` | 없음(KIS가 거절할 때까지 모두 구독) | 세션당 실시간 구독 수. 넘는 구독은 REST로 바꾸거나 뺀다. 1 이상. `.env.example`은 41 |
@@ -682,6 +690,34 @@ docker compose run --rm engine check-closing-flow
 - 4절에서 녹화와 늘 같은 봉이 있으면(KRX `J` 봉일 것으로 본다), 그 봉으로 녹화가 없는 날의 체결대금을 채우는 PR을 연다(`J` 봉이면 `auctions.py`가 이미 묻는 그 봉의 거래량을 함께 남긴다). 그 PR이 [engine-api.md](engine-api.md#get-v1symbolssymbolclosing-flowdaysfromyyyy-mm-ddtoyyyy-mm-dd-305)의 ⚠를 실측으로 바꾼다. 둘 다 다르면 녹화만 쓰는 지금대로 두고 #305에 남긴다.
 - 2·3절로 15:20 행과 지난날 표가 날마다 생기는지 본다. 빠진 날이 있으면 수집기 로그(`no 15:20 closing demand of …`, `the history task's last step failed`)를 #305에 적는다.
 
+### KRX Open API ETF 일별매매정보 확인 (#305)
+
+KIS는 16종의 순자산 총액과 상장 주수를 오늘 값만 준다(2026-10-21 `probe-nav-305`). 그래서 사용자가 지난날 순자산을 KRX Open API의 "ETF 일별매매정보"(`etf_bydd_trd`)에서 받기로 정했다(2026-10-22, #305). 그 서비스가 이 상품들에 무엇을 주는지 서버에서 잰다. 문서로 읽은 것은 [krx-openapi.md](krx-openapi.md)에 있고 모두 ⚠다(`CODING_STANDARDS.md` "External data is probed before it is used").
+
+```bash
+docker compose run --rm engine probe-krx-etf
+```
+
+- 필요한 것: `KRX_OPENAPI_KEY`(1장 10번). 없으면 머리말 뒤에 `멈춤: KRX_OPENAPI_KEY가 없다`만 찍고 아무것도 묻지 않는다(종료 코드 1). KIS 키는 없어도 된다(그러면 8절을 건너뛴다).
+- 묻는 것: KRX에 상장 전 거래일(2026-05-26), 상장일(2026-05-27), 그 뒤 주마다 첫 거래일, 마지막 5거래일을 하루 한 번씩, 1초 간격으로(30번쯤). 인증키는 헤더 `AUTH_KEY`로만 보낸다. 3번 잇달아 실패하면(401 등) 나머지 날은 묻지 않는다. 상품 행이 하나라도 오면 KIS에 상품마다 ETF/ETN 현재가(`FHPST02400000`) 1번과 NAV 비교추이(일)(`FHPST02440200`, 상장 전 거래일부터 오늘까지 100행씩, 보통 3번)를 0.5초 간격으로 묻는다(60번쯤). KIS는 캐시된 접근 토큰을 만료될 때까지 쓴다(`probe-nav`와 같다). 10분이 지나면 더 묻지 않는다. 거래 일정은 서버의 `state/market_calendar.json`을 읽는다.
+- 내는 것: 맨 위에 상품 목록, 조회 방법, 물은 날. 그 아래 여덟 절이다([krx-openapi.md](krx-openapi.md)의 "탐사가 재는 것").
+  1. 날마다의 답: 행이 있는 날·빈 답·실패(401·403·429는 KRX FAQ의 뜻과 함께, 오류 본문은 키와 짧은 값만), 본문 키, 그날 행 수, 상품 행의 `BAS_DD`가 물은 날인지.
+  2. 필드: 서비스 페이지의 19개와 견준 있음·없음·더 있음, 모양, 천 단위 쉼표·`-`가 있는 필드, 순자산총액·상장좌수·NAV·시가총액·종가의 값이 있는 상품 행 수.
+  3. 종목코드: 상품 코드가 든 필드와 쓰는 법, 찾지 못한 상품.
+  4. 상품마다 상장일과 그 뒤 물은 거래일 중 행이 있는 날·없는 날. 상장 전 거래일의 상품 행.
+  5. 물은 때 마지막 거래일과 그 전 거래일이 들어와 있는지.
+  6. `LIST_SHRS`가 이웃한 거래일 사이와 더 떨어진 날 사이에 바뀐 수, 바뀐 상품. `MKTCAP ÷ TDD_CLSPRC = LIST_SHRS`인 행 수.
+  7. `INVSTASST_NETASST_TOTAMT = LIST_SHRS × NAV`가 맞는 단위(원·천원·백만원·억원)별 행 수.
+  8. KIS와 같은 날: 물은 날마다 KRX `NAV`와 KIS 일별 `nav`의 같음·다름, 그 전 거래일과 마지막 거래일의 KRX 순자산총액·상장좌수·NAV와 KIS 현재가의 `etf_ntas_ttam`(단위별)·`lstn_stcn`·`prdy_last_nav`·`nav`.
+- 개수, 날짜, 필드 이름과 모양, 같음·다름만 낸다. 시세 값(가격, NAV, 금액, 좌수)은 내지 않으므로 공개 이슈에 올려도 된다(KRX 약관은 제3자 제공을 막는다). 쓰는 것은 없다(KIS 토큰 캐시 빼고). 종료 코드: 행이 있는 답을 하루라도 받으면 0, 아니면 1이다.
+
+**예약 작업이 돌린다** (#215, 아래 "예약 작업 (#215)"). 서버 `.env`에 `KRX_OPENAPI_KEY`를 넣고 엔진을 다시 띄운 뒤(1장 10번) 첫 밤(거래일이 아니어도), 밤 학습이 끝난 뒤(22:30부터) `probe-krx-etf-305`가 한 번 돌려 출력 전체를 #305에 남긴다. 키가 없는 밤에는 조건이 거짓이라 아무 일도 없다. 다른 확인 작업 뒤, `probe-gaps-344` 앞, 수습 시뮬레이션과 사전 검증보다 먼저 돈다. 401·403 같은 실패(종료 코드 0이 아님)로 끝나면 그다음 밤마다 다시 돈다. 그래서 이용 신청을 고치면 손으로 할 일이 없다. 끝까지 돌면(종료 코드 0) 다시 돌지 않는다.
+
+**에이전트가 할 일.** `gh issue view 305 --comments`로 댓글을 읽는다.
+- 1절이 401·403이면: 인증키나 서비스 이용 신청·승인을 사용자에게 묻는다(`ready-for-human`). 고치면 다음 밤 저절로 다시 돈다.
+- 결과로 [krx-openapi.md](krx-openapi.md)의 ⚠를 실측으로 바꾼다: 주소와 인증, 필드와 모양(쉼표, `-`), 종목코드, 상장일부터 행이 있는지, 값이 나오는 때, `LIST_SHRS`가 날마다의 좌수인지, 순자산총액의 단위, KIS와 같은지.
+- 그다음 #305의 순자산 채우기를 만든다: 상장일부터 거래일마다 한 번씩 받아 상품마다 하루 한 행으로 서버에만 저장하고, 매일 08:00 뒤에 전 거래일 값을 받는다(#305 조사 댓글의 "엔진은 이렇게 쓴다"). 값은 서버 밖(S3, 저장소, 이슈)으로 내보내지 않는다.
+
 ### 일별 수급 출처 확인 (#226)
 
 차트의 일별 수급 지표(#226)를 어느 조회에서 받을지, 조사에서 찾은 KIS 조회 7개([kis-feeds.md](kis-feeds.md#일별-수급-226))와 토스증권 Open API 조회 5개([toss-feeds.md](toss-feeds.md), #235)를 서버에서 실제로 불러 확인한다. KIS가 주 출처, 토스가 보조이고, 외국인 보유수량·지분율만 토스가 주 출처다(#226 결정).
@@ -1181,6 +1217,7 @@ report: /state/prevalidations/mandelbrot.json
 | `probe-close-refresh-264` | 일봉 다시 받기(#264, #342)를 담은 엔진이 배포된 뒤 첫 거래일 밤, 한 번. 그 저녁 저장한 그날 일봉이 잠정인 밤을 보려고 거래일 밤을 기다린다. 2026-10-21 밤에 돌았다. 다시 돌지 않지만 목록에 남긴다(다시 재려면 아래 "손으로 다시 돌리기") | `probe-close` | 45분. 넉넉히 잡은 상한이다(첫 실행이 17분, 세 종목 1년에 조회 1,500번 남짓과 종목마다 1번). 사전 검증보다 먼저 돈다 | #264: 출력 전체(가격 없음, 같음·다름과 개수, 날짜, 봉 시각, 필드 이름). 에이전트가 다시 받기가 됐는지와 KIS가 언제 확정하는지를 kis-feeds.md와 engine-api.md에 남긴다(3장 "하루 한 번 예측 (#264)"의 "다시 받은 일봉 확인") |
 | `probe-nav-305` | 이 작업을 담은 엔진(#305)이 배포된 뒤 첫 거래일 밤, 한 번. 그날 값이 밤에 들어와 있는지 보려고 거래일 밤을 기다린다 | `probe-nav` | 30분. 넉넉히 잡은 상한이다(16종 100번 남짓 조회를 0.5초 간격으로, 1분쯤). 사전 검증보다 먼저 돈다 | #305: 출력 전체(시세 값 없음, 개수·날짜·시각·필드 모양·같음·다름). 에이전트가 순자산 출처를 정리해 kis-feeds.md "ETF 순자산 (#305)"의 ⚠를 고친다(2장 "ETF 순자산 출처 확인 (#305)") |
 | `probe-dividends-310` | 이 작업을 담은 엔진(#310)이 배포된 뒤 첫 밤, 한 번(거래일이 아니어도. KIS가 지난날을 준다). 2026-10-21 밤에 돌았다. 다시 돌지 않지만 목록에 남긴다(다시 재려면 아래 "손으로 다시 돌리기") | `probe-dividends` | 30분. 넉넉히 잡은 상한이다(세 종목 10년을 두 번, 150번쯤 조회를 0.5초 간격으로, 1–2분). 사전 검증보다 먼저 돈다 | #310: 출력 전체(가격 없음, 개수·날짜·필드 값·계단 크기의 구간). 에이전트가 KIS 수정주가가 현금배당을 빼는지, 락 구분이 배당락일을 알려 주는지 정리한다(2장 "배당과 수정주가 확인 (#310)") |
+| `probe-krx-etf-305` | 서버 `.env`에 `KRX_OPENAPI_KEY`가 있는 첫 밤, 한 번(거래일이 아니어도. KRX는 영업일의 값을 다음 영업일 08:00부터 준다). 키가 없는 밤에는 기다린다(`Facts.krx_openapi`). 실패(401·403 등)로 끝나면 그다음 밤마다 다시 돈다 | `probe-krx-etf` | 15분. KRX는 10분이 지나면 더 묻지 않는다(보통 KRX 30번쯤 1초 간격, KIS 60번쯤 0.5초 간격으로 1–2분). 짧게 잡아 그 뒤 수습 시뮬레이션과 사전 검증이 마지막 시작 시각을 넘기지 않게 한다 | #305: 출력 전체(시세 값 없음, 개수·날짜·필드 이름과 모양·같음·다름). 에이전트가 [krx-openapi.md](krx-openapi.md)의 ⚠를 고치고 순자산 채우기를 만든다(2장 "KRX Open API ETF 일별매매정보 확인 (#305)") |
 | `probe-gaps-344` | 이 작업을 담은 엔진(#344)이 배포된 뒤 첫 밤, 한 번(거래일이 아니어도. 이미 녹화한 날을 읽는다) | `probe-gaps` | 15분. 넉넉히 잡은 상한이다(녹화한 날마다 결측과 종가 단일가 무렵의 raw 받은 시각, 마감 뒤 체결을 읽어 1–2분). 다른 확인 작업 뒤, 사전 검증보다 먼저 돈다. 짧게 잡아 그 뒤 작업이 마지막 시작 시각(00:30, `breiman`은 23:30)을 넘기지 않게 한다 | #344: 출력 전체(시세 값 없음, 개수·시각·코드·피드 이름·키). 에이전트가 15:30 무렵의 침묵이 매일 오는지, 끊김의 이유와 시각을 정리한다. 60초 기준은 사용자가 정한다(2장 "WebSocket 결측 확인 (#344)") |
 | `check-closing-flow-305` | 이 작업을 담은 엔진(#305)이 배포된 뒤 첫 거래일 밤, 한 번. 그날 아침의 순자산 다시 묻기, 15:20 행, 20:30 뒤의 지난날 표를 보려고 거래일 밤을 기다린다 | `check-closing-flow` | 15분. 넉넉히 잡은 상한이다(파일을 읽고, 녹화가 있는 날마다 KIS에 한 번씩 0.5초 간격으로 묻는다: 세 종목 열흘이면 30번, 15초쯤). WebSocket 결측 확인 다음, 시뮬레이션과 사전 검증보다 먼저 돈다 | #305: 출력 전체(시세 값 없음, 개수·날짜·시각·봉과 녹화의 체결대금 비율). 에이전트가 KIS가 순자산을 넘기는 때와 쌓기 시작한 첫날, 통합·KRX 1분봉의 단일가 봉과 녹화의 비교를 정리해 kis-feeds.md와 engine-api.md의 ⚠를 고친다(2장 "KRX 마감 흐름 확인 (#305)") |
 | `simulate-daily-298` | 하루 한 번 예측 종류의 알고리즘의 사전 검증(`prevalidate-cox`)이 그 밤 통과했거나, 그 종류의 수습이 시뮬레이션을 기다림(사전 검증 통과·정답 버전 재시작으로 시작한 수습이고 아직 시뮬레이션하지 않음, 엔진이 돌리는 알고리즘, #298). 그 종류의 최근 정답이 다 들어오지 않은 알고리즘은 세지 않는다(`Facts.pending_answers`, #317). 한 밤에 한 번. 실패했으면 새 커밋이 배포되거나 새로 통과한 밤에 다시 | `simulate daily` | 1시간. 넉넉히 잡은 상한이다(Cox 20번 학습과 10년치 표본, 몇 분). `prevalidate-cox` 바로 뒤, 봉 마감 알고리즘의 사전 검증보다 먼저 돈다 | #298과 #264: 출력 전체(날짜, 개수, lift. 시세 값 없음) |
@@ -1235,7 +1272,7 @@ report: /state/prevalidations/mandelbrot.json
 ````
 
 **가림.** 저장소가 공개라 올리기 전에 다음을 `[가림]`으로 바꾼다(`src/krx_quant/redaction.py`의 `redact`).
-- 비밀 설정값과 같은 문자열: `KIS_APP_KEY`, `KIS_APP_SECRET`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `KRX_ECOS_API_KEY`, `KRX_FRED_API_KEY`, `KRX_GITHUB_TOKEN`, `TOSS_CLIENT_ID`, `TOSS_CLIENT_SECRET`(#235), `KRX_OBJECT_STORE`(와 그 버킷 이름), `KRX_S3_ENDPOINT_URL`, `KRX_BIND_ADDRESS`. 8자보다 짧은 값은 같은 숫자를 망가뜨리지 않으려고 두지 않는다.
+- 비밀 설정값과 같은 문자열: `KIS_APP_KEY`, `KIS_APP_SECRET`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `KRX_ECOS_API_KEY`, `KRX_FRED_API_KEY`, `KRX_GITHUB_TOKEN`, `TOSS_CLIENT_ID`, `TOSS_CLIENT_SECRET`(#235), `KRX_OPENAPI_KEY`(#305), `KRX_OBJECT_STORE`(와 그 버킷 이름), `KRX_S3_ENDPOINT_URL`, `KRX_BIND_ADDRESS`. 8자보다 짧은 값은 같은 숫자를 망가뜨리지 않으려고 두지 않는다.
 - `scripts/check_forbidden.py`가 저장소에서 막는 주문·비밀값 패턴(`src/krx_quant/forbidden.py`의 `RULES`: KIS 주문 TR 코드와 엔드포인트, 토스 주문 엔드포인트와 클라이언트 값(#235), AWS 키, 텔레그램 토큰, JWT, GitHub 토큰, 개인 키). 같은 파일의 `REPOSITORY_RULES`(PR 번호 자리표시, #321)는 저장소 검사에만 쓰고 가리지 않는다.
 - `*.ts.net` 이름, IPv4·IPv6 주소. 09:00:30 같은 시각은 그대로 둔다.
 

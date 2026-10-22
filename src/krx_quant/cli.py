@@ -42,6 +42,7 @@ from krx_quant.feeds.base import KST
 from krx_quant.gaps_probe import probe_gaps
 from krx_quant.kind_registry import DAILY_KINDS, kind_named
 from krx_quant.kis import KisError
+from krx_quant.krx_etf_probe import probe_krx_etf
 from krx_quant.lifecycle import Status
 from krx_quant.macro import run_macro
 from krx_quant.market_calendar import calendar_store
@@ -175,6 +176,12 @@ async def _probe_dividends() -> int:
 async def _probe_nav() -> int:
     calls, failed = await probe_nav(Settings.from_env(), datetime.now(KST))
     return 1 if failed == calls else 0  # nothing answered
+
+
+async def _probe_krx_etf() -> int:
+    # The KIS keys are not required: without them the KRX part runs and the KIS comparison is skipped.
+    calls, with_rows = await probe_krx_etf(Settings.from_env(require_kis=False), datetime.now(KST))
+    return 0 if with_rows else 1  # no day answered with rows
 
 
 async def _backfill() -> None:
@@ -625,6 +632,11 @@ def main(argv: list[str] | None = None) -> int:
         help="ask where KIS gives the single-stock leveraged and inverse ETFs' net assets (#305),"
         " read-only; prints no market value",
     )
+    sub.add_parser(
+        "probe-krx-etf",
+        help="ask what the KRX Open API's ETF daily trading service gives for the single-stock ETFs"
+        " (#305), against KIS, read-only; prints no market value",
+    )
     night_cmd = sub.add_parser(
         "probe-night",
         help="summarize a recorded KOSPI200 night session (#264), read-only; prints no market value",
@@ -820,6 +832,8 @@ def main(argv: list[str] | None = None) -> int:
             return asyncio.run(_probe_dividends())
         elif args.command == "probe-nav":
             return asyncio.run(_probe_nav())
+        elif args.command == "probe-krx-etf":
+            return asyncio.run(_probe_krx_etf())
         elif args.command == "probe-night":
             return asyncio.run(_probe_night(args.day))
         elif args.command == "probe-expected-open":
