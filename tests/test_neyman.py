@@ -15,9 +15,11 @@ from dataclasses import replace
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
+import numpy as np
 import pytest
 
-from krx_quant.algorithms import ALGORITHMS, Sample, load_models, save_model
+from krx_quant import neyman_diagnostics as diagnostics
+from krx_quant.algorithms import ALGORITHMS, Model, Sample, load_models, save_model
 from krx_quant.algorithms import neyman as module
 from krx_quant.algorithms.neyman import (
     EMBARGO,
@@ -192,3 +194,170 @@ def test_a_saved_model_forecasts_the_same(tmp_path: Path) -> None:
 def test_before_training_it_has_no_view() -> None:
     f = NEYMAN.predict(features(program_net=0.8), NEYMAN.default_model())
     assert [f.p_up, f.p_flat, f.p_down] == pytest.approx([1 / 3, 1 / 3, 1 / 3])
+
+
+# The pre-validation's diagnostics (#283): reported, never judged.
+
+
+def test_a_doubted_call_can_flip_to_the_opposite_side() -> None:
+    # down, flat, up: an up call, flat the least likely. Right 27% of the time, its 0.73 left
+    # goes mostly to down (0.35 to flat's 0.05): down becomes the most likely.
+    flipped = _second_opinion([0.35, 0.05, 0.60], features(), params(0.27))
+    assert [flipped.p_up, flipped.p_flat, flipped.p_down] == pytest.approx(
+        [0.27, 0.73 * 0.05 / 0.40, 0.73 * 0.35 / 0.40]
+    )
+    assert flipped.p_down == pytest.approx(0.64, abs=0.005)
+    assert most_likely(flipped.p_up, flipped.p_flat, flipped.p_down) is Direction.DOWN
+
+
+def test_an_up_and_down_tie_is_judged_as_an_up_call() -> None:
+    tied = [0.4, 0.2, 0.4]  # down, flat, up: the rule calls up (a tie goes to flat, then up)
+    assert most_likely(0.4, 0.2, 0.4) is Direction.UP
+    doubted = _second_opinion(tied, features(), params(0.3))  # up gives way, mostly to down
+    assert [doubted.p_up, doubted.p_flat, doubted.p_down] == pytest.approx([0.3, 0.7 / 3, 1.4 / 3])
+    assert most_likely(doubted.p_up, doubted.p_flat, doubted.p_down) is Direction.DOWN
+    trusted = _second_opinion(tied, features(), params(0.5))
+    assert most_likely(trusted.p_up, trusted.p_flat, trusted.p_down) is Direction.UP
+
+
+class _Trees:
+    """Stands in for a model's trees: the first model's probabilities (down, flat, up) of each
+    bar close, in the order asked."""
+
+    def __init__(self, rows: list[list[float]]) -> None:
+        self.rows = rows
+
+    def feature_name(self) -> list[str]:
+        return list(module.FEATURES)
+
+    def predict(self, x: object, num_threads: int) -> list[list[float]]:
+        return self.rows
+
+
+def _on_day(day: int, minutes: int, outcome: Direction) -> Sample:
+    t = datetime.combine(START + timedelta(days=day), time(9, 1), KST) + timedelta(minutes=minutes)
+    return Sample("005930", t, features(), outcome, 0.0)
+
+
+def _measured_days(
+    monkeypatch: pytest.MonkeyPatch, days: list[tuple[dict[str, float], list[tuple[list[float], Direction]]]]
+) -> dict[str, object]:
+    """``days``: each day's second-model parameters, and its bar closes' first-model probabilities
+    and answers; the flips the diagnostics count over them."""
+    measures = NEYMAN.diagnostics()
+    for i, (p, closes) in enumerate(days):
+        monkeypatch.setattr(diagnostics, "_trees", lambda model, rows=[r for r, _ in closes]: _Trees(rows))
+        samples = [_on_day(i, j, outcome) for j, (_, outcome) in enumerate(closes)]
+        measures.day(START + timedelta(days=i), Model(f"neyman-day{i}", p, blob="trees"), samples)
+    flips: dict[str, object] = measures.report()["flips"]["by_symbol"]["005930"]
+    return flips
+
+
+def _up_doubted_down_trusted() -> dict[str, float]:
+    """Second-model parameters giving an up call the chance 0.27 and a down call 0.8."""
+    p = params(0.8)
+    return p | {"meta.coef.up": math.log(0.27 / 0.73) - math.log(0.8 / 0.2)}
+
+
+def test_the_diagnostics_count_flips_and_their_precision_against_the_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    flips = _measured_days(
+        monkeypatch,
+        [
+            (
+                _up_doubted_down_trusted(),
+                [
+                    ([0.35, 0.05, 0.60], Direction.DOWN),  # up, flipped to down: right
+                    ([0.60, 0.05, 0.35], Direction.DOWN),  # down, kept: right
+                    ([0.10, 0.30, 0.60], Direction.UP),  # up, turned to flat
+                    ([0.20, 0.60, 0.20], Direction.FLAT),  # flat: not a call
+                    ([0.30, 0.05, 0.65], Direction.UP),  # up, flipped to down: wrong, the up was right
+                ],
+            ),
+            (params(0.6), [([0.10, 0.30, 0.60], Direction.UP), ([0.60, 0.30, 0.10], Direction.UP)]),
+        ],
+    )
+
+    assert flips == {
+        "scored": 7,
+        "calls": 6,
+        "kept": 3,
+        "kept_precision": pytest.approx(2 / 3, abs=1e-4),
+        "to_flat": 1,
+        "flipped": 2,
+        "flipped_precision": 0.5,
+        "flipped_first_side_right": 0.5,
+        "flip_days": 1,
+        "kept_precision_on_flip_days": 1.0,  # the first day's down call, kept and right
+        "ties": 0,
+        "ties_up": 0,
+        "ties_flat": 0,
+        "ties_down": 0,
+    }
+
+
+def test_the_diagnostics_count_up_and_down_ties_and_where_the_rule_sent_them(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    flips = _measured_days(
+        monkeypatch,
+        [
+            (_up_doubted_down_trusted(), [([0.4, 0.2, 0.4], Direction.UP)]),  # called up, flipped to down
+            (params(0.6), [([0.4, 0.2, 0.4], Direction.FLAT)]),  # called up, kept
+            (params(0.6), [([0.3, 0.4, 0.3], Direction.FLAT)]),  # flat above the tie: no call
+        ],
+    )
+
+    assert (flips["ties"], flips["ties_up"], flips["ties_flat"], flips["ties_down"]) == (2, 1, 0, 1)
+    assert (flips["calls"], flips["kept"], flips["flipped"]) == (2, 1, 1)
+    assert flips["flipped_first_side_right"] == 1.0  # the answer was up
+
+
+def test_the_diagnostic_fit_is_neyman_s_and_compares_its_first_model_in_and_out_of_sample() -> None:
+    measures = NEYMAN.diagnostics()
+    model = measures.fit(made_up(3000))  # ten days
+    assert model.version == NEYMAN.fit(made_up(3000)).version, "the same model as its fit"
+
+    # The next day, as the pre-validation gives it: the samples of a day the model never saw.
+    later = [replace(s, bar_close=s.bar_close + timedelta(days=10)) for s in made_up(300, seed=1)]
+    measures.day(START + timedelta(days=10), model, later)
+
+    first = measures.report()["first_model"]
+    assert (first["fits"], first["days"]) == (1, 1)
+    got = first["by_symbol"]["005930"]
+    assert got["n"] == {"out_of_fold": 3000, "in_sample": 3000, "live": 300}
+    for measure in ("up_minus_down", "largest"):
+        m = got[measure]
+        assert all(m[s]["p05"] <= m[s]["p50"] <= m[s]["p95"] for s in ("out_of_fold", "in_sample", "live"))
+        assert 0 < m["ks_in_sample"] <= 1 and 0 <= m["ks_live"] <= 1
+        assert m["mean_abs_diff_in_sample"] > 0
+    # Of the fit's own first-model probabilities: the fold models' and the final one's.
+    found = module.fitted(made_up(3000))
+    out_of_fold, in_sample = (p / p.sum(axis=1, keepdims=True) for p in (found.out_of_fold, found.in_sample))
+    for source, p in (("out_of_fold", out_of_fold), ("in_sample", in_sample)):
+        assert got["largest"][source]["p50"] == pytest.approx(np.median(p.max(axis=1)), abs=0.005)
+        assert got["up_minus_down"][source]["p50"] == pytest.approx(np.median(p[:, 2] - p[:, 0]), abs=0.005)
+    gap = np.mean(np.abs(out_of_fold.max(axis=1) - in_sample.max(axis=1)))
+    assert got["largest"]["mean_abs_diff_in_sample"] == pytest.approx(gap, abs=1e-4)
+    assert first["all"] == got  # one symbol
+    lines = measures.lines()
+    assert lines[0].startswith("neyman diagnostics (#283; reported, not judged): 1 replayed days")
+    assert any(
+        line.startswith("  first model 005930, p_up - p_down p05/p50/p95: out of fold ") for line in lines
+    )
+
+
+def test_the_distributions_quantiles_and_distances_come_from_their_bins() -> None:
+    a = diagnostics._Histogram(diagnostics.SPREAD_EDGES)
+    a.add(np.linspace(-0.5, 0.5, 1001))
+    assert a.quantile(0.5) == pytest.approx(0.0, abs=0.005)
+    assert a.quantile(0.05) == pytest.approx(-0.45, abs=0.005)
+    same = diagnostics._Histogram(diagnostics.SPREAD_EDGES)
+    same.add(np.linspace(-0.5, 0.5, 1001))
+    apart = diagnostics._Histogram(diagnostics.SPREAD_EDGES)
+    apart.add(np.full(10, 0.9))
+    empty = diagnostics._Histogram(diagnostics.SPREAD_EDGES)
+    assert diagnostics.ks(a, same) == 0.0
+    assert diagnostics.ks(a, apart) == 1.0
+    assert diagnostics.ks(a, empty) is None and empty.quantile(0.5) is None

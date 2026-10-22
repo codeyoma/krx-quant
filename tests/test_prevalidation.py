@@ -667,3 +667,120 @@ async def test_a_second_pre_validation_of_the_same_algorithm_waits_for_the_first
 
     with pytest.raises(FileNotFoundError):
         await prevalidate(s, "kalman")
+
+
+# An algorithm's diagnostics (#283, ``contract.Diagnostics``): measured, reported, never judged.
+
+
+class _Measures:
+    """Stand-in diagnostics: the algorithm's fit, counted; each replayed day's samples, kept.
+    ``broken``: the step that raises."""
+
+    def __init__(self, algorithm: Contrarian, broken: str | None) -> None:
+        self.algorithm = algorithm
+        self.broken = broken
+        self.fits = 0
+        self.days: list[tuple[date, str, set[date]]] = []  # day, model version, the samples' days
+        self.references: set[str | None] = set()  # the reference prices the days' samples name
+
+    def _check(self, step: str) -> None:
+        if self.broken == step:
+            raise RuntimeError(f"{step} broke")
+
+    def fit(self, samples: Sequence[Sample]) -> Model:
+        self._check("fit")
+        self.fits += 1
+        return self.algorithm.fit(samples)
+
+    def day(self, day: date, model: Model, samples: Sequence[Sample]) -> None:
+        self._check("day")
+        self.days.append((day, model.version, {s.bar_close.astimezone(KST).date() for s in samples}))
+        self.references |= {s.reference for s in samples}
+
+    def report(self) -> dict[str, Any]:
+        self._check("report")
+        return {"fits": self.fits, "days": [d.isoformat() for d, _, _ in self.days]}
+
+    def lines(self) -> list[str]:
+        return [f"{self.algorithm.name} diagnostics: {len(self.days)} days"]
+
+
+class Measured(Contrarian):
+    """A Contrarian that offers diagnostics."""
+
+    def __init__(self, name: str, broken: str | None = None) -> None:
+        super().__init__(name)
+        self.measures = _Measures(self, broken)
+
+    def diagnostics(self) -> _Measures:
+        self.measures._check("start")
+        return self.measures
+
+
+def _checks_of(result: prevalidation.Prevalidation) -> list[tuple[str, bool, str]]:
+    return [(c.name, c.passed, c.detail) for c in result.checks]
+
+
+async def test_an_algorithm_s_diagnostics_are_reported_and_never_judged(tmp_path: Path) -> None:
+    plain_settings = settings(tmp_path / "plain", DAYS[:3])
+    plain = await prevalidate(
+        plain_settings, "contrarian", algorithms=[ALPHA, Contrarian("contrarian")], now=AFTER
+    )
+    s = settings(tmp_path / "measured", DAYS[:3])
+    candidate = Measured("contrarian")
+
+    result = await prevalidate(s, "contrarian", algorithms=[ALPHA, candidate], now=AFTER)
+
+    assert _checks_of(result) == _checks_of(plain), "the same checks, the same verdict"
+    assert result.models == plain.models, "its diagnostics' fit gave the algorithm's models"
+    measures = candidate.measures
+    assert measures.fits == len(candidate.fitted) == 2, "the walk-forward trained it through them"
+    # Each replayed day, with the model that predicted it and that day's samples.
+    assert [(d, v) for d, v, _ in measures.days] == list(result.models.items())
+    assert all(days == {d} for d, _, days in measures.days)
+    assert measures.references == {"mid"}, "recorded days, named so, as the nightly training reads them"
+    assert report(s, "contrarian")["diagnostics"] == {"fits": 2, "days": [d.isoformat() for d in DAYS[:3]]}
+    assert result.diagnostic_lines == ("contrarian diagnostics: 3 days",)
+    assert "diagnostics" not in report(plain_settings, "contrarian"), "none offered, none reported"
+
+
+@pytest.mark.parametrize("broken", ["start", "fit", "day", "report"])
+async def test_diagnostics_that_fail_leave_the_run_and_its_verdict_as_they_were(
+    tmp_path: Path, broken: str
+) -> None:
+    plain = await prevalidate(
+        settings(tmp_path / "plain", DAYS[:2]),
+        "contrarian",
+        algorithms=[ALPHA, Contrarian("contrarian")],
+        now=AFTER,
+    )
+    s = settings(tmp_path / "measured", DAYS[:2])
+
+    result = await prevalidate(s, "contrarian", algorithms=[ALPHA, Measured("contrarian", broken)], now=AFTER)
+
+    assert _checks_of(result) == _checks_of(plain)
+    assert result.models == plain.models, "the algorithm's own fit trained it once they failed"
+    error = report(s, "contrarian")["diagnostics"]["error"]
+    assert error.startswith(f"{broken}") and error.endswith(f"RuntimeError: {broken} broke")
+    assert result.diagnostic_lines == (f"contrarian diagnostics: not measured ({error})",)
+
+
+def test_the_command_prints_neyman_s_diagnostics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    s = settings(tmp_path, DAYS[:3])
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("KRX_DATA_DIR", str(s.data_dir))
+    monkeypatch.setenv("KRX_STATE_DIR", str(s.state_dir))
+    monkeypatch.setenv("KRX_SYMBOLS", "005930")
+
+    main(["prevalidate", "neyman", "--days", "2"])
+
+    out = capsys.readouterr().out
+    assert "\nneyman diagnostics (#283; reported, not judged): 2 replayed days predicted by trees" in out
+    assert "\n  flips 005930: " in out and "\n  first model 005930, p_up - p_down " in out
+    measured = report(s, "neyman")["diagnostics"]
+    assert (measured["issue"], measured["judged"]) == (283, False)
+    flips = measured["flips"]["by_symbol"]["005930"]
+    assert flips["scored"] == measured["first_model"]["by_symbol"]["005930"]["n"]["live"] > 0
+    assert flips["calls"] == flips["kept"] + flips["to_flat"] + flips["flipped"]

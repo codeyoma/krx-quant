@@ -1354,11 +1354,17 @@ def prevalidation_jobs(names: Sequence[str]) -> tuple[Job, ...]:
             due=_prevalidation_due(name, order),
             command=("prevalidate", name),
             timeout=PREVALIDATION_TIMEOUTS.get(name, PREVALIDATION_TIMEOUT),
-            targets=(Target(PREVALIDATION_ISSUE, note=_PREVALIDATION_NOTE),),
+            targets=(Target(PREVALIDATION_ISSUE, note=_prevalidation_note(name)),),
             attach=(Attachment(f"리포트 state/{_report_of(name)}", _report_of(name)),),
         )
         for name in order
     )
+
+
+def _prevalidation_note(algorithm: str) -> str:
+    """The note on an algorithm's pre-validation result: what passing and refusing do, and
+    what to do with what it measured besides the checks (``_DIAGNOSTICS_NOTES``)."""
+    return " ".join(n for n in (_PREVALIDATION_NOTE, _DIAGNOSTICS_NOTES.get(algorithm)) if n)
 
 
 # The daily kinds' algorithms' pre-validations (#264): a walk-forward over ten years of KRX day
@@ -1571,6 +1577,16 @@ _PREVALIDATION_NOTE = (
     "`simulate-bar-close-298`이 최근 녹화일로 수습을 시뮬레이션해 바로 판정한다(#298). "
     "거부(`refused`)되면 같은 코드·정답 버전으로는 다시 돌지 않고, 고친 코드가 배포되면 다시 돈다."
 )
+# What an agent does with the diagnostics a candidate's report carries (#283,
+# ``contract.Diagnostics``): measured besides the checks, never judged.
+_DIAGNOSTICS_NOTES = {
+    "neyman": (
+        "출력의 `neyman diagnostics` 줄과 리포트의 `diagnostics`(#283)는 판정에 쓰지 않는 측정이다: "
+        "1차의 상승·하락 예측이 2차 뒤 반대쪽으로 뒤집힌 수와 그 정밀도(뒤집히지 않은 예측의 정밀도와 함께), "
+        "상승·하락 동률, 1차 확률의 표본 밖·표본 안·실시간 분포. 에이전트가 이 숫자를 #283에 요약한다. "
+        "사용자가 그것으로 #283의 모델 변경 순서를 정한다."
+    ),
+}
 
 
 def _report_of(algorithm: str) -> str:

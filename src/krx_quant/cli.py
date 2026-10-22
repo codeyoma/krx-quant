@@ -365,6 +365,8 @@ def _prevalidate(name: str, days: int) -> int:
             f"run before: {result.earlier_runs}, {result.earlier_on_these_days} of them on any of these days"
             " (a day replayed again after a fix is no longer out of sample)"
         )
+    for line in result.diagnostic_lines:  # what it measured besides the checks (#283), never judged
+        print(line)
     print(f"report: {report_path(settings.state_dir, name)}")
     print(f"predictions: {result.db} (not in the official record)")
     if name in REGISTERED_BEFORE:

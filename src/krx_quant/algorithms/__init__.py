@@ -23,6 +23,7 @@ from krx_quant.algorithms.breiman import Breiman
 from krx_quant.algorithms.contract import (
     Abstention,
     Algorithm,
+    Diagnostics,
     KindAlgorithm,
     KindSample,
     Model,
@@ -155,6 +156,7 @@ __all__ = [
     "Abstention",
     "Algorithm",
     "Card",
+    "Diagnostics",
     "KindAlgorithm",
     "KindSample",
     "Meaning",

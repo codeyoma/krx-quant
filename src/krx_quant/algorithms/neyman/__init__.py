@@ -34,8 +34,9 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import date
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import lightgbm as lgb
 import numpy as np
@@ -48,6 +49,9 @@ from krx_quant.cards import TOUCH_LABEL, Card, Meaning, class_move_meanings
 from krx_quant.features import BARRIER_SIGMA, BARRIER_WIDTH, FeatureVector
 from krx_quant.feeds.base import kst_day
 from krx_quant.pricing import Direction, most_likely
+
+if TYPE_CHECKING:
+    from krx_quant.neyman_diagnostics import Measures
 
 TRAINING_DAYS = 20
 FEATURES: tuple[str, ...] = (*Turing.features, BARRIER_WIDTH, BARRIER_SIGMA)
@@ -185,25 +189,54 @@ class Neyman:
         return _second_opinion(trees.predict(row, num_threads=1)[0], features, model.params)
 
     def fit(self, samples: Sequence[Sample]) -> Model:
-        scored = with_outcomes(samples)
-        x = np.array([[number(s.features[n]) for n in FEATURES] for s in scored], dtype=float)
-        y = np.array([CLASSES.index(s.outcome or Direction.FLAT) for s in scored])  # all have one
-        final = _boost(x, y)
-        out_of_fold = _out_of_fold(scored, x, y)
-        params = {"rounds": float(ROUNDS)} | _second_model(scored, out_of_fold) | class_moves(scored)
-        # The loss of the forecasts made from the out-of-sample first model (the final one's on a
-        # day it never forecast out of sample: fewer than two days).
-        first = np.where(np.isnan(out_of_fold), np.asarray(final.predict(x, num_threads=1)), out_of_fold)
-        forecasts = [_second_opinion(p, s.features, params) for p, s in zip(first, scored, strict=True)]
-        loss = -float(
-            np.mean(
-                [
-                    math.log(max(_probability(f, s.outcome), _FLOOR))
-                    for f, s in zip(forecasts, scored, strict=True)
-                ]
-            )
+        return fitted(samples).model
+
+    def diagnostics(self) -> Measures:
+        """What its pre-validation report measures besides the checks (#283,
+        ``neyman_diagnostics.py``): its flips to the opposite side, and its first model's
+        probabilities out of sample, in sample and live. Reported, never judged; outside this
+        package, so a change to them alone does not ask for a new pre-validation (the code
+        digest is this package's)."""
+        from krx_quant.neyman_diagnostics import Measures  # it reads this module
+
+        return Measures()
+
+
+@dataclass(frozen=True)
+class Fitted:
+    """A fit's model, with the first model's three probabilities (down, flat, up) of each sample
+    it learned from (``scored``): out of sample (``folds``, what the second model learned from;
+    NaN where no fold holds it) and the final first model's, in sample (#283)."""
+
+    model: Model
+    scored: list[Sample]
+    out_of_fold: np.ndarray
+    in_sample: np.ndarray
+
+
+def fitted(samples: Sequence[Sample]) -> Fitted:
+    """Neyman's fit (``Neyman.fit``), with what its first models gave on the way."""
+    scored = with_outcomes(samples)
+    x = np.array([[number(s.features[n]) for n in FEATURES] for s in scored], dtype=float)
+    y = np.array([CLASSES.index(s.outcome or Direction.FLAT) for s in scored])  # all have one
+    final = _boost(x, y)
+    out_of_fold = _out_of_fold(scored, x, y)
+    params = {"rounds": float(ROUNDS)} | _second_model(scored, out_of_fold) | class_moves(scored)
+    in_sample = np.asarray(final.predict(x, num_threads=1))
+    # The loss of the forecasts made from the out-of-sample first model (the final one's on a
+    # day it never forecast out of sample: fewer than two days).
+    first = np.where(np.isnan(out_of_fold), in_sample, out_of_fold)
+    forecasts = [_second_opinion(p, s.features, params) for p, s in zip(first, scored, strict=True)]
+    loss = -float(
+        np.mean(
+            [
+                math.log(max(_probability(f, s.outcome), _FLOOR))
+                for f, s in zip(forecasts, scored, strict=True)
+            ]
         )
-        return Model.fitted(self.name, params, scored, loss, blob=final.model_to_string())
+    )
+    model = Model.fitted(Neyman.name, params, scored, loss, blob=final.model_to_string())
+    return Fitted(model, scored, out_of_fold, in_sample)
 
 
 def _second_opinion(

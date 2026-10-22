@@ -1838,6 +1838,7 @@ docker compose run --rm --no-deps engine prevalidate <이름> --days 5  # 빨리
   - `stats`: 순위표 항목과 같은 형식(`rank`, `n`, `accuracy`, `precision`, `coverage`, `brier`, `pnl`, `pnl_inverse`, `lift`). 재생한 알고리즘들끼리 매긴 순위와 FDR 보정(`q`, `significant`)이다. 종목·시간대별 분할은 없다
   - `correlations`(알고리즘 → r), `timed_out`, `statuses`(예측 상태별 개수), `skipped_for_cpu`(CPU 예산으로 건너뛴 봉 마감 수, 판정에는 쓰지 않는다), `db`, `target_version`(재생하고 채점한 정답 버전, #191. 없으면 1)
   - `earlier_runs`, `earlier_runs_on_these_days`(#262): 위 "리포트".
+  - `diagnostics`(#283): 방향 알고리즘이 진단을 내면(`diagnostics()`, `contract.Diagnostics`. 지금은 Neyman, 아래 "Neyman"의 "사전 검증의 진단") 검사 밖에서 잰 것이다. 판정에 쓰지 않는다. 진단을 내지 않는 알고리즘의 리포트에는 이 칸이 없다. 진단을 내는 알고리즘은 walk-forward 학습을 진단의 `fit`으로 한다(알고리즘의 `fit`과 같은 모델을 내고, 가는 길에 본 것을 잰다). 재생한 날마다 그날의 표본(밤 학습이 읽는 것처럼 그날의 기준가(`reference`)를 단 것)과 그날을 예측한 모델을 진단에 준다. 그 표본은 다음 날의 학습에도 쓰이므로 더 읽는 것은 마지막 날 하나다. 진단의 오류는 실행을 멈추지 않는다: 리포트에 `{"error": …}`로 남고, 그 뒤로는 알고리즘의 `fit`이 학습한다. 명령의 출력에도 진단이 낸 줄이 나온다.
 - **실행 기록**(#262): `state/prevalidations/<이름>.history.jsonl`. 리포트를 남긴 실행마다 한 줄(학습 오류, 잠금, 시간 제한으로 리포트 없이 끝난 실행은 없다. `prevalidated_at`, `code`, `target_version`, `passed`, `days`, 그리고 #262부터 `weakest_lift`(가장 약한 lift의 값)와 `day_low`(가장 약한 lift의 거래일 단위 95% 하한). 둘은 잴 수 없으면 `null`이고, 그 전의 줄과 리포트로 만든 첫 줄에는 없다)을 덧붙인다. 리포트는 마지막 것만 남기므로, 몇 번 돌렸는지는 여기서 센다. 기록이 없는데 리포트가 있으면(이 기록이 생기기 전에 돈 사전 검증) 그 리포트를 첫 줄로 삼는다. 명령은 전에 돈 적이 있으면 `run before: N, M of them on any of these days`를 출력한다. M이 1 이상이면 이번 실행은 그 날들의 M + 1번째이고, `stats` 검사가 더 엄격하다(위 "기준"). 빨리 훑어보는 `--days 5`도 그 날들의 실행으로 센다.
 - 명령은 검사별 결과를 출력하고, 통과하면 0, 아니면 1로 끝난다.
 - **엔진의 관문**: 실시간 엔진은 봉 마감마다 아직 돌리지 않은 알고리즘의 리포트를 읽는다. `passed`가 `true`이고 `code`가 지금 코드의 digest와 같고 `target_version`이 지금 `KRX_TARGET_VERSION`과 같으면(없으면 1로 본다) 그 봉 마감부터 수습(`registered`)으로 돌린다. 그 밤 예약 작업 `simulate-bar-close-298`이 그 수습을 최근 녹화일로 시뮬레이션해 바로 판정한다(위 "상태 관리"의 "수습 시뮬레이션", #298). digest는 알고리즘 모듈 파일(패키지면 그 안의 모든 `.py`)의 SHA-256 앞 16자리다. 공용 코드(`features.py` 등)는 넣지 않는다. 그 전에는 예측하지 않고, `/v1/algorithms`와 상태 점검에도 나오지 않는다. 엔진이 시작한 뒤 첫 일일 점검 때 기다리는 알고리즘을 텔레그램으로 한 번 알린다(`[알림] 사전 검증 대기: …`).
@@ -2178,6 +2179,29 @@ uv run krx-quant fit newton --days 60
 - 모델: 1차 트리는 Turing처럼 텍스트(`blob`)로 가지고 엔진 API에는 나오지 않는다. 파라미터는 `rounds`, `move.up`·`move.flat`·`move.down`, 2차의 `meta.intercept`, 입력마다 `meta.coef.<입력>`·`meta.mean.<입력>`·`meta.scale.<입력>`, 표본 밖 상승·하락 예측 수 `meta.calls`, 그 날 수 `meta.days`, 그 맞은 비율 `meta.precision`이다. 뜻은 `/v1/algorithms`의 `param_meanings`에 있다. 모델 버전은 `neyman-<마지막 학습일>-<해시>`다.
 - 밤 학습은 1차를 다섯 번 학습한다(최종 1차와 겹 넷. 표본이 20거래일이라 60거래일인 Turing의 한 번 학습과 비슷한 시간, 맥에서 67,500 × 55 표본 한 번에 약 2.3초). 사전 검증은 날마다 다시 학습한다.
 - 사전 검증과 수습은 새 알고리즘과 같다. 예약 작업이 녹화 10거래일 뒤 기다리는 다섯(`mandelbrot`, `breiman`, `kalman`, `shannon`, `poisson`) 다음에 돌린다(#204).
+- **사전 검증의 진단(#283).** Neyman의 사전 검증 리포트에는 검사 다섯 말고 `diagnostics`가 붙는다(`neyman_diagnostics.py`, 위 "사전 검증"의 `diagnostics`). 판정에 쓰지 않는다: 통과·거부를 바꾸지 않는다. #283의 모델 변경(거리 ÷ 변동성 입력, 겹 모델 평균으로 실시간 예측, embargo, 복제 대책)의 우선순위를 정할 숫자다. 그 변경은 숫자를 보고 사용자가 정하므로, Neyman의 예측, 피처, 학습, 바꿔 넣기 규칙은 그대로다.
+  - `flips`: 재생한 날마다, 그날을 예측한 모델로 그날의 봉 마감(학습이 읽는 그날의 표본 중 도달 정답이 있는 것. VI·특수인 봉 마감은 학습처럼 빠진다)의 1차와 2차를 다시 계산한다. 종목마다(`by_symbol`)와 모두(`all`):
+    - `scored`(도달 정답이 있는 봉 마감), `calls`(1차가 상승이나 하락을 낸 수).
+    - `kept`(2차 뒤에도 같은 방향)와 `kept_precision`(그중 도달 정답과 같은 비율), `to_flat`(보합이 됨), `flipped`(반대쪽이 가장 커짐. 예: 1차 하락 0.35·보합 0.05·상승 0.60은 상승 예측인데 m = 0.27이면 하락 0.64)와 `flipped_precision`(뒤집힌 방향이 도달 정답과 같은 비율), `flipped_first_side_right`(뒤집기 전 방향이 같았던 비율).
+    - `flip_days`(뒤집힘이 있던 날 수)와 `kept_precision_on_flip_days`(그 날들의 뒤집히지 않은 예측의 정밀도. 같은 날끼리 견준다. 모두(`all`)는 종목 × 날마다 센다).
+    - `ties`(1차의 상승과 하락이 같고 보합보다 큼, 예: 0.4·0.2·0.4)와 `ties_up`·`ties_flat`·`ties_down`(2차 뒤 가장 큰 쪽). 규칙(`pricing.most_likely`: 동률이면 보합, 그다음 상승)이 상승으로 부르므로 2차는 그것을 상승 예측으로 판단한다(`tie_rule`: `"up"`). m이 낮으면 하락으로 간다(0.4·0.2·0.4에서 m = 0.3이면 하락 0.47). LightGBM의 확률이 정확히 같은 일은 드물다.
+    - 정밀도는 셀 예측이 없으면 `null`이다.
+  - `first_model`: 1차 확률의 분포 셋. `out_of_fold`(2차가 배운 것: 겹 모델이 20일의 60–75%로 학습해 낸 표본 밖 확률), `in_sample`(같은 표본에 최종 1차가 낸 확률: 20일 모두로 학습해 그 표본을 봤다), `live`(그 최종 1차가 그다음 날, 곧 재생한 날에 낸 확률: 실시간에 2차가 받는 것). `fits`(표본 밖 확률이 있던 학습 수. 재생일마다 한 번 학습한다), `days`(트리로 예측한 재생일 수. 학습 전 기본 모델의 날은 빠진다). 종목마다(`by_symbol`)와 모두(`all`):
+    - `n`(분포마다 표본 수), `call_share`(분포마다 상승·하락 예측의 비율).
+    - `up_minus_down`(p_up − p_down)과 `largest`(가장 큰 클래스의 확률)마다: 세 분포의 분위수(`p05`, `p25`, `p50`, `p75`, `p95`), 표본 밖 분포와의 Kolmogorov–Smirnov 거리(`ks_in_sample`, `ks_live`), 같은 표본의 표본 밖 값과 표본 안 값 차이의 절댓값 평균(`mean_abs_diff_in_sample`).
+    - 분포는 폭 0.005의 칸에 모은다(분위수와 거리도 그 정밀도다). 표본 밖·표본 안은 재생일마다의 학습을 모두 모은 것이라, 학습 구간이 겹쳐 한 날이 여러 학습에 든다.
+  - 명령의 출력에는 `run before` 줄 다음에 `neyman diagnostics (#283; reported, not judged): N replayed days predicted by trees, M fits with out-of-sample probabilities`와, 종목마다 그리고 `all`의 `flips <종목>: …`, `first model <종목>, p_up - p_down p05/p50/p95: …`, `… largest class …`, `… up/down call share …` 줄이 나온다. #204 댓글에도 나온다.
+
+    ```
+    neyman diagnostics (#283; reported, not judged): 3 replayed days predicted by trees, 2 fits with out-of-sample probabilities
+      flips 005930: 258 up/down calls of 258 scored; kept 258 (precision 0.837), to flat 0, to the opposite side 0 (precision -, the first side right -); kept on the 0 days with a flip -; up/down ties 0 (called up; then up 0, flat 0, down 0)
+      first model 005930, largest class p05/p50/p95: out of fold 0.510/0.513/0.999, in sample 0.976/0.997/1.000, live 0.511/0.995/1.000; KS from out of fold: in sample 0.750, live 0.417; mean |out of fold - in sample| 0.364
+    ```
+
+    (테스트의 만든 녹화 4일, 한 종목에서 줄인 것이다. 시세가 4분마다 오르내리는 만든 장이라 1차가 늘 상승·하락을 낸다. 실제 값이 아니다.)
+  - 진단이 실패하면(오류) 사전 검증은 그대로 돌고 판정도 같다. 리포트의 `diagnostics`는 `{"error": "<어디서>: <오류>"}`이고 출력은 `neyman diagnostics: not measured (…)`다. 실패한 뒤로는 Neyman의 `fit`이 학습한다.
+  - 진단의 코드는 Neyman 패키지 밖(`src/krx_quant/neyman_diagnostics.py`)이라 Neyman의 코드 digest에 들지 않는다. 진단만 고쳐서는 사전 검증을 다시 묻지 않는다(다시 재려면 손으로 돌리고, 같은 날의 실행으로 센다, #262). 진단의 학습은 Neyman의 `fitted`(`fit`이 부르는 것)를 그대로 불러 같은 모델을 낸다(테스트로 확인). 이 진단을 넣으면서(#283, #354) Neyman의 `fit`을 `fitted`로 옮겨 Neyman의 digest가 바뀌었다. Neyman은 아직 사전 검증을 돈 적이 없어(리포트 없음) 다시 돌 것이 없다. 다른 알고리즘의 digest는 그대로라 그 사전 검증도 다시 묻지 않는다.
+  - **에이전트가 할 일.** Neyman의 결과가 #204에 오면(`prevalidate-neyman`, 댓글의 노트가 말한다), 이 숫자를 #283에 요약한다: 종목마다 뒤집힘 수와 그 정밀도를 뒤집히지 않은 예측의 정밀도(같은 날)와 견주고, 동률 수, 표본 밖 대 표본 안·실시간 분포의 KS와 분위수를 적는다. 사용자가 그것으로 #283의 모델 변경 순서를 정한다.
 
 ### Mandelbrot (변동폭, #181)
 
