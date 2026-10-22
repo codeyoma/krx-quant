@@ -145,6 +145,9 @@ def test_each_job_prevalidates_its_algorithm_and_posts_on_204() -> None:
             (f"리포트 state/prevalidations/{name}.json", f"prevalidations/{name}.json")
         ]
         assert listed.label == ("ready-for-agent",)
+        # Neyman's result asks the agent to summarise its diagnostics on #283; the others' do not.
+        assert ("#283에 요약한다" in listed.targets[0].note) == (name == "neyman")
+        assert listed.targets[0].note.startswith("통과(`passed`)하면 엔진이 다음 봉 마감부터 수습으로")
 
 
 # The conditions

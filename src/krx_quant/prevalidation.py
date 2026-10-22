@@ -24,6 +24,12 @@ It passes when all of these hold:
   predictions left out) have at least ``min_sample`` scored predictions and pairs with each
   baseline, and its weakest lift over the baselines is above 0.
 
+A direction algorithm may offer diagnostics (``contract.Diagnostics``, #283: Neyman's flips and
+its first model's probabilities): the walk-forward trains it through them (the same model), each
+replayed day's samples go to them with the model that predicted the day, and the report keeps
+what they measured (``diagnostics``). They are never judged, and an error in them only replaces
+them in the report.
+
 The report is saved to ``state/prevalidations/<name>.json``, passed or not, with a digest
 of the algorithm's code; the engine reads it at each bar close. The server's scheduled job
 runs this check itself, one waiting algorithm a night (``scheduled.py``, #204), and reads the
@@ -62,6 +68,7 @@ import logging
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import date, datetime, time
+from functools import partial
 from pathlib import Path
 from typing import Any, cast
 
@@ -69,9 +76,11 @@ from krx_quant.algorithms import (
     ALGORITHMS,
     KIND_ALGORITHMS,
     Algorithm,
+    Diagnostics,
     KindAlgorithm,
     Model,
     NothingToLearn,
+    Sample,
     kind_of,
     load_models,
     register,
@@ -372,6 +381,10 @@ class Prevalidation:
     # The versions of the data a daily kind's algorithm read (``daily_features.stored_versions``,
     # #297); None for the others.
     inputs: dict[str, int] | None = None
+    # What the candidate measured besides the checks (#283, ``contract.Diagnostics``), as the
+    # report keeps it and as the command prints it; None for one that offers none. Never judged.
+    diagnostics: dict[str, Any] | None = None
+    diagnostic_lines: tuple[str, ...] = ()
 
     @property
     def passed(self) -> bool:
@@ -402,6 +415,8 @@ class Prevalidation:
             out["walk_forward"] = self.walk_forward
         if self.inputs is not None:
             out["inputs"] = self.inputs
+        if self.diagnostics is not None:
+            out["diagnostics"] = self.diagnostics
         return out
 
 
@@ -471,8 +486,9 @@ async def prevalidate(
         # as their CPU comes first in the budget.
         own = [k for k in kinds if k.name == DIRECTION or (kind is not None and k.name == kind.name)]
         own_algorithms = [a for a in kind_algorithms if kind is not None and a.kind == kind.name]
+        measured = _measured(candidate) if kind is None else None  # a direction algorithm's (#283)
         models = await _replay(
-            settings, candidate, kind, algorithms, own_algorithms, own, available, replayed, db
+            settings, candidate, kind, algorithms, own_algorithms, own, available, replayed, db, measured
         )
         seed_history(settings.state_dir, name)
         before, on_days = earlier_runs(settings.state_dir, name, replayed)
@@ -484,6 +500,9 @@ async def prevalidate(
             same = [a.name for a in kind_algorithms if a.kind == kind.name and a is not candidate]
             result = _judge_kind(settings, candidate, kind, same, replayed, models, db, now, tries)
         result = replace(result, earlier_runs=before, earlier_on_these_days=on_days)
+        if measured is not None:
+            diagnostics, lines = measured.result()
+            result = replace(result, diagnostics=diagnostics, diagnostic_lines=lines)
         path = report_path(settings.state_dir, name)
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".json.tmp")
@@ -505,14 +524,18 @@ async def _replay(
     available: Sequence[date],
     replayed: Sequence[date],
     db: Path,
+    measured: _Measured | None = None,
 ) -> dict[date, str]:
     """Replay each day into ``db``, the candidate trained on the days before it (on its kind's
-    answers, #179); the version it predicted each day with."""
+    answers, #179); the version it predicted each day with. With ``measured`` (#283), the
+    candidate is trained by its diagnostics' fit, and they are given each replayed day's samples
+    and the model that predicted it."""
     calendar = calendar_store(settings).calendar
     leaders = Leaders.of(settings)
     everyone: list[Algorithm | KindAlgorithm] = [*algorithms, *kind_algorithms]
     running = load_models(settings.state_dir, [a for a in everyone if a is not candidate])
-    trainer = _WalkForward(settings, candidate, available, calendar, leaders, kind)
+    fit = None if measured is None else measured.fit
+    trainer = _WalkForward(settings, candidate, available, calendar, leaders, kind, fit)
     versions: dict[date, str] = {}
     for day in replayed:
         model = trainer.before(day)
@@ -534,7 +557,73 @@ async def _replay(
         )
         engine.store.close()
         log.info("%s: replayed %s with %s", candidate.name, day, model.version)
+        if measured is not None:
+            # The day's samples are the next day's training too: read once (the last day's alone
+            # is read for this).
+            measured.day(day, model, partial(trainer.samples_on, day))
     return versions
+
+
+def _measured(candidate: Algorithm | KindAlgorithm) -> _Measured | None:
+    """The direction candidate's diagnostics (#283), if it offers them (``diagnostics()``)."""
+    offered = getattr(candidate, "diagnostics", None)
+    if not callable(offered):
+        return None
+    return _Measured(cast(Algorithm, candidate), cast(Callable[[], Diagnostics], offered))
+
+
+class _Measured:
+    """A candidate's diagnostics (#283), kept from changing the run: an error in them is logged
+    and reported in their place, and the algorithm's own fit trains it from then on. They never
+    reach the checks."""
+
+    def __init__(self, algorithm: Algorithm, offered: Callable[[], Diagnostics]) -> None:
+        self._algorithm = algorithm
+        self.error: str | None = None
+        try:
+            self._diagnostics = offered()
+        except Exception as e:
+            self._failed("start", e)
+
+    def fit(self, samples: Sequence[Sample]) -> Model:
+        """The diagnostics' fit, which gives the algorithm's model; the algorithm's own once they
+        failed (an error of the algorithm's fit then comes from it again, and fails the run as
+        it would)."""
+        if self.error is None:
+            try:
+                return self._diagnostics.fit(samples)
+            except NothingToLearn:
+                raise  # the algorithm's: the day is predicted by its defaults
+            except Exception as e:
+                self._failed("fit", e)
+        return self._algorithm.fit(samples)
+
+    def day(self, day: date, model: Model, samples: Callable[[], Sequence[Sample]]) -> None:
+        """``day``'s samples (read here, as a failure to read them is the diagnostics' too) and
+        the model that predicted it, to the diagnostics."""
+        if self.error is None:
+            try:
+                self._diagnostics.day(day, model, samples())
+            except Exception as e:
+                self._failed(f"day {day}", e)
+
+    def result(self) -> tuple[dict[str, Any], tuple[str, ...]]:
+        """The report's ``diagnostics`` and the command's lines; the error in their place."""
+        if self.error is None:
+            try:
+                return self._diagnostics.report(), tuple(self._diagnostics.lines())
+            except Exception as e:
+                self._failed("report", e)
+        name = self._algorithm.name
+        return {"error": self.error}, (f"{name} diagnostics: not measured ({self.error})",)
+
+    def _failed(self, where: str, e: Exception) -> None:
+        self.error = f"{where}: {type(e).__name__}: {e}"
+        log.exception(
+            "%s's diagnostics failed (%s); the pre-validation goes on without them",
+            self._algorithm.name,
+            where,
+        )
 
 
 def _judge(
@@ -720,10 +809,12 @@ class _WalkForward:
         calendar: MarketCalendar,
         leaders: Leaders,
         kind: Kind | None = None,
+        fit: Callable[[Sequence[Sample]], Model] | None = None,
     ) -> None:
         self._settings = settings
         self._algorithm = algorithm
         self._kind = kind
+        self._fit = fit  # in place of the direction algorithm's (its diagnostics', #283)
         self._available = list(available)
         self._calendar = calendar
         self._leaders = leaders
@@ -746,10 +837,16 @@ class _WalkForward:
             training = [s for found in days for s in found.samples]
             if not any(s.outcome is not None for s in training):
                 return self._algorithm.default_model()
-            return cast(Algorithm, self._algorithm).fit(training)
+            return (self._fit or cast(Algorithm, self._algorithm).fit)(training)
         except NothingToLearn as e:  # no book on backfilled days, say; any other error fails the check
             log.warning("%s not trained before %s, its defaults predict: %s", self._algorithm.name, day, e)
             return self._algorithm.default_model()
+
+    def samples_on(self, day: date) -> list[Sample]:
+        """``day``'s samples with the algorithm's features (a direction algorithm's), each naming
+        the day's reference price, as the nightly training reads them; none if the day has none."""
+        found = self._load(day)
+        return [] if found is None else found.of(self._algorithm.features)
 
     def climate_before(self, day: date) -> Model:
         """The climate baseline's table fitted on the latest ``CLIMATE_DAYS`` days before

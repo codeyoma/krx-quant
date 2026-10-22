@@ -256,6 +256,22 @@ class Algorithm(Protocol):
     def predict(self, features: FeatureVector, model: Model) -> Forecast: ...
 
 
+class Diagnostics(Protocol):
+    """What a direction algorithm's pre-validation report measures besides its checks (#283),
+    when the algorithm offers it (``diagnostics()``, as Neyman does): reported, never judged.
+    ``fit`` stands in for the algorithm's own and gives the same model, measuring what it sees
+    on the way; ``day`` is given each replayed day's samples (with their answers) and the model
+    that predicted that day."""
+
+    def fit(self, samples: Sequence[Sample]) -> Model: ...
+
+    def day(self, day: date, model: Model, samples: Sequence[Sample]) -> None: ...
+
+    def report(self) -> dict[str, Any]: ...  # the report's ``diagnostics``
+
+    def lines(self) -> list[str]: ...  # the same, as the command prints it
+
+
 class KindAlgorithm(Protocol):
     """An algorithm of a kind besides the direction (#179): the same contract, on the kind's
     answers and output."""
