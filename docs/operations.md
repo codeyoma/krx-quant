@@ -205,7 +205,9 @@ curl http://krx-quant:8080/v1/macro
 | `KRX_BACKFILL_DAYS` | 365 | 1분봉을 채우는 기간(일) |
 | `KRX_BACKFILL_MAX_PER_SECOND` | 8 | 백필 조회 속도(초당). 20 이하 |
 | `KRX_DATA_DIR` | `data` (compose `/data`) | Parquet 녹화 위치. 서버에서는 저장소의 `data/` |
-| `KRX_STATE_DIR` | `state` (compose `/state`) | 토큰, 거래 일정, DB, 모델. 서버에서는 저장소의 `state/` |
+| `KRX_STATE_DIR` | `state` (compose `/state`) | 토큰, 거래 일정, DB, 모델, 로그 파일(`logs/`, #356). 서버에서는 저장소의 `state/` |
+| `KRX_LOG_DAYS` | 14 | 로그 파일(`state/logs/`, #356)을 남기는 날 수. 오늘을 넣어 센다. 2 이상의 정수(어젯밤 학습과 예약 작업이 자정 넘어서도 그 밤의 파일에 쓴다). 그보다 오래된 파일은 지운다. 오늘과 어제 파일은 지우지 않는다. `off`나 빈 값이면 파일을 쓰지도 지우지도 않는다(stdout만). 6장 "로그 파일과 꾸러미 (#356)" |
+| `KRX_LOG_MAX_MB` | 500 | 로그 파일 전체의 상한(MB, 1 이상의 정수). 넘으면 가장 오래된 파일부터 지운다(오늘과 어제 파일은 빼고). 꾸러미(`logs/bundles/`)는 세지 않는다 |
 | `KRX_FLUSH_ROWS`, `KRX_FLUSH_SECONDS` | 5000, 30 | 파티션마다 이 행 수나 초가 차면 part 파일을 쓴다 |
 | `KRX_OBJECT_STORE` | 없음 | `s3://<버킷>/<접두어>` 또는 로컬 폴더. 없으면 장 마감 업로드와 밤 학습을 하지 않는다 |
 | `AWS_REGION` | `AWS_DEFAULT_REGION`, 그것도 없으면 `ap-southeast-2` | 버킷 리전 |
@@ -993,6 +995,8 @@ Toss: 109 calls, 1 failed; tokens issued: 0
 
 밤 학습은 기본으로 Lightsail 수집기가 21:30에 별도 프로세스로 띄운다(`KRX_TRAIN_ON=server`). EC2 Spot에서 돌릴 수도 있다(`spot`, 아래 "밤 학습을 EC2 Spot으로 옮기기"). 학습 내용과 S3에 남는 것은 어디서 돌든 같다.
 
+서버에서 돌면 그 프로세스의 출력 전체(stdout과 stderr를 쓴 순서대로)와 종료 코드가 나오는 대로 `state/logs/training/<학습한 날>.log`에 남는다(#356). 배포로 컨테이너가 바뀌어도 남는다. 자정을 넘겨도 그 밤의 파일이다. 맨 앞 줄은 `krx-quant train --day <날> started (pid N)`, 그 사이에 학습이 단계마다 쓰는 `started step <이름>`과 시간·메모리 줄(#355, 아래 "단계마다 시간과 메모리를 남긴다")이 있다. 맨 끝 줄은 `ended: exit <코드> after <걸린 시간>`이다. 신호로 죽었으면 신호 이름이 붙는다(`exit -9 (SIGKILL)`: 커널의 메모리 부족 처리가 보내는 신호). 6시간 제한에 멈췄으면 `stopped at its time limit (6:00:00): exit -9 (SIGKILL)`이다(6장 "로그 파일과 꾸러미 (#356)").
+
 > **바뀜** (2026-10-11, #67): "지금은 Lightsail 수집기가 띄운다(#23에서 EC2 Spot으로 옮긴다)" → 서버와 EC2 Spot 중에서 고른다(`KRX_TRAIN_ON`). 기본은 그대로 서버다. 이유: #23. Spot으로 옮기는 것은 AWS 비용이 드는 일이라 사용자가 스택을 배포하고 켠다.
 
 - 알고리즘마다 학습에 안 쓴 최근 3거래일로 새 모델(challenger)과 서버에서 돌고 있는 모델(champion)을 비교한다. log loss가 더 낮을 때만 승격한다. 학습 구간은 그 앞의 알고리즘별 거래일 수(기본 20)다.
@@ -1262,6 +1266,7 @@ report: /state/prevalidations/mandelbrot.json
 - 매일(거래일이 아니어도) `KRX_JOBS_AT`(기본 22:30)부터 다음 날 05:30까지가 그날 밤이다. 작업이 보는 "날"은 그 밤이 시작한 저녁의 날짜다.
 - 밤 학습이 돌고 있거나 시작할 차례면 끝날 때까지 기다린다. `KRX_TRAIN_ON=spot`이면 서버가 Spot 결과를 기다리는 동안 기다린다. 어느 쪽이든 그 밤 학습이 시작한 뒤 6시간(서버 학습을 멈추는 `TRAINING_TIMEOUT`)까지만 기다린다. Spot 결과가 끝내 오지 않거나 비용 상한으로 Spot이 꺼진 밤에도 작업이 돌게 하려는 것이다.
 - 때가 된 작업을 목록 순서대로 하나씩, 밤 학습처럼 별도 프로세스(`python -m krx_quant.cli <명령>`)로 돌린다. 동시에 둘을 돌리지 않는다(메모리 2GB). 같은 컨테이너라 데이터(`/data`)와 상태(`/state`)가 엔진과 같다.
+- 작업의 출력(stdout과 stderr)은 나오는 대로 `state/logs/jobs/<이름>/<밤>.log`에도 남는다(#356). 맨 앞 줄이 시작, 맨 끝 줄이 종료 코드나 제한 시간이다. 댓글에 실리는 것과 달리 가리지 않은 그대로다(서버 안에만 있다).
 - 지금 시작하면 시작 시각 + 제한 시간이 05:30을 넘는 작업은 그 밤에 시작하지 않고 다음 밤으로 미룬다(텔레그램으로 알린다). 06:00 배포와 07:20 재시작이 프로세스를 끊기 때문이다. 밤 학습이 그 작업의 마지막 시작 시각까지 끝나지 않아도 미룬다. 제한 시간을 넘긴 작업은 멈추고 실패로 친다(그때까지의 출력을 올린다).
 - 수집기가 밤(22:30–05:30) 사이에 시작하면(장애 뒤 재시작) 그 밤의 작업을 바로 본다. 06:00 배포나 07:20 재시작으로 시작한 수집기는 그날 22:30을 기다린다.
 - `KRX_JOBS_AT=off`면 돌리지 않는다. 시각은 20:00부터 05:30 전까지이고 `KRX_TRAIN_AT`보다 뒤여야 한다(작업은 밤 학습을 기다리지만 밤 학습은 작업을 기다리지 않는다).
@@ -1501,8 +1506,9 @@ sudo systemctl disable --now krx-quant-update.timer   # 자동 업데이트 끄�
 
 ```bash
 docker compose ps
-docker compose exec engine krx-quant doctor   # 엔진, KIS, PINGPONG, 예약 작업, 디스크·메모리 요약(#322)
+docker compose exec engine krx-quant doctor   # 엔진, KIS, PINGPONG, 예약 작업, 디스크·메모리, 로그 폴더 요약(#322)
 docker compose logs --tail 200 engine
+docker compose exec engine krx-quant logs-bundle   # 에이전트에게 줄 로그 꾸러미(#356, 아래 "로그 파일과 꾸러미")
 ```
 
 | 증상 | 확인 | 조치 |
@@ -1516,7 +1522,7 @@ docker compose logs --tail 200 engine
 | `[알림] <이름> 은퇴 후보: ...` | `curl -s http://krx-quant:8080/v1/algorithms`의 `status` 이력, `/v1/algorithms/<이름>/stats?period=20d` | 벤치 60거래일 동안 회복하지 못했다. 은퇴시키려면 `docker compose exec engine krx-quant retire <이름>`. 기록은 남고, 엔진은 다음 봉 마감부터 돌리지 않는다. 되돌리려면 `krx-quant unretire <이름>`(수습부터 다시). |
 | `[알림] <날짜> 예산 때문에 예측이 빠진 알고리즘이 있습니다. ...`, 또는 `WARNING krx_quant.engine: <이름> skipped at ... for the CPU budget`나 `<이름> took over 10.0s` 로그 | `curl -s http://krx-quant:8080/v1/status`의 `cpu`(알고리즘별 예상 초와 `usage`), `docker stats`로 CPU 사용률, DB의 `runs` 테이블(`kind`가 `cpu_budget`) | 시간 초과는 그 알고리즘이 봉 마감 한 번에 `KRX_ALGORITHM_SECONDS`를 넘긴 것이고, CPU 예산 건너뜀은 알고리즘들의 합이 `KRX_CPU_BUDGET_SECONDS`를 넘은 것이다. 알고리즘을 가볍게 하거나 CPU 기준선이 높은 요금제로 옮긴다(위 "CPU 여유 재기"). 예산을 늘리려면 한도가 예산보다 작게 둘 다 고친다. 알림은 그날 일일 점검 때 한 번만 온다. |
 | `[장애] 매크로 출처 <ecos/fred/yahoo/kis>가 3번 연속 실패했습니다: <이유>` | 로그의 `macro source ... failed` | 키가 틀렸으면(`ECOS INFO-100`, `FRED 400 ... api_key`) `.env`를 고친다. `HTTP 5xx`나 연결 실패는 출처 쪽 장애다. 다음 거래일 07:30에 다시 읽고, 응답하면 `[복구] 매크로 출처 …가 다시 응답합니다.`가 온다. 그동안 그 출처의 지표 없이 국면을 정한다. |
-| `[장애] <날짜> 밤 학습이 실패했습니다: exit <코드>, 마지막으로 시작한 단계 <이름>` | `krx-quant doctor` 7절, 로그의 `nightly training of ... failed (exit <코드>)`와 그 아래 학습 출력(마지막 `started step` 줄이 죽은 단계, 그 앞 단계들의 `peak … MB` 줄). `exit -9 (SIGKILL)`는 밖에서 죽인 것으로, 보통 메모리 부족이다(`sudo journalctl -k \| grep -i -E 'oom\|killed process'`). `exit 1`이면 출력 끝의 오류를 본다. 6시간 안에 안 끝나면 `not done in 6:00:00, 마지막으로 시작한 단계 <이름>`이다 | `docker compose run --rm --no-deps engine train --day <날짜>`로 다시 돌린다. 끝난 알고리즘은 건너뛴다. 07:30 전에 끝나면 08:00 교체가 쓴다. 다음 밤 학습이 성공하면 `[복구] 밤 학습이 다시 됩니다.`가 온다. 그동안 전날 모델이 계속 돈다. 메모리 부족이면 스왑(2.2의 11단계)이 있는지 보고, 리포트의 `resources`로 어느 단계가 큰지 본다(3장 "밤 학습과 모델 교체"). |
+| `[장애] <날짜> 밤 학습이 실패했습니다: exit <코드>, 마지막으로 시작한 단계 <이름>` | `krx-quant doctor` 7절, 로그의 `nightly training of ... failed (exit <코드>)`와 그 아래 학습 출력(마지막 `started step` 줄이 죽은 단계, 그 앞 단계들의 `peak … MB` 줄). `exit -9 (SIGKILL)`는 밖에서 죽인 것으로, 보통 메모리 부족이다(`sudo journalctl -k \| grep -i -E 'oom\|killed process'`). `exit 1`이면 출력 끝의 오류를 본다. 6시간 안에 안 끝나면 `not done in 6:00:00, 마지막으로 시작한 단계 <이름>`이다. 그 밤의 출력 전체와 종료 코드는 배포 뒤에도 `state/logs/training/<날짜>.log`에 남는다(#356) | `docker compose run --rm --no-deps engine train --day <날짜>`로 다시 돌린다. 끝난 알고리즘은 건너뛴다. 07:30 전에 끝나면 08:00 교체가 쓴다. 다음 밤 학습이 성공하면 `[복구] 밤 학습이 다시 됩니다.`가 온다. 그동안 전날 모델이 계속 돈다. 메모리 부족이면 스왑(2.2의 11단계)이 있는지 보고, 리포트의 `resources`로 어느 단계가 큰지 본다(3장 "밤 학습과 모델 교체"). |
 | `… 밤 학습이 거래일 밤 N번 연속 적용되지 않았습니다(마지막으로 적용된 밤 <날짜>, …)` (#355) | `/v1/status`의 `training.last_applied`, `nights_not_applied`, `failures`, `krx-quant doctor` 7절 | 적용되지 않은 밤이 2번 이상 이어졌다. 새로 그런 밤이 생길 때마다 한 번 온다. 실패한 밤은 위 행처럼, 학습은 끝났는데 쓰지 않은 밤은 아래 `밤 학습 결과를 쓰지 않습니다` 행처럼 한다. 그동안 4분 알고리즘은 마지막으로 적용된 모델로 예측하고, 새 정답의 모델이 아니면 수습 날이 세어지지 않는다(아래 "밤 학습이 적용되지 않은 동안의 수습"). |
 | 밤 학습이 며칠째 적용되지 않는다 (2026-10-14–22, #355) | `curl -s http://krx-quant:8080/v1/status \| jq .training`, `krx-quant doctor` 7절, `free -m`, `sudo journalctl -k \| grep -i oom` | 2026-10-13 밤 뒤로 7밤 동안 목록이 하나도 생기지 않았다(`latest_night`이 10-13). 10-22는 Turing 단계에서 `exit -9`(스왑 없는 2GB에서 메모리 부족으로 본다). 그 전 밤들의 출력은 06:00 배포가 컨테이너를 새로 만들어 남지 않았다. 사용자가 스왑 2GB를 붙이고(2.2의 11단계) 10-22 밤을 손으로 다시 돌렸다. 날 캐시를 줄이는 변경(#355)이 배포된 뒤로는 단계별 메모리가 리포트와 텔레그램 요약에, 실패 이유가 `state/training_nights.json`에 남는다. |
 | `[장애] <날짜> 밤 학습이 실패했습니다: Spot 학습 결과가 <다음 거래일> 07:30까지 오지 않았습니다` | S3의 `training/logs/`(최근 로그 마지막 줄), `aws ec2 describe-instances --filters Name=tag:Name,Values=krx-quant-training`, 스케줄러 상태 | Spot이 뜨지 못했거나(용량, 할당량, 상한으로 꺼진 스케줄) 학습이 실패했다. 맥에서 `aws ec2 run-instances --launch-template 'LaunchTemplateName=krx-quant-training,Version=$Latest'`로 다시 띄우면 끝난 알고리즘은 건너뛴다. 급하면 서버에서 `docker compose run --rm --no-deps engine train --day <날짜>`. 그동안 전날 모델이 계속 돈다. |
@@ -1571,9 +1577,12 @@ docker compose run --rm engine doctor
 
 `--api <주소>`로 물을 엔진 API를 줄 수 있다(예: `--api http://127.0.0.1:8080`). 종료 코드는 늘 0이다. 엔진에 닿지 않았는지는 출력의 1절이 말한다.
 
-설정이 틀려 엔진이 뜨지 못할 때(`configuration error`)도 `doctor`는 돈다. 다른 명령과 달리 설정 오류로 끝나지 않고, 머리줄 아래 `설정 오류: <오류>`로 적은 뒤 데이터·상태 폴더(`KRX_DATA_DIR`, `KRX_STATE_DIR`), 엔진 API 주소(`KRX_API_HOST`, `KRX_API_PORT`), `KRX_COMMIT`, 가릴 비밀값만 그대로 읽어 나머지 절을 낸다. 다른 설정은 모르므로 5절의 `KRX_JOBS_AT`은 `?`다.
+설정이 틀려 엔진이 뜨지 못할 때(`configuration error`)도 `doctor`는 돈다. 다른 명령과 달리 설정 오류로 끝나지 않고, 머리줄 아래 `설정 오류: <오류>`로 적은 뒤 데이터·상태 폴더(`KRX_DATA_DIR`, `KRX_STATE_DIR`), 엔진 API 주소(`KRX_API_HOST`, `KRX_API_PORT`), `KRX_COMMIT`, 가릴 비밀값만 그대로 읽어 나머지 절을 낸다. 다른 설정은 모르므로 5절의 `KRX_JOBS_AT`과 8절의 `KRX_LOG_DAYS`·`KRX_LOG_MAX_MB`는 `?`다.
 
-**출력.** 머리줄(시각) 아래 일곱 절이다. 필드 이름은 `/v1/status`의 것 그대로다.
+**출력.** 머리줄(시각) 아래 여덟 절이다. 필드 이름은 `/v1/status`의 것 그대로다.
+
+> **바뀜** (2026-10-23, #357, #359): 여섯 절 → 여덟 절(7절 밤 학습, 8절 로그 파일). 이유: 적용되지 않은 밤 학습을 보이고(#355), 로그를 상태 폴더에 날마다 남기게 되어(#356) 그 폴더의 상태도 보인다.
+
 1. 엔진: `commit`, `started_at`(그리고 지난 시간), `mode`, `phase`, `now`. 엔진 API는 이 컨테이너의 것(`127.0.0.1:8080`), 그다음 compose의 `engine` 서비스 순서로 묻는다. 둘 다 닿지 않으면 각각의 이유, DB `runs`의 마지막 `start`(시각과 커밋), 이 명령 이미지의 `KRX_COMMIT`을 적는다.
 2. KIS: `kis.connected`, `kis.last_frame_at`, `kis.seconds_since_frame`(#311), 피드·키 수와 60초 넘게 조용하거나 아직 안 온 키 수, 열린 `gap` 수, 그리고 피드·키마다 `feed key last_received_at seconds_since gap` 한 줄(오늘이면 시각만, 아니면 날짜도).
 3. PINGPONG: 오늘의 `raw/date=<오늘>/feed=_system/symbol=_`에서 센 KIS 하트비트의 합계, 마지막 시각, 두 PINGPONG 사이 가장 긴 간격, 시간별 수. 녹화는 `KRX_FLUSH_SECONDS`(30초)마다 파일로 쓰여 그 뒤에 온 것은 아직 없을 수 있다.
@@ -1581,12 +1590,15 @@ docker compose run --rm engine doctor
    - 메시지는 엔진(`krx_quant`) 로거의 것만, 코드가 쓴 틀(`log.warning("... %s", 값)`의 첫 인자, 첫 줄)이다. 엔진의 로그 호출은 모두 틀을 문자열 그대로 쓴다(f-string이나 실행 중에 만든 글이 아니다. 테스트가 확인한다).
    - 틀의 값은 날짜·시각, 참거짓, `None`, 이름 모양의 글자(문자로 시작하고 공백 없이 40자까지: `H0UNCNT0`, `kalman`)만 그대로 싣고, 나머지(숫자, 종목 코드, 메시지, 행, 프레임)는 `…`로 바꾼다.
    - 예외는 종류만 싣고 메시지는 싣지 않는다. 다른 라이브러리(`aiohttp`, `asyncio` 등)의 줄은 로거와 수준만 싣는다.
-   - 전체 줄은 서버에서 `docker compose logs engine`으로 본다.
+   - 전체 줄은 서버의 `state/logs/engine/<날>.log`(#356, 아래 "로그 파일과 꾸러미")와 `docker compose logs engine`에 있다. 에이전트에게는 `krx-quant logs-bundle`로 준다.
 
-   `doctor` 명령은 엔진과 다른 프로세스라 엔진 로그를 읽지 못한다(Docker가 로그를 컨테이너 밖에 둔다). 그렇다고 적고, 서버에서 볼 명령(`docker compose logs --since 2h engine | grep -E ' (WARNING|ERROR) '`)을 적는다. 컨테이너 안에서 docker를 부르지 않는다.
+   `doctor` 명령은 엔진과 다른 프로세스라 엔진이 메모리에 둔 최근 줄을 읽지 못한다. 그렇다고 적고, 서버에서 볼 명령(`docker compose logs --since 2h engine | grep -E ' (WARNING|ERROR) '`)과 엔진의 로그 파일(`state/logs/engine/<날>.log`), 꾸러미 명령을 적는다. 로그 파일의 줄은 싣지 않는다(시세 값이 들어 있을 수 있다). 컨테이너 안에서 docker를 부르지 않는다.
+
+   > **바뀜** (2026-10-23, #359): "엔진 로그를 읽지 못한다(Docker가 로그를 컨테이너 밖에 둔다)"와 `docker compose logs`만 적었다 → 엔진의 로그 파일과 꾸러미 명령도 적는다. 이유: 엔진이 로그를 상태 폴더에도 남긴다(#356).
 5. 예약 작업: `state/scheduled.json`의 마지막 실행 최근 12개(이름, 밤, `outcome`, 종료 코드, 걸린 시간, 커밋, 댓글을 남긴 이슈), 목록(`JOBS`) 중 끝까지(`ok`·`failed`) 돈 적 없는 작업(조건이 아직 안 된 것도 든다), 아직 올리지 못한 결과(`unposted`). 파일을 읽지 못하면 그렇다고만 적는다. 스케줄러와 달리 `.bad`로 옮기지 않는다.
 6. 디스크와 메모리: 데이터와 상태 폴더의 여유·전체 용량(같은 디스크면 그렇다고), `/proc/meminfo`의 사용 가능·전체 메모리와 스왑, 컨테이너의 cgroup 사용량과 한도, 그 프로세스의 `VmRSS`(명령이면 그 명령, 서버 요약이면 엔진).
 7. 밤 학습(#355): 마지막으로 적용된 밤(`state/models/applied.json`)과 그 뒤 적용되지 않은 거래일 밤의 수와 날짜(`/v1/status`의 `training.nights_not_applied`와 같다), 최근 다섯 밤의 결과(`state/training_nights.json`): 끝남이면 끝난 시각, 실패면 끝난 시각, 종료 코드, 마지막으로 시작한 단계. 이 기록은 #355가 배포된 뒤의 밤부터다.
+8. 로그 파일(#356): 제목 줄에 `KRX_LOG_DAYS`와 `KRX_LOG_MAX_MB`(설정 오류면 `?`), 그 아래 종류(`engine`, `training`, `jobs`, `commands`)마다 파일 수(작업·명령은 그 수도), 크기, 가장 오래된 날, 최근 날, 그리고 합계와 상한, 꾸러미(`bundles/`)의 수와 최근 것. 수, 크기, 날짜만 싣고 파일의 줄은 싣지 않는다. 파일이 없으면 `없음`이다.
 
 한 절을 읽다 실패하면 그 절에 이유를 적고 나머지 절은 그대로 낸다.
 
@@ -1609,7 +1621,77 @@ docker compose run --rm engine doctor
 - `/v1/status`의 피드별 필드는 `kis.feeds[]`의 `feed`, `key`, `last_received_at`, `seconds_since`, `gap`이다. `last_received`가 아니다. 연결 전체의 마지막 프레임은 `kis.last_frame_at`, `kis.seconds_since_frame`이다(#311, [engine-api.md](engine-api.md#get-v1status)).
 - 엔진 API는 컨테이너 안에서 `http://127.0.0.1:8080`, 맥에서는 Tailscale로 `http://krx-quant:8080`이다. 서버 셸에서는 Tailscale 주소(`KRX_BIND_ADDRESS`)의 `KRX_ENGINE_PORT`에만 열린다(`localhost`가 아니다).
 - `docker compose run --rm engine <명령>`은 엔진과 다른 새 컨테이너다. 데이터와 상태 폴더는 같지만 엔진의 메모리(연결 상태, 로그)는 없다. 엔진의 것을 보려면 `docker compose exec engine …`이나 엔진 API를 쓴다.
-- 엔진 로그는 `docker compose logs engine`으로만 본다(서버 셸에서). 컨테이너 안에는 로그 파일이 없다.
+- 엔진 로그는 서버 셸의 `docker compose logs engine`과, 상태 폴더의 `state/logs/engine/<날>.log`에 있다(#356). `docker compose logs`는 06:00 배포가 컨테이너를 새로 만들면 그 전의 것이 없다. 지난날의 것은 파일에 있다. 에이전트에게 줄 때는 사용자에게 꾸러미(`krx-quant logs-bundle`)를 부탁한다(아래 "로그 파일과 꾸러미").
+
+  > **바뀜** (2026-10-23, #359): "엔진 로그는 `docker compose logs engine`으로만 본다. 컨테이너 안에는 로그 파일이 없다" → 상태 폴더에도 날마다 남는다. 이유: 배포가 날마다 컨테이너를 새로 만들어, 2026-10-14부터 7밤 동안 밤 학습이 적용되지 않은 이유를 로그로 알 수 없었다(#355, #356).
+
+### 로그 파일과 꾸러미 (#356)
+
+Docker는 컨테이너의 출력(`json-file`, 10 MB × 5)을 그 컨테이너가 있는 동안만 둔다. 06:00 배포가 날마다 컨테이너를 새로 만들어 그 전 날의 로그가 사라졌다. 그래서 2026-10-14부터 7밤 동안 밤 학습이 적용되지 않은 이유를 알 수 없었다(#355). 이제 모든 프로세스가 stdout과 같은 줄을 상태 폴더에도 날마다 쓴다. stdout은 그대로라 `docker compose logs`도 그대로 된다.
+
+**파일.** `state/logs/` 아래다(컨테이너 `/state/logs`, 서버 `~/krx-quant/state/logs`).
+
+| 경로 | 쓰는 것 | 날 |
+|---|---|---|
+| `engine/<날>.log` | 엔진(`collect`)의 로그 줄 | KST 날. 줄이 만들어진 시각의 날이라 자정에 다음 파일로 넘어간다 |
+| `training/<밤>.log` | 엔진이 띄운 밤 학습의 출력 전체(stdout과 stderr를 쓴 순서대로)와 시작·끝 줄 | 학습한 날. 자정을 넘겨도 그 밤의 파일이다 |
+| `jobs/<작업>/<밤>.log` | 예약 작업의 출력 전체(stdout, stderr)와 시작·끝 줄 | 작업이 돈 밤(`KRX_JOBS_AT`부터 다음 날 05:30까지) |
+| `commands/<명령>/<날>.log` | 손으로 돌린 명령(`docker compose run --rm engine <명령>`, `docker compose exec engine krx-quant <명령>`)의 로그 줄과 시작·끝 줄 | KST 날 |
+| `bundles/krx-logs-<시각>.tar.gz` | `krx-quant logs-bundle`이 만든 꾸러미. 최근 5개만 둔다 | 만든 KST 시각 |
+
+- 줄의 형식은 stdout의 줄과 같다: `2026-10-23 09:00:00,123 INFO krx_quant.collector: …`. 시각은 KST다.
+- 시작 줄은 `krx-quant <명령과 인자> started (pid N, commit <앞 12자리>)`다(엔진이 띄운 프로세스는 커밋 없이). 끝 줄은 `… ended: exit <코드> after <걸린 시간>`이다. 설정 오류로 끝났으면 `exit 2 (configuration error: …)`, 예외로 끝났으면 `ended by <예외 종류>`와 traceback이다. 엔진이 띄운 프로세스는 신호로 죽으면 신호 이름이 붙고(`exit -9 (SIGKILL)`: 커널의 메모리 부족 처리가 보내는 신호, #355의 알림과 같은 표기), 제한 시간에 멈추면 `stopped at its time limit (<제한>): exit -9 (SIGKILL)`, 엔진이 멈추면 `stopped with the engine`이다.
+- 엔진이 띄운 프로세스(밤 학습, 예약 작업)는 제 파일을 따로 쓰지 않는다. 엔진이 환경 변수 `KRX_LOG_BY_PARENT=1`을 주고, 그 프로세스가 쓰는 것을 받아 파일에 옮긴다. 그래서 로그 줄이 아닌 것(traceback, print, 커널이 죽인 것)도 남는다. 이 변수는 엔진이 정한다. `.env`에 두지 않는다.
+- 손으로 돌린 명령이 출력하는 결과(보고서)는 터미널에만 나온다. 파일에는 로그 줄과 시작·끝 줄만 남는다.
+- 지우기: 오늘을 넣어 `KRX_LOG_DAYS`(14)일보다 오래된 파일을 지운다. 전체가 `KRX_LOG_MAX_MB`(500 MB)를 넘으면 가장 오래된 파일부터 지운다. 오늘과 어제 파일은 지우지 않는다(어젯밤 학습과 작업이 아직 쓰고 있을 수 있다). 꾸러미는 상한에 세지 않는다. 프로세스가 시작할 때와 엔진이 1시간마다 본다. 지우면 `removed N log files older than 14 days (KRX_LOG_DAYS): <파일들>`(INFO)이나 `removed N log files to keep the logs within 500 MB (KRX_LOG_MAX_MB): <파일들>`(WARNING)을 남긴다. 오늘과 어제 파일만으로 상한을 넘으면 엔진이 하루 한 번 `today's and yesterday's log files alone take N MB, over KRX_LOG_MAX_MB (500 MB)` 경고를 남긴다. 작업·명령 폴더가 비면 폴더도 지운다.
+- 파일을 쓸 수 없으면(디스크가 참) 그날은 stderr에 한 번 말하고 그 파일은 건너뛴다. 다음 날 다시 쓴다. stdout은 그대로 나온다.
+- `KRX_LOG_DAYS=off`면 파일을 쓰지도 지우지도 않는다.
+- `krx-quant doctor`의 8절이 종류마다 파일 수, 크기, 가장 오래된 날과 최근 날, 합계, 꾸러미를 보인다(위 "서버 상태 보기 (#322)").
+
+**꾸러미.** 에이전트에게 로그를 줄 때 쓴다.
+
+```bash
+docker compose exec engine krx-quant logs-bundle [--days N | --since <때>] [--grep <패턴>]
+```
+
+- `--days N`(기본 7): 오늘을 넣은 최근 N일의 파일. 밤의 파일(학습, 예약 작업)은 그 밤의 날로 센다.
+- `--since <때>`: 그때부터의 줄. `2026-10-22`, `2026-10-22T21:00`(KST), 또는 지금부터 거슬러 `90m`, `6h`, `2d`. 시각이 없는 줄(traceback, 학습이 print한 줄)은 바로 앞 줄의 시각으로 본다. 그 전날 밤의 파일도 읽는다(자정 뒤의 줄이 있다). `--days`와 함께 쓰지 않는다.
+- `--grep <패턴>`: 이 정규식에 맞는 줄만 남긴다(기간을 고른 뒤).
+- 가림: 비밀값과 서버 주소를 `doctor`와 예약 작업 댓글의 규칙으로 `[가림]`으로 바꾼다(위 "예약 작업 (#215)"의 "가림", `src/krx_quant/redaction.py`). 시세 값(가격, 거래량, 수급)은 남긴다. **그래서 꾸러미는 사용자가 에이전트에게 따로 건네는 것이다. 공개 이슈, PR, 저장소, S3에는 절대 올리지 않는다.**
+- 출력과 `MANIFEST.txt`도 같은 규칙으로 가린다. `--grep` 패턴이 가릴 값(주소, 비밀값)을 담으면(`\.`처럼 이스케이프해도) 패턴을 통째로 `[가림]`으로 보인다.
+- 설정이 틀려 엔진이 뜨지 못해도 돈다(`doctor`처럼 상태 폴더와 가릴 비밀값만 읽는다).
+- 만드는 것: `state/logs/bundles/krx-logs-<KST 시각>.tar.gz`. 풀면 `krx-logs-<시각>/` 폴더에 파일이 `state/logs` 아래 경로 그대로(`engine/<날>.log` 등) 있고, `MANIFEST.txt`(출력과 같은 요약과 에이전트에게 주는 말)가 있다. 남은 줄이 없는 파일은 넣지 않는다. 최근 5개만 두고 그보다 오래된 꾸러미는 지운다(`removed N old log bundles …`).
+- 출력: 경로와 크기, 기간, 파일마다 줄 수와 가린 수, 합계, 가린 것, 맥으로 가져오는 명령. 남는 줄이 하나도 없으면 꾸러미를 만들지 않고 종료 코드 1로 끝난다.
+
+```
+로그 꾸러미: /state/logs/bundles/krx-logs-20261023-101500.tar.gz (412 KB)
+기간: 2026-10-17 00:00 – 2026-10-23 10:15 KST (--days 7)
+파일 9개(기간의 파일 9개 중 줄이 남은 것) · 줄 48,210 · 가림 37
+  training/2026-10-22.log: 1,204줄 · 가림 0
+  engine/2026-10-23.log: 9,876줄 · 가림 12
+  …
+가린 것: 비밀값(…)과 서버 주소(IP, Tailscale 이름)를 [가림]으로. krx-quant doctor와 같은 규칙이다. 시세 값은 남는다.
+이 파일은 에이전트에게 따로 건넨다. 공개 이슈, 저장소, S3에는 올리지 않는다.
+맥으로 가져오기: scp ubuntu@<서버>:~/krx-quant/state/logs/bundles/krx-logs-20261023-101500.tar.gz ~/Downloads/
+```
+
+**장애 때.** 에이전트가 서버의 로그를 봐야 하면 사용자가 한다.
+
+1. 서버의 `~/krx-quant`에서 꾸러미를 만든다. 엔진이 멈췄으면 `docker compose run --rm engine logs-bundle`이다. 범위를 좁히려면 `--since 6h`, `--days 3`, `--grep 'ERROR|WARNING'`를 붙인다.
+   ```bash
+   docker compose exec engine krx-quant logs-bundle
+   ```
+2. 맥으로 가져온다. 출력의 마지막 줄이 그 명령이다. `<서버>`는 서버의 Tailscale 이름이나 주소다(저장소에는 적지 않는다).
+   ```bash
+   scp ubuntu@<서버>:~/krx-quant/state/logs/bundles/<파일> ~/Downloads/
+   ```
+   상태 폴더의 파일을 바로 읽을 수 없으면 서버에서 컨테이너 밖으로 먼저 꺼낸 뒤 가져온다.
+   ```bash
+   docker compose cp engine:/state/logs/bundles/<파일> ~/<파일>   # 서버에서
+   scp ubuntu@<서버>:~/<파일> ~/Downloads/                       # 맥에서
+   ```
+3. 에이전트에게 맥의 경로(예: `~/Downloads/krx-logs-20261023-101500.tar.gz`)를 준다. 에이전트가 읽는 법은 [agents/server-snapshot.md](agents/server-snapshot.md#reading-a-log-bundle)에 있다.
+4. 다 쓰면 맥의 꾸러미를 지운다(시세 값이 들어 있다). 서버의 것은 최근 5개만 남는다.
 
 ## 7. 비용
 
@@ -1674,6 +1756,8 @@ docker compose run --rm engine doctor
 | `closing_flow/net_assets.parquet` | ETF 16종의 순자산(#305): 상품, 날(순자산의 날), 출처마다 한 행, 원, 처음 받은 때([events.md](events.md#closing_flow-etf-순자산-rest-305)). 지난날을 줄 KRX Open API의 값은 서버 밖으로 내보내지 않으므로 데이터 폴더가 아니라 여기 둔다. 통째로 바꿔 쓴다(`.net_assets.parquet.tmp`) |
 | `closing_flow/demand.parquet` | KRX 마감 흐름의 15:20 수요(#305): 종목마다 하루 한 행(시각, 기준가, 전일 종가, r, 수요 합과 구조별 합, 센 상품·뺀 상품 수, [events.md](events.md#closing_flow-마감-수요와-지난날-305)). 통째로 바꿔 쓴다(`.demand.parquet.tmp`) |
 | `closing_flow/days.json` | KRX 마감 흐름의 지난날 표(#305): 종목마다 날마다의 15:20 수요·비율·종가 단일가·다음날과 날마다의 종가 단일가 체결대금. 수집기 시작과 20:30 이력 작업의 끝에 다시 계산해 통째로 바꾼다(`.days.json.tmp`). 지워도 다음 계산이 다시 만든다 |
+| `logs/engine/<날>.log`, `logs/training/<밤>.log`, `logs/jobs/<작업>/<밤>.log`, `logs/commands/<명령>/<날>.log` | 프로세스 종류마다 하루 한 파일의 로그(#356): 엔진, 밤 학습, 예약 작업, 손으로 돌린 명령. 형식과 지우기는 6장 "로그 파일과 꾸러미 (#356)". `KRX_LOG_DAYS`(14일)와 `KRX_LOG_MAX_MB`(500 MB) 안에서 남는다 |
+| `logs/bundles/krx-logs-<KST 시각>.tar.gz` | `krx-quant logs-bundle`이 만든 가린 로그 꾸러미(#356). 시세 값이 들어 있어 사용자가 에이전트에게 따로 건넨다. 최근 5개만 둔다. `.krx-logs-*.tmp`는 쓰는 중인 것이다(1시간 넘게 남은 것은 다음 꾸러미가 지운다) |
 | `spot_summarized.json` | `{"night": "<날짜>"}`: 요약을 보낸 마지막 Spot 학습 밤(#23). 재시작해도 같은 요약을 다시 보내지 않는다. 보내지 못한 요약은 적지 않아서, 기한까지 다시 시도하고 다음 기다림(재시작)에도 보낸다 |
 
 > **바뀜** (2026-10-10, #48): 이전에는 `training-cache/`를 자동으로 지우지 않았다 → 지금은 밤마다 오래된 날짜를 지운다. 이유: 녹화 이벤트도 캐시하게 되어 크기가 커졌다.

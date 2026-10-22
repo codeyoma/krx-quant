@@ -9,7 +9,8 @@ running engine notices a model file that changed (the swap, ``krx-quant fit``,
 publishes what it runs (``live.json`` and the models), the champions of the next night.
 
 The nightly training runs at ``KRX_TRAIN_AT`` on trading days: here, in its own process
-(``KRX_TRAIN_ON=server``), or on EC2 Spot started by AWS at the same time (``spot``, #23).
+(``KRX_TRAIN_ON=server``; its whole output and exit code in ``state/logs/training/<day>.log``,
+#356), or on EC2 Spot started by AWS at the same time (``spot``, #23).
 On Spot, the server publishes what the run needs from it, waits for the night's result in
 the store until the next trading day's 07:30, and sends its summary (the Spot run has no
 Telegram token). The scheduled jobs (#215) wait for the night either way (``NightTraining``).
@@ -24,8 +25,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import sys
-from asyncio.subprocess import PIPE, STDOUT
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
@@ -42,6 +41,8 @@ from krx_quant.cost_guard import training_stopped
 from krx_quant.daily import DailyAlgorithm
 from krx_quant.engine import PredictionEngine
 from krx_quant.feeds.base import KST, kst_day
+from krx_quant.log_files import KRX_QUANT, night_file, run_logged
+from krx_quant.log_files import TRAINING as TRAINING_LOGS
 from krx_quant.market_calendar import MarketCalendar, next_on_trading_day
 from krx_quant.model_shelf import Shelf
 from krx_quant.nightly import (
@@ -71,7 +72,7 @@ _TRAINING_ALERT = "training"
 # From this many nights in a row whose list does not run (failed, or not applied), each new
 # one is alerted (#355).
 STREAK_ALERT = 2
-TRAIN_COMMAND = (sys.executable, "-m", "krx_quant.cli", "train")
+TRAIN_COMMAND = (*KRX_QUANT, "train")
 # How often the server looks for the result of a night trained on EC2 Spot (#23), and the
 # last such night whose summary it sent (in the state directory).
 SPOT_POLL_SECONDS = 300.0
@@ -354,6 +355,7 @@ async def keep_training(
     first: Callable[[MarketCalendar, time, datetime], datetime] | None = None,
     training: NightTraining | None = None,
     watch: TrainingWatch | None = None,
+    logs: Path | None = None,
 ) -> None:
     """Start ``krx-quant train --day <day>`` in its own process at ``train_at`` each trading
     day, until cancelled; at once for a night a restart interrupted or missed (``CATCH_UP``).
@@ -362,11 +364,12 @@ async def keep_training(
     (None once done, else why not), and ``first`` picks the first night to run. ``training``
     is told when each night is due, starts and ends (the scheduled jobs wait for it, #215).
     With ``watch`` (#355), each night's outcome is kept and the alerts are ``TrainingWatch``'s.
+    ``logs`` (``state/logs``) gets each night's training output here (#356).
     """
 
     async def run(day: date) -> Failure | None:
         if run_night is None:
-            return await _train(day)
+            return await _train(day, logs=logs)
         why = await run_night(day)
         return None if why is None else Failure(why)
 
@@ -471,28 +474,22 @@ class TrainingWatch:
 
 
 async def _train(
-    day: date, command: Sequence[str] = TRAIN_COMMAND, timeout: timedelta = TRAINING_TIMEOUT
+    day: date,
+    command: Sequence[str] = TRAIN_COMMAND,
+    timeout: timedelta = TRAINING_TIMEOUT,
+    logs: Path | None = None,
 ) -> Failure | None:
     """Run the night's training; None if it finished, else why not: the exit code and the last
-    step it started (#355), also when it is stopped at ``timeout``."""
-    process = await asyncio.create_subprocess_exec(
-        *command, "--day", day.isoformat(), stdout=PIPE, stderr=STDOUT
+    step it started (#355), also when it is stopped at ``timeout``. Its whole output and exit
+    code also go to the night's file as they come (``training/<day>.log`` under ``logs``, #356)."""
+    ran = await run_logged(  # read as it comes: what it wrote is kept if it is stopped
+        (*command, "--day", day.isoformat()),
+        timeout,
+        night_file(logs, TRAINING_LOGS, day),
+        merge=True,  # stdout and stderr in the order written
     )
-    chunks: list[bytes] = []  # read as it comes: what it wrote is kept if it is stopped
-
-    async def read() -> int:
-        assert process.stdout is not None
-        while chunk := await process.stdout.read(1 << 16):
-            chunks.append(chunk)
-        return await process.wait()
-
-    try:
-        code: int | None = await asyncio.wait_for(read(), timeout.total_seconds())
-    except TimeoutError:
-        process.kill()
-        await process.wait()
-        code = None
-    text = b"".join(chunks).decode(errors="replace").strip()
+    code = None if ran.timed_out else ran.exit_code
+    text = ran.stdout.strip()
     step = last_step(text)
     started = f"마지막으로 시작한 단계 {step or '없음'}"
     if code is None:

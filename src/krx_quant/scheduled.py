@@ -12,7 +12,8 @@ sets.
 
 Every night (trading or not) from ``KRX_JOBS_AT`` (22:30) to 05:30, once the nightly
 training is over (``swap.NightTraining``), the jobs due run one at a time, in this list's
-order, each in its own process, as the nightly training does. A job's condition is asked
+order, each in its own process, as the nightly training does; its whole output also goes to
+``state/logs/jobs/<job>/<night>.log`` as it comes (``log_files.py``, #356). A job's condition is asked
 when its turn comes, so it sees the runs of the jobs before it that night. One whose time
 limit would pass 05:30 is not started that night: the 06:00 deploy and the 07:20 restart
 stop the collector. A collector started inside the window (a restart at night) runs that
@@ -34,15 +35,13 @@ import asyncio
 import contextlib
 import json
 import logging
-import sys
-from asyncio.subprocess import DEVNULL, PIPE
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from functools import partial
 from pathlib import Path
 from time import monotonic
-from typing import Any
+from typing import Any, Protocol
 
 import aiohttp
 
@@ -55,6 +54,9 @@ from krx_quant.engine import PredictionEngine
 from krx_quant.feeds.base import KST
 from krx_quant.github import GitHub, GitHubError, comment_body
 from krx_quant.kind_registry import DAILY_KINDS, daily_kind_named
+from krx_quant.log_files import JOBS as JOB_LOGS
+from krx_quant.log_files import KRX_QUANT, night_file, root_of, run_logged
+from krx_quant.log_files import Ran as Ran  # a job's process, once it ended
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.night_probe import evening, subscribed_nights
 from krx_quant.notify import Alerts
@@ -68,10 +70,7 @@ log = logging.getLogger(__name__)
 STATE_FILE = "scheduled.json"
 OK, FAILED, INTERRUPTED, RUNNING = "ok", "failed", "interrupted", "running"
 READY_FOR_AGENT, READY_FOR_HUMAN, NEEDS_TRIAGE = "ready-for-agent", "ready-for-human", "needs-triage"
-# A job's arguments follow this, as the nightly training's do.
-KRX_QUANT = (sys.executable, "-m", "krx_quant.cli")
-# How long a killed job's output is still read for (a process it started may hold the pipe).
-_DRAIN_SECONDS = 5.0
+# A job's arguments follow ``KRX_QUANT``, as the nightly training's do.
 
 # Which part of a job's output an issue gets: None if it is not in the output.
 Part = Callable[[str], str | None]
@@ -290,55 +289,29 @@ class Job:
     attach: tuple[Attachment, ...] = ()  # files it writes, posted with its output
 
 
-@dataclass(frozen=True)
-class Ran:
-    """A job's process, once it ended."""
+class Runner(Protocol):
+    """Runs a job's ``krx-quant`` arguments within its time limit, its output also into its log
+    file (``jobs/<job>/<night>.log``, #356; None: none)."""
 
-    exit_code: int | None  # None: it could not be started
-    stdout: str
-    stderr: str
-    timed_out: bool = False
+    def __call__(
+        self, args: Sequence[str], timeout: timedelta, log_file: Path | None = None
+    ) -> Awaitable[Ran]: ...
 
 
-Runner = Callable[[Sequence[str], timedelta], Awaitable[Ran]]
 Notify = Callable[[str], Awaitable[bool]]
 
 
-async def run_command(args: Sequence[str], timeout: timedelta, program: Sequence[str] = KRX_QUANT) -> Ran:
-    """Run ``program`` with ``args`` and read its output; killed at ``timeout`` (what it wrote
-    by then is kept), and when the collector stops (cancelled)."""
-    process = await asyncio.create_subprocess_exec(*program, *args, stdin=DEVNULL, stdout=PIPE, stderr=PIPE)
-    assert process.stdout is not None and process.stderr is not None
-    out, err = bytearray(), bytearray()
-    readers = [
-        asyncio.create_task(_drain(process.stdout, out)),
-        asyncio.create_task(_drain(process.stderr, err)),
-    ]
-    # The process's end is timed too: one that closes its output early still stops at the limit.
-    ended = asyncio.create_task(process.wait())
-    try:
-        _, pending = await asyncio.wait([*readers, ended], timeout=timeout.total_seconds())
-        if pending:
-            _kill(process)
-            await asyncio.wait(readers, timeout=_DRAIN_SECONDS)
-        code = await ended
-    except BaseException:  # cancelled: the job stops with the collector
-        _kill(process)
-        raise
-    finally:
-        for task in (*readers, ended):
-            task.cancel()
-    return Ran(code, out.decode(errors="replace"), err.decode(errors="replace"), timed_out=bool(pending))
-
-
-async def _drain(stream: asyncio.StreamReader, sink: bytearray) -> None:
-    while chunk := await stream.read(1 << 16):
-        sink += chunk
-
-
-def _kill(process: asyncio.subprocess.Process) -> None:
-    with contextlib.suppress(ProcessLookupError):
-        process.kill()
+async def run_command(
+    args: Sequence[str],
+    timeout: timedelta,
+    log_file: Path | None = None,
+    *,
+    program: Sequence[str] = KRX_QUANT,
+) -> Ran:
+    """Run ``program`` with ``args`` and read its output, each line also into ``log_file``;
+    killed at ``timeout`` (what it wrote by then is kept), and when the collector stops
+    (cancelled)."""
+    return await run_logged([*program, *args], timeout, log_file)
 
 
 def window(day: date, at: time) -> tuple[datetime, datetime]:
@@ -376,6 +349,7 @@ class Scheduler:
         training: NightTraining | None = None,
         facts: Callable[[], Awaitable[Facts]] | None = None,
         runner: Runner = run_command,
+        logs: Path | None = None,
     ) -> None:
         self._jobs = jobs
         self._at = at
@@ -389,6 +363,7 @@ class Scheduler:
         self._training = training or NightTraining()
         self._facts = facts
         self._runner = runner
+        self._logs = logs  # state/logs: each run's output goes to jobs/<job>/<night>.log (#356)
 
     async def run(self) -> None:
         """Every night's jobs, until cancelled; first what the last collector left."""
@@ -486,7 +461,9 @@ class Scheduler:
         log.info("scheduled job %s: krx-quant %s", job.name, " ".join(job.command))
         began = monotonic()
         try:
-            ran = await self._runner(job.command, job.timeout)
+            ran = await self._runner(
+                job.command, job.timeout, night_file(self._logs, JOB_LOGS, day, job.name)
+            )
         except Exception as e:
             log.exception("could not run the scheduled job %s", job.name)
             ran = Ran(None, "", f"could not be started: {type(e).__name__}: {e}")
@@ -732,6 +709,7 @@ async def keep_jobs(
         secrets=secrets_of(settings),
         training=training,
         facts=partial(read_facts, settings, calendar, clock, engine),
+        logs=root_of(settings),
     )
     await scheduler.run()
 

@@ -127,7 +127,7 @@ class Runs:
     def names(self) -> list[str]:
         return [name for name, _ in self.started]
 
-    async def __call__(self, args: Sequence[str], timeout: timedelta) -> Ran:
+    async def __call__(self, args: Sequence[str], timeout: timedelta, log_file: Path | None = None) -> Ran:
         self.started.append((args[0], self.clock.now()))
         await self.held.wait()
         self.ended.append(args[0])
@@ -141,10 +141,10 @@ class Writes(Runs):
         super().__init__(clock, ran)
         self.files = files
 
-    async def __call__(self, args: Sequence[str], timeout: timedelta) -> Ran:
+    async def __call__(self, args: Sequence[str], timeout: timedelta, log_file: Path | None = None) -> Ran:
         for path, text in self.files.items():
             path.write_text(text)
-        return await super().__call__(args, timeout)
+        return await super().__call__(args, timeout, log_file)
 
 
 class Told(list[str]):

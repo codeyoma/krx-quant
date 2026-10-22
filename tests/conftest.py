@@ -8,6 +8,14 @@ from krx_quant.fake_kis import FakeKis
 from tests.algorithm_doubles import FixedCosts
 
 
+@pytest.fixture(autouse=True)
+def no_log_files(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A command a test runs (``cli.main``) writes no log file under ``state/logs`` (#356) unless
+    the test turns them on: its state folder may be the working directory's."""
+    monkeypatch.setenv("KRX_LOG_DAYS", "off")
+    monkeypatch.delenv("KRX_LOG_BY_PARENT", raising=False)
+
+
 @pytest.fixture
 async def kis() -> AsyncIterator[FakeKis]:
     fake = FakeKis()

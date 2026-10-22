@@ -35,6 +35,8 @@ services:
     restart: unless-stopped
     # The collector flushes buffered rows and open gaps on SIGTERM.
     stop_grace_period: 30s
+    # Docker keeps this output only while the container lives (the 06:00 deploy makes a new
+    # one); every process also writes its lines to state/logs/, kept KRX_LOG_DAYS days (#356).
     logging:
       driver: json-file
       options:

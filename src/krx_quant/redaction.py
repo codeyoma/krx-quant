@@ -13,7 +13,8 @@ that, everything that could name a secret or the server is replaced with ``[к∞Ал
   AWS, Telegram, JWT, GitHub tokens, private keys);
 - Tailscale names (``*.ts.net``), IPv6 and IPv4 addresses.
 
-``redact`` is a pure function: it is the one place that decides what a comment may show.
+``redact`` is a pure function: it is the one place that decides what a comment may show, and
+what the log bundle an agent is handed may (``redact_counted``, #356).
 """
 
 from __future__ import annotations
@@ -64,16 +65,35 @@ def secrets_of(settings: Settings) -> tuple[str, ...]:
 def redact(text: str, secrets: Iterable[str] = ()) -> str:
     """``text`` with ``secrets`` (those of ``MIN_SECRET`` characters or more), the forbidden
     patterns, Tailscale names and IP addresses replaced with ``MASK``."""
+    return redact_counted(text, secrets)[0]
+
+
+def redact_counted(text: str, secrets: Iterable[str] = ()) -> tuple[str, int]:
+    """``redact``'s text, and how many values it replaced (the log bundle counts them, #356)."""
+    count = 0
     for secret in sorted({s for s in secrets if len(s) >= MIN_SECRET}, key=len, reverse=True):
-        text = text.replace(secret, MASK)
-    for _, pattern in RULES:
-        text = pattern.sub(MASK, text)
-    text = _TAILNET.sub(MASK, text)
-    text = _IPV6.sub(_ipv6, text)
-    return _IPV4.sub(MASK, text)
+        found = text.count(secret)
+        if found:
+            text = text.replace(secret, MASK)
+            count += found
+    for _, pattern in (*RULES, ("Tailscale name", _TAILNET)):
+        text, found = pattern.subn(MASK, text)
+        count += found
+    masked = 0
+
+    def ipv6(match: re.Match[str]) -> str:
+        nonlocal masked
+        shown = _ipv6(match)
+        masked += shown != match.group()
+        return shown
+
+    text = _IPV6.sub(ipv6, text)
+    text, found = _IPV4.subn(MASK, text)
+    return text, count + masked + found
 
 
 def _ipv6(match: re.Match[str]) -> str:
+    """The match masked if it is an IPv6 address (shaped like one is not enough: 09:00:30)."""
     found = match.group()
     core = found.rstrip(".")
     try:
