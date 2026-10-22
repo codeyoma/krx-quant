@@ -46,7 +46,7 @@ from __future__ import annotations
 
 import bisect
 from collections import deque
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time
 from pathlib import Path
@@ -98,6 +98,22 @@ Answers = dict[tuple[str, str, datetime], Answer | None]
 # out).
 IN_VI = "vi"
 SPECIAL = "special"
+_DECLARED: dict[tuple[str, ...], frozenset[str]] = {}
+_DECLARED_KEPT = 256
+
+
+def declared(names: Iterable[str]) -> frozenset[str]:
+    """The frozenset of ``names``, one object for the same names in the same order (#355): every
+    sample of a day, or of an algorithm, shares it instead of holding its own, and a vector made
+    from another of the same object shares its values (``FeatureVector``). Built from the names
+    in their order, it iterates as a frozenset made of them anew would."""
+    key = tuple(names)
+    found = _DECLARED.get(key)
+    if found is None:
+        if len(_DECLARED) >= _DECLARED_KEPT:  # a handful in use: the registered algorithms'
+            _DECLARED.clear()
+        found = _DECLARED[key] = frozenset(key)
+    return found
 
 
 @dataclass(frozen=True)
@@ -115,25 +131,38 @@ class TrainingDay:
     def of(self, features: Sequence[str]) -> list[Sample]:
         """The samples with only ``features``, as one algorithm declared them, each naming the
         day's reference price (a fitted model counts its days by it, #165)."""
+        names = declared(features)
         return [
-            replace(s, features=FeatureVector(s.features, features), reference=self.reference)
+            replace(s, features=FeatureVector(s.features, names), reference=self.reference)
             for s in self.samples
         ]
 
     def of_kind(self, kind: Kind, features: Sequence[str]) -> list[KindSample]:
         """A kind's samples (#179): the same bar closes with only ``features``, each labelled
         with the kind's answer (none where the day has none)."""
+        names = declared(features)
         return [
             KindSample(
                 s.symbol,
                 s.bar_close,
-                FeatureVector(s.features, features),
+                FeatureVector(s.features, names),
                 self.answers.get((kind.name, s.symbol, s.bar_close)),
                 kind.answer_version,
                 self.reference,
             )
             for s in self.samples
         ]
+
+    def keeping(self, features: Sequence[str], kinds: Collection[str]) -> TrainingDay:
+        """This day with only ``features`` in its samples and only ``kinds``' answers (#355): what
+        the night's later steps still read of it. Each sample's values are those it had, as
+        ``of`` gives them; nothing is computed again."""
+        names = declared(features)
+        return replace(
+            self,
+            samples=[replace(s, features=FeatureVector(s.features, names)) for s in self.samples],
+            answers={key: answer for key, answer in self.answers.items() if key[0] in kinds},
+        )
 
 
 def training_day(
@@ -273,6 +302,7 @@ def samples(
     series = _by_day(leader_days or {})
     leading = bool(LEAD_FEATURES & set(names))  # leaders are sliced only when asked for
     touch = TouchTerms() if target_version >= 2 else None  # no quotes: a one-tick spread
+    names_held = declared(names)  # every sample's, one object (#355)
     out: list[Sample] = []
     for (symbol, day), bars in sorted(bar_days.items(), key=lambda item: (item[0][1], item[0][0])):
         session = calendar.session(day)
@@ -308,7 +338,7 @@ def samples(
             )
             values = store.compute(snapshot, names)
             later = closes.get(t + HORIZON - BAR)  # the close of the bar ending at t + 4 minutes
-            sample = _sample(snapshot, values, names, later, touch)
+            sample = _sample(snapshot, values, names_held, later, touch)
             if touch is not None:
                 # The label needs the bar that ended at t itself: an older close is not t's.
                 closing = done[-1] if done and done[-1].start + BAR == t else None
@@ -408,6 +438,7 @@ def recorded_day(
     labels: dict[tuple[str, datetime], Direction | None] = {}  # by bar close, once its window ended
     answers: Answers = {}  # the kinds' (#179), likewise
     left_out = {IN_VI: 0, SPECIAL: 0}  # the bar closes without a sample, by why (#184)
+    names_held = declared(names)  # every sample's, one object (#355)
 
     def reach(moment: datetime) -> None:
         """Everything due at the minutes up to ``moment``, before what is received then."""
@@ -462,7 +493,7 @@ def recorded_day(
             left_out[SPECIAL] += 1
             continue
         later = mids.get((snapshot.symbol, snapshot.bar_close + HORIZON))
-        sample = _sample(snapshot, values, names, later, terms)
+        sample = _sample(snapshot, values, names_held, later, terms)
         if to_touch:
             sample = replace(sample, outcome=labels.get((snapshot.symbol, t)))
         out.append(sample)
@@ -534,7 +565,7 @@ def _bare(snapshot: Snapshot) -> Snapshot:
 def _sample(
     snapshot: Snapshot,
     values: Mapping[str, Value],
-    names: Sequence[str],
+    names: frozenset[str],
     later: float | None,
     touch: TouchTerms | None = None,
 ) -> Sample:

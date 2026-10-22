@@ -170,7 +170,7 @@ def logs_with(*messages: tuple[int, str]) -> RecentLog:
     return recent
 
 
-def test_the_summary_has_its_six_parts_with_the_fields_as_the_api_names_them(tmp_path: Path) -> None:
+def test_the_summary_has_its_seven_parts_with_the_fields_as_the_api_names_them(tmp_path: Path) -> None:
     settings = server(tmp_path)
     record_pingpongs(
         settings.data_dir,
@@ -181,8 +181,8 @@ def test_the_summary_has_its_six_parts_with_the_fields_as_the_api_names_them(tmp
     logs = logs_with((logging.INFO, "not kept"), (logging.WARNING, "KIS WebSocket silent for 60s"))
     text = report(settings, NOW, Status(status_body(), "이 컨테이너의 엔진 API"), logs)
 
-    titles = [line for line in text.splitlines() if line[:2] in {f"{n}." for n in range(1, 7)}]
-    assert [t[:2] for t in titles] == ["1.", "2.", "3.", "4.", "5.", "6."]
+    titles = [line for line in text.splitlines() if line[:2] in {f"{n}." for n in range(1, 8)}]
+    assert [t[:2] for t in titles] == ["1.", "2.", "3.", "4.", "5.", "6.", "7."]
     assert text.startswith("서버 상태 2026-10-20 10:30:00 KST")
     assert f"commit {COMMIT} · started_at 2026-10-20T06:00:31+09:00 (4시간 29분 전)" in text
     assert "mode live · phase regular" in text
@@ -213,6 +213,9 @@ def test_the_summary_has_its_six_parts_with_the_fields_as_the_api_names_them(tmp
     assert f"끝까지 돈 적 없는 작업 {len(JOBS) - 2}개: {JOBS[2].name}" in text
     assert f"{JOBS[1].name} (2026-10-19 밤) → #206" in text
     assert "6. 디스크와 메모리" in text and "데이터 " in text
+    # The nightly training (#355): nothing kept yet here.
+    assert "마지막으로 적용된 밤 없음 · 그 뒤 적용되지 않은 거래일 밤 0번" in text
+    assert "기록된 밤 없음(이 기록은 #355부터)" in text
 
 
 def test_it_shows_no_market_value_nor_a_secret_nor_the_server_s_address(tmp_path: Path) -> None:

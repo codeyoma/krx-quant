@@ -314,7 +314,9 @@ async def _status(request: web.Request) -> web.Response:
     }
     # The latest night's training and whether its promotions run (swap.py); null before any.
     training = engine.training
-    if training is not None:  # finalized where the night ran: shown in KST like every time here
+    if training is not None and training["finalized_at"] is not None:
+        # Finalized where the night ran: shown in KST like every time here. None before any
+        # night's list, when only the nights not applied are shown (#355).
         training = {**training, "finalized_at": iso(datetime.fromisoformat(training["finalized_at"]))}
     body["training"] = training
     cpu = engine.cpu_use()

@@ -13,6 +13,10 @@ The nightly training runs at ``KRX_TRAIN_AT`` on trading days: here, in its own 
 On Spot, the server publishes what the run needs from it, waits for the night's result in
 the store until the next trading day's 07:30, and sends its summary (the Spot run has no
 Telegram token). The scheduled jobs (#215) wait for the night either way (``NightTraining``).
+
+Each night's outcome is kept in the state folder (#355, ``training_nights``). A failure is
+alerted with the exit code and the last step the training started; from ``STREAK_ALERT`` nights
+in a row whose list does not run, each new one is alerted, restarts or not (``TrainingWatch``).
 """
 
 from __future__ import annotations
@@ -51,6 +55,7 @@ from krx_quant.nightly import (
 )
 from krx_quant.notify import Alerts
 from krx_quant.object_store import ObjectStore, file_digest, get_json, put_json
+from krx_quant.training_nights import Failure, Outcome, TrainingNights, exit_text, last_step
 
 log = logging.getLogger(__name__)
 
@@ -63,6 +68,10 @@ TRAINING_TIMEOUT = timedelta(hours=6)
 # once: the night resumes from its checkpoints.
 CATCH_UP = timedelta(hours=8)
 _TRAINING_ALERT = "training"
+# From this many nights in a row whose list does not run (failed, or not applied), each new
+# one is alerted (#355).
+STREAK_ALERT = 2
+TRAIN_COMMAND = (sys.executable, "-m", "krx_quant.cli", "train")
 # How often the server looks for the result of a night trained on EC2 Spot (#23), and the
 # last such night whose summary it sent (in the state directory).
 SPOT_POLL_SECONDS = 300.0
@@ -190,11 +199,39 @@ def night_status(store: ObjectStore, shelf: Shelf, today: date) -> NightStatus |
     return NightStatus(night, True, "applied")
 
 
-async def show_night(store: ObjectStore, shelf: Shelf, engine: PredictionEngine, today: date) -> None:
-    """Show the latest night in the engine's status, and each algorithm's report of it."""
+async def show_night(
+    store: ObjectStore,
+    shelf: Shelf,
+    engine: PredictionEngine,
+    today: date,
+    watch: TrainingWatch | None = None,
+) -> None:
+    """Show the latest night in the engine's status, and each algorithm's report of it; with
+    ``watch``, the last night applied and the nights not applied since (#355)."""
     status = await asyncio.to_thread(night_status, store, shelf, today)
-    engine.training = None if status is None else status.as_dict()
+    engine.training = _shown(status, watch)
     engine.night_reports = {} if status is None else reports_by_algorithm(status.night)
+
+
+NO_NIGHT = "no night's promotion list yet"
+
+
+def _shown(status: NightStatus | None, watch: TrainingWatch | None) -> dict[str, Any] | None:
+    """``/v1/status``'s ``training``: the latest night's list and whether it runs (None without
+    one); with ``watch``, the nights not applied (#355), also before any list was stored, the
+    night's own fields empty then: nights that all failed are shown too."""
+    if status is None:
+        if watch is None:
+            return None
+        night: dict[str, Any] = {
+            "day": None,
+            "finalized_at": None,
+            "promoted": {},
+            "reports": [],
+            "applied": False,
+        }
+        return {**night, "reason": NO_NIGHT, **watch.fields()}
+    return status.as_dict() if watch is None else {**status.as_dict(), **watch.fields()}
 
 
 def reports_by_algorithm(night: Night) -> dict[str, dict[str, Any]]:
@@ -204,13 +241,21 @@ def reports_by_algorithm(night: Night) -> dict[str, dict[str, Any]]:
 
 
 async def morning_swap(
-    store: ObjectStore, shelf: Shelf, engine: PredictionEngine, *, today: date, at: datetime
+    store: ObjectStore,
+    shelf: Shelf,
+    engine: PredictionEngine,
+    *,
+    today: date,
+    at: datetime,
+    watch: TrainingWatch | None = None,
 ) -> NightStatus | None:
     """Apply the night's list, switch the engine, and show the night in its status."""
     status = await asyncio.to_thread(apply_promotions, store, shelf, today=today, at=at)
     if status is not None:
-        engine.training = status.as_dict()
+        engine.training = _shown(status, watch)
         engine.night_reports = reports_by_algorithm(status.night)
+    elif watch is not None:  # no list yet: the nights not applied go on showing (#355)
+        engine.training = _shown(None, watch)
     reload_models(engine, shelf)
     return status
 
@@ -251,15 +296,17 @@ async def keep_models(
     calendar: MarketCalendar,
     notify: Callable[[str], Awaitable[bool]],
     now: Callable[[], datetime],
+    watch: TrainingWatch | None = None,
 ) -> None:
     """The collector's model task, until cancelled: the morning swap on trading days (at
     once if started between 08:00 and the open), the engine switched to any model file that
-    changes, and what it runs published. Without a store only the files are watched.
+    changes, and what it runs published. Without a store only the files are watched. With
+    ``watch``, a night not applied by the swap counts to the nights in a row (#355).
     """
     swap_at = _first_swap(calendar, now())
     if store is not None:
         try:
-            await show_night(store, shelf, engine, kst_day(now()))
+            await show_night(store, shelf, engine, kst_day(now()), watch)
             await asyncio.to_thread(
                 publish_live,
                 store,
@@ -274,9 +321,11 @@ async def keep_models(
             if store is not None and now() >= swap_at:
                 today = kst_day(swap_at)
                 swap_at = next_on_trading_day(calendar, SWAP_AT, now())
-                status = await morning_swap(store, shelf, engine, today=today, at=now())
+                status = await morning_swap(store, shelf, engine, today=today, at=now(), watch=watch)
                 if status is not None and (not status.applied or status.night.promoted):
                     await notify(_swap_notice(status))
+                if watch is not None:
+                    watch.morning()
                 await asyncio.to_thread(
                     publish_live,
                     store,
@@ -284,7 +333,7 @@ async def keep_models(
                     [*engine.registered, *engine.kind_registered, *engine.daily_registered],
                 )
             elif reload_models(engine, shelf) and store is not None:  # a fit or a rollback
-                await show_night(store, shelf, engine, kst_day(now()))
+                await show_night(store, shelf, engine, kst_day(now()), watch)
                 await asyncio.to_thread(
                     publish_live,
                     store,
@@ -304,6 +353,7 @@ async def keep_training(
     run_night: Callable[[date], Awaitable[str | None]] | None = None,
     first: Callable[[MarketCalendar, time, datetime], datetime] | None = None,
     training: NightTraining | None = None,
+    watch: TrainingWatch | None = None,
 ) -> None:
     """Start ``krx-quant train --day <day>`` in its own process at ``train_at`` each trading
     day, until cancelled; at once for a night a restart interrupted or missed (``CATCH_UP``).
@@ -311,50 +361,148 @@ async def keep_training(
     that trains. With ``run_night`` (the training on EC2 Spot), that runs the night instead
     (None once done, else why not), and ``first`` picks the first night to run. ``training``
     is told when each night is due, starts and ends (the scheduled jobs wait for it, #215).
+    With ``watch`` (#355), each night's outcome is kept and the alerts are ``TrainingWatch``'s.
     """
-    run = run_night or _train
-    watch = training or NightTraining()
+
+    async def run(day: date) -> Failure | None:
+        if run_night is None:
+            return await _train(day)
+        why = await run_night(day)
+        return None if why is None else Failure(why)
+
+    schedule = training or NightTraining()
     start = (first or _first_training)(calendar, train_at, now())
     while True:
-        watch.due(start)  # before the first await: a job catching up at start waits for it
+        schedule.due(start)  # before the first await: a job catching up at start waits for it
         await asyncio.sleep(max(0.0, (start - now()).total_seconds()))
         day = night_to_train(calendar, start)
         start = next_on_trading_day(calendar, train_at, max(now(), start))
-        watch.started(now(), start)
+        schedule.started(now(), start)
         try:
             failure = await run(day)
         except Exception as e:
             log.exception("could not run the nightly training")
-            failure = str(e)
+            failure = Failure(str(e))
         finally:
-            watch.finished()
-        if failure is None:
-            alerts.resolve(_TRAINING_ALERT, "밤 학습이 다시 됩니다.")
+            schedule.finished()
+        if watch is not None:
+            try:
+                watch.ended(day, failure)
+            except Exception:  # the outcome's file: the alert still goes
+                log.exception("could not keep the night's outcome")
+                _alert(alerts, day, failure)
         else:
-            alerts.raise_(_TRAINING_ALERT, f"{day} 밤 학습이 실패했습니다: {failure}")
+            _alert(alerts, day, failure)
         try:
             await refresh()
         except Exception:
             log.exception("could not read the night's result")
 
 
-async def _train(day: date) -> str | None:
-    """Run the night's training; None if it finished, else why not."""
+def _alert(alerts: Alerts, day: date, failure: Failure | None) -> None:
+    """A night's end as alerted without a ``TrainingWatch``."""
+    if failure is None:
+        alerts.resolve(_TRAINING_ALERT, "밤 학습이 다시 됩니다.")
+    else:
+        alerts.raise_(_TRAINING_ALERT, f"{day} 밤 학습이 실패했습니다: {failure.reason}")
+
+
+class TrainingWatch:
+    """The nights whose promotion list does not run, counted across restarts and deploys (#355,
+    ``training_nights``): each night's outcome kept, its failure alerted with the exit code and the
+    last step it started; from ``STREAK_ALERT`` nights in a row on, each new such night alerted
+    with them all (once: a restart does not repeat it), whether it failed or the morning swap
+    passed without its list. ``fields`` are ``/v1/status``'s."""
+
+    def __init__(
+        self, nights: TrainingNights, alerts: Alerts, calendar: MarketCalendar, now: Callable[[], datetime]
+    ) -> None:
+        self.log = nights
+        self._alerts = alerts
+        self._calendar = calendar
+        self._now = now
+        outcomes = nights.outcomes()
+        if outcomes and not outcomes[max(outcomes)].ok:  # a failure alerted before a restart
+            alerts.mark(_TRAINING_ALERT)
+
+    def ended(self, day: date, failure: Failure | None) -> None:
+        """A night's training ended: kept, and alerted."""
+        self.log.record(
+            Outcome(
+                day,
+                failure is None,
+                self._now(),
+                None if failure is None else failure.exit_code,
+                None if failure is None else failure.step,
+                None if failure is None else failure.reason,
+            )
+        )
+        if failure is None:
+            self._alerts.resolve(_TRAINING_ALERT, "밤 학습이 다시 됩니다.")
+            return
+        text = f"{day} 밤 학습이 실패했습니다: {failure.reason}"
+        if not self._remind(text):
+            self._alerts.raise_(_TRAINING_ALERT, text)
+
+    def morning(self) -> None:
+        """After the morning swap: a night it passed without its list counts too."""
+        self._remind(None)
+
+    def fields(self) -> dict[str, Any]:
+        return self.log.fields(self._calendar, SWAP_AT, self._now())
+
+    def _remind(self, text: str | None) -> bool:
+        """Alert the nights in a row not applied, once per night, from ``STREAK_ALERT`` of them
+        on (after ``text``); whether it did."""
+        missed = self.log.not_applied(self._calendar, SWAP_AT, self._now())
+        if len(missed) < STREAK_ALERT or self.log.alerted_for() == missed[-1]:
+            return False
+        applied = self.log.last_applied()
+        outcomes = self.log.outcomes()
+        failed = sum(1 for d in missed if d in outcomes and not outcomes[d].ok)
+        streak = (
+            f"밤 학습이 거래일 밤 {len(missed)}번 연속 적용되지 않았습니다"
+            f"(마지막으로 적용된 밤 {applied or '없음'}, 그 뒤 {', '.join(f'{d:%m-%d}' for d in missed)}"
+            f", 그중 학습 실패 {failed}번). 그동안 마지막으로 적용된 모델이 돕니다."
+        )
+        self._alerts.raise_(_TRAINING_ALERT, streak if text is None else f"{text}. {streak}", again=True)
+        self.log.mark_alerted(missed[-1])
+        return True
+
+
+async def _train(
+    day: date, command: Sequence[str] = TRAIN_COMMAND, timeout: timedelta = TRAINING_TIMEOUT
+) -> Failure | None:
+    """Run the night's training; None if it finished, else why not: the exit code and the last
+    step it started (#355), also when it is stopped at ``timeout``."""
     process = await asyncio.create_subprocess_exec(
-        sys.executable, "-m", "krx_quant.cli", "train", "--day", day.isoformat(), stdout=PIPE, stderr=STDOUT
+        *command, "--day", day.isoformat(), stdout=PIPE, stderr=STDOUT
     )
+    chunks: list[bytes] = []  # read as it comes: what it wrote is kept if it is stopped
+
+    async def read() -> int:
+        assert process.stdout is not None
+        while chunk := await process.stdout.read(1 << 16):
+            chunks.append(chunk)
+        return await process.wait()
+
     try:
-        output, _ = await asyncio.wait_for(process.communicate(), TRAINING_TIMEOUT.total_seconds())
+        code: int | None = await asyncio.wait_for(read(), timeout.total_seconds())
     except TimeoutError:
         process.kill()
         await process.wait()
-        return f"not done in {TRAINING_TIMEOUT}"
-    text = output.decode(errors="replace").strip()
-    if process.returncode == 0:
+        code = None
+    text = b"".join(chunks).decode(errors="replace").strip()
+    step = last_step(text)
+    started = f"마지막으로 시작한 단계 {step or '없음'}"
+    if code is None:
+        log.error("nightly training of %s stopped after %s:\n%s", day, timeout, text)
+        return Failure(f"not done in {timeout}, {started}", None, step)
+    if code == 0:
         log.info("nightly training of %s finished:\n%s", day, text)
         return None
-    log.error("nightly training of %s failed (exit %s):\n%s", day, process.returncode, text)
-    return text.splitlines()[-1] if text else f"exit {process.returncode}"
+    log.error("nightly training of %s failed (exit %s):\n%s", day, code, text)
+    return Failure(f"{exit_text(code)}, {started}", code, step)
 
 
 def publish_training_inputs(store: ObjectStore, settings: Settings) -> None:

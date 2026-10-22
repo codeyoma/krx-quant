@@ -2,7 +2,7 @@
 
 상시 서버(AWS Lightsail 시드니)에 엔진을 띄우고 운영하는 방법이다. 설계는 [design.md](design.md) 9장에 있다.
 
-- 서버: Lightsail 시드니(`ap-southeast-2`), 2GB, 공인 IPv4, Ubuntu 24.04. 엔진은 Docker(`compose.yaml`)로 돈다.
+- 서버: Lightsail 시드니(`ap-southeast-2`), 2GB, 스왑 2GB(`/swapfile`, 2026-10-22부터, #355), 공인 IPv4, Ubuntu 24.04. 엔진은 Docker(`compose.yaml`)로 돈다.
 - 접속: Tailscale만 쓴다. 엔진 포트는 서버의 Tailscale 주소에만 열린다.
 - 데이터: 녹화한 날은 S3에 올려 영구 보관한다. 서버는 매일 03:00 KST에 Lightsail 자동 스냅샷을 뜬다.
 - 비밀값: 서버의 `.env`(권한 600)에만 둔다. 저장소에는 절대 커밋하지 않는다.
@@ -151,6 +151,14 @@ aws iam create-access-key --user-name krx-quant-engine
     sudo ufw delete allow 22/tcp
     ```
     그다음부터 Lightsail 브라우저 SSH는 쓸 수 없다. 접속은 Tailscale로만 한다.
+11. 스왑 2GB를 붙인다(#355). 밤 학습은 엔진 옆에서 별도 프로세스로 돌아, 스왑이 없던 2GB 서버에서는 메모리가 바닥나 커널(OOM killer)에 죽었다(2026-10-22 밤 `exit -9`, 6장 "밤 학습이 적용되지 않는다"). 운영 서버에는 2026-10-22에 붙였다. `deploy/setup-server.sh`는 스왑을 만들지 않으므로, 스냅샷이 아닌 새 서버에서는 손으로 한다.
+    ```bash
+    sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile
+    sudo mkswap /swapfile && sudo swapon /swapfile
+    echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab   # 재부팅해도 붙는다
+    free -m                                                      # Swap 줄의 total이 2047 안팎
+    ```
+    스왑은 밤 학습이 잠깐 넘치는 메모리를 받아 줄 뿐이다. 학습이 스왑을 많이 쓰면 느려지고 엔진의 이벤트 루프까지 멈출 수 있다(2026-10-22 23:22에 KIS WebSocket이 60초 침묵해 끊겼다). 학습의 단계별 최대 메모리는 리포트의 `resources`와 텔레그램 요약으로 본다(3장 "밤 학습과 모델 교체").
 
 엔진 API는 맥과 윈도우에서 Tailscale로 읽는다. 공인 IP로는 열리지 않는다. 엔드포인트는 [engine-api.md](engine-api.md)에 있다.
 ```bash
@@ -1006,7 +1014,18 @@ Toss: 109 calls, 1 failed; tokens issued: 0
 - 종류의 리포트(표와 알고리즘)는 학습에서 뺀 봉 마감도 이유별로 센다(#184): `labels.dropped`(합계)와 `labels.dropped_by_day`(날짜별). 이유는 녹화일의 VI 중 봉 마감(`vi`)과 특수 상황 창(`special`), 정답에 클래스가 없는 창의 이유(장벽 1분봉 규칙의 `same minute`, 녹화일의 `ambiguous`·`missing mid`·`silent quotes` 등), 정답이 없는 봉 마감(`no answer`)이다. 텔레그램 요약의 종류 줄 끝에 `· 뺀 표본 K개 (이유 n, …)`로 붙는다(많은 것부터). 날마다 표본 수와 뺀 수를 더하면 그날의 봉 마감 × 종목 수(종목 셋이면 1,128)다. 장벽에서 `same minute`이 1분봉 날 표본의 몇 %인지가 1분봉 규칙의 손실이다(#178 실측: 폭 k에서 2~4%).
 
   > **바뀜** (2026-10-15, #209): 종류 줄은 `<종류> 정답 표본: 녹화 호가 N개, 1분봉 M개`로 끝났다 → 뺀 표본 수가 붙는다(변동폭 줄도). 이유: 장벽 학습이 같은 분이라 뺀 표본 수를 남기기로 했다(#178). VI·특수와 채점할 수 없는 창도 같은 자리에 세어 몇 개를 잃는지 한눈에 보이게 했다.
-- 가장 긴 학습 구간(Turing 60거래일)에 검증 3일을 더한 날들을 읽는다(#16 전에는 23일). 그래서 캐시, 학습 시간, 메모리가 그만큼 는다. 날마다 모든 알고리즘의 피처를 한 번에 계산해 두기 때문이다. Turing 모델 파일은 1MB 안팎이다.
+- 가장 긴 학습 구간(Turing 60거래일)에 검증 3일을 더한 날들을 읽는다(#16 전에는 23일). 그래서 캐시와 학습 시간이 그만큼 는다. 날마다 모든 알고리즘의 피처와 종류의 정답을 한 번에 계산한다. Turing 모델 파일은 1MB 안팎이다.
+- **날 캐시는 남은 단계가 읽는 것만 둔다(#355).** 학습은 시작할 때 그 밤에 돌 단계(체크포인트가 없는 것)마다 읽을 날, 피처, 종류의 정답을 정해 둔다. 날을 읽으면 바로, 그리고 단계가 끝날 때마다, 남은 단계가 읽는 피처와 종류의 정답만 남기고 나머지는 버린다. 남은 단계가 읽지 않는 날은 통째로 버린다. 예를 들어 Turing만 읽는 오래된 40일은 Turing의 피처만 두었다가 Turing이 끝나면 버리고, 시계열 피처(`minute_ticks` 등)는 Markov·Kalman이 끝나면 버린다. 표본마다 따로 들던 피처 이름 집합도 하루·알고리즘에 하나를 같이 쓴다. 값은 처음 계산한 그대로라 모델은 같다(`tests/test_nightly.py`: 모든 등록 알고리즘·기후 표·종류의 표와 알고리즘의 모델이, 날마다 모든 피처를 다 둔 표본으로 학습한 것과 같다). 합성 83거래일(종목 셋, 백필만, 맥에서 잰 RSS)로 학습 프로세스의 최대 메모리가 1,159MB(Turing 단계)에서 539MB(Neyman 단계)로 줄었다. 모델 17개는 바이트까지 같았다.
+
+  > **바뀜** (2026-10-23, #357): 그 밤에 읽은 날을 모든 알고리즘의 피처와 종류의 정답과 함께 학습이 끝날 때까지 메모리에 두었다 → 남은 단계가 읽는 것만 두고 나머지는 버린다. 이유: 2GB 서버에서 Turing이 60일을 더 읽는 동안 메모리가 바닥나 밤 학습이 커널에 죽었다(2026-10-22 `exit -9`). 2026-10-14부터 밤 학습이 한 번도 적용되지 않았다(#355).
+- **단계마다 시간과 메모리를 남긴다(#355).** 단계(알고리즘, 기후 표, 종류의 표, 종류의 알고리즘, 하루 한 번 종류)를 시작하기 직전에 로그에 `started step <이름>` 줄을 쓴다. 학습이 밖에서 죽으면(OOM killer의 SIGKILL) 출력의 마지막 `started step` 줄이 죽은 단계다. 날을 읽을 때마다 `read <날짜>: <mid|close|no data>, <N> samples in <초> s`, 단계가 끝나면 `<이름>: <초> s, peak <MB> MB (since the <step|start>), <N> days read, <N> days cached`를 쓴다. 리포트에는 `resources`가 붙는다:
+  - `seconds`: 단계 전체 시간
+  - `peak_rss_mb`: 단계 동안 학습 프로세스의 최대 상주 메모리(MB). 리눅스에서는 단계와 국면마다 `/proc/self/clear_refs`로 최댓값을 지우고 `VmHWM`을 읽는다(`peak_since` `step`). 지울 수 없는 곳(맥 등)에서는 프로세스가 시작한 뒤의 최댓값이다(`peak_since` `start`)
+  - `rss_mb`: 단계가 끝날 때의 상주 메모리(`VmRSS`, 리눅스만. 아니면 `null`)
+  - `days_read`: 그 단계가 새로 읽은(계산한) 날 수, `days_cached`: 단계가 끝나고 정리한 뒤 캐시에 남은 날 수
+  - `phases`: 국면별 `seconds`, `peak_rss_mb`. `days`(날 읽기와 표본 만들기), `samples`(그 알고리즘의 피처만 담은 학습 표본), `fit`(학습), `validation`(검증 표본과 두 모델의 손실). 기후 표와 종류의 표는 `days`만 있다
+
+  텔레그램 요약에 `최대 메모리 <MB> MB (<단계> 단계) · 단계들 <분>분` 한 줄이 붙는다. `resources`가 없는 리포트(이 변경 전)는 세지 않는다.
 - 읽은 파일은 `state/training-cache/`에 복사해 두고 다음 밤에 다시 쓴다. 그 밤에 쓴 가장 오래된 날보다 오래된 날짜는 학습이 끝나면 지운다. 다만 그 날의 표본이 읽는 앞선 날(시간대 수익률이면 20거래일, 그 밖에 전 거래일을 읽으면 1일)은 남긴다.
 - Turing과 `breiman`의 시간대 수익률(`slot_return_*`, #265)을 위해 날마다 앞선 20거래일의 종목 1분봉도 캐시로 받는다(이미 캐시에 있고 내용이 같으면 받지 않고, 한 밤에 같은 키는 한 번만 확인한다).
 
@@ -1022,6 +1041,13 @@ Toss: 109 calls, 1 failed; tokens issued: 0
   > **바뀜** (2026-10-10, #45): 08:00 교체 규칙이 PR 안에서 세 번 바뀌었다. 처음(75fa527)은 "07:30까지 확정된 목록만", 다음(ef08287)은 "그 밤 바로 다음 거래일 아침의 목록만, 늦은 목록은 쓰지 않음", 지금(1590d11)은 위 규칙이다. PR #45 본문은 두 번째 규칙을 적고 있으니 이 문서를 따른다. 이유: 이른 `KRX_TRAIN_AT`이나 늦게 끝난 학습의 목록도 다음 아침에 쓰고, 모델이 빠진 목록을 반만 적용하지 않기 위해서다(1590d11).
 - `KRX_TRAIN_AT`을 21:00(그날 1분봉 업로드) 전으로 당기면 전 거래일까지의 데이터로 학습한다.
 - `/v1/status`의 `training.applied`는 지금 그 승격 모델이 돌고 있는지다. 적용 뒤 `rollback`이나 `fit`으로 바꾸면 `false`가 되고, `reason`에 지금 도는 버전이 나온다.
+- **적용되지 않은 밤 (#355).** 서버는 밤마다 학습이 끝난 결과를 `state/training_nights.json`에 남긴다(끝남 또는 실패, 끝난 시각, 종료 코드, 마지막으로 시작한 단계, 이유. 최근 30밤). 마지막으로 적용된 밤(`state/models/applied.json`) 뒤의 거래일 밤 중 학습이 실패한 밤과, 다음 거래일 08:00 교체가 지나도록 목록이 적용되지 않은 밤(실패, 07:30 뒤 확정, 학습이 아예 돌지 않음)을 센다. 파일에서만 세므로 재시작이나 06:00 배포로 초기화되지 않는다.
+  - `/v1/status`의 `training`에 `last_applied`(마지막으로 적용된 밤), `nights_not_applied`(그 뒤 적용되지 않은 거래일 밤 수), `not_applied`(그 밤들), `failures`(그중 학습이 실패한 밤: `day`, `ended_at`, `exit_code`, `step`, `reason`)가 붙는다([engine-api.md](engine-api.md#get-v1status)). 갱신은 `training`과 같은 때(시작, 08:00 교체, 학습이 끝난 뒤)다. 승격 목록이 아직 하나도 없는 서버(첫 밤부터 실패)도 이 필드를 보이고, 그때 `training.day`와 `finalized_at`은 `null`, `reason`은 `no night's promotion list yet`이다.
+  - `krx-quant doctor`의 7절(6장 "서버 상태 보기")이 같은 것과 최근 다섯 밤의 결과를 보인다. 엔진이 멈춰도 상태 폴더에서 읽는다.
+  - 실패 알림은 마지막 출력 줄 대신 종료 코드와 마지막으로 시작한 단계를 싣는다: `[장애] 2026-10-22 밤 학습이 실패했습니다: exit -9 (SIGKILL), 마지막으로 시작한 단계 turing`. 6시간 제한에 걸리면 `not done in 6:00:00, 마지막으로 시작한 단계 <이름>`이다.
+  - 적용되지 않은 밤이 2번 이상 이어지면, 새로 그런 밤이 생길 때마다(학습이 실패한 밤에는 그 실패 알림에 붙여서, 학습은 끝났지만 08:00 교체가 쓰지 않은 밤에는 교체 뒤에) 한 번씩 알린다: `… 밤 학습이 거래일 밤 N번 연속 적용되지 않았습니다(마지막으로 적용된 밤 <날짜>, 그 뒤 <MM-DD>, …, 그중 학습 실패 K번). 그동안 마지막으로 적용된 모델이 돕니다.` 알린 밤은 파일(`alerted_for`)에 남아 재시작해도 다시 보내지 않는다. 학습이 다시 끝나면 재시작 뒤에도 `[복구] 밤 학습이 다시 됩니다.`가 온다.
+
+  > **바뀜** (2026-10-23, #357): 실패 알림은 엔진이 떠 있는 동안 한 번만 오고(다시 시작하면 또 왔다), 이유는 학습 출력의 마지막 줄이었다 → 이유는 종료 코드와 마지막으로 시작한 단계이고, 2밤 이상 이어지면 밤마다 온다. 이유: 2026-10-14부터 7밤 동안 학습이 적용되지 않았는데 며칠째인지 보이지 않았고, 10-22의 마지막 줄은 정상 INFO 줄(`poisson: …`)이라 원인을 말하지 않았다(#355).
 - 엔진이 보이는 지난밤 학습은 Object Store의 가장 최근 승격 목록 `promotions/<날짜>.json`이다. 그 안에 알고리즘별 리포트가 모두 있다. 엔진은 이것을 읽어 메모리에 둔다(#165).
   - 읽는 때: 수집기가 시작할 때, 08:00 교체, `fit`·`rollback`으로 모델 파일이 바뀐 뒤, 그 밤의 학습이 끝난 뒤(Spot이면 결과를 기다린 뒤).
   - `/v1/status`의 `training`과 `/v1/algorithms`의 `validation`(알고리즘별 리포트의 검증 값)이 이것이다. API 요청은 Object Store를 읽지 않는다. 그래서 S3의 리포트를 손으로 고쳐도 다음에 읽을 때까지 그대로 보인다.
@@ -1305,6 +1331,14 @@ report: /state/prevalidations/mandelbrot.json
 - **손으로.** `docker compose run --rm --no-deps engine simulate bar-close`. 장 시간 밖에, 예약 작업이 도는 밤(22:30–05:30)을 피해 돌린다. 녹화가 10일보다 적으면 `N recorded days, fewer than 10: no simulation; the probations go on live`만 출력한다. 수습 하나는 한 번만 시뮬레이션한다(시뮬레이션하지 못한 것도 이유와 함께 남아 다시 돌지 않는다). 같은 시뮬레이션이 둘 돌지 않게 `state/simulation-bar-close.lock`으로 막는다. 재생 DB는 `state/simulation-bar-close.sqlite3`다(실행마다 새로).
 - **보이는 곳.** 상태 이력의 이유(`simulated probation <첫날>..<끝날> (<N> days): …`)와 `simulated`, `/v1/algorithms`의 `stage`(센 날과 그중 시뮬레이션 날). 순위표와 상세 통계, 합의 가중치는 실시간 예측만 센다.
 
+### 밤 학습이 적용되지 않은 동안의 수습 (#355)
+
+정답 버전이 바뀌어 수습이 다시 시작된 알고리즘(#187 배포 2026-10-18)은, 새 정답(버전 3)으로 학습한 모델로 처음 예측한 거래일부터 수습 날을 센다. 밤 학습이 적용되지 않아 옛 정답 모델이 도는 동안에는 세지 않는다.
+- 상태 판정이 세는 첫날(`counted_from`)은 그 수습이 시작된 뒤 그 알고리즘이 정답 버전 3의 모델(`model_targets.target_version` 3)로 처음 예측한 봉 마감의 날이다. 그런 예측이 없으면 `null`이고 센 날도, 판정할 날도 없다(`engine.py`의 `_counted_from`, `predictions.py`의 `first_on_target`, `lifecycle.py`의 `_held`).
+- 판정이 읽는 예측도 정답 버전 3 모델의 것만이다(`stats.on_target`). 옛 정답 모델의 예측은 채점되고 순위표에 나오지만 판정과 합의 가중치에 들지 않는다.
+- 그래서 2026-10-19부터 옛 정답 모델(예: `newton-20261008-…`)로 예측한 날은 수습으로 세어지지 않았다. 잘못 센 날은 없고, 실시간 수습이 시작되지 않았을 뿐이다. 첫 적용된 밤의 다음 거래일부터 센다.
+- 수습 시뮬레이션(위 "수습 시뮬레이션 (#298)")은 실시간 모델과 상관없이 첫 재생일 전의 날로 정답 버전 3의 모델을 따로 학습해 녹화일(2026-10-12부터)을 재생한다. 그래서 녹화 10거래일이 된 밤에 그 날들이 수습의 첫 날들로 세어진다. 그 밖에 따로 다시 셀지는 사용자가 정한다(#355).
+
 ### 정답이 바뀌는 날 (#170)
 
 > **바뀜** (2026-10-17, #260): 아래는 #170 때(정답 버전 1 → 2)의 일이다. 지금 엔진은 정답 버전이 오를 때마다 그 정답의 알고리즘에 같은 일을 하고, 상태 이력의 이유는 `the <종류> target changed to version <버전>: probation restarts with a model trained on it`, `runs`의 `detail`은 방향이 버전 번호, 다른 종류가 `<종류> <버전>`이다. 버전 3(#187)이 되는 날은 아래 "도달 정답이 뒤집힌 호가도 세는 날"에 있다. 이유: 정답 버전이 다시 올랐고, 장벽 정답도 올라 종류마다 따로 돌려야 했다(#187).
@@ -1482,7 +1516,9 @@ docker compose logs --tail 200 engine
 | `[알림] <이름> 은퇴 후보: ...` | `curl -s http://krx-quant:8080/v1/algorithms`의 `status` 이력, `/v1/algorithms/<이름>/stats?period=20d` | 벤치 60거래일 동안 회복하지 못했다. 은퇴시키려면 `docker compose exec engine krx-quant retire <이름>`. 기록은 남고, 엔진은 다음 봉 마감부터 돌리지 않는다. 되돌리려면 `krx-quant unretire <이름>`(수습부터 다시). |
 | `[알림] <날짜> 예산 때문에 예측이 빠진 알고리즘이 있습니다. ...`, 또는 `WARNING krx_quant.engine: <이름> skipped at ... for the CPU budget`나 `<이름> took over 10.0s` 로그 | `curl -s http://krx-quant:8080/v1/status`의 `cpu`(알고리즘별 예상 초와 `usage`), `docker stats`로 CPU 사용률, DB의 `runs` 테이블(`kind`가 `cpu_budget`) | 시간 초과는 그 알고리즘이 봉 마감 한 번에 `KRX_ALGORITHM_SECONDS`를 넘긴 것이고, CPU 예산 건너뜀은 알고리즘들의 합이 `KRX_CPU_BUDGET_SECONDS`를 넘은 것이다. 알고리즘을 가볍게 하거나 CPU 기준선이 높은 요금제로 옮긴다(위 "CPU 여유 재기"). 예산을 늘리려면 한도가 예산보다 작게 둘 다 고친다. 알림은 그날 일일 점검 때 한 번만 온다. |
 | `[장애] 매크로 출처 <ecos/fred/yahoo/kis>가 3번 연속 실패했습니다: <이유>` | 로그의 `macro source ... failed` | 키가 틀렸으면(`ECOS INFO-100`, `FRED 400 ... api_key`) `.env`를 고친다. `HTTP 5xx`나 연결 실패는 출처 쪽 장애다. 다음 거래일 07:30에 다시 읽고, 응답하면 `[복구] 매크로 출처 …가 다시 응답합니다.`가 온다. 그동안 그 출처의 지표 없이 국면을 정한다. |
-| `[장애] <날짜> 밤 학습이 실패했습니다: <이유>` | 로그의 `nightly training of ... failed`. 6시간 안에 안 끝나면 이유가 `not done in 6:00:00`이다 | `docker compose run --rm --no-deps engine train --day <날짜>`로 다시 돌린다. 끝난 알고리즘은 건너뛴다. 다음 밤 학습이 성공하면 `[복구] 밤 학습이 다시 됩니다.`가 온다. 그동안 전날 모델이 계속 돈다. |
+| `[장애] <날짜> 밤 학습이 실패했습니다: exit <코드>, 마지막으로 시작한 단계 <이름>` | `krx-quant doctor` 7절, 로그의 `nightly training of ... failed (exit <코드>)`와 그 아래 학습 출력(마지막 `started step` 줄이 죽은 단계, 그 앞 단계들의 `peak … MB` 줄). `exit -9 (SIGKILL)`는 밖에서 죽인 것으로, 보통 메모리 부족이다(`sudo journalctl -k \| grep -i -E 'oom\|killed process'`). `exit 1`이면 출력 끝의 오류를 본다. 6시간 안에 안 끝나면 `not done in 6:00:00, 마지막으로 시작한 단계 <이름>`이다 | `docker compose run --rm --no-deps engine train --day <날짜>`로 다시 돌린다. 끝난 알고리즘은 건너뛴다. 07:30 전에 끝나면 08:00 교체가 쓴다. 다음 밤 학습이 성공하면 `[복구] 밤 학습이 다시 됩니다.`가 온다. 그동안 전날 모델이 계속 돈다. 메모리 부족이면 스왑(2.2의 11단계)이 있는지 보고, 리포트의 `resources`로 어느 단계가 큰지 본다(3장 "밤 학습과 모델 교체"). |
+| `… 밤 학습이 거래일 밤 N번 연속 적용되지 않았습니다(마지막으로 적용된 밤 <날짜>, …)` (#355) | `/v1/status`의 `training.last_applied`, `nights_not_applied`, `failures`, `krx-quant doctor` 7절 | 적용되지 않은 밤이 2번 이상 이어졌다. 새로 그런 밤이 생길 때마다 한 번 온다. 실패한 밤은 위 행처럼, 학습은 끝났는데 쓰지 않은 밤은 아래 `밤 학습 결과를 쓰지 않습니다` 행처럼 한다. 그동안 4분 알고리즘은 마지막으로 적용된 모델로 예측하고, 새 정답의 모델이 아니면 수습 날이 세어지지 않는다(아래 "밤 학습이 적용되지 않은 동안의 수습"). |
+| 밤 학습이 며칠째 적용되지 않는다 (2026-10-14–22, #355) | `curl -s http://krx-quant:8080/v1/status \| jq .training`, `krx-quant doctor` 7절, `free -m`, `sudo journalctl -k \| grep -i oom` | 2026-10-13 밤 뒤로 7밤 동안 목록이 하나도 생기지 않았다(`latest_night`이 10-13). 10-22는 Turing 단계에서 `exit -9`(스왑 없는 2GB에서 메모리 부족으로 본다). 그 전 밤들의 출력은 06:00 배포가 컨테이너를 새로 만들어 남지 않았다. 사용자가 스왑 2GB를 붙이고(2.2의 11단계) 10-22 밤을 손으로 다시 돌렸다. 날 캐시를 줄이는 변경(#355)이 배포된 뒤로는 단계별 메모리가 리포트와 텔레그램 요약에, 실패 이유가 `state/training_nights.json`에 남는다. |
 | `[장애] <날짜> 밤 학습이 실패했습니다: Spot 학습 결과가 <다음 거래일> 07:30까지 오지 않았습니다` | S3의 `training/logs/`(최근 로그 마지막 줄), `aws ec2 describe-instances --filters Name=tag:Name,Values=krx-quant-training`, 스케줄러 상태 | Spot이 뜨지 못했거나(용량, 할당량, 상한으로 꺼진 스케줄) 학습이 실패했다. 맥에서 `aws ec2 run-instances --launch-template 'LaunchTemplateName=krx-quant-training,Version=$Latest'`로 다시 띄우면 끝난 알고리즘은 건너뛴다. 급하면 서버에서 `docker compose run --rm --no-deps engine train --day <날짜>`. 그동안 전날 모델이 계속 돈다. |
 | `[알림] AWS 비용이 이달 $N로 상한 $100의 50%(80%)를 넘었습니다.` | AWS Billing > Cost Explorer | 할 일은 없다. 예상보다 빠르면 무엇이 비용을 쓰는지 본다. |
 | `[알림] AWS 비용이 이달 $N로 상한 $100에 닿았습니다. 이달 남은 기간 밤 학습(Spot)을 끕니다. ...` | Cost Explorer | 그달은 학습 없이 전날 모델로 돈다. 서둘러 학습이 필요하면 서버에서 `train`을 손으로 돌린다. 다음 달 1일에 `[알림] 새 달(...)이라 밤 학습(Spot) 스케줄을 다시 켰습니다.`가 온다. |
@@ -1537,7 +1573,7 @@ docker compose run --rm engine doctor
 
 설정이 틀려 엔진이 뜨지 못할 때(`configuration error`)도 `doctor`는 돈다. 다른 명령과 달리 설정 오류로 끝나지 않고, 머리줄 아래 `설정 오류: <오류>`로 적은 뒤 데이터·상태 폴더(`KRX_DATA_DIR`, `KRX_STATE_DIR`), 엔진 API 주소(`KRX_API_HOST`, `KRX_API_PORT`), `KRX_COMMIT`, 가릴 비밀값만 그대로 읽어 나머지 절을 낸다. 다른 설정은 모르므로 5절의 `KRX_JOBS_AT`은 `?`다.
 
-**출력.** 머리줄(시각) 아래 여섯 절이다. 필드 이름은 `/v1/status`의 것 그대로다.
+**출력.** 머리줄(시각) 아래 일곱 절이다. 필드 이름은 `/v1/status`의 것 그대로다.
 1. 엔진: `commit`, `started_at`(그리고 지난 시간), `mode`, `phase`, `now`. 엔진 API는 이 컨테이너의 것(`127.0.0.1:8080`), 그다음 compose의 `engine` 서비스 순서로 묻는다. 둘 다 닿지 않으면 각각의 이유, DB `runs`의 마지막 `start`(시각과 커밋), 이 명령 이미지의 `KRX_COMMIT`을 적는다.
 2. KIS: `kis.connected`, `kis.last_frame_at`, `kis.seconds_since_frame`(#311), 피드·키 수와 60초 넘게 조용하거나 아직 안 온 키 수, 열린 `gap` 수, 그리고 피드·키마다 `feed key last_received_at seconds_since gap` 한 줄(오늘이면 시각만, 아니면 날짜도).
 3. PINGPONG: 오늘의 `raw/date=<오늘>/feed=_system/symbol=_`에서 센 KIS 하트비트의 합계, 마지막 시각, 두 PINGPONG 사이 가장 긴 간격, 시간별 수. 녹화는 `KRX_FLUSH_SECONDS`(30초)마다 파일로 쓰여 그 뒤에 온 것은 아직 없을 수 있다.
@@ -1550,6 +1586,7 @@ docker compose run --rm engine doctor
    `doctor` 명령은 엔진과 다른 프로세스라 엔진 로그를 읽지 못한다(Docker가 로그를 컨테이너 밖에 둔다). 그렇다고 적고, 서버에서 볼 명령(`docker compose logs --since 2h engine | grep -E ' (WARNING|ERROR) '`)을 적는다. 컨테이너 안에서 docker를 부르지 않는다.
 5. 예약 작업: `state/scheduled.json`의 마지막 실행 최근 12개(이름, 밤, `outcome`, 종료 코드, 걸린 시간, 커밋, 댓글을 남긴 이슈), 목록(`JOBS`) 중 끝까지(`ok`·`failed`) 돈 적 없는 작업(조건이 아직 안 된 것도 든다), 아직 올리지 못한 결과(`unposted`). 파일을 읽지 못하면 그렇다고만 적는다. 스케줄러와 달리 `.bad`로 옮기지 않는다.
 6. 디스크와 메모리: 데이터와 상태 폴더의 여유·전체 용량(같은 디스크면 그렇다고), `/proc/meminfo`의 사용 가능·전체 메모리와 스왑, 컨테이너의 cgroup 사용량과 한도, 그 프로세스의 `VmRSS`(명령이면 그 명령, 서버 요약이면 엔진).
+7. 밤 학습(#355): 마지막으로 적용된 밤(`state/models/applied.json`)과 그 뒤 적용되지 않은 거래일 밤의 수와 날짜(`/v1/status`의 `training.nights_not_applied`와 같다), 최근 다섯 밤의 결과(`state/training_nights.json`): 끝남이면 끝난 시각, 실패면 끝난 시각, 종료 코드, 마지막으로 시작한 단계. 이 기록은 #355가 배포된 뒤의 밤부터다.
 
 한 절을 읽다 실패하면 그 절에 이유를 적고 나머지 절은 그대로 낸다.
 
@@ -1626,7 +1663,8 @@ docker compose run --rm engine doctor
 | `models/baseline-climate.json` | 도달 정답(`KRX_TARGET_VERSION=3`)의 기준 예측 `baseline-climate` 표(#169). 모델과 같은 형식이고, `params`는 `<종목>.<30분 시간대>` → 방향(1 상승, 0 보합, −1 하락)이다. 밤 학습이 늘 승격하고 08:00 교체가 설치한다. 없으면 모든 칸이 보합(`baseline-climate-default`)이다. 버전 1에서는 읽지 않는다 |
 | `models/versions/<알고리즘>/<버전>.json` | 설치한 적 있는 모든 모델. `rollback`이 여기서 읽는다 |
 | `models/history.json` | 설치와 되돌리기 이력. 항목마다 `at`, `algorithm`, `version`(기본 모델이면 `null`), `why`(`fit`, `promotion <날짜>`, `rollback from <버전>`, `installed before`) |
-| `models/applied.json` | `{"night": "<날짜>"}`: 마지막으로 적용한 승격 목록의 밤. 이 밤과 그 전의 목록은 다시 적용하지 않는다 |
+| `models/applied.json` | `{"night": "<날짜>"}`: 마지막으로 적용한 승격 목록의 밤. 이 밤과 그 전의 목록은 다시 적용하지 않는다. 적용되지 않은 밤(#355)은 이 밤부터 센다 |
+| `training_nights.json` | 밤 학습의 결과(#355): `nights`(최근 30밤, 밤마다 `day`, `ok`, `ended_at`(KST), `exit_code`, `step`(마지막으로 시작한 단계), `reason`(알림의 이유)), `alerted_for`(연속으로 적용되지 않은 밤을 마지막으로 알린 밤). 서버에서 학습한 밤(Spot이면 결과를 기다린 밤)이 끝날 때마다 통째로 바꿔 쓴다(`training_nights.json.tmp`). `/v1/status`의 `training.failures`와 `doctor` 7절이 읽는다. 읽지 못하면 비어 있는 것으로 보고 다시 시작한다 |
 | `training-cache/` | 밤 학습이 Object Store에서 받아 둔 백필 1분봉과 녹화 이벤트의 사본. 키 경로가 같다. 학습이 끝나면 그 밤에 쓴 가장 오래된 날보다 오래된 날짜를 지운다  그 날의 표본이 읽는 앞선 날(시간대 수익률이면 20거래일, #274)은 남긴다 |
 | `cost_guard.json` | Cost Guard가 이달 한 일(#23): `month`(UTC `YYYY-MM`), `warned`(알린 비율, %), `stopped`(Spot 스케줄을 끔), `stop_told`(끈 것을 알림), `spent`(이달 값으로 마지막에 읽은 비용), `carried`(지난달 마지막 비용. 이 값 이상이 보이는 동안은 지난달 값으로 본다). 재시작해도 다시 알리지 않으려고 둔다. 잃어도 다음 달 1일에 스케줄을 다시 켠다 |
 | `scheduled.json` | 예약 작업의 상태(#215): 작업마다 마지막으로 돈 것(`day`, `outcome`, `started_at`, `commit`, `exit_code`, `seconds`, `timed_out`, `comments`)과 아직 올리지 못한 결과(`unposted`). 형식은 3장 "예약 작업 (#215)". `.scheduled.json.tmp`는 쓰는 중인 임시 파일, `scheduled.json.bad`는 읽지 못해 옮겨 둔 것이다 |
@@ -1656,7 +1694,7 @@ docker compose run --rm engine doctor
 | `raw/…/data.parquet`, `events/…/data.parquet`, `gaps/…/data.parquet` | 로컬 `data/`와 같은 경로. 장 마감 15분 뒤와 21:00에 올린다 |
 | `bars/…/bars.parquet` | 1분봉 백필. 로컬과 같은 경로 |
 | `models/<알고리즘>/<버전>.json` | 밤 학습의 challenger와 서버가 돌린 모델. 형식은 `state/models/<알고리즘>.json`과 같다 |
-| `reports/<날짜>/<알고리즘>.json` | 그 밤의 알고리즘별 검증 리포트이자 체크포인트: `algorithm`, `day`, `training_days`, `validation_days`, `champion`(`version`, `loss`, `trained_on_validation`: 검증일까지 학습한 모델인지. 손으로 `fit`한 모델 등), `challenger`(`version`, `loss`, `trained`), `promoted`, `reason`, `reference_prices`(학습·검증일마다 `mid`: 녹화 중간가, `close`: 백필 종가), `samples`(`validation`: 검증 표본 수, 검증까지 간 경우만), `forced`(champion이 다른 정답 버전이라 성적 비교 없이 승격했는지, #170. 검증까지 갔거나 강제 승격한 경우만), `validation`(검증까지 간 경우만, #89: `by_day`는 검증일마다, `by_reference`는 `mid`·`close`마다 `samples`·`challenger`·`champion` 평균 log loss. champion이 하나도 예측하지 않았으면 `champion`이 `null`. `paired`는 두 모델이 모두 예측한 표본 수 `samples`, 손실 차이(challenger − champion) 평균 `mean_difference`, 그 평균의 표준오차 `day_standard_error`(날마다 잔차를 더한 합들을 독립으로 본 클러스터 표준오차. 날의 표본 수가 같으면 검증일 평균들의 표준오차와 같다. 검증일이 2일보다 적으면 `null`)), `commit`(학습한 코드, 엔진처럼 `KRX_COMMIT`. 없으면 `unknown`, #85). 학습하지 못했거나 검증할 정답이 없으면 `champion`, `challenger`가 `null`이다. 도달 정답(`KRX_TARGET_VERSION=3`, #169)이면 `target_version`(3)과 `labels`도 있다: `samples`(학습·검증일의 정답 있는 표본 수, `recorded`는 녹화 호가로, `bars`는 1분봉 규칙으로 만든 것), `by_day`(날마다 정답 있는 표본 수). 다른 종류의 알고리즘(#179)의 리포트에는 `kind`(종류 이름)가 `algorithm` 다음에 있고, `target_version`은 그 종류의 정답 버전, `labels`는 그 종류의 정답으로 센 것이다(정답 버전과 상관없이 늘 있다) |
+| `reports/<날짜>/<알고리즘>.json` | 그 밤의 알고리즘별 검증 리포트이자 체크포인트: `algorithm`, `day`, `training_days`, `validation_days`, `champion`(`version`, `loss`, `trained_on_validation`: 검증일까지 학습한 모델인지. 손으로 `fit`한 모델 등), `challenger`(`version`, `loss`, `trained`), `promoted`, `reason`, `reference_prices`(학습·검증일마다 `mid`: 녹화 중간가, `close`: 백필 종가), `samples`(`validation`: 검증 표본 수, 검증까지 간 경우만), `forced`(champion이 다른 정답 버전이라 성적 비교 없이 승격했는지, #170. 검증까지 갔거나 강제 승격한 경우만), `validation`(검증까지 간 경우만, #89: `by_day`는 검증일마다, `by_reference`는 `mid`·`close`마다 `samples`·`challenger`·`champion` 평균 log loss. champion이 하나도 예측하지 않았으면 `champion`이 `null`. `paired`는 두 모델이 모두 예측한 표본 수 `samples`, 손실 차이(challenger − champion) 평균 `mean_difference`, 그 평균의 표준오차 `day_standard_error`(날마다 잔차를 더한 합들을 독립으로 본 클러스터 표준오차. 날의 표본 수가 같으면 검증일 평균들의 표준오차와 같다. 검증일이 2일보다 적으면 `null`)), `commit`(학습한 코드, 엔진처럼 `KRX_COMMIT`. 없으면 `unknown`, #85). 학습하지 못했거나 검증할 정답이 없으면 `champion`, `challenger`가 `null`이다. 도달 정답(`KRX_TARGET_VERSION=3`, #169)이면 `target_version`(3)과 `labels`도 있다: `samples`(학습·검증일의 정답 있는 표본 수, `recorded`는 녹화 호가로, `bars`는 1분봉 규칙으로 만든 것), `by_day`(날마다 정답 있는 표본 수). 다른 종류의 알고리즘(#179)의 리포트에는 `kind`(종류 이름)가 `algorithm` 다음에 있고, `target_version`은 그 종류의 정답 버전, `labels`는 그 종류의 정답으로 센 것이다(정답 버전과 상관없이 늘 있다). 맨 끝의 `resources`(#355)는 그 단계의 시간과 최대 메모리다: `seconds`, `peak_rss_mb`, `rss_mb`, `peak_since`, `days_read`, `days_cached`, `phases`(3장 "밤 학습과 모델 교체"). #355 전의 리포트에는 없다 |
 | `reports/<날짜>/baseline-climate.json` | 도달 정답일 때만(#169): 그 밤에 다시 맞춘 `baseline-climate` 표의 리포트. 형식은 위와 같고, `training_days`는 표를 센 최근 20거래일, `validation_days`는 빈 목록, `champion`은 `null`, `challenger`는 `version`·`trained`, `promoted`는 늘 `true`(정답 있는 표본이 없으면 `false`)다. 알고리즘들 다음에 쓰는 체크포인트다. 다른 종류의 알고리즘(#179)의 리포트는 이것 다음에 쓴다 |
 | `models/baseline-climate/<버전>.json` | 그 표. 형식은 `state/models/baseline-climate.json`과 같다 |
 | `promotions/<날짜>.json` | 그 밤의 승격 목록: `day`, `finalized_at`(확정 시각), `promoted`(알고리즘 → 버전), `reports`(위 리포트 전부). 모든 알고리즘이 끝난 뒤 한 번 쓴다. 엔진은 가장 최근 것을 읽어 메모리에 두고 `/v1/status`의 `training`과 `/v1/algorithms`의 `validation`(#165)으로 보인다(3장 "밤 학습과 모델 교체") |

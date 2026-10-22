@@ -85,6 +85,7 @@ from krx_quant.stream import LiveStatus
 from krx_quant.supply import toss_client_maker
 from krx_quant.swap import (
     NightTraining,
+    TrainingWatch,
     await_spot_night,
     first_spot_wait,
     keep_models,
@@ -92,6 +93,7 @@ from krx_quant.swap import (
     publish_training_inputs,
     show_night,
 )
+from krx_quant.training_nights import TrainingNights
 
 log = logging.getLogger(__name__)
 
@@ -382,9 +384,15 @@ async def run_collector(
             object_store = open_store(settings)
             shelf = Shelf(settings.state_dir)
             training = NightTraining()  # the scheduled jobs wait for the night's training (#215)
+            # The nights' outcomes, kept in the state folder across restarts (#355).
+            watch = (
+                TrainingWatch(TrainingNights(settings.state_dir), alerts, calendar.calendar, now)
+                if object_store is not None and settings.train_at is not None
+                else None
+            )
             background.append(
                 asyncio.create_task(
-                    keep_models(object_store, shelf, engine, calendar.calendar, alerts.deliver, now)
+                    keep_models(object_store, shelf, engine, calendar.calendar, alerts.deliver, now, watch)
                 )
             )
             if object_store is not None and settings.train_at is not None:
@@ -401,7 +409,7 @@ async def run_collector(
                 async def refresh() -> None:
                     if spot:  # for the next night, as the calendar stands now
                         await publish()
-                    await show_night(trained_on, shelf, engine, kst_day(now()))
+                    await show_night(trained_on, shelf, engine, kst_day(now()), watch)
 
                 async def on_spot(day: date) -> str | None:
                     return await await_spot_night(
@@ -421,6 +429,7 @@ async def run_collector(
                             on_spot if spot else None,
                             first_spot_wait if spot else None,
                             training,
+                            watch,
                         )
                     )
                 )

@@ -1360,14 +1360,22 @@ class FeatureVector(Mapping[str, FeatureValue]):
 
     ``touch`` carries the touch target's terms at the bar close when the engine forecasts
     that target (target version 3, 2 before #187); None for the four-minute move (version 1). A vector made
-    from another keeps its terms."""
+    from another keeps its terms.
+
+    ``declared`` given as a frozenset is kept as it is: training makes one per day and algorithm
+    and gives it to every sample (#355). A vector made from another of the very same frozenset
+    shares its values, which a copy would repeat name for name, in the same order."""
 
     def __init__(
         self, values: Mapping[str, Value], declared: Iterable[str], touch: TouchTerms | None = None
     ) -> None:
-        source: Mapping[str, Value] = values._values if isinstance(values, FeatureVector) else values
-        self._declared = frozenset(declared)
-        self._values: dict[str, Value] = {name: source[name] for name in self._declared}
+        self._declared = declared if isinstance(declared, frozenset) else frozenset(declared)
+        self._values: dict[str, Value]
+        if isinstance(values, FeatureVector) and values._declared is self._declared:
+            self._values = values._values
+        else:
+            source: Mapping[str, Value] = values._values if isinstance(values, FeatureVector) else values
+            self._values = {name: source[name] for name in self._declared}
         inherited = values.touch if isinstance(values, FeatureVector) else None
         self.touch: TouchTerms | None = touch if touch is not None else inherited
 

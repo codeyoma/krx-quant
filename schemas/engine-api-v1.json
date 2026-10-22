@@ -98,13 +98,13 @@
       "then": {"required": ["kis"]}
     },
     "training": {
-      "description": "The latest night's training as the 08:00 swap saw it.",
+      "description": "The latest night's training as the 08:00 swap saw it. #355: on a server that trains, also before any night's list was stored: day and finalized_at null, promoted and reports empty, applied false.",
       "type": "object",
       "required": ["day", "finalized_at", "promoted", "reports", "applied", "reason"],
       "additionalProperties": false,
       "properties": {
-        "day": {"$ref": "#/$defs/day"},
-        "finalized_at": {"$ref": "#/$defs/time"},
+        "day": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/day"}]},
+        "finalized_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]},
         "promoted": {"type": "object", "additionalProperties": {"type": "string"}},
         "reports": {
           "type": "array",
@@ -120,7 +120,33 @@
           }
         },
         "applied": {"type": "boolean"},
-        "reason": {"type": "string"}
+        "reason": {"type": "string"},
+        "last_applied": {
+          "description": "#355: the last night whose promotion list the morning swap applied (state/models/applied.json); null before any.",
+          "oneOf": [{"type": "null"}, {"$ref": "#/$defs/day"}]
+        },
+        "nights_not_applied": {
+          "description": "#355: the trading nights since last_applied whose list does not run: their training failed, or their morning swap passed without it.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "not_applied": {"description": "#355: those nights, oldest first.", "type": "array", "items": {"$ref": "#/$defs/day"}},
+        "failures": {
+          "description": "#355: of those nights, the ones whose training failed here, as kept in state/training/nights.json.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["day", "ended_at", "exit_code", "step", "reason"],
+            "additionalProperties": false,
+            "properties": {
+              "day": {"$ref": "#/$defs/day"},
+              "ended_at": {"$ref": "#/$defs/time"},
+              "exit_code": {"type": ["integer", "null"]},
+              "step": {"type": ["string", "null"]},
+              "reason": {"type": ["string", "null"]}
+            }
+          }
+        }
       }
     },
     "kis": {
