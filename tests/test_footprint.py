@@ -7,8 +7,13 @@ step's report keeps.
 
 from __future__ import annotations
 
+import importlib
+import sys
 from pathlib import Path
 
+import pytest
+
+from krx_quant import footprint
 from krx_quant.footprint import PEAK_START, PEAK_STEP, Meter, StepUsage
 
 
@@ -69,3 +74,22 @@ def test_without_a_peak_to_reset_the_peak_is_the_process_s_and_says_so(tmp_path:
     assert found["peak_rss_mb"] is not None and found["peak_rss_mb"] > 0
     assert found["rss_mb"] is None, "no VmRSS to read"
     assert found["phases"]["fit"]["peak_rss_mb"] == found["peak_rss_mb"]
+
+
+def test_without_proc_nor_resource_the_figures_are_unknown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Windows has no ``resource`` module: the module still loads (the CLI imports it through
+    the nightly training), and the memory figures are None."""
+    monkeypatch.setitem(sys.modules, "resource", None)  # ``import resource`` raises ImportError
+    try:
+        reloaded = importlib.reload(footprint)
+        usage = reloaded.StepUsage(reloaded.Meter(tmp_path / "no-proc"))
+        with usage.phase("fit"):
+            pass
+        found = usage.as_dict(days_cached=0)
+    finally:
+        monkeypatch.undo()
+        importlib.reload(footprint)
+    assert (found["peak_rss_mb"], found["rss_mb"]) == (None, None)
+    assert found["phases"]["fit"] == {"seconds": found["phases"]["fit"]["seconds"], "peak_rss_mb": None}

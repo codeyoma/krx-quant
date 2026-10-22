@@ -6,13 +6,12 @@ fitting, validating). Each phase's peak is the process's resident high-water mar
 ``/proc/self/clear_refs`` (Linux 4.0 and later), so that it is that phase's own; a step's
 peak is the highest of its phases'. Where the mark cannot be reset (another system, a
 kernel that refuses), the peak is the process's since it started (``ru_maxrss``), and
-``peak_since`` says ``start`` instead of ``step``. Nothing here raises: a figure that
-cannot be read is None.
+``peak_since`` says ``start`` instead of ``step``. Without either (Windows has no ``resource``
+module), the figures are None. Nothing here raises: a figure that cannot be read is None.
 """
 
 from __future__ import annotations
 
-import resource
 import sys
 import time
 from collections.abc import Iterator
@@ -54,6 +53,10 @@ class Meter:
             kb = _kb(self._proc / "status", "VmHWM")
             if kb is not None:
                 return round(kb / 1024, 1)
+        try:
+            import resource  # Unix only: not on Windows, where the engine's CLI also runs
+        except ImportError:
+            return None
         try:
             peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
         except (OSError, ValueError):

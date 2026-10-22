@@ -98,13 +98,13 @@
       "then": {"required": ["kis"]}
     },
     "training": {
-      "description": "The latest night's training as the 08:00 swap saw it.",
+      "description": "The latest night's training as the 08:00 swap saw it. #355: on a server that trains, also before any night's list was stored: day and finalized_at null, promoted and reports empty, applied false.",
       "type": "object",
       "required": ["day", "finalized_at", "promoted", "reports", "applied", "reason"],
       "additionalProperties": false,
       "properties": {
-        "day": {"$ref": "#/$defs/day"},
-        "finalized_at": {"$ref": "#/$defs/time"},
+        "day": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/day"}]},
+        "finalized_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]},
         "promoted": {"type": "object", "additionalProperties": {"type": "string"}},
         "reports": {
           "type": "array",

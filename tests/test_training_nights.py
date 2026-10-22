@@ -17,14 +17,20 @@ from typing import Any, cast
 
 import pytest
 
+from krx_quant.clock import FakeClock
 from krx_quant.config import Settings
 from krx_quant.doctor import Status, report
+from krx_quant.engine import PredictionEngine
 from krx_quant.feeds.base import KST
 from krx_quant.market_calendar import MarketCalendar
+from krx_quant.model_shelf import Shelf
 from krx_quant.notify import Alerts
-from krx_quant.swap import SWAP_AT, TrainingWatch, _train
+from krx_quant.object_store import LocalObjectStore
+from krx_quant.predictions import PredictionStore
+from krx_quant.swap import NO_NIGHT, SWAP_AT, TrainingWatch, _train, show_night
 from krx_quant.training_nights import Failure, Outcome, TrainingNights
 from tests.api_schema import check
+from tests.replay_events import api, get_json
 
 # The week of #355: the night of 10-13 was the last applied, 10-17 and 10-18 a weekend.
 APPLIED = date(2026, 10, 13)
@@ -234,3 +240,40 @@ def test_an_outcomes_file_it_cannot_read_starts_afresh(tmp_path: Path, broken: s
     assert nights.outcomes() == {} and nights.alerted_for() is None
     nights.record(Outcome(APPLIED, True, at(APPLIED, "23:00")))
     assert list(nights.outcomes()) == [APPLIED]
+
+
+async def test_nights_that_all_failed_show_before_any_night_s_list_was_stored(tmp_path: Path) -> None:
+    """A new server whose first two nights failed: no promotion list in the store, no night
+    applied. ``/v1/status``'s ``training`` still shows them, the night's own fields empty."""
+    state = tmp_path / "state"
+    nights = TrainingNights(state)
+    for day in (date(2026, 10, 14), date(2026, 10, 15)):
+        nights.record(Outcome(day, False, at(day, "23:46"), -9, "turing", KILLED.reason))
+    now = at(date(2026, 10, 16), "08:00")
+    engine = PredictionEngine(
+        PredictionStore(tmp_path / "engine.db"), CALENDAR, ("005930",), 0.00015, FakeClock(now)
+    )
+    watch = TrainingWatch(nights, Sent(), CALENDAR, lambda: now)
+
+    await show_night(LocalObjectStore(tmp_path / "store"), Shelf(state), engine, now.date(), watch)
+
+    async with api(engine) as client:
+        training = (await get_json(client, "/v1/status"))["training"]
+    check("training", training)
+    assert {k: training[k] for k in ("day", "finalized_at", "promoted", "reports", "applied", "reason")} == {
+        "day": None,
+        "finalized_at": None,
+        "promoted": {},
+        "reports": [],
+        "applied": False,
+        "reason": NO_NIGHT,
+    }
+    assert (training["last_applied"], training["nights_not_applied"]) == (None, 2)
+    assert training["not_applied"] == ["2026-10-14", "2026-10-15"]
+    assert [(f["day"], f["exit_code"], f["step"]) for f in training["failures"]] == [
+        ("2026-10-14", -9, "turing"),
+        ("2026-10-15", -9, "turing"),
+    ]
+    # Without the watch (an engine that does not train), no list is still null, as before.
+    await show_night(LocalObjectStore(tmp_path / "store"), Shelf(state), engine, now.date())
+    assert engine.training is None

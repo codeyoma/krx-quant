@@ -209,11 +209,28 @@ async def show_night(
     """Show the latest night in the engine's status, and each algorithm's report of it; with
     ``watch``, the last night applied and the nights not applied since (#355)."""
     status = await asyncio.to_thread(night_status, store, shelf, today)
-    engine.training = None if status is None else _shown(status, watch)
+    engine.training = _shown(status, watch)
     engine.night_reports = {} if status is None else reports_by_algorithm(status.night)
 
 
-def _shown(status: NightStatus, watch: TrainingWatch | None) -> dict[str, Any]:
+NO_NIGHT = "no night's promotion list yet"
+
+
+def _shown(status: NightStatus | None, watch: TrainingWatch | None) -> dict[str, Any] | None:
+    """``/v1/status``'s ``training``: the latest night's list and whether it runs (None without
+    one); with ``watch``, the nights not applied (#355), also before any list was stored, the
+    night's own fields empty then: nights that all failed are shown too."""
+    if status is None:
+        if watch is None:
+            return None
+        night: dict[str, Any] = {
+            "day": None,
+            "finalized_at": None,
+            "promoted": {},
+            "reports": [],
+            "applied": False,
+        }
+        return {**night, "reason": NO_NIGHT, **watch.fields()}
     return status.as_dict() if watch is None else {**status.as_dict(), **watch.fields()}
 
 
@@ -237,6 +254,8 @@ async def morning_swap(
     if status is not None:
         engine.training = _shown(status, watch)
         engine.night_reports = reports_by_algorithm(status.night)
+    elif watch is not None:  # no list yet: the nights not applied go on showing (#355)
+        engine.training = _shown(None, watch)
     reload_models(engine, shelf)
     return status
 
