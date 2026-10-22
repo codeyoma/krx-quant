@@ -124,3 +124,20 @@ def test_what_the_repository_forbids_is_masked(name: str) -> None:
 
 def test_a_fine_grained_github_token_is_masked_without_the_setting() -> None:
     assert redact(f"token {GITHUB_TOKEN}") == f"token {MASK}"
+
+
+def test_tailscale_names_end_where_their_labels_do() -> None:
+    assert redact("a host.ts.net and b.c.ts.net.") == f"a {MASK} and {MASK}."
+    assert redact("..ts.net and .ts.net stay") == "..ts.net and .ts.net stay"
+    assert redact("(krx-quant.tail1a2b3.ts.net:443)") == f"({MASK}:443)"
+    assert redact("x.ts.network") == "x.ts.network"
+
+
+@pytest.mark.timeout(10)  # the pattern it replaced took about 10 s on each of these
+@pytest.mark.parametrize("unit", ["x", "A.", "1.", "a.b", "1.2"])
+def test_a_long_line_is_masked_in_linear_time(unit: str) -> None:
+    # #358: the engine masks its lines for Loki on a thread of its own, which holds the
+    # interpreter while a pattern runs; quadratic patterns would stall the engine on such a line.
+    line = unit * (64 * 1024 // len(unit))
+    assert redact(line + ".ts.net") == MASK
+    assert redact(line) == line

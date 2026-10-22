@@ -12,6 +12,8 @@ Default five-role vocabulary: `needs-triage`, `needs-info`, `ready-for-agent`, `
 
 Agents cannot reach the server. To see it, add the `needs-server-snapshot` label to an open issue and read the comment the server posts within minutes (`krx-quant doctor`, masked). See `docs/agents/server-snapshot.md`.
 
+Its log lines are in Grafana Cloud Loki: query them with the Grafana Cloud connector (`query_loki_logs`, datasource `grafanacloud-logs`), else `scripts/loki-query.sh`. See `docs/agents/server-logs.md`.
+
 ### Domain docs
 
 Single-context: root `CONTEXT.md` + `docs/adr/`, plus the agreed system design in `docs/design.md`. See `docs/agents/domain.md`.

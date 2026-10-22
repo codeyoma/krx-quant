@@ -56,12 +56,6 @@ RULES = RegimeRules()  # the regime's default thresholds
 TOUCH_TARGET = 3
 TARGETS = ("1", str(TOUCH_TARGET))
 SIGNALS = SignalRule()  # the signal alerts' defaults
-# The log files in the state folder (#356, ``log_files.py``): kept this many days (today's and
-# yesterday's always: last night's training and jobs write theirs past midnight), and no more
-# than this many MB.
-DEFAULT_LOG_DAYS = 14
-MIN_LOG_DAYS = 2
-DEFAULT_LOG_MAX_MB = 500
 
 
 class SettingsError(ValueError):
@@ -230,12 +224,15 @@ class Settings:
     # nothing asks KRX, and the scheduled probe of it (``probe-krx-etf-305``) waits.
     krx_openapi_key: str | None = field(default=None, repr=False)
     krx_openapi_url: str = DEFAULT_KRX_OPENAPI_URL
-    # Every process's log lines also go to files under ``state/logs/`` (#356), kept this many
-    # days (KRX_LOG_DAYS: 14 unless set; "off": none written) and within this many MB
-    # (KRX_LOG_MAX_MB), the oldest removed first. None here, as jobs_at: a test's collector
-    # writes none.
-    log_days: int | None = None
-    log_max_mb: int = DEFAULT_LOG_MAX_MB
+    # Grafana Cloud Loki (#358): each process's log lines also go to
+    # ``<KRX_LOKI_URL>/loki/api/v1/push`` (basic auth KRX_LOKI_USER and KRX_LOKI_TOKEN, a
+    # ``logs:write`` token), where they are kept and an agent queries them (``loki.py``). All three
+    # set, or nothing is sent. Read again from the raw settings where the lines are sent
+    # (``loki.target_of``): a malformed one turns the sending off, never the process. Masked as
+    # secrets. (The files under ``state/logs`` and KRX_LOG_DAYS, KRX_LOG_MAX_MB went in #360.)
+    loki_url: str | None = field(default=None, repr=False)
+    loki_user: str | None = field(default=None, repr=False)
+    loki_token: str | None = field(default=None, repr=False)
 
     @classmethod
     def from_env(
@@ -348,7 +345,6 @@ class Settings:
         github_repo = values.get("KRX_GITHUB_REPO", DEFAULT_GITHUB_REPO).strip()
         if not re.fullmatch(r"[\w.-]+/[\w.-]+", github_repo):
             raise SettingsError(f"KRX_GITHUB_REPO must be owner/name, got {github_repo!r}")
-        log_days, log_max_mb = log_keep(values)
         restart_at = _before_pre_market("KRX_RESTART_AT", values.get("KRX_RESTART_AT", "07:20"))
         if restart_at is not None and macro_at is not None and restart_at >= macro_at:
             # The new collector would read that morning's macro again, and a source failing
@@ -459,8 +455,9 @@ class Settings:
             toss_url=values.get("TOSS_URL", DEFAULT_TOSS_URL).strip().rstrip("/"),
             krx_openapi_key=values.get("KRX_OPENAPI_KEY", "").strip() or None,
             krx_openapi_url=values.get("KRX_OPENAPI_URL", DEFAULT_KRX_OPENAPI_URL).strip().rstrip("/"),
-            log_days=log_days,
-            log_max_mb=log_max_mb,
+            loki_url=values.get("KRX_LOKI_URL", "").strip() or None,
+            loki_user=values.get("KRX_LOKI_USER", "").strip() or None,
+            loki_token=values.get("KRX_LOKI_TOKEN", "").strip() or None,
         )
 
 
@@ -471,31 +468,6 @@ def read_values(env: Mapping[str, str] | None, dotenv_path: Path | None) -> dict
         values.update({k: v for k, v in dotenv_values(dotenv_path).items() if v is not None})
     values.update(os.environ if env is None else env)
     return values
-
-
-def log_keep(values: Mapping[str, str]) -> tuple[int | None, int]:
-    """``KRX_LOG_DAYS`` (whole days, at least ``MIN_LOG_DAYS``, or off: None) and
-    ``KRX_LOG_MAX_MB`` (whole MB, at least 1) from the raw settings (#356)."""
-    raw_days = values.get("KRX_LOG_DAYS", str(DEFAULT_LOG_DAYS))
-    days: int | None = None
-    if raw_days.strip().lower() not in ("", "off"):
-        try:
-            days = int(raw_days)
-        except ValueError as e:
-            raise SettingsError(f"KRX_LOG_DAYS must be whole days or off, got {raw_days!r}") from e
-        if days < MIN_LOG_DAYS:
-            raise SettingsError(
-                f"KRX_LOG_DAYS must be at least {MIN_LOG_DAYS} (last night's files are written past "
-                f"midnight) or off, got {raw_days!r}"
-            )
-    raw_mb = values.get("KRX_LOG_MAX_MB", str(DEFAULT_LOG_MAX_MB))
-    try:
-        max_mb = int(raw_mb)
-    except ValueError as e:
-        raise SettingsError(f"KRX_LOG_MAX_MB must be whole MB, got {raw_mb!r}") from e
-    if max_mb < 1:
-        raise SettingsError(f"KRX_LOG_MAX_MB must be at least 1, got {raw_mb!r}")
-    return days, max_mb
 
 
 def _on_or_off(name: str, raw: str) -> bool:

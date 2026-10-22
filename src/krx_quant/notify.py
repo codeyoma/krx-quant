@@ -2,6 +2,11 @@
 
 Messages go to a Telegram bot when TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are set,
 otherwise only to the log. Sending never raises into the collector.
+
+Each message is logged before it is sent (``alert: <text>``, WARNING), and again once Telegram has
+taken it (``telegram sent: <text>``, INFO), or why not (``telegram send failed: …``, ERROR). The
+second says it reached Telegram: a Grafana alert rule that stands in for an alert the engine could
+not send reads it (#358, docs/operations.md "Grafana 알림 규칙").
 """
 
 from __future__ import annotations
@@ -107,6 +112,7 @@ class Alerts:
                     )
         except (aiohttp.ClientError, OSError, TimeoutError) as e:
             raise RuntimeError(f"Telegram not reachable: {self._redact(str(e))}") from e
+        log.info("telegram sent: %s", text)  # it reached Telegram (#358)
 
     async def close(self, timeout: float = 5.0) -> None:
         """Wait (briefly) for messages still being sent."""

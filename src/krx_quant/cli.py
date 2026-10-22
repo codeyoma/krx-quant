@@ -9,7 +9,6 @@ import itertools
 import json
 import logging
 import math
-import re
 import signal
 import sys
 from collections.abc import Callable
@@ -21,6 +20,7 @@ import boto3
 from aiohttp import web
 from botocore.exceptions import BotoCoreError, ClientError
 
+from krx_quant import loki
 from krx_quant.algorithms import ALGORITHMS, KIND_ALGORITHMS, RegistrationError
 from krx_quant.archive import run_archive
 from krx_quant.backfill import run_backfill
@@ -45,10 +45,6 @@ from krx_quant.kind_registry import DAILY_KINDS, kind_named
 from krx_quant.kis import KisError
 from krx_quant.krx_etf_probe import probe_krx_etf
 from krx_quant.lifecycle import Status
-from krx_quant.log_files import FORMAT as LOG_FORMAT
-from krx_quant.log_files import open_process_log
-from krx_quant.logs_bundle import DEFAULT_DAYS as BUNDLE_DAYS
-from krx_quant.logs_bundle import Period, make_bundle, since
 from krx_quant.macro import run_macro
 from krx_quant.market_calendar import calendar_store
 from krx_quant.model_shelf import Shelf
@@ -65,6 +61,9 @@ from krx_quant.prevalidation import (
     prevalidate,
     report_path,
 )
+from krx_quant.process_log import FORMAT as LOG_FORMAT
+from krx_quant.process_log import open_process_log
+from krx_quant.redaction import secrets_of
 from krx_quant.replay import replay_day
 from krx_quant.rescore import EngineRunning, rescore
 from krx_quant.signal_review import DEFAULT_DAYS as SIGNAL_REVIEW_DAYS
@@ -503,39 +502,6 @@ async def _doctor(api: str | None) -> int:
     return 0
 
 
-def _logs_bundle(days: int | None, when: str | None, grep: re.Pattern[str] | None) -> int:
-    """The log files, masked, in one archive for an agent (#356); read leniently as ``doctor``
-    reads the settings: the logs are wanted most when a setting is wrong."""
-    settings, _ = doctor_settings()
-    now = datetime.now(KST)
-    period = Period.since(when, now) if when is not None else Period.days(days or BUNDLE_DAYS, now)
-    bundle = make_bundle(settings, period, grep)
-    if bundle is None:
-        print(
-            f"no log line in {period.how} under {settings.state_dir / 'logs'}: no bundle written",
-            file=sys.stderr,
-        )
-        return 1
-    print(bundle.summary())
-    return 0
-
-
-def _since(text: str) -> str:
-    """``--since``: checked as it is given (the time it names is read when the bundle is made)."""
-    try:
-        since(text, datetime.now(KST))
-    except ValueError as e:
-        raise argparse.ArgumentTypeError(str(e)) from None
-    return text
-
-
-def _pattern(text: str) -> re.Pattern[str]:
-    try:
-        return re.compile(text)
-    except re.error as e:
-        raise argparse.ArgumentTypeError(f"not a regular expression ({e}): {text!r}") from None
-
-
 def _signal_review(days: int) -> int:
     settings = Settings.from_env(require_kis=False)
     print(signal_review(settings.state_dir / DB_NAME, settings, datetime.now(KST).date(), days))
@@ -803,23 +769,6 @@ def main(argv: list[str] | None = None) -> int:
         help="the Engine API to ask, e.g. http://127.0.0.1:8080 (default: this container's, then compose's"
         " engine service)",
     )
-    bundle_cmd = sub.add_parser(
-        "logs-bundle",
-        help="pack the log files under state/logs, masked (secrets, server addresses; market values stay),"
-        " into state/logs/bundles/krx-logs-<time>.tar.gz for an agent (#356); never for a public place",
-    )
-    period = bundle_cmd.add_mutually_exclusive_group()
-    period.add_argument(
-        "--days",
-        type=_positive,
-        help=f"the files of the last N KST days, today's included (default {BUNDLE_DAYS})",
-    )
-    period.add_argument(
-        "--since",
-        type=_since,
-        help="the lines from then on: YYYY-MM-DD, YYYY-MM-DDTHH:MM (KST), or 90m, 6h, 2d before now",
-    )
-    bundle_cmd.add_argument("--grep", type=_pattern, help="only the lines this regular expression finds")
     signal_review_cmd = sub.add_parser(
         "signal-review",
         help="print what choosing the Telegram signal settings needs (#206); reads only, writes nothing",
@@ -870,9 +819,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
-    # This process's lines also go to its file under state/logs (#356), with its exit code.
+    # This process's lines also go to Loki when it is set (#358), masked, between a start line and
+    # one with its exit code.
+    values = read_values(None, Path(".env"))
     files = open_process_log(
-        args.command, sys.argv[1:] if argv is None else argv, read_values(None, Path(".env"))
+        args.command, sys.argv[1:] if argv is None else argv, values, _log_secrets(values)
     )
     code, why = 1, None
     try:
@@ -895,6 +846,16 @@ def main(argv: list[str] | None = None) -> int:
         if files is not None:
             files.close(code, why)
     return code
+
+
+def _log_secrets(values: dict[str, str]) -> tuple[str, ...]:
+    """What the lines sent to Loki mask (#358): the settings' secrets, read leniently as
+    ``doctor`` reads them (a malformed setting is the command's to report). None to mask
+    unless Loki is set."""
+    if not loki.configured(values):
+        return ()
+    settings, _ = doctor_settings(values, None)
+    return secrets_of(settings)
 
 
 def _command(args: argparse.Namespace) -> int:
@@ -971,8 +932,6 @@ def _command(args: argparse.Namespace) -> int:
         asyncio.run(_fake_kis(args.port, args.host, args.trades))
     elif args.command == "demo-engine":
         return asyncio.run(_demo_engine(args.port, args.host, args.db, args.pace))
-    elif args.command == "logs-bundle":
-        return _logs_bundle(args.days, args.since, args.grep)
     return 0
 
 

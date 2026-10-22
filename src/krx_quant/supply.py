@@ -72,6 +72,7 @@ from krx_quant.candles import last_finished
 from krx_quant.config import Settings
 from krx_quant.feeds.base import KST, Row
 from krx_quant.kis import KisError, RestClient
+from krx_quant.loki import TEMPLATE_ONLY
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.ratelimit import RateLimiter
 from krx_quant.toss import STOCKS, TossClient, TossError, TossTokens
@@ -520,7 +521,10 @@ class SupplyKeeper:
                 log.warning("%s supply (%s) of %s not updated: %s", TOSS, query.name, symbol, e)
                 continue
             except (aiohttp.ClientError, OSError, ValueError, KeyError, TimeoutError) as e:
-                log.warning("%s supply (%s) of %s not updated: %s", TOSS, query.name, symbol, e)
+                # A ValueError may quote a Toss figure: Loki gets the template only (#358, 4.7).
+                log.warning(
+                    "%s supply (%s) of %s not updated: %s", TOSS, query.name, symbol, e, extra=TEMPLATE_ONLY
+                )
                 continue
             for day, values in got.items():
                 fetched.setdefault(day, {}).update(values)

@@ -21,7 +21,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
-from krx_quant import kis
+from krx_quant import kis, loki
 from krx_quant.cli import main
 from krx_quant.config import Settings
 from krx_quant.doctor import (
@@ -181,8 +181,9 @@ def test_the_summary_has_its_eight_parts_with_the_fields_as_the_api_names_them(t
     logs = logs_with((logging.INFO, "not kept"), (logging.WARNING, "KIS WebSocket silent for 60s"))
     text = report(settings, NOW, Status(status_body(), "이 컨테이너의 엔진 API"), logs)
 
-    titles = [line for line in text.splitlines() if line[:2] in {f"{n}." for n in range(1, 9)}]
+    titles = [line for line in text.splitlines() if line[:2] in {f"{n}." for n in range(1, 10)}]
     assert [t[:2] for t in titles] == ["1.", "2.", "3.", "4.", "5.", "6.", "7.", "8."]
+    assert titles[-1].startswith("8. Loki 전송"), "the log folders' section went in #360"
     assert text.startswith("서버 상태 2026-10-20 10:30:00 KST")
     assert f"commit {COMMIT} · started_at 2026-10-20T06:00:31+09:00 (4시간 29분 전)" in text
     assert "mode live · phase regular" in text
@@ -347,6 +348,9 @@ def test_the_lenient_settings_mask_what_the_full_ones_do(tmp_path: Path) -> None
         "KRX_OBJECT_STORE": "s3://krx-quant-example/engine",
         "KRX_S3_ENDPOINT_URL": "https://objects.example.test",
         "KRX_BIND_ADDRESS": BIND_ADDRESS,
+        "KRX_LOKI_URL": "https://logs-prod-000.grafana.example",
+        "KRX_LOKI_USER": "12345678",
+        "KRX_LOKI_TOKEN": "glc_" + "L" * 40,
         "KRX_DATA_DIR": str(tmp_path / "data"),
         "KRX_API_PORT": "8081",
     }
@@ -354,7 +358,7 @@ def test_the_lenient_settings_mask_what_the_full_ones_do(tmp_path: Path) -> None
     assert error is None
     lenient, error = doctor_settings({**env, "KRX_TARGET_VERSION": "2"}, None)
     assert error is not None and error.startswith("KRX_TARGET_VERSION 2")
-    assert secrets_of(lenient) == secrets_of(full) and len(secrets_of(full)) == 16
+    assert secrets_of(lenient) == secrets_of(full) and len(secrets_of(full)) == 19
     assert (lenient.data_dir, lenient.state_dir, lenient.api_port) == (tmp_path / "data", Path("state"), 8081)
     bad_port, _ = doctor_settings({**env, "KRX_API_PORT": "soon"}, None)
     assert bad_port.api_port == 8080
@@ -364,7 +368,8 @@ def test_the_command_cannot_read_the_engine_s_log_and_says_how_to(tmp_path: Path
     text = report(server(tmp_path), NOW, Status(status_body(), "x"))
     assert "엔진이 기억하는 줄을 읽지 못한다" in text
     assert "docker compose logs --since 2h engine" in text
-    assert "state/logs/engine/<날>.log" in text and "krx-quant logs-bundle" in text  # #356
+    assert "엔진의 전체 줄은 Grafana Cloud Loki에 있다(8절, docs/agents/server-logs.md)" in text  # #358
+    assert "state/logs" not in text and "logs-bundle" not in text  # gone in #360
 
 
 def test_without_the_api_it_says_why_and_reads_the_last_start_from_the_db(tmp_path: Path) -> None:
@@ -495,4 +500,5 @@ def test_the_engine_s_own_status_has_the_fields_of_v1_status() -> None:
         "started_at": "2026-10-20T06:30:00+09:00",
         "phase": "regular",
         "kis": live(),
+        "loki": loki.status_json(),  # this process's: off here (#358)
     }

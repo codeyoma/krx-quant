@@ -9,8 +9,8 @@ running engine notices a model file that changed (the swap, ``krx-quant fit``,
 publishes what it runs (``live.json`` and the models), the champions of the next night.
 
 The nightly training runs at ``KRX_TRAIN_AT`` on trading days: here, in its own process
-(``KRX_TRAIN_ON=server``; its whole output and exit code in ``state/logs/training/<day>.log``,
-#356), or on EC2 Spot started by AWS at the same time (``spot``, #23).
+(``KRX_TRAIN_ON=server``; its whole output and exit code in Loki, ``process="training"``, #358),
+or on EC2 Spot started by AWS at the same time (``spot``, #23).
 On Spot, the server publishes what the run needs from it, waits for the night's result in
 the store until the next trading day's 07:30, and sends its summary (the Spot run has no
 Telegram token). The scheduled jobs (#215) wait for the night either way (``NightTraining``).
@@ -41,8 +41,6 @@ from krx_quant.cost_guard import training_stopped
 from krx_quant.daily import DailyAlgorithm
 from krx_quant.engine import PredictionEngine
 from krx_quant.feeds.base import KST, kst_day
-from krx_quant.log_files import KRX_QUANT, night_file, run_logged
-from krx_quant.log_files import TRAINING as TRAINING_LOGS
 from krx_quant.market_calendar import MarketCalendar, next_on_trading_day
 from krx_quant.model_shelf import Shelf
 from krx_quant.nightly import (
@@ -56,6 +54,7 @@ from krx_quant.nightly import (
 )
 from krx_quant.notify import Alerts
 from krx_quant.object_store import ObjectStore, file_digest, get_json, put_json
+from krx_quant.process_log import KRX_QUANT, Child, run_logged
 from krx_quant.training_nights import Failure, Outcome, TrainingNights, exit_text, last_step
 
 log = logging.getLogger(__name__)
@@ -355,7 +354,6 @@ async def keep_training(
     first: Callable[[MarketCalendar, time, datetime], datetime] | None = None,
     training: NightTraining | None = None,
     watch: TrainingWatch | None = None,
-    logs: Path | None = None,
 ) -> None:
     """Start ``krx-quant train --day <day>`` in its own process at ``train_at`` each trading
     day, until cancelled; at once for a night a restart interrupted or missed (``CATCH_UP``).
@@ -364,12 +362,11 @@ async def keep_training(
     (None once done, else why not), and ``first`` picks the first night to run. ``training``
     is told when each night is due, starts and ends (the scheduled jobs wait for it, #215).
     With ``watch`` (#355), each night's outcome is kept and the alerts are ``TrainingWatch``'s.
-    ``logs`` (``state/logs``) gets each night's training output here (#356).
     """
 
     async def run(day: date) -> Failure | None:
         if run_night is None:
-            return await _train(day, logs=logs)
+            return await _train(day)
         why = await run_night(day)
         return None if why is None else Failure(why)
 
@@ -477,16 +474,15 @@ async def _train(
     day: date,
     command: Sequence[str] = TRAIN_COMMAND,
     timeout: timedelta = TRAINING_TIMEOUT,
-    logs: Path | None = None,
 ) -> Failure | None:
     """Run the night's training; None if it finished, else why not: the exit code and the last
     step it started (#355), also when it is stopped at ``timeout``. Its whole output and exit
-    code also go to the night's file as they come (``training/<day>.log`` under ``logs``, #356)."""
+    code also go to Loki as they come when it is set, labelled ``process="training"`` (#358)."""
     ran = await run_logged(  # read as it comes: what it wrote is kept if it is stopped
         (*command, "--day", day.isoformat()),
         timeout,
-        night_file(logs, TRAINING_LOGS, day),
         merge=True,  # stdout and stderr in the order written
+        child=Child.training(day),  # its lines' copy in Loki (#358)
     )
     code = None if ran.timed_out else ran.exit_code
     text = ran.stdout.strip()

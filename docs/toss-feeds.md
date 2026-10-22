@@ -29,7 +29,7 @@
   - 토큰은 로그와 오류 메시지에 남기지 않는다.
 - **허용 IP.** 토스증권 WTS 설정 > Open API > 허용 IP 관리에 등록한 IP에서만 부를 수 있다. 다른 IP에서는 토큰 발급이 403 `access_denied`(`IP address not allowed`), 다른 엔드포인트가 403 `ip-not-allowed`다. `probe-supply`는 이것을 "the server's public IP is not in Toss's allowed IPs (WTS 설정 > Open API > 허용 IP 관리)"로 보이고 토스 조회를 멈춘다. 공인 IP가 바뀌는 환경이면 막힌다(FAQ). 서버(Lightsail)의 고정 IP를 등록한다.
 - 오류 본문: 시세 엔드포인트는 `{"error": {"requestId", "code", "message", "data"}}`, 토큰 엔드포인트는 OAuth2 형식 `{"error", "error_description"}`이다. 429는 `Retry-After`만큼 기다린다(`toss.py`는 5초까지, 3번).
-- **데이터 이용 정책(FAQ).** 받은 정보는 본인의 매매 목적에만 쓴다. 비상업적이어도 제3자에게 배포하면 안 된다. 그래서 공개 이슈·저장소에는 값을 올리지 않는다(`probe-supply`는 필드 이름, 개수, 날짜, 표시만 보인다).
+- **데이터 이용 정책(FAQ).** 받은 정보는 본인의 매매 목적에만 쓴다. 비상업적이어도 제3자에게 배포하면 안 된다. 그래서 공개 이슈·저장소에는 값을 올리지 않는다(`probe-supply`는 필드 이름, 개수, 날짜, 표시만 보인다). 로그 줄을 Grafana Cloud Loki로도 보내게 되어(#358), 토스의 값이 들 수 있는 줄(일별 수급의 토스 조회가 실패한 경고: 예외 글에 토스가 준 숫자가 들 수 있다)은 Loki에 틀만 보낸다(`extra=loki.TEMPLATE_ONLY`, 값은 `…`). stdout에는 그대로 있다([operations.md](operations.md#grafana-cloud-loki로-보내는-로그-358)).
   - 일별 수급(#226)은 서버의 비공개 상태 폴더 `state/supply/symbol=<종목>/toss.parquet`에만 저장한다. 데이터 폴더(`data/`)가 아니라서 S3에 올라가지 않고(업로드는 `data/`만 올린다), 엔진 API(`GET /v1/symbols/{s}/supply`)로 사용자 자신의 화면에만 준다. 테스트와 데모 엔진의 값은 지어낸 것이다. 화면 캡처도 데모 엔진으로만 찍는다.
 
 ## 종목 정보 (#250)
