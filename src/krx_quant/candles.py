@@ -40,6 +40,14 @@ the KRX opening auction (its high, low and close are KRX's, docs/kis-feeds.md), 
 ``open_to_close`` kind is answered and trained on the KRX auctions' open and close. They are
 kept by the same rules: the whole history at first, then the last few asked again and the new
 finished days added, all of it again when KIS adjusted the past.
+
+**Their ex-date code (#310).** A KRX day candle also keeps KIS's 락 구분 of the day as KIS gives it
+(``flng_cls_code``, stored as ``ex_code``): KIS's adjusted prices do not take cash dividends out, and
+this code is how ``open_to_close_5d`` knows a window holds an ex-dividend day (``daily.ex_dividend_of``;
+the scheduled job ``probe-dividends-310``, 2026-10-21). A KRX day file written before it is noted
+``CHECKED`` only, not ``KRX_CHECKED``: its next run asks KIS for the whole history once more, as
+#264's check does, and fills the code into every stored candle KIS answers, without noting those as
+candles KIS changed. The integrated files keep no such column.
 """
 
 from __future__ import annotations
@@ -87,6 +95,9 @@ FIELDS = ("open", "high", "low", "close", "volume", "value")
 # the last candles a run replaced.
 _NOTES_KEY = b"krx_quant"
 CHECKED = 1  # a file without it (written before #264's refresh) is checked whole once
+# A KRX day file's (#310): once it holds KIS's 락 구분 (``EX_CODE``). One noted less is checked whole
+# once more, which fills the code into the candles KIS answers again.
+KRX_CHECKED = 2
 NOTED = 30  # the replaced candles a file notes, newest last
 
 CANDLE_SCHEMA = pa.schema(
@@ -102,6 +113,10 @@ CANDLE_SCHEMA = pa.schema(
         ("value", pa.int64()),  # traded value in won
     ]
 )
+# A KRX day candle's ex-date code (#310): KIS's 락 구분 (``flng_cls_code``) as given, "00" on a day
+# without one; null on a candle stored before it that KIS has not answered again.
+EX_CODE = "ex_code"
+KRX_DAY_SCHEMA = CANDLE_SCHEMA.append(pa.field(EX_CODE, pa.string()))
 
 
 @dataclass(frozen=True)
@@ -195,18 +210,26 @@ def write_candles(
 def write_krx_days(
     data_dir: Path, symbol: str, rows: Sequence[Row], replaced: Sequence[Replaced] = ()
 ) -> None:
-    """Replace the stored KRX day candles (#264), whole or not at all, noted as ``write_candles``."""
-    _write(krx_days_path(data_dir, symbol), rows, replaced)
+    """Replace the stored KRX day candles (#264), whole or not at all, with their ex-date codes
+    (#310, ``EX_CODE``: null for a row without one), noted as checked (``KRX_CHECKED``) with
+    ``replaced``."""
+    _write(krx_days_path(data_dir, symbol), rows, replaced, KRX_DAY_SCHEMA, KRX_CHECKED)
 
 
-def _write(path: Path, rows: Sequence[Row], replaced: Sequence[Replaced] = ()) -> None:
-    """Write the file whole (a temporary file renamed), noted as checked, with the last
+def _write(
+    path: Path,
+    rows: Sequence[Row],
+    replaced: Sequence[Replaced] = (),
+    schema: pa.Schema = CANDLE_SCHEMA,
+    checked: int = CHECKED,
+) -> None:
+    """Write the file whole (a temporary file renamed), noted as ``checked``, with the last
     ``NOTED`` of ``replaced``."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.tmp")
-    notes = {"checked": CHECKED, "replaced": [r.as_dict() for r in list(replaced)[-NOTED:]]}
-    schema = CANDLE_SCHEMA.with_metadata({_NOTES_KEY: json.dumps(notes).encode()})
-    pq.write_table(pa.Table.from_pylist(list(rows), schema=schema), tmp)
+    notes = {"checked": checked, "replaced": [r.as_dict() for r in list(replaced)[-NOTED:]]}
+    noted = schema.with_metadata({_NOTES_KEY: json.dumps(notes).encode()})
+    pq.write_table(pa.Table.from_pylist(list(rows), schema=noted), tmp)
     tmp.rename(path)
 
 
@@ -223,10 +246,17 @@ def stored_candles(
 
 
 async def candles_page(
-    client: RestClient, period: str, market: str, symbol: str, first: date, last: date
+    client: RestClient,
+    period: str,
+    market: str,
+    symbol: str,
+    first: date,
+    last: date,
+    ex_code: bool = False,
 ) -> list[tuple[date, Row]]:
     """One query: the candles KIS labels from ``first`` to ``last`` (at most 100, the newest), each
-    with KIS's label and stored by its period's first day; KIS's blank padding left out."""
+    with KIS's label and stored by its period's first day, with its ex-date code if ``ex_code``
+    (#310, a KRX day candle's); KIS's blank padding left out."""
     params = {
         "FID_COND_MRKT_DIV_CODE": market,
         "FID_INPUT_ISCD": symbol,
@@ -237,7 +267,7 @@ async def candles_page(
     }
     body = await client.get(CANDLES_TR, CANDLES_PATH, params)
     return [
-        (d, _candle(symbol, MARKETS[market], period_start(d, period), r))
+        (d, _candle(symbol, MARKETS[market], period_start(d, period), r, ex_code))
         for r in body.get("output2") or []
         if (d := _date(r)) is not None and first <= d <= last
     ]
@@ -295,33 +325,38 @@ class CandleKeeper:
         """Ask KIS again for the last ``REFRESH_CANDLES`` stored candles and the finished ones up
         to ``last``: replace the stored ones KIS changed since (a day stored provisional), add the
         new ones. If KIS changed the oldest of them (it adjusted the past), take the whole history
-        again; a file not checked yet (``CHECKED``) is compared whole once. True if it changed."""
-        label = "KRX day" if market == KRX_MARKET else period
+        again; a file not checked yet (``CHECKED``; a KRX day file, ``KRX_CHECKED``: its ex-date
+        codes, #310) is compared whole once. True if it changed."""
+        krx = market == KRX_MARKET  # the KRX day file (#264), with its ex-date codes (#310)
+        label = "KRX day" if krx else period
+        marks = (EX_CODE,) if krx else ()
+        schema, level = (KRX_DAY_SCHEMA, KRX_CHECKED) if krx else (CANDLE_SCHEMA, CHECKED)
         stored = _read(path)
         notes = read_notes(path)
         if stored:
             asked = market or _market(stored[-1]["venue"])
             end = max(last, stored[-1]["date"])
-            if notes.checked < CHECKED:
-                fresh = await self._walk(period, asked, symbol, _FIRST_DAY, end)
+            if notes.checked < level:
+                fresh = await self._walk(period, asked, symbol, _FIRST_DAY, end, krx)
                 if not fresh:
                     log.info("no %s candles of %s at KIS to check the stored ones against", label, symbol)
                     return False
-                rows, changes = _merged(stored, fresh, period, last)
+                rows, changes, filled = _merged(stored, fresh, period, last, marks)
                 log.info(
-                    "%s candles of %s checked whole against KIS (#264): %s replaced, %s added",
+                    "%s candles of %s checked whole against KIS (#264): %s replaced, %s added%s",
                     label,
                     symbol,
                     len(changes),
                     len(rows) - len(stored),
+                    f", ex-date codes filled in {filled} (#310)" if krx else "",
                 )
-                _write(path, rows, _noted(notes, changes, now))
+                _write(path, rows, _noted(notes, changes, now), schema, level)
                 return True
             anchor = stored[-min(REFRESH_CANDLES, len(stored))]
-            fresh = await self._walk(period, asked, symbol, anchor["date"], end)
+            fresh = await self._walk(period, asked, symbol, anchor["date"], end, krx)
             again = next((r for r in fresh if r["date"] == anchor["date"]), None)
             if again is not None and _prices(again) == _prices(anchor):
-                rows, changes = _merged(stored, fresh, period, last)
+                rows, changes, _ = _merged(stored, fresh, period, last, marks)
                 if rows == stored:
                     return False
                 for day, fields in changes:
@@ -332,7 +367,7 @@ class CandleKeeper:
                         day,
                         ", ".join(fields),
                     )
-                _write(path, rows, _noted(notes, changes, now))
+                _write(path, rows, _noted(notes, changes, now), schema, level)
                 return True
             log.info(
                 "%s candles of %s changed at %s (adjusted?): taking the whole history again",
@@ -343,12 +378,12 @@ class CandleKeeper:
         if market is None:
             taken = await self._history(period, symbol, last)
         else:
-            taken = await self._walk(period, market, symbol, _FIRST_DAY, last)
+            taken = await self._walk(period, market, symbol, _FIRST_DAY, last, krx)
         history = [r for r in taken if finished(period, r["date"], last)]
         if not history:
             log.info("no %s candles of %s at KIS yet; the next run asks again", label, symbol)
             return False
-        _write(path, history, notes.replaced)
+        _write(path, history, notes.replaced, schema, level)
         return True
 
     async def _history(self, period: str, symbol: str, last: date) -> list[Row]:
@@ -359,14 +394,16 @@ class CandleKeeper:
                 return rows
         return []
 
-    async def _walk(self, period: str, market: str, symbol: str, first: date, last: date) -> list[Row]:
+    async def _walk(
+        self, period: str, market: str, symbol: str, first: date, last: date, ex_code: bool = False
+    ) -> list[Row]:
         """The candles KIS labels from ``first`` to ``last``, oldest first, paging back from
-        ``last``; each by its period's first day."""
+        ``last``; each by its period's first day, with its ex-date code if ``ex_code`` (#310)."""
         candles: dict[date, Row] = {}
         end = last
         for _ in range(_MAX_QUERIES):
             await self._pace.acquire()
-            labelled = await candles_page(self._client, period, market, symbol, first, end)
+            labelled = await candles_page(self._client, period, market, symbol, first, end, ex_code)
             new = [(d, r) for d, r in labelled if r["date"] not in candles]
             candles.update((r["date"], r) for _, r in new)
             if not new:
@@ -390,23 +427,32 @@ def last_finished(calendar: MarketCalendar, now: datetime) -> date:
 
 
 def _merged(
-    stored: Sequence[Row], fresh: Sequence[Row], period: str, last: date
-) -> tuple[list[Row], list[tuple[date, tuple[str, ...]]]]:
-    """The stored candles with KIS's finished ones over them, oldest first, and the stored ones
-    KIS changed (each with the fields). A stored candle KIS did not answer stays."""
+    stored: Sequence[Row], fresh: Sequence[Row], period: str, last: date, marks: Sequence[str] = ()
+) -> tuple[list[Row], list[tuple[date, tuple[str, ...]]], int]:
+    """The stored candles with KIS's finished ones over them, oldest first, the stored ones KIS
+    changed (each with the fields), and how many stored ones had ``marks`` (a KRX day candle's
+    ex-date code, #310) filled in: a stored candle without one (written before it) takes KIS's,
+    which is not a change KIS made. A stored candle KIS did not answer stays."""
     by_day = {r["date"]: r for r in stored}
     changes: list[tuple[date, tuple[str, ...]]] = []
+    filled = 0
     for r in fresh:
         if not finished(period, r["date"], last):
             continue
         old = by_day.get(r["date"])
         if old is not None:
-            fields = tuple(f for f in FIELDS if old[f] != r[f])
-            if not fields:
+            fields = tuple(f for f in FIELDS if old[f] != r[f]) + tuple(
+                f for f in marks if old.get(f) is not None and old[f] != r.get(f)
+            )
+            fills = any(old.get(f) is None and r.get(f) is not None for f in marks)
+            if not fields and not fills:
                 continue
-            changes.append((r["date"], fields))
+            if fields:
+                changes.append((r["date"], fields))
+            elif fills:
+                filled += 1
         by_day[r["date"]] = r
-    return [by_day[d] for d in sorted(by_day)], changes
+    return [by_day[d] for d in sorted(by_day)], changes, filled
 
 
 def _noted(notes: Notes, changes: Sequence[tuple[date, tuple[str, ...]]], now: datetime) -> list[Replaced]:
@@ -427,8 +473,8 @@ def _date(r: dict[str, str]) -> date | None:
         return None
 
 
-def _candle(symbol: str, venue: str, start: date, r: dict[str, str]) -> Row:
-    return {
+def _candle(symbol: str, venue: str, start: date, r: dict[str, str], ex_code: bool = False) -> Row:
+    row: Row = {
         "symbol": symbol,
         "date": start,
         "venue": venue,
@@ -439,6 +485,9 @@ def _candle(symbol: str, venue: str, start: date, r: dict[str, str]) -> Row:
         "volume": to_int(r["acml_vol"]),
         "value": to_int(r["acml_tr_pbmn"]),
     }
+    if ex_code:  # a KRX day candle's (#310): KIS's 락 구분 as given
+        row[EX_CODE] = r.get("flng_cls_code")
+    return row
 
 
 def _prices(r: Row) -> tuple[int, int, int, int]:

@@ -173,11 +173,33 @@ def overlap_review(variance_ratio: float, sessions: int) -> OverlapReview:
     return OverlapReview(variance_ratio, sessions, first_review_day(variance_ratio, sessions))
 
 
+# KIS's 락 구분 of a KRX day candle (``candles.EX_CODE``, ``flng_cls_code``) that marks a cash
+# dividend's ex-date (#310). Measured by ``probe-dividends-310`` (2026-10-21: three symbols, ten
+# years, 2,451 days each): 02 (배당락) on each year-end ex-date, 05 (중간배당락) on the quarterly
+# ones, 00 on every other day, the 2018-05-04 split included; no other value came. KIS's adjusted
+# prices take no dividend out (the adjusted over the traded close stepped on the split alone), so
+# these days are what ``open_to_close_5d`` marks a window by (``ex_dividend``).
+EX_DIVIDEND_CODES = frozenset({"02", "05"})
+NO_EX_CODE = "00"
+
+
+def ex_dividend_of(code: object) -> bool | None:
+    """Whether a KRX day is a cash dividend's ex-date by KIS's 락 구분 ``code``: True for 02 and 05,
+    False for 00; None (not known) for no code (a candle stored before #310 that KIS has not
+    answered again) and for any other value. KIS's documentation lists more (01 권리락, 03 분배락,
+    04 권배락, …), but none came in the probe's ten years, so what they mean here is not measured
+    (CODING_STANDARDS.md "External data is probed before it is used")."""
+    if code in EX_DIVIDEND_CODES:
+        return True
+    return False if code == NO_EX_CODE else None
+
+
 @dataclass(frozen=True)
 class DayPrices:
     """A symbol's KRX day (#264): the opening auction's price, the day's high and low, the
     closing auction's price (``auctions.days_of``), and where the close came from. Adjusted prices
-    (``candles.py``): a past split divides them all alike, so a day's ratios hold."""
+    (``candles.py``): a past split divides them all alike, so a day's ratios hold; a cash dividend
+    is not taken out (#310), and ``ex_dividend`` says whether the day is its ex-date."""
 
     day: date
     open: float
@@ -189,8 +211,9 @@ class DayPrices:
     # From a KRX day candle (adjusted); False: the day kept from the auctions alone, as traded,
     # before its candle (``auctions.days_of``). A ratio across days needs both ends on one scale.
     candle: bool = True
-    # Whether the day is a cash dividend's ex-date; None: not known (#310: no dividend calendar
-    # is kept until the dividend probe says what KIS gives, ``dividend_probe``).
+    # Whether the day is a cash dividend's ex-date, by KIS's 락 구분 of its KRX day candle (#310,
+    # ``ex_dividend_of``); None: not known (no code, or one not measured; a day kept from the
+    # auctions alone, before its candle).
     ex_dividend: bool | None = None
 
     @classmethod
@@ -206,6 +229,7 @@ class DayPrices:
             float(row.get("low") or min(opened, closed)),
             float(closed),
             int(row.get("volume") or 0),
+            ex_dividend=ex_dividend_of(row.get("ex_code")),  # ``candles.EX_CODE``
         )
 
     @property

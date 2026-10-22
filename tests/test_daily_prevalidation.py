@@ -314,7 +314,9 @@ def test_the_night_trains_cox_last_and_puts_it_on_the_promotion_list(tmp_path: P
         now=lambda: FINISHED,
         daily=DailyTrainer(DailyFiles(tmp_path / "data", tmp_path / "state"), SYMBOLS, FEE),
     )
-    assert list(night.promoted) == ["cox"]
+    # Its five-session twin trains too, now that its kind runs (#310); held from probation, it
+    # runs on none of its models yet.
+    assert list(night.promoted) == ["cox", "cox-5d"]
     [report] = [r for r in night.reports if r["algorithm"] == "cox"]
     assert (report["cadence"], report["day"]) == ("daily", night_day.isoformat())
     stored = json.loads((root / f"models/cox/{night.promoted['cox']}.json").read_text())
@@ -366,7 +368,10 @@ def test_a_report_on_answer_version_1_has_cox_on_probation_judged_again_before_i
     clock = FakeClock(datetime.combine(LAST + timedelta(days=3), time(7), KST))
 
     e = _engine(s, clock)
-    assert e.daily_algorithms == () and e.waiting() == ["cox"], "on probation, judged on version 1: waits"
+    # cox-5d waits for its first pre-validation too (#310: its kind runs, no report yet).
+    assert e.daily_algorithms == () and e.waiting() == ["cox", "cox-5d"], (
+        "on probation, judged on version 1: waits"
+    )
     found = last_report(s.state_dir, cox)
     assert found is not None and not found.current
     [job] = [j for j in JOBS if j.name == "prevalidate-cox"]
@@ -381,7 +386,9 @@ def test_a_report_on_answer_version_1_has_cox_on_probation_judged_again_before_i
 
     path.write_text(json.dumps({**report, "target_version": OPEN_TO_CLOSE.answer_version}))
     e = _engine(s, clock)
-    assert [a.name for a in e.daily_algorithms] == ["cox"] and e.waiting() == [], "passed on version 2: runs"
+    assert [a.name for a in e.daily_algorithms] == ["cox"] and e.waiting() == ["cox-5d"], (
+        "passed on version 2: runs"
+    )
     e.store.change_status("cox", clock.now(), Status.PROBATION, Status.ACTIVE, "test")
     e.store.close()
     path.write_text(json.dumps(report))

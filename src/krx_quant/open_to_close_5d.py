@@ -32,11 +32,15 @@ an unscheduled closure moves it to the fifth day actually open); its path says w
 its first look, it is given up (``no candle``). A circuit breaker or a sidecar on any of its five
 sessions makes it special; a VI does not, and the path counts the five sessions' VIs (``vi``).
 
-**Dividends.** Whether KIS's adjusted prices take cash dividends out is not known yet: the probe
-``probe-dividends`` (``dividend_probe``, the scheduled job ``probe-dividends-310``) measures it. If
-they do not, a window with an ex-dividend date after its first session leans down by the dividend.
-The answer stays as it is, and the path says whether such a day falls in the window
-(``ex_dividend``: null while no dividend calendar is kept, ``DayPrices.ex_dividend``).
+**Dividends.** KIS's adjusted prices do not take cash dividends out: the scheduled job
+``probe-dividends-310`` (``dividend_probe``, 2026-10-21) found the adjusted over the traded close
+stepping on a split alone in ten years, never on an ex-dividend day, while KIS's 락 구분 of the day
+(``flng_cls_code``) marked the ex-dividend days, 02 at each year-end and 05 at the quarters. So a
+window with an ex-dividend day after its first session (whose open is ex already) leans down by the
+dividend. The answer stays as it is (#310's fallback), and the path says whether such a day falls in
+the window (``ex_dividend``, from the KRX day candles' codes, ``daily.ex_dividend_of``): true if one
+of sessions two to five is marked 02 or 05, false if all four are marked 00, null otherwise (a
+session the symbol has none of, a candle without the code, a code not measured).
 
 The path: ``open``, ``close``, ``change`` (c), ``band``, ``sigma``, ``scale``, ``fee_rate``,
 ``source`` (where the close came from), ``end_day``, ``sessions`` (5), ``closes`` (the five
@@ -211,7 +215,7 @@ def answers(days: Sequence[DayPrices], fee_rate: float, sessions: Sequence[date]
         held = [days[j] if (j := index.get(s)) is not None else None for s in window]
         before = index.get(known[k - 1]) if k > 0 else None
         # An ex-date after the first session (whose open is ex already); unknown for a session the
-        # symbol has none of, or without a dividend calendar.
+        # symbol has none of, or one whose candle's 락 구분 says nothing measured (#310).
         flags = [None if d is None else d.ex_dividend for d in held[1:]]
         ex_dividend = True if True in flags else False if all(f is False for f in flags) else None
         path: dict[str, Any] = {
@@ -380,14 +384,9 @@ def open_to_close_5d_stats(
     }
 
 
-# Not run until the dividend probe's result is in (#310 review, #338): its answers read KIS's
-# adjusted candles across sessions, and whether that adjustment takes cash dividends out is not
-# known (CODING_STANDARDS.md "External data is probed before it is used"). A PR made after reading
-# the probe's comment on #310 lifts it, alone (adjusted) or with the spec's fallback.
-AWAITING = (
-    "the dividend probe (#310, probe-dividends-310): "
-    "whether KIS's adjusted day candles take cash dividends out"
-)
+# It ran only once the dividend probe's result was in (#310 review, #338: ``DailyKind.awaiting``).
+# The probe found the adjustment takes no dividend out and KIS marks the ex-dividend days, so it runs
+# with the spec's fallback: the answer as it is, the window marked (``ex_dividend``, #347).
 
 # Its review days until the variance ratio is measured (#310): the rule's at five sessions' overlap.
 _REVIEW = overlap_review(UNMEASURED_RATIO, SESSIONS)
@@ -419,6 +418,5 @@ OPEN_TO_CLOSE_5D = DailyKind(
     sessions=SESSIONS,
     answer_from=ANSWER_FROM,
     gives_up=NO_CANDLE,
-    awaiting=AWAITING,
     review_hold=REVIEW_HOLD,
 )

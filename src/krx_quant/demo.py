@@ -28,6 +28,12 @@ The daily kind ``open_to_close`` (#264) has KRX day candles of its own (``krx.pa
 same days, an open a tick off the integrated one's) and, for its last 20 days up to the 8th,
 the three baselines' and Cox's predictions at 08:50 and their answers at 15:45, Cox fitted on
 the days before them. The morning's 08:50 predictions are in too, waiting for their answer.
+The five-session kind ``open_to_close_5d`` (#310) has its three baselines' predictions of the
+windows begun on those 20 days and the answers of those ended by the 8th, each at its end day's
+20:35; the four begun on the 5th to the 8th and the morning's wait for their end. Its algorithm
+``cox-5d`` makes none (its review days are held). The KRX day candles carry KIS's 락 구분 as the
+collector keeps it (``ex_code``): 00 every day but a made-up interim ex-dividend day (05) of
+005930 on 2026-09-29, so the windows begun the four sessions before it are marked ``ex_dividend``.
 
 With a pace (``demo-engine --pace SECONDS``), the morning is replayed at once only up to
 10:00; the API opens there, and the rest goes on a minute every ``pace`` seconds, in steps
@@ -59,9 +65,9 @@ from krx_quant.api import create_app
 from krx_quant.auctions import KEEP_DAYS, MINUTE_BAR, write_auctions
 from krx_quant.backfill import BAR_SCHEMA, PreviousDay, stock_bars_path
 from krx_quant.base_rates import write_base_rates
-from krx_quant.candles import PERIODS, period_start, write_candles, write_krx_days
+from krx_quant.candles import EX_CODE, PERIODS, period_start, write_candles, write_krx_days
 from krx_quant.clock import FakeClock
-from krx_quant.daily import ANSWER_FROM, StoredDays
+from krx_quant.daily import ANSWER_FROM, NO_EX_CODE, StoredDays
 from krx_quant.daily_features import DAILY_FEATURES, LiveFeatures
 from krx_quant.engine import Event, PredictionEngine
 from krx_quant.feeds import (
@@ -96,6 +102,7 @@ from krx_quant.market_calendar import MarketCalendar
 from krx_quant.model_shelf import Shelf
 from krx_quant.nightly import Night
 from krx_quant.open_to_close import OPEN_TO_CLOSE
+from krx_quant.open_to_close_5d import OPEN_TO_CLOSE_5D
 from krx_quant.predictions import DB_NAME, PredictionStore, iso
 from krx_quant.recorder import ParquetRecorder
 from krx_quant.regime import RegimeRules
@@ -275,9 +282,15 @@ def write_demo_candles(data_dir: Path) -> None:
             close = max(tick, open_ + tick * round(open_ * rng.gauss(0, 0.004) / tick))  # the day before's
         oldest_first = list(reversed(rows))
         write_candles(data_dir, "day", symbol, oldest_first)
-        # The KRX market's (#264): an opening auction a tick off NXT's pre-market open, now and then.
+        # The KRX market's (#264): an opening auction a tick off NXT's pre-market open, now and then,
+        # with KIS's 락 구분 of the day (#310): 00, or the demo's made-up ex-dividend days.
         krx = [
-            {**r, "venue": "KRX", "open": max(tick, cast(int, r["open"]) - tick * (i % 3 - 1))}
+            {
+                **r,
+                "venue": "KRX",
+                "open": max(tick, cast(int, r["open"]) - tick * (i % 3 - 1)),
+                EX_CODE: _EX_CODES.get((symbol, cast(date, r["date"])), NO_EX_CODE),
+            }
             for i, r in enumerate(oldest_first)
         ]
         write_krx_days(data_dir, symbol, krx)
@@ -298,6 +311,11 @@ def write_demo_candles(data_dir: Path) -> None:
         for period in PERIODS:
             if period != "day":  # the finished ones, made of the days, as KIS's would be (#112)
                 write_candles(data_dir, period, symbol, _finished_periods(oldest_first, period))
+
+
+# The demo's made-up ex-dividend days (#310), KIS's 락 구분 of the KRX day candle: 005930's interim
+# (05) on a Tuesday the five-session kind's shown windows cross.
+_EX_CODES = {("005930", date(2026, 9, 29)): "05"}
 
 
 # Each demo symbol's made-up listed shares, foreign holdings at the first day and lending and
@@ -461,6 +479,7 @@ async def demo_app(db: Path, pace: float | None = None) -> web.Application:
         )  # no macro read those mornings: no regime
         engine.store.close()
     cox = write_demo_daily(db, data_dir)  # the daily kind's last 20 days (#264)
+    write_demo_windows(db, data_dir)  # the five-session kind's last 20 windows (#310)
     events = demo_events()
     engine = await replay(
         events,
@@ -753,6 +772,66 @@ def write_demo_daily(db: Path, data_dir: Path) -> Model:
         store.add_kind_answers(kind.name, kind.answer_version, answered, scored_at=_at_on(day, ANSWER_FROM))
     store.close()
     return model
+
+
+def write_demo_windows(db: Path, data_dir: Path) -> None:
+    """The five-session kind's (#310) windows begun on the last ``_DAILY_SHOWN`` days before the
+    morning: each start's 08:50 predictions of its baselines (``cox-5d`` makes none: its review
+    days are held, ``review_hold``), and the answers of those ended by the 8th at their end day's
+    20:35 (``DailyKind.answer_from``), as the engine would have stored them. A window's answer and
+    band are read from every stored day at once: each is set from the windows ended before it
+    began, so later days change neither."""
+    from krx_quant.daily import Band, DailyInputs, window_end
+    from krx_quant.kinds import Answer
+    from krx_quant.predictions import NewKindPrediction
+
+    kind = OPEN_TO_CLOSE_5D
+    source = StoredDays(data_dir)
+    store = PredictionStore(db)
+    made: dict[date, list[NewKindPrediction]] = defaultdict(list)
+    answered: dict[date, list[tuple[str, datetime, Answer, bool]]] = defaultdict(list)
+    for symbol in DEMO_SYMBOLS:
+        days = source.days(symbol)
+        answers = kind.answers_of(days, _FEE, _CALENDAR)
+        ends = [window_end(d.day, a) for d, a in zip(days, answers, strict=True)]
+        for i in range(len(days) - _DAILY_SHOWN, len(days)):
+            day, at = days[i].day, kind.predicted_at(days[i].day)
+            ended = [j for j in range(i) if (end := ends[j]) is not None and end < day]
+            path = answers[i].path
+            band = None if path["band"] is None else Band(path["band"], path["sigma"], path["scale"])
+            inputs = DailyInputs(
+                symbol,
+                day,
+                at,
+                tuple((days[j].day, answers[j].label) for j in ended),
+                band,
+                _CALENDAR.previous_trading_day(day),
+                tuple(cast(date, ends[j]) for j in ended),
+            )
+            for b in kind.daily_baselines:
+                forecast = b.predict(inputs)
+                made[day].append(
+                    NewKindPrediction(
+                        symbol,
+                        b.name,
+                        b.version,
+                        at,
+                        at + timedelta(milliseconds=200),
+                        None if forecast is None else kind.output(forecast),
+                        "ok" if forecast is not None else "no_previous",
+                        band=None if band is None else band.value,
+                    )
+                )
+            if (end := ends[i]) is not None:
+                answer = Answer(answers[i].label, answers[i].unscorable, {**path, "vi": 0})
+                answered[end].append((symbol, at, answer, False))
+    for day in sorted(made):
+        store.add_kind_predictions(kind.name, made[day])
+    for end in sorted(answered):
+        store.add_kind_answers(
+            kind.name, kind.answer_version, answered[end], scored_at=_at_on(end, kind.answer_from)
+        )
+    store.close()
 
 
 def _at_on(day: date, t: time) -> datetime:

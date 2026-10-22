@@ -42,8 +42,9 @@ FEE = 0.015 / 100
 LAST = date(2026, 10, 16)
 NIGHT = datetime(2026, 10, 16, 23, 0, tzinfo=KST)
 CALENDAR = MarketCalendar()
-# The kind once the dividend probe lets it run (#338), its review days not fixed yet (held).
-RUNNING = replace(OPEN_TO_CLOSE_5D, awaiting=None)
+# The kind as it runs (the dividend probe's result lifted its gate, #338), its review days not fixed
+# yet (held).
+RUNNING = OPEN_TO_CLOSE_5D
 
 
 def settings(tmp_path: Path, days: int, signal: float = 0.0, seed: int = 310) -> Settings:

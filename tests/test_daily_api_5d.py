@@ -1,12 +1,11 @@
-"""The five-session kind through the Engine API (#310): listed by /v1/kinds as awaiting the
-dividend probe and holding its algorithms' review days; once it runs, its predictions end at their
+"""The five-session kind through the Engine API (#310): listed by /v1/kinds as running (the dividend
+probe's result is in, #338) and holding its algorithms' review days; its predictions end at their
 window's last session's close, its answers come on that day's night, and its leaderboard's extra is
 the five sessions' P&L with Driscoll–Kraay intervals; all within the /v1 schema."""
 
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import replace
 from datetime import date, datetime, time
 from pathlib import Path
 from typing import Any
@@ -23,7 +22,7 @@ from krx_quant.kind_registry import DAILY_KINDS
 from krx_quant.kinds import DIRECTION_KIND
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.open_to_close import OPEN_TO_CLOSE
-from krx_quant.open_to_close_5d import AWAITING, OPEN_TO_CLOSE_5D, REVIEW_HOLD
+from krx_quant.open_to_close_5d import OPEN_TO_CLOSE_5D, REVIEW_HOLD
 from krx_quant.predictions import PredictionStore
 from krx_quant.replay import replay_into
 from tests.api_schema import check
@@ -32,7 +31,6 @@ from tests.daily_doubles import SYMBOLS, made_history
 FEE = 0.015 / 100
 MONDAY, FRIDAY = date(2026, 10, 19), date(2026, 10, 23)
 CALENDAR = MarketCalendar()
-RUNNING = replace(OPEN_TO_CLOSE_5D, awaiting=None)  # once the dividend probe lets it run (#338)
 
 
 def at(day: date, hhmm: str) -> datetime:
@@ -66,9 +64,9 @@ async def get(client: TestClient[Any, Any], path: str, definition: str) -> Any:
     return body
 
 
-async def test_the_kind_is_listed_awaiting_the_dividend_probe_and_holding_its_review_days(
-    tmp_path: Path,
-) -> None:
+async def test_the_kind_is_listed_running_and_holding_its_review_days(tmp_path: Path) -> None:
+    """#310: the dividend probe's result lifted its gate (``daily.awaiting`` null); its algorithms'
+    review days are still held."""
     e, clock = engine(tmp_path)
     await replay_into(e, clock, [], until=at(MONDAY, "08:51"))
     async with TestClient(TestServer(create_app(e))) as client:
@@ -77,19 +75,20 @@ async def test_the_kind_is_listed_awaiting_the_dividend_probe_and_holding_its_re
         assert (daily["sessions"], daily["answer_from"], daily["awaiting"], daily["review_hold"]) == (
             5,
             "20:35",
-            AWAITING,
+            None,
             REVIEW_HOLD,
         )
         assert kinds["open_to_close"]["daily"]["awaiting"] is None
-        latest = await client.get("/v1/symbols/005930/kinds/open_to_close_5d/latest")
-        body = await latest.json()
-        assert latest.status == 200 and body["predictions"] == [], "listed, not predicted"
+        latest = await get(client, "/v1/symbols/005930/kinds/open_to_close_5d/latest", "kind_latest")
+        assert {p["algorithm"] for p in latest["predictions"]} == {
+            "otc5-flat",
+            "otc5-climate",
+            "otc5-persist",
+        }
 
 
-async def test_once_it_runs_its_window_ends_on_its_fifth_session_and_is_answered_that_night(
-    tmp_path: Path,
-) -> None:
-    e, clock = engine(tmp_path, (OPEN_TO_CLOSE, RUNNING))
+async def test_its_window_ends_on_its_fifth_session_and_is_answered_that_night(tmp_path: Path) -> None:
+    e, clock = engine(tmp_path, (OPEN_TO_CLOSE, OPEN_TO_CLOSE_5D))
     await replay_into(e, clock, [], until=at(MONDAY, "08:51"))
     async with TestClient(TestServer(create_app(e))) as client:
         latest = await get(client, "/v1/symbols/005930/kinds/open_to_close_5d/latest", "kind_latest")
