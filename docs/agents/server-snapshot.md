@@ -23,6 +23,7 @@ The output of `krx-quant doctor`, masked (secrets, server addresses), with no ma
 4. The engine's latest WARNING and ERROR log lines (the last 20 since it started). Only the code's message templates: values other than dates, times, booleans and name-shaped words show as `…`, exceptions as their type, other libraries' lines as logger and level. For full lines, ask the user for `docker compose logs --since 2h engine`.
 5. Scheduled jobs: last runs, jobs that never ran to an end, results not posted yet.
 6. Disk free under the data and state directories, and memory.
+7. The nightly training (#355): the last night the morning swap applied, the trading nights not applied since, and the latest nights' outcomes (exit code, last step started), from `state/training_nights.json`.
 
 Full description: `docs/operations.md`, "서버 상태 보기 (#322)".
 

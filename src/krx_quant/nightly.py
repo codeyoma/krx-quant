@@ -51,6 +51,13 @@ The daily kinds' algorithms (#264, ``daily_training``) come last, given the serv
 another machine, does not train them): each refitted on its latest days up to the night and
 always promoted, its report naming the kind and ``cadence`` ``daily``.
 
+Each day is read once, with every algorithm's features and every kind's answers; at once, and
+after each step, it keeps only what the steps still to run read of it (#355, ``_Needs``), and a
+day none of them reads is let go: the night's memory was every day it read, with everything, to
+its end, and ran out on the 2 GB server. Each step logs ``started step <name>`` before its work
+(a night killed from outside ends its output on it) and its time and peak memory by phase after;
+its report keeps them (``resources``, ``footprint``).
+
 Objects:
 
 - ``bars/...``: archived one-minute bars, and ``events/...``: recorded events of the feeds
@@ -69,8 +76,10 @@ import logging
 import math
 import os
 import shutil
+import time
 from collections import Counter
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import date, datetime
 from functools import partial
@@ -97,6 +106,7 @@ from krx_quant.engine import ENGINE_FEEDS, partitions
 from krx_quant.features import Leaders
 from krx_quant.feeds import TRADE
 from krx_quant.feeds.base import KST, kst_day
+from krx_quant.footprint import Meter, StepUsage
 from krx_quant.kind_registry import KINDS, daily_kind_named, kind_named
 from krx_quant.kinds import NO_ANSWER, Kind, KindForecast, TableBaseline, table_baselines
 from krx_quant.macro import regime_prefix
@@ -111,6 +121,9 @@ log = logging.getLogger(__name__)
 VALIDATION_DAYS = 3
 _S = TypeVar("_S", Sample, KindSample)  # a direction's sample or a kind's (#179)
 LIVE = "live.json"
+# The line each step's run starts with (#355): a night killed from outside (the OOM killer) ends
+# its output on the step it was in, which the server's alert names (``swap``).
+STARTED_STEP = "started step"
 
 
 def model_key(name: str, version: str) -> str:
@@ -221,6 +234,17 @@ class Night:
                 line += _dropped_text(dropped[kind])
             lines.append(line)
         lines += daily
+        # The steps' peak memory and time (#355): reports before it have none.
+        used = [r["resources"] for r in self.reports if isinstance(r.get("resources"), dict)]
+        peaks = [
+            (u["peak_rss_mb"], r["algorithm"])
+            for r in self.reports
+            if (u := r.get("resources")) and u.get("peak_rss_mb") is not None
+        ]
+        if peaks:
+            peak, where = max(peaks)
+            minutes = sum(u.get("seconds") or 0.0 for u in used) / 60
+            lines.append(f"최대 메모리 {peak:,.0f} MB ({where} 단계) · 단계들 {minutes:.0f}분")
         for r in self.reports:
             if r["promoted"] and r.get("forced"):
                 verdict = "승격(정답 바뀜, 성적 비교 없이)"
@@ -232,6 +256,37 @@ class Night:
                 verdict = "유지"
             lines.append(f"- {r['algorithm']} {verdict}: {r['reason']}")
         return "\n".join(lines)
+
+
+@dataclass(frozen=True)
+class _Needs:
+    """What a step reads of the training days (#355): which days, their samples with which
+    features, and which kinds' answers. The day cache keeps of each day only what the steps
+    still to run need, and lets a day go after the last one."""
+
+    days: tuple[date, ...] = ()
+    features: tuple[str, ...] = ()
+    kinds: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class _Step:
+    name: str
+    version: int  # the target its report must be of
+    of_kind: bool  # a kind's step: its report names the kind's answer version itself
+    run: Callable[[], dict[str, Any]]
+    needs: _Needs
+
+
+def _checkpoint(store: ObjectStore, night: date, step: _Step) -> dict[str, Any] | None:
+    """The step's report of the night if it stands; None if the step must run. A checkpoint an
+    older version wrote lacks the evidence (#89), and one of another target (#169; none written:
+    the four-minute move, 1) labelled other outcomes: trained again. A kind's is of its answer
+    version (#179)."""
+    report: dict[str, Any] | None = get_json(store, report_key(night, step.name))
+    if report is None or "commit" not in report or report.get("target_version", 1) != step.version:
+        return None
+    return report
 
 
 def train_night(
@@ -303,44 +358,78 @@ def train_night(
         [k for k, _ in tables],
     )
     live: dict[str, str] = get_json(store, LIVE) or {}
-    reports = []
-    # (name, the target its report must be of, whether a kind's, the step)
-    steps: list[tuple[str, int, bool, Callable[[], dict[str, Any]]]] = [
-        (a.name, target_version, False, partial(trainer.train, a, live.get(a.name))) for a in algorithms
+    steps: list[_Step] = [
+        _Step(a.name, target_version, False, partial(trainer.train, a, live.get(a.name)), trainer.needs(a))
+        for a in algorithms
     ]
     if target_version >= 2:
-        steps.append((CLIMATE, target_version, False, trainer.climate))
+        steps.append(_Step(CLIMATE, target_version, False, trainer.climate, trainer.climate_needs()))
     for kind, table in tables:
-        steps.append((table.name, kind.answer_version, True, partial(trainer.table, kind, table)))
+        steps.append(
+            _Step(
+                table.name,
+                kind.answer_version,
+                True,
+                partial(trainer.table, kind, table),
+                trainer.table_needs(kind, table),
+            )
+        )
     for a, kind in of_kinds:
         steps.append(
-            (a.name, kind.answer_version, True, partial(trainer.train_kind, a, kind, live.get(a.name)))
+            _Step(
+                a.name,
+                kind.answer_version,
+                True,
+                partial(trainer.train_kind, a, kind, live.get(a.name)),
+                trainer.needs(a, kind),
+            )
         )
     if daily is not None:  # the daily kinds' algorithms, on this server's files (#264)
         for d in daily_algorithms:
             # Not one of a kind awaiting a probe's result (#310, ``DailyKind.awaiting``).
             if (daily_kind := daily_kind_named(d.kind)) is not None and daily_kind.runs:
                 steps.append(
-                    (
+                    _Step(
                         d.name,
                         daily_kind.answer_version,
                         True,
                         partial(trainer.train_daily, daily, d, daily_kind),
+                        _Needs(),
                     )
                 )
-    for name, version, of_kind, step in steps:
-        report = get_json(store, report_key(night, name))
-        # A checkpoint an older version wrote lacks the evidence (#89), and one of another
-        # target (#169; none written: the four-minute move, 1) labelled other outcomes:
-        # trained again. A kind's is of its answer version (#179).
-        if report is None or "commit" not in report or report.get("target_version", 1) != version:
-            report = {**step(), "commit": commit}
-            if target_version >= 2 and not of_kind:
+    # The checkpoints first: what the steps still to run read of the days decides what the day
+    # cache keeps after each one (#355).
+    checkpoints = [_checkpoint(store, night, step) for step in steps]
+    trainer.plan([step.needs for step, found in zip(steps, checkpoints, strict=True) if found is None])
+    log.info(
+        "the night of %s: %d steps to run, %d trained earlier",
+        night,
+        sum(found is None for found in checkpoints),
+        sum(found is not None for found in checkpoints),
+    )
+    meter = Meter()
+    reports = []
+    for step, report in zip(steps, checkpoints, strict=True):
+        if report is None:
+            log.info("started step %s", step.name)  # STARTED_STEP
+            with trainer.running(meter) as usage:
+                report = {**step.run(), "commit": commit}
+            if target_version >= 2 and not step.of_kind:
                 report["target_version"] = target_version
-            put_json(store, report_key(night, name), report)
-            log.info("%s: %s", name, report["reason"])
+            report["resources"] = usage.as_dict(trainer.days_cached)
+            put_json(store, report_key(night, step.name), report)
+            log.info("%s: %s", step.name, report["reason"])
+            log.info(
+                "%s: %.1f s, peak %s MB (since the %s), %d days read, %d days cached",
+                step.name,
+                report["resources"]["seconds"],
+                report["resources"]["peak_rss_mb"],
+                report["resources"]["peak_since"],
+                report["resources"]["days_read"],
+                report["resources"]["days_cached"],
+            )
         else:
-            log.info("%s: trained earlier tonight; skipped", name)
+            log.info("%s: trained earlier tonight; skipped", step.name)
         reports.append(report)
     result = Night(
         night,
@@ -415,12 +504,79 @@ class _Trainer:
         self._calendar = MarketCalendar(
             {**(calendar.known() if calendar else {}), **dict.fromkeys(days, True)}
         )
-        # Each day is read once, with every algorithm's features.
+        # Each day is read once, with every algorithm's features; then only what the steps still
+        # to run read of it is kept (#355, ``plan``).
         everyone: list[Algorithm | KindAlgorithm] = [*algorithms, *(a for a, _ in of_kinds)]
         self._names = sorted({f for a in everyone for f in a.features})
         self._loaded: dict[date, TrainingDay | None] = {}
+        self._held: dict[date, tuple[frozenset[str], frozenset[str]]] = {}  # features, kinds kept
+        self._plan: list[_Needs] | None = None  # the steps to run, in order (none: keep every day)
+        self._at = 0  # the step running, in the plan
+        self._usage: StepUsage | None = None  # the step running's figures
         self._used: set[date] = set()
         self._checked: set[str] = set()  # keys fetched (or found missing) this night
+
+    def windows(self, training_days: int) -> tuple[list[date], list[date]]:
+        """An algorithm's training days and the validation days after them (walk-forward)."""
+        return self._days[:-VALIDATION_DAYS][-training_days:], self._days[-VALIDATION_DAYS:]
+
+    def needs(self, algorithm: Algorithm | KindAlgorithm, kind: Kind | None = None) -> _Needs:
+        """What an algorithm's step reads (``_train``): nothing with too few days."""
+        training, validation = self.windows(algorithm.training_days)
+        if not training:
+            return _Needs()
+        return _Needs((*training, *validation), algorithm.features, () if kind is None else (kind.name,))
+
+    def climate_needs(self) -> _Needs:
+        return _Needs(tuple(self._days[-CLIMATE_DAYS:]))
+
+    def table_needs(self, kind: Kind, baseline: TableBaseline) -> _Needs:
+        return _Needs(tuple(self._days[-baseline.days :]), (), (kind.name,))
+
+    def plan(self, steps: Sequence[_Needs]) -> None:
+        """The steps the night runs, in order: what each reads of the days."""
+        self._plan, self._at = list(steps), 0
+
+    @property
+    def days_cached(self) -> int:
+        return sum(found is not None for found in self._loaded.values())
+
+    @contextmanager
+    def running(self, meter: Meter) -> Iterator[StepUsage]:
+        """The plan's next step, timed (``footprint``); after it, the days no later step reads
+        are let go and the others keep only what those read."""
+        self._usage = usage = StepUsage(meter)
+        try:
+            yield usage
+        finally:
+            self._usage = None
+            self._at += 1
+            for day in list(self._loaded):
+                self._keep(day)
+
+    def _phase(self, name: str) -> Any:
+        return nullcontext() if self._usage is None else self._usage.phase(name)
+
+    def _keep(self, day: date) -> None:
+        """Keep of ``day`` only what the steps from the one running read; let it go if none does."""
+        found = self._loaded.get(day)
+        if found is None or self._plan is None:
+            return
+        wanted = [n for n in self._plan[self._at :] if day in n.days]
+        if not wanted:
+            del self._loaded[day]  # read again (from the cache folder) if anything asked
+            self._held.pop(day, None)
+            return
+        if len({n.features for n in wanted}) == 1:
+            features = wanted[0].features  # one algorithm's, in its order: its samples share them
+        else:
+            features = tuple(sorted({f for n in wanted for f in n.features}))
+        kinds = frozenset(k for n in wanted for k in n.kinds)
+        held = self._held.get(day)
+        if held is not None and held == (frozenset(features), kinds):
+            return
+        self._loaded[day] = found.keeping(features, kinds)
+        self._held[day] = (frozenset(features), kinds)
 
     def train(self, algorithm: Algorithm, live_version: str | None) -> dict[str, Any]:
         """An algorithm's night: its challenger against its champion."""
@@ -476,8 +632,9 @@ class _Trainer:
         by ``losses`` on the validation days; the report's ``heading`` after its name, and its
         ``labels`` (the target and the labelled samples by source)."""
         night = self._days[-1]
-        validation: list[date] = self._days[-VALIDATION_DAYS:]
-        training: list[date] = self._days[:-VALIDATION_DAYS][-algorithm.training_days :]
+        training: list[date]
+        validation: list[date]
+        training, validation = self.windows(algorithm.training_days)
         report: dict[str, Any] = {
             "algorithm": algorithm.name,
             **heading,
@@ -490,20 +647,26 @@ class _Trainer:
         }
         if not training:
             return {**report, "reason": f"too few days ({len(self._days)})"}
-        loaded = {day: self._day(day) for day in [*training, *validation]}
+        with self._phase("days"):
+            loaded = {day: self._day(day) for day in [*training, *validation]}
         report["reference_prices"] = {
             day.isoformat(): found.reference for day, found in loaded.items() if found is not None
         }
         report |= labels(loaded)
         try:
-            challenger = fit(samples(training))
+            with self._phase("samples"):
+                learned = samples(training)
+            with self._phase("fit"):
+                challenger = fit(learned)
         except ValueError as e:
             return {**report, "reason": f"not trained: {e}"}
+        del learned  # the samples with the algorithm's features, let go before validating
         self._put_model(algorithm.name, challenger)
         champion = self._champion(algorithm, live_version)
         # The bar closes it predicts: without the data it reads (the book), it declines,
         # whatever the model.
-        challenger_losses = losses(challenger, samples(validation))
+        with self._phase("validation"):
+            challenger_losses = losses(challenger, samples(validation))
         scored = [s for s, _ in challenger_losses]
         report["samples"] = {"validation": len(scored)}
         # A champion of another target (#170) is replaced whatever the scores say.
@@ -527,7 +690,8 @@ class _Trainer:
                     "reason": "no outcomes to validate on" + changed,
                 }
             return {**report, "reason": "no outcomes to validate on"}
-        champion_losses = losses(champion, scored)
+        with self._phase("validation"):
+            champion_losses = losses(champion, scored)
         champion_loss = _mean([loss for _, loss in champion_losses])
         challenger_loss = _mean([loss for _, loss in challenger_losses])
         better = challenger_loss < champion_loss
@@ -559,8 +723,9 @@ class _Trainer:
         """The climate baseline's table refitted on the latest ``CLIMATE_DAYS`` days (the night's
         included: it predicts the next day), stored and always promoted (#169)."""
         night = self._days[-1]
-        days = self._days[-CLIMATE_DAYS:]
-        loaded = {day: self._day(day) for day in days}
+        days = list(self.climate_needs().days)
+        with self._phase("days"):
+            loaded = {day: self._day(day) for day in days}
         report: dict[str, Any] = {
             "algorithm": CLIMATE,
             "day": night.isoformat(),
@@ -591,8 +756,9 @@ class _Trainer:
         """A kind baseline's table refitted on the kind's answers of its latest ``days`` days
         (the night's included: it predicts the next day), stored and always promoted (#180)."""
         night = self._days[-1]
-        days = self._days[-baseline.days :]
-        loaded = {day: self._day(day) for day in days}
+        days = list(self.table_needs(kind, baseline).days)
+        with self._phase("days"):
+            loaded = {day: self._day(day) for day in days}
         report: dict[str, Any] = {
             "algorithm": baseline.name,
             "kind": kind.name,
@@ -634,9 +800,11 @@ class _Trainer:
         ]
 
     def _day(self, day: date) -> TrainingDay | None:
-        """A day's samples with every algorithm's features, read once from the cache."""
+        """A day's samples, read once from the cache with every algorithm's features, of which
+        only what the steps from the one running read is kept (#355)."""
         if day not in self._loaded:
             self._fetch(day)
+            started = time.monotonic()
             self._loaded[day] = training_day(
                 self._cache,
                 day,
@@ -648,6 +816,19 @@ class _Trainer:
                 target_version=self._target_version,
                 kinds=self._kinds,
             )
+            found = self._loaded[day]
+            self._keep(day)
+            if self._usage is not None:
+                self._usage.days_read += 1
+            log.info(
+                "read %s: %s, %d samples in %.1f s",
+                day,
+                "no data" if found is None else found.reference,
+                0 if found is None else len(found.samples),
+                time.monotonic() - started,
+            )
+            self._used.add(day)
+            return self._loaded.get(day, found)  # read by a step the plan left out: this once
         self._used.add(day)
         return self._loaded[day]
 

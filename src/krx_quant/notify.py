@@ -34,11 +34,18 @@ class Alerts:
         self._active: set[str] = set()
         self._sending: set[asyncio.Task[None]] = set()
 
-    def raise_(self, key: str, text: str) -> None:
-        if key in self._active:
+    def raise_(self, key: str, text: str, *, again: bool = False) -> None:
+        """Send ``text`` once until ``resolve``; ``again`` sends it while it is on too (a problem
+        going on for days, alerted each day, #355)."""
+        if key in self._active and not again:
             return
         self._active.add(key)
         self._send(f"[장애] {text}")
+
+    def mark(self, key: str) -> None:
+        """A problem known to be on from before a restart (#355): nothing sent now, and
+        ``resolve`` sends its end."""
+        self._active.add(key)
 
     def resolve(self, key: str, text: str) -> None:
         if key not in self._active:
