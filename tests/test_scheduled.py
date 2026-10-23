@@ -44,6 +44,7 @@ from krx_quant.scheduled import (
     INTERRUPTED,
     JOBS,
     KRX_ETF_PROBE,
+    KRX_NET_ASSETS_CHECK,
     NAV_PROBE,
     NET_BUYS_PROBE,
     NIGHT_PROBE,
@@ -1294,6 +1295,28 @@ def test_the_closing_flow_check_runs_once_on_the_first_trading_night_and_posts_t
     ran = JobRecord(FRIDAY, OK, at(FRIDAY, "22:30"), COMMIT, 0, 5.0)
     assert not CLOSING_FLOW_CHECK.due(night(MONDAY, ran))
     assert "시세 값이 없다" in CLOSING_FLOW_CHECK.targets[0].note
+
+
+def test_the_krx_net_assets_check_runs_once_on_the_first_trading_night_with_the_key() -> None:
+    # #305: which day's listed units KRX's net asset total matches, when the mornings' rows came,
+    # and KRX against KIS: the start's backfill and a morning's fetch first.
+    assert KRX_NET_ASSETS_CHECK.name == "check-krx-net-assets-305"
+    assert KRX_NET_ASSETS_CHECK.command == ("check-krx-net-assets",)
+    assert KRX_NET_ASSETS_CHECK.timeout == timedelta(minutes=15)
+    assert [t.issue for t in KRX_NET_ASSETS_CHECK.targets] == [305]
+    assert JOBS.index(CLOSING_FLOW_CHECK) < JOBS.index(KRX_NET_ASSETS_CHECK)
+    first = next(i for i, j in enumerate(JOBS) if j.name.startswith(("prevalidate-", "simulate-")))
+    assert JOBS.index(KRX_NET_ASSETS_CHECK) < first, "before the simulations and pre-validations"
+    keyed = Facts(krx_openapi=True)
+
+    def with_key(day: date, record: JobRecord | None = None) -> Night:
+        return Night(day, CALENDAR.is_trading_day(day), COMMIT, record, {}, keyed)
+
+    assert KRX_NET_ASSETS_CHECK.due(with_key(FRIDAY)) and not KRX_NET_ASSETS_CHECK.due(with_key(SATURDAY))
+    assert not KRX_NET_ASSETS_CHECK.due(night(FRIDAY)), "without the key it waits"
+    ran = JobRecord(FRIDAY, OK, at(FRIDAY, "22:30"), COMMIT, 0, 5.0)
+    assert not KRX_NET_ASSETS_CHECK.due(with_key(MONDAY, ran))
+    assert "값이 없다" in KRX_NET_ASSETS_CHECK.targets[0].note
 
 
 def test_the_dividend_probe_runs_once_on_the_first_night_and_posts_to_310() -> None:

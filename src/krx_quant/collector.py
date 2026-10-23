@@ -61,6 +61,7 @@ from krx_quant.feeds import (
 from krx_quant.feeds.base import kst_day
 from krx_quant.health import FeedHealth, FeedState
 from krx_quant.kind_registry import KINDS
+from krx_quant.krx_net_assets import KrxClient, KrxNetAssetKeeper, keep_krx_net_assets
 from krx_quant.lifecycle import Rules
 from krx_quant.macro import MacroCollector, day_regime, keep_macro, macro_recorder
 from krx_quant.market_calendar import MarketCalendar, Phase, calendar_store, next_on_trading_day
@@ -331,6 +332,21 @@ async def run_collector(
             stream = _Stream(
                 session, settings, plan[:cap], recorder, now, stop, poller, health, alerts, on_event
             )
+            # The closing flow's days (#305): after the history task's runs and after KRX's net
+            # assets come in, one computation at a time (they write the same file).
+            days_lock = asyncio.Lock()
+
+            async def closing_days(at: datetime) -> None:
+                async with days_lock:
+                    await keep_days(
+                        settings.data_dir,
+                        settings.state_dir,
+                        calendar.calendar,
+                        settings.symbols,
+                        engine.store.special_windows,
+                        at,
+                    )
+
             background = [
                 asyncio.create_task(_every(_TICK_SECONDS, recorder.flush_due, "periodic flush")),
                 asyncio.create_task(
@@ -345,15 +361,7 @@ async def run_collector(
                         calendar,
                         now,
                         toss_client_maker(session, settings, lambda: datetime.now().astimezone()),
-                        # The closing flow's days (#305), from the bars just filled.
-                        partial(
-                            keep_days,
-                            settings.data_dir,
-                            settings.state_dir,
-                            calendar.calendar,
-                            settings.symbols,
-                            engine.store.special_windows,
-                        ),
+                        closing_days,  # from the bars just filled and the auctions just kept
                     )
                 ),
                 asyncio.create_task(run_live(engine, session_clock)),
@@ -365,6 +373,20 @@ async def run_collector(
                 pace = RateLimiter(1, 1 / settings.backfill_max_per_second, margin=0)  # as the history task's
                 keeper = NetAssetKeeper(client, calendar.calendar, settings.state_dir, products, pace)
                 background.append(asyncio.create_task(keep_net_assets(keeper, now)))
+                # And from the KRX Open API, read first: the past days, and the previous trading
+                # day's from 08:05 (``krx_net_assets``).
+                if settings.krx_openapi_key:
+                    krx = KrxNetAssetKeeper(
+                        KrxClient(session, settings.krx_openapi_url, settings.krx_openapi_key),
+                        calendar.calendar,
+                        settings.state_dir,
+                        products,
+                        now,
+                        after=closing_days,
+                    )
+                    background.append(asyncio.create_task(keep_krx_net_assets(krx, now)))
+                else:
+                    log.info("KRX_OPENAPI_KEY is not set: the ETF net assets come from KIS alone")
                 # Their 15:20 demand, from the engine's reference price then (#305).
                 store_at = partial(
                     store_closing_demand,

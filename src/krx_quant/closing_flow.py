@@ -23,16 +23,23 @@ ratio (``ratio_total``) is given too. A product without its A is left out of the
 (``missing``).
 
 **Denominator.** The median closing auction value of the 20 trading days before the day
-(``DENOMINATOR_DAYS``), of the days with one; None, with ``NO_RECORDED_AUCTION`` as the reason,
-when none of them has one. A day's value is its closing auction's trades in the recording: the KRX
-trades (``H0STCNT0``) from the closing auction's start to a minute after the close, price ×
-quantity (``recorded``). A day without that print in the recording (every day before it began on
-2026-10-12, and a day the connection was cut around 15:30, #344) has no value. The issue's
-fallback, the auction's one-minute bar (volume × close), is not used yet: the backfill's bars are
-the integrated ones, whose 15:30 bar may hold NXT's after-market trades of that minute, and the
-KRX (``J``) bar's volume was never measured (#317 and #342 measured its close only). The
-scheduled job ``check-closing-flow-305`` compares both bars with the recorded prints first
-(``closing_flow_check``, CODING_STANDARDS.md "External data is probed before it is used").
+(``DENOMINATOR_DAYS``), of the days with one, with how many came from each source
+(``denominator_sources``); None, with ``NO_AUCTION_VALUE`` as the reason, when none of them has
+one. A day's value (``auction_value``), the first of:
+
+- ``recorded``: its closing auction's trades in the recording, the KRX trades (``H0STCNT0``) from
+  the closing auction's start to a minute after the close, price × quantity (from 2026-10-12, but a
+  day the connection was cut around 15:30, #344);
+- ``krx_bar``: KRX's (``J``) closing auction bar kept by ``auctions`` (the 15:30 bar's volume ×
+  close, as traded);
+- ``integrated_bar``: the backfill's integrated (``UN``) closing auction bar (the same, its last
+  bar from 15:20 to 15:30), where KRX's is not kept.
+
+The bars were measured first (``check-closing-flow-305``, 2026-10-23, CODING_STANDARDS.md
+"External data is probed before it is used"): on all 9 recorded days (2026-10-12 to 10-23) of the
+three symbols both bars' volume × close equalled the recorded value (ratio 1.000) and their closes
+the recorded print. The KRX bar comes first as the auction is KRX's (``open_to_close`` reads that
+bar's close too, #317).
 
 **The days.** Each day of the backfill's bars that follows a day with them (no day missing
 between), as #270's ``structure-check`` section 2 reads them, with the same functions
@@ -40,12 +47,19 @@ between), as #270's ``structure-check`` section 2 reads them, with the same func
 auction's move (close ÷ the last price before it − 1), the day's flow to 15:20 (that price ÷ the
 day before's close − 1), the next day's gap and close-to-close. A day's demand is its stored 15:20
 one (``live``); a day without one but with its A is computed from the bars (``bars``: r is the
-day's flow). The auction went the demand's way when the two signs agree; a day without a demand
-(no A, or a symbol without products such as 009150) compares the day's flow, as #270 does. The
-special situations kept that day (``engine`` ``special_windows``: the symbol's VIs, the market's
-circuit breakers and sidecars) are named, and the summary is given with them and without.
-Computed once a day after the 20:30 backfill and at the collector's start (``keep_days``),
-kept in ``state/closing_flow/days.json``; the answer's summary is over the days asked.
+day's flow). With KRX's net assets from the listing (``krx_net_assets``), every day from the day
+after it (2026-05-28) has its A. ``net_assets_source`` says whose net assets the day's demand read
+(``net_assets.source_of``: ``krx``, ``kis``, ``krx+kis``): the screen shows "한국거래소 통계정보" for
+any but KIS's. A 15:20 row stored before the KRX source (#305) has none of its own: it read KIS's,
+then the only source (``BEFORE_KRX``).
+
+The auction went the demand's way when the two signs agree; a day without a demand (no A, or a
+symbol without products such as 009150) compares the day's flow, as #270 does. The special
+situations kept that day (``engine`` ``special_windows``: the symbol's VIs, the market's circuit
+breakers and sidecars) are named, and the summary is given with them and without. Computed after
+the history task's runs (at the collector's start and 20:30, after the auctions it keeps) and
+after KRX's net assets come in (``keep_days``, one at a time), kept in
+``state/closing_flow/days.json``; the answer's summary is over the days asked.
 """
 
 from __future__ import annotations
@@ -65,14 +79,16 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
+from krx_quant.auctions import MINUTE_BAR as KRX_MINUTE_BAR
+from krx_quant.auctions import read_auctions
 from krx_quant.backfill import MINUTE_BARS_TR, read_bars
 from krx_quant.daily import DayPrices as KrxDay
 from krx_quant.daily import StoredDays
 from krx_quant.feeds import KRX_TRADE
 from krx_quant.feeds.base import EVENT_TIME, KST, Row
 from krx_quant.macro import read_partition
-from krx_quant.market_calendar import MarketCalendar
-from krx_quant.net_assets import net_assets_for, read_net_assets
+from krx_quant.market_calendar import MarketCalendar, Session
+from krx_quant.net_assets import KIS, net_assets_for, read_net_assets, source_of
 from krx_quant.predictions import iso
 from krx_quant.products import Product, Structure, products_of
 from krx_quant.structure_check import (
@@ -89,10 +105,15 @@ from krx_quant.structure_check import (
 log = logging.getLogger(__name__)
 
 DENOMINATOR_DAYS = 20
-RECORDED = "recorded"  # where a day's closing auction value came from: the recorded KRX trades
-# Why a denominator is None: no day of the 20 before has a recorded closing auction value (the
-# bars' fallback waits for its probe, module doc); the days not computed yet (the answer's).
-NO_RECORDED_AUCTION, NOT_COMPUTED = "no_recorded_auction", "not_computed"
+# Where a day's closing auction value came from, in the order tried (module doc "Denominator"): the
+# recorded KRX trades, KRX's closing auction bar, the integrated one.
+RECORDED, KRX_BAR, INTEGRATED_BAR = "recorded", "krx_bar", "integrated_bar"
+VALUE_SOURCES = (RECORDED, KRX_BAR, INTEGRATED_BAR)
+# Why a denominator is None: no day of the 20 before has a closing auction value; the days not
+# computed yet (the answer's).
+NO_AUCTION_VALUE, NOT_COMPUTED = "no_auction_value", "not_computed"
+# The source of a 15:20 row's net assets stored before it kept one: KIS's, the only one then.
+BEFORE_KRX = KIS
 LIVE, BARS = "live", "bars"  # where a day's demand came from: the 15:20 store, the bars
 STORED = "stored"  # the answer's 15:20 demand read back
 # The 15:20 demand is stored this long after the closing auction's start: the quotes received
@@ -100,6 +121,9 @@ STORED = "stored"  # the answer's 15:20 demand read back
 STORE_AFTER = timedelta(seconds=5)
 AFTER_CLOSE = timedelta(minutes=1)  # the recorded print's window ends here (``auctions.recorded_prints``)
 DEMAND_FILE, DAYS_FILE = "demand.parquet", "days.json"
+# The days file's layout: one written before (#305's KRX net assets and the bars' denominator, 2)
+# is not read, as its rows lack fields; the next computation replaces it.
+DAYS_VERSION = 2
 
 DEMAND_SCHEMA = pa.schema(
     [
@@ -114,6 +138,7 @@ DEMAND_SCHEMA = pa.schema(
         ("futures", pa.int64()),
         ("products", pa.int64()),  # the products counted (with their A)
         ("missing", pa.int64()),  # the products without their A
+        ("net_assets_source", pa.string()),  # whose A (``source_of``); null on rows stored before it
     ]
 )
 
@@ -167,17 +192,37 @@ def _ratio(value: int | None, denominator: float | None) -> float | None:
     return None if value is None or not denominator else value / denominator
 
 
+AuctionValue = tuple[float, str]  # a day's closing auction value and its source
+
+
 def denominator(
-    values: Mapping[date, float], calendar: MarketCalendar, day: date
-) -> tuple[float | None, int]:
+    values: Mapping[date, AuctionValue], calendar: MarketCalendar, day: date
+) -> tuple[float | None, int, dict[str, int]]:
     """The median closing auction value of the ``DENOMINATOR_DAYS`` trading days before ``day``,
-    of those with one, and how many had one."""
-    found, before = [], day
+    of those with one, how many had one, and how many of them came from each source."""
+    found, sources, before = [], dict.fromkeys(VALUE_SOURCES, 0), day
     for _ in range(DENOMINATOR_DAYS):
         before = calendar.previous_trading_day(before)
-        if (value := values.get(before)) is not None:
-            found.append(value)
-    return (statistics.median(found) if found else None), len(found)
+        if (kept := values.get(before)) is not None:
+            found.append(kept[0])
+            sources[kept[1]] = sources.get(kept[1], 0) + 1
+    return (statistics.median(found) if found else None), len(found), sources
+
+
+def auction_value(
+    data_dir: Path, symbol: str, session: Session, prices: DayPrices, krx: Row | None
+) -> tuple[float | None, str | None]:
+    """The day's closing auction value and its source (module doc "Denominator"): the recorded
+    trades', else KRX's kept closing bar's (``krx``, the day's ``auctions`` row), else the
+    integrated bar's; None without any."""
+    recorded = recorded_auction_value(data_dir, session.day, symbol, session.closing_auction, session.close)
+    if recorded is not None:
+        return recorded, RECORDED
+    if krx is not None and krx["source"] == KRX_MINUTE_BAR and krx.get("close_volume") and krx.get("close"):
+        return float(krx["close_volume"] * krx["close"]), KRX_BAR
+    if prices.auction_volume and prices.close:
+        return float(prices.auction_volume * prices.close), INTEGRATED_BAR
+    return None, None
 
 
 def recorded_auction_value(
@@ -262,6 +307,7 @@ def demand_row(
         "futures": found.futures,
         "products": len(products) - len(found.missing),
         "missing": len(found.missing),
+        "net_assets_source": source_of(found.products),
     }
 
 
@@ -343,7 +389,7 @@ class DayInput:
 
     prices: DayPrices  # #270's, of the day's bars
     auction_value: float | None
-    auction_value_source: str | None  # ``RECORDED``; None without a value
+    auction_value_source: str | None  # one of ``VALUE_SOURCES``; None without a value
     special: tuple[str, ...] = ()  # the kinds of the special windows begun that day
 
 
@@ -353,6 +399,7 @@ def gather(
     """Each day of the symbol's bars with #270's prices, its closing auction value and its special
     windows, oldest first."""
     found = []
+    krx = read_auctions(data_dir, symbol)
     for day in bar_days(data_dir, [symbol], calendar):
         session = calendar.session(day)
         bars = read_bars(data_dir, day, MINUTE_BARS_TR, symbol)
@@ -361,8 +408,7 @@ def gather(
         prices = day_prices(bars, session)
         if prices is None:
             continue
-        value = recorded_auction_value(data_dir, day, symbol, session.closing_auction, session.close)
-        source = None if value is None else RECORDED
+        value, source = auction_value(data_dir, symbol, session, prices, krx.get(day))
         found.append(DayInput(prices, value, source, tuple(sorted(set(special.get(day, ()))))))
     return found
 
@@ -385,21 +431,27 @@ def day_rows(
     """The days of the table (module doc), oldest first."""
     products = products_of(symbol)
     by_day = {i.prices.day: i for i in inputs}
-    values = {d: i.auction_value for d, i in by_day.items() if i.auction_value is not None}
+    values = {
+        d: (i.auction_value, i.auction_value_source)
+        for d, i in by_day.items()
+        if i.auction_value is not None and i.auction_value_source is not None
+    }
     stored = {r["date"]: r for r in demands if r["symbol"] == symbol}
     rows = []
     for a in auction_days([i.prices for i in inputs], calendar):
         given = by_day[a.day]
-        base, base_days = denominator(values, calendar, a.day)
+        base, base_days, base_sources = denominator(values, calendar, a.day)
         kept = stored.get(a.day)
         demand = spot = futures = None
-        source = None
+        source = assets_source = None
         if kept is not None and kept["demand"] is not None:
             demand, spot, futures, source = kept["demand"], kept["spot_futures"], kept["futures"], LIVE
+            assets_source = kept.get("net_assets_source") or BEFORE_KRX
         elif products:
             found = demand_of(products, net_assets_for(net_assets, calendar, a.day), a.flow)
             if found.total is not None:
                 demand, spot, futures, source = found.total, found.spot_futures, found.futures, BARS
+                assets_source = source_of(found.products)
         lead = demand if demand is not None else a.flow
         rows.append(
             {
@@ -409,11 +461,13 @@ def day_rows(
                 "spot_futures": spot,
                 "futures": futures,
                 "demand_source": source,
+                "net_assets_source": assets_source,
                 "ratio": _ratio(spot, base),
                 "ratio_total": _ratio(demand, base),
                 "denominator": base,
                 "denominator_days": base_days,
-                "denominator_reason": None if base is not None else NO_RECORDED_AUCTION,
+                "denominator_sources": base_sources,
+                "denominator_reason": None if base is not None else NO_AUCTION_VALUE,
                 "auction_value": given.auction_value,
                 "auction_value_source": given.auction_value_source,
                 "auction_bp": _bp(a.move),
@@ -442,12 +496,13 @@ def write_days(state_dir: Path, body: Mapping[str, Any]) -> None:
 
 
 def read_days(state_dir: Path) -> dict[str, Any] | None:
+    """The days kept; None without them, or kept in an older layout (``DAYS_VERSION``)."""
     path = days_path(state_dir)
     try:
         body: dict[str, Any] = json.loads(path.read_text())
     except FileNotFoundError:
         return None
-    return body
+    return body if body.get("version") == DAYS_VERSION else None
 
 
 def compute_days(
@@ -460,7 +515,7 @@ def compute_days(
 ) -> dict[str, Any]:
     """Every symbol's days and closing auction values, as kept in the days file."""
     net_assets, demands = read_net_assets(state_dir), read_demand(state_dir)
-    body: dict[str, Any] = {"computed_at": iso(now), "symbols": {}}
+    body: dict[str, Any] = {"version": DAYS_VERSION, "computed_at": iso(now), "symbols": {}}
     for symbol in symbols:
         inputs = gather(data_dir, calendar, symbol, special.get(symbol, {}))
         body["symbols"][symbol] = {
@@ -631,13 +686,13 @@ def today_answer(
         price, source = live_price, LIVE
     r = None if price is None or not close else price / close - 1
     found = demand_of(products, held, r)
-    values: dict[date, float] = {}
+    values: dict[date, AuctionValue] = {}
     if kept is not None:
         values = {
-            date.fromisoformat(d): v["value"]
+            date.fromisoformat(d): (v["value"], v["source"])
             for d, v in kept["symbols"].get(symbol, {}).get("auction_values", {}).items()
         }
-    base, base_days = denominator(values, calendar, day)
+    base, base_days, base_sources = denominator(values, calendar, day)
     reason = None
     if not products:
         reason = "no_products"
@@ -665,11 +720,12 @@ def today_answer(
         "ratio_total": _ratio(found.total, base),
         "denominator": base,
         "denominator_days": base_days,
+        "denominator_sources": base_sources,
         "denominator_reason": None
         if base is not None
         else NOT_COMPUTED
         if kept is None
-        else NO_RECORDED_AUCTION,
+        else NO_AUCTION_VALUE,
         "products": [{**row, "name": names.get(row["code"])} for row in found.products],
         "missing": found.missing,
         "reason": reason,

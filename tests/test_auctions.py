@@ -13,6 +13,7 @@ import pytest
 from krx_quant.auctions import (
     AFTER_MARKET_OPENED,
     DAY_CANDLE,
+    KEEP_DAYS,
     MINUTE_BAR,
     NONE,
     RECORDED,
@@ -65,8 +66,17 @@ def candle(day: date, opened: int, close: int, symbol: str = "005930") -> dict[s
     }
 
 
-def kept(day: date, opened: int | None, close: int | None, source: str = MINUTE_BAR) -> dict[str, Any]:
-    return {"symbol": "005930", "date": day, "open": opened, "close": close, "source": source}
+def kept(
+    day: date, opened: int | None, close: int | None, source: str = MINUTE_BAR, volume: int | None = None
+) -> dict[str, Any]:
+    return {
+        "symbol": "005930",
+        "date": day,
+        "open": opened,
+        "close": close,
+        "source": source,
+        "close_volume": volume,
+    }
 
 
 def bar(day: date, hhmm: str, opened: int, close: int) -> dict[str, str]:
@@ -183,8 +193,8 @@ async def test_without_the_opening_bar_the_recorded_opening_print_and_else_no_op
         keeper = AuctionKeeper(client, RECENT, data, ("005930",), RateLimiter(1, 0.0, margin=0))
         await keeper.run(now)
     prices = read_auctions(data, "005930")
-    assert prices[recorded] == kept(recorded, 80_100, 80_500)
-    assert prices[MONDAY] == kept(MONDAY, None, 80_500)
+    assert prices[recorded] == kept(recorded, 80_100, 80_500, volume=1000)
+    assert prices[MONDAY] == kept(MONDAY, None, 80_500, volume=1000)
     monday = [candle(MONDAY, 40_000, 40_400)]  # adjusted since: a raw close would halve the move
     assert days_of(monday, prices) == [], "no open of its own: no day"
 
@@ -212,8 +222,8 @@ async def test_the_keeper_keeps_the_closing_auction_bar_not_the_after_markets_la
         assert await keeper.run(now) >= 2
 
     prices = read_auctions(data, "005930")
-    assert prices[MONDAY] == kept(MONDAY, 81_000, 82_000)
-    assert prices[date(2026, 10, 16)] == kept(date(2026, 10, 16), 80_000, 80_500)
+    assert prices[MONDAY] == kept(MONDAY, 81_000, 82_000, volume=1000), "with the closing bar's volume"
+    assert prices[date(2026, 10, 16)] == kept(date(2026, 10, 16), 80_000, 80_500, volume=1000)
     asked = [(q["FID_INPUT_DATE_1"], q["FID_INPUT_HOUR_1"]) for q in requests_for(kis, MINUTE_BARS)]
     assert asked[:4] == [
         ("20261019", "153959"),
@@ -224,6 +234,41 @@ async def test_the_keeper_keeps_the_closing_auction_bar_not_the_after_markets_la
     assert all(q["FID_COND_MRKT_DIV_CODE"] == "J" for q in requests_for(kis, MINUTE_BARS))
     # Days KIS has no bars of: settled none before the after-market, as there is the candle's.
     assert {r["source"] for d, r in prices.items() if d < AFTER_MARKET_OPENED} == {NONE}
+
+
+async def test_a_day_kept_before_the_volumes_gets_its_closing_bar_s_volume_once(
+    kis: FakeKis, tmp_path: Path
+) -> None:
+    """#305: the closing flow's denominator reads the KRX closing bar's volume × close. Days kept
+    from KRX's bars before the volume was kept are asked their closing bar again, once: its volume
+    where its close is the one kept, else 0. The days from the recording or settled none are not."""
+    data = tmp_path / "data"
+    friday = date(2026, 10, 16)
+    days = RECENT.trading_days(MONDAY - KEEP_DAYS, MONDAY)
+    rows = {d: kept(d, None, None, NONE) for d in days}
+    rows[MONDAY] = kept(MONDAY, 81_000, 82_000)  # as the bars: its volume is kept
+    rows[friday] = kept(friday, 80_000, 70_000)  # another close than the bar's: 0
+    rows[date(2026, 10, 15)] = kept(date(2026, 10, 15), 80_000, 80_500, RECORDED)
+    write_auctions(
+        data, "005930", {d: {k: v for k, v in r.items() if k != "close_volume"} for d, r in rows.items()}
+    )
+
+    def bars(market: str, symbol: str, day: date) -> list[dict[str, str]]:
+        return krx_bars(day, 81_000, 82_000) if day == MONDAY else krx_bars(day, 80_000, 80_500)
+
+    kis.rest_responses[MINUTE_BARS] = minute_bars_api(bars)
+    now = datetime.combine(MONDAY, time(15, 40), KST)
+    async with rest_client(kis, data, now) as client:
+        keeper = AuctionKeeper(client, RECENT, data, ("005930",), RateLimiter(1, 0.0, margin=0))
+        assert await keeper.run(now) == 2
+        prices = read_auctions(data, "005930")
+        assert prices[MONDAY] == kept(MONDAY, 81_000, 82_000, volume=1000)
+        assert prices[friday] == kept(friday, 80_000, 70_000, volume=0)
+        assert prices[date(2026, 10, 15)]["close_volume"] is None, "from the recording: no bar to read"
+        asked = [(q["FID_INPUT_DATE_1"], q["FID_INPUT_HOUR_1"]) for q in requests_for(kis, MINUTE_BARS)]
+        assert asked == [("20261019", "153959"), ("20261016", "153959")], "the closing page alone"
+        assert await keeper.run(now) == 0
+        assert len(requests_for(kis, MINUTE_BARS)) == 2, "not again"
 
 
 async def test_without_the_bar_the_recorded_prints_and_a_day_with_neither_waits_then_is_settled(

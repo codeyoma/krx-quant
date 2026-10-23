@@ -16,9 +16,9 @@ the previous trading day, in the closing flow's demand A·(L² − L)·r.
 So A is the total as KIS gives it, not the product computed in won: on the two products where
 they differed, the units had likely changed (a creation or redemption) while the total still
 held the day before's; the total's rounding (half an 억) is far below what the demand's ratio
-can tell. The user chose KRX's Open API (``etf_bydd_trd``) for the past days once a key is in
-(#305, 2026-10-22): those rows come with their own ``source``, and ``SOURCES`` says which is
-read first.
+can tell. The user chose KRX's Open API (``etf_bydd_trd``) for the past days (#305, 2026-10-22):
+its rows (``krx_net_assets``, source ``krx``) are read before KIS's (``SOURCES``), product by
+product, so KIS's stands in only where KRX's is not in.
 
 **Its day.** A row is keyed by the trading day the net assets are of, never by when they were
 fetched: the trading day before the fetch's date whose daily NAV equals the answer's
@@ -39,9 +39,9 @@ when KIS moved.
 kept as it is (its first ``fetched_at``); a different one replaces it.
 
 **Kept** in ``state/closing_flow/net_assets.parquet``: a row per product, day and source,
-rewritten whole. The state folder, not the data directory: the KRX Open API's data stays on the
-server (its terms forbid passing it on, docs/design.md 4.1), and the archive uploads ``data/``
-alone.
+rewritten whole, with KRX's listed units and NAV beside its net assets (KIS's rows have none).
+The state folder, not the data directory: the KRX Open API's data stays on the server (its terms
+forbid passing it on, docs/design.md 4.1), and the archive uploads ``data/`` alone.
 """
 
 from __future__ import annotations
@@ -67,9 +67,9 @@ from krx_quant.ratelimit import RateLimiter
 
 log = logging.getLogger(__name__)
 
-KIS = "kis"
-# The sources read, the first one's row first: KRX's Open API goes in front once it is added (#305).
-SOURCES: tuple[str, ...] = (KIS,)
+KIS, KRX = "kis", "krx"
+# The sources read, product by product, the first one's row first: KRX's Open API, then KIS (#305).
+SOURCES: tuple[str, ...] = (KRX, KIS)
 UNIT = 100_000_000  # won in KIS's ``etf_ntas_ttam``: 억원 (probe-nav-305)
 NAV_DAYS = timedelta(days=14)  # the daily NAV asked: the two weeks to the fetch's date
 EVENING = time(20, 30)  # with the history task's run (``backfill.BARS_FINAL_AT``)
@@ -84,6 +84,8 @@ SCHEMA = pa.schema(
         ("source", pa.string()),
         ("net_assets", pa.int64()),  # won
         ("fetched_at", EVENT_TIME),  # when this value was first fetched
+        ("shares", pa.int64()),  # KRX's listed units (``LIST_SHRS``) that day; null for KIS's rows
+        ("nav", pa.float64()),  # KRX's NAV that day; null for KIS's rows
     ]
 )
 
@@ -110,6 +112,34 @@ def write_net_assets(state_dir: Path, rows: Sequence[Row]) -> None:
     table = pa.Table.from_pylist([{n: r.get(n) for n in SCHEMA.names} for r in ordered], schema=SCHEMA)
     pq.write_table(table, tmp)
     tmp.rename(path)
+
+
+def keep_rows(state_dir: Path, fetched: Sequence[Row]) -> int:
+    """Add the fetched rows to the file; return how many changed. A row already held with the
+    same values stays as it is (its first ``fetched_at``), another replaces it."""
+    if not fetched:
+        return 0
+    rows = {(r["code"], r["date"], r["source"]): r for r in read_net_assets(state_dir)}
+    changed = 0
+    for row in fetched:
+        key = (row["code"], row["date"], row["source"])
+        held = rows.get(key)
+        if held is not None and all(held.get(n) == row.get(n) for n in ("net_assets", "shares", "nav")):
+            continue
+        rows[key] = row
+        changed += 1
+    if changed:
+        write_net_assets(state_dir, list(rows.values()))
+    return changed
+
+
+def source_of(rows: Sequence[Mapping[str, Any]]) -> str | None:
+    """The sources of the net assets in ``rows`` (each with ``net_assets_source``, None without
+    net assets), in ``SOURCES``' order joined by ``+``: ``krx``, ``kis``, ``krx+kis``; None if
+    none has net assets."""
+    found = {r["net_assets_source"] for r in rows if r.get("net_assets_source") is not None}
+    ordered = [s for s in SOURCES if s in found] + sorted(found - set(SOURCES))
+    return "+".join(ordered) or None
 
 
 def net_assets_on(rows: Sequence[Row], day: date) -> dict[str, Row]:
@@ -231,23 +261,7 @@ class NetAssetKeeper:
         }
 
     def _keep(self, fetched: Sequence[Row]) -> int:
-        """Add the fetched rows to the file: a value already held stays as it is (its first
-        ``fetched_at``), another replaces it."""
-        if not fetched:
-            return 0
-        stored = read_net_assets(self._state_dir)
-        rows = {(r["code"], r["date"], r["source"]): r for r in stored}
-        changed = 0
-        for row in fetched:
-            key = (row["code"], row["date"], row["source"])
-            held = rows.get(key)
-            if held is not None and held["net_assets"] == row["net_assets"]:
-                continue
-            rows[key] = row
-            changed += 1
-        if changed:
-            write_net_assets(self._state_dir, list(rows.values()))
-        return changed
+        return keep_rows(self._state_dir, fetched)
 
 
 def next_ask(

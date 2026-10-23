@@ -333,9 +333,9 @@ async def test_the_demo_has_a_cost_map(tmp_path: Path) -> None:
 @pytest.mark.timeout(120)
 async def test_the_demo_has_its_closing_flow(tmp_path: Path) -> None:
     """#305. Output: the morning's demand at 10:30 by the engine's price, its products named, one
-    without its net assets; the 20 days before, the last 8 with their stored 15:20 demand, the
-    others from the bars, a VI day, the first five without a recorded closing auction value, and
-    009150 without demand."""
+    without its net assets, the others' KIS's; the 20 days before on KRX's net assets, the last 8
+    with their stored 15:20 demand, the others from the bars, a VI day, the first five with KRX's
+    closing bar's value in place of a recorded one, and 009150 without demand."""
     app = await demo_app(tmp_path / "demo.sqlite3")
 
     async with TestClient(TestServer(app)) as client:
@@ -347,16 +347,20 @@ async def test_the_demo_has_its_closing_flow(tmp_path: Path) -> None:
     check("closing_flow_days", days)
     assert (today["day"], today["at"], today["source"]) == ("2026-10-12", "2026-10-12T10:30:00+09:00", "live")
     assert today["demand"] is not None and today["ratio"] is not None
-    assert today["denominator_days"] == 15, "the 20 days before, but the five without a recorded print"
+    assert today["denominator_days"] == 20
+    assert today["denominator_sources"] == {"recorded": 15, "krx_bar": 5, "integrated_bar": 0}
     assert today["missing"] == ["0198D0"]
+    assert {p["net_assets_source"] for p in today["products"] if p["net_assets"]} == {"kis"}
     assert all(p["name"] for p in today["products"]) and len(today["products"]) == 8
     rows = days["days"]
     assert len(rows) == 20 and rows[-1]["date"] == "2026-10-08"
     assert [r["demand_source"] for r in rows].count("live") == 8
     assert {r["demand_source"] for r in rows[:-8]} == {"bars"}
     assert rows[-1]["auction_value_source"] == "recorded" and rows[-1]["next_gap_bp"] is None
-    assert [r["auction_value"] for r in rows[:5]] == [None] * 5
-    assert rows[0]["denominator_reason"] == "no_recorded_auction" and rows[-1]["denominator_days"] == 14
+    assert [r["auction_value_source"] for r in rows[:5]] == ["krx_bar"] * 5
+    assert rows[0]["denominator_days"] == 1 and rows[-1]["denominator_days"] == 20
+    assert rows[-1]["denominator_sources"] == {"recorded": 14, "krx_bar": 6, "integrated_bar": 0}
+    assert {r["net_assets_source"] for r in rows} == {"krx"}, "the screen shows 한국거래소 통계정보"
     assert [r["date"] for r in rows if r["special"]] == ["2026-09-24"]
     assert len(days["summary"]["tertiles"]) == 3
     assert (control["demand"], control["reason"]) == (None, "no_products")

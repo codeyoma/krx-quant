@@ -26,12 +26,19 @@ bar, the day's recorded KRX trades (``H0STCNT0``, recorded from 2026-10-12) give
 a row a day: the two prices as traded (KIS does not adjust its minute bars; the opening one from the
 recorded print where KIS has no opening bar, null if neither has it), and where they came
 from (``source``: ``krx_minute_bar``, ``recorded_print``, or ``none`` for a day settled without a
-closing price). The collector's history task keeps it (``AuctionKeeper``): at its start and at
-20:30, every trading day of the last ``KEEP_DAYS`` (KIS keeps about a year of minute bars) not kept
-yet, newest first; and on a trading day at ``CLOSE_AT`` (15:40) the day itself, so the day is
-answered from 15:45. A day neither source has a closing price for is settled ``none`` once it is
-over and KIS answered other bars of it, it is older than ``SETTLE_AFTER``, or it is before the
-after-market (its candle's close stands, ``days_of``); otherwise it is asked again on the next run.
+closing price). A day from KRX's bars also keeps its closing auction bar's volume
+(``close_volume``): with the close, the closing auction's value, which the closing flow's
+denominator reads on a day without the recorded print (#305: ``check-closing-flow-305`` found the
+bar's volume × close equal to the recorded value on all 9 recorded days of the three symbols).
+A row kept before it has none: the keeper asks that day's closing bar again once (``refill``);
+0 is a bar without a volume, or with another close.
+
+The collector's history task keeps it (``AuctionKeeper``): at its start and at 20:30, every trading
+day of the last ``KEEP_DAYS`` (KIS keeps about a year of minute bars) not kept yet, newest first;
+and on a trading day at ``CLOSE_AT`` (15:40) the day itself, so the day is answered from 15:45. A
+day neither source has a closing price for is settled ``none`` once it is over and KIS answered
+other bars of it, it is older than ``SETTLE_AFTER``, or it is before the after-market (its candle's
+close stands, ``days_of``); otherwise it is asked again on the next run.
 
 **The days** (``days_of``), read by the daily kinds live and in training alike (``daily.StoredDays``):
 each KRX day candle with its close replaced by the kept closing auction price. The candle's prices
@@ -104,6 +111,9 @@ AUCTION_SCHEMA = pa.schema(
         ("open", pa.int64()),  # the opening auction's price as traded; null: none found
         ("close", pa.int64()),  # the closing auction's price as traded; null: settled ``none``
         ("source", pa.string()),
+        # The closing auction bar's volume (``krx_minute_bar`` rows): null, not asked yet (a row
+        # kept before #305's bars); 0, none.
+        ("close_volume", pa.int64()),
     ]
 )
 
@@ -267,8 +277,20 @@ def opening_bar(bars: Sequence[Row], session: Session) -> Row | None:
     return print_bar(bars, session.open, OPENING_BAR)
 
 
-def _row(symbol: str, day: date, opened: Any, closed: Any, source: str) -> Row:
-    return {"symbol": symbol, "date": day, "open": opened or None, "close": closed or None, "source": source}
+def _row(symbol: str, day: date, opened: Any, closed: Any, source: str, volume: Any = None) -> Row:
+    return {
+        "symbol": symbol,
+        "date": day,
+        "open": opened or None,
+        "close": closed or None,
+        "source": source,
+        "close_volume": volume,
+    }
+
+
+def needs_volume(row: Row) -> bool:
+    """A day kept from KRX's bars before their volume was kept: its closing bar is asked again."""
+    return row["source"] == MINUTE_BAR and row.get("close_volume") is None
 
 
 class AuctionKeeper:
@@ -290,8 +312,9 @@ class AuctionKeeper:
 
     async def run(self, now: datetime) -> int:
         """Keep every trading day of the last ``KEEP_DAYS`` up to the last closed one that is not
-        kept yet, newest first; return how many were kept. A day that fails is logged and asked
-        again on the next run; after a few failures in a row the symbol waits for it."""
+        kept yet, newest first, then the closing bar's volume of those kept without it; return how
+        many days were kept or given their volume. A day that fails is logged and asked again on
+        the next run; after a few failures in a row the symbol waits for it."""
         local = now.astimezone(KST)
         today = local.date()
         days = self._calendar.trading_days(today - KEEP_DAYS, last_closed(self._calendar, now))
@@ -299,12 +322,13 @@ class AuctionKeeper:
         for symbol in self._symbols:
             kept = read_auctions(self._data_dir, symbol)
             todo = [d for d in reversed(days) if d not in kept]
-            if not todo:
+            refill = [d for d in reversed(days) if d in kept and needs_volume(kept[d])]
+            if not todo and not refill:
                 continue
-            new = failures = 0
-            for day in todo:
+            new = volumes = failures = 0
+            for day in [*todo, *refill]:
                 try:
-                    row = await self.price(symbol, day, today)
+                    row = await (self.price(symbol, day, today) if day in todo else self.refill(kept[day]))
                 except (KisError, aiohttp.ClientError, OSError, ValueError, KeyError, TimeoutError) as e:
                     failures += 1
                     log.warning("auction prices of %s on %s not kept: %s", symbol, day, e)
@@ -314,13 +338,34 @@ class AuctionKeeper:
                     continue
                 failures = 0
                 if row is not None:
+                    if day in kept:
+                        volumes += 1
+                    else:
+                        new += 1
                     kept[day] = row
-                    new += 1
-            if new:
+            if new or volumes:
                 write_auctions(self._data_dir, symbol, kept)
-                added += new
-                log.info("kept the auction prices of %s on %d days", symbol, new)
+                added += new + volumes
+                log.info(
+                    "kept the auction prices of %s on %d days, the closing bar's volume of %d more",
+                    symbol,
+                    new,
+                    volumes,
+                )
         return added
+
+    async def refill(self, row: Row) -> Row:
+        """A day kept from KRX's bars without its closing bar's volume: the bar asked again, its
+        volume kept if its close is the one kept (else 0)."""
+        session = self._calendar.session(row["date"])
+        if session is None:
+            return {**row, "close_volume": 0}
+        bars = await self._page(
+            row["symbol"], row["date"], session.close + PRINT_WITHIN - timedelta(seconds=1)
+        )
+        bar = print_bar(bars, session.close)
+        same = bar is not None and bar["close"] == row["close"]
+        return {**row, "close_volume": (bar["volume"] or 0) if same and bar is not None else 0}
 
     async def price(self, symbol: str, day: date, today: date) -> Row | None:
         """``day``'s auction prices of ``symbol``: from KRX's minute bars, else the recording, else
@@ -337,7 +382,7 @@ class AuctionKeeper:
             if opened is None:  # the recorded opening print, as traded too
                 prints = recorded_prints(self._data_dir, day, symbol, session)
                 opened = None if prints is None else prints[0]
-            return _row(symbol, day, opened, bar["close"], MINUTE_BAR)
+            return _row(symbol, day, opened, bar["close"], MINUTE_BAR, bar["volume"] or 0)
         prints = recorded_prints(self._data_dir, day, symbol, session)
         if prints is not None and prints[1] is not None:
             return _row(symbol, day, prints[0], prints[1], RECORDED)

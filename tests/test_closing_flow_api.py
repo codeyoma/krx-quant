@@ -28,7 +28,7 @@ from krx_quant.feeds import KRX_TRADE
 from krx_quant.feeds.base import KST
 from krx_quant.kinds import DIRECTION_KIND
 from krx_quant.market_calendar import MarketCalendar
-from krx_quant.net_assets import KIS, write_net_assets
+from krx_quant.net_assets import KIS, KRX, write_net_assets
 from krx_quant.predictions import PredictionStore
 from krx_quant.products import products_of
 from krx_quant.recorder import ParquetRecorder
@@ -420,12 +420,17 @@ async def test_the_days_measure_as_structure_check_and_add_the_demand(tmp_path: 
     assert d["flow_bp"] == pytest.approx((80_800 / 81_200 - 1) * 1e4)
     assert d["next_gap_bp"] == pytest.approx((80_900 / 80_700 - 1) * 1e4)
     assert d["next_close_bp"] == pytest.approx((81_400 / 80_700 - 1) * 1e4)
-    assert (d["compared_with"], d["agree"], d["demand"]) == ("flow", True, None)
-    assert (d["auction_value"], d["denominator"], d["denominator_reason"]) == (
+    assert (d["compared_with"], d["agree"], d["demand"], d["net_assets_source"]) == ("flow", True, None, None)
+    # No recording of 009150: each day's value from the integrated bar (no KRX bar kept either).
+    assert (d["auction_value"], d["auction_value_source"]) == (80_700 * 1_200, "integrated_bar")
+    assert (d["denominator"], d["denominator_days"], d["denominator_reason"]) == (
+        (80_600 * 1_000 + 81_200 * 1_100) / 2,
+        2,
         None,
-        None,
-        "no_recorded_auction",
     )
+    assert d["denominator_sources"] == {"recorded": 0, "krx_bar": 0, "integrated_bar": 2}
+    first = rows["2026-07-28"]
+    assert (first["denominator_days"], first["denominator"]) == (1, 80_600 * 1_000)
     assert rows["2026-08-04"]["agree"] is None, "the auction did not move"
     assert rows["2026-08-07"]["next_gap_bp"] is None, "no next day yet"
     text = structure_check(data, state, CALENDAR, ("009150",), fee_rate=FEE)
@@ -447,19 +452,19 @@ async def test_the_days_measure_as_structure_check_and_add_the_demand(tmp_path: 
     assert bars_day["spot_futures"] == 5 * round(2 * 10_000_000_000 * flow)
     assert bars_day["futures"] == 2 * round(2 * 10_000_000_000 * flow) + round(6 * 10_000_000_000 * flow)
     assert (bars_day["auction_value"], bars_day["auction_value_source"]) == (82_000 * 1_700, "recorded")
-    earlier = sorted(
-        (1_000 + 100 * i) * c
-        for i, (d, (o, pre, c)) in enumerate(DAYS.items())
-        if i < 7 and d != UNRECORDED_DAY
-    )
-    assert (bars_day["denominator"], bars_day["denominator_days"]) == ((earlier[2] + earlier[3]) / 2, 6)
+    earlier = sorted((1_000 + 100 * i) * c for i, (d, (o, pre, c)) in enumerate(DAYS.items()) if i < 7)
+    assert (bars_day["denominator"], bars_day["denominator_days"]) == (earlier[3], 7)
+    assert bars_day["denominator_sources"] == {"recorded": 6, "krx_bar": 0, "integrated_bar": 1}
     assert bars_day["ratio"] == pytest.approx(bars_day["spot_futures"] / bars_day["denominator"])
+    assert bars_day["net_assets_source"] == "kis"
     unrecorded = rows[UNRECORDED_DAY.isoformat()]
-    assert (unrecorded["auction_value"], unrecorded["auction_value_source"]) == (None, None), (
-        "no recorded print: the bar's volume is not used"
-    )
+    assert (unrecorded["auction_value"], unrecorded["auction_value_source"]) == (
+        81_800 * 1_500,
+        "integrated_bar",
+    ), "no recorded print, no KRX bar kept: the integrated bar's volume × close"
     live = rows["2026-08-06"]
     assert (live["demand_source"], live["demand"], live["compared_with"]) == ("live", 300_000_000, "demand")
+    assert live["net_assets_source"] == "kis", "stored before the KRX source: KIS's, the only one then"
     assert live["agree"] is False, "a buy, and the auction went down"
     assert rows["2026-07-29"]["special"] == ["vi"]
     periods = {p["period"]: p for p in samsung["summary"]["periods"]}
@@ -486,3 +491,103 @@ async def test_days_without_a_computation_and_the_query_s_errors(tmp_path: Path)
         app, "/v1/symbols/005930/closing-flow/days?from=2026-10-12&to=2026-10-11", "closing_flow_days", 400
     )
     await get(app, "/v1/symbols/000000/closing-flow/days", "closing_flow_days", 404)
+
+
+async def test_the_past_days_read_krx_s_net_assets_and_krx_s_closing_bar(tmp_path: Path) -> None:
+    """#305, the KRX Open API's net assets and the bars' denominator. Input: the ten days' integrated
+    bars of 005930 (auction volume 777) and no recording; KRX's net assets of every day, but one
+    product's on 07-30 (KIS's then); the KRX closing bars kept by ``auctions`` with their volumes,
+    but none on 08-04 and a volume of 0 on 08-05. Output: every day after the first has its demand
+    from KRX's A and the bars (``krx``; ``krx+kis`` on 07-31, which reads 07-30's), and its closing
+    auction value from KRX's bar (its volume × close), the integrated bar's where KRX's has none."""
+    data, state = tmp_path / "data", tmp_path / "state"
+    days = list(DAYS)
+    kept = {}
+    for i, (day, (o, pre, c)) in enumerate(DAYS.items()):
+        bars(data, "005930", day, o, pre, c, 777)
+        if day != date(2026, 8, 4):
+            volume = 0 if day == date(2026, 8, 5) else 2_000 + i
+            kept[day] = {"symbol": "005930", "date": day, "open": o, "close": c, "source": MINUTE_BAR}
+            kept[day]["close_volume"] = volume
+    write_auctions(data, "005930", kept)
+    mixed, alone = date(2026, 7, 30), SAMSUNG[0].code
+    write_net_assets(
+        state,
+        [
+            {
+                "code": p.code,
+                "date": d,
+                "source": KIS if (d, p.code) == (mixed, alone) else KRX,
+                "net_assets": 10_000_000_000,
+                "fetched_at": at("08:05", d),
+                "shares": None,
+                "nav": None,
+            }
+            for d in days
+            for p in SAMSUNG
+        ],
+    )
+    engine, _ = engine_at(tmp_path, at("09:00", date(2026, 8, 10)))
+    await keep_days(data, state, CALENDAR, SYMBOLS, engine.store.special_windows, at("20:40", days[-1]))
+
+    body = await get(
+        create_app(engine, data_dir=data, state_dir=state),
+        "/v1/symbols/005930/closing-flow/days?from=2026-07-01&to=2026-08-31",
+        "closing_flow_days",
+    )
+
+    rows = {r["date"]: r for r in body["days"]}
+    assert sorted(rows) == [d.isoformat() for d in days[1:]]
+    assert {r["demand_source"] for r in rows.values()} == {"bars"}
+    assert {d: r["net_assets_source"] for d, r in rows.items() if r["net_assets_source"] != "krx"} == {
+        "2026-07-31": "krx+kis"
+    }, "07-31 reads 07-30's: KIS's for the product KRX lacked"
+    for i, (day, (_, _, c)) in enumerate(DAYS.items()):
+        if i == 0:
+            continue
+        row = rows[day.isoformat()]
+        if day in (date(2026, 8, 4), date(2026, 8, 5)):
+            assert (row["auction_value"], row["auction_value_source"]) == (c * 777, "integrated_bar"), day
+        else:
+            assert (row["auction_value"], row["auction_value_source"]) == (c * (2_000 + i), "krx_bar"), day
+    last = rows["2026-08-07"]
+    assert last["denominator_sources"] == {"recorded": 0, "krx_bar": 7, "integrated_bar": 2}
+    assert last["denominator_days"] == 9 and last["denominator_reason"] is None
+    assert last["ratio"] == pytest.approx(last["spot_futures"] / last["denominator"])
+
+
+async def test_today_s_products_read_krx_s_net_assets_first(tmp_path: Path) -> None:
+    """Source precedence: Thursday's net assets from KRX's Open API and from KIS; KRX's are read,
+    KIS's only for the product KRX lacks."""
+    data, state = tmp_path / "data", tmp_path / "state"
+    rows = [
+        {"code": code, "date": THURSDAY, "source": KIS, "net_assets": 1, "fetched_at": at("06:12", MONDAY)}
+        for code in ASSETS
+    ]
+    rows += [
+        {
+            "code": code,
+            "date": THURSDAY,
+            "source": KRX,
+            "net_assets": value,
+            "fetched_at": at("08:05", MONDAY),
+            "shares": 3_000_000,
+            "nav": 12_345.67,
+        }
+        for code, value in ASSETS.items()
+        if code != "0193W0"
+    ]
+    write_net_assets(state, rows)
+    closes(data, "005930", {THURSDAY: 80_000})
+    engine, clock = engine_at(tmp_path, at("09:00"))
+    await replay_into(engine, clock, quotes(at("10:00"), at("10:30"), 80_950, 81_050), until=at("10:30:20"))
+
+    body = await get(
+        create_app(engine, data_dir=data, state_dir=state), "/v1/symbols/005930/closing-flow", "closing_flow"
+    )
+
+    by_code = {p["code"]: p for p in body["products"]}
+    assert (by_code["0193W0"]["net_assets_source"], by_code["0193W0"]["net_assets"]) == ("kis", 1)
+    assert {p["net_assets_source"] for c, p in by_code.items() if c not in ("0193W0", NOT_KEPT)} == {"krx"}
+    assert by_code["0195R0"]["net_assets"] == ASSETS["0195R0"]
+    assert body["missing"] == [NOT_KEPT]
