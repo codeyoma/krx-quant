@@ -79,6 +79,7 @@ class StepUsage:
         self._peak: float | None = None
         self.phases: dict[str, dict[str, float | None]] = {}
         self.days_read = 0  # the training days this step read (built), not found in the cache
+        self.days_made = 0  # of them, those made from their files, not read from the sample store (#370)
         meter.reset()
 
     @contextmanager
@@ -106,6 +107,7 @@ class StepUsage:
             "rss_mb": self._meter.rss_mb(),
             "peak_since": self._meter.peak_since,
             "days_read": self.days_read,
+            "days_made": self.days_made,
             "days_cached": days_cached,
             "phases": self.phases,
         }

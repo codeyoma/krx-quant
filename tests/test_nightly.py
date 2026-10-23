@@ -1117,6 +1117,7 @@ def test_each_step_says_when_it_starts_and_reports_its_time_and_memory(
         "rss_mb",
         "peak_since",
         "days_read",
+        "days_made",
         "days_cached",
         "phases",
     }

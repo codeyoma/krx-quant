@@ -113,8 +113,9 @@ from krx_quant.macro import regime_prefix
 from krx_quant.market_calendar import MarketCalendar, calendar_store
 from krx_quant.notify import send_notice
 from krx_quant.object_store import ObjectStore, file_digest, get_json, open_store, put_json
+from krx_quant.sample_store import STORE_DIR, DayKey, NightReads, SampleStore, night_reads, read_day
 from krx_quant.touch import TARGET_VERSION
-from krx_quant.training import TrainingDay, leader_series, previous_days_needed, training_day
+from krx_quant.training import TrainingDay, leader_series, previous_days_needed
 
 log = logging.getLogger(__name__)
 
@@ -306,6 +307,7 @@ def train_night(
     kinds: Sequence[Kind] = KINDS,
     daily: DailyTrainer | None = None,
     daily_algorithms: Sequence[DailyAlgorithm] = DAILY_ALGORITHMS,
+    samples: Path | None = None,
 ) -> Night:
     """Train every algorithm for the night of ``day`` (default: the latest day with data) and
     store the promotion list. A night already finished is returned as it was. Each report
@@ -313,7 +315,9 @@ def train_night(
     ``target_version``; with the touch target (3) the climate baseline is refitted too, and
     so are the tables of the ``kinds``' baselines (#180). The algorithms of the ``kinds``
     besides the direction train after them, on their kind's answers (#179), and the daily kinds'
-    algorithms last, given ``daily`` (#264).
+    algorithms last, given ``daily`` (#264). Each day's samples are read from the sample store in
+    ``samples`` (#370, ``sample_store.py``) when they are there under their key, else made and
+    stored there; without it, every day is made.
     """
     leaders = leaders or Leaders()
     bars, trades = (
@@ -351,11 +355,10 @@ def train_night(
         fee_rate,
         leaders,
         days,
-        algorithms,
+        night_reads(algorithms, kind_algorithms, kinds),
         calendar,
         target_version,
-        of_kinds,
-        [k for k, _ in tables],
+        None if samples is None else SampleStore(samples),
     )
     live: dict[str, str] = get_json(store, LIVE) or {}
     steps: list[_Step] = [
@@ -420,12 +423,13 @@ def train_night(
             put_json(store, report_key(night, step.name), report)
             log.info("%s: %s", step.name, report["reason"])
             log.info(
-                "%s: %.1f s, peak %s MB (since the %s), %d days read, %d days cached",
+                "%s: %.1f s, peak %s MB (since the %s), %d days read (%d made), %d days cached",
                 step.name,
                 report["resources"]["seconds"],
                 report["resources"]["peak_rss_mb"],
                 report["resources"]["peak_since"],
                 report["resources"]["days_read"],
+                report["resources"]["days_made"],
                 report["resources"]["days_cached"],
             )
         else:
@@ -438,7 +442,7 @@ def train_night(
         reports,
     )
     put_json(store, promotions_key(night), result.as_dict())
-    trainer.prune()
+    trainer.prune({d for step in steps for d in step.needs.days})
     return result
 
 
@@ -468,6 +472,7 @@ async def run_training(settings: Settings, day: date | None = None) -> Night:
         commit=settings.commit,
         target_version=settings.target_version,
         daily=daily if settings.train_on == "server" else None,
+        samples=settings.state_dir / STORE_DIR,
     )
     if not finished_before:
         await send_notice(settings, night.summary())
@@ -483,17 +488,17 @@ class _Trainer:
         fee_rate: float,
         leaders: Leaders,
         days: Sequence[date],
-        algorithms: Sequence[Algorithm],
+        reads: NightReads,
         calendar: MarketCalendar | None = None,
         target_version: int = 1,
-        of_kinds: Sequence[tuple[KindAlgorithm, Kind]] = (),
-        tabled: Sequence[Kind] = (),
+        samples: SampleStore | None = None,
     ) -> None:
         self._store = store
         self._target_version = target_version
         # The kinds besides the direction its kind algorithms predict (#179) and its tables
-        # are of (#180, ``tabled``), each day read with.
-        self._kinds = tuple({k.name: k for k in [*(k for _, k in of_kinds), *tabled]}.values())
+        # are of (#180), each day read with (``sample_store.night_reads``).
+        self._kinds = reads.kinds
+        self._sample_store = samples  # the days' samples made on earlier nights (#370)
         self._cache = cache_dir
         self._symbols = tuple(symbols)
         self._fee_rate = fee_rate
@@ -506,9 +511,10 @@ class _Trainer:
         )
         # Each day is read once, with every algorithm's features; then only what the steps still
         # to run read of it is kept (#355, ``plan``).
-        everyone: list[Algorithm | KindAlgorithm] = [*algorithms, *(a for a, _ in of_kinds)]
-        self._names = sorted({f for a in everyone for f in a.features})
+        self._names = list(reads.names)
         self._loaded: dict[date, TrainingDay | None] = {}
+        self._keys: dict[date, DayKey] = {}  # each day read's key in the sample store (#370)
+        self._digests: dict[str, str] = {}  # the files fetched, by key: the store's SHA-256
         self._held: dict[date, tuple[frozenset[str], frozenset[str]]] = {}  # features, kinds kept
         self._plan: list[_Needs] | None = None  # the steps to run, in order (none: keep every day)
         self._at = 0  # the step running, in the plan
@@ -800,12 +806,14 @@ class _Trainer:
         ]
 
     def _day(self, day: date) -> TrainingDay | None:
-        """A day's samples, read once from the cache with every algorithm's features, of which
-        only what the steps from the one running read is kept (#355)."""
+        """A day's samples, read once with every algorithm's features (from the sample store, or
+        made from the cache's files and stored, #370), of which only what the steps from the one
+        running read is kept (#355)."""
         if day not in self._loaded:
             self._fetch(day)
             started = time.monotonic()
-            self._loaded[day] = training_day(
+            read = read_day(
+                self._sample_store,
                 self._cache,
                 day,
                 self._calendar,
@@ -815,17 +823,26 @@ class _Trainer:
                 self._leaders,
                 target_version=self._target_version,
                 kinds=self._kinds,
+                digests=self._digests,
             )
-            found = self._loaded[day]
+            found = self._loaded[day] = read.found
+            if read.key is not None:
+                self._keys[day] = read.key
             self._keep(day)
             if self._usage is not None:
                 self._usage.days_read += 1
+                self._usage.days_made += not read.stored
+            if read.stored:
+                source = "from the sample store"
+            else:
+                source = "made, stored" if read.made_stored else "made"
             log.info(
-                "read %s: %s, %d samples in %.1f s",
+                "read %s: %s, %d samples in %.1f s (%s)",
                 day,
                 "no data" if found is None else found.reference,
                 0 if found is None else len(found.samples),
                 time.monotonic() - started,
+                source,
             )
             self._used.add(day)
             return self._loaded.get(day, found)  # read by a step the plan left out: this once
@@ -869,6 +886,7 @@ class _Trainer:
             stored = self._store.digest(key)
             if stored is None:
                 continue
+            self._digests[key] = stored  # the copy's, once fetched: the sample store's key reads it
             path = self._cache / key
             if path.exists() and file_digest(path) == stored:
                 continue
@@ -877,10 +895,14 @@ class _Trainer:
             self._store.get(key, tmp)
             tmp.replace(path)
 
-    def prune(self) -> None:
+    def prune(self, wanted: Iterable[date] = ()) -> None:
         """Remove the cached days this night did not use: older ones no night needs again. The
         days before the oldest used one that its samples read (the slot returns' 20, #265) are
-        kept: the next night's oldest day reads them too."""
+        kept: the next night's oldest day reads them too. Of the sample store (#370), remove the
+        days no step of the night reads (``wanted``: those its checkpoints skipped included) and,
+        of the days read, the files of other keys."""
+        if self._sample_store is not None:
+            self._sample_store.prune(set(wanted), {d: k.digest for d, k in self._keys.items()})
         if not self._used:
             return
         oldest = min(self._used)

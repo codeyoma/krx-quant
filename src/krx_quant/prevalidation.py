@@ -104,6 +104,7 @@ from krx_quant.lifecycle import CLONE_CORRELATION, correlations, most_correlated
 from krx_quant.market_calendar import MarketCalendar, calendar_store
 from krx_quant.predictions import PredictionStore
 from krx_quant.replay import recorded_events, replay_recorded, sqlite_files
+from krx_quant.sample_store import STORE_DIR, NightReads, SampleStore, night_reads, stored_night_day
 from krx_quant.stats import (
     Entry,
     Lifted,
@@ -487,8 +488,20 @@ async def prevalidate(
         own = [k for k in kinds if k.name == DIRECTION or (kind is not None and k.name == kind.name)]
         own_algorithms = [a for a in kind_algorithms if kind is not None and a.kind == kind.name]
         measured = _measured(candidate) if kind is None else None  # a direction algorithm's (#283)
+        # The days the nights stored (#370) are keyed by what every registry reads.
+        night = night_reads(algorithms, kind_algorithms, kinds)
         models = await _replay(
-            settings, candidate, kind, algorithms, own_algorithms, own, available, replayed, db, measured
+            settings,
+            candidate,
+            kind,
+            algorithms,
+            own_algorithms,
+            own,
+            available,
+            replayed,
+            db,
+            measured,
+            night,
         )
         seed_history(settings.state_dir, name)
         before, on_days = earlier_runs(settings.state_dir, name, replayed)
@@ -525,17 +538,19 @@ async def _replay(
     replayed: Sequence[date],
     db: Path,
     measured: _Measured | None = None,
+    night: NightReads | None = None,
 ) -> dict[date, str]:
     """Replay each day into ``db``, the candidate trained on the days before it (on its kind's
     answers, #179); the version it predicted each day with. With ``measured`` (#283), the
     candidate is trained by its diagnostics' fit, and they are given each replayed day's samples
-    and the model that predicted it."""
+    and the model that predicted it. The recorded days are read from the sample store when a
+    night stored them, by ``night``'s key (#370)."""
     calendar = calendar_store(settings).calendar
     leaders = Leaders.of(settings)
     everyone: list[Algorithm | KindAlgorithm] = [*algorithms, *kind_algorithms]
     running = load_models(settings.state_dir, [a for a in everyone if a is not candidate])
     fit = None if measured is None else measured.fit
-    trainer = _WalkForward(settings, candidate, available, calendar, leaders, kind, fit)
+    trainer = _WalkForward(settings, candidate, available, calendar, leaders, kind, fit, night)
     versions: dict[date, str] = {}
     for day in replayed:
         model = trainer.before(day)
@@ -799,7 +814,15 @@ def _stats(stats: Lifted, min_sample: int, tries: int = 1, strict_low: float | N
 
 class _WalkForward:
     """The algorithm retrained before each day on its own window of the days before it; an
-    algorithm of a kind besides the direction (``kind``, #179) on that kind's answers."""
+    algorithm of a kind besides the direction (``kind``, #179) on that kind's answers.
+
+    A recorded day a night stored in the sample store (#370, ``state/training-samples``) under the
+    key of what it reads (``night``: the registries' features and kinds, as the night reads them) is
+    read from there, only the features and answers asked for kept (``TrainingDay.keeping``): on a
+    recorded day that is what making it with those alone gives, as the Market View follows every
+    feed whatever is asked. A backfilled day is made: its leaders' bars are read only for the lead
+    features (``training.training_day``), so a candidate without one gets no futures' moves there
+    (``kospi200f_moves`` empty) where the night's day has them. Nothing is stored."""
 
     def __init__(
         self,
@@ -810,8 +833,11 @@ class _WalkForward:
         leaders: Leaders,
         kind: Kind | None = None,
         fit: Callable[[Sequence[Sample]], Model] | None = None,
+        night: NightReads | None = None,
     ) -> None:
         self._settings = settings
+        self._night = night
+        self._store = SampleStore(settings.state_dir / STORE_DIR)
         self._algorithm = algorithm
         self._kind = kind
         self._fit = fit  # in place of the direction algorithm's (its diagnostics', #283)
@@ -895,8 +921,30 @@ class _WalkForward:
 
     def _read(self, day: date, features: Sequence[str], answered: bool = False) -> TrainingDay | None:
         """``day``'s samples with ``features``; with the kind's answers for the candidate's
-        features, or (``answered``) for its kind's tables."""
+        features, or (``answered``) for its kind's tables. A recorded day from the sample store
+        when a night stored it (#370)."""
         s = self._settings
+        kinds = () if self._kind is None or not (features or answered) else (self._kind,)
+        night = self._night
+        if (
+            night is not None
+            and set(features) <= set(night.names)
+            and set(kinds) <= set(night.kinds)
+            and is_recorded(s.data_dir, day, s.symbols)
+        ):
+            stored = stored_night_day(
+                self._store,
+                night,
+                s.data_dir,
+                day,
+                self._calendar,
+                s.symbols,
+                s.fee_rate,
+                self._leaders,
+                target_version=s.target_version,
+            )
+            if stored is not None:
+                return stored.keeping(features, [k.name for k in kinds])
         return training_day(
             s.data_dir,
             day,
@@ -906,5 +954,5 @@ class _WalkForward:
             s.fee_rate,
             self._leaders,
             target_version=s.target_version,
-            kinds=() if self._kind is None or not (features or answered) else (self._kind,),
+            kinds=kinds,
         )

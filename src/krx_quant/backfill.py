@@ -329,8 +329,7 @@ class PreviousDay:
         """The returns by 10-minute slot (#265) of the ``max(SLOT_RETURN_DAYS)`` trading days
         before ``day``, the latest first: each from its backfilled bars, read once; a day
         without them is empty. A day before the calendar knows none ends the list."""
-        known = self._calendar.known()
-        first = min(known) if known else None
+        first = self._calendar.first_known()
         out: list[Mapping[str, float]] = []
         before = day
         for _ in range(max(SLOT_RETURN_DAYS)):
