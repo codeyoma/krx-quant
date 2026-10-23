@@ -10,7 +10,7 @@ import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -27,7 +27,7 @@ from krx_quant.config import Settings
 from krx_quant.daily import DailySample, overlap_review
 from krx_quant.daily_features import DailyFiles, input_versions, samples
 from krx_quant.daily_training import prevalidate_daily
-from krx_quant.engine import Admits, PredictionEngine
+from krx_quant.engine import Admits, Notify, PredictionEngine, Refused
 from krx_quant.features import FeatureVector
 from krx_quant.feeds.base import KST
 from krx_quant.kinds import DIRECTION_KIND, KindForecast
@@ -292,7 +292,14 @@ def test_once_its_days_are_fixed_it_is_simulated_on_its_first_review_day_of_ende
     assert sim.days[-1] == date(2026, 10, 12), "the latest window to end by Friday began on Monday"
 
 
-def _engine(s: Settings, algorithm: Stand | Cox5d, clock: FakeClock, admitted: Admits) -> PredictionEngine:
+def _engine(
+    s: Settings,
+    algorithm: Stand | Cox5d,
+    clock: FakeClock,
+    admitted: Admits,
+    refused: Refused | None = None,
+    notify: Notify | None = None,
+) -> PredictionEngine:
     from krx_quant.daily import StoredDays
 
     return PredictionEngine(
@@ -310,6 +317,8 @@ def _engine(s: Settings, algorithm: Stand | Cox5d, clock: FakeClock, admitted: A
         daily_features=lambda a, sym, d, p, b: FeatureVector(dict.fromkeys(a.features), a.features),
         daily_feature_names=set(algorithm.features),
         admits=admitted,
+        refused=refused,
+        notify=notify,
     )
 
 
@@ -341,10 +350,10 @@ def test_a_passing_algorithm_of_the_kind_goes_on_probation_judged_on_60_120_180(
 def test_cox_5d_refused_is_not_on_probation_and_nothing_starts_it(tmp_path: Path) -> None:
     """#310: cox-5d's pre-validation was refused (2026-10-23: weakest lift 0.0204, lower bound by
     trading day −0.0072 at 95%). With the hold lifted, the engine still does not run it (it waits for
-    a pre-validation, as any algorithm refused); ``simulate daily`` neither enrolls nor simulates
-    it; the simulation job is not due; and its scheduled pre-validation does not run again on the
-    same code."""
-    from krx_quant.prevalidation import admits, last_report
+    a pre-validation: it is refused, as any algorithm whose report refused the code it runs);
+    ``simulate daily`` neither enrolls nor simulates it; the simulation job is not due; and its
+    scheduled pre-validation does not run again on the same code."""
+    from krx_quant.prevalidation import admits, last_report, refusals
     from krx_quant.scheduled import FAILED, _daily_simulation_due
 
     s = settings(tmp_path, 420)
@@ -353,9 +362,10 @@ def test_cox_5d_refused_is_not_on_probation_and_nothing_starts_it(tmp_path: Path
     path = report_path(s.state_dir, "cox-5d")
     path.write_text(json.dumps({**json.loads(path.read_text()), "passed": False}))
     clock = FakeClock(datetime(2026, 10, 16, 7, 20, tzinfo=KST))
-    engine = _engine(s, algorithm, clock, admits(s.state_dir))
+    engine = _engine(s, algorithm, clock, admits(s.state_dir), refusals(s.state_dir))
     assert engine.daily_algorithms == () and "cox-5d" not in engine.store.statuses()
-    assert engine.waiting() == ["cox-5d"] and engine.held() == [], "refused: waits, not held"
+    assert engine.waiting() == [] and engine.held() == [], "refused: neither waiting nor held"
+    assert list(engine.refused()) == ["cox-5d"]
     engine.store.close()
 
     run = simulate_daily(s, algorithms=[algorithm], kinds=[RUNNING], now=NIGHT)
@@ -364,6 +374,7 @@ def test_cox_5d_refused_is_not_on_probation_and_nothing_starts_it(tmp_path: Path
     refused_tonight = {prevalidation_job_name("cox-5d"): JobRecord(LAST, FAILED, NIGHT, "c", 1, 63.0)}
     report = last_report(s.state_dir, algorithm)
     assert report is not None and report.current and not report.passed and report.judged
+    # Listed as waiting all the same, its report alone keeps the job from running it again.
     facts = Facts(waiting=("cox-5d",), reports={"cox-5d": report})
     night = Night(LAST, True, "c", None, refused_tonight, facts)
     assert not _daily_simulation_due([algorithm], [RUNNING])(night)
@@ -476,3 +487,68 @@ async def test_a_passed_algorithm_held_for_its_review_days_is_not_said_to_wait_a
         assert len(about) == 1 and about[0].startswith("판정일 보류: stand."), "one alert, the held one"
         assert "사전 검증 대기" not in about[0]
         e.store.close()
+
+
+async def test_a_refused_algorithm_is_told_once_across_restarts_and_waits_again_on_other_code(
+    tmp_path: Path,
+) -> None:
+    """#310: cox-5d's report refused the code it runs (2026-10-23). The review after the engine
+    starts tells it once as refused, never as waiting, and a restart the next morning does not tell
+    it again (``runs``: ``prevalidation_refused``). Once its code changes it waits for a new
+    pre-validation, told as before; a new refusal is told once again; and without a report it
+    waits, as any new algorithm."""
+    from krx_quant.engine import REFUSED_RUN
+    from krx_quant.prevalidation import admits, refusals
+    from krx_quant.replay import replay_into
+    from tests.test_lifecycle import Outbox
+
+    s = settings(tmp_path, 420)
+    algorithm = Cox5d()
+    passed(s, algorithm)
+    path = report_path(s.state_dir, "cox-5d")
+    stats = (
+        "weakest lift 0.0204 over 1698 scored predictions; run 1 on these days, by trading day at 95.00%:"
+        " weakest lower bound -0.0072 (above 0 to pass)"
+    )
+    refused = {
+        **json.loads(path.read_text()),
+        "passed": False,
+        "checks": [
+            {"check": "days", "passed": True, "detail": "1698 trading days predicted out of sample"},
+            {"check": "stats", "passed": False, "detail": stats},
+        ],
+    }
+    path.write_text(json.dumps(refused))
+    monday = date(2026, 10, 19)
+
+    async def start(day: date, waiting: list[str], refused: list[str]) -> list[str]:
+        """An engine started the morning of ``day``: what waits and what is refused, then what its
+        review at 15:40 tells of cox-5d."""
+        outbox = Outbox()
+        clock = FakeClock(datetime.combine(day, time(7, 20), KST))
+        e = _engine(s, algorithm, clock, admits(s.state_dir), refusals(s.state_dir), outbox)
+        assert (e.waiting(), list(e.refused())) == (waiting, refused)
+        await replay_into(e, clock, [], until=datetime.combine(day, time(15, 45), KST))
+        e.store.close()
+        return [m for m in outbox.sent if "cox-5d" in m]
+
+    [told] = await start(monday, [], ["cox-5d"])
+    assert told.startswith(f"사전 검증 거부: cox-5d (stats: {stats}). "), "its failed check, a line"
+    assert "state/prevalidations/cox-5d.json" in told
+    assert await start(monday + timedelta(days=1), [], ["cox-5d"]) == [], "a restart: told already"
+
+    path.write_text(json.dumps({**refused, "code": "0123456789abcdef"}))  # its code changed since
+    [waits] = await start(monday + timedelta(days=2), ["cox-5d"], [])
+    assert waits.startswith("사전 검증 대기: cox-5d. ")
+
+    path.write_text(json.dumps({**refused, "prevalidated_at": "2026-10-21T23:00:00+09:00"}))
+    [again] = await start(monday + timedelta(days=3), [], ["cox-5d"])
+    assert again.startswith("사전 검증 거부: cox-5d (stats: "), "a new refusal of the code it runs"
+    store = PredictionStore(s.state_dir / DB_NAME)
+    assert len(store.runs(REFUSED_RUN, datetime.combine(monday, time(), KST))) == 2
+    store.close()
+
+    path.unlink()  # no report: it waits, at each start
+    for day in (monday + timedelta(days=4), monday + timedelta(days=7)):
+        [waits] = await start(day, ["cox-5d"], [])
+        assert waits.startswith("사전 검증 대기: cox-5d. ")
