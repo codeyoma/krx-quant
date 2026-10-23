@@ -95,6 +95,7 @@ from krx_quant.market_calendar import MarketCalendar, calendar_store
 from krx_quant.predictions import DB_NAME, PredictionStore, SimKindPrediction
 from krx_quant.prevalidation import MIN_DAYS, _WalkForward, admits
 from krx_quant.replay import recorded_events, replay_recorded, sqlite_files
+from krx_quant.sample_store import NightReads, night_reads
 from krx_quant.touch import TARGET_VERSION
 from krx_quant.training import finished_days, is_recorded
 
@@ -554,6 +555,7 @@ async def simulate_bar_close(
             days = recorded[-BAR_CLOSE_DAYS:]
             calendar = calendar_store(settings).calendar
             leaders = Leaders.of(settings)
+            night = night_reads(algorithms, kind_algorithms, kinds)  # the stored days' key (#370)
             standings = store.statuses()
             done: list[Simulation] = []
             ready: list[_Candidate] = []
@@ -568,7 +570,7 @@ async def simulate_bar_close(
                 stint = standings[a.name].since
                 if kind_of(a) != DIRECTION and kind is None:
                     continue
-                trainer = _WalkForward(settings, a, available, calendar, leaders, kind)
+                trainer = _WalkForward(settings, a, available, calendar, leaders, kind, night=night)
                 model = trainer.before(days[0])
                 target = settings.target_version if kind is None else kind.answer_version
                 if model.target_version != target:
@@ -581,7 +583,7 @@ async def simulate_bar_close(
             if ready:
                 replayed = _sharing_the_budget(everyone, standings, ready)
                 done += await _replay_bar_close(
-                    store, settings, ready, replayed, kinds, available, days, calendar, now
+                    store, settings, ready, replayed, kinds, available, days, calendar, now, night
                 )
                 ruled = _judge_bar_close(store, settings, everyone, ready, kinds, now)
                 done = [ruled.get(s.algorithm, s) for s in done]
@@ -621,10 +623,13 @@ async def _replay_bar_close(
     days: Sequence[date],
     calendar: MarketCalendar,
     now: datetime,
+    night: NightReads | None = None,
 ) -> list[Simulation]:
     """Replay ``days`` with the ``replayed`` algorithms (``_sharing_the_budget``): the ``ready``
     ones on their once-trained models, the others on the server's, with their kinds' baselines;
-    keep what the candidates and their kinds' baselines predicted, each with its answer."""
+    keep what the candidates and their kinds' baselines predicted, each with its answer. The days
+    the tables and the climate are refitted on are read from the sample store when a night stored
+    them, by ``night``'s key (#370)."""
     db = settings.state_dir / "simulation-bar-close.sqlite3"
     for leftover in sqlite_files(db):
         leftover.unlink(missing_ok=True)
@@ -639,11 +644,17 @@ async def _replay_bar_close(
     # with their samples, are let go: a fresh one reads the answers only).
     tables_of = [
         _WalkForward(
-            settings, next(a for a in of_kinds if kind_of(a) == k.name), available, calendar, leaders, k
+            settings,
+            next(a for a in of_kinds if kind_of(a) == k.name),
+            available,
+            calendar,
+            leaders,
+            k,
+            night=night,
         )
         for k in kinds
     ]
-    climate_of = _WalkForward(settings, ready[0].algorithm, available, calendar, leaders)
+    climate_of = _WalkForward(settings, ready[0].algorithm, available, calendar, leaders, night=night)
     models = {**load_models(settings.state_dir, beside), **{c.algorithm.name: c.model for c in ready}}
     for day in days:
         tables: dict[str, Model] = {}

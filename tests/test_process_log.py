@@ -139,8 +139,8 @@ async def test_the_training_s_steps_and_the_kill_that_ended_it_reach_loki(fake_l
         f"logging.basicConfig(level=logging.INFO, format={FORMAT!r})\n"
         "log = logging.getLogger('krx_quant.nightly')\n"
         "log.info('started step %s', 'newton')\n"
-        "log.info('%s: %.1f s, peak %s MB (since the %s), %d days read, %d days cached',"
-        " 'newton', 41.2, 812, 'step', 23, 3)\n"
+        "log.info('%s: %.1f s, peak %s MB (since the %s), %d days read (%d made), %d days cached',"
+        " 'newton', 41.2, 812, 'step', 23, 1, 3)\n"
         "log.info('started step %s', 'turing')\n"
         "os.kill(os.getpid(), signal.SIGKILL)\n"
     )
@@ -152,7 +152,7 @@ async def test_the_training_s_steps_and_the_kill_that_ended_it_reach_loki(fake_l
     assert "started (pid " in first[1]
     assert [line.split(": ", 1)[1] for _, line in middle] == [
         "started step newton",
-        "newton: 41.2 s, peak 812 MB (since the step), 23 days read, 3 days cached",
+        "newton: 41.2 s, peak 812 MB (since the step), 23 days read (1 made), 3 days cached",
         "started step turing",
     ]
     assert last[0] == "error" and "ended: exit -9 (SIGKILL) after" in last[1]

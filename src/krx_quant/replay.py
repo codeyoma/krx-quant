@@ -174,18 +174,36 @@ def recorded_events(
     were recorded that day.
     """
     read = {f: c for f, c in ENGINE_FEEDS.items() if feeds is None or f in feeds}
-    streams: list[Iterator[Event]] = []
-    for feed, columns in read.items():
+    streams = [
+        _partition_rows(feed, files, read[feed])
+        for feed, files in recorded_partitions(data_dir, day, symbols, leaders, read)
+    ]
+    if not streams:
+        raise FileNotFoundError(f"no events of {', '.join(read)} recorded on {day} in {data_dir}")
+    # Stable: rows received at the same instant keep the order of the streams.
+    return heapq.merge(*streams, key=lambda event: event[1]["received_at"])
+
+
+def recorded_partitions(
+    data_dir: Path,
+    day: date,
+    symbols: Sequence[str],
+    leaders: Leaders | None = None,
+    feeds: Collection[str] | None = None,
+) -> list[tuple[str, list[Path]]]:
+    """The files ``recorded_events`` reads (``archive.partition_files``), by feed and partition, in
+    the order it reads them: each of the engine's feeds (of ``feeds`` only, if given) and the
+    partitions the engine reads of it, those with a file. The sample store (#370) keys a day by
+    them."""
+    out = []
+    for feed in [f for f in ENGINE_FEEDS if feeds is None or f in feeds]:
         root = data_dir / "events" / f"date={day.isoformat()}" / f"feed={feed}"
         for key in _keys(feed, root, symbols, leaders or Leaders()):
             partition = root / f"symbol={key}"
             files = partition_files(partition) if partition.is_dir() else []
             if files:
-                streams.append(_partition_rows(feed, files, columns))
-    if not streams:
-        raise FileNotFoundError(f"no events of {', '.join(read)} recorded on {day} in {data_dir}")
-    # Stable: rows received at the same instant keep the order of the streams.
-    return heapq.merge(*streams, key=lambda event: event[1]["received_at"])
+                out.append((feed, files))
+    return out
 
 
 def _keys(feed: str, root: Path, symbols: Sequence[str], leaders: Leaders) -> list[str]:

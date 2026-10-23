@@ -95,6 +95,10 @@ class MarketCalendar:
         """Every day this calendar was told about, and whether it trades."""
         return dict(self._open)
 
+    def first_known(self) -> date | None:
+        """The earliest day this calendar was told about; None if it knows none."""
+        return min(self._open, default=None)
+
     def is_trading_day(self, day: date) -> bool:
         known = self._open.get(day)
         if known is not None:
