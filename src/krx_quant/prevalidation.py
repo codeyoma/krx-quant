@@ -820,9 +820,10 @@ class _WalkForward:
     key of what it reads (``night``: the registries' features and kinds, as the night reads them) is
     read from there, only the features and answers asked for kept (``TrainingDay.keeping``): on a
     recorded day that is what making it with those alone gives, as the Market View follows every
-    feed whatever is asked. A backfilled day is made: its leaders' bars are read only for the lead
-    features (``training.training_day``), so a candidate without one gets no futures' moves there
-    (``kospi200f_moves`` empty) where the night's day has them. Nothing is stored."""
+    feed whatever is asked. A backfilled day is made (``training.training_day``), in seconds: the
+    night's too, kept to the candidate's features, as its leaders' bars are read for every feature
+    that reads them (``training.needs_leaders``, #373: ``kospi200f_moves`` has the futures' moves
+    for a candidate without a lead feature, as in the night's day). Nothing is stored."""
 
     def __init__(
         self,

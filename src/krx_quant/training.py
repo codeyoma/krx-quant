@@ -14,7 +14,9 @@ classified with the same flat band as live scoring. A day is read one of two way
   close, and the outcome the close four minutes later. A close jumps between the bid and
   the ask and back (bid-ask bounce); live scoring on mid-points never sees that. The lead
   groups are the other symbols, the futures' continuous series and the ETFs. Indices and
-  US daytime trades have no backfill, so their moves are unknown.
+  US daytime trades have no backfill, so their moves are unknown. The leaders' bars are read
+  when a feature that reads them is asked for (``LEADER_FEATURES``, ``needs_leaders``), whatever
+  else is: a day's values never depend on what else is asked (#373).
 
 A recorded day is read the first way even when it has backfilled bars too.
 
@@ -61,7 +63,7 @@ from krx_quant.contracts import KOSPI200, USD, days_to_expiry
 from krx_quant.engine import Event
 from krx_quant.features import (
     BARRIER_FEATURES,
-    LEAD_FEATURES,
+    LEADER_FEATURES,
     PREVIOUS_DAY_RANGE,
     SLOT_RETURN_DAYS,
     SLOT_RETURN_FEATURES,
@@ -206,7 +208,7 @@ def training_day(
     bar_days = bar_days_on(data_dir, symbols, [day])
     if len(bar_days) < len(symbols):
         return None
-    leader_days = load_leader_days(data_dir, leaders, [day]) if LEAD_FEATURES & set(names) else {}
+    leader_days = load_leader_days(data_dir, leaders, [day]) if needs_leaders(names) else {}
     made = samples(
         bar_days,
         calendar,
@@ -219,6 +221,15 @@ def training_day(
         previous=previous,
     )
     return TrainingDay("close", made, bar_answers(bar_days, calendar, fee_rate, kinds, previous=previous))
+
+
+def needs_leaders(names: Iterable[str]) -> bool:
+    """Whether a day's samples of the features ``names`` read the leaders' bars: one of them reads
+    them (``LEADER_FEATURES``: the lead groups' moves, the KOSPI200 futures' minute moves). Decided
+    by each feature's definition, so a feature has the same values whatever else is asked (#373:
+    with the lead features alone, ``kospi200f_moves`` had no futures' bars on a backfilled day made
+    for Kalman, and had them in the night's)."""
+    return bool(LEADER_FEATURES & set(names))
 
 
 def needs_previous_day(names: Iterable[str], kinds: Sequence[Kind] = ()) -> bool:
@@ -300,7 +311,7 @@ def samples(
     leaders = leaders or Leaders()
     stocks = _by_day(bar_days)
     series = _by_day(leader_days or {})
-    leading = bool(LEAD_FEATURES & set(names))  # leaders are sliced only when asked for
+    leading = needs_leaders(names)  # leaders are sliced only for the features that read them
     touch = TouchTerms() if target_version >= 2 else None  # no quotes: a one-tick spread
     names_held = declared(names)  # every sample's, one object (#355)
     out: list[Sample] = []
