@@ -22,7 +22,7 @@ from krx_quant.kind_registry import DAILY_KINDS
 from krx_quant.kinds import DIRECTION_KIND
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.open_to_close import OPEN_TO_CLOSE
-from krx_quant.open_to_close_5d import OPEN_TO_CLOSE_5D, REVIEW_HOLD
+from krx_quant.open_to_close_5d import OPEN_TO_CLOSE_5D
 from krx_quant.predictions import PredictionStore
 from krx_quant.replay import replay_into
 from tests.api_schema import check
@@ -64,9 +64,9 @@ async def get(client: TestClient[Any, Any], path: str, definition: str) -> Any:
     return body
 
 
-async def test_the_kind_is_listed_running_and_holding_its_review_days(tmp_path: Path) -> None:
-    """#310: the dividend probe's result lifted its gate (``daily.awaiting`` null); its algorithms'
-    review days are still held."""
+async def test_the_kind_is_listed_running_with_its_review_days_fixed(tmp_path: Path) -> None:
+    """#310: the dividend probe's result lifted its gate (``daily.awaiting`` null), and its review
+    days are fixed from the measured variance ratio (60, 120, 180; ``daily.review_hold`` null)."""
     e, clock = engine(tmp_path)
     await replay_into(e, clock, [], until=at(MONDAY, "08:51"))
     async with TestClient(TestServer(create_app(e))) as client:
@@ -76,7 +76,12 @@ async def test_the_kind_is_listed_running_and_holding_its_review_days(tmp_path: 
             5,
             "20:35",
             None,
-            REVIEW_HOLD,
+            None,
+        )
+        assert (daily["probation_days"], daily["bench_days"], daily["recent_days"]) == (
+            [60, 120, 180],
+            [60, 120, 180],
+            60,
         )
         assert kinds["open_to_close"]["daily"]["awaiting"] is None
         latest = await get(client, "/v1/symbols/005930/kinds/open_to_close_5d/latest", "kind_latest")
