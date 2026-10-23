@@ -42,7 +42,9 @@ class FakeKis:
     max_subscriptions: int | None = None
     # REST: tr_id -> function of the query params returning the JSON body to send, or the body
     # and response headers (e.g. KIS's continuation header ``tr_cont``). A request's own
-    # ``tr_cont`` header reaches the function as the param ``_tr_cont``.
+    # ``tr_cont`` header reaches the function as the param ``_tr_cont``. The function raises
+    # ConnectionResetError to drop the connection before answering, ConnectionAbortedError to
+    # drop it once the answer has begun, or an ``aiohttp.web.HTTPException`` to answer with it.
     rest_responses: dict[str, Callable[[dict[str, str]], RestAnswer]] = field(default_factory=dict)
     # Master files served under /master/<name>, e.g. "fo_idx_code_mts.mst.zip".
     masters: dict[str, bytes] = field(default_factory=dict)
@@ -64,6 +66,9 @@ class FakeKis:
     # REST requests received: (monotonic arrival time, tr_id, path, query params plus the
     # authorization header under "_auth").
     rest_requests: list[tuple[float, str, str, dict[str, str]]] = field(default_factory=list)
+    # The client's port of each REST request's connection, in the order of ``rest_requests``: a
+    # new port is a new connection.
+    rest_ports: list[int] = field(default_factory=list)
 
     _demo_count: int = 0
     _runner: web.AppRunner | None = None
@@ -241,11 +246,13 @@ class FakeKis:
             return web.Response(status=404)
         return web.Response(body=body, content_type="application/zip")
 
-    async def _rest(self, request: web.Request) -> web.Response:
+    async def _rest(self, request: web.Request) -> web.StreamResponse:
         h = request.headers
         tr_id = h.get("tr_id", "")
         query = {**request.query, "_auth": h.get("authorization", "")}
         self.rest_requests.append((time.monotonic(), tr_id, request.path, query))
+        peer = request.transport.get_extra_info("peername") if request.transport is not None else None
+        self.rest_ports.append(peer[1] if peer else 0)
         if (
             h.get("authorization", "").removeprefix("Bearer ") not in self.tokens_issued
             or h.get("appkey") != self.app_key
@@ -263,10 +270,19 @@ class FakeKis:
         try:
             answer = respond(params)
         except ConnectionResetError:
-            # Simulate KIS dropping the connection mid-request.
+            # Simulate KIS dropping the connection mid-request, before any answer.
             assert request.transport is not None
             request.transport.close()
             raise
+        except ConnectionAbortedError:
+            # Simulate KIS dropping the connection once its answer has begun: the status line and
+            # headers sent, the body cut short.
+            cut = web.StreamResponse(headers={"Content-Type": "application/json", "Content-Length": "100"})
+            await cut.prepare(request)
+            await cut.write(b'{"rt_cd": "0", "output"')
+            assert request.transport is not None
+            request.transport.close()
+            return cut
         body, headers = answer if isinstance(answer, tuple) else (answer, {})
         return web.json_response(body, headers=headers)
 

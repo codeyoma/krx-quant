@@ -40,7 +40,7 @@ import aiohttp
 from krx_quant import supply_probe
 from krx_quant.auth import tokens_and_client
 from krx_quant.config import Settings
-from krx_quant.kis import KisError, RestClient
+from krx_quant.kis import KisError, RestClient, rest_session
 from krx_quant.probe_fields import MISSING, day_of, flags, present, same
 from krx_quant.supply import KIS, NET_MARKET, NXT_OPENED, TOSS, read_supply
 from krx_quant.supply_probe import INVESTOR_DAILY, kis_error, parse
@@ -220,7 +220,7 @@ async def probe_net_buys(settings: Settings, today: date, out: Out = print) -> t
         + f". NXT 개장 {NXT_OPENED}."
     )
     out("")
-    async with aiohttp.ClientSession(timeout=timeout) as session:
+    async with rest_session(timeout=timeout) as session:
         tokens, client = tokens_and_client(session, settings, lambda: datetime.now().astimezone())
         asker = _Asker(client)
         out("1. 조회(묻는 날까지 30거래일)")

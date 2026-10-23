@@ -37,7 +37,7 @@ from krx_quant.config import Settings
 from krx_quant.contracts import KOSPI200, USD, Product, front_month
 from krx_quant.features import SLOT_RETURN_DAYS, day_slot_ranges, day_slot_returns
 from krx_quant.feeds.base import EVENT_TIME, KST, Row, kst, kst_day, to_float, to_int
-from krx_quant.kis import KisError, RestClient
+from krx_quant.kis import KisError, RestClient, rest_session
 from krx_quant.market_calendar import CalendarStore, MarketCalendar, calendar_store
 from krx_quant.ratelimit import RateLimiter
 from krx_quant.reference import Bar
@@ -526,7 +526,7 @@ async def run_backfill(settings: Settings, *, clock: Callable[[], datetime] | No
     because both would spend the app key's one REST limit.
     """
     now = clock or (lambda: datetime.now(KST))
-    async with aiohttp.ClientSession() as session:
+    async with rest_session() as session:
         _, client = tokens_and_client(session, settings, now)
         store = calendar_store(settings)
         await store.refresh(client, kst_day(now()))

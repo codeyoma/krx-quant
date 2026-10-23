@@ -20,7 +20,8 @@ from krx_quant.recorder import ParquetRecorder
 
 log = logging.getLogger(__name__)
 
-# A call that failed: logged, and asked again on the next interval.
+# A call that failed: logged, and asked again on the next interval. A connection KIS dropped
+# before answering has already been asked again once by the REST client (``kis.RestClient._ask``).
 CALL_ERRORS = (KisError, aiohttp.ClientError, OSError, ValueError, TimeoutError)
 # An answer that could not be normalized: kept raw only.
 NORMALIZE_ERRORS = (KeyError, ValueError, TypeError)
@@ -56,7 +57,8 @@ class PollJob:
 class Poller:
     """Runs poll jobs, including ones added while the collector is running.
 
-    A failed call is logged and retried on the next interval.
+    A failed call is logged and retried on the next interval (a dropped connection is first
+    asked again at once by the REST client).
     """
 
     def __init__(

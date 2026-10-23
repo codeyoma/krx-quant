@@ -22,12 +22,10 @@ from collections.abc import Callable
 from datetime import date, datetime, timedelta
 from typing import Any
 
-import aiohttp
-
 from krx_quant.auth import tokens_and_client
 from krx_quant.candles import CANDLES_PATH, CANDLES_TR
 from krx_quant.config import Settings
-from krx_quant.kis import KisError, RestClient
+from krx_quant.kis import KisError, RestClient, rest_session
 
 MARKETS = ("UN", "J", "NX")
 PERIODS = ("D", "W", "M", "Y")
@@ -137,7 +135,7 @@ async def probe_candles(settings: Settings, today: date, out: Out = print) -> in
     """Measure the period chart query and print the report; the number of calls made."""
     stock = settings.symbols[0]
     etfs = [s for s in settings.etf_symbols if s not in settings.symbols]
-    async with aiohttp.ClientSession() as session:
+    async with rest_session() as session:
         _, client = tokens_and_client(session, settings, lambda: datetime.now().astimezone())
         prober = _Prober(client, out)
         out(f"{CANDLES_TR} {CANDLES_PATH}, {today}")

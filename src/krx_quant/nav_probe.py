@@ -47,7 +47,7 @@ import aiohttp
 from krx_quant.auth import tokens_and_client
 from krx_quant.config import Settings
 from krx_quant.feeds.base import KST
-from krx_quant.kis import KisError, RestClient
+from krx_quant.kis import KisError, RestClient, rest_session
 from krx_quant.market_calendar import MarketCalendar, calendar_store
 from krx_quant.probe_fields import MISSING, day_of, describe, flags, order_of, present, same
 from krx_quant.products import PRODUCTS, Product, Structure
@@ -548,7 +548,7 @@ async def probe_nav(
         " · zero 모두 0 · empty 모두 빈 값 · missing 답에 없음."
     )
     timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
+    async with rest_session(timeout=timeout) as session:
         tokens, client = tokens_and_client(session, settings, lambda: datetime.now().astimezone())
         asker = _Asker(client)
         try:

@@ -60,7 +60,7 @@ import aiohttp
 from krx_quant.auth import tokens_and_client
 from krx_quant.config import Settings
 from krx_quant.feeds.base import KST
-from krx_quant.kis import KisError, RestClient
+from krx_quant.kis import KisError, RestClient, rest_session
 from krx_quant.market_calendar import MarketCalendar, calendar_store
 from krx_quant.nav_probe import (
     DAILY,
@@ -756,7 +756,7 @@ async def probe_krx_etf(
         return 0, 0
     deadline = monotonic() + BUDGET.total_seconds()
     timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
+    async with rest_session(timeout=timeout) as session:
         krx = Krx(session, settings, deadline)
         answers = [await krx.ask(day) for day in days]
         for answer in answers:
