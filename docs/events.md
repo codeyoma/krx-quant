@@ -390,8 +390,11 @@ KOSPI200 선물과 달러선물은 KIS 선물옵션 분봉조회(`FHKIF03020200`
 | `open` | int64 | 시가 단일가(원, 원래 가격). 찾지 못했으면 null |
 | `close` | int64 | 종가 단일가(원, 원래 가격). `none`이면 null |
 | `source` | string | `krx_minute_bar`(KRX 1분봉), `recorded_print`(녹화한 체결), `none`(그날 가격 없음) |
+| `close_volume` | int64 | `krx_minute_bar` 행의 종가 단일가 봉의 거래량(주). KRX 마감 흐름(#305)의 분모가 녹화가 없는 날 `close × close_volume`으로 읽는다. null: 아직 묻지 않음(이 열 전에 받은 행), 0: 봉에 거래량이 없거나 종가가 다름. 다른 출처의 행은 null |
 
 > **바뀜** (2026-10-20, #317): 새 파일. 이유: `open_to_close`의 종가를 KRX 일봉의 종가에서 종가 단일가로 바꿨다(정답 버전 2, #264).
+
+> **바뀜** (2026-10-24, #368): `close_volume` 열을 더했다. 이 열 전에 받은 `krx_minute_bar` 행은 배포 뒤 처음 한 번 그날의 종가 단일가 봉을 다시 물어(하루 한 종목에 1번) 거래량을 채운다. 이유: `check-closing-flow-305`(2026-10-23)가 KRX 단일가 봉의 거래량 × 종가가 녹화한 체결대금과 같다고 쟀다(9일, 세 종목).
 
 ## us_daily: 미국 일 종가 (Yahoo, #264)
 
@@ -457,24 +460,28 @@ KOSPI200 선물과 달러선물은 KIS 선물옵션 분봉조회(`FHKIF03020200`
 
 ## closing_flow: ETF 순자산 (REST, #305)
 
-`NetAssetKeeper`(`net_assets.py`)가 KIS ETF/ETN 현재가(`FHPST02400000`)에서 받은 단일종목 ±2배 ETF 16종(`products.PRODUCTS`)의 순자산이다. KRX 마감 흐름(#305)의 수요 A·(L² − L)·r이 거래일 t에 t의 전 거래일 행을 A로 읽는다. 출처, 날을 정하는 규칙, 받는 때는 [kis-feeds.md](kis-feeds.md#etf-순자산-305)에 있다.
+단일종목 ±2배 ETF 16종(`products.PRODUCTS`)의 순자산이다. 두 수집이 쓴다: `KrxNetAssetKeeper`(`krx_net_assets.py`)가 KRX Open API ETF 일별매매정보(`etf_bydd_trd`)에서 받은 것(`krx`, 상장일부터, [krx-openapi.md](krx-openapi.md))과 `NetAssetKeeper`(`net_assets.py`)가 KIS ETF/ETN 현재가(`FHPST02400000`)에서 받은 것(`kis`, [kis-feeds.md](kis-feeds.md#etf-순자산-305))이다. KRX 마감 흐름(#305)의 수요 A·(L² − L)·r이 거래일 t에 t의 전 거래일 행을 A로 읽는다.
 
 ```
 <KRX_STATE_DIR>/closing_flow/net_assets.parquet
 ```
 
 - **상태 폴더에 둔다.** 지난날의 순자산은 KRX Open API(`etf_bydd_trd`)에서 받기로 했고([design.md](design.md#41-출처) 4.1), 그 데이터는 제3자에게 넘기면 안 된다. 같은 파일에 출처마다 행을 두므로 업로드하는 데이터 폴더가 아니라 여기에 둔다. 서버 밖으로 나가지 않는다.
-- 상품, 날, 출처마다 한 행이다. 다른 출처의 행은 `source`를 달리해 같은 파일에 더한다(스키마는 그대로). 읽을 때는 출처 순서(`net_assets.SOURCES`, 지금은 `kis`뿐)의 첫 출처 행을 쓴다.
-- 파일은 통째로 바꾼다(임시 파일 `.net_assets.parquet.tmp`에 쓰고 이름을 바꾼다). 상품, 날, 출처 순이다.
-- 값이 없는 날(KIS가 0이나 빈 값을 준 날)은 행이 없다. 지운 행은 없다(10년이 지나도 남는다. 하루 16행이라 작다).
+- 상품, 날, 출처마다 한 행이다. 출처마다 `source`를 달리해 같은 파일에 둔다. 읽을 때는 상품마다 출처 순서(`net_assets.SOURCES` = `krx`, `kis`)의 첫 출처 행을 쓴다.
 
-| 열 | 타입 | KIS 필드 | 설명 |
-|---|---|---|---|
-| `code` | string | (조회의 `FID_INPUT_ISCD`) | 상품 코드(예: `0193W0`) |
-| `date` | date32 | `FHPST02440200`의 `stck_bsop_date` | 순자산의 날: 일별 NAV가 현재가의 `prdy_last_nav`와 같은 받기 전 거래일 |
-| `source` | string | | 출처: `kis` |
-| `net_assets` | int64 | `etf_ntas_ttam` × 1억 | 순자산(원) |
-| `fetched_at` | timestamp(s, Asia/Seoul) | | 이 값을 처음 받은 때. 같은 값을 다시 받으면 그대로 둔다 |
+  > **바뀜** (2026-10-24, #368): 출처는 `kis`뿐이었고 열은 다섯이었다 → `krx` 행이 더해지고, 그 상장좌수와 NAV를 담는 `shares`, `nav` 열이 생겼다(KIS 행은 null). 이유: KRX Open API 수집(#305). 이 배포 전의 파일도 그대로 읽는다(새 열은 null).
+- 파일은 통째로 바꾼다(임시 파일 `.net_assets.parquet.tmp`에 쓰고 이름을 바꾼다). 상품, 날, 출처 순이다.
+- 값이 없는 날(KIS가 0이나 빈 값을 준 날, KRX가 `-`·빈 값·0을 준 상품)은 행이 없다. 지운 행은 없다(10년이 지나도 남는다. 하루 32행이라 작다).
+
+| 열 | 타입 | KRX 필드 (`krx`) | KIS 필드 (`kis`) | 설명 |
+|---|---|---|---|---|
+| `code` | string | `ISU_CD` | (조회의 `FID_INPUT_ISCD`) | 상품 코드(예: `0193W0`) |
+| `date` | date32 | `BAS_DD`(물은 `basDd`와 같은 행만) | `FHPST02440200`의 `stck_bsop_date` | 순자산의 날. KIS는 일별 NAV가 현재가의 `prdy_last_nav`와 같은 받기 전 거래일이다 |
+| `source` | string | | | 출처: `krx` 또는 `kis` |
+| `net_assets` | int64 | `INVSTASST_NETASST_TOTAMT`(원) | `etf_ntas_ttam` × 1억 | 순자산(원) |
+| `fetched_at` | timestamp(s, Asia/Seoul) | | | 이 값을 처음 받은 때. 같은 값을 다시 받으면 그대로 둔다 |
+| `shares` | int64 | `LIST_SHRS` | (null) | 그날 거래소의 상장좌수 |
+| `nav` | double | `NAV` | (null) | 그날의 NAV |
 
 ## closing_flow: 마감 수요와 지난날 (#305)
 
@@ -497,8 +504,11 @@ KRX 마감 흐름(`closing_flow.py`)이 쓰는 두 파일이다. 엔진 API `GET
 | `r` | double | `price ÷ previous_close − 1` |
 | `demand`, `spot_futures`, `futures` | int64 | 수요 합(원, + 매수 − 매도)과 현물+선물형·선물형의 합. 그 구조의 상품에 순자산이 하나도 없으면 null |
 | `products`, `missing` | int64 | 순자산이 있어 센 상품 수, 없어 뺀 상품 수 |
+| `net_assets_source` | string | 센 상품의 순자산 출처(`krx`, `kis`, 상품마다 다르면 `krx+kis`). 이 열을 더하기 전(#368)에 쓴 행은 null이고, 그때 출처는 `kis`뿐이었다 |
 
-**`days.json`**: 지난날 표. 수집기가 시작할 때와 매일 20:30 이력 작업의 끝(1분봉 백필, 일봉, 기간 기준율 뒤)에 다시 계산해 통째로 바꾼다(`.days.json.tmp`). `{"computed_at": 시각, "symbols": {종목: {"days": [...], "auction_values": {날: {"value", "source"}}}}}`이다. `days`의 항목은 엔진 API `/closing-flow/days`의 `days[]`와 같다. `auction_values`는 1분봉이 있는 날 가운데 녹화한 종가 단일가가 있는 날의 체결대금과 출처(`recorded`)다. 그날의 비율 분모(전 20거래일 중앙값)를 이것으로 계산한다. 읽는 1분봉은 백필의 1년이다.
+**`days.json`**: 지난날 표. 수집기가 시작할 때와 매일 20:30 이력 작업의 끝(1분봉 백필, 일봉, 기간 기준율, 단일가 가격 뒤)에, 그리고 KRX Open API의 순자산이 들어온 뒤에 다시 계산해 통째로 바꾼다(`.days.json.tmp`, 한 번에 하나씩). `{"version": 2, "computed_at": 시각, "symbols": {종목: {"days": [...], "auction_values": {날: {"value", "source"}}}}}`이다. `days`의 항목은 엔진 API `/closing-flow/days`의 `days[]`와 같다. `auction_values`는 1분봉이 있는 날의 종가 단일가 체결대금과 출처(`recorded` 녹화한 체결, `krx_bar` KRX 단일가 봉, `integrated_bar` 통합 단일가 봉)다. 그날의 비율 분모(전 20거래일 중앙값)를 이것으로 계산한다. 읽는 1분봉은 백필의 1년이다. `version`이 2가 아니면 읽지 않는다(다음 계산이 바꾼다).
+
+> **바뀜** (2026-10-24, #368): `version`이 없었고 `auction_values`는 녹화한 종가 단일가가 있는 날(`recorded`)뿐이었다 → `version` 2, 녹화가 없는 날은 단일가 봉의 값. 이유: `check-closing-flow-305`가 단일가 봉이 녹화와 같다고 쟀고(2026-10-23), 날 줄에 `net_assets_source`, `denominator_sources`가 더해졌다.
 
 ## 실데이터 관찰 (2026-10-08, 삼성전자, 13시 전후 90초)
 
