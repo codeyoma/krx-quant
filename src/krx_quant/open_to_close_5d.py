@@ -65,6 +65,13 @@ product − 1, and the P&L on the stock's notional R ÷ L − 2 × fee ÷ L (``p
 flat call is no trade. Every day trades a new window, so a symbol holds up to five at once: the P&L
 is per trade, with no allocation. The intervals are Driscoll–Kraay ones (``stats.overlap_interval``),
 as every statistic of this kind's (``Kind.overlap``).
+
+**Review days** (#310 "상태 판정"): set by the rule (``daily.first_review_day``) from the variance
+ratio the overlap gives the day gains, measured once in cox-5d's pre-validation (2026-10-23:
+``VARIANCE_RATIO`` 2.220, the largest of the three baselines'), and fixed here: 60, 120 and 180 days
+with an answer for probation and the bench, the latest 60 for benching and recovering, 180 scored
+predictions and pairs at least (``FIRST_REVIEW_DAY``). A simulated probation (#298) replays the
+latest 60 ended windows.
 """
 
 from __future__ import annotations
@@ -87,7 +94,7 @@ from krx_quant.daily import (
     DailyInputs,
     DailyKind,
     DayPrices,
-    overlap_review,
+    OverlapReview,
 )
 from krx_quant.feeds.base import kst_day
 from krx_quant.kinds import Answer, KindForecast, KindScored
@@ -116,9 +123,14 @@ SESSIONS = 5
 ANSWER_VERSION = 1
 # The window's end day's KRX day candle is kept after the 20:30 backfill (``candles``).
 ANSWER_FROM = time(20, 35)
-# The variance ratio its review days are set by until one is measured (#310): five sessions'
-# overlap alone, 1 + 2 × (0.8 + 0.6 + 0.4 + 0.2).
-UNMEASURED_RATIO = 5.0
+# The variance ratio its review days are set by (#310 "상태 판정"): the largest of its first
+# algorithm's day gains over each baseline (Newey–West lag 8 long-run variance ÷ γ₀), measured by
+# ``prevalidate-cox-5d`` on the night of 2026-10-23 (cox-5d's ten-year walk-forward, 1,698 days):
+# otc5-flat 2.111, otc5-climate 2.220, otc5-persist 1.958.
+VARIANCE_RATIO = 2.2204939713737923
+# The first review day the rule gives it (``daily.first_review_day``), fixed: judged on 60, 120 and
+# 180 days with an answer, benched or recovered on its latest 60, with 180 scored predictions.
+FIRST_REVIEW_DAY = 60
 
 FLAT_NAME = "otc5-flat"
 CLIMATE = "otc5-climate"
@@ -388,14 +400,12 @@ def open_to_close_5d_stats(
 # The probe found the adjustment takes no dividend out and KIS marks the ex-dividend days, so it runs
 # with the spec's fallback: the answer as it is, the window marked (``ex_dividend``, #347).
 
-# Its review days until the variance ratio is measured (#310): the rule's at five sessions' overlap.
-_REVIEW = overlap_review(UNMEASURED_RATIO, SESSIONS)
-# Until then its algorithms are held out of probation (``DailyKind.review_hold``): their first
-# pre-validation measures the ratio (``daily_training``), and the days the rule gives it are fixed
-# here in a PR before any of them is judged on them.
-REVIEW_HOLD = (
-    "its review days are fixed from the variance ratio its first pre-validation measures (#310): not yet"
-)
+# Its review days, fixed from the measured variance ratio (#310). Its algorithms were held out of
+# probation until then (``DailyKind.review_hold``, #339); that hold is lifted, so one whose
+# pre-validation passes goes on probation on these days. Another algorithm of the kind measures the
+# ratio again in its report (``walk_forward.overlap``); if the rule gives it longer days than these,
+# an issue fixes them again (#310 "다음 알고리즘").
+_REVIEW = OverlapReview(VARIANCE_RATIO, SESSIONS, FIRST_REVIEW_DAY)
 
 OPEN_TO_CLOSE_5D = DailyKind(
     name=NAME,
@@ -418,5 +428,4 @@ OPEN_TO_CLOSE_5D = DailyKind(
     sessions=SESSIONS,
     answer_from=ANSWER_FROM,
     gives_up=NO_CANDLE,
-    review_hold=REVIEW_HOLD,
 )
