@@ -170,7 +170,7 @@ def logs_with(*messages: tuple[int, str]) -> RecentLog:
     return recent
 
 
-def test_the_summary_has_its_eight_parts_with_the_fields_as_the_api_names_them(tmp_path: Path) -> None:
+def test_the_summary_has_its_nine_parts_with_the_fields_as_the_api_names_them(tmp_path: Path) -> None:
     settings = server(tmp_path)
     record_pingpongs(
         settings.data_dir,
@@ -182,8 +182,9 @@ def test_the_summary_has_its_eight_parts_with_the_fields_as_the_api_names_them(t
     text = report(settings, NOW, Status(status_body(), "이 컨테이너의 엔진 API"), logs)
 
     titles = [line for line in text.splitlines() if line[:2] in {f"{n}." for n in range(1, 10)}]
-    assert [t[:2] for t in titles] == ["1.", "2.", "3.", "4.", "5.", "6.", "7.", "8."]
-    assert titles[-1].startswith("8. Loki 전송"), "the log folders' section went in #360"
+    assert [t[:2] for t in titles] == ["1.", "2.", "3.", "4.", "5.", "6.", "7.", "8.", "9."]
+    assert titles[-2].startswith("8. Loki 전송"), "the log folders' section went in #360"
+    assert titles[-1].startswith("9. 모델 파일"), "#361"
     assert text.startswith("서버 상태 2026-10-20 10:30:00 KST")
     assert f"commit {COMMIT} · started_at 2026-10-20T06:00:31+09:00 (4시간 29분 전)" in text
     assert "mode live · phase regular" in text
@@ -217,6 +218,40 @@ def test_the_summary_has_its_eight_parts_with_the_fields_as_the_api_names_them(t
     # The nightly training (#355): nothing kept yet here.
     assert "마지막으로 적용된 밤 없음 · 그 뒤 적용되지 않은 거래일 밤 0번" in text
     assert "기록된 밤 없음(이 기록은 #355부터)" in text
+
+
+def test_the_model_files_are_counted_on_the_server_and_in_the_store(tmp_path: Path) -> None:
+    """#361: how many model files and how large, each place, and the algorithm with the most."""
+    settings = server(tmp_path, object_store=str(tmp_path / "store"))
+    models = settings.state_dir / "models"
+    (models / "versions" / "turing").mkdir(parents=True)
+    (models / "versions" / "newton").mkdir(parents=True)
+    (models / "turing.json").write_text("t" * 3 * 1024 * 1024)
+    (models / "newton.json").write_text("n" * 2048)
+    (models / "history.json").write_text("[]")  # not a model
+    (models / "applied.json").write_text("{}")
+    for name, size in (("turing-a", 3 * 1024 * 1024), ("turing-b", 1024 * 1024), ("newton-a", 2048)):
+        (models / "versions" / name.split("-")[0] / f"{name}.json").write_text("x" * size)
+    for name in ("turing-a", "turing-b", "turing-c", "newton-a"):
+        path = tmp_path / "store" / "models" / name.split("-")[0] / f"{name}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("y" * 1024 * 1024)
+
+    text = report(settings, NOW, Status(status_body(), "x"))
+
+    assert (
+        "  state/models: 지금 모델 2개 3.0 MB · versions/ 3개 4.0 MB (알고리즘 2개, 가장 많은 turing 2개)"
+        in text
+    )
+    assert "  학습 저장소 models/: 4개 4.0 MB (알고리즘 2개, 가장 많은 turing 3개)" in text
+    assert str(tmp_path / "store") not in text, "where the store is stays out"
+
+
+def test_without_a_store_the_model_files_say_so(tmp_path: Path) -> None:
+    text = report(server(tmp_path), NOW, Status(status_body(), "x"))
+
+    assert "  state/models: 지금 모델 0개 0 KB · versions/ 0개 0 KB" in text
+    assert "  학습 저장소: 없음(KRX_OBJECT_STORE)" in text
 
 
 def test_it_shows_no_market_value_nor_a_secret_nor_the_server_s_address(tmp_path: Path) -> None:

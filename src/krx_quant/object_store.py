@@ -4,6 +4,10 @@ Two implementations share one interface: a local directory, for development and
 tests, and S3. Keys are ``/``-separated paths such as
 ``raw/date=2026-10-08/feed=H0UNCNT0/symbol=005930/data.parquet``. Every object carries
 the SHA-256 of its content, so a caller can tell whether a file is already stored.
+
+Only models are ever deleted (#361, ``delete``): on S3 the engine's IAM user may delete
+``engine/models/*`` and nothing else (``deploy/iam-policy.json``), and with the bucket's
+versioning a delete leaves the object a noncurrent version for 30 days.
 """
 
 from __future__ import annotations
@@ -13,12 +17,23 @@ import json
 import shutil
 import tempfile
 import uuid
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
 import boto3
 
 from krx_quant.config import Settings
+
+
+@dataclass(frozen=True)
+class Stored:
+    """An object as listed: its key, its size in bytes and when it was stored."""
+
+    key: str
+    size: int
+    modified: datetime  # aware
 
 
 class ObjectStore(Protocol):
@@ -39,6 +54,15 @@ class ObjectStore(Protocol):
 
     def keys(self, prefix: str = "") -> list[str]:
         """Every key starting with ``prefix``, sorted."""
+        ...
+
+    def objects(self, prefix: str = "") -> list[Stored]:
+        """Every object whose key starts with ``prefix``, sorted by key, with its size and
+        when it was stored."""
+        ...
+
+    def delete(self, key: str) -> None:
+        """Remove the object under ``key``; none there: nothing happens."""
         ...
 
 
@@ -91,15 +115,22 @@ class LocalObjectStore:
         shutil.copyfile(self._root / key, target)
 
     def keys(self, prefix: str = "") -> list[str]:
+        return [o.key for o in self.objects(prefix)]
+
+    def objects(self, prefix: str = "") -> list[Stored]:
         if not self._root.exists():
             return []
-        return sorted(
-            key
-            for p in self._root.rglob("*")
-            if p.is_file()
-            and not p.name.startswith(".")
-            and (key := p.relative_to(self._root).as_posix()).startswith(prefix)
-        )
+        found = []
+        for p in self._root.rglob("*"):
+            if p.is_file() and not p.name.startswith("."):
+                key = p.relative_to(self._root).as_posix()
+                if key.startswith(prefix):
+                    stat = p.stat()
+                    found.append(Stored(key, stat.st_size, datetime.fromtimestamp(stat.st_mtime, UTC)))
+        return sorted(found, key=lambda o: o.key)
+
+    def delete(self, key: str) -> None:
+        (self._root / key).unlink(missing_ok=True)
 
 
 class S3ObjectStore:
@@ -133,12 +164,22 @@ class S3ObjectStore:
         self._client.download_file(self._bucket, self._prefix + key, str(target))
 
     def keys(self, prefix: str = "") -> list[str]:
-        found: list[str] = []
+        return [o.key for o in self.objects(prefix)]
+
+    def objects(self, prefix: str = "") -> list[Stored]:
+        found: list[Stored] = []
         for page in self._client.get_paginator("list_objects_v2").paginate(
             Bucket=self._bucket, Prefix=self._prefix + prefix
         ):
-            found += [obj["Key"][len(self._prefix) :] for obj in page.get("Contents", [])]
-        return sorted(found)
+            found += [
+                Stored(obj["Key"][len(self._prefix) :], int(obj["Size"]), obj["LastModified"])
+                for obj in page.get("Contents", [])
+            ]
+        return sorted(found, key=lambda o: o.key)
+
+    def delete(self, key: str) -> None:
+        """A delete marker where the bucket keeps versions (the server's does, 30 days)."""
+        self._client.delete_object(Bucket=self._bucket, Key=self._prefix + key)
 
 
 def open_store(settings: Settings) -> ObjectStore | None:

@@ -65,8 +65,10 @@ fi
 aws s3api put-public-access-block --bucket "$bucket" --region "$region" \
   --public-access-block-configuration \
   BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
-# The engine may only overwrite, never delete, but an overwrite with a bad file would still
-# lose data: keep earlier versions for 30 days, and drop uploads that died half-way.
+# The engine may delete only the models it no longer keeps (engine/models/, #361), and may
+# overwrite everything; a delete or an overwrite with a bad file would still lose data: keep
+# earlier versions for 30 days (the engine cannot delete those), and drop uploads that died
+# half-way.
 aws s3api put-bucket-versioning --bucket "$bucket" --region "$region" \
   --versioning-configuration Status=Enabled
 aws s3api put-bucket-lifecycle-configuration --bucket "$bucket" --region "$region" \
@@ -80,7 +82,7 @@ aws s3api put-bucket-lifecycle-configuration --bucket "$bucket" --region "$regio
   }]
 }' >/dev/null
 
-echo "== IAM user $iam_user (this bucket only, no deletes)"
+echo "== IAM user $iam_user (this bucket only; deletes only under engine/models/)"
 if ! aws iam get-user --user-name "$iam_user" >/dev/null 2>&1; then
   aws iam create-user --user-name "$iam_user" >/dev/null
 fi

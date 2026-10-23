@@ -25,7 +25,14 @@ from krx_quant.collector import run_collector
 from krx_quant.fake_kis import FakeKis
 from krx_quant.feeds import KOSPI200_FUTURES, RAW_SCHEMA
 from krx_quant.feeds.base import KST
-from krx_quant.object_store import LocalObjectStore, ObjectStore, S3ObjectStore, get_json, put_json
+from krx_quant.object_store import (
+    LocalObjectStore,
+    ObjectStore,
+    S3ObjectStore,
+    Stored,
+    get_json,
+    put_json,
+)
 from krx_quant.recorder import ParquetRecorder
 from tests.kis_frames import trade_frame
 from tests.test_collector import settings_for
@@ -105,6 +112,12 @@ class Counting:
 
     def keys(self, prefix: str = "") -> list[str]:
         return self.store.keys(prefix)
+
+    def objects(self, prefix: str = "") -> list[Stored]:
+        return self.store.objects(prefix)
+
+    def delete(self, key: str) -> None:
+        self.store.delete(key)
 
 
 async def test_archiving_again_gives_the_same_objects_without_uploading_again(
@@ -337,3 +350,24 @@ def test_objects_can_be_listed_by_prefix_and_kept_as_json(store: ObjectStore) ->
     assert store.keys("reports/") == ["reports/2026-10-12/newton.json"]
     assert get_json(store, "promotions/2026-10-12.json") == {"day": "2026-10-12"}
     assert get_json(store, "promotions/2026-10-13.json") is None
+
+
+def test_objects_are_listed_with_their_size_and_time_and_can_be_deleted(store: ObjectStore) -> None:
+    """#361: the model prune reads each object's size and when it was stored, and deletes it."""
+    before = datetime.now(UTC) - timedelta(minutes=5)
+    put_json(store, "models/newton/newton-20261012-abc123.json", {"version": "newton-20261012-abc123"})
+    put_json(store, "models/newton/newton-20261013-def456.json", {"version": "newton-20261013-def456"})
+    put_json(store, "promotions/2026-10-12.json", {"day": "2026-10-12"})
+
+    listed = store.objects("models/")
+
+    assert [o.key for o in listed] == [
+        "models/newton/newton-20261012-abc123.json",
+        "models/newton/newton-20261013-def456.json",
+    ]
+    assert all(o.size > 0 and o.modified >= before for o in listed)
+    store.delete("models/newton/newton-20261012-abc123.json")
+    store.delete("models/newton/never-stored.json")  # nothing there: nothing happens
+    assert store.keys("models/") == ["models/newton/newton-20261013-def456.json"]
+    assert store.digest("models/newton/newton-20261012-abc123.json") is None
+    assert store.keys("promotions/") == ["promotions/2026-10-12.json"]

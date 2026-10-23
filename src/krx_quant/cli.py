@@ -742,7 +742,10 @@ def main(argv: list[str] | None = None) -> int:
         help="daily: the daily kinds' algorithms; bar-close: the direction's and the other kinds'"
         " (the latest recorded days, 10 to 20)",
     )
-    rollback_cmd = sub.add_parser("rollback", help="put an algorithm back on the model it ran before")
+    rollback_cmd = sub.add_parser(
+        "rollback",
+        help="put an algorithm back one step, on the model it ran before (only that one is kept, #361)",
+    )
     rollback_cmd.add_argument("algorithm")
     retire_cmd = sub.add_parser("retire", help="retire an algorithm: it is no longer run; its records stay")
     retire_cmd.add_argument("algorithm")

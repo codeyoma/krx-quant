@@ -12,6 +12,12 @@
       "Effect": "Allow",
       "Action": ["s3:GetObject", "s3:PutObject", "s3:AbortMultipartUpload"],
       "Resource": "arn:aws:s3:::BUCKET/*"
+    },
+    {
+      "Sid": "DeleteModelsOnly",
+      "Effect": "Allow",
+      "Action": ["s3:DeleteObject"],
+      "Resource": "arn:aws:s3:::BUCKET/engine/models/*"
     }
   ]
 }

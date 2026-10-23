@@ -18,6 +18,14 @@ Telegram token). The scheduled jobs (#215) wait for the night either way (``Nigh
 Each night's outcome is kept in the state folder (#355, ``training_nights``). A failure is
 alerted with the exit code and the last step the training started; from ``STREAK_ALERT`` nights
 in a row whose list does not run, each new one is alerted, restarts or not (``TrainingWatch``).
+
+The store keeps few models (#361, ``prune_store``): after each morning swap, whether it applied
+the latest night or let it wait, and when the collector starts (``tidy_models``, which also
+prunes ``state/models/versions``: the first start after the deploy deletes what had piled up),
+each algorithm's ``models/`` keeps the model the server runs, the one a rollback goes to
+(``Shelf.kept``) and the latest night's promoted one while that night is not applied. A model
+stored after the latest night's list was final belongs to a night still training (or was
+published since) and stays.
 """
 
 from __future__ import annotations
@@ -42,7 +50,7 @@ from krx_quant.daily import DailyAlgorithm
 from krx_quant.engine import PredictionEngine
 from krx_quant.feeds.base import KST, kst_day
 from krx_quant.market_calendar import MarketCalendar, next_on_trading_day
-from krx_quant.model_shelf import Shelf
+from krx_quant.model_shelf import Pruned, Shelf, size_text
 from krx_quant.nightly import (
     LIVE,
     TRAINING_CALENDAR_KEY,
@@ -53,7 +61,7 @@ from krx_quant.nightly import (
     training_settings,
 )
 from krx_quant.notify import Alerts
-from krx_quant.object_store import ObjectStore, file_digest, get_json, put_json
+from krx_quant.object_store import ObjectStore, Stored, file_digest, get_json, put_json
 from krx_quant.process_log import KRX_QUANT, Child, run_logged
 from krx_quant.training_nights import Failure, Outcome, TrainingNights, exit_text, last_step
 
@@ -289,6 +297,103 @@ def publish_live(
     put_json(store, LIVE, live)
 
 
+MODELS = "models/"  # the store's prefix of the models (``nightly.model_key``)
+
+
+def prune_store(store: ObjectStore, shelf: Shelf, today: date) -> Pruned:
+    """Delete the store's models no one needs (#361). Each algorithm's ``models/<name>/`` keeps
+    the model the server runs and the one a rollback goes to (``Shelf.kept``), the latest
+    night's promoted one while that night is not applied (it may still be, the next morning),
+    and what ``live.json`` names; the rest goes: the challengers not promoted, older models.
+    One to keep missing (but the one a rollback goes to after a rollback) leaves the algorithm
+    whole, warned. A model stored after the latest night's list was final stays: a night
+    training now stored it, or the server published it since. Without a night's list nothing
+    is deleted. A store that refuses a delete (the IAM user without ``s3:DeleteObject``) stops
+    it, warned."""
+    night = latest_night(store, today + timedelta(days=1))
+    if night is None:
+        return Pruned()
+    final = datetime.fromisoformat(night.finalized_at)
+    pending = {} if shelf.applied(night.day) else night.promoted
+    live: dict[str, str] = get_json(store, LIVE) or {}
+    by_name: dict[str, dict[str, Stored]] = {}
+    for found in store.objects(MODELS):
+        name, _, file = found.key.removeprefix(MODELS).partition("/")
+        if name and file.endswith(".json") and "/" not in file:
+            by_name.setdefault(name, {})[file.removesuffix(".json")] = found
+    pruned = Pruned()
+    for name, stored in sorted(by_name.items()):
+        kept = shelf.kept(name)
+        if kept is None:
+            log.warning(
+                "%s: the running model is not the one its history installed last; none deleted in the store",
+                name,
+            )
+            pruned += Pruned(skipped=(name,))
+            continue
+        required = kept.required | ({pending[name]} if name in pending else set())
+        keep = required | kept.optional | ({live[name]} if name in live else set())
+        missing = sorted(required - stored.keys())
+        if missing:
+            log.warning(
+                "%s: %s to keep is not in the store; none of its models deleted", name, ", ".join(missing)
+            )
+            pruned += Pruned(skipped=(name,))
+            continue
+        gone = [o for version, o in sorted(stored.items()) if version not in keep and o.modified <= final]
+        size = 0
+        for i, found in enumerate(gone):
+            try:
+                store.delete(found.key)
+            except (OSError, BotoCoreError, ClientError) as e:
+                log.warning(
+                    "the store refused to delete %s (%s); its models are pruned no further now"
+                    " (the engine's IAM user may delete engine/models/*: deploy/iam-policy.json)",
+                    found.key,
+                    _refusal(e),
+                )
+                return _pruned_store(pruned + Pruned(i, size))
+            size += found.size
+        if gone:
+            log.info(
+                "%s: deleted %d models (%s) from the store, kept %s",
+                name,
+                len(gone),
+                size_text(size),
+                " and ".join(sorted(keep & stored.keys())) or "none",
+            )
+        pruned += Pruned(len(gone), size)
+    return _pruned_store(pruned)
+
+
+def _refusal(e: Exception) -> str:
+    """A failed delete's kind: S3's error code (``AccessDenied``), never its text, which names
+    the account."""
+    if isinstance(e, ClientError):
+        return str(e.response.get("Error", {}).get("Code") or type(e).__name__)
+    return type(e).__name__
+
+
+def _pruned_store(pruned: Pruned) -> Pruned:
+    log.info(
+        "the store's models: deleted %d files (%s); %d algorithms left whole",
+        pruned.files,
+        size_text(pruned.size),
+        len(pruned.skipped),
+    )
+    return pruned
+
+
+def tidy_models(store: ObjectStore | None, shelf: Shelf, today: date) -> Pruned:
+    """At the collector's start (#361): ``state/models/versions`` and the store pruned by the
+    rules every install and morning swap follow. The first start after the deploy deletes what
+    had piled up; later ones find little."""
+    pruned = shelf.prune_all()
+    if store is not None:
+        pruned += prune_store(store, shelf, today)
+    return pruned
+
+
 async def keep_models(
     store: ObjectStore | None,
     shelf: Shelf,
@@ -315,6 +420,10 @@ async def keep_models(
             )
         except Exception:
             log.exception("could not read the last night or publish the live models")
+    try:  # after the publishing: what the server runs is in the store (#361)
+        await asyncio.to_thread(tidy_models, store, shelf, kst_day(now()))
+    except Exception:
+        log.exception("could not delete the models no longer kept")
     while True:
         await asyncio.sleep(WATCH_SECONDS)
         try:
@@ -332,6 +441,8 @@ async def keep_models(
                     shelf,
                     [*engine.registered, *engine.kind_registered, *engine.daily_registered],
                 )
+                # The night applied or left waiting: its challengers not promoted go (#361).
+                await asyncio.to_thread(prune_store, store, shelf, today)
             elif reload_models(engine, shelf) and store is not None:  # a fit or a rollback
                 await show_night(store, shelf, engine, kst_day(now()), watch)
                 await asyncio.to_thread(
