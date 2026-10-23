@@ -34,8 +34,8 @@ usermod -aG docker "$owner"
 
 echo "== swap"
 # The nightly training runs beside the engine on a 2 GB server; without swap the kernel's OOM
-# killer ended it (2026-10-22, #355). Made once, kept across reboots, left alone if any swap
-# is already on.
+# killer ended it (2026-10-22, #355). Made once and kept across reboots; a server that already
+# has swap on (any file or partition) is left alone, /etc/fstab included.
 if [[ -z "$(swapon --show --noheadings)" ]]; then
   if [[ ! -f /swapfile ]]; then
     fallocate -l 2G /swapfile
@@ -43,8 +43,8 @@ if [[ -z "$(swapon --show --noheadings)" ]]; then
     mkswap /swapfile
   fi
   swapon /swapfile
+  grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' >>/etc/fstab
 fi
-grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' >>/etc/fstab
 
 echo "== Tailscale"
 if ! command -v tailscale >/dev/null; then
