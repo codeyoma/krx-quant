@@ -30,6 +30,9 @@ server, or an agent reading an issue, looks at first when something seems wrong.
    says: on or off (and why), the lines sent, dropped and waiting, the last success and the last
    failure's kind (``HTTP 503``, never its text). Without the engine, what this command's
    settings say. (Section 8 was the log files under ``state/logs`` until #360 removed them.)
+9. The model files (#361): how many and how large, in ``state/models`` (the models the engine
+   runs, and ``versions/``) and in the store's ``models/``, with the algorithm that has the most
+   (two each once pruned; the store may keep a third, a night's promoted model not applied yet).
 
 The command reads the settings leniently (``doctor_settings``): a malformed one, which keeps
 the engine from starting, is a finding at the top, and the rest comes from the data and state
@@ -52,7 +55,7 @@ import re
 import shutil
 import threading
 from collections import Counter, deque
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from enum import Enum
@@ -68,10 +71,12 @@ from krx_quant.archive import partition_files
 from krx_quant.config import Settings, SettingsError, read_values
 from krx_quant.feeds.base import KST
 from krx_quant.market_calendar import calendar_store
+from krx_quant.model_shelf import Shelf, size_text
+from krx_quant.object_store import open_store
 from krx_quant.predictions import DB_NAME, iso, read_only
 from krx_quant.redaction import redact, secrets_of
 from krx_quant.scheduled import JOBS, STATE_FILE
-from krx_quant.swap import SWAP_AT
+from krx_quant.swap import MODELS, SWAP_AT
 from krx_quant.training_nights import FILE as NIGHTS_FILE
 from krx_quant.training_nights import TrainingNights
 
@@ -327,6 +332,7 @@ def report(
         ("6. 디스크와 메모리", lambda: _resources(settings, process)),
         ("7. 밤 학습", lambda: _training(settings, now)),
         ("8. Loki 전송", lambda: _loki(settings, status, now)),
+        ("9. 모델 파일", lambda: _models(settings)),
     ]
     sections = [head]
     for title, part in parts:
@@ -596,6 +602,57 @@ def _resources(settings: Settings, process: str) -> list[str]:
     if rss is not None:
         lines.append(f"  {process} 프로세스(VmRSS): {_mb(rss)}")
     return lines
+
+
+def _models(settings: Settings) -> list[str]:
+    """The model files (#361): their number and size, on the server and in the store. Names and
+    counts only: no model's contents."""
+    lines = ["9. 모델 파일 (#361: 알고리즘마다 지금 모델과 되돌리기가 갈 바로 전 모델만 남긴다)"]
+    root = settings.state_dir / "models"
+    running = [p for p in root.glob("*.json") if p.is_file() and p.name not in _NOT_MODELS]
+    kept = [p for p in root.glob("versions/*/*.json") if p.is_file()]
+    lines.append(
+        f"  state/models: 지금 모델 {len(running)}개 {_size(p.stat().st_size for p in running)}"
+        f" · versions/ {len(kept)}개 {_size(p.stat().st_size for p in kept)}"
+        + _most(Counter(p.parent.name for p in kept))
+    )
+    store = open_store(settings)
+    if store is None:
+        lines.append("  학습 저장소: 없음(KRX_OBJECT_STORE)")
+        return lines
+    try:
+        stored = [o for o in store.objects(MODELS) if o.key.endswith(".json")]
+    except Exception as e:  # S3 unreachable, or refused: the section says so
+        lines.append(f"  학습 저장소 {MODELS}: 읽지 못함({type(e).__name__})")
+        return lines
+    lines.append(
+        f"  학습 저장소 {MODELS}: {len(stored)}개 {_size(o.size for o in stored)}"
+        + _most(Counter(o.key.removeprefix(MODELS).partition("/")[0] for o in stored))
+    )
+    refused = Shelf(settings.state_dir).store_refused()
+    if refused is not None:
+        lines.append(
+            f"  학습 저장소가 모델 지우기를 거부함(마지막으로 {refused} 밤, AccessDenied 등): 엔진 IAM"
+            " 사용자의 정책에 engine/models/*의 s3:DeleteObject를 넣는다(operations.md 2.1)."
+            " 그동안 파일은 그대로 남는다"
+        )
+    return lines
+
+
+# The files in ``state/models`` that are not a model the engine runs (``model_shelf``).
+_NOT_MODELS = frozenset({"history.json", "applied.json", "store_refused.json"})
+
+
+def _size(sizes: Iterable[int]) -> str:
+    return size_text(sum(sizes))
+
+
+def _most(by_algorithm: Counter[str]) -> str:
+    """How many algorithms the files are of, and the one with the most."""
+    if not by_algorithm:
+        return ""
+    name, count = max(by_algorithm.items(), key=lambda item: (item[1], item[0]))
+    return f" (알고리즘 {len(by_algorithm)}개, 가장 많은 {name} {count}개)"
 
 
 def _loki(settings: Settings, status: Status, now: datetime) -> list[str]:

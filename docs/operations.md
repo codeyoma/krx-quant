@@ -66,8 +66,21 @@ deploy/create-aws.sh krx-quant-<이름>
 리전은 `AWS_REGION` 환경 변수, 없으면 `aws configure`에서 정한 리전(`ap-southeast-2`)을 쓴다. 모든 자원을 이 리전 하나에 만든다.
 
 이 스크립트가 만드는 것이다. 다시 돌려도 이미 있는 자원은 그대로 둔다.
-- S3 버킷: 시드니 리전에 만들고 공개 접근을 모두 막는다. 버전 관리를 켜서 덮어쓴 이전 버전을 30일 보관한다. 엔진은 지울 수 없지만 덮어쓸 수는 있어서, 잘못된 파일로 덮어써도 되돌릴 수 있게 하려는 것이다. 중간에 죽은 멀티파트 업로드는 7일 뒤 지운다(같은 수명 주기 규칙 `keep-replaced-versions-30-days`).
-- IAM 사용자 `krx-quant-engine`: 이 버킷만 읽고 쓸 수 있다. 삭제 권한은 없다(`deploy/iam-policy.json`).
+- S3 버킷: 시드니 리전에 만들고 공개 접근을 모두 막는다. 버전 관리를 켜서 덮어쓰거나 지운 이전 버전을 30일 보관한다. 엔진은 무엇이든 덮어쓸 수 있고 모델(`engine/models/`)은 지울 수 있어서, 잘못된 파일로 덮어쓰거나 잘못 지워도 되돌릴 수 있게 하려는 것이다. 지우면 삭제 표시만 생기고 지운 버전은 30일 뒤 사라진다. 엔진은 이전 버전을 지울 수 없다. 중간에 죽은 멀티파트 업로드는 7일 뒤 지운다(같은 수명 주기 규칙 `keep-replaced-versions-30-days`).
+- IAM 사용자 `krx-quant-engine`: 이 버킷만 읽고 쓸 수 있다. 지울 수 있는 것은 `engine/models/` 아래의 객체뿐이다(더는 남기지 않는 모델, #361, 3장 "모델 파일 정리 (#361)"). 정책은 `deploy/iam-policy.json`이다.
+
+  > **바뀜** (2026-10-23, #362): 삭제 권한이 없었다 → `engine/models/*`의 `s3:DeleteObject`만 있다(이전 버전을 지우는 `s3:DeleteObjectVersion`은 없다). 이유: 사용자가 모델을 지금 것과 바로 전 것만 남기기로 정했다(2026-10-23, #361). 버전 관리가 지운 객체를 30일 남기므로 잘못 지워도 되돌릴 수 있다.
+
+  **이미 만든 계정은 정책만 한 번 다시 넣는다(#362 배포 전후 아무 때나).** 서버의 학습 저장소는 S3(`KRX_OBJECT_STORE=s3://<버킷>/engine`)이고, 모델을 지우는 것은 학습 위치(`KRX_TRAIN_ON=server`든 `spot`이든)와 상관없이 서버의 수집기, 곧 IAM 사용자 `krx-quant-engine`이다. 그래서 지금 계정(밤 학습이 서버에서 돈다)에서도 넣어야 한다. 이 스크립트를 처음 돌린 맥에서, 같은 관리자 자격 증명으로 저장소 루트에서 돌린다. 정책 이름은 스크립트가 만든 인라인 정책 `krx-quant-data`이고, 이 명령은 그것을 새 `deploy/iam-policy.json`으로 바꿔 쓴다(다른 권한은 그대로다).
+  ```bash
+  aws iam put-user-policy --user-name krx-quant-engine --policy-name krx-quant-data \
+    --policy-document "$(sed "s/BUCKET/krx-quant-<이름>/g" deploy/iam-policy.json)"
+  aws iam get-user-policy --user-name krx-quant-engine --policy-name krx-quant-data \
+    --query 'PolicyDocument.Statement[].Sid'   # DeleteModelsOnly가 있으면 됐다
+  ```
+  콘솔로는 IAM → 사용자 → `krx-quant-engine` → 권한 → 인라인 정책 `krx-quant-data` → 편집 → JSON에 `deploy/iam-policy.json`의 세 문을 넣는다(`BUCKET`은 버킷 이름으로). `deploy/create-aws.sh krx-quant-<이름>`을 다시 돌려도 같은 정책을 넣는다(이미 있는 자원은 그대로 둔다).
+
+  넣기 전에도 엔진은 그대로 돈다. S3가 지우기를 거부하면(`AccessDenied`) 그 자리에서 멈추고 파일은 하나도 지우지 않는다. 경고는 밤마다 한 번(`the store refused to delete <키> (AccessDenied); its models stay, pruned no further now (the engine's IAM user may delete engine/models/*: deploy/iam-policy.json)`), 같은 밤의 다음 시도(07:20 재시작, 08:00 교체)는 INFO(`the store still refuses to delete …`)다. 08:00 교체와 밤 학습은 이 때문에 멈추거나 실패하지 않는다(정리는 교체가 끝난 뒤에 하고, 학습 프로세스는 지우지 않는다). 서버의 `state/models/versions`는 그대로 정리된다. `krx-quant doctor` 9절이 거부를 보인다(`학습 저장소가 모델 지우기를 거부함(마지막으로 <날짜> 밤, …)`). 정책을 넣은 뒤 첫 정리(다음 시작이나 08:00 교체)가 쌓인 것을 지우고 `the store deletes models again`을 남긴다.
 - Lightsail 인스턴스 `krx-quant`: Ubuntu 24.04다. 번들은 2GB, 공인 IPv4인 리눅스 번들을 자동으로 고른다(시드니는 `small_3_2`). 번들 ID가 리전마다 달라서다. `BUNDLE`로 직접 정할 수도 있다.
 - Lightsail 방화벽: TCP 22는 Lightsail 브라우저 SSH에서만, UDP 41641(Tailscale 직접 연결)은 모두에게 연다. 나머지는 모두 닫는다.
 - 자동 스냅샷: 매일 18:00 UTC(03:00 KST)에 뜬다. Lightsail은 최근 7개를 보관한다.
@@ -878,7 +891,7 @@ Toss: 109 calls, 1 failed; tokens issued: 0
 | 06:00–15:20 (거래일, 10분마다) | ETF 순자산(#305): 그날 15:20 수요가 읽을 전 거래일 순자산이 아직 없는 상품만 KIS에 다시 묻는다(상품마다 2번). 모두 들어오면 멈춘다. KIS가 다음 날로 넘어가는 시각을 재지 않아서다([kis-feeds.md](kis-feeds.md#etf-순자산-305)의 "수집") |
 | 07:20 (거래일) | 전날 이전부터 돌던 수집기가 스스로 멈추고 Docker가 다시 띄운다(`KRX_RESTART_AT`, #115). 그날의 KIS 마스터로 선물·옵션 월물과 등가격 ±2 행사가를 다시 고른다. 그날 06:00 배포로 시작한 수집기는 그대로다. 매크로(07:30)와 NXT 장전(08:00) 전이라, 새 수집기가 그날 매크로를 처음부터 읽고 녹화가 비지 않는다 |
 | 07:30 (거래일) | 매크로 지표(ECOS, FRED, Yahoo, 달러선물 백필)를 읽고 그날 국면을 정해 `macro` 계층에 기록한다(`KRX_MACRO_AT`). 실패한 출처는 10분 뒤 다시, 그날 아침 3번까지 읽는다. 다시 읽기는 개장 전에만 한다 |
-| 08:00 (거래일) | 아직 적용하지 않은 가장 최근 밤의 승격 목록대로 모델을 바꾼다. 바꾸거나, 목록을 쓰지 않으면 텔레그램으로 알린다 |
+| 08:00 (거래일) | 아직 적용하지 않은 가장 최근 밤의 승격 목록대로 모델을 바꾼다. 바꾸거나, 목록을 쓰지 않으면 텔레그램으로 알린다. 그다음 학습 저장소에서 더는 남기지 않는 모델(그 밤의 승격되지 않은 challenger, 오래된 모델)을 지운다(#361, 3장 "모델 파일 정리 (#361)") |
 | 08:50 (거래일) | 하루 한 번 예측 종류(#264, `open_to_close`)의 기준 예측과 알고리즘이 종목마다 그날 시가 단일가 → 종가 단일가의 방향을 예측한다(아래 "하루 한 번 예측 (#264)") |
 | 장중 | 실시간 녹화. 끊김과 지연은 `gaps`에 기록하고 텔레그램으로 알린다. VI 현황은 시가 동시호가부터 장 마감까지 5초마다, 외국인·기관 추정 가집계는 5분마다 조회한다 |
 | 09:01–15:16 매분 | 기준 예측 3종, 알고리즘, 빠른·최종 합의가 예측하고, 4분 뒤 채점한다. `state/engine.sqlite3`에 쌓인다. 방향 말고 다른 종류(#179. 지금은 변동폭, #180과 장벽, #183, 15·30·60분 장벽, #263)의 기준 예측과 알고리즘도 같은 봉 마감에 예측하고, 그 종류의 지평(4분, 15·30·60분 장벽은 그 분) 뒤 그 종류의 정답을 쓴다(`kind_predictions`, `kind_answers`). 15·30·60분 장벽은 창이 종가 단일가 시작을 넘는 봉 마감을 예측하지 않는다(마지막 봉 마감 보통 15:05, 14:50, 14:20) |
@@ -899,7 +912,7 @@ Toss: 109 calls, 1 failed; tokens issued: 0
 
 - 수집기가 시작할 때도 지난날 중 아직 안 올린 날을 올리고 백필과 일봉 갱신, 일별 수급 갱신을 돌린다. ETF 16종의 순자산도 받고(#305, 상품마다 2번), 이력 작업의 끝에 KRX 마감 흐름의 지난날 표도 계산한다. 일·주·월·년봉의 첫 전체 수집은 종목마다 수십~수백 번 묻고, 백필과 같은 속도(`KRX_BACKFILL_MAX_PER_SECOND`)로 간다. 일별 수급의 첫 수집(10년)도 같은 속도로 종목마다 KIS 약 210번, 토스 약 60번이다.
 - 거래일 07:30부터 개장(09:00) 전 사이에 수집기가 시작하면 매크로 지표를 바로 한 번 읽는다. 개장 뒤에 시작하면 다음 거래일 07:30에 읽는다. 그날 국면이 장중에 바뀌지 않게 하려는 것이다. 손으로 읽으려면 `docker compose run --rm --no-deps engine macro`(이 명령은 언제든 새 줄을 기록한다).
-- 수집기가 시작할 때 지난밤 학습 결과를 읽고, 지금 도는 모델을 S3에 올린다.
+- 수집기가 시작할 때 지난밤 학습 결과를 읽고, 지금 도는 모델을 S3에 올린다. 그다음 `state/models/versions`와 S3의 `models/`에서 더는 남기지 않는 모델을 지운다(#361, 3장 "모델 파일 정리 (#361)"). 배포 뒤 첫 시작이 그때까지 쌓인 것을 지운다.
 - 수집기가 시작해 엔진 API를 연 뒤, 지난 예측 중 도달 정답이 빠진 봉 마감을 녹화로 채운다(아래 "지난 예측의 도달 정답", #168). 이어서 다른 종류의 정답이 빠진 봉 마감도 채운다(아래 "종류의 지난 정답", #180). 마지막으로 특수 상황 구간을 아직 판정하지 않은 지난날을 채운다(아래 "지난 특수 상황 구간", #236).
 
 > **바뀜** (2026-10-15, #197): 매분 행의 "방향 말고 다른 종류가 등록되어 있으면(#179, 지금은 없다)" → 변동폭이 등록되어 있다. 이유: 첫 종류(#177).
@@ -1049,7 +1062,7 @@ Toss: 109 calls, 1 failed; tokens issued: 0
 
   > **바뀜** (2026-10-17, #274): 학습이 끝나면 그 밤에 쓴 가장 오래된 날보다 오래된 날짜를 모두 지웠다 → 그 날의 표본이 읽는 앞선 날은 남긴다. 밤 학습은 전 거래일 하루의 1분봉만 더 받았다 → 시간대 수익률이면 앞선 20거래일. 이유: 시간대 수익률(#265)의 20일 평균이 그 날들을 읽고, 지우면 다음 밤에 다시 받는다.
 - S3에 남는 것:
-  - `models/<알고리즘>/<버전>.json`: 모델
+  - `models/<알고리즘>/<버전>.json`: 모델. 알고리즘마다 서버가 돌리는 모델, 되돌리기가 갈 모델, 아직 적용되지 않은 가장 최근 밤의 승격 모델, 지금 학습 중인 밤의 모델만 남는다(아래 "모델 파일 정리 (#361)")
   - `reports/<날짜>/<알고리즘>.json`: 검증 리포트. 알고리즘 단위 체크포인트다. 학습이 중간에 죽어도 다시 돌리면 끝난 알고리즘은 건너뛴다. 이전 버전이 쓴 체크포인트(`commit`이 없다)는 근거 필드가 없어 다시 학습한다(#89). 다른 정답 버전으로 쓴 체크포인트(`target_version`이 다르다. 없으면 1)도 다시 학습한다(#191).
   - `promotions/<날짜>.json`: 승격 목록
   - `live.json`: 서버가 지금 돌리는 버전. 다음 밤의 champion이다. 사전 검증을 기다리는 알고리즘(#24)의 설치된 모델도 들어간다.
@@ -1072,15 +1085,16 @@ Toss: 109 calls, 1 failed; tokens issued: 0
   - 로컬 사본은 따로 두지 않는다. Object Store가 없으면(`KRX_OBJECT_STORE` 없음) 둘 다 `null`이다.
 - 수집기가 학습 시각 뒤 8시간 안에 다시 시작하면(배포, 장애) 그 밤의 학습을 바로 이어서 돌린다. 끝난 알고리즘은 건너뛴다. 학습이 6시간 안에 끝나지 않으면 멈추고 알린다.
 - 손으로 학습한 모델(`fit`)이 champion이면 검증일까지 학습했을 수 있다. 그러면 리포트의 `reason`에 `trained on these days`가 붙고, 이기기가 실제보다 어렵다.
-- 서버의 모델은 `state/models/<알고리즘>.json`이다. 설치한 버전은 `state/models/versions/`에, 언제 왜 바꿨는지는 `state/models/history.json`에 남는다.
+- 서버의 모델은 `state/models/<알고리즘>.json`이다. 지금 모델과 되돌리기가 갈 바로 전 모델은 `state/models/versions/`에, 언제 왜 바꿨는지는 `state/models/history.json`에 남는다(지운 버전의 항목도 남는다).
 - 상태는 `curl http://krx-quant:8080/v1/status`의 `training`(지난밤 날짜, 적용 여부, 알고리즘별 결과)과 `/v1/algorithms`의 모델 버전, 학습 정보(`model.training`), 검증 손실(`validation`)로 본다.
 
 ```bash
 docker compose run --rm --no-deps engine train            # 밤 학습을 지금 한 번 (끝난 밤이면 그대로 둔다)
-docker compose exec engine krx-quant rollback granger     # 직전 모델로 되돌린다. 엔진이 1분 안에 바꾼다
+docker compose exec engine krx-quant rollback granger     # 한 단계(직전 모델로) 되돌린다. 엔진이 1분 안에 바꾼다
 ```
 
 - 되돌린 모델은 다음 승격까지 유지된다. 이미 적용한 승격 목록을 다시 적용하지 않는다.
+- 되돌리기는 한 단계까지다(#361). 바로 전 모델만 남기므로, 한 번 되돌린 뒤에는 그 전 모델이 보통 이미 지워져 있다. 그때 다시 `rollback`하면 기본 모델로 가고 경고 로그를 남긴다(`<이름>: <버전> is no longer kept; rolled back from <버전> to the defaults`). 도달 정답에서는 기본 모델이 그 정답으로 학습하지 않았으므로 거부한다(`<버전> is no longer kept (a rollback goes back one step only), and its defaults were not trained on target 3; …`, 종료 코드 1). 되돌린 뒤 새로 승격되거나 `fit`하면 되돌렸던 모델이 다시 바로 전 모델이 된다.
 - 도달 정답(`KRX_TARGET_VERSION=3`)에서는 지금 버전의 도달 정답으로 학습한 모델로만 되돌린다(#193, #187). 정답 버전 2의 모델로도 되돌리지 않는다. 직전이 옛 정답 모델이나 기본 모델이면 `rollback`은 이유를 말하고 거부한다(종료 코드 1). 그때는 `fit`으로 새로 학습하거나 밤 학습을 기다린다. 엔진도 도달 정답 모델을 돌리는 알고리즘을 다른 정답의 모델(기본 모델 포함)로 바꾸지 않고 로그에 남기며, 다른 정답의 모델을 돌리는 정식 알고리즘은 합의에서 뺀다.
 
   > **바뀜** (2026-10-14, #193): 어느 모델로든 되돌렸다 → 도달 정답에서는 같은 정답의 모델로만. 이유: 옛 정답 모델로 되돌린 정식 알고리즘이 합의와 신호에 들어가고, 수습 날짜는 계속 세지만 그 예측은 판정에서 빠지는 일을 막으려고(리뷰).
@@ -1089,6 +1103,17 @@ docker compose exec engine krx-quant rollback granger     # 직전 모델로 되
 - 특정 밤을 다시 돌리려면 `docker compose run --rm --no-deps engine train --day 2026-10-12`. 이미 끝난 밤이면 그 결과를 그대로 보여 주고 텔레그램으로 다시 보내지 않는다.
 
 > **바뀜** (2026-10-10, #45): 모델을 바꾸려면 엔진을 재시작하고, 되돌리려면 `state/models/<이름>.json`을 지우고 재시작했다(기본 모델로만 돌아갔다) → 엔진이 30초마다 모델 파일을 보고 스스로 바꾼다. `krx-quant rollback <이름>`이 직전 모델로 되돌리고, 이력은 `state/models/history.json`과 `versions/`에 남는다. 이유: 08:00 교체와 명령 하나로 되돌리기(#22 요구사항)를 위해서다.
+
+**모델 파일 정리 (#361).** 사용자가 2026-10-23에 정했다: 모델이 승격되면 지금 모델과 바로 전 모델 하나만 남기고 나머지는 지운다. 되돌리기는 한 단계까지 된다.
+- **서버(`state/models/versions/<알고리즘>/`).** 설치할 때마다(08:00 승격, `fit`, `rollback`) 그 알고리즘의 지금 모델과 되돌리기가 갈 모델(그 전에 설치한, 지금과 다른 가장 최근 모델)만 남기고 나머지 `.json`을 지운다. 되돌린 뒤에는 되돌리기 전의 모델도 지운다. 기본 모델로 돌아갔으면 아무것도 남기지 않는다. `state/models/<알고리즘>.json`(지금 모델)과 `history.json`(지운 버전의 항목도 남는다), `applied.json`은 그대로다.
+- **학습 저장소(S3 `models/<알고리즘>/`).** 08:00 교체 뒤마다(가장 최근 밤의 목록을 적용했든, 07:30 뒤 확정이라 그날 쓰지 않기로 했든) 알고리즘마다 서버가 돌리는 모델, 되돌리기가 갈 모델(서버의 것과 같다), `live.json`이 가리키는 모델, 아직 적용되지 않은 가장 최근 밤의 승격 모델(다음 아침에 쓸 수 있다)만 남긴다. 그 밤의 승격되지 않은 challenger와 오래된 모델은 지운다. 가장 최근 목록이 확정된 뒤에 저장된 모델(지금 학습 중인 밤의 것, 그 뒤 서버가 올린 모델)은 남긴다. 승격 목록이 하나도 없으면 아무것도 지우지 않는다. 리포트(`reports/`)와 승격 목록(`promotions/`)은 지우지 않는다.
+- **대상.** 4분 방향 알고리즘, 종류별 알고리즘(`mandelbrot`, `breiman` 등), 하루 한 번 알고리즘(`cox` 등), 기준 예측의 표(`baseline-climate`, `range-climate`, `barrier-climate`, `barrier-climate-<H>m`)가 같은 규칙이다. 사전 검증과 수습 시뮬레이션(#298)은 재생 안에서만 학습하고 모델 파일을 남기지 않는다. 그 결과(`state/prevalidations/`, `state/prevalidation-<이름>.sqlite3`, `state/simulation-bar-close.sqlite3`, `engine.sqlite3`의 시뮬레이션 표)는 이 정리와 상관없다.
+- **안전.** 지우기 전에 남길 목록을 만든다. 남길 파일이 하나라도 없으면 그 알고리즘은 그곳에서 하나도 지우지 않고 경고 로그를 남긴다: `<이름>: <버전> to keep is not in state/models/versions; no model file deleted`, `<이름>: <버전> to keep is not in the store; none of its models deleted`. 되돌린 뒤의 그 전 모델은 없어도 된다(이미 지웠을 수 있다). 지금 모델 파일이 이력의 마지막 설치와 다르면(손으로 바꾼 파일)도 지우지 않는다(`the running model is not the one its history installed last`). 지우는 것은 모델 폴더(`state/models/versions/<알고리즘>/`, 저장소의 `models/<알고리즘>/`) 안의 `.json`뿐이다.
+- **처음 한 번.** 수집기가 시작할 때마다(06:00 배포, 07:20 재시작) 지금 도는 모델을 올린 뒤 두 곳을 같은 규칙으로 정리한다. 이 변경이 배포된 뒤 첫 시작이 그때까지 쌓인 것을 지우고, 그 뒤로는 지울 것이 거의 없다. 지운 파일 수와 크기는 INFO 로그로 Loki에 간다: `state/models/versions: deleted <N> model files (<크기>) of <K> algorithms; <M> left whole`, `the store's models: deleted <N> files (<크기>); <M> algorithms left whole`, 그리고 알고리즘마다 `<이름>: deleted <N> model files (<크기>) from state/models/versions, kept …`, `<이름>: deleted <N> models (<크기>) from the store, kept …`. 08:00 교체 뒤에도 같은 줄이 남는다.
+- **S3에서 지우면.** 삭제 표시만 생기고, 지운 버전은 버킷 버전 관리로 30일 남았다가 사라진다(2.1). 그동안은 되살릴 수 있고, 용량은 30일 뒤에 준다. 엔진의 IAM 사용자는 `engine/models/*`만 지울 수 있다(`deploy/iam-policy.json`). 지금 계정은 정책을 한 번 다시 넣어야 한다(2.1의 명령). 넣기 전에는 S3가 거부하고, 파일은 그대로 남고, 경고는 밤마다 한 번이다(같은 밤의 다음 시도는 INFO. 그 밤은 `state/models/store_refused.json`에 남는다). 08:00 교체와 밤 학습은 그대로 돈다. 서버 쪽(`versions/`)은 그대로 정리된다. 저장소를 읽지 못해도(S3에 닿지 않음) 아무것도 지우지 않고 경고(`could not prune the store's models (<종류>); none deleted now`)만 남긴다.
+- `krx-quant doctor` 9절이 두 곳의 모델 파일 수와 크기를 보인다(6장 "서버 상태 보기 (#322)").
+
+> **바뀜** (2026-10-23, #362): 설치한 모든 버전을 `state/models/versions/`에, 밤마다 학습한 모든 모델(승격되지 않은 challenger도)을 S3 `models/`에 남겼고, `rollback`을 거듭하면 설치한 순서를 거슬러 계속 되돌아갔다 → 알고리즘마다 지금 모델과 바로 전 모델만 남기고(S3는 아직 적용되지 않은 밤의 승격 모델과 학습 중인 밤의 모델도) 되돌리기는 한 단계까지다. 이유: 모델 파일이 지워지지 않고 쌓였고(LightGBM 모델인 Turing, Neyman, Breiman과 지평 사다리가 커서 가장 빨리 늘었다), 사용자가 2026-10-23에 정했다(#361).
 
 ### 밤 학습을 EC2 Spot으로 옮기기 (#23)
 
@@ -1550,7 +1575,7 @@ docker compose logs --tail 200 engine
 | AWS 호출이 `... with an explicit deny in a service control policy`로 거부됨 | 서버 `.env`의 `AWS_REGION`, 맥이면 `aws configure get region` | AWS Settings 프로젝트 계정은 시드니(`ap-southeast-2`) 밖의 리전을 막는다(1장). `AWS_REGION=ap-southeast-2`로 고치고 `docker compose up -d`. 리전이 맞는데도 거부되면 계정 정책이 그 동작 자체를 막는 것이다(예: Spot, 8장). 메시지 끝의 `Encoded authorization failure message`를 맥에서 `aws sts decode-authorization-message`로 풀면 막은 문(`Sid`)이 보인다. 2026-10-14에 서버의 `AWS_REGION=ap-northeast-2`(서울)가 이것으로 ECR 로그인을 막았다(#23). |
 | `[신호] <종목> 상승 64% · 정식 3개 중 2개 같은 방향 · 09:31 봉 마감, 09:35까지` | `/v1/symbols/<종목>/latest`의 `consensus-final` | `KRX_SIGNAL_ALERT=on`일 때만 온다. 장애가 아니라 예측 신호다. 같은 종목·방향은 4분 안에 다시 오지 않는다(엔진을 다시 시작해도). VI·서킷브레이커에 걸리거나, 기준가가 없거나, 목표 시각이 지난 신호는 오지 않고 로그에 `signal blocked (<이유>)`, DB `runs`에 `signal_blocked`로 남는다. 주문 코드는 없다. |
 | `[알림] <날짜> 밤 학습`과 알고리즘별 `승격`·`유지`·`학습 안 함` | | 매일 밤 학습의 요약이다. 할 일은 없다. 승격된 모델은 다음 거래일 08:00에 바뀐다. `승격(정답 바뀜, 성적 비교 없이)`은 지금 모델이 다른 정답 버전이라 성적과 상관없이 올린 것이다(#170, 3장 "정답이 바뀌는 날"). |
-| `[알림] 모델 교체 (<날짜> 밤 학습): <알고리즘> → <버전>` | `/v1/status`의 `training` | 08:00 교체가 됐다. 되돌리려면 `docker compose exec engine krx-quant rollback <이름>`. |
+| `[알림] 모델 교체 (<날짜> 밤 학습): <알고리즘> → <버전>` | `/v1/status`의 `training` | 08:00 교체가 됐다. 되돌리려면 `docker compose exec engine krx-quant rollback <이름>`(한 단계까지, #361). |
 | `[알림] <날짜> 밤 학습 결과를 쓰지 않습니다: <이유>` | `/v1/status`의 `training.reason` | 전날 모델이 계속 돈다. `final at ..., after 07:30`이면 다음 아침에 쓴다(더 새 밤이 없으면). `not in the store: ...`면 S3에 모델이 없는 것이다. 다음 아침에 다시 시도한다. |
 | `[알림] 자동 업데이트: <이전> → <새 커밋>` | | 06:00 자동 업데이트가 됐다. 할 일은 없다. |
 | `[알림] 자동 업데이트 실패: <커밋>이 시작되지 않아 ...` | `journalctl -u krx-quant-update -n 50`, `docker compose logs --tail 200 engine` | 새 커밋이 3분 안에 API에 답하지 않아 이전 커밋으로 되돌렸다. 고친 커밋을 main에 올리면 다음 06:00에 받는다. "되돌렸지만 엔진이 응답하지 않습니다"면 4장의 SQLite 스키마 주의를 본다. |
@@ -1596,11 +1621,13 @@ docker compose run --rm engine doctor
 
 설정이 틀려 엔진이 뜨지 못할 때(`configuration error`)도 `doctor`는 돈다. 다른 명령과 달리 설정 오류로 끝나지 않고, 머리줄 아래 `설정 오류: <오류>`로 적은 뒤 데이터·상태 폴더(`KRX_DATA_DIR`, `KRX_STATE_DIR`), 엔진 API 주소(`KRX_API_HOST`, `KRX_API_PORT`), `KRX_COMMIT`, 가릴 비밀값만 그대로 읽어 나머지 절을 낸다. 다른 설정은 모르므로 5절의 `KRX_JOBS_AT`은 `?`다. 8절은 이 명령이 읽은 Loki 설정을 그대로 쓴다.
 
-**출력.** 머리줄(시각) 아래 여덟 절이다. 필드 이름은 `/v1/status`의 것 그대로다.
+**출력.** 머리줄(시각) 아래 아홉 절이다. 필드 이름은 `/v1/status`의 것 그대로다.
 
 > **바뀜** (2026-10-23, #357, #359): 여섯 절 → 여덟 절(7절 밤 학습, 8절 로그 파일). 이유: 적용되지 않은 밤 학습을 보이고(#355), 로그를 상태 폴더에 날마다 남기게 되어(#356) 그 폴더의 상태도 보인다.
 
 > **바뀜** (2026-10-23, #360): 8절 로그 파일(`state/logs`의 종류마다 파일 수, 크기, 날, 합계와 `KRX_LOG_MAX_MB`, 꾸러미) → 8절 Loki 전송. 이유: 사용자가 로그를 Grafana Cloud Loki로만 남기기로 정했다(2026-10-23). 로그 파일이 없어졌고, 그 대신 Loki로 보내는 것이 되는지 보인다(#358).
+
+> **바뀜** (2026-10-23, #362): 여덟 절 → 아홉 절(9절 모델 파일). 이유: 모델 파일을 알고리즘마다 둘만 남기게 되어(#361) 그 수와 크기를 보인다.
 
 1. 엔진: `commit`, `started_at`(그리고 지난 시간), `mode`, `phase`, `now`. 엔진 API는 이 컨테이너의 것(`127.0.0.1:8080`), 그다음 compose의 `engine` 서비스 순서로 묻는다. 둘 다 닿지 않으면 각각의 이유, DB `runs`의 마지막 `start`(시각과 커밋), 이 명령 이미지의 `KRX_COMMIT`을 적는다.
 2. KIS: `kis.connected`, `kis.last_frame_at`, `kis.seconds_since_frame`(#311), 피드·키 수와 60초 넘게 조용하거나 아직 안 온 키 수, 열린 `gap` 수, 그리고 피드·키마다 `feed key last_received_at seconds_since gap` 한 줄(오늘이면 시각만, 아니면 날짜도).
@@ -1620,6 +1647,8 @@ docker compose run --rm engine doctor
 6. 디스크와 메모리: 데이터와 상태 폴더의 여유·전체 용량(같은 디스크면 그렇다고), `/proc/meminfo`의 사용 가능·전체 메모리와 스왑, 컨테이너의 cgroup 사용량과 한도, 그 프로세스의 `VmRSS`(명령이면 그 명령, 서버 요약이면 엔진).
 7. 밤 학습(#355): 마지막으로 적용된 밤(`state/models/applied.json`)과 그 뒤 적용되지 않은 거래일 밤의 수와 날짜(`/v1/status`의 `training.nights_not_applied`와 같다), 최근 다섯 밤의 결과(`state/training_nights.json`): 끝남이면 끝난 시각, 실패면 끝난 시각, 종료 코드, 마지막으로 시작한 단계. 이 기록은 #355가 배포된 뒤의 밤부터다.
 8. Loki 전송(#358): 엔진의 `/v1/status` `loki`다. 켜짐이면 보낸 줄(Loki가 받은 줄), 버린 줄, 버퍼에 기다리는 줄, 마지막 성공 시각과 지난 시간, 마지막 오류의 종류(`HTTP 503`, `URLError(ConnectionRefusedError)`. 오류의 글은 싣지 않는다)와 그 시각이다. 꺼짐이면 그 이유(`KRX_LOKI_TOKEN is not set: …`)다. 엔진에 닿지 않거나 #358 전의 엔진이면 그렇다고 적고, 이 명령이 읽은 세 설정으로 켜질지를 적는다(6장 "Grafana Cloud Loki로 보내는 로그 (#358)").
+
+9. 모델 파일(#361): `state/models`의 지금 모델(`<알고리즘>.json`. `history.json`과 `applied.json`은 빼고)과 `versions/`의 파일 수와 크기, 학습 저장소 `models/`의 파일 수와 크기, 그리고 각각 알고리즘 수와 파일이 가장 많은 알고리즘이다: `state/models: 지금 모델 21개 12.3 MB · versions/ 40개 24.0 MB (알고리즘 21개, 가장 많은 turing 2개)`, `학습 저장소 models/: 43개 26.1 MB (알고리즘 21개, 가장 많은 turing 3개)`. 정리된 뒤에는 `versions/`가 알고리즘마다 2개까지다. 저장소는 아직 적용되지 않은 밤의 승격 모델이나 학습 중인 밤의 모델이 있으면 그보다 많다. 저장소가 없으면 `학습 저장소: 없음(KRX_OBJECT_STORE)`, 읽지 못하면 오류의 종류만 적는다. 저장소가 모델 지우기를 거부한 적이 있고 아직 다시 되지 않았으면(`state/models/store_refused.json`) `학습 저장소가 모델 지우기를 거부함(마지막으로 <날짜> 밤, AccessDenied 등): …`과 할 일(2.1의 IAM 정책)을 한 줄 더 적는다. 저장소의 위치(버킷)는 적지 않는다.
 
 한 절을 읽다 실패하면 그 절에 이유를 적고 나머지 절은 그대로 낸다.
 
@@ -1798,8 +1827,9 @@ LogQL 문법은 2026-10-23에 커넥터로 스택에 물어 확인했다(그때�
 | `prevalidations/<알고리즘>.json` | 사전 검증 리포트(`passed`, 검사별 결과, 통계, 정답 버전. 다른 종류의 알고리즘은 `kind`도, #179). 엔진이 봉 마감마다 기다리는 알고리즘의 것을 읽는다([engine-api.md](engine-api.md#사전-검증-24)). 예약 작업도 밤마다 읽어 지금 코드가 판정받았는지 보고, 사전 검증 작업이 쓴 것은 #204 댓글에 붙인다(#204) |
 | `models/<알고리즘>.json` | 엔진이 지금 돌리는 모델: `version`, `params`, `trained`, `trained_until`, `training`(학습 정보: 첫날·마지막 날, 표본 수, 학습 손실, 정답 출처별 날 수. #165 전에 저장한 모델에는 없다), Turing은 `blob`(트리). 없으면 기본 모델 |
 | `models/baseline-climate.json` | 도달 정답(`KRX_TARGET_VERSION=3`)의 기준 예측 `baseline-climate` 표(#169). 모델과 같은 형식이고, `params`는 `<종목>.<30분 시간대>` → 방향(1 상승, 0 보합, −1 하락)이다. 밤 학습이 늘 승격하고 08:00 교체가 설치한다. 없으면 모든 칸이 보합(`baseline-climate-default`)이다. 버전 1에서는 읽지 않는다 |
-| `models/versions/<알고리즘>/<버전>.json` | 설치한 적 있는 모든 모델. `rollback`이 여기서 읽는다 |
-| `models/history.json` | 설치와 되돌리기 이력. 항목마다 `at`, `algorithm`, `version`(기본 모델이면 `null`), `why`(`fit`, `promotion <날짜>`, `rollback from <버전>`, `installed before`) |
+| `models/versions/<알고리즘>/<버전>.json` | 지금 모델과 되돌리기가 갈 바로 전 모델(#361. 설치할 때마다 나머지를 지운다). `rollback`이 여기서 읽는다. **바뀜** (2026-10-23, #362): 설치한 적 있는 모든 모델 → 둘만. 이유: 사용자 결정(#361, 3장 "모델 파일 정리 (#361)") |
+| `models/history.json` | 설치와 되돌리기 이력(지운 버전의 항목도 남는다). 항목마다 `at`, `algorithm`, `version`(기본 모델이면 `null`), `why`(`fit`, `promotion <날짜>`, `rollback from <버전>`, `installed before`) |
+| `models/store_refused.json` | `{"night": "<날짜>"}`: 학습 저장소가 모델 지우기를 마지막으로 거부한 밤(#361, IAM 정책에 삭제 권한이 없을 때). 그 밤의 다음 거부는 경고 대신 INFO로 남긴다. 지우기가 다시 되면 지운다. `doctor` 9절이 읽는다 |
 | `models/applied.json` | `{"night": "<날짜>"}`: 마지막으로 적용한 승격 목록의 밤. 이 밤과 그 전의 목록은 다시 적용하지 않는다. 적용되지 않은 밤(#355)은 이 밤부터 센다 |
 | `training_nights.json` | 밤 학습의 결과(#355): `nights`(최근 30밤, 밤마다 `day`, `ok`, `ended_at`(KST), `exit_code`, `step`(마지막으로 시작한 단계), `reason`(알림의 이유)), `alerted_for`(연속으로 적용되지 않은 밤을 마지막으로 알린 밤). 서버에서 학습한 밤(Spot이면 결과를 기다린 밤)이 끝날 때마다 통째로 바꿔 쓴다(`training_nights.json.tmp`). `/v1/status`의 `training.failures`와 `doctor` 7절이 읽는다. 읽지 못하면 비어 있는 것으로 보고 다시 시작한다 |
 | `training-cache/` | 밤 학습이 Object Store에서 받아 둔 백필 1분봉과 녹화 이벤트의 사본. 키 경로가 같다. 학습이 끝나면 그 밤에 쓴 가장 오래된 날보다 오래된 날짜를 지운다  그 날의 표본이 읽는 앞선 날(시간대 수익률이면 20거래일, #274)은 남긴다 |
@@ -1834,7 +1864,7 @@ LogQL 문법은 2026-10-23에 커넥터로 스택에 물어 확인했다(그때�
 |---|---|
 | `raw/…/data.parquet`, `events/…/data.parquet`, `gaps/…/data.parquet` | 로컬 `data/`와 같은 경로. 장 마감 15분 뒤와 21:00에 올린다 |
 | `bars/…/bars.parquet` | 1분봉 백필. 로컬과 같은 경로 |
-| `models/<알고리즘>/<버전>.json` | 밤 학습의 challenger와 서버가 돌린 모델. 형식은 `state/models/<알고리즘>.json`과 같다 |
+| `models/<알고리즘>/<버전>.json` | 밤 학습의 challenger와 서버가 돌린 모델. 형식은 `state/models/<알고리즘>.json`과 같다. 알고리즘마다 서버가 돌리는 모델, 되돌리기가 갈 모델, 아직 적용되지 않은 가장 최근 밤의 승격 모델, 학습 중인 밤의 모델만 남는다(#361, 3장 "모델 파일 정리 (#361)"). **바뀜** (2026-10-23, #362): 모두 남았다 → 08:00 교체 뒤와 수집기 시작 때 나머지를 지운다. 이유: 사용자 결정(#361) |
 | `reports/<날짜>/<알고리즘>.json` | 그 밤의 알고리즘별 검증 리포트이자 체크포인트: `algorithm`, `day`, `training_days`, `validation_days`, `champion`(`version`, `loss`, `trained_on_validation`: 검증일까지 학습한 모델인지. 손으로 `fit`한 모델 등), `challenger`(`version`, `loss`, `trained`), `promoted`, `reason`, `reference_prices`(학습·검증일마다 `mid`: 녹화 중간가, `close`: 백필 종가), `samples`(`validation`: 검증 표본 수, 검증까지 간 경우만), `forced`(champion이 다른 정답 버전이라 성적 비교 없이 승격했는지, #170. 검증까지 갔거나 강제 승격한 경우만), `validation`(검증까지 간 경우만, #89: `by_day`는 검증일마다, `by_reference`는 `mid`·`close`마다 `samples`·`challenger`·`champion` 평균 log loss. champion이 하나도 예측하지 않았으면 `champion`이 `null`. `paired`는 두 모델이 모두 예측한 표본 수 `samples`, 손실 차이(challenger − champion) 평균 `mean_difference`, 그 평균의 표준오차 `day_standard_error`(날마다 잔차를 더한 합들을 독립으로 본 클러스터 표준오차. 날의 표본 수가 같으면 검증일 평균들의 표준오차와 같다. 검증일이 2일보다 적으면 `null`)), `commit`(학습한 코드, 엔진처럼 `KRX_COMMIT`. 없으면 `unknown`, #85). 학습하지 못했거나 검증할 정답이 없으면 `champion`, `challenger`가 `null`이다. 도달 정답(`KRX_TARGET_VERSION=3`, #169)이면 `target_version`(3)과 `labels`도 있다: `samples`(학습·검증일의 정답 있는 표본 수, `recorded`는 녹화 호가로, `bars`는 1분봉 규칙으로 만든 것), `by_day`(날마다 정답 있는 표본 수). 다른 종류의 알고리즘(#179)의 리포트에는 `kind`(종류 이름)가 `algorithm` 다음에 있고, `target_version`은 그 종류의 정답 버전, `labels`는 그 종류의 정답으로 센 것이다(정답 버전과 상관없이 늘 있다). 맨 끝의 `resources`(#355)는 그 단계의 시간과 최대 메모리다: `seconds`, `peak_rss_mb`, `rss_mb`, `peak_since`, `days_read`, `days_cached`, `phases`(3장 "밤 학습과 모델 교체"). #355 전의 리포트에는 없다 |
 | `reports/<날짜>/baseline-climate.json` | 도달 정답일 때만(#169): 그 밤에 다시 맞춘 `baseline-climate` 표의 리포트. 형식은 위와 같고, `training_days`는 표를 센 최근 20거래일, `validation_days`는 빈 목록, `champion`은 `null`, `challenger`는 `version`·`trained`, `promoted`는 늘 `true`(정답 있는 표본이 없으면 `false`)다. 알고리즘들 다음에 쓰는 체크포인트다. 다른 종류의 알고리즘(#179)의 리포트는 이것 다음에 쓴다 |
 | `models/baseline-climate/<버전>.json` | 그 표. 형식은 `state/models/baseline-climate.json`과 같다 |
@@ -1845,4 +1875,6 @@ LogQL 문법은 2026-10-23에 커넥터로 스택에 물어 확인했다(그때�
 | `training/logs/<KST 시각>.log` | Spot 인스턴스의 실행 로그. 마지막 줄이 `krx-quant training: exit <코드>`다 |
 
 - 객체마다 내용의 SHA-256을 함께 둔다. S3에서는 객체 메타데이터 `sha256`이고, 로컬 폴더에서는 파일에서 계산한다. 업로드와 밤 학습은 이 값으로 같은 파일인지 본다.
-- 엔진의 IAM 사용자는 객체를 지울 수 없다. 덮어쓴 이전 버전은 S3 버전 관리로 30일 남는다(2.1).
+- 엔진의 IAM 사용자는 `models/` 아래의 객체만 지울 수 있다(#361). 덮어쓰거나 지운 이전 버전은 S3 버전 관리로 30일 남는다(2.1).
+
+  > **바뀜** (2026-10-23, #362): 엔진의 IAM 사용자는 객체를 지울 수 없었다 → `models/`만 지울 수 있다. 이유: 사용자가 모델을 지금 것과 바로 전 것만 남기기로 정했다(#361).
