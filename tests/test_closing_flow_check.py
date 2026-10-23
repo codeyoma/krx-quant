@@ -14,16 +14,17 @@ from __future__ import annotations
 import json
 from datetime import date, datetime, time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from krx_quant import cli
 from krx_quant.closing_flow import keep_days, write_demand
-from krx_quant.closing_flow_check import check_closing_flow
+from krx_quant.closing_flow_check import check_closing_flow, check_krx_net_assets
 from krx_quant.config import Settings
 from krx_quant.fake_kis import FakeKis
 from krx_quant.feeds.base import KST
-from krx_quant.net_assets import KIS, write_net_assets
+from krx_quant.net_assets import KIS, KRX, write_net_assets
 from krx_quant.products import products_of
 from tests.kis_rest import MINUTE_BARS, Responder, minute_bars_api, requests_for
 from tests.test_closing_flow_api import CALENDAR, bars, engine_at, record_print
@@ -142,9 +143,9 @@ async def test_the_report_counts_the_days_and_times_without_a_value(server: Path
         "  005930: 1일 2026-10-21 – 2026-10-21 · 센 상품 8종 1일 · 시각 15:20:00 1일 · 수요 없음 0일" in out
     )
     assert (
-        "  005930: 2일 2026-10-21 – 2026-10-22 · 수요 출처 bars 1일 · live 1일 · 체결대금 출처 recorded 2일"
-        in out
-    )
+        "  005930: 2일 2026-10-21 – 2026-10-22 · 수요 출처 bars 1일 · live 1일"
+        " · 체결대금 출처 integrated_bar 1일 · recorded 2일" in out
+    ), "Tuesday: neither a recording nor KRX's bar kept, the integrated bar's"
     assert "  005930: 녹화 2일 2026-10-21 – 2026-10-22" in out
     assert (
         "    통합(UN) 봉: 같음 1 · 다름 1 · 비율 0.500 – 1.000 · 종가가 녹화 단일가와 같음 2 · 봉 없음 0"
@@ -179,3 +180,87 @@ def test_an_empty_server_says_so(
     assert "1. 순자산 (state/closing_flow/net_assets.parquet): 행 0\n  없음" in out
     assert "3. 지난날 표 (state/closing_flow/days.json): 없음(아직 계산하지 않았다)" in out
     assert "  005930: 녹화한 종가 단일가가 있는 날 없음" in out and "  KIS: 0번 조회" in out
+
+
+def test_the_krx_report_says_which_day_s_units_the_total_matches_without_a_value(server: Path) -> None:
+    """``check-krx-net-assets`` (#305). Input: KRX's rows of 005930's eight products on the trading
+    days 10-12 to 10-22, fetched at 08:05 the next trading day, their total the fund's units of the
+    next trading day × the day's NAV (the creations listed a day later), the units stepping every two
+    days and the NAV moving 1.2% a day; KIS's rows of 10-22 for two products, one 2% off. Every value
+    is a sentinel. Output: the days, their first fetch, the four hypotheses' counts (the next day's
+    units on every row), KRX against KIS, and none of the values."""
+    state = server / "state"
+    codes = [p.code for p in products_of("005930")]
+    days = CALENDAR.trading_days(date(2026, 10, 12), THURSDAY)
+
+    def units(i: int, k: int) -> int:
+        return 3_000_017 + 51_013 * (k + 1) * (i // 2)
+
+    def nav(i: int, k: int) -> float:
+        return round(10_007.31 * (1 + 0.012 * (i % 3)) + k, 2)
+
+    rows: list[dict[str, Any]] = []
+    for k, code in enumerate(codes):
+        for i, day in enumerate(days):
+            listed = units(min(i + 1, len(days) - 1), k)
+            rows.append(
+                {
+                    "code": code,
+                    "date": day,
+                    "source": KRX,
+                    "net_assets": round(listed * nav(i, k)),
+                    "fetched_at": at(days[i + 1] if i + 1 < len(days) else date(2026, 10, 23), "08:05"),
+                    "shares": units(i, k),
+                    "nav": nav(i, k),
+                }
+            )
+    krx_last = {r["code"]: r["net_assets"] for r in rows if r["date"] == THURSDAY}
+    kis = {codes[0]: krx_last[codes[0]], codes[1]: round(krx_last[codes[1]] * 1.02)}
+    rows += [
+        {
+            "code": c,
+            "date": THURSDAY,
+            "source": KIS,
+            "net_assets": v,
+            "fetched_at": at(date(2026, 10, 23), "06:12"),
+        }
+        for c, v in kis.items()
+    ]
+    write_net_assets(state, rows)
+
+    out = check_krx_net_assets(Settings.from_env(), at(date(2026, 10, 23), "23:00"))
+
+    assert out.startswith("KRX 순자산 확인 (#305)")
+    assert f"  날: 2026-10-12 – 2026-10-22 ({len(days)}일) · 그 사이 거래일 중 행 없는 날 0" in out
+    assert f"  상품이 다 있는 날 {len(days)} · 빠진 상품이 있는 날 0" in out
+    assert "  2026-10-22: 8종 · 10-23 08:05:00 – 10-23 08:05:00" in out
+    base = (len(days) - 2) * len(codes)
+    # The units step every two days: three days in a row always span a step.
+    assert f"  견준 행 {base} · 그 가운데 t−1, t, t+1의 주수가 다 같지는 않은 행 {base}" in out
+    assert f"  LIST_SHRS(t+1) × NAV(t) · 모든 행: 0.01% 안 {base} · 0.5% 안 0 · 다름 0" in out
+    same = sum(1 for i in range(1, len(days) - 1) for k in range(len(codes)) if (i + 1) // 2 == i // 2)
+    assert f"  LIST_SHRS(t) × NAV(t) · 모든 행: 0.01% 안 {same} · 0.5% 안 0 · 다름 {base - same}" in out
+    assert "  LIST_SHRS(t−1) × NAV(t) · 모든 행: 0.01% 안 0" in out
+    assert f"  2026-10-22: 견준 상품 2 · 다름 1({codes[1]})" in out
+    values = (
+        {str(r["net_assets"]) for r in rows}
+        | {str(r.get("shares")) for r in rows}
+        | {str(r.get("nav")) for r in rows}
+    )
+    for value in values - {"None"}:
+        assert value not in out.replace(" ", ""), value
+
+
+def test_the_krx_report_of_an_empty_server(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)  # no .env, no KIS key: the file alone is read
+    monkeypatch.setenv("KRX_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("KRX_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("KRX_SYMBOLS", "005930")
+
+    assert cli.main(["check-krx-net-assets"]) == 0
+
+    out = capsys.readouterr().out
+    assert "1. KRX 행 (state/closing_flow/net_assets.parquet, 출처 krx): 행 0\n  없음" in out
+    assert "4. KRX와 KIS의 같은 날 순자산 (다름 = 0.5%와 0.5억 넘게 다름)\n  둘 다 있는 날 없음" in out

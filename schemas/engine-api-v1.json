@@ -2058,9 +2058,9 @@
       }
     },
     "closing_flow": {
-      "description": "GET /v1/symbols/{symbol}/closing-flow (#305): the day's closing rebalancing demand of the symbol's single-stock ±2x ETFs, A × (L² − L) × r, in won (+ buy, − sell): at the minute (the reference price just before it, over the previous trading day's KRX close) in continuous trading, the 15:20 one from the closing auction on; by structure (spot_futures, futures) and in all; ratio is spot_futures over the median recorded closing auction value of the 20 trading days before (an upper bound; null, with denominator_reason, without one), ratio_total the total's; a product without its net assets is in missing and out of the sums. The day is today if it trades, else the last trading day. A null demand comes with its reason.",
+      "description": "GET /v1/symbols/{symbol}/closing-flow (#305): the day's closing rebalancing demand of the symbol's single-stock ±2x ETFs, A × (L² − L) × r, in won (+ buy, − sell): at the minute (the reference price just before it, over the previous trading day's KRX close) in continuous trading, the 15:20 one from the closing auction on; by structure (spot_futures, futures) and in all; ratio is spot_futures over the median closing auction value of the 20 trading days before (each day's from the recorded KRX trades, else KRX's closing auction bar, else the integrated one; denominator_sources counts the days from each), an upper bound; null, with denominator_reason, without one; ratio_total the total's; a product without its net assets is in missing and out of the sums. The day is today if it trades, else the last trading day. A null demand comes with its reason.",
       "type": "object",
-      "required": ["symbol", "day", "as_of", "at", "source", "price", "previous_close", "r", "demand", "spot_futures", "futures", "ratio", "ratio_total", "denominator", "denominator_days", "denominator_reason", "products", "missing", "reason"],
+      "required": ["symbol", "day", "as_of", "at", "source", "price", "previous_close", "r", "demand", "spot_futures", "futures", "ratio", "ratio_total", "denominator", "denominator_days", "denominator_sources", "denominator_reason", "products", "missing", "reason"],
       "additionalProperties": false,
       "properties": {
         "symbol": {"type": "string"},
@@ -2078,14 +2078,15 @@
         "ratio_total": {"type": ["number", "null"]},
         "denominator": {"type": ["number", "null"], "minimum": 0},
         "denominator_days": {"type": "integer", "minimum": 0, "maximum": 20},
-        "denominator_reason": {"enum": ["no_recorded_auction", "not_computed", null]},
+        "denominator_sources": {"$ref": "#/$defs/closing_flow_denominator_sources"},
+        "denominator_reason": {"enum": ["no_auction_value", "not_computed", null]},
         "products": {"type": "array", "items": {"$ref": "#/$defs/closing_flow_product"}},
         "missing": {"type": "array", "items": {"type": "string"}},
         "reason": {"enum": ["no_products", "before_open", "no_price", "no_previous_close", "no_net_assets", null]}
       }
     },
     "closing_flow_product": {
-      "description": "A single-stock ETF's row (#305): its leverage L, structure, L² − L, net assets on the previous trading day (won; null: not kept), their day and source, and its demand (won).",
+      "description": "A single-stock ETF's row (#305): its leverage L, structure, L² − L, net assets on the previous trading day (won; null: not kept), their day and source (krx: the KRX Open API's, read first; kis: KIS's; the screen shows \"한국거래소 통계정보\" for any but kis), and its demand (won).",
       "type": "object",
       "required": ["code", "name", "leverage", "structure", "coefficient", "net_assets", "net_assets_date", "net_assets_source", "demand"],
       "additionalProperties": false,
@@ -2153,9 +2154,9 @@
       }
     },
     "closing_flow_day": {
-      "description": "A day of the closing flow (#305): its 15:20 demand (won; live: stored at 15:20, bars: from its net assets and the bars' flow; null without either) and ratios as the answer's, the median closing auction value of the 20 trading days before and how many had one, its own closing auction value from the recorded KRX trades (null without the print recorded; the one-minute bar's fallback waits for check-closing-flow-305), the closing auction's move, the day's flow to it and the next day's gap and close-to-close in bp (#270's definitions), whether the auction went the demand's way (the flow's on a day without one; null if either did not move), and the special situations begun that day.",
+      "description": "A day of the closing flow (#305): its 15:20 demand (won; live: stored at 15:20, bars: from its net assets and the bars' flow; null without either) and whose net assets it read (krx, kis, or krx+kis when its products read both; null without a demand), ratios as the answer's, the median closing auction value of the 20 trading days before, how many had one and from which source, its own closing auction value (recorded: the recorded KRX trades; krx_bar: KRX's closing auction bar, volume × close; integrated_bar: the integrated one, where KRX's is not kept; null without any), the closing auction's move, the day's flow to it and the next day's gap and close-to-close in bp (#270's definitions), whether the auction went the demand's way (the flow's on a day without one; null if either did not move), and the special situations begun that day.",
       "type": "object",
-      "required": ["date", "period", "demand", "spot_futures", "futures", "demand_source", "ratio", "ratio_total", "denominator", "denominator_days", "denominator_reason", "auction_value", "auction_value_source", "auction_bp", "auction_ticks", "flow_bp", "compared_with", "agree", "next_gap_bp", "next_close_bp", "special"],
+      "required": ["date", "period", "demand", "spot_futures", "futures", "demand_source", "net_assets_source", "ratio", "ratio_total", "denominator", "denominator_days", "denominator_sources", "denominator_reason", "auction_value", "auction_value_source", "auction_bp", "auction_ticks", "flow_bp", "compared_with", "agree", "next_gap_bp", "next_close_bp", "special"],
       "additionalProperties": false,
       "properties": {
         "date": {"$ref": "#/$defs/day"},
@@ -2164,13 +2165,15 @@
         "spot_futures": {"type": ["integer", "null"]},
         "futures": {"type": ["integer", "null"]},
         "demand_source": {"enum": ["live", "bars", null]},
+        "net_assets_source": {"enum": ["krx", "kis", "krx+kis", null]},
         "ratio": {"type": ["number", "null"]},
         "ratio_total": {"type": ["number", "null"]},
         "denominator": {"type": ["number", "null"], "minimum": 0},
         "denominator_days": {"type": "integer", "minimum": 0, "maximum": 20},
-        "denominator_reason": {"enum": ["no_recorded_auction", null]},
+        "denominator_sources": {"$ref": "#/$defs/closing_flow_denominator_sources"},
+        "denominator_reason": {"enum": ["no_auction_value", null]},
         "auction_value": {"type": ["number", "null"], "minimum": 0},
-        "auction_value_source": {"enum": ["recorded", null]},
+        "auction_value_source": {"enum": ["recorded", "krx_bar", "integrated_bar", null]},
         "auction_bp": {"type": "number"},
         "auction_ticks": {"type": "number"},
         "flow_bp": {"type": "number"},
@@ -2179,6 +2182,17 @@
         "next_gap_bp": {"type": ["number", "null"]},
         "next_close_bp": {"type": ["number", "null"]},
         "special": {"type": "array", "items": {"enum": ["vi", "circuit_breaker", "sidecar"]}}
+      }
+    },
+    "closing_flow_denominator_sources": {
+      "description": "How many of the days a closing flow denominator is the median of (#305) had their closing auction value from each source: the recorded KRX trades, KRX's closing auction bar, the integrated bar.",
+      "type": "object",
+      "required": ["recorded", "krx_bar", "integrated_bar"],
+      "additionalProperties": false,
+      "properties": {
+        "recorded": {"type": "integer", "minimum": 0, "maximum": 20},
+        "krx_bar": {"type": "integer", "minimum": 0, "maximum": 20},
+        "integrated_bar": {"type": "integer", "minimum": 0, "maximum": 20}
       }
     },
     "closing_flow_stats": {

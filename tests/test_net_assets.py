@@ -146,6 +146,8 @@ async def test_a_morning_fetch_keeps_each_product_s_net_assets_of_the_trading_da
         "source": KIS,
         "net_assets": total("0193W0", WEDNESDAY) * UNIT,
         "fetched_at": at("07:20"),
+        "shares": None,  # KRX's alone
+        "nav": None,
     }
     held = net_assets_for(read_net_assets(tmp_path / "state"), CALENDAR, THURSDAY)
     assert set(held) == set(CODES) - {NO_FIGURE, EMPTY}, "Thursday's demand reads Wednesday's"

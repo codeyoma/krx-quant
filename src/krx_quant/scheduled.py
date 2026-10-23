@@ -1148,6 +1148,44 @@ CLOSING_FLOW_CHECK = Job(
     ),
 )
 
+# The KRX Open API's net assets (#305, ``krx_net_assets``): the collector fetches every trading day
+# from the listing at its start and the trading day before each morning from 08:05. Their probe
+# (``probe-krx-etf-305``) found ``INVSTASST_NETASST_TOTAMT`` equal to the same row's ``LIST_SHRS ×
+# NAV`` on 169 of 400 rows; the engine reads the total as it is (the fund's own net assets), and
+# which day's listed units it matches (creations and redemptions listed a day later, or a day
+# earlier) only every day's rows show. Once, on the first trading day's night with the key, after
+# the deploy that brings it, so the start's backfill and that morning's fetch are in:
+# ``check-krx-net-assets`` reads the state file only (no call) and prints counts, dates, times and
+# product codes, no value (KRX's terms forbid passing its data on). Seconds; the quarter hour is a
+# bound. After the closing flow check.
+KRX_NET_ASSETS_ISSUE = 305
+
+
+def _first_trading_night_with_the_krx_key(night: Night) -> bool:
+    """Once, on the first trading day's night ``KRX_OPENAPI_KEY`` is set."""
+    return night.facts.krx_openapi and night.trading_day and not night.ran
+
+
+KRX_NET_ASSETS_CHECK = Job(
+    name="check-krx-net-assets-305",
+    due=_first_trading_night_with_the_krx_key,
+    command=("check-krx-net-assets",),
+    timeout=timedelta(minutes=15),
+    targets=(
+        Target(
+            KRX_NET_ASSETS_ISSUE,
+            note=(
+                "에이전트가 이 출력으로 상장일부터 거래일마다 KRX 행이 있는지(1절), 전 거래일 값이 "
+                "아침 몇 시에 들어왔는지(2절), 순자산총액이 어느 날의 상장좌수 × NAV와 같은지(3절: "
+                "t+1이면 설정·환매가 다음 거래일에 상장된다), KRX와 KIS의 순자산이 같은지(4절)를 보고 "
+                "`docs/krx-openapi.md`의 "
+                '"순자산총액과 상장좌수 × NAV"와 "언제 나오나"의 ⚠를 고친다. A를 순자산총액 그대로 쓰는 것을 '
+                "바꿀 근거가 나오면 #305에 남긴다. 출력에는 값이 없다(개수, 날짜, 시각, 상품 코드만)."
+            ),
+        ),
+    ),
+)
+
 # The night futures (#264): the collector records the KOSPI200 night session's trades and book
 # (18:00–06:00) from the deploy that brings it; what only the server shows is whether KIS
 # streams them for this app key, under the contract code asked for, in the layout of KIS's
@@ -1589,6 +1627,7 @@ JOBS: tuple[Job, ...] = (
     KRX_ETF_PROBE,
     GAPS_PROBE,
     CLOSING_FLOW_CHECK,
+    KRX_NET_ASSETS_CHECK,
     *daily_prevalidation_jobs(
         [a.name for a in DAILY_ALGORITHMS],
         {a.name: a.features for a in DAILY_ALGORITHMS},
