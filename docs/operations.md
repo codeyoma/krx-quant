@@ -1786,6 +1786,8 @@ rm -rf ~/krx-quant/state/logs
 
 엔진의 텔레그램 알림(`notify.Alerts`의 `[장애]`·`[복구]`, 위 표)은 그대로 둔다. Grafana Cloud의 알림(무료 플랜에 있다)은 엔진이 스스로 보내지 못하는 것만 같은 텔레그램 대화로 보낸다. 2026-10-24에 사용자의 확인을 받아 에이전트가 Grafana Cloud 커넥터로 아래대로 만들었다(셋 다 평가 상태 `ok`). 바꾸면 Grafana와 여기를 함께 고친다.
 
+> **바뀜** (2026-10-24, #371): "아직 만들지 않았다" → 만들었다. 알림 정책 대신 규칙마다 받는 곳(`krx-quant-telegram`)과 묶음 설정을 둔다. 2번 질의에 `| logger != ""`를 더했다. 이유: 커넥터로는 알림 정책을 고칠 수 없고 규칙의 알림 설정으로 같은 일을 한다. 2번은 traceback 줄(ERROR 수준이지만 `ERROR <logger>:` 머리가 없다)이 빈 레이블의 알림 하나로 세어졌다(2026-10-24 시험).
+
 - 연락처(contact point) `krx-quant-telegram`: Telegram 연동, 기존 봇의 토큰과 대화 ID. 봇 토큰은 사용자가 Grafana 화면에서 직접 넣는다(에이전트와 저장소는 보지 않는다).
 - 받는 곳: 규칙마다 알림 설정(notification settings)에 `krx-quant-telegram`을 둔다. 알림 정책(notification policy) 트리는 쓰지 않는다. 그룹은 규칙마다 아래와 같다. 복구도 보낸다(Grafana의 `[RESOLVED]`).
 - 규칙은 폴더 `krx-quant`(uid `krx-quant`), 평가 그룹 `krx-quant-logs`(1분마다), 데이터 소스 `grafanacloud-logs`다. 규칙의 uid는 제목과 같다(`krx-quant-engine-silent`, `krx-quant-engine-error`, `krx-quant-training-failed`). 규칙마다 레이블 `service=krx-quant`를 붙인다.
