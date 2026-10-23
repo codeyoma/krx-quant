@@ -18,6 +18,7 @@ from pathlib import Path
 
 import boto3
 import pytest
+from botocore.exceptions import ClientError, EndpointConnectionError
 from moto import mock_aws
 
 from krx_quant.algorithms import Model
@@ -29,7 +30,7 @@ from krx_quant.feeds.base import kst_day
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.model_shelf import Kept, Pruned, Shelf
 from krx_quant.nightly import LIVE
-from krx_quant.object_store import LocalObjectStore, ObjectStore, S3ObjectStore, put_json
+from krx_quant.object_store import LocalObjectStore, ObjectStore, S3ObjectStore, Stored, put_json
 from krx_quant.predictions import PredictionStore
 from krx_quant.swap import morning_swap, prune_store, publish_live, tidy_models
 from krx_quant.touch import TARGET_VERSION
@@ -342,13 +343,20 @@ def test_a_history_the_running_file_disagrees_with_deletes_nothing(
 
 
 class Refusing(LocalObjectStore):
-    """A store whose user may not delete (the IAM policy before #361)."""
+    """A store whose user may not delete, as S3 answers the IAM policy before #361."""
 
     def delete(self, key: str) -> None:
-        raise PermissionError("access denied")
+        raise ClientError(
+            {"Error": {"Code": "AccessDenied", "Message": "User: arn:aws:iam::123456789012:user/x"}},
+            "DeleteObject",
+        )
 
 
-def test_a_store_that_refuses_to_delete_is_warned_of_and_left(
+def warnings_of(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def test_a_store_that_refuses_to_delete_keeps_its_files_and_is_warned_of_once_a_night(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     state, root = tmp_path / "state", tmp_path / "store"
@@ -357,12 +365,66 @@ def test_a_store_that_refuses_to_delete_is_warned_of_and_left(
     night(root, DAYS[0], promoted={})
     shelf.mark_applied(DAYS[0])
 
-    with caplog.at_level(logging.WARNING, logger="krx_quant.swap"):
-        pruned = prune_store(Refusing(root), shelf, DAYS[1])
+    with caplog.at_level(logging.INFO, logger="krx_quant.swap"):
+        first = prune_store(Refusing(root), shelf, DAYS[1])  # the start
+        again = prune_store(Refusing(root), shelf, DAYS[1])  # the morning swap, the same night
 
-    assert pruned.files == 0
+    assert first.files == again.files == 0
+    assert in_store(root, "newton") == {m.version for m in newton}, "every file stays"
+    refusals = [w for w in warnings_of(caplog) if "refused to delete" in w]
+    assert len(refusals) == 1 and "(AccessDenied)" in refusals[0]
+    assert "123456789012" not in caplog.text, "S3's text names the account: its code only"
+    assert "the store still refuses to delete" in caplog.text
+    assert shelf.store_refused() == DAYS[0]
+
+    # The next night is warned of again; once the policy lets it, the deletes go and it is forgotten.
+    night(root, DAYS[1], promoted={})
+    shelf.mark_applied(DAYS[1])
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="krx_quant.swap"):
+        prune_store(Refusing(root), shelf, DAYS[2])
+        assert len([w for w in warnings_of(caplog) if "refused to delete" in w]) == 1
+        pruned = prune_store(LocalObjectStore(root), shelf, DAYS[2])
+    assert pruned.files == 2 and in_store(root, "newton") == {m.version for m in newton[-2:]}
+    assert "the store deletes models again" in caplog.text
+    assert shelf.store_refused() is None
+
+
+async def test_a_refused_delete_leaves_the_morning_swap_done(
+    tmp_path: Path, engine: PredictionEngine, caplog: pytest.LogCaptureFixture
+) -> None:
+    root = tmp_path / "store"
+    store, shelf = Refusing(root), Shelf(tmp_path / "state")
+    promoted, lost = model("newton", DAYS[0]), model("gauss", DAYS[0])
+    night(root, DAYS[0], promoted={"newton": promoted}, beaten={"gauss": lost})
+
+    with caplog.at_level(logging.WARNING, logger="krx_quant"):
+        pruned = await morning(store, shelf, engine, DAYS[1])
+
+    assert engine.models["newton"] == promoted, "applied, whatever the store says of deletes"
+    assert shelf.applied(DAYS[0])
+    assert pruned == Pruned() and in_store(root, "gauss") == {lost.version}
+    assert len(warnings_of(caplog)) == 1
+
+
+class Unreadable(LocalObjectStore):
+    def objects(self, prefix: str = "") -> list[Stored]:
+        raise EndpointConnectionError(endpoint_url="https://s3.example.invalid")
+
+
+def test_a_store_it_cannot_list_deletes_nothing_and_raises_nothing(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    state, root = tmp_path / "state", tmp_path / "store"
+    newton = piled_up(state, root, "newton", 4)
+    night(root, DAYS[0], promoted={})
+    Shelf(state).mark_applied(DAYS[0])
+
+    with caplog.at_level(logging.WARNING, logger="krx_quant.swap"):
+        assert prune_store(Unreadable(root), Shelf(state), DAYS[1]) == Pruned()
+
     assert in_store(root, "newton") == {m.version for m in newton}
-    assert "the store refused to delete" in caplog.text and "(PermissionError)" in caplog.text
+    assert "could not prune the store's models (EndpointConnectionError)" in caplog.text
 
 
 def test_without_a_night_s_list_the_store_is_left_as_it_is(tmp_path: Path) -> None:

@@ -71,11 +71,16 @@ deploy/create-aws.sh krx-quant-<이름>
 
   > **바뀜** (2026-10-23, #362): 삭제 권한이 없었다 → `engine/models/*`의 `s3:DeleteObject`만 있다(이전 버전을 지우는 `s3:DeleteObjectVersion`은 없다). 이유: 사용자가 모델을 지금 것과 바로 전 것만 남기기로 정했다(2026-10-23, #361). 버전 관리가 지운 객체를 30일 남기므로 잘못 지워도 되돌릴 수 있다.
 
-  이미 만든 계정은 맥에서 정책만 다시 넣는다(한 번). 넣기 전에는 서버가 S3의 모델을 지우지 못하고 경고 로그를 남긴다(`the store refused to delete … (AccessDenied)`). 서버의 `state/models`는 그대로 정리된다.
+  **이미 만든 계정은 정책만 한 번 다시 넣는다(#362 배포 전후 아무 때나).** 서버의 학습 저장소는 S3(`KRX_OBJECT_STORE=s3://<버킷>/engine`)이고, 모델을 지우는 것은 학습 위치(`KRX_TRAIN_ON=server`든 `spot`이든)와 상관없이 서버의 수집기, 곧 IAM 사용자 `krx-quant-engine`이다. 그래서 지금 계정(밤 학습이 서버에서 돈다)에서도 넣어야 한다. 이 스크립트를 처음 돌린 맥에서, 같은 관리자 자격 증명으로 저장소 루트에서 돌린다. 정책 이름은 스크립트가 만든 인라인 정책 `krx-quant-data`이고, 이 명령은 그것을 새 `deploy/iam-policy.json`으로 바꿔 쓴다(다른 권한은 그대로다).
   ```bash
   aws iam put-user-policy --user-name krx-quant-engine --policy-name krx-quant-data \
     --policy-document "$(sed "s/BUCKET/krx-quant-<이름>/g" deploy/iam-policy.json)"
+  aws iam get-user-policy --user-name krx-quant-engine --policy-name krx-quant-data \
+    --query 'PolicyDocument.Statement[].Sid'   # DeleteModelsOnly가 있으면 됐다
   ```
+  콘솔로는 IAM → 사용자 → `krx-quant-engine` → 권한 → 인라인 정책 `krx-quant-data` → 편집 → JSON에 `deploy/iam-policy.json`의 세 문을 넣는다(`BUCKET`은 버킷 이름으로). `deploy/create-aws.sh krx-quant-<이름>`을 다시 돌려도 같은 정책을 넣는다(이미 있는 자원은 그대로 둔다).
+
+  넣기 전에도 엔진은 그대로 돈다. S3가 지우기를 거부하면(`AccessDenied`) 그 자리에서 멈추고 파일은 하나도 지우지 않는다. 경고는 밤마다 한 번(`the store refused to delete <키> (AccessDenied); its models stay, pruned no further now (the engine's IAM user may delete engine/models/*: deploy/iam-policy.json)`), 같은 밤의 다음 시도(07:20 재시작, 08:00 교체)는 INFO(`the store still refuses to delete …`)다. 08:00 교체와 밤 학습은 이 때문에 멈추거나 실패하지 않는다(정리는 교체가 끝난 뒤에 하고, 학습 프로세스는 지우지 않는다). 서버의 `state/models/versions`는 그대로 정리된다. `krx-quant doctor` 9절이 거부를 보인다(`학습 저장소가 모델 지우기를 거부함(마지막으로 <날짜> 밤, …)`). 정책을 넣은 뒤 첫 정리(다음 시작이나 08:00 교체)가 쌓인 것을 지우고 `the store deletes models again`을 남긴다.
 - Lightsail 인스턴스 `krx-quant`: Ubuntu 24.04다. 번들은 2GB, 공인 IPv4인 리눅스 번들을 자동으로 고른다(시드니는 `small_3_2`). 번들 ID가 리전마다 달라서다. `BUNDLE`로 직접 정할 수도 있다.
 - Lightsail 방화벽: TCP 22는 Lightsail 브라우저 SSH에서만, UDP 41641(Tailscale 직접 연결)은 모두에게 연다. 나머지는 모두 닫는다.
 - 자동 스냅샷: 매일 18:00 UTC(03:00 KST)에 뜬다. Lightsail은 최근 7개를 보관한다.
@@ -1105,7 +1110,7 @@ docker compose exec engine krx-quant rollback granger     # 한 단계(직전 �
 - **대상.** 4분 방향 알고리즘, 종류별 알고리즘(`mandelbrot`, `breiman` 등), 하루 한 번 알고리즘(`cox` 등), 기준 예측의 표(`baseline-climate`, `range-climate`, `barrier-climate`, `barrier-climate-<H>m`)가 같은 규칙이다. 사전 검증과 수습 시뮬레이션(#298)은 재생 안에서만 학습하고 모델 파일을 남기지 않는다. 그 결과(`state/prevalidations/`, `state/prevalidation-<이름>.sqlite3`, `state/simulation-bar-close.sqlite3`, `engine.sqlite3`의 시뮬레이션 표)는 이 정리와 상관없다.
 - **안전.** 지우기 전에 남길 목록을 만든다. 남길 파일이 하나라도 없으면 그 알고리즘은 그곳에서 하나도 지우지 않고 경고 로그를 남긴다: `<이름>: <버전> to keep is not in state/models/versions; no model file deleted`, `<이름>: <버전> to keep is not in the store; none of its models deleted`. 되돌린 뒤의 그 전 모델은 없어도 된다(이미 지웠을 수 있다). 지금 모델 파일이 이력의 마지막 설치와 다르면(손으로 바꾼 파일)도 지우지 않는다(`the running model is not the one its history installed last`). 지우는 것은 모델 폴더(`state/models/versions/<알고리즘>/`, 저장소의 `models/<알고리즘>/`) 안의 `.json`뿐이다.
 - **처음 한 번.** 수집기가 시작할 때마다(06:00 배포, 07:20 재시작) 지금 도는 모델을 올린 뒤 두 곳을 같은 규칙으로 정리한다. 이 변경이 배포된 뒤 첫 시작이 그때까지 쌓인 것을 지우고, 그 뒤로는 지울 것이 거의 없다. 지운 파일 수와 크기는 INFO 로그로 Loki에 간다: `state/models/versions: deleted <N> model files (<크기>) of <K> algorithms; <M> left whole`, `the store's models: deleted <N> files (<크기>); <M> algorithms left whole`, 그리고 알고리즘마다 `<이름>: deleted <N> model files (<크기>) from state/models/versions, kept …`, `<이름>: deleted <N> models (<크기>) from the store, kept …`. 08:00 교체 뒤에도 같은 줄이 남는다.
-- **S3에서 지우면.** 삭제 표시만 생기고, 지운 버전은 버킷 버전 관리로 30일 남았다가 사라진다(2.1). 그동안은 되살릴 수 있고, 용량은 30일 뒤에 준다. 엔진의 IAM 사용자는 `engine/models/*`만 지울 수 있다(`deploy/iam-policy.json`). 정책을 넣기 전에는 S3가 거부하고(`the store refused to delete … (AccessDenied); its models are pruned no further now …` 경고) 서버 쪽만 정리된다(2.1의 명령으로 한 번 넣는다).
+- **S3에서 지우면.** 삭제 표시만 생기고, 지운 버전은 버킷 버전 관리로 30일 남았다가 사라진다(2.1). 그동안은 되살릴 수 있고, 용량은 30일 뒤에 준다. 엔진의 IAM 사용자는 `engine/models/*`만 지울 수 있다(`deploy/iam-policy.json`). 지금 계정은 정책을 한 번 다시 넣어야 한다(2.1의 명령). 넣기 전에는 S3가 거부하고, 파일은 그대로 남고, 경고는 밤마다 한 번이다(같은 밤의 다음 시도는 INFO. 그 밤은 `state/models/store_refused.json`에 남는다). 08:00 교체와 밤 학습은 그대로 돈다. 서버 쪽(`versions/`)은 그대로 정리된다. 저장소를 읽지 못해도(S3에 닿지 않음) 아무것도 지우지 않고 경고(`could not prune the store's models (<종류>); none deleted now`)만 남긴다.
 - `krx-quant doctor` 9절이 두 곳의 모델 파일 수와 크기를 보인다(6장 "서버 상태 보기 (#322)").
 
 > **바뀜** (2026-10-23, #362): 설치한 모든 버전을 `state/models/versions/`에, 밤마다 학습한 모든 모델(승격되지 않은 challenger도)을 S3 `models/`에 남겼고, `rollback`을 거듭하면 설치한 순서를 거슬러 계속 되돌아갔다 → 알고리즘마다 지금 모델과 바로 전 모델만 남기고(S3는 아직 적용되지 않은 밤의 승격 모델과 학습 중인 밤의 모델도) 되돌리기는 한 단계까지다. 이유: 모델 파일이 지워지지 않고 쌓였고(LightGBM 모델인 Turing, Neyman, Breiman과 지평 사다리가 커서 가장 빨리 늘었다), 사용자가 2026-10-23에 정했다(#361).
@@ -1643,7 +1648,7 @@ docker compose run --rm engine doctor
 7. 밤 학습(#355): 마지막으로 적용된 밤(`state/models/applied.json`)과 그 뒤 적용되지 않은 거래일 밤의 수와 날짜(`/v1/status`의 `training.nights_not_applied`와 같다), 최근 다섯 밤의 결과(`state/training_nights.json`): 끝남이면 끝난 시각, 실패면 끝난 시각, 종료 코드, 마지막으로 시작한 단계. 이 기록은 #355가 배포된 뒤의 밤부터다.
 8. Loki 전송(#358): 엔진의 `/v1/status` `loki`다. 켜짐이면 보낸 줄(Loki가 받은 줄), 버린 줄, 버퍼에 기다리는 줄, 마지막 성공 시각과 지난 시간, 마지막 오류의 종류(`HTTP 503`, `URLError(ConnectionRefusedError)`. 오류의 글은 싣지 않는다)와 그 시각이다. 꺼짐이면 그 이유(`KRX_LOKI_TOKEN is not set: …`)다. 엔진에 닿지 않거나 #358 전의 엔진이면 그렇다고 적고, 이 명령이 읽은 세 설정으로 켜질지를 적는다(6장 "Grafana Cloud Loki로 보내는 로그 (#358)").
 
-9. 모델 파일(#361): `state/models`의 지금 모델(`<알고리즘>.json`. `history.json`과 `applied.json`은 빼고)과 `versions/`의 파일 수와 크기, 학습 저장소 `models/`의 파일 수와 크기, 그리고 각각 알고리즘 수와 파일이 가장 많은 알고리즘이다: `state/models: 지금 모델 21개 12.3 MB · versions/ 40개 24.0 MB (알고리즘 21개, 가장 많은 turing 2개)`, `학습 저장소 models/: 43개 26.1 MB (알고리즘 21개, 가장 많은 turing 3개)`. 정리된 뒤에는 `versions/`가 알고리즘마다 2개까지다. 저장소는 아직 적용되지 않은 밤의 승격 모델이나 학습 중인 밤의 모델이 있으면 그보다 많다. 저장소가 없으면 `학습 저장소: 없음(KRX_OBJECT_STORE)`, 읽지 못하면 오류의 종류만 적는다. 저장소의 위치(버킷)는 적지 않는다.
+9. 모델 파일(#361): `state/models`의 지금 모델(`<알고리즘>.json`. `history.json`과 `applied.json`은 빼고)과 `versions/`의 파일 수와 크기, 학습 저장소 `models/`의 파일 수와 크기, 그리고 각각 알고리즘 수와 파일이 가장 많은 알고리즘이다: `state/models: 지금 모델 21개 12.3 MB · versions/ 40개 24.0 MB (알고리즘 21개, 가장 많은 turing 2개)`, `학습 저장소 models/: 43개 26.1 MB (알고리즘 21개, 가장 많은 turing 3개)`. 정리된 뒤에는 `versions/`가 알고리즘마다 2개까지다. 저장소는 아직 적용되지 않은 밤의 승격 모델이나 학습 중인 밤의 모델이 있으면 그보다 많다. 저장소가 없으면 `학습 저장소: 없음(KRX_OBJECT_STORE)`, 읽지 못하면 오류의 종류만 적는다. 저장소가 모델 지우기를 거부한 적이 있고 아직 다시 되지 않았으면(`state/models/store_refused.json`) `학습 저장소가 모델 지우기를 거부함(마지막으로 <날짜> 밤, AccessDenied 등): …`과 할 일(2.1의 IAM 정책)을 한 줄 더 적는다. 저장소의 위치(버킷)는 적지 않는다.
 
 한 절을 읽다 실패하면 그 절에 이유를 적고 나머지 절은 그대로 낸다.
 
@@ -1824,6 +1829,7 @@ LogQL 문법은 2026-10-23에 커넥터로 스택에 물어 확인했다(그때�
 | `models/baseline-climate.json` | 도달 정답(`KRX_TARGET_VERSION=3`)의 기준 예측 `baseline-climate` 표(#169). 모델과 같은 형식이고, `params`는 `<종목>.<30분 시간대>` → 방향(1 상승, 0 보합, −1 하락)이다. 밤 학습이 늘 승격하고 08:00 교체가 설치한다. 없으면 모든 칸이 보합(`baseline-climate-default`)이다. 버전 1에서는 읽지 않는다 |
 | `models/versions/<알고리즘>/<버전>.json` | 지금 모델과 되돌리기가 갈 바로 전 모델(#361. 설치할 때마다 나머지를 지운다). `rollback`이 여기서 읽는다. **바뀜** (2026-10-23, #362): 설치한 적 있는 모든 모델 → 둘만. 이유: 사용자 결정(#361, 3장 "모델 파일 정리 (#361)") |
 | `models/history.json` | 설치와 되돌리기 이력(지운 버전의 항목도 남는다). 항목마다 `at`, `algorithm`, `version`(기본 모델이면 `null`), `why`(`fit`, `promotion <날짜>`, `rollback from <버전>`, `installed before`) |
+| `models/store_refused.json` | `{"night": "<날짜>"}`: 학습 저장소가 모델 지우기를 마지막으로 거부한 밤(#361, IAM 정책에 삭제 권한이 없을 때). 그 밤의 다음 거부는 경고 대신 INFO로 남긴다. 지우기가 다시 되면 지운다. `doctor` 9절이 읽는다 |
 | `models/applied.json` | `{"night": "<날짜>"}`: 마지막으로 적용한 승격 목록의 밤. 이 밤과 그 전의 목록은 다시 적용하지 않는다. 적용되지 않은 밤(#355)은 이 밤부터 센다 |
 | `training_nights.json` | 밤 학습의 결과(#355): `nights`(최근 30밤, 밤마다 `day`, `ok`, `ended_at`(KST), `exit_code`, `step`(마지막으로 시작한 단계), `reason`(알림의 이유)), `alerted_for`(연속으로 적용되지 않은 밤을 마지막으로 알린 밤). 서버에서 학습한 밤(Spot이면 결과를 기다린 밤)이 끝날 때마다 통째로 바꿔 쓴다(`training_nights.json.tmp`). `/v1/status`의 `training.failures`와 `doctor` 7절이 읽는다. 읽지 못하면 비어 있는 것으로 보고 다시 시작한다 |
 | `training-cache/` | 밤 학습이 Object Store에서 받아 둔 백필 1분봉과 녹화 이벤트의 사본. 키 경로가 같다. 학습이 끝나면 그 밤에 쓴 가장 오래된 날보다 오래된 날짜를 지운다  그 날의 표본이 읽는 앞선 날(시간대 수익률이면 20거래일, #274)은 남긴다 |

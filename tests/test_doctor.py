@@ -12,7 +12,7 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
 
@@ -37,6 +37,7 @@ from krx_quant.doctor import (
 )
 from krx_quant.feeds import RAW_SCHEMA
 from krx_quant.feeds.base import KST
+from krx_quant.model_shelf import Shelf
 from krx_quant.predictions import DB_NAME, PredictionStore
 from krx_quant.recorder import ParquetRecorder
 from krx_quant.redaction import MASK, secrets_of
@@ -245,6 +246,17 @@ def test_the_model_files_are_counted_on_the_server_and_in_the_store(tmp_path: Pa
     )
     assert "  학습 저장소 models/: 4개 4.0 MB (알고리즘 2개, 가장 많은 turing 3개)" in text
     assert str(tmp_path / "store") not in text, "where the store is stays out"
+
+
+def test_a_store_that_refused_to_delete_models_is_said_with_what_to_do(tmp_path: Path) -> None:
+    settings = server(tmp_path, object_store=str(tmp_path / "store"))
+    Shelf(settings.state_dir).mark_store_refused(date(2026, 10, 19))
+
+    text = report(settings, NOW, Status(status_body(), "x"))
+
+    assert "학습 저장소가 모델 지우기를 거부함(마지막으로 2026-10-19 밤, AccessDenied 등)" in text
+    assert "engine/models/*의 s3:DeleteObject를 넣는다(operations.md 2.1)" in text
+    assert "지금 모델 0개" in text, "its marker is not a model"
 
 
 def test_without_a_store_the_model_files_say_so(tmp_path: Path) -> None:

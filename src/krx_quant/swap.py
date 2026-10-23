@@ -309,7 +309,16 @@ def prune_store(store: ObjectStore, shelf: Shelf, today: date) -> Pruned:
     whole, warned. A model stored after the latest night's list was final stays: a night
     training now stored it, or the server published it since. Without a night's list nothing
     is deleted. A store that refuses a delete (the IAM user without ``s3:DeleteObject``) stops
-    it, warned."""
+    it and keeps every file: warned once a night (``Shelf.store_refused``), at INFO after that.
+    It never raises: a store it cannot read deletes nothing, warned, and the swap goes on."""
+    try:
+        return _prune_store(store, shelf, today)
+    except (OSError, ValueError, KeyError, TypeError, BotoCoreError, ClientError) as e:
+        log.warning("could not prune the store's models (%s); none deleted now", _refusal(e))
+        return Pruned()
+
+
+def _prune_store(store: ObjectStore, shelf: Shelf, today: date) -> Pruned:
     night = latest_night(store, today + timedelta(days=1))
     if night is None:
         return Pruned()
@@ -322,6 +331,7 @@ def prune_store(store: ObjectStore, shelf: Shelf, today: date) -> Pruned:
         if name and file.endswith(".json") and "/" not in file:
             by_name.setdefault(name, {})[file.removesuffix(".json")] = found
     pruned = Pruned()
+    deleting = False
     for name, stored in sorted(by_name.items()):
         kept = shelf.kept(name)
         if kept is None:
@@ -346,14 +356,14 @@ def prune_store(store: ObjectStore, shelf: Shelf, today: date) -> Pruned:
             try:
                 store.delete(found.key)
             except (OSError, BotoCoreError, ClientError) as e:
-                log.warning(
-                    "the store refused to delete %s (%s); its models are pruned no further now"
-                    " (the engine's IAM user may delete engine/models/*: deploy/iam-policy.json)",
-                    found.key,
-                    _refusal(e),
-                )
+                _refused(shelf, night.day, found.key, e)
                 return _pruned_store(pruned + Pruned(i, size))
             size += found.size
+            if not deleting:  # the first delete that went: a refusal before is over
+                deleting = True
+                if shelf.store_refused() is not None:
+                    log.info("the store deletes models again")
+                    shelf.mark_store_refused(None)
         if gone:
             log.info(
                 "%s: deleted %d models (%s) from the store, kept %s",
@@ -364,6 +374,24 @@ def prune_store(store: ObjectStore, shelf: Shelf, today: date) -> Pruned:
             )
         pruned += Pruned(len(gone), size)
     return _pruned_store(pruned)
+
+
+def _refused(shelf: Shelf, night: date, key: str, e: Exception) -> None:
+    """A delete the store refused: warned once for the night (a restart or the morning swap
+    tries again), at INFO after that, until the IAM policy lets it (2.1 of operations.md)."""
+    if shelf.store_refused() == night:
+        log.info("the store still refuses to delete %s (%s); its models stay", key, _refusal(e))
+        return
+    log.warning(
+        "the store refused to delete %s (%s); its models stay, pruned no further now"
+        " (the engine's IAM user may delete engine/models/*: deploy/iam-policy.json)",
+        key,
+        _refusal(e),
+    )
+    try:
+        shelf.mark_store_refused(night)
+    except OSError:
+        log.exception("could not keep that the store refused")
 
 
 def _refusal(e: Exception) -> str:
@@ -441,7 +469,8 @@ async def keep_models(
                     shelf,
                     [*engine.registered, *engine.kind_registered, *engine.daily_registered],
                 )
-                # The night applied or left waiting: its challengers not promoted go (#361).
+                # The night applied or left waiting: its challengers not promoted go (#361). It
+                # never raises: the swap is done whatever the store says.
                 await asyncio.to_thread(prune_store, store, shelf, today)
             elif reload_models(engine, shelf) and store is not None:  # a fit or a rollback
                 await show_night(store, shelf, engine, kst_day(now()), watch)

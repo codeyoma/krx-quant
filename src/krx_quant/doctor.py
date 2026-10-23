@@ -71,7 +71,7 @@ from krx_quant.archive import partition_files
 from krx_quant.config import Settings, SettingsError, read_values
 from krx_quant.feeds.base import KST
 from krx_quant.market_calendar import calendar_store
-from krx_quant.model_shelf import size_text
+from krx_quant.model_shelf import Shelf, size_text
 from krx_quant.object_store import open_store
 from krx_quant.predictions import DB_NAME, iso, read_only
 from krx_quant.redaction import redact, secrets_of
@@ -629,11 +629,18 @@ def _models(settings: Settings) -> list[str]:
         f"  학습 저장소 {MODELS}: {len(stored)}개 {_size(o.size for o in stored)}"
         + _most(Counter(o.key.removeprefix(MODELS).partition("/")[0] for o in stored))
     )
+    refused = Shelf(settings.state_dir).store_refused()
+    if refused is not None:
+        lines.append(
+            f"  학습 저장소가 모델 지우기를 거부함(마지막으로 {refused} 밤, AccessDenied 등): 엔진 IAM"
+            " 사용자의 정책에 engine/models/*의 s3:DeleteObject를 넣는다(operations.md 2.1)."
+            " 그동안 파일은 그대로 남는다"
+        )
     return lines
 
 
 # The files in ``state/models`` that are not a model the engine runs (``model_shelf``).
-_NOT_MODELS = frozenset({"history.json", "applied.json"})
+_NOT_MODELS = frozenset({"history.json", "applied.json", "store_refused.json"})
 
 
 def _size(sizes: Iterable[int]) -> str:

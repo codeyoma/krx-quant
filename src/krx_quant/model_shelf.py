@@ -142,6 +142,20 @@ class Shelf:
         path = self._root / _APPLIED
         return path.exists() and date.fromisoformat(json.loads(path.read_text())["night"]) >= night
 
+    def store_refused(self) -> date | None:
+        """The latest night the store refused to delete its models (#361), warned of then."""
+        try:
+            return date.fromisoformat(json.loads((self._root / _REFUSED).read_text())["night"])
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+
+    def mark_store_refused(self, night: date | None) -> None:
+        """Keep the night the store refused (None: it deletes again, forgotten)."""
+        if night is None:
+            (self._root / _REFUSED).unlink(missing_ok=True)
+        else:
+            _write(self._root / _REFUSED, {"night": night.isoformat()})
+
     def kept(self, name: str) -> Kept | None:
         """The versions of ``name`` kept (#361): the one installed now and the one a rollback
         goes to, the latest other one installed before it. Both must be there, but for the one
@@ -260,6 +274,7 @@ class Shelf:
 
 _HISTORY = "history.json"
 _APPLIED = "applied.json"
+_REFUSED = "store_refused.json"  # the night the store last refused a model's delete (#361)
 
 
 def _write(path: Path, data: Any) -> None:
