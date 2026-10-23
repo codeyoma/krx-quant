@@ -36,14 +36,15 @@ another key is a miss: the day is made again and its file replaced. A day is sto
 reading it back gives every sample, value and answer exactly as made (``fingerprint``); one that
 would not (a value JSON changes, say a tuple in an answer's path) is made every night instead.
 
-Pre-validation and the simulated probation (``prevalidation._WalkForward``) read the recorded days
-the night stored, by the night's key (``night_reads``), and keep the features and the answers they
-read (``TrainingDay.keeping``): on a recorded day the same samples as making the day with those
-alone gives, as the Market View follows every feed whatever is asked and each feature is computed
-from the bar close's snapshot alone (``tests/test_sample_store.py``). A backfilled day they make
-themselves, in seconds: the same samples too, as its leaders' bars are read for every feature that
-reads them, whatever else is asked (``training.needs_leaders``; #373: before, for the lead features
-alone, so a day made for Kalman had no futures' moves in ``kospi200f_moves``). They never write.
+Pre-validation and the simulated probation (``prevalidation._WalkForward``) read the days the night
+stored, by the night's key (``night_reads``), and keep the features and the answers they read
+(``TrainingDay.keeping``): the same samples as making the day with those alone gives
+(``tests/test_sample_store.py``). On a recorded day the Market View follows every feed whatever is
+asked and each feature is computed from the bar close's snapshot alone; on a backfilled day the
+leaders' and the previous days' bars are read for every feature that reads them, whatever else is
+asked (``training.needs_leaders``, ``needs_previous_day``). Until #373 the leaders' bars were read
+for the lead features alone, so a backfilled day made for Kalman had no futures' moves in
+``kospi200f_moves``, and they made every backfilled day themselves. They never write.
 
 The night removes the days no step reads any more, the other keys of the days it read, and files
 left half-written (``SampleStore.prune``).
