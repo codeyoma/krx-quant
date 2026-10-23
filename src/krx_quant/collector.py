@@ -301,7 +301,7 @@ async def run_collector(
             log.exception("the engine could not take a %s event", feed)
 
     try:
-        async with aiohttp.ClientSession() as session:
+        async with kis.rest_session() as session:
             alerts = Alerts(
                 session, settings.telegram_bot_token, settings.telegram_chat_id, settings.telegram_api_url
             )
@@ -763,7 +763,7 @@ async def check_fallbacks(settings: Settings, now: Clock | None = None) -> list[
     """
     clock = now or (lambda: datetime.now(UTC))
     checks: list[FallbackCheck] = []
-    async with aiohttp.ClientSession() as session:
+    async with kis.rest_session() as session:
         _, client = tokens_and_client(session, settings, clock)
         calendar = calendar_store(settings).calendar
         fronts = await front_months(session, settings, kst_day(clock()), calendar)

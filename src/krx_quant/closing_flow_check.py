@@ -40,7 +40,7 @@ from krx_quant.closing_flow import read_days, read_demand, recorded_auction_valu
 from krx_quant.config import Settings
 from krx_quant.feeds import KRX_TRADE
 from krx_quant.feeds.base import KST, Row
-from krx_quant.kis import KisError, RestClient
+from krx_quant.kis import KisError, RestClient, rest_session
 from krx_quant.market_calendar import MarketCalendar, calendar_store
 from krx_quant.net_assets import read_net_assets
 from krx_quant.products import products_of
@@ -174,7 +174,7 @@ async def auction_value_lines(settings: Settings, calendar: MarketCalendar, now:
     client: RestClient | None = None
     calls = 0
     timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
+    async with rest_session(timeout=timeout) as session:
         if any(asks.values()):
             # The cached token while it is valid: no early refresh beside the running collector.
             tokens, client = tokens_and_client(

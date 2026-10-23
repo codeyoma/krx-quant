@@ -72,7 +72,7 @@ from krx_quant.candles import (
 )
 from krx_quant.config import Settings
 from krx_quant.feeds.base import KST, Row
-from krx_quant.kis import KisError, RestClient
+from krx_quant.kis import KisError, RestClient, rest_session
 from krx_quant.market_calendar import MarketCalendar, calendar_store
 from krx_quant.supply_probe import REQUEST_TIMEOUT, kis_error
 
@@ -288,7 +288,7 @@ async def probe_close(settings: Settings, today: date, out: Out = print) -> tupl
     )
     out(f"기간: {first} – {today}의 저장된 일봉, 애프터마켓 {AFTER_MARKET_OPENED}부터")
     timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
+    async with rest_session(timeout=timeout) as session:
         tokens, client = tokens_and_client(session, settings, lambda: datetime.now().astimezone())
         asker = _Asker(client)
         try:

@@ -7,7 +7,9 @@ TR IDs; CI rejects them.
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
+import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -18,7 +20,25 @@ import aiohttp
 from krx_quant.feeds.base import KST
 from krx_quant.ratelimit import RateLimiter
 
+log = logging.getLogger(__name__)
+
 WS_PATH = "/tryitout"
+
+# KIS's REST answers carry ``Keep-Alive: timeout=5, max=100``, and KIS closes a connection left
+# idle for 5 s (measured 2026-10-23, #363). aiohttp ignores that header and keeps an idle connection
+# for 15 s by default, so it could send a call on a connection KIS had closed or was closing: the
+# call failed with "Server disconnected". A connection idle for longer than this is not used again.
+# The margin under 5 s covers the round trip and the event loop's stalls (the engine's heartbeat
+# was up to 1.2 s late that day).
+KEEPALIVE_SECONDS = 3.0
+
+
+def rest_session(**kwargs: Any) -> aiohttp.ClientSession:
+    """A client session for KIS REST calls: it reuses an idle connection only while KIS keeps it
+    open (``KEEPALIVE_SECONDS``). ``kwargs`` go to ``aiohttp.ClientSession`` (e.g. ``timeout``)."""
+    return aiohttp.ClientSession(
+        connector=aiohttp.TCPConnector(keepalive_timeout=KEEPALIVE_SECONDS), **kwargs
+    )
 
 
 class KisError(RuntimeError):
@@ -146,7 +166,8 @@ def parse_message(text: str) -> RealtimeFrame | SystemMessage:
 class RestClient:
     """Authenticated GET calls to KIS quotation endpoints, shared-rate-limited.
 
-    Market data only: callers pass read TR IDs and quotation paths.
+    Market data only: callers pass read TR IDs and quotation paths. Every call is a GET of a
+    quotation, which changes nothing at KIS, so sending one again is safe.
     """
 
     def __init__(
@@ -174,7 +195,9 @@ class RestClient:
     async def get(self, tr_id: str, path: str, params: dict[str, str]) -> dict[str, Any]:
         """Return the JSON body; raise KisError unless KIS reports success (rt_cd "0").
 
-        A call KIS refuses for its per-second limit is sent again after a short pause.
+        A call KIS refuses for its per-second limit is sent again after a short pause. A call
+        whose connection closed before KIS answered is sent again at once on a new connection
+        (``_ask``).
         """
         body, _ = await self.get_page(tr_id, path, params)
         return body
@@ -187,13 +210,10 @@ class RestClient:
         ``params`` and ``tr_cont="N"``."""
         for attempt in range(_BUSY_RETRIES + 1):
             token = await self._access_token()
-            await self._limiter.acquire()
             headers = {**self._headers, "authorization": f"Bearer {token}", "tr_id": tr_id}
             if tr_cont:
                 headers["tr_cont"] = tr_cont
-            async with self._session.get(f"{self._rest_url}{path}", params=params, headers=headers) as resp:
-                body = await resp.json(content_type=None)
-                more = resp.headers.get("tr_cont", "")
+            status, body, more = await self._ask(tr_id, f"{self._rest_url}{path}", params, headers)
             if isinstance(body, dict) and body.get("rt_cd") == "0":
                 return body, more
             code = body.get("msg_cd") if isinstance(body, dict) else None
@@ -202,8 +222,63 @@ class RestClient:
                 continue
             if code in _TOKEN_REJECTED and self._on_token_rejected:
                 self._on_token_rejected()
-            raise KisError(f"{tr_id} {params}: HTTP {resp.status} {body}")
+            raise KisError(f"{tr_id} {params}: HTTP {status} {body}")
         raise KisError("unreachable: the last attempt returns or raises")
+
+    async def _ask(
+        self, tr_id: str, url: str, params: dict[str, str], headers: dict[str, str]
+    ) -> tuple[int, Any, str]:
+        """One call: KIS's HTTP status, JSON body and ``tr_cont`` header.
+
+        The call goes on the session's pooled connections. When its connection closes before
+        the answer, aiohttp (3.14) sends a GET again by itself, once, on the pool's next
+        connection, without the limiter; on 2026-10-23 that one was closed too (#363). When the
+        call still fails that way (``dropped``), it is sent once more, at once, through the
+        limiter, on a new connection of its own, and an INFO line says so. A failure of that send
+        is raised, as is any error once KIS has answered: nothing is sent again after an answer,
+        whatever its status.
+        """
+        await self._limiter.acquire()
+        try:
+            response = await self._session.get(url, params=params, headers=headers)
+        except aiohttp.ClientError as e:
+            if not dropped(e):
+                raise
+            first: aiohttp.ClientError = e
+        else:
+            return await _read(response)
+        await self._limiter.acquire()
+        # A connector of its own, so the call cannot go on another pooled connection KIS closed.
+        connector = aiohttp.TCPConnector(force_close=True)
+        async with aiohttp.ClientSession(connector=connector, timeout=self._session.timeout) as fresh:
+            # aiohttp's own second send is off on this session, as aiohttp's test client
+            # (``aiohttp.test_utils``) turns it off: this is one send, and it went through the limiter.
+            fresh._retry_connection = False
+            answer = await _read(await fresh.get(url, params=params, headers=headers))
+        log.info(
+            "KIS REST %s answered on a new connection after its pooled one closed before an answer (%s: %s)",
+            tr_id,
+            type(first).__name__,
+            first,
+        )
+        return answer
+
+
+def dropped(error: BaseException) -> bool:
+    """Whether ``error`` is a connection closed or reset before KIS answered: KIS sent no answer,
+    so the call can be sent again. Not a connection that could not be made (KIS unreachable) nor
+    a timeout (KIS may still be working on the call): those wait for the caller's next try."""
+    if isinstance(error, aiohttp.ClientConnectorError):
+        return False
+    if isinstance(error, aiohttp.ServerDisconnectedError | aiohttp.ClientConnectionResetError):
+        return True
+    return isinstance(error, aiohttp.ClientOSError) and error.errno in (errno.ECONNRESET, errno.EPIPE)
+
+
+async def _read(response: aiohttp.ClientResponse) -> tuple[int, Any, str]:
+    async with response:
+        body = await response.json(content_type=None)
+        return response.status, body, response.headers.get("tr_cont", "")
 
 
 # KIS answers these when the access token is expired or not valid.

@@ -38,7 +38,7 @@ import aiohttp
 
 from krx_quant.auth import tokens_and_client
 from krx_quant.config import Settings
-from krx_quant.kis import KisError, RestClient
+from krx_quant.kis import KisError, RestClient, rest_session
 from krx_quant.probe_fields import MISSING, day_of, describe, flags, order_of, present, same
 from krx_quant.toss_probe import probe_toss
 
@@ -542,7 +542,7 @@ async def probe_supply(settings: Settings, today: date, out: Out = print) -> tup
     # The cached token while it is valid: no early refresh beside the running collector.
     settings = replace(settings, token_refresh_margin_seconds=0.0)
     timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
+    async with rest_session(timeout=timeout) as session:
         tokens, client = tokens_and_client(session, settings, lambda: datetime.now().astimezone())
         prober = _Prober(client, out)
         out(f"probe-supply (#226) {today}: stocks {', '.join(stocks)}; ETF {etf or '-'}")
