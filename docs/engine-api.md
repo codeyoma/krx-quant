@@ -763,7 +763,7 @@ KRX 마감 흐름 화면이 읽는 그날의 마감 리밸런싱 수요다(`clos
 }
 ```
 
-- `model_history`: `state/models/history.json`(#45)에서 그 알고리즘의 항목이다. 오래된 것부터 온다. `why`는 `fit`, `promotion <밤 날짜>`, `rollback from <버전>`, `installed before`(이력이 생기기 전에 깔려 있던 모델)다. `version`이 `null`이면 기본 모델로 돌아간 것이다. 한 번도 설치하지 않았으면 빈 목록이다. 재생에는 서버 상태가 없어서 늘 빈 목록이다. 데모 엔진은 Newton에 가상 이력(학습 설치, 롤백)을 보인다.
+- `model_history`: `state/models/history.json`(#45)에서 그 알고리즘의 항목이다. 오래된 것부터 온다. 서버는 지금 모델과 바로 전 모델의 파일만 남기지만(#361), 이력은 지운 버전의 항목도 그대로 둔다. `why`는 `fit`, `promotion <밤 날짜>`, `rollback from <버전>`, `installed before`(이력이 생기기 전에 깔려 있던 모델)다. `version`이 `null`이면 기본 모델로 돌아간 것이다. 한 번도 설치하지 않았으면 빈 목록이다. 재생에는 서버 상태가 없어서 늘 빈 목록이다. 데모 엔진은 Newton에 가상 이력(학습 설치, 롤백)을 보인다.
 - `model`은 엔진이 지금 돌리는 모델이다. 설치나 롤백 직후 1분 안에는 `model_history`의 마지막과 다를 수 있다(엔진이 모델 파일을 30초마다 본다).
 
 ### `GET /v1/leaderboard?symbol=&period=&special=`

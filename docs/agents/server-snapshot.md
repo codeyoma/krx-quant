@@ -25,6 +25,7 @@ The output of `krx-quant doctor`, masked (secrets, server addresses), with no ma
 6. Disk free under the data and state directories, and memory.
 7. The nightly training (#355): the last night the morning swap applied, the trading nights not applied since, and the latest nights' outcomes (exit code, last step started), from `state/training_nights.json`.
 8. The log lines in Grafana Cloud Loki (#358), as `/v1/status`'s `loki` says: on or off (and why), lines sent, dropped and buffered, the last success, the last failure's kind (`HTTP 503`). Until #360 this section was the log files under `state/logs`, which are gone.
+9. The model files (#361): how many and how large in `state/models` (the running models and `versions/`) and in the store's `models/`, with the algorithm that has the most. Once pruned, `versions/` holds at most two per algorithm (the running one and the one a rollback goes to); the store may hold more while a night's promoted model waits or a night is training.
 
 Full description: `docs/operations.md`, "서버 상태 보기 (#322)".
 

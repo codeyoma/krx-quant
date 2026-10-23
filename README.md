@@ -106,7 +106,7 @@ uv run krx-quant fit breiman           # 장벽(#184): 장벽 정답으로
 uv run krx-quant fit breiman-15m       # 15분 장벽(#263): 그 종류의 정답으로
 uv run krx-quant fit cox               # 시가→종가(#264): KRX 일봉 10년으로
 uv run krx-quant train                 # 밤 학습 한 번: KRX_OBJECT_STORE의 최근 날로 학습·검증·승격 목록
-uv run krx-quant rollback granger      # 직전 모델로 되돌리기
+uv run krx-quant rollback granger      # 한 단계(직전 모델로) 되돌리기. 바로 전 모델만 남는다(#361)
 ```
 - 서버에서는 수집기가 매 거래일 21:30에 밤 학습을 돌리고, 다음 거래일 08:00에 이긴 모델로 바꾼다([docs/operations.md](docs/operations.md)).
 - 서버는 매일 밤 22:30부터, 밤 학습이 끝난 뒤 때가 된 예약 작업(진단, 녹화 10거래일 뒤의 사전 검증 등)을 하나씩 돌리고 결과를 GitHub 이슈 댓글로 남긴다([docs/operations.md](docs/operations.md#예약-작업-215), #215).
