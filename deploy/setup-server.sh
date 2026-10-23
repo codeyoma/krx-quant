@@ -32,6 +32,20 @@ apt-get update -q
 apt-get install -y -q ca-certificates curl git ufw docker.io docker-compose-v2
 usermod -aG docker "$owner"
 
+echo "== swap"
+# The nightly training runs beside the engine on a 2 GB server; without swap the kernel's OOM
+# killer ended it (2026-10-22, #355). Made once, kept across reboots, left alone if any swap
+# is already on.
+if [[ -z "$(swapon --show --noheadings)" ]]; then
+  if [[ ! -f /swapfile ]]; then
+    fallocate -l 2G /swapfile
+    chmod 600 /swapfile
+    mkswap /swapfile
+  fi
+  swapon /swapfile
+fi
+grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' >>/etc/fstab
+
 echo "== Tailscale"
 if ! command -v tailscale >/dev/null; then
   curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/noble.noarmor.gpg \
