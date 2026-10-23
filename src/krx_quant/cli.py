@@ -29,6 +29,7 @@ from krx_quant.close_probe import probe_close
 from krx_quant.closing_flow_check import check_closing_flow, check_krx_net_assets
 from krx_quant.collector import check_fallbacks, measure_subscription_limit, run_collector
 from krx_quant.config import Settings, SettingsError, read_values
+from krx_quant.daily import DailyKind
 from krx_quant.daily_check import DAYS as DAILY_CHECK_DAYS
 from krx_quant.daily_check import daily_check
 from krx_quant.daily_training import daily_algorithm, fit_daily, prevalidate_daily
@@ -287,16 +288,16 @@ def _prevalidate_daily(settings: Settings, name: str) -> int:
     for symbol, got in walked.get("by_symbol", {}).items():
         accuracy = got["accuracy"]
         print(f"  {symbol}: {got['n']} days, accuracy {'-' if accuracy is None else f'{accuracy:.3f}'}")
+    found = daily_algorithm(name)
     overlap = walked.get("overlap")
     if overlap is not None:  # a kind of windows of several sessions (#310)
-        print(_overlap_lines(overlap))
+        print(_overlap_lines(overlap, None if found is None else found[1]))
     if result.earlier_runs:
         print(
             f"run before: {result.earlier_runs}, {result.earlier_on_these_days} of them on any of these days"
             " (a day walked again after a fix is no longer out of sample)"
         )
     print(f"report: {report_path(settings.state_dir, name)}")
-    found = daily_algorithm(name)
     held = None if found is None else found[1].review_hold
     if result.passed and held is not None:
         print(f"the engine does not start {name} yet: {held}")
@@ -307,8 +308,10 @@ def _prevalidate_daily(settings: Settings, name: str) -> int:
     return 0 if result.passed else 1
 
 
-def _overlap_lines(overlap: dict[str, Any]) -> str:
-    """A pre-validation's measure of its windows' overlap (#310, ``daily_training.overlap_report``)."""
+def _overlap_lines(overlap: dict[str, Any], kind: DailyKind | None = None) -> str:
+    """A pre-validation's measure of its windows' overlap (#310, ``daily_training.overlap_report``),
+    and the review days fixed for its ``kind``: the rule giving longer ones than those is #310's
+    case for fixing them again ("다음 알고리즘")."""
 
     def number(value: float | None) -> str:
         return "-" if value is None else f"{value:.3f}"
@@ -327,6 +330,13 @@ def _overlap_lines(overlap: dict[str, Any]) -> str:
             f"  review days by the rule (#310): {review['probation_days']} (recent {review['recent_days']},"
             f" at least {review['min_sample']} scored)"
         )
+        if kind is not None:
+            fixed = list(kind.review_rules.probation_days)
+            longer = review["first"] > fixed[0]
+            lines.append(
+                f"  review days of {kind.name}: {fixed}"
+                + (" - the rule gives longer ones: open an issue to fix them again (#310)" if longer else "")
+            )
     for phase in overlap["phases"]:
         lines.append(
             f"  phase {phase['phase']}: {phase['days']} days,"

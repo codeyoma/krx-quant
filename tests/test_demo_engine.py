@@ -228,10 +228,11 @@ async def test_the_demo_has_the_five_session_kind_s_windows(tmp_path: Path) -> N
         board = await get_json(client, "/v1/leaderboard?kind=open_to_close_5d&period=20d")
 
     daily = next(k for k in kinds["kinds"] if k["name"] == "open_to_close_5d")["daily"]
-    assert daily["awaiting"] is None and daily["review_hold"] is not None
+    assert daily["awaiting"] is None and daily["review_hold"] is None
+    assert daily["probation_days"] == [60, 120, 180]
     baselines = {"otc5-flat", "otc5-climate", "otc5-persist"}
     assert latest["bar_close"] == "2026-10-12T08:50:00+09:00"
-    assert {p["algorithm"] for p in latest["predictions"]} == baselines, "cox-5d is held"
+    assert {p["algorithm"] for p in latest["predictions"]} == baselines, "cox-5d was refused: not run"
     assert all(p["target_at"] == "2026-10-16T15:30:00+09:00" for p in latest["predictions"])
     assert len({p["bar_close"] for p in made["predictions"]}) == 21
     waiting = sorted({p["bar_close"][:10] for p in made["predictions"] if p["answer"] is None})

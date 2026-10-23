@@ -31,9 +31,10 @@ the days before them. The morning's 08:50 predictions are in too, waiting for th
 The five-session kind ``open_to_close_5d`` (#310) has its three baselines' predictions of the
 windows begun on those 20 days and the answers of those ended by the 8th, each at its end day's
 20:35; the four begun on the 5th to the 8th and the morning's wait for their end. Its algorithm
-``cox-5d`` makes none (its review days are held). The KRX day candles carry KIS's 락 구분 as the
-collector keeps it (``ex_code``): 00 every day but a made-up interim ex-dividend day (05) of
-005930 on 2026-09-29, so the windows begun the four sessions before it are marked ``ex_dividend``.
+``cox-5d`` makes none: its pre-validation was refused on the server, so neither engine runs it.
+The KRX day candles carry KIS's 락 구분 as the collector keeps it (``ex_code``): 00 every day but a
+made-up interim ex-dividend day (05) of 005930 on 2026-09-29, so the windows begun the four sessions
+before it are marked ``ex_dividend``.
 
 With a pace (``demo-engine --pace SECONDS``), the morning is replayed at once only up to
 10:00; the API opens there, and the rest goes on a minute every ``pace`` seconds, in steps
@@ -149,6 +150,9 @@ HALT = (time(9, 6), time(9, 36))
 _PACED_FROM = time(10, 0)  # a paced demo opens here and goes on a minute at a time…
 _STEPS = 6  # …in steps of 10 seconds
 _FEE = 0.00015
+# The algorithms the server's pre-validation refused, which the engine does not run: cox-5d
+# (2026-10-23, #310; kept refused by the user's decision of 2026-10-24). The demo runs every other.
+_REFUSED = frozenset({"cox-5d"})
 # Each symbol's mid-point at the open and its tick.
 _OPENS = {"005930": (81_250, 100), "000660": (201_000, 500), "009150": (150_050, 100)}
 # The overnight before the demo morning, each indicator's (day before, last day) values: SOX
@@ -510,6 +514,7 @@ async def demo_app(db: Path, pace: float | None = None) -> web.Application:
         models={cox.version.split("-")[0]: cox},
         daily=StoredDays(data_dir),  # the morning's 08:50 predictions (#264)
         daily_algorithms=DAILY_ALGORITHMS,
+        admits=lambda a: a.name not in _REFUSED,  # as the server's pre-validations (#310)
         daily_features=LiveFeatures(
             OPEN_TO_CLOSE, data_dir, data_dir / "state", _CALENDAR, DEMO_SYMBOLS, _FEE
         ),
@@ -885,8 +890,8 @@ def write_demo_daily(db: Path, data_dir: Path) -> Model:
 
 def write_demo_windows(db: Path, data_dir: Path) -> None:
     """The five-session kind's (#310) windows begun on the last ``_DAILY_SHOWN`` days before the
-    morning: each start's 08:50 predictions of its baselines (``cox-5d`` makes none: its review
-    days are held, ``review_hold``), and the answers of those ended by the 8th at their end day's
+    morning: each start's 08:50 predictions of its baselines (``cox-5d`` makes none: its
+    pre-validation was refused, ``_REFUSED``), and the answers of those ended by the 8th at their end day's
     20:35 (``DailyKind.answer_from``), as the engine would have stored them. A window's answer and
     band are read from every stored day at once: each is set from the windows ended before it
     began, so later days change neither."""

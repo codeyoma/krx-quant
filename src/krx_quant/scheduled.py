@@ -1390,8 +1390,8 @@ def _prevalidation_note(algorithm: str) -> str:
 # the keeper has stored them), it waits: a run then would be judged on the old data. Minutes, not
 # hours; the hour is a bound. Before the bar-close pre-validations, which may take the rest of the
 # night. Its result goes to #204, with them, and to its daily kind's issue (``DAILY_KIND_ISSUES``:
-# open_to_close's #264, open_to_close_5d's #310, whose review days wait for the variance ratio
-# its first pre-validation measures).
+# open_to_close's #264, open_to_close_5d's #310, whose review days were fixed from the variance
+# ratio its first pre-validation measured: a later algorithm's report measures it again).
 DAILY_PREVALIDATION_TIMEOUT = timedelta(hours=1)
 DAILY_KIND_ISSUES = {"open_to_close": DAILY_CHECK_ISSUE, "open_to_close_5d": 310}
 
@@ -1461,10 +1461,12 @@ _DAILY_PREVALIDATION_NOTE = (
 _DAILY_PREVALIDATION_NOTES = {
     "open_to_close_5d": (
         "5거래일 창 `open_to_close_5d`(#310)의 알고리즘의 사전 검증: KRX 일봉 10년의 walk-forward다. 이 "
-        "종류의 판정일은 이 실행이 잰 분산 배율(VR, 리포트의 `walk_forward.overlap`)로 규칙에 따라 정해 "
-        "코드에 고정한다. 그때까지는 통과(`passed`)해도 수습에 오르지 않는다(`review_hold`). 에이전트가 "
-        'VR과 규칙이 주는 판정일(`review_days`)로 판정일을 고정하는 PR을 연다(#310 "상태 판정"). '
-        "거부(`refused`)되면 같은 코드로는 다시 돌지 않는다."
+        "종류의 판정일은 `cox-5d`의 첫 사전 검증(2026-10-23 밤)이 잰 분산 배율(VR 2.220)로 규칙에 따라 "
+        "60·120·180일로 고정했다. 통과(`passed`)하면 그 밤 `simulate-daily-298`이 수습에 올리고 끝난 최근 "
+        "창 60개를 시뮬레이션해 바로 판정한다(#298). 리포트의 `walk_forward.overlap`이 이 실행의 VR과 규칙이 "
+        "주는 판정일(`review_days`)을 다시 잰다. 출력의 `review days of open_to_close_5d` 줄이 고정한 "
+        '판정일보다 길다고 하면 에이전트가 판정일을 다시 정하는 이슈를 연다(#310 "상태 판정"의 "다음 '
+        '알고리즘"). 거부(`refused`)되면 같은 코드로는 다시 돌지 않는다.'
     ),
 }
 
@@ -1525,8 +1527,9 @@ DAILY_SIMULATION = Job(
             SIMULATION_ISSUE,
             note=(
                 "하루 한 번 예측 종류의 수습 시뮬레이션(#298): 그 종류의 첫 판정일만큼의 최근 거래일"
-                "(`open_to_close`는 20일)을 그 알고리즘이 수습으로 돌았다고 치고 다시 재생했다(날마다 그 "
-                "전날까지로 다시 학습). 그 판정을 바로 했다. 통과하면 지금부터 정식이고, 못 하면 수습이 "
+                "(`open_to_close`는 20일, `open_to_close_5d`는 끝난 창 60개, #310)을 그 알고리즘이 수습으로 "
+                "돌았다고 치고 다시 재생했다(날마다 그 전날까지로 다시 학습). 그 판정을 바로 했다. 통과하면 "
+                "지금부터 정식이고, 못 하면 수습이 "
                 "이어진다(다음 판정은 그 둘째 판정일). 출력에는 시세 값이 없다(날짜, 개수, lift만)."
             ),
         ),

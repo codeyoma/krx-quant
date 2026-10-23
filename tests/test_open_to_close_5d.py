@@ -45,10 +45,12 @@ from krx_quant.market_calendar import MarketCalendar
 from krx_quant.open_to_close import OPEN_TO_CLOSE, classify
 from krx_quant.open_to_close_5d import (
     CLIMATE,
+    FIRST_REVIEW_DAY,
     FLAT_NAME,
     OPEN_TO_CLOSE_5D,
     PERSIST,
     SESSIONS,
+    VARIANCE_RATIO,
     Otc5Climate,
     Otc5Persist,
     answers,
@@ -316,6 +318,31 @@ def test_the_kind_is_registered_with_its_overlap_and_its_review_days_by_the_rule
     review = overlap_review(2.59, 5)
     assert review.rules.probation_days == (60, 120, 180) == review.rules.bench_days
     assert (review.recent_days, review.min_sample, review.rules.confidence) == (60, 180, 0.983)
+
+
+def test_its_review_days_are_fixed_from_the_variance_ratio_cox_5d_measured() -> None:
+    """#310 "상태 판정": ``prevalidate-cox-5d`` (2026-10-23 night) measured the largest variance
+    ratio 2.220 (otc5-climate's; otc5-flat 2.111, otc5-persist 1.958). The rule gives it 60 days:
+    40 days' half width t(0.9915, 7) × √(2.220 ÷ 40) = 0.73 is wider than ``open_to_close``'s 20 days'
+    t(0.9915, 19) × √(1 ÷ 20) = 0.58, 60 days' t(0.9915, 11) × √(2.220 ÷ 60) = 0.54 is not. So the
+    kind is judged on 60, 120 and 180 days, benched and recovered on its latest 60, with 180 scored
+    predictions and pairs, and its algorithms are no longer held out of probation."""
+    assert round(VARIANCE_RATIO, 3) == 2.220
+    assert first_review_day(VARIANCE_RATIO, SESSIONS) == FIRST_REVIEW_DAY == 60
+    rules = OPEN_TO_CLOSE_5D.review_rules
+    assert rules.probation_days == (60, 120, 180) == rules.bench_days
+    assert rules.confidence == DAILY_RULES.confidence == 0.983
+    assert (OPEN_TO_CLOSE_5D.recent_days, OPEN_TO_CLOSE_5D.min_sample) == (60, 180)
+    assert OPEN_TO_CLOSE_5D.review_hold is None
+    shown = OPEN_TO_CLOSE_5D.as_dict([])["daily"]
+    assert (shown["probation_days"], shown["bench_days"], shown["recent_days"], shown["review_hold"]) == (
+        [60, 120, 180],
+        [60, 120, 180],
+        60,
+        None,
+    )
+    # The margin: 60 days hold for a ratio from about 1.42 up to 2.60.
+    assert [first_review_day(vr, SESSIONS) for vr in (1.41, 1.42, 2.60, 2.61)] == [40, 60, 60, 80]
 
 
 def test_scheduled_end_and_first_unanswered_count_trading_days() -> None:
@@ -594,7 +621,8 @@ async def test_the_kind_runs_now_that_the_dividend_probe_s_result_is_in(tmp_path
     out and its 락 구분 marking the ex-dividend days, so the kind runs with the spec's fallback (the
     answer as it is, the window marked ``ex_dividend``). Its baselines predict at 08:50; its
     algorithm waits for a pre-validation, which the scheduled job runs that night; it is trained at
-    night; and while its review days are held, a pass neither enrolls nor simulates it."""
+    night; and with its review days fixed (60, 120, 180), a pass has it enrolled and simulated that
+    night."""
     from krx_quant.algorithms.cox5d import Cox5d
     from krx_quant.daily_features import DailyFiles
     from krx_quant.daily_training import DailyTrainer
@@ -642,6 +670,6 @@ async def test_the_kind_runs_now_that_the_dividend_probe_s_result_is_in(tmp_path
     assert not job.due(
         replace(night, facts=Facts(waiting=("cox-5d",), pending_answers=(OPEN_TO_CLOSE_5D.name,)))
     )
-    # A pass tonight: held for its review days, neither enrolled nor simulated.
+    # A pass tonight: enrolled and simulated that night (#310: the review days are fixed).
     passed = {job.name: JobRecord(date(2026, 10, 23), OK, at(date(2026, 10, 23), "22:31"), "c", 0, 60.0)}
-    assert not _daily_simulation_due([Cox5d()])(replace(night, records=passed))
+    assert _daily_simulation_due([Cox5d()])(replace(night, records=passed))
