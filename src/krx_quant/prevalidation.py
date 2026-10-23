@@ -816,13 +816,14 @@ class _WalkForward:
     """The algorithm retrained before each day on its own window of the days before it; an
     algorithm of a kind besides the direction (``kind``, #179) on that kind's answers.
 
-    A recorded day a night stored in the sample store (#370, ``state/training-samples``) under the
-    key of what it reads (``night``: the registries' features and kinds, as the night reads them) is
-    read from there, only the features and answers asked for kept (``TrainingDay.keeping``): on a
-    recorded day that is what making it with those alone gives, as the Market View follows every
-    feed whatever is asked. A backfilled day is made: its leaders' bars are read only for the lead
-    features (``training.training_day``), so a candidate without one gets no futures' moves there
-    (``kospi200f_moves`` empty) where the night's day has them. Nothing is stored."""
+    A day a night stored in the sample store (#370, ``state/training-samples``) under the key of
+    what it reads (``night``: the registries' features and kinds, as the night reads them) is read
+    from there, only the features and answers asked for kept (``TrainingDay.keeping``): that is what
+    making it with those alone gives. On a recorded day the Market View follows every feed whatever
+    is asked; on a backfilled day the leaders' and the previous days' bars are read for every
+    feature that reads them (``training.needs_leaders``, ``needs_previous_day``; #373: before, a
+    backfilled day made for Kalman had no futures' moves, so backfilled days were always made). A
+    day not stored under that key is made (``training.training_day``). Nothing is stored."""
 
     def __init__(
         self,
@@ -921,17 +922,12 @@ class _WalkForward:
 
     def _read(self, day: date, features: Sequence[str], answered: bool = False) -> TrainingDay | None:
         """``day``'s samples with ``features``; with the kind's answers for the candidate's
-        features, or (``answered``) for its kind's tables. A recorded day from the sample store
-        when a night stored it (#370)."""
+        features, or (``answered``) for its kind's tables. From the sample store when a night
+        stored the day (#370; a backfilled one too since #373)."""
         s = self._settings
         kinds = () if self._kind is None or not (features or answered) else (self._kind,)
         night = self._night
-        if (
-            night is not None
-            and set(features) <= set(night.names)
-            and set(kinds) <= set(night.kinds)
-            and is_recorded(s.data_dir, day, s.symbols)
-        ):
+        if night is not None and set(features) <= set(night.names) and set(kinds) <= set(night.kinds):
             stored = stored_night_day(
                 self._store,
                 night,

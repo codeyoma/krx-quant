@@ -16,7 +16,7 @@ import inspect
 import json
 import shutil
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -29,13 +29,14 @@ import krx_quant
 from krx_quant import features as features_module
 from krx_quant import sample_store
 from krx_quant.algorithms import ALGORITHMS, KIND_ALGORITHMS
+from krx_quant.algorithms.contract import Model
 from krx_quant.archive import archive
 from krx_quant.backfill import BAR_SCHEMA, FUTURES_BARS_TR, bars_key
 from krx_quant.barriers import barrier_width_rule
 from krx_quant.config import Settings
 from krx_quant.contracts import KOSPI200, USD, days_to_expiry
 from krx_quant.engine import Event
-from krx_quant.features import Leaders
+from krx_quant.features import FEATURES, LEAD_FEATURES, LEADER_FEATURES, Leaders, Snapshot
 from krx_quant.feeds import FOREIGN_ESTIMATE, NXT_TRADE, USD_FUTURES
 from krx_quant.kind_registry import KINDS, kind_named
 from krx_quant.kinds import DIRECTION_KIND, Kind
@@ -43,6 +44,7 @@ from krx_quant.market_calendar import MarketCalendar, calendar_store
 from krx_quant.nightly import train_night
 from krx_quant.object_store import LocalObjectStore
 from krx_quant.prevalidation import _WalkForward, prevalidate
+from krx_quant.reference import Bar
 from krx_quant.sample_store import (
     CALENDAR_REACH,
     STORE_DIR,
@@ -54,7 +56,7 @@ from krx_quant.sample_store import (
     read_files,
 )
 from krx_quant.touch import TARGET_VERSION
-from krx_quant.training import TrainingDay, training_day
+from krx_quant.training import TrainingDay, needs_leaders, needs_previous_day, training_day
 from tests.algorithm_doubles import FrequencyAlgorithm
 from tests.replay_events import at as at_time
 from tests.replay_events import (
@@ -546,10 +548,20 @@ def test_what_the_digest_s_code_names_is_in_the_digest_too() -> None:
     assert not outside, outside
 
 
-@pytest.mark.parametrize("day", [NIGHT, DAYS[2]], ids=["recorded", "backfilled"])
+@pytest.mark.parametrize(
+    ("day", "algorithm"),
+    [(NIGHT, None), (DAYS[2], None), (DAYS[2], "kalman"), (DAYS[2], "newton")],
+    ids=["recorded", "backfilled", "backfilled, kalman's features", "backfilled, newton's features"],
+)
 def test_every_file_a_day_reads_is_in_its_key(
-    market: Path, day: date, monkeypatch: pytest.MonkeyPatch
+    market: Path, day: date, algorithm: str | None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """With every algorithm's features and kinds, as the night reads a day, or with one
+    algorithm's alone (#373: one that reads the leaders' bars without a lead feature, one that
+    reads none)."""
+    names, kinds = NIGHT_READS.names, NIGHT_READS.kinds
+    if algorithm is not None:
+        names, kinds = next(a for a in ALGORITHMS if a.name == algorithm).features, ()
     opened: set[Path] = set()
 
     def seen(real: Callable[..., Any]) -> Callable[..., Any]:
@@ -561,12 +573,118 @@ def test_every_file_a_day_reads_is_in_its_key(
 
     for name in ("read_table", "ParquetFile", "read_schema"):
         monkeypatch.setattr(pq, name, seen(getattr(pq, name)))
-    made(market, day)
+    made(market, day, names, kinds)
     monkeypatch.undo()
 
-    files = read_files(market, day, CALENDAR, SYMBOLS, NIGHT_READS.names, LEADERS, NIGHT_READS.kinds)
+    files = read_files(market, day, CALENDAR, SYMBOLS, names, LEADERS, kinds)
     keyed = {p.resolve() for p in files}
     assert opened and opened <= keyed, sorted(str(p) for p in opened - keyed)
+
+
+class Watched(Mapping[str, Any]):
+    """A mapping that notes, under ``name`` in ``seen``, that something read it."""
+
+    def __init__(self, values: Mapping[str, Any], seen: set[str], name: str) -> None:
+        self._values, self._seen, self._name = values, seen, name
+
+    def __getitem__(self, key: str) -> Any:
+        self._seen.add(self._name)
+        return self._values[key]
+
+    def __iter__(self) -> Iterator[str]:
+        self._seen.add(self._name)
+        return iter(self._values)
+
+    def __len__(self) -> int:
+        self._seen.add(self._name)
+        return len(self._values)
+
+
+class WatchedList(Sequence[Any]):
+    """A sequence that notes, under ``name`` in ``seen``, that something read it."""
+
+    def __init__(self, values: Sequence[Any], seen: set[str], name: str) -> None:
+        self._values, self._seen, self._name = values, seen, name
+
+    def __getitem__(self, index: Any) -> Any:
+        self._seen.add(self._name)
+        return self._values[index]
+
+    def __len__(self) -> int:
+        self._seen.add(self._name)
+        return len(self._values)
+
+
+def _moving_bars(day: date, start: str, end: str, price: float, step: float) -> list[Bar]:
+    """A bar a minute from ``start`` to ``end``, its close stepping up and down around ``price``."""
+    out, t, stop = [], at_time(start, day), at_time(end, day)
+    while t < stop:
+        close = price + step * ((int(t.timestamp()) // 60 * 7919) % 7 - 3)
+        out.append(Bar(t, close, close + step, close - step, close, 10, 1, t, t))
+        t += timedelta(minutes=1)
+    return out
+
+
+PREVIOUS_FIELDS = ("previous_ranges", "previous_bars", "previous_slot_returns")
+
+
+def _what_each_feature_reads() -> dict[str, set[str]]:
+    """Each feature computed on a bar close that has everything (the day's bars, every lead
+    group's, the previous days' ranges, bars and slot returns): which of the leaders' bars and the
+    previous days' fields it read."""
+    day = DAYS[2]
+    session = CALENDAR.session(day)
+    assert session is not None
+    bars = _moving_bars(day, "09:00:00", "10:00:00", 81_200, 100)
+    base = Snapshot.at(
+        "005930",
+        at_time("10:00:00", day),
+        bars,
+        bars[-1].close,
+        FEE,
+        session_open=session.open,
+        regime="calm",
+    )
+    groups = {
+        "peers": [_moving_bars(day, "09:00:00", "10:00:00", 190_000, 500)],
+        "kospi200f": [_moving_bars(day, "08:45:00", "10:00:00", 350, 0.05)],
+        "usdf": [_moving_bars(day, "08:45:00", "10:00:00", 1340, 0.1)],
+        "indices": [_moving_bars(day, "09:00:00", "10:00:00", 3000, 0.5)],
+        "us": [_moving_bars(day, "09:00:00", "10:00:00", 180, 0.01)],
+        "etfs": [_moving_bars(day, "09:00:00", "10:00:00", 9000, 5)],
+    }
+    previous = _moving_bars(DAYS[1], "09:00:00", "15:20:00", 81_000, 100)
+    ranges = {f"{h:02d}:{m:02d}": 150.0 for h in range(9, 16) for m in (0, 30)}
+    slots = [{f"{h:02d}:{m:02d}": 1.5 for h in range(9, 16) for m in range(0, 60, 10)}] * 20
+    out: dict[str, set[str]] = {}
+    for name, feature in FEATURES.items():
+        seen: set[str] = set()
+        snapshot = dataclasses.replace(  # a fresh one: its cached moves and width are not shared
+            base,
+            leaders=Watched(groups, seen, "leaders"),
+            previous_ranges=Watched(ranges, seen, "previous_ranges"),
+            previous_bars=WatchedList(previous, seen, "previous_bars"),
+            previous_slot_returns=WatchedList(slots, seen, "previous_slot_returns"),
+        )
+        feature(snapshot)
+        out[name] = seen
+    return out
+
+
+def test_a_backfilled_day_loads_what_a_feature_reads_for_it_whatever_else_is_asked() -> None:
+    """#373. A backfilled day reads the leaders' bars (``needs_leaders``) and the previous days'
+    (``needs_previous_day``) only when a feature asked for reads them, so the features that read
+    them must be exactly those the gates name: else a feature would have them in the night's day
+    (every algorithm's features) and not in one made for its algorithm alone (pre-validation's).
+    Each feature is computed on a bar close that has everything and each read noted."""
+    reads = _what_each_feature_reads()
+
+    leading = {name for name, seen in reads.items() if "leaders" in seen}
+    assert leading == LEADER_FEATURES == {name for name in FEATURES if needs_leaders([name])}
+    assert leading == LEAD_FEATURES | {"kospi200f_moves"}
+    before = {name for name, seen in reads.items() if seen & set(PREVIOUS_FIELDS)}
+    assert before == {name for name in FEATURES if needs_previous_day([name])}
+    assert before  # the previous day's range, the barrier's width, the slot returns
 
 
 class Asked(MarketCalendar):
@@ -745,31 +863,9 @@ def asked_alone() -> list[tuple[tuple[str, ...], tuple[Kind, ...]]]:
     return list(dict.fromkeys(asked))
 
 
-@pytest.mark.parametrize("target_version", [1, TARGET_VERSION])
-def test_a_recorded_day_kept_to_some_features_and_kinds_is_that_day_made_with_them_alone(
-    market: Path, target_version: int
-) -> None:
-    """What pre-validation and the simulated probation read of a stored recorded day (``keeping``)
-    is what making the day with the candidate's features and kind alone gives."""
-    whole = made(market, NIGHT, target_version=target_version)
-    for names, kinds in asked_alone():
-        alone = made(market, NIGHT, names, kinds, target_version=target_version)
-        kept = whole.keeping(names, [k.name for k in kinds])
-        assert fingerprint(kept) == fingerprint(alone), (names, [k.name for k in kinds])
-
-
-def test_a_backfilled_day_is_made_by_pre_validation_even_when_a_night_stored_it(
-    market: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """On a backfilled day the leaders' bars are read for the lead features only: made with
-    Kalman's features alone, the day has no futures' moves where the night's has them. So
-    pre-validation makes a backfilled day itself, and reads a recorded one from the store."""
-    kalman = next(a for a in ALGORITHMS if a.name == "kalman")
-    whole, alone = made(market, DAYS[2]), made(market, DAYS[2], kalman.features, ())
-    moves = [s.features.series("kospi200f_moves") for s in whole.keeping(kalman.features, ()).samples]
-    assert any(moves) and not any(s.features.series("kospi200f_moves") for s in alone.samples)
-
-    s = Settings(
+def walk_settings(market: Path, tmp_path: Path) -> Settings:
+    """Settings of the market's days, as pre-validation reads them."""
+    return Settings(
         kis_app_key="",
         kis_app_secret="",
         symbols=SYMBOLS,
@@ -781,6 +877,39 @@ def test_a_backfilled_day_is_made_by_pre_validation_even_when_a_night_stored_it(
         fee_rate=FEE,
         target_version=TARGET_VERSION,
     )
+
+
+@pytest.mark.parametrize("target_version", [1, TARGET_VERSION])
+@pytest.mark.parametrize("day", [NIGHT, DAYS[2]], ids=["recorded", "backfilled"])
+def test_a_day_kept_to_some_features_and_kinds_is_that_day_made_with_them_alone(
+    market: Path, day: date, target_version: int
+) -> None:
+    """What pre-validation and the simulated probation read of the night's day (``keeping``) is
+    what making the day with the candidate's features and kind alone gives: a recorded day read
+    from the store, a backfilled one made (#373: its leaders' bars were read for the lead features
+    alone, so a candidate without one, as Kalman, had no futures' moves there)."""
+    whole = made(market, day, target_version=target_version)
+    for names, kinds in asked_alone():
+        alone = made(market, day, names, kinds, target_version=target_version)
+        kept = whole.keeping(names, [k.name for k in kinds])
+        assert fingerprint(kept) == fingerprint(alone), (names, [k.name for k in kinds])
+
+
+def test_a_backfilled_day_made_with_kalman_s_features_alone_has_the_night_s_futures_moves(
+    market: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#373. Kalman reads the futures' moves (``kospi200f_moves``) and no lead feature: made with
+    its features alone, a backfilled day has the futures' moves the night's day (every algorithm's
+    features) has. So pre-validation reads a backfilled day from the store too, as a recorded one:
+    both the night's, kept to Kalman's features."""
+    kalman = next(a for a in ALGORITHMS if a.name == "kalman")
+    assert not LEAD_FEATURES & set(kalman.features)
+    whole, alone = made(market, DAYS[2]), made(market, DAYS[2], kalman.features, ())
+    moves = [s.features.series("kospi200f_moves") for s in whole.keeping(kalman.features, ()).samples]
+    assert any(moves), "the fixture's futures move"
+    assert [s.features.series("kospi200f_moves") for s in alone.samples] == moves
+
+    s = walk_settings(market, tmp_path)
     store = SampleStore(s.state_dir / STORE_DIR)
     for day in (DAYS[2], NIGHT):
         assert read_it(store, market, day).made_stored
@@ -794,11 +923,113 @@ def test_a_backfilled_day_is_made_by_pre_validation_even_when_a_night_stored_it(
     trainer = _WalkForward(s, kalman, DAYS, CALENDAR, LEADERS, night=NIGHT_READS)
 
     backfilled, recorded = trainer._read(DAYS[2], kalman.features), trainer._read(NIGHT, kalman.features)
-    assert backfilled is not None and fingerprint(backfilled) == fingerprint(alone)
-    assert recorded is not None and fingerprint(recorded) == fingerprint(
-        made(market, NIGHT, kalman.features, ())
+    assert backfilled is not None
+    assert fingerprint(backfilled) == fingerprint(whole.keeping(kalman.features, ()))
+    assert recorded is not None
+    assert fingerprint(recorded) == fingerprint(made(market, NIGHT).keeping(kalman.features, ()))
+    assert calls == [], "both days from the store"
+
+
+class FuturesReader(FrequencyAlgorithm):
+    """A stand-in that learns the futures' last move from every day, backfilled ones too (Kalman
+    learns from the book's days alone): its model holds the mean over the samples that have one,
+    beside the class frequencies it forecasts."""
+
+    training_days = len(DAYS) - 1
+
+    def fit(self, samples: Sequence[Any]) -> Any:
+        scored = [s for s in samples if s.outcome is not None]
+        last = [m[-1] for s in scored if (m := s.features.series("kospi200f_moves"))]
+        moves = {"moves": float(len(last)), "mean": sum(last) / len(last) if last else 0.0}
+        return Model.fitted(self.name, {**super().fit(samples).params, **moves}, scored, 0.0)
+
+
+def test_pre_validation_trains_a_futures_reader_on_the_night_s_samples(market: Path, tmp_path: Path) -> None:
+    """#373. The walk-forward's model before the night's day is the one fitted on the night's days
+    (every algorithm's features), kept to the candidate's: the backfilled days' futures' moves
+    included."""
+    reader = FuturesReader("futures-reader", "kospi200f_moves")
+    s = walk_settings(market, tmp_path)
+    nights = {d: made(market, d) for d in DAYS[:-1]}  # the window before the night's day
+    backfilled = [x for d in nights if d not in RECORDED for x in nights[d].samples]
+    assert any(x.features.series("kospi200f_moves") for x in backfilled), "the backfilled days' futures move"
+    nightly = reader.fit([x for found in nights.values() for x in found.of(reader.features)])
+
+    model = _WalkForward(s, reader, DAYS, CALENDAR, LEADERS, night=NIGHT_READS).before(NIGHT)
+
+    assert (model.version, model.params) == (nightly.version, nightly.params)
+
+    def moving(days: Sequence[date]) -> int:
+        return sum(
+            1
+            for d in days
+            for x in nights[d].samples
+            if x.outcome is not None and x.features.series("kospi200f_moves")
+        )
+
+    assert nightly.params["moves"] == moving(list(nights)) > moving([d for d in nights if d in RECORDED])
+
+
+# Two nights' worth of days made, and two pre-validations replaying the four recorded mornings.
+@pytest.mark.timeout(240)
+async def test_pre_validation_reads_backfilled_days_a_night_stored_and_judges_the_same(
+    store_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#373. The market's days (four backfilled, four recorded) pre-validated twice for a candidate
+    that learns the futures' moves on every day, beside one that reads a lead feature (so the
+    night's days are made with one): once beside the night's stored days (none made again, the
+    backfilled ones included), once without. The same models before each day, checks and
+    statistics."""
+    algorithms: list[Any] = [
+        FrequencyAlgorithm("leader", "lead_kospi200f_1"),
+        FuturesReader("futures-reader", "kospi200f_moves"),
+    ]
+    states = {name: walk_settings(store_root, tmp_path / name) for name in ("with", "without")}
+    known = {(DAYS[0] - timedelta(days=60) + timedelta(days=i)) for i in range(80)}
+    open_days = {d.isoformat(): d.weekday() < 5 for d in sorted(known)}
+    for s in states.values():
+        s.state_dir.mkdir(parents=True)
+        (s.state_dir / "market_calendar.json").write_text(
+            json.dumps({"refreshed_on": None, "open_days": open_days})
+        )
+    calendar = calendar_store(states["with"]).calendar
+    await asyncio.to_thread(
+        night,
+        Path(shutil.copytree(store_root, tmp_path / "night-store")),
+        tmp_path / "cache",
+        states["with"].state_dir / STORE_DIR,
+        algorithms,
+        (DIRECTION_KIND,),
+        kind_algorithms=(),
+        calendar=calendar,
     )
-    assert calls == [DAYS[2]], "the recorded day from the store"
+    assert len(list((states["with"].state_dir / STORE_DIR).glob("date=*"))) == len(DAYS)
+    calls: list[date] = []
+
+    def counted(data_dir: Path, day: date, *args: Any, **kwargs: Any) -> Any:
+        calls.append(day)
+        return training_day(data_dir, day, *args, **kwargs)
+
+    monkeypatch.setattr("krx_quant.prevalidation.training_day", counted)
+    results = {}
+    for name, s in states.items():
+        calls.clear()
+        result = await prevalidate(
+            s,
+            "futures-reader",
+            algorithms=algorithms,
+            kind_algorithms=(),
+            kinds=(DIRECTION_KIND,),
+            now=FINISHED,
+        )
+        results[name] = ({k: v for k, v in result.as_dict().items() if k != "db"}, list(calls))
+
+    (stored, made_with), (fresh, made_without) = results["with"], results["without"]
+    assert made_with == [], "every day read from the night's store"
+    assert {d for d in made_without if d not in RECORDED}, "without it, the backfilled days are made"
+    assert stored == fresh
+    assert stored["models"] and stored["checks"]
+    assert len(set(stored["models"].values())) > 1, "retrained before each replayed day"
 
 
 async def prevalidation_state(tmp_path: Path, name: str) -> Settings:

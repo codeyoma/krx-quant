@@ -159,6 +159,21 @@ def test_a_day_without_the_book_is_not_learned_from() -> None:
     assert declined.value.why is Abstention.NO_BOOK
 
 
+def test_days_without_the_book_change_nothing_it_learns_whatever_their_futures_moves() -> None:
+    """A backfilled day has no book: Kalman learns nothing from it, its futures' moves there
+    included (#373: pre-validation made such days without them, the night with them)."""
+    book_days = simulated(30)
+    earlier = [replace(s, bar_close=s.bar_close - timedelta(days=60)) for s in simulated(5, seed=2)]
+    no_book = [replace(s, features=features([], s.features.series("kospi200f_moves"))) for s in earlier]
+    nor_moves = [replace(s, features=features([], ())) for s in earlier]
+    assert all(s.features.series("kospi200f_moves") for s in no_book)
+
+    alone = KALMAN.fit(book_days)
+    for backfilled in (no_book, nor_moves):
+        model = KALMAN.fit([*backfilled, *book_days])
+        assert (model.version, model.params, model.trained) == (alone.version, alone.params, alone.trained)
+
+
 def a_book_morning(end: str = "10:00:00") -> list[Event]:
     """The busy morning's book and trades, the sizes at the best quotes leaning now one way,
     now the other."""

@@ -1038,6 +1038,12 @@ FEATURES: dict[str, Feature] = {
     BARRIER_SIGMA: barrier_sigma,
 }
 LEAD_FEATURES = frozenset(lead_feature(group, lag) for group in LEAD_GROUPS for lag in LEAD_LAGS)
+# The features that read the leaders' bars (``Snapshot.leaders``): the lead groups' moves and the
+# KOSPI200 futures' one-minute moves (Kalman's, #25). A day of backfilled bars reads the leaders'
+# bars when one of these is asked for, whatever else is (``training.needs_leaders``, #373): a
+# feature that reads them must be here, or it would have them in the night's day (every
+# algorithm's features) and not in a day made for its algorithm alone (pre-validation's).
+LEADER_FEATURES = LEAD_FEATURES | {"kospi200f_moves"}
 # The range's own features (#181): no direction algorithm reads them.
 RANGE_FEATURES = frozenset({*(range_feature(m) for m in RANGE_MINUTES), PREVIOUS_DAY_RANGE})
 # The barrier's own features (#183): no direction algorithm reads them either.

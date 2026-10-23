@@ -36,13 +36,15 @@ another key is a miss: the day is made again and its file replaced. A day is sto
 reading it back gives every sample, value and answer exactly as made (``fingerprint``); one that
 would not (a value JSON changes, say a tuple in an answer's path) is made every night instead.
 
-Pre-validation and the simulated probation (``prevalidation._WalkForward``) read the recorded days
-the night stored, by the night's key (``night_reads``), and keep the features and the answers they
-read (``TrainingDay.keeping``): on a recorded day the same samples as making the day with those
-alone gives, as the Market View follows every feed whatever is asked and each feature is computed
-from the bar close's snapshot alone (``tests/test_sample_store.py``). A backfilled day they make
-themselves: there the leaders' bars are read only for the lead features, so a day made without one
-differs from the night's (no futures' moves in ``kospi200f_moves``). They never write.
+Pre-validation and the simulated probation (``prevalidation._WalkForward``) read the days the night
+stored, by the night's key (``night_reads``), and keep the features and the answers they read
+(``TrainingDay.keeping``): the same samples as making the day with those alone gives
+(``tests/test_sample_store.py``). On a recorded day the Market View follows every feed whatever is
+asked and each feature is computed from the bar close's snapshot alone; on a backfilled day the
+leaders' and the previous days' bars are read for every feature that reads them, whatever else is
+asked (``training.needs_leaders``, ``needs_previous_day``). Until #373 the leaders' bars were read
+for the lead features alone, so a backfilled day made for Kalman had no futures' moves in
+``kospi200f_moves``, and they made every backfilled day themselves. They never write.
 
 The night removes the days no step reads any more, the other keys of the days it read, and files
 left half-written (``SampleStore.prune``).
@@ -79,7 +81,7 @@ from krx_quant.algorithms.contract import Sample
 from krx_quant.archive import partition_files
 from krx_quant.backfill import MINUTE_BARS_TR, bars_key
 from krx_quant.contracts import days_to_expiry
-from krx_quant.features import LEAD_FEATURES, SLOT_RETURN_DAYS, FeatureVector, Leaders, TouchTerms
+from krx_quant.features import SLOT_RETURN_DAYS, FeatureVector, Leaders, TouchTerms
 from krx_quant.feeds.base import KST
 from krx_quant.kind_registry import kind_named
 from krx_quant.kinds import Answer, Kind, table_baselines
@@ -93,6 +95,7 @@ from krx_quant.training import (
     declared,
     is_recorded,
     leader_series,
+    needs_leaders,
     needs_previous_day,
     training_day,
 )
@@ -205,7 +208,8 @@ def read_files(
     """The files ``training_day`` may read for ``day`` with these features and kinds, as it reads
     them: the macro regime's partition; the bars of the 20 trading days before (``PreviousDay``,
     when a feature or kind reads them); the recorded partitions (``replay.recorded_partitions``) of
-    a recorded day, else the symbols' backfilled bars and, for the lead features, the leaders'."""
+    a recorded day, else the symbols' backfilled bars and, for the features that read them
+    (``training.needs_leaders``), the leaders'."""
     files: list[Path] = []
     if calendar.session(day) is not None:
         files += partition_files(data_dir / regime_prefix(day) / "symbol=market")
@@ -218,7 +222,7 @@ def read_files(
         files += [f for _, found in recorded_partitions(data_dir, day, symbols, leaders) for f in found]
     else:
         series = [(MINUTE_BARS_TR, s) for s in symbols]
-        if LEAD_FEATURES & set(names):
+        if needs_leaders(names):
             series += leader_series(leaders)
         files += [p for feed, name in series if (p := data_dir / bars_key(day, feed, name)).is_file()]
     return files
