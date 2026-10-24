@@ -25,7 +25,10 @@ def placeholder_hits(text: str) -> list[str]:
 
 @pytest.mark.parametrize(
     "stand_in",
-    ["PRNUM", "NNN", "PRB", "PRDOCS", "__PR3__", "PR_NUMBER", "XXX", "TBD", "NNNN"],
+    [
+        *("PRNUM", "NNN", "PRB", "PRDOCS", "__PR3__", "PR_NUMBER", "XXX", "TBD", "NNNN"),
+        *("KQPR", "FORKPR", "DOCS_PR"),  # capitals ending in PR (#375)
+    ],
 )
 def test_a_change_notes_stand_in_for_its_pr_number_is_found(stand_in: str) -> None:
     note = f"> **바뀜** (2026-10-20, {HASH}{stand_in}): 이전 → 지금. 이유: …."
@@ -42,7 +45,11 @@ def test_a_change_notes_stand_in_for_its_pr_number_is_found(stand_in: str) -> No
         "# PRNUM heading",  # a heading, not a reference
         "x = 1  # NNN in a comment after a space",
         "codeyoma/FinceptTerminal#97",
+        "codeyoma/FinceptTerminal#103",
+        "> **바뀜** (2026-10-24, #375): 이전 → 지금.",
         "#PRs",  # lower case: prose, not a stand-in
+        "#KQPRs",  # nor capitals running on in lower case
+        "#Kqpr",
     ],
 )
 def test_real_references_and_the_format_pass(text: str) -> None:
