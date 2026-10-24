@@ -33,7 +33,9 @@ them in the report.
 The report is saved to ``state/prevalidations/<name>.json``, passed or not, with a digest
 of the algorithm's code; the engine reads it at each bar close. The server's scheduled job
 runs this check itself, one waiting algorithm a night (``scheduled.py``, #204), and reads the
-report (``last_report``) to know whether the code it runs now has been judged already.
+report (``last_report``) to know whether the code it runs now has been judged already. An
+algorithm whose report refused the code and target it runs now is refused, not waiting
+(``refusals``): the engine tells it once, until its code or target changes.
 
 With the touch target (``KRX_TARGET_VERSION=3``, the default since #170; 2 before #187) the candidate
 trains on its labels and the replay forecasts it (the touch target's baselines, the climate
@@ -292,6 +294,48 @@ def last_report(
         passed=report.get("passed") is True,
         days=len(days) if isinstance(days, list) else 0,
     )
+
+
+@dataclass(frozen=True)
+class Refusal:
+    """An algorithm's latest report refused the code, target and inputs it runs now."""
+
+    # The report that refused: its time, and the code digest, target and inputs it judged, as one
+    # key (told once each: a run again by hand is told too).
+    judged: str
+    why: str  # the checks it failed, a line
+
+
+def refusals(
+    state_dir: Path, target_version: int = 1, kinds: Sequence[Kind] = KINDS
+) -> Callable[[Algorithm | KindAlgorithm | DailyAlgorithm], Refusal | None]:
+    """The refusal of an algorithm whose latest report judged the code and target it runs now
+    (``LastReport.judged``) and did not pass; None for any other: no report, one of other code,
+    target or inputs (a new run is due), a pass, or a look on fewer than ``MIN_DAYS`` days. The
+    engine tells a refusal once, not as waiting (#310)."""
+
+    def refusal(algorithm: Algorithm | KindAlgorithm | DailyAlgorithm) -> Refusal | None:
+        if algorithm.name in REGISTERED_BEFORE:
+            return None
+        last = last_report(state_dir, algorithm, target_version, kinds)
+        if last is None or not last.judged or last.passed:
+            return None
+        report = _read_report(state_dir, algorithm.name) or {}
+        checks = report.get("checks")
+        failed = [
+            f"{c.get('check')}: {c.get('detail')}"
+            for c in (checks if isinstance(checks, list) else [])
+            if isinstance(c, Mapping) and c.get("passed") is not True
+        ]
+        judged = {
+            "prevalidated_at": report.get("prevalidated_at"),
+            "code": code_digest(algorithm),
+            "target_version": _target(algorithm, target_version, kinds),
+            "inputs": _raised(inputs_of(algorithm)),
+        }
+        return Refusal(json.dumps(judged, sort_keys=True), "; ".join(failed) or "no failed check recorded")
+
+    return refusal
 
 
 def _read_report(state_dir: Path, name: str) -> dict[str, Any] | None:

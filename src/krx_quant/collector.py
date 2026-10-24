@@ -74,7 +74,7 @@ from krx_quant.object_store import open_store
 from krx_quant.open_to_close import OPEN_TO_CLOSE
 from krx_quant.polling import CALL_ERRORS, NORMALIZE_ERRORS, Poller, PollJob
 from krx_quant.predictions import DB_NAME, PredictionStore, iso
-from krx_quant.prevalidation import admits
+from krx_quant.prevalidation import admits, refusals
 from krx_quant.products import products_of
 from krx_quant.ratelimit import RateLimiter
 from krx_quant.recorder import ParquetRecorder
@@ -264,6 +264,8 @@ async def run_collector(
         regimes=partial(day_regime, settings.data_dir),  # recorded by the 07:30 macro read
         # A new algorithm waits for its pre-validation, on the target it runs.
         admits=admits(settings.state_dir, settings.target_version),
+        # One its latest pre-validation refused is told once, not as waiting (#310).
+        refused=refusals(settings.state_dir, settings.target_version),
         commit=settings.commit,
         review_rules=Rules.of(settings),
         target_version=settings.target_version,  # the target learned and forecast (#169)

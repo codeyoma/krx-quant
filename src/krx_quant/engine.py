@@ -39,7 +39,10 @@ since: the day the morning swap installed it, nothing before, nothing while it w
 
 Live, a new algorithm runs only once ``admits`` lets it (its pre-validation passed,
 ``prevalidation.py``): from the next bar close it starts on probation. Until then it is
-not run, listed or reviewed; the first review after the engine starts alerts it once.
+not run, listed or reviewed; the first review after the engine starts alerts it once. One
+whose latest report refused the code and target it runs now (``refused``) is not waiting: the
+first review after the refusal tells it once (``runs``: ``prevalidation_refused``), and no
+restart tells it again until its code or target changes and it waits again (#310).
 An algorithm the engine has already enrolled always runs, but for a daily kind's on probation
 (#264): it runs only while ``admits`` lets it, so a new answer version, code or inputs have its
 walk-forward run again before it predicts again.
@@ -109,7 +112,7 @@ from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping, 
 from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta
 from functools import partial
-from typing import Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from krx_quant.algorithms import (
     ALGORITHMS,
@@ -210,6 +213,9 @@ from krx_quant.special import KOSPI, Kind, SpecialSituations, Window, in_vi, tou
 from krx_quant.stats import DEFAULT_MIN_SAMPLE
 from krx_quant.touch import TARGET_VERSION, WINDOW
 
+if TYPE_CHECKING:  # the pre-validation replays through this module: its type only
+    from krx_quant.prevalidation import Refusal
+
 log = logging.getLogger(__name__)
 
 Event = tuple[str, dict[str, Any]]  # (feed TR ID, normalized row)
@@ -254,9 +260,13 @@ Change = PredictionsStored | OutcomesScored | KindPredictionsStored | KindAnswer
 Listener = Callable[[Change], None]  # told of each, as it happens (the stream)
 # Whether the engine may start a new algorithm (``prevalidation.admits``).
 Admits = Callable[[Algorithm | KindAlgorithm | DailyAlgorithm], bool]
+# Whether its latest pre-validation refused the code and target it runs now (``prevalidation.refusals``).
+Refused = Callable[[Algorithm | KindAlgorithm | DailyAlgorithm], "Refusal | None"]
 # A day's macro regime as decided before a time (the day's open); None unknown.
 Regimes = Callable[[date, datetime], str | None]
 
+# The ``runs`` kind of a pre-validation refusal told (#310): its detail is what was refused.
+REFUSED_RUN = "prevalidation_refused"
 # Each day's algorithm review runs this long after the close, when everything is scored.
 REVIEW_AFTER_CLOSE = timedelta(minutes=10)
 # How far back a starting engine looks for a kind's predictions left without their answer.
@@ -394,6 +404,7 @@ class PredictionEngine:
         signals: Signals | None = None,
         regimes: Regimes | None = None,
         admits: Admits | None = None,
+        refused: Refused | None = None,
         commit: str = "unknown",
         review_rules: Rules | None = None,
         target_version: int = 1,
@@ -470,6 +481,7 @@ class PredictionEngine:
             b.name: given.get(b.name) or b.default_table() for _, b in table_baselines(self.kinds)
         }
         self._admits = admits  # without: every registered algorithm runs (replay, tests)
+        self._refused = refused  # without: none refused, those not admitted wait (replay, tests)
         self.algorithms: tuple[Algorithm, ...] = ()  # the registered ones that run, in order
         self.kind_algorithms: tuple[KindAlgorithm, ...] = ()  # likewise, of the other kinds
         self._feature_names: list[str] = []
@@ -625,18 +637,33 @@ class PredictionEngine:
         return kind is not None and kind.review_hold is not None
 
     def waiting(self) -> list[str]:
-        """The registered algorithms not run yet: their pre-validation has not passed (what the
-        scheduled pre-validations run, and the alert names). Not one of a daily kind not run yet
-        (#310, ``DailyKind.awaiting``): it is not pre-validated before its kind runs."""
-        return (
-            [a.name for a in self.registered if a not in self.algorithms]
-            + [a.name for a in self.kind_registered if a not in self.kind_algorithms]
-            + [
-                a.name
+        """The registered algorithms not run yet: their pre-validation has not passed, nor
+        refused the code and target they run now (what the scheduled pre-validations run, and the
+        alert names). Not one of a daily kind not run yet (#310, ``DailyKind.awaiting``): it is not
+        pre-validated before its kind runs."""
+        return [a.name for a in self._unvalidated() if self._refusal(a) is None]
+
+    def refused(self) -> dict[str, Refusal]:
+        """The registered algorithms not run because their latest pre-validation refused the code
+        and target they run now (``prevalidation.refusals``), each with its refusal: not waiting,
+        as no pre-validation is due until either changes (#310)."""
+        return {a.name: r for a in self._unvalidated() if (r := self._refusal(a)) is not None}
+
+    def _unvalidated(self) -> list[Algorithm | KindAlgorithm | DailyAlgorithm]:
+        """The registered algorithms not run for want of a pre-validation passed: waiting or
+        refused."""
+        return [
+            *(a for a in self.registered if a not in self.algorithms),
+            *(a for a in self.kind_registered if a not in self.kind_algorithms),
+            *(
+                a
                 for a in self.daily_registered
                 if a not in self.daily_algorithms and self._kind_runs(a) and not self._passed_and_held(a)
-            ]
-        )
+            ),
+        ]
+
+    def _refusal(self, algorithm: Algorithm | KindAlgorithm | DailyAlgorithm) -> Refusal | None:
+        return None if self._refused is None else self._refused(algorithm)
 
     def held(self) -> list[str]:
         """The daily algorithms whose pre-validation passed but whose kind's review days are not
@@ -932,6 +959,17 @@ class PredictionEngine:
             )
             if await self._deliver(text):
                 self._told_waiting.update(untold)
+        # A refusal of the code and target it runs now, once (#310): kept in ``runs``, so a
+        # restart does not tell it again; a new code or target makes it wait again.
+        for name, refusal in self.refused().items():
+            if self.store.last_detail(REFUSED_RUN, name) == refusal.judged:
+                continue
+            text = (
+                f"사전 검증 거부: {name} ({refusal.why}). 돌지 않고, 같은 코드와 정답으로는 다시 "
+                f"검증하지 않습니다. 리포트는 서버의 state/prevalidations/{name}.json"
+            )
+            if await self._deliver(text):  # else told at the next review
+                self.store.add_run(REFUSED_RUN, at, name, refusal.judged)
         unsaid = [name for name in self.held() if name not in self._told_held]
         if unsaid:
             kinds = sorted(

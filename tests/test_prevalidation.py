@@ -42,6 +42,7 @@ from krx_quant.prevalidation import (
     history_path,
     last_report,
     prevalidate,
+    refusals,
     report_path,
     seed_history,
     tried_level,
@@ -374,6 +375,46 @@ def test_the_scheduled_job_reads_the_latest_report_as_the_engine_does(tmp_path: 
     assert look is not None and look.current and not look.judged
     path.write_text(json.dumps({"passed": True, "code": code_digest(candidate)}))  # before #204
     assert last_report(state, candidate) == LastReport(made_at=None, current=True, passed=True, days=0)
+
+
+def test_a_refusal_is_of_a_report_that_judged_the_code_and_target_it_runs(tmp_path: Path) -> None:
+    # #310: refused, not waiting, only when a new run is not due: a pass, a report of other code or
+    # target, or a look on fewer than ten days is none. Each refused report is its own key.
+    candidate = Contrarian("contrarian")
+    state = tmp_path / "state"
+    refused_by = refusals(state, target_version=TARGET_VERSION)
+    assert refused_by(candidate) is None, "no report"
+    path = report_path(state, "contrarian")
+    path.parent.mkdir(parents=True)
+    ten = [d.isoformat() for d in DAYS]
+    refused = {
+        "code": code_digest(candidate),
+        "prevalidated_at": datetime(2026, 10, 23, 23, 10, tzinfo=KST).isoformat(),
+        "passed": False,
+        "days": ten,
+        "target_version": TARGET_VERSION,
+        "checks": [
+            {"check": "days", "passed": True, "detail": "10 recorded days"},
+            {"check": "correlation", "passed": False, "detail": "highest with alpha: r = 0.950"},
+            {"check": "stats", "passed": False, "detail": "weakest lift -0.0100"},
+        ],
+    }
+    path.write_text(json.dumps(refused))
+    refusal = refused_by(candidate)
+    assert refusal is not None
+    assert refusal.why == "correlation: highest with alpha: r = 0.950; stats: weakest lift -0.0100"
+    assert refusals(state)(candidate) is None, "on another target: a new run is due"
+    path.write_text(json.dumps({**refused, "code": "0123456789abcdef"}))
+    assert refused_by(candidate) is None, "of other code"
+    path.write_text(json.dumps({**refused, "days": ten[:5]}))
+    assert refused_by(candidate) is None, "a look"
+    path.write_text(json.dumps({**refused, "passed": True}))
+    assert refused_by(candidate) is None, "passed"
+    path.write_text(json.dumps({**refused, "prevalidated_at": "2026-10-24T23:10:00+09:00"}))
+    again = refused_by(candidate)
+    assert again is not None and again.judged != refusal.judged, "a run again, told again"
+    report_path(state, "newton").write_text(json.dumps(refused))
+    assert refused_by(Contrarian("newton")) is None, "registered before pre-validation: it runs"
 
 
 async def test_an_algorithm_waiting_is_alerted_once_after_the_engine_starts(tmp_path: Path) -> None:

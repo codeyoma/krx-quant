@@ -140,6 +140,7 @@ CREATE TABLE IF NOT EXISTS runs (
     kind TEXT NOT NULL,               -- cpu_budget: an algorithm skipped for the CPU budget;
                                       -- review: the daily algorithm review ran;
                                       -- retire_candidate: benched too long, alerted;
+                                      -- prevalidation_refused: a refusal alerted (#310);
                                       -- signal_sent, signal_blocked: a Telegram signal (#80)
     at TEXT NOT NULL,
     algorithm TEXT,
@@ -898,6 +899,14 @@ class PredictionStore:
         """When the latest ``kind`` run was recorded, if one was."""
         row = self._db.execute("SELECT MAX(at) FROM runs WHERE kind = ?", (kind,)).fetchone()
         return None if row[0] is None else datetime.fromisoformat(row[0])
+
+    def last_detail(self, kind: str, algorithm: str) -> str | None:
+        """The detail of the latest ``kind`` run of ``algorithm``, if one was recorded."""
+        row = self._db.execute(
+            "SELECT detail FROM runs WHERE kind = ? AND algorithm = ? ORDER BY at DESC, id DESC LIMIT 1",
+            (kind, algorithm),
+        ).fetchone()
+        return None if row is None else str(row[0] or "")
 
     def runs(self, kind: str, since: datetime) -> list[Run]:
         """The ``kind`` runs recorded at or after ``since``, oldest first."""
