@@ -32,10 +32,13 @@ RULES: list[tuple[str, re.Pattern[str]]] = [
 # The repository check alone (#321), not the redaction of posted output: a change note's PR
 # number is only known once the PR is open, so a note is written with a stand-in first. One
 # left in a merged PR names no change: #PRNUM, #NNN, #PRB, #PRDOCS and #__PR3__ each came to
-# review that way. A real number (#123) and the format's own "#PR" in AGENTS.md pass.
+# review that way, and #KQPR in #375 (capitals ending in PR, such as #FORKPR, since then). A real
+# number (#123) and the format's own "#PR" in AGENTS.md pass.
 REPOSITORY_RULES: list[tuple[str, re.Pattern[str]]] = [
     (
         "PR number placeholder",
-        re.compile(r"#(?:PR[A-Z0-9_]+|N{3,}|X{3,}|TBD|_+PR[A-Za-z0-9_]*_+)(?![A-Za-z0-9_])"),
+        re.compile(
+            r"#(?:PR[A-Z0-9_]+|[A-Z][A-Z0-9_]*PR|N{3,}|X{3,}|TBD|_+PR[A-Za-z0-9_]*_+)(?![A-Za-z0-9_])"
+        ),
     ),
 ]
