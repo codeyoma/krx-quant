@@ -17,16 +17,18 @@ Loki as it comes when it is set (``process_log.py``, ``loki.py``, #358). A job's
 when its turn comes, so it sees the runs of the jobs before it that night. One whose time
 limit would pass 05:30 is not started that night: the 06:00 deploy and the 07:20 restart
 stop the collector. A collector started inside the window (a restart at night) runs that
-night's jobs at once.
+night's jobs at once. A job may give way (``Job.gives_way_to``, #376): the simulated
+probations run after a pre-validation that would otherwise miss its last start that night.
 
 The state (``state/scheduled.json``) keeps each job's last run: its night, outcome (``ok``,
 ``failed``, ``interrupted``; ``running`` while it runs), exit code, duration, commit and
-comments, and the results not posted yet. A run the collector's stop cut (a deploy, a
-restart, a crash) is ``interrupted``: it does not count as run, and runs again the next
-night. A result is masked (``redaction.py``) and posted on each issue, which then gets
-``ready-for-agent`` in place of ``ready-for-human`` and ``needs-triage``. Without
-``KRX_GITHUB_TOKEN``, or when GitHub fails, the result waits in the state and is posted at
-the next night or start. Telegram gets a line per outcome, with the comments' addresses.
+comments, the nights a job gave way since it last ran (#376), and the results not posted yet.
+A run the collector's stop cut (a deploy, a restart, a crash) is ``interrupted``: it does not
+count as run, and runs again the next night. A result is masked (``redaction.py``) and posted
+on each issue, which then gets ``ready-for-agent`` in place of ``ready-for-human`` and
+``needs-triage``. Without ``KRX_GITHUB_TOKEN``, or when GitHub fails, the result waits in the
+state and is posted at the next night or start. Telegram gets a line per outcome, with the
+comments' addresses.
 """
 
 from __future__ import annotations
@@ -189,14 +191,22 @@ class Unposted:
 
 
 class JobState:
-    """``state/scheduled.json``: each job's last run, and the results not posted yet."""
+    """``state/scheduled.json``: each job's last run, the nights a job gave way since it last ran
+    (#376), and the results not posted yet."""
 
     def __init__(
-        self, path: Path, jobs: dict[str, JobRecord] | None = None, unposted: list[Unposted] | None = None
+        self,
+        path: Path,
+        jobs: dict[str, JobRecord] | None = None,
+        unposted: list[Unposted] | None = None,
+        gave_way: dict[str, list[date]] | None = None,
     ) -> None:
         self.path = path
         self.jobs = jobs or {}
         self.unposted = unposted or []
+        # job -> the nights it gave way (``Job.gives_way_to``) and did not run, since it last ran
+        # and while it stayed due: the starvation guard counts them (``GIVE_WAY_NIGHTS``).
+        self.gave_way = gave_way or {}
 
     @classmethod
     def load(cls, path: Path) -> JobState:
@@ -208,6 +218,10 @@ class JobState:
                 path,
                 {name: JobRecord.from_dict(r) for name, r in data.get("jobs", {}).items()},
                 [Unposted.from_dict(u) for u in data.get("unposted", [])],
+                {
+                    name: [date.fromisoformat(d) for d in nights]
+                    for name, nights in data.get("gave_way", {}).items()
+                },
             )
         except FileNotFoundError:
             return cls(path)
@@ -222,6 +236,7 @@ class JobState:
         data = {
             "jobs": {name: record.as_dict() for name, record in self.jobs.items()},
             "unposted": [u.as_dict() for u in self.unposted],
+            "gave_way": {name: [d.isoformat() for d in nights] for name, nights in self.gave_way.items()},
         }
         tmp = self.path.with_name(f".{self.path.name}.tmp")
         tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False))
@@ -286,6 +301,12 @@ class Job:
     label: tuple[str, ...] = (READY_FOR_AGENT,)  # set on each issue once the comment is up
     unlabel: tuple[str, ...] = (READY_FOR_HUMAN, NEEDS_TRIAGE)  # taken off then
     attach: tuple[Attachment, ...] = ()  # files it writes, posted with its output
+    # The later jobs this one gives way to (#376): None, or which of them. See ``Scheduler``.
+    gives_way_to: Callable[[Job], bool] | None = None
+
+
+# A job that gave way on this many nights since it last ran gives way no more: it runs first (#376).
+GIVE_WAY_NIGHTS = 2
 
 
 class Runner(Protocol):
@@ -331,7 +352,16 @@ def first_night(at: time, now: datetime) -> date:
 
 
 class Scheduler:
-    """Runs the due jobs every night and posts their results."""
+    """Runs the due jobs every night and posts their results.
+
+    The jobs run in the list's order, but for one that gives way (``Job.gives_way_to``, #376):
+    when it could start, it gives way to the first later job of those that is due and could start
+    now but, were this one to run first, could not by its last start. Whether it could is judged by
+    this one's time limit, not by how long it last took: its run's length depends on the recorded
+    days and the algorithms replayed, which grow from one run to the next (the bar-close simulation
+    took 1 h 24 min on 2026-10-23 and 2 h 22 min on 2026-10-25). It then runs after that job, that
+    night if it can still start by its own last start, else the next night. Once a night; and once it
+    gave way on ``GIVE_WAY_NIGHTS`` nights since it last ran (while it stayed due) it runs first."""
 
     def __init__(
         self,
@@ -391,25 +421,23 @@ class Scheduler:
 
     async def run_night(self, day: date) -> None:
         """The night of ``day``: the results earlier nights could not post, then each due job
-        in turn, once the night's training is over."""
+        in turn, once the night's training is over; a job that gives way after the job it gives
+        way to."""
         _, end = window(day, self._at)
         await self._post_unposted()
         facts: Facts | None = None
-        for job in self._jobs:
-            record = self._state.jobs.get(job.name)
-            if record is not None and record.outcome == INTERRUPTED and record.day == day:
+        queue = list(self._jobs)
+        gave_way: set[str] = set()  # the jobs that gave way tonight: once a night each
+        while queue:
+            job = queue.pop(0)
+            if self._cut(job, day):
                 continue  # cut by a restart tonight: the next night runs it
             if facts is None:
                 facts = await self._read_facts()
-            night = Night(
-                day, self._calendar.is_trading_day(day), self._commit, record, dict(self._state.jobs), facts
-            )
-            try:
-                due = job.due(night)
-            except Exception:
-                log.exception("the condition of the scheduled job %s failed", job.name)
-                continue
+            due = self._due(job, day, facts)
             if not due:
+                if due is False:
+                    self._waits_no_more(job)
                 continue
             latest = end - job.timeout  # the last start that ends by 05:30
             if not await self._training_done(latest):
@@ -422,8 +450,94 @@ class Scheduler:
                     f"예약 작업 {job.name}({day} 밤): 지금 시작하면 제한 시간({_duration(job.timeout)})이 "
                     f"{JOBS_UNTIL:%H:%M}을 넘어 다음 밤으로 미룹니다."
                 )
+            elif job.name not in gave_way and (ahead := await self._gives_way(job, queue, day, facts)):
+                gave_way.add(job.name)
+                at = queue.index(ahead) + 1
+                while at < len(queue) and queue[at].name in gave_way:
+                    at += 1  # after those that gave way to it before: the list's order among them
+                queue.insert(at, job)
             else:
                 await self._run(job, day)
+
+    def _cut(self, job: Job, day: date) -> bool:
+        """Whether a restart cut ``job``'s run on the night of ``day``."""
+        record = self._state.jobs.get(job.name)
+        return record is not None and record.outcome == INTERRUPTED and record.day == day
+
+    def _due(self, job: Job, day: date, facts: Facts) -> bool | None:
+        """Whether ``job`` is due on the night of ``day``, asked now; None if its condition failed."""
+        record = self._state.jobs.get(job.name)
+        night = Night(
+            day, self._calendar.is_trading_day(day), self._commit, record, dict(self._state.jobs), facts
+        )
+        try:
+            return job.due(night)
+        except Exception:
+            log.exception("the condition of the scheduled job %s failed", job.name)
+            return None
+
+    def _waits_no_more(self, job: Job) -> None:
+        """``job`` is not due: the nights it gave way while it waited count no more (#376)."""
+        if self._state.gave_way.pop(job.name, None) is not None:
+            self._state.save()
+
+    async def _gives_way(self, job: Job, queue: Sequence[Job], day: date, facts: Facts) -> Job | None:
+        """The job of ``queue`` (the rest of the night's, in turn) that ``job`` gives way to tonight
+        (#376): the first it gives way to that is due and could start now, but not once ``job`` ran
+        to its time limit. None if there is none (both fit), or if ``job`` gave way on
+        ``GIVE_WAY_NIGHTS`` nights already: it runs first then."""
+        if job.gives_way_to is None:
+            return None
+        _, end = window(day, self._at)
+        now = self._clock.now()
+        ended = now + job.timeout  # at the latest: its limit, not how long it last took
+        ahead = next(
+            (
+                later
+                for later in queue
+                if job.gives_way_to(later)
+                and now <= end - later.timeout < ended
+                and not self._cut(later, day)
+                and self._due(later, day, facts)
+            ),
+            None,
+        )
+        if ahead is None:
+            return None
+        nights = [n for n in self._state.gave_way.get(job.name, []) if n != day]
+        last_start = end - ahead.timeout
+        if len(nights) >= GIVE_WAY_NIGHTS:
+            log.info(
+                "scheduled job %s gave way on %d nights since it last ran (%s): it runs before %s",
+                job.name,
+                len(nights),
+                ", ".join(n.isoformat() for n in nights),
+                ahead.name,
+            )
+            await self._notify(
+                f"예약 작업 {job.name}({day} 밤): 사전 검증에 이미 {len(nights)}밤 자리를 내줘 이번에는 "
+                f"먼저 돕니다. {ahead.name}은 마지막 시작 시각({last_start:%H:%M})까지 시작하지 못하면 "
+                "다음 밤으로 미뤄집니다."
+            )
+            return None
+        self._state.gave_way[job.name] = [*nights, day]
+        self._state.save()
+        log.info(
+            "scheduled job %s gives way to %s: run first to its limit (%s), it would carry it past its "
+            "last start, %s",
+            job.name,
+            ahead.name,
+            job.timeout,
+            last_start.strftime("%H:%M"),
+        )
+        await self._notify(
+            f"예약 작업 {job.name}({day} 밤): 먼저 돌아 제한 시간({_duration(job.timeout)})을 다 쓰면 "
+            f"{ahead.name}의 마지막 시작 시각({last_start:%H:%M})을 넘기므로 그 뒤로 미룹니다. "
+            f"그 뒤 {end - job.timeout:%H:%M}까지 시작할 수 있으면 그 밤에, 아니면 다음 밤에 돕니다. "
+            f"자리를 내준 밤은 {len(nights) + 1}/{GIVE_WAY_NIGHTS}이고, {GIVE_WAY_NIGHTS}밤을 내준 뒤에는 "
+            "먼저 돕니다."
+        )
+        return ahead
 
     async def _read_facts(self) -> Facts:
         if self._facts is None:
@@ -453,6 +567,7 @@ class Scheduler:
         started = self._clock.now()
         # Left RUNNING if the collector stops meanwhile: the next start calls it interrupted.
         self._state.jobs[job.name] = JobRecord(day, RUNNING, started, self._commit)
+        self._state.gave_way.pop(job.name, None)  # it runs: the nights it gave way count no more
         self._state.save()
         before = {a.path: _stamp(self._files / a.path) for a in job.attach}
         log.info("scheduled job %s: krx-quant %s", job.name, " ".join(job.command))
@@ -1481,8 +1596,17 @@ _DAILY_PREVALIDATION_NOTES = {
 # years of samples are minutes; the hour is a bound. Its result goes to #298 and #264. It waits for
 # the algorithms of a kind whose answers of the latest days are not all in on this server
 # (``Facts.pending_answers``, #264: ``open_to_close``'s closing auction prices).
+# It gives way to a bar-close pre-validation as the bar-close simulation does (below, #376). It never
+# holds back the daily pre-validations: they run before it (a pass enrolls that night), take about a
+# minute, are not one a night, and start by 04:30. Judged by its hour, it gives way only when it
+# would start after 22:30 with a Breiman due (last start 23:30) or after 23:30 with another one.
 SIMULATION_ISSUE = 298
 DAILY_SIMULATION_TIMEOUT = timedelta(hours=1)
+
+
+def _a_prevalidation(job: Job) -> bool:
+    """A pre-validation's job: the simulations give way to it (#376)."""
+    return job.command[:1] == ("prevalidate",)
 
 
 def _daily_simulation_due(
@@ -1522,6 +1646,7 @@ DAILY_SIMULATION = Job(
     due=_daily_simulation_due(DAILY_ALGORITHMS),
     command=("simulate", "daily"),
     timeout=DAILY_SIMULATION_TIMEOUT,
+    gives_way_to=_a_prevalidation,
     targets=(
         Target(
             SIMULATION_ISSUE,
@@ -1549,11 +1674,19 @@ DAILY_SIMULATION = Job(
 # simulate and the probation goes on live). The algorithms waiting are replayed together, in one
 # run: the replay of a day's events through the Market View, which they share, is most of the cost,
 # and live the engine runs them all at each bar close anyway; one run a night also leaves the rest of
-# the night to a pre-validation. It goes before the pre-validations: it can make algorithms already
-# running official at once, and a pre-validation that would not end by 05:30 waits a night. A run
-# that failed waits for new code, as a pre-validation that left no verdict does. The limit is a
-# pre-validation's: up to 20 days' replay (without its 20 retrainings), plus the burst CPU running
-# out; it starts by 00:30. Its result goes to #298 and #204.
+# the night to a pre-validation. It is listed before the pre-validations (#298: it can make
+# algorithms already running official at once), but gives way to the night's pre-validation when,
+# run first to its limit, it would carry that one past its last start (00:30, the Breimans 23:30):
+# the pre-validation runs first and the simulation after it, that night if it can still start by
+# 00:30, else the next (#376, the decision of 2026-10-26). Its limit never fits before a 5- or
+# 6-hour pre-validation inside the night, so on a night both are due the pre-validation goes first.
+# Before, the simulation the night after each pass pushed the next pre-validation back a night (8
+# waited on 2026-10-26), and an algorithm not pre-validated does not run at all, while a simulation
+# put off only judges a night later: its probation's live days count on. After it gave way on two nights
+# (``GIVE_WAY_NIGHTS``) it runs first. A run that failed waits for new code, as a pre-validation that
+# left no verdict does. The limit is a pre-validation's: up to 20 days' replay (without its 20
+# retrainings), plus the burst CPU running out; it starts by 00:30. Its result goes to #298 and
+# #204.
 SIMULATION_TIMEOUT = timedelta(hours=5)
 
 
@@ -1574,6 +1707,7 @@ BAR_CLOSE_SIMULATION = Job(
     due=_bar_close_simulation_due,
     command=("simulate", "bar-close"),
     timeout=SIMULATION_TIMEOUT,
+    gives_way_to=_a_prevalidation,
     targets=(
         Target(
             SIMULATION_ISSUE,
