@@ -54,7 +54,7 @@
 | `engine.py`, `market_view.py`, `baselines.py`, `climate.py`, `features.py`, `algorithms/`, `consensus.py` | 예측 엔진, 엔진과 학습이 같이 보는 1분봉·기준가, 기준 예측(도달 정답의 시간대 기후 표 포함, #169), 피처 저장소, 알고리즘 규약과 알고리즘, 합의 |
 | `predictions.py`, `stats.py`, `lifecycle.py`, `api.py`, `stream.py` | SQLite 저장, 통계와 순위표, 알고리즘 상태, 엔진 API와 WebSocket 스트림(형식은 `schemas/engine-api-v1.json`) |
 | `signals.py` | 텔레그램 신호 알림(선택) |
-| `training.py`, `nightly.py`, `sample_store.py`, `model_shelf.py`, `swap.py`, `footprint.py`, `training_nights.py` | 학습 샘플, 밤 학습, 날마다의 표본 저장소(#370), 서버의 모델 이력, 08:00 교체와 모델 감시, Spot 학습 결과 기다리기, 밤 학습 단계별 시간과 최대 메모리(#355), 밤 학습의 결과와 적용되지 않은 밤(#355) |
+| `training.py`, `nightly.py`, `sample_store.py`, `model_shelf.py`, `swap.py`, `footprint.py`, `training_nights.py` | 학습 샘플, 밤 학습, 날마다의 표본 저장소(#370), 서버의 모델 이력, 08:00 교체와 모델 감시, Spot 학습 결과 기다리기, 밤 학습 단계별 시간과 최대 메모리(#355)와 사전 검증·수습 시뮬레이션이 재생한 날마다의 메모리(#383), 밤 학습의 결과와 적용되지 않은 밤(#355) |
 | `cost_guard.py` | 월 AWS 비용 감시: 50%·80% 알림, 상한에서 Spot 학습 끄기(#23) |
 | `disk_watch.py` | 디스크 감시: 데이터·상태 폴더가 있는 디스크의 여유가 기준(`KRX_DISK_MIN_FREE_PERCENT`)보다 작아지면 한 번 알리고, 돌아오면 `[복구]`(#379) |
 | `scheduled.py`, `github.py`, `redaction.py`, `forbidden.py` | 예약 작업(#215): 작업 목록(`JOBS`. 사전 검증 작업은 알고리즘 등록 목록에서 만든다, #204)과 밤마다 돌리는 스케줄러, 상태 파일, GitHub 이슈 댓글과 라벨, 올리기 전 가림, 저장소 검사(`scripts/check_forbidden.py`)와 가림이 같이 쓰는 금지 패턴([operations.md](operations.md#예약-작업-215)) |

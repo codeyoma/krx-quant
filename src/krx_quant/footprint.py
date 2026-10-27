@@ -1,4 +1,5 @@
-"""Wall time and peak memory of a long run's steps (#355): the nightly training's.
+"""Wall time and peak memory of a long run's steps (#355): the nightly training's; and of a
+replayed day (#383): a pre-validation's or a simulated probation's (``DayUsage``).
 
 A step is timed in phases (the nightly training's: reading the days, building the samples,
 fitting, validating). Each phase's peak is the process's resident high-water mark
@@ -8,10 +9,21 @@ peak is the highest of its phases'. Where the mark cannot be reset (another syst
 kernel that refuses), the peak is the process's since it started (``ru_maxrss``), and
 ``peak_since`` says ``start`` instead of ``step``. Without either (Windows has no ``resource``
 module), the figures are None. Nothing here raises: a figure that cannot be read is None.
+
+``give_back`` hands the memory a replayed day freed back to the system (#383). The allocators
+keep what is freed for later: glibc's ``malloc``, in an arena for each thread that allocated
+(the engine reads the stored predictions in worker threads, more of them each replayed day as
+its database grows), and Arrow's pool, which read the day's files. Measured on made-up days
+shaped like the recorded ones, the process grew by about 50 MB a replayed day while the Python
+objects alive stayed the same; glibc held most of it as free memory. ``malloc_trim`` (glibc only)
+and the pool's ``release_unused`` return it.
 """
 
 from __future__ import annotations
 
+import ctypes
+import functools
+import gc
 import sys
 import time
 from collections.abc import Iterator
@@ -111,6 +123,68 @@ class StepUsage:
             "days_cached": days_cached,
             "phases": self.phases,
         }
+
+
+class DayUsage:
+    """A replayed day's memory (#383: a pre-validation's or a simulated probation's day), as its
+    log line says it: the process's resident memory when the day starts, then at the end of each
+    phase (its training, its replay) with that phase's peak."""
+
+    def __init__(self, meter: Meter) -> None:
+        self._meter = meter
+        self.start_mb = meter.rss_mb()
+        self.phases: dict[str, tuple[float | None, float | None]] = {}  # name -> (resident, peak)
+
+    @contextmanager
+    def phase(self, name: str) -> Iterator[None]:
+        """Keep ``name``'s resident memory at its end and its peak."""
+        self._meter.reset()
+        try:
+            yield
+        finally:
+            self.phases[name] = (self._meter.rss_mb(), self._meter.peak_mb())
+
+    def line(self) -> str:
+        """``312.4 MB at the start; training 540.1 MB (peak 612.0); replay 498.7 MB (peak 701.3);
+        peaks since each phase began``: in MB, ``?`` for a figure that cannot be read."""
+        since = "each phase began" if self._meter.peak_since == PEAK_STEP else "the process started"
+        parts = [f"{_mb(self.start_mb)} MB at the start"]
+        parts += [f"{name} {_mb(rss)} MB (peak {_mb(peak)})" for name, (rss, peak) in self.phases.items()]
+        return "; ".join(parts) + f"; peaks since {since}"
+
+
+def give_back() -> None:
+    """Free what a replayed day left (its engine's reference cycles) and hand the memory freed
+    back to the system: Arrow's pool's, then glibc's (``malloc_trim``; another C library has none,
+    and nothing is done there)."""
+    gc.collect()
+    try:
+        import pyarrow
+
+        pyarrow.default_memory_pool().release_unused()
+    except (ImportError, AttributeError, OSError):
+        pass
+    trim = _malloc_trim()
+    if trim is not None:
+        trim(0)
+
+
+@functools.cache
+def _malloc_trim() -> Any:
+    """glibc's ``malloc_trim``; None elsewhere (macOS, musl, Windows)."""
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        trim = ctypes.CDLL(None).malloc_trim  # the C library the process runs on
+    except (OSError, AttributeError):
+        return None
+    trim.argtypes = [ctypes.c_size_t]
+    trim.restype = ctypes.c_int
+    return trim
+
+
+def _mb(value: float | None) -> str:
+    return "?" if value is None else f"{value:.1f}"
 
 
 def _higher(a: float | None, b: float | None) -> float | None:

@@ -10,6 +10,8 @@ a new target, the engine's stage, and the scheduled job.
 
 from __future__ import annotations
 
+import re
+import weakref
 from collections.abc import Sequence
 from dataclasses import replace
 from datetime import date, datetime, time, timedelta
@@ -20,22 +22,24 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from krx_quant import simulation
+from krx_quant import prevalidation, simulation
 from krx_quant.backfill import BAR_SCHEMA, MINUTE_BARS_TR, bars_key
 from krx_quant.cli import main
 from krx_quant.clock import FakeClock
 from krx_quant.config import Settings
 from krx_quant.engine import PredictionEngine
 from krx_quant.feeds import KST
+from krx_quant.footprint import give_back
 from krx_quant.kinds import DIRECTION_KIND
 from krx_quant.lifecycle import REGISTERED, Status, target_changed
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.predictions import DB_NAME, PredictionStore
+from krx_quant.replay import replay_recorded
 from krx_quant.scheduled import FAILED, JOBS, OK, Facts, JobRecord, Night
 from krx_quant.simulation import BAR_CLOSE_DAYS, SimulationRun, report, simulate_bar_close
 from krx_quant.touch import TARGET_VERSION
 from tests.algorithm_doubles import FixedAlgorithm, spend
-from tests.test_prevalidation import Contrarian, swings
+from tests.test_prevalidation import MEMORY_LINE, Contrarian, swings
 from tests.test_replay_cli import record
 
 SYMBOL = "005930"
@@ -177,6 +181,54 @@ async def test_ten_recorded_days_are_simulated_trained_once_before_them_and_judg
     lines = report(run, s.review_confidence)
     assert any(f"trained once before them ({sim.training['model']}" in line for line in lines)
     assert any("review of day 10: passed, active from now" in line for line in lines)
+
+
+@TEN_DAYS
+async def test_each_simulated_day_logs_its_memory_and_lets_its_engine_go_before_the_next(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Input: ten short recorded days. Output: a memory line a replayed day (#383), and each day's
+    engine gone, and the memory it freed handed back, before the next day's tables are refitted."""
+    days = RECORDED[:10]
+    s = settings(tmp_path, days, end="09:40:00")
+    on_probation(s, "contrarian")
+    engines: list[weakref.ref[PredictionEngine]] = []
+    alive_at_refits: list[int] = []
+    given_back: list[int] = []
+
+    async def kept(*args: Any, **kwargs: Any) -> PredictionEngine:
+        engine = await replay_recorded(*args, **kwargs)
+        engines.append(weakref.ref(engine))
+        return engine
+
+    climate_before = prevalidation._WalkForward.climate_before
+
+    def refit(trainer: prevalidation._WalkForward, day: date) -> Any:
+        alive_at_refits.append(sum(e() is not None for e in engines))
+        return climate_before(trainer, day)
+
+    monkeypatch.setattr(prevalidation, "replay_recorded", kept)
+    monkeypatch.setattr(prevalidation._WalkForward, "climate_before", refit)
+
+    def counted() -> None:
+        given_back.append(len(engines))
+        give_back()
+
+    monkeypatch.setattr(prevalidation, "give_back", counted)
+    caplog.set_level("INFO", logger="krx_quant.simulation")
+
+    run = await simulate_bar_close(
+        s, algorithms=[Contrarian("contrarian")], kind_algorithms=[], now=night_after(days)
+    )
+
+    assert run.simulations[0].days == days
+    assert alive_at_refits == [0] * 10, "no replay's engine left when a day's climate is refitted"
+    assert given_back == list(range(1, 11)), "after each day's replay"
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("simulation: memory on ")]
+    assert [line.split(": ")[1] for line in lines] == [
+        f"memory on {d} (day {i} of 10)" for i, d in enumerate(days, 1)
+    ]
+    assert all(re.fullmatch(rf"simulation: memory on \S+ \(day \d+ of 10\): {MEMORY_LINE}", x) for x in lines)
 
 
 # Twenty days replayed (two runs of ten): about 11 s on a laptop, twice that on CI's runners,
