@@ -22,7 +22,8 @@ server, or an agent reading an issue, looks at first when something seems wrong.
    logger and level only.
 5. The scheduled jobs (``state/scheduled.json``, #215): their last runs, the jobs that have not
    run to an end yet, the results not posted.
-6. The free disk under the data and state directories, and the memory.
+6. The free disk under the data and state directories, the disk alert's threshold and the disks
+   it alerts now (#379, ``disk_watch``), and the memory.
 7. The nightly training (#355, ``training_nights``): the last night the morning swap applied,
    the trading nights not applied since and the failures among them, and the latest night's
    outcome: its exit code and the last step it started.
@@ -69,6 +70,8 @@ import pyarrow.parquet as pq
 from krx_quant import kis, loki
 from krx_quant.archive import partition_files
 from krx_quant.config import Settings, SettingsError, read_values
+from krx_quant.disk_watch import LABELS as DISK_LABELS
+from krx_quant.disk_watch import alerted as disk_alerted
 from krx_quant.feeds.base import KST
 from krx_quant.market_calendar import calendar_store
 from krx_quant.model_shelf import Shelf, size_text
@@ -329,7 +332,7 @@ def report(
         ("3. PINGPONG", lambda: _pingpong(settings, now)),
         ("4. 최근 WARNING·ERROR 로그", lambda: _logs(logs)),
         ("5. 예약 작업", lambda: _jobs(settings, known=config_error is None)),
-        ("6. 디스크와 메모리", lambda: _resources(settings, process)),
+        ("6. 디스크와 메모리", lambda: _resources(settings, process, known=config_error is None)),
         ("7. 밤 학습", lambda: _training(settings, now)),
         ("8. Loki 전송", lambda: _loki(settings, status, now)),
         ("9. 모델 파일", lambda: _models(settings)),
@@ -560,7 +563,7 @@ def _training(settings: Settings, now: datetime) -> list[str]:
     return lines
 
 
-def _resources(settings: Settings, process: str) -> list[str]:
+def _resources(settings: Settings, process: str, known: bool = True) -> list[str]:
     lines = ["6. 디스크와 메모리"]
     seen: dict[int, str] = {}
     for name, path in (("데이터", settings.data_dir), ("상태", settings.state_dir)):
@@ -581,6 +584,7 @@ def _resources(settings: Settings, process: str) -> list[str]:
             f"  {name} {path}: 여유 {usage.free / _GB:.1f} GB / 전체 {usage.total / _GB:.1f} GB"
             f" ({usage.free / usage.total:.0%} 여유)"
         )
+    lines.append(_disk_alert(settings, known))
     info = _meminfo(Path("/proc/meminfo"))
     if info:
         total, available = info.get("MemTotal"), info.get("MemAvailable")
@@ -602,6 +606,18 @@ def _resources(settings: Settings, process: str) -> list[str]:
     if rss is not None:
         lines.append(f"  {process} 프로세스(VmRSS): {_mb(rss)}")
     return lines
+
+
+def _disk_alert(settings: Settings, known: bool) -> str:
+    """The disk alert's threshold (#379) and the disks alerted now, as the state folder keeps them."""
+    low = ", ".join(DISK_LABELS[name] for name in disk_alerted(settings.state_dir)) or "없음"
+    if not known:
+        rule = "기준은 모른다(설정 오류)"
+    elif settings.disk_min_free_percent > 0:
+        rule = f"여유가 {settings.disk_min_free_percent:g}%보다 작으면 텔레그램"
+    else:
+        rule = "꺼짐"
+    return f"  디스크 알림(KRX_DISK_MIN_FREE_PERCENT, #379): {rule} · 지금 알림 중: {low}"
 
 
 def _models(settings: Settings) -> list[str]:

@@ -97,8 +97,15 @@ def test_the_spot_instance_s_start_script_parses(tmp_path: Path) -> None:
 
 FAKE_DOCKER = """#!/usr/bin/env bash
 # Stands in for docker: logs each call; the engine answers unless the checkout's
-# BROKEN file exists (a commit that does not start), and a push fails while PUSH_FAILS does.
+# BROKEN file exists (a commit that does not start), a push fails while PUSH_FAILS does,
+# and a prune and `system df` fail while DOCKER_FAILS does.
 echo "$*" >>"$DOCKER_LOG"
+if [[ ( "$2" == prune || "$*" == "system df"* ) && -f DOCKER_FAILS ]]; then
+  exit 1
+fi
+if [[ "$*" == "system df"* ]]; then
+  printf 'Images|1.37GB\\nContainers|0B\\nLocal Volumes|0B\\nBuild Cache|2.5GB\\n'
+fi
 # The commit a compose build is given (KRX_COMMIT), one per build.
 if [[ "$*" == "compose up -d --build" ]]; then
   echo "${KRX_COMMIT:-}" >>"$DOCKER_LOG.commits"
@@ -238,6 +245,44 @@ def test_an_image_that_could_not_be_pushed_is_pushed_on_the_next_run(server: Pat
     assert "이미지를 올렸습니다" in (server.parent / "docker.log").read_text()
 
 
+PRUNES = ["builder prune -af --filter until=72h", "image prune -af --filter until=72h"]
+
+
+def test_an_update_prunes_what_docker_kept_for_3_days_and_says_what_is_left(server: Path) -> None:
+    """#379: the build cache and the unused images, all tags, after the new engine started and
+    its image went to ECR; the notice ends with what Docker keeps and the disk's free space."""
+    repository = "123456789012.dkr.ecr.ap-southeast-2.amazonaws.com/krx-quant"
+    (server / ".env").write_text(f"KRX_IMAGE_REPOSITORY={repository}\n")
+    push(server, "Markov reads the IV")
+
+    result = update(server)
+
+    assert result.returncode == 0, result.stderr
+    calls = docker_calls(server)
+    builder, image = (calls.index(c) for c in PRUNES)
+    notice = next(i for i, c in enumerate(calls) if " notify " in c)
+    assert calls.index("compose up -d --build") < calls.index(f"push -q {repository}:latest") < builder
+    assert builder < image < calls.index("system df --format {{.Type}}|{{.Size}}") < notice
+    assert "docker images 1.37GB, build cache 2.5GB; disk free " in result.stdout
+    last = (server.parent / "docker.log").read_text().rstrip("\n").splitlines()[-1]
+    assert re.fullmatch(r"디스크 여유 \S+ / \S+ · Docker 이미지 1\.37GB, 빌드 캐시 2\.5GB", last), last
+
+
+def test_a_prune_that_fails_leaves_the_update_done(server: Path) -> None:
+    (server / "DOCKER_FAILS").write_text("x")
+    new = push(server, "Granger learns")
+
+    result = update(server)
+
+    assert result.returncode == 0, result.stderr
+    assert (server / ".auto-update-deployed").read_text().strip() == new
+    assert "could not prune the build cache" in result.stderr
+    assert "could not prune the images" in result.stderr
+    log = (server.parent / "docker.log").read_text()
+    assert "자동 업데이트 오류" not in log
+    assert "Docker 이미지 ?, 빌드 캐시 ?" in log, "what could not be read is said so"
+
+
 def test_without_an_env_file_there_is_no_image_to_push(server: Path) -> None:
     env = {"PATH": f"{server.parent / 'bin'}:/usr/bin:/bin", "DOCKER_LOG": str(server.parent / "docker.log")}
     done = subprocess.run([server / "deploy" / "push-image.sh"], env=env, capture_output=True, text=True)
@@ -257,6 +302,7 @@ def test_a_main_that_does_not_start_is_rolled_back_and_not_tried_again(server: P
     assert git(server, "rev-parse", "HEAD") == before
     assert (server / ".auto-update-failed").read_text().strip() == bad
     assert any("자동 업데이트 실패" in c and bad[:7] in c for c in docker_calls(server))
+    assert not any("prune" in c for c in docker_calls(server)), "a rollback prunes nothing (#379)"
     (server.parent / "docker.log").unlink()
 
     assert update(server).returncode == 0
