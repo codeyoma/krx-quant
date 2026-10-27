@@ -68,6 +68,13 @@ scripts/loki-query.sh '{service="krx-quant", process="training"} |= "night=2026-
 - How it ended: `{service="krx-quant", process="training"} |= "night=2026-10-22 " |~ "krx-quant train .* (ended|stopped|could not be started)"`. `exit -9 (SIGKILL)` is the out-of-memory kill.
 - The engine's side (its summary and alert): `{service="krx-quant", process="engine"} |~ "nightly training of 2026-10-22|밤 학습"`.
 
+**A pre-validation's or simulated probation's memory, day by day** (#383): one INFO line a replayed day, `<name>: memory on <day> (day <i> of <N>): <MB> MB at the start; training <MB> MB (peak <MB>); replay <MB> MB (peak <MB>); peaks since each phase began` (`simulation: memory on …` for `simulate-bar-close-298`). A start figure that rises day after day is memory piling up; operations.md "새 알고리즘 사전 검증 (#24)" says what each figure is.
+
+```bash
+scripts/loki-query.sh '{service="krx-quant", process="job"} |= "job=prevalidate-breiman " |= "memory on"' \
+  --from 2026-10-28T22:00 --to 2026-10-29T06:00 --forward --limit 100
+```
+
 **ERRORs in the last 24 hours:**
 
 ```bash

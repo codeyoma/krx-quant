@@ -8,7 +8,9 @@ every four minutes, and a registry of stand-in algorithms. Output: the report
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
+import weakref
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time, timedelta
@@ -26,6 +28,7 @@ from krx_quant.config import Settings
 from krx_quant.engine import Event, PredictionEngine
 from krx_quant.features import FeatureVector
 from krx_quant.feeds import KST
+from krx_quant.footprint import give_back
 from krx_quant.lifecycle import Status
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.model_shelf import Shelf
@@ -47,7 +50,7 @@ from krx_quant.prevalidation import (
     seed_history,
     tried_level,
 )
-from krx_quant.replay import replay_into
+from krx_quant.replay import recorded_events, replay_into, replay_recorded
 from krx_quant.stats import Lift
 from krx_quant.swap import reload_models
 from krx_quant.touch import TARGET_VERSION
@@ -613,6 +616,86 @@ async def test_it_trains_on_samples_that_say_their_day_was_recorded_as_the_night
     assert candidate.references == [{"mid"}, {"mid"}], "recorded days, as the nightly training says"
     model = report(s, "tracing")["models"][DAYS[2].isoformat()]
     assert model.startswith("tracing-20260915-"), "versions do not read the reference"
+
+
+# A replayed day's memory line (#383): the resident memory it starts with, after its training and
+# after its replay, each with its peak; ``?`` where a figure cannot be read (macOS has no VmRSS).
+_MB = r"(\d+\.\d|\?)"
+MEMORY_LINE = (
+    rf"{_MB} MB at the start; training {_MB} MB \(peak {_MB}\); replay {_MB} MB \(peak {_MB}\); "
+    r"peaks since (each phase began|the process started)"
+)
+
+
+def _verdict(result: prevalidation.Prevalidation) -> dict[str, Any]:
+    """The report as saved, without when it was made and where its database is."""
+    saved = result.as_dict()
+    for key in ("prevalidated_at", "db"):
+        saved.pop(key)
+    return saved
+
+
+# Two pre-validations of three days, each a whole session: about 16 s on a laptop, past the 30 s
+# default (``pyproject.toml``) on a loaded CI runner (#327).
+@pytest.mark.timeout(120)
+async def test_each_replayed_day_logs_its_memory_and_lets_its_engine_go_before_the_next(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Input: three recorded days. Output: a memory line a replayed day (#383), and each day's
+    engine gone, and the memory it freed handed back, before the next day is trained; the same
+    report as when the engines were kept, as before #383."""
+    engines: list[weakref.ref[PredictionEngine]] = []
+    alive_at_fits: list[int] = []
+    given_back: list[int] = []
+
+    async def kept(*args: Any, **kwargs: Any) -> PredictionEngine:
+        engine = await replay_recorded(*args, **kwargs)
+        engines.append(weakref.ref(engine))
+        return engine
+
+    class Looking(Contrarian):  # counts the replays' engines still alive when it is trained
+        def fit(self, samples: Sequence[Sample]) -> Model:
+            alive_at_fits.append(sum(e() is not None for e in engines))
+            return super().fit(samples)
+
+    monkeypatch.setattr(prevalidation, "replay_recorded", kept)
+
+    def counted() -> None:
+        given_back.append(len(engines))
+        give_back()
+
+    monkeypatch.setattr(prevalidation, "give_back", counted)
+    caplog.set_level("INFO", logger="krx_quant.prevalidation")
+    s = settings(tmp_path / "now", DAYS[:3])
+
+    result = await prevalidate(s, "looking", algorithms=[ALPHA, Looking("looking")], now=AFTER)
+
+    assert alive_at_fits == [0, 0], "trained on days 2 and 3 with no replay's engine left"
+    assert given_back == [1, 2, 3], "after each day's replay"
+    lines = [r.getMessage() for r in caplog.records if ": memory on " in r.getMessage()]
+    assert [line.split(": ")[1] for line in lines] == [
+        f"memory on {d} (day {i} of 3)" for i, d in enumerate(DAYS[:3], 1)
+    ]
+    assert all(re.fullmatch(rf"looking: memory on \S+ \(day \d of 3\): {MEMORY_LINE}", x) for x in lines)
+
+    # As before #383: each day's engine kept until the next day's replay ended, nothing handed back.
+    held: list[PredictionEngine] = []
+
+    async def as_before(settings: Settings, day: date, leaders: Any, **options: Any) -> None:
+        events = recorded_events(settings.data_dir, day, settings.symbols, leaders)
+        engine = await kept(settings, day, events, **options)
+        engine.store.close()
+        held[:] = [engine]
+
+    monkeypatch.setattr(prevalidation, "give_back", lambda: None)
+    monkeypatch.setattr(prevalidation, "_replay_day", as_before)
+    engines.clear()
+    alive_at_fits.clear()
+    before = await prevalidate(
+        settings(tmp_path / "before", DAYS[:3]), "looking", algorithms=[ALPHA, Looking("looking")], now=AFTER
+    )
+    assert alive_at_fits == [1, 1], "the previous day's engine was still alive"
+    assert _verdict(before) == _verdict(result), "the same replay, the same verdict"
 
 
 async def test_a_day_with_nothing_the_algorithm_can_learn_from_is_predicted_by_its_defaults(

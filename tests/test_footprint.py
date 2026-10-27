@@ -8,13 +8,14 @@ step's report keeps.
 from __future__ import annotations
 
 import importlib
+import platform
 import sys
 from pathlib import Path
 
 import pytest
 
 from krx_quant import footprint
-from krx_quant.footprint import PEAK_START, PEAK_STEP, Meter, StepUsage
+from krx_quant.footprint import PEAK_START, PEAK_STEP, DayUsage, Meter, StepUsage
 
 
 class FakeProc:
@@ -93,3 +94,40 @@ def test_without_proc_nor_resource_the_figures_are_unknown(
         importlib.reload(footprint)
     assert (found["peak_rss_mb"], found["rss_mb"]) == (None, None)
     assert found["phases"]["fit"] == {"seconds": found["phases"]["fit"]["seconds"], "peak_rss_mb": None}
+
+
+def test_a_replayed_day_s_line_has_its_start_and_each_phase_s_memory_and_peak(tmp_path: Path) -> None:
+    """A pre-validation's or a simulation's day (#383): the resident memory it starts with, then
+    each phase's at its end, with the phase's own peak."""
+    proc = FakeProc(tmp_path / "proc")
+    proc.set(peak_kb=300 * 1024, rss_kb=300 * 1024)
+    day = DayUsage(Meter(proc.root))
+    with day.phase("training"):
+        assert proc.reset_seen(), "each phase starts its peak afresh"
+        proc.set(peak_kb=700 * 1024, rss_kb=450 * 1024)
+    with day.phase("replay"):
+        assert proc.reset_seen()
+        proc.set(peak_kb=900 * 1024, rss_kb=500 * 1024)
+
+    assert day.phases == {"training": (450.0, 700.0), "replay": (500.0, 900.0)}
+    assert day.line() == (
+        "300.0 MB at the start; training 450.0 MB (peak 700.0); replay 500.0 MB (peak 900.0); "
+        "peaks since each phase began"
+    )
+
+
+def test_a_replayed_day_s_figures_that_cannot_be_read_are_marked(tmp_path: Path) -> None:
+    """macOS: no ``VmRSS``, and the peak is the process's since it started."""
+    day = DayUsage(Meter(tmp_path / "no-proc"))
+    with day.phase("replay"):
+        pass
+    line = day.line()
+    assert line.startswith("? MB at the start; replay ? MB (peak ")
+    assert line.endswith("; peaks since the process started")
+
+
+def test_giving_back_the_memory_freed_runs_wherever_the_engine_does() -> None:
+    """``malloc_trim`` on glibc (the server's Linux, CI's); nothing to trim elsewhere (macOS)."""
+    footprint.give_back()  # never raises
+    trim = footprint._malloc_trim()
+    assert (trim is not None) == (sys.platform.startswith("linux") and platform.libc_ver()[0] == "glibc")

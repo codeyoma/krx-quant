@@ -87,14 +87,15 @@ from krx_quant.daily_features import DailyFiles, samples
 from krx_quant.daily_training import baseline_forecasts, training_first
 from krx_quant.features import Leaders
 from krx_quant.feeds.base import KST
+from krx_quant.footprint import DayUsage, Meter
 from krx_quant.kind_registry import DAILY_KINDS, KINDS
 from krx_quant.kind_stats import kind_scoring
 from krx_quant.kinds import DIRECTION, Answer, Kind
 from krx_quant.lifecycle import DIRECTION_SCORING, REGISTERED, AtOnce, Rows, Rules, Status, review_at_once
 from krx_quant.market_calendar import MarketCalendar, calendar_store
 from krx_quant.predictions import DB_NAME, PredictionStore, SimKindPrediction
-from krx_quant.prevalidation import MIN_DAYS, _WalkForward, admits
-from krx_quant.replay import recorded_events, replay_recorded, sqlite_files
+from krx_quant.prevalidation import MIN_DAYS, _replay_day, _WalkForward, admits
+from krx_quant.replay import sqlite_files
 from krx_quant.sample_store import NightReads, night_reads
 from krx_quant.touch import TARGET_VERSION
 from krx_quant.training import finished_days, is_recorded
@@ -656,26 +657,30 @@ async def _replay_bar_close(
     ]
     climate_of = _WalkForward(settings, ready[0].algorithm, available, calendar, leaders, night=night)
     models = {**load_models(settings.state_dir, beside), **{c.algorithm.name: c.model for c in ready}}
-    for day in days:
-        tables: dict[str, Model] = {}
-        for trainer in tables_of:
-            tables.update(trainer.tables_before(day))
-        climate = climate_of.climate_before(day) if settings.target_version >= 2 else None
-        events = recorded_events(settings.data_dir, day, settings.symbols, leaders)
-        engine = await replay_recorded(
-            settings,
-            day,
-            events,
-            db=db,
-            models={**tables, **models},
-            algorithms=direction,
-            calendar=calendar,
-            climate=climate,
-            kinds=kinds,
-            kind_algorithms=of_kinds,
-        )
-        engine.store.close()
+    meter = Meter()
+    for n, day in enumerate(days, 1):
+        usage = DayUsage(meter)  # its memory, logged (#383)
+        with usage.phase("training"):
+            tables: dict[str, Model] = {}
+            for trainer in tables_of:
+                tables.update(trainer.tables_before(day))
+            climate = climate_of.climate_before(day) if settings.target_version >= 2 else None
+        with usage.phase("replay"):
+            # Let go once replayed, as pre-validation's days are (#383).
+            await _replay_day(
+                settings,
+                day,
+                leaders,
+                db=db,
+                models={**tables, **models},
+                algorithms=direction,
+                calendar=calendar,
+                climate=climate,
+                kinds=kinds,
+                kind_algorithms=of_kinds,
+            )
         log.info("simulated %s with %s", day, ", ".join(c.algorithm.name for c in ready))
+        log.info("simulation: memory on %s (day %d of %d): %s", day, n, len(days), usage.line())
     run = store.add_simulation_run(now, BAR_CLOSE, days)
     replay_db = PredictionStore(db)
     try:

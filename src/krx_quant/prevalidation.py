@@ -30,6 +30,12 @@ replayed day's samples go to them with the model that predicted the day, and the
 what they measured (``diagnostics``). They are never judged, and an error in them only replaces
 them in the report.
 
+Each replayed day logs the process's memory, at its start and after its training and its replay
+with their peaks (#383, ``footprint.DayUsage``), and is let go once replayed: its engine and events
+are dropped before the next day is trained, and the memory they freed is handed back to the system
+(``footprint.give_back``). Without, the process grew a replayed day after another until the kernel
+killed it (2026-10-27).
+
 The report is saved to ``state/prevalidations/<name>.json``, passed or not, with a digest
 of the algorithm's code; the engine reads it at each bar close. The server's scheduled job
 runs this check itself, one waiting algorithm a night (``scheduled.py``, #204), and reads the
@@ -95,6 +101,7 @@ from krx_quant.daily import DailyAlgorithm
 from krx_quant.daily_features import input_versions
 from krx_quant.features import Leaders
 from krx_quant.feeds.base import KST
+from krx_quant.footprint import DayUsage, Meter, give_back
 from krx_quant.kind_registry import KINDS, daily_kind_named, kind_named
 from krx_quant.kind_stats import KindEntry, kind_scoring, scored_of_kind
 from krx_quant.kind_stats import entry as kind_entry
@@ -596,31 +603,71 @@ async def _replay(
     fit = None if measured is None else measured.fit
     trainer = _WalkForward(settings, candidate, available, calendar, leaders, kind, fit, night)
     versions: dict[date, str] = {}
-    for day in replayed:
-        model = trainer.before(day)
+    meter = Meter()
+    for n, day in enumerate(replayed, 1):
+        usage = DayUsage(meter)  # its memory, logged (#383)
+        with usage.phase("training"):
+            model = trainer.before(day)
+            climate = trainer.climate_before(day) if settings.target_version >= 2 else None
+            tables = trainer.tables_before(day)  # its kind's baselines' (#180)
         versions[day] = model.version
-        climate = trainer.climate_before(day) if settings.target_version >= 2 else None
-        tables = trainer.tables_before(day)  # its kind's baselines' (#180)
-        events = recorded_events(settings.data_dir, day, settings.symbols, leaders)
-        engine = await replay_recorded(
-            settings,
-            day,
-            events,
-            db=db,
-            models={**running, **tables, candidate.name: model},
-            algorithms=algorithms,
-            calendar=calendar,
-            climate=climate,
-            kinds=kinds,
-            kind_algorithms=kind_algorithms,
-        )
-        engine.store.close()
+        with usage.phase("replay"):
+            await _replay_day(
+                settings,
+                day,
+                leaders,
+                db=db,
+                models={**running, **tables, candidate.name: model},
+                algorithms=algorithms,
+                calendar=calendar,
+                climate=climate,
+                kinds=kinds,
+                kind_algorithms=kind_algorithms,
+            )
         log.info("%s: replayed %s with %s", candidate.name, day, model.version)
         if measured is not None:
-            # The day's samples are the next day's training too: read once (the last day's alone
-            # is read for this).
-            measured.day(day, model, partial(trainer.samples_on, day))
+            with usage.phase("diagnostics"):
+                # The day's samples are the next day's training too: read once (the last day's
+                # alone is read for this).
+                measured.day(day, model, partial(trainer.samples_on, day))
+        log.info("%s: memory on %s (day %d of %d): %s", candidate.name, day, n, len(replayed), usage.line())
     return versions
+
+
+async def _replay_day(
+    settings: Settings,
+    day: date,
+    leaders: Leaders,
+    *,
+    db: Path,
+    models: Mapping[str, Model],
+    algorithms: Sequence[Algorithm],
+    calendar: MarketCalendar,
+    climate: Model | None,
+    kinds: Sequence[Kind],
+    kind_algorithms: Sequence[KindAlgorithm],
+) -> None:
+    """``day``'s recorded events replayed into ``db`` (``replay_recorded``), then let go (#383): what
+    it predicted is in ``db``; its engine and events are dropped before the next day is trained and
+    replayed, and the memory they freed is handed back to the system (``footprint.give_back``).
+    Without, the process grew a replayed day after another until the kernel killed it (2026-10-27,
+    #383). It keeps nothing: what the next day reads is in ``db`` and the trainer's days."""
+    events = recorded_events(settings.data_dir, day, settings.symbols, leaders)
+    engine = await replay_recorded(
+        settings,
+        day,
+        events,
+        db=db,
+        models=models,
+        algorithms=algorithms,
+        calendar=calendar,
+        climate=climate,
+        kinds=kinds,
+        kind_algorithms=kind_algorithms,
+    )
+    engine.store.close()
+    del engine, events
+    give_back()
 
 
 def _measured(candidate: Algorithm | KindAlgorithm) -> _Measured | None:
