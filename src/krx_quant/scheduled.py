@@ -1301,6 +1301,39 @@ KRX_NET_ASSETS_CHECK = Job(
     ),
 )
 
+# The member frames short of fields (#381): around 08:00 on 2026-10-23 and 10-26 a few integrated
+# member frames (``H0UNMBC0``) came with 72, 67 and 61 fields instead of 78, and the collector kept
+# them raw only with an ERROR (which alerts). Whether they follow a rule the normalization can take
+# (a block of fields left out) or are cut short decides step 2, and only the raw frames show it.
+# Once, on the first night after the deploy that brings it (trading or not: it reads the days
+# already recorded): ``probe-member-frames`` reads every recorded day's member frames (about 14,000
+# a day) and the other WebSocket feeds' frames in the minutes around the short ones. It reads files
+# only and prints counts, times, symbols, field counts and field shapes, never a value, so it can go
+# on the public issue. Seconds to a minute or two; the 20 minutes are a bound, kept short as it
+# runs before the simulations and pre-validations, which must start by 00:30 (the Breimans by
+# 23:30). Listed after the other probes, so it never holds back the results they wait on.
+MEMBER_FRAMES_ISSUE = 381
+
+MEMBER_FRAMES_PROBE = Job(
+    name="probe-member-frames-381",
+    due=_first_night,
+    command=("probe-member-frames",),
+    timeout=timedelta(minutes=20),
+    targets=(
+        Target(
+            MEMBER_FRAMES_ISSUE,
+            note=(
+                "에이전트가 이 출력으로 필드가 78개가 아닌 회원사 프레임이 언제(날마다, 시마다) 왔는지, "
+                "칸의 모양이 다음 78칸 프레임과 어디서 갈라지는지(정해진 칸이 빠지는지, 잘렸는지), "
+                "같은 때 다른 피드에도 필드 수가 맞지 않는 프레임이나 `_unparsed` 프레임(둘로 나뉜 프레임의 "
+                "뒷부분)이 있었는지 #381에 정리하고 2단계(그 모양을 정규화할지, WARNING으로 낮추고 셀지)를 "
+                "정한다. 사용자의 결정이 필요하면 이슈에 묻는다. 출력에는 시세 값이 없다"
+                "(개수, 시각, 종목코드, 필드 수, 칸의 모양만)."
+            ),
+        ),
+    ),
+)
+
 # The night futures (#264): the collector records the KOSPI200 night session's trades and book
 # (18:00–06:00) from the deploy that brings it; what only the server shows is whether KIS
 # streams them for this app key, under the contract code asked for, in the layout of KIS's
@@ -1765,6 +1798,7 @@ JOBS: tuple[Job, ...] = (
     GAPS_PROBE,
     CLOSING_FLOW_CHECK,
     KRX_NET_ASSETS_CHECK,
+    MEMBER_FRAMES_PROBE,
     *daily_prevalidation_jobs(
         [a.name for a in DAILY_ALGORITHMS],
         {a.name: a.features for a in DAILY_ALGORITHMS},

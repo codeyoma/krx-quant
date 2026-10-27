@@ -48,6 +48,7 @@ from krx_quant.krx_etf_probe import probe_krx_etf
 from krx_quant.lifecycle import Status
 from krx_quant.macro import run_macro
 from krx_quant.market_calendar import calendar_store
+from krx_quant.member_frames_probe import probe_member_frames
 from krx_quant.model_shelf import Shelf
 from krx_quant.nav_probe import probe_nav
 from krx_quant.net_buys_probe import probe_net_buys
@@ -150,6 +151,11 @@ def _probe_expected_open(days: int) -> int:
 
 def _probe_gaps() -> int:
     print(probe_gaps(Settings.from_env(require_kis=False), datetime.now(KST)))
+    return 0
+
+
+def _probe_member_frames() -> int:
+    print(probe_member_frames(Settings.from_env(require_kis=False), datetime.now(KST)))
     return 0
 
 
@@ -684,6 +690,12 @@ def main(argv: list[str] | None = None) -> int:
         " bars (#344), read-only; prints no market value",
     )
     sub.add_parser(
+        "probe-member-frames",
+        help="count the member feed's raw frames whose field count is not 78 (#381), with each one's"
+        " field shapes beside the next full frame's and the other feeds' frames around it, read-only;"
+        " prints no field value",
+    )
+    sub.add_parser(
         "check-closing-flow",
         help="summarize what the closing flow kept (#305): the net assets by day and when they came,"
         " the 15:20 rows, the days, and the integrated and KRX one-minute bars' closing auction values"
@@ -910,6 +922,8 @@ def _command(args: argparse.Namespace) -> int:
         return _probe_expected_open(args.days)
     elif args.command == "probe-gaps":
         return _probe_gaps()
+    elif args.command == "probe-member-frames":
+        return _probe_member_frames()
     elif args.command == "check-closing-flow":
         return asyncio.run(_check_closing_flow())
     elif args.command == "check-krx-net-assets":
