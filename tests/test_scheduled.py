@@ -45,6 +45,7 @@ from krx_quant.scheduled import (
     JOBS,
     KRX_ETF_PROBE,
     KRX_NET_ASSETS_CHECK,
+    MEMBER_FRAMES_PROBE,
     NAV_PROBE,
     NET_BUYS_PROBE,
     NIGHT_PROBE,
@@ -1317,6 +1318,54 @@ def test_the_krx_net_assets_check_runs_once_on_the_first_trading_night_with_the_
     ran = JobRecord(FRIDAY, OK, at(FRIDAY, "22:30"), COMMIT, 0, 5.0)
     assert not KRX_NET_ASSETS_CHECK.due(with_key(MONDAY, ran))
     assert "값이 없다" in KRX_NET_ASSETS_CHECK.targets[0].note
+
+
+def test_the_member_frames_probe_runs_once_on_the_first_night_and_posts_to_381() -> None:
+    # #381: the member frames short of fields around 08:00 (10-23, 10-26), from the days recorded.
+    assert MEMBER_FRAMES_PROBE.name == "probe-member-frames-381"
+    assert MEMBER_FRAMES_PROBE.command == ("probe-member-frames",)
+    assert MEMBER_FRAMES_PROBE.timeout == timedelta(minutes=20), (
+        "short: the simulations and pre-validations follow"
+    )
+    assert [t.issue for t in MEMBER_FRAMES_PROBE.targets] == [381]
+    assert MEMBER_FRAMES_PROBE.label == ("ready-for-agent",)
+    probes = (GAPS_PROBE, CLOSING_FLOW_CHECK, KRX_NET_ASSETS_CHECK, KRX_ETF_PROBE, NAV_PROBE, DIVIDEND_PROBE)
+    assert all(JOBS.index(probe) < JOBS.index(MEMBER_FRAMES_PROBE) for probe in probes), "they go first"
+    first = next(i for i, j in enumerate(JOBS) if j.name.startswith(("prevalidate-", "simulate-")))
+    assert JOBS.index(MEMBER_FRAMES_PROBE) < first, "before the simulations and pre-validations"
+    assert MEMBER_FRAMES_PROBE.due(night(FRIDAY)) and MEMBER_FRAMES_PROBE.due(night(SATURDAY)), (
+        "it reads the days recorded"
+    )
+    ran = JobRecord(FRIDAY, OK, at(FRIDAY, "22:30"), COMMIT, 0, 30.0)
+    assert not MEMBER_FRAMES_PROBE.due(night(MONDAY, ran))
+    assert not MEMBER_FRAMES_PROBE.due(night(MONDAY, replace(ran, outcome=FAILED, exit_code=1)))
+    assert MEMBER_FRAMES_PROBE.due(night(MONDAY, replace(ran, outcome=INTERRUPTED)))
+    output = "회원사 프레임의 필드 수 (#381): 2026-10-08 – 2026-10-28\n\n1. 날마다"
+    assert MEMBER_FRAMES_PROBE.targets[0].part(output) == output, "the whole output"
+    assert "시세 값이 없다" in MEMBER_FRAMES_PROBE.targets[0].note
+
+
+async def test_the_member_frames_probe_job_runs_the_real_command(empty_server: Path) -> None:
+    state = JobState.load(empty_server / STATE_FILE)
+    async with fake_github() as hub, aiohttp.ClientSession() as session:
+        scheduler = Scheduler(
+            [MEMBER_FRAMES_PROBE],
+            AT,
+            CALENDAR,
+            state,
+            GitHub(session, TOKEN, REPO, hub.url),
+            Told(),
+            FakeClock(at(FRIDAY, "23:00")),
+            commit=COMMIT,
+        )
+        await asyncio.wait_for(scheduler.run_night(FRIDAY), 25)
+    body = hub.bodies(381)[-1]
+    assert (
+        "**예약 작업 `probe-member-frames-381`**" in body
+        and "다시 돌리기: `docker compose run --rm engine probe-member-frames`" in body
+    )
+    assert "회원사 프레임의 필드 수 (#381): raw에 H0UNMBC0 프레임이 있는 날이 없다" in body
+    assert state.jobs["probe-member-frames-381"].exit_code == 0
 
 
 def test_the_dividend_probe_runs_once_on_the_first_night_and_posts_to_310() -> None:
