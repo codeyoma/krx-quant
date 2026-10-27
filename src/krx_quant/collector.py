@@ -29,6 +29,7 @@ from krx_quant.contracts import KOSPI200, night_front_month
 from krx_quant.cost_guard import keep_costs
 from krx_quant.daily import StoredDays
 from krx_quant.daily_features import DAILY_FEATURES, LiveFeatures
+from krx_quant.disk_watch import DiskWatch, keep_disks
 from krx_quant.doctor import RecentLog, engine_status, report
 from krx_quant.econ_calendar import CalendarCollector, keep_calendar
 from krx_quant.engine import Budget, PredictionEngine, run_live
@@ -461,6 +462,14 @@ async def run_collector(
                 background.append(asyncio.create_task(loki.keep_heartbeat()))
             if settings.cost_budget is not None:
                 background.append(asyncio.create_task(keep_costs(settings, alerts, now)))
+            if settings.disk_min_free_percent > 0:
+                disks = DiskWatch(
+                    {"data": settings.data_dir, "state": settings.state_dir},
+                    settings.disk_min_free_percent,
+                    alerts,
+                    settings.state_dir,
+                )
+                background.append(asyncio.create_task(keep_disks(disks)))
             if settings.restart_at is not None:
                 background.append(
                     asyncio.create_task(restart_each_day(settings.restart_at, calendar.calendar, now, stop))

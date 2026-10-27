@@ -159,6 +159,10 @@ class Settings:
     cost_budget: str | None = None
     training_schedules: tuple[str, ...] = ()
     cost_check_seconds: float = 3600.0
+    # Disk Watch (#379): the collector alerts when less than this share of the disk under the
+    # data or the state folder is free, in percent (KRX_DISK_MIN_FREE_PERCENT: 20 unless set;
+    # 0: never). 0 here, so a collector built in a test never alerts on the test machine's disk.
+    disk_min_free_percent: float = 0.0
     # The collector reads the macro indicators and decides the day's regime at this time
     # (KST) on trading days, after the US close (KRX_MACRO_AT: 07:30 unless set; "off").
     # None here, so a collector built in a test never does.
@@ -412,6 +416,9 @@ class Settings:
             cost_budget=values.get("KRX_COST_BUDGET", "").strip() or None,
             training_schedules=codes("KRX_TRAINING_SCHEDULES", ""),
             cost_check_seconds=float(number("KRX_COST_CHECK_SECONDS", "3600", float, minimum=60)),
+            disk_min_free_percent=float(
+                number("KRX_DISK_MIN_FREE_PERCENT", "20", float, minimum=0, maximum=99)
+            ),
             macro_at=macro_at,
             restart_at=restart_at,
             ecos_api_key=values.get("KRX_ECOS_API_KEY") or None,

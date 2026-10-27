@@ -56,6 +56,7 @@
 | `signals.py` | 텔레그램 신호 알림(선택) |
 | `training.py`, `nightly.py`, `sample_store.py`, `model_shelf.py`, `swap.py`, `footprint.py`, `training_nights.py` | 학습 샘플, 밤 학습, 날마다의 표본 저장소(#370), 서버의 모델 이력, 08:00 교체와 모델 감시, Spot 학습 결과 기다리기, 밤 학습 단계별 시간과 최대 메모리(#355), 밤 학습의 결과와 적용되지 않은 밤(#355) |
 | `cost_guard.py` | 월 AWS 비용 감시: 50%·80% 알림, 상한에서 Spot 학습 끄기(#23) |
+| `disk_watch.py` | 디스크 감시: 데이터·상태 폴더가 있는 디스크의 여유가 기준(`KRX_DISK_MIN_FREE_PERCENT`)보다 작아지면 한 번 알리고, 돌아오면 `[복구]`(#379) |
 | `scheduled.py`, `github.py`, `redaction.py`, `forbidden.py` | 예약 작업(#215): 작업 목록(`JOBS`. 사전 검증 작업은 알고리즘 등록 목록에서 만든다, #204)과 밤마다 돌리는 스케줄러, 상태 파일, GitHub 이슈 댓글과 라벨, 올리기 전 가림, 저장소 검사(`scripts/check_forbidden.py`)와 가림이 같이 쓰는 금지 패턴([operations.md](operations.md#예약-작업-215)) |
 | `doctor.py`, `snapshot.py` | 서버 요약(#322): 읽기 전용 `krx-quant doctor`(엔진의 커밋과 시작 시각, KIS 연결과 피드·키별 마지막 수신, 오늘의 PINGPONG, 최근 WARNING·ERROR 로그, 예약 작업, 디스크와 메모리, 밤 학습(#355), 로그 폴더(#356)를 시세 값 없이 가려서)와, `needs-server-snapshot` 라벨이 붙은 이슈에 그 요약을 댓글로 남기고 라벨을 떼는 수집기의 확인(3분마다, 이슈마다·시간마다 한도)([operations.md](operations.md#서버-상태-보기-322)) |
 | `process_log.py` | 프로세스의 로그 줄(#356, #358): 프로세스마다 시작 줄과 종료 코드가 든 끝 줄, 엔진이 띄운 밤 학습·예약 작업을 돌리고 그 출력 전체를 읽어 Loki로(`KRX_LOG_BY_PARENT=1`, `process="training"`·`"job"`), 종료 코드와 마지막 단계는 `Ran`으로 |

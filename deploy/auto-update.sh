@@ -15,7 +15,8 @@
 # 5. It pushes the new image to ECR for the nightly training on EC2 Spot, if that is set
 #    up (deploy/push-image.sh, #23). A push that failed is tried again on the next run,
 #    even with nothing new on main (.auto-update-push-failed).
-# 6. It reports to Telegram (krx-quant notify).
+# 6. It removes Docker's build cache and the images not used for 3 days (#379), and reports
+#    to Telegram (krx-quant notify), with what Docker keeps and the disk's free space.
 set -euo pipefail
 
 repo=$(cd "$(dirname "$0")/.." && pwd)
@@ -67,6 +68,28 @@ push_image() {
   fi
 }
 
+# The build cache and the images unused for 3 days (#379), after an update that started. The
+# running engine's image is in use, and so kept; a rollback builds the commit before again
+# (from the cache of the last 3 days when it has it), so it needs no old image. A prune that
+# fails leaves the update as it is.
+prune() {
+  docker builder prune -af --filter until=72h >/dev/null ||
+    echo "auto-update: could not prune the build cache" >&2
+  docker image prune -af --filter until=72h >/dev/null ||
+    echo "auto-update: could not prune the images" >&2
+}
+
+# What Docker keeps and the disk's free space, for the log and the notice: "<images> <build
+# cache> <free> <size>", "?" for what could not be read.
+usage() {
+  local kept images cache free size
+  kept=$(docker system df --format '{{.Type}}|{{.Size}}' 2>/dev/null) || kept=""
+  images=$(awk -F'|' '$1 == "Images" {print $2}' <<<"$kept")
+  cache=$(awk -F'|' '$1 == "Build Cache" {print $2}' <<<"$kept")
+  read -r free size < <(df -Ph . 2>/dev/null | awk 'NR == 2 {print $4, $2}') || true
+  echo "${images:-?} ${cache:-?} ${free:-?} ${size:-?}"
+}
+
 # Anything else that fails (GitHub unreachable, a checkout that cannot fast-forward) is
 # reported too; the engine keeps running what it ran.
 trap 'notify "자동 업데이트 오류: ${BASH_COMMAND} (줄 ${LINENO}). 엔진은 그대로입니다."' ERR
@@ -99,9 +122,12 @@ if restart; then
   if ! push_image; then
     pushed=$'\n'"Spot 학습용 이미지를 올리지 못했습니다. 밤 학습은 이전 이미지로 돌고, 다음 06:00에 다시 올립니다."
   fi
-  docker image prune -f >/dev/null || true
+  prune
+  read -r images cache free size < <(usage)
   echo "auto-update: ${deployed:0:7} -> ${target:0:7}"
-  notify "자동 업데이트: ${deployed:0:7} → ${target:0:7}"$'\n'"$changes$pushed"
+  echo "auto-update: docker images $images, build cache $cache; disk free $free of $size"
+  disk="디스크 여유 $free / $size · Docker 이미지 $images, 빌드 캐시 $cache"
+  notify "자동 업데이트: ${deployed:0:7} → ${target:0:7}"$'\n'"$changes$pushed"$'\n'"$disk"
   exit 0
 fi
 
