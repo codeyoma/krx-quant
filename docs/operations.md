@@ -146,6 +146,8 @@ aws iam create-access-key --user-name krx-quant-engine
    - 첫 실행에서는 `.env`를 `.env.example`에서 만들고(권한 600) 멈춘다.
    - 두 번째 실행에서는 `KRX_BIND_ADDRESS`를 쓰고, `data/`, `state/`의 주인을 이미지의 `engine` 사용자(uid 10001)로 바꾸고, 엔진을 띄우고, 자동 업데이트 타이머를 설치한다(4장).
    - 그 뒤에 다시 돌려도 Docker와 엔진은 다시 띄우지 않아 녹화가 끊기지 않는다(#385). 패키지는 없는 것만 설치하고(이미 있는 `docker.io`를 올리면 Docker가 다시 뜬다), 엔진이 돌고 있으면 빌드하지도 띄우지도 않는다(손으로 빌드한 이미지는 `KRX_COMMIT`이 `unknown`이라 06:00 업데이트의 이미지와 달라, compose가 엔진을 새로 만든다). `.env`를 고친 뒤 엔진에 읽히려면 `docker compose up -d`를 따로 한다.
+
+     > **바뀜** (2026-10-28, #386): 다시 돌리면 `apt-get install`이 이미 있는 패키지를 올리고(`docker.io`를 올리면 Docker와 엔진이 다시 뜬다), `docker compose up -d --build`가 도는 엔진을 새로 만들었다(`KRX_COMMIT` 없이 빌드한 이미지는 06:00 업데이트의 것과 다르다) → 없는 패키지만 설치하고, 도는 엔진은 그대로 둔다. 이유: #385의 커널 설정을 두려고 서버에서 다시 돌려도 녹화가 끊기지 않아야 한다(#385).
    - auth key는 `TS_AUTHKEY` 환경 변수로 준다.
 6. `.env`를 채운다.
    ```bash
