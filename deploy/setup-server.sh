@@ -7,7 +7,8 @@
 #   sudo TS_AUTHKEY=tskey-... deploy/setup-server.sh
 #
 # Safe to run again. On the first run it creates .env from .env.example and stops so
-# you can fill it in; run it again afterwards. See docs/operations.md.
+# you can fill it in; run it again afterwards. A rerun restarts neither Docker nor a running
+# engine, so recording goes on (#385). See docs/operations.md.
 set -euo pipefail
 
 if [[ $EUID -ne 0 ]]; then
@@ -28,8 +29,19 @@ set_env() {
 }
 
 echo "== packages"
-apt-get update -q
-apt-get install -y -q ca-certificates curl git ufw docker.io docker-compose-v2
+# Only the missing ones: on a rerun apt-get would upgrade docker.io, and the upgrade restarts
+# Docker and the engine with it (#385).
+missing=()
+for package in ca-certificates curl git ufw docker.io docker-compose-v2; do
+  # shellcheck disable=SC2016 # dpkg-query's own field, not a shell variable
+  if [[ "$(dpkg-query -W -f='${db:Status-Status}' "$package" 2>/dev/null || true)" != installed ]]; then
+    missing+=("$package")
+  fi
+done
+if ((${#missing[@]})); then
+  apt-get update -q
+  apt-get install -y -q "${missing[@]}"
+fi
 usermod -aG docker "$owner"
 
 echo "== swap"
@@ -45,6 +57,9 @@ if [[ -z "$(swapon --show --noheadings)" ]]; then
   swapon /swapfile
   grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' >>/etc/fstab
 fi
+
+echo "== kernel self-reboot and a journal on disk (#385)"
+"$repo/deploy/kernel-recovery.sh"
 
 echo "== Tailscale"
 if ! command -v tailscale >/dev/null; then
@@ -103,7 +118,14 @@ mkdir -p data state
 chown -R "$engine_uid:$engine_uid" data state
 
 echo "== start"
-docker compose up -d --build
+# A rerun leaves a running engine alone: built again by hand (KRX_COMMIT unknown) its image
+# differs from the 06:00 update's, and compose would recreate it, cutting the recording (#385).
+# After changing .env, run docker compose up -d.
+if [[ -n "$(docker compose ps -q --status running engine 2>/dev/null || true)" ]]; then
+  echo "the engine is running: left as it is"
+else
+  docker compose up -d --build
+fi
 docker compose ps
 
 echo "== daily update"

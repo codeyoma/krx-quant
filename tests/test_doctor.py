@@ -21,6 +21,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
+import krx_quant.doctor as doctor_module
 from krx_quant import kis, loki
 from krx_quant.cli import main
 from krx_quant.config import Settings
@@ -219,6 +220,47 @@ def test_the_summary_has_its_nine_parts_with_the_fields_as_the_api_names_them(tm
     # The nightly training (#355): nothing kept yet here.
     assert "마지막으로 적용된 밤 없음 · 그 뒤 적용되지 않은 거래일 밤 0번" in text
     assert "기록된 밤 없음(이 기록은 #355부터)" in text
+
+
+def kernel_settings(tmp_path: Path, **values: int) -> Path:
+    """A stand-in for ``/proc/sys/kernel`` with ``values``, each file as the kernel writes it."""
+    kernel = tmp_path / "proc-sys-kernel"
+    kernel.mkdir()
+    for name, value in values.items():
+        (kernel / name).write_text(f"{value}\n")
+    return kernel
+
+
+def resources(text: str) -> str:
+    return text.split("\n\n6. 디스크와 메모리", 1)[1].split("\n\n7. ", 1)[0]
+
+
+def test_section_6_shows_the_kernel_s_self_reboot_settings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    kernel = kernel_settings(tmp_path, panic=10, panic_on_oops=1, softlockup_panic=1)
+    monkeypatch.setattr(doctor_module, "KERNEL", kernel)
+
+    text = report(server(tmp_path), NOW, Status(status_body(), "이 컨테이너의 엔진 API"))
+
+    assert resources(text).splitlines()[-1] == (
+        "  커널 자동 재부팅(/proc/sys/kernel, #385): kernel.panic 10 · kernel.panic_on_oops 1"
+        " · kernel.softlockup_panic 1"
+    )
+
+
+def test_kernel_settings_not_applied_or_not_readable_are_said(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ubuntu's own values before deploy/kernel-recovery.sh ran, and a file that cannot be read."""
+    monkeypatch.setattr(doctor_module, "KERNEL", kernel_settings(tmp_path, panic=0, panic_on_oops=0))
+
+    text = report(server(tmp_path), NOW, Status(status_body(), "이 컨테이너의 엔진 API"))
+
+    assert resources(text).splitlines()[-1] == (
+        "  커널 자동 재부팅(/proc/sys/kernel, #385): kernel.panic 0 · kernel.panic_on_oops 0"
+        " · kernel.softlockup_panic 읽지 못함 · deploy/kernel-recovery.sh가 두는 값(10 · 1 · 1)과 다름"
+    )
 
 
 def test_the_model_files_are_counted_on_the_server_and_in_the_store(tmp_path: Path) -> None:

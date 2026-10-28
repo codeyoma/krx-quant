@@ -22,7 +22,7 @@ The output of `krx-quant doctor`, masked (secrets, server addresses), with no ma
 3. Today's PINGPONG heartbeats: total, the last one, the longest silence between two, the count per hour.
 4. The engine's latest WARNING and ERROR log lines (the last 20 since it started). Only the code's message templates: values other than dates, times, booleans and name-shaped words show as `…`, exceptions as their type, other libraries' lines as logger and level. For full lines, query Loki ([server-logs.md](server-logs.md)).
 5. Scheduled jobs: last runs, jobs that never ran to an end, results not posted yet.
-6. Disk free under the data and state directories, and memory.
+6. Disk free under the data and state directories, the disk alert's threshold, memory, and on its last line the kernel's self-reboot settings (#385): `커널 자동 재부팅(/proc/sys/kernel, #385): kernel.panic 10 · kernel.panic_on_oops 1 · kernel.softlockup_panic 1`. `읽지 못함` means a value could not be read; a trailing `· deploy/kernel-recovery.sh가 두는 값(10 · 1 · 1)과 다름` means they are not what `deploy/kernel-recovery.sh` sets (the user has not run `sudo deploy/setup-server.sh` since #385 deployed).
 7. The nightly training (#355): the last night the morning swap applied, the trading nights not applied since, and the latest nights' outcomes (exit code, last step started), from `state/training_nights.json`.
 8. The log lines in Grafana Cloud Loki (#358), as `/v1/status`'s `loki` says: on or off (and why), lines sent, dropped and buffered, the last success, the last failure's kind (`HTTP 503`). Until #360 this section was the log files under `state/logs`, which are gone.
 9. The model files (#361): how many and how large in `state/models` (the running models and `versions/`) and in the store's `models/`, with the algorithm that has the most. Once pruned, `versions/` holds at most two per algorithm (the running one and the one a rollback goes to); the store may hold more while a night's promoted model waits or a night is training.
@@ -37,6 +37,23 @@ The engine may be down or restarting (the 06:00 deploy, the 07:20 restart), or `
 - `docker compose run --rm engine doctor` (the engine is down)
 
 `doctor` still prints when a malformed setting keeps the engine from starting: the error comes right under its heading (`설정 오류: …`).
+
+If the whole server may be down (no snapshot, no Loki lines, `[Grafana] krx-quant 엔진 로그가 10분 넘게 없습니다…`), read the instance's health from the AWS side. An agent on the user's Mac can, with the AWS CLI configured there (region `ap-southeast-2`). These calls only read (`date -v` is macOS's):
+
+```bash
+aws lightsail get-instance-state --instance-name krx-quant --region ap-southeast-2
+aws lightsail get-instance-metric-data --instance-name krx-quant --region ap-southeast-2 \
+  --metric-name StatusCheckFailed_Instance --period 60 --unit Count --statistics Minimum Maximum \
+  --start-time "$(date -u -v-2H +%Y-%m-%dT%H:%M:%SZ)" --end-time "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --query 'sort_by(metricData,&timestamp)[].[timestamp,maximum]' --output text
+aws lightsail get-operations-for-resource --resource-name krx-quant --region ap-southeast-2 \
+  --query 'operations[:5].[createdAt,operationType,status]' --output text
+```
+
+- `StatusCheckFailed_Instance` 1 minute after minute with `StatusCheckFailed_System` 0 means the OS has hung while the hardware is fine. That is how the 2026-10-28 outage (00:33–12:15 KST) was diagnosed (#385). Both 1 is AWS's side.
+- One point a minute, keyed by the minute's start, in your time zone; the newest is 1.5–2.5 minutes old. Do not use `--period 300`: its windows start at `--start-time` and the last one comes back half full.
+- The watchdog (`.github/workflows/server-watchdog.yml`) reboots after 15 minutes of instance-check failure and reports on an issue labelled `server-watchdog` (`docs/operations.md` "서버가 멈추면 (#385)"). Its runs: `gh run list --workflow server-watchdog --repo codeyoma/krx-quant`. Do not reboot or change the instance unless the user asks: that is the watchdog's or the user's.
+- After a hang, ask the user for `sudo journalctl -b -1 -k -n 200` on the server: the journal is kept on disk since #385. It is unmasked: never paste it into an issue or PR.
 
 ## Reading the logs
 

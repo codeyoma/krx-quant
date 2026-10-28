@@ -53,6 +53,27 @@
     6. 텔레그램 연락처(contact point) `krx-quant-telegram`을 Grafana에 만들고 기존 봇의 토큰과 대화 ID를 직접 넣는다. 알림 규칙 셋은 에이전트가 커넥터로 만든다. 만들기 전에 사용자에게 확인을 받는다(6장 "Grafana 알림 규칙 (#358)").
 
     Loki 주소와 사용자 ID는 서버 `.env`와 맥의 파일에만 둔다. 저장소, 이슈, PR에는 적지 않는다.
+12. **서버 watchdog** (#385): 서버의 OS가 멈추면 커널이 스스로 재부팅하고, 그래도 멈춰 있으면 GitHub Actions가 Lightsail 인스턴스를 재부팅한다(6장 "서버가 멈추면 (#385)"). 2026-10-28에 OS가 12시간 가까이 멈춰 정했다.
+    1. 맥에서, `deploy/create-aws.sh`를 돌린 관리자 자격 증명(`aws configure`)으로 저장소 루트에서 한 번 돌린다. 다시 돌려도 된다.
+       ```bash
+       deploy/create-watchdog-role.sh
+       ```
+       GitHub의 OIDC 공급자(`token.actions.githubusercontent.com`), 역할 `krx-quant-watchdog`, 그 역할의 인라인 정책 `krx-quant-watchdog`(`deploy/watchdog-policy.json`)을 만들고, 저장소 비밀값 `AWS_WATCHDOG_ROLE_ARN`을 `gh`로 넣는다. 역할은 이 저장소의 `main`에서 도는 workflow만 받는다(`repo:codeyoma/krx-quant:ref:refs/heads/main`, audience `sts.amazonaws.com`). 권한은 시드니의 Lightsail 상태·지표·작업 읽기와 `krx-quant` 인스턴스 하나의 재부팅뿐이다. 저장되는 AWS 키는 없다. `gh`가 로그인돼 있지 않으면 비밀값을 넣는 명령을 대신 적는다. 역할과 인스턴스의 ARN에는 계정 번호가 들어 있어 스크립트는 출력하지 않는다. 이슈나 PR에 붙이지 않는다.
+    2. (선택) 텔레그램으로도 받으려면 서버 `.env`의 `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`와 같은 값을 같은 이름의 저장소 비밀값으로 넣는다. 값을 묻는다.
+       ```bash
+       gh secret set TELEGRAM_BOT_TOKEN --repo codeyoma/krx-quant
+       gh secret set TELEGRAM_CHAT_ID --repo codeyoma/krx-quant
+       ```
+    3. #385가 서버에 배포된 뒤(머지 다음 06:00), 서버에서 한 번 돌린다. 커널이 멈추면 스스로 재부팅하는 설정과 디스크에 남는 journal을 둔다. 엔진과 Docker는 다시 띄우지 않아 녹화가 끊기지 않는다(2.2의 5단계).
+       ```bash
+       cd ~/krx-quant && sudo deploy/setup-server.sh
+       ```
+       `krx-quant doctor` 6절(에이전트는 서버 요약)에 `커널 자동 재부팅(/proc/sys/kernel, #385): kernel.panic 10 · kernel.panic_on_oops 1 · kernel.softlockup_panic 1`이 나오면 됐다. 배포 전에 돌리면 아직 그 스크립트가 없다.
+    4. 머지된 뒤 맥에서 한 번 시험한다. 판단만 하고 재부팅, 이슈, 텔레그램은 하지 않는다. 판단은 그 실행의 요약 화면에 나온다.
+       ```bash
+       gh workflow run server-watchdog --repo codeyoma/krx-quant -f dry_run=true
+       gh run list --workflow server-watchdog --repo codeyoma/krx-quant --limit 3
+       ```
 
 ## 2. 개통
 
@@ -121,8 +142,12 @@ aws iam create-access-key --user-name krx-quant-engine
    - Docker, Tailscale(Tailscale SSH 포함), ufw를 설치한다.
    - Docker가 Tailscale 뒤에 시작되도록 순서를 정한다(`/etc/systemd/system/docker.service.d/after-tailscale.conf`). 부팅 때 Tailscale 주소가 아직 없어도 엔진 포트를 열 수 있게 `net.ipv4.ip_nonlocal_bind = 1`을 켠다(`/etc/sysctl.d/90-krx-quant.conf`). 이 둘은 처음 한 번만 하고, 그때만 Docker를 다시 띄운다.
    - 방화벽을 설정한다: 들어오는 연결은 Tailscale 인터페이스, 22번, 41641/udp만 허용한다.
+   - 커널이 멈추면 스스로 재부팅하도록 sysctl을 두고(`/etc/sysctl.d/91-krx-quant-recovery.conf`: `kernel.panic = 10`, `kernel.panic_on_oops = 1`, `kernel.softlockup_panic = 1`), journal을 디스크에 남긴다(`/etc/systemd/journald.conf.d/90-krx-quant.conf`: `Storage=persistent`, `SystemMaxUse=200M`). `deploy/kernel-recovery.sh`가 하고, 혼자 돌려도 된다(`sudo deploy/kernel-recovery.sh`). 다시 돌리면 sysctl만 다시 적용하고, `systemd-journald`는 그 설정이 바뀔 때만 다시 띄운다(#385, 6장 "서버가 멈추면 (#385)").
    - 첫 실행에서는 `.env`를 `.env.example`에서 만들고(권한 600) 멈춘다.
    - 두 번째 실행에서는 `KRX_BIND_ADDRESS`를 쓰고, `data/`, `state/`의 주인을 이미지의 `engine` 사용자(uid 10001)로 바꾸고, 엔진을 띄우고, 자동 업데이트 타이머를 설치한다(4장).
+   - 그 뒤에 다시 돌려도 Docker와 엔진은 다시 띄우지 않아 녹화가 끊기지 않는다(#385). 패키지는 없는 것만 설치하고(이미 있는 `docker.io`를 올리면 Docker가 다시 뜬다), 엔진이 돌고 있으면 빌드하지도 띄우지도 않는다(손으로 빌드한 이미지는 `KRX_COMMIT`이 `unknown`이라 06:00 업데이트의 이미지와 달라, compose가 엔진을 새로 만든다). `.env`를 고친 뒤 엔진에 읽히려면 `docker compose up -d`를 따로 한다.
+
+     > **바뀜** (2026-10-28, #386): 다시 돌리면 `apt-get install`이 이미 있는 패키지를 올리고(`docker.io`를 올리면 Docker와 엔진이 다시 뜬다), `docker compose up -d --build`가 도는 엔진을 새로 만들었다(`KRX_COMMIT` 없이 빌드한 이미지는 06:00 업데이트의 것과 다르다) → 없는 패키지만 설치하고, 도는 엔진은 그대로 둔다. 이유: #385의 커널 설정을 두려고 서버에서 다시 돌려도 녹화가 끊기지 않아야 한다(#385).
    - auth key는 `TS_AUTHKEY` 환경 변수로 준다.
 6. `.env`를 채운다.
    ```bash
@@ -1718,6 +1743,7 @@ docker compose logs --tail 200 engine
 | 로그의 WARNING `poll <TR> <키> failed: Server disconnected` (또는 `Connection reset by peer`) | 같은 때의 위 INFO 줄, Loki `{service="krx-quant", process="engine"} \|= "Server disconnected"` | 새 연결로 한 번 더 보낸 것도 답 전에 끊겼다. 그 조회는 다음 간격에 다시 묻는다(VI 현황은 5초 뒤, `KRX_VI_POLL_SECONDS`). 그동안 그 종목의 VI를 그만큼 늦게 안다. 2026-10-23에는 고치기 전이라 VI 현황에서 26번 나왔다. 배포 뒤에도 하루 여러 번이면 KIS나 서버의 네트워크 문제다. 같은 때의 다른 경고(WebSocket 끊김 등)를 본다. |
 | 로그의 `no macro regime for <날짜>` | `docker compose logs engine \| grep macro`, `/v1/macro` | 그날 개장 전에 정한 매크로 국면이 없다(07:30 수집이 꺼졌거나 모든 출처가 실패했거나, 수집기가 개장 뒤에 시작했다). Markov가 그날 기본 전이행렬로 돈다. `runs`에 `no_regime`으로 남는다. 할 일은 없고, 매일 나오면 07:30 수집을 확인한다. |
 | 디스크가 찬다, `[장애] 서버 디스크의 여유가 <N> GB(<M>%)로 기준 20%보다 작습니다(데이터 폴더 /data). …` (#379) | `docker system df`, `df -h`, `du -sh data/*/ state/*/`, 06:00 업데이트 알림의 끝 줄(`디스크 여유 … · Docker 이미지 …, 빌드 캐시 …`), `krx-quant doctor` 6절 | 1. Docker부터 본다. 06:00 업데이트가 3일 동안 쓰지 않은 빌드 캐시와 이미지를 지우지만(4장), 되돌린 날은 정리하지 않아서 그날 만든 것이 다음 성공까지 남는다. 장 시간 밖에서 `docker builder prune -af && docker image prune -af`를 실행한다. 도는 엔진의 이미지는 지우지 않는다. 다음 빌드는 모든 층을 다시 받아 몇 분 더 걸린다.<br>2. 로컬 데이터는 자동으로 지우지 않는다. 지우기 전에 `docker compose run --rm engine archive --recheck`를 실행하고, `0 failed`로 끝나는지(종료 코드 0) 확인한다. `.uploaded.json`이 있다는 것만으로는 지금 파일이 S3에 있다고 볼 수 없다. 파티션을 합친 뒤 업로드가 실패하면 그 전 파일의 기록이 남아 있기 때문이다. 확인한 뒤에는 오래된 날짜 폴더를 `raw`, `events`, `gaps`에서 지워도 된다. `bars`는 지우지 않는다(백필이 다시 받는다). `state/training-cache/`는 밤 학습이 끝날 때 그 밤에 쓰지 않은 오래된 날짜를 지운다. 남은 것도 지워도 된다(밤 학습이 S3에서 다시 받는다).<br>3. 여유가 기준보다 2%p 넘게 생기면 `[복구] 서버 디스크의 여유가 <N> GB(<M>%)로 돌아왔습니다(…)`가 온다. 알림은 한 번만 온다(재시작해도 `state/disk_alert.json`으로 다시 보내지 않는다). |
+| 서버가 멈췄다: `[Grafana] krx-quant 엔진 로그가 10분 넘게 없습니다…`가 오고 Tailscale로 닿지 않는다. 또는 `[watchdog] krx-quant …` 텔레그램이나 라벨 `server-watchdog`인 이슈 (#385) | 맥에서 `aws lightsail get-instance-state --instance-name krx-quant --region ap-southeast-2`와 `get-instance-metric-data`의 `StatusCheckFailed_Instance`·`StatusCheckFailed_System`([agents/server-snapshot.md](agents/server-snapshot.md)의 "If nothing comes"), 그 이슈 | 인스턴스 상태 검사만 실패하면 OS가 멈춘 것이다. 커널이 스스로 재부팅하지 못한 멈춤은 watchdog이 15분 실패 뒤 재부팅하고 이슈에 남긴다(아래 "서버가 멈추면 (#385)"). 기다리지 않으려면 맥에서 `aws lightsail reboot-instance --instance-name krx-quant --region ap-southeast-2`(그 뒤 1시간은 watchdog이 재부팅하지 않는다). 다시 뜨면 서버에서 `sudo journalctl -b -1 -k -n 200`으로 멈추기 전 부팅의 커널 로그를 본다. 시스템 상태 검사도 실패하면 AWS 쪽 문제다: 기다리거나 Lightsail 콘솔에서 멈춘 뒤 다시 시작한다. |
 | 서버를 잃었다 | Lightsail 콘솔의 스냅샷 | 1. 옛 인스턴스가 아직 있으면 먼저 멈추거나 지운다. 같은 Tailscale 신원으로 두 대가 동시에 뜨지 않게 하려는 것이다.<br>2. 마지막 자동 스냅샷으로 새 인스턴스를 만든다. 디스크에 Tailscale 신원, `.env`, 데이터가 그대로 있어서 부팅하면 `krx-quant`로 다시 붙고 엔진도 스스로 뜬다. Tailscale admin의 기기는 지우지 않는다. 지우면 접속할 길이 없어진다.<br>3. 새 인스턴스의 Lightsail 방화벽은 41641/udp만 열어 둔다(2.2의 10단계 명령).<br>4. `docker compose run --rm engine archive --recheck`로 S3와 맞춘다.<br>마지막 스냅샷 뒤에 녹화하고 아직 올리지 못한 데이터는 잃는다. |
 
 > **바뀜** (2026-10-12, #73): 위 표의 CPU 예산 행은 "텔레그램 알림은 없다"였다 → 하루 한 번 알린다. 이유: 운영자가 예산 문제를 로그로만 알 수 있었다(#71).
@@ -1731,6 +1757,59 @@ docker compose logs --tail 200 engine
 > **바뀜** (2026-10-27, #380): 위 표의 `디스크가 찬다` 행은 `df -h`, `du -sh data/*/`와 로컬 데이터를 지우는 법만 적었고, 디스크 알림이 없었다 → Docker의 빌드 캐시와 이미지를 먼저 보고, 엔진이 여유가 20%보다 작아지면 알린다. 이유: 디스크를 먹은 것은 데이터(약 4 GB)가 아니라 Docker(이미지 18.76 GB, 빌드 캐시 21.5 GB)였고, 여유가 줄어드는 것을 서버 요약으로만 알았다(#379).
 
 > **바뀜** (2026-10-24, #369): 위 표의 `사전 검증 대기` 행은 거부된 알고리즘에도 왔다(엔진이 다시 시작할 때마다) → 거부된 알고리즘에는 `사전 검증 거부` 행의 알림이 리포트마다 한 번 온다. 이유: 엔진이 거래일마다 다시 시작해(06:00 배포나 07:20 재시작) 거부된 채로 둔 `cox-5d`(#310)의 대기 알림이 날마다 왔다. 같은 코드로는 사전 검증이 다시 돌지 않으니 기다리는 것이 아니다.
+
+### 서버가 멈추면 (#385)
+
+2026-10-28 00:30부터 12:13(KST)까지 서버의 OS가 멈춰 있었다. Lightsail 지표의 인스턴스 상태 검사(`StatusCheckFailed_Instance`)가 00:33부터 1분마다 1(실패)이었고 시스템 상태 검사(`StatusCheckFailed_System`)는 0이었다. CPU는 0.7%로 평평했고 내보낸 네트워크는 0이었다. 하드웨어는 멀쩡하고 OS가 멈춘 모습으로, panic 뒤 멈춘 커널과 맞는다(Ubuntu의 `kernel.panic`은 0이라 panic 뒤 끝없이 기다린다). Grafana의 엔진 로그 끊김 알림은 텔레그램에 닿았지만 몇 시간 동안 아무도 재부팅하지 못했고, 06:00 배포, 08:00 모델 교체, 장전과 오전장 녹화를 놓쳤다. 12:13:34의 `aws lightsail reboot-instance`로 바로 살아났다(검사는 12:16부터 통과). Lightsail에는 자동 복구가 없고 알람은 알리기만 한다. 사용자가 두 겹으로 막기로 정했다(2026-10-28, #385).
+
+**1. 커널이 스스로 재부팅한다.** `deploy/kernel-recovery.sh`(`deploy/setup-server.sh`가 부른다, 2.2의 5단계)가 `/etc/sysctl.d/91-krx-quant-recovery.conf`에 둔다.
+- `kernel.panic = 10`: 커널 panic 10초 뒤 재부팅한다.
+- `kernel.panic_on_oops = 1`: oops(커널 버그)를 panic으로 본다. oops 뒤의 커널은 반쯤 고장 난 채 돌기 쉽다.
+- `kernel.softlockup_panic = 1`: soft lockup(한 CPU가 커널 안에서 20초 넘게 다른 일을 못 함)을 panic으로 본다.
+- `kernel.hung_task_panic`은 켜지 않는다. 밤 학습이 스왑을 쓰거나 디스크가 느리면 프로세스가 D 상태로 120초(`hung_task_timeout_secs`) 넘게 기다릴 수 있고, 그것으로 멀쩡한 서버가 재부팅되기 때문이다.
+- soft lockup은 버스트형 CPU의 크레딧이 바닥나 하이퍼바이저가 CPU를 오래 주지 않을 때 잘못 잡힐 수도 있다. journal에 `soft lockup` 뒤의 재부팅이 되풀이되면 `kernel.softlockup_panic`을 0으로 두는 PR을 낸다.
+- journal은 디스크에 남는다(`/etc/systemd/journald.conf.d/90-krx-quant.conf`: `Storage=persistent`, 많아야 200 MB). 다시 뜬 뒤 멈추기 전 부팅의 기록을 본다: `journalctl --list-boots`, `sudo journalctl -b -1 -k -n 200`(커널), `sudo journalctl -b -1 -n 500`. panic 메시지 자체는 디스크에 쓰이기 전에 멈춰 없을 수 있다. 그 앞의 OOM, soft lockup, 디스크 오류 같은 줄이 단서다.
+- 적용됐는지는 `krx-quant doctor` 6절이 보인다(`kernel.panic 10 · kernel.panic_on_oops 1 · kernel.softlockup_panic 1`, 다르면 끝에 `deploy/kernel-recovery.sh가 두는 값(10 · 1 · 1)과 다름`). 컨테이너도 서버의 커널을 쓰므로 `/proc/sys/kernel`에서 읽는다.
+
+**2. 밖에서 감시한다(watchdog).** GitHub Actions 예약 workflow `server-watchdog`(`.github/workflows/server-watchdog.yml`, 판단은 `scripts/server_watchdog.py`)이 10분마다(매시 4, 14, …, 54분) 돈다. GitHub는 예약 실행을 몇 분에서 수십 분 늦추거나 건너뛰기도 한다. AWS 권한은 GitHub OIDC로 받는 역할 `krx-quant-watchdog`이다(1장 12번). 저장소 비밀값 `AWS_WATCHDOG_ROLE_ARN`이 없으면 알림(notice)만 남기고 성공으로 끝난다.
+
+읽는 것(읽기만):
+- 인스턴스 상태(`get-instance-state`).
+- 두 상태 검사의 지난 40분, 1분 단위(`get-instance-metric-data`, period 60, 최솟값과 최댓값). 1분의 점은 그 1분이 끝나고 40–85초 뒤에 생긴다(2026-10-28 실측). 그래서 가장 새 점은 보통 1.5–2.5분 전의 것이다. 5분 단위(period 300)는 묻는 시작 시각부터 5분씩 세고 아직 덜 찬 마지막 구간도 돌려줘서 쓰지 않는다.
+- 인스턴스의 작업(`get-operations-for-resource`) 중 재부팅(`RebootInstance`)과 시작(`StartInstance`). 누가 했든 센다. 실패한 작업과 커널이 스스로 한 재부팅은 세지 않는다(후자는 작업으로 남지 않는다).
+- 이 workflow가 연 `server-watchdog` 이슈와 그 댓글(이 workflow가 쓴 것만).
+
+판단(위에서부터):
+1. 인스턴스가 `running`이 아니면 손대지 않는다.
+2. 인스턴스 상태 검사의 점이 없거나 가장 새 점이 6분보다 오래되면 아무것도 하지 않는다.
+3. 지난 15분의 점 15개 중 14개 이상이 있고 모두 실패이며, 실패가 가장 새 점보다 14분 이상 앞의 점에서 시작했으면(15분) 실패로 본다. 점이 모자라거나 하나라도 통과면 아직 아니다.
+4. 실패인데 시스템 상태 검사의 가장 새 점도 실패면 AWS 쪽 하드웨어나 네트워크 문제로 본다. 재부팅은 같은 하드웨어에서 다시 뜨므로 하지 않고, 한 번만 알린다. 사용자가 Lightsail 콘솔에서 인스턴스를 멈춘 뒤 다시 시작하면(stop → start) 다른 하드웨어로 옮겨진다(고정 IP와 Tailscale 이름은 그대로다). 시스템 검사가 통과로 돌아오고 인스턴스 검사만 실패하면 아래 규칙대로 한다.
+5. 포기한 이슈가 열려 있으면 아무것도 하지 않는다.
+6. 마지막 재부팅·시작이 60분 안이면 기다린다(누가 했든).
+7. 지난 3시간에 재부팅·시작이 2번 있었는데 여전히 실패면 포기하고 한 번 알린다.
+8. 아니면 재부팅한다(`aws lightsail reboot-instance`).
+9. 이슈가 열려 있는데 인스턴스 상태 검사의 마지막 점 3개(연속)가 통과면 회복을 알리고 이슈를 닫는다.
+
+2026-10-28의 지표에 대어 보면 00:54 실행에서 재부팅한다(00:33부터 실패, 가장 새 점 00:52). 그 재부팅이 고치지 못했다면 02:04에 다시 재부팅하고(01:54는 첫 재부팅 59분 45초 뒤), 03:14에 포기하고, 12:24에 회복을 알리고 닫는다(`tests/test_server_watchdog.py`).
+
+알리는 곳:
+- GitHub 이슈. 장애 하나에 이슈 하나다. 첫 일(재부팅, 포기, 하드웨어)이 라벨 `server-watchdog`인 이슈를 열고(라벨이 없으면 만든다), 같은 장애의 다음 일은 그 이슈에 댓글로 단다. 회복하면 댓글을 달고 닫는다. 제목은 `서버 watchdog: krx-quant가 멈춰 재부팅했다 (<날짜 시각> KST)` 같은 꼴이고, 본문에 판단, 두 검사의 상태, 지난 3시간의 재부팅·시작, 다음에 할 일, 실행 링크가 있다. 각 일은 숨은 표시(`<!-- krx-quant-watchdog: reboot -->` 등)로 남아 다음 실행이 읽는다. 누구나 공개 이슈에 댓글을 달 수 있어서 이 workflow(`github-actions`)가 쓴 이슈와 댓글만 읽는다.
+- 텔레그램(선택): 저장소 비밀값 `TELEGRAM_BOT_TOKEN`과 `TELEGRAM_CHAT_ID`가 둘 다 있으면 같은 때 한 줄을 보낸다. 이름은 엔진의 것(`notify.py`, `.env.example`)과 같다.
+  - `[watchdog] krx-quant 서버가 응답하지 않아 재부팅했습니다. 인스턴스 상태 검사가 <시각>부터 실패한다. <이슈 주소>`
+  - `[watchdog] krx-quant 서버가 재부팅 뒤에도 응답하지 않아 재부팅을 멈춥니다. 손으로 봐야 합니다. …`
+  - `[watchdog] krx-quant 서버가 응답하지 않고 시스템 상태 검사도 실패합니다. 재부팅하지 않습니다. …`
+  - `[watchdog] krx-quant 서버가 다시 응답합니다. 인스턴스 상태 검사가 <시각>부터 통과한다. <이슈 주소>`
+- 실행마다 판단이 그 실행의 요약 화면(Actions → server-watchdog)에 남는다.
+
+멈추기와 다시 켜기:
+- 끄기: `gh workflow disable server-watchdog --repo codeyoma/krx-quant`(켜기는 `enable`). 비밀값 `AWS_WATCHDOG_ROLE_ARN`을 지워도 아무것도 하지 않는다.
+- 포기한 뒤: 고친 다음 그 이슈를 닫으면 다시 지킨다. 닫지 않아도 검사가 통과로 돌아오면 watchdog이 회복을 알리고 닫는다.
+- 판단만 보기: `gh workflow run server-watchdog --repo codeyoma/krx-quant -f dry_run=true`.
+- 인스턴스를 띄운 채 OS를 일부러 오래 멈추는 일이 있으면 그동안 watchdog을 끈다. 콘솔에서 멈춘(stop) 인스턴스는 `running`이 아니라 손대지 않는다.
+
+실행이 실패할 때: AWS나 GitHub를 읽지 못하면 아무것도 하지 않고 실행이 실패로 끝난다(예: 역할의 신뢰나 권한이 틀려 `Not authorized to perform sts:AssumeRoleWithWebIdentity`). GitHub가 실패한 예약 실행을 메일로 알린다. 로그의 계정 번호는 가려진다(`mask-aws-account-id`). 재부팅이 실패하면 알리지 않고 실패로 끝나며, 다음 실행이 다시 판단한다. 이슈나 텔레그램이 실패하면 재부팅은 된 채 실행이 실패로 끝난다. 다음 실행은 1시간을 기다리므로 다시 재부팅하지 않는다. 공개 저장소에 60일 동안 활동이 없으면 GitHub가 예약 workflow를 끈다. 끄인 것은 Actions 화면과 `gh workflow list --all`에 보인다.
+
+06:00 배포와 07:20 재시작은 Docker만 다시 띄우고 OS는 그대로라 상태 검사는 통과한다. 커널이 스스로 재부팅하면 몇 분 안에 검사가 통과로 돌아와 watchdog은 할 일이 없다. 비용은 없다(공개 저장소의 Actions, Lightsail API).
 
 ### 서버 상태 보기 (#322)
 
@@ -1775,7 +1854,7 @@ docker compose run --rm engine doctor
 
    > **바뀜** (2026-10-23, #360): 엔진의 로그 파일(`state/logs/engine/<날>.log`)과 꾸러미 명령을 적었다 → Loki(8절)를 적는다. 이유: 사용자가 로그를 Grafana Cloud Loki로만 남기기로 정했다(2026-10-23).
 5. 예약 작업: `state/scheduled.json`의 마지막 실행 최근 12개(이름, 밤, `outcome`, 종료 코드, 걸린 시간, 커밋, 댓글을 남긴 이슈), 목록(`JOBS`) 중 끝까지(`ok`·`failed`) 돈 적 없는 작업(조건이 아직 안 된 것도 든다), 아직 올리지 못한 결과(`unposted`). 파일을 읽지 못하면 그렇다고만 적는다. 스케줄러와 달리 `.bad`로 옮기지 않는다.
-6. 디스크와 메모리: 데이터와 상태 폴더의 여유·전체 용량(같은 디스크면 그렇다고), 디스크 알림의 기준과 지금 알림 중인 디스크(`디스크 알림(KRX_DISK_MIN_FREE_PERCENT, #379): 여유가 20%보다 작으면 텔레그램 · 지금 알림 중: 없음`, 설정 오류면 기준은 모른다고), `/proc/meminfo`의 사용 가능·전체 메모리와 스왑, 컨테이너의 cgroup 사용량과 한도, 그 프로세스의 `VmRSS`(명령이면 그 명령, 서버 요약이면 엔진).
+6. 디스크와 메모리: 데이터와 상태 폴더의 여유·전체 용량(같은 디스크면 그렇다고), 디스크 알림의 기준과 지금 알림 중인 디스크(`디스크 알림(KRX_DISK_MIN_FREE_PERCENT, #379): 여유가 20%보다 작으면 텔레그램 · 지금 알림 중: 없음`, 설정 오류면 기준은 모른다고), `/proc/meminfo`의 사용 가능·전체 메모리와 스왑, 컨테이너의 cgroup 사용량과 한도, 그 프로세스의 `VmRSS`(명령이면 그 명령, 서버 요약이면 엔진). 마지막 줄은 커널 자동 재부팅 설정이다(#385, `/proc/sys/kernel`): `커널 자동 재부팅(/proc/sys/kernel, #385): kernel.panic 10 · kernel.panic_on_oops 1 · kernel.softlockup_panic 1`. 값을 읽지 못하면 `읽지 못함`, `deploy/kernel-recovery.sh`가 두는 값과 다르면 끝에 `deploy/kernel-recovery.sh가 두는 값(10 · 1 · 1)과 다름`을 붙인다(6장 "서버가 멈추면 (#385)").
 7. 밤 학습(#355): 마지막으로 적용된 밤(`state/models/applied.json`)과 그 뒤 적용되지 않은 거래일 밤의 수와 날짜(`/v1/status`의 `training.nights_not_applied`와 같다), 최근 다섯 밤의 결과(`state/training_nights.json`): 끝남이면 끝난 시각, 실패면 끝난 시각, 종료 코드, 마지막으로 시작한 단계. 이 기록은 #355가 배포된 뒤의 밤부터다.
 8. Loki 전송(#358): 엔진의 `/v1/status` `loki`다. 켜짐이면 보낸 줄(Loki가 받은 줄), 버린 줄, 버퍼에 기다리는 줄, 마지막 성공 시각과 지난 시간, 마지막 오류의 종류(`HTTP 503`, `URLError(ConnectionRefusedError)`. 오류의 글은 싣지 않는다)와 그 시각이다. 꺼짐이면 그 이유(`KRX_LOKI_TOKEN is not set: …`)다. 엔진에 닿지 않거나 #358 전의 엔진이면 그렇다고 적고, 이 명령이 읽은 세 설정으로 켜질지를 적는다(6장 "Grafana Cloud Loki로 보내는 로그 (#358)").
 
@@ -1918,6 +1997,7 @@ LogQL 문법은 2026-10-23에 커넥터로 스택에 물어 확인했다(그때�
 - S3: 월 $1 미만으로 예상한다(#7에서 하루 데이터 크기를 잰다).
 - 스냅샷: GB·월당 $0.05다.
 - Grafana Cloud: 무료 플랜(로그 월 50 GB 수집, 14일 보관, 알림 포함, #358). 보내는 양은 한도보다 훨씬 적다(6장 "Grafana Cloud Loki로 보내는 로그 (#358)").
+- 서버 watchdog(#385): 없음. 공개 저장소의 GitHub Actions와 Lightsail API 호출은 무료다(6장 "서버가 멈추면 (#385)").
 - 상한은 월 $100이다. 밤 학습을 Spot으로 옮기면 서버의 Cost Guard가 AWS Budgets 예산(`krx-quant-monthly`)을 1시간마다 읽어, 50%·80%에서 알리고 100%에서 그달 Spot 학습을 끈다(3장 "밤 학습을 EC2 Spot으로 옮기기").
 - Spot 학습: 하루 30분 안팎이면 월 $1 안팎으로 예상한다(미확인 ⚠). ECR: 월 $0.1 안팎.
 - 지금은 AWS 프로젝트 지출 한도($100)가 걸려 있어서, 한도에 닿으면 상시 서버까지 멈춘다(1장 참고). Cost Guard보다 먼저 닿지 않게 한도를 올릴지는 사용자가 정한다.

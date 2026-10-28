@@ -1,0 +1,24 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadTheServersHealth",
+      "Effect": "Allow",
+      "Action": [
+        "lightsail:GetInstanceState",
+        "lightsail:GetInstanceMetricData",
+        "lightsail:GetOperationsForResource"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {"aws:RequestedRegion": "@REGION@"}
+      }
+    },
+    {
+      "Sid": "RebootTheServerOnly",
+      "Effect": "Allow",
+      "Action": ["lightsail:RebootInstance"],
+      "Resource": "@INSTANCE_ARN@"
+    }
+  ]
+}

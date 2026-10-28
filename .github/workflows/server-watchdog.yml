@@ -1,0 +1,79 @@
+# Reboots the Lightsail server when its OS has hung, and says so in an issue (#385).
+#
+# On 2026-10-28 the server's OS stopped for almost 12 hours: Lightsail's instance status check
+# failed every minute and nobody could reboot it. Every 10 minutes this reads the instance's state,
+# its status checks and its recent reboots, and reboots it when the instance check has failed for
+# 15 minutes; never twice within an hour, and after two reboots in three hours it gives up
+# (scripts/server_watchdog.py, docs/operations.md "서버가 멈추면 (#385)").
+#
+# AWS access is a role taken through GitHub's OIDC: no AWS key is stored. Only this repository's
+# main may take it (deploy/create-watchdog-role.sh). Its ARN is a secret so the account ID stays
+# out of the public logs. Without the secret the run does nothing. To stop the watchdog:
+# gh workflow disable server-watchdog --repo codeyoma/krx-quant
+name: server-watchdog
+
+on:
+  schedule:
+    # Every 10 minutes, off the top of the hour, when GitHub delays scheduled runs the most.
+    - cron: "4-59/10 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Decide and show it on the run's page only: no reboot, no issue, no Telegram"
+        type: boolean
+        default: false
+
+permissions:
+  id-token: write # the OIDC token for the AWS role
+  contents: read
+  issues: write # the issue it reports on
+
+# One run at a time; a run that starts meanwhile waits for it (the running one is not cancelled).
+concurrency:
+  group: server-watchdog
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Is the role set?
+        id: role
+        env:
+          ROLE_ARN: ${{ secrets.AWS_WATCHDOG_ROLE_ARN }}
+        run: |
+          if [[ -z "$ROLE_ARN" ]]; then
+            echo "::notice::AWS_WATCHDOG_ROLE_ARN is not set: the watchdog does nothing (deploy/create-watchdog-role.sh)"
+            echo "set=false" >>"$GITHUB_OUTPUT"
+          else
+            echo "set=true" >>"$GITHUB_OUTPUT"
+          fi
+
+      # Only the script: no submodule, no project install (it is standard library only).
+      - uses: actions/checkout@v4
+        if: steps.role.outputs.set == 'true'
+        with:
+          submodules: false
+          sparse-checkout: scripts
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        if: steps.role.outputs.set == 'true'
+        with:
+          role-to-assume: ${{ secrets.AWS_WATCHDOG_ROLE_ARN }}
+          role-session-name: krx-quant-watchdog
+          aws-region: ap-southeast-2
+          mask-aws-account-id: true
+
+      - name: Decide, reboot when it must, report
+        if: steps.role.outputs.set == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          INSTANCE: krx-quant
+          AWS_PAGER: ""
+          DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python3 scripts/server_watchdog.py
