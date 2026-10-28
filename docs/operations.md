@@ -63,9 +63,9 @@
        - 키 교체: 같은 스크립트를 다시 돌린다. 새 키를 두 비밀값에 넣은 뒤에야 옛 키를 지운다. AWS는 사용자당 키를 2개까지 두므로, 이미 2개 있으면 오래된 것을 먼저 지우고 그렇다고 적는다. 비밀값 넣기가 실패하면 옛 키를 그대로 두고 멈춘다. 그때는 두 비밀값이 서로 다른 키를 가질 수 있어 watchdog이 실패하니, 다시 돌린다.
        - 멈추기: workflow를 끄거나(`gh workflow disable server-watchdog --repo codeyoma/krx-quant`), 두 비밀값을 지운다(`gh secret delete AWS_WATCHDOG_ACCESS_KEY_ID --repo codeyoma/krx-quant`, `gh secret delete AWS_WATCHDOG_SECRET_ACCESS_KEY --repo codeyoma/krx-quant`). 비밀값이 없으면 실행은 알림만 남기고 성공으로 끝난다. 키를 AWS에서도 없애려면 `aws iam list-access-keys --user-name krx-quant-watchdog`으로 키 ID를 보고 `aws iam delete-access-key --user-name krx-quant-watchdog --access-key-id <키 ID>`로 지운다.
 
-       > **바뀜** (2026-10-28, #PRWD): GitHub OIDC 역할(`AWS_WATCHDOG_ROLE_ARN`) → IAM 사용자 `krx-quant-watchdog`의 접근 키(`AWS_WATCHDOG_ACCESS_KEY_ID`, `AWS_WATCHDOG_SECRET_ACCESS_KEY`). 이유: 계정의 SCP가 `iam:CreateOpenIDConnectProvider`를 막는다(AWS Settings 프로젝트 계정, #387).
+       > **바뀜** (2026-10-28, #388): GitHub OIDC 역할(`AWS_WATCHDOG_ROLE_ARN`) → IAM 사용자 `krx-quant-watchdog`의 접근 키(`AWS_WATCHDOG_ACCESS_KEY_ID`, `AWS_WATCHDOG_SECRET_ACCESS_KEY`). 이유: 계정의 SCP가 `iam:CreateOpenIDConnectProvider`를 막는다(AWS Settings 프로젝트 계정, #387).
 
-       > **삭제됨** (2026-10-28, #PRWD): `deploy/create-watchdog-role.sh`. GitHub의 OIDC 공급자(`token.actions.githubusercontent.com`), 이 저장소의 `main`에서 도는 workflow만 받는 역할 `krx-quant-watchdog`, 저장소 비밀값 `AWS_WATCHDOG_ROLE_ARN`을 만들었다. 이유: 계정의 SCP가 `iam:CreateOpenIDConnectProvider`를 막아 공급자 단계에서 멈췄다. 아무것도 만들어지지 않았다(#387). 대신: `deploy/create-watchdog-user.sh`.
+       > **삭제됨** (2026-10-28, #388): `deploy/create-watchdog-role.sh`. GitHub의 OIDC 공급자(`token.actions.githubusercontent.com`), 이 저장소의 `main`에서 도는 workflow만 받는 역할 `krx-quant-watchdog`, 저장소 비밀값 `AWS_WATCHDOG_ROLE_ARN`을 만들었다. 이유: 계정의 SCP가 `iam:CreateOpenIDConnectProvider`를 막아 공급자 단계에서 멈췄다. 아무것도 만들어지지 않았다(#387). 대신: `deploy/create-watchdog-user.sh`.
     2. (선택) 텔레그램으로도 받으려면 서버 `.env`의 `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`와 같은 값을 같은 이름의 저장소 비밀값으로 넣는다. 값을 묻는다.
        ```bash
        gh secret set TELEGRAM_BOT_TOKEN --repo codeyoma/krx-quant
@@ -1781,7 +1781,7 @@ docker compose logs --tail 200 engine
 
 **2. 밖에서 감시한다(watchdog).** GitHub Actions 예약 workflow `server-watchdog`(`.github/workflows/server-watchdog.yml`, 판단은 `scripts/server_watchdog.py`)이 10분마다(매시 4, 14, …, 54분) 돈다. GitHub는 예약 실행을 몇 분에서 수십 분 늦추거나 건너뛰기도 한다. AWS 권한은 IAM 사용자 `krx-quant-watchdog`의 접근 키다(1장 12번, `deploy/create-watchdog-user.sh`). 저장소 비밀값 `AWS_WATCHDOG_ACCESS_KEY_ID`와 `AWS_WATCHDOG_SECRET_ACCESS_KEY` 중 하나라도 없으면 알림(notice)만 남기고 성공으로 끝난다. workflow는 둘을 `aws-actions/configure-aws-credentials`에 넘긴다(리전 `ap-southeast-2`, `mask-aws-account-id`).
 
-> **바뀜** (2026-10-28, #PRWD): GitHub OIDC 역할(`AWS_WATCHDOG_ROLE_ARN`) → IAM 사용자 `krx-quant-watchdog`의 접근 키(`AWS_WATCHDOG_ACCESS_KEY_ID`, `AWS_WATCHDOG_SECRET_ACCESS_KEY`). 이유: 계정의 SCP가 `iam:CreateOpenIDConnectProvider`를 막는다(AWS Settings 프로젝트 계정, #387).
+> **바뀜** (2026-10-28, #388): GitHub OIDC 역할(`AWS_WATCHDOG_ROLE_ARN`) → IAM 사용자 `krx-quant-watchdog`의 접근 키(`AWS_WATCHDOG_ACCESS_KEY_ID`, `AWS_WATCHDOG_SECRET_ACCESS_KEY`). 이유: 계정의 SCP가 `iam:CreateOpenIDConnectProvider`를 막는다(AWS Settings 프로젝트 계정, #387).
 
 읽는 것(읽기만):
 - 인스턴스 상태(`get-instance-state`).
