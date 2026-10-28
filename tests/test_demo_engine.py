@@ -366,6 +366,9 @@ async def test_the_demo_has_its_closing_flow(tmp_path: Path) -> None:
     assert (control["demand"], control["reason"]) == (None, "no_products")
 
 
+# Two demos built: about 13 s on a laptop. It went past the 30 s default (``pyproject.toml``) on a
+# CI runner (#392), as the others did on a loaded one (#327).
+@pytest.mark.timeout(120)
 async def test_the_demo_is_the_same_every_time(tmp_path: Path) -> None:
     first, second = await demo_app(tmp_path / "a.sqlite3"), await demo_app(tmp_path / "b.sqlite3")
 
