@@ -8,7 +8,8 @@ user who could not reboot for hours. ``aws lightsail reboot-instance`` fixed it 
 passed from 12:16, two and a half minutes after the reboot.
 
 The scheduled workflow ``.github/workflows/server-watchdog.yml`` runs this every 10 minutes, with
-an AWS role it takes through GitHub's OIDC (``deploy/create-watchdog-role.sh``). It reads:
+the access key of the IAM user ``krx-quant-watchdog`` from the repository's secrets
+(``deploy/create-watchdog-user.sh``, #387). It reads:
 
 - the instance's state (``get-instance-state``);
 - both status checks, one point a minute, over the last 40 minutes (``get-instance-metric-data``,
