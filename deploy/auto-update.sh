@@ -17,6 +17,10 @@
 #    even with nothing new on main (.auto-update-push-failed).
 # 6. It removes Docker's build cache and the images not used for 3 days (#379), and reports
 #    to Telegram (krx-quant notify), with what Docker keeps and the disk's free space.
+#
+# Every run, before all that, it applies the kernel's self-reboot settings and the journal on
+# disk (deploy/kernel-recovery.sh, #385), so they reach the server without anyone running
+# setup-server.sh (#389).
 set -euo pipefail
 
 repo=$(cd "$(dirname "$0")/.." && pwd)
@@ -89,6 +93,15 @@ usage() {
   read -r free size < <(df -Ph . 2>/dev/null | awk 'NR == 2 {print $4, $2}') || true
   echo "${images:-?} ${cache:-?} ${free:-?} ${size:-?}"
 }
+
+# The kernel's self-reboot settings (#385, #389). They need root: the owner's passwordless sudo
+# (Lightsail's ubuntu has it); sudo -n never waits for a password. The script restarts neither
+# Docker nor the engine and is the same when run again, so it runs every day, main moved or not.
+# When it cannot run, the update goes on; krx-quant doctor section 6 shows the values.
+if ! sudo -n "$repo/deploy/kernel-recovery.sh"; then
+  echo "auto-update: could not apply deploy/kernel-recovery.sh (it needs passwordless sudo);" \
+    "run sudo deploy/kernel-recovery.sh by hand" >&2
+fi
 
 # Anything else that fails (GitHub unreachable, a checkout that cannot fast-forward) is
 # reported too; the engine keeps running what it ran.
