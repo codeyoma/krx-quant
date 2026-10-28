@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import stat
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -362,3 +364,180 @@ def test_a_run_cut_short_after_moving_the_checkout_is_done_again(server: Path) -
     assert result.returncode == 0, result.stderr
     assert "compose up -d --build" in docker_calls(server)
     assert (server / ".auto-update-deployed").read_text().strip() == new
+
+
+# Commands kernel-recovery.sh may call, faked: each records its arguments. docker is here so a
+# call to it would show.
+RECORDED = ("sysctl", "systemctl", "systemd-tmpfiles", "journalctl", "docker")
+
+
+def kernel_recovery(tmp_path: Path) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+    """deploy/kernel-recovery.sh with its files under tmp_path/root and the commands it calls."""
+    bin_dir, calls = tmp_path / "bin", tmp_path / "calls.log"
+    bin_dir.mkdir(exist_ok=True)
+    for name in RECORDED:
+        (bin_dir / name).write_text(f'#!/bin/sh\necho "{name} $*" >>"{calls}"\n')
+        (bin_dir / name).chmod(0o755)
+    before = calls.read_text().splitlines() if calls.exists() else []
+    env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "KRX_SYSROOT": str(tmp_path / "root")}
+    done = subprocess.run([ROOT / "deploy" / "kernel-recovery.sh"], env=env, capture_output=True, text=True)
+    return done, calls.read_text().splitlines()[len(before) :]
+
+
+def settings(path: Path) -> dict[str, str]:
+    lines = [line for line in path.read_text().splitlines() if line.strip() and not line.startswith("#")]
+    return dict(line.replace(" ", "").split("=", 1) for line in lines if "=" in line)
+
+
+def test_kernel_recovery_sets_the_self_reboot_without_hung_task_panic_and_a_journal_on_disk(
+    tmp_path: Path,
+) -> None:
+    done, calls = kernel_recovery(tmp_path)
+
+    assert done.returncode == 0, done.stderr
+    conf = tmp_path / "root" / "etc" / "sysctl.d" / "91-krx-quant-recovery.conf"
+    assert settings(conf) == {
+        "kernel.panic": "10",
+        "kernel.panic_on_oops": "1",
+        "kernel.softlockup_panic": "1",
+    }
+    journald = tmp_path / "root" / "etc" / "systemd" / "journald.conf.d" / "90-krx-quant.conf"
+    assert settings(journald) == {"Storage": "persistent", "SystemMaxUse": "200M"}
+    assert (tmp_path / "root" / "var" / "log" / "journal").is_dir()
+    assert calls == [
+        f"sysctl -q -p {conf}",
+        "systemd-tmpfiles --create --prefix /var/log/journal",
+        "systemctl restart systemd-journald",
+        "journalctl --flush",
+    ]
+
+
+def test_kernel_recovery_run_again_applies_the_settings_and_restarts_nothing(tmp_path: Path) -> None:
+    kernel_recovery(tmp_path)
+
+    done, calls = kernel_recovery(tmp_path)
+
+    assert done.returncode == 0, done.stderr
+    assert calls == [f"sysctl -q -p {tmp_path / 'root' / 'etc' / 'sysctl.d' / '91-krx-quant-recovery.conf'}"]
+    assert "journal: kept on disk already" in done.stdout
+
+
+def test_setup_server_applies_the_kernel_recovery_and_leaves_a_running_engine_and_docker_alone() -> None:
+    script = (ROOT / "deploy" / "setup-server.sh").read_text()
+    assert '"$repo/deploy/kernel-recovery.sh"' in script
+    # The packages are installed only when missing (an upgrade of docker.io restarts Docker), and a
+    # running engine is not built again (its image would differ from the 06:00 update's).
+    assert "dpkg-query" in script and 'apt-get install -y -q "${missing[@]}"' in script
+    start = script.split('echo "== start"', 1)[1].split('echo "== daily update"', 1)[0]
+    assert "docker compose ps -q --status running engine" in start
+    assert "systemctl restart docker" not in script.split('echo "== Docker starts after Tailscale"', 1)[0]
+
+
+# A made-up account and instance: the script must not print them.
+ACCOUNT = "000000000000"
+INSTANCE_ARN = f"arn:aws:lightsail:ap-southeast-2:{ACCOUNT}:Instance/00000000-0000-4000-8000-000000000000"
+ROLE_ARN = f"arn:aws:iam::{ACCOUNT}:role/krx-quant-watchdog"
+# aws and gh as deploy/create-watchdog-role.sh calls them: IAM keeps what was made in STATE, and
+# every call, with the documents it carried, goes to LOG as one JSON line.
+FAKE_AWS_AND_GH = f"""#!/usr/bin/env python3
+import json, os, sys
+state, log = os.environ["STATE"], os.environ["LOG"]
+args = sys.argv[1:]
+tool = os.path.basename(sys.argv[0])
+stdin = sys.stdin.read() if tool == "gh" and args[:2] == ["secret", "set"] else None
+with open(log, "a") as f:
+    f.write(json.dumps({{"tool": tool, "args": args, "stdin": stdin}}) + "\\n")
+made = lambda name: os.path.exists(os.path.join(state, name))
+make = lambda name: open(os.path.join(state, name), "w").close()
+command = " ".join(args[:2])
+if tool == "gh":
+    sys.exit(0)
+if command == "configure get":
+    print("ap-southeast-2")
+elif command == "sts get-caller-identity":
+    print("{ACCOUNT}")
+elif command == "lightsail get-instance":
+    print("{INSTANCE_ARN}")
+elif command == "iam get-open-id-connect-provider":
+    if not made("provider"):
+        sys.exit(254)
+    print("sts.amazonaws.com")
+elif command == "iam create-open-id-connect-provider":
+    make("provider")
+elif command == "iam get-role":
+    if not made("role"):
+        sys.exit(254)
+    print("{ROLE_ARN}")
+elif command == "iam create-role":
+    make("role")
+"""
+
+
+def create_watchdog_role(tmp_path: Path) -> tuple[subprocess.CompletedProcess[str], list[dict[str, Any]]]:
+    bin_dir, state, log = tmp_path / "bin", tmp_path / "state", tmp_path / "calls.jsonl"
+    for folder in (bin_dir, state):
+        folder.mkdir(exist_ok=True)
+    for tool in ("aws", "gh"):
+        (bin_dir / tool).write_text(FAKE_AWS_AND_GH)
+        (bin_dir / tool).chmod(0o755)
+    before = len(log.read_text().splitlines()) if log.exists() else 0
+    env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "STATE": str(state), "LOG": str(log), "HOME": str(tmp_path)}
+    script = ROOT / "deploy" / "create-watchdog-role.sh"
+    done = subprocess.run([script], env=env, capture_output=True, text=True)
+    return done, [json.loads(line) for line in log.read_text().splitlines()[before:]]
+
+
+def document(calls: list[dict[str, Any]], command: str, option: str) -> Any:
+    [args] = [c["args"] for c in calls if " ".join(c["args"][:2]) == command]
+    return json.loads(args[args.index(option) + 1])
+
+
+def test_the_watchdog_role_trusts_only_main_of_this_repository_and_may_reboot_only_the_server(
+    tmp_path: Path,
+) -> None:
+    done, calls = create_watchdog_role(tmp_path)
+
+    assert done.returncode == 0, done.stderr
+    trust = document(calls, "iam create-role", "--assume-role-policy-document")
+    [statement] = trust["Statement"]
+    issuer = "token.actions.githubusercontent.com"
+    assert statement["Principal"] == {"Federated": f"arn:aws:iam::{ACCOUNT}:oidc-provider/{issuer}"}
+    assert statement["Action"] == "sts:AssumeRoleWithWebIdentity"
+    assert statement["Condition"] == {
+        "StringEquals": {
+            f"{issuer}:aud": "sts.amazonaws.com",
+            f"{issuer}:sub": "repo:codeyoma/krx-quant:ref:refs/heads/main",
+        }
+    }
+    policy = document(calls, "iam put-role-policy", "--policy-document")
+    allowed = {(action, s["Resource"]) for s in policy["Statement"] for action in s["Action"]}
+    assert allowed == {
+        ("lightsail:GetInstanceState", "*"),
+        ("lightsail:GetInstanceMetricData", "*"),
+        ("lightsail:GetOperationsForResource", "*"),
+        ("lightsail:RebootInstance", INSTANCE_ARN),
+    }
+    assert all(s["Effect"] == "Allow" for s in policy["Statement"])
+    [reads] = [s for s in policy["Statement"] if s["Resource"] == "*"]
+    assert reads["Condition"] == {"StringEquals": {"aws:RequestedRegion": "ap-southeast-2"}}
+    [secret] = [c for c in calls if c["tool"] == "gh" and c["args"][:2] == ["secret", "set"]]
+    assert secret["args"] == ["secret", "set", "AWS_WATCHDOG_ROLE_ARN", "--repo", "codeyoma/krx-quant"]
+    assert secret["stdin"] == ROLE_ARN
+    assert ACCOUNT not in done.stdout + done.stderr, "the ARNs hold the account ID"
+
+
+def test_the_watchdog_role_script_run_again_keeps_the_provider_and_role_and_resets_their_documents(
+    tmp_path: Path,
+) -> None:
+    create_watchdog_role(tmp_path)
+
+    done, calls = create_watchdog_role(tmp_path)
+
+    assert done.returncode == 0, done.stderr
+    commands = [" ".join(c["args"][:2]) for c in calls if c["tool"] == "aws"]
+    assert "iam create-open-id-connect-provider" not in commands and "iam create-role" not in commands
+    trust = document(calls, "iam update-assume-role-policy", "--policy-document")
+    assert trust["Statement"][0]["Condition"]["StringEquals"]["token.actions.githubusercontent.com:sub"] == (
+        "repo:codeyoma/krx-quant:ref:refs/heads/main"
+    )
+    assert "iam put-role-policy" in commands

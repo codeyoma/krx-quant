@@ -23,7 +23,9 @@ server, or an agent reading an issue, looks at first when something seems wrong.
 5. The scheduled jobs (``state/scheduled.json``, #215): their last runs, the jobs that have not
    run to an end yet, the results not posted.
 6. The free disk under the data and state directories, the disk alert's threshold and the disks
-   it alerts now (#379, ``disk_watch``), and the memory.
+   it alerts now (#379, ``disk_watch``), the memory, and the kernel's self-reboot settings that
+   ``deploy/kernel-recovery.sh`` sets (#385), read from ``/proc/sys/kernel``: a container shares
+   the server's kernel.
 7. The nightly training (#355, ``training_nights``): the last night the morning swap applied,
    the trading nights not applied since and the failures among them, and the latest night's
    outcome: its exit code and the last step it started.
@@ -98,6 +100,10 @@ QUIET_SECONDS = 60.0  # a feed key quiet this long is counted apart
 LAST_RUNS = 12  # the scheduled jobs' latest runs shown
 LAST_NIGHTS = 5  # the nightly training's latest nights shown
 HOURS_PER_ROW = 8
+# The kernel's self-reboot settings (#385): where the kernel shows them, and the values
+# deploy/kernel-recovery.sh sets.
+KERNEL = Path("/proc/sys/kernel")
+KERNEL_RECOVERY = {"panic": "10", "panic_on_oops": "1", "softlockup_panic": "1"}
 _MB = 1024 * 1024
 _GB = 1024 * _MB
 
@@ -605,7 +611,19 @@ def _resources(settings: Settings, process: str, known: bool = True) -> list[str
     rss = _meminfo(Path("/proc/self/status")).get("VmRSS")
     if rss is not None:
         lines.append(f"  {process} 프로세스(VmRSS): {_mb(rss)}")
+    lines.append(_kernel(KERNEL))
     return lines
+
+
+def _kernel(kernel: Path) -> str:
+    """The kernel's self-reboot settings (#385), and whether they are the ones the setup sets."""
+    values = {name: _read_text(kernel / name) for name in KERNEL_RECOVERY}
+    shown = " · ".join(f"kernel.{name} {value or '읽지 못함'}" for name, value in values.items())
+    line = f"  커널 자동 재부팅(/proc/sys/kernel, #385): {shown}"
+    if values != KERNEL_RECOVERY:
+        wanted = " · ".join(KERNEL_RECOVERY.values())
+        line += f" · deploy/kernel-recovery.sh가 두는 값({wanted})과 다름"
+    return line
 
 
 def _disk_alert(settings: Settings, known: bool) -> str:
