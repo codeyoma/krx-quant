@@ -483,9 +483,17 @@ def test_a_reboot_that_fails_is_not_reported_as_done() -> None:
     assert world.issues == {} and world.telegram == []
 
 
-def test_the_workflow_runs_the_script_every_ten_minutes_with_the_watchdog_role() -> None:
+def test_the_workflow_runs_the_script_every_ten_minutes_with_the_watchdog_users_key() -> None:
     workflow = (ROOT / ".github" / "workflows" / "server-watchdog.yml").read_text()
     assert '- cron: "4-59/10 * * * *"' in workflow
     assert "python3 scripts/server_watchdog.py" in workflow
-    assert "secrets.AWS_WATCHDOG_ROLE_ARN" in workflow and "aws-region: ap-southeast-2" in workflow
-    assert "id-token: write" in workflow and "issues: write" in workflow
+    assert "aws-access-key-id: ${{ secrets.AWS_WATCHDOG_ACCESS_KEY_ID }}" in workflow
+    assert "aws-secret-access-key: ${{ secrets.AWS_WATCHDOG_SECRET_ACCESS_KEY }}" in workflow
+    assert "aws-region: ap-southeast-2" in workflow and "mask-aws-account-id: true" in workflow
+    assert "issues: write" in workflow
+    # The account's service control policy denies GitHub's OIDC provider (#387).
+    assert "id-token" not in workflow and "role-to-assume" not in workflow
+    # Without both secrets the run ends at once, and says which script sets them.
+    check = workflow.split("- name: Is the AWS key set?", 1)[1].split("- uses:", 1)[0]
+    assert '[[ -z "$KEY_ID" || -z "$SECRET_KEY" ]]' in check and "deploy/create-watchdog-user.sh" in check
+    assert workflow.count("if: steps.key.outputs.set == 'true'") == 3

@@ -436,55 +436,91 @@ def test_setup_server_applies_the_kernel_recovery_and_leaves_a_running_engine_an
 # A made-up account and instance: the script must not print them.
 ACCOUNT = "000000000000"
 INSTANCE_ARN = f"arn:aws:lightsail:ap-southeast-2:{ACCOUNT}:Instance/00000000-0000-4000-8000-000000000000"
-ROLE_ARN = f"arn:aws:iam::{ACCOUNT}:role/krx-quant-watchdog"
-# aws and gh as deploy/create-watchdog-role.sh calls them: IAM keeps what was made in STATE, and
-# every call, with the documents it carried, goes to LOG as one JSON line.
+WATCHDOG_USER = "krx-quant-watchdog"
+# aws and gh as deploy/create-watchdog-user.sh calls them. IAM keeps the user and its access keys
+# in STATE/iam.json ("all" holds every key ever made, deleted ones too), and every call, with what
+# gh read on its standard input, goes to LOG as one JSON line. AWS's limit of two keys per user
+# holds. GH_LOGGED_OUT=1 makes gh logged out; GH_FAIL_SECRET names a secret gh fails to set.
 FAKE_AWS_AND_GH = f"""#!/usr/bin/env python3
 import json, os, sys
-state, log = os.environ["STATE"], os.environ["LOG"]
+state_file = os.path.join(os.environ["STATE"], "iam.json")
+log = os.environ["LOG"]
 args = sys.argv[1:]
 tool = os.path.basename(sys.argv[0])
 stdin = sys.stdin.read() if tool == "gh" and args[:2] == ["secret", "set"] else None
 with open(log, "a") as f:
     f.write(json.dumps({{"tool": tool, "args": args, "stdin": stdin}}) + "\\n")
-made = lambda name: os.path.exists(os.path.join(state, name))
-make = lambda name: open(os.path.join(state, name), "w").close()
 command = " ".join(args[:2])
 if tool == "gh":
+    if command == "auth status" and os.environ.get("GH_LOGGED_OUT"):
+        sys.exit(1)
+    if command == "secret set" and args[2] == os.environ.get("GH_FAIL_SECRET"):
+        sys.exit(1)
     sys.exit(0)
 if command == "configure get":
     print("ap-southeast-2")
-elif command == "sts get-caller-identity":
-    print("{ACCOUNT}")
-elif command == "lightsail get-instance":
+    sys.exit(0)
+if command == "lightsail get-instance":
     print("{INSTANCE_ARN}")
-elif command == "iam get-open-id-connect-provider":
-    if not made("provider"):
+    sys.exit(0)
+if not command.startswith("iam "):
+    sys.exit(f"unexpected aws call: {{args}}")
+iam = json.load(open(state_file)) if os.path.exists(state_file) else {{"user": False, "keys": [], "all": []}}
+option = lambda name: args[args.index(name) + 1]
+if command == "iam get-user":
+    if not iam["user"]:
         sys.exit(254)
-    print("sts.amazonaws.com")
-elif command == "iam create-open-id-connect-provider":
-    make("provider")
-elif command == "iam get-role":
-    if not made("role"):
-        sys.exit(254)
-    print("{ROLE_ARN}")
-elif command == "iam create-role":
-    make("role")
+    print("{WATCHDOG_USER}")
+elif command == "iam create-user":
+    iam["user"] = True
+elif command == "iam put-user-policy":
+    pass
+elif command == "iam list-access-keys":
+    keys = iam["keys"]
+    if "sort_by(AccessKeyMetadata,&CreateDate)" in option("--query"):
+        keys = sorted(keys, key=lambda k: k["created"])
+    print("\\t".join(k["id"] for k in keys))
+elif command == "iam create-access-key":
+    if not iam["user"] or len(iam["keys"]) >= 2:
+        sys.exit("LimitExceeded: Cannot exceed quota for AccessKeysPerUser: 2")
+    n = len(iam["all"]) + 1
+    key = {{"id": f"TESTKEY{{n:04d}}", "secret": f"test-secret-{{n}}-must-never-show", "created": n}}
+    iam["keys"].append(key)
+    iam["all"].append(key)
+    print(key["id"] + "\\t" + key["secret"])
+elif command == "iam delete-access-key":
+    before = len(iam["keys"])
+    iam["keys"] = [k for k in iam["keys"] if k["id"] != option("--access-key-id")]
+    if len(iam["keys"]) == before:
+        sys.exit("NoSuchEntity")
+else:
+    sys.exit(f"unexpected aws call: {{args}}")
+json.dump(iam, open(state_file, "w"))
 """
 
 
-def create_watchdog_role(tmp_path: Path) -> tuple[subprocess.CompletedProcess[str], list[dict[str, Any]]]:
+def create_watchdog_user(
+    tmp_path: Path, *, keys: tuple[dict[str, Any], ...] = (), bash_x: bool = False, **extra_env: str
+) -> tuple[subprocess.CompletedProcess[str], list[dict[str, Any]], dict[str, Any]]:
+    """Run deploy/create-watchdog-user.sh against the fake aws and gh: its result, the calls it
+    made, and IAM afterwards. ``keys`` are the user's keys before the first run."""
     bin_dir, state, log = tmp_path / "bin", tmp_path / "state", tmp_path / "calls.jsonl"
     for folder in (bin_dir, state):
         folder.mkdir(exist_ok=True)
     for tool in ("aws", "gh"):
         (bin_dir / tool).write_text(FAKE_AWS_AND_GH)
         (bin_dir / tool).chmod(0o755)
+    if keys:
+        made = {"user": True, "keys": list(keys), "all": list(keys)}
+        (state / "iam.json").write_text(json.dumps(made))
     before = len(log.read_text().splitlines()) if log.exists() else 0
     env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "STATE": str(state), "LOG": str(log), "HOME": str(tmp_path)}
-    script = ROOT / "deploy" / "create-watchdog-role.sh"
-    done = subprocess.run([script], env=env, capture_output=True, text=True)
-    return done, [json.loads(line) for line in log.read_text().splitlines()[before:]]
+    script = ROOT / "deploy" / "create-watchdog-user.sh"
+    command = ["bash", "-x", str(script)] if bash_x else [str(script)]
+    done = subprocess.run(command, env={**env, **extra_env}, capture_output=True, text=True)
+    calls = [json.loads(line) for line in log.read_text().splitlines()[before:]]
+    iam_file = state / "iam.json"
+    return done, calls, json.loads(iam_file.read_text()) if iam_file.exists() else {}
 
 
 def document(calls: list[dict[str, Any]], command: str, option: str) -> Any:
@@ -492,24 +528,52 @@ def document(calls: list[dict[str, Any]], command: str, option: str) -> Any:
     return json.loads(args[args.index(option) + 1])
 
 
-def test_the_watchdog_role_trusts_only_main_of_this_repository_and_may_reboot_only_the_server(
+def aws_commands(calls: list[dict[str, Any]]) -> list[str]:
+    return [" ".join(c["args"][:2]) for c in calls if c["tool"] == "aws"]
+
+
+def secrets_set(calls: list[dict[str, Any]]) -> list[tuple[str, str]]:
+    sets = [c for c in calls if c["tool"] == "gh" and c["args"][:2] == ["secret", "set"]]
+    assert all(c["args"][3:] == ["--repo", "codeyoma/krx-quant"] for c in sets), sets
+    return [(c["args"][2], c["stdin"]) for c in sets]
+
+
+def index_of(calls: list[dict[str, Any]], *args: str) -> int:
+    [i] = [i for i, c in enumerate(calls) if tuple(c["args"][: len(args)]) == args]
+    return i
+
+
+def assert_shows_nothing_secret(done: subprocess.CompletedProcess[str], iam: dict[str, Any]) -> None:
+    shown = done.stdout + done.stderr
+    assert ACCOUNT not in shown and "arn:" not in shown, "the ARNs hold the account ID"
+    for key in iam["all"]:
+        assert key["id"] not in shown and key["secret"] not in shown
+
+
+def made_key(n: int) -> dict[str, Any]:
+    return {"id": f"TESTKEY{n:04d}", "secret": f"test-secret-{n}-must-never-show", "created": n}
+
+
+def test_the_watchdog_user_may_only_read_health_and_reboot_and_its_key_goes_only_into_the_secrets(
     tmp_path: Path,
 ) -> None:
-    done, calls = create_watchdog_role(tmp_path)
+    done, calls, iam = create_watchdog_user(tmp_path)
 
     assert done.returncode == 0, done.stderr
-    trust = document(calls, "iam create-role", "--assume-role-policy-document")
-    [statement] = trust["Statement"]
-    issuer = "token.actions.githubusercontent.com"
-    assert statement["Principal"] == {"Federated": f"arn:aws:iam::{ACCOUNT}:oidc-provider/{issuer}"}
-    assert statement["Action"] == "sts:AssumeRoleWithWebIdentity"
-    assert statement["Condition"] == {
-        "StringEquals": {
-            f"{issuer}:aud": "sts.amazonaws.com",
-            f"{issuer}:sub": "repo:codeyoma/krx-quant:ref:refs/heads/main",
-        }
-    }
-    policy = document(calls, "iam put-role-policy", "--policy-document")
+    assert aws_commands(calls) == [
+        "configure get",
+        "lightsail get-instance",
+        "iam get-user",
+        "iam create-user",
+        "iam put-user-policy",
+        "iam list-access-keys",
+        "iam create-access-key",
+    ], "no console password, no other policy, nothing to delete, and no OIDC provider"
+    assert ["iam", "create-user", "--user-name", WATCHDOG_USER] in [c["args"] for c in calls]
+    [put] = [c["args"] for c in calls if c["args"][:2] == ["iam", "put-user-policy"]]
+    assert put[put.index("--user-name") + 1] == WATCHDOG_USER
+    assert put[put.index("--policy-name") + 1] == "krx-quant-watchdog"
+    policy = document(calls, "iam put-user-policy", "--policy-document")
     allowed = {(action, s["Resource"]) for s in policy["Statement"] for action in s["Action"]}
     assert allowed == {
         ("lightsail:GetInstanceState", "*"),
@@ -520,24 +584,95 @@ def test_the_watchdog_role_trusts_only_main_of_this_repository_and_may_reboot_on
     assert all(s["Effect"] == "Allow" for s in policy["Statement"])
     [reads] = [s for s in policy["Statement"] if s["Resource"] == "*"]
     assert reads["Condition"] == {"StringEquals": {"aws:RequestedRegion": "ap-southeast-2"}}
-    [secret] = [c for c in calls if c["tool"] == "gh" and c["args"][:2] == ["secret", "set"]]
-    assert secret["args"] == ["secret", "set", "AWS_WATCHDOG_ROLE_ARN", "--repo", "codeyoma/krx-quant"]
-    assert secret["stdin"] == ROLE_ARN
-    assert ACCOUNT not in done.stdout + done.stderr, "the ARNs hold the account ID"
+    [key] = iam["keys"]
+    assert secrets_set(calls) == [
+        ("AWS_WATCHDOG_ACCESS_KEY_ID", key["id"]),
+        ("AWS_WATCHDOG_SECRET_ACCESS_KEY", key["secret"]),
+    ]
+    assert not any(key["secret"] in arg for c in calls for arg in c["args"]), "on no command line"
+    assert_shows_nothing_secret(done, iam)
+    assert "open-id-connect" not in (ROOT / "deploy" / "create-watchdog-user.sh").read_text()
 
 
-def test_the_watchdog_role_script_run_again_keeps_the_provider_and_role_and_resets_their_documents(
+def test_the_watchdog_user_script_run_again_rotates_the_key_and_deletes_the_old_one_after_both_secrets(
     tmp_path: Path,
 ) -> None:
-    create_watchdog_role(tmp_path)
+    create_watchdog_user(tmp_path)
 
-    done, calls = create_watchdog_role(tmp_path)
+    done, calls, iam = create_watchdog_user(tmp_path)
 
     assert done.returncode == 0, done.stderr
-    commands = [" ".join(c["args"][:2]) for c in calls if c["tool"] == "aws"]
-    assert "iam create-open-id-connect-provider" not in commands and "iam create-role" not in commands
-    trust = document(calls, "iam update-assume-role-policy", "--policy-document")
-    assert trust["Statement"][0]["Condition"]["StringEquals"]["token.actions.githubusercontent.com:sub"] == (
-        "repo:codeyoma/krx-quant:ref:refs/heads/main"
+    assert "iam create-user" not in aws_commands(calls)
+    assert aws_commands(calls).count("iam create-access-key") == 1
+    old, new = iam["all"]
+    assert iam["keys"] == [new]
+    assert secrets_set(calls) == [
+        ("AWS_WATCHDOG_ACCESS_KEY_ID", new["id"]),
+        ("AWS_WATCHDOG_SECRET_ACCESS_KEY", new["secret"]),
+    ]
+    deleted = index_of(
+        calls, "iam", "delete-access-key", "--user-name", WATCHDOG_USER, "--access-key-id", old["id"]
     )
-    assert "iam put-role-policy" in commands
+    assert deleted > index_of(calls, "secret", "set", "AWS_WATCHDOG_SECRET_ACCESS_KEY")
+    assert deleted > index_of(calls, "secret", "set", "AWS_WATCHDOG_ACCESS_KEY_ID")
+    assert "deleted the older keys: 1" in done.stdout
+    assert_shows_nothing_secret(done, iam)
+
+
+def test_with_two_keys_there_the_watchdog_user_script_deletes_the_older_first_and_the_other_after_the_secrets(
+    tmp_path: Path,
+) -> None:
+    older, newer = made_key(1), made_key(2)
+
+    done, calls, iam = create_watchdog_user(tmp_path, keys=(newer, older))
+
+    assert done.returncode == 0, done.stderr
+    new = iam["all"][-1]
+    assert iam["keys"] == [new]
+    first = index_of(
+        calls, "iam", "delete-access-key", "--user-name", WATCHDOG_USER, "--access-key-id", older["id"]
+    )
+    assert first < index_of(calls, "iam", "create-access-key")
+    second = index_of(
+        calls, "iam", "delete-access-key", "--user-name", WATCHDOG_USER, "--access-key-id", newer["id"]
+    )
+    assert second > index_of(calls, "secret", "set", "AWS_WATCHDOG_SECRET_ACCESS_KEY")
+    assert secrets_set(calls)[-1] == ("AWS_WATCHDOG_SECRET_ACCESS_KEY", new["secret"])
+    assert "two keys were there, the most AWS allows: deleted the older one first" in done.stdout
+    assert_shows_nothing_secret(done, iam)
+
+
+def test_the_watchdog_user_script_stops_before_making_anything_when_gh_is_not_logged_in(
+    tmp_path: Path,
+) -> None:
+    done, calls, iam = create_watchdog_user(tmp_path, GH_LOGGED_OUT="1")
+
+    assert done.returncode != 0
+    assert "gh auth login" in done.stderr and "Nothing was made." in done.stderr
+    assert aws_commands(calls) == ["configure get"], "no AWS call but the profile's region"
+    assert iam == {}
+
+
+def test_when_a_secret_cannot_be_set_the_older_key_stays_and_running_again_repairs_it(tmp_path: Path) -> None:
+    create_watchdog_user(tmp_path)
+
+    done, calls, iam = create_watchdog_user(tmp_path, GH_FAIL_SECRET="AWS_WATCHDOG_SECRET_ACCESS_KEY")
+
+    assert done.returncode != 0
+    assert "iam delete-access-key" not in aws_commands(calls)
+    assert iam["keys"] == iam["all"], "the older key is kept"
+    assert "run this again" in done.stderr
+    assert_shows_nothing_secret(done, iam)
+
+    done, calls, iam = create_watchdog_user(tmp_path)
+
+    assert done.returncode == 0, done.stderr
+    assert iam["keys"] == [iam["all"][-1]] and len(iam["all"]) == 3
+    assert secrets_set(calls)[-1] == ("AWS_WATCHDOG_SECRET_ACCESS_KEY", iam["all"][-1]["secret"])
+
+
+def test_the_watchdog_user_script_shows_no_key_even_when_traced(tmp_path: Path) -> None:
+    done, _, iam = create_watchdog_user(tmp_path, bash_x=True)
+
+    assert done.returncode == 0, done.stderr
+    assert_shows_nothing_secret(done, iam)

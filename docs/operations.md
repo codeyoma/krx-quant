@@ -54,11 +54,18 @@
 
     Loki 주소와 사용자 ID는 서버 `.env`와 맥의 파일에만 둔다. 저장소, 이슈, PR에는 적지 않는다.
 12. **서버 watchdog** (#385): 서버의 OS가 멈추면 커널이 스스로 재부팅하고, 그래도 멈춰 있으면 GitHub Actions가 Lightsail 인스턴스를 재부팅한다(6장 "서버가 멈추면 (#385)"). 2026-10-28에 OS가 12시간 가까이 멈춰 정했다.
-    1. 맥에서, `deploy/create-aws.sh`를 돌린 관리자 자격 증명(`aws configure`)으로 저장소 루트에서 한 번 돌린다. 다시 돌려도 된다.
+    1. 맥에서, `deploy/create-aws.sh`를 돌린 관리자 자격 증명(`aws configure`)으로, `gh`에 로그인한 채(`gh auth login`) 저장소 루트에서 한 번 돌린다. 다시 돌려도 된다.
        ```bash
-       deploy/create-watchdog-role.sh
+       deploy/create-watchdog-user.sh
        ```
-       GitHub의 OIDC 공급자(`token.actions.githubusercontent.com`), 역할 `krx-quant-watchdog`, 그 역할의 인라인 정책 `krx-quant-watchdog`(`deploy/watchdog-policy.json`)을 만들고, 저장소 비밀값 `AWS_WATCHDOG_ROLE_ARN`을 `gh`로 넣는다. 역할은 이 저장소의 `main`에서 도는 workflow만 받는다(`repo:codeyoma/krx-quant:ref:refs/heads/main`, audience `sts.amazonaws.com`). 권한은 시드니의 Lightsail 상태·지표·작업 읽기와 `krx-quant` 인스턴스 하나의 재부팅뿐이다. 저장되는 AWS 키는 없다. `gh`가 로그인돼 있지 않으면 비밀값을 넣는 명령을 대신 적는다. 역할과 인스턴스의 ARN에는 계정 번호가 들어 있어 스크립트는 출력하지 않는다. 이슈나 PR에 붙이지 않는다.
+       IAM 사용자 `krx-quant-watchdog`과 그 사용자의 인라인 정책 `krx-quant-watchdog`(`deploy/watchdog-policy.json`)을 만들고, 새 접근 키를 저장소 비밀값 `AWS_WATCHDOG_ACCESS_KEY_ID`, `AWS_WATCHDOG_SECRET_ACCESS_KEY`에 `gh`로 넣는다. 사용자에게 콘솔 비밀번호는 없고 다른 정책도 붙이지 않는다. 권한은 시드니의 Lightsail 상태·지표·작업 읽기와 `krx-quant` 인스턴스 하나의 재부팅뿐이다. 키는 AWS에서 `gh secret set`의 표준 입력으로 바로 가고, 화면, 파일, 셸 기록, 명령줄 어디에도 남지 않는다(`bash -x`로 돌려도 추적하지 않는다). `gh`가 없거나, 로그인돼 있지 않거나, 저장소의 비밀값에 닿지 못하면 아무것도 만들기 전에 멈춘다. 계정 번호가 든 ARN과 키는 출력하지 않는다. 이슈나 PR에 붙이지 않는다.
+       - 비밀값은 이 저장소의 workflow라면 어느 것이든 읽을 수 있다(포크에서 온 PR의 실행은 못 읽는다). 새어도 할 수 있는 것은 위 정책뿐이다: 서버의 상태를 읽고 그 서버를 재부팅하는 것.
+       - 키 교체: 같은 스크립트를 다시 돌린다. 새 키를 두 비밀값에 넣은 뒤에야 옛 키를 지운다. AWS는 사용자당 키를 2개까지 두므로, 이미 2개 있으면 오래된 것을 먼저 지우고 그렇다고 적는다. 비밀값 넣기가 실패하면 옛 키를 그대로 두고 멈춘다. 그때는 두 비밀값이 서로 다른 키를 가질 수 있어 watchdog이 실패하니, 다시 돌린다.
+       - 멈추기: workflow를 끄거나(`gh workflow disable server-watchdog --repo codeyoma/krx-quant`), 두 비밀값을 지운다(`gh secret delete AWS_WATCHDOG_ACCESS_KEY_ID --repo codeyoma/krx-quant`, `gh secret delete AWS_WATCHDOG_SECRET_ACCESS_KEY --repo codeyoma/krx-quant`). 비밀값이 없으면 실행은 알림만 남기고 성공으로 끝난다. 키를 AWS에서도 없애려면 `aws iam list-access-keys --user-name krx-quant-watchdog`으로 키 ID를 보고 `aws iam delete-access-key --user-name krx-quant-watchdog --access-key-id <키 ID>`로 지운다.
+
+       > **바뀜** (2026-10-28, #388): GitHub OIDC 역할(`AWS_WATCHDOG_ROLE_ARN`) → IAM 사용자 `krx-quant-watchdog`의 접근 키(`AWS_WATCHDOG_ACCESS_KEY_ID`, `AWS_WATCHDOG_SECRET_ACCESS_KEY`). 이유: 계정의 SCP가 `iam:CreateOpenIDConnectProvider`를 막는다(AWS Settings 프로젝트 계정, #387).
+
+       > **삭제됨** (2026-10-28, #388): `deploy/create-watchdog-role.sh`. GitHub의 OIDC 공급자(`token.actions.githubusercontent.com`), 이 저장소의 `main`에서 도는 workflow만 받는 역할 `krx-quant-watchdog`, 저장소 비밀값 `AWS_WATCHDOG_ROLE_ARN`을 만들었다. 이유: 계정의 SCP가 `iam:CreateOpenIDConnectProvider`를 막아 공급자 단계에서 멈췄다. 아무것도 만들어지지 않았다(#387). 대신: `deploy/create-watchdog-user.sh`.
     2. (선택) 텔레그램으로도 받으려면 서버 `.env`의 `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`와 같은 값을 같은 이름의 저장소 비밀값으로 넣는다. 값을 묻는다.
        ```bash
        gh secret set TELEGRAM_BOT_TOKEN --repo codeyoma/krx-quant
@@ -1683,6 +1690,7 @@ sudo systemctl disable --now krx-quant-update.timer   # 자동 업데이트 끄�
 | KIS 앱키·시크릿 | KIS에서 다시 발급한다 → `.env` → `docker compose up -d`. 캐시된 접근 토큰(`state/kis_token.json`)은 앱키가 바뀌면 자동으로 버리고 새로 받는다. |
 | 텔레그램 봇 토큰 | BotFather `/revoke`로 새 토큰을 받는다 → `.env` → `docker compose up -d` → `docker compose run --rm engine test-alert` |
 | AWS 액세스 키 | 1. `aws iam create-access-key --user-name krx-quant-engine`으로 새 키를 만든다(사용자당 2개까지).<br>2. `.env`에 넣고 `docker compose up -d`를 실행한다.<br>3. `docker compose run --rm engine archive`로 업로드되는지 확인한다.<br>4. 옛 키를 지운다: `aws iam delete-access-key --user-name krx-quant-engine --access-key-id <옛 키 ID>` |
+| watchdog의 AWS 접근 키 (#387) | 맥에서 `deploy/create-watchdog-user.sh`를 다시 돌린다. 새 키를 저장소 비밀값 `AWS_WATCHDOG_ACCESS_KEY_ID`, `AWS_WATCHDOG_SECRET_ACCESS_KEY`에 넣은 뒤 옛 키를 지운다(1장 12번). 서버 `.env`와는 상관없다. |
 | Tailscale | 서버 기기의 key expiry를 꺼 두면 교체할 일이 없다. 다시 인증하려면 `sudo tailscale up --ssh --hostname=krx-quant --force-reauth` |
 
 `.env` 권한이 바뀌었으면 `deploy/secure-env.sh`로 다시 600으로 맞춘다.
@@ -1771,7 +1779,9 @@ docker compose logs --tail 200 engine
 - journal은 디스크에 남는다(`/etc/systemd/journald.conf.d/90-krx-quant.conf`: `Storage=persistent`, 많아야 200 MB). 다시 뜬 뒤 멈추기 전 부팅의 기록을 본다: `journalctl --list-boots`, `sudo journalctl -b -1 -k -n 200`(커널), `sudo journalctl -b -1 -n 500`. panic 메시지 자체는 디스크에 쓰이기 전에 멈춰 없을 수 있다. 그 앞의 OOM, soft lockup, 디스크 오류 같은 줄이 단서다.
 - 적용됐는지는 `krx-quant doctor` 6절이 보인다(`kernel.panic 10 · kernel.panic_on_oops 1 · kernel.softlockup_panic 1`, 다르면 끝에 `deploy/kernel-recovery.sh가 두는 값(10 · 1 · 1)과 다름`). 컨테이너도 서버의 커널을 쓰므로 `/proc/sys/kernel`에서 읽는다.
 
-**2. 밖에서 감시한다(watchdog).** GitHub Actions 예약 workflow `server-watchdog`(`.github/workflows/server-watchdog.yml`, 판단은 `scripts/server_watchdog.py`)이 10분마다(매시 4, 14, …, 54분) 돈다. GitHub는 예약 실행을 몇 분에서 수십 분 늦추거나 건너뛰기도 한다. AWS 권한은 GitHub OIDC로 받는 역할 `krx-quant-watchdog`이다(1장 12번). 저장소 비밀값 `AWS_WATCHDOG_ROLE_ARN`이 없으면 알림(notice)만 남기고 성공으로 끝난다.
+**2. 밖에서 감시한다(watchdog).** GitHub Actions 예약 workflow `server-watchdog`(`.github/workflows/server-watchdog.yml`, 판단은 `scripts/server_watchdog.py`)이 10분마다(매시 4, 14, …, 54분) 돈다. GitHub는 예약 실행을 몇 분에서 수십 분 늦추거나 건너뛰기도 한다. AWS 권한은 IAM 사용자 `krx-quant-watchdog`의 접근 키다(1장 12번, `deploy/create-watchdog-user.sh`). 저장소 비밀값 `AWS_WATCHDOG_ACCESS_KEY_ID`와 `AWS_WATCHDOG_SECRET_ACCESS_KEY` 중 하나라도 없으면 알림(notice)만 남기고 성공으로 끝난다. workflow는 둘을 `aws-actions/configure-aws-credentials`에 넘긴다(리전 `ap-southeast-2`, `mask-aws-account-id`).
+
+> **바뀜** (2026-10-28, #388): GitHub OIDC 역할(`AWS_WATCHDOG_ROLE_ARN`) → IAM 사용자 `krx-quant-watchdog`의 접근 키(`AWS_WATCHDOG_ACCESS_KEY_ID`, `AWS_WATCHDOG_SECRET_ACCESS_KEY`). 이유: 계정의 SCP가 `iam:CreateOpenIDConnectProvider`를 막는다(AWS Settings 프로젝트 계정, #387).
 
 읽는 것(읽기만):
 - 인스턴스 상태(`get-instance-state`).
@@ -1802,14 +1812,15 @@ docker compose logs --tail 200 engine
 - 실행마다 판단이 그 실행의 요약 화면(Actions → server-watchdog)에 남는다.
 
 멈추기와 다시 켜기:
-- 끄기: `gh workflow disable server-watchdog --repo codeyoma/krx-quant`(켜기는 `enable`). 비밀값 `AWS_WATCHDOG_ROLE_ARN`을 지워도 아무것도 하지 않는다.
+- 끄기: `gh workflow disable server-watchdog --repo codeyoma/krx-quant`(켜기는 `enable`). 두 비밀값 `AWS_WATCHDOG_ACCESS_KEY_ID`, `AWS_WATCHDOG_SECRET_ACCESS_KEY`를 지워도(`gh secret delete <이름> --repo codeyoma/krx-quant`) 아무것도 하지 않는다. 다시 넣으려면 `deploy/create-watchdog-user.sh`를 돌린다.
+- 키 교체: `deploy/create-watchdog-user.sh`를 다시 돌린다(1장 12번).
 - 포기한 뒤: 고친 다음 그 이슈를 닫으면 다시 지킨다. 닫지 않아도 검사가 통과로 돌아오면 watchdog이 회복을 알리고 닫는다.
 - 판단만 보기: `gh workflow run server-watchdog --repo codeyoma/krx-quant -f dry_run=true`.
 - 인스턴스를 띄운 채 OS를 일부러 오래 멈추는 일이 있으면 그동안 watchdog을 끈다. 콘솔에서 멈춘(stop) 인스턴스는 `running`이 아니라 손대지 않는다.
 
-실행이 실패할 때: AWS나 GitHub를 읽지 못하면 아무것도 하지 않고 실행이 실패로 끝난다(예: 역할의 신뢰나 권한이 틀려 `Not authorized to perform sts:AssumeRoleWithWebIdentity`). GitHub가 실패한 예약 실행을 메일로 알린다. 로그의 계정 번호는 가려진다(`mask-aws-account-id`). 재부팅이 실패하면 알리지 않고 실패로 끝나며, 다음 실행이 다시 판단한다. 이슈나 텔레그램이 실패하면 재부팅은 된 채 실행이 실패로 끝난다. 다음 실행은 1시간을 기다리므로 다시 재부팅하지 않는다. 공개 저장소에 60일 동안 활동이 없으면 GitHub가 예약 workflow를 끈다. 끄인 것은 Actions 화면과 `gh workflow list --all`에 보인다.
+실행이 실패할 때: AWS나 GitHub를 읽지 못하면 아무것도 하지 않고 실행이 실패로 끝난다(예: 키가 지워졌거나 틀려 `configure-aws-credentials` 단계가 `The security token included in the request is invalid`로 실패한다. 정책에 없는 일은 `AccessDeniedException`이다). GitHub가 실패한 예약 실행을 메일로 알린다. 로그의 계정 번호는 가려진다(`mask-aws-account-id`). 재부팅이 실패하면 알리지 않고 실패로 끝나며, 다음 실행이 다시 판단한다. 이슈나 텔레그램이 실패하면 재부팅은 된 채 실행이 실패로 끝난다. 다음 실행은 1시간을 기다리므로 다시 재부팅하지 않는다. 공개 저장소에 60일 동안 활동이 없으면 GitHub가 예약 workflow를 끈다. 끄인 것은 Actions 화면과 `gh workflow list --all`에 보인다.
 
-06:00 배포와 07:20 재시작은 Docker만 다시 띄우고 OS는 그대로라 상태 검사는 통과한다. 커널이 스스로 재부팅하면 몇 분 안에 검사가 통과로 돌아와 watchdog은 할 일이 없다. 비용은 없다(공개 저장소의 Actions, Lightsail API).
+06:00 배포와 07:20 재시작은 Docker만 다시 띄우고 OS는 그대로라 상태 검사는 통과한다. 커널이 스스로 재부팅하면 몇 분 안에 검사가 통과로 돌아와 watchdog은 할 일이 없다. 비용은 없다(7장).
 
 ### 서버 상태 보기 (#322)
 
@@ -1997,7 +2008,7 @@ LogQL 문법은 2026-10-23에 커넥터로 스택에 물어 확인했다(그때�
 - S3: 월 $1 미만으로 예상한다(#7에서 하루 데이터 크기를 잰다).
 - 스냅샷: GB·월당 $0.05다.
 - Grafana Cloud: 무료 플랜(로그 월 50 GB 수집, 14일 보관, 알림 포함, #358). 보내는 양은 한도보다 훨씬 적다(6장 "Grafana Cloud Loki로 보내는 로그 (#358)").
-- 서버 watchdog(#385): 없음. 공개 저장소의 GitHub Actions와 Lightsail API 호출은 무료다(6장 "서버가 멈추면 (#385)").
+- 서버 watchdog(#385, #387): 없음. 공개 저장소의 GitHub Actions 실행 시간은 무료이고, Lightsail API 호출과 그 지표(상태 검사), IAM 사용자와 접근 키에는 요금이 없다(6장 "서버가 멈추면 (#385)").
 - 상한은 월 $100이다. 밤 학습을 Spot으로 옮기면 서버의 Cost Guard가 AWS Budgets 예산(`krx-quant-monthly`)을 1시간마다 읽어, 50%·80%에서 알리고 100%에서 그달 Spot 학습을 끈다(3장 "밤 학습을 EC2 Spot으로 옮기기").
 - Spot 학습: 하루 30분 안팎이면 월 $1 안팎으로 예상한다(미확인 ⚠). ECR: 월 $0.1 안팎.
 - 지금은 AWS 프로젝트 지출 한도($100)가 걸려 있어서, 한도에 닿으면 상시 서버까지 멈춘다(1장 참고). Cost Guard보다 먼저 닿지 않게 한도를 올릴지는 사용자가 정한다.
