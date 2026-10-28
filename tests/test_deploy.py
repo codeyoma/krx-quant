@@ -121,6 +121,17 @@ fi
 """
 
 
+FAKE_SUDO = """#!/usr/bin/env bash
+# Stands in for sudo: logs each call and runs nothing, so a test never changes this machine's
+# kernel settings; it fails like a sudo that wants a password while the checkout's NO_SUDO exists.
+echo "$*" >>"$SUDO_LOG"
+if [[ -f NO_SUDO ]]; then
+  echo "sudo: a password is required" >&2
+  exit 1
+fi
+"""
+
+
 def git(cwd: Path, *args: str) -> str:
     done = subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
     return done.stdout.strip()
@@ -145,6 +156,8 @@ def server(tmp_path: Path) -> Path:
     bin_dir.mkdir()
     (bin_dir / "docker").write_text(FAKE_DOCKER)
     (bin_dir / "docker").chmod(0o755)
+    (bin_dir / "sudo").write_text(FAKE_SUDO)
+    (bin_dir / "sudo").chmod(0o755)
     return checkout
 
 
@@ -168,6 +181,7 @@ def update(server: Path, now: str = "6 0600") -> subprocess.CompletedProcess[str
         "PATH": f"{server.parent / 'bin'}:/usr/bin:/bin",
         "HOME": str(server.parent),
         "DOCKER_LOG": str(server.parent / "docker.log"),
+        "SUDO_LOG": str(server.parent / "sudo.log"),
         "KRX_UPDATE_NOW": now,
         "KRX_UPDATE_TRIES": "2",
         "KRX_UPDATE_PAUSE": "0",
@@ -193,6 +207,41 @@ def test_the_server_updates_to_a_new_main_and_says_so(server: Path) -> None:
     assert calls[0] == "compose up -d --build"
     notice = (server.parent / "docker.log").read_text().split(" notify ", 1)[1]
     assert notice.startswith("자동 업데이트") and new[:7] in notice and "- Granger learns" in notice
+
+
+def sudo_calls(server: Path) -> list[str]:
+    log = server.parent / "sudo.log"
+    return log.read_text().splitlines() if log.exists() else []
+
+
+def test_every_run_applies_the_kernel_settings_with_passwordless_sudo(server: Path) -> None:
+    """#389: deploy/kernel-recovery.sh (#385) reaches the server by the 06:00 update, on a day
+    with nothing new on main too."""
+    applied = f"-n {server / 'deploy' / 'kernel-recovery.sh'}"
+
+    assert update(server).returncode == 0
+    assert sudo_calls(server) == [applied], "nothing new on main: applied all the same"
+
+    push(server, "Granger learns")
+    assert update(server).returncode == 0
+    assert sudo_calls(server) == [applied, applied]
+
+
+def test_without_passwordless_sudo_the_update_goes_on_and_says_so(server: Path) -> None:
+    (server / "NO_SUDO").write_text("x")
+    new = push(server, "Granger learns")
+
+    result = update(server)
+
+    assert result.returncode == 0, result.stderr
+    assert git(server, "rev-parse", "HEAD") == new
+    assert "could not apply deploy/kernel-recovery.sh" in result.stderr
+    assert "자동 업데이트 오류" not in (server.parent / "docker.log").read_text()
+
+
+def test_in_market_hours_the_kernel_settings_wait_too(server: Path) -> None:
+    assert update(server, now="3 1000").returncode != 0
+    assert sudo_calls(server) == []
 
 
 def built_commits(server: Path) -> list[str]:

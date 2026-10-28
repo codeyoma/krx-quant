@@ -71,11 +71,13 @@
        gh secret set TELEGRAM_BOT_TOKEN --repo codeyoma/krx-quant
        gh secret set TELEGRAM_CHAT_ID --repo codeyoma/krx-quant
        ```
-    3. #385가 서버에 배포된 뒤(머지 다음 06:00), 서버에서 한 번 돌린다. 커널이 멈추면 스스로 재부팅하는 설정과 디스크에 남는 journal을 둔다. 엔진과 Docker는 다시 띄우지 않아 녹화가 끊기지 않는다(2.2의 5단계).
+    3. 손으로 할 일은 없다. 06:00 자동 업데이트가 실행마다 `sudo -n deploy/kernel-recovery.sh`로, 커널이 멈추면 스스로 재부팅하는 설정과 디스크에 남는 journal을 둔다(#389, 4장). main이 그대로인 날에도 돈다. 엔진과 Docker는 다시 띄우지 않아 녹화가 끊기지 않는다. 서버 주인의 비밀번호 없는 sudo가 필요하다(Lightsail의 `ubuntu`는 있다). 업데이트는 받기 전의 자기 자신으로 돌므로, #389를 머지한 뒤 두 번째 06:00(2026-10-30)에 처음 들어간다.
+       `krx-quant doctor` 6절(에이전트는 서버 요약)에 `커널 자동 재부팅(/proc/sys/kernel, #385): kernel.panic 10 · kernel.panic_on_oops 1 · kernel.softlockup_panic 1`이 나오면 됐다. 비밀번호 없는 sudo가 없으면 업데이트 로그(`journalctl -u krx-quant-update`)에 `could not apply deploy/kernel-recovery.sh`가 남고 업데이트는 그대로 한다. 그때는 서버에서 한 번 손으로 돌린다.
        ```bash
-       cd ~/krx-quant && sudo deploy/setup-server.sh
+       cd ~/krx-quant && sudo deploy/kernel-recovery.sh
        ```
-       `krx-quant doctor` 6절(에이전트는 서버 요약)에 `커널 자동 재부팅(/proc/sys/kernel, #385): kernel.panic 10 · kernel.panic_on_oops 1 · kernel.softlockup_panic 1`이 나오면 됐다. 배포 전에 돌리면 아직 그 스크립트가 없다.
+
+       > **바뀜** (2026-10-28, #390): #385가 배포된 뒤 서버에서 손으로 `sudo deploy/setup-server.sh`를 한 번 돌렸다 → 06:00 업데이트가 실행마다 넣는다. 이유: 사용자가 배포 시각에 서버에 들어가기 어렵다(#389).
     4. 머지된 뒤 맥에서 한 번 시험한다. 판단만 하고 재부팅, 이슈, 텔레그램은 하지 않는다. 판단은 그 실행의 요약 화면에 나온다.
        ```bash
        gh workflow run server-watchdog --repo codeyoma/krx-quant -f dry_run=true
@@ -1630,6 +1632,7 @@ docker compose start engine
 - 야간선물(18:00–06:00, #264)도 비지 않는다. 타이머는 06:00:00 뒤에 돌고(systemd는 정한 시각보다 먼저 돌리지 않는다), `docker compose up -d --build`는 새 이미지를 다 만든 뒤에야 옛 엔진을 멈춘다. 밤 18:00–06:00에 손으로 배포하면 그동안의 야간선물이 빈다(다시 받을 곳이 없다).
 - 엔진이 마지막으로 정상 기동을 확인한 커밋은 서버의 `.auto-update-deployed`에 남는다. main이 그 커밋이면 아무것도 하지 않는다. 재부팅 등으로 업데이트가 중간에 끊겼으면 다음 실행이 다시 한다.
 - 평일 07:50–20:10에는 손으로 실행해도 거부한다.
+- 실행마다 먼저 커널 자동 재부팅 설정과 디스크에 남는 journal을 넣는다(`sudo -n deploy/kernel-recovery.sh`, #385, #389). main이 그대로인 날에도 돈다. 다시 돌려도 같고 엔진과 Docker는 다시 띄우지 않는다. 비밀번호 없는 sudo가 없으면 `could not apply deploy/kernel-recovery.sh …`를 남기고 업데이트는 그대로 한다(1장 12번 3단계).
 - 새 엔진이 3분 안에 API에 답하지 않으면 이전 커밋으로 되돌려 다시 띄운다. 실패한 커밋은 서버의 `.auto-update-failed`에 남아서, main이 더 바뀔 때까지 다시 시도하지 않는다.
 - 새 엔진은 API를 연 뒤에 지난 예측의 도달 정답을 채운다(3장 "지난 예측의 도달 정답", #168). 채우기가 3분보다 오래 걸려도 이 확인에는 걸리지 않는다.
 - 정답을 도달 정답으로 바꾸는 배포(#170)는 그날이 전환일이다(3장 "정답이 바뀌는 날"). 엔진이 처음 뜰 때 상태를 수습으로 돌리고, `predictions`에 인덱스 하나를 만든다(스키마 버전은 그대로라 되돌려도 뜬다).
@@ -1770,7 +1773,7 @@ docker compose logs --tail 200 engine
 
 2026-10-28 00:30부터 12:13(KST)까지 서버의 OS가 멈춰 있었다. Lightsail 지표의 인스턴스 상태 검사(`StatusCheckFailed_Instance`)가 00:33부터 1분마다 1(실패)이었고 시스템 상태 검사(`StatusCheckFailed_System`)는 0이었다. CPU는 0.7%로 평평했고 내보낸 네트워크는 0이었다. 하드웨어는 멀쩡하고 OS가 멈춘 모습으로, panic 뒤 멈춘 커널과 맞는다(Ubuntu의 `kernel.panic`은 0이라 panic 뒤 끝없이 기다린다). Grafana의 엔진 로그 끊김 알림은 텔레그램에 닿았지만 몇 시간 동안 아무도 재부팅하지 못했고, 06:00 배포, 08:00 모델 교체, 장전과 오전장 녹화를 놓쳤다. 12:13:34의 `aws lightsail reboot-instance`로 바로 살아났다(검사는 12:16부터 통과). Lightsail에는 자동 복구가 없고 알람은 알리기만 한다. 사용자가 두 겹으로 막기로 정했다(2026-10-28, #385).
 
-**1. 커널이 스스로 재부팅한다.** `deploy/kernel-recovery.sh`(`deploy/setup-server.sh`가 부른다, 2.2의 5단계)가 `/etc/sysctl.d/91-krx-quant-recovery.conf`에 둔다.
+**1. 커널이 스스로 재부팅한다.** `deploy/kernel-recovery.sh`(06:00 업데이트가 실행마다 부르고(#389, 4장), `deploy/setup-server.sh`도 부른다(2.2의 5단계))가 `/etc/sysctl.d/91-krx-quant-recovery.conf`에 둔다.
 - `kernel.panic = 10`: 커널 panic 10초 뒤 재부팅한다.
 - `kernel.panic_on_oops = 1`: oops(커널 버그)를 panic으로 본다. oops 뒤의 커널은 반쯤 고장 난 채 돌기 쉽다.
 - `kernel.softlockup_panic = 1`: soft lockup(한 CPU가 커널 안에서 20초 넘게 다른 일을 못 함)을 panic으로 본다.
