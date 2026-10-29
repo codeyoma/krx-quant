@@ -296,7 +296,7 @@ def read(
             fitted=fitted,
             waiting=waiting,
             halts=_halts(db, mode, day) if "halts" in tables else (),
-            held=_held(db, mode, day) if "halts" in tables else None,
+            held=_held(db, mode, day, end) if "halts" in tables else None,
             pause=pause_of(everything),
             controls=controls,
             refit=refit,
@@ -635,11 +635,13 @@ def _halts(db: sqlite3.Connection, mode: str, day: date) -> tuple[dict[str, Any]
     return tuple(dict(r) for r in rows)
 
 
-def _held(db: sqlite3.Connection, mode: str, day: date) -> dict[str, Any] | None:
+def _held(db: sqlite3.Connection, mode: str, day: date, end: datetime) -> dict[str, Any] | None:
+    """A cumulative halt reached before ``day`` and still holding at the night's ``end``: not re-armed
+    by then (a re-arm writes ``lifted_at`` on its row, so a later one does not change the day's)."""
     row = db.execute(
-        "SELECT * FROM halts WHERE mode = ? AND kind = ? AND lifted_at IS NULL AND day < ?"
-        " ORDER BY id LIMIT 1",
-        (mode, CUMULATIVE_LIMIT, day.isoformat()),
+        "SELECT * FROM halts WHERE mode = ? AND kind = ? AND day < ?"
+        " AND (lifted_at IS NULL OR lifted_at >= ?) ORDER BY id LIMIT 1",
+        (mode, CUMULATIVE_LIMIT, day.isoformat(), _iso(end)),
     ).fetchone()
     return None if row is None else dict(row)
 

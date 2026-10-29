@@ -41,6 +41,7 @@ from tests.trader_doubles import (
     CALENDAR,
     FEE,
     AskPause,
+    AskRearm,
     Barrier,
     Day,
     Read,
@@ -202,6 +203,22 @@ def test_a_cumulative_halt_holding_and_a_pause_are_reported(tmp_path: Path) -> N
         "the halt was reached the day before: that night called"
     )
     assert "누적 손실 한도에 닿음(10:01:30)" in agent_line(reported(tmp_path, "2026-10-14 22:40:00"))
+
+
+def test_a_cumulative_halt_re_armed_later_still_holds_in_the_reports_of_the_days_before(
+    tmp_path: Path,
+) -> None:
+    """The halt of the 14th re-armed on the 16th at 09:00: the report of the 15th, run again after,
+    shows it holding that night, as it did; the 16th's shows the re-arm instead (Codex's review)."""
+    day = Day(tmp_path, rules=rules(daily=1.0, cumulative=0.4))
+    day.run([TEN, BOUGHT, quote("10:01:30", 69_900, 70_000), AskRearm("2026-10-16 09:00:00")])
+    assert day.asked and not isinstance(day.asked[0], str), "re-armed"
+    held = "- 누적 손실 한도로 멈춰 있다(2026-10-14에 닿음): 서버에서 `krx-quant trade rearm`을 할 때까지"
+
+    assert held in reported(tmp_path, "2026-10-15 22:40:00").splitlines()
+    sixteenth = reported(tmp_path, "2026-10-16 22:40:00").splitlines()
+    assert held not in sixteenth
+    assert "- 그날과 그 밤의 요청: 09:00:00 누적 한도 다시 켜기(서버)" in sixteenth
 
 
 def test_a_night_a_challenger_is_promoted_calls_an_agent(tmp_path: Path) -> None:
