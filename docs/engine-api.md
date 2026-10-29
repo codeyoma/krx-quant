@@ -1308,7 +1308,7 @@ KRX 마감 흐름 화면이 읽는 그날의 마감 리밸런싱 수요다(`clos
 
 ### `GET /v1/trader/trades?before=T&limit=N` (#394)
 
-자동 매매 trader(설계 [14장](design.md#14-자동-매매-393))의 매매를 trader의 저장소(`state/trader.sqlite3`)에서 읽기만 해서 준다. 최근 N개(`limit` 1–1000, 기본 100), `before`가 있으면 그 시각 전에 진입한 것, 진입이 늦은 것부터다. 챔피언의 매매(trader가 내는 매매: 한도가 세고 차트가 표시하는 것)를 준다. `policy=V`(정책 버전, 1 이상, #400)를 주면 그 정책의 매매를 준다: 도전 정책으로 모의로 돈 매매와 챔피언으로 낸 매매다. trader가 아직 매매하지 않았거나 저장소가 없으면 `{"trades": []}`다. 잘못된 `limit`, `before`, `policy`는 400이다. 스키마는 `trader_trades`(항목 `trader_trade`)다.
+자동 매매 trader(설계 [14장](design.md#14-자동-매매-393))의 매매를 trader의 저장소(`state/trader.sqlite3`)에서 읽기만 해서 준다. 최근 N개(`limit` 1–1000, 기본 100), `before`가 있으면 그 시각 전에 진입한 것, 진입이 늦은 것부터다. 챔피언의 매매(trader가 내는 매매: 한도가 세고 차트가 표시하는 것)를 준다. `policy=V`(정책 버전, 1 이상, #400)를 주면 그 정책의 매매를 준다: 도전 정책으로 모의로 돈 매매와 챔피언으로 낸 매매다. 자동 매매 화면의 매매 표는 기본 답을 읽고, 정책 버전을 고르면 이것을 읽는다(#401). trader가 아직 매매하지 않았거나 저장소가 없으면 `{"trades": []}`다. 잘못된 `limit`, `before`, `policy`는 400이다. 스키마는 `trader_trades`(항목 `trader_trade`)다.
 
 > **바뀜** (2026-10-30, #416): 저장소의 모든 매매를 줬다 → 챔피언의 매매를 주고, 도전 정책의 모의 매매는 `policy`로 물을 때만 준다. 이유: 도전 정책이 챔피언 옆에서 모의로 돌며 같은 표에 매매를 쓴다(#400). #400 전에는 모든 매매가 챔피언의 것이라 그 매매에는 다름이 없다.
 
@@ -1458,7 +1458,7 @@ trader가 돈 거래일마다의 장부다. `from`부터 `to`까지(KST 날짜, 
 
 ### `GET /v1/trader/policies?limit=N` (#399)
 
-자동 매매 trader의 정책 버전(설계 [14장](design.md#14-자동-매매-393) "정책", "밤 정책 맞추기")을 trader의 저장소(`state/trader.sqlite3`의 `policies`, `champions`)에서 읽기만 해서 준다. 최근 N개(`limit` 1–1000, 기본 100), 새 버전부터다. 밤 정책 맞추기가 처음 돌기 전이나 저장소가 없으면 `{"champion": null, "policies": [], "champions": []}`다. 잘못된 `limit`은 400이다. 스키마는 `trader_policies`(항목 `trader_policy`)다.
+자동 매매 trader의 정책 버전(설계 [14장](design.md#14-자동-매매-393) "정책", "밤 정책 맞추기")을 trader의 저장소(`state/trader.sqlite3`의 `policies`, `champions`)에서 읽기만 해서 준다. 자동 매매 화면의 정책 버전 표와 교체 기록이 읽는다(#401, 설계 10장 "자동 매매"). 최근 N개(`limit` 1–1000, 기본 100), 새 버전부터다. 밤 정책 맞추기가 처음 돌기 전이나 저장소가 없으면 `{"champion": null, "policies": [], "champions": []}`다. 잘못된 `limit`은 400이다. 스키마는 `trader_policies`(항목 `trader_policy`)다.
 
 ```json
 {"champion": 1,
