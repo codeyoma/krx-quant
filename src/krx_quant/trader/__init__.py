@@ -34,7 +34,7 @@ will through its KIS order module (#404).
   bid then. Costs: the commission on both sides and the sell tax.
 - **Policy** (``policy.py``, ``refit.py``, #399): a versioned set of values: the cells traded and
   their order, each cell's threshold θ and Kelly fraction λ; no limit. Every trading day's night,
-  after the nightly training, the scheduled job ``refit-policy-399`` fits a new version on the
+  after the nightly training, the scheduled job ``trader-report`` (#402) fits a new version on the
   stored predictions and answers of the cost map's 20 days, simulating the trader's trades on the
   answers' paths at each point of a small grid. The first is the champion, the later ones
   challengers. At each pick the trader trades the champion's cells among those the cost map
@@ -53,6 +53,11 @@ will through its KIS order module (#404).
   ``krx-quant trade rearm``. The screen's two pauses (``POST /v1/trader/pause``: new entries, or
   that and a sale now) last until ``krx-quant trade resume`` on the server. They hold the trades
   the trader makes, the champion's: no policy changes them.
+- **Report** (``report.py``, #402): the same night's job prints the day's report above the
+  re-fit's output (``krx-quant refit-policy --report``), one comment on the report issue, labelled
+  ``ready-for-agent`` on the week's last trading day and on the nights of a limit halt, a change
+  of the champion, the live gate passed or a failed re-fit; ``krx-quant trader-report`` prints it
+  alone, read-only. It holds no price, account, order number nor key.
 - **Store** (``store.py``): its picks of the cells, decisions, orders, fills and trades, each with
   its mode (``paper``) and its book's policy, the policy versions and the days each ran, the
   pauses, resumes and re-arms asked for, the halts, the trader's state now and each day's ledger;

@@ -32,7 +32,9 @@ comments, the nights a job gave way since it last ran (#376), and the results no
 A run the collector's stop cut (a deploy, a restart, a crash) is ``interrupted``: it does not
 count as run, and runs again the next night (a session job, the next trading day). A result
 is masked (``redaction.py``) and posted on each issue, which then gets ``ready-for-agent`` in
-place of ``ready-for-human`` and ``needs-triage``. Without ``KRX_GITHUB_TOKEN``, or when
+place of ``ready-for-human`` and ``needs-triage``; a job with ``Job.label_if`` (#402: the trader's
+nightly report) changes the labels only on the runs it says call an agent. Without
+``KRX_GITHUB_TOKEN``, or when
 GitHub fails, the result waits in the state and is posted at the next night or start. Telegram
 gets a line per outcome, with the comments' addresses.
 """
@@ -71,6 +73,7 @@ from krx_quant.process_log import KRX_QUANT, Child, run_logged
 from krx_quant.process_log import Ran as Ran  # a job's process, once it ended
 from krx_quant.redaction import redact, secrets_of
 from krx_quant.swap import NightTraining
+from krx_quant.trader.report import calls_agent
 from krx_quant.training import finished_days, is_recorded
 
 log = logging.getLogger(__name__)
@@ -316,6 +319,9 @@ class Job:
     # A session job (#403): the time (KST) it runs from on a trading day, not at night; its time
     # limit must end by ``SESSION_UNTIL``. None: a night's job.
     session: time | None = None
+    # Whether a run calls an agent (#402): the labels change (``label``, ``unlabel``) only on the
+    # runs it says so of; None: on every run.
+    label_if: Callable[[Ran], bool] | None = None
 
 
 # A job that gave way on this many nights since it last ran gives way no more: it runs first (#376).
@@ -743,7 +749,8 @@ class Scheduler:
         if ran.stderr.strip():
             details.append(("stderr", redact(ran.stderr, self._secrets)))
         body = comment_body(_heading(job, record), redact(part, self._secrets), notes=notes, details=details)
-        return Unposted(job.name, record.day, target.issue, body, job.label, job.unlabel)
+        label, unlabel = (job.label, job.unlabel) if _calls(job, ran) else ((), ())
+        return Unposted(job.name, record.day, target.issue, body, label, unlabel)
 
     async def _post(self, results: Sequence[Unposted]) -> tuple[list[str], str | None]:
         """Post ``results`` (the comment, then the labels): the comments' addresses, and why
@@ -787,6 +794,18 @@ class Scheduler:
             when = _when(job) if job is not None else "밤"
             line = f"예약 작업 {name}({day} {when})의 결과를 이제 올렸습니다. 댓글: {' '.join(links)}"
             await self._notify(line)
+
+
+def _calls(job: Job, ran: Ran) -> bool:
+    """Whether ``job``'s run ``ran`` changes its issues' labels (``Job.label_if``); a condition that
+    fails says yes: someone looks."""
+    if job.label_if is None:
+        return True
+    try:
+        return job.label_if(ran)
+    except Exception:
+        log.exception("the label condition of the scheduled job %s failed: labelled all the same", job.name)
+        return True
 
 
 def _stamp(path: Path) -> tuple[int, int, int] | None:
@@ -1450,25 +1469,35 @@ MEMBER_FRAMES_PROBE = Job(
     ),
 )
 
-# The trader's policy, fitted again (#399, #393 "정책과 자기 개선"): every trading day's night, after the
-# nightly training, ``refit-policy`` first judges the challengers that ran in paper beside the
-# champion on the trader's records and promotes one that beat it (#400, ``promotion.promote``; after
-# the market, so never during a session), then reads tonight's cost map from the collector's Engine
-# API (``KRX_TRADER_ENGINE_URL``: compose sets the engine service's own, http://engine:8080), each
-# passing cell's stored predictions and answers of its 20 days from the engine's database
-# (read-only, a cell at a time), simulates the trader's trades on the answers' paths at each point
-# of a small grid and keeps a new policy version in state/trader.sqlite3: the first one the
-# champion, a later one a challenger, which takes a free one of three running slots (it runs from
+# The trader's night (#399, #400, #402, #393 "정책과 자기 개선", "리포트와 에이전트"): every trading
+# day's night, after the nightly training, ``refit-policy --report`` first judges the challengers that
+# ran in paper beside the champion on the trader's records and promotes one that beat it (#400,
+# ``promotion.promote``; after the market, so never during a session), then reads tonight's cost map
+# from the collector's Engine API (``KRX_TRADER_ENGINE_URL``: compose sets the engine service's own,
+# http://engine:8080), each passing cell's stored predictions and answers of its 20 days from the
+# engine's database (read-only, a cell at a time), simulates the trader's trades on the answers' paths
+# at each point of a small grid and keeps a new policy version in state/trader.sqlite3: the first one
+# the champion, a later one a challenger, which takes a free one of three running slots (it runs from
 # the next trading day) or waits for one; one equal to the champion or a running challenger is not
-# kept, and one not promoted by its 20th common day is dropped. It predicts nothing again and keeps
-# only the cells' rises, so it takes seconds and little memory; its peak resident memory is in its
-# output. Its output holds cells, thresholds, counts, P&L in won (simulated, and the policies' paper
-# records), log growth and the live gate's progress, no price. The ten minutes are a bound (the cost
-# map, computed by the collector, is waited for at most two): it runs before the simulations and
-# pre-validations, which must start by 00:30. A routine night's log, not a request: it changes no
-# label. Its comments go to #402, the ticket that reports the trader's nights (#400, which ran the
-# challengers, is closed).
-REFIT_POLICY_ISSUE = 402
+# kept, and one not promoted by its 20th common day is dropped (#399, #400, ``refit.py``). Then it
+# prints the day's report (#402, ``trader/report.py``, read from the same store) above the re-fit's
+# own output: the day's ledger and the champion's trades, why no cell traded when none did, each
+# policy's paper record and judgment, what the night changed, the live gate, the limits, halts and
+# pauses. It predicts nothing again and keeps only the cells' rises, so it takes seconds and little
+# memory; its peak resident memory is in its output. Its output holds cells, thresholds, probabilities,
+# counts, ticks, shares, P&L and limits in won, log growth and times, no price, account, order number
+# nor key. The ten minutes are a bound (the cost map, computed by the collector, is waited for at most
+# two): it runs before the simulations and pre-validations, which must start by 00:30.
+#
+# One comment a night on the report issue (#417, opened by #402 and left open), which gets
+# ``ready-for-agent`` only on the nights the report calls an agent (``report.calls_agent``: the week's
+# last trading day, a loss limit reached that day, a change of the champion, the live gate passed, the
+# re-fit failed) or the job failed; another night's comment is a record and changes no label. No label
+# is taken off: a question an agent left for the user there (``ready-for-human``) stays. The
+# re-fit used to post its own comment each night (``refit-policy-399``, #399, #416): it is folded in
+# here so that the night's one comment is the one the label points at, and the judgment and the gate
+# are not posted twice. An agent reads it as ``docs/agents/trader-report.md`` says.
+TRADER_REPORT_ISSUE = 417
 
 
 def _every_trading_night(night: Night) -> bool:
@@ -1479,23 +1508,31 @@ def _every_trading_night(night: Night) -> bool:
     return record is None or record.outcome not in (OK, FAILED) or record.day != night.day
 
 
-REFIT_POLICY = Job(
-    name="refit-policy-399",
+def trader_report_calls(ran: Ran) -> bool:
+    """Whether the trader's night calls an agent (#402): its report says so, or the run failed."""
+    return ran.exit_code != 0 or ran.timed_out or calls_agent(ran.stdout)
+
+
+TRADER_REPORT = Job(
+    name="trader-report",
     due=_every_trading_night,
-    command=("refit-policy",),
+    command=("refit-policy", "--report"),
     timeout=timedelta(minutes=10),
-    label=(),
-    unlabel=(),
+    label_if=trader_report_calls,
+    unlabel=(),  # a question an agent put to the user on the issue (``ready-for-human``) stays
     targets=(
         Target(
-            REFIT_POLICY_ISSUE,
+            TRADER_REPORT_ISSUE,
             note=(
-                "자동 매매의 밤 정책 맞추기(#399)와 도전 정책 판정(#400): 먼저 모의로 함께 돈 도전 정책을 "
-                "챔피언과 견주어 이긴 것을 챔피언으로 바꾸고, 오늘 밤 비용 지도를 통과한 칸마다 문턱 θ와 "
-                "Kelly 비율 λ를 저장된 20일의 예측과 정답으로 다시 맞춘 정책 버전을 저장한다. 처음 것이 "
-                "챔피언이고, 그 뒤는 도전 정책이다: 자리 셋이 비어 있으면 다음 거래일부터 모의로 함께 돌고, "
-                "차 있으면 기다린다(20일까지 이기지 못한 도전 정책은 내려 자리를 비운다). "
-                "출력에는 시세 값이 없다(칸, 값, 건수, 순손익(원), 로그 성장, 실전 관문 진행, 메모리만)."
+                "자동 매매의 밤 리포트(#402): 그날의 매매와 장부, 칸 고르기(매매할 칸이 없던 까닭), 정책별 "
+                "모의 성적과 도전 정책 판정, 그 밤의 교체·내림·들어감·맞춘 정책, 실전 관문, 한도와 정지. "
+                "그 아래는 밤 정책 맞추기(#399, #400)의 출력이다. `에이전트 차례:` 줄이 까닭을 말하는 밤"
+                "(그 주 마지막 거래일, 한도 정지, 챔피언 교체, 관문 통과, 맞추기 실패)과 "
+                "작업이 실패한 밤에만 "
+                "`ready-for-agent`를 붙인다. 에이전트가 할 일은 `docs/agents/trader-report.md`에 있다. "
+                "리포트만 다시 보기(읽기만, 정책을 맞추지 않는다): "
+                "`docker compose run --rm engine trader-report --day <날>`. 출력에는 시세 값, 계좌번호, "
+                "주문번호, 키가 없다(칸, 확률, 틱, 수량, 건수, 순손익과 한도(원), 시각만)."
             ),
         ),
     ),
@@ -2013,7 +2050,7 @@ JOBS: tuple[Job, ...] = (
     CLOSING_FLOW_CHECK,
     KRX_NET_ASSETS_CHECK,
     MEMBER_FRAMES_PROBE,
-    REFIT_POLICY,
+    TRADER_REPORT,
     KIS_ORDER_PROBE,
     *daily_prevalidation_jobs(
         [a.name for a in DAILY_ALGORITHMS],

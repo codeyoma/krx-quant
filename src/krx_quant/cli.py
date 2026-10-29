@@ -85,6 +85,7 @@ from krx_quant.supply_probe import probe_supply
 from krx_quant.trader.limits import CONTROL_SECONDS
 from krx_quant.trader.limits import ask as ask_trader
 from krx_quant.trader.refit import run_refit
+from krx_quant.trader.report import run_night, run_report
 from krx_quant.trader.run import run_trader
 from krx_quant.trader.settings import TraderSettings
 from krx_quant.trader.store import DB_NAME as TRADER_DB
@@ -146,10 +147,19 @@ def _trade_control(action: str) -> int:
     return 0
 
 
-async def _refit_policy(engine_url: str | None) -> int:
-    """The trader's policy fitted again (#399): the scheduled job's, in the engine's container."""
+async def _refit_policy(engine_url: str | None, report: bool) -> int:
+    """The trader's policy fitted again (#399); with ``report``, then the day's report above its
+    output (#402): the scheduled job ``trader-report``'s, in the engine's container."""
     settings = Settings.from_env(require_kis=False)
-    return await run_refit(settings, TraderSettings.from_env(), datetime.now(KST), engine_url)
+    trader = TraderSettings.from_env()
+    if report:
+        return await run_night(settings, trader, datetime.now(KST), engine_url)
+    return await run_refit(settings, trader, datetime.now(KST), engine_url)
+
+
+def _trader_report(day: date | None) -> int:
+    """The trader's report of a trading day (#402), read-only."""
+    return run_report(Settings.from_env(require_kis=False), datetime.now(KST), day)
 
 
 async def _measure() -> None:
@@ -705,6 +715,23 @@ def main(argv: list[str] | None = None) -> int:
         help="the Engine API the cost map is read from (default KRX_TRADER_ENGINE_URL, which compose sets"
         " to the engine service's, http://engine:8080; else http://127.0.0.1:8080)",
     )
+    refit_cmd.add_argument(
+        "--report",
+        action="store_true",
+        help="then print the day's trader report (#402) above the re-fit's output: the scheduled job"
+        " trader-report's",
+    )
+    report_cmd = sub.add_parser(
+        "trader-report",
+        help="print the trader's report of a trading day (#402), read-only from state/trader.sqlite3: its"
+        " trades, why no cell traded, each policy's paper record, what its night changed, the live gate,"
+        " limits and pauses; no price",
+    )
+    report_cmd.add_argument(
+        "--day",
+        type=date.fromisoformat,
+        help="the trading day, YYYY-MM-DD (default: the latest at or before tonight's evening)",
+    )
     sub.add_parser(
         "measure-subscriptions",
         help="count how many real-time registrations KIS allows per session (stop the collector first)",
@@ -992,7 +1019,9 @@ def _command(args: argparse.Namespace) -> int:
             return _trade_control(args.control)
         asyncio.run(_trade())
     elif args.command == "refit-policy":
-        return asyncio.run(_refit_policy(args.engine_url))
+        return asyncio.run(_refit_policy(args.engine_url, args.report))
+    elif args.command == "trader-report":
+        return _trader_report(args.day)
     elif args.command == "measure-subscriptions":
         asyncio.run(_measure())
     elif args.command == "check-fallbacks":
