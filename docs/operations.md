@@ -1151,7 +1151,7 @@ compose 서비스 `trader`가 `krx-quant trade`를 돈다. 수집기(`engine`)�
   ```
 
   `rearm asked for (control N) …`와 `the trader read it at …`이 나오고, `[알림] 자동 매매(paper): 누적 손실 한도를 다시 켰습니다(krx-quant trade rearm). 누적 손익을 지금부터 다시 셉니다. …`가 온다. 누적 손익은 그때부터 다시 센다. 누적 한도에 닿지 않았으면 `… has not reached its cumulative loss limit: nothing to re-arm`(종료 코드 1)이고 아무것도 쓰지 않는다. 하루 한도와 정지는 풀지 않는다.
-- **화면의 정지**: "새 진입 정지"는 새로 사지 않고 들고 있는 것은 원래 규칙대로 판다. "정지하고 즉시 매도"는 새로 사지 않고 들고 있는 것을 바로 판다. 엔진 API(`POST /v1/trader/pause`)가 trader 저장소에 쓰고, trader가 1초 안에 읽어 `[알림] 자동 매매(paper): 새 진입 정지 요청을 받았습니다(화면). …` 또는 `… 정지하고 즉시 매도 요청을 받았습니다(화면). …`를 보낸다. 손으로도 보낼 수 있다(Tailscale 안에서): `curl -s -X POST -H 'Content-Type: application/json' -d '{"sell_now": false}' http://krx-quant:8080/v1/trader/pause`.
+- **화면의 정지**: Fincept의 "KRX 자동 매매" 화면(#397)에 버튼 둘이 있고, 둘 다 확인 창을 거친다. "새 진입 정지"는 새로 사지 않고 들고 있는 것은 원래 규칙대로 판다. "정지하고 즉시 매도"는 새로 사지 않고 들고 있는 것을 바로 판다. 엔진 API(`POST /v1/trader/pause`)가 trader 저장소에 쓰고, trader가 1초 안에 읽어 `[알림] 자동 매매(paper): 새 진입 정지 요청을 받았습니다(화면). …` 또는 `… 정지하고 즉시 매도 요청을 받았습니다(화면). …`를 보낸다. 손으로도 보낼 수 있다(Tailscale 안에서): `curl -s -X POST -H 'Content-Type: application/json' -d '{"sell_now": false}' http://krx-quant:8080/v1/trader/pause`.
 - **재개**: 정지는 다시 시작해도, 다음 날에도 이어진다. 다시 켜는 것은 서버에서만 된다:
 
   ```bash
