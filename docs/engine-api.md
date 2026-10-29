@@ -875,7 +875,7 @@ KRX 마감 흐름 화면이 읽는 그날의 마감 리밸런싱 수요다(`clos
 
 ### `GET /v1/cost-map?symbol=&period=&special=` (#307)
 
-비용 지도다. 상승·하락 신호가 왕복 비용을 갚으려면 얼마나 맞혀야 하는지를, 엔진이 예측하는 지평마다 실제 맞힘률 옆에 놓는다(`cost_map.py`). 지평·비용 화면이 읽는다. 리서치의 결론(`research/reports/`)이 바탕이다: 대칭 목표 ±W틱, 왕복 비용 C틱이면 P(상승|신호) − P(하락|신호) ≥ C/W여야 본전이고, 맞힘률로 말하면 p* = (W + C) ÷ 2W를 넘어야 한다. W < C면 다 맞혀도 손해다.
+비용 지도다. 상승·하락 신호가 왕복 비용을 갚으려면 얼마나 맞혀야 하는지를, 엔진이 예측하는 지평마다 실제 맞힘률 옆에 놓는다(`cost_map.py`). 지평·비용 화면이 읽는다. 자동 매매 trader도 시작할 때와 매일 08:30에 `?symbol=005930&period=20d&special=exclude`로 읽어 매매할 칸을 고른다(#395, 설계 [14장](design.md#14-자동-매매-393) "칸"): 방향과 4·15·30분 장벽 줄의 세 예측자 가운데 `verdict.market`이 `pass`인 것. 리서치의 결론(`research/reports/`)이 바탕이다: 대칭 목표 ±W틱, 왕복 비용 C틱이면 P(상승|신호) − P(하락|신호) ≥ C/W여야 본전이고, 맞힘률로 말하면 p* = (W + C) ÷ 2W를 넘어야 한다. W < C면 다 맞혀도 손해다.
 
 질의 값은 순위표와 같다(`symbol`, `period`, `special`. `kind`와 `basis`는 받지 않는다). 잘못된 값은 400이다. `symbol`을 빼면(`all`) 모든 종목이다.
 
@@ -1310,8 +1310,9 @@ KRX 마감 흐름 화면이 읽는 그날의 마감 리밸런싱 수요다(`clos
 자동 매매 trader(설계 [14장](design.md#14-자동-매매-393))의 매매를 trader의 저장소(`state/trader.sqlite3`)에서 읽기만 해서 준다. 최근 N개(`limit` 1–1000, 기본 100), `before`가 있으면 그 시각 전에 진입한 것, 진입이 늦은 것부터다. trader가 아직 매매하지 않았거나 저장소가 없으면 `{"trades": []}`다. 잘못된 `limit`과 `before`는 400이다. 스키마는 `trader_trades`(항목 `trader_trade`)다.
 
 ```json
-{"trades": [{"id": 1, "mode": "paper", "symbol": "005930", "kind": "barrier", "predictor": "breiman", "prediction_id": 42,
+{"trades": [{"id": 1, "mode": "paper", "symbol": "005930", "kind": "barrier", "predictor": "breiman", "role": "top", "prediction_id": 42,
   "bar_close": "2026-10-14T10:00:00+09:00", "probability": 0.7, "threshold": 0.6,
+  "p_star": 0.63, "precision_low": 0.7, "kelly": 10.5, "fraction": 1.0,
   "anchor": 70050.0, "tick": 100.0, "width_ticks": 2, "target": 70250.0, "stop": 69850.0, "time_barrier": "2026-10-14T10:04:00+09:00",
   "decided_at": "2026-10-14T10:00:02.300000+09:00",
   "entry": {"at": "2026-10-14T10:00:02.500000+09:00", "price": 70100.0, "quantity": 14},
@@ -1325,9 +1326,12 @@ KRX 마감 흐름 화면이 읽는 그날의 마감 리밸런싱 수요다(`clos
 (값은 지어낸 예다.)
 
 - `mode`: `paper`(모의). `mock`·`live`는 KIS 주문 모듈이 들어온 뒤의 값이다(#404–#408).
-- `kind`, `predictor`: 매매한 칸. `prediction_id`는 엔진 DB의 예측 id다(방향은 `predictions.id`, 다른 종류는 `kind_predictions.id`). `probability`는 그 예측의 오름 확률(방향 `p_up`, 장벽 `p_up_first`), `threshold`는 그때의 문턱 θ다.
+- `kind`, `predictor`: 매매한 칸. 비용 지도가 고른 칸이다(#395, 설계 14장 "칸"). `prediction_id`는 엔진 DB의 예측 id다(방향은 `predictions.id`, 다른 종류는 `kind_predictions.id`). `probability`는 그 예측의 오름 확률(방향 `p_up`, 장벽 `p_up_first`), `threshold`는 그때의 문턱 θ다.
+- `role`, `p_star`, `precision_low`, `kelly`, `fraction`(#395): 그 칸을 고를 때의 비용 지도(`GET /v1/cost-map`, 005930, 20일)에서 온 값이다. `role`은 예측자의 자리(`consensus` 최종 합의, `top` 순위 1위 알고리즘, `baseline` 가장 센 기준 예측), `p_star`는 시장가 왕복의 손익분기 맞힘률, `precision_low`는 그 칸의 맞힘률 하한(Wilson 95%), `kelly`는 그 둘과 줄의 W·C로 낸 Kelly f*(자르기 전), `fraction`은 산 비율(f*의 절반을 0–1로 자른 것)이다. #395 전에 진입한 매매는 다섯 다 `null`이다.
 - `anchor`, `tick`, `width_ticks`: 기준가(봉 마감 통합 중간가), 그 호가단위, 폭(방향은 k, 장벽은 w). `target` = `anchor` + `width_ticks` × `tick`, `stop` = `anchor` − `width_ticks` × `tick`, `time_barrier` = 봉 마감 + 그 종류의 지평.
-- `decided_at`: trader가 그 예측을 읽은 때. `entry`: 그 뒤 처음 받은 호가의 매도 1호가와 수량(운용 상한 ÷ 그 값의 내림).
+- `decided_at`: trader가 그 예측으로 사기로 정한 때. 보통 읽은 때이고, 같은 봉 마감의 순위가 더 높은 칸을 기다렸으면 그 뒤다(#395). `entry`: 그 뒤 처음 받은 호가의 매도 1호가와 수량(`fraction` × 운용 상한 ÷ 그 값의 내림).
+
+> **바뀜** (2026-10-30, #412): `entry.quantity`는 운용 상한 ÷ 매도 1호가의 내림이었다 → `fraction` × 운용 상한 ÷ 매도 1호가의 내림이고, `decided_at`은 읽은 때였다 → 정한 때(순위가 높은 칸을 기다리면 그 뒤). `role`, `p_star`, `precision_low`, `kelly`, `fraction`이 더해졌다. 이유: 칸을 비용 지도로 고르고, 순위와 분할 Kelly 크기를 쓴다(#395).
 - `exit`: 청산 시각·가격·이유(`take_profit`: 목표가에, `stop_loss`: 그때의 매수 1호가에, `time`: 시간 장벽 직전 호가의 매수 1호가에). 열려 있으면 `null`이고, 그때 `sell_fee`, `tax`, `cost`, `gross`, `net`도 `null`이다. 시간 청산의 `exit.at`이 `time_barrier`보다 늦으면 장벽 앞 5초 안에 호가가 없어(스트림이 끊겼거나 trader가 멈춰 있었다) 다음 호가에 판 것이다.
 - `buy_fee`, `sell_fee`, `tax`, `cost`, `gross`, `net`: 원. 수수료는 산 금액과 판 금액에 각각 `KRX_FEE_PERCENT`, 매도세는 판 금액에 `pricing.SELL_TAX`. `gross` = (매도가 − 매수가) × 수량, `net` = `gross` − `cost`.
 - `orders`: 그 매매의 주문, 낸 순서대로. 매수(`entry`), 목표가에 걸어 둔 매도(`take_profit`: 익절이면 `filled`, 손절·시간이면 `cancelled`), 손절·시간의 매도(`stop_loss`, `time`). `broker_id`는 증권사 주문 번호(모의는 `null`). `fills`의 `quote_at`은 모의 체결이 쓴 호가의 받은 시각이다.

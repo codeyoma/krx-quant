@@ -1,34 +1,43 @@
-"""The trader (#393, #394): trades 005930 on one cell's predictions by the triple barrier, as its
-own process (``krx-quant trade``, compose service ``trader``), apart from the collector.
+"""The trader (#393, #394, #395): trades 005930 by the triple barrier on the cells the cost map
+passes, as its own process (``krx-quant trade``, compose service ``trader``), apart from the
+collector.
 
-The first stem (#394) is paper only: the trader fills its orders on the collector's live best
-quotes (``quotes.py``) and writes what it did to its own store, ``state/trader.sqlite3``
-(``store.py``). It has no order code and calls no KIS order: the KIS order calls live in
-``krx_quant.kis_orders`` alone, the one file the repository's forbidden-pattern check
-(``scripts/check_forbidden.py``) lets hold KIS order TR IDs and endpoints (#403), and only the
-order probe uses them so far; the trader will through its KIS order module (#404).
+For now it is paper only (#394): the trader fills its orders on the collector's live best quotes
+(``quotes.py``) and writes what it did to its own store, ``state/trader.sqlite3`` (``store.py``).
+It has no order code and calls no KIS order: the KIS order calls live in ``krx_quant.kis_orders``
+alone, the one file the repository's forbidden-pattern check (``scripts/check_forbidden.py``) lets
+hold KIS order TR IDs and endpoints (#403), and only the order probe uses them so far; the trader
+will through its KIS order module (#404).
 
-- **Cell** (``cells.py``): the one (kind, predictor) traded, set in ``.env`` (``settings.py``):
-  the four-minute direction (width k) or the 4-, 15- or 30-minute barrier (width w). The trader
-  reads the engine's database (``state/engine.sqlite3``) read-only for its predictions as they
-  are displayed (``displayed_at``).
-- **Rules** (``paper.py``): a prediction of the rise (up; the barrier's up_first) at or above
-  the threshold buys, when nothing is held. Its reference price is the prediction's ``anchor``,
-  the target ``anchor + w × tick``, the stop ``anchor − w × tick`` (w = k for the direction) and
-  the time barrier the bar close plus the kind's horizon. Entries from five minutes after the
-  open (09:05), and only when the time barrier is by five minutes before the closing auction
-  (15:15); no buy when the best ask has reached the target already.
+- **Cells** (``selection.py``, #395): a cell is a (kind, predictor): the four-minute direction
+  (width k) or the 4-, 15- or 30-minute barrier (width w), and the final consensus (the
+  direction's only), the kind's first-ranked algorithm or its strongest baseline. The trader
+  trades the cells whose verdict on the engine's cost map (``GET /v1/cost-map``, 005930, the last
+  20 days) is ``pass`` at a market order's round trip, picked at each start and every day at
+  08:30; none passing, it trades nothing that day and keeps why. It reads their predictions from
+  the engine's database (``state/engine.sqlite3``) read-only as they are displayed
+  (``displayed_at``, ``cells.py``).
+- **Rules** (``paper.py``): a prediction of the rise (up; the barrier's up_first) at or above the
+  threshold buys, when nothing is held and no special situation (a VI, a circuit breaker, a
+  sidecar) touches its window. Of the rises of one bar close, the cell ranked first (the
+  greatest hit rate's lower bound less p*) buys. Its reference price is the prediction's
+  ``anchor``, the target ``anchor + w × tick``, the stop ``anchor − w × tick`` (w = k for the
+  direction) and the time barrier the bar close plus the kind's horizon. Entries from five
+  minutes after the open (09:05), and only when the time barrier is by five minutes before the
+  closing auction (15:15); no buy when the best ask has reached the target already.
+- **Size**: the cell's fractional Kelly, from its hit rate's lower bound and its payoff (the
+  target less the cost against the stop and the cost), cut to 0–1, of the capital (1,000,000
+  won), over the best ask, rounded down; none below one share.
 - **Paper fills**: the buy at the best ask of the first quote received after the decision; the
   take-profit at the target once a best bid reaches it; the stop and the time exit at the best
-  bid then. Costs: the commission on both sides and the sell tax. The quantity is the capital
-  (1,000,000 won) over the best ask, rounded down.
-- **Store** (``store.py``): its decisions, orders, fills and trades, each with its mode
-  (``paper``); the Engine API reads it (``GET /v1/trader/trades``).
+  bid then. Costs: the commission on both sides and the sell tax.
+- **Store** (``store.py``): its picks of the cells, decisions, orders, fills and trades, each with
+  its mode (``paper``); the Engine API reads it (``GET /v1/trader/trades``).
 """
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import time, timedelta
 
 # The one symbol traded (#393).
 SYMBOL = "005930"
@@ -42,11 +51,23 @@ LATER_MODES = ("mock", "live")
 # The kinds a cell may be of (#393): the four-minute direction, and the barrier at 4, 15 and 30
 # minutes. The 60-minute barrier and the daily kinds are not traded.
 TRADED_KINDS = ("direction", "barrier", "barrier_15m", "barrier_30m")
+# A cell's predictor, as the cost map names it (#307, #395): the final consensus (the direction's
+# only), the kind's first-ranked algorithm besides the consensus, its strongest baseline.
+ROLES = ("consensus", "top", "baseline")
 
 # The capital the trader may use, in won (#393): ``.env`` may narrow it, never widen it.
 CAPITAL = 1_000_000
 # The default threshold: a rise's probability at least this buys (the signal alerts' default).
 THRESHOLD = 0.6
+# The share of a cell's Kelly fraction bought (#395): half Kelly, cut to 0–1 after.
+KELLY_FRACTION = 0.5
+
+# The cost map the cells are picked from (#395): 005930's, its last 20 days with predictions, the
+# special situations left out (the trader buys in none). Picked at each start, and every day at
+# PICK_AT: after the night (the training, the scheduled jobs, the 07:20 restart and the 08:00
+# model swap), before the open.
+COST_MAP_PERIOD = "20d"
+PICK_AT = time(8, 30)
 
 # Continuous trading only (#393): entries from this long after the open (09:05), and only when
 # the time barrier is at least this long before the closing auction (15:15).

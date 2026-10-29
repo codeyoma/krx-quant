@@ -646,7 +646,8 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("collect", help="record KIS real-time feeds until interrupted")
     sub.add_parser(
-        "trade", help="trade 005930 on the configured cell's predictions, in paper (#394), until interrupted"
+        "trade",
+        help="trade 005930 on the cells the cost map passes, in paper (#394, #395), until interrupted",
     )
     sub.add_parser(
         "measure-subscriptions",

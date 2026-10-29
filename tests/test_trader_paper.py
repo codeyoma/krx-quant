@@ -314,11 +314,11 @@ def test_a_capital_below_one_share_buys_nothing(tmp_path: Path) -> None:
 
 def test_the_direction_trades_its_final_consensus_on_k(tmp_path: Path) -> None:
     """The direction's target and stop are k ticks from its bar close's mid-point; a blocked final
-    consensus (#88) buys nothing."""
+    consensus (#88) buys nothing (one blocked for a special situation is ``special``, #395)."""
     day = Day(tmp_path, cell=DIRECTION)
     [trade] = day.run(
         [
-            Read("10:00:02.3", [Direction("10:00:00", blocked="special")]),
+            Read("10:00:02.3", [Direction("10:00:00", blocked="no_reference")]),
             quote("10:00:02.5", 70_000, 70_100),
             Read("10:01:02.3", [Direction("10:01:00")]),
             quote("10:01:02.5", 70_000, 70_100),
