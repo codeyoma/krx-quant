@@ -1337,7 +1337,7 @@ KRX 마감 흐름 화면이 읽는 그날의 마감 리밸런싱 수요다(`clos
 - `buy_fee`, `sell_fee`, `tax`, `cost`, `gross`, `net`: 원. 수수료는 산 금액과 판 금액에 각각 `KRX_FEE_PERCENT`, 매도세는 판 금액에 `pricing.SELL_TAX`. `gross` = (매도가 − 매수가) × 수량, `net` = `gross` − `cost`.
 - `orders`: 그 매매의 주문, 낸 순서대로. 매수(`entry`), 목표가에 걸어 둔 매도(`take_profit`: 익절이면 `filled`, 손절·시간·정지·한도면 `cancelled`), 손절·시간·정지·한도의 매도(`stop_loss`, `time`, `pause`, `daily_limit`, `cumulative_limit`). `broker_id`는 증권사 주문 번호(모의는 `null`). `fills`의 `quote_at`은 모의 체결이 쓴 호가의 받은 시각이다.
 
-> **바뀜** (2026-10-30, #PRNUM): `exit.reason`과 `orders[].purpose`는 `take_profit`, `stop_loss`, `time`(과 `entry`)이었다 → `pause`, `daily_limit`, `cumulative_limit`도 있다. `entry.quantity`는 주문 가능 현금도 넘지 않는다. 이유: 손실 한도와 화면의 정지가 열린 포지션을 바로 판다(#396).
+> **바뀜** (2026-10-30, #413): `exit.reason`과 `orders[].purpose`는 `take_profit`, `stop_loss`, `time`(과 `entry`)이었다 → `pause`, `daily_limit`, `cumulative_limit`도 있다. `entry.quantity`는 주문 가능 현금도 넘지 않는다. 이유: 손실 한도와 화면의 정지가 열린 포지션을 바로 판다(#396).
 
 ### `GET /v1/trader` (#396)
 

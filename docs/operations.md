@@ -2173,7 +2173,7 @@ LogQL 문법은 2026-10-23에 커넥터로 스택에 물어 확인했다(그때�
 | `engine.sqlite3`, `-wal`, `-shm` | 예측, 채점, 상태, 합의 가중치, 다른 종류의 예측과 정답(`kind_predictions`, `kind_answers`, #179), 특수 상황 구간(`special_windows`, `special_days`, #236), 수습 시뮬레이션의 재생과 예측(`simulation_runs`, `simulations`, `sim_predictions`, `sim_kind_predictions`, #298. 실시간 예측과 따로 둔다). 테이블은 [engine-api.md](engine-api.md#저장-stateenginesqlite3)에 있다. 스키마 버전은 `PRAGMA user_version`이다(#179, #236, #298의 새 표는 올리지 않았다) |
 | `trader.sqlite3`, `-wal`, `-shm` | 자동 매매 trader의 저장소(#394): 시작마다(`runs`), 비용 지도로 칸을 고른 기록(`selections`, #395), 읽은 칸의 예측과 한 일(`decisions`), 매매(`trades`), 주문(`orders`), 체결(`fills`), 정지·재개·다시 켜기 요청(`controls`, #396), 닿은 손실 한도(`halts`), 지금 상태(`snapshot`), 날마다의 장부(`days`). 모든 행에 모드(`paper`). trader가 쓰고, 엔진 API는 읽고 정지 요청만 쓰며, `krx-quant trade resume|rearm`이 재개와 다시 켜기를 쓴다([design.md](design.md#14-자동-매매-393) 14장) |
 
-> **바뀜** (2026-10-30, #PRNUM): `trader.sqlite3`는 trader만 쓰고 엔진 API는 읽기만 했다 → 엔진 API가 화면의 정지 요청을, `krx-quant trade resume|rearm`이 재개와 다시 켜기를 `controls`에 쓴다. 이유: 화면의 정지 두 가지와 서버의 재개·다시 켜기가 trader에게 닿는 길이다(#396).
+> **바뀜** (2026-10-30, #413): `trader.sqlite3`는 trader만 쓰고 엔진 API는 읽기만 했다 → 엔진 API가 화면의 정지 요청을, `krx-quant trade resume|rearm`이 재개와 다시 켜기를 `controls`에 쓴다. 이유: 화면의 정지 두 가지와 서버의 재개·다시 켜기가 trader에게 닿는 길이다(#396).
 | `replay-<날짜>.sqlite3` | `krx-quant replay`의 결과 |
 | `.engine.lock` | 도는 엔진이 잡는 잠금 파일(`flock`, #168). 잡혀 있으면 `rescore`가 거부한다. 엔진이 끝나면 풀린다. 파일은 남아도 된다 |
 | `prevalidation-<알고리즘>.sqlite3` | `krx-quant prevalidate`가 재생한 예측과 채점. 다시 돌리면 새로 만든다 |
