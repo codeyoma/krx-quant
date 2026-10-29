@@ -41,6 +41,11 @@ With a pace (``demo-engine --pace SECONDS``), the morning is replayed at once on
 of 10 seconds, so the stream sends predictions, the consensus, outcomes and the bar being
 made as they are (#21, #110). It ends at
 10:30 as the unpaced demo does, with the same answers.
+
+The trader's store (``state/trader.sqlite3``, #398) holds made-up trades on 005930, filled on the
+demo's own quotes by the paper rules: one each on the two afternoons before, and seven on the
+morning, paper up to 10:05 and live after, the last still held at 10:30. A paced demo has them all
+from the start; a screen marks each once its bar is there.
 """
 
 from __future__ import annotations
@@ -127,6 +132,13 @@ from krx_quant.structure_check import DayPrices
 from krx_quant.supply import KIS, NET_MARKET, NXT_OPENED, TOSS, write_supply
 from krx_quant.swap import NightStatus, reports_by_algorithm
 from krx_quant.touch import TARGET_VERSION
+from krx_quant.trader import CAPITAL, THRESHOLD
+from krx_quant.trader import SYMBOL as TRADER_SYMBOL
+from krx_quant.trader.paper import costs
+from krx_quant.trader.store import DB_NAME as TRADER_DB
+from krx_quant.trader.store import Entry as TraderEntry
+from krx_quant.trader.store import Exit as TraderExit
+from krx_quant.trader.store import TraderStore
 from krx_quant.us_daily import write_us_daily
 
 DEMO_DAY = date(2026, 10, 12)
@@ -433,6 +445,95 @@ def write_demo_base_rates(state_dir: Path) -> None:
     write_base_rates(state_dir, body)
 
 
+# The trader's made-up trades on 005930 (#398), for the chart's buys and sells: each entry's time
+# (the barrier prediction of its minute read two seconds after the bar close) and its barriers'
+# width w in ticks; paper on the afternoons before and on the morning up to 10:05, live after, so
+# the chart tells the two apart.
+_DEMO_ENTRIES = (
+    (datetime(2026, 10, 7, 14, 22, 2, tzinfo=KST), 4),
+    (datetime(2026, 10, 8, 14, 41, 2, tzinfo=KST), 2),
+    *((datetime.combine(DEMO_DAY, time(9, m, 2), KST), w) for m, w in ((43, 4), (49, 4), (55, 2))),
+    *((datetime.combine(DEMO_DAY, time(10, m, 2), KST), w) for m, w in ((6, 4), (12, 6), (18, 2), (27, 8))),
+)
+_DEMO_LIVE_FROM = time(10, 5)
+
+
+def write_demo_trader(state_dir: Path, books: Sequence[Event]) -> None:
+    """The trader's store (``state/trader.sqlite3``, replaced) with a made-up trade at each of
+    ``_DEMO_ENTRIES``, filled on 005930's quotes in ``books`` as paper fills are (``trader/paper.py``):
+    the buy at the ask of the first quote after the decision, its barriers w ticks either side of the
+    mid-point then, and its exit as ``_demo_exit`` finds it (the time barrier four minutes after the
+    bar close)."""
+    for leftover in (TRADER_DB, f"{TRADER_DB}-wal", f"{TRADER_DB}-shm"):
+        (state_dir / leftover).unlink(missing_ok=True)
+    quotes = sorted(
+        (row["received_at"].astimezone(KST), float(row["bid_px_1"]), float(row["ask_px_1"]))
+        for feed, row in books
+        if feed == BOOK.tr_id and row["symbol"] == TRADER_SYMBOL
+    )
+    store = TraderStore(state_dir / TRADER_DB)
+    try:
+        for n, (decided, w) in enumerate(_DEMO_ENTRIES):
+            mode = "live" if decided >= _at(_DEMO_LIVE_FROM) else "paper"
+            after = [q for q in quotes if q[0] > decided]
+            bought_at, bid, ask = after[0]
+            tick = _OPENS[TRADER_SYMBOL][1]
+            anchor = (bid + ask) / 2
+            bar_close = decided.replace(second=0, microsecond=0)
+            cell = {"mode": mode, "symbol": TRADER_SYMBOL, "kind": "barrier", "predictor": "breiman"}
+            decision = store.add_decision(
+                **cell,
+                prediction_id=n + 1,
+                bar_close=bar_close,
+                displayed_at=decided,
+                decided_at=decided,
+                probability=0.68,
+                action="buy",
+                reason=None,
+            )
+            entry = TraderEntry(
+                **cell,
+                prediction_id=n + 1,
+                bar_close=bar_close,
+                probability=0.68,
+                threshold=THRESHOLD,
+                anchor=anchor,
+                tick=tick,
+                width_ticks=w,
+                target=anchor + w * tick,
+                stop=anchor - w * tick,
+                time_barrier=bar_close + timedelta(minutes=4),
+                decided_at=decided,
+                entry_at=bought_at,
+                entry_price=ask,
+                quantity=CAPITAL // int(ask),
+                buy_fee=ask * (CAPITAL // int(ask)) * _FEE,
+                quote_at=bought_at,
+            )
+            trade = store.enter(decision, entry)
+            if (out := _demo_exit(entry, [q for q in after[1:] if q[0] < entry.time_barrier])) is not None:
+                store.exit(trade, out)
+    finally:
+        store.close()
+
+
+def _demo_exit(entry: TraderEntry, held: Sequence[tuple[datetime, float, float]]) -> TraderExit | None:
+    """How a demo trade ends on the quotes received while it is held (``held``: their times, bids
+    and asks, before its time barrier), by the paper rules; None while it is still held at 10:30."""
+    taken = next((q for q in held if q[1] >= entry.target), None)
+    stopped = next((q for q in held if q[1] <= entry.stop), None)
+    if stopped is not None and (taken is None or stopped[0] < taken[0]):
+        at, price, reason, quote_at = stopped[0], stopped[1], "stop_loss", stopped[0]
+    elif taken is not None:
+        at, price, reason, quote_at = taken[0], entry.target, "take_profit", taken[0]
+    elif held and entry.time_barrier <= _at(_END):  # sold at the barrier, at the last bid before it
+        at, price, reason, quote_at = entry.time_barrier, held[-1][1], "time", held[-1][0]
+    else:
+        return None
+    cost = costs(entry.entry_price, price, entry.quantity, _FEE)
+    return TraderExit(at, price, reason, cost.sell_fee, cost.tax, quote_at)
+
+
 def _finished_periods(days: list[Row], period: str) -> list[Row]:
     """The candles of ``period`` made of day candles (oldest first), each dated by its first
     day, without the one holding the demo morning: as the collector stores them."""
@@ -480,6 +581,8 @@ async def demo_app(db: Path, pace: float | None = None) -> web.Application:
     write_demo_candles(data_dir)
     write_demo_supply(data_dir / "state")  # before the daily kind's days: Cox reads the flows
     write_demo_base_rates(data_dir / "state")  # the cost map's (#307)
+    # The trader's trades (#398) on the quotes of the days before and of the morning.
+    write_demo_trader(data_dir / "state", [e for day in PAST_DAYS for e in past_events(day)] + demo_events())
     for day in PAST_DAYS:
         # Each day by its own engine, ended before the daily review after the close, so
         # every algorithm stays active as on the morning.

@@ -62,6 +62,10 @@ Endpoints (all under ``/v1``):
 - ``GET /trader/trades?before=T&limit=N``: the trader's last N trades (#394, default 100, at most
   1000) entered before ``T`` if given, newest first, each with its orders and their fills, as the
   trader keeps them (``state/trader.sqlite3``, ``trader/store.py``); none before the trader's first.
+- ``GET /symbols/{symbol}/trader-marks?before=T&limit=N``: the trader's buys and sells of the
+  symbol as the chart marks them (#398, ``trader/marks.py``): the last N (default 100, at most 1000)
+  before ``T`` if given, newest first, each at its fill's time and price, with its trade's quantity,
+  mode and cell, and a sell's exit reason and net P&L.
 
 An algorithm is of a kind (``kind`` in ``/algorithms``). ``/leaderboard?kind=`` ranks a kind's
 algorithms against its baselines (the direction's by default, as before); an algorithm's
@@ -150,6 +154,7 @@ from krx_quant.stats import (
 from krx_quant.stream import EventStream, LiveStatus, kind_prediction_json, kind_target, prediction_json
 from krx_quant.supply import FIELDS as SUPPLY_FIELDS
 from krx_quant.supply import stored_supply
+from krx_quant.trader.marks import read_marks
 from krx_quant.trader.store import DB_NAME as TRADER_DB
 from krx_quant.trader.store import read_trades
 
@@ -297,6 +302,7 @@ def create_app(
     app.router.add_get("/v1/symbols/{symbol}/kinds/{kind}/latest", _kind_latest)
     app.router.add_get("/v1/symbols/{symbol}/kinds/{kind}/predictions", _kind_predictions)
     app.router.add_get("/v1/trader/trades", _trader_trades)
+    app.router.add_get("/v1/symbols/{symbol}/trader-marks", _trader_marks)
     return app
 
 
@@ -1439,6 +1445,22 @@ async def _trader_trades(request: web.Request) -> web.Response:
         else await asyncio.to_thread(read_trades, state_dir / TRADER_DB, before, limit)
     )
     return _json({"trades": trades})
+
+
+async def _trader_marks(request: web.Request) -> web.Response:
+    """The trader's buys and sells of a symbol as the chart marks them (#398), read from its store
+    (read-only, off the event loop); none without the store, before the trader's first trade, or
+    for a symbol it does not trade."""
+    _, symbol = _engine_and_symbol(request)
+    limit = _limit_query(request, DEFAULT_LIMIT, MAX_LIMIT)
+    before = _time_query(request, "before")
+    state_dir = request.app[STATE_DIR_KEY]
+    marks = (
+        []
+        if state_dir is None
+        else await asyncio.to_thread(read_marks, state_dir / TRADER_DB, symbol, before, limit)
+    )
+    return _json({"symbol": symbol, "marks": marks})
 
 
 def _json(body: dict[str, Any]) -> web.Response:

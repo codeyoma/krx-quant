@@ -519,3 +519,24 @@ def test_a_pace_is_a_finite_number_of_seconds_more_than_0(
 
     assert exit.value.code == 2, "a wrong argument, as the README's exit codes say"
     assert "seconds per minute of the demo morning: a finite number more than 0" in capsys.readouterr().err
+
+
+async def test_the_demo_has_the_trader_s_paper_and_live_trades_on_005930(tmp_path: Path) -> None:
+    """#398. Output: buys and sells on the two afternoons before and on the morning, paper up to
+    10:05 and live after, each sell's exit reason and net P&L, the morning's last trade still open
+    at 10:30; none on the other symbols."""
+    app = await demo_app(tmp_path / "demo.sqlite3")
+
+    async with TestClient(TestServer(app)) as client:
+        body = await get_json(client, "/v1/symbols/005930/trader-marks")
+        other = await get_json(client, "/v1/symbols/000660/trader-marks")
+
+    check("trader_marks", body)
+    marks = body["marks"]
+    assert {m["at"][:10] for m in marks} == {"2026-10-07", "2026-10-08", "2026-10-12"}
+    assert {m["mode"] for m in marks if m["at"] < "2026-10-12T10:05"} == {"paper"}
+    assert {m["mode"] for m in marks if m["at"] > "2026-10-12T10:05"} == {"live"}
+    assert {m["exit_reason"] for m in marks if m["side"] == "sell"} == {"take_profit", "stop_loss", "time"}
+    assert {m["net"] > 0 for m in marks if m["side"] == "sell"} == {True, False}, "a gain and a loss"
+    assert marks[0]["side"] == "buy" and marks[0]["at"][:16] == "2026-10-12T10:27", "held at 10:30"
+    assert other["marks"] == []
