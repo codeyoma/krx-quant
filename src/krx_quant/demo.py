@@ -45,7 +45,17 @@ made as they are (#21, #110). It ends at
 The trader's store (``state/trader.sqlite3``, #398) holds made-up trades on 005930, filled on the
 demo's own quotes by the paper rules: one each on the two afternoons before, and seven on the
 morning, paper up to 10:05 and live after, the last still held at 10:30. A paced demo has them all
-from the start; a screen marks each once its bar is there.
+from the start; a screen marks each once its bar is there. With them (#397), for the auto trader
+screen: the trader's state at 10:30 (the live trader running, that trade open), each mode's day
+ledgers by the trader's own limits, a pause of new entries from the screen on the 8th and the
+server's resume on the 12th. Policy 1, fitted on the 7th's night, is the first champion: the
+trades from the 8th are its, with their cell's p* and lower bound (the 7th's has none, entered
+before the picks, #395); policy 2, fitted on the 8th's night, is a challenger with two paper trades
+of its own on the morning (#400), and each policy's paper days are kept, so the state has the
+champion, the live gate's progress and the challenger's standing. A paced demo has that 10:30 state
+from the start:
+not alive (it is written at 10:30) until its clock gets near there. A pause posted to the demo is
+written as the engine writes it, and stays unread: no trader runs.
 """
 
 from __future__ import annotations
@@ -132,13 +142,17 @@ from krx_quant.structure_check import DayPrices
 from krx_quant.supply import KIS, NET_MARKET, NXT_OPENED, TOSS, write_supply
 from krx_quant.swap import NightStatus, reports_by_algorithm
 from krx_quant.touch import TARGET_VERSION
-from krx_quant.trader import CAPITAL, THRESHOLD
+from krx_quant.trader import CAPITAL, PAPER, THRESHOLD
 from krx_quant.trader import SYMBOL as TRADER_SYMBOL
-from krx_quant.trader.paper import costs
+from krx_quant.trader import policy as policies
+from krx_quant.trader.limits import Guard
+from krx_quant.trader.paper import PaperTrader, costs, shares, unrealized
+from krx_quant.trader.paper import Rules as TraderRules
+from krx_quant.trader.quotes import BestQuote
+from krx_quant.trader.store import API, CLI, PAUSE, RESUME, TraderStore
 from krx_quant.trader.store import DB_NAME as TRADER_DB
 from krx_quant.trader.store import Entry as TraderEntry
 from krx_quant.trader.store import Exit as TraderExit
-from krx_quant.trader.store import TraderStore
 from krx_quant.us_daily import write_us_daily
 
 DEMO_DAY = date(2026, 10, 12)
@@ -456,14 +470,48 @@ _DEMO_ENTRIES = (
     *((datetime.combine(DEMO_DAY, time(10, m, 2), KST), w) for m, w in ((6, 4), (12, 6), (18, 2), (27, 8))),
 )
 _DEMO_LIVE_FROM = time(10, 5)
+# The trader's runs and controls (#397), for the screen's state and days: the paper trader started
+# on the 7th before the open; new entries paused from the screen on the 8th after its trade, and
+# resumed on the server on the 12th before the open; the live one started at 10:05 (a mode is the
+# server's ``.env``'s: a restart). Each control is read this long after it was asked for.
+_DEMO_PAPER_FROM = datetime(2026, 10, 7, 7, 20, 3, tzinfo=KST)
+_DEMO_PAUSE = datetime(2026, 10, 8, 15, 2, 10, tzinfo=KST)
+_DEMO_RESUME = datetime(2026, 10, 12, 8, 41, 0, tzinfo=KST)
+_DEMO_READ = timedelta(milliseconds=400)
+# The trader's policies (#399, #400, made up): version 1 fitted on the 7th's night, the first
+# champion, so the 8th's trade on is its; version 2 fitted on the 8th's night, a challenger given a
+# running slot then, so it runs in paper beside the champion from the 12th (its pick at 08:30). Each
+# trades the top algorithm's 4-minute barrier at its threshold θ and Kelly fraction λ.
+_DEMO_POLICIES = (
+    (datetime(2026, 10, 7, 22, 31, 4, tzinfo=KST), THRESHOLD, 0.5),
+    (datetime(2026, 10, 8, 22, 31, 4, tzinfo=KST), 0.65, 1.0),
+)
+# The cell as the cost map picked it (#395, made up): the predictor's role, its breakeven p*, its hit
+# rate's lower bound and Kelly f*; bought with all of the capital (λ × f* cut to 1). The 7th's trade,
+# before the first champion, was entered before the picks: none of these.
+_DEMO_PICK = ("top", 0.61, 0.66, 9.6)
+# The challenger's paper trades on the morning (#400): its own book, beside the champion's, on the
+# same quotes: each entry's time and width w.
+_DEMO_CHALLENGER_ENTRIES = (
+    (datetime.combine(DEMO_DAY, time(9, 46, 2), KST), 4),
+    (datetime.combine(DEMO_DAY, time(9, 58, 2), KST), 2),
+)
 
 
 def write_demo_trader(state_dir: Path, books: Sequence[Event]) -> None:
     """The trader's store (``state/trader.sqlite3``, replaced) with a made-up trade at each of
     ``_DEMO_ENTRIES``, filled on 005930's quotes in ``books`` as paper fills are (``trader/paper.py``):
-    the buy at the ask of the first quote after the decision, its barriers w ticks either side of the
-    mid-point then, and its exit as ``_demo_exit`` finds it (the time barrier four minutes after the
-    bar close)."""
+    the buy at the ask of the first quote after the decision, as many shares as the capital and the
+    cash buy (``paper.shares``), its barriers w ticks either side of the mid-point then, and its exit
+    as ``_demo_exit`` finds it (the time barrier four minutes after the bar close).
+
+    With them the trader's runs, its pause and resume (``_DEMO_PAUSE``, ``_DEMO_RESUME``), each day's
+    ledger by the trader's own limits (``limits.Guard``: each trade marked at every bid it was held
+    through, then its exit) and its state at 10:30 (#397): the live trader's, written by a paper trader
+    of that mode (``PaperTrader``) on the quotes since its open trade's entry. And its policies
+    (``_DEMO_POLICIES``, #399, #400): the champion's trades carry its version, the challenger's paper
+    trades (``_DEMO_CHALLENGER_ENTRIES``) theirs, and each policy's trading days in paper are kept
+    (``policy_days``), from which the Engine API measures the live gate and the challenger's standing."""
     for leftover in (TRADER_DB, f"{TRADER_DB}-wal", f"{TRADER_DB}-shm"):
         (state_dir / leftover).unlink(missing_ok=True)
     quotes = sorted(
@@ -471,55 +519,193 @@ def write_demo_trader(state_dir: Path, books: Sequence[Event]) -> None:
         for feed, row in books
         if feed == BOOK.tr_id and row["symbol"] == TRADER_SYMBOL
     )
+    rules = TraderRules(fee_rate=_FEE)
+    live_from = _at(_DEMO_LIVE_FROM)
     store = TraderStore(state_dir / TRADER_DB)
     try:
+        db = policies.connect(state_dir / TRADER_DB)
+        try:
+            versions = [
+                policies.add(db, night, _demo_policy_reason(night), [_demo_policy_cell(night, θ, λ)], [], {})
+                for night, θ, λ in _DEMO_POLICIES
+            ]
+        finally:
+            db.close()
+        (champion, _), (challenger, _) = versions
+        champion_from = _DEMO_POLICIES[0][0]
+        store.add_run(_DEMO_PAPER_FROM, PAPER, {"demo": True})
+        guard = Guard(store, PAPER, rules.limits, _DEMO_PAPER_FROM, lambda text: None)
+        controls = [(_DEMO_PAUSE, PAUSE, API, False), (_DEMO_RESUME, RESUME, CLI, None)]
         for n, (decided, w) in enumerate(_DEMO_ENTRIES):
-            mode = "live" if decided >= _at(_DEMO_LIVE_FROM) else "paper"
-            after = [q for q in quotes if q[0] > decided]
-            bought_at, bid, ask = after[0]
-            tick = _OPENS[TRADER_SYMBOL][1]
-            anchor = (bid + ask) / 2
-            bar_close = decided.replace(second=0, microsecond=0)
-            decision = store.add_decision(
-                mode=mode,
-                symbol=TRADER_SYMBOL,
-                kind="barrier",
-                predictor="breiman",
-                prediction_id=n + 1,
-                bar_close=bar_close,
-                displayed_at=decided,
-                decided_at=decided,
-                probability=0.68,
-                action="buy",
-                reason=None,
+            mode = "live" if decided >= live_from else PAPER
+            while controls and controls[0][0] < decided:
+                asked, action, source, sell_now = controls.pop(0)
+                _demo_day(guard, asked)
+                guard.apply(store.add_control(asked, action, source, sell_now=sell_now), asked + _DEMO_READ)
+                store.put_day(guard.mode, guard.day, guard.ledger(), asked + _DEMO_READ)
+            if mode != guard.mode:  # the paper day ends at the switch; the live trader starts
+                store.put_day(guard.mode, guard.day, guard.ledger(), live_from)
+                store.add_run(live_from, mode, {"demo": True})
+                guard = Guard(store, mode, rules.limits, live_from, lambda text: None)
+            _demo_day(guard, decided)
+            picked = decided > champion_from
+            _demo_trade(
+                store,
+                quotes,
+                decided,
+                w,
+                n + 1,
+                mode,
+                policy_id=champion if picked else None,
+                pick=picked,
+                cash=CAPITAL + guard.realized_all,
+                guard=guard,
             )
-            entry = TraderEntry(
-                mode=mode,
-                symbol=TRADER_SYMBOL,
-                kind="barrier",
-                predictor="breiman",
-                prediction_id=n + 1,
-                bar_close=bar_close,
-                probability=0.68,
-                threshold=THRESHOLD,
-                anchor=anchor,
-                tick=tick,
-                width_ticks=w,
-                target=anchor + w * tick,
-                stop=anchor - w * tick,
-                time_barrier=bar_close + timedelta(minutes=4),
-                decided_at=decided,
-                entry_at=bought_at,
-                entry_price=ask,
-                quantity=CAPITAL // int(ask),
-                buy_fee=ask * (CAPITAL // int(ask)) * _FEE,
-                quote_at=bought_at,
+        # The challenger's book: its own cash, held by no limit or pause.
+        realized = 0.0
+        for n, (decided, w) in enumerate(_DEMO_CHALLENGER_ENTRIES):
+            net = _demo_trade(
+                store,
+                quotes,
+                decided,
+                w,
+                101 + n,
+                PAPER,
+                policy_id=challenger,
+                pick=True,
+                cash=CAPITAL + realized,
+                threshold=_DEMO_POLICIES[1][1],
+                champion=False,
             )
-            trade = store.enter(decision, entry)
-            if (out := _demo_exit(entry, [q for q in after[1:] if q[0] < entry.time_barrier])) is not None:
-                store.exit(trade, out)
+            realized += net or 0.0
+        # Each policy's trading days in paper (``desk.record``): the champion's from the 8th, stopped
+        # that day by the screen's pause in the session; the challenger's on the 12th.
+        for version, day, as_champion, stopped in (
+            (champion, PAST_DAYS[1], True, True),
+            (champion, DEMO_DAY, True, False),
+            (challenger, DEMO_DAY, False, False),
+        ):
+            store.put_policy_day(
+                PAPER, version, day, as_champion, stopped, datetime.combine(day, time(15, 30), KST)
+            )
+        # The live trader's state at 10:30, its open trade marked at each bid since it was bought.
+        trader = PaperTrader(store, rules, _CALENDAR.session, live_from, guard.mode)
+        held = store.open_trade(guard.mode)
+        for at, bid, ask in quotes:
+            if held is not None and held.entry_at is not None and held.entry_at < at <= _at(_END):
+                trader.on_quote(BestQuote(at, bid, ask))
+        trader.write(_at(_END))
     finally:
         store.close()
+
+
+def _demo_policy_reason(night: datetime) -> str:
+    return f"{night.date()} 밤 맞추기: 비용 지도가 시장가 왕복으로 통과시킨 1칸 가운데 1칸(데모, 지어낸 값)"
+
+
+def _demo_policy_cell(night: datetime, threshold: float, kelly_fraction: float) -> policies.PolicyCell:
+    """The demo policy's one cell, fitted as the nightly re-fit keeps it (made-up figures)."""
+    role, p_star, low, kelly = _DEMO_PICK
+    fitted: dict[str, Any] = {"p_star": p_star, "low": low, "kelly": kelly}
+    fitted |= {"fraction": min(1.0, kelly_fraction * kelly)}
+    fitted |= {"days": [night.date().isoformat()], "read": {"read": 380, "rises": 120}}
+    fitted |= {"trades": 24, "wins": 14, "net": 8_400.0, "growth": 0.0084}
+    return policies.PolicyCell("barrier", role, "breiman", threshold, kelly_fraction, fitted)
+
+
+def _demo_trade(
+    store: TraderStore,
+    quotes: Sequence[tuple[datetime, float, float]],
+    decided: datetime,
+    w: int,
+    prediction_id: int,
+    mode: str,
+    *,
+    policy_id: int | None,
+    pick: bool,
+    cash: float,
+    threshold: float = THRESHOLD,
+    champion: bool = True,
+    guard: Guard | None = None,
+) -> float | None:
+    """A demo trade decided at ``decided`` on 005930's ``quotes`` (``write_demo_trader``), kept in
+    ``store`` with its decision; its net P&L once it exits, None while held at 10:30. The champion's
+    is marked in ``guard`` at each bid it was held through, from its buy's quote to the one it was
+    sold on (that one sells it, as the trader's ``on_quote`` does): the day's lowest P&L and the
+    cumulative one's count those dips, not the exit alone; then its exit, and the day's ledger kept."""
+    after = [q for q in quotes if q[0] > decided]
+    bought_at, bid, ask = after[0]
+    tick = _OPENS[TRADER_SYMBOL][1]
+    anchor = (bid + ask) / 2
+    bar_close = decided.replace(second=0, microsecond=0)
+    quantity = shares(1.0, CAPITAL, ask, cash, _FEE)
+    role, p_star, low, kelly = _DEMO_PICK if pick else (None, None, None, None)
+    decision = store.add_decision(
+        mode=mode,
+        symbol=TRADER_SYMBOL,
+        kind="barrier",
+        predictor="breiman",
+        prediction_id=prediction_id,
+        bar_close=bar_close,
+        displayed_at=decided,
+        decided_at=decided,
+        probability=0.68,
+        action="buy",
+        reason=None,
+        policy_id=policy_id,
+    )
+    entry = TraderEntry(
+        mode=mode,
+        symbol=TRADER_SYMBOL,
+        kind="barrier",
+        predictor="breiman",
+        prediction_id=prediction_id,
+        bar_close=bar_close,
+        probability=0.68,
+        threshold=threshold,
+        anchor=anchor,
+        tick=tick,
+        width_ticks=w,
+        target=anchor + w * tick,
+        stop=anchor - w * tick,
+        time_barrier=bar_close + timedelta(minutes=4),
+        decided_at=decided,
+        entry_at=bought_at,
+        entry_price=ask,
+        quantity=quantity,
+        buy_fee=ask * quantity * _FEE,
+        quote_at=bought_at,
+        role=role,
+        p_star=p_star,
+        low=low,
+        kelly=kelly,
+        fraction=1.0 if pick else None,
+        policy_id=policy_id,
+        champion=champion,
+    )
+    trade = store.enter(decision, entry)
+    out = _demo_exit(entry, [q for q in after[1:] if q[0] < entry.time_barrier])
+    if out is None:
+        return None
+    if guard is not None:
+        for at, held_bid, _ in after:
+            if at >= out.at:
+                break
+            guard.mark(unrealized(trade, held_bid, _FEE), at)
+    store.exit(trade, out)
+    net = (out.price - entry.entry_price) * quantity - entry.buy_fee - out.sell_fee - out.tax
+    if guard is not None:
+        guard.exited(net, out.at)
+        store.put_day(mode, guard.day, guard.ledger(), out.at)
+    return net
+
+
+def _demo_day(guard: Guard, at: datetime) -> None:
+    """``guard`` on to the day of ``at``, as the trader's clock goes: past the midnight after its
+    day, which keeps that day's ledger as it ended (``Guard.roll``), and on to ``at``."""
+    if kst_day(at) > guard.day:
+        guard.roll(datetime.combine(guard.day + timedelta(days=1), time(), KST))
+        guard.roll(at)
 
 
 def _demo_exit(entry: TraderEntry, held: Sequence[tuple[datetime, float, float]]) -> TraderExit | None:

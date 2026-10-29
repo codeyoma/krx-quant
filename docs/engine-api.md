@@ -1344,6 +1344,9 @@ KRX 마감 흐름 화면이 읽는 그날의 마감 리밸런싱 수요다(`clos
 - `exit`: 청산 시각·가격·이유(`take_profit`: 목표가에, `stop_loss`: 그때의 매수 1호가에, `time`: 시간 장벽 직전 호가의 매수 1호가에, #396의 `pause`: "정지하고 즉시 매도" 뒤 처음 받은 호가의 매수 1호가에, `daily_limit`·`cumulative_limit`: 손실 한도에 닿은 호가(또는 그 뒤 처음 받은 호가)의 매수 1호가에). 열려 있으면 `null`이고, 그때 `sell_fee`, `tax`, `cost`, `gross`, `net`도 `null`이다. 시간 청산의 `exit.at`이 `time_barrier`보다 늦으면 장벽 앞 5초 안에 호가가 없어(스트림이 끊겼거나 trader가 멈춰 있었다) 다음 호가에 판 것이다.
 - `buy_fee`, `sell_fee`, `tax`, `cost`, `gross`, `net`: 원. 수수료는 산 금액과 판 금액에 각각 `KRX_FEE_PERCENT`, 매도세는 판 금액에 `pricing.SELL_TAX`. `gross` = (매도가 − 매수가) × 수량, `net` = `gross` − `cost`.
 - `orders`: 그 매매의 주문, 낸 순서대로. 매수(`entry`), 목표가에 걸어 둔 매도(`take_profit`: 익절이면 `filled`, 손절·시간·정지·한도면 `cancelled`), 손절·시간·정지·한도의 매도(`stop_loss`, `time`, `pause`, `daily_limit`, `cumulative_limit`). `broker_id`는 증권사 주문 번호(모의는 `null`). `fills`의 `quote_at`은 모의 체결이 쓴 호가의 받은 시각이다.
+- 데모 엔진의 매매는 아래 `trader-marks`의 것과 같다. 10-07 밤에 맞춘 정책 1이 첫 챔피언이라, 10-08부터의 매매는 `policy`가 1이고 칸의 값이 있다(지어낸 값: `role` `top`, `p_star` 0.61, `precision_low` 0.66, `kelly` 9.6, `fraction` 1.0, `threshold` 0.6). 10-07의 매매는 첫 챔피언 전이고 칸 고르기(#395) 전에 들어간 매매라 넷 다 `null`이다. `policy=2`는 10-08 밤에 맞춘 도전 정책 2가 10-12 아침에 모의로 낸 매매 둘(`threshold` 0.65)이다(#400). 기본 답(챔피언의 매매)에는 없다.
+
+  > **바뀜** (2026-10-30, #415): 데모의 매매는 모두 칸의 값(`role`, `p_star`, `precision_low`, `kelly`, `fraction`)과 정책이 `null`이었고 정책도 없었다 → 정책 1(챔피언)과 2(도전 정책)가 있고, 10-08부터의 매매는 정책 1의 것으로 지어낸 칸의 값이 있으며, 도전 정책의 모의 매매도 있다. 이유: 자동 매매 화면(#397)의 매매 표가 p*와 하한을 보이고, 데모의 `GET /v1/trader`가 챔피언과 관문 진행(#400)을 보이게.
 
 > **바뀜** (2026-10-30, #413): `exit.reason`과 `orders[].purpose`는 `take_profit`, `stop_loss`, `time`(과 `entry`)이었다 → `pause`, `daily_limit`, `cumulative_limit`도 있다. `entry.quantity`는 주문 가능 현금도 넘지 않는다. 이유: 손실 한도와 화면의 정지가 열린 포지션을 바로 판다(#396).
 
@@ -1392,6 +1395,7 @@ KRX 마감 흐름 화면이 읽는 그날의 마감 리밸런싱 수요다(`clos
 - `gate`(#400, 설계 14장 "실전 관문"): 실전 관문의 진행이다. 챔피언(`policy`)의 모의 기록 날 수(`days`, 도전 정책이었을 때를 포함), 필요한 날 수(`required`, 20), 날마다 순손익(매매 없는 날 0, 원)의 평균(`mean`)과 그 하한(`low`, 양쪽 `level` 95%, 겹침 H = 1의 거래일 단위 t. 2일 미만이면 `null`), 넘었는지(`passed`: `days` ≥ `required`이고 `low` > 0). 첫 챔피언 전에는 `policy`가 `null`, `days`가 0이다. 화면의 "모의 12/20일, 하한 −0.3%"의 비율은 `low` ÷ `capital`이다. 관문을 넘었다고 실전 주문이 나가지는 않는다(`live` 모드는 #408).
 - `policies`(#400): 챔피언과 지금 도는 도전 정책(셋까지, 오래된 것부터). `status`는 `champion`이나 `challenger`다. `paper`는 그 정책의 모의 기록이다: 처음과 마지막 거래일(`since`, `last`), 날 수, 매매 수(청산한 것), 순손익 합(원), 날마다 평균과 그 95% 하한. `promotion`은 도전 정책만: 챔피언과 함께 돈 거래일(`days`, 챔피언이 장중에 멈춘 날은 뺀다), 필요한 날 수(`required`, 10), 이 날 수까지 이기지 못하면 그 밤에 내려진다(`until`, 20), 날마다 (도전 − 챔피언) 순손익의 평균과 하한(`level`은 도전 정책 수 `challengers`로 Bonferroni 보정한 양쪽 신뢰수준: 1 − 0.05 ÷ 도전 정책 수), 지금 판정하면 이기는지(`passed`)와 아니면 왜인지(`why`: `few_days` 날 수 부족, `not_above` 하한 ≤ 0). 실제 교체는 장이 끝난 뒤 밤 작업이 한다(설계 14장 "도전 정책과 승격"). 오늘 밤 자리를 받은 도전 정책도 다음 거래일부터 돌기 전에 여기 있다(기록 0일). 자리를 기다리는 정책은 `GET /v1/trader/policies`의 `waiting`이다.
 - trader가 상태를 쓴 적이 없거나 저장소가 없으면 `alive`가 거짓, `controls`가 비고 나머지는 모두 `null`이다(`gate`는 0일, `policies`는 빈 목록).
+- 데모 엔진(`krx-quant demo-engine`, #397)에는 10:30의 실전 trader가 있다: 10:05에 시작해 돌고(`running`), 아침의 마지막 매매(10:27 진입)를 들고 있다. 오늘·누적 손익은 그날 실전으로 청산한 매매 셋과 그 포지션의 평가 손익이고, `controls`는 10-08 화면의 새 진입 정지와 10-12 08:41 서버의 재개다(둘 다 읽힘). 값은 trader의 코드(`limits.Guard`, `PaperTrader`)가 데모의 호가 위에서 쓴 것이다(`demo.write_demo_trader`). 속도를 준 데모(`--pace`)도 처음부터 10:30의 상태를 주므로, 데모 시계가 10:29:45에 닿을 때까지 `alive`가 거짓이다. 데모에 정지를 보내면 엔진처럼 쓰지만 읽을 trader가 없어 `applied_at`이 `null`로 남고 `status`도 그대로다. `champion`은 1, `gate`는 정책 1의 모의 기록 2일(10-08, 10-12. 10-08은 화면의 정지로 멈춘 날)이고, `policies`에 도전 정책 2(10-12부터, 1일, `promotion.why`가 `few_days`)가 있다.
 
 ### `GET /v1/trader/days?from=YYYY-MM-DD&to=YYYY-MM-DD` (#396)
 
@@ -1411,6 +1415,7 @@ trader가 돈 거래일마다의 장부다. `from`부터 `to`까지(KST 날짜, 
 - `daily`: 그날 손익(실현 + 평가)의 가장 낮은 값(`worst`)과 그것이 하루 한도(`limit`, 원)에서 쓴 몫(`used`).
 - `cumulative`: 그날 마지막의 누적 손익(`net`), 그날 가장 낮았던 누적 손익(`worst`)과 그것이 누적 한도에서 쓴 몫.
 - `status`: 그날 마지막의 상태(`GET /v1/trader`의 `status`). `halt`: 그날 닿은 한도(`daily_limit`, `cumulative_limit`), 없으면 `null`. `updated_at`: 그날 장부를 마지막으로 쓴 때.
+- 데모 엔진(#397)에는 모의의 10-07·10-08·10-12(10:05에 실전으로 바뀔 때까지)와 실전의 10-12 장부가 있다. 10-08은 화면의 새 진입 정지로 `entries_paused`로 끝났다. 가장 낮은 손익(`worst`)은 trader처럼 매매를 든 동안 받은 호가마다의 평가로 센다: 10-07의 매매는 익절로 끝났지만 그 전에 −4,664원까지 내려갔다. 지난날의 `updated_at`은 trader가 날을 넘긴 그 밤 0시다.
 
 ### `POST /v1/trader/pause` (#396)
 
