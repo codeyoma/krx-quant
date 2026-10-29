@@ -549,6 +549,29 @@ KRX 야간 파생상품시장의 KOSPI200 선물 최근월물을 녹화한다. �
 
 > **바뀜** (2026-10-21, #342): "확인하지 못한 것 ⚠: 이 앱키로 실제로 오는지, 키 형식, 체결 필드 수, 시각 표기, 같은 밤 주간 선물 피드에도 오는지, `fo_cme_code.mst`의 내용" → 위 실측. 이유: 2026-10-20 밤 `probe-night-264`.
 
+## 주문 (#403)
+
+자동 매매(#393)의 trader가 쓸 KIS 계좌 호출이다. 모두 `src/krx_quant/kis_orders.py`에 있다. 주문 TR ID와 주문 엔드포인트는 이 문서에 적지 않는다: 저장소 검사(`scripts/check_forbidden.py`)가 그 파일 밖에서는 막는다. 아래는 그 파일의 상수 이름이다.
+
+출처는 KIS 예제(koreainvestment/open-trading-api `examples_llm/domestic_stock`, 2026-10-29에 읽음)다. 모의투자 서버에서 재기 전이라 모두 ⚠다. 예약 작업 `probe-kis-orders-403`의 #403 댓글이 오면 고친다(운영 문서 2장 "KIS 모의투자 주문 확인 (#403)").
+
+- **서버와 키.** trader는 수집기와 다른 앱키(`KRX_TRADER_KIS_*`)를 쓴다. 모의투자 서버는 REST `https://openapivts.koreainvestment.com:29443`, WebSocket `ws://ops.koreainvestment.com:31000`이다. TR ID는 실전과 모의가 다르다(`kis_orders.Tr`: 모의는 `V`로 시작한다) ⚠. 시세 조회(`PRICE` `FHKST01010100`, `BOOK` `FHKST01010200`)는 둘이 같다 ⚠.
+
+| 호출 | 상수(TR ID, 경로) | 보내는 것 | 받는 것 ⚠ |
+|---|---|---|---|
+| 현금 매수·매도(주식주문(현금)) | `BUY`, `SELL`, `ORDER_PATH`(POST) | `CANO`, `ACNT_PRDT_CD`, `PDNO`, `ORD_DVSN` `00`(지정가), `ORD_QTY`, `ORD_UNPR`, `EXCG_ID_DVSN_CD` `KRX`, 매도는 `SLL_TYPE` `01`(일반매도) | `output`: `KRX_FWDG_ORD_ORGNO`(KRX 전송 주문조직번호), `ODNO`(주문번호), `ORD_TMD`(주문 시각) |
+| 취소(주식주문(정정취소)) | `CANCEL`, `CANCEL_PATH`(POST) | 위 계좌, `KRX_FWDG_ORD_ORGNO`, `ORGN_ODNO`(원주문번호), `RVSE_CNCL_DVSN_CD` `02`(취소), `QTY_ALL_ORD_YN` `Y`(남은 수량 전부), `ORD_QTY` `0`, `ORD_UNPR` `0` | 주문과 같은 `output`(취소 주문의 번호) |
+| 주식일별주문체결조회 | `FILLS`, `FILLS_PATH`(GET) | 계좌, 날짜, `PDNO`, `ODNO`, `CCLD_DVSN` `00`(전체), `INQR_DVSN` `01`(정순), 다음 쪽은 `CTX_AREA_FK100`·`CTX_AREA_NK100`과 `tr_cont` `N` | `output1` 주문마다 한 행: `ord_qty`, `tot_ccld_qty`(체결 수량), `rmn_qty`(남은 수량), `avg_prvs`(체결 평균가), `cncl_yn`, `orgn_odno` 등. `output2` 합계. 모의는 한 쪽에 15행(실전 100) |
+| 주식잔고조회 | `BALANCE`, `BALANCE_PATH`(GET) | 계좌, `INQR_DVSN` `02`(종목별), `PRCS_DVSN` `00`(당일 매매 포함) | `output1` 종목마다(`hldg_qty`, `ord_psbl_qty`, `pchs_avg_pric` 등), `output2` 계좌 합계(`dnca_tot_amt` 예수금 등). 모의는 한 쪽에 20행(실전 50) |
+| 매수가능조회 | `ORDERABLE`, `ORDERABLE_PATH`(GET) | 계좌, `PDNO`, `ORD_UNPR`, `ORD_DVSN`(`00` 지정가, `01` 시장가) | `output`: `ord_psbl_cash`, `nrcvb_buy_amt`·`nrcvb_buy_qty`(미수 없이), `max_buy_amt`·`max_buy_qty`. KIS 예제는 종목 전액 매수 수량은 시장가로 물으라고 한다 |
+| 주식정정취소가능주문조회 | `CANCELABLE`, `CANCELABLE_PATH`(GET) | 계좌 | KIS 예제는 실전 TR ID만 있다. 모의투자에서 되는지는 프로브가 본다 |
+| 실시간 체결 통보 | `FILL_NOTICE`(`H0STCNI0` 실전, `H0STCNI9` 모의) | WebSocket 구독, `tr_key`는 HTS ID | 아래 |
+
+- **체결 통보.** 구독 응답의 `body.output`에 `key`(32자)와 `iv`(16자)가 오고, 데이터 프레임(`1|H0STCNI9|001|...`)의 넷째 칸이 그 키로 암호화돼 있다: base64, AES-256-CBC, PKCS#7(`kis_orders.decrypt`) ⚠. 푼 값은 `^`로 나뉜 26칸이다(`FILL_NOTICE_COLUMNS`): `CUST_ID`, `ACNT_NO`, `ODER_NO`, `OODER_NO`, `SELN_BYOV_CLS`(01 매도, 02 매수), `RCTF_CLS`(0 정상, 1 정정, 2 취소), `ODER_KIND`, `ODER_COND`, `STCK_SHRN_ISCD`, `CNTG_QTY`, `CNTG_UNPR`, `STCK_CNTG_HOUR`, `RFUS_YN`(0 승인, 1 거부), `CNTG_YN`(1 주문·정정·취소·거부의 접수, 2 체결), `ACPT_YN`(1 주문 접수, 2 확인, 3 취소), `BRNC_NO`, `ODER_QTY`, `ACNT_NAME`, `ORD_COND_PRC`, `ORD_EXG_GB`, `POPUP_YN`, `FILLER`, `CRDT_CLS`, `CRDT_LOAN_DATE`, `CNTG_ISNM40`, `ODER_PRC` ⚠. 코드의 뜻은 KIS 문서의 기억이다 ⚠.
+- **주문을 다시 보내지 않는다.** 주문은 POST라 aiohttp가 다시 보내지 않고, `kis_orders`도 다시 보내지 않는다. 연결이 끊겨 응답이 없으면 주문이 들어갔는지는 조회로 안다.
+- **모의 서버의 토큰과 초당 한도.** 접근토큰은 24시간, 1분에 한 번 발급된다고 알려져 있다. 모의 서버의 초당 한도는 실전(20건)보다 낮다고 알려져 있다. 프로브가 둘 다 잰다 ⚠.
+- **장 시간.** 모의투자 서버는 장중에만 체결한다. 그래서 프로브는 장중 작업이다(거래일 10:00) ⚠.
+
 ## 피드별 메모
 
 - **달러선물(`H0CFCNT0`)**: KIS 상품선물 실시간체결가다. 컬럼 50개는 KOSPI200 선물(`H0IFCNT0`)과 같다. 가격 문자열에 부동소수 잡음이 섞여 온다(예: `1337.20000117`). 정규화할 때 소수 둘째 자리로 반올림한다.
