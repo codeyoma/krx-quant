@@ -1383,7 +1383,7 @@ def test_the_policy_is_fitted_again_every_trading_night_and_posted_to_400() -> N
     assert REFIT_POLICY.name == "refit-policy-399"
     assert REFIT_POLICY.command == ("refit-policy",)
     assert REFIT_POLICY.timeout == timedelta(minutes=10), "short: the simulations and pre-validations follow"
-    assert [t.issue for t in REFIT_POLICY.targets] == [400]
+    assert [t.issue for t in REFIT_POLICY.targets] == [402], "#400 closed: the nights' report's ticket"
     assert (REFIT_POLICY.label, REFIT_POLICY.unlabel) == ((), ()), "a routine night's log: no label changes"
     assert REFIT_POLICY.session is None, "a night's job: after the nightly training"
     first = next(i for i, j in enumerate(JOBS) if j.name.startswith(("prevalidate-", "simulate-")))
@@ -1424,12 +1424,13 @@ async def test_the_policy_refit_job_runs_the_real_command(
             commit=COMMIT,
         )
         await asyncio.wait_for(scheduler.run_night(FRIDAY), 25)
-    body = hub.bodies(400)[-1]
+    body = hub.bodies(402)[-1]
     assert "**예약 작업 `refit-policy-399`**" in body
+    assert "도전 정책 판정 (#400)" in body and "챔피언이 아직 없다" in body, "judged first: no champion yet"
     assert "정책 맞추기 (#399): 정책 1 · 챔피언(처음 맞춘 정책)" in body
     assert "매매할 칸: 없음 (비용 지도를 통과한 칸이 없다)" in body
     assert state.jobs["refit-policy-399"].exit_code == 0
-    assert hub.labels.get(400, set()) == set(), "no label changed"
+    assert hub.labels.get(402, set()) == set(), "no label changed"
 
 
 def test_the_dividend_probe_runs_once_on_the_first_night_and_posts_to_310() -> None:

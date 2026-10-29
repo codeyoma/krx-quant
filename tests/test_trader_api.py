@@ -25,6 +25,7 @@ from tests.replay_events import at as replay_at
 from tests.replay_events import run
 from tests.test_trader_refit import DAYS, write_five
 from tests.trader_doubles import (
+    BARRIER,
     CALENDAR,
     FEE,
     AskPause,
@@ -35,6 +36,8 @@ from tests.trader_doubles import (
     Read,
     Tick,
     at,
+    keep,
+    policy_cell,
     quote,
 )
 
@@ -265,9 +268,12 @@ async def policies_answer(scratch: Path, state: Path | None, query: str = "") ->
 
 async def test_the_policies_newest_first_the_champion_marked(tmp_path: Path) -> None:
     """Two nights' re-fits of the same five predictions: the first the champion, the second a
-    challenger with the same values."""
+    challenger in a running slot, its grid's λ a quarter (the same values would not be kept, #400)."""
     write_five(tmp_path)
-    for night in ("22:31:00", "22:45:00"):
+    for night, grid in (
+        ("22:31:00", Grid(min_trades=1)),
+        ("22:45:00", Grid(min_trades=1, kelly_fractions=(0.25,))),
+    ):
         refit_from(
             DAYS,
             tmp_path / ENGINE_DB,
@@ -276,7 +282,7 @@ async def test_the_policies_newest_first_the_champion_marked(tmp_path: Path) -> 
             capital=CAPITAL,
             fee_rate=FEE,
             target_version=TARGET_VERSION,
-            grid=Grid(min_trades=1),
+            grid=grid,
             now=at(night),
         )
 
@@ -289,7 +295,10 @@ async def test_the_policies_newest_first_the_champion_marked(tmp_path: Path) -> 
     assert [(p["version"], p["status"]) for p in body["policies"]] == [(2, "challenger"), (1, "champion")]
     assert [p["version"] for p in page["policies"]] == [2]
     challenger, champion = body["policies"]
-    assert challenger["cells"] == champion["cells"]
+    assert [{**c, "kelly_fraction": 0.5, "fitted": None} for c in challenger["cells"]] == [
+        {**c, "fitted": None} for c in champion["cells"]
+    ], "but λ"
+    assert (challenger["admitted_at"], champion["admitted_at"]) == ("2026-10-14T22:45:00+09:00", None)
     [cell] = champion["cells"]
     assert (cell["kind"], cell["predictor"], cell["threshold"], cell["kelly_fraction"]) == (
         "barrier",
@@ -298,7 +307,9 @@ async def test_the_policies_newest_first_the_champion_marked(tmp_path: Path) -> 
         0.5,
     )
     assert champion["fit"]["result"]["net"] == 7_000
-    assert body["champions"] == [{"at": "2026-10-14T22:31:00+09:00", "version": 1, "reason": FIRST}]
+    assert body["champions"] == [
+        {"at": "2026-10-14T22:31:00+09:00", "version": 1, "reason": FIRST, "detail": None}
+    ]
 
 
 async def test_no_policies_before_the_first_fit(tmp_path: Path) -> None:
@@ -364,3 +375,41 @@ async def test_a_store_the_nightly_fit_made_before_the_trader_s_first_start_answ
     status, days = answers["/v1/trader/days"]
     assert (status, days["days"]) == (200, [])
     check("trader_days", days)
+
+
+async def test_the_challengers_paper_trades_their_records_and_the_gate_through_the_api(
+    tmp_path: Path,
+) -> None:
+    """#400: policy 1 the champion (θ 0.8), policy 2 a challenger (θ 0.6) on 10-14; the day's
+    trades are the challenger's alone. The trades route gives the champion's unless asked for a
+    policy's; the trader's state gives the policies running, their records and the gate."""
+    keep(tmp_path, at("2026-10-12 22:31:00"), policy_cell(BARRIER, 0.8))
+    keep(tmp_path, at("2026-10-13 22:31:00"), policy_cell(BARRIER, 0.6))
+    Day(tmp_path, desk=True).run(DAY)
+    engine = await run(tmp_path / "replay.db", [], until=replay_at("09:00:00"))
+    async with TestClient(TestServer(create_app(engine, state_dir=tmp_path))) as client:
+        answers = {}
+        for route in ("/v1/trader/trades", "/v1/trader/trades?policy=2", "/v1/trader", "/v1/trader/policies"):
+            response = await client.get(route)
+            assert response.status == 200, route
+            answers[route] = await response.json()
+
+    check("trader_trades", answers["/v1/trader/trades"])
+    assert answers["/v1/trader/trades"]["trades"] == [], "the champion bought nothing"
+    challenger = answers["/v1/trader/trades?policy=2"]["trades"]
+    check("trader_trades", answers["/v1/trader/trades?policy=2"])
+    assert [(t["policy"], t["champion"]) for t in challenger] == [(2, False)] * 3
+    state = answers["/v1/trader"]
+    check("trader", state)
+    assert (state["champion"], state["gate"]["policy"], state["gate"]["days"]) == (1, 1, 1)
+    assert [(p["version"], p["status"], p["paper"]["days"]) for p in state["policies"]] == [
+        (1, "champion", 1),
+        (2, "challenger", 1),
+    ]
+    assert state["policies"][1]["paper"]["trades"] == 2, "the open trade is not counted yet"
+    policies = answers["/v1/trader/policies"]
+    check("trader_policies", policies)
+    assert [(p["version"], p["status"], p["paper"]["days"]) for p in policies["policies"]] == [
+        (2, "challenger", 1),
+        (1, "champion", 1),
+    ]

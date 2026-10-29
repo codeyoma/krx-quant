@@ -113,7 +113,17 @@ from krx_quant.trader import (
     THRESHOLD,
 )
 from krx_quant.trader.cells import Cell, Signal
-from krx_quant.trader.limits import HEARTBEAT, RUNNING, SALE, SNAPSHOT_SECONDS, Guard, Limits, Notify
+from krx_quant.trader.limits import (
+    HEARTBEAT,
+    RUNNING,
+    SALE,
+    SNAPSHOT_SECONDS,
+    Guard,
+    Holds,
+    Limits,
+    Notify,
+    Unlimited,
+)
 from krx_quant.trader.quotes import BestQuote
 from krx_quant.trader.selection import Pick, Selection
 from krx_quant.trader.store import Entry, Exit, OpenTrade, TraderStore, iso
@@ -281,7 +291,13 @@ class PaperTrader:
     pauses, resumes and re-arms asked for (``on_controls``) and the clock (``on_time``), into
     ``store``. ``sessions`` gives a day's session (the market calendar's); ``started_at`` is when
     this run began; ``notify`` sends a notice to Telegram (#396). Until the first picks it trades
-    nothing."""
+    nothing.
+
+    The champion's book by default: the trades the trader makes, which its limits and pauses hold
+    (``guard``), with its state and ledger. With ``challenger`` (#400, ``desk.Desk``), that
+    challenger policy's book: the same rules on the same quotes, in paper, held by no limit nor pause
+    (``limits.Unlimited``, buying on ``account``'s cash), writing no state; its decisions and trades
+    carry its version."""
 
     def __init__(
         self,
@@ -291,29 +307,41 @@ class PaperTrader:
         started_at: datetime,
         mode: str = PAPER,
         notify: Notify | None = None,
+        *,
+        challenger: int | None = None,
+        account: Callable[[], float] | None = None,
     ) -> None:
         self.store = store
         self.rules = rules
         self._sessions = sessions
         self._started_at = started_at
         self.mode = mode
-        self.guard = Guard(store, mode, rules.limits, started_at, notify or (lambda text: None))
+        self.challenger = challenger
+        self._guard: Guard | None = None
+        self.holds: Holds
+        if challenger is None:
+            self._guard = Guard(store, mode, rules.limits, started_at, notify or (lambda text: None))
+            self.holds = self._guard
+        else:
+            self.holds = Unlimited(account or (lambda: 0.0))
         # A sale the status asks for sells at the first quote received after this (#396).
         self._sell_after: datetime | None = None
         self._written: tuple[datetime, dict[str, Any]] | None = None  # the state last written
         self._dirty = True  # a change to write at once
         self._selection: int | None = None  # the picks' row in the store
-        self._policy: int | None = None  # the policy version the picks are under (#399)
+        self._policy: int | None = challenger  # the policy version the picks are under (#399)
         self._picks: dict[Cell, tuple[int, Pick]] = {}  # each picked cell's rank and pick
         self._special: list[Window] = []
         self._read: dict[datetime, set[Cell]] = {}  # the cells read of each recent bar close
         self._pending: dict[datetime, list[_Candidate]] = {}  # rises waiting, by bar close
         self._last: BestQuote | None = None  # the latest quote received
         self._waiting: _Waiting | None = None
-        self._open: OpenTrade | None = store.open_trade(mode)
+        self._open: OpenTrade | None = store.open_trade(mode, challenger)
         if self._open is not None:
-            log.info("trader: going on with trade %s, open since before this start", self._open.id)
-        dropped = store.drop_unfilled(mode, RESTARTED)
+            log.info("%s going on with trade %s, open since before this start", self._whose(), self._open.id)
+        if challenger is not None:
+            return
+        dropped = store.drop_unfilled(mode, RESTARTED)  # every book's: none is waiting at a start
         if dropped:
             log.info("trader: %s buy(s) waiting for a quote when the trader stopped: given up", dropped)
         if self.guard.status != RUNNING:
@@ -323,8 +351,34 @@ class PaperTrader:
         self.write(started_at)
 
     @property
+    def guard(self) -> Guard:
+        """The champion's limits and pauses (#396); a challenger's book has none."""
+        if self._guard is None:
+            raise AttributeError(f"challenger {self.challenger}'s book has no limits")
+        return self._guard
+
+    @property
     def status(self) -> str:
-        return self.guard.status
+        return self.holds.status
+
+    @property
+    def policy(self) -> int | None:
+        """The policy version it trades under (None: before the first champion)."""
+        return self._policy
+
+    def trades(self, cell: Cell) -> bool:
+        """Whether ``cell`` is among those it picked."""
+        return cell in self._picks
+
+    @property
+    def busy(self) -> bool:
+        """Whether it holds a position or waits to buy one."""
+        return self._busy()
+
+    def _whose(self) -> str:
+        """Its log lines' start: the champion's as they were (``trader: bought …``), a challenger's
+        with its version (``trader: challenger N bought …``)."""
+        return "trader:" if self.challenger is None else f"trader: challenger {self.challenger}"
 
     @property
     def cells(self) -> list[Cell]:
@@ -335,9 +389,11 @@ class PaperTrader:
         """The cells to trade from ``at`` on, kept in the store; a rise waiting of a cell no longer
         picked is skipped (``not_picked``)."""
         self._selection = self.store.add_selection(self.mode, at, selection)
-        self._policy = selection.policy
+        self._policy = selection.policy if self.challenger is None else self.challenger
         self._picks = {p.cell: (rank, p) for rank, p in enumerate(selection.picks)}
-        if selection.picks:
+        if self.challenger is not None:
+            log.info("trader: challenger %s in paper: %s", self.challenger, selection.describe())
+        elif selection.picks:
             log.info("trader: trading %s cell(s): %s", len(selection.picks), selection.describe())
         else:
             log.info("trader: trading no cell until the next pick: %s", selection.describe())
@@ -351,6 +407,15 @@ class PaperTrader:
             else:
                 del self._pending[close]
         self._settle(at)
+
+    def retire(self, at: datetime) -> None:
+        """A challenger no longer run (#400: dropped, or promoted, its paper book giving way to the
+        champion's): it picks nothing more, a rise waiting is skipped (``not_picked``); a buy waiting
+        for its quote and an open position go on to their ends."""
+        self._picks = {}
+        for close in list(self._pending):
+            for c in self._pending.pop(close):
+                self._skip(c.signal, at, NOT_PICKED)
 
     def on_special(self, windows: Sequence[Window]) -> None:
         """The special windows the engine knows of now (the latest of each). A buy decided but not
@@ -366,7 +431,7 @@ class PaperTrader:
         """A prediction of a cell, read at ``at``; one already decided on (a restart) is passed over."""
         cell = Cell(signal.kind, signal.predictor)
         self._read.setdefault(signal.bar_close, set()).add(cell)
-        if self.store.decided(self.mode, signal.kind, signal.predictor, signal.prediction_id):
+        if self.store.decided(self.mode, self._policy, signal.kind, signal.predictor, signal.prediction_id):
             return
         if cell not in self._picks:
             self._skip(signal, at, NOT_PICKED)
@@ -403,7 +468,7 @@ class PaperTrader:
         if status in SALE and quote.received_at > (self._sell_after or self._started_at):
             self._exit(trade, quote.received_at, quote.bid, SALE[status], quote)
             return
-        reached = self.guard.mark(unrealized(trade, quote.bid, self.rules.fee_rate), quote.received_at)
+        reached = self.holds.mark(unrealized(trade, quote.bid, self.rules.fee_rate), quote.received_at)
         if reached is not None:
             self._dirty = True
             self._enforce(quote.received_at, quote)
@@ -411,7 +476,9 @@ class PaperTrader:
     def on_controls(self, now: datetime) -> None:
         """The pauses, resumes and re-arms asked for and not read yet (#396), read at ``now``, in
         the order asked: the status they make holds from now (a sale it asks for at the next
-        quote)."""
+        quote). The champion's book alone: no pause holds a challenger's."""
+        if self._guard is None:
+            return
         controls = self.store.controls(applied=False)
         for control in controls:
             self.guard.apply(control, now)
@@ -443,8 +510,8 @@ class PaperTrader:
     def on_time(self, now: datetime) -> None:
         """The clock: a rise that waited long enough for the cells ranked above it is decided, a
         buy whose quote did not come is given up, a time barrier passed is sold on the last quote
-        before it; a new day's figures (#396); the state written."""
-        if self.guard.roll(now):
+        before it; a new day's figures (#396); the champion's state written."""
+        if self.holds.roll(now):
             self._dirty = True
         self._settle(now)
         grace = self.rules.grace
@@ -458,7 +525,8 @@ class PaperTrader:
                 self._exit(trade, trade.time_barrier, standing.bid, TIME, standing)
         for close in [c for c in self._read if c < now - timedelta(hours=1) and c not in self._pending]:
             del self._read[close]
-        self.write(now, force=False)
+        if self._guard is not None:
+            self.write(now, force=False)
 
     def write(self, now: datetime, force: bool = True) -> None:
         """The state (``state``) and the day's ledger into the store: at once if something changed
@@ -606,7 +674,8 @@ class PaperTrader:
         _, pick = self._picks[candidate.cell]
         decision = self._add_decision(signal, at, BUY, None)
         log.info(
-            "trader: buying on %s %s of %s (p %.3f): target %s, stop %s, until %s, %.0f%% of the capital",
+            "%s buying on %s %s of %s (p %.3f): target %s, stop %s, until %s, %.0f%% of the capital",
+            self._whose(),
             signal.kind,
             signal.predictor,
             signal.bar_close.strftime("%H:%M"),
@@ -635,6 +704,7 @@ class PaperTrader:
             action,
             reason,
             self._selection,
+            self._policy,
         )
 
     def _buy(self, waiting: _Waiting, quote: BestQuote) -> None:
@@ -653,7 +723,7 @@ class PaperTrader:
             self._give_up(waiting, TARGET_REACHED)
             return
         pick = waiting.pick
-        cash = self.rules.capital + self.guard.realized_all  # nothing open: one at a time
+        cash = self.rules.capital + self.holds.realized_all  # nothing open: one at a time
         quantity = shares(pick.fraction, self.rules.capital, quote.ask, cash, self.rules.fee_rate)
         if quantity < 1:
             self._give_up(waiting, NO_SHARES)
@@ -693,15 +763,16 @@ class PaperTrader:
                 kelly=pick.kelly,
                 fraction=pick.fraction,
                 policy_id=self._policy,
+                champion=self.challenger is None,
             ),
         )
         self._dirty = True
-        log.info("trader: bought %s at %s (trade %s)", quantity, quote.ask, self._open.id)
+        log.info("%s bought %s at %s (trade %s)", self._whose(), quantity, quote.ask, self._open.id)
 
     def _give_up(self, waiting: _Waiting, reason: str) -> None:
         self._waiting = None
         self.store.unfilled(waiting.decision, reason)
-        log.info("trader: no buy on %s (%s)", waiting.signal.bar_close.strftime("%H:%M"), reason)
+        log.info("%s no buy on %s (%s)", self._whose(), waiting.signal.bar_close.strftime("%H:%M"), reason)
 
     def _follow(self, trade: OpenTrade, quote: BestQuote, standing: BestQuote | None) -> None:
         if quote.received_at >= trade.time_barrier:
@@ -734,7 +805,7 @@ class PaperTrader:
         paid = costs(trade.entry_price, price, trade.quantity, self.rules.fee_rate)
         # The day the exit is counted in, rolled before the exit is kept: a day read again after it
         # would hold it already (an exit the clock had not reached the day of yet, #396).
-        if self.guard.roll(at):
+        if self.holds.roll(at):
             self._dirty = True
         self.store.exit(trade, Exit(at, price, reason, paid.sell_fee, paid.tax, quote.received_at))
         self._open = None
@@ -742,7 +813,13 @@ class PaperTrader:
         self._dirty = True
         net = (price - trade.entry_price) * trade.quantity - trade.buy_fee - paid.sell_fee - paid.tax
         log.info(
-            "trader: sold %s at %s (%s, trade %s): net %.0f won", trade.quantity, price, reason, trade.id, net
+            "%s sold %s at %s (%s, trade %s): net %.0f won",
+            self._whose(),
+            trade.quantity,
+            price,
+            reason,
+            trade.id,
+            net,
         )
-        if self.guard.exited(net, at) is not None:  # its realized loss reached a limit
+        if self.holds.exited(net, at) is not None:  # its realized loss reached a limit
             self._enforce(at)

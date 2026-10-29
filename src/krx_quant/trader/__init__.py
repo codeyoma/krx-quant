@@ -37,9 +37,16 @@ will through its KIS order module (#404).
   after the nightly training, the scheduled job ``refit-policy-399`` fits a new version on the
   stored predictions and answers of the cost map's 20 days, simulating the trader's trades on the
   answers' paths at each point of a small grid. The first is the champion, the later ones
-  challengers only (#400 runs and promotes them). At each pick the trader trades the champion's
-  cells among those the cost map passes, in its order, at its θ and λ; before the first champion,
-  the cost map's cells at ``KRX_TRADER_THRESHOLD`` and ``KELLY_FRACTION``.
+  challengers. At each pick the trader trades the champion's cells among those the cost map
+  passes, in its order, at its θ and λ; before the first champion, the cost map's cells at
+  ``KRX_TRADER_THRESHOLD`` and ``KELLY_FRACTION``.
+- **Challengers** (``desk.py``, ``promotion.py``, #400): up to three run in paper beside the
+  champion from the next trading day, each in its own book on the same predictions and quotes,
+  held by no limit nor pause; trades and decisions are split by policy version. The nightly job
+  promotes one that beat the champion on at least ten common trading days (the day-level lower
+  bound of challenger − champion net P&L above 0, Bonferroni over the challengers), after the
+  market only. The live gate: the champion's paper record of 20 trading days at least, the
+  day-level lower bound of its daily net P&L above 0 (measured; the live mode is #408's).
 - **Limits and pauses** (``limits.py``, #396): the loss is the net realized P&L plus the open
   position's at the best bid, after its costs; a day's of 10% of the capital stops the day (sold
   at once, trading again the next trading day), a cumulative one of 20% stops the trader until
@@ -47,8 +54,9 @@ will through its KIS order module (#404).
   that and a sale now) last until ``krx-quant trade resume`` on the server. They hold the trades
   the trader makes, the champion's: no policy changes them.
 - **Store** (``store.py``): its picks of the cells, decisions, orders, fills and trades, each with
-  its mode (``paper``), the policy versions, the pauses, resumes and re-arms asked for, the
-  halts, the trader's state now and each day's ledger; the Engine API reads it
+  its mode (``paper``) and its book's policy, the policy versions and the days each ran, the
+  pauses, resumes and re-arms asked for, the halts, the trader's state now and each day's ledger;
+  the Engine API reads it
   (``GET /v1/trader``, ``/v1/trader/trades``, ``/v1/trader/days``, ``/v1/trader/policies``) and
   writes a pause into it (``POST /v1/trader/pause``), nothing else.
 """

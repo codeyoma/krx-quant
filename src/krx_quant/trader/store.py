@@ -6,8 +6,10 @@ by the nightly re-fit (#399, from the engine's container).
   cells picked in their rank with what they were picked on (p*, the hit rate's lower bound, the
   Kelly fraction), every cell considered with its verdict, and, when none trades, why (no cell
   passes, or the cost map could not be read);
-- ``decisions``: each prediction of a picked cell the trader read, and what it did: bought, or
-  why not (``paper.py``'s reasons), under which pick;
+- ``decisions``: each prediction of a picked cell a book read (#400: the champion's and each
+  challenger's), and what it did: bought, or why not (``paper.py``'s reasons), under which pick
+  and policy; unique by (mode, policy, kind, predictor, prediction), a store from before made
+  again so (``_key_decisions``);
 - ``trades``: each position, from its entry to its exit: the cell and its pick (the predictor's
   role, p*, the hit rate's lower bound, the Kelly f* and the fraction bought), the prediction and
   its probability, the reference price, target, stop and time barrier, the entry and the exit
@@ -18,8 +20,12 @@ by the nightly re-fit (#399, from the engine's container).
   cancelled), and the broker's order number (none in paper);
 - ``fills``: each order's fills, with the quote a paper fill was made on;
 - ``policies`` and ``champions`` (#399, ``policy.py``): each policy version and each change of the
-  champion, written by the nightly re-fit (``refit.py``); a pick and a trade carry the policy
-  version they were made under (``policy_id``; null before the first champion);
+  champion, written by the nightly re-fit (``refit.py``) and its promotion (#400,
+  ``promotion.py``); a pick and a trade carry the policy version they were made under
+  (``policy_id``; null before the first champion), a trade whether the champion's book made it
+  (``champion``, #400: ``CHAMPION_TRADE``);
+- ``policy_days`` (#400): each trading day a policy ran in the trader (its paper record's days),
+  whether it was the champion and, if so, stopped in the session;
 - ``controls`` (#396): each pause, resume and re-arm asked for, by whom (``api``: the screen's
   pause through the Engine API; ``cli``: ``krx-quant trade resume|rearm`` on the server), and when
   the trader read it (null until it has: it reads them every ``CONTROL_SECONDS``);
@@ -34,8 +40,8 @@ same tables (a pause and a resume hold whatever the mode). The trader writes it,
 re-fit its policies; the Engine API reads it read-only (``read_trades``, ``read_trader``,
 ``read_days``, ``policy.read_policies``) and writes a pause into it (``request_pause``), and
 ``krx-quant trade resume|rearm`` a resume or a re-arm: nothing else. Times are ISO 8601 strings in
-KST, which sort in time order. The columns #395 and #399 added (``_ADDED``) are added to a store
-made before them, null in its rows.
+KST, which sort in time order. The columns #395, #399 and #400 added (``_ADDED``) are added to a
+store made before them, null in its rows.
 """
 
 from __future__ import annotations
@@ -50,12 +56,38 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from krx_quant.feeds.base import KST
-from krx_quant.trader import policy
+from krx_quant.trader import policy, promotion
 
 if TYPE_CHECKING:
     from krx_quant.trader.selection import Selection
 
 DB_NAME = "trader.sqlite3"
+
+# A book's decisions (#400: the champion's and each challenger's), unique by the policy too
+# (``_key_decisions``): one prediction is read by every book that trades its cell.
+_DECISIONS = """
+CREATE TABLE IF NOT EXISTS {name} (  -- each prediction of a picked cell a book read, and what was done
+    id INTEGER PRIMARY KEY,
+    mode TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    predictor TEXT NOT NULL,
+    prediction_id INTEGER NOT NULL,    -- predictions.id (direction) or kind_predictions.id, engine DB
+    bar_close TEXT NOT NULL,
+    displayed_at TEXT NOT NULL,
+    decided_at TEXT NOT NULL,          -- when the trader read it
+    probability REAL,                  -- the rise's (up, up_first); null without a forecast
+    action TEXT NOT NULL,              -- buy or skip
+    reason TEXT,                       -- skip: why not; buy: why it did not fill; null once filled
+    trade_id INTEGER REFERENCES trades (id),
+    selection_id INTEGER REFERENCES selections (id),  -- the pick in force; null: none yet (#395)
+    policy_id INTEGER REFERENCES policies (id)         -- the book's policy (#400); null: before the first
+);
+"""
+_DECISIONS_KEY = (
+    "CREATE UNIQUE INDEX IF NOT EXISTS decisions_by_prediction"
+    " ON decisions (mode, coalesce(policy_id, 0), kind, predictor, prediction_id)"
+)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (       -- each start of the trader
@@ -74,22 +106,7 @@ CREATE TABLE IF NOT EXISTS selections (  -- each pick of the cells from the cost
     reason TEXT,                       -- why no cell trades: no_pass, no_cost_map; null when one does
     detail TEXT                        -- why the cost map could not be read
 );
-CREATE TABLE IF NOT EXISTS decisions (  -- each prediction of a picked cell read, and what was done
-    id INTEGER PRIMARY KEY,
-    mode TEXT NOT NULL,
-    symbol TEXT NOT NULL,
-    kind TEXT NOT NULL,
-    predictor TEXT NOT NULL,
-    prediction_id INTEGER NOT NULL,    -- predictions.id (direction) or kind_predictions.id, engine DB
-    bar_close TEXT NOT NULL,
-    displayed_at TEXT NOT NULL,
-    decided_at TEXT NOT NULL,          -- when the trader read it
-    probability REAL,                  -- the rise's (up, up_first); null without a forecast
-    action TEXT NOT NULL,              -- buy or skip
-    reason TEXT,                       -- skip: why not; buy: why it did not fill; null once filled
-    trade_id INTEGER REFERENCES trades (id),
-    UNIQUE (mode, kind, predictor, prediction_id)
-);
+{decisions}
 CREATE TABLE IF NOT EXISTS trades (     -- a position, from its entry to its exit
     id INTEGER PRIMARY KEY,
     mode TEXT NOT NULL,
@@ -171,6 +188,15 @@ CREATE TABLE IF NOT EXISTS snapshot (   -- the trader's state now (#396): GET /v
     at TEXT NOT NULL,
     body TEXT NOT NULL                 -- JSON
 );
+CREATE TABLE IF NOT EXISTS policy_days (  -- each trading day a policy ran in the trader (#400)
+    mode TEXT NOT NULL,
+    policy_id INTEGER NOT NULL REFERENCES policies (id),
+    day TEXT NOT NULL,
+    champion INTEGER NOT NULL,         -- 1: it was the champion (its trades the trader's); 0: a challenger
+    stopped INTEGER NOT NULL,          -- 1: as the champion, paused or stopped by a limit in the session
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (mode, policy_id, day)
+);
 CREATE TABLE IF NOT EXISTS days (       -- each trading day's ledger (#396): GET /v1/trader/days
     mode TEXT NOT NULL,
     day TEXT NOT NULL,
@@ -189,10 +215,10 @@ CREATE TABLE IF NOT EXISTS days (       -- each trading day's ledger (#396): GET
 """
 
 # Columns added since the tables were first made (#395, #399): added to a store made before, null
-# in its rows.
+# in its rows. ``decisions`` takes its policy as it is made again (#400, ``_key_decisions``).
 _ADDED = {
     "selections": (
-        ("policy_id", "INTEGER REFERENCES policies (id)"),  # the champion applied (#399); null: none yet
+        ("policy_id", "INTEGER REFERENCES policies (id)"),  # the policy applied (#399); null: none yet
     ),
     "decisions": (
         ("selection_id", "INTEGER REFERENCES selections (id)"),  # the pick in force; null: none yet
@@ -205,16 +231,18 @@ _ADDED = {
         ("kelly", "REAL"),  # f*, uncut
         ("fraction", "REAL"),  # the share of the capital bought: λ × f*, cut to 0-1
         ("policy_id", "INTEGER REFERENCES policies (id)"),  # the policy it was made under (#399)
+        # 1: made by the champion's book, the trader's own; 0: a challenger's paper trade (#400); null:
+        # before #400, when the champion's book was the only one.
+        ("champion", "INTEGER"),
     ),
 }
 
-# A trade ``t`` of the champion (#399): entered before the first champion, or under the policy that
-# was the champion when it was entered (``champions``). The chart marks these alone (``marks.py``),
-# and the loss limits count these alone (#396).
-CHAMPION_TRADE = (
-    "(t.policy_id IS NULL OR t.policy_id ="
-    " (SELECT c.policy_id FROM champions c WHERE c.at <= t.entry_at ORDER BY c.id DESC LIMIT 1))"
-)
+# A trade ``t`` of the champion (#399, #400): made by the champion's book (``trades.champion``), the
+# trader's own trades, before the first champion too; never a challenger's paper trade. The chart
+# marks these alone (``marks.py``), the loss limits and the paper cash count these alone (#396), and
+# ``GET /v1/trader/trades`` gives these unless asked for a policy's. The champion changes only after
+# the market (``promotion.in_market``), so a day's trades are all of one champion.
+CHAMPION_TRADE = "coalesce(t.champion, 1) = 1"
 
 BUY, SELL = "buy", "sell"
 OPEN, FILLED, CANCELLED = "open", "filled", "cancelled"
@@ -268,6 +296,8 @@ class Entry:
     fraction: float | None = None
     # The policy version it was made under (#399); None before the first champion.
     policy_id: int | None = None
+    # Made by the champion's book (#400), the trader's own; False: a challenger's paper trade.
+    champion: bool = True
 
 
 @dataclass(frozen=True)
@@ -345,7 +375,9 @@ class TraderStore:
         self._db.row_factory = sqlite3.Row
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.execute("PRAGMA synchronous=NORMAL")
-        self._db.executescript(f"BEGIN;{_SCHEMA}COMMIT;")
+        self._db.executescript(
+            f"BEGIN;{_SCHEMA.format(decisions=_DECISIONS.format(name='decisions'))}COMMIT;"
+        )
         policy.ensure_schema(self._db)
         with self._db:
             for table, columns in _ADDED.items():
@@ -357,6 +389,37 @@ class TraderStore:
                         except sqlite3.OperationalError as e:  # added meanwhile by the other writer
                             if "duplicate column" not in str(e):
                                 raise
+        self._key_decisions()
+
+    def _key_decisions(self) -> None:
+        """``decisions`` unique by the book's policy too (#400). A store made before has the table
+        unique on (mode, kind, predictor, prediction_id), which a prediction read by the champion's
+        book and a challenger's breaks: it is made again with ``policy_id``, each row taking its
+        pick's policy (``selections.policy_id``), in one transaction the other writers wait for."""
+        db = self._db
+        if _keyed_by_policy(db):
+            with db:
+                db.execute(_DECISIONS_KEY)
+            return
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            if not _keyed_by_policy(db):  # not made again meanwhile by another writer
+                columns = [
+                    r["name"] for r in db.execute("PRAGMA table_info(decisions)") if r["name"] != "policy_id"
+                ]
+                db.execute("ALTER TABLE decisions RENAME TO decisions_before_400")
+                db.execute(_DECISIONS.format(name="decisions"))
+                db.execute(
+                    f"INSERT INTO decisions ({', '.join(columns)}, policy_id)"
+                    f" SELECT {', '.join('d.' + c for c in columns)}, s.policy_id FROM decisions_before_400 d"
+                    " LEFT JOIN selections s ON s.id = d.selection_id ORDER BY d.id"
+                )
+                db.execute("DROP TABLE decisions_before_400")
+            db.execute(_DECISIONS_KEY)
+            db.execute("COMMIT")
+        except BaseException:
+            db.execute("ROLLBACK")
+            raise
 
     def close(self) -> None:
         self._db.close()
@@ -365,6 +428,14 @@ class TraderStore:
         """The champion policy now (#399); None before the first. ``policy.PolicyError`` when it
         cannot be read."""
         return policy.champion(self._db)
+
+    def running_challengers(self, day: date) -> list[int]:
+        """The challengers that run on ``day`` (#400, ``policy.running_versions``)."""
+        return policy.running_versions(self._db, day)
+
+    def read_policy(self, version: int) -> policy.Policy:
+        """Policy ``version`` (#400); ``policy.PolicyError`` when it cannot be read."""
+        return policy.read(self._db, version)
 
     def add_run(self, at: datetime, mode: str, detail: Mapping[str, Any]) -> None:
         with self._db:
@@ -392,10 +463,15 @@ class TraderStore:
         assert cursor.lastrowid is not None
         return cursor.lastrowid
 
-    def decided(self, mode: str, kind: str, predictor: str, prediction_id: int) -> bool:
+    def decided(
+        self, mode: str, policy_id: int | None, kind: str, predictor: str, prediction_id: int
+    ) -> bool:
+        """Whether the book of ``policy_id`` (None: before the first champion) decided on the
+        prediction already (a restart)."""
         row = self._db.execute(
-            "SELECT 1 FROM decisions WHERE mode = ? AND kind = ? AND predictor = ? AND prediction_id = ?",
-            (mode, kind, predictor, prediction_id),
+            "SELECT 1 FROM decisions WHERE mode = ? AND coalesce(policy_id, 0) = ? AND kind = ?"
+            " AND predictor = ? AND prediction_id = ?",
+            (mode, policy_id or 0, kind, predictor, prediction_id),
         ).fetchone()
         return row is not None
 
@@ -413,12 +489,13 @@ class TraderStore:
         action: str,
         reason: str | None,
         selection_id: int | None = None,
+        policy_id: int | None = None,
     ) -> int:
         with self._db:
             cursor = self._db.execute(
                 "INSERT INTO decisions (mode, symbol, kind, predictor, prediction_id, bar_close,"
-                " displayed_at, decided_at, probability, action, reason, selection_id)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " displayed_at, decided_at, probability, action, reason, selection_id, policy_id)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     mode,
                     symbol,
@@ -432,6 +509,7 @@ class TraderStore:
                     action,
                     reason,
                     selection_id,
+                    policy_id,
                 ),
             )
         assert cursor.lastrowid is not None
@@ -462,7 +540,7 @@ class TraderStore:
                 "INSERT INTO trades (mode, symbol, kind, predictor, prediction_id, bar_close, probability,"
                 " threshold, anchor, tick, width_ticks, target, stop, time_barrier, decided_at, entry_at,"
                 " entry_price, quantity, buy_fee, selection_id, role, p_star, precision_low, kelly, fraction,"
-                f" policy_id) VALUES ({', '.join('?' * 26)})",
+                f" policy_id, champion) VALUES ({', '.join('?' * 27)})",
                 (
                     entry.mode,
                     entry.symbol,
@@ -490,6 +568,7 @@ class TraderStore:
                     entry.kelly,
                     entry.fraction,
                     entry.policy_id,
+                    int(entry.champion),
                 ),
             )
             trade = cursor.lastrowid
@@ -542,13 +621,19 @@ class TraderStore:
                 (at, out.price, out.reason, out.sell_fee, out.tax, cost, gross, gross - cost, trade.id),
             )
 
-    def open_trade(self, mode: str) -> OpenTrade | None:
-        """``mode``'s trade not exited yet, if any (one position at a time)."""
+    def open_trade(self, mode: str, challenger: int | None = None) -> OpenTrade | None:
+        """``mode``'s trade of the champion (``CHAMPION_TRADE``) not exited yet, if any (one position
+        at a time); with ``challenger``, that challenger's paper trade not exited (#400)."""
+        params: tuple[Any, ...]
+        if challenger is None:
+            whose, params = CHAMPION_TRADE, (mode,)
+        else:
+            whose, params = "t.policy_id = ? AND t.champion = 0", (mode, challenger)
         row = self._db.execute(
             "SELECT t.*, o.id AS resting FROM trades t JOIN orders o ON o.trade_id = t.id"
             " AND o.purpose = 'take_profit' AND o.status = 'open'"
-            " WHERE t.mode = ? AND t.exit_at IS NULL ORDER BY t.id DESC LIMIT 1",
-            (mode,),
+            f" WHERE t.mode = ? AND t.exit_at IS NULL AND {whose} ORDER BY t.id DESC LIMIT 1",
+            params,
         ).fetchone()
         if row is None:
             return None
@@ -566,6 +651,30 @@ class TraderStore:
             datetime.fromisoformat(row["bar_close"]),
             datetime.fromisoformat(row["entry_at"]),
         )
+
+    def open_challengers(self, mode: str) -> list[int]:
+        """The challengers with a paper trade of ``mode`` not exited (#400: the trader stopped before
+        its exit), whose books go on with it."""
+        rows = self._db.execute(
+            "SELECT DISTINCT t.policy_id FROM trades t WHERE t.mode = ? AND t.exit_at IS NULL"
+            " AND t.policy_id IS NOT NULL AND t.champion = 0 ORDER BY t.policy_id",
+            (mode,),
+        )
+        return [int(r[0]) for r in rows]
+
+    def put_policy_day(
+        self, mode: str, policy_id: int, day: date, champion: bool, stopped: bool, at: datetime
+    ) -> None:
+        """A trading day ``policy_id`` ran (#400): its record's (``promotion.records``). Once the
+        champion or stopped that day, it stays so."""
+        with self._db:
+            self._db.execute(
+                "INSERT INTO policy_days (mode, policy_id, day, champion, stopped, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (mode, policy_id, day) DO UPDATE SET"
+                " champion = max(champion, excluded.champion), stopped = max(stopped, excluded.stopped),"
+                " updated_at = excluded.updated_at",
+                (mode, policy_id, day.isoformat(), int(champion), int(stopped), iso(at)),
+            )
 
     def realized(self, mode: str, since: datetime | None) -> tuple[float, int]:
         """The net P&L of ``mode``'s trades exited at or after ``since`` (all if None), and how many:
@@ -715,6 +824,12 @@ class TraderStore:
         )
 
 
+def _keyed_by_policy(db: sqlite3.Connection) -> bool:
+    """Whether ``decisions`` is unique by the policy (#400), not by the constraint it was made with
+    before (an index SQLite made for a ``UNIQUE`` clause)."""
+    return not any(r["origin"] == "u" for r in db.execute("PRAGMA index_list(decisions)"))
+
+
 def _control(row: sqlite3.Row) -> Control:
     return Control(
         row["id"],
@@ -755,15 +870,18 @@ def request_pause(path: Path, sell_now: bool, at: datetime) -> dict[str, Any]:
 def read_trader(path: Path | None, now: datetime) -> dict[str, Any]:
     """``GET /v1/trader`` (#396): the trader's state as it last wrote it, whether it is running
     (that state at most ``ALIVE_SECONDS`` old at ``now``), and the last controls asked for, newest
-    first (those not read yet with ``applied_at`` null). Its fields null without a store (an engine
-    without a state folder, a trader not started yet)."""
+    first (those not read yet with ``applied_at`` null); the champion, the live gate on its paper
+    record and the policies running with theirs (#400, ``promotion.progress``). Its fields null
+    without a store (an engine without a state folder, a trader not started yet)."""
     body: dict[str, Any] = dict.fromkeys(TRADER_FIELDS)
     body |= {"updated_at": None, "alive": False, "controls": []}
+    body |= {"champion": None, "gate": promotion.gate(None, None).as_json(), "policies": []}
     if path is None:
         return body
     with _reading(path) as db:
         if db is None:
             return body
+        body |= promotion.progress(db)
         tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
         if "snapshot" in tables:
             row = db.execute("SELECT at, body FROM snapshot WHERE id = 1").fetchone()
@@ -854,15 +972,41 @@ def _reading(path: Path) -> Iterator[sqlite3.Connection | None]:
         db.close()
 
 
-def read_trades(path: Path, before: datetime | None, limit: int) -> list[dict[str, Any]]:
+def champion_of(db: sqlite3.Connection) -> str:
+    """``CHAMPION_TRADE`` for this store: every trade is the champion's in a store from before #400
+    (the trader has not opened it since, so its trades have no ``champion``: the champion's book was
+    the only one)."""
+    columns = {r[1] for r in db.execute("PRAGMA table_info(trades)")}
+    return CHAMPION_TRADE if "champion" in columns else "1"
+
+
+def read_trades(
+    path: Path, before: datetime | None, limit: int, policy_id: int | None = None
+) -> list[dict[str, Any]]:
     """The last ``limit`` trades entered before ``before`` (if given), newest first, each with its
-    orders and their fills: ``GET /v1/trader/trades``."""
+    orders and their fills: ``GET /v1/trader/trades``. The champion's (``CHAMPION_TRADE``: the
+    trades the trader makes, which the limits hold and the chart marks), or with ``policy_id`` that
+    policy's (#400: in paper as a challenger, and as the champion)."""
     with _reading(path) as db:
         if db is None:
             return []
-        where, params = ("WHERE entry_at < ?", [iso(before)]) if before is not None else ("", [])
+        champion = champion_of(db)
+        params: list[Any]
+        if policy_id is None:
+            conditions, params = [champion], []
+        elif "policy_id" not in {r[1] for r in db.execute("PRAGMA table_info(trades)")}:
+            return []  # a store from before #399: no trade carries a policy
+        else:
+            conditions, params = ["t.policy_id = ?"], [policy_id]
+        if before is not None:
+            conditions.append("t.entry_at < ?")
+            params.append(iso(before))
         rows = db.execute(
-            f"SELECT * FROM trades {where} ORDER BY entry_at DESC, id DESC LIMIT ?", (*params, limit)
+            # Its own name: ``t.*`` holds ``champion`` already, null in a row from before #400, and a
+            # row reads the first column of a name.
+            f"SELECT t.*, {champion} AS by_champion FROM trades t WHERE {' AND '.join(conditions)}"
+            " ORDER BY t.entry_at DESC, t.id DESC LIMIT ?",
+            (*params, limit),
         ).fetchall()
         ids = [r["id"] for r in rows]
         orders: dict[int, list[dict[str, Any]]] = {}
@@ -901,6 +1045,7 @@ def _trade_json(
         "kelly": row["kelly"],
         "fraction": row["fraction"],
         "policy": row.get("policy_id"),  # a store the trader has not opened since #399: none
+        "champion": bool(row["by_champion"]),  # the champion's (#400): the trader's, which the limits hold
         "anchor": row["anchor"],
         "tick": row["tick"],
         "width_ticks": row["width_ticks"],

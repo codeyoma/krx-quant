@@ -2563,7 +2563,7 @@
     },
 
     "trader_trades": {
-      "description": "GET /v1/trader/trades?before=T&limit=N (#394): the trader's last N trades entered before T if given, newest first, as it keeps them (state/trader.sqlite3); none before its first.",
+      "description": "GET /v1/trader/trades?policy=V&before=T&limit=N (#394): the trader's last N trades entered before T if given, newest first, as it keeps them (state/trader.sqlite3); none before its first. The champion's trades (#400: those the trader makes, which the limits hold and the chart marks), or with policy those of that policy version (in paper as a challenger, and as the champion).",
       "type": "object",
       "required": ["trades"],
       "additionalProperties": false,
@@ -2583,25 +2583,49 @@
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["at", "version", "reason"],
+            "required": ["at", "version", "reason", "detail"],
             "additionalProperties": false,
             "properties": {
               "at": {"$ref": "#/$defs/time"},
               "version": {"type": "integer", "minimum": 1},
-              "reason": {"type": "string"}
+              "reason": {"type": "string"},
+              "detail": {
+                "description": "A promotion's figures (#400): the champion replaced (from), the common trading days, the mean a day of (challenger - champion) net P&L in won and its lower bound at level (Bonferroni over challengers); null for the first champion.",
+                "oneOf": [
+                  {"type": "null"},
+                  {
+                    "type": "object",
+                    "required": ["from", "days", "required", "mean", "low", "level", "challengers"],
+                    "additionalProperties": false,
+                    "properties": {
+                      "from": {"type": "integer", "minimum": 1},
+                      "days": {"type": "integer", "minimum": 0},
+                      "required": {"type": "integer", "minimum": 1},
+                      "mean": {"type": ["number", "null"]},
+                      "low": {"type": ["number", "null"]},
+                      "level": {"type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1},
+                      "challengers": {"type": "integer", "minimum": 1}
+                    }
+                  }
+                ]
+              }
             }
           }
         }
       }
     },
     "trader_policy": {
-      "description": "A policy version (#399): the cells it trades, first ranked first, each with its threshold and Kelly fraction and what it was fitted on; the cells the cost map passed that it left out, and why; what it was fitted on (the cost map, the grid, the simulated result, the run). It holds no limit: those come from the code and the server's .env alone.",
+      "description": "A policy version (#399): the cells it trades, first ranked first, each with its threshold and Kelly fraction and what it was fitted on; the cells the cost map passed that it left out, and why; what it was fitted on (the cost map, the grid, the simulated result, the run). It holds no limit: those come from the code and the server's .env alone. status (#400): champion now, former once, dropped (a challenger dropped at dropped_at, unpromoted by its 20th common day), challenger (in one of the three running slots since admitted_at), else waiting (kept while the slots were full, admitted when one frees, the newest first); paper: its paper record.",
       "type": "object",
-      "required": ["version", "status", "created_at", "reason", "cells", "left_out", "fit"],
+      "required": ["version", "status", "created_at", "reason", "cells", "left_out", "fit", "admitted_at", "dropped_at",
+                   "paper"],
       "additionalProperties": false,
       "properties": {
         "version": {"type": "integer", "minimum": 1},
-        "status": {"enum": ["champion", "challenger", "former"]},
+        "status": {"enum": ["champion", "challenger", "former", "dropped", "waiting"]},
+        "admitted_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]},
+        "dropped_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]},
+        "paper": {"$ref": "#/$defs/trader_paper"},
         "created_at": {"$ref": "#/$defs/time"},
         "reason": {"type": "string"},
         "cells": {
@@ -2660,10 +2684,10 @@
       }
     },
     "trader_trade": {
-      "description": "A position from its entry to its exit (#394): the cell (kind, predictor) and what the cost map picked it on (#395: the predictor's role, p*, the hit rate's lower bound, the Kelly f* and the share of the capital bought; null for a trade entered before), the prediction and its rise's probability, the barriers, the fills, the costs and the P&L in won; exit and the sell's costs null while open. policy: the policy version it was made under (#399), null before the first champion. An exit is by the triple barrier (take_profit, stop_loss, time), or a sale at once (#396): a pause selling now (pause), a loss limit reached (daily_limit, cumulative_limit).",
+      "description": "A position from its entry to its exit (#394): the cell (kind, predictor) and what the cost map picked it on (#395: the predictor's role, p*, the hit rate's lower bound, the Kelly f* and the share of the capital bought; null for a trade entered before), the prediction and its rise's probability, the barriers, the fills, the costs and the P&L in won; exit and the sell's costs null while open. policy: the policy version it was made under (#399), null before the first champion; champion (#400): whether it is the champion's, not a challenger's paper trade. An exit is by the triple barrier (take_profit, stop_loss, time), or a sale at once (#396): a pause selling now (pause), a loss limit reached (daily_limit, cumulative_limit).",
       "type": "object",
       "required": ["id", "mode", "symbol", "kind", "predictor", "role", "prediction_id", "bar_close", "probability",
-                   "threshold", "p_star", "precision_low", "kelly", "fraction", "policy", "anchor", "tick", "width_ticks",
+                   "threshold", "p_star", "precision_low", "kelly", "fraction", "policy", "champion", "anchor", "tick", "width_ticks",
                    "target", "stop", "time_barrier", "decided_at", "entry", "exit", "buy_fee", "sell_fee", "tax",
                    "cost", "gross", "net", "orders"],
       "additionalProperties": false,
@@ -2683,6 +2707,7 @@
         "kelly": {"type": ["number", "null"]},
         "fraction": {"type": ["number", "null"], "exclusiveMinimum": 0, "maximum": 1},
         "policy": {"type": ["integer", "null"], "minimum": 1},
+        "champion": {"type": "boolean", "description": "#400: the champion's trade (the trader's, which the limits hold and the chart marks); false: a challenger's paper trade."},
         "anchor": {"type": "number", "exclusiveMinimum": 0},
         "tick": {"type": "number", "exclusiveMinimum": 0},
         "width_ticks": {"type": "integer", "minimum": 1},
@@ -2759,10 +2784,10 @@
       }
     },
     "trader": {
-      "description": "GET /v1/trader (#396): the trader's state as it last wrote it into its store (at least every 5 s while it runs; alive while that is at most 15 s old), and the last 20 pauses, resumes and re-arms asked for, newest first (applied_at null until the trader has read one). Every field but alive and controls is null before the trader first wrote its state.",
+      "description": "GET /v1/trader (#396): the trader's state as it last wrote it into its store (at least every 5 s while it runs; alive while that is at most 15 s old), and the last 20 pauses, resumes and re-arms asked for, newest first (applied_at null until the trader has read one). Every field but alive and controls is null before the trader first wrote its state. #400: the champion's version, the live gate on its paper record, and the champion and each challenger running with their paper records (a challenger's with where it stands against the champion), read from the store whatever the trader wrote.",
       "type": "object",
       "required": ["updated_at", "alive", "mode", "status", "started_at", "capital", "cash", "position", "today",
-                   "cumulative", "limits", "pause", "controls"],
+                   "cumulative", "limits", "pause", "controls", "champion", "gate", "policies"],
       "additionalProperties": false,
       "properties": {
         "updated_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]},
@@ -2862,7 +2887,72 @@
             }
           ]
         },
-        "controls": {"type": "array", "maxItems": 20, "items": {"$ref": "#/$defs/trader_control"}}
+        "controls": {"type": "array", "maxItems": 20, "items": {"$ref": "#/$defs/trader_control"}},
+        "champion": {"type": ["integer", "null"], "minimum": 1},
+        "gate": {"$ref": "#/$defs/trader_gate"},
+        "policies": {
+          "type": "array",
+          "maxItems": 4,
+          "items": {
+            "type": "object",
+            "required": ["version", "status", "paper", "promotion"],
+            "additionalProperties": false,
+            "properties": {
+              "version": {"type": "integer", "minimum": 1},
+              "status": {"enum": ["champion", "challenger"]},
+              "paper": {"$ref": "#/$defs/trader_paper"},
+              "promotion": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/trader_promotion"}]}
+            }
+          }
+        }
+      }
+    },
+    "trader_paper": {
+      "description": "A policy's paper record (#400): every trading day it ran in the trader (as a challenger or the champion), each with the net P&L of its trades entered that day in won (0 without a trade); its first and last day, the days, the trades, the net, its mean a day and that mean's day-level 95% lower bound (null from fewer than two days).",
+      "type": "object",
+      "required": ["since", "last", "days", "trades", "net", "mean", "low"],
+      "additionalProperties": false,
+      "properties": {
+        "since": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/day"}]},
+        "last": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/day"}]},
+        "days": {"type": "integer", "minimum": 0},
+        "trades": {"type": "integer", "minimum": 0},
+        "net": {"type": "number"},
+        "mean": {"type": ["number", "null"]},
+        "low": {"type": ["number", "null"]}
+      }
+    },
+    "trader_gate": {
+      "description": "The live gate (#400, #393): the champion's paper record of at least required (20) trading days whose day-level lower bound of the daily net P&L (no-trade days 0, two-sided level 0.95, an overlap of one) is above 0. policy null before the first champion.",
+      "type": "object",
+      "required": ["policy", "days", "required", "mean", "low", "level", "passed"],
+      "additionalProperties": false,
+      "properties": {
+        "policy": {"type": ["integer", "null"], "minimum": 1},
+        "days": {"type": "integer", "minimum": 0},
+        "required": {"type": "integer", "minimum": 1},
+        "mean": {"type": ["number", "null"]},
+        "low": {"type": ["number", "null"]},
+        "level": {"type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1},
+        "passed": {"type": "boolean"}
+      }
+    },
+    "trader_promotion": {
+      "description": "A challenger against the champion (#400): their common trading days (both ran, the champion not stopped), the mean a day of (challenger - champion) net P&L in won and its lower bound at level (two-sided, Bonferroni over the challengers running); passed when the days reach required (10) and the lower bound is above 0, else why (few_days, not_above). It is promoted only after the market; one not promoted by its until-th (20) common day is dropped that night.",
+      "type": "object",
+      "required": ["champion", "days", "required", "until", "mean", "low", "level", "challengers", "passed", "why"],
+      "additionalProperties": false,
+      "properties": {
+        "champion": {"type": "integer", "minimum": 1},
+        "days": {"type": "integer", "minimum": 0},
+        "required": {"type": "integer", "minimum": 1},
+        "until": {"type": "integer", "minimum": 1},
+        "mean": {"type": ["number", "null"]},
+        "low": {"type": ["number", "null"]},
+        "level": {"type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1},
+        "challengers": {"type": "integer", "minimum": 1},
+        "passed": {"type": "boolean"},
+        "why": {"enum": ["few_days", "not_above", null]}
       }
     },
     "trader_limit": {

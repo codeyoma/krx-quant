@@ -50,11 +50,25 @@ def trade(
     out: datetime | None,
     prediction_id: int,
     policy_id: int | None = None,
+    champion: bool = True,
 ) -> None:
     """A trade of ``mode`` written as the trader writes one: bought at ``entry`` at 70,100, 10
-    shares, and sold at ``out`` (if given) at the target; under ``policy_id`` (#399) if given."""
+    shares, and sold at ``out`` (if given) at the target; under ``policy_id`` (#399) if given, by
+    the champion's book unless ``champion`` is false (a challenger's, #400)."""
     decision = store.add_decision(
-        mode, SYMBOL, "barrier", "breiman", prediction_id, entry, entry, entry, 0.7, "buy", None
+        mode,
+        SYMBOL,
+        "barrier",
+        "breiman",
+        prediction_id,
+        entry,
+        entry,
+        entry,
+        0.7,
+        "buy",
+        None,
+        None,
+        policy_id,
     )
     opened = store.enter(
         decision,
@@ -80,6 +94,7 @@ def trade(
             buy_fee=105.15,
             quote_at=entry,
             policy_id=policy_id,
+            champion=champion,
         ),
     )
     if out is not None:
@@ -208,8 +223,8 @@ async def test_each_mark_carries_its_trade_s_policy_and_only_the_champion_s_are_
     tmp_path: Path,
 ) -> None:
     """#399: a trade entered before the first champion (no policy), then policy 1 the champion from
-    22:31 on, its trade two mornings later; policy 2, a challenger, trades beside it (#400 runs
-    them): its paper trade is not the champion's and is not marked."""
+    22:31 on, its trade two mornings later; policy 2, a challenger, trades beside it in its own book
+    (#400): its paper trade is not the champion's and is not marked."""
     store = TraderStore(tmp_path / DB_NAME)
     try:
         trade(store, "paper", at("10:00:00"), at("10:02:00"), 1)
@@ -221,7 +236,7 @@ async def test_each_mark_carries_its_trade_s_policy_and_only_the_champion_s_are_
             db.close()
         morning = at("10:00:00") + timedelta(days=2)
         trade(store, "paper", morning, morning + timedelta(minutes=2), 2, policy_id=1)
-        trade(store, "paper", morning + timedelta(minutes=1), None, 3, policy_id=2)
+        trade(store, "paper", morning + timedelta(minutes=1), None, 3, policy_id=2, champion=False)
     finally:
         store.close()
 
