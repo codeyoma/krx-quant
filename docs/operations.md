@@ -347,11 +347,12 @@ curl http://krx-quant:8080/v1/macro
 | 변수 | 기본값 | 뜻과 범위 |
 |---|---|---|
 | `KRX_TRADER_MODE` | `paper` | `paper`(모의)뿐이다. `mock`, `live`는 KIS 주문 모듈(#404) 전까지 설정 오류다 |
-| `KRX_TRADER_KIND` | `direction` | 매매할 칸의 종류: `direction`, `barrier`, `barrier_15m`, `barrier_30m` |
-| `KRX_TRADER_PREDICTOR` | `consensus-final` | 매매할 칸의 예측자: 알고리즘, 기준 예측, 합의의 이름(`/v1/algorithms`의 `name`) |
-| `KRX_TRADER_THRESHOLD` | `0.6` | 사는 오름 확률(방향 `p_up`, 장벽 `p_up_first`)의 문턱 θ. 0–1 |
-| `KRX_TRADER_CAPITAL` | `1000000` | 운용 상한(원). 1 이상 1,000,000 이하. 넘으면 시작하지 않는다(좁히기만 한다, #393) |
+| `KRX_TRADER_THRESHOLD` | `0.6` | 사는 오름 확률(방향 `p_up`, 장벽 `p_up_first`)의 문턱 θ. 0–1. 고른 칸 모두에 같다 |
+| `KRX_TRADER_CAPITAL` | `1000000` | 운용 상한(원). 1 이상 1,000,000 이하. 넘으면 시작하지 않는다(좁히기만 한다, #393). 한 번에 사는 금액은 칸의 Kelly 비율 × 이 값이다(#395) |
 | `KRX_TRADER_QUOTES_URL` | `ws://127.0.0.1:8081/v1/quotes` (compose `ws://engine:8081/v1/quotes`) | 수집기의 호가 스트림 |
+| `KRX_TRADER_ENGINE_URL` | `http://127.0.0.1:8080` (compose `http://engine:8080`) | 매매할 칸을 고를 비용 지도(`GET /v1/cost-map`)를 묻는 엔진 API(#395). `http://호스트:포트`, 경로 없이 |
+
+> **삭제됨** (2026-10-30, #412): `KRX_TRADER_KIND`(매매할 칸의 종류, 기본 `direction`), `KRX_TRADER_PREDICTOR`(그 예측자, 기본 `consensus-final`). 이유: spec #393대로 매매할 칸은 비용 지도가 고른다(#395). 대신: 시작할 때와 매일 08:30에 005930의 20일 비용 지도에서 시장가 왕복 판정이 `pass`인 칸들(아래 "자동 매매"). 서버 `.env`에 남아 있어도 trader는 읽지 않고, 시작할 때 `trader: KRX_TRADER_KIND is no longer read (#395): the cost map picks the cells`를 WARNING으로 남긴다.
 
 compose와 스크립트가 읽는 변수다. 엔진은 `KRX_BIND_ADDRESS`를 예약 작업의 가림에만 읽고, 나머지는 읽지 않는다.
 
@@ -1096,10 +1097,12 @@ Toss: 109 calls, 1 failed; tokens issued: 0
 
 compose 서비스 `trader`가 `krx-quant trade`를 돈다. 수집기(`engine`)와 같은 이미지의 다른 컨테이너라, 06:00 배포가 둘을 함께 새로 띄우고, 수집기가 멈추거나(07:20 재시작, 메모리 부족) 다시 떠도 trader는 따로 산다. 지금은 모의(`paper`)뿐이다: 주문을 내지 않고 KIS 키도 쓰지 않는다. 규칙은 [design.md](design.md#14-자동-매매-393) 14장에 있다.
 
-- 장중에는 `.env`의 칸(`KRX_TRADER_KIND`, `KRX_TRADER_PREDICTOR`, 기본 `direction`·`consensus-final`)의 예측을 0.5초마다 엔진 DB에서 읽고(읽기만), 수집기의 호가 스트림(`ws://engine:8081/v1/quotes`, compose 네트워크 안에서만 열린다)으로 모의 체결한다. 진입은 개장 + 5분(보통 09:05)부터이고, 시간 장벽이 종가 단일가 − 5분(보통 15:15)을 넘는 예측으로는 사지 않는다. 그래서 15:15 뒤에는 포지션이 없다.
-- 기록은 `state/trader.sqlite3`에 남는다(`decisions`, `trades`, `orders`, `fills`, `runs`). 매매는 `curl -s 'http://krx-quant:8080/v1/trader/trades?limit=20'`로 본다([engine-api.md](engine-api.md#get-v1tradertradesbeforetlimitn-394)). 사지 않은 이유는 `decisions.reason`이다: `docker compose exec trader python -c 'import sqlite3; [print(r) for r in sqlite3.connect("file:/state/trader.sqlite3?mode=ro", uri=True).execute("select bar_close, probability, action, reason from decisions order by id desc limit 20")]'`.
+- 매매할 칸은 엔진 API의 비용 지도가 고른다(#395). trader가 시작할 때와 매일 08:30에 `http://engine:8080/v1/cost-map?symbol=005930&period=20d&special=exclude`(compose 네트워크 안)를 읽고, 방향과 4·15·30분 장벽의 세 예측자(최종 합의, 순위 1위 알고리즘, 가장 센 기준 예측) 가운데 시장가 왕복 판정이 `pass`인 칸만 매매한다. 고를 때마다 INFO `trader: trading N cell(s): <종류> <예측자> (<자리>: low … − p* … = …, Kelly … → …); …`를 남긴다. 통과하는 칸이 없으면 INFO `trader: trading no cell until the next pick: none passes: <종류> <자리> <예측자> <판정>; …`이고 그날은 매매하지 않는다. 엔진 API에 닿지 않으면 WARNING `trader: could not read the cost map (…): no cell trades until it is read, asked for every 60s`를 한 번 남기고 1분마다 다시 묻는다(읽으면 INFO `trader: the cost map is read again`). 06:00 배포 직후 엔진이 뜨는 동안 한두 번 나오는 것은 정상이다.
+- 고른 기록은 `selections` 표다: `docker compose exec trader python -c 'import sqlite3; [print(r) for r in sqlite3.connect("file:/state/trader.sqlite3?mode=ro", uri=True).execute("select at, reason, picks, considered from selections order by id desc limit 3")]'`. `reason`이 `no_pass`면 통과한 칸이 없었고, `no_cost_map`이면 비용 지도를 읽지 못했다(`detail`에 까닭).
+- 장중에는 고른 칸들의 예측을 0.5초마다 엔진 DB에서 읽고(읽기만), 수집기의 호가 스트림(`ws://engine:8081/v1/quotes`, compose 네트워크 안에서만 열린다)으로 모의 체결한다. 같은 봉 마감에 여러 칸이 오름이면 순위(맞힘률 하한 − p*)가 높은 칸 하나만 산다. 엔진이 아는 특수 상황(005930의 VI, 서킷브레이커, 사이드카)이 그 예측의 창에 닿으면 사지 않는다(`special`). 진입은 개장 + 5분(보통 09:05)부터이고, 시간 장벽이 종가 단일가 − 5분(보통 15:15)을 넘는 예측으로는 사지 않는다. 그래서 15:15 뒤에는 포지션이 없다.
+- 기록은 `state/trader.sqlite3`에 남는다(`selections`, `decisions`, `trades`, `orders`, `fills`, `runs`). 매매는 `curl -s 'http://krx-quant:8080/v1/trader/trades?limit=20'`로 본다([engine-api.md](engine-api.md#get-v1tradertradesbeforetlimitn-394)). 사지 않은 이유는 `decisions.reason`이다: `docker compose exec trader python -c 'import sqlite3; [print(r) for r in sqlite3.connect("file:/state/trader.sqlite3?mode=ro", uri=True).execute("select bar_close, probability, action, reason from decisions order by id desc limit 20")]'`.
 - 로그는 Loki의 `{service="krx-quant", process="trader"}`(#358의 같은 전송)와 `docker compose logs trader`에 있다. 사고팔 때마다 INFO 줄(`trader: buying on …`, `trader: bought …`, `trader: sold … (<이유>, trade N): net … won`, `trader: no buy on … (<이유>)`)을 남긴다. 호가 스트림이 끊기면 WARNING `quotes: … ; connecting again`을 한 번 남기고 돌아올 때까지 다시 붙는다.
-- 칸이나 문턱을 바꾸려면 서버 `.env`를 고치고 `docker compose up -d trader`로 다시 띄운다. 들고 있던 모의 매매는 이어서 규칙대로 판다. 멈추려면 `docker compose stop trader`(다음 `docker compose up -d`나 06:00 배포가 다시 띄운다).
+- 문턱을 바꾸려면 서버 `.env`를 고치고 `docker compose up -d trader`로 다시 띄운다(다시 띄우면 칸도 그때의 비용 지도로 다시 고른다). 들고 있던 모의 매매는 이어서 규칙대로 판다. 멈추려면 `docker compose stop trader`(다음 `docker compose up -d`나 06:00 배포가 다시 띄운다).
 - 수집기가 호가 리스너를 열지 못하면 `[장애] 자동 매매의 호가 스트림을 열지 못했습니다 (…). 녹화는 계속합니다.`가 온다. 그동안 trader는 새로 사지 않는다(`no_quote`).
 - 사용자가 할 일은 없다. KIS 모의투자 키(mock)와 실전 계좌(live)는 그 티켓(#403–#408)이 올 때 따로 안내한다.
 
@@ -2137,7 +2140,7 @@ LogQL 문법은 2026-10-23에 커넥터로 스택에 물어 확인했다(그때�
 | `kis_token.json` | KIS REST 접근 토큰 캐시(권한 600). 앱키가 바뀌면 버린다 |
 | `market_calendar.json` | KIS 휴장일 조회 캐시 |
 | `engine.sqlite3`, `-wal`, `-shm` | 예측, 채점, 상태, 합의 가중치, 다른 종류의 예측과 정답(`kind_predictions`, `kind_answers`, #179), 특수 상황 구간(`special_windows`, `special_days`, #236), 수습 시뮬레이션의 재생과 예측(`simulation_runs`, `simulations`, `sim_predictions`, `sim_kind_predictions`, #298. 실시간 예측과 따로 둔다). 테이블은 [engine-api.md](engine-api.md#저장-stateenginesqlite3)에 있다. 스키마 버전은 `PRAGMA user_version`이다(#179, #236, #298의 새 표는 올리지 않았다) |
-| `trader.sqlite3`, `-wal`, `-shm` | 자동 매매 trader의 저장소(#394): 시작마다(`runs`), 읽은 칸의 예측과 한 일(`decisions`), 매매(`trades`), 주문(`orders`), 체결(`fills`). 모든 행에 모드(`paper`). trader만 쓰고 엔진 API가 읽기만 한다([design.md](design.md#14-자동-매매-393) 14장) |
+| `trader.sqlite3`, `-wal`, `-shm` | 자동 매매 trader의 저장소(#394): 시작마다(`runs`), 비용 지도로 칸을 고른 기록(`selections`, #395), 읽은 칸의 예측과 한 일(`decisions`), 매매(`trades`), 주문(`orders`), 체결(`fills`). 모든 행에 모드(`paper`). trader만 쓰고 엔진 API가 읽기만 한다([design.md](design.md#14-자동-매매-393) 14장) |
 | `replay-<날짜>.sqlite3` | `krx-quant replay`의 결과 |
 | `.engine.lock` | 도는 엔진이 잡는 잠금 파일(`flock`, #168). 잡혀 있으면 `rescore`가 거부한다. 엔진이 끝나면 풀린다. 파일은 남아도 된다 |
 | `prevalidation-<알고리즘>.sqlite3` | `krx-quant prevalidate`가 재생한 예측과 채점. 다시 돌리면 새로 만든다 |

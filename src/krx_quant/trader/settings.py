@@ -6,12 +6,15 @@ narrow the capital, never widen it (#393).
 
 - ``KRX_TRADER_MODE``: ``paper`` (the default and, for now, the only one; ``mock`` and ``live``
   come with the KIS order module, #404, #405, #408);
-- ``KRX_TRADER_KIND``, ``KRX_TRADER_PREDICTOR``: the cell traded (``direction`` and
-  ``consensus-final`` unless set); the kind one of ``TRADED_KINDS``;
 - ``KRX_TRADER_THRESHOLD``: θ, the rise's probability that buys (0.6 unless set);
 - ``KRX_TRADER_CAPITAL``: the capital in won (1,000,000 unless set; at most that);
 - ``KRX_TRADER_QUOTES_URL``: the collector's quote stream (``quotes.py``); compose sets it to the
-  engine service's.
+  engine service's;
+- ``KRX_TRADER_ENGINE_URL``: the Engine API the cost map is read from (``selection.py``, #395);
+  compose sets it to the engine service's, inside the compose network.
+
+``KRX_TRADER_KIND`` and ``KRX_TRADER_PREDICTOR`` (#394: the one cell traded) are gone: the cost map
+picks the cells (#395). One still set is not read; the trader says so at its start (``ignored``).
 """
 
 from __future__ import annotations
@@ -23,22 +26,24 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from krx_quant.config import SettingsError, read_values
-from krx_quant.consensus import FINAL
-from krx_quant.trader import CAPITAL, LATER_MODES, MODES, PAPER, THRESHOLD, TRADED_KINDS
-from krx_quant.trader.cells import Cell
+from krx_quant.trader import CAPITAL, LATER_MODES, MODES, PAPER, THRESHOLD
 
 DEFAULT_QUOTES_URL = "ws://127.0.0.1:8081/v1/quotes"
-_NAME = re.compile(r"^[a-z0-9][a-z0-9_.-]*$")  # an algorithm's, a baseline's or a consensus's name
+DEFAULT_ENGINE_URL = "http://127.0.0.1:8080"
+# Settings no longer read (#395: the cost map picks the cells).
+GONE = ("KRX_TRADER_KIND", "KRX_TRADER_PREDICTOR")
+_HOST = re.compile(r"^https?://[^/\s]+$")  # a scheme and a host, with its port: no path
 
 
 @dataclass(frozen=True)
 class TraderSettings:
     mode: str = PAPER
-    cell: Cell = Cell("direction", FINAL)
     threshold: float = THRESHOLD
     capital: int = CAPITAL
     quotes_url: str = DEFAULT_QUOTES_URL
+    engine_url: str = DEFAULT_ENGINE_URL
     poll_seconds: float = 0.5  # how often the engine's database is read for new predictions
+    ignored: tuple[str, ...] = ()  # the settings found that are no longer read (``GONE``)
 
     @classmethod
     def from_env(
@@ -53,12 +58,6 @@ class TraderSettings:
             )
         if mode not in MODES:
             raise SettingsError(f"KRX_TRADER_MODE must be one of {', '.join(MODES)}, got {mode!r}")
-        kind = values.get("KRX_TRADER_KIND", "direction").strip().lower() or "direction"
-        if kind not in TRADED_KINDS:
-            raise SettingsError(f"KRX_TRADER_KIND must be one of {', '.join(TRADED_KINDS)}, got {kind!r}")
-        predictor = values.get("KRX_TRADER_PREDICTOR", FINAL).strip() or FINAL
-        if not _NAME.fullmatch(predictor):
-            raise SettingsError(f"KRX_TRADER_PREDICTOR must be a predictor's name, got {predictor!r}")
         threshold = _number(values, "KRX_TRADER_THRESHOLD", str(THRESHOLD), float, 0.0, 1.0)
         capital = int(_number(values, "KRX_TRADER_CAPITAL", str(CAPITAL), int, 1, None))
         if capital > CAPITAL:
@@ -69,12 +68,19 @@ class TraderSettings:
         quotes_url = values.get("KRX_TRADER_QUOTES_URL", DEFAULT_QUOTES_URL).strip() or DEFAULT_QUOTES_URL
         if not quotes_url.startswith(("ws://", "wss://")):
             raise SettingsError(f"KRX_TRADER_QUOTES_URL must be a ws:// URL, got {quotes_url!r}")
+        engine_url = values.get("KRX_TRADER_ENGINE_URL", DEFAULT_ENGINE_URL).strip().rstrip("/")
+        engine_url = engine_url or DEFAULT_ENGINE_URL
+        if not _HOST.fullmatch(engine_url):
+            raise SettingsError(
+                f"KRX_TRADER_ENGINE_URL must be http://host:port, without a path, got {engine_url!r}"
+            )
         return cls(
             mode=mode,
-            cell=Cell(kind, predictor),
             threshold=float(threshold),
             capital=capital,
             quotes_url=quotes_url,
+            engine_url=engine_url,
+            ignored=tuple(name for name in GONE if values.get(name, "").strip()),
         )
 
 

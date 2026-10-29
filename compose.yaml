@@ -47,10 +47,11 @@ services:
         max-size: 10m
         max-file: "5"
 
-  # The trader (#393, #394): trades 005930 on one cell's predictions, in paper. The same image, its
-  # own process: it lives on when the collector dies (out of memory, a restart) and the other way
-  # round. It reads the engine's database read-only and writes state/trader.sqlite3; the quotes
-  # come from the engine service's stream, inside this network. It listens on no port.
+  # The trader (#393, #394, #395): trades 005930 on the cells the cost map passes, in paper. The
+  # same image, its own process: it lives on when the collector dies (out of memory, a restart)
+  # and the other way round. It reads the engine's database read-only and writes
+  # state/trader.sqlite3; the quotes come from the engine service's stream and the cost map from
+  # its Engine API, both inside this network. It listens on no port.
   trader:
     build:
       context: .
@@ -63,6 +64,7 @@ services:
       KRX_DATA_DIR: /data
       KRX_STATE_DIR: /state
       KRX_TRADER_QUOTES_URL: ws://engine:8081/v1/quotes
+      KRX_TRADER_ENGINE_URL: http://engine:8080
     volumes:
       - ./data:/data
       - ./state:/state

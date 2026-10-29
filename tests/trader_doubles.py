@@ -1,8 +1,9 @@
-"""Stored predictions, fake quote streams and a driver for the trader's tests (#394).
+"""Stored predictions, picks, fake quote streams and a driver for the trader's tests (#394, #395).
 
-The engine's predictions are written into a real engine database (``PredictionStore``), as the
-engine displays them, and the trader reads them there (``cells.CellReader``); the quotes are made
-up, received in the order given. Every price is made up.
+The engine's predictions and special windows are written into a real engine database
+(``PredictionStore``), as the engine displays and learns them, and the trader reads them there
+(``cells.EngineReader``); the picks are made as the cost map would pass them; the quotes are made
+up, received in the order given. Every price and hit rate is made up.
 """
 
 from __future__ import annotations
@@ -21,10 +22,13 @@ from krx_quant.feeds.base import KST
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.predictions import DB_NAME as ENGINE_DB
 from krx_quant.predictions import NewKindPrediction, NewPrediction, PredictionStore
-from krx_quant.trader import SYMBOL
-from krx_quant.trader.cells import Cell, CellReader
+from krx_quant.special import Kind as SpecialKind
+from krx_quant.special import Window
+from krx_quant.trader import KELLY_FRACTION, SYMBOL
+from krx_quant.trader.cells import Cell, EngineReader
 from krx_quant.trader.paper import PaperTrader, Rules
 from krx_quant.trader.quotes import BestQuote
+from krx_quant.trader.selection import Pick, Selection, kelly
 from krx_quant.trader.store import DB_NAME, TraderStore, read_trades
 
 DAY = (2026, 10, 14)  # a Wednesday: the calendar guesses it trades, 09:00 to 15:30
@@ -44,6 +48,36 @@ def at(hms: str) -> datetime:
 
 def quote(hms: str, bid: float, ask: float) -> BestQuote:
     return BestQuote(at(hms), bid, ask, 10.0, 10.0)
+
+
+def pick(
+    cell: Cell,
+    role: str = "top",
+    low: float = 0.9,
+    p_star: float = 0.6,
+    fraction: float | None = None,
+    width: float = 10.0,
+    cost: float = 2.6,
+) -> Pick:
+    """A cell the cost map passes: by default its lower bound well above p*, its Kelly far above 1,
+    the whole capital. ``fraction`` sets the share of the capital it buys instead."""
+    f = kelly(low, width, cost, 100, 70_050)
+    assert f is not None
+    cut = min(1.0, max(0.0, KELLY_FRACTION * f))
+    return Pick(
+        kind=cell.kind,
+        role=role,
+        predictor=cell.predictor,
+        p_star=p_star,
+        low=low,
+        calls=300,
+        width=width,
+        cost=cost,
+        reference_price=70_050,
+        tick=100,
+        kelly=f,
+        fraction=cut if fraction is None else fraction,
+    )
 
 
 @dataclass(frozen=True)
@@ -117,11 +151,27 @@ class Direction:
 
 
 @dataclass(frozen=True)
+class Special:
+    """A special window the engine learns at its start: a VI of ``symbol`` (005930 by default); a
+    circuit breaker's or a sidecar's is the whole market's."""
+
+    start: str
+    end: str
+    kind: SpecialKind = SpecialKind.VI
+    symbol: str = SYMBOL
+
+    def write(self, store: PredictionStore) -> None:
+        symbol = self.symbol if self.kind is SpecialKind.VI else None
+        store.keep_special(Window(self.kind, symbol, at(self.start), at(self.end)), at(self.start))
+
+
+@dataclass(frozen=True)
 class Read:
-    """The engine displays ``shown``; the trader reads its database at ``hms``."""
+    """The engine displays ``shown`` (or learns a special window); the trader reads its database
+    at ``hms``."""
 
     hms: str
-    shown: Sequence[Barrier | Direction] = ()
+    shown: Sequence[Barrier | Direction | Special] = ()
 
     @property
     def time(self) -> datetime:
@@ -148,23 +198,27 @@ def _time(event: Event) -> datetime:
 
 @dataclass
 class Day:
-    """A trading day of the trader on ``state``: an engine database it reads, its own store."""
+    """A trading day of the trader on ``state``: an engine database it reads, its own store. It
+    trades ``picks``, in that rank (by default ``cell``'s alone, passing well)."""
 
     state: Path
     cell: Cell = BARRIER
     rules: Rules = field(default_factory=lambda: Rules(fee_rate=FEE))
     started_at: datetime = field(default_factory=lambda: at("09:00:00"))
+    picks: Sequence[Pick] | None = None
+    selection: Selection | None = None  # the picks as chosen from a cost map, ``picks`` unless given
 
     def run(self, events: Sequence[Event]) -> list[dict[str, Any]]:
         """Each event in time order (the clock ticking at each), into a trader started at
-        ``started_at``; the trades kept, newest first."""
+        ``started_at`` with the picks; the trades kept, newest first."""
         engine = PredictionStore(self.state / ENGINE_DB)
         store = TraderStore(self.state / DB_NAME)
         try:
             trader = PaperTrader(store, self.rules, CALENDAR.session, self.started_at)
-            reader = CellReader(
-                self.state / ENGINE_DB, self.cell, SYMBOL, self.started_at - timedelta(minutes=2)
-            )
+            picks = tuple(self.picks) if self.picks is not None else (pick(self.cell),)
+            trader.select(self.selection or Selection(picks), self.started_at)
+            reader = EngineReader(self.state / ENGINE_DB, SYMBOL)
+            reader.follow(trader.cells, self.started_at - timedelta(minutes=2))
             for event in sorted(events, key=_time):
                 trader.on_time(_time(event))
                 if isinstance(event, BestQuote):
@@ -172,7 +226,11 @@ class Day:
                 elif isinstance(event, Read):
                     for shown in event.shown:
                         shown.write(engine)
-                    for signal in reader.new():
+                    read = reader.read(at("00:00:00"))
+                    assert read is not None
+                    windows, signals = read
+                    trader.on_special(windows)
+                    for signal in signals:
                         trader.on_signal(signal, event.time)
         finally:
             store.close()
@@ -183,6 +241,89 @@ class Day:
         return read_trades(self.state / DB_NAME, None, 1000)
 
     def decisions(self) -> list[dict[str, Any]]:
+        return self._rows("decisions")
+
+    def selections(self) -> list[dict[str, Any]]:
+        return self._rows("selections")
+
+    def _rows(self, table: str) -> list[dict[str, Any]]:
         with closing(sqlite3.connect(self.state / DB_NAME)) as db:
             db.row_factory = sqlite3.Row
-            return [dict(r) for r in db.execute("SELECT * FROM decisions ORDER BY id")]
+            return [dict(r) for r in db.execute(f"SELECT * FROM {table} ORDER BY id")]
+
+
+# The cost map (``GET /v1/cost-map``, #307) as the Engine API gives it: made-up rows within the /v1
+# schema (``cost_map``), each verdict as given.
+
+HORIZONS = {"direction": 4, "barrier": 4, "barrier_15m": 15, "barrier_30m": 30, "barrier_60m": 60}
+
+
+def predictor(
+    algorithm: str, low: float, verdict: str | dict[str, str] | None, calls: int = 300, rank: int | None = 1
+) -> dict[str, Any]:
+    """A predictor on a row: its hit rate's lower bound ``low``; ``verdict`` both costs' or each."""
+    verdicts = {"limit": verdict, "market": verdict} if isinstance(verdict, str) else verdict
+    return {
+        "algorithm": algorithm,
+        "rank": rank,
+        "calls": calls,
+        "precision": {"value": min(1.0, low + 0.05), "low": low, "high": min(1.0, low + 0.1), "n": calls},
+        "edge": 0.3,
+        "pnl": None,
+        "pnl_inverse": None,
+        "verdict": verdicts,
+    }
+
+
+def cost_row(
+    kind: str,
+    *,
+    width: float = 10.0,
+    cost: float = 2.6,
+    price: float = 70_050.0,
+    tick: int = 100,
+    consensus: dict[str, Any] | None = None,
+    top: dict[str, Any] | None = None,
+    baseline: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """A kind's row: W and the market cost C in ticks at ``price`` (the limit one a tick less)."""
+    limit = cost - 1
+    daily = kind not in HORIZONS
+    breakeven = {
+        "limit": {"c_over_w": limit / width, "p_star": (width + limit) / (2 * width)},
+        "market": {"c_over_w": cost / width, "p_star": (width + cost) / (2 * width)},
+    }
+    return {
+        "kind": kind,
+        "title": kind,
+        "horizon_minutes": HORIZONS.get(kind),
+        "rule": "made up",
+        "days": ["2026-10-13", "2026-10-14"],
+        "unit": "bp" if daily else "ticks",
+        "bar_closes": 380,
+        "width": width,
+        "reference_price": price,
+        "tick": None if daily else tick,
+        "cost": {"limit": limit, "market": cost},
+        "breakeven": None if daily else breakeven,
+        "breakeven_missing": "대칭 장벽이 아님: 보합 폭은 거래를 닫는 자리가 아니다" if daily else None,
+        "consensus": consensus,
+        "top": top,
+        "baseline": baseline,
+    }
+
+
+def cost_map(rows: Sequence[dict[str, Any]], symbol: str = SYMBOL, period: str = "20d") -> dict[str, Any]:
+    return {
+        "symbol": symbol,
+        "period": period,
+        "special": "exclude",
+        "as_of": "2026-10-14T08:30:00+09:00",
+        "min_sample": 200,
+        "fee_rate": FEE,
+        "spread_ticks": 1,
+        "symbols": [],
+        "rows": list(rows),
+        "regimes": None,
+        "regimes_missing": "not computed yet",
+    }

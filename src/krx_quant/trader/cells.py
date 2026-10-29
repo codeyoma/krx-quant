@@ -1,8 +1,10 @@
-"""The cell the trader trades (#394), and its predictions as the engine displays them.
+"""The cells the trader trades (#394, #395), their predictions as the engine displays them, and the
+special situations the engine knows of.
 
 A cell is a (kind, predictor): the direction's ``consensus-final``, the barrier's ``breiman``.
-Its predictions are read from the engine's database (``state/engine.sqlite3``), opened
-read-only each time (``mode=ro``): the trader never writes there. The engine keeps it in
+Which cells are traded is picked from the cost map (``selection.py``). Their predictions are read
+from the engine's database (``state/engine.sqlite3``), opened read-only at each read
+(``mode=ro``, ``EngineReader``): the trader never writes there. The engine keeps it in
 write-ahead-log mode, so a reader sees each commit as it is made.
 
 - The direction's (``predictions``, #160): its three probabilities (up, flat, down), and from its
@@ -12,6 +14,9 @@ write-ahead-log mode, so a reader sees each commit as it is made.
 - A kind's (``kind_predictions``): its output's three probabilities in the kind's order, the
   bar close's mid-point (``anchor``) and tick (#210), and its barrier width (``width_ticks``,
   #183).
+- The special situations' windows the engine kept as it learned them (``special_windows``, #236,
+  ``special.py``): 005930's VIs and the whole market's circuit breakers and sidecars, each with
+  its start and end (a VI's end, while its release is not known, the least it lasts).
 """
 
 from __future__ import annotations
@@ -19,6 +24,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -27,6 +33,8 @@ from krx_quant.feeds.base import KST
 from krx_quant.kind_registry import kind_named
 from krx_quant.kinds import DIRECTION, Kind
 from krx_quant.pricing import tick_size
+from krx_quant.special import Kind as SpecialKind
+from krx_quant.special import Window
 
 log = logging.getLogger(__name__)
 
@@ -76,30 +84,18 @@ def open_engine_db(path: Path) -> sqlite3.Connection:
 
 
 class CellReader:
-    """The cell's predictions of ``symbol`` displayed since the last read, oldest first."""
+    """A cell's predictions of ``symbol`` displayed since the last read, oldest first."""
 
-    def __init__(self, path: Path, cell: Cell, symbol: str, since: datetime) -> None:
-        self.path = path
+    def __init__(self, cell: Cell, symbol: str, since: datetime) -> None:
         self.cell = cell
         self.symbol = symbol
         self._kind = traded_kind(cell.kind)
         self._rise = self._kind.index(self._kind.sides[0]) if self._kind.sides else 0
         # The latest bar close read, as the engine stores times: ISO 8601 in KST, which sorts in time.
         self._after = since.astimezone(KST).isoformat()
-        self._missing = False
 
-    def new(self) -> list[Signal]:
-        if not self.path.exists():
-            if not self._missing:
-                log.warning("trader: no engine database at %s yet", self.path)
-            self._missing = True
-            return []
-        self._missing = False
-        db = open_engine_db(self.path)
-        try:
-            signals = self._direction(db) if self._kind.name == DIRECTION else self._other(db)
-        finally:
-            db.close()
+    def read(self, db: sqlite3.Connection) -> list[Signal]:
+        signals = self._direction(db) if self._kind.name == DIRECTION else self._other(db)
         if signals:
             self._after = max(self._after, max(s.bar_close for s in signals).astimezone(KST).isoformat())
         return signals
@@ -170,3 +166,61 @@ class CellReader:
                 )
             )
         return signals
+
+
+class EngineReader:
+    """The engine's database, read-only at each read: the followed cells' new predictions of
+    ``symbol`` and the special windows kept that touch it."""
+
+    def __init__(self, path: Path, symbol: str) -> None:
+        self.path = path
+        self.symbol = symbol
+        self._readers: dict[Cell, CellReader] = {}
+        self._missing = False
+
+    @property
+    def cells(self) -> list[Cell]:
+        return list(self._readers)
+
+    def follow(self, cells: Iterable[Cell], since: datetime) -> None:
+        """Read ``cells`` from now on: one already followed goes on from where it was, a new one
+        from the predictions of bar closes after ``since``; the others are no longer read."""
+        self._readers = {c: self._readers.get(c) or CellReader(c, self.symbol, since) for c in cells}
+
+    def read(self, windows_since: datetime) -> tuple[list[Window], list[Signal]] | None:
+        """The special windows kept that end after ``windows_since``, and the followed cells' new
+        predictions by bar close; None while there is no engine database."""
+        if not self.path.exists():
+            if not self._missing:
+                log.warning("trader: no engine database at %s yet", self.path)
+            self._missing = True
+            return None
+        self._missing = False
+        db = open_engine_db(self.path)
+        try:
+            windows = special_windows(db, self.symbol, windows_since)
+            signals = [s for reader in self._readers.values() for s in reader.read(db)]
+        finally:
+            db.close()
+        signals.sort(key=lambda s: (s.bar_close, s.displayed_at))
+        return windows, signals
+
+
+def special_windows(db: sqlite3.Connection, symbol: str, since: datetime) -> list[Window]:
+    """The special windows the engine kept (#236) of ``symbol`` or the whole market that end after
+    ``since``, by start."""
+    rows = db.execute(
+        "SELECT kind, symbol, start, end, detail FROM special_windows"
+        " WHERE end > ? AND (symbol IS NULL OR symbol = ?) ORDER BY start",
+        (since.astimezone(KST).isoformat(), symbol),
+    ).fetchall()
+    windows = []
+    for r in rows:
+        try:
+            kind = SpecialKind(r["kind"])
+        except ValueError:
+            log.warning("trader: a special window of a kind it does not know (%s)", r["kind"])
+            continue
+        start, end = datetime.fromisoformat(r["start"]), datetime.fromisoformat(r["end"])
+        windows.append(Window(kind, r["symbol"], start, end, r["detail"]))
+    return windows

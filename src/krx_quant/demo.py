@@ -480,9 +480,11 @@ def write_demo_trader(state_dir: Path, books: Sequence[Event]) -> None:
             tick = _OPENS[TRADER_SYMBOL][1]
             anchor = (bid + ask) / 2
             bar_close = decided.replace(second=0, microsecond=0)
-            cell = {"mode": mode, "symbol": TRADER_SYMBOL, "kind": "barrier", "predictor": "breiman"}
             decision = store.add_decision(
-                **cell,
+                mode=mode,
+                symbol=TRADER_SYMBOL,
+                kind="barrier",
+                predictor="breiman",
                 prediction_id=n + 1,
                 bar_close=bar_close,
                 displayed_at=decided,
@@ -492,7 +494,10 @@ def write_demo_trader(state_dir: Path, books: Sequence[Event]) -> None:
                 reason=None,
             )
             entry = TraderEntry(
-                **cell,
+                mode=mode,
+                symbol=TRADER_SYMBOL,
+                kind="barrier",
+                predictor="breiman",
                 prediction_id=n + 1,
                 bar_close=bar_close,
                 probability=0.68,
