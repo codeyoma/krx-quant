@@ -547,13 +547,15 @@ async def test_the_demo_has_the_trader_s_state_days_and_controls(tmp_path: Path)
     morning's last trade open (its target, stop and time barrier, marked at the last bid), the
     day's and the cumulative P&L of its trades, the limits' use; the screen's pause of the 8th and
     the server's resume of the 12th; each mode's days, the 8th paused, each day's lowest P&L with
-    its trades' dips while held; the morning's trades with the cell's p* and lower bound."""
+    its trades' dips while held; the champion's trades from the 8th under policy 1 with the cell's p*
+    and lower bound; the live gate on its paper record and a challenger's (#400)."""
     app = await demo_app(tmp_path / "demo.sqlite3")
 
     async with TestClient(TestServer(app)) as client:
         state = await get_json(client, "/v1/trader")
         days = await get_json(client, "/v1/trader/days")
         trades = await get_json(client, "/v1/trader/trades")
+        theirs = await get_json(client, "/v1/trader/trades?policy=2")
 
     check("trader", state)
     check("trader_days", days)
@@ -602,10 +604,29 @@ async def test_the_demo_has_the_trader_s_state_days_and_controls(tmp_path: Path)
     assert all(d["daily"]["worst"] <= min(0.0, d["net"]) for d in days["days"])
     paper = [t for t in trades["trades"] if t["mode"] == "paper"]
     assert ledger["2026-10-12", "paper"]["cumulative"]["net"] == pytest.approx(sum(t["net"] for t in paper))
-    assert {t["p_star"] for t in trades["trades"] if t["entry"]["at"] < "2026-10-12"} == {None}
+    # The champion's trades: before the first champion (the 7th's) none of the pick's values nor a
+    # policy, after it policy 1's with the cell's p* and lower bound.
+    assert [(t["policy"], t["p_star"]) for t in trades["trades"] if t["entry"]["at"] < "2026-10-08"] == [
+        (None, None)
+    ]
     assert {
-        (t["p_star"], t["precision_low"]) for t in trades["trades"] if t["entry"]["at"] > "2026-10-12"
-    } == {(0.61, 0.66)}
+        (t["policy"], t["p_star"], t["precision_low"])
+        for t in trades["trades"]
+        if t["entry"]["at"] > "2026-10-08"
+    } == {(1, 0.61, 0.66)}
+    # The policies (#399, #400): 1 the champion with its paper record and the live gate on it, 2 a
+    # challenger running beside it from the 12th, its paper trades its own.
+    assert state["champion"] == 1
+    gate = state["gate"]
+    assert (gate["policy"], gate["days"], gate["required"], gate["passed"]) == (1, 2, 20, False)
+    assert [(p["version"], p["status"]) for p in state["policies"]] == [(1, "champion"), (2, "challenger")]
+    challenger = state["policies"][1]
+    assert challenger["paper"]["days"] == 1 and challenger["paper"]["trades"] == len(theirs["trades"]) == 2
+    assert challenger["promotion"]["why"] == "few_days"
+    assert {(t["policy"], t["mode"]) for t in theirs["trades"]} == {(2, "paper")}
+    assert all(t["id"] not in {u["id"] for u in trades["trades"]} for t in theirs["trades"]), (
+        "not the champion's"
+    )
 
 
 async def test_a_pause_from_the_screen_waits_in_the_demo_for_a_trader(tmp_path: Path) -> None:

@@ -440,14 +440,16 @@ def test_the_direction_s_trades_are_its_touch_p_and_l(tmp_path: Path) -> None:
 # The same input, the same policy; champion, then challengers.
 
 
-def test_the_same_input_makes_the_same_policy_and_the_later_ones_are_challengers(tmp_path: Path) -> None:
+def test_the_same_input_makes_the_same_policy_and_it_is_not_kept_twice(tmp_path: Path) -> None:
+    """Fitted into two stores, byte for byte the same policy. Fitted again into the first, it has
+    the champion's values: not kept (#400), the champion stays."""
     write_five(tmp_path)
 
-    def again(night: str) -> Any:
+    def again(night: str, store: Path) -> Any:
         return refit_from(
             DAYS,
             tmp_path / ENGINE_DB,
-            tmp_path / TRADER_DB,
+            store,
             CALENDAR.session,
             capital=CAPITAL,
             fee_rate=FEE,
@@ -456,17 +458,24 @@ def test_the_same_input_makes_the_same_policy_and_the_later_ones_are_challengers
             now=at(night),
         )
 
-    first, second = again("22:31:00"), again("22:45:00")
+    first = again("22:31:00", tmp_path / TRADER_DB)
+    other = again("22:45:00", tmp_path / "other" / TRADER_DB)
+    second = again("22:50:00", tmp_path / TRADER_DB)
 
-    assert (first.version, first.champion, second.version, second.champion) == (1, True, 2, False)
-    assert second.champion_version == 1, "the first stays the champion"
-    assert second.cells == first.cells and second.left_out == first.left_out
-    assert {**second.fit, "run": None} == {**first.fit, "run": None}, "but its time and memory"
-    with closing(sqlite3.connect(tmp_path / TRADER_DB)) as db:
-        cells = [r[0] for r in db.execute("SELECT cells FROM policies ORDER BY id")]
-        champions = db.execute("SELECT policy_id, reason FROM champions").fetchall()
-    assert cells[0] == cells[1], "byte for byte"
-    assert champions == [(1, policies.FIRST)]
+    assert (first.version, first.champion, other.version, other.champion) == (1, True, 1, True)
+    assert other.cells == first.cells and other.left_out == first.left_out
+    assert {**other.fit, "run": None} == {**first.fit, "run": None}, "but its time and memory"
+    stored = []
+    for path in (tmp_path / TRADER_DB, tmp_path / "other" / TRADER_DB):
+        with closing(sqlite3.connect(path)) as db:
+            stored.append([r[0] for r in db.execute("SELECT cells FROM policies ORDER BY id")])
+            champions = db.execute("SELECT policy_id, reason FROM champions").fetchall()
+        assert champions == [(1, policies.FIRST)]
+    assert stored[0] == stored[1], "byte for byte, and one policy each"
+    assert (second.version, second.same_as, second.champion, second.champion_version) == (1, 1, False, 1)
+    assert report(second).startswith(
+        "정책 맞추기 (#399): 새 정책 없음 · 맞춘 값이 챔피언 정책 1과 같아 저장하지 않았다\n"
+    )
 
 
 def test_no_cell_passing_makes_an_empty_policy(tmp_path: Path) -> None:
@@ -533,7 +542,10 @@ async def test_the_job_reads_tonight_s_cost_map_and_keeps_the_policy(
     assert code == 0
     assert api.asked == [{"symbol": SYMBOL, "period": "20d", "special": "exclude"}]
     out = capsys.readouterr().out
-    assert out.startswith("정책 맞추기 (#399): 정책 1 · 챔피언(처음 맞춘 정책)")
+    assert out.startswith("도전 정책 판정 (#400)\n챔피언이 아직 없다(첫 밤 정책 맞추기 전).\n\n"), (
+        "the challengers are judged first (#400): none before the first champion"
+    )
+    assert "\n정책 맞추기 (#399): 정책 1 · 챔피언(처음 맞춘 정책)\n" in out
     assert "뺀 칸: barrier breiman (top): few_trades, 모의 매매가 20건에 못 미침(가장 많을 때 5건)" in out
     assert "격자: θ 0.4 0.5 0.6 0.7 0.8 × λ 0.25 0.5 1 · 칸마다 모의 매매 20건 이상" in out
     assert re.search(r"메모리: 최대 RSS \d+\.\d MB", out), out

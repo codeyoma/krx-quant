@@ -373,7 +373,15 @@ def test_the_limits_count_the_champion_s_trades_alone(tmp_path: Path) -> None:
             db.close()
         morning = at("10:00:00") + timedelta(days=2)
         trade(store, "paper", morning, morning + timedelta(minutes=2), 2, policy_id=1)
-        trade(store, "paper", morning + timedelta(minutes=1), morning + timedelta(minutes=3), 3, policy_id=2)
+        trade(
+            store,
+            "paper",
+            morning + timedelta(minutes=1),
+            morning + timedelta(minutes=3),
+            3,
+            policy_id=2,
+            champion=False,
+        )
         guard = Guard(store, "paper", Limits(1_000_000, 10, 20), morning + timedelta(hours=1), lambda _: None)
     finally:
         store.close()

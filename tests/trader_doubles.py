@@ -1,12 +1,13 @@
 """Stored predictions, picks, fake quote streams and a driver for the trader's tests (#394, #395,
-#396).
+#396, #400).
 
 The engine's predictions and special windows are written into a real engine database
 (``PredictionStore``), as the engine displays and learns them, and the trader reads them there
 (``cells.EngineReader``); the picks are made as the cost map would pass them; the quotes are made
 up, received in the order given; the pauses are written into the trader's store as the Engine API
-writes them, the resumes and re-arms as ``krx-quant trade`` does. Every price and hit rate is made
-up.
+writes them, the resumes and re-arms as ``krx-quant trade`` does. With ``Day.desk`` the trader is
+the whole desk (#400: the champion's book and each challenger running, the policies kept in the
+store as the nightly re-fit keeps them, ``keep``). Every price and hit rate is made up.
 """
 
 from __future__ import annotations
@@ -28,7 +29,9 @@ from krx_quant.predictions import NewKindPrediction, NewPrediction, PredictionSt
 from krx_quant.special import Kind as SpecialKind
 from krx_quant.special import Window
 from krx_quant.trader import KELLY_FRACTION, SYMBOL
+from krx_quant.trader import policy as policies
 from krx_quant.trader.cells import Cell, EngineReader
+from krx_quant.trader.desk import Desk
 from krx_quant.trader.limits import ask
 from krx_quant.trader.paper import PaperTrader, Rules
 from krx_quant.trader.quotes import BestQuote
@@ -244,8 +247,20 @@ class AskRearm:
         return at(self.hms)
 
 
+@dataclass(frozen=True)
+class Repick:
+    """The trader's pick at ``hms`` (its 08:30 one, #395): the same cells passing, under the policies
+    kept then (#400)."""
+
+    hms: str
+
+    @property
+    def time(self) -> datetime:
+        return at(self.hms)
+
+
 Asked = AskPause | AskResume | AskRearm
-Event = Read | Tick | BestQuote | Asked
+Event = Read | Tick | BestQuote | Asked | Repick
 
 
 def _time(event: Event) -> datetime:
@@ -268,25 +283,39 @@ class Day:
     # suspended overnight wakes to a quote first).
     clock_first: bool = True
     asked: list[Control | str] = field(default_factory=list)  # each resume and re-arm, or why none
+    # The whole desk (#400): the champion's book and the challengers' under the policies kept in the
+    # store, ``picks`` being the cells the cost map passes; else the champion's book alone, trading
+    # ``selection`` or ``picks`` as given.
+    desk: bool = False
 
     def run(self, events: Sequence[Event]) -> list[dict[str, Any]]:
         """Each event in time order (the clock ticking at each), into a trader started at
-        ``started_at`` with the picks, its state written after the last; the trades kept, newest
-        first."""
+        ``started_at`` with the picks, its state written after the last; the champion's trades kept,
+        newest first."""
         engine = PredictionStore(self.state / ENGINE_DB)
         store = TraderStore(self.state / DB_NAME)
         try:
-            trader = PaperTrader(
-                store, self.rules, CALENDAR.session, self.started_at, notify=self.notices.append
-            )
+            trader: Desk | PaperTrader
+            if self.desk:
+                trader = Desk(
+                    store, self.rules, CALENDAR.session, self.started_at, notify=self.notices.append
+                )
+            else:
+                trader = PaperTrader(
+                    store, self.rules, CALENDAR.session, self.started_at, notify=self.notices.append
+                )
             picks = tuple(self.picks) if self.picks is not None else (pick(self.cell),)
-            trader.select(self.selection or Selection(picks), self.started_at)
+            chosen = self.selection or Selection(picks)
+            trader.select(chosen, self.started_at)
             reader = EngineReader(self.state / ENGINE_DB, SYMBOL)
             reader.follow(trader.cells, self.started_at - timedelta(minutes=2))
             for event in sorted(events, key=_time):
                 if self.clock_first or not isinstance(event, BestQuote):
                     trader.on_time(_time(event))
-                if isinstance(event, BestQuote):
+                if isinstance(event, Repick):
+                    trader.select(chosen, event.time)
+                    reader.follow(trader.cells, event.time - timedelta(minutes=2))
+                elif isinstance(event, BestQuote):
                     trader.on_quote(event)
                 elif isinstance(event, Read):
                     for shown in event.shown:
@@ -323,8 +352,9 @@ class Day:
         """``GET /v1/trader/days`` of the test month."""
         return read_days(self.state / DB_NAME, date(2026, 10, 1), date(2026, 10, 31))
 
-    def trades(self) -> list[dict[str, Any]]:
-        return read_trades(self.state / DB_NAME, None, 1000)
+    def trades(self, policy: int | None = None) -> list[dict[str, Any]]:
+        """The champion's trades, or ``policy``'s (#400), newest first."""
+        return read_trades(self.state / DB_NAME, None, 1000, policy)
 
     def decisions(self) -> list[dict[str, Any]]:
         return self._rows("decisions")
@@ -336,6 +366,27 @@ class Day:
         with closing(sqlite3.connect(self.state / DB_NAME)) as db:
             db.row_factory = sqlite3.Row
             return [dict(r) for r in db.execute(f"SELECT * FROM {table} ORDER BY id")]
+
+
+def keep(state: Path, made: datetime, *cells: policies.PolicyCell, reason: str = "밤 맞추기") -> int:
+    """A policy version kept at ``made`` as the nightly re-fit keeps it (``policy.add``): the first
+    the champion, a later one a challenger (#400: it runs from the trading day after ``made``'s
+    pick). Its version."""
+    db = policies.connect(state / DB_NAME)
+    try:
+        version, _ = policies.add(db, made, reason, cells, [], {"grid": {}})
+    finally:
+        db.close()
+    return version
+
+
+def policy_cell(
+    of: Cell, threshold: float = 0.6, kelly_fraction: float = 0.5, role: str = "top"
+) -> policies.PolicyCell:
+    """A cell of a policy at ``threshold`` and ``kelly_fraction``, fitted as the re-fit keeps it."""
+    fitted = {"p_star": 0.63, "low": 0.7, "kelly": 10.5, "fraction": 1.0, "days": [], "read": {}}
+    fitted |= {"trades": 24, "wins": 12, "net": 0.0, "growth": 0.0}
+    return policies.PolicyCell(of.kind, role, of.predictor, threshold, kelly_fraction, fitted)
 
 
 # The cost map (``GET /v1/cost-map``, #307) as the Engine API gives it: made-up rows within the /v1

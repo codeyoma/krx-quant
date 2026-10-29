@@ -10,8 +10,18 @@ them, a stored one that carried one would be read without it (``PolicyCell.from_
 nothing here reads or writes the trader's settings.
 
 **Champion and challengers.** The first policy fitted becomes the champion; every later one is
-kept as a challenger only (#399). Running the challengers in paper beside the champion and
-promoting one is #400's. ``champions`` keeps each change of the champion, with why.
+kept as a challenger (#399). ``champions`` keeps each change of the champion, with why. The
+challengers run in paper beside the champion (#400, ``desk.py``) in ``CHALLENGERS`` slots: a
+policy kept while the slots are full waits (stored, not run) and is admitted when one frees, the
+newest waiting first (``admit``, ``admitted_at``); a fit with the values of the champion or of a
+running challenger is not kept (``same_as``). A challenger leaves its slot when it is promoted
+(``promotion.py``, ``crown``; the champion it replaces runs no more) or when it reaches
+``promotion.RETIRE_DAYS`` common days unpromoted (``drop``, ``dropped_at``: it never runs again).
+A challenger runs on a trading day when it was admitted before that day's pick (``PICK_AT``,
+08:30: ``running_versions``), so one admitted tonight runs from the next trading day.
+
+> Spec #393 dropped the oldest of three for each new one; with a fit every night, none would have
+> reached the promotion's ten days (#416, Codex's review).
 
 **How the trader applies the champion** (``apply``), at each pick (its start and 08:30, #395):
 the cost map still decides what may trade (a cell passing at a market order's round trip, a
@@ -34,13 +44,14 @@ from __future__ import annotations
 import json
 import math
 import sqlite3
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
 from krx_quant.feeds.base import KST
+from krx_quant.trader import PAPER, PICK_AT
 from krx_quant.trader.cells import Cell
 from krx_quant.trader.selection import NOT_IN_POLICY, Selection
 
@@ -51,17 +62,29 @@ CREATE TABLE IF NOT EXISTS policies (   -- each policy version (#399): what the 
     reason TEXT NOT NULL,               -- why it was made
     cells TEXT NOT NULL,                -- JSON: the cells it trades, first ranked first, with θ and λ
     left_out TEXT NOT NULL,             -- JSON: the cells the cost map passed that it does not trade, and why
-    fit TEXT NOT NULL                   -- JSON: what it was fitted on: cost map, grid, result, run
+    fit TEXT NOT NULL,                  -- JSON: what it was fitted on: cost map, grid, result, run
+    admitted_at TEXT,                   -- a challenger given a running slot (#400); null: waiting
+    dropped_at TEXT                     -- a challenger dropped unpromoted (#400); null: not dropped
 );
 CREATE TABLE IF NOT EXISTS champions (  -- each change of the champion (#399; promotions, #400)
     id INTEGER PRIMARY KEY,
     at TEXT NOT NULL,
     policy_id INTEGER NOT NULL REFERENCES policies (id),
-    reason TEXT NOT NULL
+    reason TEXT NOT NULL,
+    detail TEXT                         -- JSON: a promotion's figures (#400); null for the first
 );
 """
+# Columns added since the tables were first made (#400): added to a store made before, null in its
+# rows.
+_ADDED = {
+    "policies": (("admitted_at", "TEXT"), ("dropped_at", "TEXT")),
+    "champions": (("detail", "TEXT"),),
+}
 
-CHAMPION, CHALLENGER, FORMER = "champion", "challenger", "former"
+# The challengers' running slots (#393, #400).
+CHALLENGERS = 3
+
+CHAMPION, CHALLENGER, FORMER, DROPPED, WAITING = "champion", "challenger", "former", "dropped", "waiting"
 # Why the first policy is the champion (#399): no challenger has run against anything yet.
 FIRST = "처음 맞춘 정책(#399)"
 # How long a writer waits for the trader's own writes to the same store.
@@ -124,6 +147,8 @@ class Policy:
     cells: tuple[PolicyCell, ...]  # first ranked first
     left_out: tuple[dict[str, Any], ...] = ()
     fit: Mapping[str, Any] = field(default_factory=dict)
+    admitted_at: datetime | None = None  # a challenger given a running slot (#400)
+    dropped_at: datetime | None = None  # a challenger dropped unpromoted (#400)
 
 
 def apply(policy: Policy | None, selection: Selection) -> Selection:
@@ -154,6 +179,16 @@ def apply(policy: Policy | None, selection: Selection) -> Selection:
 
 def ensure_schema(db: sqlite3.Connection) -> None:
     db.executescript(f"BEGIN;{SCHEMA}COMMIT;")
+    with db:
+        for table, columns in _ADDED.items():
+            have = {r[1] for r in db.execute(f"PRAGMA table_info({table})")}
+            for name, spec in columns:
+                if name not in have:
+                    try:
+                        db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {spec}")
+                    except sqlite3.OperationalError as e:  # added meanwhile by the other writer
+                        if "duplicate column" not in str(e):
+                            raise
 
 
 def connect(path: Path) -> sqlite3.Connection:
@@ -181,7 +216,8 @@ def add(
     fit: Mapping[str, Any],
 ) -> tuple[int, bool]:
     """Keep a new policy version; the first one kept becomes the champion (``FIRST``), in the same
-    transaction. Its version, and whether it is the champion."""
+    transaction; a later one, a challenger, takes a free running slot or waits (``admit``). Its
+    version, and whether it is the champion."""
     with db:
         cursor = db.execute(
             "INSERT INTO policies (created_at, reason, cells, left_out, fit) VALUES (?, ?, ?, ?, ?)",
@@ -200,7 +236,149 @@ def add(
             db.execute(
                 "INSERT INTO champions (at, policy_id, reason) VALUES (?, ?, ?)", (_iso(at), version, FIRST)
             )
+        else:
+            _admit(db, at)
     return version, first
+
+
+def _columns(db: sqlite3.Connection) -> set[str]:
+    return {r[1] for r in db.execute("PRAGMA table_info(policies)")}
+
+
+def _a_challenger(db: sqlite3.Connection) -> str:
+    """A policy ``p`` never the champion and not dropped (#400)."""
+    dropped = "p.dropped_at IS NULL AND " if "dropped_at" in _columns(db) else ""
+    return f"{dropped}p.id NOT IN (SELECT policy_id FROM champions)"
+
+
+def _running(db: sqlite3.Connection) -> str:
+    """A challenger ``p`` in a running slot (#400); none in a store the trader has not opened since."""
+    if "admitted_at" not in _columns(db):
+        return "0"
+    return f"p.admitted_at IS NOT NULL AND {_a_challenger(db)}"
+
+
+def admit(db: sqlite3.Connection, at: datetime) -> list[int]:
+    """The waiting policies given the free running slots at ``at``, the newest first (#400): the
+    versions admitted. They run from the next pick (``running_versions``)."""
+    with db:
+        return _admit(db, at)
+
+
+def _admit(db: sqlite3.Connection, at: datetime) -> list[int]:
+    held = db.execute(f"SELECT count(*) FROM policies p WHERE {_running(db)}").fetchone()[0]
+    free = CHALLENGERS - int(held)
+    if free <= 0:
+        return []
+    rows = db.execute(
+        f"SELECT p.id FROM policies p WHERE p.admitted_at IS NULL AND {_a_challenger(db)}"
+        " ORDER BY p.id DESC LIMIT ?",
+        (free,),
+    ).fetchall()
+    for (version,) in rows:
+        db.execute("UPDATE policies SET admitted_at = ? WHERE id = ?", (_iso(at), version))
+    return sorted(int(r[0]) for r in rows)
+
+
+def admitted_at(db: sqlite3.Connection, at: datetime) -> list[int]:
+    """The policies admitted at ``at`` (a night's)."""
+    rows = db.execute("SELECT id FROM policies WHERE admitted_at = ? ORDER BY id", (_iso(at),))
+    return [int(r[0]) for r in rows]
+
+
+def drop(db: sqlite3.Connection, at: datetime, versions: Collection[int]) -> None:
+    """``versions``, challengers judged long enough without a promotion (#400,
+    ``promotion.RETIRE_DAYS``), dropped at ``at`` for good: their slots free."""
+    with db:
+        for version in versions:
+            db.execute(
+                "UPDATE policies SET dropped_at = ? WHERE id = ? AND dropped_at IS NULL", (_iso(at), version)
+            )
+
+
+def waiting_versions(db: sqlite3.Connection) -> list[int]:
+    """The policies kept but not admitted, newest first (#400)."""
+    if "admitted_at" not in _columns(db):
+        return []
+    rows = db.execute(
+        f"SELECT p.id FROM policies p WHERE p.admitted_at IS NULL AND {_a_challenger(db)} ORDER BY p.id DESC"
+    )
+    return [int(r[0]) for r in rows]
+
+
+def values(cells: Sequence[PolicyCell]) -> tuple[tuple[str, str, str, float, float], ...]:
+    """A policy's values (#393: its cells in their order, each θ and λ), what was fitted aside."""
+    return tuple((c.kind, c.role, c.predictor, c.threshold, c.kelly_fraction) for c in cells)
+
+
+def same_as(db: sqlite3.Connection, cells: Sequence[PolicyCell]) -> int | None:
+    """The champion or the running challenger with the values of ``cells``, if any (#400: a fit
+    that changes nothing is not kept). ``PolicyError`` when one of them cannot be read."""
+    found = values(cells)
+    current = champion_version(db)
+    for version in [*([] if current is None else [current]), *challenger_versions(db)]:
+        if values(read(db, version).cells) == found:
+            return version
+    return None
+
+
+def champion_version(db: sqlite3.Connection) -> int | None:
+    """The champion's version now (the latest of ``champions``); None before the first."""
+    row = db.execute("SELECT policy_id FROM champions ORDER BY id DESC LIMIT 1").fetchone()
+    return None if row is None else int(row[0])
+
+
+def challenger_versions(db: sqlite3.Connection) -> list[int]:
+    """The challengers in a running slot, oldest first: admitted, never the champion, not dropped
+    (at most ``CHALLENGERS``)."""
+    rows = db.execute(f"SELECT p.id FROM policies p WHERE {_running(db)} ORDER BY p.id")
+    return [int(r[0]) for r in rows]
+
+
+def running_versions(db: sqlite3.Connection, day: date) -> list[int]:
+    """The challengers that run on ``day``, oldest first: admitted before its pick (``PICK_AT``,
+    08:30), so that one admitted on a night runs from the next trading day, whenever the trader
+    reads it."""
+    versions = challenger_versions(db)
+    if not versions:
+        return []
+    marks = ", ".join("?" * len(versions))
+    cutoff = datetime.combine(day, PICK_AT, KST)
+    rows = db.execute(f"SELECT id, admitted_at FROM policies WHERE id IN ({marks})", versions)
+    return sorted(int(r[0]) for r in rows if datetime.fromisoformat(r[1]) < cutoff)
+
+
+def read(db: sqlite3.Connection, version: int) -> Policy:
+    """Policy ``version``; ``PolicyError`` when it is not kept or cannot be read."""
+    row = db.execute("SELECT * FROM policies WHERE id = ?", (version,)).fetchone()
+    if row is None:
+        raise PolicyError(f"policy {version}: not kept")
+    try:
+        return _policy(row)
+    except (ValueError, TypeError, KeyError, AttributeError) as e:
+        raise PolicyError(f"policy {version}: {e}") from e
+
+
+def crown(
+    db: sqlite3.Connection,
+    at: datetime,
+    version: int,
+    reason: str,
+    detail: Mapping[str, Any],
+    replacing: int | None = None,
+) -> bool:
+    """``version`` the champion from ``at`` (#400, ``promotion.promote``): a change of the champion
+    kept, with why and its figures; with ``replacing``, only while that is still the champion (no
+    other writer changed it meanwhile). Whether it was kept."""
+    with db:
+        db.execute("BEGIN IMMEDIATE")
+        if replacing is not None and champion_version(db) != replacing:
+            return False
+        db.execute(
+            "INSERT INTO champions (at, policy_id, reason, detail) VALUES (?, ?, ?, ?)",
+            (_iso(at), version, reason, _dumps(dict(detail))),
+        )
+    return True
 
 
 class PolicyError(Exception):
@@ -222,10 +400,26 @@ def champion(db: sqlite3.Connection) -> Policy | None:
         raise PolicyError(f"policy {row['id']}: {e}") from e
 
 
-def read_policies(path: Path, limit: int) -> dict[str, Any]:
-    """The last ``limit`` policy versions, newest first, each with its status (``champion`` now,
-    ``former`` once, else ``challenger``), and every change of the champion, newest first:
+def status_of(
+    version: int, champion: int | None, once: Collection[int], dropped: bool, admitted: bool
+) -> str:
+    """A policy's status: ``champion`` now, ``former`` once, ``dropped`` (a challenger dropped
+    unpromoted, #400), ``challenger`` (in a running slot), else ``waiting`` (kept, not admitted)."""
+    if version == champion:
+        return CHAMPION
+    if version in once:
+        return FORMER
+    if dropped:
+        return DROPPED
+    return CHALLENGER if admitted else WAITING
+
+
+def read_policies(path: Path, limit: int, mode: str = PAPER) -> dict[str, Any]:
+    """The last ``limit`` policy versions, newest first, each with its status (``status_of``) and
+    its paper record (#400, ``promotion.paper``), and every change of the champion, newest first:
     ``GET /v1/trader/policies``. Read-only; none without the store or before the first policy."""
+    from krx_quant.trader import promotion  # it imports this module
+
     if not path.exists():
         return {"champion": None, "policies": [], "champions": []}
     db = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
@@ -235,28 +429,42 @@ def read_policies(path: Path, limit: int) -> dict[str, Any]:
             return {"champion": None, "policies": [], "champions": []}
         changes = [dict(r) for r in db.execute("SELECT * FROM champions ORDER BY id DESC")]
         rows = db.execute("SELECT * FROM policies ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+        records = promotion.records(db, mode, [r["id"] for r in rows])
     finally:
         db.close()
     now = changes[0]["policy_id"] if changes else None
     once = {c["policy_id"] for c in changes}
     policies = []
     for row in rows:
-        status = CHAMPION if row["id"] == now else FORMER if row["id"] in once else CHALLENGER
+        keys = row.keys()
+        dropped = "dropped_at" in keys and row["dropped_at"] is not None
+        admitted = row["admitted_at"] if "admitted_at" in keys else None
         policies.append(
             {
                 "version": row["id"],
-                "status": status,
+                "status": status_of(row["id"], now, once, dropped, admitted is not None),
                 "created_at": row["created_at"],
                 "reason": row["reason"],
                 "cells": json.loads(row["cells"]),
                 "left_out": json.loads(row["left_out"]),
                 "fit": json.loads(row["fit"]),
+                "admitted_at": admitted,
+                "dropped_at": row["dropped_at"] if dropped else None,
+                "paper": promotion.paper(records.get(row["id"])),
             }
         )
     return {
         "champion": now,
         "policies": policies,
-        "champions": [{"at": c["at"], "version": c["policy_id"], "reason": c["reason"]} for c in changes],
+        "champions": [
+            {
+                "at": c["at"],
+                "version": c["policy_id"],
+                "reason": c["reason"],
+                "detail": json.loads(c["detail"]) if c.get("detail") else None,
+            }
+            for c in changes
+        ],
     }
 
 
@@ -272,6 +480,8 @@ def _policy(row: sqlite3.Row) -> Policy:
     cells, left_out, fit = (json.loads(row[k]) for k in ("cells", "left_out", "fit"))
     if not isinstance(cells, list) or not isinstance(left_out, list) or not isinstance(fit, dict):
         raise ValueError("its cells, left_out and fit are not a list, a list and an object")
+    dropped = row["dropped_at"] if "dropped_at" in row.keys() else None
+    admitted = row["admitted_at"] if "admitted_at" in row.keys() else None
     return Policy(
         version=row["id"],
         created_at=datetime.fromisoformat(row["created_at"]),
@@ -279,6 +489,8 @@ def _policy(row: sqlite3.Row) -> Policy:
         cells=tuple(PolicyCell.from_json(c) for c in cells),
         left_out=tuple(dict(x) for x in left_out),
         fit=fit,
+        admitted_at=None if admitted is None else datetime.fromisoformat(admitted),
+        dropped_at=None if dropped is None else datetime.fromisoformat(dropped),
     )
 
 
