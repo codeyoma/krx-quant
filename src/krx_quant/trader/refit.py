@@ -1,7 +1,8 @@
 """The nightly re-fit of the trader's policy (#399, #393 "정책과 자기 개선"): ``krx-quant
 refit-policy``, run every trading day's night after the nightly training by the scheduled job
-``trader-report`` (#402: ``--report`` prints the day's report above this output). It first judges the challengers that ran against the champion and promotes one
-that beat it (#400, ``promotion.promote``: after the market only), then writes a new policy
+``trader-report`` (#402: ``--report`` prints the day's report above this output). It first
+judges the challengers that ran against the champion and promotes one that beat it (#400,
+``promotion.promote``: after the market only), then writes a new policy
 version (``policy.py``): the first one becomes the champion, every later one a challenger, which
 takes a free one of the three running slots (it runs in paper beside the champion from the next
 trading day) or waits for one. A fit with the values of the champion or of a running challenger is
