@@ -268,9 +268,12 @@ async def policies_answer(scratch: Path, state: Path | None, query: str = "") ->
 
 async def test_the_policies_newest_first_the_champion_marked(tmp_path: Path) -> None:
     """Two nights' re-fits of the same five predictions: the first the champion, the second a
-    challenger with the same values."""
+    challenger in a running slot, its grid's λ a quarter (the same values would not be kept, #400)."""
     write_five(tmp_path)
-    for night in ("22:31:00", "22:45:00"):
+    for night, grid in (
+        ("22:31:00", Grid(min_trades=1)),
+        ("22:45:00", Grid(min_trades=1, kelly_fractions=(0.25,))),
+    ):
         refit_from(
             DAYS,
             tmp_path / ENGINE_DB,
@@ -279,7 +282,7 @@ async def test_the_policies_newest_first_the_champion_marked(tmp_path: Path) -> 
             capital=CAPITAL,
             fee_rate=FEE,
             target_version=TARGET_VERSION,
-            grid=Grid(min_trades=1),
+            grid=grid,
             now=at(night),
         )
 
@@ -292,7 +295,10 @@ async def test_the_policies_newest_first_the_champion_marked(tmp_path: Path) -> 
     assert [(p["version"], p["status"]) for p in body["policies"]] == [(2, "challenger"), (1, "champion")]
     assert [p["version"] for p in page["policies"]] == [2]
     challenger, champion = body["policies"]
-    assert challenger["cells"] == champion["cells"]
+    assert [{**c, "kelly_fraction": 0.5, "fitted": None} for c in challenger["cells"]] == [
+        {**c, "fitted": None} for c in champion["cells"]
+    ], "but λ"
+    assert (challenger["admitted_at"], champion["admitted_at"]) == ("2026-10-14T22:45:00+09:00", None)
     [cell] = champion["cells"]
     assert (cell["kind"], cell["predictor"], cell["threshold"], cell["kelly_fraction"]) == (
         "barrier",

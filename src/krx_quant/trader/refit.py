@@ -3,7 +3,10 @@ refit-policy``, the scheduled job ``refit-policy-399`` on every trading day's ni
 nightly training. It first judges the challengers that ran against the champion and promotes one
 that beat it (#400, ``promotion.promote``: after the market only), then writes a new policy
 version (``policy.py``): the first one becomes the champion, every later one a challenger, which
-runs in paper beside the champion from the next trading day and drops the oldest beyond three.
+takes a free one of the three running slots (it runs in paper beside the champion from the next
+trading day) or waits for one. A fit with the values of the champion or of a running challenger is
+not kept (``policy.same_as``). At the night's end the slots freed are filled, the newest waiting
+first (``policy.admit``).
 
 **Which cells.** Tonight's cost map of 005930 (``GET /v1/cost-map``, as the trader reads it at
 08:30, ``selection.pick``) decides what may trade: the cells passing at a market order's round
@@ -108,8 +111,10 @@ KELLY_FRACTIONS = (0.25, 0.5, 1.0)
 MIN_TRADES = 20
 # Why a cell the cost map passed is left out.
 FEW_TRADES, NO_GAIN = "few_trades", "no_gain"
-# What the job's exit code says: 0 a policy kept, 1 none (the cost map or the engine's database
-# could not be read).
+# The waiting policies the night's output names, newest first.
+WAITING_SHOWN = 5
+# What the job's exit code says: 0 a policy kept (or the same values running already), 1 none (the
+# cost map or the engine's database could not be read).
 NO_POLICY_KEPT = 1
 
 
@@ -486,8 +491,13 @@ class Refitted:
     left_out: tuple[dict[str, Any], ...]
     fit: Mapping[str, Any]
     passed: int  # the cells the cost map passed
-    dropped: tuple[int, ...] = ()  # the challengers it dropped (beyond three, #400)
-    challengers: tuple[int, ...] = ()  # the challengers kept after it, oldest first
+    # #400: the champion or running challenger it equals (then it is not kept: ``version`` is that
+    # one's), whether it was admitted to a running slot, the challengers running after it (oldest
+    # first) and the policies waiting (newest first).
+    same_as: int | None = None
+    admitted: bool = False
+    challengers: tuple[int, ...] = ()
+    waiting: tuple[int, ...] = ()
 
 
 def refit_from(
@@ -570,10 +580,19 @@ def refit_from(
     )
     store = policies.connect(trader_db)
     try:
-        version, first_champion = policies.add(store, now, reason, cells, left_out, fit_json)
+        try:
+            same = policies.same_as(store, cells)
+        except policies.PolicyError as e:  # one it would be compared with cannot be read: kept
+            log.warning("refit: cannot compare with the policies running (%s): kept all the same", e)
+            same = None
+        if same is None:
+            version, first_champion = policies.add(store, now, reason, cells, left_out, fit_json)
+        else:
+            version, first_champion = same, False
         champion = policies.champion_version(store)
-        dropped = tuple(policies.dropped_at(store, now))
+        admitted = version in policies.admitted_at(store, now)
         challengers = tuple(policies.challenger_versions(store))
+        waiting = tuple(policies.waiting_versions(store))
     finally:
         store.close()
     return Refitted(
@@ -584,8 +603,10 @@ def refit_from(
         left_out=left_out,
         fit=fit_json,
         passed=len(selection.picks),
-        dropped=dropped,
+        same_as=same,
+        admitted=admitted,
         challengers=challengers,
+        waiting=waiting,
     )
 
 
@@ -593,14 +614,24 @@ def report(done: Refitted) -> str:
     """The job's output, for the issue (no price: cells, values, counts, won and growth)."""
     fit_json = done.fit
     cost_map = fit_json["cost_map"]
-    status = (
-        "챔피언(처음 맞춘 정책)"
-        if done.champion
-        else f"도전 정책(챔피언은 정책 {done.champion_version}, 다음 거래일부터 모의로 함께 돈다)"
-    )
+    if done.champion:
+        head = f"정책 {done.version} · 챔피언(처음 맞춘 정책)"
+    elif done.same_as is not None:
+        whose = "챔피언" if done.same_as == done.champion_version else "도는 도전 정책"
+        head = f"새 정책 없음 · 맞춘 값이 {whose} 정책 {done.same_as}과 같아 저장하지 않았다"
+    elif done.admitted:
+        head = (
+            f"정책 {done.version} · 도전 정책(챔피언은 정책 {done.champion_version}, "
+            "다음 거래일부터 모의로 함께 돈다)"
+        )
+    else:
+        head = (
+            f"정책 {done.version} · 기다리는 정책"
+            "(도전 정책 셋이 돌고 있다: 자리가 나면 가장 새 것부터 들어간다)"
+        )
     grid = fit_json["grid"]
     lines = [
-        f"정책 맞추기 (#399): 정책 {done.version} · {status}",
+        f"정책 맞추기 (#399): {head}",
         f"비용 지도: {SYMBOL} {cost_map['period']}, as_of {cost_map['as_of']}, "
         f"시장가 왕복 통과 {done.passed}칸",
         "격자: θ "
@@ -633,8 +664,10 @@ def report(done: Refitted) -> str:
         lines.append(f"뺀 칸: {x['kind']} {x['predictor']} ({x['role']}): {why}, {detail}")
     if done.challengers:
         lines.append("모의로 도는 도전 정책(셋까지): " + ", ".join(f"정책 {v}" for v in done.challengers))
-    if done.dropped:
-        lines.append("내린 도전 정책(가장 오래된 것): " + ", ".join(f"정책 {v}" for v in done.dropped))
+    if done.waiting:
+        shown = ", ".join(f"정책 {v}" for v in done.waiting[:WAITING_SHOWN])
+        more = f" 외 {len(done.waiting) - WAITING_SHOWN}개" if len(done.waiting) > WAITING_SHOWN else ""
+        lines.append(f"자리를 기다리는 정책(새 것부터): {shown}{more}")
     total = fit_json["result"]
     run = fit_json["run"]
     lines += [
@@ -699,6 +732,42 @@ async def run_refit(
     calendar = calendar_store(settings).calendar
     promote_now(settings.state_dir / TRADER_DB, calendar.session, now)
     try:
+        return await _refit(settings, trader, url, calendar.session, now)
+    finally:
+        admit_now(settings.state_dir / TRADER_DB, now)
+
+
+def admit_now(trader_db: Path, now: datetime) -> None:
+    """The night's end (#400): the running slots freed tonight (a promotion, a challenger dropped)
+    and not taken by tonight's fit given to the newest policies waiting; printed when any is."""
+    if not trader_db.exists():
+        return
+    try:
+        db = policies.connect(trader_db)
+        try:
+            admitted = policies.admit(db, now)
+        finally:
+            db.close()
+    except sqlite3.Error as e:
+        print(f"도전 정책 자리 (#400): 저장소를 쓰지 못해 기다리는 정책을 들이지 못했다: {e}")
+        log.error("admission: %s", e)
+        return
+    if admitted:
+        log.info("admission: policy %s take(s) a challenger's slot", ", ".join(map(str, admitted)))
+        print(
+            "\n도전 정책 자리 (#400): 빈 자리에 들어간 정책(다음 거래일부터 돈다): "
+            + ", ".join(f"정책 {v}" for v in admitted)
+        )
+
+
+async def _refit(
+    settings: Settings,
+    trader: TraderSettings,
+    url: str,
+    sessions: Callable[[date], Session | None],
+    now: datetime,
+) -> int:
+    try:
         async with aiohttp.ClientSession() as session:
             body = await read_cost_map(session, url)
     except CostMapError as e:
@@ -714,7 +783,7 @@ async def run_refit(
             body,
             engine_db,
             settings.state_dir / TRADER_DB,
-            calendar.session,
+            sessions,
             capital=trader.capital,
             fee_rate=settings.fee_rate,
             target_version=settings.target_version,
@@ -733,7 +802,13 @@ async def run_refit(
     log.info(
         "refit: policy %s kept (%s), %s of %s cell(s); peak RSS %s MB (since the %s), %.1fs",
         done.version,
-        "the champion" if done.champion else "a challenger",
+        "the champion"
+        if done.champion
+        else f"the same values as policy {done.same_as}: not kept again"
+        if done.same_as is not None
+        else "a challenger running"
+        if done.admitted
+        else "a challenger waiting",
         len(done.cells),
         done.passed,
         _mb(run["peak_rss_mb"]),

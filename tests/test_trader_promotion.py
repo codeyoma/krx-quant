@@ -32,7 +32,7 @@ from krx_quant.trader.promotion import (
     judge,
     promote,
 )
-from krx_quant.trader.refit import promote_now
+from krx_quant.trader.refit import admit_now, promote_now
 from krx_quant.trader.store import DB_NAME, TraderStore
 from tests.trader_doubles import (
     BARRIER,
@@ -199,8 +199,8 @@ def setup(state: Path, *challengers: Sequence[float]) -> None:
     """Policy 1 the champion, without a trade on the first ten weekdays; a challenger for each of
     ``challengers``, its nets on those days."""
     keep(state, at("2026-08-31 22:31:00"), policy_cell(BARRIER, 0.8))
-    for _ in challengers:
-        keep(state, at("2026-08-31 22:32:00"), policy_cell(BARRIER, 0.6))
+    for n, _ in enumerate(challengers):
+        keep(state, at("2026-08-31 22:32:00"), policy_cell(BARRIER, 0.6 - n / 100))
     ran(state, 1, [0.0] * 10, champion=True)
     for version, nets in enumerate(challengers, start=2):
         ran(state, version, nets)
@@ -304,27 +304,122 @@ def test_of_several_passing_the_greatest_lower_bound_is_promoted(tmp_path: Path)
     assert done.promoted == 3
 
 
-def test_a_fourth_challenger_drops_the_oldest_for_good(tmp_path: Path) -> None:
-    """Policies 2, 3, 4 are the challengers; policy 5 drops policy 2. Policy 5 promoted, the
-    challengers are 3 and 4: policy 2 does not come back."""
-    for night in range(5):
-        keep(tmp_path, at("22:31:00") + timedelta(days=night), policy_cell(BARRIER))
+def test_three_slots_the_newest_waiting_first_and_a_dropped_one_never_back(tmp_path: Path) -> None:
+    """Policies 2, 3 and 4 take the slots; 5 and 6 wait. Policy 4 promoted, the newest waiting (6)
+    takes its slot; policy 2 dropped, 5 takes its. A dropped one never runs again."""
+    for night in range(6):
+        keep(tmp_path, at("22:31:00") + timedelta(days=night), policy_cell(BARRIER, 0.4 + night / 100))
 
     with closing(sqlite3.connect(tmp_path / DB_NAME)) as db:
-        assert policies.challenger_versions(db) == [3, 4, 5]
-        assert policies.crown(db, at("2026-10-20 15:31:00"), 5, "test", {})
-        assert policies.challenger_versions(db) == [3, 4]
+        assert (policies.challenger_versions(db), policies.waiting_versions(db)) == ([2, 3, 4], [6, 5])
+        assert policies.crown(db, at("2026-10-20 15:31:00"), 4, "test", {})
+        assert policies.challenger_versions(db) == [2, 3]
+        assert policies.admit(db, at("2026-10-20 22:40:00")) == [6]
+        policies.drop(db, at("2026-10-21 22:40:00"), [2])
+        assert policies.admit(db, at("2026-10-21 22:41:00")) == [5]
+        assert (policies.challenger_versions(db), policies.waiting_versions(db)) == ([3, 5, 6], [])
+        assert policies.admit(db, at("2026-10-22 22:41:00")) == [], "no slot free"
     found = {
-        p["version"]: (p["status"], p["dropped_at"])
+        p["version"]: (p["status"], p["admitted_at"], p["dropped_at"])
         for p in policies.read_policies(tmp_path / DB_NAME, 10)["policies"]
     }
     assert found == {
-        5: ("champion", None),
-        4: ("challenger", None),
-        3: ("challenger", None),
-        2: ("dropped", "2026-10-18T22:31:00+09:00"),
-        1: ("former", None),
+        6: ("challenger", "2026-10-20T22:40:00+09:00", None),
+        5: ("challenger", "2026-10-21T22:41:00+09:00", None),
+        4: ("champion", "2026-10-17T22:31:00+09:00", None),
+        3: ("challenger", "2026-10-16T22:31:00+09:00", None),
+        2: ("dropped", "2026-10-15T22:31:00+09:00", "2026-10-21T22:40:00+09:00"),
+        1: ("former", None, None),
     }
+
+
+def day_ran(state: Path, version: int, day: date, net: float, champion: bool) -> None:
+    """``version`` ran on ``day`` with a trade of ``net`` (none when 0)."""
+    store = TraderStore(state / DB_NAME)
+    try:
+        store.put_policy_day("paper", version, day, champion, False, datetime.combine(day, time(10), KST))
+    finally:
+        store.close()
+    if net:
+        ran_trade(state, version, day, net, champion)
+
+
+def ran_trade(state: Path, version: int, day: date, net: float, champion: bool) -> None:
+    store = TraderStore(state / DB_NAME)
+    try:
+        entry = datetime.combine(day, time(10), KST)
+        with store._db:
+            store._db.execute(
+                f"INSERT INTO trades ({', '.join(COLUMNS)}) VALUES ({', '.join('?' * len(COLUMNS))})",
+                (
+                    *("paper", "005930", "barrier", "breiman", 1, entry.isoformat(), 0.7, 0.6),
+                    *(70_050, 100, 2, 70_250, 69_850, (entry + timedelta(minutes=4)).isoformat()),
+                    *(entry.isoformat(), (entry + timedelta(seconds=2)).isoformat(), 70_100, 10, 105.15),
+                    *((entry + timedelta(minutes=2)).isoformat(), 70_250, "take_profit", 105.375, 1405),
+                    *(1615.525, net + 1615.525, net, version, int(champion)),
+                ),
+            )
+    finally:
+        store.close()
+
+
+def test_a_challenger_reaches_its_tenth_day_and_is_promoted_while_a_fit_comes_every_night(
+    tmp_path: Path,
+) -> None:
+    """Policy 1 the champion (no trade), policy 2 a challenger making 1,000 won a day. Every night a
+    new fit comes: 3 and 4 take the last slots, the later ones wait. Policy 2 is judged from its
+    tenth day and promoted that night; that night's fit takes its slot."""
+    keep(tmp_path, at("2026-08-31 22:31:00"), policy_cell(BARRIER, 0.8))
+    keep(tmp_path, at("2026-08-31 22:32:00"), policy_cell(BARRIER, 0.6))
+    promoted_on: list[tuple[int, int | None]] = []
+    for n, day in enumerate(WEEKDAYS[:10]):
+        db = policies.connect(tmp_path / DB_NAME)
+        try:
+            champion, running = policies.champion_version(db), policies.running_versions(db, day)
+        finally:
+            db.close()
+        assert champion is not None
+        day_ran(tmp_path, champion, day, 0.0, champion=True)
+        for version in running:
+            day_ran(tmp_path, version, day, 1_000.0 if version == 2 else 0.0, champion=False)
+        night = datetime.combine(day, time(22, 31), KST)
+        done = judged_at(tmp_path, night)
+        promoted_on.append((n + 1, done.promoted))
+        keep(tmp_path, night + timedelta(minutes=1), policy_cell(BARRIER, 0.5 - n / 100))
+
+    assert promoted_on == [(n, None) for n in range(1, 10)] + [(10, 2)]
+    with closing(sqlite3.connect(tmp_path / DB_NAME)) as db:
+        assert policies.champion_version(db) == 2
+        assert policies.challenger_versions(db) == [3, 4, 12], "tonight's fit takes the freed slot"
+        assert policies.waiting_versions(db) == [11, 10, 9, 8, 7, 6, 5]
+
+
+def test_a_challenger_not_promoted_by_its_twentieth_day_is_dropped_and_the_newest_waiting_enters(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Policy 2 no better than the champion for twenty common days: dropped; 3 and 4, five days
+    each, stay. At the night's end the newest waiting policy (6) takes the slot, not 5."""
+    keep(tmp_path, at("2026-08-31 22:31:00"), policy_cell(BARRIER, 0.8))
+    for n in range(5):
+        keep(tmp_path, at("2026-08-31 22:32:00"), policy_cell(BARRIER, 0.6 - n / 100))
+    ran(tmp_path, 1, [0.0] * 20, champion=True)
+    ran(tmp_path, 2, [0.0] * 20)
+    ran(tmp_path, 3, [0.0] * 5)
+    ran(tmp_path, 4, [0.0] * 5)
+
+    done = judged_at(tmp_path, at("22:31:00"))
+    admit_now(tmp_path / DB_NAME, at("22:35:00"))
+
+    assert [(j.challenger, j.days, j.why, j.retires) for j in done.judgments] == [
+        (2, 20, NOT_ABOVE, True),
+        (3, 5, FEW_DAYS, False),
+        (4, 5, FEW_DAYS, False),
+    ]
+    assert (done.promoted, done.dropped) == (None, (2,))
+    with closing(sqlite3.connect(tmp_path / DB_NAME)) as db:
+        assert (policies.challenger_versions(db), policies.waiting_versions(db)) == ([3, 4, 6], [5])
+    assert "빈 자리에 들어간 정책(다음 거래일부터 돈다): 정책 6" in capsys.readouterr().out
+    assert "내린 도전 정책(20일 동안 이기지 못함, 자리를 비운다): 정책 2" in promotion.report(done)
 
 
 def test_a_challenger_runs_on_the_days_after_the_pick_it_was_kept_before(tmp_path: Path) -> None:
@@ -346,7 +441,8 @@ def test_the_night_s_report_has_no_price(tmp_path: Path, capsys: pytest.CaptureF
     out = capsys.readouterr().out
     assert out.splitlines()[:6] == [
         "도전 정책 판정 (#400)",
-        "챔피언 정책 1 · 도전 정책 3개 · 하한의 신뢰수준 98.33%(Bonferroni) · 함께 돈 거래일 10일 이상 필요",
+        "챔피언 정책 1 · 도전 정책 3개 · 하한의 신뢰수준 98.33%(Bonferroni) · 함께 돈 거래일 10일부터 판정, "
+        "20일까지 못 이기면 내린다",
         "- 정책 2: 함께 돈 거래일 10일, 날마다 (도전 − 챔피언) 순손익 평균 +1,100원, 하한 -244원 → 하한 ≤ 0",
         "- 정책 3: 함께 돈 거래일 3일, 날마다 (도전 − 챔피언) 순손익 평균 +0원, 하한 +0원 → 날 수 부족",
         "- 정책 4: 함께 돈 거래일 0일, 날마다 (도전 − 챔피언) 순손익 평균 없음, 하한 없음 → 날 수 부족",

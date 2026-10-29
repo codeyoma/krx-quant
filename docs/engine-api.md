@@ -1372,7 +1372,7 @@ KRX 마감 흐름 화면이 읽는 그날의 마감 리밸런싱 수요다(`clos
                "promotion": null},
               {"version": 5, "status": "challenger",
                "paper": {"since": "2026-10-08", "last": "2026-10-15", "days": 6, "trades": 14, "net": 9000.0, "mean": 1500.0, "low": -800.0},
-               "promotion": {"champion": 3, "days": 6, "required": 10, "mean": 250.0, "low": -1900.0, "level": 0.975,
+               "promotion": {"champion": 3, "days": 6, "required": 10, "until": 20, "mean": 250.0, "low": -1900.0, "level": 0.975,
                              "challengers": 2, "passed": false, "why": "few_days"}}]}
 ```
 
@@ -1388,7 +1388,7 @@ KRX 마감 흐름 화면이 읽는 그날의 마감 리밸런싱 수요다(`clos
 - `controls`: 최근 요청 20개, 최근 것부터. `source`는 `api`(화면의 `POST /v1/trader/pause`)나 `cli`(서버의 `krx-quant trade resume|rearm`), `applied_at`은 trader가 읽은 때(아직이면 `null`).
 - `champion`(#400): 지금 챔피언의 정책 버전(`GET /v1/trader/policies`의 `champion`), 첫 밤 정책 맞추기 전에는 `null`이다. 아래 셋은 trader가 쓴 상태가 아니라 엔진이 요청 때 저장소의 기록(`policy_days`와 매매)으로 계산한다. 그래서 trader가 멈춰 있어도 맞다.
 - `gate`(#400, 설계 14장 "실전 관문"): 실전 관문의 진행이다. 챔피언(`policy`)의 모의 기록 날 수(`days`, 도전 정책이었을 때를 포함), 필요한 날 수(`required`, 20), 날마다 순손익(매매 없는 날 0, 원)의 평균(`mean`)과 그 하한(`low`, 양쪽 `level` 95%, 겹침 H = 1의 거래일 단위 t. 2일 미만이면 `null`), 넘었는지(`passed`: `days` ≥ `required`이고 `low` > 0). 첫 챔피언 전에는 `policy`가 `null`, `days`가 0이다. 화면의 "모의 12/20일, 하한 −0.3%"의 비율은 `low` ÷ `capital`이다. 관문을 넘었다고 실전 주문이 나가지는 않는다(`live` 모드는 #408).
-- `policies`(#400): 챔피언과 지금 도는 도전 정책(셋까지, 오래된 것부터). `status`는 `champion`이나 `challenger`다. `paper`는 그 정책의 모의 기록이다: 처음과 마지막 거래일(`since`, `last`), 날 수, 매매 수(청산한 것), 순손익 합(원), 날마다 평균과 그 95% 하한. `promotion`은 도전 정책만: 챔피언과 함께 돈 거래일(`days`, 챔피언이 장중에 멈춘 날은 뺀다), 필요한 날 수(`required`, 10), 날마다 (도전 − 챔피언) 순손익의 평균과 하한(`level`은 도전 정책 수 `challengers`로 Bonferroni 보정한 양쪽 신뢰수준: 1 − 0.05 ÷ 도전 정책 수), 지금 판정하면 이기는지(`passed`)와 아니면 왜인지(`why`: `few_days` 날 수 부족, `not_above` 하한 ≤ 0). 실제 교체는 장이 끝난 뒤 밤 작업이 한다(설계 14장 "도전 정책과 승격"). 오늘 밤 맞춘 도전 정책도 다음 거래일부터 돌기 전에 여기 있다(기록 0일).
+- `policies`(#400): 챔피언과 지금 도는 도전 정책(셋까지, 오래된 것부터). `status`는 `champion`이나 `challenger`다. `paper`는 그 정책의 모의 기록이다: 처음과 마지막 거래일(`since`, `last`), 날 수, 매매 수(청산한 것), 순손익 합(원), 날마다 평균과 그 95% 하한. `promotion`은 도전 정책만: 챔피언과 함께 돈 거래일(`days`, 챔피언이 장중에 멈춘 날은 뺀다), 필요한 날 수(`required`, 10), 이 날 수까지 이기지 못하면 그 밤에 내려진다(`until`, 20), 날마다 (도전 − 챔피언) 순손익의 평균과 하한(`level`은 도전 정책 수 `challengers`로 Bonferroni 보정한 양쪽 신뢰수준: 1 − 0.05 ÷ 도전 정책 수), 지금 판정하면 이기는지(`passed`)와 아니면 왜인지(`why`: `few_days` 날 수 부족, `not_above` 하한 ≤ 0). 실제 교체는 장이 끝난 뒤 밤 작업이 한다(설계 14장 "도전 정책과 승격"). 오늘 밤 자리를 받은 도전 정책도 다음 거래일부터 돌기 전에 여기 있다(기록 0일). 자리를 기다리는 정책은 `GET /v1/trader/policies`의 `waiting`이다.
 - trader가 상태를 쓴 적이 없거나 저장소가 없으면 `alive`가 거짓, `controls`가 비고 나머지는 모두 `null`이다(`gate`는 0일, `policies`는 빈 목록).
 
 ### `GET /v1/trader/days?from=YYYY-MM-DD&to=YYYY-MM-DD` (#396)
@@ -1471,7 +1471,7 @@ trader가 돈 거래일마다의 장부다. `from`부터 `to`까지(KST 날짜, 
               "defaults": {"threshold": 0.6, "kelly_fraction": 0.5}, "min_trades": 20},
      "fee_rate": 0.00015, "result": {"trades": 64, "wins": 38, "net": 21000.0, "growth": 0.02095, "days_traded": 18},
      "run": {"commit": "…", "seconds": 2.4, "rss_start_mb": 131.0, "peak_rss_mb": 139.8, "rss_mb": 136.2, "peak_since": "step"}},
-   "dropped_at": null,
+   "admitted_at": "2026-10-15T22:31:04+09:00", "dropped_at": null,
    "paper": {"since": "2026-10-16", "last": "2026-10-29", "days": 10, "trades": 23, "net": 11000.0, "mean": 1100.0, "low": 63.35}},
   {"version": 1, "status": "former", "...": "..."}],
  "champions": [{"at": "2026-10-29T22:30:40+09:00", "version": 2,
@@ -1484,9 +1484,9 @@ trader가 돈 거래일마다의 장부다. `from`부터 `to`까지(KST 날짜, 
 
 - `champion`: 지금 챔피언의 버전(`champions`의 마지막). 첫 맞추기 전에는 `null`이다.
 - `champions[]`: 챔피언이 바뀐 때마다, 최근 것부터. `detail`(#400)은 승격의 수치다: 전 챔피언(`from`), 함께 돈 거래일, 필요한 날 수, 날마다 (도전 − 챔피언) 순손익의 평균과 하한(원), 그 신뢰수준, 그때 돈 도전 정책 수. 처음 챔피언은 `null`이다.
-- `policies[].status`: `champion`(지금 챔피언), `former`(전에 챔피언이었다: 도전 정책에 진 뒤 더 돌지 않는다), `challenger`(챔피언이 된 적 없고 내려지지 않은 도전 정책: 모의로 돈다, 오늘 밤 맞춘 것은 다음 거래일부터), `dropped`(넷째 도전 정책이 들어와 내려진 것, 그때가 `dropped_at`. 다시 돌지 않는다). `dropped_at`은 `dropped`가 아니면 `null`이다.
+- `policies[].status`: `champion`(지금 챔피언), `former`(전에 챔피언이었다: 도전 정책에 진 뒤 더 돌지 않는다), `challenger`(자리 셋 가운데 하나를 받아 모의로 도는 도전 정책, 받은 때가 `admitted_at`: 오늘 밤 받은 것은 다음 거래일부터 돈다), `waiting`(자리가 차 있을 때 맞춰져 기다린다. 자리가 나면 가장 새 것부터 들어간다), `dropped`(함께 돈 거래일 20일까지 챔피언을 이기지 못해 내려진 것, 그때가 `dropped_at`. 다시 돌지 않는다). `admitted_at`은 자리를 받은 적이 없으면, `dropped_at`은 `dropped`가 아니면 `null`이다. 챔피언이나 도는 도전 정책과 값이 같은 맞추기는 저장하지 않아 여기 없다.
 
-  > **바뀜** (2026-10-30, #416): "#399에서는 처음 것이 챔피언이고 나머지는 도전 정책이다" → 도전 정책은 모의로 돌고(셋까지), 이기면 챔피언이 되며(`former`가 생긴다), 넷째가 들어오면 가장 오래된 것이 `dropped`가 된다. 이유: #400.
+  > **바뀜** (2026-10-30, #416): "#399에서는 처음 것이 챔피언이고 나머지는 도전 정책이다" → 도전 정책은 자리 셋에서 모의로 돌고(`challenger`, 자리가 차면 `waiting`), 이기면 챔피언이 되며(`former`가 생긴다), 20일까지 이기지 못하면 `dropped`가 된다. 이유: #400. 넷째가 들어오면 가장 오래된 것을 내리면 어느 도전 정책도 10일을 채우지 못해서 자리를 기다리게 했다(Codex 리뷰).
 - `policies[].paper`(#400): 그 정책의 모의 기록(`GET /v1/trader`의 `policies[].paper`와 같다). 돈 적이 없으면 0일이다.
 - `cells`: 매매하는 칸, 순위대로. `threshold`는 사는 오름 확률의 문턱 θ, `kelly_fraction`은 Kelly 비율 λ(산 비율 = λ × 그날 f*, 0–1로 자름). `fitted`는 그 밤에 무엇으로 맞췄는지다: 그 밤 비용 지도의 `p_star`, 맞힘률 하한 `low`, Kelly f* `kelly`와 그것으로 낸 비율 `fraction`, 맞춘 날(`days`), 읽은 예측 수(`read.read`)와 오름(`read.rises`)과 거른 이유별 수(`paper.plan`의 이유, `off_target`: 지금 정답으로 학습하지 않은 모델의 예측, `unpriced`: 경로에 손익을 셀 호가가 없음), 정책 전체 모의에서 그 칸의 매매 수·이익 낸 수·순손익(원)·로그 성장.
 - `left_out`: 비용 지도는 통과시켰지만 넣지 않은 칸과 이유. `few_trades`면 `most_trades`(어느 점에서도 모의 매매가 `min_trades`에 못 미침, 가장 많을 때의 수), `no_gain`이면 `best`(넣어도 정책의 로그 성장이 늘지 않음, 가장 나은 점과 그 결과).

@@ -11,11 +11,17 @@ nothing here reads or writes the trader's settings.
 
 **Champion and challengers.** The first policy fitted becomes the champion; every later one is
 kept as a challenger (#399). ``champions`` keeps each change of the champion, with why. The
-challengers run in paper beside the champion (#400, ``desk.py``), at most ``CHALLENGERS`` of them:
-a new one drops the oldest still running for good (``dropped_at``, ``cap``). A challenger runs on
-a trading day when it was kept before that day's pick (``PICK_AT``, 08:30: ``running_versions``), so one
-fitted tonight runs from the next trading day. One that beats the champion in paper becomes the
-champion after the market (``promotion.py``, ``crown``); the champion it replaces runs no more.
+challengers run in paper beside the champion (#400, ``desk.py``) in ``CHALLENGERS`` slots: a
+policy kept while the slots are full waits (stored, not run) and is admitted when one frees, the
+newest waiting first (``admit``, ``admitted_at``); a fit with the values of the champion or of a
+running challenger is not kept (``same_as``). A challenger leaves its slot when it is promoted
+(``promotion.py``, ``crown``; the champion it replaces runs no more) or when it reaches
+``promotion.RETIRE_DAYS`` common days unpromoted (``drop``, ``dropped_at``: it never runs again).
+A challenger runs on a trading day when it was admitted before that day's pick (``PICK_AT``,
+08:30: ``running_versions``), so one admitted tonight runs from the next trading day.
+
+> Spec #393 dropped the oldest of three for each new one; with a fit every night, none would have
+> reached the promotion's ten days (#416, Codex's review).
 
 **How the trader applies the champion** (``apply``), at each pick (its start and 08:30, #395):
 the cost map still decides what may trade (a cell passing at a market order's round trip, a
@@ -57,7 +63,8 @@ CREATE TABLE IF NOT EXISTS policies (   -- each policy version (#399): what the 
     cells TEXT NOT NULL,                -- JSON: the cells it trades, first ranked first, with θ and λ
     left_out TEXT NOT NULL,             -- JSON: the cells the cost map passed that it does not trade, and why
     fit TEXT NOT NULL,                  -- JSON: what it was fitted on: cost map, grid, result, run
-    dropped_at TEXT                     -- a challenger dropped for a newer one (#400); null: not dropped
+    admitted_at TEXT,                   -- a challenger given a running slot (#400); null: waiting
+    dropped_at TEXT                     -- a challenger dropped unpromoted (#400); null: not dropped
 );
 CREATE TABLE IF NOT EXISTS champions (  -- each change of the champion (#399; promotions, #400)
     id INTEGER PRIMARY KEY,
@@ -69,12 +76,15 @@ CREATE TABLE IF NOT EXISTS champions (  -- each change of the champion (#399; pr
 """
 # Columns added since the tables were first made (#400): added to a store made before, null in its
 # rows.
-_ADDED = {"policies": (("dropped_at", "TEXT"),), "champions": (("detail", "TEXT"),)}
+_ADDED = {
+    "policies": (("admitted_at", "TEXT"), ("dropped_at", "TEXT")),
+    "champions": (("detail", "TEXT"),),
+}
 
-# The challengers run at once (#393, #400): a new one drops the oldest.
+# The challengers' running slots (#393, #400).
 CHALLENGERS = 3
 
-CHAMPION, CHALLENGER, FORMER, DROPPED = "champion", "challenger", "former", "dropped"
+CHAMPION, CHALLENGER, FORMER, DROPPED, WAITING = "champion", "challenger", "former", "dropped", "waiting"
 # Why the first policy is the champion (#399): no challenger has run against anything yet.
 FIRST = "처음 맞춘 정책(#399)"
 # How long a writer waits for the trader's own writes to the same store.
@@ -137,7 +147,8 @@ class Policy:
     cells: tuple[PolicyCell, ...]  # first ranked first
     left_out: tuple[dict[str, Any], ...] = ()
     fit: Mapping[str, Any] = field(default_factory=dict)
-    dropped_at: datetime | None = None  # a challenger dropped for a newer one (#400)
+    admitted_at: datetime | None = None  # a challenger given a running slot (#400)
+    dropped_at: datetime | None = None  # a challenger dropped unpromoted (#400)
 
 
 def apply(policy: Policy | None, selection: Selection) -> Selection:
@@ -205,7 +216,7 @@ def add(
     fit: Mapping[str, Any],
 ) -> tuple[int, bool]:
     """Keep a new policy version; the first one kept becomes the champion (``FIRST``), in the same
-    transaction; a later one, a challenger, drops the oldest beyond ``CHALLENGERS`` (``cap``). Its
+    transaction; a later one, a challenger, takes a free running slot or waits (``admit``). Its
     version, and whether it is the champion."""
     with db:
         cursor = db.execute(
@@ -226,38 +237,89 @@ def add(
                 "INSERT INTO champions (at, policy_id, reason) VALUES (?, ?, ?)", (_iso(at), version, FIRST)
             )
         else:
-            _cap(db, at)
+            _admit(db, at)
     return version, first
 
 
+def _columns(db: sqlite3.Connection) -> set[str]:
+    return {r[1] for r in db.execute("PRAGMA table_info(policies)")}
+
+
 def _a_challenger(db: sqlite3.Connection) -> str:
-    """A policy ``p`` that is a challenger (#400): never the champion, not dropped (in a store the
-    trader has not opened since #400, none is)."""
-    columns = {r[1] for r in db.execute("PRAGMA table_info(policies)")}
-    dropped = "p.dropped_at IS NULL AND " if "dropped_at" in columns else ""
+    """A policy ``p`` never the champion and not dropped (#400)."""
+    dropped = "p.dropped_at IS NULL AND " if "dropped_at" in _columns(db) else ""
     return f"{dropped}p.id NOT IN (SELECT policy_id FROM champions)"
 
 
-def cap(db: sqlite3.Connection, at: datetime) -> list[int]:
-    """The challengers beyond the newest ``CHALLENGERS`` dropped at ``at`` for good (the oldest
-    first goes): the versions dropped. A dropped one never runs again, even once a newer one is
-    promoted (the challengers are fewer then until the next night's)."""
+def _running(db: sqlite3.Connection) -> str:
+    """A challenger ``p`` in a running slot (#400); none in a store the trader has not opened since."""
+    if "admitted_at" not in _columns(db):
+        return "0"
+    return f"p.admitted_at IS NOT NULL AND {_a_challenger(db)}"
+
+
+def admit(db: sqlite3.Connection, at: datetime) -> list[int]:
+    """The waiting policies given the free running slots at ``at``, the newest first (#400): the
+    versions admitted. They run from the next pick (``running_versions``)."""
     with db:
-        return _cap(db, at)
+        return _admit(db, at)
 
 
-def _cap(db: sqlite3.Connection, at: datetime) -> list[int]:
-    rows = db.execute(f"SELECT p.id FROM policies p WHERE {_a_challenger(db)} ORDER BY p.id DESC").fetchall()
-    dropped = [r[0] for r in rows[CHALLENGERS:]]
-    for version in dropped:
-        db.execute("UPDATE policies SET dropped_at = ? WHERE id = ?", (_iso(at), version))
-    return sorted(dropped)
+def _admit(db: sqlite3.Connection, at: datetime) -> list[int]:
+    held = db.execute(f"SELECT count(*) FROM policies p WHERE {_running(db)}").fetchone()[0]
+    free = CHALLENGERS - int(held)
+    if free <= 0:
+        return []
+    rows = db.execute(
+        f"SELECT p.id FROM policies p WHERE p.admitted_at IS NULL AND {_a_challenger(db)}"
+        " ORDER BY p.id DESC LIMIT ?",
+        (free,),
+    ).fetchall()
+    for (version,) in rows:
+        db.execute("UPDATE policies SET admitted_at = ? WHERE id = ?", (_iso(at), version))
+    return sorted(int(r[0]) for r in rows)
 
 
-def dropped_at(db: sqlite3.Connection, at: datetime) -> list[int]:
-    """The challengers dropped at ``at`` (a night's ``add``)."""
-    rows = db.execute("SELECT id FROM policies WHERE dropped_at = ? ORDER BY id", (_iso(at),))
-    return [r[0] for r in rows]
+def admitted_at(db: sqlite3.Connection, at: datetime) -> list[int]:
+    """The policies admitted at ``at`` (a night's)."""
+    rows = db.execute("SELECT id FROM policies WHERE admitted_at = ? ORDER BY id", (_iso(at),))
+    return [int(r[0]) for r in rows]
+
+
+def drop(db: sqlite3.Connection, at: datetime, versions: Collection[int]) -> None:
+    """``versions``, challengers judged long enough without a promotion (#400,
+    ``promotion.RETIRE_DAYS``), dropped at ``at`` for good: their slots free."""
+    with db:
+        for version in versions:
+            db.execute(
+                "UPDATE policies SET dropped_at = ? WHERE id = ? AND dropped_at IS NULL", (_iso(at), version)
+            )
+
+
+def waiting_versions(db: sqlite3.Connection) -> list[int]:
+    """The policies kept but not admitted, newest first (#400)."""
+    if "admitted_at" not in _columns(db):
+        return []
+    rows = db.execute(
+        f"SELECT p.id FROM policies p WHERE p.admitted_at IS NULL AND {_a_challenger(db)} ORDER BY p.id DESC"
+    )
+    return [int(r[0]) for r in rows]
+
+
+def values(cells: Sequence[PolicyCell]) -> tuple[tuple[str, str, str, float, float], ...]:
+    """A policy's values (#393: its cells in their order, each θ and λ), what was fitted aside."""
+    return tuple((c.kind, c.role, c.predictor, c.threshold, c.kelly_fraction) for c in cells)
+
+
+def same_as(db: sqlite3.Connection, cells: Sequence[PolicyCell]) -> int | None:
+    """The champion or the running challenger with the values of ``cells``, if any (#400: a fit
+    that changes nothing is not kept). ``PolicyError`` when one of them cannot be read."""
+    found = values(cells)
+    current = champion_version(db)
+    for version in [*([] if current is None else [current]), *challenger_versions(db)]:
+        if values(read(db, version).cells) == found:
+            return version
+    return None
 
 
 def champion_version(db: sqlite3.Connection) -> int | None:
@@ -267,23 +329,22 @@ def champion_version(db: sqlite3.Connection) -> int | None:
 
 
 def challenger_versions(db: sqlite3.Connection) -> list[int]:
-    """The challengers' versions, oldest first: never the champion, not dropped, the newest
-    ``CHALLENGERS`` (a store from before the cap may keep more until the next night caps them)."""
-    rows = db.execute(
-        f"SELECT p.id FROM policies p WHERE {_a_challenger(db)} ORDER BY p.id DESC LIMIT ?", (CHALLENGERS,)
-    )
-    return sorted(int(r[0]) for r in rows)
+    """The challengers in a running slot, oldest first: admitted, never the champion, not dropped
+    (at most ``CHALLENGERS``)."""
+    rows = db.execute(f"SELECT p.id FROM policies p WHERE {_running(db)} ORDER BY p.id")
+    return [int(r[0]) for r in rows]
 
 
 def running_versions(db: sqlite3.Connection, day: date) -> list[int]:
-    """The challengers that run on ``day``, oldest first: kept before its pick (``PICK_AT``, 08:30),
-    so that one fitted on a night runs from the next trading day, whenever the trader reads it."""
+    """The challengers that run on ``day``, oldest first: admitted before its pick (``PICK_AT``,
+    08:30), so that one admitted on a night runs from the next trading day, whenever the trader
+    reads it."""
     versions = challenger_versions(db)
     if not versions:
         return []
     marks = ", ".join("?" * len(versions))
     cutoff = datetime.combine(day, PICK_AT, KST)
-    rows = db.execute(f"SELECT id, created_at FROM policies WHERE id IN ({marks})", versions)
+    rows = db.execute(f"SELECT id, admitted_at FROM policies WHERE id IN ({marks})", versions)
     return sorted(int(r[0]) for r in rows if datetime.fromisoformat(r[1]) < cutoff)
 
 
@@ -339,14 +400,18 @@ def champion(db: sqlite3.Connection) -> Policy | None:
         raise PolicyError(f"policy {row['id']}: {e}") from e
 
 
-def status_of(version: int, champion: int | None, once: Collection[int], dropped: bool) -> str:
-    """A policy's status: ``champion`` now, ``former`` once, ``dropped`` (a challenger dropped for
-    a newer one, #400), else ``challenger``."""
+def status_of(
+    version: int, champion: int | None, once: Collection[int], dropped: bool, admitted: bool
+) -> str:
+    """A policy's status: ``champion`` now, ``former`` once, ``dropped`` (a challenger dropped
+    unpromoted, #400), ``challenger`` (in a running slot), else ``waiting`` (kept, not admitted)."""
     if version == champion:
         return CHAMPION
     if version in once:
         return FORMER
-    return DROPPED if dropped else CHALLENGER
+    if dropped:
+        return DROPPED
+    return CHALLENGER if admitted else WAITING
 
 
 def read_policies(path: Path, limit: int, mode: str = PAPER) -> dict[str, Any]:
@@ -373,15 +438,17 @@ def read_policies(path: Path, limit: int, mode: str = PAPER) -> dict[str, Any]:
     for row in rows:
         keys = row.keys()
         dropped = "dropped_at" in keys and row["dropped_at"] is not None
+        admitted = row["admitted_at"] if "admitted_at" in keys else None
         policies.append(
             {
                 "version": row["id"],
-                "status": status_of(row["id"], now, once, dropped),
+                "status": status_of(row["id"], now, once, dropped, admitted is not None),
                 "created_at": row["created_at"],
                 "reason": row["reason"],
                 "cells": json.loads(row["cells"]),
                 "left_out": json.loads(row["left_out"]),
                 "fit": json.loads(row["fit"]),
+                "admitted_at": admitted,
                 "dropped_at": row["dropped_at"] if dropped else None,
                 "paper": promotion.paper(records.get(row["id"])),
             }
@@ -414,6 +481,7 @@ def _policy(row: sqlite3.Row) -> Policy:
     if not isinstance(cells, list) or not isinstance(left_out, list) or not isinstance(fit, dict):
         raise ValueError("its cells, left_out and fit are not a list, a list and an object")
     dropped = row["dropped_at"] if "dropped_at" in row.keys() else None
+    admitted = row["admitted_at"] if "admitted_at" in row.keys() else None
     return Policy(
         version=row["id"],
         created_at=datetime.fromisoformat(row["created_at"]),
@@ -421,6 +489,7 @@ def _policy(row: sqlite3.Row) -> Policy:
         cells=tuple(PolicyCell.from_json(c) for c in cells),
         left_out=tuple(dict(x) for x in left_out),
         fit=fit,
+        admitted_at=None if admitted is None else datetime.fromisoformat(admitted),
         dropped_at=None if dropped is None else datetime.fromisoformat(dropped),
     )
 

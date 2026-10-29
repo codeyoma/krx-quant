@@ -1450,22 +1450,24 @@ MEMBER_FRAMES_PROBE = Job(
     ),
 )
 
-# The trader's policy, fitted again (#399, #393 "정책과 자기 개선"): every trading day's night, after
-# the nightly training, ``refit-policy`` first judges the challengers that ran in paper beside the
-# champion on the trader's records and promotes one that beat it (#400, ``promotion.promote``;
-# after the market, so never during a session), then reads tonight's cost map from the collector's
-# Engine API (``KRX_TRADER_ENGINE_URL``: compose sets the engine service's own,
-# http://engine:8080), each passing cell's stored predictions and answers of its 20 days from the
-# engine's database (read-only, a cell at a time), simulates the trader's trades on the answers'
-# paths at each point of a small grid and keeps a new policy version in state/trader.sqlite3: the
-# first one the champion, the later ones challengers, which run from the next trading day and drop
-# the oldest beyond three. It predicts nothing again and keeps only the cells' rises, so it takes
-# seconds and little memory; its peak resident memory is in its output. Its output holds cells,
-# thresholds, counts, P&L in won (simulated, and the policies' paper records), log growth and the
-# live gate's progress, no price. The ten minutes are a bound (the cost map, computed by the
-# collector, is waited for at most two): it runs before the simulations and pre-validations, which
-# must start by 00:30. A routine night's log, not a request: it changes no label. Its comments go to
-# #402, the ticket that reports the trader's nights (#400, which ran the challengers, is closed).
+# The trader's policy, fitted again (#399, #393 "정책과 자기 개선"): every trading day's night, after the
+# nightly training, ``refit-policy`` first judges the challengers that ran in paper beside the
+# champion on the trader's records and promotes one that beat it (#400, ``promotion.promote``; after
+# the market, so never during a session), then reads tonight's cost map from the collector's Engine
+# API (``KRX_TRADER_ENGINE_URL``: compose sets the engine service's own, http://engine:8080), each
+# passing cell's stored predictions and answers of its 20 days from the engine's database
+# (read-only, a cell at a time), simulates the trader's trades on the answers' paths at each point
+# of a small grid and keeps a new policy version in state/trader.sqlite3: the first one the
+# champion, a later one a challenger, which takes a free one of three running slots (it runs from
+# the next trading day) or waits for one; one equal to the champion or a running challenger is not
+# kept, and one not promoted by its 20th common day is dropped. It predicts nothing again and keeps
+# only the cells' rises, so it takes seconds and little memory; its peak resident memory is in its
+# output. Its output holds cells, thresholds, counts, P&L in won (simulated, and the policies' paper
+# records), log growth and the live gate's progress, no price. The ten minutes are a bound (the cost
+# map, computed by the collector, is waited for at most two): it runs before the simulations and
+# pre-validations, which must start by 00:30. A routine night's log, not a request: it changes no
+# label. Its comments go to #402, the ticket that reports the trader's nights (#400, which ran the
+# challengers, is closed).
 REFIT_POLICY_ISSUE = 402
 
 
@@ -1491,7 +1493,8 @@ REFIT_POLICY = Job(
                 "자동 매매의 밤 정책 맞추기(#399)와 도전 정책 판정(#400): 먼저 모의로 함께 돈 도전 정책을 "
                 "챔피언과 견주어 이긴 것을 챔피언으로 바꾸고, 오늘 밤 비용 지도를 통과한 칸마다 문턱 θ와 "
                 "Kelly 비율 λ를 저장된 20일의 예측과 정답으로 다시 맞춘 정책 버전을 저장한다. 처음 것이 "
-                "챔피언이고, 그 뒤는 다음 거래일부터 모의로 함께 도는 도전 정책이다(셋까지). "
+                "챔피언이고, 그 뒤는 도전 정책이다: 자리 셋이 비어 있으면 다음 거래일부터 모의로 함께 돌고, "
+                "차 있으면 기다린다(20일까지 이기지 못한 도전 정책은 내려 자리를 비운다). "
                 "출력에는 시세 값이 없다(칸, 값, 건수, 순손익(원), 로그 성장, 실전 관문 진행, 메모리만)."
             ),
         ),

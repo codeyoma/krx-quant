@@ -2615,13 +2615,15 @@
       }
     },
     "trader_policy": {
-      "description": "A policy version (#399): the cells it trades, first ranked first, each with its threshold and Kelly fraction and what it was fitted on; the cells the cost map passed that it left out, and why; what it was fitted on (the cost map, the grid, the simulated result, the run). It holds no limit: those come from the code and the server's .env alone. status (#400): champion now, former once, dropped (a challenger dropped for a newer one at dropped_at), else challenger; paper: its paper record.",
+      "description": "A policy version (#399): the cells it trades, first ranked first, each with its threshold and Kelly fraction and what it was fitted on; the cells the cost map passed that it left out, and why; what it was fitted on (the cost map, the grid, the simulated result, the run). It holds no limit: those come from the code and the server's .env alone. status (#400): champion now, former once, dropped (a challenger dropped at dropped_at, unpromoted by its 20th common day), challenger (in one of the three running slots since admitted_at), else waiting (kept while the slots were full, admitted when one frees, the newest first); paper: its paper record.",
       "type": "object",
-      "required": ["version", "status", "created_at", "reason", "cells", "left_out", "fit", "dropped_at", "paper"],
+      "required": ["version", "status", "created_at", "reason", "cells", "left_out", "fit", "admitted_at", "dropped_at",
+                   "paper"],
       "additionalProperties": false,
       "properties": {
         "version": {"type": "integer", "minimum": 1},
-        "status": {"enum": ["champion", "challenger", "former", "dropped"]},
+        "status": {"enum": ["champion", "challenger", "former", "dropped", "waiting"]},
+        "admitted_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]},
         "dropped_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]},
         "paper": {"$ref": "#/$defs/trader_paper"},
         "created_at": {"$ref": "#/$defs/time"},
@@ -2936,14 +2938,15 @@
       }
     },
     "trader_promotion": {
-      "description": "A challenger against the champion (#400): their common trading days (both ran, the champion not stopped), the mean a day of (challenger - champion) net P&L in won and its lower bound at level (two-sided, Bonferroni over the challengers running); passed when the days reach required (10) and the lower bound is above 0, else why (few_days, not_above). It is promoted only after the market.",
+      "description": "A challenger against the champion (#400): their common trading days (both ran, the champion not stopped), the mean a day of (challenger - champion) net P&L in won and its lower bound at level (two-sided, Bonferroni over the challengers running); passed when the days reach required (10) and the lower bound is above 0, else why (few_days, not_above). It is promoted only after the market; one not promoted by its until-th (20) common day is dropped that night.",
       "type": "object",
-      "required": ["champion", "days", "required", "mean", "low", "level", "challengers", "passed", "why"],
+      "required": ["champion", "days", "required", "until", "mean", "low", "level", "challengers", "passed", "why"],
       "additionalProperties": false,
       "properties": {
         "champion": {"type": "integer", "minimum": 1},
         "days": {"type": "integer", "minimum": 0},
         "required": {"type": "integer", "minimum": 1},
+        "until": {"type": "integer", "minimum": 1},
         "mean": {"type": ["number", "null"]},
         "low": {"type": ["number", "null"]},
         "level": {"type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1},

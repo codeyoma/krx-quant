@@ -180,15 +180,23 @@ def test_a_challenger_kept_tonight_runs_from_the_next_trading_day(tmp_path: Path
     assert [d[0] for d in records(tmp_path)[2]] == ["2026-10-15"]
 
 
-def test_a_dropped_challenger_runs_no_more_from_the_next_pick(tmp_path: Path) -> None:
-    """Policies 2, 3 and 4 run on 10-14; policy 5, kept that night, drops policy 2, the oldest: on
-    10-15 policies 3, 4 and 5 run."""
+def test_a_fit_kept_while_the_slots_are_full_waits_and_runs_once_one_frees(tmp_path: Path) -> None:
+    """Policies 2, 3 and 4 take the three slots on the night of 10-13; policy 5, kept that night
+    too, waits: it does not run on 10-14. Policy 2 dropped on the night of 10-14, policy 5 takes its
+    slot: on 10-15 policies 3, 4 and 5 run."""
     keep(tmp_path, at("2026-10-12 22:31:00"), policy_cell(BARRIER, 0.8))
-    for made in ("2026-10-13 22:31:00", "2026-10-13 22:32:00", "2026-10-13 22:33:00"):
-        keep(tmp_path, at(made), policy_cell(BARRIER, 0.6))
+    for n, made in enumerate(("2026-10-13 22:31:00", "2026-10-13 22:32:00", "2026-10-13 22:33:00")):
+        keep(tmp_path, at(made), policy_cell(BARRIER, 0.6 - n / 100))
+    keep(tmp_path, at("2026-10-13 22:34:00"), policy_cell(BARRIER, 0.5))
     day = Day(tmp_path, desk=True)
     day.run([Tick("09:00:01")])
-    keep(tmp_path, at("22:31:00"), policy_cell(BARRIER, 0.6))
+    db = policies.connect(tmp_path / DB_NAME)
+    try:
+        assert (policies.challenger_versions(db), policies.waiting_versions(db)) == ([2, 3, 4], [5])
+        policies.drop(db, at("22:40:00"), [2])
+        assert policies.admit(db, at("22:41:00")) == [5]
+    finally:
+        db.close()
 
     day.run([Repick("2026-10-15 08:30:00"), Tick("2026-10-15 09:00:01")])
 
@@ -200,6 +208,19 @@ def test_a_dropped_challenger_runs_no_more_from_the_next_pick(tmp_path: Path) ->
         4: ["2026-10-14", "2026-10-15"],
         5: ["2026-10-15"],
     }
+
+
+def test_a_champion_s_trade_from_before_400_is_given_as_the_champion_s(tmp_path: Path) -> None:
+    """A store the trader opened before #400 gets ``trades.champion`` null in its rows: those trades
+    are the champion's, and the trades route says so (``t.*`` has a ``champion`` of its own)."""
+    Day(tmp_path).run([TEN, BOUGHT, TAKEN])
+    with closing(sqlite3.connect(tmp_path / DB_NAME)) as db:
+        db.execute("UPDATE trades SET champion = NULL")
+        db.commit()
+
+    [trade] = Day(tmp_path).trades()
+
+    assert (trade["champion"], trade["policy"]) == (True, None)
 
 
 def test_a_restart_goes_on_with_a_challenger_s_open_trade(tmp_path: Path) -> None:
@@ -248,6 +269,7 @@ def test_the_trader_s_state_shows_the_policies_running_and_the_gate(tmp_path: Pa
         "champion": 1,
         "days": 1,
         "required": 10,
+        "until": 20,
         "mean": pytest.approx(-161.735),
         "low": None,
         "level": 0.95,

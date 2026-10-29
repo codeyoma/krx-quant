@@ -17,10 +17,13 @@ days both ran (``common``), at least ``PROMOTION_DAYS`` of them, the day-level l
 ``LEVEL`` with Bonferroni over the challengers running (``policy.challenger_versions``, at most three):
 1 − 0.05 ÷ m. A day the champion was stopped (a pause or a loss limit at some time in the session)
 is not a common day: its trades were cut short by what is not its policy, the challenger's were
-not. Of several passing, the greatest lower bound is promoted (then the newest). The promotion is
-judged and written only after the market (``in_market``: from the day's pick at 08:30 to the end of
-the closing auction it waits), so the champion never changes during a session: the trader reads it
-at each pick (``desk.Desk.select``), and a change written before 08:30 holds the whole day.
+not. Of several passing, the greatest lower bound is promoted (then the newest). A challenger is
+judged every night from its tenth common day; one not promoted by its ``RETIRE_DAYS``-th (20) is
+dropped (``policy.drop``), which frees its slot for the newest policy waiting (``policy.admit``).
+The promotion is judged and written only after the market (``in_market``: from the day's pick at
+08:30 to the end of the closing auction it waits), so the champion never changes during a session:
+the trader reads it at each pick (``desk.Desk.select``), and a change written before 08:30 holds
+the whole day.
 
 **The live gate** (``gate``): the champion's paper record of at least ``GATE_DAYS`` trading days,
 whose day-level lower bound of the daily net P&L (no-trade days 0, ``LEVEL`` with an overlap of
@@ -44,6 +47,8 @@ from krx_quant.trader import policy as policies
 
 # A challenger is judged on this many common trading days at least (#393).
 PROMOTION_DAYS = 10
+# One not promoted by this many common days is dropped, freeing its slot (#400, #416).
+RETIRE_DAYS = 20
 # The live gate: the champion's paper record of this many trading days at least (#393).
 GATE_DAYS = 20
 # The lower bounds' level, two-sided (the engine's "95% lower bound"); a promotion's is divided
@@ -197,6 +202,12 @@ class Judgment:
     level: float
     challengers: int
     required: int = PROMOTION_DAYS
+    until: int = RETIRE_DAYS
+
+    @property
+    def retires(self) -> bool:
+        """Whether it is dropped tonight: its ``until``-th common day reached, not promoted."""
+        return not self.passed and self.days >= self.until
 
     @property
     def why(self) -> str | None:
@@ -216,6 +227,7 @@ class Judgment:
             "champion": self.champion,
             "days": self.days,
             "required": self.required,
+            "until": self.until,
             "mean": self.mean,
             "low": self.low,
             "level": self.level,
@@ -275,8 +287,8 @@ def in_market(now: datetime, sessions: Callable[[date], Session | None]) -> bool
 @dataclass(frozen=True)
 class Promotion:
     """A night's judgment: the champion before, each challenger's, the one promoted if any, why
-    none was judged (``MARKET_OPEN``, ``NO_CHAMPION``), the challengers dropped, and the live gate
-    on the champion after."""
+    none was judged (``MARKET_OPEN``, ``NO_CHAMPION``), the challengers dropped (``RETIRE_DAYS``
+    reached unpromoted), and the live gate on the champion after."""
 
     at: datetime
     champion: int | None
@@ -295,13 +307,14 @@ def promote(
 ) -> Promotion:
     """Judge the challengers running against the champion on the records in the store ``db``
     (``policy.connect``) and, after the market, make the one that passes the champion
-    (``policy.crown``). During a trading day's market nothing is judged or written."""
+    (``policy.crown``) and drop those that reached ``RETIRE_DAYS`` unpromoted (``policy.drop``;
+    the slots they free are filled at the night's end, ``policy.admit``). During a trading day's
+    market nothing is judged or written."""
     current = policies.champion_version(db)
     if in_market(now, sessions):
         return Promotion(now, current, (), None, MARKET_OPEN, _gate(db, current, mode))
     if current is None:
         return Promotion(now, None, (), None, NO_CHAMPION, _gate(db, None, mode))
-    dropped = tuple(policies.cap(db, now))  # a store from before the cap (#399) is capped first
     running = policies.challenger_versions(db)
     kept = records(db, mode, [current, *running])
     judgments = tuple(judge(current, kept, running))
@@ -311,6 +324,8 @@ def promote(
         best = max(passing, key=lambda j: (j.low or 0.0, j.challenger))
         if policies.crown(db, now, best.challenger, _reason(best), _detail(best), replacing=current):
             promoted = best.challenger
+    dropped = tuple(j.challenger for j in judgments if j.retires and j.challenger != promoted)
+    policies.drop(db, now, dropped)
     return Promotion(now, current, judgments, promoted, None, _gate(db, promoted or current, mode), dropped)
 
 
@@ -332,7 +347,7 @@ def _reason(j: Judgment) -> str:
 def _detail(j: Judgment) -> dict[str, Any]:
     return {
         "from": j.champion,
-        **{k: v for k, v in j.as_json().items() if k not in ("champion", "passed", "why")},
+        **{k: v for k, v in j.as_json().items() if k not in ("champion", "until", "passed", "why")},
     }
 
 
@@ -391,10 +406,13 @@ def report(done: Promotion) -> str:
         level = done.judgments[0].level
         lines.append(
             f"챔피언 정책 {done.champion} · 도전 정책 {len(done.judgments)}개 · "
-            f"하한의 신뢰수준 {level:.2%}(Bonferroni) · 함께 돈 거래일 {PROMOTION_DAYS}일 이상 필요"
+            f"하한의 신뢰수준 {level:.2%}(Bonferroni) · 함께 돈 거래일 {PROMOTION_DAYS}일부터 판정, "
+            f"{RETIRE_DAYS}일까지 못 이기면 내린다"
         )
         for j in done.judgments:
             verdict = {None: "통과", FEW_DAYS: "날 수 부족", NOT_ABOVE: "하한 ≤ 0"}[j.why]
+            if j.retires:
+                verdict += f", {j.until}일을 채워 내림"
             lines.append(
                 f"- 정책 {j.challenger}: 함께 돈 거래일 {j.days}일, 날마다 (도전 − 챔피언) 순손익 평균 "
                 f"{_won(j.mean)}, 하한 {_won(j.low)} → {verdict}"
@@ -405,7 +423,10 @@ def report(done: Promotion) -> str:
             else "→ 챔피언은 그대로다."
         )
     if done.dropped:
-        lines.append("내린 도전 정책(셋을 넘음): " + ", ".join(f"정책 {v}" for v in done.dropped))
+        lines.append(
+            f"내린 도전 정책({RETIRE_DAYS}일 동안 이기지 못함, 자리를 비운다): "
+            + ", ".join(f"정책 {v}" for v in done.dropped)
+        )
     g = done.gate
     if g.policy is not None:
         lines.append(

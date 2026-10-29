@@ -1002,7 +1002,9 @@ def read_trades(
             conditions.append("t.entry_at < ?")
             params.append(iso(before))
         rows = db.execute(
-            f"SELECT t.*, {champion} AS champion FROM trades t WHERE {' AND '.join(conditions)}"
+            # Its own name: ``t.*`` holds ``champion`` already, null in a row from before #400, and a
+            # row reads the first column of a name.
+            f"SELECT t.*, {champion} AS by_champion FROM trades t WHERE {' AND '.join(conditions)}"
             " ORDER BY t.entry_at DESC, t.id DESC LIMIT ?",
             (*params, limit),
         ).fetchall()
@@ -1043,7 +1045,7 @@ def _trade_json(
         "kelly": row["kelly"],
         "fraction": row["fraction"],
         "policy": row.get("policy_id"),  # a store the trader has not opened since #399: none
-        "champion": bool(row["champion"]),  # the champion's (#400): the trader's, which the limits hold
+        "champion": bool(row["by_champion"]),  # the champion's (#400): the trader's, which the limits hold
         "anchor": row["anchor"],
         "tick": row["tick"],
         "width_ticks": row["width_ticks"],
