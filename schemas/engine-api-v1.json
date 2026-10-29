@@ -2560,6 +2560,107 @@
           }
         }
       }
+    },
+
+    "trader_trades": {
+      "description": "GET /v1/trader/trades?before=T&limit=N (#394): the trader's last N trades entered before T if given, newest first, as it keeps them (state/trader.sqlite3); none before its first.",
+      "type": "object",
+      "required": ["trades"],
+      "additionalProperties": false,
+      "properties": {
+        "trades": {"type": "array", "items": {"$ref": "#/$defs/trader_trade"}}
+      }
+    },
+    "trader_trade": {
+      "description": "A position from its entry to its exit (#394): the cell (kind, predictor), the prediction and its rise's probability, the barriers, the fills, the costs and the P&L in won; exit and the sell's costs null while open.",
+      "type": "object",
+      "required": ["id", "mode", "symbol", "kind", "predictor", "prediction_id", "bar_close", "probability",
+                   "threshold", "anchor", "tick", "width_ticks", "target", "stop", "time_barrier", "decided_at",
+                   "entry", "exit", "buy_fee", "sell_fee", "tax", "cost", "gross", "net", "orders"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "integer"},
+        "mode": {"enum": ["paper", "mock", "live"]},
+        "symbol": {"type": "string"},
+        "kind": {"enum": ["direction", "barrier", "barrier_15m", "barrier_30m"]},
+        "predictor": {"type": "string"},
+        "prediction_id": {"type": "integer"},
+        "bar_close": {"$ref": "#/$defs/time"},
+        "probability": {"type": "number", "minimum": 0, "maximum": 1},
+        "threshold": {"type": "number", "minimum": 0, "maximum": 1},
+        "anchor": {"type": "number", "exclusiveMinimum": 0},
+        "tick": {"type": "number", "exclusiveMinimum": 0},
+        "width_ticks": {"type": "integer", "minimum": 1},
+        "target": {"type": "number"},
+        "stop": {"type": "number"},
+        "time_barrier": {"$ref": "#/$defs/time"},
+        "decided_at": {"$ref": "#/$defs/time"},
+        "entry": {
+          "type": "object",
+          "required": ["at", "price", "quantity"],
+          "additionalProperties": false,
+          "properties": {
+            "at": {"$ref": "#/$defs/time"},
+            "price": {"type": "number", "exclusiveMinimum": 0},
+            "quantity": {"type": "integer", "minimum": 1}
+          }
+        },
+        "exit": {
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "required": ["at", "price", "reason"],
+              "additionalProperties": false,
+              "properties": {
+                "at": {"$ref": "#/$defs/time"},
+                "price": {"type": "number", "exclusiveMinimum": 0},
+                "reason": {"enum": ["take_profit", "stop_loss", "time"]}
+              }
+            }
+          ]
+        },
+        "buy_fee": {"type": "number", "minimum": 0},
+        "sell_fee": {"type": ["number", "null"], "minimum": 0},
+        "tax": {"type": ["number", "null"], "minimum": 0},
+        "cost": {"type": ["number", "null"], "minimum": 0},
+        "gross": {"type": ["number", "null"]},
+        "net": {"type": ["number", "null"]},
+        "orders": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "side", "purpose", "price", "quantity", "placed_at", "status", "closed_at",
+                         "broker_id", "fills"],
+            "additionalProperties": false,
+            "properties": {
+              "id": {"type": "integer"},
+              "side": {"enum": ["buy", "sell"]},
+              "purpose": {"enum": ["entry", "take_profit", "stop_loss", "time"]},
+              "price": {"type": "number", "exclusiveMinimum": 0},
+              "quantity": {"type": "integer", "minimum": 1},
+              "placed_at": {"$ref": "#/$defs/time"},
+              "status": {"enum": ["open", "filled", "cancelled"]},
+              "closed_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]},
+              "broker_id": {"type": ["string", "null"]},
+              "fills": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["at", "price", "quantity", "quote_at"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "at": {"$ref": "#/$defs/time"},
+                    "price": {"type": "number", "exclusiveMinimum": 0},
+                    "quantity": {"type": "integer", "minimum": 1},
+                    "quote_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
     }
   }
 }

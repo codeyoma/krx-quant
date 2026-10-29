@@ -234,6 +234,19 @@ def test_a_process_the_engine_started_or_without_loki_sends_nothing(
     assert loki.active() is None
 
 
+async def test_the_trader_s_lines_are_its_own_process_s(fake_loki: FakeLoki) -> None:
+    """#394: ``krx-quant trade`` runs as long as the engine; its lines are ``process="trader"``,
+    without a ``command=`` field."""
+    files = open_process_log("trade", ["trade"], fake_loki.values())
+    assert files is not None
+    logging.getLogger("krx_quant.test").warning("a line of the trader")
+    await asyncio.to_thread(files.close, 0)
+
+    taken = [(labels["process"], line) for labels, line in fake_loki.lines()]
+    assert {process for process, _ in taken} == {"trader"}
+    assert not any("command=" in line for _, line in taken)
+
+
 async def test_a_process_s_own_lines_go_between_its_start_and_its_end(
     fake_loki: FakeLoki, caplog: pytest.LogCaptureFixture
 ) -> None:
