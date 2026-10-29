@@ -4,7 +4,10 @@ the server's ``.env`` alone, which may narrow them, never widen them (``settings
 
 **Whose.** The limits and the pauses hold the trades the trader makes: the champion policy's
 (#399; before the first champion, the defaults'). The loss counts those alone
-(``store.CHAMPION_TRADE``), never a challenger's paper trades (#400).
+(``store.CHAMPION_TRADE``), never a challenger's paper trades (#400), and neither a limit nor a
+pause holds a challenger's book (``Unlimited``): it is a simulation of its policy's rules, which a
+promotion compares with the champion's on the days the champion was not stopped
+(``promotion.py``).
 
 **Loss.** A P&L is the net realized one (the trades exited, after their costs) plus the open
 position's at the best bid: what selling it at that bid would net, after the buy's commission and
@@ -43,7 +46,7 @@ import logging
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta
-from typing import Any
+from typing import Any, Protocol
 
 from krx_quant.feeds.base import KST, kst_day
 from krx_quant.trader.store import (
@@ -337,6 +340,55 @@ class Guard:
         if status == CUMULATIVE_LIMIT:
             return "누적 손실 한도로 멈춰 있습니다: krx-quant trade rearm."
         return "정지 요청으로 멈춰 있습니다: krx-quant trade resume."
+
+
+class Holds(Protocol):
+    """What holds a book's trades (``paper.PaperTrader``): the champion's ``Guard``, a challenger's
+    ``Unlimited``."""
+
+    unrealized: float
+
+    @property
+    def status(self) -> str: ...
+
+    @property
+    def realized_all(self) -> float: ...
+
+    def roll(self, now: datetime) -> bool: ...
+
+    def mark(self, unrealized: float, at: datetime) -> str | None: ...
+
+    def exited(self, net: float, at: datetime) -> str | None: ...
+
+
+class Unlimited:
+    """A challenger's paper book (#400): no loss limit and no pause holds it (the limits hold the
+    champion's trades alone, #393), so it is always ``running``. It buys on the paper account's cash
+    as it stands with nothing open (``account``: the capital plus the champion's realized P&L, the
+    cash the trader buys on), so that its size is the one it would have as the champion."""
+
+    def __init__(self, account: Callable[[], float]) -> None:
+        self._account = account
+        self.unrealized = 0.0
+
+    @property
+    def status(self) -> str:
+        return RUNNING
+
+    @property
+    def realized_all(self) -> float:
+        return self._account()
+
+    def roll(self, now: datetime) -> bool:
+        return False
+
+    def mark(self, unrealized: float, at: datetime) -> str | None:
+        self.unrealized = unrealized
+        return None
+
+    def exited(self, net: float, at: datetime) -> str | None:
+        self.unrealized = 0.0
+        return None
 
 
 def ask(store: TraderStore, action: str, mode: str, at: datetime) -> Control | str:

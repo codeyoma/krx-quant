@@ -59,12 +59,15 @@ Endpoints (all under ``/v1``):
   ``latest`` and ``predictions``, each with its bar close's answer, the bar close's k it
   was made with (``flat_ticks``, #200), its mid-point and tick size there (``anchor``,
   ``tick``, #210) and, for a kind with barriers, their width there (``width_ticks``, #183);
-- ``GET /trader/trades?before=T&limit=N``: the trader's last N trades (#394, default 100, at most
-  1000) entered before ``T`` if given, newest first, each with its orders and their fills, as the
-  trader keeps them (``state/trader.sqlite3``, ``trader/store.py``); none before the trader's first.
+- ``GET /trader/trades?policy=V&before=T&limit=N``: the trader's last N trades (#394, default 100,
+  at most 1000) entered before ``T`` if given, newest first, each with its orders and their fills,
+  as the trader keeps them (``state/trader.sqlite3``, ``trader/store.py``); none before the
+  trader's first. The champion's trades, or with ``policy`` that policy version's (#400: a
+  challenger's paper trades too);
 - ``GET /trader``: the trader's state as it last wrote it (#396): its mode and status, cash,
   position, the day's and the cumulative P&L, the loss limits' use, the pause, whether it is
-  running, and the last pauses, resumes and re-arms asked for;
+  running, and the last pauses, resumes and re-arms asked for; the champion, the live gate's
+  progress and the policies running with their paper records (#400, ``trader/promotion.py``);
 - ``GET /trader/days?from=D&to=D``: its ledger of each trading day (#396; default the year to
   today, at most 4,000 days), oldest first;
 - ``POST /trader/pause`` (``{"sell_now": false|true}``, ``Content-Type: application/json``): the
@@ -72,9 +75,10 @@ Endpoints (all under ``/v1``):
   new entries, or that and a sale of the open position now. The API's only write: it neither
   resumes nor re-arms the trader, nor changes its mode or limits.
 - ``GET /trader/policies?limit=N``: the trader's last N policy versions (#399, default 100, at most
-  1000), newest first, each with its status (``champion``, ``challenger``, ``former``), its cells
-  with their θ and Kelly fraction, the cells it left out and what it was fitted on; and every
-  change of the champion (``trader/policy.py``); none before the first nightly fit.
+  1000), newest first, each with its status (``champion``, ``challenger``, ``former``,
+  ``dropped``), its cells with their θ and Kelly fraction, the cells it left out, what it was
+  fitted on and its paper record (#400); and every change of the champion, a promotion's with its
+  figures (``trader/policy.py``); none before the first nightly fit.
 - ``GET /symbols/{symbol}/trader-marks?before=T&limit=N``: the trader's buys and sells of the
   symbol as the chart marks them (#398, ``trader/marks.py``): the last N (default 100, at most 1000)
   before ``T`` if given, newest first, each at its fill's time and price, with its trade's quantity,
@@ -1457,15 +1461,22 @@ def _excluded_json(e: Excluded | None) -> dict[str, Any]:
 
 
 async def _trader_trades(request: web.Request) -> web.Response:
-    """The trader's trades (#394), read from its store (read-only, off the event loop); none without
-    the store or before the trader's first trade."""
+    """The trader's trades (#394), read from its store (read-only, off the event loop): the
+    champion's, or a policy version's (``policy``, #400); none without the store or before the
+    trader's first trade."""
     limit = _limit_query(request, DEFAULT_LIMIT, MAX_LIMIT)
     before = _time_query(request, "before")
+    raw = request.query.get("policy")
+    policy: int | None = None
+    if raw is not None:
+        policy = int(raw) if raw.isdecimal() and raw.isascii() else 0
+        if policy < 1:
+            raise _error(web.HTTPBadRequest, f"policy must be a policy version (1 or more), got {raw!r}")
     state_dir = request.app[STATE_DIR_KEY]
     trades = (
         []
         if state_dir is None
-        else await asyncio.to_thread(read_trades, state_dir / TRADER_DB, before, limit)
+        else await asyncio.to_thread(read_trades, state_dir / TRADER_DB, before, limit, policy)
     )
     return _json({"trades": trades})
 

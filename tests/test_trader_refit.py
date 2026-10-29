@@ -533,7 +533,10 @@ async def test_the_job_reads_tonight_s_cost_map_and_keeps_the_policy(
     assert code == 0
     assert api.asked == [{"symbol": SYMBOL, "period": "20d", "special": "exclude"}]
     out = capsys.readouterr().out
-    assert out.startswith("정책 맞추기 (#399): 정책 1 · 챔피언(처음 맞춘 정책)")
+    assert out.startswith("도전 정책 판정 (#400)\n챔피언이 아직 없다(첫 밤 정책 맞추기 전).\n\n"), (
+        "the challengers are judged first (#400): none before the first champion"
+    )
+    assert "\n정책 맞추기 (#399): 정책 1 · 챔피언(처음 맞춘 정책)\n" in out
     assert "뺀 칸: barrier breiman (top): few_trades, 모의 매매가 20건에 못 미침(가장 많을 때 5건)" in out
     assert "격자: θ 0.4 0.5 0.6 0.7 0.8 × λ 0.25 0.5 1 · 칸마다 모의 매매 20건 이상" in out
     assert re.search(r"메모리: 최대 RSS \d+\.\d MB", out), out

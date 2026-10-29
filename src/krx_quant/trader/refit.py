@@ -1,7 +1,9 @@
 """The nightly re-fit of the trader's policy (#399, #393 "정책과 자기 개선"): ``krx-quant
 refit-policy``, the scheduled job ``refit-policy-399`` on every trading day's night, after the
-nightly training. It writes a new policy version (``policy.py``): the first one becomes the
-champion, every later one a challenger only (#400 runs and promotes them).
+nightly training. It first judges the challengers that ran against the champion and promotes one
+that beat it (#400, ``promotion.promote``: after the market only), then writes a new policy
+version (``policy.py``): the first one becomes the champion, every later one a challenger, which
+runs in paper beside the champion from the next trading day and drops the oldest beyond three.
 
 **Which cells.** Tonight's cost map of 005930 (``GET /v1/cost-map``, as the trader reads it at
 08:30, ``selection.pick``) decides what may trade: the cells passing at a market order's round
@@ -88,7 +90,7 @@ from krx_quant.predictions import KIND_ANSWER_JOIN, KIND_SCORED, SCORED, TOUCH_J
 from krx_quant.pricing import Direction, tick_size
 from krx_quant.special import Window
 from krx_quant.stats import Prices, touch_profit
-from krx_quant.trader import KELLY_FRACTION, SYMBOL, THRESHOLD
+from krx_quant.trader import KELLY_FRACTION, SYMBOL, THRESHOLD, promotion
 from krx_quant.trader import policy as policies
 from krx_quant.trader.cells import Cell, Signal, open_engine_db, special_windows, traded_kind
 from krx_quant.trader.paper import Plan, Rules, plan, shares
@@ -484,6 +486,8 @@ class Refitted:
     left_out: tuple[dict[str, Any], ...]
     fit: Mapping[str, Any]
     passed: int  # the cells the cost map passed
+    dropped: tuple[int, ...] = ()  # the challengers it dropped (beyond three, #400)
+    challengers: tuple[int, ...] = ()  # the challengers kept after it, oldest first
 
 
 def refit_from(
@@ -567,17 +571,21 @@ def refit_from(
     store = policies.connect(trader_db)
     try:
         version, first_champion = policies.add(store, now, reason, cells, left_out, fit_json)
-        champion = policies.champion(store)
+        champion = policies.champion_version(store)
+        dropped = tuple(policies.dropped_at(store, now))
+        challengers = tuple(policies.challenger_versions(store))
     finally:
         store.close()
     return Refitted(
         version=version,
         champion=first_champion,
-        champion_version=None if champion is None else champion.version,
+        champion_version=champion,
         cells=cells,
         left_out=left_out,
         fit=fit_json,
         passed=len(selection.picks),
+        dropped=dropped,
+        challengers=challengers,
     )
 
 
@@ -586,7 +594,9 @@ def report(done: Refitted) -> str:
     fit_json = done.fit
     cost_map = fit_json["cost_map"]
     status = (
-        "챔피언(처음 맞춘 정책)" if done.champion else f"도전 정책(챔피언은 정책 {done.champion_version})"
+        "챔피언(처음 맞춘 정책)"
+        if done.champion
+        else f"도전 정책(챔피언은 정책 {done.champion_version}, 다음 거래일부터 모의로 함께 돈다)"
     )
     grid = fit_json["grid"]
     lines = [
@@ -621,6 +631,10 @@ def report(done: Refitted) -> str:
                 f"{best['kelly_fraction']:g}: 모의 {best['trades']}건, 순손익 {best['net']:+,.0f}원)"
             )
         lines.append(f"뺀 칸: {x['kind']} {x['predictor']} ({x['role']}): {why}, {detail}")
+    if done.challengers:
+        lines.append("모의로 도는 도전 정책(셋까지): " + ", ".join(f"정책 {v}" for v in done.challengers))
+    if done.dropped:
+        lines.append("내린 도전 정책(가장 오래된 것): " + ", ".join(f"정책 {v}" for v in done.dropped))
     total = fit_json["result"]
     run = fit_json["run"]
     lines += [
@@ -642,13 +656,48 @@ def _mb(value: float | None) -> str:
     return "?" if value is None else f"{value:.1f}"
 
 
+def promote_now(trader_db: Path, sessions: Callable[[date], Session | None], now: datetime) -> None:
+    """The night's promotion (#400) on the trader's store, its report printed (and why not, when
+    the store cannot be read or written: the re-fit goes on). Without a store there is no champion
+    yet, and none is made for it."""
+    if not trader_db.exists():
+        print(
+            promotion.report(
+                promotion.Promotion(now, None, (), None, promotion.NO_CHAMPION, promotion.gate(None, None))
+            )
+            + "\n"
+        )
+        return
+    try:
+        db = policies.connect(trader_db)
+        try:
+            done = promotion.promote(db, now, sessions)
+        finally:
+            db.close()
+    except (sqlite3.Error, policies.PolicyError) as e:
+        print(f"도전 정책 판정 (#400): 저장소를 읽거나 쓰지 못해 판정하지 않았다: {e}\n")
+        log.error("promotion: %s", e)
+        return
+    if done.promoted is not None:
+        log.warning(
+            "promotion: policy %s is the champion now, in place of policy %s", done.promoted, done.champion
+        )
+    else:
+        log.info("promotion: policy %s stays the champion (%s)", done.champion, done.deferred or "judged")
+    print(promotion.report(done) + "\n")
+
+
 async def run_refit(
     settings: Settings, trader: TraderSettings, now: datetime, engine_url: str | None = None
 ) -> int:
-    """``krx-quant refit-policy``: tonight's cost map from the Engine API (``engine_url``, else the
-    trader's ``KRX_TRADER_ENGINE_URL``), the fit, the policy kept; its report printed. 0 when a
-    policy is kept, ``NO_POLICY_KEPT`` when the cost map or the engine's database cannot be read."""
+    """``krx-quant refit-policy``: first the challengers judged and one promoted if it beat the
+    champion (#400, ``promotion.promote``), then tonight's cost map from the Engine API
+    (``engine_url``, else the trader's ``KRX_TRADER_ENGINE_URL``), the fit, the policy kept; both
+    reports printed. 0 when a policy is kept, ``NO_POLICY_KEPT`` when the cost map or the engine's
+    database cannot be read (the promotion is judged all the same)."""
     url = engine_url or trader.engine_url
+    calendar = calendar_store(settings).calendar
+    promote_now(settings.state_dir / TRADER_DB, calendar.session, now)
     try:
         async with aiohttp.ClientSession() as session:
             body = await read_cost_map(session, url)
@@ -660,7 +709,6 @@ async def run_refit(
     if not engine_db.exists():
         print(f"정책 맞추기 (#399): 엔진 DB가 없어({engine_db}) 정책을 만들지 않았다")
         return NO_POLICY_KEPT
-    calendar = calendar_store(settings).calendar
     try:
         done = refit_from(
             body,

@@ -23,9 +23,10 @@ from krx_quant.predictions import DB_NAME as ENGINE_DB
 from krx_quant.predictions import PredictionStore
 from krx_quant.trader import policy as policies
 from krx_quant.trader.cells import Cell
+from krx_quant.trader.desk import under_champion
 from krx_quant.trader.paper import BELOW_THRESHOLD, OUTRANKED
 from krx_quant.trader.policy import PolicyCell, PolicyError
-from krx_quant.trader.run import run_trader, under_champion
+from krx_quant.trader.run import run_trader
 from krx_quant.trader.selection import NO_PASS, NO_POLICY, NOT_IN_POLICY, Selection, choose
 from krx_quant.trader.settings import TraderSettings
 from krx_quant.trader.store import DB_NAME, TraderStore, read_trades

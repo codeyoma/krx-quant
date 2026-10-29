@@ -1,13 +1,15 @@
 """``krx-quant trade`` (#394, #395): the trader's process, until stopped.
 
-Five loops in one event loop, all into one ``PaperTrader``:
+Five loops in one event loop, all into one ``desk.Desk`` (#400: the champion's book and each
+running challenger's):
 
 - the picks (``selection.pick``): the cells the cost map passes, read from the Engine API at the
   start and every day at ``PICK_AT`` (08:30), under the champion policy read from the store then
-  (#399, ``policy.apply``: its cells among them, in its order, at its θ and λ). A cost map that
-  cannot be read is asked for again every ``PICK_RETRY_SECONDS``, and no cell trades until it is
-  read: a pick is never older than the day's. A champion that cannot be read trades nothing
-  (``NO_POLICY``) until the next pick;
+  (#399, ``policy.apply``: its cells among them, in its order, at its θ and λ), and under each
+  challenger running that day for its paper book (#400). A cost map that cannot be read is asked
+  for again every ``PICK_RETRY_SECONDS``, and no cell trades until it is read: a pick is never
+  older than the day's. A champion that cannot be read trades nothing (``NO_POLICY``) until the
+  next pick;
 - the collector's quotes as they come (``quotes.follow_quotes``);
 - the engine's database every ``TraderSettings.poll_seconds`` (``cells.EngineReader``,
   read-only): the picked cells' new predictions, and the special windows the engine kept;
@@ -38,12 +40,13 @@ from krx_quant.feeds.base import KST
 from krx_quant.market_calendar import MarketCalendar, Session, calendar_store
 from krx_quant.notify import Alerts
 from krx_quant.predictions import DB_NAME as ENGINE_DB
-from krx_quant.trader import COST_MAP_PERIOD, KELLY_FRACTION, PICK_AT, SYMBOL, policy
+from krx_quant.trader import COST_MAP_PERIOD, KELLY_FRACTION, PICK_AT, SYMBOL
 from krx_quant.trader.cells import EngineReader
+from krx_quant.trader.desk import Desk
 from krx_quant.trader.limits import CONTROL_SECONDS
-from krx_quant.trader.paper import PaperTrader, Rules
+from krx_quant.trader.paper import Rules
 from krx_quant.trader.quotes import follow_quotes
-from krx_quant.trader.selection import NO_COST_MAP, NO_POLICY, Selection, pick
+from krx_quant.trader.selection import NO_COST_MAP, pick
 from krx_quant.trader.settings import TraderSettings
 from krx_quant.trader.store import DB_NAME, TraderStore
 
@@ -62,26 +65,6 @@ def next_pick(now: datetime) -> datetime:
     """The first ``PICK_AT`` after ``now``."""
     due = datetime.combine(now.astimezone(KST).date(), PICK_AT, KST)
     return due if due > now else due + timedelta(days=1)
-
-
-def under_champion(store: TraderStore, selection: Selection) -> Selection:
-    """``selection`` under the champion policy kept now (#399); as it is before the first, and with
-    no cell when the champion cannot be read."""
-    try:
-        champion = store.champion()
-    except (policy.PolicyError, sqlite3.Error) as e:
-        log.error("trader: cannot read the champion policy (%s): no cell trades until the next pick", e)
-        return Selection((), selection.considered, selection.as_of, NO_POLICY, str(e))
-    if champion is None:
-        log.info("trader: no champion policy yet: the cost map's cells at the default threshold and Kelly")
-    else:
-        log.info(
-            "trader: under the champion, policy %s (%s): %s cell(s)",
-            champion.version,
-            champion.created_at.strftime("%Y-%m-%d %H:%M"),
-            len(champion.cells),
-        )
-    return policy.apply(champion, selection)
 
 
 class _Sessions:
@@ -140,7 +123,7 @@ async def run_trader(
                 session, settings.telegram_bot_token, settings.telegram_chat_id, settings.telegram_api_url
             )
             try:
-                book = PaperTrader(store, rules, _Sessions(settings), started, trader.mode, alerts.notice)
+                book = Desk(store, rules, _Sessions(settings), started, trader.mode, alerts.notice)
                 await _trade(settings, trader, book, session, stop=stop, clock=clock, sleep=sleep)
             finally:
                 await alerts.close()
@@ -152,7 +135,7 @@ async def run_trader(
 async def _trade(
     settings: Settings,
     trader: TraderSettings,
-    book: PaperTrader,
+    book: Desk,
     session: aiohttp.ClientSession,
     *,
     stop: asyncio.Event,
@@ -194,7 +177,7 @@ async def _trade(
             if failing:
                 log.info("trader: the cost map is read again")
             failing = False
-            book.select(under_champion(book.store, selection), at)
+            book.select(selection, at)
             reader.follow(book.cells, at - LOOK_BACK)
             due = next_pick(clock())
             while clock() < due:
