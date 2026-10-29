@@ -31,8 +31,15 @@ will through its KIS order module (#404).
 - **Paper fills**: the buy at the best ask of the first quote received after the decision; the
   take-profit at the target once a best bid reaches it; the stop and the time exit at the best
   bid then. Costs: the commission on both sides and the sell tax.
+- **Limits and pauses** (``limits.py``, #396): the loss is the net realized P&L plus the open
+  position's at the best bid, after its costs; a day's of 10% of the capital stops the day (sold
+  at once, trading again the next trading day), a cumulative one of 20% stops the trader until
+  ``krx-quant trade rearm``. The screen's two pauses (``POST /v1/trader/pause``: new entries, or
+  that and a sale now) last until ``krx-quant trade resume`` on the server.
 - **Store** (``store.py``): its picks of the cells, decisions, orders, fills and trades, each with
-  its mode (``paper``); the Engine API reads it (``GET /v1/trader/trades``).
+  its mode (``paper``), the pauses, resumes and re-arms asked for, the halts, the trader's state
+  now and each day's ledger; the Engine API reads it (``GET /v1/trader``, ``/v1/trader/trades``,
+  ``/v1/trader/days``) and writes a pause into it (``POST /v1/trader/pause``), nothing else.
 """
 
 from __future__ import annotations
@@ -57,6 +64,12 @@ ROLES = ("consensus", "top", "baseline")
 
 # The capital the trader may use, in won (#393): ``.env`` may narrow it, never widen it.
 CAPITAL = 1_000_000
+# The loss limits (#393 "한도와 정지", #396), in percent of the capital: a day's loss of 10%
+# (100,000 won) stops the day, a cumulative loss of 20% (200,000 won) stops the trader until it is
+# re-armed on the server (``krx-quant trade rearm``). ``.env`` may narrow them, never widen them,
+# and the policy never touches them (``limits.py``).
+DAILY_LOSS_PERCENT = 10.0
+CUMULATIVE_LOSS_PERCENT = 20.0
 # The default threshold: a rise's probability at least this buys (the signal alerts' default).
 THRESHOLD = 0.6
 # The share of a cell's Kelly fraction bought (#395): half Kelly, cut to 0–1 after.

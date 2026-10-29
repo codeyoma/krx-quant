@@ -348,7 +348,9 @@ curl http://krx-quant:8080/v1/macro
 |---|---|---|
 | `KRX_TRADER_MODE` | `paper` | `paper`(모의)뿐이다. `mock`, `live`는 KIS 주문 모듈(#404) 전까지 설정 오류다 |
 | `KRX_TRADER_THRESHOLD` | `0.6` | 사는 오름 확률(방향 `p_up`, 장벽 `p_up_first`)의 문턱 θ. 0–1. 고른 칸 모두에 같다 |
-| `KRX_TRADER_CAPITAL` | `1000000` | 운용 상한(원). 1 이상 1,000,000 이하. 넘으면 시작하지 않는다(좁히기만 한다, #393). 한 번에 사는 금액은 칸의 Kelly 비율 × 이 값이다(#395) |
+| `KRX_TRADER_CAPITAL` | `1000000` | 운용 상한(원). 1 이상 1,000,000 이하. 넘으면 시작하지 않는다(좁히기만 한다, #393). 한 번에 사는 금액은 칸의 Kelly 비율 × 이 값이다(#395). 주문 가능 현금(이 값 + 청산한 매매의 순손익)도 넘지 않는다(#396) |
+| `KRX_TRADER_DAILY_LOSS_PERCENT` | `10` | 하루 손실 한도, 운용 상한의 %(#396, 기본 100,000원). 0 초과 10 이하. 10을 넘으면 시작하지 않는다(좁히기만 한다). 그날 손실(비용을 뺀 실현 + 열린 포지션의 평가)이 닿으면 열린 포지션을 팔고 그날은 사지 않는다. 다음 거래일에 다시 돈다 |
+| `KRX_TRADER_CUMULATIVE_LOSS_PERCENT` | `20` | 누적 손실 한도, 운용 상한의 %(#396, 기본 200,000원). 0 초과 20 이하. 20을 넘으면 시작하지 않는다. 닿으면 팔고 `krx-quant trade rearm`까지 사지 않는다(아래 "자동 매매") |
 | `KRX_TRADER_QUOTES_URL` | `ws://127.0.0.1:8081/v1/quotes` (compose `ws://engine:8081/v1/quotes`) | 수집기의 호가 스트림 |
 | `KRX_TRADER_ENGINE_URL` | `http://127.0.0.1:8080` (compose `http://engine:8080`) | 매매할 칸을 고를 비용 지도(`GET /v1/cost-map`)를 묻는 엔진 API(#395). `http://호스트:포트`, 경로 없이 |
 
@@ -1106,6 +1108,31 @@ compose 서비스 `trader`가 `krx-quant trade`를 돈다. 수집기(`engine`)�
 - 수집기가 호가 리스너를 열지 못하면 `[장애] 자동 매매의 호가 스트림을 열지 못했습니다 (…). 녹화는 계속합니다.`가 온다. 그동안 trader는 새로 사지 않는다(`no_quote`).
 - 사용자가 할 일은 없다. KIS 모의투자 키(mock)와 실전 계좌(live)는 그 티켓(#403–#408)이 올 때 따로 안내한다.
 
+#### 한도, 정지, 재개, 다시 켜기 (#396)
+
+규칙은 [design.md](design.md#14-자동-매매-393) 14장 "한도와 정지"에 있다. 지금 상태는 `curl -s http://krx-quant:8080/v1/trader`(모드, `status`, 현금, 포지션, 오늘·누적 손익, 한도 사용, 정지, 최근 요청), 날마다는 `curl -s http://krx-quant:8080/v1/trader/days`([engine-api.md](engine-api.md#get-v1trader-396))다.
+
+- **하루 손실 한도**(기본 운용 상한의 10%, 100,000원, `KRX_TRADER_DAILY_LOSS_PERCENT`): 닿으면 trader가 열린 포지션을 바로 팔고 그날은 사지 않는다. `[알림] 자동 매매(paper): 하루 손실 한도에 닿았습니다. …`가 온다. 할 일은 없다: 다음 거래일에 저절로 다시 돈다.
+- **누적 손실 한도**(기본 20%, 200,000원, `KRX_TRADER_CUMULATIVE_LOSS_PERCENT`): 닿으면 같은 방법으로 멈추고 다음 날에도 사지 않는다. `[알림] 자동 매매(paper): 누적 손실 한도에 닿았습니다. …`가 온다. 원인을 본 뒤 다시 켜려면 서버에서:
+
+  ```bash
+  docker compose exec trader krx-quant trade rearm
+  ```
+
+  `rearm asked for (control N) …`와 `the trader read it at …`이 나오고, `[알림] 자동 매매(paper): 누적 손실 한도를 다시 켰습니다(krx-quant trade rearm). 누적 손익을 지금부터 다시 셉니다. …`가 온다. 누적 손익은 그때부터 다시 센다. 누적 한도에 닿지 않았으면 `… has not reached its cumulative loss limit: nothing to re-arm`(종료 코드 1)이고 아무것도 쓰지 않는다. 하루 한도와 정지는 풀지 않는다.
+- **화면의 정지**: "새 진입 정지"는 새로 사지 않고 들고 있는 것은 원래 규칙대로 판다. "정지하고 즉시 매도"는 새로 사지 않고 들고 있는 것을 바로 판다. 엔진 API(`POST /v1/trader/pause`)가 trader 저장소에 쓰고, trader가 1초 안에 읽어 `[알림] 자동 매매(paper): 새 진입 정지 요청을 받았습니다(화면). …` 또는 `… 정지하고 즉시 매도 요청을 받았습니다(화면). …`를 보낸다. 손으로도 보낼 수 있다(Tailscale 안에서): `curl -s -X POST -H 'Content-Type: application/json' -d '{"sell_now": false}' http://krx-quant:8080/v1/trader/pause`.
+- **재개**: 정지는 다시 시작해도, 다음 날에도 이어진다. 다시 켜는 것은 서버에서만 된다:
+
+  ```bash
+  docker compose exec trader krx-quant trade resume
+  ```
+
+  `resume asked for (control N) …`와 `the trader read it at …`이 나오고 `[알림] 자동 매매(paper): 정지를 풀었습니다(krx-quant trade resume). 다시 삽니다.`가 온다(한도로 멈춰 있으면 그렇다고 적는다). 정지가 없으면 `the trader is not paused: nothing to resume`(종료 코드 1)이다. 한도는 풀지 않는다.
+- trader 컨테이너가 멈춰 있으면 `docker compose run --rm trader trade resume`(또는 `rearm`)으로 쓴다. `the trader has not read it yet: it does when it runs …`가 나오고, trader가 다시 뜰 때 읽는다. 두 명령은 서버 `.env`의 trader 설정을 읽는다(`rearm`은 그 모드의 누적 한도를 다시 켠다). 설정이 틀리면 trader처럼 `configuration error`로 멈춘다.
+- 요청과 한도의 기록: `docker compose exec trader python -c 'import sqlite3; db = sqlite3.connect("file:/state/trader.sqlite3?mode=ro", uri=True); [print(r) for r in db.execute("select * from controls order by id desc limit 10")]; [print(r) for r in db.execute("select at, kind, pnl, limit_won, lifted_at from halts order by id desc limit 10")]'`.
+- 한도를 좁히려면 서버 `.env`의 두 값을 낮추고 `docker compose up -d trader`. 이미 실현한 손실이 좁힌 한도를 넘으면 trader는 시작하자마자 멈추고 알린다. 넓히는 값(10, 20 초과)은 trader를 시작하지 않게 한다(`configuration error: KRX_TRADER_DAILY_LOSS_PERCENT (…%) is above the trader's limit … never widen it`).
+- 로그: 한도에 닿으면 WARNING `trader: the daily loss limit is reached: … won (realized …, open …), the limit -…`, 정지·재개·다시 켜기는 WARNING `trader: paused (api, control N, sell now: …)`, `trader: resumed (control N): <상태>`, `trader: the cumulative loss limit re-armed (control N): <상태>`. 판 매매는 `trader: sold … (pause|daily_limit|cumulative_limit, trade N): net … won`이다. 멈춘 채 시작하면 WARNING `trader: starting <상태>`.
+
 ### 일별 수급 (#226)
 
 차트의 하단 지표 8종(공매도 거래량, 개인·기관·외국인 순매수량, 외국인 보유수량, 외국인 지분율, 대차잔고, 신용잔고)의 데이터다. 수집기가 받아 `state/supply/`에 두고(8장), 엔진 API `GET /v1/symbols/{s}/supply`로 준다([engine-api.md](engine-api.md)). 출처와 규칙은 [kis-feeds.md](kis-feeds.md#수집-226)에 있다.
@@ -1807,6 +1834,10 @@ docker compose logs --tail 200 engine
 | `[장애] 구독한 키가 모두 끊긴 피드: stale <TR>` | 그 피드(TR)의 구독·조회 키가 전부 기준 시간(`health.STALE_SECONDS`)보다 오래 조용하다. 그날 아직 한 번도 안 온 키 중 지연으로 치지 않는 키(미국 주간거래, KIS가 거래일을 확인하지 않은 날)는 세지 않는다. 구독 키가 잘못됐거나(KIS는 잘못된 키도 구독 성공으로 답한다. 예: #113의 만기 지난 옵션 월물), 파싱이나 연결이 고장 났다. 여러 피드가 함께 오면 연결 문제다. | 키 하나라도 데이터가 다시 오면 `[복구] 데이터가 다시 들어오는 피드: stale <TR>`가 온다. 키 하나만 조용한 것(거래정지, VI, 체결이 드문 옵션 행사가)은 알리지 않는다. `gaps` 계층과 `/v1/status`의 `kis.feeds[].gap`에만 남는다. |
 | `[장애] 장 마감 데이터 업로드가 ... 실패했습니다` | 로그의 `could not archive ...` | 1. AWS 키, `KRX_OBJECT_STORE` 버킷 이름, IAM 정책을 확인한다.<br>2. 고친 뒤 `docker compose run --rm engine archive`를 돌린다. 다시 돌려도 안전하다.<br>3. 다음 업로드가 성공하면 `[복구]`가 온다. |
 | `[장애] 자동 매매의 호가 스트림을 열지 못했습니다 (<오류>). 녹화는 계속합니다.` | 로그의 `quote stream not started on ...` | 녹화와 예측은 계속하고, trader는 호가가 없어 새로 사지 않는다(#394). 다른 프로세스가 8081을 쓰는지 확인하고 `docker compose restart engine` |
+| `[알림] 자동 매매(<모드>): 하루 손실 한도에 닿았습니다. …` | `curl -s http://krx-quant:8080/v1/trader`의 `limits.daily`, `/v1/trader/trades?limit=5` | 그날 손실(비용을 뺀 실현 + 열린 포지션의 평가)이 하루 한도에 닿아 trader가 열린 포지션을 팔고 그날은 사지 않는다(#396). 할 일은 없다: 다음 거래일에 다시 돈다 |
+| `[알림] 자동 매매(<모드>): 누적 손실 한도에 닿았습니다. …` | 위와 같고 `limits.cumulative` | 누적 손실이 누적 한도에 닿아 trader가 팔고 멈췄다. 다시 켤 때까지 사지 않는다. 원인(매매, 비용 지도, 정책)을 본 뒤 `docker compose exec trader krx-quant trade rearm`(3장 "자동 매매"의 "한도, 정지, 재개, 다시 켜기") |
+| `[알림] 자동 매매(<모드>): 새 진입 정지 요청을 받았습니다(화면). …`, `… 정지하고 즉시 매도 요청을 받았습니다(화면). …` | `/v1/trader`의 `pause`, `controls` | 화면에서 정지 버튼을 눌렀다. 다시 켜려면 `docker compose exec trader krx-quant trade resume` |
+| `[알림] 자동 매매(<모드>): 정지를 풀었습니다(krx-quant trade resume). …`, `… 누적 손실 한도를 다시 켰습니다(krx-quant trade rearm). …` | `/v1/trader`의 `status` | 서버에서 재개나 다시 켜기를 했다. 문구 끝이 "다시 삽니다."가 아니면 다른 정지나 한도가 아직 걸려 있다 |
 | `[장애] 엔진 API를 열지 못했습니다` | 로그의 `Engine API not started on ...` | 녹화와 예측은 계속한다. 다른 프로세스가 8080을 쓰는지 확인하고 `docker compose up -d`로 다시 띄운다. |
 | 알고리즘을 다시 학습하고 싶다 | 밤 학습 결과는 텔레그램과 `/v1/status`의 `training` | 밤 학습이 매일 한다. 당장 바꾸려면 알고리즘마다(`newton`, `gauss`, `granger`, `markov`, `kalman`, `shannon`, `poisson`, `turing`) `docker compose run --rm --no-deps engine fit <이름>`. 엔진이 1분 안에 새 모델로 바꾼다. 되돌리려면 `docker compose exec engine krx-quant rollback <이름>`(위 "밤 학습과 모델 교체"). |
 | `[알림] 사전 검증 대기: <이름>. 검증을 통과해야 돌기 시작합니다. ...` | `curl -s http://krx-quant:8080/v1/algorithms`에 그 이름이 없다 | 새로 등록된 알고리즘이 사전 검증을 기다린다. 녹화가 10거래일 이상이면 예약 작업이 밤마다 하나씩 돌리고 #204에 남긴다(3장 "새 알고리즘 사전 검증"). 손으로 다시 돌리려면 장 시간 밖에서(예약 작업이 도는 22:30–05:30도 피해) `docker compose run --rm --no-deps engine prevalidate <이름>`. 엔진이 다시 시작할 때마다 한 번 온다. 사전 검증이 지금 코드를 거부한 알고리즘에는 오지 않는다(아래 `사전 검증 거부`, #369). |
@@ -2140,7 +2171,9 @@ LogQL 문법은 2026-10-23에 커넥터로 스택에 물어 확인했다(그때�
 | `kis_token.json` | KIS REST 접근 토큰 캐시(권한 600). 앱키가 바뀌면 버린다 |
 | `market_calendar.json` | KIS 휴장일 조회 캐시 |
 | `engine.sqlite3`, `-wal`, `-shm` | 예측, 채점, 상태, 합의 가중치, 다른 종류의 예측과 정답(`kind_predictions`, `kind_answers`, #179), 특수 상황 구간(`special_windows`, `special_days`, #236), 수습 시뮬레이션의 재생과 예측(`simulation_runs`, `simulations`, `sim_predictions`, `sim_kind_predictions`, #298. 실시간 예측과 따로 둔다). 테이블은 [engine-api.md](engine-api.md#저장-stateenginesqlite3)에 있다. 스키마 버전은 `PRAGMA user_version`이다(#179, #236, #298의 새 표는 올리지 않았다) |
-| `trader.sqlite3`, `-wal`, `-shm` | 자동 매매 trader의 저장소(#394): 시작마다(`runs`), 비용 지도로 칸을 고른 기록(`selections`, #395), 읽은 칸의 예측과 한 일(`decisions`), 매매(`trades`), 주문(`orders`), 체결(`fills`). 모든 행에 모드(`paper`). trader만 쓰고 엔진 API가 읽기만 한다([design.md](design.md#14-자동-매매-393) 14장) |
+| `trader.sqlite3`, `-wal`, `-shm` | 자동 매매 trader의 저장소(#394): 시작마다(`runs`), 비용 지도로 칸을 고른 기록(`selections`, #395), 읽은 칸의 예측과 한 일(`decisions`), 매매(`trades`), 주문(`orders`), 체결(`fills`), 정지·재개·다시 켜기 요청(`controls`, #396), 닿은 손실 한도(`halts`), 지금 상태(`snapshot`), 날마다의 장부(`days`). 모든 행에 모드(`paper`). trader가 쓰고, 엔진 API는 읽고 정지 요청만 쓰며, `krx-quant trade resume|rearm`이 재개와 다시 켜기를 쓴다([design.md](design.md#14-자동-매매-393) 14장) |
+
+> **바뀜** (2026-10-30, #PRNUM): `trader.sqlite3`는 trader만 쓰고 엔진 API는 읽기만 했다 → 엔진 API가 화면의 정지 요청을, `krx-quant trade resume|rearm`이 재개와 다시 켜기를 `controls`에 쓴다. 이유: 화면의 정지 두 가지와 서버의 재개·다시 켜기가 trader에게 닿는 길이다(#396).
 | `replay-<날짜>.sqlite3` | `krx-quant replay`의 결과 |
 | `.engine.lock` | 도는 엔진이 잡는 잠금 파일(`flock`, #168). 잡혀 있으면 `rescore`가 거부한다. 엔진이 끝나면 풀린다. 파일은 남아도 된다 |
 | `prevalidation-<알고리즘>.sqlite3` | `krx-quant prevalidate`가 재생한 예측과 채점. 다시 돌리면 새로 만든다 |

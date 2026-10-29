@@ -11,6 +11,7 @@ import logging
 import math
 import signal
 import sys
+import time
 from collections.abc import Callable
 from datetime import date, datetime
 from pathlib import Path
@@ -81,8 +82,12 @@ from krx_quant.simulation import (
 )
 from krx_quant.structure_check import structure_check
 from krx_quant.supply_probe import probe_supply
+from krx_quant.trader.limits import CONTROL_SECONDS
+from krx_quant.trader.limits import ask as ask_trader
 from krx_quant.trader.run import run_trader
 from krx_quant.trader.settings import TraderSettings
+from krx_quant.trader.store import DB_NAME as TRADER_DB
+from krx_quant.trader.store import TraderStore
 from krx_quant.training import fit_algorithm
 
 
@@ -113,6 +118,31 @@ async def _trade() -> None:
         except NotImplementedError:  # Windows: Ctrl+C raises KeyboardInterrupt instead
             pass
     await run_trader(settings, trader, stop=stop)
+
+
+def _trade_control(action: str) -> int:
+    """``krx-quant trade resume|rearm`` (#396): the trader's pause lifted, or its cumulative loss
+    limit re-armed, written into its store for the running trader to read; whether it did."""
+    settings = Settings.from_env(require_kis=False)
+    mode = TraderSettings.from_env().mode  # a re-arm is of the mode the trader runs in
+    store = TraderStore(settings.state_dir / TRADER_DB)
+    try:
+        asked = ask_trader(store, action, mode, datetime.now(KST))
+        if isinstance(asked, str):
+            print(asked)
+            return 1
+        print(f"{action} asked for (control {asked.id}) at {asked.at.isoformat()}")
+        deadline = time.monotonic() + 3 * CONTROL_SECONDS + 1
+        while time.monotonic() < deadline:
+            control = store.control(asked.id)
+            if control is not None and control.applied_at is not None:
+                print(f"the trader read it at {control.applied_at.isoformat()}")
+                return 0
+            time.sleep(CONTROL_SECONDS / 2)
+    finally:
+        store.close()
+    print("the trader has not read it yet: it does when it runs (docker compose ps trader)")
+    return 0
 
 
 async def _measure() -> None:
@@ -645,9 +675,17 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="krx-quant")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("collect", help="record KIS real-time feeds until interrupted")
-    sub.add_parser(
+    trade_cmd = sub.add_parser(
         "trade",
-        help="trade 005930 on the cells the cost map passes, in paper (#394, #395), until interrupted",
+        help="trade 005930 on the cells the cost map passes, in paper (#394, #395), until interrupted;"
+        " resume: lift the screen's pause; rearm: re-arm the cumulative loss limit (#396)",
+    )
+    trade_cmd.add_argument(
+        "control",
+        nargs="?",
+        choices=("resume", "rearm"),
+        help="instead of trading, ask the running trader to resume after a pause, or to re-arm its"
+        " cumulative loss limit (counted again from then)",
     )
     sub.add_parser(
         "measure-subscriptions",
@@ -932,6 +970,8 @@ def _command(args: argparse.Namespace) -> int:
     if args.command == "collect":
         asyncio.run(_collect())
     elif args.command == "trade":
+        if args.control is not None:
+            return _trade_control(args.control)
         asyncio.run(_trade())
     elif args.command == "measure-subscriptions":
         asyncio.run(_measure())

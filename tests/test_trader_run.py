@@ -1,10 +1,13 @@
-"""``krx-quant trade`` (#394, #395): the trader's process on a quote stream, an engine database and
-the Engine API's cost map, its settings, and that it never writes the engine's database."""
+"""``krx-quant trade`` (#394, #395, #396): the trader's process on a quote stream, an engine database
+and the Engine API's cost map, its settings, that it never writes the engine's database, and the
+pauses, resumes and re-arms it reads from its store (the screen's through the Engine API, the
+server's through ``krx-quant trade resume|rearm``), with their notices on Telegram."""
 
 from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import sqlite3
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager, closing
@@ -15,20 +18,27 @@ from typing import Any
 
 import pytest
 from aiohttp import web
+from aiohttp.test_utils import TestClient, TestServer
 
+from krx_quant import cli
+from krx_quant.api import create_app
 from krx_quant.config import Settings, SettingsError
 from krx_quant.feeds import BOOK
 from krx_quant.predictions import DB_NAME as ENGINE_DB
 from krx_quant.predictions import PredictionStore
 from krx_quant.trader import CAPITAL
 from krx_quant.trader.cells import open_engine_db
+from krx_quant.trader.limits import ask
 from krx_quant.trader.quotes import QuoteFeed
 from krx_quant.trader.run import next_pick, run_trader
 from krx_quant.trader.selection import NO_COST_MAP, NO_PASS
 from krx_quant.trader.settings import TraderSettings
+from krx_quant.trader.store import CUMULATIVE_LIMIT, TraderStore, read_trades, request_pause
 from krx_quant.trader.store import DB_NAME as TRADER_DB
-from krx_quant.trader.store import read_trades
+from tests.replay_events import at as replay_at
+from tests.replay_events import run
 from tests.test_live_predictions import free_port
+from tests.test_notify import telegram
 from tests.trader_doubles import FEE, Barrier, at, cost_map, cost_row, predictor
 
 PASSING = cost_map([cost_row("barrier", top=predictor("breiman", 0.70, "pass"))])
@@ -298,6 +308,11 @@ async def test_the_cell_settings_of_394_are_no_longer_read(
     ("name", "value", "why"),
     [
         ("KRX_TRADER_CAPITAL", str(CAPITAL + 1), "never widen"),  # .env narrows the limits only (#393)
+        ("KRX_TRADER_DAILY_LOSS_PERCENT", "10.5", "never widen"),  # #396
+        ("KRX_TRADER_CUMULATIVE_LOSS_PERCENT", "25", "never widen"),
+        ("KRX_TRADER_DAILY_LOSS_PERCENT", "0", "above 0"),
+        ("KRX_TRADER_CUMULATIVE_LOSS_PERCENT", "-1", "KRX_TRADER_CUMULATIVE_LOSS_PERCENT"),
+        ("KRX_TRADER_DAILY_LOSS_PERCENT", "ten", "a number"),
         ("KRX_TRADER_MODE", "live", "not built yet"),
         ("KRX_TRADER_MODE", "mock", "not built yet"),
         ("KRX_TRADER_MODE", "real", "must be one of"),
@@ -337,3 +352,106 @@ async def test_the_trader_waits_for_an_engine_database_not_there_yet(
     await asyncio.wait_for(task, 5)
     assert read_trades(tmp_path / TRADER_DB, None, 10) == []
     assert not (tmp_path / ENGINE_DB).exists(), "not made by the trader"
+
+
+def test_the_loss_limits_default_to_the_code_s_and_env_narrows_them() -> None:
+    """#393, #396: 10% a day and 20% in all of the capital; ``.env`` may narrow them, never widen them."""
+    default = TraderSettings.from_env({}, None)
+    assert (default.daily_loss_percent, default.cumulative_loss_percent) == (10.0, 20.0)
+    narrowed = TraderSettings.from_env(
+        {"KRX_TRADER_DAILY_LOSS_PERCENT": "5", "KRX_TRADER_CUMULATIVE_LOSS_PERCENT": "12.5"}, None
+    )
+    assert (narrowed.daily_loss_percent, narrowed.cumulative_loss_percent) == (5.0, 12.5)
+    same = TraderSettings.from_env(
+        {"KRX_TRADER_DAILY_LOSS_PERCENT": "10", "KRX_TRADER_CUMULATIVE_LOSS_PERCENT": "20"}, None
+    )
+    assert same == default
+
+
+async def test_the_screen_s_pause_reaches_the_running_trader_and_telegram(tmp_path: Path) -> None:
+    """The screen pauses the trader through the Engine API, which writes the pause into the trader's
+    store; the running trader reads it (within ``CONTROL_SECONDS``), and says so on Telegram.
+    ``krx-quant trade resume`` on the server lifts it the same way."""
+    state = tmp_path / "state"
+    async with telegram(200) as (url, sent):
+        settings = Settings(
+            kis_app_key="",
+            kis_app_secret="",
+            state_dir=state,
+            fee_rate=FEE,
+            telegram_bot_token="123:fake",
+            telegram_chat_id="42",
+            telegram_api_url=url,
+        )
+        trader = TraderSettings(
+            quotes_url=f"ws://127.0.0.1:{free_port()}/v1/quotes",
+            engine_url=f"http://127.0.0.1:{free_port()}",
+            poll_seconds=0.01,
+        )
+        stop = asyncio.Event()
+        task = asyncio.create_task(run_trader(settings, trader, stop=stop, now=lambda: at("10:00:00")))
+        engine = await run(tmp_path / "replay.db", [], until=replay_at("09:00:00"))
+        try:
+            async with TestClient(TestServer(create_app(engine, state_dir=state))) as client:
+                await until(lambda: (state / TRADER_DB).exists())
+                response = await client.post("/v1/trader/pause", json={"sell_now": False})
+                assert response.status == 202
+                await until(lambda: status(state) == "entries_paused")
+                await until(lambda: any("새 진입 정지" in text for text in sent))
+                server = TraderStore(state / TRADER_DB)
+                try:
+                    resume = ask(server, "resume", "paper", at("10:00:01"))
+                finally:
+                    server.close()
+                assert not isinstance(resume, str)
+                await until(lambda: status(state) == "running")
+                await until(lambda: any("정지를 풀었습니다" in text for text in sent))
+        finally:
+            stop.set()
+            await asyncio.wait_for(task, 5)
+    controls = rows(state, "controls")
+    assert [(c["action"], c["source"]) for c in controls] == [("pause", "api"), ("resume", "cli")]
+    assert all(c["applied_at"] is not None for c in controls)
+    assert all(text.startswith("[알림] 자동 매매(paper): ") for text in sent)
+
+
+def status(state: Path) -> str | None:
+    snapshot = rows(state, "snapshot")
+    return None if not snapshot else json.loads(snapshot[0]["body"])["status"]
+
+
+def test_trade_resume_and_rearm_on_the_server(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``krx-quant trade resume|rearm`` writes the control for the running trader to read; with
+    nothing to resume or re-arm it writes nothing and exits 1. With no trader running it says the
+    trader reads it when it runs."""
+    monkeypatch.chdir(tmp_path)  # no .env
+    monkeypatch.setenv("KRX_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setattr(cli, "CONTROL_SECONDS", 0.01)
+    path = tmp_path / "state" / TRADER_DB
+
+    assert cli.main(["trade", "resume"]) == 1
+    assert "not paused: nothing to resume" in capsys.readouterr().out
+    assert cli.main(["trade", "rearm"]) == 1
+    assert "has not reached its cumulative loss limit" in capsys.readouterr().out
+
+    request_pause(path, True, at("10:00:00"))
+    assert cli.main(["trade", "resume"]) == 0
+    out = capsys.readouterr().out
+    assert "resume asked for (control 2)" in out and "has not read it yet" in out
+
+    store = TraderStore(path)
+    try:
+        store.add_halt(at("10:00:00"), "paper", CUMULATIVE_LIMIT, -200_100, -200_100, 0, 200_000)
+    finally:
+        store.close()
+    assert cli.main(["trade", "rearm"]) == 0
+    assert "rearm asked for (control 3)" in capsys.readouterr().out
+    assert cli.main(["trade", "rearm"]) == 1, "one waiting already"
+    assert "waiting for the trader to read it already" in capsys.readouterr().out
+    assert [(c["action"], c["mode"]) for c in rows(tmp_path / "state", "controls")] == [
+        ("pause", None),
+        ("resume", None),
+        ("rearm", "paper"),
+    ]

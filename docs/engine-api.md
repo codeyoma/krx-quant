@@ -244,16 +244,17 @@
 - 시각은 KST ISO 8601 문자열이다(예: `2026-10-12T09:31:00+09:00`).
 - 응답은 UTF-8 JSON이다(`Content-Type: application/json; charset=utf-8`). 사람이 읽기 쉽게 두 칸 들여쓰고, 한글을 `\u` 이스케이프 없이 그대로 보낸다.
 - 오류는 `{"error": "..."}`다. 모르는 종목은 404, 잘못된 `limit`은 400이다.
+- 쓰기는 `POST /v1/trader/pause` 하나다(#396, 아래). 인증이 없어서(Tailscale 안에서만 열린다) 화면이 할 수 있는 쓰기는 자동 매매 trader의 정지뿐이다. 나머지는 모두 `GET`이다.
 
 ### 계약 (JSON 스키마, #19)
 
-- `schemas/engine-api-v1.json`이 모든 `/v1` 응답의 형식이다(JSON Schema 2020-12). 엔드포인트마다 `$defs`에 정의가 하나씩 있다: `status`, `symbols`, `latest`, `predictions`, `bars`, `candles`, `special`(항목은 `special_window`, #236), `supply`(항목은 `supply_day`, #226), `algorithms`, `algorithm_detail`, `leaderboard`, `algorithm_stats`, `consensus`, `macro`, `calendar`, `kinds`, `kind_latest`, `kind_predictions`, `trader_trades`(항목은 `trader_trade`, #394), 오류는 `error`. 스트림의 메시지는 `event`(종류마다 `prediction_event` 등)다.
+- `schemas/engine-api-v1.json`이 모든 `/v1` 응답의 형식이다(JSON Schema 2020-12). 엔드포인트마다 `$defs`에 정의가 하나씩 있다: `status`, `symbols`, `latest`, `predictions`, `bars`, `candles`, `special`(항목은 `special_window`, #236), `supply`(항목은 `supply_day`, #226), `algorithms`, `algorithm_detail`, `leaderboard`, `algorithm_stats`, `consensus`, `macro`, `calendar`, `kinds`, `kind_latest`, `kind_predictions`, `trader_trades`(항목은 `trader_trade`, #394), `trader`(한도는 `trader_limit`, 요청은 `trader_control`, #396), `trader_days`(항목은 `trader_day`), `POST /v1/trader/pause`의 응답 `trader_pause`, 오류는 `error`. 스트림의 메시지는 `event`(종류마다 `prediction_event` 등)다.
 - 다른 종류 항목의 `output`, 정답의 `path`, 통계의 `extra`는 종류마다 형식이 다르다. 변동폭의 것은 `range_output`, `range_path`, `range_stats`다(#180, 아래 "변동폭"). 장벽의 것은 `barrier_output`, `barrier_path`, `barrier_stats`다(#183, 아래 "장벽").
 - `leaderboard`와 `algorithm_stats`는 둘 중 하나다(#179): 방향의 것(`direction_leaderboard`, `direction_algorithm_stats`, 이전과 같은 형식)과 다른 종류의 것(`kind_leaderboard`, `kind_algorithm_stats`, 맨 위에 `kind`가 있다).
 
   > **바뀜** (2026-10-15, #196): `leaderboard`와 `algorithm_stats` 정의가 방향의 형식 그 자체였다 → 그 형식은 `direction_leaderboard`, `direction_algorithm_stats`로 옮기고, 두 정의는 방향의 것과 다른 종류의 것 중 하나다. 방향의 응답 형식은 그대로다. 항목의 `lift`도 같은 내용을 `lift` 정의로 옮겨 두 종류가 함께 쓴다. 이유: 엔드포인트마다 정의 하나를 지키면서 다른 종류의 응답도 계약으로 검사하려고(#179).
 - 스키마에 없는 필드는 계약 위반이다(모든 객체가 닫혀 있다). 그래서 필드를 더하거나 바꾸면 스키마도 같이 고친다. 시각은 `+09:00`이 붙은 ISO 8601이어야 한다.
-- 계약 테스트(`tests/test_api_contract.py`)가 세 모드의 엔진에 모든 엔드포인트, 질의 변형, 오류 응답을 물어 스키마로 검사한다. 빈 재생 엔진(값이 `null`인 경우), 데모 엔진(필드가 찬 경우), 가짜 KIS 위의 실시간 수집기다. 라우트마다 스키마 정의가 있는지도 확인한다(`tests/api_schema.py`의 `ROUTES`). 그래서 엔드포인트를 더하면 `ROUTES`와 스키마에 함께 넣어야 테스트를 지난다. 다른 종류의 엔드포인트(`kind_latest`, `kind_predictions`)는 그 종류가 있는 엔진만 답하므로, 시험용 종류로 재생한 엔진을 따로 검사한다(#179).
+- 계약 테스트(`tests/test_api_contract.py`)가 세 모드의 엔진에 모든 엔드포인트, 질의 변형, 오류 응답을 물어 스키마로 검사한다. 빈 재생 엔진(값이 `null`인 경우), 데모 엔진(필드가 찬 경우), 가짜 KIS 위의 실시간 수집기다. 라우트마다 스키마 정의가 있는지도 확인한다(`tests/api_schema.py`의 `ROUTES`, `POST` 라우트는 `WRITES`. `POST`는 `/v1/trader/pause` 하나뿐인지도 본다, #396). 그래서 엔드포인트를 더하면 `ROUTES`와 스키마에 함께 넣어야 테스트를 지난다. 다른 종류의 엔드포인트(`kind_latest`, `kind_predictions`)는 그 종류가 있는 엔진만 답하므로, 시험용 종류로 재생한 엔진을 따로 검사한다(#179).
 - 스트림 테스트(`tests/test_api_stream.py`)는 받은 메시지마다 `event` 정의로 검사한다. 실시간 수집기의 계약 테스트도 스트림을 함께 검사한다.
 - 화면은 이 스키마와 데모 엔진(`krx-quant demo-engine`)으로 만든다. 데모 엔진도 같은 계약 테스트를 지난다.
 
@@ -1329,12 +1330,79 @@ KRX 마감 흐름 화면이 읽는 그날의 마감 리밸런싱 수요다(`clos
 - `kind`, `predictor`: 매매한 칸. 비용 지도가 고른 칸이다(#395, 설계 14장 "칸"). `prediction_id`는 엔진 DB의 예측 id다(방향은 `predictions.id`, 다른 종류는 `kind_predictions.id`). `probability`는 그 예측의 오름 확률(방향 `p_up`, 장벽 `p_up_first`), `threshold`는 그때의 문턱 θ다.
 - `role`, `p_star`, `precision_low`, `kelly`, `fraction`(#395): 그 칸을 고를 때의 비용 지도(`GET /v1/cost-map`, 005930, 20일)에서 온 값이다. `role`은 예측자의 자리(`consensus` 최종 합의, `top` 순위 1위 알고리즘, `baseline` 가장 센 기준 예측), `p_star`는 시장가 왕복의 손익분기 맞힘률, `precision_low`는 그 칸의 맞힘률 하한(Wilson 95%), `kelly`는 그 둘과 줄의 W·C로 낸 Kelly f*(자르기 전), `fraction`은 산 비율(f*의 절반을 0–1로 자른 것)이다. #395 전에 진입한 매매는 다섯 다 `null`이다.
 - `anchor`, `tick`, `width_ticks`: 기준가(봉 마감 통합 중간가), 그 호가단위, 폭(방향은 k, 장벽은 w). `target` = `anchor` + `width_ticks` × `tick`, `stop` = `anchor` − `width_ticks` × `tick`, `time_barrier` = 봉 마감 + 그 종류의 지평.
-- `decided_at`: trader가 그 예측으로 사기로 정한 때. 보통 읽은 때이고, 같은 봉 마감의 순위가 더 높은 칸을 기다렸으면 그 뒤다(#395). `entry`: 그 뒤 처음 받은 호가의 매도 1호가와 수량(`fraction` × 운용 상한 ÷ 그 값의 내림).
+- `decided_at`: trader가 그 예측으로 사기로 정한 때. 보통 읽은 때이고, 같은 봉 마감의 순위가 더 높은 칸을 기다렸으면 그 뒤다(#395). `entry`: 그 뒤 처음 받은 호가의 매도 1호가와 수량(min(`fraction` × 운용 상한, 주문 가능 현금) ÷ 그 값의 내림. 모의의 주문 가능 현금은 운용 상한 + 청산한 매매의 순손익이고 매수 수수료도 그 안에서 낸다, #396).
 
 > **바뀜** (2026-10-30, #412): `entry.quantity`는 운용 상한 ÷ 매도 1호가의 내림이었다 → `fraction` × 운용 상한 ÷ 매도 1호가의 내림이고, `decided_at`은 읽은 때였다 → 정한 때(순위가 높은 칸을 기다리면 그 뒤). `role`, `p_star`, `precision_low`, `kelly`, `fraction`이 더해졌다. 이유: 칸을 비용 지도로 고르고, 순위와 분할 Kelly 크기를 쓴다(#395).
-- `exit`: 청산 시각·가격·이유(`take_profit`: 목표가에, `stop_loss`: 그때의 매수 1호가에, `time`: 시간 장벽 직전 호가의 매수 1호가에). 열려 있으면 `null`이고, 그때 `sell_fee`, `tax`, `cost`, `gross`, `net`도 `null`이다. 시간 청산의 `exit.at`이 `time_barrier`보다 늦으면 장벽 앞 5초 안에 호가가 없어(스트림이 끊겼거나 trader가 멈춰 있었다) 다음 호가에 판 것이다.
+- `exit`: 청산 시각·가격·이유(`take_profit`: 목표가에, `stop_loss`: 그때의 매수 1호가에, `time`: 시간 장벽 직전 호가의 매수 1호가에, #396의 `pause`: "정지하고 즉시 매도" 뒤 처음 받은 호가의 매수 1호가에, `daily_limit`·`cumulative_limit`: 손실 한도에 닿은 호가(또는 그 뒤 처음 받은 호가)의 매수 1호가에). 열려 있으면 `null`이고, 그때 `sell_fee`, `tax`, `cost`, `gross`, `net`도 `null`이다. 시간 청산의 `exit.at`이 `time_barrier`보다 늦으면 장벽 앞 5초 안에 호가가 없어(스트림이 끊겼거나 trader가 멈춰 있었다) 다음 호가에 판 것이다.
 - `buy_fee`, `sell_fee`, `tax`, `cost`, `gross`, `net`: 원. 수수료는 산 금액과 판 금액에 각각 `KRX_FEE_PERCENT`, 매도세는 판 금액에 `pricing.SELL_TAX`. `gross` = (매도가 − 매수가) × 수량, `net` = `gross` − `cost`.
-- `orders`: 그 매매의 주문, 낸 순서대로. 매수(`entry`), 목표가에 걸어 둔 매도(`take_profit`: 익절이면 `filled`, 손절·시간이면 `cancelled`), 손절·시간의 매도(`stop_loss`, `time`). `broker_id`는 증권사 주문 번호(모의는 `null`). `fills`의 `quote_at`은 모의 체결이 쓴 호가의 받은 시각이다.
+- `orders`: 그 매매의 주문, 낸 순서대로. 매수(`entry`), 목표가에 걸어 둔 매도(`take_profit`: 익절이면 `filled`, 손절·시간·정지·한도면 `cancelled`), 손절·시간·정지·한도의 매도(`stop_loss`, `time`, `pause`, `daily_limit`, `cumulative_limit`). `broker_id`는 증권사 주문 번호(모의는 `null`). `fills`의 `quote_at`은 모의 체결이 쓴 호가의 받은 시각이다.
+
+> **바뀜** (2026-10-30, #PRNUM): `exit.reason`과 `orders[].purpose`는 `take_profit`, `stop_loss`, `time`(과 `entry`)이었다 → `pause`, `daily_limit`, `cumulative_limit`도 있다. `entry.quantity`는 주문 가능 현금도 넘지 않는다. 이유: 손실 한도와 화면의 정지가 열린 포지션을 바로 판다(#396).
+
+### `GET /v1/trader` (#396)
+
+자동 매매 trader의 지금 상태다(설계 [14장](design.md#14-자동-매매-393) "한도와 정지"). trader가 바뀔 때마다, 평가 손익만 움직이면 1초에 한 번까지, 그렇지 않아도 5초마다 저장소(`state/trader.sqlite3`의 `snapshot`)에 쓰는 것을 엔진이 읽어 준다. 거기에 최근 정지·재개·다시 켜기 요청 20개를 붙인다. 스키마는 `trader`다.
+
+```json
+{"updated_at": "2026-10-15T10:06:00+09:00", "alive": true, "mode": "paper", "status": "running",
+ "started_at": "2026-10-15T07:20:05+09:00", "capital": 1000000, "cash": 14142.79,
+ "position": {"trade_id": 7, "kind": "barrier", "predictor": "breiman", "quantity": 14, "entry_price": 70100.0,
+              "entry_at": "2026-10-15T10:05:02.500000+09:00", "target": 70250.0, "stop": 69850.0,
+              "time_barrier": "2026-10-15T10:09:00+09:00", "bid": 69900.0, "bid_at": "2026-10-15T10:06:00+09:00",
+              "unrealized": -5051.2, "selling": false},
+ "today": {"day": "2026-10-15", "realized": 0.0, "unrealized": -5051.2, "net": -5051.2, "trades": 0, "worst": -5051.2},
+ "cumulative": {"since": "2026-10-14T07:20:03+09:00", "realized": -4310.0, "unrealized": -5051.2, "net": -9361.2, "worst": -9361.2},
+ "limits": {"daily": {"percent": 10.0, "won": 100000.0, "used": 0.0505, "reached_at": null},
+            "cumulative": {"percent": 20.0, "won": 200000.0, "used": 0.0468, "reached_at": null}},
+ "pause": null,
+ "controls": [{"id": 2, "at": "2026-10-15T10:00:02.400000+09:00", "action": "resume", "source": "cli", "sell_now": null, "mode": null,
+               "applied_at": "2026-10-15T10:00:02.600000+09:00"},
+              {"id": 1, "at": "2026-10-14T10:07:00+09:00", "action": "pause", "source": "api", "sell_now": false, "mode": null,
+               "applied_at": "2026-10-14T10:07:00.300000+09:00"}]}
+```
+
+(값은 지어낸 예다.)
+
+- `updated_at`: trader가 상태를 마지막으로 쓴 때. `alive`: 그것이 엔진의 지금과 15초 안이면 참이다(trader가 돈다). 거짓이면 아래 값은 trader가 멈추기 전의 것이다.
+- `mode`: `paper`. `status`: `running`(돈다), `entries_paused`(새 진입 정지), `paused`(정지하고 즉시 매도), `daily_limit`(하루 손실 한도로 오늘 멈춤), `cumulative_limit`(누적 손실 한도로 `rearm`까지 멈춤). 여럿이 맞으면 `cumulative_limit`, `daily_limit`, `paused`, `entries_paused` 순서로 앞의 것이다. `started_at`: 이번 시작.
+- `capital`: 운용 상한(원). `cash`: 주문 가능 현금(모의: 운용 상한 + 청산한 매매의 순손익 − 열린 포지션의 매수 금액과 수수료).
+- `position`: 열린 포지션, 없으면 `null`. `bid`·`bid_at`은 평가에 쓴 매수 1호가와 그 받은 시각(산 뒤의 호가가 아직 없으면 `null`), `unrealized`는 그 매수 1호가에 지금 팔면 받을 순손익(매수·매도 수수료와 매도세를 뺀다), `selling`은 정지·한도가 팔게 해서 다음 호가를 기다리는지다.
+- `today`: 그날(0시부터) 청산한 매매의 순손익(`realized`)과 수, 열린 포지션의 평가 손익, 그 합(`net`), 그날 합의 가장 낮은 값(`worst`, 0 이하). `cumulative`: 같은 것을 그 모드의 첫 시작부터, 다시 켰으면 그때부터(`since`).
+- `limits`: 하루·누적 손실 한도의 운용 상한 대비 비율(`percent`)과 원(`won`), 지금 손익이 쓰는 몫(`used`, 0이면 손실 없음, 1이면 한도), 지금 그 한도로 멈춰 있으면 닿은 때(`reached_at`).
+- `pause`: 지금 걸린 정지(처음 정지한 때, 즉시 매도인지, 누가), 없으면 `null`.
+- `controls`: 최근 요청 20개, 최근 것부터. `source`는 `api`(화면의 `POST /v1/trader/pause`)나 `cli`(서버의 `krx-quant trade resume|rearm`), `applied_at`은 trader가 읽은 때(아직이면 `null`).
+- trader가 상태를 쓴 적이 없거나 저장소가 없으면 `alive`가 거짓, `controls`가 비고 나머지는 모두 `null`이다.
+
+### `GET /v1/trader/days?from=YYYY-MM-DD&to=YYYY-MM-DD` (#396)
+
+trader가 돈 거래일마다의 장부다. `from`부터 `to`까지(KST 날짜, 둘 다 포함, 기본은 엔진의 오늘까지 1년, 최대 4,000일), 이른 날부터, 모드마다. 잘못된 날짜와 범위는 400이다. 스키마는 `trader_days`(항목 `trader_day`)다.
+
+```json
+{"from": "2025-10-16", "to": "2026-10-15",
+ "days": [{"day": "2026-10-14", "mode": "paper", "net": -5051.2, "trades": 1,
+           "daily": {"limit": 100000.0, "worst": -5051.2, "used": 0.0505},
+           "cumulative": {"limit": 200000.0, "net": -5051.2, "worst": -5051.2, "used": 0.0253},
+           "status": "entries_paused", "halt": null, "updated_at": "2026-10-14T15:29:59.750000+09:00"}]}
+```
+
+(값은 지어낸 예다.)
+
+- `net`, `trades`: 그날 청산한 매매의 순손익(원)과 수. 매매가 없던 거래일도 trader가 돌았으면 0으로 있다.
+- `daily`: 그날 손익(실현 + 평가)의 가장 낮은 값(`worst`)과 그것이 하루 한도(`limit`, 원)에서 쓴 몫(`used`).
+- `cumulative`: 그날 마지막의 누적 손익(`net`), 그날 가장 낮았던 누적 손익(`worst`)과 그것이 누적 한도에서 쓴 몫.
+- `status`: 그날 마지막의 상태(`GET /v1/trader`의 `status`). `halt`: 그날 닿은 한도(`daily_limit`, `cumulative_limit`), 없으면 `null`. `updated_at`: 그날 장부를 마지막으로 쓴 때.
+
+### `POST /v1/trader/pause` (#396)
+
+화면의 정지 버튼 둘이다. 엔진 API의 유일한 쓰기다. 몸은 `{"sell_now": false}`(새 진입 정지) 또는 `{"sell_now": true}`(정지하고 즉시 매도)이고 `Content-Type: application/json`이어야 한다. 엔진은 요청을 trader의 저장소(`controls`)에 쓰고 202와 쓴 것을 준다. trader가 0.5초마다 읽는다(1초 안). 스키마는 `trader_pause`다.
+
+```json
+{"control": {"id": 3, "at": "2026-10-15T10:07:00+09:00", "action": "pause", "source": "api", "sell_now": true, "mode": null, "applied_at": null}}
+```
+
+- `sell_now` 거짓: 새로 사지 않는다. 열린 포지션은 원래 규칙(익절, 손절, 시간)대로 판다. 참: 새로 사지 않고, 열린 포지션을 다음 호가의 매수 1호가에 바로 판다(청산 이유 `pause`). 이미 거짓으로 멈춰 있을 때 참을 보내면 판다. 참 뒤의 거짓은 되돌리지 않는다.
+- 다시 켜는 것은 서버의 `krx-quant trade resume`뿐이다(운영 문서 "자동 매매"). API로는 재개, 다시 켜기, 모드와 한도를 바꿀 수 없다(그런 경로가 없다).
+- 몸이 위 둘이 아니면(다른 필드, 문자열 `"true"`, 깨진 JSON) 400, JSON이 아니면 415다. 415는 브라우저의 다른 사이트 폼(`text/plain`)이 정지를 보내지 못하게 한다. 상태 폴더가 없는 엔진(재생)은 503이다. trader 저장소가 아직 없으면 만들어 쓰고, trader가 시작할 때 읽는다.
 
 ### 호가 스트림 (수집기 안, #394)
 

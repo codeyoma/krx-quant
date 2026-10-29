@@ -24,6 +24,8 @@ with its reason:
   close to its time barrier (``special``): a VI of 005930, a circuit breaker, a sidecar
   (``special_windows``, #236; the open span, ``special.touching``, as the engine blocks a final
   consensus);
+- the trader is running (#396, ``limits.py``): not paused (``entries_paused``, ``paused``) nor
+  stopped by a loss limit (``daily_limit``, ``cumulative_limit``), the status its reason;
 - nothing is held, nor waiting to be bought (``holding``): one position at a time;
 - no cell ranked above it buys on the same bar close (``outranked``).
 
@@ -36,9 +38,10 @@ displayed (it would be stale after). A higher-ranked cell whose prediction comes
 finds the position taken (``holding``).
 
 **Size.** The cell's Kelly fraction (``Pick.fraction``: half its Kelly f*, cut to 0–1) of the
-capital, over the best ask, rounded down: ⌊min(capital − what is open, fraction × capital) ÷
-ask⌋ (nothing is open: one position at a time). Below one share it buys nothing
-(``no_shares``).
+capital, over the best ask, rounded down: ⌊min(capital − what is open, fraction × capital, cash)
+÷ ask⌋ (nothing is open: one position at a time). The cash is the paper account's (#396): the
+capital, plus the net P&L of every trade of the mode exited, less the open position's cost; a
+buy pays its commission from it too. Below one share it buys nothing (``no_shares``).
 
 Its reference price is the prediction's ``anchor`` (the bar close's integrated mid-point), the
 target ``anchor + w × tick``, the stop ``anchor − w × tick`` (w = k for the direction), the time
@@ -55,6 +58,10 @@ barrier the bar close plus the kind's horizon: the trade is the event its hit ra
 - the take-profit at the target, once a quote received after the buy has its best bid at or above
   it (no place at the front of the queue is assumed);
 - the stop at the best bid of the first quote after the buy whose best bid is at or below the stop;
+- a pause selling at once, or a loss limit reached (#396, ``limits.py``), at the best bid of the
+  first quote received after it (a limit reached on a quote: that quote's), its reason ``pause``,
+  ``daily_limit`` or ``cumulative_limit``; the take-profit, the stop and the time exit come first
+  on that quote;
 - the time exit at the best bid of the last quote received before the time barrier, once a quote
   received at or after it comes, or the clock is ``Rules.grace`` past it. Without a quote in the
   ``Rules.quote_wait`` before the barrier (the stream was down), or when the trader was not
@@ -68,8 +75,14 @@ cost the round trip on the reference price per share in ticks, a trade pays on i
 
 A quote received before the trader started is the book as it stood, never a trigger. A trader
 started with a trade open (a restart) goes on with it: its exits as above, and a buy it was
-waiting for is given up (``restarted``). The same picks, the same predictions read at the same
+waiting for is given up (``restarted``). A pause or a limit holding when it starts holds on, and
+one that sells sells it at the first quote. The same picks, the same predictions read at the same
 times, and the same quotes always make the same trades.
+
+**State.** The trader writes its state (``state``: status, cash, position, the day's and the
+cumulative P&L, the limits' use, the pause) into its store as it changes, at most every
+``SNAPSHOT_SECONDS`` while only the open position's bid moves and at least every ``HEARTBEAT``,
+with the day's ledger (``days``) on a trading day: ``GET /v1/trader``, ``/v1/trader/days``.
 """
 
 from __future__ import annotations
@@ -79,17 +92,28 @@ import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from typing import Any
 
 from krx_quant.feeds.base import kst_day
 from krx_quant.kinds import most_likely
 from krx_quant.market_calendar import Session
 from krx_quant.pricing import SELL_TAX
 from krx_quant.special import Window, touching
-from krx_quant.trader import CAPITAL, ENTRY_AFTER_OPEN, EXIT_BEFORE_AUCTION, PAPER, SYMBOL, THRESHOLD
+from krx_quant.trader import (
+    CAPITAL,
+    CUMULATIVE_LOSS_PERCENT,
+    DAILY_LOSS_PERCENT,
+    ENTRY_AFTER_OPEN,
+    EXIT_BEFORE_AUCTION,
+    PAPER,
+    SYMBOL,
+    THRESHOLD,
+)
 from krx_quant.trader.cells import Cell, Signal
+from krx_quant.trader.limits import HEARTBEAT, RUNNING, SALE, SNAPSHOT_SECONDS, Guard, Limits, Notify
 from krx_quant.trader.quotes import BestQuote
 from krx_quant.trader.selection import Pick, Selection
-from krx_quant.trader.store import Entry, Exit, OpenTrade, TraderStore
+from krx_quant.trader.store import Entry, Exit, OpenTrade, TraderStore, iso
 
 log = logging.getLogger(__name__)
 
@@ -112,6 +136,8 @@ VI_STATUS = "vi"
 class Rules:
     threshold: float = THRESHOLD
     capital: int = CAPITAL
+    daily_loss_percent: float = DAILY_LOSS_PERCENT  # the loss limits, of the capital (#396)
+    cumulative_loss_percent: float = CUMULATIVE_LOSS_PERCENT
     fee_rate: float = 0.00015  # the commission per side, as a fraction
     entry_after_open: timedelta = ENTRY_AFTER_OPEN
     exit_before_auction: timedelta = EXIT_BEFORE_AUCTION
@@ -123,6 +149,10 @@ class Rules:
     # The clock passes a deadline by this much before it acts without a quote: quotes received
     # before the deadline but still on their way come in first.
     grace: timedelta = timedelta(seconds=1)
+
+    @property
+    def limits(self) -> Limits:
+        return Limits(self.capital, self.daily_loss_percent, self.cumulative_loss_percent)
 
 
 @dataclass(frozen=True)
@@ -152,9 +182,22 @@ def costs(entry_price: float, exit_price: float, quantity: int, fee_rate: float)
     return Costs(entry_price * quantity * fee_rate, sold * fee_rate, sold * SELL_TAX)
 
 
-def shares(fraction: float, capital: float, ask: float) -> int:
-    """What a buy at ``ask`` takes: ``fraction`` of the capital, rounded down to whole shares."""
-    return math.floor(min(capital, fraction * capital) / ask)
+def shares(
+    fraction: float, capital: float, ask: float, cash: float | None = None, fee_rate: float = 0.0
+) -> int:
+    """What a buy at ``ask`` takes: ``fraction`` of the capital, within the ``cash`` (if given) its
+    notional and commission may use, rounded down to whole shares."""
+    budget = min(capital, fraction * capital)
+    if cash is not None:
+        budget = min(budget, max(0.0, cash) / (1 + fee_rate))
+    return math.floor(budget / ask)
+
+
+def unrealized(trade: OpenTrade, bid: float, fee_rate: float) -> float:
+    """What ``trade`` would net sold at ``bid`` now (#396): the gross less the buy's commission and
+    the sale's commission and tax."""
+    paid = costs(trade.entry_price, bid, trade.quantity, fee_rate)
+    return (bid - trade.entry_price) * trade.quantity - trade.buy_fee - paid.sell_fee - paid.tax
 
 
 def plan(
@@ -225,9 +268,11 @@ class _Waiting:
 
 class PaperTrader:
     """The picked cells' paper trades, from the picks (``select``), the special windows
-    (``on_special``), the cells' predictions (``on_signal``), the quotes (``on_quote``) and the
-    clock (``on_time``), into ``store``. ``sessions`` gives a day's session (the market
-    calendar's); ``started_at`` is when this run began. Until the first picks it trades nothing."""
+    (``on_special``), the cells' predictions (``on_signal``), the quotes (``on_quote``), the
+    pauses, resumes and re-arms asked for (``on_controls``) and the clock (``on_time``), into
+    ``store``. ``sessions`` gives a day's session (the market calendar's); ``started_at`` is when
+    this run began; ``notify`` sends a notice to Telegram (#396). Until the first picks it trades
+    nothing."""
 
     def __init__(
         self,
@@ -236,12 +281,18 @@ class PaperTrader:
         sessions: Callable[[date], Session | None],
         started_at: datetime,
         mode: str = PAPER,
+        notify: Notify | None = None,
     ) -> None:
         self.store = store
         self.rules = rules
         self._sessions = sessions
         self._started_at = started_at
         self.mode = mode
+        self.guard = Guard(store, mode, rules.limits, started_at, notify or (lambda text: None))
+        # A sale the status asks for sells at the first quote received after this (#396).
+        self._sell_after: datetime | None = None
+        self._written: tuple[datetime, dict[str, Any]] | None = None  # the state last written
+        self._dirty = True  # a change to write at once
         self._selection: int | None = None  # the picks' row in the store
         self._picks: dict[Cell, tuple[int, Pick]] = {}  # each picked cell's rank and pick
         self._special: list[Window] = []
@@ -255,6 +306,15 @@ class PaperTrader:
         dropped = store.drop_unfilled(mode, RESTARTED)
         if dropped:
             log.info("trader: %s buy(s) waiting for a quote when the trader stopped: given up", dropped)
+        if self.guard.status != RUNNING:
+            log.warning("trader: starting %s", self.guard.status)
+        self.on_controls(started_at)  # asked for while it was not running
+        self._enforce(started_at)
+        self.write(started_at)
+
+    @property
+    def status(self) -> str:
+        return self.guard.status
 
     @property
     def cells(self) -> list[Cell]:
@@ -303,6 +363,8 @@ class PaperTrader:
             planned = plan(signal, self.rules, self._sessions(kst_day(signal.bar_close)), at, self._special)
             if not isinstance(planned, Plan):
                 self._skip(signal, at, planned)
+            elif self.status != RUNNING:
+                self._skip(signal, at, self.status)
             elif self._busy():
                 self._skip(signal, at, self._held_off(signal))
             else:
@@ -321,11 +383,56 @@ class PaperTrader:
             self._buy(self._waiting, quote)
         elif self._open is not None:
             self._follow(self._open, quote, standing)
+        trade = self._open
+        if trade is None:
+            return
+        status = self.status
+        if status in SALE and quote.received_at > (self._sell_after or self._started_at):
+            self._exit(trade, quote.received_at, quote.bid, SALE[status], quote)
+            return
+        reached = self.guard.mark(unrealized(trade, quote.bid, self.rules.fee_rate), quote.received_at)
+        if reached is not None:
+            self._dirty = True
+            self._enforce(quote.received_at, quote)
+
+    def on_controls(self, now: datetime) -> None:
+        """The pauses, resumes and re-arms asked for and not read yet (#396), read at ``now``, in
+        the order asked: the status they make holds from now (a sale it asks for at the next
+        quote)."""
+        controls = self.store.controls(applied=False)
+        for control in controls:
+            self.guard.apply(control, now)
+        if controls:
+            self._dirty = True
+            self._enforce(now)
+
+    def _enforce(self, at: datetime, quote: BestQuote | None = None) -> None:
+        """What the status asks for at ``at``: nothing bought (a buy waiting for its quote given up,
+        the rises waiting skipped, the status their reason); the open position sold if it sells, at
+        ``quote``'s bid if the status began on it, else at the next quote's."""
+        status = self.status
+        if status == RUNNING:
+            return
+        if self._waiting is not None:
+            self._give_up(self._waiting, status)
+        for close in list(self._pending):
+            for c in self._pending.pop(close):
+                self._skip(c.signal, at, status)
+        trade = self._open
+        if trade is None or status not in SALE:
+            return
+        if quote is not None:
+            self._exit(trade, quote.received_at, quote.bid, SALE[status], quote)
+        elif self._sell_after is None:
+            self._sell_after = at
+            log.info("trader: %s: trade %s sells at the next quote", status, trade.id)
 
     def on_time(self, now: datetime) -> None:
         """The clock: a rise that waited long enough for the cells ranked above it is decided, a
         buy whose quote did not come is given up, a time barrier passed is sold on the last quote
-        before it."""
+        before it; a new day's figures (#396); the state written."""
+        if self.guard.roll(now):
+            self._dirty = True
         self._settle(now)
         grace = self.rules.grace
         waiting = self._waiting
@@ -338,6 +445,89 @@ class PaperTrader:
                 self._exit(trade, trade.time_barrier, standing.bid, TIME, standing)
         for close in [c for c in self._read if c < now - timedelta(hours=1) and c not in self._pending]:
             del self._read[close]
+        self.write(now, force=False)
+
+    def write(self, now: datetime, force: bool = True) -> None:
+        """The state (``state``) and the day's ledger into the store: at once if something changed
+        or ``force``; if only the open position's P&L moved, at most every ``SNAPSHOT_SECONDS``;
+        else every ``HEARTBEAT``."""
+        body = self.state()
+        if self._written is not None and not (force or self._dirty):
+            at, written = self._written
+            if now - at < (SNAPSHOT_SECONDS if body != written else HEARTBEAT):
+                return
+        self.store.put_snapshot(now, body)
+        guard = self.guard
+        if self._sessions(guard.day) is not None:  # a trading day's ledger
+            self.store.put_day(self.mode, guard.day, guard.ledger(), now)
+        self._written = (now, body)
+        self._dirty = False
+
+    def state(self) -> dict[str, Any]:
+        """The trader's state now (#396): what ``GET /v1/trader`` gives."""
+        guard, trade, last = self.guard, self._open, self._last
+        position = None
+        cost = 0.0
+        if trade is not None:
+            cost = trade.entry_price * trade.quantity + trade.buy_fee
+            seen = last is not None and (trade.entry_at is None or last.received_at >= trade.entry_at)
+            position = {
+                "trade_id": trade.id,
+                "kind": trade.kind,
+                "predictor": trade.predictor,
+                "quantity": trade.quantity,
+                "entry_price": trade.entry_price,
+                "entry_at": None if trade.entry_at is None else iso(trade.entry_at),
+                "target": trade.target,
+                "stop": trade.stop,
+                "time_barrier": iso(trade.time_barrier),
+                "bid": last.bid if seen and last is not None else None,
+                "bid_at": iso(last.received_at) if seen and last is not None else None,
+                "unrealized": guard.unrealized,
+                "selling": self.status in SALE,
+            }
+        limits = guard.limits
+        since = guard.since
+        return {
+            "mode": self.mode,
+            "status": guard.status,
+            "started_at": iso(self._started_at),
+            "capital": self.rules.capital,
+            "cash": self.rules.capital + guard.realized_all - cost,
+            "position": position,
+            "today": {
+                "day": guard.day.isoformat(),
+                "realized": guard.realized_day,
+                "unrealized": guard.unrealized,
+                "net": guard.day_pnl,
+                "trades": guard.trades_day,
+                "worst": guard.worst,
+            },
+            "cumulative": {
+                "since": None if since is None else iso(since),
+                "realized": guard.realized_cumulative,
+                "unrealized": guard.unrealized,
+                "net": guard.cumulative_pnl,
+                "worst": guard.cumulative_worst,
+            },
+            "limits": {
+                "daily": {
+                    "percent": limits.daily_percent,
+                    "won": limits.daily,
+                    "used": max(0.0, -guard.day_pnl) / limits.daily,
+                    "reached_at": None if guard.daily_halt is None else iso(guard.daily_halt.at),
+                },
+                "cumulative": {
+                    "percent": limits.cumulative_percent,
+                    "won": limits.cumulative,
+                    "used": max(0.0, -guard.cumulative_pnl) / limits.cumulative,
+                    "reached_at": None if guard.cumulative_halt is None else iso(guard.cumulative_halt.at),
+                },
+            },
+            "pause": None
+            if guard.pause is None
+            else {"at": iso(guard.pause.at), "sell_now": guard.pause.sell_now, "source": guard.pause.source},
+        }
 
     def _busy(self) -> bool:
         return self._open is not None or self._waiting is not None
@@ -386,6 +576,10 @@ class PaperTrader:
             if now < best.deadline(self.rules) and any(cell not in read for cell in above):
                 return  # a later bar close waits too: this one may still buy
             del self._pending[close]
+            if self.status != RUNNING:  # paused or stopped meanwhile (#396)
+                for c in waiting:
+                    self._skip(c.signal, now, self.status)
+                continue
             if self._busy():  # bought on another bar close meanwhile
                 for c in waiting:
                     self._skip(c.signal, now, self._held_off(c.signal))
@@ -433,6 +627,9 @@ class PaperTrader:
     def _buy(self, waiting: _Waiting, quote: BestQuote) -> None:
         if quote.received_at <= waiting.decided_at:
             return  # received before the decision, though it came after it
+        if self.status != RUNNING:
+            self._give_up(waiting, self.status)
+            return
         if quote.received_at >= waiting.plan.time_barrier:
             self._give_up(waiting, EXPIRED)
             return
@@ -443,7 +640,8 @@ class PaperTrader:
             self._give_up(waiting, TARGET_REACHED)
             return
         pick = waiting.pick
-        quantity = shares(pick.fraction, self.rules.capital, quote.ask)  # nothing open: one at a time
+        cash = self.rules.capital + self.guard.realized_all  # nothing open: one at a time
+        quantity = shares(pick.fraction, self.rules.capital, quote.ask, cash, self.rules.fee_rate)
         if quantity < 1:
             self._give_up(waiting, NO_SHARES)
             return
@@ -483,6 +681,7 @@ class PaperTrader:
                 fraction=pick.fraction,
             ),
         )
+        self._dirty = True
         log.info("trader: bought %s at %s (trade %s)", quantity, quote.ask, self._open.id)
 
     def _give_up(self, waiting: _Waiting, reason: str) -> None:
@@ -521,7 +720,11 @@ class PaperTrader:
         paid = costs(trade.entry_price, price, trade.quantity, self.rules.fee_rate)
         self.store.exit(trade, Exit(at, price, reason, paid.sell_fee, paid.tax, quote.received_at))
         self._open = None
+        self._sell_after = None
+        self._dirty = True
         net = (price - trade.entry_price) * trade.quantity - trade.buy_fee - paid.sell_fee - paid.tax
         log.info(
             "trader: sold %s at %s (%s, trade %s): net %.0f won", trade.quantity, price, reason, trade.id, net
         )
+        if self.guard.exited(net, at) is not None:  # its realized loss reached a limit
+            self._enforce(at)

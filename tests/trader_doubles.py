@@ -1,9 +1,12 @@
-"""Stored predictions, picks, fake quote streams and a driver for the trader's tests (#394, #395).
+"""Stored predictions, picks, fake quote streams and a driver for the trader's tests (#394, #395,
+#396).
 
 The engine's predictions and special windows are written into a real engine database
 (``PredictionStore``), as the engine displays and learns them, and the trader reads them there
 (``cells.EngineReader``); the picks are made as the cost map would pass them; the quotes are made
-up, received in the order given. Every price and hit rate is made up.
+up, received in the order given; the pauses are written into the trader's store as the Engine API
+writes them, the resumes and re-arms as ``krx-quant trade`` does. Every price and hit rate is made
+up.
 """
 
 from __future__ import annotations
@@ -12,7 +15,7 @@ import sqlite3
 from collections.abc import Sequence
 from contextlib import closing
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -26,10 +29,21 @@ from krx_quant.special import Kind as SpecialKind
 from krx_quant.special import Window
 from krx_quant.trader import KELLY_FRACTION, SYMBOL
 from krx_quant.trader.cells import Cell, EngineReader
+from krx_quant.trader.limits import ask
 from krx_quant.trader.paper import PaperTrader, Rules
 from krx_quant.trader.quotes import BestQuote
 from krx_quant.trader.selection import Pick, Selection, kelly
-from krx_quant.trader.store import DB_NAME, TraderStore, read_trades
+from krx_quant.trader.store import (
+    DB_NAME,
+    REARM,
+    RESUME,
+    Control,
+    TraderStore,
+    read_days,
+    read_trader,
+    read_trades,
+    request_pause,
+)
 
 DAY = (2026, 10, 14)  # a Wednesday: the calendar guesses it trades, 09:00 to 15:30
 CALENDAR = MarketCalendar()
@@ -39,11 +53,17 @@ DIRECTION = Cell("direction", FINAL)
 
 
 def at(hms: str) -> datetime:
-    """A time of the test day, ``HH:MM:SS`` with an optional fraction."""
+    """A time of the test day, ``HH:MM:SS`` with an optional fraction; of another day with its date
+    before it (``2026-10-15 10:00:00``)."""
+    day = DAY
+    if " " in hms:
+        ymd, hms = hms.split(" ")
+        y, mo, d = (int(x) for x in ymd.split("-"))
+        day = (y, mo, d)
     whole, _, fraction = hms.partition(".")
     h, m, s = (int(x) for x in whole.split(":"))
     micro = int((fraction + "000000")[:6]) if fraction else 0
-    return datetime(*DAY, h, m, s, micro, tzinfo=KST)
+    return datetime(*day, h, m, s, micro, tzinfo=KST)
 
 
 def quote(hms: str, bid: float, ask: float) -> BestQuote:
@@ -189,7 +209,43 @@ class Tick:
         return at(self.hms)
 
 
-Event = Read | Tick | BestQuote
+@dataclass(frozen=True)
+class AskPause:
+    """The screen's pause at ``hms`` (#396), written as the Engine API writes it; the trader reads
+    it then."""
+
+    hms: str
+    sell_now: bool = False
+
+    @property
+    def time(self) -> datetime:
+        return at(self.hms)
+
+
+@dataclass(frozen=True)
+class AskResume:
+    """``krx-quant trade resume`` at ``hms``; the trader reads it then."""
+
+    hms: str
+
+    @property
+    def time(self) -> datetime:
+        return at(self.hms)
+
+
+@dataclass(frozen=True)
+class AskRearm:
+    """``krx-quant trade rearm`` at ``hms``; the trader reads it then."""
+
+    hms: str
+
+    @property
+    def time(self) -> datetime:
+        return at(self.hms)
+
+
+Asked = AskPause | AskResume | AskRearm
+Event = Read | Tick | BestQuote | Asked
 
 
 def _time(event: Event) -> datetime:
@@ -207,14 +263,19 @@ class Day:
     started_at: datetime = field(default_factory=lambda: at("09:00:00"))
     picks: Sequence[Pick] | None = None
     selection: Selection | None = None  # the picks as chosen from a cost map, ``picks`` unless given
+    notices: list[str] = field(default_factory=list)  # sent to Telegram (#396)
+    asked: list[Control | str] = field(default_factory=list)  # each resume and re-arm, or why none
 
     def run(self, events: Sequence[Event]) -> list[dict[str, Any]]:
         """Each event in time order (the clock ticking at each), into a trader started at
-        ``started_at`` with the picks; the trades kept, newest first."""
+        ``started_at`` with the picks, its state written after the last; the trades kept, newest
+        first."""
         engine = PredictionStore(self.state / ENGINE_DB)
         store = TraderStore(self.state / DB_NAME)
         try:
-            trader = PaperTrader(store, self.rules, CALENDAR.session, self.started_at)
+            trader = PaperTrader(
+                store, self.rules, CALENDAR.session, self.started_at, notify=self.notices.append
+            )
             picks = tuple(self.picks) if self.picks is not None else (pick(self.cell),)
             trader.select(self.selection or Selection(picks), self.started_at)
             reader = EngineReader(self.state / ENGINE_DB, SYMBOL)
@@ -232,10 +293,31 @@ class Day:
                     trader.on_special(windows)
                     for signal in signals:
                         trader.on_signal(signal, event.time)
+                elif isinstance(event, AskPause):
+                    request_pause(self.state / DB_NAME, event.sell_now, event.time)
+                    trader.on_controls(event.time)
+                elif isinstance(event, AskResume | AskRearm):
+                    server = TraderStore(self.state / DB_NAME)  # as krx-quant trade does
+                    try:
+                        action = RESUME if isinstance(event, AskResume) else REARM
+                        self.asked.append(ask(server, action, trader.mode, event.time))
+                    finally:
+                        server.close()
+                    trader.on_controls(event.time)
+            if events:
+                trader.write(max(_time(e) for e in events))
         finally:
             store.close()
             engine.close()
         return self.trades()
+
+    def state_now(self, hms: str) -> dict[str, Any]:
+        """``GET /v1/trader`` at ``hms``."""
+        return read_trader(self.state / DB_NAME, at(hms))
+
+    def days(self) -> list[dict[str, Any]]:
+        """``GET /v1/trader/days`` of the test month."""
+        return read_days(self.state / DB_NAME, date(2026, 10, 1), date(2026, 10, 31))
 
     def trades(self) -> list[dict[str, Any]]:
         return read_trades(self.state / DB_NAME, None, 1000)

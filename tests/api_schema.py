@@ -38,7 +38,11 @@ ROUTES = {
     "/v1/symbols/{symbol}/kinds/{kind}/latest": "kind_latest",
     "/v1/symbols/{symbol}/kinds/{kind}/predictions": "kind_predictions",
     "/v1/trader/trades": "trader_trades",  # #394
+    "/v1/trader": "trader",  # #396
+    "/v1/trader/days": "trader_days",
 }
+# Each POST route and the definition of its answer: the trader's pause, the API's one write (#396).
+WRITES = {"/v1/trader/pause": "trader_pause"}
 # The routes of a kind besides the direction: answered only by an engine predicting one.
 KIND_ROUTES = {"kind_latest", "kind_predictions"}
 # The WebSocket route and the definition of each of its messages.

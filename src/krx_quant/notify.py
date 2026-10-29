@@ -73,6 +73,11 @@ class Alerts:
             return False
         return True
 
+    def notice(self, text: str) -> None:
+        """A notice that is not a problem to resolve (the trader's halts, pauses, resumes and
+        re-arms, #396), sent and not waited for."""
+        self._send(f"[알림] {text}")
+
     def signal(self, text: str) -> None:
         """A prediction signal (``signals.py``), sent and not waited for."""
         self._send(f"[신호] {text}")

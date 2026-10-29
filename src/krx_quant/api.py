@@ -62,6 +62,15 @@ Endpoints (all under ``/v1``):
 - ``GET /trader/trades?before=T&limit=N``: the trader's last N trades (#394, default 100, at most
   1000) entered before ``T`` if given, newest first, each with its orders and their fills, as the
   trader keeps them (``state/trader.sqlite3``, ``trader/store.py``); none before the trader's first.
+- ``GET /trader``: the trader's state as it last wrote it (#396): its mode and status, cash,
+  position, the day's and the cumulative P&L, the loss limits' use, the pause, whether it is
+  running, and the last pauses, resumes and re-arms asked for;
+- ``GET /trader/days?from=D&to=D``: its ledger of each trading day (#396; default the year to
+  today, at most 4,000 days), oldest first;
+- ``POST /trader/pause`` (``{"sell_now": false|true}``, ``Content-Type: application/json``): the
+  screen's pause of the trader (#396), written into its store for it to read within a second:
+  new entries, or that and a sale of the open position now. The API's only write: it neither
+  resumes nor re-arms the trader, nor changes its mode or limits.
 
 An algorithm is of a kind (``kind`` in ``/algorithms``). ``/leaderboard?kind=`` ranks a kind's
 algorithms against its baselines (the direction's by default, as before); an algorithm's
@@ -75,7 +84,8 @@ sends ``basis`` (``a`` or ``b``): it is accepted, ignored and echoed back as sen
 screen, which asks again until the answer's ``basis`` is its own, is answered once
 (``LEGACY_BASES``). Without it the answer has no ``basis``.
 
-Times are ISO 8601 in KST. On the server, compose publishes it on the Tailscale address only.
+Times are ISO 8601 in KST. On the server, compose publishes it on the Tailscale address only;
+it has no authentication, so the trader's pause is its one write.
 """
 
 from __future__ import annotations
@@ -151,7 +161,8 @@ from krx_quant.stream import EventStream, LiveStatus, kind_prediction_json, kind
 from krx_quant.supply import FIELDS as SUPPLY_FIELDS
 from krx_quant.supply import stored_supply
 from krx_quant.trader.store import DB_NAME as TRADER_DB
-from krx_quant.trader.store import read_trades
+from krx_quant.trader.store import read_days as read_trader_days
+from krx_quant.trader.store import read_trader, read_trades, request_pause
 
 ENGINE_KEY = web.AppKey("engine", PredictionEngine)
 # live: the collector; demo: `krx-quant demo-engine`; replay: tests.
@@ -214,6 +225,9 @@ MAX_SUPPLY_DAYS = 4000
 # The closing flow's days (#305): the days asked for by default, and the most one question spans.
 DEFAULT_CLOSING_DAYS = 365
 MAX_CLOSING_DAYS = 4000
+# The trader's days (#396): the days asked for by default, and the most one question spans.
+DEFAULT_TRADER_DAYS = 365
+MAX_TRADER_DAYS = 4000
 # The KRX days (``auctions.days_of``) the closing flow's previous close is read from, re-read
 # when their files change.
 KRX_DAYS_KEY: web.AppKey[StoredDays | None] = web.AppKey("krx_days")
@@ -297,6 +311,9 @@ def create_app(
     app.router.add_get("/v1/symbols/{symbol}/kinds/{kind}/latest", _kind_latest)
     app.router.add_get("/v1/symbols/{symbol}/kinds/{kind}/predictions", _kind_predictions)
     app.router.add_get("/v1/trader/trades", _trader_trades)
+    app.router.add_get("/v1/trader", _trader)
+    app.router.add_get("/v1/trader/days", _trader_days)
+    app.router.add_post("/v1/trader/pause", _trader_pause)
     return app
 
 
@@ -1441,8 +1458,58 @@ async def _trader_trades(request: web.Request) -> web.Response:
     return _json({"trades": trades})
 
 
-def _json(body: dict[str, Any]) -> web.Response:
-    return web.json_response(body, dumps=_dumps)
+async def _trader(request: web.Request) -> web.Response:
+    """The trader's state (#396), read from its store (read-only, off the event loop); its fields
+    null before the trader first wrote it."""
+    now = request.app[ENGINE_KEY].clock.now()
+    state_dir = request.app[STATE_DIR_KEY]
+    path = None if state_dir is None else state_dir / TRADER_DB
+    return _json(await asyncio.to_thread(read_trader, path, now))
+
+
+async def _trader_days(request: web.Request) -> web.Response:
+    """The trader's ledger of each day (#396) from ``from`` to ``to``, oldest first."""
+    engine = request.app[ENGINE_KEY]
+    to = _day_query(request, "to") or kst_day(engine.clock.now())
+    since = _day_query(request, "from") or to - timedelta(days=DEFAULT_TRADER_DAYS - 1)
+    if since > to:
+        raise _error(web.HTTPBadRequest, f"from must not be after to, got {since} and {to}")
+    if (span := (to - since).days + 1) > MAX_TRADER_DAYS:
+        raise _error(web.HTTPBadRequest, f"from and to span at most {MAX_TRADER_DAYS} days, got {span}")
+    state_dir = request.app[STATE_DIR_KEY]
+    days = (
+        []
+        if state_dir is None
+        else await asyncio.to_thread(read_trader_days, state_dir / TRADER_DB, since, to)
+    )
+    return _json({"from": since.isoformat(), "to": to.isoformat(), "days": days})
+
+
+async def _trader_pause(request: web.Request) -> web.Response:
+    """The screen's pause of the trader (#396): ``{"sell_now": false}`` pauses new entries,
+    ``true`` also sells the open position at once. Written into the trader's store (off the event
+    loop) for the trader to read within a second; 202 with what was written. A JSON body only
+    (a browser's cross-site form cannot send one without asking first), with ``sell_now`` alone."""
+    state_dir = request.app[STATE_DIR_KEY]
+    if state_dir is None:
+        raise _error(web.HTTPServiceUnavailable, "no trader here: this engine has no state folder")
+    if request.content_type != "application/json":
+        raise _error(
+            web.HTTPUnsupportedMediaType, f"the body must be application/json, got {request.content_type!r}"
+        )
+    try:
+        body = json.loads(await request.text())
+    except ValueError:
+        body = None
+    if not isinstance(body, dict) or set(body) != {"sell_now"} or not isinstance(body["sell_now"], bool):
+        raise _error(web.HTTPBadRequest, 'the body must be {"sell_now": false} or {"sell_now": true}')
+    at = request.app[ENGINE_KEY].clock.now()
+    control = await asyncio.to_thread(request_pause, state_dir / TRADER_DB, body["sell_now"], at)
+    return _json({"control": control}, status=202)
+
+
+def _json(body: dict[str, Any], status: int = 200) -> web.Response:
+    return web.json_response(body, dumps=_dumps, status=status)
 
 
 def _error(kind: type[web.HTTPError], message: str) -> web.HTTPError:
