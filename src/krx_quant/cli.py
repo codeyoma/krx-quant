@@ -55,6 +55,7 @@ from krx_quant.net_buys_probe import probe_net_buys
 from krx_quant.night_probe import probe_night
 from krx_quant.nightly import from_the_server, run_training
 from krx_quant.notify import send_notice, send_test_alert
+from krx_quant.order_probe import probe_kis_orders
 from krx_quant.predictions import DB_NAME, PredictionStore
 from krx_quant.prevalidation import (
     PREVALIDATION_DAYS,
@@ -157,6 +158,11 @@ def _probe_gaps() -> int:
 def _probe_member_frames() -> int:
     print(probe_member_frames(Settings.from_env(require_kis=False), datetime.now(KST)))
     return 0
+
+
+async def _probe_kis_orders() -> int:
+    """The trader's orders on KIS's mock server (#403): its own keys, not the collector's."""
+    return await probe_kis_orders(Settings.from_env(require_kis=False), datetime.now(KST))
 
 
 async def _check_closing_flow() -> int:
@@ -696,6 +702,13 @@ def main(argv: list[str] | None = None) -> int:
         " prints no field value",
     )
     sub.add_parser(
+        "probe-kis-orders",
+        help="place the trader's probe orders on KIS's mock-trading server with KRX_TRADER_KIS_* (#403):"
+        " a 1-share marketable buy and sell of 005930, a far limit buy and its cancel, three orders KIS"
+        " should refuse; refuses any server but the mock one and runs only in the KRX session; prints"
+        " the answers' codes and field shapes, no key, account, order number or market value",
+    )
+    sub.add_parser(
         "check-closing-flow",
         help="summarize what the closing flow kept (#305): the net assets by day and when they came,"
         " the 15:20 rows, the days, and the integrated and KRX one-minute bars' closing auction values"
@@ -924,6 +937,8 @@ def _command(args: argparse.Namespace) -> int:
         return _probe_gaps()
     elif args.command == "probe-member-frames":
         return _probe_member_frames()
+    elif args.command == "probe-kis-orders":
+        return asyncio.run(_probe_kis_orders())
     elif args.command == "check-closing-flow":
         return asyncio.run(_check_closing_flow())
     elif args.command == "check-krx-net-assets":

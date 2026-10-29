@@ -20,15 +20,21 @@ stop the collector. A collector started inside the window (a restart at night) r
 night's jobs at once. A job may give way (``Job.gives_way_to``, #376): the simulated
 probations run after a pre-validation that would otherwise miss its last start that night.
 
+A session job (``Job.session``, #403) runs instead on a trading day, from its time in the
+continuous session, and ends by ``SESSION_UNTIL``: work only the market's hours can do (an
+order on KIS's mock server fills only then). It waits for no training, and its condition is
+asked with cheap ``Facts`` of its own (``session_facts``), not the night's, which read every
+recorded day beside the live engine.
+
 The state (``state/scheduled.json``) keeps each job's last run: its night, outcome (``ok``,
 ``failed``, ``interrupted``; ``running`` while it runs), exit code, duration, commit and
 comments, the nights a job gave way since it last ran (#376), and the results not posted yet.
 A run the collector's stop cut (a deploy, a restart, a crash) is ``interrupted``: it does not
-count as run, and runs again the next night. A result is masked (``redaction.py``) and posted
-on each issue, which then gets ``ready-for-agent`` in place of ``ready-for-human`` and
-``needs-triage``. Without ``KRX_GITHUB_TOKEN``, or when GitHub fails, the result waits in the
-state and is posted at the next night or start. Telegram gets a line per outcome, with the
-comments' addresses.
+count as run, and runs again the next night (a session job, the next trading day). A result
+is masked (``redaction.py``) and posted on each issue, which then gets ``ready-for-agent`` in
+place of ``ready-for-human`` and ``needs-triage``. Without ``KRX_GITHUB_TOKEN``, or when
+GitHub fails, the result waits in the state and is posted at the next night or start. Telegram
+gets a line per outcome, with the comments' addresses.
 """
 
 from __future__ import annotations
@@ -59,6 +65,7 @@ from krx_quant.kind_registry import DAILY_KINDS, daily_kind_named
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.night_probe import evening, subscribed_nights
 from krx_quant.notify import Alerts
+from krx_quant.order_probe import NO_KEYS
 from krx_quant.prevalidation import MIN_DAYS, REGISTERED_BEFORE, LastReport, last_report, report_path
 from krx_quant.process_log import KRX_QUANT, Child, run_logged
 from krx_quant.process_log import Ran as Ran  # a job's process, once it ended
@@ -269,13 +276,16 @@ class Facts:
     simulating: tuple[str, ...] = ()
     # Whether ``KRX_OPENAPI_KEY`` is set on this server (#305): the KRX Open API probe waits for it.
     krx_openapi: bool = False
+    # Whether the trader's KIS key, secret and account are set (``Settings.trader_kis``, #403): the
+    # order probe waits for them once it has said they are not.
+    trader_kis: bool = False
 
 
 @dataclass(frozen=True)
 class Night:
     """What a job's condition is asked with."""
 
-    day: date  # the night's day: from KRX_JOBS_AT on it to 05:30 the next morning
+    day: date  # the night's day: from KRX_JOBS_AT on it to 05:30 the next morning; a session job's day
     trading_day: bool
     commit: str  # the code running
     record: JobRecord | None  # this job's last run; None if it never ran
@@ -303,6 +313,9 @@ class Job:
     attach: tuple[Attachment, ...] = ()  # files it writes, posted with its output
     # The later jobs this one gives way to (#376): None, or which of them. See ``Scheduler``.
     gives_way_to: Callable[[Job], bool] | None = None
+    # A session job (#403): the time (KST) it runs from on a trading day, not at night; its time
+    # limit must end by ``SESSION_UNTIL``. None: a night's job.
+    session: time | None = None
 
 
 # A job that gave way on this many nights since it last ran gives way no more: it runs first (#376).
@@ -341,6 +354,17 @@ def window(day: date, at: time) -> tuple[datetime, datetime]:
     return datetime.combine(start, at, KST), datetime.combine(day + timedelta(days=1), JOBS_UNTIL, KST)
 
 
+# A session job ends by this time on its trading day (#403): before the trader's last exit (every
+# position is closed by 15:15, #393) and the closing auction from 15:20.
+SESSION_UNTIL = time(15, 15)
+
+
+def session_window(job: Job, day: date) -> tuple[datetime, datetime]:
+    """A session job's window on ``day``: from its time to ``SESSION_UNTIL``."""
+    assert job.session is not None
+    return datetime.combine(day, job.session, KST), datetime.combine(day, SESSION_UNTIL, KST)
+
+
 def first_night(at: time, now: datetime) -> date:
     """The first night a scheduler started at ``now`` runs: one under way (a restart at
     night) at once, else the next."""
@@ -361,7 +385,12 @@ class Scheduler:
     days and the algorithms replayed, which grow from one run to the next (the bar-close simulation
     took 1 h 24 min on 2026-10-23 and 2 h 22 min on 2026-10-25). It then runs after that job, that
     night if it can still start by its own last start, else the next night. Once a night; and once it
-    gave way on ``GIVE_WAY_NIGHTS`` nights since it last ran (while it stayed due) it runs first."""
+    gave way on ``GIVE_WAY_NIGHTS`` nights since it last ran (while it stayed due) it runs first.
+
+    The session jobs (``Job.session``, #403) run apart from the nights: on each trading day, in the
+    list's order, each from its time if it can still end by ``SESSION_UNTIL``, asked its condition
+    with ``session_facts``. A collector started later in the session runs a job due at once; one
+    started after it waits for the next trading day."""
 
     def __init__(
         self,
@@ -377,6 +406,7 @@ class Scheduler:
         secrets: Sequence[str] = (),
         training: NightTraining | None = None,
         facts: Callable[[], Awaitable[Facts]] | None = None,
+        session_facts: Callable[[], Awaitable[Facts]] | None = None,
         runner: Runner = run_command,
     ) -> None:
         self._jobs = jobs
@@ -390,11 +420,24 @@ class Scheduler:
         self._secrets = tuple(secrets)
         self._training = training or NightTraining()
         self._facts = facts
+        self._session_facts = session_facts
         self._runner = runner
 
+    @property
+    def _night_jobs(self) -> list[Job]:
+        return [j for j in self._jobs if j.session is None]
+
+    @property
+    def _session_jobs(self) -> list[Job]:
+        return [j for j in self._jobs if j.session is not None]
+
     async def run(self) -> None:
-        """Every night's jobs, until cancelled; first what the last collector left."""
+        """Every night's jobs and every trading day's session jobs, until cancelled; first what the
+        last collector left."""
         await self.recover()
+        await asyncio.gather(self._nights(), self._sessions())
+
+    async def _nights(self) -> None:
         day = first_night(self._at, self._clock.now())
         while True:
             start, end = window(day, self._at)
@@ -406,6 +449,54 @@ class Scheduler:
                     log.exception("the scheduled jobs of the night of %s failed", day)
             day += timedelta(days=1)
 
+    async def _sessions(self) -> None:
+        """Each trading day's session jobs, from today's on."""
+        if not self._session_jobs:
+            return
+        day = self._clock.now().astimezone(KST).date()
+        while True:
+            if self._calendar.is_trading_day(day):
+                try:
+                    await self.run_session(day)
+                except Exception:
+                    log.exception("the scheduled session jobs of %s failed", day)
+            day += timedelta(days=1)
+            await self._clock.sleep_until(datetime.combine(day, time(0), KST))
+
+    async def run_session(self, day: date) -> None:
+        """The session jobs of the trading day ``day``, each from its time on, in the list's order:
+        one due runs if it can end by ``SESSION_UNTIL``, else it waits for the next trading day."""
+        await self._post_unposted()
+        for job in self._session_jobs:
+            start, end = session_window(job, day)
+            await self._clock.sleep_until(start)
+            if self._clock.now() >= end or self._cut(job, day):
+                continue  # the session is over, or a restart cut its run today: the next trading day
+            due = self._due(job, day, await self._read_session_facts())
+            if not due:
+                if due is False:
+                    self._waits_no_more(job)
+                continue
+            if self._clock.now() > end - job.timeout:
+                await self._notify(
+                    f"예약 작업 {job.name}({day} 장중): 지금 시작하면 제한 시간({_duration(job.timeout)})이 "
+                    f"{SESSION_UNTIL:%H:%M}을 넘어 다음 거래일로 미룹니다."
+                )
+                continue
+            await self._run(job, day)
+
+    async def _read_session_facts(self) -> Facts:
+        if self._session_facts is None:
+            return Facts()
+        try:
+            return await self._session_facts()
+        except Exception:
+            log.exception("could not read what the scheduled session jobs' conditions ask")
+            return Facts()
+
+    def _job_named(self, name: str) -> Job | None:
+        return next((j for j in self._jobs if j.name == name), None)
+
     async def recover(self) -> None:
         """A run the last collector left going was cut (a deploy, a restart, a crash): it runs
         again the next night. Results not posted yet are posted."""
@@ -414,9 +505,18 @@ class Scheduler:
                 record.outcome = INTERRUPTED
                 self._state.save()
                 log.warning("scheduled job %s was cut on the night of %s: it runs again", name, record.day)
-                await self._notify(
-                    f"예약 작업 {name}({record.day} 밤)이 엔진 재시작으로 끊겼습니다. 다음 밤에 다시 돕니다."
-                )
+                job = self._job_named(name)
+                if job is not None and job.session is not None:
+                    line = (
+                        f"예약 작업 {name}({record.day} 장중)이 엔진 재시작으로 끊겼습니다. "
+                        "다음 거래일 장중에 다시 돕니다."
+                    )
+                else:
+                    line = (
+                        f"예약 작업 {name}({record.day} 밤)이 엔진 재시작으로 끊겼습니다. "
+                        "다음 밤에 다시 돕니다."
+                    )
+                await self._notify(line)
         await self._post_unposted()
 
     async def run_night(self, day: date) -> None:
@@ -426,7 +526,7 @@ class Scheduler:
         _, end = window(day, self._at)
         await self._post_unposted()
         facts: Facts | None = None
-        queue = list(self._jobs)
+        queue = self._night_jobs
         gave_way: set[str] = set()  # the jobs that gave way tonight: once a night each
         while queue:
             job = queue.pop(0)
@@ -682,7 +782,9 @@ class Scheduler:
             if id(result) not in left and result.comment is not None:
                 posted.setdefault((result.job, result.day), []).append(result.comment)
         for (name, day), links in posted.items():
-            line = f"예약 작업 {name}({day} 밤)의 결과를 이제 올렸습니다. 댓글: {' '.join(links)}"
+            job = self._job_named(name)
+            when = _when(job) if job is not None else "밤"
+            line = f"예약 작업 {name}({day} {when})의 결과를 이제 올렸습니다. 댓글: {' '.join(links)}"
             await self._notify(line)
 
 
@@ -695,11 +797,16 @@ def _stamp(path: Path) -> tuple[int, int, int] | None:
     return found.st_ino, found.st_mtime_ns, found.st_size
 
 
+def _when(job: Job) -> str:
+    """When a job runs, as its lines say: at night, or in the session (#403)."""
+    return "밤" if job.session is None else "장중"
+
+
 def _heading(job: Job, record: JobRecord) -> str:
     code = "없음" if record.exit_code is None else str(record.exit_code)
     commit = record.commit if record.commit == "unknown" else record.commit[:12]
     return (
-        f"**예약 작업 `{job.name}`** · {record.day} 밤 · 커밋 `{commit}` · 종료 코드 {code} · "
+        f"**예약 작업 `{job.name}`** · {record.day} {_when(job)} · 커밋 `{commit}` · 종료 코드 {code} · "
         f"{_duration(record.seconds)}"
     )
 
@@ -712,7 +819,7 @@ def _outcome_line(job: Job, record: JobRecord, links: Sequence[str], why_not: st
         how = "시작하지 못함"
     else:
         how = f"종료 코드 {record.exit_code}"
-    line = f"예약 작업 {job.name}({record.day} 밤): {what}, {how}, {_duration(record.seconds)}."
+    line = f"예약 작업 {job.name}({record.day} {_when(job)}): {what}, {how}, {_duration(record.seconds)}."
     if links:
         line += f" 댓글: {' '.join(links)}"
     if why_not:
@@ -779,7 +886,14 @@ async def read_facts(
         simulating=tuple(simulating),
         pending_answers=tuple(answers),
         krx_openapi=settings.krx_openapi_key is not None,
+        trader_kis=settings.trader_kis,
     )
+
+
+async def session_facts(settings: Settings) -> Facts:
+    """What the session jobs' conditions ask (#403): the settings only, nothing read beside the
+    live engine in the market's hours."""
+    return Facts(trader_kis=settings.trader_kis)
 
 
 def pending_answers(settings: Settings, calendar: MarketCalendar, now: datetime) -> list[str]:
@@ -823,6 +937,7 @@ async def keep_jobs(
         secrets=secrets_of(settings),
         training=training,
         facts=partial(read_facts, settings, calendar, clock, engine),
+        session_facts=partial(session_facts, settings),
     )
     await scheduler.run()
 
@@ -1334,6 +1449,53 @@ MEMBER_FRAMES_PROBE = Job(
     ),
 )
 
+# The trader's KIS orders (#403, #393): before the trader reads a field of KIS's answers to its
+# orders (#404), the mock-trading server's answers are measured on the server. The mock server fills
+# orders only in the market's hours, so this is a session job (``Job.session``), not a night's: on
+# a trading day at 10:00, past the opening's first hour, ``probe-kis-orders`` places a 1-share
+# marketable limit buy and sell of 005930, a far limit buy and its cancel and three orders KIS should
+# refuse, with the trader's own mock key (``KRX_TRADER_KIS_*``), and records the answers, the
+# inquiries, the balance and the fill notice. It refuses any server but the mock one. It prints
+# codes, quantities, times and field shapes, never a key, an account, an order number or a market
+# value, so it can go on the public issue. A minute or two, paced at a call a second; the quarter
+# hour is a bound. Each trading day until a run does every step (exit 0); without the keys it says
+# so once (``order_probe.NO_KEYS``) and then waits for them (``Facts.trader_kis``).
+KIS_ORDER_PROBE_ISSUE = 403
+
+
+def _a_session_until_the_orders_were_probed(night: Night) -> bool:
+    """On a trading day, until a run did every step: again the next trading day after one that did
+    not, but after one that found no keys only once they are set."""
+    if not night.trading_day:
+        return False
+    record = night.record
+    if record is None or record.outcome not in (OK, FAILED):
+        return True  # never ran to its end (a run a restart cut runs the next trading day)
+    if record.outcome == OK or record.day >= night.day:
+        return False
+    return record.exit_code != NO_KEYS or night.facts.trader_kis
+
+
+KIS_ORDER_PROBE = Job(
+    name="probe-kis-orders-403",
+    due=_a_session_until_the_orders_were_probed,
+    command=("probe-kis-orders",),
+    timeout=timedelta(minutes=15),
+    session=time(10, 0),
+    targets=(
+        Target(
+            KIS_ORDER_PROBE_ISSUE,
+            note=(
+                '에이전트가 이 출력으로 `docs/kis-feeds.md` "주문 (#403)"의 ⚠(주문·취소 응답의 필드, '
+                "거부 코드, 주문 체결 조회의 행과 체결 수량, 체결 통보의 필드와 종류, 잔고·매수가능의 필드와 "
+                "체결 뒤 바뀌는 값, 토큰과 초당 한도)를 실측으로 고치고, trader가 체결을 실시간 체결 통보와 "
+                "주문 체결 조회 중 무엇으로 받을지 #404에 정한다. 사용자의 결정이 필요하면 이슈에 묻는다. "
+                "출력에는 키, 계좌번호, 주문번호, 시세 값이 없다(코드, 수량, 시각, 틱 차이, 필드의 모양만)."
+            ),
+        ),
+    ),
+)
+
 # The night futures (#264): the collector records the KOSPI200 night session's trades and book
 # (18:00–06:00) from the deploy that brings it; what only the server shows is whether KIS
 # streams them for this app key, under the contract code asked for, in the layout of KIS's
@@ -1799,6 +1961,7 @@ JOBS: tuple[Job, ...] = (
     CLOSING_FLOW_CHECK,
     KRX_NET_ASSETS_CHECK,
     MEMBER_FRAMES_PROBE,
+    KIS_ORDER_PROBE,
     *daily_prevalidation_jobs(
         [a.name for a in DAILY_ALGORITHMS],
         {a.name: a.features for a in DAILY_ALGORITHMS},

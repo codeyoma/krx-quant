@@ -18,6 +18,10 @@ from krx_quant.stats import DEFAULT_MIN_SAMPLE
 
 DEFAULT_REST_URL = "https://openapi.koreainvestment.com:9443"
 DEFAULT_WS_URL = "ws://ops.koreainvestment.com:21000"
+# KIS's mock-trading (모의투자) servers: the trader's (#393) unless set, and the only ones the order
+# probe (#403) calls.
+KIS_MOCK_REST_URL = "https://openapivts.koreainvestment.com:29443"
+KIS_MOCK_WS_URL = "ws://ops.koreainvestment.com:31000"
 # KIS publishes daily master files of listed contracts here.
 DEFAULT_MASTER_URL = "https://new.real.download.dws.co.kr/common/master"
 # KIS allows 20 REST calls per second on a real account.
@@ -237,6 +241,27 @@ class Settings:
     loki_url: str | None = field(default=None, repr=False)
     loki_user: str | None = field(default=None, repr=False)
     loki_token: str | None = field(default=None, repr=False)
+    # The trader's own KIS app key (#393, #403): a mock-trading (모의투자) key and its mock account
+    # (KRX_TRADER_KIS_APP_KEY, KRX_TRADER_KIS_APP_SECRET, KRX_TRADER_KIS_ACCOUNT: the account's 8
+    # digits and its 2-digit product code, e.g. 12345678-01), and the HTS ID the real-time fill
+    # notice is asked by (KRX_TRADER_KIS_HTS_ID). Never the collector's KIS_APP_KEY: the two share
+    # neither the call limit nor the token. Kept as written, so a wrong one never stops the
+    # collector: the order probe (``order_probe.py``) says what is missing or malformed. Masked as
+    # secrets.
+    trader_kis_app_key: str | None = field(default=None, repr=False)
+    trader_kis_app_secret: str | None = field(default=None, repr=False)
+    trader_kis_account: str | None = field(default=None, repr=False)
+    trader_kis_hts_id: str | None = field(default=None, repr=False)
+    # The KIS servers the trader calls (KRX_TRADER_KIS_REST_URL, KRX_TRADER_KIS_WS_URL): the mock
+    # servers unless set. The order probe refuses any other.
+    trader_kis_rest_url: str = KIS_MOCK_REST_URL
+    trader_kis_ws_url: str = KIS_MOCK_WS_URL
+
+    @property
+    def trader_kis(self) -> bool:
+        """Whether the trader's KIS key, secret and account are all set (#403): the order probe
+        waits for them."""
+        return bool(self.trader_kis_app_key and self.trader_kis_app_secret and self.trader_kis_account)
 
     @classmethod
     def from_env(
@@ -465,6 +490,12 @@ class Settings:
             loki_url=values.get("KRX_LOKI_URL", "").strip() or None,
             loki_user=values.get("KRX_LOKI_USER", "").strip() or None,
             loki_token=values.get("KRX_LOKI_TOKEN", "").strip() or None,
+            trader_kis_app_key=values.get("KRX_TRADER_KIS_APP_KEY", "").strip() or None,
+            trader_kis_app_secret=values.get("KRX_TRADER_KIS_APP_SECRET", "").strip() or None,
+            trader_kis_account=values.get("KRX_TRADER_KIS_ACCOUNT", "").strip() or None,
+            trader_kis_hts_id=values.get("KRX_TRADER_KIS_HTS_ID", "").strip() or None,
+            trader_kis_rest_url=values.get("KRX_TRADER_KIS_REST_URL", "").strip() or KIS_MOCK_REST_URL,
+            trader_kis_ws_url=values.get("KRX_TRADER_KIS_WS_URL", "").strip() or KIS_MOCK_WS_URL,
         )
 
 
@@ -520,7 +551,8 @@ def _before_pre_market(name: str, raw: str) -> time | None:
 
 def _at_night(name: str, raw: str) -> time | None:
     """A time of day from 20:00 (the NXT after-market's close) to before 05:30, or off: the
-    scheduled jobs then never run in trading hours, and end before the 06:00 deploy."""
+    night's scheduled jobs then never run in trading hours, and end before the 06:00 deploy. (A
+    session job, #403, runs in trading hours by design, at its own time in ``scheduled.JOBS``.)"""
     at = _time_or_off(name, raw)
     if at is not None and JOBS_UNTIL <= at < JOBS_FROM:
         raise SettingsError(f"{name} must be from 20:00 to before 05:30 or off, got {raw!r}")

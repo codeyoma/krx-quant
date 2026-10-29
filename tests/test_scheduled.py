@@ -180,6 +180,7 @@ async def scheduling(
     token: str | None = TOKEN,
     training: NightTraining | None = None,
     facts: Facts | Callable[[], Facts] | None = None,
+    session_facts: Facts | None = None,
     told: Told | None = None,
     secrets: Sequence[str] = (),
     clock: FakeClock | None = None,
@@ -195,6 +196,9 @@ async def scheduling(
             return facts()
         return facts or Facts()
 
+    async def read_session_facts() -> Facts:
+        return session_facts or Facts()
+
     async with aiohttp.ClientSession() as session:
         hub = GitHub(session, token if github else None, REPO, github.url if github else "http://127.0.0.1:9")
         scheduler = Scheduler(
@@ -209,6 +213,7 @@ async def scheduling(
             secrets=secrets,
             training=training,
             facts=read_facts,
+            session_facts=read_session_facts,
             runner=runs,
         )
         task = asyncio.create_task(scheduler.run())

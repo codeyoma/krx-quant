@@ -6,7 +6,8 @@ that, everything that could name a secret or the server is replaced with ``[к∞Ал
 - every secret setting's value (``secrets_of``): the KIS app key and secret, the Telegram
   token and chat, the AWS keys, the macro API keys, the GitHub token, the Toss client ID and
   secret (#235), the KRX Open API key (#305), the Object Store (and its bucket), the S3 endpoint,
-  ``KRX_BIND_ADDRESS`` and Grafana Cloud Loki's address, user and token (#358).
+  ``KRX_BIND_ADDRESS``, Grafana Cloud Loki's address, user and token (#358), and the trader's KIS
+  key, secret, account (also its digits alone and its 8-digit number) and HTS ID (#403).
   Values shorter than ``MIN_SECRET`` characters are left alone: masking them would mangle
   numbers that only happen to be equal;
 - whatever the repository's own check forbids (``forbidden.RULES``: KIS order codes,
@@ -63,7 +64,14 @@ def secrets_of(settings: Settings) -> tuple[str, ...]:
         settings.loki_url,
         settings.loki_user,
         settings.loki_token,
+        settings.trader_kis_app_key,
+        settings.trader_kis_app_secret,
+        settings.trader_kis_account,
+        settings.trader_kis_hts_id,
     ]
+    if settings.trader_kis_account:  # also as KIS writes it (CANO): its digits, then the 8 alone
+        digits = "".join(c for c in settings.trader_kis_account if c.isdigit())
+        values += [digits, digits[:8]]
     if settings.object_store and settings.object_store.startswith("s3://"):
         values.append(urlsplit(settings.object_store).netloc)  # the bucket, named alone
     return tuple(v.strip() for v in values if v and len(v.strip()) >= MIN_SECRET)
