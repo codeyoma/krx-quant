@@ -29,6 +29,8 @@ from krx_quant.feeds.base import KST
 from krx_quant.github import GitHub
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.notify import Alerts
+from krx_quant.predictions import DB_NAME as ENGINE_DB
+from krx_quant.predictions import PredictionStore
 from krx_quant.process_log import Child
 from krx_quant.scheduled import (
     CLOSE_PROBE,
@@ -50,6 +52,7 @@ from krx_quant.scheduled import (
     NET_BUYS_PROBE,
     NIGHT_PROBE,
     OK,
+    REFIT_POLICY,
     RUNNING,
     SIGNAL_REVIEW,
     STATE_FILE,
@@ -74,6 +77,8 @@ from krx_quant.swap import TRAINING_TIMEOUT, NightTraining, keep_training
 from tests.fake_github import REPO, TOKEN, FakeGitHub, fake_github
 from tests.test_collector import settings_for
 from tests.test_subscription_limit import until
+from tests.test_trader_run import EngineApi
+from tests.trader_doubles import cost_map, cost_row, predictor
 
 THURSDAY, FRIDAY, SATURDAY, SUNDAY, MONDAY = (date(2026, 10, d) for d in (15, 16, 17, 18, 19))
 CALENDAR = MarketCalendar({THURSDAY: True, FRIDAY: True, SATURDAY: False, SUNDAY: False, MONDAY: True})
@@ -1371,6 +1376,60 @@ async def test_the_member_frames_probe_job_runs_the_real_command(empty_server: P
     )
     assert "회원사 프레임의 필드 수 (#381): raw에 H0UNMBC0 프레임이 있는 날이 없다" in body
     assert state.jobs["probe-member-frames-381"].exit_code == 0
+
+
+def test_the_policy_is_fitted_again_every_trading_night_and_posted_to_400() -> None:
+    # #399: the trader's policy, fitted again on the stored predictions after the nightly training.
+    assert REFIT_POLICY.name == "refit-policy-399"
+    assert REFIT_POLICY.command == ("refit-policy",)
+    assert REFIT_POLICY.timeout == timedelta(minutes=10), "short: the simulations and pre-validations follow"
+    assert [t.issue for t in REFIT_POLICY.targets] == [400]
+    assert (REFIT_POLICY.label, REFIT_POLICY.unlabel) == ((), ()), "a routine night's log: no label changes"
+    assert REFIT_POLICY.session is None, "a night's job: after the nightly training"
+    first = next(i for i, j in enumerate(JOBS) if j.name.startswith(("prevalidate-", "simulate-")))
+    assert JOBS.index(MEMBER_FRAMES_PROBE) < JOBS.index(REFIT_POLICY) < first, (
+        "after the probes, before the simulations and pre-validations"
+    )
+    assert REFIT_POLICY.due(night(FRIDAY)) and not REFIT_POLICY.due(night(SATURDAY)), "trading nights"
+    ran = JobRecord(FRIDAY, OK, at(FRIDAY, "22:30"), COMMIT, 0, 3.0)
+    assert not REFIT_POLICY.due(night(FRIDAY, ran)), "once a night"
+    assert REFIT_POLICY.due(night(MONDAY, ran)), "and every trading night"
+    assert REFIT_POLICY.due(night(MONDAY, replace(ran, outcome=FAILED, exit_code=1)))
+    assert REFIT_POLICY.due(night(MONDAY, replace(ran, outcome=INTERRUPTED)))
+    assert not REFIT_POLICY.due(night(SUNDAY, ran))
+    assert "시세 값이 없다" in REFIT_POLICY.targets[0].note
+
+
+async def test_the_policy_refit_job_runs_the_real_command(
+    empty_server: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Against an Engine API whose cost map passes no cell: the first policy, empty, is the champion."""
+    PredictionStore(empty_server / "state" / ENGINE_DB).close()
+    failing = cost_map([cost_row("barrier", top=predictor("breiman", 0.60, "fail"))])
+    state = JobState.load(empty_server / STATE_FILE)
+    async with (
+        EngineApi([failing]).serving() as url,
+        fake_github() as hub,
+        aiohttp.ClientSession() as session,
+    ):
+        monkeypatch.setenv("KRX_TRADER_ENGINE_URL", url)
+        scheduler = Scheduler(
+            [REFIT_POLICY],
+            AT,
+            CALENDAR,
+            state,
+            GitHub(session, TOKEN, REPO, hub.url),
+            Told(),
+            FakeClock(at(FRIDAY, "23:00")),
+            commit=COMMIT,
+        )
+        await asyncio.wait_for(scheduler.run_night(FRIDAY), 25)
+    body = hub.bodies(400)[-1]
+    assert "**예약 작업 `refit-policy-399`**" in body
+    assert "정책 맞추기 (#399): 정책 1 · 챔피언(처음 맞춘 정책)" in body
+    assert "매매할 칸: 없음 (비용 지도를 통과한 칸이 없다)" in body
+    assert state.jobs["refit-policy-399"].exit_code == 0
+    assert hub.labels.get(400, set()) == set(), "no label changed"
 
 
 def test_the_dividend_probe_runs_once_on_the_first_night_and_posts_to_310() -> None:

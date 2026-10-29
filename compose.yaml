@@ -30,6 +30,10 @@ services:
       # port of it is published below, so only the containers of this compose network reach it.
       KRX_QUOTES_HOST: 0.0.0.0
       KRX_QUOTES_PORT: "8081"
+      # The nightly policy re-fit (#399, the scheduled job refit-policy-399) runs in this container
+      # and reads the cost map from this service's own Engine API by its name, as
+      # `docker compose run --rm engine refit-policy` does from a container of its own.
+      KRX_TRADER_ENGINE_URL: http://engine:8080
     volumes:
       - ./data:/data
       - ./state:/state

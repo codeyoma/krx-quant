@@ -17,13 +17,16 @@ The tests narrow the limits (``Rules``) so that a few ticks reach them, as ``.en
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
 
-from krx_quant.trader.limits import CONTROL_SECONDS, ENTRIES_PAUSED, PAUSED, RUNNING, Limits
+from krx_quant.trader import policy as policies
+from krx_quant.trader.limits import CONTROL_SECONDS, ENTRIES_PAUSED, PAUSED, RUNNING, Guard, Limits
 from krx_quant.trader.paper import Rules, shares
-from krx_quant.trader.store import CUMULATIVE_LIMIT, DAILY_LIMIT, REARM, Control
+from krx_quant.trader.store import CUMULATIVE_LIMIT, DAILY_LIMIT, DB_NAME, REARM, Control, TraderStore
+from tests.test_trader_marks import trade
 from tests.trader_doubles import (
     FEE,
     AskPause,
@@ -353,3 +356,27 @@ def test_an_exit_on_a_day_the_clock_has_not_reached_yet_is_counted_once(
     assert state["cash"] == pytest.approx(1_000_000 - 3_654.21)
     [fifteenth] = [d for d in day.days() if d["day"] == "2026-10-15"]
     assert (fifteenth["trades"], fifteenth["net"]) == (1, pytest.approx(-3_654.21))
+
+
+def test_the_limits_count_the_champion_s_trades_alone(tmp_path: Path) -> None:
+    """#399, #400: a trade entered before the first champion and one of policy 1, the champion,
+    count; policy 2's, a challenger's paper trade beside it, does not. Each loses 115.525 (10 shares
+    bought at 70,100 and sold at 70,250: 1,500 less 1,615.525 of costs)."""
+    store = TraderStore(tmp_path / DB_NAME)
+    try:
+        trade(store, "paper", at("10:00:00"), at("10:02:00"), 1)
+        db = policies.connect(tmp_path / DB_NAME)
+        try:
+            policies.add(db, at("22:31:00"), "밤 맞추기", [], [], {})  # the champion
+            policies.add(db, at("22:31:00") + timedelta(days=1), "밤 맞추기", [], [], {})  # a challenger
+        finally:
+            db.close()
+        morning = at("10:00:00") + timedelta(days=2)
+        trade(store, "paper", morning, morning + timedelta(minutes=2), 2, policy_id=1)
+        trade(store, "paper", morning + timedelta(minutes=1), morning + timedelta(minutes=3), 3, policy_id=2)
+        guard = Guard(store, "paper", Limits(1_000_000, 10, 20), morning + timedelta(hours=1), lambda _: None)
+    finally:
+        store.close()
+
+    assert guard.realized_day == pytest.approx(-115.525) and guard.trades_day == 1
+    assert guard.realized_cumulative == pytest.approx(-231.05) == guard.realized_all

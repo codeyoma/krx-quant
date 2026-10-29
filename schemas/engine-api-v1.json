@@ -2571,11 +2571,99 @@
         "trades": {"type": "array", "items": {"$ref": "#/$defs/trader_trade"}}
       }
     },
+    "trader_policies": {
+      "description": "GET /v1/trader/policies?limit=N (#399): the trader's last N policy versions, newest first, each with its status, and every change of the champion, newest first, as the trader's store keeps them (state/trader.sqlite3); none before the first nightly fit.",
+      "type": "object",
+      "required": ["champion", "policies", "champions"],
+      "additionalProperties": false,
+      "properties": {
+        "champion": {"type": ["integer", "null"], "minimum": 1},
+        "policies": {"type": "array", "items": {"$ref": "#/$defs/trader_policy"}},
+        "champions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["at", "version", "reason"],
+            "additionalProperties": false,
+            "properties": {
+              "at": {"$ref": "#/$defs/time"},
+              "version": {"type": "integer", "minimum": 1},
+              "reason": {"type": "string"}
+            }
+          }
+        }
+      }
+    },
+    "trader_policy": {
+      "description": "A policy version (#399): the cells it trades, first ranked first, each with its threshold and Kelly fraction and what it was fitted on; the cells the cost map passed that it left out, and why; what it was fitted on (the cost map, the grid, the simulated result, the run). It holds no limit: those come from the code and the server's .env alone.",
+      "type": "object",
+      "required": ["version", "status", "created_at", "reason", "cells", "left_out", "fit"],
+      "additionalProperties": false,
+      "properties": {
+        "version": {"type": "integer", "minimum": 1},
+        "status": {"enum": ["champion", "challenger", "former"]},
+        "created_at": {"$ref": "#/$defs/time"},
+        "reason": {"type": "string"},
+        "cells": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["kind", "role", "predictor", "threshold", "kelly_fraction", "fitted"],
+            "additionalProperties": false,
+            "properties": {
+              "kind": {"enum": ["direction", "barrier", "barrier_15m", "barrier_30m"]},
+              "role": {"enum": ["consensus", "top", "baseline"]},
+              "predictor": {"type": "string"},
+              "threshold": {"type": "number", "minimum": 0, "maximum": 1},
+              "kelly_fraction": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
+              "fitted": {
+                "type": "object",
+                "required": ["p_star", "low", "kelly", "fraction", "days", "read", "trades", "wins", "net", "growth"],
+                "additionalProperties": false,
+                "properties": {
+                  "p_star": {"type": "number"},
+                  "low": {"type": "number", "minimum": 0, "maximum": 1},
+                  "kelly": {"type": "number"},
+                  "fraction": {"type": "number", "minimum": 0, "maximum": 1},
+                  "days": {"type": "array", "items": {"type": "string", "format": "date"}},
+                  "read": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
+                  "trades": {"type": "integer", "minimum": 0},
+                  "wins": {"type": "integer", "minimum": 0},
+                  "net": {"type": "number"},
+                  "growth": {"type": ["number", "null"]}
+                }
+              }
+            }
+          }
+        },
+        "left_out": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["kind", "role", "predictor", "p_star", "low", "kelly", "why", "read"],
+            "additionalProperties": false,
+            "properties": {
+              "kind": {"type": "string"},
+              "role": {"enum": ["consensus", "top", "baseline"]},
+              "predictor": {"type": "string"},
+              "p_star": {"type": "number"},
+              "low": {"type": "number"},
+              "kelly": {"type": "number"},
+              "why": {"enum": ["few_trades", "no_gain"]},
+              "most_trades": {"type": "integer", "minimum": 0},
+              "best": {"type": "object"},
+              "read": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}}
+            }
+          }
+        },
+        "fit": {"type": "object"}
+      }
+    },
     "trader_trade": {
-      "description": "A position from its entry to its exit (#394): the cell (kind, predictor) and what the cost map picked it on (#395: the predictor's role, p*, the hit rate's lower bound, the Kelly f* and the share of the capital bought; null for a trade entered before), the prediction and its rise's probability, the barriers, the fills, the costs and the P&L in won; exit and the sell's costs null while open. An exit is by the triple barrier (take_profit, stop_loss, time), or a sale at once (#396): a pause selling now (pause), a loss limit reached (daily_limit, cumulative_limit).",
+      "description": "A position from its entry to its exit (#394): the cell (kind, predictor) and what the cost map picked it on (#395: the predictor's role, p*, the hit rate's lower bound, the Kelly f* and the share of the capital bought; null for a trade entered before), the prediction and its rise's probability, the barriers, the fills, the costs and the P&L in won; exit and the sell's costs null while open. policy: the policy version it was made under (#399), null before the first champion. An exit is by the triple barrier (take_profit, stop_loss, time), or a sale at once (#396): a pause selling now (pause), a loss limit reached (daily_limit, cumulative_limit).",
       "type": "object",
       "required": ["id", "mode", "symbol", "kind", "predictor", "role", "prediction_id", "bar_close", "probability",
-                   "threshold", "p_star", "precision_low", "kelly", "fraction", "anchor", "tick", "width_ticks",
+                   "threshold", "p_star", "precision_low", "kelly", "fraction", "policy", "anchor", "tick", "width_ticks",
                    "target", "stop", "time_barrier", "decided_at", "entry", "exit", "buy_fee", "sell_fee", "tax",
                    "cost", "gross", "net", "orders"],
       "additionalProperties": false,
@@ -2594,6 +2682,7 @@
         "precision_low": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
         "kelly": {"type": ["number", "null"]},
         "fraction": {"type": ["number", "null"], "exclusiveMinimum": 0, "maximum": 1},
+        "policy": {"type": ["integer", "null"], "minimum": 1},
         "anchor": {"type": "number", "exclusiveMinimum": 0},
         "tick": {"type": "number", "exclusiveMinimum": 0},
         "width_ticks": {"type": "integer", "minimum": 1},
@@ -2870,7 +2959,7 @@
       }
     },
     "trader_mark": {
-      "description": "A trade's buy (its entry's fill) or sell (its exit's fill) (#398): the fill's time and price, the trade's quantity, mode, policy (null until policies have versions, #399) and cell; a sell's exit reason and net P&L after costs in won, null on a buy.",
+      "description": "A trade's buy (its entry's fill) or sell (its exit's fill) (#398): the fill's time and price, the trade's quantity, mode, policy version (#399: null for a trade entered before the first champion; only the champion's trades are marked) and cell; a sell's exit reason and net P&L after costs in won, null on a buy.",
       "type": "object",
       "required": ["trade_id", "side", "at", "price", "quantity", "mode", "policy", "kind", "predictor",
                    "exit_reason", "net"],
@@ -2882,7 +2971,7 @@
         "price": {"type": "number", "exclusiveMinimum": 0},
         "quantity": {"type": "integer", "minimum": 1},
         "mode": {"enum": ["paper", "mock", "live"]},
-        "policy": {"type": "null"},
+        "policy": {"type": ["integer", "null"], "minimum": 1},
         "kind": {"enum": ["direction", "barrier", "barrier_15m", "barrier_30m"]},
         "predictor": {"type": "string"},
         "exit_reason": {"enum": ["take_profit", "stop_loss", "time", "pause", "daily_limit", "cumulative_limit", null]},

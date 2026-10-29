@@ -2,6 +2,10 @@
 once, and what lets it go on. The policy never touches them (#399): they come from the code and
 the server's ``.env`` alone, which may narrow them, never widen them (``settings.py``).
 
+**Whose.** The limits and the pauses hold the trades the trader makes: the champion policy's
+(#399; before the first champion, the defaults'). The loss counts those alone
+(``store.CHAMPION_TRADE``), never a challenger's paper trades (#400).
+
 **Loss.** A P&L is the net realized one (the trades exited, after their costs) plus the open
 position's at the best bid: what selling it at that bid would net, after the buy's commission and
 the sale's commission and tax (``paper.unrealized``). The day's counts from 00:00 KST of that day;

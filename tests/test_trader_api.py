@@ -1,6 +1,7 @@
 """The trader through the Engine API, within the /v1 contract (``schemas/engine-api-v1.json``):
-its trades (``GET /v1/trader/trades``, #394), its state and days (``GET /v1/trader``,
-``/v1/trader/days``, #396), and the screen's pause (``POST /v1/trader/pause``, #396)."""
+its trades (``GET /v1/trader/trades``, #394), its policy versions (``GET /v1/trader/policies``,
+#399), its state and days (``GET /v1/trader``, ``/v1/trader/days``, #396), and the screen's pause
+(``POST /v1/trader/pause``, #396)."""
 
 from __future__ import annotations
 
@@ -12,11 +13,30 @@ from typing import Any
 from aiohttp.test_utils import TestClient, TestServer
 
 from krx_quant.api import create_app
+from krx_quant.predictions import DB_NAME as ENGINE_DB
+from krx_quant.touch import TARGET_VERSION
+from krx_quant.trader import CAPITAL
 from krx_quant.trader.paper import Rules
+from krx_quant.trader.policy import FIRST
+from krx_quant.trader.refit import Grid, refit_from
+from krx_quant.trader.store import DB_NAME as TRADER_DB
 from tests.api_schema import check
 from tests.replay_events import at as replay_at
 from tests.replay_events import run
-from tests.trader_doubles import FEE, AskPause, AskResume, Barrier, Day, Event, Read, Tick, at, quote
+from tests.test_trader_refit import DAYS, write_five
+from tests.trader_doubles import (
+    CALENDAR,
+    FEE,
+    AskPause,
+    AskResume,
+    Barrier,
+    Day,
+    Event,
+    Read,
+    Tick,
+    at,
+    quote,
+)
 
 DAY: list[Event] = [
     Read("10:00:02.3", [Barrier("10:00:00")]),
@@ -231,3 +251,116 @@ async def test_the_chart_marks_a_sale_by_a_pause_or_a_limit(tmp_path: Path) -> N
         check("trader_marks", body)
         sell, buy = body["marks"]
         assert (sell["side"], sell["exit_reason"], buy["side"]) == ("sell", reason, "buy")
+
+
+# ``GET /v1/trader/policies`` (#399).
+
+
+async def policies_answer(scratch: Path, state: Path | None, query: str = "") -> tuple[int, Any]:
+    engine = await run(scratch / "replay.db", [], until=replay_at("09:00:00"))
+    async with TestClient(TestServer(create_app(engine, state_dir=state))) as client:
+        response = await client.get(f"/v1/trader/policies{query}")
+        return response.status, await response.json()
+
+
+async def test_the_policies_newest_first_the_champion_marked(tmp_path: Path) -> None:
+    """Two nights' re-fits of the same five predictions: the first the champion, the second a
+    challenger with the same values."""
+    write_five(tmp_path)
+    for night in ("22:31:00", "22:45:00"):
+        refit_from(
+            DAYS,
+            tmp_path / ENGINE_DB,
+            tmp_path / TRADER_DB,
+            CALENDAR.session,
+            capital=CAPITAL,
+            fee_rate=FEE,
+            target_version=TARGET_VERSION,
+            grid=Grid(min_trades=1),
+            now=at(night),
+        )
+
+    status, body = await policies_answer(tmp_path, tmp_path)
+    _, page = await policies_answer(tmp_path, tmp_path, "?limit=1")
+
+    assert status == 200
+    check("trader_policies", body)
+    assert body["champion"] == 1
+    assert [(p["version"], p["status"]) for p in body["policies"]] == [(2, "challenger"), (1, "champion")]
+    assert [p["version"] for p in page["policies"]] == [2]
+    challenger, champion = body["policies"]
+    assert challenger["cells"] == champion["cells"]
+    [cell] = champion["cells"]
+    assert (cell["kind"], cell["predictor"], cell["threshold"], cell["kelly_fraction"]) == (
+        "barrier",
+        "breiman",
+        0.7,
+        0.5,
+    )
+    assert champion["fit"]["result"]["net"] == 7_000
+    assert body["champions"] == [{"at": "2026-10-14T22:31:00+09:00", "version": 1, "reason": FIRST}]
+
+
+async def test_no_policies_before_the_first_fit(tmp_path: Path) -> None:
+    empty: dict[str, Any] = {"champion": None, "policies": [], "champions": []}
+    assert await policies_answer(tmp_path, tmp_path / "empty") == (200, empty)
+    assert await policies_answer(tmp_path, None) == (200, empty)
+    Day(tmp_path).run(DAY)  # a trader's store without a policy yet
+    assert await policies_answer(tmp_path, tmp_path) == (200, empty)
+    status, body = await policies_answer(tmp_path, None, "?limit=0")
+    assert status == 400
+    check("error", body)
+
+
+async def test_a_trade_carries_its_policy(tmp_path: Path) -> None:
+    Day(tmp_path).run(DAY)
+    _, body = await trades(tmp_path, tmp_path)
+    assert {t["policy"] for t in body["trades"]} == {None}, "before the first champion"
+
+
+async def test_a_store_the_nightly_fit_made_before_the_trader_s_first_start_answers_every_route(
+    tmp_path: Path,
+) -> None:
+    """The re-fit ran before the trader ever started (a collector without it): the store it made
+    holds the trader's tables too, and every trader route answers with nothing yet."""
+    write_five(tmp_path)
+    assert not (tmp_path / TRADER_DB).exists()
+    refit_from(
+        DAYS,
+        tmp_path / ENGINE_DB,
+        tmp_path / TRADER_DB,
+        CALENDAR.session,
+        capital=CAPITAL,
+        fee_rate=FEE,
+        target_version=TARGET_VERSION,
+        grid=Grid(min_trades=1),
+        now=at("22:31:00"),
+    )
+
+    engine = await run(tmp_path / "replay.db", [], until=replay_at("09:00:00"))
+    async with TestClient(TestServer(create_app(engine, state_dir=tmp_path))) as client:
+        answers = {}
+        for route in (
+            "/v1/trader/trades",
+            "/v1/trader/policies",
+            "/v1/symbols/005930/trader-marks",
+            "/v1/trader",  # #396
+            "/v1/trader/days",
+        ):
+            response = await client.get(route)
+            answers[route] = (response.status, await response.json())
+
+    assert answers["/v1/trader/trades"] == (200, {"trades": []})
+    assert answers["/v1/symbols/005930/trader-marks"] == (200, {"symbol": "005930", "marks": []})
+    status, policies = answers["/v1/trader/policies"]
+    assert (status, policies["champion"], len(policies["policies"])) == (200, 1, 1)
+    check("trader_trades", answers["/v1/trader/trades"][1])
+    check("trader_policies", policies)
+    status, state = answers["/v1/trader"]
+    assert (status, state["status"], state["controls"]) == (200, None, []), (
+        "the trader has not written its state"
+    )
+    check("trader", state)
+    status, days = answers["/v1/trader/days"]
+    assert (status, days["days"]) == (200, [])
+    check("trader_days", days)

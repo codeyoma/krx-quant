@@ -1,4 +1,5 @@
-"""The trader's store (#394): ``state/trader.sqlite3``, written by the trader alone.
+"""The trader's store (#394): ``state/trader.sqlite3``, written by the trader, and its policy tables
+by the nightly re-fit (#399, from the engine's container).
 
 - ``runs``: each start of the trader, with its mode and settings;
 - ``selections``: each pick of the cells from the cost map (#395): when, the cost map's time, the
@@ -16,6 +17,9 @@
   target, the stop's or the time exit's sell), its limit, quantity and status (open, filled,
   cancelled), and the broker's order number (none in paper);
 - ``fills``: each order's fills, with the quote a paper fill was made on;
+- ``policies`` and ``champions`` (#399, ``policy.py``): each policy version and each change of the
+  champion, written by the nightly re-fit (``refit.py``); a pick and a trade carry the policy
+  version they were made under (``policy_id``; null before the first champion);
 - ``controls`` (#396): each pause, resume and re-arm asked for, by whom (``api``: the screen's
   pause through the Engine API; ``cli``: ``krx-quant trade resume|rearm`` on the server), and when
   the trader read it (null until it has: it reads them every ``CONTROL_SECONDS``);
@@ -26,11 +30,12 @@
   and the cumulative P&L at their lowest, the limits, the status and the limit reached.
 
 Every row carries its mode (``paper``): paper, KIS mock and live trades are told apart in the
-same tables (a pause and a resume hold whatever the mode). The trader writes it; the Engine API
-reads it read-only (``read_trades``, ``read_trader``, ``read_days``) and writes a pause into it
-(``request_pause``), and ``krx-quant trade resume|rearm`` a resume or a re-arm: nothing else.
-Times are ISO 8601 strings in KST, which sort in time order. The columns #395 added
-(``_ADDED``) are added to a store made before it, null in its rows.
+same tables (a pause and a resume hold whatever the mode). The trader writes it, and the nightly
+re-fit its policies; the Engine API reads it read-only (``read_trades``, ``read_trader``,
+``read_days``, ``policy.read_policies``) and writes a pause into it (``request_pause``), and
+``krx-quant trade resume|rearm`` a resume or a re-arm: nothing else. Times are ISO 8601 strings in
+KST, which sort in time order. The columns #395 and #399 added (``_ADDED``) are added to a store
+made before them, null in its rows.
 """
 
 from __future__ import annotations
@@ -45,6 +50,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from krx_quant.feeds.base import KST
+from krx_quant.trader import policy
 
 if TYPE_CHECKING:
     from krx_quant.trader.selection import Selection
@@ -182,9 +188,12 @@ CREATE TABLE IF NOT EXISTS days (       -- each trading day's ledger (#396): GET
 );
 """
 
-# Columns added since the tables were first made (#395): added to a store made before, null in
-# its rows.
+# Columns added since the tables were first made (#395, #399): added to a store made before, null
+# in its rows.
 _ADDED = {
+    "selections": (
+        ("policy_id", "INTEGER REFERENCES policies (id)"),  # the champion applied (#399); null: none yet
+    ),
     "decisions": (
         ("selection_id", "INTEGER REFERENCES selections (id)"),  # the pick in force; null: none yet
     ),
@@ -194,9 +203,18 @@ _ADDED = {
         ("p_star", "REAL"),  # the breakeven hit rate at a market order's round trip
         ("precision_low", "REAL"),  # the cell's hit rate's lower bound
         ("kelly", "REAL"),  # f*, uncut
-        ("fraction", "REAL"),  # the share of the capital bought: KELLY_FRACTION × f*, cut to 0-1
+        ("fraction", "REAL"),  # the share of the capital bought: λ × f*, cut to 0-1
+        ("policy_id", "INTEGER REFERENCES policies (id)"),  # the policy it was made under (#399)
     ),
 }
+
+# A trade ``t`` of the champion (#399): entered before the first champion, or under the policy that
+# was the champion when it was entered (``champions``). The chart marks these alone (``marks.py``),
+# and the loss limits count these alone (#396).
+CHAMPION_TRADE = (
+    "(t.policy_id IS NULL OR t.policy_id ="
+    " (SELECT c.policy_id FROM champions c WHERE c.at <= t.entry_at ORDER BY c.id DESC LIMIT 1))"
+)
 
 BUY, SELL = "buy", "sell"
 OPEN, FILLED, CANCELLED = "open", "filled", "cancelled"
@@ -248,6 +266,8 @@ class Entry:
     low: float | None = None
     kelly: float | None = None
     fraction: float | None = None
+    # The policy version it was made under (#399); None before the first champion.
+    policy_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -326,6 +346,7 @@ class TraderStore:
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.execute("PRAGMA synchronous=NORMAL")
         self._db.executescript(f"BEGIN;{_SCHEMA}COMMIT;")
+        policy.ensure_schema(self._db)
         with self._db:
             for table, columns in _ADDED.items():
                 have = {r["name"] for r in self._db.execute(f"PRAGMA table_info({table})")}
@@ -340,6 +361,11 @@ class TraderStore:
     def close(self) -> None:
         self._db.close()
 
+    def champion(self) -> policy.Policy | None:
+        """The champion policy now (#399); None before the first. ``policy.PolicyError`` when it
+        cannot be read."""
+        return policy.champion(self._db)
+
     def add_run(self, at: datetime, mode: str, detail: Mapping[str, Any]) -> None:
         with self._db:
             self._db.execute(
@@ -350,8 +376,8 @@ class TraderStore:
     def add_selection(self, mode: str, at: datetime, selection: Selection) -> int:
         with self._db:
             cursor = self._db.execute(
-                "INSERT INTO selections (at, mode, as_of, picks, considered, reason, detail)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO selections (at, mode, as_of, picks, considered, reason, detail, policy_id)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     iso(at),
                     mode,
@@ -360,6 +386,7 @@ class TraderStore:
                     json.dumps(list(selection.considered), ensure_ascii=False),
                     selection.reason,
                     selection.detail,
+                    selection.policy,
                 ),
             )
         assert cursor.lastrowid is not None
@@ -434,8 +461,8 @@ class TraderStore:
             cursor = self._db.execute(
                 "INSERT INTO trades (mode, symbol, kind, predictor, prediction_id, bar_close, probability,"
                 " threshold, anchor, tick, width_ticks, target, stop, time_barrier, decided_at, entry_at,"
-                " entry_price, quantity, buy_fee, selection_id, role, p_star, precision_low, kelly, fraction)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " entry_price, quantity, buy_fee, selection_id, role, p_star, precision_low, kelly, fraction,"
+                f" policy_id) VALUES ({', '.join('?' * 26)})",
                 (
                     entry.mode,
                     entry.symbol,
@@ -462,6 +489,7 @@ class TraderStore:
                     entry.low,
                     entry.kelly,
                     entry.fraction,
+                    entry.policy_id,
                 ),
             )
             trade = cursor.lastrowid
@@ -540,11 +568,13 @@ class TraderStore:
         )
 
     def realized(self, mode: str, since: datetime | None) -> tuple[float, int]:
-        """The net P&L of ``mode``'s trades exited at or after ``since`` (all if None), and how many."""
+        """The net P&L of ``mode``'s trades exited at or after ``since`` (all if None), and how many:
+        the champion's alone (``CHAMPION_TRADE``), the trades the limits and the cash hold (#396); a
+        challenger's paper trades (#400) are not."""
         where, params = ("AND exit_at >= ?", [iso(since)]) if since is not None else ("", [])
         row = self._db.execute(
-            "SELECT coalesce(sum(net), 0), count(*) FROM trades"
-            f" WHERE mode = ? AND exit_at IS NOT NULL {where}",
+            "SELECT coalesce(sum(net), 0), count(*) FROM trades t"
+            f" WHERE mode = ? AND exit_at IS NOT NULL AND {CHAMPION_TRADE} {where}",
             (mode, *params),
         ).fetchone()
         return float(row[0]), int(row[1])
@@ -870,6 +900,7 @@ def _trade_json(
         "precision_low": row["precision_low"],
         "kelly": row["kelly"],
         "fraction": row["fraction"],
+        "policy": row.get("policy_id"),  # a store the trader has not opened since #399: none
         "anchor": row["anchor"],
         "tick": row["tick"],
         "width_ticks": row["width_ticks"],

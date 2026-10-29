@@ -18,28 +18,39 @@ will through its KIS order module (#404).
   the engine's database (``state/engine.sqlite3``) read-only as they are displayed
   (``displayed_at``, ``cells.py``).
 - **Rules** (``paper.py``): a prediction of the rise (up; the barrier's up_first) at or above the
-  threshold buys, when nothing is held and no special situation (a VI, a circuit breaker, a
-  sidecar) touches its window. Of the rises of one bar close, the cell ranked first (the
-  greatest hit rate's lower bound less p*) buys. Its reference price is the prediction's
-  ``anchor``, the target ``anchor + w × tick``, the stop ``anchor − w × tick`` (w = k for the
-  direction) and the time barrier the bar close plus the kind's horizon. Entries from five
+  threshold (its cell's under the champion policy) buys, when nothing is held and no special
+  situation (a VI, a circuit breaker, a sidecar) touches its window. Of the rises of one bar
+  close, the cell ranked first (the champion's order; before the first, the greatest hit rate's
+  lower bound less p*) buys. Its reference price is the prediction's ``anchor``, the target
+  ``anchor + w × tick``, the stop ``anchor − w × tick`` (w = k for the direction) and the time
+  barrier the bar close plus the kind's horizon. Entries from five
   minutes after the open (09:05), and only when the time barrier is by five minutes before the
   closing auction (15:15); no buy when the best ask has reached the target already.
-- **Size**: the cell's fractional Kelly, from its hit rate's lower bound and its payoff (the
-  target less the cost against the stop and the cost), cut to 0–1, of the capital (1,000,000
+- **Size**: the cell's fractional Kelly (λ × f*, from its hit rate's lower bound and its payoff:
+  the target less the cost against the stop and the cost), cut to 0–1, of the capital (1,000,000
   won), over the best ask, rounded down; none below one share.
 - **Paper fills**: the buy at the best ask of the first quote received after the decision; the
   take-profit at the target once a best bid reaches it; the stop and the time exit at the best
   bid then. Costs: the commission on both sides and the sell tax.
+- **Policy** (``policy.py``, ``refit.py``, #399): a versioned set of values: the cells traded and
+  their order, each cell's threshold θ and Kelly fraction λ; no limit. Every trading day's night,
+  after the nightly training, the scheduled job ``refit-policy-399`` fits a new version on the
+  stored predictions and answers of the cost map's 20 days, simulating the trader's trades on the
+  answers' paths at each point of a small grid. The first is the champion, the later ones
+  challengers only (#400 runs and promotes them). At each pick the trader trades the champion's
+  cells among those the cost map passes, in its order, at its θ and λ; before the first champion,
+  the cost map's cells at ``KRX_TRADER_THRESHOLD`` and ``KELLY_FRACTION``.
 - **Limits and pauses** (``limits.py``, #396): the loss is the net realized P&L plus the open
   position's at the best bid, after its costs; a day's of 10% of the capital stops the day (sold
   at once, trading again the next trading day), a cumulative one of 20% stops the trader until
   ``krx-quant trade rearm``. The screen's two pauses (``POST /v1/trader/pause``: new entries, or
-  that and a sale now) last until ``krx-quant trade resume`` on the server.
+  that and a sale now) last until ``krx-quant trade resume`` on the server. They hold the trades
+  the trader makes, the champion's: no policy changes them.
 - **Store** (``store.py``): its picks of the cells, decisions, orders, fills and trades, each with
-  its mode (``paper``), the pauses, resumes and re-arms asked for, the halts, the trader's state
-  now and each day's ledger; the Engine API reads it (``GET /v1/trader``, ``/v1/trader/trades``,
-  ``/v1/trader/days``) and writes a pause into it (``POST /v1/trader/pause``), nothing else.
+  its mode (``paper``), the policy versions, the pauses, resumes and re-arms asked for, the
+  halts, the trader's state now and each day's ledger; the Engine API reads it
+  (``GET /v1/trader``, ``/v1/trader/trades``, ``/v1/trader/days``, ``/v1/trader/policies``) and
+  writes a pause into it (``POST /v1/trader/pause``), nothing else.
 """
 
 from __future__ import annotations
@@ -70,9 +81,11 @@ CAPITAL = 1_000_000
 # and the policy never touches them (``limits.py``).
 DAILY_LOSS_PERCENT = 10.0
 CUMULATIVE_LOSS_PERCENT = 20.0
-# The default threshold: a rise's probability at least this buys (the signal alerts' default).
+# The default threshold: a rise's probability at least this buys (the signal alerts' default);
+# until the first champion policy, whose θ for the cell it is from then on (#399).
 THRESHOLD = 0.6
-# The share of a cell's Kelly fraction bought (#395): half Kelly, cut to 0–1 after.
+# The share of a cell's Kelly fraction bought (#395): half Kelly, cut to 0–1 after; until the
+# first champion policy, whose λ for the cell it is from then on (#399).
 KELLY_FRACTION = 0.5
 
 # The cost map the cells are picked from (#395): 005930's, its last 20 days with predictions, the

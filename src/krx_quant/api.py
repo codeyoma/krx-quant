@@ -71,6 +71,10 @@ Endpoints (all under ``/v1``):
   screen's pause of the trader (#396), written into its store for it to read within a second:
   new entries, or that and a sale of the open position now. The API's only write: it neither
   resumes nor re-arms the trader, nor changes its mode or limits.
+- ``GET /trader/policies?limit=N``: the trader's last N policy versions (#399, default 100, at most
+  1000), newest first, each with its status (``champion``, ``challenger``, ``former``), its cells
+  with their θ and Kelly fraction, the cells it left out and what it was fitted on; and every
+  change of the champion (``trader/policy.py``); none before the first nightly fit.
 - ``GET /symbols/{symbol}/trader-marks?before=T&limit=N``: the trader's buys and sells of the
   symbol as the chart marks them (#398, ``trader/marks.py``): the last N (default 100, at most 1000)
   before ``T`` if given, newest first, each at its fill's time and price, with its trade's quantity,
@@ -165,6 +169,7 @@ from krx_quant.stream import EventStream, LiveStatus, kind_prediction_json, kind
 from krx_quant.supply import FIELDS as SUPPLY_FIELDS
 from krx_quant.supply import stored_supply
 from krx_quant.trader.marks import read_marks
+from krx_quant.trader.policy import read_policies
 from krx_quant.trader.store import DB_NAME as TRADER_DB
 from krx_quant.trader.store import read_days as read_trader_days
 from krx_quant.trader.store import read_trader, read_trades, request_pause
@@ -319,6 +324,7 @@ def create_app(
     app.router.add_get("/v1/trader", _trader)
     app.router.add_get("/v1/trader/days", _trader_days)
     app.router.add_post("/v1/trader/pause", _trader_pause)
+    app.router.add_get("/v1/trader/policies", _trader_policies)
     app.router.add_get("/v1/symbols/{symbol}/trader-marks", _trader_marks)
     return app
 
@@ -1512,6 +1518,16 @@ async def _trader_pause(request: web.Request) -> web.Response:
     at = request.app[ENGINE_KEY].clock.now()
     control = await asyncio.to_thread(request_pause, state_dir / TRADER_DB, body["sell_now"], at)
     return _json({"control": control}, status=202)
+
+
+async def _trader_policies(request: web.Request) -> web.Response:
+    """The trader's policy versions (#399), read from its store (read-only, off the event loop);
+    none without the store or before the first nightly fit."""
+    limit = _limit_query(request, DEFAULT_LIMIT, MAX_LIMIT)
+    state_dir = request.app[STATE_DIR_KEY]
+    if state_dir is None:
+        return _json({"champion": None, "policies": [], "champions": []})
+    return _json(await asyncio.to_thread(read_policies, state_dir / TRADER_DB, limit))
 
 
 async def _trader_marks(request: web.Request) -> web.Response:
