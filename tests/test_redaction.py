@@ -43,6 +43,23 @@ def test_every_secret_setting_is_masked_wherever_it_shows() -> None:
     assert masked.splitlines()[0] == f"value {MASK} here"
 
 
+def test_the_trader_s_kis_key_account_and_hts_id_are_masked_as_kis_writes_them() -> None:
+    # #403: the order probe's own process posts on a public issue; its account also shows as KIS
+    # writes it, the digits alone (ACNT_NO) and the 8 of them before the product code (CANO).
+    settings = Settings(
+        kis_app_key="",
+        kis_app_secret="",
+        trader_kis_app_key="PStrader" + "k" * 28,
+        trader_kis_app_secret="Sx" + "s" * 60,
+        trader_kis_account="98765432-01",
+        trader_kis_hts_id="probehts7",
+    )
+    secrets = secrets_of(settings)
+    text = "CANO 98765432, ACNT_NO 9876543201, account 98765432-01, CUST_ID probehts7, key PStrader"
+    masked = redact(text + "k" * 28, secrets)
+    assert masked == f"CANO {MASK}, ACNT_NO {MASK}, account {MASK}, CUST_ID {MASK}, key {MASK}"
+
+
 def test_the_github_token_is_not_in_the_settings_repr() -> None:
     assert GITHUB_TOKEN not in repr(server_settings())
 

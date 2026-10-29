@@ -51,6 +51,8 @@ Worktree, checks, commits, docs, PRs, reviews and stacked PRs: `docs/agents/pr-c
 
 - Work that must run on the server on a given day or at a given time (a diagnosis after a deploy, a pre-validation once enough days are recorded, a measurement a decision waits for) is a scheduled job: add an entry to `JOBS` in `src/krx_quant/scheduled.py` in a PR, with its condition, command, time limit, issues and labels. Do not open a `ready-for-human` issue asking the user to remember a date and run a command.
 - The server runs it at night, after the nightly training, and posts the result as a comment on the job's issues, which then get `ready-for-agent`. Read it with `gh issue view <n> --comments`. See `docs/operations.md` "예약 작업 (#215)".
+- Work only the market's hours can do (an order on KIS's mock server fills only then) is a session job: give its entry a `session` time, and it runs on a trading day at that time instead of at night, ending by 15:15 (`SESSION_UNTIL`). Its condition sees cheap `Facts` (`session_facts`), not the night's.
+  > **바뀜** (2026-10-29, #410): scheduled jobs ran at night only → a session job runs in the market's hours of a trading day. 이유: KIS 모의투자 서버는 장중에만 체결하는데, 주문 응답은 쓰기 전에 서버에서 재야 한다(#403).
 - A new algorithm needs no entry: its pre-validation job is built from the registries (`prevalidation_jobs`) and posts to `PREVALIDATION_ISSUE` (#204). Once #204 is closed, point that at an open issue in the algorithm's PR.
 
 ## Repository layout

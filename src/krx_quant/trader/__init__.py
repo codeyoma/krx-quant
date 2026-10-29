@@ -3,9 +3,10 @@ own process (``krx-quant trade``, compose service ``trader``), apart from the co
 
 The first stem (#394) is paper only: the trader fills its orders on the collector's live best
 quotes (``quotes.py``) and writes what it did to its own store, ``state/trader.sqlite3``
-(``store.py``). It has no order code: the KIS order module comes in its own ticket (#404), and
-the repository's forbidden-pattern check (``scripts/check_forbidden.py``) still refuses KIS
-order TR IDs and endpoints everywhere.
+(``store.py``). It has no order code and calls no KIS order: the KIS order calls live in
+``krx_quant.kis_orders`` alone, the one file the repository's forbidden-pattern check
+(``scripts/check_forbidden.py``) lets hold KIS order TR IDs and endpoints (#403), and only the
+order probe uses them so far; the trader will through its KIS order module (#404).
 
 - **Cell** (``cells.py``): the one (kind, predictor) traded, set in ``.env`` (``settings.py``):
   the four-minute direction (width k) or the 4-, 15- or 30-minute barrier (width w). The trader

@@ -2,9 +2,11 @@
 
 KRX 종목의 4분 뒤 가격 움직임을 여러 퀀트 알고리즘이 예측하고, 예측을 자동 채점해 통계로 보여주는 개인용 엔진이다. 결과는 fork한 Fincept Terminal([codeyoma/FinceptTerminal](https://github.com/codeyoma/FinceptTerminal), `custom` 브랜치)의 화면에서 본다.
 
-엔진(수집기)에는 주문 코드가 없다. 신호만 낸다. 자동 매매(#393)는 따로 도는 trader 프로세스(`krx-quant trade`, compose 서비스 `trader`)가 한다. 지금은 모의(`paper`)뿐이다: 수집기가 내보내는 실시간 호가로 체결을 흉내 내고, 주문은 내지 않는다(설계 [14장](docs/design.md#14-자동-매매-393)). KIS 주문 코드는 아직 어디에도 없고, `scripts/check_forbidden.py`가 계속 막는다.
+엔진(수집기)에는 주문 코드가 없다. 신호만 낸다. 자동 매매(#393)는 따로 도는 trader 프로세스(`krx-quant trade`, compose 서비스 `trader`)가 한다. 지금은 모의(`paper`)뿐이다: 수집기가 내보내는 실시간 호가로 체결을 흉내 내고, 주문은 내지 않는다(설계 [14장](docs/design.md#14-자동-매매-393)). KIS 주문 코드는 trader의 KIS 주문 모듈(`src/krx_quant/kis_orders.py`) 하나에만 있고, 그 밖에서는 `scripts/check_forbidden.py`가 계속 막는다. 지금 그것을 쓰는 것은 KIS 모의투자 서버에 주문해 응답을 재는 프로브(`krx-quant probe-kis-orders`, #403)뿐이다. trader는 아직 쓰지 않는다(#404, #405).
 
 > **바뀜** (2026-10-29, #409): "주문 기능은 없다. 신호만 낸다." → 엔진에는 주문 코드가 없고, 자동 매매는 따로 도는 trader가 한다(지금은 모의뿐). 이유: 사용자가 엔진의 예측으로 삼성전자를 스스로 사고파는 자동 매매를 원했다(#393). 주문 코드는 trader의 KIS 주문 모듈에만 둔다(#404에서). 이 PR은 모의뿐이다.
+
+> **바뀜** (2026-10-29, #410): "KIS 주문 코드는 아직 어디에도 없고, `scripts/check_forbidden.py`가 계속 막는다" → `src/krx_quant/kis_orders.py` 하나에만 있고, 그 밖에서는 계속 막는다. 지금은 모의투자 서버의 주문 프로브만 쓴다. 이유: 주문 응답의 필드를 쓰기 전에 모의투자 서버에서 잰다(#403, CODING_STANDARDS "External data is probed before it is used").
 
 ## 받기
 
@@ -30,7 +32,9 @@ uv run python scripts/check_forbidden.py && uv run ruff check && uv run ruff for
 
 테스트 하나가 시간 한도(`pyproject.toml`의 `timeout`, 30초)를 넘으면 `pytest`는 모든 스레드의 스택을 출력하고 그 자리에서 실행 전체를 끝낸다(`timeout_method = "thread"`, #335). 그 뒤의 테스트는 돌지 않는다. 더 오래 걸려야 하는 테스트는 `@pytest.mark.timeout(N)`과 이유를 단다. CI의 테스트 job은 60분을 넘으면 멈춘다(`timeout-minutes`, 평소 11–22분).
 
-`scripts/check_forbidden.py`는 KIS 주문 TR 코드, 주문 엔드포인트, 비밀값 패턴(`RULES`)과 바뀜·삭제됨 노트에 남은 PR 번호 자리표시(`REPOSITORY_RULES`, #321)가 저장소에 들어오면 실패한다. CI도 같은 검사를 한다. 패턴은 `src/krx_quant/forbidden.py`에 있다. 예약 작업이 GitHub 이슈에 남기는 댓글에서는 `RULES`만 가린다(#215).
+`scripts/check_forbidden.py`는 KIS 주문 TR 코드와 주문 엔드포인트(trader의 KIS 주문 모듈 `src/krx_quant/kis_orders.py` 밖에서, `forbidden.ALLOWED_IN`), 비밀값 패턴(`RULES`)과 바뀜·삭제됨 노트에 남은 PR 번호 자리표시(`REPOSITORY_RULES`, #321)가 저장소에 들어오면 실패한다. CI도 같은 검사를 한다. 패턴은 `src/krx_quant/forbidden.py`에 있다. 예약 작업이 GitHub 이슈에 남기는 댓글에서는 `RULES`만 가린다(#215).
+
+> **바뀜** (2026-10-29, #410): KIS 주문 TR 코드와 주문 엔드포인트는 어느 파일에서도 실패했다 → `src/krx_quant/kis_orders.py` 하나에서만 풀린다(그 파일에서도 다른 규칙은 그대로, 토스 주문 규칙도 그대로). 게시물 가림(`redaction.py`)은 그 파일의 TR 코드도 가린다. 이유: 자동 매매(#393)의 주문 코드를 한 곳에 두고, 다른 파일에 주문 코드가 새면 계속 막으려고(#403).
 
 > **바뀜** (2026-10-20, #328): 검사는 주문 코드와 비밀값만 봤다 → PR 번호 자리표시도 본다(저장소 검사에만). 이유: PR을 열기 전에 쓴 자리표시가 남은 채 리뷰에 온 PR이 일곱 개였다(#321).
 

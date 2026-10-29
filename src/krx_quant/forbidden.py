@@ -2,14 +2,18 @@
 what the server posts to the public issue tracker (``redaction.py``, #215). ``REPOSITORY_RULES``
 are the repository check's alone (#321).
 
-The engine is signals-only: no KIS order TR IDs or order endpoints, and no Toss order
-endpoints (#235), may ever appear in the repository. Secrets belong in ``.env`` on the server
-only. This file spells the patterns out, so the repository check skips it.
+The engine is signals-only: KIS order TR IDs and order endpoints may appear in one file only, the
+trader's KIS account module (``ALLOWED_IN``: ``src/krx_quant/kis_orders.py``, #393, #403), and Toss
+order endpoints (#235) nowhere. Every other rule holds in that file too. What the server posts is
+masked of them all, that file's TR IDs included (``redaction.py`` takes no exception). Secrets
+belong in ``.env`` on the server only. This file spells the patterns out, so the repository check
+skips it.
 """
 
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
 
 RULES: list[tuple[str, re.Pattern[str]]] = [
     # KIS write/order TR IDs are four letters, four digits and "U" (reads end in "R"),
@@ -42,3 +46,28 @@ REPOSITORY_RULES: list[tuple[str, re.Pattern[str]]] = [
         ),
     ),
 ]
+
+# The repository check's one exception (#393, #403): the KIS order rules hold everywhere but the
+# trader's KIS account module, where its order TR IDs and endpoints are written once. A path is
+# the file's from the repository root, as ``git ls-files`` gives it: a file of the same name
+# elsewhere is checked as any other.
+ORDER_MODULE = "src/krx_quant/kis_orders.py"
+ALLOWED_IN: dict[str, frozenset[str]] = {
+    "KIS order TR ID": frozenset({ORDER_MODULE}),
+    "KIS order endpoint": frozenset({ORDER_MODULE}),
+}
+
+
+def findings(path: str, text: str) -> Iterator[tuple[int, str]]:
+    """Each line of ``text`` (the file at ``path``, from the repository root) that a rule of the
+    repository check finds, with the rule's name: every rule, but where ``ALLOWED_IN`` lets that
+    file hold it."""
+    rules = [
+        (name, pattern)
+        for name, pattern in (*RULES, *REPOSITORY_RULES)
+        if path not in ALLOWED_IN.get(name, frozenset())
+    ]
+    for lineno, line in enumerate(text.splitlines(), 1):
+        for name, pattern in rules:
+            if pattern.search(line):
+                yield lineno, name
