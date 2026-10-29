@@ -2756,6 +2756,37 @@
           }
         }
       }
+    },
+
+    "trader_marks": {
+      "description": "GET /v1/symbols/{symbol}/trader-marks?before=T&limit=N (#398): the trader's buys and sells of the symbol as the chart marks them, the last N before T if given, newest first, and any more at the moment of the last of them; none before its first trade or for a symbol it does not trade.",
+      "type": "object",
+      "required": ["symbol", "marks"],
+      "additionalProperties": false,
+      "properties": {
+        "symbol": {"type": "string"},
+        "marks": {"type": "array", "items": {"$ref": "#/$defs/trader_mark"}}
+      }
+    },
+    "trader_mark": {
+      "description": "A trade's buy (its entry's fill) or sell (its exit's fill) (#398): the fill's time and price, the trade's quantity, mode, policy version (#399: null for a trade entered before the first champion; only the champion's trades are marked) and cell; a sell's exit reason and net P&L after costs in won, null on a buy.",
+      "type": "object",
+      "required": ["trade_id", "side", "at", "price", "quantity", "mode", "policy", "kind", "predictor",
+                   "exit_reason", "net"],
+      "additionalProperties": false,
+      "properties": {
+        "trade_id": {"type": "integer"},
+        "side": {"enum": ["buy", "sell"]},
+        "at": {"$ref": "#/$defs/time"},
+        "price": {"type": "number", "exclusiveMinimum": 0},
+        "quantity": {"type": "integer", "minimum": 1},
+        "mode": {"enum": ["paper", "mock", "live"]},
+        "policy": {"type": ["integer", "null"], "minimum": 1},
+        "kind": {"enum": ["direction", "barrier", "barrier_15m", "barrier_30m"]},
+        "predictor": {"type": "string"},
+        "exit_reason": {"enum": ["take_profit", "stop_loss", "time", null]},
+        "net": {"type": ["number", "null"]}
+      }
     }
   }
 }

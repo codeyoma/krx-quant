@@ -39,6 +39,7 @@ ROUTES = {
     "/v1/symbols/{symbol}/kinds/{kind}/predictions": "kind_predictions",
     "/v1/trader/trades": "trader_trades",  # #394
     "/v1/trader/policies": "trader_policies",  # #399
+    "/v1/symbols/{symbol}/trader-marks": "trader_marks",  # #398
 }
 # The routes of a kind besides the direction: answered only by an engine predicting one.
 KIND_ROUTES = {"kind_latest", "kind_predictions"}

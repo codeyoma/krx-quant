@@ -62,7 +62,7 @@
 | `engine.py`, `market_view.py`, `baselines.py`, `climate.py`, `features.py`, `algorithms/`, `consensus.py` | 예측 엔진, 엔진과 학습이 같이 보는 1분봉·기준가, 기준 예측(도달 정답의 시간대 기후 표 포함, #169), 피처 저장소, 알고리즘 규약과 알고리즘, 합의 |
 | `predictions.py`, `stats.py`, `lifecycle.py`, `api.py`, `stream.py` | SQLite 저장, 통계와 순위표, 알고리즘 상태, 엔진 API와 WebSocket 스트림(형식은 `schemas/engine-api-v1.json`) |
 | `signals.py` | 텔레그램 신호 알림(선택) |
-| `trader/` | 자동 매매(#393, 14장)의 trader 프로세스(`krx-quant trade`, compose 서비스 `trader`): 비용 지도로 칸 고르기·순위·Kelly 비율(`selection.py`, #395), 정책 버전과 챔피언(`policy.py`, #399), 밤 정책 맞추기(`refit.py`, `krx-quant refit-policy`, #399), 칸의 예측과 특수 상황 창 읽기(`cells.py`, 엔진 DB를 읽기만), 수집기가 내보내는 최우선 호가 스트림과 trader의 받기(`quotes.py`), 삼중 장벽 모의 매매 규칙과 비용(`paper.py`), trader 저장소(`store.py`, `state/trader.sqlite3`), trader 설정(`settings.py`), 프로세스(`run.py`). 주문 코드는 없다(#394는 모의뿐) |
+| `trader/` | 자동 매매(#393, 14장)의 trader 프로세스(`krx-quant trade`, compose 서비스 `trader`): 비용 지도로 칸 고르기·순위·Kelly 비율(`selection.py`, #395), 정책 버전과 챔피언(`policy.py`, #399), 밤 정책 맞추기(`refit.py`, `krx-quant refit-policy`, #399), 칸의 예측과 특수 상황 창 읽기(`cells.py`, 엔진 DB를 읽기만), 수집기가 내보내는 최우선 호가 스트림과 trader의 받기(`quotes.py`), 삼중 장벽 모의 매매 규칙과 비용(`paper.py`), trader 저장소(`store.py`, `state/trader.sqlite3`), 차트에 표시할 매수·매도 읽기(`marks.py`, #398), trader 설정(`settings.py`), 프로세스(`run.py`). 주문 코드는 없다(#394는 모의뿐) |
 | `training.py`, `nightly.py`, `sample_store.py`, `model_shelf.py`, `swap.py`, `footprint.py`, `training_nights.py` | 학습 샘플, 밤 학습, 날마다의 표본 저장소(#370), 서버의 모델 이력, 08:00 교체와 모델 감시, Spot 학습 결과 기다리기, 밤 학습 단계별 시간과 최대 메모리(#355)와 사전 검증·수습 시뮬레이션이 재생한 날마다의 메모리(#383), 밤 학습의 결과와 적용되지 않은 밤(#355) |
 | `cost_guard.py` | 월 AWS 비용 감시: 50%·80% 알림, 상한에서 Spot 학습 끄기(#23) |
 | `disk_watch.py` | 디스크 감시: 데이터·상태 폴더가 있는 디스크의 여유가 기준(`KRX_DISK_MIN_FREE_PERCENT`)보다 작아지면 한 번 알리고, 돌아오면 `[복구]`(#379) |
@@ -1272,6 +1272,10 @@ v1에서는 쓰지 않는다. 조사 결과는 [paid-data.md](paid-data.md)에 �
 | `champions` | 챔피언이 바뀔 때마다(#399, 승격은 #400): 시각, 정책 버전, 이유. 마지막 행이 지금 챔피언이다 |
 
 엔진 API가 이 저장소를 읽기만 해서 `GET /v1/trader/trades?before=&limit=`([engine-api.md](engine-api.md#get-v1tradertradesbeforetlimitn-394))와 `GET /v1/trader/policies?limit=`([engine-api.md](engine-api.md#get-v1traderpolicieslimitn-399))로 준다.
+
+**차트의 매수·매도 (#398).** 엔진 API가 같은 저장소에서 매매마다 진입의 매수와 청산의 매도를 체결 시각·가격, 수량, 모드, 칸, 매도의 청산 이유와 순손익으로 `GET /v1/symbols/{symbol}/trader-marks?before=&limit=`에 준다(`trader/marks.py`, [engine-api.md](engine-api.md#get-v1symbolssymboltrader-marksbeforetlimitn-398)). Fincept의 KRX 4분 예측 화면이 005930의 1분 차트에 매수 ▲·매도 ▼로 그리고, 호버에 가격, 수량, 청산 이유, 순손익을 보이며, 실전과 모의를 색으로 가른다(`fincept/custom/README.md`). 표시마다 그 매매의 정책 버전(`policy`, #399, 첫 챔피언 전의 매매는 `null`)이 있고, 챔피언의 매매만 준다: 첫 챔피언 전의 매매와, 그 매매에 들어갈 때 챔피언이던 정책의 매매(`champions`에서 진입 시각에 챔피언이던 것). 도전 정책의 모의 매매(#400)는 차트에 보이지 않는다.
+
+> **바뀜** (2026-10-30, #414): "정책에 버전이 생기기 전(#399)에는 정책이 하나라 모든 매매를 보인다. 버전이 생기면 챔피언의 것을 보인다" → 정책 버전이 생겼다: 표시의 `policy`가 그 매매의 정책 버전이고, 챔피언의 매매만 준다. 이유: #399가 정책 버전을 더했다(#398이 남긴 대로 챔피언의 것).
 
 **하지 않는 것(지금).** KIS 주문(mock, live: `KRX_TRADER_MODE`를 그렇게 두면 trader가 시작하지 않는다. KIS 계좌 호출은 `kis_orders.py`에 있지만 아직 KIS 모의투자 주문 프로브(#403, 운영 문서 2장 "KIS 모의투자 주문 확인 (#403)")만 쓴다), 한도와 정지, 호가가 끊겼을 때의 REST 현재가, 텔레그램 알림, 화면, 도전 정책을 모의로 함께 돌리기와 챔피언 바꾸기(#400)는 뒤 티켓들이다(위).
 
