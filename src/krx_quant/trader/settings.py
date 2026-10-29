@@ -8,6 +8,8 @@ narrow the capital, never widen it (#393).
   come with the KIS order module, #404, #405, #408);
 - ``KRX_TRADER_THRESHOLD``: θ, the rise's probability that buys (0.6 unless set);
 - ``KRX_TRADER_CAPITAL``: the capital in won (1,000,000 unless set; at most that);
+- ``KRX_TRADER_DAILY_LOSS_PERCENT``, ``KRX_TRADER_CUMULATIVE_LOSS_PERCENT`` (#396): the loss
+  limits in percent of the capital (10 and 20 unless set; above 0 and at most those);
 - ``KRX_TRADER_QUOTES_URL``: the collector's quote stream (``quotes.py``); compose sets it to the
   engine service's;
 - ``KRX_TRADER_ENGINE_URL``: the Engine API the cost map is read from (``selection.py``, #395);
@@ -26,7 +28,15 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from krx_quant.config import SettingsError, read_values
-from krx_quant.trader import CAPITAL, LATER_MODES, MODES, PAPER, THRESHOLD
+from krx_quant.trader import (
+    CAPITAL,
+    CUMULATIVE_LOSS_PERCENT,
+    DAILY_LOSS_PERCENT,
+    LATER_MODES,
+    MODES,
+    PAPER,
+    THRESHOLD,
+)
 
 DEFAULT_QUOTES_URL = "ws://127.0.0.1:8081/v1/quotes"
 DEFAULT_ENGINE_URL = "http://127.0.0.1:8080"
@@ -40,6 +50,8 @@ class TraderSettings:
     mode: str = PAPER
     threshold: float = THRESHOLD
     capital: int = CAPITAL
+    daily_loss_percent: float = DAILY_LOSS_PERCENT
+    cumulative_loss_percent: float = CUMULATIVE_LOSS_PERCENT
     quotes_url: str = DEFAULT_QUOTES_URL
     engine_url: str = DEFAULT_ENGINE_URL
     poll_seconds: float = 0.5  # how often the engine's database is read for new predictions
@@ -65,6 +77,8 @@ class TraderSettings:
                 f"KRX_TRADER_CAPITAL ({capital:,}) is above the trader's limit of {CAPITAL:,} won: "
                 ".env may narrow it, never widen it"
             )
+        daily = _limit(values, "KRX_TRADER_DAILY_LOSS_PERCENT", DAILY_LOSS_PERCENT)
+        cumulative = _limit(values, "KRX_TRADER_CUMULATIVE_LOSS_PERCENT", CUMULATIVE_LOSS_PERCENT)
         quotes_url = values.get("KRX_TRADER_QUOTES_URL", DEFAULT_QUOTES_URL).strip() or DEFAULT_QUOTES_URL
         if not quotes_url.startswith(("ws://", "wss://")):
             raise SettingsError(f"KRX_TRADER_QUOTES_URL must be a ws:// URL, got {quotes_url!r}")
@@ -78,10 +92,26 @@ class TraderSettings:
             mode=mode,
             threshold=float(threshold),
             capital=capital,
+            daily_loss_percent=daily,
+            cumulative_loss_percent=cumulative,
             quotes_url=quotes_url,
             engine_url=engine_url,
             ignored=tuple(name for name in GONE if values.get(name, "").strip()),
         )
+
+
+def _limit(values: Mapping[str, str], name: str, code: float) -> float:
+    """A loss limit in percent of the capital: above 0, and at most the code's (#393: ``.env``
+    narrows a limit, never widens it)."""
+    value = float(_number(values, name, f"{code:g}", float, 0.0, None))
+    if value <= 0:
+        raise SettingsError(f"{name} must be above 0, got {value:g}: a limit of 0 stops every trade")
+    if value > code:
+        raise SettingsError(
+            f"{name} ({value:g}%) is above the trader's limit of {code:g}% of the capital: "
+            ".env may narrow it, never widen it"
+        )
+    return value
 
 
 def _number(

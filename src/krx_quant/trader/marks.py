@@ -22,7 +22,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from krx_quant.trader.store import _reading, iso
+from krx_quant.trader.store import CHAMPION_TRADE, _reading, iso
 
 # A trade's buy (its entry) and its sell (its exit, once out), as one table of marks, of the
 # champion's trades (#399): its policy version, and which trades.
@@ -34,11 +34,9 @@ UNION ALL
 SELECT id, 'sell', exit_at, exit_price, quantity, mode, kind, predictor, exit_reason, net, {policy}
   FROM trades t WHERE symbol = :symbol AND exit_at IS NOT NULL AND {champions}
 """
-# A trade entered before the first champion, or under the policy that was the champion then.
-_CHAMPIONS = (
-    "(t.policy_id IS NULL OR t.policy_id ="
-    " (SELECT c.policy_id FROM champions c WHERE c.at <= t.entry_at ORDER BY c.id DESC LIMIT 1))"
-)
+# A trade entered before the first champion, or under the policy that was the champion then (the
+# loss limits count the same trades, #396).
+_CHAMPIONS = CHAMPION_TRADE
 _NEWEST_FIRST = "ORDER BY at DESC, trade_id DESC, side DESC"
 
 

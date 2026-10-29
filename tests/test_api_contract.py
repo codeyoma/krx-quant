@@ -27,7 +27,7 @@ from krx_quant.collector import run_collector
 from krx_quant.demo import demo_app
 from krx_quant.fake_kis import FakeKis
 from krx_quant.touch import TARGET_VERSION
-from tests.api_schema import KIND_ROUTES, ROUTES, SCHEMA, STREAM, check
+from tests.api_schema import KIND_ROUTES, ROUTES, SCHEMA, STREAM, WRITES, check
 from tests.kind_doubles import TEST_KIND, FixedKindAlgorithm
 from tests.kis_frames import book_frame
 from tests.replay_events import LIVE_PREDICTORS, api, at, run
@@ -128,6 +128,9 @@ async def walk(get: Get) -> dict[str, int]:
             )
     await ask("/v1/trader/trades", "trader_trades")  # #394
     await ask("/v1/trader/trades?limit=5&before=2026-10-12T10:00:00%2B09:00", "trader_trades")
+    await ask("/v1/trader", "trader")  # #396
+    await ask("/v1/trader/days", "trader_days")
+    await ask("/v1/trader/days?from=2026-10-01&to=2026-10-12", "trader_days")
     await ask("/v1/trader/policies?limit=5", "trader_policies")  # #399
     for symbol in symbols:  # #398
         await ask(f"/v1/symbols/{symbol}/trader-marks", "trader_marks")
@@ -175,6 +178,9 @@ async def walk(get: Get) -> dict[str, int]:
         ("/v1/symbols/005930/closing-flow/days?from=2015-01-01&to=2026-10-12", 400),
         ("/v1/trader/trades?limit=0", 400),
         ("/v1/trader/trades?before=10:00", 400),
+        ("/v1/trader/days?from=2026-10-1", 400),
+        ("/v1/trader/days?from=2026-10-12&to=2026-10-11", 400),
+        ("/v1/trader/days?from=2015-01-01&to=2026-10-12", 400),
         ("/v1/trader/policies?limit=0", 400),
         ("/v1/symbols/999999/trader-marks", 404),
         ("/v1/symbols/005930/trader-marks?limit=0", 400),
@@ -189,12 +195,17 @@ async def walk(get: Get) -> dict[str, int]:
 async def test_every_route_has_its_definition(tmp_path: Path) -> None:
     engine = await run(tmp_path / "engine.db", [], until=at("09:00:00"))
 
-    routes = {
-        r.resource.canonical for r in create_app(engine).router.routes() if r.method == "GET" and r.resource
+    app = create_app(engine)
+    routes = {r.resource.canonical for r in app.router.routes() if r.method == "GET" and r.resource}
+    others = {
+        (r.method, r.resource.canonical)
+        for r in app.router.routes()
+        if r.method not in ("GET", "HEAD") and r.resource is not None
     }
 
     assert routes == set(ROUTES) | set(STREAM)
-    assert {*ROUTES.values(), *STREAM.values()} <= set(SCHEMA["$defs"])
+    assert others == {("POST", path) for path in WRITES}, "the trader's pause is the only write (#396)"
+    assert {*ROUTES.values(), *STREAM.values(), *WRITES.values()} <= set(SCHEMA["$defs"])
 
 
 async def test_the_status_names_the_commit_running_and_when_the_engine_started(tmp_path: Path) -> None:

@@ -1,6 +1,6 @@
 """``krx-quant trade`` (#394, #395): the trader's process, until stopped.
 
-Four loops in one event loop, all into one ``PaperTrader``:
+Five loops in one event loop, all into one ``PaperTrader``:
 
 - the picks (``selection.pick``): the cells the cost map passes, read from the Engine API at the
   start and every day at ``PICK_AT`` (08:30), under the champion policy read from the store then
@@ -12,7 +12,12 @@ Four loops in one event loop, all into one ``PaperTrader``:
 - the engine's database every ``TraderSettings.poll_seconds`` (``cells.EngineReader``,
   read-only): the picked cells' new predictions, and the special windows the engine kept;
 - the clock every ``TICK_SECONDS`` (a rise that waited for the cells ranked above it, a time
-  barrier passed without a quote, a buy whose quote did not come).
+  barrier passed without a quote, a buy whose quote did not come, the state written);
+- the pauses, resumes and re-arms asked for (#396: the screen's through the Engine API, the
+  server's ``krx-quant trade resume|rearm``), read from the trader's store every
+  ``limits.CONTROL_SECONDS`` (within a second).
+
+Its halts, pauses, resumes and re-arms go to Telegram (``notify.Alerts.notice``).
 
 The trading days come from the calendar the collector keeps in the state folder
 (``state/market_calendar.json``), read again each day; the trader never asks KIS.
@@ -31,9 +36,11 @@ import aiohttp
 from krx_quant.config import Settings
 from krx_quant.feeds.base import KST
 from krx_quant.market_calendar import MarketCalendar, Session, calendar_store
+from krx_quant.notify import Alerts
 from krx_quant.predictions import DB_NAME as ENGINE_DB
 from krx_quant.trader import COST_MAP_PERIOD, KELLY_FRACTION, PICK_AT, SYMBOL, policy
 from krx_quant.trader.cells import EngineReader
+from krx_quant.trader.limits import CONTROL_SECONDS
 from krx_quant.trader.paper import PaperTrader, Rules
 from krx_quant.trader.quotes import follow_quotes
 from krx_quant.trader.selection import NO_COST_MAP, NO_POLICY, Selection, pick
@@ -110,6 +117,8 @@ async def run_trader(
         {
             "threshold": trader.threshold,
             "capital": trader.capital,
+            "daily_loss_percent": trader.daily_loss_percent,
+            "cumulative_loss_percent": trader.cumulative_loss_percent,
             "fee_rate": settings.fee_rate,
             "kelly_fraction": KELLY_FRACTION,
             "cost_map": {"engine": trader.engine_url, "symbol": SYMBOL, "period": COST_MAP_PERIOD},
@@ -118,21 +127,53 @@ async def run_trader(
     )
     for name in trader.ignored:
         log.warning("trader: %s is no longer read (#395): the cost map picks the cells", name)
-    rules = Rules(threshold=trader.threshold, capital=trader.capital, fee_rate=settings.fee_rate)
-    book = PaperTrader(store, rules, _Sessions(settings), started, trader.mode)
+    rules = Rules(
+        threshold=trader.threshold,
+        capital=trader.capital,
+        daily_loss_percent=trader.daily_loss_percent,
+        cumulative_loss_percent=trader.cumulative_loss_percent,
+        fee_rate=settings.fee_rate,
+    )
+    try:
+        async with aiohttp.ClientSession() as session:
+            alerts = Alerts(
+                session, settings.telegram_bot_token, settings.telegram_chat_id, settings.telegram_api_url
+            )
+            try:
+                book = PaperTrader(store, rules, _Sessions(settings), started, trader.mode, alerts.notice)
+                await _trade(settings, trader, book, session, stop=stop, clock=clock, sleep=sleep)
+            finally:
+                await alerts.close()
+    finally:
+        store.close()
+        log.info("trader: stopped")
+
+
+async def _trade(
+    settings: Settings,
+    trader: TraderSettings,
+    book: PaperTrader,
+    session: aiohttp.ClientSession,
+    *,
+    stop: asyncio.Event,
+    clock: Clock,
+    sleep: Callable[[float], Awaitable[None]],
+) -> None:
     reader = EngineReader(settings.state_dir / ENGINE_DB, SYMBOL)
     log.info(
-        "trader: %s trading %s on the cells the cost map of %s passes (threshold %g, capital %s won),"
-        " quotes from %s",
+        "trader: %s trading %s on the cells the cost map of %s passes (threshold %g, capital %s won,"
+        " loss limits %g%% a day and %g%% in all), quotes from %s",
         trader.mode,
         SYMBOL,
         trader.engine_url,
         trader.threshold,
         f"{trader.capital:,}",
+        trader.daily_loss_percent,
+        trader.cumulative_loss_percent,
         trader.quotes_url,
     )
 
-    async def picking(session: aiohttp.ClientSession) -> None:
+    async def picking() -> None:
         failing = False
         while True:
             selection = await pick(session, trader.engine_url)
@@ -153,7 +194,7 @@ async def run_trader(
             if failing:
                 log.info("trader: the cost map is read again")
             failing = False
-            book.select(under_champion(store, selection), at)
+            book.select(under_champion(book.store, selection), at)
             reader.follow(book.cells, at - LOOK_BACK)
             due = next_pick(clock())
             while clock() < due:
@@ -179,24 +220,28 @@ async def run_trader(
             book.on_time(clock())
             await sleep(TICK_SECONDS)
 
-    try:
-        async with aiohttp.ClientSession() as session:
-            tasks = [
-                asyncio.create_task(picking(session)),
-                asyncio.create_task(follow_quotes(session, trader.quotes_url, SYMBOL, book.on_quote)),
-                asyncio.create_task(predictions()),
-                asyncio.create_task(ticks()),
-            ]
-            waiting = asyncio.create_task(stop.wait())
+    async def controls() -> None:
+        while True:
             try:
-                done, _ = await asyncio.wait([waiting, *tasks], return_when=asyncio.FIRST_COMPLETED)
-                for task in done:
-                    if task is not waiting:
-                        task.result()  # a loop that ended raised: let it out
-            finally:
-                for task in [waiting, *tasks]:
-                    task.cancel()
-                await asyncio.gather(waiting, *tasks, return_exceptions=True)
+                book.on_controls(clock())
+            except sqlite3.Error as e:  # the store busy with another writer: read again next time
+                log.warning("trader: could not read the controls asked for (%s)", e)
+            await sleep(CONTROL_SECONDS)
+
+    tasks = [
+        asyncio.create_task(picking()),
+        asyncio.create_task(follow_quotes(session, trader.quotes_url, SYMBOL, book.on_quote)),
+        asyncio.create_task(predictions()),
+        asyncio.create_task(ticks()),
+        asyncio.create_task(controls()),
+    ]
+    waiting = asyncio.create_task(stop.wait())
+    try:
+        done, _ = await asyncio.wait([waiting, *tasks], return_when=asyncio.FIRST_COMPLETED)
+        for task in done:
+            if task is not waiting:
+                task.result()  # a loop that ended raised: let it out
     finally:
-        store.close()
-        log.info("trader: stopped")
+        for task in [waiting, *tasks]:
+            task.cancel()
+        await asyncio.gather(waiting, *tasks, return_exceptions=True)

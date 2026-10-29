@@ -2660,7 +2660,7 @@
       }
     },
     "trader_trade": {
-      "description": "A position from its entry to its exit (#394): the cell (kind, predictor) and what the cost map picked it on (#395: the predictor's role, p*, the hit rate's lower bound, the Kelly f* and the share of the capital bought; null for a trade entered before), the prediction and its rise's probability, the barriers, the fills, the costs and the P&L in won; exit and the sell's costs null while open. policy: the policy version it was made under (#399), null before the first champion.",
+      "description": "A position from its entry to its exit (#394): the cell (kind, predictor) and what the cost map picked it on (#395: the predictor's role, p*, the hit rate's lower bound, the Kelly f* and the share of the capital bought; null for a trade entered before), the prediction and its rise's probability, the barriers, the fills, the costs and the P&L in won; exit and the sell's costs null while open. policy: the policy version it was made under (#399), null before the first champion. An exit is by the triple barrier (take_profit, stop_loss, time), or a sale at once (#396): a pause selling now (pause), a loss limit reached (daily_limit, cumulative_limit).",
       "type": "object",
       "required": ["id", "mode", "symbol", "kind", "predictor", "role", "prediction_id", "bar_close", "probability",
                    "threshold", "p_star", "precision_low", "kelly", "fraction", "policy", "anchor", "tick", "width_ticks",
@@ -2710,7 +2710,7 @@
               "properties": {
                 "at": {"$ref": "#/$defs/time"},
                 "price": {"type": "number", "exclusiveMinimum": 0},
-                "reason": {"enum": ["take_profit", "stop_loss", "time"]}
+                "reason": {"enum": ["take_profit", "stop_loss", "time", "pause", "daily_limit", "cumulative_limit"]}
               }
             }
           ]
@@ -2731,7 +2731,8 @@
             "properties": {
               "id": {"type": "integer"},
               "side": {"enum": ["buy", "sell"]},
-              "purpose": {"enum": ["entry", "take_profit", "stop_loss", "time"]},
+              "purpose": {"enum": ["entry", "take_profit", "stop_loss", "time", "pause", "daily_limit",
+                                   "cumulative_limit"]},
               "price": {"type": "number", "exclusiveMinimum": 0},
               "quantity": {"type": "integer", "minimum": 1},
               "placed_at": {"$ref": "#/$defs/time"},
@@ -2757,7 +2758,196 @@
         }
       }
     },
-
+    "trader": {
+      "description": "GET /v1/trader (#396): the trader's state as it last wrote it into its store (at least every 5 s while it runs; alive while that is at most 15 s old), and the last 20 pauses, resumes and re-arms asked for, newest first (applied_at null until the trader has read one). Every field but alive and controls is null before the trader first wrote its state.",
+      "type": "object",
+      "required": ["updated_at", "alive", "mode", "status", "started_at", "capital", "cash", "position", "today",
+                   "cumulative", "limits", "pause", "controls"],
+      "additionalProperties": false,
+      "properties": {
+        "updated_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]},
+        "alive": {"type": "boolean"},
+        "mode": {"enum": ["paper", "mock", "live", null]},
+        "status": {"enum": ["running", "entries_paused", "paused", "daily_limit", "cumulative_limit", null]},
+        "started_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]},
+        "capital": {"type": ["integer", "null"], "minimum": 1},
+        "cash": {"type": ["number", "null"]},
+        "position": {
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "required": ["trade_id", "kind", "predictor", "quantity", "entry_price", "entry_at", "target", "stop",
+                           "time_barrier", "bid", "bid_at", "unrealized", "selling"],
+              "additionalProperties": false,
+              "properties": {
+                "trade_id": {"type": "integer"},
+                "kind": {"enum": ["direction", "barrier", "barrier_15m", "barrier_30m"]},
+                "predictor": {"type": "string"},
+                "quantity": {"type": "integer", "minimum": 1},
+                "entry_price": {"type": "number", "exclusiveMinimum": 0},
+                "entry_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]},
+                "target": {"type": "number"},
+                "stop": {"type": "number"},
+                "time_barrier": {"$ref": "#/$defs/time"},
+                "bid": {"type": ["number", "null"], "exclusiveMinimum": 0},
+                "bid_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]},
+                "unrealized": {"type": "number"},
+                "selling": {"type": "boolean"}
+              }
+            }
+          ]
+        },
+        "today": {
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "required": ["day", "realized", "unrealized", "net", "trades", "worst"],
+              "additionalProperties": false,
+              "properties": {
+                "day": {"$ref": "#/$defs/day"},
+                "realized": {"type": "number"},
+                "unrealized": {"type": "number"},
+                "net": {"type": "number"},
+                "trades": {"type": "integer", "minimum": 0},
+                "worst": {"type": "number", "maximum": 0}
+              }
+            }
+          ]
+        },
+        "cumulative": {
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "required": ["since", "realized", "unrealized", "net", "worst"],
+              "additionalProperties": false,
+              "properties": {
+                "since": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]},
+                "realized": {"type": "number"},
+                "unrealized": {"type": "number"},
+                "net": {"type": "number"},
+                "worst": {"type": "number", "maximum": 0}
+              }
+            }
+          ]
+        },
+        "limits": {
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "required": ["daily", "cumulative"],
+              "additionalProperties": false,
+              "properties": {
+                "daily": {"$ref": "#/$defs/trader_limit"},
+                "cumulative": {"$ref": "#/$defs/trader_limit"}
+              }
+            }
+          ]
+        },
+        "pause": {
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "required": ["at", "sell_now", "source"],
+              "additionalProperties": false,
+              "properties": {
+                "at": {"$ref": "#/$defs/time"},
+                "sell_now": {"type": "boolean"},
+                "source": {"enum": ["api", "cli"]}
+              }
+            }
+          ]
+        },
+        "controls": {"type": "array", "maxItems": 20, "items": {"$ref": "#/$defs/trader_control"}}
+      }
+    },
+    "trader_limit": {
+      "description": "A loss limit (#396): in percent of the capital and in won, how much of it the P&L (realized + open, after costs) uses now (0: none, 1: all of it), and when it was reached if it holds.",
+      "type": "object",
+      "required": ["percent", "won", "used", "reached_at"],
+      "additionalProperties": false,
+      "properties": {
+        "percent": {"type": "number", "exclusiveMinimum": 0, "maximum": 20},
+        "won": {"type": "number", "exclusiveMinimum": 0},
+        "used": {"type": "number", "minimum": 0},
+        "reached_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]}
+      }
+    },
+    "trader_control": {
+      "description": "A pause, resume or re-arm asked for (#396): the screen's pause through POST /v1/trader/pause (source api), the server's krx-quant trade resume|rearm (source cli); applied_at null until the trader has read it.",
+      "type": "object",
+      "required": ["id", "at", "action", "source", "sell_now", "mode", "applied_at"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "integer"},
+        "at": {"$ref": "#/$defs/time"},
+        "action": {"enum": ["pause", "resume", "rearm"]},
+        "source": {"enum": ["api", "cli"]},
+        "sell_now": {"type": ["boolean", "null"]},
+        "mode": {"enum": ["paper", "mock", "live", null]},
+        "applied_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]}
+      }
+    },
+    "trader_pause": {
+      "description": "POST /v1/trader/pause (#396), 202: the pause written into the trader's store, for the trader to read within a second.",
+      "type": "object",
+      "required": ["control"],
+      "additionalProperties": false,
+      "properties": {
+        "control": {"$ref": "#/$defs/trader_control"}
+      }
+    },
+    "trader_days": {
+      "description": "GET /v1/trader/days?from=YYYY-MM-DD&to=YYYY-MM-DD (#396): the trader's ledger of each trading day it ran from from to to (KST dates, both included; default the year to today, at most 4000 days), oldest first, each mode's.",
+      "type": "object",
+      "required": ["from", "to", "days"],
+      "additionalProperties": false,
+      "properties": {
+        "from": {"$ref": "#/$defs/day"},
+        "to": {"$ref": "#/$defs/day"},
+        "days": {"type": "array", "items": {"$ref": "#/$defs/trader_day"}}
+      }
+    },
+    "trader_day": {
+      "description": "A trading day of the trader (#396): the net P&L of the trades exited that day and how many, the day's P&L at its lowest (realized + open, after costs) against the daily limit, the cumulative P&L at the day's last update and at its lowest against the cumulative limit (used: the lowest over the limit), the status at the day's last update, and the limit reached that day if any.",
+      "type": "object",
+      "required": ["day", "mode", "net", "trades", "daily", "cumulative", "status", "halt", "updated_at"],
+      "additionalProperties": false,
+      "properties": {
+        "day": {"$ref": "#/$defs/day"},
+        "mode": {"enum": ["paper", "mock", "live"]},
+        "net": {"type": "number"},
+        "trades": {"type": "integer", "minimum": 0},
+        "daily": {
+          "type": "object",
+          "required": ["limit", "worst", "used"],
+          "additionalProperties": false,
+          "properties": {
+            "limit": {"type": "number", "exclusiveMinimum": 0},
+            "worst": {"type": "number", "maximum": 0},
+            "used": {"type": "number", "minimum": 0}
+          }
+        },
+        "cumulative": {
+          "type": "object",
+          "required": ["limit", "net", "worst", "used"],
+          "additionalProperties": false,
+          "properties": {
+            "limit": {"type": "number", "exclusiveMinimum": 0},
+            "net": {"type": "number"},
+            "worst": {"type": "number", "maximum": 0},
+            "used": {"type": "number", "minimum": 0}
+          }
+        },
+        "status": {"enum": ["running", "entries_paused", "paused", "daily_limit", "cumulative_limit"]},
+        "halt": {"enum": ["daily_limit", "cumulative_limit", null]},
+        "updated_at": {"$ref": "#/$defs/time"}
+      }
+    },
     "trader_marks": {
       "description": "GET /v1/symbols/{symbol}/trader-marks?before=T&limit=N (#398): the trader's buys and sells of the symbol as the chart marks them, the last N before T if given, newest first, and any more at the moment of the last of them; none before its first trade or for a symbol it does not trade.",
       "type": "object",
@@ -2784,7 +2974,7 @@
         "policy": {"type": ["integer", "null"], "minimum": 1},
         "kind": {"enum": ["direction", "barrier", "barrier_15m", "barrier_30m"]},
         "predictor": {"type": "string"},
-        "exit_reason": {"enum": ["take_profit", "stop_loss", "time", null]},
+        "exit_reason": {"enum": ["take_profit", "stop_loss", "time", "pause", "daily_limit", "cumulative_limit", null]},
         "net": {"type": ["number", "null"]}
       }
     }

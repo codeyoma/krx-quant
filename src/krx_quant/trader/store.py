@@ -19,13 +19,23 @@ by the nightly re-fit (#399, from the engine's container).
 - ``fills``: each order's fills, with the quote a paper fill was made on;
 - ``policies`` and ``champions`` (#399, ``policy.py``): each policy version and each change of the
   champion, written by the nightly re-fit (``refit.py``); a pick and a trade carry the policy
-  version they were made under (``policy_id``; null before the first champion).
+  version they were made under (``policy_id``; null before the first champion);
+- ``controls`` (#396): each pause, resume and re-arm asked for, by whom (``api``: the screen's
+  pause through the Engine API; ``cli``: ``krx-quant trade resume|rearm`` on the server), and when
+  the trader read it (null until it has: it reads them every ``CONTROL_SECONDS``);
+- ``halts`` (#396): each loss limit reached: when, the day, the limit and the P&L that reached it;
+  a cumulative one's re-arm (``lifted_at``);
+- ``snapshot`` (#396): the trader's state now, one row it rewrites (``GET /v1/trader``);
+- ``days`` (#396): each trading day's ledger by mode: the net P&L realized, the trades, the day's
+  and the cumulative P&L at their lowest, the limits, the status and the limit reached.
 
 Every row carries its mode (``paper``): paper, KIS mock and live trades are told apart in the
-same tables. The Engine API reads it read-only (``read_trades``, ``GET /v1/trader/trades``;
-``policy.read_policies``, ``GET /v1/trader/policies``). Times are ISO 8601 strings in KST, which
-sort in time order. The columns #395 and #399 added (``_ADDED``) are added to a store made before
-them, null in its rows.
+same tables (a pause and a resume hold whatever the mode). The trader writes it, and the nightly
+re-fit its policies; the Engine API reads it read-only (``read_trades``, ``read_trader``,
+``read_days``, ``policy.read_policies``) and writes a pause into it (``request_pause``), and
+``krx-quant trade resume|rearm`` a resume or a re-arm: nothing else. Times are ISO 8601 strings in
+KST, which sort in time order. The columns #395 and #399 added (``_ADDED``) are added to a store
+made before them, null in its rows.
 """
 
 from __future__ import annotations
@@ -35,7 +45,7 @@ import sqlite3
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -134,6 +144,48 @@ CREATE TABLE IF NOT EXISTS fills (
     quote_at TEXT                      -- the quote a paper fill was made on
 );
 CREATE INDEX IF NOT EXISTS fills_by_order ON fills (order_id);
+CREATE TABLE IF NOT EXISTS controls (   -- each pause, resume and re-arm asked for (#396)
+    id INTEGER PRIMARY KEY,
+    at TEXT NOT NULL,                  -- when it was asked for
+    action TEXT NOT NULL,              -- pause, resume, rearm
+    source TEXT NOT NULL,              -- api (the screen's pause), cli (krx-quant trade resume|rearm)
+    sell_now INTEGER,                  -- a pause's: 1 sells the open position at once, 0 lets it run
+    mode TEXT,                         -- a re-arm's: the mode whose cumulative limit it re-arms
+    applied_at TEXT                    -- when the trader read it; null until it has
+);
+CREATE TABLE IF NOT EXISTS halts (      -- each loss limit reached (#396)
+    id INTEGER PRIMARY KEY,
+    at TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    day TEXT NOT NULL,                 -- the KST date it was reached on
+    kind TEXT NOT NULL,                -- daily_limit, cumulative_limit
+    pnl REAL NOT NULL,                 -- the P&L that reached it: realized + open, won
+    realized REAL NOT NULL,
+    unrealized REAL NOT NULL,          -- the open position's at the best bid, after its costs
+    limit_won REAL NOT NULL,           -- the limit then, won
+    lifted_at TEXT,                    -- a cumulative one's re-arm; a daily one ends with its day
+    rearm_id INTEGER REFERENCES controls (id)
+);
+CREATE TABLE IF NOT EXISTS snapshot (   -- the trader's state now (#396): GET /v1/trader
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    at TEXT NOT NULL,
+    body TEXT NOT NULL                 -- JSON
+);
+CREATE TABLE IF NOT EXISTS days (       -- each trading day's ledger (#396): GET /v1/trader/days
+    mode TEXT NOT NULL,
+    day TEXT NOT NULL,
+    realized REAL NOT NULL,            -- the net P&L of the trades exited that day, won
+    trades INTEGER NOT NULL,           -- the trades exited that day
+    worst REAL NOT NULL,               -- the day's lowest P&L, realized + open: at most 0
+    cumulative REAL NOT NULL,          -- the cumulative P&L at the day's last update
+    cumulative_worst REAL NOT NULL,    -- its lowest that day: at most 0
+    daily_limit REAL NOT NULL,         -- the limits that day, won
+    cumulative_limit REAL NOT NULL,
+    status TEXT NOT NULL,              -- the trader's at the day's last update
+    halt TEXT,                         -- the limit reached that day, if any
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (mode, day)
+);
 """
 
 # Columns added since the tables were first made (#395, #399): added to a store made before, null
@@ -156,9 +208,27 @@ _ADDED = {
     ),
 }
 
+# A trade ``t`` of the champion (#399): entered before the first champion, or under the policy that
+# was the champion when it was entered (``champions``). The chart marks these alone (``marks.py``),
+# and the loss limits count these alone (#396).
+CHAMPION_TRADE = (
+    "(t.policy_id IS NULL OR t.policy_id ="
+    " (SELECT c.policy_id FROM champions c WHERE c.at <= t.entry_at ORDER BY c.id DESC LIMIT 1))"
+)
+
 BUY, SELL = "buy", "sell"
 OPEN, FILLED, CANCELLED = "open", "filled", "cancelled"
 ENTRY = "entry"
+# What a control asks for (#396), and who asks.
+PAUSE, RESUME, REARM = "pause", "resume", "rearm"
+API, CLI = "api", "cli"
+# The limits a halt is of (#396): also the trader's status while it holds.
+DAILY_LIMIT, CUMULATIVE_LIMIT = "daily_limit", "cumulative_limit"
+# GET /v1/trader: the trader is running while its snapshot is at most this old (it rewrites it
+# every ``limits.HEARTBEAT`` at least).
+ALIVE_SECONDS = 15.0
+# GET /v1/trader: the last controls shown.
+CONTROLS_SHOWN = 20
 
 
 def iso(at: datetime) -> str:
@@ -225,6 +295,46 @@ class OpenTrade:
     kind: str  # its cell's
     predictor: str
     bar_close: datetime
+    entry_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class Control:
+    """A pause, resume or re-arm asked for (#396)."""
+
+    id: int
+    at: datetime
+    action: str
+    source: str
+    sell_now: bool | None
+    mode: str | None
+    applied_at: datetime | None
+
+    def as_json(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "at": iso(self.at),
+            "action": self.action,
+            "source": self.source,
+            "sell_now": self.sell_now,
+            "mode": self.mode,
+            "applied_at": None if self.applied_at is None else iso(self.applied_at),
+        }
+
+
+@dataclass(frozen=True)
+class Halt:
+    """A loss limit reached (#396)."""
+
+    id: int
+    at: datetime
+    mode: str
+    day: date
+    kind: str
+    pnl: float
+    realized: float
+    unrealized: float
+    limit: float
 
 
 class TraderStore:
@@ -242,7 +352,11 @@ class TraderStore:
                 have = {r["name"] for r in self._db.execute(f"PRAGMA table_info({table})")}
                 for name, spec in columns:
                     if name not in have:
-                        self._db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {spec}")
+                        try:
+                            self._db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {spec}")
+                        except sqlite3.OperationalError as e:  # added meanwhile by the other writer
+                            if "duplicate column" not in str(e):
+                                raise
 
     def close(self) -> None:
         self._db.close()
@@ -398,6 +512,7 @@ class TraderStore:
             entry.kind,
             entry.predictor,
             entry.bar_close,
+            entry.entry_at,
         )
 
     def exit(self, trade: OpenTrade, out: Exit) -> None:
@@ -449,7 +564,126 @@ class TraderStore:
             row["kind"],
             row["predictor"],
             datetime.fromisoformat(row["bar_close"]),
+            datetime.fromisoformat(row["entry_at"]),
         )
+
+    def realized(self, mode: str, since: datetime | None) -> tuple[float, int]:
+        """The net P&L of ``mode``'s trades exited at or after ``since`` (all if None), and how many:
+        the champion's alone (``CHAMPION_TRADE``), the trades the limits and the cash hold (#396); a
+        challenger's paper trades (#400) are not."""
+        where, params = ("AND exit_at >= ?", [iso(since)]) if since is not None else ("", [])
+        row = self._db.execute(
+            "SELECT coalesce(sum(net), 0), count(*) FROM trades t"
+            f" WHERE mode = ? AND exit_at IS NOT NULL AND {CHAMPION_TRADE} {where}",
+            (mode, *params),
+        ).fetchone()
+        return float(row[0]), int(row[1])
+
+    def first_run(self, mode: str) -> datetime | None:
+        """When ``mode`` was first started."""
+        row = self._db.execute("SELECT min(at) FROM runs WHERE mode = ?", (mode,)).fetchone()
+        return None if row[0] is None else datetime.fromisoformat(row[0])
+
+    # Controls (#396): the engine writes a pause, ``krx-quant trade`` a resume or a re-arm, the
+    # trader marks each applied as it reads it.
+
+    def add_control(
+        self, at: datetime, action: str, source: str, sell_now: bool | None = None, mode: str | None = None
+    ) -> Control:
+        with self._db:
+            cursor = self._db.execute(
+                "INSERT INTO controls (at, action, source, sell_now, mode) VALUES (?, ?, ?, ?, ?)",
+                (iso(at), action, source, None if sell_now is None else int(sell_now), mode),
+            )
+        assert cursor.lastrowid is not None
+        control = self.control(cursor.lastrowid)
+        assert control is not None
+        return control
+
+    def control(self, control: int) -> Control | None:
+        row = self._db.execute("SELECT * FROM controls WHERE id = ?", (control,)).fetchone()
+        return None if row is None else _control(row)
+
+    def controls(self, applied: bool | None = None) -> list[Control]:
+        """The controls asked for, in order: those applied, those not yet, or all."""
+        where = {None: "", True: "WHERE applied_at IS NOT NULL", False: "WHERE applied_at IS NULL"}[applied]
+        return [_control(r) for r in self._db.execute(f"SELECT * FROM controls {where} ORDER BY id")]
+
+    def applied(self, control: int, at: datetime) -> None:
+        with self._db:
+            self._db.execute("UPDATE controls SET applied_at = ? WHERE id = ?", (iso(at), control))
+
+    # Halts (#396).
+
+    def add_halt(
+        self, at: datetime, mode: str, kind: str, pnl: float, realized: float, unrealized: float, limit: float
+    ) -> Halt:
+        day = at.astimezone(KST).date()
+        with self._db:
+            cursor = self._db.execute(
+                "INSERT INTO halts (at, mode, day, kind, pnl, realized, unrealized, limit_won)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (iso(at), mode, day.isoformat(), kind, pnl, realized, unrealized, limit),
+            )
+        assert cursor.lastrowid is not None
+        return Halt(cursor.lastrowid, at, mode, day, kind, pnl, realized, unrealized, limit)
+
+    def halts(self, mode: str, day: date) -> tuple[Halt | None, Halt | None]:
+        """``mode``'s halts in force on ``day``: the daily limit's of that day, the cumulative
+        limit's not re-armed."""
+        daily = self._db.execute(
+            "SELECT * FROM halts WHERE mode = ? AND kind = ? AND day = ? ORDER BY id LIMIT 1",
+            (mode, DAILY_LIMIT, day.isoformat()),
+        ).fetchone()
+        cumulative = self._db.execute(
+            "SELECT * FROM halts WHERE mode = ? AND kind = ? AND lifted_at IS NULL ORDER BY id LIMIT 1",
+            (mode, CUMULATIVE_LIMIT),
+        ).fetchone()
+        return (None if daily is None else _halt(daily)), (None if cumulative is None else _halt(cumulative))
+
+    def lift(self, halt: int, at: datetime, rearm: int) -> None:
+        """A cumulative halt re-armed."""
+        with self._db:
+            self._db.execute(
+                "UPDATE halts SET lifted_at = ?, rearm_id = ? WHERE id = ?", (iso(at), rearm, halt)
+            )
+
+    def rearmed_at(self, mode: str) -> datetime | None:
+        """When ``mode``'s cumulative limit was last re-armed: its count starts there."""
+        row = self._db.execute("SELECT max(lifted_at) FROM halts WHERE mode = ?", (mode,)).fetchone()
+        return None if row[0] is None else datetime.fromisoformat(row[0])
+
+    # The state now and the days (#396).
+
+    def put_snapshot(self, at: datetime, body: Mapping[str, Any]) -> None:
+        with self._db:
+            self._db.execute(
+                "INSERT INTO snapshot (id, at, body) VALUES (1, ?, ?)"
+                " ON CONFLICT (id) DO UPDATE SET at = excluded.at, body = excluded.body",
+                (iso(at), json.dumps(dict(body), ensure_ascii=False)),
+            )
+
+    def put_day(self, mode: str, day: date, row: Mapping[str, Any], at: datetime) -> None:
+        """``mode``'s ledger of ``day`` as it stands at ``at`` (``days``' columns)."""
+        columns = (
+            *("realized", "trades", "worst", "cumulative", "cumulative_worst"),
+            *("daily_limit", "cumulative_limit", "status", "halt"),
+        )
+        values = [row[c] for c in columns]
+        with self._db:
+            self._db.execute(
+                f"INSERT INTO days (mode, day, {', '.join(columns)}, updated_at)"
+                f" VALUES (?, ?, {', '.join('?' * len(columns))}, ?)"
+                " ON CONFLICT (mode, day) DO UPDATE SET "
+                + ", ".join(f"{c} = excluded.{c}" for c in (*columns, "updated_at")),
+                (mode, day.isoformat(), *values, iso(at)),
+            )
+
+    def day(self, mode: str, day: date) -> dict[str, Any] | None:
+        row = self._db.execute(
+            "SELECT * FROM days WHERE mode = ? AND day = ?", (mode, day.isoformat())
+        ).fetchone()
+        return None if row is None else dict(row)
 
     def _mode(self, trade: int) -> str:
         mode: str = self._db.execute("SELECT mode FROM trades WHERE id = ?", (trade,)).fetchone()[0]
@@ -479,6 +713,131 @@ class TraderStore:
             "INSERT INTO fills (order_id, at, price, quantity, quote_at) VALUES (?, ?, ?, ?, ?)",
             (order, at, price, quantity, iso(quote_at)),
         )
+
+
+def _control(row: sqlite3.Row) -> Control:
+    return Control(
+        row["id"],
+        datetime.fromisoformat(row["at"]),
+        row["action"],
+        row["source"],
+        None if row["sell_now"] is None else bool(row["sell_now"]),
+        row["mode"],
+        None if row["applied_at"] is None else datetime.fromisoformat(row["applied_at"]),
+    )
+
+
+def _halt(row: sqlite3.Row) -> Halt:
+    return Halt(
+        row["id"],
+        datetime.fromisoformat(row["at"]),
+        row["mode"],
+        date.fromisoformat(row["day"]),
+        row["kind"],
+        row["pnl"],
+        row["realized"],
+        row["unrealized"],
+        row["limit_won"],
+    )
+
+
+def request_pause(path: Path, sell_now: bool, at: datetime) -> dict[str, Any]:
+    """The screen's pause (``POST /v1/trader/pause``, #396), written into the trader's store for
+    the trader to read: the control kept. The store is made if the trader has not made it yet; it
+    reads the pause when it starts."""
+    store = TraderStore(path)
+    try:
+        return store.add_control(at, PAUSE, API, sell_now=sell_now).as_json()
+    finally:
+        store.close()
+
+
+def read_trader(path: Path | None, now: datetime) -> dict[str, Any]:
+    """``GET /v1/trader`` (#396): the trader's state as it last wrote it, whether it is running
+    (that state at most ``ALIVE_SECONDS`` old at ``now``), and the last controls asked for, newest
+    first (those not read yet with ``applied_at`` null). Its fields null without a store (an engine
+    without a state folder, a trader not started yet)."""
+    body: dict[str, Any] = dict.fromkeys(TRADER_FIELDS)
+    body |= {"updated_at": None, "alive": False, "controls": []}
+    if path is None:
+        return body
+    with _reading(path) as db:
+        if db is None:
+            return body
+        tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        if "snapshot" in tables:
+            row = db.execute("SELECT at, body FROM snapshot WHERE id = 1").fetchone()
+            if row is not None:
+                updated = datetime.fromisoformat(row["at"])
+                written = json.loads(row["body"])
+                body |= {k: written.get(k) for k in TRADER_FIELDS}
+                body["updated_at"] = iso(updated)
+                body["alive"] = abs((now - updated).total_seconds()) <= ALIVE_SECONDS
+        if "controls" in tables:
+            rows = db.execute("SELECT * FROM controls ORDER BY id DESC LIMIT ?", (CONTROLS_SHOWN,))
+            body["controls"] = [_control(r).as_json() for r in rows]
+    return body
+
+
+# The fields of the trader's state it writes (``PaperTrader.state``) and GET /v1/trader gives.
+TRADER_FIELDS = (
+    "mode",
+    "status",
+    "started_at",
+    "capital",
+    "cash",
+    "position",
+    "today",
+    "cumulative",
+    "limits",
+    "pause",
+)
+
+
+def read_days(path: Path, since: date, to: date) -> list[dict[str, Any]]:
+    """``GET /v1/trader/days`` (#396): each day's ledger from ``since`` to ``to`` (both included),
+    oldest first, each mode's."""
+    with _reading(path) as db:
+        if db is None:
+            return []
+        if (
+            db.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'days'").fetchone()
+            is None
+        ):
+            return []
+        rows = db.execute(
+            "SELECT * FROM days WHERE day >= ? AND day <= ? ORDER BY day, mode",
+            (since.isoformat(), to.isoformat()),
+        ).fetchall()
+    return [_day_json(dict(r)) for r in rows]
+
+
+def _used(worst: float, limit: float) -> float:
+    """How much of ``limit`` a P&L of ``worst`` used: 0 for none, 1 for all of it."""
+    return max(0.0, -worst) / limit if limit > 0 else 0.0
+
+
+def _day_json(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "day": row["day"],
+        "mode": row["mode"],
+        "net": row["realized"],
+        "trades": row["trades"],
+        "daily": {
+            "limit": row["daily_limit"],
+            "worst": row["worst"],
+            "used": _used(row["worst"], row["daily_limit"]),
+        },
+        "cumulative": {
+            "limit": row["cumulative_limit"],
+            "net": row["cumulative"],
+            "worst": row["cumulative_worst"],
+            "used": _used(row["cumulative_worst"], row["cumulative_limit"]),
+        },
+        "status": row["status"],
+        "halt": row["halt"],
+        "updated_at": row["updated_at"],
+    }
 
 
 @contextmanager
