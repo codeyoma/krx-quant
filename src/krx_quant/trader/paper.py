@@ -6,7 +6,9 @@ hold, else it is skipped with its reason:
 - it was made (status ok) and the engine did not block it (a final consensus, #88): ``not_ok``,
   ``blocked``;
 - it was displayed at most ``Rules.fresh`` before the decision (``stale``: a trader that was
-  stopped does not act on the predictions it missed);
+  stopped does not act on the predictions it missed), and the decision is before its time barrier
+  (``expired``: an engine catching up displays an overdue bar close's prediction late, and a
+  barrier prediction carries no block of its own for it);
 - its most likely class is the kind's rise (up, up_first; a tie goes to the middle class, then
   the first, ``kinds.most_likely``) and that class's probability is at least the threshold θ:
   ``not_up``, ``below_threshold``;
@@ -25,9 +27,9 @@ barrier the bar close plus the kind's horizon: the trade is the event its hit ra
 
 - the buy at the best ask of the first quote received after the decision. None if that quote's
   ask is at or above the target (``target_reached``: it was reached already), if the capital
-  does not buy one share (``no_shares``), or if no quote comes within ``Rules.quote_wait``
-  (``no_quote``). The quantity is the capital over that ask, rounded down. The take-profit's sell
-  rests at the target from then on;
+  does not buy one share (``no_shares``), if no quote comes within ``Rules.quote_wait``
+  (``no_quote``), or if it comes at or after the time barrier (``expired``). The quantity is the
+  capital over that ask, rounded down. The take-profit's sell rests at the target from then on;
 - the take-profit at the target, once a quote received after the buy has its best bid at or above
   it (no place at the front of the queue is assumed);
 - the stop at the best bid of the first quote after the buy whose best bid is at or below the stop;
@@ -70,7 +72,7 @@ log = logging.getLogger(__name__)
 # Why a trade ended.
 TAKE_PROFIT, STOP_LOSS, TIME = "take_profit", "stop_loss", "time"
 # Why a prediction bought nothing.
-NOT_OK, BLOCKED, STALE = "not_ok", "blocked", "stale"
+NOT_OK, BLOCKED, STALE, EXPIRED = "not_ok", "blocked", "stale", "expired"
 NOT_UP, BELOW_THRESHOLD, NO_REFERENCE = "not_up", "below_threshold", "no_reference"
 CLOSED, BEFORE_ENTRY, PAST_LAST_EXIT, HOLDING = "closed", "before_entry", "past_last_exit", "holding"
 # Why a buy decided did not fill.
@@ -131,6 +133,8 @@ def plan(signal: Signal, rules: Rules, session: Session | None, at: datetime) ->
         return BLOCKED
     if at - signal.displayed_at > rules.fresh:
         return STALE
+    if at >= signal.bar_close + signal.horizon:
+        return EXPIRED
     if most_likely(signal.probabilities) != signal.rise:
         return NOT_UP
     if p < rules.threshold:
@@ -252,6 +256,9 @@ class PaperTrader:
     def _buy(self, waiting: _Waiting, quote: BestQuote) -> None:
         if quote.received_at <= waiting.decided_at:
             return  # received before the decision, though it came after it
+        if quote.received_at >= waiting.plan.time_barrier:
+            self._give_up(waiting, EXPIRED)
+            return
         if quote.received_at > waiting.deadline(self.rules):
             self._give_up(waiting, NO_QUOTE)
             return
@@ -323,7 +330,8 @@ class PaperTrader:
         return last
 
     def _fresh(self, trade: OpenTrade, quote: BestQuote) -> bool:
-        return trade.time_barrier - quote.received_at <= self.rules.quote_wait
+        """Whether ``quote`` was received before the barrier, within ``Rules.quote_wait`` of it."""
+        return timedelta(0) < trade.time_barrier - quote.received_at <= self.rules.quote_wait
 
     def _exit(self, trade: OpenTrade, at: datetime, price: float, reason: str, quote: BestQuote) -> None:
         paid = costs(trade.entry_price, price, trade.quantity, self.rules.fee_rate)

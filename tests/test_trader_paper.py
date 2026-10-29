@@ -27,6 +27,7 @@ from krx_quant.trader.paper import (
     BEFORE_ENTRY,
     BELOW_THRESHOLD,
     BLOCKED,
+    EXPIRED,
     HOLDING,
     NO_QUOTE,
     NO_REFERENCE,
@@ -215,6 +216,25 @@ def test_no_entry_whose_time_barrier_is_past_15_15(tmp_path: Path) -> None:
         ]
     )
     assert [d["reason"] for d in four.decisions()] == [None, PAST_LAST_EXIT]
+
+
+def test_no_entry_once_the_time_barrier_has_passed(tmp_path: Path) -> None:
+    """An engine catching up displays an overdue bar close's prediction late: the 15:11 barrier's,
+    whose time barrier is 15:15, displayed at 15:20 during the closing auction, buys nothing (#409).
+    Nor does a buy decided just before its barrier whose first quote comes at or after it."""
+    late = Day(tmp_path / "late")
+    assert (
+        late.run([Read("15:20:00.3", [Barrier("15:11:00", shown=540)]), quote("15:20:00.5", 70_000, 70_100)])
+        == []
+    )
+    assert [(d["action"], d["reason"]) for d in late.decisions()] == [("skip", EXPIRED)]
+
+    edge = Day(tmp_path / "edge")
+    assert (
+        edge.run([Read("10:03:58.3", [Barrier("10:00:00", shown=238)]), quote("10:04:00.5", 70_000, 70_100)])
+        == []
+    )
+    assert [(d["action"], d["reason"]) for d in edge.decisions()] == [("buy", EXPIRED)]
 
 
 def test_no_entry_before_09_05(tmp_path: Path) -> None:
