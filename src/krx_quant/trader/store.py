@@ -1,12 +1,17 @@
 """The trader's store (#394): ``state/trader.sqlite3``, written by the trader alone.
 
 - ``runs``: each start of the trader, with its mode and settings;
-- ``decisions``: each prediction of the cell the trader read, and what it did: bought, or why
-  not (``paper.py``'s reasons);
-- ``trades``: each position, from its entry to its exit: the cell, the prediction and its
-  probability, the reference price, target, stop and time barrier, the entry and the exit (why
-  it ended: take_profit, stop_loss, time), the costs (both commissions and the sell tax) and the
-  P&L before and after them, in won;
+- ``selections``: each pick of the cells from the cost map (#395): when, the cost map's time, the
+  cells picked in their rank with what they were picked on (p*, the hit rate's lower bound, the
+  Kelly fraction), every cell considered with its verdict, and, when none trades, why (no cell
+  passes, or the cost map could not be read);
+- ``decisions``: each prediction of a picked cell the trader read, and what it did: bought, or
+  why not (``paper.py``'s reasons), under which pick;
+- ``trades``: each position, from its entry to its exit: the cell and its pick (the predictor's
+  role, p*, the hit rate's lower bound, the Kelly f* and the fraction bought), the prediction and
+  its probability, the reference price, target, stop and time barrier, the entry and the exit
+  (why it ended: take_profit, stop_loss, time), the costs (both commissions and the sell tax) and
+  the P&L before and after them, in won;
 - ``orders``: each order of a trade (the entry's buy, the take-profit's sell resting at the
   target, the stop's or the time exit's sell), its limit, quantity and status (open, filled,
   cancelled), and the broker's order number (none in paper);
@@ -14,7 +19,8 @@
 
 Every row carries its mode (``paper``): paper, KIS mock and live trades are told apart in the
 same tables. The Engine API reads it read-only (``read_trades``, ``GET /v1/trader/trades``).
-Times are ISO 8601 strings in KST, which sort in time order.
+Times are ISO 8601 strings in KST, which sort in time order. The columns #395 added
+(``_ADDED``) are added to a store made before it, null in its rows.
 """
 
 from __future__ import annotations
@@ -26,9 +32,12 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from krx_quant.feeds.base import KST
+
+if TYPE_CHECKING:
+    from krx_quant.trader.selection import Selection
 
 DB_NAME = "trader.sqlite3"
 
@@ -39,7 +48,17 @@ CREATE TABLE IF NOT EXISTS runs (       -- each start of the trader
     mode TEXT NOT NULL,
     detail TEXT NOT NULL               -- JSON: the cell, threshold, capital, commit
 );
-CREATE TABLE IF NOT EXISTS decisions (  -- each prediction of the cell read, and what was done
+CREATE TABLE IF NOT EXISTS selections (  -- each pick of the cells from the cost map (#395)
+    id INTEGER PRIMARY KEY,
+    at TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    as_of TEXT,                        -- the cost map's as_of; null when it could not be read
+    picks TEXT NOT NULL,               -- JSON: the cells picked, first ranked first, with p*, low, Kelly
+    considered TEXT NOT NULL,          -- JSON: every (kind, role) and its verdict, or why it has none
+    reason TEXT,                       -- why no cell trades: no_pass, no_cost_map; null when one does
+    detail TEXT                        -- why the cost map could not be read
+);
+CREATE TABLE IF NOT EXISTS decisions (  -- each prediction of a picked cell read, and what was done
     id INTEGER PRIMARY KEY,
     mode TEXT NOT NULL,
     symbol TEXT NOT NULL,
@@ -111,6 +130,22 @@ CREATE TABLE IF NOT EXISTS fills (
 CREATE INDEX IF NOT EXISTS fills_by_order ON fills (order_id);
 """
 
+# Columns added since the tables were first made (#395): added to a store made before, null in
+# its rows.
+_ADDED = {
+    "decisions": (
+        ("selection_id", "INTEGER REFERENCES selections (id)"),  # the pick in force; null: none yet
+    ),
+    "trades": (
+        ("selection_id", "INTEGER REFERENCES selections (id)"),
+        ("role", "TEXT"),  # the predictor's on the cost map: consensus, top, baseline
+        ("p_star", "REAL"),  # the breakeven hit rate at a market order's round trip
+        ("precision_low", "REAL"),  # the cell's hit rate's lower bound
+        ("kelly", "REAL"),  # f*, uncut
+        ("fraction", "REAL"),  # the share of the capital bought: KELLY_FRACTION × f*, cut to 0-1
+    ),
+}
+
 BUY, SELL = "buy", "sell"
 OPEN, FILLED, CANCELLED = "open", "filled", "cancelled"
 ENTRY = "entry"
@@ -144,6 +179,13 @@ class Entry:
     quantity: int
     buy_fee: float
     quote_at: datetime
+    # The cell's pick (#395); None for a trade entered before it.
+    selection_id: int | None = None
+    role: str | None = None
+    p_star: float | None = None
+    low: float | None = None
+    kelly: float | None = None
+    fraction: float | None = None
 
 
 @dataclass(frozen=True)
@@ -168,6 +210,9 @@ class OpenTrade:
     target: float
     stop: float
     time_barrier: datetime
+    kind: str  # its cell's
+    predictor: str
+    bar_close: datetime
 
 
 class TraderStore:
@@ -179,6 +224,12 @@ class TraderStore:
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.execute("PRAGMA synchronous=NORMAL")
         self._db.executescript(f"BEGIN;{_SCHEMA}COMMIT;")
+        with self._db:
+            for table, columns in _ADDED.items():
+                have = {r["name"] for r in self._db.execute(f"PRAGMA table_info({table})")}
+                for name, spec in columns:
+                    if name not in have:
+                        self._db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {spec}")
 
     def close(self) -> None:
         self._db.close()
@@ -189,6 +240,24 @@ class TraderStore:
                 "INSERT INTO runs (at, mode, detail) VALUES (?, ?, ?)",
                 (iso(at), mode, json.dumps(dict(detail), ensure_ascii=False, sort_keys=True)),
             )
+
+    def add_selection(self, mode: str, at: datetime, selection: Selection) -> int:
+        with self._db:
+            cursor = self._db.execute(
+                "INSERT INTO selections (at, mode, as_of, picks, considered, reason, detail)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    iso(at),
+                    mode,
+                    selection.as_of,
+                    json.dumps([p.as_json() for p in selection.picks], ensure_ascii=False),
+                    json.dumps(list(selection.considered), ensure_ascii=False),
+                    selection.reason,
+                    selection.detail,
+                ),
+            )
+        assert cursor.lastrowid is not None
+        return cursor.lastrowid
 
     def decided(self, mode: str, kind: str, predictor: str, prediction_id: int) -> bool:
         row = self._db.execute(
@@ -210,12 +279,13 @@ class TraderStore:
         probability: float | None,
         action: str,
         reason: str | None,
+        selection_id: int | None = None,
     ) -> int:
         with self._db:
             cursor = self._db.execute(
                 "INSERT INTO decisions (mode, symbol, kind, predictor, prediction_id, bar_close,"
-                " displayed_at, decided_at, probability, action, reason)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " displayed_at, decided_at, probability, action, reason, selection_id)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     mode,
                     symbol,
@@ -228,6 +298,7 @@ class TraderStore:
                     probability,
                     action,
                     reason,
+                    selection_id,
                 ),
             )
         assert cursor.lastrowid is not None
@@ -257,8 +328,8 @@ class TraderStore:
             cursor = self._db.execute(
                 "INSERT INTO trades (mode, symbol, kind, predictor, prediction_id, bar_close, probability,"
                 " threshold, anchor, tick, width_ticks, target, stop, time_barrier, decided_at, entry_at,"
-                " entry_price, quantity, buy_fee)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " entry_price, quantity, buy_fee, selection_id, role, p_star, precision_low, kelly, fraction)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     entry.mode,
                     entry.symbol,
@@ -279,6 +350,12 @@ class TraderStore:
                     entry.entry_price,
                     entry.quantity,
                     entry.buy_fee,
+                    entry.selection_id,
+                    entry.role,
+                    entry.p_star,
+                    entry.low,
+                    entry.kelly,
+                    entry.fraction,
                 ),
             )
             trade = cursor.lastrowid
@@ -298,6 +375,9 @@ class TraderStore:
             entry.target,
             entry.stop,
             entry.time_barrier,
+            entry.kind,
+            entry.predictor,
+            entry.bar_close,
         )
 
     def exit(self, trade: OpenTrade, out: Exit) -> None:
@@ -346,6 +426,9 @@ class TraderStore:
             row["target"],
             row["stop"],
             datetime.fromisoformat(row["time_barrier"]),
+            row["kind"],
+            row["predictor"],
+            datetime.fromisoformat(row["bar_close"]),
         )
 
     def _mode(self, trade: int) -> str:
@@ -431,8 +514,13 @@ def _trade_json(
         "predictor": row["predictor"],
         "prediction_id": row["prediction_id"],
         "bar_close": row["bar_close"],
+        "role": row["role"],
         "probability": row["probability"],
         "threshold": row["threshold"],
+        "p_star": row["p_star"],
+        "precision_low": row["precision_low"],
+        "kelly": row["kelly"],
+        "fraction": row["fraction"],
         "anchor": row["anchor"],
         "tick": row["tick"],
         "width_ticks": row["width_ticks"],

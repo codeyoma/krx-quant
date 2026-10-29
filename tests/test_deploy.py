@@ -66,7 +66,8 @@ def services(compose: str) -> dict[str, str]:
 def test_the_quote_stream_is_not_published_only_the_engine_api_is() -> None:
     """#394: the collector streams the quotes on 8081 inside its container; compose publishes the
     Engine API's 8080 alone, so the Tailscale address never reaches the quotes. The trader listens
-    on nothing and reads them over the compose network."""
+    on nothing and reads them over the compose network, and the cost map from the Engine API there
+    (#395)."""
     compose = (ROOT / "compose.yaml").read_text()
     found = services(compose)
 
@@ -75,6 +76,7 @@ def test_the_quote_stream_is_not_published_only_the_engine_api_is() -> None:
     assert 'KRX_API_PORT: "8080"' in found["engine"] and 'KRX_QUOTES_PORT: "8081"' in found["engine"]
     assert "ports:" not in found["trader"] and "expose:" not in compose
     assert "KRX_TRADER_QUOTES_URL: ws://engine:8081/v1/quotes" in found["trader"]
+    assert "KRX_TRADER_ENGINE_URL: http://engine:8080" in found["trader"]
     assert 'command: ["trade"]' in found["trader"] and "image: krx-quant:latest" in found["trader"]
     assert "network_mode" not in compose
 
