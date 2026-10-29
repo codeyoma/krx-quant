@@ -81,6 +81,7 @@ from krx_quant.simulation import (
 )
 from krx_quant.structure_check import structure_check
 from krx_quant.supply_probe import probe_supply
+from krx_quant.trader.refit import run_refit
 from krx_quant.trader.run import run_trader
 from krx_quant.trader.settings import TraderSettings
 from krx_quant.training import fit_algorithm
@@ -113,6 +114,12 @@ async def _trade() -> None:
         except NotImplementedError:  # Windows: Ctrl+C raises KeyboardInterrupt instead
             pass
     await run_trader(settings, trader, stop=stop)
+
+
+async def _refit_policy(engine_url: str | None) -> int:
+    """The trader's policy fitted again (#399): the scheduled job's, in the engine's container."""
+    settings = Settings.from_env(require_kis=False)
+    return await run_refit(settings, TraderSettings.from_env(), datetime.now(KST), engine_url)
 
 
 async def _measure() -> None:
@@ -649,6 +656,17 @@ def main(argv: list[str] | None = None) -> int:
         "trade",
         help="trade 005930 on the cells the cost map passes, in paper (#394, #395), until interrupted",
     )
+    refit_cmd = sub.add_parser(
+        "refit-policy",
+        help="fit the trader's policy again (#399): tonight's cost map from the Engine API, each passing"
+        " cell's threshold and Kelly fraction on a small grid, from the stored predictions and answers of"
+        " its 20 days (read-only); keeps it in state/trader.sqlite3, the first as the champion",
+    )
+    refit_cmd.add_argument(
+        "--engine-url",
+        help="the Engine API the cost map is read from (default KRX_TRADER_ENGINE_URL, which compose sets"
+        " to the engine service's, http://engine:8080; else http://127.0.0.1:8080)",
+    )
     sub.add_parser(
         "measure-subscriptions",
         help="count how many real-time registrations KIS allows per session (stop the collector first)",
@@ -933,6 +951,8 @@ def _command(args: argparse.Namespace) -> int:
         asyncio.run(_collect())
     elif args.command == "trade":
         asyncio.run(_trade())
+    elif args.command == "refit-policy":
+        return asyncio.run(_refit_policy(args.engine_url))
     elif args.command == "measure-subscriptions":
         asyncio.run(_measure())
     elif args.command == "check-fallbacks":

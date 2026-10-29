@@ -77,6 +77,9 @@ def test_the_quote_stream_is_not_published_only_the_engine_api_is() -> None:
     assert "ports:" not in found["trader"] and "expose:" not in compose
     assert "KRX_TRADER_QUOTES_URL: ws://engine:8081/v1/quotes" in found["trader"]
     assert "KRX_TRADER_ENGINE_URL: http://engine:8080" in found["trader"]
+    assert "KRX_TRADER_ENGINE_URL: http://engine:8080" in found["engine"], (
+        "the nightly policy re-fit (#399) asks its own container's Engine API, by the service's name"
+    )
     assert 'command: ["trade"]' in found["trader"] and "image: krx-quant:latest" in found["trader"]
     assert "network_mode" not in compose
 

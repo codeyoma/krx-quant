@@ -128,6 +128,7 @@ async def walk(get: Get) -> dict[str, int]:
             )
     await ask("/v1/trader/trades", "trader_trades")  # #394
     await ask("/v1/trader/trades?limit=5&before=2026-10-12T10:00:00%2B09:00", "trader_trades")
+    await ask("/v1/trader/policies?limit=5", "trader_policies")  # #399
     for symbol in symbols:  # #398
         await ask(f"/v1/symbols/{symbol}/trader-marks", "trader_marks")
         query = "?limit=5&before=2026-10-12T10:00:00%2B09:00"
@@ -174,6 +175,7 @@ async def walk(get: Get) -> dict[str, int]:
         ("/v1/symbols/005930/closing-flow/days?from=2015-01-01&to=2026-10-12", 400),
         ("/v1/trader/trades?limit=0", 400),
         ("/v1/trader/trades?before=10:00", 400),
+        ("/v1/trader/policies?limit=0", 400),
         ("/v1/symbols/999999/trader-marks", 404),
         ("/v1/symbols/005930/trader-marks?limit=0", 400),
         ("/v1/symbols/005930/trader-marks?before=10:00", 400),

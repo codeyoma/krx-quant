@@ -8,6 +8,8 @@ made up.
 
 from __future__ import annotations
 
+import sqlite3
+from contextlib import closing
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -17,6 +19,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from krx_quant.api import create_app
 from krx_quant.trader import SYMBOL
+from krx_quant.trader import policy as policies
 from krx_quant.trader.store import DB_NAME, Entry, Exit, TraderStore
 from tests.api_schema import check
 from tests.replay_events import at as replay_at
@@ -40,9 +43,16 @@ def before(moment: str) -> str:
     return "before=" + url_quote(moment)
 
 
-def trade(store: TraderStore, mode: str, entry: datetime, out: datetime | None, prediction_id: int) -> None:
+def trade(
+    store: TraderStore,
+    mode: str,
+    entry: datetime,
+    out: datetime | None,
+    prediction_id: int,
+    policy_id: int | None = None,
+) -> None:
     """A trade of ``mode`` written as the trader writes one: bought at ``entry`` at 70,100, 10
-    shares, and sold at ``out`` (if given) at the target."""
+    shares, and sold at ``out`` (if given) at the target; under ``policy_id`` (#399) if given."""
     decision = store.add_decision(
         mode, SYMBOL, "barrier", "breiman", prediction_id, entry, entry, entry, 0.7, "buy", None
     )
@@ -69,6 +79,7 @@ def trade(store: TraderStore, mode: str, entry: datetime, out: datetime | None, 
             quantity=10,
             buy_fee=105.15,
             quote_at=entry,
+            policy_id=policy_id,
         ),
     )
     if out is not None:
@@ -191,3 +202,49 @@ async def test_a_bad_query_or_an_unknown_symbol_is_refused(tmp_path: Path) -> No
     answered, body = await marks(tmp_path, tmp_path, symbol="999999")
     assert answered == 404
     check("error", body)
+
+
+async def test_each_mark_carries_its_trade_s_policy_and_only_the_champion_s_are_marked(
+    tmp_path: Path,
+) -> None:
+    """#399: a trade entered before the first champion (no policy), then policy 1 the champion from
+    22:31 on, its trade two mornings later; policy 2, a challenger, trades beside it (#400 runs
+    them): its paper trade is not the champion's and is not marked."""
+    store = TraderStore(tmp_path / DB_NAME)
+    try:
+        trade(store, "paper", at("10:00:00"), at("10:02:00"), 1)
+        db = policies.connect(tmp_path / DB_NAME)
+        try:
+            policies.add(db, at("22:31:00"), "밤 맞추기", [], [], {})  # the champion
+            policies.add(db, at("22:31:00") + timedelta(days=1), "밤 맞추기", [], [], {})  # a challenger
+        finally:
+            db.close()
+        morning = at("10:00:00") + timedelta(days=2)
+        trade(store, "paper", morning, morning + timedelta(minutes=2), 2, policy_id=1)
+        trade(store, "paper", morning + timedelta(minutes=1), None, 3, policy_id=2)
+    finally:
+        store.close()
+
+    status, body = await marks(tmp_path, tmp_path)
+
+    assert status == 200
+    check("trader_marks", body)
+    assert [(m["trade_id"], m["side"], m["policy"]) for m in body["marks"]] == [
+        (2, "sell", 1),
+        (2, "buy", 1),
+        (1, "sell", None),
+        (1, "buy", None),
+    ], "the challenger's trade 3 is not marked"
+
+
+async def test_a_store_from_before_the_policies_marks_every_trade(tmp_path: Path) -> None:
+    """The Engine API may read the store before the trader, restarted with #399, adds its columns."""
+    Day(tmp_path).run(DAY)
+    with closing(sqlite3.connect(tmp_path / DB_NAME)) as db:
+        db.execute("DROP TABLE champions")
+        db.execute("ALTER TABLE trades DROP COLUMN policy_id")
+        db.commit()
+
+    _, body = await marks(tmp_path, tmp_path)
+
+    assert len(body["marks"]) == 5 and {m["policy"] for m in body["marks"]} == {None}

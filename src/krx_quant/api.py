@@ -62,6 +62,10 @@ Endpoints (all under ``/v1``):
 - ``GET /trader/trades?before=T&limit=N``: the trader's last N trades (#394, default 100, at most
   1000) entered before ``T`` if given, newest first, each with its orders and their fills, as the
   trader keeps them (``state/trader.sqlite3``, ``trader/store.py``); none before the trader's first.
+- ``GET /trader/policies?limit=N``: the trader's last N policy versions (#399, default 100, at most
+  1000), newest first, each with its status (``champion``, ``challenger``, ``former``), its cells
+  with their θ and Kelly fraction, the cells it left out and what it was fitted on; and every
+  change of the champion (``trader/policy.py``); none before the first nightly fit.
 - ``GET /symbols/{symbol}/trader-marks?before=T&limit=N``: the trader's buys and sells of the
   symbol as the chart marks them (#398, ``trader/marks.py``): the last N (default 100, at most 1000)
   before ``T`` if given, newest first, each at its fill's time and price, with its trade's quantity,
@@ -155,6 +159,7 @@ from krx_quant.stream import EventStream, LiveStatus, kind_prediction_json, kind
 from krx_quant.supply import FIELDS as SUPPLY_FIELDS
 from krx_quant.supply import stored_supply
 from krx_quant.trader.marks import read_marks
+from krx_quant.trader.policy import read_policies
 from krx_quant.trader.store import DB_NAME as TRADER_DB
 from krx_quant.trader.store import read_trades
 
@@ -302,6 +307,7 @@ def create_app(
     app.router.add_get("/v1/symbols/{symbol}/kinds/{kind}/latest", _kind_latest)
     app.router.add_get("/v1/symbols/{symbol}/kinds/{kind}/predictions", _kind_predictions)
     app.router.add_get("/v1/trader/trades", _trader_trades)
+    app.router.add_get("/v1/trader/policies", _trader_policies)
     app.router.add_get("/v1/symbols/{symbol}/trader-marks", _trader_marks)
     return app
 
@@ -1445,6 +1451,16 @@ async def _trader_trades(request: web.Request) -> web.Response:
         else await asyncio.to_thread(read_trades, state_dir / TRADER_DB, before, limit)
     )
     return _json({"trades": trades})
+
+
+async def _trader_policies(request: web.Request) -> web.Response:
+    """The trader's policy versions (#399), read from its store (read-only, off the event loop);
+    none without the store or before the first nightly fit."""
+    limit = _limit_query(request, DEFAULT_LIMIT, MAX_LIMIT)
+    state_dir = request.app[STATE_DIR_KEY]
+    if state_dir is None:
+        return _json({"champion": None, "policies": [], "champions": []})
+    return _json(await asyncio.to_thread(read_policies, state_dir / TRADER_DB, limit))
 
 
 async def _trader_marks(request: web.Request) -> web.Response:
