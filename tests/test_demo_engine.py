@@ -546,8 +546,8 @@ async def test_the_demo_has_the_trader_s_state_days_and_controls(tmp_path: Path)
     """#397, for the auto trader screen. Output: the live trader running at 10:30 with the
     morning's last trade open (its target, stop and time barrier, marked at the last bid), the
     day's and the cumulative P&L of its trades, the limits' use; the screen's pause of the 8th and
-    the server's resume of the 12th; each mode's days, the 8th paused; the morning's trades with
-    the cell's p* and lower bound."""
+    the server's resume of the 12th; each mode's days, the 8th paused, each day's lowest P&L with
+    its trades' dips while held; the morning's trades with the cell's p* and lower bound."""
     app = await demo_app(tmp_path / "demo.sqlite3")
 
     async with TestClient(TestServer(app)) as client:
@@ -594,6 +594,12 @@ async def test_the_demo_has_the_trader_s_state_days_and_controls(tmp_path: Path)
     assert ledger["2026-10-08", "paper"]["status"] == "entries_paused", "paused from the screen that day"
     assert ledger["2026-10-12", "paper"]["status"] == "running", "resumed on the server before the open"
     assert ledger["2026-10-12", "live"]["net"] == pytest.approx(realized)
+    # Each trade marked at the bids it was held through, as the trader marks it: the 7th's one trade
+    # dipped before its take profit, so its day's lowest is a loss though the day's net is a gain.
+    first = ledger["2026-10-07", "paper"]
+    assert first["net"] > 0 > first["daily"]["worst"]
+    assert first["cumulative"]["worst"] == first["daily"]["worst"]
+    assert all(d["daily"]["worst"] <= min(0.0, d["net"]) for d in days["days"])
     paper = [t for t in trades["trades"] if t["mode"] == "paper"]
     assert ledger["2026-10-12", "paper"]["cumulative"]["net"] == pytest.approx(sum(t["net"] for t in paper))
     assert {t["p_star"] for t in trades["trades"] if t["entry"]["at"] < "2026-10-12"} == {None}

@@ -1341,6 +1341,8 @@ KRX 마감 흐름 화면이 읽는 그날의 마감 리밸런싱 수요다(`clos
 - `orders`: 그 매매의 주문, 낸 순서대로. 매수(`entry`), 목표가에 걸어 둔 매도(`take_profit`: 익절이면 `filled`, 손절·시간·정지·한도면 `cancelled`), 손절·시간·정지·한도의 매도(`stop_loss`, `time`, `pause`, `daily_limit`, `cumulative_limit`). `broker_id`는 증권사 주문 번호(모의는 `null`). `fills`의 `quote_at`은 모의 체결이 쓴 호가의 받은 시각이다.
 - 데모 엔진의 매매는 아래 `trader-marks`의 것과 같다. 10-12 아침의 매매에는 칸의 값이 있다(지어낸 값: `role` `top`, `p_star` 0.61, `precision_low` 0.66, `kelly` 9.6, `fraction` 1.0). 10-07·10-08 오후의 둘은 칸 고르기(#395) 전에 들어간 매매라 `null`이다.
 
+  > **바뀜** (2026-10-30, #415): 데모의 매매는 모두 칸의 값(`role`, `p_star`, `precision_low`, `kelly`, `fraction`)이 `null`이었다 → 10-12 아침의 매매에는 지어낸 값이 있다. 이유: 자동 매매 화면(#397)의 매매 표가 p*와 하한을 보이고, 그것을 데모로 캡처하려고.
+
 > **바뀜** (2026-10-30, #413): `exit.reason`과 `orders[].purpose`는 `take_profit`, `stop_loss`, `time`(과 `entry`)이었다 → `pause`, `daily_limit`, `cumulative_limit`도 있다. `entry.quantity`는 주문 가능 현금도 넘지 않는다. 이유: 손실 한도와 화면의 정지가 열린 포지션을 바로 판다(#396).
 
 ### `GET /v1/trader` (#396)
@@ -1396,7 +1398,7 @@ trader가 돈 거래일마다의 장부다. `from`부터 `to`까지(KST 날짜, 
 - `daily`: 그날 손익(실현 + 평가)의 가장 낮은 값(`worst`)과 그것이 하루 한도(`limit`, 원)에서 쓴 몫(`used`).
 - `cumulative`: 그날 마지막의 누적 손익(`net`), 그날 가장 낮았던 누적 손익(`worst`)과 그것이 누적 한도에서 쓴 몫.
 - `status`: 그날 마지막의 상태(`GET /v1/trader`의 `status`). `halt`: 그날 닿은 한도(`daily_limit`, `cumulative_limit`), 없으면 `null`. `updated_at`: 그날 장부를 마지막으로 쓴 때.
-- 데모 엔진(#397)에는 모의의 10-07·10-08·10-12(10:05에 실전으로 바뀔 때까지)와 실전의 10-12 장부가 있다. 10-08은 화면의 새 진입 정지로 `entries_paused`로 끝났다. 지난날의 `updated_at`은 trader가 날을 넘긴 그 밤 0시다.
+- 데모 엔진(#397)에는 모의의 10-07·10-08·10-12(10:05에 실전으로 바뀔 때까지)와 실전의 10-12 장부가 있다. 10-08은 화면의 새 진입 정지로 `entries_paused`로 끝났다. 가장 낮은 손익(`worst`)은 trader처럼 매매를 든 동안 받은 호가마다의 평가로 센다: 10-07의 매매는 익절로 끝났지만 그 전에 −4,664원까지 내려갔다. 지난날의 `updated_at`은 trader가 날을 넘긴 그 밤 0시다.
 
 ### `POST /v1/trader/pause` (#396)
 

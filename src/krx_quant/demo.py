@@ -141,7 +141,7 @@ from krx_quant.touch import TARGET_VERSION
 from krx_quant.trader import CAPITAL, PAPER, THRESHOLD
 from krx_quant.trader import SYMBOL as TRADER_SYMBOL
 from krx_quant.trader.limits import Guard
-from krx_quant.trader.paper import PaperTrader, costs, shares
+from krx_quant.trader.paper import PaperTrader, costs, shares, unrealized
 from krx_quant.trader.paper import Rules as TraderRules
 from krx_quant.trader.quotes import BestQuote
 from krx_quant.trader.store import API, CLI, PAUSE, RESUME, TraderStore
@@ -488,9 +488,9 @@ def write_demo_trader(state_dir: Path, books: Sequence[Event]) -> None:
     as ``_demo_exit`` finds it (the time barrier four minutes after the bar close).
 
     With them the trader's runs, its pause and resume (``_DEMO_PAUSE``, ``_DEMO_RESUME``), each day's
-    ledger by the trader's own limits (``limits.Guard``) and its state at 10:30 (#397): the live
-    trader's, written by a paper trader of that mode (``PaperTrader``) on the quotes since its open
-    trade's entry."""
+    ledger by the trader's own limits (``limits.Guard``: each trade marked at every bid it was held
+    through, then its exit) and its state at 10:30 (#397): the live trader's, written by a paper trader
+    of that mode (``PaperTrader``) on the quotes since its open trade's entry."""
     for leftover in (TRADER_DB, f"{TRADER_DB}-wal", f"{TRADER_DB}-shm"):
         (state_dir / leftover).unlink(missing_ok=True)
     quotes = sorted(
@@ -567,6 +567,13 @@ def write_demo_trader(state_dir: Path, books: Sequence[Event]) -> None:
             )
             trade = store.enter(decision, entry)
             if (out := _demo_exit(entry, [q for q in after[1:] if q[0] < entry.time_barrier])) is not None:
+                # Marked at each bid it was held through, from its buy's quote to the one it was sold on
+                # (that one sells it, as the trader's ``on_quote`` does): the day's lowest P&L and the
+                # cumulative one's count those dips, not the exit alone.
+                for at, held_bid, _ in after:
+                    if at >= out.at:
+                        break
+                    guard.mark(unrealized(trade, held_bid, _FEE), at)
                 store.exit(trade, out)
                 gross = (out.price - entry.entry_price) * quantity
                 guard.exited(gross - entry.buy_fee - out.sell_fee - out.tax, out.at)
