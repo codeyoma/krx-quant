@@ -71,6 +71,10 @@ Endpoints (all under ``/v1``):
   screen's pause of the trader (#396), written into its store for it to read within a second:
   new entries, or that and a sale of the open position now. The API's only write: it neither
   resumes nor re-arms the trader, nor changes its mode or limits.
+- ``GET /symbols/{symbol}/trader-marks?before=T&limit=N``: the trader's buys and sells of the
+  symbol as the chart marks them (#398, ``trader/marks.py``): the last N (default 100, at most 1000)
+  before ``T`` if given, newest first, each at its fill's time and price, with its trade's quantity,
+  mode and cell, and a sell's exit reason and net P&L.
 
 An algorithm is of a kind (``kind`` in ``/algorithms``). ``/leaderboard?kind=`` ranks a kind's
 algorithms against its baselines (the direction's by default, as before); an algorithm's
@@ -160,6 +164,7 @@ from krx_quant.stats import (
 from krx_quant.stream import EventStream, LiveStatus, kind_prediction_json, kind_target, prediction_json
 from krx_quant.supply import FIELDS as SUPPLY_FIELDS
 from krx_quant.supply import stored_supply
+from krx_quant.trader.marks import read_marks
 from krx_quant.trader.store import DB_NAME as TRADER_DB
 from krx_quant.trader.store import read_days as read_trader_days
 from krx_quant.trader.store import read_trader, read_trades, request_pause
@@ -314,6 +319,7 @@ def create_app(
     app.router.add_get("/v1/trader", _trader)
     app.router.add_get("/v1/trader/days", _trader_days)
     app.router.add_post("/v1/trader/pause", _trader_pause)
+    app.router.add_get("/v1/symbols/{symbol}/trader-marks", _trader_marks)
     return app
 
 
@@ -1506,6 +1512,22 @@ async def _trader_pause(request: web.Request) -> web.Response:
     at = request.app[ENGINE_KEY].clock.now()
     control = await asyncio.to_thread(request_pause, state_dir / TRADER_DB, body["sell_now"], at)
     return _json({"control": control}, status=202)
+
+
+async def _trader_marks(request: web.Request) -> web.Response:
+    """The trader's buys and sells of a symbol as the chart marks them (#398), read from its store
+    (read-only, off the event loop); none without the store, before the trader's first trade, or
+    for a symbol it does not trade."""
+    _, symbol = _engine_and_symbol(request)
+    limit = _limit_query(request, DEFAULT_LIMIT, MAX_LIMIT)
+    before = _time_query(request, "before")
+    state_dir = request.app[STATE_DIR_KEY]
+    marks = (
+        []
+        if state_dir is None
+        else await asyncio.to_thread(read_marks, state_dir / TRADER_DB, symbol, before, limit)
+    )
+    return _json({"symbol": symbol, "marks": marks})
 
 
 def _json(body: dict[str, Any], status: int = 200) -> web.Response:

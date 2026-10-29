@@ -40,6 +40,7 @@ ROUTES = {
     "/v1/trader/trades": "trader_trades",  # #394
     "/v1/trader": "trader",  # #396
     "/v1/trader/days": "trader_days",
+    "/v1/symbols/{symbol}/trader-marks": "trader_marks",  # #398
 }
 # Each POST route and the definition of its answer: the trader's pause, the API's one write (#396).
 WRITES = {"/v1/trader/pause": "trader_pause"}

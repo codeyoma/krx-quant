@@ -12,10 +12,11 @@ from typing import Any
 from aiohttp.test_utils import TestClient, TestServer
 
 from krx_quant.api import create_app
+from krx_quant.trader.paper import Rules
 from tests.api_schema import check
 from tests.replay_events import at as replay_at
 from tests.replay_events import run
-from tests.trader_doubles import AskPause, AskResume, Barrier, Day, Event, Read, Tick, at, quote
+from tests.trader_doubles import FEE, AskPause, AskResume, Barrier, Day, Event, Read, Tick, at, quote
 
 DAY: list[Event] = [
     Read("10:00:02.3", [Barrier("10:00:00")]),
@@ -213,3 +214,20 @@ async def test_a_pause_asks_for_json_with_sell_now_alone(tmp_path: Path) -> None
         response = await client.post("/v1/trader/pause", json={"sell_now": False})
         assert response.status == 503
         check("error", await response.json())
+
+
+async def test_the_chart_marks_a_sale_by_a_pause_or_a_limit(tmp_path: Path) -> None:
+    """#398's marks show #396's sales: a pause selling now, and the daily limit reached."""
+    paused = tmp_path / "paused"
+    Day(paused).run([*DAY[:2], AskPause("10:00:30", sell_now=True), quote("10:00:31", 70_000, 70_100)])
+    limited = tmp_path / "limited"
+    Day(limited, rules=Rules(fee_rate=FEE, daily_loss_percent=0.5)).run(
+        [*DAY[:2], quote("10:01:30", 69_900, 70_000)]
+    )
+
+    for state, reason in ((paused, "pause"), (limited, "daily_limit")):
+        async with engine_api(tmp_path, state) as client:
+            body = await (await client.get("/v1/symbols/005930/trader-marks")).json()
+        check("trader_marks", body)
+        sell, buy = body["marks"]
+        assert (sell["side"], sell["exit_reason"], buy["side"]) == ("sell", reason, "buy")
