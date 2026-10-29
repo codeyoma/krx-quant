@@ -95,6 +95,8 @@ from krx_quant.swap import (
     publish_training_inputs,
     show_night,
 )
+from krx_quant.trader import SYMBOL as TRADED_SYMBOL
+from krx_quant.trader.quotes import QuoteFeed
 from krx_quant.training_nights import TrainingNights
 
 log = logging.getLogger(__name__)
@@ -104,6 +106,7 @@ Clock = Callable[[], datetime]
 _WS_ALERT = "websocket"
 _ARCHIVE_ALERT = "archive"
 _API_ALERT = "api"
+_QUOTES_ALERT = "quotes"
 
 # Recorded days are archived this long after each trading day's close, and every night,
 # after the NXT and KRX after-market close and the 20:30 backfill, for the rest of the
@@ -297,12 +300,19 @@ async def run_collector(
     recent = RecentLog()
     logging.getLogger().addHandler(recent)
 
+    # The traded symbol's best quotes, streamed to the trader (#394).
+    quotes = QuoteFeed([TRADED_SYMBOL])
+
     def on_event(feed: str, row: dict[str, Any]) -> None:
         # Recording comes first: a prediction bug must never stop it.
         try:
             engine.on_event(feed, row)
         except Exception:
             log.exception("the engine could not take a %s event", feed)
+        try:
+            quotes.on_event(feed, row)
+        except Exception:
+            log.exception("the quote stream could not take a %s event", feed)
 
     try:
         async with kis.rest_session() as session:
@@ -523,6 +533,7 @@ async def run_collector(
                 asyncio.create_task(fill_names(names, session, settings, lambda: datetime.now().astimezone()))
             )
             api = await _serve_api(settings, engine, live, alerts, names)
+            quote_stream = await _serve_quotes(settings, quotes, alerts)
             # The past bar closes' touch labels, once the API answers (#168): the 06:00 deploy
             # checks it within 3 minutes, and the fill can take longer.
             background.append(asyncio.create_task(keep_touches_filled(settings, engine, lock)))
@@ -531,6 +542,8 @@ async def run_collector(
             finally:
                 if api is not None:
                     await api.cleanup()
+                if quote_stream is not None:
+                    await quote_stream.cleanup()
                 await stream.close()
                 for task in background:
                     task.cancel()
@@ -602,6 +615,24 @@ async def _serve_api(
         alerts.raise_(_API_ALERT, f"엔진 API를 열지 못했습니다 ({e}). 녹화는 계속합니다.")
         return None
     log.info("Engine API on http://%s:%s/v1", settings.api_host, settings.api_port)
+    return runner
+
+
+async def _serve_quotes(settings: Settings, quotes: QuoteFeed, alerts: Alerts) -> web.AppRunner | None:
+    """Start the quote stream (#394) on its own listener; if it cannot listen, alert and go on
+    recording without it (the trader then buys nothing)."""
+    if settings.quotes_port is None:
+        return None
+    runner = web.AppRunner(quotes.app(), access_log=None)
+    await runner.setup()
+    try:
+        await web.TCPSite(runner, settings.quotes_host, settings.quotes_port).start()
+    except OSError as e:
+        await runner.cleanup()
+        log.error("quote stream not started on %s:%s: %s", settings.quotes_host, settings.quotes_port, e)
+        alerts.raise_(_QUOTES_ALERT, f"자동 매매의 호가 스트림을 열지 못했습니다 ({e}). 녹화는 계속합니다.")
+        return None
+    log.info("quote stream on ws://%s:%s/v1/quotes", settings.quotes_host, settings.quotes_port)
     return runner
 
 

@@ -142,6 +142,13 @@ class Settings:
     # address only. None (tests only) runs the engine without the API.
     api_host: str = "127.0.0.1"
     api_port: int | None = None
+    # The collector streams the traded symbol's best quotes to the trader here (#394, KRX_QUOTES_HOST,
+    # KRX_QUOTES_PORT, default 127.0.0.1 and the port after KRX_API_PORT's, 8081; "off": none): a
+    # listener of its own, never the Engine API's. Inside Docker the host is 0.0.0.0 and compose
+    # publishes no port of it: only the containers of the compose network reach it. None (tests
+    # only) streams nothing.
+    quotes_host: str = "127.0.0.1"
+    quotes_port: int | None = None
     # One algorithm may take this long for a bar close (all symbols); the algorithms' expected
     # work per bar close must fit in the CPU budget, or the last registered are skipped. One
     # algorithm at its limit leaves the others room: the limit is below the budget.
@@ -382,6 +389,20 @@ class Settings:
                 f"KRX_RESTART_AT ({restart_at:%H:%M}) must be before KRX_MACRO_AT ({macro_at:%H:%M}): "
                 "the restarted collector reads the day's macro once"
             )
+        api_port = int(number("KRX_API_PORT", "8080", int, maximum=65535))
+        # The port next to the API's unless set (8081 beside 8080): never the API's by default.
+        next_port = str(api_port + 1 if api_port < 65535 else api_port - 1)
+        quotes_port = (
+            None
+            if values.get("KRX_QUOTES_PORT", next_port).strip().lower() == "off"
+            else int(number("KRX_QUOTES_PORT", next_port, int, maximum=65535))
+        )
+        if quotes_port == api_port:
+            # The Engine API's port is the one published; the quotes stay inside the server (#394).
+            raise SettingsError(
+                f"KRX_QUOTES_PORT ({quotes_port}) must not be KRX_API_PORT: the quote stream has a "
+                "listener of its own, which compose does not publish"
+            )
         return cls(
             kis_app_key=required("KIS_APP_KEY"),
             kis_app_secret=required("KIS_APP_SECRET"),
@@ -432,7 +453,9 @@ class Settings:
             flush_seconds=float(number("KRX_FLUSH_SECONDS", "30", float)),
             fee_rate=float(number("KRX_FEE_PERCENT", "0.015", float, minimum=0, maximum=1)) / 100,
             api_host=values.get("KRX_API_HOST", "127.0.0.1"),
-            api_port=int(number("KRX_API_PORT", "8080", int, maximum=65535)),
+            api_port=api_port,
+            quotes_host=values.get("KRX_QUOTES_HOST", "127.0.0.1"),
+            quotes_port=quotes_port,
             algorithm_seconds=algorithm_seconds,
             cpu_budget_seconds=cpu_budget_seconds,
             min_sample=int(number("KRX_MIN_SAMPLE", str(DEFAULT_MIN_SAMPLE), int)),

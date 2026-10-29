@@ -81,6 +81,8 @@ from krx_quant.simulation import (
 )
 from krx_quant.structure_check import structure_check
 from krx_quant.supply_probe import probe_supply
+from krx_quant.trader.run import run_trader
+from krx_quant.trader.settings import TraderSettings
 from krx_quant.training import fit_algorithm
 
 
@@ -97,6 +99,20 @@ async def _collect() -> None:
         "recording %s into %s", ",".join(settings.symbols), settings.data_dir.resolve()
     )
     await run_collector(settings, stop=stop)
+
+
+async def _trade() -> None:
+    # The KIS keys are the collector's, which the trader never uses (#393): paper needs none.
+    settings = Settings.from_env(require_kis=False)
+    trader = TraderSettings.from_env()
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, stop.set)
+        except NotImplementedError:  # Windows: Ctrl+C raises KeyboardInterrupt instead
+            pass
+    await run_trader(settings, trader, stop=stop)
 
 
 async def _measure() -> None:
@@ -630,6 +646,9 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("collect", help="record KIS real-time feeds until interrupted")
     sub.add_parser(
+        "trade", help="trade 005930 on the configured cell's predictions, in paper (#394), until interrupted"
+    )
+    sub.add_parser(
         "measure-subscriptions",
         help="count how many real-time registrations KIS allows per session (stop the collector first)",
     )
@@ -911,6 +930,8 @@ def _command(args: argparse.Namespace) -> int:
     """Run the command ``args`` name; its exit code."""
     if args.command == "collect":
         asyncio.run(_collect())
+    elif args.command == "trade":
+        asyncio.run(_trade())
     elif args.command == "measure-subscriptions":
         asyncio.run(_measure())
     elif args.command == "check-fallbacks":

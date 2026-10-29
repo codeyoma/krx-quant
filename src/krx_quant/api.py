@@ -58,7 +58,10 @@ Endpoints (all under ``/v1``):
   ``?bar_close=T``: a kind's predictions besides the direction's, as the direction's
   ``latest`` and ``predictions``, each with its bar close's answer, the bar close's k it
   was made with (``flat_ticks``, #200), its mid-point and tick size there (``anchor``,
-  ``tick``, #210) and, for a kind with barriers, their width there (``width_ticks``, #183).
+  ``tick``, #210) and, for a kind with barriers, their width there (``width_ticks``, #183);
+- ``GET /trader/trades?before=T&limit=N``: the trader's last N trades (#394, default 100, at most
+  1000) entered before ``T`` if given, newest first, each with its orders and their fills, as the
+  trader keeps them (``state/trader.sqlite3``, ``trader/store.py``); none before the trader's first.
 
 An algorithm is of a kind (``kind`` in ``/algorithms``). ``/leaderboard?kind=`` ranks a kind's
 algorithms against its baselines (the direction's by default, as before); an algorithm's
@@ -147,6 +150,8 @@ from krx_quant.stats import (
 from krx_quant.stream import EventStream, LiveStatus, kind_prediction_json, kind_target, prediction_json
 from krx_quant.supply import FIELDS as SUPPLY_FIELDS
 from krx_quant.supply import stored_supply
+from krx_quant.trader.store import DB_NAME as TRADER_DB
+from krx_quant.trader.store import read_trades
 
 ENGINE_KEY = web.AppKey("engine", PredictionEngine)
 # live: the collector; demo: `krx-quant demo-engine`; replay: tests.
@@ -291,6 +296,7 @@ def create_app(
     app.router.add_get("/v1/kinds", _kinds)
     app.router.add_get("/v1/symbols/{symbol}/kinds/{kind}/latest", _kind_latest)
     app.router.add_get("/v1/symbols/{symbol}/kinds/{kind}/predictions", _kind_predictions)
+    app.router.add_get("/v1/trader/trades", _trader_trades)
     return app
 
 
@@ -1419,6 +1425,20 @@ def _bin_json(b: CalibrationBin) -> dict[str, Any]:
 def _excluded_json(e: Excluded | None) -> dict[str, Any]:
     e = e or Excluded()
     return {"special": e.special, "unscorable": e.unscorable, "status": e.status}
+
+
+async def _trader_trades(request: web.Request) -> web.Response:
+    """The trader's trades (#394), read from its store (read-only, off the event loop); none without
+    the store or before the trader's first trade."""
+    limit = _limit_query(request, DEFAULT_LIMIT, MAX_LIMIT)
+    before = _time_query(request, "before")
+    state_dir = request.app[STATE_DIR_KEY]
+    trades = (
+        []
+        if state_dir is None
+        else await asyncio.to_thread(read_trades, state_dir / TRADER_DB, before, limit)
+    )
+    return _json({"trades": trades})
 
 
 def _json(body: dict[str, Any]) -> web.Response:

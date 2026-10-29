@@ -12,6 +12,12 @@ services:
       - smoke-data:/data
       - smoke-state:/state
       - smoke-archive:/archive
+  # Built with the rest, not started by deploy/smoke-local.sh: kept off the real .env and state/.
+  trader:
+    env_file: !override deploy/smoke.env
+    volumes: !override
+      - smoke-data:/data
+      - smoke-state:/state
 
 volumes:
   smoke-data:

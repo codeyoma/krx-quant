@@ -126,6 +126,8 @@ async def walk(get: Get) -> dict[str, int]:
                 "kind_algorithm_stats",
                 await ask(f"/v1/algorithms/{baseline['name']}/stats", "algorithm_stats"),
             )
+    await ask("/v1/trader/trades", "trader_trades")  # #394
+    await ask("/v1/trader/trades?limit=5&before=2026-10-12T10:00:00%2B09:00", "trader_trades")
     for path, status in (
         ("/v1/symbols/005930/kinds/direction/latest", 404),
         ("/v1/symbols/005930/kinds/nothing/predictions", 404),
@@ -166,6 +168,8 @@ async def walk(get: Get) -> dict[str, int]:
         ("/v1/symbols/005930/closing-flow/days?from=2026-10-1", 400),
         ("/v1/symbols/005930/closing-flow/days?from=2026-10-12&to=2026-10-11", 400),
         ("/v1/symbols/005930/closing-flow/days?from=2015-01-01&to=2026-10-12", 400),
+        ("/v1/trader/trades?limit=0", 400),
+        ("/v1/trader/trades?before=10:00", 400),
     ):
         await ask(path, "error", status)
     asked = {*ROUTES.values(), "error"} - (set() if kinds[1:] else KIND_ROUTES)

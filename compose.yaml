@@ -26,17 +26,48 @@ services:
       # keeps it on the Tailscale address.
       KRX_API_HOST: 0.0.0.0
       KRX_API_PORT: "8080"
+      # The traded symbol's best quotes for the trader (#394), on a listener of their own: no
+      # port of it is published below, so only the containers of this compose network reach it.
+      KRX_QUOTES_HOST: 0.0.0.0
+      KRX_QUOTES_PORT: "8081"
     volumes:
       - ./data:/data
       - ./state:/state
     ports:
-      # The Engine API listens on 8080 inside the container (docs/engine-api.md).
+      # The Engine API listens on 8080 inside the container (docs/engine-api.md). Only it.
       - "${KRX_BIND_ADDRESS:?set KRX_BIND_ADDRESS to the Tailscale IPv4 (tailscale ip -4)}:${KRX_ENGINE_PORT:-8080}:8080"
     restart: unless-stopped
     # The collector flushes buffered rows and open gaps on SIGTERM.
     stop_grace_period: 30s
     # Docker keeps this output only while the container lives (the 06:00 deploy makes a new
     # one); every process also sends its lines to Grafana Cloud Loki when KRX_LOKI_* are set (#358).
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "5"
+
+  # The trader (#393, #394): trades 005930 on one cell's predictions, in paper. The same image, its
+  # own process: it lives on when the collector dies (out of memory, a restart) and the other way
+  # round. It reads the engine's database read-only and writes state/trader.sqlite3; the quotes
+  # come from the engine service's stream, inside this network. It listens on no port.
+  trader:
+    build:
+      context: .
+      args:
+        KRX_COMMIT: ${KRX_COMMIT:-unknown}
+    image: krx-quant:latest
+    command: ["trade"]
+    env_file: .env
+    environment:
+      KRX_DATA_DIR: /data
+      KRX_STATE_DIR: /state
+      KRX_TRADER_QUOTES_URL: ws://engine:8081/v1/quotes
+    volumes:
+      - ./data:/data
+      - ./state:/state
+    restart: unless-stopped
+    stop_grace_period: 10s
     logging:
       driver: json-file
       options:

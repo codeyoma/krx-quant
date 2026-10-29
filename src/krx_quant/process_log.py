@@ -107,12 +107,14 @@ def open_process_log(
     report."""
     if os.environ.get(BY_PARENT):
         return None
-    engine = command == "collect"
+    # The engine's (``collect``) and the trader's (``trade``, #394) lines are their own processes';
+    # every other command's is labelled ``command``, with its name.
+    process = {"collect": loki.ENGINE, "trade": loki.TRADER}.get(command)
     shipped, why_not = loki.start(
         values,
         secrets,
-        loki.ENGINE if engine else loki.COMMAND,
-        "" if engine else f"command={command}",
+        process or loki.COMMAND,
+        "" if process else f"command={command}",
         formatter(),
     )
     if shipped is None:
