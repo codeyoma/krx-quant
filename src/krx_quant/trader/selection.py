@@ -47,6 +47,8 @@ PASS = "pass"
 # Why no cell trades.
 NO_PASS = "no_pass"  # the cost map was read: no cell's verdict passes
 NO_COST_MAP = "no_cost_map"  # it could not be read
+NOT_IN_POLICY = "not_in_policy"  # cells pass, none of them the champion policy's (#399, ``policy.apply``)
+NO_POLICY = "no_policy"  # the champion policy could not be read (#399): nothing trades
 # The cost map can take a while: the engine computes it over 20 days, in a worker thread.
 TIMEOUT_SECONDS = 120.0
 
@@ -70,7 +72,11 @@ class Pick:
     reference_price: float  # where W and C were read
     tick: float
     kelly: float  # f*, uncut
-    fraction: float  # KELLY_FRACTION × f*, cut to 0–1: the share of the capital it buys
+    # λ × f*, cut to 0–1: the share of the capital it buys (λ: KELLY_FRACTION, or the policy's, #399).
+    fraction: float
+    # The rise's probability that buys, the policy's for this cell (#399); None: the trader's
+    # ``Rules.threshold`` (before the first policy).
+    threshold: float | None = None
 
     @property
     def cell(self) -> Cell:
@@ -95,34 +101,45 @@ class Pick:
             "tick": self.tick,
             "kelly": self.kelly,
             "fraction": self.fraction,
+            "threshold": self.threshold,
         }
 
 
 @dataclass(frozen=True)
 class Selection:
     """The cells picked from one cost map, ranked; with every cell considered and, when none
-    trades, why (``NO_PASS``, ``NO_COST_MAP`` with ``detail``)."""
+    trades, why (``NO_PASS``, ``NO_COST_MAP`` with ``detail``, ``policy.NOT_IN_POLICY``). Under a
+    policy (#399, ``policy.apply``), the policy's cells among them, in its order, and its version."""
 
     picks: tuple[Pick, ...]
     considered: tuple[dict[str, Any], ...] = ()
     as_of: str | None = None  # the cost map's
     reason: str | None = None
     detail: str | None = None
+    policy: int | None = None  # the policy version applied; None: none yet (#399)
 
     def describe(self) -> str:
         """A line for the log."""
         if self.picks:
-            return "; ".join(
+            under = "" if self.policy is None else f"policy {self.policy}: "
+            return under + "; ".join(
                 f"{p.kind} {p.predictor} ({p.role}: low {p.low:.3f} − p* {p.p_star:.3f} = {p.priority:+.3f},"
-                f" Kelly {p.kelly:.2f} → {p.fraction:.2f})"
+                f" Kelly {p.kelly:.2f} → {p.fraction:.2f}"
+                + ("" if p.threshold is None else f", θ {p.threshold:g}")
+                + ")"
                 for p in self.picks
             )
         if self.reason == NO_COST_MAP:
             return f"no cost map ({self.detail})"
+        if self.reason == NO_POLICY:
+            return f"the champion policy cannot be read ({self.detail})"
         seen = [
             f"{c['kind']} {c['role']} {c['predictor'] or '-'} {c['verdict'] or c['why']}"
+            + (f" ({c['why']})" if c["verdict"] and c.get("why") else "")
             for c in self.considered
         ]
+        if self.reason == NOT_IN_POLICY:
+            return f"none of policy {self.policy}'s cells passes: " + "; ".join(seen)
         return "none passes: " + "; ".join(seen)
 
 

@@ -1,5 +1,5 @@
 """Paper trading by the triple barrier (#393 "모의 체결", #394), on the cells picked from the cost map
-(#395, ``selection.py``).
+(#395, ``selection.py``) under the champion policy (#399, ``policy.apply``).
 
 **Entry.** A prediction of a cell, as the trader reads it, buys when all hold, else it is skipped
 with its reason:
@@ -13,8 +13,9 @@ with its reason:
   (``expired``: an engine catching up displays an overdue bar close's prediction late, and a
   barrier prediction carries no block of its own for it);
 - its most likely class is the kind's rise (up, up_first; a tie goes to the middle class, then
-  the first, ``kinds.most_likely``) and that class's probability is at least the threshold θ:
-  ``not_up``, ``below_threshold``;
+  the first, ``kinds.most_likely``) and that class's probability is at least the threshold θ
+  (its cell's under the champion policy, ``Pick.threshold``, #399; before the first,
+  ``Rules.threshold``): ``not_up``, ``below_threshold``;
 - it has its reference: the bar close's mid-point, tick and width (``no_reference``);
 - the day trades (``closed``); its bar close is at least five minutes after the open (09:05,
   ``before_entry``), and its time barrier, the bar close plus the kind's horizon, at least five
@@ -28,14 +29,16 @@ with its reason:
 - no cell ranked above it buys on the same bar close (``outranked``).
 
 **Priority.** Of the rises of one bar close, the cell ranked first (``Selection.picks``: the
-greatest hit rate's lower bound less p*) buys. The cells' predictions of a bar close come at
+champion policy's order, #399; before the first, the greatest hit rate's lower bound less p*)
+buys. The cells' predictions of a bar close come at
 different times (a baseline's at once, an algorithm's within its time budget, the final consensus
 after every member), so a rise waits for the cells ranked above it: it is decided once each of
 them has a prediction of that bar close read, or at the latest ``Rules.fresh`` after it was
 displayed (it would be stale after). A higher-ranked cell whose prediction comes later than that
 finds the position taken (``holding``).
 
-**Size.** The cell's Kelly fraction (``Pick.fraction``: half its Kelly f*, cut to 0–1) of the
+**Size.** The cell's Kelly fraction (``Pick.fraction``: λ of its Kelly f*, cut to 0–1; λ the
+champion policy's for the cell, #399, before the first ``KELLY_FRACTION``, a half) of the
 capital, over the best ask, rounded down: ⌊min(capital − what is open, fraction × capital) ÷
 ask⌋ (nothing is open: one position at a time). Below one share it buys nothing
 (``no_shares``).
@@ -158,11 +161,17 @@ def shares(fraction: float, capital: float, ask: float) -> int:
 
 
 def plan(
-    signal: Signal, rules: Rules, session: Session | None, at: datetime, special: Sequence[Window] = ()
+    signal: Signal,
+    rules: Rules,
+    session: Session | None,
+    at: datetime,
+    special: Sequence[Window] = (),
+    threshold: float | None = None,
 ) -> Plan | str:
     """A prediction read at ``at``, with the special windows known then: its buy's barriers, or why
     it buys nothing (the reasons the module doc lists, but the trader's own: ``not_picked``,
-    ``holding``, ``outranked``)."""
+    ``holding``, ``outranked``). ``threshold`` is its cell's θ under the policy (#399), else
+    ``rules.threshold``. The nightly re-fit simulates the trades by the same rules (``refit.py``)."""
     if signal.status == VI_STATUS:
         return SPECIAL
     p = signal.rise_probability
@@ -176,7 +185,7 @@ def plan(
         return EXPIRED
     if most_likely(signal.probabilities) != signal.rise:
         return NOT_UP
-    if p < rules.threshold:
+    if p < (rules.threshold if threshold is None else threshold):
         return BELOW_THRESHOLD
     if signal.anchor is None or not signal.tick or not signal.width:
         return NO_REFERENCE
@@ -243,6 +252,7 @@ class PaperTrader:
         self._started_at = started_at
         self.mode = mode
         self._selection: int | None = None  # the picks' row in the store
+        self._policy: int | None = None  # the policy version the picks are under (#399)
         self._picks: dict[Cell, tuple[int, Pick]] = {}  # each picked cell's rank and pick
         self._special: list[Window] = []
         self._read: dict[datetime, set[Cell]] = {}  # the cells read of each recent bar close
@@ -265,6 +275,7 @@ class PaperTrader:
         """The cells to trade from ``at`` on, kept in the store; a rise waiting of a cell no longer
         picked is skipped (``not_picked``)."""
         self._selection = self.store.add_selection(self.mode, at, selection)
+        self._policy = selection.policy
         self._picks = {p.cell: (rank, p) for rank, p in enumerate(selection.picks)}
         if selection.picks:
             log.info("trader: trading %s cell(s): %s", len(selection.picks), selection.describe())
@@ -300,7 +311,9 @@ class PaperTrader:
         if cell not in self._picks:
             self._skip(signal, at, NOT_PICKED)
         else:
-            planned = plan(signal, self.rules, self._sessions(kst_day(signal.bar_close)), at, self._special)
+            session = self._sessions(kst_day(signal.bar_close))
+            _, picked = self._picks[cell]
+            planned = plan(signal, self.rules, session, at, self._special, picked.threshold)
             if not isinstance(planned, Plan):
                 self._skip(signal, at, planned)
             elif self._busy():
@@ -462,7 +475,7 @@ class PaperTrader:
                 prediction_id=signal.prediction_id,
                 bar_close=signal.bar_close,
                 probability=p,
-                threshold=self.rules.threshold,
+                threshold=self.rules.threshold if pick.threshold is None else pick.threshold,
                 anchor=signal.anchor,
                 tick=signal.tick,
                 width_ticks=signal.width,
@@ -481,6 +494,7 @@ class PaperTrader:
                 low=pick.low,
                 kelly=pick.kelly,
                 fraction=pick.fraction,
+                policy_id=self._policy,
             ),
         )
         log.info("trader: bought %s at %s (trade %s)", quantity, quote.ask, self._open.id)

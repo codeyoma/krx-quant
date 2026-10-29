@@ -247,7 +247,7 @@
 
 ### 계약 (JSON 스키마, #19)
 
-- `schemas/engine-api-v1.json`이 모든 `/v1` 응답의 형식이다(JSON Schema 2020-12). 엔드포인트마다 `$defs`에 정의가 하나씩 있다: `status`, `symbols`, `latest`, `predictions`, `bars`, `candles`, `special`(항목은 `special_window`, #236), `supply`(항목은 `supply_day`, #226), `algorithms`, `algorithm_detail`, `leaderboard`, `algorithm_stats`, `consensus`, `macro`, `calendar`, `kinds`, `kind_latest`, `kind_predictions`, `trader_trades`(항목은 `trader_trade`, #394), 오류는 `error`. 스트림의 메시지는 `event`(종류마다 `prediction_event` 등)다.
+- `schemas/engine-api-v1.json`이 모든 `/v1` 응답의 형식이다(JSON Schema 2020-12). 엔드포인트마다 `$defs`에 정의가 하나씩 있다: `status`, `symbols`, `latest`, `predictions`, `bars`, `candles`, `special`(항목은 `special_window`, #236), `supply`(항목은 `supply_day`, #226), `algorithms`, `algorithm_detail`, `leaderboard`, `algorithm_stats`, `consensus`, `macro`, `calendar`, `kinds`, `kind_latest`, `kind_predictions`, `trader_trades`(항목은 `trader_trade`, #394), `trader_policies`(항목은 `trader_policy`, #399), 오류는 `error`. 스트림의 메시지는 `event`(종류마다 `prediction_event` 등)다.
 - 다른 종류 항목의 `output`, 정답의 `path`, 통계의 `extra`는 종류마다 형식이 다르다. 변동폭의 것은 `range_output`, `range_path`, `range_stats`다(#180, 아래 "변동폭"). 장벽의 것은 `barrier_output`, `barrier_path`, `barrier_stats`다(#183, 아래 "장벽").
 - `leaderboard`와 `algorithm_stats`는 둘 중 하나다(#179): 방향의 것(`direction_leaderboard`, `direction_algorithm_stats`, 이전과 같은 형식)과 다른 종류의 것(`kind_leaderboard`, `kind_algorithm_stats`, 맨 위에 `kind`가 있다).
 
@@ -1312,7 +1312,7 @@ KRX 마감 흐름 화면이 읽는 그날의 마감 리밸런싱 수요다(`clos
 ```json
 {"trades": [{"id": 1, "mode": "paper", "symbol": "005930", "kind": "barrier", "predictor": "breiman", "role": "top", "prediction_id": 42,
   "bar_close": "2026-10-14T10:00:00+09:00", "probability": 0.7, "threshold": 0.6,
-  "p_star": 0.63, "precision_low": 0.7, "kelly": 10.5, "fraction": 1.0,
+  "p_star": 0.63, "precision_low": 0.7, "kelly": 10.5, "fraction": 1.0, "policy": 1,
   "anchor": 70050.0, "tick": 100.0, "width_ticks": 2, "target": 70250.0, "stop": 69850.0, "time_barrier": "2026-10-14T10:04:00+09:00",
   "decided_at": "2026-10-14T10:00:02.300000+09:00",
   "entry": {"at": "2026-10-14T10:00:02.500000+09:00", "price": 70100.0, "quantity": 14},
@@ -1326,8 +1326,11 @@ KRX 마감 흐름 화면이 읽는 그날의 마감 리밸런싱 수요다(`clos
 (값은 지어낸 예다.)
 
 - `mode`: `paper`(모의). `mock`·`live`는 KIS 주문 모듈이 들어온 뒤의 값이다(#404–#408).
-- `kind`, `predictor`: 매매한 칸. 비용 지도가 고른 칸이다(#395, 설계 14장 "칸"). `prediction_id`는 엔진 DB의 예측 id다(방향은 `predictions.id`, 다른 종류는 `kind_predictions.id`). `probability`는 그 예측의 오름 확률(방향 `p_up`, 장벽 `p_up_first`), `threshold`는 그때의 문턱 θ다.
-- `role`, `p_star`, `precision_low`, `kelly`, `fraction`(#395): 그 칸을 고를 때의 비용 지도(`GET /v1/cost-map`, 005930, 20일)에서 온 값이다. `role`은 예측자의 자리(`consensus` 최종 합의, `top` 순위 1위 알고리즘, `baseline` 가장 센 기준 예측), `p_star`는 시장가 왕복의 손익분기 맞힘률, `precision_low`는 그 칸의 맞힘률 하한(Wilson 95%), `kelly`는 그 둘과 줄의 W·C로 낸 Kelly f*(자르기 전), `fraction`은 산 비율(f*의 절반을 0–1로 자른 것)이다. #395 전에 진입한 매매는 다섯 다 `null`이다.
+- `kind`, `predictor`: 매매한 칸. 비용 지도가 고른 칸이다(#395, 설계 14장 "칸"). `prediction_id`는 엔진 DB의 예측 id다(방향은 `predictions.id`, 다른 종류는 `kind_predictions.id`). `probability`는 그 예측의 오름 확률(방향 `p_up`, 장벽 `p_up_first`), `threshold`는 그때의 문턱 θ다(챔피언 정책이 그 칸에 정한 θ, 첫 챔피언 전에는 `KRX_TRADER_THRESHOLD`, #399).
+- `policy`(#399): 그 매매를 낸 정책 버전(`GET /v1/trader/policies`의 `version`). 첫 챔피언 전에 진입한 매매와 #399 전의 매매는 `null`이다.
+- `role`, `p_star`, `precision_low`, `kelly`, `fraction`(#395): 그 칸을 고를 때의 비용 지도(`GET /v1/cost-map`, 005930, 20일)에서 온 값이다. `role`은 예측자의 자리(`consensus` 최종 합의, `top` 순위 1위 알고리즘, `baseline` 가장 센 기준 예측), `p_star`는 시장가 왕복의 손익분기 맞힘률, `precision_low`는 그 칸의 맞힘률 하한(Wilson 95%), `kelly`는 그 둘과 줄의 W·C로 낸 Kelly f*(자르기 전), `fraction`은 산 비율(f*의 λ배를 0–1로 자른 것. λ는 챔피언 정책이 그 칸에 정한 Kelly 비율, 첫 챔피언 전에는 0.5, #399)이다. #395 전에 진입한 매매는 다섯 다 `null`이다.
+
+  > **바뀜** (2026-10-30, #414): `fraction`은 f*의 절반, `threshold`는 `KRX_TRADER_THRESHOLD`였다 → 챔피언 정책의 그 칸의 λ × f*와 θ다(첫 챔피언 전에는 그대로). `policy`가 더해졌다. 이유: 정책 버전과 밤 맞추기(#399).
 - `anchor`, `tick`, `width_ticks`: 기준가(봉 마감 통합 중간가), 그 호가단위, 폭(방향은 k, 장벽은 w). `target` = `anchor` + `width_ticks` × `tick`, `stop` = `anchor` − `width_ticks` × `tick`, `time_barrier` = 봉 마감 + 그 종류의 지평.
 - `decided_at`: trader가 그 예측으로 사기로 정한 때. 보통 읽은 때이고, 같은 봉 마감의 순위가 더 높은 칸을 기다렸으면 그 뒤다(#395). `entry`: 그 뒤 처음 받은 호가의 매도 1호가와 수량(`fraction` × 운용 상한 ÷ 그 값의 내림).
 
@@ -1335,6 +1338,39 @@ KRX 마감 흐름 화면이 읽는 그날의 마감 리밸런싱 수요다(`clos
 - `exit`: 청산 시각·가격·이유(`take_profit`: 목표가에, `stop_loss`: 그때의 매수 1호가에, `time`: 시간 장벽 직전 호가의 매수 1호가에). 열려 있으면 `null`이고, 그때 `sell_fee`, `tax`, `cost`, `gross`, `net`도 `null`이다. 시간 청산의 `exit.at`이 `time_barrier`보다 늦으면 장벽 앞 5초 안에 호가가 없어(스트림이 끊겼거나 trader가 멈춰 있었다) 다음 호가에 판 것이다.
 - `buy_fee`, `sell_fee`, `tax`, `cost`, `gross`, `net`: 원. 수수료는 산 금액과 판 금액에 각각 `KRX_FEE_PERCENT`, 매도세는 판 금액에 `pricing.SELL_TAX`. `gross` = (매도가 − 매수가) × 수량, `net` = `gross` − `cost`.
 - `orders`: 그 매매의 주문, 낸 순서대로. 매수(`entry`), 목표가에 걸어 둔 매도(`take_profit`: 익절이면 `filled`, 손절·시간이면 `cancelled`), 손절·시간의 매도(`stop_loss`, `time`). `broker_id`는 증권사 주문 번호(모의는 `null`). `fills`의 `quote_at`은 모의 체결이 쓴 호가의 받은 시각이다.
+
+### `GET /v1/trader/policies?limit=N` (#399)
+
+자동 매매 trader의 정책 버전(설계 [14장](design.md#14-자동-매매-393) "정책", "밤 정책 맞추기")을 trader의 저장소(`state/trader.sqlite3`의 `policies`, `champions`)에서 읽기만 해서 준다. 최근 N개(`limit` 1–1000, 기본 100), 새 버전부터다. 밤 정책 맞추기가 처음 돌기 전이나 저장소가 없으면 `{"champion": null, "policies": [], "champions": []}`다. 잘못된 `limit`은 400이다. 스키마는 `trader_policies`(항목 `trader_policy`)다.
+
+```json
+{"champion": 1,
+ "policies": [{"version": 2, "status": "challenger", "created_at": "2026-10-15T22:31:04+09:00",
+   "reason": "2026-10-15 밤 맞추기: 비용 지도(2026-10-15T22:31:02+09:00)가 시장가 왕복으로 통과시킨 2칸 가운데 1칸",
+   "cells": [{"kind": "barrier", "role": "top", "predictor": "breiman", "threshold": 0.7, "kelly_fraction": 0.5,
+     "fitted": {"p_star": 0.63, "low": 0.7, "kelly": 10.5, "fraction": 1.0, "days": ["2026-09-17", "...", "2026-10-15"],
+       "read": {"read": 7580, "rises": 5120, "not_up": 1900, "past_last_exit": 240, "...": 0},
+       "trades": 64, "wins": 38, "net": 21000.0, "growth": 0.02095}}],
+   "left_out": [{"kind": "barrier_15m", "role": "baseline", "predictor": "barrier-persist-15m", "p_star": 0.6, "low": 0.66,
+     "kelly": 8.1, "why": "no_gain", "best": {"threshold": 0.6, "kelly_fraction": 0.5, "trades": 41, "wins": 18, "net": -9800.0, "growth": -0.0098},
+     "read": {"read": 7580, "rises": 4200}}],
+   "fit": {"cost_map": {"as_of": "2026-10-15T22:31:02+09:00", "period": "20d", "passed": 2},
+     "grid": {"thresholds": [0.4, 0.5, 0.6, 0.7, 0.8], "kelly_fractions": [0.25, 0.5, 1.0],
+              "defaults": {"threshold": 0.6, "kelly_fraction": 0.5}, "min_trades": 20},
+     "fee_rate": 0.00015, "result": {"trades": 64, "wins": 38, "net": 21000.0, "growth": 0.02095, "days_traded": 18},
+     "run": {"commit": "…", "seconds": 2.4, "rss_start_mb": 131.0, "peak_rss_mb": 139.8, "rss_mb": 136.2, "peak_since": "step"}}},
+  {"version": 1, "status": "champion", "...": "..."}],
+ "champions": [{"at": "2026-10-14T22:31:05+09:00", "version": 1, "reason": "처음 맞춘 정책(#399)"}]}
+```
+
+(값은 지어낸 예다.)
+
+- `champion`: 지금 챔피언의 버전(`champions`의 마지막). 첫 맞추기 전에는 `null`이다.
+- `policies[].status`: `champion`(지금 챔피언), `former`(전에 챔피언이었다, #400의 교체 뒤), `challenger`(챔피언이 된 적 없는 도전 정책). #399에서는 처음 것이 챔피언이고 나머지는 도전 정책이다.
+- `cells`: 매매하는 칸, 순위대로. `threshold`는 사는 오름 확률의 문턱 θ, `kelly_fraction`은 Kelly 비율 λ(산 비율 = λ × 그날 f*, 0–1로 자름). `fitted`는 그 밤에 무엇으로 맞췄는지다: 그 밤 비용 지도의 `p_star`, 맞힘률 하한 `low`, Kelly f* `kelly`와 그것으로 낸 비율 `fraction`, 맞춘 날(`days`), 읽은 예측 수(`read.read`)와 오름(`read.rises`)과 거른 이유별 수(`paper.plan`의 이유, `off_target`: 지금 정답으로 학습하지 않은 모델의 예측, `unpriced`: 경로에 손익을 셀 호가가 없음), 정책 전체 모의에서 그 칸의 매매 수·이익 낸 수·순손익(원)·로그 성장.
+- `left_out`: 비용 지도는 통과시켰지만 넣지 않은 칸과 이유. `few_trades`면 `most_trades`(어느 점에서도 모의 매매가 `min_trades`에 못 미침, 가장 많을 때의 수), `no_gain`이면 `best`(넣어도 정책의 로그 성장이 늘지 않음, 가장 나은 점과 그 결과).
+- `fit`: 비용 지도(`as_of`, `period`, 통과한 칸 수 `passed`), 격자(`thresholds`, `kelly_fractions`, 같을 때 고르는 기본값 `defaults`, 칸마다 최소 모의 매매 수 `min_trades`), 수수료율, 정책 전체의 모의 결과(`result`: 매매 수, 이익 낸 수, 순손익(원), 로그 성장, 매매한 날 수), 실행(`run`: 커밋, 걸린 초, 시작·최대·끝 RSS(MB), `peak_since`: `step`이면 최대가 맞추기 동안의 것, `start`면 프로세스 시작부터의 것).
+- 한도(운용 상한, 하루·누적 손실 한도)는 정책에 없다. 코드의 기본값과 서버 `.env`에서만 온다.
 
 ### 호가 스트림 (수집기 안, #394)
 

@@ -1450,6 +1450,50 @@ MEMBER_FRAMES_PROBE = Job(
     ),
 )
 
+# The trader's policy, fitted again (#399, #393 "정책과 자기 개선"): every trading day's night, after
+# the nightly training, ``refit-policy`` reads tonight's cost map from the collector's Engine API
+# (``KRX_TRADER_ENGINE_URL``: compose sets the engine service's own, http://engine:8080), each
+# passing cell's stored predictions and answers of its 20 days from the engine's database
+# (read-only, a cell at a time), simulates the trader's trades on the answers'
+# paths at each point of a small grid and keeps a new policy version in state/trader.sqlite3: the
+# first one the champion, the later ones challengers (#400 runs and promotes them). It predicts
+# nothing again and keeps only the cells' rises, so it takes seconds and little memory; its peak
+# resident memory is in its output. Its output holds cells, thresholds, counts, simulated P&L in
+# won and log growth, no price. The ten minutes are a bound (the cost map, computed by the
+# collector, is waited for at most two): it runs before the simulations and pre-validations, which
+# must start by 00:30. A routine night's log, not a request: it changes no label. Its comments go to
+# #400, the ticket that runs the challengers.
+REFIT_POLICY_ISSUE = 400
+
+
+def _every_trading_night(night: Night) -> bool:
+    """Every trading day's night, once; a run a restart cut runs the next trading night."""
+    if not night.trading_day:
+        return False
+    record = night.record
+    return record is None or record.outcome not in (OK, FAILED) or record.day != night.day
+
+
+REFIT_POLICY = Job(
+    name="refit-policy-399",
+    due=_every_trading_night,
+    command=("refit-policy",),
+    timeout=timedelta(minutes=10),
+    label=(),
+    unlabel=(),
+    targets=(
+        Target(
+            REFIT_POLICY_ISSUE,
+            note=(
+                "자동 매매의 밤 정책 맞추기(#399): 오늘 밤 비용 지도를 통과한 칸마다 문턱 θ와 Kelly 비율 λ를 "
+                "저장된 20일의 예측과 정답으로 다시 맞춘 정책 버전이다. 처음 것이 챔피언이고, 그 뒤는 도전 "
+                "정책으로 저장만 한다(모의로 돌리고 바꾸는 것은 #400). "
+                "출력에는 시세 값이 없다(칸, 값, 건수, 모의 순손익(원), 로그 성장, 메모리만)."
+            ),
+        ),
+    ),
+)
+
 # The trader's KIS orders (#403, #393): before the trader reads a field of KIS's answers to its
 # orders (#404), the mock-trading server's answers are measured on the server. The mock server fills
 # orders only in the market's hours, so this is a session job (``Job.session``), not a night's: on
@@ -1962,6 +2006,7 @@ JOBS: tuple[Job, ...] = (
     CLOSING_FLOW_CHECK,
     KRX_NET_ASSETS_CHECK,
     MEMBER_FRAMES_PROBE,
+    REFIT_POLICY,
     KIS_ORDER_PROBE,
     *daily_prevalidation_jobs(
         [a.name for a in DAILY_ALGORITHMS],
