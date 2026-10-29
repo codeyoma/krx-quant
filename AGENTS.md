@@ -14,6 +14,10 @@ Agents cannot reach the server. To see it, add the `needs-server-snapshot` label
 
 Its log lines are in Grafana Cloud Loki: query them with the Grafana Cloud connector (`query_loki_logs`, datasource `grafanacloud-logs`), else `scripts/loki-query.sh`. See `docs/agents/server-logs.md`.
 
+### Trader report
+
+The auto trader's nightly report on #417 turns `ready-for-agent` on the week's last trading day and on trading events; what to do then: `docs/agents/trader-report.md`.
+
 ### Domain docs
 
 Single-context: root `CONTEXT.md` + `docs/adr/`, plus the agreed system design in `docs/design.md`. See `docs/agents/domain.md`.

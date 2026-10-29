@@ -52,13 +52,13 @@ from krx_quant.scheduled import (
     NET_BUYS_PROBE,
     NIGHT_PROBE,
     OK,
-    REFIT_POLICY,
     RUNNING,
     SIGNAL_REVIEW,
     STATE_FILE,
     STRUCTURE_CHECK,
     STRUCTURE_SUPPLY,
     SUPPLY_PROBE,
+    TRADER_REPORT,
     Attachment,
     Facts,
     Job,
@@ -71,6 +71,7 @@ from krx_quant.scheduled import (
     first_night,
     run_command,
     sections,
+    trader_report_calls,
     window,
 )
 from krx_quant.swap import TRAINING_TIMEOUT, NightTraining, keep_training
@@ -1378,32 +1379,74 @@ async def test_the_member_frames_probe_job_runs_the_real_command(empty_server: P
     assert state.jobs["probe-member-frames-381"].exit_code == 0
 
 
-def test_the_policy_is_fitted_again_every_trading_night_and_posted_to_400() -> None:
-    # #399: the trader's policy, fitted again on the stored predictions after the nightly training.
-    assert REFIT_POLICY.name == "refit-policy-399"
-    assert REFIT_POLICY.command == ("refit-policy",)
-    assert REFIT_POLICY.timeout == timedelta(minutes=10), "short: the simulations and pre-validations follow"
-    assert [t.issue for t in REFIT_POLICY.targets] == [402], "#400 closed: the nights' report's ticket"
-    assert (REFIT_POLICY.label, REFIT_POLICY.unlabel) == ((), ()), "a routine night's log: no label changes"
-    assert REFIT_POLICY.session is None, "a night's job: after the nightly training"
+def test_the_trader_s_night_is_fitted_and_reported_every_trading_night_on_417() -> None:
+    # #399, #400, #402: the trader's policy judged and fitted again after the nightly training, then
+    # the day's report above the re-fit's output, one comment a night on the report issue.
+    assert TRADER_REPORT.name == "trader-report"
+    assert TRADER_REPORT.command == ("refit-policy", "--report")
+    assert TRADER_REPORT.timeout == timedelta(minutes=10), "short: the simulations and pre-validations follow"
+    assert [t.issue for t in TRADER_REPORT.targets] == [417], "the report issue #402 opened"
+    assert TRADER_REPORT.label == ("ready-for-agent",) and TRADER_REPORT.label_if is trader_report_calls
+    assert TRADER_REPORT.unlabel == (), "a question left for the user (ready-for-human) stays"
+    assert TRADER_REPORT.session is None, "a night's job: after the nightly training"
+    assert "refit-policy-399" not in [j.name for j in JOBS], "folded into the report (#402)"
     first = next(i for i, j in enumerate(JOBS) if j.name.startswith(("prevalidate-", "simulate-")))
-    assert JOBS.index(MEMBER_FRAMES_PROBE) < JOBS.index(REFIT_POLICY) < first, (
+    assert JOBS.index(MEMBER_FRAMES_PROBE) < JOBS.index(TRADER_REPORT) < first, (
         "after the probes, before the simulations and pre-validations"
     )
-    assert REFIT_POLICY.due(night(FRIDAY)) and not REFIT_POLICY.due(night(SATURDAY)), "trading nights"
+    assert TRADER_REPORT.due(night(FRIDAY)) and not TRADER_REPORT.due(night(SATURDAY)), "trading nights"
     ran = JobRecord(FRIDAY, OK, at(FRIDAY, "22:30"), COMMIT, 0, 3.0)
-    assert not REFIT_POLICY.due(night(FRIDAY, ran)), "once a night"
-    assert REFIT_POLICY.due(night(MONDAY, ran)), "and every trading night"
-    assert REFIT_POLICY.due(night(MONDAY, replace(ran, outcome=FAILED, exit_code=1)))
-    assert REFIT_POLICY.due(night(MONDAY, replace(ran, outcome=INTERRUPTED)))
-    assert not REFIT_POLICY.due(night(SUNDAY, ran))
-    assert "시세 값이 없다" in REFIT_POLICY.targets[0].note
+    assert not TRADER_REPORT.due(night(FRIDAY, ran)), "once a night"
+    assert TRADER_REPORT.due(night(MONDAY, ran)), "and every trading night"
+    assert TRADER_REPORT.due(night(MONDAY, replace(ran, outcome=FAILED, exit_code=1)))
+    assert TRADER_REPORT.due(night(MONDAY, replace(ran, outcome=INTERRUPTED)))
+    assert not TRADER_REPORT.due(night(SUNDAY, ran))
+    note = TRADER_REPORT.targets[0].note
+    assert "docs/agents/trader-report.md" in note and "시세 값, 계좌번호, 주문번호, 키가 없다" in note
 
 
-async def test_the_policy_refit_job_runs_the_real_command(
+ROUTINE = "자동 매매 리포트 (#402) · 2026-10-15(목) · 모의(paper)\n에이전트 차례: 아님(밤의 기록만)\n"
+WEEKLY = (
+    "자동 매매 리포트 (#402) · 2026-10-16(금) · 모의(paper)\n에이전트 차례: 이번 주 마지막 거래일(금요일)\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("ran", "labels"),
+    [
+        (Ran(0, ROUTINE, ""), {"ready-for-human"}),
+        (Ran(0, WEEKLY, ""), {"ready-for-human", "ready-for-agent"}),
+        (
+            Ran(0, ROUTINE.replace("아님(밤의 기록만)", "하루 손실 한도에 닿음(10:01:30)"), ""),
+            {"ready-for-human", "ready-for-agent"},
+        ),
+        (Ran(1, ROUTINE, "Traceback"), {"ready-for-human", "ready-for-agent"}),
+        (Ran(0, ROUTINE, "", timed_out=True), {"ready-for-human", "ready-for-agent"}),
+    ],
+    ids=["a-routine-night", "the-week-s-last", "an-event", "failed", "timed-out"],
+)
+async def test_the_report_issue_is_ready_for_an_agent_only_on_the_nights_the_report_calls_one(
+    tmp_path: Path, ran: Ran, labels: set[str]
+) -> None:
+    """Each night's comment goes up; ``ready-for-agent`` is added only on a night that calls an agent
+    (#402), and a question left for the user (``ready-for-human``) is never taken off."""
+    clock = FakeClock(at(FRIDAY, "22:00"))
+    async with fake_github() as hub:
+        hub.labels = {417: {"ready-for-human"}}
+        async with scheduling(
+            tmp_path, at(FRIDAY, "22:00"), [TRADER_REPORT], runs=Runs(clock, ran), github=hub, clock=clock
+        ) as (_, _, told, state):
+            clock.set(at(FRIDAY, "22:30"))
+            await until(lambda: bool(told))
+        assert len(hub.bodies(417)) == 1 and state.unposted == []
+        assert hub.labels[417] == labels
+
+
+async def test_the_trader_report_job_runs_the_real_command(
     empty_server: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Against an Engine API whose cost map passes no cell: the first policy, empty, is the champion."""
+    """Against an Engine API whose cost map passes no cell: the first policy, empty, is the champion,
+    crowned in the night, so the report calls an agent and the issue is labelled."""
     PredictionStore(empty_server / "state" / ENGINE_DB).close()
     failing = cost_map([cost_row("barrier", top=predictor("breiman", 0.60, "fail"))])
     state = JobState.load(empty_server / STATE_FILE)
@@ -1414,7 +1457,7 @@ async def test_the_policy_refit_job_runs_the_real_command(
     ):
         monkeypatch.setenv("KRX_TRADER_ENGINE_URL", url)
         scheduler = Scheduler(
-            [REFIT_POLICY],
+            [TRADER_REPORT],
             AT,
             CALENDAR,
             state,
@@ -1424,13 +1467,17 @@ async def test_the_policy_refit_job_runs_the_real_command(
             commit=COMMIT,
         )
         await asyncio.wait_for(scheduler.run_night(FRIDAY), 25)
-    body = hub.bodies(402)[-1]
-    assert "**예약 작업 `refit-policy-399`**" in body
-    assert "도전 정책 판정 (#400)" in body and "챔피언이 아직 없다" in body, "judged first: no champion yet"
-    assert "정책 맞추기 (#399): 정책 1 · 챔피언(처음 맞춘 정책)" in body
-    assert "매매할 칸: 없음 (비용 지도를 통과한 칸이 없다)" in body
-    assert state.jobs["refit-policy-399"].exit_code == 0
-    assert hub.labels.get(402, set()) == set(), "no label changed"
+    body = hub.bodies(417)[-1]
+    assert "**예약 작업 `trader-report`**" in body
+    assert "다시 돌리기: `docker compose run --rm engine refit-policy --report`" in body
+    report, refit = body.split("밤 정책 맞추기의 출력 (krx-quant refit-policy, #399 #400)")
+    assert "자동 매매 리포트 (#402)" in report and "첫 챔피언(정책 1)" in report, "the report first"
+    assert "- 맞춘 정책 1(챔피언): 칸 없음" in report
+    assert "도전 정책 판정 (#400)" in refit and "챔피언이 아직 없다" in refit, "judged first: no champion yet"
+    assert "정책 맞추기 (#399): 정책 1 · 챔피언(처음 맞춘 정책)" in refit
+    assert "매매할 칸: 없음 (비용 지도를 통과한 칸이 없다)" in refit
+    assert state.jobs["trader-report"].exit_code == 0
+    assert hub.labels.get(417) == {"ready-for-agent"}, "a champion crowned in the night calls an agent"
 
 
 def test_the_dividend_probe_runs_once_on_the_first_night_and_posts_to_310() -> None:

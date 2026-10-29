@@ -1,0 +1,57 @@
+# The trader's nightly report
+
+The auto trader (#393) reports every trading night on issue #417, which stays open. The scheduled job `trader-report` runs `krx-quant refit-policy --report` after the nightly training: it judges the challengers, fits the night's policy (#399, #400), and posts one comment. The day's report is on top, the re-fit's own output below it. Full description: `docs/operations.md`, "예약 작업 (#215)" and "자동 매매 (#394)"; the rules: `docs/design.md` chapter 14.
+
+## When it is your turn
+
+The issue gets `ready-for-agent` only on a night that calls an agent. A report's second line says why: `에이전트 차례: <reasons>`, or `에이전트 차례: 아님(…)` on a night that is only a record. The reasons:
+
+| Reason | Means |
+|---|---|
+| `이번 주 마지막 거래일(<day>요일)` | The weekly review: Friday, or the last trading day before a Friday the market is closed. |
+| `하루 손실 한도에 닿음`, `누적 손실 한도에 닿음` | A loss limit stopped the trader that day. |
+| `첫 챔피언`, `챔피언 교체` | The policy the trader trades changed that night. |
+| `실전 관문을 넘음` | The champion's paper record passed the live gate that night. |
+| `밤 정책 맞추기 실패`, or a non-zero exit code in the comment's heading | The night's work did not finish. |
+
+The job never takes a label off #417. Once you are done, remove `ready-for-agent` yourself.
+
+## Read
+
+Read every comment since your last turn, not only the labelled one: the routine nights before it are part of the week.
+
+```bash
+gh api --paginate --slurp repos/codeyoma/krx-quant/issues/417/comments \
+  | jq -r 'add // [] | .[-6:][] | .created_at + "\n" + .body + "\n"'
+```
+
+Each report holds, in order:
+
+1. The day's ledger and the champion's trades: times, cell, probability and θ, p* and the hit rate's lower bound, shares, how each ended (`take_profit`, `stop_loss`, `time`, `pause`, `daily_limit`, `cumulative_limit`), the ticks between its fills, the costs and the net P&L in won. Then what the champion's book did with the predictions it read: bought, tried to buy (`target_reached`, `no_quote`, …), skipped (`not_up`, `below_threshold`, `holding`, `special`, …).
+2. The day's pick from the cost map. When no cell traded, every cell considered and its verdict (`fail`, `few`, `no row`, …).
+3. Each policy's paper record to that day and, for a challenger, where it stands against the champion: common days, mean difference, lower bound, verdict.
+4. What the night changed: the champion, challengers dropped and admitted, the policies fitted and their cells, the policies waiting, a re-fit that kept nothing or failed.
+5. The live gate: days, mean, lower bound.
+6. Limits, the halts that day, a cumulative halt still holding, the pause in force, the pauses, resumes and re-arms asked for.
+7. The last five trading days' ledger.
+
+The comment shows no prices, account numbers, order numbers or keys. For more, see [server-logs.md](server-logs.md): the trader's lines are `{service="krx-quant", process="trader"}`, the night job's `{service="krx-quant", process="job"} |= "job=trader-report "`. For the server's state now, see [server-snapshot.md](server-snapshot.md).
+
+## Do one of these
+
+- **Nothing to change.** Comment on #417 in Korean with a short summary: the week's net P&L, the gate's progress, what you checked and why no change is warranted. Then remove the label.
+- **Propose an improvement.** Open an issue that cites the report comments it rests on, then a PR that closes it ([pr-checklist.md](pr-checklist.md)). Examples: a new feature or algorithm for a kind whose cell keeps failing the cost map; an entry or exit rule the evidence calls for (many take-profits that net a loss, many `target_reached`, …); a change to the nightly fit's grid. An improvement goes through the same paper gate as everything else:
+  - A new feature or algorithm passes the engine's own gates first (pre-validation, probation). The trader trades it only once the cost map passes its cell and a challenger fitted with that cell beats the champion in paper (#400).
+  - A trading rule must be a value a policy carries, so that the champion trades as before and a challenger with the rule has to win in paper first. A PR must not change how the current champion trades. If the rule cannot be expressed as a policy value, ask the user before building it.
+  - Comment on #417 with the issue and PR links, then remove the label.
+- **Ask the user.** Comment on #417 in Korean with the question and the evidence, add `ready-for-human`, and remove `ready-for-agent`. Ask when:
+  - the cumulative limit holds: re-arming is the user's call (`krx-quant trade rearm` on the server);
+  - the live gate passed: going live is the user's call and their steps (#408). Never treat a passed gate as permission;
+  - a change would touch the limits, the capital, the modes, the live gate or the promotion rule;
+  - losses or halts recur and the evidence does not point to one fix.
+
+## Never
+
+- Change the limits, the capital or the mode, or widen any of them. They come from the code and the server's `.env` (#396). No policy or PR makes the trader trade more than they allow.
+- Add order code outside `src/krx_quant/kis_orders.py`, or place, resume or re-arm anything. Agents cannot reach the server, and live orders are the user's.
+- Put prices, account numbers, order numbers or keys in an issue, PR or doc. Both repositories are public.
