@@ -11,7 +11,7 @@ Few and fixed (Loki indexes each set):
 | Label | Values |
 |---|---|
 | `service` | `krx-quant` |
-| `process` | `engine` (the collector, `krx-quant collect`), `training` (the nightly training the engine starts), `job` (a scheduled job, #215), `command` (a command run by hand: `docker compose run --rm engine <command>`, `docker compose exec engine krx-quant <command>`) |
+| `process` | `engine` (the collector, `krx-quant collect`), `training` (the nightly training the engine starts), `job` (a scheduled job, #215), `trader` (the trader, `krx-quant trade`, compose service `trader`, #394), `command` (a command run by hand: `docker compose run --rm engine <command>`, `docker compose exec engine krx-quant <command>`) |
 | `level` | `debug`, `info`, `warning`, `error`, `critical`. A training's or job's line with no level of its own (a traceback, a printed report) has the level of the line before it |
 
 Everything else is in the line, which is the server's stdout line with fields in front:

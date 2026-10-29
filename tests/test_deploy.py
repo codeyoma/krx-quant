@@ -42,6 +42,50 @@ def test_the_engine_port_is_published_on_the_tailscale_address_only() -> None:
     assert "network_mode" not in compose, "host networking would expose every listening port"
 
 
+def services(compose: str) -> dict[str, str]:
+    """Each service of a compose file and its block's text."""
+    found: dict[str, str] = {}
+    lines = compose.splitlines()
+    start = lines.index("services:")
+    name: str | None = None
+    block: list[str] = []
+    for line in lines[start + 1 :]:
+        if line and not line.startswith(" "):
+            break  # the next top-level key
+        if line.startswith("  ") and not line.startswith("   ") and line.strip().endswith(":"):
+            if name is not None:
+                found[name] = "\n".join(block)
+            name, block = line.strip()[:-1], []
+        elif name is not None:
+            block.append(line)
+    if name is not None:
+        found[name] = "\n".join(block)
+    return found
+
+
+def test_the_quote_stream_is_not_published_only_the_engine_api_is() -> None:
+    """#394: the collector streams the quotes on 8081 inside its container; compose publishes the
+    Engine API's 8080 alone, so the Tailscale address never reaches the quotes. The trader listens
+    on nothing and reads them over the compose network."""
+    compose = (ROOT / "compose.yaml").read_text()
+    found = services(compose)
+
+    assert set(found) == {"engine", "trader"}
+    assert [p.rsplit(":", 1)[-1] for p in published_ports(found["engine"])] == ["8080"], "the Engine API"
+    assert 'KRX_API_PORT: "8080"' in found["engine"] and 'KRX_QUOTES_PORT: "8081"' in found["engine"]
+    assert "ports:" not in found["trader"] and "expose:" not in compose
+    assert "KRX_TRADER_QUOTES_URL: ws://engine:8081/v1/quotes" in found["trader"]
+    assert 'command: ["trade"]' in found["trader"] and "image: krx-quant:latest" in found["trader"]
+    assert "network_mode" not in compose
+
+
+def test_the_smoke_run_keeps_the_trader_off_the_real_env_and_state() -> None:
+    smoke = services((ROOT / "deploy" / "compose.smoke.yaml").read_text())
+
+    assert "env_file: !override deploy/smoke.env" in smoke["trader"]
+    assert "./state" not in smoke["trader"] and "smoke-state:/state" in smoke["trader"]
+
+
 def test_secure_env_makes_the_env_file_readable_by_its_owner_only(tmp_path: Path) -> None:
     env = tmp_path / ".env"
     env.write_text("KIS_APP_KEY=x\n")

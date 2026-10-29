@@ -67,6 +67,7 @@ log = logging.getLogger(__name__)
 
 SERVICE = "krx-quant"
 ENGINE, TRAINING, JOB, COMMAND = "engine", "training", "job", "command"  # the ``process`` label
+TRADER = "trader"  # the trader's process (#394, ``krx-quant trade``)
 URL, USER, TOKEN = "KRX_LOKI_URL", "KRX_LOKI_USER", "KRX_LOKI_TOKEN"
 PUSH = "/loki/api/v1/push"
 BATCH_LINES = 1000

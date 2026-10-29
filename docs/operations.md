@@ -278,6 +278,8 @@ curl http://krx-quant:8080/v1/macro
 | `KRX_FEE_PERCENT` | 0.015 | 편도 수수료율(%). 0–1. 보합 범위, 닿음 손익(`pnl`), 장벽 손익, 인버스 닿음 손익(`pnl_inverse`, −2배 상품이라 상품 금액인 주가의 절반에, #272)에 쓴다 |
 | `KRX_API_HOST` | `127.0.0.1` (compose `0.0.0.0`) | 엔진 API가 듣는 주소 |
 | `KRX_API_PORT` | 8080 (compose 8080) | 엔진 API 포트. 1–65535 |
+| `KRX_QUOTES_HOST` | `127.0.0.1` (compose `0.0.0.0`) | 수집기가 자동 매매 trader에게 005930의 최우선 호가를 흘리는 리스너의 주소(#394, [engine-api.md](engine-api.md#호가-스트림-수집기-안-394)) |
+| `KRX_QUOTES_PORT` | `KRX_API_PORT` 다음 포트, 보통 8081 (compose 8081, publish 하지 않는다) | 그 리스너의 포트. `off`면 열지 않는다(trader가 사지 않는다). `KRX_API_PORT`와 같으면 설정 오류다. 1–65535 |
 | `KRX_ALGORITHM_SECONDS` | 10 | 알고리즘 하나가 봉 마감 한 번에 쓸 수 있는 시간(초). 55 이하이고 `KRX_CPU_BUDGET_SECONDS`보다 작아야 한다 |
 | `KRX_CPU_BUDGET_SECONDS` | 30 | 봉 마감 한 번에 알고리즘 예상 시간 합의 상한(초) |
 | `KRX_MIN_SAMPLE` | 200 | 순위와 상태 판정에 필요한 채점 수와 기준 예측과의 짝 수 |
@@ -320,6 +322,17 @@ curl http://krx-quant:8080/v1/macro
 > **삭제됨** (2026-10-23, #360): `KRX_LOG_DAYS`(로그 파일 `state/logs/`를 남기는 날 수, 기본 14, `off`면 쓰지 않음), `KRX_LOG_MAX_MB`(로그 파일 전체의 상한, 기본 500 MB). 그리고 `KRX_STATE_DIR`의 `logs/`. 이유: 사용자가 로그를 Grafana Cloud Loki로만 남기기로 정했다(2026-10-23). 대신: Grafana Cloud Loki(`KRX_LOKI_URL`·`KRX_LOKI_USER`·`KRX_LOKI_TOKEN`, #358). 서버 `.env`에 두 값이 남아 있어도 엔진은 읽지 않는다.
 
 > **바뀜** (2026-10-20, #329): `KRX_GITHUB_TOKEN`은 예약 작업만 썼다 → 서버 요약(#322)도 쓴다: 라벨이 붙은 열린 이슈를 찾고, 댓글을 남기고, 라벨을 떼고, 저장소에 라벨이 없으면 만든다. 권한(Issues: Read and write)은 그대로다. 이유: 에이전트는 서버를 볼 수 없어, 2026-10-19 WebSocket 침묵 장애(#308) 때 사용자가 명령 다섯 개의 출력을 붙여 넣어야 했다.
+
+자동 매매 trader(`krx-quant trade`, #394)만 읽는 변수다. 수집기는 읽지 않아서, 틀린 값은 trader만 멈춘다(`configuration error: ...`, 종료 코드 2, Docker가 다시 띄우고 또 멈춘다). 아래 "자동 매매 (#394)".
+
+| 변수 | 기본값 | 뜻과 범위 |
+|---|---|---|
+| `KRX_TRADER_MODE` | `paper` | `paper`(모의)뿐이다. `mock`, `live`는 KIS 주문 모듈(#404) 전까지 설정 오류다 |
+| `KRX_TRADER_KIND` | `direction` | 매매할 칸의 종류: `direction`, `barrier`, `barrier_15m`, `barrier_30m` |
+| `KRX_TRADER_PREDICTOR` | `consensus-final` | 매매할 칸의 예측자: 알고리즘, 기준 예측, 합의의 이름(`/v1/algorithms`의 `name`) |
+| `KRX_TRADER_THRESHOLD` | `0.6` | 사는 오름 확률(방향 `p_up`, 장벽 `p_up_first`)의 문턱 θ. 0–1 |
+| `KRX_TRADER_CAPITAL` | `1000000` | 운용 상한(원). 1 이상 1,000,000 이하. 넘으면 시작하지 않는다(좁히기만 한다, #393) |
+| `KRX_TRADER_QUOTES_URL` | `ws://127.0.0.1:8081/v1/quotes` (compose `ws://engine:8081/v1/quotes`) | 수집기의 호가 스트림 |
 
 compose와 스크립트가 읽는 변수다. 엔진은 `KRX_BIND_ADDRESS`를 예약 작업의 가림에만 읽고, 나머지는 읽지 않는다.
 
@@ -1024,6 +1037,17 @@ Toss: 109 calls, 1 failed; tokens issued: 0
 - 손으로 돌리려면 `docker compose run --rm engine archive`를 실행한다.
 - 업로드 기록은 서버의 각 파티션 `.uploaded.json`에 저장소별로 남는다. S3 쪽에서 객체가 사라졌을 수 있으면 `docker compose run --rm engine archive --recheck`로 모든 파일을 S3와 비교해 빠진 것을 올린다.
 
+### 자동 매매 (#394)
+
+compose 서비스 `trader`가 `krx-quant trade`를 돈다. 수집기(`engine`)와 같은 이미지의 다른 컨테이너라, 06:00 배포가 둘을 함께 새로 띄우고, 수집기가 멈추거나(07:20 재시작, 메모리 부족) 다시 떠도 trader는 따로 산다. 지금은 모의(`paper`)뿐이다: 주문을 내지 않고 KIS 키도 쓰지 않는다. 규칙은 [design.md](design.md#14-자동-매매-393) 14장에 있다.
+
+- 장중에는 `.env`의 칸(`KRX_TRADER_KIND`, `KRX_TRADER_PREDICTOR`, 기본 `direction`·`consensus-final`)의 예측을 0.5초마다 엔진 DB에서 읽고(읽기만), 수집기의 호가 스트림(`ws://engine:8081/v1/quotes`, compose 네트워크 안에서만 열린다)으로 모의 체결한다. 진입은 개장 + 5분(보통 09:05)부터이고, 시간 장벽이 종가 단일가 − 5분(보통 15:15)을 넘는 예측으로는 사지 않는다. 그래서 15:15 뒤에는 포지션이 없다.
+- 기록은 `state/trader.sqlite3`에 남는다(`decisions`, `trades`, `orders`, `fills`, `runs`). 매매는 `curl -s 'http://krx-quant:8080/v1/trader/trades?limit=20'`로 본다([engine-api.md](engine-api.md#get-v1tradertradesbeforetlimitn-394)). 사지 않은 이유는 `decisions.reason`이다: `docker compose exec trader python -c 'import sqlite3; [print(r) for r in sqlite3.connect("file:/state/trader.sqlite3?mode=ro", uri=True).execute("select bar_close, probability, action, reason from decisions order by id desc limit 20")]'`.
+- 로그는 Loki의 `{service="krx-quant", process="trader"}`(#358의 같은 전송)와 `docker compose logs trader`에 있다. 사고팔 때마다 INFO 줄(`trader: buying on …`, `trader: bought …`, `trader: sold … (<이유>, trade N): net … won`, `trader: no buy on … (<이유>)`)을 남긴다. 호가 스트림이 끊기면 WARNING `quotes: … ; connecting again`을 한 번 남기고 돌아올 때까지 다시 붙는다.
+- 칸이나 문턱을 바꾸려면 서버 `.env`를 고치고 `docker compose up -d trader`로 다시 띄운다. 들고 있던 모의 매매는 이어서 규칙대로 판다. 멈추려면 `docker compose stop trader`(다음 `docker compose up -d`나 06:00 배포가 다시 띄운다).
+- 수집기가 호가 리스너를 열지 못하면 `[장애] 자동 매매의 호가 스트림을 열지 못했습니다 (…). 녹화는 계속합니다.`가 온다. 그동안 trader는 새로 사지 않는다(`no_quote`).
+- 사용자가 할 일은 없다. KIS 모의투자 키(mock)와 실전 계좌(live)는 그 티켓(#403–#408)이 올 때 따로 안내한다.
+
 ### 일별 수급 (#226)
 
 차트의 하단 지표 8종(공매도 거래량, 개인·기관·외국인 순매수량, 외국인 보유수량, 외국인 지분율, 대차잔고, 신용잔고)의 데이터다. 수집기가 받아 `state/supply/`에 두고(8장), 엔진 API `GET /v1/symbols/{s}/supply`로 준다([engine-api.md](engine-api.md)). 출처와 규칙은 [kis-feeds.md](kis-feeds.md#수집-226)에 있다.
@@ -1715,6 +1739,7 @@ docker compose logs --tail 200 engine
 | `[장애] KIS WebSocket 연결이 끊겼습니다` | 로그의 `KIS WebSocket down (...)` 원인. 괄호 안이 `silent 60s`면 KIS가 연결을 닫지 않은 채 60초(`KRX_WS_SILENCE_SECONDS`) 동안 PINGPONG까지 아무것도 보내지 않아 수집기가 닫은 것이다(#308). 그 앞에 `KIS WebSocket silent for 60s` WARNING이 있다 | 1초에서 최대 60초 간격으로 스스로 재연결한다. 60초 넘게 붙어 있으면 `[복구]`가 온다. 장 시간과 상관없이 온다. 오래 가면 KIS 점검 공지를 보고, 앱키가 유효한지 확인한다. 날마다 끊김의 시각·이유·피드 수와 종가 단일가 무렵의 침묵은 `docker compose run --rm engine probe-gaps`가 센다(2장 "WebSocket 결측 확인 (#344)"). |
 | `[장애] 구독한 키가 모두 끊긴 피드: stale <TR>` | 그 피드(TR)의 구독·조회 키가 전부 기준 시간(`health.STALE_SECONDS`)보다 오래 조용하다. 그날 아직 한 번도 안 온 키 중 지연으로 치지 않는 키(미국 주간거래, KIS가 거래일을 확인하지 않은 날)는 세지 않는다. 구독 키가 잘못됐거나(KIS는 잘못된 키도 구독 성공으로 답한다. 예: #113의 만기 지난 옵션 월물), 파싱이나 연결이 고장 났다. 여러 피드가 함께 오면 연결 문제다. | 키 하나라도 데이터가 다시 오면 `[복구] 데이터가 다시 들어오는 피드: stale <TR>`가 온다. 키 하나만 조용한 것(거래정지, VI, 체결이 드문 옵션 행사가)은 알리지 않는다. `gaps` 계층과 `/v1/status`의 `kis.feeds[].gap`에만 남는다. |
 | `[장애] 장 마감 데이터 업로드가 ... 실패했습니다` | 로그의 `could not archive ...` | 1. AWS 키, `KRX_OBJECT_STORE` 버킷 이름, IAM 정책을 확인한다.<br>2. 고친 뒤 `docker compose run --rm engine archive`를 돌린다. 다시 돌려도 안전하다.<br>3. 다음 업로드가 성공하면 `[복구]`가 온다. |
+| `[장애] 자동 매매의 호가 스트림을 열지 못했습니다 (<오류>). 녹화는 계속합니다.` | 로그의 `quote stream not started on ...` | 녹화와 예측은 계속하고, trader는 호가가 없어 새로 사지 않는다(#394). 다른 프로세스가 8081을 쓰는지 확인하고 `docker compose restart engine` |
 | `[장애] 엔진 API를 열지 못했습니다` | 로그의 `Engine API not started on ...` | 녹화와 예측은 계속한다. 다른 프로세스가 8080을 쓰는지 확인하고 `docker compose up -d`로 다시 띄운다. |
 | 알고리즘을 다시 학습하고 싶다 | 밤 학습 결과는 텔레그램과 `/v1/status`의 `training` | 밤 학습이 매일 한다. 당장 바꾸려면 알고리즘마다(`newton`, `gauss`, `granger`, `markov`, `kalman`, `shannon`, `poisson`, `turing`) `docker compose run --rm --no-deps engine fit <이름>`. 엔진이 1분 안에 새 모델로 바꾼다. 되돌리려면 `docker compose exec engine krx-quant rollback <이름>`(위 "밤 학습과 모델 교체"). |
 | `[알림] 사전 검증 대기: <이름>. 검증을 통과해야 돌기 시작합니다. ...` | `curl -s http://krx-quant:8080/v1/algorithms`에 그 이름이 없다 | 새로 등록된 알고리즘이 사전 검증을 기다린다. 녹화가 10거래일 이상이면 예약 작업이 밤마다 하나씩 돌리고 #204에 남긴다(3장 "새 알고리즘 사전 검증"). 손으로 다시 돌리려면 장 시간 밖에서(예약 작업이 도는 22:30–05:30도 피해) `docker compose run --rm --no-deps engine prevalidate <이름>`. 엔진이 다시 시작할 때마다 한 번 온다. 사전 검증이 지금 코드를 거부한 알고리즘에는 오지 않는다(아래 `사전 검증 거부`, #369). |
@@ -1927,7 +1952,7 @@ rm -rf ~/krx-quant/state/logs
   | 레이블 | 값 |
   |---|---|
   | `service` | `krx-quant` |
-  | `process` | `engine`, `training`(밤 학습), `job`(예약 작업), `command`(손으로 돌린 명령) |
+  | `process` | `engine`, `training`(밤 학습), `job`(예약 작업), `trader`(자동 매매, `krx-quant trade`, #394), `command`(손으로 돌린 명령) |
   | `level` | `debug`, `info`, `warning`, `error`, `critical`. 밤 학습·예약 작업이 쓴 줄 중 제 수준이 없는 줄(traceback, print)은 바로 앞 줄의 수준이다 |
 
 - 가림: 보내기 전에 `doctor`와 예약 작업 댓글의 규칙으로 비밀값과 서버 주소를 `[가림]`으로 바꾼다(`redaction.py`, 이 세 설정도 가린다). KIS의 시세 값은 남는다. 사용자의 비공개 스택이라 그렇게 정했다(2026-10-23).
@@ -2048,6 +2073,7 @@ LogQL 문법은 2026-10-23에 커넥터로 스택에 물어 확인했다(그때�
 | `kis_token.json` | KIS REST 접근 토큰 캐시(권한 600). 앱키가 바뀌면 버린다 |
 | `market_calendar.json` | KIS 휴장일 조회 캐시 |
 | `engine.sqlite3`, `-wal`, `-shm` | 예측, 채점, 상태, 합의 가중치, 다른 종류의 예측과 정답(`kind_predictions`, `kind_answers`, #179), 특수 상황 구간(`special_windows`, `special_days`, #236), 수습 시뮬레이션의 재생과 예측(`simulation_runs`, `simulations`, `sim_predictions`, `sim_kind_predictions`, #298. 실시간 예측과 따로 둔다). 테이블은 [engine-api.md](engine-api.md#저장-stateenginesqlite3)에 있다. 스키마 버전은 `PRAGMA user_version`이다(#179, #236, #298의 새 표는 올리지 않았다) |
+| `trader.sqlite3`, `-wal`, `-shm` | 자동 매매 trader의 저장소(#394): 시작마다(`runs`), 읽은 칸의 예측과 한 일(`decisions`), 매매(`trades`), 주문(`orders`), 체결(`fills`). 모든 행에 모드(`paper`). trader만 쓰고 엔진 API가 읽기만 한다([design.md](design.md#14-자동-매매-393) 14장) |
 | `replay-<날짜>.sqlite3` | `krx-quant replay`의 결과 |
 | `.engine.lock` | 도는 엔진이 잡는 잠금 파일(`flock`, #168). 잡혀 있으면 `rescore`가 거부한다. 엔진이 끝나면 풀린다. 파일은 남아도 된다 |
 | `prevalidation-<알고리즘>.sqlite3` | `krx-quant prevalidate`가 재생한 예측과 채점. 다시 돌리면 새로 만든다 |

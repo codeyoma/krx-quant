@@ -247,7 +247,7 @@
 
 ### 계약 (JSON 스키마, #19)
 
-- `schemas/engine-api-v1.json`이 모든 `/v1` 응답의 형식이다(JSON Schema 2020-12). 엔드포인트마다 `$defs`에 정의가 하나씩 있다: `status`, `symbols`, `latest`, `predictions`, `bars`, `candles`, `special`(항목은 `special_window`, #236), `supply`(항목은 `supply_day`, #226), `algorithms`, `algorithm_detail`, `leaderboard`, `algorithm_stats`, `consensus`, `macro`, `calendar`, `kinds`, `kind_latest`, `kind_predictions`, 오류는 `error`. 스트림의 메시지는 `event`(종류마다 `prediction_event` 등)다.
+- `schemas/engine-api-v1.json`이 모든 `/v1` 응답의 형식이다(JSON Schema 2020-12). 엔드포인트마다 `$defs`에 정의가 하나씩 있다: `status`, `symbols`, `latest`, `predictions`, `bars`, `candles`, `special`(항목은 `special_window`, #236), `supply`(항목은 `supply_day`, #226), `algorithms`, `algorithm_detail`, `leaderboard`, `algorithm_stats`, `consensus`, `macro`, `calendar`, `kinds`, `kind_latest`, `kind_predictions`, `trader_trades`(항목은 `trader_trade`, #394), 오류는 `error`. 스트림의 메시지는 `event`(종류마다 `prediction_event` 등)다.
 - 다른 종류 항목의 `output`, 정답의 `path`, 통계의 `extra`는 종류마다 형식이 다르다. 변동폭의 것은 `range_output`, `range_path`, `range_stats`다(#180, 아래 "변동폭"). 장벽의 것은 `barrier_output`, `barrier_path`, `barrier_stats`다(#183, 아래 "장벽").
 - `leaderboard`와 `algorithm_stats`는 둘 중 하나다(#179): 방향의 것(`direction_leaderboard`, `direction_algorithm_stats`, 이전과 같은 형식)과 다른 종류의 것(`kind_leaderboard`, `kind_algorithm_stats`, 맨 위에 `kind`가 있다).
 
@@ -1304,6 +1304,41 @@ KRX 마감 흐름 화면이 읽는 그날의 마감 리밸런싱 수요다(`clos
 > **바뀜** (2026-10-12, #116): 최종 합의가 확률·동의 조건만 맞으면 보냈고, 반복 억제 상태는 메모리에만 있었다 → 보내기 직전에 막을 이유(`special`, `no_reference`, `expired`)를 보고, 보낸·막힌 신호를 `runs`에 남기며, 재시작하면 오늘 보낸 신호로 반복 억제를 되살린다. 이유: VI는 봉 마감 시점에만 확인해서 봉 마감 직후에 걸린 VI가 신호를 막지 못했고, 기준가가 없는 종목에도 신호가 나갔고, 엔진이 재시작하면 같은 신호가 목표 시각 전에 다시 나갈 수 있었다(#78, #80).
 
 메시지는 `[신호] 005930 상승 64% · 정식 3개 중 2개 같은 방향 · 09:31 봉 마감, 09:35까지`다. 정식 알고리즘이 없으면 합의가 비어서 신호도 없다. 주문은 하지 않는다(엔진에 주문 코드는 없다).
+
+### `GET /v1/trader/trades?before=T&limit=N` (#394)
+
+자동 매매 trader(설계 [14장](design.md#14-자동-매매-393))의 매매를 trader의 저장소(`state/trader.sqlite3`)에서 읽기만 해서 준다. 최근 N개(`limit` 1–1000, 기본 100), `before`가 있으면 그 시각 전에 진입한 것, 진입이 늦은 것부터다. trader가 아직 매매하지 않았거나 저장소가 없으면 `{"trades": []}`다. 잘못된 `limit`과 `before`는 400이다. 스키마는 `trader_trades`(항목 `trader_trade`)다.
+
+```json
+{"trades": [{"id": 1, "mode": "paper", "symbol": "005930", "kind": "barrier", "predictor": "breiman", "prediction_id": 42,
+  "bar_close": "2026-10-14T10:00:00+09:00", "probability": 0.7, "threshold": 0.6,
+  "anchor": 70050.0, "tick": 100.0, "width_ticks": 2, "target": 70250.0, "stop": 69850.0, "time_barrier": "2026-10-14T10:04:00+09:00",
+  "decided_at": "2026-10-14T10:00:02.300000+09:00",
+  "entry": {"at": "2026-10-14T10:00:02.500000+09:00", "price": 70100.0, "quantity": 14},
+  "exit": {"at": "2026-10-14T10:02:00+09:00", "price": 70250.0, "reason": "take_profit"},
+  "buy_fee": 147.21, "sell_fee": 147.525, "tax": 1967.0, "cost": 2261.735, "gross": 2100.0, "net": -161.735,
+  "orders": [{"id": 1, "side": "buy", "purpose": "entry", "price": 70100.0, "quantity": 14, "placed_at": "...", "status": "filled",
+              "closed_at": "...", "broker_id": null, "fills": [{"at": "...", "price": 70100.0, "quantity": 14, "quote_at": "..."}]},
+             {"id": 2, "side": "sell", "purpose": "take_profit", "price": 70250.0, "...": "..."}]}]}
+```
+
+(값은 지어낸 예다.)
+
+- `mode`: `paper`(모의). `mock`·`live`는 KIS 주문 모듈이 들어온 뒤의 값이다(#404–#408).
+- `kind`, `predictor`: 매매한 칸. `prediction_id`는 엔진 DB의 예측 id다(방향은 `predictions.id`, 다른 종류는 `kind_predictions.id`). `probability`는 그 예측의 오름 확률(방향 `p_up`, 장벽 `p_up_first`), `threshold`는 그때의 문턱 θ다.
+- `anchor`, `tick`, `width_ticks`: 기준가(봉 마감 통합 중간가), 그 호가단위, 폭(방향은 k, 장벽은 w). `target` = `anchor` + `width_ticks` × `tick`, `stop` = `anchor` − `width_ticks` × `tick`, `time_barrier` = 봉 마감 + 그 종류의 지평.
+- `decided_at`: trader가 그 예측을 읽은 때. `entry`: 그 뒤 처음 받은 호가의 매도 1호가와 수량(운용 상한 ÷ 그 값의 내림).
+- `exit`: 청산 시각·가격·이유(`take_profit`: 목표가에, `stop_loss`: 그때의 매수 1호가에, `time`: 시간 장벽 직전 호가의 매수 1호가에). 열려 있으면 `null`이고, 그때 `sell_fee`, `tax`, `cost`, `gross`, `net`도 `null`이다. 시간 청산의 `exit.at`이 `time_barrier`보다 늦으면 장벽 앞 5초 안에 호가가 없어(스트림이 끊겼거나 trader가 멈춰 있었다) 다음 호가에 판 것이다.
+- `buy_fee`, `sell_fee`, `tax`, `cost`, `gross`, `net`: 원. 수수료는 산 금액과 판 금액에 각각 `KRX_FEE_PERCENT`, 매도세는 판 금액에 `pricing.SELL_TAX`. `gross` = (매도가 − 매수가) × 수량, `net` = `gross` − `cost`.
+- `orders`: 그 매매의 주문, 낸 순서대로. 매수(`entry`), 목표가에 걸어 둔 매도(`take_profit`: 익절이면 `filled`, 손절·시간이면 `cancelled`), 손절·시간의 매도(`stop_loss`, `time`). `broker_id`는 증권사 주문 번호(모의는 `null`). `fills`의 `quote_at`은 모의 체결이 쓴 호가의 받은 시각이다.
+
+### 호가 스트림 (수집기 안, #394)
+
+엔진 API가 아니다. 수집기가 자동 매매 trader에게 005930의 최우선 호가를 따로 연 리스너로 보낸다(`trader/quotes.py`, `GET /v1/quotes`, WebSocket). 리스너는 `KRX_QUOTES_HOST`·`KRX_QUOTES_PORT`(기본 127.0.0.1과 `KRX_API_PORT` 다음 포트, 보통 8081. `off`면 열지 않는다)이고, 엔진 API의 포트와 같게 정하면 수집기가 시작하지 않는다. 서버의 compose는 컨테이너 안 0.0.0.0:8081로 열지만 그 포트를 publish하지 않아서 compose 네트워크 안의 trader만 닿는다(`ws://engine:8081/v1/quotes`). Tailscale 주소의 엔진 API 포트(8080)에는 이 경로가 없다(404). 리스너를 열지 못하면 녹화는 계속하고 `[장애] 자동 매매의 호가 스트림을 열지 못했습니다`를 보낸다.
+
+- 메시지마다 JSON 텍스트 하나: `symbol`, `feed`(`H0UNASP0` 통합 호가, `H0UNCNT0` 통합 체결), `received_at`(수집기가 받은 시각), `bid`, `ask`, `bid_size`, `ask_size`(체결의 1호가는 수량이 없어 `null`).
+- 도달 정답과 장벽 정답이 쓰는 호가와 같다(위 "채점"의 도달 정답, `kinds.QuoteLog`): 통합 WebSocket 호가와 통합 체결의 1호가. REST 스냅숏과 한쪽만 있는 호가는 보내지 않고, 뒤집힌 호가(매도 1호가 < 매수 1호가)는 보낸다(#187).
+- 연결하면 마지막 호가를 먼저 하나 보내고, 그 뒤 받는 대로 보낸다. 10,000개 넘게 밀린 클라이언트는 닫는다(1013). 클라이언트는 아무것도 보내지 않는다.
 
 ## 예측 종류 (#179)
 
