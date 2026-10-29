@@ -1325,7 +1325,8 @@ def demo_shelf(state_dir: Path) -> Shelf:
 
 
 def demo_kis(now: datetime) -> dict[str, object]:
-    """A made-up KIS status at ``now``: connected, the member flow of 000660 quiet for 16 minutes."""
+    """A made-up KIS status at ``now``: connected, the member flow of 000660 quiet for 16 minutes,
+    with one frame short of fields that morning."""
     last = {(TRADE.tr_id, s): now - timedelta(seconds=2) for s in DEMO_SYMBOLS}
     last |= {(BOOK.tr_id, s): now - timedelta(seconds=1) for s in DEMO_SYMBOLS}
     last |= {
@@ -1339,6 +1340,8 @@ def demo_kis(now: datetime) -> dict[str, object]:
             "last_received_at": iso(at),
             "seconds_since": (now - at).total_seconds(),
             "gap": "stale" if feed == "H0UNMBC0" else None,
+            # The 08:00 member frame short of fields (#381): one, kept raw only.
+            "short_frames": 1 if feed == "H0UNMBC0" else 0,
         }
         for (feed, key), at in last.items()
     ]

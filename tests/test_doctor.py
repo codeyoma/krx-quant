@@ -89,6 +89,7 @@ def status_body() -> dict[str, Any]:
                     "last_received_at": "2026-10-20T10:29:59.5+09:00",
                     "seconds_since": 0.5,
                     "gap": None,
+                    "short_frames": 0,
                 },
                 {
                     "feed": "H0UNASP0",
@@ -96,6 +97,7 @@ def status_body() -> dict[str, Any]:
                     "last_received_at": "2026-10-19T16:33:10+09:00",
                     "seconds_since": 64010.0,
                     "gap": f"disconnected: lost {BIND_ADDRESS}",
+                    "short_frames": 0,
                 },
                 {
                     "feed": "H0MFCNT0",
@@ -103,6 +105,7 @@ def status_body() -> dict[str, Any]:
                     "last_received_at": None,
                     "seconds_since": None,
                     "gap": None,
+                    "short_frames": 0,
                 },
             ],
         },
@@ -192,6 +195,7 @@ def test_the_summary_has_its_nine_parts_with_the_fields_as_the_api_names_them(tm
     assert "mode live · phase regular" in text
     assert "connected true · last_frame_at 2026-10-20T10:29:57+09:00 · seconds_since_frame 3.2" in text
     assert "feeds 3개 · 60초 넘게 조용하거나 아직 안 온 키 2개 · 열린 gap 1개" in text
+    assert "필드가 모자라 raw에만 남긴 프레임(오늘, 엔진 시작 뒤, #381): 없음" in text
     assert "feed key last_received_at seconds_since gap" in text
     assert "H0UNCNT0 005930 10:29:59 0.5 -" in text
     assert f"H0UNASP0 005930 2026-10-19 16:33:10 64010.0 disconnected: lost {MASK}" in text
@@ -493,6 +497,29 @@ def test_a_state_file_it_cannot_read_is_said_and_left_where_it_is(tmp_path: Path
     )
     assert (settings.state_dir / STATE_FILE).read_text() == "{broken"  # not set aside: it only reads
     assert "6. 디스크와 메모리" in text
+
+
+def test_section_2_counts_today_s_frames_short_of_fields_by_feed_and_key(tmp_path: Path) -> None:
+    title = "  필드가 모자라 raw에만 남긴 프레임(오늘, 엔진 시작 뒤, #381): "
+    body = status_body()
+    body["kis"]["feeds"] += [
+        {
+            "feed": "H0UNMBC0",
+            "key": key,
+            "last_received_at": None,
+            "seconds_since": None,
+            "gap": None,
+            "short_frames": n,
+        }
+        for key, n in (("009150", 2), ("000660", 1))
+    ]
+    lines = report(server(tmp_path), NOW, Status(body, "x")).splitlines()
+    assert f"{title}3개 · H0UNMBC0 000660 1 · H0UNMBC0 009150 2" in lines
+
+    for feed in body["kis"]["feeds"]:
+        del feed["short_frames"]  # an engine from before #381's step 2
+    lines = report(server(tmp_path), NOW, Status(body, "x")).splitlines()
+    assert f"{title}모른다(엔진의 /v1/status에 short_frames가 없다)" in lines
 
 
 def test_a_part_that_fails_leaves_the_others(tmp_path: Path) -> None:

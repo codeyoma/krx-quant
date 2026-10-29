@@ -3,7 +3,8 @@
 Around 08:00 (NXT's pre-market opens) a few integrated member frames (``H0UNMBC0``) could not be
 normalized: ``RealtimeFrame.records`` found fewer fields than the 78 of ``MEMBER_COLUMNS``
 (2026-10-23 08:00:01: 72; 2026-10-26 08:00:00: 67 and 08:00:02: 61), and the collector kept them
-raw only (``could not normalize H0UNMBC0 frame; kept raw only``, an ERROR that alerts). Whether
+raw only (``could not normalize H0UNMBC0 frame; kept raw only``, an ERROR that alerts; a counted
+WARNING since #419, as this probe found no rule to read them by). Whether
 those frames follow a rule (a block of fields left out) or are cut short only the raw frames show.
 This probe reads them, over every recorded day:
 

@@ -5,7 +5,8 @@ A gap opens for a WebSocket subscription when the connection drops or goes silen
 quiet in continuous trading, per the Market Calendar, for longer than its threshold
 (closed by the next message).
 Closed gaps are written to the ``gaps`` layer; gaps still open at shutdown are
-written with no end.
+written with no end. Each key also counts today's frames that came short of fields and were
+kept raw only (#381).
 """
 
 from __future__ import annotations
@@ -90,6 +91,9 @@ class FeedState:
     key: str
     last_received_at: datetime | None
     gap: str | None  # the reason of the open gap, if any
+    # Today's (KST) frames with fewer fields than their records need, kept raw only (#381):
+    # counted since the engine started.
+    short_frames: int
 
 
 class FeedHealth:
@@ -102,6 +106,7 @@ class FeedHealth:
         self._open: dict[Key, _Gap] = {}
         self._last_seen: dict[Key, datetime] = {}
         self._watched: dict[Key, datetime] = {}  # key -> when it started being expected
+        self._short: dict[Key, tuple[date, int]] = {}  # key -> (KST day, short frames that day)
 
     def watch(self, key: Key) -> None:
         """``key`` is registered or polled from now on, so it should deliver in market hours."""
@@ -131,6 +136,12 @@ class FeedHealth:
         at = self._now()
         self._last_seen[key] = at
         self._close_if(key, GapKind.STALE, at)
+
+    def short_frame(self, key: Key) -> None:
+        """A frame of ``key`` came with fewer fields than its records need and was kept raw
+        only (#381): counted for today, KST."""
+        today = kst_day(self._now())
+        self._short[key] = (today, self._short_today(key, today) + 1)
 
     def check_stale(self) -> list[Key]:
         """Open a stale gap for every feed silent past its threshold in continuous trading;
@@ -190,17 +201,24 @@ class FeedHealth:
         return confirmed and key[0] not in OWN_HOURS
 
     def snapshot(self) -> list[FeedState]:
-        """Every expected or delivering feed: when it last delivered and any open gap."""
-        keys = sorted(self._watched.keys() | self._last_seen.keys())
+        """Every expected or delivering feed: when it last delivered, any open gap and today's
+        short frames."""
+        today = kst_day(self._now())
+        keys = sorted(self._watched.keys() | self._last_seen.keys() | self._short.keys())
         return [
             FeedState(
                 key[0],
                 key[1],
                 self._last_seen.get(key),
                 gap.reason if (gap := self._open.get(key)) is not None else None,
+                self._short_today(key, today),
             )
             for key in keys
         ]
+
+    def _short_today(self, key: Key, today: date) -> int:
+        day, count = self._short.get(key, (today, 0))
+        return count if day == today else 0
 
     def close(self) -> None:
         """Write gaps that are still open, with no end."""

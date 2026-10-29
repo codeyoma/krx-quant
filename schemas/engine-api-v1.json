@@ -180,14 +180,15 @@
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["feed", "key", "last_received_at", "seconds_since", "gap"],
+            "required": ["feed", "key", "last_received_at", "seconds_since", "gap", "short_frames"],
             "additionalProperties": false,
             "properties": {
               "feed": {"type": "string"},
               "key": {"type": "string"},
               "last_received_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]},
               "seconds_since": {"type": ["number", "null"]},
-              "gap": {"type": ["string", "null"]}
+              "gap": {"type": ["string", "null"]},
+              "short_frames": {"type": "integer", "minimum": 0, "description": "Today's (KST) frames with fewer fields than their records need, kept raw only, since the engine started (#381)"}
             }
           }
         }

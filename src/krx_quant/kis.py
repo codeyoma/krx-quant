@@ -45,6 +45,15 @@ class KisError(RuntimeError):
     pass
 
 
+class ShortFrame(KisError):
+    """A data frame with fewer fields than its records need (``RealtimeFrame.records``)."""
+
+    def __init__(self, tr_id: str, count: int, width: int, got: int) -> None:
+        super().__init__(f"{tr_id}: expected {count}x{width} fields, got {got}")
+        self.expected = count * width
+        self.got = got
+
+
 async def issue_access_token(
     session: aiohttp.ClientSession, rest_url: str, app_key: str, app_secret: str
 ) -> tuple[str, datetime]:
@@ -104,8 +113,13 @@ class RealtimeFrame:
         return self.payload.split("^", 1)[0]
 
     def records(self, width: int) -> list[list[str]]:
-        """Split the payload into ``count`` records of ``width`` fields each."""
+        """Split the payload into ``count`` records of ``width`` fields each.
+
+        Fewer fields than that raise ``ShortFrame``, more raise ``KisError``.
+        """
         fields = self.payload.split("^")
+        if len(fields) < self.count * width:
+            raise ShortFrame(self.tr_id, self.count, width, len(fields))
         if len(fields) != self.count * width:
             raise KisError(f"{self.tr_id}: expected {self.count}x{width} fields, got {len(fields)}")
         return [fields[i * width : (i + 1) * width] for i in range(self.count)]

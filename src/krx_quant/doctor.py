@@ -6,8 +6,9 @@ server, or an agent reading an issue, looks at first when something seems wrong.
 1. The engine: its code (``commit``), when it started (``started_at``), its mode and the
    market phase.
 2. KIS: whether the WebSocket is ``connected``, its last frame (``last_frame_at``,
-   ``seconds_since_frame``, #311), and each feed and key's ``last_received_at``,
-   ``seconds_since`` and open ``gap``, as ``/v1/status`` names them.
+   ``seconds_since_frame``, #311), today's frames short of fields kept raw only by feed and key
+   (``short_frames``, #381), and each feed and key's ``last_received_at``, ``seconds_since`` and
+   open ``gap``, as ``/v1/status`` names them.
 3. Today's PINGPONG heartbeats by hour, the last one and the longest silence between two
    (``raw/date=<today>/feed=_system/symbol=_``).
 4. The latest WARNING and ERROR log lines, where the process can read the engine's memory: the
@@ -409,6 +410,7 @@ def _kis(status: Status, now: datetime) -> list[str]:
         f"  feeds {len(feeds)}개 · {QUIET_SECONDS:g}초 넘게 조용하거나 아직 안 온 키 {quiet}개"
         f" · 열린 gap {gaps}개"
     )
+    lines.append(_short_frames(feeds))
     if feeds:
         lines.append("  feed key last_received_at seconds_since gap")
         today = now.astimezone(KST).date()
@@ -418,6 +420,22 @@ def _kis(status: Status, now: datetime) -> list[str]:
                 f" {_seconds(f.get('seconds_since'))} {f.get('gap') or '-'}"
             )
     return lines
+
+
+def _short_frames(feeds: list[Mapping[str, Any]]) -> str:
+    """Today's frames short of fields, kept raw only, by feed and key (``short_frames``, #381)."""
+    title = "  필드가 모자라 raw에만 남긴 프레임(오늘, 엔진 시작 뒤, #381)"
+    if feeds and not any("short_frames" in f for f in feeds):
+        return f"{title}: 모른다(엔진의 /v1/status에 short_frames가 없다)"
+    counted = sorted(
+        (str(f.get("feed")), str(f.get("key")), n)
+        for f in feeds
+        if isinstance(n := f.get("short_frames"), int) and n > 0
+    )
+    if not counted:
+        return f"{title}: 없음"
+    total = sum(n for _, _, n in counted)
+    return f"{title}: {total}개 · " + " · ".join(f"{feed} {key} {n}" for feed, key, n in counted)
 
 
 def _pingpong(settings: Settings, now: datetime) -> list[str]:
