@@ -370,6 +370,23 @@ def test_a_rise_waiting_for_the_cells_above_it_is_not_bought_once_a_special_wind
     ]
 
 
+def test_a_buy_waiting_for_its_quote_is_given_up_once_a_special_window_touches_it(tmp_path: Path) -> None:
+    """Decided at 10:00:02.3; a VI of 005930 learned at 10:00:03, before the first quote (10:00:03.5):
+    no buy (Codex review on #412)."""
+    day = Day(tmp_path)
+
+    trades = day.run(
+        [
+            Read("10:00:02.3", [Barrier("10:00:00")]),
+            Read("10:00:03", [Special("10:00:03", "10:05:33")]),
+            quote("10:00:03.5", 70_000, 70_100),
+        ]
+    )
+
+    assert trades == []
+    assert [(d["action"], d["reason"]) for d in day.decisions()] == [("buy", SPECIAL)]
+
+
 def test_the_engine_s_own_special_situation_calls_stop_the_buy(tmp_path: Path) -> None:
     """No prediction made for a VI (status vi) and a final consensus the engine blocked for a VI or
     a circuit breaker (#88) are special; one blocked for want of a reference is blocked."""

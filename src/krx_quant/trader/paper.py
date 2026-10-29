@@ -46,8 +46,9 @@ barrier the bar close plus the kind's horizon: the trade is the event its hit ra
 
 **Fills** on the collector's best quotes (``quotes.py``), in the order received:
 
-- the buy at the best ask of the first quote received after the decision. None if that quote's
-  ask is at or above the target (``target_reached``: it was reached already), if the size is
+- the buy at the best ask of the first quote received after the decision. None if a special
+  window learned before that quote touches its window (``special``), if that quote's ask is at or
+  above the target (``target_reached``: it was reached already), if the size is
   below one share (``no_shares``), if no quote comes within ``Rules.quote_wait``
   (``no_quote``), or if it comes at or after the time barrier (``expired``). The take-profit's
   sell rests at the target from then on;
@@ -281,8 +282,14 @@ class PaperTrader:
         self._settle(at)
 
     def on_special(self, windows: Sequence[Window]) -> None:
-        """The special windows the engine knows of now (the latest of each)."""
+        """The special windows the engine knows of now (the latest of each). A buy decided but not
+        filled yet whose window one of them touches is given up (``special``)."""
         self._special = list(windows)
+        waiting = self._waiting
+        if waiting is not None and touching(
+            self._special, waiting.signal.symbol, waiting.signal.bar_close, waiting.plan.time_barrier
+        ):
+            self._give_up(waiting, SPECIAL)
 
     def on_signal(self, signal: Signal, at: datetime) -> None:
         """A prediction of a cell, read at ``at``; one already decided on (a restart) is passed over."""
