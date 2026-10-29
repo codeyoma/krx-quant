@@ -189,7 +189,9 @@ async def test_every_route_has_its_definition(tmp_path: Path) -> None:
     app = create_app(engine)
     routes = {r.resource.canonical for r in app.router.routes() if r.method == "GET" and r.resource}
     others = {
-        (r.method, r.resource.canonical) for r in app.router.routes() if r.method not in ("GET", "HEAD")
+        (r.method, r.resource.canonical)
+        for r in app.router.routes()
+        if r.method not in ("GET", "HEAD") and r.resource is not None
     }
 
     assert routes == set(ROUTES) | set(STREAM)
