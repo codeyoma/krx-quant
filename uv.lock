@@ -367,6 +367,7 @@ source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },
     { name = "boto3" },
+    { name = "cryptography" },
     { name = "lightgbm" },
     { name = "numpy" },
     { name = "pyarrow" },
@@ -389,6 +390,7 @@ dev = [
 requires-dist = [
     { name = "aiohttp", specifier = ">=3.10" },
     { name = "boto3", specifier = ">=1.35" },
+    { name = "cryptography", specifier = ">=44" },
     { name = "lightgbm", specifier = ">=4.7.0" },
     { name = "numpy", specifier = ">=2.4.6" },
     { name = "pyarrow", specifier = ">=17" },

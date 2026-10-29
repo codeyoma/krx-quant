@@ -440,6 +440,10 @@ def test_the_lenient_settings_mask_what_the_full_ones_do(tmp_path: Path) -> None
         "KRX_LOKI_URL": "https://logs-prod-000.grafana.example",
         "KRX_LOKI_USER": "12345678",
         "KRX_LOKI_TOKEN": "glc_" + "L" * 40,
+        "KRX_TRADER_KIS_APP_KEY": "PStrader" + "k" * 28,
+        "KRX_TRADER_KIS_APP_SECRET": "Sx" + "s" * 60,
+        "KRX_TRADER_KIS_ACCOUNT": "98765432-01",
+        "KRX_TRADER_KIS_HTS_ID": "probehts7",
         "KRX_DATA_DIR": str(tmp_path / "data"),
         "KRX_API_PORT": "8081",
     }
@@ -447,7 +451,8 @@ def test_the_lenient_settings_mask_what_the_full_ones_do(tmp_path: Path) -> None
     assert error is None
     lenient, error = doctor_settings({**env, "KRX_TARGET_VERSION": "2"}, None)
     assert error is not None and error.startswith("KRX_TARGET_VERSION 2")
-    assert secrets_of(lenient) == secrets_of(full) and len(secrets_of(full)) == 19
+    # 19, and the trader's key, secret, account (written, its digits, its 8) and HTS ID (#403).
+    assert secrets_of(lenient) == secrets_of(full) and len(secrets_of(full)) == 25
     assert (lenient.data_dir, lenient.state_dir, lenient.api_port) == (tmp_path / "data", Path("state"), 8081)
     bad_port, _ = doctor_settings({**env, "KRX_API_PORT": "soon"}, None)
     assert bad_port.api_port == 8080

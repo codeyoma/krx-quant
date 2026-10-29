@@ -26,6 +26,14 @@ def no_loki(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     loki.stop(0)
 
 
+@pytest.fixture(autouse=True)
+def no_trader_kis(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No test's command finds the trader's KIS keys (#403): empty values override a checkout's
+    ``.env``, so the order probe a test may start stops before it calls KIS at all."""
+    for name in ("APP_KEY", "APP_SECRET", "ACCOUNT", "HTS_ID", "REST_URL", "WS_URL"):
+        monkeypatch.setenv(f"KRX_TRADER_KIS_{name}", "")
+
+
 @pytest.fixture
 async def fake_loki() -> AsyncIterator[FakeLoki]:
     """A fake Grafana Cloud Loki (``tests/loki_fake.py``)."""
