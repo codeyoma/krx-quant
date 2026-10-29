@@ -45,7 +45,13 @@ made as they are (#21, #110). It ends at
 The trader's store (``state/trader.sqlite3``, #398) holds made-up trades on 005930, filled on the
 demo's own quotes by the paper rules: one each on the two afternoons before, and seven on the
 morning, paper up to 10:05 and live after, the last still held at 10:30. A paced demo has them all
-from the start; a screen marks each once its bar is there.
+from the start; a screen marks each once its bar is there. With them (#397), for the auto trader
+screen: the trader's state at 10:30 (the live trader running, that trade open), each mode's day
+ledgers by the trader's own limits, a pause of new entries from the screen on the 8th and the
+server's resume on the 12th; the morning's trades carry their cell's p* and lower bound, the
+afternoons' none (entered before the picks, #395). A paced demo has that 10:30 state from the start:
+not alive (it is written at 10:30) until its clock gets near there. A pause posted to the demo is
+written as the engine writes it, and stays unread: no trader runs.
 """
 
 from __future__ import annotations
@@ -132,13 +138,16 @@ from krx_quant.structure_check import DayPrices
 from krx_quant.supply import KIS, NET_MARKET, NXT_OPENED, TOSS, write_supply
 from krx_quant.swap import NightStatus, reports_by_algorithm
 from krx_quant.touch import TARGET_VERSION
-from krx_quant.trader import CAPITAL, THRESHOLD
+from krx_quant.trader import CAPITAL, PAPER, THRESHOLD
 from krx_quant.trader import SYMBOL as TRADER_SYMBOL
-from krx_quant.trader.paper import costs
+from krx_quant.trader.limits import Guard
+from krx_quant.trader.paper import PaperTrader, costs, shares
+from krx_quant.trader.paper import Rules as TraderRules
+from krx_quant.trader.quotes import BestQuote
+from krx_quant.trader.store import API, CLI, PAUSE, RESUME, TraderStore
 from krx_quant.trader.store import DB_NAME as TRADER_DB
 from krx_quant.trader.store import Entry as TraderEntry
 from krx_quant.trader.store import Exit as TraderExit
-from krx_quant.trader.store import TraderStore
 from krx_quant.us_daily import write_us_daily
 
 DEMO_DAY = date(2026, 10, 12)
@@ -456,14 +465,32 @@ _DEMO_ENTRIES = (
     *((datetime.combine(DEMO_DAY, time(10, m, 2), KST), w) for m, w in ((6, 4), (12, 6), (18, 2), (27, 8))),
 )
 _DEMO_LIVE_FROM = time(10, 5)
+# The trader's runs and controls (#397), for the screen's state and days: the paper trader started
+# on the 7th before the open; new entries paused from the screen on the 8th after its trade, and
+# resumed on the server on the 12th before the open; the live one started at 10:05 (a mode is the
+# server's ``.env``'s: a restart). Each control is read this long after it was asked for.
+_DEMO_PAPER_FROM = datetime(2026, 10, 7, 7, 20, 3, tzinfo=KST)
+_DEMO_PAUSE = datetime(2026, 10, 8, 15, 2, 10, tzinfo=KST)
+_DEMO_RESUME = datetime(2026, 10, 12, 8, 41, 0, tzinfo=KST)
+_DEMO_READ = timedelta(milliseconds=400)
+# The morning's cell as the cost map picked it at 08:30 (#395, made up): the top algorithm on the
+# 4-minute barrier, its breakeven p*, its hit rate's lower bound and Kelly f*, all of the capital.
+# The afternoons' trades were entered before the picks (#395): none of these.
+_DemoPick = tuple[str | None, float | None, float | None, float | None, float | None]
+_DEMO_PICK: _DemoPick = ("top", 0.61, 0.66, 9.6, 1.0)  # role, p*, low, f*, fraction
 
 
 def write_demo_trader(state_dir: Path, books: Sequence[Event]) -> None:
     """The trader's store (``state/trader.sqlite3``, replaced) with a made-up trade at each of
     ``_DEMO_ENTRIES``, filled on 005930's quotes in ``books`` as paper fills are (``trader/paper.py``):
-    the buy at the ask of the first quote after the decision, its barriers w ticks either side of the
-    mid-point then, and its exit as ``_demo_exit`` finds it (the time barrier four minutes after the
-    bar close)."""
+    the buy at the ask of the first quote after the decision, as many shares as the capital and the
+    cash buy (``paper.shares``), its barriers w ticks either side of the mid-point then, and its exit
+    as ``_demo_exit`` finds it (the time barrier four minutes after the bar close).
+
+    With them the trader's runs, its pause and resume (``_DEMO_PAUSE``, ``_DEMO_RESUME``), each day's
+    ledger by the trader's own limits (``limits.Guard``) and its state at 10:30 (#397): the live
+    trader's, written by a paper trader of that mode (``PaperTrader``) on the quotes since its open
+    trade's entry."""
     for leftover in (TRADER_DB, f"{TRADER_DB}-wal", f"{TRADER_DB}-shm"):
         (state_dir / leftover).unlink(missing_ok=True)
     quotes = sorted(
@@ -471,15 +498,33 @@ def write_demo_trader(state_dir: Path, books: Sequence[Event]) -> None:
         for feed, row in books
         if feed == BOOK.tr_id and row["symbol"] == TRADER_SYMBOL
     )
+    rules = TraderRules(fee_rate=_FEE)
+    live_from = _at(_DEMO_LIVE_FROM)
     store = TraderStore(state_dir / TRADER_DB)
     try:
+        store.add_run(_DEMO_PAPER_FROM, PAPER, {"demo": True})
+        guard = Guard(store, PAPER, rules.limits, _DEMO_PAPER_FROM, lambda text: None)
+        controls = [(_DEMO_PAUSE, PAUSE, API, False), (_DEMO_RESUME, RESUME, CLI, None)]
         for n, (decided, w) in enumerate(_DEMO_ENTRIES):
-            mode = "live" if decided >= _at(_DEMO_LIVE_FROM) else "paper"
+            mode = "live" if decided >= live_from else PAPER
+            while controls and controls[0][0] < decided:
+                asked, action, source, sell_now = controls.pop(0)
+                _demo_day(guard, asked)
+                guard.apply(store.add_control(asked, action, source, sell_now=sell_now), asked + _DEMO_READ)
+                store.put_day(guard.mode, guard.day, guard.ledger(), asked + _DEMO_READ)
+            if mode != guard.mode:  # the paper day ends at the switch; the live trader starts
+                store.put_day(guard.mode, guard.day, guard.ledger(), live_from)
+                store.add_run(live_from, mode, {"demo": True})
+                guard = Guard(store, mode, rules.limits, live_from, lambda text: None)
+            _demo_day(guard, decided)
             after = [q for q in quotes if q[0] > decided]
             bought_at, bid, ask = after[0]
             tick = _OPENS[TRADER_SYMBOL][1]
             anchor = (bid + ask) / 2
             bar_close = decided.replace(second=0, microsecond=0)
+            quantity = shares(1.0, CAPITAL, ask, CAPITAL + guard.realized_all, _FEE)
+            pick: _DemoPick = _DEMO_PICK if decided.date() == DEMO_DAY else (None, None, None, None, None)
+            role, p_star, low, kelly, fraction = pick
             decision = store.add_decision(
                 mode=mode,
                 symbol=TRADER_SYMBOL,
@@ -511,15 +556,38 @@ def write_demo_trader(state_dir: Path, books: Sequence[Event]) -> None:
                 decided_at=decided,
                 entry_at=bought_at,
                 entry_price=ask,
-                quantity=CAPITAL // int(ask),
-                buy_fee=ask * (CAPITAL // int(ask)) * _FEE,
+                quantity=quantity,
+                buy_fee=ask * quantity * _FEE,
                 quote_at=bought_at,
+                role=role,
+                p_star=p_star,
+                low=low,
+                kelly=kelly,
+                fraction=fraction,
             )
             trade = store.enter(decision, entry)
             if (out := _demo_exit(entry, [q for q in after[1:] if q[0] < entry.time_barrier])) is not None:
                 store.exit(trade, out)
+                gross = (out.price - entry.entry_price) * quantity
+                guard.exited(gross - entry.buy_fee - out.sell_fee - out.tax, out.at)
+                store.put_day(mode, guard.day, guard.ledger(), out.at)
+        # The live trader's state at 10:30, its open trade marked at each bid since it was bought.
+        trader = PaperTrader(store, rules, _CALENDAR.session, live_from, guard.mode)
+        held = store.open_trade(guard.mode)
+        for at, bid, ask in quotes:
+            if held is not None and held.entry_at is not None and held.entry_at < at <= _at(_END):
+                trader.on_quote(BestQuote(at, bid, ask))
+        trader.write(_at(_END))
     finally:
         store.close()
+
+
+def _demo_day(guard: Guard, at: datetime) -> None:
+    """``guard`` on to the day of ``at``, as the trader's clock goes: past the midnight after its
+    day, which keeps that day's ledger as it ended (``Guard.roll``), and on to ``at``."""
+    if kst_day(at) > guard.day:
+        guard.roll(datetime.combine(guard.day + timedelta(days=1), time(), KST))
+        guard.roll(at)
 
 
 def _demo_exit(entry: TraderEntry, held: Sequence[tuple[datetime, float, float]]) -> TraderExit | None:

@@ -540,3 +540,79 @@ async def test_the_demo_has_the_trader_s_paper_and_live_trades_on_005930(tmp_pat
     assert {m["net"] > 0 for m in marks if m["side"] == "sell"} == {True, False}, "a gain and a loss"
     assert marks[0]["side"] == "buy" and marks[0]["at"][:16] == "2026-10-12T10:27", "held at 10:30"
     assert other["marks"] == []
+
+
+async def test_the_demo_has_the_trader_s_state_days_and_controls(tmp_path: Path) -> None:
+    """#397, for the auto trader screen. Output: the live trader running at 10:30 with the
+    morning's last trade open (its target, stop and time barrier, marked at the last bid), the
+    day's and the cumulative P&L of its trades, the limits' use; the screen's pause of the 8th and
+    the server's resume of the 12th; each mode's days, the 8th paused; the morning's trades with
+    the cell's p* and lower bound."""
+    app = await demo_app(tmp_path / "demo.sqlite3")
+
+    async with TestClient(TestServer(app)) as client:
+        state = await get_json(client, "/v1/trader")
+        days = await get_json(client, "/v1/trader/days")
+        trades = await get_json(client, "/v1/trader/trades")
+
+    check("trader", state)
+    check("trader_days", days)
+    assert (state["mode"], state["status"], state["alive"]) == ("live", "running", True)
+    assert state["updated_at"] == "2026-10-12T10:30:00+09:00"
+    position = state["position"]
+    held = trades["trades"][0]
+    assert held["exit"] is None and position["trade_id"] == held["id"]
+    assert (position["target"], position["stop"], position["time_barrier"]) == (
+        held["target"],
+        held["stop"],
+        "2026-10-12T10:31:00+09:00",
+    )
+    assert position["bid"] is not None and position["bid_at"] <= "2026-10-12T10:30:00+09:00"
+    live = [t for t in trades["trades"] if t["mode"] == "live" and t["exit"] is not None]
+    realized = sum(t["net"] for t in live)
+    assert state["today"]["trades"] == len(live) == 3
+    assert state["today"]["realized"] == pytest.approx(realized)
+    assert state["today"]["net"] == pytest.approx(realized + position["unrealized"])
+    assert state["cumulative"]["since"] == state["started_at"] == "2026-10-12T10:05:00+09:00"
+    assert state["cash"] == pytest.approx(
+        state["capital"] + realized - held["entry"]["price"] * held["entry"]["quantity"] - held["buy_fee"]
+    )
+    assert state["limits"]["daily"]["won"] == 100_000 and state["limits"]["cumulative"]["won"] == 200_000
+    assert 0 < state["limits"]["daily"]["used"] < 1 and state["pause"] is None
+    assert [(c["action"], c["source"], c["sell_now"]) for c in state["controls"]] == [
+        ("resume", "cli", None),
+        ("pause", "api", False),
+    ]
+    assert all(c["applied_at"] is not None for c in state["controls"])
+    ledger = {(d["day"], d["mode"]): d for d in days["days"]}
+    assert set(ledger) == {
+        ("2026-10-07", "paper"),
+        ("2026-10-08", "paper"),
+        ("2026-10-12", "paper"),
+        ("2026-10-12", "live"),
+    }
+    assert ledger["2026-10-08", "paper"]["status"] == "entries_paused", "paused from the screen that day"
+    assert ledger["2026-10-12", "paper"]["status"] == "running", "resumed on the server before the open"
+    assert ledger["2026-10-12", "live"]["net"] == pytest.approx(realized)
+    paper = [t for t in trades["trades"] if t["mode"] == "paper"]
+    assert ledger["2026-10-12", "paper"]["cumulative"]["net"] == pytest.approx(sum(t["net"] for t in paper))
+    assert {t["p_star"] for t in trades["trades"] if t["entry"]["at"] < "2026-10-12"} == {None}
+    assert {
+        (t["p_star"], t["precision_low"]) for t in trades["trades"] if t["entry"]["at"] > "2026-10-12"
+    } == {(0.61, 0.66)}
+
+
+async def test_a_pause_from_the_screen_waits_in_the_demo_for_a_trader(tmp_path: Path) -> None:
+    """#397. Output: the demo writes a pause posted to it as the engine does; with no trader running
+    to read it, it stays unread and the state is the made-up one's."""
+    app = await demo_app(tmp_path / "demo.sqlite3")
+
+    async with TestClient(TestServer(app)) as client:
+        response = await client.post("/v1/trader/pause", json={"sell_now": True})
+        posted = await response.json()
+        state = await get_json(client, "/v1/trader")
+
+    assert response.status == 202
+    assert state["controls"][0] == posted["control"]
+    assert posted["control"]["applied_at"] is None
+    assert state["status"] == "running"
