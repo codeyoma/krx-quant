@@ -718,6 +718,10 @@ class PaperTrader:
 
     def _exit(self, trade: OpenTrade, at: datetime, price: float, reason: str, quote: BestQuote) -> None:
         paid = costs(trade.entry_price, price, trade.quantity, self.rules.fee_rate)
+        # The day the exit is counted in, rolled before the exit is kept: a day read again after it
+        # would hold it already (an exit the clock had not reached the day of yet, #396).
+        if self.guard.roll(at):
+            self._dirty = True
         self.store.exit(trade, Exit(at, price, reason, paid.sell_fee, paid.tax, quote.received_at))
         self._open = None
         self._sell_after = None

@@ -264,6 +264,9 @@ class Day:
     picks: Sequence[Pick] | None = None
     selection: Selection | None = None  # the picks as chosen from a cost map, ``picks`` unless given
     notices: list[str] = field(default_factory=list)  # sent to Telegram (#396)
+    # False: a quote reaches the trader before its clock moves to the quote's time (a process
+    # suspended overnight wakes to a quote first).
+    clock_first: bool = True
     asked: list[Control | str] = field(default_factory=list)  # each resume and re-arm, or why none
 
     def run(self, events: Sequence[Event]) -> list[dict[str, Any]]:
@@ -281,7 +284,8 @@ class Day:
             reader = EngineReader(self.state / ENGINE_DB, SYMBOL)
             reader.follow(trader.cells, self.started_at - timedelta(minutes=2))
             for event in sorted(events, key=_time):
-                trader.on_time(_time(event))
+                if self.clock_first or not isinstance(event, BestQuote):
+                    trader.on_time(_time(event))
                 if isinstance(event, BestQuote):
                     trader.on_quote(event)
                 elif isinstance(event, Read):

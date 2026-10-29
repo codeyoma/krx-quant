@@ -192,13 +192,15 @@ class Guard:
         return self._check(at)
 
     def exited(self, net: float, at: datetime) -> str | None:
-        """A trade exited at ``at`` with ``net``: the limit its realized P&L makes reached, if one is."""
-        self.roll(at)
+        """A trade exited at ``at`` with ``net``, kept in the store already: the limit its realized
+        P&L makes reached, if one is. The caller rolls the day before it keeps the exit (``roll``);
+        if the exit rolls it here instead, the day's figures read again hold the exit already."""
         self.unrealized = 0.0
-        self.realized_day += net
-        self.trades_day += 1
-        self.realized_cumulative += net
-        self.realized_all += net
+        if not self.roll(at):
+            self.realized_day += net
+            self.trades_day += 1
+            self.realized_cumulative += net
+            self.realized_all += net
         return self._check(at)
 
     def ledger(self) -> dict[str, Any]:

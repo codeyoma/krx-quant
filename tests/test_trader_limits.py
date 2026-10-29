@@ -327,3 +327,29 @@ def test_the_controls_are_read_within_a_second() -> None:
 def test_the_rules_carry_the_default_limits() -> None:
     assert (Rules().limits.daily, Rules().limits.cumulative) == (100_000, 200_000)
     assert replace(Rules(), capital=500_000).limits.cumulative == 100_000
+
+
+@pytest.mark.parametrize("clock_first", [True, False])
+def test_an_exit_on_a_day_the_clock_has_not_reached_yet_is_counted_once(
+    tmp_path: Path, clock_first: bool
+) -> None:
+    """A 30-minute barrier bought at 10:00 and still open when the process is suspended; it wakes on
+    the 15th to a quote before its clock moves there. The time exit at that bid (70,000: −3,654.21)
+    is the day's one trade, whether the quote or the clock rolls the day first."""
+    day = Day(tmp_path, cell=replace(Day(tmp_path).cell, kind="barrier_30m"), clock_first=clock_first)
+    [trade] = day.run(
+        [
+            Read("10:00:02.3", [Barrier("10:00:00", kind="barrier_30m")]),
+            BOUGHT,
+            quote(on("2026-10-15", "09:00:05"), 70_000, 70_100),
+        ]
+    )
+
+    assert trade["exit"] == {"at": "2026-10-15T09:00:05+09:00", "price": 70_000, "reason": "time"}
+    state = day.state_now(on("2026-10-15", "09:00:06"))
+    assert (state["today"]["day"], state["today"]["trades"]) == ("2026-10-15", 1)
+    assert state["today"]["realized"] == pytest.approx(-3_654.21)
+    assert state["cumulative"]["realized"] == pytest.approx(-3_654.21)
+    assert state["cash"] == pytest.approx(1_000_000 - 3_654.21)
+    [fifteenth] = [d for d in day.days() if d["day"] == "2026-10-15"]
+    assert (fifteenth["trades"], fifteenth["net"]) == (1, pytest.approx(-3_654.21))
