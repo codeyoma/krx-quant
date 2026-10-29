@@ -881,6 +881,8 @@ docker compose run --rm engine probe-member-frames
 - 3절로 짧은 프레임의 모양이 다음 78칸 프레임과 어디서 갈라지는지 본다. 늘 같은 칸(예: 뒤쪽 영문 이름)이 빠지면 규칙이다. 앞에서부터 같고 뒤가 모자라기만 하면 잘린 프레임이다. 4절의 `_unparsed`에 그 뒷부분이 있는지, 같은 때 다른 피드에도 필드 수가 맞지 않는 프레임이 있었는지 함께 적는다.
 - 그것으로 2단계를 정한다: 규칙이면 그 모양을 정규화하고 [kis-feeds.md](kis-feeds.md#피드별-메모)에 실측을 적는다. 규칙이 없으면(잘린 프레임) 이 경우를 WARNING으로 낮추고 개수를 센다(원본은 지금처럼 남긴다). 사용자 결정이 필요하면 #381에 묻는다.
 
+**결과** (2026-10-29 밤, [#381 댓글](https://github.com/codeyoma/krx-quant/issues/381#issuecomment-6501525787)). 2026-10-12 – 10-29의 14일, 회원사 프레임 240,240개 중 9개가 78칸보다 적었다(61–72칸). 모두 08:00에 온 그 종목의 그날 첫 프레임이었고, 다음 78칸 프레임이 약 20초–2분 30초 뒤에 왔다. 빠진 칸은 한 덩어리가 아니고 수도 매번 달라 규칙이 없다. 같은 때 다른 피드에는 이상이 없었다. 그래서 2단계는 WARNING으로 낮추고 세는 쪽으로 했다(#419, 사용자 결정은 필요 없었다): 그런 프레임은 raw에만 남고, WARNING `H0UNMBC0 frame short of fields kept raw only (…)`과 그날 수(`/v1/status`의 `kis.feeds[].short_frames`, `krx-quant doctor` 2절)가 남는다. 그래서 Grafana 알림 `krx-quant-engine-error`가 아침마다 울리지 않는다. 자세한 실측은 [kis-feeds.md](kis-feeds.md#피드별-메모)의 "회원사 WebSocket의 필드 수"에 있다.
+
 ### KIS 모의투자 주문 확인 (#403)
 
 자동 매매(#393)의 trader는 KIS에 주문하고, 체결을 받고, 잔고를 읽는다. 그 응답의 필드를 쓰기 전에(CODING_STANDARDS "External data is probed before it is used") 모의투자 서버에서 실제 응답을 잰다. 필드와 TR ID는 KIS의 예제(koreainvestment/open-trading-api `examples_llm/domestic_stock`, 2026-10-29에 읽음)에서 왔고, 이 프로브의 출력이 나오기 전까지는 가설이다([kis-feeds.md](kis-feeds.md#주문-403)).
@@ -1808,6 +1810,7 @@ docker compose start engine
 - 장전 브리핑의 KRX 예상 시가를 KRX 것(거래소 구분 코드 `1`)만 고르는 엔진(#341, #314)은 `/v1/briefing`의 `expected_open`에서 NXT(`2`)의 예상가를 버린다. 녹화와 저장은 그대로다. 그 거래일 밤 예약 작업 `probe-expected-open-krx-314`가 KRX 것만 센 `probe-expected-open`의 출력을 #314에 남긴다(2장 "예상 체결 녹화 확인 (#304)"의 "다시 재기"). 서버에서 손으로 할 일은 없다.
 - WebSocket 결측 확인(#344)을 담은 엔진은 수집, 저장, 침묵 감시를 바꾸지 않는다. 그 밤 예약 작업 `probe-gaps-344`가 녹화한 모든 날의 결측과 종가 단일가 구간을 #344에 남긴다(2장 "WebSocket 결측 확인 (#344)"). 서버에서 손으로 할 일은 없다.
 - 회원사 프레임의 필드 수 확인(#381)을 담은 엔진은 수집, 저장, 정규화를 바꾸지 않는다(08:00 무렵 필드가 모자란 회원사 프레임은 전처럼 raw에만 남고 ERROR가 난다). 그 밤 예약 작업 `probe-member-frames-381`이 녹화한 모든 날의 회원사 프레임 중 필드 수가 맞지 않는 것을 #381에 남긴다(2장 "회원사 프레임의 필드 수 확인 (#381)"). 서버에서 손으로 할 일은 없다.
+- 필드가 모자란 회원사 프레임을 WARNING으로 낮추는 엔진(#419, #381)은 처음 뜰 때부터 그런 프레임을 ERROR 대신 WARNING(`H0UNMBC0 frame short of fields kept raw only (…)`)으로 남기고, 피드·키마다 그날 수를 센다(`/v1/status`의 `kis.feeds[].short_frames`, `krx-quant doctor` 2절). raw에만 남기고 이벤트를 버리는 것은 그대로다. 그래서 08:00에 Grafana 알림 `krx-quant-engine-error`가 울리지 않는다. 서버에서 손으로 할 일은 없다.
 - 결과는 텔레그램으로 온다(`krx-quant notify`): `[알림] 자동 업데이트: <이전> → <새 커밋>`과 커밋 제목(최대 10개), 끝 줄에 디스크 여유와 Docker가 가진 크기(#379, 아래), `[알림] 자동 업데이트 실패: …`, 그 밖의 오류(GitHub 접속 실패 등)는 `[알림] 자동 업데이트 오류: …`. 오류일 때 엔진은 그대로 돈다.
 - 업데이트가 끝나면(새 엔진이 API에 답하고 Spot 학습용 이미지를 올린 뒤) Docker가 3일(72시간) 동안 쓰지 않은 빌드 캐시와, 컨테이너가 쓰지 않는 이미지 중 만든 지 3일이 지난 것을 이름이 있든 없든 지운다(#379): `docker builder prune -af --filter until=72h`, `docker image prune -af --filter until=72h`.
   - 도는 엔진의 이미지는 컨테이너가 쓰고 있어서 지우지 않는다.
@@ -2013,7 +2016,7 @@ docker compose run --rm engine doctor
 > **바뀜** (2026-10-23, #362): 여덟 절 → 아홉 절(9절 모델 파일). 이유: 모델 파일을 알고리즘마다 둘만 남기게 되어(#361) 그 수와 크기를 보인다.
 
 1. 엔진: `commit`, `started_at`(그리고 지난 시간), `mode`, `phase`, `now`. 엔진 API는 이 컨테이너의 것(`127.0.0.1:8080`), 그다음 compose의 `engine` 서비스 순서로 묻는다. 둘 다 닿지 않으면 각각의 이유, DB `runs`의 마지막 `start`(시각과 커밋), 이 명령 이미지의 `KRX_COMMIT`을 적는다.
-2. KIS: `kis.connected`, `kis.last_frame_at`, `kis.seconds_since_frame`(#311), 피드·키 수와 60초 넘게 조용하거나 아직 안 온 키 수, 열린 `gap` 수, 그리고 피드·키마다 `feed key last_received_at seconds_since gap` 한 줄(오늘이면 시각만, 아니면 날짜도).
+2. KIS: `kis.connected`, `kis.last_frame_at`, `kis.seconds_since_frame`(#311), 피드·키 수와 60초 넘게 조용하거나 아직 안 온 키 수, 열린 `gap` 수, 필드가 모자라 raw에만 남긴 오늘의 프레임 수(`kis.feeds[].short_frames`의 합과 그 피드·키마다의 수, 없으면 `없음`, 그 필드가 없는 #419 전 엔진이면 `모른다`, #381), 그리고 피드·키마다 `feed key last_received_at seconds_since gap` 한 줄(오늘이면 시각만, 아니면 날짜도).
 3. PINGPONG: 오늘의 `raw/date=<오늘>/feed=_system/symbol=_`에서 센 KIS 하트비트의 합계, 마지막 시각, 두 PINGPONG 사이 가장 긴 간격, 시간별 수. 녹화는 `KRX_FLUSH_SECONDS`(30초)마다 파일로 쓰여 그 뒤에 온 것은 아직 없을 수 있다.
 4. 최근 WARNING·ERROR 로그: 수집기는 시작한 뒤의 WARNING·ERROR 줄 최근 200개를 메모리에 두고, 서버 요약에는 그 수와 마지막 20줄을 싣는다. 줄은 시각, 수준, 로거, 메시지, 예외의 종류이고 300자에서 자른다. 실행 중에 생긴 글은 싣지 않는다. 그래서 시세 값이 들어갈 수 없다(예: 알아볼 수 없는 KIS 프레임의 앞부분이 든 오류, 가격이 든 예외 메시지):
    - 메시지는 엔진(`krx_quant`) 로거의 것만, 코드가 쓴 틀(`log.warning("... %s", 값)`의 첫 인자, 첫 줄)이다. 엔진의 로그 호출은 모두 틀을 문자열 그대로 쓴다(f-string이나 실행 중에 만든 글이 아니다. 테스트가 확인한다).
@@ -2051,7 +2054,7 @@ docker compose run --rm engine doctor
 
 **함정.** 에이전트가 서버에서 돌릴 명령을 줄 때 틀리기 쉬운 것이다(#308 때 실제로 틀렸다).
 - 컨테이너 안의 파이썬은 `/app/.venv/bin/python`이다. 이 배포 전 이미지의 `python`은 앱의 패키지가 없는 기본 파이썬이라 `import pyarrow`가 실패했다. 지금은 `PATH`의 맨 앞이 venv라 `python`도 같지만, 전체 경로가 언제나 맞다. `docker compose run`으로 파이썬을 바로 돌리려면 `--entrypoint /app/.venv/bin/python`을 준다(엔트리포인트가 `/app/.venv/bin/krx-quant`다. 2.3절의 예).
-- `/v1/status`의 피드별 필드는 `kis.feeds[]`의 `feed`, `key`, `last_received_at`, `seconds_since`, `gap`이다. `last_received`가 아니다. 연결 전체의 마지막 프레임은 `kis.last_frame_at`, `kis.seconds_since_frame`이다(#311, [engine-api.md](engine-api.md#get-v1status)).
+- `/v1/status`의 피드별 필드는 `kis.feeds[]`의 `feed`, `key`, `last_received_at`, `seconds_since`, `gap`, `short_frames`(#381)다. `last_received`가 아니다. 연결 전체의 마지막 프레임은 `kis.last_frame_at`, `kis.seconds_since_frame`이다(#311, [engine-api.md](engine-api.md#get-v1status)).
 - 엔진 API는 컨테이너 안에서 `http://127.0.0.1:8080`, 맥에서는 Tailscale로 `http://krx-quant:8080`이다. 서버 셸에서는 Tailscale 주소(`KRX_BIND_ADDRESS`)의 `KRX_ENGINE_PORT`에만 열린다(`localhost`가 아니다).
 - `docker compose run --rm engine <명령>`은 엔진과 다른 새 컨테이너다. 데이터와 상태 폴더는 같지만 엔진의 메모리(연결 상태, 로그)는 없다. 엔진의 것을 보려면 `docker compose exec engine …`이나 엔진 API를 쓴다.
 - 엔진 로그는 Grafana Cloud Loki(`{service="krx-quant", process="engine"}`, #358)와 서버 셸의 `docker compose logs engine`에 있다. `docker compose logs`는 06:00 배포가 컨테이너를 새로 만들면 그 전의 것이 없다. 에이전트는 Loki를 질의한다([agents/server-logs.md](agents/server-logs.md)).
@@ -2150,6 +2153,7 @@ rm -rf ~/krx-quant/state/logs
        [10m]))
      ```
    - 뺀 다섯 틀은 엔진이 같은 때 `[장애]`로 알리는 것이다(밤 학습 실패, 엔진 API를 열지 못함, 장 마감 업로드 실패, AWS 비용을 읽지 못함). 엔진에 그런 알림이 더해지면 이 목록에도 더한다. `telegram send failed`는 빼지 않는다: 엔진이 텔레그램으로 보내지 못한 것이라 Grafana가 대신 알린다.
+   - 08:00의 필드가 모자란 회원사 프레임은 #419부터 ERROR가 아니라 WARNING이라 이 규칙에 들지 않는다(#381, [kis-feeds.md](kis-feeds.md#피드별-메모)). 다른 정규화 실패(다른 피드의 것, 회원사 프레임의 필드가 많거나 값을 읽지 못한 것: `could not normalize … frame; kept raw only`)는 그대로 ERROR라 알린다.
    - 밤 학습(`process="training"`)의 줄은 3번이, 예약 작업(`job`)은 엔진이 결과마다 텔레그램 한 줄과 이슈 댓글로, 손으로 돌린 명령(`command`)은 돌린 사람이 본다. 그래서 엔진의 줄만 본다.
    - 조건: A > 0. 대기 0초. 데이터 없음은 Normal(ERROR가 없으면 데이터가 없다).
    - 알림 하나가 `logger`(모듈)와 `message`(메시지의 앞부분: 첫 숫자·콜론·괄호 전까지, 40자까지)마다 생긴다. 그래서 같은 메시지 틀은 계속 나도 한 번 오고, 4시간마다 다시 온다. 10분 동안 그 줄이 없으면 복구된다.

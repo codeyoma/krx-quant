@@ -124,6 +124,15 @@ WS_CLOSE_SECONDS = 5.0
 # How often buffered partitions whose time limit has passed are flushed.
 _TICK_SECONDS = 1.0
 
+# Feeds whose frames KIS sends short of fields now and then, with no rule to read them by: such
+# a frame is kept raw only, as any frame that cannot be normalized, and counted (``FeedHealth``),
+# but logged as a WARNING, not an ERROR, which alerts. Other feeds' short frames stay ERRORs.
+# The integrated member flow (H0UNMBC0): 9 of its 240,240 frames from 2026-10-12 to 10-29 came
+# with 61–72 fields of 78, all at 08:00 (the NXT pre-market's start), each the symbol's first that
+# day, the fields missing in no fixed block; the next full frame came 20 s to 2.5 min later
+# (#381, ``probe-member-frames-381`` of 2026-10-29).
+SHORT_FRAMES_EXPECTED = frozenset({MEMBER.tr_id})
+
 
 def subscription_plan(
     settings: Settings, fronts: FrontMonths | None, night: str | None = None
@@ -645,6 +654,7 @@ def _live_status(stream: _Stream, health: FeedHealth, now: Clock) -> LiveStatus:
             "last_received_at": iso(last) if last else None,
             "seconds_since": (at - last).total_seconds() if last else None,
             "gap": f.gap,
+            "short_frames": f.short_frames,
         }
 
     def status() -> dict[str, Any]:
@@ -1112,7 +1122,9 @@ class _Stream:
         """Record one message raw, then answer or normalize it.
 
         The raw copy is written before anything can fail, and a message that cannot be
-        parsed or normalized is logged and skipped so one bad frame never stops recording.
+        parsed or normalized is logged and skipped so one bad frame never stops recording. A
+        frame short of fields is also counted for its key, and logged as a WARNING for the
+        feeds that send such frames now and then (``SHORT_FRAMES_EXPECTED``, #381).
         """
         at = self._now()
         day = kst_day(at)
@@ -1153,7 +1165,18 @@ class _Stream:
                 feed.normalize(dict(zip(feed.columns, fields, strict=True)), received_at)
                 for fields in message.records(len(feed.columns))
             ]
-        except (kis.KisError, ValueError, KeyError, IndexError):
+        except (kis.KisError, ValueError, KeyError, IndexError) as e:
+            if isinstance(e, kis.ShortFrame):
+                self._health.short_frame((message.tr_id, message.symbol))
+                if feed.tr_id in SHORT_FRAMES_EXPECTED:
+                    log.warning(
+                        "%s frame short of fields kept raw only (%s, #381): %d of %d",
+                        message.tr_id,
+                        message.symbol,
+                        e.got,
+                        e.expected,
+                    )
+                    return
             log.exception("could not normalize %s frame; kept raw only", message.tr_id)
             return
         for row in rows:

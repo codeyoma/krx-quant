@@ -132,6 +132,7 @@ async def test_the_kis_status_is_sent_on_connecting_and_when_it_changes(tmp_path
                     "last_received_at": "2026-10-12T09:29:58+09:00",
                     "seconds_since": 2.0,
                     "gap": "disconnected: closed",
+                    "short_frames": 0,
                 }
             ],
         }

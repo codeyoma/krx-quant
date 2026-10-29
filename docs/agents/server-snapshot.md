@@ -18,7 +18,7 @@ Only the label asks. The server never reads an issue's title, body or comments, 
 The output of `krx-quant doctor`, masked (secrets, server addresses), with no market values. Field names are `/v1/status`'s.
 
 1. Engine: `commit`, `started_at`, `mode`, `phase`.
-2. KIS: `kis.connected`, `kis.last_frame_at`, `kis.seconds_since_frame`, then one line per feed and key: `feed key last_received_at seconds_since gap`.
+2. KIS: `kis.connected`, `kis.last_frame_at`, `kis.seconds_since_frame`, today's frames short of fields kept raw only (`kis.feeds[].short_frames`: the total and each feed and key's count, `없음` for none, `모른다` from an engine before #419; a few `H0UNMBC0` ones at 08:00 are expected, #381), then one line per feed and key: `feed key last_received_at seconds_since gap`.
 3. Today's PINGPONG heartbeats: total, the last one, the longest silence between two, the count per hour.
 4. The engine's latest WARNING and ERROR log lines (the last 20 since it started). Only the code's message templates: values other than dates, times, booleans and name-shaped words show as `…`, exceptions as their type, other libraries' lines as logger and level. For full lines, query Loki ([server-logs.md](server-logs.md)).
 5. Scheduled jobs: last runs, jobs that never ran to an end, results not posted yet.

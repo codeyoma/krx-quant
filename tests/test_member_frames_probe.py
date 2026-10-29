@@ -255,11 +255,12 @@ async def test_the_frame_the_collector_could_not_normalize_is_the_one_reported(
     # received at the same instant (a fixed clock), in the order received.
     kis.script[(MEMBER.tr_id, "005930")] = [full(), SHORT_END, full()]
 
-    with caplog.at_level(logging.ERROR):
+    with caplog.at_level(logging.WARNING):
         await collect(kis, settings_for(kis, tmp_path))
 
     assert len(read(tmp_path, "events", MEMBER.tr_id)) == 2 and len(read(tmp_path, "raw", MEMBER.tr_id)) == 3
-    assert "could not normalize H0UNMBC0 frame; kept raw only" in caplog.text
+    # A WARNING since #381's step 2, an ERROR before (tests/test_short_frames.py).
+    assert "H0UNMBC0 frame short of fields kept raw only (005930, #381): 72 of 78" in caplog.text
     output = report(tmp_path, ("005930",), FIXED_NOW + timedelta(hours=1))
     assert (
         "  2026-10-08 09:30:16.000 005930 · 레코드 1 · 필드 72(78보다 6 적다) · "
