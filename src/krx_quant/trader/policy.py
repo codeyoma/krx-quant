@@ -157,9 +157,14 @@ def ensure_schema(db: sqlite3.Connection) -> None:
 
 
 def connect(path: Path) -> sqlite3.Connection:
-    """The trader's store for writing policies (the nightly re-fit, in the engine's container): the
-    tables made if missing, write-ahead log as the trader keeps it."""
-    path.parent.mkdir(parents=True, exist_ok=True)
+    """The trader's store for writing policies (the nightly re-fit, in the engine's container),
+    write-ahead log as the trader keeps it. Every table of the store is made first if missing, the
+    trader's as the trader makes them (``store.TraderStore``): a re-fit before the trader's first
+    start (a collector without it) must not leave a store with the policies alone, which the
+    Engine API's readers of trades and marks would take for a whole one."""
+    from krx_quant.trader.store import TraderStore  # it imports this module
+
+    TraderStore(path).close()
     db = sqlite3.connect(path, timeout=BUSY_SECONDS)
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA journal_mode=WAL")

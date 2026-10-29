@@ -154,3 +154,37 @@ async def test_a_trade_carries_its_policy(tmp_path: Path) -> None:
     Day(tmp_path).run(DAY)
     _, body = await trades(tmp_path, tmp_path)
     assert {t["policy"] for t in body["trades"]} == {None}, "before the first champion"
+
+
+async def test_a_store_the_nightly_fit_made_before_the_trader_s_first_start_answers_every_route(
+    tmp_path: Path,
+) -> None:
+    """The re-fit ran before the trader ever started (a collector without it): the store it made
+    holds the trader's tables too, and every trader route answers with nothing yet."""
+    write_five(tmp_path)
+    assert not (tmp_path / TRADER_DB).exists()
+    refit_from(
+        DAYS,
+        tmp_path / ENGINE_DB,
+        tmp_path / TRADER_DB,
+        CALENDAR.session,
+        capital=CAPITAL,
+        fee_rate=FEE,
+        target_version=TARGET_VERSION,
+        grid=Grid(min_trades=1),
+        now=at("22:31:00"),
+    )
+
+    engine = await run(tmp_path / "replay.db", [], until=replay_at("09:00:00"))
+    async with TestClient(TestServer(create_app(engine, state_dir=tmp_path))) as client:
+        answers = {}
+        for route in ("/v1/trader/trades", "/v1/trader/policies", "/v1/symbols/005930/trader-marks"):
+            response = await client.get(route)
+            answers[route] = (response.status, await response.json())
+
+    assert answers["/v1/trader/trades"] == (200, {"trades": []})
+    assert answers["/v1/symbols/005930/trader-marks"] == (200, {"symbol": "005930", "marks": []})
+    status, policies = answers["/v1/trader/policies"]
+    assert (status, policies["champion"], len(policies["policies"])) == (200, 1, 1)
+    check("trader_trades", answers["/v1/trader/trades"][1])
+    check("trader_policies", policies)

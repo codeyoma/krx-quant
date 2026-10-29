@@ -1256,7 +1256,7 @@ v1에서는 쓰지 않는다. 조사 결과는 [paid-data.md](paid-data.md)에 �
 - 비용 지도를 읽지 못하면(엔진 API가 응답하지 않음) 정책을 만들지 않고 종료 코드 1로 끝난다. 다음 거래일 밤에 다시 돈다. 통과한 칸이 없으면 빈 정책을 만든다(종료 코드 0).
 - 메모리: 서버는 2 GB이고 사전 검증의 재생이 메모리 부족으로 죽은 적이 있다. 맞추기는 칸 하나씩, 엔진 DB의 색인으로 그 칸의 예측만 읽고, 행마다 바로 읽어 작은 `Candidate`(오름인 예측만)로 둔다. 정답 경로와 출력은 남기지 않는다. 20거래일(하루 379 봉 마감)의 네 칸, 예측 30,320개를 맞출 때 Python이 잡는 메모리는 최대 11 MB(tracemalloc, 테스트의 상한 24 MB)이고, 별도 프로세스(`krx-quant refit-policy`) 전체의 최대 RSS는 약 140 MB(대부분 CLI의 import), 걸린 시간은 2.5초쯤이다(맥에서 잰 값, `tests/test_trader_refit.py`의 두 메모리 테스트). 작업은 밤마다 최대 RSS를 출력(이슈 댓글), 로그(`refit: policy N kept …; peak RSS … MB`)와 정책의 `fit.run.peak_rss_mb`에 남긴다.
 
-**저장 (`state/trader.sqlite3`).** trader가 쓴다. 정책 표(`policies`, `champions`)는 밤 정책 맞추기가 엔진 컨테이너에서 쓴다(#399, 같은 `state` 폴더). 매매 기록의 행에는 모드(`paper`)가 붙는다. #395가 더한 열(`selection_id`, `role`, `p_star`, `precision_low`, `kelly`, `fraction`)과 #399가 더한 열(`policy_id`)은 그 전에 만든 저장소에 trader가 시작할 때 더하고, 그 전의 행에서는 `null`이다.
+**저장 (`state/trader.sqlite3`).** trader가 쓴다. 정책 표(`policies`, `champions`)는 밤 정책 맞추기가 엔진 컨테이너에서 쓴다(#399, 같은 `state` 폴더). trader가 시작하기 전에 맞추기가 돌면 저장소의 표를 trader가 만드는 그대로 모두 만든 뒤 정책을 쓴다(엔진 API의 매매·표시 읽기가 정책 표만 있는 저장소를 만나지 않게). 매매 기록의 행에는 모드(`paper`)가 붙는다. #395가 더한 열(`selection_id`, `role`, `p_star`, `precision_low`, `kelly`, `fraction`)과 #399가 더한 열(`policy_id`)은 그 전에 만든 저장소에 trader가 시작할 때 더하고, 그 전의 행에서는 `null`이다.
 
 > **바뀜** (2026-10-30, #414): "trader만 쓴다" → 정책 표는 밤 정책 맞추기가 쓴다. 이유: 밤 학습 뒤의 예약 작업은 수집기의 컨테이너에서 돌고, 정책 버전은 spec #393대로 trader의 저장소에 둔다(#399).
 
