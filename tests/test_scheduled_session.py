@@ -35,6 +35,7 @@ from krx_quant.scheduled import (
     Night,
     Scheduler,
     Target,
+    Unposted,
     session_facts,
     session_window,
 )
@@ -162,6 +163,27 @@ async def test_a_session_job_is_asked_with_the_session_s_facts_and_posts_as_a_se
         assert [n.facts for n in seen] == [day_facts] and seen[0].day == FRIDAY and seen[0].trading_day
         assert hub.bodies(1)[-1].startswith("**예약 작업 `day-job`** · 2026-10-16 장중 · 커밋 ")
         assert told[-1].startswith("예약 작업 day-job(2026-10-16 장중): 성공, 종료 코드 0")
+
+
+async def test_the_session_loop_leaves_the_results_not_posted_to_the_night(tmp_path: Path) -> None:
+    # It wakes at midnight, inside the night: posting them there too could post one twice beside a
+    # night's job posting it. They go up at the next night or start (the night's own rule).
+    state = JobState(tmp_path / STATE_FILE, unposted=[Unposted("night-job", THURSDAY, 7, "body", (), ())])
+    async with fake_github() as hub, aiohttp.ClientSession() as session:
+        scheduler = Scheduler(
+            [session_job(due=lambda night: False)],
+            AT,
+            CALENDAR,
+            state,
+            GitHub(session, TOKEN, REPO, hub.url),
+            Told(),
+            FakeClock(at(FRIDAY, "10:00")),
+            commit=COMMIT,
+        )
+        await asyncio.wait_for(scheduler.run_session(FRIDAY), 5)
+        assert hub.bodies(7) == [] and len(state.unposted) == 1
+        await asyncio.wait_for(scheduler.run_night(FRIDAY), 5)
+        assert hub.bodies(7) == ["body"] and state.unposted == []
 
 
 async def test_the_session_facts_are_the_settings_alone() -> None:

@@ -25,7 +25,8 @@ the trader's own mock account (``KRX_TRADER_KIS_*``, never the collector's key),
 11. the same sell at the best bid, of what was bought;
 12. the account after the sell;
 13. the fill notices: their frames, decrypted, by kind, matched to the orders, with how long after
-    each order's answer they came;
+    each order's answer they came; with an HTS ID, a step that is done only if the subscription
+    was answered with its key and IV and a notice could be read (a run without one is not done);
 14. a summary: the calls, KIS's per-second refusals, and whether every step was done.
 
 An order it placed that is still open at the end is cancelled. A run a restart cuts may leave a
@@ -86,7 +87,8 @@ SYMBOL = "005930"
 QUANTITY = 1
 # Exit codes: it ran every step (0); it stopped on an error (1); the servers are not the mock ones;
 # the keys are not set (the scheduled job then waits for them); outside the session; a step was
-# not done (a refused buy, a fill or a cancel that did not come).
+# not done (a refused buy, a fill or a cancel that did not come, or, with an HTS ID, no fill notice
+# read: no approval key, no answer to the subscription, no frame decrypted).
 REFUSED, NO_KEYS, CLOSED, INCOMPLETE = 2, 3, 4, 5
 # The continuous session it orders in: after the opening's first minutes, and ended before the
 # trader's own last exit (#393: every position is closed by 15:15).
@@ -677,6 +679,8 @@ class _Probe:
     async def notices_seen(self) -> None:
         say = self.say
         say("13. 체결 통보")
+        if self.hts_id:
+            self.done["notice"] = False  # done once a notice is read, below
         if self.listening is None:
             say("  - 받지 않았다(6절).")
             say("")
@@ -698,6 +702,8 @@ class _Probe:
                 break
         timed, odd = self._records()
         records = [r for _, r in timed]
+        answer = (self.notices.answer or {}).get("body") or {}
+        self.done["notice"] = answer.get("rt_cd") == "0" and self.notices.key_iv is not None and bool(records)
         frames = self.notices.frames
         encrypted = sum(1 for _, text in frames if text.startswith("1"))
         pings = sum(1 for _, text in self.notices.controls if "PINGPONG" in text)
@@ -731,29 +737,14 @@ class _Probe:
     def _records(self) -> tuple[list[tuple[float, dict[str, str]]], list[str]]:
         """The notices' records by field name, decrypted, each with when its frame came; and lines
         on the frames that could not be read so."""
-        key_iv = self.notices.key_iv
         records: list[tuple[float, dict[str, str]]] = []
         odd: Counter[str] = Counter()
         for at, text in list(self.notices.frames):
-            parts = text.split("|", 3)
-            if len(parts) != 4:
-                odd["모양이 다른 프레임"] += 1
-                continue
-            payload = parts[3]
-            if parts[0] == "1":
-                if key_iv is None:
-                    odd["key·iv가 없어 풀지 못한 프레임"] += 1
-                    continue
-                try:
-                    payload = decrypt(key_iv[0], key_iv[1], payload)
-                except (ValueError, UnicodeDecodeError):
-                    odd["풀리지 않은 프레임"] += 1
-                    continue
-            values = payload.split("^")
-            if len(values) != len(FILL_NOTICE_COLUMNS):
-                odd[f"필드가 {len(values)}개인 프레임"] += 1
-                continue
-            records.append((at, dict(zip(FILL_NOTICE_COLUMNS, values, strict=True))))
+            found = notice_records(text, self.notices.key_iv)
+            if isinstance(found, str):
+                odd[found] += 1
+            else:
+                records += [(at, record) for record in found]
         return records, [f"{what} {n}개" for what, n in odd.items()]
 
     def summary(self) -> None:
@@ -764,7 +755,10 @@ class _Probe:
         shown = ", ".join(f"{k} {n}" for k, n in kinds.most_common())
         say(f"  - REST 호출 {len(answers)}번(토큰 제외): {shown}")
         say(f"  - 초당 한도({BUSY}) {sum(1 for a in answers if a.code == BUSY)}번")
-        names = {"token": "토큰", "far": "하한가 매수와 취소", "buy": "매수 체결", "sell": "매도 체결"}
+        names = {
+            **{"token": "토큰", "far": "하한가 매수와 취소", "buy": "매수 체결", "sell": "매도 체결"},
+            "notice": "체결 통보",
+        }
         say("  - " + ", ".join(f"{names[k]} {'됨' if v else '안 됨'}" for k, v in self.done.items()))
         say(f"  - 걸린 시간 {time.monotonic() - self.began:.0f}초")
 
@@ -791,6 +785,30 @@ class _Probe:
         relied on)."""
         answer = await self.read(lambda: self.account.fills(self.day, SYMBOL, ref.number))
         return [r for r in answer.rows("output1") if _same_no(r.get("odno"), ref.number)]
+
+
+def notice_records(text: str, key_iv: tuple[str, str] | None) -> list[dict[str, str]] | str:
+    """A fill notice frame's records by field name (``FILL_NOTICE_COLUMNS``), decrypted with the
+    subscription's key and IV; a frame may hold several (its count, ``1|tr_id|002|...``). Else why
+    it could not be read so."""
+    parts = text.split("|", 3)
+    if len(parts) != 4 or not parts[2].isdigit():
+        return "모양이 다른 프레임"
+    payload = parts[3]
+    if parts[0] == "1":
+        if key_iv is None:
+            return "key·iv가 없어 풀지 못한 프레임"
+        try:
+            payload = decrypt(key_iv[0], key_iv[1], payload)
+        except (ValueError, UnicodeDecodeError):
+            return "풀리지 않은 프레임"
+    values = payload.split("^")
+    width, count = len(FILL_NOTICE_COLUMNS), int(parts[2])
+    if count < 1 or len(values) != count * width:
+        return f"레코드 {count}개에 필드가 {len(values)}개인 프레임"
+    return [
+        dict(zip(FILL_NOTICE_COLUMNS, values[i * width : (i + 1) * width], strict=True)) for i in range(count)
+    ]
 
 
 def said(answer: Answer) -> str:

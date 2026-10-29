@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 
-from krx_quant import kis_orders, order_probe
+from krx_quant import fake_kis, kis_orders, order_probe
 from krx_quant.config import DEFAULT_REST_URL, DEFAULT_WS_URL, KIS_MOCK_REST_URL, KIS_MOCK_WS_URL, Settings
 from krx_quant.fake_kis import BUY_SIDE, SELL_SIDE, FakeAccount, FakeKis, encrypt
 from krx_quant.feeds.base import KST
@@ -221,7 +221,7 @@ async def test_a_run_buys_and_sells_one_share_and_cancels_a_far_order(
     assert "  - 구독 응답: rt_cd 0 · msg_cd OPSP0000" in text and "key 32자, iv 16자" in text
     assert "  - 필드 26개로 나뉜 레코드" in text and "통보 없음" not in text
     assert "  - 9. 즉시 체결 지정가 매수: 1·0·0·1·02" in text and "2·0·0·2·02" in text
-    assert "토큰 됨, 하한가 매수와 취소 됨, 매수 체결 됨, 매도 체결 됨" in text
+    assert "토큰 됨, 하한가 매수와 취소 됨, 매수 체결 됨, 매도 체결 됨, 체결 통보 됨" in text
 
 
 async def test_the_report_shows_no_key_account_order_number_or_personal_field(
@@ -254,6 +254,29 @@ async def test_without_the_hts_id_it_orders_without_the_fill_notice(
     assert "HTS ID(KRX_TRADER_KIS_HTS_ID): 없음, 체결 통보(6·13절)는 건너뛴다" in text
     assert "6. 체결 통보 구독\n  - HTS ID가 없어 건너뛴다." in text
     assert fake.ws_connections == 0 and not fake.approvals_issued
+
+
+async def test_with_an_hts_id_a_fill_notice_not_subscribed_leaves_the_run_not_done(
+    trader: tuple[FakeKis, FakeAccount], tmp_path: Path
+) -> None:
+    # The orders went through, but the notice the scheduled job is to measure was not: it runs again.
+    fake, account = trader
+    fake.accept_ws = False
+    code, text = await probe(trader_settings(fake, tmp_path), fake)
+    assert code == INCOMPLETE
+    assert "  - 구독 응답이 5초 안에 오지 않았다: " in text
+    assert "매수 체결 됨, 매도 체결 됨, 체결 통보 안 됨" in text
+    assert account.holdings.get(SYMBOL, 0) == 0 and all(o.left == 0 for o in account.orders)
+
+
+async def test_with_an_hts_id_notices_that_cannot_be_decrypted_leave_the_run_not_done(
+    trader: tuple[FakeKis, FakeAccount], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake, _ = trader
+    monkeypatch.setattr(fake_kis, "encrypt", lambda key, iv, text: encrypt("x" * 32, iv, text))
+    code, text = await probe(trader_settings(fake, tmp_path), fake, timing=replace(FAST, notice_wait=0.5))
+    assert code == INCOMPLETE
+    assert "  - 풀리지 않은 프레임 " in text and "체결 통보 안 됨" in text
 
 
 async def test_an_order_that_does_not_fill_is_cancelled_tried_once_more_and_nothing_is_sold(
@@ -352,6 +375,21 @@ def test_a_fill_notice_frame_is_decrypted_with_the_subscription_s_key() -> None:
     text = "^".join(kis_orders.FILL_NOTICE_COLUMNS)
     key, iv = "k" * 32, "i" * 16
     assert kis_orders.decrypt(key, iv, encrypt(key, iv, text)) == text
+
+
+def test_a_fill_notice_frame_may_hold_several_records() -> None:
+    key, iv = "k" * 32, "i" * 16
+    one = [f"{name.lower()}1" for name in kis_orders.FILL_NOTICE_COLUMNS]
+    two = [f"{name.lower()}2" for name in kis_orders.FILL_NOTICE_COLUMNS]
+    frame = f"1|{kis_orders.FILL_NOTICE.mock}|002|{encrypt(key, iv, '^'.join([*one, *two]))}"
+    records = order_probe.notice_records(frame, (key, iv))
+    assert isinstance(records, list) and [r["ODER_NO"] for r in records] == ["oder_no1", "oder_no2"]
+    short = f"1|{kis_orders.FILL_NOTICE.mock}|002|{encrypt(key, iv, '^'.join(one))}"
+    assert order_probe.notice_records(short, (key, iv)) == "레코드 2개에 필드가 26개인 프레임"
+    assert order_probe.notice_records(frame, None) == "key·iv가 없어 풀지 못한 프레임"
+    assert order_probe.notice_records(f"0|{kis_orders.FILL_NOTICE.mock}|001|{'^'.join(one)}", None) == [
+        dict(zip(kis_orders.FILL_NOTICE_COLUMNS, one, strict=True))
+    ]
 
 
 def test_an_account_is_eight_digits_and_a_product_code() -> None:

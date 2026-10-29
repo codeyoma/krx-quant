@@ -465,8 +465,9 @@ class Scheduler:
 
     async def run_session(self, day: date) -> None:
         """The session jobs of the trading day ``day``, each from its time on, in the list's order:
-        one due runs if it can end by ``SESSION_UNTIL``, else it waits for the next trading day."""
-        await self._post_unposted()
+        one due runs if it can end by ``SESSION_UNTIL``, else it waits for the next trading day.
+        The results earlier runs could not post wait for the next night or start, as the night's do:
+        posted from here too, at midnight, they could go up twice beside a night's job posting them."""
         for job in self._session_jobs:
             start, end = session_window(job, day)
             await self._clock.sleep_until(start)
