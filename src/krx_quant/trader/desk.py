@@ -18,6 +18,10 @@ same cells' predictions and the same quotes, in one process.
   The reader follows every book's cells (``cells``).
 - **Quotes, special windows, the clock**: to every book. **Controls** (pauses, resumes, re-arms):
   to the champion's alone.
+- **A stall of the quotes** (#407, ``stall.QuoteWatch``): the desk watches the stream once for every
+  book, keeps each stall and sends it and the quotes' return to Telegram once each; every book is
+  told (``on_stall``, ``on_recover``: no new buy meanwhile; the mock champion reads KIS's REST
+  quotes, the paper books wait), and so is a book made during one.
 - **Mock mode** (#405): the champion's book (``mock.MockTrader``) is the execution layer alone: its
   KIS orders, its trades of mode ``mock``, the limits and pauses, the state and ledger. Beside it
   the champion policy keeps a paper shadow (``shadow``: ``paper.PaperTrader`` in paper, held by no
@@ -40,7 +44,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 from collections.abc import Callable, Sequence
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from krx_quant.feeds.base import kst_day
 from krx_quant.kis_orders import Broker
@@ -53,6 +57,7 @@ from krx_quant.trader.mock import MockTrader, Timing
 from krx_quant.trader.paper import PaperTrader, Rules
 from krx_quant.trader.quotes import BestQuote
 from krx_quant.trader.selection import NO_POLICY, Selection
+from krx_quant.trader.stall import STALL_AFTER, QuoteWatch
 from krx_quant.trader.store import TraderStore
 
 log = logging.getLogger(__name__)
@@ -83,7 +88,8 @@ class Desk:
     champion's book's (``paper.PaperTrader``). In ``mock`` mode (#405) the champion's book orders
     through ``broker`` (``mock.MockTrader``, its fills read at ``clock``'s time, waiting ``timing``),
     and the champion policy's paper shadow (``shadow``) keeps its paper record; the challengers'
-    books are in paper as ever."""
+    books are in paper as ever. More than ``stall_after`` without a quote in continuous trading is a
+    stall of the quotes (#407; None watches nothing)."""
 
     def __init__(
         self,
@@ -97,12 +103,16 @@ class Desk:
         broker: Broker | None = None,
         clock: Callable[[], datetime] | None = None,
         timing: Timing | None = None,
+        stall_after: timedelta | None = STALL_AFTER,
     ) -> None:
         self.store = store
         self.rules = rules
         self._sessions = sessions
         self._started_at = started_at
         self.mode = mode
+        # The collector's quotes, watched for every book (#407): a stall the trader stopped during,
+        # taken up again, holds the books made below.
+        self.watch = QuoteWatch(store, mode, sessions, started_at, notify or (lambda text: None), stall_after)
         self.champion: PaperTrader
         if mode == MOCK:
             if broker is None or clock is None:
@@ -134,6 +144,8 @@ class Desk:
         # A challenger's paper trade left open when the trader stopped: its book goes on with it.
         for version in store.open_challengers(PAPER):
             self.challengers[version] = self._book(version)
+        for book in [self.champion, *([] if self.shadow is None else [self.shadow])]:
+            self._told(book, started_at)
 
     def _paper_account(self) -> float:
         """The net P&L the paper books size on: the champion's book's in paper mode (the trades its
@@ -143,9 +155,10 @@ class Desk:
             return self.champion.holds.realized_all
         return self.store.paper_account()
 
-    def _book(self, version: int) -> PaperTrader:
-        """Challenger ``version``'s book: in paper whatever the trader's mode (#405)."""
-        return PaperTrader(
+    def _book(self, version: int, at: datetime | None = None) -> PaperTrader:
+        """Challenger ``version``'s book: in paper whatever the trader's mode (#405); told of a stall of
+        the quotes at ``at`` (the start's if None, #407)."""
+        book = PaperTrader(
             self.store,
             self.rules,
             self._sessions,
@@ -154,6 +167,14 @@ class Desk:
             challenger=version,
             account=self._paper_account,
         )
+        return self._told(book, at or self._started_at)
+
+    def _told(self, book: PaperTrader, at: datetime) -> PaperTrader:
+        """``book``, told of the stall of the quotes holding at ``at``, if one does (#407)."""
+        stall = self.watch.stall
+        if stall is not None:
+            book.on_stall(stall, at)
+        return book
 
     @property
     def books(self) -> list[PaperTrader]:
@@ -197,7 +218,7 @@ class Desk:
         for version, challenger in running.items():
             book = self.challengers.get(version)
             if book is None:
-                book = self.challengers[version] = self._book(version)
+                book = self.challengers[version] = self._book(version, at)
             book.select(policy.apply(challenger, selection), at)
         for version in sorted(self._running - set(running)):
             log.info("trader: challenger %s runs no more", version)
@@ -216,7 +237,10 @@ class Desk:
             book.on_signal(signal, at)
 
     def on_quote(self, quote: BestQuote) -> None:
+        ended = self.watch.on_quote(quote)  # the quotes back (#407): each book told before it takes it
         for book in self.books:
+            if ended is not None:
+                book.on_recover(ended, quote.received_at)
             book.on_quote(quote)
         self._prune()
 
@@ -224,7 +248,10 @@ class Desk:
         self.champion.on_controls(now)
 
     def on_time(self, now: datetime) -> None:
+        begun = self.watch.on_time(now)  # the quotes stalled (#407)
         for book in self.books:
+            if begun is not None:
+                book.on_stall(begun, now)
             book.on_time(now)
         self.record(now)
         self._prune()

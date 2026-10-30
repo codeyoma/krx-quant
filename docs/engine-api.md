@@ -1325,7 +1325,8 @@ KRX 마감 흐름 화면이 읽는 그날의 마감 리밸런싱 수요다(`clos
   "buy_fee": 147.21, "sell_fee": 147.525, "tax": 1967.0, "cost": 2261.735, "gross": 2100.0, "net": -161.735,
   "orders": [{"id": 1, "side": "buy", "purpose": "entry", "price": 70100.0, "quantity": 14, "placed_at": "...", "status": "filled",
               "closed_at": "...", "broker_id": null, "fills": [{"at": "...", "price": 70100.0, "quantity": 14, "quote_at": "..."}]},
-             {"id": 2, "side": "sell", "purpose": "take_profit", "price": 70250.0, "...": "..."}]}]}
+             {"id": 2, "side": "sell", "purpose": "take_profit", "price": 70250.0, "...": "..."}],
+  "stalls": []}]}
 ```
 
 (값은 지어낸 예다.)
@@ -1341,7 +1342,10 @@ KRX 마감 흐름 화면이 읽는 그날의 마감 리밸런싱 수요다(`clos
 - `decided_at`: trader가 그 예측으로 사기로 정한 때. 보통 읽은 때이고, 같은 봉 마감의 순위가 더 높은 칸을 기다렸으면 그 뒤다(#395). `entry`: 그 뒤 처음 받은 호가의 매도 1호가와 수량(min(`fraction` × 운용 상한, 주문 가능 현금) ÷ 그 값의 내림. 모의의 주문 가능 현금은 운용 상한 + 청산한 매매의 순손익이고 매수 수수료도 그 안에서 낸다, #396).
 
 > **바뀜** (2026-10-30, #412): `entry.quantity`는 운용 상한 ÷ 매도 1호가의 내림이었다 → `fraction` × 운용 상한 ÷ 매도 1호가의 내림이고, `decided_at`은 읽은 때였다 → 정한 때(순위가 높은 칸을 기다리면 그 뒤). `role`, `p_star`, `precision_low`, `kelly`, `fraction`이 더해졌다. 이유: 칸을 비용 지도로 고르고, 순위와 분할 Kelly 크기를 쓴다(#395).
-- `exit`: 청산 시각·가격·이유(`take_profit`: 목표가에, `stop_loss`: 그때의 매수 1호가에, `time`: 시간 장벽 직전 호가의 매수 1호가에, #396의 `pause`: "정지하고 즉시 매도" 뒤 처음 받은 호가의 매수 1호가에, `daily_limit`·`cumulative_limit`: 손실 한도에 닿은 호가(또는 그 뒤 처음 받은 호가)의 매수 1호가에). 열려 있으면 `null`이고, 그때 `sell_fee`, `tax`, `cost`, `gross`, `net`도 `null`이다. 시간 청산의 `exit.at`이 `time_barrier`보다 늦으면 장벽 앞 5초 안에 호가가 없어(스트림이 끊겼거나 trader가 멈춰 있었다) 다음 호가에 판 것이다.
+- `exit`: 청산 시각·가격·이유(`take_profit`: 목표가에, `stop_loss`: 그때의 매수 1호가에, `time`: 시간 장벽 직전 호가의 매수 1호가에, #396의 `pause`: "정지하고 즉시 매도" 뒤 처음 받은 호가의 매수 1호가에, `daily_limit`·`cumulative_limit`: 손실 한도에 닿은 호가(또는 그 뒤 처음 받은 호가)의 매수 1호가에). 열려 있으면 `null`이고, 그때 `sell_fee`, `tax`, `cost`, `gross`, `net`도 `null`이다. 시간 청산의 `exit.at`이 `time_barrier`보다 늦으면 장벽 앞 5초 안에 호가가 없어(스트림이 끊겼거나 trader가 멈춰 있었다) 다음 호가에 판 것이다. 호가 끊김(#407)이면 `stalls`에 남는다(아래).
+- `stalls`(#407, 설계 14장 "호가 끊김"): 그 매매가 열린 채 지난 수집기 호가의 끊김, 오래된 것부터. `began_at`은 trader가 본 때(연속매매 시간에 5초 넘게 호가가 없었다), `last_quote_at`은 그 전 마지막 호가의 받은 시각(이번 시작 뒤 없었으면 `null`), `ended_at`은 끝난 때(호가가 다시 왔거나, trader가 다른 날·모드로 다시 시작했다. 이어지는 동안 `null`), `effect`는 그 끊김이 청산에 한 일이다: `waited`(호가가 돌아올 때까지 기다려 끊김 뒤 첫 호가로 청산했다: 모의 장부), `rest`(mock: 끊김 동안 KIS REST 호가로 팔기를 시작했다), `null`(없다: 끊김을 지나 이어졌거나, 걸어 둔 익절 매도가 체결됐다). 끊김이 없었으면 빈 목록이다. #407 전의 매매와 #407 뒤에 trader가 아직 열지 않은 저장소는 빈 목록이다.
+
+  > **바뀜** (2026-10-31, #423): `stalls`가 더해졌다. 이유: spec #393 "호가"대로 모의 장부가 호가를 기다린 일을 매매 기록에 남긴다(#407).
 - `buy_fee`, `sell_fee`, `tax`, `cost`, `gross`, `net`: 원. 수수료는 산 금액과 판 금액에 각각 `KRX_FEE_PERCENT`, 매도세는 판 금액에 `pricing.SELL_TAX`. `gross` = (매도가 − 매수가) × 수량, `net` = `gross` − `cost`.
 - `orders`: 그 매매의 주문, 낸 순서대로. 매수(`entry`), 목표가에 걸어 둔 매도(`take_profit`: 익절이면 `filled`, 손절·시간·정지·한도면 `cancelled`), 손절·시간·정지·한도의 매도(`stop_loss`, `time`, `pause`, `daily_limit`, `cumulative_limit`). `broker_id`는 증권사 주문 번호(모의는 `null`, mock은 KIS의 주문 번호, #405). `fills`의 `quote_at`은 모의 체결이 쓴 호가의 받은 시각이다(mock은 `null`: 체결은 KIS 주문 체결 조회의 평균가와 수량이다). mock의 매매는 일부만 체결된 주문(남은 것을 취소해 `cancelled`인데 체결이 있다)과, 한 번의 팔기에 매도 주문 여럿(같은 목적, 매수 1호가로 다시 낸 것)을 가질 수 있다. 그 매매의 `exit.price`는 매도 체결들의 평균이다.
 - 데모 엔진의 매매는 아래 `trader-marks`의 것과 같다. 10-07 밤에 맞춘 정책 1이 첫 챔피언이라, 10-08부터의 매매는 `policy`가 1이고 칸의 값이 있다(지어낸 값: `role` `top`, `p_star` 0.61, `precision_low` 0.66, `kelly` 9.6, `fraction` 1.0, `threshold` 0.6). 10-07의 매매는 첫 챔피언 전이고 칸 고르기(#395) 전에 들어간 매매라 넷 다 `null`이다. `policy=2`는 10-08 밤에 맞춘 도전 정책 2가 10-12 아침에 모의로 낸 매매 둘(`threshold` 0.65)이다(#400). 기본 답(챔피언의 매매)에는 없다.
