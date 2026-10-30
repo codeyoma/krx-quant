@@ -84,6 +84,7 @@ from krx_quant.structure_check import structure_check
 from krx_quant.supply_probe import probe_supply
 from krx_quant.trader.limits import CONTROL_SECONDS
 from krx_quant.trader.limits import ask as ask_trader
+from krx_quant.trader.mock_check import check_mock_trades
 from krx_quant.trader.refit import run_refit
 from krx_quant.trader.report import run_night, run_report
 from krx_quant.trader.run import run_trader
@@ -109,7 +110,8 @@ async def _collect() -> None:
 
 
 async def _trade() -> None:
-    # The KIS keys are the collector's, which the trader never uses (#393): paper needs none.
+    # The KIS keys are the collector's, which the trader never uses (#393): paper needs none, and
+    # mock its own (KRX_TRADER_KIS_*, #405), which the trader checks as it starts.
     settings = Settings.from_env(require_kis=False)
     trader = TraderSettings.from_env()
     stop = asyncio.Event()
@@ -155,6 +157,11 @@ async def _refit_policy(engine_url: str | None, report: bool) -> int:
     if report:
         return await run_night(settings, trader, datetime.now(KST), engine_url)
     return await run_refit(settings, trader, datetime.now(KST), engine_url)
+
+
+async def _check_mock_trades(day: date | None) -> int:
+    """A mock trading day's orders in the ledger against KIS's order inquiry (#405), read-only."""
+    return await check_mock_trades(Settings.from_env(require_kis=False), datetime.now(KST), day)
 
 
 def _trader_report(day: date | None) -> int:
@@ -694,7 +701,8 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("collect", help="record KIS real-time feeds until interrupted")
     trade_cmd = sub.add_parser(
         "trade",
-        help="trade 005930 on the cells the cost map passes, in paper (#394, #395), until interrupted;"
+        help="trade 005930 on the cells the cost map passes, in paper (#394, #395) or on KIS's mock server"
+        " (KRX_TRADER_MODE=mock, #405), until interrupted;"
         " resume: lift the screen's pause; rearm: re-arm the cumulative loss limit (#396)",
     )
     trade_cmd.add_argument(
@@ -728,6 +736,17 @@ def main(argv: list[str] | None = None) -> int:
         " limits and pauses; no price",
     )
     report_cmd.add_argument(
+        "--day",
+        type=date.fromisoformat,
+        help="the trading day, YYYY-MM-DD (default: the latest at or before tonight's evening)",
+    )
+    mock_check_cmd = sub.add_parser(
+        "check-mock-trades",
+        help="compare a mock trading day's orders in the trader's ledger with KIS's order inquiry (#405),"
+        " with KRX_TRADER_KIS_* on the mock server: sides, quantities, fills and fill prices in ticks;"
+        " no order number, account or price",
+    )
+    mock_check_cmd.add_argument(
         "--day",
         type=date.fromisoformat,
         help="the trading day, YYYY-MM-DD (default: the latest at or before tonight's evening)",
@@ -1022,6 +1041,8 @@ def _command(args: argparse.Namespace) -> int:
         return asyncio.run(_refit_policy(args.engine_url, args.report))
     elif args.command == "trader-report":
         return _trader_report(args.day)
+    elif args.command == "check-mock-trades":
+        return asyncio.run(_check_mock_trades(args.day))
     elif args.command == "measure-subscriptions":
         asyncio.run(_measure())
     elif args.command == "check-fallbacks":

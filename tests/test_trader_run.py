@@ -313,8 +313,7 @@ async def test_the_cell_settings_of_394_are_no_longer_read(
         ("KRX_TRADER_DAILY_LOSS_PERCENT", "0", "above 0"),
         ("KRX_TRADER_CUMULATIVE_LOSS_PERCENT", "-1", "KRX_TRADER_CUMULATIVE_LOSS_PERCENT"),
         ("KRX_TRADER_DAILY_LOSS_PERCENT", "ten", "a number"),
-        ("KRX_TRADER_MODE", "live", "not built yet"),
-        ("KRX_TRADER_MODE", "mock", "not built yet"),
+        ("KRX_TRADER_MODE", "live", "not built yet"),  # #408; mock is in (#405, test_trader_mock.py)
         ("KRX_TRADER_MODE", "real", "must be one of"),
         ("KRX_TRADER_THRESHOLD", "1.5", "KRX_TRADER_THRESHOLD"),
         ("KRX_TRADER_CAPITAL", "0", "KRX_TRADER_CAPITAL"),

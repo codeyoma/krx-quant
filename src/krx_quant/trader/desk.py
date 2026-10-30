@@ -4,7 +4,8 @@ same cells' predictions and the same quotes, in one process.
 - **Picks** (``select``, at the trader's start and every day at 08:30): the champion read from the
   store, applied to the cells the cost map passes (``under_champion``, ``policy.apply``), for the
   champion's book (``paper.PaperTrader``: the trades the trader makes, which its loss limits and
-  pauses hold); and each challenger that runs that day (``policy.running_versions``: at most
+  pauses hold; in mock mode ``mock.MockTrader``, #405, its orders on KIS's mock server); and each
+  challenger that runs that day (``policy.running_versions``: at most
   three, kept before that day's 08:30, so one fitted tonight runs from the next trading day)
   applied to the same cells, for its own paper book. A challenger book holds no limit nor pause
   (``limits.Unlimited``) and buys on the paper account's cash with nothing open, as the champion's
@@ -35,11 +36,13 @@ from collections.abc import Callable, Sequence
 from datetime import date, datetime
 
 from krx_quant.feeds.base import kst_day
+from krx_quant.kis_orders import Broker
 from krx_quant.market_calendar import Session
 from krx_quant.special import Window
-from krx_quant.trader import PAPER, policy
+from krx_quant.trader import MOCK, PAPER, policy
 from krx_quant.trader.cells import Cell, Signal
 from krx_quant.trader.limits import RUNNING, Notify
+from krx_quant.trader.mock import MockTrader, Timing
 from krx_quant.trader.paper import PaperTrader, Rules
 from krx_quant.trader.quotes import BestQuote
 from krx_quant.trader.selection import NO_POLICY, Selection
@@ -70,7 +73,9 @@ def under_champion(store: TraderStore, selection: Selection) -> Selection:
 
 class Desk:
     """The champion's book and the challengers' (module doc), into ``store``; the arguments are the
-    champion's book's (``paper.PaperTrader``)."""
+    champion's book's (``paper.PaperTrader``). In ``mock`` mode (#405) the champion's book orders
+    through ``broker`` (``mock.MockTrader``, its fills read at ``clock``'s time, waiting ``timing``);
+    the challengers' are in paper as ever."""
 
     def __init__(
         self,
@@ -80,13 +85,23 @@ class Desk:
         started_at: datetime,
         mode: str = PAPER,
         notify: Notify | None = None,
+        *,
+        broker: Broker | None = None,
+        clock: Callable[[], datetime] | None = None,
+        timing: Timing | None = None,
     ) -> None:
         self.store = store
         self.rules = rules
         self._sessions = sessions
         self._started_at = started_at
         self.mode = mode
-        self.champion = PaperTrader(store, rules, sessions, started_at, mode, notify)
+        self.champion: PaperTrader
+        if mode == MOCK:
+            if broker is None or clock is None:
+                raise ValueError("the mock mode's champion orders through a broker, at a clock")
+            self.champion = MockTrader(store, rules, sessions, started_at, broker, clock, notify, timing)
+        else:
+            self.champion = PaperTrader(store, rules, sessions, started_at, mode, notify)
         self.challengers: dict[int, PaperTrader] = {}
         self._running: set[int] = set()  # the challengers picked, not retired
         self._recorded: dict[tuple[int, date], bool] = {}  # each record kept today, and if stopped
@@ -178,6 +193,14 @@ class Desk:
     def write(self, now: datetime) -> None:
         self.champion.write(now)
         self.record(now)
+
+    async def idle(self) -> None:
+        """Until the champion's book has no order in flight (#405: in mock, its KIS orders)."""
+        await self.champion.idle()
+
+    async def close(self) -> None:
+        """The trader stopping: the champion's order in flight waited for (#405, ``mock.CLOSE_SECONDS``)."""
+        await self.champion.close()
 
     def record(self, now: datetime) -> None:
         """Each running book's policy ran today, while the session is open (module doc)."""

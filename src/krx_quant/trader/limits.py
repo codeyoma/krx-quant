@@ -30,9 +30,15 @@ open position is sold by its own barriers), true pauses them and sells the open 
 Both hold until ``krx-quant trade resume`` on the server; a pause with ``sell_now`` since the last
 resume sells, whatever came after it. The API can neither resume nor re-arm.
 
+**A failed order** (#405, mock mode): a KIS order refused, one whose outcome is not known (no
+answer) or one that could not be sent (``mock.py``) is kept (``failures``) and stops new entries for
+the rest of that day (``order_failed``); the open position is sold by its own barriers. The next
+day the trader buys again. The first of a day is sent to Telegram, the later ones are logged.
+
 **Status**, the first that holds: ``cumulative_limit``, ``daily_limit``, ``paused`` (sold at
-once), ``entries_paused``, ``running``. Every status but ``running`` buys nothing: a prediction
-that would have bought is skipped with it as its reason, a buy waiting for its quote is given up.
+once), ``entries_paused``, ``order_failed``, ``running``. Every status but ``running`` buys
+nothing: a prediction that would have bought is skipped with it as its reason, a buy waiting for
+its quote is given up.
 ``paused`` and the two limits sell the open position at the best bid of the first quote received
 after the status began (a limit reached on a quote: at that quote's), the exit's reason ``pause``,
 ``daily_limit`` or ``cumulative_limit``.
@@ -58,6 +64,7 @@ from krx_quant.trader.store import (
     REARM,
     RESUME,
     Control,
+    Failure,
     Halt,
     TraderStore,
 )
@@ -65,7 +72,8 @@ from krx_quant.trader.store import (
 log = logging.getLogger(__name__)
 
 RUNNING, ENTRIES_PAUSED, PAUSED = "running", "entries_paused", "paused"
-STATUSES = (RUNNING, ENTRIES_PAUSED, PAUSED, DAILY_LIMIT, CUMULATIVE_LIMIT)
+ORDER_FAILED = "order_failed"  # a KIS order failed today (#405): no new entry until the next day
+STATUSES = (RUNNING, ENTRIES_PAUSED, PAUSED, ORDER_FAILED, DAILY_LIMIT, CUMULATIVE_LIMIT)
 # The statuses that sell the open position at once, and the exit's reason each gives.
 SALE = {PAUSED: "pause", DAILY_LIMIT: DAILY_LIMIT, CUMULATIVE_LIMIT: CUMULATIVE_LIMIT}
 # The trader reads the controls asked for this often (#396: within a second).
@@ -120,6 +128,17 @@ def pause_of(controls: Iterable[Control]) -> Pause | None:
     return pause
 
 
+# How a notice names the order that failed and what became of it (#405).
+_SAID = {"refused": "KIS가 거부했습니다", "unknown": "응답이 없어 결과를 모릅니다"}
+_WHAT = {
+    "buy": "매수",
+    "take_profit": "익절 매도",
+    "cancel": "취소",
+    "sell": "매도",
+    "orderable": "주문 가능 현금 조회",
+}
+
+
 def won(value: float) -> str:
     return f"{value:,.0f}원"
 
@@ -154,6 +173,7 @@ class Guard:
         self.realized_cumulative, _ = self.store.realized(self.mode, self._rearmed_at)
         self.realized_all, _ = self.store.realized(self.mode, None)
         self.daily_halt, self.cumulative_halt = self.store.halts(self.mode, self.day)
+        self.failure: Failure | None = self.store.failure(self.mode, self.day)  # #405
         kept = self.store.day(self.mode, self.day) or {}
         self.worst = min(0.0, self.realized_day, kept.get("worst", 0.0))
         self.cumulative_worst = min(0.0, self.realized_cumulative, kept.get("cumulative_worst", 0.0))
@@ -166,6 +186,8 @@ class Guard:
             return DAILY_LIMIT
         if self.pause is not None:
             return PAUSED if self.pause.sell_now else ENTRIES_PAUSED
+        if self.failure is not None:
+            return ORDER_FAILED
         return RUNNING
 
     @property
@@ -184,10 +206,13 @@ class Guard:
         if self.store.day(self.mode, self.day) is not None:  # a trading day's ledger: as it ended
             self.store.put_day(self.mode, self.day, self.ledger(), now)
         held = self.daily_halt is not None
+        failed = self.failure is not None
         self.day = day
         self._load()
         if held and self.daily_halt is None:
             log.info("trader: a new day (%s): the daily loss limit reached before holds no more", day)
+        if failed and self.failure is None:
+            log.info("trader: a new day (%s): the failed order of the day before stops entries no more", day)
         self._check(now)
         return True
 
@@ -271,6 +296,35 @@ class Guard:
         )
         return halt
 
+    def order_failed(
+        self,
+        at: datetime,
+        what: str,
+        outcome: str,
+        detail: str,
+        code: str | None = None,
+        trade: int | None = None,
+    ) -> None:
+        """A KIS order of ``what`` (buy, take_profit, cancel, sell, orderable) failed at ``at``
+        (#405): kept, and new entries stop for the rest of the day; the day's first is sent to
+        Telegram. ``detail`` is KIS's code and message or the error, never an account or order
+        number."""
+        self.roll(at)
+        kept = self.store.add_failure(at, self.mode, what, outcome, detail, code, trade)
+        first = self.failure is None
+        if first:
+            self.failure = kept
+        log.error("trader: the %s order %s (%s): %s", what, outcome, code or "-", detail)
+        if not first:
+            return
+        said = _SAID.get(outcome, "보내지 못했습니다")
+        self._notify(
+            f"자동 매매({self.mode}): {_WHAT.get(what, what)} 주문을 {said}({detail})."
+            " 오늘은 새로 사지 않고, 들고 있는 것은 원래 규칙(목표가, 손절가, 시간)대로 팝니다."
+            " 다음 거래일에 다시 돕니다."
+            + (" 결과를 모르는 주문은 KIS 계좌에서 확인하세요." if outcome == "unknown" else "")
+        )
+
     def apply(self, control: Control, at: datetime) -> None:
         """A control read at ``at``: marked applied, and the pause, resume or re-arm made."""
         self.store.applied(control.id, at)
@@ -339,6 +393,8 @@ class Guard:
             return "오늘은 하루 손실 한도로 멈춰 있고, 다음 거래일에 다시 돕니다."
         if status == CUMULATIVE_LIMIT:
             return "누적 손실 한도로 멈춰 있습니다: krx-quant trade rearm."
+        if status == ORDER_FAILED:
+            return "오늘은 주문 실패로 새로 사지 않고, 다음 거래일에 다시 돕니다."
         return "정지 요청으로 멈춰 있습니다: krx-quant trade resume."
 
 

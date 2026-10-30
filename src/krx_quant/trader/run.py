@@ -19,7 +19,15 @@ running challenger's):
   server's ``krx-quant trade resume|rearm``), read from the trader's store every
   ``limits.CONTROL_SECONDS`` (within a second).
 
-Its halts, pauses, resumes and re-arms go to Telegram (``notify.Alerts.notice``).
+Its halts, pauses, resumes and re-arms go to Telegram (``notify.Alerts.notice``), and in mock
+mode its failed orders.
+
+In mock mode (#405, ``KRX_TRADER_MODE=mock``) the champion's book orders on KIS's mock server
+(``mock.MockTrader``) through the trader's broker (``kis_orders.trader_broker``: the trader's own
+key, ``KRX_TRADER_KIS_*``). The trader does not start, and records no run, when that broker cannot
+be made: a key or the account missing, the collector's key, or servers that are not KIS's mock
+ones (``SettingsError``, exit 2). A trader stopping waits for the order in flight
+(``mock.CLOSE_SECONDS``).
 
 The trading days come from the calendar the collector keeps in the state folder
 (``state/market_calendar.json``), read again each day; the trader never asks KIS.
@@ -35,15 +43,19 @@ from datetime import date, datetime, time, timedelta
 
 import aiohttp
 
+from krx_quant import kis
 from krx_quant.config import Settings
 from krx_quant.feeds.base import KST
+from krx_quant.kis_orders import MOCK as MOCK_SERVERS
+from krx_quant.kis_orders import Broker, Servers, trader_broker
 from krx_quant.market_calendar import MarketCalendar, Session, calendar_store
 from krx_quant.notify import Alerts
 from krx_quant.predictions import DB_NAME as ENGINE_DB
-from krx_quant.trader import COST_MAP_PERIOD, KELLY_FRACTION, PICK_AT, SYMBOL
+from krx_quant.trader import COST_MAP_PERIOD, KELLY_FRACTION, MOCK, PICK_AT, SYMBOL
 from krx_quant.trader.cells import EngineReader
 from krx_quant.trader.desk import Desk
 from krx_quant.trader.limits import CONTROL_SECONDS
+from krx_quant.trader.mock import Timing
 from krx_quant.trader.paper import Rules
 from krx_quant.trader.quotes import follow_quotes
 from krx_quant.trader.selection import NO_COST_MAP, pick
@@ -89,9 +101,29 @@ async def run_trader(
     stop: asyncio.Event,
     now: Clock | None = None,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    servers: Servers = MOCK_SERVERS,
+    timing: Timing | None = None,
 ) -> None:
-    """Trade the cells picked until ``stop`` is set. ``now`` is the clock (KST), ``sleep`` the loops' wait."""
+    """Trade the cells picked until ``stop`` is set. ``now`` is the clock (KST), ``sleep`` the loops' wait.
+    In mock mode the broker orders on ``servers`` alone (KIS's mock ones; a test's fake KIS), with the
+    mock book's waits ``timing``."""
     clock: Clock = now if now is not None else (lambda: datetime.now(KST))
+    async with kis.rest_session() as orders:
+        # Made before anything is kept: a mock trader that cannot order does not start (#405).
+        broker = trader_broker(orders, settings, clock, servers=servers) if trader.mode == MOCK else None
+        await _run(settings, trader, stop=stop, clock=clock, sleep=sleep, broker=broker, timing=timing)
+
+
+async def _run(
+    settings: Settings,
+    trader: TraderSettings,
+    *,
+    stop: asyncio.Event,
+    clock: Clock,
+    sleep: Callable[[float], Awaitable[None]],
+    broker: Broker | None,
+    timing: Timing | None,
+) -> None:
     started = clock()
     store = TraderStore(settings.state_dir / DB_NAME)
     store.add_run(
@@ -123,8 +155,21 @@ async def run_trader(
                 session, settings.telegram_bot_token, settings.telegram_chat_id, settings.telegram_api_url
             )
             try:
-                book = Desk(store, rules, _Sessions(settings), started, trader.mode, alerts.notice)
-                await _trade(settings, trader, book, session, stop=stop, clock=clock, sleep=sleep)
+                book = Desk(
+                    store,
+                    rules,
+                    _Sessions(settings),
+                    started,
+                    trader.mode,
+                    alerts.notice,
+                    broker=broker,
+                    clock=clock,
+                    timing=timing,
+                )
+                try:
+                    await _trade(settings, trader, book, session, stop=stop, clock=clock, sleep=sleep)
+                finally:
+                    await book.close()  # the order in flight on KIS, waited for (#405)
             finally:
                 await alerts.close()
     finally:

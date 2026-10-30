@@ -73,6 +73,9 @@ from krx_quant.process_log import KRX_QUANT, Child, run_logged
 from krx_quant.process_log import Ran as Ran  # a job's process, once it ended
 from krx_quant.redaction import redact, secrets_of
 from krx_quant.swap import NightTraining
+from krx_quant.trader.mock_check import DIFFERENT as MOCK_DIFFERENT
+from krx_quant.trader.mock_check import SAME as MOCK_SAME
+from krx_quant.trader.mock_check import mock_days
 from krx_quant.trader.report import calls_agent
 from krx_quant.training import finished_days, is_recorded
 
@@ -282,6 +285,9 @@ class Facts:
     # Whether the trader's KIS key, secret and account are set (``Settings.trader_kis``, #403): the
     # order probe waits for them once it has said they are not.
     trader_kis: bool = False
+    # The trading days the trader ran in mock mode (#405, ``mock_check.mock_days``): the mock day's
+    # check waits for the first.
+    mock_days: tuple[date, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -907,6 +913,7 @@ async def read_facts(
         pending_answers=tuple(answers),
         krx_openapi=settings.krx_openapi_key is not None,
         trader_kis=settings.trader_kis,
+        mock_days=await asyncio.to_thread(mock_days, settings.state_dir),
     )
 
 
@@ -1538,6 +1545,52 @@ TRADER_REPORT = Job(
     ),
 )
 
+# The mock mode's trades against KIS (#405, its third acceptance criterion): on the night of the
+# first trading day the trader ran in mock mode (``Facts.mock_days``: a mock ledger that day),
+# ``check-mock-trades`` compares the champion's orders of that day in the ledger with KIS's day order
+# inquiry, read with the trader's own mock key, order by order (matched by KIS's order number): the
+# side, the quantity, what filled and the fill price, as a difference in ticks. KIS's orders placed
+# while the order probe ran that day are the probe's (#403, same account). It prints counts,
+# quantities, sides, times and ticks, never an order number, an account, a key or a price. Again on
+# each later mock trading night until a day had orders to compare (``mock_check.NO_ORDERS``) and
+# both could be read (``UNREADABLE``); done once one was the same (``SAME``) or not (``DIFFERENT``).
+# Seconds; five minutes is a bound. #405 stays open until its comment.
+MOCK_CHECK_ISSUE = 405
+
+
+def _a_mock_night_until_compared(night: Night) -> bool:
+    """On the night of a trading day the trader ran in mock mode, until one compared its orders."""
+    if not night.trading_day or night.day not in night.facts.mock_days:
+        return False
+    record = night.record
+    if record is None or record.outcome not in (OK, FAILED):
+        return True  # never ran to its end (a run a restart cut runs the next mock night)
+    if record.exit_code in (MOCK_SAME, MOCK_DIFFERENT):
+        return False
+    return record.day < night.day
+
+
+MOCK_CHECK = Job(
+    name="check-mock-trades-405",
+    due=_a_mock_night_until_compared,
+    command=("check-mock-trades",),
+    timeout=timedelta(minutes=5),
+    targets=(
+        Target(
+            MOCK_CHECK_ISSUE,
+            note=(
+                "KIS 모의투자(mock) 첫 거래일의 매매를 장부(state/trader.sqlite3)와 "
+                "KIS 주문 체결 조회로 견준다(#405의 세 번째 완료 조건). 주문마다 매수·매도, "
+                "주문 수량, 체결 수량, 체결가 차이(틱)를 보이고, 주문 프로브(#403)가 돈 동안의 "
+                "KIS 주문은 프로브의 것이라 세지 않는다. 결과가 `같다`면 에이전트가 #405를 닫는다. "
+                "`다르다`면 다른 주문을 보고 고치는 PR을 연다. 다시 보기(읽기만): "
+                "`docker compose run --rm engine check-mock-trades --day <날>`. "
+                "출력에는 주문번호, 계좌번호, 키, 가격이 없다(건수, 수량, 시각, 틱만)."
+            ),
+        ),
+    ),
+)
+
 # The trader's KIS orders (#403, #393): before the trader reads a field of KIS's answers to its
 # orders (#404), the mock-trading server's answers are measured on the server. The mock server fills
 # orders only in the market's hours, so this is a session job (``Job.session``), not a night's: on
@@ -2055,6 +2108,7 @@ JOBS: tuple[Job, ...] = (
     KRX_NET_ASSETS_CHECK,
     MEMBER_FRAMES_PROBE,
     TRADER_REPORT,
+    MOCK_CHECK,
     KIS_ORDER_PROBE,
     *daily_prevalidation_jobs(
         [a.name for a in DAILY_ALGORITHMS],

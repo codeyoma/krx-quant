@@ -5,8 +5,9 @@ real-time fill notice.
 This is the one file of the repository the forbidden-pattern check lets hold KIS order TR IDs and
 order endpoints (``forbidden.ALLOWED_IN``, ``scripts/check_forbidden.py``): they are written here
 and nowhere else, and every other module reaches them through this one. The collector never
-imports it. The order probe (``order_probe.py``) does, in a scheduled job's own process, and so
-will the trader's mock mode (#405).
+calls it. The order probe (``order_probe.py``) does, in a scheduled job's own process, and so do the
+trader in mock mode (#405, ``trader/mock.py``, through ``Broker``) and the mock day's check
+(``trader/mock_check.py``, another scheduled job's process).
 
 Each TR ID comes in two, the live server's and the mock (모의투자) server's (``Tr``): an
 ``Account`` is made for one of them (``mock``), with the server it calls.

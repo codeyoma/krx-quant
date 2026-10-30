@@ -350,6 +350,12 @@ class PaperTrader:
         self._enforce(started_at)
         self.write(started_at)
 
+    async def idle(self) -> None:
+        """Until no order is in flight: a paper book's fill at once, so at once (``mock.py``'s waits)."""
+
+    async def close(self, timeout: float = 0.0) -> None:
+        """The trader stopping: nothing in flight in paper (``mock.py``'s waits for its order)."""
+
     @property
     def guard(self) -> Guard:
         """The champion's limits and pauses (#396); a challenger's book has none."""
@@ -728,46 +734,56 @@ class PaperTrader:
         if quantity < 1:
             self._give_up(waiting, NO_SHARES)
             return
-        signal, planned = waiting.signal, waiting.plan
-        assert signal.anchor is not None and signal.tick is not None and signal.width is not None
-        p = signal.rise_probability
-        assert p is not None
         self._waiting = None
+        self._fill_buy(waiting, quote, quantity)
+
+    def _fill_buy(self, waiting: _Waiting, quote: BestQuote, quantity: int) -> None:
+        """The buy decided, of ``quantity`` shares at ``quote``'s ask: in paper, filled whole at once.
+        The mock book (#405, ``mock.MockTrader``) orders it on KIS instead."""
         self._open = self.store.enter(
-            waiting.decision,
-            Entry(
-                mode=self.mode,
-                symbol=SYMBOL,
-                kind=signal.kind,
-                predictor=signal.predictor,
-                prediction_id=signal.prediction_id,
-                bar_close=signal.bar_close,
-                probability=p,
-                threshold=self.rules.threshold if pick.threshold is None else pick.threshold,
-                anchor=signal.anchor,
-                tick=signal.tick,
-                width_ticks=signal.width,
-                target=planned.target,
-                stop=planned.stop,
-                time_barrier=planned.time_barrier,
-                decided_at=waiting.decided_at,
-                entry_at=quote.received_at,
-                entry_price=quote.ask,
-                quantity=quantity,
-                buy_fee=quote.ask * quantity * self.rules.fee_rate,
-                quote_at=quote.received_at,
-                selection_id=self._selection,
-                role=pick.role,
-                p_star=pick.p_star,
-                low=pick.low,
-                kelly=pick.kelly,
-                fraction=pick.fraction,
-                policy_id=self._policy,
-                champion=self.challenger is None,
-            ),
+            waiting.decision, self._entry(waiting, quote.received_at, quote.ask, quantity, quote.received_at)
         )
         self._dirty = True
         log.info("%s bought %s at %s (trade %s)", self._whose(), quantity, quote.ask, self._open.id)
+
+    def _entry(
+        self, waiting: _Waiting, at: datetime, price: float, quantity: int, quote_at: datetime
+    ) -> Entry:
+        """The trade ``waiting`` enters: ``quantity`` shares filled at ``price`` at ``at``."""
+        signal, planned, pick = waiting.signal, waiting.plan, waiting.pick
+        assert signal.anchor is not None and signal.tick is not None and signal.width is not None
+        p = signal.rise_probability
+        assert p is not None
+        return Entry(
+            mode=self.mode,
+            symbol=SYMBOL,
+            kind=signal.kind,
+            predictor=signal.predictor,
+            prediction_id=signal.prediction_id,
+            bar_close=signal.bar_close,
+            probability=p,
+            threshold=self.rules.threshold if pick.threshold is None else pick.threshold,
+            anchor=signal.anchor,
+            tick=signal.tick,
+            width_ticks=signal.width,
+            target=planned.target,
+            stop=planned.stop,
+            time_barrier=planned.time_barrier,
+            decided_at=waiting.decided_at,
+            entry_at=at,
+            entry_price=price,
+            quantity=quantity,
+            buy_fee=price * quantity * self.rules.fee_rate,
+            quote_at=quote_at,
+            selection_id=self._selection,
+            role=pick.role,
+            p_star=pick.p_star,
+            low=pick.low,
+            kelly=pick.kelly,
+            fraction=pick.fraction,
+            policy_id=self._policy,
+            champion=self.challenger is None,
+        )
 
     def _give_up(self, waiting: _Waiting, reason: str) -> None:
         self._waiting = None

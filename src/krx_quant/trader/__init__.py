@@ -2,13 +2,15 @@
 passes, as its own process (``krx-quant trade``, compose service ``trader``), apart from the
 collector.
 
-For now it is paper only (#394): the trader fills its orders on the collector's live best quotes
-(``quotes.py``) and writes what it did to its own store, ``state/trader.sqlite3`` (``store.py``).
-It has no order code and calls no KIS order: the KIS order calls live in ``krx_quant.kis_orders``
-alone, the one file the repository's forbidden-pattern check (``scripts/check_forbidden.py``) lets
-hold KIS order TR IDs and endpoints (#403). Its broker there (``kis_orders.Broker``, #404: orders,
-cancels, fills read off the day's order inquiry, the balance, the orderable cash, the REST quotes,
-with the trader's own key and token) is used by none yet: the trader's mock mode will (#405).
+In paper (``KRX_TRADER_MODE=paper``, the default, #394) the trader fills its orders on the
+collector's live best quotes (``quotes.py``) and writes what it did to its own store,
+``state/trader.sqlite3`` (``store.py``). In mock (#405, ``mock.py``) the champion's book places its
+orders on KIS's mock server instead, through the broker of ``krx_quant.kis_orders``
+(``kis_orders.Broker``, #404: orders, cancels, fills read off the day's order inquiry, the
+orderable cash, with the trader's own key and token), and writes its trades from KIS's fills; the
+challengers stay in paper. The trader holds no order code: the KIS order calls live in
+``krx_quant.kis_orders`` alone, the one file the repository's forbidden-pattern check
+(``scripts/check_forbidden.py``) lets hold KIS order TR IDs and endpoints (#403).
 
 - **Cells** (``selection.py``, #395): a cell is a (kind, predictor): the four-minute direction
   (width k) or the 4-, 15- or 30-minute barrier (width w), and the final consensus (the
@@ -59,10 +61,15 @@ with the trader's own key and token) is used by none yet: the trader's mock mode
   ``ready-for-agent`` on the week's last trading day and on the nights of a limit halt, a change
   of the champion, the live gate passed or a failed re-fit; ``krx-quant trader-report`` prints it
   alone, read-only. It holds no price, account, order number nor key.
+- **Mock** (``mock.py``, #405): with ``KRX_TRADER_MODE=mock`` the champion's book orders on KIS's
+  mock server: a limit buy at the best ask (what is left cancelled after a few seconds, a partial
+  fill a position of that), the take-profit's limit sell resting at the target, the stop's and the
+  time exit's limit sells at the best bid; its trades written from KIS's fills. A failed order
+  stops new entries for the day. ``mock_check.py`` compares a mock day's orders with KIS's.
 - **Store** (``store.py``): its picks of the cells, decisions, orders, fills and trades, each with
-  its mode (``paper``) and its book's policy, the policy versions and the days each ran, the
-  pauses, resumes and re-arms asked for, the halts, the trader's state now and each day's ledger;
-  the Engine API reads it
+  its mode (``paper``, ``mock``) and its book's policy, the policy versions and the days each ran,
+  the pauses, resumes and re-arms asked for, the halts, the failed orders, the trader's state now
+  and each day's ledger; the Engine API reads it
   (``GET /v1/trader``, ``/v1/trader/trades``, ``/v1/trader/days``, ``/v1/trader/policies``) and
   writes a pause into it (``POST /v1/trader/pause``), nothing else.
 """
@@ -74,11 +81,13 @@ from datetime import time, timedelta
 # The one symbol traded (#393).
 SYMBOL = "005930"
 
-# The modes (#393): paper, filled on the live quotes inside the trader. KIS's mock and the live
-# account (mock, live) come with the modes that order through the KIS order module (#405, #408).
+# The modes (#393): paper, filled on the live quotes inside the trader; mock (#405), the champion's
+# orders placed on KIS's mock server (``mock.py``), the challengers in paper beside it. The live
+# account (live) comes with its mode (#408).
 PAPER = "paper"
-MODES = (PAPER,)
-LATER_MODES = ("mock", "live")
+MOCK = "mock"
+MODES = (PAPER, MOCK)
+LATER_MODES = ("live",)
 
 # The kinds a cell may be of (#393): the four-minute direction, and the barrier at 4, 15 and 30
 # minutes. The 60-minute barrier and the daily kinds are not traded.
