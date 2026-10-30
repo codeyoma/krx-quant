@@ -273,6 +273,9 @@ _ADDED = {
         # 1: the champion's paper shadow's (#405: in mock mode, the champion policy's trade filled in
         # paper beside its KIS orders, ``champion`` 0); null or 0 otherwise.
         ("shadow", "INTEGER"),
+        # Why a mock trade's sale began (#405: stop_loss, time, pause, a limit), kept when it is
+        # decided so that a restart goes on selling; null until then.
+        ("selling", "TEXT"),
     ),
 }
 
@@ -380,6 +383,7 @@ class Resting:
     filled: int
     amount: float  # the fills kept of it, in won
     purpose: str = "take_profit"  # take_profit, or a sale's (stop_loss, time, ...)
+    day: date | None = None  # the day it was placed: the day order inquiry that shows it
 
 
 @dataclass(frozen=True)
@@ -758,9 +762,23 @@ class TraderStore:
                 int(r["kept"]),
                 float(r["amount"]),
                 r["purpose"],
+                date.fromisoformat(r["placed_at"][:10]),
             )
             for r in rows
         ]
+
+    def begin_sale(self, trade: int, reason: str) -> None:
+        """Why ``trade``'s sale began (#405), kept when it is decided: a restart goes on selling it
+        though none of its sells is open (each cancelled, or refused)."""
+        with self._db:
+            self._db.execute(
+                "UPDATE trades SET selling = ? WHERE id = ? AND selling IS NULL", (reason, trade)
+            )
+
+    def sale_begun(self, trade: int) -> str | None:
+        """Why ``trade``'s sale began (``begin_sale``), if it did."""
+        row = self._db.execute("SELECT selling FROM trades WHERE id = ?", (trade,)).fetchone()
+        return None if row is None or row[0] is None else str(row[0])
 
     def resting(self, trade: int) -> Resting | None:
         """``trade``'s take-profit sell resting on KIS (#405), if one is."""

@@ -181,6 +181,8 @@ class MockTrader(PaperTrader):
                     self._resting = order
                 else:  # a sale was under way: it goes on, that order taken off first
                     self._live, self._selling = order, order.purpose
+            # A sale begun goes on, though none of its sells is open (each cancelled, or refused).
+            self._selling = store.sale_begun(self._open.id) or self._selling
         else:  # a restart: a buy of which nothing filled yet, open on KIS, is followed still
             kept = store.open_unfilled_buy(MOCK)
             if kept is not None:
@@ -201,8 +203,7 @@ class MockTrader(PaperTrader):
         if reason == TAKE_PROFIT and (self._resting is not None or self._work is not None):
             return  # the resting sell takes it (its fills are read as it rests), or is being placed
         if self._selling is None:
-            self._selling = reason
-            log.info("trader: selling trade %s on KIS (%s)", trade.id, reason)
+            self._begin_sale(trade, reason)
         self._kick(self._clock())
 
     def on_quote(self, quote: BestQuote) -> None:
@@ -283,7 +284,9 @@ class MockTrader(PaperTrader):
             return
         status = self.status
         if self._selling is None and status in SALE:  # a pause or a limit while it was bought
-            self._selling = SALE[status]
+            if self._sell_after is not None and not self._quoted_after(self._sell_after):
+                return  # it sells on the first quote received after the status began, as in paper
+            self._begin_sale(trade, SALE[status])
         if self._selling is not None:
             if (self._retry_at is None or now >= self._retry_at) and self._bid() is not None:
                 self._retry_at = None
@@ -292,6 +295,16 @@ class MockTrader(PaperTrader):
             return
         if self._resting is not None and (self._follower is None or self._follower.done()):
             self._follower = asyncio.get_running_loop().create_task(self._follow_resting(trade.id))
+
+    def _begin_sale(self, trade: OpenTrade, reason: str) -> None:
+        """The sale of ``trade`` decided: latched, and kept on the trade for a restart (#405)."""
+        self._selling = reason
+        self.store.begin_sale(trade.id, reason)
+        log.info("trader: selling trade %s on KIS (%s)", trade.id, reason)
+
+    def _quoted_after(self, moment: datetime) -> bool:
+        last = self._last
+        return last is not None and last.received_at > moment
 
     def _stop_following(self) -> None:
         follower = self._follower
@@ -497,7 +510,10 @@ class MockTrader(PaperTrader):
         placed = Placed(price, trade.quantity, sent.ref.branch, sent.ref.number)
         order = self.store.add_order(trade.id, SELL, TAKE_PROFIT, placed, self._clock())
         self._open = replace(trade, take_profit_order=order)
-        self._resting = Resting(order, price, trade.quantity, sent.ref.branch, sent.ref.number, 0, 0.0)
+        day = kst_day(self._clock())
+        self._resting = Resting(
+            order, price, trade.quantity, sent.ref.branch, sent.ref.number, 0, 0.0, TAKE_PROFIT, day
+        )
         log.info(
             "trader: take-profit sell of %s resting at %s on KIS (trade %s)", trade.quantity, price, trade.id
         )
@@ -512,7 +528,7 @@ class MockTrader(PaperTrader):
                 return
             try:
                 row = await self._broker.order(
-                    self._day_of(trade), SYMBOL, OrderRef(resting.branch, resting.number)
+                    resting.day or self._day_of(trade), SYMBOL, OrderRef(resting.branch, resting.number)
                 )
             except BrokerError as e:
                 log.warning("trader: could not read the take-profit sell (%s); read again", e)
@@ -589,7 +605,8 @@ class MockTrader(PaperTrader):
                 assert sent.ref is not None
                 placed = Placed(bid, left, sent.ref.branch, sent.ref.number)
                 order = self.store.add_order(trade.id, SELL, reason, placed, self._clock(), OPEN)
-                self._live = Resting(order, bid, left, sent.ref.branch, sent.ref.number, 0, 0.0, reason)
+                day = kst_day(self._clock())  # the day its row is on: a sale may come after the entry's
+                self._live = Resting(order, bid, left, sent.ref.branch, sent.ref.number, 0, 0.0, reason, day)
 
             try:
                 taken = await self._broker.take(
@@ -650,7 +667,8 @@ class MockTrader(PaperTrader):
         cancelled, and its row read until nothing is left of it (a fill can come before the cancel
         lands: KIS then finds less or nothing to cancel). Its row, its fills kept; None when it could
         not be taken off (a failed order, tried again later, the order followed still)."""
-        cancel, row = await self._withdraw(self._day_of(trade), OrderRef(resting.branch, resting.number))
+        day = resting.day or self._day_of(trade)  # the day it was placed on
+        cancel, row = await self._withdraw(day, OrderRef(resting.branch, resting.number))
         if row is not None:
             resting = self._keep(resting, row)
         if row is None or row.left > 0:

@@ -45,7 +45,7 @@ from krx_quant.trader.quotes import BestQuote, QuoteFeed
 from krx_quant.trader.run import run_trader
 from krx_quant.trader.selection import Selection
 from krx_quant.trader.settings import TraderSettings
-from krx_quant.trader.store import DB_NAME, TraderStore, read_trader, read_trades
+from krx_quant.trader.store import DB_NAME, TraderStore, read_trader, read_trades, request_pause
 from tests.test_live_predictions import free_port
 from tests.test_trader_run import PASSING, EngineApi, book
 from tests.trader_doubles import BARRIER, CALENDAR, FEE, Barrier, Read, Tick, at, pick, quote
@@ -91,12 +91,20 @@ class Depth:
 @dataclass(frozen=True)
 class Resting_:
     """From ``hms`` on, KIS's book takes nothing at once: an order rests, and fills as its cancel
-    comes (``FakeAccount.fills_late``)."""
+    comes (``FakeAccount.fills_late``) when ``late``, else not at all."""
+
+    hms: str
+    late: bool = True
+
+
+@dataclass(frozen=True)
+class PauseNow:
+    """The screen's pause that sells at once (#396), asked at ``hms`` and read by the trader then."""
 
     hms: str
 
 
-Event = Read | Tick | BestQuote | Quote | Fill | Depth | Resting_
+Event = Read | Tick | BestQuote | Quote | Fill | Depth | Resting_ | PauseNow
 
 
 def _time(event: Event) -> datetime:
@@ -104,7 +112,7 @@ def _time(event: Event) -> datetime:
         return event.received_at
     if isinstance(event, Quote):
         return event.quote.received_at
-    if isinstance(event, Fill | Depth | Resting_):
+    if isinstance(event, Fill | Depth | Resting_ | PauseNow):
         return at(event.hms)
     return event.time
 
@@ -232,7 +240,10 @@ class MockDay:
         elif isinstance(event, Depth):
             self.account.depth = event.shares
         elif isinstance(event, Resting_):
-            self.account.fills, self.account.fills_late = False, True
+            self.account.fills, self.account.fills_late = False, event.late
+        elif isinstance(event, PauseNow):
+            request_pause(self.state / DB_NAME, True, at(event.hms))
+            book.on_controls(at(event.hms))
         elif isinstance(event, Fill):
             [resting] = resting_sells(self.account)
             want = resting.filled + (resting.left if event.quantity is None else event.quantity)
@@ -807,6 +818,83 @@ async def test_a_sell_kis_took_is_kept_before_its_fills_are_read_and_a_restart_r
     ]
     assert trade["exit"]["reason"] == STOP_LOSS and account.holdings[SYMBOL] == 0
     assert len(account.placed(SELL_SIDE)) == 2, "the take-profit, the stop's sell: none sold twice"
+
+
+@pytest.mark.parametrize("how", ["cancelled", "refused"])
+async def test_a_restart_goes_on_with_a_sale_begun_though_none_of_its_sells_is_open(
+    kis_mock: tuple[FakeKis, FakeAccount], tmp_path: Path, how: str
+) -> None:
+    """The stop's sell fills nothing (cancelled at the end of its batch, or refused by KIS) and the
+    trader stops. Started again with the bid back above the stop, it still sells what the stop began
+    to sell: the reason was kept on the trade when the sale was decided."""
+    fake, account = kis_mock
+    taken = fake.rest_posts[kis_orders.SELL.mock]
+    if how == "refused":
+        fake.rest_posts[kis_orders.SELL.mock] = lambda body: (
+            {"rt_cd": "1", "msg_cd": OFF_TICK[0], "msg1": OFF_TICK[1]}
+            if body["ORD_UNPR"] == "69800"
+            else taken(body)
+        )
+    events: list[Event] = [TEN, BOUGHT, quote("10:01:30", 69_800, 69_900)]
+    if how == "cancelled":
+        events.insert(2, Resting_("10:01:00", late=False))
+    await MockDay(tmp_path, fake, account, timing=replace(TIMING, rounds=1, retry=3600.0)).run(events)
+    account.fills = True
+
+    [trade] = await MockDay(tmp_path, fake, account, started_at=at("10:02:00")).run(
+        [quote("10:02:05", 70_000, 70_100)]  # above the stop (69,850), below the target
+    )
+
+    assert rows(tmp_path, "trades")[0]["selling"] == STOP_LOSS
+    sold = [o[1:5] for o in orders_of(trade) if o[1] == "stop_loss"]
+    assert sold[-1] == ("stop_loss", 70_000, 14, "filled")
+    assert trade["exit"]["reason"] == STOP_LOSS and account.holdings[SYMBOL] == 0
+
+
+async def test_each_sell_is_followed_on_the_day_it_was_placed(
+    kis_mock: tuple[FakeKis, FakeAccount], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A trade the trader was down for at its time barrier sells the next day. That day's sell is
+    followed on that day's inquiry, not on the entry's (its cancel refused, it is taken off later)."""
+    fake, account = kis_mock
+    await MockDay(tmp_path, fake, account).run([TEN, BOUGHT])
+    asked = cancel_without_a_token_once(
+        monkeypatch, account, lambda o: o.side == SELL_SIDE and o.price == 70_000
+    )
+
+    later = MockDay(tmp_path, fake, account, started_at=at("2026-10-15 09:00:00"))
+    [trade] = await later.run([Depth("2026-10-15 09:04:00", 5), quote("2026-10-15 09:05:00", 70_000, 70_100)])
+
+    assert asked[0] == asked[1], "its cancel not sent, then taken off"
+    assert trade["exit"]["reason"] == TIME and account.holdings[SYMBOL] == 0
+    number = asked[0]
+    days = {
+        q["INQR_STRT_DT"]
+        for _, tr, _, q in fake.rest_requests
+        if tr == kis_orders.FILLS.mock and q.get("ODNO") == number
+    }
+    assert days == {"20261015"}
+
+
+async def test_a_pause_that_sells_now_waits_for_a_quote_after_it(
+    kis_mock: tuple[FakeKis, FakeAccount], tmp_path: Path
+) -> None:
+    """The screen asks to pause and sell at 10:01 while no quote comes: the clock alone sells
+    nothing, the take-profit rests on; the first quote after the pause sells at its bid."""
+    fake, account = kis_mock
+    first = MockDay(tmp_path, fake, account)
+    [waiting] = await first.run([TEN, BOUGHT, PauseNow("10:01:00"), Tick("10:01:01"), Tick("10:01:05")])
+    assert [o[1:5] for o in orders_of(waiting)][1:] == [("take_profit", 70_300, 14, "open")], (
+        "nothing sold yet"
+    )
+    assert first.status == "paused"
+
+    [trade] = await MockDay(tmp_path, fake, account, started_at=at("10:01:10")).run(
+        [quote("10:01:12", 70_000, 70_100)]
+    )
+    assert trade["exit"]["reason"] == "pause" and [o[1:5] for o in orders_of(trade)][2:] == [
+        ("pause", 70_000, 14, "filled")
+    ]
 
 
 # Partial fills and the cancel race
