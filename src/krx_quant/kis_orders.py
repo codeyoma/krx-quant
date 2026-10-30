@@ -777,6 +777,7 @@ class Broker:
         *,
         wait: float = TAKE_WAIT,
         poll: float = POLL,
+        on_accepted: Callable[[Sent], None] | None = None,
     ) -> Taken:
         """A limit order meant to fill at once (a buy at the best ask, a sell at the best bid): sent,
         its fills read on ``day``'s inquiry every ``poll`` seconds until it is filled whole or
@@ -788,14 +789,18 @@ class Broker:
         not followed: whether it went in, the inquiry shows (``Taken.left`` None). Once the order is
         accepted nothing raises: a cancel that cannot be sent (no token) ends it with what is left
         open (``Taken.cancel`` None, ``left`` above 0, or None when no read showed the order), for
-        the caller to follow (#405). ValueError for a side that is neither ``SIDE_BUY`` nor
-        ``SIDE_SELL``: nothing is sent."""
+        the caller to follow (#405). ``on_accepted`` is called with the order the moment KIS takes
+        it, before any read: the caller keeps it then (write-ahead), so that a stop while its fills
+        are read loses nothing. ValueError for a side that is neither ``SIDE_BUY`` nor ``SIDE_SELL``:
+        nothing is sent."""
         if side not in (SIDE_BUY, SIDE_SELL):
             raise ValueError(f"a side is {SIDE_BUY} (buy) or {SIDE_SELL} (sell), got {side!r}")
         order = self.buy if side == SIDE_BUY else self.sell
         sent = await order(symbol, quantity, price)
         if not sent.accepted or sent.ref is None:
             return Taken(sent)
+        if on_accepted is not None:
+            on_accepted(sent)
         row = await self._follow(day, symbol, sent.ref, wait, poll)
         if row is not None and row.left == 0:
             return Taken(sent, row)

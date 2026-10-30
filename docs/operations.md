@@ -1187,7 +1187,7 @@ compose 서비스 `trader`가 `krx-quant trade`를 돈다. 수집기(`engine`)�
 - **주문 실패**: KIS가 거부했거나, 응답이 없어 결과를 모르거나, 보내지 못한(토큰 없음, 주문 가능 현금 조회 실패) 주문은 `failures` 표에 남고, 그날 첫 실패에 `[알림] 자동 매매(mock): <매수|익절 매도|취소|매도> 주문을 <KIS가 거부했습니다|응답이 없어 결과를 모릅니다|보내지 못했습니다>(<까닭>). 오늘은 새로 사지 않고, …`가 온다. 상태가 `order_failed`가 되어 그날은 새로 사지 않고, 들고 있는 것은 원래 규칙대로 판다(실패한 매도는 30초 뒤 다시 낸다). 다음 거래일에 저절로 다시 돈다. 할 일: "결과를 모릅니다"면 KIS 모의투자 계좌(HTS·MTS)에서 그 주문이 들어갔는지 본다. 장부에 없는 보유가 남았으면 손으로 판다(계좌 맞추기는 #406). 기록: `docker compose exec trader python -c 'import sqlite3; [print(r) for r in sqlite3.connect("file:/state/trader.sqlite3?mode=ro", uri=True).execute("select at, what, outcome, code, detail from failures order by id desc limit 10")]'`.
 - mock 첫 거래일 밤에 예약 작업 `check-mock-trades-405`가 그날 장부의 주문을 KIS 주문 체결 조회와 주문마다 견주어 #405에 올린다(아래 "예약 작업 (#215)"). 손으로는 `docker compose run --rm engine check-mock-trades --day YYYY-MM-DD`(읽기만).
 - 주문 프로브(`probe-kis-orders-403`)는 trader가 마지막으로 mock으로 시작했으면 돌지 않는다(그 10:00은 trader의 마지막 청산 15:15 전이라, trader가 005930을 들고 같은 모의 계좌로 주문하고 있을 수 있다). paper로 되돌리면 다음 거래일부터 다시 돈다. 프로브는 주문하기 전에도 계좌에 005930이나 남은 수량이 있는 주문이 있으면 아무것도 주문하지 않고 멈춘다(종료 코드 6, 다음 거래일에 다시). 대조는 그래도 프로브가 돈 동안의 주문을 프로브의 것으로 센다.
-- trader가 멈출 때(`docker compose stop trader`, 06:00 배포)는 보내고 있던 주문이 끝나기를 8초까지 기다린다. 걸어 둔 익절 매도는 KIS에 남고, 다시 뜨면 그 주문을 이어서 읽는다. 다시 뜨기 전에 KIS 계좌의 보유·미체결과 장부를 맞추는 일은 아직 없다(#406).
+- trader가 멈출 때(`docker compose stop trader`, 06:00 배포)는 보내고 있던 주문이 끝나기를 8초까지 기다린다. KIS가 받은 주문은 체결을 읽기 전에 장부에 열린 주문으로 써 두므로, 그 안에 끝나지 않아도 다시 뜬 trader가 그 주문을 거두고 체결을 맞춘다. 걸어 둔 익절 매도는 KIS에 남고, 다시 뜨면 그 주문을 이어서 읽는다. 다시 뜨기 전에 KIS 계좌의 보유·미체결과 장부를 맞추는 일은 아직 없다(#406).
 
 #### 한도, 정지, 재개, 다시 켜기 (#396)
 

@@ -88,7 +88,15 @@ class Depth:
     shares: int | None
 
 
-Event = Read | Tick | BestQuote | Quote | Fill | Depth
+@dataclass(frozen=True)
+class Resting_:
+    """From ``hms`` on, KIS's book takes nothing at once: an order rests, and fills as its cancel
+    comes (``FakeAccount.fills_late``)."""
+
+    hms: str
+
+
+Event = Read | Tick | BestQuote | Quote | Fill | Depth | Resting_
 
 
 def _time(event: Event) -> datetime:
@@ -96,7 +104,7 @@ def _time(event: Event) -> datetime:
         return event.received_at
     if isinstance(event, Quote):
         return event.quote.received_at
-    if isinstance(event, Fill | Depth):
+    if isinstance(event, Fill | Depth | Resting_):
         return at(event.hms)
     return event.time
 
@@ -145,6 +153,9 @@ class MockDay:
     status: str | None = None  # the book's status after the last event
     state_now: dict[str, Any] | None = None  # GET /v1/trader after the last event
     timing: Timing = TIMING
+    # The trader stopped after the last event once this holds, its order in flight cancelled (a stop
+    # that does not wait for it): None waits for the order as ever.
+    stop_when: Callable[[], bool] | None = None
 
     async def run(self, events: Sequence[Event]) -> list[dict[str, Any]]:
         engine = PredictionStore(self.state / ENGINE_DB)
@@ -175,10 +186,15 @@ class MockDay:
                 reader = EngineReader(self.state / ENGINE_DB, SYMBOL)
                 reader.follow(book.cells, self.started_at - timedelta(minutes=2))
                 try:
-                    for event in sorted(events, key=_time):
+                    ordered = sorted(events, key=_time)
+                    for n, event in enumerate(ordered, 1):
                         clock[0] = _time(event)
                         book.on_time(clock[0])
                         await self._on(event, book, engine, reader, store)
+                        if n == len(ordered) and self.stop_when is not None:
+                            await until(self.stop_when)
+                            await book.close(timeout=0.0)  # the order in flight cancelled mid-poll
+                            break
                         await book.idle()
                     book.write(clock[0])
                     self.status = book.status
@@ -215,6 +231,8 @@ class MockDay:
                 book.on_signal(signal, event.time)
         elif isinstance(event, Depth):
             self.account.depth = event.shares
+        elif isinstance(event, Resting_):
+            self.account.fills, self.account.fills_late = False, True
         elif isinstance(event, Fill):
             [resting] = resting_sells(self.account)
             want = resting.filled + (resting.left if event.quantity is None else event.quantity)
@@ -730,6 +748,65 @@ async def test_a_sale_whose_fills_cannot_be_read_never_sells_twice(
     stop = [o[3:] for o in orders_of(trade) if o[1] == "stop_loss"]
     assert stop[0] == (14, "cancelled", 5) and sum(o[2] for o in stop) == 14
     assert account.holdings[SYMBOL] == 0 and trade["exit"]["reason"] == STOP_LOSS
+
+
+def open_row(state: Path, query: str) -> Callable[[], bool]:
+    """Whether the trader's store holds a row by ``query`` (read apart, as it is committed)."""
+
+    def holds() -> bool:
+        with closing(sqlite3.connect(state / DB_NAME)) as db:
+            return db.execute(query).fetchone() is not None
+
+    return holds
+
+
+async def test_a_buy_kis_took_is_kept_before_its_fills_are_read_and_a_restart_recovers_it(
+    kis_mock: tuple[FakeKis, FakeAccount], tmp_path: Path
+) -> None:
+    """The trader stops while it reads the fills of a buy KIS took (its order in flight cancelled).
+    The buy was kept the moment KIS took it, so the trader started again follows it: it takes it
+    off, and the 14 that filled meanwhile open the trade, its take-profit resting."""
+    fake, account = kis_mock
+    account.fills, account.fills_late = False, True
+    long = replace(TIMING, wait=30.0)  # its fills read for half a minute: the stop comes first
+    held = open_row(tmp_path, "SELECT 1 FROM unfilled_buys WHERE status = 'open'")
+    assert await MockDay(tmp_path, fake, account, timing=long, stop_when=held).run([TEN, BOUGHT]) == []
+    [kept] = rows(tmp_path, "unfilled_buys")
+    assert (kept["status"], kept["quantity"]) == ("open", 14) and kept["broker_id"] == account.orders[
+        0
+    ].number
+
+    [trade] = await MockDay(tmp_path, fake, account, started_at=at("10:01:00")).run([Tick("10:01:00.5")])
+
+    assert trade["entry"]["quantity"] == 14
+    assert [o[1:5] for o in orders_of(trade)] == [
+        ("entry", 70_100, 14, "filled"),
+        ("take_profit", 70_300, 14, "open"),
+    ]
+    assert [r["status"] for r in rows(tmp_path, "unfilled_buys")] == ["filled"]
+
+
+async def test_a_sell_kis_took_is_kept_before_its_fills_are_read_and_a_restart_recovers_it(
+    kis_mock: tuple[FakeKis, FakeAccount], tmp_path: Path
+) -> None:
+    """The trader stops while it reads the fills of the stop's sell. The sell was kept open the
+    moment KIS took it, so the trader started again takes it off, finds its 14 sold, and sells
+    nothing more."""
+    fake, account = kis_mock
+    long = replace(TIMING, wait=30.0)
+    held = open_row(tmp_path, "SELECT 1 FROM orders WHERE purpose = 'stop_loss' AND status = 'open'")
+    first = MockDay(tmp_path, fake, account, timing=long, stop_when=held)
+    await first.run([TEN, BOUGHT, Resting_("10:01:00"), quote("10:01:30", 69_800, 69_900)])
+
+    [trade] = await MockDay(tmp_path, fake, account, started_at=at("10:01:40")).run(
+        [quote("10:01:45", 69_800, 69_900)]
+    )
+
+    assert [o[1:] for o in orders_of(trade) if o[1] == "stop_loss"] == [
+        ("stop_loss", 69_800, 14, "filled", 14)
+    ]
+    assert trade["exit"]["reason"] == STOP_LOSS and account.holdings[SYMBOL] == 0
+    assert len(account.placed(SELL_SIDE)) == 2, "the take-profit, the stop's sell: none sold twice"
 
 
 # Partial fills and the cancel race

@@ -320,9 +320,27 @@ class MockTrader(PaperTrader):
         if quantity < 1:
             self._give_up(waiting, NO_SHARES)
             return
+        # The trade it would open, its fill to come: kept with the order, so that a restart follows it.
+        would = self._entry(waiting, self._clock(), ask, quantity, quote.received_at)
+        kept: list[int] = []
+
+        def accepted(sent: Sent) -> None:  # write-ahead: the order kept before its fills are read
+            assert sent.ref is not None
+            placed = Placed(ask, quantity, sent.ref.branch, sent.ref.number)
+            kept.append(
+                self.store.add_unfilled_buy(waiting.decision, MOCK, placed, self._clock(), OPEN, would)
+            )
+
         try:
             taken = await self._broker.take(
-                SYMBOL, SIDE_BUY, quantity, ask, day, wait=self._timing.wait, poll=self._timing.poll
+                SYMBOL,
+                SIDE_BUY,
+                quantity,
+                ask,
+                day,
+                wait=self._timing.wait,
+                poll=self._timing.poll,
+                on_accepted=accepted,
             )
         except BrokerError as e:  # no token: nothing was sent
             self._buy_failed(waiting, "buy", ERROR, str(e))
@@ -345,20 +363,18 @@ class MockTrader(PaperTrader):
             else:
                 self._cancel_failed(taken.cancel, None)
             self._retry_at = at + timedelta(seconds=self._timing.retry)
+        [unfilled] = kept  # its record since KIS took it (``accepted``)
         if taken.filled < 1:  # kept all the same: the ledger holds every order KIS has (``mock_check``)
-            # The trade it would open, its fill to come: kept with it, so that a restart follows it.
-            would = self._entry(waiting, at, ask, quantity, quote.received_at)
-            unfilled = self.store.add_unfilled_buy(
-                waiting.decision, MOCK, placed, at, OPEN if live else CANCELLED, would
-            )
             if live:
                 self._live_buy = _LiveBuy(placed, day, 0, 0.0, waiting.decision, would, unfilled)
                 return
+            self.store.close_unfilled_buy(unfilled, CANCELLED)
             self.store.unfilled(waiting.decision, UNFILLED)
             log.info("trader: no fill of the buy at %s on KIS before its cancel", ask)
             return
         entry = self._entry(waiting, at, taken.average, taken.filled, quote.received_at)
         trade = self.store.open_position(waiting.decision, entry, placed, OPEN if live else None)
+        self.store.close_unfilled_buy(unfilled, FILLED)  # its trade holds the order now
         self._open = trade
         self._dirty = True
         if live:
@@ -566,6 +582,15 @@ class MockTrader(PaperTrader):
             bid = self._bid()
             if left <= 0 or bid is None:
                 break
+
+            def accepted(sent: Sent, trade: OpenTrade = trade, bid: int = bid, left: int = left) -> None:
+                # Write-ahead: the sell kept open the moment KIS takes it, before its fills are read,
+                # so that a stop meanwhile leaves it to be taken off and reconciled.
+                assert sent.ref is not None
+                placed = Placed(bid, left, sent.ref.branch, sent.ref.number)
+                order = self.store.add_order(trade.id, SELL, reason, placed, self._clock(), OPEN)
+                self._live = Resting(order, bid, left, sent.ref.branch, sent.ref.number, 0, 0.0, reason)
+
             try:
                 taken = await self._broker.take(
                     SYMBOL,
@@ -575,25 +600,22 @@ class MockTrader(PaperTrader):
                     kst_day(self._clock()),
                     wait=self._timing.wait,
                     poll=self._timing.poll,
+                    on_accepted=accepted,
                 )
             except BrokerError as e:
                 self._sale_failed(trade, "sell", ERROR, str(e))
                 return
             sent, at = taken.sent, self._clock()
             if sent.accepted and sent.ref is not None:
-                # Open still when its cancel did not take (or it was never seen on the inquiry): it is
-                # followed, and taken off before anything more is sold.
-                live = taken.unsettled
-                status = FILLED if taken.filled >= left else OPEN if live else CANCELLED
-                placed = Placed(bid, left, sent.ref.branch, sent.ref.number)
-                order = self.store.add_order(trade.id, SELL, reason, placed, at, status)
+                live = self._live
+                assert live is not None
                 if taken.filled:
-                    self.store.add_fill(order, at, taken.average, taken.filled)
-                if status == OPEN:
-                    amount = taken.average * taken.filled
-                    self._live = Resting(
-                        order, bid, left, sent.ref.branch, sent.ref.number, taken.filled, amount, reason
-                    )
+                    self.store.add_fill(live.order_id, at, taken.average, taken.filled)
+                if taken.unsettled:  # open still: followed, and taken off before anything more is sold
+                    self._live = replace(live, filled=taken.filled, amount=taken.average * taken.filled)
+                else:
+                    self.store.close_order(live.order_id, FILLED if taken.filled >= left else CANCELLED, at)
+                    self._live = None
                 log.info(
                     "trader: sold %s of %s at %s on KIS (%s, trade %s)",
                     taken.filled,
