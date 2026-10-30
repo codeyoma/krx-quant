@@ -1169,7 +1169,7 @@ compose 서비스 `trader`가 `krx-quant trade`를 돈다. 수집기(`engine`)�
 모드마다 따로인 것:
 
 - 손실 한도: 누적 손실은 그 모드를 처음 켠 때부터 센다(mock은 처음 mock으로 시작한 때부터). 하루 한도, 정지, 재개, 다시 켜기는 위와 같다. `rearm`은 `.env`의 모드의 누적 한도를 다시 켠다.
-- 기록: 밤의 승격 판정, 실전 관문, 밤 리포트, `GET /v1/trader`의 `gate`·`policies`, `GET /v1/trader/policies`는 trader가 마지막으로 시작한 모드의 기록을 읽는다(리포트는 그날 장 마감 때의 모드). 그래서 mock으로 바꾸면 관문의 날 수와 도전 정책이 챔피언과 함께 돈 날은 mock의 날부터 다시 센다. paper의 기록은 지우지 않고 남는다(paper로 되돌리면 이어서 센다).
+- 기록: 밤의 승격 판정, 실전 관문, 밤 리포트, `GET /v1/trader`의 `gate`·`policies`, `GET /v1/trader/policies`는 trader가 마지막으로 시작한 모드의 기록을 읽는다(리포트는 그날 장 마감 때의 모드. 실전 `live`(#408)는 모의 기록이라 지금은 paper의 것). 그래서 mock으로 바꾸면 관문의 날 수와 도전 정책이 챔피언과 함께 돈 날은 mock의 날부터 다시 센다. paper의 기록은 지우지 않고 남는다(paper로 되돌리면 이어서 센다).
 - 매매와 장부(`GET /v1/trader/trades`, `/v1/trader/days`)에는 행마다 모드가 붙는다(`mode`). 도전 정책의 장부는 mock에서도 모의로 채운다(`trades.champion` 0).
 
 #### KIS 모의 (#405)

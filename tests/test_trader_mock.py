@@ -708,6 +708,8 @@ def test_the_records_are_of_the_mode_the_trader_last_started_in(tmp_path: Path) 
         assert promotion.mode_at(db, at("23:00:00")) == PAPER, "the mode of the day's close"
     with closing(sqlite3.connect(tmp_path / "none.sqlite3")) as db:
         assert promotion.mode_at(db) == PAPER
+    # A live trader (#408) is gated on a simulated record: paper's for now.
+    assert [promotion.records_of(m) for m in (PAPER, MOCK, "live")] == [PAPER, MOCK, PAPER]
 
 
 # A restart, and the trader's process

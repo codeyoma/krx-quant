@@ -7,7 +7,8 @@ challenger's, ``desk.py``), each with the net P&L of the policy's trades entered
 day it made none. A trade ends on the day it is entered (by 15:15; later only when the trader was
 down at its time barrier), so a day's trades are all of that day. A policy's days as a challenger
 and as the champion are one record: a challenger promoted brings its own. One mode's (#405): the
-mode the trader last started in (``mode_at``), ``paper`` until it starts in ``mock``. In paper
+mode the trader last started in (``mode_at``), ``paper`` until it starts in ``mock`` (a live
+trader's, #408, are paper's: ``records_of``). In paper
 both books fill in paper; in mock the champion's trades are its KIS mock fills (``mock.py``) and
 the challengers' their paper fills on the same quotes. The champion's trades are the ones the
 limits hold (#396), a challenger's are held by none (``limits.Unlimited``).
@@ -44,7 +45,7 @@ from typing import Any
 from krx_quant.feeds.base import KST, kst_day
 from krx_quant.market_calendar import Session
 from krx_quant.stats import overlap_t_test
-from krx_quant.trader import PAPER, PICK_AT
+from krx_quant.trader import MOCK, PAPER, PICK_AT
 from krx_quant.trader import policy as policies
 
 # A challenger is judged on this many common trading days at least (#393).
@@ -93,6 +94,16 @@ class Record:
         return sum(d.net for d in self.days)
 
 
+# The simulated modes, whose records are their own (#405). A live trader (#408) is judged and gated on
+# a simulated record: paper's, until #408 decides otherwise.
+SIMULATED = (PAPER, MOCK)
+
+
+def records_of(mode: str) -> str:
+    """The mode whose records ``mode``'s promotion, live gate and report read (``SIMULATED``)."""
+    return mode if mode in SIMULATED else PAPER
+
+
 def mode_at(db: sqlite3.Connection, at: datetime | None = None) -> str:
     """The mode the trader last started in, at or before ``at`` (all its starts if None): the mode
     whose records the nightly promotion, the report and the API read (#405). ``paper`` before the
@@ -110,11 +121,11 @@ def records(
     db: sqlite3.Connection, mode: str | None = None, versions: Iterable[int] | None = None
 ) -> dict[int, Record]:
     """The records of ``versions`` (all if None) in ``mode`` (None: the mode the trader last started
-    in, ``mode_at``), read from the trader's store; none from a store the trader has not kept them in
-    yet."""
+    in, ``mode_at``; a live one's are paper's, ``records_of``), read from the trader's store; none
+    from a store the trader has not kept them in yet."""
     if not _has_table(db, "policy_days"):
         return {}
-    mode = mode or mode_at(db)
+    mode = records_of(mode or mode_at(db))
     wanted = None if versions is None else set(versions)
     ran: dict[int, list[tuple[date, bool, bool]]] = {}
     for version, day, champion, stopped in db.execute(
