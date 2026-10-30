@@ -2,7 +2,9 @@
 
 KRX 종목의 4분 뒤 가격 움직임을 여러 퀀트 알고리즘이 예측하고, 예측을 자동 채점해 통계로 보여주는 개인용 엔진이다. 결과는 fork한 Fincept Terminal([codeyoma/FinceptTerminal](https://github.com/codeyoma/FinceptTerminal), `custom` 브랜치)의 화면에서 본다.
 
-엔진(수집기)에는 주문 코드가 없다. 신호만 낸다. 자동 매매(#393)는 따로 도는 trader 프로세스(`krx-quant trade`, compose 서비스 `trader`)가 한다. 지금은 모의(`paper`)뿐이다: 수집기가 내보내는 실시간 호가로 체결을 흉내 내고, 주문은 내지 않는다(설계 [14장](docs/design.md#14-자동-매매-393)). KIS 주문 코드는 trader의 KIS 주문 모듈(`src/krx_quant/kis_orders.py`) 하나에만 있고, 그 밖에서는 `scripts/check_forbidden.py`가 계속 막는다. 지금 그것을 쓰는 것은 KIS 모의투자 서버에 주문해 응답을 재는 프로브(`krx-quant probe-kis-orders`, #403)뿐이다. 프로브가 잰 필드로 주문·취소·체결·잔고를 읽는 trader의 주문 모듈(`kis_orders.Broker`, #404)도 그 파일에 있지만, trader는 아직 쓰지 않는다(mock 모드, #405).
+엔진(수집기)에는 주문 코드가 없다. 신호만 낸다. 자동 매매(#393)는 따로 도는 trader 프로세스(`krx-quant trade`, compose 서비스 `trader`)가 한다. 모드는 둘이다(서버 `.env`의 `KRX_TRADER_MODE`). 기본값 `paper`(모의)는 수집기가 내보내는 실시간 호가로 체결을 흉내 내고 주문은 내지 않는다. `mock`(KIS 모의, #405)은 챔피언 정책의 매매를 trader 자신의 모의 키로 KIS 모의투자 서버에 실제로 주문하고, 장부를 KIS의 체결로 쓴다. 실전(`live`, #408)은 아직 없다(설계 [14장](docs/design.md#14-자동-매매-393), 모드 바꾸기는 [operations.md](docs/operations.md) "모드 바꾸기 (#405)"). KIS 주문 코드는 trader의 KIS 주문 모듈(`src/krx_quant/kis_orders.py`) 하나에만 있고, 그 밖에서는 `scripts/check_forbidden.py`가 계속 막는다. 그것을 쓰는 것은 KIS 모의투자 서버에 주문해 응답을 재는 프로브(`krx-quant probe-kis-orders`, #403), mock 모드의 trader(`kis_orders.Broker`, #404, #405), mock 첫날의 장부를 KIS 체결 조회와 견주는 예약 작업(`krx-quant check-mock-trades`, #405)이다.
+
+> **바뀜** (2026-10-30, #422): "지금은 모의(`paper`)뿐이다", "trader의 주문 모듈은 그 파일에 있지만 trader는 아직 쓰지 않는다(mock 모드, #405)" → `mock` 모드가 KIS 모의투자 서버에 실제로 주문한다. 이유: #405(spec #393의 "세 모드": 실전 전에 KIS 모의투자로 주문과 체결을 확인한다).
 
 > **바뀜** (2026-10-29, #409): "주문 기능은 없다. 신호만 낸다." → 엔진에는 주문 코드가 없고, 자동 매매는 따로 도는 trader가 한다(지금은 모의뿐). 이유: 사용자가 엔진의 예측으로 삼성전자를 스스로 사고파는 자동 매매를 원했다(#393). 주문 코드는 trader의 KIS 주문 모듈에만 둔다(#404에서). 이 PR은 모의뿐이다.
 

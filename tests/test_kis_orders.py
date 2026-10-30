@@ -515,3 +515,43 @@ async def test_a_read_that_fails_while_an_order_is_followed_is_read_again(
     async with broker_of(fake, settings_of(fake, tmp_path)) as broker:
         taken = await broker.take(SYMBOL, SIDE_BUY, 2, account.ask, DAY, wait=WAIT, poll=POLL)
     assert taken.filled == 2 and taken.cancel is None
+
+
+async def test_a_cancel_that_cannot_be_sent_leaves_the_order_open_for_the_caller(
+    trader: tuple[FakeKis, FakeAccount], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#405: once KIS took the order, ``take`` raises nothing: a cancel with no token to send it with
+    ends it with what filled and what is left open, for the trader to follow."""
+    fake, account = trader
+    account.depth = 4
+
+    async def no_token(self: Broker, order: kis_orders.OrderRef) -> kis_orders.Sent:
+        raise NoToken("cancel: no access token (made up), nothing sent")
+
+    monkeypatch.setattr(Broker, "cancel", no_token)
+    async with broker_of(fake, settings_of(fake, tmp_path)) as broker:
+        taken = await broker.take(SYMBOL, SIDE_BUY, 10, account.ask, DAY, wait=0.2, poll=POLL)
+
+    assert taken.sent.accepted and taken.cancel is None and taken.unsettled
+    assert (taken.filled, taken.left) == (4, 6)
+    assert [o.left for o in account.orders] == [6], "open on KIS still"
+
+
+async def test_fills_that_cannot_be_read_leave_the_order_unsettled_for_the_caller(
+    trader: tuple[FakeKis, FakeAccount], tmp_path: Path
+) -> None:
+    """#405: no read of the order's row answers: ``take`` raises nothing, and the order KIS took is
+    unsettled (its end not known), named for the caller to follow."""
+    fake, account = trader
+    fake.rest_responses[kis_orders.FILLS.mock] = lambda params: {
+        "rt_cd": "1",
+        "msg_cd": "FK0010",
+        "msg1": "x",
+    }
+    async with broker_of(fake, settings_of(fake, tmp_path)) as broker:
+        taken = await broker.take(SYMBOL, SIDE_BUY, 10, account.ask, DAY, wait=0.2, poll=POLL)
+
+    assert taken.sent.accepted and taken.row is None and taken.left is None and taken.unsettled
+    assert taken.sent.ref is not None and kis_orders.same_number(
+        taken.sent.ref.number, account.orders[0].number
+    )

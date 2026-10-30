@@ -462,3 +462,31 @@ def test_the_trader_s_keys_are_read_from_the_env_and_default_to_the_mock_servers
     assert not Settings.from_env({**env, "KRX_TRADER_KIS_APP_SECRET": " "}, dotenv_path=None).trader_kis
     live = Settings.from_env({**env, "KRX_TRADER_KIS_REST_URL": DEFAULT_REST_URL}, dotenv_path=None)
     assert live.trader_kis_rest_url == DEFAULT_REST_URL  # read as written: the probe refuses it
+
+
+# The trader's account in mock mode (#405)
+
+
+@pytest.mark.parametrize("busy", ["held", "open order"])
+async def test_it_places_nothing_on_an_account_the_trader_may_be_using(
+    trader: tuple[FakeKis, FakeAccount], tmp_path: Path, busy: str
+) -> None:
+    """The account holds 005930, or has an order with something left: the trader in mock mode may be
+    using it. The probe reads the account and stops before its first order, with a code the job
+    tries again on the next trading day."""
+    fake, account = trader
+    if busy == "held":
+        account.holdings[SYMBOL] = 14
+    else:
+        account.fills = False  # a buy resting on the account, as a trader's take-profit would
+        account._order({"PDNO": SYMBOL, "ORD_QTY": "3", "ORD_UNPR": str(account.lower)})
+    placed = len(account.orders)
+
+    code, text = await probe(trader_settings(fake, tmp_path), fake)
+
+    assert code == order_probe.IN_USE
+    assert "멈춤: 계좌에 005930" in text and "아무것도 주문하지 않았다" in text and "#405" in text
+    assert (
+        len(account.orders) == placed and posted(fake, kis_orders.BUY) == posted(fake, kis_orders.SELL) == []
+    )
+    assert account.holdings.get(SYMBOL, 0) == (14 if busy == "held" else 0)

@@ -39,6 +39,8 @@ from krx_quant.scheduled import (
     session_facts,
     session_window,
 )
+from krx_quant.trader.store import DB_NAME as TRADER_DB
+from krx_quant.trader.store import TraderStore
 from tests.fake_github import REPO, TOKEN, fake_github
 from tests.test_scheduled import (
     AT,
@@ -236,6 +238,30 @@ def test_the_order_probe_runs_each_trading_day_until_a_run_does_every_step() -> 
         assert due(day(MONDAY, failed)), code
         assert not due(day(FRIDAY, failed)), "not twice a day"
     assert due(day(MONDAY, replace(ran, outcome=INTERRUPTED)))
+
+
+def test_the_order_probe_does_not_run_while_the_trader_is_in_mock_mode() -> None:
+    """#405: the probe's session (10:00) is before the trader's last exit (15:15), when a trader in
+    mock mode may hold 005930 and order on the same mock account; again on a later day it is not."""
+    due = KIS_ORDER_PROBE.due
+    mock = Night(FRIDAY, True, COMMIT, None, {}, Facts(trader_kis=True, trader_mock=True))
+    assert not due(mock)
+    ran = JobRecord(FRIDAY, FAILED, at(FRIDAY, "10:00"), COMMIT, INCOMPLETE, 47.0)
+    assert not due(replace(mock, day=MONDAY, record=ran))
+    assert due(replace(mock, day=MONDAY, record=ran, facts=Facts(trader_kis=True))), "back in paper"
+
+
+async def test_the_session_facts_read_the_mode_the_trader_last_started_in(tmp_path: Path) -> None:
+    settings = Settings(kis_app_key="", kis_app_secret="", state_dir=tmp_path)
+    assert (await session_facts(settings)).trader_mock is False, "no trader yet"
+    store = TraderStore(tmp_path / TRADER_DB)
+    try:
+        store.add_run(at(THURSDAY, "08:00"), "paper", {})
+        assert (await session_facts(settings)).trader_mock is False
+        store.add_run(at(FRIDAY, "08:00"), "mock", {})
+    finally:
+        store.close()
+    assert (await session_facts(settings)).trader_mock is True
 
 
 def test_without_the_keys_the_order_probe_says_so_once_then_waits_for_them() -> None:

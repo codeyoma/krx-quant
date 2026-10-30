@@ -6,9 +6,15 @@ which the trader writes while the day's session is open: its champion's book and
 challenger's, ``desk.py``), each with the net P&L of the policy's trades entered that day, 0 on a
 day it made none. A trade ends on the day it is entered (by 15:15; later only when the trader was
 down at its time barrier), so a day's trades are all of that day. A policy's days as a challenger
-and as the champion are one record: a challenger promoted brings its own. Paper only (mode
-``paper``): the champion's paper trades are the ones the limits hold (#396), a challenger's are
-held by none (``limits.Unlimited``).
+and as the champion are one record: a challenger promoted brings its own. Always paper's
+(``records_of``, #405), whatever the trader's mode: every policy, the champion and the challengers
+alike, on one fill model, so that a switch from paper to mock to live never starts the history
+again. In paper mode the champion's record is its book's, whose trades the limits hold (#396); in
+mock mode it is its paper shadow's (``desk.Desk.shadow``, held by nothing, as a challenger's book
+is), never its KIS fills; a challenger's trades are held by none (``limits.Unlimited``). The
+records are simulated evidence: what a policy would have made filled in paper, not what an
+execution makes (rejects, partial fills, the account's reconciliation, the fill gap between KIS
+and the shadow, ``gap.py``), which the live mode must check apart (#408).
 
 **Promotion** (``judge``, ``promote``): a challenger becomes the champion when, over the trading
 days both ran (``common``), at least ``PROMOTION_DAYS`` of them, the day-level lower bound of
@@ -91,13 +97,33 @@ class Record:
         return sum(d.net for d in self.days)
 
 
+def records_of(mode: str | None) -> str:
+    """The mode whose records ``mode``'s promotion, live gate and report read: paper's for every mode
+    (#405), mock and live included: one fill model for every policy, one history across the modes."""
+    return PAPER
+
+
+def mode_at(db: sqlite3.Connection, at: datetime | None = None) -> str:
+    """The mode the trader last started in, at or before ``at`` (all its starts if None): the mode
+    whose trades and ledger the report shows (#405), not the records it reads (``records_of``).
+    ``paper`` before the first start."""
+    if not _has_table(db, "runs"):
+        return PAPER
+    where, params = "", []
+    if at is not None:
+        where, params = "WHERE at <= ?", [at.astimezone(KST).isoformat()]
+    row = db.execute(f"SELECT mode FROM runs {where} ORDER BY at DESC, id DESC LIMIT 1", params).fetchone()
+    return PAPER if row is None else str(row[0])
+
+
 def records(
-    db: sqlite3.Connection, mode: str = PAPER, versions: Iterable[int] | None = None
+    db: sqlite3.Connection, mode: str | None = None, versions: Iterable[int] | None = None
 ) -> dict[int, Record]:
-    """The paper records of ``versions`` (all if None) in ``mode``, read from the trader's store;
-    none from a store the trader has not kept them in yet."""
+    """The records of ``versions`` (all if None), paper's whatever ``mode`` (``records_of``), read
+    from the trader's store; none from a store the trader has not kept them in yet."""
     if not _has_table(db, "policy_days"):
         return {}
+    mode = records_of(mode)
     wanted = None if versions is None else set(versions)
     ran: dict[int, list[tuple[date, bool, bool]]] = {}
     for version, day, champion, stopped in db.execute(
@@ -303,13 +329,15 @@ def promote(
     db: sqlite3.Connection,
     now: datetime,
     sessions: Callable[[date], Session | None],
-    mode: str = PAPER,
+    mode: str | None = None,
 ) -> Promotion:
     """Judge the challengers running against the champion on the records in the store ``db``
     (``policy.connect``) and, after the market, make the one that passes the champion
     (``policy.crown``) and drop those that reached ``RETIRE_DAYS`` unpromoted (``policy.drop``;
     the slots they free are filled at the night's end, ``policy.admit``). During a trading day's
-    market nothing is judged or written."""
+    market nothing is judged or written. The records are paper's whatever ``mode`` (``records_of``,
+    #405)."""
+    mode = records_of(mode)
     current = policies.champion_version(db)
     if in_market(now, sessions):
         return Promotion(now, current, (), None, MARKET_OPEN, _gate(db, current, mode))
@@ -355,11 +383,11 @@ def _won(value: float | None) -> str:
     return "없음" if value is None else f"{value:+,.0f}원"
 
 
-def progress(db: sqlite3.Connection, mode: str = PAPER) -> dict[str, Any]:
-    """``GET /v1/trader``'s policies (#400): the champion's version, the live gate on its paper
-    record, and the champion and each challenger running with their paper records and, for a
-    challenger, where it stands against the champion. Read-only; empty from a store without
-    policies."""
+def progress(db: sqlite3.Connection, mode: str | None = None) -> dict[str, Any]:
+    """``GET /v1/trader``'s policies (#400): the champion's version, the live gate on its record,
+    and the champion and each challenger running with their records and, for a challenger, where it
+    stands against the champion; the records ``mode``'s (None: the mode the trader last started in,
+    #405). Read-only; empty from a store without policies."""
     if not _has_table(db, "policies") or not _has_table(db, "champions"):
         return {"champion": None, "gate": gate(None, None).as_json(), "policies": []}
     current = policies.champion_version(db)

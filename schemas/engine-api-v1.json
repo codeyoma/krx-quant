@@ -2688,7 +2688,7 @@
       "description": "A position from its entry to its exit (#394): the cell (kind, predictor) and what the cost map picked it on (#395: the predictor's role, p*, the hit rate's lower bound, the Kelly f* and the share of the capital bought; null for a trade entered before), the prediction and its rise's probability, the barriers, the fills, the costs and the P&L in won; exit and the sell's costs null while open. policy: the policy version it was made under (#399), null before the first champion; champion (#400): whether it is the champion's, not a challenger's paper trade. An exit is by the triple barrier (take_profit, stop_loss, time), or a sale at once (#396): a pause selling now (pause), a loss limit reached (daily_limit, cumulative_limit).",
       "type": "object",
       "required": ["id", "mode", "symbol", "kind", "predictor", "role", "prediction_id", "bar_close", "probability",
-                   "threshold", "p_star", "precision_low", "kelly", "fraction", "policy", "champion", "anchor", "tick", "width_ticks",
+                   "threshold", "p_star", "precision_low", "kelly", "fraction", "policy", "champion", "shadow", "anchor", "tick", "width_ticks",
                    "target", "stop", "time_barrier", "decided_at", "entry", "exit", "buy_fee", "sell_fee", "tax",
                    "cost", "gross", "net", "orders"],
       "additionalProperties": false,
@@ -2708,7 +2708,8 @@
         "kelly": {"type": ["number", "null"]},
         "fraction": {"type": ["number", "null"], "exclusiveMinimum": 0, "maximum": 1},
         "policy": {"type": ["integer", "null"], "minimum": 1},
-        "champion": {"type": "boolean", "description": "#400: the champion's trade (the trader's, which the limits hold and the chart marks); false: a challenger's paper trade."},
+        "champion": {"type": "boolean", "description": "#400: the champion's trade (the trader's, which the limits hold and the chart marks); false: a challenger's paper trade, or the shadow's."},
+        "shadow": {"type": "boolean", "description": "#405: the champion policy's paper shadow's trade in mock mode (champion false): its paper record, never the trader's."},
         "anchor": {"type": "number", "exclusiveMinimum": 0},
         "tick": {"type": "number", "exclusiveMinimum": 0},
         "width_ticks": {"type": "integer", "minimum": 1},
@@ -2794,7 +2795,7 @@
         "updated_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]},
         "alive": {"type": "boolean"},
         "mode": {"enum": ["paper", "mock", "live", null]},
-        "status": {"enum": ["running", "entries_paused", "paused", "daily_limit", "cumulative_limit", null]},
+        "status": {"enum": ["running", "entries_paused", "paused", "order_failed", "daily_limit", "cumulative_limit", null]},
         "started_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]},
         "capital": {"type": ["integer", "null"], "minimum": 1},
         "cash": {"type": ["number", "null"]},
@@ -3006,7 +3007,7 @@
     "trader_day": {
       "description": "A trading day of the trader (#396): the net P&L of the trades exited that day and how many, the day's P&L at its lowest (realized + open, after costs) against the daily limit, the cumulative P&L at the day's last update and at its lowest against the cumulative limit (used: the lowest over the limit), the status at the day's last update, and the limit reached that day if any.",
       "type": "object",
-      "required": ["day", "mode", "net", "trades", "daily", "cumulative", "status", "halt", "updated_at"],
+      "required": ["day", "mode", "net", "trades", "daily", "cumulative", "status", "halt", "updated_at", "gap"],
       "additionalProperties": false,
       "properties": {
         "day": {"$ref": "#/$defs/day"},
@@ -3034,9 +3035,61 @@
             "used": {"type": "number", "minimum": 0}
           }
         },
-        "status": {"enum": ["running", "entries_paused", "paused", "daily_limit", "cumulative_limit"]},
+        "status": {"enum": ["running", "entries_paused", "paused", "order_failed", "daily_limit", "cumulative_limit"]},
         "halt": {"enum": ["daily_limit", "cumulative_limit", null]},
-        "updated_at": {"$ref": "#/$defs/time"}
+        "updated_at": {"$ref": "#/$defs/time"},
+        "gap": {
+          "description": "#405: on a mock day, the champion's KIS mock trades entered that day against its paper shadow's (trades and the net of those exited, the difference mock − shadow, and each prediction's pair: the fill price differences in ticks, mock − shadow, the quantities, the exit reasons, the net difference; a side null when that book did not trade it); null on another mode's day, or a mock day with neither.",
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "required": ["mock", "shadow", "difference", "pairs"],
+              "additionalProperties": false,
+              "properties": {
+                "mock": {"$ref": "#/$defs/trader_gap_side"},
+                "shadow": {"$ref": "#/$defs/trader_gap_side"},
+                "difference": {"type": "number"},
+                "pairs": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": ["kind", "predictor", "bar_close", "mock", "shadow", "entry_ticks", "exit_ticks", "net_difference"],
+                    "additionalProperties": false,
+                    "properties": {
+                      "kind": {"type": "string"},
+                      "predictor": {"type": "string"},
+                      "bar_close": {"$ref": "#/$defs/time"},
+                      "mock": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/trader_gap_trade"}]},
+                      "shadow": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/trader_gap_trade"}]},
+                      "entry_ticks": {"type": ["number", "null"]},
+                      "exit_ticks": {"type": ["number", "null"]},
+                      "net_difference": {"type": ["number", "null"]}
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "trader_gap_side": {
+      "description": "#405: one side of a mock day's gap: its trades entered that day and the net P&L of those exited (won).",
+      "type": "object",
+      "required": ["trades", "net"],
+      "additionalProperties": false,
+      "properties": {"trades": {"type": "integer", "minimum": 0}, "net": {"type": "number"}}
+    },
+    "trader_gap_trade": {
+      "description": "#405: one book's trade of a prediction in a mock day's gap: its shares, why it ended (null while open), its net P&L (won, null while open).",
+      "type": "object",
+      "required": ["quantity", "exit_reason", "net"],
+      "additionalProperties": false,
+      "properties": {
+        "quantity": {"type": "integer", "minimum": 1},
+        "exit_reason": {"enum": ["take_profit", "stop_loss", "time", "pause", "daily_limit", "cumulative_limit", null]},
+        "net": {"type": ["number", "null"]}
       }
     },
     "trader_marks": {

@@ -53,8 +53,9 @@ from typing import Any
 from krx_quant.config import Settings
 from krx_quant.feeds.base import KST
 from krx_quant.market_calendar import MarketCalendar, calendar_store
-from krx_quant.trader import PAPER, PICK_AT, promotion
+from krx_quant.trader import MOCK, PAPER, PICK_AT, promotion
 from krx_quant.trader import policy as policies
+from krx_quant.trader.gap import day_gap
 from krx_quant.trader.limits import Pause, pause_of
 from krx_quant.trader.refit import NO_POLICY_KEPT, run_refit
 from krx_quant.trader.settings import TraderSettings
@@ -80,7 +81,17 @@ STATUSES = {
     "paused": "정지하고 즉시 매도(paused)",
     DAILY_LIMIT: "하루 손실 한도로 멈춤(daily_limit)",
     CUMULATIVE_LIMIT: "누적 손실 한도로 멈춤(cumulative_limit)",
+    "order_failed": "주문 실패로 그날 새 진입 정지(order_failed)",  # #405
 }
+# A failed KIS order of mock mode (#405): what it was, what became of it.
+FAILED_ORDERS = {
+    "buy": "매수",
+    "take_profit": "익절 매도",
+    "cancel": "취소",
+    "sell": "매도",
+    "orderable": "주문 가능 현금 조회",
+}
+FAILED_OUTCOMES = {"refused": "KIS가 거부", "unknown": "응답 없음(결과 모름)", "error": "보내지 못함"}
 EXITS = {
     "take_profit": "익절(take_profit)",
     "stop_loss": "손절(stop_loss)",
@@ -191,6 +202,8 @@ class Report:
     fitted: tuple[Fitted, ...] = ()
     waiting: int = 0
     halts: tuple[Mapping[str, Any], ...] = ()  # reached that day
+    failures: tuple[Mapping[str, Any], ...] = ()  # the KIS orders that failed that day (#405, mock)
+    gap: Mapping[str, Any] | None = None  # a mock day's KIS trades against the paper shadow's (#405)
     held: Mapping[str, Any] | None = None  # a cumulative halt reached before the day, not re-armed
     pause: Pause | None = None  # in force at the night's end
     controls: tuple[Control, ...] = ()  # asked from the day's start to the night's end
@@ -238,24 +251,27 @@ def read(
     day: date,
     calendar: MarketCalendar,
     *,
-    mode: str = PAPER,
+    mode: str | None = None,
     refit: int | None = None,
 ) -> Report:
     """The report of the trading day ``day`` from the trader's store at ``path``, read-only (module
-    doc). ``sqlite3.Error`` when it cannot be read."""
+    doc), of ``mode``: by default the mode the trader last started in by the day's close (#405,
+    ``promotion.mode_at``). ``sqlite3.Error`` when it cannot be read."""
     week = last_of_week(calendar, day)
     if not path.exists():
         none = promotion.gate(None, None)
-        return Report(day, mode, week, none, none, found=False, refit=refit)
+        return Report(day, mode or PAPER, week, none, none, found=False, refit=refit)
     start, end = night_of(calendar, day)
     session = calendar.session(day)
     with _reading(path) as db:
+        closed = session.close if session is not None else datetime.combine(day, time(23, 59, 59), KST)
+        mode = mode or promotion.mode_at(db, closed)
         tables = _tables(db)
         has_policies = {"policies", "champions"} <= tables
         champion = _champion_at(db, start) if has_policies else None
         at_end = _champion_at(db, end) if has_policies else None
         challengers = _slots_at(db, start) if has_policies else []
-        records = promotion.records(db, PAPER, {v for v in (champion, at_end, *challengers) if v is not None})
+        records = promotion.records(db, mode, {v for v in (champion, at_end, *challengers) if v is not None})
         to_day = {v: _upto(r, day) for v, r in records.items()}
         before = {v: _upto(r, day - timedelta(days=1)) for v, r in records.items()}
         standings = _standings(day, champion, challengers, to_day)
@@ -296,6 +312,8 @@ def read(
             fitted=fitted,
             waiting=waiting,
             halts=_halts(db, mode, day) if "halts" in tables else (),
+            failures=_failures(db, mode, day) if "failures" in tables else (),
+            gap=day_gap(db, day) if mode == MOCK and "trades" in tables else None,
             held=_held(db, mode, day, end) if "halts" in tables else None,
             pause=pause_of(everything),
             controls=controls,
@@ -310,6 +328,8 @@ def reasons(report: Report) -> list[str]:
         out.append(f"이번 주 마지막 거래일({WEEKDAYS[report.day.weekday()]}요일)")
     for halt in report.halts:
         out.append(f"{LIMITS.get(halt['kind'], halt['kind'])}에 닿음({_hms(halt['at'])})")
+    if report.failures:
+        out.append(f"KIS 주문 실패 {len(report.failures)}건(첫 실패 {_hms(report.failures[0]['at'])})")
     for change in report.crowned:
         if change.replaced is None:
             out.append(f"첫 챔피언(정책 {change.version})")
@@ -342,6 +362,7 @@ def render(report: Report) -> str:
         return "\n".join(lines)
     sections = [
         _day_section(report),
+        *([] if report.gap is None else [_gap_section(report.gap)]),
         _pick_section(report),
         _standings_section(report),
         _night_section(report),
@@ -353,7 +374,11 @@ def render(report: Report) -> str:
 
 
 def run_report(
-    settings: Settings, now: datetime, day: date | None = None, refit: int | None = None, mode: str = PAPER
+    settings: Settings,
+    now: datetime,
+    day: date | None = None,
+    refit: int | None = None,
+    mode: str | None = None,
 ) -> int:
     """``krx-quant trader-report``: the report of ``day`` (else ``report_day``) printed; 0, or
     ``REPORT_FAILED`` (with a line saying why) when the store cannot be read."""
@@ -635,6 +660,14 @@ def _halts(db: sqlite3.Connection, mode: str, day: date) -> tuple[dict[str, Any]
     return tuple(dict(r) for r in rows)
 
 
+def _failures(db: sqlite3.Connection, mode: str, day: date) -> tuple[dict[str, Any], ...]:
+    rows = db.execute(
+        "SELECT at, what, outcome, code, detail FROM failures WHERE mode = ? AND day = ? ORDER BY id",
+        (mode, day.isoformat()),
+    )
+    return tuple(dict(r) for r in rows)
+
+
 def _held(db: sqlite3.Connection, mode: str, day: date, end: datetime) -> dict[str, Any] | None:
     """A cumulative halt reached before ``day`` and still holding at the night's ``end``: not re-armed
     by then (a re-arm writes ``lifted_at`` on its row, so a later one does not change the day's)."""
@@ -667,6 +700,44 @@ def _controls(db: sqlite3.Connection, start: datetime | None, end: datetime) -> 
 
 
 # Writing.
+
+
+def _gap_section(gap: Mapping[str, Any]) -> str:
+    """A mock day's KIS trades against the champion's paper shadow (#405, ``gap.day_gap``): ticks and
+    won, no price."""
+    mock, shadow = gap["mock"], gap["shadow"]
+    lines = [
+        "KIS 모의와 그림자 장부 (#405)",
+        f"- KIS 모의 매매 {mock['trades']}건 {_won(mock['net'])} · 그림자(모의 체결) {shadow['trades']}건"
+        f" {_won(shadow['net'])} · 차이(KIS − 그림자) {_won(gap['difference'])}",
+    ]
+    for p in gap["pairs"]:
+        cell = f"{_hms(p['bar_close'])[:5]} {p['kind']} {p['predictor']}"
+        if p["mock"] is None:
+            lines.append(f"- {cell}: 그림자만 샀다({_end(p['shadow'])}) · KIS는 사지 않았다")
+        elif p["shadow"] is None:
+            lines.append(f"- {cell}: KIS만 샀다({_end(p['mock'])}) · 그림자는 사지 않았다")
+        else:
+            lines.append(
+                f"- {cell}: 진입 {_ticks(p['entry_ticks'])} · 청산 {_ticks(p['exit_ticks'])}"
+                f" · {p['mock']['quantity']}주 ↔ {p['shadow']['quantity']}주"
+                f" · 순손익 차이 {_won(p['net_difference'])}"
+                f" (KIS {_end(p['mock'])}, 그림자 {_end(p['shadow'])})"
+            )
+    lines.append(
+        "- 틱은 KIS 체결가 − 그림자 체결가: 진입은 0보다 크면 KIS가 비싸게 샀고,"
+        " 청산은 0보다 크면 KIS가 비싸게 팔았다"
+    )
+    return "\n".join(lines)
+
+
+def _end(side: Mapping[str, Any]) -> str:
+    reason = side["exit_reason"]
+    return "열림" if reason is None else EXITS.get(reason, reason)
+
+
+def _ticks(value: float | None) -> str:
+    return "없음" if value is None else f"{value:+.2f}틱"
 
 
 def _won(value: float | None) -> str:
@@ -920,6 +991,12 @@ def _limits_section(report: Report) -> str:
             )
     else:
         lines.append("- 그날 닿은 한도: 없음")
+    for f in report.failures:  # #405: KIS's code and message, never an order or account number
+        lines.append(
+            f"- KIS 주문 실패: {_hms(f['at'])} {FAILED_ORDERS.get(f['what'], f['what'])} · "
+            f"{FAILED_OUTCOMES.get(f['outcome'], f['outcome'])}({f['code'] or '-'}: {f['detail']})"
+            " · 그날 새 진입 정지"
+        )
     held = report.held
     if held is not None:
         lines.append(

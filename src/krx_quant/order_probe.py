@@ -13,7 +13,9 @@ the trader's own mock account (``KRX_TRADER_KIS_*``, never the collector's key),
 3. the per-second limit: ``BURST`` reads of the orderable cash sent at once;
 4. the quotes the orders are priced from (KRX's: the price, the day's limits, the tick, the best
    ask and bid);
-5. the account before: the balance, the orderable cash and the day's orders;
+5. the account before: the balance, the orderable cash and the day's orders; when it holds 005930
+   or has an order with something left (the trader in mock mode may be using it, #405), it stops
+   there, placing nothing (``IN_USE``);
 6. the fill notice: its subscription by the HTS ID, kept open to the end (none without it);
 7. three orders KIS should refuse, at prices that cannot fill: a price off the tick, more than the
    cash buys, a sell of shares not held;
@@ -97,6 +99,10 @@ QUANTITY = 1
 # not done (a refused buy, a fill or a cancel that did not come, or, with an HTS ID, no fill notice
 # read: no approval key, no answer to the subscription, no frame decrypted).
 REFUSED, NO_KEYS, CLOSED, INCOMPLETE = 2, 3, 4, 5
+# The account holds 005930 or has an order open before the probe placed anything (#405): the trader
+# may be using it in mock mode, so nothing is placed; the scheduled job tries again the next trading
+# day.
+IN_USE = 6
 # The continuous session it orders in: after the opening's first minutes, and ended before the
 # trader's own last exit (#393: every position is closed by 15:15).
 OPEN_FROM, OPEN_UNTIL = clock_time(9, 5), clock_time(15, 15)
@@ -180,6 +186,7 @@ class Snapshot:
     holding: dict[str, Any] = field(default_factory=dict)
     totals: dict[str, Any] = field(default_factory=dict)
     orderable: dict[str, Any] = field(default_factory=dict)
+    open_orders: int = 0  # the day's orders with something left to fill (read before the first order)
 
     @property
     def held(self) -> int:
@@ -328,6 +335,16 @@ class _Probe:
         await self.limit()
         quote = await self.quotes()
         before = await self.snapshot("5. 시작 전 계좌", quote)
+        if before.held or before.open_orders:
+            # #405: the trader may be using this account in mock mode; the probe places nothing on
+            # an account that is not empty, and the scheduled job tries again the next trading day.
+            say(
+                f"멈춤: 계좌에 {SYMBOL} {before.held}주, 남은 수량이 있는 주문 {before.open_orders}건이 있어 "
+                "아무것도 주문하지 않았다. trader가 이 모의 계좌로 mock 모드를 돌고 있을 수 있다(#405). "
+                "계좌가 비면 다음 거래일 장중에 다시 돈다."
+            )
+            self.summary()
+            return IN_USE
         await self.subscribe()
         if quote is None:
             say("주문하지 않았다: 시세(4절)에서 매도·매수 1호가를 읽지 못했다.")
@@ -461,6 +478,17 @@ class _Probe:
             say(f"  - 오늘 주문 체결 조회: {said(fills)}, {len(fills.rows('output1'))}행")
             say(f"    output1 필드: {fields_of(fills.rows('output1'))}")
             say(f"    output2 필드: {fields_of(fills.rows('output2'))}")
+            rows, last = fills.rows("output1"), fills
+            for _ in range(PAGES - 1):  # every page: an order open may be on a later one
+                if not last.more:
+                    break
+                last = await self.read(partial(self.account.fills, self.day, context=last.context))
+                rows += last.rows("output1")
+            snap.open_orders = sum(
+                1
+                for r in rows
+                if str(r.get("cncl_yn", "")).strip() != "Y" and (_int(r.get("rmn_qty")) or 0) > 0
+            )
         else:
             say(f"  - 바뀐 것(체결금액 = 1로): {changes(before, snap, unit)}")
         say("")

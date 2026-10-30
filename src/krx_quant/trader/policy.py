@@ -51,7 +51,7 @@ from pathlib import Path
 from typing import Any
 
 from krx_quant.feeds.base import KST
-from krx_quant.trader import PAPER, PICK_AT
+from krx_quant.trader import PICK_AT
 from krx_quant.trader.cells import Cell
 from krx_quant.trader.selection import NOT_IN_POLICY, Selection
 
@@ -414,10 +414,11 @@ def status_of(
     return CHALLENGER if admitted else WAITING
 
 
-def read_policies(path: Path, limit: int, mode: str = PAPER) -> dict[str, Any]:
+def read_policies(path: Path, limit: int, mode: str | None = None) -> dict[str, Any]:
     """The last ``limit`` policy versions, newest first, each with its status (``status_of``) and
-    its paper record (#400, ``promotion.paper``), and every change of the champion, newest first:
-    ``GET /v1/trader/policies``. Read-only; none without the store or before the first policy."""
+    its record (#400, ``promotion.records``: ``mode``'s, by default the mode the trader last started
+    in, #405), and every change of the champion, newest first: ``GET /v1/trader/policies``.
+    Read-only; none without the store or before the first policy."""
     from krx_quant.trader import promotion  # it imports this module
 
     if not path.exists():

@@ -17,8 +17,14 @@ by the nightly re-fit (#399, from the engine's container).
   the P&L before and after them, in won;
 - ``orders``: each order of a trade (the entry's buy, the take-profit's sell resting at the
   target, the stop's or the time exit's sell), its limit, quantity and status (open, filled,
-  cancelled), and the broker's order number (none in paper);
-- ``fills``: each order's fills, with the quote a paper fill was made on;
+  cancelled), and the broker's order, its number and branch (#405: KIS's, in mock; none in paper).
+  A mock sale may take several sells at the best bid (``mock.py``), each its own order;
+- ``fills``: each order's fills, with the quote a paper fill was made on (none in mock: a mock
+  fill is KIS's, at its average price ``avg_prvs``, as the day's order inquiry shows it);
+- ``unfilled_buys`` (#405): each mock buy KIS took of which nothing filled (no trade opened), with
+  KIS's order, so that the ledger holds every order KIS has;
+- ``failures`` (#405): each KIS order of mock mode that failed (refused, its outcome unknown, or
+  an error before it was sent), which stops new entries for the rest of that day (``limits.py``);
 - ``policies`` and ``champions`` (#399, ``policy.py``): each policy version and each change of the
   champion, written by the nightly re-fit (``refit.py``) and its promotion (#400,
   ``promotion.py``); a pick and a trade carry the policy version they were made under
@@ -35,13 +41,15 @@ by the nightly re-fit (#399, from the engine's container).
 - ``days`` (#396): each trading day's ledger by mode: the net P&L realized, the trades, the day's
   and the cumulative P&L at their lowest, the limits, the status and the limit reached.
 
-Every row carries its mode (``paper``): paper, KIS mock and live trades are told apart in the
-same tables (a pause and a resume hold whatever the mode). The trader writes it, and the nightly
-re-fit its policies; the Engine API reads it read-only (``read_trades``, ``read_trader``,
-``read_days``, ``policy.read_policies``) and writes a pause into it (``request_pause``), and
-``krx-quant trade resume|rearm`` a resume or a re-arm: nothing else. Times are ISO 8601 strings in
-KST, which sort in time order. The columns #395, #399 and #400 added (``_ADDED``) are added to a
-store made before them, null in its rows.
+Every row carries its mode (``paper``, ``mock``): paper, KIS mock and live trades are told apart in
+the same tables (a pause and a resume hold whatever the mode). The records (``policy_days`` and the
+policies' trades' P&L) are paper's whatever the mode (``promotion.records_of``, #405: in mock mode
+the champion's paper shadow keeps the champion's, ``shadow`` 1). The trader writes it, and the
+nightly re-fit its policies; the Engine API reads it read-only (``read_trades``,
+``read_trader``, ``read_days``, ``policy.read_policies``) and writes a pause into it
+(``request_pause``), and ``krx-quant trade resume|rearm`` a resume or a re-arm: nothing else. Times
+are ISO 8601 strings in KST, which sort in time order. The columns #395, #399, #400 and #405 added
+(``_ADDED``) are added to a store made before them, null in its rows.
 """
 
 from __future__ import annotations
@@ -50,13 +58,15 @@ import json
 import sqlite3
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from krx_quant.feeds.base import KST
-from krx_quant.trader import policy, promotion
+from krx_quant.pricing import SELL_TAX
+from krx_quant.trader import MOCK, PAPER, policy, promotion
+from krx_quant.trader.gap import day_gap
 
 if TYPE_CHECKING:
     from krx_quant.trader.selection import Selection
@@ -161,6 +171,29 @@ CREATE TABLE IF NOT EXISTS fills (
     quote_at TEXT                      -- the quote a paper fill was made on
 );
 CREATE INDEX IF NOT EXISTS fills_by_order ON fills (order_id);
+CREATE TABLE IF NOT EXISTS unfilled_buys (  -- each mock buy KIS took of which nothing filled (#405)
+    id INTEGER PRIMARY KEY,
+    decision_id INTEGER NOT NULL REFERENCES decisions (id),
+    mode TEXT NOT NULL,
+    price REAL NOT NULL,               -- the limit
+    quantity INTEGER NOT NULL,
+    placed_at TEXT NOT NULL,
+    status TEXT NOT NULL,              -- cancelled; open when its cancel did not take; filled once it did
+    broker_id TEXT NOT NULL,           -- KIS's order number
+    broker_branch TEXT,
+    entry TEXT                         -- JSON: the trade it would open (its fill to come), while open
+);
+CREATE TABLE IF NOT EXISTS failures (   -- each KIS order of mock mode that failed (#405)
+    id INTEGER PRIMARY KEY,
+    at TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    day TEXT NOT NULL,                 -- the KST date: new entries stop for the rest of it
+    trade_id INTEGER REFERENCES trades (id),  -- the trade it was of; null for a buy that opened none
+    what TEXT NOT NULL,                -- buy, take_profit, cancel, sell, orderable
+    outcome TEXT NOT NULL,             -- refused, unknown (no answer: whether it went in is not known), error
+    code TEXT,                         -- KIS's msg_cd, when it answered
+    detail TEXT NOT NULL               -- why, as KIS said it (never an account or order number)
+);
 CREATE TABLE IF NOT EXISTS controls (   -- each pause, resume and re-arm asked for (#396)
     id INTEGER PRIMARY KEY,
     at TEXT NOT NULL,                  -- when it was asked for
@@ -223,6 +256,9 @@ _ADDED = {
     "decisions": (
         ("selection_id", "INTEGER REFERENCES selections (id)"),  # the pick in force; null: none yet
     ),
+    "orders": (
+        ("broker_branch", "TEXT"),  # the broker order's branch (#405: KRX_FWDG_ORD_ORGNO); null in paper
+    ),
     "trades": (
         ("selection_id", "INTEGER REFERENCES selections (id)"),
         ("role", "TEXT"),  # the predictor's on the cost map: consensus, top, baseline
@@ -234,6 +270,12 @@ _ADDED = {
         # 1: made by the champion's book, the trader's own; 0: a challenger's paper trade (#400); null:
         # before #400, when the champion's book was the only one.
         ("champion", "INTEGER"),
+        # 1: the champion's paper shadow's (#405: in mock mode, the champion policy's trade filled in
+        # paper beside its KIS orders, ``champion`` 0); null or 0 otherwise.
+        ("shadow", "INTEGER"),
+        # Why a mock trade's sale began (#405: stop_loss, time, pause, a limit), kept when it is
+        # decided so that a restart goes on selling; null until then.
+        ("selling", "TEXT"),
     ),
 }
 
@@ -243,6 +285,10 @@ _ADDED = {
 # ``GET /v1/trader/trades`` gives these unless asked for a policy's. The champion changes only after
 # the market (``promotion.in_market``), so a day's trades are all of one champion.
 CHAMPION_TRADE = "coalesce(t.champion, 1) = 1"
+# A trade ``t`` of the champion's paper shadow (#405): in mock mode, the champion policy's paper trade
+# beside the KIS orders. Not the trader's (``champion`` 0): no limit, chart or default trade list
+# counts it; its policy's paper record does (``promotion.records``).
+SHADOW_TRADE = "coalesce(t.shadow, 0) = 1"
 
 BUY, SELL = "buy", "sell"
 OPEN, FILLED, CANCELLED = "open", "filled", "cancelled"
@@ -296,8 +342,11 @@ class Entry:
     fraction: float | None = None
     # The policy version it was made under (#399); None before the first champion.
     policy_id: int | None = None
-    # Made by the champion's book (#400), the trader's own; False: a challenger's paper trade.
+    # Made by the champion's book (#400), the trader's own; False: a challenger's paper trade, or the
+    # shadow's (``shadow``).
     champion: bool = True
+    # The champion's paper shadow's (#405): the champion policy's paper trade in mock mode.
+    shadow: bool = False
 
 
 @dataclass(frozen=True)
@@ -311,11 +360,52 @@ class Exit:
 
 
 @dataclass(frozen=True)
+class Placed:
+    """An order as the broker took it (#405): its limit and quantity, and KIS's order (its branch and
+    number; None when KIS named none)."""
+
+    price: float
+    quantity: int
+    branch: str | None = None
+    number: str | None = None
+
+
+@dataclass(frozen=True)
+class Resting:
+    """A trade's sell order open on KIS (#405): the take-profit's resting at the target, or a sale's
+    whose cancel did not take; its row, KIS's order, what of it was kept filled."""
+
+    order_id: int
+    price: float
+    quantity: int
+    branch: str
+    number: str
+    filled: int
+    amount: float  # the fills kept of it, in won
+    purpose: str = "take_profit"  # take_profit, or a sale's (stop_loss, time, ...)
+    day: date | None = None  # the day it was placed: the day order inquiry that shows it
+
+
+@dataclass(frozen=True)
+class Failure:
+    """A KIS order that failed (#405)."""
+
+    id: int
+    at: datetime
+    mode: str
+    day: date
+    what: str
+    outcome: str
+    code: str | None
+    detail: str
+
+
+@dataclass(frozen=True)
 class OpenTrade:
     """A trade not exited yet, as kept: what a restarted trader goes on with."""
 
     id: int
-    take_profit_order: int
+    take_profit_order: int | None  # None: a mock trade whose take-profit sell KIS did not take (#405)
     entry_price: float
     quantity: int
     buy_fee: float
@@ -515,8 +605,8 @@ class TraderStore:
         assert cursor.lastrowid is not None
         return cursor.lastrowid
 
-    def unfilled(self, decision: int, reason: str) -> None:
-        """A buy decided that did not fill, and why."""
+    def unfilled(self, decision: int, reason: str | None) -> None:
+        """A buy decided that did not fill, and why (None: not given up, #405)."""
         with self._db:
             self._db.execute("UPDATE decisions SET reason = ? WHERE id = ?", (reason, decision))
 
@@ -536,43 +626,7 @@ class TraderStore:
         the target, in one transaction."""
         at = iso(entry.entry_at)
         with self._db:
-            cursor = self._db.execute(
-                "INSERT INTO trades (mode, symbol, kind, predictor, prediction_id, bar_close, probability,"
-                " threshold, anchor, tick, width_ticks, target, stop, time_barrier, decided_at, entry_at,"
-                " entry_price, quantity, buy_fee, selection_id, role, p_star, precision_low, kelly, fraction,"
-                f" policy_id, champion) VALUES ({', '.join('?' * 27)})",
-                (
-                    entry.mode,
-                    entry.symbol,
-                    entry.kind,
-                    entry.predictor,
-                    entry.prediction_id,
-                    iso(entry.bar_close),
-                    entry.probability,
-                    entry.threshold,
-                    entry.anchor,
-                    entry.tick,
-                    entry.width_ticks,
-                    entry.target,
-                    entry.stop,
-                    iso(entry.time_barrier),
-                    iso(entry.decided_at),
-                    at,
-                    entry.entry_price,
-                    entry.quantity,
-                    entry.buy_fee,
-                    entry.selection_id,
-                    entry.role,
-                    entry.p_star,
-                    entry.low,
-                    entry.kelly,
-                    entry.fraction,
-                    entry.policy_id,
-                    int(entry.champion),
-                ),
-            )
-            trade = cursor.lastrowid
-            assert trade is not None
+            trade = self._insert_trade(entry)
             bought = self._order(trade, entry.mode, BUY, ENTRY, entry.entry_price, entry.quantity, at)
             self._fill(bought, at, entry.entry_price, entry.quantity, entry.quote_at)
             resting = self._order(
@@ -600,6 +654,7 @@ class TraderStore:
         at = iso(out.at)
         with self._db:
             if out.reason == "take_profit":
+                assert trade.take_profit_order is not None, "a paper trade's take-profit rests from its entry"
                 sold = trade.take_profit_order
                 self._db.execute(
                     "UPDATE orders SET status = ?, closed_at = ? WHERE id = ?", (FILLED, at, sold)
@@ -621,16 +676,270 @@ class TraderStore:
                 (at, out.price, out.reason, out.sell_fee, out.tax, cost, gross, gross - cost, trade.id),
             )
 
-    def open_trade(self, mode: str, challenger: int | None = None) -> OpenTrade | None:
+    # Mock trades (#405): each order as KIS took it, each fill as its order inquiry showed it.
+
+    def open_position(self, decision: int, entry: Entry, buy: Placed, status: str | None = None) -> OpenTrade:
+        """A mock buy filled (``entry``: the fills' average price and quantity): its trade, the buy's
+        order as KIS took it (filled whole, or cancelled for the rest; ``status`` open when its cancel
+        did not take, followed until it settles: ``grow_position``, ``close_entry``) and its fill, in
+        one transaction. Its take-profit sell is added once KIS takes it (``add_order``)."""
+        at = iso(entry.entry_at)
+        status = status or (FILLED if entry.quantity >= buy.quantity else CANCELLED)
+        with self._db:
+            trade = self._insert_trade(entry)
+            bought = self._order(trade, entry.mode, BUY, ENTRY, buy.price, buy.quantity, at, status)
+            self._db.execute(
+                "UPDATE orders SET closed_at = ?, broker_id = ?, broker_branch = ? WHERE id = ?",
+                (None if status == OPEN else at, buy.number, buy.branch, bought),
+            )
+            self._db.execute(
+                "INSERT INTO fills (order_id, at, price, quantity) VALUES (?, ?, ?, ?)",
+                (bought, at, entry.entry_price, entry.quantity),
+            )
+            self._db.execute("UPDATE decisions SET trade_id = ? WHERE id = ?", (trade, decision))
+        return OpenTrade(
+            trade,
+            None,
+            entry.entry_price,
+            entry.quantity,
+            entry.buy_fee,
+            entry.target,
+            entry.stop,
+            entry.time_barrier,
+            entry.kind,
+            entry.predictor,
+            entry.bar_close,
+            entry.entry_at,
+        )
+
+    def add_order(
+        self, trade: int, side: str, purpose: str, placed: Placed, at: datetime, status: str = OPEN
+    ) -> int:
+        """An order of ``trade`` as KIS took it (#405); a closed one is closed at ``at``."""
+        when = iso(at)
+        with self._db:
+            order = self._order(
+                trade, self._mode(trade), side, purpose, placed.price, placed.quantity, when, status
+            )
+            self._db.execute(
+                "UPDATE orders SET closed_at = ?, broker_id = ?, broker_branch = ? WHERE id = ?",
+                (None if status == OPEN else when, placed.number, placed.branch, order),
+            )
+        return order
+
+    def add_fill(self, order: int, at: datetime, price: float, quantity: int) -> None:
+        """A fill of ``order`` as KIS's order inquiry showed it (#405): its average price."""
+        with self._db:
+            self._db.execute(
+                "INSERT INTO fills (order_id, at, price, quantity) VALUES (?, ?, ?, ?)",
+                (order, iso(at), price, quantity),
+            )
+
+    def close_order(self, order: int, status: str, at: datetime) -> None:
+        with self._db:
+            self._db.execute(
+                "UPDATE orders SET status = ?, closed_at = ? WHERE id = ?", (status, iso(at), order)
+            )
+
+    def open_sells(self, trade: int) -> list[Resting]:
+        """``trade``'s sell orders still open on KIS (#405), oldest first: its take-profit sell resting
+        at the target, and a sale's sell whose cancel did not take; each with what of it was kept
+        filled."""
+        rows = self._db.execute(
+            "SELECT o.*, coalesce(sum(f.quantity), 0) AS kept,"
+            " coalesce(sum(f.price * f.quantity), 0) AS amount"
+            " FROM orders o LEFT JOIN fills f ON f.order_id = o.id WHERE o.trade_id = ? AND o.side = ?"
+            " AND o.status = ? AND o.broker_id IS NOT NULL GROUP BY o.id ORDER BY o.id",
+            (trade, SELL, OPEN),
+        )
+        return [
+            Resting(
+                r["id"],
+                r["price"],
+                r["quantity"],
+                r["broker_branch"] or "",
+                r["broker_id"],
+                int(r["kept"]),
+                float(r["amount"]),
+                r["purpose"],
+                date.fromisoformat(r["placed_at"][:10]),
+            )
+            for r in rows
+        ]
+
+    def begin_sale(self, trade: int, reason: str) -> None:
+        """Why ``trade``'s sale began (#405), kept when it is decided: a restart goes on selling it
+        though none of its sells is open (each cancelled, or refused)."""
+        with self._db:
+            self._db.execute(
+                "UPDATE trades SET selling = ? WHERE id = ? AND selling IS NULL", (reason, trade)
+            )
+
+    def sale_begun(self, trade: int) -> str | None:
+        """Why ``trade``'s sale began (``begin_sale``), if it did."""
+        row = self._db.execute("SELECT selling FROM trades WHERE id = ?", (trade,)).fetchone()
+        return None if row is None or row[0] is None else str(row[0])
+
+    def resting(self, trade: int) -> Resting | None:
+        """``trade``'s take-profit sell resting on KIS (#405), if one is."""
+        return next((o for o in self.open_sells(trade) if o.purpose == "take_profit"), None)
+
+    def sells(self, trade: int) -> tuple[int, float]:
+        """The shares of ``trade`` sold so far and what they brought, in won: its sell orders' fills."""
+        row = self._db.execute(
+            "SELECT coalesce(sum(f.quantity), 0), coalesce(sum(f.price * f.quantity), 0) FROM fills f"
+            " JOIN orders o ON o.id = f.order_id WHERE o.trade_id = ? AND o.side = ?",
+            (trade, SELL),
+        ).fetchone()
+        return int(row[0]), float(row[1])
+
+    def sold(self, trade: int) -> int:
+        """The shares of ``trade`` sold so far."""
+        return self.sells(trade)[0]
+
+    def add_unfilled_buy(
+        self, decision: int, mode: str, placed: Placed, at: datetime, status: str, entry: Entry | None = None
+    ) -> int:
+        """A mock buy KIS took of which nothing filled (#405): no trade, but the ledger keeps every
+        order KIS has (``mock_check``). ``status`` is cancelled, or open when its cancel did not take
+        (followed: ``close_unfilled_buy``), kept with the trade it would open (``entry``) for a
+        restart to follow it (``open_unfilled_buy``). Its row."""
+        with self._db:
+            cursor = self._db.execute(
+                "INSERT INTO unfilled_buys (decision_id, mode, price, quantity, placed_at, status, broker_id,"
+                " broker_branch, entry) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (decision, mode, placed.price, placed.quantity, iso(at), status, placed.number)
+                + (placed.branch, None if entry is None else _entry_json(entry)),
+            )
+        assert cursor.lastrowid is not None
+        return cursor.lastrowid
+
+    def open_unfilled_buy(self, mode: str) -> tuple[int, int, Placed, date, Entry] | None:
+        """``mode``'s buy of which nothing filled, still open on KIS (#405): its row, its decision, its
+        order, its day, the trade it would open. None without one."""
+        row = self._db.execute(
+            "SELECT * FROM unfilled_buys WHERE mode = ? AND status = ? AND entry IS NOT NULL"
+            " ORDER BY id DESC LIMIT 1",
+            (mode, OPEN),
+        ).fetchone()
+        if row is None:
+            return None
+        placed = Placed(row["price"], row["quantity"], row["broker_branch"], row["broker_id"])
+        day = date.fromisoformat(row["placed_at"][:10])
+        return row["id"], row["decision_id"], placed, day, _entry_of(row["entry"])
+
+    def close_unfilled_buy(self, row: int, status: str) -> None:
+        """An unfilled buy followed (#405) settled: cancelled with nothing filled, or ``filled`` once
+        something did (its trade then holds the order: ``open_position``)."""
+        with self._db:
+            self._db.execute("UPDATE unfilled_buys SET status = ? WHERE id = ?", (status, row))
+
+    def grow_position(
+        self, trade: int, quantity: int, price: float, buy_fee: float, fill: tuple[datetime, float, int]
+    ) -> None:
+        """More of a mock trade's buy filled after its cancel failed (#405): the trade's shares, entry
+        price and commission the buy's fills now, and the new fill (when, its average, how many) kept
+        on its entry order."""
+        at, fill_price, fill_quantity = fill
+        with self._db:
+            self._db.execute(
+                "UPDATE trades SET quantity = ?, entry_price = ?, buy_fee = ? WHERE id = ?",
+                (quantity, price, buy_fee, trade),
+            )
+            self._db.execute(
+                "INSERT INTO fills (order_id, at, price, quantity) SELECT id, ?, ?, ? FROM orders"
+                " WHERE trade_id = ? AND purpose = ? ORDER BY id LIMIT 1",
+                (iso(at), fill_price, fill_quantity, trade, ENTRY),
+            )
+
+    def close_entry(self, trade: int, status: str, at: datetime) -> None:
+        """A mock trade's buy settled (#405): filled whole, or cancelled for the rest."""
+        with self._db:
+            self._db.execute(
+                "UPDATE orders SET status = ?, closed_at = ? WHERE trade_id = ? AND purpose = ?",
+                (status, iso(at), trade, ENTRY),
+            )
+
+    def open_entry(self, trade: int) -> tuple[Placed, int, float, date] | None:
+        """A mock trade's buy still open on KIS (#405): its order, what of it filled and for how much,
+        its day; None once it settled."""
+        row = self._db.execute(
+            "SELECT o.*, coalesce(sum(f.quantity), 0) AS kept,"
+            " coalesce(sum(f.price * f.quantity), 0) AS amount"
+            " FROM orders o LEFT JOIN fills f ON f.order_id = o.id WHERE o.trade_id = ? AND o.purpose = ?"
+            " AND o.status = ? AND o.broker_id IS NOT NULL GROUP BY o.id",
+            (trade, ENTRY, OPEN),
+        ).fetchone()
+        if row is None or row["id"] is None:
+            return None
+        placed = Placed(row["price"], row["quantity"], row["broker_branch"], row["broker_id"])
+        return placed, int(row["kept"]), float(row["amount"]), date.fromisoformat(row["placed_at"][:10])
+
+    def exit_on_fills(self, trade: OpenTrade, at: datetime, reason: str, fee_rate: float) -> float:
+        """A mock trade's exit (#405), once its sells' fills hold every share: its price their average,
+        its costs on their notional (the commission ``fee_rate`` a side and the sell tax), its P&L. The
+        net, in won."""
+        row = self._db.execute(
+            "SELECT coalesce(sum(f.quantity), 0), coalesce(sum(f.price * f.quantity), 0) FROM fills f"
+            " JOIN orders o ON o.id = f.order_id WHERE o.trade_id = ? AND o.side = ?",
+            (trade.id, SELL),
+        ).fetchone()
+        quantity, amount = int(row[0]), float(row[1])
+        if quantity != trade.quantity:
+            raise ValueError(f"trade {trade.id}: {quantity} of its {trade.quantity} shares sold")
+        price = amount / quantity
+        sell_fee, tax = amount * fee_rate, amount * SELL_TAX
+        gross = amount - trade.entry_price * trade.quantity
+        cost = trade.buy_fee + sell_fee + tax
+        with self._db:
+            self._db.execute(
+                "UPDATE trades SET exit_at = ?, exit_price = ?, exit_reason = ?, sell_fee = ?, tax = ?,"
+                " cost = ?, gross = ?, net = ? WHERE id = ?",
+                (iso(at), price, reason, sell_fee, tax, cost, gross, gross - cost, trade.id),
+            )
+        return gross - cost
+
+    def add_failure(
+        self,
+        at: datetime,
+        mode: str,
+        what: str,
+        outcome: str,
+        detail: str,
+        code: str | None = None,
+        trade: int | None = None,
+    ) -> Failure:
+        day = at.astimezone(KST).date()
+        with self._db:
+            cursor = self._db.execute(
+                "INSERT INTO failures (at, mode, day, trade_id, what, outcome, code, detail)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (iso(at), mode, day.isoformat(), trade, what, outcome, code, detail),
+            )
+        assert cursor.lastrowid is not None
+        return Failure(cursor.lastrowid, at, mode, day, what, outcome, code, detail)
+
+    def failure(self, mode: str, day: date) -> Failure | None:
+        """``mode``'s first failed order of ``day`` (#405): new entries stop for the rest of it."""
+        row = self._db.execute(
+            "SELECT * FROM failures WHERE mode = ? AND day = ? ORDER BY id LIMIT 1", (mode, day.isoformat())
+        ).fetchone()
+        return None if row is None else _failure(row)
+
+    def open_trade(self, mode: str, challenger: int | None = None, shadow: bool = False) -> OpenTrade | None:
         """``mode``'s trade of the champion (``CHAMPION_TRADE``) not exited yet, if any (one position
-        at a time); with ``challenger``, that challenger's paper trade not exited (#400)."""
+        at a time); with ``challenger``, that challenger's paper trade not exited (#400); with
+        ``shadow``, the champion's paper shadow's (#405, ``SHADOW_TRADE``)."""
         params: tuple[Any, ...]
-        if challenger is None:
+        if shadow:
+            whose, params = SHADOW_TRADE, (mode,)
+        elif challenger is None:
             whose, params = CHAMPION_TRADE, (mode,)
         else:
-            whose, params = "t.policy_id = ? AND t.champion = 0", (mode, challenger)
+            whose = f"t.policy_id = ? AND t.champion = 0 AND NOT {SHADOW_TRADE}"
+            params = (mode, challenger)
         row = self._db.execute(
-            "SELECT t.*, o.id AS resting FROM trades t JOIN orders o ON o.trade_id = t.id"
+            "SELECT t.*, o.id AS resting FROM trades t LEFT JOIN orders o ON o.trade_id = t.id"
             " AND o.purpose = 'take_profit' AND o.status = 'open'"
             f" WHERE t.mode = ? AND t.exit_at IS NULL AND {whose} ORDER BY t.id DESC LIMIT 1",
             params,
@@ -657,7 +966,7 @@ class TraderStore:
         its exit), whose books go on with it."""
         rows = self._db.execute(
             "SELECT DISTINCT t.policy_id FROM trades t WHERE t.mode = ? AND t.exit_at IS NULL"
-            " AND t.policy_id IS NOT NULL AND t.champion = 0 ORDER BY t.policy_id",
+            f" AND t.policy_id IS NOT NULL AND t.champion = 0 AND NOT {SHADOW_TRADE} ORDER BY t.policy_id",
             (mode,),
         )
         return [int(r[0]) for r in rows]
@@ -675,6 +984,17 @@ class TraderStore:
                 " updated_at = excluded.updated_at",
                 (mode, policy_id, day.isoformat(), int(champion), int(stopped), iso(at)),
             )
+
+    def paper_account(self) -> float:
+        """The net P&L of the champion's paper book (#405): its paper trades exited, the champion's
+        book's in paper mode and its shadow's in mock mode. What the shadow and the challengers size
+        on in mock mode, never the KIS fills."""
+        row = self._db.execute(
+            "SELECT coalesce(sum(net), 0) FROM trades t WHERE mode = ? AND exit_at IS NOT NULL"
+            f" AND ({CHAMPION_TRADE} OR {SHADOW_TRADE})",
+            (PAPER,),
+        ).fetchone()
+        return float(row[0])
 
     def realized(self, mode: str, since: datetime | None) -> tuple[float, int]:
         """The net P&L of ``mode``'s trades exited at or after ``since`` (all if None), and how many:
@@ -794,6 +1114,47 @@ class TraderStore:
         ).fetchone()
         return None if row is None else dict(row)
 
+    def _insert_trade(self, entry: Entry) -> int:
+        """``entry``'s row in ``trades``, inside the caller's transaction."""
+        cursor = self._db.execute(
+            "INSERT INTO trades (mode, symbol, kind, predictor, prediction_id, bar_close, probability,"
+            " threshold, anchor, tick, width_ticks, target, stop, time_barrier, decided_at, entry_at,"
+            " entry_price, quantity, buy_fee, selection_id, role, p_star, precision_low, kelly, fraction,"
+            f" policy_id, champion, shadow) VALUES ({', '.join('?' * 28)})",
+            (
+                entry.mode,
+                entry.symbol,
+                entry.kind,
+                entry.predictor,
+                entry.prediction_id,
+                iso(entry.bar_close),
+                entry.probability,
+                entry.threshold,
+                entry.anchor,
+                entry.tick,
+                entry.width_ticks,
+                entry.target,
+                entry.stop,
+                iso(entry.time_barrier),
+                iso(entry.decided_at),
+                iso(entry.entry_at),
+                entry.entry_price,
+                entry.quantity,
+                entry.buy_fee,
+                entry.selection_id,
+                entry.role,
+                entry.p_star,
+                entry.low,
+                entry.kelly,
+                entry.fraction,
+                entry.policy_id,
+                int(entry.champion),
+                int(entry.shadow),
+            ),
+        )
+        assert cursor.lastrowid is not None
+        return cursor.lastrowid
+
     def _mode(self, trade: int) -> str:
         mode: str = self._db.execute("SELECT mode FROM trades WHERE id = ?", (trade,)).fetchone()[0]
         return mode
@@ -842,6 +1203,34 @@ def _control(row: sqlite3.Row) -> Control:
     )
 
 
+# An Entry's times, as ISO strings in its JSON (``_entry_json``).
+_ENTRY_TIMES = ("bar_close", "time_barrier", "decided_at", "entry_at", "quote_at")
+
+
+def _entry_json(entry: Entry) -> str:
+    fields = asdict(entry)
+    return json.dumps({k: iso(v) if k in _ENTRY_TIMES else v for k, v in fields.items()})
+
+
+def _entry_of(text: str) -> Entry:
+    fields: dict[str, Any] = json.loads(text)
+    times: dict[str, Any] = {k: datetime.fromisoformat(fields[k]) for k in _ENTRY_TIMES}
+    return Entry(**(fields | times))
+
+
+def _failure(row: sqlite3.Row) -> Failure:
+    return Failure(
+        row["id"],
+        datetime.fromisoformat(row["at"]),
+        row["mode"],
+        date.fromisoformat(row["day"]),
+        row["what"],
+        row["outcome"],
+        row["code"],
+        row["detail"],
+    )
+
+
 def _halt(row: sqlite3.Row) -> Halt:
     return Halt(
         row["id"],
@@ -870,9 +1259,10 @@ def request_pause(path: Path, sell_now: bool, at: datetime) -> dict[str, Any]:
 def read_trader(path: Path | None, now: datetime) -> dict[str, Any]:
     """``GET /v1/trader`` (#396): the trader's state as it last wrote it, whether it is running
     (that state at most ``ALIVE_SECONDS`` old at ``now``), and the last controls asked for, newest
-    first (those not read yet with ``applied_at`` null); the champion, the live gate on its paper
-    record and the policies running with theirs (#400, ``promotion.progress``). Its fields null
-    without a store (an engine without a state folder, a trader not started yet)."""
+    first (those not read yet with ``applied_at`` null); the champion, the live gate on its record
+    and the policies running with theirs (#400, ``promotion.progress``), in the mode it runs in
+    (#405). Its fields null without a store (an engine without a state folder, a trader not started
+    yet)."""
     body: dict[str, Any] = dict.fromkeys(TRADER_FIELDS)
     body |= {"updated_at": None, "alive": False, "controls": []}
     body |= {"champion": None, "gate": promotion.gate(None, None).as_json(), "policies": []}
@@ -881,7 +1271,6 @@ def read_trader(path: Path | None, now: datetime) -> dict[str, Any]:
     with _reading(path) as db:
         if db is None:
             return body
-        body |= promotion.progress(db)
         tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
         if "snapshot" in tables:
             row = db.execute("SELECT at, body FROM snapshot WHERE id = 1").fetchone()
@@ -891,6 +1280,8 @@ def read_trader(path: Path | None, now: datetime) -> dict[str, Any]:
                 body |= {k: written.get(k) for k in TRADER_FIELDS}
                 body["updated_at"] = iso(updated)
                 body["alive"] = abs((now - updated).total_seconds()) <= ALIVE_SECONDS
+        # The records of the mode it runs in (#405): its state's, else the mode it last started in.
+        body |= promotion.progress(db, body["mode"])
         if "controls" in tables:
             rows = db.execute("SELECT * FROM controls ORDER BY id DESC LIMIT ?", (CONTROLS_SHOWN,))
             body["controls"] = [_control(r).as_json() for r in rows]
@@ -914,7 +1305,8 @@ TRADER_FIELDS = (
 
 def read_days(path: Path, since: date, to: date) -> list[dict[str, Any]]:
     """``GET /v1/trader/days`` (#396): each day's ledger from ``since`` to ``to`` (both included),
-    oldest first, each mode's."""
+    oldest first, each mode's; a mock day's with its gap to the champion's paper shadow (#405,
+    ``gap.day_gap``), null on the others."""
     with _reading(path) as db:
         if db is None:
             return []
@@ -927,7 +1319,11 @@ def read_days(path: Path, since: date, to: date) -> list[dict[str, Any]]:
             "SELECT * FROM days WHERE day >= ? AND day <= ? ORDER BY day, mode",
             (since.isoformat(), to.isoformat()),
         ).fetchall()
-    return [_day_json(dict(r)) for r in rows]
+        return [
+            _day_json(dict(r))
+            | {"gap": day_gap(db, date.fromisoformat(r["day"])) if r["mode"] == MOCK else None}
+            for r in rows
+        ]
 
 
 def _used(worst: float, limit: float) -> float:
@@ -1046,6 +1442,7 @@ def _trade_json(
         "fraction": row["fraction"],
         "policy": row.get("policy_id"),  # a store the trader has not opened since #399: none
         "champion": bool(row["by_champion"]),  # the champion's (#400): the trader's, which the limits hold
+        "shadow": bool(row.get("shadow")),  # the champion's paper shadow's (#405, mock mode)
         "anchor": row["anchor"],
         "tick": row["tick"],
         "width_ticks": row["width_ticks"],

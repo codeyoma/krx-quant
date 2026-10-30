@@ -1330,10 +1330,10 @@ KRX 마감 흐름 화면이 읽는 그날의 마감 리밸런싱 수요다(`clos
 
 (값은 지어낸 예다.)
 
-- `mode`: `paper`(모의). `mock`·`live`는 KIS 주문 모듈이 들어온 뒤의 값이다(#404–#408).
+- `mode`: `paper`(모의) 또는 `mock`(KIS 모의투자, #405). `live`는 #408의 값이다. **바뀜** (2026-10-30, #422): `paper`뿐이었다 → `mock`이 들어왔다. 이유: #405.
 - `kind`, `predictor`: 매매한 칸. 비용 지도가 고른 칸이다(#395, 설계 14장 "칸"). `prediction_id`는 엔진 DB의 예측 id다(방향은 `predictions.id`, 다른 종류는 `kind_predictions.id`). `probability`는 그 예측의 오름 확률(방향 `p_up`, 장벽 `p_up_first`), `threshold`는 그때의 문턱 θ다(챔피언 정책이 그 칸에 정한 θ, 첫 챔피언 전에는 `KRX_TRADER_THRESHOLD`, #399).
 - `policy`(#399): 그 매매를 낸 정책 버전(`GET /v1/trader/policies`의 `version`). 첫 챔피언 전에 진입한 매매와 #399 전의 매매는 `null`이다.
-- `champion`(#400): 챔피언의 장부가 낸 매매면 참(trader의 매매: 한도가 세고 차트가 표시한다), 도전 정책의 모의 매매면 거짓. 첫 챔피언 전의 매매와 #400 전의 매매는 참이다.
+- `champion`(#400): 챔피언의 장부가 낸 매매면 참(trader의 매매: 한도가 세고 차트가 표시한다), 도전 정책의 모의 매매면 거짓. 첫 챔피언 전의 매매와 #400 전의 매매는 참이다. `shadow`(#405): mock 모드에서 챔피언 정책의 그림자 장부가 모의 체결한 매매면 참(`mode` `paper`, `champion` 거짓). 그 정책의 모의 기록이고 trader의 매매가 아니어서, 정책을 묻지 않은 목록(`policy` 없이)에는 나오지 않는다. `?policy=N`으로 물으면 그 정책의 KIS 모의 매매, 그림자 매매, 도전 정책이었을 때의 매매가 함께 나온다.
 - `role`, `p_star`, `precision_low`, `kelly`, `fraction`(#395): 그 칸을 고를 때의 비용 지도(`GET /v1/cost-map`, 005930, 20일)에서 온 값이다. `role`은 예측자의 자리(`consensus` 최종 합의, `top` 순위 1위 알고리즘, `baseline` 가장 센 기준 예측), `p_star`는 시장가 왕복의 손익분기 맞힘률, `precision_low`는 그 칸의 맞힘률 하한(Wilson 95%), `kelly`는 그 둘과 줄의 W·C로 낸 Kelly f*(자르기 전), `fraction`은 산 비율(f*의 λ배를 0–1로 자른 것. λ는 챔피언 정책이 그 칸에 정한 Kelly 비율, 첫 챔피언 전에는 0.5, #399)이다. #395 전에 진입한 매매는 다섯 다 `null`이다.
 
   > **바뀜** (2026-10-30, #414): `fraction`은 f*의 절반, `threshold`는 `KRX_TRADER_THRESHOLD`였다 → 챔피언 정책의 그 칸의 λ × f*와 θ다(첫 챔피언 전에는 그대로). `policy`가 더해졌다. 이유: 정책 버전과 밤 맞추기(#399).
@@ -1343,7 +1343,7 @@ KRX 마감 흐름 화면이 읽는 그날의 마감 리밸런싱 수요다(`clos
 > **바뀜** (2026-10-30, #412): `entry.quantity`는 운용 상한 ÷ 매도 1호가의 내림이었다 → `fraction` × 운용 상한 ÷ 매도 1호가의 내림이고, `decided_at`은 읽은 때였다 → 정한 때(순위가 높은 칸을 기다리면 그 뒤). `role`, `p_star`, `precision_low`, `kelly`, `fraction`이 더해졌다. 이유: 칸을 비용 지도로 고르고, 순위와 분할 Kelly 크기를 쓴다(#395).
 - `exit`: 청산 시각·가격·이유(`take_profit`: 목표가에, `stop_loss`: 그때의 매수 1호가에, `time`: 시간 장벽 직전 호가의 매수 1호가에, #396의 `pause`: "정지하고 즉시 매도" 뒤 처음 받은 호가의 매수 1호가에, `daily_limit`·`cumulative_limit`: 손실 한도에 닿은 호가(또는 그 뒤 처음 받은 호가)의 매수 1호가에). 열려 있으면 `null`이고, 그때 `sell_fee`, `tax`, `cost`, `gross`, `net`도 `null`이다. 시간 청산의 `exit.at`이 `time_barrier`보다 늦으면 장벽 앞 5초 안에 호가가 없어(스트림이 끊겼거나 trader가 멈춰 있었다) 다음 호가에 판 것이다.
 - `buy_fee`, `sell_fee`, `tax`, `cost`, `gross`, `net`: 원. 수수료는 산 금액과 판 금액에 각각 `KRX_FEE_PERCENT`, 매도세는 판 금액에 `pricing.SELL_TAX`. `gross` = (매도가 − 매수가) × 수량, `net` = `gross` − `cost`.
-- `orders`: 그 매매의 주문, 낸 순서대로. 매수(`entry`), 목표가에 걸어 둔 매도(`take_profit`: 익절이면 `filled`, 손절·시간·정지·한도면 `cancelled`), 손절·시간·정지·한도의 매도(`stop_loss`, `time`, `pause`, `daily_limit`, `cumulative_limit`). `broker_id`는 증권사 주문 번호(모의는 `null`). `fills`의 `quote_at`은 모의 체결이 쓴 호가의 받은 시각이다.
+- `orders`: 그 매매의 주문, 낸 순서대로. 매수(`entry`), 목표가에 걸어 둔 매도(`take_profit`: 익절이면 `filled`, 손절·시간·정지·한도면 `cancelled`), 손절·시간·정지·한도의 매도(`stop_loss`, `time`, `pause`, `daily_limit`, `cumulative_limit`). `broker_id`는 증권사 주문 번호(모의는 `null`, mock은 KIS의 주문 번호, #405). `fills`의 `quote_at`은 모의 체결이 쓴 호가의 받은 시각이다(mock은 `null`: 체결은 KIS 주문 체결 조회의 평균가와 수량이다). mock의 매매는 일부만 체결된 주문(남은 것을 취소해 `cancelled`인데 체결이 있다)과, 한 번의 팔기에 매도 주문 여럿(같은 목적, 매수 1호가로 다시 낸 것)을 가질 수 있다. 그 매매의 `exit.price`는 매도 체결들의 평균이다.
 - 데모 엔진의 매매는 아래 `trader-marks`의 것과 같다. 10-07 밤에 맞춘 정책 1이 첫 챔피언이라, 10-08부터의 매매는 `policy`가 1이고 칸의 값이 있다(지어낸 값: `role` `top`, `p_star` 0.61, `precision_low` 0.66, `kelly` 9.6, `fraction` 1.0, `threshold` 0.6). 10-07의 매매는 첫 챔피언 전이고 칸 고르기(#395) 전에 들어간 매매라 넷 다 `null`이다. `policy=2`는 10-08 밤에 맞춘 도전 정책 2가 10-12 아침에 모의로 낸 매매 둘(`threshold` 0.65)이다(#400). 기본 답(챔피언의 매매)에는 없다.
 
   > **바뀜** (2026-10-30, #415): 데모의 매매는 모두 칸의 값(`role`, `p_star`, `precision_low`, `kelly`, `fraction`)과 정책이 `null`이었고 정책도 없었다 → 정책 1(챔피언)과 2(도전 정책)가 있고, 10-08부터의 매매는 정책 1의 것으로 지어낸 칸의 값이 있으며, 도전 정책의 모의 매매도 있다. 이유: 자동 매매 화면(#397)의 매매 표가 p*와 하한을 보이고, 데모의 `GET /v1/trader`가 챔피언과 관문 진행(#400)을 보이게.
@@ -1384,9 +1384,9 @@ KRX 마감 흐름 화면이 읽는 그날의 마감 리밸런싱 수요다(`clos
 (값은 지어낸 예다.)
 
 - `updated_at`: trader가 상태를 마지막으로 쓴 때. `alive`: 그것이 엔진의 지금과 15초 안이면 참이다(trader가 돈다). 거짓이면 아래 값은 trader가 멈추기 전의 것이다.
-- `mode`: `paper`. `status`: `running`(돈다), `entries_paused`(새 진입 정지), `paused`(정지하고 즉시 매도), `daily_limit`(하루 손실 한도로 오늘 멈춤), `cumulative_limit`(누적 손실 한도로 `rearm`까지 멈춤). 여럿이 맞으면 `cumulative_limit`, `daily_limit`, `paused`, `entries_paused` 순서로 앞의 것이다. `started_at`: 이번 시작.
+- `mode`: `paper` 또는 `mock`(#405). `status`: `running`(돈다), `entries_paused`(새 진입 정지), `paused`(정지하고 즉시 매도), `order_failed`(mock에서 KIS 주문이 실패해 오늘은 새로 사지 않음, #405), `daily_limit`(하루 손실 한도로 오늘 멈춤), `cumulative_limit`(누적 손실 한도로 `rearm`까지 멈춤). 여럿이 맞으면 `cumulative_limit`, `daily_limit`, `paused`, `entries_paused`, `order_failed` 순서로 앞의 것이다. `champion`·`gate`·`policies`는 어느 모드에서도 paper의 기록이다(mock에서는 챔피언의 그림자 장부의 것, #405). **바뀜** (2026-10-30, #422): `mode`는 `paper`뿐이었고 `order_failed`가 없었다 → mock과 그 주문 실패가 들어왔다. 이유: #405. `started_at`: 이번 시작.
 - `capital`: 운용 상한(원). `cash`: 주문 가능 현금(모의: 운용 상한 + 청산한 매매의 순손익 − 열린 포지션의 매수 금액과 수수료).
-- `position`: 열린 포지션, 없으면 `null`. `bid`·`bid_at`은 평가에 쓴 매수 1호가와 그 받은 시각(산 뒤의 호가가 아직 없으면 `null`), `unrealized`는 그 매수 1호가에 지금 팔면 받을 순손익(매수·매도 수수료와 매도세를 뺀다), `selling`은 정지·한도가 팔게 해서 다음 호가를 기다리는지다.
+- `position`: 열린 포지션, 없으면 `null`. `bid`·`bid_at`은 평가에 쓴 매수 1호가와 그 받은 시각(산 뒤의 호가가 아직 없으면 `null`), `unrealized`는 그 매수 1호가에 지금 팔면 받을 순손익(매수·매도 수수료와 매도세를 뺀다), `selling`은 정지·한도가 팔게 해서 다음 호가를 기다리는지, mock(#405)에서는 KIS에 팔고 있는지(손절·시간·정지·한도의 팔기가 시작됐다)다. mock의 `unrealized`는 이미 판 몫(익절 매도의 일부 체결, 팔고 있는 매도)을 그 체결 금액으로, 남은 주식만 그 매수 1호가로 센다.
 - `today`: 그날(0시부터) 청산한 매매의 순손익(`realized`)과 수, 열린 포지션의 평가 손익, 그 합(`net`), 그날 합의 가장 낮은 값(`worst`, 0 이하). `cumulative`: 같은 것을 그 모드의 첫 시작부터, 다시 켰으면 그때부터(`since`).
 - `limits`: 하루·누적 손실 한도의 운용 상한 대비 비율(`percent`)과 원(`won`), 지금 손익이 쓰는 몫(`used`, 0이면 손실 없음, 1이면 한도), 지금 그 한도로 멈춰 있으면 닿은 때(`reached_at`).
 - `pause`: 지금 걸린 정지(처음 정지한 때, 즉시 매도인지, 누가), 없으면 `null`.
@@ -1415,6 +1415,7 @@ trader가 돈 거래일마다의 장부다. `from`부터 `to`까지(KST 날짜, 
 - `daily`: 그날 손익(실현 + 평가)의 가장 낮은 값(`worst`)과 그것이 하루 한도(`limit`, 원)에서 쓴 몫(`used`).
 - `cumulative`: 그날 마지막의 누적 손익(`net`), 그날 가장 낮았던 누적 손익(`worst`)과 그것이 누적 한도에서 쓴 몫.
 - `status`: 그날 마지막의 상태(`GET /v1/trader`의 `status`). `halt`: 그날 닿은 한도(`daily_limit`, `cumulative_limit`), 없으면 `null`. `updated_at`: 그날 장부를 마지막으로 쓴 때.
+- `gap`(#405): mock 날(`mode` `mock`)에 그날 들어간 챔피언의 KIS 모의 매매와 그 그림자 장부의 모의 매매의 차이. `mock`·`shadow`는 매매 수(`trades`)와 청산한 것의 순손익(`net`, 원), `difference`는 KIS − 그림자(원). `pairs`는 같은 예측(종류, 예측자, 봉 마감)끼리의 짝이다: `mock`·`shadow`(그 매매의 수량, 청산 이유, 순손익. 그 장부가 사지 않았으면 `null`), `entry_ticks`·`exit_ticks`(체결가 차이, KIS − 그림자, 그 매매의 틱으로. 진입은 양수면 KIS가 비싸게 샀고, 청산은 양수면 KIS가 비싸게 팔았다. 한쪽이 없거나 열려 있으면 `null`), `net_difference`(KIS − 그림자, 원). 다른 모드의 날과 두 장부 모두 매매가 없는 날은 `null`이다.
 - 데모 엔진(#397)에는 모의의 10-07·10-08·10-12(10:05에 실전으로 바뀔 때까지)와 실전의 10-12 장부가 있다. 10-08은 화면의 새 진입 정지로 `entries_paused`로 끝났다. 가장 낮은 손익(`worst`)은 trader처럼 매매를 든 동안 받은 호가마다의 평가로 센다: 10-07의 매매는 익절로 끝났지만 그 전에 −4,664원까지 내려갔다. 지난날의 `updated_at`은 trader가 날을 넘긴 그 밤 0시다.
 
 ### `POST /v1/trader/pause` (#396)
@@ -1494,7 +1495,7 @@ trader가 돈 거래일마다의 장부다. `from`부터 `to`까지(KST 날짜, 
 - `policies[].status`: `champion`(지금 챔피언), `former`(전에 챔피언이었다: 도전 정책에 진 뒤 더 돌지 않는다), `challenger`(자리 셋 가운데 하나를 받아 모의로 도는 도전 정책, 받은 때가 `admitted_at`: 오늘 밤 받은 것은 다음 거래일부터 돈다), `waiting`(자리가 차 있을 때 맞춰져 기다린다. 자리가 나면 가장 새 것부터 들어간다), `dropped`(함께 돈 거래일 20일까지 챔피언을 이기지 못해 내려진 것, 그때가 `dropped_at`. 다시 돌지 않는다). `admitted_at`은 자리를 받은 적이 없으면, `dropped_at`은 `dropped`가 아니면 `null`이다. 챔피언이나 도는 도전 정책과 값이 같은 맞추기는 저장하지 않아 여기 없다.
 
   > **바뀜** (2026-10-30, #416): "#399에서는 처음 것이 챔피언이고 나머지는 도전 정책이다" → 도전 정책은 자리 셋에서 모의로 돌고(`challenger`, 자리가 차면 `waiting`), 이기면 챔피언이 되며(`former`가 생긴다), 20일까지 이기지 못하면 `dropped`가 된다. 이유: #400. 넷째가 들어오면 가장 오래된 것을 내리면 어느 도전 정책도 10일을 채우지 못해서 자리를 기다리게 했다(Codex 리뷰).
-- `policies[].paper`(#400): 그 정책의 모의 기록(`GET /v1/trader`의 `policies[].paper`와 같다). 돈 적이 없으면 0일이다.
+- `policies[].paper`(#400): 그 정책의 모의 기록(`GET /v1/trader`의 `policies[].paper`와 같다). 돈 적이 없으면 0일이다. 어느 모드에서도 paper의 기록이다(mock에서 챔피언의 것은 그림자 장부의 것, #405).
 - `cells`: 매매하는 칸, 순위대로. `threshold`는 사는 오름 확률의 문턱 θ, `kelly_fraction`은 Kelly 비율 λ(산 비율 = λ × 그날 f*, 0–1로 자름). `fitted`는 그 밤에 무엇으로 맞췄는지다: 그 밤 비용 지도의 `p_star`, 맞힘률 하한 `low`, Kelly f* `kelly`와 그것으로 낸 비율 `fraction`, 맞춘 날(`days`), 읽은 예측 수(`read.read`)와 오름(`read.rises`)과 거른 이유별 수(`paper.plan`의 이유, `off_target`: 지금 정답으로 학습하지 않은 모델의 예측, `unpriced`: 경로에 손익을 셀 호가가 없음), 정책 전체 모의에서 그 칸의 매매 수·이익 낸 수·순손익(원)·로그 성장.
 - `left_out`: 비용 지도는 통과시켰지만 넣지 않은 칸과 이유. `few_trades`면 `most_trades`(어느 점에서도 모의 매매가 `min_trades`에 못 미침, 가장 많을 때의 수), `no_gain`이면 `best`(넣어도 정책의 로그 성장이 늘지 않음, 가장 나은 점과 그 결과).
 - `fit`: 비용 지도(`as_of`, `period`, 통과한 칸 수 `passed`), 격자(`thresholds`, `kelly_fractions`, 같을 때 고르는 기본값 `defaults`, 칸마다 최소 모의 매매 수 `min_trades`), 수수료율, 정책 전체의 모의 결과(`result`: 매매 수, 이익 낸 수, 순손익(원), 로그 성장, 매매한 날 수), 실행(`run`: 커밋, 걸린 초, 시작·최대·끝 RSS(MB), `peak_since`: `step`이면 최대가 맞추기 동안의 것, `start`면 프로세스 시작부터의 것).

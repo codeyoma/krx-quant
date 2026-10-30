@@ -12,6 +12,7 @@ The issue gets `ready-for-agent` only on a night that calls an agent. A report's
 | `하루 손실 한도에 닿음`, `누적 손실 한도에 닿음` | A loss limit stopped the trader that day. |
 | `첫 챔피언`, `챔피언 교체` | The policy the trader trades changed that night. |
 | `실전 관문을 넘음` | The champion's paper record passed the live gate that night. |
+| `KIS 주문 실패 N건(첫 실패 <time>)` | In mock mode (#405), a KIS order failed that day: refused, without an answer (its outcome unknown), or not sent. New entries stopped for the rest of the day. The report's limits section lists each one with KIS's code and message. |
 | `밤 정책 맞추기 실패`, or a non-zero exit code in the comment's heading | The night's work did not finish. |
 
 The job never takes a label off #417. Once you are done, remove `ready-for-agent` yourself.
@@ -28,11 +29,12 @@ gh api --paginate --slurp repos/codeyoma/krx-quant/issues/417/comments \
 Each report holds, in order:
 
 1. The day's ledger and the champion's trades: times, cell, probability and θ, p* and the hit rate's lower bound, shares, how each ended (`take_profit`, `stop_loss`, `time`, `pause`, `daily_limit`, `cumulative_limit`), the ticks between its fills, the costs and the net P&L in won. Then what the champion's book did with the predictions it read: bought, tried to buy (`target_reached`, `no_quote`, …), skipped (`not_up`, `below_threshold`, `holding`, `special`, …).
+   On a mock day (#405), then the KIS mock trades against the champion's paper shadow: each side's trades and net, the difference, and per prediction the entry and exit fill differences in ticks (KIS − shadow) and the net difference. The policies' records (3 and 5 below) are paper's in every mode: the shadow's for the champion in mock mode. A growing gap is execution, not the policy: it matters for the live mode (#408), not for a policy PR.
 2. The day's pick from the cost map. When no cell traded, every cell considered and its verdict (`fail`, `few`, `no row`, …).
 3. Each policy's paper record to that day and, for a challenger, where it stands against the champion: common days, mean difference, lower bound, verdict.
 4. What the night changed: the champion, challengers dropped and admitted, the policies fitted and their cells, the policies waiting, a re-fit that kept nothing or failed.
 5. The live gate: days, mean, lower bound.
-6. Limits, the halts that day, a cumulative halt still holding, the pause in force, the pauses, resumes and re-arms asked for.
+6. Limits, the halts that day, the failed KIS orders that day (mock, #405), a cumulative halt still holding, the pause in force, the pauses, resumes and re-arms asked for.
 7. The last five trading days' ledger.
 
 The comment shows no prices, account numbers, order numbers or keys. For more, see [server-logs.md](server-logs.md): the trader's lines are `{service="krx-quant", process="trader"}`, the night job's `{service="krx-quant", process="job"} |= "job=trader-report "`. For the server's state now, see [server-snapshot.md](server-snapshot.md).
@@ -48,7 +50,8 @@ The comment shows no prices, account numbers, order numbers or keys. For more, s
   - the cumulative limit holds: re-arming is the user's call (`krx-quant trade rearm` on the server);
   - the live gate passed: going live is the user's call and their steps (#408). Never treat a passed gate as permission;
   - a change would touch the limits, the capital, the modes, the live gate or the promotion rule;
-  - losses or halts recur and the evidence does not point to one fix.
+  - losses or halts recur and the evidence does not point to one fix;
+  - a KIS order's outcome is not known (`응답 없음(결과 모름)`): the account may hold shares or an order the ledger does not, which only the user can see and settle until the account's reconciliation (#406). A refused order with a code the trader should not have caused (off the tick, more than held) is a bug: open an issue with the code and the failure's line.
 
 ## Never
 

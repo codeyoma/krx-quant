@@ -297,7 +297,10 @@ class PaperTrader:
     (``guard``), with its state and ledger. With ``challenger`` (#400, ``desk.Desk``), that
     challenger policy's book: the same rules on the same quotes, in paper, held by no limit nor pause
     (``limits.Unlimited``, buying on ``account``'s cash), writing no state; its decisions and trades
-    carry its version."""
+    carry its version. With ``shadow`` (#405), the champion policy's paper shadow in mock mode: held
+    and sized as a challenger's book is, its trades the champion policy's paper record (``champion``
+    0, ``shadow`` 1), never the trader's; ``carry`` also goes on with the paper champion book's trade
+    left open by paper mode."""
 
     def __init__(
         self,
@@ -310,6 +313,8 @@ class PaperTrader:
         *,
         challenger: int | None = None,
         account: Callable[[], float] | None = None,
+        shadow: bool = False,
+        carry: bool = False,
     ) -> None:
         self.store = store
         self.rules = rules
@@ -317,9 +322,10 @@ class PaperTrader:
         self._started_at = started_at
         self.mode = mode
         self.challenger = challenger
+        self.shadow = shadow
         self._guard: Guard | None = None
         self.holds: Holds
-        if challenger is None:
+        if challenger is None and not shadow:
             self._guard = Guard(store, mode, rules.limits, started_at, notify or (lambda text: None))
             self.holds = self._guard
         else:
@@ -336,12 +342,25 @@ class PaperTrader:
         self._pending: dict[datetime, list[_Candidate]] = {}  # rises waiting, by bar close
         self._last: BestQuote | None = None  # the latest quote received
         self._waiting: _Waiting | None = None
-        self._open: OpenTrade | None = store.open_trade(mode, challenger)
+        self._open: OpenTrade | None = (
+            store.open_trade(mode, challenger)
+            if not shadow
+            # A shadow goes on with its own trade left open; in mock mode (``carry``) with the paper
+            # champion book's too, left open by paper mode (#405): no guard counts either in memory.
+            else store.open_trade(mode, shadow=True) or (store.open_trade(mode) if carry else None)
+        )
         if self._open is not None:
             log.info("%s going on with trade %s, open since before this start", self._whose(), self._open.id)
         if challenger is not None:
             return
-        dropped = store.drop_unfilled(mode, RESTARTED)  # every book's: none is waiting at a start
+        dropped = store.drop_unfilled(mode, RESTARTED)  # every book's of the mode: none is waiting at a start
+        if shadow:
+            if dropped:
+                log.info(
+                    "trader: shadow: %s paper buy(s) waiting for a quote when the trader stopped: given up",
+                    dropped,
+                )
+            return
         if dropped:
             log.info("trader: %s buy(s) waiting for a quote when the trader stopped: given up", dropped)
         if self.guard.status != RUNNING:
@@ -349,6 +368,12 @@ class PaperTrader:
         self.on_controls(started_at)  # asked for while it was not running
         self._enforce(started_at)
         self.write(started_at)
+
+    async def idle(self) -> None:
+        """Until no order is in flight: a paper book's fill at once, so at once (``mock.py``'s waits)."""
+
+    async def close(self, timeout: float = 0.0) -> None:
+        """The trader stopping: nothing in flight in paper (``mock.py``'s waits for its order)."""
 
     @property
     def guard(self) -> Guard:
@@ -377,7 +402,9 @@ class PaperTrader:
 
     def _whose(self) -> str:
         """Its log lines' start: the champion's as they were (``trader: bought …``), a challenger's
-        with its version (``trader: challenger N bought …``)."""
+        with its version (``trader: challenger N bought …``), the shadow's (``trader: shadow …``)."""
+        if self.shadow:
+            return "trader: shadow"
         return "trader:" if self.challenger is None else f"trader: challenger {self.challenger}"
 
     @property
@@ -393,6 +420,8 @@ class PaperTrader:
         self._picks = {p.cell: (rank, p) for rank, p in enumerate(selection.picks)}
         if self.challenger is not None:
             log.info("trader: challenger %s in paper: %s", self.challenger, selection.describe())
+        elif self.shadow:
+            log.info("trader: shadow in paper: %s", selection.describe())
         elif selection.picks:
             log.info("trader: trading %s cell(s): %s", len(selection.picks), selection.describe())
         else:
@@ -468,7 +497,7 @@ class PaperTrader:
         if status in SALE and quote.received_at > (self._sell_after or self._started_at):
             self._exit(trade, quote.received_at, quote.bid, SALE[status], quote)
             return
-        reached = self.holds.mark(unrealized(trade, quote.bid, self.rules.fee_rate), quote.received_at)
+        reached = self.holds.mark(self._unrealized(trade, quote.bid), quote.received_at)
         if reached is not None:
             self._dirty = True
             self._enforce(quote.received_at, quote)
@@ -613,6 +642,11 @@ class PaperTrader:
     def _busy(self) -> bool:
         return self._open is not None or self._waiting is not None
 
+    def _unrealized(self, trade: OpenTrade, bid: float) -> float:
+        """What the open ``trade`` nets sold at ``bid`` now (``unrealized``); the mock book counts
+        what of it is sold already at its fills (#405)."""
+        return unrealized(trade, bid, self.rules.fee_rate)
+
     def _rank(self, cell: Cell) -> int:
         return self._picks[cell][0] if cell in self._picks else len(self._picks)
 
@@ -728,46 +762,57 @@ class PaperTrader:
         if quantity < 1:
             self._give_up(waiting, NO_SHARES)
             return
-        signal, planned = waiting.signal, waiting.plan
-        assert signal.anchor is not None and signal.tick is not None and signal.width is not None
-        p = signal.rise_probability
-        assert p is not None
         self._waiting = None
+        self._fill_buy(waiting, quote, quantity)
+
+    def _fill_buy(self, waiting: _Waiting, quote: BestQuote, quantity: int) -> None:
+        """The buy decided, of ``quantity`` shares at ``quote``'s ask: in paper, filled whole at once.
+        The mock book (#405, ``mock.MockTrader``) orders it on KIS instead."""
         self._open = self.store.enter(
-            waiting.decision,
-            Entry(
-                mode=self.mode,
-                symbol=SYMBOL,
-                kind=signal.kind,
-                predictor=signal.predictor,
-                prediction_id=signal.prediction_id,
-                bar_close=signal.bar_close,
-                probability=p,
-                threshold=self.rules.threshold if pick.threshold is None else pick.threshold,
-                anchor=signal.anchor,
-                tick=signal.tick,
-                width_ticks=signal.width,
-                target=planned.target,
-                stop=planned.stop,
-                time_barrier=planned.time_barrier,
-                decided_at=waiting.decided_at,
-                entry_at=quote.received_at,
-                entry_price=quote.ask,
-                quantity=quantity,
-                buy_fee=quote.ask * quantity * self.rules.fee_rate,
-                quote_at=quote.received_at,
-                selection_id=self._selection,
-                role=pick.role,
-                p_star=pick.p_star,
-                low=pick.low,
-                kelly=pick.kelly,
-                fraction=pick.fraction,
-                policy_id=self._policy,
-                champion=self.challenger is None,
-            ),
+            waiting.decision, self._entry(waiting, quote.received_at, quote.ask, quantity, quote.received_at)
         )
         self._dirty = True
         log.info("%s bought %s at %s (trade %s)", self._whose(), quantity, quote.ask, self._open.id)
+
+    def _entry(
+        self, waiting: _Waiting, at: datetime, price: float, quantity: int, quote_at: datetime
+    ) -> Entry:
+        """The trade ``waiting`` enters: ``quantity`` shares filled at ``price`` at ``at``."""
+        signal, planned, pick = waiting.signal, waiting.plan, waiting.pick
+        assert signal.anchor is not None and signal.tick is not None and signal.width is not None
+        p = signal.rise_probability
+        assert p is not None
+        return Entry(
+            mode=self.mode,
+            symbol=SYMBOL,
+            kind=signal.kind,
+            predictor=signal.predictor,
+            prediction_id=signal.prediction_id,
+            bar_close=signal.bar_close,
+            probability=p,
+            threshold=self.rules.threshold if pick.threshold is None else pick.threshold,
+            anchor=signal.anchor,
+            tick=signal.tick,
+            width_ticks=signal.width,
+            target=planned.target,
+            stop=planned.stop,
+            time_barrier=planned.time_barrier,
+            decided_at=waiting.decided_at,
+            entry_at=at,
+            entry_price=price,
+            quantity=quantity,
+            buy_fee=price * quantity * self.rules.fee_rate,
+            quote_at=quote_at,
+            selection_id=self._selection,
+            role=pick.role,
+            p_star=pick.p_star,
+            low=pick.low,
+            kelly=pick.kelly,
+            fraction=pick.fraction,
+            policy_id=self._policy,
+            champion=self.challenger is None and not self.shadow,
+            shadow=self.shadow,
+        )
 
     def _give_up(self, waiting: _Waiting, reason: str) -> None:
         self._waiting = None
