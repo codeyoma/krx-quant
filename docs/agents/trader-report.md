@@ -51,7 +51,9 @@ The comment shows no prices, account numbers, order numbers or keys. For more, s
   - the live gate passed: going live is the user's call and their steps (#408). Never treat a passed gate as permission;
   - a change would touch the limits, the capital, the modes, the live gate or the promotion rule;
   - losses or halts recur and the evidence does not point to one fix;
-  - a KIS order's outcome is not known (`응답 없음(결과 모름)`): the account may hold shares or an order the ledger does not, which only the user can see and settle until the account's reconciliation (#406). A refused order with a code the trader should not have caused (off the tick, more than held) is a bug: open an issue with the code and the failure's line.
+  - a KIS order's outcome is not known (`응답 없음(결과 모름)`) and was not settled: the trader looks up a buy whose answer was lost and adopts it when exactly one KIS order can be it (#406), but a sell's is not looked up. If the report shows a pause of source `계좌 맞추기` (a mock start found the account unlike the ledger, #406), only the user can check the account and resume, which accepts what is outside the ledger. A refused order with a code the trader should not have caused (off the tick, more than held) is a bug: open an issue with the code and the failure's line.
+
+  > **바뀜** (2026-10-31, #424): "결과를 모르는 주문은 계좌 맞추기(#406) 전까지 사용자만 보고 정리한다" → trader가 mock 시작에서 계좌를 맞추고 응답이 사라진 매수를 장부에 넣는다. 계좌 맞추기의 정지는 여전히 사용자가 확인하고 재개한다. 이유: #406.
 
 ## Never
 
