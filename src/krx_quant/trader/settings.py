@@ -5,7 +5,7 @@ wrong one stops the trader, never the recording. Every limit is the code's at mo
 narrow the capital, never widen it (#393).
 
 - ``KRX_TRADER_MODE``: ``paper`` (the default and, for now, the only one; ``mock`` and ``live``
-  come with the KIS order module, #404, #405, #408);
+  come with the modes that order through the KIS order module, #405, #408);
 - ``KRX_TRADER_THRESHOLD``: θ, the rise's probability that buys (0.6 unless set);
 - ``KRX_TRADER_CAPITAL``: the capital in won (1,000,000 unless set; at most that);
 - ``KRX_TRADER_DAILY_LOSS_PERCENT``, ``KRX_TRADER_CUMULATIVE_LOSS_PERCENT`` (#396): the loss
@@ -65,8 +65,8 @@ class TraderSettings:
         mode = values.get("KRX_TRADER_MODE", PAPER).strip().lower() or PAPER
         if mode in LATER_MODES:
             raise SettingsError(
-                f"KRX_TRADER_MODE {mode} is not built yet: the trader has no order code until the KIS "
-                "order module (#404); set paper or remove it"
+                f"KRX_TRADER_MODE {mode} is not built yet: the KIS order module is in (#404), the modes "
+                "that order through it come with #405 (mock) and #408 (live); set paper or remove it"
             )
         if mode not in MODES:
             raise SettingsError(f"KRX_TRADER_MODE must be one of {', '.join(MODES)}, got {mode!r}")
