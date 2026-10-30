@@ -58,7 +58,7 @@ import json
 import sqlite3
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -178,9 +178,10 @@ CREATE TABLE IF NOT EXISTS unfilled_buys (  -- each mock buy KIS took of which n
     price REAL NOT NULL,               -- the limit
     quantity INTEGER NOT NULL,
     placed_at TEXT NOT NULL,
-    status TEXT NOT NULL,              -- cancelled; open when its cancel did not take
+    status TEXT NOT NULL,              -- cancelled; open when its cancel did not take; filled once it did
     broker_id TEXT NOT NULL,           -- KIS's order number
-    broker_branch TEXT
+    broker_branch TEXT,
+    entry TEXT                         -- JSON: the trade it would open (its fill to come), while open
 );
 CREATE TABLE IF NOT EXISTS failures (   -- each KIS order of mock mode that failed (#405)
     id INTEGER PRIMARY KEY,
@@ -600,8 +601,8 @@ class TraderStore:
         assert cursor.lastrowid is not None
         return cursor.lastrowid
 
-    def unfilled(self, decision: int, reason: str) -> None:
-        """A buy decided that did not fill, and why."""
+    def unfilled(self, decision: int, reason: str | None) -> None:
+        """A buy decided that did not fill, and why (None: not given up, #405)."""
         with self._db:
             self._db.execute("UPDATE decisions SET reason = ? WHERE id = ?", (reason, decision))
 
@@ -778,19 +779,36 @@ class TraderStore:
         """The shares of ``trade`` sold so far."""
         return self.sells(trade)[0]
 
-    def add_unfilled_buy(self, decision: int, mode: str, placed: Placed, at: datetime, status: str) -> int:
+    def add_unfilled_buy(
+        self, decision: int, mode: str, placed: Placed, at: datetime, status: str, entry: Entry | None = None
+    ) -> int:
         """A mock buy KIS took of which nothing filled (#405): no trade, but the ledger keeps every
         order KIS has (``mock_check``). ``status`` is cancelled, or open when its cancel did not take
-        (followed: ``close_unfilled_buy``). Its row."""
+        (followed: ``close_unfilled_buy``), kept with the trade it would open (``entry``) for a
+        restart to follow it (``open_unfilled_buy``). Its row."""
         with self._db:
             cursor = self._db.execute(
                 "INSERT INTO unfilled_buys (decision_id, mode, price, quantity, placed_at, status, broker_id,"
-                " broker_branch) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                " broker_branch, entry) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (decision, mode, placed.price, placed.quantity, iso(at), status, placed.number)
-                + (placed.branch,),
+                + (placed.branch, None if entry is None else _entry_json(entry)),
             )
         assert cursor.lastrowid is not None
         return cursor.lastrowid
+
+    def open_unfilled_buy(self, mode: str) -> tuple[int, int, Placed, date, Entry] | None:
+        """``mode``'s buy of which nothing filled, still open on KIS (#405): its row, its decision, its
+        order, its day, the trade it would open. None without one."""
+        row = self._db.execute(
+            "SELECT * FROM unfilled_buys WHERE mode = ? AND status = ? AND entry IS NOT NULL"
+            " ORDER BY id DESC LIMIT 1",
+            (mode, OPEN),
+        ).fetchone()
+        if row is None:
+            return None
+        placed = Placed(row["price"], row["quantity"], row["broker_branch"], row["broker_id"])
+        day = date.fromisoformat(row["placed_at"][:10])
+        return row["id"], row["decision_id"], placed, day, _entry_of(row["entry"])
 
     def close_unfilled_buy(self, row: int, status: str) -> None:
         """An unfilled buy followed (#405) settled: cancelled with nothing filled, or ``filled`` once
@@ -1165,6 +1183,21 @@ def _control(row: sqlite3.Row) -> Control:
         row["mode"],
         None if row["applied_at"] is None else datetime.fromisoformat(row["applied_at"]),
     )
+
+
+# An Entry's times, as ISO strings in its JSON (``_entry_json``).
+_ENTRY_TIMES = ("bar_close", "time_barrier", "decided_at", "entry_at", "quote_at")
+
+
+def _entry_json(entry: Entry) -> str:
+    fields = asdict(entry)
+    return json.dumps({k: iso(v) if k in _ENTRY_TIMES else v for k, v in fields.items()})
+
+
+def _entry_of(text: str) -> Entry:
+    fields: dict[str, Any] = json.loads(text)
+    times: dict[str, Any] = {k: datetime.fromisoformat(fields[k]) for k in _ENTRY_TIMES}
+    return Entry(**(fields | times))
 
 
 def _failure(row: sqlite3.Row) -> Failure:

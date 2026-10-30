@@ -526,6 +526,79 @@ async def test_a_restarted_mock_book_takes_off_the_buy_left_open(
     ]
 
 
+async def test_a_restart_follows_a_buy_left_open_with_nothing_filled_and_opens_its_trade_when_it_fills(
+    kis_mock: tuple[FakeKis, FakeAccount], tmp_path: Path
+) -> None:
+    """The trader stops while its buy is open on KIS, nothing filled and its cancel refused. Started
+    again, it takes the buy off; the 14 that filled meanwhile open the trade the decision would have
+    opened, and its take-profit rests."""
+    fake, account = kis_mock
+    account.fills = False
+    cancel_refused_once(fake, account, BUY_SIDE)
+    first = MockDay(tmp_path, fake, account, timing=replace(TIMING, retry=3600.0))
+    assert await first.run([TEN, BOUGHT]) == []
+    [kept] = rows(tmp_path, "unfilled_buys")
+    assert kept["status"] == "open" and kept["entry"] is not None
+
+    [trade] = await MockDay(tmp_path, fake, account, started_at=at("10:01:00")).run([Tick("10:01:00.5")])
+
+    assert (trade["entry"]["quantity"], trade["target"], trade["stop"]) == (14, 70_250, 69_850)
+    assert [o[1:5] for o in orders_of(trade)] == [
+        ("entry", 70_100, 14, "filled"),
+        ("take_profit", 70_300, 14, "open"),
+    ]
+    [decision] = rows(tmp_path, "decisions")
+    assert (decision["trade_id"], decision["reason"]) == (trade["id"], None)
+    assert [r["status"] for r in rows(tmp_path, "unfilled_buys")] == ["filled"]
+
+
+async def test_a_restart_that_cannot_take_off_a_buy_left_open_stops_new_entries(
+    kis_mock: tuple[FakeKis, FakeAccount], tmp_path: Path
+) -> None:
+    fake, account = kis_mock
+    account.fills = False
+    fake.rest_posts[kis_orders.CANCEL.mock] = lambda body: {
+        "rt_cd": "1",
+        "msg_cd": "FK0009",
+        "msg1": "made up: 취소를 받지 못했습니다",
+    }
+    await MockDay(tmp_path, fake, account, timing=replace(TIMING, retry=3600.0)).run([TEN, BOUGHT])
+
+    hour = replace(TIMING, retry=3600.0)  # the cancel tried again an hour later: once in this day
+    later = MockDay(tmp_path, fake, account, started_at=at("2026-10-15 09:00:00"), timing=hour)
+    trades = await later.run(
+        [
+            Tick("2026-10-15 09:00:00.5"),
+            Read("2026-10-15 10:00:02.3", [Barrier("2026-10-15 10:00:00")]),
+            quote("2026-10-15 10:00:02.5", 70_000, 70_100),
+        ]
+    )
+
+    assert trades == [] and later.status == ORDER_FAILED
+    assert [n for n in later.notices if "취소 주문을 KIS가 거부했습니다" in n]
+    assert rows(tmp_path, "decisions")[-1]["reason"] == ORDER_FAILED, "no new entry"
+    assert [r["status"] for r in rows(tmp_path, "unfilled_buys")] == ["open"], (
+        "followed still (#406 reconciles)"
+    )
+
+
+async def test_a_batch_of_sells_used_up_waits_for_a_later_quote_or_tick(
+    kis_mock: tuple[FakeKis, FakeAccount], tmp_path: Path
+) -> None:
+    """KIS's book takes one share at a time: the stop's batch of two sells leaves 12 unsold and the
+    next batch waits for the clock to move, two more at the next tick."""
+    fake, account = kis_mock
+    day = MockDay(tmp_path, fake, account, timing=replace(TIMING, rounds=2))
+
+    [trade] = await day.run([TEN, BOUGHT, Depth("10:01:00", 1), quote("10:01:30", 69_800, 69_900)])
+    assert [o[3] for o in orders_of(trade) if o[1] == "stop_loss"] == [14, 13], "one batch, then it waits"
+    assert trade["exit"] is None
+
+    restarted = MockDay(tmp_path, fake, account, started_at=at("10:01:30"), timing=replace(TIMING, rounds=2))
+    [trade] = await restarted.run([Depth("10:01:30.5", 1), quote("10:01:31", 69_800, 69_900)])
+    assert [o[3] for o in orders_of(trade) if o[1] == "stop_loss"] == [14, 13, 12, 11]
+
+
 # Partial fills and the cancel race
 
 
@@ -658,7 +731,8 @@ async def test_a_failed_order_stops_entries_for_that_day_alone(
     await first.run([TEN, quote("10:00:02.5", 70_000, 70_150)])
     assert first.status == ORDER_FAILED
 
-    later = MockDay(tmp_path, fake, account, started_at=at("2026-10-15 09:00:00"))
+    hour = replace(TIMING, retry=3600.0)  # the cancel tried again an hour later: once in this day
+    later = MockDay(tmp_path, fake, account, started_at=at("2026-10-15 09:00:00"), timing=hour)
     [trade] = await later.run(
         [
             Read("2026-10-15 10:00:02.3", [Barrier("2026-10-15 10:00:00")]),

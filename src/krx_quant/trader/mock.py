@@ -77,7 +77,17 @@ from krx_quant.trader import MOCK, SYMBOL
 from krx_quant.trader.limits import ORDER_FAILED, SALE, Notify
 from krx_quant.trader.paper import NO_SHARES, TAKE_PROFIT, PaperTrader, Rules, _Waiting
 from krx_quant.trader.quotes import BestQuote
-from krx_quant.trader.store import CANCELLED, FILLED, OPEN, SELL, OpenTrade, Placed, Resting, TraderStore
+from krx_quant.trader.store import (
+    CANCELLED,
+    FILLED,
+    OPEN,
+    SELL,
+    Entry,
+    OpenTrade,
+    Placed,
+    Resting,
+    TraderStore,
+)
 
 log = logging.getLogger(__name__)
 
@@ -98,21 +108,22 @@ class Timing:
     poll: float = POLL  # the inquiry read this often while it waits
     follow: float = 2.0  # the take-profit sell's row read this often while it rests
     retry: float = 30.0  # a sale whose order failed is tried again this long after
-    rounds: int = 5  # sells at the best bid in one go, before the next quote or tick
+    rounds: int = 5  # sells at the best bid in one go; then the next go no sooner than ``wait`` later
 
 
 @dataclass(frozen=True)
 class _LiveBuy:
     """A buy KIS took whose cancel did not take, or that its order inquiry never showed: open on KIS
-    still, so followed until nothing is left of it. Its fills join its trade (``waiting`` is the
-    decision while none filled yet, its ``unfilled_buys`` row ``unfilled``)."""
+    still, so followed until nothing is left of it. Its fills join its trade; while none filled yet,
+    its ``unfilled_buys`` row (``unfilled``) keeps its decision and the trade it would open
+    (``entry``, its fill to come), so that a restart follows it too."""
 
     placed: Placed
     day: date
     filled: int
     amount: float  # what filled, in won
-    waiting: _Waiting | None = None
-    quote_at: datetime | None = None
+    decision: int | None = None
+    entry: Entry | None = None
     unfilled: int | None = None
 
 
@@ -170,6 +181,13 @@ class MockTrader(PaperTrader):
                     self._resting = order
                 else:  # a sale was under way: it goes on, that order taken off first
                     self._live, self._selling = order, order.purpose
+        else:  # a restart: a buy of which nothing filled yet, open on KIS, is followed still
+            kept = store.open_unfilled_buy(MOCK)
+            if kept is not None:
+                unfilled, decision, ordered, since, would = kept
+                self._live_buy = _LiveBuy(ordered, since, 0, 0.0, decision, would, unfilled)
+                store.unfilled(decision, None)  # not given up at the start: it may fill still
+                log.warning("trader: a buy left open on KIS at the stop, nothing filled yet: taken off now")
 
     # The paper book's hooks.
 
@@ -328,11 +346,13 @@ class MockTrader(PaperTrader):
                 self._cancel_failed(taken.cancel, None)
             self._retry_at = at + timedelta(seconds=self._timing.retry)
         if taken.filled < 1:  # kept all the same: the ledger holds every order KIS has (``mock_check``)
+            # The trade it would open, its fill to come: kept with it, so that a restart follows it.
+            would = self._entry(waiting, at, ask, quantity, quote.received_at)
             unfilled = self.store.add_unfilled_buy(
-                waiting.decision, MOCK, placed, at, OPEN if live else CANCELLED
+                waiting.decision, MOCK, placed, at, OPEN if live else CANCELLED, would
             )
             if live:
-                self._live_buy = _LiveBuy(placed, day, 0, 0.0, waiting, quote.received_at, unfilled)
+                self._live_buy = _LiveBuy(placed, day, 0, 0.0, waiting.decision, would, unfilled)
                 return
             self.store.unfilled(waiting.decision, UNFILLED)
             log.info("trader: no fill of the buy at %s on KIS before its cancel", ask)
@@ -391,10 +411,16 @@ class MockTrader(PaperTrader):
         if row.filled > live.filled:
             amount = row.average * row.filled
             if self._open is None:
-                assert live.waiting is not None and live.quote_at is not None and live.unfilled is not None
-                entry = self._entry(live.waiting, at, row.average, row.filled, live.quote_at)
+                assert live.decision is not None and live.entry is not None and live.unfilled is not None
+                entry = replace(
+                    live.entry,
+                    entry_at=at,
+                    entry_price=row.average,
+                    quantity=row.filled,
+                    buy_fee=amount * self.rules.fee_rate,
+                )
                 status = OPEN if row.left else None
-                self._open = self.store.open_position(live.waiting.decision, entry, live.placed, status)
+                self._open = self.store.open_position(live.decision, entry, live.placed, status)
                 self.store.close_unfilled_buy(live.unfilled, FILLED)
                 log.info(
                     "trader: the buy at %s filled %s on KIS after its cancel failed",
@@ -410,15 +436,15 @@ class MockTrader(PaperTrader):
                 self._open = replace(trade, quantity=row.filled, entry_price=row.average, buy_fee=fee)
                 log.info("trader: %s more of the buy filled on KIS (trade %s)", new, trade.id)
             live = self._live_buy = replace(
-                live, filled=row.filled, amount=amount, waiting=None, unfilled=None
+                live, filled=row.filled, amount=amount, decision=None, entry=None, unfilled=None
             )
             self._dirty = True
         if row.left > 0:
             return
         if self._open is None:  # nothing filled: no trade
-            assert live.waiting is not None and live.unfilled is not None
+            assert live.decision is not None and live.unfilled is not None
             self.store.close_unfilled_buy(live.unfilled, CANCELLED)
-            self.store.unfilled(live.waiting.decision, UNFILLED)
+            self.store.unfilled(live.decision, UNFILLED)
         else:
             self.store.close_entry(
                 self._open.id, FILLED if row.filled >= live.placed.quantity else CANCELLED, at
@@ -588,6 +614,14 @@ class MockTrader(PaperTrader):
                 return
         if trade.quantity - self.store.sold(trade.id) <= 0:
             self._finish(trade, reason)
+        else:  # rounds spent with shares left (no bid that sells them): the next batch waits a while
+            self._retry_at = self._clock() + timedelta(seconds=self._timing.wait)
+            log.info(
+                "trader: trade %s: %s share(s) left after %s sell(s) at the bid; again at a later quote",
+                trade.id,
+                trade.quantity - self.store.sold(trade.id),
+                self._timing.rounds,
+            )
 
     async def _take_off(self, trade: OpenTrade, resting: Resting) -> OrderRow | None:
         """A sell open on KIS (the resting take-profit's, or a sale's whose cancel did not take)
