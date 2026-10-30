@@ -27,6 +27,8 @@ with its reason:
   consensus);
 - the trader is running (#396, ``limits.py``): not paused (``entries_paused``, ``paused``) nor
   stopped by a loss limit (``daily_limit``, ``cumulative_limit``), the status its reason;
+- the collector's quotes flow (``quotes_stalled``, #407, ``stall.py``): none for more than five
+  seconds in continuous trading is a stall, and nothing new is bought until a quote comes again;
 - nothing is held, nor waiting to be bought (``holding``): one position at a time;
 - no cell ranked above it buys on the same bar close (``outranked``).
 
@@ -70,6 +72,13 @@ barrier the bar close plus the kind's horizon: the trade is the event its hit ra
   ``Rules.quote_wait`` before the barrier (the stream was down), or when the trader was not
   running at the barrier, it waits for the next quote and sells at its best bid then: the trade's
   ``exit_at`` after its ``time_barrier`` shows the wait.
+
+**A stall** of the quotes (#407, ``stall.py``, told by the desk: ``on_stall``, ``on_recover``): no
+new buy (a rise read is skipped ``quotes_stalled``, a buy waiting for its quote given up so, the
+rises waiting skipped so); the open trade waits for the quotes (a paper book has no other price) and
+is kept as open through the stall (``trade_stalls``). When the quotes come again, an exit made on the
+first quote after the stall (the stop crossed, the time barrier passed, a pause selling meanwhile)
+keeps that on its trade (``waited``). The mock book reads KIS's REST quotes instead (``mock.py``).
 
 **Costs** (``costs``): the commission (``KRX_FEE_PERCENT``) on the buy's and the sell's notional
 and the sell tax (``pricing.SELL_TAX``) on the sell's; the net P&L is the gross less them, in won.
@@ -126,7 +135,7 @@ from krx_quant.trader.limits import (
 )
 from krx_quant.trader.quotes import BestQuote
 from krx_quant.trader.selection import Pick, Selection
-from krx_quant.trader.store import Entry, Exit, OpenTrade, TraderStore, iso
+from krx_quant.trader.store import WAITED, Entry, Exit, OpenTrade, Stall, TraderStore, iso
 
 log = logging.getLogger(__name__)
 
@@ -138,6 +147,8 @@ STALE, EXPIRED = "stale", "expired"
 NOT_UP, BELOW_THRESHOLD, NO_REFERENCE = "not_up", "below_threshold", "no_reference"
 CLOSED, BEFORE_ENTRY, PAST_LAST_EXIT = "closed", "before_entry", "past_last_exit"
 HOLDING, OUTRANKED = "holding", "outranked"
+# The collector's quotes stalled (#407): nothing new is bought until they come again.
+STALLED = "quotes_stalled"
 # Why a buy decided did not fill.
 TARGET_REACHED, NO_SHARES, NO_QUOTE, RESTARTED = "target_reached", "no_shares", "no_quote", "restarted"
 BUY, SKIP = "buy", "skip"
@@ -342,6 +353,9 @@ class PaperTrader:
         self._pending: dict[datetime, list[_Candidate]] = {}  # rises waiting, by bar close
         self._last: BestQuote | None = None  # the latest quote received
         self._waiting: _Waiting | None = None
+        self._stall: Stall | None = None  # the collector's quotes stalled since (#407)
+        self._returned: Stall | None = None  # the stall the quote being taken is the first after
+        self._linked: tuple[int, int] | None = None  # the (trade, stall) kept as open through it
         self._open: OpenTrade | None = (
             store.open_trade(mode, challenger)
             if not shadow
@@ -459,6 +473,34 @@ class PaperTrader:
         ):
             self._give_up(waiting, SPECIAL)
 
+    def on_stall(self, stall: Stall, at: datetime) -> None:
+        """The collector's quotes stalled, seen at ``at`` (#407, module doc): nothing new bought (the
+        buy waiting for its quote given up, the rises waiting skipped, ``quotes_stalled``); the open
+        trade kept as open through it."""
+        self._stall = stall
+        if self._waiting is not None:
+            self._give_up(self._waiting, STALLED)
+        for close in list(self._pending):
+            for c in self._pending.pop(close):
+                self._skip(c.signal, at, STALLED)
+        self._link_stall()
+        self._dirty = True
+
+    def on_recover(self, stall: Stall, at: datetime) -> None:
+        """The quotes back at ``at`` (#407): the quote that ends ``stall`` comes next (``on_quote``);
+        the open trade's exit made on it keeps that it waited for the quotes (``WAITED``)."""
+        self._stall = None
+        self._returned = stall if self._open is not None else None
+        self._dirty = True
+
+    def _link_stall(self) -> None:
+        """The open trade kept as open through the stall, once (``trade_stalls``)."""
+        stall, trade = self._stall, self._open
+        if stall is None or trade is None or self._linked == (trade.id, stall.id):
+            return
+        self.store.add_trade_stall(trade.id, stall.id)
+        self._linked = (trade.id, stall.id)
+
     def on_signal(self, signal: Signal, at: datetime) -> None:
         """A prediction of a cell, read at ``at``; one already decided on (a restart) is passed over."""
         cell = Cell(signal.kind, signal.predictor)
@@ -475,6 +517,8 @@ class PaperTrader:
                 self._skip(signal, at, planned)
             elif self.status != RUNNING:
                 self._skip(signal, at, self.status)
+            elif self._stall is not None:
+                self._skip(signal, at, STALLED)
             elif self._busy():
                 self._skip(signal, at, self._held_off(signal))
             else:
@@ -482,11 +526,20 @@ class PaperTrader:
         self._settle(at)
 
     def on_quote(self, quote: BestQuote) -> None:
-        """A quote from the stream. One not newer than the latest (a reconnect's first) is passed over."""
+        """A quote from the stream (in mock mode during a stall, KIS's REST one, #407). One not newer
+        than the latest (a reconnect's first) is passed over."""
         standing = self._last
         if standing is not None and quote.received_at <= standing.received_at:
+            self._returned = None  # the first quote after a stall, passed over: none waited on it
             return
         self._last = quote
+        try:
+            self._take(quote, standing)
+        finally:
+            self._returned = None  # the first quote taken after a stall alone waited through it
+
+    def _take(self, quote: BestQuote, standing: BestQuote | None) -> None:
+        """``quote`` taken, ``standing`` the latest before it: the buy waiting, the exits, the limits."""
         if quote.received_at < self._started_at:
             return  # the book as it stood before this run: no trigger
         if self._waiting is not None:
@@ -698,6 +751,10 @@ class PaperTrader:
                 for c in waiting:
                     self._skip(c.signal, now, self.status)
                 continue
+            if self._stall is not None:  # the quotes stalled meanwhile (#407)
+                for c in waiting:
+                    self._skip(c.signal, now, STALLED)
+                continue
             if self._busy():  # bought on another bar close meanwhile
                 for c in waiting:
                     self._skip(c.signal, now, self._held_off(c.signal))
@@ -855,6 +912,8 @@ class PaperTrader:
         # would hold it already (an exit the clock had not reached the day of yet, #396).
         if self.holds.roll(at):
             self._dirty = True
+        if self._returned is not None:  # made on the first quote after a stall: it waited (#407)
+            self.store.stall_effect(trade.id, self._returned.id, WAITED)
         self.store.exit(trade, Exit(at, price, reason, paid.sell_fee, paid.tax, quote.received_at))
         self._open = None
         self._sell_after = None

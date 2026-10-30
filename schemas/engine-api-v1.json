@@ -2690,7 +2690,7 @@
       "required": ["id", "mode", "symbol", "kind", "predictor", "role", "prediction_id", "bar_close", "probability",
                    "threshold", "p_star", "precision_low", "kelly", "fraction", "policy", "champion", "shadow", "anchor", "tick", "width_ticks",
                    "target", "stop", "time_barrier", "decided_at", "entry", "exit", "buy_fee", "sell_fee", "tax",
-                   "cost", "gross", "net", "orders"],
+                   "cost", "gross", "net", "orders", "stalls"],
       "additionalProperties": false,
       "properties": {
         "id": {"type": "integer"},
@@ -2780,6 +2780,21 @@
                   }
                 }
               }
+            }
+          }
+        },
+        "stalls": {
+          "description": "#407: each stall of the collector's quotes the trade was open through, oldest first: when the trader saw it (more than 5 s with no quote), the last quote before it, when it ended (null while it lasts), and what it did to the exit: waited (the exit made on the first quote after it), rest (mock: the sale begun on KIS's REST quotes during it), null (none).",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["began_at", "last_quote_at", "ended_at", "effect"],
+            "additionalProperties": false,
+            "properties": {
+              "began_at": {"$ref": "#/$defs/time"},
+              "last_quote_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]},
+              "ended_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]},
+              "effect": {"enum": ["waited", "rest", null]}
             }
           }
         }

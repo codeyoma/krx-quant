@@ -76,6 +76,18 @@ sold until it is done (a prediction read meanwhile is ``reconciling``).
 
 One order is in flight at a time (``_work``): while it is, nothing else is bought or sold, and a
 sale asked for meanwhile begins once it ends. A trader stopped waits for it (``close``).
+
+**The quotes stalled** (#407, ``stall.py``): nothing new is bought, as in paper. While a position is
+open, KIS's best quotes (``Broker.best``: KRX's best bid and ask, the market the trader orders on)
+are read on the trader's key, one read at a time, at the stall and then on the clock's ticks
+``Timing.rest`` seconds after the last read began; each is taken as a quote, stamped with the clock
+at its answer. The take-profit rests on KIS as ever, and the stop, the time barrier, a pause that
+sells and the loss limits are checked on them, the sale's sells placed at their best bid. A sale
+begun on them keeps that on its trade (``trade_stalls.effect`` ``rest``). A read that fails is said
+once until one is answered, and read again at the next turn; it is no failed order. Once the
+collector's quotes come again the reads stop (one in flight is not taken) and the stream is the
+quotes again. The paper shadow and the challengers have no REST access: they wait for the stream
+(``paper.py``).
 """
 
 from __future__ import annotations
@@ -100,6 +112,7 @@ from krx_quant.kis_orders import (
     OrderRef,
     OrderRow,
     Sent,
+    Unexpected,
     same_number,
 )
 from krx_quant.market_calendar import Session
@@ -121,13 +134,16 @@ from krx_quant.trader.store import (
     OPEN,
     PAUSE,
     RECONCILE,
+    REST,
     SELL,
     SENT,
     UNSENT,
+    WAITED,
     Entry,
     OpenTrade,
     Placed,
     Resting,
+    Stall,
     TraderStore,
 )
 
@@ -142,6 +158,16 @@ RECONCILING = "reconciling"
 UNKNOWN, ERROR = "unknown", "error"
 # A trader stopping waits this long for the order in flight (compose gives it 10 s).
 CLOSE_SECONDS = 8.0
+# While the collector's quotes stall (#407), KIS's best quotes are read this often, with a position
+# open. Every call on the trader's key goes through one limiter, two in any 1.1 s
+# (``kis_orders.PER_SECOND``: of five sent at once the mock server answered three, and none of
+# thirty sent a second apart was refused, #403). Two seconds apart, at most one read falls in any
+# 1.1 s window, so the other slot is always an order call's. Beside the take-profit's row read every
+# two seconds (``Timing.follow``) that is one call a second; during a sale (the take-profit's reading
+# stopped), its inquiry every second (``kis_orders.POLL``) and the reads make 1.5 a second, under the
+# limiter's 1.8. A read every second would make a sale's 2 a second, over it: the order calls would
+# wait their turn.
+REST_SECONDS = 2.0
 
 
 @dataclass(frozen=True)
@@ -153,6 +179,7 @@ class Timing:
     follow: float = 2.0  # the take-profit sell's row read this often while it rests
     retry: float = 30.0  # a sale whose order failed is tried again this long after
     rounds: int = 5  # sells at the best bid in one go; then the next go no sooner than ``wait`` later
+    rest: float = REST_SECONDS  # KIS's best quotes read this often while the quotes stall (#407)
 
 
 @dataclass(frozen=True)
@@ -218,6 +245,9 @@ class MockTrader(PaperTrader):
         self._resting: Resting | None = None  # the take-profit sell resting on KIS
         self._live: Resting | None = None  # a sale's sell whose cancel did not take: open on KIS still
         self._live_buy: _LiveBuy | None = None  # a buy whose cancel did not take: open on KIS still
+        self._reading: asyncio.Task[None] | None = None  # KIS's best quotes read in a stall (#407)
+        self._rest_at: datetime | None = None  # when the last of those reads began
+        self._rest_failing = False  # the last read failed (said once until one is answered)
         self._closing = False
         self._reconciled = False  # the start's reconcile done (#406): nothing is bought or sold before
         self._unreadable = False  # a start that could not read KIS, told
@@ -265,8 +295,19 @@ class MockTrader(PaperTrader):
         super().on_quote(quote)
         self._kick(self._clock())
 
+    def on_stall(self, stall: Stall, at: datetime) -> None:
+        super().on_stall(stall, at)
+        if self._open is not None:
+            log.info(
+                "trader: reading KIS's best quotes over REST every %gs while the quotes stall (trade %s)",
+                self._timing.rest,
+                self._open.id,
+            )
+        self._read_rest(at)
+
     def on_time(self, now: datetime) -> None:
         super().on_time(now)
+        self._read_rest(now)
         self._kick(now)
 
     def state(self) -> dict[str, Any]:
@@ -287,18 +328,21 @@ class MockTrader(PaperTrader):
     # The orders in flight.
 
     async def idle(self) -> None:
-        """Until no order is in flight (one ending may begin the next: a sale asked for meanwhile)."""
-        while (work := self._work) is not None:
-            await asyncio.wait({work})
+        """Until no order is in flight (one ending may begin the next: a sale asked for meanwhile), nor
+        a REST read of a stall (#407)."""
+        while (task := self._work or self._reading) is not None:
+            await asyncio.wait({task})
 
     async def close(self, timeout: float = CLOSE_SECONDS) -> None:
-        """The trader stopping: the take-profit sell's reading stops (it rests on KIS), and the order
-        in flight is waited for ``timeout`` seconds at most, then cancelled."""
+        """The trader stopping: the take-profit sell's reading stops (it rests on KIS), and so do the
+        REST quotes' (#407); the order in flight is waited for ``timeout`` seconds at most, then
+        cancelled."""
         self._closing = True
-        follower, work = self._follower, self._work
-        if follower is not None:
-            follower.cancel()
-            await asyncio.gather(follower, return_exceptions=True)
+        follower, work, reading = self._follower, self._work, self._reading
+        for task in (follower, reading):
+            if task is not None:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
         if work is not None:
             try:
                 await asyncio.wait_for(asyncio.shield(work), timeout)
@@ -329,6 +373,7 @@ class MockTrader(PaperTrader):
         """What the open trade needs next, when no order is in flight: its sale begun (or tried again
         once ``_retry_at`` is past), or its resting take-profit sell's row followed."""
         trade = self._open
+        self._link_stall()  # a trade its buy opened during a stall (#407)
         if self._closing or self._work is not None:
             return
         if not self._reconciled:  # the start's reconcile first (#406), again once ``_retry_at`` is past
@@ -358,10 +403,20 @@ class MockTrader(PaperTrader):
             self._follower = asyncio.get_running_loop().create_task(self._follow_resting(trade.id))
 
     def _begin_sale(self, trade: OpenTrade, reason: str) -> None:
-        """The sale of ``trade`` decided: latched, and kept on the trade for a restart (#405)."""
+        """The sale of ``trade`` decided: latched, and kept on the trade for a restart (#405); begun
+        during a stall, on the REST quotes, or on the first quote after one, kept so (#407)."""
         self._selling = reason
         self.store.begin_sale(trade.id, reason)
-        log.info("trader: selling trade %s on KIS (%s)", trade.id, reason)
+        if self._stall is not None:
+            self.store.stall_effect(trade.id, self._stall.id, REST)
+        elif self._returned is not None:
+            self.store.stall_effect(trade.id, self._returned.id, WAITED)
+        log.info(
+            "trader: selling trade %s on KIS (%s%s)",
+            trade.id,
+            reason,
+            ", on KIS's REST quotes: the quotes stalled" if self._stall is not None else "",
+        )
 
     def _quoted_after(self, moment: datetime) -> bool:
         last = self._last
@@ -374,7 +429,8 @@ class MockTrader(PaperTrader):
         self._follower = None
 
     def _bid(self) -> int | None:
-        """The best bid a sell is placed at: the latest quote's, received since the trader started."""
+        """The best bid a sell is placed at: the latest quote's, received since the trader started (in a
+        stall, KIS's REST one, #407)."""
         last = self._last
         if last is None or last.received_at < self._started_at:
             return None
@@ -614,6 +670,51 @@ class MockTrader(PaperTrader):
     def _probe(self, day: date) -> Window:
         """When the order probe ran on ``day`` on the same account (``mock_check.probe_window``)."""
         return probe_window(self.store.path.parent, day)
+
+    # The REST quotes while the collector's quotes stall (#407).
+
+    def _read_rest(self, now: datetime) -> None:
+        """A read of KIS's best quotes begun at ``now``, if the quotes stall with a position open, none
+        is in flight, and the last began ``Timing.rest`` seconds ago at least (module doc)."""
+        stall = self._stall
+        if stall is None or self._open is None or self._closing or self._reading is not None:
+            return
+        if self._rest_at is not None and (now - self._rest_at).total_seconds() < self._timing.rest:
+            return
+        self._rest_at = now
+        self._reading = asyncio.get_running_loop().create_task(self._read_best(stall))
+
+    async def _read_best(self, stall: Stall) -> None:
+        """One read of KIS's best quotes, taken as a quote while ``stall`` lasts."""
+        try:
+            try:
+                best = await self._broker.best(SYMBOL)
+                if best.bid <= 0 or best.ask <= 0:  # a side empty (an upper or lower limit): none to sell on
+                    raise Unexpected(f"book: a side is empty (bid {best.bid > 0}, ask {best.ask > 0})")
+            except BrokerError as e:  # not answered, or not as measured: read again at the next turn
+                if not self._rest_failing:
+                    log.warning(
+                        "trader: could not read KIS's best quotes over REST (%s); read again every %gs",
+                        e,
+                        self._timing.rest,
+                    )
+                self._rest_failing = True
+                return
+            if self._rest_failing:
+                log.info("trader: KIS's best quotes read over REST again")
+            self._rest_failing = False
+            if self._stall is not stall:  # the quotes back meanwhile: the stream's are the quotes
+                return
+            self.store.read_rest(stall.id)
+            at = self._clock()
+            self.on_quote(
+                BestQuote(at, float(best.bid), float(best.ask), float(best.bid_size), float(best.ask_size))
+            )
+        except Exception:  # a broken store: said, and read again at the next turn
+            log.exception("trader: a REST quote broke off")
+        finally:
+            if self._reading is asyncio.current_task():
+                self._reading = None
 
     # The buy.
 

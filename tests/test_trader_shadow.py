@@ -116,6 +116,7 @@ class MockDesk:
                     broker=broker,
                     clock=lambda: clock[0],
                     timing=TIMING,
+                    stall_after=None,  # the made-up quotes are sparse (``trader_doubles.Day``)
                 )
                 await desk.start()
                 desk.select(Selection((pick(BARRIER),)), self.started_at)
