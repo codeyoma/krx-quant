@@ -539,6 +539,38 @@ async def test_nothing_is_bought_or_sold_until_the_account_could_be_read(
     assert day.status == RUNNING and day.failures() == [] and account.orders == []
 
 
+async def test_a_take_profit_filled_while_the_trader_was_down_exits_take_profit_though_a_stop_came_first(
+    kis_mock: tuple[FakeKis, FakeAccount], tmp_path: Path
+) -> None:
+    """The take-profit filled whole while the trader was down. Started again, it cannot read KIS's
+    inquiry at first, and a quote at the stop comes meanwhile (the stop's sale begins, nothing sold).
+    Once the account is read, the take-profit's fills hold every share: the trade exits
+    ``take_profit``, and nothing more is sold."""
+    fake, account = kis_mock
+    await MockDay(tmp_path, fake, account).run([TEN, BOUGHT])
+    tp = take_profit(account)
+    account.bid, account.improvement = tp.price, 0.0
+    account.fill(tp)
+    read = fake.rest_responses[kis_orders.FILLS.mock]
+    asked = [0]
+
+    def later(params: dict[str, str]) -> Any:
+        asked[0] += 1
+        if asked[0] < 2:
+            return {"rt_cd": "1", "msg_cd": "FK0010", "msg1": "made up: 조회하지 못했습니다"}
+        return read(params)
+
+    fake.rest_responses[kis_orders.FILLS.mock] = later
+    restarted = MockDay(
+        tmp_path, fake, account, started_at=at("10:01:00"), timing=replace(TIMING, retry=60.0)
+    )
+    [trade] = await restarted.run([quote("10:01:10", 69_800, 69_900), Tick("10:02:10")])
+
+    assert trade["exit"]["reason"] == TAKE_PROFIT and account.holdings[SYMBOL] == 0
+    assert [o[1:] for o in orders_of(trade)][1:] == [("take_profit", 70_300, 14, "filled", 14)]
+    assert len(account.placed(SELL_SIDE)) == 1, "nothing sold at the stop"
+
+
 # The comparison
 
 

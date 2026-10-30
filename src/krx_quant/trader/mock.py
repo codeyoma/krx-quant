@@ -459,6 +459,7 @@ class MockTrader(PaperTrader):
                 self._absorb(live.filled, live.amount / live.filled if live.filled else 0.0, 0)
             if over:
                 log.info("trader: the buy left open on KIS on %s is over with its day", live.day)
+        reason = self._selling or TAKE_PROFIT
         for still in (self._resting, self._live):
             trade = self._open
             if still is None or trade is None:
@@ -467,6 +468,8 @@ class MockTrader(PaperTrader):
             row = _row_of(await rows(day), still.number)
             if row is not None:
                 still = self._keep(still, row)
+            if still.purpose == TAKE_PROFIT and still.filled >= still.quantity:
+                reason = TAKE_PROFIT  # it sold the rest, whatever sale began meanwhile
             if day < today or (row is not None and row.left == 0):
                 self._close_sell(still)
                 log.info(
@@ -478,7 +481,7 @@ class MockTrader(PaperTrader):
                 )
         trade = self._open
         if trade is not None and self._live_buy is None and self._all_sold(trade):
-            self._finish(trade, self._selling or TAKE_PROFIT)
+            self._finish(trade, reason)
 
     async def _find_sent(self, rows: Callable[[date], Awaitable[list[OrderRow]]], today: date) -> int:
         """Each buy sent whose answer was not had looked up on its day's inquiry (module doc): adopted,
