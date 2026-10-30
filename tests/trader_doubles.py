@@ -287,6 +287,9 @@ class Day:
     # store, ``picks`` being the cells the cost map passes; else the champion's book alone, trading
     # ``selection`` or ``picks`` as given.
     desk: bool = False
+    # The desk's watch of the quotes (#407): off unless a test sets it, since the made-up quotes come
+    # seconds or minutes apart, where 005930's stream brings several a second.
+    stall_after: timedelta | None = None
 
     def run(self, events: Sequence[Event]) -> list[dict[str, Any]]:
         """Each event in time order (the clock ticking at each), into a trader started at
@@ -298,7 +301,12 @@ class Day:
             trader: Desk | PaperTrader
             if self.desk:
                 trader = Desk(
-                    store, self.rules, CALENDAR.session, self.started_at, notify=self.notices.append
+                    store,
+                    self.rules,
+                    CALENDAR.session,
+                    self.started_at,
+                    notify=self.notices.append,
+                    stall_after=self.stall_after,
                 )
             else:
                 trader = PaperTrader(

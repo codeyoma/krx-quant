@@ -39,7 +39,13 @@ by the nightly re-fit (#399, from the engine's container).
   a cumulative one's re-arm (``lifted_at``);
 - ``snapshot`` (#396): the trader's state now, one row it rewrites (``GET /v1/trader``);
 - ``days`` (#396): each trading day's ledger by mode: the net P&L realized, the trades, the day's
-  and the cumulative P&L at their lowest, the limits, the status and the limit reached.
+  and the cumulative P&L at their lowest, the limits, the status and the limit reached;
+- ``stalls`` (#407, ``stall.py``): each stall of the collector's quotes: when the trader saw it
+  (more than five seconds with no quote in the session), the last quote before it, when a quote
+  came again (or the trader started again instead), and the REST quotes the mock book read
+  meanwhile; ``trade_stalls``: each stall a trade was open through, and what it did to the exit
+  (``effect``: ``waited``, the exit made on the first quote after it; ``rest``, the sale decided on
+  a REST quote during it; null, none).
 
 Every row carries its mode (``paper``, ``mock``): paper, KIS mock and live trades are told apart in
 the same tables (a pause and a resume hold whatever the mode). The records (``policy_days`` and the
@@ -279,6 +285,30 @@ _ADDED = {
     ),
 }
 
+# The stalls of the collector's quotes (#407, ``stall.py``), and the trades open through them.
+_STALLS = """
+CREATE TABLE IF NOT EXISTS stalls (     -- each stall of the collector's quote stream (#407)
+    id INTEGER PRIMARY KEY,
+    mode TEXT NOT NULL,
+    began_at TEXT NOT NULL,            -- when the trader saw it: more than 5 s with no quote
+    last_quote_at TEXT,                -- the last quote received before it; null: none since the start
+    ended_at TEXT,                     -- null while it lasts
+    ended_by TEXT,                     -- quote: a quote came again; restart: the trader started again
+    rest_reads INTEGER NOT NULL DEFAULT 0  -- KIS's best quotes read over REST meanwhile (mock)
+);
+CREATE TABLE IF NOT EXISTS trade_stalls (  -- each stall a trade was open through (#407)
+    trade_id INTEGER NOT NULL REFERENCES trades (id),
+    stall_id INTEGER NOT NULL REFERENCES stalls (id),
+    effect TEXT,                       -- waited, rest; null: the trade went on unaffected
+    PRIMARY KEY (trade_id, stall_id)
+);
+"""
+# What a stall did to a trade's exit (``trade_stalls.effect``): its exit was made on the first quote
+# after the stall (paper waits for the quotes), or its sale decided on a REST quote during it (mock).
+WAITED, REST = "waited", "rest"
+# How a stall ended (``stalls.ended_by``): a quote came again, or the trader started again.
+QUOTE, RESTART = "quote", "restart"
+
 # A trade ``t`` of the champion (#399, #400): made by the champion's book (``trades.champion``), the
 # trader's own trades, before the first champion too; never a challenger's paper trade. The chart
 # marks these alone (``marks.py``), the loss limits and the paper cash count these alone (#396), and
@@ -401,6 +431,17 @@ class Failure:
 
 
 @dataclass(frozen=True)
+class Stall:
+    """A stall of the collector's quotes (#407): when the trader saw it, and the last quote received
+    before it (None: none since the trader started)."""
+
+    id: int
+    mode: str
+    began_at: datetime
+    last_quote_at: datetime | None
+
+
+@dataclass(frozen=True)
 class OpenTrade:
     """A trade not exited yet, as kept: what a restarted trader goes on with."""
 
@@ -466,7 +507,7 @@ class TraderStore:
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.execute("PRAGMA synchronous=NORMAL")
         self._db.executescript(
-            f"BEGIN;{_SCHEMA.format(decisions=_DECISIONS.format(name='decisions'))}COMMIT;"
+            f"BEGIN;{_SCHEMA.format(decisions=_DECISIONS.format(name='decisions'))}{_STALLS}COMMIT;"
         )
         policy.ensure_schema(self._db)
         with self._db:
@@ -1114,6 +1155,60 @@ class TraderStore:
         ).fetchone()
         return None if row is None else dict(row)
 
+    # The stalls of the collector's quotes (#407, ``stall.py``).
+
+    def add_stall(self, mode: str, began_at: datetime, last_quote_at: datetime | None) -> Stall:
+        with self._db:
+            cursor = self._db.execute(
+                "INSERT INTO stalls (mode, began_at, last_quote_at) VALUES (?, ?, ?)",
+                (mode, iso(began_at), None if last_quote_at is None else iso(last_quote_at)),
+            )
+        assert cursor.lastrowid is not None
+        return Stall(cursor.lastrowid, mode, began_at, last_quote_at)
+
+    def end_stall(self, stall: int, at: datetime, how: str) -> None:
+        with self._db:
+            self._db.execute(
+                "UPDATE stalls SET ended_at = ?, ended_by = ? WHERE id = ? AND ended_at IS NULL",
+                (iso(at), how, stall),
+            )
+
+    def open_stall(self) -> Stall | None:
+        """The last stall not ended (the trader stopped during it), if any."""
+        row = self._db.execute(
+            "SELECT * FROM stalls WHERE ended_at IS NULL ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        if row is None:
+            return None
+        last = row["last_quote_at"]
+        return Stall(
+            row["id"],
+            row["mode"],
+            datetime.fromisoformat(row["began_at"]),
+            None if last is None else datetime.fromisoformat(last),
+        )
+
+    def read_rest(self, stall: int) -> None:
+        """One more REST quote read during ``stall`` (the mock book's, #407)."""
+        with self._db:
+            self._db.execute("UPDATE stalls SET rest_reads = rest_reads + 1 WHERE id = ?", (stall,))
+
+    def add_trade_stall(self, trade: int, stall: int) -> None:
+        """``trade`` open through ``stall``; kept once."""
+        with self._db:
+            self._db.execute(
+                "INSERT OR IGNORE INTO trade_stalls (trade_id, stall_id) VALUES (?, ?)", (trade, stall)
+            )
+
+    def stall_effect(self, trade: int, stall: int, effect: str) -> None:
+        """What ``stall`` did to ``trade``'s exit (``WAITED``, ``REST``)."""
+        with self._db:
+            self._db.execute(
+                "INSERT INTO trade_stalls (trade_id, stall_id, effect) VALUES (?, ?, ?)"
+                " ON CONFLICT (trade_id, stall_id) DO UPDATE SET effect = excluded.effect",
+                (trade, stall, effect),
+            )
+
     def _insert_trade(self, entry: Entry) -> int:
         """``entry``'s row in ``trades``, inside the caller's transaction."""
         cursor = self._db.execute(
@@ -1418,11 +1513,27 @@ def read_trades(
                     f"SELECT * FROM fills WHERE order_id IN ({','.join('?' * len(chunk))}) ORDER BY id", chunk
                 ):
                     fills.setdefault(f["order_id"], []).append(dict(f))
-        return [_trade_json(dict(r), orders.get(r["id"], []), fills) for r in rows]
+        stalls: dict[int, list[dict[str, Any]]] = {}
+        tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        if ids and "trade_stalls" in tables:  # a store the trader has not opened since #407: none
+            marks = ",".join("?" * len(ids))
+            for s in db.execute(
+                "SELECT ts.trade_id, ts.effect, s.began_at, s.last_quote_at, s.ended_at"
+                " FROM trade_stalls ts JOIN stalls s ON s.id = ts.stall_id"
+                f" WHERE ts.trade_id IN ({marks}) ORDER BY s.began_at, s.id",
+                ids,
+            ):
+                stalls.setdefault(s["trade_id"], []).append(
+                    {k: s[k] for k in ("began_at", "last_quote_at", "ended_at", "effect")}
+                )
+        return [_trade_json(dict(r), orders.get(r["id"], []), fills, stalls.get(r["id"], [])) for r in rows]
 
 
 def _trade_json(
-    row: dict[str, Any], orders: list[dict[str, Any]], fills: Mapping[int, list[dict[str, Any]]]
+    row: dict[str, Any],
+    orders: list[dict[str, Any]],
+    fills: Mapping[int, list[dict[str, Any]]],
+    stalls: list[dict[str, Any]],
 ) -> dict[str, Any]:
     closed = row["exit_at"] is not None
     return {
@@ -1478,4 +1589,7 @@ def _trade_json(
             }
             for o in orders
         ],
+        # The stalls of the collector's quotes the trade was open through (#407), and what each did
+        # to its exit.
+        "stalls": stalls,
     }

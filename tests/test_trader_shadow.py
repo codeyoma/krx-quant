@@ -115,6 +115,7 @@ class MockDesk:
                     broker=broker,
                     clock=lambda: clock[0],
                     timing=TIMING,
+                    stall_after=None,  # the made-up quotes are sparse (``trader_doubles.Day``)
                 )
                 desk.select(Selection((pick(BARRIER),)), self.started_at)
                 reader = EngineReader(self.state / ENGINE_DB, SYMBOL)

@@ -10,7 +10,8 @@ running challenger's):
   for again every ``PICK_RETRY_SECONDS``, and no cell trades until it is read: a pick is never
   older than the day's. A champion that cannot be read trades nothing (``NO_POLICY``) until the
   next pick;
-- the collector's quotes as they come (``quotes.follow_quotes``);
+- the collector's quotes as they come (``quotes.follow_quotes``), watched for a stall by the desk
+  (#407, ``stall.py``);
 - the engine's database every ``TraderSettings.poll_seconds`` (``cells.EngineReader``,
   read-only): the picked cells' new predictions, and the special windows the engine kept;
 - the clock every ``TICK_SECONDS`` (a rise that waited for the cells ranked above it, a time

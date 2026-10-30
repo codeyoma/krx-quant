@@ -68,6 +68,11 @@ challengers stay in paper. The trader holds no order code: the KIS order calls l
   stops new entries for the day. Beside it the champion policy's paper shadow keeps its paper
   record (``desk.Desk.shadow``): every record is paper's in every mode, and ``gap.py`` shows the
   KIS trades against the shadow's. ``mock_check.py`` compares a mock day's orders with KIS's.
+- **Quotes stalled** (``stall.py``, #407): more than five seconds without a quote in continuous
+  trading is a stall, kept and sent to Telegram with the quotes' return, once each: no book buys
+  anything new meanwhile; the mock champion keeps its open position's stop and time barrier on KIS's
+  best quotes read over REST on the trader's key (every two seconds, within its call limit), and a
+  paper book waits for the stream and keeps that wait on its trade.
 - **Store** (``store.py``): its picks of the cells, decisions, orders, fills and trades, each with
   its mode (``paper``, ``mock``) and its book's policy, the policy versions and the days each ran,
   the pauses, resumes and re-arms asked for, the halts, the failed orders, the trader's state now
