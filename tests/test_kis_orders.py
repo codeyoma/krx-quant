@@ -198,6 +198,16 @@ async def test_a_refused_order_is_not_sent_again_and_says_why(
     assert not account.orders
 
 
+async def test_a_side_neither_buy_nor_sell_sends_nothing(
+    trader: tuple[FakeKis, FakeAccount], tmp_path: Path
+) -> None:
+    fake, account = trader
+    async with broker_of(fake, settings_of(fake, tmp_path)) as broker:
+        with pytest.raises(ValueError, match="a side is 02"):
+            await broker.take(SYMBOL, "buy", 1, account.ask, DAY, wait=WAIT, poll=POLL)
+    assert not fake.posts_received
+
+
 async def test_a_refusal_of_a_code_not_known_gives_kis_s_message(
     trader: tuple[FakeKis, FakeAccount], tmp_path: Path
 ) -> None:

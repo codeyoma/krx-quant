@@ -777,7 +777,10 @@ class Broker:
         filled is the row's ``filled``, at its ``average``; a partial fill is a position of that.
 
         A refused order ends there. One without an answer, or accepted without naming its order, is
-        not followed: whether it went in, the inquiry shows (``Taken.left`` None)."""
+        not followed: whether it went in, the inquiry shows (``Taken.left`` None). ValueError for a
+        side that is neither ``SIDE_BUY`` nor ``SIDE_SELL``: nothing is sent."""
+        if side not in (SIDE_BUY, SIDE_SELL):
+            raise ValueError(f"a side is {SIDE_BUY} (buy) or {SIDE_SELL} (sell), got {side!r}")
         order = self.buy if side == SIDE_BUY else self.sell
         sent = await order(symbol, quantity, price)
         if not sent.accepted or sent.ref is None:
