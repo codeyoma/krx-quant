@@ -9,11 +9,13 @@ without closing them, as a half-open TCP connection does. Everything it
 receives is recorded so tests can assert on what the collector sent.
 
 REST POSTs are answered the same way, by TR ID (``rest_posts``), and a TR
-ID may get a per-second limit (``rest_limits``). ``FakeAccount`` puts a
-mock-trading account behind it (#403): cash orders, their cancel, the order
-and fill inquiry, the balance, the orderable cash, the quotes, and the
-encrypted real-time fill notice. Its fields follow KIS's examples, not the
-probe's evidence; its codes and messages are made up.
+ID may get a per-second limit (``rest_limits``) or refuse its next calls for
+it (``busy``). Tokens can be expired (``expire_tokens``). ``FakeAccount`` puts
+a mock-trading account behind it (#403, #404): cash orders, their cancel, the
+order and fill inquiry (full and partial fills), the balance, the orderable
+cash, the quotes, and the encrypted real-time fill notice. Its fields, codes
+and messages are those the order probe measured on KIS's mock server
+(``kis_orders.PROBE_COMMENT``) but where it says they are made up.
 """
 
 from __future__ import annotations
@@ -36,7 +38,7 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from krx_quant import kis_orders
 from krx_quant.feeds.stock import TRADE_COLUMNS
 from krx_quant.kis import WS_PATH
-from krx_quant.pricing import tick_size
+from krx_quant.pricing import SELL_TAX, tick_size
 
 # A canned REST answer: the JSON body, or the body and response headers.
 RestAnswer = dict[str, Any] | tuple[dict[str, Any], dict[str, str]]
@@ -81,7 +83,8 @@ class FakeKis:
     # The client's port of each REST request's connection, in the order of ``rest_requests``: a
     # new port is a new connection.
     rest_ports: list[int] = field(default_factory=list)
-    # REST POSTs: tr_id -> function of the JSON body returning the answer, as ``rest_responses``.
+    # REST POSTs: tr_id -> function of the JSON body returning the answer, as ``rest_responses``;
+    # it raises ConnectionResetError to drop the connection before answering.
     rest_posts: dict[str, Callable[[dict[str, Any]], RestAnswer]] = field(default_factory=dict)
     # POSTs received: (monotonic arrival time, tr_id, path, JSON body).
     posts_received: list[tuple[float, str, str, dict[str, Any]]] = field(default_factory=list)
@@ -90,6 +93,11 @@ class FakeKis:
     # none.
     rest_limits: dict[str, int] = field(default_factory=dict)
     _rest_times: dict[str, deque[float]] = field(default_factory=lambda: defaultdict(deque))
+    # REST calls (GET and POST) of a TR ID to refuse next with EGW00201, however few came this
+    # second: tr_id -> how many.
+    busy: dict[str, int] = field(default_factory=dict)
+    # Tokens KIS no longer takes (``expire_tokens``): a call with one is refused with EGW00123.
+    expired_tokens: set[str] = field(default_factory=set)
 
     _demo_count: int = 0
     _runner: web.AppRunner | None = None
@@ -141,6 +149,10 @@ class FakeKis:
             await ws.close()
         if self._runner is not None:
             await self._runner.cleanup()
+
+    def expire_tokens(self) -> None:
+        """Every token issued so far is no longer taken, as once it expires on KIS's side."""
+        self.expired_tokens.update(self.tokens_issued)
 
     def subscribed_keys(self) -> set[tuple[str, str]]:
         return {(s["body"]["input"]["tr_id"], s["body"]["input"]["tr_key"]) for s in self.subscriptions}
@@ -272,15 +284,25 @@ class FakeKis:
         """KIS's refusal of a REST call: a token or key it does not know, or one call too many
         this second; None if it is answered."""
         h = request.headers
+        token = h.get("authorization", "").removeprefix("Bearer ")
         if (
-            h.get("authorization", "").removeprefix("Bearer ") not in self.tokens_issued
+            token not in self.tokens_issued
             or h.get("appkey") != self.app_key
             or h.get("appsecret") != self.app_secret
         ):
             return web.json_response(
                 {"rt_cd": "1", "msg_cd": "EGW00123", "msg1": "invalid token"}, status=403
             )
+        if token in self.expired_tokens:
+            # The code the collector's client takes for a token KIS no longer accepts
+            # (``kis._TOKEN_REJECTED``); its status and message are made up (not seen on the mock).
+            expired = {"rt_cd": "1", "msg_cd": "EGW00123", "msg1": "기간이 만료된 token 입니다."}
+            return web.json_response(expired, status=500)
         tr_id = h.get("tr_id", "")
+        if self.busy.get(tr_id, 0) > 0:
+            self.busy[tr_id] -= 1
+            busy = {"rt_cd": "1", "msg_cd": BUSY_MSG_CD, "msg1": "초당 거래건수를 초과하였습니다."}
+            return web.json_response(busy, status=500)
         if tr_id in self.rest_limits:
             now, times = time.monotonic(), self._rest_times[tr_id]
             while times and now - times[0] >= 1.0:
@@ -301,7 +323,13 @@ class FakeKis:
         respond = self.rest_posts.get(tr_id)
         if respond is None:
             return web.json_response({"rt_cd": "1", "msg_cd": "OPSQ0002", "msg1": f"unknown tr_id {tr_id}"})
-        answer = respond(body)
+        try:
+            answer = respond(body)
+        except ConnectionResetError:
+            # KIS's answer lost: the connection dropped before it (what the call did is done).
+            assert request.transport is not None
+            request.transport.close()
+            raise
         answer_body, headers = answer if isinstance(answer, tuple) else (answer, {})
         return web.json_response(answer_body, headers=headers)
 
@@ -427,13 +455,24 @@ def encrypt(key: str, iv: str, text: str) -> str:
     return base64.b64encode(encryptor.update(padded) + encryptor.finalize()).decode()
 
 
-# The mock account's made-up refusals (KIS's own codes are what the probe records, #403).
-TICK_REFUSED = ("FK0001", "주문단가가 호가단위에 맞지 않습니다.")
-CASH_REFUSED = ("FK0002", "주문가능금액을 초과 했습니다.")
+# What the mock server answered (the order probe's comment on #403, ``kis_orders.PROBE_COMMENT``):
+# codes and messages as it gave them.
+BOUGHT = (kis_orders.BOUGHT, "모의투자 매수주문이 완료 되었습니다.")
+SOLD = (kis_orders.SOLD, "모의투자 매도주문이 완료 되었습니다.")
+CANCELLED = (kis_orders.CANCELLED, "모의투자 취소주문이 완료 되었습니다.")
+INQUIRED = (kis_orders.INQUIRED, "모의투자 조회가 완료되었습니다.")
+NO_ROWS = (kis_orders.NO_ROWS, "모의투자 조회할 내역(자료)이 없습니다.")
+QUOTED = (kis_orders.QUOTED, "정상처리 되었습니다.")
+OFF_TICK = ("40030000", "모의투자 주문처리가 안되었습니다(호가단위 오류)")
+NOT_HELD = ("40240000", "모의투자 잔고내역이 없습니다.")
+NOT_MOCK = (kis_orders.NOT_MOCK, "모의투자 TR 이 아닙니다.")
+# Not measured, made up: a sell of more shares than are held when some are, and a cancel of an
+# order with nothing left of it.
 SHARES_REFUSED = ("FK0003", "주문가능수량을 초과 했습니다.")
 NOTHING_TO_CANCEL = ("FK0004", "정정/취소할 수량이 없습니다.")
-UNSUPPORTED = ("FK0005", "모의투자에서는 해당업무가 제공되지 않습니다.")
-BUY_SIDE, SELL_SIDE = "02", "01"  # SLL_BUY_DVSN_CD
+BUY_SIDE, SELL_SIDE = kis_orders.SIDE_BUY, kis_orders.SIDE_SELL
+BRANCH = "01790"  # made up: the order's branch (KRX_FWDG_ORD_ORGNO, ord_gno_brno)
+NUMBERS_FROM = 31_401  # made up: the first order number
 
 
 @dataclass
@@ -447,7 +486,7 @@ class FakeOrder:
     price: int
     at: str  # HHMMSS
     filled: int = 0
-    fill_price: int = 0
+    amount: float = 0.0  # what filled, in won
     cancelled: int = 0  # cancelled of it (an order), or by it (a cancel)
     original: str = ""
 
@@ -455,16 +494,28 @@ class FakeOrder:
     def left(self) -> int:
         return self.quantity - self.filled - self.cancelled if not self.original else 0
 
+    @property
+    def average(self) -> float:
+        return self.amount / self.filled if self.filled else 0.0
+
 
 @dataclass
 class FakeAccount:
-    """A mock-trading account behind ``kis`` (#403), registered on it by ``install``.
+    """A mock-trading account behind ``kis`` (#403, #404), registered on it by ``install``.
 
-    A limit buy at the ask or above fills at the ask at once, a limit sell at the bid or below at
-    the bid, unless ``fills`` is off; any other rests until cancelled. A price off the tick, a buy
-    beyond the cash or a sell beyond the shares held is refused. Each order, fill, cancel and
-    refusal is told on the fill notice (encrypted, to every open WebSocket) when ``notices``.
-    The cancellable-orders inquiry is refused as unsupported, as KIS's example suggests of the mock.
+    A limit buy at the ask or above fills at once, a limit sell at the bid or below, unless
+    ``fills`` is off; any other rests until cancelled. As on the mock server, a fill is half a tick
+    better than the quote it crosses (``improvement``: the probe's one-share buy at the ask filled
+    half a tick under it, its sell at the bid half a tick over it). ``depth`` caps the shares a
+    marketable order fills at once (a partial fill: the rest rests). A price off the tick is
+    refused, and a sell of shares not held; a buy beyond the cash is not, as the mock accepted
+    one. Each order, fill, cancel and refusal is told on the fill notice (encrypted, to every open
+    WebSocket) when ``notices``: in KIS's example's 26 fields, or the first ``notice_fields`` of
+    them (the mock's records had 23). The cancellable-orders inquiry is not a mock TR (HTTP 500).
+
+    The deposit (``dnca_tot_amt``) stays the day's start (``cash``); the fills and their costs (the
+    commission ``fee_rate`` a side, the sell tax) move the deposit two days on
+    (``prvs_rcdl_excc_amt``), as on the mock server.
     """
 
     kis: FakeKis
@@ -480,10 +531,22 @@ class FakeAccount:
     # A marketable order fills only once its cancel comes (``fills`` off), which then finds nothing
     # to cancel: a fill that races the cancel.
     fills_late: bool = False
+    depth: int | None = None
+    improvement: float = 0.5  # ticks
+    fee_rate: float = 0.00014  # the mock's commission: thdt_tlex_amt rose by 0.00014 of a buy's amount
     notices: bool = True
+    notice_fields: int | None = None
     hts_id: str = "testhts01"
     account: str = "1234567801"
+    page_rows: int = 15  # rows a page of the inquiry (KIS's example's for the mock; not measured)
+    # The next orders whose answer is lost: taken, then the connection drops before the answer.
+    lose_answers: int = 0
     orders: list[FakeOrder] = field(default_factory=list)
+    flows: float = 0.0  # the day's fills and costs, in won: what moved the deposit two days on
+    bought: float = 0.0
+    sold: float = 0.0
+    costs: float = 0.0
+    paid: dict[str, float] = field(default_factory=dict)  # by symbol: what the shares held cost
     _pushes: set[asyncio.Task[None]] = field(default_factory=set)
 
     def install(self) -> FakeAccount:
@@ -493,7 +556,7 @@ class FakeAccount:
         self.kis.rest_responses[kis_orders.FILLS.mock] = self._fills
         self.kis.rest_responses[kis_orders.BALANCE.mock] = self._balance
         self.kis.rest_responses[kis_orders.ORDERABLE.mock] = self._orderable
-        self.kis.rest_responses[kis_orders.CANCELABLE.mock] = lambda _: _refusal(UNSUPPORTED)
+        self.kis.rest_responses[kis_orders.CANCELABLE.mock] = _not_mock
         self.kis.rest_responses[kis_orders.PRICE] = self._price
         self.kis.rest_responses[kis_orders.BOOK] = self._book
         return self
@@ -501,40 +564,72 @@ class FakeAccount:
     def placed(self, side: str) -> list[FakeOrder]:
         return [o for o in self.orders if o.side == side and not o.original]
 
+    @property
+    def settled(self) -> float:
+        """The deposit two days on (``prvs_rcdl_excc_amt``)."""
+        return self.cash + self.flows
+
+    def fill(self, order: FakeOrder, quantity: int | None = None) -> None:
+        """Fill ``quantity`` of what is left of ``order`` (all of it: None), half a tick better than
+        the ask (a buy) or the bid (a sell)."""
+        quantity = order.left if quantity is None else min(order.left, quantity)
+        if quantity <= 0:
+            return
+        quote = self.ask if order.side == BUY_SIDE else self.bid
+        better = self.improvement * tick_size(quote)
+        price = quote - better if order.side == BUY_SIDE else quote + better
+        amount = quantity * price
+        order.filled += quantity
+        order.amount += amount
+        fee = amount * self.fee_rate
+        if order.side == BUY_SIDE:
+            self.flows -= amount + fee
+            self.bought += amount
+            self.costs += fee
+            self.paid[order.symbol] = self.paid.get(order.symbol, 0.0) + amount
+        else:
+            tax = amount * SELL_TAX
+            held = self.holdings.get(order.symbol, 0)
+            self.paid[order.symbol] = (
+                self.paid.get(order.symbol, 0.0) * (held - quantity) / held if held else 0.0
+            )
+            self.flows += amount - fee - tax
+            self.sold += amount
+            self.costs += fee + tax
+        change = quantity if order.side == BUY_SIDE else -quantity
+        self.holdings[order.symbol] = self.holdings.get(order.symbol, 0) + change
+        self._tell(order, "2", "0", "2", quantity, round(price))
+
     def _order(self, body: dict[str, Any]) -> RestAnswer:
         side = SELL_SIDE if "SLL_TYPE" in body else BUY_SIDE
         symbol, quantity, price = str(body["PDNO"]), int(body["ORD_QTY"]), int(body["ORD_UNPR"])
         if price % tick_size(price):
-            return self._refuse(TICK_REFUSED, side, symbol, quantity, price)
-        if side == BUY_SIDE and quantity * price > self.cash - self._held_cash():
-            return self._refuse(CASH_REFUSED, side, symbol, quantity, price)
-        if side == SELL_SIDE and quantity > self.holdings.get(symbol, 0) - self._held_shares(symbol):
+            return self._refuse(OFF_TICK, side, symbol, quantity, price)
+        if side == SELL_SIDE and not self.holdings.get(symbol, 0):
+            return self._refuse(NOT_HELD, side, symbol, quantity, price)
+        if side == SELL_SIDE and quantity > self.holdings[symbol] - self._held_shares(symbol):
             return self._refuse(SHARES_REFUSED, side, symbol, quantity, price)
         order = FakeOrder(self._number(), side, symbol, quantity, price, self._now())
         self.orders.append(order)
         self._tell(order, "1", "0", "1", quantity, price)
         if self.fills and self._marketable(order):
-            self._fill(order)
-        return _accepted(order, "주문 전송 완료 되었습니다.")
+            self.fill(order, self.depth)
+        answer = _accepted(order, BOUGHT if side == BUY_SIDE else SOLD)
+        if self.lose_answers > 0:
+            self.lose_answers -= 1
+            raise ConnectionResetError("the answer is lost")
+        return answer
 
     def _marketable(self, order: FakeOrder) -> bool:
         return order.price >= self.ask if order.side == BUY_SIDE else order.price <= self.bid
 
-    def _fill(self, order: FakeOrder) -> None:
-        """Fill what is left of ``order`` at the ask (a buy) or the bid (a sell)."""
-        quantity = order.left
-        order.filled += quantity
-        order.fill_price = self.ask if order.side == BUY_SIDE else self.bid
-        amount = quantity * order.fill_price
-        self.cash += -amount if order.side == BUY_SIDE else amount
-        change = quantity if order.side == BUY_SIDE else -quantity
-        self.holdings[order.symbol] = self.holdings.get(order.symbol, 0) + change
-        self._tell(order, "2", "0", "2", quantity, order.fill_price)
-
     def _cancel(self, body: dict[str, Any]) -> RestAnswer:
-        original = next((o for o in self.orders if o.number == str(body["ORGN_ODNO"])), None)
+        number = str(body["ORGN_ODNO"])
+        original = next(
+            (o for o in self.orders if not o.original and kis_orders.same_number(o.number, number)), None
+        )
         if original is not None and self.fills_late and original.left > 0 and self._marketable(original):
-            self._fill(original)
+            self.fill(original)
         if original is None or original.left <= 0:
             return _refusal(NOTHING_TO_CANCEL)
         cancel = FakeOrder(
@@ -550,7 +645,7 @@ class FakeAccount:
         original.cancelled += original.left
         self.orders.append(cancel)
         self._tell(cancel, "1", "2", "2", cancel.quantity, original.price)
-        return _accepted(cancel, "정정/취소 주문 전송 완료 되었습니다.")
+        return _accepted(cancel, CANCELLED)
 
     def _refuse(
         self, refusal: tuple[str, str], side: str, symbol: str, quantity: int, price: int
@@ -560,12 +655,17 @@ class FakeAccount:
         return _refusal(refusal)
 
     def _fills(self, params: dict[str, str]) -> RestAnswer:
+        """The day's orders, oldest first, ``page_rows`` a page (the next asked by the offset in
+        ``CTX_AREA_NK100``, ``tr_cont`` M while there are more)."""
         rows = [
             self._row(o)
             for o in self.orders
-            if (not params.get("ODNO") or o.number == params["ODNO"])
+            if (not params.get("ODNO") or kis_orders.same_number(o.number, params["ODNO"]))
             and (not params.get("PDNO") or o.symbol == params["PDNO"])
         ]
+        start = int(params.get("CTX_AREA_NK100") or 0)
+        page = rows[start : start + self.page_rows]
+        more = start + self.page_rows < len(rows)
         totals = {
             "tot_ord_qty": str(sum(int(r["ord_qty"]) for r in rows)),
             "tot_ccld_qty": str(sum(int(r["tot_ccld_qty"]) for r in rows)),
@@ -573,103 +673,174 @@ class FakeAccount:
             "pchs_avg_pric": "0.0000",
             "prsm_tlex_smtl": "0",
         }
-        return {
-            "rt_cd": "0",
-            "msg_cd": "FK0000",
-            "msg1": "조회가 완료되었습니다.",
-            "output1": rows,
+        code, message = INQUIRED if rows else NO_ROWS
+        body = {
+            "ctx_area_fk100": "",
+            "ctx_area_nk100": str(start + self.page_rows) if more else "",
+            "output1": page,
             "output2": totals,
+            "rt_cd": "0",
+            "msg_cd": code,
+            "msg1": message,
         }
+        return body, {"tr_cont": "M" if more else "E"}
 
     def _row(self, o: FakeOrder) -> dict[str, str]:
+        side = "매수" if o.side == BUY_SIDE else "매도"
         return {
             "ord_dt": self.today.strftime("%Y%m%d"),
-            "ord_gno_brno": "01790",
+            "ord_gno_brno": BRANCH,
             "odno": o.number,
-            "orgn_odno": o.original,
-            "ord_dvsn_name": "지정가",
+            "orgn_odno": o.original or "0",
+            "ord_dvsn_name": "보통가",
             "sll_buy_dvsn_cd": o.side,
-            "sll_buy_dvsn_cd_name": "현금매수" if o.side == BUY_SIDE else "현금매도",
+            "sll_buy_dvsn_cd_name": side + ("취소" if o.original else ""),
             "pdno": o.symbol,
             "prdt_name": "삼성전자",
             "ord_qty": str(o.quantity),
             "ord_unpr": str(o.price),
             "ord_tmd": o.at,
             "tot_ccld_qty": str(o.filled),
-            "avg_prvs": str(o.fill_price),
+            "avg_prvs": _price_text(o.average),
             "cncl_yn": "Y" if o.original else "N",
-            "tot_ccld_amt": str(o.filled * o.fill_price),
+            "tot_ccld_amt": str(round(o.amount)),
             "ord_dvsn_cd": "00",
-            "cnc_cfrm_qty": str(o.cancelled if o.original else 0),
+            "cncl_cfrm_qty": str(o.cancelled if o.original else 0),
             "rmn_qty": str(o.left),
             "rjct_qty": "0",
+            "ccld_cndt_name": "",
+            "infm_tmd": o.at,
+            "prdt_type_cd": "",
+            "excg_dvsn_cd": "",
             "excg_id_dvsn_cd": "KRX",
-            # What KIS's example lists beside them, made up here: a phone number and an IP address.
+            "stpm_cndt_pric": "0",
+            "stpm_efct_occr_dtmd": "",
+            "loan_dt": "",
+            "ord_orgno": "",
+            "ordr_empno": "",
+            "rsvn_ord_end_dt": "",
+            "cpbc_ordp_infm_mthd_dvsn_cd": "",
+            "cpbc_ordp_mtrl_dvsn_cd": "",
+            "cpbc_ordp_ord_rcit_dvsn_cd": "",
+            # Empty on the mock server; made up here, a phone number and an IP address, for the tests
+            # to see the probe keep them out.
             "ctac_tlno": "01012345678",
             "inqr_ip_addr": "10.11.12.13",
         }
 
     def _balance(self, params: dict[str, str]) -> RestAnswer:
-        rows = [
-            {
-                "pdno": symbol,
-                "prdt_name": "삼성전자",
-                "hldg_qty": str(quantity),
-                "ord_psbl_qty": str(quantity - self._held_shares(symbol)),
-                "pchs_avg_pric": f"{self.ask}.0000",
-                "pchs_amt": str(quantity * self.ask),
-                "prpr": str(self.price),
-                "evlu_amt": str(quantity * self.price),
-                "evlu_pfls_amt": str(quantity * (self.price - self.ask)),
-            }
-            for symbol, quantity in self.holdings.items()
-            if quantity
-        ]
+        rows = []
+        for symbol, quantity in self.holdings.items():
+            if not quantity:
+                continue  # the mock server drops a symbol sold out
+            paid = self.paid.get(symbol, 0.0)
+            value = quantity * self.price
+            rows.append(
+                {
+                    "pdno": symbol,
+                    "prdt_name": "삼성전자",
+                    "trad_dvsn_name": "현금",
+                    "bfdy_buy_qty": "0",
+                    "bfdy_sll_qty": "0",
+                    "thdt_buyqty": str(sum(o.filled for o in self.placed(BUY_SIDE) if o.symbol == symbol)),
+                    "thdt_sll_qty": str(sum(o.filled for o in self.placed(SELL_SIDE) if o.symbol == symbol)),
+                    "hldg_qty": str(quantity),
+                    "ord_psbl_qty": str(quantity - self._held_shares(symbol)),
+                    "pchs_avg_pric": f"{paid / quantity:.4f}",
+                    "pchs_amt": str(round(paid)),
+                    "prpr": str(self.price),
+                    "evlu_amt": str(value),
+                    "evlu_pfls_amt": str(round(value - paid)),
+                    "evlu_pfls_rt": "0.00",
+                    "fltt_rt": "0.00000000",
+                    "bfdy_cprs_icdc": "0",
+                }
+            )
+        held = sum(int(r["evlu_amt"]) for r in rows)
+        paid_all = sum(int(r["pchs_amt"]) for r in rows)
+        settled = round(self.settled)
         totals = {
             "dnca_tot_amt": str(self.cash),
             "nxdy_excc_amt": str(self.cash),
-            "prvs_rcdl_excc_amt": str(self.cash),
-            "tot_evlu_amt": str(self.cash + sum(int(r["evlu_amt"]) for r in rows)),
+            "prvs_rcdl_excc_amt": str(settled),
+            "cma_evlu_amt": "0",
+            "bfdy_buy_amt": "0",
+            "thdt_buy_amt": str(round(self.bought)),
+            "nxdy_auto_rdpt_amt": "0",
+            "bfdy_sll_amt": "0",
+            "thdt_sll_amt": str(round(self.sold)),
+            "d2_auto_rdpt_amt": "0",
+            "bfdy_tlex_amt": "0",
+            "thdt_tlex_amt": str(round(self.costs)),
+            "tot_loan_amt": "0",
+            "scts_evlu_amt": str(held),
+            "tot_evlu_amt": str(settled + held),
+            "nass_amt": str(settled + held),
+            "fncg_gld_auto_rdpt_yn": "",
+            "pchs_amt_smtl_amt": str(paid_all),
+            "evlu_amt_smtl_amt": str(held),
+            "evlu_pfls_smtl_amt": str(held - paid_all),
+            "tot_stln_slng_chgs": "0",
+            "bfdy_tot_asst_evlu_amt": str(self.cash),
+            "asst_icdc_amt": str(settled + held - self.cash),
+            "asst_icdc_erng_rt": "0.00000000",
         }
-        return {
-            "rt_cd": "0",
-            "msg_cd": "FK0000",
-            "msg1": "조회가 완료되었습니다.",
+        code, message = INQUIRED
+        body = {
+            "ctx_area_fk100": "",
+            "ctx_area_nk100": "",
             "output1": rows,
             "output2": [totals],
+            "rt_cd": "0",
+            "msg_cd": code,
+            "msg1": message,
         }
+        return body, {"tr_cont": "D" if rows else "E"}
 
     def _orderable(self, params: dict[str, str]) -> RestAnswer:
         price = int(params["ORD_UNPR"]) if params.get("ORD_UNPR") else self.upper
-        free = self.cash - self._held_cash()
+        free = max(0, round(self.settled - self._held_cash()))
+        shares = int(free // (price * (1 + self.fee_rate)))
         output = {
             "ord_psbl_cash": str(free),
-            "nrcvb_buy_amt": str(free),
-            "nrcvb_buy_qty": str(free // price),
-            "max_buy_amt": str(free),
-            "max_buy_qty": str(free // price),
+            "ord_psbl_sbst": "0",
+            "ruse_psbl_amt": "0",
+            "fund_rpch_chgs": "0",
             "psbl_qty_calc_unpr": str(price),
+            "nrcvb_buy_amt": str(round(shares * price)),
+            "nrcvb_buy_qty": str(shares),
+            "max_buy_amt": str(round(shares * price)),
+            "max_buy_qty": str(shares),
+            "cma_evlu_amt": "0",
+            "ovrs_re_use_amt_wcrc": "0",
+            "ord_psbl_frcr_amt_wcrc": "0",
         }
-        return {"rt_cd": "0", "msg_cd": "FK0000", "msg1": "매수가능 조회가 완료되었습니다.", "output": output}
+        code, message = INQUIRED
+        return {"output": output, "rt_cd": "0", "msg_cd": code, "msg1": message}, {"tr_cont": "E"}
 
     def _price(self, params: dict[str, str]) -> RestAnswer:
         output = {
+            "stck_shrn_iscd": params.get("FID_INPUT_ISCD", ""),
             "stck_prpr": str(self.price),
             "stck_mxpr": str(self.upper),
             "stck_llam": str(self.lower),
+            "stck_sdpr": str(self.price),
             "aspr_unit": str(tick_size(self.price)),
+            "vi_cls_code": "N",
         }
-        return {"rt_cd": "0", "msg_cd": "FK0000", "msg1": "정상처리 되었습니다.", "output": output}
+        code, message = QUOTED
+        return {"output": output, "rt_cd": "0", "msg_cd": code, "msg1": message}
 
     def _book(self, params: dict[str, str]) -> RestAnswer:
-        book = {"aspr_acpt_hour": "100000", "askp1": str(self.ask), "bidp1": str(self.bid)}
-        return {
-            "rt_cd": "0",
-            "msg_cd": "FK0000",
-            "msg1": "정상처리 되었습니다.",
-            "output1": book,
-            "output2": {},
+        book = {
+            "aspr_acpt_hour": "100000",
+            "askp1": str(self.ask),
+            "bidp1": str(self.bid),
+            "askp_rsqn1": "1500",
+            "bidp_rsqn1": "2500",
         }
+        code, message = QUOTED
+        return {"output1": book, "output2": {}, "rt_cd": "0", "msg_cd": code, "msg1": message}
 
     def _held_cash(self) -> int:
         return sum(o.left * o.price for o in self.orders if o.side == BUY_SIDE)
@@ -678,7 +849,8 @@ class FakeAccount:
         return sum(o.left for o in self.orders if o.side == SELL_SIDE and o.symbol == symbol)
 
     def _number(self) -> str:
-        return f"{len(self.orders) + 1:010d}"
+        """A new order number, made up: ten digits, leading zeros (ODNO and odno are int-looking)."""
+        return f"{NUMBERS_FROM + len(self.orders):010d}"
 
     @staticmethod
     def _now() -> str:
@@ -715,7 +887,7 @@ class FakeAccount:
             "RFUS_YN": "1" if refused else "0",
             "CNTG_YN": filled,
             "ACPT_YN": accepted,
-            "BRNC_NO": "01790",
+            "BRNC_NO": BRANCH,
             "ODER_QTY": str(order.quantity),
             "ACNT_NAME": "홍길동",
             "ORD_COND_PRC": "0",
@@ -727,20 +899,30 @@ class FakeAccount:
             "CNTG_ISNM40": "삼성전자",
             "ODER_PRC": str(order.price),
         }
-        fields = "^".join(values[c] for c in kis_orders.FILL_NOTICE_COLUMNS)
+        columns = kis_orders.FILL_NOTICE_COLUMNS[: self.notice_fields]
+        fields = "^".join(values[c] for c in columns)
         frame = f"1|{kis_orders.FILL_NOTICE.mock}|001|{encrypt(NOTICE_KEY, NOTICE_IV, fields)}"
         task = asyncio.get_running_loop().create_task(self.kis.push(frame))
         self._pushes.add(task)
         task.add_done_callback(self._pushes.discard)
 
 
-_DONE = {"rt_cd": "0", "msg_cd": "FK0000", "msg1": "조회가 완료되었습니다."}
-
-
-def _accepted(order: FakeOrder, message: str) -> RestAnswer:
-    output = {"KRX_FWDG_ORD_ORGNO": "01790", "ODNO": order.number, "ORD_TMD": order.at}
-    return {"rt_cd": "0", "msg_cd": "FK0000", "msg1": message, "output": output}
+def _accepted(order: FakeOrder, said: tuple[str, str]) -> RestAnswer:
+    output = {"KRX_FWDG_ORD_ORGNO": BRANCH, "ODNO": order.number, "ORD_TMD": order.at, "SOR_ODNO": ""}
+    return {"rt_cd": "0", "msg_cd": said[0], "msg1": said[1], "output": output}
 
 
 def _refusal(refusal: tuple[str, str]) -> RestAnswer:
     return {"rt_cd": "1", "msg_cd": refusal[0], "msg1": refusal[1]}
+
+
+def _not_mock(params: dict[str, str]) -> RestAnswer:
+    body = {"rt_cd": "1", "msg_cd": NOT_MOCK[0], "msg1": NOT_MOCK[1]}
+    raise web.HTTPInternalServerError(
+        text=json.dumps(body, ensure_ascii=False), content_type="application/json"
+    )
+
+
+def _price_text(value: float) -> str:
+    """A price as KIS writes it: whole, or with its decimals."""
+    return str(int(value)) if float(value).is_integer() else f"{value:.4f}"

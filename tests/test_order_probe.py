@@ -1,9 +1,10 @@
 """The order probe (#403): what it places on KIS's mock server, what it refuses, and what its
 report shows and keeps out.
 
-KIS is the fake one (``fake_kis.FakeKis`` with a ``FakeAccount``); its codes and messages are
-made up, so these tests check what the probe does with an answer, not what KIS answers. Every
-value here is made up too: the keys, the account, the HTS ID.
+KIS is the fake one (``fake_kis.FakeKis`` with a ``FakeAccount``), answering with the codes and
+messages the probe measured on the mock server (#403) where it has them; these tests check what the
+probe does with an answer, not what KIS answers. Every value here is made up: the keys, the
+account, the HTS ID, the prices.
 """
 
 from __future__ import annotations
@@ -190,9 +191,10 @@ async def test_a_run_buys_and_sells_one_share_and_cancels_a_far_order(
     assert {tr_id for _, tr_id, _, _ in fake.posts_received} == mock_ids
     assert all(tr_id.startswith("V") for _, tr_id, _, _ in fake.posts_received)
     # Four buys (off the tick, beyond the cash, the far one, the marketable one), two sells (of
-    # shares not held, the marketable one) and one cancel (the far one's).
+    # shares not held, the marketable one) and two cancels: the buy beyond the cash, which the mock
+    # accepts (#403), and the far one.
     buys, sells = posted(fake, kis_orders.BUY), posted(fake, kis_orders.SELL)
-    assert len(buys) == 4 and len(sells) == 2 and len(posted(fake, kis_orders.CANCEL)) == 1
+    assert len(buys) == 4 and len(sells) == 2 and len(posted(fake, kis_orders.CANCEL)) == 2
     assert [b["ORD_QTY"] for b in buys][2:] == ["1", "1"] and sells[-1]["ORD_QTY"] == "1"
     assert all(b["EXCG_ID_DVSN_CD"] == "KRX" and b["ORD_DVSN"] == "00" for b in [*buys, *sells])
     assert int(buys[-1]["ORD_UNPR"]) == account.ask and int(sells[-1]["ORD_UNPR"]) == account.bid
@@ -206,18 +208,27 @@ async def test_a_run_buys_and_sells_one_share_and_cancels_a_far_order(
     for section in range(1, 15):
         assert f"\n{section}. " in f"\n{text}", section
     assert "  - 곧바로 다시: HTTP 200" in text and "첫 토큰과 다르다" in text
-    assert "  - HTTP 200 FK0000 5건" in text  # the burst
-    assert "a. 호가 단위가 아닌 가격(하한가 + 1원) 매수 1주: HTTP 200 · rt_cd 1 · msg_cd FK0001" in text
+    assert "  - HTTP 200 20310000 5건" in text  # the burst
+    assert "a. 호가 단위가 아닌 가격(하한가 + 1원) 매수 1주: HTTP 200 · rt_cd 1 · msg_cd 40030000" in text
     assert (
-        "b. 미수 없는 매수 수량(nrcvb_buy_qty) + 1주를 하한가에 매수: HTTP 200 · rt_cd 1 · msg_cd FK0002"
+        "b. 미수 없는 매수 수량(nrcvb_buy_qty) + 1주를 하한가에 매수: HTTP 200 · rt_cd 0 · msg_cd 40600000"
         in (text)
     )
-    assert "c. 들고 있지 않은 주식(상한가) 매도 1주: HTTP 200 · rt_cd 1 · msg_cd FK0003" in text
-    assert "  - 정정취소가능주문조회: HTTP 200 · rt_cd 1 · msg_cd FK0005" in text
+    assert "    받아들였다(output 필드: int: KRX_FWDG_ORD_ORGNO, ODNO, ORD_TMD · empty: SOR_ODNO)" in text
+    assert "c. 들고 있지 않은 주식(상한가) 매도 1주: HTTP 200 · rt_cd 1 · msg_cd 40240000" in text
+    assert "  - 정정취소가능주문조회: HTTP 500 · rt_cd 1 · msg_cd EGW02006" in text
+    assert "주문 응답과 견줌: odno는 ODNO와 같다, ord_gno_brno는 KRX_FWDG_ORD_ORGNO와 같다" in text
     assert "원주문: " in text and "취소 주문(orgn_odno = 원주문): " in text and "cncl_yn Y" in text
-    assert "  - 체결: 1주, 조회 1번째" in text and "avg_prvs 주문가 +0틱" in text
+    assert "cncl_cfrm_qty 1" in text  # the cancel's row, by its name on the mock server
+    # Filled half a tick better than the order's price, as on the mock server.
+    assert (
+        "  - 체결: 1주, 조회 1번째" in text
+        and "avg_prvs 주문가 -0.5틱" in text
+        and "avg_prvs 주문가 +0.5틱" in text
+    )
     assert "보유.hldg_qty +1" in text and "보유.hldg_qty -1" in text
-    assert "합계.dnca_tot_amt -1.00000" in text  # the cash fell by the fill's amount
+    # The deposit two days on fell by the fill's amount and its commission; the deposit stayed.
+    assert "합계.prvs_rcdl_excc_amt -1.000" in text and "합계.dnca_tot_amt" not in text
     assert "  - 구독 응답: rt_cd 0 · msg_cd OPSP0000" in text and "key 32자, iv 16자" in text
     assert "  - 필드 26개로 나뉜 레코드" in text and "통보 없음" not in text
     assert "  - 9. 즉시 체결 지정가 매수: 1·0·0·1·02" in text and "2·0·0·2·02" in text
@@ -232,13 +243,14 @@ async def test_the_report_shows_no_key_account_order_number_or_personal_field(
     code, text = await probe(settings, fake)
     assert code == 0, text
     numbers = [o.number for o in account.orders]
-    assert len(numbers) == 4
+    assert len(numbers) == 6  # two buys and their cancels, the marketable buy and sell
     hidden = [TRADER_KEY, TRADER_SECRET, ACCOUNT, "9876543201", "98765432", HTS_ID, *numbers]
     hidden += ["01012345678", "10.11.12.13", "홍길동", "01790", *fake.tokens_issued]
     for value in hidden:
         assert value not in text, value
     # Nor a price: each against the order's own, in ticks.
-    for price in (account.ask, account.bid, account.lower, account.upper, account.price):
+    fills = [round(o.average) for o in account.orders if o.filled]
+    for price in (account.ask, account.bid, account.lower, account.upper, account.price, *fills):
         assert str(price) not in text, price
     # By its look instead.
     assert "ctac_tlno" in text and "ODNO" in text and "ACNT_NO" in text
@@ -279,6 +291,33 @@ async def test_with_an_hts_id_notices_that_cannot_be_decrypted_leave_the_run_not
     assert "  - 풀리지 않은 프레임 " in text and "체결 통보 안 됨" in text
 
 
+async def test_notices_of_another_width_are_shown_by_position_without_a_value(
+    trader: tuple[FakeKis, FakeAccount], tmp_path: Path
+) -> None:
+    # The mock server's records had 23 fields where KIS's example names 26 (#403): the run is not
+    # done, and each position is shown by its look for a later change to name it.
+    fake, account = trader
+    account.notice_fields = 23
+    code, text = await probe(trader_settings(fake, tmp_path), fake, timing=replace(FAST, notice_wait=0.5))
+    assert code == INCOMPLETE
+    assert "체결 통보 안 됨" in text
+    assert "  - 레코드 1개에 필드가 23개인 프레임 " in text
+    assert (
+        "  - 23칸 레코드 " in text
+        and "의 칸별 모양(FILL_NOTICE_COLUMNS는 26칸이라 이름을 붙이지 못한다" in text
+    )
+    lines = {line.split(":", 1)[0].strip(): line for line in text.splitlines() if line.startswith("    칸 ")}
+    assert len(lines) == 23
+    # The fake's first fields are KIS's example's: the HTS ID, the account, the order numbers.
+    assert "= HTS ID " in lines["칸 1"] and "text" in lines["칸 1"]
+    assert "= 계좌 " in lines["칸 2"] and "10자" in lines["칸 2"]
+    assert "= 주문번호 " in lines["칸 3"] and "= 종목코드 " in lines["칸 9"]
+    assert "= KRX_FWDG_ORD_ORGNO " in lines["칸 16"]
+    numbers = [o.number for o in account.orders]
+    for value in [HTS_ID, "9876543201", "01790", "홍길동", *numbers, str(account.ask), str(account.bid)]:
+        assert value not in text, value
+
+
 async def test_an_order_that_does_not_fill_is_cancelled_tried_once_more_and_nothing_is_sold(
     trader: tuple[FakeKis, FakeAccount], tmp_path: Path
 ) -> None:
@@ -291,7 +330,7 @@ async def test_an_order_that_does_not_fill_is_cancelled_tried_once_more_and_noth
     assert "매수 체결 안 됨, 매도 체결 안 됨" in text
     # Both tries were cancelled, and only the share not held was offered for sale.
     assert len(posted(fake, kis_orders.BUY)) == 5 and len(posted(fake, kis_orders.SELL)) == 1
-    assert len(posted(fake, kis_orders.CANCEL)) == 3
+    assert len(posted(fake, kis_orders.CANCEL)) == 4  # with the far buy's and the one beyond the cash
     assert all(o.left == 0 for o in account.orders) and account.holdings.get(SYMBOL, 0) == 0
 
 
@@ -346,7 +385,7 @@ async def test_the_burst_shows_the_per_second_limit(
     # A second after the burst, its four leave the fake's window before the paced reads.
     code, text = await probe(trader_settings(fake, tmp_path), fake, timing=replace(FAST, burst_rest=1.05))
     assert code == 0, text
-    assert "  - HTTP 200 FK0000 4건, HTTP 500 EGW00201 1건" in text
+    assert "  - HTTP 200 20310000 4건, HTTP 500 EGW00201 1건" in text
     assert '  - 한도를 넘은 응답: HTTP 500 · "초당 거래건수를 초과하였습니다."' in text
     assert "  - 초당 한도(EGW00201) 1번" in text
 

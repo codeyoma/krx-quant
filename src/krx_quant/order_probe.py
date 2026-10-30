@@ -17,8 +17,10 @@ the trader's own mock account (``KRX_TRADER_KIS_*``, never the collector's key),
 6. the fill notice: its subscription by the HTS ID, kept open to the end (none without it);
 7. three orders KIS should refuse, at prices that cannot fill: a price off the tick, more than the
    cash buys, a sell of shares not held;
-8. a buy at the day's lower limit, which does not fill, the cancellable orders, its inquiry, its
-   cancel and the inquiry after;
+8. a buy at the day's lower limit, which does not fill, the cancellable orders, its inquiry
+   (whether its ``odno`` and ``ord_gno_brno`` are the answer's ``ODNO`` and
+   ``KRX_FWDG_ORD_ORGNO``: a cancel names an order by them, #406), its cancel and the inquiry
+   after;
 9. a marketable limit buy of ``QUANTITY`` share at the best ask, its fill by the inquiry, what is
    left of it cancelled after ``Timing.fill_wait`` (and once more at the new ask if none filled);
 10. the account after the buy, by what changed (amounts as a multiple of the fill's amount);
@@ -26,7 +28,11 @@ the trader's own mock account (``KRX_TRADER_KIS_*``, never the collector's key),
 12. the account after the sell;
 13. the fill notices: their frames, decrypted, by kind, matched to the orders, with how long after
     each order's answer they came; with an HTS ID, a step that is done only if the subscription
-    was answered with its key and IV and a notice could be read (a run without one is not done);
+    was answered with its key and IV and a notice could be read (a run without one is not done).
+    Records of a width ``FILL_NOTICE_COLUMNS`` does not name (the mock server's 23 on 2026-10-30,
+    #403) are shown by position instead (``layout``): each field's look, lengths, how many values
+    it took and what it equals of the orders, the account and the HTS ID, never its value, for a
+    later change to name the columns; the step is then not done;
 14. a summary: the calls, KIS's per-second refusals, and whether every step was done.
 
 An order it placed that is still open at the end is cancelled. A run a restart cuts may leave a
@@ -75,10 +81,11 @@ from krx_quant.kis_orders import (
     issue_token,
     listen_fill_notices,
     order_ref,
+    same_number,
 )
 from krx_quant.market_calendar import MarketCalendar, calendar_store
 from krx_quant.pricing import tick_size
-from krx_quant.probe_fields import describe, flags, present
+from krx_quant.probe_fields import describe, flag, flags, present
 from krx_quant.ratelimit import RateLimiter
 from krx_quant.redaction import redact, secrets_of
 
@@ -105,7 +112,7 @@ SHOWN = frozenset(
         *("rt_cd", "msg_cd", "msg1", "pdno", "prdt_name", "sll_buy_dvsn_cd", "sll_buy_dvsn_cd_name"),
         *("ord_dvsn_cd", "ord_dvsn_name", "excg_id_dvsn_cd", "excg_dvsn_cd", "prdt_type_cd"),
         *("ccld_cndt_name", "cncl_yn", "ord_dt", "ord_tmd", "infm_tmd", "aspr_unit", "aspr_acpt_hour"),
-        *("ord_qty", "tot_ccld_qty", "rmn_qty", "rjct_qty", "cnc_cfrm_qty", "tot_ord_qty"),
+        *("ord_qty", "tot_ccld_qty", "rmn_qty", "rjct_qty", "cncl_cfrm_qty", "tot_ord_qty"),
         *("hldg_qty", "ord_psbl_qty", "thdt_buyqty", "thdt_sll_qty", "bfdy_buy_qty", "bfdy_sll_qty"),
         # the fill notice's
         *("seln_byov_cls", "rctf_cls", "oder_kind", "oder_cond", "stck_shrn_iscd", "cntg_qty"),
@@ -434,7 +441,7 @@ class _Probe:
             if not answer.more or page == PAGES - 1:
                 say(f"  - 잔고: {said(answer)}, {page + 1}쪽" + (" (더 있음)" if answer.more else ""))
                 break
-            context = _context(answer)
+            context = answer.context
         mine = [r for r in holdings if str(r.get("pdno", "")).strip() == SYMBOL]
         say(f"    보유 {len(holdings)}행, {SYMBOL} {'있음' if mine else '없음'}")
         if before is None:
@@ -561,6 +568,10 @@ class _Probe:
             say(f"    {values_of(row, ref=price)}")
         if rows:
             say(f"    필드: {fields_of(rows)}")
+            # Whether a cancel can name an order found on the inquiry alone (#406), by its values.
+            number = _alike(rows[0].get("odno"), placed.ref.number)
+            branch = _alike(rows[0].get("ord_gno_brno"), placed.ref.branch)
+            say(f"    주문 응답과 견줌: odno는 ODNO와 {number}, ord_gno_brno는 KRX_FWDG_ORD_ORGNO와 {branch}")
         cancel = await self.cancel(placed)
         if cancel is None or cancel.ref is None:
             say("")
@@ -570,12 +581,15 @@ class _Probe:
         related = [
             r
             for r in day.rows("output1")
-            if _same_no(r.get("odno"), placed.ref.number) or _same_no(r.get("orgn_odno"), placed.ref.number)
+            if same_number(r.get("odno"), placed.ref.number)
+            or same_number(r.get("orgn_odno"), placed.ref.number)
         ]
         say(f"  - 취소 뒤 오늘 {SYMBOL} 조회: {said(day)}, 그 주문과 취소의 행 {len(related)}")
         for row in related:
             role = (
-                "원주문" if _same_no(row.get("odno"), placed.ref.number) else "취소 주문(orgn_odno = 원주문)"
+                "원주문"
+                if same_number(row.get("odno"), placed.ref.number)
+                else "취소 주문(orgn_odno = 원주문)"
             )
             say(f"    {role}: {values_of(row, ref=price)}")
         say("")
@@ -691,7 +705,7 @@ class _Probe:
             # Cleared before the frames are read: a frame after the read sets it again.
             self.notices.changed.clear()
             told = [r for _, r in self._records()[0]]
-            if all(any(_same_no(r.get("ODER_NO"), ref.number) for r in told) for _, ref in accepted):
+            if all(any(same_number(r.get("ODER_NO"), ref.number) for r in told) for _, ref in accepted):
                 break
             left = self.timing.notice_wait - (time.monotonic() - began)
             if left <= 0:
@@ -700,7 +714,7 @@ class _Probe:
                 await asyncio.wait_for(self.notices.changed.wait(), left)
             except TimeoutError:
                 break
-        timed, odd = self._records()
+        timed, odd, unnamed = self._records()
         records = [r for _, r in timed]
         answer = (self.notices.answer or {}).get("body") or {}
         self.done["notice"] = answer.get("rt_cd") == "0" and self.notices.key_iv is not None and bool(records)
@@ -712,6 +726,8 @@ class _Probe:
             say(f"  - 연결: {self.notices.error}")
         for line in odd:
             say(f"  - {line}")
+        for line in layout(unnamed, self._known()):
+            say(line)
         if not records:
             say("")
             return
@@ -722,7 +738,7 @@ class _Probe:
             + ", ".join(f"{'·'.join(k)} {n}개" for k, n in kinds.most_common())
         )
         for placed, ref in accepted:
-            mine = [(at, r) for at, r in timed if _same_no(r.get("ODER_NO"), ref.number)]
+            mine = [(at, r) for at, r in timed if same_number(r.get("ODER_NO"), ref.number)]
             if not mine:
                 say(f"  - {placed.label}: 통보 없음")
                 continue
@@ -734,18 +750,43 @@ class _Probe:
         say(f"  - 필드: {fields_of(records)}")
         say("")
 
-    def _records(self) -> tuple[list[tuple[float, dict[str, str]]], list[str]]:
-        """The notices' records by field name, decrypted, each with when its frame came; and lines
-        on the frames that could not be read so."""
+    def _records(
+        self,
+    ) -> tuple[list[tuple[float, dict[str, str]]], list[str], list[list[str]]]:
+        """The notices' records by field name, decrypted, each with when its frame came; lines on
+        the frames that could not be read so; and the values of the records decrypted whose width
+        ``FILL_NOTICE_COLUMNS`` does not name (the mock server's 23, #403)."""
         records: list[tuple[float, dict[str, str]]] = []
         odd: Counter[str] = Counter()
+        unnamed: list[list[str]] = []
         for at, text in list(self.notices.frames):
             found = notice_records(text, self.notices.key_iv)
             if isinstance(found, str):
                 odd[found] += 1
+                values = notice_values(text, self.notices.key_iv)
+                if not isinstance(values, str):
+                    unnamed += values
             else:
                 records += [(at, record) for record in found]
-        return records, [f"{what} {n}개" for what, n in odd.items()]
+        return records, [f"{what} {n}개" for what, n in odd.items()], unnamed
+
+    def _known(self) -> list[tuple[str, Callable[[str], bool]]]:
+        """What a fill notice's field may be, told without its value (``layout``): the orders'
+        numbers and branches, their prices (the fills' once filled), the account, the HTS ID and
+        the symbol."""
+        refs = [p.ref for p in self.placed if p.ref is not None]
+        prices = {p.price for p in self.placed if p.price}
+        account = {self.account_no.number + self.account_no.product, self.account_no.number}
+        hts_id = (self.hts_id or "").strip()
+        return [
+            # Not a one- or two-character code that happens to read as a small order number.
+            ("주문번호", lambda v: len(v.strip()) > 2 and any(same_number(v, ref.number) for ref in refs)),
+            ("KRX_FWDG_ORD_ORGNO", lambda v: any(same_number(v, ref.branch) for ref in refs)),
+            ("주문가·체결가", lambda v: _int(v) in prices),
+            ("계좌", lambda v: v.strip().replace("-", "") in account),
+            ("HTS ID", lambda v: bool(hts_id) and v.strip() == hts_id),
+            ("종목코드", lambda v: v.strip() == SYMBOL),
+        ]
 
     def summary(self) -> None:
         say = self.say
@@ -784,12 +825,12 @@ class _Probe:
         """The inquiry's rows of the order ``ref`` (KIS's own filter by order number is not
         relied on)."""
         answer = await self.read(lambda: self.account.fills(self.day, SYMBOL, ref.number))
-        return [r for r in answer.rows("output1") if _same_no(r.get("odno"), ref.number)]
+        return [r for r in answer.rows("output1") if same_number(r.get("odno"), ref.number)]
 
 
-def notice_records(text: str, key_iv: tuple[str, str] | None) -> list[dict[str, str]] | str:
-    """A fill notice frame's records by field name (``FILL_NOTICE_COLUMNS``), decrypted with the
-    subscription's key and IV; a frame may hold several (its count, ``1|tr_id|002|...``). Else why
+def notice_values(text: str, key_iv: tuple[str, str] | None) -> list[list[str]] | str:
+    """A fill notice frame's records as their values, in order, decrypted with the subscription's
+    key and IV; a frame may hold several (its count, ``1|tr_id|002|...``), of equal width. Else why
     it could not be read so."""
     parts = text.split("|", 3)
     if len(parts) != 4 or not parts[2].isdigit():
@@ -803,12 +844,51 @@ def notice_records(text: str, key_iv: tuple[str, str] | None) -> list[dict[str, 
         except (ValueError, UnicodeDecodeError):
             return "풀리지 않은 프레임"
     values = payload.split("^")
-    width, count = len(FILL_NOTICE_COLUMNS), int(parts[2])
-    if count < 1 or len(values) != count * width:
+    count = int(parts[2])
+    if count < 1 or len(values) % count:
         return f"레코드 {count}개에 필드가 {len(values)}개인 프레임"
-    return [
-        dict(zip(FILL_NOTICE_COLUMNS, values[i * width : (i + 1) * width], strict=True)) for i in range(count)
-    ]
+    width = len(values) // count
+    return [values[i * width : (i + 1) * width] for i in range(count)]
+
+
+def notice_records(text: str, key_iv: tuple[str, str] | None) -> list[dict[str, str]] | str:
+    """A fill notice frame's records by field name (``FILL_NOTICE_COLUMNS``); else why it could not
+    be read so (``notice_values``, or a width the columns do not name)."""
+    found = notice_values(text, key_iv)
+    if isinstance(found, str):
+        return found
+    if any(len(values) != len(FILL_NOTICE_COLUMNS) for values in found):
+        return f"레코드 {len(found)}개에 필드가 {sum(len(v) for v in found)}개인 프레임"
+    return [dict(zip(FILL_NOTICE_COLUMNS, values, strict=True)) for values in found]
+
+
+def layout(records: Sequence[Sequence[str]], known: Sequence[tuple[str, Callable[[str], bool]]]) -> list[str]:
+    """The fields of records ``FILL_NOTICE_COLUMNS`` cannot name, by width and position, each by its
+    look and never its value (#403: the mock server's records had 23 fields): its flag
+    (``probe_fields.flag``), its lengths, how many values it took, and in how many records it equals
+    something ``known`` (an order number, the account...). From them a later change names the
+    columns."""
+    lines: list[str] = []
+    widths = Counter(len(record) for record in records)
+    for width in sorted(widths):
+        group = [record for record in records if len(record) == width]
+        lines.append(
+            f"  - {width}칸 레코드 {len(group)}개의 칸별 모양(FILL_NOTICE_COLUMNS는 "
+            f"{len(FILL_NOTICE_COLUMNS)}칸이라 이름을 붙이지 못한다. 값은 보이지 않는다):"
+        )
+        for i in range(width):
+            values = [record[i].strip() for record in group]
+            lengths = sorted({len(v) for v in values if v})
+            parts = [flag("", values)]
+            if lengths:
+                parts.append(f"{lengths[0]}자" if len(lengths) == 1 else f"{lengths[0]}–{lengths[-1]}자")
+            parts.append(f"값 {len(set(values))}가지")
+            for name, match in known:
+                n = sum(1 for v in values if v and match(v))
+                if n:
+                    parts.append(f"= {name} {n}/{len(values)}")
+            lines.append(f"    칸 {i + 1}: {' · '.join(parts)}")
+    return lines
 
 
 def said(answer: Answer) -> str:
@@ -909,16 +989,15 @@ def _number(value: Any) -> float | None:
         return None
 
 
-def _same_no(a: Any, b: Any) -> bool:
-    """Two order numbers alike, their leading zeros aside; never when one is empty."""
-    x, y = str(a or "").strip().lstrip("0"), str(b or "").strip().lstrip("0")
-    return bool(x) and x == y
-
-
-def _context(answer: Answer) -> tuple[str, str]:
-    body = answer.body if isinstance(answer.body, dict) else {}
-    low = {str(k).lower(): str(v) for k, v in body.items()}
-    return low.get("ctx_area_fk100", ""), low.get("ctx_area_nk100", "")
+def _alike(a: Any, b: Any) -> str:
+    """How two numbers KIS gave compare, without either: the same text, the same but for leading
+    zeros, or not the same."""
+    x, y = str(a or "").strip(), str(b or "").strip()
+    if not x or not y:
+        return "없음"
+    if x == y:
+        return "같다"
+    return "앞의 0을 빼면 같다" if same_number(x, y) else "다르다"
 
 
 def _kind(answer: Answer) -> str:

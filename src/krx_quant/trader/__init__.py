@@ -6,8 +6,9 @@ For now it is paper only (#394): the trader fills its orders on the collector's 
 (``quotes.py``) and writes what it did to its own store, ``state/trader.sqlite3`` (``store.py``).
 It has no order code and calls no KIS order: the KIS order calls live in ``krx_quant.kis_orders``
 alone, the one file the repository's forbidden-pattern check (``scripts/check_forbidden.py``) lets
-hold KIS order TR IDs and endpoints (#403), and only the order probe uses them so far; the trader
-will through its KIS order module (#404).
+hold KIS order TR IDs and endpoints (#403). Its broker there (``kis_orders.Broker``, #404: orders,
+cancels, fills read off the day's order inquiry, the balance, the orderable cash, the REST quotes,
+with the trader's own key and token) is used by none yet: the trader's mock mode will (#405).
 
 - **Cells** (``selection.py``, #395): a cell is a (kind, predictor): the four-minute direction
   (width k) or the 4-, 15- or 30-minute barrier (width w), and the final consensus (the
@@ -74,7 +75,7 @@ from datetime import time, timedelta
 SYMBOL = "005930"
 
 # The modes (#393): paper, filled on the live quotes inside the trader. KIS's mock and the live
-# account (mock, live) come with the KIS order module (#404, #405, #408).
+# account (mock, live) come with the modes that order through the KIS order module (#405, #408).
 PAPER = "paper"
 MODES = (PAPER,)
 LATER_MODES = ("mock", "live")

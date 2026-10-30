@@ -1548,7 +1548,10 @@ TRADER_REPORT = Job(
 # codes, quantities, times and field shapes, never a key, an account, an order number or a market
 # value, so it can go on the public issue. A minute or two, paced at a call a second; the quarter
 # hour is a bound. Each trading day until a run does every step (exit 0); without the keys it says
-# so once (``order_probe.NO_KEYS``) and then waits for them (``Facts.trader_kis``).
+# so once (``order_probe.NO_KEYS``) and then waits for them (``Facts.trader_kis``). The run of
+# 2026-10-30 did every step but the fill notice, whose records had 23 fields (#403): the next runs
+# show them by position (``order_probe.layout``) until a change names them; the trader reads its
+# fills off the order inquiry meanwhile (#404).
 KIS_ORDER_PROBE_ISSUE = 403
 
 
@@ -1575,10 +1578,11 @@ KIS_ORDER_PROBE = Job(
         Target(
             KIS_ORDER_PROBE_ISSUE,
             note=(
-                '에이전트가 이 출력으로 `docs/kis-feeds.md` "주문 (#403)"의 ⚠(주문·취소 응답의 필드, '
-                "거부 코드, 주문 체결 조회의 행과 체결 수량, 체결 통보의 필드와 종류, 잔고·매수가능의 필드와 "
-                "체결 뒤 바뀌는 값, 토큰과 초당 한도)를 실측으로 고치고, trader가 체결을 실시간 체결 통보와 "
-                "주문 체결 조회 중 무엇으로 받을지 #404에 정한다. 사용자의 결정이 필요하면 이슈에 묻는다. "
+                '에이전트가 이 출력으로 `docs/kis-feeds.md` "주문 (#403)"의 남은 ⚠(체결 통보의 칸, '
+                "조회의 odno·ord_gno_brno가 주문 응답과 같은지, cncl_cfrm_qty, 거부 코드)를 실측으로 "
+                "고친다. 13절에 칸별 모양이 있으면 FILL_NOTICE_COLUMNS와 견줘 모의 서버의 칸 이름을 "
+                "붙이는 PR을 열고, trader가 체결을 실시간 체결 통보로 받을지 다시 정한다(지금은 주문 체결 "
+                "조회, #404). 사용자의 결정이 필요하면 이슈에 묻는다. "
                 "출력에는 키, 계좌번호, 주문번호, 시세 값이 없다(코드, 수량, 시각, 틱 차이, 필드의 모양만)."
             ),
         ),
