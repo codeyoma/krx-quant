@@ -65,7 +65,9 @@ challengers stay in paper. The trader holds no order code: the KIS order calls l
   mock server: a limit buy at the best ask (what is left cancelled after a few seconds, a partial
   fill a position of that), the take-profit's limit sell resting at the target, the stop's and the
   time exit's limit sells at the best bid; its trades written from KIS's fills. A failed order
-  stops new entries for the day. ``mock_check.py`` compares a mock day's orders with KIS's.
+  stops new entries for the day. Beside it the champion policy's paper shadow keeps its paper
+  record (``desk.Desk.shadow``): every record is paper's in every mode, and ``gap.py`` shows the
+  KIS trades against the shadow's. ``mock_check.py`` compares a mock day's orders with KIS's.
 - **Store** (``store.py``): its picks of the cells, decisions, orders, fills and trades, each with
   its mode (``paper``, ``mock``) and its book's policy, the policy versions and the days each ran,
   the pauses, resumes and re-arms asked for, the halts, the failed orders, the trader's state now

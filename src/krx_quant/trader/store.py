@@ -43,8 +43,9 @@ by the nightly re-fit (#399, from the engine's container).
 
 Every row carries its mode (``paper``, ``mock``): paper, KIS mock and live trades are told apart in
 the same tables (a pause and a resume hold whatever the mode). The records (``policy_days`` and the
-trades' P&L) are read by the mode the trader last started in (``promotion.mode_at``, #405). The trader writes
-it, and the nightly re-fit its policies; the Engine API reads it read-only (``read_trades``,
+policies' trades' P&L) are paper's whatever the mode (``promotion.records_of``, #405: in mock mode
+the champion's paper shadow keeps the champion's, ``shadow`` 1). The trader writes it, and the
+nightly re-fit its policies; the Engine API reads it read-only (``read_trades``,
 ``read_trader``, ``read_days``, ``policy.read_policies``) and writes a pause into it
 (``request_pause``), and ``krx-quant trade resume|rearm`` a resume or a re-arm: nothing else. Times
 are ISO 8601 strings in KST, which sort in time order. The columns #395, #399, #400 and #405 added
@@ -64,7 +65,8 @@ from typing import TYPE_CHECKING, Any
 
 from krx_quant.feeds.base import KST
 from krx_quant.pricing import SELL_TAX
-from krx_quant.trader import policy, promotion
+from krx_quant.trader import MOCK, PAPER, policy, promotion
+from krx_quant.trader.gap import day_gap
 
 if TYPE_CHECKING:
     from krx_quant.trader.selection import Selection
@@ -267,6 +269,9 @@ _ADDED = {
         # 1: made by the champion's book, the trader's own; 0: a challenger's paper trade (#400); null:
         # before #400, when the champion's book was the only one.
         ("champion", "INTEGER"),
+        # 1: the champion's paper shadow's (#405: in mock mode, the champion policy's trade filled in
+        # paper beside its KIS orders, ``champion`` 0); null or 0 otherwise.
+        ("shadow", "INTEGER"),
     ),
 }
 
@@ -276,6 +281,10 @@ _ADDED = {
 # ``GET /v1/trader/trades`` gives these unless asked for a policy's. The champion changes only after
 # the market (``promotion.in_market``), so a day's trades are all of one champion.
 CHAMPION_TRADE = "coalesce(t.champion, 1) = 1"
+# A trade ``t`` of the champion's paper shadow (#405): in mock mode, the champion policy's paper trade
+# beside the KIS orders. Not the trader's (``champion`` 0): no limit, chart or default trade list
+# counts it; its policy's paper record does (``promotion.records``).
+SHADOW_TRADE = "coalesce(t.shadow, 0) = 1"
 
 BUY, SELL = "buy", "sell"
 OPEN, FILLED, CANCELLED = "open", "filled", "cancelled"
@@ -329,8 +338,11 @@ class Entry:
     fraction: float | None = None
     # The policy version it was made under (#399); None before the first champion.
     policy_id: int | None = None
-    # Made by the champion's book (#400), the trader's own; False: a challenger's paper trade.
+    # Made by the champion's book (#400), the trader's own; False: a challenger's paper trade, or the
+    # shadow's (``shadow``).
     champion: bool = True
+    # The champion's paper shadow's (#405): the champion policy's paper trade in mock mode.
+    shadow: bool = False
 
 
 @dataclass(frozen=True)
@@ -831,12 +843,17 @@ class TraderStore:
 
     def open_trade(self, mode: str, challenger: int | None = None) -> OpenTrade | None:
         """``mode``'s trade of the champion (``CHAMPION_TRADE``) not exited yet, if any (one position
-        at a time); with ``challenger``, that challenger's paper trade not exited (#400)."""
+        at a time); with ``challenger``, that challenger's paper trade not exited (#400). In paper the
+        champion's paper book is one across the modes (#405): the champion's book in paper mode, its
+        shadow in mock mode, each going on with the other's trade left open at a switch."""
         params: tuple[Any, ...]
         if challenger is None:
             whose, params = CHAMPION_TRADE, (mode,)
+            if mode == PAPER:
+                whose = f"({CHAMPION_TRADE} OR {SHADOW_TRADE})"
         else:
-            whose, params = "t.policy_id = ? AND t.champion = 0", (mode, challenger)
+            whose = f"t.policy_id = ? AND t.champion = 0 AND NOT {SHADOW_TRADE}"
+            params = (mode, challenger)
         row = self._db.execute(
             "SELECT t.*, o.id AS resting FROM trades t LEFT JOIN orders o ON o.trade_id = t.id"
             " AND o.purpose = 'take_profit' AND o.status = 'open'"
@@ -865,7 +882,7 @@ class TraderStore:
         its exit), whose books go on with it."""
         rows = self._db.execute(
             "SELECT DISTINCT t.policy_id FROM trades t WHERE t.mode = ? AND t.exit_at IS NULL"
-            " AND t.policy_id IS NOT NULL AND t.champion = 0 ORDER BY t.policy_id",
+            f" AND t.policy_id IS NOT NULL AND t.champion = 0 AND NOT {SHADOW_TRADE} ORDER BY t.policy_id",
             (mode,),
         )
         return [int(r[0]) for r in rows]
@@ -883,6 +900,17 @@ class TraderStore:
                 " updated_at = excluded.updated_at",
                 (mode, policy_id, day.isoformat(), int(champion), int(stopped), iso(at)),
             )
+
+    def paper_account(self) -> float:
+        """The net P&L of the champion's paper book (#405): its paper trades exited, the champion's
+        book's in paper mode and its shadow's in mock mode. What the shadow and the challengers size
+        on in mock mode, never the KIS fills."""
+        row = self._db.execute(
+            "SELECT coalesce(sum(net), 0) FROM trades t WHERE mode = ? AND exit_at IS NOT NULL"
+            f" AND ({CHAMPION_TRADE} OR {SHADOW_TRADE})",
+            (PAPER,),
+        ).fetchone()
+        return float(row[0])
 
     def realized(self, mode: str, since: datetime | None) -> tuple[float, int]:
         """The net P&L of ``mode``'s trades exited at or after ``since`` (all if None), and how many:
@@ -1008,7 +1036,7 @@ class TraderStore:
             "INSERT INTO trades (mode, symbol, kind, predictor, prediction_id, bar_close, probability,"
             " threshold, anchor, tick, width_ticks, target, stop, time_barrier, decided_at, entry_at,"
             " entry_price, quantity, buy_fee, selection_id, role, p_star, precision_low, kelly, fraction,"
-            f" policy_id, champion) VALUES ({', '.join('?' * 27)})",
+            f" policy_id, champion, shadow) VALUES ({', '.join('?' * 28)})",
             (
                 entry.mode,
                 entry.symbol,
@@ -1037,6 +1065,7 @@ class TraderStore:
                 entry.fraction,
                 entry.policy_id,
                 int(entry.champion),
+                int(entry.shadow),
             ),
         )
         assert cursor.lastrowid is not None
@@ -1177,7 +1206,8 @@ TRADER_FIELDS = (
 
 def read_days(path: Path, since: date, to: date) -> list[dict[str, Any]]:
     """``GET /v1/trader/days`` (#396): each day's ledger from ``since`` to ``to`` (both included),
-    oldest first, each mode's."""
+    oldest first, each mode's; a mock day's with its gap to the champion's paper shadow (#405,
+    ``gap.day_gap``), null on the others."""
     with _reading(path) as db:
         if db is None:
             return []
@@ -1190,7 +1220,11 @@ def read_days(path: Path, since: date, to: date) -> list[dict[str, Any]]:
             "SELECT * FROM days WHERE day >= ? AND day <= ? ORDER BY day, mode",
             (since.isoformat(), to.isoformat()),
         ).fetchall()
-    return [_day_json(dict(r)) for r in rows]
+        return [
+            _day_json(dict(r))
+            | {"gap": day_gap(db, date.fromisoformat(r["day"])) if r["mode"] == MOCK else None}
+            for r in rows
+        ]
 
 
 def _used(worst: float, limit: float) -> float:
@@ -1309,6 +1343,7 @@ def _trade_json(
         "fraction": row["fraction"],
         "policy": row.get("policy_id"),  # a store the trader has not opened since #399: none
         "champion": bool(row["by_champion"]),  # the champion's (#400): the trader's, which the limits hold
+        "shadow": bool(row.get("shadow")),  # the champion's paper shadow's (#405, mock mode)
         "anchor": row["anchor"],
         "tick": row["tick"],
         "width_ticks": row["width_ticks"],

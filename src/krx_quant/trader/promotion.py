@@ -6,12 +6,15 @@ which the trader writes while the day's session is open: its champion's book and
 challenger's, ``desk.py``), each with the net P&L of the policy's trades entered that day, 0 on a
 day it made none. A trade ends on the day it is entered (by 15:15; later only when the trader was
 down at its time barrier), so a day's trades are all of that day. A policy's days as a challenger
-and as the champion are one record: a challenger promoted brings its own. One mode's (#405): the
-mode the trader last started in (``mode_at``), ``paper`` until it starts in ``mock`` (a live
-trader's, #408, are paper's: ``records_of``). In paper
-both books fill in paper; in mock the champion's trades are its KIS mock fills (``mock.py``) and
-the challengers' their paper fills on the same quotes. The champion's trades are the ones the
-limits hold (#396), a challenger's are held by none (``limits.Unlimited``).
+and as the champion are one record: a challenger promoted brings its own. Always paper's
+(``records_of``, #405), whatever the trader's mode: every policy, the champion and the challengers
+alike, on one fill model, so that a switch from paper to mock to live never starts the history
+again. In paper mode the champion's record is its book's, whose trades the limits hold (#396); in
+mock mode it is its paper shadow's (``desk.Desk.shadow``, held by nothing, as a challenger's book
+is), never its KIS fills; a challenger's trades are held by none (``limits.Unlimited``). The
+records are simulated evidence: what a policy would have made filled in paper, not what an
+execution makes (rejects, partial fills, the account's reconciliation, the fill gap between KIS
+and the shadow, ``gap.py``), which the live mode must check apart (#408).
 
 **Promotion** (``judge``, ``promote``): a challenger becomes the champion when, over the trading
 days both ran (``common``), at least ``PROMOTION_DAYS`` of them, the day-level lower bound of
@@ -45,7 +48,7 @@ from typing import Any
 from krx_quant.feeds.base import KST, kst_day
 from krx_quant.market_calendar import Session
 from krx_quant.stats import overlap_t_test
-from krx_quant.trader import MOCK, PAPER, PICK_AT
+from krx_quant.trader import PAPER, PICK_AT
 from krx_quant.trader import policy as policies
 
 # A challenger is judged on this many common trading days at least (#393).
@@ -94,20 +97,16 @@ class Record:
         return sum(d.net for d in self.days)
 
 
-# The simulated modes, whose records are their own (#405). A live trader (#408) is judged and gated on
-# a simulated record: paper's, until #408 decides otherwise.
-SIMULATED = (PAPER, MOCK)
-
-
-def records_of(mode: str) -> str:
-    """The mode whose records ``mode``'s promotion, live gate and report read (``SIMULATED``)."""
-    return mode if mode in SIMULATED else PAPER
+def records_of(mode: str | None) -> str:
+    """The mode whose records ``mode``'s promotion, live gate and report read: paper's for every mode
+    (#405), mock and live included: one fill model for every policy, one history across the modes."""
+    return PAPER
 
 
 def mode_at(db: sqlite3.Connection, at: datetime | None = None) -> str:
     """The mode the trader last started in, at or before ``at`` (all its starts if None): the mode
-    whose records the nightly promotion, the report and the API read (#405). ``paper`` before the
-    first start."""
+    whose trades and ledger the report shows (#405), not the records it reads (``records_of``).
+    ``paper`` before the first start."""
     if not _has_table(db, "runs"):
         return PAPER
     where, params = "", []
@@ -120,12 +119,11 @@ def mode_at(db: sqlite3.Connection, at: datetime | None = None) -> str:
 def records(
     db: sqlite3.Connection, mode: str | None = None, versions: Iterable[int] | None = None
 ) -> dict[int, Record]:
-    """The records of ``versions`` (all if None) in ``mode`` (None: the mode the trader last started
-    in, ``mode_at``; a live one's are paper's, ``records_of``), read from the trader's store; none
-    from a store the trader has not kept them in yet."""
+    """The records of ``versions`` (all if None), paper's whatever ``mode`` (``records_of``), read
+    from the trader's store; none from a store the trader has not kept them in yet."""
     if not _has_table(db, "policy_days"):
         return {}
-    mode = records_of(mode or mode_at(db))
+    mode = records_of(mode)
     wanted = None if versions is None else set(versions)
     ran: dict[int, list[tuple[date, bool, bool]]] = {}
     for version, day, champion, stopped in db.execute(
@@ -337,9 +335,9 @@ def promote(
     (``policy.connect``) and, after the market, make the one that passes the champion
     (``policy.crown``) and drop those that reached ``RETIRE_DAYS`` unpromoted (``policy.drop``;
     the slots they free are filled at the night's end, ``policy.admit``). During a trading day's
-    market nothing is judged or written. The records are ``mode``'s, by default the mode the trader
-    last started in at ``now`` (``mode_at``, #405)."""
-    mode = mode or mode_at(db, now)
+    market nothing is judged or written. The records are paper's whatever ``mode`` (``records_of``,
+    #405)."""
+    mode = records_of(mode)
     current = policies.champion_version(db)
     if in_market(now, sessions):
         return Promotion(now, current, (), None, MARKET_OPEN, _gate(db, current, mode))

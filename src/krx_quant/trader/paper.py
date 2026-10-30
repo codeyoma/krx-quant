@@ -297,7 +297,9 @@ class PaperTrader:
     (``guard``), with its state and ledger. With ``challenger`` (#400, ``desk.Desk``), that
     challenger policy's book: the same rules on the same quotes, in paper, held by no limit nor pause
     (``limits.Unlimited``, buying on ``account``'s cash), writing no state; its decisions and trades
-    carry its version."""
+    carry its version. With ``shadow`` (#405), the champion policy's paper shadow in mock mode: held
+    and sized as a challenger's book is, its trades the champion policy's paper record (``champion``
+    0, ``shadow`` 1), never the trader's."""
 
     def __init__(
         self,
@@ -310,6 +312,7 @@ class PaperTrader:
         *,
         challenger: int | None = None,
         account: Callable[[], float] | None = None,
+        shadow: bool = False,
     ) -> None:
         self.store = store
         self.rules = rules
@@ -317,9 +320,10 @@ class PaperTrader:
         self._started_at = started_at
         self.mode = mode
         self.challenger = challenger
+        self.shadow = shadow
         self._guard: Guard | None = None
         self.holds: Holds
-        if challenger is None:
+        if challenger is None and not shadow:
             self._guard = Guard(store, mode, rules.limits, started_at, notify or (lambda text: None))
             self.holds = self._guard
         else:
@@ -341,7 +345,14 @@ class PaperTrader:
             log.info("%s going on with trade %s, open since before this start", self._whose(), self._open.id)
         if challenger is not None:
             return
-        dropped = store.drop_unfilled(mode, RESTARTED)  # every book's: none is waiting at a start
+        dropped = store.drop_unfilled(mode, RESTARTED)  # every book's of the mode: none is waiting at a start
+        if shadow:
+            if dropped:
+                log.info(
+                    "trader: shadow: %s paper buy(s) waiting for a quote when the trader stopped: given up",
+                    dropped,
+                )
+            return
         if dropped:
             log.info("trader: %s buy(s) waiting for a quote when the trader stopped: given up", dropped)
         if self.guard.status != RUNNING:
@@ -383,7 +394,9 @@ class PaperTrader:
 
     def _whose(self) -> str:
         """Its log lines' start: the champion's as they were (``trader: bought …``), a challenger's
-        with its version (``trader: challenger N bought …``)."""
+        with its version (``trader: challenger N bought …``), the shadow's (``trader: shadow …``)."""
+        if self.shadow:
+            return "trader: shadow"
         return "trader:" if self.challenger is None else f"trader: challenger {self.challenger}"
 
     @property
@@ -399,6 +412,8 @@ class PaperTrader:
         self._picks = {p.cell: (rank, p) for rank, p in enumerate(selection.picks)}
         if self.challenger is not None:
             log.info("trader: challenger %s in paper: %s", self.challenger, selection.describe())
+        elif self.shadow:
+            log.info("trader: shadow in paper: %s", selection.describe())
         elif selection.picks:
             log.info("trader: trading %s cell(s): %s", len(selection.picks), selection.describe())
         else:
@@ -787,7 +802,8 @@ class PaperTrader:
             kelly=pick.kelly,
             fraction=pick.fraction,
             policy_id=self._policy,
-            champion=self.challenger is None,
+            champion=self.challenger is None and not self.shadow,
+            shadow=self.shadow,
         )
 
     def _give_up(self, waiting: _Waiting, reason: str) -> None:

@@ -1,7 +1,9 @@
 """KIS mock trading (#405, #393 "KIS 주문"): with ``KRX_TRADER_MODE=mock`` the champion's book places
 its orders on KIS's mock server through the trader's broker (``kis_orders.Broker``, #404), by the
 same decisions, limits, pauses and ledger as paper (``paper.PaperTrader``): only how an order fills
-changes. The challengers stay in paper beside it (``desk.py``), on the same quotes.
+changes. It is the execution layer alone: the champion policy's paper record is kept by its paper
+shadow beside it, and the challengers' in paper as ever (``desk.py``), on the same quotes; nothing
+of the KIS fills reaches them (``gap.py`` shows the difference).
 
 **Entry.** A buy decided buys at the first quote received after its decision, as in paper, but on
 KIS: the orderable cash is read at that quote's best ask (``Broker.orderable``) and the size cut to

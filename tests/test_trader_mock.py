@@ -686,9 +686,12 @@ async def test_the_challengers_stay_in_paper_beside_the_mock_champion(
                 broker=broker,
                 clock=lambda: at("09:00:00"),
             )
-            assert isinstance(desk.champion, MockTrader)
+            assert isinstance(desk.champion, MockTrader) and desk.champion.mode == MOCK
+            assert desk.shadow is not None and type(desk.shadow) is PaperTrader
+            assert (desk.shadow.mode, desk.shadow.shadow, desk.shadow.challenger) == (PAPER, True, None)
             challenger = desk._book(7)
             assert type(challenger) is PaperTrader and challenger.challenger == 7
+            assert challenger.mode == PAPER, "labelled paper, filled in paper"
             await desk.close()
         with pytest.raises(ValueError, match="broker"):
             Desk(store, Rules(fee_rate=FEE), CALENDAR.session, at("09:00:00"), MOCK)
@@ -696,7 +699,11 @@ async def test_the_challengers_stay_in_paper_beside_the_mock_champion(
         store.close()
 
 
-def test_the_records_are_of_the_mode_the_trader_last_started_in(tmp_path: Path) -> None:
+def test_the_report_shows_the_mode_the_trader_ran_in_and_every_mode_reads_paper_records(
+    tmp_path: Path,
+) -> None:
+    """The report's trades and ledger are the mode the trader ran in by the day's close; the records
+    (the promotion, the live gate, the report's standings) are paper's whatever the mode (#405)."""
     store = TraderStore(tmp_path / DB_NAME)
     try:
         store.add_run(at("09:00:00"), PAPER, {})
@@ -708,8 +715,7 @@ def test_the_records_are_of_the_mode_the_trader_last_started_in(tmp_path: Path) 
         assert promotion.mode_at(db, at("23:00:00")) == PAPER, "the mode of the day's close"
     with closing(sqlite3.connect(tmp_path / "none.sqlite3")) as db:
         assert promotion.mode_at(db) == PAPER
-    # A live trader (#408) is gated on a simulated record: paper's for now.
-    assert [promotion.records_of(m) for m in (PAPER, MOCK, "live")] == [PAPER, MOCK, PAPER]
+    assert [promotion.records_of(m) for m in (PAPER, MOCK, "live", None)] == [PAPER] * 4
 
 
 # A restart, and the trader's process

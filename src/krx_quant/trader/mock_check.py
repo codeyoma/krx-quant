@@ -41,6 +41,7 @@ from krx_quant.kis_orders import (
 from krx_quant.market_calendar import calendar_store
 from krx_quant.pricing import tick_size
 from krx_quant.trader import MOCK, SYMBOL
+from krx_quant.trader.promotion import mode_at
 from krx_quant.trader.report import WEEKDAYS, report_day
 from krx_quant.trader.store import DB_NAME, champion_of
 
@@ -129,6 +130,17 @@ def mock_days(state_dir: Path) -> tuple[date, ...]:
     except sqlite3.Error as e:
         log.warning("cannot read the trader's mock days (%s)", e)
         return ()
+
+
+def trader_in_mock(state_dir: Path) -> bool:
+    """Whether the trader last started in mock mode (its store's ``runs``): it may then hold 005930
+    and order on the mock account in the session (#405). False without the store."""
+    try:
+        with _reading(state_dir / DB_NAME) as db:
+            return db is not None and mode_at(db) == MOCK
+    except sqlite3.Error as e:
+        log.warning("cannot read the trader's mode (%s): taken as mock", e)
+        return True
 
 
 def ledger_orders(db: sqlite3.Connection, day: date) -> list[LedgerOrder]:

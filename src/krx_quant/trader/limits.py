@@ -4,7 +4,8 @@ the server's ``.env`` alone, which may narrow them, never widen them (``settings
 
 **Whose.** The limits and the pauses hold the trades the trader makes: the champion policy's
 (#399; before the first champion, the defaults'). The loss counts those alone
-(``store.CHAMPION_TRADE``), never a challenger's paper trades (#400), and neither a limit nor a
+(``store.CHAMPION_TRADE``), never a challenger's paper trades (#400) nor the champion's paper
+shadow's in mock mode (#405), and neither a limit nor a
 pause holds a challenger's book (``Unlimited``): it is a simulation of its policy's rules, which a
 promotion compares with the champion's on the days the champion was not stopped
 (``promotion.py``).

@@ -75,7 +75,7 @@ from krx_quant.redaction import redact, secrets_of
 from krx_quant.swap import NightTraining
 from krx_quant.trader.mock_check import DIFFERENT as MOCK_DIFFERENT
 from krx_quant.trader.mock_check import SAME as MOCK_SAME
-from krx_quant.trader.mock_check import mock_days
+from krx_quant.trader.mock_check import mock_days, trader_in_mock
 from krx_quant.trader.report import calls_agent
 from krx_quant.training import finished_days, is_recorded
 
@@ -288,6 +288,9 @@ class Facts:
     # The trading days the trader ran in mock mode (#405, ``mock_check.mock_days``): the mock day's
     # check waits for the first.
     mock_days: tuple[date, ...] = ()
+    # Whether the trader last started in mock mode (#405, ``mock_check.trader_in_mock``): it may hold
+    # 005930 and order on the mock account in the session, so the order probe does not run.
+    trader_mock: bool = False
 
 
 @dataclass(frozen=True)
@@ -918,9 +921,11 @@ async def read_facts(
 
 
 async def session_facts(settings: Settings) -> Facts:
-    """What the session jobs' conditions ask (#403): the settings only, nothing read beside the
-    live engine in the market's hours."""
-    return Facts(trader_kis=settings.trader_kis)
+    """What the session jobs' conditions ask (#403): the settings, and the mode the trader last
+    started in (#405, one small read of its store), nothing else beside the live engine in the
+    market's hours."""
+    mock = await asyncio.to_thread(trader_in_mock, settings.state_dir)
+    return Facts(trader_kis=settings.trader_kis, trader_mock=mock)
 
 
 def pending_answers(settings: Settings, calendar: MarketCalendar, now: datetime) -> list[str]:
@@ -1610,8 +1615,10 @@ KIS_ORDER_PROBE_ISSUE = 403
 
 def _a_session_until_the_orders_were_probed(night: Night) -> bool:
     """On a trading day, until a run did every step: again the next trading day after one that did
-    not, but after one that found no keys only once they are set."""
-    if not night.trading_day:
+    not, but after one that found no keys only once they are set. Never while the trader is in mock
+    mode (#405): its session (10:00) is before the trader's last exit (15:15), when the trader may
+    hold 005930 and order on the same mock account."""
+    if not night.trading_day or night.facts.trader_mock:
         return False
     record = night.record
     if record is None or record.outcome not in (OK, FAILED):

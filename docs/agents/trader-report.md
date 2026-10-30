@@ -29,6 +29,7 @@ gh api --paginate --slurp repos/codeyoma/krx-quant/issues/417/comments \
 Each report holds, in order:
 
 1. The day's ledger and the champion's trades: times, cell, probability and θ, p* and the hit rate's lower bound, shares, how each ended (`take_profit`, `stop_loss`, `time`, `pause`, `daily_limit`, `cumulative_limit`), the ticks between its fills, the costs and the net P&L in won. Then what the champion's book did with the predictions it read: bought, tried to buy (`target_reached`, `no_quote`, …), skipped (`not_up`, `below_threshold`, `holding`, `special`, …).
+   On a mock day (#405), then the KIS mock trades against the champion's paper shadow: each side's trades and net, the difference, and per prediction the entry and exit fill differences in ticks (KIS − shadow) and the net difference. The policies' records (3 and 5 below) are paper's in every mode: the shadow's for the champion in mock mode. A growing gap is execution, not the policy: it matters for the live mode (#408), not for a policy PR.
 2. The day's pick from the cost map. When no cell traded, every cell considered and its verdict (`fail`, `few`, `no row`, …).
 3. Each policy's paper record to that day and, for a challenger, where it stands against the champion: common days, mean difference, lower bound, verdict.
 4. What the night changed: the champion, challengers dropped and admitted, the policies fitted and their cells, the policies waiting, a re-fit that kept nothing or failed.

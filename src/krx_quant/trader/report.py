@@ -53,8 +53,9 @@ from typing import Any
 from krx_quant.config import Settings
 from krx_quant.feeds.base import KST
 from krx_quant.market_calendar import MarketCalendar, calendar_store
-from krx_quant.trader import PAPER, PICK_AT, promotion
+from krx_quant.trader import MOCK, PAPER, PICK_AT, promotion
 from krx_quant.trader import policy as policies
+from krx_quant.trader.gap import day_gap
 from krx_quant.trader.limits import Pause, pause_of
 from krx_quant.trader.refit import NO_POLICY_KEPT, run_refit
 from krx_quant.trader.settings import TraderSettings
@@ -202,6 +203,7 @@ class Report:
     waiting: int = 0
     halts: tuple[Mapping[str, Any], ...] = ()  # reached that day
     failures: tuple[Mapping[str, Any], ...] = ()  # the KIS orders that failed that day (#405, mock)
+    gap: Mapping[str, Any] | None = None  # a mock day's KIS trades against the paper shadow's (#405)
     held: Mapping[str, Any] | None = None  # a cumulative halt reached before the day, not re-armed
     pause: Pause | None = None  # in force at the night's end
     controls: tuple[Control, ...] = ()  # asked from the day's start to the night's end
@@ -311,6 +313,7 @@ def read(
             waiting=waiting,
             halts=_halts(db, mode, day) if "halts" in tables else (),
             failures=_failures(db, mode, day) if "failures" in tables else (),
+            gap=day_gap(db, day) if mode == MOCK and "trades" in tables else None,
             held=_held(db, mode, day, end) if "halts" in tables else None,
             pause=pause_of(everything),
             controls=controls,
@@ -359,6 +362,7 @@ def render(report: Report) -> str:
         return "\n".join(lines)
     sections = [
         _day_section(report),
+        *([] if report.gap is None else [_gap_section(report.gap)]),
         _pick_section(report),
         _standings_section(report),
         _night_section(report),
@@ -696,6 +700,44 @@ def _controls(db: sqlite3.Connection, start: datetime | None, end: datetime) -> 
 
 
 # Writing.
+
+
+def _gap_section(gap: Mapping[str, Any]) -> str:
+    """A mock day's KIS trades against the champion's paper shadow (#405, ``gap.day_gap``): ticks and
+    won, no price."""
+    mock, shadow = gap["mock"], gap["shadow"]
+    lines = [
+        "KIS 모의와 그림자 장부 (#405)",
+        f"- KIS 모의 매매 {mock['trades']}건 {_won(mock['net'])} · 그림자(모의 체결) {shadow['trades']}건"
+        f" {_won(shadow['net'])} · 차이(KIS − 그림자) {_won(gap['difference'])}",
+    ]
+    for p in gap["pairs"]:
+        cell = f"{_hms(p['bar_close'])[:5]} {p['kind']} {p['predictor']}"
+        if p["mock"] is None:
+            lines.append(f"- {cell}: 그림자만 샀다({_end(p['shadow'])}) · KIS는 사지 않았다")
+        elif p["shadow"] is None:
+            lines.append(f"- {cell}: KIS만 샀다({_end(p['mock'])}) · 그림자는 사지 않았다")
+        else:
+            lines.append(
+                f"- {cell}: 진입 {_ticks(p['entry_ticks'])} · 청산 {_ticks(p['exit_ticks'])}"
+                f" · {p['mock']['quantity']}주 ↔ {p['shadow']['quantity']}주"
+                f" · 순손익 차이 {_won(p['net_difference'])}"
+                f" (KIS {_end(p['mock'])}, 그림자 {_end(p['shadow'])})"
+            )
+    lines.append(
+        "- 틱은 KIS 체결가 − 그림자 체결가: 진입은 0보다 크면 KIS가 비싸게 샀고,"
+        " 청산은 0보다 크면 KIS가 비싸게 팔았다"
+    )
+    return "\n".join(lines)
+
+
+def _end(side: Mapping[str, Any]) -> str:
+    reason = side["exit_reason"]
+    return "열림" if reason is None else EXITS.get(reason, reason)
+
+
+def _ticks(value: float | None) -> str:
+    return "없음" if value is None else f"{value:+.2f}틱"
 
 
 def _won(value: float | None) -> str:
