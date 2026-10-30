@@ -338,7 +338,7 @@ class MockTrader(PaperTrader):
         placed = Placed(ask, quantity, sent.ref.branch, sent.ref.number)
         # Open on KIS still: its cancel did not take, or the inquiry never showed it. It is followed
         # until nothing is left of it (``_settle_buy``), and no take-profit rests before.
-        live = taken.left is None or taken.left > 0
+        live = taken.unsettled
         if live:
             if taken.left is None:
                 self._failed("buy", UNKNOWN, "주문이 받아들여졌으나 주문 체결 조회에 보이지 않는다")
@@ -583,7 +583,7 @@ class MockTrader(PaperTrader):
             if sent.accepted and sent.ref is not None:
                 # Open still when its cancel did not take (or it was never seen on the inquiry): it is
                 # followed, and taken off before anything more is sold.
-                live = taken.left is None or taken.left > 0
+                live = taken.unsettled
                 status = FILLED if taken.filled >= left else OPEN if live else CANCELLED
                 placed = Placed(bid, left, sent.ref.branch, sent.ref.number)
                 order = self.store.add_order(trade.id, SELL, reason, placed, at, status)
@@ -667,8 +667,8 @@ class MockTrader(PaperTrader):
             await asyncio.sleep(self._timing.poll)
 
     def _cancel_failed(self, cancel: Sent | None, trade: int | None) -> None:
-        if cancel is None:
-            self._failed("cancel", UNKNOWN, "취소를 보내지 않았다", trade=trade)
+        if cancel is None:  # it could not be sent (no token): the order is open still
+            self._failed("cancel", ERROR, "취소를 보내지 못했다(접근토큰 없음)", trade=trade)
         elif cancel.outcome == REFUSED:
             self._failed("cancel", REFUSED, cancel.reason, cancel.code, trade)
         elif not cancel.accepted:

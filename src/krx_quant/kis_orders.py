@@ -709,6 +709,13 @@ class Taken:
             return 0
         return self.row.left if self.row is not None else None
 
+    @property
+    def unsettled(self) -> bool:
+        """KIS took the order (``sent.ref`` names it) and it is not known to be over: something of it
+        is left open (its cancel did not take, or could not be sent), or no read showed it. The
+        caller follows it by ``sent.ref`` until nothing is left of it (#405)."""
+        return self.sent.accepted and self.sent.ref is not None and (self.left is None or self.left > 0)
+
 
 class Tokens(Protocol):
     """The access token a broker's calls carry (``auth.TokenManager``)."""
@@ -778,8 +785,11 @@ class Broker:
         filled is the row's ``filled``, at its ``average``; a partial fill is a position of that.
 
         A refused order ends there. One without an answer, or accepted without naming its order, is
-        not followed: whether it went in, the inquiry shows (``Taken.left`` None). ValueError for a
-        side that is neither ``SIDE_BUY`` nor ``SIDE_SELL``: nothing is sent."""
+        not followed: whether it went in, the inquiry shows (``Taken.left`` None). Once the order is
+        accepted nothing raises: a cancel that cannot be sent (no token) ends it with what is left
+        open (``Taken.cancel`` None, ``left`` above 0, or None when no read showed the order), for
+        the caller to follow (#405). ValueError for a side that is neither ``SIDE_BUY`` nor
+        ``SIDE_SELL``: nothing is sent."""
         if side not in (SIDE_BUY, SIDE_SELL):
             raise ValueError(f"a side is {SIDE_BUY} (buy) or {SIDE_SELL} (sell), got {side!r}")
         order = self.buy if side == SIDE_BUY else self.sell
@@ -789,7 +799,13 @@ class Broker:
         row = await self._follow(day, symbol, sent.ref, wait, poll)
         if row is not None and row.left == 0:
             return Taken(sent, row)
-        cancel = await self.cancel(sent.ref)
+        try:
+            cancel = await self.cancel(sent.ref)
+        except BrokerError as e:  # no token: the cancel was not sent, what is left of the order is open
+            log.warning(
+                "the cancel of a trader's order could not be sent (%s): what is left of it is open", e
+            )
+            return Taken(sent, row)
         row = await self._follow(day, symbol, sent.ref, wait, poll) or row
         return Taken(sent, row, cancel)
 

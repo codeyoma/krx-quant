@@ -599,6 +599,139 @@ async def test_a_batch_of_sells_used_up_waits_for_a_later_quote_or_tick(
     assert [o[3] for o in orders_of(trade) if o[1] == "stop_loss"] == [14, 13, 12, 11]
 
 
+Pick = Callable[[FakeOrder], bool]
+
+
+def the_buy(order: FakeOrder) -> bool:
+    return order.side == BUY_SIDE
+
+
+def the_stop_sell(order: FakeOrder) -> bool:
+    return order.side == SELL_SIDE and order.price == 69_800
+
+
+def cancel_without_a_token_once(
+    monkeypatch: pytest.MonkeyPatch, account: FakeAccount, pick: Pick
+) -> list[str]:
+    """The first cancel of the trader's order ``pick`` chooses cannot be sent: no access token
+    (#405). The cancels asked of it, by order number."""
+    cancel = kis_orders.Broker.cancel
+    asked: list[str] = []
+
+    async def first_without(self: kis_orders.Broker, order: kis_orders.OrderRef) -> kis_orders.Sent:
+        [placed] = [o for o in account.orders if kis_orders.same_number(o.number, order.number)]
+        if pick(placed):
+            asked.append(order.number)
+            if len(asked) == 1:
+                raise kis_orders.NoToken("cancel: no access token (made up), nothing sent")
+        return await cancel(self, order)
+
+    monkeypatch.setattr(kis_orders.Broker, "cancel", first_without)
+    return asked
+
+
+def reads_fail_until_a_second_cancel(fake: FakeKis, account: FakeAccount, pick: Pick) -> list[str]:
+    """KIS does not answer the inquiry of the order ``pick`` chooses (#405: a fill read that raises)
+    until the trader asks to cancel it a second time; the cancels asked of it."""
+    read, cancel = fake.rest_responses[kis_orders.FILLS.mock], fake.rest_posts[kis_orders.CANCEL.mock]
+    asked: list[str] = []
+
+    def chosen(number: str) -> bool:
+        return any(pick(o) for o in account.orders if number and kis_orders.same_number(o.number, number))
+
+    def inquiry(params: dict[str, str]) -> Any:
+        if chosen(params.get("ODNO", "")) and len(asked) < 2:
+            return {"rt_cd": "1", "msg_cd": "FK0010", "msg1": "made up: 조회하지 못했습니다"}
+        return read(params)
+
+    def cancelled(body: dict[str, Any]) -> Any:
+        if chosen(str(body["ORGN_ODNO"])):
+            asked.append(str(body["ORGN_ODNO"]))
+        return cancel(body)
+
+    fake.rest_responses[kis_orders.FILLS.mock] = inquiry
+    fake.rest_posts[kis_orders.CANCEL.mock] = cancelled
+    return asked
+
+
+async def test_a_buy_whose_cancel_cannot_be_sent_is_kept_and_followed(
+    kis_mock: tuple[FakeKis, FakeAccount], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """4 of 14 fill, and the cancel of the 10 left cannot be sent: the 4 are a position, the buy is
+    followed, and the next try cancels the 10; the take-profit then rests for the 4."""
+    fake, account = kis_mock
+    account.depth = 4
+    asked = cancel_without_a_token_once(monkeypatch, account, the_buy)
+    day = MockDay(tmp_path, fake, account)
+
+    [trade] = await day.run([TEN, BOUGHT])
+
+    assert len(asked) == 2 and trade["entry"]["quantity"] == 4
+    assert orders_of(trade) == [
+        ("buy", "entry", 70_100, 14, "cancelled", 4),
+        ("sell", "take_profit", 70_300, 4, "open", 0),
+    ]
+    assert account.holdings[SYMBOL] == 4 and [o.left for o in account.placed(BUY_SIDE)] == [0]
+    assert [(f["what"], f["outcome"]) for f in day.failures()] == [("cancel", "error")]
+
+
+async def test_a_buy_whose_fills_cannot_be_read_is_kept_and_followed(
+    kis_mock: tuple[FakeKis, FakeAccount], tmp_path: Path
+) -> None:
+    """The buy fills 14 at once, but KIS answers none of its reads: the trader keeps the order it does
+    not know the end of, follows it, and once a read answers opens the trade of its 14."""
+    fake, account = kis_mock
+    asked = reads_fail_until_a_second_cancel(fake, account, the_buy)
+    day = MockDay(tmp_path, fake, account)
+
+    [trade] = await day.run([TEN, BOUGHT])
+
+    assert len(asked) == 2 and trade["entry"]["quantity"] == 14
+    assert orders_of(trade) == [
+        ("buy", "entry", 70_100, 14, "filled", 14),
+        ("sell", "take_profit", 70_300, 14, "open", 0),
+    ]
+    assert [r["status"] for r in rows(tmp_path, "unfilled_buys")] == ["filled"]
+    assert [(f["what"], f["outcome"]) for f in day.failures()] == [("buy", "unknown")]
+
+
+async def test_a_sale_whose_cancel_cannot_be_sent_never_sells_twice(
+    kis_mock: tuple[FakeKis, FakeAccount], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The stop's sell fills 5 of 14 and its cancel cannot be sent: the sell is followed, taken off
+    on the next try (KIS cancels its 9 then), and only those 9 are sold after."""
+    fake, account = kis_mock
+    asked = cancel_without_a_token_once(monkeypatch, account, the_stop_sell)
+    day = MockDay(tmp_path, fake, account)
+
+    [trade] = await day.run([TEN, BOUGHT, Depth("10:01:00", 5), quote("10:01:30", 69_800, 69_900)])
+
+    assert len(asked) == 3, "the cancel not sent, then the take-off's, then the next sell's own"
+    assert [o[3:] for o in orders_of(trade) if o[1] == "stop_loss"] == [
+        (14, "cancelled", 5),  # its 9 taken off on the next try
+        (9, "cancelled", 5),
+        (4, "filled", 4),
+    ]
+    assert account.holdings[SYMBOL] == 0 and trade["exit"]["reason"] == STOP_LOSS
+
+
+async def test_a_sale_whose_fills_cannot_be_read_never_sells_twice(
+    kis_mock: tuple[FakeKis, FakeAccount], tmp_path: Path
+) -> None:
+    """The stop's sell fills 5 of 14 but none of its reads answers: it is followed, taken off on the
+    next try (its 5 fills read then), and only the 9 left are sold after."""
+    fake, account = kis_mock
+    asked = reads_fail_until_a_second_cancel(fake, account, the_stop_sell)
+    day = MockDay(tmp_path, fake, account)
+
+    [trade] = await day.run([TEN, BOUGHT, Depth("10:01:00", 5), quote("10:01:30", 69_800, 69_900)])
+
+    assert len(asked) >= 2
+    stop = [o[3:] for o in orders_of(trade) if o[1] == "stop_loss"]
+    assert stop[0] == (14, "cancelled", 5) and sum(o[2] for o in stop) == 14
+    assert account.holdings[SYMBOL] == 0 and trade["exit"]["reason"] == STOP_LOSS
+
+
 # Partial fills and the cancel race
 
 
