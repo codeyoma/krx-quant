@@ -140,6 +140,24 @@ async def test_a_mock_day_s_orders_are_the_same_in_the_ledger_and_on_kis(
     assert not re.search(r"\d{2},?\d{3}원|\b(69|70)[,]?\d{3}\b", out), "no price"
 
 
+async def test_a_buy_of_which_nothing_filled_is_compared_as_the_ledger_keeps_it(
+    kis_mock: tuple[FakeKis, FakeAccount], tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A buy KIS took and cancelled with nothing filled opened no trade: it is the ledger's all the
+    same, not an order KIS has that the ledger lacks."""
+    fake, account = kis_mock
+    account.fills = False
+    assert await MockDay(tmp_path, fake, account).run([TEN, BOUGHT]) == []
+    capsys.readouterr()
+
+    code, out = await check(fake, tmp_path, capsys)
+
+    assert code == SAME
+    assert "매매 0건, 주문 1건(매수 1, 매도 0)" in out
+    assert "1. 매수(진입) 10:00:02 · 주문 14주 ↔ 14주 · 체결 0주 ↔ 0주 · 체결가 차이 +0.00틱: 같다" in out
+    assert "장부에 없는 KIS의 주문\n- 없음" in out
+
+
 async def test_a_kis_order_the_ledger_lacks_is_a_difference_unless_the_probe_placed_it(
     kis_mock: tuple[FakeKis, FakeAccount], tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

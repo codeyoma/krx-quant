@@ -21,6 +21,8 @@ by the nightly re-fit (#399, from the engine's container).
   A mock sale may take several sells at the best bid (``mock.py``), each its own order;
 - ``fills``: each order's fills, with the quote a paper fill was made on (none in mock: a mock
   fill is KIS's, at its average price ``avg_prvs``, as the day's order inquiry shows it);
+- ``unfilled_buys`` (#405): each mock buy KIS took of which nothing filled (no trade opened), with
+  KIS's order, so that the ledger holds every order KIS has;
 - ``failures`` (#405): each KIS order of mock mode that failed (refused, its outcome unknown, or
   an error before it was sent), which stops new entries for the rest of that day (``limits.py``);
 - ``policies`` and ``champions`` (#399, ``policy.py``): each policy version and each change of the
@@ -167,6 +169,17 @@ CREATE TABLE IF NOT EXISTS fills (
     quote_at TEXT                      -- the quote a paper fill was made on
 );
 CREATE INDEX IF NOT EXISTS fills_by_order ON fills (order_id);
+CREATE TABLE IF NOT EXISTS unfilled_buys (  -- each mock buy KIS took of which nothing filled (#405)
+    id INTEGER PRIMARY KEY,
+    decision_id INTEGER NOT NULL REFERENCES decisions (id),
+    mode TEXT NOT NULL,
+    price REAL NOT NULL,               -- the limit
+    quantity INTEGER NOT NULL,
+    placed_at TEXT NOT NULL,
+    status TEXT NOT NULL,              -- cancelled; open when its cancel did not take
+    broker_id TEXT NOT NULL,           -- KIS's order number
+    broker_branch TEXT
+);
 CREATE TABLE IF NOT EXISTS failures (   -- each KIS order of mock mode that failed (#405)
     id INTEGER PRIMARY KEY,
     at TEXT NOT NULL,
@@ -343,8 +356,8 @@ class Placed:
 
 @dataclass(frozen=True)
 class Resting:
-    """A trade's take-profit sell resting on KIS (#405): its row, KIS's order, what of it was kept
-    filled."""
+    """A trade's sell order open on KIS (#405): the take-profit's resting at the target, or a sale's
+    whose cancel did not take; its row, KIS's order, what of it was kept filled."""
 
     order_id: int
     price: float
@@ -353,6 +366,7 @@ class Resting:
     number: str
     filled: int
     amount: float  # the fills kept of it, in won
+    purpose: str = "take_profit"  # take_profit, or a sale's (stop_loss, time, ...)
 
 
 @dataclass(frozen=True)
@@ -711,36 +725,58 @@ class TraderStore:
                 "UPDATE orders SET status = ?, closed_at = ? WHERE id = ?", (status, iso(at), order)
             )
 
-    def resting(self, trade: int) -> Resting | None:
-        """``trade``'s take-profit sell resting on KIS (#405), if one is: open, with KIS's order."""
-        row = self._db.execute(
+    def open_sells(self, trade: int) -> list[Resting]:
+        """``trade``'s sell orders still open on KIS (#405), oldest first: its take-profit sell resting
+        at the target, and a sale's sell whose cancel did not take; each with what of it was kept
+        filled."""
+        rows = self._db.execute(
             "SELECT o.*, coalesce(sum(f.quantity), 0) AS kept,"
             " coalesce(sum(f.price * f.quantity), 0) AS amount"
-            " FROM orders o LEFT JOIN fills f ON f.order_id = o.id WHERE o.trade_id = ?"
-            " AND o.purpose = 'take_profit' AND o.status = 'open' AND o.broker_id IS NOT NULL"
-            " GROUP BY o.id ORDER BY o.id DESC LIMIT 1",
-            (trade,),
-        ).fetchone()
-        if row is None or row["id"] is None:
-            return None
-        return Resting(
-            row["id"],
-            row["price"],
-            row["quantity"],
-            row["broker_branch"] or "",
-            row["broker_id"],
-            int(row["kept"]),
-            float(row["amount"]),
+            " FROM orders o LEFT JOIN fills f ON f.order_id = o.id WHERE o.trade_id = ? AND o.side = ?"
+            " AND o.status = ? AND o.broker_id IS NOT NULL GROUP BY o.id ORDER BY o.id",
+            (trade, SELL, OPEN),
         )
+        return [
+            Resting(
+                r["id"],
+                r["price"],
+                r["quantity"],
+                r["broker_branch"] or "",
+                r["broker_id"],
+                int(r["kept"]),
+                float(r["amount"]),
+                r["purpose"],
+            )
+            for r in rows
+        ]
 
-    def sold(self, trade: int) -> int:
-        """The shares of ``trade`` sold so far: its sell orders' fills."""
+    def resting(self, trade: int) -> Resting | None:
+        """``trade``'s take-profit sell resting on KIS (#405), if one is."""
+        return next((o for o in self.open_sells(trade) if o.purpose == "take_profit"), None)
+
+    def sells(self, trade: int) -> tuple[int, float]:
+        """The shares of ``trade`` sold so far and what they brought, in won: its sell orders' fills."""
         row = self._db.execute(
-            "SELECT coalesce(sum(f.quantity), 0) FROM fills f JOIN orders o ON o.id = f.order_id"
-            " WHERE o.trade_id = ? AND o.side = ?",
+            "SELECT coalesce(sum(f.quantity), 0), coalesce(sum(f.price * f.quantity), 0) FROM fills f"
+            " JOIN orders o ON o.id = f.order_id WHERE o.trade_id = ? AND o.side = ?",
             (trade, SELL),
         ).fetchone()
-        return int(row[0])
+        return int(row[0]), float(row[1])
+
+    def sold(self, trade: int) -> int:
+        """The shares of ``trade`` sold so far."""
+        return self.sells(trade)[0]
+
+    def add_unfilled_buy(self, decision: int, mode: str, placed: Placed, at: datetime, status: str) -> None:
+        """A mock buy KIS took of which nothing filled (#405): no trade, but the ledger keeps every
+        order KIS has (``mock_check``). ``status`` is cancelled, or open when its cancel did not take."""
+        with self._db:
+            self._db.execute(
+                "INSERT INTO unfilled_buys (decision_id, mode, price, quantity, placed_at, status, broker_id,"
+                " broker_branch) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (decision, mode, placed.price, placed.quantity, iso(at), status, placed.number)
+                + (placed.branch,),
+            )
 
     def exit_on_fills(self, trade: OpenTrade, at: datetime, reason: str, fee_rate: float) -> float:
         """A mock trade's exit (#405), once its sells' fills hold every share: its price their average,

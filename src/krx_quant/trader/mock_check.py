@@ -70,7 +70,7 @@ PURPOSES = {
 class LedgerOrder:
     """An order of the champion's mock trades, as the ledger keeps it."""
 
-    trade: int
+    trade: int | None  # None: a buy of which nothing filled, which opened no trade
     side: str  # SIDE_BUY or SIDE_SELL
     purpose: str
     quantity: int
@@ -132,31 +132,52 @@ def mock_days(state_dir: Path) -> tuple[date, ...]:
 
 
 def ledger_orders(db: sqlite3.Connection, day: date) -> list[LedgerOrder]:
-    """The champion's mock orders placed on ``day`` with a KIS order, oldest first."""
-    if not _has(db, "orders"):
-        return []
-    rows = db.execute(
-        "SELECT o.id, o.trade_id, o.side, o.purpose, o.quantity, o.placed_at, o.broker_id,"
-        " coalesce(sum(f.quantity), 0) AS filled, coalesce(sum(f.price * f.quantity), 0) AS amount"
-        " FROM orders o JOIN trades t ON t.id = o.trade_id LEFT JOIN fills f ON f.order_id = o.id"
-        " WHERE o.mode = ? AND o.broker_id IS NOT NULL AND substr(o.placed_at, 1, 10) = ?"
-        f" AND {champion_of(db)}"
-        " GROUP BY o.id ORDER BY o.placed_at, o.id",
-        (MOCK, day.isoformat()),
-    )
-    return [
-        LedgerOrder(
-            trade=r["trade_id"],
-            side=SIDES[r["side"]],
-            purpose=r["purpose"],
-            quantity=r["quantity"],
-            filled=int(r["filled"]),
-            average=float(r["amount"]) / r["filled"] if r["filled"] else 0.0,
-            number=str(r["broker_id"]),
-            placed_at=datetime.fromisoformat(r["placed_at"]),
+    """The champion's mock orders placed on ``day`` with a KIS order, oldest first: its trades'
+    orders, and its buys of which nothing filled (``unfilled_buys``: no trade, ``trade`` None)."""
+    found: list[LedgerOrder] = []
+    if _has(db, "orders"):
+        rows = db.execute(
+            "SELECT o.id, o.trade_id, o.side, o.purpose, o.quantity, o.placed_at, o.broker_id,"
+            " coalesce(sum(f.quantity), 0) AS filled, coalesce(sum(f.price * f.quantity), 0) AS amount"
+            " FROM orders o JOIN trades t ON t.id = o.trade_id LEFT JOIN fills f ON f.order_id = o.id"
+            " WHERE o.mode = ? AND o.broker_id IS NOT NULL AND substr(o.placed_at, 1, 10) = ?"
+            f" AND {champion_of(db)}"
+            " GROUP BY o.id ORDER BY o.placed_at, o.id",
+            (MOCK, day.isoformat()),
         )
-        for r in rows
-    ]
+        found += [
+            LedgerOrder(
+                trade=r["trade_id"],
+                side=SIDES[r["side"]],
+                purpose=r["purpose"],
+                quantity=r["quantity"],
+                filled=int(r["filled"]),
+                average=float(r["amount"]) / r["filled"] if r["filled"] else 0.0,
+                number=str(r["broker_id"]),
+                placed_at=datetime.fromisoformat(r["placed_at"]),
+            )
+            for r in rows
+        ]
+    if _has(db, "unfilled_buys"):
+        rows = db.execute(
+            "SELECT quantity, placed_at, broker_id FROM unfilled_buys"
+            " WHERE mode = ? AND substr(placed_at, 1, 10) = ?",
+            (MOCK, day.isoformat()),
+        )
+        found += [
+            LedgerOrder(
+                None,
+                SIDE_BUY,
+                "entry",
+                r["quantity"],
+                0,
+                0.0,
+                str(r["broker_id"]),
+                datetime.fromisoformat(r["placed_at"]),
+            )
+            for r in rows
+        ]
+    return sorted(found, key=lambda o: o.placed_at)
 
 
 def failures(db: sqlite3.Connection, day: date) -> list[sqlite3.Row]:
@@ -242,7 +263,7 @@ def render(check: Check) -> str:
     day = check.day
     lines = [f"KIS 모의 매매 대조 (#405) · {day}({WEEKDAYS[day.weekday()]}) · {SYMBOL}"]
     ledger = check.ledger
-    trades = len({o.trade for o in ledger})
+    trades = len({o.trade for o in ledger if o.trade is not None})
     lines.append(
         f"- 장부(state/trader.sqlite3, mock, 챔피언의 매매): 매매 {trades}건, 주문 {len(ledger)}건"
         f"({_sides(ledger)}), 체결 {_filled(ledger)}"

@@ -373,6 +373,56 @@ async def test_a_sale_partly_filled_sells_what_is_left_again_at_the_bid(
     assert trade["exit"]["price"] == 69_850 and account.holdings[SYMBOL] == 0
 
 
+async def test_a_sale_whose_cancel_did_not_take_is_followed_and_never_sold_twice(
+    kis_mock: tuple[FakeKis, FakeAccount], tmp_path: Path
+) -> None:
+    """The stop's sell fills 5 of 14 and KIS refuses its cancel: the order stays open on KIS. It
+    fills the other 9 before the sale is tried again, so the next try takes it off and finds every
+    share sold: no second sell (KIS would have sold shares the trader no longer holds)."""
+    fake, account = kis_mock
+    cancel = fake.rest_posts[kis_orders.CANCEL.mock]
+    asked: list[str] = []
+
+    def refuse_once(body: dict[str, Any]) -> Any:  # the stop's sell: refused, then filled meanwhile
+        [order] = [o for o in account.orders if kis_orders.same_number(o.number, body["ORGN_ODNO"])]
+        if order.side == SELL_SIDE and order.price == 69_800:
+            asked.append(order.number)
+            if len(asked) == 1:
+                return {"rt_cd": "1", "msg_cd": "FK0009", "msg1": "made up: 취소를 받지 못했습니다"}
+            account.depth = None
+            account.fill(order)  # the rest filled during the wait
+        return cancel(body)
+
+    fake.rest_posts[kis_orders.CANCEL.mock] = refuse_once
+    day = MockDay(tmp_path, fake, account)
+
+    [trade] = await day.run([TEN, BOUGHT, Depth("10:01:00", 5), quote("10:01:30", 69_800, 69_900)])
+
+    assert orders_of(trade)[2:] == [("sell", "stop_loss", 69_800, 14, "filled", 14)]  # 5, then 9
+    assert trade["exit"]["reason"] == STOP_LOSS and trade["exit"]["price"] == 69_850
+    assert len(asked) == 2, "taken off before anything more was sold"
+    assert account.holdings[SYMBOL] == 0 and len(account.placed(SELL_SIDE)) == 2  # the take-profit, the stop
+    assert [(f["what"], f["outcome"]) for f in day.failures()] == [("cancel", "refused")]
+
+
+async def test_a_partly_filled_take_profit_is_valued_at_its_fills_and_the_rest_at_the_bid(
+    kis_mock: tuple[FakeKis, FakeAccount], tmp_path: Path
+) -> None:
+    """13 of the 14 sold at 70,300, the last share at the bid of 69,900: 983,800 won in all against
+    980,700 paid, less 147.105 for the buy and 983,800 × 0.215% = 2,115.17 for the sales: 837.725 won.
+    Valued as 14 shares at that bid it would be −4,351, past a 4,000-won daily limit."""
+    fake, account = kis_mock
+    day = MockDay(tmp_path, fake, account, rules=Rules(fee_rate=FEE, daily_loss_percent=0.4))
+
+    [trade] = await day.run([TEN, BOUGHT, Fill("10:01:00", 13), quote("10:01:30", 69_900, 70_000)])
+
+    assert day.status == RUNNING and rows(tmp_path, "halts") == []
+    assert trade["exit"] is None
+    assert day.state_now is not None
+    assert day.state_now["position"]["unrealized"] == pytest.approx(837.725)
+    assert day.state_now["today"]["net"] == pytest.approx(837.725)
+
+
 # Partial fills and the cancel race
 
 
@@ -435,6 +485,16 @@ async def test_a_buy_nothing_of_which_fills_buys_nothing(
     assert (decision["action"], decision["reason"], decision["trade_id"]) == ("buy", UNFILLED, None)
     assert day.status == RUNNING and day.notices == [], "not a failure"
     assert not account.holdings.get(SYMBOL)
+    # The order is kept all the same, with KIS's: the ledger holds every order KIS has.
+    [kept] = rows(tmp_path, "unfilled_buys")
+    [order] = account.placed(BUY_SIDE)
+    assert (kept["decision_id"], kept["quantity"], kept["price"], kept["status"]) == (
+        decision["id"],
+        14,
+        70_100,
+        "cancelled",
+    )
+    assert kept["broker_id"] == order.number
 
 
 # Failures

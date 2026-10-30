@@ -22,15 +22,20 @@ time barrier, a pause that sells, a loss limit, ``paper.py``), the take-profit s
 and its row read until nothing is left of it: a fill that came before the cancel is kept, and one
 that filled it whole exits the trade ``take_profit``. Then a limit sell of the shares left at the
 best bid of the latest quote (``Broker.take``), and again at the then best bid while shares are
-left (``Timing.rounds`` at a time, then on the next quote or tick). The trade exits once every
-share is sold, at the average of its sells' fills, with the reason the sale began with. A
+left (``Timing.rounds`` at a time, then on the next quote or tick). A sell whose cancel did not
+take stays open in the ledger and is followed: before anything more is sold it is cancelled again
+and its fills kept, so that a fill of it during the wait is never sold twice. The trade exits once
+every share is sold, at the average of its sells' fills, with the reason the sale began with. A
 take-profit sell KIS did not take is sold so, at the best bid, once that bid reaches the target.
 
 **Ledger.** A trade's entry, exit, costs and P&L come from KIS's fills: the commission
 (``KRX_FEE_PERCENT``) a side and the sell tax on the fills' notional, as in paper. Each order is
 kept with KIS's order (``orders.broker_id``, ``broker_branch``) and each fill as the inquiry showed
-it (``store.open_position``, ``add_order``, ``add_fill``, ``exit_on_fills``). The limits and pauses
-(#396, ``limits.py``) count these trades as they count paper's; the trades are of mode ``mock``.
+it (``store.open_position``, ``add_order``, ``add_fill``, ``exit_on_fills``); a buy KIS took of
+which nothing filled is kept too (``unfilled_buys``), so that the ledger holds every order KIS has.
+The limits and pauses (#396, ``limits.py``) count these trades as they count paper's, an open
+trade valued at what its sells brought so far and the rest of its shares at the best bid; the
+trades are of mode ``mock``.
 
 **A failed order**: KIS refused it, it had no answer (whether it went in is not known: the
 account's reconciliation is #406's), or it could not be sent (no token, an inquiry KIS did not
@@ -65,12 +70,12 @@ from krx_quant.kis_orders import (
     Sent,
 )
 from krx_quant.market_calendar import Session
-from krx_quant.pricing import tick_size
+from krx_quant.pricing import SELL_TAX, tick_size
 from krx_quant.trader import MOCK, SYMBOL
 from krx_quant.trader.limits import ORDER_FAILED, SALE, Notify
 from krx_quant.trader.paper import NO_SHARES, TAKE_PROFIT, PaperTrader, Rules, _Waiting
 from krx_quant.trader.quotes import BestQuote
-from krx_quant.trader.store import CANCELLED, FILLED, SELL, OpenTrade, Placed, Resting, TraderStore
+from krx_quant.trader.store import CANCELLED, FILLED, OPEN, SELL, OpenTrade, Placed, Resting, TraderStore
 
 log = logging.getLogger(__name__)
 
@@ -133,11 +138,16 @@ class MockTrader(PaperTrader):
         self._follower: asyncio.Task[None] | None = None  # the take-profit sell's row, read as it rests
         self._selling: str | None = None  # the reason the open trade's sale began with
         self._retry_at: datetime | None = None  # a sale that failed goes again from then
-        self._resting: Resting | None = None
+        self._resting: Resting | None = None  # the take-profit sell resting on KIS
+        self._live: Resting | None = None  # a sale's sell whose cancel did not take: open on KIS still
         self._closing = False
         super().__init__(store, rules, sessions, started_at, MOCK, notify)
-        if self._open is not None:  # a restart: its take-profit sell rests on KIS still, if it did
-            self._resting = store.resting(self._open.id)
+        if self._open is not None:  # a restart: its sells open on KIS when it stopped go on
+            for order in store.open_sells(self._open.id):
+                if order.purpose == TAKE_PROFIT:
+                    self._resting = order
+                else:  # a sale was under way: it goes on, that order taken off first
+                    self._live, self._selling = order, order.purpose
 
     # The paper book's hooks.
 
@@ -168,6 +178,15 @@ class MockTrader(PaperTrader):
         if body["position"] is not None and self._selling is not None:
             body["position"]["selling"] = True
         return body
+
+    def _unrealized(self, trade: OpenTrade, bid: float) -> float:
+        """What ``trade`` nets once the shares not sold yet are sold at ``bid``: what its sells' fills
+        brought (a take-profit filled in part, a sale under way) and the rest at ``bid``, less the
+        buy's commission and the sales' commission and tax."""
+        sold, amount = self.store.sells(trade.id)
+        proceeds = amount + bid * (trade.quantity - sold)
+        paid = trade.buy_fee + proceeds * (self.rules.fee_rate + SELL_TAX)
+        return proceeds - trade.entry_price * trade.quantity - paid
 
     # The orders in flight.
 
@@ -271,7 +290,9 @@ class MockTrader(PaperTrader):
         at = self._clock()
         if taken.left > 0:  # its cancel did not take: what is left of it may fill still
             self._cancel_failed(taken.cancel, None)
-        if taken.filled < 1:
+        if taken.filled < 1:  # kept all the same: the ledger holds every order KIS has (``mock_check``)
+            placed = Placed(ask, quantity, sent.ref.branch, sent.ref.number)
+            self.store.add_unfilled_buy(waiting.decision, MOCK, placed, at, OPEN if taken.left else CANCELLED)
             self.store.unfilled(waiting.decision, UNFILLED)
             log.info("trader: no fill of the buy at %s on KIS before its cancel", ask)
             return
@@ -372,19 +393,28 @@ class MockTrader(PaperTrader):
         kept = replace(resting, filled=row.filled, amount=amount)
         if self._resting is resting:
             self._resting = kept
+        if self._live is resting:
+            self._live = kept
         return kept
 
     # The sale.
 
     async def _sell(self, trade: OpenTrade, reason: str) -> None:
-        resting = self._resting
-        if resting is not None:
-            row = await self._take_off(trade, resting)
+        # First the sells open on KIS: the take-profit's, and a sale's whose cancel did not take
+        # before. Each is cancelled and its fills kept until nothing is left of it, so that what is
+        # sold next is what is left (a fill can come before the cancel lands).
+        for still in (self._resting, self._live):
+            if still is None:
+                continue
+            row = await self._take_off(trade, still)
             if row is None:
                 return
-            if row.filled >= trade.quantity:  # it filled before its cancel landed
+            if still.purpose == TAKE_PROFIT and row.filled >= trade.quantity:  # filled before its cancel
                 self._finish(trade, TAKE_PROFIT)
                 return
+        if self.store.sold(trade.id) >= trade.quantity:
+            self._finish(trade, reason)
+            return
         for _ in range(self._timing.rounds):
             left = trade.quantity - self.store.sold(trade.id)
             bid = self._bid()
@@ -405,11 +435,19 @@ class MockTrader(PaperTrader):
                 return
             sent, at = taken.sent, self._clock()
             if sent.accepted and sent.ref is not None:
-                status = FILLED if taken.filled >= left else CANCELLED
+                # Open still when its cancel did not take (or it was never seen on the inquiry): it is
+                # followed, and taken off before anything more is sold.
+                live = taken.left is None or taken.left > 0
+                status = FILLED if taken.filled >= left else OPEN if live else CANCELLED
                 placed = Placed(bid, left, sent.ref.branch, sent.ref.number)
                 order = self.store.add_order(trade.id, SELL, reason, placed, at, status)
                 if taken.filled:
                     self.store.add_fill(order, at, taken.average, taken.filled)
+                if status == OPEN:
+                    amount = taken.average * taken.filled
+                    self._live = Resting(
+                        order, bid, left, sent.ref.branch, sent.ref.number, taken.filled, amount, reason
+                    )
                 log.info(
                     "trader: sold %s of %s at %s on KIS (%s, trade %s)",
                     taken.filled,
@@ -432,9 +470,10 @@ class MockTrader(PaperTrader):
             self._finish(trade, reason)
 
     async def _take_off(self, trade: OpenTrade, resting: Resting) -> OrderRow | None:
-        """The resting take-profit sell cancelled, and its row read until nothing is left of it (a
-        fill can come before the cancel lands: KIS then finds less or nothing to cancel). Its row,
-        its fills kept; None when it could not be taken off (a failed order, tried again later)."""
+        """A sell open on KIS (the resting take-profit's, or a sale's whose cancel did not take)
+        cancelled, and its row read until nothing is left of it (a fill can come before the cancel
+        lands: KIS then finds less or nothing to cancel). Its row, its fills kept; None when it could
+        not be taken off (a failed order, tried again later, the order followed still)."""
         ref = OrderRef(resting.branch, resting.number)
         try:
             cancel = await self._broker.cancel(ref)
@@ -460,8 +499,11 @@ class MockTrader(PaperTrader):
             return None
         filled = row.filled >= resting.quantity
         self.store.close_order(resting.order_id, FILLED if filled else CANCELLED, self._clock())
-        self._resting = None
-        self._open = replace(trade, take_profit_order=None)
+        if resting.purpose == TAKE_PROFIT:
+            self._resting = None
+            self._open = replace(trade, take_profit_order=None)
+        else:
+            self._live = None
         return row
 
     def _cancel_failed(self, cancel: Sent | None, trade: int | None) -> None:
@@ -490,6 +532,7 @@ class MockTrader(PaperTrader):
         self._sell_after = None
         self._selling = None
         self._resting = None
+        self._live = None
         self._retry_at = None
         self._stop_following()
         self._dirty = True

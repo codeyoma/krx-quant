@@ -474,7 +474,7 @@ class PaperTrader:
         if status in SALE and quote.received_at > (self._sell_after or self._started_at):
             self._exit(trade, quote.received_at, quote.bid, SALE[status], quote)
             return
-        reached = self.holds.mark(unrealized(trade, quote.bid, self.rules.fee_rate), quote.received_at)
+        reached = self.holds.mark(self._unrealized(trade, quote.bid), quote.received_at)
         if reached is not None:
             self._dirty = True
             self._enforce(quote.received_at, quote)
@@ -618,6 +618,11 @@ class PaperTrader:
 
     def _busy(self) -> bool:
         return self._open is not None or self._waiting is not None
+
+    def _unrealized(self, trade: OpenTrade, bid: float) -> float:
+        """What the open ``trade`` nets sold at ``bid`` now (``unrealized``); the mock book counts
+        what of it is sold already at its fills (#405)."""
+        return unrealized(trade, bid, self.rules.fee_rate)
 
     def _rank(self, cell: Cell) -> int:
         return self._picks[cell][0] if cell in self._picks else len(self._picks)
