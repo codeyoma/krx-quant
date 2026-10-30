@@ -172,8 +172,9 @@ def ledger_orders(db: sqlite3.Connection, day: date) -> list[LedgerOrder]:
         ]
     if _has(db, "unfilled_buys"):
         rows = db.execute(
+            # One that filled later (its cancel had failed) is its trade's order now (#405).
             "SELECT quantity, placed_at, broker_id FROM unfilled_buys"
-            " WHERE mode = ? AND substr(placed_at, 1, 10) = ?",
+            " WHERE mode = ? AND substr(placed_at, 1, 10) = ? AND status != 'filled'",
             (MOCK, day.isoformat()),
         )
         found += [

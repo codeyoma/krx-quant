@@ -113,6 +113,19 @@ class Desk:
         self.shadow: PaperTrader | None = None
         if mode == MOCK:  # the champion policy's paper record, beside its KIS orders (#405)
             self.shadow = PaperTrader(
+                store,
+                rules,
+                sessions,
+                started_at,
+                PAPER,
+                shadow=True,
+                carry=True,
+                account=self._paper_account,
+            )
+        elif store.open_trade(PAPER, shadow=True) is not None:
+            # A shadow's trade left open by mock mode: a shadow book of its own sells it by its
+            # barriers, picking nothing, apart from the champion's book, whose limits never count it.
+            self.shadow = PaperTrader(
                 store, rules, sessions, started_at, PAPER, shadow=True, account=self._paper_account
             )
         self.challengers: dict[int, PaperTrader] = {}
@@ -126,7 +139,7 @@ class Desk:
         """The net P&L the paper books size on: the champion's book's in paper mode (the trades its
         limits hold); in mock mode the champion's paper book's (``store.paper_account``), never the KIS
         fills (#405)."""
-        if self.shadow is None:
+        if self.mode != MOCK:
             return self.champion.holds.realized_all
         return self.store.paper_account()
 
@@ -166,7 +179,7 @@ class Desk:
         (and its shadow's), and under each challenger running that day for its own (module doc)."""
         under = under_champion(self.store, selection)
         self.champion.select(under, at)
-        if self.shadow is not None:
+        if self.mode == MOCK and self.shadow is not None:
             self.shadow.select(under, at)
         running: dict[int, policy.Policy] = {}
         try:
@@ -239,7 +252,7 @@ class Desk:
         books: list[tuple[int, bool, bool]] = [(v, False, False) for v in sorted(self._running)]
         if self.champion.policy is not None:
             # In mock mode its record is the shadow's, which no pause nor limit stops (#405).
-            stopped = self.shadow is None and self.champion.status != RUNNING
+            stopped = self.mode != MOCK and self.champion.status != RUNNING
             books.insert(0, (self.champion.policy, True, stopped))
         for version, champion, stopped in books:
             kept = self._recorded.get((version, day))
@@ -250,7 +263,10 @@ class Desk:
             self._recorded[(version, day)] = stopped
 
     def _prune(self) -> None:
-        """Let a retired challenger's book go once it holds nothing."""
+        """Let a retired challenger's book go once it holds nothing, and outside mock mode the shadow
+        book that sold the shadow's trade left open (#405)."""
+        if self.mode != MOCK and self.shadow is not None and not self.shadow.busy:
+            self.shadow = None
         for version in [
             v for v, book in self.challengers.items() if v not in self._running and not book.busy
         ]:

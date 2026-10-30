@@ -144,6 +144,7 @@ class MockDay:
     notices: list[str] = field(default_factory=list)
     status: str | None = None  # the book's status after the last event
     state_now: dict[str, Any] | None = None  # GET /v1/trader after the last event
+    timing: Timing = TIMING
 
     async def run(self, events: Sequence[Event]) -> list[dict[str, Any]]:
         engine = PredictionStore(self.state / ENGINE_DB)
@@ -168,7 +169,7 @@ class MockDay:
                     broker,
                     lambda: clock[0],
                     self.notices.append,
-                    TIMING,
+                    self.timing,
                 )
                 book.select(Selection((pick(BARRIER),)), self.started_at)
                 reader = EngineReader(self.state / ENGINE_DB, SYMBOL)
@@ -421,6 +422,108 @@ async def test_a_partly_filled_take_profit_is_valued_at_its_fills_and_the_rest_a
     assert day.state_now is not None
     assert day.state_now["position"]["unrealized"] == pytest.approx(837.725)
     assert day.state_now["today"]["net"] == pytest.approx(837.725)
+
+
+def cancel_refused_once(fake: FakeKis, account: FakeAccount, side: str) -> list[str]:
+    """KIS refuses the first cancel of the trader's ``side`` order (it stays open), and fills what is
+    left of it before taking the next: the cancels asked, by order number."""
+    cancel = fake.rest_posts[kis_orders.CANCEL.mock]
+    asked: list[str] = []
+
+    def answer(body: dict[str, Any]) -> Any:
+        [order] = [o for o in account.orders if kis_orders.same_number(o.number, body["ORGN_ODNO"])]
+        if order.side == side and not order.original:
+            asked.append(order.number)
+            if len(asked) == 1:
+                return {"rt_cd": "1", "msg_cd": "FK0009", "msg1": "made up: 취소를 받지 못했습니다"}
+            account.depth = None
+            account.fill(order)  # what was left filled meanwhile
+        return cancel(body)
+
+    fake.rest_posts[kis_orders.CANCEL.mock] = answer
+    return asked
+
+
+async def test_a_buy_whose_cancel_did_not_take_is_followed_and_its_later_fills_join_the_trade(
+    kis_mock: tuple[FakeKis, FakeAccount], tmp_path: Path
+) -> None:
+    """4 of 14 fill at the ask, KIS refuses the cancel of the 10 left, and they fill before it is
+    taken off again: the trade grows to 14, and only then does the take-profit rest, for all 14."""
+    fake, account = kis_mock
+    account.depth = 4
+    asked = cancel_refused_once(fake, account, BUY_SIDE)
+    day = MockDay(tmp_path, fake, account)
+
+    [trade] = await day.run([TEN, BOUGHT, Fill("10:02:00")])
+
+    assert len(asked) == 2, "taken off again"
+    assert trade["entry"]["quantity"] == 14 and trade["entry"]["price"] == 70_050
+    assert orders_of(trade) == [
+        ("buy", "entry", 70_100, 14, "filled", 14),  # 4, then 10
+        ("sell", "take_profit", 70_300, 14, "filled", 14),
+    ]
+    assert trade["exit"]["reason"] == TAKE_PROFIT and account.holdings[SYMBOL] == 0
+    assert [(f["what"], f["outcome"]) for f in day.failures()] == [("cancel", "refused")]
+
+
+async def test_a_buy_of_which_nothing_filled_before_its_cancel_failed_opens_its_trade_when_it_fills(
+    kis_mock: tuple[FakeKis, FakeAccount], tmp_path: Path
+) -> None:
+    fake, account = kis_mock
+    account.fills = False  # nothing at the limit at first
+    cancel_refused_once(fake, account, BUY_SIDE)
+    day = MockDay(tmp_path, fake, account)
+
+    [trade] = await day.run([TEN, BOUGHT])
+
+    assert trade["entry"]["quantity"] == 14
+    assert orders_of(trade) == [
+        ("buy", "entry", 70_100, 14, "filled", 14),
+        ("sell", "take_profit", 70_300, 14, "open", 0),
+    ]
+    [decision] = day.decisions()
+    assert (decision["action"], decision["reason"], decision["trade_id"]) == ("buy", None, trade["id"])
+    [kept] = rows(tmp_path, "unfilled_buys")
+    assert kept["status"] == "filled", "its trade holds the order now"
+
+
+async def test_a_sale_takes_off_a_buy_still_open_first_and_sells_every_share(
+    kis_mock: tuple[FakeKis, FakeAccount], tmp_path: Path
+) -> None:
+    """The stop comes while the buy's 10 shares are open on KIS (its cancel refused, the next try not
+    due yet): the sale takes the buy off first, its 10 fills join the trade, and all 14 are sold."""
+    fake, account = kis_mock
+    account.depth = 4
+    cancel_refused_once(fake, account, BUY_SIDE)
+    day = MockDay(tmp_path, fake, account, timing=replace(TIMING, retry=30.0))
+
+    [trade] = await day.run([TEN, BOUGHT, quote("10:01:30", 69_800, 69_900)])
+
+    assert trade["entry"]["quantity"] == 14
+    assert orders_of(trade) == [
+        ("buy", "entry", 70_100, 14, "filled", 14),
+        ("sell", "stop_loss", 69_800, 14, "filled", 14),  # no take-profit rested while the buy was open
+    ]
+    assert trade["exit"]["reason"] == STOP_LOSS and account.holdings[SYMBOL] == 0
+
+
+async def test_a_restarted_mock_book_takes_off_the_buy_left_open(
+    kis_mock: tuple[FakeKis, FakeAccount], tmp_path: Path
+) -> None:
+    fake, account = kis_mock
+    account.depth = 4
+    cancel_refused_once(fake, account, BUY_SIDE)
+    first = MockDay(tmp_path, fake, account, timing=replace(TIMING, retry=3600.0))
+    [open_trade] = await first.run([TEN, BOUGHT])
+    assert open_trade["entry"]["quantity"] == 4 and orders_of(open_trade)[0][4] == "open"
+
+    [trade] = await MockDay(tmp_path, fake, account, started_at=at("10:01:00")).run([Tick("10:01:00.5")])
+
+    assert trade["entry"]["quantity"] == 14
+    assert [o[1:5] for o in orders_of(trade)] == [
+        ("entry", 70_100, 14, "filled"),
+        ("take_profit", 70_300, 14, "open"),
+    ]
 
 
 # Partial fills and the cancel race

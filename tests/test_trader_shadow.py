@@ -307,18 +307,26 @@ async def test_the_shadow_and_the_challengers_size_on_the_paper_account_not_on_k
     assert sorted(t["entry"]["quantity"] for t in paper) == [9, 9]  # 700,000 ÷ 70,100
 
 
-async def test_the_paper_book_goes_on_with_the_shadow_s_trade_after_a_switch_back_to_paper(
+async def test_a_shadow_trade_left_open_at_a_switch_back_to_paper_is_sold_apart_from_the_guard(
     kis_mock: tuple[FakeKis, FakeAccount], tmp_path: Path
 ) -> None:
-    """The champion's paper book is one across the modes: a trader started again in paper sells the
-    shadow's open trade by its barriers, as its own book's."""
+    """A trader started again in paper sells the shadow's open trade by its barriers in a shadow book
+    of its own: it stays the shadow's (its policy's paper record), and the paper book's limits and
+    cash never count it, before or after a restart."""
     fake, account = kis_mock
     champion_and_challenger(tmp_path)
     await MockDesk(tmp_path, fake, account).run([TEN, BOUGHT])
 
-    Day(tmp_path, started_at=at("10:01:00")).run([TAKEN])
+    paper = Day(tmp_path, started_at=at("10:01:00"), desk=True)
+    paper.run([TAKEN])
 
-    shadow = [t for t in read_trades(tmp_path / DB_NAME, None, 10, 1) if t["shadow"]]
-    assert [t["exit"] for t in shadow] == [
-        {"at": "2026-10-14T10:02:00+09:00", "price": 70_250, "reason": TAKE_PROFIT}
-    ]
+    [shadow] = [t for t in read_trades(tmp_path / DB_NAME, None, 10, 1) if t["shadow"]]
+    assert shadow["exit"] == {"at": "2026-10-14T10:02:00+09:00", "price": 70_250, "reason": TAKE_PROFIT}
+    assert (shadow["mode"], shadow["champion"]) == (PAPER, False)
+    assert paper.state_now("10:02:01")["today"]["realized"] == 0.0, "the guard did not count it"
+    store = TraderStore(tmp_path / DB_NAME)
+    try:
+        assert store.realized(PAPER, None) == (0.0, 0), "nor does the store, as the guard reloads it"
+        assert store.paper_account() == pytest.approx(shadow["net"]), "the paper account holds it"
+    finally:
+        store.close()

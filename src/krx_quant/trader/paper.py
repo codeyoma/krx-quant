@@ -299,7 +299,8 @@ class PaperTrader:
     (``limits.Unlimited``, buying on ``account``'s cash), writing no state; its decisions and trades
     carry its version. With ``shadow`` (#405), the champion policy's paper shadow in mock mode: held
     and sized as a challenger's book is, its trades the champion policy's paper record (``champion``
-    0, ``shadow`` 1), never the trader's."""
+    0, ``shadow`` 1), never the trader's; ``carry`` also goes on with the paper champion book's trade
+    left open by paper mode."""
 
     def __init__(
         self,
@@ -313,6 +314,7 @@ class PaperTrader:
         challenger: int | None = None,
         account: Callable[[], float] | None = None,
         shadow: bool = False,
+        carry: bool = False,
     ) -> None:
         self.store = store
         self.rules = rules
@@ -340,7 +342,13 @@ class PaperTrader:
         self._pending: dict[datetime, list[_Candidate]] = {}  # rises waiting, by bar close
         self._last: BestQuote | None = None  # the latest quote received
         self._waiting: _Waiting | None = None
-        self._open: OpenTrade | None = store.open_trade(mode, challenger)
+        self._open: OpenTrade | None = (
+            store.open_trade(mode, challenger)
+            if not shadow
+            # A shadow goes on with its own trade left open; in mock mode (``carry``) with the paper
+            # champion book's too, left open by paper mode (#405): no guard counts either in memory.
+            else store.open_trade(mode, shadow=True) or (store.open_trade(mode) if carry else None)
+        )
         if self._open is not None:
             log.info("%s going on with trade %s, open since before this start", self._whose(), self._open.id)
         if challenger is not None:

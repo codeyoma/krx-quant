@@ -101,6 +101,21 @@ class Timing:
     rounds: int = 5  # sells at the best bid in one go, before the next quote or tick
 
 
+@dataclass(frozen=True)
+class _LiveBuy:
+    """A buy KIS took whose cancel did not take, or that its order inquiry never showed: open on KIS
+    still, so followed until nothing is left of it. Its fills join its trade (``waiting`` is the
+    decision while none filled yet, its ``unfilled_buys`` row ``unfilled``)."""
+
+    placed: Placed
+    day: date
+    filled: int
+    amount: float  # what filled, in won
+    waiting: _Waiting | None = None
+    quote_at: datetime | None = None
+    unfilled: int | None = None
+
+
 def tick_up(price: float) -> int:
     """The first price on KRX's tick at or above ``price``."""
     up = math.ceil(round(price / tick_size(price), 9)) * tick_size(price)
@@ -142,9 +157,14 @@ class MockTrader(PaperTrader):
         self._retry_at: datetime | None = None  # a sale that failed goes again from then
         self._resting: Resting | None = None  # the take-profit sell resting on KIS
         self._live: Resting | None = None  # a sale's sell whose cancel did not take: open on KIS still
+        self._live_buy: _LiveBuy | None = None  # a buy whose cancel did not take: open on KIS still
         self._closing = False
         super().__init__(store, rules, sessions, started_at, MOCK, notify)
-        if self._open is not None:  # a restart: its sells open on KIS when it stopped go on
+        if self._open is not None:  # a restart: its orders open on KIS when it stopped go on
+            entry = store.open_entry(self._open.id)
+            if entry is not None:
+                placed, filled, amount, day = entry
+                self._live_buy = _LiveBuy(placed, day, filled, amount)
             for order in store.open_sells(self._open.id):
                 if order.purpose == TAKE_PROFIT:
                     self._resting = order
@@ -154,7 +174,7 @@ class MockTrader(PaperTrader):
     # The paper book's hooks.
 
     def _busy(self) -> bool:
-        return super()._busy() or self._work is not None
+        return super()._busy() or self._work is not None or self._live_buy is not None
 
     def _fill_buy(self, waiting: _Waiting, quote: BestQuote, quantity: int) -> None:
         self._start(self._enter(waiting, quote, quantity))
@@ -234,7 +254,14 @@ class MockTrader(PaperTrader):
         """What the open trade needs next, when no order is in flight: its sale begun (or tried again
         once ``_retry_at`` is past), or its resting take-profit sell's row followed."""
         trade = self._open
-        if self._closing or self._work is not None or trade is None:
+        if self._closing or self._work is not None:
+            return
+        if self._live_buy is not None and self._selling is None:  # a sale takes it off first itself
+            if self._retry_at is None or now >= self._retry_at:
+                self._retry_at = None
+                self._start(self._settle_buy())
+            return
+        if trade is None:
             return
         status = self.status
         if self._selling is None and status in SALE:  # a pause or a limit while it was bought
@@ -286,24 +313,36 @@ class MockTrader(PaperTrader):
         if sent.outcome == REFUSED:
             self._buy_failed(waiting, "buy", REFUSED, sent.reason, sent.code)
             return
-        if taken.left is None or sent.ref is None:
+        if sent.ref is None:
             self._buy_failed(waiting, "buy", UNKNOWN, _unknown(sent))
             return
         at = self._clock()
-        if taken.left > 0:  # its cancel did not take: what is left of it may fill still
-            self._cancel_failed(taken.cancel, None)
+        placed = Placed(ask, quantity, sent.ref.branch, sent.ref.number)
+        # Open on KIS still: its cancel did not take, or the inquiry never showed it. It is followed
+        # until nothing is left of it (``_settle_buy``), and no take-profit rests before.
+        live = taken.left is None or taken.left > 0
+        if live:
+            if taken.left is None:
+                self._failed("buy", UNKNOWN, "주문이 받아들여졌으나 주문 체결 조회에 보이지 않는다")
+            else:
+                self._cancel_failed(taken.cancel, None)
+            self._retry_at = at + timedelta(seconds=self._timing.retry)
         if taken.filled < 1:  # kept all the same: the ledger holds every order KIS has (``mock_check``)
-            placed = Placed(ask, quantity, sent.ref.branch, sent.ref.number)
-            self.store.add_unfilled_buy(waiting.decision, MOCK, placed, at, OPEN if taken.left else CANCELLED)
+            unfilled = self.store.add_unfilled_buy(
+                waiting.decision, MOCK, placed, at, OPEN if live else CANCELLED
+            )
+            if live:
+                self._live_buy = _LiveBuy(placed, day, 0, 0.0, waiting, quote.received_at, unfilled)
+                return
             self.store.unfilled(waiting.decision, UNFILLED)
             log.info("trader: no fill of the buy at %s on KIS before its cancel", ask)
             return
         entry = self._entry(waiting, at, taken.average, taken.filled, quote.received_at)
-        trade = self.store.open_position(
-            waiting.decision, entry, Placed(ask, quantity, sent.ref.branch, sent.ref.number)
-        )
+        trade = self.store.open_position(waiting.decision, entry, placed, OPEN if live else None)
         self._open = trade
         self._dirty = True
+        if live:
+            self._live_buy = _LiveBuy(placed, day, taken.filled, taken.average * taken.filled)
         log.info(
             "trader: bought %s of %s at %s on KIS, %.1f on average (trade %s)",
             taken.filled,
@@ -312,7 +351,79 @@ class MockTrader(PaperTrader):
             taken.average,
             trade.id,
         )
-        await self._place_take_profit(trade)
+        if not live:
+            await self._place_take_profit(trade)
+
+    async def _settle_buy(self) -> None:
+        """The buy open on KIS taken off: cancelled again and read until nothing is left of it, its
+        fills joined to its trade (or a trade opened by them); then the take-profit placed. Tried
+        again ``Timing.retry`` later while it does not come off."""
+        if not await self._take_off_buy():
+            return
+        trade = self._open
+        if trade is not None:
+            await self._place_take_profit(trade)
+
+    async def _take_off_buy(self) -> bool:
+        """``_live_buy`` cancelled and read until nothing is left of it, its fills kept; whether it
+        came off (else it is tried again later, a failed order)."""
+        live = self._live_buy
+        assert live is not None
+        assert live.placed.branch is not None and live.placed.number is not None
+        cancel, row = await self._withdraw(live.day, OrderRef(live.placed.branch, live.placed.number))
+        if row is not None:
+            self._absorb(row)
+        if row is None or row.left > 0:
+            if isinstance(cancel, str):
+                self._failed("cancel", ERROR, cancel, trade=None if self._open is None else self._open.id)
+            else:
+                self._cancel_failed(cancel, None if self._open is None else self._open.id)
+            self._retry_at = self._clock() + timedelta(seconds=self._timing.retry)
+            return False
+        return True
+
+    def _absorb(self, row: OrderRow) -> None:
+        """The live buy's fills ``row`` shows and not kept yet: joined to its trade, or a trade opened
+        by them; once nothing is left of it, it settles."""
+        live = self._live_buy
+        assert live is not None
+        at = self._clock()
+        if row.filled > live.filled:
+            amount = row.average * row.filled
+            if self._open is None:
+                assert live.waiting is not None and live.quote_at is not None and live.unfilled is not None
+                entry = self._entry(live.waiting, at, row.average, row.filled, live.quote_at)
+                status = OPEN if row.left else None
+                self._open = self.store.open_position(live.waiting.decision, entry, live.placed, status)
+                self.store.close_unfilled_buy(live.unfilled, FILLED)
+                log.info(
+                    "trader: the buy at %s filled %s on KIS after its cancel failed",
+                    live.placed.price,
+                    row.filled,
+                )
+            else:
+                trade = self._open
+                fee = amount * self.rules.fee_rate
+                new = row.filled - live.filled
+                fill = (at, (amount - live.amount) / new, new)
+                self.store.grow_position(trade.id, row.filled, row.average, fee, fill)
+                self._open = replace(trade, quantity=row.filled, entry_price=row.average, buy_fee=fee)
+                log.info("trader: %s more of the buy filled on KIS (trade %s)", new, trade.id)
+            live = self._live_buy = replace(
+                live, filled=row.filled, amount=amount, waiting=None, unfilled=None
+            )
+            self._dirty = True
+        if row.left > 0:
+            return
+        if self._open is None:  # nothing filled: no trade
+            assert live.waiting is not None and live.unfilled is not None
+            self.store.close_unfilled_buy(live.unfilled, CANCELLED)
+            self.store.unfilled(live.waiting.decision, UNFILLED)
+        else:
+            self.store.close_entry(
+                self._open.id, FILLED if row.filled >= live.placed.quantity else CANCELLED, at
+            )
+        self._live_buy = None
 
     def _buy_failed(
         self, waiting: _Waiting, what: str, outcome: str, detail: str, code: str | None = None
@@ -327,7 +438,7 @@ class MockTrader(PaperTrader):
             return  # it sells at once instead
         price = tick_up(trade.target)
         try:
-            sent = await self._broker.sell(SYMBOL, trade.quantity, price)
+            sent = await self._broker.sell(SYMBOL, trade.quantity - self.store.sold(trade.id), price)
         except BrokerError as e:
             self._failed("take_profit", ERROR, str(e), trade=trade.id)
             return
@@ -402,7 +513,14 @@ class MockTrader(PaperTrader):
     # The sale.
 
     async def _sell(self, trade: OpenTrade, reason: str) -> None:
-        # First the sells open on KIS: the take-profit's, and a sale's whose cancel did not take
+        # First a buy still open on KIS (its cancel did not take): taken off, its fills joined to the
+        # trade, so that every share bought is sold.
+        if self._live_buy is not None:
+            if not await self._take_off_buy():
+                return
+            assert self._open is not None
+            trade = self._open
+        # Then the sells open on KIS: the take-profit's, and a sale's whose cancel did not take
         # before. Each is cancelled and its fills kept until nothing is left of it, so that what is
         # sold next is what is left (a fill can come before the cancel lands).
         for still in (self._resting, self._live):
@@ -476,28 +594,15 @@ class MockTrader(PaperTrader):
         cancelled, and its row read until nothing is left of it (a fill can come before the cancel
         lands: KIS then finds less or nothing to cancel). Its row, its fills kept; None when it could
         not be taken off (a failed order, tried again later, the order followed still)."""
-        ref = OrderRef(resting.branch, resting.number)
-        try:
-            cancel = await self._broker.cancel(ref)
-        except BrokerError as e:
-            self._sale_failed(trade, "cancel", ERROR, str(e))
-            return None
-        day = self._day_of(trade)
-        deadline = asyncio.get_running_loop().time() + self._timing.wait
-        row: OrderRow | None = None
-        while True:
-            try:
-                row = await self._broker.order(day, SYMBOL, ref) or row
-            except BrokerError as e:
-                log.warning("trader: could not read the take-profit sell after its cancel (%s)", e)
-            if (row is not None and row.left == 0) or asyncio.get_running_loop().time() >= deadline:
-                break
-            await asyncio.sleep(self._timing.poll)
+        cancel, row = await self._withdraw(self._day_of(trade), OrderRef(resting.branch, resting.number))
         if row is not None:
             resting = self._keep(resting, row)
         if row is None or row.left > 0:
-            self._cancel_failed(cancel, trade.id)
-            self._retry_at = self._clock() + timedelta(seconds=self._timing.retry)
+            if isinstance(cancel, str):
+                self._sale_failed(trade, "cancel", ERROR, cancel)
+            else:
+                self._cancel_failed(cancel, trade.id)
+                self._retry_at = self._clock() + timedelta(seconds=self._timing.retry)
             return None
         filled = row.filled >= resting.quantity
         self.store.close_order(resting.order_id, FILLED if filled else CANCELLED, self._clock())
@@ -507,6 +612,25 @@ class MockTrader(PaperTrader):
         else:
             self._live = None
         return row
+
+    async def _withdraw(self, day: date, ref: OrderRef) -> tuple[Sent | str, OrderRow | None]:
+        """Order ``ref`` of ``day`` cancelled, and its row read until nothing is left of it or
+        ``Timing.wait`` has passed (a fill can come before the cancel lands: KIS then finds less or
+        nothing to cancel). The cancel's outcome (why, when it could not be sent) and the last row."""
+        try:
+            cancel: Sent | str = await self._broker.cancel(ref)
+        except BrokerError as e:
+            return str(e), None
+        deadline = asyncio.get_running_loop().time() + self._timing.wait
+        row: OrderRow | None = None
+        while True:
+            try:
+                row = await self._broker.order(day, SYMBOL, ref) or row
+            except BrokerError as e:
+                log.warning("trader: could not read an order after its cancel (%s)", e)
+            if (row is not None and row.left == 0) or asyncio.get_running_loop().time() >= deadline:
+                return cancel, row
+            await asyncio.sleep(self._timing.poll)
 
     def _cancel_failed(self, cancel: Sent | None, trade: int | None) -> None:
         if cancel is None:
@@ -535,6 +659,7 @@ class MockTrader(PaperTrader):
         self._selling = None
         self._resting = None
         self._live = None
+        self._live_buy = None
         self._retry_at = None
         self._stop_following()
         self._dirty = True

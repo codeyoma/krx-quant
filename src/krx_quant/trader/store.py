@@ -673,20 +673,19 @@ class TraderStore:
 
     # Mock trades (#405): each order as KIS took it, each fill as its order inquiry showed it.
 
-    def open_position(self, decision: int, entry: Entry, buy: Placed) -> OpenTrade:
+    def open_position(self, decision: int, entry: Entry, buy: Placed, status: str | None = None) -> OpenTrade:
         """A mock buy filled (``entry``: the fills' average price and quantity): its trade, the buy's
-        order as KIS took it (filled whole, or cancelled for the rest) and its fill, in one
-        transaction. Its take-profit sell is added once KIS takes it (``add_order``)."""
+        order as KIS took it (filled whole, or cancelled for the rest; ``status`` open when its cancel
+        did not take, followed until it settles: ``grow_position``, ``close_entry``) and its fill, in
+        one transaction. Its take-profit sell is added once KIS takes it (``add_order``)."""
         at = iso(entry.entry_at)
-        whole = entry.quantity >= buy.quantity
+        status = status or (FILLED if entry.quantity >= buy.quantity else CANCELLED)
         with self._db:
             trade = self._insert_trade(entry)
-            bought = self._order(
-                trade, entry.mode, BUY, ENTRY, buy.price, buy.quantity, at, FILLED if whole else CANCELLED
-            )
+            bought = self._order(trade, entry.mode, BUY, ENTRY, buy.price, buy.quantity, at, status)
             self._db.execute(
                 "UPDATE orders SET closed_at = ?, broker_id = ?, broker_branch = ? WHERE id = ?",
-                (at, buy.number, buy.branch, bought),
+                (None if status == OPEN else at, buy.number, buy.branch, bought),
             )
             self._db.execute(
                 "INSERT INTO fills (order_id, at, price, quantity) VALUES (?, ?, ?, ?)",
@@ -779,16 +778,66 @@ class TraderStore:
         """The shares of ``trade`` sold so far."""
         return self.sells(trade)[0]
 
-    def add_unfilled_buy(self, decision: int, mode: str, placed: Placed, at: datetime, status: str) -> None:
+    def add_unfilled_buy(self, decision: int, mode: str, placed: Placed, at: datetime, status: str) -> int:
         """A mock buy KIS took of which nothing filled (#405): no trade, but the ledger keeps every
-        order KIS has (``mock_check``). ``status`` is cancelled, or open when its cancel did not take."""
+        order KIS has (``mock_check``). ``status`` is cancelled, or open when its cancel did not take
+        (followed: ``close_unfilled_buy``). Its row."""
         with self._db:
-            self._db.execute(
+            cursor = self._db.execute(
                 "INSERT INTO unfilled_buys (decision_id, mode, price, quantity, placed_at, status, broker_id,"
                 " broker_branch) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (decision, mode, placed.price, placed.quantity, iso(at), status, placed.number)
                 + (placed.branch,),
             )
+        assert cursor.lastrowid is not None
+        return cursor.lastrowid
+
+    def close_unfilled_buy(self, row: int, status: str) -> None:
+        """An unfilled buy followed (#405) settled: cancelled with nothing filled, or ``filled`` once
+        something did (its trade then holds the order: ``open_position``)."""
+        with self._db:
+            self._db.execute("UPDATE unfilled_buys SET status = ? WHERE id = ?", (status, row))
+
+    def grow_position(
+        self, trade: int, quantity: int, price: float, buy_fee: float, fill: tuple[datetime, float, int]
+    ) -> None:
+        """More of a mock trade's buy filled after its cancel failed (#405): the trade's shares, entry
+        price and commission the buy's fills now, and the new fill (when, its average, how many) kept
+        on its entry order."""
+        at, fill_price, fill_quantity = fill
+        with self._db:
+            self._db.execute(
+                "UPDATE trades SET quantity = ?, entry_price = ?, buy_fee = ? WHERE id = ?",
+                (quantity, price, buy_fee, trade),
+            )
+            self._db.execute(
+                "INSERT INTO fills (order_id, at, price, quantity) SELECT id, ?, ?, ? FROM orders"
+                " WHERE trade_id = ? AND purpose = ? ORDER BY id LIMIT 1",
+                (iso(at), fill_price, fill_quantity, trade, ENTRY),
+            )
+
+    def close_entry(self, trade: int, status: str, at: datetime) -> None:
+        """A mock trade's buy settled (#405): filled whole, or cancelled for the rest."""
+        with self._db:
+            self._db.execute(
+                "UPDATE orders SET status = ?, closed_at = ? WHERE trade_id = ? AND purpose = ?",
+                (status, iso(at), trade, ENTRY),
+            )
+
+    def open_entry(self, trade: int) -> tuple[Placed, int, float, date] | None:
+        """A mock trade's buy still open on KIS (#405): its order, what of it filled and for how much,
+        its day; None once it settled."""
+        row = self._db.execute(
+            "SELECT o.*, coalesce(sum(f.quantity), 0) AS kept,"
+            " coalesce(sum(f.price * f.quantity), 0) AS amount"
+            " FROM orders o LEFT JOIN fills f ON f.order_id = o.id WHERE o.trade_id = ? AND o.purpose = ?"
+            " AND o.status = ? AND o.broker_id IS NOT NULL GROUP BY o.id",
+            (trade, ENTRY, OPEN),
+        ).fetchone()
+        if row is None or row["id"] is None:
+            return None
+        placed = Placed(row["price"], row["quantity"], row["broker_branch"], row["broker_id"])
+        return placed, int(row["kept"]), float(row["amount"]), date.fromisoformat(row["placed_at"][:10])
 
     def exit_on_fills(self, trade: OpenTrade, at: datetime, reason: str, fee_rate: float) -> float:
         """A mock trade's exit (#405), once its sells' fills hold every share: its price their average,
@@ -841,16 +890,15 @@ class TraderStore:
         ).fetchone()
         return None if row is None else _failure(row)
 
-    def open_trade(self, mode: str, challenger: int | None = None) -> OpenTrade | None:
+    def open_trade(self, mode: str, challenger: int | None = None, shadow: bool = False) -> OpenTrade | None:
         """``mode``'s trade of the champion (``CHAMPION_TRADE``) not exited yet, if any (one position
-        at a time); with ``challenger``, that challenger's paper trade not exited (#400). In paper the
-        champion's paper book is one across the modes (#405): the champion's book in paper mode, its
-        shadow in mock mode, each going on with the other's trade left open at a switch."""
+        at a time); with ``challenger``, that challenger's paper trade not exited (#400); with
+        ``shadow``, the champion's paper shadow's (#405, ``SHADOW_TRADE``)."""
         params: tuple[Any, ...]
-        if challenger is None:
+        if shadow:
+            whose, params = SHADOW_TRADE, (mode,)
+        elif challenger is None:
             whose, params = CHAMPION_TRADE, (mode,)
-            if mode == PAPER:
-                whose = f"({CHAMPION_TRADE} OR {SHADOW_TRADE})"
         else:
             whose = f"t.policy_id = ? AND t.champion = 0 AND NOT {SHADOW_TRADE}"
             params = (mode, challenger)
