@@ -29,7 +29,10 @@ every exit.
 the trader's store, read within ``CONTROL_SECONDS``): ``sell_now`` false pauses new entries (the
 open position is sold by its own barriers), true pauses them and sells the open position at once.
 Both hold until ``krx-quant trade resume`` on the server; a pause with ``sell_now`` since the last
-resume sells, whatever came after it. The API can neither resume nor re-arm.
+resume sells, whatever came after it. The API can neither resume nor re-arm. A mock start that finds
+the KIS account unlike the ledger (#406, ``mock.py``) pauses new entries the same way (source
+``reconcile``, its own notice saying what it found); the resume that lifts it also accepts what is
+outside the ledger as the account's (``store.accept_reconciles``).
 
 **A failed order** (#405, mock mode): a KIS order refused, one whose outcome is not known (no
 answer) or one that could not be sent (``mock.py``) is kept (``failures``) and stops new entries for
@@ -63,6 +66,7 @@ from krx_quant.trader.store import (
     DAILY_LIMIT,
     PAUSE,
     REARM,
+    RECONCILE,
     RESUME,
     Control,
     Failure,
@@ -137,6 +141,7 @@ _WHAT = {
     "cancel": "취소",
     "sell": "매도",
     "orderable": "주문 가능 현금 조회",
+    "reconcile": "계좌 맞추기",
 }
 
 
@@ -332,7 +337,7 @@ class Guard:
         if control.action == PAUSE:
             self._paused(control)
         elif control.action == RESUME:
-            self._resumed(control)
+            self._resumed(control, at)
         elif control.action == REARM:
             self._rearmed(control, at)
         else:
@@ -346,6 +351,8 @@ class Guard:
             self.pause = Pause(self.pause.at, self.pause.sell_now or sell_now, self.pause.source)
         who = "화면" if control.source == API else control.source
         log.warning("trader: paused (%s, control %s, sell now: %s)", control.source, control.id, sell_now)
+        if control.source == RECONCILE:
+            return  # the reconcile tells what it found itself (#406)
         if sell_now:
             what = "정지하고 즉시 매도 요청을 받았습니다"
             then = "새로 사지 않고 열린 포지션을 바로 팝니다."
@@ -357,11 +364,16 @@ class Guard:
             " 다시 켜기는 서버의 krx-quant trade resume뿐입니다."
         )
 
-    def _resumed(self, control: Control) -> None:
+    def _resumed(self, control: Control, at: datetime) -> None:
         if self.pause is None:
             log.info("trader: control %s resumes a trader not paused: nothing to do", control.id)
             return
         self.pause = None
+        # What the account holds outside the ledger, as a reconcile found it, is the account's (#406).
+        if self.store.accept_reconciles(self.mode, at):
+            log.warning(
+                "trader: the KIS account as the reconcile found it is accepted (control %s)", control.id
+            )
         log.warning("trader: resumed (control %s): %s", control.id, self.status)
         self._notify(f"자동 매매({self.mode}): 정지를 풀었습니다(krx-quant trade resume). {self._still()}")
 

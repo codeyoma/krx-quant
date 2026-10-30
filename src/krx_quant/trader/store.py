@@ -22,9 +22,15 @@ by the nightly re-fit (#399, from the engine's container).
 - ``fills``: each order's fills, with the quote a paper fill was made on (none in mock: a mock
   fill is KIS's, at its average price ``avg_prvs``, as the day's order inquiry shows it);
 - ``unfilled_buys`` (#405): each mock buy KIS took of which nothing filled (no trade opened), with
-  KIS's order, so that the ledger holds every order KIS has;
+  KIS's order, so that the ledger holds every order KIS has; since #406 each mock buy from before
+  it is sent (``sent``: its answer not had yet, or lost), so that one whose answer was lost is
+  looked up on KIS and adopted with its decision (``mock.py``);
 - ``failures`` (#405): each KIS order of mock mode that failed (refused, its outcome unknown, or
   an error before it was sent), which stops new entries for the rest of that day (``limits.py``);
+- ``reconciles`` (#406): each check of the KIS account against the ledger at a mock start: what
+  the account holds or has open outside the ledger, whether it was as the ledger has it (``clean``)
+  or not (``held``: new entries paused until ``krx-quant trade resume``, which accepts what it
+  found, ``resumed_at``);
 - ``policies`` and ``champions`` (#399, ``policy.py``): each policy version and each change of the
   champion, written by the nightly re-fit (``refit.py``) and its promotion (#400,
   ``promotion.py``); a pick and a trade carry the policy version they were made under
@@ -177,9 +183,11 @@ CREATE TABLE IF NOT EXISTS unfilled_buys (  -- each mock buy KIS took of which n
     mode TEXT NOT NULL,
     price REAL NOT NULL,               -- the limit
     quantity INTEGER NOT NULL,
-    placed_at TEXT NOT NULL,
-    status TEXT NOT NULL,              -- cancelled; open when its cancel did not take; filled once it did
-    broker_id TEXT NOT NULL,           -- KIS's order number
+    placed_at TEXT NOT NULL,           -- when it was sent (#406: kept before it is)
+    -- cancelled; open when its cancel did not take; filled once it did. #406: sent (its answer not
+    -- had: lost, or the trader stopped), refused, unsent (no token), absent (looked up: KIS has none)
+    status TEXT NOT NULL,
+    broker_id TEXT NOT NULL,           -- KIS's order number; '' while sent (#406)
     broker_branch TEXT,
     entry TEXT                         -- JSON: the trade it would open (its fill to come), while open
 );
@@ -194,11 +202,25 @@ CREATE TABLE IF NOT EXISTS failures (   -- each KIS order of mock mode that fail
     code TEXT,                         -- KIS's msg_cd, when it answered
     detail TEXT NOT NULL               -- why, as KIS said it (never an account or order number)
 );
+CREATE TABLE IF NOT EXISTS reconciles (  -- each check of the KIS account at a mock start (#406)
+    id INTEGER PRIMARY KEY,
+    at TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    status TEXT NOT NULL,              -- clean: as the ledger has it; held: not, new entries paused
+    -- JSON: what the account held outside the ledger: shares by symbol ("holdings") and the day's KIS
+    -- order numbers with something left ("orders")
+    outside TEXT NOT NULL,
+    detail TEXT NOT NULL,              -- JSON: what differed (``reconcile.Finding.detail``)
+    control_id INTEGER REFERENCES controls (id),  -- the pause it asked for (held)
+    resumed_at TEXT                    -- held: when a resume lifted its pause, accepting what it found
+);
 CREATE TABLE IF NOT EXISTS controls (   -- each pause, resume and re-arm asked for (#396)
     id INTEGER PRIMARY KEY,
     at TEXT NOT NULL,                  -- when it was asked for
     action TEXT NOT NULL,              -- pause, resume, rearm
-    source TEXT NOT NULL,              -- api (the screen's pause), cli (krx-quant trade resume|rearm)
+    -- api (the screen's pause), cli (krx-quant trade resume|rearm), reconcile (a mock start's account
+    -- check that found the account unlike the ledger, #406)
+    source TEXT NOT NULL,
     sell_now INTEGER,                  -- a pause's: 1 sells the open position at once, 0 lets it run
     mode TEXT,                         -- a re-arm's: the mode whose cumulative limit it re-arms
     applied_at TEXT                    -- when the trader read it; null until it has
@@ -292,10 +314,15 @@ SHADOW_TRADE = "coalesce(t.shadow, 0) = 1"
 
 BUY, SELL = "buy", "sell"
 OPEN, FILLED, CANCELLED = "open", "filled", "cancelled"
+# A mock buy's (``unfilled_buys``, #406): sent, its answer not had (lost, or the trader stopped
+# before it came); refused; not sent (no token); looked up and not on KIS.
+SENT, BUY_REFUSED, UNSENT, ABSENT = "sent", "refused", "unsent", "absent"
 ENTRY = "entry"
-# What a control asks for (#396), and who asks.
+# What a control asks for (#396), and who asks: the reconcile's pause (#406) is a mock start's.
 PAUSE, RESUME, REARM = "pause", "resume", "rearm"
-API, CLI = "api", "cli"
+API, CLI, RECONCILE = "api", "cli", "reconcile"
+# A reconcile's (#406): the account as the ledger has it, or not (new entries paused).
+CLEAN, HELD = "clean", "held"
 # The limits a halt is of (#396): also the trader's status while it holds.
 DAILY_LIMIT, CUMULATIVE_LIMIT = "daily_limit", "cumulative_limit"
 # GET /v1/trader: the trader is running while its snapshot is at most this old (it rewrites it
@@ -362,12 +389,14 @@ class Exit:
 @dataclass(frozen=True)
 class Placed:
     """An order as the broker took it (#405): its limit and quantity, and KIS's order (its branch and
-    number; None when KIS named none)."""
+    number; None when KIS named none). ``at`` is when it was sent (#406): its day's order inquiry
+    shows it, though its fills were read later (the trader stopped between), on another day."""
 
     price: float
     quantity: int
     branch: str | None = None
     number: str | None = None
+    at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -682,12 +711,15 @@ class TraderStore:
         """A mock buy filled (``entry``: the fills' average price and quantity): its trade, the buy's
         order as KIS took it (filled whole, or cancelled for the rest; ``status`` open when its cancel
         did not take, followed until it settles: ``grow_position``, ``close_entry``) and its fill, in
-        one transaction. Its take-profit sell is added once KIS takes it (``add_order``)."""
+        one transaction. Its take-profit sell is added once KIS takes it (``add_order``). The order is
+        placed when it was sent (``buy.at``, #406), the fill and the trade's entry when the fills
+        were read: a buy whose fills a restart recovered is on its own day's inquiry."""
         at = iso(entry.entry_at)
+        placed = iso(buy.at) if buy.at is not None else at
         status = status or (FILLED if entry.quantity >= buy.quantity else CANCELLED)
         with self._db:
             trade = self._insert_trade(entry)
-            bought = self._order(trade, entry.mode, BUY, ENTRY, buy.price, buy.quantity, at, status)
+            bought = self._order(trade, entry.mode, BUY, ENTRY, buy.price, buy.quantity, placed, status)
             self._db.execute(
                 "UPDATE orders SET closed_at = ?, broker_id = ?, broker_branch = ? WHERE id = ?",
                 (None if status == OPEN else at, buy.number, buy.branch, bought),
@@ -800,23 +832,34 @@ class TraderStore:
     def add_unfilled_buy(
         self, decision: int, mode: str, placed: Placed, at: datetime, status: str, entry: Entry | None = None
     ) -> int:
-        """A mock buy KIS took of which nothing filled (#405): no trade, but the ledger keeps every
-        order KIS has (``mock_check``). ``status`` is cancelled, or open when its cancel did not take
+        """A mock buy of which nothing filled (#405): no trade, but the ledger keeps every order KIS
+        has (``mock_check``). ``status`` is cancelled, or open when its cancel did not take
         (followed: ``close_unfilled_buy``), kept with the trade it would open (``entry``) for a
-        restart to follow it (``open_unfilled_buy``). Its row."""
+        restart to follow it (``open_unfilled_buy``). Since #406 it is kept before it is sent
+        (``sent``, no order number yet: ``accept_buy`` names it once KIS takes it), so that a buy
+        whose answer was lost is looked up and adopted with its decision (``sent_buys``). Its row."""
         with self._db:
             cursor = self._db.execute(
                 "INSERT INTO unfilled_buys (decision_id, mode, price, quantity, placed_at, status, broker_id,"
                 " broker_branch, entry) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (decision, mode, placed.price, placed.quantity, iso(at), status, placed.number)
+                (decision, mode, placed.price, placed.quantity, iso(at), status, placed.number or "")
                 + (placed.branch, None if entry is None else _entry_json(entry)),
             )
         assert cursor.lastrowid is not None
         return cursor.lastrowid
 
+    def accept_buy(self, row: int, branch: str | None, number: str, status: str = OPEN) -> None:
+        """A buy kept before it was sent (#406), as KIS took it: its order (``branch`` None for one
+        adopted off the inquiry, which names it by number alone), and open while it is followed."""
+        with self._db:
+            self._db.execute(
+                "UPDATE unfilled_buys SET broker_id = ?, broker_branch = ?, status = ? WHERE id = ?",
+                (number, branch, status, row),
+            )
+
     def open_unfilled_buy(self, mode: str) -> tuple[int, int, Placed, date, Entry] | None:
         """``mode``'s buy of which nothing filled, still open on KIS (#405): its row, its decision, its
-        order, its day, the trade it would open. None without one."""
+        order (sent at ``Placed.at``), its day, the trade it would open. None without one."""
         row = self._db.execute(
             "SELECT * FROM unfilled_buys WHERE mode = ? AND status = ? AND entry IS NOT NULL"
             " ORDER BY id DESC LIMIT 1",
@@ -824,9 +867,27 @@ class TraderStore:
         ).fetchone()
         if row is None:
             return None
-        placed = Placed(row["price"], row["quantity"], row["broker_branch"], row["broker_id"])
-        day = date.fromisoformat(row["placed_at"][:10])
-        return row["id"], row["decision_id"], placed, day, _entry_of(row["entry"])
+        return row["id"], row["decision_id"], _placed(row), _day_of(row), _entry_of(row["entry"])
+
+    def sent_buys(self, mode: str) -> list[tuple[int, int, Placed, date, Entry]]:
+        """``mode``'s buys sent whose answer was not had (#406: lost, or the trader stopped before it
+        came), oldest first: each row, decision, order (no number: ``Placed.at`` when it was sent),
+        day and the trade it would open, to be looked up on KIS."""
+        rows = self._db.execute(
+            "SELECT * FROM unfilled_buys WHERE mode = ? AND status = ? AND entry IS NOT NULL ORDER BY id",
+            (mode, SENT),
+        )
+        return [(r["id"], r["decision_id"], _placed(r), _day_of(r), _entry_of(r["entry"])) for r in rows]
+
+    def broker_numbers(self, mode: str) -> set[str]:
+        """Every KIS order number ``mode``'s ledger keeps (#406): its trades' orders' and its buys'
+        that opened none."""
+        rows = self._db.execute(
+            "SELECT broker_id FROM orders WHERE mode = ? AND broker_id IS NOT NULL AND broker_id != ''"
+            " UNION SELECT broker_id FROM unfilled_buys WHERE mode = ? AND broker_id != ''",
+            (mode, mode),
+        )
+        return {str(r[0]) for r in rows}
 
     def close_unfilled_buy(self, row: int, status: str) -> None:
         """An unfilled buy followed (#405) settled: cancelled with nothing filled, or ``filled`` once
@@ -872,8 +933,7 @@ class TraderStore:
         ).fetchone()
         if row is None or row["id"] is None:
             return None
-        placed = Placed(row["price"], row["quantity"], row["broker_branch"], row["broker_id"])
-        return placed, int(row["kept"]), float(row["amount"]), date.fromisoformat(row["placed_at"][:10])
+        return _placed(row), int(row["kept"]), float(row["amount"]), _day_of(row)
 
     def exit_on_fills(self, trade: OpenTrade, at: datetime, reason: str, fee_rate: float) -> float:
         """A mock trade's exit (#405), once its sells' fills hold every share: its price their average,
@@ -1041,6 +1101,56 @@ class TraderStore:
     def applied(self, control: int, at: datetime) -> None:
         with self._db:
             self._db.execute("UPDATE controls SET applied_at = ? WHERE id = ?", (iso(at), control))
+
+    # Reconciles (#406): each mock start's check of the KIS account against the ledger.
+
+    def add_reconcile(
+        self,
+        at: datetime,
+        mode: str,
+        status: str,
+        outside: Mapping[str, Any],
+        detail: Mapping[str, Any],
+        control: int | None = None,
+    ) -> int:
+        with self._db:
+            cursor = self._db.execute(
+                "INSERT INTO reconciles (at, mode, status, outside, detail, control_id)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (iso(at), mode, status, _json(outside), _json(detail), control),
+            )
+        assert cursor.lastrowid is not None
+        return cursor.lastrowid
+
+    def accepted_outside(self, mode: str) -> dict[str, Any]:
+        """What ``mode``'s account held outside the ledger as last accepted (#406): the last reconcile
+        that found it as the ledger has it, or whose pause a resume lifted. Empty before any."""
+        row = self._db.execute(
+            "SELECT outside FROM reconciles WHERE mode = ? AND (status = ? OR resumed_at IS NOT NULL)"
+            " ORDER BY id DESC LIMIT 1",
+            (mode, CLEAN),
+        ).fetchone()
+        return {} if row is None else dict(json.loads(row[0]))
+
+    def held_reconcile(self, mode: str) -> dict[str, Any] | None:
+        """``mode``'s last reconcile, if it found the account unlike the ledger and no resume has
+        lifted its pause yet (#406): its row."""
+        row = self._db.execute(
+            "SELECT * FROM reconciles WHERE mode = ? ORDER BY id DESC LIMIT 1", (mode,)
+        ).fetchone()
+        if row is None or row["status"] != HELD or row["resumed_at"] is not None:
+            return None
+        return {**dict(row), "outside": json.loads(row["outside"]), "detail": json.loads(row["detail"])}
+
+    def accept_reconciles(self, mode: str, at: datetime) -> int:
+        """A resume at ``at`` (#406): the reconciles of ``mode`` that paused, accepted (what they found
+        outside the ledger is the account's from then); how many."""
+        with self._db:
+            cursor = self._db.execute(
+                "UPDATE reconciles SET resumed_at = ? WHERE mode = ? AND status = ? AND resumed_at IS NULL",
+                (iso(at), mode, HELD),
+            )
+        return cursor.rowcount
 
     # Halts (#396).
 
@@ -1216,6 +1326,23 @@ def _entry_of(text: str) -> Entry:
     fields: dict[str, Any] = json.loads(text)
     times: dict[str, Any] = {k: datetime.fromisoformat(fields[k]) for k in _ENTRY_TIMES}
     return Entry(**(fields | times))
+
+
+def _placed(row: sqlite3.Row) -> Placed:
+    """An order's row (``orders``, ``unfilled_buys``) as KIS took it, sent at its ``placed_at``."""
+    number = row["broker_id"] or None
+    return Placed(
+        row["price"], row["quantity"], row["broker_branch"], number, datetime.fromisoformat(row["placed_at"])
+    )
+
+
+def _day_of(row: sqlite3.Row) -> date:
+    """The day an order's row was placed on: the day order inquiry that shows it."""
+    return date.fromisoformat(row["placed_at"][:10])
+
+
+def _json(value: Mapping[str, Any]) -> str:
+    return json.dumps(dict(value), ensure_ascii=False, sort_keys=True)
 
 
 def _failure(row: sqlite3.Row) -> Failure:

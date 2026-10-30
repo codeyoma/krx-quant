@@ -15,7 +15,9 @@ a mock-trading account behind it (#403, #404): cash orders, their cancel, the
 order and fill inquiry (full and partial fills), the balance, the orderable
 cash, the quotes, and the encrypted real-time fill notice. Its fields, codes
 and messages are those the order probe measured on KIS's mock server
-(``kis_orders.PROBE_COMMENT``) but where it says they are made up.
+(``kis_orders.PROBE_COMMENT``) but where it says they are made up. Its orders are
+day orders (#406): each is of the day it was placed, and once that day is over it
+neither fills nor can be cancelled.
 """
 
 from __future__ import annotations
@@ -470,6 +472,8 @@ NOT_MOCK = (kis_orders.NOT_MOCK, "모의투자 TR 이 아닙니다.")
 # order with nothing left of it.
 SHARES_REFUSED = ("FK0003", "주문가능수량을 초과 했습니다.")
 NOTHING_TO_CANCEL = ("FK0004", "정정/취소할 수량이 없습니다.")
+# Made up too (#406): a cancel of an order of a day gone by (a day order: KRX ended it at the close).
+PAST_DAY = ("FK0005", "당일 주문만 취소할 수 있습니다.")
 BUY_SIDE, SELL_SIDE = kis_orders.SIDE_BUY, kis_orders.SIDE_SELL
 BRANCH = "01790"  # made up: the order's branch (KRX_FWDG_ORD_ORGNO, ord_gno_brno)
 NUMBERS_FROM = 31_401  # made up: the first order number
@@ -489,6 +493,7 @@ class FakeOrder:
     amount: float = 0.0  # what filled, in won
     cancelled: int = 0  # cancelled of it (an order), or by it (a cancel)
     original: str = ""
+    day: date | None = None  # the day it was placed: its day order inquiry's (ord_dt)
 
     @property
     def left(self) -> int:
@@ -512,6 +517,13 @@ class FakeAccount:
     one. Each order, fill, cancel and refusal is told on the fill notice (encrypted, to every open
     WebSocket) when ``notices``: in KIS's example's 26 fields, or the first ``notice_fields`` of
     them (the mock's records had 23). The cancellable-orders inquiry is not a mock TR (HTTP 500).
+
+    Its time is ``clock``'s (KST; the wall clock without one), its day ``clock``'s date (``today``
+    without one). An order is a day order (#406): the inquiry of a day shows that day's orders
+    alone, and an order of a day gone by neither fills nor can be cancelled (``PAST_DAY``, made
+    up). Its row still shows what was left of it when its day ended: how KIS shows an expired order
+    was not measured, so the fake shows the worst case for the trader, which never reads an order
+    of a day gone by as open.
 
     The deposit (``dnca_tot_amt``) stays the day's start (``cash``); the fills and their costs (the
     commission ``fee_rate`` a side, the sell tax) move the deposit two days on
@@ -541,6 +553,7 @@ class FakeAccount:
     page_rows: int = 15  # rows a page of the inquiry (KIS's example's for the mock; not measured)
     # The next orders whose answer is lost: taken, then the connection drops before the answer.
     lose_answers: int = 0
+    clock: Callable[[], datetime] | None = None  # the time (KST); the wall clock without one
     orders: list[FakeOrder] = field(default_factory=list)
     flows: float = 0.0  # the day's fills and costs, in won: what moved the deposit two days on
     bought: float = 0.0
@@ -564,6 +577,23 @@ class FakeAccount:
     def placed(self, side: str) -> list[FakeOrder]:
         return [o for o in self.orders if o.side == side and not o.original]
 
+    def resting(self, side: str) -> list[FakeOrder]:
+        """The day's orders of ``side`` with something left to fill (an order of a day gone by is
+        over, whatever its row shows)."""
+        return [o for o in self.placed(side) if self._live(o)]
+
+    @property
+    def day(self) -> date:
+        """The account's day: ``clock``'s date, else ``today``."""
+        return self.clock().date() if self.clock is not None else self.today
+
+    def _live(self, order: FakeOrder) -> bool:
+        return order.left > 0 and not self._past(order)
+
+    def _past(self, order: FakeOrder) -> bool:
+        """Whether ``order``'s day is over: a day order of a day gone by."""
+        return order.day is not None and order.day != self.day
+
     @property
     def settled(self) -> float:
         """The deposit two days on (``prvs_rcdl_excc_amt``)."""
@@ -573,7 +603,7 @@ class FakeAccount:
         """Fill ``quantity`` of what is left of ``order`` (all of it: None), half a tick better than
         the ask (a buy) or the bid (a sell)."""
         quantity = order.left if quantity is None else min(order.left, quantity)
-        if quantity <= 0:
+        if quantity <= 0 or self._past(order):  # a day order's day is over: it fills no more
             return
         quote = self.ask if order.side == BUY_SIDE else self.bid
         better = self.improvement * tick_size(quote)
@@ -609,7 +639,7 @@ class FakeAccount:
             return self._refuse(NOT_HELD, side, symbol, quantity, price)
         if side == SELL_SIDE and quantity > self.holdings[symbol] - self._held_shares(symbol):
             return self._refuse(SHARES_REFUSED, side, symbol, quantity, price)
-        order = FakeOrder(self._number(), side, symbol, quantity, price, self._now())
+        order = FakeOrder(self._number(), side, symbol, quantity, price, self._now(), day=self.day)
         self.orders.append(order)
         self._tell(order, "1", "0", "1", quantity, price)
         if self.fills and self._marketable(order):
@@ -628,6 +658,8 @@ class FakeAccount:
         original = next(
             (o for o in self.orders if not o.original and kis_orders.same_number(o.number, number)), None
         )
+        if original is not None and original.left > 0 and self._past(original):
+            return _refusal(PAST_DAY)
         if original is not None and self.fills_late and original.left > 0 and self._marketable(original):
             self.fill(original)
         if original is None or original.left <= 0:
@@ -641,6 +673,7 @@ class FakeAccount:
             self._now(),
             cancelled=original.left,
             original=original.number,
+            day=self.day,
         )
         original.cancelled += original.left
         self.orders.append(cancel)
@@ -655,13 +688,16 @@ class FakeAccount:
         return _refusal(refusal)
 
     def _fills(self, params: dict[str, str]) -> RestAnswer:
-        """The day's orders, oldest first, ``page_rows`` a page (the next asked by the offset in
-        ``CTX_AREA_NK100``, ``tr_cont`` M while there are more)."""
+        """The orders of the day asked (``INQR_STRT_DT``), oldest first, ``page_rows`` a page (the
+        next asked by the offset in ``CTX_AREA_NK100``, ``tr_cont`` M while there are more)."""
+        asked = params.get("INQR_STRT_DT")
+        day = datetime.strptime(asked, "%Y%m%d").date() if asked else None
         rows = [
             self._row(o)
             for o in self.orders
             if (not params.get("ODNO") or kis_orders.same_number(o.number, params["ODNO"]))
             and (not params.get("PDNO") or o.symbol == params["PDNO"])
+            and (day is None or (o.day or self.today) == day)
         ]
         start = int(params.get("CTX_AREA_NK100") or 0)
         page = rows[start : start + self.page_rows]
@@ -688,7 +724,7 @@ class FakeAccount:
     def _row(self, o: FakeOrder) -> dict[str, str]:
         side = "매수" if o.side == BUY_SIDE else "매도"
         return {
-            "ord_dt": self.today.strftime("%Y%m%d"),
+            "ord_dt": (o.day or self.today).strftime("%Y%m%d"),
             "ord_gno_brno": BRANCH,
             "odno": o.number,
             "orgn_odno": o.original or "0",
@@ -843,18 +879,19 @@ class FakeAccount:
         return {"output1": book, "output2": {}, "rt_cd": "0", "msg_cd": code, "msg1": message}
 
     def _held_cash(self) -> int:
-        return sum(o.left * o.price for o in self.orders if o.side == BUY_SIDE)
+        return sum(o.left * o.price for o in self.orders if o.side == BUY_SIDE and self._live(o))
 
     def _held_shares(self, symbol: str) -> int:
-        return sum(o.left for o in self.orders if o.side == SELL_SIDE and o.symbol == symbol)
+        return sum(
+            o.left for o in self.orders if o.side == SELL_SIDE and o.symbol == symbol and self._live(o)
+        )
 
     def _number(self) -> str:
         """A new order number, made up: ten digits, leading zeros (ODNO and odno are int-looking)."""
         return f"{NUMBERS_FROM + len(self.orders):010d}"
 
-    @staticmethod
-    def _now() -> str:
-        return datetime.now().strftime("%H%M%S")
+    def _now(self) -> str:
+        return (self.clock() if self.clock is not None else datetime.now()).strftime("%H%M%S")
 
     def _tell(
         self,
