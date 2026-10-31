@@ -27,7 +27,10 @@ checkpoints evaluated that night and where the champion stands); what the live m
 (``live.readiness``: the gate and the execution checks on the mock days, and on a live day its first
 period, ``live.ramp``), with a KIS day's comparison of its orders with KIS's; the limits, the halts
 reached that day, a cumulative halt still holding, the pause in force and the pauses, resumes and
-re-arms asked for; the last trading days' ledger.
+re-arms asked for; the last trading days' ledger. A mock day's practice (#427,
+``KRX_TRADER_MOCK_PRACTICE``) is apart: its trades, the predictions the book read on its practice
+pick, the practice cell of the day's pick and its pairs with the practice shadow, each said so
+(``연습``); the ledger and the limits are KIS's, the practice's with the champion's.
 
 **What it never holds**: a price (no fill, reference, target, stop or quote), a broker's order
 number, an account, a key. The scheduled job's output is masked besides, as every job's
@@ -143,6 +146,7 @@ class Trade:
     reason: str | None  # how it ended; None while open
     cost: float | None
     net: float | None
+    practice: bool = False  # the mock book's practice trade (#427)
 
 
 @dataclass(frozen=True)
@@ -202,6 +206,8 @@ class Report:
     # What the champion's book did with the predictions it read: (``bought``, None), (``unfilled``,
     # why), (``skip``, why) → how many.
     decisions: Mapping[tuple[str, str | None], int] = field(default_factory=dict)
+    # The same of the predictions it read on a practice pick (#427), apart.
+    practice_decisions: Mapping[tuple[str, str | None], int] = field(default_factory=dict)
     pick: Mapping[str, Any] | None = None  # the champion's last pick of the day
     picks: int = 0  # its picks that day
     standings: tuple[Standing, ...] = ()
@@ -323,6 +329,9 @@ def read(
             recent=_recent(db, mode, day) if "days" in tables else (),
             trades=_trades(db, mode, day) if "trades" in tables else (),
             decisions=_decisions(db, mode, day, champion) if "decisions" in tables else {},
+            practice_decisions=_decisions(db, mode, day, champion, practice=True)
+            if "decisions" in tables
+            else {},
             pick=pick,
             picks=picks,
             standings=standings,
@@ -598,7 +607,8 @@ def _recent(db: sqlite3.Connection, mode: str, day: date) -> tuple[dict[str, Any
 
 
 def _trades(db: sqlite3.Connection, mode: str, day: date) -> tuple[Trade, ...]:
-    """The champion's trades entered on ``day`` (``store.CHAMPION_TRADE``), in their order."""
+    """The champion's trades entered on ``day`` (``store.CHAMPION_TRADE``: the mock book's practice
+    trades among them, each ``practice``, #427), in their order."""
     rows = db.execute(
         f"SELECT t.* FROM trades t WHERE t.mode = ? AND substr(t.entry_at, 1, 10) = ? AND {champion_of(db)}"
         " ORDER BY t.entry_at, t.id",
@@ -626,25 +636,33 @@ def _trades(db: sqlite3.Connection, mode: str, day: date) -> tuple[Trade, ...]:
                 reason=r["exit_reason"],
                 cost=r["cost"],
                 net=r["net"],
+                practice=bool(r.get("practice")),
             )
         )
     return tuple(out)
 
 
 def _decisions(
-    db: sqlite3.Connection, mode: str, day: date, champion: int | None
+    db: sqlite3.Connection, mode: str, day: date, champion: int | None, practice: bool = False
 ) -> dict[tuple[str, str | None], int]:
     """What the champion's book did with the predictions it read on ``day``: its decisions are
-    under the champion's policy, or none (before the first, or a champion that could not be read)."""
+    under the champion's policy, or none (before the first, or a champion that could not be read);
+    those it read on a practice pick (#427, ``selections.practice``) apart, with ``practice``."""
     whose = ""
     params: list[Any] = [mode, day.isoformat()]
     if "policy_id" in _columns(db, "decisions"):
-        whose = " AND (policy_id IS NULL OR policy_id = ?)"
+        whose = " AND (d.policy_id IS NULL OR d.policy_id = ?)"
         params.append(-1 if champion is None else champion)
+    joined = ""
+    if "selection_id" in _columns(db, "decisions") and "practice" in _columns(db, "selections"):
+        joined = " LEFT JOIN selections s ON s.id = d.selection_id"
+        whose += f" AND coalesce(s.practice, 0) = {int(practice)}"
+    elif practice:
+        return {}  # a store the trader has not opened since #427: no practice pick
     out: dict[tuple[str, str | None], int] = {}
     for action, reason, filled, count in db.execute(
-        "SELECT action, reason, trade_id IS NOT NULL, count(*) FROM decisions"
-        f" WHERE mode = ? AND substr(decided_at, 1, 10) = ?{whose} GROUP BY 1, 2, 3",
+        "SELECT d.action, d.reason, d.trade_id IS NOT NULL, count(*) FROM decisions d"
+        f"{joined} WHERE d.mode = ? AND substr(d.decided_at, 1, 10) = ?{whose} GROUP BY 1, 2, 3",
         params,
     ):
         if action == "buy":
@@ -770,6 +788,8 @@ def _gap_section(gap: Mapping[str, Any], mode: str = "mock") -> str:
     ]
     for p in gap["pairs"]:
         cell = f"{_hms(p['bar_close'])[:5]} {p['kind']} {p['predictor']}"
+        if p.get("practice"):  # #427: the practice trade against the practice shadow's
+            cell = f"{cell}(연습)"
         if p["mock"] is None:
             lines.append(f"- {cell}: 그림자만 샀다({_end(p['shadow'])}) · KIS는 사지 않았다")
         elif p["shadow"] is None:
@@ -848,29 +868,43 @@ def _day_section(report: Report) -> str:
             f"(누적 한도 {_amount(ledger['cumulative_limit'])}의 "
             f"{_used(ledger['cumulative_worst'], ledger['cumulative_limit'])})"
         )
-    if report.trades:
-        net = sum(t.net or 0.0 for t in report.trades)
-        lines.append(f"매매 {len(report.trades)}건(진입 순, 가격은 싣지 않는다), 순손익 합 {_won(net)}:")
-        for n, t in enumerate(report.trades, 1):
-            exit_ = (
-                "열림(아직 청산하지 않았다)"
-                if t.exit_at is None
-                else f"{_when(t.exit_at, report.day)} {EXITS.get(t.reason or '', t.reason)}"
-            )
-            moved = "" if t.ticks is None else f" · {t.ticks:+g}틱"
-            lines.append(
-                f"{n}. {_when(t.entry_at, report.day)} → {exit_} · {_cell(t.kind, t.predictor, t.role)} · "
-                f"오름 {t.probability:.2f} ≥ θ {t.threshold:g} · "
-                f"p* {_ratio(t.p_star)}, 하한 {_ratio(t.low)} · "
-                f"{t.quantity}주{moved} · 비용 {_amount(t.cost)} · 순손익 {_won(t.net)}"
-            )
+    champions = [t for t in report.trades if not t.practice]
+    practised = [t for t in report.trades if t.practice]
+    if champions:
+        net = sum(t.net or 0.0 for t in champions)
+        lines.append(f"매매 {len(champions)}건(진입 순, 가격은 싣지 않는다), 순손익 합 {_won(net)}:")
+        lines += [_trade_line(n, t, report.day) for n, t in enumerate(champions, 1)]
     else:
         lines.append("매매 없음.")
+    if practised:  # #427: the mock book's practice, apart from the champion's trades
+        net = sum(t.net or 0.0 for t in practised)
+        lines.append(
+            f"연습 매매 {len(practised)}건(KIS 모의, 챔피언 칸이 없던 때 1주씩: 승격·관문·모의 기록에는 세지"
+            f" 않고, 장부·한도·실행 점검에는 센다), 순손익 합 {_won(net)}:"
+        )
+        lines += [_trade_line(n, t, report.day) for n, t in enumerate(practised, 1)]
     lines.append(_decisions_line(report.decisions))
+    if report.practice_decisions:
+        lines.append(_decisions_line(report.practice_decisions, "연습 칸 고르기의 챔피언 장부"))
     return "\n".join(lines)
 
 
-def _decisions_line(decisions: Mapping[tuple[str, str | None], int]) -> str:
+def _trade_line(n: int, t: Trade, day: date) -> str:
+    exit_ = (
+        "열림(아직 청산하지 않았다)"
+        if t.exit_at is None
+        else f"{_when(t.exit_at, day)} {EXITS.get(t.reason or '', t.reason)}"
+    )
+    moved = "" if t.ticks is None else f" · {t.ticks:+g}틱"
+    return (
+        f"{n}. {_when(t.entry_at, day)} → {exit_} · {_cell(t.kind, t.predictor, t.role)} · "
+        f"오름 {t.probability:.2f} ≥ θ {t.threshold:g} · "
+        f"p* {_ratio(t.p_star)}, 하한 {_ratio(t.low)} · "
+        f"{t.quantity}주{moved} · 비용 {_amount(t.cost)} · 순손익 {_won(t.net)}"
+    )
+
+
+def _decisions_line(decisions: Mapping[tuple[str, str | None], int], whose: str = "챔피언의 장부") -> str:
     if not decisions:
         return "읽은 예측: 없음(챔피언의 장부가 그날 읽은 예측이 없다)"
     total = sum(decisions.values())
@@ -883,7 +917,7 @@ def _decisions_line(decisions: Mapping[tuple[str, str | None], int]) -> str:
         )
         if found:
             parts.append(f"{title}: " + ", ".join(f"{reason} {n}" for reason, n in found))
-    return "읽은 예측(챔피언의 장부): " + " · ".join(parts)
+    return f"읽은 예측({whose}): " + " · ".join(parts)
 
 
 def _pick_section(report: Report) -> str:
@@ -897,6 +931,16 @@ def _pick_section(report: Report) -> str:
     )
     lines = [head]
     chosen = pick["picks"]
+    if pick.get("practice") and chosen:  # #427: no champion cell to trade, the mock book practised one
+        practised = chosen[0]
+        cell = _cell(practised["kind"], practised["predictor"], practised["role"])
+        low, p_star = practised["low"], practised["p_star"]
+        lines.append(
+            f"연습 칸(KIS 모의, KRX_TRADER_MOCK_PRACTICE): {cell}: 판정이 있는 칸 가운데 하한 − p*가 가장"
+            f" 큰 칸 · 하한 {_ratio(low)} − p* {_ratio(p_star)} = {low - p_star:+.3f} ·"
+            f" {practised['calls']}건 · θ 기본값 · {practised.get('quantity') or 1}주씩"
+        )
+        chosen = []
     if chosen:
         lines.append(f"매매할 칸 {len(chosen)}(순위 순):")
         for n, p in enumerate(chosen, 1):

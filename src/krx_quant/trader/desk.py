@@ -33,6 +33,19 @@ same cells' predictions and the same quotes, in one process.
   ``run.py``), the champion's book is the same KIS book of mode ``live`` on the live account, with
   its paper shadow as in mock mode, sized on the first period's cap until it is lifted (``ramp``).
   Before they pass the trader runs the desk in paper (its mode ``paper``).
+- **Mock practice** (#427, ``KRX_TRADER_MOCK_PRACTICE=on``, mock mode alone): at a pick whose cost
+  map was read and whose champion was read (none yet counts as read) but with no champion cell to
+  trade (``NO_PASS``, ``NOT_IN_POLICY``), the champion's book trades the cost map's practice cell
+  (``Selection.practice``: the greatest lower bound less p* of the cells with a verdict) one share at a
+  time at ``KRX_TRADER_THRESHOLD``. Not after ``NO_COST_MAP`` nor ``NO_POLICY``. The KIS book stays
+  the one owner of the account's orders: no second book orders on KIS, and one position or buy waits
+  at a time whichever cell it is of. Once a pick finds a champion cell again, the practice cell is
+  picked no more (a rise of it waiting is ``not_picked``); a practice position is sold by its own
+  barriers, and holds the champion's cells off (``holding``) until it is. Its paper shadow is a book
+  of its own (``practice_shadow``, held by nothing, as the shadow is), so that the champion policy's
+  shadow and record never hold a practice trade; a practice shadow's trade left open is sold by its
+  barriers whatever the mode or the setting. The practice trades are of no policy and no record
+  counts them (``store.PRACTICE_TRADE``); the KIS checks, the limits and the cash do (#427).
 - **Records** (``record``): while a trading day's session is open (from its open to the end of its
   closing auction), each running book's policy ran that day (``policy_days``), always in paper
   (#405): the champion's (in mock and live mode its shadow's), stopped once its status is not
@@ -49,6 +62,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 from collections.abc import Callable, Sequence
+from dataclasses import replace
 from datetime import date, datetime, timedelta
 from typing import Any
 
@@ -56,13 +70,13 @@ from krx_quant.feeds.base import kst_day
 from krx_quant.kis_orders import Broker
 from krx_quant.market_calendar import Session
 from krx_quant.special import Window
-from krx_quant.trader import KIS_MODES, LIVE, PAPER, live, policy
+from krx_quant.trader import KIS_MODES, LIVE, MOCK, PAPER, live, policy
 from krx_quant.trader.cells import Cell, Signal
 from krx_quant.trader.limits import RUNNING, Notify
 from krx_quant.trader.mock import MockTrader, Timing
 from krx_quant.trader.paper import PaperTrader, Rules
 from krx_quant.trader.quotes import BestQuote
-from krx_quant.trader.selection import NO_POLICY, Selection
+from krx_quant.trader.selection import NO_PASS, NO_POLICY, NOT_IN_POLICY, Selection
 from krx_quant.trader.stall import STALL_AFTER, QuoteWatch
 from krx_quant.trader.store import TraderStore
 
@@ -95,7 +109,8 @@ class Desk:
     through ``broker`` (``mock.MockTrader``, its fills read at ``clock``'s time, waiting ``timing``),
     and the champion policy's paper shadow (``shadow``) keeps its paper record; the challengers'
     books are in paper as ever. More than ``stall_after`` without a quote in continuous trading is a
-    stall of the quotes (#407; None watches nothing)."""
+    stall of the quotes (#407; None watches nothing). With ``practice`` (#427, mock mode alone) the
+    champion's book practises a cell on a day no champion cell trades (module doc)."""
 
     def __init__(
         self,
@@ -110,7 +125,11 @@ class Desk:
         clock: Callable[[], datetime] | None = None,
         timing: Timing | None = None,
         stall_after: timedelta | None = STALL_AFTER,
+        practice: bool = False,
     ) -> None:
+        if practice and mode != MOCK:  # #427: the settings refuse it before (``settings.py``)
+            raise ValueError(f"the mock practice is for the mock mode alone, not {mode}")
+        self.practice = practice
         self.store = store
         self.rules = rules
         self._sessions = sessions
@@ -147,13 +166,28 @@ class Desk:
             self.shadow = PaperTrader(
                 store, rules, sessions, started_at, PAPER, shadow=True, account=self._paper_account
             )
+        # The practice cell's paper shadow (#427): practising, or a trade of it left open (the practice
+        # turned off, or the mode changed), which it sells by its barriers, picking nothing.
+        self.practice_shadow: PaperTrader | None = None
+        if practice or store.open_trade(PAPER, shadow=True, practice=True) is not None:
+            self.practice_shadow = PaperTrader(
+                store,
+                rules,
+                sessions,
+                started_at,
+                PAPER,
+                shadow=True,
+                practice=True,
+                account=self._paper_account,
+            )
+        self.champion.practice_state = {"enabled": practice, "active": False, "cell": None}
         self.challengers: dict[int, PaperTrader] = {}
         self._running: set[int] = set()  # the challengers picked, not retired
         self._recorded: dict[tuple[int, date], bool] = {}  # each record kept today, and if stopped
         # A challenger's paper trade left open when the trader stopped: its book goes on with it.
         for version in store.open_challengers(PAPER):
             self.challengers[version] = self._book(version)
-        for book in [self.champion, *([] if self.shadow is None else [self.shadow])]:
+        for book in [self.champion, *self._shadows]:
             self._told(book, started_at)
 
     def _paper_account(self) -> float:
@@ -186,9 +220,13 @@ class Desk:
         return book
 
     @property
+    def _shadows(self) -> list[PaperTrader]:
+        """The champion policy's shadow and the practice shadow (#427), those there are."""
+        return [b for b in (self.shadow, self.practice_shadow) if b is not None]
+
+    @property
     def books(self) -> list[PaperTrader]:
-        shadow = [] if self.shadow is None else [self.shadow]
-        return [self.champion, *shadow, *self.challengers.values()]
+        return [self.champion, *self._shadows, *self.challengers.values()]
 
     @property
     def cells(self) -> list[Cell]:
@@ -208,9 +246,20 @@ class Desk:
         """The cells the cost map passes at ``at`` (``selection``) under the champion for its book
         (and its shadow's), and under each challenger running that day for its own (module doc)."""
         under = under_champion(self.store, selection)
-        self.champion.select(under, at)
+        chosen = self._practising(under)
+        self.champion.select(chosen, at)
         if self.mode in KIS_MODES and self.shadow is not None:
             self.shadow.select(under, at)
+        if self.practice_shadow is not None:
+            if chosen.practising:
+                self.practice_shadow.select(chosen, at)
+            else:  # no new practice entry; a practice position is sold by its barriers (#427)
+                self.practice_shadow.retire(at)
+        self.champion.practice_state = {
+            "enabled": self.practice,
+            "active": chosen.practising,
+            "cell": chosen.picks[0].as_json() if chosen.practising else None,
+        }
         running: dict[int, policy.Policy] = {}
         try:
             versions = self.store.running_challengers(kst_day(at))
@@ -234,6 +283,16 @@ class Desk:
             self.challengers[version].retire(at)
         self._running = set(running)
         self._prune()
+
+    def _practising(self, under: Selection) -> Selection:
+        """``under`` (the champion's pick), or with the practice on and no champion cell to trade on a
+        cost map and a champion read, the practice cell's (#427, module doc)."""
+        if not self.practice or under.picks or under.reason not in (NO_PASS, NOT_IN_POLICY):
+            return under
+        if under.practice is None:
+            log.info("trader: no cell can be practised on this cost map: no practice until the next pick")
+            return under
+        return replace(under, picks=(under.practice,))
 
     def on_special(self, windows: Sequence[Window]) -> None:
         for book in self.books:
@@ -328,10 +387,13 @@ class Desk:
             self._recorded[(version, day)] = stopped
 
     def _prune(self) -> None:
-        """Let a retired challenger's book go once it holds nothing, and outside mock mode the shadow
-        book that sold the shadow's trade left open (#405)."""
+        """Let a retired challenger's book go once it holds nothing, outside mock mode the shadow book
+        that sold the shadow's trade left open (#405), and without the practice the practice shadow's
+        book once it sold its trade left open (#427)."""
         if self.mode not in KIS_MODES and self.shadow is not None and not self.shadow.busy:
             self.shadow = None
+        if not self.practice and self.practice_shadow is not None and not self.practice_shadow.busy:
+            self.practice_shadow = None
         for version in [
             v for v, book in self.challengers.items() if v not in self._running and not book.busy
         ]:

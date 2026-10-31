@@ -183,7 +183,7 @@ class Point:
     @property
     def fraction(self) -> float:
         """The share of the capital it buys: λ × f*, cut to 0–1 (``policy.apply``'s)."""
-        return min(1.0, max(0.0, self.kelly_fraction * self.pick.kelly))
+        return min(1.0, max(0.0, self.kelly_fraction * (self.pick.kelly or 0.0)))
 
 
 @dataclass

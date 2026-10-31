@@ -114,6 +114,7 @@
     6. 모드를 바꾸는 것은 3장 "자동 매매"의 "실전 (#408)"이다. 키만 넣으면 아무 일도 없다.
 
     앱키, 시크릿, 계좌번호는 서버 `.env`에만 둔다. 저장소, 이슈, PR에는 적지 않는다. 예약 작업의 댓글과 서버 요약에서는 가린다(`redaction.py`).
+15. **mock 연습 매매 켜기** (#427, `KRX_TRADER_MODE=mock`일 때만): 비용 지도에서 통과한 칸이 없는 날에도 KIS 모의 주문이 나가게 하려면 서버 `.env`에 `KRX_TRADER_MOCK_PRACTICE=on`을 넣고 `docker compose up -d trader`를 실행한다. 끄는 것도 같다(`off`로 고치거나 줄을 지우고 다시 띄운다). 3장 "자동 매매"의 "연습 매매 (#427)"에 확인할 것과 로그가 있다.
 
 ## 2. 개통
 
@@ -364,6 +365,7 @@ curl http://krx-quant:8080/v1/macro
 | 변수 | 기본값 | 뜻과 범위 |
 |---|---|---|
 | `KRX_TRADER_MODE` | `paper` | `paper`(모의: 호가로 체결을 흉내 내고 주문하지 않는다) 또는 `mock`(KIS 모의: 챔피언의 매매를 `KRX_TRADER_KIS_*`로 KIS 모의투자 서버에 주문하고 장부를 KIS의 체결로 쓴다, #405). 모드는 여기서만 바꾼다(아래 "모드 바꾸기 (#405)"). `live`(실전, #408): 실전 관문과 실행 점검을 넘은 챔피언만 `KRX_TRADER_LIVE_KIS_*`로 새 실전 계좌에 주문하고, 그 전에는 실제 주문 없이 `paper`처럼 돈다(3장 "자동 매매"의 "실전 (#408)"). **바뀜** (2026-10-31, #425): "`live`는 그 모드(#408)가 들어오기 전까지 설정 오류다" → `live`가 들어왔다. 이유: #408. **바뀜** (2026-10-30, #421): "KIS 주문 모듈(#404) 전까지" → 그 모드(#405, #408) 전까지. 이유: #404는 주문 모듈만 더하고, trader가 그것으로 주문하는 것은 mock·live 모드다. **바뀜** (2026-10-30, #422): `paper`뿐이었다 → `mock`이 들어왔다. 이유: #405 |
+| `KRX_TRADER_MOCK_PRACTICE` | `off` | `on`이면 mock 모드에서 매매할 챔피언 칸이 없는 고르기(비용 지도와 챔피언은 읽었고 `no_pass`, `not_in_policy`)에 연습 칸 하나를 1주씩 KIS 모의로 매매한다(#427, 3장 "자동 매매"의 "연습 매매 (#427)"). `off`나 `on`만 받는다. `KRX_TRADER_MODE=mock`일 때만 쓴다: `paper`나 `live`(관문 전에 paper로 도는 live 포함)와 함께 `on`이면 trader가 시작하지 않는다(`configuration error: KRX_TRADER_MOCK_PRACTICE=on is for KRX_TRADER_MODE=mock alone, not …`, 종료 코드 2). 같은 `.env`를 읽는 `krx-quant trade resume|rearm`과 밤의 `refit-policy`도 그 오류로 멈춘다 |
 | `KRX_TRADER_THRESHOLD` | `0.6` | 사는 오름 확률(방향 `p_up`, 장벽 `p_up_first`)의 문턱 θ. 0–1. 첫 챔피언 정책 전에만 고른 칸 모두에 쓴다. 챔피언이 있으면 칸마다 챔피언의 θ다(#399). 밤 정책 맞추기가 로그 성장이 같은 점들 가운데 고를 때의 기본값이기도 하다 |
 | `KRX_TRADER_CAPITAL` | `1000000` | 운용 상한(원). 1 이상 1,000,000 이하. 넘으면 시작하지 않는다(좁히기만 한다, #393). 한 번에 사는 금액은 칸의 Kelly 비율 × 이 값이다(#395). 밤 정책 맞추기(#399)도 모의 매매의 수량을 이 값으로 센다. 정책에는 남지 않고, 맞추기는 이 값을 바꾸지 않는다. 주문 가능 현금(이 값 + 청산한 매매의 순손익)도 넘지 않는다(#396) |
 | `KRX_TRADER_DAILY_LOSS_PERCENT` | `10` | 하루 손실 한도, 운용 상한의 %(#396, 기본 100,000원). 0 초과 10 이하. 10을 넘으면 시작하지 않는다(좁히기만 한다). 그날 손실(비용을 뺀 실현 + 열린 포지션의 평가)이 닿으면 열린 포지션을 팔고 그날은 사지 않는다. 다음 거래일에 다시 돈다. 정책에 없고, 밤 정책 맞추기가 바꾸지 않는다(#399) |
@@ -1204,7 +1206,7 @@ compose 서비스 `trader`가 `krx-quant trade`를 돈다. 수집기(`engine`)�
 
 `KRX_TRADER_MODE=mock`이면 챔피언의 장부가 paper와 같은 결정(칸, 순위, 크기, 진입 조건, 손절가·목표가·시간 장벽, 한도와 정지)으로 KIS 모의투자 서버에 주문한다. 체결만 다르다. 규칙은 [design.md](design.md#14-자동-매매-393) 14장 "KIS 모의 (#405)"에 있다.
 
-- 그림자: 챔피언 정책의 그림자 장부가 같은 예측과 호가로 모의 체결한다(모드 `paper`, `trades.shadow` 1). 한도와 정지에 멈추지 않고 모의 계좌로 산다. 이것이 챔피언의 모의 기록이고(승격, 실전 관문), KIS의 체결·실패·정지는 그림자에 닿지 않는다. 로그는 `trader: shadow bought …`, `trader: shadow sold …`다. KIS 매매와 그림자의 차이는 `curl -s 'http://krx-quant:8080/v1/trader/days' | jq '.days[] | select(.mode == "mock") | .gap'`과 밤 리포트의 "KIS 모의와 그림자 장부"에 있다(매매 수, 순손익과 그 차이, 예측마다 체결가 차이(틱)).
+- 그림자: 챔피언 정책의 그림자 장부가 같은 예측과 호가로 모의 체결한다(모드 `paper`, `trades.shadow` 1). 한도와 정지에 멈추지 않고 모의 계좌로 산다. 이것이 챔피언의 모의 기록이고(승격, 실전 관문), KIS의 체결·실패·정지는 그림자에 닿지 않는다. 로그는 `trader: shadow bought …`, `trader: shadow sold …`다. 연습 매매(#427, 아래 "연습 매매 (#427)")는 자기 그림자(`trader: practice shadow …`)와 짝짓는다. KIS 매매와 그림자의 차이는 `curl -s 'http://krx-quant:8080/v1/trader/days' | jq '.days[] | select(.mode == "mock") | .gap'`과 밤 리포트의 "KIS 모의와 그림자 장부"에 있다(매매 수, 순손익과 그 차이, 예측마다 체결가 차이(틱)).
 - 진입: 결정 뒤 첫 호가의 매도 1호가로 주문 가능 현금을 읽어 수량을 그 안으로 줄이고, 그 값에 지정가 매수를 낸다. 5초 안에 체결되지 않은 수량은 취소한다. 일부만 체결되면 그 수량이 포지션이다. 취소가 받아들여지지 않았거나 보내지 못한(접근토큰 없음) 매수, 조회가 끝을 보이지 않은 매수는 주문 실패로 알리고, 30초 뒤 다시 취소해 그사이 체결된 몫을 포지션에 더한 다음에야 익절 매도를 건다. trader가 그사이 다시 시작해도 그 매수를 이어서 따라간다. 하나도 체결되지 않으면 사지 않는다(`decisions.reason` `unfilled`). 그 주문은 KIS가 받은 것이라 `unfilled_buys`에 남는다(대조가 견준다). 매수는 보내기 전에 `unfilled_buys`에 `sent`로 남는다(#406): 응답이 사라진 매수는 그 직후와 다음 시작에 KIS에서 찾는다(아래 "시작할 때 계좌 맞추기 (#406)").
 - 익절: 체결 직후 목표가를 호가 단위로 올림한 값에 매도 지정가를 걸어 둔다. 2초마다 KIS 주문 체결 조회로 그 주문을 읽고, 다 체결되면 익절로 끝낸다.
 - 손절·시간·정지·한도: 걸어 둔 매도를 취소하고(취소 전에 체결된 것은 그대로 센다), 남은 주식을 그때의 매수 1호가에 매도 지정가로 낸다(호가가 끊겼으면 KIS REST 호가의 매수 1호가, 아래 "호가 끊김 (#407)"). 남으면 다시 낸다(한 번에 다섯 번까지, 그 뒤 5초 지난 다음 호가에서 또). 남은 수량의 취소가 받아들여지지 않은 매도는 장부에 `open`으로 남고, 다시 팔기 전에 그 주문부터 다시 취소해 그동안의 체결을 센다(두 번 팔지 않는다).
@@ -1230,6 +1232,19 @@ mock 모드의 trader는 시작할 때마다(06:00 배포, 재시작, watchdog�
 - **서버가 멈춰 있던 동안의 위험**: trader가 멈춰 있으면 손절가와 시간 장벽을 아무도 보지 않는다. KIS에는 걸어 둔 익절 매도만 남아, 값이 목표가에 닿으면 팔리지만 손절가 아래로 내려가도 팔리지 않는다. 그 익절 매도도 당일 주문이라 그날 장 마감(15:30)에 끝나고, 그 뒤에는 KIS에 아무 주문도 없다. 멈춘 서버는 watchdog(#385)이 15분 뒤에 다시 켜고, 다시 뜬 trader가 위대로 판다: 그사이 손절가 아래로 얼마나 내려갔든 그때의 매수 1호가에 판다. 다음 날까지 멈춰 있었으면 그 매매는 다음 거래일의 첫 호가에 판다(그 호가가 09:00 전에 오면 시가 단일가에 들어간다).
 - 로그(Loki `{service="krx-quant", process="trader"}`): INFO `trader: the KIS account is as the ledger has it (outside it, accepted: …)`, `trader: the take_profit sell of trade N left on KIS is over (…)`, `trader: the buy left open on KIS on <날> is over with its day`, `trader: the buy at <가격> sent on <날> is not on KIS: it did not go in`. WARNING `trader: the KIS account is unlike the ledger (…): new entries paused`, `trader: the buy at <가격> whose answer was lost was found on KIS: … adopted`, `trader: could not read the KIS account to reconcile it with the ledger (…)`.
 - 기록: `docker compose exec trader python -c 'import sqlite3; [print(r) for r in sqlite3.connect("file:/state/trader.sqlite3?mode=ro", uri=True).execute("select at, status, detail, resumed_at from reconciles order by id desc limit 10")]'`. `outside` 열에는 KIS 주문번호가 있으니 공개 이슈에 붙이지 않는다.
+
+#### 연습 매매 (#427)
+
+mock으로 시작한 날부터 비용 지도에서 시장가 왕복으로 통과하는 칸이 없어 KIS 모의 주문이 나가지 않았고, 실전(#408)의 실행 점검이 채워지지 않았다. `KRX_TRADER_MOCK_PRACTICE=on`이면 매매할 챔피언 칸이 없는 고르기에 챔피언의 KIS 장부가 연습 칸 하나를 1주씩 산다. 비용 지도의 판정과 챔피언은 그대로다. 규칙은 [design.md](design.md#14-자동-매매-393) 14장 "연습 매매 (#427)"에 있다.
+
+- 켜기: 서버 `.env`에 `KRX_TRADER_MOCK_PRACTICE=on`(`KRX_TRADER_MODE=mock`과 함께)을 넣고 `docker compose up -d trader`. 시작한 고르기(그 뒤로는 매일 08:30)에서 챔피언 칸이 없으면 INFO `trader: practising, no champion cell trades: practice on <종류> <예측자>, a share at a time (none passes: …)`가 나온다. `curl -s http://krx-quant:8080/v1/trader | jq .practice`가 `{"enabled": true, "active": true, "cell": {…}}`다. 연습할 칸도 없으면(판정이 있는 칸이 없다) INFO `trader: no cell can be practised on this cost map: no practice until the next pick`이고 `active`가 `false`다.
+- 끄기: `KRX_TRADER_MOCK_PRACTICE=off`(또는 줄을 지운다)로 고치고 `docker compose up -d trader`. 열린 연습 포지션이 있어도 된다: 다시 뜬 trader가 그것을 원래 규칙(목표가, 손절가, 시간 장벽)대로 팔고, 계좌 맞추기는 그것을 장부의 것으로 센다. 누적 손실은 되돌리지 않는다.
+- `paper`나 `live`와 함께 `on`이면 trader가 시작하지 않는다(`configuration error: KRX_TRADER_MOCK_PRACTICE=on is for KRX_TRADER_MODE=mock alone, not …`, 종료 코드 2). mock에서 다른 모드로 바꿀 때는 이 줄을 먼저 `off`로 고친다.
+- 칸과 크기: 판정이 있는 칸(`pass`, `fail`) 가운데 맞힘률 하한 − p*가 가장 큰 칸 하나를, 문턱 `KRX_TRADER_THRESHOLD`로 1주씩 산다(주문 가능 현금과 운용 상한 안에서). 진입 조건과 장벽은 그대로라 그날 매매가 없을 수도 있다. 다음 고르기에서 챔피언 칸이 다시 생기면 새 연습 진입을 멈추고, 들고 있던 연습 포지션은 원래 규칙대로 판다. 포지션은 계좌 전체에서 하나라 그동안 챔피언 칸은 사지 않는다(`holding`).
+- 어디에 세나: 손실 한도와 정지, 주문 가능 현금, 날마다 KIS 대조(`order_checks`, `check-mock-trades`)와 live의 실행 점검(mock 날 수, 왕복 매매 수, 체결 차이, 주문 실패, 계좌 맞추기, 끝나지 않은 주문)은 센다: KIS 실행을 재는 것이라서다. 승격, 실전 관문(`stressed_low` 포함), 챔피언의 paper 기록, 모의 계좌는 세지 않는다: 연습 매매는 정책이 없다.
+- 보이는 곳: `GET /v1/trader`의 `practice`와 `position.practice`, `GET /v1/trader/trades`의 매매마다 `practice`(챔피언의 매매 목록에 함께 나온다. `?policy=N`에는 나오지 않는다), `GET /v1/trader/days`의 mock 날 `gap.pairs[].practice`, 화면의 매매 표와 모드 배지 옆의 `연습`, 밤 리포트의 `연습 매매 N건(KIS 모의, …)`, `연습 칸(KIS 모의, KRX_TRADER_MOCK_PRACTICE): …`, `읽은 예측(연습 칸 고르기의 챔피언 장부): …`, 그림자 짝의 `(연습)`.
+- 로그(Loki `{service="krx-quant", process="trader"}`): KIS 쪽은 mock의 로그 그대로다(`trader: bought 1 of 1 at … on KIS, …`). 연습 그림자는 `trader: practice shadow bought …`, `trader: practice shadow sold …`다.
+- 기록: `docker compose exec trader python -c 'import sqlite3; [print(r) for r in sqlite3.connect("file:/state/trader.sqlite3?mode=ro", uri=True).execute("select id, mode, champion, shadow, kind, predictor, quantity, exit_reason, net from trades where practice = 1 order by id desc limit 10")]'`.
 
 #### 호가 끊김 (#407)
 

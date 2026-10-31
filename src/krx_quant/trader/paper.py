@@ -48,7 +48,13 @@ capital, over the best ask, rounded down: ⌊min(capital − what is open, fract
 capital, plus the net P&L of every trade of the mode exited, less the open position's cost; a
 buy pays its commission from it too. Below one share it buys nothing (``no_shares``). A cap below
 the capital (``cap``: the live mode's first period, #408, ``live.py``) takes the capital's place in
-both terms.
+both terms. A pick of fixed shares (``Pick.quantity``: the mock book's practice cell, #427) buys that
+many in place of its fraction, within the same cash and capital: ⌊min(capital, cash) ÷ ask⌋ at most.
+
+**Practice** (#427, ``desk.Desk``): the mock book's practice cell is a pick like another, its trade
+marked ``practice``, of no policy (``Entry.policy_id`` None: no record counts it), its fraction none
+(it buys its shares). Its paper shadow is a book of its own (``practice``), as the champion's shadow
+is (``shadow``), so that the champion policy's shadow never holds a practice position.
 
 Its reference price is the prediction's ``anchor`` (the bar close's integrated mid-point), the
 target ``anchor + w × tick``, the stop ``anchor − w × tick`` (w = k for the direction), the time
@@ -328,6 +334,7 @@ class PaperTrader:
         account: Callable[[], float] | None = None,
         shadow: bool = False,
         carry: bool = False,
+        practice: bool = False,
     ) -> None:
         self.store = store
         self.rules = rules
@@ -336,6 +343,10 @@ class PaperTrader:
         self.mode = mode
         self.challenger = challenger
         self.shadow = shadow
+        self.practice = shadow and practice  # the practice cell's paper shadow (#427)
+        # What GET /v1/trader's ``practice`` gives (#427): whether the mock practice is on, whether the
+        # book practises now and its cell; set by the desk at each pick.
+        self.practice_state: dict[str, Any] | None = None
         # What a buy sizes on in place of the capital, if below it (#408: the live first period's cap).
         self.cap: int | None = None
         # The live mode's state as the trader last judged it (#408, ``live.live_state``): its state's.
@@ -365,9 +376,11 @@ class PaperTrader:
         self._open: OpenTrade | None = (
             store.open_trade(mode, challenger)
             if not shadow
-            # A shadow goes on with its own trade left open; in mock mode (``carry``) with the paper
-            # champion book's too, left open by paper mode (#405): no guard counts either in memory.
-            else store.open_trade(mode, shadow=True) or (store.open_trade(mode) if carry else None)
+            # A shadow goes on with its own trade left open (the practice shadow with its own, #427); in
+            # mock mode (``carry``) with the paper champion book's too, left open by paper mode (#405):
+            # no guard counts either in memory.
+            else store.open_trade(mode, shadow=True, practice=self.practice)
+            or (store.open_trade(mode) if carry else None)
         )
         if self._open is not None:
             log.info("%s going on with trade %s, open since before this start", self._whose(), self._open.id)
@@ -425,7 +438,10 @@ class PaperTrader:
 
     def _whose(self) -> str:
         """Its log lines' start: the champion's as they were (``trader: bought …``), a challenger's
-        with its version (``trader: challenger N bought …``), the shadow's (``trader: shadow …``)."""
+        with its version (``trader: challenger N bought …``), the shadow's (``trader: shadow …``), the
+        practice shadow's (``trader: practice shadow …``, #427)."""
+        if self.practice:
+            return "trader: practice shadow"
         if self.shadow:
             return "trader: shadow"
         return "trader:" if self.challenger is None else f"trader: challenger {self.challenger}"
@@ -444,7 +460,9 @@ class PaperTrader:
         if self.challenger is not None:
             log.info("trader: challenger %s in paper: %s", self.challenger, selection.describe())
         elif self.shadow:
-            log.info("trader: shadow in paper: %s", selection.describe())
+            log.info("%s in paper: %s", self._whose(), selection.describe())
+        elif selection.practising:
+            log.info("trader: practising, no champion cell trades: %s", selection.describe())
         elif selection.picks:
             log.info("trader: trading %s cell(s): %s", len(selection.picks), selection.describe())
         else:
@@ -657,6 +675,7 @@ class PaperTrader:
                 "bid_at": iso(last.received_at) if seen and last is not None else None,
                 "unrealized": guard.unrealized,
                 "selling": self.status in SALE,
+                "practice": trade.practice,  # the mock book's practice trade (#427)
             }
         limits = guard.limits
         since = guard.since
@@ -700,6 +719,7 @@ class PaperTrader:
             if guard.pause is None
             else {"at": iso(guard.pause.at), "sell_now": guard.pause.sell_now, "source": guard.pause.source},
             "live": self.live,
+            "practice": self.practice_state,
         }
 
     def _busy(self) -> bool:
@@ -827,6 +847,8 @@ class PaperTrader:
         capital = self.rules.capital if self.cap is None else min(self.rules.capital, self.cap)
         cash = self.rules.capital + self.holds.realized_all  # nothing open: one at a time
         quantity = shares(pick.fraction, capital, quote.ask, cash, self.rules.fee_rate)
+        if pick.quantity is not None:  # its shares, within the cash and the capital (#427)
+            quantity = min(pick.quantity, shares(1.0, capital, quote.ask, cash, self.rules.fee_rate))
         if quantity < 1:
             self._give_up(waiting, NO_SHARES)
             return
@@ -876,10 +898,13 @@ class PaperTrader:
             p_star=pick.p_star,
             low=pick.low,
             kelly=pick.kelly,
-            fraction=pick.fraction,
-            policy_id=self._policy,
+            # A practice pick buys its shares (#427): no share of the capital.
+            fraction=None if pick.quantity is not None else pick.fraction,
+            # A practice trade is of no policy (#427): no record, promotion or gate counts it.
+            policy_id=None if pick.practice else self._policy,
             champion=self.challenger is None and not self.shadow,
             shadow=self.shadow,
+            practice=pick.practice,
         )
 
     def _give_up(self, waiting: _Waiting, reason: str) -> None:

@@ -2688,7 +2688,7 @@
       "description": "A position from its entry to its exit (#394): the cell (kind, predictor) and what the cost map picked it on (#395: the predictor's role, p*, the hit rate's lower bound, the Kelly f* and the share of the capital bought; null for a trade entered before), the prediction and its rise's probability, the barriers, the fills, the costs and the P&L in won; exit and the sell's costs null while open. policy: the policy version it was made under (#399), null before the first champion; champion (#400): whether it is the champion's, not a challenger's paper trade. An exit is by the triple barrier (take_profit, stop_loss, time), or a sale at once (#396): a pause selling now (pause), a loss limit reached (daily_limit, cumulative_limit).",
       "type": "object",
       "required": ["id", "mode", "symbol", "kind", "predictor", "role", "prediction_id", "bar_close", "probability",
-                   "threshold", "p_star", "precision_low", "kelly", "fraction", "policy", "champion", "shadow", "anchor", "tick", "width_ticks",
+                   "threshold", "p_star", "precision_low", "kelly", "fraction", "policy", "champion", "shadow", "practice", "anchor", "tick", "width_ticks",
                    "target", "stop", "time_barrier", "decided_at", "entry", "exit", "buy_fee", "sell_fee", "tax",
                    "cost", "gross", "net", "orders", "stalls"],
       "additionalProperties": false,
@@ -2710,6 +2710,7 @@
         "policy": {"type": ["integer", "null"], "minimum": 1},
         "champion": {"type": "boolean", "description": "#400: the champion's trade (the trader's, which the limits hold and the chart marks); false: a challenger's paper trade, or the shadow's."},
         "shadow": {"type": "boolean", "description": "#405: the champion policy's paper shadow's trade in mock mode (champion false): its paper record, never the trader's."},
+        "practice": {"type": "boolean", "description": "#427: the mock book's practice trade (KRX_TRADER_MOCK_PRACTICE: on a day no champion cell traded, one share of the practice cell at KRX_TRADER_THRESHOLD; champion true, the trader's own, which the limits hold), or the practice shadow's (shadow true). Of no policy (policy null, fraction null): no record, promotion or live gate counts it; the mock execution checks do."},
         "anchor": {"type": "number", "exclusiveMinimum": 0},
         "tick": {"type": "number", "exclusiveMinimum": 0},
         "width_ticks": {"type": "integer", "minimum": 1},
@@ -2804,7 +2805,7 @@
       "description": "GET /v1/trader (#396): the trader's state as it last wrote it into its store (at least every 5 s while it runs; alive while that is at most 15 s old), and the last 20 pauses, resumes and re-arms asked for, newest first (applied_at null until the trader has read one). Every field but alive and controls is null before the trader first wrote its state. #400: the champion's version, the live gate on its paper record, and the champion and each challenger running with their paper records (a challenger's with where it stands against the champion), read from the store whatever the trader wrote. #408: live, the live mode as the trader judged it at its start and at its last pick (null before #408's trader first wrote it).",
       "type": "object",
       "required": ["updated_at", "alive", "mode", "status", "started_at", "capital", "cash", "position", "today",
-                   "cumulative", "limits", "pause", "live", "controls", "champion", "gate", "policies"],
+                   "cumulative", "limits", "pause", "live", "practice", "controls", "champion", "gate", "policies"],
       "additionalProperties": false,
       "properties": {
         "updated_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]},
@@ -2835,7 +2836,8 @@
                 "bid": {"type": ["number", "null"], "exclusiveMinimum": 0},
                 "bid_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]},
                 "unrealized": {"type": "number"},
-                "selling": {"type": "boolean"}
+                "selling": {"type": "boolean"},
+                "practice": {"type": "boolean", "description": "#427: the mock book's practice trade; absent in a state written before #427."}
               }
             }
           ]
@@ -2905,6 +2907,22 @@
           ]
         },
         "live": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/trader_live"}]},
+        "practice": {
+          "description": "#427: the mock practice (KRX_TRADER_MOCK_PRACTICE, mock mode alone): whether it is on (enabled), whether the champion's book practises now (active: its last pick read the cost map and the champion but found no champion cell to trade, no_pass or not_in_policy), and the practice cell then (cell, null when not active). Null before #427's trader first wrote its state.",
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "required": ["enabled", "active", "cell"],
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {"type": "boolean"},
+                "active": {"type": "boolean"},
+                "cell": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/trader_practice_cell"}]}
+              }
+            }
+          ]
+        },
         "controls": {"type": "array", "maxItems": 20, "items": {"$ref": "#/$defs/trader_control"}},
         "champion": {"type": ["integer", "null"], "minimum": 1},
         "gate": {"$ref": "#/$defs/trader_gate"},
@@ -3169,12 +3187,13 @@
                   "type": "array",
                   "items": {
                     "type": "object",
-                    "required": ["kind", "predictor", "bar_close", "mock", "shadow", "entry_ticks", "exit_ticks", "net_difference"],
+                    "required": ["kind", "predictor", "bar_close", "practice", "mock", "shadow", "entry_ticks", "exit_ticks", "net_difference"],
                     "additionalProperties": false,
                     "properties": {
                       "kind": {"type": "string"},
                       "predictor": {"type": "string"},
                       "bar_close": {"$ref": "#/$defs/time"},
+                      "practice": {"type": "boolean", "description": "#427: the mock book's practice trade against the practice shadow's: a pair is of one book (practice or not) and one prediction."},
                       "mock": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/trader_gap_trade"}]},
                       "shadow": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/trader_gap_trade"}]},
                       "entry_ticks": {"type": ["number", "null"]},
@@ -3221,7 +3240,7 @@
       "description": "A trade's buy (its entry's fill) or sell (its exit's fill) (#398): the fill's time and price, the trade's quantity, mode, policy version (#399: null for a trade entered before the first champion; only the champion's trades are marked) and cell; a sell's exit reason and net P&L after costs in won, null on a buy.",
       "type": "object",
       "required": ["trade_id", "side", "at", "price", "quantity", "mode", "policy", "kind", "predictor",
-                   "exit_reason", "net"],
+                   "exit_reason", "net", "practice"],
       "additionalProperties": false,
       "properties": {
         "trade_id": {"type": "integer"},
@@ -3234,7 +3253,32 @@
         "kind": {"enum": ["direction", "barrier", "barrier_15m", "barrier_30m"]},
         "predictor": {"type": "string"},
         "exit_reason": {"enum": ["take_profit", "stop_loss", "time", "pause", "daily_limit", "cumulative_limit", null]},
-        "net": {"type": ["number", "null"]}
+        "net": {"type": ["number", "null"]},
+        "practice": {"type": "boolean", "description": "#427: the mock book's practice trade (the trader's own, of no policy)."}
+      }
+    },
+    "trader_practice_cell": {
+      "description": "#427: the cell the mock book practises: of the cells with a verdict at a market order's round trip (pass or fail; few and none left out), the greatest hit rate's lower bound less p* (priority), its figures as the cost map gave them (W, the market cost C in ticks at its reference price and tick, Kelly f* or null when a call right does not pay its cost). It buys quantity shares (1) at KRX_TRADER_THRESHOLD (threshold null), within the cash and the capital: no share of the capital (fraction 0).",
+      "type": "object",
+      "required": ["kind", "role", "predictor", "p_star", "low", "priority", "calls", "width", "cost", "reference_price", "tick", "kelly", "fraction", "threshold", "quantity", "practice"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {"enum": ["direction", "barrier", "barrier_15m", "barrier_30m"]},
+        "role": {"enum": ["consensus", "top", "baseline"]},
+        "predictor": {"type": "string"},
+        "p_star": {"type": "number"},
+        "low": {"type": "number", "minimum": 0, "maximum": 1},
+        "priority": {"type": "number"},
+        "calls": {"type": "integer", "minimum": 0},
+        "width": {"type": "number", "exclusiveMinimum": 0},
+        "cost": {"type": "number", "minimum": 0},
+        "reference_price": {"type": "number", "exclusiveMinimum": 0},
+        "tick": {"type": "number", "exclusiveMinimum": 0},
+        "kelly": {"type": ["number", "null"]},
+        "fraction": {"type": "number", "minimum": 0, "maximum": 1},
+        "threshold": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+        "quantity": {"type": "integer", "minimum": 1},
+        "practice": {"const": true}
       }
     }
   }
