@@ -383,6 +383,9 @@ class PaperTrader:
         self._enforce(started_at)
         self.write(started_at)
 
+    async def start(self) -> None:
+        """Before it trades: nothing in paper (``mock.py`` reconciles the KIS account first, #406)."""
+
     async def idle(self) -> None:
         """Until no order is in flight: a paper book's fill at once, so at once (``mock.py``'s waits)."""
 

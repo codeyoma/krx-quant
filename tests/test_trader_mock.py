@@ -170,6 +170,7 @@ class MockDay:
         store = TraderStore(self.state / DB_NAME)
         store.add_run(self.started_at, MOCK, {})  # as the trader keeps its start
         clock = [self.started_at]
+        self.account.clock = lambda: clock[0]  # KIS's time and day are the test's
         try:
             async with kis.rest_session() as session:
                 broker = trader_broker(
@@ -190,6 +191,7 @@ class MockDay:
                     self.notices.append,
                     self.timing,
                 )
+                await book.start()  # the account reconciled with the ledger first (#406)
                 book.select(Selection((pick(BARRIER),)), self.started_at)
                 reader = EngineReader(self.state / ENGINE_DB, SYMBOL)
                 reader.follow(book.cells, self.started_at - timedelta(minutes=2))
@@ -266,7 +268,7 @@ class MockDay:
 
 
 def resting_sells(account: FakeAccount) -> list[FakeOrder]:
-    return [o for o in account.placed(SELL_SIDE) if o.left > 0]
+    return account.resting(SELL_SIDE)
 
 
 def rows(state: Path, table: str) -> list[dict[str, Any]]:
@@ -584,6 +586,9 @@ async def test_a_restart_follows_a_buy_left_open_with_nothing_filled_and_opens_i
 async def test_a_restart_that_cannot_take_off_a_buy_left_open_stops_new_entries(
     kis_mock: tuple[FakeKis, FakeAccount], tmp_path: Path
 ) -> None:
+    """The buy rests on KIS and KIS refuses every cancel of it. Started again the same day, the trader
+    follows it still (its cancel refused again) and buys nothing new. (The next day it is over with
+    its day: ``test_trader_reconcile.py``.)"""
     fake, account = kis_mock
     account.fills = False
     fake.rest_posts[kis_orders.CANCEL.mock] = lambda body: {
@@ -591,24 +596,19 @@ async def test_a_restart_that_cannot_take_off_a_buy_left_open_stops_new_entries(
         "msg_cd": "FK0009",
         "msg1": "made up: 취소를 받지 못했습니다",
     }
-    await MockDay(tmp_path, fake, account, timing=replace(TIMING, retry=3600.0)).run([TEN, BOUGHT])
+    hour = replace(TIMING, retry=3600.0)  # the cancel tried again an hour later: once in this run
+    await MockDay(tmp_path, fake, account, timing=hour).run([TEN, BOUGHT])
 
-    hour = replace(TIMING, retry=3600.0)  # the cancel tried again an hour later: once in this day
-    later = MockDay(tmp_path, fake, account, started_at=at("2026-10-15 09:00:00"), timing=hour)
+    later = MockDay(tmp_path, fake, account, started_at=at("10:01:00"), timing=hour)
     trades = await later.run(
-        [
-            Tick("2026-10-15 09:00:00.5"),
-            Read("2026-10-15 10:00:02.3", [Barrier("2026-10-15 10:00:00")]),
-            quote("2026-10-15 10:00:02.5", 70_000, 70_100),
-        ]
+        [Tick("10:01:00.5"), Read("10:05:02.3", [Barrier("10:05:00")]), quote("10:05:02.5", 70_000, 70_100)]
     )
 
     assert trades == [] and later.status == ORDER_FAILED
-    assert [n for n in later.notices if "취소 주문을 KIS가 거부했습니다" in n]
+    assert [(f["what"], f["outcome"]) for f in later.failures()] == [("cancel", "refused")] * 2
     assert rows(tmp_path, "decisions")[-1]["reason"] == ORDER_FAILED, "no new entry"
-    assert [r["status"] for r in rows(tmp_path, "unfilled_buys")] == ["open"], (
-        "followed still (#406 reconciles)"
-    )
+    assert [r["status"] for r in rows(tmp_path, "unfilled_buys")] == ["open"], "followed still"
+    assert len(account.placed(BUY_SIDE)) == 1
 
 
 async def test_a_batch_of_sells_used_up_waits_for_a_later_quote_or_tick(
@@ -1040,20 +1040,38 @@ async def test_a_failed_order_stops_entries_for_that_day_alone(
     assert trade["entry"]["quantity"] == 14 and later.status == RUNNING
 
 
-async def test_a_buy_without_an_answer_alerts_that_its_outcome_is_not_known(
+async def test_a_buy_without_an_answer_is_found_on_kis_and_adopted_with_its_decision(
     kis_mock: tuple[FakeKis, FakeAccount], tmp_path: Path
 ) -> None:
+    """KIS takes the buy and fills its 14, but its answer is lost on the way (#406). The trader
+    alerts that its outcome is not known, finds it on the day's order inquiry (the one KIS buy of
+    its limit and quantity the ledger does not keep), and opens the trade its decision would have:
+    its take-profit rests. It is not sent again."""
     fake, account = kis_mock
-    account.lose_answers = 1  # KIS takes the buy; its answer is lost on the way
+    account.lose_answers = 1
     day = MockDay(tmp_path, fake, account)
 
-    assert await day.run([TEN, BOUGHT]) == []
+    [trade] = await day.run([TEN, BOUGHT])
+
+    assert (trade["entry"]["quantity"], trade["entry"]["price"]) == (14, 70_050)
+    assert (trade["kind"], trade["target"], trade["stop"]) == ("barrier", 70_250, 69_850)
+    assert orders_of(trade) == [
+        ("buy", "entry", 70_100, 14, "filled", 14),
+        ("sell", "take_profit", 70_300, 14, "open", 0),
+    ]
+    [bought] = account.placed(BUY_SIDE)
+    assert trade["orders"][0]["broker_id"] == bought.number, "KIS's order, adopted"
+    [decision] = day.decisions()
+    assert (decision["trade_id"], decision["reason"]) == (trade["id"], None)
+    [kept] = rows(tmp_path, "unfilled_buys")
+    assert (kept["status"], kept["broker_id"]) == ("filled", bought.number)
     [failure] = day.failures()
     assert (failure["what"], failure["outcome"]) == ("buy", "unknown")
-    assert day.status == ORDER_FAILED
-    [notice] = day.notices
-    assert "응답이 없어 결과를 모릅니다" in notice and "KIS 계좌에서 확인" in notice
-    assert len(account.placed(BUY_SIDE)) == 1, "not sent again: an order sent twice is two orders"
+    assert day.status == ORDER_FAILED, "no new entry today all the same"
+    failed, adopted = day.notices
+    assert "응답이 없어 결과를 모릅니다" in failed and "KIS 계좌에서 확인" in failed
+    assert "응답이 없던 매수를 KIS 주문 체결 조회에서 찾아 장부에 넣었습니다" in adopted
+    assert "(14주 가운데 14주 체결)" in adopted
 
 
 async def test_a_refused_take_profit_alerts_and_the_stop_still_sells(

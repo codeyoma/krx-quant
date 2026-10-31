@@ -1020,7 +1020,7 @@ def _limits_section(report: Report) -> str:
 
 
 def _source(source: str) -> str:
-    return {"api": "화면", "cli": "서버"}.get(source, source)
+    return {"api": "화면", "cli": "서버", "reconcile": "계좌 맞추기"}.get(source, source)
 
 
 def _control(control: Control, day: date) -> str:

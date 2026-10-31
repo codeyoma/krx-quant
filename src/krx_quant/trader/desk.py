@@ -23,7 +23,8 @@ same cells' predictions and the same quotes, in one process.
   told (``on_stall``, ``on_recover``: no new buy meanwhile; the mock champion reads KIS's REST
   quotes, the paper books wait), and so is a book made during one.
 - **Mock mode** (#405): the champion's book (``mock.MockTrader``) is the execution layer alone: its
-  KIS orders, its trades of mode ``mock``, the limits and pauses, the state and ledger. Beside it
+  KIS orders, its trades of mode ``mock``, the limits and pauses, the state and ledger. At the start
+  (``start``, #406) it reconciles the KIS account with the ledger before any book trades. Beside it
   the champion policy keeps a paper shadow (``shadow``: ``paper.PaperTrader`` in paper, held by no
   limit nor pause, as a challenger's book is), on the same picks, predictions and quotes. The
   shadow and the challengers size on the paper account (``store.paper_account``: the net of the
@@ -259,6 +260,11 @@ class Desk:
     def write(self, now: datetime) -> None:
         self.champion.write(now)
         self.record(now)
+
+    async def start(self) -> None:
+        """Before anything trades: in mock mode the champion's book reconciles the KIS account with
+        the ledger (#406, ``mock.MockTrader.start``)."""
+        await self.champion.start()
 
     async def idle(self) -> None:
         """Until the champion's book has no order in flight (#405: in mock, its KIS orders)."""

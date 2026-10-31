@@ -39,10 +39,40 @@ The limits and pauses (#396, ``limits.py``) count these trades as they count pap
 trade valued at what its sells brought so far and the rest of its shares at the best bid; the
 trades are of mode ``mock``.
 
-**A failed order**: KIS refused it, it had no answer (whether it went in is not known: the
-account's reconciliation is #406's), or it could not be sent (no token, an inquiry KIS did not
-answer). It is kept (``failures``) and sent to Telegram, and new entries stop for the rest of the day
-(``limits.ORDER_FAILED``); a sale that failed is tried again ``Timing.retry`` seconds later.
+**A failed order**: KIS refused it, it had no answer (whether it went in is not known), or it could
+not be sent (no token, an inquiry KIS did not answer). It is kept (``failures``) and sent to
+Telegram, and new entries stop for the rest of the day (``limits.ORDER_FAILED``); a sale that failed
+is tried again ``Timing.retry`` seconds later.
+
+**A buy whose answer was lost** (#406): each buy is kept before it is sent (``unfilled_buys``,
+``store.SENT``), with its decision and the trade it would open. One KIS took but whose answer did
+not come (or the trader stopped before it came) is looked up on the day's order inquiry
+(``reconcile.candidates``: a buy of 005930 at its limit and of its quantity, placed around when it
+was sent, whose number the ledger does not keep, not the order probe's): when exactly one KIS
+order can be it and nothing is left of it, it is adopted (its fills open the trade its decision
+would have, its take-profit rests); none, and it did not go in (``store.ABSENT``, at a start: KIS
+shows an order it took at once); more than one, or one still open on KIS (cancelling it would name
+KIS's branch from the inquiry, ``ord_gno_brno``, not measured yet), and new entries pause until the
+server resumes them (below). Right after the lost answer it is looked up for ``Timing.wait``; what
+is not settled then, the next start looks up again.
+
+**Start** (#406, ``start``, before anything is bought or sold): the ledger's orders open on KIS when
+the trader stopped are read, each on the day it was placed: their fills kept, one with nothing left
+closed, one of a day gone by over with what filled (a KRX limit order is a day order: it is not
+cancelled, KIS ended it at the close). A trade whose sells hold every share exits. The buys sent
+whose answer was not had are looked up (above). Then the account against the ledger
+(``reconcile.compare``): the shares held, the other symbols held, the day's orders with something
+left that the trader does not follow. What is outside the ledger beyond what was accepted last, a
+share of the ledger the account does not hold, or a lost buy not adopted: the trader touches none of
+it, pauses new entries (a pause of source ``reconcile``, ``limits.Guard``) and says what it found on
+Telegram; the open trade is sold by its own rules still. ``krx-quant trade resume`` lifts it and
+accepts what is outside the ledger then as the account's (``reconciles``). Then the open trade: past
+its time barrier, it is sold at once (at the first quote's best bid, ``time``); with time left and
+no take-profit resting on KIS (it was cancelled there, expired with its day, refused, or never
+placed), the take-profit is placed again for the shares not sold. A restart never sends an order
+twice: an order kept open is read, never sent again, and a buy decided is never decided again. While
+KIS cannot be read the start is tried again every ``Timing.retry`` seconds, and nothing is bought or
+sold until it is done (a prediction read meanwhile is ``reconciling``).
 
 One order is in flight at a time (``_work``): while it is, nothing else is bought or sold, and a
 sale asked for meanwhile begins once it ends. A trader stopped waits for it (``close``).
@@ -65,7 +95,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
-from collections.abc import Callable, Coroutine
+from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 from typing import Any
@@ -83,19 +113,31 @@ from krx_quant.kis_orders import (
     OrderRow,
     Sent,
     Unexpected,
+    same_number,
 )
 from krx_quant.market_calendar import Session
 from krx_quant.pricing import SELL_TAX, tick_size
 from krx_quant.trader import MOCK, SYMBOL
+from krx_quant.trader.cells import Signal
 from krx_quant.trader.limits import ORDER_FAILED, SALE, Notify
-from krx_quant.trader.paper import NO_SHARES, TAKE_PROFIT, PaperTrader, Rules, _Waiting
+from krx_quant.trader.mock_check import probe_window
+from krx_quant.trader.paper import NO_SHARES, TAKE_PROFIT, TIME, PaperTrader, Rules, _Waiting
 from krx_quant.trader.quotes import BestQuote
+from krx_quant.trader.reconcile import Finding, Outside, Window, candidates, compare
 from krx_quant.trader.store import (
+    ABSENT,
+    BUY_REFUSED,
     CANCELLED,
+    CLEAN,
     FILLED,
+    HELD,
     OPEN,
+    PAUSE,
+    RECONCILE,
     REST,
     SELL,
+    SENT,
+    UNSENT,
     WAITED,
     Entry,
     OpenTrade,
@@ -109,6 +151,8 @@ log = logging.getLogger(__name__)
 
 # Why a buy decided bought nothing on KIS: nothing filled before its cancel (the ask moved).
 UNFILLED = "unfilled"
+# Why a prediction bought nothing (#406): the start's reconcile of the account was not done yet.
+RECONCILING = "reconciling"
 # What became of a failed order (``failures.outcome``): KIS refused it, it had no answer, or it
 # could not be sent.
 UNKNOWN, ERROR = "unknown", "error"
@@ -162,6 +206,11 @@ def tick_up(price: float) -> int:
     return int(up)
 
 
+def _row_of(rows: list[OrderRow], number: str | None) -> OrderRow | None:
+    """Order ``number``'s own row among ``rows`` (not a cancel of it)."""
+    return next((r for r in rows if not r.cancel and same_number(r.number, number)), None)
+
+
 def _unknown(sent: Sent) -> str:
     """Why an order's outcome is not known: no answer, or an acceptance that named no order."""
     answer = sent.answer
@@ -200,6 +249,9 @@ class MockTrader(PaperTrader):
         self._rest_at: datetime | None = None  # when the last of those reads began
         self._rest_failing = False  # the last read failed (said once until one is answered)
         self._closing = False
+        self._reconciled = False  # the start's reconcile done (#406): nothing is bought or sold before
+        self._unreadable = False  # a start that could not read KIS, told
+        self._notify: Notify = notify or (lambda text: None)
         super().__init__(store, rules, sessions, started_at, MOCK, notify)
         if self._open is not None:  # a restart: its orders open on KIS when it stopped go on
             entry = store.open_entry(self._open.id)
@@ -224,7 +276,10 @@ class MockTrader(PaperTrader):
     # The paper book's hooks.
 
     def _busy(self) -> bool:
-        return super()._busy() or self._work is not None or self._live_buy is not None
+        return super()._busy() or self._work is not None or self._live_buy is not None or not self._reconciled
+
+    def _held_off(self, signal: Signal) -> str:
+        return RECONCILING if not self._reconciled else super()._held_off(signal)
 
     def _fill_buy(self, waiting: _Waiting, quote: BestQuote, quantity: int) -> None:
         self._start(self._enter(waiting, quote, quantity))
@@ -305,8 +360,9 @@ class MockTrader(PaperTrader):
         except Exception as e:  # a broken answer or store: kept as a failed order, the trader goes on
             log.exception("trader: an order on KIS broke off")
             trade = self._open
-            self._failed("sell" if trade is not None else "buy", ERROR, f"{type(e).__name__}: {e}")
-            if trade is not None:
+            what = "reconcile" if not self._reconciled else "sell" if trade is not None else "buy"
+            self._failed(what, ERROR, f"{type(e).__name__}: {e}")
+            if trade is not None or not self._reconciled:
                 self._retry_at = self._clock() + timedelta(seconds=self._timing.retry)
         finally:
             self._work = None
@@ -319,6 +375,11 @@ class MockTrader(PaperTrader):
         trade = self._open
         self._link_stall()  # a trade its buy opened during a stall (#407)
         if self._closing or self._work is not None:
+            return
+        if not self._reconciled:  # the start's reconcile first (#406), again once ``_retry_at`` is past
+            if self._retry_at is None or now >= self._retry_at:
+                self._retry_at = None
+                self._start(self._reconcile())
             return
         if self._live_buy is not None and self._selling is None:  # a sale takes it off first itself
             if self._retry_at is None or now >= self._retry_at:
@@ -374,6 +435,241 @@ class MockTrader(PaperTrader):
         if last is None or last.received_at < self._started_at:
             return None
         return round(last.bid)
+
+    # The start (#406).
+
+    async def start(self) -> None:
+        """Before anything is bought or sold: the ledger's orders read on KIS, the buys whose answer
+        was lost looked up, the account compared with the ledger, the open trade sold or its
+        take-profit placed again (module doc). While KIS cannot be read it is tried again every
+        ``Timing.retry`` seconds (``_kick``), and nothing is bought or sold until it is done."""
+        self._kick(self._clock())
+        await self.idle()
+
+    async def _reconcile(self) -> None:
+        now = self._clock()
+        today = kst_day(now)
+        days: dict[date, list[OrderRow]] = {}
+
+        async def rows(day: date) -> list[OrderRow]:
+            """``day``'s orders on KIS, every symbol's, read once a reconcile."""
+            if day not in days:
+                days[day] = await self._broker.orders(day)
+            return days[day]
+
+        try:
+            await self._settle_kept(rows, today)
+            doubtful = await self._find_sent(rows, today)
+            today_rows = await rows(today)  # before the balance: a fill between is in the bounds
+            balance = await self._broker.balance()
+        except BrokerError as e:
+            self._retry_at = self._clock() + timedelta(seconds=self._timing.retry)
+            log.warning(
+                "trader: could not read the KIS account to reconcile it with the ledger (%s): nothing is"
+                " bought or sold until it is, read again in %gs",
+                e,
+                self._timing.retry,
+            )
+            if not self._unreadable:
+                self._unreadable = True
+                self._notify(
+                    f"자동 매매({MOCK}): 시작할 때 KIS 계좌를 읽지 못했습니다({e}). 장부와 맞추기 전에는"
+                    f" 사지도 팔지도 않고, {self._timing.retry:g}초마다 다시 읽습니다."
+                )
+            return
+        finding = compare(
+            balance,
+            today_rows,
+            self._followed(),
+            self._held(),
+            Outside.of(self.store.accepted_outside(MOCK)),
+            self._probe(today),
+            doubtful,
+        )
+        at = self._clock()
+        if finding.clean:
+            self.store.add_reconcile(at, MOCK, CLEAN, finding.outside.as_json(), finding.detail())
+            log.info(
+                "trader: the KIS account is as the ledger has it (outside it, accepted: %s)",
+                finding.outside.as_json(),
+            )
+        else:
+            self._hold(finding, at)
+        if self._unreadable:
+            self._notify(f"자동 매매({MOCK}): KIS 계좌를 읽어 장부와 맞췄습니다.")
+        self._reconciled, self._unreadable, self._dirty = True, False, True
+        await self._go_on(at, finding)
+
+    async def _settle_kept(self, rows: Callable[[date], Awaitable[list[OrderRow]]], today: date) -> None:
+        """The ledger's orders open on KIS when the trader stopped, each read on the day it was
+        placed: its fills kept; one with nothing left closed; one of a day gone by over with what
+        filled (a day order: KIS ended it at the close, nothing is cancelled). A trade whose sells
+        now hold every share exits."""
+        live = self._live_buy
+        if live is not None:
+            over = live.day < today
+            row = _row_of(await rows(live.day), live.placed.number)
+            if row is not None:
+                self._absorb(row.filled, row.average, 0 if over else row.left)
+            elif over:
+                self._absorb(live.filled, live.amount / live.filled if live.filled else 0.0, 0)
+            if over:
+                log.info("trader: the buy left open on KIS on %s is over with its day", live.day)
+        reason = self._selling or TAKE_PROFIT
+        for still in (self._resting, self._live):
+            trade = self._open
+            if still is None or trade is None:
+                continue
+            day = still.day or self._day_of(trade)
+            row = _row_of(await rows(day), still.number)
+            if row is not None:
+                still = self._keep(still, row)
+            if still.purpose == TAKE_PROFIT and still.filled >= still.quantity:
+                reason = TAKE_PROFIT  # it sold the rest, whatever sale began meanwhile
+            if day < today or (row is not None and row.left == 0):
+                self._close_sell(still)
+                log.info(
+                    "trader: the %s sell of trade %s left on KIS is over (%s of %s filled)",
+                    still.purpose,
+                    trade.id,
+                    still.filled,
+                    still.quantity,
+                )
+        trade = self._open
+        if trade is not None and self._live_buy is None and self._all_sold(trade):
+            self._finish(trade, reason)
+
+    async def _find_sent(self, rows: Callable[[date], Awaitable[list[OrderRow]]], today: date) -> int:
+        """Each buy sent whose answer was not had looked up on its day's inquiry (module doc): adopted,
+        not on KIS, or doubtful (left as sent). How many are doubtful."""
+        doubtful = 0
+        for unfilled, decision, placed, day, would in self.store.sent_buys(MOCK):
+            found = candidates(
+                await rows(day), placed, day, self.store.broker_numbers(MOCK), self._probe(day)
+            )
+            alone = self._open is None and self._live_buy is None
+            if len(found) == 1 and alone and (day < today or found[0].left == 0):
+                self._adopt(unfilled, decision, placed, day, would, found[0])
+            elif not found:
+                self.store.close_unfilled_buy(unfilled, ABSENT)
+                log.info(
+                    "trader: the buy at %s sent on %s is not on KIS: it did not go in", placed.price, day
+                )
+            else:
+                doubtful += 1
+                log.warning(
+                    "trader: the buy at %s sent on %s, whose answer was lost, is not adopted: %s KIS order(s)"
+                    " can be it%s",
+                    placed.price,
+                    day,
+                    len(found),
+                    "" if alone else ", and another trade is open",
+                )
+        return doubtful
+
+    async def _look_up(self, unfilled: int, decision: int, placed: Placed, day: date, would: Entry) -> None:
+        """A buy whose answer was lost, looked up on KIS for ``Timing.wait`` seconds right after: adopted
+        once one KIS order alone can be it and nothing is left of it; more than one, or one still open
+        then, pauses new entries (``_hold``); none, and the next start looks it up again."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._timing.wait
+        found: list[OrderRow] = []
+        while True:
+            try:
+                rows = await self._broker.orders(day)
+                found = candidates(rows, placed, day, self.store.broker_numbers(MOCK), self._probe(day))
+            except BrokerError as e:
+                log.warning("trader: could not look up the buy whose answer was lost (%s)", e)
+            if len(found) == 1 and found[0].left == 0:
+                self._adopt(unfilled, decision, placed, day, would, found[0])
+                trade = self._open
+                if trade is not None:
+                    await self._place_take_profit(trade)
+                return
+            if len(found) > 1 or loop.time() >= deadline:
+                break
+            await asyncio.sleep(self._timing.poll)
+        if not found:
+            log.warning("trader: the buy whose answer was lost is not on KIS yet: the next start looks again")
+            return
+        accepted = Outside.of(self.store.accepted_outside(MOCK))
+        self._hold(Finding(accepted, Outside(), doubtful=1), self._clock())
+
+    def _adopt(
+        self, unfilled: int, decision: int, placed: Placed, day: date, would: Entry, row: OrderRow
+    ) -> None:
+        """The buy ``unfilled`` whose answer was lost is KIS's order ``row``, over: its fills open the
+        trade its decision would have (``would``), or none filled and it bought nothing."""
+        self.store.accept_buy(unfilled, None, row.number)
+        self.store.unfilled(decision, None)  # not given up: its fills open its trade
+        self._live_buy = _LiveBuy(replace(placed, number=row.number), day, 0, 0.0, decision, would, unfilled)
+        self._absorb(row.filled, row.average, 0)
+        log.warning(
+            "trader: the buy at %s whose answer was lost was found on KIS: %s of %s filled, adopted",
+            placed.price,
+            row.filled,
+            placed.quantity,
+        )
+        self._notify(
+            f"자동 매매({MOCK}): 응답이 없던 매수를 KIS 주문 체결 조회에서 찾아 장부에 넣었습니다"
+            f"({placed.quantity}주 가운데 {row.filled}주 체결). 들고 있는 것은 원래 규칙"
+            "(목표가, 손절가, 시간)대로 팝니다."
+        )
+
+    def _hold(self, finding: Finding, at: datetime) -> None:
+        """The account unlike the ledger (``finding``): nothing of it touched, new entries paused by a
+        pause of source ``reconcile`` until ``krx-quant trade resume``, and told on Telegram; once
+        only while the same is found again and that pause holds."""
+        held = self.store.held_reconcile(MOCK)
+        outside = finding.outside.as_json()
+        if held is not None and self.guard.pause is not None and finding.same_as(held["detail"]):
+            self.store.add_reconcile(at, MOCK, HELD, outside, finding.detail())
+            log.warning(
+                "trader: the KIS account is unlike the ledger as before (%s): paused still", finding.detail()
+            )
+            return
+        control = self.store.add_control(at, PAUSE, RECONCILE, sell_now=False)
+        self.store.add_reconcile(at, MOCK, HELD, outside, finding.detail(), control.id)
+        log.warning("trader: the KIS account is unlike the ledger (%s): new entries paused", finding.detail())
+        self.guard.apply(control, at)
+        self._notify(finding.notice(MOCK))
+        self._dirty = True
+        self._enforce(at)
+
+    async def _go_on(self, now: datetime, finding: Finding) -> None:
+        """The open trade after the reconcile: past its time barrier, sold at once; with time left
+        and no take-profit resting on KIS, the take-profit placed again for the shares not sold."""
+        trade = self._open
+        if trade is None:
+            return
+        if self._selling is None and now >= trade.time_barrier:
+            self._begin_sale(trade, TIME)
+            return
+        if self._resting is None and self._live_buy is None and not finding.missing:
+            await self._place_take_profit(trade)
+
+    def _followed(self) -> list[str]:
+        """KIS's numbers of the orders the trader follows: its open buy, its resting take-profit, a
+        sale's sell open."""
+        numbers = [o.number for o in (self._resting, self._live) if o is not None]
+        live = self._live_buy
+        if live is not None and live.placed.number is not None:
+            numbers.append(live.placed.number)
+        return numbers
+
+    def _held(self) -> tuple[int, int]:
+        """The fewest and the most shares of 005930 the ledger can hold now: its open trade's shares
+        not sold yet, less what its open sells may still sell, plus what its open buy may still buy."""
+        trade = self._open
+        shares = 0 if trade is None else trade.quantity - self.store.sold(trade.id)
+        low = shares - sum(o.quantity - o.filled for o in (self._resting, self._live) if o is not None)
+        live = self._live_buy
+        high = shares + (0 if live is None else live.placed.quantity - live.filled)
+        return max(0, low), high
+
+    def _probe(self, day: date) -> Window:
+        """When the order probe ran on ``day`` on the same account (``mock_check.probe_window``)."""
+        return probe_window(self.store.path.parent, day)
 
     # The REST quotes while the collector's quotes stall (#407).
 
@@ -436,14 +732,16 @@ class MockTrader(PaperTrader):
             return
         # The trade it would open, its fill to come: kept with the order, so that a restart follows it.
         would = self._entry(waiting, self._clock(), ask, quantity, quote.received_at)
-        kept: list[int] = []
+        # Kept before it is sent (#406): a buy whose answer is lost, or a stop before it comes, leaves
+        # its row and decision for the order to be looked up on KIS and adopted.
+        sent_at = self._clock()
+        unfilled = self.store.add_unfilled_buy(
+            waiting.decision, MOCK, Placed(ask, quantity, at=sent_at), sent_at, SENT, would
+        )
 
         def accepted(sent: Sent) -> None:  # write-ahead: the order kept before its fills are read
             assert sent.ref is not None
-            placed = Placed(ask, quantity, sent.ref.branch, sent.ref.number)
-            kept.append(
-                self.store.add_unfilled_buy(waiting.decision, MOCK, placed, self._clock(), OPEN, would)
-            )
+            self.store.accept_buy(unfilled, sent.ref.branch, sent.ref.number)
 
         try:
             taken = await self._broker.take(
@@ -457,17 +755,20 @@ class MockTrader(PaperTrader):
                 on_accepted=accepted,
             )
         except BrokerError as e:  # no token: nothing was sent
+            self.store.close_unfilled_buy(unfilled, UNSENT)
             self._buy_failed(waiting, "buy", ERROR, str(e))
             return
         sent = taken.sent
         if sent.outcome == REFUSED:
+            self.store.close_unfilled_buy(unfilled, BUY_REFUSED)
             self._buy_failed(waiting, "buy", REFUSED, sent.reason, sent.code)
             return
-        if sent.ref is None:
+        if sent.ref is None:  # no answer: whether it went in, KIS's inquiry tells (#406)
             self._buy_failed(waiting, "buy", UNKNOWN, _unknown(sent))
+            await self._look_up(unfilled, waiting.decision, Placed(ask, quantity, at=sent_at), day, would)
             return
         at = self._clock()
-        placed = Placed(ask, quantity, sent.ref.branch, sent.ref.number)
+        placed = Placed(ask, quantity, sent.ref.branch, sent.ref.number, sent_at)
         # Open on KIS still: its cancel did not take, or the inquiry never showed it. It is followed
         # until nothing is left of it (``_settle_buy``), and no take-profit rests before.
         live = taken.unsettled
@@ -477,7 +778,6 @@ class MockTrader(PaperTrader):
             else:
                 self._cancel_failed(taken.cancel, None)
             self._retry_at = at + timedelta(seconds=self._timing.retry)
-        [unfilled] = kept  # its record since KIS took it (``accepted``)
         if taken.filled < 1:  # kept all the same: the ledger holds every order KIS has (``mock_check``)
             if live:
                 self._live_buy = _LiveBuy(placed, day, 0, 0.0, waiting.decision, would, unfilled)
@@ -522,7 +822,7 @@ class MockTrader(PaperTrader):
         assert live.placed.branch is not None and live.placed.number is not None
         cancel, row = await self._withdraw(live.day, OrderRef(live.placed.branch, live.placed.number))
         if row is not None:
-            self._absorb(row)
+            self._absorb(row.filled, row.average, row.left)
         if row is None or row.left > 0:
             if isinstance(cancel, str):
                 self._failed("cancel", ERROR, cancel, trade=None if self._open is None else self._open.id)
@@ -532,53 +832,49 @@ class MockTrader(PaperTrader):
             return False
         return True
 
-    def _absorb(self, row: OrderRow) -> None:
-        """The live buy's fills ``row`` shows and not kept yet: joined to its trade, or a trade opened
-        by them; once nothing is left of it, it settles."""
+    def _absorb(self, filled: int, average: float, left: int) -> None:
+        """The live buy's fills its row shows (``filled`` at ``average``, ``left`` still open) and not
+        kept yet: joined to its trade, or a trade opened by them; once nothing is left of it, it
+        settles."""
         live = self._live_buy
         assert live is not None
         at = self._clock()
-        if row.filled > live.filled:
-            amount = row.average * row.filled
+        if filled > live.filled:
+            amount = average * filled
             if self._open is None:
                 assert live.decision is not None and live.entry is not None and live.unfilled is not None
+                # Its fills read now; the order placed when it was sent (``Placed.at``, #406).
                 entry = replace(
                     live.entry,
                     entry_at=at,
-                    entry_price=row.average,
-                    quantity=row.filled,
+                    entry_price=average,
+                    quantity=filled,
                     buy_fee=amount * self.rules.fee_rate,
                 )
-                status = OPEN if row.left else None
+                status = OPEN if left else None
                 self._open = self.store.open_position(live.decision, entry, live.placed, status)
                 self.store.close_unfilled_buy(live.unfilled, FILLED)
-                log.info(
-                    "trader: the buy at %s filled %s on KIS after its cancel failed",
-                    live.placed.price,
-                    row.filled,
-                )
+                log.info("trader: the buy at %s filled %s on KIS, read later", live.placed.price, filled)
             else:
                 trade = self._open
                 fee = amount * self.rules.fee_rate
-                new = row.filled - live.filled
+                new = filled - live.filled
                 fill = (at, (amount - live.amount) / new, new)
-                self.store.grow_position(trade.id, row.filled, row.average, fee, fill)
-                self._open = replace(trade, quantity=row.filled, entry_price=row.average, buy_fee=fee)
+                self.store.grow_position(trade.id, filled, average, fee, fill)
+                self._open = replace(trade, quantity=filled, entry_price=average, buy_fee=fee)
                 log.info("trader: %s more of the buy filled on KIS (trade %s)", new, trade.id)
             live = self._live_buy = replace(
-                live, filled=row.filled, amount=amount, decision=None, entry=None, unfilled=None
+                live, filled=filled, amount=amount, decision=None, entry=None, unfilled=None
             )
             self._dirty = True
-        if row.left > 0:
+        if left > 0:
             return
         if self._open is None:  # nothing filled: no trade
             assert live.decision is not None and live.unfilled is not None
             self.store.close_unfilled_buy(live.unfilled, CANCELLED)
             self.store.unfilled(live.decision, UNFILLED)
         else:
-            self.store.close_entry(
-                self._open.id, FILLED if row.filled >= live.placed.quantity else CANCELLED, at
-            )
+            self.store.close_entry(self._open.id, FILLED if filled >= live.placed.quantity else CANCELLED, at)
         self._live_buy = None
 
     def _buy_failed(
@@ -593,8 +889,11 @@ class MockTrader(PaperTrader):
         if self._selling is not None or self.status in SALE:
             return  # it sells at once instead
         price = tick_up(trade.target)
+        left = trade.quantity - self.store.sold(trade.id)  # placed again after a restart (#406): the rest
+        if left <= 0:
+            return
         try:
-            sent = await self._broker.sell(SYMBOL, trade.quantity - self.store.sold(trade.id), price)
+            sent = await self._broker.sell(SYMBOL, left, price)
         except BrokerError as e:
             self._failed("take_profit", ERROR, str(e), trade=trade.id)
             return
@@ -608,16 +907,14 @@ class MockTrader(PaperTrader):
                 trade.id,
             )
             return
-        placed = Placed(price, trade.quantity, sent.ref.branch, sent.ref.number)
+        placed = Placed(price, left, sent.ref.branch, sent.ref.number, self._clock())
         order = self.store.add_order(trade.id, SELL, TAKE_PROFIT, placed, self._clock())
         self._open = replace(trade, take_profit_order=order)
         day = kst_day(self._clock())
         self._resting = Resting(
-            order, price, trade.quantity, sent.ref.branch, sent.ref.number, 0, 0.0, TAKE_PROFIT, day
+            order, price, left, sent.ref.branch, sent.ref.number, 0, 0.0, TAKE_PROFIT, day
         )
-        log.info(
-            "trader: take-profit sell of %s resting at %s on KIS (trade %s)", trade.quantity, price, trade.id
-        )
+        log.info("trader: take-profit sell of %s resting at %s on KIS (trade %s)", left, price, trade.id)
 
     async def _follow_resting(self, trade_id: int) -> None:
         """The resting take-profit sell's row, read every ``Timing.follow`` seconds: its fills kept,
@@ -636,23 +933,19 @@ class MockTrader(PaperTrader):
                 continue
             if row is None or self._resting is not resting or self._work is not None:
                 continue
-            self._keep(resting, row)
+            resting = self._keep(resting, row)
             if row.left > 0:
                 continue
-            now = self._clock()
-            if row.filled >= trade.quantity:
-                self.store.close_order(resting.order_id, FILLED, now)
-                self._resting = None
+            self._close_sell(resting)
+            if self.store.sold(trade.id) >= trade.quantity:
                 self._finish(trade, TAKE_PROFIT)
             else:  # cancelled on KIS, not by the trader: the stop and the time barrier sell the rest
                 log.warning(
                     "trader: the take-profit sell of trade %s ended on KIS with %s of %s filled",
                     trade.id,
                     row.filled,
-                    trade.quantity,
+                    resting.quantity,
                 )
-                self.store.close_order(resting.order_id, CANCELLED, now)
-                self._resting = None
             return
 
     def _keep(self, resting: Resting, row: OrderRow) -> Resting:
@@ -688,7 +981,8 @@ class MockTrader(PaperTrader):
             row = await self._take_off(trade, still)
             if row is None:
                 return
-            if still.purpose == TAKE_PROFIT and row.filled >= trade.quantity:  # filled before its cancel
+            # Filled before its cancel, and every share sold by it.
+            if still.purpose == TAKE_PROFIT and row.filled >= still.quantity and self._all_sold(trade):
                 self._finish(trade, TAKE_PROFIT)
                 return
         if self.store.sold(trade.id) >= trade.quantity:
@@ -779,14 +1073,23 @@ class MockTrader(PaperTrader):
                 self._cancel_failed(cancel, trade.id)
                 self._retry_at = self._clock() + timedelta(seconds=self._timing.retry)
             return None
-        filled = row.filled >= resting.quantity
+        self._close_sell(resting)
+        return row
+
+    def _close_sell(self, resting: Resting) -> None:
+        """A sell with nothing left of it on KIS: closed in the ledger, filled whole or cancelled for
+        the rest (by the trader, on KIS, or with its day)."""
+        filled = resting.filled >= resting.quantity
         self.store.close_order(resting.order_id, FILLED if filled else CANCELLED, self._clock())
         if resting.purpose == TAKE_PROFIT:
             self._resting = None
-            self._open = replace(trade, take_profit_order=None)
+            if self._open is not None:
+                self._open = replace(self._open, take_profit_order=None)
         else:
             self._live = None
-        return row
+
+    def _all_sold(self, trade: OpenTrade) -> bool:
+        return self.store.sold(trade.id) >= trade.quantity
 
     async def _withdraw(self, day: date, ref: OrderRef) -> tuple[Sent | str, OrderRow | None]:
         """Order ``ref`` of ``day`` cancelled, and its row read until nothing is left of it or

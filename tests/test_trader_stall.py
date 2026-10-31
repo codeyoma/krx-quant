@@ -324,6 +324,7 @@ class StallDesk:
         store = TraderStore(self.state / DB_NAME)
         store.add_run(self.started_at, MOCK, {})
         clock = [self.started_at]
+        self.account.clock = lambda: clock[0]  # KIS's time and day are the test's
         try:
             async with kis.rest_session() as session:
                 broker = trader_broker(
@@ -346,6 +347,7 @@ class StallDesk:
                     timing=self.timing,
                     stall_after=STALL_AFTER,
                 )
+                await desk.start()  # the KIS account reconciled with the ledger first (#406), as ``run`` does
                 desk.select(Selection((pick(BARRIER),)), self.started_at)
                 reader = EngineReader(self.state / ENGINE_DB, SYMBOL)
                 reader.follow(desk.cells, self.started_at - timedelta(minutes=2))

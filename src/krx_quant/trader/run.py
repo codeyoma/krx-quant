@@ -27,7 +27,10 @@ In mock mode (#405, ``KRX_TRADER_MODE=mock``) the champion's book orders on KIS'
 (``mock.MockTrader``) through the trader's broker (``kis_orders.trader_broker``: the trader's own
 key, ``KRX_TRADER_KIS_*``). The trader does not start, and records no run, when that broker cannot
 be made: a key or the account missing, the collector's key, or servers that are not KIS's mock
-ones (``SettingsError``, exit 2). A trader stopping waits for the order in flight
+ones (``SettingsError``, exit 2). Before the loops begin it reconciles the KIS account with the
+ledger (#406, ``mock.MockTrader.start``): the ledger's orders read on KIS, the buys whose answer was
+lost looked up, what is outside the ledger paused on, the open trade sold past its time barrier or
+its take-profit placed again. A trader stopping waits for the order in flight
 (``mock.CLOSE_SECONDS``).
 
 The trading days come from the calendar the collector keeps in the state folder
@@ -168,6 +171,7 @@ async def _run(
                     timing=timing,
                 )
                 try:
+                    await book.start()  # in mock mode the KIS account reconciled with the ledger (#406)
                     await _trade(settings, trader, book, session, stop=stop, clock=clock, sleep=sleep)
                 finally:
                     await book.close()  # the order in flight on KIS, waited for (#405)

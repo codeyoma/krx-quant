@@ -95,6 +95,7 @@ class MockDesk:
         store = TraderStore(self.state / DB_NAME)
         store.add_run(self.started_at, MOCK, {})
         clock = [self.started_at]
+        self.account.clock = lambda: clock[0]
         try:
             async with kis.rest_session() as session:
                 broker = trader_broker(
@@ -117,6 +118,7 @@ class MockDesk:
                     timing=TIMING,
                     stall_after=None,  # the made-up quotes are sparse (``trader_doubles.Day``)
                 )
+                await desk.start()
                 desk.select(Selection((pick(BARRIER),)), self.started_at)
                 reader = EngineReader(self.state / ENGINE_DB, SYMBOL)
                 reader.follow(desk.cells, self.started_at - timedelta(minutes=2))
