@@ -504,3 +504,75 @@ def test_a_recording_that_cannot_be_read_leaves_its_day_s_signals_out(tmp_path: 
 
     assert done.recorded == (FIRST,)
     assert done.tallies[BREIMAN].missing[NO_RECORDING] == 1, "J's day"
+
+
+def record_gap(data: Path, start: datetime, end: datetime | None, feed: str = KRX_TRADE.tr_id) -> None:
+    """A gap of 005930's ``feed`` kept as the collector keeps it: under the day it started."""
+    recorder = ParquetRecorder(data, flush_rows=1_000, flush_seconds=3600)
+    row = {"feed": feed, "symbol": SYMBOL, "start": start, "end": end, "reason": "disconnected: test"}
+    recorder.record("gaps", start.astimezone(KST).date(), feed, SYMBOL, row, GAP_SCHEMA)
+    recorder.close()
+
+
+def measured_with(tmp_path: Path, *extra: tuple[str, int]) -> passive.Measurement:
+    """``measured``, with ``extra`` KRX trades of the next day (time, price) recorded first."""
+    write_predictions(tmp_path)
+    record(tmp_path / "data")
+    recorder = ParquetRecorder(tmp_path / "data", flush_rows=1_000, flush_seconds=3600)
+    for hms, price in extra:
+        at = moment(SECOND, hms)
+        row = {"symbol": SYMBOL, "event_time": at, "received_at": at.astimezone(UTC), "venue": "KRX"}
+        recorder.record("events", SECOND, KRX_TRADE.tr_id, SYMBOL, row | {"price": price}, KRX_TRADE.schema)
+    recorder.close()
+    return measure(
+        BODY,
+        tmp_path / ENGINE_DB,
+        tmp_path / TRADER_DB,
+        tmp_path / "data",
+        CALENDAR.session,
+        fee_rate=FEE,
+        target_version=3,
+        threshold=0.6,
+    )
+
+
+def test_a_gap_that_started_the_evening_before_leaves_its_signals_out(tmp_path: Path) -> None:
+    """KRX's trades of 005930 gone from 20:00 the day before to 10:00:20, in J's window (its decision
+    10:00:02): J is missing data, not a passive buy that did not fill. The day before is measured as
+    before: the gap began after its signals."""
+    record_gap(tmp_path / "data", moment(FIRST, "20:00:00"), moment(SECOND, "10:00:20"))
+
+    t = measured_with(tmp_path).tallies[BREIMAN]
+
+    assert t.missing == {GAP: 2, NO_QUOTE: 1}, "E's, and now J's"
+    assert (t.measured, t.passive[CONSERVATIVE].unfilled, t.passive[OPTIMISTIC].unfilled) == (4, 1, 0)
+
+
+def test_an_open_gap_lasts_until_its_feed_delivers_again(tmp_path: Path) -> None:
+    """A gap from 20:00 the day before with no end (its collector stopped with it open): KRX's
+    trades of the next day come back at 10:00:05, in J's window, so J is missing data."""
+    record_gap(tmp_path / "data", moment(FIRST, "20:00:00"), None)
+
+    t = measured_with(tmp_path).tallies[BREIMAN]
+
+    assert t.missing == {GAP: 2, NO_QUOTE: 1}
+    assert t.measured == 4
+
+
+def test_an_open_gap_over_before_the_session_leaves_nothing_out(tmp_path: Path) -> None:
+    """The same gap, KRX's trades back at 08:59:00 the next day: J is measured."""
+    record_gap(tmp_path / "data", moment(FIRST, "20:00:00"), None)
+
+    t = measured_with(tmp_path, ("08:59:00", 70_100)).tallies[BREIMAN]
+
+    assert t.missing == {GAP: 1, NO_QUOTE: 1}
+    assert t.measured == 5 and t.passive[OPTIMISTIC].unfilled == 1, "J ran away, as before"
+
+
+def test_a_gap_older_than_the_lookback_is_not_read(tmp_path: Path) -> None:
+    """Gaps are read from ``GAP_LOOKBACK`` days before a measured day: one that began earlier would
+    have been closed by a restart, and is not looked for."""
+    long_ago = moment(FIRST, "10:00:00") - timedelta(days=passive.GAP_LOOKBACK + 1)  # before both
+    record_gap(tmp_path / "data", long_ago, moment(SECOND, "10:00:20"))
+
+    assert measured_with(tmp_path).tallies[BREIMAN].missing == {GAP: 1, NO_QUOTE: 1}
