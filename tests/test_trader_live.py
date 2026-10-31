@@ -599,7 +599,8 @@ async def test_the_live_mode_s_answer_changing_at_a_pick_stops_the_trader_to_sta
 ) -> None:
     """Started at 08:00 without the gate, it runs as paper; the gate and the checks pass before the
     08:30 pick: at that pick, holding nothing, it says so and stops (``SWITCH``), for Docker to start
-    it again in live mode."""
+    it again in live mode. No prediction is served: one of 10:00 read at 08:00 would make the book wait
+    to buy, which nothing fills before the market, and the trader would wait for it (the race CI hit)."""
     fake, account = kis_live
     state = tmp_path / "state"
 
@@ -612,7 +613,7 @@ async def test_the_live_mode_s_answer_changing_at_a_pick_stops_the_trader_to_sta
     keep(state, at("2026-09-15 22:31:00"), policy_cell(BARRIER, 0.6))
     async with telegram(200) as (url, sent):
         returned = await run_live(
-            state, fake, account, sent, url, act=act, start="08:00:00", fast=True, ends=True
+            state, fake, account, sent, url, act=act, start="08:00:00", fast=True, ends=True, predict=False
         )
         await until(lambda: any("실전 관문과 실행 점검을 모두 넘었습니다" in t for t in sent))
 
