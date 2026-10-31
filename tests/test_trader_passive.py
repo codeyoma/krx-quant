@@ -480,3 +480,27 @@ def test_the_job_runs_on_a_trading_night_until_a_run_measures() -> None:
 def test_the_job_runs_after_the_trader_s_night_and_before_the_simulations() -> None:
     first: Any = next(i for i, j in enumerate(JOBS) if j.name.startswith(("prevalidate-", "simulate-")))
     assert JOBS.index(TRADER_REPORT) < JOBS.index(PASSIVE_ENTRY) < first
+
+
+def test_a_recording_that_cannot_be_read_leaves_its_day_s_signals_out(tmp_path: Path) -> None:
+    write_predictions(tmp_path)
+    record(tmp_path / "data")
+    partition = (
+        tmp_path / "data" / "events" / f"date={SECOND}" / f"feed={KRX_TRADE.tr_id}" / f"symbol={SYMBOL}"
+    )
+    for part in partition.glob("*.parquet"):
+        part.write_bytes(b"not parquet")
+
+    done = measure(
+        BODY,
+        tmp_path / ENGINE_DB,
+        tmp_path / TRADER_DB,
+        tmp_path / "data",
+        CALENDAR.session,
+        fee_rate=FEE,
+        target_version=3,
+        threshold=0.6,
+    )
+
+    assert done.recorded == (FIRST,)
+    assert done.tallies[BREIMAN].missing[NO_RECORDING] == 1, "J's day"

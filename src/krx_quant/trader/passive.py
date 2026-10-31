@@ -39,10 +39,10 @@ the integrated book's and the integrated trades' best quotes, the trader's strea
 - **A hit** is the stored answer's class the rise, as the cost map counts the hit rate.
 
 **Missing data**, counted apart and left out of both entries: a day without its recorded book or
-KRX trades (``NO_RECORDING``); a recorded gap (the ``gaps`` layer) of 005930's book, integrated or
-KRX trades in the signal's window, from the decision to the time barrier (``GAP``); no quote within
-``Rules.quote_wait`` after the decision (``NO_QUOTE``); no quote to sell on at the time barrier
-(``NO_EXIT_QUOTE``).
+KRX trades, or whose files of them cannot be read (``NO_RECORDING``); a recorded gap (the ``gaps``
+layer) of 005930's book, integrated or KRX trades in the signal's window, from the decision to the
+time barrier (``GAP``); no quote within ``Rules.quote_wait`` after the decision (``NO_QUOTE``); no
+quote to sell on at the time barrier (``NO_EXIT_QUOTE``).
 
 **The report**, for all the signals, each kind and each cell: the counts (read, kept out by the
 entry rules, missing, ``target_reached``, measured); the market entry's hit rate and net per trade;
@@ -274,7 +274,16 @@ def sale_of(
 
 
 def read_day(data_dir: Path, day: date) -> Recording | None:
-    """005930's recording of ``day`` (module doc); None without its book or KRX trades."""
+    """005930's recording of ``day`` (module doc); None without its book or KRX trades, or when a
+    file of them cannot be read (logged: its signals are counted ``NO_RECORDING``)."""
+    try:
+        return _read_day(data_dir, day)
+    except (OSError, pa.ArrowException) as e:
+        log.warning("passive entry: cannot read the recording of %s (%s): its signals are left out", day, e)
+        return None
+
+
+def _read_day(data_dir: Path, day: date) -> Recording | None:
     events = data_dir / "events" / f"date={day.isoformat()}"
     if not partition_files(events / f"feed={BOOK.tr_id}" / f"symbol={SYMBOL}"):
         return None

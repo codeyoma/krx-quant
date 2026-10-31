@@ -1744,9 +1744,10 @@ LIVE_PROBE = Job(
 # and KRX trades of 005930 a day at a time; it prints the fill rates under two fill assumptions, the
 # hit rates of the filled and the unfilled beside the market entry's, the net in ticks per filled
 # trade and per signal, and the counts, by cell and kind. It changes nothing: the trader's ordering
-# stays. No price, only ticks, ratios, seconds and counts, so it can go on the public issue. A minute
-# or two; the quarter hour is a bound, kept short as it runs before the simulations and
-# pre-validations, which must start by 00:30.
+# stays. No price, only ticks, ratios, seconds and counts, so it can go on the public issue. Seconds
+# (the cost map waited for two minutes at most; a server-sized day, 570,000 quotes and 300,000 KRX
+# trades, read in 0.05 s on a Mac); the quarter hour is a bound, kept short as it runs before the
+# simulations and pre-validations, which must start by 00:30.
 PASSIVE_ENTRY_ISSUE = 432
 
 
