@@ -329,25 +329,9 @@ def read_cell(
     """``pick``'s stored predictions of ``days`` and their answers, as the cost map counts them, read
     a row at a time (module doc "From what")."""
     read = CellRead()
-    if not days:
-        return read
-    kind = traded_kind(pick.kind)
-    rules = Rules(threshold=0.0, fee_rate=fee_rate)  # every rise: θ is the simulation's
-    rows = _direction_rows(db, pick, days) if kind.name == DIRECTION else _kind_rows(db, pick, days)
-    # An algorithm's predictions by models trained on the answers they are scored on, as the
-    # statistics keep them (``stats.on_target``); the direction's only from touch target 2 on.
-    target = kind.answer_version if kind.name != DIRECTION else target_version
-    # Every one of a baseline's and a consensus's.
-    every = pick.role != "top" or (kind.name == DIRECTION and target_version < 2)
-    for row, signal, path, label in rows:
-        read.counts["read"] += 1
-        if not every and row["model_target"] != target:
-            read.counts["off_target"] += 1
-            continue
-        planned = plan(signal, rules, sessions(kst_day(signal.bar_close)), signal.displayed_at, windows)
-        if not isinstance(planned, Plan):
-            read.counts[planned] += 1
-            continue
+    for signal, planned, path, label in rises(
+        db, pick.cell, pick.role, days, sessions, windows, target_version, read.counts
+    ):
         candidate = _candidate(signal, planned, path, label, fee_rate)
         if candidate is None:
             read.counts["unpriced"] += 1
@@ -357,10 +341,47 @@ def read_cell(
     return read
 
 
+def rises(
+    db: sqlite3.Connection,
+    cell: Cell,
+    role: str,
+    days: Sequence[date],
+    sessions: Callable[[date], Session | None],
+    windows: Sequence[Window],
+    target_version: int,
+    counts: Counter[str],
+) -> Iterator[tuple[Signal, Plan, Mapping[str, Any], str]]:
+    """``cell``'s stored predictions of ``days`` that ``paper.plan`` lets buy at some θ (its rises,
+    the entry rules met), each with its plan, its answer's path and its answer's class; read a row
+    at a time, as the cost map counts them (module doc "From what"). Each row read is counted in
+    ``counts`` (``read``), and each kept out by why: ``off_target``, ``paper.plan``'s reasons. The
+    passive entry's measurement (#432, ``passive.py``) reads its signals so too."""
+    if not days:
+        return
+    kind = traded_kind(cell.kind)
+    rules = Rules(threshold=0.0)  # every rise: θ is the caller's
+    rows = _direction_rows(db, cell, days) if kind.name == DIRECTION else _kind_rows(db, cell, days)
+    # An algorithm's predictions by models trained on the answers they are scored on, as the
+    # statistics keep them (``stats.on_target``); the direction's only from touch target 2 on.
+    target = kind.answer_version if kind.name != DIRECTION else target_version
+    # Every one of a baseline's and a consensus's.
+    every = role != "top" or (kind.name == DIRECTION and target_version < 2)
+    for row, signal, path, label in rows:
+        counts["read"] += 1
+        if not every and row["model_target"] != target:
+            counts["off_target"] += 1
+            continue
+        planned = plan(signal, rules, sessions(kst_day(signal.bar_close)), signal.displayed_at, windows)
+        if not isinstance(planned, Plan):
+            counts[planned] += 1
+            continue
+        yield signal, planned, path, label
+
+
 Row = tuple[sqlite3.Row, Signal, Mapping[str, Any], str]
 
 
-def _direction_rows(db: sqlite3.Connection, pick: Pick, days: Sequence[date]) -> Iterator[Row]:
+def _direction_rows(db: sqlite3.Connection, cell: Cell, days: Sequence[date]) -> Iterator[Row]:
     on, params = _on_days(days)
     cursor = db.execute(
         "SELECT p.id, p.bar_close, p.displayed_at, p.status, p.p_up, p.p_flat, p.p_down, o.mid_close,"
@@ -370,7 +391,7 @@ def _direction_rows(db: sqlite3.Connection, pick: Pick, days: Sequence[date]) ->
         f" LEFT JOIN blocks b ON b.prediction_id = p.id {TOUCH_JOIN}"
         " LEFT JOIN model_targets m ON m.algorithm = p.algorithm AND m.version = p.model_version"
         f" WHERE p.algorithm = ? AND {on} AND {SCORED} AND o.special = 0 ORDER BY p.bar_close, p.id",
-        (pick.predictor, *params),
+        (cell.predictor, *params),
     )
     kind = traded_kind(DIRECTION)
     for r in cursor:
@@ -378,7 +399,7 @@ def _direction_rows(db: sqlite3.Connection, pick: Pick, days: Sequence[date]) ->
         signal = Signal(
             prediction_id=r["id"],
             kind=DIRECTION,
-            predictor=pick.predictor,
+            predictor=cell.predictor,
             symbol=SYMBOL,
             bar_close=datetime.fromisoformat(r["bar_close"]),
             displayed_at=datetime.fromisoformat(r["displayed_at"]),
@@ -394,8 +415,8 @@ def _direction_rows(db: sqlite3.Connection, pick: Pick, days: Sequence[date]) ->
         yield r, signal, json.loads(r["path"]), r["label"]
 
 
-def _kind_rows(db: sqlite3.Connection, pick: Pick, days: Sequence[date]) -> Iterator[Row]:
-    kind = traded_kind(pick.kind)
+def _kind_rows(db: sqlite3.Connection, cell: Cell, days: Sequence[date]) -> Iterator[Row]:
+    kind = traded_kind(cell.kind)
     on, params = _on_days(days)
     cursor = db.execute(
         "SELECT p.id, p.bar_close, p.displayed_at, p.status, p.output, p.anchor, p.tick, p.width_ticks,"
@@ -404,7 +425,7 @@ def _kind_rows(db: sqlite3.Connection, pick: Pick, days: Sequence[date]) -> Iter
         " LEFT JOIN model_targets m ON m.algorithm = p.algorithm AND m.version = p.model_version"
         f" WHERE p.kind = ? AND p.algorithm = ? AND {on} AND {KIND_SCORED} AND a.special = 0"
         " ORDER BY p.bar_close, p.id",
-        (kind.answer_version, kind.name, pick.predictor, *params),
+        (kind.answer_version, kind.name, cell.predictor, *params),
     )
     rise = kind.index(kind.sides[0]) if kind.sides else 0
     for r in cursor:
@@ -416,7 +437,7 @@ def _kind_rows(db: sqlite3.Connection, pick: Pick, days: Sequence[date]) -> Iter
         signal = Signal(
             prediction_id=r["id"],
             kind=kind.name,
-            predictor=pick.predictor,
+            predictor=cell.predictor,
             symbol=SYMBOL,
             bar_close=datetime.fromisoformat(r["bar_close"]),
             displayed_at=datetime.fromisoformat(r["displayed_at"]),

@@ -68,7 +68,7 @@
 | `engine.py`, `market_view.py`, `baselines.py`, `climate.py`, `features.py`, `algorithms/`, `consensus.py` | 예측 엔진, 엔진과 학습이 같이 보는 1분봉·기준가, 기준 예측(도달 정답의 시간대 기후 표 포함, #169), 피처 저장소, 알고리즘 규약과 알고리즘, 합의 |
 | `predictions.py`, `stats.py`, `lifecycle.py`, `api.py`, `stream.py` | SQLite 저장, 통계와 순위표, 알고리즘 상태, 엔진 API와 WebSocket 스트림(형식은 `schemas/engine-api-v1.json`) |
 | `signals.py` | 텔레그램 신호 알림(선택) |
-| `trader/` | 자동 매매(#393, 14장)의 trader 프로세스(`krx-quant trade`, compose 서비스 `trader`): 비용 지도로 칸 고르기·순위·Kelly 비율(`selection.py`, #395), 정책 버전과 챔피언(`policy.py`, #399), 밤 정책 맞추기(`refit.py`, `krx-quant refit-policy`, #399), 밤 리포트(`report.py`, `krx-quant trader-report`와 `refit-policy --report`, #402), 챔피언과 도전 정책의 장부(`desk.py`, #400), 도전 정책 판정·승격과 실전 관문(`promotion.py`, #400), 칸의 예측과 특수 상황 창 읽기(`cells.py`, 엔진 DB를 읽기만), 수집기가 내보내는 최우선 호가 스트림과 trader의 받기(`quotes.py`), 삼중 장벽 모의 매매 규칙과 비용(`paper.py`), 손실 한도와 정지·재개·다시 켜기(`limits.py`, #396), trader 저장소(`store.py`, `state/trader.sqlite3`), 차트에 표시할 매수·매도 읽기(`marks.py`, #398), trader 설정(`settings.py`), 프로세스(`run.py`), KIS 모의 주문 장부(`mock.py`, #405: 챔피언의 주문을 `kis_orders.Broker`로 KIS 모의투자 서버에 낸다), mock 날의 장부와 KIS 체결 조회 대조(`mock_check.py`, `krx-quant check-mock-trades`, #405), mock 시작의 계좌와 장부 견주기(`reconcile.py`, #406), live 모드의 실전 관문·실행 점검·첫 단계 상한(`live.py`, #408), KIS 장부와 그림자의 체결 차이(`gap.py`, #405). 주문 코드(TR ID, 주문 경로)는 없다: `kis_orders.py`를 부른다 |
+| `trader/` | 자동 매매(#393, 14장)의 trader 프로세스(`krx-quant trade`, compose 서비스 `trader`): 비용 지도로 칸 고르기·순위·Kelly 비율(`selection.py`, #395), 정책 버전과 챔피언(`policy.py`, #399), 밤 정책 맞추기(`refit.py`, `krx-quant refit-policy`, #399), 밤 리포트(`report.py`, `krx-quant trader-report`와 `refit-policy --report`, #402), 챔피언과 도전 정책의 장부(`desk.py`, #400), 도전 정책 판정·승격과 실전 관문(`promotion.py`, #400), 칸의 예측과 특수 상황 창 읽기(`cells.py`, 엔진 DB를 읽기만), 수집기가 내보내는 최우선 호가 스트림과 trader의 받기(`quotes.py`), 삼중 장벽 모의 매매 규칙과 비용(`paper.py`), 손실 한도와 정지·재개·다시 켜기(`limits.py`, #396), trader 저장소(`store.py`, `state/trader.sqlite3`), 차트에 표시할 매수·매도 읽기(`marks.py`, #398), trader 설정(`settings.py`), 프로세스(`run.py`), KIS 모의 주문 장부(`mock.py`, #405: 챔피언의 주문을 `kis_orders.Broker`로 KIS 모의투자 서버에 낸다), mock 날의 장부와 KIS 체결 조회 대조(`mock_check.py`, `krx-quant check-mock-trades`, #405), mock 시작의 계좌와 장부 견주기(`reconcile.py`, #406), live 모드의 실전 관문·실행 점검·첫 단계 상한(`live.py`, #408), KIS 장부와 그림자의 체결 차이(`gap.py`, #405), 대기 매수(매수 1호가)를 녹화로 재는 측정(`passive.py`, `krx-quant measure-passive-entry`, #432). 주문 코드(TR ID, 주문 경로)는 없다: `kis_orders.py`를 부른다 |
 | `training.py`, `nightly.py`, `sample_store.py`, `model_shelf.py`, `swap.py`, `footprint.py`, `training_nights.py` | 학습 샘플, 밤 학습, 날마다의 표본 저장소(#370), 서버의 모델 이력, 08:00 교체와 모델 감시, Spot 학습 결과 기다리기, 밤 학습 단계별 시간과 최대 메모리(#355)와 사전 검증·수습 시뮬레이션이 재생한 날마다의 메모리(#383), 밤 학습의 결과와 적용되지 않은 밤(#355) |
 | `cost_guard.py` | 월 AWS 비용 감시: 50%·80% 알림, 상한에서 Spot 학습 끄기(#23) |
 | `disk_watch.py` | 디스크 감시: 데이터·상태 폴더가 있는 디스크의 여유가 기준(`KRX_DISK_MIN_FREE_PERCENT`)보다 작아지면 한 번 알리고, 돌아오면 `[복구]`(#379) |
@@ -1260,6 +1260,14 @@ v1에서는 쓰지 않는다. 조사 결과는 [paid-data.md](paid-data.md)에 �
 - 비용은 실제와 같다: 수수료(`KRX_FEE_PERCENT`)를 산 금액과 판 금액에 각각, 매도세(`pricing.SELL_TAX`)를 판 금액에. 순손익 = (매도가 − 매수가) × 수량 − 비용(원). 장벽 손익·닿음 손익(`barriers.barrier_profit`, `stats.touch_profit`)은 기준가로 잰 주당 비용을 틱으로 빼지만, 매매는 체결 가격으로 낸다. 손계산 예는 `tests/test_trader_paper.py`에 있다: 70,100원에 14주를 사서 목표가 70,250원(k = 2)에 팔면 2,100원을 벌고 비용 2,261.735원을 내서 161.735원을 잃는다. 매도 1호가로 사면 k틱 − 스프레드 절반만 벌기 때문이다(6장 "닿음 손익").
 - trader가 시작하기 전에 받은 호가는 서 있던 호가로만 쓰고 체결을 일으키지 않는다. 다시 시작한 trader는 열린 매매를 이어서 위 규칙대로 판다. 사려고 기다리던 결정은 버린다(`restarted`). 같은 예측을 같은 때 읽고 같은 호가를 받으면 같은 매매가 나온다(`tests/test_trader_paper.py`).
 
+**대기 매수: 측정 중 (#432, PR #434, `trader/passive.py`).** trader는 매도 1호가에 산다(위 "모의 체결". mock과 live도 매도 1호가의 지정가). 그래서 칸을 비용 지도의 시장가 왕복으로 판정하고, 지금은 모든 칸이 `fail`이다. 매수 1호가에 걸어 두는 대기 매수는 1틱이 싸다. 하지만 체결되지 않을 수 있고, 가격이 불리하게 움직일 때 잘 체결된다(역선택). 1틱이 싸다는 것만으로 이득이라고 볼 수 없어서, 바꾸기 전에 녹화로 잰다. trader의 주문 방식은 그대로다. 바꿀지는 그 숫자를 보고 사용자가 정하고, 대기 진입을 넣는 것은 별도 티켓이다.
+
+- 신호: 그 밤 비용 지도의 칸 모두(판정과 상관없이 예측자가 있는 칸)의 그 종류의 날(최근 20일)에서, trader가 샀을 오름 예측이다. 밤 정책 맞추기가 읽는 대로 읽는다(`refit.rises`). `paper.plan`이 그 칸의 θ로 사게 한 것만 센다. θ는 챔피언 정책의 칸 값이고, 정책에 없는 칸은 `KRX_TRADER_THRESHOLD`다. 신호는 하나씩 따로 잰다. 포지션 하나와 칸 순위는 두지 않는다.
+- 진입: 결정(예측이 표시된 때) 뒤 처음 받은 호가에서 둘 다 시작한다. 호가는 trader의 스트림과 같다(통합 호가와 통합 체결의 1호가). 시장가 진입은 그 매도 1호가에 산다. 대기 진입은 그 매수 1호가에 걸고 시간 장벽에 취소한다. 체결은 KRX 체결(`H0STCNT0`)로 본다(trader는 KRX에만 주문한다). 보수적 가정은 그 가격 아래로 체결이 나와야, 낙관적 가정은 그 가격 이하로 나오면 체결로 본다. 첫 호가가 맞물리거나 뒤집혔으면(매수 1호가 ≥ 매도 1호가) 대기 매수도 그 매도 1호가에 바로 산 것으로 본다.
+- 청산: 둘 다 위 모의 체결 규칙대로다. 손익은 주당 순손익(수수료 양쪽, 매도세)을 기준가의 틱으로 센다.
+- 데이터가 빠진 신호는 따로 세고 두 진입 모두에서 뺀다: 그날 녹화가 없음, 신호의 창에 결측 구간이 있음(그 전 10일에 시작해 이어진 구간도), 결정 뒤 5초 안에 호가가 없음, 시간 장벽에 팔 호가가 없음.
+- 출력: 전체, 종류마다, 칸마다 낸다. 표본 수, 시장가의 맞힘률과 순손익, 가정마다 체결률, 체결된 것과 미체결의 맞힘률, 체결당·신호당(미체결 0) 순손익, 같은 신호의 시장가 순손익, 대기 − 시장가(신호당, 날 단위 95% 구간)다. 가격은 없다. 예약 작업 `passive-entry-432`가 배포 뒤 첫 거래일 밤에 #432에 남긴다([operations.md](operations.md#대기-매수-측정-432)).
+
 **정책 (#399, `trader/policy.py`).** 정책은 버전이 있는 값 묶음이다(spec #393 "정책과 자기 개선").
 
 - 값: 매매하는 칸과 그 순서(첫째가 순위 1), 칸마다 문턱 θ와 Kelly 비율 λ. 버전마다 만든 시각, 만든 이유, 비용 지도가 통과시켰지만 넣지 않은 칸과 그 이유(`left_out`), 무엇으로 맞췄는지(`fit`: 비용 지도의 `as_of`, 격자, 모의 결과, 커밋, 걸린 시간, 최대 RSS)를 남긴다.
@@ -1492,7 +1500,7 @@ v1에서는 쓰지 않는다. 조사 결과는 [paid-data.md](paid-data.md)에 �
   > **바뀜** (2026-10-31, #425): "첫 실전 날의 주문이 그것을 잰다"뿐이었다 → 조회 프로브가 주문 전에 재고, 체결의 필드는 첫 실전 날의 체결 확인이 그날을 세기 전에 잰다. 이유: CODING_STANDARDS "External data is probed before it is used"(Codex 리뷰).
 - 테스트(`tests/test_trader_live.py`, `tests/test_trader_promotion.py`): 가짜 KIS의 실전 계좌(`FakeAccount(live=True)`: 실전 TR ID, 코드와 메시지는 지어낸 것)로 관문 전 live(KIS를 부르지 않음, 모의 매매 14주, 알림), 관문과 점검 뒤 live(실전 TR ID로만 주문, 첫 단계 상한으로 3주, 그림자 14주, 평가금 알림), 주문 가능 현금(15만 원이면 2주), 고르기에서 판단이 바뀌어 스스로 멈춤, 점검마다 잠김(견주지 못한 날, 다른 날, 주문 실패, 계좌 맞추기 멈춤, 끝나지 않은 주문, 종가 뒤 청산, 체결 차이, 날 수), 1틱 더 불리한 관문, 첫 단계의 상한과 올림, 체결 차이 위반과 주문 실패 위반, 재개 뒤 다시 세기, 실전 키의 분리를 본다. 관문의 우연한 통과는 흉내로 본다(위 "실전 관문").
 
-**하지 않는 것(지금).** 실전 서버의 응답을 재는 프로브(에이전트는 실전 주문을 내지 않는다. 첫 실전 날의 주문이 잰다: 위 "실전 (#408)"의 ⚠), 실시간 체결 통보로 체결 받기(모의 서버의 23칸, #403).
+**하지 않는 것(지금).** 실전 서버의 응답을 재는 프로브(에이전트는 실전 주문을 내지 않는다. 첫 실전 날의 주문이 잰다: 위 "실전 (#408)"의 ⚠), 실시간 체결 통보로 체결 받기(모의 서버의 23칸, #403), 매수 1호가에 걸어 두는 대기 매수(위 "대기 매수: 측정 중", #432가 녹화로 잰다).
 
 > **바뀜** (2026-10-31, #425): "실전 주문(`live`: `KRX_TRADER_MODE=live`면 trader가 시작하지 않는다, #408), 관문을 넘은 챔피언만 실전 주문을 내는 것(#408)은 뒤 티켓이다" → 들어왔다(위 "실전 (#408)"). 이유: #408.
 

@@ -93,6 +93,7 @@ from krx_quant.trader import LIVE
 from krx_quant.trader.limits import CONTROL_SECONDS
 from krx_quant.trader.limits import ask as ask_trader
 from krx_quant.trader.mock_check import check_mock_trades
+from krx_quant.trader.passive import run_passive_entry
 from krx_quant.trader.promotion import mode_at
 from krx_quant.trader.refit import run_refit
 from krx_quant.trader.report import run_night, run_report
@@ -170,6 +171,13 @@ async def _refit_policy(engine_url: str | None, report: bool) -> int:
     if report:
         return await run_night(settings, trader, datetime.now(KST), engine_url)
     return await run_refit(settings, trader, datetime.now(KST), engine_url)
+
+
+async def _measure_passive_entry(engine_url: str | None) -> int:
+    """A passive entry at the best bid against the trader's marketable one, on the recordings (#432),
+    read-only: the scheduled job ``passive-entry-432``'s, in the engine's container."""
+    settings = Settings.from_env(require_kis=False)
+    return await run_passive_entry(settings, TraderSettings.from_env(), engine_url)
 
 
 async def _check_mock_trades(day: date | None) -> int:
@@ -766,6 +774,17 @@ def main(argv: list[str] | None = None) -> int:
         help="then print the day's trader report (#402) above the re-fit's output: the scheduled job"
         " trader-report's",
     )
+    passive_cmd = sub.add_parser(
+        "measure-passive-entry",
+        help="measure on the recorded quotes and KRX trades how a buy resting at the best bid would have"
+        " done against the trader's marketable entry (#432), on the signals of tonight's cost map's cells"
+        " and days: fill rates under two fill assumptions, hit rates, net ticks; read-only, no price",
+    )
+    passive_cmd.add_argument(
+        "--engine-url",
+        help="the Engine API the cost map is read from (default KRX_TRADER_ENGINE_URL, which compose sets"
+        " to the engine service's, http://engine:8080; else http://127.0.0.1:8080)",
+    )
     report_cmd = sub.add_parser(
         "trader-report",
         help="print the trader's report of a trading day (#402), read-only from state/trader.sqlite3: its"
@@ -1108,6 +1127,8 @@ def _command(args: argparse.Namespace) -> int:
         asyncio.run(_trade())
     elif args.command == "refit-policy":
         return asyncio.run(_refit_policy(args.engine_url, args.report))
+    elif args.command == "measure-passive-entry":
+        return asyncio.run(_measure_passive_entry(args.engine_url))
     elif args.command == "trader-report":
         return _trader_report(args.day)
     elif args.command == "check-mock-trades":
