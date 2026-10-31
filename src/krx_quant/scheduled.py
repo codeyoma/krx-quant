@@ -1040,6 +1040,43 @@ SIGNAL_REVIEW = Job(
     ),
 )
 
+# ②′ The signal-threshold review again (#206): its first run (the night of 2026-10-24) had one day
+# on which newton and turing were both official members, so the thresholds were kept and the review
+# put off until more trading days were recorded (the #206 comment of 2026-10-25). Once, on the night
+# of the first trading day on or after ``SIGNAL_REVIEW_AGAIN_FROM`` with an official algorithm, the
+# same command reads the days since; its section 5 (the consensus had the official algorithms been
+# members all along) then covers them. Before the pre-validations, as the first run.
+SIGNAL_REVIEW_AGAIN_FROM = date(2026, 11, 2)
+
+
+def _signal_review_again(night: Night) -> bool:
+    """Once, on the first trading night from ``SIGNAL_REVIEW_AGAIN_FROM`` with an official algorithm."""
+    return (
+        night.trading_day
+        and night.day >= SIGNAL_REVIEW_AGAIN_FROM
+        and night.facts.official > 0
+        and not night.ran
+    )
+
+
+SIGNAL_REVIEW_AGAIN = Job(
+    name="signal-review-206-1102",
+    due=_signal_review_again,
+    command=("signal-review", "--days", "20"),
+    timeout=timedelta(hours=1),
+    targets=(
+        Target(
+            SIGNAL_REVIEW_ISSUE,
+            note=(
+                "신호 기준 검토의 두 번째 실행이다. 첫 실행(2026-10-24 밤)은 정식 합의가 있는 날이 "
+                "하루뿐이라 기준을 그대로 두고 2026-11-02쯤 다시 보기로 했다. 에이전트가 이 출력으로 "
+                "`KRX_SIGNAL_MIN_PROBABILITY`, `KRX_SIGNAL_MIN_AGREE`의 추천값을 낸다. 사용자가 정하면 "
+                "서버 `.env`의 두 값을 바꾸거나 기본값을 PR로 바꾼다."
+            ),
+        ),
+    ),
+)
+
 # ③ The daily supply sources (#226): where KIS, and the Toss Open API when its client is set
 # (#235), give the chart's daily supply indicators, asked once, on the first night after the
 # deploy that brings the job (trading or not: the probe asks for the latest trading day and
@@ -2164,6 +2201,7 @@ JOBS: tuple[Job, ...] = (
     TRADER_REPORT,
     MOCK_CHECK,
     KIS_ORDER_PROBE,
+    SIGNAL_REVIEW_AGAIN,
     LIVE_PROBE,
     *daily_prevalidation_jobs(
         [a.name for a in DAILY_ALGORITHMS],
