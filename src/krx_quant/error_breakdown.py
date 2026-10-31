@@ -100,6 +100,8 @@ def error_breakdown(
     db: Path, settings: Settings, until: date, days: int = DEFAULT_DAYS, algorithm: str = DEFAULT_ALGORITHM
 ) -> str:
     """The breakdown of ``algorithm`` over the latest ``days`` days with predictions up to ``until``."""
+    if algorithm == CLIMATE:  # its lift is over itself: none
+        return f"{algorithm} 오류 분석: 기준({CLIMATE}) 자신과는 견주지 않는다"
     with read_only(db) as conn:
         data = None if conn is None else read(conn, settings, until, days, algorithm)
     if data is None or not data.days:

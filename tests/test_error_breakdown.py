@@ -82,10 +82,6 @@ ROWS = [
 T_975_DF1 = 12.706204736  # Student's t, 97.5% quantile, one degree of freedom
 
 
-def on(day: date, hhmm: str) -> datetime:
-    return at(day, hhmm)
-
-
 def predict(
     store: PredictionStore,
     algorithm: str,
@@ -121,7 +117,7 @@ def hand_made(db: Path) -> None:
     store = PredictionStore(db)
     store.record_models([("turing", "v1", TARGET_VERSION), ("turing", "old", 2)])
     for day, hhmm, turing, climate, answer, spread, sigma in ROWS:
-        t = on(day, hhmm)
+        t = at(day, hhmm)
         predict(store, "turing", t, turing, answer)
         if climate is not None:
             predict(store, CLIMATE, t, climate, answer, version="baseline-climate-default")
@@ -134,7 +130,7 @@ def hand_made(db: Path) -> None:
             BARRIER.name, BARRIER.answer_version, [(SYMBOL, t, Answer("timeout", None, path), False)]
         )
     # Left out, as the leaderboard leaves them out: a special window, and a model of another target.
-    special, old = on(D2, "09:34"), on(D2, "09:35")
+    special, old = at(D2, "09:34"), at(D2, "09:35")
     predict(store, "turing", special, UP, DOWN, special=True)
     predict(store, CLIMATE, special, DOWN, DOWN, version="baseline-climate-default", special=True)
     predict(store, "turing", old, UP, DOWN, version="old")
@@ -274,6 +270,7 @@ def test_the_breakdown_reads_without_writing(db: Path, tmp_path: Path) -> None:
     assert sorted(p.name for p in tmp_path.iterdir()) == files  # no -wal or -shm made
     assert db.read_bytes() == stored
     assert error_breakdown(tmp_path / "none.sqlite3", SETTINGS, D2, 20) == "turing 오류 분석: 데이터 없음"
+    assert "견주지 않는다" in error_breakdown(db, SETTINGS, D2, 20, CLIMATE)  # no lift over itself
 
 
 # The scheduled job
