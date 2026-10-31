@@ -54,6 +54,8 @@ from krx_quant.scheduled import (
     OK,
     RUNNING,
     SIGNAL_REVIEW,
+    SIGNAL_REVIEW_AGAIN,
+    SIGNAL_REVIEW_AGAIN_FROM,
     STATE_FILE,
     STRUCTURE_CHECK,
     STRUCTURE_SUPPLY,
@@ -911,6 +913,26 @@ def test_the_signal_review_runs_once_on_the_first_night_with_an_official_algorit
     assert not SIGNAL_REVIEW.due(official(MONDAY, 2, ran))
     assert not SIGNAL_REVIEW.due(official(MONDAY, 2, replace(ran, outcome=FAILED, exit_code=1)))
     assert SIGNAL_REVIEW.due(official(MONDAY, 2, replace(ran, outcome=INTERRUPTED)))
+
+
+def test_the_signal_review_runs_again_once_on_the_first_trading_night_from_november_2() -> None:
+    assert SIGNAL_REVIEW_AGAIN.command == SIGNAL_REVIEW.command
+    assert [t.issue for t in SIGNAL_REVIEW_AGAIN.targets] == [206]
+    assert SIGNAL_REVIEW_AGAIN.name != SIGNAL_REVIEW.name  # its own record: the first run does not end it
+    jobs = list(JOBS)
+    first_prevalidation = next(i for i, j in enumerate(jobs) if j.command[0] == "prevalidate")
+    assert jobs.index(SIGNAL_REVIEW_AGAIN) < first_prevalidation  # before them, as the first run
+    monday = SIGNAL_REVIEW_AGAIN_FROM
+    friday, sunday = monday - timedelta(days=3), monday - timedelta(days=1)
+    tuesday = monday + timedelta(days=1)
+    assert not SIGNAL_REVIEW_AGAIN.due(official(friday, 2))  # before November 2
+    assert not SIGNAL_REVIEW_AGAIN.due(official(sunday, 2))
+    assert not SIGNAL_REVIEW_AGAIN.due(official(monday, 0))  # no official algorithm: no consensus to review
+    assert SIGNAL_REVIEW_AGAIN.due(official(monday, 2))
+    assert SIGNAL_REVIEW_AGAIN.due(official(tuesday, 1))  # a later trading night when Monday had none
+    ran = JobRecord(monday, OK, at(monday, "22:30"), COMMIT, 0, 30.0)
+    assert not SIGNAL_REVIEW_AGAIN.due(official(tuesday, 2, ran))
+    assert SIGNAL_REVIEW_AGAIN.due(official(tuesday, 2, replace(ran, outcome=INTERRUPTED)))
 
 
 def test_the_supply_probe_runs_once_on_the_first_night_trading_or_not() -> None:
