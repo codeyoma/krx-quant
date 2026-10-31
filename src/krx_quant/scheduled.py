@@ -56,6 +56,7 @@ from typing import Any, Protocol
 import aiohttp
 
 from krx_quant.algorithms import ALGORITHMS, DAILY_ALGORITHMS, KIND_ALGORITHMS, Algorithm, KindAlgorithm
+from krx_quant.climate_prior import REPORT as CLIMATE_PRIOR_REPORT
 from krx_quant.clock import SessionClock
 from krx_quant.config import JOBS_UNTIL, Settings
 from krx_quant.daily import DailyAlgorithm, DailyKind
@@ -2258,6 +2259,52 @@ def _report_of(algorithm: str) -> str:
     return report_path(Path(), algorithm).as_posix()
 
 
+# The climate prior experiment (#429): shannon's pre-validation was refused 5.5 points below the
+# climate baseline (2026-10-30, #204). ``climate-prior`` walks that pre-validation's folds over the
+# training samples, replaying nothing, and compares the climate alone, shannon as it is and shannon
+# with each symbol and slot's smoothed class frequencies as two inputs more, on the same bar closes
+# (``climate_prior.py``). Once, on the first night with ``MIN_DAYS`` recorded days (trading or not:
+# it reads finished days); after a failure (its time limit, say), again once a deploy brings other
+# code. It reads the days the nights stored and fits shannon's regression twice a day: under a
+# minute or two a day, as a pre-validation's training phases without their replays, its memory
+# logged a day (#383). The three hours are a bound, with room for the burst CPU running out. Last: it
+# holds back no simulation nor pre-validation, and a night one of them leaves too short for it, it
+# runs the next. Its output holds counts, rates, lifts, weights and dates, no price. Whether shannon
+# takes the prior is decided from it in another PR.
+CLIMATE_PRIOR_ISSUE = 429
+
+
+def _until_a_run_ends_ok(night: Night) -> bool:
+    """On the first night with at least ``MIN_DAYS`` recorded days, trading or not, once; after a
+    failed run, again on other code."""
+    if night.facts.recorded_days < MIN_DAYS:
+        return False
+    record = night.record
+    return not night.ran or (
+        record is not None and record.outcome == FAILED and record.commit != night.commit
+    )
+
+
+CLIMATE_PRIOR = Job(
+    name="climate-prior-429",
+    due=_until_a_run_ends_ok,
+    command=("climate-prior",),
+    timeout=timedelta(hours=3),
+    targets=(
+        Target(
+            CLIMATE_PRIOR_ISSUE,
+            note=(
+                "에이전트가 이 출력으로 #429의 채택 규칙을 판정해 이슈에 정리한다: (c)가 (b)보다 낫고"
+                "((c) over (b)가 0보다 크고) 기후 대비 거래일 단위 하한이 (b)보다 높으면 `shannon`에 사전 "
+                "확률을 넣는 PR을 연다(코드 digest가 바뀌어 사전 검증이 다시 돈다). 아니면 넣지 않고 숫자만 "
+                "남긴다. 출력에는 시세 값이 없다(날짜, 개수, 비율, lift, 가중치만)."
+            ),
+        ),
+    ),
+    attach=(Attachment(f"리포트 state/{CLIMATE_PRIOR_REPORT}", CLIMATE_PRIOR_REPORT),),
+)
+
+
 JOBS: tuple[Job, ...] = (
     DIAGNOSE,
     SIGNAL_REVIEW,
@@ -2294,4 +2341,5 @@ JOBS: tuple[Job, ...] = (
     DAILY_SIMULATION,
     BAR_CLOSE_SIMULATION,
     *prevalidation_jobs([*(a.name for a in ALGORITHMS), *(a.name for a in KIND_ALGORITHMS)]),
+    CLIMATE_PRIOR,
 )

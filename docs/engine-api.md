@@ -2383,7 +2383,35 @@ uv run krx-quant fit newton --days 60
   - 호가가 있는 표본이 없으면 학습하지 않는다(`not trained: no training samples with the book`).
 - 기본값(학습 전): 가중치와 절편 0. 세 확률이 같고 기대수익 0이다.
 - 파라미터 이름은 `penalty`, `validation_from`, `validation_to`, `validation_days`, `mean.<입력>`, `sd.<입력>`, `w.<클래스>.<입력>`, `bias.<클래스>`, `move.<클래스>`다(클래스: `up`, `flat`, `down`). 모델 버전은 `shannon-<마지막 학습일>-<해시>`다.
-- 사전 검증(#24)을 통과해야 돈다. 녹화가 10거래일 쌓여야 통과할 수 있다.
+- 사전 검증(#24)을 통과해야 돈다. 녹화가 10거래일 쌓여야 통과할 수 있다. 2026-10-30 사전 검증에서 거부됐다(#204: 시간대 기후 대비 lift −5.5%p). 아래 실험이 그 까닭을 잰다.
+
+#### 기후 사전 확률 실험 (#429)
+
+Shannon의 입력에 종목 × 30분 시간대의 클래스 빈도(기후 사전 확률)를 더하면 기후 기준에 지는 몫을 되찾는지 잰다(`climate_prior.py`, #435). 실험일 뿐이다. 엔진은 돌리지 않고, Shannon의 코드와 모델은 그대로다.
+
+```bash
+docker compose run --rm --no-deps engine climate-prior            # 최근 20 녹화일
+docker compose run --rm --no-deps engine climate-prior --days 5   # 빨리 훑어보기
+```
+
+- **fold.** 사전 검증(위 "사전 검증 (#24)")과 같다. 최근 20 녹화일(모자라면 있는 만큼)을 하루씩 예측한다. 그날 전의 Shannon 학습 창(20거래일, 백필만 있는 날 포함)으로 맞춘 모델이 예측하고, 그날로는 학습하지 않는다. 엔진을 재생하지 않는다. 그날의 학습 표본(밤 학습과 같은 표본. 밤 학습이 저장했으면 표본 저장소에서 꺼낸다, #370)을 세 쪽이 예측한다. 녹화일의 표본은 통계가 빼는 봉 마감(VI, 특수 상황)을 빼고 엔진의 도달 정답을 단다. 그래서 사전 검증이 채점한 봉 마감과 같다.
+- **세 쪽.** 같은 봉 마감에서 견준다. 셋이 모두 예측한 봉 마감만 센다. Shannon은 호가가 없으면 예측하지 않고, 그런 봉 마감은 `no_book`으로 따로 센다.
+  - (a) `climate`: 날마다 그 전 20거래일로 다시 맞춘 `baseline-climate` 표. 사전 검증의 재생과 같다.
+  - (b) `shannon`: 지금의 Shannon. 사전 검증의 walk-forward가 학습시키는 그대로다.
+  - (c) `shannon_prior`(`ShannonPrior`): (b)가 받은 바로 그 표본으로 Shannon의 회귀를 학습한다. 입력은 Shannon의 여덟에 둘을 더한다. 봉 마감의 종목 × 시간대 사전 확률에서 `climate_up` = log(p상승 / p보합), `climate_down` = log(p하락 / p보합)이다. L1 강도 후보, 거래일 단위 검증, 표준화가 Shannon과 같다. 더한 입력 없이는 Shannon과 같은 모델이 나온다(시험이 확인한다).
+- **사전 확률.** 종목 × 30분 시간대(`consensus.slot`: 봉 마감 09:01–09:30은 09:00 칸)와 종목 하루 전체로 정답을 센다. fold의 학습 창 표본만 센다. 녹화일과 백필일을 모두 센다(기후 기준과 같다). 평활은 디리클레다. 종목 하루는 그 수에 가짜 수 30을 세 클래스에 똑같이 나눠 더한다. 칸은 그 수에 가짜 수 30을 그 종목 하루의 빈도대로 더한다(`PRIOR_STRENGTH`). 본 적 없는 칸은 그 종목 하루의 것을 쓰고, 본 적 없는 종목은 세 클래스가 같다.
+  - **인과적.** 학습 표본마다 학습 창에서 그 표본의 날 전의 날만 센다. 그 정답은 모두 그 봉 마감 전에 정해졌다(4분 창은 시작한 날에 끝난다). 그 표본의 날과 그 뒤의 정답은 들어가지 않는다. 그래서 창의 첫날 표본의 사전 확률은 세 클래스가 같다.
+  - **모델에 둔다.** fold의 모델이 예측에 쓰는 사전 확률은 학습 창의 모든 날로 센 것이다. 모델의 파라미터 `prior.<종목>.<시간대>.<클래스>`, `prior.<종목>.all.<클래스>`(평활한 확률)에 둔다. 피처가 아니다. fold마다 다른 정답 집계라서, 모든 fold와 알고리즘이 함께 쓰는 피처 캐시(표본 저장소)에 두지 않는다.
+  - (c)의 모델 버전은 `shannon-prior-<마지막 학습일>-<해시>`, 학습 전에는 `shannon-prior-default`다(Shannon의 기본값, 더한 입력의 가중치 0). 그 밖의 파라미터 이름은 Shannon과 같다(`mean.climate_up`, `w.up.climate_up` 등).
+- **리포트** `state/experiments/climate-prior-429.json`. 돌릴 때마다 덮어쓴다.
+  - `days`, `folds`: 날마다 `models`(세 쪽의 모델 버전), `trained_on`((b)와 (c)가 배운 표본: 정답과 호가가 있음), `scored`, `no_book`.
+  - `arms`: 쪽마다 `n`, `accuracy`(맞힘률), `coverage`(상승·하락 예측의 몫), `directional_precision`, `brier`, `by_class`(클래스마다 `recall`, `precision`, `predicted`, `happened`). 비율은 95% Wilson 구간이다.
+  - `lift`: `over_climate`의 `shannon`, `shannon_prior`와 `prior_over_shannon`. 각각 `pairs`(봉 마감 짝의 맞힘률 이득, 95% 정규 구간)와 `by_day`(거래일 단위: 하루 평균 이득을 값 하나로, 95% Student t 구간. 그 하한이 사전 검증의 `day_low`다)가 있다.
+  - `rule`: #429의 채택 규칙. `better`는 (c)의 (b) 대비 lift > 0이다. `lower_bound_up`은 (c)의 기후 대비 거래일 단위 하한이 (b)의 것보다 높은지다. 둘 다면 `met`이다.
+  - `last_model`: 마지막 날의 (c) 모델 버전, L1 강도, 사전 확률 입력의 가중치.
+- **출력.** 같은 숫자를 줄로 낸다(날, 개수, 비율, lift, 가중치. 시세 값은 없다). 그 뒤에 규칙 줄(`#429 rule: … -> met …` 또는 `not met …`)이 나온다. 이어서 (c)의 기후 대비 lift가 0 위인지 나온다. 0 위가 아니면 넣어도 사전 검증의 `stats`를 넘지 못한다. 녹화일이 없으면 1로 끝난다.
+- **메모리.** 사전 검증의 학습 단계와 같다(재생은 없다, #383). 학습 창의 날만 들고 지나간 날은 버린다. 날마다 메모리 줄(`climate prior: memory on <날> (day i of n): …`)을 남기고 비운 메모리를 돌려준다.
+- **서버에서는** 예약 작업 `climate-prior-429`가 돌린다([operations.md](operations.md#예약-작업-215)). 채택은 그 숫자로 다음 PR에서 정한다. 넣으려면 `predict`가 종목과 봉 마감을 알아야 하는데, 지금 규약(위 "규약")은 피처만 준다.
 
 ### Poisson
 

@@ -941,10 +941,7 @@ class _WalkForward:
         self._answered: dict[date, TrainingDay | None] = {}  # the kind's tables' days, answers only
 
     def before(self, day: date) -> Model:
-        window = [d for d in self._available if d < day][-self._algorithm.training_days :]
-        for gone in [d for d in self._loaded if not window or d < window[0]]:
-            del self._loaded[gone]
-        days = [found for d in window if (found := self._load(d)) is not None]
+        days = self._window(day)
         try:
             if self._kind is not None:
                 kind_algorithm = cast(KindAlgorithm, self._algorithm)
@@ -952,16 +949,31 @@ class _WalkForward:
                 if not any(s.label is not None for s in answered):
                     return self._algorithm.default_model()
                 return kind_algorithm.fit(answered)
-            # As the nightly training does (``nightly._samples``): each sample names its day's
-            # reference price, recorded ("mid") or backfilled ("close"), which Neyman's folds
-            # and a model's days by source read (#283).
-            training = [s for found in days for s in found.of(self._algorithm.features)]
+            training = self._training(days)
             if not any(s.outcome is not None for s in training):
                 return self._algorithm.default_model()
             return (self._fit or cast(Algorithm, self._algorithm).fit)(training)
         except NothingToLearn as e:  # no book on backfilled days, say; any other error fails the check
             log.warning("%s not trained before %s, its defaults predict: %s", self._algorithm.name, day, e)
             return self._algorithm.default_model()
+
+    def samples_before(self, day: date) -> list[Sample]:
+        """The samples ``before`` trains a direction algorithm on for ``day``: its window's days
+        before it, with its features. The climate prior experiment (#429) fits its arms on them."""
+        return self._training(self._window(day))
+
+    def _window(self, day: date) -> list[TrainingDay]:
+        """The algorithm's window of days before ``day``, the days older than it let go."""
+        window = [d for d in self._available if d < day][-self._algorithm.training_days :]
+        for gone in [d for d in self._loaded if not window or d < window[0]]:
+            del self._loaded[gone]
+        return [found for d in window if (found := self._load(d)) is not None]
+
+    def _training(self, days: Sequence[TrainingDay]) -> list[Sample]:
+        # As the nightly training does (``nightly._samples``): each sample names its day's
+        # reference price, recorded ("mid") or backfilled ("close"), which Neyman's folds
+        # and a model's days by source read (#283).
+        return [s for found in days for s in found.of(self._algorithm.features)]
 
     def samples_on(self, day: date) -> list[Sample]:
         """``day``'s samples with the algorithm's features (a direction algorithm's), each naming
