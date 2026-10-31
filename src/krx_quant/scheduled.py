@@ -1873,6 +1873,37 @@ EXPECTED_OPEN_KRX_PROBE = Job(
     ),
 )
 
+# Where turing errs (#431): ``error-breakdown`` breaks the official algorithm's live predictions of
+# the latest 20 days with predictions down by symbol, 30-minute slot, spread and volatility, each
+# cell with its confusion matrix and its lift over the climate baseline, before any algorithm is
+# changed or added for accuracy. Once, on the first night after the deploy that brings it (trading
+# or not: it reads the stored days only). It reads the engine DB read-only beside the running
+# engine, a day at a time, as ``signal-review`` does; the hour is a bound, not an estimate. It
+# prints counts and ratios, no price or market value, so it can go on the public issue. Before the
+# pre-validations, which may take the rest of the night.
+ERROR_BREAKDOWN_ISSUE = 431
+
+ERROR_BREAKDOWN = Job(
+    name="error-breakdown-431",
+    due=_first_night,
+    command=("error-breakdown", "--days", "20", "--algorithm", "turing"),
+    timeout=timedelta(hours=1),
+    targets=(
+        Target(
+            ERROR_BREAKDOWN_ISSUE,
+            note=(
+                "탐색용 리포트다. 에이전트가 이 출력으로 turing의 정확도(상승·보합·하락 맞힘률)를 올릴 "
+                "만한 곳(시간대, 스프레드, 변동성, 종목)과 후속 티켓 후보를 이 이슈에 댓글로 남기고 "
+                "`ready-for-human`으로 돌린다. 근거는 칸의 기후 대비 lift와 거래일 하한, 혼동 행렬, "
+                "정밀도다. `표본 부족` 칸은 고르지 않는다. 여기서 고른 칸은 그대로 판정하지 않고, 후속 "
+                "티켓이 이 기간 뒤의 날들(홀드아웃)로 판정한다. 사용자가 정한다. 다시 돌리기(읽기만): "
+                "`docker compose run --rm engine error-breakdown --days 20`. 출력에는 가격과 시세 값이 "
+                "없다(개수, 비율, lift만)."
+            ),
+        ),
+    ),
+)
+
 # ⑤ The pre-validations (#204): a new algorithm runs live once its pre-validation has passed
 # (``prevalidation.py``). Once ``MIN_DAYS`` trading days are recorded, one waiting algorithm
 # is pre-validated a night, at most (``prevalidation_tonight``): a run replays 20 days beside
@@ -2253,6 +2284,7 @@ JOBS: tuple[Job, ...] = (
     KIS_ORDER_PROBE,
     SIGNAL_REVIEW_AGAIN,
     LIVE_PROBE,
+    ERROR_BREAKDOWN,
     PASSIVE_ENTRY,
     *daily_prevalidation_jobs(
         [a.name for a in DAILY_ALGORITHMS],

@@ -87,6 +87,7 @@
 | `diagnose.py` | 읽기 전용 진단 명령: 남은 결정에 필요한 실측(#82) |
 | `entry_delay.py` | 진입 지연(#262): 예측을 봉 마감 +1·+5·+30초에 따랐을 때의 목표 도달과 닿음 손익을 녹화 호가로 다시 잰다. `diagnose` 10절 |
 | `signal_review.py` | 읽기 전용 신호 기준 검토 명령(`signal-review`, #206): 순위표와 정식 알고리즘의 성적, 기준 후보(최종 합의 확률 × 같은 방향 정식 수)마다 엔진의 신호 규칙(`signals.py`)을 저장된 합의에 그대로 돌린 신호 수와 적중률([operations.md](operations.md#신호-기준-검토-206)) |
+| `error_breakdown.py` | 읽기 전용 오류 분석 명령(`error-breakdown`, #431, 탐색용): 정식 알고리즘의 실시간 예측을 종목, 30분 시간대, 스프레드, 변동성(σ̂₄ 삼분위)으로 나눠 칸마다 혼동 행렬, 정밀도, `baseline-climate` 대비 lift(`stats.entry`, 순위표와 같은 통계)를 낸다([operations.md](operations.md#오류-분석-431)) |
 | `skill.py` | 기준율 대비 실력(#262): 예측 × 정답 표의 kappa, Gerrity 점수, 균형 맞힘률, 독립성 검정(카이제곱), 거래일 단위 kappa(날마다 kappa, 날들의 t 구간). 알고리즘 상세 통계의 `overall.skill`([engine-api.md](engine-api.md#get-v1algorithmsnamestatssymbolperiodspecial)) |
 | `structure_check.py` | 읽기 전용 구조 실측 명령(`structure-check`, #270): 리서치가 문헌으로 정하지 못한 주장(단일종목 레버리지 ETF 상장 전후의 일 단위 구조와 마감 단일가, 기간·틱 크기별 4분 도달 정답, 월말·월초 × 외국인 순매수)을 1분봉, 일봉, KIS 일별 수급으로 잰다([operations.md](operations.md#구조-실측-270)) |
 | `night_probe.py` | 읽기 전용 야간선물 녹화 확인 명령(`probe-night`, #264): 한 밤(18:00–다음 날 06:00)의 구독 응답, 야간선물 체결·호가의 프레임·레코드 수, 필드 수, 시각, 결측, KIS 마스터의 코드를 값 없이 보인다([operations.md](operations.md#야간선물-녹화-확인-264), [kis-feeds.md](kis-feeds.md#야간선물-264)) |

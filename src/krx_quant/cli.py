@@ -38,6 +38,9 @@ from krx_quant.demo import demo_app, demo_morning
 from krx_quant.diagnose import DEFAULT_DAYS, diagnose
 from krx_quant.dividend_probe import probe_dividends
 from krx_quant.doctor import doctor, doctor_settings
+from krx_quant.error_breakdown import DEFAULT_ALGORITHM as ERROR_ALGORITHM
+from krx_quant.error_breakdown import DEFAULT_DAYS as ERROR_DAYS
+from krx_quant.error_breakdown import error_breakdown
 from krx_quant.expected_open_probe import DAYS as EXPECTED_OPEN_DAYS
 from krx_quant.expected_open_probe import probe_expected_open
 from krx_quant.fake_kis import FakeKis
@@ -625,6 +628,12 @@ def _signal_review(days: int) -> int:
     return 0
 
 
+def _error_breakdown(days: int, algorithm: str) -> int:
+    settings = Settings.from_env(require_kis=False)
+    print(error_breakdown(settings.state_dir / DB_NAME, settings, datetime.now(KST).date(), days, algorithm))
+    return 0
+
+
 def _daily_check(days: int) -> int:
     settings = Settings.from_env(require_kis=False)
     calendar = calendar_store(settings).calendar
@@ -989,6 +998,20 @@ def main(argv: list[str] | None = None) -> int:
         default=SIGNAL_REVIEW_DAYS,
         help=f"the latest N days with predictions (default {SIGNAL_REVIEW_DAYS}, the leaderboard's 20d)",
     )
+    error_cmd = sub.add_parser(
+        "error-breakdown",
+        help="print where an algorithm errs (#431): confusion matrices and lift over the climate baseline"
+        " by symbol, 30-minute slot, spread and volatility; exploratory, reads only, writes nothing",
+    )
+    error_cmd.add_argument(
+        "--days",
+        type=_positive,
+        default=ERROR_DAYS,
+        help=f"the latest N days with predictions (default {ERROR_DAYS}, the leaderboard's 20d)",
+    )
+    error_cmd.add_argument(
+        "--algorithm", default=ERROR_ALGORITHM, help=f"the algorithm (default {ERROR_ALGORITHM})"
+    )
     daily_cmd = sub.add_parser(
         "daily-check",
         help="print what the daily kinds did on the latest trading days (#264); reads only, writes nothing",
@@ -1152,6 +1175,8 @@ def _command(args: argparse.Namespace) -> int:
         return asyncio.run(_doctor(args.api))
     elif args.command == "signal-review":
         return _signal_review(args.days)
+    elif args.command == "error-breakdown":
+        return _error_breakdown(args.days, args.algorithm)
     elif args.command == "structure-check":
         return _structure_check(args.days)
     elif args.command == "daily-check":
