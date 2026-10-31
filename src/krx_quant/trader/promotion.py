@@ -35,8 +35,9 @@ the whole day.
 trader's paper history is every trading day a champion ran in it (``history``: ``policy_days`` with
 ``champion`` 1, whichever policy), and a checkpoint falls on each ``CHECKPOINT_DAYS``-th (20) of
 them: day 20, 40, 60 and so on. At checkpoint k the night's job (``promote``, after the market)
-takes the champion of that day (``champion_on``) and its paper record up to that day, at least
-``GATE_DAYS`` (20) of its days, and tests the mean of the daily net P&L (no-trade days 0) one-sided at
+takes the champion of that day (``champion_on``) and its paper record up to that day on the days it
+ran as the champion alone (``PolicyDay.champion``), at least ``GATE_DAYS`` (20) of them, and tests the
+mean of the daily net P&L (no-trade days 0) one-sided at
 α_k = ``GATE_ALPHA`` × 6 ÷ (π² k²) (``alpha``): the day-level lower bound two-sided at 1 − 2α_k
 (``checkpoint_level``, the engine's ``stats`` statistic with an overlap of one, as before) above 0.
 Over every checkpoint the α spent is at most ``GATE_ALPHA`` (Σ 6 ÷ (π² k²) = 1), so a champion
@@ -45,15 +46,24 @@ simulation, ``tests/test_trader_promotion.py``). k counts the trader's checkpoin
 champion's: a new champion gets no fresh α. Each checkpoint is evaluated once and kept
 (``gate_checks``), so that a trade that ends later never changes what it found; a night that missed
 one evaluates it on the record up to its day. A champion that passed stays passed (``Gate.passed``);
-a new one must pass at a later checkpoint, on a day it was the champion. The same checkpoint is also
+a new one must pass at a later checkpoint, on a day it was the champion. Its days as a challenger
+never count (``champion_days``): ``judge`` promoted it on them, so their record is the one that
+won a comparison and is biased upward. A promoted champion's record for the gate starts on the first
+trading day after it took over; the first champion's, fitted without a paper record, on its first
+day. Each checkpoint then tests days its champion was not picked on, so the α spent stays at most
+``GATE_ALPHA`` across every change of the champion (#408's simulation of the promotion and the
+checkpoints together, ``tests/test_trader_promotion.py``). The same checkpoint is also
 judged with ``STRESS_TICKS`` (1) extra adverse tick on each leg of each trade (``stressed_low``: the
 daily nets less 2 × the trades' tick × shares, the costs already in them not charged again), one of
 the live mode's execution checks (``live.py``).
 
-> **바뀜** (2026-10-31, #425): the gate was looked at every night: the champion's record of 20 days
-> at least, its 95% lower bound above 0 → checkpoints with α spent as 1/k². 이유: with no edge, a
-> gate looked at nightly passed by chance 12% of the time by day 120 and 15% by day 250 (#408's
-> simulation, t4 daily P&L); the checkpoints keep it at most 2.5% at any horizon.
+> **바뀜** (2026-10-31, #425): the gate was looked at every night: the champion's whole record (its
+> days as a challenger too) of 20 days at least, its 95% lower bound above 0 → checkpoints with α
+> spent as 1/k², on its days as the champion only. 이유: with no edge, a gate looked at nightly passed
+> by chance 12% of the time by day 120 and 15% by day 250 (#408's simulation, t4 daily P&L); and a
+> promoted champion's challenger days are the ones it won its promotion on: counted, zero-edge
+> challengers promoted and gated together passed the checkpoints 3.2% of the time over 250 days. On
+> the champion's own days the checkpoints keep it at most 2.5%.
 """
 
 from __future__ import annotations
@@ -260,7 +270,8 @@ def champion_on(db: sqlite3.Connection, day: date) -> int | None:
 @dataclass(frozen=True)
 class Checkpoint:
     """The live gate at checkpoint ``k`` (#408): on ``day``, the trader's ``k`` × 20th paper day, the
-    champion then (``policy``) and its paper record up to it (``days``, ``mean``), its lower bound at
+    champion then (``policy``) and its paper days as the champion up to it (``days``, ``mean``), its
+    lower bound at
     ``level`` and the same with ``STRESS_TICKS`` extra adverse ticks a leg (``stressed_low``); when it
     was evaluated (``at``)."""
 
@@ -306,13 +317,20 @@ class Checkpoint:
         }
 
 
+def champion_days(record: Record | None, until: date | None = None) -> list[PolicyDay]:
+    """The days of ``record`` the gate tests (#408, module doc): the ones it ran as the champion, to
+    ``until`` if given; never its days as a challenger, which its promotion was judged on."""
+    found = () if record is None else record.days
+    return [d for d in found if d.champion and (until is None or d.day <= until)]
+
+
 def evaluate(db: sqlite3.Connection, k: int, day: date) -> Checkpoint:
-    """Checkpoint ``k`` on ``day`` (module doc): the champion of that day and its record up to it."""
+    """Checkpoint ``k`` on ``day`` (module doc): the champion of that day and its days as the champion
+    up to it."""
     version = champion_on(db, day)
     if version is None:
         return Checkpoint(k, day, None, 0, None, None, None)
-    found = records(db, PAPER, [version]).get(version)
-    days = [d for d in (() if found is None else found.days) if d.day <= day]
+    days = champion_days(records(db, PAPER, [version]).get(version), day)
     nets = [d.net for d in days]
     level = checkpoint_level(k)
     return Checkpoint(
@@ -383,11 +401,11 @@ def check_gate(db: sqlite3.Connection, now: datetime) -> list[Checkpoint]:
 
 @dataclass(frozen=True)
 class Gate:
-    """The live gate (#393 "실전 관문", #408) on the champion ``policy``: its paper record now
-    (``days``, ``mean``, and the lower bound ``low`` at ``level``: the next checkpoint's, or the one it
-    passed at), the trader's paper history (``history`` days), the next checkpoint's number
-    (``next``), the checkpoint it passed at (``passed_at``) and the first it passed with the extra
-    ticks (``stressed``), and the latest checkpoint evaluated (``last``)."""
+    """The live gate (#393 "실전 관문", #408) on the champion ``policy``: its paper days as the
+    champion now (``days``, ``mean``, and the lower bound ``low`` at ``level``: the next
+    checkpoint's, or the one it passed at), the trader's paper history (``history`` days), the next
+    checkpoint's number (``next``), the checkpoint it passed at (``passed_at``) and the first it
+    passed with the extra ticks (``stressed``), and the latest checkpoint evaluated (``last``)."""
 
     policy: int | None
     days: int
@@ -444,14 +462,13 @@ def gate_of(
     until: date | None = None,
     checked_by: datetime | None = None,
 ) -> Gate:
-    """The live gate on the champion ``version`` from the store ``db``: its record and the trader's
-    history up to ``until``, the checkpoints evaluated by ``checked_by`` (all if None)."""
+    """The live gate on the champion ``version`` from the store ``db``: its days as the champion and
+    the trader's history up to ``until``, the checkpoints evaluated by ``checked_by`` (all if None)."""
     points = [c for c in checkpoints(db) if checked_by is None or (c.at is not None and c.at <= checked_by)]
     days = len(history(db, until))
     if version is None:
         return replace(no_gate(), history=days, next=len(points) + 1, last=points[-1] if points else None)
-    found = records(db, PAPER, [version]).get(version)
-    nets = [d.net for d in (() if found is None else found.days) if until is None or d.day <= until]
+    nets = [d.net for d in champion_days(records(db, PAPER, [version]).get(version), until)]
     passed = next((c for c in points if c.policy == version and c.passed), None)
     stressed = next((c for c in points if c.policy == version and c.stressed_passed), None)
     nxt = len(points) + 1
@@ -557,6 +574,13 @@ def judge(champion: int, records_: Mapping[int, Record], challengers: Sequence[i
     return out
 
 
+def pick(judgments: Iterable[Judgment]) -> Judgment | None:
+    """The one of ``judgments`` promoted (module doc): of those passing, the greatest lower bound,
+    then the newest; None when none passes."""
+    passing = [j for j in judgments if j.passed]
+    return max(passing, key=lambda j: (j.low or 0.0, j.challenger)) if passing else None
+
+
 def in_market(now: datetime, sessions: Callable[[date], Session | None]) -> bool:
     """Whether ``now`` is in a trading day's market: from its pick (``PICK_AT``, when the trader
     reads the day's champion) to the end of its closing auction. No promotion is written then."""
@@ -606,12 +630,12 @@ def promote(
     running = policies.challenger_versions(db)
     kept = records(db, mode, [current, *running])
     judgments = tuple(judge(current, kept, running))
-    passing = [j for j in judgments if j.passed]
     promoted = None
-    if passing:
-        best = max(passing, key=lambda j: (j.low or 0.0, j.challenger))
-        if policies.crown(db, now, best.challenger, _reason(best), _detail(best), replacing=current):
-            promoted = best.challenger
+    best = pick(judgments)
+    if best is not None and policies.crown(
+        db, now, best.challenger, _reason(best), _detail(best), replacing=current
+    ):
+        promoted = best.challenger
     dropped = tuple(j.challenger for j in judgments if j.retires and j.challenger != promoted)
     policies.drop(db, now, dropped)
     return Promotion(
@@ -726,7 +750,8 @@ def checkpoint_line(c: Checkpoint) -> str:
         return f"{head}: 그날 챔피언이 없다 → 넘지 못함"
     verdict = "넘었다" if c.passed else ("기록 부족" if c.days < GATE_DAYS else "하한 ≤ 0")
     return (
-        f"{head}: 챔피언 정책 {c.policy}의 모의 기록 {c.days}일, 날마다 순손익 평균 {_won(c.mean)}, "
+        f"{head}: 챔피언 정책 {c.policy}의 챔피언으로 돈 모의 기록 {c.days}일, "
+        f"날마다 순손익 평균 {_won(c.mean)}, "
         f"하한 {_won(c.low)}(신뢰수준 {c.level:.2%}), 다리마다 {STRESS_TICKS}틱 더 불리하면 하한 "
         f"{_won(c.stressed_low)} → {verdict}"
     )
@@ -734,7 +759,7 @@ def checkpoint_line(c: Checkpoint) -> str:
 
 def gate_line(g: Gate) -> str:
     """The live gate on the champion now (#408), for the night's output: no price."""
-    head = f"실전 관문: 챔피언 정책 {g.policy}의 모의 기록 {g.days}일(이력 {g.history}거래일)"
+    head = f"실전 관문: 챔피언 정책 {g.policy}의 챔피언으로 돈 모의 기록 {g.days}일(이력 {g.history}거래일)"
     if g.passed_at is not None:
         c = g.passed_at
         return f"{head} → 넘었다({c.k}번째 판정, {c.day}, 하한 {_won(c.low)}, 신뢰수준 {c.level:.2%})"

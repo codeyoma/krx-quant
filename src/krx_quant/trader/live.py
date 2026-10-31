@@ -444,7 +444,7 @@ class Readiness:
             )
         low = "없음" if g.low is None else f"{g.low:+,.0f}원"
         return (
-            f"실전 관문: 챔피언 정책 {g.policy}의 모의 기록 {g.days}일, 다음 판정은 모의 이력 "
+            f"실전 관문: 챔피언 정책 {g.policy}의 챔피언으로 돈 모의 기록 {g.days}일, 다음 판정은 모의 이력 "
             f"{g.next_day}거래일째(지금 {g.history}일, α {promotion.alpha(g.next):.3%}), 지금 하한 {low}"
         )
 

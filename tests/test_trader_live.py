@@ -396,7 +396,7 @@ def test_before_the_first_checkpoint_the_gate_is_missing_with_the_next_one_named
 
     assert found.missing[0] == "gate"
     assert found.gate_said() == (
-        "실전 관문: 챔피언 정책 1의 모의 기록 12일, 다음 판정은 모의 이력 20거래일째"
+        "실전 관문: 챔피언 정책 1의 챔피언으로 돈 모의 기록 12일, 다음 판정은 모의 이력 20거래일째"
         "(지금 12일, α 1.520%), 지금 하한 +0원"
     )
     assert "KIS 모의 거래일 0/20일" in found.notice()
@@ -519,7 +519,9 @@ async def test_live_before_the_gate_orders_nothing_and_says_what_is_missing(
     assert (run["mode"], run["detail"]["configured"]) == (PAPER, LIVE)
     assert run["detail"]["live"][0] == "gate"
     [notice] = [t for t in sent if "자동 매매(live): 실전 모드" in t]
-    assert "실전 관문: 챔피언 정책 1의 모의 기록 0일, 다음 판정은 모의 이력 20거래일째" in notice
+    assert "실전 관문: 챔피언 정책 1의 챔피언으로 돈 모의 기록 0일, 다음 판정은 모의 이력 20거래일째" in (
+        notice
+    )
     assert "KIS 모의 거래일 0/20일" in notice and "KIS 모의 왕복 매매 0/30건" in notice
     state_now = read_trader(state / DB_NAME, at("10:00:03"))
     assert state_now["mode"] == PAPER

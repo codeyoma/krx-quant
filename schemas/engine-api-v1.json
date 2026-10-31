@@ -2941,7 +2941,7 @@
       }
     },
     "trader_gate": {
-      "description": "The live gate (#400, #393; #408: judged at checkpoints). A checkpoint falls on every 20th trading day of the trader's paper history (history: the days a champion ran); at checkpoint k the champion of that day passes when its paper record has at least required (20) days and the day-level lower bound of its daily net P&L (no-trade days 0, an overlap of one) at the two-sided level 1 - 2 alpha_k, alpha_k = 0.025 x 6 / (pi^2 k^2), is above 0. days, mean: the champion's record now; low at level: the next checkpoint's, or the one it passed at (passed_at). checkpoint: the next one (its number k, its day of the history, alpha, level). stressed: it passed a checkpoint with one extra adverse tick a leg too. last: the latest checkpoint judged. policy null before the first champion.",
+      "description": "The live gate (#400, #393; #408: judged at checkpoints). A checkpoint falls on every 20th trading day of the trader's paper history (history: the days a champion ran); at checkpoint k the champion of that day passes when its paper record on the days it ran as the champion (never its days as a challenger, which its promotion was judged on) has at least required (20) days and the day-level lower bound of its daily net P&L (no-trade days 0, an overlap of one) at the two-sided level 1 - 2 alpha_k, alpha_k = 0.025 x 6 / (pi^2 k^2), is above 0. days, mean: the champion's days as the champion now; low at level: the next checkpoint's, or the one it passed at (passed_at). checkpoint: the next one (its number k, its day of the history, alpha, level). stressed: it passed a checkpoint with one extra adverse tick a leg too. last: the latest checkpoint judged. policy null before the first champion.",
       "type": "object",
       "required": ["policy", "days", "required", "mean", "low", "level", "passed", "history", "checkpoint", "passed_at",
                    "stressed", "last"],
@@ -2973,7 +2973,7 @@
       }
     },
     "trader_checkpoint": {
-      "description": "A checkpoint of the live gate judged by the nightly job (#408): its number k, its day (the trader's k x 20th paper day), the champion then and its paper record up to it (days, mean in won), its lower bound at level (1 - 2 alpha) and the same with one extra adverse tick a leg (stressed_low), whether each is above 0 with 20 days at least, and when it was judged.",
+      "description": "A checkpoint of the live gate judged by the nightly job (#408): its number k, its day (the trader's k x 20th paper day), the champion then and its paper record as the champion up to it (days, mean in won), its lower bound at level (1 - 2 alpha) and the same with one extra adverse tick a leg (stressed_low), whether each is above 0 with 20 days at least, and when it was judged.",
       "type": "object",
       "required": ["k", "day", "policy", "days", "mean", "low", "stressed_low", "alpha", "level", "passed",
                    "stressed_passed", "at"],

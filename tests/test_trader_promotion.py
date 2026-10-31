@@ -34,6 +34,7 @@ from krx_quant.trader.promotion import (
     Record,
     alpha,
     bonferroni,
+    champion_days,
     checkpoint_level,
     checkpoints,
     gate_of,
@@ -41,6 +42,7 @@ from krx_quant.trader.promotion import (
     lower_bound,
     no_gate,
     passes,
+    pick,
     promote,
 )
 from krx_quant.trader.refit import admit_now, promote_now
@@ -215,6 +217,66 @@ def test_without_an_edge_the_checkpoints_pass_by_chance_at_most_two_and_a_half_p
     assert false_passes(2_000, 500, seed=409) <= 0.025
     assert false_passes(1_000, 1_000, seed=410) <= 0.025
     assert false_passes(500, 120, seed=408, nightly=True) > 0.10, "the nightly looks it replaces"
+
+
+def lifetime_false_passes(paths: int, horizon: int, seed: int) -> tuple[float, float]:
+    """The shares of ``paths`` traders whose policies all have no edge (each policy's trading days'
+    net P&L normal, mean 0, deviation 1,000 won, independent, a fixed seed) that the gate passes
+    within ``horizon`` days, the promotion and the checkpoints run together as the night's job runs
+    them (``promote``): first testing the champion on its days as the champion (``champion_days``),
+    then on its whole record (the gate before #425's review). Each day the champion and the
+    challengers running (at most three) trade; on a checkpoint's day the gate tests the champion of
+    that day. Then ``judge`` and ``pick`` promote one from its tenth common day, those reaching their
+    twentieth unpromoted are dropped (``Judgment.retires``), and each free slot takes a new policy,
+    as a fit comes every night. The promotion never reads the gate, so both gates are tested on the
+    same traders."""
+    rng = random.Random(seed)
+    days = [date(2026, 1, 1) + timedelta(days=t) for t in range(horizon)]
+    slots = 3
+    own = whole = 0
+    for _ in range(paths):
+        ran: dict[int, list[PolicyDay]] = {1: []}
+        champion, running, newest = 1, list[int](), 1
+        passed = [False, False]  # on its days as the champion, on its whole record
+        for n, day in enumerate(days, 1):
+            for version in (champion, *running):
+                ran[version].append(PolicyDay(day, rng.gauss(0.0, 1_000.0), 1, version == champion, False))
+            if n % CHECKPOINT_DAYS == 0:
+                record = Record(champion, tuple(ran[champion]))
+                for i, tested in enumerate((champion_days(record), record.days)):
+                    passed[i] = passed[i] or passes([d.net for d in tested], n // CHECKPOINT_DAYS)
+                if all(passed):
+                    break
+            # The night. The champion's record from the oldest challenger's first day holds all
+            # their common days (its days are one a calendar day, so the first is found by count).
+            first = min((ran[v][0].day for v in running), default=day)
+            since = max(0, (first - ran[champion][0].day).days)
+            kept = {v: Record(v, tuple(ran[v])) for v in running}
+            kept[champion] = Record(champion, tuple(ran[champion][since:]))
+            judgments = judge(champion, kept, running)
+            best = pick(judgments)
+            champion = champion if best is None else best.challenger
+            running = [j.challenger for j in judgments if j.challenger != champion and not j.retires]
+            while len(running) < slots:
+                newest += 1
+                ran[newest] = []
+                running.append(newest)
+        own += passed[0]
+        whole += passed[1]
+    return own / paths, whole / paths
+
+
+@pytest.mark.timeout(300)
+def test_without_an_edge_promotion_and_checkpoints_together_pass_at_most_two_and_a_half_percent() -> None:
+    """#425's review: a promoted champion's days as a challenger are the ones ``judge`` picked it
+    on, so the gate tests only its days as the champion. Three zero-edge challengers at a time
+    against the champion, the promotion every night and the checkpoints, over a trader's year (250
+    trading days, 3,000 traders, a fixed seed): 1.9% pass by chance, at most 2.5% (the sampling
+    error ±0.25%). Tested on their whole record, as the gate was before the review, the same
+    traders pass 2.6% of the time. Over 16,000 other traders: 2.0% and 2.7%."""
+    own, whole = lifetime_false_passes(3_000, 250, seed=425)
+    assert own <= 0.025
+    assert whole > 0.025, "the whole record's selection bias the review found"
 
 
 # The records as the trader keeps them.
@@ -522,8 +584,8 @@ def test_the_night_s_report_has_no_price(tmp_path: Path, capsys: pytest.CaptureF
         "→ 챔피언은 그대로다.",
     ]
     assert (
-        "실전 관문: 챔피언 정책 1의 모의 기록 10일(이력 10거래일), 날마다 순손익 평균 +0원, 다음 판정(1번째, "
-        "이력 20거래일째, α 1.520%)의 신뢰수준 96.96%로 지금 하한 +0원 → 아직" in out
+        "실전 관문: 챔피언 정책 1의 챔피언으로 돈 모의 기록 10일(이력 10거래일), 날마다 순손익 평균 +0원, "
+        "다음 판정(1번째, 이력 20거래일째, α 1.520%)의 신뢰수준 96.96%로 지금 하한 +0원 → 아직" in out
     )
     assert not re.search(r"70[,.]?[0-9]{3}", out), "no price"
 
@@ -570,11 +632,13 @@ def test_a_checkpoint_is_judged_once_and_a_champion_that_passed_stays_passed(tmp
     assert [(c.k, c.low) for c in kept] == [(1, pytest.approx(321.16, abs=0.01)), (2, two.low)]
 
 
-# Policy 2's forty days: 28 of +2,000 and 12 of −2,000. The mean is 32,000 ÷ 40 = 800; deviations
-# 1,200 (×28) and −2,800 (×12), their squares 134,400,000, the variance ÷ 39, the standard error
-# √(134,400,000 ÷ 39 ÷ 40) = 293.52. At α_1 its lower bound is 800 − 2.246666 × 293.52 = 140.6 > 0; at
-# α_2, 800 − 2.815463 × 293.52 = −26.4.
-CLOSE = ([2_000.0] * 7 + [-2_000.0] * 3) * 4
+# Policy 2's twenty days as the champion: 12 of +2,000 and 8 of −1,000. The mean is 16,000 ÷ 20 = 800;
+# deviations 1,200 (×12) and −1,800 (×8), their squares 43,200,000, the variance ÷ 19, the standard
+# error √(43,200,000 ÷ 19 ÷ 20) = 337.17. At α_1 its lower bound is 800 − 2.339284 × 337.17 = 11.3 > 0;
+# at α_2, 800 − 2.985660 × 337.17 = −206.7.
+CLOSE = ([2_000.0] * 6 + [-1_000.0] * 4) * 2
+# Its twenty days as a challenger, the ones it was promoted on: 18 of +2,000 and 2 of −1,000.
+WON_ON = ([2_000.0] * 9 + [-1_000.0]) * 2
 
 
 def test_the_alpha_spent_counts_the_trader_s_checkpoints_across_a_change_of_the_champion(
@@ -582,30 +646,32 @@ def test_the_alpha_spent_counts_the_trader_s_checkpoints_across_a_change_of_the_
 ) -> None:
     """Policy 1 is the champion of the first twenty days (no trade: it fails the first checkpoint);
     policy 2, a challenger beside it, is crowned that night and is the champion of the next twenty.
-    The second checkpoint judges policy 2 on its forty days at α_2, the trader's second: below 0, so
-    it does not pass, though at a fresh α_1 it would. It must pass at a later checkpoint."""
+    The second checkpoint judges policy 2 on its twenty days as the champion at α_2, the trader's
+    second: below 0, so it does not pass, though at a fresh α_1 it would. Its days as a challenger,
+    which it was promoted on, never count: with them its forty days would pass at α_2. It must pass
+    at a later checkpoint."""
     keep(tmp_path, at("2026-08-31 22:31:00"), policy_cell(BARRIER, 0.8))
     keep(tmp_path, at("2026-08-31 22:32:00"), policy_cell(BARRIER, 0.6))
-    for day, net in zip(LONG[:20], CLOSE[:20], strict=True):
+    for day, net in zip(LONG[:20], WON_ON, strict=True):
         day_ran(tmp_path, 1, day, 0.0, champion=True)
         day_ran(tmp_path, 2, day, net, champion=False)
     first = judged_at(tmp_path, night(LONG[19]))
-    with closing(policies.connect(tmp_path / DB_NAME)) as db:
-        assert policies.crown(db, night(LONG[19]) + timedelta(minutes=1), 2, "test", {}, replacing=1)
-    for day, net in zip(LONG[20:40], CLOSE[20:], strict=True):
+    assert first.promoted == 2, "it beat the champion on those days"
+    for day, net in zip(LONG[20:40], CLOSE, strict=True):
         day_ran(tmp_path, 2, day, net, champion=True)
     second = judged_at(tmp_path, night(LONG[39]))
 
     assert [(c.k, c.policy, c.passed) for c in first.checked] == [(1, 1, False)]
     [two] = second.checked
-    assert (two.k, two.policy, two.days, two.mean) == (2, 2, 40, 800)
-    assert two.low == pytest.approx(800 - 2.815463 * math.sqrt(134_400_000 / 39 / 40), abs=0.01)
-    assert two.low == pytest.approx(-26.4, abs=0.1) and not two.passed
-    assert lower_bound(CLOSE, checkpoint_level(1)) == pytest.approx(140.6, abs=0.1)
+    assert (two.k, two.policy, two.days, two.mean) == (2, 2, 20, 800)
+    assert two.low == pytest.approx(800 - 2.985660 * math.sqrt(43_200_000 / 19 / 20), abs=0.01)
+    assert two.low == pytest.approx(-206.7, abs=0.1) and not two.passed
+    assert lower_bound(CLOSE, checkpoint_level(1)) == pytest.approx(11.3, abs=0.1)
     assert passes(CLOSE, 1), "a fresh α for the new champion would have passed it"
+    assert passes(WON_ON + CLOSE, 2), "its days as a challenger would have passed it"
     with closing(sqlite3.connect(tmp_path / DB_NAME)) as db:
         gate = gate_of(db, 2)
         before = gate_of(db, 2, LONG[19], night(LONG[19]))
     assert (gate.passed, gate.history, gate.next, gate.next_day) == (False, 40, 3, 60)
     assert gate.level == pytest.approx(checkpoint_level(3))
-    assert (before.days, before.history, before.next) == (20, 20, 2), "the gate as it stood that night"
+    assert (before.days, before.history, before.next) == (0, 20, 2), "the gate as it stood that night"

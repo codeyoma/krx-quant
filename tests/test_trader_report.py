@@ -116,7 +116,7 @@ def test_a_day_s_trades_are_reported_with_each_policy_s_record_and_no_price(tmp_
     )
     assert "- 바뀐 것 없음" in lines
     assert (
-        "실전 관문: 챔피언 정책 1의 모의 기록 1일(이력 1거래일), 날마다 순손익 평균 -162원, "
+        "실전 관문: 챔피언 정책 1의 챔피언으로 돈 모의 기록 1일(이력 1거래일), 날마다 순손익 평균 -162원, "
         "다음 판정(1번째, 이력 20거래일째, α 1.520%)의 신뢰수준 96.96%로 지금 하한 없음 → 아직"
     ) in lines
     assert "실전 준비 (#408)" in lines, "what the live mode needs"
@@ -245,8 +245,9 @@ def test_a_night_a_challenger_is_promoted_calls_an_agent(tmp_path: Path) -> None
         "챔피언과 함께 돈 거래일 10일, (도전 − 챔피언) 평균 +1,100원, 하한 +63원(신뢰수준 95.00%) → 통과"
     ), "the night's judgment, as it was made"
     assert any(
-        line.startswith("실전 관문: 챔피언 정책 2의 모의 기록 10일(이력 10거래일)") for line in lines
-    ), "the gate on the champion after the night"
+        line.startswith("실전 관문: 챔피언 정책 2의 챔피언으로 돈 모의 기록 0일(이력 10거래일)")
+        for line in lines
+    ), "the gate on the champion after the night: its days as a challenger do not count"
     assert "그날 · 챔피언 정책 1" in lines, "the day's champion"
     the_night_after = reported(tmp_path, f"{WEEKDAYS[10]} 22:40:00")
     assert "챔피언 교체" not in agent_line(the_night_after), "that night only"
@@ -274,13 +275,16 @@ def test_the_night_the_live_gate_passes_calls_an_agent_and_not_the_nights_after(
     assert any(
         line.startswith(
             f"실전 관문 판정 1번째(모의 이력 20거래일째, {WEEKDAYS[19]}, α 1.520%): "
-            "챔피언 정책 1의 모의 기록 20일, 날마다 순손익 평균 +1,000원, 하한 +321원(신뢰수준 96.96%)"
+            "챔피언 정책 1의 챔피언으로 돈 모의 기록 20일, 날마다 순손익 평균 +1,000원, "
+            "하한 +321원(신뢰수준 96.96%)"
         )
         and line.endswith("→ 넘었다")
         for line in lines
     )
     assert any(
-        line.startswith("실전 관문: 챔피언 정책 1의 모의 기록 20일(이력 20거래일) → 넘었다(1번째 판정")
+        line.startswith(
+            "실전 관문: 챔피언 정책 1의 챔피언으로 돈 모의 기록 20일(이력 20거래일) → 넘었다(1번째 판정"
+        )
         and "그 밤 처음 넘었다" in line
         for line in lines
     )

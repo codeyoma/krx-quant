@@ -36,7 +36,7 @@ Each report holds, in order:
 2. The day's pick from the cost map. When no cell traded, every cell considered and its verdict (`fail`, `few`, `no row`, …).
 3. Each policy's paper record to that day and, for a challenger, where it stands against the champion: common days, mean difference, lower bound, verdict.
 4. What the night changed: the champion, challengers dropped and admitted, the policies fitted and their cells, the policies waiting, a re-fit that kept nothing or failed.
-5. The live gate (#408): each checkpoint judged that night (`실전 관문 판정 k번째 …`: its day, the champion then, its record's days, mean and lower bound at α_k, and the same with one extra adverse tick a leg), then the champion's standing (`실전 관문: …`: its record, the next checkpoint and its α, or the checkpoint it passed at).
+5. The live gate (#408): each checkpoint judged that night (`실전 관문 판정 k번째 …`: its day, the champion then, its days as the champion (never its days as a challenger), their mean and lower bound at α_k, and the same with one extra adverse tick a leg), then the champion's standing (`실전 관문: …`: its days as the champion, the next checkpoint and its α, or the checkpoint it passed at).
    Then `실전 준비 (#408)`: whether the next pick would order on the live account, the gate and each execution check (✓ or ✗) on the mock period, on a mock or live day that day's orders compared with KIS's (`같다`, `다르다`, not yet), and on a live day the first period (cap, live days and round trips, its checks).
 6. Limits, the halts that day, the failed KIS orders that day (mock, #405), a cumulative halt still holding, the pause in force, the pauses, resumes and re-arms asked for.
 7. The last five trading days' ledger.
