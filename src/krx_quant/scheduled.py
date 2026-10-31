@@ -1733,6 +1733,55 @@ LIVE_PROBE = Job(
     ),
 )
 
+# The passive entry (#432): the trader buys at the best ask, so its cells are judged at a market
+# order's round trip, and none passes. A buy resting at the best bid is a tick cheaper but may not
+# fill, and fills best when the price goes against it. Before that is decided, it is measured on the
+# recordings: on the first trading day's night after the deploy that brings it (its days are the
+# cost map's 20, recorded already), and again each trading night after a run that failed (the cost
+# map or the engine's database not read, exit 1) until one measures, ``measure-passive-entry`` reads
+# tonight's cost map from the collector's Engine API (``KRX_TRADER_ENGINE_URL``, as ``trader-report``
+# does), every cell's signals from the engine's database (read-only), and each day's recorded quotes
+# and KRX trades of 005930 a day at a time; it prints the fill rates under two fill assumptions, the
+# hit rates of the filled and the unfilled beside the market entry's, the net in ticks per filled
+# trade and per signal, and the counts, by cell and kind. It changes nothing: the trader's ordering
+# stays. No price, only ticks, ratios, seconds and counts, so it can go on the public issue. A minute
+# or two; the quarter hour is a bound, kept short as it runs before the simulations and
+# pre-validations, which must start by 00:30.
+PASSIVE_ENTRY_ISSUE = 432
+
+
+def _a_trading_night_until_measured(night: Night) -> bool:
+    """On a trading night, until a run measured (exit 0): the next trading night again after one that
+    failed or was cut."""
+    if not night.trading_day:
+        return False
+    record = night.record
+    if record is None or record.outcome not in (OK, FAILED):
+        return True
+    return record.outcome != OK and record.day < night.day
+
+
+PASSIVE_ENTRY = Job(
+    name="passive-entry-432",
+    due=_a_trading_night_until_measured,
+    command=("measure-passive-entry",),
+    timeout=timedelta(minutes=15),
+    targets=(
+        Target(
+            PASSIVE_ENTRY_ISSUE,
+            note=(
+                "대기 매수(매수 1호가) 측정(#432): 비용 지도의 칸마다, 종류마다 trader가 살 신호를 녹화된 "
+                "호가와 KRX 체결로 시장가 진입(매도 1호가)과 대기 진입(매수 1호가, 시간 장벽에 취소)으로 "
+                "흉내 낸 결과다. 체결 가정은 둘이다: 보수적(그 가격 아래 체결), 낙관적(그 가격 이하 체결). "
+                "에이전트가 체결률, 체결된 것과 미체결의 맞힘률(역선택), 신호당·체결당 순손익(틱)으로 "
+                "대기 진입을 넣을지 추천하고, 사용자가 정한다. 넣는 것은 별도 티켓이다. 다시 돌리기(읽기만): "
+                "`docker compose run --rm engine measure-passive-entry`. 출력에는 시세 값과 가격이 없다"
+                "(틱, 비율, 초, 건수만)."
+            ),
+        ),
+    ),
+)
+
 # The night futures (#264): the collector records the KOSPI200 night session's trades and book
 # (18:00–06:00) from the deploy that brings it; what only the server shows is whether KIS
 # streams them for this app key, under the contract code asked for, in the layout of KIS's
@@ -2203,6 +2252,7 @@ JOBS: tuple[Job, ...] = (
     KIS_ORDER_PROBE,
     SIGNAL_REVIEW_AGAIN,
     LIVE_PROBE,
+    PASSIVE_ENTRY,
     *daily_prevalidation_jobs(
         [a.name for a in DAILY_ALGORITHMS],
         {a.name: a.features for a in DAILY_ALGORITHMS},
