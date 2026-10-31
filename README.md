@@ -2,7 +2,9 @@
 
 KRX 종목의 4분 뒤 가격 움직임을 여러 퀀트 알고리즘이 예측하고, 예측을 자동 채점해 통계로 보여주는 개인용 엔진이다. 결과는 fork한 Fincept Terminal([codeyoma/FinceptTerminal](https://github.com/codeyoma/FinceptTerminal), `custom` 브랜치)의 화면에서 본다.
 
-엔진(수집기)에는 주문 코드가 없다. 신호만 낸다. 자동 매매(#393)는 따로 도는 trader 프로세스(`krx-quant trade`, compose 서비스 `trader`)가 한다. 모드는 둘이다(서버 `.env`의 `KRX_TRADER_MODE`). 기본값 `paper`(모의)는 수집기가 내보내는 실시간 호가로 체결을 흉내 내고 주문은 내지 않는다. `mock`(KIS 모의, #405)은 챔피언 정책의 매매를 trader 자신의 모의 키로 KIS 모의투자 서버에 실제로 주문하고, 장부를 KIS의 체결로 쓴다. 실전(`live`, #408)은 아직 없다(설계 [14장](docs/design.md#14-자동-매매-393), 모드 바꾸기는 [operations.md](docs/operations.md) "모드 바꾸기 (#405)"). KIS 주문 코드는 trader의 KIS 주문 모듈(`src/krx_quant/kis_orders.py`) 하나에만 있고, 그 밖에서는 `scripts/check_forbidden.py`가 계속 막는다. 그것을 쓰는 것은 KIS 모의투자 서버에 주문해 응답을 재는 프로브(`krx-quant probe-kis-orders`, #403), mock 모드의 trader(`kis_orders.Broker`, #404, #405), mock 첫날의 장부를 KIS 체결 조회와 견주는 예약 작업(`krx-quant check-mock-trades`, #405)이다.
+엔진(수집기)에는 주문 코드가 없다. 신호만 낸다. 자동 매매(#393)는 따로 도는 trader 프로세스(`krx-quant trade`, compose 서비스 `trader`)가 한다. 모드는 셋이다(서버 `.env`의 `KRX_TRADER_MODE`). 기본값 `paper`(모의)는 수집기가 내보내는 실시간 호가로 체결을 흉내 내고 주문은 내지 않는다. `mock`(KIS 모의, #405)은 챔피언 정책의 매매를 trader 자신의 모의 키로 KIS 모의투자 서버에 실제로 주문하고, 장부를 KIS의 체결로 쓴다. `live`(실전, #408)는 실전 관문과 실행 점검을 넘은 챔피언만 새 실전 계좌의 키(`KRX_TRADER_LIVE_KIS_*`)로 주문하고, 그 전에는 주문 없이 모의로 돌며 모자란 것을 알린다(설계 [14장](docs/design.md#14-자동-매매-393), 모드 바꾸기는 [operations.md](docs/operations.md) "모드 바꾸기 (#405)", "실전 (#408)"). 에이전트는 실전 주문을 내지 않는다: live는 사용자가 서버에서 켠다. KIS 주문 코드는 trader의 KIS 주문 모듈(`src/krx_quant/kis_orders.py`) 하나에만 있고, 그 밖에서는 `scripts/check_forbidden.py`가 계속 막는다. 그것을 쓰는 것은 KIS 모의투자 서버에 주문해 응답을 재는 프로브(`krx-quant probe-kis-orders`, #403), mock과 live 모드의 trader(`kis_orders.Broker`, #404, #405, #408), mock 첫날의 장부를 KIS 체결 조회와 견주는 예약 작업(`krx-quant check-mock-trades`, #405)이다.
+
+> **바뀜** (2026-10-31, #PRLIVE): "모드는 둘이다", "실전(`live`, #408)은 아직 없다" → 모드는 셋이고 live는 관문과 실행 점검을 넘은 챔피언만 실전 계좌에 주문한다. 이유: #408.
 
 > **바뀜** (2026-10-30, #422): "지금은 모의(`paper`)뿐이다", "trader의 주문 모듈은 그 파일에 있지만 trader는 아직 쓰지 않는다(mock 모드, #405)" → `mock` 모드가 KIS 모의투자 서버에 실제로 주문한다. 이유: #405(spec #393의 "세 모드": 실전 전에 KIS 모의투자로 주문과 체결을 확인한다).
 
@@ -138,7 +140,7 @@ uv run krx-quant replay 2026-10-12
 docker compose up -d --build
 ```
 
-서비스는 둘이다: 수집기·엔진(`engine`)과 자동 매매 trader(`trader`, 모의뿐, #394). 같은 이미지의 다른 컨테이너라 하나가 죽어도 다른 하나는 돈다. 엔진 API의 포트만 Tailscale 주소에 열리고, 수집기가 trader에게 호가를 보내는 포트(8081)는 compose 네트워크 안에만 있다.
+서비스는 둘이다: 수집기·엔진(`engine`)과 자동 매매 trader(`trader`, #394: 모드는 `paper`, `mock`, `live`). 같은 이미지의 다른 컨테이너라 하나가 죽어도 다른 하나는 돈다. 엔진 API의 포트만 Tailscale 주소에 열리고, 수집기가 trader에게 호가를 보내는 포트(8081)는 compose 네트워크 안에만 있다.
 
 > **삭제됨** (2026-10-08, #33): `docker build -t krx-quant .` 뒤 `docker run --rm --env-file .env -u "$(id -u):$(id -g)" -v "$PWD/data:/data" -v "$PWD/state:/state" krx-quant collect`로 띄우던 안내. 이유 기록 없음. 대신: `compose.yaml`(엔진 포트를 Tailscale 주소에만 연다)과 `deploy/setup-server.sh`.
 
@@ -197,7 +199,7 @@ uv run python -c "import glob, pyarrow.parquet as pq; d = sorted(glob.glob('data
 | 명령 | 하는 일 | KIS 키 |
 |---|---|---|
 | `collect` | 실시간 녹화, 예측·채점, 엔진 API, 업로드, 백필, 밤 학습 일정, 밤 예약 작업(#215), 라벨로 요청한 이슈에 서버 요약 댓글(#322). 시작할 때 API를 연 뒤 지난 예측의 빠진 도달 정답을 녹화로 채운다(#168). 멈출 때까지 돈다 | 필요 |
-| `trade` | 자동 매매(#394): 엔진 API의 비용 지도(`KRX_TRADER_ENGINE_URL`)가 시장가 왕복으로 통과시킨 칸들(#395, 시작할 때와 매일 08:30에 고른다)의 예측을 엔진 DB에서 읽기만 하며 005930을 삼중 장벽으로 모의 매매하고 `state/trader.sqlite3`에 남긴다. 호가는 수집기의 호가 스트림(`KRX_TRADER_QUOTES_URL`)에서 받는다. 서버에서는 compose 서비스 `trader`가 돌린다(수집기와 따로). 멈출 때까지 돈다([docs/operations.md](docs/operations.md#자동-매매-394)). 하루·누적 손실 한도(운용 상한의 10%, 20%)에 닿거나 화면에서 정지하면 멈춘다(#396) | 없어도 된다 |
+| `trade` | 자동 매매(#394): 엔진 API의 비용 지도(`KRX_TRADER_ENGINE_URL`)가 시장가 왕복으로 통과시킨 칸들(#395, 시작할 때와 매일 08:30에 고른다)의 예측을 엔진 DB에서 읽기만 하며 005930을 삼중 장벽으로 매매하고 `state/trader.sqlite3`에 남긴다: `KRX_TRADER_MODE`가 `paper`면 모의로, `mock`이면 KIS 모의투자 서버에(#405), `live`면 관문과 실행 점검을 넘었을 때 새 실전 계좌에(#408. 그 전에는 모의로, 판단이 바뀌면 08:30에 스스로 멈추고 Docker가 다시 띄운다). 호가는 수집기의 호가 스트림(`KRX_TRADER_QUOTES_URL`)에서 받는다. 서버에서는 compose 서비스 `trader`가 돌린다(수집기와 따로). 멈출 때까지 돈다([docs/operations.md](docs/operations.md#자동-매매-394)). 하루·누적 손실 한도(운용 상한의 10%, 20%)에 닿거나 화면에서 정지하면 멈춘다(#396) | 없어도 된다 |
 | `trade resume`, `trade rearm` | 돌고 있는 trader에게 화면의 정지를 풀거나(`resume`) 누적 손실 한도를 다시 켜라고(`rearm`, 누적 손익을 그때부터 다시 센다) `state/trader.sqlite3`에 쓴다(#396). trader가 1초 안에 읽는다. 풀 것이 없으면 종료 코드 1이다. 서버에서 `docker compose exec trader krx-quant trade resume` | 없어도 된다 |
 | `refit-policy [--report]` | 자동 매매의 정책을 다시 맞춘다(#399, #400): 먼저 도전 정책을 챔피언과 견주어 이긴 것을 챔피언으로 바꾸고(장중이 아닐 때만), 그 밤 비용 지도(`KRX_TRADER_ENGINE_URL`)를 통과한 칸마다 문턱 θ와 Kelly 비율 λ를 저장된 20일의 예측과 정답으로 맞춘 정책 버전을 `state/trader.sqlite3`에 저장한다(엔진 DB는 읽기만). `--report`는 그 뒤 그날의 리포트(`trader-report`)를 그 출력 위에 찍는다: 예약 작업 `trader-report`가 거래일 밤마다 돌려 리포트 이슈 #417에 남긴다(#402) | 없어도 된다 |
 | `trader-report [--day YYYY-MM-DD]` | 자동 매매의 그날 리포트를 출력한다(#402): 그날의 장부와 챔피언의 매매, 매매할 칸이 없던 까닭, 정책별 모의 성적과 도전 정책 판정, 그 밤의 교체·내림·들어감·맞춘 정책, 실전 관문, 한도와 정지. 둘째 줄 `에이전트 차례:`가 에이전트를 부르는지와 그 까닭을 말한다. **가격, 계좌번호, 주문번호, 키는 출력하지 않는다.** `state/trader.sqlite3`를 읽기만 한다. 날을 주지 않으면 지금이 그 밤에 드는 거래일이다([docs/operations.md](docs/operations.md#자동-매매-394)의 "밤 리포트 (#402)") | 없어도 된다 |

@@ -1,7 +1,10 @@
 """KIS mock trading (#405, #393 "KIS 주문"): with ``KRX_TRADER_MODE=mock`` the champion's book places
 its orders on KIS's mock server through the trader's broker (``kis_orders.Broker``, #404), by the
 same decisions, limits, pauses and ledger as paper (``paper.PaperTrader``): only how an order fills
-changes. It is the execution layer alone: the champion policy's paper record is kept by its paper
+changes. The live mode (#408, ``live.py``) is the same book of mode ``live`` on the live account
+(``kis_orders.trader_live_broker``): what is said below of the mock holds for it, but where it says
+otherwise (the order probe's orders are the mock account's alone; the live account's value checked at
+the start). It is the execution layer alone: the champion policy's paper record is kept by its paper
 shadow beside it, and the challengers' in paper as ever (``desk.py``), on the same quotes; nothing
 of the KIS fills reaches them (``gap.py`` shows the difference).
 
@@ -77,6 +80,20 @@ sold until it is done (a prediction read meanwhile is ``reconciling``).
 One order is in flight at a time (``_work``): while it is, nothing else is bought or sold, and a
 sale asked for meanwhile begins once it ends. A trader stopped waits for it (``close``).
 
+**The live account's value** (#408): at the start's reconcile, an account whose value
+(``Balance.total``, ``tot_evlu_amt``) is above the operating cap (``KRX_TRADER_CAPITAL``) is told on
+Telegram: the live account is meant to hold that much alone (#393). The trader buys within its cap
+all the same.
+
+**Each KIS day against KIS** (#408, ``order_checks``): once a trading day's session is over (its
+closing auction ended, ``CHECK_AFTER`` later) with nothing open, the book reads that day's orders on
+KIS and compares them with the ledger's (``mock_check.Check``: each order's side, quantity, fills
+and fill price, and KIS's orders the ledger does not hold, the order probe's apart), and keeps the
+verdict, ``same``, ``different`` or ``no_orders``; a ``different`` day is told on Telegram. A day the
+inquiry could not be read is tried again ``Timing.check`` seconds later, and a start compares the
+days of the last ``CHECK_REACH`` it has not yet. The live mode's execution checks and its first
+period read them (``live.py``): a day not compared is no pass.
+
 **The quotes stalled** (#407, ``stall.py``): nothing new is bought, as in paper. While a position is
 open, KIS's best quotes (``Broker.best``: KRX's best bid and ask, the market the trader orders on)
 are read on the trader's key, one read at a time, at the stall and then on the clock's ticks
@@ -117,10 +134,14 @@ from krx_quant.kis_orders import (
 )
 from krx_quant.market_calendar import Session
 from krx_quant.pricing import SELL_TAX, tick_size
-from krx_quant.trader import MOCK, SYMBOL
+from krx_quant.trader import LIVE, MOCK, SYMBOL
 from krx_quant.trader.cells import Signal
 from krx_quant.trader.limits import ORDER_FAILED, SALE, Notify
-from krx_quant.trader.mock_check import probe_window
+from krx_quant.trader.live import kis_days
+from krx_quant.trader.mock_check import DIFFERENT as CHECK_DIFFERENT
+from krx_quant.trader.mock_check import NO_ORDERS as CHECK_NO_ORDERS
+from krx_quant.trader.mock_check import SAME as CHECK_SAME
+from krx_quant.trader.mock_check import Check, failures, ledger_orders, probe_window
 from krx_quant.trader.paper import NO_SHARES, TAKE_PROFIT, TIME, PaperTrader, Rules, _Waiting
 from krx_quant.trader.quotes import BestQuote
 from krx_quant.trader.reconcile import Finding, Outside, Window, candidates, compare
@@ -129,12 +150,15 @@ from krx_quant.trader.store import (
     BUY_REFUSED,
     CANCELLED,
     CLEAN,
+    DIFFERENT,
     FILLED,
     HELD,
+    NO_ORDERS,
     OPEN,
     PAUSE,
     RECONCILE,
     REST,
+    SAME,
     SELL,
     SENT,
     UNSENT,
@@ -168,6 +192,15 @@ CLOSE_SECONDS = 8.0
 # limiter's 1.8. A read every second would make a sale's 2 a second, over it: the order calls would
 # wait their turn.
 REST_SECONDS = 2.0
+# A day's orders are compared with KIS's this long after its closing auction ends (#408), and a
+# start compares the days of this far back it has not (KIS's day inquiry reaches three months).
+CHECK_AFTER = timedelta(minutes=1)
+CHECK_REACH = timedelta(days=80)
+# With no day to compare, the days are looked at again this long after (a new day's ledger is kept
+# during its session, compared after its close).
+CHECK_IDLE = timedelta(minutes=10)
+# The verdict a day's comparison keeps (``mock_check.Check.code``).
+VERDICTS = {CHECK_SAME: SAME, CHECK_DIFFERENT: DIFFERENT, CHECK_NO_ORDERS: NO_ORDERS}
 
 
 @dataclass(frozen=True)
@@ -180,6 +213,7 @@ class Timing:
     retry: float = 30.0  # a sale whose order failed is tried again this long after
     rounds: int = 5  # sells at the best bid in one go; then the next go no sooner than ``wait`` later
     rest: float = REST_SECONDS  # KIS's best quotes read this often while the quotes stall (#407)
+    check: float = 600.0  # a day's comparison whose inquiry could not be read is tried again (#408)
 
 
 @dataclass(frozen=True)
@@ -234,6 +268,7 @@ class MockTrader(PaperTrader):
         clock: Callable[[], datetime],
         notify: Notify | None = None,
         timing: Timing | None = None,
+        mode: str = MOCK,
     ) -> None:
         self._broker = broker
         self._clock = clock
@@ -246,13 +281,15 @@ class MockTrader(PaperTrader):
         self._live: Resting | None = None  # a sale's sell whose cancel did not take: open on KIS still
         self._live_buy: _LiveBuy | None = None  # a buy whose cancel did not take: open on KIS still
         self._reading: asyncio.Task[None] | None = None  # KIS's best quotes read in a stall (#407)
+        self._checking: asyncio.Task[None] | None = None  # a day's orders compared with KIS's (#408)
+        self._check_after: datetime | None = None  # a comparison that could not read KIS goes again then
         self._rest_at: datetime | None = None  # when the last of those reads began
         self._rest_failing = False  # the last read failed (said once until one is answered)
         self._closing = False
         self._reconciled = False  # the start's reconcile done (#406): nothing is bought or sold before
         self._unreadable = False  # a start that could not read KIS, told
         self._notify: Notify = notify or (lambda text: None)
-        super().__init__(store, rules, sessions, started_at, MOCK, notify)
+        super().__init__(store, rules, sessions, started_at, mode, notify)
         if self._open is not None:  # a restart: its orders open on KIS when it stopped go on
             entry = store.open_entry(self._open.id)
             if entry is not None:
@@ -266,7 +303,7 @@ class MockTrader(PaperTrader):
             # A sale begun goes on, though none of its sells is open (each cancelled, or refused).
             self._selling = store.sale_begun(self._open.id) or self._selling
         else:  # a restart: a buy of which nothing filled yet, open on KIS, is followed still
-            kept = store.open_unfilled_buy(MOCK)
+            kept = store.open_unfilled_buy(self.mode)
             if kept is not None:
                 unfilled, decision, ordered, since, would = kept
                 self._live_buy = _LiveBuy(ordered, since, 0, 0.0, decision, would, unfilled)
@@ -309,6 +346,7 @@ class MockTrader(PaperTrader):
         super().on_time(now)
         self._read_rest(now)
         self._kick(now)
+        self._check_days(now)
 
     def state(self) -> dict[str, Any]:
         body = super().state()
@@ -338,8 +376,8 @@ class MockTrader(PaperTrader):
         REST quotes' (#407); the order in flight is waited for ``timeout`` seconds at most, then
         cancelled."""
         self._closing = True
-        follower, work, reading = self._follower, self._work, self._reading
-        for task in (follower, reading):
+        follower, work, reading, checking = self._follower, self._work, self._reading, self._checking
+        for task in (follower, reading, checking):
             if task is not None:
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
@@ -473,7 +511,7 @@ class MockTrader(PaperTrader):
             if not self._unreadable:
                 self._unreadable = True
                 self._notify(
-                    f"자동 매매({MOCK}): 시작할 때 KIS 계좌를 읽지 못했습니다({e}). 장부와 맞추기 전에는"
+                    f"자동 매매({self.mode}): 시작할 때 KIS 계좌를 읽지 못했습니다({e}). 장부와 맞추기 전에는"
                     f" 사지도 팔지도 않고, {self._timing.retry:g}초마다 다시 읽습니다."
                 )
             return
@@ -482,13 +520,20 @@ class MockTrader(PaperTrader):
             today_rows,
             self._followed(),
             self._held(),
-            Outside.of(self.store.accepted_outside(MOCK)),
+            Outside.of(self.store.accepted_outside(self.mode)),
             self._probe(today),
             doubtful,
         )
         at = self._clock()
+        if self.mode == LIVE and balance.total > self.rules.capital:  # #408: the account holds the cap alone
+            log.warning("trader: the live account's value is above the operating cap")
+            self._notify(
+                f"자동 매매({self.mode}): 실전 계좌의 평가금({balance.total:,}원)이 운용 상한"
+                f"({self.rules.capital:,}원)보다 큽니다. 이 계좌에는 운용 상한만큼만 두기로 했습니다(#393)."
+                " trader는 운용 상한 안에서만 사지만, 계좌를 확인하세요."
+            )
         if finding.clean:
-            self.store.add_reconcile(at, MOCK, CLEAN, finding.outside.as_json(), finding.detail())
+            self.store.add_reconcile(at, self.mode, CLEAN, finding.outside.as_json(), finding.detail())
             log.info(
                 "trader: the KIS account is as the ledger has it (outside it, accepted: %s)",
                 finding.outside.as_json(),
@@ -496,7 +541,7 @@ class MockTrader(PaperTrader):
         else:
             self._hold(finding, at)
         if self._unreadable:
-            self._notify(f"자동 매매({MOCK}): KIS 계좌를 읽어 장부와 맞췄습니다.")
+            self._notify(f"자동 매매({self.mode}): KIS 계좌를 읽어 장부와 맞췄습니다.")
         self._reconciled, self._unreadable, self._dirty = True, False, True
         await self._go_on(at, finding)
 
@@ -543,9 +588,9 @@ class MockTrader(PaperTrader):
         """Each buy sent whose answer was not had looked up on its day's inquiry (module doc): adopted,
         not on KIS, or doubtful (left as sent). How many are doubtful."""
         doubtful = 0
-        for unfilled, decision, placed, day, would in self.store.sent_buys(MOCK):
+        for unfilled, decision, placed, day, would in self.store.sent_buys(self.mode):
             found = candidates(
-                await rows(day), placed, day, self.store.broker_numbers(MOCK), self._probe(day)
+                await rows(day), placed, day, self.store.broker_numbers(self.mode), self._probe(day)
             )
             alone = self._open is None and self._live_buy is None
             if len(found) == 1 and alone and (day < today or found[0].left == 0):
@@ -577,7 +622,7 @@ class MockTrader(PaperTrader):
         while True:
             try:
                 rows = await self._broker.orders(day)
-                found = candidates(rows, placed, day, self.store.broker_numbers(MOCK), self._probe(day))
+                found = candidates(rows, placed, day, self.store.broker_numbers(self.mode), self._probe(day))
             except BrokerError as e:
                 log.warning("trader: could not look up the buy whose answer was lost (%s)", e)
             if len(found) == 1 and found[0].left == 0:
@@ -592,7 +637,7 @@ class MockTrader(PaperTrader):
         if not found:
             log.warning("trader: the buy whose answer was lost is not on KIS yet: the next start looks again")
             return
-        accepted = Outside.of(self.store.accepted_outside(MOCK))
+        accepted = Outside.of(self.store.accepted_outside(self.mode))
         self._hold(Finding(accepted, Outside(), doubtful=1), self._clock())
 
     def _adopt(
@@ -611,7 +656,7 @@ class MockTrader(PaperTrader):
             placed.quantity,
         )
         self._notify(
-            f"자동 매매({MOCK}): 응답이 없던 매수를 KIS 주문 체결 조회에서 찾아 장부에 넣었습니다"
+            f"자동 매매({self.mode}): 응답이 없던 매수를 KIS 주문 체결 조회에서 찾아 장부에 넣었습니다"
             f"({placed.quantity}주 가운데 {row.filled}주 체결). 들고 있는 것은 원래 규칙"
             "(목표가, 손절가, 시간)대로 팝니다."
         )
@@ -620,19 +665,19 @@ class MockTrader(PaperTrader):
         """The account unlike the ledger (``finding``): nothing of it touched, new entries paused by a
         pause of source ``reconcile`` until ``krx-quant trade resume``, and told on Telegram; once
         only while the same is found again and that pause holds."""
-        held = self.store.held_reconcile(MOCK)
+        held = self.store.held_reconcile(self.mode)
         outside = finding.outside.as_json()
         if held is not None and self.guard.pause is not None and finding.same_as(held["detail"]):
-            self.store.add_reconcile(at, MOCK, HELD, outside, finding.detail())
+            self.store.add_reconcile(at, self.mode, HELD, outside, finding.detail())
             log.warning(
                 "trader: the KIS account is unlike the ledger as before (%s): paused still", finding.detail()
             )
             return
         control = self.store.add_control(at, PAUSE, RECONCILE, sell_now=False)
-        self.store.add_reconcile(at, MOCK, HELD, outside, finding.detail(), control.id)
+        self.store.add_reconcile(at, self.mode, HELD, outside, finding.detail(), control.id)
         log.warning("trader: the KIS account is unlike the ledger (%s): new entries paused", finding.detail())
         self.guard.apply(control, at)
-        self._notify(finding.notice(MOCK))
+        self._notify(finding.notice(self.mode))
         self._dirty = True
         self._enforce(at)
 
@@ -668,8 +713,83 @@ class MockTrader(PaperTrader):
         return max(0, low), high
 
     def _probe(self, day: date) -> Window:
-        """When the order probe ran on ``day`` on the same account (``mock_check.probe_window``)."""
+        """When the order probe ran on ``day`` on the same account (``mock_check.probe_window``): the
+        mock account's alone, the probe never orders on the live one (#408)."""
+        if self.mode != MOCK:
+            return None
         return probe_window(self.store.path.parent, day)
+
+    # Each KIS day against KIS (#408).
+
+    def _check_days(self, now: datetime) -> None:
+        """The oldest KIS day not compared yet whose session is over, compared with KIS's inquiry, when
+        nothing is open nor in flight (module doc)."""
+        if self._closing or not self._reconciled or self._checking is not None or self._work is not None:
+            return
+        if self._open is not None or self._live_buy is not None:
+            return
+        if self._check_after is not None and now < self._check_after:
+            return
+        done = self.store.order_checks(self.mode)
+        for day in kis_days(self.store.db, self.mode):
+            session = self._sessions(day)
+            if day in done or session is None or now - session.close > CHECK_REACH:
+                continue
+            if now < session.close + CHECK_AFTER:
+                self._check_after = session.close + CHECK_AFTER
+                return
+            self._checking = asyncio.get_running_loop().create_task(self._check_day(day))
+            return
+        self._check_after = now + CHECK_IDLE
+
+    async def _check_day(self, day: date) -> None:
+        try:
+            try:
+                rows = await self._broker.orders(day, SYMBOL)
+            except BrokerError as e:
+                self._check_after = self._clock() + timedelta(seconds=self._timing.check)
+                log.warning(
+                    "trader: could not read %s's orders on KIS to compare them with the ledger (%s); again"
+                    " in %gs",
+                    day,
+                    e,
+                    self._timing.check,
+                )
+                return
+            db = self.store.db
+            check = Check(
+                day,
+                ledger_orders(db, day, self.mode),
+                rows,
+                self._probe(day),
+                len(failures(db, day, self.mode)),
+            )
+            verdict = VERDICTS[check.code]
+            probe, others = check.extra()
+            detail = {
+                "orders": len(check.ledger),
+                "compared": len(check.compared),
+                "same": sum(1 for c in check.compared if c.same),
+                "missing": len(check.missing),
+                "extra": len(others),
+                "probe": len(probe),
+                "failed": check.failed,
+            }
+            self.store.add_order_check(self.mode, day, verdict, self._clock(), detail)
+            log.info("trader: %s's orders against KIS: %s (%s)", day, verdict, detail)
+            if verdict == DIFFERENT:
+                self._notify(
+                    f"자동 매매({self.mode}): {day}의 주문이 장부와 KIS 주문 체결 조회에서 다릅니다(장부 "
+                    f"{detail['orders']}건, 같은 것 {detail['same']}건, KIS에 없는 것 {detail['missing']}건, "
+                    f"장부에 없는 것 {detail['extra']}건). 실전 점검(#408)이 이날을 통과로 세지 않습니다."
+                    " 밤 리포트와 서버의 trader 로그를 보세요."
+                )
+        except Exception:  # a broken answer or store: said, and the day compared again later
+            log.exception("trader: comparing a day's orders with KIS broke off")
+            self._check_after = self._clock() + timedelta(seconds=self._timing.check)
+        finally:
+            if self._checking is asyncio.current_task():
+                self._checking = None
 
     # The REST quotes while the collector's quotes stall (#407).
 
@@ -736,7 +856,7 @@ class MockTrader(PaperTrader):
         # its row and decision for the order to be looked up on KIS and adopted.
         sent_at = self._clock()
         unfilled = self.store.add_unfilled_buy(
-            waiting.decision, MOCK, Placed(ask, quantity, at=sent_at), sent_at, SENT, would
+            waiting.decision, self.mode, Placed(ask, quantity, at=sent_at), sent_at, SENT, would
         )
 
         def accepted(sent: Sent) -> None:  # write-ahead: the order kept before its fills are read

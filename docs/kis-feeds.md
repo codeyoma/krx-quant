@@ -555,7 +555,7 @@ KRX 야간 파생상품시장의 KOSPI200 선물 최근월물을 녹화한다. �
 
 경로, TR ID, 보내는 필드는 KIS 예제(koreainvestment/open-trading-api `examples_llm/domestic_stock`, 2026-10-29에 읽음)에서 왔다. 받는 것은 2026-10-30 10:00 KIS 모의투자 서버에서 예약 작업 `probe-kis-orders-403`이 쟀다([#403 댓글](https://github.com/codeyoma/krx-quant/issues/403#issuecomment-6512294559), `kis_orders.PROBE_COMMENT`). 005930 1주를 사고팔았고, 체결 통보 말고는 모든 단계가 됐다(종료 코드 5, 운영 문서 2장 "KIS 모의투자 주문 확인 (#403)"). ⚠는 그 댓글로도 확인하지 못한 것이다.
 
-- **서버와 키.** trader는 수집기와 다른 앱키(`KRX_TRADER_KIS_*`)를 쓴다. 모의투자 서버는 REST `https://openapivts.koreainvestment.com:29443`, WebSocket `ws://ops.koreainvestment.com:31000`이다. 모의 TR ID(`kis_orders.Tr`, `V`로 시작한다)로 주문, 취소, 주문 체결 조회, 잔고, 매수가능조회가 모두 됐다. 시세 조회(`PRICE` `FHKST01010100`, `BOOK` `FHKST01010200`)는 실전과 같은 TR ID로 됐다. 실전 TR ID와 실전 서버는 재지 않았다 ⚠(live 모드, #408).
+- **서버와 키.** trader는 수집기와 다른 앱키(`KRX_TRADER_KIS_*`)를 쓴다. 모의투자 서버는 REST `https://openapivts.koreainvestment.com:29443`, WebSocket `ws://ops.koreainvestment.com:31000`이다. 모의 TR ID(`kis_orders.Tr`, `V`로 시작한다)로 주문, 취소, 주문 체결 조회, 잔고, 매수가능조회가 모두 됐다. 시세 조회(`PRICE` `FHKST01010100`, `BOOK` `FHKST01010200`)는 실전과 같은 TR ID로 됐다. 실전 TR ID와 실전 서버는 재지 않았다 ⚠(아래 "실전 서버 (#408)").
 
 | 호출 | 상수(TR ID, 경로) | 보내는 것 | 받은 것(실측) |
 |---|---|---|---|
@@ -595,9 +595,17 @@ KRX 야간 파생상품시장의 KOSPI200 선물 최근월물을 녹화한다. �
   - 이유: 프로브에서 조회는 됐고 첫 조회에 체결을 보였다(주문 응답 뒤 2초 안). 실시간 체결 통보는 모의 서버의 23칸이 무엇인지 모른다. 모르는 필드는 쓰지 않는다(CODING_STANDARDS "External data is probed before it is used").
   - 체결 통보는 23칸에 이름이 붙은 뒤 다시 정한다. 그때 바뀌는 것은 체결을 아는 데 걸리는 시간(조회 1초 간격)과 호출 수다(주문 하나에 조회 몇 번).
 - **trader의 주문 모듈**(`kis_orders.Broker`, `kis_orders.trader_broker`, #404). 위 실측대로 읽는다. 매수, 매도, 취소는 `Sent`다: 받아들임과 그 주문, 거부와 그 뜻, 또는 모름. 조회의 행은 `OrderRow`, 잔고는 `Balance`, 매수가능조회는 `Orderable`, 현재가는 `Price`, 최우선 호가는 `Best`다(호가 스트림이 끊겼을 때의 REST 현재가, #407: mock의 trader가 끊김 동안 포지션을 들고 있으면 2초마다 읽는다. 같은 제한기라 어느 1.1초 창에도 하나뿐이다. [design.md](design.md#14-자동-매매-393) 14장 "호가 끊김"). 잰 필드가 없거나 숫자가 아니면 그 필드 이름으로 멈춘다(`Unexpected`). 값은 오류에 넣지 않는다.
-  - `trader_broker`는 trader의 키·시크릿·계좌가 없거나, 키가 수집기의 `KIS_APP_KEY`와 같거나, `KRX_TRADER_KIS_REST_URL`·`KRX_TRADER_KIS_WS_URL`이 모의투자 서버가 아니면 만들지 않는다(설정 오류). 실전 서버는 live 모드(#408)가 연다.
+  - `trader_broker`는 trader의 키·시크릿·계좌가 없거나, 키가 수집기의 `KIS_APP_KEY`와 같거나, 키나 계좌가 실전 것(`KRX_TRADER_LIVE_KIS_*`, #408)과 같거나, `KRX_TRADER_KIS_REST_URL`·`KRX_TRADER_KIS_WS_URL`이 모의투자 서버가 아니면 만들지 않는다(설정 오류). 실전 계좌는 `trader_live_broker`(#408, 아래 "실전 서버 (#408)")다. **바뀜** (2026-10-31, #PRLIVE): "실전 서버는 live 모드(#408)가 연다" → `trader_live_broker`가 연다. 이유: #408.
   - mock 모드의 trader(`trader/mock.py`, #405)와 mock 첫날의 대조(`trader/mock_check.py`)가 쓴다. **바뀜** (2026-10-30, #422): "아직 trader는 이것을 쓰지 않는다. mock 모드(#405)가 쓴다" → 쓴다. 이유: #405. 테스트는 가짜 KIS(`fake_kis.FakeAccount`)가 위 실측의 모양, 코드, 메시지로 답한다(`tests/test_kis_orders.py`). 재지 않은 것(일부 체결의 행, 위 ⚠의 거부 코드, 토큰 거절의 상태와 메시지)은 지어낸 것이라고 적어 두었다.
 - **장 시간.** 장중(10:00)에는 즉시 체결 지정가가 체결됐다. 장 밖에서는 재지 않았다 ⚠. 그래서 프로브는 장중 작업이다(거래일 10:00).
+- **실전 서버 (#408).** live 모드의 trader(`kis_orders.trader_live_broker`)가 쓴다. 서버는 KIS의 실전 서버(`kis_orders.LIVE`: 수집기의 기본 REST `https://openapi.koreainvestment.com:9443`)로 코드에 정해져 있고, 키는 새 실전 계좌의 것(`KRX_TRADER_LIVE_KIS_APP_KEY`, `KRX_TRADER_LIVE_KIS_APP_SECRET`, `KRX_TRADER_LIVE_KIS_ACCOUNT`)이다. 수집기의 키, 모의 키, 모의 계좌와 같으면 만들지 않는다. TR ID는 각 상수의 실전 쪽(`Tr.live`: `BUY.live`, `SELL.live`, `CANCEL.live`, `FILLS.live`, `BALANCE.live`, `ORDERABLE.live`)이고, 시세(`PRICE`, `BOOK`)는 모의와 같다. 토큰은 `state/trader_live_kis_token.json`에 따로 캐시한다. 보내는 필드는 모의와 같다(KIS 예제에서 실전과 모의가 같은 본문이다).
+  - 실전 서버의 응답은 아무도 재지 않았다 ⚠: 에이전트는 실전 주문을 내지 않고, 주문 프로브는 모의투자 서버에만 주문한다(실전 키를 받으면 주문하지 않는다). 그래서 trader는 실전의 응답을 위 모의의 필드로 읽는다. 재지 않은 것:
+    - 주문·취소의 응답: 받아들임은 `rt_cd` 0과 `output`의 `KRX_FWDG_ORD_ORGNO`·`ODNO`로 읽고 `msg_cd`에 기대지 않는다(위 `40600000` 등은 모의의 것이다) ⚠.
+    - 주문 체결 조회의 행: `avg_prvs`가 체결가인지, `rmn_qty`·`tot_ccld_qty`·`rjct_qty`, 취소의 행, 한 쪽의 행 수(KIS 예제: 실전 100행) ⚠. 실전 체결이 모의처럼 호가보다 반 틱 나은지는 모른다 ⚠: 그래서 실전 첫 단계의 체결 차이는 고치지 않고 잰다.
+    - 잔고의 `tot_evlu_amt`(시작할 때 평가금이 운용 상한을 넘는지 본다), `prvs_rcdl_excc_amt`, 매수가능조회의 `ord_psbl_cash`·`nrcvb_buy_qty`의 뜻 ⚠. 증거금률 100% 계좌에서 `nrcvb_buy_qty`가 미수 없는 수량인지 ⚠.
+    - 초당 한도(실전은 20건으로 알려져 있다): trader는 모의와 같은 2건(1.1초 창)으로 보내 닿지 않게 한다 ⚠.
+    - 거부 코드와 토큰 거절의 코드 ⚠: 거부는 `rt_cd` 1로 읽고 KIS의 메시지를 남긴다.
+  - 무엇이 재나: 첫 실전 날의 주문(첫 단계라 운용 상한 25만 원 안)이다. trader가 그 체결을 주문 체결 조회로 읽고, 그날 장 마감 뒤 장부와 KIS를 견주며(`order_checks`, 다르면 텔레그램), 다음 시작의 계좌 맞추기가 다른 것을 알린다. 에이전트는 그날 밤 리포트의 "실전 준비"와 서버 스냅숏(`needs-server-snapshot`)으로 보고 이 절의 ⚠를 고친다. 다른 것이 보이면 첫 단계의 점검이 새 진입을 멈춘다(design.md 14장 "실전 (#408)").
 
 > **바뀜** (2026-10-30, #421): "모의투자 서버에서 재기 전이라 모두 ⚠다": 받는 것은 KIS 예제의 필드였고, 체결 통보는 26칸, "접근토큰은 24시간, 1분에 한 번 발급된다고 알려져 있다", "모의 서버의 초당 한도는 실전(20건)보다 낮다고 알려져 있다", 정정취소가능주문조회는 "모의투자에서 되는지는 프로브가 본다" → 위 실측(남은 것만 ⚠). trader가 체결을 실시간 체결 통보와 주문 체결 조회 중 무엇으로 받을지 → 주문 체결 조회. 이유: 2026-10-30 `probe-kis-orders-403`([#403 댓글](https://github.com/codeyoma/krx-quant/issues/403#issuecomment-6512294559)), #404.
 

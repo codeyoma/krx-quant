@@ -82,9 +82,11 @@ from krx_quant.simulation import (
 )
 from krx_quant.structure_check import structure_check
 from krx_quant.supply_probe import probe_supply
+from krx_quant.trader import LIVE
 from krx_quant.trader.limits import CONTROL_SECONDS
 from krx_quant.trader.limits import ask as ask_trader
 from krx_quant.trader.mock_check import check_mock_trades
+from krx_quant.trader.promotion import mode_at
 from krx_quant.trader.refit import run_refit
 from krx_quant.trader.report import run_night, run_report
 from krx_quant.trader.run import run_trader
@@ -110,8 +112,10 @@ async def _collect() -> None:
 
 
 async def _trade() -> None:
-    # The KIS keys are the collector's, which the trader never uses (#393): paper needs none, and
-    # mock its own (KRX_TRADER_KIS_*, #405), which the trader checks as it starts.
+    # The KIS keys are the collector's, which the trader never uses (#393): paper needs none, mock
+    # its own (KRX_TRADER_KIS_*, #405) and live the live account's (KRX_TRADER_LIVE_KIS_*, #408), which
+    # the trader checks as it starts. A trader that stops by itself (#408: the live mode's answer
+    # changed at a pick) exits 0, and Docker starts it again (``restart: unless-stopped``).
     settings = Settings.from_env(require_kis=False)
     trader = TraderSettings.from_env()
     stop = asyncio.Event()
@@ -131,6 +135,8 @@ def _trade_control(action: str) -> int:
     mode = TraderSettings.from_env().mode  # a re-arm is of the mode the trader runs in
     store = TraderStore(settings.state_dir / TRADER_DB)
     try:
+        if mode == LIVE:  # #408: a live trader runs as paper until the gate and the checks pass
+            mode = mode_at(store.db)
         asked = ask_trader(store, action, mode, datetime.now(KST))
         if isinstance(asked, str):
             print(asked)
@@ -701,8 +707,9 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("collect", help="record KIS real-time feeds until interrupted")
     trade_cmd = sub.add_parser(
         "trade",
-        help="trade 005930 on the cells the cost map passes, in paper (#394, #395) or on KIS's mock server"
-        " (KRX_TRADER_MODE=mock, #405), until interrupted;"
+        help="trade 005930 on the cells the cost map passes, in paper (#394, #395), on KIS's mock server"
+        " (KRX_TRADER_MODE=mock, #405) or on the live account once the live gate and the execution"
+        " checks pass (KRX_TRADER_MODE=live, #408), until interrupted;"
         " resume: lift the screen's pause; rearm: re-arm the cumulative loss limit (#396)",
     )
     trade_cmd.add_argument(

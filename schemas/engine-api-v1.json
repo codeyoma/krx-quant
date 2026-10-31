@@ -2801,10 +2801,10 @@
       }
     },
     "trader": {
-      "description": "GET /v1/trader (#396): the trader's state as it last wrote it into its store (at least every 5 s while it runs; alive while that is at most 15 s old), and the last 20 pauses, resumes and re-arms asked for, newest first (applied_at null until the trader has read one). Every field but alive and controls is null before the trader first wrote its state. #400: the champion's version, the live gate on its paper record, and the champion and each challenger running with their paper records (a challenger's with where it stands against the champion), read from the store whatever the trader wrote.",
+      "description": "GET /v1/trader (#396): the trader's state as it last wrote it into its store (at least every 5 s while it runs; alive while that is at most 15 s old), and the last 20 pauses, resumes and re-arms asked for, newest first (applied_at null until the trader has read one). Every field but alive and controls is null before the trader first wrote its state. #400: the champion's version, the live gate on its paper record, and the champion and each challenger running with their paper records (a challenger's with where it stands against the champion), read from the store whatever the trader wrote. #408: live, the live mode as the trader judged it at its start and at its last pick (null before #408's trader first wrote it).",
       "type": "object",
       "required": ["updated_at", "alive", "mode", "status", "started_at", "capital", "cash", "position", "today",
-                   "cumulative", "limits", "pause", "controls", "champion", "gate", "policies"],
+                   "cumulative", "limits", "pause", "live", "controls", "champion", "gate", "policies"],
       "additionalProperties": false,
       "properties": {
         "updated_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]},
@@ -2899,11 +2899,12 @@
               "properties": {
                 "at": {"$ref": "#/$defs/time"},
                 "sell_now": {"type": "boolean"},
-                "source": {"enum": ["api", "cli"]}
+                "source": {"enum": ["api", "cli", "reconcile", "ramp"]}
               }
             }
           ]
         },
+        "live": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/trader_live"}]},
         "controls": {"type": "array", "maxItems": 20, "items": {"$ref": "#/$defs/trader_control"}},
         "champion": {"type": ["integer", "null"], "minimum": 1},
         "gate": {"$ref": "#/$defs/trader_gate"},
@@ -2940,9 +2941,10 @@
       }
     },
     "trader_gate": {
-      "description": "The live gate (#400, #393): the champion's paper record of at least required (20) trading days whose day-level lower bound of the daily net P&L (no-trade days 0, two-sided level 0.95, an overlap of one) is above 0. policy null before the first champion.",
+      "description": "The live gate (#400, #393; #408: judged at checkpoints). A checkpoint falls on every 20th trading day of the trader's paper history (history: the days a champion ran); at checkpoint k the champion of that day passes when its paper record has at least required (20) days and the day-level lower bound of its daily net P&L (no-trade days 0, an overlap of one) at the two-sided level 1 - 2 alpha_k, alpha_k = 0.025 x 6 / (pi^2 k^2), is above 0. days, mean: the champion's record now; low at level: the next checkpoint's, or the one it passed at (passed_at). checkpoint: the next one (its number k, its day of the history, alpha, level). stressed: it passed a checkpoint with one extra adverse tick a leg too. last: the latest checkpoint judged. policy null before the first champion.",
       "type": "object",
-      "required": ["policy", "days", "required", "mean", "low", "level", "passed"],
+      "required": ["policy", "days", "required", "mean", "low", "level", "passed", "history", "checkpoint", "passed_at",
+                   "stressed", "last"],
       "additionalProperties": false,
       "properties": {
         "policy": {"type": ["integer", "null"], "minimum": 1},
@@ -2951,7 +2953,104 @@
         "mean": {"type": ["number", "null"]},
         "low": {"type": ["number", "null"]},
         "level": {"type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1},
-        "passed": {"type": "boolean"}
+        "passed": {"type": "boolean"},
+        "history": {"type": "integer", "minimum": 0},
+        "checkpoint": {
+          "type": "object",
+          "required": ["k", "day", "every", "alpha", "level"],
+          "additionalProperties": false,
+          "properties": {
+            "k": {"type": "integer", "minimum": 1},
+            "day": {"type": "integer", "minimum": 1},
+            "every": {"type": "integer", "minimum": 1},
+            "alpha": {"type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1},
+            "level": {"type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1}
+          }
+        },
+        "passed_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/trader_checkpoint"}]},
+        "stressed": {"type": "boolean"},
+        "last": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/trader_checkpoint"}]}
+      }
+    },
+    "trader_checkpoint": {
+      "description": "A checkpoint of the live gate judged by the nightly job (#408): its number k, its day (the trader's k x 20th paper day), the champion then and its paper record up to it (days, mean in won), its lower bound at level (1 - 2 alpha) and the same with one extra adverse tick a leg (stressed_low), whether each is above 0 with 20 days at least, and when it was judged.",
+      "type": "object",
+      "required": ["k", "day", "policy", "days", "mean", "low", "stressed_low", "alpha", "level", "passed",
+                   "stressed_passed", "at"],
+      "additionalProperties": false,
+      "properties": {
+        "k": {"type": "integer", "minimum": 1},
+        "day": {"$ref": "#/$defs/day"},
+        "policy": {"type": ["integer", "null"], "minimum": 1},
+        "days": {"type": "integer", "minimum": 0},
+        "mean": {"type": ["number", "null"]},
+        "low": {"type": ["number", "null"]},
+        "stressed_low": {"type": ["number", "null"]},
+        "alpha": {"type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1},
+        "level": {"type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1},
+        "passed": {"type": "boolean"},
+        "stressed_passed": {"type": "boolean"},
+        "at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]}
+      }
+    },
+    "trader_live_check": {
+      "description": "One check of the live mode (#408): its name, whether it passes, what it found (value) against what it needs (required), and that in Korean (said).",
+      "type": "object",
+      "required": ["name", "passed", "value", "required", "said"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {"enum": ["mock_days", "mock_trips", "order_checks", "order_failed", "reconcile", "unresolved", "flat",
+                          "gap", "stressed_gate", "live_days", "live_trips", "live_gap"]},
+        "passed": {"type": "boolean"},
+        "value": {"type": ["number", "null"]},
+        "required": {"type": ["number", "null"]},
+        "said": {"type": "string"}
+      }
+    },
+    "trader_live": {
+      "description": "The live mode as the trader judged it at its start and at its last pick (#408): configured, KRX_TRADER_MODE is live; ordering, the champion's book orders on the live account now; unlocked, the live gate and every execution check pass; missing, the names of what does not (gate first); gate, the gate's standing in Korean; checks, the execution checks on the mock period (its first and last day and days); ramp, in live mode the first period: its cap in won (250,000 until lifted to the capital), when it was lifted, since when it counts, its live days and round trips and what they need, its checks, and a breach whose pause holds.",
+      "type": "object",
+      "required": ["configured", "ordering", "unlocked", "missing", "gate", "checks", "period", "ramp"],
+      "additionalProperties": false,
+      "properties": {
+        "configured": {"type": "boolean"},
+        "ordering": {"type": "boolean"},
+        "unlocked": {"type": "boolean"},
+        "missing": {"type": "array", "items": {"type": "string"}},
+        "gate": {"type": "string"},
+        "checks": {"type": "array", "items": {"$ref": "#/$defs/trader_live_check"}},
+        "period": {
+          "type": "object",
+          "required": ["since", "until", "days"],
+          "additionalProperties": false,
+          "properties": {
+            "since": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/day"}]},
+            "until": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/day"}]},
+            "days": {"type": "integer", "minimum": 0}
+          }
+        },
+        "ramp": {
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "required": ["cap", "lifted_at", "since", "days", "required_days", "trips", "required_trips", "checks",
+                           "breached_at"],
+              "additionalProperties": false,
+              "properties": {
+                "cap": {"type": "integer", "minimum": 1},
+                "lifted_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]},
+                "since": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]},
+                "days": {"type": "integer", "minimum": 0},
+                "required_days": {"type": "integer", "minimum": 1},
+                "trips": {"type": "integer", "minimum": 0},
+                "required_trips": {"type": "integer", "minimum": 1},
+                "checks": {"type": "array", "items": {"$ref": "#/$defs/trader_live_check"}},
+                "breached_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]}
+              }
+            }
+          ]
+        }
       }
     },
     "trader_promotion": {
@@ -2993,7 +3092,7 @@
         "id": {"type": "integer"},
         "at": {"$ref": "#/$defs/time"},
         "action": {"enum": ["pause", "resume", "rearm"]},
-        "source": {"enum": ["api", "cli"]},
+        "source": {"enum": ["api", "cli", "reconcile", "ramp"]},
         "sell_now": {"type": ["boolean", "null"]},
         "mode": {"enum": ["paper", "mock", "live", null]},
         "applied_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]}

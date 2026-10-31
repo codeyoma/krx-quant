@@ -697,7 +697,7 @@ def promote_now(trader_db: Path, sessions: Callable[[date], Session | None], now
     if not trader_db.exists():
         print(
             promotion.report(
-                promotion.Promotion(now, None, (), None, promotion.NO_CHAMPION, promotion.gate(None, None))
+                promotion.Promotion(now, None, (), None, promotion.NO_CHAMPION, promotion.no_gate())
             )
             + "\n"
         )

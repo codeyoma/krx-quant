@@ -7,8 +7,9 @@ the trader's own mock account (``KRX_TRADER_KIS_*``, never the collector's key),
 ``kis_orders`` (this module holds no TR ID):
 
 1. the settings: the servers, the keys, the account's form; it refuses any server that is not the
-   mock one (``REFUSED``) and stops without the keys (``NO_KEYS``) or outside the session
-   (``CLOSED``), placing nothing;
+   mock one and a mock key or account that is the live one (``KRX_TRADER_LIVE_KIS_*``, #408)
+   (``REFUSED``), and stops without the keys (``NO_KEYS``) or outside the session (``CLOSED``),
+   placing nothing;
 2. the token: issued twice, one right after the other (what the second gets);
 3. the per-second limit: ``BURST`` reads of the orderable cash sent at once;
 4. the quotes the orders are priced from (KRX's: the price, the day's limits, the tick, the best
@@ -228,6 +229,13 @@ async def probe_kis_orders(
             '"KIS 모의투자 키") 다음 거래일 장중에 다시 돈다.'
         )
         return NO_KEYS
+    if _live_key(settings):
+        say(
+            "  - 모의 키나 계좌(KRX_TRADER_KIS_*)가 실전 것(KRX_TRADER_LIVE_KIS_*)과 같아 주문하지 않았다."
+            " 이 프로브는 모의투자 계좌에만 주문한다(#408). 서버 .env의 모의 키를 고치면 다음 거래일 장중에"
+            " 다시 돈다."
+        )
+        return REFUSED
     try:
         account_no = AccountNo.parse(settings.trader_kis_account or "")
     except ValueError:
@@ -260,6 +268,19 @@ async def probe_kis_orders(
 
 def _keys(settings: Settings) -> tuple[str | None, ...]:
     return settings.trader_kis_app_key, settings.trader_kis_app_secret, settings.trader_kis_account
+
+
+def _live_key(settings: Settings) -> bool:
+    """Whether the mock key or account is the live one (#408): the probe never orders with it."""
+
+    def digits(text: str | None) -> str:
+        return "".join(c for c in text or "" if c.isdigit())
+
+    live_account = digits(settings.trader_live_kis_account)
+    return (
+        settings.trader_live_kis_app_key is not None
+        and settings.trader_kis_app_key == settings.trader_live_kis_app_key
+    ) or (bool(live_account) and digits(settings.trader_kis_account) == live_account)
 
 
 class _Probe:

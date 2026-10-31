@@ -490,3 +490,16 @@ async def test_it_places_nothing_on_an_account_the_trader_may_be_using(
         len(account.orders) == placed and posted(fake, kis_orders.BUY) == posted(fake, kis_orders.SELL) == []
     )
     assert account.holdings.get(SYMBOL, 0) == (14 if busy == "held" else 0)
+
+
+async def test_it_never_orders_with_the_live_key_or_the_live_account(
+    trader: tuple[FakeKis, FakeAccount], tmp_path: Path
+) -> None:
+    """#408: the live key is the live account's own; a mock key or account that is it stops the probe
+    before it sends anything."""
+    fake, _ = trader
+    for change in ({"trader_live_kis_app_key": TRADER_KEY}, {"trader_live_kis_account": ACCOUNT}):
+        code, text = await probe(trader_settings(fake, tmp_path, **change), fake)
+        assert code == REFUSED
+        assert "실전 것(KRX_TRADER_LIVE_KIS_*)과 같아 주문하지 않았다" in text
+    assert nothing_sent(fake)

@@ -46,7 +46,9 @@ champion policy's for the cell, #399, before the first ``KELLY_FRACTION``, a hal
 capital, over the best ask, rounded down: ⌊min(capital − what is open, fraction × capital, cash)
 ÷ ask⌋ (nothing is open: one position at a time). The cash is the paper account's (#396): the
 capital, plus the net P&L of every trade of the mode exited, less the open position's cost; a
-buy pays its commission from it too. Below one share it buys nothing (``no_shares``).
+buy pays its commission from it too. Below one share it buys nothing (``no_shares``). A cap below
+the capital (``cap``: the live mode's first period, #408, ``live.py``) takes the capital's place in
+both terms.
 
 Its reference price is the prediction's ``anchor`` (the bar close's integrated mid-point), the
 target ``anchor + w × tick``, the stop ``anchor − w × tick`` (w = k for the direction), the time
@@ -334,6 +336,10 @@ class PaperTrader:
         self.mode = mode
         self.challenger = challenger
         self.shadow = shadow
+        # What a buy sizes on in place of the capital, if below it (#408: the live first period's cap).
+        self.cap: int | None = None
+        # The live mode's state as the trader last judged it (#408, ``live.live_state``): its state's.
+        self.live: dict[str, Any] | None = None
         self._guard: Guard | None = None
         self.holds: Holds
         if challenger is None and not shadow:
@@ -693,6 +699,7 @@ class PaperTrader:
             "pause": None
             if guard.pause is None
             else {"at": iso(guard.pause.at), "sell_now": guard.pause.sell_now, "source": guard.pause.source},
+            "live": self.live,
         }
 
     def _busy(self) -> bool:
@@ -817,8 +824,9 @@ class PaperTrader:
             self._give_up(waiting, TARGET_REACHED)
             return
         pick = waiting.pick
+        capital = self.rules.capital if self.cap is None else min(self.rules.capital, self.cap)
         cash = self.rules.capital + self.holds.realized_all  # nothing open: one at a time
-        quantity = shares(pick.fraction, self.rules.capital, quote.ask, cash, self.rules.fee_rate)
+        quantity = shares(pick.fraction, capital, quote.ask, cash, self.rules.fee_rate)
         if quantity < 1:
             self._give_up(waiting, NO_SHARES)
             return

@@ -1,6 +1,7 @@
 """The trader (#393, #394, #395): trades 005930 by the triple barrier on the cells the cost map
 passes, as its own process (``krx-quant trade``, compose service ``trader``), apart from the
-collector.
+collector. In live mode (#408, ``live.py``) the champion orders on the new live account, past the
+live gate and the execution checks alone.
 
 In paper (``KRX_TRADER_MODE=paper``, the default, #394) the trader fills its orders on the
 collector's live best quotes (``quotes.py``) and writes what it did to its own store,
@@ -48,8 +49,17 @@ challengers stay in paper. The trader holds no order code: the KIS order calls l
   held by no limit nor pause; trades and decisions are split by policy version. The nightly job
   promotes one that beat the champion on at least ten common trading days (the day-level lower
   bound of challenger − champion net P&L above 0, Bonferroni over the challengers), after the
-  market only. The live gate: the champion's paper record of 20 trading days at least, the
-  day-level lower bound of its daily net P&L above 0 (measured; the live mode is #408's).
+  market only. The live gate (#408): judged at checkpoints, every 20th day of the trader's paper
+  history, on the champion of that day and its paper record of 20 days at least, the day-level
+  lower bound of its daily net P&L above 0 at α_k = 0.025 × 6 ÷ (π² k²); a champion that passed
+  stays passed.
+- **Live** (``live.py``, #408): with ``KRX_TRADER_MODE=live`` the champion's book is the KIS book of
+  mode ``live`` on the live account (``kis_orders.trader_live_broker``: the live key alone), once the
+  live gate and the execution checks on the mock days pass (KIS days compared, no failed order nor
+  reconcile pause, nothing left open, flat by the auction, the adverse gap a leg within bounds, the
+  gate passing with one extra tick a leg); until then the trader runs as paper and says what is
+  missing. Its first period sizes on 250,000 won until 20 live days and 30 round trips pass their
+  checks; a breach pauses new entries until ``krx-quant trade resume``.
 - **Limits and pauses** (``limits.py``, #396): the loss is the net realized P&L plus the open
   position's at the best bid, after its costs; a day's of 10% of the capital stops the day (sold
   at once, trading again the next trading day), a cumulative one of 20% stops the trader until
@@ -89,12 +99,15 @@ from datetime import time, timedelta
 SYMBOL = "005930"
 
 # The modes (#393): paper, filled on the live quotes inside the trader; mock (#405), the champion's
-# orders placed on KIS's mock server (``mock.py``), the challengers in paper beside it. The live
-# account (live) comes with its mode (#408).
+# orders placed on KIS's mock server (``mock.py``), the challengers in paper beside it; live (#408),
+# the champion's orders placed on the live account the same way, once the live gate and the execution
+# checks pass (``live.py``; until then the trader runs as paper). The two that order on KIS
+# (``KIS_MODES``) share the KIS book (``mock.MockTrader``).
 PAPER = "paper"
 MOCK = "mock"
-MODES = (PAPER, MOCK)
-LATER_MODES = ("live",)
+LIVE = "live"
+MODES = (PAPER, MOCK, LIVE)
+KIS_MODES = (MOCK, LIVE)
 
 # The kinds a cell may be of (#393): the four-minute direction, and the barrier at 4, 15 and 30
 # minutes. The 60-minute barrier and the daily kinds are not traded.

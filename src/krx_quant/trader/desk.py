@@ -29,12 +29,16 @@ same cells' predictions and the same quotes, in one process.
   limit nor pause, as a challenger's book is), on the same picks, predictions and quotes. The
   shadow and the challengers size on the paper account (``store.paper_account``: the net of the
   champion's paper book), never on the KIS fills, so no difference of execution reaches them.
+- **Live mode** (#408): with the live gate and the execution checks passed (``live.py``, judged by
+  ``run.py``), the champion's book is the same KIS book of mode ``live`` on the live account, with
+  its paper shadow as in mock mode, sized on the first period's cap until it is lifted (``ramp``).
+  Before they pass the trader runs the desk in paper (its mode ``paper``).
 - **Records** (``record``): while a trading day's session is open (from its open to the end of its
   closing auction), each running book's policy ran that day (``policy_days``), always in paper
-  (#405): the champion's (in mock mode its shadow's), stopped once its status is not ``running``
-  in the session (in mock mode never: the shadow is held by nothing); each challenger's. Each
-  policy-day once. The promotion and the live gate read them (``promotion.py``). Before the first
-  champion the champion's book has no policy and keeps no record.
+  (#405): the champion's (in mock and live mode its shadow's), stopped once its status is not
+  ``running`` in the session (in mock and live mode never: the shadow is held by nothing); each
+  challenger's. Each policy-day once. The promotion and the live gate read them (``promotion.py``).
+  Before the first champion the champion's book has no policy and keeps no record.
 
 The champion never changes during a session: it is read at the picks only, and a promotion is
 written after the market alone (``promotion.in_market``).
@@ -46,12 +50,13 @@ import logging
 import sqlite3
 from collections.abc import Callable, Sequence
 from datetime import date, datetime, timedelta
+from typing import Any
 
 from krx_quant.feeds.base import kst_day
 from krx_quant.kis_orders import Broker
 from krx_quant.market_calendar import Session
 from krx_quant.special import Window
-from krx_quant.trader import MOCK, PAPER, policy
+from krx_quant.trader import KIS_MODES, LIVE, PAPER, live, policy
 from krx_quant.trader.cells import Cell, Signal
 from krx_quant.trader.limits import RUNNING, Notify
 from krx_quant.trader.mock import MockTrader, Timing
@@ -114,15 +119,18 @@ class Desk:
         # The collector's quotes, watched for every book (#407): a stall the trader stopped during,
         # taken up again, holds the books made below.
         self.watch = QuoteWatch(store, mode, sessions, started_at, notify or (lambda text: None), stall_after)
+        self._notify: Notify = notify or (lambda text: None)
         self.champion: PaperTrader
-        if mode == MOCK:
+        if mode in KIS_MODES:
             if broker is None or clock is None:
-                raise ValueError("the mock mode's champion orders through a broker, at a clock")
-            self.champion = MockTrader(store, rules, sessions, started_at, broker, clock, notify, timing)
+                raise ValueError(f"the {mode} mode's champion orders through a broker, at a clock")
+            self.champion = MockTrader(
+                store, rules, sessions, started_at, broker, clock, notify, timing, mode=mode
+            )
         else:
             self.champion = PaperTrader(store, rules, sessions, started_at, mode, notify)
         self.shadow: PaperTrader | None = None
-        if mode == MOCK:  # the champion policy's paper record, beside its KIS orders (#405)
+        if mode in KIS_MODES:  # the champion policy's paper record, beside its KIS orders (#405, #408)
             self.shadow = PaperTrader(
                 store,
                 rules,
@@ -150,9 +158,9 @@ class Desk:
 
     def _paper_account(self) -> float:
         """The net P&L the paper books size on: the champion's book's in paper mode (the trades its
-        limits hold); in mock mode the champion's paper book's (``store.paper_account``), never the KIS
-        fills (#405)."""
-        if self.mode != MOCK:
+        limits hold); in mock and live mode the champion's paper book's (``store.paper_account``),
+        never the KIS fills (#405)."""
+        if self.mode not in KIS_MODES:
             return self.champion.holds.realized_all
         return self.store.paper_account()
 
@@ -201,7 +209,7 @@ class Desk:
         (and its shadow's), and under each challenger running that day for its own (module doc)."""
         under = under_champion(self.store, selection)
         self.champion.select(under, at)
-        if self.mode == MOCK and self.shadow is not None:
+        if self.mode in KIS_MODES and self.shadow is not None:
             self.shadow.select(under, at)
         running: dict[int, policy.Policy] = {}
         try:
@@ -261,6 +269,22 @@ class Desk:
         self.champion.write(now)
         self.record(now)
 
+    def set_live(self, state: dict[str, Any], at: datetime) -> None:
+        """The live mode's state as the trader judged it at ``at`` (#408, ``live.live_state``): in the
+        champion's state from now (``GET /v1/trader``'s ``live``)."""
+        self.champion.live = state
+        self.champion.write(at)
+
+    def ramp(self, at: datetime) -> live.Ramp | None:
+        """In live mode (#408): the first period judged at ``at`` (a lift or a breach written and told,
+        ``live.step``), and the champion's book sized on its cap from now; its pause read at once."""
+        if self.mode != LIVE:
+            return None
+        found = live.step(self.store, self._sessions, at, self.rules.capital, self._notify)
+        self.champion.cap = None if found.cap >= self.rules.capital else found.cap
+        self.champion.on_controls(at)
+        return found
+
     async def start(self) -> None:
         """Before anything trades: in mock mode the champion's book reconciles the KIS account with
         the ledger (#406, ``mock.MockTrader.start``)."""
@@ -284,8 +308,8 @@ class Desk:
             self._recorded = {k: v for k, v in self._recorded.items() if k[1] == day}
         books: list[tuple[int, bool, bool]] = [(v, False, False) for v in sorted(self._running)]
         if self.champion.policy is not None:
-            # In mock mode its record is the shadow's, which no pause nor limit stops (#405).
-            stopped = self.mode != MOCK and self.champion.status != RUNNING
+            # In mock and live mode its record is the shadow's, which no pause nor limit stops (#405).
+            stopped = self.mode not in KIS_MODES and self.champion.status != RUNNING
             books.insert(0, (self.champion.policy, True, stopped))
         for version, champion, stopped in books:
             kept = self._recorded.get((version, day))
@@ -298,7 +322,7 @@ class Desk:
     def _prune(self) -> None:
         """Let a retired challenger's book go once it holds nothing, and outside mock mode the shadow
         book that sold the shadow's trade left open (#405)."""
-        if self.mode != MOCK and self.shadow is not None and not self.shadow.busy:
+        if self.mode not in KIS_MODES and self.shadow is not None and not self.shadow.busy:
             self.shadow = None
         for version in [
             v for v, book in self.challengers.items() if v not in self._running and not book.busy

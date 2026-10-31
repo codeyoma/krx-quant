@@ -143,9 +143,10 @@ def trader_in_mock(state_dir: Path) -> bool:
         return True
 
 
-def ledger_orders(db: sqlite3.Connection, day: date) -> list[LedgerOrder]:
-    """The champion's mock orders placed on ``day`` with a KIS order, oldest first: its trades'
-    orders, and its buys of which nothing filled (``unfilled_buys``: no trade, ``trade`` None)."""
+def ledger_orders(db: sqlite3.Connection, day: date, mode: str = MOCK) -> list[LedgerOrder]:
+    """The champion's ``mode`` orders (mock; live, #408) placed on ``day`` with a KIS order, oldest
+    first: its trades' orders, and its buys of which nothing filled (``unfilled_buys``: no trade,
+    ``trade`` None)."""
     found: list[LedgerOrder] = []
     if _has(db, "orders"):
         rows = db.execute(
@@ -155,7 +156,7 @@ def ledger_orders(db: sqlite3.Connection, day: date) -> list[LedgerOrder]:
             " WHERE o.mode = ? AND o.broker_id IS NOT NULL AND substr(o.placed_at, 1, 10) = ?"
             f" AND {champion_of(db)}"
             " GROUP BY o.id ORDER BY o.placed_at, o.id",
-            (MOCK, day.isoformat()),
+            (mode, day.isoformat()),
         )
         found += [
             LedgerOrder(
@@ -177,7 +178,7 @@ def ledger_orders(db: sqlite3.Connection, day: date) -> list[LedgerOrder]:
             "SELECT quantity, placed_at, broker_id FROM unfilled_buys"
             " WHERE mode = ? AND substr(placed_at, 1, 10) = ? AND status IN ('open', 'cancelled')"
             " AND broker_id != ''",
-            (MOCK, day.isoformat()),
+            (mode, day.isoformat()),
         )
         found += [
             LedgerOrder(
@@ -195,12 +196,12 @@ def ledger_orders(db: sqlite3.Connection, day: date) -> list[LedgerOrder]:
     return sorted(found, key=lambda o: o.placed_at)
 
 
-def failures(db: sqlite3.Connection, day: date) -> list[sqlite3.Row]:
+def failures(db: sqlite3.Connection, day: date, mode: str = MOCK) -> list[sqlite3.Row]:
     if not _has(db, "failures"):
         return []
     return db.execute(
         "SELECT at, what, outcome, code FROM failures WHERE mode = ? AND day = ? ORDER BY id",
-        (MOCK, day.isoformat()),
+        (mode, day.isoformat()),
     ).fetchall()
 
 

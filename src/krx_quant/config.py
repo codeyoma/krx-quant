@@ -263,6 +263,14 @@ class Settings:
     # servers unless set. The order probe refuses any other.
     trader_kis_rest_url: str = KIS_MOCK_REST_URL
     trader_kis_ws_url: str = KIS_MOCK_WS_URL
+    # The trader's live key (#408): the new live account's own app key and that account
+    # (KRX_TRADER_LIVE_KIS_APP_KEY, KRX_TRADER_LIVE_KIS_APP_SECRET, KRX_TRADER_LIVE_KIS_ACCOUNT), apart
+    # from the mock ones above under names of their own, so that neither the mock mode nor the order
+    # probe can ever pick it up. Read by the live mode alone (``kis_orders.trader_live_broker``), on
+    # KIS's live servers, which no setting changes. Kept as written; masked as secrets.
+    trader_live_kis_app_key: str | None = field(default=None, repr=False)
+    trader_live_kis_app_secret: str | None = field(default=None, repr=False)
+    trader_live_kis_account: str | None = field(default=None, repr=False)
 
     @property
     def trader_kis(self) -> bool:
@@ -519,6 +527,9 @@ class Settings:
             trader_kis_hts_id=values.get("KRX_TRADER_KIS_HTS_ID", "").strip() or None,
             trader_kis_rest_url=values.get("KRX_TRADER_KIS_REST_URL", "").strip() or KIS_MOCK_REST_URL,
             trader_kis_ws_url=values.get("KRX_TRADER_KIS_WS_URL", "").strip() or KIS_MOCK_WS_URL,
+            trader_live_kis_app_key=values.get("KRX_TRADER_LIVE_KIS_APP_KEY", "").strip() or None,
+            trader_live_kis_app_secret=values.get("KRX_TRADER_LIVE_KIS_APP_SECRET", "").strip() or None,
+            trader_live_kis_account=values.get("KRX_TRADER_LIVE_KIS_ACCOUNT", "").strip() or None,
         )
 
 

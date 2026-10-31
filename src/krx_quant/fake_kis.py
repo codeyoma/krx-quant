@@ -17,7 +17,8 @@ cash, the quotes, and the encrypted real-time fill notice. Its fields, codes
 and messages are those the order probe measured on KIS's mock server
 (``kis_orders.PROBE_COMMENT``) but where it says they are made up. Its orders are
 day orders (#406): each is of the day it was placed, and once that day is over it
-neither fills nor can be cancelled.
+neither fills nor can be cancelled. With ``live`` (#408) it is the live account instead, on the
+live server's TR IDs, its codes and messages made up (the live server was not measured).
 """
 
 from __future__ import annotations
@@ -476,6 +477,16 @@ NOTHING_TO_CANCEL = ("FK0004", "정정/취소할 수량이 없습니다.")
 PAST_DAY = ("FK0005", "당일 주문만 취소할 수 있습니다.")
 BUY_SIDE, SELL_SIDE = kis_orders.SIDE_BUY, kis_orders.SIDE_SELL
 BRANCH = "01790"  # made up: the order's branch (KRX_FWDG_ORD_ORGNO, ord_gno_brno)
+# Not measured, made up (#408): the live server's codes and messages for the mock server's above.
+LIVE_SAID = {
+    BOUGHT: ("FK1001", "매수주문이 완료 되었습니다."),
+    SOLD: ("FK1002", "매도주문이 완료 되었습니다."),
+    CANCELLED: ("FK1003", "취소주문이 완료 되었습니다."),
+    INQUIRED: ("FK1004", "조회가 완료되었습니다."),
+    NO_ROWS: ("FK1005", "조회할 내역이 없습니다."),
+    OFF_TICK: ("FK1006", "주문처리가 안되었습니다(호가단위 오류)"),
+    NOT_HELD: ("FK1007", "잔고내역이 없습니다."),
+}
 NUMBERS_FROM = 31_401  # made up: the first order number
 
 
@@ -550,6 +561,8 @@ class FakeAccount:
     notice_fields: int | None = None
     hts_id: str = "testhts01"
     account: str = "1234567801"
+    # The live account (#408): the live server's TR IDs, the codes and messages made up (``LIVE_SAID``).
+    live: bool = False
     page_rows: int = 15  # rows a page of the inquiry (KIS's example's for the mock; not measured)
     # The next orders whose answer is lost: taken, then the connection drops before the answer.
     lose_answers: int = 0
@@ -563,16 +576,22 @@ class FakeAccount:
     _pushes: set[asyncio.Task[None]] = field(default_factory=set)
 
     def install(self) -> FakeAccount:
+        mock = not self.live
         for tr in (kis_orders.BUY, kis_orders.SELL):
-            self.kis.rest_posts[tr.mock] = self._order
-        self.kis.rest_posts[kis_orders.CANCEL.mock] = self._cancel
-        self.kis.rest_responses[kis_orders.FILLS.mock] = self._fills
-        self.kis.rest_responses[kis_orders.BALANCE.mock] = self._balance
-        self.kis.rest_responses[kis_orders.ORDERABLE.mock] = self._orderable
-        self.kis.rest_responses[kis_orders.CANCELABLE.mock] = _not_mock
+            self.kis.rest_posts[tr.of(mock)] = self._order
+        self.kis.rest_posts[kis_orders.CANCEL.of(mock)] = self._cancel
+        self.kis.rest_responses[kis_orders.FILLS.of(mock)] = self._fills
+        self.kis.rest_responses[kis_orders.BALANCE.of(mock)] = self._balance
+        self.kis.rest_responses[kis_orders.ORDERABLE.of(mock)] = self._orderable
+        if mock:
+            self.kis.rest_responses[kis_orders.CANCELABLE.mock] = _not_mock
         self.kis.rest_responses[kis_orders.PRICE] = self._price
         self.kis.rest_responses[kis_orders.BOOK] = self._book
         return self
+
+    def _said(self, said: tuple[str, str]) -> tuple[str, str]:
+        """The code and message the server answers: the mock's as measured, the live's made up."""
+        return LIVE_SAID.get(said, said) if self.live else said
 
     def placed(self, side: str) -> list[FakeOrder]:
         return [o for o in self.orders if o.side == side and not o.original]
@@ -634,9 +653,9 @@ class FakeAccount:
         side = SELL_SIDE if "SLL_TYPE" in body else BUY_SIDE
         symbol, quantity, price = str(body["PDNO"]), int(body["ORD_QTY"]), int(body["ORD_UNPR"])
         if price % tick_size(price):
-            return self._refuse(OFF_TICK, side, symbol, quantity, price)
+            return self._refuse(self._said(OFF_TICK), side, symbol, quantity, price)
         if side == SELL_SIDE and not self.holdings.get(symbol, 0):
-            return self._refuse(NOT_HELD, side, symbol, quantity, price)
+            return self._refuse(self._said(NOT_HELD), side, symbol, quantity, price)
         if side == SELL_SIDE and quantity > self.holdings[symbol] - self._held_shares(symbol):
             return self._refuse(SHARES_REFUSED, side, symbol, quantity, price)
         order = FakeOrder(self._number(), side, symbol, quantity, price, self._now(), day=self.day)
@@ -644,7 +663,7 @@ class FakeAccount:
         self._tell(order, "1", "0", "1", quantity, price)
         if self.fills and self._marketable(order):
             self.fill(order, self.depth)
-        answer = _accepted(order, BOUGHT if side == BUY_SIDE else SOLD)
+        answer = _accepted(order, self._said(BOUGHT if side == BUY_SIDE else SOLD))
         if self.lose_answers > 0:
             self.lose_answers -= 1
             raise ConnectionResetError("the answer is lost")
@@ -678,7 +697,7 @@ class FakeAccount:
         original.cancelled += original.left
         self.orders.append(cancel)
         self._tell(cancel, "1", "2", "2", cancel.quantity, original.price)
-        return _accepted(cancel, CANCELLED)
+        return _accepted(cancel, self._said(CANCELLED))
 
     def _refuse(
         self, refusal: tuple[str, str], side: str, symbol: str, quantity: int, price: int
@@ -709,7 +728,7 @@ class FakeAccount:
             "pchs_avg_pric": "0.0000",
             "prsm_tlex_smtl": "0",
         }
-        code, message = INQUIRED if rows else NO_ROWS
+        code, message = self._said(INQUIRED if rows else NO_ROWS)
         body = {
             "ctx_area_fk100": "",
             "ctx_area_nk100": str(start + self.page_rows) if more else "",
@@ -821,7 +840,7 @@ class FakeAccount:
             "asst_icdc_amt": str(settled + held - self.cash),
             "asst_icdc_erng_rt": "0.00000000",
         }
-        code, message = INQUIRED
+        code, message = self._said(INQUIRED)
         body = {
             "ctx_area_fk100": "",
             "ctx_area_nk100": "",
@@ -851,7 +870,7 @@ class FakeAccount:
             "ovrs_re_use_amt_wcrc": "0",
             "ord_psbl_frcr_amt_wcrc": "0",
         }
-        code, message = INQUIRED
+        code, message = self._said(INQUIRED)
         return {"output": output, "rt_cd": "0", "msg_cd": code, "msg1": message}, {"tr_cont": "E"}
 
     def _price(self, params: dict[str, str]) -> RestAnswer:
