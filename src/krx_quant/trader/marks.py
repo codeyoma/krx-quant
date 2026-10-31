@@ -7,8 +7,10 @@ trade's quantity, mode and cell. The sell carries why the trade ended and its ne
 the buy carries neither. Each carries its trade's policy version (``policy``, #399; null for a
 trade entered before the first champion). The chart shows the champion's trades: those its book
 made (``store.CHAMPION_TRADE``, #400: ``trades.champion``; before the first champion too); a
-challenger's paper trades (#400) are not marked. A store the trader has not opened since #399 has
-no policy yet: every trade, ``policy`` null; one not opened since #400, no challenger's trade.
+challenger's paper trades (#400) are not marked. The mock book's practice trades (#427) are the
+trader's own, marked with ``practice`` true (of no policy, ``policy`` null). A store the trader has not
+opened since #399 has no policy yet: every trade, ``policy`` null; one not opened since #400, no
+challenger's trade; one not opened since #427, no practice trade.
 
 Read from the trader's store (``store.py``) read-only, newest first, a page at a time: the marks
 before a time, at most ``limit`` of them, but never a page that leaves out some marks of the
@@ -22,16 +24,17 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from krx_quant.trader.store import _reading, champion_of, iso
+from krx_quant.trader.store import _reading, champion_of, iso, practice_of
 
 # A trade's buy (its entry) and its sell (its exit, once out), as one table of marks, of the
 # champion's trades (#399): its policy version, and which trades.
 _MARKS = """
 SELECT id AS trade_id, 'buy' AS side, entry_at AS at, entry_price AS price, quantity, mode, kind,
-       predictor, NULL AS exit_reason, NULL AS net, {policy} AS policy
+       predictor, NULL AS exit_reason, NULL AS net, {policy} AS policy, {practice} AS practice
   FROM trades t WHERE symbol = :symbol AND {champions}
 UNION ALL
-SELECT id, 'sell', exit_at, exit_price, quantity, mode, kind, predictor, exit_reason, net, {policy}
+SELECT id, 'sell', exit_at, exit_price, quantity, mode, kind, predictor, exit_reason, net, {policy},
+       {practice}
   FROM trades t WHERE symbol = :symbol AND exit_at IS NOT NULL AND {champions}
 """
 _NEWEST_FIRST = "ORDER BY at DESC, trade_id DESC, side DESC"
@@ -60,7 +63,8 @@ def _marks(db: sqlite3.Connection) -> str:
     null in a store from before the policies (#399)."""
     columns = {r[1] for r in db.execute("PRAGMA table_info(trades)")}
     policy = "t.policy_id" if "policy_id" in columns else "NULL"
-    return _MARKS.format(policy=policy, champions=champion_of(db))  # the loss limits count the same
+    # The loss limits count the same; a practice trade is the trader's own (#427).
+    return _MARKS.format(policy=policy, champions=champion_of(db), practice=practice_of(db))
 
 
 def _rest_of_moment(
@@ -89,4 +93,5 @@ def _mark_json(row: dict[str, Any]) -> dict[str, Any]:
         "predictor": row["predictor"],
         "exit_reason": row["exit_reason"],
         "net": row["net"],
+        "practice": bool(row["practice"]),  # the mock book's practice trade (#427)
     }

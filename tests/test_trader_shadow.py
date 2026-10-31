@@ -14,7 +14,7 @@ made up.
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
@@ -34,10 +34,11 @@ from krx_quant.trader.desk import Desk
 from krx_quant.trader.gap import day_gap
 from krx_quant.trader.limits import ORDER_FAILED
 from krx_quant.trader.marks import read_marks
+from krx_quant.trader.mock import Timing
 from krx_quant.trader.paper import TAKE_PROFIT, Rules
 from krx_quant.trader.quotes import BestQuote
 from krx_quant.trader.selection import Selection
-from krx_quant.trader.store import DB_NAME, TraderStore, read_days, read_trades
+from krx_quant.trader.store import DB_NAME, TraderStore, read_days, read_trader, read_trades
 from tests.test_trader_mock import TIMING, Fill, kis_mock, resting_sells, settings_of, until
 from tests.trader_doubles import (
     BARRIER,
@@ -61,7 +62,20 @@ TEN = Read("10:00:02.3", [Barrier("10:00:00")])
 BOUGHT = quote("10:00:02.5", 70_000, 70_100)
 TAKEN = quote("10:02:00", 70_300, 70_400)
 
-Event = Read | Tick | BestQuote | Fill
+
+@dataclass(frozen=True)
+class Repicked:
+    """The desk's pick at ``hms`` (its 08:30 one, or a start's): the cost map's cells ``selection``."""
+
+    hms: str
+    selection: Selection
+
+    @property
+    def time(self) -> datetime:
+        return at(self.hms)
+
+
+Event = Read | Tick | BestQuote | Fill | Repicked
 
 
 def _time(event: Event) -> datetime:
@@ -89,6 +103,14 @@ class MockDesk:
     started_at: datetime = field(default_factory=lambda: at("09:00:00"))
     notices: list[str] = field(default_factory=list)
     status: str | None = None
+    # The cost map's cells at the start (``pick(BARRIER)``'s unless given), and the mock practice (#427).
+    selection: Selection | None = None
+    practice: bool = False
+    state_now: dict[str, Any] | None = None  # GET /v1/trader after the last event
+    # The trader stopped after the last event once this holds, its order in flight cancelled (a stop
+    # that does not wait for it, as ``MockDay``'s): None waits for the order as ever.
+    stop_when: Callable[[], bool] | None = None
+    timing: Timing = TIMING
 
     async def run(self, events: Sequence[Event]) -> None:
         engine = PredictionStore(self.state / ENGINE_DB)
@@ -115,15 +137,17 @@ class MockDesk:
                     self.notices.append,
                     broker=broker,
                     clock=lambda: clock[0],
-                    timing=TIMING,
+                    timing=self.timing,
                     stall_after=None,  # the made-up quotes are sparse (``trader_doubles.Day``)
+                    practice=self.practice,
                 )
                 await desk.start()
-                desk.select(Selection((pick(BARRIER),)), self.started_at)
+                desk.select(self.selection or Selection((pick(BARRIER),)), self.started_at)
                 reader = EngineReader(self.state / ENGINE_DB, SYMBOL)
                 reader.follow(desk.cells, self.started_at - timedelta(minutes=2))
                 try:
-                    for event in sorted(events, key=_time):
+                    ordered = sorted(events, key=_time)
+                    for n, event in enumerate(ordered, 1):
                         clock[0] = _time(event)
                         desk.on_time(clock[0])
                         if isinstance(event, BestQuote):
@@ -144,9 +168,17 @@ class MockDesk:
                             self.account.fill(resting, event.quantity)
                             self.account.improvement = 0.5
                             await until(lambda: not desk.champion.busy)
+                        elif isinstance(event, Repicked):
+                            desk.select(event.selection, event.time)
+                            reader.follow(desk.cells, event.time - timedelta(minutes=2))
+                        if n == len(ordered) and self.stop_when is not None:
+                            await until(self.stop_when)
+                            await desk.champion.close(timeout=0.0)  # the order in flight cancelled
+                            break
                         await desk.idle()
                     desk.write(clock[0])
                     self.status = desk.status
+                    self.state_now = read_trader(self.state / DB_NAME, clock[0])
                 finally:
                     await desk.close()
         finally:

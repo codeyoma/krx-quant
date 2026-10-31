@@ -25,6 +25,16 @@ fractions of the price g = (W − C) × tick ÷ price and ℓ = (W + C) × tick 
 p log(1 + f g) + (1 − p) log(1 − f ℓ) is greatest at f* = p ÷ ℓ − (1 − p) ÷ g, positive exactly
 when p > p* = (W + C) ÷ 2W. The trader buys ``KELLY_FRACTION`` of it, cut to 0–1
 (``Pick.fraction``): with stops a few ticks away f* is mostly far above 1, the whole capital.
+
+**Practice** (#427, ``Selection.practice``). Each cost map also names the cell the mock book
+practises on a day no champion cell trades (``desk.Desk``, ``KRX_TRADER_MOCK_PRACTICE``): of the
+cells with a verdict at a market order's round trip (``pass`` or ``fail``; ``few`` and a cell
+without a predictor or a p* are left out), the one whose hit rate's lower bound less p* is the
+greatest, its rank's figures finite (the lower bound, p*) and its row's barrier sound (W and the tick
+above 0, C at least 0, its reference price above 0); of two alike, by the kinds' order, then the
+predictors'. It buys at ``KRX_TRADER_THRESHOLD`` (``threshold`` None) one share
+(``PRACTICE_SHARES``, ``Pick.quantity``: its Kelly is mostly at most 0), within the cash and the
+capital still. It is no pick of the champion's: its trades carry no policy and count in no record.
 """
 
 from __future__ import annotations
@@ -33,7 +43,7 @@ import json
 import logging
 import math
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import aiohttp
@@ -49,6 +59,11 @@ NO_PASS = "no_pass"  # the cost map was read: no cell's verdict passes
 NO_COST_MAP = "no_cost_map"  # it could not be read
 NOT_IN_POLICY = "not_in_policy"  # cells pass, none of them the champion policy's (#399, ``policy.apply``)
 NO_POLICY = "no_policy"  # the champion policy could not be read (#399): nothing trades
+# A cell with one of these verdicts may be practised (#427): ``few`` and none are left out.
+FAIL = "fail"
+PRACTISED = (PASS, FAIL)
+# The shares a practice buy takes (#427).
+PRACTICE_SHARES = 1
 # The cost map can take a while: the engine computes it over 20 days, in a worker thread.
 TIMEOUT_SECONDS = 120.0
 
@@ -71,12 +86,17 @@ class Pick:
     cost: float  # the row's market round trip C, ticks
     reference_price: float  # where W and C were read
     tick: float
-    kelly: float  # f*, uncut
+    kelly: float | None  # f*, uncut; None for a practice cell whose call right does not pay (#427)
     # λ × f*, cut to 0–1: the share of the capital it buys (λ: KELLY_FRACTION, or the policy's, #399).
     fraction: float
     # The rise's probability that buys, the policy's for this cell (#399); None: the trader's
     # ``Rules.threshold`` (before the first policy).
     threshold: float | None = None
+    # The shares it buys, within the cash and the capital, in place of ``fraction`` (#427: a practice
+    # cell's one); None: ``fraction`` of the capital.
+    quantity: int | None = None
+    # The mock book's practice cell (#427, module doc), not a champion's.
+    practice: bool = False
 
     @property
     def cell(self) -> Cell:
@@ -102,6 +122,8 @@ class Pick:
             "kelly": self.kelly,
             "fraction": self.fraction,
             "threshold": self.threshold,
+            "quantity": self.quantity,
+            "practice": self.practice,
         }
 
 
@@ -117,14 +139,24 @@ class Selection:
     reason: str | None = None
     detail: str | None = None
     policy: int | None = None  # the policy version applied; None: none yet (#399)
+    # The cell the mock book would practise on this cost map (#427, module doc); None: no cell can.
+    practice: Pick | None = None
+
+    @property
+    def practising(self) -> bool:
+        """Whether its picks are the practice cell (#427, ``desk.Desk``): no champion cell trades."""
+        return any(p.practice for p in self.picks)
 
     def describe(self) -> str:
         """A line for the log."""
+        if self.practising:
+            why = replace(self, picks=()).describe()
+            return f"practice on {self.picks[0].kind} {self.picks[0].predictor}, a share at a time ({why})"
         if self.picks:
             under = "" if self.policy is None else f"policy {self.policy}: "
             return under + "; ".join(
                 f"{p.kind} {p.predictor} ({p.role}: low {p.low:.3f} − p* {p.p_star:.3f} = {p.priority:+.3f},"
-                f" Kelly {p.kelly:.2f} → {p.fraction:.2f}"
+                f" Kelly {p.kelly or 0:.2f} → {p.fraction:.2f}"
                 + ("" if p.threshold is None else f", θ {p.threshold:g}")
                 + ")"
                 for p in self.picks
@@ -164,6 +196,7 @@ def choose(body: Mapping[str, Any], kelly_fraction: float = KELLY_FRACTION) -> S
     as_of = body.get("as_of") if isinstance(body.get("as_of"), str) else None
     rows = {r.get("kind"): r for r in body["rows"] if isinstance(r, Mapping)}
     picks: list[Pick] = []
+    practised: list[Pick] = []  # the cells that may be practised (#427, module doc)
     considered: list[dict[str, Any]] = []
     for kind in TRADED_KINDS:
         row = rows.get(kind)
@@ -191,8 +224,6 @@ def choose(body: Mapping[str, Any], kelly_fraction: float = KELLY_FRACTION) -> S
             if verdict is None:
                 seen["why"] = row.get("breakeven_missing") or "no p*"
                 continue
-            if verdict != PASS:
-                continue
             figures = {
                 "low": low,
                 "p_star": p_star,
@@ -207,26 +238,76 @@ def choose(body: Mapping[str, Any], kelly_fraction: float = KELLY_FRACTION) -> S
                 f = kelly(
                     known["low"], known["width"], known["cost"], known["tick"], known["reference_price"]
                 )
+            name = predictor["algorithm"]
+            if verdict in PRACTISED and _sound(known, len(figures)):
+                practised.append(
+                    _pick(kind, role, name, calls or 0, known, f, 0.0, PRACTICE_SHARES, practice=True)
+                )
+            if verdict != PASS:
+                continue
             if f is None or f <= 0:
                 seen["why"] = "its pass cannot be sized" if f is None else "Kelly at most 0"
                 continue
             seen["picked"] = True
             picks.append(
-                Pick(
-                    kind=kind,
-                    role=role,
-                    predictor=predictor["algorithm"],
-                    calls=calls or 0,
-                    kelly=f,
-                    fraction=min(1.0, max(0.0, kelly_fraction * f)),
-                    **known,
-                )
+                _pick(kind, role, name, calls or 0, known, f, min(1.0, max(0.0, kelly_fraction * f)))
             )
-    picks.sort(key=lambda p: (-p.priority, TRADED_KINDS.index(p.kind), ROLES.index(p.role)))
+    picks.sort(key=_rank)
     unique: dict[Cell, Pick] = {}
     for p in picks:
         unique.setdefault(p.cell, p)
-    return Selection(tuple(unique.values()), tuple(considered), as_of, None if unique else NO_PASS)
+    practice = min(practised, key=_rank) if practised else None
+    return Selection(
+        tuple(unique.values()), tuple(considered), as_of, None if unique else NO_PASS, practice=practice
+    )
+
+
+def _pick(
+    kind: str,
+    role: str,
+    predictor: str,
+    calls: int,
+    known: Mapping[str, float],
+    f: float | None,
+    fraction: float,
+    quantity: int | None = None,
+    practice: bool = False,
+) -> Pick:
+    """A cell picked on a row's figures ``known`` (every one of them there)."""
+    return Pick(
+        kind=kind,
+        role=role,
+        predictor=predictor,
+        p_star=known["p_star"],
+        low=known["low"],
+        calls=calls,
+        width=known["width"],
+        cost=known["cost"],
+        reference_price=known["reference_price"],
+        tick=known["tick"],
+        kelly=f,
+        fraction=fraction,
+        quantity=quantity,
+        practice=practice,
+    )
+
+
+def _rank(p: Pick) -> tuple[float, int, int]:
+    """The picks' order (module doc): the greatest lower bound less p* first, then the kinds', then the
+    predictors'."""
+    return (-p.priority, TRADED_KINDS.index(p.kind), ROLES.index(p.role))
+
+
+def _sound(known: Mapping[str, float], wanted: int) -> bool:
+    """Whether a row's figures can rank and bound a practice cell (#427, module doc): every one there
+    and finite, W and the tick above 0, C at least 0, the reference price above 0."""
+    return (
+        len(known) == wanted
+        and known["width"] > 0
+        and known["tick"] > 0
+        and known["cost"] >= 0
+        and known["reference_price"] > 0
+    )
 
 
 async def read_cost_map(session: aiohttp.ClientSession, engine_url: str) -> dict[str, Any]:

@@ -18,12 +18,21 @@ fill price difference in ticks of the trade's tick (the mock's less the shadow's
 paid more on the buy, got more on the sale), the quantities, the exit reasons and the net
 difference; a prediction one side traded alone has the other ``null``. ``GET /v1/trader/days``
 gives it on each mock day (``gap``), the nightly report prints it. No price, only ticks and won.
+
+**Books** (#427). The mock book's practice trades (``store.PRACTICE_TRADE``) have their own paper
+shadow (``desk.Desk.practice_shadow``): a pair is of one book, its key the book (practice or not)
+and the prediction, so that a practice trade never pairs with the champion policy's shadow nor a
+champion trade with the practice shadow. Every trade of the day is in exactly one pair
+(``pairing``): a key that one side holds more than once (it should not: a book decides a prediction
+once) pairs none of them, each one-sided, so that no trade is dropped unseen; ``Pairing.alone``
+counts the one-sided, which the live mode's gap check says (``live.py``).
 """
 
 from __future__ import annotations
 
 import sqlite3
 from collections.abc import Iterable
+from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
@@ -31,60 +40,109 @@ from krx_quant.trader import MOCK, PAPER
 
 _COLUMNS = (
     "kind, predictor, prediction_id, bar_close, tick, entry_at, entry_price, quantity, exit_price,"
-    " exit_reason, net"
+    " exit_reason, net, {practice} AS practice"
 )
+
+Key = tuple[bool, str, str, int, str]  # the book (practice or not), then the prediction
 
 
 def _trades(db: sqlite3.Connection, mode: str, days: Iterable[date]) -> tuple[list[Any], list[Any]]:
-    """``mode``'s champion trades entered on ``days`` and the paper shadow's, oldest first."""
+    """``mode``'s champion trades entered on ``days`` (the mock book's practice trades among them,
+    #427) and the paper shadows' (the champion policy's and the practice one's), oldest first."""
     wanted = sorted({d.isoformat() for d in days})
     columns = {r[1] for r in db.execute("PRAGMA table_info(trades)")}
     if "shadow" not in columns or not wanted:
         return [], []
+    # A store the trader has not opened since #427 holds no practice trade.
+    picked = _COLUMNS.format(practice="coalesce(practice, 0)" if "practice" in columns else "0")
     marks = ",".join("?" * len(wanted))
     kis = db.execute(
-        f"SELECT {_COLUMNS} FROM trades t WHERE mode = ? AND coalesce(champion, 1) = 1"
+        f"SELECT {picked} FROM trades t WHERE mode = ? AND coalesce(champion, 1) = 1"
         f" AND substr(entry_at, 1, 10) IN ({marks}) ORDER BY entry_at, id",
         (mode, *wanted),
     ).fetchall()
     shadow = db.execute(
-        f"SELECT {_COLUMNS} FROM trades t WHERE mode = ? AND coalesce(shadow, 0) = 1"
+        f"SELECT {picked} FROM trades t WHERE mode = ? AND coalesce(shadow, 0) = 1"
         f" AND substr(entry_at, 1, 10) IN ({marks}) ORDER BY entry_at, id",
         (PAPER, *wanted),
     ).fetchall()
     return kis, shadow
 
 
-def pairs(db: sqlite3.Connection, mode: str, days: Iterable[date]) -> list[tuple[Any, Any]]:
-    """The champion's ``mode`` trades (mock, live) entered on ``days``, each with its paper shadow's
-    trade of the same prediction: those both books traded, oldest first. Each row has its ``tick``,
-    ``entry_price``, ``exit_price`` (null while open), ``quantity`` and ``net``."""
+@dataclass(frozen=True)
+class Pairing:
+    """Every trade of the KIS book and of the shadows on some days, each once (module doc): the
+    pairs both books traded (``pairs``: the KIS trade, the shadow's) and the trades one side traded
+    alone (``alone``: the other side None), in the keys' order."""
+
+    pairs: tuple[tuple[Any, Any], ...]
+    alone: tuple[tuple[Any | None, Any | None], ...]
+
+    @property
+    def kis_alone(self) -> int:
+        """The KIS trades without a shadow's to pair with."""
+        return sum(1 for kis, _ in self.alone if kis is not None)
+
+
+def pairing(db: sqlite3.Connection, mode: str, days: Iterable[date]) -> Pairing:
+    """The champion's ``mode`` trades (mock, live) entered on ``days`` against the paper shadows',
+    each with its book's shadow trade of the same prediction (module doc). Each row has its
+    ``tick``, ``entry_price``, ``exit_price`` (null while open), ``quantity``, ``net`` and
+    ``practice``."""
     kis, shadow = _trades(db, mode, days)
-    by_shadow = {_key(r): r for r in shadow}
-    return [(r, by_shadow[_key(r)]) for r in kis if _key(r) in by_shadow]
+    return _pair_up(kis, shadow)
+
+
+def _pair_up(kis: list[Any], shadow: list[Any]) -> Pairing:
+    by_kis: dict[Key, list[Any]] = {}
+    by_shadow: dict[Key, list[Any]] = {}
+    for rows, found in ((kis, by_kis), (shadow, by_shadow)):
+        for r in rows:
+            found.setdefault(_key(r), []).append(r)
+    paired: list[tuple[Any, Any]] = []
+    alone: list[tuple[Any | None, Any | None]] = []
+    for key in sorted(set(by_kis) | set(by_shadow), key=_order):
+        mine, theirs = by_kis.get(key, []), by_shadow.get(key, [])
+        if len(mine) == 1 and len(theirs) == 1:
+            paired.append((mine[0], theirs[0]))
+            continue
+        alone += [(r, None) for r in mine] + [(None, r) for r in theirs]
+    assert len(paired) * 2 + len(alone) == len(kis) + len(shadow), "every trade in exactly one pair"
+    return Pairing(tuple(paired), tuple(alone))
+
+
+def pairs(db: sqlite3.Connection, mode: str, days: Iterable[date]) -> list[tuple[Any, Any]]:
+    """The champion's ``mode`` trades (mock, live) entered on ``days``, each with its book's paper
+    shadow trade of the same prediction: those both books traded, oldest first (``pairing``)."""
+    return list(pairing(db, mode, days).pairs)
 
 
 def day_gap(db: sqlite3.Connection, day: date, mode: str = MOCK) -> dict[str, Any] | None:
-    """``day``'s ``mode`` trades (mock; live, #408) against the shadow's (module doc); None on a day
+    """``day``'s ``mode`` trades (mock; live, #408) against the shadows' (module doc); None on a day
     with neither."""
     mock, shadow = _trades(db, mode, [day])
     if not mock and not shadow:
         return None
-    by_mock = {_key(r): r for r in mock}
-    by_shadow = {_key(r): r for r in shadow}
-    keys = sorted(set(by_mock) | set(by_shadow), key=lambda k: (k[3], k[0], k[1], k[2]))
-    pairs = [_pair(by_mock.get(k), by_shadow.get(k)) for k in keys]
+    found = _pair_up(mock, shadow)
+    sides = [*found.pairs, *found.alone]
+    sides.sort(key=lambda pair: _order(_key(pair[0] if pair[0] is not None else pair[1])))
     mock_net, shadow_net = _net(mock), _net(shadow)
     return {
         "mock": {"trades": len(mock), "net": mock_net},
         "shadow": {"trades": len(shadow), "net": shadow_net},
         "difference": mock_net - shadow_net,
-        "pairs": pairs,
+        "pairs": [_pair(m, s) for m, s in sides],
     }
 
 
-def _key(row: sqlite3.Row) -> tuple[str, str, int, str]:
-    return row["kind"], row["predictor"], row["prediction_id"], row["bar_close"]
+def _key(row: sqlite3.Row) -> Key:
+    return bool(row["practice"]), row["kind"], row["predictor"], row["prediction_id"], row["bar_close"]
+
+
+def _order(key: Key) -> tuple[str, str, str, int, bool]:
+    """Pairs in the order of their bar close, then their cell and prediction, then their book."""
+    practice, kind, predictor, prediction, close = key
+    return close, kind, predictor, prediction, practice
 
 
 def _net(rows: list[sqlite3.Row]) -> float:
@@ -112,6 +170,7 @@ def _pair(mock: sqlite3.Row | None, shadow: sqlite3.Row | None) -> dict[str, Any
         "kind": some["kind"],
         "predictor": some["predictor"],
         "bar_close": some["bar_close"],
+        "practice": bool(some["practice"]),  # the mock book's practice trade and its shadow (#427)
         "mock": _side(mock),
         "shadow": _side(shadow),
         "entry_ticks": entry,

@@ -21,16 +21,22 @@ starts it again in the other mode (``run.py``).
     (``order_checks``, the KIS book's own comparison after each session). A day not compared (KIS
     could not be read) is no pass;
   - ``order_failed``: no day with a failed order (``failures``);
+
+  The mock book's practice trades (#427, ``KRX_TRADER_MOCK_PRACTICE``) count in every one of these:
+  they measure KIS's execution, not a policy's profit. The gate and ``stressed_gate`` never count them
+  (no record does);
   - ``reconcile``: no reconcile that paused new entries (``reconciles`` ``held``, #406): it pauses only
     on what neither the ledger nor the order probe explains;
   - ``unresolved``: nothing of the mode left open from before today: an order, a buy sent whose
     answer was lost, a trade;
   - ``flat``: every trade of the period sold before its day's closing auction;
   - ``gap``: the adverse gap of each leg against the paper shadow's fill of the same prediction
-    (``gap.pairs``), in ticks of the trade's tick: a buy's (fill − shadow), a sale's (shadow − fill),
-    plus ``MOCK_CORRECTION`` (0.5) a leg for the mock server's fill half a tick better than the quote
+    (``gap.pairing``: of the same book, #427, the practice trades against the practice shadow's), in
+    ticks of the trade's tick: a buy's (fill − shadow), a sale's (shadow − fill), plus
+    ``MOCK_CORRECTION`` (0.5) a leg for the mock server's fill half a tick better than the quote
     (#403). Its mean at most ``GAP_MEAN`` (1) and its 95th percentile (nearest rank) at most
-    ``GAP_P95`` (2);
+    ``GAP_P95`` (2). A KIS trade its shadow did not trade is measured by no leg; how many there are
+    is said with it, so that none is left out unseen;
   - ``stressed_gate``: the champion passed a checkpoint with one extra adverse tick on each leg too
     (``promotion.Checkpoint.stressed_passed``);
   - ``live_probe``: the last read of the live account by inquiry calls alone passed
@@ -77,7 +83,7 @@ from krx_quant.market_calendar import Session
 from krx_quant.pricing import tick_size
 from krx_quant.trader import LIVE, MOCK, promotion
 from krx_quant.trader import policy as policies
-from krx_quant.trader.gap import pairs
+from krx_quant.trader.gap import pairing
 from krx_quant.trader.store import (
     BREACH,
     DIFFERENT,
@@ -369,13 +375,30 @@ def verified(db: sqlite3.Connection, mode: str, day: date) -> bool:
     return _verdicts(db, mode).get(day) in (SAME, NO_ORDERS) and not fill_problems(db, mode, [day])
 
 
+@dataclass(frozen=True)
+class Legs:
+    """The legs' adverse gaps in ticks, and the KIS trades their shadow did not trade (``alone``: no
+    leg measures them, #427)."""
+
+    values: tuple[float, ...]
+    alone: int = 0
+
+
 def legs(
     db: sqlite3.Connection, mode: str, days: Iterable[date], correction: float, since: datetime | None = None
-) -> list[float]:
+) -> Legs:
     """Each leg's adverse gap in ticks (module doc): of the champion's ``mode`` trades entered on
-    ``days`` (at or after ``since``) against their paper shadow's, plus ``correction`` a leg."""
+    ``days`` (at or after ``since``) against their book's paper shadow's (``gap.pairing``: the practice
+    trades against the practice shadow's, #427), plus ``correction`` a leg; and how many of those
+    trades their shadow did not trade."""
     out: list[float] = []
-    for kis, shadow in pairs(db, mode, days):
+    found = pairing(db, mode, days)
+    alone = sum(
+        1
+        for kis, _ in found.alone
+        if kis is not None and (since is None or datetime.fromisoformat(kis["entry_at"]) >= since)
+    )
+    for kis, shadow in found.pairs:
         if since is not None and datetime.fromisoformat(kis["entry_at"]) < since:
             continue
         tick = kis["tick"] or shadow["tick"]
@@ -384,7 +407,7 @@ def legs(
         out.append((kis["entry_price"] - shadow["entry_price"]) / tick + correction)
         if kis["exit_price"] is not None and shadow["exit_price"] is not None:
             out.append((shadow["exit_price"] - kis["exit_price"]) / tick + correction)
-    return out
+    return Legs(tuple(out), alone)
 
 
 def p95(values: Sequence[float]) -> float | None:
@@ -395,11 +418,15 @@ def p95(values: Sequence[float]) -> float | None:
     return ranked[max(0, math.ceil(0.95 * len(ranked)) - 1)]
 
 
-def gap_check(name: str, values: Sequence[float], corrected: bool) -> Check:
+def gap_check(name: str, found: Legs, corrected: bool) -> Check:
     """The legs' gap: its mean at most ``GAP_MEAN`` and its 95th percentile at most ``GAP_P95``; no
-    leg is no pass."""
+    leg is no pass. The KIS trades no leg measures (their shadow did not trade them) are said (#427)."""
+    values = found.values
+    alone = f", 그림자와 짝이 없어 재지 않은 KIS 매매 {found.alone}건" if found.alone else ""
     if not values:
-        return Check(name, False, None, GAP_MEAN, "그림자 장부와 짝지은 매매가 없어 체결 차이를 재지 못했다")
+        return Check(
+            name, False, None, GAP_MEAN, f"그림자 장부와 짝지은 매매가 없어 체결 차이를 재지 못했다{alone}"
+        )
     mean = sum(values) / len(values)
     top = p95(values)
     assert top is not None
@@ -411,7 +438,7 @@ def gap_check(name: str, values: Sequence[float], corrected: bool) -> Check:
         mean,
         GAP_MEAN,
         f"다리 {len(values)}개의 불리한 체결 차이 평균 {mean:+.2f}틱(≤ {GAP_MEAN:g}), 95% {top:+.2f}틱"
-        f"(≤ {GAP_P95:g}){note}",
+        f"(≤ {GAP_P95:g}){note}{alone}",
     )
 
 

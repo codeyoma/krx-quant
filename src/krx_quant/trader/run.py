@@ -25,7 +25,9 @@ mode its failed orders.
 
 In mock mode (#405, ``KRX_TRADER_MODE=mock``) the champion's book orders on KIS's mock server
 (``mock.MockTrader``) through the trader's broker (``kis_orders.trader_broker``: the trader's own
-key, ``KRX_TRADER_KIS_*``). The trader does not start, and records no run, when that broker cannot
+key, ``KRX_TRADER_KIS_*``); with ``KRX_TRADER_MOCK_PRACTICE=on`` (#427) it practises a cell on a day no
+champion cell trades (``desk.Desk``). The settings refuse the practice with paper and live, before a
+live trader falls back to paper. The trader does not start, and records no run, when that broker cannot
 be made: a key or the account missing, the collector's key, or servers that are not KIS's mock
 ones (``SettingsError``, exit 2). Before the loops begin it reconciles the KIS account with the
 ledger (#406, ``mock.MockTrader.start``): the ledger's orders read on KIS, the buys whose answer was
@@ -186,6 +188,7 @@ async def _run(
             "cumulative_loss_percent": trader.cumulative_loss_percent,
             "fee_rate": settings.fee_rate,
             "kelly_fraction": KELLY_FRACTION,
+            "mock_practice": trader.mock_practice,  # #427
             "cost_map": {"engine": trader.engine_url, "symbol": SYMBOL, "period": COST_MAP_PERIOD},
             "commit": settings.commit,
         },
@@ -216,6 +219,7 @@ async def _run(
                     broker=broker if mode in KIS_MODES else None,
                     clock=clock,
                     timing=timing,
+                    practice=trader.mock_practice and mode == MOCK,  # #427: the settings allow mock alone
                 )
                 watch = LiveWatch(trader.mode, mode, book, sessions, alerts.notice)
                 watch.judge(started, ready, start=True)

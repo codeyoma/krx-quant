@@ -65,6 +65,16 @@ by the nightly re-fit (#399, from the engine's container).
   (``lift``), or a check breached (``breach``, its pause of new entries, and the resume that ended
   it, ``resumed_at``).
 
+**Practice** (#427, ``KRX_TRADER_MOCK_PRACTICE``): on a day no champion cell trades, the mock book
+practises one cell a share at a time (``desk.Desk``). Its pick is kept with ``selections.practice``
+1, its trades with ``trades.practice`` 1 (``PRACTICE_TRADE``) and the buys of which nothing filled
+with ``unfilled_buys.practice`` 1 (and in their ``entry``, which a restart adopts or opens a trade
+from); a trade's orders and fills are its trade's. A practice trade of the mock book is the trader's
+own (``champion`` 1: the loss limits, the cash, the KIS checks, the reconcile and the chart count
+it), of no policy (``policy_id`` null: no record, promotion or live gate counts it); its paper
+shadow's (``shadow`` 1) is of no policy either, and the paper account leaves it out
+(``paper_account``).
+
 Every row carries its mode (``paper``, ``mock``, ``live``): paper, KIS mock and live trades are told
 apart in the same tables (a pause and a resume hold whatever the mode). The records (``policy_days`` and the
 policies' trades' P&L) are paper's whatever the mode (``promotion.records_of``, #405: in mock mode
@@ -329,6 +339,7 @@ CREATE TABLE IF NOT EXISTS days (       -- each trading day's ledger (#396): GET
 _ADDED = {
     "selections": (
         ("policy_id", "INTEGER REFERENCES policies (id)"),  # the policy applied (#399); null: none yet
+        ("practice", "INTEGER"),  # 1: its pick is the mock book's practice cell (#427); null or 0: not
     ),
     "decisions": (
         ("selection_id", "INTEGER REFERENCES selections (id)"),  # the pick in force; null: none yet
@@ -353,6 +364,12 @@ _ADDED = {
         # Why a mock trade's sale began (#405: stop_loss, time, pause, a limit), kept when it is
         # decided so that a restart goes on selling; null until then.
         ("selling", "TEXT"),
+        # 1: a practice trade (#427): the mock book's on its practice cell (``champion`` 1), or its paper
+        # shadow's (``shadow`` 1); of no policy. Null or 0 otherwise.
+        ("practice", "INTEGER"),
+    ),
+    "unfilled_buys": (
+        ("practice", "INTEGER"),  # 1: a practice buy (#427); null or 0 otherwise
     ),
 }
 
@@ -390,6 +407,10 @@ CHAMPION_TRADE = "coalesce(t.champion, 1) = 1"
 # beside the KIS orders. Not the trader's (``champion`` 0): no limit, chart or default trade list
 # counts it; its policy's paper record does (``promotion.records``).
 SHADOW_TRADE = "coalesce(t.shadow, 0) = 1"
+# A practice trade ``t`` (#427, module doc): the mock book's on its practice cell (``champion`` 1, the
+# trader's own: the limits, the cash and the KIS checks count it) or its paper shadow's (``shadow``
+# 1). Of no policy: no record counts it.
+PRACTICE_TRADE = "coalesce(t.practice, 0) = 1"
 
 BUY, SELL = "buy", "sell"
 OPEN, FILLED, CANCELLED = "open", "filled", "cancelled"
@@ -458,6 +479,8 @@ class Entry:
     champion: bool = True
     # The champion's paper shadow's (#405): the champion policy's paper trade in mock mode.
     shadow: bool = False
+    # A practice trade (#427): the mock book's on its practice cell, or its paper shadow's.
+    practice: bool = False
 
 
 @dataclass(frozen=True)
@@ -540,6 +563,7 @@ class OpenTrade:
     predictor: str
     bar_close: datetime
     entry_at: datetime | None = None
+    practice: bool = False  # a practice trade (#427)
 
 
 @dataclass(frozen=True)
@@ -666,8 +690,8 @@ class TraderStore:
     def add_selection(self, mode: str, at: datetime, selection: Selection) -> int:
         with self._db:
             cursor = self._db.execute(
-                "INSERT INTO selections (at, mode, as_of, picks, considered, reason, detail, policy_id)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO selections (at, mode, as_of, picks, considered, reason, detail, policy_id,"
+                " practice) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     iso(at),
                     mode,
@@ -677,6 +701,7 @@ class TraderStore:
                     selection.reason,
                     selection.detail,
                     selection.policy,
+                    int(selection.practising),
                 ),
             )
         assert cursor.lastrowid is not None
@@ -775,6 +800,7 @@ class TraderStore:
             entry.predictor,
             entry.bar_close,
             entry.entry_at,
+            entry.practice,
         )
 
     def exit(self, trade: OpenTrade, out: Exit) -> None:
@@ -842,6 +868,7 @@ class TraderStore:
             entry.predictor,
             entry.bar_close,
             entry.entry_at,
+            entry.practice,
         )
 
     def add_order(
@@ -941,9 +968,10 @@ class TraderStore:
         with self._db:
             cursor = self._db.execute(
                 "INSERT INTO unfilled_buys (decision_id, mode, price, quantity, placed_at, status, broker_id,"
-                " broker_branch, entry) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " broker_branch, entry, practice) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (decision, mode, placed.price, placed.quantity, iso(at), status, placed.number or "")
-                + (placed.branch, None if entry is None else _entry_json(entry)),
+                + (placed.branch, None if entry is None else _entry_json(entry))
+                + (int(entry is not None and entry.practice),),
             )
         assert cursor.lastrowid is not None
         return cursor.lastrowid
@@ -1086,13 +1114,17 @@ class TraderStore:
         ).fetchone()
         return None if row is None else _failure(row)
 
-    def open_trade(self, mode: str, challenger: int | None = None, shadow: bool = False) -> OpenTrade | None:
-        """``mode``'s trade of the champion (``CHAMPION_TRADE``) not exited yet, if any (one position
-        at a time); with ``challenger``, that challenger's paper trade not exited (#400); with
-        ``shadow``, the champion's paper shadow's (#405, ``SHADOW_TRADE``)."""
+    def open_trade(
+        self, mode: str, challenger: int | None = None, shadow: bool = False, practice: bool = False
+    ) -> OpenTrade | None:
+        """``mode``'s trade of the champion (``CHAMPION_TRADE``, a practice one of the mock book's too,
+        #427) not exited yet, if any (one position at a time); with ``challenger``, that challenger's
+        paper trade not exited (#400); with ``shadow``, the champion's paper shadow's (#405,
+        ``SHADOW_TRADE``), or with ``practice`` too the practice shadow's (#427)."""
         params: tuple[Any, ...]
         if shadow:
-            whose, params = SHADOW_TRADE, (mode,)
+            which = PRACTICE_TRADE if practice else f"NOT {PRACTICE_TRADE}"
+            whose, params = f"{SHADOW_TRADE} AND {which}", (mode,)
         elif challenger is None:
             whose, params = CHAMPION_TRADE, (mode,)
         else:
@@ -1119,6 +1151,7 @@ class TraderStore:
             row["predictor"],
             datetime.fromisoformat(row["bar_close"]),
             datetime.fromisoformat(row["entry_at"]),
+            bool(row["practice"]),
         )
 
     def open_challengers(self, mode: str) -> list[int]:
@@ -1147,19 +1180,20 @@ class TraderStore:
 
     def paper_account(self) -> float:
         """The net P&L of the champion's paper book (#405): its paper trades exited, the champion's
-        book's in paper mode and its shadow's in mock mode. What the shadow and the challengers size
-        on in mock mode, never the KIS fills."""
+        book's in paper mode and its shadow's in mock mode, never the practice shadow's (#427). What
+        the shadows and the challengers size on in mock mode, never the KIS fills."""
         row = self._db.execute(
             "SELECT coalesce(sum(net), 0) FROM trades t WHERE mode = ? AND exit_at IS NOT NULL"
-            f" AND ({CHAMPION_TRADE} OR {SHADOW_TRADE})",
+            f" AND ({CHAMPION_TRADE} OR {SHADOW_TRADE}) AND NOT {PRACTICE_TRADE}",
             (PAPER,),
         ).fetchone()
         return float(row[0])
 
     def realized(self, mode: str, since: datetime | None) -> tuple[float, int]:
         """The net P&L of ``mode``'s trades exited at or after ``since`` (all if None), and how many:
-        the champion's alone (``CHAMPION_TRADE``), the trades the limits and the cash hold (#396); a
-        challenger's paper trades (#400) are not."""
+        the champion's alone (``CHAMPION_TRADE``), the trades the limits and the cash hold (#396), the
+        mock book's practice trades with them (#427: its KIS fills, the same account); a challenger's
+        paper trades (#400) are not, nor a shadow's."""
         where, params = ("AND exit_at >= ?", [iso(since)]) if since is not None else ("", [])
         row = self._db.execute(
             "SELECT coalesce(sum(net), 0), count(*) FROM trades t"
@@ -1432,7 +1466,7 @@ class TraderStore:
             "INSERT INTO trades (mode, symbol, kind, predictor, prediction_id, bar_close, probability,"
             " threshold, anchor, tick, width_ticks, target, stop, time_barrier, decided_at, entry_at,"
             " entry_price, quantity, buy_fee, selection_id, role, p_star, precision_low, kelly, fraction,"
-            f" policy_id, champion, shadow) VALUES ({', '.join('?' * 28)})",
+            f" policy_id, champion, shadow, practice) VALUES ({', '.join('?' * 29)})",
             (
                 entry.mode,
                 entry.symbol,
@@ -1462,6 +1496,7 @@ class TraderStore:
                 entry.policy_id,
                 int(entry.champion),
                 int(entry.shadow),
+                int(entry.practice),
             ),
         )
         assert cursor.lastrowid is not None
@@ -1630,6 +1665,7 @@ TRADER_FIELDS = (
     "limits",
     "pause",
     "live",
+    "practice",
 )
 
 
@@ -1698,6 +1734,13 @@ def _reading(path: Path) -> Iterator[sqlite3.Connection | None]:
         db.close()
 
 
+def practice_of(db: sqlite3.Connection) -> str:
+    """``PRACTICE_TRADE`` for this store: none is a practice trade in a store the trader has not
+    opened since #427 (no ``practice`` column yet)."""
+    columns = {r[1] for r in db.execute("PRAGMA table_info(trades)")}
+    return PRACTICE_TRADE if "practice" in columns else "0"
+
+
 def champion_of(db: sqlite3.Connection) -> str:
     """``CHAMPION_TRADE`` for this store: every trade is the champion's in a store from before #400
     (the trader has not opened it since, so its trades have no ``champion``: the champion's book was
@@ -1711,8 +1754,9 @@ def read_trades(
 ) -> list[dict[str, Any]]:
     """The last ``limit`` trades entered before ``before`` (if given), newest first, each with its
     orders and their fills: ``GET /v1/trader/trades``. The champion's (``CHAMPION_TRADE``: the
-    trades the trader makes, which the limits hold and the chart marks), or with ``policy_id`` that
-    policy's (#400: in paper as a challenger, and as the champion)."""
+    trades the trader makes, which the limits hold and the chart marks; the mock book's practice
+    trades among them, each ``practice``, #427), or with ``policy_id`` that policy's (#400: in paper
+    as a challenger, and as the champion; a practice trade is of no policy)."""
     with _reading(path) as db:
         if db is None:
             return []
@@ -1789,6 +1833,7 @@ def _trade_json(
         "policy": row.get("policy_id"),  # a store the trader has not opened since #399: none
         "champion": bool(row["by_champion"]),  # the champion's (#400): the trader's, which the limits hold
         "shadow": bool(row.get("shadow")),  # the champion's paper shadow's (#405, mock mode)
+        "practice": bool(row.get("practice")),  # the mock book's practice trade, or its shadow's (#427)
         "anchor": row["anchor"],
         "tick": row["tick"],
         "width_ticks": row["width_ticks"],

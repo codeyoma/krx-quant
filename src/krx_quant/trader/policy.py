@@ -162,7 +162,7 @@ def apply(policy: Policy | None, selection: Selection) -> Selection:
     for cell in policy.cells:
         found = passing.get(cell.cell)
         if found is not None:
-            fraction = min(1.0, max(0.0, cell.kelly_fraction * found.kelly))
+            fraction = min(1.0, max(0.0, cell.kelly_fraction * (found.kelly or 0.0)))
             picks.append(replace(found, threshold=cell.threshold, fraction=fraction))
     kept = {p.cell for p in picks}
     considered = []

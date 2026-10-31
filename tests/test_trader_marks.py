@@ -130,6 +130,7 @@ async def test_each_trade_s_buy_and_its_sell_once_out_newest_first(tmp_path: Pat
         "predictor": "breiman",
         "exit_reason": None,
         "net": None,
+        "practice": False,  # #427: the mock book's practice trade alone is
     }
     assert sold["trade_id"] == taken["id"]
     assert (sold["price"], sold["quantity"]) == (taken["exit"]["price"], 14)

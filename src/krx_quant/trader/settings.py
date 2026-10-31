@@ -16,7 +16,11 @@ narrow the capital, never widen it (#393).
 - ``KRX_TRADER_QUOTES_URL``: the collector's quote stream (``quotes.py``); compose sets it to the
   engine service's;
 - ``KRX_TRADER_ENGINE_URL``: the Engine API the cost map is read from (``selection.py``, #395);
-  compose sets it to the engine service's, inside the compose network.
+  compose sets it to the engine service's, inside the compose network;
+- ``KRX_TRADER_MOCK_PRACTICE`` (#427): ``off`` (the default) or ``on``: on a day no champion cell
+  trades, the mock book practises one cell, a share at a time (``desk.Desk``, ``selection.py``). For
+  ``KRX_TRADER_MODE=mock`` alone: ``on`` with ``paper`` or ``live`` is a configuration error, checked
+  here, before a live trader falls back to paper (``run.py``).
 
 ``KRX_TRADER_KIND`` and ``KRX_TRADER_PREDICTOR`` (#394: the one cell traded) are gone: the cost map
 picks the cells (#395). One still set is not read; the trader says so at its start (``ignored``).
@@ -35,6 +39,7 @@ from krx_quant.trader import (
     CAPITAL,
     CUMULATIVE_LOSS_PERCENT,
     DAILY_LOSS_PERCENT,
+    MOCK,
     MODES,
     PAPER,
     THRESHOLD,
@@ -45,6 +50,8 @@ DEFAULT_ENGINE_URL = "http://127.0.0.1:8080"
 # Settings no longer read (#395: the cost map picks the cells).
 GONE = ("KRX_TRADER_KIND", "KRX_TRADER_PREDICTOR")
 _HOST = re.compile(r"^https?://[^/\s]+$")  # a scheme and a host, with its port: no path
+# KRX_TRADER_MOCK_PRACTICE's values (#427).
+ON, OFF = "on", "off"
 
 
 @dataclass(frozen=True)
@@ -58,6 +65,8 @@ class TraderSettings:
     engine_url: str = DEFAULT_ENGINE_URL
     poll_seconds: float = 0.5  # how often the engine's database is read for new predictions
     ignored: tuple[str, ...] = ()  # the settings found that are no longer read (``GONE``)
+    # The mock book practises a cell on a day no champion cell trades (#427, ``desk.Desk``).
+    mock_practice: bool = False
 
     @classmethod
     def from_env(
@@ -85,6 +94,15 @@ class TraderSettings:
             raise SettingsError(
                 f"KRX_TRADER_ENGINE_URL must be http://host:port, without a path, got {engine_url!r}"
             )
+        practice = values.get("KRX_TRADER_MOCK_PRACTICE", OFF).strip().lower() or OFF
+        if practice not in (ON, OFF):
+            raise SettingsError(f"KRX_TRADER_MOCK_PRACTICE must be on or off, got {practice!r}")
+        if practice == ON and mode != MOCK:
+            # Before a live trader falls back to paper (#408): the setting is wrong whatever it runs as.
+            raise SettingsError(
+                f"KRX_TRADER_MOCK_PRACTICE=on is for KRX_TRADER_MODE=mock alone, not {mode} (#427): the"
+                " practice trades order on KIS's mock server only"
+            )
         return cls(
             mode=mode,
             threshold=float(threshold),
@@ -94,6 +112,7 @@ class TraderSettings:
             quotes_url=quotes_url,
             engine_url=engine_url,
             ignored=tuple(name for name in GONE if values.get(name, "").strip()),
+            mock_practice=practice == ON,
         )
 
 
