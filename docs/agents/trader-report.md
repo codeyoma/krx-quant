@@ -18,6 +18,8 @@ The issue gets `ready-for-agent` only on a night that calls an agent. A report's
 
 The job never takes a label off #417. Once you are done, remove `ready-for-agent` yourself.
 
+#417 also gets the live account's read (#408, the scheduled job `probe-live-account-408`, `KIS 실전 계좌 읽기 프로브 (#408)`): once the live key is set, it reads the live account by inquiry calls alone and checks each field the trader's broker reads. `결과: 같다` passes the live mode's `live_probe` check: note it in `docs/kis-feeds.md` "실전 서버 (#408)" (the ⚠ it measured). `결과: 다르다` names the fields missing or not as read: open an issue and a PR fixing the reads in `src/krx_quant/kis_orders.py` (with fake answers in the measured shape), as for the mock probe (#403).
+
 ## Read
 
 Read every comment since your last turn, not only the labelled one: the routine nights before it are part of the week.

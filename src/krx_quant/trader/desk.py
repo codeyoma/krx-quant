@@ -275,6 +275,14 @@ class Desk:
         self.champion.live = state
         self.champion.write(at)
 
+    def wind_down(self, at: datetime) -> None:
+        """The mode the trader runs in about to end (#408, ``run.LiveWatch``): the champion's book picks
+        no cell from ``at`` (a rise waiting skipped), so that it buys nothing new; what it holds is sold
+        by its own rules. A later pick picks again; the trader winds it down again then."""
+        if self.champion.cells:
+            log.info("trader: winding the %s book down: nothing new is bought", self.mode)
+        self.champion.retire(at)
+
     def ramp(self, at: datetime) -> live.Ramp | None:
         """In live mode (#408): the first period judged at ``at`` (a lift or a breach written and told,
         ``live.step``), and the champion's book sized on its cap from now; its pause read at once."""

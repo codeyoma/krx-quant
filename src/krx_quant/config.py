@@ -273,6 +273,13 @@ class Settings:
     trader_live_kis_account: str | None = field(default=None, repr=False)
 
     @property
+    def trader_live_kis(self) -> bool:
+        """Whether the trader's live key, secret and account are all set (#408): the live account's
+        read (``live_probe.py``) waits for them."""
+        key, secret = self.trader_live_kis_app_key, self.trader_live_kis_app_secret
+        return bool(key and secret and self.trader_live_kis_account)
+
+    @property
     def trader_kis(self) -> bool:
         """Whether the trader's KIS key, secret and account are all set (#403): the order probe
         waits for them."""

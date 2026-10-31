@@ -285,6 +285,9 @@ class Facts:
     # Whether the trader's KIS key, secret and account are set (``Settings.trader_kis``, #403): the
     # order probe waits for them once it has said they are not.
     trader_kis: bool = False
+    # Whether the trader's live key, secret and account are set (``Settings.trader_live_kis``, #408):
+    # the live account's read waits for them.
+    trader_live_kis: bool = False
     # The trading days the trader ran in mock mode (#405, ``mock_check.mock_days``): the mock day's
     # check waits for the first.
     mock_days: tuple[date, ...] = ()
@@ -916,6 +919,7 @@ async def read_facts(
         pending_answers=tuple(answers),
         krx_openapi=settings.krx_openapi_key is not None,
         trader_kis=settings.trader_kis,
+        trader_live_kis=settings.trader_live_kis,
         mock_days=await asyncio.to_thread(mock_days, settings.state_dir),
     )
 
@@ -1649,6 +1653,49 @@ KIS_ORDER_PROBE = Job(
     ),
 )
 
+# The live account's answers (#408, CODING_STANDARDS "External data is probed before it is used"): the
+# trader's broker reads the live server's answers by the fields measured on the mock server (#403), and
+# no agent orders live. So on a trading night once the live key is set (``Facts.trader_live_kis``),
+# ``probe-live-account`` reads the live account by inquiry calls alone (the price, the balance, the
+# orderable cash, the day's order inquiry), checks every field the broker reads against how it reads
+# it, and keeps the result in the trader's store; the live mode orders only once one passed
+# (``live.readiness``'s ``live_probe``). It places no order. Its output holds codes, pages and field
+# names, never a key, an account, an order number or a value. Seconds; five minutes is a bound. Each
+# trading night until a run passes. The report issue (#417) gets it: #408 is closed by its PR.
+LIVE_PROBE_ISSUE = 417
+
+
+def _a_night_until_the_live_account_was_read(night: Night) -> bool:
+    """On a trading night once the live key is set, until a run passed (exit 0)."""
+    if not night.trading_day or not night.facts.trader_live_kis:
+        return False
+    record = night.record
+    if record is None or record.outcome not in (OK, FAILED):
+        return True
+    return record.outcome != OK and record.day < night.day
+
+
+LIVE_PROBE = Job(
+    name="probe-live-account-408",
+    due=_a_night_until_the_live_account_was_read,
+    command=("probe-live-account",),
+    timeout=timedelta(minutes=5),
+    targets=(
+        Target(
+            LIVE_PROBE_ISSUE,
+            note=(
+                "실전 계좌 읽기 프로브(#408): 실전 키로 조회만 해서(현재가, 잔고, 매수가능조회, "
+                "그날 주문 체결 조회) trader가 읽는 필드가 실전의 답에 있고 그 꼴인지 본다. 주문은 "
+                "하나도 보내지 않는다. `같다`면 live 모드의 실행 점검 `live_probe`가 통과한다. "
+                "`다르다`면 에이전트가 `kis_orders.py`의 읽기를 고치는 PR을 열고 `docs/kis-feeds.md` "
+                '"실전 서버 (#408)"를 고친다. 체결가·체결 수량은 첫 실전 날에 trader가 본다. '
+                "다시 돌리기(조회만): `docker compose run --rm engine probe-live-account`. "
+                "출력에는 키, 계좌번호, 주문번호, 시세 값이 없다(코드, 쪽, 필드 이름과 꼴만)."
+            ),
+        ),
+    ),
+)
+
 # The night futures (#264): the collector records the KOSPI200 night session's trades and book
 # (18:00–06:00) from the deploy that brings it; what only the server shows is whether KIS
 # streams them for this app key, under the contract code asked for, in the layout of KIS's
@@ -2117,6 +2164,7 @@ JOBS: tuple[Job, ...] = (
     TRADER_REPORT,
     MOCK_CHECK,
     KIS_ORDER_PROBE,
+    LIVE_PROBE,
     *daily_prevalidation_jobs(
         [a.name for a in DAILY_ALGORITHMS],
         {a.name: a.features for a in DAILY_ALGORITHMS},

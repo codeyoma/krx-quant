@@ -144,7 +144,7 @@ def trade(
                 ("buy", "entry", entry, entered),
                 ("sell", "take_profit", exit_, entered + timedelta(seconds=1)),
             ):
-                db.execute(
+                kept = db.execute(
                     "INSERT INTO orders (trade_id, mode, side, purpose, price, quantity, placed_at, status,"
                     " closed_at, broker_id) VALUES (?, ?, ?, ?, ?, ?, ?, 'filled', ?, ?)",
                     (
@@ -158,6 +158,10 @@ def trade(
                         out.isoformat(),
                         f"{trade_id}{side}",
                     ),
+                )
+                db.execute(  # filled whole at its limit, as KIS's inquiry shows it
+                    "INSERT INTO fills (order_id, at, price, quantity) VALUES (?, ?, ?, ?)",
+                    (kept.lastrowid, placed.isoformat(), price, quantity),
                 )
     return trade_id
 
@@ -233,6 +237,16 @@ def ready(state: Path, quantity: int = 10, *, policy: bool = True) -> None:
     champion_days(state, DAYS)
     [checkpoint] = judge_gate(state, at("2026-10-13 22:31:00"))
     assert checkpoint.passed
+    probed(state, True)
+
+
+def probed(state: Path, passed: bool) -> None:
+    """The live account's read by inquiry calls alone, as ``probe-live-account`` keeps it (#408)."""
+    store = TraderStore(state / DB_NAME)
+    try:
+        store.add_live_probe(at("2026-10-13 22:40:00"), passed, {"calls": {}})
+    finally:
+        store.close()
 
 
 def readiness(state: Path, today: date = TODAY) -> live.Readiness:
@@ -323,6 +337,14 @@ def _worse(db: sqlite3.Connection) -> None:
     )
 
 
+def _unprobed(db: sqlite3.Connection) -> None:
+    db.execute("DELETE FROM live_probes")
+
+
+def _probe_failed(db: sqlite3.Connection) -> None:
+    db.execute("UPDATE live_probes SET passed = 0")
+
+
 def _short(db: sqlite3.Connection) -> None:
     db.execute("DELETE FROM days WHERE mode = ? AND day = ?", (MOCK, DAYS[0].isoformat()))
 
@@ -338,6 +360,8 @@ def _short(db: sqlite3.Connection) -> None:
         (_late, "flat"),
         (_worse, "gap"),
         (_short, "mock_days"),
+        (_unprobed, "live_probe"),  # the live account not read yet by inquiry calls alone
+        (_probe_failed, "live_probe"),
     ],
 )
 def test_each_execution_check_keeps_the_live_mode_locked(
@@ -393,13 +417,15 @@ async def run_live(
     settings: Settings | None = None,
     fast: bool = False,
     ends: bool = False,
+    predict: bool = True,
 ) -> str | None:
     """``krx-quant trade`` with ``KRX_TRADER_MODE=live`` on ``state`` (its 10:00 prediction in the
     engine's database), the live servers ``fake``'s, until ``act`` is done (and with ``ends`` until
     the trader stops by itself, within ten seconds); what it returned. ``fast`` makes the loops' waits
     short, so that the clock set ahead is read at once."""
     engine = PredictionStore(state / ENGINE_DB)
-    Barrier("10:00:00").write(engine)
+    if predict:
+        Barrier("10:00:00").write(engine)
     engine.close()
     feed = QuoteFeed(["005930"])
     port = free_port()
@@ -593,6 +619,52 @@ async def test_the_live_mode_s_answer_changing_at_a_pick_stops_the_trader_to_sta
     assert fake.posts_received == [], "no live order before the start again"
 
 
+async def test_a_start_with_live_exposure_winds_it_down_on_the_live_account_before_paper(
+    kis_live: tuple[FakeKis, FakeAccount], tmp_path: Path
+) -> None:
+    """Codex on #425: a live trade still open when the trader starts again after a change of the
+    champion (policy 2, no checkpoint passed). The trader does not fall back to paper at once: it runs
+    the live book to wind the trade down (its take-profit resting on KIS followed, nothing new bought),
+    and once KIS fills it and nothing is left, it stops to start again as paper (``SWITCH``)."""
+    fake, account = kis_live
+    state = tmp_path / "state"
+    ready(state)
+
+    async def buy(feed: QuoteFeed, clock: list[datetime]) -> None:
+        await until(lambda: decided(state))
+        await until(lambda: feed.clients > 0)
+        account.bid, account.ask = 70_000, 70_100
+        feed.on_event(BOOK.tr_id, book(at("10:00:02.5"), 70_000, 70_100))
+        await until(lambda: len(account.resting(kis_orders.SIDE_SELL)) == 1)
+
+    async def wind_down(feed: QuoteFeed, clock: list[datetime]) -> None:
+        await until(lambda: len(runs(state)) == 2)
+        [resting] = account.resting(kis_orders.SIDE_SELL)
+        account.bid = resting.price
+        account.fill(resting)
+
+    async with telegram(200) as (url, sent):
+        assert await run_live(state, fake, account, sent, url, act=buy) is None
+        keep(state, at("10:00:30"), policy_cell(BARRIER, 0.65))
+        with closing(policies.connect(state / DB_NAME)) as db:
+            assert policies.crown(db, at("10:00:40"), 2, "test", {}, replacing=1)
+        returned = await run_live(
+            state, fake, account, sent, url, act=wind_down, start="10:01:00", ends=True, predict=False
+        )
+        await until(lambda: any("정리할 것(열린 매매·주문)이 있습니다" in t for t in sent))
+
+    assert returned == SWITCH
+    first, second = runs(state)
+    assert (first["mode"], second["mode"]) == (LIVE, LIVE)
+    assert second["detail"]["winding_down"] == 2, "the open trade and its take-profit"
+    assert second["detail"]["live"][0] == "gate"
+    [trade] = [t for t in read_trades(state / DB_NAME, None, 100) if t["mode"] == LIVE]
+    assert trade["exit"]["reason"] == "take_profit"
+    assert len(account.placed(kis_orders.SIDE_BUY)) == 1, "nothing new bought while winding down"
+    with closing(sqlite3.connect(state / DB_NAME)) as db:
+        assert live.exposure(db) == 0
+
+
 def test_a_live_trader_whose_champion_no_longer_passes_switches_back_at_the_pick(tmp_path: Path) -> None:
     store = TraderStore(tmp_path / DB_NAME)
     notices: list[str] = []
@@ -709,7 +781,8 @@ def test_a_failed_order_in_the_first_period_breaches_at_the_next_pick_and_a_resu
     assert any("주문 실패가 있던 날 1일" in n for n in notices)
     assert (paused, resumed) == (ENTRIES_PAUSED, RUNNING)
     assert (again.since, again.breached_at, again.outcome, again.cap) == (at("08:40:00"), None, None, 250_000)
-    assert again.days == (TODAY,), "the period from the resume: the day the book kept its ledger of"
+    assert again.days == (), "the period from the resume: its day not compared with KIS yet does not count"
+    assert "확인을 기다리는 날 1일" in next(c.said for c in again.checks if c.name == "live_days")
 
 
 def test_a_breach_resumed_while_the_trader_runs_as_paper_begins_a_new_period(tmp_path: Path) -> None:
@@ -733,6 +806,31 @@ def test_a_breach_resumed_while_the_trader_runs_as_paper_begins_a_new_period(tmp
 
     assert book.status == RUNNING
     assert (again.since, again.breached_at) == (at("08:40:00"), None)
+
+
+def test_a_live_day_counts_once_compared_and_its_fills_sound(tmp_path: Path) -> None:
+    """A live day not compared with KIS yet waits (no count, no breach); a sale filled six ticks over
+    its limit is not sound: a breach of ``live_fills``."""
+    notices: list[str] = []
+    live_history(tmp_path, DAYS[:3])
+    with closing(sqlite3.connect(tmp_path / DB_NAME)) as db, db:
+        db.execute("DELETE FROM order_checks WHERE day = ?", (DAYS[2].isoformat(),))
+
+    waiting = stepped(tmp_path, at("08:30:00"), notices)
+    with closing(sqlite3.connect(tmp_path / DB_NAME)) as db, db:
+        db.execute(
+            "UPDATE fills SET price = price + 600 WHERE id = (SELECT min(f.id) FROM fills f"
+            " JOIN orders o ON o.id = f.order_id WHERE o.mode = ? AND o.side = 'sell')",
+            (LIVE,),
+        )
+    breached = stepped(tmp_path, at("08:30:00"), notices)
+
+    assert (waiting.outcome, waiting.breached_at, len(waiting.days)) == (None, None, 2)
+    assert "확인을 기다리는 날 1일" in next(c.said for c in waiting.checks if c.name == "live_days")
+    assert breached.breached_at == at("08:30:00")
+    fills = next(c for c in breached.checks if c.name == "live_fills")
+    assert not fills.passed and "체결가가 지정가와 +6.0틱 떨어졌다" in fills.said
+    assert any("실전 체결 확인" in n for n in notices)
 
 
 async def test_the_live_desk_sizes_on_the_cap_until_the_period_is_lifted(

@@ -32,7 +32,10 @@ starts it again in the other mode (``run.py``).
     (#403). Its mean at most ``GAP_MEAN`` (1) and its 95th percentile (nearest rank) at most
     ``GAP_P95`` (2);
   - ``stressed_gate``: the champion passed a checkpoint with one extra adverse tick on each leg too
-    (``promotion.Checkpoint.stressed_passed``).
+    (``promotion.Checkpoint.stressed_passed``);
+  - ``live_probe``: the last read of the live account by inquiry calls alone passed
+    (``live_probe.py``, the scheduled job ``probe-live-account-408``): every field the broker reads
+    is in the live server's answers, as it reads it.
 
 **The first live period** (``ramp``, ``step``). The live book sizes on ``RAMP_CAP`` (250,000 won) in
 place of the capital, its shares rounded down (an order the cap cannot pay one share of is not
@@ -40,10 +43,21 @@ placed), until the period holds ``RAMP_DAYS`` (20) live trading days and ``RAMP_
 live round trips, all before today. The period begins at the first live start. Then, at a pick, the
 live gap (the live fills against the paper shadow's, ``gap``'s legs without the correction) is
 judged with the same failure, reconcile, open and flat checks over the period: all passing lifts the
-cap to the capital for good (``LIFT``). A check that fails, at any pick of the period (the gap once
-the period is long enough), is a breach (``BREACH``): new entries pause (a pause of source ``ramp``)
+cap to the capital for good (``LIFT``). A live day counts toward the period only once it is
+verified: compared with KIS's day order inquiry (``order_checks`` ``same`` or ``no_orders``; a day
+not compared yet waits) and its fills sound (``fill_problems``: a buy filled at or under its limit
+and at most ``SANE_TICKS`` under it, a sale at or over its limit and at most that over it, no order
+filled beyond its quantity, a trade's buys and sales the same shares). Those are the fields a real
+fill alone shows, which the live probe cannot read on an account without orders: the first live day
+measures them before the period counts it. A check that fails, at any pick of the period (the gap
+once the period is long enough), is a breach (``BREACH``): new entries pause (a pause of source ``ramp``)
 until the server reviews it and resumes (``krx-quant trade resume``), which begins a new period at
 the cap from then. The loss limits stay the capital's (#396).
+
+**What is left on the live account** (``exposure``): an open live trade, a live order open, or a
+live buy sent whose answer was not had. While any is left the trader never falls back to paper: a
+start that would (the champion no longer passes) runs the live book anyway to wind it down, buying
+nothing new, and the trader starts again as paper only once nothing is left (``run.LiveWatch``).
 
 Nothing here sends an order; ``step`` writes the lift, the breach and its pause into the store, the
 rest reads it.
@@ -60,6 +74,7 @@ from typing import Any
 
 from krx_quant.feeds.base import KST, kst_day
 from krx_quant.market_calendar import Session
+from krx_quant.pricing import tick_size
 from krx_quant.trader import LIVE, MOCK, promotion
 from krx_quant.trader import policy as policies
 from krx_quant.trader.gap import pairs
@@ -68,6 +83,7 @@ from krx_quant.trader.store import (
     DIFFERENT,
     HELD,
     LIFT,
+    NO_ORDERS,
     PAUSE,
     RAMP,
     SAME,
@@ -90,6 +106,9 @@ RAMP_DAYS = 20
 RAMP_TRIPS = 30
 # A day's closing auction when the calendar does not say (KRX's: 15:20).
 AUCTION = time(15, 20)
+# A live fill this many ticks past its limit's other side is not sound (``fill_problems``): a
+# marketable limit fills at its limit or better, by the spread at most.
+SANE_TICKS = 5
 
 Sessions = Callable[[date], Session | None]
 
@@ -143,6 +162,25 @@ def trips(db: sqlite3.Connection, mode: str, days: Iterable[date], since: dateti
         (mode, *wanted, *params),
     ).fetchone()
     return int(row[0])
+
+
+def exposure(db: sqlite3.Connection, mode: str = LIVE) -> int:
+    """What of ``mode`` is left on the KIS account by the ledger (module doc): its open trades, its
+    open orders, its buys sent whose answer was not had or still open on KIS. 0 when none is."""
+    left = 0
+    if _has(db, "trades"):
+        left += db.execute(
+            f"SELECT count(*) FROM trades t WHERE t.mode = ? AND t.exit_at IS NULL AND {champion_of(db)}",
+            (mode,),
+        ).fetchone()[0]
+    if _has(db, "orders"):
+        query = "SELECT count(*) FROM orders WHERE mode = ? AND status = 'open'"
+        left += db.execute(query, (mode,)).fetchone()[0]
+    if _has(db, "unfilled_buys"):
+        left += db.execute(
+            "SELECT count(*) FROM unfilled_buys WHERE mode = ? AND status IN ('sent', 'open')", (mode,)
+        ).fetchone()[0]
+    return int(left)
 
 
 def mock_period(db: sqlite3.Connection, today: date) -> list[date]:
@@ -199,9 +237,13 @@ def clean_checks(
     today: date,
     sessions: Sessions | None,
     since: datetime | None = None,
+    *,
+    pending: bool = False,
 ) -> list[Check]:
     """The failure, reconcile, open and flat checks of ``mode`` over ``days`` (and from ``since``)
-    (module doc), and the day comparisons'."""
+    (module doc), and the day comparisons': a day with orders not compared fails them, but with
+    ``pending`` (the first live period, whose days count once verified) only a day found different
+    does."""
     period = set(days)
     first = datetime.combine(min(days), time(), KST) if days else None
     start = max(t for t in (first, since) if t is not None) if first or since else None
@@ -213,7 +255,9 @@ def clean_checks(
     ordered = _ordered_days(db, mode) & period
     verdicts = _verdicts(db, mode)
     compared = {d for d in ordered if verdicts.get(d) == SAME}
-    differ = {d for d in period if verdicts.get(d) == DIFFERENT} | (ordered - compared)
+    differ = {d for d in period if verdicts.get(d) == DIFFERENT}
+    if not pending:
+        differ |= ordered - compared
     out = [
         Check(
             "order_checks",
@@ -275,6 +319,54 @@ def clean_checks(
                 late += 1
     out.append(Check("flat", late == 0, float(late), 0.0, f"종가 단일가 전에 팔지 못한 매매 {late}건"))
     return out
+
+
+def fill_problems(db: sqlite3.Connection, mode: str, days: Iterable[date]) -> list[str]:
+    """What is not sound of the champion's ``mode`` fills on ``days`` (module doc), in Korean, one a
+    line: none when every fill is within ``SANE_TICKS`` of its limit on its own side, no order filled
+    beyond its quantity, and every trade exited sold the shares it bought."""
+    wanted = sorted({d.isoformat() for d in days})
+    if not wanted or not _has(db, "orders") or not _has(db, "fills"):
+        return []
+    marks = ",".join("?" * len(wanted))
+    out: list[str] = []
+    filled: dict[int, int] = {}
+    quantities: dict[int, int] = {}
+    for order, side, limit, quantity, price, shares in db.execute(
+        "SELECT o.id, o.side, o.price, o.quantity, f.price, f.quantity FROM orders o"
+        " JOIN trades t ON t.id = o.trade_id JOIN fills f ON f.order_id = o.id"
+        f" WHERE o.mode = ? AND {champion_of(db)} AND substr(o.placed_at, 1, 10) IN ({marks})",
+        (mode, *wanted),
+    ):
+        quantities[order] = int(quantity)
+        filled[order] = filled.get(order, 0) + int(shares)
+        tick = tick_size(limit)
+        if price <= 0 or shares <= 0:
+            out.append(f"주문 {order}의 체결가나 수량이 0 이하다")
+        elif side == "buy" and not limit - SANE_TICKS * tick <= price <= limit:
+            out.append(f"매수 {order}의 체결가가 지정가와 {(price - limit) / tick:+.1f}틱 떨어졌다")
+        elif side == "sell" and not limit <= price <= limit + SANE_TICKS * tick:
+            out.append(f"매도 {order}의 체결가가 지정가와 {(price - limit) / tick:+.1f}틱 떨어졌다")
+    out += [f"주문 {o}이 수량보다 많이 체결됐다" for o, n in filled.items() if n > quantities[o]]
+    for trade, quantity, bought, sold in db.execute(
+        "SELECT t.id, t.quantity,"
+        " (SELECT coalesce(sum(f.quantity), 0) FROM orders o JOIN fills f ON f.order_id = o.id"
+        "  WHERE o.trade_id = t.id AND o.side = 'buy'),"
+        " (SELECT coalesce(sum(f.quantity), 0) FROM orders o JOIN fills f ON f.order_id = o.id"
+        "  WHERE o.trade_id = t.id AND o.side = 'sell')"
+        f" FROM trades t WHERE t.mode = ? AND t.exit_at IS NOT NULL AND {champion_of(db)}"
+        f" AND substr(t.entry_at, 1, 10) IN ({marks})",
+        (mode, *wanted),
+    ):
+        if not bought == sold == quantity:
+            out.append(f"매매 {trade}의 산 주식({bought})·판 주식({sold})·수량({quantity})이 다르다")
+    return out
+
+
+def verified(db: sqlite3.Connection, mode: str, day: date) -> bool:
+    """Whether ``mode``'s ``day`` is verified (module doc): compared with KIS (``same``, or no orders
+    on either side) and its fills sound."""
+    return _verdicts(db, mode).get(day) in (SAME, NO_ORDERS) and not fill_problems(db, mode, [day])
 
 
 def legs(
@@ -421,8 +513,32 @@ def readiness(db: sqlite3.Connection, sessions: Sessions | None, today: date) ->
             "다리마다 1틱 더 불리하게 쳐도 관문을 넘는가: "
             + ("넘었다" if g.stressed is not None else "아직(챔피언이 그렇게 넘은 판정이 없다)"),
         ),
+        probe_check(db),
     ]
     return Readiness(g, tuple(checks), tuple(period))
+
+
+def probe_check(db: sqlite3.Connection) -> Check:
+    """The live account's last read by inquiry calls alone (``live_probe.py``): passed or not."""
+    row = (
+        db.execute("SELECT at, passed FROM live_probes ORDER BY id DESC LIMIT 1").fetchone()
+        if _has(db, "live_probes")
+        else None
+    )
+    if row is None:
+        return Check(
+            "live_probe",
+            False,
+            None,
+            None,
+            "실전 계좌 읽기 프로브: 아직 돌지 않았다(실전 키가 서버 .env에 들어간 뒤 거래일 밤에 돈다)",
+        )
+    day = datetime.fromisoformat(row[0]).astimezone(KST).date()
+    if row[1]:
+        return Check("live_probe", True, None, None, f"실전 계좌 읽기 프로브: 통과({day})")
+    return Check(
+        "live_probe", False, None, None, f"실전 계좌 읽기 프로브: 통과하지 못했다({day}, 그 댓글을 본다)"
+    )
 
 
 @dataclass(frozen=True)
@@ -500,15 +616,19 @@ def ramp(db: sqlite3.Connection, sessions: Sessions | None, now: datetime, capit
     if since is None:
         return Ramp(cap)
     today = kst_day(now)
-    days = tuple(d for d in kis_days(db, LIVE) if kst_day(since) <= d < today)
+    every = tuple(d for d in kis_days(db, LIVE) if kst_day(since) <= d < today)
+    days = tuple(d for d in every if verified(db, LIVE, d))  # a day counts once verified
+    waiting = len(every) - len(days)
     made = trips(db, LIVE, days, since)
+    problems = fill_problems(db, LIVE, every)
     checks = (
         Check(
             "live_days",
             len(days) >= RAMP_DAYS,
             float(len(days)),
             float(RAMP_DAYS),
-            f"실전 거래일 {len(days)}/{RAMP_DAYS}일",
+            f"실전 거래일 {len(days)}/{RAMP_DAYS}일(KIS와 견주고 체결을 확인한 날)"
+            + (f", 확인을 기다리는 날 {waiting}일" if waiting else ""),
         ),
         Check(
             "live_trips",
@@ -517,7 +637,15 @@ def ramp(db: sqlite3.Connection, sessions: Sessions | None, now: datetime, capit
             float(RAMP_TRIPS),
             f"실전 왕복 매매 {made}/{RAMP_TRIPS}건",
         ),
-        *clean_checks(db, LIVE, days, today, sessions, since),
+        *clean_checks(db, LIVE, every, today, sessions, since, pending=True),
+        Check(
+            "live_fills",
+            not problems,
+            float(len(problems)),
+            0.0,
+            "실전 체결 확인: "
+            + ("체결가와 수량이 지정가와 주문에 맞다" if not problems else "; ".join(problems)),
+        ),
         gap_check("live_gap", legs(db, LIVE, days, 0.0, since), corrected=False),
     )
     return Ramp(cap, None, since, days, made, checks, breached)

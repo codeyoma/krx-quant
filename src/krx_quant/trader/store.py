@@ -58,6 +58,9 @@ by the nightly re-fit (#399, from the engine's container).
 - ``order_checks`` (#408): each KIS trading day's orders in the ledger against KIS's day order
   inquiry, compared by the KIS book after that day's session (``mock.MockTrader``,
   ``mock_check.Check``): the verdict (``same``, ``different``, ``no_orders``) and its counts;
+- ``live_probes`` (#408, ``live_probe.py``): each read of the live account by inquiry calls alone,
+  checked against the fields the broker reads: whether it passed, and each call's code, rows and
+  fields missing or not as read (never a value);
 - ``ramp`` (#408, ``live.py``): the live mode's first period's end: the cap lifted to the capital
   (``lift``), or a check breached (``breach``, its pause of new entries, and the resume that ended
   it, ``resumed_at``).
@@ -288,6 +291,12 @@ CREATE TABLE IF NOT EXISTS order_checks (  -- each KIS trading day's orders agai
     at TEXT NOT NULL,                  -- when it was compared
     detail TEXT NOT NULL,              -- JSON: the counts (orders, compared, missing, extra, failed)
     PRIMARY KEY (mode, day)
+);
+CREATE TABLE IF NOT EXISTS live_probes (  -- each read of the live account, checked (#408)
+    id INTEGER PRIMARY KEY,
+    at TEXT NOT NULL,
+    passed INTEGER NOT NULL,           -- 1: every answer as the broker reads it
+    detail TEXT NOT NULL               -- JSON: each call's code, rows, fields missing or not as read
 );
 CREATE TABLE IF NOT EXISTS ramp (      -- the live mode's first period's end (#408)
     id INTEGER PRIMARY KEY,
@@ -1250,6 +1259,15 @@ class TraderStore:
         """``mode``'s days compared, each its verdict."""
         rows = self._db.execute("SELECT day, verdict FROM order_checks WHERE mode = ?", (mode,))
         return {date.fromisoformat(r[0]): str(r[1]) for r in rows}
+
+    # The live account's read (#408, ``live_probe.py``).
+
+    def add_live_probe(self, at: datetime, passed: bool, detail: Mapping[str, Any]) -> None:
+        with self._db:
+            self._db.execute(
+                "INSERT INTO live_probes (at, passed, detail) VALUES (?, ?, ?)",
+                (iso(at), int(passed), _json(detail)),
+            )
 
     # The live mode's first period (#408, ``live.py``).
 

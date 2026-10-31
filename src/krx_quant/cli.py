@@ -47,6 +47,7 @@ from krx_quant.kind_registry import DAILY_KINDS, kind_named
 from krx_quant.kis import KisError
 from krx_quant.krx_etf_probe import probe_krx_etf
 from krx_quant.lifecycle import Status
+from krx_quant.live_probe import probe_live_account
 from krx_quant.macro import run_macro
 from krx_quant.market_calendar import calendar_store
 from krx_quant.member_frames_probe import probe_member_frames
@@ -234,6 +235,11 @@ def _probe_gaps() -> int:
 def _probe_member_frames() -> int:
     print(probe_member_frames(Settings.from_env(require_kis=False), datetime.now(KST)))
     return 0
+
+
+async def _probe_live_account() -> int:
+    """The live account read by inquiry calls alone (#408): the trader's live key, no order."""
+    return await probe_live_account(Settings.from_env(require_kis=False), datetime.now(KST))
 
 
 async def _probe_kis_orders() -> int:
@@ -831,6 +837,13 @@ def main(argv: list[str] | None = None) -> int:
         " prints no field value",
     )
     sub.add_parser(
+        "probe-live-account",
+        help="read the trader's live account with KRX_TRADER_LIVE_KIS_* by inquiry calls alone (#408): the"
+        " price, the balance, the orderable cash and the day's order inquiry, each field the trader's broker"
+        " reads checked against how it reads it; places no order; keeps the result for the live mode;"
+        " prints codes and field names, no key, account, order number or value",
+    )
+    sub.add_parser(
         "probe-kis-orders",
         help="place the trader's probe orders on KIS's mock-trading server with KRX_TRADER_KIS_* (#403):"
         " a 1-share marketable buy and sell of 005930, a far limit buy and its cancel, three orders KIS"
@@ -1076,6 +1089,8 @@ def _command(args: argparse.Namespace) -> int:
         return _probe_gaps()
     elif args.command == "probe-member-frames":
         return _probe_member_frames()
+    elif args.command == "probe-live-account":
+        return asyncio.run(_probe_live_account())
     elif args.command == "probe-kis-orders":
         return asyncio.run(_probe_kis_orders())
     elif args.command == "check-closing-flow":

@@ -38,7 +38,10 @@ In live mode (#408, ``KRX_TRADER_MODE=live``) the trader makes the live broker a
 does not start without it, ``SettingsError``), and judges at its start and at each pick whether the
 champion may order on the live account (``live.readiness``: the live gate and the execution checks).
 Until then the desk runs in paper (its run kept as ``paper``, ``configured`` ``live``) and the trader
-says what is missing on Telegram at its start and once a day; once they pass, the champion's book
+says what is missing on Telegram at its start and once a day; but while something is left on the
+live account (``live.exposure``: a live trade, order or lost buy, after a change of the champion)
+it runs the live book to wind it down, buying nothing new (``Desk.wind_down``), and starts again as
+paper only once nothing is left; once they pass, the champion's book
 orders on the live account as the mock one does on the mock account, sized on the first period's cap
 (``live.step``). When the answer changes at a pick, the trader stops itself once nothing of the
 champion's book is open (``SWITCH``), and Docker starts it again (compose's ``restart:
@@ -165,15 +168,18 @@ async def _run(
     started = clock()
     store = TraderStore(settings.state_dir / DB_NAME)
     sessions = _Sessions(settings)
-    # The live mode orders only once the gate and the execution checks pass (#408): before, as paper.
+    # The live mode orders only once the gate and the execution checks pass (#408): before, as paper;
+    # but what is left on the live account is wound down by the live book first, nothing new bought.
     ready = live.readiness(store.db, sessions, kst_day(started))
-    mode = PAPER if trader.mode == LIVE and not ready.unlocked else trader.mode
+    left = live.exposure(store.db) if trader.mode == LIVE else 0
+    mode = PAPER if trader.mode == LIVE and not ready.unlocked and not left else trader.mode
     store.add_run(
         started,
         mode,
         {
             "configured": trader.mode,
             **({"live": ready.missing} if trader.mode == LIVE else {}),
+            **({"winding_down": left} if mode == LIVE and not ready.unlocked else {}),
             "threshold": trader.threshold,
             "capital": trader.capital,
             "daily_loss_percent": trader.daily_loss_percent,
@@ -254,6 +260,13 @@ class LiveWatch:
         self.switch = asyncio.Event()
         self._told: date | None = None  # the day what is missing was last told
 
+    def can_switch(self) -> bool:
+        """Whether the trader may stop to start again in the other mode: nothing of the champion's book
+        open, and from live nothing left on the live account (``live.exposure``)."""
+        if self._desk.champion.busy:
+            return False
+        return self.running != LIVE or live.exposure(self._desk.store.db) == 0
+
     def judge(self, at: datetime, ready: live.Readiness | None = None, *, start: bool = False) -> None:
         ready = ready or live.readiness(self._desk.store.db, self._sessions, kst_day(at))
         ramp = self._desk.ramp(at) if self.running == LIVE else None
@@ -262,10 +275,19 @@ class LiveWatch:
             return
         wanted = LIVE if ready.unlocked else PAPER
         if wanted != self.running:
+            self._desk.wind_down(at)  # nothing new bought on the mode about to end, the picks' again
             if not self.switch.is_set():
                 self.switch.set()
                 log.warning("trader: the live mode's answer is now %s: stopping to start again", wanted)
-                if wanted == LIVE:
+                if wanted == PAPER and start:
+                    self._notify(
+                        "자동 매매(live): 실전 조건이 빠졌지만 실전 계좌에 정리할 것(열린 매매·주문)이"
+                        " 있습니다("
+                        + "; ".join(ready.said())
+                        + "). 새로 사지 않고 그것을 원래 규칙대로 정리한 뒤 trader를 다시 시작해 모의로"
+                        " 돕니다."
+                    )
+                elif wanted == LIVE:
                     self._notify(
                         "자동 매매(live): 실전 관문과 실행 점검을 모두 넘었습니다. 들고 있는 것이 없으면"
                         " trader를 다시 시작해 실전 계좌에 주문합니다(첫 단계 운용 상한 "
@@ -375,9 +397,10 @@ async def _trade(
             await sleep(CONTROL_SECONDS)
 
     async def switching() -> None:
-        """Once the live mode's answer changed (#408): until nothing of the champion's book is open."""
+        """Once the live mode's answer changed (#408): until nothing of the champion's book is open, and
+        from live nothing is left on the live account."""
         await watch.switch.wait()
-        while book.champion.busy:
+        while not watch.can_switch():
             await sleep(TICK_SECONDS)
 
     tasks = [

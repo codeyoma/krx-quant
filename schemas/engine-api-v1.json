@@ -3000,7 +3000,8 @@
       "additionalProperties": false,
       "properties": {
         "name": {"enum": ["mock_days", "mock_trips", "order_checks", "order_failed", "reconcile", "unresolved", "flat",
-                          "gap", "stressed_gate", "live_days", "live_trips", "live_gap"]},
+                          "gap", "stressed_gate", "live_probe", "live_days", "live_trips", "live_fills",
+                          "live_gap"]},
         "passed": {"type": "boolean"},
         "value": {"type": ["number", "null"]},
         "required": {"type": ["number", "null"]},
