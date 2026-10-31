@@ -388,7 +388,7 @@ def render(report: Report) -> str:
         return "\n".join(lines)
     sections = [
         _day_section(report),
-        *([] if report.gap is None else [_gap_section(report.gap)]),
+        *([] if report.gap is None else [_gap_section(report.gap, report.mode)]),
         _pick_section(report),
         _standings_section(report),
         _night_section(report),
@@ -758,13 +758,14 @@ def _controls(db: sqlite3.Connection, start: datetime | None, end: datetime) -> 
 # Writing.
 
 
-def _gap_section(gap: Mapping[str, Any]) -> str:
-    """A mock day's KIS trades against the champion's paper shadow (#405, ``gap.day_gap``): ticks and
-    won, no price."""
+def _gap_section(gap: Mapping[str, Any], mode: str = "mock") -> str:
+    """A mock or live day's KIS trades against the champion's paper shadow (#405, #408,
+    ``gap.day_gap``): ticks and won, no price."""
     mock, shadow = gap["mock"], gap["shadow"]
+    name = "KIS 실전" if mode == LIVE else "KIS 모의"
     lines = [
-        "KIS 모의와 그림자 장부 (#405)",
-        f"- KIS 모의 매매 {mock['trades']}건 {_won(mock['net'])} · 그림자(모의 체결) {shadow['trades']}건"
+        f"{name}와 그림자 장부 ({'#408' if mode == LIVE else '#405'})",
+        f"- {name} 매매 {mock['trades']}건 {_won(mock['net'])} · 그림자(모의 체결) {shadow['trades']}건"
         f" {_won(shadow['net'])} · 차이(KIS − 그림자) {_won(gap['difference'])}",
     ]
     for p in gap["pairs"]:
