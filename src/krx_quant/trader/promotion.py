@@ -50,7 +50,7 @@ judged with ``STRESS_TICKS`` (1) extra adverse tick on each leg of each trade (`
 daily nets less 2 × the trades' tick × shares, the costs already in them not charged again), one of
 the live mode's execution checks (``live.py``).
 
-> **바뀜** (2026-10-31, #PRLIVE): the gate was looked at every night: the champion's record of 20 days
+> **바뀜** (2026-10-31, #425): the gate was looked at every night: the champion's record of 20 days
 > at least, its 95% lower bound above 0 → checkpoints with α spent as 1/k². 이유: with no edge, a
 > gate looked at nightly passed by chance 12% of the time by day 120 and 15% by day 250 (#408's
 > simulation, t4 daily P&L); the checkpoints keep it at most 2.5% at any horizon.
