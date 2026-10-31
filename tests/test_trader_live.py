@@ -712,6 +712,29 @@ def test_a_failed_order_in_the_first_period_breaches_at_the_next_pick_and_a_resu
     assert again.days == (TODAY,), "the period from the resume: the day the book kept its ledger of"
 
 
+def test_a_breach_resumed_while_the_trader_runs_as_paper_begins_a_new_period(tmp_path: Path) -> None:
+    """The ramp's pause holds every mode: resumed by a trader running as paper (its champion changed),
+    the breach is over all the same, and the next live period counts from the resume."""
+    notices: list[str] = []
+    live_history(tmp_path, DAYS[:5])
+    store = TraderStore(tmp_path / DB_NAME)
+    try:
+        failed_at = datetime.combine(DAYS[2], time(11), KST)
+        store.add_failure(failed_at, LIVE, "sell", "unknown", "made up", None, None)
+        assert live.step(store, CALENDAR.session, at("08:30:00"), 1_000_000, notices.append).breached_at
+        rules = Rules(fee_rate=FEE)
+        book = PaperTrader(store, rules, CALENDAR.session, at("08:31:00"), PAPER, notices.append)
+        assert book.status == ENTRIES_PAUSED, "the ramp's pause holds the paper book too"
+        assert not isinstance(ask(store, RESUME, PAPER, at("08:40:00")), str)
+        book.on_controls(at("08:40:00"))
+        again = live.ramp(store.db, CALENDAR.session, at("2026-10-15 08:30:00"), 1_000_000)
+    finally:
+        store.close()
+
+    assert book.status == RUNNING
+    assert (again.since, again.breached_at) == (at("08:40:00"), None)
+
+
 async def test_the_live_desk_sizes_on_the_cap_until_the_period_is_lifted(
     kis_live: tuple[FakeKis, FakeAccount], tmp_path: Path
 ) -> None:

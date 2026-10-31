@@ -378,7 +378,7 @@ class Guard:
                 "trader: the KIS account as the reconcile found it is accepted (control %s)", control.id
             )
         # A breach of the live mode's first period, reviewed: its period begins again from now (#408).
-        if self.store.resume_ramp(self.mode, at):
+        if self.store.resume_ramp(at):
             log.warning("trader: the live ramp's breach is reviewed: its first period begins again now")
         log.warning("trader: resumed (control %s): %s", control.id, self.status)
         self._notify(f"자동 매매({self.mode}): 정지를 풀었습니다(krx-quant trade resume). {self._still()}")

@@ -1262,13 +1262,13 @@ class TraderStore:
                 (iso(at), mode, event, _json(detail), control),
             )
 
-    def resume_ramp(self, mode: str, at: datetime) -> int:
-        """A resume lifting the pauses (#396): ``mode``'s breaches not resumed yet end at ``at``, and a
-        new period begins (``live.ramp``). How many."""
+    def resume_ramp(self, at: datetime) -> int:
+        """A resume lifting the pauses (#396): the live first period's breaches not resumed yet end at
+        ``at``, and a new period begins (``live.ramp``). Whatever mode the resume is read in: a pause
+        holds every mode, so a breach's is lifted by a resume a paper trader read too. How many."""
         with self._db:
             cursor = self._db.execute(
-                "UPDATE ramp SET resumed_at = ? WHERE mode = ? AND event = ? AND resumed_at IS NULL",
-                (iso(at), mode, BREACH),
+                "UPDATE ramp SET resumed_at = ? WHERE event = ? AND resumed_at IS NULL", (iso(at), BREACH)
             )
         return cursor.rowcount
 
