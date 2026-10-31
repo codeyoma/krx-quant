@@ -931,8 +931,8 @@ def _pick_section(report: Report) -> str:
     )
     lines = [head]
     chosen = pick["picks"]
-    if pick.get("practice"):  # #427: no champion cell to trade, the mock book practised one
-        [practised] = chosen
+    if pick.get("practice") and chosen:  # #427: no champion cell to trade, the mock book practised one
+        practised = chosen[0]
         cell = _cell(practised["kind"], practised["predictor"], practised["role"])
         low, p_star = practised["low"], practised["p_star"]
         lines.append(
