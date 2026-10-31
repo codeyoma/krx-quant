@@ -142,7 +142,11 @@ async def test_the_trader_trades_on_the_stream_and_never_writes_the_engine_s_dat
 
 
 async def trade_on_the_stream(
-    state: Path, feed: QuoteFeed, clock: list[datetime], task: asyncio.Task[None], stop: asyncio.Event
+    state: Path,
+    feed: QuoteFeed,
+    clock: list[datetime],
+    task: asyncio.Task[str | None],
+    stop: asyncio.Event,
 ) -> None:
     """The 10:00 prediction bought at 10:00:02.5 and sold at 10:02, once the trader decided on it."""
 
@@ -313,7 +317,6 @@ async def test_the_cell_settings_of_394_are_no_longer_read(
         ("KRX_TRADER_DAILY_LOSS_PERCENT", "0", "above 0"),
         ("KRX_TRADER_CUMULATIVE_LOSS_PERCENT", "-1", "KRX_TRADER_CUMULATIVE_LOSS_PERCENT"),
         ("KRX_TRADER_DAILY_LOSS_PERCENT", "ten", "a number"),
-        ("KRX_TRADER_MODE", "live", "not built yet"),  # #408; mock is in (#405, test_trader_mock.py)
         ("KRX_TRADER_MODE", "real", "must be one of"),
         ("KRX_TRADER_THRESHOLD", "1.5", "KRX_TRADER_THRESHOLD"),
         ("KRX_TRADER_CAPITAL", "0", "KRX_TRADER_CAPITAL"),

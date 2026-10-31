@@ -34,7 +34,7 @@ from krx_quant.trader.selection import choose
 from krx_quant.trader.settings import TraderSettings
 from krx_quant.trader.store import DB_NAME, TraderStore
 from tests.test_trader_limits import BOUGHT, TEN, rules
-from tests.test_trader_promotion import CLOSE_CALL, WEEKDAYS, judged_at, ran, setup
+from tests.test_trader_promotion import CLOSE_CALL, WEEKDAYS, day_ran, judged_at, setup
 from tests.test_trader_run import EngineApi
 from tests.trader_doubles import (
     BARRIER,
@@ -116,9 +116,10 @@ def test_a_day_s_trades_are_reported_with_each_policy_s_record_and_no_price(tmp_
     )
     assert "- 바뀐 것 없음" in lines
     assert (
-        "실전 관문: 챔피언 정책 1의 모의 기록 1/20거래일, 날마다 순손익 평균 -162원, "
-        "하한 없음(신뢰수준 95%) → 아직"
+        "실전 관문: 챔피언 정책 1의 챔피언으로 돈 모의 기록 1일(이력 1거래일), 날마다 순손익 평균 -162원, "
+        "다음 판정(1번째, 이력 20거래일째, α 1.520%)의 신뢰수준 96.96%로 지금 하한 없음 → 아직"
     ) in lines
+    assert "실전 준비 (#408)" in lines, "what the live mode needs"
     assert "- 그날 닿은 한도: 없음" in lines and "- 정지: 없음" in lines
     assert lines[-1] == (
         "2026-10-14 · 매매 1건 · 순손익 -162원 · 그날 최저 -3,654원 · 누적 -162원 · 도는 중(running)"
@@ -243,33 +244,49 @@ def test_a_night_a_challenger_is_promoted_calls_an_agent(tmp_path: Path) -> None
     assert challenger.endswith(
         "챔피언과 함께 돈 거래일 10일, (도전 − 챔피언) 평균 +1,100원, 하한 +63원(신뢰수준 95.00%) → 통과"
     ), "the night's judgment, as it was made"
-    assert any(line.startswith("실전 관문: 챔피언 정책 2의 모의 기록 10/20거래일") for line in lines), (
-        "the gate on the champion after the night"
-    )
+    assert any(
+        line.startswith("실전 관문: 챔피언 정책 2의 챔피언으로 돈 모의 기록 0일(이력 10거래일)")
+        for line in lines
+    ), "the gate on the champion after the night: its days as a challenger do not count"
     assert "그날 · 챔피언 정책 1" in lines, "the day's champion"
     the_night_after = reported(tmp_path, f"{WEEKDAYS[10]} 22:40:00")
     assert "챔피언 교체" not in agent_line(the_night_after), "that night only"
 
 
 def test_the_night_the_live_gate_passes_calls_an_agent_and_not_the_nights_after(tmp_path: Path) -> None:
-    """The champion's record passes the gate on its twentieth day (``test_trader_promotion.py``: mean
-    1,000 won a day, lower bound +393 won); the nineteenth was too few days, the twenty-first passes
-    as the twentieth did."""
+    """The champion's record passes the gate at the trader's first checkpoint, its twentieth day
+    (``test_trader_promotion.py``: mean 1,000 won a day, lower bound +321 won at α_1), judged by that
+    night's job before its report; the nineteenth night has no checkpoint, the twenty-first shows it
+    passed the evening before (#408)."""
     keep(tmp_path, at("2026-08-31 22:31:00"), policy_cell(BARRIER, 0.8))
-    ran(tmp_path, 1, [2_000.0] * 12 + [-1_000.0] * 4 + [0.0] * 5, champion=True)
-
-    nineteenth, twentieth, twenty_first = (
-        reported(tmp_path, f"{WEEKDAYS[n]} 22:40:00") for n in (18, 19, 20)
-    )
+    texts = []
+    for n, net in enumerate([2_000.0] * 12 + [-1_000.0] * 4 + [0.0] * 5):
+        day_ran(tmp_path, 1, WEEKDAYS[n], net, champion=True)
+        judged_at(tmp_path, at(f"{WEEKDAYS[n]} 22:31:00"))
+        texts.append(reported(tmp_path, f"{WEEKDAYS[n]} 22:40:00"))
+    nineteenth, twentieth, twenty_first = texts[18:]
 
     assert "실전 관문" not in agent_line(nineteenth)
+    assert "1번째, 이력 20거래일째" in next(
+        line for line in nineteenth.splitlines() if line.startswith("실전 관문: ")
+    )
     assert agent_line(twentieth) == "에이전트 차례: 실전 관문을 넘음(챔피언 정책 1)"
+    lines = twentieth.splitlines()
     assert any(
         line.startswith(
-            "실전 관문: 챔피언 정책 1의 모의 기록 20/20거래일, 날마다 순손익 평균 +1,000원, 하한 +393원"
+            f"실전 관문 판정 1번째(모의 이력 20거래일째, {WEEKDAYS[19]}, α 1.520%): "
+            "챔피언 정책 1의 챔피언으로 돈 모의 기록 20일, 날마다 순손익 평균 +1,000원, "
+            "하한 +321원(신뢰수준 96.96%)"
+        )
+        and line.endswith("→ 넘었다")
+        for line in lines
+    )
+    assert any(
+        line.startswith(
+            "실전 관문: 챔피언 정책 1의 챔피언으로 돈 모의 기록 20일(이력 20거래일) → 넘었다(1번째 판정"
         )
         and "그 밤 처음 넘었다" in line
-        for line in twentieth.splitlines()
+        for line in lines
     )
     assert "실전 관문" not in agent_line(twenty_first), "passed the evening before already"
     assert "넘었다" in next(line for line in twenty_first.splitlines() if line.startswith("실전 관문: "))

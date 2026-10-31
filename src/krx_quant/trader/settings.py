@@ -4,9 +4,11 @@ They are read by the trader alone (``krx-quant trade``): the collector never rea
 wrong one stops the trader, never the recording. Every limit is the code's at most: ``.env`` may
 narrow the capital, never widen it (#393).
 
-- ``KRX_TRADER_MODE``: ``paper`` (the default) or ``mock`` (#405: the champion orders on KIS's mock
+- ``KRX_TRADER_MODE``: ``paper`` (the default), ``mock`` (#405: the champion orders on KIS's mock
   server with the trader's own key, ``KRX_TRADER_KIS_*``, which the trader checks as it starts,
-  ``kis_orders.trader_broker``); ``live`` comes with its mode (#408);
+  ``kis_orders.trader_broker``) or ``live`` (#408: the champion orders on the live account with the
+  live key, ``KRX_TRADER_LIVE_KIS_*``, ``kis_orders.trader_live_broker``, once the live gate and the
+  execution checks pass; until then it runs as paper, ``live.py``);
 - ``KRX_TRADER_THRESHOLD``: θ, the rise's probability that buys (0.6 unless set);
 - ``KRX_TRADER_CAPITAL``: the capital in won (1,000,000 unless set; at most that);
 - ``KRX_TRADER_DAILY_LOSS_PERCENT``, ``KRX_TRADER_CUMULATIVE_LOSS_PERCENT`` (#396): the loss
@@ -33,7 +35,6 @@ from krx_quant.trader import (
     CAPITAL,
     CUMULATIVE_LOSS_PERCENT,
     DAILY_LOSS_PERCENT,
-    LATER_MODES,
     MODES,
     PAPER,
     THRESHOLD,
@@ -64,11 +65,6 @@ class TraderSettings:
     ) -> TraderSettings:
         values = read_values(env, dotenv_path)
         mode = values.get("KRX_TRADER_MODE", PAPER).strip().lower() or PAPER
-        if mode in LATER_MODES:
-            raise SettingsError(
-                f"KRX_TRADER_MODE {mode} is not built yet: it comes with #408; set paper or mock, or"
-                " remove it"
-            )
         if mode not in MODES:
             raise SettingsError(f"KRX_TRADER_MODE must be one of {', '.join(MODES)}, got {mode!r}")
         threshold = _number(values, "KRX_TRADER_THRESHOLD", str(THRESHOLD), float, 0.0, 1.0)

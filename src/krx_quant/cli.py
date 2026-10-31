@@ -47,6 +47,7 @@ from krx_quant.kind_registry import DAILY_KINDS, kind_named
 from krx_quant.kis import KisError
 from krx_quant.krx_etf_probe import probe_krx_etf
 from krx_quant.lifecycle import Status
+from krx_quant.live_probe import probe_live_account
 from krx_quant.macro import run_macro
 from krx_quant.market_calendar import calendar_store
 from krx_quant.member_frames_probe import probe_member_frames
@@ -82,9 +83,11 @@ from krx_quant.simulation import (
 )
 from krx_quant.structure_check import structure_check
 from krx_quant.supply_probe import probe_supply
+from krx_quant.trader import LIVE
 from krx_quant.trader.limits import CONTROL_SECONDS
 from krx_quant.trader.limits import ask as ask_trader
 from krx_quant.trader.mock_check import check_mock_trades
+from krx_quant.trader.promotion import mode_at
 from krx_quant.trader.refit import run_refit
 from krx_quant.trader.report import run_night, run_report
 from krx_quant.trader.run import run_trader
@@ -110,8 +113,10 @@ async def _collect() -> None:
 
 
 async def _trade() -> None:
-    # The KIS keys are the collector's, which the trader never uses (#393): paper needs none, and
-    # mock its own (KRX_TRADER_KIS_*, #405), which the trader checks as it starts.
+    # The KIS keys are the collector's, which the trader never uses (#393): paper needs none, mock
+    # its own (KRX_TRADER_KIS_*, #405) and live the live account's (KRX_TRADER_LIVE_KIS_*, #408), which
+    # the trader checks as it starts. A trader that stops by itself (#408: the live mode's answer
+    # changed at a pick) exits 0, and Docker starts it again (``restart: unless-stopped``).
     settings = Settings.from_env(require_kis=False)
     trader = TraderSettings.from_env()
     stop = asyncio.Event()
@@ -131,6 +136,8 @@ def _trade_control(action: str) -> int:
     mode = TraderSettings.from_env().mode  # a re-arm is of the mode the trader runs in
     store = TraderStore(settings.state_dir / TRADER_DB)
     try:
+        if mode == LIVE:  # #408: a live trader runs as paper until the gate and the checks pass
+            mode = mode_at(store.db)
         asked = ask_trader(store, action, mode, datetime.now(KST))
         if isinstance(asked, str):
             print(asked)
@@ -228,6 +235,11 @@ def _probe_gaps() -> int:
 def _probe_member_frames() -> int:
     print(probe_member_frames(Settings.from_env(require_kis=False), datetime.now(KST)))
     return 0
+
+
+async def _probe_live_account() -> int:
+    """The live account read by inquiry calls alone (#408): the trader's live key, no order."""
+    return await probe_live_account(Settings.from_env(require_kis=False), datetime.now(KST))
 
 
 async def _probe_kis_orders() -> int:
@@ -701,8 +713,9 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("collect", help="record KIS real-time feeds until interrupted")
     trade_cmd = sub.add_parser(
         "trade",
-        help="trade 005930 on the cells the cost map passes, in paper (#394, #395) or on KIS's mock server"
-        " (KRX_TRADER_MODE=mock, #405), until interrupted;"
+        help="trade 005930 on the cells the cost map passes, in paper (#394, #395), on KIS's mock server"
+        " (KRX_TRADER_MODE=mock, #405) or on the live account once the live gate and the execution"
+        " checks pass (KRX_TRADER_MODE=live, #408), until interrupted;"
         " resume: lift the screen's pause; rearm: re-arm the cumulative loss limit (#396)",
     )
     trade_cmd.add_argument(
@@ -822,6 +835,13 @@ def main(argv: list[str] | None = None) -> int:
         help="count the member feed's raw frames whose field count is not 78 (#381), with each one's"
         " field shapes beside the next full frame's and the other feeds' frames around it, read-only;"
         " prints no field value",
+    )
+    sub.add_parser(
+        "probe-live-account",
+        help="read the trader's live account with KRX_TRADER_LIVE_KIS_* by inquiry calls alone (#408): the"
+        " price, the balance, the orderable cash and the day's order inquiry, each field the trader's broker"
+        " reads checked against how it reads it; places no order; keeps the result for the live mode;"
+        " prints codes and field names, no key, account, order number or value",
     )
     sub.add_parser(
         "probe-kis-orders",
@@ -1069,6 +1089,8 @@ def _command(args: argparse.Namespace) -> int:
         return _probe_gaps()
     elif args.command == "probe-member-frames":
         return _probe_member_frames()
+    elif args.command == "probe-live-account":
+        return asyncio.run(_probe_live_account())
     elif args.command == "probe-kis-orders":
         return asyncio.run(_probe_kis_orders())
     elif args.command == "check-closing-flow":

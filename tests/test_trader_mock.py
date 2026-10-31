@@ -17,6 +17,7 @@ sell rests at 70,300, the first tick at or above the target.
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
 from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import closing
@@ -1125,10 +1126,12 @@ async def test_a_loss_limit_reached_sells_on_kis_at_the_bid(
 # The mode, its servers, its records
 
 
-def test_the_mock_mode_is_a_setting_and_live_is_not_yet() -> None:
+def test_the_mock_and_live_modes_are_settings() -> None:
+    """#408: live is a mode too; another word is not."""
     assert TraderSettings.from_env({"KRX_TRADER_MODE": "mock"}, None).mode == MOCK
-    with pytest.raises(SettingsError, match="not built yet"):
-        TraderSettings.from_env({"KRX_TRADER_MODE": "live"}, None)
+    assert TraderSettings.from_env({"KRX_TRADER_MODE": "live"}, None).mode == "live"
+    with pytest.raises(SettingsError, match="must be one of paper, mock, live"):
+        TraderSettings.from_env({"KRX_TRADER_MODE": "real"}, None)
 
 
 @pytest.mark.parametrize(
@@ -1291,3 +1294,54 @@ async def test_the_trader_in_mock_mode_orders_on_kis_from_its_stream(
     assert (trade["mode"], trade["entry"]["price"], trade["exit"]["reason"]) == (MOCK, 70_050, TAKE_PROFIT)
     assert all(o["broker_id"] for o in trade["orders"])
     assert [r["mode"] for r in rows(state, "runs")] == [MOCK]
+
+
+# Each KIS day against KIS (#408)
+
+
+def order_checks(state: Path) -> list[tuple[str, str, str, dict[str, Any]]]:
+    with closing(sqlite3.connect(state / DB_NAME)) as db:
+        rows_ = db.execute(
+            "SELECT mode, day, verdict, detail FROM order_checks ORDER BY mode, day"
+        ).fetchall()
+    return [(m, d, v, json.loads(detail)) for m, d, v, detail in rows_]
+
+
+async def test_after_its_session_a_mock_day_s_orders_are_compared_with_kis_and_kept(
+    kis_mock: tuple[FakeKis, FakeAccount], tmp_path: Path
+) -> None:
+    """A minute after the closing auction, nothing open, the book compares the day's orders (the buy
+    and its take-profit) with KIS's day order inquiry: the same, kept for the live mode's checks."""
+    fake, account = kis_mock
+    day = MockDay(tmp_path, fake, account, stop_when=lambda: bool(order_checks(tmp_path)))
+
+    await day.run([TEN, BOUGHT, Fill("10:02:00"), Tick("15:30:30"), Tick("15:31:00")])
+
+    [(mode, on, verdict, detail)] = order_checks(tmp_path)
+    assert (mode, on, verdict) == (MOCK, "2026-10-14", "same")
+    assert detail == {
+        "orders": 2,
+        "compared": 2,
+        "same": 2,
+        "missing": 0,
+        "extra": 0,
+        "probe": 0,
+        "failed": 0,
+    }
+    assert not any("다릅니다" in n for n in day.notices)
+
+
+async def test_a_kis_order_the_ledger_does_not_hold_makes_the_day_different_and_is_told(
+    kis_mock: tuple[FakeKis, FakeAccount], tmp_path: Path
+) -> None:
+    fake, account = kis_mock
+    day = MockDay(tmp_path, fake, account, stop_when=lambda: bool(order_checks(tmp_path)))
+    account.orders.append(
+        FakeOrder("99001", BUY_SIDE, SYMBOL, 1, 69_000, "110000", cancelled=1, day=date(2026, 10, 14))
+    )
+
+    await day.run([TEN, BOUGHT, Fill("10:02:00"), Tick("15:31:00")])
+
+    [(_, _, verdict, detail)] = order_checks(tmp_path)
+    assert (verdict, detail["extra"]) == ("different", 1)
+    assert any("2026-10-14의 주문이 장부와 KIS 주문 체결 조회에서 다릅니다" in n for n in day.notices)

@@ -8,6 +8,10 @@ half a tick better than the quote, #403), a partial fill, a buy that filled noth
 order; and by what they hold apart (the shadow is held by no limit nor pause, and sizes on the
 paper account).
 
+In live mode (#408) the champion's live trades (mode ``live``) have their paper shadow the same way;
+``pairs`` gives the two trades of each prediction, the live mode's execution checks and its first
+period measure their legs (``live.py``).
+
 ``day_gap`` gives a trading day's: each side's trades entered that day and the net of those
 exited, the difference (mock − shadow), and each prediction's pair: the entry's and the exit's
 fill price difference in ticks of the trade's tick (the mock's less the shadow's: above 0 the mock
@@ -19,31 +23,51 @@ gives it on each mock day (``gap``), the nightly report prints it. No price, onl
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Iterable
 from datetime import date
 from typing import Any
 
 from krx_quant.trader import MOCK, PAPER
 
 _COLUMNS = (
-    "kind, predictor, prediction_id, bar_close, tick, entry_price, quantity, exit_price, exit_reason, net"
+    "kind, predictor, prediction_id, bar_close, tick, entry_at, entry_price, quantity, exit_price,"
+    " exit_reason, net"
 )
 
 
-def day_gap(db: sqlite3.Connection, day: date) -> dict[str, Any] | None:
-    """``day``'s mock trades against the shadow's (module doc); None on a day with neither."""
+def _trades(db: sqlite3.Connection, mode: str, days: Iterable[date]) -> tuple[list[Any], list[Any]]:
+    """``mode``'s champion trades entered on ``days`` and the paper shadow's, oldest first."""
+    wanted = sorted({d.isoformat() for d in days})
     columns = {r[1] for r in db.execute("PRAGMA table_info(trades)")}
-    if "shadow" not in columns:
-        return None
-    mock = db.execute(
+    if "shadow" not in columns or not wanted:
+        return [], []
+    marks = ",".join("?" * len(wanted))
+    kis = db.execute(
         f"SELECT {_COLUMNS} FROM trades t WHERE mode = ? AND coalesce(champion, 1) = 1"
-        " AND substr(entry_at, 1, 10) = ? ORDER BY entry_at, id",
-        (MOCK, day.isoformat()),
+        f" AND substr(entry_at, 1, 10) IN ({marks}) ORDER BY entry_at, id",
+        (mode, *wanted),
     ).fetchall()
     shadow = db.execute(
         f"SELECT {_COLUMNS} FROM trades t WHERE mode = ? AND coalesce(shadow, 0) = 1"
-        " AND substr(entry_at, 1, 10) = ? ORDER BY entry_at, id",
-        (PAPER, day.isoformat()),
+        f" AND substr(entry_at, 1, 10) IN ({marks}) ORDER BY entry_at, id",
+        (PAPER, *wanted),
     ).fetchall()
+    return kis, shadow
+
+
+def pairs(db: sqlite3.Connection, mode: str, days: Iterable[date]) -> list[tuple[Any, Any]]:
+    """The champion's ``mode`` trades (mock, live) entered on ``days``, each with its paper shadow's
+    trade of the same prediction: those both books traded, oldest first. Each row has its ``tick``,
+    ``entry_price``, ``exit_price`` (null while open), ``quantity`` and ``net``."""
+    kis, shadow = _trades(db, mode, days)
+    by_shadow = {_key(r): r for r in shadow}
+    return [(r, by_shadow[_key(r)]) for r in kis if _key(r) in by_shadow]
+
+
+def day_gap(db: sqlite3.Connection, day: date, mode: str = MOCK) -> dict[str, Any] | None:
+    """``day``'s ``mode`` trades (mock; live, #408) against the shadow's (module doc); None on a day
+    with neither."""
+    mock, shadow = _trades(db, mode, [day])
     if not mock and not shadow:
         return None
     by_mock = {_key(r): r for r in mock}

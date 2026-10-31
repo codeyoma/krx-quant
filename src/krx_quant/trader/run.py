@@ -33,6 +33,21 @@ lost looked up, what is outside the ledger paused on, the open trade sold past i
 its take-profit placed again. A trader stopping waits for the order in flight
 (``mock.CLOSE_SECONDS``).
 
+In live mode (#408, ``KRX_TRADER_MODE=live``) the trader makes the live broker as it starts
+(``kis_orders.trader_live_broker``: the live key, ``KRX_TRADER_LIVE_KIS_*``, on KIS's live servers; it
+does not start without it, ``SettingsError``), and judges at its start and at each pick whether the
+champion may order on the live account (``live.readiness``: the live gate and the execution checks).
+Until then the desk runs in paper (its run kept as ``paper``, ``configured`` ``live``) and the trader
+says what is missing on Telegram at its start and once a day; but while something is left on the
+live account (``live.exposure``: a live trade, order or lost buy, after a change of the champion)
+it runs the live book to wind it down, buying nothing new (``Desk.wind_down``), and starts again as
+paper only once nothing is left; once they pass, the champion's book
+orders on the live account as the mock one does on the mock account, sized on the first period's cap
+(``live.step``). When the answer changes at a pick, the trader stops itself once nothing of the
+champion's book is open (``SWITCH``), and Docker starts it again (compose's ``restart:
+unless-stopped``), which judges it afresh: a mode is chosen at a start alone. Every mode keeps the
+live state as it judged it in its state (``GET /v1/trader``'s ``live``).
+
 The trading days come from the calendar the collector keeps in the state folder
 (``state/market_calendar.json``), read again each day; the trader never asks KIS.
 """
@@ -49,13 +64,24 @@ import aiohttp
 
 from krx_quant import kis
 from krx_quant.config import Settings
-from krx_quant.feeds.base import KST
+from krx_quant.feeds.base import KST, kst_day
+from krx_quant.kis_orders import LIVE as LIVE_SERVERS
 from krx_quant.kis_orders import MOCK as MOCK_SERVERS
-from krx_quant.kis_orders import Broker, Servers, trader_broker
+from krx_quant.kis_orders import Broker, Servers, trader_broker, trader_live_broker
 from krx_quant.market_calendar import MarketCalendar, Session, calendar_store
 from krx_quant.notify import Alerts
 from krx_quant.predictions import DB_NAME as ENGINE_DB
-from krx_quant.trader import COST_MAP_PERIOD, KELLY_FRACTION, MOCK, PICK_AT, SYMBOL
+from krx_quant.trader import (
+    COST_MAP_PERIOD,
+    KELLY_FRACTION,
+    KIS_MODES,
+    LIVE,
+    MOCK,
+    PAPER,
+    PICK_AT,
+    SYMBOL,
+    live,
+)
 from krx_quant.trader.cells import EngineReader
 from krx_quant.trader.desk import Desk
 from krx_quant.trader.limits import CONTROL_SECONDS
@@ -75,6 +101,9 @@ TICK_SECONDS = 0.25
 LOOK_BACK = timedelta(minutes=2)
 # A cost map that could not be read is asked for again this often.
 PICK_RETRY_SECONDS = 60.0
+# Why the trader stopped by itself (#408): the live mode's answer changed at a pick, and Docker
+# starts it again in the other mode.
+SWITCH = "switch"
 
 
 def next_pick(now: datetime) -> datetime:
@@ -106,16 +135,24 @@ async def run_trader(
     now: Clock | None = None,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     servers: Servers = MOCK_SERVERS,
+    live_servers: Servers = LIVE_SERVERS,
     timing: Timing | None = None,
-) -> None:
-    """Trade the cells picked until ``stop`` is set. ``now`` is the clock (KST), ``sleep`` the loops' wait.
-    In mock mode the broker orders on ``servers`` alone (KIS's mock ones; a test's fake KIS), with the
-    mock book's waits ``timing``."""
+) -> str | None:
+    """Trade the cells picked until ``stop`` is set, or until the live mode's answer changes at a pick
+    (``SWITCH``, returned; None after ``stop``). ``now`` is the clock (KST), ``sleep`` the loops' wait.
+    In mock mode the broker orders on ``servers`` alone (KIS's mock ones; a test's fake KIS), in live
+    mode on ``live_servers`` (KIS's live ones; a test's fake KIS), with the KIS book's waits
+    ``timing``."""
     clock: Clock = now if now is not None else (lambda: datetime.now(KST))
     async with kis.rest_session() as orders:
-        # Made before anything is kept: a mock trader that cannot order does not start (#405).
-        broker = trader_broker(orders, settings, clock, servers=servers) if trader.mode == MOCK else None
-        await _run(settings, trader, stop=stop, clock=clock, sleep=sleep, broker=broker, timing=timing)
+        # Made before anything is kept: a mock or live trader that cannot order does not start (#405,
+        # #408). The live broker is made whether or not the live mode orders yet: its key is checked.
+        broker: Broker | None = None
+        if trader.mode == MOCK:
+            broker = trader_broker(orders, settings, clock, servers=servers)
+        elif trader.mode == LIVE:
+            broker = trader_live_broker(orders, settings, clock, servers=live_servers)
+        return await _run(settings, trader, stop=stop, clock=clock, sleep=sleep, broker=broker, timing=timing)
 
 
 async def _run(
@@ -127,13 +164,22 @@ async def _run(
     sleep: Callable[[float], Awaitable[None]],
     broker: Broker | None,
     timing: Timing | None,
-) -> None:
+) -> str | None:
     started = clock()
     store = TraderStore(settings.state_dir / DB_NAME)
+    sessions = _Sessions(settings)
+    # The live mode orders only once the gate and the execution checks pass (#408): before, as paper;
+    # but what is left on the live account is wound down by the live book first, nothing new bought.
+    ready = live.readiness(store.db, sessions, kst_day(started))
+    left = live.exposure(store.db) if trader.mode == LIVE else 0
+    mode = PAPER if trader.mode == LIVE and not ready.unlocked and not left else trader.mode
     store.add_run(
         started,
-        trader.mode,
+        mode,
         {
+            "configured": trader.mode,
+            **({"live": ready.missing} if trader.mode == LIVE else {}),
+            **({"winding_down": left} if mode == LIVE and not ready.unlocked else {}),
             "threshold": trader.threshold,
             "capital": trader.capital,
             "daily_loss_percent": trader.daily_loss_percent,
@@ -153,6 +199,7 @@ async def _run(
         cumulative_loss_percent=trader.cumulative_loss_percent,
         fee_rate=settings.fee_rate,
     )
+    switched = False
     try:
         async with aiohttp.ClientSession() as session:
             alerts = Alerts(
@@ -162,17 +209,21 @@ async def _run(
                 book = Desk(
                     store,
                     rules,
-                    _Sessions(settings),
+                    sessions,
                     started,
-                    trader.mode,
+                    mode,
                     alerts.notice,
-                    broker=broker,
+                    broker=broker if mode in KIS_MODES else None,
                     clock=clock,
                     timing=timing,
                 )
+                watch = LiveWatch(trader.mode, mode, book, sessions, alerts.notice)
+                watch.judge(started, ready, start=True)
                 try:
-                    await book.start()  # in mock mode the KIS account reconciled with the ledger (#406)
-                    await _trade(settings, trader, book, session, stop=stop, clock=clock, sleep=sleep)
+                    await book.start()  # in mock and live mode the KIS account reconciled (#406)
+                    switched = await _trade(
+                        settings, trader, book, session, watch, stop=stop, clock=clock, sleep=sleep
+                    )
                 finally:
                     await book.close()  # the order in flight on KIS, waited for (#405)
             finally:
@@ -180,6 +231,85 @@ async def _run(
     finally:
         store.close()
         log.info("trader: stopped")
+    if switched:
+        log.warning("trader: stopped to start again in the other mode (#408): Docker starts it again")
+        return SWITCH
+    return None
+
+
+class LiveWatch:
+    """The live mode's answer (#408, ``live.readiness``), judged at the start and at each pick for
+    the trader ``configured`` (``KRX_TRADER_MODE``) running its desk in ``running``: kept in the
+    champion's state, the first period stepped in live mode (``Desk.ramp``), what is missing told at
+    the start and once a day while the live mode waits, and ``switch`` set when the answer is not the
+    one the trader started with."""
+
+    def __init__(
+        self,
+        configured: str,
+        running: str,
+        desk: Desk,
+        sessions: Callable[[date], Session | None],
+        notify: Callable[[str], None],
+    ) -> None:
+        self.configured = configured
+        self.running = running
+        self._desk = desk
+        self._sessions = sessions
+        self._notify = notify
+        self.switch = asyncio.Event()
+        self._told: date | None = None  # the day what is missing was last told
+
+    def can_switch(self) -> bool:
+        """Whether the trader may stop to start again in the other mode: nothing of the champion's book
+        open, and from live nothing left on the live account (``live.exposure``)."""
+        if self._desk.champion.busy:
+            return False
+        return self.running != LIVE or live.exposure(self._desk.store.db) == 0
+
+    def judge(self, at: datetime, ready: live.Readiness | None = None, *, start: bool = False) -> None:
+        ready = ready or live.readiness(self._desk.store.db, self._sessions, kst_day(at))
+        ramp = self._desk.ramp(at) if self.running == LIVE else None
+        self._desk.set_live(live.live_state(ready, self.configured, self.running == LIVE, ramp), at)
+        if self.configured != LIVE:
+            return
+        wanted = LIVE if ready.unlocked else PAPER
+        if wanted != self.running:
+            self._desk.wind_down(at)  # nothing new bought on the mode about to end, the picks' again
+            if not self.switch.is_set():
+                self.switch.set()
+                log.warning("trader: the live mode's answer is now %s: stopping to start again", wanted)
+                if wanted == PAPER and start:
+                    self._notify(
+                        "자동 매매(live): 실전 조건이 빠졌지만 실전 계좌에 정리할 것(열린 매매·주문)이"
+                        " 있습니다("
+                        + "; ".join(ready.said())
+                        + "). 새로 사지 않고 그것을 원래 규칙대로 정리한 뒤 trader를 다시 시작해 모의로"
+                        " 돕니다."
+                    )
+                elif wanted == LIVE:
+                    self._notify(
+                        "자동 매매(live): 실전 관문과 실행 점검을 모두 넘었습니다. 들고 있는 것이 없으면"
+                        " trader를 다시 시작해 실전 계좌에 주문합니다(첫 단계 운용 상한 "
+                        f"{min(live.RAMP_CAP, self._desk.rules.capital):,}원)."
+                    )
+                else:
+                    self._notify(
+                        "자동 매매(live): 실전 조건이 빠졌습니다("
+                        + "; ".join(ready.said())
+                        + "). 들고 있는 것을 다 팔면 trader를 다시 시작해 실제 주문 없이 모의로 돕니다."
+                    )
+            return
+        day = kst_day(at)
+        if self.running == PAPER and self._told != day:
+            self._told = day
+            log.warning("trader: live mode, no real order yet: %s missing", ", ".join(ready.missing))
+            self._notify(ready.notice())
+        elif self.running == LIVE and start and ramp is not None:
+            self._notify(
+                f"자동 매매(live): 실전 계좌에 주문합니다. 운용 상한 {ramp.cap:,}원"
+                + ("." if ramp.lifted_at is not None else "(첫 단계: 실전 20거래일, 왕복 매매 30건 동안).")
+            )
 
 
 async def _trade(
@@ -187,16 +317,19 @@ async def _trade(
     trader: TraderSettings,
     book: Desk,
     session: aiohttp.ClientSession,
+    watch: LiveWatch,
     *,
     stop: asyncio.Event,
     clock: Clock,
     sleep: Callable[[float], Awaitable[None]],
-) -> None:
+) -> bool:
+    """The loops until ``stop`` is set (False), or until the live mode's answer changed and nothing of
+    the champion's book is open (True)."""
     reader = EngineReader(settings.state_dir / ENGINE_DB, SYMBOL)
     log.info(
         "trader: %s trading %s on the cells the cost map of %s passes (threshold %g, capital %s won,"
         " loss limits %g%% a day and %g%% in all), quotes from %s",
-        trader.mode,
+        book.mode,
         SYMBOL,
         trader.engine_url,
         trader.threshold,
@@ -221,6 +354,7 @@ async def _trade(
                     )
                     book.select(selection, at)
                     reader.follow(book.cells, at - LOOK_BACK)
+                    watch.judge(at)
                 failing = True
                 await sleep(PICK_RETRY_SECONDS)
                 continue
@@ -229,6 +363,7 @@ async def _trade(
             failing = False
             book.select(selection, at)
             reader.follow(book.cells, at - LOOK_BACK)
+            watch.judge(at)
             due = next_pick(clock())
             while clock() < due:
                 await sleep(min(60.0, (due - clock()).total_seconds()))
@@ -261,6 +396,13 @@ async def _trade(
                 log.warning("trader: could not read the controls asked for (%s)", e)
             await sleep(CONTROL_SECONDS)
 
+    async def switching() -> None:
+        """Once the live mode's answer changed (#408): until nothing of the champion's book is open, and
+        from live nothing is left on the live account."""
+        await watch.switch.wait()
+        while not watch.can_switch():
+            await sleep(TICK_SECONDS)
+
     tasks = [
         asyncio.create_task(picking()),
         asyncio.create_task(follow_quotes(session, trader.quotes_url, SYMBOL, book.on_quote)),
@@ -269,12 +411,14 @@ async def _trade(
         asyncio.create_task(controls()),
     ]
     waiting = asyncio.create_task(stop.wait())
+    switch = asyncio.create_task(switching())
     try:
-        done, _ = await asyncio.wait([waiting, *tasks], return_when=asyncio.FIRST_COMPLETED)
+        done, _ = await asyncio.wait([waiting, switch, *tasks], return_when=asyncio.FIRST_COMPLETED)
         for task in done:
-            if task is not waiting:
+            if task not in (waiting, switch):
                 task.result()  # a loop that ended raised: let it out
+        return switch in done and waiting not in done
     finally:
-        for task in [waiting, *tasks]:
+        for task in [waiting, switch, *tasks]:
             task.cancel()
-        await asyncio.gather(waiting, *tasks, return_exceptions=True)
+        await asyncio.gather(waiting, switch, *tasks, return_exceptions=True)

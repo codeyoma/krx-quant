@@ -6,11 +6,17 @@ This is the one file of the repository the forbidden-pattern check lets hold KIS
 order endpoints (``forbidden.ALLOWED_IN``, ``scripts/check_forbidden.py``): they are written here
 and nowhere else, and every other module reaches them through this one. The collector never
 calls it. The order probe (``order_probe.py``) does, in a scheduled job's own process, and so do the
-trader in mock mode (#405, ``trader/mock.py``, through ``Broker``) and the mock day's check
-(``trader/mock_check.py``, another scheduled job's process).
+trader in mock and live mode (#405, #408, ``trader/mock.py``, through ``Broker``) and the mock day's
+check (``trader/mock_check.py``, another scheduled job's process).
 
 Each TR ID comes in two, the live server's and the mock (모의투자) server's (``Tr``): an
-``Account`` is made for one of them (``mock``), with the server it calls.
+``Account`` is made for one of them (``mock``), with the server it calls. The mock broker
+(``trader_broker``) calls the mock servers with the mock key (``KRX_TRADER_KIS_*``); the live broker
+(``trader_live_broker``, #408) KIS's live servers (``LIVE``) with the live key
+(``KRX_TRADER_LIVE_KIS_*``), each refusing the other's key. The live answers are read by the fields
+measured on the mock server: the live server's were not measured (no agent orders on it), so the
+first live day's orders measure them (``docs/kis-feeds.md`` "주문 (#403)", the ⚠ of the live
+server).
 
 Two layers:
 
@@ -53,7 +59,14 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 from krx_quant import kis
 from krx_quant.auth import TokenManager
-from krx_quant.config import KIS_MOCK_REST_URL, KIS_MOCK_WS_URL, Settings, SettingsError
+from krx_quant.config import (
+    DEFAULT_REST_URL,
+    DEFAULT_WS_URL,
+    KIS_MOCK_REST_URL,
+    KIS_MOCK_WS_URL,
+    Settings,
+    SettingsError,
+)
 from krx_quant.ratelimit import RateLimiter
 
 log = logging.getLogger(__name__)
@@ -149,8 +162,10 @@ POLL = 1.0
 TAKE_WAIT = 5.0
 # The most pages of an inquiry read (``tr_cont`` M or F: another page); a day of more is an error.
 PAGES = 20
-# The trader's token, cached apart from the collector's (``state/kis_token.json``).
+# The trader's token, cached apart from the collector's (``state/kis_token.json``); the live key's
+# apart from the mock key's (#408).
 TOKEN_FILE = "trader_kis_token.json"
+LIVE_TOKEN_FILE = "trader_live_kis_token.json"
 
 # The fill notice's fields, in order (KIS's example, ``notice_cols``): 26, the live server's layout
 # as the example gives it. On the mock server each record had 23 fields (#403), which the probe
@@ -175,6 +190,9 @@ class Servers:
 
 
 MOCK = Servers(KIS_MOCK_REST_URL, KIS_MOCK_WS_URL)
+# KIS's live servers (#408): the collector's defaults. The live broker calls these alone; no setting
+# changes them (a test passes its fake's).
+LIVE = Servers(DEFAULT_REST_URL, DEFAULT_WS_URL)
 
 
 def _url(text: str) -> str:
@@ -971,9 +989,10 @@ def trader_broker(
     reused across restarts and issued at most once a minute (``auth.TokenManager``: KIS answered a
     second token asked at once with ``TOKEN_TOO_SOON``); its calls paced at ``per_second``.
 
-    SettingsError when a key is missing, when it is the collector's, or when the trader's servers
-    are not ``servers`` (the mock ones): the trader orders on the mock server only until its live
-    mode (#408)."""
+    SettingsError when a key is missing, when it is the collector's or the live one
+    (``KRX_TRADER_LIVE_KIS_APP_KEY``, #408: the mock mode and the order probe never take it), or when
+    the trader's servers are not ``servers`` (the mock ones): this broker orders on the mock server
+    alone; the live account's is ``trader_live_broker``."""
     key, secret = settings.trader_kis_app_key, settings.trader_kis_app_secret
     if not (key and secret and settings.trader_kis_account):
         raise SettingsError(
@@ -985,36 +1004,126 @@ def trader_broker(
             "KRX_TRADER_KIS_APP_KEY is the collector's KIS_APP_KEY: the trader uses a key of its own, so "
             "the two share neither the call limits nor the token"
         )
+    if key == settings.trader_live_kis_app_key or (
+        settings.trader_live_kis_account is not None
+        and _digits(settings.trader_kis_account) == _digits(settings.trader_live_kis_account)
+    ):
+        raise SettingsError(
+            "KRX_TRADER_KIS_APP_KEY or KRX_TRADER_KIS_ACCOUNT is the live one (KRX_TRADER_LIVE_KIS_*): the "
+            "mock mode orders on the mock account alone, never with the live key (#408)"
+        )
     if not Servers(settings.trader_kis_rest_url, settings.trader_kis_ws_url).same_as(servers):
         raise SettingsError(
-            "KRX_TRADER_KIS_REST_URL and KRX_TRADER_KIS_WS_URL are not KIS's mock servers: the trader "
-            "orders on the mock server only until its live mode (#408)"
+            "KRX_TRADER_KIS_REST_URL and KRX_TRADER_KIS_WS_URL are not KIS's mock servers: the mock broker "
+            "orders on the mock server alone (the live mode has a key of its own, KRX_TRADER_LIVE_KIS_*)"
         )
     try:
         account_no = AccountNo.parse(settings.trader_kis_account)
     except ValueError as e:
         raise SettingsError(f"KRX_TRADER_KIS_ACCOUNT: {e}") from None
-    tokens = TokenManager(
+    return _broker(
         session,
+        settings,
+        now,
         settings.trader_kis_rest_url,
         key,
         secret,
-        settings.state_dir / TOKEN_FILE,
+        account_no,
+        TOKEN_FILE,
+        mock=True,
+        per_second=per_second,
+        pause=pause,
+    )
+
+
+def trader_live_broker(
+    session: aiohttp.ClientSession,
+    settings: Settings,
+    now: Callable[[], datetime],
+    *,
+    servers: Servers = LIVE,
+    per_second: int = PER_SECOND,
+    pause: float = BUSY_PAUSE,
+) -> Broker:
+    """The trader's broker on its live account (#408): the live key and account
+    (``KRX_TRADER_LIVE_KIS_*``), on KIS's live servers (``servers``, ``LIVE``: no setting changes
+    them), with the live server's TR IDs (``Tr.live``); its token cached in
+    ``state/trader_live_kis_token.json``, apart from the mock key's; its calls paced as the mock
+    broker's (``PER_SECOND``, below the live server's 20 a second: its own limit was not measured).
+
+    SettingsError when the live key, secret or account is missing, when the key is the collector's or
+    the mock one, or the account the mock one: the live key is the new live account's own (#393
+    "KIS 주문")."""
+    key, secret = settings.trader_live_kis_app_key, settings.trader_live_kis_app_secret
+    if not (key and secret and settings.trader_live_kis_account):
+        raise SettingsError(
+            "KRX_TRADER_LIVE_KIS_APP_KEY, KRX_TRADER_LIVE_KIS_APP_SECRET and KRX_TRADER_LIVE_KIS_ACCOUNT are "
+            "needed for the live mode"
+        )
+    if key == settings.kis_app_key:
+        raise SettingsError(
+            "KRX_TRADER_LIVE_KIS_APP_KEY is the collector's KIS_APP_KEY: the live account has a key of its"
+            " own"
+        )
+    if key == settings.trader_kis_app_key or (
+        settings.trader_kis_account is not None
+        and _digits(settings.trader_live_kis_account) == _digits(settings.trader_kis_account)
+    ):
+        raise SettingsError(
+            "KRX_TRADER_LIVE_KIS_APP_KEY or KRX_TRADER_LIVE_KIS_ACCOUNT is the mock one (KRX_TRADER_KIS_*):"
+            " the live mode orders with the new live account's own key"
+        )
+    try:
+        account_no = AccountNo.parse(settings.trader_live_kis_account)
+    except ValueError as e:
+        raise SettingsError(f"KRX_TRADER_LIVE_KIS_ACCOUNT: {e}") from None
+    return _broker(
+        session,
+        settings,
+        now,
+        servers.rest,
+        key,
+        secret,
+        account_no,
+        LIVE_TOKEN_FILE,
+        mock=False,
+        per_second=per_second,
+        pause=pause,
+    )
+
+
+def _broker(
+    session: aiohttp.ClientSession,
+    settings: Settings,
+    now: Callable[[], datetime],
+    rest_url: str,
+    key: str,
+    secret: str,
+    account_no: AccountNo,
+    token_file: str,
+    *,
+    mock: bool,
+    per_second: int,
+    pause: float,
+) -> Broker:
+    tokens = TokenManager(
+        session,
+        rest_url,
+        key,
+        secret,
+        settings.state_dir / token_file,
         now,
         timedelta(seconds=settings.token_refresh_margin_seconds),
         settings.token_min_interval_seconds,
     )
     account = Account(
-        session,
-        settings.trader_kis_rest_url,
-        key,
-        secret,
-        account_no,
-        tokens.get,
-        mock=True,
-        limiter=RateLimiter(per_second),
+        session, rest_url, key, secret, account_no, tokens.get, mock=mock, limiter=RateLimiter(per_second)
     )
     return Broker(account, tokens, pause=pause)
+
+
+def _digits(text: str | None) -> str:
+    return "".join(c for c in text or "" if c.isdigit())
 
 
 def _field(row: Mapping[str, Any], name: str) -> str:

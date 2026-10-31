@@ -10,6 +10,7 @@ challenger, on the night of 10-13: both run on 10-14. Every price is made up.
 
 from __future__ import annotations
 
+import math
 import sqlite3
 from contextlib import closing
 from datetime import date
@@ -251,8 +252,19 @@ def test_the_trader_s_state_shows_the_policies_running_and_the_gate(tmp_path: Pa
         "required": 20,
         "mean": 0.0,
         "low": None,
-        "level": 0.95,
+        "level": pytest.approx(1 - 2 * 0.025 * 6 / math.pi**2),  # the first checkpoint's (#408)
         "passed": False,
+        "history": 1,
+        "checkpoint": {
+            "k": 1,
+            "day": 20,
+            "every": 20,
+            "alpha": pytest.approx(0.025 * 6 / math.pi**2),
+            "level": pytest.approx(1 - 2 * 0.025 * 6 / math.pi**2),
+        },
+        "passed_at": None,
+        "stressed": False,
+        "last": None,
     }
     champion, challenger = state["policies"]
     assert (champion["version"], champion["status"], champion["promotion"]) == (1, "champion", None)

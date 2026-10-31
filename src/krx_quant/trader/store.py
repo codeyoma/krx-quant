@@ -51,10 +51,22 @@ by the nightly re-fit (#399, from the engine's container).
   came again (or the trader started again instead), and the REST quotes the mock book read
   meanwhile; ``trade_stalls``: each stall a trade was open through, and what it did to the exit
   (``effect``: ``waited``, the exit made on the first quote after it; ``rest``, the sale decided on
-  a REST quote during it; null, none).
+  a REST quote during it; null, none);
+- ``gate_checks`` (#408, ``promotion.check_gate``): each checkpoint of the live gate, evaluated once
+  by the nightly job: its number, its day, the champion then and its record's figures, its α and
+  level, whether it passed, and with one extra adverse tick a leg;
+- ``order_checks`` (#408): each KIS trading day's orders in the ledger against KIS's day order
+  inquiry, compared by the KIS book after that day's session (``mock.MockTrader``,
+  ``mock_check.Check``): the verdict (``same``, ``different``, ``no_orders``) and its counts;
+- ``live_probes`` (#408, ``live_probe.py``): each read of the live account by inquiry calls alone,
+  checked against the fields the broker reads: whether it passed, and each call's code, rows and
+  fields missing or not as read (never a value);
+- ``ramp`` (#408, ``live.py``): the live mode's first period's end: the cap lifted to the capital
+  (``lift``), or a check breached (``breach``, its pause of new entries, and the resume that ended
+  it, ``resumed_at``).
 
-Every row carries its mode (``paper``, ``mock``): paper, KIS mock and live trades are told apart in
-the same tables (a pause and a resume hold whatever the mode). The records (``policy_days`` and the
+Every row carries its mode (``paper``, ``mock``, ``live``): paper, KIS mock and live trades are told
+apart in the same tables (a pause and a resume hold whatever the mode). The records (``policy_days`` and the
 policies' trades' P&L) are paper's whatever the mode (``promotion.records_of``, #405: in mock mode
 the champion's paper shadow keeps the champion's, ``shadow`` 1). The trader writes it, and the
 nightly re-fit its policies; the Engine API reads it read-only (``read_trades``,
@@ -258,6 +270,43 @@ CREATE TABLE IF NOT EXISTS policy_days (  -- each trading day a policy ran in th
     updated_at TEXT NOT NULL,
     PRIMARY KEY (mode, policy_id, day)
 );
+CREATE TABLE IF NOT EXISTS gate_checks (  -- each checkpoint of the live gate (#408)
+    k INTEGER PRIMARY KEY,             -- 1, 2, …: the trader's checkpoints, never a champion's
+    day TEXT NOT NULL,                 -- the trader's k × 20th paper day
+    policy_id INTEGER,                 -- the champion that day; null: none
+    days INTEGER NOT NULL,             -- its paper record's days up to it
+    mean REAL,                         -- their daily net P&L's mean, won
+    low REAL,                          -- its lower bound at ``level``
+    stressed_low REAL,                 -- the same with one extra adverse tick a leg
+    alpha REAL NOT NULL,               -- 0.025 × 6 ÷ (π² k²), one-sided
+    level REAL NOT NULL,               -- 1 − 2α, two-sided
+    passed INTEGER NOT NULL,
+    stressed_passed INTEGER NOT NULL,
+    at TEXT NOT NULL                   -- when the nightly job evaluated it
+);
+CREATE TABLE IF NOT EXISTS order_checks (  -- each KIS trading day's orders against KIS (#408)
+    mode TEXT NOT NULL,                -- mock, live
+    day TEXT NOT NULL,
+    verdict TEXT NOT NULL,             -- same, different, no_orders
+    at TEXT NOT NULL,                  -- when it was compared
+    detail TEXT NOT NULL,              -- JSON: the counts (orders, compared, missing, extra, failed)
+    PRIMARY KEY (mode, day)
+);
+CREATE TABLE IF NOT EXISTS live_probes (  -- each read of the live account, checked (#408)
+    id INTEGER PRIMARY KEY,
+    at TEXT NOT NULL,
+    passed INTEGER NOT NULL,           -- 1: every answer as the broker reads it
+    detail TEXT NOT NULL               -- JSON: each call's code, rows, fields missing or not as read
+);
+CREATE TABLE IF NOT EXISTS ramp (      -- the live mode's first period's end (#408)
+    id INTEGER PRIMARY KEY,
+    at TEXT NOT NULL,
+    mode TEXT NOT NULL,                -- live
+    event TEXT NOT NULL,               -- lift: the cap is the capital from now; breach: a check breached
+    detail TEXT NOT NULL,              -- JSON: the period and its checks
+    control_id INTEGER REFERENCES controls (id),  -- a breach's pause of new entries
+    resumed_at TEXT                    -- a breach: when a resume lifted its pause, a new period beginning
+);
 CREATE TABLE IF NOT EXISTS days (       -- each trading day's ledger (#396): GET /v1/trader/days
     mode TEXT NOT NULL,
     day TEXT NOT NULL,
@@ -348,9 +397,14 @@ OPEN, FILLED, CANCELLED = "open", "filled", "cancelled"
 # before it came); refused; not sent (no token); looked up and not on KIS.
 SENT, BUY_REFUSED, UNSENT, ABSENT = "sent", "refused", "unsent", "absent"
 ENTRY = "entry"
-# What a control asks for (#396), and who asks: the reconcile's pause (#406) is a mock start's.
+# What a control asks for (#396), and who asks: the reconcile's pause (#406) is a mock start's; the
+# ramp's (#408) the live mode's first period's breach.
 PAUSE, RESUME, REARM = "pause", "resume", "rearm"
-API, CLI, RECONCILE = "api", "cli", "reconcile"
+API, CLI, RECONCILE, RAMP = "api", "cli", "reconcile", "ramp"
+# The live mode's first period's end (#408, ``ramp``).
+LIFT, BREACH = "lift", "breach"
+# A KIS day's orders against KIS (#408, ``order_checks``): as ``mock_check.Check.code`` finds them.
+SAME, DIFFERENT, NO_ORDERS = "same", "different", "no_orders"
 # A reconcile's (#406): the account as the ledger has it, or not (new entries paused).
 CLEAN, HELD = "clean", "held"
 # The limits a halt is of (#396): also the trader's status while it holds.
@@ -583,6 +637,11 @@ class TraderStore:
 
     def close(self) -> None:
         self._db.close()
+
+    @property
+    def db(self) -> sqlite3.Connection:
+        """The connection, for the readers of several tables at once (``live.py``, ``mock_check``)."""
+        return self._db
 
     def champion(self) -> policy.Policy | None:
         """The champion policy now (#399); None before the first. ``policy.PolicyError`` when it
@@ -1183,6 +1242,54 @@ class TraderStore:
             return None
         return {**dict(row), "outside": json.loads(row["outside"]), "detail": json.loads(row["detail"])}
 
+    # The KIS days' orders against KIS (#408).
+
+    def add_order_check(
+        self, mode: str, day: date, verdict: str, at: datetime, detail: Mapping[str, Any]
+    ) -> None:
+        with self._db:
+            self._db.execute(
+                "INSERT INTO order_checks (mode, day, verdict, at, detail) VALUES (?, ?, ?, ?, ?)"
+                " ON CONFLICT (mode, day) DO UPDATE SET verdict = excluded.verdict, at = excluded.at,"
+                " detail = excluded.detail",
+                (mode, day.isoformat(), verdict, iso(at), _json(detail)),
+            )
+
+    def order_checks(self, mode: str) -> dict[date, str]:
+        """``mode``'s days compared, each its verdict."""
+        rows = self._db.execute("SELECT day, verdict FROM order_checks WHERE mode = ?", (mode,))
+        return {date.fromisoformat(r[0]): str(r[1]) for r in rows}
+
+    # The live account's read (#408, ``live_probe.py``).
+
+    def add_live_probe(self, at: datetime, passed: bool, detail: Mapping[str, Any]) -> None:
+        with self._db:
+            self._db.execute(
+                "INSERT INTO live_probes (at, passed, detail) VALUES (?, ?, ?)",
+                (iso(at), int(passed), _json(detail)),
+            )
+
+    # The live mode's first period (#408, ``live.py``).
+
+    def add_ramp(
+        self, at: datetime, mode: str, event: str, detail: Mapping[str, Any], control: int | None = None
+    ) -> None:
+        with self._db:
+            self._db.execute(
+                "INSERT INTO ramp (at, mode, event, detail, control_id) VALUES (?, ?, ?, ?, ?)",
+                (iso(at), mode, event, _json(detail), control),
+            )
+
+    def resume_ramp(self, at: datetime) -> int:
+        """A resume lifting the pauses (#396): the live first period's breaches not resumed yet end at
+        ``at``, and a new period begins (``live.ramp``). Whatever mode the resume is read in: a pause
+        holds every mode, so a breach's is lifted by a resume a paper trader read too. How many."""
+        with self._db:
+            cursor = self._db.execute(
+                "UPDATE ramp SET resumed_at = ? WHERE event = ? AND resumed_at IS NULL", (iso(at), BREACH)
+            )
+        return cursor.rowcount
+
     def accept_reconciles(self, mode: str, at: datetime) -> int:
         """A resume at ``at`` (#406): the reconciles of ``mode`` that paused, accepted (what they found
         outside the ledger is the account's from then); how many."""
@@ -1487,7 +1594,7 @@ def read_trader(path: Path | None, now: datetime) -> dict[str, Any]:
     yet)."""
     body: dict[str, Any] = dict.fromkeys(TRADER_FIELDS)
     body |= {"updated_at": None, "alive": False, "controls": []}
-    body |= {"champion": None, "gate": promotion.gate(None, None).as_json(), "policies": []}
+    body |= {"champion": None, "gate": promotion.no_gate().as_json(), "policies": []}
     if path is None:
         return body
     with _reading(path) as db:
@@ -1522,6 +1629,7 @@ TRADER_FIELDS = (
     "cumulative",
     "limits",
     "pause",
+    "live",
 )
 
 

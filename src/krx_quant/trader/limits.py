@@ -32,7 +32,9 @@ Both hold until ``krx-quant trade resume`` on the server; a pause with ``sell_no
 resume sells, whatever came after it. The API can neither resume nor re-arm. A mock start that finds
 the KIS account unlike the ledger (#406, ``mock.py``) pauses new entries the same way (source
 ``reconcile``, its own notice saying what it found); the resume that lifts it also accepts what is
-outside the ledger as the account's (``store.accept_reconciles``).
+outside the ledger as the account's (``store.accept_reconciles``). The live mode's first period
+(#408, ``live.py``) pauses them the same way on a breach of its checks (source ``ramp``, its own
+notice saying which); the resume that lifts it begins a new period (``store.resume_ramp``).
 
 **A failed order** (#405, mock mode): a KIS order refused, one whose outcome is not known (no
 answer) or one that could not be sent (``mock.py``) is kept (``failures``) and stops new entries for
@@ -65,6 +67,7 @@ from krx_quant.trader.store import (
     CUMULATIVE_LIMIT,
     DAILY_LIMIT,
     PAUSE,
+    RAMP,
     REARM,
     RECONCILE,
     RESUME,
@@ -351,8 +354,8 @@ class Guard:
             self.pause = Pause(self.pause.at, self.pause.sell_now or sell_now, self.pause.source)
         who = "화면" if control.source == API else control.source
         log.warning("trader: paused (%s, control %s, sell now: %s)", control.source, control.id, sell_now)
-        if control.source == RECONCILE:
-            return  # the reconcile tells what it found itself (#406)
+        if control.source in (RECONCILE, RAMP):
+            return  # the reconcile (#406) and the live ramp (#408) tell what they found themselves
         if sell_now:
             what = "정지하고 즉시 매도 요청을 받았습니다"
             then = "새로 사지 않고 열린 포지션을 바로 팝니다."
@@ -374,6 +377,9 @@ class Guard:
             log.warning(
                 "trader: the KIS account as the reconcile found it is accepted (control %s)", control.id
             )
+        # A breach of the live mode's first period, reviewed: its period begins again from now (#408).
+        if self.store.resume_ramp(at):
+            log.warning("trader: the live ramp's breach is reviewed: its first period begins again now")
         log.warning("trader: resumed (control %s): %s", control.id, self.status)
         self._notify(f"자동 매매({self.mode}): 정지를 풀었습니다(krx-quant trade resume). {self._still()}")
 

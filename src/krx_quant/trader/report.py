@@ -22,9 +22,12 @@ and, when no cell traded, why (the day's pick from the cost map: every cell cons
 verdict); each policy's paper record to the day and, for a challenger, where it stands against the
 champion (``promotion.judge``, as the night's judgment counts it); what the night changed (the
 champion, the challengers dropped and admitted, the policies fitted and their cells, the policies
-waiting, and whether the re-fit kept none or failed); the live gate (``promotion.gate``); the limits,
-the halts reached that day, a cumulative halt still holding, the pause in force and the pauses,
-resumes and re-arms asked for; the last trading days' ledger.
+waiting, and whether the re-fit kept none or failed); the live gate (``promotion.gate_of``, #408: the
+checkpoints evaluated that night and where the champion stands); what the live mode needs
+(``live.readiness``: the gate and the execution checks on the mock days, and on a live day its first
+period, ``live.ramp``), with a KIS day's comparison of its orders with KIS's; the limits, the halts
+reached that day, a cumulative halt still holding, the pause in force and the pauses, resumes and
+re-arms asked for; the last trading days' ledger.
 
 **What it never holds**: a price (no fill, reference, target, stop or quote), a broker's order
 number, an account, a key. The scheduled job's output is masked besides, as every job's
@@ -33,8 +36,9 @@ number, an account, a key. The scheduled job's output is masked besides, as ever
 **When it calls an agent** (``reasons``; the job labels the issue ``ready-for-agent`` only then,
 ``calls_agent``): on the week's last trading day (a Friday, or the day before a Friday the market is
 closed), when a loss limit was reached that day, when the champion changed that night, when the live
-gate passed that night (not passed the evening before under the same champion), or when the night's
-re-fit failed. Any other night is a record and changes no label.
+gate passed that night (a checkpoint evaluated that night passed for the champion at its end), when
+the live mode's first period was lifted or breached that day (#408), or when the night's re-fit
+failed. Any other night is a record and changes no label.
 """
 
 from __future__ import annotations
@@ -53,13 +57,13 @@ from typing import Any
 from krx_quant.config import Settings
 from krx_quant.feeds.base import KST
 from krx_quant.market_calendar import MarketCalendar, calendar_store
-from krx_quant.trader import MOCK, PAPER, PICK_AT, promotion
+from krx_quant.trader import CAPITAL, KIS_MODES, LIVE, PAPER, PICK_AT, live, promotion
 from krx_quant.trader import policy as policies
 from krx_quant.trader.gap import day_gap
 from krx_quant.trader.limits import Pause, pause_of
 from krx_quant.trader.refit import NO_POLICY_KEPT, run_refit
 from krx_quant.trader.settings import TraderSettings
-from krx_quant.trader.store import CUMULATIVE_LIMIT, DAILY_LIMIT, DB_NAME, Control, champion_of
+from krx_quant.trader.store import BREACH, CUMULATIVE_LIMIT, DAILY_LIMIT, DB_NAME, LIFT, Control, champion_of
 
 log = logging.getLogger(__name__)
 
@@ -182,9 +186,14 @@ class Report:
     day: date
     mode: str
     last_of_week: bool  # the week's last trading day
-    gate: promotion.Gate  # on the champion at the night's end, its record to the day
-    gate_before: promotion.Gate  # on the day's champion, its record to the day before
+    gate: promotion.Gate  # on the champion at the night's end, its record to the day (#408)
     found: bool = True  # the store is there
+    checked: tuple[promotion.Checkpoint, ...] = ()  # the gate's checkpoints evaluated in the night
+    night: tuple[datetime, datetime] | None = None  # from the day's pick to the next one's
+    readiness: live.Readiness | None = None  # what the live mode needs, as of the next day (#408)
+    ramp: live.Ramp | None = None  # a live day's first period
+    ramp_events: tuple[tuple[str, datetime], ...] = ()  # the ramp's lifts and breaches that day
+    order_check: Mapping[str, Any] | None = None  # a KIS day's orders against KIS (#408)
     capital: float | None = None
     champion: int | None = None  # in force on the day
     ledger: Mapping[str, Any] | None = None  # the day's ``days`` row
@@ -211,10 +220,12 @@ class Report:
 
     @property
     def gate_passed(self) -> bool:
-        """The live gate passed in the night: passed at its end, not the evening before under the
-        same champion."""
-        before = self.gate_before.passed and self.gate_before.policy == self.gate.policy
-        return self.gate.passed and not before
+        """The live gate passed in the night: the champion at its end passed at a checkpoint evaluated
+        in it (#408)."""
+        passed = self.gate.passed_at
+        if passed is None or passed.at is None or self.night is None:
+            return False
+        return self.night[0] <= passed.at < self.night[1]
 
 
 def report_day(calendar: MarketCalendar, now: datetime) -> date:
@@ -259,8 +270,7 @@ def read(
     ``promotion.mode_at``). ``sqlite3.Error`` when it cannot be read."""
     week = last_of_week(calendar, day)
     if not path.exists():
-        none = promotion.gate(None, None)
-        return Report(day, mode or PAPER, week, none, none, found=False, refit=refit)
+        return Report(day, mode or PAPER, week, promotion.no_gate(), found=False, refit=refit)
     start, end = night_of(calendar, day)
     session = calendar.session(day)
     with _reading(path) as db:
@@ -273,7 +283,6 @@ def read(
         challengers = _slots_at(db, start) if has_policies else []
         records = promotion.records(db, mode, {v for v in (champion, at_end, *challengers) if v is not None})
         to_day = {v: _upto(r, day) for v, r in records.items()}
-        before = {v: _upto(r, day - timedelta(days=1)) for v, r in records.items()}
         standings = _standings(day, champion, challengers, to_day)
         crowned: tuple[Crowned, ...] = ()
         dropped: tuple[int, ...] = ()
@@ -291,12 +300,23 @@ def read(
         pick, picks = _pick(db, mode, day, champion, None if session is None else session.close)
         controls = _controls(db, datetime.combine(day, time(), KST), end) if "controls" in tables else ()
         everything = _controls(db, None, end) if "controls" in tables else ()
+        points = promotion.checkpoints(db)
+        later = day + timedelta(days=1)
         return Report(
             day=day,
             mode=mode,
             last_of_week=week,
-            gate=promotion.gate(at_end, to_day.get(at_end) if at_end is not None else None),
-            gate_before=promotion.gate(champion, before.get(champion) if champion is not None else None),
+            gate=promotion.gate_of(db, at_end, day, end) if has_policies else promotion.no_gate(),
+            checked=tuple(c for c in points if c.at is not None and start <= c.at < end),
+            night=(start, end),
+            readiness=live.readiness(db, calendar.session, later),
+            ramp=live.ramp(db, calendar.session, datetime.combine(later, time(), KST), _capital_of(db, end))
+            if mode == LIVE
+            else None,
+            ramp_events=_ramp_events(db, start, end) if "ramp" in tables else (),
+            order_check=_order_check(db, mode, day)
+            if mode in KIS_MODES and "order_checks" in tables
+            else None,
             capital=_capital(db, mode, end) if "runs" in tables else None,
             champion=champion,
             ledger=_ledger(db, mode, day) if "days" in tables else None,
@@ -313,7 +333,7 @@ def read(
             waiting=waiting,
             halts=_halts(db, mode, day) if "halts" in tables else (),
             failures=_failures(db, mode, day) if "failures" in tables else (),
-            gap=day_gap(db, day) if mode == MOCK and "trades" in tables else None,
+            gap=day_gap(db, day, mode) if mode in KIS_MODES and "trades" in tables else None,
             held=_held(db, mode, day, end) if "halts" in tables else None,
             pause=pause_of(everything),
             controls=controls,
@@ -337,6 +357,12 @@ def reasons(report: Report) -> list[str]:
             out.append(f"챔피언 교체(정책 {change.replaced} → 정책 {change.version})")
     if report.gate_passed:
         out.append(f"실전 관문을 넘음(챔피언 정책 {report.gate.policy})")
+    for event, _ in report.ramp_events:
+        out.append(
+            "실전 운용 상한을 올림(첫 단계를 마침)"
+            if event == LIFT
+            else "실전 첫 단계 점검을 벗어남(새 진입 정지)"
+        )
     if report.refit:
         out.append(f"밤 정책 맞추기 실패(종료 코드 {report.refit})")
     return out
@@ -362,11 +388,12 @@ def render(report: Report) -> str:
         return "\n".join(lines)
     sections = [
         _day_section(report),
-        *([] if report.gap is None else [_gap_section(report.gap)]),
+        *([] if report.gap is None else [_gap_section(report.gap, report.mode)]),
         _pick_section(report),
         _standings_section(report),
         _night_section(report),
         _gate_line(report),
+        _live_section(report),
         _limits_section(report),
         _recent_section(report),
     ]
@@ -660,6 +687,35 @@ def _halts(db: sqlite3.Connection, mode: str, day: date) -> tuple[dict[str, Any]
     return tuple(dict(r) for r in rows)
 
 
+def _capital_of(db: sqlite3.Connection, end: datetime) -> int:
+    """The capital of the trader's last start before ``end``, whatever its mode (``runs``); the code's
+    without one."""
+    row = (
+        db.execute("SELECT detail FROM runs WHERE at < ? ORDER BY id DESC LIMIT 1", (_iso(end),)).fetchone()
+        if "runs" in _tables(db)
+        else None
+    )
+    capital = json.loads(row[0]).get("capital") if row is not None else None
+    return capital if isinstance(capital, int) and not isinstance(capital, bool) else CAPITAL
+
+
+def _ramp_events(db: sqlite3.Connection, start: datetime, end: datetime) -> tuple[tuple[str, datetime], ...]:
+    """The live first period's lifts and breaches from ``start`` to ``end`` (#408)."""
+    rows = db.execute(
+        "SELECT event, at FROM ramp WHERE mode = ? AND event IN (?, ?) AND at >= ? AND at < ? ORDER BY id",
+        (LIVE, LIFT, BREACH, _iso(start), _iso(end)),
+    )
+    return tuple((str(r[0]), datetime.fromisoformat(r[1])) for r in rows)
+
+
+def _order_check(db: sqlite3.Connection, mode: str, day: date) -> dict[str, Any] | None:
+    """A KIS day's orders against KIS (#408, ``order_checks``)."""
+    row = db.execute(
+        "SELECT verdict, detail FROM order_checks WHERE mode = ? AND day = ?", (mode, day.isoformat())
+    ).fetchone()
+    return None if row is None else {"verdict": row[0], "detail": json.loads(row[1])}
+
+
 def _failures(db: sqlite3.Connection, mode: str, day: date) -> tuple[dict[str, Any], ...]:
     rows = db.execute(
         "SELECT at, what, outcome, code, detail FROM failures WHERE mode = ? AND day = ? ORDER BY id",
@@ -702,13 +758,14 @@ def _controls(db: sqlite3.Connection, start: datetime | None, end: datetime) -> 
 # Writing.
 
 
-def _gap_section(gap: Mapping[str, Any]) -> str:
-    """A mock day's KIS trades against the champion's paper shadow (#405, ``gap.day_gap``): ticks and
-    won, no price."""
+def _gap_section(gap: Mapping[str, Any], mode: str = "mock") -> str:
+    """A mock or live day's KIS trades against the champion's paper shadow (#405, #408,
+    ``gap.day_gap``): ticks and won, no price."""
     mock, shadow = gap["mock"], gap["shadow"]
+    name = "KIS 실전" if mode == LIVE else "KIS 모의"
     lines = [
-        "KIS 모의와 그림자 장부 (#405)",
-        f"- KIS 모의 매매 {mock['trades']}건 {_won(mock['net'])} · 그림자(모의 체결) {shadow['trades']}건"
+        f"{name}와 그림자 장부 ({'#408' if mode == LIVE else '#405'})",
+        f"- {name} 매매 {mock['trades']}건 {_won(mock['net'])} · 그림자(모의 체결) {shadow['trades']}건"
         f" {_won(shadow['net'])} · 차이(KIS − 그림자) {_won(gap['difference'])}",
     ]
     for p in gap["pairs"]:
@@ -959,17 +1016,68 @@ def _simulated(fitted: Mapping[str, Any], title: str = "") -> str:
 
 def _gate_line(report: Report) -> str:
     g = report.gate
+    lines = [promotion.checkpoint_line(c) for c in report.checked]
     if g.policy is None:
-        return f"실전 관문: 챔피언이 없다(0/{g.required}거래일)"
-    line = (
-        f"실전 관문: 챔피언 정책 {g.policy}의 모의 기록 {g.days}/{g.required}거래일, 날마다 순손익 평균 "
-        f"{_won(g.mean)}, 하한 {_won(g.low)}(신뢰수준 {g.level:.0%}) → {'넘었다' if g.passed else '아직'}"
-    )
+        lines.append(f"실전 관문: 챔피언이 없다(모의 이력 {g.history}거래일, 다음 판정 {g.next_day}거래일째)")
+        return "\n".join(lines)
+    line = promotion.gate_line(g)
     if report.gate_passed:
         line += (
-            " · 그 밤 처음 넘었다(넘어도 저절로 실전이 되지 않는다: 모드는 사용자가 서버에서 바꾼다, #408)"
+            " · 그 밤 처음 넘었다(넘어도 저절로 실전이 되지 않는다: 모드는 사용자가 서버에서 바꾸고,"
+            " live 모드는 실행 점검도 넘어야 주문한다, #408)"
         )
-    return line
+    lines.append(line)
+    return "\n".join(lines)
+
+
+def _live_section(report: Report) -> str:
+    """What the live mode needs (#408): the execution checks on the mock days, a KIS day's comparison
+    of its orders with KIS's, and on a live day the first period. Counts, ticks and won, no price."""
+    lines = ["실전 준비 (#408)"]
+    found = report.readiness
+    if found is not None:
+        period = found.period
+        span = (
+            f"실행 점검은 KIS 모의 기간 {period[0]}–{period[-1]}({len(period)}거래일)로 본다"
+            if period
+            else "KIS 모의 거래일이 아직 없다"
+        )
+        verdict = "실전 주문 가능" if found.unlocked else "아직 실전 주문 안 함"
+        lines.append(f"- 다음 거래일 08:30 고르기의 판단: {verdict} · {span}")
+        lines.append(f"- {'✓' if found.gate.passed else '✗'} {found.gate_said()}")
+        lines += [f"- {'✓' if c.passed else '✗'} {c.said}" for c in found.checks]
+    check = report.order_check
+    if check is not None:
+        verdict = {"same": "같다", "different": "다르다", "no_orders": "견줄 주문이 없다"}.get(
+            check["verdict"], check["verdict"]
+        )
+        detail = check["detail"]
+        lines.append(
+            f"- 그날 주문의 KIS 대조: {verdict}(장부 {detail.get('orders', 0)}건,"
+            f" 같은 것 {detail.get('same', 0)}건, KIS에 없는 것 {detail.get('missing', 0)}건,"
+            f" 장부에 없는 것 {detail.get('extra', 0)}건)"
+        )
+    elif report.mode in KIS_MODES:
+        lines.append(
+            "- 그날 주문의 KIS 대조: 아직 없다(장 마감 뒤 trader가 견준다. 견주지 못한 날은 통과가 아니다)"
+        )
+    ramp = report.ramp
+    if ramp is not None:
+        if ramp.lifted_at is not None:
+            lines.append(
+                f"- 실전 운용 상한 {ramp.cap:,}원(첫 단계를 {_hms(ramp.lifted_at.isoformat())}에 마침)"
+            )
+        else:
+            lines.append(
+                f"- 실전 첫 단계: 운용 상한 {ramp.cap:,}원, 실전 {len(ramp.days)}/{live.RAMP_DAYS}거래일,"
+                f" 왕복 매매 {ramp.trips}/{live.RAMP_TRIPS}건"
+                + (" · 점검을 벗어나 새 진입이 멈춰 있다(krx-quant trade resume)" if ramp.breached_at else "")
+            )
+            lines += [f"  - {'✓' if c.passed else '✗'} {c.said}" for c in ramp.checks]
+    for event, at in report.ramp_events:
+        what = "운용 상한을 올렸다" if event == LIFT else "점검을 벗어나 새 진입을 멈췄다"
+        lines.append(f"- 그날 {_hms(at.isoformat())}: 실전 첫 단계의 {what}")
+    return "\n".join(lines)
 
 
 def _limits_section(report: Report) -> str:

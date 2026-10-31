@@ -99,6 +99,22 @@
 
     키가 없으면 작업이 첫 거래일에 "모의 키가 없다"고 #403에 한 번 남기고, 키가 들어온 뒤의 거래일에 다시 돈다. 앱키, 시크릿, 계좌번호, HTS ID는 서버 `.env`에만 둔다. 저장소, 이슈, PR에는 적지 않는다. 예약 작업의 댓글, 서버 요약, Loki 줄에서는 가린다(3장 "예약 작업 (#215)"의 "가림").
 
+14. **실전 계좌와 실전 키** (#408, 자동 매매가 실전 계좌에 주문하게 할 때만): trader의 live 모드(3장 "자동 매매"의 "실전 (#408)")는 이것이 있어야 시작한다. 에이전트는 실전 주문을 내지 않는다: 켜는 것도 되돌리는 것도 사용자가 한다.
+    1. 한국투자증권에서 자동 매매만 쓸 **새 실전 계좌**(국내주식 위탁)를 연다. 다른 돈이 든 계좌를 쓰지 않는다: trader에 버그가 있어도 그 밖의 돈을 건드리지 못하게(spec #393).
+    2. 그 계좌에 운용 상한(`KRX_TRADER_CAPITAL`, 기본 1,000,000원)만 넣는다. 평가금이 그보다 크면 trader가 시작할 때마다 텔레그램으로 알린다.
+    3. 그 계좌의 **증거금률을 100%**로 바꾼다(미수 불가. 한국투자증권 앱이나 HTS의 증거금률 변경 메뉴. 메뉴 이름은 판마다 다르다). trader는 매수 전마다 주문 가능 현금을 읽고 그 이상 사지 않지만, 계좌가 미수를 막는 것이 둘째 장치다.
+    4. KIS Developers(https://apiportal.koreainvestment.com)에서 그 **새 실전 계좌**로 앱키와 앱시크릿을 발급받는다. 수집기의 실전 앱키(`KIS_APP_KEY`)와도 모의 앱키(`KRX_TRADER_KIS_APP_KEY`)와도 다른 키다. 같으면 trader가 시작하지 않는다.
+    5. 서버 `.env`에 넣는다(2장 "설정 값 전체"):
+       ```
+       KRX_TRADER_LIVE_KIS_APP_KEY=<새 실전 계좌의 앱키>
+       KRX_TRADER_LIVE_KIS_APP_SECRET=<그 앱시크릿>
+       KRX_TRADER_LIVE_KIS_ACCOUNT=<새 실전 계좌번호 8자리>-<상품코드 2자리>
+       ```
+       이름이 모의 키(`KRX_TRADER_KIS_*`)와 달라 mock 모드와 주문 프로브는 이것을 읽지 않는다. 모의 키 자리에 실전 키나 계좌를 넣으면 mock 모드도 프로브도 주문하지 않는다. 서버 주소 설정은 없다: 코드가 KIS의 실전 서버로 정해 둔다.
+    6. 모드를 바꾸는 것은 3장 "자동 매매"의 "실전 (#408)"이다. 키만 넣으면 아무 일도 없다.
+
+    앱키, 시크릿, 계좌번호는 서버 `.env`에만 둔다. 저장소, 이슈, PR에는 적지 않는다. 예약 작업의 댓글과 서버 요약에서는 가린다(`redaction.py`).
+
 ## 2. 개통
 
 ### 2.1 AWS 자원 (맥에서)
@@ -259,9 +275,10 @@ curl http://krx-quant:8080/v1/macro
 | `KRX_OPENAPI_KEY` | 없음 | KRX Open API 인증키(#305, 비밀값). 서비스 "ETF 일별매매정보"(`etf_bydd_trd`)의 이용 신청이 승인된 것이어야 한다([krx-openapi.md](krx-openapi.md)). 요청 헤더 `AUTH_KEY`로만 보내고 주소, 출력, 로그에는 두지 않는다. 있으면 수집기가 ETF 순자산을 받는다(시작할 때 상장일부터, 거래일 08:05부터 전 거래일, #368). 없으면 KRX를 부르지 않는다(수집기는 `KRX_OPENAPI_KEY is not set: the ETF net assets come from KIS alone`을 남기고, `probe-krx-etf`는 `멈춤: KRX_OPENAPI_KEY가 없다`, 예약 작업 `probe-krx-etf-305`·`check-krx-net-assets-305`는 기다린다). 예약 작업의 댓글과 `doctor`에서 가린다 |
 | `KRX_OPENAPI_URL` | `https://data-dbg.krx.co.kr` | KRX Open API 주소(테스트는 가짜 서버를 가리킨다). 경로 `/svc/apis/etp/etf_bydd_trd.json`을 붙인다 |
 | `KIS_WS_URL` | `ws://ops.koreainvestment.com:21000` | KIS WebSocket 주소 |
-| `KRX_TRADER_KIS_APP_KEY`, `KRX_TRADER_KIS_APP_SECRET` | 없음 | trader 자신의 KIS 앱키와 시크릿(#403, 비밀값). 지금은 모의투자 앱키다(1장 13). 수집기의 `KIS_APP_KEY`와 다른 키여야 한다: 호출 한도와 토큰을 나누지 않는다. 주문 프로브(`probe-kis-orders`), mock 모드의 trader(`KRX_TRADER_MODE=mock`, #405), mock 첫날의 대조(`check-mock-trades`, #405)가 읽는다. 없으면 프로브가 그렇다고 남기고 주문하지 않고, mock 모드의 trader는 시작하지 않는다(`configuration error: KRX_TRADER_KIS_APP_KEY, … are needed …`). trader의 주문 모듈(`kis_orders.trader_broker`, #404)은 이 키가 `KIS_APP_KEY`와 같으면 만들지 않고, 토큰을 `state/trader_kis_token.json`에 캐시한다. **바뀜** (2026-10-30, #422): "지금은 주문 프로브만 읽는다", "trader가 그것을 쓰는 것은 mock 모드(#405)부터다" → mock 모드의 trader와 그 대조도 읽는다. 이유: #405 |
+| `KRX_TRADER_KIS_APP_KEY`, `KRX_TRADER_KIS_APP_SECRET` | 없음 | trader 자신의 KIS 앱키와 시크릿(#403, 비밀값). 지금은 모의투자 앱키다(1장 13). 수집기의 `KIS_APP_KEY`와 다른 키여야 한다: 호출 한도와 토큰을 나누지 않는다. 주문 프로브(`probe-kis-orders`), mock 모드의 trader(`KRX_TRADER_MODE=mock`, #405), mock 첫날의 대조(`check-mock-trades`, #405)가 읽는다. 실전 키(`KRX_TRADER_LIVE_KIS_*`, #408)와 같으면 셋 다 주문하지 않는다. 없으면 프로브가 그렇다고 남기고 주문하지 않고, mock 모드의 trader는 시작하지 않는다(`configuration error: KRX_TRADER_KIS_APP_KEY, … are needed …`). trader의 주문 모듈(`kis_orders.trader_broker`, #404)은 이 키가 `KIS_APP_KEY`와 같으면 만들지 않고, 토큰을 `state/trader_kis_token.json`에 캐시한다. **바뀜** (2026-10-30, #422): "지금은 주문 프로브만 읽는다", "trader가 그것을 쓰는 것은 mock 모드(#405)부터다" → mock 모드의 trader와 그 대조도 읽는다. 이유: #405 |
 | `KRX_TRADER_KIS_ACCOUNT` | 없음 | 그 키의 계좌(비밀값): 계좌번호 8자리와 상품코드 2자리(`12345678-01` 꼴, `-`는 없어도 된다). 꼴이 틀려도 수집기는 뜬다. 프로브가 그렇다고 남기고 주문하지 않는다. 가림은 쓴 그대로, 숫자 10자리, 앞 8자리를 모두 가린다 |
 | `KRX_TRADER_KIS_HTS_ID` | 없음 | 실시간 체결 통보를 구독하는 HTS ID(한국투자증권 로그인 아이디, 비밀값). 없으면 프로브가 체결 통보만 빼고 돈다 |
+| `KRX_TRADER_LIVE_KIS_APP_KEY`, `KRX_TRADER_LIVE_KIS_APP_SECRET`, `KRX_TRADER_LIVE_KIS_ACCOUNT` | 없음 | 새 실전 계좌의 앱키, 시크릿, 계좌(#408, 비밀값, 1장 14). live 모드의 trader만 읽는다(`kis_orders.trader_live_broker`). 모의 키와 이름이 달라 mock 모드와 주문 프로브는 읽지 않는다. `KRX_TRADER_MODE=live`인데 셋 가운데 하나라도 없거나, 키가 수집기의 `KIS_APP_KEY`나 모의 키와 같거나, 계좌가 모의 계좌와 같으면 trader가 시작하지 않는다(`configuration error`, 종료 코드 2). 서버는 KIS의 실전 서버로 정해져 있다(설정 없음). 토큰은 `state/trader_live_kis_token.json`에 따로 캐시한다 |
 | `KRX_TRADER_KIS_REST_URL`, `KRX_TRADER_KIS_WS_URL` | `https://openapivts.koreainvestment.com:29443`, `ws://ops.koreainvestment.com:31000` | trader가 부르는 KIS 서버. 기본값이 모의투자 서버다. 주문 프로브, mock 모드의 trader, mock 첫날의 대조는 두 값이 모의투자 서버가 아니면 아무것도 보내지 않고 멈춘다(종료 코드 2, `configuration error: KRX_TRADER_KIS_REST_URL and KRX_TRADER_KIS_WS_URL are not KIS's mock servers …`). 실전 서버는 live 모드(#408)가 연다 |
 | `KIS_MASTER_URL` | `https://new.real.download.dws.co.kr/common/master` | 최근월물을 찾는 KIS 마스터 파일 주소. 토스가 이름을 주지 않은 종목의 회사 이름도 여기의 종목 마스터(`kospi_code.mst.zip`, `kosdaq_code.mst.zip`)에서 읽는다(#250) |
 | `KIS_WS_MAX_SUBSCRIPTIONS` | 없음(KIS가 거절할 때까지 모두 구독) | 세션당 실시간 구독 수. 넘는 구독은 REST로 바꾸거나 뺀다. 1 이상. `.env.example`은 41 |
@@ -346,7 +363,7 @@ curl http://krx-quant:8080/v1/macro
 
 | 변수 | 기본값 | 뜻과 범위 |
 |---|---|---|
-| `KRX_TRADER_MODE` | `paper` | `paper`(모의: 호가로 체결을 흉내 내고 주문하지 않는다) 또는 `mock`(KIS 모의: 챔피언의 매매를 `KRX_TRADER_KIS_*`로 KIS 모의투자 서버에 주문하고 장부를 KIS의 체결로 쓴다, #405). 모드는 여기서만 바꾼다(아래 "모드 바꾸기 (#405)"). `live`는 그 모드(#408)가 들어오기 전까지 설정 오류다. **바뀜** (2026-10-30, #421): "KIS 주문 모듈(#404) 전까지" → 그 모드(#405, #408) 전까지. 이유: #404는 주문 모듈만 더하고, trader가 그것으로 주문하는 것은 mock·live 모드다. **바뀜** (2026-10-30, #422): `paper`뿐이었다 → `mock`이 들어왔다. 이유: #405 |
+| `KRX_TRADER_MODE` | `paper` | `paper`(모의: 호가로 체결을 흉내 내고 주문하지 않는다) 또는 `mock`(KIS 모의: 챔피언의 매매를 `KRX_TRADER_KIS_*`로 KIS 모의투자 서버에 주문하고 장부를 KIS의 체결로 쓴다, #405). 모드는 여기서만 바꾼다(아래 "모드 바꾸기 (#405)"). `live`(실전, #408): 실전 관문과 실행 점검을 넘은 챔피언만 `KRX_TRADER_LIVE_KIS_*`로 새 실전 계좌에 주문하고, 그 전에는 실제 주문 없이 `paper`처럼 돈다(3장 "자동 매매"의 "실전 (#408)"). **바뀜** (2026-10-31, #425): "`live`는 그 모드(#408)가 들어오기 전까지 설정 오류다" → `live`가 들어왔다. 이유: #408. **바뀜** (2026-10-30, #421): "KIS 주문 모듈(#404) 전까지" → 그 모드(#405, #408) 전까지. 이유: #404는 주문 모듈만 더하고, trader가 그것으로 주문하는 것은 mock·live 모드다. **바뀜** (2026-10-30, #422): `paper`뿐이었다 → `mock`이 들어왔다. 이유: #405 |
 | `KRX_TRADER_THRESHOLD` | `0.6` | 사는 오름 확률(방향 `p_up`, 장벽 `p_up_first`)의 문턱 θ. 0–1. 첫 챔피언 정책 전에만 고른 칸 모두에 쓴다. 챔피언이 있으면 칸마다 챔피언의 θ다(#399). 밤 정책 맞추기가 로그 성장이 같은 점들 가운데 고를 때의 기본값이기도 하다 |
 | `KRX_TRADER_CAPITAL` | `1000000` | 운용 상한(원). 1 이상 1,000,000 이하. 넘으면 시작하지 않는다(좁히기만 한다, #393). 한 번에 사는 금액은 칸의 Kelly 비율 × 이 값이다(#395). 밤 정책 맞추기(#399)도 모의 매매의 수량을 이 값으로 센다. 정책에는 남지 않고, 맞추기는 이 값을 바꾸지 않는다. 주문 가능 현금(이 값 + 청산한 매매의 순손익)도 넘지 않는다(#396) |
 | `KRX_TRADER_DAILY_LOSS_PERCENT` | `10` | 하루 손실 한도, 운용 상한의 %(#396, 기본 100,000원). 0 초과 10 이하. 10을 넘으면 시작하지 않는다(좁히기만 한다). 그날 손실(비용을 뺀 실현 + 열린 포지션의 평가)이 닿으면 열린 포지션을 팔고 그날은 사지 않는다. 다음 거래일에 다시 돈다. 정책에 없고, 밤 정책 맞추기가 바꾸지 않는다(#399) |
@@ -1106,9 +1123,11 @@ Toss: 109 calls, 1 failed; tokens issued: 0
 
 ### 자동 매매 (#394)
 
-compose 서비스 `trader`가 `krx-quant trade`를 돈다. 수집기(`engine`)와 같은 이미지의 다른 컨테이너라, 06:00 배포가 둘을 함께 새로 띄우고, 수집기가 멈추거나(07:20 재시작, 메모리 부족) 다시 떠도 trader는 따로 산다. 모드는 서버 `.env`의 `KRX_TRADER_MODE`다. 기본값 `paper`(모의)는 주문을 내지 않고 KIS 키도 쓰지 않는다. `mock`(KIS 모의, #405)은 챔피언의 매매를 trader 자신의 모의 키로 KIS 모의투자 서버에 주문한다(아래 "모드 바꾸기 (#405)", "KIS 모의 (#405)"). 규칙은 [design.md](design.md#14-자동-매매-393) 14장에 있다.
+compose 서비스 `trader`가 `krx-quant trade`를 돈다. 수집기(`engine`)와 같은 이미지의 다른 컨테이너라, 06:00 배포가 둘을 함께 새로 띄우고, 수집기가 멈추거나(07:20 재시작, 메모리 부족) 다시 떠도 trader는 따로 산다. 모드는 서버 `.env`의 `KRX_TRADER_MODE`다. 기본값 `paper`(모의)는 주문을 내지 않고 KIS 키도 쓰지 않는다. `mock`(KIS 모의, #405)은 챔피언의 매매를 trader 자신의 모의 키로 KIS 모의투자 서버에 주문한다(아래 "모드 바꾸기 (#405)", "KIS 모의 (#405)"). `live`(실전, #408)는 실전 관문과 실행 점검을 넘은 챔피언만 새 실전 계좌에 주문하고, 그 전에는 주문 없이 모의로 돈다(아래 "실전 (#408)"). 규칙은 [design.md](design.md#14-자동-매매-393) 14장에 있다.
 
 > **바뀜** (2026-10-30, #422): "지금은 모의(`paper`)뿐이다: 주문을 내지 않고 KIS 키도 쓰지 않는다" → `mock` 모드는 KIS 모의투자 서버에 주문한다. 이유: #405.
+
+> **바뀜** (2026-10-31, #425): `paper`와 `mock`뿐이었다 → `live`가 들어왔다. 이유: #408.
 
 - 매매할 칸은 엔진 API의 비용 지도가 고른다(#395). trader가 시작할 때와 매일 08:30에 `http://engine:8080/v1/cost-map?symbol=005930&period=20d&special=exclude`(compose 네트워크 안)를 읽고, 방향과 4·15·30분 장벽의 세 예측자(최종 합의, 순위 1위 알고리즘, 가장 센 기준 예측) 가운데 시장가 왕복 판정이 `pass`인 칸만 매매한다. 고를 때마다 INFO `trader: trading N cell(s): <종류> <예측자> (<자리>: low … − p* … = …, Kelly … → …); …`를 남긴다. 통과하는 칸이 없으면 INFO `trader: trading no cell until the next pick: none passes: <종류> <자리> <예측자> <판정>; …`이고 그날은 매매하지 않는다. 엔진 API에 닿지 않으면 WARNING `trader: could not read the cost map (…): no cell trades until it is read, asked for every 60s`를 한 번 남기고 1분마다 다시 묻는다(읽으면 INFO `trader: the cost map is read again`). 06:00 배포 직후 엔진이 뜨는 동안 한두 번 나오는 것은 정상이다.
 - 고른 기록은 `selections` 표다: `docker compose exec trader python -c 'import sqlite3; [print(r) for r in sqlite3.connect("file:/state/trader.sqlite3?mode=ro", uri=True).execute("select at, reason, picks, considered from selections order by id desc limit 3")]'`. `reason`이 `no_pass`면 통과한 칸이 없었고, `no_cost_map`이면 비용 지도를 읽지 못했다(`detail`에 까닭).
@@ -1125,7 +1144,7 @@ compose 서비스 `trader`가 `krx-quant trade`를 돈다. 수집기(`engine`)�
 
   > **바뀜** (2026-10-30, #418): 예약 작업 `refit-policy-399`(`krx-quant refit-policy`)가 맞추고 출력을 #402에 남겼다 → 예약 작업 `trader-report`(`krx-quant refit-policy --report`)가 같은 일을 하고, 그날의 리포트 아래에 그 출력을 붙여 리포트 이슈 #417에 한 댓글로 남긴다. 이유: 밤 리포트(#402)의 라벨이 가리키는 댓글이 밤마다 하나여야 하고, 판정과 관문이 두 번 오르지 않게 한다. #402는 이 PR로 닫힌다.
 - **도전 정책과 승격 (#400).** 도전 정책은 자리 셋에서, 자리를 받은 뒤 첫 08:30 고르기부터 챔피언 옆에서 모의로 돈다: 같은 예측, 같은 호가, 같은 규칙으로, 한도와 정지 없이. 자리가 차 있을 때 맞춘 정책은 기다리고(`waiting`), 자리가 나면 가장 새 것부터 들어간다(작업 출력 `도전 정책 자리 (#400): 빈 자리에 들어간 정책 …`, 로그 INFO `admission: policy N take(s) a challenger's slot`). 챔피언이나 도는 도전 정책과 값이 같은 맞추기는 저장하지 않는다(출력 `새 정책 없음 · 맞춘 값이 … 같아 저장하지 않았다`, 로그 `refit: policy N kept (the same values as policy N: not kept again)`). 고를 때 INFO `trader: challenger N in paper: <고른 칸>`, 매매 줄은 `trader: challenger N buying on …`, `trader: challenger N bought …`, `trader: challenger N sold … (<이유>, trade M): net … won`이다(챔피언의 줄은 그대로 `trader: bought …`). 판정은 밤 작업이 정책을 맞추기 전에 한다: 함께 돈 거래일 10일 이상, 날마다 (도전 − 챔피언) 순손익의 하한(도전 정책 수로 Bonferroni 보정)이 0보다 크면 챔피언이 된다. 20일까지 이기지 못하면 내려지고(`dropped`, 출력 `내린 도전 정책(20일 동안 이기지 못함, 자리를 비운다)`), 다음 고르기에 INFO `trader: challenger N runs no more`다. 바뀌면 작업 로그에 WARNING `promotion: policy N is the champion now, in place of policy M`, 아니면 INFO `promotion: policy M stays the champion (judged)`이다. 거래일 08:30부터 15:30 사이에 작업을 손으로 돌리면 판정하지 않는다(`market_open`). 장중에는 챔피언이 바뀌지 않는다. 새 챔피언은 다음 08:30 고르기부터 산다. 도전 정책과 판정의 진행은 `curl -s 'http://krx-quant:8080/v1/trader' | jq '.champion, .gate, .policies'`로 본다([engine-api.md](engine-api.md#get-v1trader-396)).
-- **실전 관문 (#400).** 챔피언의 모의 기록(도전 정책이었던 날 포함)이 20거래일 이상이고 날마다 순손익(매매 없는 날 0)의 95% 하한이 0보다 크면 넘는다. 위 `GET /v1/trader`의 `gate`와 밤 작업의 출력(`실전 관문: 챔피언 정책 N의 모의 기록 12/20거래일, …`)에 있다. 지금은 재기만 한다: 관문을 넘어도 trader는 모의로 돈다(`live`는 #408).
+- **실전 관문 (#400, #408).** 밤마다가 아니라 판정점에서만 판정한다: trader의 모의 이력(챔피언이 돈 거래일) 20일째, 40일째, 60일째 … 밤에 그날의 챔피언이 챔피언으로 돈 날의 모의 기록(승격된 챔피언은 챔피언이 된 다음 거래일부터. 도전 정책이었던 날은 세지 않는다. 20거래일 이상)의 날마다 순손익(매매 없는 날 0)을 k번째 판정점의 α_k = 0.025 × 6 ÷ (π² k²)로 본다(첫 판정점 1.52%, 둘째 0.38%: 평생 2.5% 이하). 판정은 한 번만 남기고(`gate_checks`), 넘은 챔피언은 넘은 채이며, 챔피언이 바뀌어도 k는 이어서 센다. 위 `GET /v1/trader`의 `gate`(다음 판정점의 번호와 날, α, 넘은 판정점)와 밤 작업의 출력(`실전 관문 판정 1번째(모의 이력 20거래일째, …)`, `실전 관문: 챔피언 정책 N의 챔피언으로 돈 모의 기록 12일(이력 12거래일), … 다음 판정(1번째, 이력 20거래일째, α 1.520%) …`)에 있다. 관문을 넘어도 저절로 실전이 되지 않는다: `KRX_TRADER_MODE=live`이고 실행 점검도 넘어야 주문한다(아래 "실전 (#408)"). **바뀜** (2026-10-31, #425): 밤마다 20거래일 이상과 95% 하한으로 보았다(`… 모의 기록 12/20거래일, …`, 도전 정책이었던 날 포함), 재기만 했다 → 판정점에서 α_k로, 챔피언으로 돈 날만 보고, live 모드가 그것으로 주문한다. 이유: 밤마다 보면 영향이 없는 챔피언도 12–15% 넘긴다(design.md 14장 "실전 관문"), #408. 도전 정책이었던 날은 그 정책을 승격시킨 날이라 넣으면 영향이 없는 정책들이 2.5%보다 자주 넘는다(같은 곳, #425 리뷰).
 - trader는 칸을 고를 때(시작, 매일 08:30) 챔피언을 읽어, 비용 지도를 통과한 칸 가운데 챔피언의 칸만 챔피언의 순서·θ·λ로 산다. INFO `trader: under the champion, policy N (…): M cell(s)`, 고른 칸 줄 `trader: trading K cell(s): policy N: … θ 0.7)`. 통과한 칸이 챔피언에 없으면 `trader: trading no cell until the next pick: none of policy N's cells passes: …`. 첫 맞추기 전에는 INFO `trader: no champion policy yet: …`이고 #395대로(`KRX_TRADER_THRESHOLD`, λ 0.5) 산다. 첫 챔피언이 빈 정책(그 밤 통과한 칸이 없었다)이면 도전 정책이 이겨 챔피언이 될 때까지 매매하지 않는다. 챔피언을 읽지 못하면 ERROR `trader: cannot read the champion policy (…): no cell trades until the next pick`.
 - 정책은 `curl -s 'http://krx-quant:8080/v1/trader/policies?limit=5'`로 본다([engine-api.md](engine-api.md#get-v1traderpolicieslimitn-399)). 맞추기의 로그는 `{service="krx-quant", process="job"}`의 `job=trader-report` 줄이다(#418 전에는 `job=refit-policy-399`): `refit: policy N kept (the champion | a challenger running | a challenger waiting | the same values as policy N: not kept again), K of M cell(s); peak RSS … MB (…), …s`.
 
@@ -1136,14 +1155,16 @@ compose 서비스 `trader`가 `krx-quant trade`를 돈다. 수집기(`engine`)�
     - `이번 주 마지막 거래일(금요일)`: 그 주의 마지막 거래일. 금요일이 휴장이면 그 앞 거래일이다.
     - `하루 손실 한도에 닿음(<시각>)`, `누적 손실 한도에 닿음(<시각>)`: 그날 한도에 닿았다. 닿은 날 밤에만 센다.
     - `첫 챔피언(정책 N)`, `챔피언 교체(정책 M → 정책 N)`: 그 밤에 챔피언이 바뀌었다.
-    - `실전 관문을 넘음(챔피언 정책 N)`: 그 밤에 처음 넘었다. 그 전날 저녁에 같은 챔피언으로 이미 넘었으면 세지 않는다.
+    - `실전 관문을 넘음(챔피언 정책 N)`: 그 밤 판정한 판정점에서 그 밤 끝의 챔피언이 넘었다(#408). **바뀜** (2026-10-31, #425): "그 밤에 처음 넘었다. 그 전날 저녁에 같은 챔피언으로 이미 넘었으면 세지 않는다" → 그 밤의 판정점에서 넘었다. 이유: 관문은 판정점에서만 판정한다(#408).
+    - `실전 운용 상한을 올림(첫 단계를 마침)`, `실전 첫 단계 점검을 벗어남(새 진입 정지)`: live의 첫 단계가 그날 끝났다(#408).
     - `KIS 주문 실패 N건(첫 실패 <시각>)`: mock 모드(#405)에서 그날 KIS 주문이 실패했다. "한도와 정지"에 실패마다 시각, 주문, 결과, KIS의 코드와 메시지가 나온다.
     - `밤 정책 맞추기 실패(종료 코드 N)`.
   - 그날의 장부와 챔피언의 매매. 매매마다 진입·청산 시각, 칸, 오름 확률 ≥ θ, p*와 하한, 수량, 청산 이유, 체결 사이의 틱, 비용, 순손익(원)이다. 가격은 싣지 않는다. 그 아래에 챔피언의 장부가 읽은 예측을 어떻게 했는지가 이유별 건수로 나온다: 산 것, 사려 했으나 못 산 것, 사지 않은 것.
   - 칸 고르기: 그날 장 마감 전 마지막 고르기. 매매할 칸이 없었으면 그 까닭(`no_pass`, `no_cost_map`, `not_in_policy`, `no_policy`)과 살펴본 칸마다의 판정(`fail`, `few`, `no row` 등)이 나온다.
   - 정책별 모의 성적: 그날의 챔피언과 도전 정책마다 그날의 매매·순손익과 그날까지의 기록(거래일, 매매, 순손익, 날마다 평균과 하한). 도전 정책은 챔피언과 함께 돈 거래일, (도전 − 챔피언) 평균과 하한, 판정이 더 나온다. 그 밤의 판정과 같은 수다.
   - 그 밤: 챔피언 교체와 그 이유, 내린 도전 정책, 빈 자리에 들어간 정책, 맞춘 정책과 그 칸·θ·λ·모의 결과, 기다리는 정책 수, 맞추기가 정책을 저장하지 않았거나 실패했는지.
-  - 실전 관문: 날 수, 평균, 하한, 넘었는지.
+  - 실전 관문: 그 밤 판정한 판정점(그날의 챔피언, 챔피언으로 돈 날 수, 평균, α_k의 하한, 다리마다 1틱 더 불리한 하한)과 지금 챔피언의 자리(다음 판정점과 그 α, 또는 넘은 판정점, #408).
+  - 실전 준비(#408): 다음 거래일 08:30 고르기가 실전 계좌에 주문할지, 관문과 실행 점검마다 ✓·✗(mock 기간), KIS 날이면 그날 주문의 KIS 대조, live 날이면 첫 단계(상한, 실전 날과 왕복 매매, 그 점검).
   - 한도와 정지: 한도(원), 그날 닿은 한도, 그날의 KIS 주문 실패(mock, #405), 아직 풀리지 않은 누적 한도, 지금의 정지, 그날과 그 밤의 정지·재개·다시 켜기 요청.
   - 모드: 그날의 매매·장부·칸 고르기는 그날 장 마감 때 trader가 돌던 모드의 것이다(첫 줄의 모드, #405). 정책별 모의 성적과 실전 관문은 어느 모드에서도 paper의 기록이다.
   - KIS 모의와 그림자 장부(mock 날만, #405): KIS 모의 매매와 챔피언의 그림자 매매의 수와 순손익, 그 차이, 예측마다 진입·청산 체결가 차이(틱)와 순손익 차이. 한쪽만 산 예측은 그렇다고 적는다.
@@ -1171,9 +1192,11 @@ compose 서비스 `trader`가 `krx-quant trade`를 돈다. 수집기(`engine`)�
    시작 줄 `trader: mock trading 005930 on the cells …`이 나오면 됐다. `curl -s http://krx-quant:8080/v1/trader | jq .mode`가 `"mock"`이다. 키가 없거나, 수집기의 키이거나, 서버가 모의투자 서버가 아니면 `configuration error: …`(종료 코드 2)로 시작하지 않고 run도 남기지 않는다. Docker가 다시 띄우고 또 멈추므로 `.env`를 고친 뒤 다시 `docker compose up -d trader`.
 4. 되돌리려면 `KRX_TRADER_MODE=paper`(또는 줄을 지운다)로 고치고 `docker compose up -d trader`. 1과 같이 열린 포지션이 없을 때 한다.
 
+`live`(#408)로 바꾸는 것과 되돌리는 것은 아래 "실전 (#408)"이다.
+
 모드마다 따로인 것:
 
-- 손실 한도: 누적 손실은 그 모드를 처음 켠 때부터 센다(mock은 처음 mock으로 시작한 때부터). 하루 한도, 정지, 재개, 다시 켜기는 위와 같다. `rearm`은 `.env`의 모드의 누적 한도를 다시 켠다.
+- 손실 한도: 누적 손실은 그 모드를 처음 켠 때부터 센다(mock은 처음 mock으로 시작한 때부터, live는 처음 실전 계좌에 주문하며 시작한 때부터: 관문 전의 live는 `paper`로 돈다). 하루 한도, 정지, 재개, 다시 켜기는 위와 같다. `rearm`은 `.env`의 모드의 누적 한도를 다시 켠다.
 - 기록: 밤의 승격 판정, 실전 관문, 밤 리포트의 정책별 성적, `GET /v1/trader`의 `gate`·`policies`, `GET /v1/trader/policies`는 어느 모드에서도 paper의 기록을 읽는다. mock에서는 챔피언 정책의 그림자 장부(모의 체결)가 챔피언의 기록을 이어 쓰고 도전 정책도 paper로 쓴다(아래 "KIS 모의 (#405)"). 그래서 모드를 바꿔도 관문의 날 수와 도전 정책이 챔피언과 함께 돈 날은 이어서 센다.
 - 매매와 장부(`GET /v1/trader/trades`, `/v1/trader/days`)에는 행마다 모드가 붙는다(`mode`). 화면의 매매 표와 차트는 trader의 매매(paper 모드의 모의 매매, mock의 KIS 모의 매매)를 보이고, 그림자와 도전 정책의 매매는 `?policy=N`으로만 나온다. 리포트의 그날 매매와 장부는 그날 장 마감 때의 모드의 것이다.
 
@@ -1219,6 +1242,41 @@ mock 모드의 trader는 시작할 때마다(06:00 배포, 재시작, watchdog�
 - 로그(Loki `{service="krx-quant", process="trader"}`): WARNING `trader: the collector's quotes stalled: none for more than 5s (the last at HH:MM:SS): no new entry until they return`, WARNING `trader: the quotes are back at HH:MM:SS, Ns after the last: on the stream again`. mock은 INFO `trader: reading KIS's best quotes over REST every 2s while the quotes stall (trade N)`, `trader: selling trade N on KIS (<이유>, on KIS's REST quotes: the quotes stalled)`. 읽기 실패는 WARNING `trader: could not read KIS's best quotes over REST (…); read again every 2s`를 한 번 남기고(다시 읽히면 INFO `trader: KIS's best quotes read over REST again`) 다음 차례에 다시 읽는다. 주문 실패가 아니라 `failures`에 남지 않고 새 진입을 멈추지 않는다. 끊김 중에 멈췄던 trader가 같은 날 다시 뜨면 WARNING `trader: the quotes had stalled since HH:MM:SS when the trader stopped: no new entry until they return`이고 다시 알리지 않는다.
 - 할 일: 짧은 끊김(수집기의 07:20 재시작은 장 밖이다, 메모리 부족 재시작, 연결 끊김)은 할 일이 없다: 돌아오면 저절로 다시 산다. 몇 분 넘게 이어지면 수집기를 본다: `docker compose ps engine`, `docker compose logs --tail 50 engine`, `curl -s http://krx-quant:8080/v1/status | jq .kis`(6장 "장애 대응"). trader의 연결만 끊겼으면 trader 로그에 `quotes: … ; connecting again`이 있다. 수집기가 호가 리스너를 열지 못했으면 위 `[장애] 자동 매매의 호가 스트림을 열지 못했습니다`가 먼저 온다.
 - 호가 리스너를 끈 서버(`KRX_QUOTES_PORT=off`)에서는 거래일마다 09:00:05쯤 끊김 알림이 한 번 온다(trader가 사지 않는 것은 그대로다).
+
+#### 실전 (#408)
+
+`KRX_TRADER_MODE=live`면 챔피언의 장부가 새 실전 계좌에 주문한다. 다만 실전 관문(위 "실전 관문")과 실행 점검을 모두 넘었을 때만이다. 그 전에는 실제 주문을 하나도 내지 않고 `paper`처럼 돈다. 규칙은 [design.md](design.md#14-자동-매매-393) 14장 "실전 (#408)"에 있다. 에이전트는 실전 주문을 내지 않는다: 켜고 되돌리는 것은 사용자가 서버에서 한다.
+
+켜기 전에:
+
+1. 1장 14대로 새 실전 계좌를 열고(운용 상한만 넣는다), 증거금률을 100%로 하고, 그 계좌의 앱키를 받아 서버 `.env`에 `KRX_TRADER_LIVE_KIS_APP_KEY`, `KRX_TRADER_LIVE_KIS_APP_SECRET`, `KRX_TRADER_LIVE_KIS_ACCOUNT`를 넣는다. 그 뒤 첫 거래일 밤에 예약 작업 `probe-live-account-408`이 실전 계좌를 조회만으로 읽어(주문하지 않는다) trader가 읽는 필드가 실전의 답에 있는지 보고 #417에 남긴다(아래 "예약 작업 (#215)"). 이것이 통과(`결과: 같다`)해야 live가 주문한다(실행 점검 `live_probe`). 손으로는 `docker compose run --rm engine probe-live-account`(조회만). 실전 계좌나 앱키를 바꾸면 손으로 한 번 다시 돌린다.
+2. mock으로 충분히 돌린다: 실행 점검은 mock 날의 KIS 모의 주문을 읽는다(최근 mock 20거래일 이상, 왕복 매매 30건 이상, 그 기간의 주문 실패·계좌 맞추기 멈춤·끝나지 않은 주문이 없고, 날마다 장부와 KIS가 같고, 체결 차이가 다리마다 평균 1틱·95% 2틱 이하). 어디까지 왔는지는 어느 모드에서든 `curl -s http://krx-quant:8080/v1/trader | jq '.gate, .live'`와 밤 리포트의 "실전 준비"에 있다(trader가 시작할 때와 08:30 고르기마다 판단해 둔다).
+
+켜기:
+
+3. 열린 포지션이 없을 때(`curl -s http://krx-quant:8080/v1/trader | jq '.mode, .position'`, 장 시작 전이나 15:15 뒤) 서버 `.env`에서 `KRX_TRADER_MODE=live`로 고치고 다시 띄운다:
+
+   ```bash
+   docker compose up -d trader
+   docker compose logs --tail 20 trader
+   ```
+
+   - 관문이나 점검이 모자라면: 시작 줄이 `trader: paper trading 005930 on the cells …`이고 WARNING `trader: live mode, no real order yet: gate, mock_days, … missing`이 나온다. 텔레그램으로 `[알림] 자동 매매(live): 실전 모드(KRX_TRADER_MODE=live)지만 아직 실제 주문을 내지 않고 모의(paper)로 돕니다. 모자란 것: …`이 시작할 때와 하루 한 번(그날 08:30 고르기) 온다. `jq .mode`는 `"paper"`, `jq .live.configured`는 `true`, `jq .live.ordering`은 `false`다. 화면의 모드 배지는 `실전 대기`다. 할 일은 없다: 모자란 것을 모두 채우면 그날 08:30 고르기에서 `[알림] 자동 매매(live): 실전 관문과 실행 점검을 모두 넘었습니다. …`가 오고, 들고 있는 것이 없을 때 trader가 스스로 멈춘다(로그 WARNING `trader: stopped to start again in the other mode (#408): Docker starts it again`, 종료 코드 0). compose의 `restart: unless-stopped`가 바로 다시 띄운다.
+   - 넘었으면: 시작 줄이 `trader: live trading 005930 on the cells …`이고 `[알림] 자동 매매(live): 실전 계좌에 주문합니다. 운용 상한 250,000원(첫 단계: 실전 20거래일, 왕복 매매 30건 동안).`이 온다. `jq .mode`가 `"live"`, 화면의 모드 배지가 `실전`이다. 시작할 때 실전 계좌와 장부를 맞추고(위 "시작할 때 계좌 맞추기 (#406)"와 같다), 계좌 평가금이 운용 상한보다 크면 `[알림] 자동 매매(live): 실전 계좌의 평가금(…원)이 운용 상한(…원)보다 큽니다. …`가 온다.
+   - 실전 키가 없거나, 수집기의 키나 모의 키와 같거나, 실전 계좌가 모의 계좌와 같으면 관문 전이어도 `configuration error: KRX_TRADER_LIVE_KIS_APP_KEY, … are needed for the live mode`(또는 `… is the mock one …`, `… the collector's …`)로 시작하지 않고 run도 남기지 않는다(종료 코드 2). Docker가 다시 띄우고 또 멈추므로 `.env`를 고친 뒤 다시 `docker compose up -d trader`.
+
+도는 동안:
+
+- 첫 단계: 실전 거래일 20일과 청산한 실전 왕복 매매 30건까지는 운용 상한 대신 250,000원으로 산다(내림, 1주도 못 사면 사지 않는다). 실전 거래일은 확인된 날만 센다: 장 마감 뒤 trader가 그날 주문을 KIS와 견주어 `같다`(또는 견줄 주문이 없음)이고, 체결이 맞아야 한다(매수는 지정가 이하·5틱 안, 매도는 지정가 이상·5틱 안, 주문보다 많이 체결되지 않고, 매매마다 산 주식과 판 주식이 같다). 체결가와 체결 수량은 실제 체결이 있어야 보이는 필드라 프로브가 못 보고, 첫 실전 날이 이렇게 잰다. 아직 견주지 않은 날은 기다리고(세지 않는다), 체결이 맞지 않으면 위반이다. 그 뒤 08:30 고르기에서 실전 체결과 그림자의 차이(다리마다 평균 1틱·95% 2틱 이하)와 주문 실패·계좌 맞추기·끝나지 않은 주문·종가 뒤 청산·KIS 대조가 맞으면 `[알림] 자동 매매(live): 실전 첫 단계(…)를 점검대로 마쳤습니다. 운용 상한을 250,000원에서 1,000,000원으로 올립니다.`가 오고 그 뒤로는 운용 상한으로 산다.
+- 위반: 첫 단계 동안 고르기에서 그 점검 가운데 하나라도 어긋나면(체결 차이는 기간을 채운 뒤) `[알림] 자동 매매(live): 실전 첫 단계의 점검을 벗어나 새 진입을 멈췄습니다: …`가 온다. 새로 사지 않고(`status` `entries_paused`, `pause.source` `ramp`) 들고 있는 것은 원래 규칙대로 판다. 할 일: `curl -s http://krx-quant:8080/v1/trader | jq .live.ramp`와 밤 리포트의 "실전 준비", 로그를 본다(에이전트에게 맡겨도 된다). 괜찮다고 보면 `docker compose exec trader krx-quant trade resume`: 정지를 풀고, 첫 단계를 그때부터 다시 센다.
+- 날마다 KIS와 견주기: 장 마감 1분 뒤 trader가 그날 장부의 주문을 실전 계좌의 주문 체결 조회와 견주어 남긴다(`order_checks`). 다르면 `[알림] 자동 매매(live): <날>의 주문이 장부와 KIS 주문 체결 조회에서 다릅니다(…)`가 온다. 한국투자증권 계좌의 그날 주문과 견주어 보고, 까닭은 에이전트에게 맡긴다. mock 날도 같다(그것이 live의 실행 점검이다).
+- 주문 실패, 손실 한도, 정지, 재개, 호가 끊김은 mock과 같다(위 "KIS 모의 (#405)", 아래 "한도, 정지, 재개, 다시 켜기 (#396)"). 누적 손실 한도는 처음 실전 계좌에 주문하며 시작한 때부터 센다. 관문 전의 live에서 `krx-quant trade rearm`은 trader가 실제로 도는 `paper`의 누적 한도를 다시 켠다.
+- 챔피언이 바뀌면(밤의 승격) 새 챔피언은 자기가 챔피언으로 돈 날 뒤의 판정점에서 관문을 넘어야 한다. 도전 정책이었던 날은 세지 않으므로 챔피언으로 20거래일을 채운 뒤의 판정점이 가장 이르다: 승격 뒤 적어도 20거래일, 판정점이 20일마다라 길면 40거래일 가까이 실제 주문이 없다. 그때까지 다음 08:30 고르기에서 `[알림] 자동 매매(live): 실전 조건이 빠졌습니다(…). …`가 오고, 새로 사지 않으며, 실전 계좌에 남은 것(열린 매매, 열린 주문, 응답을 받지 못한 매수)이 없어지면 trader가 스스로 다시 시작해 실제 주문 없이 모의로 돈다. 다시 시작할 때(06:00 배포 등) 실전 조건이 빠졌는데 실전 계좌에 남은 것이 있으면 바로 모의로 가지 않는다: 실전 장부로 시작해 계좌를 맞추고 그것을 원래 규칙(목표가, 손절가, 시간)대로 정리하며 새로 사지 않는다(`[알림] 자동 매매(live): 실전 조건이 빠졌지만 실전 계좌에 정리할 것(열린 매매·주문)이 있습니다(…). …`, `runs.detail.winding_down`). 남은 것이 없어지면 모의로 다시 시작한다. **바뀜** (2026-10-31, #425): 다시 시작할 때 실전 조건이 빠졌으면 실전 계좌에 남은 것이 있어도 모의로 시작했다 → 실전 장부가 그것을 정리한 뒤 모의로. 이유: 모의 장부는 실전 계좌의 포지션을 손절·시간·취소로 다루지 못한다(Codex 리뷰).
+- 첫 실전 날에는 실전 서버의 응답을 처음 잰다(아무도 재지 않았다, [kis-feeds.md](kis-feeds.md#주문-403)의 "실전 서버" ⚠). 그날 밤 리포트의 "실전 준비"(그날 주문의 KIS 대조)와 서버 스냅숏(`needs-server-snapshot`)을 에이전트가 본다.
+
+되돌리기:
+
+4. 열린 포지션이 없을 때 서버 `.env`에서 `KRX_TRADER_MODE=mock`(또는 `paper`)으로 고치고 `docker compose up -d trader`. 실전으로 산 주식이 남아 있으면 mock·paper의 trader는 그것을 팔지 않는다: 한국투자증권 앱에서 그 계좌로 손으로 판다. 실전 키는 `.env`에 남겨 두어도 mock 모드와 주문 프로브는 읽지 않는다. 급하면 먼저 화면의 "정지하고 즉시 매도"로 팔고 되돌린다.
 
 #### 한도, 정지, 재개, 다시 켜기 (#396)
 
@@ -1640,6 +1698,7 @@ report: /state/prevalidations/mandelbrot.json
 | `probe-member-frames-381` | 이 작업을 담은 엔진(#381)이 배포된 뒤 첫 밤, 한 번(거래일이 아니어도. 이미 녹화한 날을 읽는다) | `probe-member-frames` | 20분. 넉넉히 잡은 상한이다(녹화한 날마다 회원사 프레임 1.4만 건쯤과 짧은 프레임 앞뒤 몇 분의 다른 피드 프레임을 읽어 몇 초에서 1–2분). `check-krx-net-assets-305` 다음, 시뮬레이션과 사전 검증보다 먼저 돈다. 짧게 잡아 그 뒤 작업이 마지막 시작 시각(00:30, `breiman`은 23:30)을 넘기지 않게 한다 | #381: 출력 전체(시세 값 없음, 개수·시각·종목코드·필드 수·칸의 모양). 에이전트가 필드가 78개가 아닌 회원사 프레임이 규칙인지 잘린 것인지 정리하고 2단계(정규화나 WARNING)를 정한다(2장 "회원사 프레임의 필드 수 확인 (#381)") |
 | `trader-report` | 거래일 밤마다 한 번(밤 학습 뒤). 실패하거나 끊겼으면 다음 거래일 밤에 다시 돈다 | `refit-policy --report` | 10분. 넉넉히 잡은 상한이다(수집기가 비용 지도를 계산하는 것을 2분까지 기다리고, 맞추기와 리포트는 몇 초다). `probe-member-frames-381` 다음, 시뮬레이션과 사전 검증보다 먼저 돈다. 짧게 잡아 그 뒤 작업이 마지막 시작 시각(00:30, `breiman`은 23:30)을 넘기지 않게 한다 | #417(리포트 이슈, #402가 열었다): 그날의 리포트(위 "자동 매매 (#394)"의 "밤 리포트 (#402)")와 그 아래 밤 정책 맞추기의 출력 전체. 시세 값, 계좌번호, 주문번호, 키는 없다(칸, 확률, 틱, 수량, 건수, 순손익과 한도(원), 로그 성장, 시각, 최대 RSS). 리포트의 `에이전트 차례:` 줄이 까닭을 말하는 밤(그 주 마지막 거래일, 그날 한도 정지, 챔피언 교체, 관문 통과, 맞추기 실패)과 작업이 실패한 밤에만 `ready-for-agent`를 붙이고, 떼는 라벨은 없다. 먼저 도전 정책을 챔피언과 견주어 이긴 것을 챔피언으로 바꾸고(#400), 그다음 자동 매매의 정책 버전을 저장한다: 처음 것이 챔피언, 그 뒤는 도전 정책(자리 셋이 비어 있으면 다음 거래일부터 모의로 돌고, 차 있으면 기다린다. 20일까지 이기지 못한 도전 정책은 내려 자리를 비운다. 위 "자동 매매 (#394)", [design.md](design.md#14-자동-매매-393) 14장 "밤 정책 맞추기", "도전 정책과 승격", "밤 리포트"). 비용 지도를 읽지 못해도 판정과 리포트는 한다(종료 코드 1). 엔진 API는 compose가 엔진 서비스에 둔 `KRX_TRADER_ENGINE_URL`(`http://engine:8080`, 그 서비스 자신의 것)로 묻는다. 그래서 댓글의 `docker compose run --rm engine refit-policy --report`도 돌아가는 수집기의 엔진 API에 닿는다. 그 명령은 정책을 다시 맞추므로, 리포트만 보려면 `trader-report`를 쓴다 |
 | `check-mock-trades-405` | trader가 mock 모드로 돈 거래일(그날 mock 장부가 있다, `Facts.mock_days`)의 밤, 한 번. 그날 장부에도 KIS에도 trader의 주문이 없었거나(종료 코드 3) 저장소나 KIS를 읽지 못했으면(4) 다음 mock 거래일 밤에 다시 돈다. 같거나(0) 다르면(5) 끝난다 | `check-mock-trades` | 5분. 넉넉히 잡은 상한이다(저장소 읽기와 KIS 조회 몇 번, 몇 초). `trader-report` 다음에 돈다 | #405: 출력 전체. 그날 챔피언의 mock 주문을 KIS 주문 체결 조회와 KIS 주문번호로 맞춰 주문마다 매수·매도, 주문 수량, 체결 수량, 체결가 차이(틱)를 보이고, KIS에 없는 장부의 주문과 장부에 없는 KIS의 주문을 적는다. 주문 프로브(#403)가 그날 돈 동안의 KIS 주문은 프로브의 것이라 세지 않는다(`state/scheduled.json`의 그 작업의 시작과 걸린 시간). 주문번호, 계좌번호, 키, 가격은 없다. `결과: 같다`면 에이전트가 #405를 닫는다(완료 조건 3). trader 자신의 모의 키(`KRX_TRADER_KIS_*`)로 모의투자 서버에만 묻는다 |
+| `probe-live-account-408` | 거래일 밤, 실전 키(`KRX_TRADER_LIVE_KIS_*`)가 서버 `.env`에 있을 때(`Facts.trader_live_kis`). 통과(종료 코드 0)할 때까지 거래일 밤마다 한 번. 키가 없으면 돌지 않는다 | `probe-live-account` | 5분. 넉넉히 잡은 상한이다(조회 넷, 몇 초) | #417(리포트 이슈. #408은 그 PR이 닫는다): 출력 전체. 실전 계좌를 조회만으로 읽는다(현재가, 잔고, 매수가능조회, 그날 주문 체결 조회. 주문 TR은 보내지 않는다). trader가 읽는 필드마다 실전의 답에 있는지와 그 꼴(정수, 숫자, 글자)을 보이고 결과를 trader 저장소(`live_probes`)에 남긴다. live 모드는 한 번 통과(`같다`)해야 주문한다(실행 점검 `live_probe`). `다르다`면 에이전트가 `kis_orders.py`의 읽기를 고치는 PR을 연다. 키, 계좌번호, 주문번호, 값은 없다(#408) |
 | `probe-kis-orders-403` | **장중 작업**(아래 "언제 도는가"의 장중 작업): 거래일 10:00. 종료 코드가 0이 될 때까지 거래일마다 다시 돈다. trader가 마지막으로 mock으로 시작했으면 돌지 않는다(`Facts.trader_mock`, #405: 그 시각은 trader의 마지막 청산 15:15 전이다). 계좌에 005930이나 남은 수량이 있는 주문이 있으면 아무것도 주문하지 않고 멈춘다(종료 코드 6, 다음 거래일에 다시). **바뀜** (2026-10-30, #422): mock 모드와 상관없이 같은 모의 계좌로 돌았다 → mock인 동안 돌지 않고, 빈 계좌에서만 주문한다. 이유: 7c의 들고 있지 않은 주식 매도가 trader의 주식을 팔 수 있고, 7b·8의 매수가 계좌 맞추기(#406)에 보인다. 모의 키가 없으면(종료 코드 3) 첫 거래일에 그렇다고 한 번 남기고, 키가 들어온 뒤의 거래일에 돈다(`Facts.trader_kis`) | `probe-kis-orders` | 15분. 넉넉히 잡은 상한이다(호출을 1초에 하나씩, 1–2분). 15:15까지 끝나야 하므로 15:00 뒤에는 그날 시작하지 않는다 | #403: 출력 전체(키, 계좌번호, 주문번호, 시세 값 없음). 에이전트가 kis-feeds.md "주문 (#403)"의 ⚠를 고친다. 2026-10-30 실행으로 trader는 체결을 주문 체결 조회로 받기로 했다(#404). 그 뒤의 실행은 체결 통보의 23칸을 칸마다 보이고, 에이전트가 칸 이름을 붙인다(2장 "KIS 모의투자 주문 확인 (#403)") |
 | `simulate-daily-298` | 하루 한 번 예측 종류의 알고리즘의 사전 검증(`prevalidate-cox`)이 그 밤 통과했거나, 그 종류의 수습이 시뮬레이션을 기다림(사전 검증 통과·정답 버전 재시작으로 시작한 수습이고 아직 시뮬레이션하지 않음, 엔진이 돌리는 알고리즘, #298). 그 종류의 최근 정답이 다 들어오지 않은 알고리즘은 세지 않는다(`Facts.pending_answers`, #317). 한 밤에 한 번. 실패했으면 새 커밋이 배포되거나 새로 통과한 밤에 다시 | `simulate daily` | 1시간. 넉넉히 잡은 상한이다(Cox 20번 학습과 10년치 표본, 몇 분). `prevalidate-cox` 바로 뒤, 봉 마감 알고리즘의 사전 검증보다 먼저 돈다. 다만 먼저 돌아 1시간을 다 쓰면 그 밤 봉 마감 사전 검증이 마지막 시작 시각을 넘기게 될 때는 그 뒤에 돈다(04:30까지 시작, 아래 "수습 시뮬레이션은 사전 검증이 놓칠 때만 뒤로 간다", #376) | #298과 #264: 출력 전체(날짜, 개수, lift. 시세 값 없음) |
 | `simulate-bar-close-298` | 녹화 10거래일 이상(`recorded_days`, 사전 검증의 `MIN_DAYS`)이고 4분(봉 마감) 종류의 수습이 시뮬레이션을 기다림(사전 검증 통과·정답 버전 재시작으로 시작한 수습이고 아직 시뮬레이션하지 않음, #298). 한 밤에 한 번, 기다리는 알고리즘을 모두 한 재생에. 실패했으면 새 커밋이 배포된 뒤 다시. 끊겼으면 다음 밤 | `simulate bar-close` | 5시간. 사전 검증과 같은 상한이다(최근 10–20일 재생. 사전 검증처럼 날마다 다시 학습하지 않고 한 번 학습한다). 00:30까지 시작해야 한다. 목록에서는 봉 마감 알고리즘의 사전 검증 앞이지만, 먼저 돌아 5시간을 다 쓰면 그 밤 사전 검증이 마지막 시작 시각(00:30, Breiman 23:30)을 넘기므로 사전 검증이 때가 된 밤에는 그 뒤에 돈다. 그 뒤 00:30까지 시작할 수 있으면 그 밤에, 아니면 다음 밤에 돈다. 두 밤을 내주면 셋째 밤에는 먼저 돈다(아래 "수습 시뮬레이션은 사전 검증이 놓칠 때만 뒤로 간다", #376) | #298과 #204: 출력 전체(날짜, 개수, lift. 시세 값 없음) |
@@ -1962,6 +2021,14 @@ docker compose logs --tail 200 engine
 | `[알림] 자동 매매(mock): 시작할 때 KIS 계좌가 장부와 다릅니다: …` | `/v1/trader`의 `status`(`entries_paused`)와 `pause.source`(`reconcile`), 저장소의 `reconciles` | 장부에 없는 보유·미체결, 계좌에 없는 장부의 주식, 가리지 못한 응답 없는 매수가 있어 새 진입을 멈췄다(#406). KIS 모의투자 계좌를 본 뒤 `docker compose exec trader krx-quant trade resume`(3장 "자동 매매"의 "시작할 때 계좌 맞추기 (#406)") |
 | `[알림] 자동 매매(mock): 시작할 때 KIS 계좌를 읽지 못했습니다(…). …` | 로그의 `could not read the KIS account to reconcile it with the ledger` | trader가 30초마다 다시 읽고, 그동안 사지도 팔지도 않는다(#406). 오래 가면 KIS 모의투자 서버 점검과 trader의 키를 본다. 읽으면 `… KIS 계좌를 읽어 장부와 맞췄습니다.`가 온다 |
 | `[알림] 자동 매매(mock): 응답이 없던 매수를 KIS 주문 체결 조회에서 찾아 장부에 넣었습니다(…)` | `/v1/trader/trades?limit=1` | 응답이 사라진 매수를 KIS에서 찾아 그 매매를 열었다(#406). 할 일은 없다: 원래 규칙대로 판다 |
+| `[알림] 자동 매매(live): 실전 모드(KRX_TRADER_MODE=live)지만 아직 실제 주문을 내지 않고 모의(paper)로 돕니다. 모자란 것: …` | `curl -s http://krx-quant:8080/v1/trader \| jq .live`, 밤 리포트의 "실전 준비" | live로 켰지만 실전 관문이나 실행 점검이 모자라 모의로 돈다(#408). 시작할 때와 하루 한 번 온다. 할 일은 없다: 모두 채우면 그날 08:30에 스스로 다시 시작해 주문한다. 그만 받으려면 `KRX_TRADER_MODE`를 `mock`이나 `paper`로 되돌린다(3장 "자동 매매"의 "실전 (#408)") |
+| `[알림] 자동 매매(live): 실전 관문과 실행 점검을 모두 넘었습니다. …`, `… 실전 조건이 빠졌습니다(…). …` | 로그의 `the live mode's answer is now …: stopping to start again` | 08:30 고르기에서 판단이 바뀌어 trader가 들고 있는 것이 없을 때 스스로 멈추고 Docker가 다시 띄운다(#408). 할 일은 없다. 다시 뜬 뒤 `… 실전 계좌에 주문합니다. …` 또는 모자란 것의 알림이 온다 |
+| `[알림] 자동 매매(live): 실전 조건이 빠졌지만 실전 계좌에 정리할 것(열린 매매·주문)이 있습니다(…). …` | `/v1/trader`의 `mode`(`live`), `position`, 저장소의 `runs.detail.winding_down` | 다시 시작했는데 실전 조건(관문, 점검)이 빠졌고 실전 계좌에 열린 매매나 주문이 남아 있다(#408). 실전 장부가 새로 사지 않고 그것을 원래 규칙대로 정리한 뒤 모의로 다시 시작한다. 할 일은 없다. 급하면 화면의 "정지하고 즉시 매도" |
+| `[알림] 자동 매매(live): 실전 계좌에 주문합니다. 운용 상한 250,000원(…)` | `/v1/trader`의 `live.ramp` | live가 실전 계좌에 주문하며 시작했다(#408). 첫 단계(실전 20거래일, 왕복 30건)는 25만 원까지만 산다 |
+| `[알림] 자동 매매(live): 실전 계좌의 평가금(…원)이 운용 상한(…원)보다 큽니다. …` | 한국투자증권 앱의 그 계좌 | 새 실전 계좌에 운용 상한보다 많이 들어 있다(#408). trader는 상한 안에서만 사지만, 넘는 돈은 그 계좌에서 빼 둔다 |
+| `[알림] 자동 매매(live): 실전 첫 단계(…)를 점검대로 마쳤습니다. 운용 상한을 250,000원에서 1,000,000원으로 올립니다.` | `/v1/trader`의 `live.ramp.lifted_at` | 첫 단계의 체결 차이와 점검이 맞아 상한을 올렸다(#408). 할 일은 없다 |
+| `[알림] 자동 매매(live): 실전 첫 단계의 점검을 벗어나 새 진입을 멈췄습니다: …` | `/v1/trader`의 `status`(`entries_paused`), `pause.source`(`ramp`), `live.ramp.checks`, 밤 리포트의 "실전 준비" | 첫 단계에서 주문 실패, 계좌 맞추기 멈춤, 끝나지 않은 주문, 종가 뒤 청산, KIS 대조가 다른 날, 또는 기간을 채운 뒤 체결 차이가 기준을 넘었다(#408). 들고 있는 것은 원래 규칙대로 판다. 까닭을 본 뒤(에이전트에게 맡겨도 된다) `docker compose exec trader krx-quant trade resume`: 첫 단계를 그때부터 다시 센다 |
+| `[알림] 자동 매매(<mock\|live>): <날>의 주문이 장부와 KIS 주문 체결 조회에서 다릅니다(…)` | 저장소의 `order_checks`, 밤 리포트의 "실전 준비" | 장 마감 뒤 trader가 그날 장부의 주문을 KIS와 견주었더니 달랐다(#408). 그날은 실행 점검에서 통과로 세지 않는다. 한국투자증권 계좌의 그날 주문을 보고, 다른 까닭은 에이전트에게 맡긴다 |
 | `[장애] 엔진 API를 열지 못했습니다` | 로그의 `Engine API not started on ...` | 녹화와 예측은 계속한다. 다른 프로세스가 8080을 쓰는지 확인하고 `docker compose up -d`로 다시 띄운다. |
 | 알고리즘을 다시 학습하고 싶다 | 밤 학습 결과는 텔레그램과 `/v1/status`의 `training` | 밤 학습이 매일 한다. 당장 바꾸려면 알고리즘마다(`newton`, `gauss`, `granger`, `markov`, `kalman`, `shannon`, `poisson`, `turing`) `docker compose run --rm --no-deps engine fit <이름>`. 엔진이 1분 안에 새 모델로 바꾼다. 되돌리려면 `docker compose exec engine krx-quant rollback <이름>`(위 "밤 학습과 모델 교체"). |
 | `[알림] 사전 검증 대기: <이름>. 검증을 통과해야 돌기 시작합니다. ...` | `curl -s http://krx-quant:8080/v1/algorithms`에 그 이름이 없다 | 새로 등록된 알고리즘이 사전 검증을 기다린다. 녹화가 10거래일 이상이면 예약 작업이 밤마다 하나씩 돌리고 #204에 남긴다(3장 "새 알고리즘 사전 검증"). 손으로 다시 돌리려면 장 시간 밖에서(예약 작업이 도는 22:30–05:30도 피해) `docker compose run --rm --no-deps engine prevalidate <이름>`. 엔진이 다시 시작할 때마다 한 번 온다. 사전 검증이 지금 코드를 거부한 알고리즘에는 오지 않는다(아래 `사전 검증 거부`, #369). |
@@ -2295,9 +2362,10 @@ LogQL 문법은 2026-10-23에 커넥터로 스택에 물어 확인했다(그때�
 |---|---|
 | `kis_token.json` | KIS REST 접근 토큰 캐시(권한 600). 앱키가 바뀌면 버린다 |
 | `trader_kis_token.json` | trader 자신의 KIS 접근 토큰 캐시(권한 600, #404). 수집기의 것과 따로다. trader의 주문 모듈(`kis_orders.trader_broker`)이 쓰고(mock 모드의 trader와 mock 첫날의 대조, #405), 앱키가 바뀌면 버린다. mock으로 처음 시작할 때 생긴다. **바뀜** (2026-10-30, #422): "그 모듈을 쓰는 mock 모드(#405)가 들어오기 전에는 생기지 않는다" → mock 모드가 쓴다. 이유: #405 |
+| `trader_live_kis_token.json` | trader의 실전 키의 접근 토큰 캐시(권한 600, #408). 모의 키의 것(`trader_kis_token.json`)과 따로다. live 모드의 trader(`kis_orders.trader_live_broker`)가 실전 계좌에 처음 무언가를 물을 때 생긴다(관문 전의 live는 KIS를 부르지 않아 생기지 않는다) |
 | `market_calendar.json` | KIS 휴장일 조회 캐시 |
 | `engine.sqlite3`, `-wal`, `-shm` | 예측, 채점, 상태, 합의 가중치, 다른 종류의 예측과 정답(`kind_predictions`, `kind_answers`, #179), 특수 상황 구간(`special_windows`, `special_days`, #236), 수습 시뮬레이션의 재생과 예측(`simulation_runs`, `simulations`, `sim_predictions`, `sim_kind_predictions`, #298. 실시간 예측과 따로 둔다). 테이블은 [engine-api.md](engine-api.md#저장-stateenginesqlite3)에 있다. 스키마 버전은 `PRAGMA user_version`이다(#179, #236, #298의 새 표는 올리지 않았다) |
-| `trader.sqlite3`, `-wal`, `-shm` | 자동 매매 trader의 저장소(#394): 시작마다(`runs`), 비용 지도로 칸을 고른 기록(`selections`, #395), 읽은 칸의 예측과 한 일(`decisions`), 매매(`trades`), 주문(`orders`), 체결(`fills`), 정책 버전(`policies`, #399)과 챔피언의 바뀜(`champions`), 정책마다 돈 거래일(`policy_days`, #400: 도전 정책의 승격과 실전 관문이 읽는 모의 기록), 정지·재개·다시 켜기 요청(`controls`, #396), 닿은 손실 한도(`halts`), mock 모드의 실패한 KIS 주문(`failures`, #405)과 하나도 체결되지 않은 매수(`unfilled_buys`, #405. #406부터 보내는 매수와 응답이 사라진 매수도), mock 시작마다의 계좌 맞추기(`reconciles`, #406: 장부 밖의 보유와 KIS 주문번호가 있다), 지금 상태(`snapshot`), 날마다의 장부(`days`). 매매 기록의 행에 모드(`paper`, `mock`), mock 주문에 KIS의 주문번호(`orders.broker_id`, `broker_branch`, #405), 결정과 매매에 정책 버전(챔피언과 도전 정책의 장부가 갈린다, #400). trader가 쓰고, 정책 표는 밤 정책 맞추기(예약 작업 `refit-policy-399`)가 쓴다. 엔진 API는 읽고 정지 요청만 쓰며, `krx-quant trade resume|rearm`이 재개와 다시 켜기를 쓴다([design.md](design.md#14-자동-매매-393) 14장) |
+| `trader.sqlite3`, `-wal`, `-shm` | 자동 매매 trader의 저장소(#394, #408의 `gate_checks`, `order_checks`, `ramp`도 여기): 시작마다(`runs`), 비용 지도로 칸을 고른 기록(`selections`, #395), 읽은 칸의 예측과 한 일(`decisions`), 매매(`trades`), 주문(`orders`), 체결(`fills`), 정책 버전(`policies`, #399)과 챔피언의 바뀜(`champions`), 정책마다 돈 거래일(`policy_days`, #400: 도전 정책의 승격과 실전 관문이 읽는 모의 기록), 정지·재개·다시 켜기 요청(`controls`, #396), 닿은 손실 한도(`halts`), mock 모드의 실패한 KIS 주문(`failures`, #405)과 하나도 체결되지 않은 매수(`unfilled_buys`, #405. #406부터 보내는 매수와 응답이 사라진 매수도), mock 시작마다의 계좌 맞추기(`reconciles`, #406: 장부 밖의 보유와 KIS 주문번호가 있다), 지금 상태(`snapshot`), 날마다의 장부(`days`). 매매 기록의 행에 모드(`paper`, `mock`), mock 주문에 KIS의 주문번호(`orders.broker_id`, `broker_branch`, #405), 결정과 매매에 정책 버전(챔피언과 도전 정책의 장부가 갈린다, #400). trader가 쓰고, 정책 표는 밤 정책 맞추기(예약 작업 `refit-policy-399`)가 쓴다. 엔진 API는 읽고 정지 요청만 쓰며, `krx-quant trade resume|rearm`이 재개와 다시 켜기를 쓴다([design.md](design.md#14-자동-매매-393) 14장) |
 
 > **바뀜** (2026-10-30, #414): `trader.sqlite3`는 trader만 썼다 → 정책 표(`policies`, `champions`)는 밤 정책 맞추기가 엔진 컨테이너에서 쓴다. 이유: 정책 버전은 spec #393대로 trader의 저장소에 두고, 밤 학습 뒤 예약 작업은 수집기의 컨테이너에서 돈다(#399).
 
