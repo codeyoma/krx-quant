@@ -26,6 +26,9 @@ from krx_quant.algorithms import ALGORITHMS, KIND_ALGORITHMS, RegistrationError
 from krx_quant.archive import run_archive
 from krx_quant.backfill import run_backfill
 from krx_quant.candle_probe import probe_candles
+from krx_quant.climate_prior import REPORT as CLIMATE_PRIOR_REPORT
+from krx_quant.climate_prior import climate_prior_experiment
+from krx_quant.climate_prior import lines as climate_prior_lines
 from krx_quant.close_probe import probe_close
 from krx_quant.closing_flow_check import check_closing_flow, check_krx_net_assets
 from krx_quant.collector import check_fallbacks, measure_subscription_limit, run_collector
@@ -491,6 +494,18 @@ def _prevalidate(name: str, days: int) -> int:
     return 0 if result.passed else 1
 
 
+def _climate_prior(days: int) -> int:
+    """The climate prior experiment for shannon (#429): its lines; exit 1 without a recorded day."""
+    settings = Settings.from_env(require_kis=False)
+    try:
+        result = climate_prior_experiment(settings, days=days)
+    except FileNotFoundError as e:
+        print(e, file=sys.stderr)
+        return 1
+    print("\n".join(climate_prior_lines(result, settings.state_dir / CLIMATE_PRIOR_REPORT)))
+    return 0
+
+
 def _simulate(which: str) -> int:
     """Simulate the probations that wait for it (#298), print what came of them; exit 1 if one
     could not run."""
@@ -908,6 +923,17 @@ def main(argv: list[str] | None = None) -> int:
         default=PREVALIDATION_DAYS,
         help=f"recorded trading days to replay (default: {PREVALIDATION_DAYS})",
     )
+    climate_prior_cmd = sub.add_parser(
+        "climate-prior",
+        help="compare the climate baseline, shannon and shannon with each slot's class frequencies on"
+        " the pre-validation's folds (#429; reads the training samples, replays nothing)",
+    )
+    climate_prior_cmd.add_argument(
+        "--days",
+        type=_positive,
+        default=PREVALIDATION_DAYS,
+        help=f"recorded trading days to predict (default: {PREVALIDATION_DAYS})",
+    )
     train_cmd = sub.add_parser(
         "train", help="train every algorithm on KRX_OBJECT_STORE's latest days and store the promotion list"
     )
@@ -1111,6 +1137,8 @@ def _command(args: argparse.Namespace) -> int:
         return _fit(args.algorithm, args.days)
     elif args.command == "prevalidate":
         return _prevalidate(args.algorithm, args.days)
+    elif args.command == "climate-prior":
+        return _climate_prior(args.days)
     elif args.command == "train":
         return _train(args.day, args.from_store)
     elif args.command == "simulate":
