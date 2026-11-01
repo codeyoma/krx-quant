@@ -67,6 +67,7 @@ from krx_quant.github import GitHub, GitHubError, comment_body
 from krx_quant.kind_registry import DAILY_KINDS, daily_kind_named
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.night_probe import evening, subscribed_nights
+from krx_quant.nightly_hit_rates import HIT_RATE_NIGHTS, nights_with_hit_rates
 from krx_quant.notify import Alerts
 from krx_quant.order_probe import NO_KEYS
 from krx_quant.prevalidation import MIN_DAYS, REGISTERED_BEFORE, LastReport, last_report, report_path
@@ -295,6 +296,10 @@ class Facts:
     # Whether the trader last started in mock mode (#405, ``mock_check.trader_in_mock``): it may hold
     # 005930 and order on the mock account in the session, so the order probe does not run.
     trader_mock: bool = False
+    # How many of the latest nights' promotion lists carry the hit rates beside the swap (#437,
+    # ``nightly_hit_rates.nights_with_hit_rates``, up to ``HIT_RATE_NIGHTS``): their summary waits for
+    # them.
+    hit_rate_nights: int = 0
 
 
 @dataclass(frozen=True)
@@ -922,6 +927,7 @@ async def read_facts(
         trader_kis=settings.trader_kis,
         trader_live_kis=settings.trader_live_kis,
         mock_days=await asyncio.to_thread(mock_days, settings.state_dir),
+        hit_rate_nights=await asyncio.to_thread(nights_with_hit_rates, settings),
     )
 
 
@@ -1784,6 +1790,53 @@ PASSIVE_ENTRY = Job(
     ),
 )
 
+# The hit rates beside the nightly swap (#437): from the deploy that brings it, each nightly report
+# that compares the two models also has their hit rates on the same bar closes, what a hit-rate-first
+# rule would have chosen and whether the log loss promoted a model whose hit rate fell
+# (``nightly_hit_rates``); the swap rule stays the mean log loss. Once ``HIT_RATE_NIGHTS`` (10)
+# nights' promotion lists carry them (counted in the store when the night's conditions are read,
+# ``Facts.hit_rate_nights``: before the night's training ends, it may count that night the next), on
+# that night, trading or not, once: ``nightly-hit-rates`` sums them up by algorithm, and an agent
+# proposes on #437 whether to change the swap rule; the user decides. After a failure, again once a
+# deploy brings other code. It reads ten promotion lists from the store: seconds; the quarter hour is
+# a bound. Before the simulations and pre-validations, which may take the rest of the night. Its
+# output holds counts, rates and dates, no price.
+NIGHTLY_HIT_RATES_ISSUE = 437
+
+
+def _with_hit_rate_nights(night: Night) -> bool:
+    """Once, on the first night ``HIT_RATE_NIGHTS`` promotion lists carry the hit rates, trading or
+    not; after a failed run, again on other code."""
+    if night.facts.hit_rate_nights < HIT_RATE_NIGHTS:
+        return False
+    record = night.record
+    return not night.ran or (
+        record is not None and record.outcome == FAILED and record.commit != night.commit
+    )
+
+
+NIGHTLY_HIT_RATES = Job(
+    name="nightly-hit-rates-437",
+    due=_with_hit_rate_nights,
+    command=("nightly-hit-rates", "--nights", str(HIT_RATE_NIGHTS)),
+    timeout=timedelta(minutes=15),
+    targets=(
+        Target(
+            NIGHTLY_HIT_RATES_ISSUE,
+            note=(
+                "밤 학습이 챔피언 교체(검증일 평균 로그 손실) 옆에 남긴 맞힘률의 요약이다(최근 10밤). "
+                "교체 규칙은 바꾸지 않았다. 밤마다 두 모델이 모두 예측한 봉 마감에서 잰 맞힘률이고, "
+                "이어진 두 밤은 검증일 3일 중 2일을 함께 쓰므로 밤들은 독립이 아니다. 에이전트가 이 "
+                "출력(불일치: 로그 손실로는 승격했는데 맞힘률이 떨어진 밤, 두 규칙이 갈린 밤, 승격한 밤의 "
+                "맞힘률 변화)으로 교체 규칙을 바꿀지에 대한 안을 이 이슈에 남기고 `ready-for-human`으로 "
+                "돌린다. 사용자가 정한다. 다시 돌리기(읽기만): "
+                "`docker compose run --rm engine nightly-hit-rates --nights 10`. "
+                "출력에는 가격과 시세 값이 없다(개수, 비율, 날짜만)."
+            ),
+        ),
+    ),
+)
+
 # The night futures (#264): the collector records the KOSPI200 night session's trades and book
 # (18:00–06:00) from the deploy that brings it; what only the server shows is whether KIS
 # streams them for this app key, under the contract code asked for, in the layout of KIS's
@@ -2333,6 +2386,7 @@ JOBS: tuple[Job, ...] = (
     LIVE_PROBE,
     ERROR_BREAKDOWN,
     PASSIVE_ENTRY,
+    NIGHTLY_HIT_RATES,
     *daily_prevalidation_jobs(
         [a.name for a in DAILY_ALGORITHMS],
         {a.name: a.features for a in DAILY_ALGORITHMS},
