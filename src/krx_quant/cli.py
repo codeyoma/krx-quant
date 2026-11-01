@@ -111,6 +111,9 @@ from krx_quant.trader.settings import TraderSettings
 from krx_quant.trader.store import DB_NAME as TRADER_DB
 from krx_quant.trader.store import TraderStore
 from krx_quant.training import fit_algorithm
+from krx_quant.turing_prior import REPORT as TURING_PRIOR_REPORT
+from krx_quant.turing_prior import lines as turing_prior_lines
+from krx_quant.turing_prior import turing_prior_experiment
 
 
 async def _collect() -> None:
@@ -543,6 +546,19 @@ def _poisson_link(days: int) -> int:
         print(e, file=sys.stderr)
         return 1
     print("\n".join(poisson_link_lines(result, settings.state_dir / POISSON_LINK_REPORT)))
+    return 0
+
+
+def _turing_prior(days: int) -> int:
+    """The symbol and climate prior experiment for turing (#448): its lines; exit 1 without a
+    recorded day."""
+    settings = Settings.from_env(require_kis=False)
+    try:
+        result = turing_prior_experiment(settings, days=days)
+    except FileNotFoundError as e:
+        print(e, file=sys.stderr)
+        return 1
+    print("\n".join(turing_prior_lines(result, settings.state_dir / TURING_PRIOR_REPORT)))
     return 0
 
 
@@ -1038,6 +1054,17 @@ def main(argv: list[str] | None = None) -> int:
         default=PREVALIDATION_DAYS,
         help=f"recorded trading days to predict (default: {PREVALIDATION_DAYS})",
     )
+    turing_prior_cmd = sub.add_parser(
+        "turing-prior",
+        help="compare the climate baseline, turing, and turing with the symbol, each slot's class frequencies"
+        " or both on the pre-validation's folds (#448; reads the training samples, replays nothing)",
+    )
+    turing_prior_cmd.add_argument(
+        "--days",
+        type=_positive,
+        default=PREVALIDATION_DAYS,
+        help=f"recorded trading days to predict (default: {PREVALIDATION_DAYS})",
+    )
     train_cmd = sub.add_parser(
         "train", help="train every algorithm on KRX_OBJECT_STORE's latest days and store the promotion list"
     )
@@ -1285,6 +1312,8 @@ def _command(args: argparse.Namespace) -> int:
         return _climate_prior(args.days)
     elif args.command == "poisson-link":
         return _poisson_link(args.days)
+    elif args.command == "turing-prior":
+        return _turing_prior(args.days)
     elif args.command == "train":
         return _train(args.day, args.from_store)
     elif args.command == "simulate":

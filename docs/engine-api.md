@@ -1962,7 +1962,7 @@ trader가 돈 거래일마다의 장부다. `from`부터 `to`까지(KST 날짜, 
 - `predict(features, model)`: 한 종목의 피처로 `{p_up, p_flat, p_down, expected_ticks}`를 낸다. 세 확률의 합은 1이다. 읽는 데이터가 봉 마감에 없으면 `NotPredicted(Abstention.NO_BOOK)`을 던져 그 종목을 예측하지 않는다(#25). 엔진은 이유를 예측의 `status`로 남기고, 밤 학습과 사전 검증은 그 표본을 검증에서 뺀다.
 - `predict_with_context(features, model, context)`(고를 수 있는 능력, #429, `contract.ContextAware`): 피처와 함께 어디서 묻는지(`PredictionContext(symbol, bar_close)`: 종목과 봉 마감)를 받아 `predict`와 같은 것을 낸다. 이 능력이 있는 알고리즘은 `predict`로는 예측하지 않는다(`MissingContext`). 맥락은 피처가 아니다. 그 알고리즘이 맥락으로 읽는 것은 자기 모델의 것이다(Shannon의 기후 사전 확률 표, 아래 "Shannon"). 그래서 피처 저장소와 표본 저장소는 그대로다. 지금은 방향 알고리즘만 가질 수 있고, 가진 것은 Shannon뿐이다.
 
-예측은 모두 디스패처 하나(`contract.forecast_of`)로 묻는다(#429): 엔진의 봉 마감 예측(`_predict_symbols`. 그래서 사전 검증과 수습 시뮬레이션의 재생도), 밤 학습의 검증(`nightly._losses`, 표본마다 그 표본의 종목과 봉 마감), 실험의 (c)(`climate_prior.py`). 디스패처는 능력이 있는지(`ContextAware`)를 보고 길을 고른다(예외를 잡아 고르지 않는다). 맥락이 필요한 알고리즘을 맥락 없이 물으면 `MissingContext`로 분명하게 실패한다(엔진은 그 봉 마감의 그 알고리즘을 `error`로 남긴다). 능력이 없는 알고리즘은 전처럼 `predict`로 묻고 맥락을 받지 않는다. 다른 종류의 알고리즘(`KindAlgorithm`)은 `predict`뿐이다.
+예측은 모두 디스패처 하나(`contract.forecast_of`)로 묻는다(#429): 엔진의 봉 마감 예측(`_predict_symbols`. 그래서 사전 검증과 수습 시뮬레이션의 재생도), 밤 학습의 검증(`nightly._losses`, 표본마다 그 표본의 종목과 봉 마감), 실험의 (c)(`climate_prior.py`)와 (b)–(e)(`turing_prior.py`, #448). 디스패처는 능력이 있는지(`ContextAware`)를 보고 길을 고른다(예외를 잡아 고르지 않는다). 맥락이 필요한 알고리즘을 맥락 없이 물으면 `MissingContext`로 분명하게 실패한다(엔진은 그 봉 마감의 그 알고리즘을 `error`로 남긴다). 능력이 없는 알고리즘은 전처럼 `predict`로 묻고 맥락을 받지 않는다. 다른 종류의 알고리즘(`KindAlgorithm`)은 `predict`뿐이다.
 
 > **바뀜** (2026-10-14, #189): 카드는 과학자, 성격, 핵심 로직, 고유 피처, 학습 방법 다섯 칸이었고 파라미터에는 뜻이 없었다 → 예측 방식(`forecasting`)과 실패 조건(`failure`)을 더했고, 파라미터마다 뜻(`param_meanings`)을 둔다. 기준 예측과 합의도 같은 형식의 카드를 가진다(`baselines.py`, `consensus.py`의 `cards`). 이유: 상세 창의 "학습·예측 방식"이 무엇을 정답으로 배우고 확률을 어떻게 만드는지, 어떤 장에서 틀리기 쉬운지, 이름이 무슨 뜻인지 다 말하게 하려고(2026-10-14 인터뷰, QUANT LETTER의 카드 형식).
 
@@ -2506,6 +2506,38 @@ docker compose run --rm --no-deps engine poisson-link --days 5   # 빨리 훑어
   > **바뀜** (2026-10-15, #198): "CPU 예산이 모자라면 가장 먼저 건너뛴다" → 다른 종류의 알고리즘 다음이다. 이유: 다른 종류의 알고리즘은 방향 알고리즘 뒤에 돌고(#179), 그 첫 알고리즘이 등록되었다.
 - 모델 파일이 크다(트리 텍스트, 학습 표본 3,000개에 약 1MB).
 - 실행 환경: LightGBM은 OpenMP가 필요하다. 서버 이미지에는 `libgomp1`을 넣었다. 맥에서 테스트하려면 `brew install libomp`가 필요하다.
+
+#### Turing의 종목과 사전 확률 실험 (#448)
+
+Turing의 입력에 종목, 종목 × 30분 시간대의 클래스 빈도(기후 사전 확률, 위 "기후 사전 확률 실험 (#429)"), 또는 둘 다를 더하면 기후 기준에 지는 몫을 되찾는지 잰다(`turing_prior.py`, #453). #431의 오류 분석에서 Turing의 입력에는 시간(`minutes_since_open`)은 있지만 종목이 없었다. 그런데 종목마다 정답 분포가 크게 다르고, 조용할 때(σ̂₄ 하위 삼분위) 보합이 많은데도 방향을 자주 불러 기후 기준에 졌다. 실험일 뿐이다. 엔진은 돌리지 않고, Turing의 코드와 모델은 그대로다(코드 digest가 그대로라 Turing의 사전 검증도 다시 돌지 않는다).
+
+```bash
+docker compose run --rm --no-deps engine turing-prior            # 최근 20 녹화일
+docker compose run --rm --no-deps engine turing-prior --days 5   # 빨리 훑어보기
+```
+
+- **fold.** 사전 검증(위 "사전 검증 (#24)")과 같고, 기후 사전 확률 실험과 같은 방식이다. 최근 20 녹화일(모자라면 있는 만큼)을 하루씩 예측한다. 그날 전의 Turing 학습 창(60거래일, 백필만 있는 날 포함)으로 맞춘 모델이 예측하고, 그날로는 학습하지 않는다. 기후 기준은 자기 창(20거래일)으로 맞춘다. 엔진을 재생하지 않는다. 그날의 학습 표본(밤 학습과 같은 표본. 밤 학습이 저장했으면 표본 저장소에서 꺼낸다, #370)을 다섯 쪽이 예측한다. Turing은 모든 봉 마감을 예측하므로(학습 전에는 세 확률 1/3씩) 정답이 있는 봉 마감을 모두 센다.
+- **다섯 쪽.** 같은 봉 마감에서 견준다.
+  - (a) `climate`: 날마다 그 전 20거래일로 다시 맞춘 `baseline-climate` 표. 사전 검증의 재생과 같다.
+  - (b) `turing`: 지금의 Turing(등록된 알고리즘 그대로). 사전 검증의 walk-forward가 학습시키는 그대로이고, 엔진처럼 예측한다(시험이 확인한다).
+  - (c) `turing_symbol`(`TuringPlus(symbol=True)`): (b)가 받은 바로 그 표본으로 학습한다. Turing의 피처(같은 순서) 뒤에 종목 입력 `symbol` 하나를 더한다. LightGBM의 범주형 입력(`categorical_feature`)이다. 학습 창의 종목마다 종목 코드 순서로 번호를 매겨 모델에 둔다(`symbol.<종목>`). 학습 창에 없던 종목은 빈 입력이다.
+  - (d) `turing_prior`(`TuringPlus(prior=True)`): 입력 둘을 더한다. 봉 마감의 종목 × 시간대 기후 사전 확률에서 `climate_up` = log(p상승 / p보합), `climate_down` = log(p하락 / p보합)이다. #429와 같은 정의다(`algorithms/priors.py`를 가져다 쓰고 고치지 않는다. 그 파일은 Shannon의 코드 digest에 든다).
+  - (e) `turing_symbol_prior`: 셋을 다 더한다.
+  - (c)–(e)는 Turing과 같은 부스팅(`BOOSTING`, 200번, 한 스레드, 고정 시드)이다. 엔진처럼 디스패처(`forecast_of`)로 종목과 봉 마감을 주고 묻는다. 모델 버전은 `turing-symbol-…`, `turing-prior-…`, `turing-symbol-prior-…`이고, 학습 전에는 `…-default`(세 확률 1/3)다. 한 날의 (c)–(e)는 Turing 피처의 행렬을 함께 쓴다.
+- **사전 확률.** 위 "Shannon"의 "기후 사전 확률"과 같다. fold의 학습 창(Turing의 60거래일) 표본만 센다.
+  - **인과적.** 학습 표본마다 학습 창에서 그 표본의 날 전의 날만 센다. 그 표본의 날과 그 뒤의 정답은 들어가지 않는다(시험이 확인한다). 그래서 창의 첫날 표본의 사전 확률은 세 클래스가 같다.
+  - **모델에 둔다.** fold의 모델이 예측에 쓰는 사전 확률은 학습 창의 모든 날로 센 것이고, 모델의 파라미터(`prior.<종목>.<시간대>.<클래스>`, `prior.<종목>.all.<클래스>`)에 둔다. 피처가 아니다.
+- **σ̂₄ 삼분위.** #431의 것과 같다. 봉 마감에서의 장벽 σ̂₄(중간가 대비 bp)를 엔진 DB에서 쓰지 않고 읽는다(`error_breakdown.read_sigmas`). 종목마다 예측한 날들의 σ̂₄가 있는 봉 마감으로 삼분위 경계를 정한다(`api.volatility_cuts`). σ̂₄가 없는 봉 마감(1분봉 20개 미만, 기록 없음)은 `none`이다.
+- **판정 규칙(돌리기 전에 정했다, `candidates`).** (c), (d), (e)마다 `better`((b) 대비 lift(봉 마감 짝) > 0)와 `lower_bound_up`(기후 대비 거래일 단위 하한이 (b)의 것보다 높음)을 본다. 둘 다면 그 쪽이 "후보"(`candidate`)다. 후보도 바로 Turing에 넣지 않는다. 넣으면 코드 digest가 바뀌어 사전 검증이 다시 돌고, 최종 판정은 그 뒤의 날들로 한다.
+- **리포트** `state/experiments/turing-prior-448.json`. 돌릴 때마다 덮어쓴다.
+  - `days`, `turing_days`(60), `prior`(입력, 가짜 수), `folds`: 날마다 `models`(다섯 쪽의 모델 버전), `trained_on`((b)–(e)가 배운 표본: 정답이 있음), `scored`.
+  - `arms`: 쪽마다 `n`, `accuracy`(맞힘률), `coverage`(상승·하락 예측의 몫), `directional_precision`, `brier`, `by_class`(클래스마다 `recall`, `precision`, `predicted`, `happened`), `confusion`(부른 클래스 → 나온 클래스 → 봉 마감 수), `over_climate`(기후 대비 lift, 기후 자신은 null), `over_turing`((c)–(e)의 (b) 대비 lift, 나머지는 null). 비율은 95% Wilson 구간이다. lift마다 `pairs`(봉 마감 짝의 맞힘률 이득, 95% 정규 구간)와 `by_day`(거래일 단위: 하루 평균 이득을 값 하나로, 95% Student t 구간. 그 하한이 사전 검증의 `day_low`다)가 있다.
+  - `by_volatility`: `with_sigma`(σ̂₄가 있는 봉 마감 수)와 `cells`(`low`, `mid`, `high`, `none`마다 `arms`와 같은 것). `by_slot`: 30분 칸(`09:00`은 봉 마감 09:01–09:30)마다 같은 것. 봉 마감이 없는 칸은 빠진다.
+  - `rule`: (c)–(e)마다 `better`, `lower_bound_up`, `candidate`. `candidates`: 후보인 쪽.
+  - `gain`: 마지막 날의 (c)–(e) 모델에서 더한 입력마다 트리 이득(gain) 전체에서 차지한 몫. 트리가 그 입력을 얼마나 썼는지 본다. 학습 전이면 null.
+- **출력.** 같은 숫자를 줄로 낸다(날, 개수, 비율, lift, 이득 몫. 시세 값, σ̂₄ 값과 경계는 없다). 쪽마다의 표, 클래스별 재현율·정밀도, 혼동 행렬, lift, 규칙 줄(`#448 rule, (c): … -> a candidate` 또는 `not a candidate`)과 후보 줄, 이득 몫, σ̂₄ 삼분위별·30분 칸별 표(쪽마다 맞힘률, 커버리지, Brier, 기후 대비와 (b) 대비 짝 lift와 거래일 하한, 혼동 행렬)가 나온다. 리포트 JSON은 칸이 많아 GitHub 댓글 한도를 넘으면 댓글에서 줄여 붙는다. 칸의 숫자는 출력에 모두 있다. 녹화일이 없으면 1로 끝난다.
+- **메모리.** 사전 검증의 학습 단계와 같다(재생은 없다, #383). 학습 창의 날만 들고 지나간 날은 버린다. 날마다 메모리 줄(`turing prior: memory on <날> (day i of n): …`)을 남기고 비운 메모리를 돌려준다.
+- **서버에서는** 예약 작업 `turing-prior-448`이 돌린다([operations.md](operations.md#예약-작업-215)). 에이전트가 결과를 보고 Turing에 넣을지에 대한 안을 #448에 남기고, 사용자가 정한다. 넣으면 다음 PR에서 하고, 코드 digest가 바뀌어 사전 검증이 다시 돈다.
 
 ### Neyman (#266)
 

@@ -89,6 +89,7 @@ from krx_quant.trader.mock_check import SAME as MOCK_SAME
 from krx_quant.trader.mock_check import mock_days, trader_in_mock
 from krx_quant.trader.report import calls_agent
 from krx_quant.training import finished_days, is_recorded
+from krx_quant.turing_prior import REPORT as TURING_PRIOR_REPORT
 
 log = logging.getLogger(__name__)
 
@@ -2610,6 +2611,41 @@ POISSON_LINK = Job(
 )
 
 
+# The symbol and climate prior experiment for turing (#448, after #431's breakdown of turing's
+# live predictions): ``turing-prior`` walks turing's pre-validation folds over the training samples,
+# replaying nothing, and compares the climate alone, turing as it is and turing's trees with the
+# symbol, each symbol and slot's smoothed class frequencies (#429's prior), or both, as inputs more,
+# on the same bar closes, overall and by σ̂₄ tercile and 30-minute slot (``turing_prior.py``). Run as
+# ``climate-prior-429`` is (``_until_a_run_ends_ok``): once, on the first night with ``MIN_DAYS``
+# recorded days; after a failure, again on other code. A day fits turing's trees four times on its
+# 60 days (about 3 s each on a Mac with three symbols' made-up 60 days, the server about three
+# times slower): a minute or so, its memory logged a day (#383). The three hours are a bound, with
+# room for the burst CPU running out. Last with the other experiments: it holds back no simulation
+# nor pre-validation. Its output holds counts, rates, lifts, gain shares and dates, no price nor
+# σ̂₄. Whether turing takes an input is proposed from it on #448, and decided in another PR.
+TURING_PRIOR_ISSUE = 448
+TURING_PRIOR = Job(
+    name="turing-prior-448",
+    due=_until_a_run_ends_ok,
+    command=("turing-prior",),
+    timeout=timedelta(hours=3),
+    targets=(
+        Target(
+            TURING_PRIOR_ISSUE,
+            note=(
+                "에이전트가 이 출력으로 #448의 판정 규칙을 보고, turing에 넣을지에 대한 안을 이슈에 "
+                "남긴다. 규칙은 돌리기 전에 정했다: (c), (d), (e) 중 (b)보다 낫고((b) 대비 짝 lift가 "
+                '0보다 크고) 기후 대비 거래일 하한이 (b)보다 높은 팔이 "후보"다. 후보도 바로 turing에 '
+                "넣지 않는다. 넣으면 코드 digest가 바뀌어 사전 검증이 다시 돌고, 최종 판정은 그 뒤의 "
+                "날들로 한다. 사용자가 정한다. 출력에는 시세 값이 없다(날짜, 개수, 비율, lift, 이득 "
+                "몫만. σ̂₄ 값과 경계도 없다)."
+            ),
+        ),
+    ),
+    attach=(Attachment(f"리포트 state/{TURING_PRIOR_REPORT}", TURING_PRIOR_REPORT),),
+)
+
+
 JOBS: tuple[Job, ...] = (
     DIAGNOSE,
     SIGNAL_REVIEW,
@@ -2652,4 +2688,5 @@ JOBS: tuple[Job, ...] = (
     *prevalidation_jobs([*(a.name for a in ALGORITHMS), *(a.name for a in KIND_ALGORITHMS)]),
     CLIMATE_PRIOR,
     POISSON_LINK,
+    TURING_PRIOR,
 )
