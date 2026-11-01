@@ -115,7 +115,13 @@ async def test_a_status_change_from_another_process_is_streamed(tmp_path: Path) 
 async def test_the_kis_status_is_sent_on_connecting_and_when_it_changes(tmp_path: Path) -> None:
     engine, _ = engine_at(tmp_path / "engine.db", at("09:30:00"))
     frame = "2026-10-12T09:29:59+09:00"
-    kis: dict[str, Any] = {"connected": True, "last_frame_at": frame, "seconds_since_frame": 1.0, "feeds": []}
+    kis: dict[str, Any] = {
+        "connected": True,
+        "last_frame_at": frame,
+        "seconds_since_frame": 1.0,
+        "feeds": [],
+        "polls": [],
+    }
     app = create_app(engine, mode="live", live_status=lambda: kis, stream_poll_seconds=0.01)
 
     async with TestClient(TestServer(app)) as client:
@@ -135,6 +141,7 @@ async def test_the_kis_status_is_sent_on_connecting_and_when_it_changes(tmp_path
                     "short_frames": 0,
                 }
             ],
+            "polls": [],
         }
         [changed] = await receive_until(ws, lambda e: e["type"] == "health")
         await ws.close()

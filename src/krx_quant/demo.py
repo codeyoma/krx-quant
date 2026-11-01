@@ -1326,7 +1326,8 @@ def demo_shelf(state_dir: Path) -> Shelf:
 
 def demo_kis(now: datetime) -> dict[str, object]:
     """A made-up KIS status at ``now``: connected, the member flow of 000660 quiet for 16 minutes,
-    with one frame short of fields that morning."""
+    with one frame short of fields that morning, and the investor estimates' polls with a few
+    short outages, 000660's going on (#441)."""
     last = {(TRADE.tr_id, s): now - timedelta(seconds=2) for s in DEMO_SYMBOLS}
     last |= {(BOOK.tr_id, s): now - timedelta(seconds=1) for s in DEMO_SYMBOLS}
     last |= {
@@ -1351,6 +1352,27 @@ def demo_kis(now: datetime) -> dict[str, object]:
         "last_frame_at": iso(frame),
         "seconds_since_frame": (now - frame).total_seconds(),
         "feeds": feeds,
+        "polls": [_demo_poll(now, symbol) for symbol in DEMO_SYMBOLS],
+    }
+
+
+def _demo_poll(now: datetime, symbol: str) -> dict[str, object]:
+    """The investor estimates' poll of ``symbol`` (every 300 s) since 06:00: each had an outage of
+    two calls, and 000660 fails now, its second call in a row (#441)."""
+    failing = symbol == "000660"
+    errors = {"EGW00316": 2, "OPSQ1002": 2} if failing else {"EGW00316": 1, "OPSQ1002": 1}
+    return {
+        "feed": FOREIGN_ESTIMATE.tr_id,
+        "key": symbol,
+        "attempts": 54,
+        "failures": sum(errors.values()),
+        "errors": errors,
+        "outages": 2 if failing else 1,
+        "consecutive_failures": 2 if failing else 0,
+        "max_consecutive_failures": 2,
+        "outage_since": iso(now - timedelta(seconds=310)) if failing else None,
+        "last_success_at": iso(now - timedelta(seconds=(610 if failing else 10))),
+        "last_recovery_seconds": 300.0,
     }
 
 
