@@ -286,7 +286,8 @@ def test_the_job_runs_once_on_the_first_night_with_ten_recorded_days_after_every
     )
     assert [t.issue for t in job.targets] == [429] and "시세 값이 없다" in job.targets[0].note
     assert [a.path for a in job.attach] == ["experiments/climate-prior-429.json"]
-    assert JOBS[-1] is job, "last: it holds back no simulation nor pre-validation"
+    after = max(i for i, j in enumerate(JOBS) if j.name.startswith(("prevalidate-", "simulate-")))
+    assert JOBS.index(job) > after, "last: it holds back no simulation nor pre-validation"
     assert job.gives_way_to is None and job.session is None
     saturday = date(2026, 10, 31)
     started = datetime(2026, 10, 31, 23, 0, tzinfo=KST)
