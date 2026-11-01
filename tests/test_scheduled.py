@@ -612,7 +612,7 @@ async def test_the_result_goes_on_each_issue_which_is_then_ready_for_an_agent(tm
 
     whole, crossed = hub.bodies(203)[0], hub.bodies(187)[0]
     assert first_lines(whole) == [
-        "**예약 작업 `diagnose-203-187`** · 2026-10-16 밤 · 커밋 `0123456789ab` · 종료 코드 0 · 0초",
+        "**예약 작업 `diagnose-203-187`** · 2026-10-16 밤 · 성공 · 커밋 `0123456789ab` · 종료 코드 0 · 0초",
         "",
         "다시 돌리기: `docker compose run --rm engine diagnose --days 20`",
         "",
@@ -658,7 +658,8 @@ async def test_what_is_posted_is_masked(tmp_path: Path) -> None:
     assert secret not in body and "100.64.1.2" not in body and "ts.net" not in body
     assert "key [가림] at [가림]" in body
     assert "<details><summary>stderr</summary>\n\n```\nTraceback: [가림] [가림]\n```" in body
-    assert "종료 코드 1" in body.splitlines()[0]
+    assert " · 실패 · " in body.splitlines()[0] and "종료 코드 1" in body.splitlines()[0]
+    # Its exit code is its own: not an exception's, as a pre-validation's other than a refusal is (#440).
     assert told[0].startswith("예약 작업 job(2026-10-16 밤): 실패, 종료 코드 1, 0초. 댓글: ")
 
 
@@ -742,8 +743,40 @@ async def test_a_timed_out_job_says_so(tmp_path: Path) -> None:
             clock.set(at(FRIDAY, "22:30"))
             await until(lambda: bool(told))
     assert "제한 시간 1시간을 넘어 멈췄다. 그때까지의 출력이다." in hub.bodies(1)[0]
-    assert told[0].startswith("예약 작업 job(2026-10-16 밤): 실패, 제한 시간 1시간을 넘어 멈춤, 0초.")
+    assert told[0].startswith("예약 작업 job(2026-10-16 밤): 시간 초과, 제한 시간 1시간을 넘어 멈춤, 0초.")
     assert state.jobs["job"].outcome == FAILED and state.jobs["job"].timed_out
+    assert state.jobs["job"].verdict is None  # a job without a report judges nothing
+
+
+async def test_a_job_killed_by_a_signal_or_not_started_says_so(tmp_path: Path) -> None:
+    class CannotStart(Runs):
+        async def __call__(self, args: Sequence[str], timeout: timedelta, child: Child | None = None) -> Ran:
+            raise FileNotFoundError("krx-quant")
+
+    clock = FakeClock(at(FRIDAY, "22:00"))
+    killed = Runs(clock, Ran(-9, "", ""))  # the kernel's out-of-memory killer, say
+    unstarted = CannotStart(FakeClock(at(FRIDAY, "22:40")))
+    async with fake_github() as hub:
+        start = at(FRIDAY, "22:00")
+        async with scheduling(tmp_path, start, [job("killed")], runs=killed, github=hub, clock=clock) as (
+            _,
+            _,
+            told,
+            _,
+        ):
+            clock.set(at(FRIDAY, "22:30"))
+            await until(lambda: bool(told))
+        async with scheduling(
+            tmp_path, at(FRIDAY, "22:40"), [job("unstarted")], runs=unstarted, github=hub
+        ) as (_, _, also, _):
+            await until(lambda: bool(also))
+    assert told[0].startswith("예약 작업 killed(2026-10-16 밤): 신호로 죽음, 종료 코드 -9(SIGKILL), 0초.")
+    assert also[0].startswith("예약 작업 unstarted(2026-10-16 밤): 실패, 시작하지 못함, 0초.")
+    heading = "**예약 작업 `{}`** · 2026-10-16 밤 · {} · 커밋 `0123456789ab` · 종료 코드 {} · 0초"
+    assert [body.splitlines()[0] for body in hub.bodies(1)] == [
+        heading.format("killed", "신호로 죽음", "-9(SIGKILL)"),
+        heading.format("unstarted", "실패", "없음"),
+    ]
 
 
 async def test_without_a_token_the_result_waits_on_the_server_until_there_is_one(tmp_path: Path) -> None:

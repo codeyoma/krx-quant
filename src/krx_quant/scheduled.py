@@ -28,7 +28,8 @@ recorded day beside the live engine.
 
 The state (``state/scheduled.json``) keeps each job's last run: its night, outcome (``ok``,
 ``failed``, ``interrupted``; ``running`` while it runs), exit code, duration, commit and
-comments, the nights a job gave way since it last ran (#376), and the results not posted yet.
+comments, a pre-validation's verdict apart from its outcome (``passed``, ``refused``: #440, its
+``Job.report``), the nights a job gave way since it last ran (#376), and the results not posted yet.
 A run the collector's stop cut (a deploy, a restart, a crash) is ``interrupted``: it does not
 count as run, and runs again the next night (a session job, the next trading day). A result
 is masked (``redaction.py``) and posted on each issue, which then gets ``ready-for-agent`` in
@@ -36,7 +37,10 @@ place of ``ready-for-human`` and ``needs-triage``; a job with ``Job.label_if`` (
 nightly report) changes the labels only on the runs it says call an agent. Without
 ``KRX_GITHUB_TOKEN``, or when
 GitHub fails, the result waits in the state and is posted at the next night or start. Telegram
-gets a line per outcome, with the comments' addresses.
+gets a line per run, with the comments' addresses. The line and the comment's first line say what
+came of it (``_what``, #440): 성공 (a pre-validation's 통과), 거부, 실패 (a pre-validation's 예외), 시간
+초과 or 신호로 죽음. A refusal's exit code is 1, as an error's is: it is told apart by the report the
+run wrote.
 """
 
 from __future__ import annotations
@@ -45,6 +49,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import signal
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
@@ -84,6 +89,8 @@ log = logging.getLogger(__name__)
 
 STATE_FILE = "scheduled.json"
 OK, FAILED, INTERRUPTED, RUNNING = "ok", "failed", "interrupted", "running"
+# A pre-validation's verdict (#440), as its report and its output say it.
+PASSED, REFUSED = "passed", "refused"
 READY_FOR_AGENT, READY_FOR_HUMAN, NEEDS_TRIAGE = "ready-for-agent", "ready-for-human", "needs-triage"
 # A job's arguments follow ``KRX_QUANT``, as the nightly training's do.
 
@@ -141,6 +148,9 @@ class JobRecord:
     seconds: float | None = None
     timed_out: bool = False  # stopped at its time limit (then FAILED)
     comments: dict[int, str] = field(default_factory=dict)  # issue -> the result's comment
+    # What the run judged (#440, ``Job.report``): PASSED (OK), REFUSED (FAILED: its exit code 1, as the
+    # conditions have always read it), or None: a job without a verdict, or a run that left none.
+    verdict: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -152,6 +162,7 @@ class JobRecord:
             "seconds": self.seconds,
             "timed_out": self.timed_out,
             "comments": {str(issue): url for issue, url in self.comments.items()},
+            "verdict": self.verdict,
         }
 
     @classmethod
@@ -165,6 +176,7 @@ class JobRecord:
             seconds=None if data.get("seconds") is None else float(data["seconds"]),
             timed_out=bool(data.get("timed_out", False)),
             comments={int(issue): str(url) for issue, url in data.get("comments", {}).items()},
+            verdict=None if data.get("verdict") is None else str(data["verdict"]),  # none before #440
         )
 
 
@@ -335,6 +347,10 @@ class Job:
     # Whether a run calls an agent (#402): the labels change (``label``, ``unlabel``) only on the
     # runs it says so of; None: on every run.
     label_if: Callable[[Ran], bool] | None = None
+    # The report whose verdict the run's exit code gives (#440, a pre-validation's): a path under the
+    # state directory. Exit 0 passes; exit 1 refuses only if the run wrote it whole, made since it
+    # started (``_refused_since``): else it is an error, which exits 1 too. None: no verdict.
+    report: str | None = None
 
 
 # A job that gave way on this many nights since it last ran gives way no more: it runs first (#376).
@@ -703,9 +719,24 @@ class Scheduler:
             ran = Ran(None, "", f"could not be started: {type(e).__name__}: {e}")
         seconds = round(monotonic() - began, 1)
         outcome = OK if ran.exit_code == 0 and not ran.timed_out else FAILED
-        record = JobRecord(day, outcome, started, self._commit, ran.exit_code, seconds, ran.timed_out)
+        record = JobRecord(
+            day,
+            outcome,
+            started,
+            self._commit,
+            ran.exit_code,
+            seconds,
+            ran.timed_out,
+            verdict=self._verdict(job, ran, started),
+        )
         self._state.jobs[job.name] = record
-        log.info("scheduled job %s: %s (exit %s) in %.1fs", job.name, outcome, ran.exit_code, seconds)
+        log.info(
+            "scheduled job %s: %s (exit %s) in %.1fs",
+            job.name,
+            record.verdict or outcome,
+            ran.exit_code,
+            seconds,
+        )
         attached, absent = self._attachments(job, before)
         results = [self._result(job, target, record, ran, attached, absent) for target in job.targets]
         self._state.unposted.extend(results)
@@ -717,6 +748,18 @@ class Scheduler:
     def _files(self) -> Path:
         """Where the jobs' attachments are: the state directory, the state file's."""
         return self._state.path.parent
+
+    def _verdict(self, job: Job, ran: Ran, started: datetime) -> str | None:
+        """What ``job``'s run ``ran``, started at ``started``, judged (#440): PASSED on exit 0, REFUSED
+        on exit 1 with a refusal of its own in ``Job.report``; None for a job without a report, and
+        for a run that judged nothing (it raised, ran out of time, was killed, or wrote no report)."""
+        if job.report is None or ran.timed_out:
+            return None
+        if ran.exit_code == 0:
+            return PASSED
+        if ran.exit_code == 1 and _refused_since(self._files / job.report, started):
+            return REFUSED
+        return None
 
     def _attachments(
         self, job: Job, before: Mapping[str, tuple[int, int, int] | None]
@@ -821,6 +864,19 @@ def _calls(job: Job, ran: Ran) -> bool:
         return True
 
 
+def _refused_since(path: Path, started: datetime) -> bool:
+    """Whether ``path`` holds a whole report that refused (``passed`` false), made (its
+    ``prevalidated_at``) at ``started`` or later: the run's own, not one an earlier run left."""
+    try:
+        report = json.loads(path.read_text())
+        made = datetime.fromisoformat(str(report["prevalidated_at"])) if isinstance(report, dict) else None
+    except (OSError, ValueError, KeyError):
+        return False
+    if made is None or made.tzinfo is None:
+        return False
+    return report.get("passed") is False and made >= started
+
+
 def _stamp(path: Path) -> tuple[int, int, int] | None:
     """Which version of the file at ``path`` is there (inode, change time, size); None if none."""
     try:
@@ -835,24 +891,55 @@ def _when(job: Job) -> str:
     return "밤" if job.session is None else "장중"
 
 
+def _what(job: Job, record: JobRecord) -> str:
+    """What came of a run, as its comment and its line say it (#440): 성공 (통과 for a pre-validation
+    that passed), 거부 (it judged to the end and refused: not a failure, though it exits 1), and the
+    failures, by how they ended: 시간 초과, 신호로 죽음 (the kernel's out-of-memory killer sends
+    SIGKILL), and any other exit code, or none (it could not be started): 예외 for a job with a
+    verdict (``Job.report``: it ends so only when it raised before its verdict), 실패 for another (its
+    codes are its own: the order probe's 3 says its keys are not set, #403)."""
+    if record.verdict == PASSED:
+        return "통과"
+    if record.verdict == REFUSED:
+        return "거부"
+    if record.outcome == OK:
+        return "성공"
+    if record.timed_out:
+        return "시간 초과"
+    if record.exit_code is not None and record.exit_code < 0:
+        return "신호로 죽음"
+    return "예외" if job.report is not None else "실패"
+
+
+def _code(exit_code: int | None) -> str:
+    """An exit code as the lines show it: ``-9(SIGKILL)`` for a signal, ``없음`` if none."""
+    if exit_code is None:
+        return "없음"
+    if exit_code < 0:
+        with contextlib.suppress(ValueError):
+            return f"{exit_code}({signal.Signals(-exit_code).name})"
+    return str(exit_code)
+
+
 def _heading(job: Job, record: JobRecord) -> str:
-    code = "없음" if record.exit_code is None else str(record.exit_code)
     commit = record.commit if record.commit == "unknown" else record.commit[:12]
     return (
-        f"**예약 작업 `{job.name}`** · {record.day} {_when(job)} · 커밋 `{commit}` · 종료 코드 {code} · "
-        f"{_duration(record.seconds)}"
+        f"**예약 작업 `{job.name}`** · {record.day} {_when(job)} · {_what(job, record)} · 커밋 `{commit}` · "
+        f"종료 코드 {_code(record.exit_code)} · {_duration(record.seconds)}"
     )
 
 
 def _outcome_line(job: Job, record: JobRecord, links: Sequence[str], why_not: str | None) -> str:
-    what = "성공" if record.outcome == OK else "실패"
     if record.timed_out:
         how = f"제한 시간 {_duration(job.timeout)}을 넘어 멈춤"
     elif record.exit_code is None:
         how = "시작하지 못함"
     else:
-        how = f"종료 코드 {record.exit_code}"
-    line = f"예약 작업 {job.name}({record.day} {_when(job)}): {what}, {how}, {_duration(record.seconds)}."
+        how = f"종료 코드 {_code(record.exit_code)}"
+    line = (
+        f"예약 작업 {job.name}({record.day} {_when(job)}): {_what(job, record)}, {how}, "
+        f"{_duration(record.seconds)}."
+    )
     if links:
         line += f" 댓글: {' '.join(links)}"
     if why_not:
@@ -1999,6 +2086,7 @@ def prevalidation_jobs(names: Sequence[str]) -> tuple[Job, ...]:
             timeout=PREVALIDATION_TIMEOUTS.get(name, PREVALIDATION_TIMEOUT),
             targets=(Target(PREVALIDATION_ISSUE, note=_prevalidation_note(name)),),
             attach=(Attachment(f"리포트 state/{_report_of(name)}", _report_of(name)),),
+            report=_report_of(name),
         )
         for name in order
     )
@@ -2077,6 +2165,7 @@ def daily_prevalidation_jobs(
                     Target(DAILY_KIND_ISSUES.get(kind or "", DAILY_CHECK_ISSUE), note=note),
                 ),
                 attach=(Attachment(f"리포트 state/{_report_of(name)}", _report_of(name)),),
+                report=_report_of(name),
             )
         )
     return tuple(out)

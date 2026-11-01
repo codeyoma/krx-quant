@@ -39,6 +39,9 @@ from krx_quant.scheduled import (
     INTERRUPTED,
     JOBS,
     OK,
+    PASSED,
+    PREVALIDATION_ISSUE,
+    REFUSED,
     STATE_FILE,
     Facts,
     Job,
@@ -66,7 +69,9 @@ from tests.test_scheduled import (
     THURSDAY,
     Runs,
     Told,
+    Writes,
     at,
+    saved,
     scheduling,
     settle,
 )
@@ -318,7 +323,8 @@ async def test_one_algorithm_a_night_in_turn_each_refusal_on_204_with_its_report
     assert len(bodies) == 6 and hub.labels == {204: {"ready-for-agent"}}
     first = bodies[0]
     assert first.splitlines()[:4] == [
-        "**예약 작업 `prevalidate-mandelbrot`** · 2026-10-16 밤 · 커밋 `0123456789ab` · 종료 코드 1 · 0초",
+        "**예약 작업 `prevalidate-mandelbrot`** · 2026-10-16 밤 · 거부 · 커밋 `0123456789ab` · "
+        "종료 코드 1 · 0초",
         "",
         "다시 돌리기: `docker compose run --rm engine prevalidate mandelbrot`",
         "통과(`passed`)하면 엔진이 다음 봉 마감부터 수습으로 돌리고, 수습이 시작된 그 밤 "
@@ -333,8 +339,137 @@ async def test_one_algorithm_a_night_in_turn_each_refusal_on_204_with_its_report
     ]
     assert json.loads(folded.split("\n```")[0]) == refusal(EVERYONE["mandelbrot"], at(FRIDAY, "22:30"))
     assert lines_told[0].startswith(
-        "예약 작업 prevalidate-mandelbrot(2026-10-16 밤): 실패, 종료 코드 1, 0초. 댓글: "
+        "예약 작업 prevalidate-mandelbrot(2026-10-16 밤): 거부, 종료 코드 1, 0초. 댓글: "
     )
+    # A refusal failed, as its exit code 1 always did to the conditions: they are as they were.
+    assert {(r.outcome, r.verdict) for r in state.jobs.values()} == {(FAILED, REFUSED)}
+
+
+# What came of a run (#440): a refusal is the command's verdict, not a failure, though its exit
+# code is 1 as an error's is.
+
+MANDELBROT = next(j for j in PREVALIDATIONS if j.name == "prevalidate-mandelbrot")
+TOLD = "예약 작업 prevalidate-mandelbrot(2026-10-16 밤): "
+# Its comment's first line: what came of it, and the exit code.
+HEADING = (
+    "**예약 작업 `prevalidate-mandelbrot`** · 2026-10-16 밤 · {} · 커밋 `0123456789ab` · 종료 코드 {} · 0초"
+)
+
+
+async def ended(state_dir: Path, ran: Ran, report: str | None = None) -> tuple[str, str, JobRecord]:
+    """mandelbrot's pre-validation run once, on Friday night from 22:30, ending as ``ran`` and
+    writing ``report`` as its report while it runs (None: none): the line told without the
+    comments' addresses, its comment's first line, its record."""
+    clock = FakeClock(at(FRIDAY, "22:00"))
+    path = report_path(state_dir, "mandelbrot")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    runs = Writes(clock, ran, {} if report is None else {path: report})
+    async with fake_github() as hub:
+        async with scheduling(
+            state_dir,
+            at(FRIDAY, "22:00"),
+            [MANDELBROT],
+            runs=runs,
+            github=hub,
+            facts=Facts(MIN_DAYS, ORDER),
+            clock=clock,
+        ) as (_, _, told, state):
+            clock.set(at(FRIDAY, "22:30"))
+            await until(lambda: bool(told))
+    [body] = hub.bodies(PREVALIDATION_ISSUE)
+    return told[0].split(" 댓글: ")[0], body.splitlines()[0], state.jobs[MANDELBROT.name]
+
+
+async def test_each_end_of_a_pre_validation_is_told_in_words_of_its_own(tmp_path: Path) -> None:
+    refused = refusal(EVERYONE["mandelbrot"], at(FRIDAY, "22:30"))  # made as the run starts: its own
+    ends = {
+        "passed": (Ran(0, "mandelbrot: passed\n", ""), json.dumps({**refused, "passed": True})),
+        "refused": (Ran(1, "mandelbrot: refused\n", ""), json.dumps(refused)),
+        "raised": (Ran(1, "", "Traceback (most recent call last): ...\nKeyError: 'x'\n"), None),
+        "timed_out": (Ran(-9, "half\n", "", timed_out=True), None),
+        "killed": (Ran(-9, "", ""), None),  # the kernel's out-of-memory killer (breiman, 2026-10-27)
+    }
+    seen = {name: await ended(tmp_path / name, ran, report) for name, (ran, report) in ends.items()}
+
+    assert {name: told for name, (told, _, _) in seen.items()} == {
+        "passed": TOLD + "통과, 종료 코드 0, 0초.",
+        "refused": TOLD + "거부, 종료 코드 1, 0초.",
+        "raised": TOLD + "예외, 종료 코드 1, 0초.",
+        "timed_out": TOLD + "시간 초과, 제한 시간 5시간을 넘어 멈춤, 0초.",
+        "killed": TOLD + "신호로 죽음, 종료 코드 -9(SIGKILL), 0초.",
+    }
+    assert {name: heading for name, (_, heading, _) in seen.items()} == {
+        "passed": HEADING.format("통과", "0"),
+        "refused": HEADING.format("거부", "1"),
+        "raised": HEADING.format("예외", "1"),
+        "timed_out": HEADING.format("시간 초과", "-9(SIGKILL)"),
+        "killed": HEADING.format("신호로 죽음", "-9(SIGKILL)"),
+    }
+    # The record keeps how the run ended and what it judged apart.
+    assert {name: (r.outcome, r.verdict) for name, (_, _, r) in seen.items()} == {
+        "passed": (OK, PASSED),
+        "refused": (FAILED, REFUSED),
+        "raised": (FAILED, None),
+        "timed_out": (FAILED, None),
+        "killed": (FAILED, None),
+    }
+    jobs = saved(tmp_path / "refused")["jobs"]
+    assert isinstance(jobs, dict) and jobs["prevalidate-mandelbrot"]["verdict"] == REFUSED  # as saved
+
+
+async def test_an_exit_1_without_a_whole_report_of_its_own_is_a_failure_not_a_refusal(tmp_path: Path) -> None:
+    candidate = EVERYONE["mandelbrot"]
+    earlier = json.dumps(refusal(candidate, at(THURSDAY, "23:10")))  # an earlier run's refusal
+    left = report_path(tmp_path / "left", "mandelbrot")
+    left.parent.mkdir(parents=True)
+    left.write_text(earlier)  # and this run leaves it as it was
+    timeless = {k: v for k, v in refusal(candidate, at(FRIDAY, "22:30")).items() if k != "prevalidated_at"}
+    passing = json.dumps({**refusal(candidate, at(FRIDAY, "22:30")), "passed": True})
+    exits = {
+        "none": None,  # no report at all (no recorded day, a lock held, a crash before it)
+        "left": None,
+        "stale": earlier,  # written while it ran, but made before it started
+        "timeless": json.dumps(timeless),
+        "torn": '{"passed": false, "prevalidated_at": "2026-10-16T22:30',
+        "passing": passing,  # a pass with exit 1: something after it failed
+    }
+    crashed = Ran(1, "", "Traceback (most recent call last): ...\n")
+    seen = {name: await ended(tmp_path / name, crashed, report) for name, report in exits.items()}
+    assert {name: told for name, (told, _, _) in seen.items()} == dict.fromkeys(
+        exits, TOLD + "예외, 종료 코드 1, 0초."
+    )
+    assert {name: heading for name, (_, heading, _) in seen.items()} == dict.fromkeys(
+        exits, HEADING.format("예외", "1")
+    )
+    assert {(r.outcome, r.verdict) for _, _, r in seen.values()} == {(FAILED, None)}
+
+
+def test_a_state_saved_before_the_verdicts_is_read_as_it_was(tmp_path: Path) -> None:
+    poisson = {  # as the scheduler saved a run before #440: no verdict
+        "day": "2026-10-16",
+        "outcome": "failed",
+        "started_at": "2026-10-16T22:30:00+09:00",
+        "commit": COMMIT,
+        "exit_code": 1,
+        "seconds": 3600.0,
+        "timed_out": False,
+        "comments": {"204": "https://github.com/x/y/issues/204#issuecomment-1"},
+    }
+    before = {"jobs": {"prevalidate-poisson": poisson}, "unposted": [], "gave_way": {}}
+    (tmp_path / STATE_FILE).write_text(json.dumps(before))
+    state = JobState.load(tmp_path / STATE_FILE)
+    assert not (tmp_path / f"{STATE_FILE}.bad").exists()
+    record = state.jobs["prevalidate-poisson"]
+    assert (record.outcome, record.exit_code, record.verdict, record.comments) == (
+        FAILED,
+        1,
+        None,
+        {204: "https://github.com/x/y/issues/204#issuecomment-1"},
+    )
+    # Its turn reads it as before (#204): it ran on this code, and no report judged it.
+    assert prevalidation_turn(night(SATURDAY, runs={"poisson": record}), "poisson") is None
+    state.save()
+    assert saved(tmp_path)["jobs"] == {"prevalidate-poisson": {**poisson, "verdict": None}}
 
 
 @pytest.fixture
