@@ -89,6 +89,12 @@ scripts/loki-query.sh '{service="krx-quant", level=~"error|critical"}' --since 2
   ```
 - With the engine's own alerts beside them: `{service="krx-quant", process="engine"} |= "alert: ["`.
 
+**REST poll outages** (#441): each failed call is a WARNING `poll <TR> <key> failed: …`, and each outage that ended an INFO line `poll outage of <TR> <key> ended after <seconds> s: <N> failures in a row (<code> <n>, …)`. Today's counts by key and KIS code are in `krx-quant doctor` section 2 (`kis.polls`).
+
+```bash
+scripts/loki-query.sh '{service="krx-quant", process="engine"} |= "poll outage of "' --since 24h --limit 500
+```
+
 **The WebSocket around the close** (15:20–15:31 on 2026-10-22):
 
 ```bash
