@@ -1112,6 +1112,20 @@ def by_volatility(
     so every predictor's terciles are the same bar closes and can be set side by side: the
     widths at a third and two thirds of the symbol's sorted ones (the lower of two). Records
     without a width are left out."""
+    cuts = volatility_cuts(widths)
+    groups: dict[str, list[Scored]] = {t: [] for t in TERCILES}
+    for r in records:
+        w = widths.get((r.symbol, iso(r.bar_close)))
+        if w is None:
+            continue
+        groups[tercile(w, cuts[r.symbol])].append(r)
+    return groups, cuts
+
+
+def volatility_cuts(widths: Mapping[tuple[str, str], float]) -> dict[str, list[float]]:
+    """Each symbol's two tercile cuts of ``widths`` (by symbol and bar close): its widths at a
+    third and two thirds of its sorted ones (the lower of two). ``by_volatility`` takes them from
+    the period it splits; the holdout (#447) from its discovery period."""
     by_symbol: dict[str, list[float]] = {}
     for (symbol, _), width in widths.items():
         by_symbol.setdefault(symbol, []).append(width)
@@ -1119,14 +1133,14 @@ def by_volatility(
     for symbol, ws in sorted(by_symbol.items()):
         ws.sort()
         cuts[symbol] = [ws[(len(ws) - 1) // 3], ws[2 * (len(ws) - 1) // 3]]
-    groups: dict[str, list[Scored]] = {t: [] for t in TERCILES}
-    for r in records:
-        w = widths.get((r.symbol, iso(r.bar_close)))
-        if w is None:
-            continue
-        low, high = cuts[r.symbol]
-        groups["low" if w <= low else "mid" if w <= high else "high"].append(r)
-    return groups, cuts
+    return cuts
+
+
+def tercile(width: float, cuts: Sequence[float]) -> str:
+    """The tercile (``TERCILES``) of ``width`` by a symbol's two ``cuts``: low up to the lower cut,
+    mid up to the upper, high above."""
+    low, high = cuts
+    return "low" if width <= low else "mid" if width <= high else "high"
 
 
 def skill_json(s: Skill | None, by_day: Lift | None = None) -> dict[str, Any] | None:

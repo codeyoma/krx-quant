@@ -69,6 +69,8 @@ from krx_quant.daily_features import pending_inputs
 from krx_quant.engine import PredictionEngine
 from krx_quant.feeds.base import KST
 from krx_quant.github import GitHub, GitHubError, comment_body
+from krx_quant.holdout import DAYS as HOLDOUT_DAYS
+from krx_quant.holdout import days_in_window
 from krx_quant.kind_registry import DAILY_KINDS, daily_kind_named
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.night_probe import evening, subscribed_nights
@@ -76,6 +78,7 @@ from krx_quant.nightly_hit_rates import HIT_RATE_NIGHTS, nights_with_hit_rates
 from krx_quant.notify import Alerts
 from krx_quant.order_probe import NO_KEYS
 from krx_quant.poisson_link import REPORT as POISSON_LINK_REPORT
+from krx_quant.predictions import DB_NAME
 from krx_quant.prevalidation import MIN_DAYS, REGISTERED_BEFORE, LastReport, last_report, report_path
 from krx_quant.process_log import KRX_QUANT, Child, run_logged
 from krx_quant.process_log import Ran as Ran  # a job's process, once it ended
@@ -313,6 +316,9 @@ class Facts:
     # ``nightly_hit_rates.nights_with_hit_rates``, up to ``HIT_RATE_NIGHTS``): their summary waits for
     # them.
     hit_rate_nights: int = 0
+    # How many days of turing's holdout window are in the engine DB (#447, ``holdout.days_in_window``,
+    # up to ``holdout.DAYS``): its judging waits for the window to be full.
+    holdout_days: int = 0
 
 
 @dataclass(frozen=True)
@@ -1016,6 +1022,7 @@ async def read_facts(
         trader_live_kis=settings.trader_live_kis,
         mock_days=await asyncio.to_thread(mock_days, settings.state_dir),
         hit_rate_nights=await asyncio.to_thread(nights_with_hit_rates, settings),
+        holdout_days=await asyncio.to_thread(days_in_window, settings.state_dir / DB_NAME),
     )
 
 
@@ -2093,6 +2100,50 @@ ERROR_BREAKDOWN = Job(
     ),
 )
 
+# turing's hypotheses judged on a fixed holdout (#447): four hypotheses picked from #431's report,
+# fixed in #447 before the days after its period, are judged on the first ``holdout.DAYS`` (10) days
+# after 2026-10-30 with turing's predictions on answer version 3 (``holdout.py``). Once, on the first
+# night the window is full (``Facts.holdout_days``, counted in the engine DB read-only when the
+# night's conditions are read: a few small queries), trading or not; after a failure, again once a
+# deploy brings other code. It reads the window's scored predictions read-only beside the running
+# engine, a day at a time, as ``error-breakdown`` does (which read 15 days in 24 seconds on the
+# server); the hour is a bound. Before the simulations and pre-validations, which may take the rest
+# of the night. Its output holds counts, ratios and lifts: no price, market value or σ̂₄ cut.
+HOLDOUT_ISSUE = 447
+
+
+def _holdout_full(night: Night) -> bool:
+    """Once, on the first night the holdout window is full, trading or not; after a failed run,
+    again on other code."""
+    if night.facts.holdout_days < HOLDOUT_DAYS:
+        return False
+    record = night.record
+    return not night.ran or (
+        record is not None and record.outcome == FAILED and record.commit != night.commit
+    )
+
+
+ERROR_HOLDOUT = Job(
+    name="error-holdout-447",
+    due=_holdout_full,
+    command=("error-holdout",),
+    timeout=timedelta(hours=1),
+    targets=(
+        Target(
+            HOLDOUT_ISSUE,
+            note=(
+                "#431의 리포트에서 고른 가설 넷(이 이슈 본문에 고정)을 그 뒤의 고정 창 10거래일로 판정한 "
+                "결과다. 에이전트가 이 출력을 #431의 후속(B #448, C #449)과 엮어 이 이슈에 댓글로 정리하고 "
+                "`ready-for-human`으로 돌린다. `섰다`인 가설만 C의 규칙이나 turing 개선의 근거가 된다. "
+                "`서지 않음`과 `표본 부족`은 근거가 아니다. 가설, 창, σ̂₄ 경계, 구간, 최소 표본은 결과를 보고 "
+                "바꾸지 않는다. 사용자가 정한다. 다시 돌리기(읽기만): "
+                "`docker compose run --rm engine error-holdout`. 출력에는 가격과 시세 값이 없다"
+                "(개수, 비율, lift만)."
+            ),
+        ),
+    ),
+)
+
 # ⑤ The pre-validations (#204): a new algorithm runs live once its pre-validation has passed
 # (``prevalidation.py``). Once ``MIN_DAYS`` trading days are recorded, one waiting algorithm
 # is pre-validated a night, at most (``prevalidation_tonight``): a run replays 20 days beside
@@ -2557,6 +2608,7 @@ JOBS: tuple[Job, ...] = (
     SIGNAL_REVIEW_AGAIN,
     LIVE_PROBE,
     ERROR_BREAKDOWN,
+    ERROR_HOLDOUT,
     PASSIVE_ENTRY,
     COST_MAP_AUDIT,
     NIGHTLY_HIT_RATES,

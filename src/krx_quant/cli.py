@@ -50,6 +50,7 @@ from krx_quant.expected_open_probe import probe_expected_open
 from krx_quant.fake_kis import FakeKis
 from krx_quant.feeds.base import KST
 from krx_quant.gaps_probe import probe_gaps
+from krx_quant.holdout import error_holdout
 from krx_quant.kind_registry import DAILY_KINDS, kind_named
 from krx_quant.kis import KisError
 from krx_quant.krx_etf_probe import probe_krx_etf
@@ -676,6 +677,12 @@ def _error_breakdown(days: int, algorithm: str) -> int:
     return 0
 
 
+def _error_holdout() -> int:
+    settings = Settings.from_env(require_kis=False)
+    print(error_holdout(settings.state_dir / DB_NAME))
+    return 0
+
+
 def _nightly_hit_rates(nights: int) -> int:
     """The hit rates beside the nightly swap over the latest ``nights`` nights (#437); exit 1 without
     the store or a night that carries them."""
@@ -1100,6 +1107,11 @@ def main(argv: list[str] | None = None) -> int:
     error_cmd.add_argument(
         "--algorithm", default=ERROR_ALGORITHM, help=f"the algorithm (default {ERROR_ALGORITHM})"
     )
+    sub.add_parser(
+        "error-holdout",
+        help="print turing's four pre-registered hypotheses of #431's report judged on the fixed holdout"
+        " (#447): the first 10 trading days after 2026-10-30; reads only, writes nothing, no price",
+    )
     hit_rates_cmd = sub.add_parser(
         "nightly-hit-rates",
         help="print the champion's and the challenger's hit rates the nightly reports carry beside the"
@@ -1283,6 +1295,8 @@ def _command(args: argparse.Namespace) -> int:
         return _signal_review(args.days)
     elif args.command == "error-breakdown":
         return _error_breakdown(args.days, args.algorithm)
+    elif args.command == "error-holdout":
+        return _error_holdout()
     elif args.command == "nightly-hit-rates":
         return _nightly_hit_rates(args.nights)
     elif args.command == "structure-check":

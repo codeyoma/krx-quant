@@ -134,16 +134,17 @@ def read(conn: sqlite3.Connection, settings: Settings, until: date, days: int, a
     chosen = sorted(days_with_predictions(conn, until, days))
     if not chosen:
         return Period([], [], [], {})
-    scored = _scored(conn, chosen, settings.target_version, algorithm)
-    return Period(chosen, scored.get(algorithm, []), scored.get(CLIMATE, []), _sigmas(conn, chosen))
+    scored = read_scored(conn, chosen, settings.target_version, algorithm)
+    return Period(chosen, scored.get(algorithm, []), scored.get(CLIMATE, []), read_sigmas(conn, chosen))
 
 
-def _scored(
+def read_scored(
     conn: sqlite3.Connection, days: Sequence[date], target_version: int, algorithm: str
 ) -> dict[str, list[Scored]]:
     """``algorithm``'s and the climate baseline's scored predictions on ``days`` as the leaderboard
-    reads them (special ones left out; an algorithm's by models of the engine's target only), a
-    day at a time, as ``signal_review`` reads them."""
+    reads them (special ones left out; an algorithm's by models of ``target_version`` only: the
+    engine's here, the pre-registered one in the holdout, ``holdout.py``), a day at a time, as
+    ``signal_review`` reads them."""
     baselines = {b.name for b in baselines_for(target_version)} | set(NAMES)
     wanted = {algorithm, CLIMATE}
     out: dict[str, list[Scored]] = {}
@@ -156,7 +157,7 @@ def _scored(
     return out
 
 
-def _sigmas(conn: sqlite3.Connection, days: Sequence[date]) -> dict[Key, float]:
+def read_sigmas(conn: sqlite3.Connection, days: Sequence[date]) -> dict[Key, float]:
     """σ̂₄ at each bar close of ``days`` the barrier answered with one, in basis points of its
     mid-point (σ̂₄ ticks × the tick ÷ the mid-point): in basis points, not ticks, as
     ``PredictionStore.barrier_widths``, because a tick changes size at band edges."""
