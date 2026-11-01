@@ -1790,7 +1790,7 @@ PASSIVE_ENTRY = Job(
     ),
 )
 
-# The hit rates beside the nightly swap (#437): from the deploy that brings it, each nightly report
+# The hit rates beside the nightly swap (#437): from the deploy that brings it (#446), each nightly report
 # that compares the two models also has their hit rates on the same bar closes, what a hit-rate-first
 # rule would have chosen and whether the log loss promoted a model whose hit rate fell
 # (``nightly_hit_rates``); the swap rule stays the mean log loss. Once ``HIT_RATE_NIGHTS`` (10)
