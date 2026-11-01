@@ -2144,6 +2144,35 @@ ERROR_HOLDOUT = Job(
     ),
 )
 
+# A regime gate on the same holdout (#449): at a bar close in σ̂₄'s lowest tercile or in the 12:00 or
+# 12:30 slot it takes the climate baseline's prediction, elsewhere turing's (``climate_gate.py``),
+# compared with both on #447's window. On the nights #447's job runs (``_holdout_full``), after it:
+# it reads the same days read-only the same way, so the hour is as loose a bound. Its output holds
+# counts, ratios and lifts: no price, market value or σ̂₄ cut.
+GATE_ISSUE = 449
+
+CLIMATE_GATE = Job(
+    name="climate-gate-449",
+    due=_holdout_full,
+    command=("climate-gate",),
+    timeout=timedelta(hours=1),
+    targets=(
+        Target(
+            GATE_ISSUE,
+            note=(
+                "이 이슈 본문에 고정한 국면 문(봉 마감이 σ̂₄ 하위 삼분위이거나 12:00·12:30 칸이면 기후 "
+                "기준, 아니면 turing)을 #447과 같은 고정 창 10거래일에서 turing, 기후와 같은 봉 마감으로 잰 "
+                "결과다. 에이전트가 이 출력을 #447(가설 판정), #448(사전 확률 실험)과 엮어 이 이슈에 댓글로 "
+                "정리하고 `ready-for-human`으로 돌린다. 문이 turing보다 낫다는 것은 turing 대비 거래일 95% "
+                "하한 > 0(`섰다`)일 때만이다. 엔진에는 넣지 않는다. 결과를 보고 사용자가 정한다. 문, 창, "
+                "σ̂₄ 경계, 구간은 결과를 보고 바꾸지 않는다. 다시 돌리기(읽기만): "
+                "`docker compose run --rm engine climate-gate`. 출력에는 가격과 시세 값이 없다"
+                "(개수, 비율, lift만)."
+            ),
+        ),
+    ),
+)
+
 # ⑤ The pre-validations (#204): a new algorithm runs live once its pre-validation has passed
 # (``prevalidation.py``). Once ``MIN_DAYS`` trading days are recorded, one waiting algorithm
 # is pre-validated a night, at most (``prevalidation_tonight``): a run replays 20 days beside
@@ -2609,6 +2638,7 @@ JOBS: tuple[Job, ...] = (
     LIVE_PROBE,
     ERROR_BREAKDOWN,
     ERROR_HOLDOUT,
+    CLIMATE_GATE,
     PASSIVE_ENTRY,
     COST_MAP_AUDIT,
     NIGHTLY_HIT_RATES,

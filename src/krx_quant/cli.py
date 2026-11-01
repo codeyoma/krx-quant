@@ -26,6 +26,7 @@ from krx_quant.algorithms import ALGORITHMS, KIND_ALGORITHMS, RegistrationError
 from krx_quant.archive import run_archive
 from krx_quant.backfill import run_backfill
 from krx_quant.candle_probe import probe_candles
+from krx_quant.climate_gate import climate_gate
 from krx_quant.climate_prior import REPORT as CLIMATE_PRIOR_REPORT
 from krx_quant.climate_prior import climate_prior_experiment
 from krx_quant.climate_prior import lines as climate_prior_lines
@@ -683,6 +684,12 @@ def _error_holdout() -> int:
     return 0
 
 
+def _climate_gate() -> int:
+    settings = Settings.from_env(require_kis=False)
+    print(climate_gate(settings.state_dir / DB_NAME))
+    return 0
+
+
 def _nightly_hit_rates(nights: int) -> int:
     """The hit rates beside the nightly swap over the latest ``nights`` nights (#437); exit 1 without
     the store or a night that carries them."""
@@ -1112,6 +1119,11 @@ def main(argv: list[str] | None = None) -> int:
         help="print turing's four pre-registered hypotheses of #431's report judged on the fixed holdout"
         " (#447): the first 10 trading days after 2026-10-30; reads only, writes nothing, no price",
     )
+    sub.add_parser(
+        "climate-gate",
+        help="print the gate that takes baseline-climate's prediction when quiet or at lunch and turing's"
+        " elsewhere, against both, on #447's holdout (#449); reads only, writes nothing, no price",
+    )
     hit_rates_cmd = sub.add_parser(
         "nightly-hit-rates",
         help="print the champion's and the challenger's hit rates the nightly reports carry beside the"
@@ -1297,6 +1309,8 @@ def _command(args: argparse.Namespace) -> int:
         return _error_breakdown(args.days, args.algorithm)
     elif args.command == "error-holdout":
         return _error_holdout()
+    elif args.command == "climate-gate":
+        return _climate_gate()
     elif args.command == "nightly-hit-rates":
         return _nightly_hit_rates(args.nights)
     elif args.command == "structure-check":

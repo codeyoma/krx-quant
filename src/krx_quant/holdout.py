@@ -36,8 +36,8 @@ without writing to it (``predictions.read_only``): turing's and the climate base
 predictions a day at a time (``error_breakdown.read_scored``) and σ̂₄ (``read_sigmas``). No price,
 market value or σ̂₄ cut is printed.
 
-#449 (a gate arm) is to reuse the window, the cuts and the verdict: ``read_holdout``,
-``Holdout.tercile`` and ``judge``.
+#449's regime gate (``climate_gate.py``) reuses the window, the cuts and the verdict:
+``read_holdout``, ``Holdout.tercile`` and ``judge``.
 """
 
 from __future__ import annotations
