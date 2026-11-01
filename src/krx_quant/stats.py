@@ -256,15 +256,22 @@ def wilson(successes: int, n: int) -> Interval | None:
     return Interval(p, max(0.0, center - half), min(1.0, center + half), n)
 
 
-def mean_interval(values: Sequence[float]) -> Interval | None:
+def mean_interval(values: Sequence[float], level: float = 0.95) -> Interval | None:
+    """The mean of ``values`` with a two-sided ``level`` normal interval."""
     n = len(values)
     if n == 0:
         return None
     mean = sum(values) / n
     if n == 1:
         return Interval(mean, None, None, 1)
-    half = _Z * _standard_error(values, mean)
+    half = _z(level) * _standard_error(values, mean)
     return Interval(mean, mean - half, mean + half, n)
+
+
+@cache
+def _z(level: float) -> float:
+    """The normal quantile of a two-sided ``level`` interval."""
+    return NormalDist().inv_cdf(1 - (1 - level) / 2)
 
 
 def _standard_error(values: Sequence[float], mean: float) -> float:
@@ -371,10 +378,11 @@ def _gains(records: Sequence[Paired], baseline: Sequence[Paired]) -> Iterator[tu
     )
 
 
-def lift(records: Sequence[Paired], baseline: Sequence[Paired]) -> Lift:
-    """Accuracy gained over ``baseline`` on the bar closes both predicted."""
+def lift(records: Sequence[Paired], baseline: Sequence[Paired], level: float = 0.95) -> Lift:
+    """Accuracy gained over ``baseline`` on the bar closes both predicted, with a two-sided
+    ``level`` normal interval (the pairs counted as independent)."""
     gains = [gain for _, gain in _gains(records, baseline)]
-    interval = mean_interval(gains)
+    interval = mean_interval(gains, level)
     if interval is None:
         return Lift(0, None, None, None, None)
     if interval.n < MIN_PAIRS_TESTED:
