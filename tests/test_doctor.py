@@ -156,6 +156,17 @@ def write_jobs(state_dir: Path) -> None:
                 "timed_out": False,
                 "comments": {},
             },
+            "prevalidate-poisson": {  # a refusal: its exit code 1 is the verdict (#440)
+                "day": "2026-10-18",
+                "outcome": "failed",
+                "started_at": "2026-10-18T22:30:00+09:00",
+                "commit": COMMIT,
+                "exit_code": 1,
+                "seconds": 3600.0,
+                "timed_out": False,
+                "comments": {},
+                "verdict": "refused",
+            },
         },
         "unposted": [
             {"job": JOBS[1].name, "day": "2026-10-19", "issue": 206, "body": "b", "label": [], "unlabel": []}
@@ -219,7 +230,8 @@ def test_the_summary_has_its_nine_parts_with_the_fields_as_the_api_names_them(tm
     assert lines[first].startswith(f"    {JOBS[1].name} · 2026-10-19 밤 · failed · 종료 코드 1")
     assert lines[second].startswith(f"    {JOBS[0].name} · 2026-10-16 밤 · ok · 종료 코드 0 · 1분 12초")
     assert lines[second].endswith("댓글 #203")
-    assert f"끝까지 돈 적 없는 작업 {len(JOBS) - 2}개: {JOBS[2].name}" in text
+    assert "    prevalidate-poisson · 2026-10-18 밤 · failed · 판정 refused · 종료 코드 1 · 1시간" in text
+    assert f"끝까지 돈 적 없는 작업 {len(JOBS) - 3}개: {JOBS[2].name}" in text
     assert f"{JOBS[1].name} (2026-10-19 밤) → #206" in text
     assert "6. 디스크와 메모리" in text and "데이터 " in text
     # The nightly training (#355): nothing kept yet here.

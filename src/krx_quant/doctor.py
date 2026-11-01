@@ -585,8 +585,10 @@ def _jobs(settings: Settings, *, known: bool = True) -> list[str]:
         for name, r in latest[:LAST_RUNS]:
             code = "없음" if r.get("exit_code") is None else r.get("exit_code")
             comments = " ".join(f"#{n}" for n in sorted(r.get("comments") or {}, key=str))
+            # A pre-validation's verdict (#440): a refusal is ``failed`` with exit code 1, as an error is.
+            verdict = f" · 판정 {r['verdict']}" if r.get("verdict") else ""
             line = (
-                f"    {name} · {r.get('day')} 밤 · {r.get('outcome')} · 종료 코드 {code} · "
+                f"    {name} · {r.get('day')} 밤 · {r.get('outcome')}{verdict} · 종료 코드 {code} · "
                 f"{_span(r.get('seconds'))} · commit {str(r.get('commit', ''))[:12]}"
             )
             if r.get("timed_out"):
