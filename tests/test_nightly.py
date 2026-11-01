@@ -55,7 +55,7 @@ from krx_quant.recorder import ParquetRecorder
 from krx_quant.swap import morning_swap, publish_live
 from krx_quant.touch import TARGET_VERSION
 from krx_quant.training import TrainingDay, training_day
-from tests.algorithm_doubles import FrequencyAlgorithm
+from tests.algorithm_doubles import FrequencyAlgorithm, PlacedAlgorithm
 from tests.api_schema import check
 from tests.replay_events import api, at, book, every, get_json, index_tick, trade
 from tests.synthetic_bars import trending
@@ -158,6 +158,24 @@ def test_a_model_that_learned_is_promoted_and_one_that_did_not_is_not(
     assert report["promoted"] is True
     lost = read(store_root, f"reports/{NIGHT}/backwards.json")
     assert lost["promoted"] is False and lost["challenger"]["loss"] > lost["champion"]["loss"]
+
+
+def test_a_context_aware_algorithm_is_validated_with_each_sample_s_symbol_and_bar_close(
+    store_root: Path, tmp_path: Path
+) -> None:
+    # #429: the night asks as the engine does (``contract.forecast_of``), the challenger then the champion.
+    placed = PlacedAlgorithm("placed", features=("velocity",), unique=("velocity",))
+
+    night(store_root, tmp_path, [placed])
+
+    report = read(store_root, f"reports/{NIGHT}/placed.json")
+    validated = report["samples"]["validation"]
+    assert validated > 0 and len(placed.contexts) == 2 * validated
+    challenger, champion = placed.contexts[:validated], placed.contexts[validated:]
+    assert challenger == champion
+    assert {c.symbol for c in challenger} == {"005930"}
+    assert sorted({c.bar_close.date() for c in challenger}) == DAYS[-VALIDATION_DAYS:]
+    assert len({c.bar_close for c in challenger}) == validated, "each sample's own bar close"
 
 
 def test_the_champion_is_the_model_the_server_runs(store_root: Path, tmp_path: Path) -> None:

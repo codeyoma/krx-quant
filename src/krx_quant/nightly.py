@@ -96,7 +96,7 @@ from krx_quant.algorithms import (
     KindAlgorithm,
     Model,
 )
-from krx_quant.algorithms.contract import KindSample, Sample, kind_predicted, predicted
+from krx_quant.algorithms.contract import KindSample, PredictionContext, Sample, kind_predicted, predicted
 from krx_quant.algorithms.forecasts import LOSS_FLOOR, forecasting, log_loss
 from krx_quant.backfill import MINUTE_BARS_TR, bars_key
 from krx_quant.climate import CLIMATE, CLIMATE_DAYS, fit_climate
@@ -969,13 +969,14 @@ def _every(days_of: dict[str, set[date]], day: date) -> bool:
 
 def _losses(algorithm: Algorithm, model: Model, samples: Sequence[Sample]) -> list[tuple[Sample, float, str]]:
     """``model``'s log loss on each sample with an outcome that it predicts, and the class it
-    called there (its most likely, #437)."""
+    called there (its most likely, #437). A context-aware algorithm (#429) is given the sample's
+    symbol and bar close, as the engine gives them."""
     out = []
     for s in samples:
         if s.outcome is None:
             continue
         with forecasting(s.features):  # of the target the sample was labelled with (#169)
-            f = predicted(algorithm, s.features, model)
+            f = predicted(algorithm, s.features, model, PredictionContext(s.symbol, s.bar_close))
         if f is not None:
             out.append((s, log_loss(f, s.outcome), most_likely(f.p_up, f.p_flat, f.p_down).value))
     return out

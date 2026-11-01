@@ -1,11 +1,11 @@
 """The climate prior experiment (#429): shannon's regression with each symbol and slot's class
-frequencies as two inputs more, against shannon as it is and the climate baseline, on the folds of
-shannon's pre-validation.
+frequencies as two inputs more, against shannon as it was before and the climate baseline, on the
+folds of shannon's pre-validation. Since #429's adoption (c) is shannon itself; the prior's helpers
+are ``algorithms/priors.py``'s (``tests/test_priors.py``), and shannon's prior ``tests/test_shannon.py``'s.
 
 Input: made-up samples whose labels follow the time of day, and recorded days whose first half hour
 swings both ways (each four minutes reach both targets: up) while the rest stands still. Output: the
-prior each training sample and each fold's model are given, the models, the experiment's report and
-lines, and the scheduled job.
+arms' models, the experiment's report and lines, and the scheduled job.
 """
 
 from __future__ import annotations
@@ -13,28 +13,19 @@ from __future__ import annotations
 import json
 import math
 import re
-from datetime import date, datetime, time, timedelta
+from dataclasses import replace
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import numpy as np
 import pytest
 
 from krx_quant import climate_prior
-from krx_quant.algorithms import Abstention, Model, NothingToLearn, NotPredicted, Sample
-from krx_quant.algorithms.shannon import INPUTS, Shannon
+from krx_quant.algorithms import Abstention, NothingToLearn, NotPredicted
+from krx_quant.algorithms.priors import PriorTally
+from krx_quant.algorithms.shannon import INPUTS, Shannon, default_params, regression
 from krx_quant.cli import main
-from krx_quant.climate_prior import (
-    PRIOR_INPUTS,
-    PRIOR_STRENGTH,
-    PriorTally,
-    ShannonPrior,
-    climate_prior_experiment,
-    lines,
-    prior_inputs,
-    prior_of,
-    regression,
-    training_priors,
-)
+from krx_quant.climate_prior import ShannonAlone, ShannonPrior, climate_prior_experiment, lines
 from krx_quant.config import Settings
 from krx_quant.engine import Event
 from krx_quant.features import Leaders
@@ -49,116 +40,52 @@ from krx_quant.training import finished_days
 from tests.replay_events import at, book, trade
 from tests.test_prevalidation import AFTER, DAYS
 from tests.test_replay_cli import record
-from tests.test_shannon import inputs, on_days
+from tests.test_shannon import a_day, inputs, on_days
 
 UP, FLAT, DOWN = Direction.UP, Direction.FLAT, Direction.DOWN
 D1, D2, D3 = DAYS[:3]
-VARIANT = ShannonPrior()
 
 
-def sample(day: date, hhmm: str, outcome: Direction | None, symbol: str = "005930") -> Sample:
-    """A bar close whose inputs say nothing (every one the same)."""
-    return Sample(
-        symbol, datetime.combine(day, time.fromisoformat(hhmm), KST), inputs(ofi_1=0.5), outcome, 0.0
-    )
-
-
-def a_day(day: date, opening: Direction = UP) -> list[Sample]:
-    """Ten bar closes from 09:01 labelled ``opening``, ten from 10:01 flat."""
-    return [sample(day, f"09:{m:02d}", opening) for m in range(1, 11)] + [
-        sample(day, f"10:{m:02d}", FLAT) for m in range(1, 11)
-    ]
-
-
-def test_a_training_sample_s_prior_counts_only_the_window_s_days_before_its_own() -> None:
+def test_c_is_shannon_now_under_the_experiment_s_name() -> None:
     window = [*a_day(D1), *a_day(D2), *a_day(D3)]
 
-    priors = training_priors(window, window)
+    ours, theirs = ShannonPrior().fit(window), Shannon().fit(window)
 
-    assert priors[:20] == [(0.0, 0.0)] * 20, "the window's first day: nothing before it, the even split"
-    # After the first day: the symbol's day 10 up, 10 flat, 0 down, with 30 pseudo-counts split evenly;
-    # its 09:00 slot 10 up, with 30 in the day's frequencies.
-    day = ((10 + 10) / 50, (10 + 10) / 50, 10 / 50)
-    opening = (
-        (10 + PRIOR_STRENGTH * day[0]) / (10 + PRIOR_STRENGTH),
-        PRIOR_STRENGTH * day[1] / (10 + PRIOR_STRENGTH),
-        PRIOR_STRENGTH * day[2] / (10 + PRIOR_STRENGTH),
-    )
-    assert opening == pytest.approx((0.55, 0.3, 0.15))
-    assert priors[20] == pytest.approx(prior_inputs(opening)), "09:01 on the second day: the first day's"
-    assert priors[20][0] > 0 > priors[30][0], "up likelier than flat at the open, not at 10:00"
-    # A sample's own day's labels and the later days' never reach it.
-    turned = [*a_day(D1), *a_day(D2, DOWN), *a_day(D3, DOWN)]
-    assert training_priors(turned, turned)[:40] == priors[:40]
-    assert training_priors(turned, turned)[40:] != priors[40:], "the third day counts the second's"
-    # Nor do days outside the window: only what it is given is counted.
-    assert training_priors(window[20:], window[20:])[:20] == [(0.0, 0.0)] * 20
+    assert ours.params == theirs.params
+    assert ours.version.startswith("shannon-prior-20260916-")
+    assert ours.version.removeprefix("shannon-prior-") == theirs.version.removeprefix("shannon-")
+    assert ShannonPrior().default_model().version == "shannon-prior-default"
 
 
-def test_trained_on_a_single_day_it_learns_nothing_from_the_prior_of_that_day_s_own_labels() -> None:
-    # The labels follow the slot alone: a prior that counted the day's own labels would tell them
-    # all. Counted on the days before (none), it is the even split everywhere, and stays unweighted.
-    model = VARIANT.fit(a_day(D1))
-
-    assert [model.params[f"w.{c}.{f}"] for c in ("up", "flat", "down") for f in PRIOR_INPUTS] == [0.0] * 6
-    assert model.params["prior.005930.09:00.up"] > 0.5, "the day is kept for the day after it"
-
-
-def test_the_model_keeps_its_window_s_prior_and_predicts_with_it_alone() -> None:
-    window = [*a_day(D1), *a_day(D2), *a_day(D3)]
-    tally = PriorTally()
-    tally.add(window)
-
-    model = VARIANT.fit(window)
-
-    kept = {k: v for k, v in model.params.items() if k.startswith("prior.")}
-    assert kept == tally.table(), "every day of the window, in the model's own parameters"
-    assert model.version.startswith("shannon-prior-20260916-")
-    later = date(2026, 9, 17)
-    opening, ten = sample(later, "09:05", None), sample(later, "10:05", None)
-    at_open = VARIANT.predict(opening.features, model, opening.symbol, opening.bar_close)
-    at_ten = VARIANT.predict(ten.features, model, ten.symbol, ten.bar_close)
-    assert at_open.p_up > at_open.p_flat and at_ten.p_flat > at_ten.p_up, "the same inputs, the slot tells"
-    stored = Model.from_json(model.to_json())
-    assert VARIANT.predict(opening.features, stored, opening.symbol, opening.bar_close) == at_open
-    # The prior is read from the model, nowhere else: the 10:00 slot's row in place of the open's.
-    moved = {k: kept[k.replace("09:00", "10:00")] for k in kept if ".09:00." in k}
-    swapped = Model(model.version, {**model.params, **moved})
-    assert VARIANT.predict(opening.features, swapped, opening.symbol, opening.bar_close) == pytest.approx(
-        at_ten
-    )
-    # A slot never seen takes its symbol's day; a symbol never seen, the even split.
-    afternoon = datetime.combine(later, time(13, 5), KST)
-    assert prior_of(model.params, "005930", afternoon) == tuple(
-        kept[f"prior.005930.all.{c}"] for c in "up flat down".split()
-    )
-    assert prior_of(model.params, "000660", afternoon) == (1 / 3, 1 / 3, 1 / 3)
-
-
-def test_without_the_book_or_a_label_it_learns_nothing_and_predicts_as_shannon_does() -> None:
-    no_book = [Sample(s.symbol, s.bar_close, inputs(depth_imbalance=None), s.outcome, 0.0) for s in a_day(D1)]
-    with pytest.raises(NothingToLearn, match="with the book"):
-        VARIANT.fit(no_book)
-    with pytest.raises(NotPredicted) as declined:
-        VARIANT.predict(no_book[0].features, VARIANT.default_model(), "005930", no_book[0].bar_close)
-    assert declined.value.why is Abstention.NO_BOOK
-    s = a_day(D1)[0]
-    default = VARIANT.predict(s.features, VARIANT.default_model(), s.symbol, s.bar_close)
-    assert default == Shannon().predict(s.features, Shannon().default_model()), "every class as likely"
-
-
-def test_on_shannon_s_inputs_alone_its_regression_is_shannon_s() -> None:
+def test_b_is_shannon_before_the_prior_its_regression_on_its_eight_inputs_alone() -> None:
     # 240 samples on four days: the penalty is validated on the last two.
     scored = sorted(on_days([100, 100, 20, 20]), key=lambda s: (s.bar_close, s.symbol))
     raw = np.array([[np.nan if s.features[f] is None else s.features[f] for f in INPUTS] for s in scored])
     y = np.array([[float(s.outcome is c) for c in (UP, FLAT, DOWN)] for s in scored])
 
-    ours = regression(raw, y, [kst_day(s.bar_close) for s in scored], INPUTS)
+    model = ShannonAlone().fit(scored)
 
-    theirs = Shannon().fit(scored).params
+    assert model.version.startswith("shannon-20260904-")
+    assert model.params.keys() == default_params(INPUTS).keys(), "no prior, no prior's input"
+    ours = regression(raw, y, [kst_day(s.bar_close) for s in scored], INPUTS)
     assert ours["validation_days"] == 2.0
-    assert ours == pytest.approx({k: theirs[k] for k in ours}, abs=1e-12)
-    assert set(theirs) - set(ours) == {"move.up", "move.flat", "move.down"}
+    assert {k: model.params[k] for k in ours} == ours
+    assert set(model.params) - set(ours) == {"move.up", "move.flat", "move.down"}
+    with pytest.raises(NothingToLearn, match="with the book"):
+        ShannonAlone().fit([replace(s, features=inputs(depth_imbalance=None)) for s in scored])
+    with pytest.raises(NotPredicted) as declined:
+        ShannonAlone().predict(inputs(depth_imbalance=None), model)
+    assert declined.value.why is Abstention.NO_BOOK
+
+
+def test_where_the_prior_says_nothing_shannon_is_b() -> None:
+    # One day: no day before any sample, the even split everywhere; the prior's inputs never vary.
+    one_day = on_days([150])
+
+    alone, shannon = ShannonAlone().fit(one_day), Shannon().fit(one_day)
+
+    assert {k: shannon.params[k] for k in alone.params} == alone.params
+    assert all(v == 0 for k, v in shannon.params.items() if k.startswith("w.") and "climate" in k)
 
 
 def mornings(day: date) -> list[Event]:

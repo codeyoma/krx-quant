@@ -215,8 +215,9 @@ def _record_run(state_dir: Path, result: Prevalidation) -> None:
 
 def code_digest(algorithm: Algorithm | KindAlgorithm | DailyAlgorithm) -> str:
     """A digest of the algorithm's own code: its module, or every module of its package; then, for
-    one that runs another algorithm's code (``code_from``: those algorithms' classes, #310:
-    ``cox-5d`` fits as ``cox`` does), that code too, so a change to it asks for a new verdict."""
+    one that runs code from elsewhere (``code_from``: a class of each, whose module or package is
+    digested: #310, ``cox-5d`` fits as ``cox`` does; #429, shannon's climate prior is
+    ``algorithms/priors.py``'s), that code too, so a change to it asks for a new verdict."""
     digest = hashlib.sha256()
     _digest_code(digest, type(algorithm), algorithm.name)
     for shared in getattr(type(algorithm), "code_from", ()):

@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from krx_quant.algorithms import Model
+from krx_quant.algorithms import Model, PredictionContext
 from krx_quant.algorithms.granger import DEFAULT_PARAMS as GRANGER_DEFAULTS
 from krx_quant.barriers import BARRIER
 from krx_quant.baselines import Forecast
@@ -23,7 +23,7 @@ from krx_quant.engine import Budget, Event
 from krx_quant.features import FEATURES, FeatureStore, Leaders, Snapshot, Value
 from krx_quant.feeds import USD_FUTURES
 from krx_quant.touch import TARGET_VERSION
-from tests.algorithm_doubles import FixedAlgorithm
+from tests.algorithm_doubles import FixedAlgorithm, PlacedAlgorithm
 from tests.replay_events import (
     SYMBOL,
     api,
@@ -60,6 +60,19 @@ async def test_newton_predicts_and_is_scored_under_its_model_version(tmp_path: P
     assert all(p["outcome"]["class_a"] for p in scored[:-20])
     # Once there are enough bars to see a trend, Newton commits to a move.
     assert any(p["expected_ticks"] != 0 for p in newton)
+
+
+async def test_a_context_aware_algorithm_is_given_each_symbol_and_bar_close(tmp_path: Path) -> None:
+    # #429: the engine asks every algorithm through one dispatcher (``forecast_of``).
+    placed = PlacedAlgorithm("placed", features=("velocity",), unique=("velocity",))
+
+    engine = await run(tmp_path / "engine.db", busy_morning(), until=at("09:10:00"), algorithms=[placed])
+
+    closes = [at(f"09:{m:02d}:00") for m in range(1, 11)]
+    assert placed.contexts == [PredictionContext(SYMBOL, close) for close in closes]
+    stored = await predictions_of(engine, "placed")
+    assert sorted(p["bar_close"] for p in stored) == [c.isoformat() for c in closes]
+    assert {p["status"] for p in stored} == {"ok"}
 
 
 async def test_gauss_predicts_and_is_scored_under_its_model_version(tmp_path: Path) -> None:

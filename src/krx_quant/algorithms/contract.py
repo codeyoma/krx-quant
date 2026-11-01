@@ -11,6 +11,15 @@
   it needs is missing at the bar close, ``NotPredicted`` with why (stored as the
   prediction's status, unscored).
 
+A direction algorithm may predict with where it is asked besides the features (#429,
+``ContextAware``): ``predict_with_context`` is given the symbol and the bar close
+(``PredictionContext``), never a feature, so what it reads there is its model's (Shannon's
+climate prior, ``priors.py``), not the shared Feature Store's. Every forecast is asked for
+through one dispatcher (``forecast_of``): the engine's at each bar close (so the replays of
+pre-validation and simulated probation too), the nightly validation's (``predicted``). It
+picks the path by the capability, and a context-aware algorithm asked without a context fails
+(``MissingContext``); an algorithm without it keeps ``predict`` and never sees a context.
+
 Algorithms never see each other's output; only the consensus combines them.
 
 An algorithm predicts one kind (#179, ``kinds.py``): ``kind``, the direction when it does
@@ -29,7 +38,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 from krx_quant.baselines import Forecast
 from krx_quant.cards import Card, Meaning
@@ -256,6 +265,43 @@ class Algorithm(Protocol):
     def predict(self, features: FeatureVector, model: Model) -> Forecast: ...
 
 
+@dataclass(frozen=True)
+class PredictionContext:
+    """Where a forecast is asked for (#429): the symbol, at the close of the bar it is made at.
+    What a context-aware algorithm (``ContextAware``) is given besides the features."""
+
+    symbol: str
+    bar_close: datetime
+
+
+class MissingContext(RuntimeError):
+    """A context-aware algorithm asked for a forecast without its context (``PredictionContext``):
+    a defect of the caller, never a gap in the data."""
+
+
+@runtime_checkable
+class ContextAware(Protocol):
+    """A direction algorithm that predicts with its context too (#429, module doc): the symbol
+    and the bar close. Its ``predict`` raises ``MissingContext``."""
+
+    def predict_with_context(
+        self, features: FeatureVector, model: Model, context: PredictionContext
+    ) -> Forecast: ...
+
+
+def forecast_of(
+    algorithm: Algorithm, features: FeatureVector, model: Model, context: PredictionContext | None
+) -> Forecast:
+    """``algorithm``'s forecast (module doc): with ``context`` when it predicts with one
+    (``ContextAware``), else from the features and the model alone. Raises ``NotPredicted`` as
+    the algorithm does, and ``MissingContext`` for a context-aware algorithm without ``context``."""
+    if isinstance(algorithm, ContextAware):
+        if context is None:
+            raise MissingContext(f"{algorithm.name} predicts with the symbol and the bar close: none given")
+        return algorithm.predict_with_context(features, model, context)
+    return algorithm.predict(features, model)
+
+
 class Diagnostics(Protocol):
     """What a direction algorithm's pre-validation report measures besides its checks (#283),
     when the algorithm offers it (``diagnostics()``, as Neyman does): reported, never judged.
@@ -304,10 +350,13 @@ def kind_of(algorithm: Algorithm | KindAlgorithm) -> str:
     return str(getattr(algorithm, "kind", DIRECTION))
 
 
-def predicted(algorithm: Algorithm, features: FeatureVector, model: Model) -> Forecast | None:
-    """``algorithm``'s forecast, or None where it does not predict (``NotPredicted``)."""
+def predicted(
+    algorithm: Algorithm, features: FeatureVector, model: Model, context: PredictionContext | None
+) -> Forecast | None:
+    """``algorithm``'s forecast (``forecast_of``), or None where it does not predict
+    (``NotPredicted``)."""
     try:
-        return algorithm.predict(features, model)
+        return forecast_of(algorithm, features, model, context)
     except NotPredicted:
         return None
 

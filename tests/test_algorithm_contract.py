@@ -5,7 +5,9 @@
 - every parameter its model can hold, and every registered feature, has a meaning (#164);
 - it reads only the features it declared;
 - its probabilities are each in [0, 1] and add up to 1, whatever the features, unless it
-  declines the symbol with a reason (``NotPredicted``: the book missing);
+  declines the symbol with a reason (``NotPredicted``: the book missing), asked as the engine
+  asks (``forecast_of``: a context-aware algorithm, #429, is given the symbol and the bar close;
+  without them it fails, ``MissingContext``);
 - training gives a new, versioned model that survives being saved: on backfilled bars, or
   on recorded days for an algorithm that reads the book or the trades' sides.
 
@@ -18,7 +20,7 @@ from __future__ import annotations
 
 import math
 import time
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 import pytest
@@ -28,10 +30,14 @@ from krx_quant.algorithms import (
     KIND_ALGORITHMS,
     Abstention,
     Algorithm,
+    ContextAware,
     KindAlgorithm,
     KindSample,
     Meaning,
+    MissingContext,
     NotPredicted,
+    PredictionContext,
+    forecast_of,
     load_models,
     predicted,
     save_model,
@@ -49,16 +55,19 @@ from krx_quant.features import (
     UndeclaredFeature,
     Value,
 )
+from krx_quant.feeds import KST
 from krx_quant.kind_registry import kind_named
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.training import bar_answers, recorded_samples, samples
-from tests.algorithm_doubles import FixedAlgorithm
+from tests.algorithm_doubles import CAUTIOUS, FixedAlgorithm, PlacedAlgorithm
 from tests.replay_events import with_sides
 from tests.synthetic_bars import random_walk, trending
 from tests.test_replay import busy_morning
 
 FEE = 0.015 / 100
 DAYS = [date(2026, 9, 21), date(2026, 9, 22)]
+# Where the engine asks for a forecast: a symbol, at a bar close.
+CONTEXT = PredictionContext("005930", datetime(2026, 9, 23, 9, 5, tzinfo=KST))
 
 
 def given(default: float | None, **values: float | None) -> dict[str, Value]:
@@ -149,7 +158,7 @@ def test_probabilities_are_a_distribution_from_declared_features_only(
     features = FeatureVector(SCENARIOS[scenario], algorithm.features)  # reading any other raises
 
     try:
-        forecast = algorithm.predict(features, algorithm.default_model())
+        forecast = forecast_of(algorithm, features, algorithm.default_model(), CONTEXT)
     except NotPredicted as declined:
         assert isinstance(declined.why, Abstention)
         assert set(algorithm.features) & BOOK_FEATURES, "only for missing data an algorithm reads"
@@ -187,12 +196,14 @@ def test_training_gives_a_new_versioned_model_that_can_be_saved(algorithm: Algor
 
     default = algorithm.default_model()
     assert model.version != default.version
-    assert model.params.keys() == default.params.keys()
-    assert set(model.params) <= set(algorithm.param_meanings), "every fitted parameter has a meaning"
+    assert model.params.keys() >= default.params.keys()
+    # Beside its defaults' a fitted model holds only a climate prior's table (#429, Shannon's).
+    assert all(k.startswith("prior.") for k in model.params.keys() - default.params.keys())
+    assert all(p in algorithm.param_meanings for p in model.params), "every fitted parameter has a meaning"
     save_model(tmp_path, algorithm.name, model)
     assert load_models(tmp_path, [algorithm])[algorithm.name] == model
     for sample in training[:50]:
-        predicted(algorithm, sample.features, model)
+        predicted(algorithm, sample.features, model, PredictionContext(sample.symbol, sample.bar_close))
 
 
 def test_predicting_takes_a_small_part_of_the_time_budget(algorithm: Algorithm) -> None:
@@ -203,8 +214,35 @@ def test_predicting_takes_a_small_part_of_the_time_budget(algorithm: Algorithm) 
     started = time.perf_counter()
     for _ in range(100):
         for features in vectors:
-            predicted(algorithm, features, model)
+            predicted(algorithm, features, model, CONTEXT)
     assert time.perf_counter() - started < 1.0
+
+
+def test_one_dispatcher_gives_a_context_to_the_algorithms_that_predict_with_one_only() -> None:
+    placed = PlacedAlgorithm("placed", features=("velocity",), unique=("velocity",))
+    plain = FixedAlgorithm("plain", features=("velocity",), unique=("velocity",))
+    features = FeatureVector(SCENARIOS["quiet"], ("velocity",))
+    model = plain.default_model()
+    assert isinstance(placed, ContextAware) and not isinstance(plain, ContextAware)
+
+    assert forecast_of(placed, features, model, CONTEXT) == CAUTIOUS
+    assert placed.contexts == [CONTEXT]
+    assert forecast_of(plain, features, model, CONTEXT) == CAUTIOUS, "its predict, as before #429"
+    assert forecast_of(plain, features, model, None) == CAUTIOUS
+    with pytest.raises(MissingContext, match="placed predicts with the symbol and the bar close: none given"):
+        forecast_of(placed, features, model, None)
+    with pytest.raises(MissingContext):
+        predicted(placed, features, model, None)
+    assert placed.contexts == [CONTEXT], "never asked without one"
+
+
+def test_shannon_predicts_with_its_context(algorithm: Algorithm) -> None:
+    # The registered algorithms that do (#429): shannon only, so far.
+    assert isinstance(algorithm, ContextAware) == (algorithm.name == "shannon")
+    if isinstance(algorithm, ContextAware):
+        features = FeatureVector(SCENARIOS["quiet"], algorithm.features)
+        with pytest.raises(MissingContext):
+            algorithm.predict(features, algorithm.default_model())
 
 
 def test_reading_an_undeclared_feature_breaks_the_contract() -> None:

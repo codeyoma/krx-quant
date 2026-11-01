@@ -8,7 +8,7 @@ import time
 import weakref
 from collections.abc import Mapping, Sequence
 
-from krx_quant.algorithms import Card, Meaning, Model, Sample
+from krx_quant.algorithms import Card, Meaning, MissingContext, Model, PredictionContext, Sample
 from krx_quant.baselines import Forecast
 from krx_quant.features import SERIES_FEATURES, FeatureVector, Value
 from krx_quant.pricing import Direction
@@ -110,6 +110,24 @@ class FixedAlgorithm:
         if self._seconds:
             spend(self._seconds)
         return self._forecast
+
+
+class PlacedAlgorithm(FixedAlgorithm):
+    """A context-aware ``FixedAlgorithm`` (#429, ``contract.ContextAware``): predicts its forecast
+    with the context it is given, kept in ``contexts``; without one, never."""
+
+    def __init__(self, name: str, *, features: tuple[str, ...], unique: tuple[str, ...]) -> None:
+        super().__init__(name, features=features, unique=unique)
+        self.contexts: list[PredictionContext] = []
+
+    def predict(self, features: FeatureVector, model: Model) -> Forecast:
+        raise MissingContext(f"{self.name} predicts with its context")
+
+    def predict_with_context(
+        self, features: FeatureVector, model: Model, context: PredictionContext
+    ) -> Forecast:
+        self.contexts.append(context)
+        return super().predict(features, model)
 
 
 class FrequencyAlgorithm:
