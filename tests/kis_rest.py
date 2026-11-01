@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator, Callable, Iterable
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 import aiohttp
 import pytest
+from aiohttp import web
 
 from krx_quant import auth
 from krx_quant.auth import tokens_and_client
@@ -23,6 +25,26 @@ Responder = Callable[[dict[str, str]], dict[str, Any]]
 HOLIDAYS = "CTCA0903R"
 MINUTE_BARS = "FHKST03010230"
 FUTURES_BARS = "FHKIF03020200"
+
+# KIS's refusals of the investor estimates (``HHPTJ04160200``) on the server, 41 calls on
+# 2026-10-31 (Loki, #441): OPSQ1002 with HTTP 200, and EGW00316 with HTTP 500.
+SESSION_FULL = {"rt_cd": "9", "msg_cd": "OPSQ1002", "msg1": "SESSION FULL"}
+QUERY_ERROR = {
+    "rt_cd": "1",
+    "msg_cd": "EGW00316",
+    "msg1": "조회 처리 중 오류 발생하였습니다. 재 조회 수행 부탁드립니다.",
+}
+
+
+def session_full() -> dict[str, Any]:
+    """KIS's OPSQ1002 answer, as a responder returns it (HTTP 200)."""
+    return dict(SESSION_FULL)
+
+
+def query_error() -> NoReturn:
+    """KIS's EGW00316 answer, as a responder raises it (HTTP 500)."""
+    raise web.HTTPInternalServerError(text=json.dumps(QUERY_ERROR), content_type="application/json")
+
 
 # KIS answers about 24 days per holiday query.
 _HOLIDAY_PAGE_DAYS = 24

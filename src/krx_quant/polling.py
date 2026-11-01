@@ -16,6 +16,7 @@ import aiohttp
 from krx_quant.feeds import RAW_SCHEMA, RestFeed
 from krx_quant.feeds.base import kst_day
 from krx_quant.kis import KisError, RestClient
+from krx_quant.poll_outages import PollOutages
 from krx_quant.recorder import ParquetRecorder
 
 log = logging.getLogger(__name__)
@@ -58,7 +59,8 @@ class Poller:
     """Runs poll jobs, including ones added while the collector is running.
 
     A failed call is logged and retried on the next interval (a dropped connection is first
-    asked again at once by the REST client).
+    asked again at once by the REST client). Each call's outcome is counted in ``outages``
+    (#441), which changes nothing in how calls are made.
     """
 
     def __init__(
@@ -70,6 +72,7 @@ class Poller:
         on_added: Callable[[tuple[str, str]], None] | None = None,
         on_received: Callable[[tuple[str, str]], None] | None = None,
         on_event: Callable[[str, dict[str, Any]], None] | None = None,
+        outages: PollOutages | None = None,
     ) -> None:
         self._client = client
         self._recorder = recorder
@@ -78,6 +81,7 @@ class Poller:
         self._on_added = on_added
         self._on_received = on_received
         self._on_event = on_event
+        self._outages = outages
         self._tasks: dict[tuple[str, str], asyncio.Task[None]] = {}
 
     def add(self, job: PollJob) -> None:
@@ -109,7 +113,11 @@ class Poller:
                     body = await client.get(job.feed.tr_id, job.feed.path, params)
                 except CALL_ERRORS as e:
                     log.warning("poll %s %s failed: %s", job.feed.tr_id, job.key, e)
+                    if self._outages is not None:
+                        self._outages.failed((job.feed.tr_id, job.key), e)
                 else:
+                    if self._outages is not None:
+                        self._outages.succeeded((job.feed.tr_id, job.key))
                     news = job.feed.news(body)
                     if job.first_is_baseline and last is _UNSEEN:
                         self._read_baseline(job, params, body, self._now(), day)

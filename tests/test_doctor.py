@@ -108,6 +108,7 @@ def status_body() -> dict[str, Any]:
                     "short_frames": 0,
                 },
             ],
+            "polls": [],
         },
     }
 
@@ -522,6 +523,69 @@ def test_section_2_counts_today_s_frames_short_of_fields_by_feed_and_key(tmp_pat
     assert f"{title}모른다(엔진의 /v1/status에 short_frames가 없다)" in lines
 
 
+def _poll(feed: str, key: str, attempts: int, errors: dict[str, int], **state: Any) -> dict[str, Any]:
+    """A ``kis.polls`` entry (#441): no outage going on unless ``state`` says so."""
+    return {
+        "feed": feed,
+        "key": key,
+        "attempts": attempts,
+        "failures": sum(errors.values()),
+        "errors": errors,
+        "outages": 0,
+        "consecutive_failures": 0,
+        "max_consecutive_failures": 0,
+        "outage_since": None,
+        "last_success_at": "2026-10-20T10:29:55+09:00",
+        "last_recovery_seconds": None,
+    } | state
+
+
+def test_section_2_sums_the_rest_polls_by_endpoint_and_error_code(tmp_path: Path) -> None:
+    title = "  REST 조회(오늘, 엔진 시작 뒤, #441): "
+    body = status_body()
+    lines = report(server(tmp_path), NOW, Status(body, "x")).splitlines()
+    assert f"{title}아직 없음" in lines
+
+    estimate = "HHPTJ04160200"
+    body["kis"]["polls"] = [
+        _poll(
+            estimate,
+            "005930",
+            75,
+            {"EGW00316": 9, "OPSQ1002": 7},
+            outages=9,
+            max_consecutive_failures=4,
+            last_success_at="2026-10-20T10:26:40+09:00",
+            last_recovery_seconds=301.2,
+        ),
+        _poll(
+            estimate,
+            "000660",
+            74,
+            {"OPSQ1002": 2},
+            outages=1,
+            consecutive_failures=2,
+            max_consecutive_failures=2,
+            outage_since="2026-10-20T10:21:00+09:00",
+            last_success_at="2026-10-19T15:16:00+09:00",
+        ),
+        _poll("FHPST01390000", "005930", 4000, {}),
+    ]
+    lines = report(server(tmp_path), NOW, Status(body, "x")).splitlines()
+    start = lines.index(f"{title}키 3개 · 시도 4,149번 · 실패 18번 · 장애 10번 · 지금 장애 중인 키 1개")
+    assert lines[start + 1 : start + 5] == [
+        f"  실패(끝점·오류 코드별): {estimate} EGW00316 9 · {estimate} OPSQ1002 9",
+        "  feed key attempts failures outages max_consecutive_failures consecutive_failures"
+        " outage_since last_success_at last_recovery_seconds",
+        f"  {estimate} 000660 74 2 1 2 2 10:21:00 2026-10-19 15:16:00 -",
+        f"  {estimate} 005930 75 16 9 4 0 - 10:26:40 301.2",
+    ], "the keys that failed today, not the VI status that did not"
+
+    del body["kis"]["polls"]  # an engine from before #441
+    lines = report(server(tmp_path), NOW, Status(body, "x")).splitlines()
+    assert f"{title}모른다(엔진의 /v1/status에 polls가 없다)" in lines
+
+
 def test_a_part_that_fails_leaves_the_others(tmp_path: Path) -> None:
     body = status_body()
     body["kis"]["feeds"] = [{"feed": "X", "key": "Y", "seconds_since": "soon"}]  # not a number
@@ -610,7 +674,13 @@ def test_the_engine_s_own_status_has_the_fields_of_v1_status() -> None:
         clock = Clock()
 
     def live() -> dict[str, Any]:
-        return {"connected": True, "last_frame_at": None, "seconds_since_frame": None, "feeds": []}
+        return {
+            "connected": True,
+            "last_frame_at": None,
+            "seconds_since_frame": None,
+            "feeds": [],
+            "polls": [],
+        }
 
     status = engine_status(cast(Any, Engine()), live)
     assert status.source == "엔진 프로세스"

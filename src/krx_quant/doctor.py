@@ -7,8 +7,9 @@ server, or an agent reading an issue, looks at first when something seems wrong.
    market phase.
 2. KIS: whether the WebSocket is ``connected``, its last frame (``last_frame_at``,
    ``seconds_since_frame``, #311), today's frames short of fields kept raw only by feed and key
-   (``short_frames``, #381), and each feed and key's ``last_received_at``, ``seconds_since`` and
-   open ``gap``, as ``/v1/status`` names them.
+   (``short_frames``, #381), the REST polls' calls, failures and outages today, by endpoint and
+   error code and for each key that failed (``polls``, #441), and each feed and key's
+   ``last_received_at``, ``seconds_since`` and open ``gap``, as ``/v1/status`` names them.
 3. Today's PINGPONG heartbeats by hour, the last one and the longest silence between two
    (``raw/date=<today>/feed=_system/symbol=_``).
 4. The latest WARNING and ERROR log lines, where the process can read the engine's memory: the
@@ -414,13 +415,59 @@ def _kis(status: Status, now: datetime) -> list[str]:
         f" · 열린 gap {gaps}개"
     )
     lines.append(_short_frames(feeds))
+    today = now.astimezone(KST).date()
+    lines += _polls(live, today)
     if feeds:
         lines.append("  feed key last_received_at seconds_since gap")
-        today = now.astimezone(KST).date()
         for f in sorted(feeds, key=lambda f: (str(f.get("feed")), str(f.get("key")))):
             lines.append(
                 f"  {f.get('feed')} {f.get('key')} {_clock(f.get('last_received_at'), today)}"
                 f" {_seconds(f.get('seconds_since'))} {f.get('gap') or '-'}"
+            )
+    return lines
+
+
+def _polls(live: Mapping[str, Any], today: date) -> list[str]:
+    """The REST polls' calls and outages today (``kis.polls``, #441): in all, the failures by
+    endpoint and error code, and a line for each key that failed today or is failing now."""
+    title = "  REST 조회(오늘, 엔진 시작 뒤, #441)"
+    if "polls" not in live:
+        return [f"{title}: 모른다(엔진의 /v1/status에 polls가 없다)"]
+    polls = sorted(
+        (p for p in live.get("polls") or () if isinstance(p, Mapping)),
+        key=lambda p: (str(p.get("feed")), str(p.get("key"))),
+    )
+    if not polls:
+        return [f"{title}: 아직 없음"]
+    failing = [p for p in polls if _int(p.get("consecutive_failures")) > 0]
+    lines = [
+        f"{title}: 키 {len(polls)}개 · 시도 {sum(_int(p.get('attempts')) for p in polls):,}번"
+        f" · 실패 {sum(_int(p.get('failures')) for p in polls):,}번"
+        f" · 장애 {sum(_int(p.get('outages')) for p in polls):,}번 · 지금 장애 중인 키 {len(failing)}개"
+    ]
+    by_code: Counter[tuple[str, str]] = Counter()
+    for p in polls:
+        errors = p.get("errors")
+        for code, n in errors.items() if isinstance(errors, Mapping) else ():
+            by_code[(str(p.get("feed")), str(code))] += _int(n)
+    if by_code:
+        lines.append(
+            "  실패(끝점·오류 코드별): "
+            + " · ".join(f"{feed} {code} {n:,}" for (feed, code), n in sorted(by_code.items()))
+        )
+    # A run that began yesterday has no failures today until its next call.
+    shown = [p for p in polls if _int(p.get("failures")) > 0 or _int(p.get("consecutive_failures")) > 0]
+    if shown:
+        lines.append(
+            "  feed key attempts failures outages max_consecutive_failures consecutive_failures"
+            " outage_since last_success_at last_recovery_seconds"
+        )
+        for p in shown:
+            lines.append(
+                f"  {p.get('feed')} {p.get('key')} {_count(p.get('attempts'))} {_count(p.get('failures'))}"
+                f" {_count(p.get('outages'))} {_count(p.get('max_consecutive_failures'))}"
+                f" {_count(p.get('consecutive_failures'))} {_clock(p.get('outage_since'), today)}"
+                f" {_clock(p.get('last_success_at'), today)} {_seconds(p.get('last_recovery_seconds'))}"
             )
     return lines
 
@@ -764,6 +811,11 @@ def _loki(settings: Settings, status: Status, now: datetime) -> list[str]:
 
 def _count(value: Any) -> str:
     return f"{value:,}" if isinstance(value, int) and not isinstance(value, bool) else "?"
+
+
+def _int(value: Any) -> int:
+    """A count from the API, 0 when it is not one."""
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
 
 
 def _meminfo(path: Path) -> dict[str, int]:

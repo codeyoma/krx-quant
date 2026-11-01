@@ -73,6 +73,7 @@ from krx_quant.net_assets import NetAssetKeeper, keep_net_assets
 from krx_quant.notify import Alerts
 from krx_quant.object_store import open_store
 from krx_quant.open_to_close import OPEN_TO_CLOSE
+from krx_quant.poll_outages import PollOutages, PollState
 from krx_quant.polling import CALL_ERRORS, NORMALIZE_ERRORS, Poller, PollJob
 from krx_quant.predictions import DB_NAME, PredictionStore, iso
 from krx_quant.prevalidation import admits, refusals
@@ -333,6 +334,8 @@ async def run_collector(
                 engine.signals = Signals(settings.signal_rule, alerts.signal)
             tokens, client = tokens_and_client(session, settings, now)
             await _warm_up(tokens)
+            # The polls' calls and outages by feed and key, alerted on when one goes on (#441).
+            outages = PollOutages(now, alerts)
             poller = Poller(
                 client,
                 recorder,
@@ -341,6 +344,7 @@ async def run_collector(
                 on_added=health.watch,
                 on_received=health.received,
                 on_event=on_event,
+                outages=outages,
             )
             fronts = await front_months(session, settings, kst_day(now()), calendar.calendar)
             plan = subscription_plan(settings, fronts, night_contract(now(), calendar.calendar))
@@ -525,7 +529,7 @@ async def run_collector(
                 background.append(
                     asyncio.create_task(keep_calendar(calendar_collector, settings.calendar_every))
                 )
-            live = _live_status(stream, health, now)
+            live = _live_status(stream, health, outages, now)
             if settings.snapshot_every is not None:
 
                 async def snapshot() -> str:
@@ -645,7 +649,7 @@ async def _serve_quotes(settings: Settings, quotes: QuoteFeed, alerts: Alerts) -
     return runner
 
 
-def _live_status(stream: _Stream, health: FeedHealth, now: Clock) -> LiveStatus:
+def _live_status(stream: _Stream, health: FeedHealth, outages: PollOutages, now: Clock) -> LiveStatus:
     def feed(f: FeedState, at: datetime) -> dict[str, Any]:
         last = f.last_received_at
         return {
@@ -655,6 +659,21 @@ def _live_status(stream: _Stream, health: FeedHealth, now: Clock) -> LiveStatus:
             "seconds_since": (at - last).total_seconds() if last else None,
             "gap": f.gap,
             "short_frames": f.short_frames,
+        }
+
+    def poll(p: PollState) -> dict[str, Any]:
+        return {
+            "feed": p.feed,
+            "key": p.key,
+            "attempts": p.attempts,
+            "failures": p.failures,
+            "errors": p.errors,
+            "outages": p.outages,
+            "consecutive_failures": p.consecutive_failures,
+            "max_consecutive_failures": p.max_consecutive_failures,
+            "outage_since": iso(p.outage_since) if p.outage_since else None,
+            "last_success_at": iso(p.last_success_at) if p.last_success_at else None,
+            "last_recovery_seconds": p.last_recovery_seconds,
         }
 
     def status() -> dict[str, Any]:
@@ -667,6 +686,8 @@ def _live_status(stream: _Stream, health: FeedHealth, now: Clock) -> LiveStatus:
             "last_frame_at": iso(frame) if frame else None,
             "seconds_since_frame": (at - frame).total_seconds() if frame else None,
             "feeds": [feed(f, at) for f in health.snapshot()],
+            # The REST polls' calls and outages today (#441).
+            "polls": [poll(p) for p in outages.snapshot()],
         }
 
     return status

@@ -42,7 +42,14 @@ def rest_session(**kwargs: Any) -> aiohttp.ClientSession:
 
 
 class KisError(RuntimeError):
-    pass
+    """A KIS call or message that failed. A REST call KIS answered without success also carries
+    KIS's code (``msg_cd``) and the HTTP status, so a caller can count it by them without reading
+    the answer's text (#441)."""
+
+    def __init__(self, message: str, *, code: str | None = None, status: int | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+        self.status = status
 
 
 class ShortFrame(KisError):
@@ -236,7 +243,11 @@ class RestClient:
                 continue
             if code in _TOKEN_REJECTED and self._on_token_rejected:
                 self._on_token_rejected()
-            raise KisError(f"{tr_id} {params}: HTTP {status} {body}")
+            raise KisError(
+                f"{tr_id} {params}: HTTP {status} {body}",
+                code=code if isinstance(code, str) else None,
+                status=status,
+            )
         raise KisError("unreachable: the last attempt returns or raises")
 
     async def _ask(

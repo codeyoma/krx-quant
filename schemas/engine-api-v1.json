@@ -168,9 +168,9 @@
       }
     },
     "kis": {
-      "description": "Live and demo (made up) only: the KIS connection and each feed's latest delivery.",
+      "description": "Live and demo (made up) only: the KIS connection, each feed's latest delivery and the REST polls' outages.",
       "type": "object",
-      "required": ["connected", "last_frame_at", "seconds_since_frame", "feeds"],
+      "required": ["connected", "last_frame_at", "seconds_since_frame", "feeds", "polls"],
       "additionalProperties": false,
       "properties": {
         "connected": {"type": "boolean"},
@@ -189,6 +189,28 @@
               "seconds_since": {"type": ["number", "null"]},
               "gap": {"type": ["string", "null"]},
               "short_frames": {"type": "integer", "minimum": 0, "description": "Today's (KST) frames with fewer fields than their records need, kept raw only, since the engine started (#381)"}
+            }
+          }
+        },
+        "polls": {
+          "description": "Each REST-polled feed and key called since the engine started: today's (KST) calls and failures, and its outage (#441). An outage starts at a failed call and ends at the next success.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["feed", "key", "attempts", "failures", "errors", "outages", "consecutive_failures", "max_consecutive_failures", "outage_since", "last_success_at", "last_recovery_seconds"],
+            "additionalProperties": false,
+            "properties": {
+              "feed": {"type": "string"},
+              "key": {"type": "string"},
+              "attempts": {"type": "integer", "minimum": 0, "description": "Today's calls, answered or failed"},
+              "failures": {"type": "integer", "minimum": 0},
+              "errors": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 1}, "description": "Today's failures by kind: KIS's code (msg_cd), else HTTP <status>, else the error's type"},
+              "outages": {"type": "integer", "minimum": 0, "description": "Outages going on at some time today"},
+              "consecutive_failures": {"type": "integer", "minimum": 0, "description": "Failures since the last success; 0 once one comes"},
+              "max_consecutive_failures": {"type": "integer", "minimum": 0, "description": "Today's longest run of failures"},
+              "outage_since": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}], "description": "The first failure of the outage going on"},
+              "last_success_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]},
+              "last_recovery_seconds": {"type": ["number", "null"], "description": "The last ended outage: from its first failure to the success that ended it"}
             }
           }
         }
