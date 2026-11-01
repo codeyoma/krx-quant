@@ -1784,6 +1784,52 @@ PASSIVE_ENTRY = Job(
     ),
 )
 
+# The cost map's audit (#438): the cost map shows each kind's first-ranked algorithm only, so another
+# ranked one might pass the cost the top fails, unseen. Once, on the first night after the deploy that
+# brings it (trading or not: the cost map's 20 days are stored already), and again the next night
+# after a run that failed (the cost map or the engine's database not read, exit 1; the visible
+# candidate unlike the cost map's top, exit 2), ``cost-map-audit`` reads tonight's cost map from the
+# collector's Engine API (``KRX_TRADER_ENGINE_URL``, as ``measure-passive-entry`` does) and the engine's
+# database read-only, and judges every ranked algorithm of the trader's kinds by the cost map's own
+# code. It changes nothing: the cost map and the trader stay. No price, only hit rates, p*, ticks,
+# counts and dates, so it can go on the public issue. The cost map waits two minutes at most and the
+# rest reads 005930's 20 days a kind at a time, as the cost map does; the half hour is a bound. Before
+# the simulations and pre-validations, which must start by 00:30.
+COST_MAP_AUDIT_ISSUE = 438
+
+
+def _a_night_until_audited(night: Night) -> bool:
+    """On any night, until a run audited (exit 0): the next night again after one that failed or was
+    cut."""
+    record = night.record
+    if record is None or record.outcome not in (OK, FAILED):
+        return True
+    return record.outcome != OK and record.day < night.day
+
+
+COST_MAP_AUDIT = Job(
+    name="cost-map-audit-438",
+    due=_a_night_until_audited,
+    command=("cost-map-audit",),
+    timeout=timedelta(minutes=30),
+    targets=(
+        Target(
+            COST_MAP_AUDIT_ISSUE,
+            note=(
+                "비용 지도 감사(#438): trader의 종류(방향, 장벽 3종)마다 순위표에 오른 알고리즘을 모두 비용 "
+                "지도의 계산으로 판정했다. 보임은 비용 지도의 1위, 숨음은 그 밖이다. 탐색용이다: 숨은 후보가 "
+                "통과해도 매매 허가가 아니다. 숨은 후보가 시장가 왕복으로 통과하면, 에이전트가 비용 지도가 "
+                "1위 하나 대신 무엇을 보일지 안을 이 이슈에 남기고 `ready-for-human`으로 돌린다. 사용자가 "
+                "정한다. 바꾸면 paper로 먼저 본다. 통과한 숨은 후보가 없으면 그 숫자를 정리해 남기고 "
+                "이슈를 닫는다. 대조가 다르면(종료 코드 2) 그 종류의 숫자를 믿지 않고 원인을 찾는다. "
+                "다시 돌리기(읽기만): "
+                "`docker compose run --rm engine cost-map-audit`. 출력에는 가격이 없다(맞힘률, p*, 틱, "
+                "개수, 날짜만)."
+            ),
+        ),
+    ),
+)
+
 # The night futures (#264): the collector records the KOSPI200 night session's trades and book
 # (18:00–06:00) from the deploy that brings it; what only the server shows is whether KIS
 # streams them for this app key, under the contract code asked for, in the layout of KIS's
@@ -2333,6 +2379,7 @@ JOBS: tuple[Job, ...] = (
     LIVE_PROBE,
     ERROR_BREAKDOWN,
     PASSIVE_ENTRY,
+    COST_MAP_AUDIT,
     *daily_prevalidation_jobs(
         [a.name for a in DAILY_ALGORITHMS],
         {a.name: a.features for a in DAILY_ALGORITHMS},
