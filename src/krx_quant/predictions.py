@@ -468,6 +468,50 @@ def scored_rows(
     return select_predictions(db, where, params)
 
 
+def select_kind_predictions(
+    db: sqlite3.Connection, answer_version: int, where: str, params: Sequence[Any]
+) -> list[dict[str, Any]]:
+    """A kind's predictions ``p`` that ``where`` selects, with their bar close's answer ``a`` of
+    ``answer_version``, their output and the answer's path parsed, as the store and the API read
+    them; ``db``'s rows are ``sqlite3.Row``."""
+    rows = db.execute(
+        "SELECT p.*, a.answer_version AS answer_version, a.class AS answer_class,"
+        " a.unscorable AS answer_unscorable, a.special AS answer_special, a.path AS answer_path,"
+        " a.scored_at AS answer_scored_at, m.target_version AS model_target"
+        f" FROM kind_predictions p {KIND_ANSWER_JOIN}"
+        " LEFT JOIN model_targets m ON m.algorithm = p.algorithm AND m.version = p.model_version " + where,
+        (answer_version, *params),
+    ).fetchall()
+    out = []
+    for r in rows:
+        row = dict(r)
+        row["output"] = None if row["output"] is None else json.loads(row["output"])
+        row["answer_path"] = None if row["answer_path"] is None else json.loads(row["answer_path"])
+        row["inputs"] = None if row.get("inputs") is None else json.loads(row["inputs"])
+        out.append(row)
+    return out
+
+
+def kind_scored_rows(
+    db: sqlite3.Connection,
+    kind: str,
+    answer_version: int,
+    days: Sequence[date],
+    symbol: str | None,
+    include_special: bool,
+) -> list[dict[str, Any]]:
+    """A kind's predictions made on ``days`` (of ``symbol`` if given) and scored on their answer of
+    ``answer_version`` (``KIND_SCORED``), special ones only if ``include_special``: what its
+    statistics are made of (``scored_rows``, of a kind besides the direction)."""
+    if not days:
+        return []
+    on, params = _made_on(days, symbol)
+    where = f"WHERE p.kind = ? AND {on} AND {KIND_SCORED}"
+    if not include_special:
+        where += " AND a.special = 0"
+    return select_kind_predictions(db, answer_version, where, (kind, *params))
+
+
 def days_with_predictions(db: sqlite3.Connection, until: date, limit: int) -> list[date]:
     """The latest ``limit`` days with predictions, up to ``until``, latest first.
 
@@ -1479,11 +1523,7 @@ class PredictionStore:
         include_special: bool,
         db: sqlite3.Connection,
     ) -> list[dict[str, Any]]:
-        on, params = _made_on(days, symbol)
-        where = f"WHERE p.kind = ? AND {on} AND {KIND_SCORED}"
-        if not include_special:
-            where += " AND a.special = 0"
-        return self._kind_select(answer_version, where, (kind, *params), db)
+        return kind_scored_rows(db, kind, answer_version, days, symbol, include_special)
 
     def kind_scored_and_excluded(
         self, kind: str, answer_version: int, days: Sequence[date], symbol: str | None, include_special: bool
@@ -1520,29 +1560,8 @@ class PredictionStore:
     def _kind_select(
         self, answer_version: int, where: str, params: tuple[Any, ...], db: sqlite3.Connection | None = None
     ) -> list[dict[str, Any]]:
-        """A kind's predictions ``p`` with their bar close's answer ``a`` of ``answer_version``,
-        their output and the answer's path parsed."""
-        rows = (
-            (db or self._db)
-            .execute(
-                "SELECT p.*, a.answer_version AS answer_version, a.class AS answer_class,"
-                " a.unscorable AS answer_unscorable, a.special AS answer_special, a.path AS answer_path,"
-                " a.scored_at AS answer_scored_at, m.target_version AS model_target"
-                f" FROM kind_predictions p {KIND_ANSWER_JOIN}"
-                " LEFT JOIN model_targets m ON m.algorithm = p.algorithm AND m.version = p.model_version "
-                + where,
-                (answer_version, *params),
-            )
-            .fetchall()
-        )
-        out = []
-        for r in rows:
-            row = dict(r)
-            row["output"] = None if row["output"] is None else json.loads(row["output"])
-            row["answer_path"] = None if row["answer_path"] is None else json.loads(row["answer_path"])
-            row["inputs"] = None if row.get("inputs") is None else json.loads(row["inputs"])
-            out.append(row)
-        return out
+        """``select_kind_predictions``, on ``db`` or the store's own connection."""
+        return select_kind_predictions(db or self._db, answer_version, where, params)
 
     # Simulated probations (#298): their replays' predictions, apart from the live ones.
 

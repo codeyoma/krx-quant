@@ -163,7 +163,7 @@ async def test_a_session_job_is_asked_with_the_session_s_facts_and_posts_as_a_se
             clock.set(at(FRIDAY, "10:00"))
             await until(lambda: "day-job" in state.jobs and bool(state.jobs["day-job"].comments))
         assert [n.facts for n in seen] == [day_facts] and seen[0].day == FRIDAY and seen[0].trading_day
-        assert hub.bodies(1)[-1].startswith("**예약 작업 `day-job`** · 2026-10-16 장중 · 커밋 ")
+        assert hub.bodies(1)[-1].startswith("**예약 작업 `day-job`** · 2026-10-16 장중 · 성공 · 커밋 ")
         assert told[-1].startswith("예약 작업 day-job(2026-10-16 장중): 성공, 종료 코드 0")
 
 
@@ -296,7 +296,7 @@ async def test_the_order_probe_job_runs_the_real_command_and_without_keys_says_s
         )
         await asyncio.wait_for(scheduler.run_session(FRIDAY), 25)
     body = hub.bodies(403)[-1]
-    assert body.startswith("**예약 작업 `probe-kis-orders-403`** · 2026-10-16 장중 · 커밋 ")
+    assert body.startswith("**예약 작업 `probe-kis-orders-403`** · 2026-10-16 장중 · 실패 · 커밋 ")
     assert "다시 돌리기: `docker compose run --rm engine probe-kis-orders`" in body
     assert "KIS 모의투자 주문 프로브 (#403)" in body and "모의 키가 없어 주문하지 않았다" in body
     record = state.jobs["probe-kis-orders-403"]

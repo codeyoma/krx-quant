@@ -33,6 +33,7 @@ from krx_quant.close_probe import probe_close
 from krx_quant.closing_flow_check import check_closing_flow, check_krx_net_assets
 from krx_quant.collector import check_fallbacks, measure_subscription_limit, run_collector
 from krx_quant.config import Settings, SettingsError, read_values
+from krx_quant.cost_map_audit import run_audit as run_cost_map_audit
 from krx_quant.daily import DailyKind
 from krx_quant.daily_check import DAYS as DAILY_CHECK_DAYS
 from krx_quant.daily_check import daily_check
@@ -181,6 +182,14 @@ async def _measure_passive_entry(engine_url: str | None) -> int:
     read-only: the scheduled job ``passive-entry-432``'s, in the engine's container."""
     settings = Settings.from_env(require_kis=False)
     return await run_passive_entry(settings, TraderSettings.from_env(), engine_url)
+
+
+async def _cost_map_audit(engine_url: str | None) -> int:
+    """Every ranked algorithm of the trader's kinds judged as the cost map's top (#438), read-only:
+    the scheduled job ``cost-map-audit-438``'s, in the engine's container."""
+    settings = Settings.from_env(require_kis=False)
+    url = engine_url or TraderSettings.from_env().engine_url
+    return await run_cost_map_audit(settings.state_dir / DB_NAME, url, settings.target_version)
 
 
 async def _check_mock_trades(day: date | None) -> int:
@@ -801,6 +810,17 @@ def main(argv: list[str] | None = None) -> int:
         help="the Engine API the cost map is read from (default KRX_TRADER_ENGINE_URL, which compose sets"
         " to the engine service's, http://engine:8080; else http://127.0.0.1:8080)",
     )
+    audit_cmd = sub.add_parser(
+        "cost-map-audit",
+        help="judge every ranked algorithm of the trader's kinds as tonight's cost map judges its top"
+        " (#438): the visible top against the cost map to the number, the hidden ones by the same rule,"
+        " the rise and fall calls' hit rates apart; exploratory, read-only, no price",
+    )
+    audit_cmd.add_argument(
+        "--engine-url",
+        help="the Engine API the cost map is read from (default KRX_TRADER_ENGINE_URL, which compose sets"
+        " to the engine service's, http://engine:8080; else http://127.0.0.1:8080)",
+    )
     report_cmd = sub.add_parser(
         "trader-report",
         help="print the trader's report of a trading day (#402), read-only from state/trader.sqlite3: its"
@@ -1157,6 +1177,8 @@ def _command(args: argparse.Namespace) -> int:
         return asyncio.run(_refit_policy(args.engine_url, args.report))
     elif args.command == "measure-passive-entry":
         return asyncio.run(_measure_passive_entry(args.engine_url))
+    elif args.command == "cost-map-audit":
+        return asyncio.run(_cost_map_audit(args.engine_url))
     elif args.command == "trader-report":
         return _trader_report(args.day)
     elif args.command == "check-mock-trades":
