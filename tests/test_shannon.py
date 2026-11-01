@@ -1,10 +1,12 @@
 """Shannon: its own features through the Replay Harness, its L1 logistic regression on
-made-up samples, and its predictions on the prediction path.
+made-up samples with the climate prior of each symbol and slot (#429), and its predictions
+on the prediction path.
 
 Input: integrated books with their ten levels' sizes, trades with their aggressor side
-and venue, or samples whose outcome follows the order flow. Output: the feature values an
-algorithm sees at each bar close, what the fitted model forecasts, and what the engine
-stores.
+and venue, or samples whose outcome follows the order flow or the time of day. Output: the
+feature values an algorithm sees at each bar close, the prior each training sample and the
+model are given, what the fitted model forecasts at a symbol and bar close, and what the
+engine stores.
 """
 
 from __future__ import annotations
@@ -18,8 +20,19 @@ from typing import Any
 
 import pytest
 
-from krx_quant.algorithms import Abstention, NothingToLearn, NotPredicted, Sample
-from krx_quant.algorithms.shannon import INPUTS, Shannon
+from krx_quant.algorithms import (
+    Abstention,
+    MissingContext,
+    Model,
+    NothingToLearn,
+    NotPredicted,
+    PredictionContext,
+    Sample,
+    forecast_of,
+)
+from krx_quant.algorithms.priors import PRIOR_INPUTS, PriorTally, prior_of
+from krx_quant.algorithms.shannon import INPUTS, Shannon, default_params
+from krx_quant.baselines import Forecast
 from krx_quant.engine import Event
 from krx_quant.features import FeatureVector, Leaders
 from krx_quant.feeds import BOOK, KRX_TRADE, KST, NXT_TRADE
@@ -125,6 +138,16 @@ def inputs(**values: float | None) -> FeatureVector:
     return FeatureVector(dict.fromkeys(INPUTS) | {"depth_imbalance": 0.0} | values, SHANNON.features)
 
 
+LATER = datetime.combine(date(2026, 9, 30), time(9, 5), KST)  # after every made-up sample's day
+
+
+def forecast(
+    features: FeatureVector, model: Model, bar_close: datetime = LATER, symbol: str = "005930"
+) -> Forecast:
+    """Shannon's forecast of ``symbol`` at ``bar_close``, as the engine asks it."""
+    return SHANNON.predict_with_context(features, model, PredictionContext(symbol, bar_close))
+
+
 def made_up(n: int, seed: int = 0) -> list[Sample]:
     """The last minute's order flow imbalance sets the next four minutes; the other inputs
     are noise, and the flows unknown (a restart)."""
@@ -152,9 +175,9 @@ def test_shannon_learns_which_way_the_order_flow_pushes_and_drops_the_noise() ->
     model = SHANNON.fit(made_up(1000))
 
     assert model.version.startswith("shannon-2026")
-    buying = SHANNON.predict(inputs(ofi_1=1.5), model)
-    selling = SHANNON.predict(inputs(ofi_1=-1.5), model)
-    still = SHANNON.predict(inputs(ofi_1=0.0), model)
+    buying = forecast(inputs(ofi_1=1.5), model)
+    selling = forecast(inputs(ofi_1=-1.5), model)
+    still = forecast(inputs(ofi_1=0.0), model)
     assert buying.p_up > 0.6 and selling.p_down > 0.6 and still.p_flat > 0.5
     assert buying.expected_ticks > 1 > -1 > selling.expected_ticks
     weights = {k: v for k, v in model.params.items() if k.startswith("w.")}
@@ -212,8 +235,87 @@ def test_without_the_book_shannon_neither_learns_nor_predicts() -> None:
     with pytest.raises(NothingToLearn, match="with the book"):
         SHANNON.fit(no_book)
     with pytest.raises(NotPredicted) as declined:
-        SHANNON.predict(no_book[0].features, SHANNON.default_model())
+        forecast(no_book[0].features, SHANNON.default_model())
     assert declined.value.why is Abstention.NO_BOOK
+
+
+def test_without_the_symbol_and_the_bar_close_shannon_does_not_predict() -> None:
+    model = SHANNON.fit(made_up(300))
+
+    with pytest.raises(MissingContext, match="shannon predicts with the symbol and the bar close"):
+        SHANNON.predict(inputs(ofi_1=1.0), model)
+    with pytest.raises(MissingContext, match="none given"):
+        forecast_of(SHANNON, inputs(ofi_1=1.0), model, None)
+    context = PredictionContext("005930", LATER)
+    assert forecast_of(SHANNON, inputs(ofi_1=1.0), model, context) == forecast(inputs(ofi_1=1.0), model)
+
+
+def labelled(day: date, hhmm: str, outcome: Direction | None, symbol: str = "005930") -> Sample:
+    """A bar close whose inputs say nothing (every one the same)."""
+    return Sample(
+        symbol, datetime.combine(day, time.fromisoformat(hhmm), KST), inputs(ofi_1=0.5), outcome, 0.0
+    )
+
+
+def a_day(day: date, opening: Direction = Direction.UP) -> list[Sample]:
+    """Ten bar closes from 09:01 labelled ``opening``, ten from 10:01 flat."""
+    return [labelled(day, f"09:{m:02d}", opening) for m in range(1, 11)] + [
+        labelled(day, f"10:{m:02d}", Direction.FLAT) for m in range(1, 11)
+    ]
+
+
+D1, D2, D3 = (date(2026, 9, 14) + timedelta(days=i) for i in range(3))
+
+
+def test_trained_on_a_single_day_it_learns_nothing_from_the_prior_of_that_day_s_own_labels() -> None:
+    # The labels follow the slot alone: a prior that counted the day's own labels would tell them
+    # all. Counted on the days before (none), it is the even split everywhere, and stays unweighted.
+    model = SHANNON.fit(a_day(D1))
+
+    assert [model.params[f"w.{c}.{f}"] for c in ("up", "flat", "down") for f in PRIOR_INPUTS] == [0.0] * 6
+    assert model.params["prior.005930.09:00.up"] > 0.5, "the day is kept for the day after it"
+
+
+def test_the_model_keeps_its_window_s_prior_and_predicts_with_it_alone() -> None:
+    window = [*a_day(D1), *a_day(D2), *a_day(D3)]
+    tally = PriorTally()
+    tally.add(window)
+
+    model = SHANNON.fit(window)
+
+    kept = {k: v for k, v in model.params.items() if k.startswith("prior.")}
+    assert kept == tally.table(), "every day of the window, in the model's own parameters"
+    assert model.params.keys() - kept.keys() == default_params().keys(), "beside shannon's own"
+    assert model.version.startswith("shannon-20260916-")
+    later = date(2026, 9, 17)
+    opening, ten = labelled(later, "09:05", None), labelled(later, "10:05", None)
+    at_open = forecast(opening.features, model, opening.bar_close)
+    at_ten = forecast(ten.features, model, ten.bar_close)
+    assert at_open.p_up > at_open.p_flat and at_ten.p_flat > at_ten.p_up, "the same inputs, the slot tells"
+    stored = Model.from_json(model.to_json())
+    assert forecast(opening.features, stored, opening.bar_close) == at_open
+    # The prior is read from the model, nowhere else: the 10:00 slot's row in place of the open's.
+    moved = {k: kept[k.replace("09:00", "10:00")] for k in kept if ".09:00." in k}
+    swapped = Model(model.version, {**model.params, **moved})
+    assert forecast(opening.features, swapped, opening.bar_close) == pytest.approx(at_ten)
+    # A slot never seen takes its symbol's day; a symbol never seen, the even split.
+    afternoon = datetime.combine(later, time(13, 5), KST)
+    assert prior_of(model.params, "005930", afternoon) == tuple(
+        kept[f"prior.005930.all.{c}"] for c in "up flat down".split()
+    )
+    assert prior_of(model.params, "000660", afternoon) == (1 / 3, 1 / 3, 1 / 3)
+
+
+def test_a_model_fitted_before_the_prior_predicts_as_it_did() -> None:
+    # The model a night installed before #429: no prior, no prior's input. Read unweighted, as a
+    # model whose prior weights are 0.
+    fitted = SHANNON.fit([*made_up(600), *a_day(D1), *a_day(D2)])
+    prior = {k for k in fitted.params if k.startswith("prior.") or k.endswith(PRIOR_INPUTS)}
+    before = Model("shannon-20260915-abcdef", {k: v for k, v in fitted.params.items() if k not in prior})
+    unweighted = Model(fitted.version, {**fitted.params, **{k: 0.0 for k in prior if k.startswith("w.")}})
+
+    for ofi in (-1.5, 0.0, 1.5):
+        assert forecast(inputs(ofi_1=ofi), before) == forecast(inputs(ofi_1=ofi), unweighted)
 
 
 def an_order_book_morning(end: str = "10:00:00") -> list[Event]:
@@ -273,3 +375,32 @@ async def test_what_comes_after_a_bar_close_never_changes_shannon_s_forecast(tmp
         return {k: p[k] for k in ("p_up", "p_flat", "p_down", "expected_ticks")}
 
     assert at_cut(await predictions_of(full, "shannon")) == at_cut(await predictions_of(short, "shannon"))
+
+
+async def test_on_the_prediction_path_shannon_is_given_each_bar_close_and_predicts_with_its_slot(
+    tmp_path: Path,
+) -> None:
+    # Its inputs unweighted, its prior's weighted: the forecast is the bar close's slot's prior.
+    # The open's slot (09:00) leans up; any other takes the symbol's day, which leans flat.
+    table = {
+        **{
+            f"prior.005930.09:00.{c}": p for c, p in zip(("up", "flat", "down"), (0.6, 0.3, 0.1), strict=True)
+        },
+        **{f"prior.005930.all.{c}": p for c, p in zip(("up", "flat", "down"), (0.2, 0.6, 0.2), strict=True)},
+    }
+    weights = {"w.up.climate_up": 1.0, "w.down.climate_down": 1.0}
+    model = Model("shannon-20261009-abc123", default_params() | weights | table)
+
+    engine = await run(
+        tmp_path / "engine.db", an_order_book_morning(), until=at("09:40:00"), models={"shannon": model}
+    )
+
+    stored = {p["bar_close"]: p for p in await predictions_of(engine, "shannon")}
+    for hhmm in ("09:05", "09:30", "09:31", "09:35"):
+        bar_close = at(f"{hhmm}:00")
+        expected = forecast(inputs(), model, bar_close)
+        p = stored[bar_close.isoformat()]
+        assert (p["p_up"], p["p_flat"], p["p_down"]) == pytest.approx(
+            (expected.p_up, expected.p_flat, expected.p_down)
+        ), hhmm
+    assert stored[at("09:30:00").isoformat()]["p_up"] > stored[at("09:31:00").isoformat()]["p_up"]

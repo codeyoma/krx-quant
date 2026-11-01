@@ -122,6 +122,8 @@ from krx_quant.algorithms import (
     KindAlgorithm,
     Model,
     NotPredicted,
+    PredictionContext,
+    forecast_of,
     register,
     register_kind_algorithms,
 )
@@ -1527,7 +1529,7 @@ class PredictionEngine:
         name, model = algorithm.name, self.models[algorithm.name]
         vectors = {s: FeatureVector(c.features, algorithm.features, c.touch) for s, c in at_close.items()}
         made, declined, status = await self._timed(
-            name, bar_close, at_close, partial(_predict_symbols, algorithm, model, vectors)
+            name, bar_close, at_close, partial(_predict_symbols, algorithm, model, vectors, bar_close)
         )
         self._record(bar_close, at_close, _entries(name, model.version, made, declined, status))
         return name, made
@@ -1729,14 +1731,17 @@ def _with_status(standings: Mapping[str, Standing], status: Status) -> set[str]:
 _Predicted = tuple[dict[str, Forecast], dict[str, Abstention]]
 
 
-def _predict_symbols(algorithm: Algorithm, model: Model, vectors: Mapping[str, FeatureVector]) -> _Predicted:
-    """Runs in a worker thread: one algorithm on every symbol, each forecast checked."""
+def _predict_symbols(
+    algorithm: Algorithm, model: Model, vectors: Mapping[str, FeatureVector], bar_close: datetime
+) -> _Predicted:
+    """Runs in a worker thread: one algorithm on every symbol at ``bar_close``, each forecast
+    checked. A context-aware algorithm (#429) is given each symbol and the bar close."""
     forecasts: dict[str, Forecast] = {}
     declined: dict[str, Abstention] = {}
     for symbol, features in vectors.items():
         try:
             with forecasting(features):  # of the target the features carry (#169)
-                f = algorithm.predict(features, model)
+                f = forecast_of(algorithm, features, model, PredictionContext(symbol, bar_close))
         except NotPredicted as e:
             declined[symbol] = e.why
             continue

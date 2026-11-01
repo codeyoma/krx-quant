@@ -710,6 +710,11 @@ def _algorithm_json(
     stages: Mapping[str, Stage],
     simulations: Mapping[str, SimulationRecord],
 ) -> dict[str, Any]:
+    model = engine.models[a.name]
+    # Every parameter it may hold, then those of its model's that are known by name only (Shannon's
+    # climate prior's table, #429: ``priors.PriorMeanings``), so that ``model.params`` are all here.
+    meanings = a.param_meanings
+    named = [p for p in dict.fromkeys([*meanings, *model.params]) if p in meanings]
     return {
         "name": a.name,
         "kind": str(getattr(a, "kind", DIRECTION)),  # the kind it predicts (#179)
@@ -721,8 +726,8 @@ def _algorithm_json(
             for f in a.features
         },
         "training_days": a.training_days,
-        "model": engine.models[a.name].as_dict(),
-        "param_meanings": {p: m.as_dict() for p, m in a.param_meanings.items()},
+        "model": model.as_dict(),
+        "param_meanings": {p: meanings[p].as_dict() for p in named},
         "status": _status_json(engine, a.name),
         "validation": _validation_json(engine, a.name),
         "stage": _stage_json(stages.get(a.name)),

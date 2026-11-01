@@ -11,12 +11,14 @@ Three arms, on the same folds and the same bar closes:
 
 - (a) **climate**: the climate baseline's table refitted before each day on the ``CLIMATE_DAYS``
   days before it, as the pre-validation's replay refits it (``_WalkForward.climate_before``);
-- (b) **shannon**: shannon as it is, trained before each day as its pre-validation trained it
+- (b) **shannon**: shannon as it was before #429's adoption (``ShannonAlone``: its regression on
+  its eight inputs alone), trained before each day as its pre-validation trained it
   (``_WalkForward.before``);
 - (c) **shannon + prior** (``ShannonPrior``): shannon's regression on the very samples (b) is
   trained on, with two inputs more: the log-odds of up and of down against flat in the smoothed
-  class frequencies of the bar close's symbol and slot (``PRIOR_INPUTS``). The same penalties,
-  the same validation on whole trading days, the same standardization (``regression``).
+  class frequencies of the bar close's symbol and slot (``priors.PRIOR_INPUTS``). The same
+  penalties, the same validation on whole trading days, the same standardization
+  (``shannon.regression``). Since #429's adoption it is shannon itself, named apart from (b).
 
 **Folds.** The pre-validation's: the latest ``PREVALIDATION_DAYS`` recorded days, each predicted
 by models fitted on shannon's window of the 20 trading days before it (backfilled days among
@@ -26,20 +28,14 @@ training makes them, read from the sample store when a night stored them, #370);
 leave out the bar closes the statistics leave out (a VI, a special situation) and carry the
 engine's touch labels, so they are the bar closes the pre-validation scored.
 
-**The prior** (``PriorTally``): label counts by symbol and slot (``consensus.slot``), and by
-symbol over the whole day, of the fold's training window alone: the samples (b) and (c) are
-given, recorded and backfilled days alike (the climate counts both). Smoothed: a symbol's day is
-its counts plus ``PRIOR_STRENGTH`` pseudo-counts split evenly among the classes; a slot is its
-counts plus as many in its symbol's day's frequencies. A slot never seen takes its symbol's day;
-a symbol never seen, the even split.
-
-- **Causal** (``training_priors``). A training sample's prior counts the window's days before its
-  own only: each of their labels was decided before its bar close (a four-minute window ends the
-  day it starts). Its own day's labels and the days after it never reach it.
-- **Kept with the model.** The prior a fold's model predicts with counts every day of its window,
-  and is held in the model's parameters (``prior.<symbol>.<slot>.<class>``,
-  ``prior.<symbol>.all.<class>``): not a feature, as a label aggregate depends on the fold and a
-  feature cache is shared by every fold and algorithm.
+**The prior** (``priors.py``, where its helpers moved with #429's adoption, so that shannon never
+imports this experiment): label counts by symbol and slot, and by symbol over the whole day, of
+the fold's training window alone: the samples (b) and (c) are given, recorded and backfilled days
+alike (the climate counts both), smoothed toward the coarser one with ``PRIOR_STRENGTH``
+pseudo-counts. A training sample's prior counts the window's days before its own only (causal);
+the prior a fold's model predicts with counts every day of its window and is held in the model's
+parameters, never a feature (a label aggregate depends on the fold, and the feature cache is
+shared by every fold and algorithm).
 
 **The report** (``state/experiments/climate-prior-429.json``, and the command's lines): each arm's
 bar closes scored, hit rate, recall and precision of each class, directional coverage (the share
@@ -48,7 +44,8 @@ close and by trading day (a day's mean gain one value, with its 95% Student t in
 lower bound is the pre-validation's ``day_low``), and the lift of (c) over (b). Counts, rates,
 lifts, weights and dates only, never a price. #429's rule (``Experiment.rule``): (c) better than
 (b) (its lift over (b) above 0), and its lower bound by trading day over the climate above (b)'s.
-Whether shannon takes the prior is decided from the posted numbers, in another change.
+It was met on 2026-11-01's run, and shannon took the prior (#429): the experiment still compares
+the same three arms.
 
 **Memory.** A pre-validation's training phase's, without its replay (#383): the window's days are
 kept and the older let go as the folds move on; each day logs its memory, then hands back what it
@@ -59,9 +56,8 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 from collections import Counter
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -70,25 +66,31 @@ from typing import Any
 import numpy as np
 
 from krx_quant.algorithms import ALGORITHMS, KIND_ALGORITHMS, Algorithm, KindAlgorithm
-from krx_quant.algorithms.contract import Abstention, Model, NothingToLearn, NotPredicted, Sample
+from krx_quant.algorithms.contract import (
+    Abstention,
+    Model,
+    NothingToLearn,
+    NotPredicted,
+    PredictionContext,
+    Sample,
+    forecast_of,
+)
 from krx_quant.algorithms.forecasts import CLASSES, class_moves, number, param
+from krx_quant.algorithms.priors import PRIOR_INPUTS, PRIOR_STRENGTH
 from krx_quant.algorithms.shannon import (
-    _MIN_SD,
     INPUTS,
-    MIN_SPLIT,
-    PENALTIES,
-    VALIDATION_SHARE,
     Shannon,
-    _cross_entropy,
-    _fista,
-    _probabilities,
-    _validated_on,
     default_params,
+    inputs_of,
+    one_hot,
+    probabilities,
+    regression,
+    training_loss,
+    with_the_book,
 )
 from krx_quant.baselines import Forecast
-from krx_quant.climate import ALL_DAY, direction
+from krx_quant.climate import direction
 from krx_quant.config import Settings
-from krx_quant.consensus import slot
 from krx_quant.features import FeatureVector, Leaders
 from krx_quant.feeds.base import KST, kst_day
 from krx_quant.footprint import DayUsage, Meter, give_back
@@ -105,233 +107,50 @@ log = logging.getLogger(__name__)
 
 EXPERIMENT = "climate-prior-429"
 REPORT = f"experiments/{EXPERIMENT}.json"  # under the state directory
-PRIOR = "prior"  # the prior's parameters: prior.<symbol>.<slot>.<class>
-# The prior's inputs: log(p_up / p_flat) and log(p_down / p_flat) at the bar close's symbol and slot.
-PRIOR_INPUTS = ("climate_up", "climate_down")
-NAMES = (*INPUTS, *PRIOR_INPUTS)  # (c)'s inputs
-# Pseudo-counts a slot's (and a symbol's day's) frequencies are pulled toward the next coarser one
-# with: about a day of a slot's bar closes (30 a symbol).
-PRIOR_STRENGTH = 30.0
 CLIMATE_ARM, SHANNON_ARM, PRIOR_ARM = "climate", "shannon", "shannon_prior"
 ARMS = (CLIMATE_ARM, SHANNON_ARM, PRIOR_ARM)
 LABELS = {CLIMATE_ARM: "(a) climate", SHANNON_ARM: "(b) shannon", PRIOR_ARM: "(c) shannon + prior"}
 
-Prior = tuple[float, float, float]  # p_up, p_flat, p_down
-_EVEN: Prior = (1 / 3, 1 / 3, 1 / 3)
 
+class ShannonAlone:
+    """(b): shannon as it was before #429's adoption, its regression on its eight inputs
+    (``INPUTS``) alone; named as shannon was. An experiment's arm: not registered, and the engine
+    never runs it."""
 
-def _smoothed(counts: Counter[Direction], base: Prior) -> Prior:
-    n = sum(counts.values())
-    up, flat, down = (
-        (counts[c] + PRIOR_STRENGTH * b) / (n + PRIOR_STRENGTH) for c, b in zip(CLASSES, base, strict=True)
-    )
-    return up, flat, down
-
-
-def _row(symbol: str, where: str, p: Prior) -> dict[str, float]:
-    return {param(PRIOR, symbol, where, c.value): q for c, q in zip(CLASSES, p, strict=True)}
-
-
-class PriorTally:
-    """Label counts by symbol and 30-minute slot, and by symbol over the whole day: the prior's."""
-
-    def __init__(self) -> None:
-        self._slots: dict[tuple[str, str], Counter[Direction]] = {}
-        self._days: dict[str, Counter[Direction]] = {}
-
-    def add(self, samples: Iterable[Sample]) -> None:
-        """Count the labels of ``samples`` (those without one are not counted)."""
-        for s in samples:
-            if s.outcome is not None:
-                self._slots.setdefault((s.symbol, slot(s.bar_close)), Counter())[s.outcome] += 1
-                self._days.setdefault(s.symbol, Counter())[s.outcome] += 1
-
-    def table(self) -> dict[str, float]:
-        """The smoothed frequencies, as a model keeps them (module doc): each symbol's day,
-        ``prior.<symbol>.all.<class>``, and each slot, ``prior.<symbol>.<slot>.<class>``; empty
-        before any label."""
-        days = {symbol: _smoothed(counts, _EVEN) for symbol, counts in self._days.items()}
-        out: dict[str, float] = {}
-        for symbol, p in sorted(days.items()):
-            out |= _row(symbol, ALL_DAY, p)
-        for (symbol, where), counts in sorted(self._slots.items()):
-            out |= _row(symbol, where, _smoothed(counts, days[symbol]))
-        return out
-
-
-def prior_of(params: Mapping[str, float], symbol: str, bar_close: datetime) -> Prior:
-    """The prior ``params`` hold for ``symbol`` at ``bar_close``: its slot's, else its symbol's
-    day's, else the even split."""
-    for where in (slot(bar_close), ALL_DAY):
-        found = [params.get(param(PRIOR, symbol, where, c.value)) for c in CLASSES]
-        if all(p is not None for p in found):
-            up, flat, down = (float(p) for p in found if p is not None)
-            return up, flat, down
-    return _EVEN
-
-
-def prior_inputs(p: Prior) -> tuple[float, float]:
-    """The prior's two inputs (``PRIOR_INPUTS``): the log-odds of up and of down against flat."""
-    up, flat, down = p
-    return math.log(up / flat), math.log(down / flat)
-
-
-def training_priors(window: Sequence[Sample], scored: Sequence[Sample]) -> list[tuple[float, float]]:
-    """The prior inputs of each of ``scored``, the training samples of ``window``: the table of
-    ``window``'s labels on the days before the sample's own, never its own day's or a later one's
-    (module doc, "Causal")."""
-    by_day: dict[date, list[Sample]] = {}
-    for s in window:
-        by_day.setdefault(kst_day(s.bar_close), []).append(s)
-    tally = PriorTally()
-    tables: dict[date, dict[str, float]] = {}
-    for day in sorted({*by_day, *(kst_day(s.bar_close) for s in scored)}):
-        tables[day] = tally.table()
-        tally.add(by_day.get(day, ()))
-    return [prior_inputs(prior_of(tables[kst_day(s.bar_close)], s.symbol, s.bar_close)) for s in scored]
-
-
-def _standardization(raw: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Each column's mean and standard deviation over its known values (shannon's: 0 and 1 for a
-    column with none, 1 for one that does not vary)."""
-    means, sds = [], []
-    for j in range(raw.shape[1]):
-        known = raw[~np.isnan(raw[:, j]), j]
-        mean = float(known.mean()) if known.size else 0.0
-        sd = float(known.std()) if known.size else 1.0
-        means.append(mean)
-        sds.append(sd if sd > _MIN_SD else 1.0)
-    return np.array(means), np.array(sds)
-
-
-def _standardized(raw: np.ndarray, means: np.ndarray, sds: np.ndarray) -> np.ndarray:
-    """In standard deviations from the means; 0 (the mean) where unknown, as shannon does."""
-    out: np.ndarray = np.where(np.isnan(raw), 0.0, (raw - means) / sds)
-    return out
-
-
-def _fitted(raw: np.ndarray, y: np.ndarray, penalty: float) -> tuple[np.ndarray, ...]:
-    means, sds = _standardization(raw)
-    w, b = _fista(_standardized(raw, means, sds), y, penalty)
-    return means, sds, w, b
-
-
-def _chosen_penalty(raw: np.ndarray, y: np.ndarray, days: Sequence[date]) -> tuple[float, list[date]]:
-    """Shannon's choice of penalty (``shannon._chosen_penalty``) on rows in time order, ``days``
-    their trading days: the latest days held out whole, as many as bring them nearest
-    ``VALIDATION_SHARE`` of the rows; the middle penalty and no day when too few to split."""
-    distinct = sorted(set(days))
-    if len(raw) < MIN_SPLIT or len(distinct) < 2:
-        return PENALTIES[len(PENALTIES) // 2], []
-    per_day = Counter(days)
-    target = len(raw) * VALIDATION_SHARE
-
-    def off_target(k: int) -> float:
-        return abs(sum(per_day[d] for d in distinct[-k:]) - target)
-
-    held_days = distinct[-min(range(1, len(distinct)), key=off_target) :]
-    held = np.array([d >= held_days[0] for d in days])
-    best: tuple[float, float] | None = None
-    for penalty in PENALTIES:
-        means, sds, w, b = _fitted(raw[~held], y[~held], penalty)
-        loss = _cross_entropy(w, b, _standardized(raw[held], means, sds), y[held])
-        if best is None or loss < best[0] - 1e-12:
-            best = (loss, penalty)
-    assert best is not None
-    return best[1], held_days
-
-
-def regression(
-    raw: np.ndarray, y: np.ndarray, days: Sequence[date], names: Sequence[str]
-) -> dict[str, float]:
-    """Shannon's L1 logistic regression on ``raw`` (a row a sample in time order, ``days`` their
-    trading days; a column an input of ``names``, NaN where unknown), ``y`` the classes one-hot:
-    its parameters as shannon names them (``penalty``, ``validation_*``, ``mean.<input>``,
-    ``sd.<input>``, ``w.<class>.<input>``, ``bias.<class>``). On shannon's inputs it is shannon's
-    model."""
-    penalty, validated = _chosen_penalty(raw, y, days)
-    means, sds, w, b = _fitted(raw, y, penalty)
-    params = {"penalty": penalty, **_validated_on(validated)}
-    for j, f in enumerate(names):
-        params[param("mean", f)] = float(means[j])
-        params[param("sd", f)] = float(sds[j])
-    for i, c in enumerate(CLASSES):
-        params[param("bias", c.value)] = float(b[i])
-        for j, f in enumerate(names):
-            params[param("w", c.value, f)] = float(w[i, j]) + 0.0  # a zeroed weight is 0, not −0
-    return params
-
-
-def _inputs(scored: Sequence[Sample]) -> np.ndarray:
-    return np.array([[number(s.features[f]) for f in INPUTS] for s in scored], dtype=float).reshape(
-        len(scored), len(INPUTS)
-    )
-
-
-def _one_hot(scored: Sequence[Sample]) -> np.ndarray:
-    return np.array([[float(s.outcome is c) for c in CLASSES] for s in scored], dtype=float)
-
-
-def _parameters(params: Mapping[str, float]) -> tuple[np.ndarray, ...]:
-    """(c)'s means, standard deviations, weights and biases, from a model's parameters."""
-    means = np.array([params[param("mean", f)] for f in NAMES])
-    sds = np.array([params[param("sd", f)] for f in NAMES])
-    w = np.array([[params[param("w", c.value, f)] for f in NAMES] for c in CLASSES])
-    b = np.array([params[param("bias", c.value)] for c in CLASSES])
-    return means, sds, w, b
-
-
-class ShannonPrior:
-    """(c): shannon's regression with the climate prior's two inputs (module doc). An experiment's
-    arm: not registered, and the engine never runs it. It predicts with a symbol and a bar close
-    besides the features, which an algorithm is not given (``contract.Algorithm.predict``)."""
-
-    name = "shannon-prior"
+    name = Shannon.name
+    card = Shannon.card
     features = Shannon.features
     training_days = Shannon.training_days
+    param_meanings = Shannon.param_meanings
 
     def default_model(self) -> Model:
-        """Before any training: shannon's defaults, the prior's inputs unweighted."""
-        params = default_params()
-        for f in PRIOR_INPUTS:
-            params[param("mean", f)] = 0.0
-            params[param("sd", f)] = 1.0
-            for c in CLASSES:
-                params[param("w", c.value, f)] = 0.0
-        return Model(f"{self.name}-default", params)
+        """Before any training: shannon's defaults, without the prior's inputs."""
+        return Model(f"{self.name}-default", default_params(INPUTS))
 
     def fit(self, samples: Sequence[Sample]) -> Model:
-        """Trained as shannon is, on the samples with a label and the book, each with its causal
-        prior (``training_priors``); the model keeps the prior of all of ``samples``' labels."""
-        scored = sorted(
-            (s for s in samples if s.outcome is not None and s.features["depth_imbalance"] is not None),
-            key=lambda s: (s.bar_close, s.symbol),
-        )
-        if not scored:
-            raise NothingToLearn("no training samples with the book")
-        raw = np.hstack([_inputs(scored), np.array(training_priors(samples, scored), dtype=float)])
-        y = _one_hot(scored)
-        params = default_params() | regression(raw, y, [kst_day(s.bar_close) for s in scored], NAMES)
-        tally = PriorTally()
-        tally.add(samples)
-        params |= class_moves(scored) | tally.table()
-        means, sds, w, b = _parameters(params)
-        return Model.fitted(
-            self.name, params, scored, _cross_entropy(w, b, _standardized(raw, means, sds), y)
-        )
+        """Trained as shannon was, on the samples with a label and the book."""
+        scored = with_the_book(samples)
+        raw, y = inputs_of(scored), one_hot(scored)
+        params = default_params(INPUTS) | regression(raw, y, [kst_day(s.bar_close) for s in scored], INPUTS)
+        params |= class_moves(scored)
+        return Model.fitted(self.name, params, scored, training_loss(params, raw, y, INPUTS))
 
-    def predict(self, features: FeatureVector, model: Model, symbol: str, bar_close: datetime) -> Forecast:
-        """The forecast at ``symbol``'s ``bar_close`` with the prior ``model`` holds; ``no_book``
-        without the book, as shannon."""
+    def predict(self, features: FeatureVector, model: Model) -> Forecast:
+        """The forecast of ``features`` alone; ``no_book`` without the book, as shannon."""
         if features["depth_imbalance"] is None:
             raise NotPredicted(Abstention.NO_BOOK)
         p = model.params
-        prior = prior_inputs(prior_of(p, symbol, bar_close))
-        raw = np.array([[*(number(features[f]) for f in INPUTS), *prior]], dtype=float)
-        means, sds, w, b = _parameters(p)
-        up, flat, down = (float(q) for q in _probabilities(w, b, _standardized(raw, means, sds))[0])
+        raw = np.array([[number(features[f]) for f in INPUTS]], dtype=float)
+        up, flat, down = probabilities(p, raw, INPUTS)
         expected = sum(q * p[param("move", c.value)] for q, c in zip((up, flat, down), CLASSES, strict=True))
         return Forecast(up, flat, down, expected)
+
+
+class ShannonPrior(Shannon):
+    """(c): shannon with the climate prior, as it is since #429's adoption, named apart from (b)
+    (``shannon-prior``). Not registered: the engine runs shannon."""
+
+    name = "shannon-prior"
 
 
 @dataclass(frozen=True)
@@ -510,7 +329,7 @@ def climate_prior_experiment(
         raise FileNotFoundError(f"no recorded day of {symbols} in {settings.data_dir}")
     calendar = calendar_store(settings).calendar
     night = night_reads(algorithms, kind_algorithms, kinds)
-    shannon, variant = Shannon(), ShannonPrior()
+    shannon, variant = ShannonAlone(), ShannonPrior()
     trainer = _WalkForward(settings, shannon, available, calendar, Leaders.of(settings), night=night)
     records: dict[str, list[Scored]] = {arm: [] for arm in ARMS}
     folds: list[Fold] = []
@@ -563,7 +382,7 @@ def _models(trainer: _WalkForward, variant: ShannonPrior, day: date) -> tuple[di
 def _score(
     samples: Sequence[Sample],
     models: Mapping[str, Model],
-    shannon: Shannon,
+    shannon: ShannonAlone,
     variant: ShannonPrior,
     records: Mapping[str, list[Scored]],
 ) -> tuple[int, int]:
@@ -577,7 +396,9 @@ def _score(
         try:
             forecasts = {
                 SHANNON_ARM: shannon.predict(s.features, models[SHANNON_ARM]),
-                PRIOR_ARM: variant.predict(s.features, models[PRIOR_ARM], s.symbol, s.bar_close),
+                PRIOR_ARM: forecast_of(
+                    variant, s.features, models[PRIOR_ARM], PredictionContext(s.symbol, s.bar_close)
+                ),
             }
         except NotPredicted:
             no_book += 1
