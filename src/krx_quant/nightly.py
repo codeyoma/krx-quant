@@ -17,8 +17,10 @@ closes (``training``). For each algorithm, in registration order:
 3. The challenger and a report of both are stored. Besides the verdict, the report has
    what tells a real improvement from noise (#89): the losses by validation day and by
    reference price, the paired difference with its standard error over days, whether
-   the champion learned the validation days, and the code that trained (``KRX_COMMIT``).
-   The rule stays the mean loss alone. The report is the algorithm's
+   the champion learned the validation days, and the code that trained (``KRX_COMMIT``); and
+   the two models' hit rates on the same bar closes, with what a hit-rate-first rule would have
+   chosen and whether the log loss promoted a model whose hit rate fell (#437,
+   ``nightly_hit_rates``). The rule stays the mean loss alone. The report is the algorithm's
    checkpoint: a night run again (after a crash, or a reclaimed Spot instance) skips the
    algorithms it has.
 
@@ -108,11 +110,15 @@ from krx_quant.feeds import TRADE
 from krx_quant.feeds.base import KST, kst_day
 from krx_quant.footprint import Meter, StepUsage
 from krx_quant.kind_registry import KINDS, daily_kind_named, kind_named
-from krx_quant.kinds import NO_ANSWER, Kind, KindForecast, TableBaseline, table_baselines
+from krx_quant.kinds import DIRECTION_KIND, NO_ANSWER, Kind, KindForecast, TableBaseline, table_baselines
+from krx_quant.kinds import most_likely as most_likely_class
 from krx_quant.macro import regime_prefix
 from krx_quant.market_calendar import MarketCalendar, calendar_store
+from krx_quant.nightly_hit_rates import HIT_RATE, summary_text
+from krx_quant.nightly_hit_rates import compare as compare_hit_rates
 from krx_quant.notify import send_notice
 from krx_quant.object_store import ObjectStore, file_digest, get_json, open_store, put_json
+from krx_quant.pricing import most_likely
 from krx_quant.sample_store import STORE_DIR, DayKey, NightReads, SampleStore, night_reads, read_day
 from krx_quant.touch import TARGET_VERSION
 from krx_quant.training import TrainingDay, leader_series, previous_days_needed
@@ -255,7 +261,10 @@ class Night:
                 verdict = "학습 안 함"
             else:
                 verdict = "유지"
-            lines.append(f"- {r['algorithm']} {verdict}: {r['reason']}")
+            line = f"- {r['algorithm']} {verdict}: {r['reason']}"
+            if isinstance(r.get(HIT_RATE), dict):  # the two models' hit rates (#437)
+                line += summary_text(r[HIT_RATE])
+            lines.append(line)
         return "\n".join(lines)
 
 
@@ -590,6 +599,7 @@ class _Trainer:
             algorithm,
             live_version,
             self._target_version,
+            DIRECTION_KIND,
             {},
             lambda loaded: (
                 {"target_version": self._target_version, "labels": _labels(loaded)}
@@ -616,6 +626,7 @@ class _Trainer:
             algorithm,
             live_version,
             kind.answer_version,
+            kind,
             {"kind": kind.name},
             lambda loaded: {"target_version": kind.answer_version, "labels": _kind_labels(loaded, kind)},
             lambda days: self._kind_samples(algorithm, kind, days),
@@ -628,15 +639,17 @@ class _Trainer:
         algorithm: Algorithm | KindAlgorithm,
         live_version: str | None,
         target: int,
+        kind: Kind,
         heading: Mapping[str, Any],
         labels: Callable[[Mapping[date, TrainingDay | None]], dict[str, Any]],
         samples: Callable[[Sequence[date]], list[_S]],
         fit: Callable[[list[_S]], Model],
-        losses: Callable[[Model, Sequence[_S]], list[tuple[_S, float]]],
+        losses: Callable[[Model, Sequence[_S]], list[tuple[_S, float, str]]],
     ) -> dict[str, Any]:
         """The challenger trained on ``samples`` of the training days, against the champion, both
-        by ``losses`` on the validation days; the report's ``heading`` after its name, and its
-        ``labels`` (the target and the labelled samples by source)."""
+        by ``losses`` on the validation days (with the class each called, of ``kind``'s, for their
+        hit rates, #437); the report's ``heading`` after its name, and its ``labels`` (the target and
+        the labelled samples by source)."""
         night = self._days[-1]
         training: list[date]
         validation: list[date]
@@ -673,7 +686,7 @@ class _Trainer:
         # whatever the model.
         with self._phase("validation"):
             challenger_losses = losses(challenger, samples(validation))
-        scored = [s for s, _ in challenger_losses]
+        scored = [s for s, _, _ in challenger_losses]
         report["samples"] = {"validation": len(scored)}
         # A champion of another target (#170) is replaced whatever the scores say.
         champion_target = champion.target_version or 1
@@ -698,13 +711,16 @@ class _Trainer:
             return {**report, "reason": "no outcomes to validate on"}
         with self._phase("validation"):
             champion_losses = losses(champion, scored)
-        champion_loss = _mean([loss for _, loss in champion_losses])
-        challenger_loss = _mean([loss for _, loss in challenger_losses])
+        champion_loss = _mean([loss for _, loss, _ in champion_losses])
+        challenger_loss = _mean([loss for _, loss, _ in challenger_losses])
         better = challenger_loss < champion_loss
         sign = "<" if better else "≥"
         # A champion fitted by hand on the latest days may have learned the validation days:
         # it is then judged on what it saw, and is harder to beat than it should be.
         saw = champion.trained_until is not None and champion.trained_until >= validation[0]
+        references = {day: found.reference for day, found in loaded.items() if found is not None}
+        # Reported beside the verdict, which it does not change (#437).
+        hit_rates = compare_hit_rates(challenger_losses, champion_losses, references, kind, better)
         return {
             **report,
             "champion": {"version": champion.version, "loss": champion_loss, "trained_on_validation": saw},
@@ -715,11 +731,8 @@ class _Trainer:
             },
             "promoted": better or retarget,
             "forced": retarget,
-            "validation": _validation(
-                challenger_losses,
-                champion_losses,
-                {day: found.reference for day, found in loaded.items() if found is not None},
-            ),
+            "validation": _validation(challenger_losses, champion_losses, references),
+            **({} if hit_rates is None else {HIT_RATE: hit_rates}),
             "reason": f"{challenger_loss:.4f} {sign} {champion_loss:.4f} ({champion.version}"
             + (", trained on these days)" if saw else ")")
             + (changed if retarget else ""),
@@ -954,8 +967,9 @@ def _every(days_of: dict[str, set[date]], day: date) -> bool:
     return all(day in days for days in days_of.values())
 
 
-def _losses(algorithm: Algorithm, model: Model, samples: Sequence[Sample]) -> list[tuple[Sample, float]]:
-    """``model``'s log loss on each sample with an outcome that it predicts."""
+def _losses(algorithm: Algorithm, model: Model, samples: Sequence[Sample]) -> list[tuple[Sample, float, str]]:
+    """``model``'s log loss on each sample with an outcome that it predicts, and the class it
+    called there (its most likely, #437)."""
     out = []
     for s in samples:
         if s.outcome is None:
@@ -963,7 +977,7 @@ def _losses(algorithm: Algorithm, model: Model, samples: Sequence[Sample]) -> li
         with forecasting(s.features):  # of the target the sample was labelled with (#169)
             f = predicted(algorithm, s.features, model)
         if f is not None:
-            out.append((s, log_loss(f, s.outcome)))
+            out.append((s, log_loss(f, s.outcome), most_likely(f.p_up, f.p_flat, f.p_down).value))
     return out
 
 
@@ -985,16 +999,17 @@ def _labels(loaded: Mapping[date, TrainingDay | None]) -> dict[str, Any]:
 
 def _kind_losses(
     algorithm: KindAlgorithm, kind: Kind, model: Model, samples: Sequence[KindSample]
-) -> list[tuple[KindSample, float]]:
+) -> list[tuple[KindSample, float, str]]:
     """``model``'s log loss of ``kind``'s three classes on each sample with an answer that it
-    predicts (#179)."""
+    predicts (#179), and the class it called there (#437)."""
     out = []
     for s in samples:
         if s.label is None:
             continue
         f = kind_predicted(algorithm, s.features, model)
         if f is not None:
-            out.append((s, kind_log_loss(kind, f, s.label)))
+            called = kind.classes[most_likely_class(f.probabilities)]
+            out.append((s, kind_log_loss(kind, f, s.label), called))
     return out
 
 
@@ -1055,8 +1070,8 @@ def _mean(values: Sequence[float]) -> float:
 
 
 def _validation(
-    challenger: Sequence[tuple[Sample | KindSample, float]],
-    champion: Sequence[tuple[Sample | KindSample, float]],
+    challenger: Sequence[tuple[Sample | KindSample, float, str]],
+    champion: Sequence[tuple[Sample | KindSample, float, str]],
     references: Mapping[date, str],
 ) -> dict[str, Any]:
     """The validation's losses by day and by reference price (``mid``, ``close``), and the
@@ -1068,11 +1083,11 @@ def _validation(
     def key(sample: Sample | KindSample) -> tuple[str, datetime]:
         return sample.symbol, sample.bar_close
 
-    by_champion = {key(s): loss for s, loss in champion}
+    by_champion = {key(s): loss for s, loss, _ in champion}
 
     def losses(day_of: Callable[[Sample | KindSample], Any]) -> dict[str, dict[str, Any]]:
         groups: dict[Any, list[tuple[Sample | KindSample, float]]] = {}
-        for sample, loss in challenger:
+        for sample, loss, _ in challenger:
             groups.setdefault(day_of(sample), []).append((sample, loss))
         out = {}
         for group, rows in sorted(groups.items()):
@@ -1085,7 +1100,7 @@ def _validation(
         return out
 
     paired: dict[date, list[float]] = {}
-    for sample, loss in challenger:
+    for sample, loss, _ in challenger:
         if key(sample) in by_champion:
             paired.setdefault(kst_day(sample.bar_close), []).append(loss - by_champion[key(sample)])
     differences = [d for day in paired.values() for d in day]

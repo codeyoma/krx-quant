@@ -63,7 +63,10 @@ from krx_quant.nav_probe import probe_nav
 from krx_quant.net_buys_probe import probe_net_buys
 from krx_quant.night_probe import probe_night
 from krx_quant.nightly import from_the_server, run_training
+from krx_quant.nightly_hit_rates import HIT_RATE_NIGHTS, compared_nights
+from krx_quant.nightly_hit_rates import lines as hit_rate_lines
 from krx_quant.notify import send_notice, send_test_alert
+from krx_quant.object_store import open_store
 from krx_quant.order_probe import probe_kis_orders
 from krx_quant.poisson_link import REPORT as POISSON_LINK_REPORT
 from krx_quant.poisson_link import lines as poisson_link_lines
@@ -673,6 +676,19 @@ def _error_breakdown(days: int, algorithm: str) -> int:
     return 0
 
 
+def _nightly_hit_rates(nights: int) -> int:
+    """The hit rates beside the nightly swap over the latest ``nights`` nights (#437); exit 1 without
+    the store or a night that carries them."""
+    settings = Settings.from_env(require_kis=False)
+    store = open_store(settings)
+    if store is None:
+        print("KRX_OBJECT_STORE is not set: the nights' promotion lists are there", file=sys.stderr)
+        return 1
+    found = compared_nights(store, nights)
+    print("\n".join(hit_rate_lines(found, nights)))
+    return 0 if found else 1
+
+
 def _daily_check(days: int) -> int:
     settings = Settings.from_env(require_kis=False)
     calendar = calendar_store(settings).calendar
@@ -1084,6 +1100,18 @@ def main(argv: list[str] | None = None) -> int:
     error_cmd.add_argument(
         "--algorithm", default=ERROR_ALGORITHM, help=f"the algorithm (default {ERROR_ALGORITHM})"
     )
+    hit_rates_cmd = sub.add_parser(
+        "nightly-hit-rates",
+        help="print the champion's and the challenger's hit rates the nightly reports carry beside the"
+        " log loss's swap (#437), by algorithm over the latest nights: mismatches, what a hit-rate-first"
+        " rule would have chosen; reads the store only, no price",
+    )
+    hit_rates_cmd.add_argument(
+        "--nights",
+        type=_positive,
+        default=HIT_RATE_NIGHTS,
+        help=f"the latest N nights whose promotion lists carry the hit rates (default {HIT_RATE_NIGHTS})",
+    )
     daily_cmd = sub.add_parser(
         "daily-check",
         help="print what the daily kinds did on the latest trading days (#264); reads only, writes nothing",
@@ -1255,6 +1283,8 @@ def _command(args: argparse.Namespace) -> int:
         return _signal_review(args.days)
     elif args.command == "error-breakdown":
         return _error_breakdown(args.days, args.algorithm)
+    elif args.command == "nightly-hit-rates":
+        return _nightly_hit_rates(args.nights)
     elif args.command == "structure-check":
         return _structure_check(args.days)
     elif args.command == "daily-check":
