@@ -74,6 +74,7 @@ from krx_quant.market_calendar import MarketCalendar
 from krx_quant.night_probe import evening, subscribed_nights
 from krx_quant.notify import Alerts
 from krx_quant.order_probe import NO_KEYS
+from krx_quant.poisson_link import REPORT as POISSON_LINK_REPORT
 from krx_quant.prevalidation import MIN_DAYS, REGISTERED_BEFORE, LastReport, last_report, report_path
 from krx_quant.process_log import KRX_QUANT, Child, run_logged
 from krx_quant.process_log import Ran as Ran  # a job's process, once it ended
@@ -2440,6 +2441,41 @@ CLIMATE_PRIOR = Job(
 )
 
 
+# The asymmetric link experiment (#439): poisson's pre-validation was refused, always flat and 5.2
+# points below the climate baseline (2026-10-31, #204). ``poisson-link`` walks that pre-validation's
+# folds over the training samples, replaying nothing, and compares the climate alone, poisson as it
+# is and poisson's lean through a multinomial link of its own, on the same bar closes
+# (``poisson_link.py``). Run as ``climate-prior-429`` is (``_until_a_run_ends_ok``): once, on the
+# first night with ``MIN_DAYS`` recorded days; after a failure, again on other code. A day fits
+# poisson twice (the fold's, and the intensities its link is tuned with) and the link six times:
+# a minute or two, its memory logged a day (#383). The three hours are a bound, with room for the
+# burst CPU running out. Last with the other experiments: it holds back no simulation nor
+# pre-validation. Its output holds counts, rates, lifts, leans, coefficients and dates, no price.
+# Whether poisson takes the link is proposed from it on #439, and decided in another PR.
+POISSON_LINK_ISSUE = 439
+POISSON_LINK = Job(
+    name="poisson-link-439",
+    due=_until_a_run_ends_ok,
+    command=("poisson-link",),
+    timeout=timedelta(hours=3),
+    targets=(
+        Target(
+            POISSON_LINK_ISSUE,
+            note=(
+                "에이전트가 이 출력으로 #439의 비교 규칙을 판정하고, poisson에 넣을지에 대한 안을 "
+                "이슈에 남긴다. 규칙은 돌리기 전에 정했다: (c)가 (b)보다 낫고((c) over (b)가 0보다 "
+                "크고) 기후 대비 거래일 단위 하한이 (b)보다 높으면 순서형 연결이 poisson을 막았다는 "
+                "뜻이다. 그러면 연결을 바꾸는 안을 낸다(코드 digest가 바뀌어 사전 검증이 다시 돈다). "
+                "아니면 쏠림 분위별로 나온 클래스와 (c)의 쏠림 가중치로 입력에 정보가 있는지 정리한다. "
+                "결과로 poisson을 저절로 바꾸지 않는다. 출력에는 시세 값이 없다(날짜, 개수, 비율, "
+                "lift, 쏠림, 계수만)."
+            ),
+        ),
+    ),
+    attach=(Attachment(f"리포트 state/{POISSON_LINK_REPORT}", POISSON_LINK_REPORT),),
+)
+
+
 JOBS: tuple[Job, ...] = (
     DIAGNOSE,
     SIGNAL_REVIEW,
@@ -2478,4 +2514,5 @@ JOBS: tuple[Job, ...] = (
     BAR_CLOSE_SIMULATION,
     *prevalidation_jobs([*(a.name for a in ALGORITHMS), *(a.name for a in KIND_ALGORITHMS)]),
     CLIMATE_PRIOR,
+    POISSON_LINK,
 )

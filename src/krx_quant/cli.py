@@ -65,6 +65,9 @@ from krx_quant.night_probe import probe_night
 from krx_quant.nightly import from_the_server, run_training
 from krx_quant.notify import send_notice, send_test_alert
 from krx_quant.order_probe import probe_kis_orders
+from krx_quant.poisson_link import REPORT as POISSON_LINK_REPORT
+from krx_quant.poisson_link import lines as poisson_link_lines
+from krx_quant.poisson_link import poisson_link_experiment
 from krx_quant.predictions import DB_NAME, PredictionStore
 from krx_quant.prevalidation import (
     PREVALIDATION_DAYS,
@@ -526,6 +529,18 @@ def _climate_prior(days: int) -> int:
     return 0
 
 
+def _poisson_link(days: int) -> int:
+    """The asymmetric link experiment for poisson (#439): its lines; exit 1 without a recorded day."""
+    settings = Settings.from_env(require_kis=False)
+    try:
+        result = poisson_link_experiment(settings, days=days)
+    except FileNotFoundError as e:
+        print(e, file=sys.stderr)
+        return 1
+    print("\n".join(poisson_link_lines(result, settings.state_dir / POISSON_LINK_REPORT)))
+    return 0
+
+
 def _simulate(which: str) -> int:
     """Simulate the probations that wait for it (#298), print what came of them; exit 1 if one
     could not run."""
@@ -982,6 +997,17 @@ def main(argv: list[str] | None = None) -> int:
         default=PREVALIDATION_DAYS,
         help=f"recorded trading days to predict (default: {PREVALIDATION_DAYS})",
     )
+    poisson_link_cmd = sub.add_parser(
+        "poisson-link",
+        help="compare the climate baseline, poisson and poisson's lean through an asymmetric multinomial"
+        " link on the pre-validation's folds (#439; reads the training samples, replays nothing)",
+    )
+    poisson_link_cmd.add_argument(
+        "--days",
+        type=_positive,
+        default=PREVALIDATION_DAYS,
+        help=f"recorded trading days to predict (default: {PREVALIDATION_DAYS})",
+    )
     train_cmd = sub.add_parser(
         "train", help="train every algorithm on KRX_OBJECT_STORE's latest days and store the promotion list"
     )
@@ -1205,6 +1231,8 @@ def _command(args: argparse.Namespace) -> int:
         return _prevalidate(args.algorithm, args.days)
     elif args.command == "climate-prior":
         return _climate_prior(args.days)
+    elif args.command == "poisson-link":
+        return _poisson_link(args.days)
     elif args.command == "train":
         return _train(args.day, args.from_store)
     elif args.command == "simulate":
