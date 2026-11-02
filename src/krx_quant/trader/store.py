@@ -892,7 +892,7 @@ class TraderStore:
 
     def accept_order(self, order: int, branch: str | None, number: str) -> None:
         """A sell kept before it was sent (#460), as KIS took it: its order (``branch`` None for one
-        found on the inquiry whose branch KIS never named), open."""
+        found on the inquiry, which names it by number alone), open."""
         with self._db:
             self._db.execute(
                 "UPDATE orders SET broker_id = ?, broker_branch = ?, status = ? WHERE id = ?",
@@ -1034,17 +1034,6 @@ class TraderStore:
             (mode, SENT),
         )
         return [(r["id"], r["decision_id"], _placed(r), _day_of(r), _entry_of(r["entry"])) for r in rows]
-
-    def broker_branches(self, mode: str) -> set[str]:
-        """Every branch KIS named in its answers to ``mode``'s orders (#460: ``KRX_FWDG_ORD_ORGNO``,
-        kept with each order KIS took)."""
-        rows = self._db.execute(
-            "SELECT broker_branch FROM orders WHERE mode = ? AND coalesce(broker_branch, '') != ''"
-            " UNION SELECT broker_branch FROM unfilled_buys"
-            " WHERE mode = ? AND coalesce(broker_branch, '') != ''",
-            (mode, mode),
-        )
-        return {str(r[0]) for r in rows}
 
     def broker_numbers(self, mode: str) -> set[str]:
         """Every KIS order number ``mode``'s ledger keeps (#406): its trades' orders' and its buys'

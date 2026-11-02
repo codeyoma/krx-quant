@@ -604,10 +604,6 @@ class OrderRow:
     average: float  # avg_prvs
     cancel: bool  # cncl_yn Y
     at: str  # ord_tmd, HHMMSS
-    # ord_gno_brno; "" when the row has none. Whether it is the order answer's KRX_FWDG_ORD_ORGNO,
-    # which a cancel names, is not measured (#403 ⚠): the mock book cancels by it only when it is a
-    # branch KIS named in an order answer (#460, ``mock.MockTrader._branch``).
-    branch: str = ""
 
     @classmethod
     def of(cls, row: Mapping[str, Any]) -> OrderRow:
@@ -625,7 +621,6 @@ class OrderRow:
             average=_amount(row, "avg_prvs"),
             cancel=_field(row, "cncl_yn") == "Y",
             at=_field(row, "ord_tmd"),
-            branch=str(row.get("ord_gno_brno") or "").strip(),
         )
 
     @property

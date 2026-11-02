@@ -71,13 +71,14 @@ on its day's order inquiry (``reconcile.candidates``: a sell of 005930 at its li
 quantity, placed around when it was sent, whose number the ledger does not keep, not the order
 probe's): for ``Timing.wait`` right after, then every ``Timing.retry`` seconds, and at a start. When
 exactly one KIS order can be it and nothing is left of it (or its day is over), its fills are the
-trade's; when something is left and its inquiry branch (``ord_gno_brno``) is one KIS named in an
-order answer (``_branch``), it is followed as the order it is (its cancel names that branch): a
-sale's is taken off before the rest is sold, a take-profit rests. None, more than one, an inquiry
-not read, or one with something left whose branch KIS never named: it stays as sent. The stop, the
-time barrier, a pause that sells and the loss limits then sell nothing; their sale begins (kept for
-once it is settled) and is told on Telegram, to check the KIS account. Nothing clears it but KIS's
-inquiry: ``krx-quant trade resume`` does not (it cannot tell whether the sell went in).
+trade's, and the sale goes on with what is left. None, more than one, an inquiry not read, or one
+with something left: it stays as sent. One with something left is not cancelled: a cancel names
+KIS's branch, which the inquiry shows as ``ord_gno_brno``, not measured yet to be the order answer's
+``KRX_FWDG_ORD_ORGNO`` (#403 ⚠), as for a lost buy; it is adopted once it is over on KIS (filled, or
+ended at the close). The stop, the time barrier, a pause that sells and the loss limits then sell
+nothing; their sale begins (kept for once it is settled) and is told on Telegram, to check the KIS
+account. Nothing clears it but KIS's inquiry: ``krx-quant trade resume`` does not (it cannot tell
+whether the sell went in).
 
 **The live account's own 005930** (#460): before each live buy, the account's balance is read; while
 it holds 005930 (nothing of the ledger's is open then: one position at a time), the buy is not sent
@@ -1431,17 +1432,15 @@ class MockTrader(PaperTrader):
 
     def _settle_lost(self, rows: Sequence[OrderRow], today: date) -> bool:
         """The sell whose answer was lost against its day's inquiry ``rows`` (module doc): the trade's
-        once exactly one KIS order can be it and nothing is left of it (or its day is over), or what is
-        left can be cancelled (``_branch``). Whether it was settled."""
+        once exactly one KIS order can be it and nothing is left of it (or its day is over). Whether
+        it was settled."""
         lost, trade = self._lost, self._open
         assert lost is not None and trade is not None
         known = self.store.broker_numbers(self.mode)
         found = candidates(rows, lost.placed, lost.day, known, self._probe(lost.day), SIDE_SELL)
         row = found[0] if len(found) == 1 else None
-        over = row is not None and (lost.day < today or row.left == 0)
-        branch = None if row is None else self._branch(row)
-        if row is not None and (over or branch is not None):
-            self._adopt_sell(trade, lost, row, branch, over)
+        if row is not None and (lost.day < today or row.left == 0):
+            self._adopt_sell(trade, lost, row)
             return True
         if len(found) != lost.found or lost.unread:  # said when it changes, not at every look
             log.warning(
@@ -1450,66 +1449,40 @@ class MockTrader(PaperTrader):
                 lost.purpose,
                 trade.id,
                 len(found),
-                ", with shares left, whose branch KIS never named in an order answer" if row else "",
+                ", with shares left on KIS (not cancelled: its branch is not measured)" if row else "",
                 self._timing.retry,
             )
             self._lost = replace(lost, found=len(found), unread=False)
         return False
 
-    def _adopt_sell(
-        self, trade: OpenTrade, lost: _Lost, row: OrderRow, branch: str | None, over: bool
-    ) -> None:
-        """The sell whose answer was lost is KIS's order ``row``: its fills are the trade's; with
-        nothing left of it (``over``) it is closed, else followed as the order it is, its cancel naming
-        ``branch``. Every share sold, the trade exits."""
-        self.store.accept_order(lost.order, branch, row.number)
-        resting = Resting(
-            lost.order,
-            lost.placed.price,
-            lost.placed.quantity,
-            branch or "",
-            row.number,
-            0,
-            0.0,
-            lost.purpose,
-            lost.day,
+    def _adopt_sell(self, trade: OpenTrade, lost: _Lost, row: OrderRow) -> None:
+        """The sell whose answer was lost is KIS's order ``row``, over: its fills are the trade's, and
+        it is closed. Every share sold, the trade exits; else its sale goes on with what is left."""
+        self.store.accept_order(lost.order, None, row.number)  # found on the inquiry: no branch named
+        placed = lost.placed
+        order = Resting(
+            lost.order, placed.price, placed.quantity, "", row.number, 0, 0.0, lost.purpose, lost.day
         )
-        if lost.purpose == TAKE_PROFIT:
-            self._resting = resting
-            self._open = trade = replace(trade, take_profit_order=lost.order)
-        else:
-            self._live = resting
         self._lost = None
-        kept = self._keep(resting, row)
-        if over:
-            self._close_sell(kept)
+        kept = self._keep(order, row)
+        self._close_sell(kept)
         self._dirty = True
         log.warning(
-            "trader: the %s sell of trade %s whose answer was lost was found on KIS: %s of %s filled%s",
+            "trader: the %s sell of trade %s whose answer was lost was found on KIS, over: %s of %s filled",
             lost.purpose,
             trade.id,
             row.filled,
-            lost.placed.quantity,
-            "" if over else ", the rest followed",
+            placed.quantity,
         )
         said = "익절 매도" if lost.purpose == TAKE_PROFIT else "매도"
-        rest = "" if over else ", 남은 것은 따라갑니다"
         self._notify(
             f"자동 매매({self.mode}): 응답이 없던 {said} 주문을 KIS 주문 체결 조회에서 찾아 장부에 넣었습니다"
-            f"({lost.placed.quantity}주 가운데 {row.filled}주 체결{rest})."
-            " 이 매매는 원래 규칙(목표가, 손절가, 시간)대로 팝니다."
+            f"({placed.quantity}주 가운데 {row.filled}주 체결). 이 매매는 원래 규칙(목표가, 손절가, 시간)대로"
+            " 팝니다."
         )
         if self._all_sold(trade):
             whole = lost.purpose == TAKE_PROFIT and kept.filled >= kept.quantity
             self._finish(trade, TAKE_PROFIT if whole else self._selling or lost.purpose)
-
-    def _branch(self, row: OrderRow) -> str | None:
-        """The branch a cancel of ``row``, an order found on the inquiry alone, names (#460): its own
-        (``ord_gno_brno``) when it is a branch KIS named in its answer to an order of this mode
-        (``KRX_FWDG_ORD_ORGNO``, kept in the ledger), as KIS named it there; else None, and it is not
-        cancelled: that the two are the same field is not measured (#403 ⚠)."""
-        named = sorted(self.store.broker_branches(self.mode))
-        return next((b for b in named if same_number(b, row.branch)), None)
 
     def _finish(self, trade: OpenTrade, reason: str) -> None:
         """Every share of ``trade`` sold: its exit kept from its sells' fills."""
