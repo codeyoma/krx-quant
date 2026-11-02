@@ -1,14 +1,15 @@
 """The KIS account against the ledger (#406, #393 "KIS 주문"): what a mock start compares before
-the trader buys or sells anything, and which KIS order a buy whose answer was lost is.
+the trader buys or sells anything, and which KIS order a buy or a sell whose answer was lost is.
 
 The mock book (``mock.MockTrader.start``) first reads its own orders on KIS, each on the day it was
 placed (an order of a day gone by is over: a KRX limit order is a day order), and looks up each buy
-it sent whose answer it never had (``store.SENT``, ``candidates``). Then ``compare`` holds the
-account's balance and the day's order inquiry against what the ledger holds:
+it sent whose answer it never had (``store.SENT``, ``candidates``), and the sell (#460). Then
+``compare`` holds the account's balance and the day's order inquiry against what the ledger holds:
 
 - **005930 held**: the ledger's open trade's shares not sold yet, give or take what its orders still
-  open on KIS may fill between the reads (a buy's ``rmn_qty`` more, a sell's fewer). More is held
-  outside the ledger; fewer is missing from the account.
+  open on KIS may fill between the reads (a buy's ``rmn_qty`` more, a sell's fewer; a sell whose
+  answer was lost, #460, all of its shares fewer). More is held outside the ledger; fewer is missing
+  from the account.
 - **Any other symbol held**: outside the ledger (the trader trades 005930 alone).
 - **The day's orders with something left** (``rmn_qty`` above 0) that the trader does not follow
   (its open buy, its resting take-profit, a sale's sell): outside the ledger, but for those placed
@@ -37,12 +38,13 @@ from typing import Any
 
 from krx_quant.feeds.base import KST
 from krx_quant.kis_orders import SIDE_BUY, Balance, OrderRow, same_number
-from krx_quant.trader import SYMBOL
+from krx_quant.trader import LIVE, SYMBOL
 from krx_quant.trader.mock_check import PROBE_JOB
 from krx_quant.trader.store import Placed
 
-# A lost buy is a KIS buy placed (by KIS's ``ord_tmd``) from this long before it was sent to this
-# long after: KIS's clock and the trader's are both KST, a few seconds apart at most.
+# A lost order (a buy, #406; a sell, #460) is a KIS order placed (by KIS's ``ord_tmd``) from this long
+# before it was sent to this long after: KIS's clock and the trader's are both KST, a few seconds apart
+# at most.
 LOST_BEFORE = timedelta(seconds=10)
 LOST_AFTER = timedelta(minutes=2)
 
@@ -125,12 +127,18 @@ class Finding:
             found.append(f"장부의 포지션 가운데 {self.missing}주가 계좌에 없습니다")
         if self.doubtful:
             found.append(f"응답이 없던 매수 {self.doubtful}건을 KIS의 주문 하나로 가리지 못했습니다")
+        # The live account (#460): its own 005930 stops new entries though a resume accepts it.
+        live = (
+            " 다만 실전 계좌에 장부 밖의 005930이 있는 동안에는 재개해도 새로 사지 않습니다(#460)."
+            if mode == LIVE and SYMBOL in self.new.holdings
+            else ""
+        )
         return (
             f"자동 매매({mode}): 시작할 때 KIS 계좌가 장부와 다릅니다: {'; '.join(found)}."
             " 장부 밖의 것은 건드리지 않고, 새로 사지 않습니다(새 진입 정지). 장부의 포지션은 원래 규칙"
             "(목표가, 손절가, 시간)대로 팝니다. 서버에서 KIS 모의투자 계좌를 확인한 뒤"
             " krx-quant trade resume으로 다시 켭니다: 그때 장부 밖의 보유와 주문은 trader의 것이 아닌"
-            " 것으로 받아들입니다."
+            f" 것으로 받아들입니다.{live}"
         )
 
 
@@ -152,24 +160,30 @@ def _probes(row: OrderRow, probe: Window) -> bool:
 
 
 def candidates(
-    rows: Sequence[OrderRow], buy: Placed, day: date, known: Iterable[str], probe: Window
+    rows: Sequence[OrderRow],
+    order: Placed,
+    day: date,
+    known: Iterable[str],
+    probe: Window,
+    side: str = SIDE_BUY,
 ) -> list[OrderRow]:
-    """The KIS orders of ``day`` that a buy sent at ``buy.at`` whose answer was lost could be: buys
-    of 005930 at its limit and of its quantity, placed from ``LOST_BEFORE`` before it was sent to
-    ``LOST_AFTER`` after, whose numbers the ledger does not keep (``known``), not the probe's."""
-    assert buy.at is not None
+    """The KIS orders of ``day`` that an order of ``side`` (a buy, #406; a sell, #460) sent at
+    ``order.at`` whose answer was lost could be: orders of 005930 of that side at its limit and of
+    its quantity, placed from ``LOST_BEFORE`` before it was sent to ``LOST_AFTER`` after, whose
+    numbers the ledger does not keep (``known``), not the probe's."""
+    assert order.at is not None
     numbers = list(known)
     found = []
     for r in rows:
         at = placed_at(r, day)
         if (
             r.cancel
-            or r.side != SIDE_BUY
+            or r.side != side
             or r.symbol != SYMBOL
-            or r.price != round(buy.price)
-            or r.quantity != buy.quantity
+            or r.price != round(order.price)
+            or r.quantity != order.quantity
             or at is None
-            or not buy.at - LOST_BEFORE <= at <= buy.at + LOST_AFTER
+            or not order.at - LOST_BEFORE <= at <= order.at + LOST_AFTER
             or any(same_number(r.number, n) for n in numbers)
             or _probes(r, probe)
         ):
@@ -189,9 +203,10 @@ def compare(
 ) -> Finding:
     """The account (``balance``, the day's inquiry ``today``) against the ledger: ``followed`` the
     KIS numbers of the orders the trader follows, ``held`` the fewest and the most shares of 005930
-    the ledger can hold (its open trade's shares not sold yet, less what its open sells may still
-    sell, plus what its open buy may still buy); ``accepted`` what was accepted outside it, ``probe``
-    when the order probe ran that day, ``doubtful`` the lost buys not adopted (module doc)."""
+    the ledger can hold (its open trade's shares not sold yet, less what its open sells and a sell
+    whose answer was lost may still sell, plus what its open buy may still buy); ``accepted`` what
+    was accepted outside it, ``probe`` when the order probe ran that day, ``doubtful`` the lost buys
+    not adopted (module doc)."""
     low, high = held
     shares = balance.held(SYMBOL)
     holdings = {s: h.quantity for s, h in balance.holdings.items() if s != SYMBOL and h.quantity > 0}

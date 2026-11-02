@@ -27,8 +27,8 @@ starts it again in the other mode (``run.py``).
   (no record does);
   - ``reconcile``: no reconcile that paused new entries (``reconciles`` ``held``, #406): it pauses only
     on what neither the ledger nor the order probe explains;
-  - ``unresolved``: nothing of the mode left open from before today: an order, a buy sent whose
-    answer was lost, a trade;
+  - ``unresolved``: nothing of the mode left open from before today: an order, a buy or a sell
+    (#460) sent whose answer was lost, a trade;
   - ``flat``: every trade of the period sold before its day's closing auction;
   - ``gap``: the adverse gap of each leg against the paper shadow's fill of the same prediction
     (``gap.pairing``: of the same book, #427, the practice trades against the practice shadow's), in
@@ -61,9 +61,10 @@ until the server reviews it and resumes (``krx-quant trade resume``), which begi
 the cap from then. The loss limits stay the capital's (#396).
 
 **What is left on the live account** (``exposure``): an open live trade, a live order open, or a
-live buy sent whose answer was not had. While any is left the trader never falls back to paper: a
-start that would (the champion no longer passes) runs the live book anyway to wind it down, buying
-nothing new, and the trader starts again as paper only once nothing is left (``run.LiveWatch``).
+live buy or sell (#460) sent whose answer was not had. While any is left the trader never falls back
+to paper: a start that would (the champion no longer passes) runs the live book anyway to wind it
+down, buying nothing new, and the trader starts again as paper only once nothing is left
+(``run.LiveWatch``).
 
 Nothing here sends an order; ``step`` writes the lift, the breach and its pause into the store, the
 rest reads it.
@@ -172,7 +173,8 @@ def trips(db: sqlite3.Connection, mode: str, days: Iterable[date], since: dateti
 
 def exposure(db: sqlite3.Connection, mode: str = LIVE) -> int:
     """What of ``mode`` is left on the KIS account by the ledger (module doc): its open trades, its
-    open orders, its buys sent whose answer was not had or still open on KIS. 0 when none is."""
+    open orders and its sells sent whose answer was not had (#460), its buys sent whose answer was
+    not had or still open on KIS. 0 when none is."""
     left = 0
     if _has(db, "trades"):
         left += db.execute(
@@ -180,7 +182,7 @@ def exposure(db: sqlite3.Connection, mode: str = LIVE) -> int:
             (mode,),
         ).fetchone()[0]
     if _has(db, "orders"):
-        query = "SELECT count(*) FROM orders WHERE mode = ? AND status = 'open'"
+        query = "SELECT count(*) FROM orders WHERE mode = ? AND status IN ('open', 'sent')"
         left += db.execute(query, (mode,)).fetchone()[0]
     if _has(db, "unfilled_buys"):
         left += db.execute(
@@ -293,7 +295,7 @@ def clean_checks(
     left = 0
     if _has(db, "orders"):
         left += db.execute(
-            "SELECT count(*) FROM orders WHERE mode = ? AND status = 'open' AND placed_at < ?",
+            "SELECT count(*) FROM orders WHERE mode = ? AND status IN ('open', 'sent') AND placed_at < ?",
             (mode, midnight),
         ).fetchone()[0]
     if _has(db, "unfilled_buys"):

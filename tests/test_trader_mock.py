@@ -165,11 +165,12 @@ class MockDay:
     # The trader stopped after the last event once this holds, its order in flight cancelled (a stop
     # that does not wait for it): None waits for the order as ever.
     stop_when: Callable[[], bool] | None = None
+    mode: str = MOCK  # the book's: ``live`` on the same fake account (#460), KIS's answers alike
 
     async def run(self, events: Sequence[Event]) -> list[dict[str, Any]]:
         engine = PredictionStore(self.state / ENGINE_DB)
         store = TraderStore(self.state / DB_NAME)
-        store.add_run(self.started_at, MOCK, {})  # as the trader keeps its start
+        store.add_run(self.started_at, self.mode, {})  # as the trader keeps its start
         clock = [self.started_at]
         self.account.clock = lambda: clock[0]  # KIS's time and day are the test's
         try:
@@ -191,6 +192,7 @@ class MockDay:
                     lambda: clock[0],
                     self.notices.append,
                     self.timing,
+                    self.mode,
                 )
                 await book.start()  # the account reconciled with the ledger first (#406)
                 book.select(Selection((pick(BARRIER),)), self.started_at)
