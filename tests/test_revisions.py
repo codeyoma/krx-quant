@@ -350,11 +350,12 @@ async def test_a_review_day_passed_while_it_waited_makes_it_active_once_its_pre_
     past day 40 miss, a review day). Output: it stays on probation and the review day is kept;
     the pass that night makes it active at the engine's next start, the reason saying both. Had a
     later review day of the same probation not passed, or a new target restarted its probation
-    since, the pass would leave it on probation."""
+    since, the pass would leave it on probation; a reviewed refactor deployed in between keeps the
+    review day (the same revision)."""
     deploy = at("06:00:00", weekdays_before(DAY, 9)[0])
-    later, restarted = tmp_path / "later.db", tmp_path / "restarted.db"
+    later, restarted, mapped = tmp_path / "later.db", tmp_path / "restarted.db", tmp_path / "mapped.db"
     db = tmp_path / "engine.db"
-    for each in (db, later, restarted):
+    for each in (db, later, restarted, mapped):
         await ten_days_right(each, deploy)
         await run(
             db=each,
@@ -380,20 +381,26 @@ async def test_a_review_day_passed_while_it_waited_makes_it_active_once_its_pre_
         )
     night_pass = Gate({"alpha": "a2"}, {("alpha", deploy): Verdict(True, "")})
     next_day = DAY + timedelta(days=1)
+    # A reviewed refactor of a2 deployed before the pass (#457 review): the same revision, a new row.
+    refactor = Refactor("alpha", "a2", "a3", "PR 0: the same samples, model and forecasts")
+    await start(mapped, at("21:00:00"), Gate({"alpha": "a3"}, refactors=[refactor]), [ALPHA])
+    mapped_pass = Gate({"alpha": "a3"}, {("alpha", deploy): Verdict(True, "")}, refactors=[refactor])
 
     for each in (db, later, restarted):
         await start(each, at("06:00:00", next_day), night_pass, [ALPHA])
+    await start(mapped, at("06:00:00", next_day), mapped_pass, [ALPHA])
 
-    previous, status, reason = last_change_of(db, "alpha")
-    assert (previous, status) == ("probation", "active")
-    assert reason.startswith("10 days on probation;") and reason.endswith(f"; {CODE_PASSED}")
+    for each in (db, mapped):
+        previous, status, reason = last_change_of(each, "alpha")
+        assert (previous, status) == ("probation", "active")
+        assert reason.startswith("10 days on probation;") and reason.endswith(f"; {CODE_PASSED}")
     assert last_change_of(later, "alpha") == ("active", "probation", CODE_CHANGED), (
         "its latest review day failed"
     )
     assert last_change_of(restarted, "alpha")[1:] == ("probation", target_changed("direction", 9)), (
         "another stint: its review day was the earlier probation's"
     )
-    for each in (db, later, restarted):
+    for each in (db, later, restarted, mapped):
         with stored(each) as store:
             assert store.revisions()["alpha"].verdict == REVISION_PASSED
 

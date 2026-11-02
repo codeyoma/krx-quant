@@ -722,7 +722,8 @@ class PredictionEngine:
 
     def _held_review(self, revision: Revision, standing: Standing) -> str | None:
         """The reason of the review day ``revision``'s algorithm passed live while its new code
-        waited for its pre-validation (#454), if the latest review day of its probation now
+        waited for its pre-validation (#454: of the revision begun at its boundary, a reviewed
+        refactor's row too), if the latest review day of its probation now
         (``standing``: the stint, since a new target's restart begins another) passed; None if it is
         not on probation, no review day of this stint was reached, or the latest did not pass
         (``_review`` keeps each: ``REVISION_REVIEW_RUN``)."""
@@ -735,7 +736,7 @@ class PredictionEngine:
             return None
         if (
             not isinstance(kept, dict)
-            or kept.get("revision") != revision.id
+            or kept.get("boundary") != revision.boundary.astimezone(KST).isoformat()
             or kept.get("stint") != standing.since.astimezone(KST).isoformat()
             or not kept.get("passed")
         ):
@@ -1163,6 +1164,8 @@ class PredictionEngine:
             c = promoted.get(name)
             kept = {
                 "revision": revision.id,
+                # The revision's, kept by a reviewed refactor's row too: what the pass matches.
+                "boundary": revision.boundary.astimezone(KST).isoformat(),
                 "stint": standing.since.astimezone(
                     KST
                 ).isoformat(),  # its probation's: a restart begins another
