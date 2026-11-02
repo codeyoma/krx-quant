@@ -39,15 +39,21 @@ sizes the buy (``paper.size``).
 > (``Pick.fraction``), of the capital → f* sizes nothing. 이유: spec #468 4 "크기": with stops a few
 > ticks away f* is mostly far above 1, the whole capital.
 
-**Practice** (#427, ``Selection.practice``). Each cost map also names the cell the mock book
-practises on a day no champion cell trades (``desk.Desk``, ``KRX_TRADER_MOCK_PRACTICE``): of the
-cells with a verdict at a market order's round trip (``pass`` or ``fail``; ``few`` and a cell
-without a predictor or a p* are left out), the one whose hit rate's lower bound less p* is the
-greatest, its rank's figures finite (the lower bound, p*) and its row's barrier sound (W and the tick
-above 0, C at least 0, its reference price above 0); of two alike, by the kinds' order, then the
-predictors'. It buys at ``KRX_TRADER_THRESHOLD`` (``threshold`` None) one share
-(``PRACTICE_SHARES``, ``Pick.quantity``: its Kelly is mostly at most 0), within the cash and the
-capital still. It is no pick of the champion's: its trades carry no policy and count in no record.
+**Practice** (#427, ``Selection.practisable``). Each cost map also names the cells the mock book may
+practise on a day no champion cell trades (``desk.Desk``, ``KRX_TRADER_MOCK_PRACTICE``): the cells
+with a verdict at a market order's round trip (``pass`` or ``fail``; ``few`` and a cell without a
+predictor or a p* are left out), their rank's figures finite (the lower bound, p*) and their row's
+barrier sound (W and the tick above 0, C at least 0, its reference price above 0), in the picks'
+order. Each buys one share (``PRACTICE_SHARES``, ``Pick.quantity``: its Kelly is mostly at most 0),
+within the cash and the capital still. The nightly job freezes one of them, at a θ, for a whole
+review cycle (#474, ``practice.py``: the greatest lower bound of the net a signal replayed). It is
+no pick of the champion's: its trades carry no policy and count in no record.
+
+> **바뀜** (2026-11-03, #479): each cost map named the practice cell (``Selection.practice``: the
+> greatest lower bound less p* of these), which every pick took, at ``KRX_TRADER_THRESHOLD`` → it
+> names the cells that may be practised, and the nightly job freezes one for a review cycle at its
+> own θ. 이유: spec #468 6 "연습" (the user's choice, 2026-11-02): a practice re-picked at every pick
+> was no fixed strategy.
 """
 
 from __future__ import annotations
@@ -111,8 +117,8 @@ class Pick:
     tick: float | None
     # f*, uncut, a diagnosis alone (#471); None for a practice cell whose call right does not pay (#427)
     kelly: float | None
-    # The rise's probability that buys, the policy's for this cell (#399); None: the trader's
-    # ``Rules.threshold`` (before the first policy).
+    # The rise's probability that buys, the policy's for this cell (#399), or the practice cell's frozen
+    # for the review cycle (#474); None: the trader's ``Rules.threshold``.
     threshold: float | None = None
     # The shares it buys, within the cash and the capital, in place of a loss budget's (#427: a practice
     # cell's one); None: the loss budget's (#471, ``paper.size``).
@@ -167,8 +173,9 @@ class Selection:
     reason: str | None = None
     detail: str | None = None
     policy: int | None = None  # the policy version applied; None: none yet (#399)
-    # The cell the mock book would practise on this cost map (#427, module doc); None: no cell can.
-    practice: Pick | None = None
+    # The cells the mock book may practise on this cost map (#427, module doc), in the picks' order;
+    # the nightly job freezes one for a review cycle (#474, ``practice.py``).
+    practisable: tuple[Pick, ...] = ()
     # Under a policy (#469, ``policy.apply``): each of its cells in its order, whether it trades and,
     # if not, why (``GONE``, ``NO_COST_MAP``; ``OFF_MAP`` or the cost map's verdict before #472).
     cells: tuple[dict[str, Any], ...] = ()
@@ -189,7 +196,9 @@ class Selection:
         """A line for the log."""
         if self.practising:
             why = replace(self, picks=()).describe()
-            return f"practice on {self.picks[0].kind} {self.picks[0].predictor}, a share at a time ({why})"
+            p = self.picks[0]
+            theta = "" if p.threshold is None else f" at θ {p.threshold:g}"
+            return f"practice on {p.kind} {p.predictor}{theta}, a share at a time ({why})"
         if self.picks:
             under = "" if self.policy is None else f"policy {self.policy}: "
             return under + "; ".join(
@@ -306,13 +315,15 @@ def choose(body: Mapping[str, Any]) -> Selection:
     unique: dict[Cell, Pick] = {}
     for p in picks:
         unique.setdefault(p.cell, p)
-    practice = min(practised, key=_rank) if practised else None
+    practisable: dict[Cell, Pick] = {}
+    for p in sorted(practised, key=_rank):
+        practisable.setdefault(p.cell, p)
     return Selection(
         tuple(unique.values()),
         tuple(considered),
         as_of,
         None if unique else NO_PASS,
-        practice=practice,
+        practisable=tuple(practisable.values()),
         named=tuple(named.values()),
     )
 

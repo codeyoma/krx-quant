@@ -40,9 +40,11 @@ same cells' predictions and the same quotes, in one process.
   Before they pass the trader runs the desk in paper (its mode ``paper``).
 - **Mock practice** (#427, ``KRX_TRADER_MOCK_PRACTICE=on``, mock mode alone): at a pick whose cost
   map was read and whose champion was read (none yet counts as read) but with no champion cell to
-  trade (``NO_PASS``, ``NOT_IN_POLICY``), the champion's book trades the cost map's practice cell
-  (``Selection.practice``: the greatest lower bound less p* of the cells with a verdict) one share at a
-  time at ``KRX_TRADER_THRESHOLD``. Not after ``NO_COST_MAP`` nor ``NO_POLICY``. The KIS book stays
+  trade (``NO_PASS``, ``NOT_IN_POLICY``, ``NO_CHAMPION``), the champion's book trades the practice
+  cell kept for the review cycle in force (#474, ``practice.frozen``: chosen by the nightly job, at
+  its θ) one share at a time; none while no cell is kept for the cycle (``practice.NOT_FROZEN``), nor
+  for the rest of the cycle once a pick finds its predictor gone (``GONE``, ``practice.rest``: never
+  another cell). Not after ``NO_COST_MAP`` nor ``NO_POLICY``. The KIS book stays
   the one owner of the account's orders: no second book orders on KIS, and one position or buy waits
   at a time whichever cell it is of. Once a pick finds a champion cell again, the practice cell is
   picked no more (a rise of it waiting is ``not_picked``); a practice position is sold by its own
@@ -51,6 +53,11 @@ same cells' predictions and the same quotes, in one process.
   shadow and record never hold a practice trade; a practice shadow's trade left open is sold by its
   barriers whatever the mode or the setting. The practice trades are of no policy and no record
   counts them (``store.PRACTICE_TRADE``); the KIS checks, the limits and the cash do (#427).
+
+  > **바뀜** (2026-11-03, #479): the practice cell was the cost map's at each pick
+  > (``Selection.practice``: the greatest lower bound less p* of the cells with a verdict), at
+  > ``KRX_TRADER_THRESHOLD`` → the cell and θ kept for the review cycle. 이유: spec #468 6 "연습"
+  > (the user's choice, 2026-11-02): one practice strategy frozen for a cycle.
 - **Records** (``record``): while a trading day's session is open (from its open to the end of its
   closing auction), each running book's policy ran that day (``policy_days``), always in paper
   (#405): the champion's (in mock and live mode its shadow's), stopped once its status is not
@@ -83,7 +90,7 @@ from krx_quant.feeds.base import KST, kst_day
 from krx_quant.kis_orders import Broker
 from krx_quant.market_calendar import Session
 from krx_quant.special import Window
-from krx_quant.trader import KIS_MODES, LIVE, MOCK, PAPER, SYMBOL, live, policy, review
+from krx_quant.trader import KIS_MODES, LIVE, MOCK, PAPER, SYMBOL, live, policy, practice, review
 from krx_quant.trader.cells import Cell, Signal, gone
 from krx_quant.trader.limits import RUNNING, Notify
 from krx_quant.trader.mock import MockTrader, Timing
@@ -119,6 +126,19 @@ def under_champion(
         len(champion.cells),
     )
     return policy.apply(champion, selection, () if gone_of is None else gone_of(champion))
+
+
+def practice_state(enabled: bool, kept: practice.Frozen | None = None) -> dict[str, Any]:
+    """``GET /v1/trader``'s ``practice`` (#427): whether it is on, whether the book practises now and
+    on which cell (set by the pick), the cell kept for the review cycle (#474, ``frozen``) and why it
+    does not practise (``why``, ``practice.py``; null while it does, and with the practice off)."""
+    return {
+        "enabled": enabled,
+        "active": False,
+        "cell": None,
+        "frozen": None if kept is None else kept.as_json(),
+        "why": None,
+    }
 
 
 class Desk:
@@ -209,7 +229,7 @@ class Desk:
                 account=self._paper_account,
                 since=self.simulated_since(),
             )
-        self.champion.practice_state = {"enabled": practice, "active": False, "cell": None}
+        self.champion.practice_state = practice_state(practice)
         self.challengers: dict[int, PaperTrader] = {}
         self._running: set[int] = set()  # the challengers picked, not retired
         self._recorded: dict[tuple[int, date], bool] = {}  # each record kept today, and if stopped
@@ -301,7 +321,7 @@ class Desk:
             return self._gone(kept, cycle, at)
 
         under = under_champion(self.store, selection, gone_of)
-        chosen = self._practising(under)
+        chosen, self.champion.practice_state = self._practising(under, cycle, at)
         self.champion.select(chosen, at)
         if self.mode in KIS_MODES and self.shadow is not None:
             self.shadow.select(under, at)
@@ -310,11 +330,6 @@ class Desk:
                 self.practice_shadow.select(chosen, at)
             else:  # no new practice entry; a practice position is sold by its barriers (#427)
                 self.practice_shadow.retire(at)
-        self.champion.practice_state = {
-            "enabled": self.practice,
-            "active": chosen.practising,
-            "cell": chosen.picks[0].as_json() if chosen.practising else None,
-        }
         running: dict[int, policy.Policy] = {}
         try:
             versions = self.store.running_challengers(kst_day(at))
@@ -375,15 +390,65 @@ class Desk:
             )
         return found
 
-    def _practising(self, under: Selection) -> Selection:
+    def _practising(
+        self, under: Selection, cycle: review.Cycle | None, at: datetime
+    ) -> tuple[Selection, dict[str, Any]]:
         """``under`` (the champion's pick), or with the practice on and no champion cell to trade on a
-        cost map and a champion read (none yet included), the practice cell's (#427, module doc)."""
-        if not self.practice or under.picks or under.reason not in (NO_PASS, NOT_IN_POLICY, NO_CHAMPION):
-            return under
-        if under.practice is None:
-            log.info("trader: no cell can be practised on this cost map: no practice until the next pick")
-            return under
-        return replace(under, picks=(under.practice,))
+        cost map and a champion read (none yet included), the practice cell kept for ``cycle`` (#474,
+        module doc); with ``GET /v1/trader``'s ``practice`` (#427)."""
+        if not self.practice:
+            return under, practice_state(False)
+        kept = self._frozen(cycle, at)
+        state = practice_state(True, kept)
+        why: str | None = None
+        if under.picks:
+            why = practice.CHAMPION
+        elif under.reason not in (NO_PASS, NOT_IN_POLICY, NO_CHAMPION):
+            why = under.reason
+        elif kept is None:
+            why = practice.NOT_FROZEN
+            log.info(
+                "trader: no practice cell is kept for review cycle %s yet (the nightly job chooses one):"
+                " no practice until one is",
+                "?" if cycle is None else cycle.number,
+            )
+        elif kept.gone_at is not None:
+            why = GONE
+            log.info(
+                "trader: the practice cell %s %s is gone: no practice until review cycle %s ends",
+                kept.pick.kind,
+                kept.pick.predictor,
+                kept.cycle,
+            )
+        if why is not None or kept is None:
+            return under, state | {"why": why}
+        return replace(under, picks=(kept.pick,)), state | {"active": True, "cell": kept.pick.as_json()}
+
+    def _frozen(self, cycle: review.Cycle | None, at: datetime) -> practice.Frozen | None:
+        """The practice cell kept for ``cycle`` (#474), found gone at ``at`` if its predictor no longer
+        predicts (``cells.gone``, as a policy's cell, #469: kept, so that it rests for the rest of the
+        cycle); None without one, or when the store cannot say (logged)."""
+        if cycle is None:
+            return None
+        try:
+            kept = practice.frozen(self.store.db, cycle.evaluation, cycle.number)
+            if kept is None or kept.gone_at is not None or self.engine is None:
+                return kept
+            if kept.cell not in gone(self.engine, SYMBOL, [kept.cell], at):
+                return kept
+            log.warning(
+                "trader: the practice cell %s %s is %s: its predictor no longer predicts; no practice until"
+                " review cycle %s ends, and no other cell takes its place",
+                kept.pick.kind,
+                kept.pick.predictor,
+                GONE,
+                cycle.number,
+            )
+            practice.rest(self.store.db, cycle.evaluation, cycle.number, at)
+            return practice.frozen(self.store.db, cycle.evaluation, cycle.number)
+        except (sqlite3.Error, ValueError, KeyError, TypeError) as e:
+            log.error("trader: cannot read the practice cell of review cycle %s (%s): none", cycle.number, e)
+            return None
 
     def on_special(self, windows: Sequence[Window]) -> None:
         for book in self.books:

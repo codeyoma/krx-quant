@@ -2804,7 +2804,7 @@
         "policy": {"type": ["integer", "null"], "minimum": 1},
         "champion": {"type": "boolean", "description": "#400: the champion's trade (the trader's, which the limits hold and the chart marks); false: a challenger's paper trade, or the shadow's."},
         "shadow": {"type": "boolean", "description": "#405: the champion policy's paper shadow's trade in mock mode (champion false): its paper record, never the trader's."},
-        "practice": {"type": "boolean", "description": "#427: the mock book's practice trade (KRX_TRADER_MOCK_PRACTICE: on a day no champion cell traded, one share of the practice cell at KRX_TRADER_THRESHOLD; champion true, the trader's own, which the limits hold), or the practice shadow's (shadow true). Of no policy (policy null, fraction null): no record, promotion or live gate counts it; the mock execution checks do."},
+        "practice": {"type": "boolean", "description": "#427: the mock book's practice trade (KRX_TRADER_MOCK_PRACTICE: on a day no champion cell traded, one share of the practice cell at the θ kept for the review cycle, #474; at KRX_TRADER_THRESHOLD before it; champion true, the trader's own, which the limits hold), or the practice shadow's (shadow true). Of no policy (policy null, fraction null): no record, promotion or live gate counts it; the mock execution checks do."},
         "anchor": {"type": "number", "exclusiveMinimum": 0},
         "tick": {"type": "number", "exclusiveMinimum": 0},
         "width_ticks": {"type": "integer", "minimum": 1},
@@ -3003,7 +3003,7 @@
         },
         "live": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/trader_live"}]},
         "practice": {
-          "description": "#427: the mock practice (KRX_TRADER_MOCK_PRACTICE, mock mode alone): whether it is on (enabled), whether the champion's book practises now (active: its last pick read the cost map and the champion but found no champion cell to trade, no_pass or not_in_policy), and the practice cell then (cell, null when not active). Null before #427's trader first wrote its state.",
+          "description": "#427: the mock practice (KRX_TRADER_MOCK_PRACTICE, mock mode alone): whether it is on (enabled), whether the champion's book practises now (active: its last pick read the cost map and the champion but found no champion cell to trade, no_pass, not_in_policy or no_champion, and a practice cell is kept for the review cycle in force), and the practice cell then (cell, null when not active). #474: the cell kept for the review cycle in force (frozen) and why the book does not practise (why). Null before #427's trader first wrote its state.",
           "oneOf": [
             {"type": "null"},
             {
@@ -3013,7 +3013,15 @@
               "properties": {
                 "enabled": {"type": "boolean"},
                 "active": {"type": "boolean"},
-                "cell": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/trader_practice_cell"}]}
+                "cell": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/trader_practice_cell"}]},
+                "frozen": {
+                  "description": "#474: the practice cell kept for the review cycle in force at the last pick (null: none kept yet, or the practice off; absent in a state written before #474).",
+                  "oneOf": [{"type": "null"}, {"$ref": "#/$defs/trader_practice_frozen"}]
+                },
+                "why": {
+                  "description": "#474: why the champion's book does not practise at the last pick, the practice on: champion (a champion cell trades), not_frozen (no practice cell kept for the review cycle in force yet: the nightly job chooses one), gone (the cell's predictor no longer predicts: none until the cycle ends), or the pick's own reason (no_cost_map, no_policy). Null while it practises, and with the practice off; absent in a state written before #474.",
+                  "oneOf": [{"type": "null"}, {"enum": ["champion", "not_frozen", "gone", "no_cost_map", "no_policy"]}]
+                }
               }
             }
           ]
@@ -3372,8 +3380,40 @@
         "practice": {"type": "boolean", "description": "#427: the mock book's practice trade (the trader's own, of no policy)."}
       }
     },
+    "trader_practice_frozen": {
+      "description": "#474: the mock practice cell kept for a review cycle: chosen by the nightly job once for the cycle (chosen_at), of the cells with a verdict at a market order's round trip (pass or fail), the cell and θ (threshold) whose net per signal replayed alone a share (#470) has the greatest day-level 95% lower bound (per_signal, in ticks; it may be below 0) of those that bought at least 20 times. signals and bought: its signals and buys on the replay; wins: those that netted above 0; measured: the cell × θ measured that night; eligible: those that bought enough. gone_at: when a pick found its predictor gone (no practice until the cycle ends), else null.",
+      "type": "object",
+      "required": ["evaluation", "cycle", "chosen_at", "kind", "role", "predictor", "threshold", "per_signal", "signals", "bought", "wins", "measured", "eligible", "gone_at"],
+      "additionalProperties": false,
+      "properties": {
+        "evaluation": {"type": "integer", "minimum": 1},
+        "cycle": {"type": "integer", "minimum": 1},
+        "chosen_at": {"$ref": "#/$defs/time"},
+        "kind": {"enum": ["direction", "barrier", "barrier_15m", "barrier_30m"]},
+        "role": {"enum": ["consensus", "top", "baseline"]},
+        "predictor": {"type": "string"},
+        "threshold": {"type": "number", "minimum": 0, "maximum": 1},
+        "per_signal": {
+          "type": "object",
+          "required": ["value", "low", "high", "days"],
+          "additionalProperties": false,
+          "properties": {
+            "value": {"type": "number"},
+            "low": {"type": "number"},
+            "high": {"type": "number"},
+            "days": {"type": "integer", "minimum": 2}
+          }
+        },
+        "signals": {"type": "integer", "minimum": 0},
+        "bought": {"type": "integer", "minimum": 0},
+        "wins": {"type": "integer", "minimum": 0},
+        "measured": {"type": "integer", "minimum": 1},
+        "eligible": {"type": "integer", "minimum": 1},
+        "gone_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]}
+      }
+    },
     "trader_practice_cell": {
-      "description": "#427: the cell the mock book practises: of the cells with a verdict at a market order's round trip (pass or fail; few and none left out), the greatest hit rate's lower bound less p* (priority), its figures as the cost map gave them (W, the market cost C in ticks at its reference price and tick, Kelly f* or null when a call right does not pay its cost). It buys quantity shares (1) at KRX_TRADER_THRESHOLD (threshold null), within the cash and the capital: no loss budget (#471; fraction 0 before it).",
+      "description": "#427: the cell the mock book practises, its figures as the cost map gave them (W, the market cost C in ticks at its reference price and tick, Kelly f* or null when a call right does not pay its cost; priority: the hit rate's lower bound less p*). #474: the cell kept for the review cycle, as the cost map gave it the night it was chosen, at its θ (threshold); before #474 the greatest priority of the cells with a verdict at each pick, at KRX_TRADER_THRESHOLD (threshold null). It buys quantity shares (1) within the cash and the capital: no loss budget (#471; fraction 0 before it).",
       "type": "object",
       "required": ["kind", "role", "predictor", "p_star", "low", "priority", "calls", "width", "cost", "reference_price", "tick", "kelly", "threshold", "quantity", "practice"],
       "additionalProperties": false,

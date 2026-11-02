@@ -27,16 +27,16 @@ Its halts, pauses, resumes and re-arms go to Telegram (``notify.Alerts.notice``)
 mode its failed orders.
 
 In mock mode (#405, ``KRX_TRADER_MODE=mock``) the champion's book orders on KIS's mock server
-(``mock.MockTrader``) through the trader's broker (``kis_orders.trader_broker``: the trader's own
-key, ``KRX_TRADER_KIS_*``); with ``KRX_TRADER_MOCK_PRACTICE=on`` (#427) it practises a cell on a day no
-champion cell trades (``desk.Desk``). The settings refuse the practice with paper and live, before a
-live trader falls back to paper. The trader does not start, and records no run, when that broker cannot
-be made: a key or the account missing, the collector's key, or servers that are not KIS's mock
-ones (``SettingsError``, exit 2). Before the loops begin it reconciles the KIS account with the
-ledger (#406, ``mock.MockTrader.start``): the ledger's orders read on KIS, the buys whose answer was
-lost looked up, what is outside the ledger paused on, the open trade sold past its time barrier or
-its take-profit placed again. A trader stopping waits for the order in flight
-(``mock.CLOSE_SECONDS``).
+(``mock.MockTrader``) through the trader's broker (``kis_orders.trader_broker``: the trader's own key,
+``KRX_TRADER_KIS_*``); with ``KRX_TRADER_MOCK_PRACTICE=on`` (#427) it practises a cell on a day no
+champion cell trades (``desk.Desk``: the cell frozen for the review cycle, #474). The settings refuse
+the practice with paper and live, before a live trader falls back to paper. The trader does not start,
+and records no run, when that broker cannot be made: a key or the account missing, the collector's key,
+or servers that are not KIS's mock ones (``SettingsError``, exit 2). Before the loops begin it
+reconciles the KIS account with the ledger (#406, ``mock.MockTrader.start``): the ledger's orders read
+on KIS, the buys whose answer was lost looked up, what is outside the ledger paused on, the open trade
+sold past its time barrier or its take-profit placed again. A trader stopping waits for the order in
+flight (``mock.CLOSE_SECONDS``).
 
 In live mode (#408, ``KRX_TRADER_MODE=live``) the trader makes the live broker as it starts
 (``kis_orders.trader_live_broker``: the live key, ``KRX_TRADER_LIVE_KIS_*``, on KIS's live servers; it
