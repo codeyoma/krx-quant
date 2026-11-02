@@ -60,7 +60,7 @@ which would stop it out at once). A cap below the capital (``cap``: the live mod
 mock book's practice cell, #427) buys that many in place of its budget, within the same cash and
 capital. The budget bounds the loss planned, not a gap past the stop.
 
-> **바뀜** (2026-11-03, #PRNUM): the cell's Kelly fraction (λ × f*, cut to 0–1) of the capital over
+> **바뀜** (2026-11-03, #478): the cell's Kelly fraction (λ × f*, cut to 0–1) of the capital over
 > the ask → the loss budget over a share's loss at the stop. 이유: spec #468 "크기가 사실상 전액이다":
 > with stops a few ticks away f* is mostly far above 1, the whole capital.
 

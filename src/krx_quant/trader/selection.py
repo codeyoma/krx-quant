@@ -26,7 +26,7 @@ p log(1 + f g) + (1 − p) log(1 − f ℓ) is greatest at f* = p ÷ ℓ − (1 
 when p > p* = (W + C) ÷ 2W. It is a diagnosis alone (``Pick.kelly``, #471): a trade's loss budget
 sizes the buy (``paper.size``).
 
-> **바뀜** (2026-11-03, #PRNUM): the trader bought ``KELLY_FRACTION`` (a half) of f*, cut to 0–1
+> **바뀜** (2026-11-03, #478): the trader bought ``KELLY_FRACTION`` (a half) of f*, cut to 0–1
 > (``Pick.fraction``), of the capital → f* sizes nothing. 이유: spec #468 4 "크기": with stops a few
 > ticks away f* is mostly far above 1, the whole capital.
 

@@ -42,7 +42,7 @@ kept, then the higher. A cell kept at no point is left out, and why: ``few_trade
 ``MIN_TRADES`` at every point), ``no_gain`` (no point grows the capital more). The same predictions,
 recordings, cost map, calendar and settings make the same policy.
 
-> **바뀜** (2026-11-03, #PRNUM): the grid was θ × λ (``KELLY_FRACTIONS`` 0.25, 0.5, 1), its ties going to
+> **바뀜** (2026-11-03, #478): the grid was θ × λ (``KELLY_FRACTIONS`` 0.25, 0.5, 1), its ties going to
 > the λ nearest ``KELLY_FRACTION`` then the lower → θ alone. 이유: #471 took λ out of the policy (spec
 > #468 4 "크기"); the change is that alone, the fit's target is #472's.
 

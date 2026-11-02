@@ -9,7 +9,7 @@ and the server's ``.env`` alone (#393 "한도와 정지"). A policy holds none o
 carried one would be read without it (``PolicyCell.from_json``), and nothing here reads or writes
 the trader's settings.
 
-> **바뀜** (2026-11-03, #PRNUM): each cell had a Kelly fraction λ too (the share of the cell's f*
+> **바뀜** (2026-11-03, #478): each cell had a Kelly fraction λ too (the share of the cell's f*
 > bought) → none: a policy that kept one (``kelly_fraction``, versions fitted before #471) is read
 > without it, its stored row as it was. 이유: spec #468 4 "크기": the loss budget sizes every buy.
 

@@ -10,7 +10,7 @@ of its policy's rules, which a promotion compares with the champion's (``promoti
 #471 the loss limits are simulated on its own trades (``Simulated``), so that it is held as the
 champion would have been.
 
-> **바뀜** (2026-11-03, #PRNUM): no limit held a challenger's book nor a shadow's (``Unlimited``) → the
+> **바뀜** (2026-11-03, #478): no limit held a challenger's book nor a shadow's (``Unlimited``) → the
 > daily and the cumulative loss limits are simulated on its own trades (``Simulated``). 이유: spec #468
 > 5 "모든 그림자 장부 … 기존 손실 한도를 흉내 낸다": unheld, they could not be compared with the champion.
 
