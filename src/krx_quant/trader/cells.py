@@ -20,9 +20,10 @@ write-ahead-log mode, so a reader sees each commit as it is made.
 
 Each prediction comes with its model version (``model_version``, #469): the nightly training goes on
 within a frozen policy version, and each trade keeps the model that bought it. A cell's predictor is
-gone (``gone``, #469) when the latest trading day its kind has predictions of 005930 on, before a
-pick, has none of it (any status): it was retired or taken out of the engine. A day the engine made
-none of the kind proves nothing, and nothing is gone then.
+gone (``gone``, #469) when the latest trading day before a pick's day that its kind has predictions
+of 005930 on has none of it (any status): it was retired or taken out of the engine. Whole days
+alone: the pick's own day may have only the bar closes a slower predictor has not finished yet. A
+day the engine made none of the kind proves nothing, and nothing is gone then.
 """
 
 from __future__ import annotations
@@ -32,7 +33,7 @@ import logging
 import sqlite3
 from collections.abc import Collection, Iterable
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 from pathlib import Path
 
 from krx_quant.feeds.base import KST
@@ -215,15 +216,16 @@ class EngineReader:
         return windows, signals
 
 
-def gone(path: Path, symbol: str, cells: Collection[Cell], before: datetime) -> set[Cell]:
-    """The ``cells`` whose predictor is gone before ``before`` (#469, module doc): the latest trading
-    day with predictions of the cell's kind of ``symbol`` before then has none of its predictor. None
-    without the engine's database (read-only, at once)."""
+def gone(path: Path, symbol: str, cells: Collection[Cell], at: datetime) -> set[Cell]:
+    """The ``cells`` whose predictor is gone at a pick at ``at`` (#469, module doc): the latest trading
+    day before ``at``'s day with predictions of the cell's kind of ``symbol`` has none of its
+    predictor. None without the engine's database (read-only, at once)."""
     if not cells or not path.exists():
         return set()
+    day = datetime.combine(at.astimezone(KST).date(), time(), KST).isoformat()
     db = open_engine_db(path)
     try:
-        return {c for c in cells if _gone(db, c, symbol, before.astimezone(KST).isoformat())}
+        return {c for c in cells if _gone(db, c, symbol, day)}
     finally:
         db.close()
 
@@ -246,7 +248,7 @@ def _gone(db: sqlite3.Connection, cell: Cell, symbol: str, before: str) -> bool:
     last = db.execute(latest, (*keys, before)).fetchone()[0]
     if last is None:
         return False  # no prediction of the kind at all: nothing to tell from
-    day = datetime.combine(datetime.fromisoformat(last).astimezone(KST).date(), datetime.min.time(), KST)
+    day = datetime.combine(datetime.fromisoformat(last).astimezone(KST).date(), time(), KST)
     return db.execute(its, (cell.predictor, *keys, day.isoformat(), before)).fetchone() is None
 
 

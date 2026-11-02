@@ -23,8 +23,9 @@ from krx_quant.feeds.base import KST
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.predictions import DB_NAME as ENGINE_DB
 from krx_quant.predictions import PredictionStore
+from krx_quant.trader import SYMBOL, promotion, review
 from krx_quant.trader import policy as policies
-from krx_quant.trader import promotion, review
+from krx_quant.trader.cells import gone
 from krx_quant.trader.desk import under_champion
 from krx_quant.trader.promotion import BETWEEN_REVIEWS, REVIEWED
 from krx_quant.trader.run import run_trader
@@ -232,6 +233,28 @@ def test_a_cell_whose_predictor_is_gone_trades_no_more_until_the_next_review(
     assert all(p["evaluation"] == 2 for p in picks)
     assert "policy 1's cell barrier breiman is gone" in caplog.text
     assert not [d for d in rows(tmp_path, "decisions") if d["bar_close"] < "2026-11-11"], "not read"
+
+
+def test_a_predictor_is_gone_on_a_whole_day_alone(tmp_path: Path) -> None:
+    """On 10-13 breiman and barrier-persist predicted; on 10-14 by 10:00:30 only barrier-persist's
+    10:00 is stored (breiman, slower, not yet): a pick then does not find breiman gone. Nor does one
+    without any prediction of the kind, nor one without the engine's database."""
+    engine_db = tmp_path / ENGINE_DB
+    assert gone(engine_db, SYMBOL, [BARRIER], at("10:00:30")) == set(), "no database"
+    engine = PredictionStore(engine_db)
+    assert gone(engine_db, SYMBOL, [BARRIER], at("10:00:30")) == set(), "no prediction of the kind"
+    for shown in (
+        Barrier("2026-10-13 10:00:00"),
+        Barrier("2026-10-13 10:00:00", predictor="barrier-persist"),
+        Barrier("10:00:00", predictor="barrier-persist"),
+    ):
+        shown.write(engine)
+    engine.close()
+
+    assert gone(engine_db, SYMBOL, [BARRIER], at("10:00:30")) == set()
+    assert gone(engine_db, SYMBOL, [BARRIER], at("2026-10-15 08:30:00")) == {BARRIER}, (
+        "10-14, whole, has none of it"
+    )
 
 
 def test_a_trade_keeps_its_model_version_and_the_evaluation_version_in_force(tmp_path: Path) -> None:
