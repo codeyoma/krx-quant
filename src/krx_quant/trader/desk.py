@@ -53,7 +53,7 @@ same cells' predictions and the same quotes, in one process.
   barriers whatever the mode or the setting. The practice trades are of no policy and no record
   counts them (``store.PRACTICE_TRADE``); the KIS checks, the limits and the cash do (#427).
 
-  > **바뀜** (2026-11-03, #PR474): the practice cell was the cost map's at each pick
+  > **바뀜** (2026-11-03, #479): the practice cell was the cost map's at each pick
   > (``Selection.practice``: the greatest lower bound less p* of the cells with a verdict), at
   > ``KRX_TRADER_THRESHOLD`` → the cell and θ kept for the review cycle. 이유: spec #468 6 "연습"
   > (the user's choice, 2026-11-02): one practice strategy frozen for a cycle.

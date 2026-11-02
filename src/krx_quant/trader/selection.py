@@ -40,7 +40,7 @@ within the cash and the capital still. The nightly job freezes one of them, at a
 review cycle (#474, ``practice.py``: the greatest lower bound of the net a signal replayed). It is
 no pick of the champion's: its trades carry no policy and count in no record.
 
-> **바뀜** (2026-11-03, #PR474): each cost map named the practice cell (``Selection.practice``: the
+> **바뀜** (2026-11-03, #479): each cost map named the practice cell (``Selection.practice``: the
 > greatest lower bound less p* of these), which every pick took, at ``KRX_TRADER_THRESHOLD`` → it
 > names the cells that may be practised, and the nightly job freezes one for a review cycle at its
 > own θ. 이유: spec #468 6 "연습" (the user's choice, 2026-11-02): a practice re-picked at every pick
