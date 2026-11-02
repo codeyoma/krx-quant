@@ -24,10 +24,9 @@ challengers stay in paper. The trader holds no order code: the KIS order calls l
 - **Rules** (``paper.py``): a prediction of the rise (up; the barrier's up_first) at or above the
   threshold (its cell's under the champion policy) buys, when nothing is held and no special
   situation (a VI, a circuit breaker, a sidecar) touches its window. Of the rises of one bar
-  close, the cell ranked first (the champion's order; before the first, the greatest hit rate's
-  lower bound less p*) buys. Its reference price is the prediction's ``anchor``, the target
-  ``anchor + w × tick``, the stop ``anchor − w × tick`` (w = k for the direction) and the time
-  barrier the bar close plus the kind's horizon. Entries from five
+  close, the cell ranked first (the champion's order) buys. Its reference price is the
+  prediction's ``anchor``, the target ``anchor + w × tick``, the stop ``anchor − w × tick`` (w = k
+  for the direction) and the time barrier the bar close plus the kind's horizon. Entries from five
   minutes after the open (09:05), and only when the time barrier is by five minutes before the
   closing auction (15:15); no buy when the best ask has reached the target already.
 - **Size**: the cell's fractional Kelly (λ × f*, from its hit rate's lower bound and its payoff:
@@ -42,12 +41,17 @@ challengers stay in paper. The trader holds no order code: the KIS order calls l
   stored predictions and answers of the cost map's 20 days, simulating the trader's trades on the
   answers' paths at each point of a small grid. The first is the champion, the later ones
   challengers. At each pick the trader trades the champion's cells among those the cost map
-  passes, in its order, at its θ and λ; before the first champion, the cost map's cells at
-  ``KRX_TRADER_THRESHOLD`` and ``KELLY_FRACTION``.
+  passes, in its order, at its θ and λ; before the first champion, nothing (#469).
+- **Frozen version** (``review.py``, #469): the champion's cells (by their predictors' names), their
+  order and θ hold from one review to the next; a review falls every 20 trading days of the
+  trader's calendar, judged after its close and applied from the next trading day. The nightly
+  training goes on within the version, each trade keeping its prediction's model version; the
+  evaluation version (2) reads the records and the live gate from its first day alone.
 - **Challengers** (``desk.py``, ``promotion.py``, #400): up to three run in paper beside the
   champion from the next trading day, each in its own book on the same predictions and quotes,
   held by no limit nor pause; trades and decisions are split by policy version. The nightly job
-  promotes one that beat the champion on at least ten common trading days (the day-level lower
+  promotes, on a review night alone (#469), one that beat the champion on at least ten common
+  trading days (the day-level lower
   bound of challenger − champion net P&L above 0, Bonferroni over the challengers), after the
   market only. The live gate (#408): judged at checkpoints, every 20th day of the trader's paper
   history, on the champion of that day and its paper record of 20 days at least, the day-level
@@ -124,11 +128,12 @@ CAPITAL = 1_000_000
 # and the policy never touches them (``limits.py``).
 DAILY_LOSS_PERCENT = 10.0
 CUMULATIVE_LOSS_PERCENT = 20.0
-# The default threshold: a rise's probability at least this buys (the signal alerts' default);
-# until the first champion policy, whose θ for the cell it is from then on (#399).
+# The default threshold: a rise's probability at least this buys (the signal alerts' default); the
+# mock practice cell's (#427) and the nightly fit's default, a champion policy's cell having its own θ
+# (#399). Before the first champion nothing but the practice trades (#469).
 THRESHOLD = 0.6
-# The share of a cell's Kelly fraction bought (#395): half Kelly, cut to 0–1 after; until the
-# first champion policy, whose λ for the cell it is from then on (#399).
+# The share of a cell's Kelly fraction bought (#395): half Kelly, cut to 0–1 after; the nightly fit's
+# default, a champion policy's cell having its own λ (#399).
 KELLY_FRACTION = 0.5
 
 # The cost map the cells are picked from (#395): 005930's, its last 20 days with predictions, the

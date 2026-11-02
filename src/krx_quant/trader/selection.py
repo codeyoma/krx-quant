@@ -59,6 +59,12 @@ NO_PASS = "no_pass"  # the cost map was read: no cell's verdict passes
 NO_COST_MAP = "no_cost_map"  # it could not be read
 NOT_IN_POLICY = "not_in_policy"  # cells pass, none of them the champion policy's (#399, ``policy.apply``)
 NO_POLICY = "no_policy"  # the champion policy could not be read (#399): nothing trades
+NO_CHAMPION = "no_champion"  # no champion yet (#469): nothing trades before the first
+# Why a policy's cell does not trade (#469, ``policy.apply``), besides the cost map's verdict: its
+# predictor stopped predicting (for the rest of the review cycle), or the cost map does not name it
+# today (another predictor holds its role).
+GONE = "gone"
+OFF_MAP = "not_on_cost_map"
 # A cell with one of these verdicts may be practised (#427): ``few`` and none are left out.
 FAIL = "fail"
 PRACTISED = (PASS, FAIL)
@@ -141,6 +147,13 @@ class Selection:
     policy: int | None = None  # the policy version applied; None: none yet (#399)
     # The cell the mock book would practise on this cost map (#427, module doc); None: no cell can.
     practice: Pick | None = None
+    # Under a policy (#469, ``policy.apply``): each of its cells in its order, whether it trades and,
+    # if not, why (``GONE``, ``OFF_MAP``, or the cost map's verdict).
+    cells: tuple[dict[str, Any], ...] = ()
+    # The evaluation version and the review cycle the pick is made in (#469, ``review.py``); None
+    # before the evaluation was begun.
+    evaluation: int | None = None
+    cycle: int | None = None
 
     @property
     def practising(self) -> bool:
@@ -170,9 +183,20 @@ class Selection:
             + (f" ({c['why']})" if c["verdict"] and c.get("why") else "")
             for c in self.considered
         ]
+        if self.reason == NO_CHAMPION:
+            return "no champion yet: nothing trades before the first (#469); " + "; ".join(seen)
         if self.reason == NOT_IN_POLICY:
-            return f"none of policy {self.policy}'s cells passes: " + "; ".join(seen)
-        return "none passes: " + "; ".join(seen)
+            return f"none of policy {self.policy}'s cells passes: " + "; ".join(seen) + self._missing()
+        return "none passes: " + "; ".join(seen) + self._missing()
+
+    def _missing(self) -> str:
+        """The policy's cells off the cost map or gone (#469), for the log line."""
+        found = [
+            f"{c['kind']} {c['predictor']} {c['why']}"
+            for c in self.cells
+            if not c["traded"] and c["why"] in (GONE, OFF_MAP)
+        ]
+        return f" (policy {self.policy}: " + "; ".join(found) + ")" if found else ""
 
 
 def kelly(low: float, width: float, cost: float, tick: float, price: float) -> float | None:

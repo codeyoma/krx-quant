@@ -27,7 +27,7 @@ from krx_quant.trader.desk import under_champion
 from krx_quant.trader.paper import BELOW_THRESHOLD, OUTRANKED
 from krx_quant.trader.policy import PolicyCell, PolicyError
 from krx_quant.trader.run import run_trader
-from krx_quant.trader.selection import NO_PASS, NO_POLICY, NOT_IN_POLICY, Selection, choose
+from krx_quant.trader.selection import NO_CHAMPION, NO_PASS, NO_POLICY, NOT_IN_POLICY, Selection, choose
 from krx_quant.trader.settings import TraderSettings
 from krx_quant.trader.store import DB_NAME, TraderStore, read_trades
 from tests.test_live_predictions import free_port
@@ -135,18 +135,26 @@ def test_the_champion_s_order_ranks_the_rises_of_a_bar_close(tmp_path: Path) -> 
     assert reasons == {FIFTEEN.predictor: None, BARRIER.predictor: OUTRANKED}
 
 
-def test_before_the_first_champion_the_cost_map_s_cells_trade_as_before(tmp_path: Path) -> None:
+def test_before_the_first_champion_nothing_trades(tmp_path: Path) -> None:
+    """#469: the cost map's passing cells traded before the first champion at the .env's θ and the
+    default λ; nothing does now, the pick kept with why (``no_champion``)."""
     store = TraderStore(tmp_path / DB_NAME)
-    passing = Selection((pick(BARRIER),))
+    body = cost_map([cost_row("barrier", top=predictor("breiman", 0.70, "pass"))])
     try:
         assert store.champion() is None
-        assert under_champion(store, passing) == passing
+        under = under_champion(store, choose(body))
     finally:
         store.close()
-    [trade] = Day(tmp_path, selection=passing).run(
+    assert (under.picks, under.reason, under.policy) == ((), NO_CHAMPION, None)
+    seen = {(c["kind"], c["predictor"]): (c["picked"], c["why"]) for c in under.considered}
+    assert seen[("barrier", "breiman")] == (False, NO_CHAMPION)
+    assert under.describe().startswith("no champion yet: nothing trades before the first")
+    trades = Day(tmp_path, desk=True, picks=choose(body).picks).run(
         [Read("10:00:02.3", [Barrier("10:00:00")]), quote("10:00:02.5", 70_000, 70_100)]
     )
-    assert (trade["policy"], trade["threshold"]) == (None, 0.6), "the .env's θ, no policy"
+    assert trades == []
+    [selection] = Day(tmp_path).selections()
+    assert (selection["reason"], selection["picks"]) == (NO_CHAMPION, "[]")
 
 
 def test_a_champion_that_cannot_be_read_trades_nothing(tmp_path: Path) -> None:

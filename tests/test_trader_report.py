@@ -34,7 +34,7 @@ from krx_quant.trader.selection import choose
 from krx_quant.trader.settings import TraderSettings
 from krx_quant.trader.store import DB_NAME, TraderStore
 from tests.test_trader_limits import BOUGHT, TEN, rules
-from tests.test_trader_promotion import CLOSE_CALL, WEEKDAYS, day_ran, judged_at, setup
+from tests.test_trader_promotion import CLOSE_CALL, WEEKDAYS, begun, day_ran, judged_at, setup
 from tests.test_trader_run import EngineApi
 from tests.trader_doubles import (
     BARRIER,
@@ -224,7 +224,9 @@ def test_a_cumulative_halt_re_armed_later_still_holds_in_the_reports_of_the_days
 
 def test_a_night_a_challenger_is_promoted_calls_an_agent(tmp_path: Path) -> None:
     """Policy 2 beats the champion on its tenth common day (``test_trader_promotion.py``: mean
-    +1,100 won a day, lower bound +63 won) and is promoted that night."""
+    +1,100 won a day, lower bound +63 won), a review day (#469: the 20th weekday from 08-18), and is
+    promoted that night."""
+    begun(tmp_path, date(2026, 8, 18))
     setup(tmp_path, CLOSE_CALL)
     tenth = WEEKDAYS[9]
     assert judged_at(tmp_path, at(f"{tenth} 22:31:00")).promoted == 2

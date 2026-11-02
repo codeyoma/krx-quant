@@ -1503,10 +1503,12 @@ async def _trader_trades(request: web.Request) -> web.Response:
 async def _trader(request: web.Request) -> web.Response:
     """The trader's state (#396), read from its store (read-only, off the event loop); its fields
     null before the trader first wrote it."""
-    now = request.app[ENGINE_KEY].clock.now()
+    engine = request.app[ENGINE_KEY]
+    now = engine.clock.now()
     state_dir = request.app[STATE_DIR_KEY]
     path = None if state_dir is None else state_dir / TRADER_DB
-    return _json(await asyncio.to_thread(read_trader, path, now))
+    # The review cycle (#469) counted on the engine's market calendar.
+    return _json(await asyncio.to_thread(read_trader, path, now, engine.calendar.session))
 
 
 async def _trader_days(request: web.Request) -> web.Response:

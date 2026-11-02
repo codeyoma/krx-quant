@@ -60,6 +60,7 @@ from tests.trader_doubles import (
     Read,
     Tick,
     at,
+    first_champion,
     keep,
     pick,
     policy_cell,
@@ -113,6 +114,7 @@ def decided(state: Path, mode: str) -> list[tuple[str, str, str | None]]:
 
 
 def paper_day(state: Path, started: str = "10:00:00") -> Day:
+    first_champion(state)  # #469: nothing trades before the first
     return Day(state, desk=True, stall_after=STALL_AFTER, started_at=at(started))
 
 

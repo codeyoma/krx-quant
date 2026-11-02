@@ -2824,10 +2824,11 @@
       }
     },
     "trader": {
-      "description": "GET /v1/trader (#396): the trader's state as it last wrote it into its store (at least every 5 s while it runs; alive while that is at most 15 s old), and the last 20 pauses, resumes and re-arms asked for, newest first (applied_at null until the trader has read one). Every field but alive and controls is null before the trader first wrote its state. #400: the champion's version, the live gate on its paper record, and the champion and each challenger running with their paper records (a challenger's with where it stands against the champion), read from the store whatever the trader wrote. #408: live, the live mode as the trader judged it at its start and at its last pick (null before #408's trader first wrote it).",
+      "description": "GET /v1/trader (#396): the trader's state as it last wrote it into its store (at least every 5 s while it runs; alive while that is at most 15 s old), and the last 20 pauses, resumes and re-arms asked for, newest first (applied_at null until the trader has read one). Every field but alive and controls is null before the trader first wrote its state. #400: the champion's version, the live gate on its paper record, and the champion and each challenger running with their paper records (a challenger's with where it stands against the champion), read from the store whatever the trader wrote. #408: live, the live mode as the trader judged it at its start and at its last pick (null before #408's trader first wrote it). #469: cycle, the review cycle in force and its evaluation version; the records, the promotion and the gate read that version's days alone.",
       "type": "object",
       "required": ["updated_at", "alive", "mode", "status", "started_at", "capital", "cash", "position", "today",
-                   "cumulative", "limits", "pause", "live", "practice", "controls", "champion", "gate", "policies"],
+                   "cumulative", "limits", "pause", "live", "practice", "controls", "champion", "gate", "policies",
+                   "cycle"],
       "additionalProperties": false,
       "properties": {
         "updated_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]},
@@ -2948,6 +2949,26 @@
         "controls": {"type": "array", "maxItems": 20, "items": {"$ref": "#/$defs/trader_control"}},
         "champion": {"type": ["integer", "null"], "minimum": 1},
         "gate": {"$ref": "#/$defs/trader_gate"},
+        "cycle": {
+          "description": "#469: the review cycle in force (the one being traded; after a day's close, the next trading day's): its evaluation version (2: the rules of #469) and that version's first day (since), the cycle's number from 1, its first trading day (start) and its review day (review, its 20th trading day: judged after its close, applied from the next trading day), the place in it of the trading day in force (day, 1 to days; null before the first cycle's start), counted on the engine's market calendar. Null before the trader or the nightly job first began the evaluation version.",
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "required": ["evaluation", "since", "number", "start", "review", "day", "days"],
+              "additionalProperties": false,
+              "properties": {
+                "evaluation": {"type": "integer", "minimum": 2},
+                "since": {"$ref": "#/$defs/day"},
+                "number": {"type": "integer", "minimum": 1},
+                "start": {"$ref": "#/$defs/day"},
+                "review": {"$ref": "#/$defs/day"},
+                "day": {"type": ["integer", "null"], "minimum": 1},
+                "days": {"type": "integer", "minimum": 1}
+              }
+            }
+          ]
+        },
         "policies": {
           "type": "array",
           "maxItems": 4,

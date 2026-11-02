@@ -93,7 +93,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import date, datetime
@@ -101,9 +101,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from krx_quant.feeds.base import KST
+from krx_quant.market_calendar import MarketCalendar, Session
 from krx_quant.pricing import SELL_TAX
-from krx_quant.trader import MOCK, PAPER, policy, promotion
+from krx_quant.trader import MOCK, PAPER, policy, promotion, review
+from krx_quant.trader.cells import Cell
 from krx_quant.trader.gap import day_gap
+from krx_quant.trader.selection import GONE
 
 if TYPE_CHECKING:
     from krx_quant.trader.selection import Selection
@@ -344,6 +347,13 @@ _ADDED = {
     "selections": (
         ("policy_id", "INTEGER REFERENCES policies (id)"),  # the policy applied (#399); null: none yet
         ("practice", "INTEGER"),  # 1: its pick is the mock book's practice cell (#427); null or 0: not
+        # JSON (#469): the policy's cells in its order, each traded or why not (``Selection.cells``);
+        # null without a policy and before #469.
+        ("cells", "TEXT"),
+        # The evaluation version and the review cycle the pick was made in (#469, ``review.py``); null
+        # before #469 and before the evaluation was begun.
+        ("evaluation", "INTEGER"),
+        ("cycle", "INTEGER"),
     ),
     "decisions": (
         ("selection_id", "INTEGER REFERENCES selections (id)"),  # the pick in force; null: none yet
@@ -371,6 +381,11 @@ _ADDED = {
         # 1: a practice trade (#427): the mock book's on its practice cell (``champion`` 1), or its paper
         # shadow's (``shadow`` 1); of no policy. Null or 0 otherwise.
         ("practice", "INTEGER"),
+        # The model version of the prediction that bought it (#469: the nightly training goes on within
+        # the frozen policy version), and the evaluation version in force on its entry day
+        # (``review.version_on``). Null before #469.
+        ("model_version", "TEXT"),
+        ("evaluation", "INTEGER"),
     ),
     "unfilled_buys": (
         ("practice", "INTEGER"),  # 1: a practice buy (#427); null or 0 otherwise
@@ -487,6 +502,8 @@ class Entry:
     shadow: bool = False
     # A practice trade (#427): the mock book's on its practice cell, or its paper shadow's.
     practice: bool = False
+    # The model version of the prediction that bought it (#469); None for one read before #469.
+    model_version: str | None = None
 
 
 @dataclass(frozen=True)
@@ -623,6 +640,7 @@ class TraderStore:
             f"BEGIN;{_SCHEMA.format(decisions=_DECISIONS.format(name='decisions'))}{_STALLS}COMMIT;"
         )
         policy.ensure_schema(self._db)
+        review.ensure_schema(self._db)
         with self._db:
             for table, columns in _ADDED.items():
                 have = {r["name"] for r in self._db.execute(f"PRAGMA table_info({table})")}
@@ -697,7 +715,7 @@ class TraderStore:
         with self._db:
             cursor = self._db.execute(
                 "INSERT INTO selections (at, mode, as_of, picks, considered, reason, detail, policy_id,"
-                " practice) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " practice, cells, evaluation, cycle) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     iso(at),
                     mode,
@@ -708,10 +726,29 @@ class TraderStore:
                     selection.detail,
                     selection.policy,
                     int(selection.practising),
+                    json.dumps(list(selection.cells), ensure_ascii=False) if selection.cells else None,
+                    selection.evaluation,
+                    selection.cycle,
                 ),
             )
         assert cursor.lastrowid is not None
         return cursor.lastrowid
+
+    def gone(self, policy_id: int, evaluation: int, cycle: int) -> set[Cell]:
+        """The cells of policy ``policy_id`` a pick of review cycle ``cycle`` (of ``evaluation``) found
+        gone (#469, ``selection.GONE``): their predictors stopped predicting, so they trade no more until
+        the next review, even should they come back."""
+        found: set[Cell] = set()
+        rows = self._db.execute(
+            "SELECT cells FROM selections WHERE policy_id = ? AND evaluation = ? AND cycle = ?"
+            " AND cells IS NOT NULL",
+            (policy_id, evaluation, cycle),
+        )
+        for (text,) in rows:
+            for cell in json.loads(text):
+                if cell.get("why") == GONE:
+                    found.add(Cell(cell["kind"], cell["predictor"]))
+        return found
 
     def decided(
         self, mode: str, policy_id: int | None, kind: str, predictor: str, prediction_id: int
@@ -1497,7 +1534,8 @@ class TraderStore:
             "INSERT INTO trades (mode, symbol, kind, predictor, prediction_id, bar_close, probability,"
             " threshold, anchor, tick, width_ticks, target, stop, time_barrier, decided_at, entry_at,"
             " entry_price, quantity, buy_fee, selection_id, role, p_star, precision_low, kelly, fraction,"
-            f" policy_id, champion, shadow, practice) VALUES ({', '.join('?' * 29)})",
+            " policy_id, champion, shadow, practice, model_version, evaluation)"
+            f" VALUES ({', '.join('?' * 31)})",
             (
                 entry.mode,
                 entry.symbol,
@@ -1528,6 +1566,8 @@ class TraderStore:
                 int(entry.champion),
                 int(entry.shadow),
                 int(entry.practice),
+                entry.model_version,
+                review.version_on(self._db, entry.entry_at.astimezone(KST).date()),
             ),
         )
         assert cursor.lastrowid is not None
@@ -1651,16 +1691,19 @@ def request_pause(path: Path, sell_now: bool, at: datetime) -> dict[str, Any]:
         store.close()
 
 
-def read_trader(path: Path | None, now: datetime) -> dict[str, Any]:
+def read_trader(
+    path: Path | None, now: datetime, sessions: Callable[[date], Session | None] | None = None
+) -> dict[str, Any]:
     """``GET /v1/trader`` (#396): the trader's state as it last wrote it, whether it is running
     (that state at most ``ALIVE_SECONDS`` old at ``now``), and the last controls asked for, newest
     first (those not read yet with ``applied_at`` null); the champion, the live gate on its record
     and the policies running with theirs (#400, ``promotion.progress``), in the mode it runs in
-    (#405). Its fields null without a store (an engine without a state folder, a trader not started
-    yet)."""
+    (#405); the review cycle in force and its evaluation version (#469, ``review.state``), counted on
+    ``sessions`` (the engine's market calendar; by default one that guesses the weekdays trade). Its
+    fields null without a store (an engine without a state folder, a trader not started yet)."""
     body: dict[str, Any] = dict.fromkeys(TRADER_FIELDS)
     body |= {"updated_at": None, "alive": False, "controls": []}
-    body |= {"champion": None, "gate": promotion.no_gate().as_json(), "policies": []}
+    body |= {"champion": None, "gate": promotion.no_gate().as_json(), "policies": [], "cycle": None}
     if path is None:
         return body
     with _reading(path) as db:
@@ -1677,6 +1720,7 @@ def read_trader(path: Path | None, now: datetime) -> dict[str, Any]:
                 body["alive"] = abs((now - updated).total_seconds()) <= ALIVE_SECONDS
         # The records of the mode it runs in (#405): its state's, else the mode it last started in.
         body |= promotion.progress(db, body["mode"])
+        body["cycle"] = review.state(db, now, sessions or MarketCalendar().session)
         if "controls" in tables:
             rows = db.execute("SELECT * FROM controls ORDER BY id DESC LIMIT ?", (CONTROLS_SHOWN,))
             body["controls"] = [_control(r).as_json() for r in rows]

@@ -94,7 +94,7 @@ from krx_quant.predictions import KIND_ANSWER_JOIN, KIND_SCORED, SCORED, TOUCH_J
 from krx_quant.pricing import Direction, tick_size
 from krx_quant.special import Window
 from krx_quant.stats import Prices, touch_profit
-from krx_quant.trader import KELLY_FRACTION, SYMBOL, THRESHOLD, promotion
+from krx_quant.trader import KELLY_FRACTION, SYMBOL, THRESHOLD, promotion, review
 from krx_quant.trader import policy as policies
 from krx_quant.trader.cells import Cell, Signal, open_engine_db, special_windows, traded_kind
 from krx_quant.trader.paper import Plan, Rules, plan, shares
@@ -582,6 +582,7 @@ def refit_from(
     left_out = tuple({**x, "read": seen.get(Cell(x["kind"], x["predictor"]), {})} for x in fitted.left_out)
     result = fitted.result
     fit_json: dict[str, Any] = {
+        "evaluation": review.EVALUATION,  # #469: the rules it is fitted and judged under
         "cost_map": {"as_of": selection.as_of, "period": body.get("period"), "passed": len(selection.picks)},
         "grid": grid.as_json(),
         "fee_rate": fee_rate,

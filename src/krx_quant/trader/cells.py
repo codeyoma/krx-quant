@@ -17,6 +17,12 @@ write-ahead-log mode, so a reader sees each commit as it is made.
 - The special situations' windows the engine kept as it learned them (``special_windows``, #236,
   ``special.py``): 005930's VIs and the whole market's circuit breakers and sidecars, each with
   its start and end (a VI's end, while its release is not known, the least it lasts).
+
+Each prediction comes with its model version (``model_version``, #469): the nightly training goes on
+within a frozen policy version, and each trade keeps the model that bought it. A cell's predictor is
+gone (``gone``, #469) when the latest trading day its kind has predictions of 005930 on, before a
+pick, has none of it (any status): it was retired or taken out of the engine. A day the engine made
+none of the kind proves nothing, and nothing is gone then.
 """
 
 from __future__ import annotations
@@ -24,7 +30,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -63,6 +69,7 @@ class Signal:
     width: int | None  # the barriers' width in ticks: k for the direction, w for a barrier
     horizon: timedelta  # the kind's: the time barrier is the bar close plus it
     blocked: str | None = None  # why the engine blocked a final consensus (#88)
+    model_version: str | None = None  # the model that made it (#469)
 
     @property
     def rise_probability(self) -> float | None:
@@ -103,7 +110,7 @@ class CellReader:
     def _direction(self, db: sqlite3.Connection) -> list[Signal]:
         rows = db.execute(
             "SELECT p.id, p.bar_close, p.displayed_at, p.status, p.p_up, p.p_flat, p.p_down,"
-            " o.mid_close, o.flat_ticks, b.reason AS blocked"
+            " p.model_version, o.mid_close, o.flat_ticks, b.reason AS blocked"
             " FROM predictions p LEFT JOIN outcomes o ON o.prediction_id = p.id"
             " LEFT JOIN blocks b ON b.prediction_id = p.id"
             " WHERE p.algorithm = ? AND p.symbol = ? AND p.bar_close > ? ORDER BY p.bar_close, p.id",
@@ -129,13 +136,14 @@ class CellReader:
                     width=r["flat_ticks"],
                     horizon=self._kind.horizon,
                     blocked=r["blocked"],
+                    model_version=r["model_version"],
                 )
             )
         return signals
 
     def _other(self, db: sqlite3.Connection) -> list[Signal]:
         rows = db.execute(
-            "SELECT id, bar_close, displayed_at, status, output, anchor, tick, width_ticks"
+            "SELECT id, bar_close, displayed_at, status, output, anchor, tick, width_ticks, model_version"
             " FROM kind_predictions WHERE kind = ? AND symbol = ? AND algorithm = ? AND bar_close > ?"
             " ORDER BY bar_close, id",
             (self._kind.name, self.symbol, self.cell.predictor, self._after),
@@ -163,6 +171,7 @@ class CellReader:
                     tick=None if r["tick"] is None else float(r["tick"]),
                     width=r["width_ticks"],
                     horizon=self._kind.horizon,
+                    model_version=r["model_version"],
                 )
             )
         return signals
@@ -204,6 +213,41 @@ class EngineReader:
             db.close()
         signals.sort(key=lambda s: (s.bar_close, s.displayed_at))
         return windows, signals
+
+
+def gone(path: Path, symbol: str, cells: Collection[Cell], before: datetime) -> set[Cell]:
+    """The ``cells`` whose predictor is gone before ``before`` (#469, module doc): the latest trading
+    day with predictions of the cell's kind of ``symbol`` before then has none of its predictor. None
+    without the engine's database (read-only, at once)."""
+    if not cells or not path.exists():
+        return set()
+    db = open_engine_db(path)
+    try:
+        return {c for c in cells if _gone(db, c, symbol, before.astimezone(KST).isoformat())}
+    finally:
+        db.close()
+
+
+def _gone(db: sqlite3.Connection, cell: Cell, symbol: str, before: str) -> bool:
+    if traded_kind(cell.kind).name == DIRECTION:
+        latest = "SELECT max(bar_close) FROM predictions WHERE symbol = ? AND bar_close < ?"
+        its = (
+            "SELECT 1 FROM predictions WHERE algorithm = ? AND symbol = ? AND bar_close >= ?"
+            " AND bar_close < ? LIMIT 1"
+        )
+        keys: tuple[str, ...] = (symbol,)
+    else:
+        latest = "SELECT max(bar_close) FROM kind_predictions WHERE kind = ? AND symbol = ? AND bar_close < ?"
+        its = (
+            "SELECT 1 FROM kind_predictions WHERE algorithm = ? AND kind = ? AND symbol = ?"
+            " AND bar_close >= ? AND bar_close < ? LIMIT 1"
+        )
+        keys = (cell.kind, symbol)
+    last = db.execute(latest, (*keys, before)).fetchone()[0]
+    if last is None:
+        return False  # no prediction of the kind at all: nothing to tell from
+    day = datetime.combine(datetime.fromisoformat(last).astimezone(KST).date(), datetime.min.time(), KST)
+    return db.execute(its, (cell.predictor, *keys, day.isoformat(), before)).fetchone() is None
 
 
 def special_windows(db: sqlite3.Connection, symbol: str, since: datetime) -> list[Window]:

@@ -14,8 +14,8 @@ with its reason:
   barrier prediction carries no block of its own for it);
 - its most likely class is the kind's rise (up, up_first; a tie goes to the middle class, then
   the first, ``kinds.most_likely``) and that class's probability is at least the threshold θ
-  (its cell's under the champion policy, ``Pick.threshold``, #399; before the first,
-  ``Rules.threshold``): ``not_up``, ``below_threshold``;
+  (its cell's under the champion policy, ``Pick.threshold``, #399; a pick without one, the mock
+  practice cell's, ``Rules.threshold``): ``not_up``, ``below_threshold``;
 - it has its reference: the bar close's mid-point, tick and width (``no_reference``);
 - the day trades (``closed``); its bar close is at least five minutes after the open (09:05,
   ``before_entry``), and its time barrier, the bar close plus the kind's horizon, at least five
@@ -33,8 +33,8 @@ with its reason:
 - no cell ranked above it buys on the same bar close (``outranked``).
 
 **Priority.** Of the rises of one bar close, the cell ranked first (``Selection.picks``: the
-champion policy's order, #399; before the first, the greatest hit rate's lower bound less p*)
-buys. The cells' predictions of a bar close come at
+champion policy's order, #399; picks without a policy, the greatest hit rate's lower bound less
+p*) buys. The cells' predictions of a bar close come at
 different times (a baseline's at once, an algorithm's within its time budget, the final consensus
 after every member), so a rise waits for the cells ranked above it: it is decided once each of
 them has a prediction of that bar close read, or at the latest ``Rules.fresh`` after it was
@@ -42,7 +42,7 @@ displayed (it would be stale after). A higher-ranked cell whose prediction comes
 finds the position taken (``holding``).
 
 **Size.** The cell's Kelly fraction (``Pick.fraction``: λ of its Kelly f*, cut to 0–1; λ the
-champion policy's for the cell, #399, before the first ``KELLY_FRACTION``, a half) of the
+champion policy's for the cell, #399; a pick without a policy, ``KELLY_FRACTION``, a half) of the
 capital, over the best ask, rounded down: ⌊min(capital − what is open, fraction × capital, cash)
 ÷ ask⌋ (nothing is open: one position at a time). The cash is the paper account's (#396): the
 capital, plus the net P&L of every trade of the mode exited, less the open position's cost; a
@@ -905,6 +905,7 @@ class PaperTrader:
             champion=self.challenger is None and not self.shadow,
             shadow=self.shadow,
             practice=pick.practice,
+            model_version=signal.model_version,
         )
 
     def _give_up(self, waiting: _Waiting, reason: str) -> None:
