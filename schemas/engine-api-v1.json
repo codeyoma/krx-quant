@@ -2638,7 +2638,7 @@
       }
     },
     "trader_policy": {
-      "description": "A policy version (#399): the cells it trades, first ranked first, each with its threshold and Kelly fraction and what it was fitted on; the cells the cost map passed that it left out, and why; what it was fitted on (the cost map, the grid, the recorded days replayed (#470), the replayed result, the run). It holds no limit: those come from the code and the server's .env alone. status (#400): champion now, former once, dropped (a challenger dropped at dropped_at, unpromoted by its 20th common day), challenger (in one of the three running slots since admitted_at), else waiting (kept while the slots were full, admitted when one frees, the newest first); paper: its paper record.",
+      "description": "A policy version (#399): the cells it trades, first ranked first, each with its threshold (and its Kelly fraction, a policy fitted before #471 alone: not read since) and what it was fitted on; the cells the cost map passed that it left out, and why; what it was fitted on (the cost map, the grid, the recorded days replayed (#470), the replayed result, the run). It holds no limit: those come from the code and the server's .env alone. status (#400): champion now, former once, dropped (a challenger dropped at dropped_at, unpromoted by its 20th common day), challenger (in one of the three running slots since admitted_at), else waiting (kept while the slots were full, admitted when one frees, the newest first); paper: its paper record.",
       "type": "object",
       "required": ["version", "status", "created_at", "reason", "cells", "left_out", "fit", "admitted_at", "dropped_at",
                    "paper"],
@@ -2655,23 +2655,23 @@
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["kind", "role", "predictor", "threshold", "kelly_fraction", "fitted"],
+            "required": ["kind", "role", "predictor", "threshold", "fitted"],
             "additionalProperties": false,
             "properties": {
               "kind": {"enum": ["direction", "barrier", "barrier_15m", "barrier_30m"]},
               "role": {"enum": ["consensus", "top", "baseline"]},
               "predictor": {"type": "string"},
               "threshold": {"type": "number", "minimum": 0, "maximum": 1},
-              "kelly_fraction": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
+              "kelly_fraction": {"type": "number", "minimum": 0, "description": "#471: a policy fitted before #471 alone, as it kept it (λ, the share of f* bought); not read since: the loss budget sizes every buy."},
               "fitted": {
                 "type": "object",
-                "required": ["p_star", "low", "kelly", "fraction", "days", "read", "trades", "wins", "net", "growth"],
+                "required": ["p_star", "low", "kelly", "days", "read", "trades", "wins", "net", "growth"],
                 "additionalProperties": false,
                 "properties": {
                   "p_star": {"type": "number"},
                   "low": {"type": "number", "minimum": 0, "maximum": 1},
                   "kelly": {"type": "number"},
-                  "fraction": {"type": "number", "minimum": 0, "maximum": 1},
+                  "fraction": {"type": "number", "minimum": 0, "maximum": 1, "description": "#471: a policy fitted before #471 alone (λ × f*, cut to 0–1)."},
                   "days": {"type": "array", "items": {"type": "string", "format": "date"}},
                   "read": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
                   "trades": {"type": "integer", "minimum": 0},
@@ -2768,7 +2768,7 @@
         "p_star": {"type": ["number", "null"]},
         "precision_low": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
         "kelly": {"type": ["number", "null"]},
-        "fraction": {"type": ["number", "null"], "exclusiveMinimum": 0, "maximum": 1},
+        "fraction": {"type": ["number", "null"], "exclusiveMinimum": 0, "maximum": 1, "description": "The share of the capital bought (λ × f*); null since #471, which sizes a buy by a loss budget."},
         "policy": {"type": ["integer", "null"], "minimum": 1},
         "champion": {"type": "boolean", "description": "#400: the champion's trade (the trader's, which the limits hold and the chart marks); false: a challenger's paper trade, or the shadow's."},
         "shadow": {"type": "boolean", "description": "#405: the champion policy's paper shadow's trade in mock mode (champion false): its paper record, never the trader's."},
@@ -3341,9 +3341,9 @@
       }
     },
     "trader_practice_cell": {
-      "description": "#427: the cell the mock book practises: of the cells with a verdict at a market order's round trip (pass or fail; few and none left out), the greatest hit rate's lower bound less p* (priority), its figures as the cost map gave them (W, the market cost C in ticks at its reference price and tick, Kelly f* or null when a call right does not pay its cost). It buys quantity shares (1) at KRX_TRADER_THRESHOLD (threshold null), within the cash and the capital: no share of the capital (fraction 0).",
+      "description": "#427: the cell the mock book practises: of the cells with a verdict at a market order's round trip (pass or fail; few and none left out), the greatest hit rate's lower bound less p* (priority), its figures as the cost map gave them (W, the market cost C in ticks at its reference price and tick, Kelly f* or null when a call right does not pay its cost). It buys quantity shares (1) at KRX_TRADER_THRESHOLD (threshold null), within the cash and the capital: no loss budget (#471; fraction 0 before it).",
       "type": "object",
-      "required": ["kind", "role", "predictor", "p_star", "low", "priority", "calls", "width", "cost", "reference_price", "tick", "kelly", "fraction", "threshold", "quantity", "practice"],
+      "required": ["kind", "role", "predictor", "p_star", "low", "priority", "calls", "width", "cost", "reference_price", "tick", "kelly", "threshold", "quantity", "practice"],
       "additionalProperties": false,
       "properties": {
         "kind": {"enum": ["direction", "barrier", "barrier_15m", "barrier_30m"]},
@@ -3358,7 +3358,7 @@
         "reference_price": {"type": "number", "exclusiveMinimum": 0},
         "tick": {"type": "number", "exclusiveMinimum": 0},
         "kelly": {"type": ["number", "null"]},
-        "fraction": {"type": "number", "minimum": 0, "maximum": 1},
+        "fraction": {"type": "number", "minimum": 0, "maximum": 1, "description": "Before #471 alone: 0."},
         "threshold": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
         "quantity": {"type": "integer", "minimum": 1},
         "practice": {"const": true}

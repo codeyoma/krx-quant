@@ -53,7 +53,6 @@ from tests.test_trader_reconcile import Lost, next_day
 from tests.trader_doubles import (
     BARRIER,
     CALENDAR,
-    FEE,
     AskPause,
     Barrier,
     Day,
@@ -65,6 +64,7 @@ from tests.trader_doubles import (
     pick,
     policy_cell,
     quote,
+    whole_rules,
 )
 
 __all__ = ["kis_mock"]  # the fixture, used here
@@ -317,7 +317,7 @@ class StallDesk:
     state: Path
     fake: FakeKis
     account: FakeAccount
-    rules: Rules = field(default_factory=lambda: Rules(fee_rate=FEE))
+    rules: Rules = field(default_factory=whole_rules)
     started_at: datetime = field(default_factory=lambda: at("10:00:00"))
     notices: list[str] = field(default_factory=list)
     timing: Timing = TIMING

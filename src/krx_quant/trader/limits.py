@@ -5,10 +5,14 @@ the server's ``.env`` alone, which may narrow them, never widen them (``settings
 **Whose.** The limits and the pauses hold the trades the trader makes: the champion policy's
 (#399; before the first champion, the defaults'). The loss counts those alone
 (``store.CHAMPION_TRADE``), never a challenger's paper trades (#400) nor the champion's paper
-shadow's in mock mode (#405), and neither a limit nor a
-pause holds a challenger's book (``Unlimited``): it is a simulation of its policy's rules, which a
-promotion compares with the champion's on the days the champion was not stopped
-(``promotion.py``).
+shadow's in mock mode (#405). No pause holds a challenger's book nor a shadow's: each is a simulation
+of its policy's rules, which a promotion compares with the champion's (``promotion.py``), and since
+#471 the loss limits are simulated on its own trades (``Simulated``), so that it is held as the
+champion would have been.
+
+> **바뀜** (2026-11-03, #PRNUM): no limit held a challenger's book nor a shadow's (``Unlimited``) → the
+> daily and the cumulative loss limits are simulated on its own trades (``Simulated``). 이유: spec #468
+> 5 "모든 그림자 장부 … 기존 손실 한도를 흉내 낸다": unheld, they could not be compared with the champion.
 
 **Loss.** A P&L is the net realized one (the trades exited, after their costs) plus the open
 position's at the best bid: what selling it at that bid would net, after the buy's commission and
@@ -57,7 +61,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import Any, Protocol
 
 from krx_quant.feeds.base import KST, kst_day
@@ -421,7 +425,7 @@ class Guard:
 
 class Holds(Protocol):
     """What holds a book's trades (``paper.PaperTrader``): the champion's ``Guard``, a challenger's
-    ``Unlimited``."""
+    or a shadow's ``Simulated``."""
 
     unrealized: float
 
@@ -438,34 +442,91 @@ class Holds(Protocol):
     def exited(self, net: float, at: datetime) -> str | None: ...
 
 
-class Unlimited:
-    """A challenger's paper book (#400): no loss limit and no pause holds it (the limits hold the
-    champion's trades alone, #393), so it is always ``running``. It buys on the paper account's cash
-    as it stands with nothing open (``account``: the capital plus the champion's realized P&L, the
-    cash the trader buys on), so that its size is the one it would have as the champion."""
+class Simulated:
+    """The loss limits of a challenger's paper book (#400), the champion's paper shadow (#405) or the
+    practice shadow (#427), simulated (#471, module doc "Whose"): the champion's limits (``Guard``'s
+    rules: the P&L realized and open at the best bid, after its costs, the day's from 00:00 KST and the
+    cumulative one's from where it was given, ``realized_day`` and ``realized_cumulative``) on the
+    book's own trades. A limit reached holds its book as the champion's: its status (``daily_limit``,
+    ``cumulative_limit``) buys nothing and sells the open position at once; the daily one ends with its
+    day, the cumulative one with the trader's re-arm (``rearm``). Nothing of it is kept nor told: it is
+    read again from the book's trades at a start, and a new day's P&L from them too (``day_realized``,
+    as ``Guard.roll`` reads the store; none: from 0). No pause holds it. It buys on the paper account's cash
+    as it stands with nothing open (``account``: the capital plus the champion's realized P&L, the cash
+    the trader buys on), so that its size is the one it would have as the champion."""
 
-    def __init__(self, account: Callable[[], float]) -> None:
+    def __init__(
+        self,
+        limits: Limits,
+        day: date,
+        realized_day: float = 0.0,
+        realized_cumulative: float = 0.0,
+        account: Callable[[], float] = lambda: 0.0,
+        day_realized: Callable[[date], float] | None = None,
+    ) -> None:
+        self.limits = limits
+        self.day = day
+        self.realized_day = realized_day
+        self.realized_cumulative = realized_cumulative
         self._account = account
+        self._day_realized = day_realized
         self.unrealized = 0.0
+        self.daily_halt = False
+        self.cumulative_halt = False
+        self._check()  # a loss realized beyond a limit already holds from the start
 
     @property
     def status(self) -> str:
-        return RUNNING
+        if self.cumulative_halt:
+            return CUMULATIVE_LIMIT
+        return DAILY_LIMIT if self.daily_halt else RUNNING
 
     @property
     def realized_all(self) -> float:
         return self._account()
 
     def roll(self, now: datetime) -> bool:
-        return False
+        """A new day at ``now``: its P&L as the book's trades of it have it (``day_realized``, else 0),
+        the daily limit lifted unless that P&L reaches it. Whether it was one. The caller rolls the day
+        before it keeps an exit (``exited`` adds it)."""
+        day = kst_day(now)
+        if day <= self.day:
+            return False
+        self.day = day
+        self.realized_day = 0.0 if self._day_realized is None else self._day_realized(day)
+        self.daily_halt = False
+        self._check()
+        return True
 
     def mark(self, unrealized: float, at: datetime) -> str | None:
+        """The open position's P&L at the bid at ``at``: the limit it makes reached, if one is."""
+        self.roll(at)
         self.unrealized = unrealized
-        return None
+        return self._check()
 
     def exited(self, net: float, at: datetime) -> str | None:
+        """A trade exited at ``at`` with ``net``: the limit its realized P&L makes reached, if one is."""
+        self.roll(at)
         self.unrealized = 0.0
-        return None
+        self.realized_day += net
+        self.realized_cumulative += net
+        return self._check()
+
+    def rearm(self) -> None:
+        """The trader's cumulative limit re-armed: the cumulative P&L counted again from now."""
+        self.cumulative_halt = False
+        self.realized_cumulative = 0.0
+
+    def _check(self) -> str | None:
+        """As ``Guard._check``: a limit is reached when the P&L is at or below its negative."""
+        reached = None
+        if not self.daily_halt and self.realized_day + self.unrealized <= -self.limits.daily:
+            self.daily_halt = True
+            reached = DAILY_LIMIT
+        if not self.cumulative_halt and self.realized_cumulative + self.unrealized <= -self.limits.cumulative:
+            self.cumulative_halt = True
+            reached = CUMULATIVE_LIMIT
+        return reached
 
 
 def ask(store: TraderStore, action: str, mode: str, at: datetime) -> Control | str:

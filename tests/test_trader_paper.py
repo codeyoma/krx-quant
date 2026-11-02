@@ -41,10 +41,21 @@ from krx_quant.trader.paper import (
     TAKE_PROFIT,
     TARGET_REACHED,
     TIME,
-    Rules,
     costs,
 )
-from tests.trader_doubles import DIRECTION, FEE, Barrier, Day, Direction, Event, Read, Tick, at, quote
+from tests.trader_doubles import (
+    DIRECTION,
+    FEE,
+    Barrier,
+    Day,
+    Direction,
+    Event,
+    Read,
+    Tick,
+    at,
+    quote,
+    whole_rules,
+)
 
 TEN = Read("10:00:02.3", [Barrier("10:00:00")])
 BOUGHT = quote("10:00:02.5", 70_000, 70_100)
@@ -307,7 +318,7 @@ def test_a_buy_without_a_quote_within_five_seconds_is_given_up(tmp_path: Path) -
 
 
 def test_a_capital_below_one_share_buys_nothing(tmp_path: Path) -> None:
-    day = Day(tmp_path, rules=Rules(fee_rate=FEE, capital=70_000))
+    day = Day(tmp_path, rules=whole_rules(capital=70_000))
     assert day.run([TEN, BOUGHT]) == []
     assert [d["reason"] for d in day.decisions()] == [NO_SHARES]
 

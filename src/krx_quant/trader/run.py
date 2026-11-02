@@ -5,7 +5,7 @@ running challenger's):
 
 - the picks (``selection.pick``): the cells the cost map passes, read from the Engine API at the
   start and every day at ``PICK_AT`` (08:30), under the champion policy read from the store then
-  (#399, ``policy.apply``: its cells among them, in its order, at its θ and λ), and under each
+  (#399, ``policy.apply``: its cells among them, in its order, at its θ; #471: no λ), and under each
   challenger running that day for its paper book (#400). A cost map that cannot be read is asked
   for again every ``PICK_RETRY_SECONDS``, and no cell trades until it is read: a pick is never
   older than the day's. A champion that cannot be read trades nothing (``NO_POLICY``) until the
@@ -77,7 +77,6 @@ from krx_quant.notify import Alerts
 from krx_quant.predictions import DB_NAME as ENGINE_DB
 from krx_quant.trader import (
     COST_MAP_PERIOD,
-    KELLY_FRACTION,
     KIS_MODES,
     LIVE,
     MOCK,
@@ -198,7 +197,12 @@ async def _run(
             "daily_loss_percent": trader.daily_loss_percent,
             "cumulative_loss_percent": trader.cumulative_loss_percent,
             "fee_rate": settings.fee_rate,
-            "kelly_fraction": KELLY_FRACTION,
+            # The risk rules (#471): a trade's loss budget, the losses in a row and their cooldown, the
+            # buy orders a day.
+            "risk_per_trade_percent": trader.risk_per_trade_percent,
+            "loss_streak": trader.loss_streak,
+            "cooldown_minutes": trader.cooldown_minutes,
+            "daily_buy_orders": trader.daily_buy_orders,
             "mock_practice": trader.mock_practice,  # #427
             "cost_map": {"engine": trader.engine_url, "symbol": SYMBOL, "period": COST_MAP_PERIOD},
             "commit": settings.commit,
@@ -206,13 +210,7 @@ async def _run(
     )
     for name in trader.ignored:
         log.warning("trader: %s is no longer read (#395): the cost map picks the cells", name)
-    rules = Rules(
-        threshold=trader.threshold,
-        capital=trader.capital,
-        daily_loss_percent=trader.daily_loss_percent,
-        cumulative_loss_percent=trader.cumulative_loss_percent,
-        fee_rate=settings.fee_rate,
-    )
+    rules = Rules.of(trader, settings.fee_rate)
     switched = False
     try:
         async with aiohttp.ClientSession() as session:

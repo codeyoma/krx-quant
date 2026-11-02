@@ -36,7 +36,7 @@ from krx_quant.trader.desk import Desk
 from krx_quant.trader.gap import day_gap, pairing
 from krx_quant.trader.limits import RUNNING
 from krx_quant.trader.marks import read_marks
-from krx_quant.trader.paper import STOP_LOSS, TAKE_PROFIT, TIME, Rules
+from krx_quant.trader.paper import STOP_LOSS, TAKE_PROFIT, TIME
 from krx_quant.trader.selection import (
     NO_CHAMPION,
     NO_COST_MAP,
@@ -54,7 +54,6 @@ from tests.test_trader_shadow import BOUGHT, DAY, TAKEN, TEN, MockDesk, Repicked
 from tests.trader_doubles import (
     BARRIER,
     CALENDAR,
-    FEE,
     Barrier,
     Direction,
     Read,
@@ -67,6 +66,7 @@ from tests.trader_doubles import (
     policy_cell,
     predictor,
     quote,
+    whole_rules,
 )
 
 __all__ = ["kis_mock"]  # the fixture, used here
@@ -129,7 +129,7 @@ def test_the_practice_is_a_setting_of_the_mock_mode_alone(
     store = TraderStore(tmp_path / DB_NAME)
     try:
         with pytest.raises(ValueError, match="mock mode alone"):
-            Desk(store, Rules(fee_rate=FEE), CALENDAR.session, at("09:00:00"), PAPER, practice=True)
+            Desk(store, whole_rules(), CALENDAR.session, at("09:00:00"), PAPER, practice=True)
     finally:
         store.close()
 
@@ -164,12 +164,7 @@ def test_the_practice_cell_has_the_greatest_lower_bound_less_p_star_of_the_cells
     assert practice is not None
     assert (practice.kind, practice.role, practice.predictor) == ("barrier", "top", "breiman")
     assert practice.priority == pytest.approx(0.62 - 0.63)
-    assert (practice.quantity, practice.practice, practice.threshold, practice.fraction) == (
-        1,
-        True,
-        None,
-        0.0,
-    )
+    assert (practice.quantity, practice.practice, practice.threshold) == (1, True, None)
     assert practice.kelly is not None and practice.kelly < 0, "its Kelly at most 0: one share"
 
     tie = choose(
@@ -204,7 +199,7 @@ async def test_the_practice_is_picked_only_on_a_cost_map_and_a_champion_read_wit
             def desk(practice: bool) -> Desk:
                 return Desk(
                     store,
-                    Rules(fee_rate=FEE),
+                    whole_rules(),
                     CALENDAR.session,
                     at("09:00:00"),
                     MOCK,
@@ -587,7 +582,7 @@ async def test_the_loss_limits_count_the_champion_and_the_practice_kis_net_toget
     141.9): −4,202.4 won. Together −9,202.4: the day's limit, though neither alone reaches it. The
     paper shadows count nowhere, and a start with the practice off holds the day's loss still."""
     fake, account = kis_mock
-    rules = Rules(capital=80_000, fee_rate=FEE)
+    rules = whole_rules(capital=80_000)
     store = TraderStore(tmp_path / DB_NAME)
     try:
         lost = Entry(

@@ -10,10 +10,11 @@ trader's store and the job's report. Every price and probability is made up.
 The trades worked by hand throughout: the 4-minute barrier at a reference of 70,050 won, tick 100, w 5
 (target 70,550, stop 69,550), displayed 2 s after its bar close and bought at the best ask of the
 first quote after that, 70,100 (the bar close's standing ask 70,000 is not the buy's): 14 shares of
-1,000,000 won. Up: sold at the target once a bid reaches 70,600: 450 won a share less the commission
-on 70,100 and 70,550 and the tax on 70,550 (10.515 + 10.5825 + 141.1) = +287.8025 won a share,
-+4,029.235 won. Down: stopped at the bid 69,500: −600 − (10.515 + 10.425 + 139) = −759.94 won a share,
-−10,639.16 won.
+1,000,000 won (a loss budget of the whole capital, ``trader_doubles.whole_rules``: the trader's own
+buys six, ``test_the_replay_buys_what_the_trader_s_loss_budget_pays``). Up: sold at the target once a
+bid reaches 70,600: 450 won a share less the commission on 70,100 and 70,550 and the tax on 70,550
+(10.515 + 10.5825 + 141.1) = +287.8025 won a share, +4,029.235 won. Down: stopped at the bid 69,500:
+−600 − (10.515 + 10.425 + 139) = −759.94 won a share, −10,639.16 won.
 """
 
 from __future__ import annotations
@@ -62,6 +63,7 @@ from krx_quant.trader.paper import (
     STOP_LOSS,
     TAKE_PROFIT,
     TARGET_REACHED,
+    Rules,
     net_of,
 )
 from krx_quant.trader.quotes import BestQuote
@@ -82,7 +84,18 @@ from krx_quant.trader.selection import Pick, choose
 from krx_quant.trader.settings import TraderSettings
 from krx_quant.trader.store import DB_NAME as TRADER_DB
 from tests.test_trader_run import EngineApi
-from tests.trader_doubles import CALENDAR, DAY, FEE, at, cost_map, cost_row, pick, predictor, record_quotes
+from tests.trader_doubles import (
+    CALENDAR,
+    DAY,
+    FEE,
+    at,
+    cost_map,
+    cost_row,
+    pick,
+    predictor,
+    record_quotes,
+    whole_rules,
+)
 
 BREIMAN = Cell("barrier", "breiman")
 FIFTEEN = Cell("barrier_15m", "barrier-persist-15m")
@@ -215,8 +228,7 @@ def refit(state: Path, body: dict[str, Any] = DAYS, *, store: Path | None = None
     """``refit_from`` on ``state``'s engine database and recordings, by default at 22:31 of the test day
     into ``state``'s trader store, on the hand examples' grid."""
     args: dict[str, Any] = {
-        "capital": CAPITAL,
-        "fee_rate": FEE,
+        "rules": whole_rules(),
         "target_version": TARGET_VERSION,
         "grid": ONE,
         "now": at("22:31:00"),
@@ -231,8 +243,11 @@ def refit(state: Path, body: dict[str, Any] = DAYS, *, store: Path | None = None
     )
 
 
-def replayer_on(state: Path, picks: Sequence[Pick], days: Sequence[date] = (date(*DAY),)) -> Replay:
-    """The fit's replay (``refit_from``'s) of ``picks`` on ``state``'s database and recordings."""
+def replayer_on(
+    state: Path, picks: Sequence[Pick], days: Sequence[date] = (date(*DAY),), rules: Rules | None = None
+) -> Replay:
+    """The fit's replay (``refit_from``'s) of ``picks`` on ``state``'s database and recordings, by
+    ``rules`` (``whole_rules`` unless given)."""
     db = open_engine_db(state / ENGINE_DB)
     windows = special_windows(db, SYMBOL, datetime(*DAY, tzinfo=KST))
     replayer = Replayer(
@@ -241,8 +256,7 @@ def replayer_on(state: Path, picks: Sequence[Pick], days: Sequence[date] = (date
         CALENDAR.session,
         windows,
         {p.cell: Source(p.role, tuple(days)) for p in picks},
-        capital=CAPITAL,
-        fee_rate=FEE,
+        rules=rules or whole_rules(),
         target_version=TARGET_VERSION,
         thresholds=ONE.thresholds,
     )
@@ -260,17 +274,17 @@ def test_the_threshold_fitted_on_the_replayed_days_is_the_hand_worked_one(tmp_pa
     """θ 0.4 trades all five: 3 × 4,029.235 − 2 × 10,639.16 = −9,190.615 won; θ 0.5 (four, but the
     10:30 rise) −13,219.85; θ 0.6 (10:00, 10:20, 10:40) −2,580.69; θ 0.7 (10:00, 10:40) +8,058.47; θ
     0.8 (10:40) +4,029.235. θ 0.7 grows the capital most: 2 ln(1.004029235). Its f* (W 10, C 2.6,
-    lower bound 0.70 at 70,050: 0.70 ÷ 0.017987 − 0.30 ÷ 0.010564 = 10.52) makes every λ of the grid
-    buy the whole capital: the growth is the same, and λ is the default, 0.5."""
+    lower bound 0.70 at 70,050: 0.70 ÷ 0.017987 − 0.30 ÷ 0.010564 = 10.52) is kept as a diagnosis; the
+    cell has no λ (#471)."""
     write_five(tmp_path)
 
     done = refit(tmp_path)
 
     [cell] = done.cells
     assert (cell.kind, cell.role, cell.predictor) == ("barrier", "top", "breiman")
-    assert (cell.threshold, cell.kelly_fraction) == (0.7, 0.5)
+    assert cell.threshold == 0.7 and "kelly_fraction" not in cell.as_json()
     assert cell.fitted["kelly"] == pytest.approx(10.52, abs=0.01)
-    assert cell.fitted["fraction"] == 1.0
+    assert "fraction" not in cell.fitted
     assert (cell.fitted["trades"], cell.fitted["wins"], cell.fitted["net"]) == (2, 2, pytest.approx(2 * UP))
     assert cell.fitted["growth"] == pytest.approx(2 * ln(1 + UP / CAPITAL))
     assert cell.fitted["read"] == {"read": 5, "rises": 5}
@@ -293,9 +307,11 @@ def test_the_threshold_fitted_on_the_replayed_days_is_the_hand_worked_one(tmp_pa
     assert signals["0.4"]["exits"] == {STOP_LOSS: 2, TAKE_PROFIT: 3}
 
 
-def test_the_kelly_fraction_is_fitted_where_f_star_leaves_it_a_choice(tmp_path: Path) -> None:
-    """f* = 1: λ 0.25 buys 0.25 of the capital (3 shares at 70,100), 0.5 half (7), 1 all of it (14). Two
-    take-profits of +287.8025 won a share. All of it grows the capital most."""
+def test_the_replay_buys_what_the_trader_s_loss_budget_pays(tmp_path: Path) -> None:
+    """By the trader's rules (#471): a share bought at 70,100 loses 70,100 − 69,550 (the stop) + 10.515 +
+    69,550 × 0.215% + a tick of 100 = 810.0475 won at its stop; 0.5% of 1,000,000 won buys
+    ⌊5,000 ÷ 810.0475⌋ = 6. Its f* sizes nothing: the same six whatever it is. Two take-profits of
+    +287.8025 won a share."""
     store = engine(tmp_path)
     try:
         barrier(store, "10:00", (0.75, 0.15, 0.10), UP_FIRST, reached="10:02:00")
@@ -303,27 +319,19 @@ def test_the_kelly_fraction_is_fitted_where_f_star_leaves_it_a_choice(tmp_path: 
     finally:
         store.close()
     record_quotes(tmp_path / "data", [*quotes_of("10:00", UP_FIRST), *quotes_of("10:40", UP_FIRST)])
-    small = replace(pick(BREIMAN), kelly=1.0)
+    trader = Rules(fee_rate=FEE)
 
-    fitted = fit_cells([small], replayer_on(tmp_path, [small]), ONE)
-
-    [kept] = fitted.kept
-    assert (kept.threshold, kept.kelly_fraction, kept.fraction) == (0.6, 1.0, 1.0), (
-        "θ: every point at or under 0.7 trades both: the default, 0.6"
-    )
-    assert fitted.result.total.net == pytest.approx(2 * UP)
-    replay = replayer_on(tmp_path, [small])
-    for fraction, shares in ((0.25, 3), (0.5, 7), (1.0, 14)):
-        [alone] = replay(small, [[Point(small, 0.6, fraction)]])
-        assert alone.total.net == pytest.approx(2 * shares * UP / 14), fraction
+    for f in (1.0, 10.52):
+        chosen = replace(pick(BREIMAN), kelly=f)
+        fitted = fit_cells([chosen], replayer_on(tmp_path, [chosen], rules=trader), ONE)
+        [kept] = fitted.kept
+        assert kept.threshold == 0.6, "every point at or under 0.7 trades both: the default, 0.6"
+        assert fitted.result.total.net == pytest.approx(2 * 6 * UP / 14), f
 
 
-def test_ties_go_to_the_default_then_the_higher_threshold_then_the_lower_fraction() -> None:
-    points = Grid().points()
-    assert points[:4] == [(0.6, 0.5), (0.6, 0.25), (0.6, 1.0), (0.7, 0.5)]
-    assert points[-1] == (0.4, 1.0)
-    assert len(points) == 15, "five thresholds by three Kelly fractions"
-    assert Grid(threshold=0.65).points()[:2] == [(0.7, 0.5), (0.7, 0.25)], "the .env's θ, then the higher"
+def test_ties_go_to_the_default_then_the_higher_threshold() -> None:
+    assert Grid().points() == [0.6, 0.7, 0.5, 0.8, 0.4], "θ alone (#471: no λ)"
+    assert Grid(threshold=0.65).points()[:2] == [0.7, 0.6], "the .env's θ, then the higher"
 
 
 def made_up(trades: dict[Cell, tuple[int, float]]) -> Replay:
@@ -362,19 +370,19 @@ def test_a_cell_is_left_out_with_too_few_trades_or_no_gain() -> None:
 
 
 def test_each_pick_is_one_pass_of_its_points_with_the_cells_kept_before() -> None:
-    """The first pick's fifteen points, then the second's, each with the first as it was kept."""
-    asked: list[list[list[tuple[Cell, float, float]]]] = []
+    """The first pick's five points, then the second's, each with the first as it was kept."""
+    asked: list[list[list[tuple[Cell, float]]]] = []
     inner = made_up({BREIMAN: (30, 1_000.0), FIFTEEN: (30, 500.0)})
 
     def replay(chosen: Pick, policies: Sequence[Sequence[Point]]) -> Sequence[Result]:
-        asked.append([[(p.pick.cell, p.threshold, p.kelly_fraction) for p in policy] for policy in policies])
+        asked.append([[(p.pick.cell, p.threshold) for p in policy] for policy in policies])
         return inner(chosen, policies)
 
     fitted = fit_cells([pick(BREIMAN), pick(FIFTEEN, role="baseline")], replay, Grid())
 
-    assert [len(policies) for policies in asked] == [15, 15]
+    assert [len(policies) for policies in asked] == [5, 5]
     assert all(len(policy) == 1 for policy in asked[0])
-    assert {policy[0] for policy in asked[1]} == {(BREIMAN, 0.6, 0.5)}, "the first as kept"
+    assert {policy[0] for policy in asked[1]} == {(BREIMAN, 0.6)}, "the first as kept"
     assert [p.pick.cell for p in fitted.kept] == [BREIMAN, FIFTEEN]
 
 
@@ -405,7 +413,7 @@ def test_the_rises_read_are_those_the_trader_would_buy(tmp_path: Path) -> None:
     quotes += [BestQuote(at("10:40:03"), 70_500, 70_600)]
     record_quotes(tmp_path / "data", quotes)
 
-    done = refit(tmp_path, grid=Grid(min_trades=1, thresholds=(0.6,), kelly_fractions=(0.5,)))
+    done = refit(tmp_path, grid=Grid(min_trades=1, thresholds=(0.6,)))
 
     [cell] = done.cells
     assert cell.fitted["read"] == {
@@ -501,12 +509,12 @@ def test_a_policy_holds_no_limit_and_the_fit_changes_none(tmp_path: Path) -> Non
     write_five(tmp_path)
     narrow = TraderSettings(capital=500_000)
 
-    done = refit(tmp_path, capital=narrow.capital)
+    done = refit(tmp_path, rules=whole_rules(capital=narrow.capital))
 
     stored = policies.read_policies(tmp_path / TRADER_DB, 10)["policies"][0]
     words = json.dumps(stored).lower().replace(STOP_LOSS, "exit")  # the signals' exits: no limit
     assert not re.search(r"capital|limit|loss|한도|상한", words), "no limit, nor the capital, in a policy"
-    assert set(stored["cells"][0]) == {"kind", "role", "predictor", "threshold", "kelly_fraction", "fitted"}
+    assert set(stored["cells"][0]) == {"kind", "role", "predictor", "threshold", "fitted"}
     assert narrow == TraderSettings(capital=500_000), "the trader's settings as they were"
     # 500,000 won buys 7 shares at 70,100: the 2 take-profits make 2 × 7 × 287.8025 won.
     assert done.cells[0].fitted["net"] == pytest.approx(UP)
@@ -535,7 +543,7 @@ async def test_the_job_reads_tonight_s_cost_map_and_keeps_the_policy(
     )
     assert "\n정책 맞추기 (#399): 정책 1 · 챔피언(처음 맞춘 정책)\n" in out
     assert "뺀 칸: barrier breiman (top): few_trades, 모의 매매가 20건에 못 미침(가장 많을 때 5건)" in out
-    assert "격자: θ 0.4 0.5 0.6 0.7 0.8 × λ 0.25 0.5 1 · 칸마다 모의 매매 20건 이상" in out
+    assert "격자: θ 0.4 0.5 0.6 0.7 0.8 · 칸마다 모의 매매 20건 이상" in out
     assert (
         "재생 (#470): 녹화한 날을 trader의 모의 체결 규칙 그대로 다시 돌린다 · 1일(녹화 없음 0일, 장중 결측 "
         "구간 0일) · 재생 1번, 날 읽기 1번" in out
@@ -710,8 +718,7 @@ def timed_refit(state: Path, body: dict[str, Any]) -> Any:
         state / TRADER_DB,
         state / "data",
         CALENDAR.session,
-        capital=CAPITAL,
-        fee_rate=FEE,
+        rules=whole_rules(),
         target_version=TARGET_VERSION,
         grid=Grid(),
         now=datetime.combine(TWENTY[-1], time(22, 31), KST),

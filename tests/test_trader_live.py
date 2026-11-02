@@ -42,7 +42,7 @@ from krx_quant.trader import LIVE, MOCK, PAPER, live, promotion
 from krx_quant.trader import policy as policies
 from krx_quant.trader.desk import Desk
 from krx_quant.trader.limits import ENTRIES_PAUSED, RUNNING, ask
-from krx_quant.trader.paper import PaperTrader, Rules
+from krx_quant.trader.paper import PaperTrader
 from krx_quant.trader.quotes import QuoteFeed
 from krx_quant.trader.run import SWITCH, LiveWatch, run_trader
 from krx_quant.trader.settings import TraderSettings
@@ -62,7 +62,7 @@ from tests.test_live_predictions import free_port
 from tests.test_notify import telegram
 from tests.test_trader_mock import ACCOUNT, KEY, SECRET, TIMING, until
 from tests.test_trader_run import PASSING, EngineApi, book
-from tests.trader_doubles import BARRIER, CALENDAR, FEE, Barrier, at, keep, policy_cell
+from tests.trader_doubles import BARRIER, CALENDAR, FEE, Barrier, at, keep, policy_cell, whole_rules
 
 LIVE_KEY = "PSlive" + "l" * 30
 LIVE_SECRET = "Sl" + "v" * 60
@@ -511,8 +511,8 @@ async def test_live_before_the_gate_orders_nothing_and_says_what_is_missing(
         await until(lambda: any("자동 매매(live): 실전 모드" in t for t in sent))
 
     [paper] = read_trades(state / DB_NAME, None, 10)
-    assert (returned, paper["mode"], paper["entry"]["quantity"]) == (None, PAPER, 14), (
-        "a paper trade of the whole capital: no live order, no cap"
+    assert (returned, paper["mode"], paper["entry"]["quantity"]) == (None, PAPER, 9), (
+        "a paper trade on the capital's loss budget (#471: 5,000 ÷ 510.6925 a share): no live order, no cap"
     )
     assert fake.rest_requests == [] and fake.posts_received == [] and fake.tokens_issued == []
     [run] = runs(state)
@@ -533,8 +533,9 @@ async def test_live_past_the_gate_and_the_checks_orders_on_the_live_server_withi
     kis_live: tuple[FakeKis, FakeAccount], tmp_path: Path
 ) -> None:
     """Past the gate and the checks: the 10:00 rise buys on the live server, with the live server's TR
-    IDs, 3 shares (⌊250,000 ÷ 70,100⌋: the first period's cap), its take-profit resting there; its
-    paper shadow buys 14. An account worth 2,000,000 won, above the 1,000,000 cap, is told."""
+    IDs, 2 shares (#471: 0.5% of the first period's cap, 1,250 won, over 510.6925 won a share at its
+    stop), its take-profit resting there; its paper shadow buys 9, on the capital's. An account worth
+    2,000,000 won, above the 1,000,000 cap, is told."""
     fake, account = kis_live
     account.cash = 2_000_000
     state = tmp_path / "state"
@@ -553,7 +554,7 @@ async def test_live_past_the_gate_and_the_checks_orders_on_the_live_server_withi
 
     assert returned is None
     [bought] = [t for t in read_trades(state / DB_NAME, None, 100) if t["mode"] == LIVE]
-    assert (bought["mode"], bought["entry"]["quantity"], bought["entry"]["price"]) == (LIVE, 3, 70_100)
+    assert (bought["mode"], bought["entry"]["quantity"], bought["entry"]["price"]) == (LIVE, 2, 70_100)
     posted = {tr_id for _, tr_id, _, _ in fake.posts_received}
     assert posted == {kis_orders.BUY.live, kis_orders.SELL.live}, "the live server's TR IDs alone"
     assert not posted & {kis_orders.BUY.mock, kis_orders.SELL.mock}
@@ -561,7 +562,7 @@ async def test_live_past_the_gate_and_the_checks_orders_on_the_live_server_withi
         shadow = db.execute(
             "SELECT mode, quantity FROM trades WHERE shadow = 1 AND entry_at > '2026-10-14'"
         ).fetchall()
-    assert shadow == [(PAPER, 14)], "its paper shadow, sized on the capital"
+    assert shadow == [(PAPER, 9)], "its paper shadow, sized on the capital"
     assert runs(state)[-1]["mode"] == LIVE
     assert any("자동 매매(live): 실전 계좌에 주문합니다. 운용 상한 250,000원" in t for t in sent)
     assert any("실전 계좌의 평가금(2,000,000원)이 운용 상한(1,000,000원)보다 큽니다" in t for t in sent)
@@ -572,9 +573,9 @@ async def test_live_past_the_gate_and_the_checks_orders_on_the_live_server_withi
 async def test_live_never_buys_more_than_the_orderable_cash(
     kis_live: tuple[FakeKis, FakeAccount], tmp_path: Path
 ) -> None:
-    """150,000 won orderable: 2 shares (⌊150,000 ÷ (70,100 × 1.00015)⌋), below the cap's 3."""
+    """100,000 won orderable: 1 share (⌊100,000 ÷ (70,100 × 1.00015)⌋), below the loss budget's 2."""
     fake, account = kis_live
-    account.cash = 150_000
+    account.cash = 100_000
     state = tmp_path / "state"
     ready(state)
 
@@ -589,9 +590,9 @@ async def test_live_never_buys_more_than_the_orderable_cash(
         await run_live(state, fake, account, sent, url, act=act)
 
     [bought] = [t for t in read_trades(state / DB_NAME, None, 100) if t["mode"] == LIVE]
-    assert (bought["mode"], bought["entry"]["quantity"]) == (LIVE, 2)
+    assert (bought["mode"], bought["entry"]["quantity"]) == (LIVE, 1)
     [buy] = account.placed(kis_orders.SIDE_BUY)
-    assert buy.quantity == 2
+    assert buy.quantity == 1
 
 
 async def test_the_live_mode_s_answer_changing_at_a_pick_stops_the_trader_to_start_again(
@@ -672,7 +673,7 @@ def test_a_live_trader_whose_champion_no_longer_passes_switches_back_at_the_pick
     store = TraderStore(tmp_path / DB_NAME)
     notices: list[str] = []
     try:
-        desk = Desk(store, Rules(fee_rate=FEE), CALENDAR.session, at("08:30:00"), PAPER, notices.append)
+        desk = Desk(store, whole_rules(), CALENDAR.session, at("08:30:00"), PAPER, notices.append)
         watch = LiveWatch(LIVE, LIVE, desk, CALENDAR.session, notices.append)
         watch.judge(at("08:30:00"))
     finally:
@@ -769,7 +770,7 @@ def test_a_failed_order_in_the_first_period_breaches_at_the_next_pick_and_a_resu
         store.add_failure(
             datetime.combine(DAYS[2], time(11), KST), LIVE, "sell", "unknown", "made up", None, None
         )
-        book = PaperTrader(store, Rules(fee_rate=FEE), CALENDAR.session, at("08:29:00"), LIVE, notices.append)
+        book = PaperTrader(store, whole_rules(), CALENDAR.session, at("08:29:00"), LIVE, notices.append)
         found = live.step(store, CALENDAR.session, at("08:30:00"), 1_000_000, notices.append)
         book.on_controls(at("08:30:00"))
         paused = book.status
@@ -798,7 +799,7 @@ def test_a_breach_resumed_while_the_trader_runs_as_paper_begins_a_new_period(tmp
         failed_at = datetime.combine(DAYS[2], time(11), KST)
         store.add_failure(failed_at, LIVE, "sell", "unknown", "made up", None, None)
         assert live.step(store, CALENDAR.session, at("08:30:00"), 1_000_000, notices.append).breached_at
-        rules = Rules(fee_rate=FEE)
+        rules = whole_rules()
         book = PaperTrader(store, rules, CALENDAR.session, at("08:31:00"), PAPER, notices.append)
         assert book.status == ENTRIES_PAUSED, "the ramp's pause holds the paper book too"
         assert not isinstance(ask(store, RESUME, PAPER, at("08:40:00")), str)
@@ -855,7 +856,7 @@ async def test_the_live_desk_sizes_on_the_cap_until_the_period_is_lifted(
             )
             desk = Desk(
                 store,
-                Rules(fee_rate=FEE),
+                whole_rules(),
                 CALENDAR.session,
                 at("08:00:00"),
                 LIVE,

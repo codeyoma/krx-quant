@@ -53,6 +53,7 @@ from tests.trader_doubles import (
     pick,
     policy_cell,
     quote,
+    whole_rules,
 )
 
 __all__ = ["kis_mock"]  # the fixture, used here
@@ -99,7 +100,7 @@ class MockDesk:
     state: Path
     fake: FakeKis
     account: FakeAccount
-    rules: Rules = field(default_factory=lambda: Rules(fee_rate=FEE))
+    rules: Rules = field(default_factory=whole_rules)
     started_at: datetime = field(default_factory=lambda: at("09:00:00"))
     notices: list[str] = field(default_factory=list)
     status: str | None = None
@@ -235,6 +236,25 @@ async def test_in_mock_mode_the_champion_keeps_a_paper_shadow_beside_its_kis_tra
     assert champion_day.net != pytest.approx(mine["net"])
     [challenger_day] = kept[2].days
     assert challenger_day.day == DAY and challenger_day.net == pytest.approx(theirs["net"])
+
+
+async def test_the_shadow_and_the_challenger_size_by_the_loss_budget_as_the_kis_champion_does(
+    kis_mock: tuple[FakeKis, FakeAccount], tmp_path: Path
+) -> None:
+    """By the trader's rules (#471): 0.5% of 1,000,000 won over 510.6925 won a share at the stop buys
+    nine, on KIS and in both paper books; the shadow's and the challenger's loss limits are their own,
+    simulated (``limits.Simulated``), never the champion's guard."""
+    fake, account = kis_mock
+    champion_and_challenger(tmp_path)
+    desk = MockDesk(tmp_path, fake, account, rules=Rules(fee_rate=FEE))
+
+    await desk.run([TEN, BOUGHT, TAKEN, Fill("10:02:30")])
+
+    [mine] = desk.trades()
+    shadow = by_book(desk.trades(policy=1))[PAPER, False, True]
+    [theirs] = desk.trades(policy=2)
+    assert [t["entry"]["quantity"] for t in (mine, shadow, theirs)] == [9, 9, 9]
+    assert [t["fraction"] for t in (mine, shadow, theirs)] == [None, None, None]
 
 
 async def test_the_gap_between_the_kis_trades_and_the_shadow_is_in_the_ledger_and_the_report(

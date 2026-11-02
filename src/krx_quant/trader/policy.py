@@ -2,12 +2,16 @@
 on, fitted again every night from the stored predictions (``refit.py``).
 
 **What a policy is.** The cells it trades, first ranked first, and for each its threshold θ (the
-rise's probability that buys) and its Kelly fraction λ (the share of the cell's Kelly f* bought,
-cut to 0–1); with when it was made and why, the cells the cost map passed that it leaves out and
-why, and what it was fitted on (``fit``). No limit is part of it: the capital and the loss limits
-come from the code and the server's ``.env`` alone (#393 "한도와 정지"). A policy holds none of
-them, a stored one that carried one would be read without it (``PolicyCell.from_json``), and
-nothing here reads or writes the trader's settings.
+rise's probability that buys); with when it was made and why, the cells the cost map passed that it
+leaves out and why, and what it was fitted on (``fit``). No limit is part of it: the capital, the
+loss limits and the risk rules (#471: a trade's loss budget, which sizes the buy) come from the code
+and the server's ``.env`` alone (#393 "한도와 정지"). A policy holds none of them, a stored one that
+carried one would be read without it (``PolicyCell.from_json``), and nothing here reads or writes
+the trader's settings.
+
+> **바뀜** (2026-11-03, #PRNUM): each cell had a Kelly fraction λ too (the share of the cell's f*
+> bought) → none: a policy that kept one (``kelly_fraction``, versions fitted before #471) is read
+> without it, its stored row as it was. 이유: spec #468 4 "크기": the loss budget sizes every buy.
 
 **Champion and challengers.** The first policy fitted becomes the champion; every later one is
 kept as a challenger (#399). ``champions`` keeps each change of the champion, with why. The
@@ -26,7 +30,7 @@ A challenger runs on a trading day when it was admitted before that day's pick (
 **How the trader applies the champion** (``apply``), at each pick (its start and 08:30, #395):
 the cost map still decides what may trade (a cell passing at a market order's round trip, a
 necessary condition), and the champion what does. The trader trades the champion's cells among
-those passing, in the champion's order, each at its θ and with λ × the day's f* of the capital.
+those passing, in the champion's order, each at its θ, sized by the loss budget (``paper.size``).
 A cell passing that the champion does not have is not traded (``NOT_IN_POLICY`` when that leaves
 none): it comes in through a challenger fitted on a later night, once promoted (#400). An empty
 champion (no cell passed the night it was fitted) trades nothing. Before the first champion nothing
@@ -77,7 +81,7 @@ CREATE TABLE IF NOT EXISTS policies (   -- each policy version (#399): what the 
     id INTEGER PRIMARY KEY,             -- the version
     created_at TEXT NOT NULL,
     reason TEXT NOT NULL,               -- why it was made
-    cells TEXT NOT NULL,                -- JSON: the cells it trades, first ranked first, with θ and λ
+    cells TEXT NOT NULL,                -- JSON: the cells it trades, first ranked first, with θ (λ to #471)
     left_out TEXT NOT NULL,             -- JSON: the cells the cost map passed that it does not trade, and why
     fit TEXT NOT NULL,                  -- JSON: what it was fitted on: cost map, grid, result, run
     admitted_at TEXT,                   -- a challenger given a running slot (#400); null: waiting
@@ -110,14 +114,13 @@ BUSY_SECONDS = 30.0
 
 @dataclass(frozen=True)
 class PolicyCell:
-    """A cell a policy trades: its threshold θ and Kelly fraction λ, and what it was fitted on
-    (``fitted``: the cost map's p*, lower bound and f*, the simulated trades)."""
+    """A cell a policy trades: its threshold θ, and what it was fitted on (``fitted``: the cost map's
+    p*, lower bound and f*, the simulated trades)."""
 
     kind: str
     role: str  # the predictor's on the cost map when fitted: consensus, top, baseline (#469: not its key)
     predictor: str
     threshold: float
-    kelly_fraction: float
     fitted: Mapping[str, Any] = field(default_factory=dict)
 
     @property
@@ -130,26 +133,25 @@ class PolicyCell:
             "role": self.role,
             "predictor": self.predictor,
             "threshold": self.threshold,
-            "kelly_fraction": self.kelly_fraction,
             "fitted": dict(self.fitted),
         }
 
     @classmethod
     def from_json(cls, data: Mapping[str, Any]) -> PolicyCell:
-        """A stored cell; its values only (any other key, a limit's say, is not read). ValueError
-        when one is missing or not a number from 0 to 1 (λ above 0)."""
-        threshold, fraction = _unit(data.get("threshold")), _unit(data.get("kelly_fraction"))
+        """A stored cell; its values only (any other key, a limit's say, or the Kelly fraction λ a
+        policy fitted before #471 kept, is not read). ValueError when one is missing or θ is not a
+        number from 0 to 1."""
+        threshold = _unit(data.get("threshold"))
         if not all(isinstance(data.get(k), str) for k in ("kind", "role", "predictor")):
             raise ValueError(f"a policy cell without its kind, role or predictor: {data!r}")
-        if threshold is None or fraction is None or fraction <= 0:
-            raise ValueError(f"a policy cell's θ and λ must be numbers from 0 to 1: {data!r}")
+        if threshold is None:
+            raise ValueError(f"a policy cell's θ must be a number from 0 to 1: {data!r}")
         fitted = data.get("fitted")
         return cls(
             data["kind"],
             data["role"],
             data["predictor"],
             threshold,
-            fraction,
             dict(fitted) if isinstance(fitted, Mapping) else {},
         )
 
@@ -170,8 +172,8 @@ class Policy:
 
 def apply(policy: Policy | None, selection: Selection, gone: Collection[Cell] = ()) -> Selection:
     """``selection`` (the cells the cost map passes today) under ``policy`` (module doc): its cells,
-    by their predictors' names, among those passing, in its order, each at its θ and with λ × the
-    day's f*; the others marked as not in it. Each of its cells kept with whether it trades and why
+    by their predictors' names, among those passing, in its order, each at its θ; the others marked
+    as not in it. Each of its cells kept with whether it trades and why
     not (``Selection.cells``, #469): ``GONE`` (in ``gone``: its predictor stopped predicting),
     ``OFF_MAP`` (the cost map does not name it today), else the cost map's verdict. Without a policy
     nothing trades (``NO_CHAMPION``, #469), and a cost map that could not be read stays as it is."""
@@ -191,8 +193,7 @@ def apply(policy: Policy | None, selection: Selection, gone: Collection[Cell] = 
         found = None if cell.cell in gone else passing.get(cell.cell)
         why = None
         if found is not None:
-            fraction = min(1.0, max(0.0, cell.kelly_fraction * (found.kelly or 0.0)))
-            picks.append(replace(found, threshold=cell.threshold, fraction=fraction))
+            picks.append(replace(found, threshold=cell.threshold))
         elif cell.cell in gone:
             why = GONE
         elif cell.cell not in named:
@@ -359,10 +360,10 @@ def waiting_versions(db: sqlite3.Connection) -> list[int]:
     return [int(r[0]) for r in rows]
 
 
-def values(cells: Sequence[PolicyCell]) -> tuple[tuple[str, str, float, float], ...]:
-    """A policy's values (#393: its cells in their order, each θ and λ), what was fitted aside; a cell
-    by its predictor's name, not its role on the cost map (#469)."""
-    return tuple((c.kind, c.predictor, c.threshold, c.kelly_fraction) for c in cells)
+def values(cells: Sequence[PolicyCell]) -> tuple[tuple[str, str, float], ...]:
+    """A policy's values (#393: its cells in their order, each θ; no λ since #471), what was fitted
+    aside; a cell by its predictor's name, not its role on the cost map (#469)."""
+    return tuple((c.kind, c.predictor, c.threshold) for c in cells)
 
 
 def same_as(db: sqlite3.Connection, cells: Sequence[PolicyCell]) -> int | None:

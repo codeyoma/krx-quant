@@ -862,7 +862,7 @@ def _day_section(report: Report) -> str:
     head = (
         f"그날 · 챔피언 정책 {champion}"
         if champion is not None
-        else "그날 · 챔피언 없음(첫 정책 전: 비용 지도의 칸을 기본값 θ와 λ로 산다)"
+        else "그날 · 챔피언 없음(첫 정책 전: 연습 말고는 사지 않는다, #469)"
     )
     lines = [head]
     ledger = report.ledger
@@ -954,10 +954,12 @@ def _pick_section(report: Report) -> str:
         lines.append(f"매매할 칸 {len(chosen)}(순위 순):")
         for n, p in enumerate(chosen, 1):
             theta = "기본값" if p.get("threshold") is None else f"{p['threshold']:g}"
+            # #471: a loss budget sizes the buy; a pick kept before it bought a fraction of the capital.
+            sized = f"비율 {p['fraction']:.2f}" if p.get("fraction") is not None else "손실 예산"
             lines.append(
                 f"{n}. {_cell(p['kind'], p['predictor'], p['role'])}: 하한 {_ratio(p['low'])} − p* "
                 f"{_ratio(p['p_star'])} = {p['low'] - p['p_star']:+.3f} · {p['calls']}건 · θ {theta} · "
-                f"비율 {p['fraction']:.2f}"
+                + sized
             )
         return "\n".join(lines)
     reason = pick["reason"]
@@ -1046,8 +1048,7 @@ def _night_section(report: Report) -> str:
             continue
         cells = (
             " · ".join(
-                f"{n}. {_cell(c.kind, c.predictor, c.role)} θ {c.threshold:g} λ {c.kelly_fraction:g}"
-                + _simulated(c.fitted)
+                f"{n}. {_cell(c.kind, c.predictor, c.role)} θ {c.threshold:g}" + _simulated(c.fitted)
                 for n, c in enumerate(f.cells, 1)
             )
             or "칸 없음"

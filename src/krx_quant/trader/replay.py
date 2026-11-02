@@ -23,15 +23,21 @@ close's rises the first ranked buys once each cell ranked above it has a predict
 close read, or ``Rules.fresh`` after its display, the clock's quarter-second ticks taken as
 continuous); the buy at the best ask of the first quote received after the decision (``refused``:
 none at or past its time barrier, later than ``Rules.quote_wait``, or at its target already; a
-special window known by that quote that touches its window gives it up); the size (``size``: λ × f*
-of the capital within the paper account's cash, the capital plus the replay's own net so far); the
-exits (``exit_on``, ``clock_exit``: the take-profit at the target once a best bid reaches it, the
-stop at the first best bid at or below it, the time exit at the best bid of the last quote received
-in the ``Rules.quote_wait`` before the time barrier, else of the first one after it); the costs
-(``net_of``: the commission on both fills' notionals, the sell tax on the sale's). The quotes on
-which an exit rule does nothing are passed by a search of the arrays for the first one it can act
-on, and ``exit_on`` judges that one. No limit nor pause holds a replay (as a challenger's book,
-``limits.Unlimited``), and nothing stalls: a gap leaves its signals out instead (below).
+special window known by that quote that touches its window gives it up); the size (``size``, #471:
+the trader's loss budget over a share's loss at the stop, within the paper account's cash, the
+capital plus the replay's own net so far); the risk rules (``risk_held``, #471: the day's buy orders,
+the losses in a row and their cooldown, on the replay's own trades of the day); the exits
+(``exit_on``, ``clock_exit``: the take-profit at the target once a best bid reaches it, the stop at
+the first best bid at or below it, the time exit at the best bid of the last quote received in the
+``Rules.quote_wait`` before the time barrier, else of the first one after it); the costs (``net_of``:
+the commission on both fills' notionals, the sell tax on the sale's). The quotes on which an exit
+rule does nothing are passed by a search of the arrays for the first one it can act on, and
+``exit_on`` judges that one. The loss limits hold a replay as they hold a challenger's book
+(``limits.Simulated``, #471: from the replay's first day): a trade's exit realized at or below one
+stops it (the daily one for the rest of the day), and so does the open position at a best bid it
+holds through (``paper.unrealized``, as the paper book marks it on each quote, found by a search of
+the arrays too), sold at that bid. No pause holds it, and nothing stalls: a gap leaves its signals out
+instead (below).
 
 **Two outputs.**
 
@@ -39,9 +45,9 @@ on, and ``exit_on`` judges that one. No limit nor pause holds a replay (as a cha
   at its read as if nothing were held and no other cell ranked: bought or not (``special``,
   ``expired``, ``target_reached``), its exit and its net in won and in ticks of its reference;
   tallied at each θ of the grid its probability reaches.
-- *The policy* (``Policy``): its cells in their rank at their θ and λ, one position at a time, with
-  the waits the priority makes: its trades, those that gained, their net in won and the capital's
-  log growth, by cell and by day (``Result``).
+- *The policy* (``Policy``): its cells in their rank at their θ, one position at a time, with the
+  waits the priority makes, sized and held as the paper book is (#471): its trades, those that
+  gained, their net in won and the capital's log growth, by cell and by day (``Result``).
 
 **Missing data**, left out of both and counted apart, never a trade that made nothing: a day without
 its recording of the book, or whose files cannot be read (``no_recording``); a recorded gap of the
@@ -84,6 +90,7 @@ from krx_quant.gaps_probe import Unread, read_gaps
 from krx_quant.kinds import DIRECTION
 from krx_quant.macro import read_partition
 from krx_quant.market_calendar import Session
+from krx_quant.pricing import SELL_TAX
 from krx_quant.special import Window, touching
 from krx_quant.stats import Interval, day_mean
 from krx_quant.trader import SYMBOL
@@ -97,10 +104,10 @@ from krx_quant.trader.cells import (
     kind_signal,
     traded_kind,
 )
+from krx_quant.trader.limits import RUNNING, SALE, Simulated
 from krx_quant.trader.paper import (
     HOLDING,
     NO_QUOTE,
-    NO_SHARES,
     OUTRANKED,
     SPECIAL,
     Plan,
@@ -113,6 +120,7 @@ from krx_quant.trader.paper import (
     net_of,
     plan,
     refused,
+    risk_held,
     settle,
     size,
 )
@@ -299,7 +307,10 @@ def known(windows: Sequence[Window], at: datetime) -> list[Window]:
 class Fill:
     """A rise's buy decided at a time, on its day's recording, a share: its data missing
     (``missing``), given up (``refused``: ``special``, ``expired``, ``target_reached``), or bought at
-    ``entry`` at ``entry_at`` and sold by ``sale``. ``free_at``: when the book holds nothing again."""
+    ``entry`` at ``entry_at`` and sold by ``sale``. ``free_at``: when the book holds nothing again. A
+    buy's quotes held through (#471: what a loss limit marks it on) are the recording's from
+    ``bought`` (the buy's, out) to ``until`` (the one its exit is made on, out; the day's end for the
+    clock's time exit)."""
 
     free_at: datetime
     missing: str | None = None
@@ -307,6 +318,8 @@ class Fill:
     entry_at: datetime | None = None
     entry: float | None = None
     sale: Sale | None = None
+    bought: int = 0
+    until: int = 0
 
 
 class Fills:
@@ -351,13 +364,13 @@ class Fills:
         sold = self._sale(day, first, planned)
         if sold is None:
             return Fill(decided_at, missing=NO_EXIT_QUOTE)
-        sale, taken = sold
-        return Fill(taken, entry_at=quote.received_at, entry=quote.ask, sale=sale)
+        sale, taken, until = sold
+        return Fill(taken, entry_at=quote.received_at, entry=quote.ask, sale=sale, bought=first, until=until)
 
-    def _sale(self, day: Recording, bought: int, planned: Plan) -> tuple[Sale, datetime] | None:
+    def _sale(self, day: Recording, bought: int, planned: Plan) -> tuple[Sale, datetime, int] | None:
         """The exit of a position bought on quote ``bought``, by the paper exits on the quotes
-        received after it, and when the book takes it; None without a quote to sell on at the time
-        barrier."""
+        received after it, when the book takes it and the quote it is made on (the day's end for the
+        clock's); None without a quote to sell on at the time barrier."""
         rules = self._rules
         times, bids = day.quotes.times, day.quotes.bids
         n = len(times)
@@ -378,11 +391,11 @@ class Fills:
             taken = quote.received_at
             if sale.quote is standing:  # sold at the barrier on the quote before it: the clock may first
                 taken = min(taken, planned.time_barrier + rules.grace)
-            return sale, taken
+            return sale, taken, k
         # No quote at or after the barrier: the clock's time exit on the last quote, if recent.
         clocked = planned.time_barrier + rules.grace
         sale = clock_exit(planned, day.quote(n - 1), clocked, rules)
-        return None if sale is None else (sale, clocked)
+        return None if sale is None else (sale, clocked, n)
 
 
 # Each signal alone.
@@ -457,12 +470,10 @@ class Signals:
 
 @dataclass(frozen=True)
 class Ranked:
-    """A policy's cell as a replay trades it: its θ and its share of the capital (λ × f*, cut to
-    0–1)."""
+    """A policy's cell as a replay trades it: its θ (#471: sized by the loss budget, no λ)."""
 
     cell: Cell
     threshold: float
-    fraction: float
 
 
 @dataclass
@@ -516,23 +527,28 @@ class Trade:
 
 class Policy:
     """A policy's replay, a day at a time (module doc): its cells in their rank (``ranked``, the first
-    first), the paper account's net so far (its cash), its tallies."""
+    first), held by ``rules`` (the capital, the loss budget, the risk rules and the loss limits, #471);
+    the paper account's net so far (its cash), its tallies."""
 
     def __init__(
         self,
         ranked: Sequence[Ranked],
-        capital: float,
         rules: Rules,
         sessions: Callable[[date], Session | None],
         record: Callable[[Trade], None] | None = None,
     ) -> None:
         self.ranked = tuple(ranked)
         self.ranks = {r.cell: i for i, r in enumerate(self.ranked)}
-        self._capital = capital
+        self._capital = rules.capital
         self._rules = rules
         self._sessions = sessions
         self._record = record
         self._realized = 0.0
+        # The loss limits, simulated from the first day (#471), and the risk rules' day: its buys and
+        # its exits (time, net), in order.
+        self.holds = Simulated(rules.limits, date.min, account=lambda: self._realized)
+        self._buys = 0
+        self._exits: list[tuple[datetime, float]] = []
         self.total = Tally()
         self.cells = {r.cell: Tally() for r in self.ranked}
         self.days: dict[date, float] = {}
@@ -549,6 +565,7 @@ class Policy:
         predictions in the order read, the clock at each rise's deadline (``settle``)."""
         rules = self._rules
         self._fills, self._held = fills, None
+        self._buys, self._exits = 0, []
         pending: dict[datetime, list[Rise]] = {}
         seen: dict[datetime, set[Cell]] = {}
         deadlines: list[datetime] = []
@@ -592,16 +609,20 @@ class Policy:
         self.skipped[reason] += 1
 
     def _busy(self, signal: Signal, at: datetime) -> str | None:
-        """Why a rise does not buy at ``at``: something is held or waits to be bought (``outranked``
-        when of the same bar close and ranked above it, as ``PaperTrader._held_off``)."""
+        """Why a rise does not buy at ``at``, as ``PaperTrader._not_now``: a loss limit reached (its
+        status), something held or waiting to be bought (``outranked`` when of the same bar close and
+        ranked above it, as ``PaperTrader._held_off``), the risk rules (#471, ``risk_held``)."""
+        self.holds.roll(at)
+        if self.holds.status != RUNNING:
+            return self.holds.status
         held = self._held
-        if held is None or at >= held[0]:
-            return None
-        of = held[1]
-        mine = self.ranks[Cell(signal.kind, signal.predictor)]
-        if of.bar_close == signal.bar_close and self.ranks[Cell(of.kind, of.predictor)] < mine:
-            return OUTRANKED
-        return HOLDING
+        if held is not None and at < held[0]:
+            of = held[1]
+            mine = self.ranks[Cell(signal.kind, signal.predictor)]
+            if of.bar_close == signal.bar_close and self.ranks[Cell(of.kind, of.predictor)] < mine:
+                return OUTRANKED
+            return HOLDING
+        return risk_held(self._rules, at, self._buys, self._exits)
 
     def _decide(self, rise: Rise, at: datetime) -> None:
         assert self._fills is not None
@@ -615,16 +636,25 @@ class Policy:
             self.skipped[filled.refused] += 1
             return
         assert filled.entry is not None and filled.entry_at is not None and filled.sale is not None
-        ranked = self.ranked[self.ranks[rise.cell]]
+        rules = self._rules
         cash = self._capital + self._realized  # nothing open: one at a time
-        fee_rate = self._rules.fee_rate
-        quantity = size(ranked.fraction, None, self._capital, filled.entry, cash, fee_rate)
-        if quantity < 1:
-            self.skipped[NO_SHARES] += 1
+        fee_rate = rules.fee_rate
+        quantity = size(
+            filled.entry, rise.plan.stop, rules.budget(self._capital), self._capital, cash, fee_rate
+        )
+        if isinstance(quantity, str):  # ``no_shares``, ``bad_stop``
+            self.skipped[quantity] += 1
             self._held = (filled.entry_at, signal)
             return
+        self._buys += 1
         sale = filled.sale
+        limited = self._limited(filled, quantity)
+        if limited is not None:  # sold at once by a loss limit, before its own exit
+            sale = limited
+            self._held = (sale.at, signal)
         net = net_of(filled.entry, sale.price, quantity, fee_rate)
+        self.holds.exited(net, sale.at)
+        self._exits.append((sale.at, net))
         self._realized += net
         self.total.add(net, self._capital)
         self.cells[rise.cell].add(net, self._capital)
@@ -646,6 +676,30 @@ class Policy:
                     net,
                 )
             )
+
+    def _limited(self, filled: Fill, quantity: int) -> Sale | None:
+        """The sale a loss limit makes of ``quantity`` shares bought as ``filled`` (#471, module doc):
+        at the best bid of the first quote it holds through at which the day's or the cumulative P&L,
+        with the position's open one there (``paper.unrealized``, the same sums), is at or below its
+        limit (``limits.Simulated``, which keeps it reached); None if none is."""
+        day = self._fills.day if self._fills is not None else None
+        start, end = filled.bought + 1, filled.until
+        if day is None or start >= end or filled.entry is None:
+            return None
+        holds, limits, fee_rate = self.holds, self._rules.limits, self._rules.fee_rate
+        bids = day.quotes.bids[start:end]
+        sold = bids * quantity
+        buy_fee = filled.entry * quantity * fee_rate
+        held = (bids - filled.entry) * quantity - buy_fee - sold * fee_rate - sold * SELL_TAX
+        hit = np.flatnonzero(
+            (holds.realized_day + held <= -limits.daily)
+            | (holds.realized_cumulative + held <= -limits.cumulative)
+        )
+        if not len(hit):
+            return None
+        quote = day.quote(start + int(hit[0]))
+        holds.mark(float(held[hit[0]]), quote.received_at)
+        return Sale(quote.received_at, quote.bid, SALE[holds.status], quote)
 
 
 # A pass over the days.
@@ -674,7 +728,8 @@ class Pass:
 class Replayer:
     """The recorded days of ``cells`` (module doc), from the engine's database ``db`` (read-only) and
     the recordings under ``data_dir``, with the special ``windows`` the engine kept; a day at a time,
-    a pass at each ``run``. ``thresholds``: the θ each signal measured alone is tallied at."""
+    a pass at each ``run``, its policies held by ``rules``. ``thresholds``: the θ each signal measured
+    alone is tallied at."""
 
     def __init__(
         self,
@@ -684,8 +739,7 @@ class Replayer:
         windows: Sequence[Window],
         cells: Mapping[Cell, Source],
         *,
-        capital: float,
-        fee_rate: float,
+        rules: Rules,
         target_version: int,
         thresholds: Sequence[float],
         meter: Meter | None = None,
@@ -695,10 +749,9 @@ class Replayer:
         self._sessions = sessions
         self._windows = sorted(windows, key=lambda w: w.start)
         self._cells = dict(cells)
-        self._capital = capital
         self._target_version = target_version
         self._thresholds = tuple(thresholds)
-        self.rules = Rules(fee_rate=fee_rate)
+        self.rules = rules  # the trader's (#471: its capital, loss budget, risk rules and loss limits)
         self._meter = meter or Meter()
         self.passes = 0
         self.days_read = 0
@@ -714,7 +767,7 @@ class Replayer:
         """One pass over the days: each of ``policies`` replayed (its trades to ``record``, if given)
         and ``alone``'s signals measured alone."""
         self.passes += 1
-        books = [Policy(p, self._capital, self.rules, self._sessions, record) for p in policies]
+        books = [Policy(p, self.rules, self._sessions, record) for p in policies]
         cells = {r.cell for p in policies for r in p} | ({alone} if alone is not None else set())
         signals = {t: Signals() for t in self._thresholds}
         counts: Counter[str] = Counter()

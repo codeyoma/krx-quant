@@ -481,14 +481,15 @@ _DEMO_READ = timedelta(milliseconds=400)
 # The trader's policies (#399, #400, made up): version 1 fitted on the 7th's night, the first
 # champion, so the 8th's trade on is its; version 2 fitted on the 8th's night, a challenger given a
 # running slot then, so it runs in paper beside the champion from the 12th (its pick at 08:30). Each
-# trades the top algorithm's 4-minute barrier at its threshold θ and Kelly fraction λ.
+# trades the top algorithm's 4-minute barrier at its threshold θ (#471: a policy has no Kelly fraction λ).
 _DEMO_POLICIES = (
-    (datetime(2026, 10, 7, 22, 31, 4, tzinfo=KST), THRESHOLD, 0.5),
-    (datetime(2026, 10, 8, 22, 31, 4, tzinfo=KST), 0.65, 1.0),
+    (datetime(2026, 10, 7, 22, 31, 4, tzinfo=KST), THRESHOLD),
+    (datetime(2026, 10, 8, 22, 31, 4, tzinfo=KST), 0.65),
 )
 # The cell as the cost map picked it (#395, made up): the predictor's role, its breakeven p*, its hit
-# rate's lower bound and Kelly f*; bought with all of the capital (λ × f* cut to 1). The 7th's trade,
-# before the first champion, was entered before the picks: none of these.
+# rate's lower bound and Kelly f*; bought with all of the capital (λ × f* cut to 1: the demo's days are
+# before #471's loss budget). The 7th's trade, before the first champion, was entered before the picks:
+# none of these.
 _DEMO_PICK = ("top", 0.61, 0.66, 9.6)
 # The challenger's paper trades on the morning (#400): its own book, beside the champion's, on the
 # same quotes: each entry's time and width w.
@@ -526,8 +527,8 @@ def write_demo_trader(state_dir: Path, books: Sequence[Event]) -> None:
         db = policies.connect(state_dir / TRADER_DB)
         try:
             versions = [
-                policies.add(db, night, _demo_policy_reason(night), [_demo_policy_cell(night, θ, λ)], [], {})
-                for night, θ, λ in _DEMO_POLICIES
+                policies.add(db, night, _demo_policy_reason(night), [_demo_policy_cell(night, θ)], [], {})
+                for night, θ in _DEMO_POLICIES
             ]
         finally:
             db.close()
@@ -603,14 +604,13 @@ def _demo_policy_reason(night: datetime) -> str:
     return f"{night.date()} 밤 맞추기: 비용 지도가 시장가 왕복으로 통과시킨 1칸 가운데 1칸(데모, 지어낸 값)"
 
 
-def _demo_policy_cell(night: datetime, threshold: float, kelly_fraction: float) -> policies.PolicyCell:
+def _demo_policy_cell(night: datetime, threshold: float) -> policies.PolicyCell:
     """The demo policy's one cell, fitted as the nightly re-fit keeps it (made-up figures)."""
     role, p_star, low, kelly = _DEMO_PICK
     fitted: dict[str, Any] = {"p_star": p_star, "low": low, "kelly": kelly}
-    fitted |= {"fraction": min(1.0, kelly_fraction * kelly)}
     fitted |= {"days": [night.date().isoformat()], "read": {"read": 380, "rises": 120}}
     fitted |= {"trades": 24, "wins": 14, "net": 8_400.0, "growth": 0.0084}
-    return policies.PolicyCell("barrier", role, "breiman", threshold, kelly_fraction, fitted)
+    return policies.PolicyCell("barrier", role, "breiman", threshold, fitted)
 
 
 def _demo_trade(
@@ -638,7 +638,7 @@ def _demo_trade(
     tick = _OPENS[TRADER_SYMBOL][1]
     anchor = (bid + ask) / 2
     bar_close = decided.replace(second=0, microsecond=0)
-    quantity = shares(1.0, CAPITAL, ask, cash, _FEE)
+    quantity = shares(CAPITAL, ask, cash, _FEE)
     role, p_star, low, kelly = _DEMO_PICK if pick else (None, None, None, None)
     decision = store.add_decision(
         mode=mode,

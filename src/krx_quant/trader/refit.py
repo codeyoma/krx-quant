@@ -12,7 +12,7 @@ first (``policy.admit``).
 **Which cells.** Tonight's cost map of 005930 (``GET /v1/cost-map``, as the trader reads it at
 08:30, ``selection.pick``) decides what may trade: the cells passing at a market order's round
 trip, ranked by their hit rate's lower bound less p*. The policy keeps that order; the fit sets
-each cell's threshold θ and Kelly fraction λ, or leaves the cell out.
+each cell's threshold θ, or leaves the cell out.
 
 **From what** (#470): the recorded days, replayed by the paper trader's own rules
 (``replay.py``): each cell's predictions of 005930 on the cost map's days for its kind (the row's
@@ -21,34 +21,38 @@ reads them (an algorithm's by models trained on the answers they are scored on,
 ``stats.on_target``), and each day's quotes as the collector recorded them and streamed them to the
 trader. Nothing is predicted again, and no answer is read.
 
-**The trades replayed** (``replay.Policy``): the policy's cells in their rank at their θ and λ, one
+**The trades replayed** (``replay.Policy``): the policy's cells in their rank at their θ, one
 position at a time, as the paper book would have traded them on those quotes: a rise decided as
 ``paper.plan`` and ``paper.settle`` decide it (the entry rules at the cell's θ, with the special
 windows known then; of a bar close's rises the first ranked buys, a rise waiting for the cells
-ranked above it), bought at the best ask of the first quote after the decision, ⌊min(capital,
-λ × f* × capital, cash) ÷ ask⌋ shares (``paper.size``, the cash the capital plus the replay's net so
-far), sold at the target once a best bid reaches it, at the first best bid at or below the stop (the
-direction's too), or at the time barrier; its net in won after the commission on both fills and the
-sell tax. A signal in a gap of the recording, or of a day without one, is left out and counted, not
-traded.
+ranked above it; the risk rules, ``paper.risk_held``, #471), bought at the best ask of the first quote
+after the decision, as many shares as the trader's loss budget pays (``paper.size``, #471: within the
+cash, the capital plus the replay's net so far), sold at the target once a best bid reaches it, at the
+first best bid at or below the stop (the direction's too), or at the time barrier, or at once by a
+loss limit simulated (``limits.Simulated``); its net in won after the commission on both fills and
+the sell tax. A signal in a gap of the recording, or of a day without one, is left out and counted,
+not traded.
 
 **The fit** (``fit``): the cells one at a time in rank order, each at every point of the grid
-(``Grid``: θ in ``THRESHOLDS`` × λ in ``KELLY_FRACTIONS``) with the cells kept before it as they
-were kept. The point whose replayed days grow the capital most (Σ log(1 + net ÷ capital) over the
-trades, the Kelly criterion: the capital does not compound in the trader, but λ is a Kelly
-fraction) is kept when the cell made at least ``MIN_TRADES`` trades there and it grows the capital
-more than leaving the cell out. Of points that grow it alike, the one nearest the trader's
-defaults (θ ``KRX_TRADER_THRESHOLD``, λ ``KELLY_FRACTION``) is kept, then the higher θ, then the
-lower λ. A cell kept at no point is left out, and why: ``few_trades`` (fewer than ``MIN_TRADES``
-at every point), ``no_gain`` (no point grows the capital more). The same predictions, recordings,
-cost map, calendar and settings make the same policy.
+(``Grid``: θ in ``THRESHOLDS``) with the cells kept before it as they were kept. The point whose
+replayed days grow the capital most (Σ log(1 + net ÷ capital) over the trades) is kept when the cell
+made at least ``MIN_TRADES`` trades there and it grows the capital more than leaving the cell out. Of
+points that grow it alike, the one nearest the trader's default θ (``KRX_TRADER_THRESHOLD``) is
+kept, then the higher. A cell kept at no point is left out, and why: ``few_trades`` (fewer than
+``MIN_TRADES`` at every point), ``no_gain`` (no point grows the capital more). The same predictions,
+recordings, cost map, calendar and settings make the same policy.
+
+> **바뀜** (2026-11-03, #PRNUM): the grid was θ × λ (``KELLY_FRACTIONS`` 0.25, 0.5, 1), its ties going to
+> the λ nearest ``KELLY_FRACTION`` then the lower → θ alone. 이유: #471 took λ out of the policy (spec
+> #468 4 "크기"); the change is that alone, the fit's target is #472's.
 
 **Each signal alone** (#470, ``replay.Signals``): each cell's rises, each measured alone a share at
 each θ of the grid, kept in its policy cell (``fitted.signals``) or in its entry of the cells left
 out, and shown in the report. The fit does not use them yet (#472).
 
-**Limits.** None is fitted nor kept: the capital sizes the replayed trades as it sizes the
-trader's (``KRX_TRADER_CAPITAL``), and the fit only writes ``policies`` and ``champions``.
+**Limits.** None is fitted nor kept: the capital, the loss budget, the risk rules and the loss limits
+hold the replayed trades as they hold the trader's (``KRX_TRADER_CAPITAL``, #471's settings), and the
+fit only writes ``policies`` and ``champions``.
 
 **Memory** (the server has 2 GB; pre-validation replays have been killed for it): a pass of the
 replay for each cell the cost map passes, its points of the grid replayed together with the cells
@@ -67,7 +71,6 @@ from collections import Counter
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
-from itertools import product
 from pathlib import Path
 from typing import Any
 
@@ -82,7 +85,7 @@ from krx_quant.predictions import DB_NAME as ENGINE_DB
 from krx_quant.predictions import KIND_ANSWER_JOIN, KIND_SCORED, SCORED, TOUCH_JOIN
 from krx_quant.pricing import tick_size
 from krx_quant.special import Window
-from krx_quant.trader import KELLY_FRACTION, SYMBOL, THRESHOLD, promotion, review
+from krx_quant.trader import SYMBOL, THRESHOLD, promotion, review
 from krx_quant.trader import policy as policies
 from krx_quant.trader.cells import Cell, Signal, open_engine_db, special_windows, traded_kind
 from krx_quant.trader.paper import NO_QUOTE, Plan, Rules, plan
@@ -106,9 +109,8 @@ from krx_quant.trader.store import DB_NAME as TRADER_DB
 
 log = logging.getLogger(__name__)
 
-# The grid (#399: small): the thresholds θ and the Kelly fractions λ tried for each cell.
+# The grid (#399: small): the thresholds θ tried for each cell (#471: no Kelly fraction λ).
 THRESHOLDS = (0.4, 0.5, 0.6, 0.7, 0.8)
-KELLY_FRACTIONS = (0.25, 0.5, 1.0)
 # A cell is kept at a point only if it made this many replayed trades there: one a trading day of
 # the cost map's 20 on average, so a θ is not picked for a few lucky trades.
 MIN_TRADES = 20
@@ -124,28 +126,17 @@ NO_POLICY_KEPT = 1
 @dataclass(frozen=True)
 class Grid:
     thresholds: tuple[float, ...] = THRESHOLDS
-    kelly_fractions: tuple[float, ...] = KELLY_FRACTIONS
-    threshold: float = THRESHOLD  # the defaults ties go to: the trader's
-    kelly_fraction: float = KELLY_FRACTION
+    threshold: float = THRESHOLD  # the default ties go to: the trader's
     min_trades: int = MIN_TRADES
 
-    def points(self) -> list[tuple[float, float]]:
-        """Every (θ, λ), in the order ties are kept by (module doc)."""
-        return sorted(
-            product(self.thresholds, self.kelly_fractions),
-            key=lambda g: (
-                round(abs(g[0] - self.threshold), 9),
-                -g[0],
-                round(abs(g[1] - self.kelly_fraction), 9),
-                g[1],
-            ),
-        )
+    def points(self) -> list[float]:
+        """Every θ, in the order ties are kept by (module doc)."""
+        return sorted(self.thresholds, key=lambda t: (round(abs(t - self.threshold), 9), -t))
 
     def as_json(self) -> dict[str, Any]:
         return {
             "thresholds": list(self.thresholds),
-            "kelly_fractions": list(self.kelly_fractions),
-            "defaults": {"threshold": self.threshold, "kelly_fraction": self.kelly_fraction},
+            "defaults": {"threshold": self.threshold},
             "min_trades": self.min_trades,
         }
 
@@ -156,16 +147,10 @@ class Point:
 
     pick: Pick
     threshold: float
-    kelly_fraction: float
-
-    @property
-    def fraction(self) -> float:
-        """The share of the capital it buys: λ × f*, cut to 0–1 (``policy.apply``'s)."""
-        return min(1.0, max(0.0, self.kelly_fraction * (self.pick.kelly or 0.0)))
 
     def ranked(self) -> Ranked:
         """As the replay trades it."""
-        return Ranked(self.pick.cell, self.threshold, self.fraction)
+        return Ranked(self.pick.cell, self.threshold)
 
 
 @dataclass(frozen=True)
@@ -184,13 +169,13 @@ Replay = Callable[[Pick, Sequence[Sequence[Point]]], Sequence[Result]]
 
 
 def fit(picks: Sequence[Pick], replay: Replay, grid: Grid) -> Fitted:
-    """The cells' θ and λ (module doc "The fit"): one pass of ``replay`` a pick, every point of the
-    grid replayed in it with the points kept before."""
+    """The cells' θ (module doc "The fit"): one pass of ``replay`` a pick, every point of the grid
+    replayed in it with the points kept before."""
     kept: list[Point] = []
     left_out: list[dict[str, Any]] = []
     current = Result(Tally(), {}, {})  # no cell: no trade
     for pick in picks:
-        points = [Point(pick, threshold, fraction) for threshold, fraction in grid.points()]
+        points = [Point(pick, threshold) for threshold in grid.points()]
         results = replay(pick, [[*kept, point] for point in points])
         best: tuple[Point, Result] | None = None
         tried: tuple[Point, Result] | None = None  # the best with enough trades, kept or not
@@ -214,7 +199,7 @@ def fit(picks: Sequence[Pick], replay: Replay, grid: Grid) -> Fitted:
             out |= {"why": FEW_TRADES, "most_trades": most}
         else:
             point, result = tried
-            best_point = {"threshold": point.threshold, "kelly_fraction": point.kelly_fraction}
+            best_point = {"threshold": point.threshold}
             out |= {"why": NO_GAIN, "best": best_point | result.cells[pick.cell].as_json()}
         left_out.append(out)
     return Fitted(tuple(kept), tuple(left_out), current)
@@ -395,8 +380,7 @@ def refit_from(
     data_dir: Path,
     sessions: Callable[[date], Session | None],
     *,
-    capital: float,
-    fee_rate: float,
+    rules: Rules,
     target_version: int,
     grid: Grid,
     now: datetime,
@@ -404,8 +388,9 @@ def refit_from(
     meter: Meter | None = None,
 ) -> Refitted:
     """Fit a policy on the cost map ``body``, the engine's database at ``engine_db`` (read-only) and
-    the recordings under ``data_dir`` (module doc), and keep it in the trader's store at
-    ``trader_db``. ``CostMapError`` when ``body`` is not the cost map asked for."""
+    the recordings under ``data_dir`` (module doc), the replay held by the trader's ``rules`` (its
+    capital, commission, loss budget, risk rules and loss limits), and keep it in the trader's store
+    at ``trader_db``. ``CostMapError`` when ``body`` is not the cost map asked for."""
     meter = meter or Meter()
     started = clock.monotonic()
     meter.reset()
@@ -427,8 +412,7 @@ def refit_from(
                 sessions,
                 windows,
                 sources,
-                capital=capital,
-                fee_rate=fee_rate,
+                rules=rules,
                 target_version=target_version,
                 thresholds=grid.thresholds,
                 meter=meter,
@@ -459,12 +443,10 @@ def refit_from(
             role=p.pick.role,
             predictor=p.pick.predictor,
             threshold=p.threshold,
-            kelly_fraction=p.kelly_fraction,
             fitted={
                 "p_star": p.pick.p_star,
                 "low": p.pick.low,
                 "kelly": p.pick.kelly,
-                "fraction": p.fraction,
                 "days": [d.isoformat() for d in days_of.get(p.pick.kind, ())],
                 **measured(p.pick.cell),
                 **fitted.result.cells[p.pick.cell].as_json(),
@@ -481,7 +463,7 @@ def refit_from(
         "evaluation": review.EVALUATION,  # #469: the rules it is fitted and judged under
         "cost_map": {"as_of": selection.as_of, "period": body.get("period"), "passed": len(selection.picks)},
         "grid": grid.as_json(),
-        "fee_rate": fee_rate,
+        "fee_rate": rules.fee_rate,
         "replay": {  # #470: the recorded days replayed
             "days": len(recordings),
             "no_recording": [d.isoformat() for d, r in sorted(recordings.items()) if r == NO_RECORDING],
@@ -569,8 +551,6 @@ def report(done: Refitted) -> str:
         f"시장가 왕복 통과 {done.passed}칸",
         "격자: θ "
         + " ".join(f"{t:g}" for t in grid["thresholds"])
-        + " × λ "
-        + " ".join(f"{k:g}" for k in grid["kelly_fractions"])
         + f" · 칸마다 모의 매매 {grid['min_trades']}건 이상",
         _replayed(fit_json.get("replay")),
         "",
@@ -580,8 +560,8 @@ def report(done: Refitted) -> str:
     for i, c in enumerate(done.cells, 1):
         f = c.fitted
         lines.append(
-            f"{i}. {c.kind} {c.predictor} ({c.role}): θ {c.threshold:g}, λ {c.kelly_fraction:g} → 비율 "
-            f"{f['fraction']:.2f} · 모의 {f['trades']}건(이익 {f['wins']}) · 순손익 {f['net']:+,.0f}원 · "
+            f"{i}. {c.kind} {c.predictor} ({c.role}): θ {c.threshold:g} · 모의 {f['trades']}건(이익 "
+            f"{f['wins']}) · 순손익 {f['net']:+,.0f}원 · "
             f"로그 성장 {_growth(f['growth'])} · 읽은 예측 {f['read'].get('read', 0)}, "
             f"오름 {f['read'].get('rises', 0)}"
         )
@@ -593,8 +573,8 @@ def report(done: Refitted) -> str:
         else:
             best = x["best"]
             detail = (
-                f"넣어도 정책의 로그 성장이 늘지 않음(가장 나은 θ {best['threshold']:g}, λ "
-                f"{best['kelly_fraction']:g}: 모의 {best['trades']}건, 순손익 {best['net']:+,.0f}원)"
+                f"넣어도 정책의 로그 성장이 늘지 않음(가장 나은 θ {best['threshold']:g}: 모의 "
+                f"{best['trades']}건, 순손익 {best['net']:+,.0f}원)"
             )
         lines.append(f"뺀 칸: {x['kind']} {x['predictor']} ({x['role']}): {why}, {detail}")
         lines += _alone(x.get("signals") or {})
@@ -779,8 +759,7 @@ async def _refit(
             settings.state_dir / TRADER_DB,
             settings.data_dir,
             sessions,
-            capital=trader.capital,
-            fee_rate=settings.fee_rate,
+            rules=Rules.of(trader, settings.fee_rate),
             target_version=settings.target_version,
             grid=Grid(threshold=trader.threshold),
             now=now,

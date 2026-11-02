@@ -103,7 +103,7 @@ def test_a_day_s_trades_are_reported_with_each_policy_s_record_and_no_price(tmp_
     assert "읽은 예측(챔피언의 장부): 읽은 예측 2 · 산 것 1 · 사지 않은 것: not_up 1" in lines, (
         "the champion's book's decisions alone, not the challenger's"
     )
-    assert "1. barrier breiman(top): 하한 0.900 − p* 0.600 = +0.300 · 300건 · θ 0.6 · 비율 1.00" in lines
+    assert "1. barrier breiman(top): 하한 0.900 − p* 0.600 = +0.300 · 300건 · θ 0.6 · 손실 예산" in lines
     assert (
         "- 챔피언 정책 1: 그날 매매 1건, 순손익 -162원 · 기록 1거래일, 매매 1건, 순손익 -162원, "
         "날마다 평균 -162원, 하한 없음"
@@ -158,7 +158,7 @@ def test_a_day_without_a_trade_says_why_no_cell_passed(tmp_path: Path) -> None:
         "비용 지도 as_of 2026-10-14T08:30:00+09:00" in lines
     )
     assert "정책별 모의 성적: 정책이 없다(첫 밤 정책 맞추기 전)" in lines
-    assert "그날 · 챔피언 없음(첫 정책 전: 비용 지도의 칸을 기본값 θ와 λ로 산다)" in lines
+    assert "그날 · 챔피언 없음(첫 정책 전: 연습 말고는 사지 않는다, #469)" in lines
     assert not calls_agent(text), "a day without a trade is a record"
 
 

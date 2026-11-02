@@ -31,7 +31,7 @@ from krx_quant.predictions import NewKindPrediction, NewPrediction, PredictionSt
 from krx_quant.recorder import ParquetRecorder
 from krx_quant.special import Kind as SpecialKind
 from krx_quant.special import Window
-from krx_quant.trader import KELLY_FRACTION, SYMBOL, review
+from krx_quant.trader import SYMBOL, review
 from krx_quant.trader import policy as policies
 from krx_quant.trader.cells import Cell, EngineReader
 from krx_quant.trader.desk import Desk
@@ -54,8 +54,20 @@ from krx_quant.trader.store import (
 DAY = (2026, 10, 14)  # a Wednesday: the calendar guesses it trades, 09:00 to 15:30
 CALENDAR = MarketCalendar()
 FEE = 0.00015  # 0.015% a side
+# The loss budget the trader's tests buy by (#471), in percent of the capital: the whole of it, so that
+# the cash and the capital size a buy as they did before #471 (14 shares at 70,100 of 1,000,000 won)
+# and a test of the orders, the limits or the ledger keeps its figures. Above what ``.env`` may set
+# (``settings.py``): the loss budget's own tests (``test_trader_risk.py``) and the replay's parity
+# with the paper book (``test_trader_replay.py``) buy by the trader's (``Rules`` as it is).
+WHOLE_CAPITAL = 100.0
 BARRIER = Cell("barrier", "breiman")
 DIRECTION = Cell("direction", FINAL)
+
+
+def whole_rules(**changes: Any) -> Rules:
+    """The trader's rules at the test commission, the loss budget the whole capital (``WHOLE_CAPITAL``),
+    with ``changes``; every risk rule the trader's (#471)."""
+    return Rules(**{"fee_rate": FEE, "risk_percent": WHOLE_CAPITAL, **changes})
 
 
 def at(hms: str) -> datetime:
@@ -93,15 +105,15 @@ def pick(
     role: str = "top",
     low: float = 0.9,
     p_star: float = 0.6,
-    fraction: float | None = None,
     width: float = 10.0,
     cost: float = 2.6,
+    quantity: int | None = None,
 ) -> Pick:
-    """A cell the cost map passes: by default its lower bound well above p*, its Kelly far above 1,
-    the whole capital. ``fraction`` sets the share of the capital it buys instead."""
+    """A cell the cost map passes: by default its lower bound well above p*, its Kelly far above 1
+    (a diagnosis alone, #471: the loss budget sizes its buys). ``quantity`` buys that many shares
+    instead (#427: a practice cell's)."""
     f = kelly(low, width, cost, 100, 70_050)
     assert f is not None
-    cut = min(1.0, max(0.0, KELLY_FRACTION * f))
     return Pick(
         kind=cell.kind,
         role=role,
@@ -114,7 +126,7 @@ def pick(
         reference_price=70_050,
         tick=100,
         kelly=f,
-        fraction=cut if fraction is None else fraction,
+        quantity=quantity,
     )
 
 
@@ -289,7 +301,7 @@ class Day:
 
     state: Path
     cell: Cell = BARRIER
-    rules: Rules = field(default_factory=lambda: Rules(fee_rate=FEE))
+    rules: Rules = field(default_factory=whole_rules)
     started_at: datetime = field(default_factory=lambda: at("09:00:00"))
     picks: Sequence[Pick] | None = None
     selection: Selection | None = None  # the picks as chosen from a cost map, ``picks`` unless given
@@ -412,7 +424,7 @@ def keep(state: Path, made: datetime, *cells: policies.PolicyCell, reason: str =
 
 def first_champion(state: Path, *cells: policies.PolicyCell) -> int:
     """The champion kept the night before the test day (``keep``), of ``cells`` (by default the
-    barrier's breiman at θ 0.6 and λ 0.5, as the default pick trades it), unless one is already: the
+    barrier's breiman at θ 0.6, as the default pick trades it), unless one is already: the
     desk trades nothing before the first champion (#469). Its version."""
     db = policies.connect(state / DB_NAME)
     try:
@@ -424,13 +436,11 @@ def first_champion(state: Path, *cells: policies.PolicyCell) -> int:
     return keep(state, at("2026-10-13 22:31:00"), *(cells or (policy_cell(BARRIER),)))
 
 
-def policy_cell(
-    of: Cell, threshold: float = 0.6, kelly_fraction: float = 0.5, role: str = "top"
-) -> policies.PolicyCell:
-    """A cell of a policy at ``threshold`` and ``kelly_fraction``, fitted as the re-fit keeps it."""
-    fitted = {"p_star": 0.63, "low": 0.7, "kelly": 10.5, "fraction": 1.0, "days": [], "read": {}}
+def policy_cell(of: Cell, threshold: float = 0.6, role: str = "top") -> policies.PolicyCell:
+    """A cell of a policy at ``threshold``, fitted as the re-fit keeps it."""
+    fitted = {"p_star": 0.63, "low": 0.7, "kelly": 10.5, "days": [], "read": {}}
     fitted |= {"trades": 24, "wins": 12, "net": 0.0, "growth": 0.0}
-    return policies.PolicyCell(of.kind, role, of.predictor, threshold, kelly_fraction, fitted)
+    return policies.PolicyCell(of.kind, role, of.predictor, threshold, fitted)
 
 
 # The cost map (``GET /v1/cost-map``, #307) as the Engine API gives it: made-up rows within the /v1

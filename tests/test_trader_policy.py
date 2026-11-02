@@ -24,7 +24,7 @@ from krx_quant.predictions import PredictionStore
 from krx_quant.trader import policy as policies
 from krx_quant.trader.cells import Cell
 from krx_quant.trader.desk import under_champion
-from krx_quant.trader.paper import BELOW_THRESHOLD, OUTRANKED
+from krx_quant.trader.paper import BELOW_THRESHOLD, OUTRANKED, Rules
 from krx_quant.trader.policy import PolicyCell, PolicyError
 from krx_quant.trader.run import run_trader
 from krx_quant.trader.selection import NO_CHAMPION, NO_PASS, NO_POLICY, NOT_IN_POLICY, Selection, choose
@@ -49,8 +49,8 @@ from tests.trader_doubles import (
 FIFTEEN = Cell("barrier_15m", "barrier-persist-15m")
 
 
-def cell(of: Cell, threshold: float = 0.7, kelly_fraction: float = 0.25, role: str = "top") -> PolicyCell:
-    return PolicyCell(of.kind, role, of.predictor, threshold, kelly_fraction, {"trades": 24})
+def cell(of: Cell, threshold: float = 0.7, role: str = "top") -> PolicyCell:
+    return PolicyCell(of.kind, role, of.predictor, threshold, {"trades": 24})
 
 
 def champion(state: Path, *cells: PolicyCell) -> policies.Policy:
@@ -65,14 +65,15 @@ def champion(state: Path, *cells: PolicyCell) -> policies.Policy:
     return found
 
 
-def test_the_champion_s_cells_trade_at_its_threshold_and_kelly_fraction(tmp_path: Path) -> None:
-    """θ 0.7: the 10:00 rise at 0.65 buys nothing. λ 0.25 of f* = 2: half the capital, 7 shares at
-    70,100. The trade carries the policy's version and its θ."""
-    kept = champion(tmp_path, cell(BARRIER, threshold=0.7, kelly_fraction=0.25))
+def test_the_champion_s_cells_trade_at_its_threshold_sized_by_the_loss_budget(tmp_path: Path) -> None:
+    """θ 0.7: the 10:00 rise at 0.65 buys nothing. The cell has no Kelly fraction (#471): its f* of 2 a
+    diagnosis, the loss budget buys nine shares at 70,100 (5,000 won ÷ 510.6925 a share at its stop).
+    The trade carries the policy's version and its θ."""
+    kept = champion(tmp_path, cell(BARRIER, threshold=0.7))
     passing = Selection((replace(pick(BARRIER), kelly=2.0),))
 
     under = policies.apply(kept, passing)
-    trades = Day(tmp_path, selection=under).run(
+    trades = Day(tmp_path, selection=under, rules=Rules(fee_rate=FEE)).run(
         [
             Read("10:00:02.3", [Barrier("10:00:00", p=(0.65, 0.2, 0.15))]),
             quote("10:00:02.5", 70_000, 70_100),
@@ -82,10 +83,10 @@ def test_the_champion_s_cells_trade_at_its_threshold_and_kelly_fraction(tmp_path
     )
 
     [p] = under.picks
-    assert (p.threshold, p.fraction, under.policy) == (0.7, 0.5, 1)
+    assert (p.threshold, p.kelly, under.policy) == (0.7, 2.0, 1)
     [trade] = trades
-    assert (trade["policy"], trade["threshold"], trade["fraction"]) == (1, 0.7, 0.5)
-    assert trade["entry"]["quantity"] == 7, "⌊500,000 ÷ 70,100⌋"
+    assert (trade["policy"], trade["threshold"], trade["fraction"], trade["kelly"]) == (1, 0.7, None, 2.0)
+    assert trade["entry"]["quantity"] == 9, "⌊5,000 ÷ 510.6925⌋"
     decisions = Day(tmp_path).decisions()
     assert [(d["action"], d["reason"]) for d in decisions] == [("skip", BELOW_THRESHOLD), ("buy", None)]
     [selection] = Day(tmp_path).selections()
@@ -184,9 +185,39 @@ def test_a_stored_cell_is_read_for_its_values_only() -> None:
     assert read == cell(BARRIER)
     assert not hasattr(read, "capital")
     with pytest.raises(ValueError):
-        PolicyCell.from_json({**stored, "kelly_fraction": 0})
-    with pytest.raises(ValueError):
         PolicyCell.from_json({**stored, "threshold": 1.5})
+
+
+def test_a_policy_has_no_kelly_fraction_and_an_old_one_s_is_not_read(tmp_path: Path) -> None:
+    """#471: a cell's values are its θ alone. A policy fitted before kept a λ (``kelly_fraction``, 0
+    or past 1 an error then): it is read without it, its row as it was, and a fit of the same cells
+    and θ is the same policy."""
+    assert "kelly_fraction" not in cell(BARRIER).as_json()
+    assert not hasattr(cell(BARRIER), "kelly_fraction")
+    for kept in (0, 0.5, 2):
+        read = PolicyCell.from_json({**cell(BARRIER).as_json(), "kelly_fraction": kept})
+        assert read == cell(BARRIER), kept
+    db = policies.connect(tmp_path / DB_NAME)
+    try:
+        old = [{**cell(BARRIER).as_json(), "kelly_fraction": 0.25}]
+        with db:
+            db.execute(
+                "INSERT INTO policies (created_at, reason, cells, left_out, fit)"
+                " VALUES (?, ?, ?, '[]', '{}')",
+                (at("2026-10-30 22:31:00").isoformat(), "#471 전 맞추기", json.dumps(old)),
+            )
+            db.execute(
+                "INSERT INTO champions (at, policy_id, reason) VALUES (?, 1, ?)",
+                (at("2026-10-30 22:31:00").isoformat(), policies.FIRST),
+            )
+        found = policies.champion(db)
+        assert found is not None and found.cells == (cell(BARRIER),)
+        assert policies.values(found.cells) == (("barrier", "breiman", 0.7),)
+        assert policies.same_as(db, [cell(BARRIER)]) == 1, "the same cells and θ: the same policy"
+        stored = json.loads(db.execute("SELECT cells FROM policies WHERE id = 1").fetchone()[0])
+        assert stored[0]["kelly_fraction"] == 0.25, "the old row kept as it was"
+    finally:
+        db.close()
 
 
 def test_the_store_from_before_policies_gets_their_tables_and_columns(tmp_path: Path) -> None:
