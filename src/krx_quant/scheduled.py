@@ -74,6 +74,9 @@ from krx_quant.holdout import DAYS as HOLDOUT_DAYS
 from krx_quant.holdout import days_in_window
 from krx_quant.kind_registry import DAILY_KINDS, daily_kind_named
 from krx_quant.market_calendar import MarketCalendar, first_whole_day
+from krx_quant.neyman_variants import REPORT as NEYMAN_VARIANTS_REPORT
+from krx_quant.neyman_variants import Progress as NeymanVariants
+from krx_quant.neyman_variants import progress as neyman_variants_progress
 from krx_quant.night_probe import evening, subscribed_nights
 from krx_quant.nightly_hit_rates import HIT_RATE_NIGHTS, nights_with_hit_rates
 from krx_quant.notify import Alerts
@@ -341,6 +344,10 @@ class Facts:
     # How many days of turing's holdout window are in the engine DB (#447, ``holdout.days_in_window``,
     # up to ``holdout.DAYS``): its judging waits for the window to be full.
     holdout_days: int = 0
+    # Where neyman's variants experiment stands (#455, ``neyman_variants.progress``, read from its
+    # report and the day folders): its window's N once discovered, whether it was judged, and the
+    # recorded days after 2026-11-02 that can be in the window.
+    neyman_variants: NeymanVariants = field(default_factory=NeymanVariants)
 
 
 @dataclass(frozen=True)
@@ -1075,6 +1082,7 @@ async def read_facts(
         mock_days=await asyncio.to_thread(mock_days, settings.state_dir),
         hit_rate_nights=await asyncio.to_thread(nights_with_hit_rates, settings),
         holdout_days=await asyncio.to_thread(days_in_window, settings.state_dir / DB_NAME),
+        neyman_variants=await asyncio.to_thread(neyman_variants_progress, settings, clock.now()),
     )
 
 
@@ -2797,6 +2805,63 @@ TURING_PRIOR = Job(
 )
 
 
+# Neyman's variants (#455, after #283's diagnosis of neyman's pre-validation): ``neyman-variants``
+# walks neyman's pre-validation's folds over the training samples, replaying nothing, and compares
+# neyman as it is (A) with its flips swapped back (B), without slot_return_5d and slot_return_20d (C),
+# and C with the cost's distance in volatilities as a second-model input (D), on the same bar closes
+# (``neyman_variants.py``). Two stages, each run once: on the first night after the deploy that brings
+# it, trading or not, the discovery on neyman's pre-validation days fixes N, the window's days, from
+# the days' paired gains' spread; then on the first night N recorded days after 2026-11-02 are in that
+# have not been counted short (``Facts.neyman_variants``: read from its report and the day folders),
+# the evaluation counts the window's days and, once it is full, judges it once (a window a short day
+# left unfilled waits for the next recorded day). After a failure, again on other code. A day fits ten
+# tree models on neyman's 20 days (about 1.7 s each on a Mac with 22,000 made-up samples, the server
+# about three times slower) and reads a day: the discovery's 15 days take a quarter of an hour or so,
+# a window of 60 about an hour; the four hours are a bound, with room for the burst CPU running out
+# and for the window's first days the sample store has let go by then (made again, minutes a recorded
+# day). Last with the other experiments: it holds back no simulation nor pre-validation. Its output
+# holds counts, rates, lifts, scores and dates, no price nor σ̂₄. Adopting a candidate is #454's, and
+# the user decides.
+NEYMAN_VARIANTS_ISSUE = 455
+
+
+def _neyman_variants_due(night: Night) -> bool:
+    """The discovery on the first night; then the evaluation on the first night its window can be full,
+    until it is judged; after a failed run, again on other code. Not on a night its progress was not
+    read."""
+    record = night.record
+    if record is not None and record.outcome == FAILED and record.commit == night.commit:
+        return False
+    found = night.facts.neyman_variants
+    if not found.read:
+        return False
+    if found.n is None:
+        return True
+    return not found.judged and found.candidates >= found.n
+
+
+NEYMAN_VARIANTS = Job(
+    name="neyman-variants-283",
+    due=_neyman_variants_due,
+    command=("neyman-variants",),
+    timeout=timedelta(hours=4),
+    targets=(
+        Target(
+            NEYMAN_VARIANTS_ISSUE,
+            note=(
+                "에이전트가 이 출력으로 이 이슈에 안을 남긴다. 발견 단계(첫 실행)면 N과 비교마다의 s_d를 "
+                "정리한다. N이 60을 넘으면 평가 전에 비교를 줄일지 그대로 기다릴지 사용자에게 묻는다. "
+                "평가면 돌리기 전에 정한 판정을 그대로 읽는다: B, C, D 중 A 대비 짝 lift가 0보다 크고 "
+                '거래일 단위 98.333% 하한도 0보다 큰 팔이 "후보"다. 창, N, 판정 규칙은 결과를 보고 '
+                "바꾸지 않는다. 후보도 바로 neyman에 넣지 않는다(#454가 끝난 뒤 사용자가 정한다). "
+                "출력에는 시세 값이 없다(날짜, 개수, 비율, lift, 점수만. σ̂₄ 값과 경계도 없다)."
+            ),
+        ),
+    ),
+    attach=(Attachment(f"리포트 state/{NEYMAN_VARIANTS_REPORT}", NEYMAN_VARIANTS_REPORT),),
+)
+
+
 JOBS: tuple[Job, ...] = (
     DIAGNOSE,
     SIGNAL_REVIEW,
@@ -2841,4 +2906,5 @@ JOBS: tuple[Job, ...] = (
     CLIMATE_PRIOR,
     POISSON_LINK,
     TURING_PRIOR,
+    NEYMAN_VARIANTS,
 )
