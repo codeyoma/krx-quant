@@ -2691,7 +2691,8 @@
                   "wins": {"type": "integer", "minimum": 0},
                   "net": {"type": "number"},
                   "growth": {"type": ["number", "null"]},
-                  "signals": {"$ref": "#/$defs/trader_signals_by_threshold"}
+                  "signals": {"$ref": "#/$defs/trader_signals_by_threshold"},
+                  "calibration": {"$ref": "#/$defs/trader_calibration"}
                 }
               }
             }
@@ -2717,7 +2718,8 @@
               "most_days": {"type": "integer", "minimum": 0, "description": "#472, few_trades: the most days with a buy at a threshold."},
               "best": {"type": "object", "description": "no_edge (#472): the threshold whose lower bound is the highest (the lowest of those alike) and its bound (trader_bound); no_gain (before #472): the best point and its replayed result."},
               "read": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
-              "signals": {"$ref": "#/$defs/trader_signals_by_threshold"}
+              "signals": {"$ref": "#/$defs/trader_signals_by_threshold"},
+              "calibration": {"$ref": "#/$defs/trader_calibration"}
             }
           }
         },
@@ -2782,12 +2784,12 @@
       }
     },
     "trader_trade": {
-      "description": "A position from its entry to its exit (#394): the cell (kind, predictor) and what the cost map picked it on (#395: the predictor's role, p*, the hit rate's lower bound, the Kelly f* and the share of the capital bought; null for a trade entered before), the prediction and its rise's probability, the barriers, the fills, the costs and the P&L in won; exit and the sell's costs null while open. policy: the policy version it was made under (#399), null before the first champion; champion (#400): whether it is the champion's, not a challenger's paper trade. An exit is by the triple barrier (take_profit, stop_loss, time), or a sale at once (#396): a pause selling now (pause), a loss limit reached (daily_limit, cumulative_limit).",
+      "description": "A position from its entry to its exit (#394): the cell (kind, predictor) and what the cost map picked it on (#395: the predictor's role, p*, the hit rate's lower bound, the Kelly f* and the share of the capital bought; null for a trade entered before), the prediction and its rise's probability, the barriers, the fills, the costs and the P&L in won; exit and the sell's costs null while open. policy: the policy version it was made under (#399), null before the first champion; champion (#400): whether it is the champion's, not a challenger's paper trade. An exit is by the triple barrier (take_profit, stop_loss, time), or a sale at once (#396): a pause selling now (pause), a loss limit reached (daily_limit, cumulative_limit). #475: execution, each leg's adverse ticks and delays (trader_execution).",
       "type": "object",
       "required": ["id", "mode", "symbol", "kind", "predictor", "role", "prediction_id", "bar_close", "probability",
                    "threshold", "p_star", "precision_low", "kelly", "fraction", "policy", "champion", "shadow", "practice", "anchor", "tick", "width_ticks",
                    "target", "stop", "time_barrier", "decided_at", "entry", "exit", "buy_fee", "sell_fee", "tax",
-                   "cost", "gross", "net", "orders", "stalls"],
+                   "cost", "gross", "net", "orders", "stalls", "execution"],
       "additionalProperties": false,
       "properties": {
         "id": {"type": "integer"},
@@ -2895,15 +2897,54 @@
               "effect": {"enum": ["waited", "rest", null]}
             }
           }
+        },
+        "execution": {"$ref": "#/$defs/trader_execution"}
+      }
+    },
+    "trader_execution": {
+      "description": "#475: a trade's execution cost, from its row and its orders. clock: whose clock its times are on: quote (a paper fill's, the quote it was made on as the collector received it), trader (a KIS fill's, mock or live: when the trader read it off KIS's day order inquiry, never KIS's own time of the fill). entry: the buy; exit: the sale (null while open).",
+      "type": "object",
+      "required": ["clock", "entry", "exit"],
+      "additionalProperties": false,
+      "properties": {
+        "clock": {"enum": ["quote", "trader"]},
+        "entry": {
+          "description": "ticks: the fill's price less the mid-point of the latest quote the book had when it decided the buy, in the trade's ticks (positive: adverse); placed: seconds from the decision to its order (a paper buy's is its fill); filled: seconds from the decision to its last fill (a KIS buy whose cancel did not take may fill more after the entry's time, its first fill's). Null where the trade has none (kept before #475).",
+          "type": "object",
+          "required": ["ticks", "placed", "filled"],
+          "additionalProperties": false,
+          "properties": {
+            "ticks": {"type": ["number", "null"]},
+            "placed": {"type": ["number", "null"]},
+            "filled": {"type": ["number", "null"]}
+          }
+        },
+        "exit": {
+          "description": "reason: the trade's exit reason. ticks: the shares sold, each portion against its own reference and averaged by its shares (positive: adverse): a take-profit's fills against the target, the limit it rested at from the buy (KIS's rests at the target rounded up to the tick, below 0); a sale's (the stop crossed, the time barrier, a pause or a limit selling) against the mid-point of the latest quote when it was decided. A take-profit that filled in part before a stop sold the rest has both. reference: the exit reason's, target for a take-profit, else mid. mid: placed and filled seconds from the sale's decision to its first sell and to the exit (a KIS sale's last fill read). target: placed seconds from the buy's fill to the take-profit's order, filled null (it rests until the market comes to it). Null where the trade has none (kept before #475).",
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "required": ["reason", "reference", "ticks", "placed", "filled"],
+              "additionalProperties": false,
+              "properties": {
+                "reason": {"enum": ["take_profit", "stop_loss", "time", "pause", "daily_limit", "cumulative_limit"]},
+                "reference": {"enum": ["mid", "target"]},
+                "ticks": {"type": ["number", "null"]},
+                "placed": {"type": ["number", "null"]},
+                "filled": {"type": ["number", "null"]}
+              }
+            }
+          ]
         }
       }
     },
     "trader": {
-      "description": "GET /v1/trader (#396): the trader's state as it last wrote it into its store (at least every 5 s while it runs; alive while that is at most 15 s old), and the last 20 pauses, resumes and re-arms asked for, newest first (applied_at null until the trader has read one). Every field but alive and controls is null before the trader first wrote its state. #400: the champion's version, the live gate on its paper record, and the champion and each challenger running with their paper records (a challenger's with where it stands against the champion), read from the store whatever the trader wrote. #408: live, the live mode as the trader judged it at its start and at its last pick (null before #408's trader first wrote it). #469: cycle, the review cycle in force and its evaluation version; the records, the promotion and the gate read that version's days alone.",
+      "description": "GET /v1/trader (#396): the trader's state as it last wrote it into its store (at least every 5 s while it runs; alive while that is at most 15 s old), and the last 20 pauses, resumes and re-arms asked for, newest first (applied_at null until the trader has read one). Every field but alive and controls is null before the trader first wrote its state. #400: the champion's version, the live gate on its paper record, and the champion and each challenger running with their paper records (a challenger's with where it stands against the champion), read from the store whatever the trader wrote. #408: live, the live mode as the trader judged it at its start and at its last pick (null before #408's trader first wrote it). #469: cycle, the review cycle in force and its evaluation version; the records, the promotion and the gate read that version's days alone. #475: risk, the loss budget and the risk rules' state of the champion's book (trader_risk).",
       "type": "object",
       "required": ["updated_at", "alive", "mode", "status", "started_at", "capital", "cash", "position", "today",
                    "cumulative", "limits", "pause", "live", "practice", "controls", "champion", "gate", "policies",
-                   "cycle", "cohort"],
+                   "cycle", "cohort", "risk"],
       "additionalProperties": false,
       "properties": {
         "updated_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]},
@@ -3070,7 +3111,30 @@
         "cohort": {
           "description": "#473: the challengers' cohort formed last (the one running, or on a review night the one just judged before the next is formed), with its verdict (null until judged); null before the first.",
           "oneOf": [{"type": "null"}, {"$ref": "#/$defs/trader_cohort"}]
+        },
+        "risk": {
+          "description": "#475: the loss budget and the risk rules' state (#471) of the champion's book as the trader last wrote it; null in a state written before #475.",
+          "oneOf": [{"type": "null"}, {"$ref": "#/$defs/trader_risk"}]
         }
+      }
+    },
+    "trader_risk": {
+      "description": "#475: the risk rules (#471) of the champion's book on its day (day, KST: they count from 00:00): a trade's loss budget (budget_percent of the capital a buy sizes on, the live first period's cap if below it; budget in won); the buy orders that day (buys: a paper buy's fill, each KIS buy sent, those KIS refused included) and their limit (daily_buys); the net losses in a row at the day's last exit (losses) and how many start a cooldown (loss_streak), its length (cooldown_minutes), the cooldowns begun that day (cooldowns) and the end of the one in force (cooldown_until, null when none is); what holds a new buy at the state's time (held: buy_limit, cooldown; null when neither). The values are KRX_TRADER_* of the server's .env, never looser than the code's.",
+      "type": "object",
+      "required": ["day", "budget_percent", "budget", "buys", "daily_buys", "losses", "loss_streak", "cooldown_minutes", "cooldowns", "cooldown_until", "held"],
+      "additionalProperties": false,
+      "properties": {
+        "day": {"$ref": "#/$defs/day"},
+        "budget_percent": {"type": "number", "exclusiveMinimum": 0},
+        "budget": {"type": "number", "minimum": 0},
+        "buys": {"type": "integer", "minimum": 0},
+        "daily_buys": {"type": "integer", "minimum": 1},
+        "losses": {"type": "integer", "minimum": 0},
+        "loss_streak": {"type": "integer", "minimum": 1},
+        "cooldown_minutes": {"type": "number", "minimum": 0},
+        "cooldowns": {"type": "integer", "minimum": 0},
+        "cooldown_until": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]},
+        "held": {"enum": ["buy_limit", "cooldown", null]}
       }
     },
     "trader_cohort": {
@@ -3475,6 +3539,43 @@
         "measured": {"type": "integer", "minimum": 1},
         "eligible": {"type": "integer", "minimum": 1},
         "gone_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]}
+      }
+    },
+    "trader_calibration": {
+      "description": "#475: a cell's calibration on the recorded days the night's re-fit replayed (spec #468 8 \"확률 보정\"): its rises the entry rules let buy, each measured alone a share (as trader_signals), in five bins of fixed edges by the rise's probability (the grid's thresholds: a threshold buys its bin and those above it; the last to 1); below: the rises under the first edge, which no threshold of the grid buys. Missing from a policy fitted before #475.",
+      "type": "object",
+      "required": ["bins", "below"],
+      "additionalProperties": false,
+      "properties": {
+        "bins": {"type": "array", "items": {"$ref": "#/$defs/trader_calibration_bin"}},
+        "below": {"type": "integer", "minimum": 0}
+      }
+    },
+    "trader_calibration_bin": {
+      "description": "#475: the rises whose probability is at least from and below to (the last bin's to 1 included). signals: those measured (missing: left out, their data missing); answered: those whose answer is known; outcomes: their answers' classes, up (the kind's rise: the direction's up, a barrier's up_first), flat (flat, timeout) and down (down, down_first); hits: the class right (the answer the rise); first: the upper target reached first (a barrier's up_first; the direction's touch label reaching its upper target before its lower one, or that one alone); bought: those bought alone a share; profitable: those of them that netted above 0 after the costs.",
+      "type": "object",
+      "required": ["from", "to", "signals", "missing", "answered", "outcomes", "hits", "first", "bought", "profitable"],
+      "additionalProperties": false,
+      "properties": {
+        "from": {"type": "number", "minimum": 0, "maximum": 1},
+        "to": {"type": "number", "minimum": 0, "maximum": 1},
+        "signals": {"type": "integer", "minimum": 0},
+        "missing": {"type": "integer", "minimum": 0},
+        "answered": {"type": "integer", "minimum": 0},
+        "outcomes": {
+          "type": "object",
+          "required": ["up", "flat", "down"],
+          "additionalProperties": false,
+          "properties": {
+            "up": {"type": "integer", "minimum": 0},
+            "flat": {"type": "integer", "minimum": 0},
+            "down": {"type": "integer", "minimum": 0}
+          }
+        },
+        "hits": {"type": "integer", "minimum": 0},
+        "first": {"type": "integer", "minimum": 0},
+        "bought": {"type": "integer", "minimum": 0},
+        "profitable": {"type": "integer", "minimum": 0}
       }
     },
     "trader_practice_cell": {

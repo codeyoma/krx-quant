@@ -10,6 +10,7 @@ Every price, P&L and hit rate is made up.
 from __future__ import annotations
 
 import re
+import sqlite3
 from datetime import date
 from pathlib import Path
 
@@ -35,6 +36,7 @@ from krx_quant.trader.settings import TraderSettings
 from krx_quant.trader.store import DB_NAME, TraderStore
 from tests.test_trader_limits import BOUGHT, TEN, rules
 from tests.test_trader_promotion import CLOSE_CALL, WEEKDAYS, begun, day_ran, judged_at, setup
+from tests.test_trader_risk import TRADER, loss, rise
 from tests.test_trader_run import EngineApi
 from tests.trader_doubles import (
     BARRIER,
@@ -336,6 +338,89 @@ def test_the_night_s_failed_re_fit_calls_an_agent() -> None:
     made = read(Path("/nonexistent") / DB_NAME, WEDNESDAY, CALENDAR, refit=1)
     assert reasons(made) == ["밤 정책 맞추기 실패(종료 코드 1)"]
     assert calls_agent(render(made))
+
+
+def started(state: Path, mode: str = "paper") -> None:
+    """The trader's start at 09:00 as ``run.py`` keeps it: its capital and risk rules (#471), the code's."""
+    store = TraderStore(state / DB_NAME)
+    try:
+        store.add_run(
+            at("09:00:00"),
+            mode,
+            {
+                "capital": 1_000_000,
+                "risk_per_trade_percent": 0.5,
+                "loss_streak": 3,
+                "cooldown_minutes": 30,
+                "daily_buy_orders": 20,
+            },
+        )
+    finally:
+        store.close()
+
+
+def test_a_day_s_execution_cost_and_risk_rules_are_reported_with_no_price(tmp_path: Path) -> None:
+    """#475: each trade's legs and the day's means; the loss budget, the buy orders and the cooldown.
+    The 10:00 rise is decided with the 10:00:01 quote's mid-point (69,950) known and bought at the ask
+    70,100: 1.5 ticks adverse; the 10:10 and 10:20 ones with the 10:00:30 quote's (69,850): 2.5. Each
+    is stopped on a quote whose bid 69,800 is half a tick under its mid-point. Three net losses in a row:
+    the cooldown from the third's exit, 10:20:30, to 10:50:30, which skips the 10:30 rise."""
+    started(tmp_path)
+    Day(tmp_path, rules=TRADER).run(
+        [quote("10:00:01", 69_900, 70_000), *loss("10:00"), *loss("10:10"), *loss("10:20"), rise("10:30")]
+    )
+
+    text = reported(tmp_path)
+
+    lines = text.splitlines()
+    executed = [line for line in lines if line.startswith("   실행: ")]
+    assert executed == [
+        f"   실행: 매수 +{ticks:.2f}틱(결정 때 중간가 대비) · 결정 뒤 주문 0.2초, 체결 0.2초 · "
+        "매도(stop_loss) +0.50틱(결정 때 중간가 대비) · 결정 뒤 주문 0.0초, 체결 0.0초"
+        for ticks in (1.5, 2.5, 2.5)
+    ]
+    assert (
+        "실행 비용 (#475): 틱은 불리한 쪽이 +(매수는 결정 때 중간가보다 비싸게, 매도는 싸게 체결; 익절은 "
+        "목표가 대비), 지연은 결정부터 · 시각은 체결한 호가를 받은 때다"
+        "(모의 체결: collector가 받은 호가 시각)"
+    ) in lines
+    assert (
+        "- 평균: 매수 +2.17틱, 결정 뒤 체결 0.2초(3건) · 손절·시간·정지·한도 매도 +0.50틱, 결정 뒤 체결 "
+        "0.0초(3건)"
+    ) in lines
+    assert (
+        "- 위험 규칙 (#471): 매매마다 손실 예산 5,000원(운용 상한 1,000,000원의 0.5%) · "
+        "그날 매수 주문 3/20 · 순손실 3번 연달으면 30분 쉰다: 그날 쉼 1번(10:20:30–10:50:30) · "
+        "그날 마지막 청산까지 연달은 순손실 3번"
+    ) in lines
+    assert "읽은 예측(챔피언의 장부): 읽은 예측 4 · 산 것 3 · 사지 않은 것: cooldown 1" in lines
+    assert not PRICE.search(text), "no price"
+
+
+def test_a_take_profit_s_execution_is_from_its_target_and_a_store_before_475_has_none(tmp_path: Path) -> None:
+    """#475: the take-profit's leg from its target, the limit resting from the buy; a store whose trades
+    were kept before #475 (no ``decided_mid`` column) reports its trades without the lines."""
+    Day(tmp_path).run([TEN, BOUGHT, quote("10:02:00", 70_250, 70_300)])
+
+    lines = reported(tmp_path).splitlines()
+
+    [executed] = [line for line in lines if line.startswith("   실행: ")]
+    assert executed == (
+        "   실행: 매수 ?(결정 때 중간가 없음) · 결정 뒤 주문 0.2초, 체결 0.2초 · "
+        "매도(take_profit) +0.00틱(목표가 대비: 매수 뒤 걸어 둔 지정가) · 매수 체결 뒤 주문 0.0초"
+    ), "no quote before the decision: no mid-point known"
+    assert "- 평균: 매수 없음, 결정 뒤 체결 0.2초(1건) · 익절 목표가 대비 +0.00틱(1건)" in lines
+
+    old = tmp_path / "old"
+    old.mkdir()
+    Day(old).run([TEN, BOUGHT, quote("10:02:00", 70_250, 70_300)])
+    db = sqlite3.connect(old / DB_NAME)
+    with db:
+        db.execute("ALTER TABLE trades DROP COLUMN decided_mid")
+    db.close()
+    text = reported(old)
+    assert "실행" not in text and "1. 10:00:02 → 10:02:00 익절(take_profit)" in text
+    assert "위험 규칙" not in text, "no start of the trader's that kept its risk rules"
 
 
 def test_no_account_nor_order_number_is_in_the_report(tmp_path: Path) -> None:

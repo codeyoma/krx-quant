@@ -32,11 +32,13 @@ from krx_quant.trader.paper import (
     at_risk,
     midnight,
     risk_held,
+    risk_state,
     size,
 )
 from krx_quant.trader.quotes import BestQuote
 from krx_quant.trader.settings import TraderSettings
-from krx_quant.trader.store import CUMULATIVE_LIMIT, DAILY_LIMIT, DB_NAME, TraderStore
+from krx_quant.trader.store import CUMULATIVE_LIMIT, DAILY_LIMIT, DB_NAME, TraderStore, read_trader
+from tests.api_schema import check
 from tests.trader_doubles import (
     BARRIER,
     FEE,
@@ -225,6 +227,55 @@ def test_a_trade_carried_overnight_counts_on_the_day_it_is_sold(tmp_path: Path) 
     assert (carried["bar_close"][:10], carried["exit"]["at"][:10]) == ("2026-10-13", "2026-10-14")
     assert carried["net"] < 0
     assert reasons(again)[-1] == ("10:20", COOLING_DOWN)
+
+
+def test_the_risk_rules_state_worked_by_hand() -> None:
+    """#475 (``GET /v1/trader``'s ``risk``): three net losses in a row by 10:10, the cooldown in force to
+    10:40; at 10:40 it is over, one begun that day. The budget is of the capital a buy sizes on (the
+    live first period's 250,000 won: 1,250)."""
+    rules = Rules(fee_rate=FEE)
+    t = at("10:00:00")
+    three = [(t, -1.0), (t + timedelta(minutes=5), -1.0), (t + timedelta(minutes=10), -1.0)]
+
+    cooling = risk_state(rules, t + timedelta(minutes=11), 3, three, 1_000_000)
+    over = risk_state(rules, t + timedelta(minutes=40), 3, three, 250_000)
+    fresh = risk_state(rules, t, 0, [], 1_000_000)
+
+    assert cooling == {
+        "day": "2026-10-14",
+        "budget_percent": 0.5,
+        "budget": 5_000.0,
+        "buys": 3,
+        "daily_buys": 20,
+        "losses": 3,
+        "loss_streak": 3,
+        "cooldown_minutes": 30.0,
+        "cooldowns": 1,
+        "cooldown_until": "2026-10-14T10:40:00+09:00",
+        "held": COOLING_DOWN,
+    }
+    assert (over["budget"], over["cooldowns"], over["cooldown_until"], over["held"]) == (
+        1_250.0,
+        1,
+        None,
+        None,
+    )
+    assert (fresh["buys"], fresh["losses"], fresh["cooldowns"], fresh["held"]) == (0, 0, 0, None)
+    assert risk_state(rules, t, 20, [], 1_000_000)["held"] == BUY_LIMIT
+    for state in (cooling, over, fresh):
+        check("trader_risk", state)
+
+
+def test_the_trader_s_state_has_its_risk_rules(tmp_path: Path) -> None:
+    """#475: stopped at 10:00:30, 10:10:30 and 10:20:30, the trader's state at the 10:30 rise's read
+    has the three buys, the three losses in a row and the cooldown to 10:50:30."""
+    Day(tmp_path, rules=TRADER).run([*loss("10:00"), *loss("10:10"), *loss("10:20"), rise("10:30")])
+
+    risk = read_trader(tmp_path / DB_NAME, at("10:30:03"))["risk"]
+
+    check("trader_risk", risk)
+    assert (risk["buys"], risk["losses"], risk["cooldowns"], risk["budget"]) == (3, 3, 1, BUDGET)
+    assert (risk["cooldown_until"], risk["held"]) == ("2026-10-14T10:50:30+09:00", COOLING_DOWN)
 
 
 # The buy orders a day.

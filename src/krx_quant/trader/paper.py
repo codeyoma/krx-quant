@@ -125,6 +125,12 @@ waiting for is given up (``restarted``). A pause or a limit holding when it star
 one that sells sells it at the first quote. The same picks, the same predictions read at the same
 times, and the same quotes always make the same trades.
 
+**Execution cost** (#475, ``store.execution``): a buy decided keeps the mid-point of the latest quote
+the book had then (``Entry.decided_mid``), and a sale (the stop, the time exit, a pause or a limit) the
+time and the mid-point of the quote it was decided on (``Exit.decided_at``, ``Exit.mid``; the mock
+book's when its sale begins, ``mock.py``). A take-profit rests at the target from the buy: its leg is
+measured from the target.
+
 **One set of rules** (#470): the entry (``plan``, ``admit``), the priority (``settle``), the buy's fill
 (``refused``, ``size``), the risk rules (``risk_held``, #471), the exits (``exit_on``, ``clock_exit``)
 and the costs (``costs``, ``net_of``) are functions of this module that the paper book calls, and so
@@ -133,7 +139,8 @@ challenger's book simulates (``limits.Simulated``): the same predictions and the
 same trades there (``tests/test_trader_replay.py``).
 
 **State.** The trader writes its state (``state``: status, cash, position, the day's and the
-cumulative P&L, the limits' use, the pause) into its store as it changes, at most every
+cumulative P&L, the limits' use, the pause, and since #475 the risk rules' state, ``risk_state``)
+into its store as it changes, at most every
 ``SNAPSHOT_SECONDS`` while only the open position's bid moves and at least every ``HEARTBEAT``,
 with the day's ledger (``days``) on a trading day: ``GET /v1/trader``, ``/v1/trader/days``.
 """
@@ -495,12 +502,53 @@ def risk_held(rules: Rules, at: datetime, buys: int, exits: Sequence[tuple[datet
     neither holds."""
     if buys >= rules.daily_buys:
         return BUY_LIMIT
-    losses, until = 0, None
+    began, _ = cooldowns(rules, exits)
+    return COOLING_DOWN if began and at < began[-1][1] else None
+
+
+def cooldowns(
+    rules: Rules, exits: Sequence[tuple[datetime, float]]
+) -> tuple[list[tuple[datetime, datetime]], int]:
+    """The cooldowns a book's ``exits`` of a day began (#471, module doc "Risk rules"; each exit's time
+    and net, in the order they exited): each exit that made ``rules.loss_streak`` net losses in a row or
+    more, with when it ends; and the net losses in a row at the last exit."""
+    losses, began = 0, []
     for exited_at, net in exits:
         losses = losses + 1 if net < 0 else 0
         if losses >= rules.loss_streak:
-            until = exited_at + rules.cooldown
-    return COOLING_DOWN if until is not None and at < until else None
+            began.append((exited_at, exited_at + rules.cooldown))
+    return began, losses
+
+
+def risk_state(
+    rules: Rules, at: datetime, buys: int, exits: Sequence[tuple[datetime, float]], capital: float
+) -> dict[str, Any]:
+    """The risk rules' state at ``at`` (#475, ``GET /v1/trader``'s ``risk``), from a book's buy orders
+    of ``at``'s day and its exits that day (``risk_held``'s): the loss budget (its percent of
+    ``capital``, the capital a buy sizes on, and in won), the buy orders and their limit, the net
+    losses in a row and how many start a cooldown, the cooldown's minutes, those begun that day and the
+    end of the one in force (None when none is), and what holds a buy now (``buy_limit``,
+    ``cooldown``; None)."""
+    began, losses = cooldowns(rules, exits)
+    until = began[-1][1] if began and at < began[-1][1] else None
+    return {
+        "day": kst_day(at).isoformat(),
+        "budget_percent": rules.risk_percent,
+        "budget": rules.budget(capital),
+        "buys": buys,
+        "daily_buys": rules.daily_buys,
+        "losses": losses,
+        "loss_streak": rules.loss_streak,
+        "cooldown_minutes": rules.cooldown.total_seconds() / 60,
+        "cooldowns": len(began),
+        "cooldown_until": None if until is None else iso(until),
+        "held": risk_held(rules, at, buys, exits),
+    }
+
+
+def mid_of(quote: BestQuote | None) -> float | None:
+    """A quote's mid-point (#475: a leg's execution cost is from the one the book knew at its decision)."""
+    return None if quote is None else (quote.bid + quote.ask) / 2
 
 
 def midnight(at: datetime) -> datetime:
@@ -574,6 +622,7 @@ class _Waiting:
     pick: Pick
     plan: Plan
     decided_at: datetime
+    mid: float | None = None  # the latest quote's mid-point at the decision (#475); None without one
 
     def deadline(self, rules: Rules) -> datetime:
         return self.decided_at + rules.quote_wait
@@ -651,6 +700,8 @@ class PaperTrader:
         # A sale the status asks for sells at the first quote received after this (#396).
         self._sell_after: datetime | None = None
         self._written: tuple[datetime, dict[str, Any]] | None = None  # the state last written
+        # The risk rules' state last read from the store, and when (#475, ``_risk_state``).
+        self._risk_read: tuple[datetime, dict[str, Any]] | None = None
         self._dirty = True  # a change to write at once
         self._selection: int | None = None  # the picks' row in the store
         self._policy: int | None = challenger  # the policy version the picks are under (#399)
@@ -934,7 +985,7 @@ class PaperTrader:
         """The state (``state``) and the day's ledger into the store: at once if something changed
         or ``force``; if only the open position's P&L moved, at most every ``SNAPSHOT_SECONDS``;
         else every ``HEARTBEAT``."""
-        body = self.state()
+        body = self.state(now)
         if self._written is not None and not (force or self._dirty):
             at, written = self._written
             if now - at < (SNAPSHOT_SECONDS if body != written else HEARTBEAT):
@@ -946,8 +997,8 @@ class PaperTrader:
         self._written = (now, body)
         self._dirty = False
 
-    def state(self) -> dict[str, Any]:
-        """The trader's state now (#396): what ``GET /v1/trader`` gives."""
+    def state(self, now: datetime | None = None) -> dict[str, Any]:
+        """The trader's state at ``now`` (#396; its start's if None): what ``GET /v1/trader`` gives."""
         guard, trade, last = self.guard, self._open, self._last
         position = None
         cost = 0.0
@@ -1013,7 +1064,27 @@ class PaperTrader:
             else {"at": iso(guard.pause.at), "sell_now": guard.pause.sell_now, "source": guard.pause.source},
             "live": self.live,
             "practice": self.practice_state,
+            # #475: the loss budget and the risk rules' state (#471) of the champion's book's day.
+            "risk": self._risk_state(now or self._started_at),
         }
+
+    def _risk_state(self, at: datetime) -> dict[str, Any]:
+        """``risk_state`` at ``at``, read from the store again when something changed (a buy or an exit
+        makes the book dirty) or ``SNAPSHOT_SECONDS`` after the last read: ``state`` is asked at every
+        tick of the clock, the store's day read at most every second (a cooldown ends to the second)."""
+        kept = self._risk_read
+        if kept is not None and not self._dirty and timedelta(0) <= at - kept[0] < SNAPSHOT_SECONDS:
+            return kept[1]
+        since, book = midnight(at), self._book()
+        found = risk_state(
+            self.rules,
+            at,
+            self.store.day_buys(self.mode, since, **book),
+            self.store.day_exits(self.mode, since, **book),
+            self._capital(),
+        )
+        self._risk_read = (at, found)
+        return found
 
     def _busy(self) -> bool:
         return self._open is not None or self._waiting is not None
@@ -1100,7 +1171,7 @@ class PaperTrader:
             if pick.quantity is not None
             else f"a loss budget of {self.rules.budget(self._capital()):.0f} won",
         )
-        self._waiting = _Waiting(decision, signal, pick, planned, at)
+        self._waiting = _Waiting(decision, signal, pick, planned, at, mid_of(self._last))
 
     def _skip(self, signal: Signal, at: datetime, reason: str) -> None:
         self._add_decision(signal, at, SKIP, reason)
@@ -1204,6 +1275,7 @@ class PaperTrader:
             shadow=self.shadow,
             practice=pick.practice,
             model_version=signal.model_version,
+            decided_mid=waiting.mid,
         )
 
     def _give_up(self, waiting: _Waiting, reason: str) -> None:
@@ -1225,7 +1297,9 @@ class PaperTrader:
             self._dirty = True
         if self._returned is not None:  # made on the first quote after a stall: it waited (#407)
             self.store.stall_effect(trade.id, self._returned.id, WAITED)
-        self.store.exit(trade, Exit(at, price, reason, paid.sell_fee, paid.tax, quote.received_at))
+        # The sale's decision (#475): on the quote it is made on; a take-profit rests from the buy.
+        sold = (None, None) if reason == TAKE_PROFIT else (at, mid_of(quote))
+        self.store.exit(trade, Exit(at, price, reason, paid.sell_fee, paid.tax, quote.received_at, *sold))
         self._open = None
         self._sell_after = None
         self._dirty = True

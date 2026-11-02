@@ -51,6 +51,12 @@ predictor whose rises are always 1.000 has every θ's signals alike, and its rep
 decides. The cells kept are ranked by their lower bound, the highest first (then the kinds' order,
 then the roles'): of one bar close's rises the first ranked buys.
 
+**The calibration** (#475, ``replay.Calibration``): beside each cell's signals alone, its rises in
+the grid's five bins of probability, with their answers' classes, the class right, the upper target
+reached first and those that netted above 0 bought alone; kept in the cell's ``fitted`` (and a cell
+left out's) and printed under it (``calibrated``). A description: the entry above decides, and
+nothing changes a θ by it.
+
 **The whole policy** (#472): the cells kept, in their rank at their θ, replayed together one position
 at a time as the paper book would have traded them (``replay.Policy``: the rank waits, sized by the
 trader's loss budget, ``paper.size``, held by its risk rules and loss limits, #471). Its daily net in
@@ -127,6 +133,7 @@ from krx_quant.trader.replay import (
     NO_EXIT_QUOTE,
     NO_RECORDING,
     OFF_TARGET,
+    Calibration,
     Ranked,
     Replayer,
     Result,
@@ -518,6 +525,7 @@ def refit_from(
             verdicts.setdefault(Cell(seen["kind"], seen["predictor"]), seen.get("verdict"))
     alone: Mapping[Cell, Mapping[float, Signals]] = {}
     counts: Mapping[Cell, Mapping[str, int]] = {}
+    calibration: Mapping[Cell, Calibration] = {}
     recorded: dict[Cell, int] = {}
     replayer: Replayer | None = None
     judged = Judged((), (), 0, grid.level(0))
@@ -541,7 +549,7 @@ def refit_from(
                 meter=meter,
             )
             measured = replayer.run([], alone=[p.cell for p in picks])
-            alone, counts = measured.signals, measured.counts
+            alone, counts, calibration = measured.signals, measured.counts, measured.calibration
             found = replayer.recordings
             recorded = {
                 p.cell: sum(found.get(d, NO_RECORDING) != NO_RECORDING for d in sources[p.cell].days)
@@ -562,10 +570,12 @@ def refit_from(
             db.close()
 
     def measured_json(cell: Cell) -> dict[str, Any]:
+        calibrated = calibration.get(cell)
         return {
             "verdict": verdicts.get(cell),
             "read": dict(counts.get(cell, {})),
             "signals": {f"{t:g}": s.as_json() for t, s in alone.get(cell, {}).items()},
+            **({} if calibrated is None else {"calibration": calibrated.as_json()}),  # #475
         }
 
     cells = tuple(
@@ -756,6 +766,7 @@ def report(done: Refitted) -> str:
             + _verdict(f.get("verdict"))
         )
         lines += _alone(f.get("signals") or {})
+        lines += calibrated(f.get("calibration"))
     for x in done.left_out:
         why = x["why"]
         if why == FEW_DAYS:
@@ -777,6 +788,7 @@ def report(done: Refitted) -> str:
             f"뺀 칸: {x['kind']} {x['predictor']} ({x['role']}): {why}, {detail}" + _verdict(x.get("verdict"))
         )
         lines += _alone(x.get("signals") or {})
+        lines += calibrated(x.get("calibration"))
     if done.challengers:
         lines.append(
             "모의로 도는 도전 정책(묶음, 셋까지): " + ", ".join(f"정책 {v}" for v in done.challengers)
@@ -870,6 +882,47 @@ def _alone(signals: Mapping[str, Mapping[str, Any]]) -> list[str]:
             part += f", 빠짐 {sum(s['missing'].values())}"
         parts.append(part)
     return ["   1주씩 따로 잰 신호: " + " · ".join(parts)]
+
+
+def calibrated(calibration: Mapping[str, Any] | None) -> list[str]:
+    """A cell's calibration (#475, ``replay.Calibration``), a line a bin with rises: its probability's
+    span, the rises measured, their answers' classes (상승: the kind's rise; 보합; 하락), the class right,
+    the upper target reached first, and those bought alone a share that netted above 0; counts and
+    shares, no price. A description: nothing changes a θ by it."""
+    if not calibration:
+        return []
+    bins = [b for b in calibration["bins"] if b["signals"] or b["missing"]]
+    below = calibration.get("below") or 0
+    head = "   보정 (#475, 점수 구간마다 오름 신호, 1주씩 따로 잰 것: 설명일 뿐 θ를 바꾸지 않는다)"
+    under = f" · 첫 경계 아래 {below}(어느 θ도 사지 않는다)" if below else ""
+    if not bins:
+        return [f"{head}: 구간 안 신호 없음{under}"]
+    return [head + under, *(_bin_line(b) for b in bins)]
+
+
+def _bin_line(b: Mapping[str, Any]) -> str:
+    """A calibration's bin (``calibrated``)."""
+    span = f"[{b['from']:g}, 1]" if b["to"] >= 1 else f"[{b['from']:g}, {b['to']:g})"
+    parts = [f"   - {span}: 신호 {b['signals']}"]
+    answered, out = b["answered"], b["outcomes"]
+    if answered:
+        parts += [
+            f"결과 상승 {_share(out['up'], answered)}, 보합 {_share(out['flat'], answered)}, "
+            f"하락 {_share(out['down'], answered)}(답 {answered})",
+            f"클래스 맞음 {_share(b['hits'], answered)}",
+            f"목표 먼저 {_share(b['first'], answered)}",
+        ]
+    else:
+        parts.append("답 없음")
+    bought = b["bought"]
+    parts.append(f"순이익 {_share(b['profitable'], bought)}(체결 {bought})" if bought else "체결 없음")
+    if b["missing"]:
+        parts.append(f"데이터가 빠져 뺌 {b['missing']}")
+    return " · ".join(parts)
+
+
+def _share(n: int, of: int) -> str:
+    return f"{n / of:.0%}" if of else "?"
 
 
 def _ticks(value: float | None) -> str:
