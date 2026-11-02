@@ -7,13 +7,14 @@ same cells' predictions and the same quotes, in one process.
   the first champion, #469), for the
   champion's book (``paper.PaperTrader``: the trades the trader makes, which its loss limits and
   pauses hold; in mock mode ``mock.MockTrader``, #405, its orders on KIS's mock server); and each
-  challenger that runs that day (``policy.running_versions``: at most
-  three, kept before that day's 08:30, so one fitted tonight runs from the next trading day)
-  applied to the same cells, for its own paper book. No pause holds a challenger book; it sizes by
+  challenger that runs that day (``policy.running_versions``: the members of the cohort of that
+  day's review cycle, #473, at most three, entered before that day's 08:30, so a cohort formed on a
+  review night runs from the next trading day, the cycle's first) applied to the same cells, for its
+  own paper book. No pause holds a challenger book; it sizes by
   the loss budget and keeps the risk rules on its own orders and trades, its loss limits simulated
   on its own trades (#471, ``limits.Simulated``: the cumulative one from ``simulated_since``, counted
   again when the trader is re-armed), and it buys on the paper account's cash with nothing open, as
-  the champion's book would. A challenger that no longer runs (dropped for a newer one, promoted) is
+  the champion's book would. A challenger that no longer runs (its cohort judged: promoted or dropped) is
   retired: its book buys nothing more and is let go once it holds nothing. A champion that cannot be read
   trades nothing until the next pick (``NO_POLICY``); a challenger that cannot be read does not
   run until then.
@@ -60,11 +61,17 @@ same cells' predictions and the same quotes, in one process.
   > (the user's choice, 2026-11-02): one practice strategy frozen for a cycle.
 - **Records** (``record``): while a trading day's session is open (from its open to the end of its
   closing auction), each running book's policy ran that day (``policy_days``), always in paper
-  (#405): the champion's (in mock and live mode its shadow's), stopped once its status is not
-  ``running`` in the session (in mock and live mode never: no pause holds the shadow); each
-  challenger's, never stopped (a simulated loss limit is its policy's own evidence, #471). Each
-  policy-day once. The promotion and the live gate read them (``promotion.py``).
-  Before the first champion the champion's book has no policy and keeps no record.
+  (#405): the champion's (in mock and live mode its shadow's), stopped once a pause or a failed
+  order holds it in the session (in mock and live mode never: no pause holds the shadow); each
+  challenger's, never stopped (a simulated loss limit is its policy's own evidence, #471). A loss
+  limit does not mark the champion's day stopped either (#473): it is its policy's rule, which the
+  challengers simulate, so that the cohort's judgment counts the day for both. Each policy-day once.
+  The promotion and the live gate read them (``promotion.py``). Before the first champion the
+  champion's book has no policy and keeps no record.
+
+  > **바뀜** (2026-11-03, #PR473): the champion's day was stopped once its status was not
+  > ``running`` (a loss limit too) → by a pause or a failed order alone. 이유: spec #468 5: the days a
+  > loss limit stopped count in the judgment.
 
 The champion never changes during a session: it is read at the picks only, and a promotion is
 written after the market alone (``promotion.in_market``); since #469 on a review night alone.
@@ -98,9 +105,12 @@ from krx_quant.trader.paper import PaperTrader, Rules
 from krx_quant.trader.quotes import BestQuote
 from krx_quant.trader.selection import GONE, NO_CHAMPION, NO_PASS, NO_POLICY, NOT_IN_POLICY, Selection
 from krx_quant.trader.stall import STALL_AFTER, QuoteWatch
-from krx_quant.trader.store import TraderStore
+from krx_quant.trader.store import CUMULATIVE_LIMIT, DAILY_LIMIT, TraderStore
 
 log = logging.getLogger(__name__)
+
+# The champion's statuses that leave its day a common one (#473): running, or held by its own rules.
+RUN_OR_LIMIT = (RUNNING, DAILY_LIMIT, CUMULATIVE_LIMIT)
 
 
 def under_champion(
@@ -536,7 +546,8 @@ class Desk:
         books: list[tuple[int, bool, bool]] = [(v, False, False) for v in sorted(self._running)]
         if self.champion.policy is not None:
             # In mock and live mode its record is the shadow's, which no pause nor limit stops (#405).
-            stopped = self.mode not in KIS_MODES and self.champion.status != RUNNING
+            # A loss limit is its policy's rule (#473): only what is not, a pause or a failed order.
+            stopped = self.mode not in KIS_MODES and self.champion.status not in RUN_OR_LIMIT
             books.insert(0, (self.champion.policy, True, stopped))
         for version, champion, stopped in books:
             kept = self._recorded.get((version, day))

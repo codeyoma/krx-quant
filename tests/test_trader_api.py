@@ -17,8 +17,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from krx_quant.api import create_app
 from krx_quant.predictions import DB_NAME as ENGINE_DB
 from krx_quant.touch import TARGET_VERSION
-from krx_quant.trader.policy import FIRST
-from krx_quant.trader.refit import refit_from
+from krx_quant.trader.refit import BOOTSTRAP, refit_from
 from krx_quant.trader.store import DB_NAME as TRADER_DB
 from tests.api_schema import check
 from tests.replay_events import at as replay_at
@@ -35,6 +34,7 @@ from tests.trader_doubles import (
     Read,
     Tick,
     at,
+    challenger,
     keep,
     policy_cell,
     quote,
@@ -265,8 +265,9 @@ async def policies_answer(scratch: Path, state: Path | None, query: str = "") ->
 
 
 async def test_the_policies_newest_first_the_champion_marked(tmp_path: Path) -> None:
-    """Two nights' re-fits of the same five predictions: the first the champion (θ 0.7), the second a
-    challenger in a running slot, its grid's θ 0.8 alone (the same values would not be kept, #400)."""
+    """Two nights' re-fits of the same five predictions: the first (θ 0.7) waits for a cohort behind
+    the empty champion kept before it (#473), the second, its grid's θ 0.8 alone (the same values
+    would not be kept, #400), waits too."""
     write_five(tmp_path)
     for night, grid in (
         ("2026-10-15 22:31:00", SMALL),
@@ -290,24 +291,29 @@ async def test_the_policies_newest_first_the_champion_marked(tmp_path: Path) -> 
     assert status == 200
     check("trader_policies", body)
     assert body["champion"] == 1
-    assert [(p["version"], p["status"]) for p in body["policies"]] == [(2, "challenger"), (1, "champion")]
-    assert [p["version"] for p in page["policies"]] == [2]
-    challenger, champion = body["policies"]
-    assert [{**c, "threshold": 0.7, "fitted": None} for c in challenger["cells"]] == [
-        {**c, "fitted": None} for c in champion["cells"]
+    assert [(p["version"], p["status"]) for p in body["policies"]] == [
+        (3, "waiting"),
+        (2, "waiting"),
+        (1, "champion"),
+    ]
+    assert [p["version"] for p in page["policies"]] == [3]
+    second, first, champion = body["policies"]
+    assert [{**c, "threshold": 0.7, "fitted": None} for c in second["cells"]] == [
+        {**c, "fitted": None} for c in first["cells"]
     ], "but θ"
-    assert (challenger["admitted_at"], champion["admitted_at"]) == ("2026-10-15T22:45:00+09:00", None)
-    [cell] = champion["cells"]
+    assert (second["admitted_at"], first["admitted_at"], champion["cells"]) == (None, None, [])
+    [cell] = first["cells"]
     assert (cell["kind"], cell["predictor"], cell["threshold"]) == ("barrier", "breiman", 0.7)
     assert "kelly_fraction" not in cell, "no λ (#471)"
-    assert champion["fit"]["result"]["net"] == pytest.approx(4 * UP), "two take-profits of 14 shares a day"
+    assert first["fit"]["result"]["net"] == pytest.approx(4 * UP), "two take-profits of 14 shares a day"
     assert body["champions"] == [
-        {"at": "2026-10-15T22:31:00+09:00", "version": 1, "reason": FIRST, "detail": None}
+        {"at": "2026-10-15T22:31:00+09:00", "version": 1, "reason": BOOTSTRAP, "detail": None}
     ]
+    assert body["cohorts"] == [], "a cohort is formed on a review night"
 
 
 async def test_no_policies_before_the_first_fit(tmp_path: Path) -> None:
-    empty: dict[str, Any] = {"champion": None, "policies": [], "champions": []}
+    empty: dict[str, Any] = {"champion": None, "policies": [], "champions": [], "cohorts": []}
     assert await policies_answer(tmp_path, tmp_path / "empty") == (200, empty)
     assert await policies_answer(tmp_path, None) == (200, empty)
     Day(tmp_path).run(DAY)  # a trader's store without a policy yet
@@ -358,7 +364,9 @@ async def test_a_store_the_nightly_fit_made_before_the_trader_s_first_start_answ
     assert answers["/v1/trader/trades"] == (200, {"trades": []})
     assert answers["/v1/symbols/005930/trader-marks"] == (200, {"symbol": "005930", "marks": []})
     status, policies = answers["/v1/trader/policies"]
-    assert (status, policies["champion"], len(policies["policies"])) == (200, 1, 1)
+    assert (status, policies["champion"], len(policies["policies"])) == (200, 1, 2), (
+        "the empty champion kept before the fit (#473), and the fit"
+    )
     check("trader_trades", answers["/v1/trader/trades"][1])
     check("trader_policies", policies)
     status, state = answers["/v1/trader"]
@@ -378,7 +386,7 @@ async def test_the_challengers_paper_trades_their_records_and_the_gate_through_t
     trades are the challenger's alone. The trades route gives the champion's unless asked for a
     policy's; the trader's state gives the policies running, their records and the gate."""
     keep(tmp_path, at("2026-10-12 22:31:00"), policy_cell(BARRIER, 0.8))
-    keep(tmp_path, at("2026-10-13 22:31:00"), policy_cell(BARRIER, 0.6))
+    challenger(tmp_path, at("2026-10-13 22:31:00"), policy_cell(BARRIER, 0.6))
     Day(tmp_path, desk=True).run(DAY)
     engine = await run(tmp_path / "replay.db", [], until=replay_at("09:00:00"))
     async with TestClient(TestServer(create_app(engine, state_dir=tmp_path))) as client:
@@ -390,9 +398,9 @@ async def test_the_challengers_paper_trades_their_records_and_the_gate_through_t
 
     check("trader_trades", answers["/v1/trader/trades"])
     assert answers["/v1/trader/trades"]["trades"] == [], "the champion bought nothing"
-    challenger = answers["/v1/trader/trades?policy=2"]["trades"]
+    theirs = answers["/v1/trader/trades?policy=2"]["trades"]
     check("trader_trades", answers["/v1/trader/trades?policy=2"])
-    assert [(t["policy"], t["champion"]) for t in challenger] == [(2, False)] * 3
+    assert [(t["policy"], t["champion"]) for t in theirs] == [(2, False)] * 3
     state = answers["/v1/trader"]
     check("trader", state)
     assert (state["champion"], state["gate"]["policy"], state["gate"]["days"]) == (1, 1, 1)

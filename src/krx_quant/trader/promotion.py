@@ -17,32 +17,41 @@ records are simulated evidence: what a policy would have made filled in paper, n
 execution makes (rejects, partial fills, the account's reconciliation, the fill gap between KIS
 and the shadow, ``gap.py``), which the live mode must check apart (#408).
 
-**Promotion** (``judge``, ``promote``): a challenger becomes the champion when, over the trading
-days both ran (``common``), at least ``PROMOTION_DAYS`` of them, the day-level lower bound of
-(challenger − champion) net P&L is above 0. The lower bound is the engine's trading-day statistic
-(``stats.overlap_t_test`` with an overlap of one session: a Student t over the days), two-sided at
-``LEVEL`` with Bonferroni over the challengers running (``policy.challenger_versions``, at most three):
-1 − 0.05 ÷ m. A day the champion was stopped (a pause or a loss limit at some time in the session)
-is not a common day: its trades were cut short by what is not its policy, the challenger's were
-not. Of several passing, the greatest lower bound is promoted (then the newest). A challenger is
-judged from its tenth common day; one not promoted by its ``RETIRE_DAYS``-th (20) is dropped
-(``policy.drop``), which frees its slot for the newest policy waiting (``policy.admit``).
-The promotion is judged and written only after the market (``in_market``: from the day's pick at
-08:30 to the end of the closing auction it waits), so the champion never changes during a session:
-the trader reads it at each pick (``desk.Desk.select``), and a change written before 08:30 holds
-the whole day.
-
-**Review nights alone** (#469, ``review.py``): the champion's version is frozen between reviews. The
-promotion is judged, and challengers dropped, on a review night alone (``review.reviewing``: after
-the close of a cycle's twentieth trading day, until the next trading day's pick), once (a night that
-crowned one judges no more), by the rule above; on any other night nothing is judged, crowned or
-dropped (``BETWEEN_REVIEWS``). The records, the promotion and the live gate read the current
-evaluation version's days alone (``since``, from its first day): an earlier version's evidence stays
-in the store, archived, and is not inherited.
+**Promotion** (``judge_cohort``, ``promote``, #473: spec #468 5 "도전 정책"): the challengers enter as a
+cohort of at most three at the start of a review cycle (#469, ``cohort.py``), the champion they are
+judged against fixed then, and run in paper for the whole cycle. They are judged once, on the cycle's
+review night (``review.reviewing``: after the close of its twentieth trading day, until the next
+trading day's pick), never before. A member wins when, over the cycle's trading days both it and the
+cohort's champion ran (``common``), at least ``PROMOTION_DAYS`` (10) of them, the day-level lower
+bound of (member − champion) net P&L is above 0. A day either made no trade counts (0), and so does a
+day a loss limit stopped either (the challengers' simulated, #471; in paper mode the champion's own:
+the same rules); a day the champion was paused is not a common day (``PolicyDay.stopped``: a pause,
+the screen's or a check's, or a failed order cut its trades short, not its policy). The lower bound
+is the engine's trading-day statistic (``stats.overlap_t_test`` with an overlap of one session: a
+Student t over the days), two-sided at ``LEVEL`` with Bonferroni over the cohort's members: 1 − 0.05
+÷ m. Fewer common days: undecided (``FEW_DAYS``, 판정 불가); the window is not stretched. Of several
+passing, the greatest lower bound is crowned (then the newest), from the next trading day; every other
+member is dropped (``policy.drop``), with the verdict and its figures kept for good
+(``cohort.settle``). A cohort whose review night passed unjudged (the job did not run) is closed
+unjudged and dropped (``cohort.close_missed``): the champion stays until the next review. The
+promotion is judged and written only after the market (``in_market``: from the day's pick at 08:30
+to the end of the closing auction it waits), so the champion never changes during a session: the
+trader reads it at each pick (``desk.Desk.select``), and a change written before 08:30 holds the
+whole day. The records, the promotion and the live gate read the current evaluation version's days
+alone (``since``, #469, from its first day): an earlier version's evidence stays in the store,
+archived, and is not inherited.
 
 > **바뀜** (2026-11-02, #476): a challenger was judged every night from its tenth common day → on a
 > review night alone, and on the current evaluation version's days alone. 이유: spec #468 "버전과
 > 검토 주기": the version that trades is frozen between reviews.
+
+> **바뀜** (2026-11-03, #PR473): each challenger in a running slot was judged on every review night
+> from its tenth common day, Bonferroni over the challengers running, and dropped once it reached
+> 20 common days unpromoted; a day the champion was stopped by a loss limit was not a common day →
+> a cohort formed at a cycle's start is judged once, on that cycle's review night, Bonferroni within
+> it, every member not crowned dropped; a day a loss limit stopped the champion counts. 이유: spec
+> #468 5 "도전 정책": no repeated looks during a cycle, and the shadows' simulated halts count as
+> trading days.
 
 **The live gate** (#408, ``check_gate``, ``gate_of``): judged at checkpoints, not every night. The
 trader's paper history is every trading day a champion ran in it (``history``: ``policy_days`` with
@@ -83,6 +92,7 @@ the live mode's execution checks (``live.py``).
 
 from __future__ import annotations
 
+import logging
 import math
 import sqlite3
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -94,12 +104,14 @@ from krx_quant.feeds.base import KST, kst_day
 from krx_quant.market_calendar import Session
 from krx_quant.stats import overlap_t_test
 from krx_quant.trader import PAPER, PICK_AT, review
+from krx_quant.trader import cohort as cohorts
 from krx_quant.trader import policy as policies
 
-# A challenger is judged on this many common trading days at least (#393).
+log = logging.getLogger(__name__)
+
+# A cohort's member is judged on this many common trading days at least (#393); fewer at its review:
+# undecided (#473, 판정 불가), dropped.
 PROMOTION_DAYS = 10
-# One not promoted by this many common days is dropped, freeing its slot (#400, #416).
-RETIRE_DAYS = 20
 # The live gate (#393, #408): at a checkpoint, the champion's paper record of this many trading days
 # at least.
 GATE_DAYS = 20
@@ -117,17 +129,19 @@ LEVEL = 0.95
 OVERLAP = 1
 # Why a challenger is not promoted.
 FEW_DAYS, NOT_ABOVE = "few_days", "not_above"
-# Why no promotion was judged (#469: not a review night; this review night's judged already).
+# Why no promotion was judged (#469: not a review night; this review night's judged already; #473:
+# no cohort ran in the cycle reviewed).
 MARKET_OPEN, NO_CHAMPION = "market_open", "no_champion"
-BETWEEN_REVIEWS, REVIEWED = "between_reviews", "reviewed"
+BETWEEN_REVIEWS, REVIEWED, NO_COHORT = "between_reviews", "reviewed", "no_cohort"
 
 
 @dataclass(frozen=True)
 class PolicyDay:
     """A trading day a policy ran: its trades' net P&L (0 without one), how many, whether it was
-    the champion then and, if so, stopped at some time in the session; and its trades' tick times
-    their shares, summed (``ticks``, won: what one tick on every leg's every share costs a leg,
-    #408)."""
+    the champion then and, if so, stopped at some time in the session (since #473 by a pause or a
+    failed order alone, ``desk.Desk.record``: a loss limit is its policy's rule); and its trades'
+    tick times their shares, summed (``ticks``, won: what one tick on every leg's every share costs
+    a leg, #408)."""
 
     day: date
     net: float
@@ -561,7 +575,8 @@ def gate_of(
 @dataclass(frozen=True)
 class Judgment:
     """A challenger against the champion: their common days, the mean a day of (challenger −
-    champion) net P&L and its lower bound at ``level`` (Bonferroni over ``challengers``)."""
+    champion) net P&L and its lower bound at ``level`` (Bonferroni over ``challengers``, its cohort's
+    members); ``review``: the review day its cohort is judged after (#473)."""
 
     challenger: int
     champion: int
@@ -571,12 +586,8 @@ class Judgment:
     level: float
     challengers: int
     required: int = PROMOTION_DAYS
-    until: int = RETIRE_DAYS
-
-    @property
-    def retires(self) -> bool:
-        """Whether it is dropped tonight: its ``until``-th common day reached, not promoted."""
-        return not self.passed and self.days >= self.until
+    until: int = review.REVIEW_DAYS  # a cycle's trading days: judged after its last (#473)
+    review: date | None = None
 
     @property
     def why(self) -> str | None:
@@ -591,12 +602,18 @@ class Judgment:
     def passed(self) -> bool:
         return self.why is None
 
+    @property
+    def verdict(self) -> str:
+        """Its verdict at its cohort's review (``cohort.PASSED``, ``NOT_ABOVE``, ``UNDECIDED``)."""
+        return {None: cohorts.PASSED, NOT_ABOVE: cohorts.NOT_ABOVE, FEW_DAYS: cohorts.UNDECIDED}[self.why]
+
     def as_json(self) -> dict[str, Any]:
         return {
             "champion": self.champion,
             "days": self.days,
             "required": self.required,
             "until": self.until,
+            "review": None if self.review is None else self.review.isoformat(),
             "mean": self.mean,
             "low": self.low,
             "level": self.level,
@@ -605,15 +622,30 @@ class Judgment:
             "why": self.why,
         }
 
+    def figures(self) -> dict[str, Any]:
+        """As its cohort's verdict keeps it (#473, ``cohort.settle``)."""
+        return {
+            "version": self.challenger,
+            "days": self.days,
+            "mean": self.mean,
+            "low": self.low,
+            "verdict": self.verdict,
+        }
 
-def common(champion: Record | None, challenger: Record | None) -> list[tuple[date, float]]:
-    """The trading days both ran, oldest first, but those the champion was stopped on, with each
-    day's (challenger − champion) net P&L."""
+
+def common(
+    champion: Record | None, challenger: Record | None, window: tuple[date, date] | None = None
+) -> list[tuple[date, float]]:
+    """The trading days both ran (within ``window``, both days included, if given), oldest first, but
+    those the champion was stopped on (a pause, ``PolicyDay.stopped``), with each day's (challenger −
+    champion) net P&L."""
     if champion is None or challenger is None:
         return []
     theirs = {d.day: d for d in champion.days}
     out = []
     for mine in challenger.days:
+        if window is not None and not window[0] <= mine.day <= window[1]:
+            continue
         other = theirs.get(mine.day)
         if other is not None and not (other.stopped or mine.stopped):
             out.append((mine.day, mine.net - other.net))
@@ -621,16 +653,23 @@ def common(champion: Record | None, challenger: Record | None) -> list[tuple[dat
 
 
 def bonferroni(challengers: int) -> float:
-    """The two-sided level of each challenger's lower bound when ``challengers`` run at once."""
+    """The two-sided level of each challenger's lower bound when ``challengers`` are judged together
+    (#473: a cohort's members)."""
     return 1 - (1 - LEVEL) / max(1, challengers)
 
 
-def judge(champion: int, records_: Mapping[int, Record], challengers: Sequence[int]) -> list[Judgment]:
-    """Each of ``challengers`` (the versions running) against the ``champion`` (module doc)."""
+def judge(
+    champion: int,
+    records_: Mapping[int, Record],
+    challengers: Sequence[int],
+    window: tuple[date, date] | None = None,
+) -> list[Judgment]:
+    """Each of ``challengers`` against the ``champion`` (module doc), on their common days within
+    ``window``, Bonferroni over them."""
     level = bonferroni(len(challengers))
     out = []
     for version in challengers:
-        diffs = [d for _, d in common(records_.get(champion), records_.get(version))]
+        diffs = [d for _, d in common(records_.get(champion), records_.get(version), window)]
         out.append(
             Judgment(
                 version,
@@ -643,6 +682,19 @@ def judge(champion: int, records_: Mapping[int, Record], challengers: Sequence[i
             )
         )
     return out
+
+
+def judge_cohort(found: cohorts.Cohort, records_: Mapping[int, Record]) -> list[Judgment]:
+    """Each member of ``found`` (oldest first) against the champion it was formed with, on the days of
+    its cycle (``found.first`` to ``found.review``) both ran, Bonferroni over its members (#473); none
+    without a champion."""
+    if found.champion is None:
+        return []
+    window = (found.first, found.review)
+    return [
+        replace(j, review=found.review)
+        for j in judge(found.champion, records_, sorted(found.members), window)
+    ]
 
 
 def pick(judgments: Iterable[Judgment]) -> Judgment | None:
@@ -662,11 +714,13 @@ def in_market(now: datetime, sessions: Callable[[date], Session | None]) -> bool
 
 @dataclass(frozen=True)
 class Promotion:
-    """A night's judgment: the champion before, each challenger's, the one promoted if any, why
-    none was judged (``MARKET_OPEN``, ``NO_CHAMPION``; #469: ``BETWEEN_REVIEWS``, ``REVIEWED``), the
-    challengers dropped (``RETIRE_DAYS`` reached unpromoted), the live gate on the champion after, the
-    gate's checkpoints evaluated that night (#408), and the review day (#469): the night's on a review
-    night, else the next one."""
+    """A night's judgment: the champion before, each member's of the cohort judged, the one promoted
+    if any, why none was judged (``MARKET_OPEN``, ``NO_CHAMPION``; #469: ``BETWEEN_REVIEWS``,
+    ``REVIEWED``; #473: ``NO_COHORT``), the members dropped, the live gate on the champion after, the
+    gate's checkpoints evaluated that night (#408), the review day (#469): the night's on a review
+    night, else the next one; and (#473) the cohort judged and its verdict, the cohorts closed unjudged
+    that night (their review night missed) and the stale challengers dropped
+    (``cohort.retire_stale``)."""
 
     at: datetime
     champion: int | None
@@ -677,6 +731,10 @@ class Promotion:
     dropped: tuple[int, ...] = ()
     checked: tuple[Checkpoint, ...] = ()
     review: date | None = None
+    cohort: cohorts.Cohort | None = None
+    verdict: cohorts.Verdict | None = None
+    missed: tuple[cohorts.Verdict, ...] = ()
+    retired: tuple[int, ...] = ()
 
 
 def promote(
@@ -685,14 +743,15 @@ def promote(
     sessions: Callable[[date], Session | None],
     mode: str | None = None,
 ) -> Promotion:
-    """Judge the challengers running against the champion on the records in the store ``db``
-    (``policy.connect``) and, after the market, make the one that passes the champion
-    (``policy.crown``) and drop those that reached ``RETIRE_DAYS`` unpromoted (``policy.drop``;
-    the slots they free are filled at the night's end, ``policy.admit``). During a trading day's
-    market nothing is judged or written. Since #469 the evaluation version is begun here if it was
-    not yet (``review.begin``), and the promotion judged on a review night alone, once: on any other
-    night nothing is judged, crowned or dropped (``BETWEEN_REVIEWS``). The records are paper's
-    whatever ``mode`` (``records_of``, #405)."""
+    """Judge, after the market, on the records in the store ``db`` (``policy.connect``), the cohort
+    whose review night ``now`` is in (#473, module doc): the member that passes made the champion and
+    every other dropped, with the verdict kept (``cohort.settle``). During a trading day's market
+    nothing is judged or written. The evaluation version is begun here if it was not yet
+    (``review.begin``, #469), the live gate's checkpoints due evaluated, the stale challengers dropped
+    (``cohort.retire_stale``) and a cohort whose review night was missed closed
+    (``cohort.close_missed``); on any night but a review night nothing is judged, crowned or dropped
+    (``BETWEEN_REVIEWS``), nor twice on one (``REVIEWED``). The records are paper's whatever ``mode``
+    (``records_of``, #405)."""
     mode = records_of(mode)
     champion = policies.champion_version(db)
     if in_market(now, sessions):
@@ -701,57 +760,77 @@ def promote(
     # The live gate's checkpoints due (#408): on the champion of each checkpoint's day, whatever
     # tonight's judgment makes the champion from tomorrow.
     checked = tuple(check_gate(db, now))
+    retired = cohorts.retire_stale(db, now, evaluation)
+    missed = tuple(cohorts.close_missed(db, now, sessions))
+    found: dict[str, Any] = {"checked": checked, "missed": missed, "retired": retired}
     if champion is None:
-        return Promotion(now, None, (), None, NO_CHAMPION, gate_of(db, None), checked=checked)
+        return Promotion(now, None, (), None, NO_CHAMPION, gate_of(db, None), **found)
     day = review.reviewing(evaluation, now, sessions)
     if day is None:
         upcoming = review.cycle_at(evaluation, now, sessions).review
         gate = gate_of(db, champion)
-        return Promotion(now, champion, (), None, BETWEEN_REVIEWS, gate, checked=checked, review=upcoming)
-    if _crowned_since(db, day, sessions):
+        return Promotion(now, champion, (), None, BETWEEN_REVIEWS, gate, review=upcoming, **found)
+    judged = cohorts.of(db, evaluation.version, review.cycle_of(evaluation, day, sessions).number)
+    if judged is None:
+        return Promotion(now, champion, (), None, NO_COHORT, gate_of(db, champion), review=day, **found)
+    kept = cohorts.verdict_of(db, judged.evaluation, judged.cycle)
+    if kept is not None:
         gate = gate_of(db, champion)
-        return Promotion(now, champion, (), None, REVIEWED, gate, checked=checked, review=day)
-    current = champion
-    running = policies.challenger_versions(db)
-    kept = records(db, mode, [current, *running])
-    judgments = tuple(judge(current, kept, running))
-    promoted = None
+        return Promotion(
+            now, champion, (), None, REVIEWED, gate, review=day, cohort=judged, verdict=kept, **found
+        )
+    against = judged.champion if judged.champion is not None else champion
+    records_ = records(db, mode, [against, *judged.members])
+    judgments = tuple(judge_cohort(judged, records_))
     best = pick(judgments)
-    if best is not None and policies.crown(
-        db, now, best.challenger, _reason(best), _detail(best), replacing=current
-    ):
-        promoted = best.challenger
-    dropped = tuple(j.challenger for j in judgments if j.retires and j.challenger != promoted)
-    policies.drop(db, now, dropped)
+    verdict = cohorts.settle(
+        db,
+        now,
+        judged,
+        [j.figures() for j in judgments],
+        bonferroni(len(judged.members)) if judged.members else None,
+        None if best is None else best.challenger,
+        "" if best is None else _reason(best, judged),
+        {} if best is None else _detail(best, judged),
+    )
+    promoted = verdict.promoted
+    if best is not None and promoted is None:
+        log.warning(
+            "promotion: the champion changed since cohort %s was formed (policy %s): none crowned",
+            judged.cycle,
+            judged.champion,
+        )
+    dropped = tuple(v for v in sorted(judged.members) if v != promoted)
     return Promotion(
-        now, current, judgments, promoted, None, gate_of(db, promoted or current), dropped, checked, day
+        now,
+        against,
+        judgments,
+        promoted,
+        None,
+        gate_of(db, promoted or policies.champion_version(db)),
+        dropped,
+        review=day,
+        cohort=judged,
+        verdict=verdict,
+        **found,
     )
 
 
-def _crowned_since(db: sqlite3.Connection, day: date, sessions: Callable[[date], Session | None]) -> bool:
-    """Whether the champion changed after the close of the review day ``day`` (#469): that review
-    night's promotion is written, and none other is judged on it."""
-    session = sessions(day)
-    assert session is not None
-    row = db.execute(
-        "SELECT 1 FROM champions WHERE at >= ? LIMIT 1", (session.close.astimezone(KST).isoformat(),)
-    ).fetchone()
-    return row is not None
-
-
-def _reason(j: Judgment) -> str:
+def _reason(j: Judgment, judged: cohorts.Cohort) -> str:
     return (
-        f"도전 정책 {j.challenger}이 챔피언 정책 {j.champion}을 모의로 이겼다(#400): "
-        f"함께 돈 거래일 {j.days}일, "
+        f"도전 정책 {j.challenger}이 챔피언 정책 {j.champion}을 모의로 이겼다(#473): "
+        f"주기 {judged.cycle} 묶음의 검토 날 {judged.review}, 함께 돈 거래일 {j.days}일, "
         f"날마다 (도전 − 챔피언) 순손익 평균 {_won(j.mean)}, 하한 {_won(j.low)}"
-        f"(신뢰수준 {j.level:.2%}, 도전 정책 {j.challengers}개로 Bonferroni 보정)"
+        f"(신뢰수준 {j.level:.2%}, 묶음의 도전 정책 {j.challengers}개로 Bonferroni 보정)"
     )
 
 
-def _detail(j: Judgment) -> dict[str, Any]:
+def _detail(j: Judgment, judged: cohorts.Cohort) -> dict[str, Any]:
     return {
         "from": j.champion,
-        **{k: v for k, v in j.as_json().items() if k not in ("champion", "until", "passed", "why")},
+        **{k: v for k, v in j.as_json().items() if k not in ("champion", "until", "review", "passed", "why")},
+        "evaluation": judged.evaluation,
+        "cycle": judged.cycle,
     }
 
 
@@ -761,15 +840,19 @@ def _won(value: float | None) -> str:
 
 def progress(db: sqlite3.Connection, mode: str | None = None) -> dict[str, Any]:
     """``GET /v1/trader``'s policies (#400): the champion's version, the live gate on its record,
-    and the champion and each challenger running with their records and, for a challenger, where it
-    stands against the champion; the records ``mode``'s (None: the mode the trader last started in,
-    #405). Read-only; empty from a store without policies."""
+    and the champion and each challenger with their records and, for a challenger, where it stands
+    against its cohort's champion so far (#473: ``judge_cohort`` on the days of its cycle to now; a
+    figure, not a verdict: it is judged on its cycle's review night alone); the cohort formed last
+    with its verdict (``cohort``, #473); the records ``mode``'s (None: the mode the trader last started
+    in, #405). Read-only; empty from a store without policies."""
     if not _has_table(db, "policies") or not _has_table(db, "champions"):
-        return {"champion": None, "gate": no_gate().as_json(), "policies": []}
+        return {"champion": None, "gate": no_gate().as_json(), "policies": [], "cohort": None}
     current = policies.champion_version(db)
     running = policies.challenger_versions(db)
-    kept = records(db, mode, [*([] if current is None else [current]), *running])
-    judged = {j.challenger: j for j in judge(current, kept, running)} if current is not None else {}
+    running_cohorts = [c for c in cohorts.unjudged(db) if c.champion is not None]
+    against = {c.champion for c in running_cohorts if c.champion is not None}
+    kept = records(db, mode, {*([] if current is None else [current]), *running, *against})
+    judged = {j.challenger: j for c in running_cohorts for j in judge_cohort(c, kept)}
     listed: list[dict[str, Any]] = []
     if current is not None:
         listed.append(
@@ -790,57 +873,86 @@ def progress(db: sqlite3.Connection, mode: str | None = None) -> dict[str, Any]:
                 "promotion": None if found is None else found.as_json(),
             }
         )
+    last = cohorts.latest(db)
+    verdict = None if last is None else cohorts.verdict_of(db, last.evaluation, last.cycle)
     return {
         "champion": current,
         "gate": gate_of(db, current).as_json(),
         "policies": listed,
+        "cohort": None
+        if last is None
+        else {**last.as_json(), "verdict": None if verdict is None else verdict.as_json()},
     }
 
 
+VERDICTS = {
+    cohorts.PROMOTED: "챔피언이 됨",
+    cohorts.PASSED: "통과(하한이 더 큰 정책이 있어 내림)",
+    cohorts.NOT_ABOVE: "하한 ≤ 0",
+    cohorts.UNDECIDED: f"판정 불가(함께 돈 거래일 {PROMOTION_DAYS}일 미만)",
+    cohorts.MISSED: "판정하지 못함(검토 날 밤의 작업이 돌지 않았다)",
+}
+
+
 def report(done: Promotion) -> str:
-    """The night's judgment for the job's output (#400): won and counts, no price."""
-    lines = ["도전 정책 판정 (#400)"]
+    """The night's judgment for the job's output (#400; #473: the cohort judged on a review night):
+    won and counts, no price."""
+    lines = ["도전 정책 판정 (#473: 묶음을 검토 날 밤에 한 번)"]
+    for v in done.missed:
+        lines.append(
+            f"주기 {v.cycle}의 묶음은 검토 날 밤에 판정하지 못해 판정 없이 내렸다(창을 늘리지 않는다): "
+            + (", ".join(f"정책 {m['version']}" for m in v.members) or "도전 정책 없음")
+        )
+    if done.retired:
+        lines.append(
+            "묶음에 들 수 없는 정책을 내렸다(묶음 밖에서 돌던 도전 정책, 평가 버전 전에 맞춘 기다리는 정책): "
+            + ", ".join(f"정책 {v}" for v in done.retired)
+        )
     if done.deferred == MARKET_OPEN:
         lines.append("장중이라 판정하지 않았다: 챔피언은 장이 끝난 뒤에만 바뀐다.")
     elif done.deferred == NO_CHAMPION:
         lines.append("챔피언이 아직 없다(첫 밤 정책 맞추기 전).")
     elif done.deferred == BETWEEN_REVIEWS:
         lines.append(
-            "검토 날이 아니라 판정하지 않았다(#469): 챔피언은 검토 날(20거래일마다) 장이 끝난 뒤에만 바뀐다. "
-            f"다음 검토 날 {done.review}."
+            "검토 날이 아니라 판정하지 않았다(#469): 도전 정책은 묶음으로 검토 날(20거래일마다) 밤에 한 번 "
+            f"판정하고, 챔피언은 그때만 바뀐다. 다음 검토 날 {done.review}."
         )
+    elif done.deferred == NO_COHORT:
+        lines.append(f"검토 날 {done.review}: 이 주기에 돈 도전 정책 묶음이 없다. 챔피언은 그대로다.")
     elif done.deferred == REVIEWED:
-        lines.append(f"검토 날 {done.review}의 판정은 이미 했다: 그 밤에 챔피언이 바뀌었다.")
-    elif not done.judgments:
-        lines.append(f"챔피언 정책 {done.champion}: 도는 도전 정책이 없다.")
-    else:
-        level = done.judgments[0].level
-        lines.append(
-            f"검토 날 {done.review}(#469) · 챔피언 정책 {done.champion} · "
-            f"도전 정책 {len(done.judgments)}개 · "
-            f"하한의 신뢰수준 {level:.2%}(Bonferroni) · 함께 돈 거래일 {PROMOTION_DAYS}일부터 판정, "
-            f"{RETIRE_DAYS}일까지 못 이기면 내린다"
+        lines.append(f"검토 날 {done.review}의 판정은 이미 했다(판정 기록은 바뀌지 않는다).")
+    elif done.cohort is not None and done.verdict is not None:
+        c, v = done.cohort, done.verdict
+        head = (
+            f"검토 날 {done.review}(#469) · 주기 {c.cycle} 묶음({c.first}–{c.review}) · "
+            f"챔피언 정책 {c.champion}"
         )
-        for j in done.judgments:
-            verdict = {None: "통과", FEW_DAYS: "날 수 부족", NOT_ABOVE: "하한 ≤ 0"}[j.why]
-            if j.retires:
-                verdict += f", {j.until}일을 채워 내림"
+        if not done.judgments:
+            lines.append(f"{head}: 묶음에 도전 정책이 없었다. 챔피언은 그대로다.")
+        else:
+            level = "?" if v.level is None else f"{v.level:.2%}"
             lines.append(
-                f"- 정책 {j.challenger}: 함께 돈 거래일 {j.days}일, 날마다 (도전 − 챔피언) 순손익 평균 "
-                f"{_won(j.mean)}, 하한 {_won(j.low)} → {verdict}"
+                f"{head} · 도전 정책 {len(done.judgments)}개 · 하한의 신뢰수준 {level}(묶음 안 Bonferroni) · "
+                f"함께 돈 거래일 {PROMOTION_DAYS}일 미만이면 판정 불가"
             )
-        lines.append(
-            f"→ 정책 {done.promoted}이 챔피언이 됐다(trader가 다음 08:30 고르기부터 쓴다)."
-            if done.promoted is not None
-            else "→ 챔피언은 그대로다."
-        )
+            verdicts = {int(m["version"]): str(m["verdict"]) for m in v.members}
+            for j in done.judgments:
+                lines.append(
+                    f"- 정책 {j.challenger}: 함께 돈 거래일 {j.days}일, 날마다 (도전 − 챔피언) 순손익 평균 "
+                    f"{_won(j.mean)}, 하한 {_won(j.low)} → {VERDICTS[verdicts[j.challenger]]}"
+                )
+            lines.append(
+                f"→ 정책 {done.promoted}이 챔피언이 됐다(trader가 다음 08:30 고르기부터 쓴다)."
+                if done.promoted is not None
+                else "→ 챔피언은 그대로다."
+            )
     if done.dropped:
         lines.append(
-            f"내린 도전 정책({RETIRE_DAYS}일 동안 이기지 못함, 자리를 비운다): "
+            "내린 도전 정책(묶음에서 뽑히지 않음, 다시 돌지 않는다): "
             + ", ".join(f"정책 {v}" for v in done.dropped)
         )
-    for c in done.checked:
-        lines.append(checkpoint_line(c))
+    for point in done.checked:
+        lines.append(checkpoint_line(point))
     g = done.gate
     if g.policy is not None:
         lines.append(gate_line(g))

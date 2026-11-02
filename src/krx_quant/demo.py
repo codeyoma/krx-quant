@@ -142,7 +142,7 @@ from krx_quant.structure_check import DayPrices
 from krx_quant.supply import KIS, NET_MARKET, NXT_OPENED, TOSS, write_supply
 from krx_quant.swap import NightStatus, reports_by_algorithm
 from krx_quant.touch import TARGET_VERSION
-from krx_quant.trader import CAPITAL, PAPER, THRESHOLD
+from krx_quant.trader import CAPITAL, PAPER, THRESHOLD, cohort, review
 from krx_quant.trader import SYMBOL as TRADER_SYMBOL
 from krx_quant.trader import policy as policies
 from krx_quant.trader.limits import Guard
@@ -479,9 +479,10 @@ _DEMO_PAUSE = datetime(2026, 10, 8, 15, 2, 10, tzinfo=KST)
 _DEMO_RESUME = datetime(2026, 10, 12, 8, 41, 0, tzinfo=KST)
 _DEMO_READ = timedelta(milliseconds=400)
 # The trader's policies (#399, #400, made up): version 1 fitted on the 7th's night, the first
-# champion, so the 8th's trade on is its; version 2 fitted on the 8th's night, a challenger given a
-# running slot then, so it runs in paper beside the champion from the 12th (its pick at 08:30). Each
-# trades the top algorithm's 4-minute barrier at its threshold θ (#471: a policy has no Kelly fraction λ).
+# champion, so the 8th's trade on is its; version 2 fitted on the 8th's night, a challenger entered
+# that night into the cohort of a review cycle from the 12th (#473), so it runs in paper beside the
+# champion from the 12th (its pick at 08:30). Each trades the top algorithm's 4-minute barrier at its
+# threshold θ (#471: a policy has no Kelly fraction λ).
 _DEMO_POLICIES = (
     (datetime(2026, 10, 7, 22, 31, 4, tzinfo=KST), THRESHOLD),
     (datetime(2026, 10, 8, 22, 31, 4, tzinfo=KST), 0.65),
@@ -530,9 +531,15 @@ def write_demo_trader(state_dir: Path, books: Sequence[Event]) -> None:
                 policies.add(db, night, _demo_policy_reason(night), [_demo_policy_cell(night, θ)], [], {})
                 for night, θ in _DEMO_POLICIES
             ]
+            (champion, _), (challenger, _) = versions
+            # Its cohort (#473): a cycle from the 12th, judged against policy 1 on its review night.
+            entered = _DEMO_POLICIES[1][0]
+            cycle = review.cycle_of(
+                review.Evaluation(review.EVALUATION, entered, DEMO_DAY), DEMO_DAY, _CALENDAR.session
+            )
+            cohort.form(db, entered, review.EVALUATION, cycle, champion, [challenger])
         finally:
             db.close()
-        (champion, _), (challenger, _) = versions
         champion_from = _DEMO_POLICIES[0][0]
         store.add_run(_DEMO_PAPER_FROM, PAPER, {"demo": True})
         guard = Guard(store, PAPER, rules.limits, _DEMO_PAPER_FROM, lambda text: None)

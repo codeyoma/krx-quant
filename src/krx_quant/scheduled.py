@@ -1685,16 +1685,18 @@ MEMBER_FRAMES_PROBE = Job(
 )
 
 # The trader's night (#399, #400, #402, #393 "정책과 자기 개선", "리포트와 에이전트"): every trading
-# day's night, after the nightly training, ``refit-policy --report`` first judges the challengers that
-# ran in paper beside the champion on the trader's records and promotes one that beat it (#400,
-# ``promotion.promote``; after the market, so never during a session), then reads tonight's cost map
+# day's night, after the nightly training, ``refit-policy --report`` first judges, on a review night
+# alone, the cohort of challengers that ran in paper beside the champion for the cycle, on the
+# trader's records, and promotes one that beat it (#400, #473, ``promotion.promote``; after the
+# market, so never during a session), then reads tonight's cost map
 # from the collector's Engine API (``KRX_TRADER_ENGINE_URL``: compose sets the engine service's own,
 # http://engine:8080), each passing cell's stored predictions and answers of its 20 days from the
 # engine's database (read-only, a cell at a time), simulates the trader's trades on the answers' paths
 # at each point of a small grid and keeps a new policy version in state/trader.sqlite3: the first one
-# the champion, a later one a challenger, which takes a free one of three running slots (it runs from
-# the next trading day) or waits for one; one equal to the champion or a running challenger is not
-# kept, and one not promoted by its 20th common day is dropped (#399, #400, ``refit.py``). Then it
+# the champion (an empty one, on a store without one, before a fit with cells), a later one waiting
+# for the next cohort; one equal to the champion, a running challenger or a policy waiting is not
+# kept. On a review night the night's end forms the next cycle's cohort from the newest three
+# waiting (#399, #400, #473, ``refit.py``, ``cohort.py``). Then it
 # prints the day's report (#402, ``trader/report.py``, read from the same store) above the re-fit's
 # own output: the day's ledger and the champion's trades, why no cell traded when none did, each
 # policy's paper record and judgment, what the night changed, the live gate, the limits, halts and

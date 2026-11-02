@@ -45,24 +45,26 @@ challengers stay in paper. The trader holds no order code: the KIS order calls l
   trader's own rules (#470, ``replay.py``): each cell the cost map names enters at the lowest θ of a
   small grid whose one-share net per signal has a day-level lower bound above 0, Bonferroni over every
   cell and θ judged, and the policy of those cells must replay above 0 too (#472). The first is the
-  champion, the later ones challengers. At each pick the trader trades the champion's cells, in its
+  champion (#473: on a store without one, an empty one is kept before a fit with cells), the later
+  ones wait for a cohort of challengers. At each pick the trader trades the champion's cells, in its
   order, at its θ; before the first champion, nothing (#469).
 - **Frozen version** (``review.py``, #469): the champion's cells (by their predictors' names), their
   order and θ hold from one review to the next; a review falls every 20 trading days of the
   trader's calendar, judged after its close and applied from the next trading day. The nightly
   training goes on within the version, each trade keeping its prediction's model version; the
   evaluation version (2) reads the records and the live gate from its first day alone.
-- **Challengers** (``desk.py``, ``promotion.py``, #400): up to three run in paper beside the
-  champion from the next trading day, each in its own book on the same predictions and quotes,
+- **Challengers** (``desk.py``, ``promotion.py``, ``cohort.py``, #400, #473): up to three enter
+  together as a cohort at the start of a review cycle, the newest waiting first, and run in paper
+  beside the champion for the whole cycle, each in its own book on the same predictions and quotes,
   held by no pause, its size, risk rules and loss limits the champion's, simulated on its own trades
   (#471, ``limits.Simulated``); trades and decisions are split by policy version. The nightly job
-  promotes, on a review night alone (#469), one that beat the champion on at least ten common
-  trading days (the day-level lower
-  bound of challenger − champion net P&L above 0, Bonferroni over the challengers), after the
-  market only. The live gate (#408): judged at checkpoints, every 20th day of the trader's paper
-  history, on the champion of that day and its paper record of 20 days at least, the day-level
-  lower bound of its daily net P&L above 0 at α_k = 0.025 × 6 ÷ (π² k²); a champion that passed
-  stays passed.
+  judges the cohort once, on its cycle's review night, after the market: a member that beat the
+  champion fixed at the cohort's start on at least ten common trading days (the day-level lower
+  bound of challenger − champion net P&L above 0, Bonferroni within the cohort) is crowned, the
+  greatest lower bound first, and every other member dropped; each cohort and verdict is kept. The
+  live gate (#408): judged at checkpoints, every 20th day of the trader's paper history, on the
+  champion of that day and its paper record of 20 days at least, the day-level lower bound of its
+  daily net P&L above 0 at α_k = 0.025 × 6 ÷ (π² k²); a champion that passed stays passed.
 - **Live** (``live.py``, #408): with ``KRX_TRADER_MODE=live`` the champion's book is the KIS book of
   mode ``live`` on the live account (``kis_orders.trader_live_broker``: the live key alone), once the
   live gate and the execution checks on the mock days pass (KIS days compared, no failed order nor

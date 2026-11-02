@@ -2602,13 +2602,14 @@
       }
     },
     "trader_policies": {
-      "description": "GET /v1/trader/policies?limit=N (#399): the trader's last N policy versions, newest first, each with its status, and every change of the champion, newest first, as the trader's store keeps them (state/trader.sqlite3); none before the first nightly fit.",
+      "description": "GET /v1/trader/policies?limit=N (#399): the trader's last N policy versions, newest first, each with its status, every change of the champion, newest first, and every cohort of challengers with its verdict (#473), as the trader's store keeps them (state/trader.sqlite3); none before the first nightly fit.",
       "type": "object",
-      "required": ["champion", "policies", "champions"],
+      "required": ["champion", "policies", "champions", "cohorts"],
       "additionalProperties": false,
       "properties": {
         "champion": {"type": ["integer", "null"], "minimum": 1},
         "policies": {"type": "array", "items": {"$ref": "#/$defs/trader_policy"}},
+        "cohorts": {"description": "#473: every cohort of challengers, the newest first, each with its verdict.", "type": "array", "items": {"$ref": "#/$defs/trader_cohort"}},
         "champions": {
           "type": "array",
           "items": {
@@ -2620,7 +2621,7 @@
               "version": {"type": "integer", "minimum": 1},
               "reason": {"type": "string"},
               "detail": {
-                "description": "A promotion's figures (#400): the champion replaced (from), the common trading days, the mean a day of (challenger - champion) net P&L in won and its lower bound at level (Bonferroni over challengers); null for the first champion.",
+                "description": "A promotion's figures (#400): the champion replaced (from), the common trading days, the mean a day of (challenger - champion) net P&L in won and its lower bound at level (Bonferroni over challengers: since #473 its cohort's members), and (#473) the cohort's evaluation version and review cycle; null for the first champion.",
                 "oneOf": [
                   {"type": "null"},
                   {
@@ -2634,7 +2635,9 @@
                       "mean": {"type": ["number", "null"]},
                       "low": {"type": ["number", "null"]},
                       "level": {"type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1},
-                      "challengers": {"type": "integer", "minimum": 1}
+                      "challengers": {"type": "integer", "minimum": 1},
+                      "evaluation": {"type": "integer", "minimum": 1},
+                      "cycle": {"type": "integer", "minimum": 1}
                     }
                   }
                 ]
@@ -2645,7 +2648,7 @@
       }
     },
     "trader_policy": {
-      "description": "A policy version (#399): the cells it trades, first ranked first, each with its threshold (and its Kelly fraction, a policy fitted before #471 alone: not read since) and what it was fitted on; the cells the cost map named (#472; before it, those it passed) that it left out, and why; what it was fitted on (the cost map, the grid, the recorded days replayed (#470), the replayed result, the run). It holds no limit: those come from the code and the server's .env alone. status (#400): champion now, former once, dropped (a challenger dropped at dropped_at, unpromoted by its 20th common day), challenger (in one of the three running slots since admitted_at), else waiting (kept while the slots were full, admitted when one frees, the newest first); paper: its paper record.",
+      "description": "A policy version (#399): the cells it trades, first ranked first, each with its threshold (and its Kelly fraction, a policy fitted before #471 alone: not read since) and what it was fitted on; the cells the cost map named (#472; before it, those it passed) that it left out, and why; what it was fitted on (the cost map, the grid, the recorded days replayed (#470), the replayed result, the run). It holds no limit: those come from the code and the server's .env alone. status (#400; #473): champion now, former once, dropped (at dropped_at: a cohort's member not crowned at its review, or a policy waiting that a cohort did not take; before #473, a challenger unpromoted by its 20th common day), challenger (a member, since admitted_at, of the cohort not judged yet), else waiting (kept, waiting for the next cohort, formed on a review night from the newest); paper: its paper record.",
       "type": "object",
       "required": ["version", "status", "created_at", "reason", "cells", "left_out", "fit", "admitted_at", "dropped_at",
                    "paper"],
@@ -2900,7 +2903,7 @@
       "type": "object",
       "required": ["updated_at", "alive", "mode", "status", "started_at", "capital", "cash", "position", "today",
                    "cumulative", "limits", "pause", "live", "practice", "controls", "champion", "gate", "policies",
-                   "cycle"],
+                   "cycle", "cohort"],
       "additionalProperties": false,
       "properties": {
         "updated_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]},
@@ -3063,6 +3066,67 @@
               "promotion": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/trader_promotion"}]}
             }
           }
+        },
+        "cohort": {
+          "description": "#473: the challengers' cohort formed last (the one running, or on a review night the one just judged before the next is formed), with its verdict (null until judged); null before the first.",
+          "oneOf": [{"type": "null"}, {"$ref": "#/$defs/trader_cohort"}]
+        }
+      }
+    },
+    "trader_cohort": {
+      "description": "A cohort of challengers (#473): formed at the start of review cycle cycle of evaluation version evaluation (formed_at), its members (versions, the newest first, at most three) run in paper from the cycle's first trading day (start) to its review day (review), judged once after that day's close against the champion fixed when it was formed (champion). passed_over: the policies waiting it did not take, dropped then, each with why (older: three newer were taken; champion_values; alike: a newer one's values; unreadable; earlier_evaluation: kept before the evaluation version began). verdict: its one judgment, kept as judged; null until then.",
+      "type": "object",
+      "required": ["evaluation", "cycle", "formed_at", "start", "review", "champion", "members", "passed_over", "verdict"],
+      "additionalProperties": false,
+      "properties": {
+        "evaluation": {"type": "integer", "minimum": 1},
+        "cycle": {"type": "integer", "minimum": 1},
+        "formed_at": {"$ref": "#/$defs/time"},
+        "start": {"$ref": "#/$defs/day"},
+        "review": {"$ref": "#/$defs/day"},
+        "champion": {"type": ["integer", "null"], "minimum": 1},
+        "members": {"type": "array", "maxItems": 3, "items": {"type": "integer", "minimum": 1}},
+        "passed_over": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["version", "why"],
+            "additionalProperties": false,
+            "properties": {
+              "version": {"type": "integer", "minimum": 1},
+              "why": {"enum": ["older", "champion_values", "alike", "unreadable", "earlier_evaluation"]}
+            }
+          }
+        },
+        "verdict": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/trader_cohort_verdict"}]}
+      }
+    },
+    "trader_cohort_verdict": {
+      "description": "A cohort's verdict (#473), written once on its review night and never changed: when (judged_at), the champion it was judged against, the outcome (promoted: a member crowned, promoted; kept: none passed; missed: the review night's job did not run, so it was closed unjudged on a later night, its window not stretched), each lower bound's two-sided level (1 - 0.05 / members, Bonferroni within the cohort; null when missed or empty), and each member's common trading days in the cycle with the champion (no-trade days and days a loss limit stopped either counted, days the champion was paused not), the mean a day of (member - champion) net P&L in won and its lower bound (null when missed), and its verdict: promoted, passed (but another's lower bound was greater), not_above (lower bound at or below 0), undecided (fewer than 10 common days), missed.",
+      "type": "object",
+      "required": ["judged_at", "champion", "outcome", "promoted", "level", "members"],
+      "additionalProperties": false,
+      "properties": {
+        "judged_at": {"$ref": "#/$defs/time"},
+        "champion": {"type": ["integer", "null"], "minimum": 1},
+        "outcome": {"enum": ["promoted", "kept", "missed"]},
+        "promoted": {"type": ["integer", "null"], "minimum": 1},
+        "level": {"type": ["number", "null"], "exclusiveMinimum": 0, "exclusiveMaximum": 1},
+        "members": {
+          "type": "array",
+          "maxItems": 3,
+          "items": {
+            "type": "object",
+            "required": ["version", "days", "mean", "low", "verdict"],
+            "additionalProperties": false,
+            "properties": {
+              "version": {"type": "integer", "minimum": 1},
+              "days": {"type": ["integer", "null"], "minimum": 0},
+              "mean": {"type": ["number", "null"]},
+              "low": {"type": ["number", "null"]},
+              "verdict": {"enum": ["promoted", "passed", "not_above", "undecided", "missed"]}
+            }
+          }
         }
       }
     },
@@ -3196,15 +3260,16 @@
       }
     },
     "trader_promotion": {
-      "description": "A challenger against the champion (#400): their common trading days (both ran, the champion not stopped), the mean a day of (challenger - champion) net P&L in won and its lower bound at level (two-sided, Bonferroni over the challengers running); passed when the days reach required (10) and the lower bound is above 0, else why (few_days, not_above). It is promoted only after the market; one not promoted by its until-th (20) common day is dropped that night.",
+      "description": "A challenger against its cohort's champion (#400, #473): their common trading days of its review cycle so far (both ran, the champion not paused; no-trade days and days a loss limit stopped either counted), the mean a day of (challenger - champion) net P&L in won and its lower bound at level (two-sided, Bonferroni over its cohort's members, challengers); passed when the days reach required (10) and the lower bound is above 0, else why (few_days, not_above). A figure until its cohort's review night (review, the cycle's until-th (20) trading day), which judges it once, after its close: then the one that passes with the greatest lower bound is crowned, every other dropped (few_days then: undecided).",
       "type": "object",
-      "required": ["champion", "days", "required", "until", "mean", "low", "level", "challengers", "passed", "why"],
+      "required": ["champion", "days", "required", "until", "review", "mean", "low", "level", "challengers", "passed", "why"],
       "additionalProperties": false,
       "properties": {
         "champion": {"type": "integer", "minimum": 1},
         "days": {"type": "integer", "minimum": 0},
         "required": {"type": "integer", "minimum": 1},
         "until": {"type": "integer", "minimum": 1},
+        "review": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/day"}]},
         "mean": {"type": ["number", "null"]},
         "low": {"type": ["number", "null"]},
         "level": {"type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1},

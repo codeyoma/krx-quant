@@ -40,8 +40,13 @@ by the nightly re-fit (#399, from the engine's container).
   ``promotion.py``); a pick and a trade carry the policy version they were made under
   (``policy_id``; null before the first champion), a trade whether the champion's book made it
   (``champion``, #400: ``CHAMPION_TRADE``);
+- ``cohorts``, ``cohort_members`` and ``cohort_verdicts`` (#473, ``cohort.py``): each cohort of
+  challengers as formed at a review cycle's start (its cycle, window, champion, members and the
+  policies it passed over) and its one verdict (when, the outcome, the member crowned, the level and
+  each member's figures), written by the nightly job, never changed;
 - ``policy_days`` (#400): each trading day a policy ran in the trader (its paper record's days),
-  whether it was the champion and, if so, stopped in the session;
+  whether it was the champion and, if so, stopped in the session (#473: by a pause or a failed
+  order, not a loss limit);
 - ``controls`` (#396): each pause, resume and re-arm asked for, by whom (``api``: the screen's
   pause through the Engine API; ``cli``: ``krx-quant trade resume|rearm`` on the server), and when
   the trader read it (null until it has: it reads them every ``CONTROL_SECONDS``);
@@ -1788,13 +1793,15 @@ def read_trader(
     """``GET /v1/trader`` (#396): the trader's state as it last wrote it, whether it is running
     (that state at most ``ALIVE_SECONDS`` old at ``now``), and the last controls asked for, newest
     first (those not read yet with ``applied_at`` null); the champion, the live gate on its record
-    and the policies running with theirs (#400, ``promotion.progress``), in the mode it runs in
-    (#405); the review cycle in force and its evaluation version (#469, ``review.state``), counted on
-    ``sessions`` (the engine's market calendar; by default one that guesses the weekdays trade). Its
-    fields null without a store (an engine without a state folder, a trader not started yet)."""
+    and the policies running with theirs (#400, ``promotion.progress``; #473: the cohort formed
+    last, with its verdict), in the mode it runs in (#405); the review cycle in force and its
+    evaluation version (#469, ``review.state``), counted on ``sessions`` (the engine's market
+    calendar; by default one that guesses the weekdays trade). Its fields null without a store (an
+    engine without a state folder, a trader not started yet)."""
     body: dict[str, Any] = dict.fromkeys(TRADER_FIELDS)
     body |= {"updated_at": None, "alive": False, "controls": []}
-    body |= {"champion": None, "gate": promotion.no_gate().as_json(), "policies": [], "cycle": None}
+    body |= {"champion": None, "gate": promotion.no_gate().as_json(), "policies": [], "cohort": None}
+    body["cycle"] = None
     if path is None:
         return body
     with _reading(path) as db:

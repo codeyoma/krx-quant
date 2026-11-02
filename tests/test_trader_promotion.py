@@ -1,6 +1,7 @@
 """The promotion of a challenger and the live gate (#400, #393 "정책과 자기 개선", "실전 관문"; #408:
-the gate's checkpoints): worked by hand, on paper records as the trader keeps them (``policy_days``
-and its trades), and the gate's false-pass rate simulated.
+the gate's checkpoints; #473: a cohort judged once, on its review night): worked by hand, on paper
+records as the trader keeps them (``policy_days`` and its trades), and the false-pass rates of the
+gate and of the promotion simulated. ``tests/test_trader_cohort.py`` has the cohorts themselves.
 
 The t quantiles used (``stats._t_quantile``): 2.262157 at 0.975 with 9 degrees of freedom (ten
 days, 95% two-sided), 2.933324 at 1 − 0.05 ÷ 6 with 9 (ten days, Bonferroni over three
@@ -47,7 +48,7 @@ from krx_quant.trader.promotion import (
     pick,
     promote,
 )
-from krx_quant.trader.refit import admit_now, promote_now
+from krx_quant.trader.refit import form_now, promote_now
 from krx_quant.trader.store import DB_NAME, TraderStore
 from tests.trader_doubles import (
     BARRIER,
@@ -57,6 +58,7 @@ from tests.trader_doubles import (
     Read,
     Repick,
     at,
+    enter,
     keep,
     policy_cell,
     quote,
@@ -132,11 +134,23 @@ def test_a_challenger_passing_alone_fails_once_bonferroni_counts_three() -> None
     assert (corrected.passed, corrected.why) == (False, NOT_ABOVE)
 
 
-def test_a_day_the_champion_was_stopped_is_not_a_common_day() -> None:
+def test_a_day_the_champion_was_paused_is_not_a_common_day() -> None:
+    """``stopped``: a pause (or a failed order) held the champion that day (#473: not a loss limit,
+    ``desk.Desk.record``). Nine common days: fewer than ten, undecided at the review."""
     champion = record(1, [0.0] * 10, champion=True, stopped=[WEEKDAYS[3]])
     [judged] = judge(1, {1: champion, 2: record(2, [1_000.0] * 10)}, [2])
 
-    assert (judged.days, judged.why) == (9, FEW_DAYS)
+    assert (judged.days, judged.why, judged.verdict) == (9, FEW_DAYS, "undecided")
+
+
+def test_only_the_days_of_the_cohort_s_cycle_are_common() -> None:
+    """#473: a cohort's member is judged on its cycle's days alone (``window``): never on more."""
+    champion = record(1, [0.0] * 12, champion=True)
+    challenger = record(2, [1_000.0] * 12)
+
+    [judged] = judge(1, {1: champion, 2: challenger}, [2], (WEEKDAYS[2], WEEKDAYS[11]))
+
+    assert (judged.days, judged.low) == (10, 1_000.0)
 
 
 # Twenty days: twelve of +2,000, four of −1,000 and four without a trade (0).
@@ -230,21 +244,25 @@ def lifetime_false_passes(paths: int, horizon: int, seed: int) -> tuple[float, f
     net P&L normal, mean 0, deviation 1,000 won, independent, a fixed seed) that the gate passes
     within ``horizon`` days, the promotion and the checkpoints run together as the night's job runs
     them (``promote``): first testing the champion on its days as the champion (``champion_days``),
-    then on its whole record (the gate before #425's review). Each day the champion and the
-    challengers running (at most three) trade; on a checkpoint's day the gate tests the champion of
-    that day. Then ``judge`` and ``pick`` promote one from its tenth common day, those reaching their
-    twentieth unpromoted are dropped (``Judgment.retires``), and each free slot takes a new policy,
-    as a fit comes every night. The promotion never reads the gate, so both gates are tested on the
-    same traders."""
+    then on its whole record (the gate before #425's review). A cohort of three challengers runs
+    beside the champion for each review cycle of 20 days (#473); on the cycle's last day the gate
+    tests the champion of that day, then ``judge`` and ``pick`` judge the cohort once on its 20 days
+    and crown one, and a new cohort of three enters. The promotion never reads the gate, so both
+    gates are tested on the same traders."""
     rng = random.Random(seed)
     days = [date(2026, 1, 1) + timedelta(days=t) for t in range(horizon)]
     slots = 3
     own = whole = 0
     for _ in range(paths):
         ran: dict[int, list[PolicyDay]] = {1: []}
-        champion, running, newest = 1, list[int](), 1
+        champion, newest = 1, 1
+        running: list[int] = []
         passed = [False, False]  # on its days as the champion, on its whole record
         for n, day in enumerate(days, 1):
+            if (n - 1) % CHECKPOINT_DAYS == 0:  # a cycle's first day: a new cohort
+                running = list(range(newest + 1, newest + 1 + slots))
+                newest += slots
+                ran |= {v: [] for v in running}
             for version in (champion, *running):
                 ran[version].append(PolicyDay(day, rng.gauss(0.0, 1_000.0), 1, version == champion, False))
             if n % CHECKPOINT_DAYS == 0:
@@ -253,20 +271,11 @@ def lifetime_false_passes(paths: int, horizon: int, seed: int) -> tuple[float, f
                     passed[i] = passed[i] or passes([d.net for d in tested], n // CHECKPOINT_DAYS)
                 if all(passed):
                     break
-            # The night. The champion's record from the oldest challenger's first day holds all
-            # their common days (its days are one a calendar day, so the first is found by count).
-            first = min((ran[v][0].day for v in running), default=day)
-            since = max(0, (first - ran[champion][0].day).days)
-            kept = {v: Record(v, tuple(ran[v])) for v in running}
-            kept[champion] = Record(champion, tuple(ran[champion][since:]))
-            judgments = judge(champion, kept, running)
-            best = pick(judgments)
-            champion = champion if best is None else best.challenger
-            running = [j.challenger for j in judgments if j.challenger != champion and not j.retires]
-            while len(running) < slots:
-                newest += 1
-                ran[newest] = []
-                running.append(newest)
+                # The review night: the cohort on its cycle's 20 days, once.
+                kept = {v: Record(v, tuple(ran[v])) for v in running}
+                kept[champion] = Record(champion, tuple(ran[champion][-CHECKPOINT_DAYS:]))
+                best = pick(judge(champion, kept, running))
+                champion = champion if best is None else best.challenger
         own += passed[0]
         whole += passed[1]
     return own / paths, whole / paths
@@ -275,14 +284,41 @@ def lifetime_false_passes(paths: int, horizon: int, seed: int) -> tuple[float, f
 @pytest.mark.timeout(300)
 def test_without_an_edge_promotion_and_checkpoints_together_pass_at_most_two_and_a_half_percent() -> None:
     """#425's review: a promoted champion's days as a challenger are the ones ``judge`` picked it
-    on, so the gate tests only its days as the champion. Three zero-edge challengers at a time
-    against the champion, the promotion every night and the checkpoints, over a trader's year (250
-    trading days, 3,000 traders, a fixed seed): 1.9% pass by chance, at most 2.5% (the sampling
-    error ±0.25%). Tested on their whole record, as the gate was before the review, the same
-    traders pass 2.6% of the time. Over 16,000 other traders: 2.0% and 2.7%."""
+    on, so the gate tests only its days as the champion. A cohort of three zero-edge challengers a
+    review cycle against the champion (#473), judged once on its review night, and the checkpoints,
+    over a trader's year (250 trading days, 3,000 traders, a fixed seed): 2.1% pass by chance on the
+    champion's own days, at most 2.5% (the sampling error ±0.25%), and 2.6% on its whole record; over
+    16,000 other traders 1.8% and 2.45%. (With #400's nightly looks from the tenth common day: 1.9%
+    and 2.6%, and 2.0% and 2.7%.)"""
     own, whole = lifetime_false_passes(3_000, 250, seed=425)
     assert own <= 0.025
-    assert whole > 0.025, "the whole record's selection bias the review found"
+    assert whole >= own, "the whole record holds the days the cohort's judgment picked it on"
+
+
+def false_promotions(paths: int, seed: int, nightly: bool = False) -> float:
+    """The share of ``paths`` review cycles in which a cohort of three zero-edge challengers (each
+    day's (challenger − champion) net P&L 1,000 won × t4, mean 0, a fixed seed) has one promoted:
+    judged once on its 20 days (#473), or looked at every night from the tenth common day to the
+    20th (#400's rule, the Bonferroni over the three alike)."""
+    rng = random.Random(seed)
+    level = bonferroni(3)
+    promoted = 0
+    for _ in range(paths):
+        diffs = [[1_000.0 * t4(rng) for _ in range(20)] for _ in range(3)]
+        looks = range(10, 21) if nightly else (20,)
+        lows = (lower_bound(d[:n], level) for n in looks for d in diffs)
+        promoted += any(low is not None and low > 0 for low in lows)
+    return promoted / paths
+
+
+def test_judged_once_a_cohort_without_an_edge_is_promoted_at_most_two_and_a_half_percent() -> None:
+    """#473 (spec #468 5: Bonferroni within the cohort, no repeated looks): a cohort of three
+    zero-edge challengers judged once on its review night has one promoted by chance in at most
+    2.5% of the cycles (each side 0.05 ÷ 6, three of them: 2.5%): 2.2% of 10,000 cycles of
+    heavy-tailed t4 days (a fixed seed; 1.9–2.1% of 10,000 with three others). Looked at every night
+    from the tenth day to the 20th, as #400 judged, 6.3% were."""
+    assert false_promotions(10_000, seed=473) <= 0.025
+    assert false_promotions(10_000, seed=473, nightly=True) > 0.05, "the repeated looks it replaces"
 
 
 # The records as the trader keeps them.
@@ -296,12 +332,15 @@ COLUMNS = (
 )
 
 
-def ran(state: Path, version: int, nets: Sequence[float], champion: bool = False) -> None:
-    """``version`` ran on the first weekdays, one each of ``nets``: a trade of that net P&L on the
-    days it is not 0, none on the others (as the trader writes them: a day's row and its trades)."""
+def ran(
+    state: Path, version: int, nets: Sequence[float], champion: bool = False, days: Sequence[date] = WEEKDAYS
+) -> None:
+    """``version`` ran on the first of ``days`` (the weekdays from 09-01), one each of ``nets``: a
+    trade of that net P&L on the days it is not 0, none on the others (as the trader writes them: a
+    day's row and its trades)."""
     store = TraderStore(state / DB_NAME)
     try:
-        for day, net in zip(WEEKDAYS, nets, strict=False):
+        for day, net in zip(days, nets, strict=False):
             store.put_policy_day("paper", version, day, champion, False, at(f"{day} 10:00:00"))
             if net:
                 entry = datetime.combine(day, time(10), KST)
@@ -332,15 +371,20 @@ def ran(state: Path, version: int, nets: Sequence[float], champion: bool = False
         store.close()
 
 
-def setup(state: Path, *challengers: Sequence[float]) -> None:
-    """Policy 1 the champion, without a trade on the first ten weekdays; a challenger for each of
-    ``challengers``, its nets on those days."""
-    keep(state, at("2026-08-31 22:31:00"), policy_cell(BARRIER, 0.8))
-    for n, _ in enumerate(challengers):
-        keep(state, at("2026-08-31 22:32:00"), policy_cell(BARRIER, 0.6 - n / 100))
-    ran(state, 1, [0.0] * 10, champion=True)
+def setup(state: Path, *challengers: Sequence[float], days: Sequence[date] = WEEKDAYS) -> None:
+    """Policy 1 the champion, without a trade on the first ten of ``days`` (the weekdays from 09-01);
+    a challenger for each of ``challengers``, its nets on those days, all entered the night before
+    the first as the cohort of the review cycle in force then (#473, ``enter``)."""
+    night = datetime.combine(days[0] - timedelta(days=1), time(22, 31), KST)
+    keep(state, night, policy_cell(BARRIER, 0.8))
+    versions = [
+        keep(state, night + timedelta(minutes=1), policy_cell(BARRIER, 0.6 - n / 100))
+        for n, _ in enumerate(challengers)
+    ]
+    enter(state, night + timedelta(minutes=2), *versions)
+    ran(state, 1, [0.0] * 10, champion=True, days=days)
     for version, nets in enumerate(challengers, start=2):
-        ran(state, version, nets)
+        ran(state, version, nets, days=days)
 
 
 def begun(state: Path, first: date) -> None:
@@ -377,13 +421,13 @@ def test_the_records_hold_a_day_without_a_trade_as_zero(tmp_path: Path) -> None:
 
 
 def test_the_champion_never_changes_during_the_market(tmp_path: Path) -> None:
-    """Policy 2 beats the champion on ten days (+1,000 each). The test day (10-14) is a review day,
-    the 40th weekday from 08-20 (#469). Judged at 10:00 of it, or at 08:30, when the trader reads the
-    day's champion, nothing is judged or written; at the end of the closing auction (15:30) it is
-    promoted. The trader running that day keeps policy 1 until its next pick, from which the
-    champion's book trades under policy 2."""
-    begun(tmp_path, date(2026, 8, 20))
-    setup(tmp_path, [1_000.0] * 10)
+    """Policy 2 beats the champion on ten days (+1,000 each) of the cycle from 09-17, whose review
+    day is the test day (10-14, its 20th weekday, #469). Judged at 10:00 of it, or at 08:30, when the
+    trader reads the day's champion, nothing is judged or written; at the end of the closing auction
+    (15:30) it is promoted. The trader running that day keeps policy 1 until its next pick, from which
+    the champion's book trades under policy 2."""
+    begun(tmp_path, date(2026, 9, 17))
+    setup(tmp_path, [1_000.0] * 10, days=[d for d in LONG if d >= date(2026, 9, 30)])
 
     for moment in ("08:30:00", "10:00:00", "15:29:59"):
         done = judged_at(tmp_path, at(moment))
@@ -434,7 +478,8 @@ def test_a_holiday_or_a_night_judges_and_keeps_the_promotion_with_its_figures(tm
     change = found["champions"][0]
     assert change["version"] == 2
     assert change["reason"].startswith(
-        "도전 정책 2이 챔피언 정책 1을 모의로 이겼다(#400): 함께 돈 거래일 10일"
+        "도전 정책 2이 챔피언 정책 1을 모의로 이겼다(#473): 주기 1 묶음의 검토 날 2026-09-25, "
+        "함께 돈 거래일 10일"
     )
     assert change["detail"] == {
         "from": 1,
@@ -444,6 +489,8 @@ def test_a_holiday_or_a_night_judges_and_keeps_the_promotion_with_its_figures(tm
         "low": pytest.approx(63.35, abs=0.01),
         "level": 0.95,
         "challengers": 1,
+        "evaluation": 2,
+        "cycle": 1,
     }
     assert found["policies"][0]["paper"]["days"] == 10
     with closing(sqlite3.connect(tmp_path / DB_NAME)) as db:
@@ -458,35 +505,6 @@ def test_of_several_passing_the_greatest_lower_bound_is_promoted(tmp_path: Path)
     assert [(j.challenger, j.passed) for j in done.judgments] == [(2, True), (3, True), (4, False)]
     assert done.judgments[0].level == pytest.approx(1 - 0.05 / 3)
     assert done.promoted == 3
-
-
-def test_three_slots_the_newest_waiting_first_and_a_dropped_one_never_back(tmp_path: Path) -> None:
-    """Policies 2, 3 and 4 take the slots; 5 and 6 wait. Policy 4 promoted, the newest waiting (6)
-    takes its slot; policy 2 dropped, 5 takes its. A dropped one never runs again."""
-    for night in range(6):
-        keep(tmp_path, at("22:31:00") + timedelta(days=night), policy_cell(BARRIER, 0.4 + night / 100))
-
-    with closing(sqlite3.connect(tmp_path / DB_NAME)) as db:
-        assert (policies.challenger_versions(db), policies.waiting_versions(db)) == ([2, 3, 4], [6, 5])
-        assert policies.crown(db, at("2026-10-20 15:31:00"), 4, "test", {})
-        assert policies.challenger_versions(db) == [2, 3]
-        assert policies.admit(db, at("2026-10-20 22:40:00")) == [6]
-        policies.drop(db, at("2026-10-21 22:40:00"), [2])
-        assert policies.admit(db, at("2026-10-21 22:41:00")) == [5]
-        assert (policies.challenger_versions(db), policies.waiting_versions(db)) == ([3, 5, 6], [])
-        assert policies.admit(db, at("2026-10-22 22:41:00")) == [], "no slot free"
-    found = {
-        p["version"]: (p["status"], p["admitted_at"], p["dropped_at"])
-        for p in policies.read_policies(tmp_path / DB_NAME, 10)["policies"]
-    }
-    assert found == {
-        6: ("challenger", "2026-10-20T22:40:00+09:00", None),
-        5: ("challenger", "2026-10-21T22:41:00+09:00", None),
-        4: ("champion", "2026-10-17T22:31:00+09:00", None),
-        3: ("challenger", "2026-10-16T22:31:00+09:00", None),
-        2: ("dropped", "2026-10-15T22:31:00+09:00", "2026-10-21T22:40:00+09:00"),
-        1: ("former", None, None),
-    }
 
 
 def day_ran(state: Path, version: int, day: date, net: float, champion: bool) -> None:
@@ -519,40 +537,45 @@ def ran_trade(state: Path, version: int, day: date, net: float, champion: bool) 
         store.close()
 
 
-def test_a_challenger_better_from_its_tenth_day_is_promoted_on_the_review_night_alone(
-    tmp_path: Path,
-) -> None:
-    """Policy 1 the champion (no trade), policy 2 a challenger making 1,000 won a day. Every night a
-    new fit comes: 3 and 4 take the last slots, the later ones wait. Policy 2 beats the champion from
-    its tenth day, but the champion's version is frozen between reviews (#469): every night before
-    the review day (the 20th weekday from 09-01) leaves the champion, its cells, their order and θ as
-    they were; the review night promotes policy 2, and that night's fit takes its slot."""
+def test_twenty_nights_of_fits_wait_and_the_review_night_judges_the_cohort_once(tmp_path: Path) -> None:
+    """Policy 1 the champion (no trade); policies 2 and 3 enter as the cohort of the cycle from 09-01
+    (#473), policy 2 making 1,000 won a day. Every night a new fit comes and waits: nothing judges,
+    crowns, drops or enters during the cycle, though policy 2 beats the champion from its tenth day,
+    and the champion's cells, their order and θ stay as they were (#469). The review night (its 20th
+    weekday) judges the cohort once: policy 2 is crowned, policy 3 dropped; at the night's end the
+    three newest fits enter as the next cycle's cohort, the older ones dropped (#473)."""
     keep(tmp_path, at("2026-08-31 22:31:00"), policy_cell(BARRIER, 0.8), policy_cell(FIFTEEN, 0.7))
     keep(tmp_path, at("2026-08-31 22:32:00"), policy_cell(BARRIER, 0.6))
+    keep(tmp_path, at("2026-08-31 22:32:30"), policy_cell(BARRIER, 0.59))
+    enter(tmp_path, at("2026-08-31 22:33:00"), 3, 2)
     frozen = values_now(tmp_path)
-    promoted_on: list[tuple[int, int | None, str | None]] = []
+    nights: list[tuple[int, int | None, str | None]] = []
     for n, day in enumerate(WEEKDAYS[:20]):
         db = policies.connect(tmp_path / DB_NAME)
         try:
             champion, running = policies.champion_version(db), policies.running_versions(db, day)
         finally:
             db.close()
-        assert champion is not None
-        day_ran(tmp_path, champion, day, 0.0, champion=True)
+        assert (champion, running) == (1, [2, 3]), f"day {n + 1}: the cohort of the cycle"
+        day_ran(tmp_path, 1, day, 0.0, champion=True)
         for version in running:
             day_ran(tmp_path, version, day, 1_000.0 if version == 2 else 0.0, champion=False)
         night = datetime.combine(day, time(22, 31), KST)
         done = judged_at(tmp_path, night)
-        promoted_on.append((n + 1, done.promoted, done.deferred))
+        nights.append((n + 1, done.promoted, done.deferred))
         if done.promoted is None:
             assert values_now(tmp_path) == frozen, f"night {n + 1}: the champion's version is frozen"
+            assert done.verdict is None and done.dropped == ()
         keep(tmp_path, night + timedelta(minutes=1), policy_cell(BARRIER, 0.5 - n / 100))
+        form_now(tmp_path / DB_NAME, CALENDAR.session, night + timedelta(minutes=2))
 
-    assert promoted_on == [(n, None, BETWEEN_REVIEWS) for n in range(1, 20)] + [(20, 2, None)]
+    assert nights == [(n, None, BETWEEN_REVIEWS) for n in range(1, 20)] + [(20, 2, None)]
+    assert done.verdict is not None and (done.verdict.outcome, done.dropped) == ("promoted", (3,))
     with closing(sqlite3.connect(tmp_path / DB_NAME)) as db:
         assert policies.champion_version(db) == 2
-        assert policies.challenger_versions(db) == [3, 4, 22], "tonight's fit takes the freed slot"
-        assert policies.waiting_versions(db) == list(range(21, 4, -1))
+        assert policies.challenger_versions(db) == [21, 22, 23], "the next cycle's cohort: the newest three"
+        assert policies.waiting_versions(db) == [], "the older fits are dropped: newer ones replaced them"
+        assert policies.running_versions(db, WEEKDAYS[20]) == [21, 22, 23]
 
 
 def values_now(state: Path) -> tuple[int | None, tuple[tuple[str, str, float], ...]]:
@@ -565,46 +588,32 @@ def values_now(state: Path) -> tuple[int | None, tuple[tuple[str, str, float], .
     return (None, ()) if found is None else (found.version, policies.values(found.cells))
 
 
-def test_a_challenger_not_promoted_by_its_twentieth_day_is_dropped_and_the_newest_waiting_enters(
+def test_every_member_not_crowned_is_dropped_and_one_short_of_days_is_undecided(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Policy 2 no better than the champion for twenty common days: dropped; 3 and 4, five days
-    each, stay. At the night's end the newest waiting policy (6) takes the slot, not 5."""
-    keep(tmp_path, at("2026-08-31 22:31:00"), policy_cell(BARRIER, 0.8))
-    for n in range(5):
-        keep(tmp_path, at("2026-08-31 22:32:00"), policy_cell(BARRIER, 0.6 - n / 100))
+    """Policy 2 no better than the champion on twenty days (``not_above``); 3 and 4 ran five days each
+    (the trader down, say): undecided (#473: 판정 불가). The review night drops all three; the night
+    before judged none."""
+    setup(tmp_path, [0.0] * 20, [0.0] * 5, [0.0] * 5)
     ran(tmp_path, 1, [0.0] * 20, champion=True)
-    ran(tmp_path, 2, [0.0] * 20)
-    ran(tmp_path, 3, [0.0] * 5)
-    ran(tmp_path, 4, [0.0] * 5)
 
-    early = judged_at(tmp_path, night(WEEKDAYS[18]))  # #469: not dropped between reviews
+    early = judged_at(tmp_path, night(WEEKDAYS[18]))  # not between reviews (#469, #473)
     done = judged_at(tmp_path, night(WEEKDAYS[19]))  # the review night
-    admit_now(tmp_path / DB_NAME, night(WEEKDAYS[19]) + timedelta(minutes=4))
 
-    assert (early.deferred, early.judgments, early.dropped) == (BETWEEN_REVIEWS, (), ())
-
-    assert [(j.challenger, j.days, j.why, j.retires) for j in done.judgments] == [
-        (2, 20, NOT_ABOVE, True),
-        (3, 5, FEW_DAYS, False),
-        (4, 5, FEW_DAYS, False),
+    assert (early.deferred, early.judgments, early.dropped, early.verdict) == (BETWEEN_REVIEWS, (), (), None)
+    assert [(j.challenger, j.days, j.why, j.verdict) for j in done.judgments] == [
+        (2, 20, NOT_ABOVE, "not_above"),
+        (3, 5, FEW_DAYS, "undecided"),
+        (4, 5, FEW_DAYS, "undecided"),
     ]
-    assert (done.promoted, done.dropped) == (None, (2,))
+    assert (done.promoted, done.dropped) == (None, (2, 3, 4))
     with closing(sqlite3.connect(tmp_path / DB_NAME)) as db:
-        assert (policies.challenger_versions(db), policies.waiting_versions(db)) == ([3, 4, 6], [5])
-    assert "빈 자리에 들어간 정책(다음 거래일부터 돈다): 정책 6" in capsys.readouterr().out
-    assert "내린 도전 정책(20일 동안 이기지 못함, 자리를 비운다): 정책 2" in promotion.report(done)
-
-
-def test_a_challenger_runs_on_the_days_after_the_pick_it_was_kept_before(tmp_path: Path) -> None:
-    keep(tmp_path, at("2026-10-13 22:31:00"), policy_cell(BARRIER))  # the champion
-    keep(tmp_path, at("2026-10-13 22:31:00"), policy_cell(BARRIER))
-    keep(tmp_path, at("08:29:59"), policy_cell(BARRIER))
-    keep(tmp_path, at("08:30:00"), policy_cell(BARRIER))
-
-    with closing(sqlite3.connect(tmp_path / DB_NAME)) as db:
-        assert policies.running_versions(db, date(2026, 10, 14)) == [2, 3]
-        assert policies.running_versions(db, date(2026, 10, 15)) == [2, 3, 4]
+        assert policies.challenger_versions(db) == []
+    text = promotion.report(done)
+    assert (
+        "- 정책 3: 함께 돈 거래일 5일, 날마다 (도전 − 챔피언) 순손익 평균 +0원, 하한 +0원 → 판정 불가" in text
+    )
+    assert "내린 도전 정책(묶음에서 뽑히지 않음, 다시 돌지 않는다): 정책 2, 정책 3, 정책 4" in text
 
 
 def test_the_night_s_report_has_no_price(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -615,19 +624,22 @@ def test_the_night_s_report_has_no_price(tmp_path: Path, capsys: pytest.CaptureF
     promote_now(tmp_path / DB_NAME, CALENDAR.session, night(WEEKDAYS[19]))
 
     assert between.splitlines()[:2] == [
-        "도전 정책 판정 (#400)",
-        "검토 날이 아니라 판정하지 않았다(#469): 챔피언은 검토 날(20거래일마다) 장이 끝난 뒤에만 바뀐다. "
-        "다음 검토 날 2026-09-28.",
+        "도전 정책 판정 (#473: 묶음을 검토 날 밤에 한 번)",
+        "검토 날이 아니라 판정하지 않았다(#469): 도전 정책은 묶음으로 검토 날(20거래일마다) 밤에 한 번 "
+        "판정하고, 챔피언은 그때만 바뀐다. 다음 검토 날 2026-09-28.",
     ]
     out = capsys.readouterr().out
-    assert out.splitlines()[:6] == [
-        "도전 정책 판정 (#400)",
-        "검토 날 2026-09-28(#469) · 챔피언 정책 1 · 도전 정책 3개 · 하한의 신뢰수준 98.33%(Bonferroni) · "
-        "함께 돈 거래일 10일부터 판정, 20일까지 못 이기면 내린다",
+    assert out.splitlines()[:7] == [
+        "도전 정책 판정 (#473: 묶음을 검토 날 밤에 한 번)",
+        "검토 날 2026-09-28(#469) · 주기 1 묶음(2026-09-01–2026-09-28) · 챔피언 정책 1 · 도전 정책 3개 · "
+        "하한의 신뢰수준 98.33%(묶음 안 Bonferroni) · 함께 돈 거래일 10일 미만이면 판정 불가",
         "- 정책 2: 함께 돈 거래일 10일, 날마다 (도전 − 챔피언) 순손익 평균 +1,100원, 하한 -244원 → 하한 ≤ 0",
-        "- 정책 3: 함께 돈 거래일 3일, 날마다 (도전 − 챔피언) 순손익 평균 +0원, 하한 +0원 → 날 수 부족",
-        "- 정책 4: 함께 돈 거래일 0일, 날마다 (도전 − 챔피언) 순손익 평균 없음, 하한 없음 → 날 수 부족",
+        "- 정책 3: 함께 돈 거래일 3일, 날마다 (도전 − 챔피언) 순손익 평균 +0원, 하한 +0원 "
+        "→ 판정 불가(함께 돈 거래일 10일 미만)",
+        "- 정책 4: 함께 돈 거래일 0일, 날마다 (도전 − 챔피언) 순손익 평균 없음, 하한 없음 "
+        "→ 판정 불가(함께 돈 거래일 10일 미만)",
         "→ 챔피언은 그대로다.",
+        "내린 도전 정책(묶음에서 뽑히지 않음, 다시 돌지 않는다): 정책 2, 정책 3, 정책 4",
     ]
     assert (
         "실전 관문: 챔피언 정책 1의 챔피언으로 돈 모의 기록 10일(이력 10거래일), 날마다 순손익 평균 +0원, "
@@ -697,7 +709,11 @@ def test_the_alpha_spent_counts_the_trader_s_checkpoints_across_a_change_of_the_
     which it was promoted on, never count: with them its forty days would pass at α_2. It must pass
     at a later checkpoint."""
     keep(tmp_path, at("2026-08-31 22:31:00"), policy_cell(BARRIER, 0.8))
-    keep(tmp_path, at("2026-08-31 22:32:00"), policy_cell(BARRIER, 0.6))
+    enter(
+        tmp_path,
+        at("2026-08-31 22:33:00"),
+        keep(tmp_path, at("2026-08-31 22:32:00"), policy_cell(BARRIER, 0.6)),
+    )
     for day, net in zip(LONG[:20], WON_ON, strict=True):
         day_ran(tmp_path, 1, day, 0.0, champion=True)
         day_ran(tmp_path, 2, day, net, champion=False)
