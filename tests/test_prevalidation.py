@@ -331,6 +331,45 @@ async def test_a_report_counts_only_for_the_code_that_passed(tmp_path: Path) -> 
     assert engine.waiting() == []
 
 
+async def test_the_engine_logs_each_admission_once(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    # #456: the line Loki shows when the gate lets a new algorithm in, once, not at each bar close.
+    caplog.set_level("INFO", logger="krx_quant.engine")
+    candidate = Contrarian("contrarian")
+    path = report_path(tmp_path / "state", "contrarian")
+    path.parent.mkdir(parents=True)
+    gate = admits(tmp_path / "state")
+
+    engine = await run(
+        tmp_path / "live.db",
+        busy_morning(end="09:05:00"),
+        until=at("09:05:00"),
+        algorithms=[ALPHA, candidate],
+        kind_algorithms=(),
+        admits=lambda a: a.name == "alpha" or gate(a),
+    )
+    assert engine.waiting() == ["contrarian"]
+    path.write_text(json.dumps({"passed": True, "code": code_digest(candidate)}))
+    assert isinstance(engine.clock, FakeClock)
+    await replay_into(engine, engine.clock, [], until=at("09:09:00"))
+    assert engine.waiting() == []
+    assert engine.store.status_history("contrarian")[-1]["status"] == "probation"
+
+    admitted = [r.getMessage() for r in caplog.records if "admitted on probation" in r.getMessage()]
+    assert admitted == [
+        f"alpha: admitted on probation through the pre-validation gate (code {code_digest(ALPHA)})",
+        f"contrarian: admitted on probation through the pre-validation gate (code {code_digest(candidate)})",
+    ]
+
+
+async def test_an_engine_without_the_gate_logs_no_admission(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A replay runs every algorithm without a gate (#456): nothing passed, so nothing is told.
+    caplog.set_level("INFO", logger="krx_quant.engine")
+    await run(tmp_path / "replay.db", [], until=at("09:02:00"), algorithms=[ALPHA], kind_algorithms=())
+    assert not [r for r in caplog.records if "admitted on probation" in r.getMessage()]
+
+
 def test_a_report_counts_only_for_the_target_it_was_scored_on(tmp_path: Path) -> None:
     candidate = Contrarian("contrarian")
     path = report_path(tmp_path / "state", "contrarian")

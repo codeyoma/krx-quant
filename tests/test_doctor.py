@@ -9,6 +9,7 @@ from __future__ import annotations
 import ast
 import json
 import logging
+import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import replace
@@ -23,7 +24,9 @@ from aiohttp.test_utils import TestServer
 
 import krx_quant.doctor as doctor_module
 from krx_quant import kis, loki
+from krx_quant.algorithms import Model, save_model
 from krx_quant.cli import main
+from krx_quant.clock import FakeClock
 from krx_quant.config import Settings
 from krx_quant.doctor import (
     COMPOSE_API,
@@ -36,13 +39,20 @@ from krx_quant.doctor import (
     fetch_status,
     report,
 )
+from krx_quant.engine import PredictionEngine
 from krx_quant.feeds import RAW_SCHEMA
 from krx_quant.feeds.base import KST
+from krx_quant.lifecycle import Status as AlgorithmStatus
 from krx_quant.model_shelf import Shelf
 from krx_quant.predictions import DB_NAME, PredictionStore
+from krx_quant.prevalidation import Refusal
 from krx_quant.recorder import ParquetRecorder
 from krx_quant.redaction import MASK, secrets_of
 from krx_quant.scheduled import JOBS, STATE_FILE
+from krx_quant.touch import TARGET_VERSION
+from tests.algorithm_doubles import FixedAlgorithm
+from tests.kind_doubles import DRIFT, TEST_KIND, FixedKindAlgorithm
+from tests.replay_events import CALENDAR, FEE, SYMBOL
 
 NOW = datetime(2026, 10, 20, 10, 30, 0, tzinfo=KST)
 COMMIT = "0123456789abcdef0123456789abcdef01234567"
@@ -187,7 +197,7 @@ def logs_with(*messages: tuple[int, str]) -> RecentLog:
     return recent
 
 
-def test_the_summary_has_its_nine_parts_with_the_fields_as_the_api_names_them(tmp_path: Path) -> None:
+def test_the_summary_has_its_ten_parts_with_the_fields_as_the_api_names_them(tmp_path: Path) -> None:
     settings = server(tmp_path)
     record_pingpongs(
         settings.data_dir,
@@ -198,10 +208,11 @@ def test_the_summary_has_its_nine_parts_with_the_fields_as_the_api_names_them(tm
     logs = logs_with((logging.INFO, "not kept"), (logging.WARNING, "KIS WebSocket silent for 60s"))
     text = report(settings, NOW, Status(status_body(), "이 컨테이너의 엔진 API"), logs)
 
-    titles = [line for line in text.splitlines() if line[:2] in {f"{n}." for n in range(1, 10)}]
-    assert [t[:2] for t in titles] == ["1.", "2.", "3.", "4.", "5.", "6.", "7.", "8.", "9."]
-    assert titles[-2].startswith("8. Loki 전송"), "the log folders' section went in #360"
-    assert titles[-1].startswith("9. 모델 파일"), "#361"
+    titles = [line for line in text.splitlines() if re.match(r"\d+\. ", line)]
+    assert [t.split(".")[0] for t in titles] == [str(n) for n in range(1, 11)]
+    assert titles[7].startswith("8. Loki 전송"), "the log folders' section went in #360"
+    assert titles[8].startswith("9. 모델 파일"), "#361"
+    assert titles[9].startswith("10. 알고리즘"), "#456"
     assert text.startswith("서버 상태 2026-10-20 10:30:00 KST")
     assert f"commit {COMMIT} · started_at 2026-10-20T06:00:31+09:00 (4시간 29분 전)" in text
     assert "mode live · phase regular" in text
@@ -316,6 +327,106 @@ def test_a_store_that_refused_to_delete_models_is_said_with_what_to_do(tmp_path:
     assert "학습 저장소가 모델 지우기를 거부함(마지막으로 2026-10-19 밤, AccessDenied 등)" in text
     assert "engine/models/*의 s3:DeleteObject를 넣는다(operations.md 2.1)" in text
     assert "지금 모델 0개" in text, "its marker is not a model"
+
+
+def test_section_10_lists_each_kind_s_algorithms_and_those_waiting_for_or_refused_at_the_gate(
+    tmp_path: Path,
+) -> None:
+    """#456: as the engine holds them, each algorithm with a status by kind (its status, since when
+    and why, the model it runs), then those waiting for their pre-validation and those refused."""
+    settings = server(tmp_path)
+    settings.state_dir.mkdir(parents=True)
+    store = PredictionStore(settings.state_dir / DB_NAME)
+    store.mark_target(TARGET_VERSION, NOW - timedelta(days=40))  # no restart on a new target (#170)
+    store.add_status("bravo", NOW - timedelta(days=12), None, AlgorithmStatus.PROBATION, "registered")
+    store.add_status(
+        "bravo",
+        NOW - timedelta(days=2),
+        AlgorithmStatus.PROBATION,
+        AlgorithmStatus.ACTIVE,
+        "promoted: weakest lift low 0.0012",
+    )
+    store.add_status("gone", NOW - timedelta(days=30), None, AlgorithmStatus.RETIRED, "retired by hand")
+    refusal = Refusal("judged", "stats: weakest lift -0.0100")
+    engine = PredictionEngine(
+        store,
+        CALENDAR,
+        (SYMBOL,),
+        FEE,
+        FakeClock(NOW),
+        algorithms=[
+            FixedAlgorithm(name, features=(feature,), unique=(feature,))
+            for name, feature in (
+                ("alpha", "velocity"),
+                ("bravo", "acceleration"),
+                ("charlie", "relative_volume"),
+                ("delta", "vwap_z"),
+            )
+        ],
+        kinds=(TEST_KIND,),
+        kind_algorithms=[FixedKindAlgorithm("drifter", features=("volatility",), unique=("volatility",))],
+        models={"bravo": Model("bravo-20261019-0a1b2c", {})},
+        admits=lambda a: a.name in {"alpha", "drifter"},  # charlie and delta have not passed
+        refused=lambda a: refusal if a.name == "delta" else None,
+    )
+
+    text = report(settings, NOW, engine_status(engine, None))
+    store.close()
+
+    section = text[text.index("10. 알고리즘") :].splitlines()
+    assert section[0] == "10. 알고리즘 (#456, 엔진 프로세스)"
+    assert "  상태가 있는 알고리즘 4개: probation 2 · active 1 · retired 1" in section
+    assert section[section.index("  direction:") + 1 :][:2] == [
+        "    alpha probation 10:30:00 alpha-default registered",
+        "    bravo active 2026-10-18 10:30:00 bravo-20261019-0a1b2c promoted: weakest lift low 0.0012",
+    ]
+    assert (
+        section[section.index(f"  {DRIFT}:") + 1]
+        == "    drifter probation 10:30:00 drifter-default registered"
+    )
+    assert (
+        section[section.index("  등록되지 않은 이름:") + 1]
+        == "    gone retired 2026-09-20 10:30:00 - retired by hand"
+    )
+    assert "  사전 검증을 기다리는 알고리즘(waiting) 1개: charlie" in section
+    assert section[section.index("  사전 검증이 거부한 알고리즘(refused) 1개:") + 1] == (
+        "    delta: stats: weakest lift -0.0100"
+    )
+    assert "  사전 검증은 통과했고 그 종류의 리뷰 날을 기다리는 알고리즘(held, #310): 없음" in section
+
+
+def test_the_command_reads_the_statuses_from_the_db_and_leaves_the_gate_to_the_engine(tmp_path: Path) -> None:
+    """#456: a process apart from the engine reads the statuses from the engine DB and the models
+    from ``state/models``; who waits for or was refused at the gate only the engine knows."""
+    settings = server(tmp_path)
+    settings.state_dir.mkdir(parents=True)
+    store = PredictionStore(settings.state_dir / DB_NAME)
+    store.add_status("neyman", NOW - timedelta(hours=2), None, AlgorithmStatus.PROBATION, "registered")
+    store.add_status("gone", NOW - timedelta(days=30), None, AlgorithmStatus.RETIRED, "retired by hand")
+    store.close()
+    save_model(settings.state_dir, "neyman", Model("neyman-20261019-0a1b2c", {}))
+
+    text = report(settings, NOW, Status(None, "", ("이 컨테이너의 엔진 API: refused",)))
+
+    section = text[text.index("10. 알고리즘") :].splitlines()
+    assert section[0] == "10. 알고리즘 (#456, 엔진 DB의 statuses와 state/models)"
+    assert (
+        section[section.index("  direction:") + 1]
+        == "    neyman probation 08:30:00 neyman-20261019-0a1b2c registered"
+    )
+    assert (
+        section[section.index("  등록되지 않은 이름:") + 1]
+        == "    gone retired 2026-09-20 10:30:00 - retired by hand"
+    )
+    assert section[-1] == (
+        "  사전 검증 대기·거부: 모른다(엔진 프로세스만 안다)."
+        " 이슈에 needs-server-snapshot 라벨을 붙여 받는 요약에 실린다"
+    )
+
+
+def test_section_10_without_the_engine_db_says_so(tmp_path: Path) -> None:
+    text = report(server(tmp_path), NOW, Status(status_body(), "x"))
+    assert "10. 알고리즘 (#456, 엔진 DB의 statuses와 state/models): 엔진 DB 없음" in text
 
 
 def test_without_a_store_the_model_files_say_so(tmp_path: Path) -> None:

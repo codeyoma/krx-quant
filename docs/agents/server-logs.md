@@ -75,6 +75,13 @@ scripts/loki-query.sh '{service="krx-quant", process="job"} |= "job=prevalidate-
   --from 2026-10-28T22:00 --to 2026-10-29T06:00 --forward --limit 100
 ```
 
+**An algorithm's admission and status changes** (#456): one INFO line when the engine's pre-validation gate lets a new algorithm in, `<name>: admitted on probation through the pre-validation gate (code <digest>)` (the digest is its report's `code`), once per algorithm, not at each bar close; one per status change, `<name>: <from> -> <to> (<reason>)`; and `<name> now runs <version>` when it starts on a model. What each algorithm stands at now, and who waits for or was refused at the gate, is the snapshot's section 10 ([server-snapshot.md](server-snapshot.md)).
+
+```bash
+scripts/loki-query.sh '{service="krx-quant", process="engine"} |~ "admitted on probation|: [a-z]+ -> [a-z]+ \\(| now runs "' \
+  --since 7d --forward --limit 500
+```
+
 **ERRORs in the last 24 hours:**
 
 ```bash
@@ -123,7 +130,7 @@ scripts/loki-query.sh '{service="krx-quant", process="command"} |= "command=doct
 - The heartbeats: `{service="krx-quant", process="engine"} |= "heartbeat: "` (one a minute while the engine runs).
 - The shipping's own warnings (dropped lines, failures): `{service="krx-quant"} |= "Loki: "`.
 - Whether an engine alert reached Telegram: `{service="krx-quant", process="engine"} |~ "telegram sent: |telegram send failed"` (each alert is logged as `alert: …` before it is sent).
-- No line at all for minutes means the engine (or the server) is down, or cannot reach Grafana Cloud. Then ask for a snapshot ([server-snapshot.md](server-snapshot.md)): `krx-quant doctor` section 9 shows the engine's shipping (on or off, lines sent and dropped, the last success, the last failure's kind).
+- No line at all for minutes means the engine (or the server) is down, or cannot reach Grafana Cloud. Then ask for a snapshot ([server-snapshot.md](server-snapshot.md)): `krx-quant doctor` section 8 shows the engine's shipping (on or off, lines sent and dropped, the last success, the last failure's kind).
 
 ## Alert rules
 

@@ -763,6 +763,7 @@ class PredictionEngine:
         for a in running:
             if a.name not in known:
                 self.store.add_status(a.name, self.clock.now(), None, Status.PROBATION, REGISTERED)
+                self._tell_admitted(a)
                 if self._revisions is not None and a.name not in self._revision_of:
                     try:
                         self._revise(a, None, self.clock.now(), Status.PROBATION)
@@ -771,10 +772,19 @@ class PredictionEngine:
         for d in daily_admitted:
             if d.name not in known:
                 self.store.add_status(d.name, self.clock.now(), None, Status.PROBATION, REGISTERED)
+                self._tell_admitted(d)
         self.algorithms = tuple(admitted)
         self.kind_algorithms = tuple(kind_admitted)
         self.daily_algorithms = tuple(daily_admitted)
         self._feature_names = sorted({f for a in running for f in a.features})
+
+    def _tell_admitted(self, algorithm: Algorithm | KindAlgorithm | DailyAlgorithm) -> None:
+        if self._admits is not None:  # let in by the gate: told once, for Loki (#456)
+            log.info(
+                "%s: admitted on probation through the pre-validation gate (code %s)",
+                algorithm.name,
+                _code(algorithm),
+            )
 
     def _kind_runs(self, algorithm: DailyAlgorithm) -> bool:
         kind = self.daily_kind_named(algorithm.kind)
@@ -1909,6 +1919,17 @@ def _with_status(standings: Mapping[str, Standing], status: Status) -> set[str]:
 
 # An algorithm's forecasts by symbol, and why for each symbol it did not predict.
 _Predicted = tuple[dict[str, Forecast], dict[str, Abstention]]
+
+
+def _code(algorithm: Algorithm | KindAlgorithm | DailyAlgorithm) -> str:
+    """The digest of the code its pre-validation judged (``prevalidation.code_digest``), for a log
+    line: never in the way of the admission it tells."""
+    from krx_quant.prevalidation import code_digest  # the pre-validation replays through this module
+
+    try:
+        return code_digest(algorithm)
+    except (OSError, ValueError):
+        return "unknown"
 
 
 def _predict_symbols(
