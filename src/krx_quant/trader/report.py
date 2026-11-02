@@ -60,7 +60,7 @@ from typing import Any
 from krx_quant.config import Settings
 from krx_quant.feeds.base import KST
 from krx_quant.market_calendar import MarketCalendar, calendar_store
-from krx_quant.trader import CAPITAL, KIS_MODES, LIVE, PAPER, PICK_AT, live, promotion
+from krx_quant.trader import CAPITAL, KIS_MODES, LIVE, PAPER, PICK_AT, live, promotion, review
 from krx_quant.trader import policy as policies
 from krx_quant.trader.gap import day_gap
 from krx_quant.trader.limits import Pause, pause_of
@@ -224,6 +224,7 @@ class Report:
     pause: Pause | None = None  # in force at the night's end
     controls: tuple[Control, ...] = ()  # asked from the day's start to the night's end
     refit: int | None = None  # the night's re-fit's exit code (``run_night``); None: not run with it
+    cycle: review.Cycle | None = None  # the day's review cycle (#469); None before the evaluation
 
     @property
     def gate_passed(self) -> bool:
@@ -348,7 +349,14 @@ def read(
             pause=pause_of(everything),
             controls=controls,
             refit=refit,
+            cycle=_cycle(db, day, calendar),
         )
+
+
+def _cycle(db: sqlite3.Connection, day: date, calendar: MarketCalendar) -> review.Cycle | None:
+    """The review cycle of ``day`` (#469), None before the evaluation version was begun."""
+    evaluation = review.current(db)
+    return None if evaluation is None else review.cycle_of(evaluation, day, calendar.session)
 
 
 def reasons(report: Report) -> list[str]:
@@ -970,10 +978,23 @@ def _pick_section(report: Report) -> str:
     return "\n".join(lines)
 
 
+def _cycle_line(report: Report) -> list[str]:
+    """The day's review cycle (#469): the champion changes on its review night alone."""
+    c = report.cycle
+    if c is None:
+        return []
+    place = "첫 주기 전" if c.day is None else f"그날 {c.day}일째"
+    tonight = " · 그날 밤이 검토다" if c.day == c.days else ""
+    return [
+        f"검토 주기 (#469): 평가 버전 {c.evaluation} · 주기 {c.number}({c.first}부터, 검토 날 {c.review}) · "
+        f"{place}{tonight} · 챔피언은 검토 날 장이 끝난 뒤에만 바뀐다(판정은 그날 밤)"
+    ]
+
+
 def _standings_section(report: Report) -> str:
     if not report.standings:
-        return "정책별 모의 성적: 정책이 없다(첫 밤 정책 맞추기 전)"
-    lines = ["정책별 모의 성적 (그날까지의 기록)"]
+        return "\n".join([*_cycle_line(report), "정책별 모의 성적: 정책이 없다(첫 밤 정책 맞추기 전)"])
+    lines = [*_cycle_line(report), "정책별 모의 성적 (그날까지의 기록)"]
     for s in report.standings:
         who = f"챔피언 정책 {s.version}" if s.champion else f"도전 정책 {s.version}"
         today = (

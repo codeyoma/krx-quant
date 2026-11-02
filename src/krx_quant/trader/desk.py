@@ -2,7 +2,8 @@
 same cells' predictions and the same quotes, in one process.
 
 - **Picks** (``select``, at the trader's start and every day at 08:30): the champion read from the
-  store, applied to the cells the cost map passes (``under_champion``, ``policy.apply``), for the
+  store, applied to the cells the cost map passes (``under_champion``, ``policy.apply``; none before
+  the first champion, #469), for the
   champion's book (``paper.PaperTrader``: the trades the trader makes, which its loss limits and
   pauses hold; in mock mode ``mock.MockTrader``, #405, its orders on KIS's mock server); and each
   challenger that runs that day (``policy.running_versions``: at most
@@ -54,53 +55,65 @@ same cells' predictions and the same quotes, in one process.
   Before the first champion the champion's book has no policy and keeps no record.
 
 The champion never changes during a session: it is read at the picks only, and a promotion is
-written after the market alone (``promotion.in_market``).
+written after the market alone (``promotion.in_market``); since #469 on a review night alone.
+
+**The review cycle** (#469, ``review.py``): each pick is kept with the evaluation version and the
+review cycle in force (``review.cycle_at``), and each policy's cells with whether they trade
+(``Selection.cells``). A cell whose predictor is gone (``cells.gone``: the engine's database, at
+``engine``) trades no more for the rest of that cycle, whatever later picks find
+(``TraderStore.gone``): never another cell in its place.
 """
 
 from __future__ import annotations
 
 import logging
 import sqlite3
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import replace
 from datetime import date, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 from krx_quant.feeds.base import kst_day
 from krx_quant.kis_orders import Broker
 from krx_quant.market_calendar import Session
 from krx_quant.special import Window
-from krx_quant.trader import KIS_MODES, LIVE, MOCK, PAPER, live, policy
-from krx_quant.trader.cells import Cell, Signal
+from krx_quant.trader import KIS_MODES, LIVE, MOCK, PAPER, SYMBOL, live, policy, review
+from krx_quant.trader.cells import Cell, Signal, gone
 from krx_quant.trader.limits import RUNNING, Notify
 from krx_quant.trader.mock import MockTrader, Timing
 from krx_quant.trader.paper import PaperTrader, Rules
 from krx_quant.trader.quotes import BestQuote
-from krx_quant.trader.selection import NO_PASS, NO_POLICY, NOT_IN_POLICY, Selection
+from krx_quant.trader.selection import GONE, NO_CHAMPION, NO_PASS, NO_POLICY, NOT_IN_POLICY, Selection
 from krx_quant.trader.stall import STALL_AFTER, QuoteWatch
 from krx_quant.trader.store import TraderStore
 
 log = logging.getLogger(__name__)
 
 
-def under_champion(store: TraderStore, selection: Selection) -> Selection:
-    """``selection`` under the champion policy kept now (#399); as it is before the first, and with
-    no cell when the champion cannot be read."""
+def under_champion(
+    store: TraderStore,
+    selection: Selection,
+    gone_of: Callable[[policy.Policy], Collection[Cell]] | None = None,
+) -> Selection:
+    """``selection`` under the champion policy kept now (#399), its cells ``gone_of`` it trading
+    none (#469); with no cell before the first (``NO_CHAMPION``, #469) and when the champion cannot
+    be read (``NO_POLICY``)."""
     try:
         champion = store.champion()
     except (policy.PolicyError, sqlite3.Error) as e:
         log.error("trader: cannot read the champion policy (%s): no cell trades until the next pick", e)
-        return Selection((), selection.considered, selection.as_of, NO_POLICY, str(e))
+        return replace(selection, picks=(), reason=NO_POLICY, detail=str(e))
     if champion is None:
-        log.info("trader: no champion policy yet: the cost map's cells at the default threshold and Kelly")
-    else:
-        log.info(
-            "trader: under the champion, policy %s (%s): %s cell(s)",
-            champion.version,
-            champion.created_at.strftime("%Y-%m-%d %H:%M"),
-            len(champion.cells),
-        )
-    return policy.apply(champion, selection)
+        log.info("trader: no champion policy yet: no cell trades before the first (#469)")
+        return policy.apply(None, selection)
+    log.info(
+        "trader: under the champion, policy %s (%s): %s cell(s)",
+        champion.version,
+        champion.created_at.strftime("%Y-%m-%d %H:%M"),
+        len(champion.cells),
+    )
+    return policy.apply(champion, selection, () if gone_of is None else gone_of(champion))
 
 
 class Desk:
@@ -126,10 +139,12 @@ class Desk:
         timing: Timing | None = None,
         stall_after: timedelta | None = STALL_AFTER,
         practice: bool = False,
+        engine: Path | None = None,
     ) -> None:
         if practice and mode != MOCK:  # #427: the settings refuse it before (``settings.py``)
             raise ValueError(f"the mock practice is for the mock mode alone, not {mode}")
         self.practice = practice
+        self.engine = engine  # the engine's database, where a policy's predictor is found gone (#469)
         self.store = store
         self.rules = rules
         self._sessions = sessions
@@ -244,8 +259,16 @@ class Desk:
 
     def select(self, selection: Selection, at: datetime) -> None:
         """The cells the cost map passes at ``at`` (``selection``) under the champion for its book
-        (and its shadow's), and under each challenger running that day for its own (module doc)."""
-        under = under_champion(self.store, selection)
+        (and its shadow's), and under each challenger running that day for its own, in the review
+        cycle in force (module doc)."""
+        cycle = self._cycle(at)
+        if cycle is not None:
+            selection = replace(selection, evaluation=cycle.evaluation, cycle=cycle.number)
+
+        def gone_of(kept: policy.Policy) -> set[Cell]:
+            return self._gone(kept, cycle, at)
+
+        under = under_champion(self.store, selection, gone_of)
         chosen = self._practising(under)
         self.champion.select(chosen, at)
         if self.mode in KIS_MODES and self.shadow is not None:
@@ -277,17 +300,53 @@ class Desk:
             book = self.challengers.get(version)
             if book is None:
                 book = self.challengers[version] = self._book(version, at)
-            book.select(policy.apply(challenger, selection), at)
+            book.select(policy.apply(challenger, selection, gone_of(challenger)), at)
         for version in sorted(self._running - set(running)):
             log.info("trader: challenger %s runs no more", version)
             self.challengers[version].retire(at)
         self._running = set(running)
         self._prune()
 
+    def _cycle(self, at: datetime) -> review.Cycle | None:
+        """The review cycle in force at ``at`` (#469); None before the evaluation was begun, or when the
+        store or the calendar cannot say (logged: the pick goes on without it)."""
+        try:
+            evaluation = review.current(self.store.db)
+            return None if evaluation is None else review.cycle_at(evaluation, at, self._sessions)
+        except (sqlite3.Error, ValueError) as e:
+            log.error("trader: cannot tell the review cycle (%s): the pick is kept without it", e)
+            return None
+
+    def _gone(self, kept: policy.Policy, cycle: review.Cycle | None, at: datetime) -> set[Cell]:
+        """The cells of ``kept`` that trade no more in ``cycle`` (#469, module doc): their predictor
+        gone now in the engine's database, or found gone by a pick earlier in the cycle."""
+        found: set[Cell] = set()
+        cells = [c.cell for c in kept.cells]
+        if self.engine is not None:
+            try:
+                found = gone(self.engine, SYMBOL, cells, at)
+            except sqlite3.Error as e:
+                log.warning("trader: cannot tell if policy %s's predictors predict (%s)", kept.version, e)
+        if cycle is not None:
+            try:
+                found |= self.store.gone(kept.version, cycle.evaluation, cycle.number)
+            except (sqlite3.Error, ValueError, KeyError, TypeError) as e:
+                log.warning("trader: cannot read policy %s's cells gone this cycle (%s)", kept.version, e)
+        for cell in sorted(found & set(cells), key=lambda c: (c.kind, c.predictor)):
+            log.warning(
+                "trader: policy %s's cell %s %s is %s: its predictor no longer predicts; it trades no"
+                " more until the next review, and no other cell takes its place",
+                kept.version,
+                cell.kind,
+                cell.predictor,
+                GONE,
+            )
+        return found
+
     def _practising(self, under: Selection) -> Selection:
         """``under`` (the champion's pick), or with the practice on and no champion cell to trade on a
-        cost map and a champion read, the practice cell's (#427, module doc)."""
-        if not self.practice or under.picks or under.reason not in (NO_PASS, NOT_IN_POLICY):
+        cost map and a champion read (none yet included), the practice cell's (#427, module doc)."""
+        if not self.practice or under.picks or under.reason not in (NO_PASS, NOT_IN_POLICY, NO_CHAMPION):
             return under
         if under.practice is None:
             log.info("trader: no cell can be practised on this cost map: no practice until the next pick")

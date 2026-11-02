@@ -28,7 +28,7 @@ from krx_quant.predictions import DB_NAME as ENGINE_DB
 from krx_quant.predictions import NewKindPrediction, NewPrediction, PredictionStore
 from krx_quant.special import Kind as SpecialKind
 from krx_quant.special import Window
-from krx_quant.trader import KELLY_FRACTION, SYMBOL
+from krx_quant.trader import KELLY_FRACTION, SYMBOL, review
 from krx_quant.trader import policy as policies
 from krx_quant.trader.cells import Cell, EngineReader
 from krx_quant.trader.desk import Desk
@@ -290,6 +290,9 @@ class Day:
     # The desk's watch of the quotes (#407): off unless a test sets it, since the made-up quotes come
     # seconds or minutes apart, where 005930's stream brings several a second.
     stall_after: timedelta | None = None
+    # The desk finds a policy's predictor gone in the engine's database (#469): off unless a test sets
+    # it, since most tests write the predictions of the cells they trade alone.
+    gone: bool = False
 
     def run(self, events: Sequence[Event]) -> list[dict[str, Any]]:
         """Each event in time order (the clock ticking at each), into a trader started at
@@ -307,6 +310,7 @@ class Day:
                     self.started_at,
                     notify=self.notices.append,
                     stall_after=self.stall_after,
+                    engine=self.state / ENGINE_DB if self.gone else None,
                 )
             else:
                 trader = PaperTrader(
@@ -379,13 +383,30 @@ class Day:
 def keep(state: Path, made: datetime, *cells: policies.PolicyCell, reason: str = "밤 맞추기") -> int:
     """A policy version kept at ``made`` as the nightly re-fit keeps it (``policy.add``): the first
     the champion, a later one a challenger (#400: it runs from the trading day after ``made``'s
-    pick). Its version."""
+    pick). Its version. The evaluation version (#469) begun then if it was not yet, as the night's
+    job begins it (``promotion.promote``): its first cycle from the first trading day after
+    ``made``."""
     db = policies.connect(state / DB_NAME)
     try:
+        review.begin(db, made, CALENDAR.session)
         version, _ = policies.add(db, made, reason, cells, [], {"grid": {}})
     finally:
         db.close()
     return version
+
+
+def first_champion(state: Path, *cells: policies.PolicyCell) -> int:
+    """The champion kept the night before the test day (``keep``), of ``cells`` (by default the
+    barrier's breiman at θ 0.6 and λ 0.5, as the default pick trades it), unless one is already: the
+    desk trades nothing before the first champion (#469). Its version."""
+    db = policies.connect(state / DB_NAME)
+    try:
+        found = policies.champion_version(db)
+    finally:
+        db.close()
+    if found is not None:
+        return found
+    return keep(state, at("2026-10-13 22:31:00"), *(cells or (policy_cell(BARRIER),)))
 
 
 def policy_cell(

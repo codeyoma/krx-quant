@@ -50,7 +50,7 @@ from krx_quant.trader.settings import TraderSettings
 from krx_quant.trader.store import DB_NAME, TraderStore, read_trader, read_trades, request_pause
 from tests.test_live_predictions import free_port
 from tests.test_trader_run import PASSING, EngineApi, book
-from tests.trader_doubles import BARRIER, CALENDAR, FEE, Barrier, Read, Tick, at, pick, quote
+from tests.trader_doubles import BARRIER, CALENDAR, FEE, Barrier, Read, Tick, at, first_champion, pick, quote
 
 KEY = "PStrader" + "m" * 28
 SECRET = "Sm" + "k" * 60
@@ -1317,9 +1317,10 @@ async def test_the_trader_in_mock_mode_orders_on_kis_from_its_stream(
 ) -> None:
     """``krx-quant trade`` with ``KRX_TRADER_MODE=mock``: the 10:00 prediction bought on KIS at the
     first quote after it, its take-profit sell resting there until KIS fills it; the run kept as
-    mock's."""
+    mock's. The barrier's breiman is the champion's cell (#469: nothing trades before the first)."""
     fake, account = kis_mock
     state = tmp_path / "state"
+    first_champion(state)
     engine = PredictionStore(state / ENGINE_DB)
     Barrier("10:00:00").write(engine)
     engine.close()

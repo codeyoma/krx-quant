@@ -29,9 +29,19 @@ necessary condition), and the champion what does. The trader trades the champion
 those passing, in the champion's order, each at its θ and with λ × the day's f* of the capital.
 A cell passing that the champion does not have is not traded (``NOT_IN_POLICY`` when that leaves
 none): it comes in through a challenger fitted on a later night, once promoted (#400). An empty
-champion (no cell passed the night it was fitted) trades nothing. Before the first champion the
-trader trades the cost map's cells at ``KRX_TRADER_THRESHOLD`` and ``KELLY_FRACTION``, as #395
-did, and its trades carry no policy.
+champion (no cell passed the night it was fitted) trades nothing. Before the first champion nothing
+trades (#469, ``NO_CHAMPION``).
+
+**The frozen version** (#469, ``review.py``): the champion's cells, their order and θ hold from one
+review to the next. A cell is its predictor's name (``Cell``: kind and predictor), never the cost
+map's role: when the cost map's ``top`` of a kind becomes another algorithm, the champion's cell
+stays its own (``OFF_MAP`` while the cost map does not name it, never the other algorithm), and one
+whose predictor stopped predicting (``GONE``, ``cells.gone``) trades no more until the next review.
+Each pick keeps every cell of the policy and why it does not trade (``Selection.cells``).
+
+> **바뀜** (2026-11-02, #476): before the first champion the trader traded the cost map's cells at
+> ``KRX_TRADER_THRESHOLD`` and ``KELLY_FRACTION`` → nothing. 이유: spec #468 "챔피언 전 기본 매매는
+> 없앤다". A policy's values compare by its cells' predictors' names, θ and λ, no longer their roles.
 
 **Store** (``state/trader.sqlite3``, beside the trader's tables): ``policies`` (each version, its
 id the version) and ``champions``. The nightly re-fit writes them from the engine's container
@@ -53,7 +63,14 @@ from typing import Any
 from krx_quant.feeds.base import KST
 from krx_quant.trader import PICK_AT
 from krx_quant.trader.cells import Cell
-from krx_quant.trader.selection import NOT_IN_POLICY, Selection
+from krx_quant.trader.selection import (
+    GONE,
+    NO_CHAMPION,
+    NO_COST_MAP,
+    NOT_IN_POLICY,
+    OFF_MAP,
+    Selection,
+)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS policies (   -- each policy version (#399): what the trader trades on
@@ -97,7 +114,7 @@ class PolicyCell:
     (``fitted``: the cost map's p*, lower bound and f*, the simulated trades)."""
 
     kind: str
-    role: str  # the predictor's on the cost map: consensus, top, baseline
+    role: str  # the predictor's on the cost map when fitted: consensus, top, baseline (#469: not its key)
     predictor: str
     threshold: float
     kelly_fraction: float
@@ -151,29 +168,65 @@ class Policy:
     dropped_at: datetime | None = None  # a challenger dropped unpromoted (#400)
 
 
-def apply(policy: Policy | None, selection: Selection) -> Selection:
-    """``selection`` (the cells the cost map passes today) under ``policy`` (module doc): its cells
-    among those passing, in its order, each at its θ and with λ × the day's f*; the others marked
-    as not in it. ``selection`` as it is without a policy."""
+def apply(policy: Policy | None, selection: Selection, gone: Collection[Cell] = ()) -> Selection:
+    """``selection`` (the cells the cost map passes today) under ``policy`` (module doc): its cells,
+    by their predictors' names, among those passing, in its order, each at its θ and with λ × the
+    day's f*; the others marked as not in it. Each of its cells kept with whether it trades and why
+    not (``Selection.cells``, #469): ``GONE`` (in ``gone``: its predictor stopped predicting),
+    ``OFF_MAP`` (the cost map does not name it today), else the cost map's verdict. Without a policy
+    nothing trades (``NO_CHAMPION``, #469), and a cost map that could not be read stays as it is."""
     if policy is None:
-        return selection
+        if selection.reason == NO_COST_MAP:
+            return selection
+        unpicked = tuple(
+            {**seen, "picked": False, "why": NO_CHAMPION} if seen.get("picked") else seen
+            for seen in selection.considered
+        )
+        return replace(selection, picks=(), considered=unpicked, reason=NO_CHAMPION)
     passing = {p.cell: p for p in selection.picks}
+    named = {Cell(c["kind"], c["predictor"]): c for c in selection.considered if c.get("predictor")}
     picks = []
+    cells = []
     for cell in policy.cells:
-        found = passing.get(cell.cell)
+        found = None if cell.cell in gone else passing.get(cell.cell)
+        why = None
         if found is not None:
             fraction = min(1.0, max(0.0, cell.kelly_fraction * (found.kelly or 0.0)))
             picks.append(replace(found, threshold=cell.threshold, fraction=fraction))
+        elif cell.cell in gone:
+            why = GONE
+        elif cell.cell not in named:
+            why = OFF_MAP
+        else:
+            seen = named[cell.cell]
+            why = seen.get("why") or seen.get("verdict") or "no verdict"
+        cells.append(
+            {
+                "kind": cell.kind,
+                "role": cell.role,
+                "predictor": cell.predictor,
+                "threshold": cell.threshold,
+                "traded": found is not None,
+                "why": why,
+            }
+        )
     kept = {p.cell for p in picks}
+    mine = {c.cell for c in policy.cells}
     considered = []
     for seen in selection.considered:
-        predictor = seen.get("predictor")
-        if seen.get("picked") and Cell(seen["kind"], predictor or "") not in kept:
-            seen = {**seen, "picked": False, "why": f"not in policy {policy.version}"}
+        named_cell = Cell(seen["kind"], seen.get("predictor") or "")
+        if seen.get("picked") and named_cell not in kept:
+            why = GONE if named_cell in mine else f"not in policy {policy.version}"
+            seen = {**seen, "picked": False, "why": why}
         considered.append(seen)
     reason = selection.reason if picks or selection.reason is not None else NOT_IN_POLICY
     return replace(
-        selection, picks=tuple(picks), considered=tuple(considered), reason=reason, policy=policy.version
+        selection,
+        picks=tuple(picks),
+        considered=tuple(considered),
+        reason=reason,
+        policy=policy.version,
+        cells=tuple(cells),
     )
 
 
@@ -306,9 +359,10 @@ def waiting_versions(db: sqlite3.Connection) -> list[int]:
     return [int(r[0]) for r in rows]
 
 
-def values(cells: Sequence[PolicyCell]) -> tuple[tuple[str, str, str, float, float], ...]:
-    """A policy's values (#393: its cells in their order, each θ and λ), what was fitted aside."""
-    return tuple((c.kind, c.role, c.predictor, c.threshold, c.kelly_fraction) for c in cells)
+def values(cells: Sequence[PolicyCell]) -> tuple[tuple[str, str, float, float], ...]:
+    """A policy's values (#393: its cells in their order, each θ and λ), what was fitted aside; a cell
+    by its predictor's name, not its role on the cost map (#469)."""
+    return tuple((c.kind, c.predictor, c.threshold, c.kelly_fraction) for c in cells)
 
 
 def same_as(db: sqlite3.Connection, cells: Sequence[PolicyCell]) -> int | None:

@@ -39,7 +39,7 @@ from tests.replay_events import at as replay_at
 from tests.replay_events import run
 from tests.test_live_predictions import free_port
 from tests.test_notify import telegram
-from tests.trader_doubles import FEE, Barrier, at, cost_map, cost_row, predictor
+from tests.trader_doubles import BARRIER, FEE, Barrier, at, cost_map, cost_row, keep, policy_cell, predictor
 
 PASSING = cost_map([cost_row("barrier", top=predictor("breiman", 0.70, "pass"))])
 FAILING = cost_map([cost_row("barrier", top=predictor("breiman", 0.60, "fail"))])
@@ -106,9 +106,11 @@ def rows(state: Path, table: str) -> list[dict[str, Any]]:
 async def test_the_trader_trades_on_the_stream_and_never_writes_the_engine_s_database(tmp_path: Path) -> None:
     """Input: a barrier prediction of 10:00 in the engine's database (the engine stopped since, so
     nothing else writes it), the collector's quote stream, and a cost map passing the barrier's
-    breiman. Output: the trader picks it, buys on the first quote after reading its prediction and
-    sells at the target; the engine's database is as it was, byte for byte."""
+    breiman, the champion's cell (#469: none trades before the first). Output: the trader picks it,
+    buys on the first quote after reading its prediction and sells at the target; the engine's
+    database is as it was, byte for byte."""
     state = tmp_path / "state"
+    keep(state, at("2026-10-13 22:31:00"), policy_cell(BARRIER))
     engine = PredictionStore(state / ENGINE_DB)
     Barrier("10:00:00").write(engine)
     engine.close()
@@ -178,6 +180,7 @@ async def test_without_a_cost_map_no_cell_trades_until_it_is_read(tmp_path: Path
     failure is kept once. Asked again, the cost map passes the cell, and the prediction, still fresh,
     is decided on."""
     state = tmp_path / "state"
+    keep(state, at("2026-10-13 22:31:00"), policy_cell(BARRIER))
     engine = PredictionStore(state / ENGINE_DB)
     Barrier("10:00:00").write(engine)
     engine.close()
@@ -213,9 +216,10 @@ async def test_without_a_cost_map_no_cell_trades_until_it_is_read(tmp_path: Path
 
 
 async def test_the_cells_are_picked_again_every_day_at_08_30(tmp_path: Path) -> None:
-    """Started at 08:00 on a cost map passing none; at 08:30 it passes the barrier's breiman. The
-    clock moves as the trader's loops wait."""
+    """Started at 08:00 on a cost map passing none; at 08:30 it passes the barrier's breiman, the
+    champion's cell. The clock moves as the trader's loops wait."""
     clock = [at("08:00:00")]
+    keep(tmp_path, at("2026-10-13 22:31:00"), policy_cell(BARRIER))
 
     async def sleep(seconds: float) -> None:
         clock[0] += timedelta(seconds=seconds)

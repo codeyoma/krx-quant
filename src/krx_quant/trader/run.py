@@ -9,7 +9,9 @@ running challenger's):
   challenger running that day for its paper book (#400). A cost map that cannot be read is asked
   for again every ``PICK_RETRY_SECONDS``, and no cell trades until it is read: a pick is never
   older than the day's. A champion that cannot be read trades nothing (``NO_POLICY``) until the
-  next pick;
+  next pick, nor does the trader before the first champion (#469, ``NO_CHAMPION``). Each pick is
+  made in the review cycle in force (#469, ``review.py``: the evaluation version begun at the
+  trader's first start after its deploy, if the nightly job did not begin it first);
 - the collector's quotes as they come (``quotes.follow_quotes``), watched for a stall by the desk
   (#407, ``stall.py``);
 - the engine's database every ``TraderSettings.poll_seconds`` (``cells.EngineReader``,
@@ -83,6 +85,7 @@ from krx_quant.trader import (
     PICK_AT,
     SYMBOL,
     live,
+    review,
 )
 from krx_quant.trader.cells import EngineReader
 from krx_quant.trader.desk import Desk
@@ -170,6 +173,14 @@ async def _run(
     started = clock()
     store = TraderStore(settings.state_dir / DB_NAME)
     sessions = _Sessions(settings)
+    # The review calendar (#469): its first cycle from the first trading day after the deploy.
+    evaluation = review.begin(store.db, started, sessions)
+    log.info(
+        "trader: evaluation version %s, review cycles of %s trading days from %s",
+        evaluation.version,
+        evaluation.review_days,
+        evaluation.first_day,
+    )
     # The live mode orders only once the gate and the execution checks pass (#408): before, as paper;
     # but what is left on the live account is wound down by the live book first, nothing new bought.
     ready = live.readiness(store.db, sessions, kst_day(started))
@@ -220,6 +231,7 @@ async def _run(
                     clock=clock,
                     timing=timing,
                     practice=trader.mock_practice and mode == MOCK,  # #427: the settings allow mock alone
+                    engine=settings.state_dir / ENGINE_DB,  # where a policy's predictor is found gone (#469)
                 )
                 watch = LiveWatch(trader.mode, mode, book, sessions, alerts.notice)
                 watch.judge(started, ready, start=True)

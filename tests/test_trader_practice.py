@@ -30,13 +30,22 @@ from krx_quant.consensus import FINAL
 from krx_quant.fake_kis import BUY_SIDE, SELL_SIDE, FakeAccount, FakeKis
 from krx_quant.kis_orders import Servers, trader_broker
 from krx_quant.trader import MOCK, PAPER, SYMBOL, live, promotion, report
+from krx_quant.trader import policy as policies
 from krx_quant.trader.cells import Cell
 from krx_quant.trader.desk import Desk
 from krx_quant.trader.gap import day_gap, pairing
 from krx_quant.trader.limits import RUNNING
 from krx_quant.trader.marks import read_marks
 from krx_quant.trader.paper import STOP_LOSS, TAKE_PROFIT, TIME, Rules
-from krx_quant.trader.selection import NO_COST_MAP, NO_PASS, NO_POLICY, NOT_IN_POLICY, Selection, choose
+from krx_quant.trader.selection import (
+    NO_CHAMPION,
+    NO_COST_MAP,
+    NO_PASS,
+    NO_POLICY,
+    NOT_IN_POLICY,
+    Selection,
+    choose,
+)
 from krx_quant.trader.settings import TraderSettings
 from krx_quant.trader.store import DAILY_LIMIT, DB_NAME, Entry, Exit, TraderStore, read_days, read_trades
 from tests.api_schema import check
@@ -53,6 +62,7 @@ from tests.trader_doubles import (
     at,
     cost_map,
     cost_row,
+    first_champion,
     keep,
     policy_cell,
     predictor,
@@ -177,8 +187,9 @@ def test_the_practice_cell_has_the_greatest_lower_bound_less_p_star_of_the_cells
 async def test_the_practice_is_picked_only_on_a_cost_map_and_a_champion_read_with_no_champion_cell(
     kis_mock: tuple[FakeKis, FakeAccount], tmp_path: Path
 ) -> None:
-    """``no_pass`` and ``not_in_policy`` practise; ``no_cost_map``, ``no_policy`` and a day with a
-    champion cell do not. The practice off, none does."""
+    """``no_pass``, ``not_in_policy`` and ``no_champion`` (#469: a cell passing before the first
+    champion trades no more) practise; ``no_cost_map``, ``no_policy`` and a day with a champion cell
+    do not. The practice off, none does."""
     fake, _ = kis_mock
     store = TraderStore(tmp_path / DB_NAME)
     try:
@@ -215,8 +226,10 @@ async def test_the_practice_is_picked_only_on_a_cost_map_and_a_champion_read_wit
             on.select(no_map, at("09:01:00"))
             assert on.champion.cells == [] and on.practice_shadow.cells == []
             assert on.champion.practice_state == {"enabled": True, "active": False, "cell": None}
-            on.select(choose(PASSING), at("09:02:00"))
-            assert on.champion.cells == [cell] and not on.champion.practice_state["active"]
+            on.select(choose(PASSING), at("09:02:00"))  # passing, but no champion yet (#469)
+            assert on.champion.cells == [cell] and on.champion.practice_state["active"]
+            assert on.champion.practice_state["cell"]["quantity"] == 1
+            assert mock_picks(tmp_path)[-1]["reason"] == NO_CHAMPION
             keep(tmp_path, at("2026-10-13 22:31:00"), policy_cell(OTHER))
             on.select(choose(PASSING), at("09:03:00"))  # the champion's cell is not the one passing
             assert on.champion.cells == [cell] and on.champion.practice_state["active"]
@@ -227,8 +240,13 @@ async def test_the_practice_is_picked_only_on_a_cost_map_and_a_champion_read_wit
                 1,
                 1,
             )
+            keep(tmp_path, at("2026-10-13 22:32:00"), policy_cell(BARRIER))
+            assert policies.crown(store.db, at("2026-10-13 22:33:00"), 2, "test", {})
+            on.select(choose(PASSING), at("09:03:30"))  # a champion cell: no practice
+            assert on.champion.cells == [cell] and not on.champion.practice_state["active"]
+            assert on.champion.practice_state["cell"] is None
             with store.db:  # the champion cannot be read
-                store.db.execute("UPDATE policies SET cells = 'broken' WHERE id = 1")
+                store.db.execute("UPDATE policies SET cells = 'broken' WHERE id = 2")
             on.select(practised(), at("09:04:00"))
             assert on.champion.cells == [] and not on.champion.practice_state["active"]
             assert mock_picks(tmp_path)[-1]["reason"] == NO_POLICY
@@ -447,8 +465,11 @@ async def test_a_champion_cell_back_stops_new_practice_and_the_practice_position
     """The practice of the direction's consensus buys its share at 10:00. At 10:01 a pick passes the
     barrier's breiman: the practice is picked no more, and the barrier's rise of 10:01 finds the
     account's one position taken (``holding``) while the champion's shadow buys it in paper. The
-    practice share is sold at its time barrier (10:04); the barrier's rise of 10:08 buys on KIS."""
+    practice share is sold at its time barrier (10:04); the barrier's rise of 10:08 buys on KIS. The
+    barrier's breiman is the champion's cell throughout (#469: nothing but the practice trades before
+    the first champion)."""
     fake, account = kis_mock
+    first_champion(tmp_path)
     start = choose(
         cost_map(
             [
