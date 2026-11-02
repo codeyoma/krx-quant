@@ -47,6 +47,15 @@ An algorithm the engine has already enrolled always runs, but for a daily kind's
 (#264): it runs only while ``admits`` lets it, so a new answer version, code or inputs have its
 walk-forward run again before it predicts again.
 
+Live, a running bar-close algorithm whose code changed is judged again (#454, ``revisions.py``):
+at each start the engine records the code each one runs (``revisions``); one whose code is not
+the revision it ran before (nor a reviewed refactor of it) goes back on probation once
+(``lifecycle.CODE_CHANGED``), retired ones aside. That probation counts from its first whole trading
+day, is never simulated, and becomes active only once the pre-validation of the new code (a
+scheduled job, on the recorded days after the change) has passed too; a refusal retires it at the
+next bar close, told once at the next review. The first start of this records each one's code as it
+runs and changes no status.
+
 The symbols' bars and reference prices, and the bars of the series that may lead them
 (``features.Leaders``: futures, indices, US daytime trades, ETFs), come from the Market
 View (``market_view.py``) as they stood at the bar close. Training on a recorded day goes
@@ -187,6 +196,8 @@ from krx_quant.kinds import (
 from krx_quant.kinds import NO_PREVIOUS as KIND_NO_PREVIOUS
 from krx_quant.kinds import Kind as PredictionKind
 from krx_quant.lifecycle import (
+    CODE_CHANGED,
+    CODE_REFUSED,
     REGISTERED,
     Review,
     Rules,
@@ -198,7 +209,7 @@ from krx_quant.lifecycle import (
     target_changed,
 )
 from krx_quant.lifecycle import stages as stages_now
-from krx_quant.market_calendar import MarketCalendar
+from krx_quant.market_calendar import MarketCalendar, first_whole_day
 from krx_quant.market_view import (
     FUTURES_SERIES,
     HORIZON,
@@ -207,7 +218,18 @@ from krx_quant.market_view import (
     MarketView,
     next_bar_close,
 )
-from krx_quant.predictions import NewKindPrediction, NewPrediction, Pending, PredictionStore, Score
+from krx_quant.predictions import (
+    REVISION_CHANGED,
+    REVISION_FIRST,
+    REVISION_PASSED,
+    REVISION_REFUSED,
+    NewKindPrediction,
+    NewPrediction,
+    Pending,
+    PredictionStore,
+    Revision,
+    Score,
+)
 from krx_quant.pricing import Direction, classify, flat_ticks, most_likely, tick_size
 from krx_quant.reference import Bar
 from krx_quant.signals import SENT, Blocked, Judged, Signals
@@ -217,6 +239,7 @@ from krx_quant.touch import TARGET_VERSION, WINDOW
 
 if TYPE_CHECKING:  # the pre-validation replays through this module: its type only
     from krx_quant.prevalidation import Refusal
+    from krx_quant.revisions import RevisionGate
 
 log = logging.getLogger(__name__)
 
@@ -269,6 +292,8 @@ Regimes = Callable[[date, datetime], str | None]
 
 # The ``runs`` kind of a pre-validation refusal told (#310): its detail is what was refused.
 REFUSED_RUN = "prevalidation_refused"
+# The ``runs`` kind of a refused revision told (#454): its detail is the revision's id.
+REVISION_REFUSED_RUN = "revision_refused"
 # Each day's algorithm review runs this long after the close, when everything is scored.
 REVIEW_AFTER_CLOSE = timedelta(minutes=10)
 # How far back a starting engine looks for a kind's predictions left without their answer.
@@ -407,6 +432,7 @@ class PredictionEngine:
         regimes: Regimes | None = None,
         admits: Admits | None = None,
         refused: Refused | None = None,
+        revisions: RevisionGate | None = None,
         commit: str = "unknown",
         review_rules: Rules | None = None,
         target_version: int = 1,
@@ -484,6 +510,9 @@ class PredictionEngine:
         }
         self._admits = admits  # without: every registered algorithm runs (replay, tests)
         self._refused = refused  # without: none refused, those not admitted wait (replay, tests)
+        # The code each running bar-close algorithm runs (#454); without: none kept (replay, tests).
+        self._revisions = revisions
+        self._revision_of: dict[str, Revision] = {}  # each one's latest revision, as stored
         self.algorithms: tuple[Algorithm, ...] = ()  # the registered ones that run, in order
         self.kind_algorithms: tuple[KindAlgorithm, ...] = ()  # likewise, of the other kinds
         self._feature_names: list[str] = []
@@ -555,6 +584,7 @@ class PredictionEngine:
                 seconds=self._budget.per_algorithm,
             )
         self._restart_on_target()
+        self._check_revisions()
         self._admit()
         self._record_models(self.models)
 
@@ -585,13 +615,114 @@ class PredictionEngine:
                 log.info("%s: %s -> probation (%s)", name, standing.status.value, reason)
             self.store.mark_target(version, now, _marked_as(kind))
 
+    def _check_revisions(self) -> None:
+        """At start (#454): record the code each enrolled bar-close algorithm runs, and put one whose
+        code changed since its last revision back on probation (``revisions.py``). One without a
+        revision yet (the first start of this, one never recorded) has its code recorded as its
+        first revision, its status as it is; a retired one with a revision is left as it was."""
+        if self._revisions is None:
+            return
+        standings = self.store.statuses()
+        self._revision_of = self.store.revisions()
+        now = self.clock.now()
+        for a in self._bar_close():
+            standing = standings.get(a.name)
+            if standing is None:
+                continue  # not enrolled: its first revision is recorded when it is (``_admit``)
+            last = self._revision_of.get(a.name)
+            if last is not None and standing.status is Status.RETIRED:
+                continue  # never revived: a later unretire and start find its code changed then
+            self._revise(a, last, now, standing.status)
+
+    def _revise(
+        self, algorithm: Algorithm | KindAlgorithm, last: Revision | None, now: datetime, status: Status
+    ) -> None:
+        """Record the code ``algorithm`` runs against its ``last`` revision (#454); ``status`` is its
+        status as read."""
+        assert self._revisions is not None
+        name, code = algorithm.name, self._revisions.code(algorithm)
+        keep = partial(self.store.add_revision, name, code.digest, code.target_version, code.inputs, now)
+        if last is None:
+            revision = keep(boundary=now, state=REVISION_FIRST)
+            log.info("%s: runs code %s, recorded as its first revision", name, code.digest)
+        elif last.code == code.digest:
+            return
+        elif (same := self._revisions.refactor(name, last.code, code.digest)) is not None:
+            revision = keep(
+                boundary=last.boundary,
+                state=last.state,
+                mapped_from=last.code,
+                verdict=last.verdict,
+                judged_at=last.judged_at,
+                detail=same.evidence,
+            )
+            log.info("%s: code %s -> %s, the same revision (%s)", name, last.code, code.digest, same.evidence)
+        else:
+            revision = keep(boundary=now, state=REVISION_CHANGED, restart=status)
+            log.info(
+                "%s: code %s -> %s: %s -> probation (%s)",
+                name,
+                last.code,
+                code.digest,
+                status.value,
+                CODE_CHANGED,
+            )
+        self._revision_of[name] = revision
+
+    def _judge_revisions(self) -> None:
+        """Keep the verdict of each changed revision's pre-validation once its report is in (#454):
+        a pass lets its probation make it active; a refusal retires it (told at the next review)."""
+        if self._revisions is None:
+            return
+        pending = [r for r in self._revision_of.values() if r.pending]
+        if not pending:
+            return
+        standings = self.store.statuses()
+        for revision in pending:
+            name = revision.algorithm
+            algorithm = self._bar_close_named(name)
+            verdict = None if algorithm is None else self._revisions.verdict(algorithm, revision.boundary)
+            if verdict is None:
+                continue
+            now = self.clock.now()
+            if verdict.passed:
+                self._revision_of[name] = self.store.judge_revision(revision, REVISION_PASSED, now, None)
+                log.info("%s: its new code %s passed its pre-validation", name, revision.code)
+                continue
+            standing = standings.get(name)
+            retire = None if standing is None or standing.status is Status.RETIRED else standing.status
+            reason = f"{CODE_REFUSED}: {verdict.why}"
+            self._revision_of[name] = self.store.judge_revision(
+                revision, REVISION_REFUSED, now, verdict.why, retire=retire, reason=reason
+            )
+            log.info("%s: %s -> retired (%s)", name, retire.value if retire else "retired", reason)
+
+    def _bar_close(self) -> list[Algorithm | KindAlgorithm]:
+        """The registered bar-close algorithms: the direction's, then the other kinds'."""
+        return [*self.registered, *self.kind_registered]
+
+    def _bar_close_named(self, name: str) -> Algorithm | KindAlgorithm | None:
+        return next((a for a in self._bar_close() if a.name == name), None)
+
+    def revising(self) -> list[tuple[Algorithm | KindAlgorithm, Revision]]:
+        """The bar-close algorithms not retired whose changed code waits for its pre-validation
+        (#454), in registration order, each with its revision: what the scheduled job runs."""
+        retired = _with_status(self.store.statuses(), Status.RETIRED)
+        return [
+            (a, r)
+            for a in self._bar_close()
+            if (r := self._revision_of.get(a.name)) is not None and r.pending and a.name not in retired
+        ]
+
     def _record_models(self, models: Mapping[str, Model]) -> None:
         """Keep the target each of ``models`` was trained on, for the reviews (#170)."""
         self.store.record_models([(name, m.version, m.target_version) for name, m in models.items()])
 
     def _admit(self) -> None:
         """Run the algorithms enrolled before and the new ones admitted; a new one starts on
-        probation."""
+        probation, a new bar-close one with its code as its first revision (#454). The verdicts of
+        changed revisions' pre-validations are kept first (``_judge_revisions``)."""
+        self._judge_revisions()
         known = self.store.statuses()
         admitted = [a for a in self.registered if a.name in known or self._admits is None or self._admits(a)]
         kind_admitted = [
@@ -622,9 +753,14 @@ class PredictionEngine:
         ):
             return
         running: list[Algorithm | KindAlgorithm] = [*admitted, *kind_admitted]
-        for a in [*running, *daily_admitted]:
+        for a in running:
             if a.name not in known:
                 self.store.add_status(a.name, self.clock.now(), None, Status.PROBATION, REGISTERED)
+                if self._revisions is not None and a.name not in self._revision_of:
+                    self._revise(a, None, self.clock.now(), Status.PROBATION)
+        for d in daily_admitted:
+            if d.name not in known:
+                self.store.add_status(d.name, self.clock.now(), None, Status.PROBATION, REGISTERED)
         self.algorithms = tuple(admitted)
         self.kind_algorithms = tuple(kind_admitted)
         self.daily_algorithms = tuple(daily_admitted)
@@ -869,7 +1005,9 @@ class PredictionEngine:
 
     async def _review(self, at: datetime) -> None:
         """Change statuses by the lifecycle rules, alert retirement candidates, and tell the
-        predictions the budgets cost that day."""
+        predictions the budgets cost that day. An algorithm whose changed code has not passed its
+        pre-validation stays on probation whatever its review (#454)."""
+        self._judge_revisions()
         standings = self.store.statuses()
         alerted = {
             name
@@ -934,7 +1072,18 @@ class PredictionEngine:
                 simulated=self.simulated(daily),
             )
             result = Review(result.changes + judged.changes, result.candidates + judged.candidates)
+        held = {r.algorithm for r in self._revision_of.values() if r.held}
+        changes = []
         for c in result.changes:
+            if c.algorithm in held and c.status is Status.ACTIVE:
+                log.info(
+                    "%s: stays on probation (%s), the pre-validation of its new code has not passed",
+                    c.algorithm,
+                    c.reason,
+                )
+            else:
+                changes.append(c)
+        for c in changes:
             # Only from the status reviewed: a retire command may have landed meanwhile.
             if self.store.change_status(
                 c.algorithm, at, c.previous, c.status, c.reason, simulated=c.simulated
@@ -972,6 +1121,20 @@ class PredictionEngine:
             )
             if await self._deliver(text):  # else told at the next review
                 self.store.add_run(REFUSED_RUN, at, name, refusal.judged)
+        # A revision its pre-validation refused, once (#454): kept in ``runs`` by its id.
+        for revision in self._revision_of.values():
+            name = revision.algorithm
+            if revision.verdict != REVISION_REFUSED:
+                continue
+            if self.store.last_detail(REVISION_REFUSED_RUN, name) == str(revision.id):
+                continue
+            text = (
+                f"코드 변경 사전 검증 거부: {name} ({revision.detail}). 코드가 바뀐 뒤"
+                f"({revision.boundary.astimezone(KST):%Y-%m-%d %H:%M})의 녹화일로 다시 판정해 거부되어 "
+                f"은퇴했습니다. 리포트는 서버의 state/prevalidations/{name}.json"
+            )
+            if await self._deliver(text):  # else told at the next review
+                self.store.add_run(REVISION_REFUSED_RUN, at, name, str(revision.id))
         unsaid = [name for name in self.held() if name not in self._told_held]
         if unsaid:
             kinds = sorted(
@@ -992,7 +1155,7 @@ class PredictionEngine:
         await self._report_budgets(at)
         await self._refit_weights(at)
         # Last: a review that failed part way is run again after a restart.
-        self.store.add_run("review", at, None, f"{len(result.changes)} status changes")
+        self.store.add_run("review", at, None, f"{len(changes)} status changes")
 
     async def _report_budgets(self, at: datetime) -> None:
         """Tell the reviewed day's predictions the time and CPU budgets cost, if any: an
@@ -1043,12 +1206,19 @@ class PredictionEngine:
             return day + timedelta(days=1)
         return day
 
+    def _first_day(self, standing: Standing) -> date:
+        """The first day ``standing`` counts for (``_first_counted``); on a probation for new code
+        (#454, ``CODE_CHANGED``), its first whole trading day: the revision's predictions only."""
+        if standing.status is Status.PROBATION and standing.reason == CODE_CHANGED:
+            return first_whole_day(self.calendar, standing.since)
+        return self._first_counted(standing.since)
+
     def _counted_from(self, name: str, standing: Standing) -> date | None:
-        """The first day ``name``'s status counts for (``_first_counted``); on probation or as
+        """The first day ``name``'s status counts for (``_first_day``); on probation or as
         a clone, no earlier than the first trading day it predicted with a model trained on the
         touch target since (#170): the day the morning swap (or a fit) installed one. None
         while it has not: a training that failed or a holiday counts nothing."""
-        first = self._first_counted(standing.since)
+        first = self._first_day(standing)
         if standing.status not in (Status.PROBATION, Status.CLONE):
             return first
         started = self.store.first_on_target(name, standing.since, TARGET_VERSION)
@@ -1058,7 +1228,7 @@ class PredictionEngine:
         """``_counted_from`` of a kind's algorithm (#179): on probation or as a clone, from the
         first trading day it predicted with a model trained on the kind's answers (its answer
         version); its defaults' days are not counted, as a new direction algorithm's are not."""
-        first = self._first_counted(standing.since)
+        first = self._first_day(standing)
         if standing.status not in (Status.PROBATION, Status.CLONE):
             return first
         started = self.store.first_kind_on_target(name, standing.since, kind.answer_version)

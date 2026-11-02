@@ -49,12 +49,15 @@ from krx_quant.scheduled import (
     JobState,
     Night,
     Ran,
+    Revising,
     Scheduler,
     prevalidation_job_name,
     prevalidation_order,
     prevalidation_reports,
     prevalidation_tonight,
     prevalidation_turn,
+    revision_job_name,
+    revision_turn,
 )
 from krx_quant.touch import TARGET_VERSION
 from tests.fake_github import REPO, TOKEN, fake_github
@@ -82,12 +85,16 @@ EVERYONE: dict[str, Algorithm | KindAlgorithm] = {
     **{a.name: a for a in ALGORITHMS},
     **{a.name: a for a in KIND_ALGORITHMS},
 }
-# The bar-close algorithms' (the daily kinds', #264, run apart: ``test_daily_prevalidation``).
+# The bar-close algorithms' (the daily kinds', #264, run apart: ``test_daily_prevalidation``), first
+# ones (a changed code's, #454, below).
 PREVALIDATIONS = [
     j
     for j in JOBS
-    if j.command[0] == "prevalidate" and j.command[1] not in {a.name for a in DAILY_ALGORITHMS}
+    if j.command[0] == "prevalidate"
+    and j.command[1] not in {a.name for a in DAILY_ALGORITHMS}
+    and "--revision" not in j.command
 ]
+REVISIONS = [j for j in JOBS if "--revision" in j.command]
 NEW = "fedcba9876543210fedc"  # a later deploy's commit
 TUESDAY, WEDNESDAY = date(2026, 10, 20), date(2026, 10, 21)
 
@@ -513,3 +520,111 @@ async def test_the_job_runs_the_real_command(empty_server: Path) -> None:
         # No verdict on this code: not again until a deploy; breiman's turn the next night.
         await run_night(SATURDAY, [mandelbrot])
         assert len(hub.bodies(204)) == 1
+
+
+# A running algorithm's changed code (#454): pre-validated on the days after the change, first in
+# the night's one turn.
+
+CHANGED_ON = date(2026, 10, 5)  # a Monday, the week before the nights here
+CHANGED = at(CHANGED_ON, "06:00")  # the deploy that changed it: a revision's boundary
+
+
+def revising(
+    recorded: int, made_at: datetime | None = None, *, days: int = MIN_DAYS, passed: bool = False
+) -> Revising:
+    """A changed revision from CHANGED_ON's morning with ``recorded`` days recorded since, its report made
+    at ``made_at`` for it if given (on the code it runs, on ``days`` days, ``passed`` or not)."""
+    found = None if made_at is None else report(made_at=made_at, days=days, passed=passed)
+    return Revising(CHANGED, CHANGED_ON, recorded, found)
+
+
+def revision_night(
+    day: date,
+    changed: dict[str, Revising],
+    *,
+    waiting: Sequence[str] = ORDER,
+    runs: dict[str, JobRecord] | None = None,
+    commit: str = COMMIT,
+) -> Night:
+    """A night with ``changed`` revisions, ``waiting`` algorithms and ``runs`` by job name."""
+    facts = Facts(recorded_days=30, waiting=tuple(waiting), revising=changed)
+    return Night(day, CALENDAR.is_trading_day(day), commit, None, dict(runs or {}), facts)
+
+
+def revised_tonight(n: Night) -> str | None:
+    """The changed code pre-validated tonight, as the jobs' conditions see it: one at most, and
+    then no first pre-validation."""
+    due = [j.command[1] for j in REVISIONS if j.due(n)]
+    assert len(due) <= 1, due
+    return due[0] if due else None
+
+
+def test_every_bar_close_algorithm_has_a_revision_job_turing_too() -> None:
+    registry = [a.name for a in ALGORITHMS] + [a.name for a in KIND_ALGORITHMS]
+    assert [j.command for j in REVISIONS] == [("prevalidate", name, "--revision") for name in registry]
+    assert {"turing", "newton", "neyman"} <= {j.command[1] for j in REVISIONS}
+    for job in REVISIONS:
+        name = job.command[1]
+        assert job.name == revision_job_name(name)
+        assert job.timeout == timedelta(hours=6 if name.startswith("breiman") else 5)
+        assert [t.issue for t in job.targets] == [PREVALIDATION_ISSUE]
+        assert job.report == f"prevalidations/{name}.json"
+        assert ("#283에 요약한다" in job.targets[0].note) == (name == "neyman")
+    names = [j.name for j in JOBS]
+    # After the bar-close simulation (it gives way to them as to any pre-validation), before the
+    # first pre-validations: its algorithm runs already and cannot be made active before it passes.
+    assert names.index("simulate-bar-close-298") < names.index(REVISIONS[0].name)
+    assert names.index(REVISIONS[-1].name) < names.index(PREVALIDATIONS[0].name)
+    [simulation] = [j for j in JOBS if j.name == "simulate-bar-close-298"]
+    assert simulation.gives_way_to is not None and all(simulation.gives_way_to(j) for j in REVISIONS)
+
+
+def test_a_changed_code_is_pre_validated_once_ten_days_are_recorded_after_the_change() -> None:
+    assert revised_tonight(revision_night(FRIDAY, {"turing": revising(MIN_DAYS - 1)})) is None
+    assert revision_turn(revision_night(FRIDAY, {"turing": revising(MIN_DAYS - 1)}), "turing") is None
+    assert revised_tonight(revision_night(FRIDAY, {"turing": revising(MIN_DAYS)})) == "turing"
+    assert revised_tonight(revision_night(FRIDAY, {})) is None, "no changed code"
+    # Two in the registries' order: newton first, turing the next night.
+    both = {"turing": revising(MIN_DAYS), "newton": revising(MIN_DAYS)}
+    assert revised_tonight(revision_night(FRIDAY, both)) == "newton"
+    ran_newton = {revision_job_name("newton"): ran(FRIDAY, OK)}
+    left = {**both, "newton": revising(MIN_DAYS, at(FRIDAY, "23:10"))}  # its verdict
+    assert revised_tonight(revision_night(FRIDAY, left, runs=ran_newton)) is None, "one a night"
+    assert revised_tonight(revision_night(SATURDAY, left, runs=ran_newton)) == "turing"
+
+
+def test_it_takes_the_night_s_one_turn_before_the_algorithms_waiting() -> None:
+    changed = {"neyman": revising(MIN_DAYS)}
+    n = revision_night(FRIDAY, changed)
+    assert revised_tonight(n) == "neyman"
+    assert prevalidation_tonight(n, ORDER) == "mandelbrot", "asked before it ran"
+    after = revision_night(FRIDAY, changed, runs={revision_job_name("neyman"): ran(FRIDAY, OK)})
+    assert prevalidation_tonight(after, ORDER) is None, "it ran tonight: the waiting wait a night"
+    # A first pre-validation already ran tonight (a restart at night): the changed code waits too.
+    first = revision_night(FRIDAY, changed, runs={prevalidation_job_name("mandelbrot"): ran(FRIDAY, OK)})
+    assert revised_tonight(first) is None
+
+
+def test_a_changed_code_s_verdict_is_not_asked_again_a_run_without_one_waits_for_a_deploy() -> None:
+    judged = {"turing": revising(MIN_DAYS, at(FRIDAY, "23:10"))}
+    tried = {revision_job_name("turing"): ran(FRIDAY, OK)}
+    for commit in (COMMIT, NEW):
+        assert revision_turn(revision_night(SATURDAY, judged, runs=tried, commit=commit), "turing") is None
+    # A look on fewer days by hand since is no verdict: the next night asks for one again.
+    look = {"turing": revising(MIN_DAYS, at(SATURDAY, "10:00"), days=5)}
+    assert revision_turn(revision_night(SUNDAY, look, runs=tried), "turing") == FRESH
+    # It crashed: no report for this revision. The same code waits; a deploy asks again, after the
+    # changed codes not tried yet.
+    crashed = {revision_job_name("turing"): ran(FRIDAY)}
+    none = {"turing": revising(MIN_DAYS), "newton": revising(MIN_DAYS)}
+    tried_newton = {**crashed, revision_job_name("newton"): ran(THURSDAY, OK)}
+    none["newton"] = revising(MIN_DAYS, at(THURSDAY, "23:10"))
+    assert revision_turn(revision_night(SATURDAY, none, runs=crashed), "turing") is None
+    assert revision_turn(revision_night(SATURDAY, none, runs=crashed, commit=NEW), "turing") == AGAIN
+    assert revised_tonight(revision_night(SATURDAY, none, runs=tried_newton, commit=NEW)) == "turing"
+    # A run before this revision began was an earlier revision's: this one is fresh.
+    earlier = {revision_job_name("turing"): ran(CHANGED_ON - timedelta(days=3))}
+    assert (
+        revision_turn(revision_night(SATURDAY, {"turing": revising(MIN_DAYS)}, runs=earlier), "turing")
+        == FRESH
+    )

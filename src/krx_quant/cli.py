@@ -58,7 +58,7 @@ from krx_quant.krx_etf_probe import probe_krx_etf
 from krx_quant.lifecycle import Status
 from krx_quant.live_probe import probe_live_account
 from krx_quant.macro import run_macro
-from krx_quant.market_calendar import calendar_store
+from krx_quant.market_calendar import calendar_store, first_whole_day
 from krx_quant.member_frames_probe import probe_member_frames
 from krx_quant.model_shelf import Shelf
 from krx_quant.nav_probe import probe_nav
@@ -73,7 +73,7 @@ from krx_quant.order_probe import probe_kis_orders
 from krx_quant.poisson_link import REPORT as POISSON_LINK_REPORT
 from krx_quant.poisson_link import lines as poisson_link_lines
 from krx_quant.poisson_link import poisson_link_experiment
-from krx_quant.predictions import DB_NAME, PredictionStore
+from krx_quant.predictions import DB_NAME, REVISION_CHANGED, PredictionStore, latest_revisions, read_only
 from krx_quant.prevalidation import (
     PREVALIDATION_DAYS,
     REGISTERED_BEFORE,
@@ -489,12 +489,25 @@ def _train(day: date | None, from_store: bool) -> int:
     return 0
 
 
-def _prevalidate(name: str, days: int) -> int:
+def _prevalidate(name: str, days: int, revision: bool = False) -> int:
     settings = Settings.from_env(require_kis=False)
     if daily_algorithm(name) is not None:  # a daily kind's: its walk-forward (#264)
+        if revision:
+            print(f"{name} is a daily kind's: --revision is for the bar-close algorithms", file=sys.stderr)
+            return 1
         return _prevalidate_daily(settings, name)
+    boundary = since = None
+    if revision:  # the revision its code changed to (#454): judged on the days after the change
+        with read_only(settings.state_dir / DB_NAME) as db:
+            changed = None if db is None else latest_revisions(db).get(name)
+        if changed is None or changed.state != REVISION_CHANGED:
+            print(f"{name} runs no changed code the engine recorded: no revision to judge", file=sys.stderr)
+            return 1
+        boundary = changed.boundary
+        since = first_whole_day(calendar_store(settings).calendar, boundary)
+        print(f"{name}: code {changed.code}, run since {boundary.isoformat()}: recorded days from {since}")
     try:
-        result = asyncio.run(prevalidate(settings, name, days=days))
+        result = asyncio.run(prevalidate(settings, name, days=days, revision=boundary, since=since))
     except (
         FileNotFoundError,
         RegistrationError,
@@ -516,7 +529,13 @@ def _prevalidate(name: str, days: int) -> int:
         print(line)
     print(f"report: {report_path(settings.state_dir, name)}")
     print(f"predictions: {result.db} (not in the official record)")
-    if name in REGISTERED_BEFORE:
+    if revision:
+        print(
+            f"the engine keeps {name} on probation; its review makes it active only now it passed"
+            if result.passed
+            else f"the engine retires {name} at its next bar close, unless this was a look on fewer days"
+        )
+    elif name in REGISTERED_BEFORE:
         print(f"{name} was registered before pre-validation: the engine runs it either way")
     elif result.passed:
         print(f"the engine starts {name} on probation at its next bar close, unless it runs it already")
@@ -1032,6 +1051,11 @@ def main(argv: list[str] | None = None) -> int:
         default=PREVALIDATION_DAYS,
         help=f"recorded trading days to replay (default: {PREVALIDATION_DAYS})",
     )
+    prevalidate_cmd.add_argument(
+        "--revision",
+        action="store_true",
+        help="judge the running algorithm's changed code on the recorded days after the change (#454)",
+    )
     climate_prior_cmd = sub.add_parser(
         "climate-prior",
         help="compare the climate baseline, shannon and shannon with each slot's class frequencies on"
@@ -1307,7 +1331,7 @@ def _command(args: argparse.Namespace) -> int:
     elif args.command == "fit":
         return _fit(args.algorithm, args.days)
     elif args.command == "prevalidate":
-        return _prevalidate(args.algorithm, args.days)
+        return _prevalidate(args.algorithm, args.days, args.revision)
     elif args.command == "climate-prior":
         return _climate_prior(args.days)
     elif args.command == "poisson-link":

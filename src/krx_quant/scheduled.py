@@ -3,9 +3,10 @@ leaves the result as a comment on GitHub issues, where people and agents read it
 
 The jobs are listed here (``JOBS``), so what runs on the server, and when, is reviewed in
 a PR; the pre-validations (#204) are built from the algorithm registries, one for each
-algorithm registered after pre-validation existed. Each has a name (its key in the state
-file), a condition asked every night (``Night``: the day, whether it trades, this job's
-last run, every job's, and what the engine knows, ``Facts``), the command (``krx-quant``
+algorithm registered after pre-validation existed, and one for each bar-close algorithm's changed
+code (#454). Each has a name (its key in the state file), a condition asked every night
+(``Night``: the day, whether it trades, this job's last run, every job's, and what the engine
+knows, ``Facts``), the command (``krx-quant``
 arguments), a time limit, the issues its result goes to (each with the part of the output
 it gets), the files it writes that go with the result (``Attachment``) and the labels it
 sets.
@@ -72,14 +73,21 @@ from krx_quant.github import GitHub, GitHubError, comment_body
 from krx_quant.holdout import DAYS as HOLDOUT_DAYS
 from krx_quant.holdout import days_in_window
 from krx_quant.kind_registry import DAILY_KINDS, daily_kind_named
-from krx_quant.market_calendar import MarketCalendar
+from krx_quant.market_calendar import MarketCalendar, first_whole_day
 from krx_quant.night_probe import evening, subscribed_nights
 from krx_quant.nightly_hit_rates import HIT_RATE_NIGHTS, nights_with_hit_rates
 from krx_quant.notify import Alerts
 from krx_quant.order_probe import NO_KEYS
 from krx_quant.poisson_link import REPORT as POISSON_LINK_REPORT
-from krx_quant.predictions import DB_NAME
-from krx_quant.prevalidation import MIN_DAYS, REGISTERED_BEFORE, LastReport, last_report, report_path
+from krx_quant.predictions import DB_NAME, Revision
+from krx_quant.prevalidation import (
+    MIN_DAYS,
+    REGISTERED_BEFORE,
+    LastReport,
+    last_report,
+    report_path,
+    revision_report,
+)
 from krx_quant.process_log import KRX_QUANT, Child, run_logged
 from krx_quant.process_log import Ran as Ran  # a job's process, once it ended
 from krx_quant.redaction import redact, secrets_of
@@ -276,6 +284,16 @@ class JobState:
 
 
 @dataclass(frozen=True)
+class Revising:
+    """A running bar-close algorithm's changed code, waiting for its pre-validation (#454)."""
+
+    boundary: datetime  # when the engine first ran it
+    since: date  # its first whole trading day: the days it is judged on start there
+    recorded_days: int  # the recorded days from ``since``, as ``prevalidate --revision`` counts them
+    report: LastReport | None  # its latest report if made for this revision; None without one
+
+
+@dataclass(frozen=True)
 class Facts:
     """What the engine knows that a condition may ask, read once a night."""
 
@@ -299,6 +317,9 @@ class Facts:
     pending_answers: tuple[str, ...] = ()
     # The bar-close kinds' algorithms on a probation that waits for its simulation (#298).
     simulating: tuple[str, ...] = ()
+    # The running bar-close algorithms whose changed code waits for its pre-validation (#454,
+    # ``PredictionEngine.revising``), by name.
+    revising: Mapping[str, Revising] = field(default_factory=dict)
     # Whether ``KRX_OPENAPI_KEY`` is set on this server (#305): the KRX Open API probe waits for it.
     krx_openapi: bool = False
     # Whether the trader's KIS key, secret and account are set (``Settings.trader_kis``, #403): the
@@ -988,6 +1009,34 @@ def prevalidation_reports(
     return {name: report for name, report in reports.items() if report is not None}
 
 
+def revising_facts(
+    settings: Settings,
+    calendar: MarketCalendar,
+    now: datetime,
+    revising: Sequence[tuple[Algorithm | KindAlgorithm, Revision]],
+) -> dict[str, Revising]:
+    """Each of ``revising`` (``PredictionEngine.revising``) as the revision jobs ask (#454): its first
+    whole trading day, the recorded days from it and its report made for this revision."""
+    if not revising:
+        return {}
+    recorded = [
+        d
+        for d in finished_days(settings.data_dir, settings.symbols, now)
+        if is_recorded(settings.data_dir, d, settings.symbols)
+    ]
+    out = {}
+    for algorithm, revision in revising:
+        since = first_whole_day(calendar, revision.boundary)
+        found = revision_report(settings.state_dir, algorithm, revision.boundary, settings.target_version)
+        out[algorithm.name] = Revising(
+            revision.boundary,
+            since,
+            sum(1 for d in recorded if d >= since),
+            None if found is None else found[0],
+        )
+    return out
+
+
 async def read_facts(
     settings: Settings, calendar: MarketCalendar, clock: SessionClock, engine: PredictionEngine
 ) -> Facts:
@@ -1008,6 +1057,7 @@ async def read_facts(
     pending = await asyncio.to_thread(pending_inputs, daily, settings.state_dir, settings.symbols)
     answers = await asyncio.to_thread(pending_answers, settings, calendar, clock.now())
     simulating, simulating_daily = engine.to_simulate()  # the engine's database: on this thread
+    revising = engine.revising()  # likewise (#454)
     return Facts(
         recorded,
         tuple(engine.waiting()),
@@ -1017,6 +1067,7 @@ async def read_facts(
         tuple(pending),
         simulating_daily=tuple(simulating_daily),
         simulating=tuple(simulating),
+        revising=await asyncio.to_thread(revising_facts, settings, calendar, clock.now(), revising),
         pending_answers=tuple(answers),
         krx_openapi=settings.krx_openapi_key is not None,
         trader_kis=settings.trader_kis,
@@ -2239,8 +2290,9 @@ def prevalidation_turn(night: Night, algorithm: str) -> str | None:
 
 def prevalidation_tonight(night: Night, order: Sequence[str]) -> str | None:
     """The algorithm pre-validated tonight, of ``order``: none if one was tonight already
-    (whatever came of it); else the first FRESH, else the first AGAIN."""
-    if any(
+    (whatever came of it), a changed code's too (#454, ``revision_tonight``); else the first FRESH,
+    else the first AGAIN."""
+    if _revision_ran_tonight(night) or any(
         (record := night.records.get(prevalidation_job_name(name))) is not None and record.day == night.day
         for name in order
     ):
@@ -2278,6 +2330,104 @@ def _prevalidation_note(algorithm: str) -> str:
     """The note on an algorithm's pre-validation result: what passing and refusing do, and
     what to do with what it measured besides the checks (``_DIAGNOSTICS_NOTES``)."""
     return " ".join(n for n in (_PREVALIDATION_NOTE, _DIAGNOSTICS_NOTES.get(algorithm)) if n)
+
+
+# The pre-validations of changed code (#454, ``revisions.py``): a running bar-close algorithm whose
+# code changed is back on probation, and is pre-validated on the recorded days after the change only
+# (``prevalidate <name> --revision``: from its first whole trading day), once ``MIN_DAYS`` of them are
+# recorded. Every check, as a first pre-validation's. It shares the one a night of the bar-close
+# pre-validations (a run replays the same days beside the live engine) and comes first: its algorithm
+# runs already, and its probation cannot make it active before it passed; the waiting ones run on the
+# nights after. One a night among them, in the registries' order (turing too: its exemption is its
+# first revision's). Its verdict is not asked for again; a run that left none runs again after a
+# deploy, after the ones not tried yet, as a first pre-validation does. Its result goes to #204.
+REVISION_JOB = "prevalidate-revision-"
+
+
+def revision_job_name(algorithm: str) -> str:
+    return f"{REVISION_JOB}{algorithm}"
+
+
+def _revision_ran_tonight(night: Night) -> bool:
+    return any(name.startswith(REVISION_JOB) and r.day == night.day for name, r in night.records.items())
+
+
+def revision_turn(night: Night, algorithm: str) -> str | None:
+    """Whether ``algorithm``'s changed code would be pre-validated tonight (#454): FRESH, AGAIN (its
+    last run for this revision left no verdict, on older code: it waits for the FRESH ones), or None
+    (not tonight: none waits, too few days after the change, or judged)."""
+    revising = night.facts.revising.get(algorithm)
+    if revising is None or revising.recorded_days < MIN_DAYS:
+        return None
+    report = revising.report
+    if report is not None and report.judged:
+        return None  # the engine keeps its verdict at its next bar close
+    record = night.records.get(revision_job_name(algorithm))
+    if record is None or record.outcome not in (OK, FAILED) or record.started_at < revising.boundary:
+        return FRESH  # never ran for this revision, or a restart cut it
+    if (
+        report is not None
+        and not report.current
+        and report.made_at is not None
+        and report.made_at >= record.started_at
+    ):
+        return FRESH  # the run left its report, and the target has changed since
+    ended = record.started_at + timedelta(seconds=record.seconds or 0.0)
+    if report is not None and report.made_at is not None and report.made_at > ended:
+        return FRESH  # a look by hand since replaced its verdict
+    if record.commit == night.commit:
+        return None  # it ran on this code without a verdict: another deploy may give one
+    return AGAIN
+
+
+def revision_tonight(night: Night, order: Sequence[str]) -> str | None:
+    """The algorithm of ``order`` whose changed code is pre-validated tonight (#454): none if a
+    bar-close pre-validation (a first one or a changed code's) ran tonight; else the first FRESH,
+    else the first AGAIN."""
+    if _revision_ran_tonight(night) or any(
+        (record := night.records.get(prevalidation_job_name(name))) is not None and record.day == night.day
+        for name in order
+    ):
+        return None
+    turns = [(name, revision_turn(night, name)) for name in order]
+    return next((n for n, t in turns if t == FRESH), None) or next((n for n, t in turns if t == AGAIN), None)
+
+
+def _revision_due(algorithm: str, order: tuple[str, ...]) -> Callable[[Night], bool]:
+    def due(night: Night) -> bool:
+        return revision_tonight(night, order) == algorithm
+
+    return due
+
+
+def revision_jobs(names: Sequence[str]) -> tuple[Job, ...]:
+    """A job pre-validating the changed code of each bar-close algorithm of ``names`` (the
+    registries' order), those registered before pre-validation too (#454)."""
+    order = tuple(names)
+    return tuple(
+        Job(
+            name=revision_job_name(name),
+            due=_revision_due(name, order),
+            command=("prevalidate", name, "--revision"),
+            timeout=PREVALIDATION_TIMEOUTS.get(name, PREVALIDATION_TIMEOUT),
+            targets=(Target(PREVALIDATION_ISSUE, note=_revision_note(name)),),
+            attach=(Attachment(f"리포트 state/{_report_of(name)}", _report_of(name)),),
+            report=_report_of(name),
+        )
+        for name in order
+    )
+
+
+_REVISION_NOTE = (
+    "코드가 바뀐 돌고 있는 알고리즘의 사전 검증(#454): 코드가 바뀐 뒤 첫 온전한 거래일부터의 녹화일만 "
+    "재생했다(검사는 처음 사전 검증과 같다). 거부(`refused`)되면 엔진이 다음 봉 마감에 은퇴시키고 다음 15:40 "
+    "점검에 한 번 알린다. 통과(`passed`)만으로는 정식이 되지 않는다: 수습은 이어지고, 실시간 수습의 판정일 "
+    "판정도 통과해야 정식이다. 같은 코드로는 다시 돌지 않는다."
+)
+
+
+def _revision_note(algorithm: str) -> str:
+    return " ".join(n for n in (_REVISION_NOTE, _DIAGNOSTICS_NOTES.get(algorithm)) if n)
 
 
 # The daily kinds' algorithms' pre-validations (#264): a walk-forward over ten years of KRX day
@@ -2636,9 +2786,10 @@ TURING_PRIOR = Job(
                 "에이전트가 이 출력으로 #448의 판정 규칙을 보고, turing에 넣을지에 대한 안을 이슈에 "
                 "남긴다. 규칙은 돌리기 전에 정했다: (c), (d), (e) 중 (b)보다 낫고((b) 대비 짝 lift가 "
                 '0보다 크고) 기후 대비 거래일 하한이 (b)보다 높은 팔이 "후보"다. 후보도 바로 turing에 '
-                "넣지 않는다. 넣으면 코드 digest가 바뀌어 사전 검증이 다시 돌고, 최종 판정은 그 뒤의 "
-                "날들로 한다. 사용자가 정한다. 출력에는 시세 값이 없다(날짜, 개수, 비율, lift, 이득 "
-                "몫만. σ̂₄ 값과 경계도 없다)."
+                "넣지 않는다. 넣으면 turing의 코드 digest가 바뀌어 turing이 수습으로 돌아가고, 바뀐 뒤 "
+                "녹화일 10일로 `prevalidate-revision-turing`이 다시 판정한다. 정식은 그것과 실시간 수습을 "
+                "모두 통과해야 된다(#454). 사용자가 정한다. 출력에는 시세 값이 없다(날짜, 개수, 비율, "
+                "lift, 이득 몫만. σ̂₄ 값과 경계도 없다)."
             ),
         ),
     ),
@@ -2685,6 +2836,7 @@ JOBS: tuple[Job, ...] = (
     ),
     DAILY_SIMULATION,
     BAR_CLOSE_SIMULATION,
+    *revision_jobs([*(a.name for a in ALGORITHMS), *(a.name for a in KIND_ALGORITHMS)]),
     *prevalidation_jobs([*(a.name for a in ALGORITHMS), *(a.name for a in KIND_ALGORITHMS)]),
     CLIMATE_PRIOR,
     POISSON_LINK,
