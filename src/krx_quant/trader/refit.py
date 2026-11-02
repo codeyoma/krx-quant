@@ -14,7 +14,7 @@ trader reads it at 08:30, ``selection.pick``: ``Selection.named``), whatever its
 map's hit rates describe, and the replayed one-share net decides. Each is tried at every θ of the
 grid; the fit keeps a cell at one θ, or leaves it out with why.
 
-> **바뀜** (2026-11-03, #472): the cells passing the cost map at a market order's round trip alone
+> **바뀜** (2026-11-03, #480): the cells passing the cost map at a market order's round trip alone
 > were fitted, in its rank (the hit rate's lower bound less p*) → every cell it names, ranked by the
 > fit. 이유: spec #468 3 "진입": the cost map's pass is no longer a condition.
 
@@ -59,7 +59,7 @@ challenges, #399).
 **Development evidence.** The cells and θ are chosen on the days they are judged on, so a policy kept
 is a challenger alone: it becomes the champion only by its forward shadow record (``promotion.py``).
 
-> **바뀜** (2026-11-03, #472): the cells were fitted one at a time in the cost map's rank, each at
+> **바뀜** (2026-11-03, #480): the cells were fitted one at a time in the cost map's rank, each at
 > the point of the grid whose replayed policy grew the capital most (Σ log(1 + net ÷ capital)), kept
 > when it made ``MIN_TRADES`` replayed trades there and grew it more than leaving it out
 > (``few_trades``, ``no_gain``), ties going to the trader's default θ then the higher; a pass a cell →

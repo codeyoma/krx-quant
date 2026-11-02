@@ -17,7 +17,7 @@ cell whose verdict at a market order's round trip (``verdict.market``) is ``pass
 lower bound above the breakeven p*) is also a pick (``Selection.picks``): what the cost map alone
 would trade, kept as a diagnosis (``no_pass`` when none passes) and no longer a condition.
 
-> **바뀜** (2026-11-03, #472): a cell traded only when it passed (``fail``, ``few`` and no verdict
+> **바뀜** (2026-11-03, #480): a cell traded only when it passed (``fail``, ``few`` and no verdict
 > never traded), and a pass whose f* was not above 0 was not picked → the cost map's verdict is a
 > diagnosis; the champion's cells trade. 이유: spec #468 3 "진입": the nightly fit enters a cell by
 > the lower bound of its replayed one-share net instead.

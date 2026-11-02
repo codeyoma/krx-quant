@@ -37,7 +37,7 @@ map's figures where it names the cell (``Selection.named``) and none where it do
 once promoted (#400). An empty champion trades nothing. Before the first champion nothing trades
 (#469, ``NO_CHAMPION``), nor while the cost map cannot be read (``NO_COST_MAP``).
 
-> **바뀜** (2026-11-03, #472): the champion's cells traded only among those the cost map passed at a
+> **바뀜** (2026-11-03, #480): the champion's cells traded only among those the cost map passed at a
 > market order's round trip (a necessary condition), and a cell the cost map did not name that day
 > did not trade (``OFF_MAP``) → the champion's cells trade, named or not. 이유: spec #468 3 "진입":
 > the execution lower bound of the nightly fit replaces the cost map's pass.
