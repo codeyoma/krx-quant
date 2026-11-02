@@ -273,6 +273,34 @@ def test_the_daily_limit_sells_and_stops_the_replay_as_it_does_the_paper_trader(
     assert done.results[0].skipped == {DAILY_LIMIT: 1}
 
 
+def test_a_buy_whose_own_quote_reaches_the_daily_limit_is_sold_on_it_as_the_paper_trader_sells_it(
+    tmp_path: Path,
+) -> None:
+    """The day's realized −96,645.96 won (the gap's stop at 59,500), nine shares bought at 70,100 against
+    a bid of 69,860: open at once −3,606.43, the day's −100,252.39 past the daily limit on the buy's own
+    quote. The paper trader marks a position on the quote that fills it and sells there (``_take``);
+    the replay too, never the 10:11 take-profit (#478, Codex's review)."""
+    events: list[Event] = [
+        Read("10:00:02", [Barrier("10:00:00")]),
+        quote("10:00:02.5", 70_000, 70_100),
+        quote("10:01:00", 59_500, 59_600),
+        Read("10:10:02", [Barrier("10:10:00")]),
+        quote("10:10:02.5", 69_860, 70_100),  # bought on it, and past the limit on it
+        quote("10:11:00", 70_300, 70_400),
+        Read("10:20:02", [Barrier("10:20:00")]),
+        quote("10:20:02.5", 70_000, 70_100),
+    ]
+
+    paper, trades, done = both(tmp_path, events, [pick(BARRIER)])
+
+    assert of_paper(paper) == as_paper(trades)
+    assert [(t.reason, t.entry_at, t.exit_at, t.exit) for t in trades] == [
+        (STOP_LOSS, at("10:00:02.5"), at("10:01:00"), 59_500),
+        (DAILY_LIMIT, at("10:10:02.5"), at("10:10:02.5"), 69_860),
+    ]
+    assert done.results[0].skipped == {DAILY_LIMIT: 1}
+
+
 def test_the_rank_waits_are_the_paper_trader_s(tmp_path: Path) -> None:
     """breiman ranked first, the 15-minute barrier's baseline second. At 11:00 the second's rise,
     displayed at 11:00:01, waits for the first's prediction, read at 11:00:04 and no rise: it buys at

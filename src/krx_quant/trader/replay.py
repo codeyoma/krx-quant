@@ -35,9 +35,9 @@ rule does nothing are passed by a search of the arrays for the first one it can 
 ``exit_on`` judges that one. The loss limits hold a replay as they hold a challenger's book
 (``limits.Simulated``, #471: from the replay's first day): a trade's exit realized at or below one
 stops it (the daily one for the rest of the day), and so does the open position at a best bid it
-holds through (``paper.unrealized``, as the paper book marks it on each quote, found by a search of
-the arrays too), sold at that bid. No pause holds it, and nothing stalls: a gap leaves its signals out
-instead (below).
+holds through, the quote it is bought on included (``paper.unrealized``, as the paper book marks it
+on each quote, found by a search of the arrays too), sold at that bid. No pause holds it, and nothing
+stalls: a gap leaves its signals out instead (below).
 
 **Two outputs.**
 
@@ -309,8 +309,8 @@ class Fill:
     (``missing``), given up (``refused``: ``special``, ``expired``, ``target_reached``), or bought at
     ``entry`` at ``entry_at`` and sold by ``sale``. ``free_at``: when the book holds nothing again. A
     buy's quotes held through (#471: what a loss limit marks it on) are the recording's from
-    ``bought`` (the buy's, out) to ``until`` (the one its exit is made on, out; the day's end for the
-    clock's time exit)."""
+    ``bought`` (the buy's, in: the paper book marks a position on the quote it is bought on) to
+    ``until`` (the one its exit is made on, out; the day's end for the clock's time exit)."""
 
     free_at: datetime
     missing: str | None = None
@@ -681,9 +681,11 @@ class Policy:
         """The sale a loss limit makes of ``quantity`` shares bought as ``filled`` (#471, module doc):
         at the best bid of the first quote it holds through at which the day's or the cumulative P&L,
         with the position's open one there (``paper.unrealized``, the same sums), is at or below its
-        limit (``limits.Simulated``, which keeps it reached); None if none is."""
+        limit (``limits.Simulated``, which keeps it reached); None if none is. The buy's own quote
+        first: ``PaperTrader._take`` marks a position on the quote that fills it, its spread and costs
+        open at once, before any exit rule acts."""
         day = self._fills.day if self._fills is not None else None
-        start, end = filled.bought + 1, filled.until
+        start, end = filled.bought, filled.until
         if day is None or start >= end or filled.entry is None:
             return None
         holds, limits, fee_rate = self.holds, self._rules.limits, self._rules.fee_rate
