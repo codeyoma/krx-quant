@@ -10,6 +10,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
+import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from krx_quant.api import create_app
@@ -23,7 +24,7 @@ from krx_quant.trader.store import DB_NAME as TRADER_DB
 from tests.api_schema import check
 from tests.replay_events import at as replay_at
 from tests.replay_events import run
-from tests.test_trader_refit import DAYS, write_five
+from tests.test_trader_refit import DAYS, UP, write_five
 from tests.trader_doubles import (
     BARRIER,
     CALENDAR,
@@ -278,6 +279,7 @@ async def test_the_policies_newest_first_the_champion_marked(tmp_path: Path) -> 
             DAYS,
             tmp_path / ENGINE_DB,
             tmp_path / TRADER_DB,
+            tmp_path / "data",
             CALENDAR.session,
             capital=CAPITAL,
             fee_rate=FEE,
@@ -306,7 +308,7 @@ async def test_the_policies_newest_first_the_champion_marked(tmp_path: Path) -> 
         0.7,
         0.5,
     )
-    assert champion["fit"]["result"]["net"] == 7_000
+    assert champion["fit"]["result"]["net"] == pytest.approx(2 * UP), "two take-profits of 14 shares"
     assert body["champions"] == [
         {"at": "2026-10-14T22:31:00+09:00", "version": 1, "reason": FIRST, "detail": None}
     ]
@@ -340,6 +342,7 @@ async def test_a_store_the_nightly_fit_made_before_the_trader_s_first_start_answ
         DAYS,
         tmp_path / ENGINE_DB,
         tmp_path / TRADER_DB,
+        tmp_path / "data",
         CALENDAR.session,
         capital=CAPITAL,
         fee_rate=FEE,

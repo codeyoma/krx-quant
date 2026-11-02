@@ -2638,7 +2638,7 @@
       }
     },
     "trader_policy": {
-      "description": "A policy version (#399): the cells it trades, first ranked first, each with its threshold and Kelly fraction and what it was fitted on; the cells the cost map passed that it left out, and why; what it was fitted on (the cost map, the grid, the simulated result, the run). It holds no limit: those come from the code and the server's .env alone. status (#400): champion now, former once, dropped (a challenger dropped at dropped_at, unpromoted by its 20th common day), challenger (in one of the three running slots since admitted_at), else waiting (kept while the slots were full, admitted when one frees, the newest first); paper: its paper record.",
+      "description": "A policy version (#399): the cells it trades, first ranked first, each with its threshold and Kelly fraction and what it was fitted on; the cells the cost map passed that it left out, and why; what it was fitted on (the cost map, the grid, the recorded days replayed (#470), the replayed result, the run). It holds no limit: those come from the code and the server's .env alone. status (#400): champion now, former once, dropped (a challenger dropped at dropped_at, unpromoted by its 20th common day), challenger (in one of the three running slots since admitted_at), else waiting (kept while the slots were full, admitted when one frees, the newest first); paper: its paper record.",
       "type": "object",
       "required": ["version", "status", "created_at", "reason", "cells", "left_out", "fit", "admitted_at", "dropped_at",
                    "paper"],
@@ -2677,7 +2677,8 @@
                   "trades": {"type": "integer", "minimum": 0},
                   "wins": {"type": "integer", "minimum": 0},
                   "net": {"type": "number"},
-                  "growth": {"type": ["number", "null"]}
+                  "growth": {"type": ["number", "null"]},
+                  "signals": {"$ref": "#/$defs/trader_signals_by_threshold"}
                 }
               }
             }
@@ -2699,11 +2700,50 @@
               "why": {"enum": ["few_trades", "no_gain"]},
               "most_trades": {"type": "integer", "minimum": 0},
               "best": {"type": "object"},
-              "read": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}}
+              "read": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
+              "signals": {"$ref": "#/$defs/trader_signals_by_threshold"}
             }
           }
         },
         "fit": {"type": "object"}
+      }
+    },
+    "trader_signals_by_threshold": {
+      "description": "#470: a cell's signals on the recorded days the night's re-fit replayed, each measured alone a share by the paper trader's rules, at each threshold of the grid (the key, as written: \"0.6\"). Missing from a policy fitted before #470.",
+      "type": "object",
+      "additionalProperties": {"$ref": "#/$defs/trader_signals"}
+    },
+    "trader_signals": {
+      "description": "#470: the rises at or above a threshold, each decided at its display as if nothing were held: signals; missing (left out, by why: no_recording, gap, no_quote, no_exit_quote); measured (the others); refused (measured and not bought: special, expired, target_reached); bought, wins (net above 0), exits (take_profit, stop_loss, time); net in won and ticks in ticks of the reference, summed over those bought; per_signal: the net in ticks per signal measured (one not bought 0), each day's mean one value, with its day-level 95% interval over days (null from fewer than two days).",
+      "type": "object",
+      "required": ["signals", "measured", "missing", "refused", "bought", "wins", "exits", "net", "ticks", "per_signal"],
+      "additionalProperties": false,
+      "properties": {
+        "signals": {"type": "integer", "minimum": 0},
+        "measured": {"type": "integer", "minimum": 0},
+        "missing": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
+        "refused": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
+        "bought": {"type": "integer", "minimum": 0},
+        "wins": {"type": "integer", "minimum": 0},
+        "exits": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
+        "net": {"type": "number"},
+        "ticks": {"type": "number"},
+        "per_signal": {
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "required": ["value", "low", "high", "days"],
+              "additionalProperties": false,
+              "properties": {
+                "value": {"type": "number"},
+                "low": {"type": "number"},
+                "high": {"type": "number"},
+                "days": {"type": "integer", "minimum": 2}
+              }
+            }
+          ]
+        }
       }
     },
     "trader_trade": {

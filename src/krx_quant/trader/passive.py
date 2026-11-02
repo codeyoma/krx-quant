@@ -41,7 +41,7 @@ the integrated book's and the integrated trades' best quotes, the trader's strea
 **Missing data**, counted apart and left out of both entries: a day without its recorded book or
 KRX trades, or whose files of them cannot be read (``NO_RECORDING``); a recorded gap (the ``gaps``
 layer) of 005930's book, integrated or KRX trades in the signal's window, from the decision to the
-time barrier, those that began on the days before too (``GAP``, ``day_gaps``); no quote within
+time barrier, those that began on the days before too (``GAP``, ``replay.day_gaps``); no quote within
 ``Rules.quote_wait`` after the decision (``NO_QUOTE``); no quote to sell on at the time barrier
 (``NO_EXIT_QUOTE``).
 
@@ -68,7 +68,7 @@ import time as clock
 from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -83,7 +83,6 @@ from krx_quant.entry_delay import Quotes, day_quotes
 from krx_quant.feeds import BOOK, KRX_TRADE, TRADE
 from krx_quant.feeds.base import KST, kst_day
 from krx_quant.footprint import Meter, give_back
-from krx_quant.gaps_probe import Unread, read_gaps
 from krx_quant.macro import read_partition
 from krx_quant.market_calendar import Session, calendar_store
 from krx_quant.predictions import DB_NAME as ENGINE_DB
@@ -94,6 +93,7 @@ from krx_quant.trader import policy as policies
 from krx_quant.trader.cells import Cell, open_engine_db, special_windows, traded_kind
 from krx_quant.trader.paper import BELOW_THRESHOLD, STOP_LOSS, TAKE_PROFIT, TIME, Rules, costs
 from krx_quant.trader.refit import cost_map_days, rises
+from krx_quant.trader.replay import day_gaps, micros
 from krx_quant.trader.selection import CostMapError, choose, read_cost_map
 from krx_quant.trader.settings import TraderSettings
 from krx_quant.trader.store import DB_NAME as TRADER_DB
@@ -108,23 +108,13 @@ NO_RECORDING, GAP, NO_QUOTE, NO_EXIT_QUOTE = "no_recording", "gap", "no_quote", 
 MISSING = (NO_RECORDING, GAP, NO_QUOTE, NO_EXIT_QUOTE)
 # The feeds whose recorded gaps leave a signal out.
 GAP_FEEDS = frozenset({BOOK.tr_id, TRADE.tr_id, KRX_TRADE.tr_id})
-# The days before a measured one whose gaps are read too (``day_gaps``): a gap is kept under the day it
-# started, and the collector restarts every trading day at 07:20 (``KRX_RESTART_AT``), so one from
-# before the previous trading day ended by then; ten calendar days cover the longest holiday.
-GAP_LOOKBACK = 10
 # What the command's exit code says: 0 measured, 1 not (the cost map or the engine's database).
 NOT_MEASURED = 1
 
 # The paper trader's rules (``paper.Rules``): the quote wait the first quote and the time exit use.
 RULES = Rules()
 
-_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 _MICRO = timedelta(microseconds=1)
-
-
-def micros(at: datetime) -> int:
-    """``at`` in microseconds since the epoch, exactly (the recorded receipt times' unit)."""
-    return (at - _EPOCH) // _MICRO
 
 
 @dataclass(frozen=True, slots=True)
@@ -300,40 +290,7 @@ def _read_day(data_dir: Path, day: date) -> Recording | None:
     times = pc.cast(pc.cast(table["received_at"], pa.timestamp("us", tz="UTC")), pa.int64()).to_numpy()
     order = np.argsort(times, kind="stable")
     prices = pc.cast(table["price"], pa.float64()).to_numpy()
-    return Recording(quotes, times[order], prices[order], day_gaps(data_dir, day))
-
-
-def day_gaps(data_dir: Path, day: date) -> tuple[tuple[int, int | None], ...]:
-    """The recorded gaps of 005930's feeds that matter (``GAP_FEEDS``) overlapping ``day``
-    (microseconds). A gap is kept under the day it started on (``health.FeedHealth``), so the
-    ``GAP_LOOKBACK`` days before are read too: an outage that began the evening before may run into
-    the session. A gap without an end was still open when its collector stopped; it ended, at the
-    latest, at that feed's first row received on ``day`` after its start (a feed delivers again
-    only once it is back), and without one it covers the rest of the day."""
-    start, end = (micros(datetime.combine(d, time(), KST)) for d in (day, day + timedelta(days=1)))
-    unread = Unread()
-    found: list[tuple[int, int | None]] = []
-    for back in range(GAP_LOOKBACK + 1):
-        for gap in read_gaps(data_dir, day - timedelta(days=back), unread):
-            if gap.feed not in GAP_FEEDS or gap.key != SYMBOL:
-                continue
-            began = micros(gap.start)
-            ended = _back_at(data_dir, day, gap.feed, began) if gap.end is None else micros(gap.end)
-            if began < end and (ended is None or ended > start):
-                found.append((began, ended))
-    return tuple(sorted(found, key=lambda g: g[0]))
-
-
-def _back_at(data_dir: Path, day: date, feed: str, after: int) -> int | None:
-    """The first receipt time on ``day`` of ``feed``'s rows of 005930 after ``after``; None without
-    one."""
-    partition = data_dir / "events" / f"date={day.isoformat()}" / f"feed={feed}" / f"symbol={SYMBOL}"
-    table = read_partition(partition, ("received_at",))
-    if table is None or table.num_rows == 0:
-        return None
-    times = pc.cast(pc.cast(table["received_at"], pa.timestamp("us", tz="UTC")), pa.int64()).to_numpy()
-    later = times[times > after]
-    return int(later.min()) if len(later) else None
+    return Recording(quotes, times[order], prices[order], day_gaps(data_dir, day, GAP_FEEDS))
 
 
 # Reading the signals.

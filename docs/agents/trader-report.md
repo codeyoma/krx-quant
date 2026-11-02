@@ -41,6 +41,8 @@ Each report holds, in order:
 6. Limits, the halts that day, the failed KIS orders that day (mock, #405), a cumulative halt still holding, the pause in force, the pauses, resumes and re-arms asked for.
 7. The last five trading days' ledger.
 
+Below the report, the re-fit's own output (#399): the cost map, the grid, then the recorded days it replayed by the paper trader's own rules (#470, `재생 (#470): …`: the days, those without a recording and those with a gap in the session, the passes). Each cell kept with its θ and λ, or left out and why, and under it the cell's signals measured alone a share at each θ (`1주씩 따로 잰 신호: θ … 신호 N, 체결 M, 신호당 …틱(날 단위 하한 …)`). A signal of a day without its recording or in a recorded gap is left out and counted (`데이터가 빠져 뺀 신호 …`), never as a trade of no gain. Days without a recording or with gaps are the collector's problem, not the policy's: open an issue when they recur.
+
 The comment shows no prices, account numbers, order numbers or keys. For more, see [server-logs.md](server-logs.md): the trader's lines are `{service="krx-quant", process="trader"}`, the night job's `{service="krx-quant", process="job"} |= "job=trader-report "`. For the server's state now, see [server-snapshot.md](server-snapshot.md).
 
 ## Do one of these

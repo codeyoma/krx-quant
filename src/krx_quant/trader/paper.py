@@ -99,6 +99,12 @@ waiting for is given up (``restarted``). A pause or a limit holding when it star
 one that sells sells it at the first quote. The same picks, the same predictions read at the same
 times, and the same quotes always make the same trades.
 
+**One set of rules** (#470): the entry (``plan``, ``admit``), the priority (``settle``), the buy's fill
+(``refused``, ``size``), the exits (``exit_on``, ``clock_exit``) and the costs (``costs``, ``net_of``)
+are functions of this module that the paper book calls, and so does the nightly re-fit's replay of
+the recorded days (``replay.py``): the same predictions and the same quotes make the same trades
+there (``tests/test_trader_replay.py``).
+
 **State.** The trader writes its state (``state``: status, cash, position, the day's and the
 cumulative P&L, the limits' use, the pause) into its store as it changes, at most every
 ``SNAPSHOT_SECONDS`` while only the open position's bid moves and at least every ``HEARTBEAT``,
@@ -109,10 +115,10 @@ from __future__ import annotations
 
 import logging
 import math
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-from typing import Any
+from typing import Any, Protocol
 
 from krx_quant.feeds.base import kst_day
 from krx_quant.kinds import most_likely
@@ -243,7 +249,7 @@ def plan(
     """A prediction read at ``at``, with the special windows known then: its buy's barriers, or why
     it buys nothing (the reasons the module doc lists, but the trader's own: ``not_picked``,
     ``holding``, ``outranked``). ``threshold`` is its cell's θ under the policy (#399), else
-    ``rules.threshold``. The nightly re-fit simulates the trades by the same rules (``refit.py``)."""
+    ``rules.threshold``. The nightly re-fit replays the recorded days by the same rules (``replay.py``)."""
     if signal.status == VI_STATUS:
         return SPECIAL
     p = signal.rise_probability
@@ -275,7 +281,7 @@ def plan(
 
 
 @dataclass(frozen=True)
-class _Candidate:
+class Rise:
     """A rise of a picked cell, read at ``read_at``, waiting for the cells ranked above it."""
 
     signal: Signal
@@ -288,6 +294,178 @@ class _Candidate:
 
     def deadline(self, rules: Rules) -> datetime:
         return self.signal.displayed_at + rules.fresh
+
+
+# The rules a book follows, as functions (#470): the paper book's and the re-fit's replay of the
+# recorded days (``replay.py``) call these, so that both make the same trades.
+
+# A book's answers to the priority (``admit``, ``settle``): ``skip`` keeps that a prediction bought
+# nothing and why; ``held`` says why the book buys nothing now (its status, a stall, a position held
+# or a buy waiting: ``holding``, ``outranked``), None if it may; ``decide`` decides a rise's buy.
+Skip = Callable[[Signal, datetime, str], None]
+Held = Callable[[Signal, datetime], str | None]
+Decide = Callable[[Rise, datetime], None]
+
+
+def admit(
+    pending: dict[datetime, list[Rise]],
+    signal: Signal,
+    planned: Plan | str,
+    at: datetime,
+    skip: Skip,
+    held: Held,
+) -> bool:
+    """A picked cell's prediction read at ``at``, with its plan (``plan``): skipped with why it buys
+    nothing (its plan's reason, or why the book buys nothing now), else waiting among its bar close's
+    rises for the cells ranked above it (``settle``). Whether it waits."""
+    if not isinstance(planned, Plan):
+        skip(signal, at, planned)
+        return False
+    why = held(signal, at)
+    if why is not None:
+        skip(signal, at, why)
+        return False
+    pending.setdefault(signal.bar_close, []).append(Rise(signal, planned, at))
+    return True
+
+
+def settle(
+    pending: dict[datetime, list[Rise]],
+    read: Mapping[datetime, Collection[Cell]],
+    ranks: Mapping[Cell, int],
+    special: Sequence[Window],
+    now: datetime,
+    rules: Rules,
+    *,
+    skip: Skip,
+    held: Held,
+    decide: Decide,
+) -> None:
+    """Decide the rises waiting (module doc "Priority"), oldest bar close first: of a bar close, the
+    first ranked buys once every cell ranked above it (``ranks``, 0 first) was read of that bar close
+    (``read``), or its wait is over; the others are outranked (or held off, when something was bought
+    meanwhile). A rise a special window known now touches is ``special``. A bar close still waiting
+    holds the later ones too: they are decided after it."""
+    for close in sorted(pending):
+        waiting = []
+        for c in sorted(pending[close], key=lambda c: ranks[c.cell]):
+            if touching(special, c.signal.symbol, close, c.plan.time_barrier):
+                skip(c.signal, now, SPECIAL)
+            else:
+                waiting.append(c)
+        if not waiting:
+            del pending[close]
+            continue
+        pending[close] = waiting
+        best = waiting[0]
+        rank = ranks[best.cell]
+        seen = read.get(close, ())
+        if now < best.deadline(rules) and any(r < rank and cell not in seen for cell, r in ranks.items()):
+            return  # a later bar close waits too: this one may still buy
+        del pending[close]
+        why = held(best.signal, now)
+        if why is not None:  # paused, stopped or stalled meanwhile, or bought on another bar close
+            for c in waiting:
+                skip(c.signal, now, held(c.signal, now) or why)
+            continue
+        decide(best, now)
+        for c in waiting[1:]:
+            skip(c.signal, now, OUTRANKED)
+
+
+class Barriers(Protocol):
+    """A buy's barriers: a ``Plan``'s, an open trade's."""
+
+    @property
+    def target(self) -> float: ...
+
+    @property
+    def stop(self) -> float: ...
+
+    @property
+    def time_barrier(self) -> datetime: ...
+
+
+def refused(decided_at: datetime, barriers: Barriers, quote: BestQuote, rules: Rules) -> str | None:
+    """Why the first quote received after a buy's decision at ``decided_at`` does not fill it (module
+    doc "Fills"): received at or after its time barrier (``expired``), later than
+    ``Rules.quote_wait`` after the decision (``no_quote``), its ask at or above the target
+    (``target_reached``); None: it fills at that ask, if the size makes a share (``size``)."""
+    if quote.received_at >= barriers.time_barrier:
+        return EXPIRED
+    if quote.received_at > decided_at + rules.quote_wait:
+        return NO_QUOTE
+    if quote.ask >= barriers.target:
+        return TARGET_REACHED
+    return None
+
+
+def size(
+    fraction: float, quantity: int | None, capital: float, ask: float, cash: float, fee_rate: float
+) -> int:
+    """The shares a buy at ``ask`` takes (module doc "Size"): ``fraction`` of the capital, or a pick's
+    fixed ``quantity`` (#427) within the capital, within the ``cash`` its notional and commission may
+    use, rounded down."""
+    if quantity is not None:
+        return min(quantity, shares(1.0, capital, ask, cash, fee_rate))
+    return shares(fraction, capital, ask, cash, fee_rate)
+
+
+@dataclass(frozen=True)
+class Sale:
+    """An exit: sold at ``price`` at ``at`` for ``reason``, on ``quote`` (the one whose bid it took)."""
+
+    at: datetime
+    price: float
+    reason: str
+    quote: BestQuote
+
+
+def fresh_before(barrier: datetime, quote: BestQuote, rules: Rules) -> bool:
+    """Whether ``quote`` was received before ``barrier``, within ``Rules.quote_wait`` of it: the quote
+    a time exit sells on at the barrier."""
+    return timedelta(0) < barrier - quote.received_at <= rules.quote_wait
+
+
+def exit_on(
+    barriers: Barriers,
+    quote: BestQuote,
+    standing: BestQuote | None,
+    rules: Rules,
+    ran_at_barrier: bool = True,
+) -> Sale | None:
+    """The exit ``quote``, received after the buy, makes of a position (module doc "Fills"),
+    ``standing`` the latest quote received before it: at or after the time barrier, the time exit at
+    the standing quote's bid at the barrier if it is recent (``fresh_before``) and the trader ran at
+    the barrier, else at this one's bid now; before it, the take-profit at the target once its bid
+    reaches it, the stop at its bid at or below the stop. None: held on."""
+    if quote.received_at >= barriers.time_barrier:
+        if ran_at_barrier and standing is not None and fresh_before(barriers.time_barrier, standing, rules):
+            return Sale(barriers.time_barrier, standing.bid, TIME, standing)
+        return Sale(quote.received_at, quote.bid, TIME, quote)
+    if quote.bid >= barriers.target:
+        return Sale(quote.received_at, barriers.target, TAKE_PROFIT, quote)
+    if quote.bid <= barriers.stop:
+        return Sale(quote.received_at, quote.bid, STOP_LOSS, quote)
+    return None
+
+
+def clock_exit(
+    barriers: Barriers, last: BestQuote | None, now: datetime, rules: Rules, ran_at_barrier: bool = True
+) -> Sale | None:
+    """The time exit the clock makes at ``now``, ``Rules.grace`` past the time barrier, before a quote
+    at or after it came: at the bid of ``last``, the latest quote received, at the barrier, if it is
+    recent (``fresh_before``) and the trader ran at the barrier. None: it waits for the next quote."""
+    if now < barriers.time_barrier + rules.grace or not ran_at_barrier or last is None:
+        return None
+    if not fresh_before(barriers.time_barrier, last, rules):
+        return None
+    return Sale(barriers.time_barrier, last.bid, TIME, last)
+
+
+def net_of(entry_price: float, exit_price: float, quantity: int, fee_rate: float) -> float:
+    """A round trip's net P&L in won: the gross less its costs (``costs``), as a trade keeps it."""
+    return (exit_price - entry_price) * quantity - costs(entry_price, exit_price, quantity, fee_rate).total
 
 
 @dataclass(frozen=True)
@@ -367,7 +545,7 @@ class PaperTrader:
         self._picks: dict[Cell, tuple[int, Pick]] = {}  # each picked cell's rank and pick
         self._special: list[Window] = []
         self._read: dict[datetime, set[Cell]] = {}  # the cells read of each recent bar close
-        self._pending: dict[datetime, list[_Candidate]] = {}  # rises waiting, by bar close
+        self._pending: dict[datetime, list[Rise]] = {}  # rises waiting, by bar close
         self._last: BestQuote | None = None  # the latest quote received
         self._waiting: _Waiting | None = None
         self._stall: Stall | None = None  # the collector's quotes stalled since (#407)
@@ -537,16 +715,7 @@ class PaperTrader:
             session = self._sessions(kst_day(signal.bar_close))
             _, picked = self._picks[cell]
             planned = plan(signal, self.rules, session, at, self._special, picked.threshold)
-            if not isinstance(planned, Plan):
-                self._skip(signal, at, planned)
-            elif self.status != RUNNING:
-                self._skip(signal, at, self.status)
-            elif self._stall is not None:
-                self._skip(signal, at, STALLED)
-            elif self._busy():
-                self._skip(signal, at, self._held_off(signal))
-            else:
-                self._pending.setdefault(signal.bar_close, []).append(_Candidate(signal, planned, at))
+            admit(self._pending, signal, planned, at, self._skip, self._not_now)
         self._settle(at)
 
     def on_quote(self, quote: BestQuote) -> None:
@@ -628,10 +797,10 @@ class PaperTrader:
         if waiting is not None and now >= waiting.deadline(self.rules) + grace:
             self._give_up(waiting, NO_QUOTE)
         trade = self._open
-        if trade is not None and now >= trade.time_barrier + grace:
-            standing = self._standing(trade)
-            if standing is not None:
-                self._exit(trade, trade.time_barrier, standing.bid, TIME, standing)
+        if trade is not None:
+            sale = clock_exit(trade, self._last, now, self.rules, trade.time_barrier >= self._started_at)
+            if sale is not None:
+                self._exit(trade, sale.at, sale.price, sale.reason, sale.quote)
         for close in [c for c in self._read if c < now - timedelta(hours=1) and c not in self._pending]:
             del self._read[close]
         if self._guard is not None:
@@ -751,46 +920,34 @@ class PaperTrader:
             return OUTRANKED
         return HOLDING
 
-    def _settle(self, now: datetime) -> None:
-        """Decide the rises waiting, oldest bar close first: of a bar close, the first ranked buys
-        once every cell ranked above it was read of that bar close, or its wait is over; the others
-        are outranked (or held off, when something was bought meanwhile). A rise a special window
-        learned while it waited now touches is ``special``."""
-        for close in sorted(self._pending):
-            waiting = []
-            for c in sorted(self._pending[close], key=lambda c: self._picks[c.cell][0]):
-                if touching(self._special, c.signal.symbol, close, c.plan.time_barrier):
-                    self._skip(c.signal, now, SPECIAL)
-                else:
-                    waiting.append(c)
-            if not waiting:
-                del self._pending[close]
-                continue
-            self._pending[close] = waiting
-            best = waiting[0]
-            rank = self._picks[best.cell][0]
-            read = self._read.get(close, set())
-            above = [cell for cell, (r, _) in self._picks.items() if r < rank]
-            if now < best.deadline(self.rules) and any(cell not in read for cell in above):
-                return  # a later bar close waits too: this one may still buy
-            del self._pending[close]
-            if self.status != RUNNING:  # paused or stopped meanwhile (#396)
-                for c in waiting:
-                    self._skip(c.signal, now, self.status)
-                continue
-            if self._stall is not None:  # the quotes stalled meanwhile (#407)
-                for c in waiting:
-                    self._skip(c.signal, now, STALLED)
-                continue
-            if self._busy():  # bought on another bar close meanwhile
-                for c in waiting:
-                    self._skip(c.signal, now, self._held_off(c.signal))
-                continue
-            self._decide(best, now)
-            for c in waiting[1:]:
-                self._skip(c.signal, now, OUTRANKED)
+    def _not_now(self, signal: Signal, at: datetime) -> str | None:
+        """Why a rise read or decided at ``at`` buys nothing now: paused or stopped (#396, its status),
+        the quotes stalled (#407), something held or bought (``_held_off``); None if it may buy."""
+        if self.status != RUNNING:
+            return self.status
+        if self._stall is not None:
+            return STALLED
+        if self._busy():
+            return self._held_off(signal)
+        return None
 
-    def _decide(self, candidate: _Candidate, at: datetime) -> None:
+    def _settle(self, now: datetime) -> None:
+        """Decide the rises waiting (``settle``): a rise a special window learned while it waited now
+        touches is ``special``."""
+        ranks = {cell: rank for cell, (rank, _) in self._picks.items()}
+        settle(
+            self._pending,
+            self._read,
+            ranks,
+            self._special,
+            now,
+            self.rules,
+            skip=self._skip,
+            held=self._not_now,
+            decide=self._decide,
+        )
+
+    def _decide(self, candidate: Rise, at: datetime) -> None:
         signal, planned = candidate.signal, candidate.plan
         _, pick = self._picks[candidate.cell]
         decision = self._add_decision(signal, at, BUY, None)
@@ -834,21 +991,15 @@ class PaperTrader:
         if self.status != RUNNING:
             self._give_up(waiting, self.status)
             return
-        if quote.received_at >= waiting.plan.time_barrier:
-            self._give_up(waiting, EXPIRED)
-            return
-        if quote.received_at > waiting.deadline(self.rules):
-            self._give_up(waiting, NO_QUOTE)
-            return
-        if quote.ask >= waiting.plan.target:
-            self._give_up(waiting, TARGET_REACHED)
+        reason = refused(waiting.decided_at, waiting.plan, quote, self.rules)
+        if reason is not None:
+            self._give_up(waiting, reason)
             return
         pick = waiting.pick
         capital = self.rules.capital if self.cap is None else min(self.rules.capital, self.cap)
         cash = self.rules.capital + self.holds.realized_all  # nothing open: one at a time
-        quantity = shares(pick.fraction, capital, quote.ask, cash, self.rules.fee_rate)
-        if pick.quantity is not None:  # its shares, within the cash and the capital (#427)
-            quantity = min(pick.quantity, shares(1.0, capital, quote.ask, cash, self.rules.fee_rate))
+        # A practice pick buys its shares, within the cash and the capital (#427).
+        quantity = size(pick.fraction, pick.quantity, capital, quote.ask, cash, self.rules.fee_rate)
         if quantity < 1:
             self._give_up(waiting, NO_SHARES)
             return
@@ -914,31 +1065,10 @@ class PaperTrader:
         log.info("%s no buy on %s (%s)", self._whose(), waiting.signal.bar_close.strftime("%H:%M"), reason)
 
     def _follow(self, trade: OpenTrade, quote: BestQuote, standing: BestQuote | None) -> None:
-        if quote.received_at >= trade.time_barrier:
-            if (
-                trade.time_barrier >= self._started_at
-                and standing is not None
-                and self._fresh(trade, standing)
-            ):
-                self._exit(trade, trade.time_barrier, standing.bid, TIME, standing)
-            else:  # no recent quote before the barrier, or the trader was not running then
-                self._exit(trade, quote.received_at, quote.bid, TIME, quote)
-        elif quote.bid >= trade.target:
-            self._exit(trade, quote.received_at, trade.target, TAKE_PROFIT, quote)
-        elif quote.bid <= trade.stop:
-            self._exit(trade, quote.received_at, quote.bid, STOP_LOSS, quote)
-
-    def _standing(self, trade: OpenTrade) -> BestQuote | None:
-        """The quote a time exit sells on at the barrier: the last one received before it, if recent
-        enough and the trader was running then."""
-        last = self._last
-        if trade.time_barrier < self._started_at or last is None or not self._fresh(trade, last):
-            return None
-        return last
-
-    def _fresh(self, trade: OpenTrade, quote: BestQuote) -> bool:
-        """Whether ``quote`` was received before the barrier, within ``Rules.quote_wait`` of it."""
-        return timedelta(0) < trade.time_barrier - quote.received_at <= self.rules.quote_wait
+        # At the time barrier, the last quote before it sells only if the trader was running then.
+        sale = exit_on(trade, quote, standing, self.rules, trade.time_barrier >= self._started_at)
+        if sale is not None:
+            self._exit(trade, sale.at, sale.price, sale.reason, sale.quote)
 
     def _exit(self, trade: OpenTrade, at: datetime, price: float, reason: str, quote: BestQuote) -> None:
         paid = costs(trade.entry_price, price, trade.quantity, self.rules.fee_rate)
