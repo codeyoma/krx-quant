@@ -97,6 +97,9 @@ SIMULATED = "simulated probation"
 CODE_CHANGED = "code changed"
 # How the reason it is retired for starts when that new code's pre-validation refuses it (#454).
 CODE_REFUSED = "the pre-validation of its new code refused it"
+# How the reason it is made active ends when a review day passed while that pre-validation was due,
+# and it then passed (#454).
+CODE_PASSED = "the pre-validation of its new code passed since"
 
 
 def target_changed(kind: str, version: int) -> str:

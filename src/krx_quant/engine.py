@@ -114,6 +114,7 @@ from __future__ import annotations
 
 import asyncio
 import heapq
+import json
 import logging
 import math
 import time as timer
@@ -197,6 +198,7 @@ from krx_quant.kinds import NO_PREVIOUS as KIND_NO_PREVIOUS
 from krx_quant.kinds import Kind as PredictionKind
 from krx_quant.lifecycle import (
     CODE_CHANGED,
+    CODE_PASSED,
     CODE_REFUSED,
     REGISTERED,
     Review,
@@ -294,6 +296,9 @@ Regimes = Callable[[date, datetime], str | None]
 REFUSED_RUN = "prevalidation_refused"
 # The ``runs`` kind of a refused revision told (#454): its detail is the revision's id.
 REVISION_REFUSED_RUN = "revision_refused"
+# The ``runs`` kind of a review day of a probation whose new code waits for its pre-validation
+# (#454): its detail is JSON, the revision's id, the days counted, whether it passed and why.
+REVISION_REVIEW_RUN = "revision_review"
 # Each day's algorithm review runs this long after the close, when everything is scored.
 REVIEW_AFTER_CLOSE = timedelta(minutes=10)
 # How far back a starting engine looks for a kind's predictions left without their answer.
@@ -674,7 +679,9 @@ class PredictionEngine:
 
     def _judge_revisions(self) -> None:
         """Keep the verdict of each changed revision's pre-validation once its report is in (#454):
-        a pass lets its probation make it active; a refusal retires it (told at the next review)."""
+        a pass makes it active if its latest probation review day passed while it waited
+        (``_held_review``), else lets its next review day do so; a refusal retires it (told at the
+        next review)."""
         if self._revisions is None:
             return
         pending = [r for r in self._revision_of.values() if r.pending]
@@ -692,17 +699,54 @@ class PredictionEngine:
             if verdict is None:
                 continue
             now = self.clock.now()
-            if verdict.passed:
-                self._revision_of[name] = self.store.judge_revision(revision, REVISION_PASSED, now, None)
-                log.info("%s: its new code %s passed its pre-validation", name, revision.code)
-                continue
             standing = standings.get(name)
-            retire = None if standing is None or standing.status is Status.RETIRED else standing.status
-            reason = f"{CODE_REFUSED}: {verdict.why}"
+            if verdict.passed:
+                passed = self._held_review(revision)
+                promote = None
+                if passed is not None and standing is not None and standing.status is Status.PROBATION:
+                    promote = (Status.PROBATION, Status.ACTIVE, f"{passed}; {CODE_PASSED}")
+                self._revision_of[name] = self.store.judge_revision(
+                    revision, REVISION_PASSED, now, None, change=promote
+                )
+                log.info("%s: its new code %s passed its pre-validation", name, revision.code)
+                if promote is not None:
+                    log.info("%s: probation -> active (%s)", name, promote[2])
+                continue
+            retire = None
+            if standing is not None and standing.status is not Status.RETIRED:
+                retire = (standing.status, Status.RETIRED, f"{CODE_REFUSED}: {verdict.why}")
             self._revision_of[name] = self.store.judge_revision(
-                revision, REVISION_REFUSED, now, verdict.why, retire=retire, reason=reason
+                revision, REVISION_REFUSED, now, verdict.why, change=retire
             )
-            log.info("%s: %s -> retired (%s)", name, retire.value if retire else "retired", reason)
+            log.info("%s: -> retired (%s: %s)", name, CODE_REFUSED, verdict.why)
+
+    def _held_review(self, revision: Revision) -> str | None:
+        """The reason of the probation review day ``revision``'s algorithm passed live while its new
+        code waited for its pre-validation (#454), if the latest review day it reached since its
+        boundary passed; None if none did, or the latest did not (``_review`` keeps each:
+        ``REVISION_REVIEW_RUN``)."""
+        detail = self.store.last_detail(REVISION_REVIEW_RUN, revision.algorithm)
+        try:
+            kept = json.loads(detail or "null")
+        except ValueError:
+            return None
+        if not isinstance(kept, dict) or kept.get("revision") != revision.id or not kept.get("passed"):
+            return None
+        return str(kept.get("reason") or "")
+
+    def _review_day(self, name: str, standing: Standing, day: date) -> int | None:
+        """The days ``name``'s probation counts at ``day``'s review if that is one of its review days
+        (``Rules.probation_days``), as the review counts them (live days: a held revision is never
+        simulated); None otherwise."""
+        kind = self.kind_of_algorithm(name)
+        if kind is None or kind is DIRECTION_KIND:
+            days = self.store.prediction_days(day, _REVIEW_DAYS)
+            first = self._counted_from(name, standing)
+        else:
+            days = self.store.kind_prediction_days(kind.name, day, _REVIEW_DAYS)
+            first = self._kind_counted_from(kind, name, standing)
+        counted = 0 if first is None else sum(1 for d in days if d >= first)
+        return counted if counted in self.review_rules.probation_days else None
 
     def _bar_close(self) -> list[Algorithm | KindAlgorithm]:
         """The registered bar-close algorithms: the direction's, then the other kinds'."""
@@ -1092,17 +1136,37 @@ class PredictionEngine:
                 simulated=self.simulated(daily),
             )
             result = Review(result.changes + judged.changes, result.candidates + judged.candidates)
-        held = {r.algorithm for r in self._revision_of.values() if r.held}
-        changes = []
-        for c in result.changes:
-            if c.algorithm in held and c.status is Status.ACTIVE:
-                log.info(
-                    "%s: stays on probation (%s), the pre-validation of its new code has not passed",
-                    c.algorithm,
-                    c.reason,
-                )
-            else:
-                changes.append(c)
+        # A probation whose new code has not passed its pre-validation (#454) is not made active; what
+        # each of its review days decided is kept, and the pass makes it active if the latest passed
+        # (``_judge_revisions``): a later review day that does not pass undoes an earlier one.
+        held = {r.algorithm: r for r in self._revision_of.values() if r.held}
+        promoted = {
+            c.algorithm: c for c in result.changes if c.algorithm in held and c.status is Status.ACTIVE
+        }
+        changes = [c for c in result.changes if c.algorithm not in promoted]
+        day = at.astimezone(KST).date()
+        for name, revision in held.items():
+            standing = standings.get(name)
+            if standing is None or standing.status is not Status.PROBATION:
+                continue
+            counted = self._review_day(name, standing, day)
+            if counted is None:
+                continue
+            c = promoted.get(name)
+            kept = {
+                "revision": revision.id,
+                "days": counted,
+                "passed": c is not None,
+                "reason": c and c.reason,
+            }
+            self.store.add_run(REVISION_REVIEW_RUN, at, name, json.dumps(kept))
+            log.info(
+                "%s: day %d of its probation %s; it stays on probation until the pre-validation of its"
+                " new code passes",
+                name,
+                counted,
+                f"passed ({c.reason})" if c is not None else "did not pass",
+            )
         for c in changes:
             # Only from the status reviewed: a retire command may have landed meanwhile.
             if self.store.change_status(

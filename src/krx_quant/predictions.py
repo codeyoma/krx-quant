@@ -975,19 +975,20 @@ class PredictionStore:
         at: datetime,
         detail: str | None,
         *,
-        retire: Status | None = None,
-        reason: str = "",
+        change: tuple[Status, Status, str] | None = None,
     ) -> Revision:
-        """Keep the verdict of ``revision``'s pre-validation (#454); with ``retire`` (its status as
-        read), retire it in the same transaction for ``reason``, if its status is still that."""
+        """Keep the verdict of ``revision``'s pre-validation (#454); with ``change`` (its status as
+        read, the status it goes to and why: a refusal's retirement, a pass's held promotion), make
+        it in the same transaction, if its status is still the one read."""
         self.version += 1
         with self._db:
             self._db.execute(
                 "UPDATE revisions SET verdict = ?, judged_at = ?, detail = ? WHERE id = ?",
                 (verdict, iso(at), detail, revision.id),
             )
-            if retire is not None:
-                self._change_status(revision.algorithm, at, retire, Status.RETIRED, reason, False)
+            if change is not None:
+                previous, status, reason = change
+                self._change_status(revision.algorithm, at, previous, status, reason, False)
         row = self._db.execute(
             f"SELECT {_REVISION_COLUMNS} FROM revisions WHERE id = ?", (revision.id,)
         ).fetchone()

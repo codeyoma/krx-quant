@@ -18,8 +18,18 @@ import pytest
 
 from krx_quant.algorithms import ALGORITHMS, Algorithm, KindAlgorithm, Model
 from krx_quant.cli import main
+from krx_quant.engine import REVISION_REVIEW_RUN
 from krx_quant.feeds import KST
-from krx_quant.lifecycle import CODE_CHANGED, CODE_REFUSED, REGISTERED, AtOnce, Change, Status, target_changed
+from krx_quant.lifecycle import (
+    CODE_CHANGED,
+    CODE_PASSED,
+    CODE_REFUSED,
+    REGISTERED,
+    AtOnce,
+    Change,
+    Status,
+    target_changed,
+)
 from krx_quant.market_calendar import MarketCalendar, first_whole_day
 from krx_quant.predictions import (
     DB_NAME,
@@ -330,6 +340,53 @@ async def test_the_probation_makes_it_active_only_once_its_pre_validation_passed
     assert last_change_of(passed, "alpha")[2].startswith("10 days on probation;")
     with stored(passed) as store:
         assert store.revisions()["alpha"].verdict == REVISION_PASSED
+
+
+async def test_a_review_day_passed_while_it_waited_makes_it_active_once_its_pre_validation_passes(
+    tmp_path: Path,
+) -> None:
+    """Input: alpha back on probation for a2, right throughout; DAY's review, its tenth day,
+    passes while a2's pre-validation has not (#457 review: a later pass must not wait for, or
+    past day 40 miss, a review day). Output: it stays on probation and the review day is kept;
+    the pass that night makes it active at the engine's next start, the reason saying both. Had a
+    later review day not passed, the pass would leave it on probation."""
+    deploy = at("06:00:00", weekdays_before(DAY, 9)[0])
+    later = tmp_path / "later.db"
+    db = tmp_path / "engine.db"
+    for each in (db, later):
+        await ten_days_right(each, deploy)
+        await run(
+            db=each,
+            events=[],
+            until=at("15:45:00"),
+            algorithms=[ALPHA],
+            kind_algorithms=(),
+            min_sample=20,
+            revisions=Gate({"alpha": "a2"}),
+        )
+    assert last_change_of(db, "alpha") == ("active", "probation", CODE_CHANGED)
+    with stored(db) as store:
+        kept = json.loads(store.last_detail(REVISION_REVIEW_RUN, "alpha") or "{}")
+        assert (kept["days"], kept["passed"]) == (10, True)
+        assert kept["revision"] == store.revisions()["alpha"].id
+    with stored(later) as store:  # a later review day that did not pass, as the review keeps it
+        failed = {"revision": store.revisions()["alpha"].id, "days": 20, "passed": False, "reason": None}
+        store.add_run(REVISION_REVIEW_RUN, at("15:41:00"), "alpha", json.dumps(failed))
+    night_pass = Gate({"alpha": "a2"}, {("alpha", deploy): Verdict(True, "")})
+    next_day = DAY + timedelta(days=1)
+
+    for each in (db, later):
+        await start(each, at("06:00:00", next_day), night_pass, [ALPHA])
+
+    previous, status, reason = last_change_of(db, "alpha")
+    assert (previous, status) == ("probation", "active")
+    assert reason.startswith("10 days on probation;") and reason.endswith(f"; {CODE_PASSED}")
+    assert last_change_of(later, "alpha") == ("active", "probation", CODE_CHANGED), (
+        "its latest review day failed"
+    )
+    for each in (db, later):
+        with stored(each) as store:
+            assert store.revisions()["alpha"].verdict == REVISION_PASSED
 
 
 async def test_a_pass_alone_makes_nothing_active(tmp_path: Path) -> None:

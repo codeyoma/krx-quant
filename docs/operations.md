@@ -1941,7 +1941,7 @@ report: /state/prevalidations/mandelbrot.json
 - 이것을 담은 엔진의 첫 시작(#457의 배포)은 돌고 있는 알고리즘마다 지금 코드를 첫 리비전으로 남기기만 하고 상태를 바꾸지 않는다. 로그에 알고리즘마다 `<이름>: runs code <digest>, recorded as its first revision`이 한 줄씩 남는다. 코드가 바뀐 시작에는 `<이름>: code <옛 digest> -> <새 digest>: <상태> -> probation (code changed)`가 남는다.
 - 수습은 그 시작 뒤 첫 온전한 거래일부터 센다(06:00 배포면 그날). 수습 시뮬레이션은 하지 않는다.
 - 그 뒤 녹화일이 10일 쌓인 밤, 예약 작업 `prevalidate-revision-<이름>`이 `prevalidate <이름> --revision`으로 그 날들만 재생해 판정한다(아래 "예약 작업"의 표). 결과는 #204에 남는다. 처음 사전 검증과 "한 밤에 하나"를 나누고, 그 밤 차례에서 먼저다. 그 밤 기다리는 알고리즘의 사전 검증은 다음 밤으로 미뤄진다.
-- 거부되면 엔진이 다음 봉 마감(또는 시작)에 은퇴시키고, 다음 15:40 점검 때 `[알림] 코드 변경 사전 검증 거부: …`가 한 번 온다. 통과하면 수습이 이어지고, 실시간 수습의 판정일(10·20·40일째) 판정도 통과해야 정식이다. 10일째 점검은 그 밤의 사전 검증보다 먼저라 보통 20일째가 첫 기회다.
+- 거부되면 엔진이 다음 봉 마감(또는 시작)에 은퇴시키고, 다음 15:40 점검 때 `[알림] 코드 변경 사전 검증 거부: …`가 한 번 온다. 통과하면 수습이 이어지고, 실시간 수습의 판정일(10·20·40일째) 판정도 통과해야 정식이다. 사전 검증보다 먼저 온 판정일(보통 10일째 15:40)에 실시간 수습이 통과했으면 그 판정을 남겨 두었다가 사전 검증이 통과한 다음 봉 마감(또는 시작)에 정식이 된다. 마지막 판정일이 통과하지 못했으면 다음 판정일을 기다린다.
 - 손으로 돌리려면 장 시간 밖에서 `docker compose run --rm --no-deps engine prevalidate <이름> --revision`. 바뀐 코드가 없으면 `no revision to judge`로 끝난다.
 - 리팩터처럼 학습과 예측을 바꾸지 않는 코드 변경도 기본은 수습으로 되돌린다. 되돌리지 않으려면 그 PR이 `src/krx_quant/revisions.py`의 `SAME_REVISION`에 옛 digest → 새 digest와 증거(학습과 예측이 같다는 시험)를 넣는다. 배포 전 digest는 `uv run python -c "from krx_quant.algorithms import ALGORITHMS; from krx_quant.prevalidation import code_digest; print({a.name: code_digest(a) for a in ALGORITHMS})"`로 본다.
 
