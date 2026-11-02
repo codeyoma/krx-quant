@@ -24,7 +24,8 @@ narrow the capital, never widen it (#393).
 - ``KRX_TRADER_ENGINE_URL``: the Engine API the cost map is read from (``selection.py``, #395);
   compose sets it to the engine service's, inside the compose network;
 - ``KRX_TRADER_MOCK_PRACTICE`` (#427): ``off`` (the default) or ``on``: on a day no champion cell
-  trades, the mock book practises one cell, a share at a time (``desk.Desk``, ``selection.py``). For
+  trades, the mock book practises one cell, a share at a time (``desk.Desk``), the cell and its θ
+  frozen for each review cycle by the nightly job (#474, ``practice.py``; it chooses none while off). For
   ``KRX_TRADER_MODE=mock`` alone: ``on`` with ``paper`` or ``live`` is a configuration error, checked
   here, before a live trader falls back to paper (``run.py``).
 

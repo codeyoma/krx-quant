@@ -14,7 +14,7 @@ them (``record_quotes``) are what the re-fit replays (#470). Every price and hit
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
@@ -31,13 +31,14 @@ from krx_quant.predictions import NewKindPrediction, NewPrediction, PredictionSt
 from krx_quant.recorder import ParquetRecorder
 from krx_quant.special import Kind as SpecialKind
 from krx_quant.special import Window
-from krx_quant.trader import SYMBOL, review
+from krx_quant.trader import SYMBOL, practice, review
 from krx_quant.trader import policy as policies
 from krx_quant.trader.cells import Cell, EngineReader
 from krx_quant.trader.desk import Desk
 from krx_quant.trader.limits import ask
 from krx_quant.trader.paper import PaperTrader, Rules
 from krx_quant.trader.quotes import BestQuote
+from krx_quant.trader.replay import Signals
 from krx_quant.trader.selection import Pick, Selection, kelly
 from krx_quant.trader.store import (
     DB_NAME,
@@ -441,6 +442,43 @@ def policy_cell(of: Cell, threshold: float = 0.6, role: str = "top") -> policies
     fitted = {"p_star": 0.63, "low": 0.7, "kelly": 10.5, "days": [], "read": {}}
     fitted |= {"trades": 24, "wins": 12, "net": 0.0, "growth": 0.0}
     return policies.PolicyCell(of.kind, role, of.predictor, threshold, fitted)
+
+
+def alone(by_day: Mapping[date, Sequence[float]], given_up: int = 0) -> Signals:
+    """A cell's signals replayed alone a share (#470, ``replay.Signals``), made up: each day's bought
+    signals' net in ticks, and ``given_up`` more on the first day, bought none (net 0)."""
+    signals = Signals()
+    for n, (day, nets) in enumerate(sorted(by_day.items())):
+        extra = given_up if n == 0 else 0
+        signals.days[day] = [len(nets) + extra, float(sum(nets))]
+        signals.signals += len(nets) + extra
+        signals.bought += len(nets)
+        signals.wins += sum(1 for net in nets if net > 0)
+        signals.ticks += sum(nets)
+        if extra:
+            signals.refused["expired"] += extra
+    return signals
+
+
+# Twenty signals bought on two days (#474): enough for a practice cell to be chosen.
+ENOUGH = {date(2026, 10, 12): [1.0] * 10, date(2026, 10, 13): [-0.5] * 10}
+
+
+def practise(
+    state: Path, chosen: Pick, threshold: float = 0.6, when: str = "2026-10-13 22:40:00"
+) -> practice.Frozen:
+    """``chosen`` kept at ``threshold`` as the mock practice cell of the review cycle in force at
+    ``when`` (#474), as the nightly job keeps one (``practice.keep``): measured on 20 signals bought
+    alone on two days. The evaluation version begun the night before the test day, if it was not yet
+    (its first cycle 10-14 to 11-10)."""
+    db = policies.connect(state / DB_NAME)
+    try:
+        evaluation = review.begin(db, at("2026-10-13 22:30:00"), CALENDAR.session)
+        cycle = review.cycle_at(evaluation, at(when), CALENDAR.session)
+        measured = practice.Measured(chosen, threshold, alone(ENOUGH))
+        return practice.keep(db, evaluation.version, cycle.number, at(when), measured, [measured])
+    finally:
+        db.close()
 
 
 # The cost map (``GET /v1/cost-map``, #307) as the Engine API gives it: made-up rows within the /v1

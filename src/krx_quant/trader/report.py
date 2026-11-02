@@ -30,7 +30,10 @@ reached that day, a cumulative halt still holding, the pause in force and the pa
 re-arms asked for; the last trading days' ledger. A mock day's practice (#427,
 ``KRX_TRADER_MOCK_PRACTICE``) is apart: its trades, the predictions the book read on its practice
 pick, the practice cell of the day's pick and its pairs with the practice shadow, each said so
-(``연습``); the ledger and the limits are KIS's, the practice's with the champion's.
+(``연습``); the ledger and the limits are KIS's, the practice's with the champion's. The practice cell
+is the one kept for the day's review cycle (#474, ``practice.py``): its θ, when it was chosen and its
+replayed figures; the night's choice of the next cycle's is in the re-fit's output below
+(``practice.freeze_now``, which ``run_night`` runs after the re-fit).
 
 **What it never holds**: a price (no fill, reference, target, stop or quote), a broker's order
 number, an account, a key. The scheduled job's output is masked besides, as every job's
@@ -60,7 +63,7 @@ from typing import Any
 from krx_quant.config import Settings
 from krx_quant.feeds.base import KST
 from krx_quant.market_calendar import MarketCalendar, calendar_store
-from krx_quant.trader import CAPITAL, KIS_MODES, LIVE, PAPER, PICK_AT, live, promotion, review
+from krx_quant.trader import CAPITAL, KIS_MODES, LIVE, PAPER, PICK_AT, live, practice, promotion, review
 from krx_quant.trader import policy as policies
 from krx_quant.trader.gap import day_gap
 from krx_quant.trader.limits import Pause, pause_of
@@ -225,6 +228,8 @@ class Report:
     controls: tuple[Control, ...] = ()  # asked from the day's start to the night's end
     refit: int | None = None  # the night's re-fit's exit code (``run_night``); None: not run with it
     cycle: review.Cycle | None = None  # the day's review cycle (#469); None before the evaluation
+    # The mock practice cell kept for the day's review cycle (#474); None: none kept (yet).
+    practice: practice.Frozen | None = None
 
     @property
     def gate_passed(self) -> bool:
@@ -310,6 +315,7 @@ def read(
         everything = _controls(db, None, end) if "controls" in tables else ()
         points = promotion.checkpoints(db)
         later = day + timedelta(days=1)
+        cycle = _cycle(db, day, calendar)
         return Report(
             day=day,
             mode=mode,
@@ -349,7 +355,8 @@ def read(
             pause=pause_of(everything),
             controls=controls,
             refit=refit,
-            cycle=_cycle(db, day, calendar),
+            cycle=cycle,
+            practice=None if cycle is None else practice.frozen(db, cycle.evaluation, cycle.number),
         )
 
 
@@ -444,8 +451,10 @@ async def run_night(
     settings: Settings, trader: TraderSettings, now: datetime, engine_url: str | None = None
 ) -> int:
     """``krx-quant refit-policy --report``, the scheduled job ``trader-report``'s: the night's re-fit
-    (``refit.run_refit``), then the day's report printed above the re-fit's output. The re-fit's exit
-    code (one that raised counts 1), else the report's."""
+    (``refit.run_refit``) and the mock practice cell chosen for the review cycle in force if none is
+    kept for it (#474, ``practice.freeze_now``), then the day's report printed above their output. The
+    re-fit's exit code (one that raised counts 1), else the report's: the practice's choice changes
+    neither."""
     printed = io.StringIO()
     try:
         with contextlib.redirect_stdout(printed):
@@ -453,6 +462,12 @@ async def run_night(
     except Exception:
         log.exception("trader report: the night's re-fit failed")
         code = NO_POLICY_KEPT
+    try:
+        with contextlib.redirect_stdout(printed):
+            print()
+            await practice.freeze_now(settings, trader, now, engine_url)
+    except Exception:
+        log.exception("trader report: the night's practice cell could not be chosen")
     reported = run_report(settings, now, refit=code)
     print(f"\n{REFIT_HEADING}\n")
     print(printed.getvalue().rstrip("\n") or "(출력 없음)")
@@ -932,23 +947,32 @@ def _decisions_line(decisions: Mapping[tuple[str, str | None], int], whose: str 
 def _pick_section(report: Report) -> str:
     pick = report.pick
     if pick is None:
-        return "칸 고르기: 그날 고른 기록이 없다(trader가 그날 돌지 않았다)"
+        return "\n".join(
+            ["칸 고르기: 그날 고른 기록이 없다(trader가 그날 돌지 않았다)", *_practice_line(report)]
+        )
     head = (
         f"칸 고르기: {_when(pick['at'], report.day)}"
         f"(그날 고르기 {report.picks}번 가운데 장 마감 전 마지막) · "
         f"비용 지도 as_of {pick['as_of'] or '없음'}"
     )
-    lines = [head]
+    lines = [head, *_practice_line(report)]
     chosen = pick["picks"]
     if pick.get("practice") and chosen:  # #427: no champion cell to trade, the mock book practised one
         practised = chosen[0]
         cell = _cell(practised["kind"], practised["predictor"], practised["role"])
-        low, p_star = practised["low"], practised["p_star"]
-        lines.append(
-            f"연습 칸(KIS 모의, KRX_TRADER_MOCK_PRACTICE): {cell}: 판정이 있는 칸 가운데 하한 − p*가 가장"
-            f" 큰 칸 · 하한 {_ratio(low)} − p* {_ratio(p_star)} = {low - p_star:+.3f} ·"
-            f" {practised['calls']}건 · θ 기본값 · {practised.get('quantity') or 1}주씩"
-        )
+        shares = f"{practised.get('quantity') or 1}주씩"
+        if practised.get("threshold") is None:  # a pick before #474: the cost map's at each pick
+            low, p_star = practised["low"], practised["p_star"]
+            lines.append(
+                f"연습 칸(KIS 모의, KRX_TRADER_MOCK_PRACTICE): {cell}: 판정이 있는 칸 가운데 하한 − p*가 "
+                f"가장 큰 칸 · 하한 {_ratio(low)} − p* {_ratio(p_star)} = {low - p_star:+.3f} ·"
+                f" {practised['calls']}건 · θ 기본값 · {shares}"
+            )
+        else:
+            lines.append(
+                f"연습 칸(KIS 모의, KRX_TRADER_MOCK_PRACTICE): {cell}: 검토 주기에 고정한 칸(#474) · "
+                f"θ {practised['threshold']:g} · {shares}(승격·관문·모의 기록에는 세지 않는다)"
+            )
         chosen = []
     if chosen:
         lines.append(f"매매할 칸 {len(chosen)}(순위 순):")
@@ -978,6 +1002,23 @@ def _pick_section(report: Report) -> str:
         extra = f", {c['why']}" if c.get("why") else ""
         lines.append(f"- {c['kind']} {c['role']} {c.get('predictor') or '-'}: {verdict}({figures}){extra}")
     return "\n".join(lines)
+
+
+def _practice_line(report: Report) -> list[str]:
+    """The mock practice cell kept for the day's review cycle (#474), if one is."""
+    kept = report.practice
+    if kept is None:
+        return []
+    cell = _cell(kept.pick.kind, kept.pick.predictor, kept.pick.role)
+    gone = (
+        ""
+        if kept.gone_at is None
+        else f" · {kept.gone_at.astimezone(KST):%Y-%m-%d %H:%M}에 예측자가 없어져(gone) 주기 끝까지 쉰다"
+    )
+    return [
+        f"연습 칸 (#474): 주기 {kept.cycle}에 고정 · {cell} · θ {kept.threshold:g}"
+        f"({kept.chosen_at.astimezone(KST):%Y-%m-%d %H:%M}에 고름) · {practice.figures(kept.chosen)}{gone}"
+    ]
 
 
 def _cycle_line(report: Report) -> list[str]:
