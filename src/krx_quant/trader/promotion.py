@@ -381,10 +381,11 @@ def evaluate(db: sqlite3.Connection, k: int, day: date) -> Checkpoint:
 
 def checkpoints(db: sqlite3.Connection) -> list[Checkpoint]:
     """The checkpoints evaluated and kept (``gate_checks``), the first first, of every evaluation
-    version (``current`` keeps the current one's)."""
+    version (``current_checkpoints`` keeps the current one's): the current version's with their
+    ``base`` (#469)."""
     if not _has_table(db, "gate_checks"):
         return []
-    return [
+    found = [
         Checkpoint(
             int(r[0]),
             date.fromisoformat(r[1]),
@@ -399,29 +400,39 @@ def checkpoints(db: sqlite3.Connection) -> list[Checkpoint]:
             "SELECT k, day, policy_id, days, mean, low, stressed_low, at FROM gate_checks ORDER BY k"
         )
     ]
+    first = since(db)
+    if first is None:
+        return found
+    base = _base(found, first)
+    return [replace(c, base=base) if c.day >= first else c for c in found]
 
 
-def current(
+def _base(points: Sequence[Checkpoint], first: date) -> int:
+    """The highest number a checkpoint of an evaluation version before the one from ``first`` took
+    (0 if none): the current version's number on from it (#469)."""
+    return max((c.k for c in points if c.day < first), default=0)
+
+
+def current_checkpoints(
     db: sqlite3.Connection, points: Sequence[Checkpoint] | None = None
 ) -> tuple[list[Checkpoint], int]:
     """The checkpoints of the current evaluation version (#469: on its first day or after, ``since``)
-    of ``points`` (all kept if None), each with its ``base``, and that base: the highest number an
-    earlier version's took (0 if none), which the current version's number on from."""
-    found = checkpoints(db) if points is None else list(points)
+    among ``points`` (all kept if None), and their ``base``."""
+    kept = checkpoints(db)
+    found = kept if points is None else list(points)
     first = since(db)
     if first is None:
         return found, 0
-    base = max((c.k for c in found if c.day < first), default=0)
-    return [replace(c, base=base) for c in found if c.day >= first], base
+    return [c for c in found if c.day >= first], _base(kept, first)
 
 
 def check_gate(db: sqlite3.Connection, now: datetime) -> list[Checkpoint]:
     """The checkpoints due by the trader's paper history and not evaluated yet, evaluated at ``now``
     and kept, in order (a night that missed one evaluates it on the record up to its day). The
     night's job alone writes them, after the market (``promote``). Since #469 the current
-    evaluation version's, numbered on from the earlier versions' (``current``)."""
+    evaluation version's, numbered on from the earlier versions' (``current_checkpoints``)."""
     days = history(db)
-    points, base = current(db)
+    points, base = current_checkpoints(db)
     done = {c.k for c in points}
     out = []
     for j in range(1, len(days) // CHECKPOINT_DAYS + 1):
@@ -521,7 +532,7 @@ def gate_of(
     the trader's history up to ``until``, the checkpoints evaluated by ``checked_by`` (all if None);
     the current evaluation version's alone (#469: no checkpoint passed under an earlier one counts)."""
     by = [c for c in checkpoints(db) if checked_by is None or (c.at is not None and c.at <= checked_by)]
-    points, base = current(db, by)
+    points, base = current_checkpoints(db, by)
     days = len(history(db, until))
     if version is None:
         last = points[-1] if points else None
