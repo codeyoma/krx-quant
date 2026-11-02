@@ -25,11 +25,11 @@ Two layers:
 - ``Broker`` (#404) is the trader's: it reads the answers by the fields the probe measured on the
   mock server (the scheduled job ``probe-kis-orders-403``, its comment on #403 of 2026-10-30,
   ``PROBE_COMMENT``; CODING_STANDARDS.md, "External data is probed before it is used"), with the
-  trader's own key and cached token (``trader_broker``), paced (``PER_SECOND``), and retried by
-  the rules below. Its fills come from the day's order inquiry, polled after each order
-  (``Broker.take``), never from the real-time fill notice: on the mock server each notice record
-  had 23 fields where KIS's example lists 26 (``FILL_NOTICE_COLUMNS``), so its fields are not
-  known yet (``docs/kis-feeds.md``, "주문 (#403)").
+  trader's own key and cached token (``trader_broker``), paced (``PER_SECOND``; the live broker's
+  ``LIVE_PER_SECOND``), and retried by the rules below. Its fills come from the day's order
+  inquiry, polled after each order (``Broker.take``), never from the real-time fill notice: on the
+  mock server each notice record had 23 fields where KIS's example lists 26
+  (``FILL_NOTICE_COLUMNS``), so its fields are not known yet (``docs/kis-feeds.md``, "주문 (#403)").
 
 What is sent again: a call KIS refused for its per-second limit (``BUSY``) after ``BUSY_PAUSE``,
 and one it refused for its token (``TOKEN_REJECTED``) once with a new token. Both are KIS's
@@ -148,11 +148,17 @@ REFUSALS = {
 # (``nrcvb_buy_qty``) and one more, at the day's lower limit (BOUGHT). So the trader sizes a buy
 # from the orderable cash itself (``Orderable.most``); KIS does not stop it.
 
-# The pace (``PER_SECOND``): every call of the broker through one limiter, two a second over a
-# 1.1 s window. Of five reads sent at once the mock server answered three and refused two
-# (``BUSY``); none of the calls the probe paced a second apart was refused. A call refused for the
-# limit goes again ``BUSY_PAUSE`` later, at most ``BUSY_RETRIES`` times.
-PER_SECOND = 2
+# The pace: every call of a broker through one limiter, over a 1.1 s window, each server's its own
+# (#461). The mock broker's lets one call through (``PER_SECOND``): of five reads sent at once the
+# mock server answered three and refused two (``BUSY``), and of thirty the probe sent a second apart
+# it refused none (#403); at two a window, every mock trade of 2026-11-02 had its fill inquiry and
+# the sell right after the buy refused. The live broker's lets two through (``LIVE_PER_SECOND``),
+# under the live server's 20 a second. The live server's limit was not measured, and the mock
+# server's is not taken for it: a change to it waits for a measurement on the live server. A call
+# refused for the limit goes again ``BUSY_PAUSE`` later, at most ``BUSY_RETRIES`` times, through the
+# same limiter.
+PER_SECOND = 1
+LIVE_PER_SECOND = 2
 BUSY_PAUSE = 1.0
 BUSY_RETRIES = 3
 # A marketable order (``Broker.take``): its fills are read on the day's inquiry every ``POLL``
@@ -987,7 +993,8 @@ def trader_broker(
     """The trader's broker on KIS's mock server: the trader's own key and account
     (``KRX_TRADER_KIS_*``), never the collector's; its token cached in ``state/trader_kis_token.json``,
     reused across restarts and issued at most once a minute (``auth.TokenManager``: KIS answered a
-    second token asked at once with ``TOKEN_TOO_SOON``); its calls paced at ``per_second``.
+    second token asked at once with ``TOKEN_TOO_SOON``); its calls paced at ``per_second`` in any
+    1.1 s (``PER_SECOND``, one: the mock server's, #461).
 
     SettingsError when a key is missing, when it is the collector's or the live one
     (``KRX_TRADER_LIVE_KIS_APP_KEY``, #408: the mock mode and the order probe never take it), or when
@@ -1042,14 +1049,15 @@ def trader_live_broker(
     now: Callable[[], datetime],
     *,
     servers: Servers = LIVE,
-    per_second: int = PER_SECOND,
+    per_second: int = LIVE_PER_SECOND,
     pause: float = BUSY_PAUSE,
 ) -> Broker:
     """The trader's broker on its live account (#408): the live key and account
     (``KRX_TRADER_LIVE_KIS_*``), on KIS's live servers (``servers``, ``LIVE``: no setting changes
     them), with the live server's TR IDs (``Tr.live``); its token cached in
-    ``state/trader_live_kis_token.json``, apart from the mock key's; its calls paced as the mock
-    broker's (``PER_SECOND``, below the live server's 20 a second: its own limit was not measured).
+    ``state/trader_live_kis_token.json``, apart from the mock key's; its calls paced at
+    ``per_second`` in any 1.1 s (``LIVE_PER_SECOND``, two: below the live server's 20 a second; its
+    own limit was not measured, and the mock server's is not taken for it, #461).
 
     SettingsError when the live key, secret or account is missing, when the key is the collector's or
     the mock one, or the account the mock one: the live key is the new live account's own (#393

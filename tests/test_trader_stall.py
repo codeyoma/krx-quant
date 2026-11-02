@@ -530,18 +530,21 @@ async def test_a_pause_selling_at_once_asked_in_a_stall_sells_on_kis_s_next_rest
 # The call limit
 
 
-def test_the_rest_reads_leave_the_order_calls_room_within_the_trader_s_call_limit() -> None:
-    """Every call on the trader's key goes through one limiter: ``PER_SECOND`` in any window of 1.1 s
-    (#403: of five sent at once the mock server answered three). A read every ``REST_SECONDS`` takes
-    at most one slot of any window, leaving the other to the orders; with a sale's inquiry every
-    ``POLL`` seconds beside it, the calls a second stay under the limiter's pace."""
+def test_the_rest_reads_leave_the_order_calls_room_within_the_live_call_limit() -> None:
+    """Every call on the trader's key goes through one limiter. The live broker's lets
+    ``LIVE_PER_SECOND`` through in any window of 1.1 s: a read every ``REST_SECONDS`` takes at most
+    one slot of any window, leaving the other to the orders; with a sale's inquiry every ``POLL``
+    seconds beside it, the calls a second stay under the limiter's pace. The mock broker's lets one
+    through (``PER_SECOND``, #461: two in a window were refused): there the reads beside the
+    take-profit's already fill it, and an order call waits its turn."""
     window = 1.0 + 0.1  # RateLimiter's period and its margin, as ``trader_broker`` makes it
     assert Timing().rest == REST_SECONDS >= window, "at most one read in any window"
-    assert kis_orders.PER_SECOND - 1 >= 1, "a slot of each window for the order calls"
+    assert kis_orders.LIVE_PER_SECOND - 1 >= 1, "a slot of each window for the order calls"
     resting = 1 / REST_SECONDS + 1 / Timing().follow  # the take-profit's row read as it rests
     selling = 1 / REST_SECONDS + 1 / kis_orders.POLL  # a sale's inquiry, the take-profit's reading stopped
     assert max(resting, selling) == pytest.approx(1.5)
-    assert max(resting, selling) < kis_orders.PER_SECOND / window
+    assert max(resting, selling) < kis_orders.LIVE_PER_SECOND / window
+    assert resting > kis_orders.PER_SECOND / window, "on the mock server the order calls wait"
 
 
 async def test_kis_s_rest_quotes_are_read_every_two_seconds_of_a_stall_with_a_position_open_and_no_more(
