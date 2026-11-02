@@ -1361,7 +1361,7 @@ KRX 마감 흐름 화면이 읽는 그날의 마감 리밸런싱 수요다(`clos
 
 > **바뀜** (2026-11-02, #463): `orders[].status`는 `open`, `filled`, `cancelled`였다 → 응답을 받지 못한 mock·live 매도의 `sent`도 있다. 이유: 응답이 사라진 매도를 다시 보내지 않고 장부에 남겨 KIS에서 찾는다(#460).
 
-> **바뀜** (2026-11-02, #PRNUM): `orders[].status`에 `absent`가 더해졌다(`open`, `filled`, `cancelled`, `sent`였다). 이유: KIS에 닿지 않은 매도는 조회에 끝내 보이지 않아 `sent`로 남은 매매가 팔리지 않았다. 그 행을 지우지 않고 `absent`로 남긴다(#464).
+> **바뀜** (2026-11-02, #465): `orders[].status`에 `absent`가 더해졌다(`open`, `filled`, `cancelled`, `sent`였다). 이유: KIS에 닿지 않은 매도는 조회에 끝내 보이지 않아 `sent`로 남은 매매가 팔리지 않았다. 그 행을 지우지 않고 `absent`로 남긴다(#464).
 
 ### `GET /v1/trader` (#396)
 
