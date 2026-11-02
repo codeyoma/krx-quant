@@ -47,6 +47,7 @@ from tests.trader_doubles import (
     Read,
     Tick,
     at,
+    challenger,
     cost_map,
     cost_row,
     keep,
@@ -69,9 +70,10 @@ def agent_line(text: str) -> str:
 
 
 def champion_and_challenger(state: Path) -> None:
-    """Policy 1 the champion, policy 2 a challenger (θ 0.65), both kept the night before."""
+    """Policy 1 the champion, policy 2 a challenger (θ 0.65, its cohort's alone, #473), both kept the
+    night before."""
     keep(state, at("2026-10-13 22:31:00"), policy_cell(BARRIER, 0.6))
-    keep(state, at("2026-10-13 22:32:00"), policy_cell(BARRIER, 0.65))
+    challenger(state, at("2026-10-13 22:32:00"), policy_cell(BARRIER, 0.65))
 
 
 def test_a_day_s_trades_are_reported_with_each_policy_s_record_and_no_price(tmp_path: Path) -> None:
@@ -108,12 +110,12 @@ def test_a_day_s_trades_are_reported_with_each_policy_s_record_and_no_price(tmp_
         "- 챔피언 정책 1: 그날 매매 1건, 순손익 -162원 · 기록 1거래일, 매매 1건, 순손익 -162원, "
         "날마다 평균 -162원, 하한 없음"
     ) in lines
-    challenger = next(line for line in lines if line.startswith("- 도전 정책 2: "))
-    assert "그날 매매 1건, 순손익 -162원" in challenger
-    assert challenger.endswith(
-        "챔피언과 함께 돈 거래일 1일, (도전 − 챔피언) 평균 +0원, 하한 없음(신뢰수준 95.00%) "
-        "→ 날 수 부족(10일부터 판정)"
-    )
+    theirs = next(line for line in lines if line.startswith("- 도전 정책 2: "))
+    assert "그날 매매 1건, 순손익 -162원" in theirs
+    assert theirs.endswith(
+        "챔피언 정책 1과 함께 돈 거래일 1일, (도전 − 챔피언) 평균 +0원, 하한 없음(신뢰수준 95.00%, 묶음 안 "
+        "Bonferroni) · 지금은 날 수 부족(10일 미만이면 판정 불가) · 검토 날 2026-11-10 밤에 한 번 판정한다"
+    ), "a figure until its cohort's review night (#473)"
     assert "- 바뀐 것 없음" in lines
     assert (
         "실전 관문: 챔피언 정책 1의 챔피언으로 돈 모의 기록 1일(이력 1거래일), 날마다 순손익 평균 -162원, "
@@ -239,12 +241,18 @@ def test_a_night_a_challenger_is_promoted_calls_an_agent(tmp_path: Path) -> None
     change = next(line for line in lines if line.startswith("- 챔피언 교체: "))
     assert change.startswith(
         "- 챔피언 교체: 정책 1 → 정책 2(22:31:00). "
-        "도전 정책 2이 챔피언 정책 1을 모의로 이겼다(#400): 함께 돈 거래일 10일"
+        "도전 정책 2이 챔피언 정책 1을 모의로 이겼다(#473): 주기 1 묶음의 검토 날 2026-09-14, "
+        "함께 돈 거래일 10일"
     )
-    challenger = next(line for line in lines if line.startswith("- 도전 정책 2: "))
-    assert challenger.startswith("- 도전 정책 2: 그날 매매 1건, 순손익 -1,000원 · 기록 10거래일, 매매 10건, ")
-    assert challenger.endswith(
-        "챔피언과 함께 돈 거래일 10일, (도전 − 챔피언) 평균 +1,100원, 하한 +63원(신뢰수준 95.00%) → 통과"
+    assert (
+        "- 묶음 판정 (#473): 주기 1(2026-08-18–2026-09-14) · 챔피언 정책 1과 견줌 · 정책 2 챔피언이 됨(하한 "
+        "+63원, 10일)" in lines
+    )
+    theirs = next(line for line in lines if line.startswith("- 도전 정책 2: "))
+    assert theirs.startswith("- 도전 정책 2: 그날 매매 1건, 순손익 -1,000원 · 기록 10거래일, 매매 10건, ")
+    assert theirs.endswith(
+        "챔피언 정책 1과 함께 돈 거래일 10일, (도전 − 챔피언) 평균 +1,100원, 하한 +63원(신뢰수준 95.00%, "
+        "묶음 안 Bonferroni) · 그 밤 판정: 챔피언이 됨"
     ), "the night's judgment, as it was made"
     assert any(
         line.startswith("실전 관문: 챔피언 정책 2의 챔피언으로 돈 모의 기록 0일(이력 10거래일)")
@@ -372,7 +380,9 @@ async def test_the_scheduled_job_s_night_reports_above_the_re_fit_s_output(
     ]
     assert "- 첫 챔피언: 정책 1(22:31:00). 처음 맞춘 정책(#399)" in report
     assert "- 맞춘 정책 1(챔피언): 칸 없음 (정책 전체 모의 0건, 순손익 +0원)" in report
-    assert refit.lstrip("\n").startswith("도전 정책 판정 (#400)\n챔피언이 아직 없다")
+    assert refit.lstrip("\n").startswith(
+        "도전 정책 판정 (#473: 묶음을 검토 날 밤에 한 번)\n챔피언이 아직 없다"
+    )
     assert "정책 맞추기 (#399): 정책 1 · 챔피언(처음 맞춘 정책)" in refit
 
 

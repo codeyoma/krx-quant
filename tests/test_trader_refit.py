@@ -70,6 +70,7 @@ from krx_quant.trader.paper import (
 )
 from krx_quant.trader.quotes import BestQuote
 from krx_quant.trader.refit import (
+    BOOTSTRAP,
     FEW_DAYS,
     FEW_TRADES,
     NO_EDGE,
@@ -266,8 +267,9 @@ def test_a_cell_the_cost_map_fails_enters_at_the_lowest_threshold_its_lower_boun
     0.7 (10:00, 10:40) and 0.8 (10:40) +2.878025. Five points are judged (two buys over two days at
     0.8 at least), each bound at 99% (1 − 0.05 ÷ 5); the days alike, the bound is the mean. θ 0.7 is the
     lowest above 0, though the cost map fails the cell. Its policy replayed buys the 10:00 and 10:40
-    rises each day, 14 shares: 2 × 4,029.235 won a day, above 0: kept, the first policy the champion.
-    The cost map's f* is kept as a diagnosis; the cell has no λ (#471)."""
+    rises each day, 14 shares: 2 × 4,029.235 won a day, above 0: kept, a challenger waiting for a
+    cohort behind the empty champion kept before it (#473: the first fit with cells is development
+    evidence). The cost map's f* is kept as a diagnosis; the cell has no λ (#471)."""
     write_five(tmp_path)
 
     done = refit(tmp_path)
@@ -306,7 +308,18 @@ def test_a_cell_the_cost_map_fails_enters_at_the_lowest_threshold_its_lower_boun
     assert done.fit["replay"] == {"days": 2, "no_recording": [], "gaps": [], "passes": 2, "days_read": 4}
     assert done.fit["cost_map"]["named"] == 1 and done.fit["cost_map"]["passed"] == 0
     assert done.left_out == () and done.rejected is None
-    assert (done.version, done.champion, done.champion_version) == (1, True, 1), "the first: the champion"
+    assert (done.version, done.champion, done.champion_version, done.bootstrap) == (2, False, 1, 1), (
+        "the first with cells waits behind an empty champion (#473)"
+    )
+    with closing(sqlite3.connect(tmp_path / TRADER_DB)) as db:
+        assert db.execute("SELECT id, cells FROM policies WHERE id = 1").fetchone() == (1, "[]")
+        assert db.execute("SELECT policy_id, reason FROM champions").fetchall() == [(1, BOOTSTRAP)]
+        assert policies.waiting_versions(db) == [2]
+    assert report(done).startswith(
+        "정책 맞추기 (#399): 정책 2 · 기다리는 정책(#473: 다음 묶음을 기다린다. 검토 날 밤에 기다리는 "
+        "정책 가운데 새것부터 셋까지 다음 주기의 도전 정책으로 들어간다) · 챔피언이 없어 빈 정책 1을 "
+        "챔피언으로 먼저 두었다\n"
+    )
 
 
 def test_the_replay_buys_what_the_trader_s_loss_budget_pays(tmp_path: Path) -> None:
@@ -598,14 +611,14 @@ def test_a_baseline_s_predictions_are_all_read_whatever_their_model(tmp_path: Pa
 
 def test_the_same_input_makes_the_same_policy_and_it_is_not_kept_twice(tmp_path: Path) -> None:
     """Fitted into two stores, byte for byte the same policy. Fitted again into the first, it has
-    the champion's values: not kept (#400), the champion stays."""
+    the values of a policy waiting (#473): not kept (#400); nor once that is the champion."""
     write_five(tmp_path)
 
     first = refit(tmp_path)
     other = refit(tmp_path, store=tmp_path / "other" / TRADER_DB, now=moment(SECOND, "22:45"))
     second = refit(tmp_path, now=moment(SECOND, "22:50"))
 
-    assert (first.version, first.champion, other.version, other.champion) == (1, True, 1, True)
+    assert (first.version, first.bootstrap, other.version, other.bootstrap) == (2, 1, 2, 1)
     assert other.cells == first.cells and other.left_out == first.left_out
     assert {**other.fit, "run": None} == {**first.fit, "run": None}, "but its time and memory"
     stored = []
@@ -613,12 +626,17 @@ def test_the_same_input_makes_the_same_policy_and_it_is_not_kept_twice(tmp_path:
         with closing(sqlite3.connect(path)) as db:
             stored.append([r[0] for r in db.execute("SELECT cells FROM policies ORDER BY id")])
             champions = db.execute("SELECT policy_id, reason FROM champions").fetchall()
-        assert champions == [(1, policies.FIRST)]
-    assert stored[0] == stored[1], "byte for byte, and one policy each"
-    assert (second.version, second.same_as, second.champion, second.champion_version) == (1, 1, False, 1)
+        assert champions == [(1, BOOTSTRAP)]
+    assert stored[0] == stored[1], "byte for byte, and two policies each: the empty champion and the fit"
+    assert (second.version, second.same_as, second.champion, second.champion_version) == (2, 2, False, 1)
     assert report(second).startswith(
-        "정책 맞추기 (#399): 새 정책 없음 · 맞춘 값이 챔피언 정책 1과 같아 저장하지 않았다\n"
+        "정책 맞추기 (#399): 새 정책 없음 · 맞춘 값이 기다리는 정책 정책 2과 같아 저장하지 않았다\n"
     )
+    with closing(policies.connect(tmp_path / TRADER_DB)) as db:
+        assert policies.crown(db, moment(SECOND, "22:55"), 2, "test", {})
+    third = refit(tmp_path, now=moment(SECOND, "23:00"))
+    assert (third.version, third.same_as) == (2, 2)
+    assert report(third).startswith("정책 맞추기 (#399): 새 정책 없음 · 맞춘 값이 챔피언 정책 2과 같아")
 
 
 def test_no_cell_kept_makes_an_empty_policy(tmp_path: Path) -> None:
@@ -704,10 +722,14 @@ async def test_the_job_reads_tonight_s_cost_map_and_keeps_the_policy(
     assert code == 0
     assert api.asked == [{"symbol": SYMBOL, "period": "20d", "special": "exclude"}]
     out = capsys.readouterr().out
-    assert out.startswith("도전 정책 판정 (#400)\n챔피언이 아직 없다(첫 밤 정책 맞추기 전).\n\n"), (
-        "the challengers are judged first (#400): none before the first champion"
-    )
+    assert out.startswith(
+        "도전 정책 판정 (#473: 묶음을 검토 날 밤에 한 번)\n챔피언이 아직 없다(첫 밤 정책 맞추기 전).\n\n"
+    ), "the challengers are judged first (#400): none before the first champion"
     assert "\n정책 맞추기 (#399): 정책 1 · 챔피언(처음 맞춘 정책)\n" in out
+    assert out.endswith(
+        "\n도전 정책 묶음 (#473): 주기 1(2026-10-16–2026-11-12)의 묶음: 기다리는 정책이 없어 "
+        "비었다(이 주기에는 도전 정책이 돌지 않는다)\n"
+    ), "the night's end: its evaluation's first cycle, ahead, has its cohort (none waits)"
     assert (
         "비용 지도: 005930 20d, as_of 2026-10-14T08:30:00+09:00, 이름이 있는 칸 1칸(판정과 상관없이 모두 "
         "시험한다. 시장가 왕복 통과 0칸은 참고만)" in out

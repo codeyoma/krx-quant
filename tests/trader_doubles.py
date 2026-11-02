@@ -7,8 +7,9 @@ The engine's predictions and special windows are written into a real engine data
 up, received in the order given; the pauses are written into the trader's store as the Engine API
 writes them, the resumes and re-arms as ``krx-quant trade`` does. With ``Day.desk`` the trader is
 the whole desk (#400: the champion's book and each challenger running, the policies kept in the
-store as the nightly re-fit keeps them, ``keep``). The same quotes recorded as the collector records
-them (``record_quotes``) are what the re-fit replays (#470). Every price and hit rate is made up.
+store as the nightly re-fit keeps them, ``keep``, and entered as a cohort, ``enter``, #473). The
+same quotes recorded as the collector records them (``record_quotes``) are what the re-fit replays
+(#470). Every price and hit rate is made up.
 """
 
 from __future__ import annotations
@@ -31,7 +32,7 @@ from krx_quant.predictions import NewKindPrediction, NewPrediction, PredictionSt
 from krx_quant.recorder import ParquetRecorder
 from krx_quant.special import Kind as SpecialKind
 from krx_quant.special import Window
-from krx_quant.trader import SYMBOL, practice, review
+from krx_quant.trader import SYMBOL, cohort, practice, review
 from krx_quant.trader import policy as policies
 from krx_quant.trader.cells import Cell, EngineReader
 from krx_quant.trader.desk import Desk
@@ -410,8 +411,8 @@ class Day:
 
 def keep(state: Path, made: datetime, *cells: policies.PolicyCell, reason: str = "밤 맞추기") -> int:
     """A policy version kept at ``made`` as the nightly re-fit keeps it (``policy.add``): the first
-    the champion, a later one a challenger (#400: it runs from the trading day after ``made``'s
-    pick). Its version. The evaluation version (#469) begun then if it was not yet, as the night's
+    the champion, a later one waiting for a cohort (#473: ``enter`` makes it a challenger). Its
+    version. The evaluation version (#469) begun then if it was not yet, as the night's
     job begins it (``promotion.promote``): its first cycle from the first trading day after
     ``made``."""
     db = policies.connect(state / DB_NAME)
@@ -420,6 +421,29 @@ def keep(state: Path, made: datetime, *cells: policies.PolicyCell, reason: str =
         version, _ = policies.add(db, made, reason, cells, [], {"grid": {}})
     finally:
         db.close()
+    return version
+
+
+def enter(state: Path, made: datetime, *versions: int) -> cohort.Cohort:
+    """``versions`` entered at ``made`` as the cohort of the review cycle in force then (#473), against
+    the champion then, as the nightly job forms one (``cohort.form``), but in whichever cycle the test
+    is in: the job forms one before its cycle begins alone (``cohort.form_tonight``). They run from
+    the trading day after ``made``'s pick to the cycle's review day."""
+    db = policies.connect(state / DB_NAME)
+    try:
+        evaluation = review.begin(db, made, CALENDAR.session)
+        cycle = review.cycle_at(evaluation, made, CALENDAR.session)
+        members = sorted(versions, reverse=True)  # the newest first, as the job takes them
+        return cohort.form(db, made, evaluation.version, cycle, policies.champion_version(db), members)
+    finally:
+        db.close()
+
+
+def challenger(state: Path, made: datetime, *cells: policies.PolicyCell) -> int:
+    """A policy kept at ``made`` (``keep``) and entered alone as a cohort then (``enter``): a challenger
+    from the next trading day. Its version."""
+    version = keep(state, made, *cells)
+    enter(state, made, version)
     return version
 
 

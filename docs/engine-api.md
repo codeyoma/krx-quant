@@ -249,7 +249,7 @@
 
 ### 계약 (JSON 스키마, #19)
 
-- `schemas/engine-api-v1.json`이 모든 `/v1` 응답의 형식이다(JSON Schema 2020-12). 엔드포인트마다 `$defs`에 정의가 하나씩 있다: `status`, `symbols`, `latest`, `predictions`, `bars`, `candles`, `special`(항목은 `special_window`, #236), `supply`(항목은 `supply_day`, #226), `algorithms`, `algorithm_detail`, `leaderboard`, `algorithm_stats`, `consensus`, `macro`, `calendar`, `kinds`, `kind_latest`, `kind_predictions`, `trader_trades`(항목은 `trader_trade`, #394), `trader_marks`(항목은 `trader_mark`, #398), `trader_policies`(항목은 `trader_policy`, #399), `trader`(한도는 `trader_limit`, 요청은 `trader_control`, #396. 정책의 모의 기록은 `trader_paper`, 실전 관문은 `trader_gate`(판정점은 `trader_checkpoint`, #408), 도전 정책의 승격 판정은 `trader_promotion`, #400. live 모드는 `trader_live`, 그 점검은 `trader_live_check`, #408), `trader_days`(항목은 `trader_day`), `POST /v1/trader/pause`의 응답 `trader_pause`, 오류는 `error`. 스트림의 메시지는 `event`(종류마다 `prediction_event` 등)다.
+- `schemas/engine-api-v1.json`이 모든 `/v1` 응답의 형식이다(JSON Schema 2020-12). 엔드포인트마다 `$defs`에 정의가 하나씩 있다: `status`, `symbols`, `latest`, `predictions`, `bars`, `candles`, `special`(항목은 `special_window`, #236), `supply`(항목은 `supply_day`, #226), `algorithms`, `algorithm_detail`, `leaderboard`, `algorithm_stats`, `consensus`, `macro`, `calendar`, `kinds`, `kind_latest`, `kind_predictions`, `trader_trades`(항목은 `trader_trade`, #394), `trader_marks`(항목은 `trader_mark`, #398), `trader_policies`(항목은 `trader_policy`, #399), `trader`(한도는 `trader_limit`, 요청은 `trader_control`, #396. 정책의 모의 기록은 `trader_paper`, 실전 관문은 `trader_gate`(판정점은 `trader_checkpoint`, #408), 도전 정책의 승격 판정은 `trader_promotion`, #400. 도전 정책 묶음은 `trader_cohort`, 그 판정은 `trader_cohort_verdict`, #473. live 모드는 `trader_live`, 그 점검은 `trader_live_check`, #408), `trader_days`(항목은 `trader_day`), `POST /v1/trader/pause`의 응답 `trader_pause`, 오류는 `error`. 스트림의 메시지는 `event`(종류마다 `prediction_event` 등)다.
 - 다른 종류 항목의 `output`, 정답의 `path`, 통계의 `extra`는 종류마다 형식이 다르다. 변동폭의 것은 `range_output`, `range_path`, `range_stats`다(#180, 아래 "변동폭"). 장벽의 것은 `barrier_output`, `barrier_path`, `barrier_stats`다(#183, 아래 "장벽").
 - `leaderboard`와 `algorithm_stats`는 둘 중 하나다(#179): 방향의 것(`direction_leaderboard`, `direction_algorithm_stats`, 이전과 같은 형식)과 다른 종류의 것(`kind_leaderboard`, `kind_algorithm_stats`, 맨 위에 `kind`가 있다).
 
@@ -1401,10 +1401,13 @@ KRX 마감 흐름 화면이 읽는 그날의 마감 리밸런싱 수요다(`clos
                "promotion": null},
               {"version": 5, "status": "challenger",
                "paper": {"since": "2026-10-08", "last": "2026-10-15", "days": 6, "trades": 14, "net": 9000.0, "mean": 1500.0, "low": -800.0},
-               "promotion": {"champion": 3, "days": 6, "required": 10, "until": 20, "mean": 250.0, "low": -1900.0, "level": 0.975,
-                             "challengers": 2, "passed": false, "why": "few_days"}}],
+               "promotion": {"champion": 3, "days": 6, "required": 10, "until": 20, "review": "2026-10-28", "mean": 250.0,
+                             "low": -1900.0, "level": 0.975, "challengers": 2, "passed": false, "why": "few_days"}}],
  "cycle": {"evaluation": 2, "since": "2026-09-30", "number": 1, "start": "2026-09-30", "review": "2026-10-28",
-           "day": 12, "days": 20}}
+           "day": 12, "days": 20},
+ "cohort": {"evaluation": 2, "cycle": 1, "formed_at": "2026-09-29T22:40:12+09:00", "start": "2026-09-30",
+            "review": "2026-10-28", "champion": 3, "members": [5, 4], "passed_over": [{"version": 2, "why": "older"}],
+            "verdict": null}}
 ```
 
 (값은 지어낸 예다.)
@@ -1425,10 +1428,11 @@ KRX 마감 흐름 화면이 읽는 그날의 마감 리밸런싱 수요다(`clos
 - `controls`: 최근 요청 20개, 최근 것부터. `source`는 `api`(화면의 `POST /v1/trader/pause`), `cli`(서버의 `krx-quant trade resume|rearm`), `reconcile`(mock 시작에서 KIS 계좌가 장부와 달라 trader가 스스로 건 새 진입 정지, #406: [design.md](design.md#14-자동-매매-393) 14장 "계좌 맞추기와 재시작"), `applied_at`은 trader가 읽은 때(아직이면 `null`). **바뀜** (2026-10-31, #424): `source`는 `api`나 `cli`였다 → `reconcile`이 더해졌다. 이유: #406.
 - `champion`(#400): 지금 챔피언의 정책 버전(`GET /v1/trader/policies`의 `champion`), 첫 밤 정책 맞추기 전에는 `null`이다. 아래 셋은 trader가 쓴 상태가 아니라 엔진이 요청 때 저장소의 기록(`policy_days`와 매매)으로 계산한다. 그래서 trader가 멈춰 있어도 맞다.
 - `gate`(#400, #408, 설계 14장 "실전 관문"): 실전 관문의 진행이다. 판정점에서만 판정한다: trader의 모의 이력(챔피언이 돈 거래일)의 20번째, 40번째 … 날 밤에, 그날 챔피언이 챔피언으로 돈 날의 모의 기록을 k번째 판정점의 α_k = 0.025 × 6 ÷ (π² k²)로 본다. 챔피언(`policy`)이 챔피언으로 돈 날 수(`days`: 승격된 챔피언은 챔피언이 된 다음 거래일부터. 도전 정책이었던 날은 세지 않는다), 판정점에 필요한 날 수(`required`, 20), 날마다 순손익(매매 없는 날 0, 원)의 평균(`mean`)과 그 하한(`low`: 양쪽 신뢰수준 `level`로, 겹침 H = 1의 거래일 단위 t. `level`은 다음 판정점의 1 − 2α, 넘었으면 넘은 판정점의 것. 2일 미만이면 `null`), 넘었는지(`passed`: 그 챔피언이 판정점에서 넘었다. 넘은 채다). `history`: trader의 모의 이력 날 수(#469부터 지금 평가 버전의 첫날부터, 아래 `cycle`). `checkpoint`: 다음 판정점(`k`, 그 날 `day`: 이력의 몇 번째 날, `every` 20, `alpha`, `level`). `passed_at`: 넘은 판정점(아래 꼴), 아니면 `null`. `stressed`: 다리마다 1틱 더 불리하게 친 기록으로도 넘은 판정점이 있는지(live의 실행 점검 `stressed_gate`). `last`: 마지막으로 판정한 판정점(`k`, `day`(날짜), 그날 챔피언 `policy`, `days`, `mean`, `low`, `stressed_low`, `alpha`, `level`, `passed`, `stressed_passed`, 판정한 때 `at`), 아직 없으면 `null`. 첫 챔피언 전에는 `policy`가 `null`, `days`가 0이다. 화면의 하한 비율은 `low` ÷ `capital`이다. 관문을 넘었다고 실전 주문이 저절로 나가지는 않는다: `KRX_TRADER_MODE=live`이고 실행 점검도 맞아야 한다(위 `live`). **바뀜** (2026-11-02, #476): `history`, `days`, `mean`, `low`, `passed`, `passed_at`, `last`는 trader의 모든 날과 판정점을 셌다 → 지금 평가 버전의 것만 센다(그 전 버전에서 넘은 관문은 물려받지 않는다). `checkpoint.k`는 그 전 버전의 판정점 다음부터 이어 세고, `checkpoint.day`는 새 버전의 이력에서의 날이다. 이유: spec #468 "새 버전이 옛 관문 통과를 물려받지 않는다"(#469, 설계 14장 "실전 관문"). **바뀜** (2026-10-31, #425): `days`, `required`, `mean`, `low`(95%), `level` 0.95, `passed`(`days` ≥ 20이고 `low` > 0, 밤마다 다시 계산)뿐이었다 → 판정점에서만 판정하고, `level`이 다음 판정점의 것이며, `history`, `checkpoint`, `passed_at`, `stressed`, `last`가 더해졌다. `days`, `mean`, `low`는 도전 정책이었던 날을 포함했다 → 챔피언으로 돈 날만. 화면은 "며칠 남았는지" 대신 다음 판정점과 그 α를 보인다. 이유: 밤마다 보는 관문은 영향이 없는 챔피언도 12–15% 넘겼다(#408). 도전 정책이었던 날은 그 정책을 승격시킨 날이라 위로 치우친다(설계 14장 "실전 관문", #425 리뷰).
-- `policies`(#400): 챔피언과 지금 도는 도전 정책(셋까지, 오래된 것부터). `status`는 `champion`이나 `challenger`다. `paper`는 그 정책의 모의 기록이다: 처음과 마지막 거래일(`since`, `last`), 날 수, 매매 수(청산한 것), 순손익 합(원), 날마다 평균과 그 95% 하한. `promotion`은 도전 정책만: 챔피언과 함께 돈 거래일(`days`, 챔피언이 장중에 멈춘 날은 뺀다), 필요한 날 수(`required`, 10), 이 날 수까지 이기지 못하면 그 밤에 내려진다(`until`, 20), 날마다 (도전 − 챔피언) 순손익의 평균과 하한(`level`은 도전 정책 수 `challengers`로 Bonferroni 보정한 양쪽 신뢰수준: 1 − 0.05 ÷ 도전 정책 수), 지금 판정하면 이기는지(`passed`)와 아니면 왜인지(`why`: `few_days` 날 수 부족, `not_above` 하한 ≤ 0). 실제 교체는 검토 날(#469, 아래 `cycle`의 `review`) 장이 끝난 뒤 밤 작업이 한다(설계 14장 "도전 정책과 승격"): 그 밖의 날에는 `passed`가 참이어도 바뀌지 않는다. 기록(`paper`)과 판정은 지금 평가 버전의 날만 센다(#469). **바뀜** (2026-11-02, #476): 실제 교체는 장이 끝난 뒤의 어느 밤이든 했다 → 검토 날 밤에만. 이유: spec #468 "버전과 검토 주기"(#469). 오늘 밤 자리를 받은 도전 정책도 다음 거래일부터 돌기 전에 여기 있다(기록 0일). 자리를 기다리는 정책은 `GET /v1/trader/policies`의 `waiting`이다.
+- `policies`(#400): 챔피언과 지금 도전 정책(#473부터 판정 전 묶음의 정책, 셋까지, 오래된 것부터). `status`는 `champion`이나 `challenger`다. `paper`는 그 정책의 모의 기록이다: 처음과 마지막 거래일(`since`, `last`), 날 수, 매매 수(청산한 것), 순손익 합(원), 날마다 평균과 그 95% 하한. `promotion`은 도전 정책만, 그 묶음에 고정한 챔피언(`champion`)과 그 주기의 지금까지의 날로 본 수치다(#473): 함께 돈 거래일(`days`: 챔피언이 정지로 멈춘 날은 빼고, 매매가 없는 날과 손실 한도로 멈춘 날은 넣는다), 판정에 필요한 날 수(`required`, 10: 검토 날에 이보다 적으면 판정 불가), 주기의 거래일 수(`until`, 20), 판정하는 검토 날(`review`, 날짜), 날마다 (도전 − 챔피언) 순손익의 평균과 하한(`level`은 묶음의 정책 수 `challengers`로 Bonferroni 보정한 양쪽 신뢰수준: 1 − 0.05 ÷ 묶음의 정책 수), 지금 날들로 보면 이기는지(`passed`)와 아니면 왜인지(`why`: `few_days` 날 수 부족, `not_above` 하한 ≤ 0). 판정이 아니라 참고다: 판정은 그 주기의 검토 날(`review`) 장이 끝난 뒤 밤 작업이 한 번 한다(설계 14장 "도전 정책과 승격"). 그 밖의 날에는 `passed`가 참이어도 바뀌지 않는다. 기록(`paper`)과 판정은 지금 평가 버전의 날만 센다(#469). **바뀜** (2026-11-02, #476): 실제 교체는 장이 끝난 뒤의 어느 밤이든 했다 → 검토 날 밤에만. 이유: spec #468 "버전과 검토 주기"(#469). **바뀜** (2026-11-03, #481): `promotion`은 함께 돈 모든 날(챔피언이 손실 한도로 멈춘 날도 뺐다)로, 도는 도전 정책 수로 보정했고, `until`(20)일까지 이기지 못하면 그 밤에 내려졌다. 오늘 밤 자리를 받은 도전 정책도 여기 있었다 → 그 묶음의 주기 안의 날로, 묶음의 정책 수로 보정하고, `until`은 주기의 거래일 수, `review`가 더해졌다. 묶음은 검토 날 밤에 만들어지고 다음 거래일부터 돈다. 이유: spec #468 5절 "도전 정책". 다음 묶음을 기다리는 정책은 `GET /v1/trader/policies`의 `waiting`이다.
+- `cohort`(#473, 설계 14장 "도전 정책과 승격"): 마지막으로 만든 도전 정책 묶음이다(지금 도는 것. 검토 날 밤 판정 뒤 다음 묶음을 만들기 전에는 막 판정한 것). `GET /v1/trader/policies`의 `cohorts` 항목과 같은 꼴이다(아래). 첫 묶음 전에는 `null`이다. 스키마는 `trader_cohort`다.
 - `cycle`(#469, 설계 14장 "버전과 검토 주기 (#469)"): 지금 적용되는 검토 주기다(그날 장이 끝났으면 다음 거래일의 주기). `evaluation`: 평가 버전(2: #469의 규칙), `since`: 그 버전의 첫날. `number`: 주기 번호(1부터), `start`: 그 첫 거래일, `review`: 그 검토 날(20번째 거래일: 장이 끝난 뒤 판정하고 다음 거래일부터 적용한다), `day`: 그 주기에서 지금 적용되는 거래일이 몇째 날인지(1–`days`, 첫 주기의 첫날 전이면 `null`), `days`: 주기의 거래일 수(20). 거래일은 엔진의 시장 달력으로 센다. 엔진이 요청 때 저장소의 `evaluations`로 계산한다. trader나 밤 작업이 평가 버전을 아직 쓰지 않았으면(#469 전의 저장소) `null`이다. 데모 엔진은 평가 버전을 쓰지 않아 `null`이다.
-- trader가 상태를 쓴 적이 없거나 저장소가 없으면 `alive`가 거짓, `controls`가 비고 나머지는 모두 `null`이다(`gate`는 0일, `policies`는 빈 목록, `cycle`은 `null`).
-- 데모 엔진(`krx-quant demo-engine`, #397)에는 10:30의 실전 trader가 있다: 10:05에 시작해 돌고(`running`), 아침의 마지막 매매(10:27 진입)를 들고 있다. 오늘·누적 손익은 그날 실전으로 청산한 매매 셋과 그 포지션의 평가 손익이고, `controls`는 10-08 화면의 새 진입 정지와 10-12 08:41 서버의 재개다(둘 다 읽힘). 값은 trader의 코드(`limits.Guard`, `PaperTrader`)가 데모의 호가 위에서 쓴 것이다(`demo.write_demo_trader`). 속도를 준 데모(`--pace`)도 처음부터 10:30의 상태를 주므로, 데모 시계가 10:29:45에 닿을 때까지 `alive`가 거짓이다. 데모에 정지를 보내면 엔진처럼 쓰지만 읽을 trader가 없어 `applied_at`이 `null`로 남고 `status`도 그대로다. `champion`은 1, `gate`는 정책 1의 모의 기록 2일(10-08, 10-12. 10-08은 화면의 정지로 멈춘 날)이고, `policies`에 도전 정책 2(10-12부터, 1일, `promotion.why`가 `few_days`)가 있다.
+- trader가 상태를 쓴 적이 없거나 저장소가 없으면 `alive`가 거짓, `controls`가 비고 나머지는 모두 `null`이다(`gate`는 0일, `policies`는 빈 목록, `cycle`과 `cohort`는 `null`).
+- 데모 엔진(`krx-quant demo-engine`, #397)에는 10:30의 실전 trader가 있다: 10:05에 시작해 돌고(`running`), 아침의 마지막 매매(10:27 진입)를 들고 있다. 오늘·누적 손익은 그날 실전으로 청산한 매매 셋과 그 포지션의 평가 손익이고, `controls`는 10-08 화면의 새 진입 정지와 10-12 08:41 서버의 재개다(둘 다 읽힘). 값은 trader의 코드(`limits.Guard`, `PaperTrader`)가 데모의 호가 위에서 쓴 것이다(`demo.write_demo_trader`). 속도를 준 데모(`--pace`)도 처음부터 10:30의 상태를 주므로, 데모 시계가 10:29:45에 닿을 때까지 `alive`가 거짓이다. 데모에 정지를 보내면 엔진처럼 쓰지만 읽을 trader가 없어 `applied_at`이 `null`로 남고 `status`도 그대로다. `champion`은 1, `gate`는 정책 1의 모의 기록 2일(10-08, 10-12. 10-08은 화면의 정지로 멈춘 날)이고, `policies`에 도전 정책 2(10-12부터, 1일, `promotion.why`가 `few_days`)가 있다. 정책 2는 10-08 밤에 10-12부터의 주기의 묶음으로 들어갔다(#473, `cohort`).
 
 ### `GET /v1/trader/days?from=YYYY-MM-DD&to=YYYY-MM-DD` (#396)
 
@@ -1495,7 +1499,7 @@ trader가 돈 거래일마다의 장부다. `from`부터 `to`까지(KST 날짜, 
 
 ### `GET /v1/trader/policies?limit=N` (#399)
 
-자동 매매 trader의 정책 버전(설계 [14장](design.md#14-자동-매매-393) "정책", "밤 정책 맞추기")을 trader의 저장소(`state/trader.sqlite3`의 `policies`, `champions`)에서 읽기만 해서 준다. 자동 매매 화면의 정책 버전 표와 교체 기록이 읽는다(#401, 설계 10장 "자동 매매"). 최근 N개(`limit` 1–1000, 기본 100), 새 버전부터다. 밤 정책 맞추기가 처음 돌기 전이나 저장소가 없으면 `{"champion": null, "policies": [], "champions": []}`다. 잘못된 `limit`은 400이다. 스키마는 `trader_policies`(항목 `trader_policy`)다.
+자동 매매 trader의 정책 버전(설계 [14장](design.md#14-자동-매매-393) "정책", "밤 정책 맞추기")과 도전 정책 묶음(#473, "도전 정책과 승격")을 trader의 저장소(`state/trader.sqlite3`의 `policies`, `champions`, `cohorts`, `cohort_members`, `cohort_verdicts`)에서 읽기만 해서 준다. 자동 매매 화면의 정책 버전 표와 교체 기록이 읽는다(#401, 설계 10장 "자동 매매"). 최근 N개(`limit` 1–1000, 기본 100), 새 버전부터다. 밤 정책 맞추기가 처음 돌기 전이나 저장소가 없으면 `{"champion": null, "policies": [], "champions": [], "cohorts": []}`다. 잘못된 `limit`은 400이다. 스키마는 `trader_policies`(항목 `trader_policy`)다.
 
 ```json
 {"champion": 1,
@@ -1526,16 +1530,30 @@ trader가 돈 거래일마다의 장부다. `from`부터 `to`까지(KST 날짜, 
    "paper": {"since": "2026-10-16", "last": "2026-10-29", "days": 10, "trades": 23, "net": 11000.0, "mean": 1100.0, "low": 63.35}},
   {"version": 1, "status": "former", "...": "..."}],
  "champions": [{"at": "2026-10-29T22:30:40+09:00", "version": 2,
-                "reason": "도전 정책 2이 챔피언 정책 1을 모의로 이겼다(#400): 함께 돈 거래일 10일, …",
-                "detail": {"from": 1, "days": 10, "required": 10, "mean": 1100.0, "low": 63.35, "level": 0.95, "challengers": 1}},
-               {"at": "2026-10-14T22:31:05+09:00", "version": 1, "reason": "처음 맞춘 정책(#399)", "detail": null}]}
+                "reason": "도전 정책 2이 챔피언 정책 1을 모의로 이겼다(#473): 주기 1 묶음의 검토 날 2026-10-29, 함께 돈 거래일 10일, …",
+                "detail": {"from": 1, "days": 10, "required": 10, "mean": 1100.0, "low": 63.35, "level": 0.95, "challengers": 1,
+                           "evaluation": 2, "cycle": 1}},
+               {"at": "2026-10-01T22:31:05+09:00", "version": 1, "reason": "처음 맞춘 정책(#399)", "detail": null}],
+ "cohorts": [{"evaluation": 2, "cycle": 2, "formed_at": "2026-10-29T22:40:12+09:00", "start": "2026-10-30",
+              "review": "2026-11-26", "champion": 2, "members": [9, 8, 7], "passed_over": [{"version": 6, "why": "older"}],
+              "verdict": null},
+             {"evaluation": 2, "cycle": 1, "formed_at": "2026-10-01T22:40:09+09:00", "start": "2026-10-02",
+              "review": "2026-10-29", "champion": 1, "members": [2], "passed_over": [],
+              "verdict": {"judged_at": "2026-10-29T22:30:40+09:00", "champion": 1, "outcome": "promoted", "promoted": 2,
+                          "level": 0.95,
+                          "members": [{"version": 2, "days": 10, "mean": 1100.0, "low": 63.35, "verdict": "promoted"}]}}]}
 ```
 
 (값은 지어낸 예다.)
 
 - `champion`: 지금 챔피언의 버전(`champions`의 마지막). 첫 맞추기 전에는 `null`이다.
-- `champions[]`: 챔피언이 바뀐 때마다, 최근 것부터. `detail`(#400)은 승격의 수치다: 전 챔피언(`from`), 함께 돈 거래일, 필요한 날 수, 날마다 (도전 − 챔피언) 순손익의 평균과 하한(원), 그 신뢰수준, 그때 돈 도전 정책 수. 처음 챔피언은 `null`이다.
-- `policies[].status`: `champion`(지금 챔피언), `former`(전에 챔피언이었다: 도전 정책에 진 뒤 더 돌지 않는다), `challenger`(자리 셋 가운데 하나를 받아 모의로 도는 도전 정책, 받은 때가 `admitted_at`: 오늘 밤 받은 것은 다음 거래일부터 돈다), `waiting`(자리가 차 있을 때 맞춰져 기다린다. 자리가 나면 가장 새 것부터 들어간다), `dropped`(함께 돈 거래일 20일까지 챔피언을 이기지 못해 내려진 것, 그때가 `dropped_at`. 다시 돌지 않는다). `admitted_at`은 자리를 받은 적이 없으면, `dropped_at`은 `dropped`가 아니면 `null`이다. 챔피언이나 도는 도전 정책과 값이 같은 맞추기는 저장하지 않아 여기 없다.
+- `champions[]`: 챔피언이 바뀐 때마다, 최근 것부터. `detail`(#400)은 승격의 수치다: 전 챔피언(`from`), 함께 돈 거래일, 필요한 날 수, 날마다 (도전 − 챔피언) 순손익의 평균과 하한(원), 그 신뢰수준, 그때 돈 도전 정책 수(#473부터 묶음의 정책 수), 그 묶음의 평가 버전(`evaluation`)과 주기(`cycle`, #473: 그 전의 승격에는 없다). 처음 챔피언은 `null`이다. 챔피언이 없는 저장소에 칸이 있는 정책을 처음 맞추면 빈 정책이 먼저 챔피언이 된다(#473, 이유 `빈 챔피언(#473): 맞춘 정책은 검토 날의 묶음 판정으로만 챔피언이 된다`).
+- `policies[].status`: `champion`(지금 챔피언), `former`(전에 챔피언이었다: 도전 정책에 진 뒤 더 돌지 않는다), `challenger`(판정 전 묶음의 도전 정책, 묶음에 든 때가 `admitted_at`: 검토 날 밤에 든 것은 다음 거래일, 그 주기의 첫날부터 돈다), `waiting`(다음 묶음을 기다린다: 검토 날 밤에 새것부터 셋까지 들어간다), `dropped`(묶음 판정에서 뽑히지 않았거나 묶음에 들지 못해 내려진 것, 그때가 `dropped_at`. 다시 돌지 않는다). `admitted_at`은 묶음에 든 적이 없으면, `dropped_at`은 `dropped`가 아니면 `null`이다. 챔피언, 도는 도전 정책, 기다리는 정책과 값이 같은 맞추기는 저장하지 않아 여기 없다.
+
+  > **바뀜** (2026-11-03, #481): `challenger`는 자리 셋 가운데 하나를 받아 도는 도전 정책(받은 때가 `admitted_at`, 오늘 밤 받은 것은 다음 거래일부터), `waiting`은 자리가 차 있을 때 맞춰져 자리가 나면 가장 새 것부터 들어가는 것, `dropped`는 함께 돈 거래일 20일까지 챔피언을 이기지 못해 내려진 것이었다. 기다리는 정책과 값이 같은 맞추기는 저장했다 → 위와 같다. 이유: spec #468 5절 "도전 정책": 도전 정책은 묶음으로 들어와 검토 날 밤에 한 번 판정받는다.
+- `cohorts[]`(#473, 설계 14장 "도전 정책과 승격"): 도전 정책 묶음마다, 새것부터. 스키마는 `trader_cohort`, 그 판정은 `trader_cohort_verdict`다. 저장소에 쓴 그대로 주고, 한 번 쓴 묶음과 판정은 바뀌지 않는다.
+  - `evaluation`, `cycle`: 평가 버전과 검토 주기(`GET /v1/trader`의 `cycle`). `formed_at`: 만든 때(대개 그 앞 주기의 검토 날 밤). `start`, `review`: 그 주기의 첫 거래일과 검토 날(그 정책들이 도는 날이다). 엔진의 시장 달력으로 지금 센 것이다: 묶음을 만든 뒤 알려진 휴장일은 검토 날을 민다(만들 때 센 날은 저장소의 `cohorts`에 그대로 남는다). `champion`: 견줄 챔피언, 만들 때 고정한다. `members`: 묶음의 정책(새것부터, 셋까지). `passed_over`: 그때 기다리다 묶음에 들지 못해 내린 정책과 까닭(`older` 새것 셋에 밀림, `champion_values` 챔피언과 같은 값, `alike` 더 새것과 같은 값, `unreadable` 읽지 못함, `earlier_evaluation` 평가 버전 전에 맞춤).
+  - `verdict`: 그 검토 날 밤의 판정, 판정 전에는 `null`. `judged_at`, 견준 `champion`, `outcome`(`promoted` 하나가 챔피언이 됨, `kept` 챔피언 그대로, `missed` 검토 날 밤의 작업이 돌지 않아 그 뒤 밤에 판정 없이 닫음: 창을 늘리지 않는다), `promoted`(챔피언이 된 정책, 아니면 `null`), `level`(하한의 양쪽 신뢰수준 1 − 0.05 ÷ 묶음의 정책 수, `missed`나 빈 묶음이면 `null`), `members`: 정책마다 함께 돈 거래일(`days`), 날마다 (도전 − 챔피언) 순손익의 평균(`mean`)과 하한(`low`, 원. `missed`면 셋 다 `null`), 판정(`verdict`: `promoted`, `passed` 통과했지만 하한이 더 큰 정책이 있었다, `not_above` 하한 ≤ 0, `undecided` 함께 돈 날이 10일 미만이라 판정 불가, `missed`). 뽑히지 않은 정책은 모두 내린다.
 
   > **바뀜** (2026-10-30, #416): "#399에서는 처음 것이 챔피언이고 나머지는 도전 정책이다" → 도전 정책은 자리 셋에서 모의로 돌고(`challenger`, 자리가 차면 `waiting`), 이기면 챔피언이 되며(`former`가 생긴다), 20일까지 이기지 못하면 `dropped`가 된다. 이유: #400. 넷째가 들어오면 가장 오래된 것을 내리면 어느 도전 정책도 10일을 채우지 못해서 자리를 기다리게 했다(Codex 리뷰).
 - `policies[].paper`(#400): 그 정책의 모의 기록(`GET /v1/trader`의 `policies[].paper`와 같다). 돈 적이 없으면 0일이다. 어느 모드에서도 paper의 기록이다(mock에서 챔피언의 것은 그림자 장부의 것, #405).

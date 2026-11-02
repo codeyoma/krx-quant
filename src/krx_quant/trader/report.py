@@ -9,21 +9,23 @@ scheduled job ``trader-report`` runs ``krx-quant refit-policy --report`` every t
 comment a night.
 
 **Which day, which night.** A trading day's night runs from its pick (``PICK_AT``, 08:30) to the
-next trading day's pick: a champion crowned, a challenger dropped or admitted, a policy fitted in it
-takes effect from the next trading day's pick (``promotion.in_market``, ``policy.running_versions``).
+next trading day's pick: a champion crowned, a challenger dropped, a cohort formed (#473), a policy
+fitted in it takes effect from the next trading day's pick (``promotion.in_market``,
+``policy.running_versions``).
 The day reported is the one whose night it is (``report_day``): at the scheduled jobs' night (22:30
 to 05:30) the evening's trading day, as the scheduler counts it. The day's champion and challengers
 are those in force at its pick; the records are read to the day.
 
-**What it holds** (``render``): the day's ledger and the champion's trades (times, cell,
-probability and θ, p* and the hit rate's lower bound, shares, how each ended, the ticks between its
-fills, the costs and the net P&L in won), what the champion's book did with the predictions it read
-and, when no cell traded, why (the day's pick from the cost map: every cell considered and its
-verdict); each policy's paper record to the day and, for a challenger, where it stands against the
-champion (``promotion.judge``, as the night's judgment counts it); what the night changed (the
-champion, the challengers dropped and admitted, the policies fitted and their cells, the policies
-waiting, and whether the re-fit kept none or failed); the live gate (``promotion.gate_of``, #408: the
-checkpoints evaluated that night and where the champion stands); what the live mode needs
+**What it holds** (``render``): the day's ledger and the champion's trades (times, cell, probability
+and θ, p* and the hit rate's lower bound, shares, how each ended, the ticks between its fills, the
+costs and the net P&L in won), what the champion's book did with the predictions it read and, when
+no cell traded, why (the day's pick from the cost map: every cell considered and its verdict); each
+policy's paper record to the day and, for a challenger, where it stands against its cohort's
+champion on the days of its cycle to the day (``promotion.judge_cohort``, #473: a figure until its
+review night, which judges it once); what the night changed (the champion, the cohort judged and its
+verdict, the challengers dropped, the cohort formed, the policies fitted and their cells, the
+policies waiting, and whether the re-fit kept none or failed); the live gate (``promotion.gate_of``,
+#408: the checkpoints evaluated that night and where the champion stands); what the live mode needs
 (``live.readiness``: the gate and the execution checks on the mock days, and on a live day its first
 period, ``live.ramp``), with a KIS day's comparison of its orders with KIS's; the limits, the halts
 reached that day, a cumulative halt still holding, the pause in force and the pauses, resumes and
@@ -31,8 +33,8 @@ re-arms asked for; the last trading days' ledger. A mock day's practice (#427,
 ``KRX_TRADER_MOCK_PRACTICE``) is apart: its trades, the predictions the book read on its practice
 pick, the practice cell of the day's pick and its pairs with the practice shadow, each said so
 (``연습``); the ledger and the limits are KIS's, the practice's with the champion's. The practice cell
-is the one kept for the day's review cycle (#474, ``practice.py``): its θ, when it was chosen and its
-replayed figures; the night's choice of the next cycle's is in the re-fit's output below
+is the one kept for the day's review cycle (#474, ``practice.py``): its θ, when it was chosen and
+its replayed figures; the night's choice of the next cycle's is in the re-fit's output below
 (``practice.freeze_now``, which ``run_night`` runs after the re-fit).
 
 **What it never holds**: a price (no fill, reference, target, stop or quote), a broker's order
@@ -63,7 +65,18 @@ from typing import Any
 from krx_quant.config import Settings
 from krx_quant.feeds.base import KST
 from krx_quant.market_calendar import MarketCalendar, calendar_store
-from krx_quant.trader import CAPITAL, KIS_MODES, LIVE, PAPER, PICK_AT, live, practice, promotion, review
+from krx_quant.trader import (
+    CAPITAL,
+    KIS_MODES,
+    LIVE,
+    PAPER,
+    PICK_AT,
+    cohort,
+    live,
+    practice,
+    promotion,
+    review,
+)
 from krx_quant.trader import policy as policies
 from krx_quant.trader.gap import day_gap
 from krx_quant.trader.limits import Pause, pause_of
@@ -120,15 +133,16 @@ NO_CELL = {
 }
 POLICY_STATUSES = {
     policies.CHAMPION: "챔피언",
-    policies.CHALLENGER: "도전 정책: 다음 거래일부터 모의로 돈다",
-    policies.WAITING: "기다리는 정책: 도전 정책 자리 셋이 차 있다",
+    policies.CHALLENGER: "도전 정책: 묶음으로 주기 동안 모의로 돈다",
+    policies.WAITING: "기다리는 정책: 다음 묶음(검토 날 밤)을 기다린다",
     policies.DROPPED: "내린 정책",
     policies.FORMER: "전 챔피언",
 }
-VERDICTS = {
-    None: "통과",
-    promotion.FEW_DAYS: f"날 수 부족({promotion.PROMOTION_DAYS}일부터 판정)",
-    promotion.NOT_ABOVE: "하한 ≤ 0",
+# Where a challenger stands before its review night (#473): a figure, not a verdict.
+STANDS = {
+    None: "지금은 하한 > 0",
+    promotion.FEW_DAYS: f"지금은 날 수 부족({promotion.PROMOTION_DAYS}일 미만이면 판정 불가)",
+    promotion.NOT_ABOVE: "지금은 하한 ≤ 0",
 }
 
 
@@ -156,13 +170,15 @@ class Trade:
 @dataclass(frozen=True)
 class Standing:
     """A policy of the day: the champion or a challenger, its record's day of the report (None if it
-    did not run that day), its paper record to the day and, a challenger's, its judgment."""
+    did not run that day), its paper record to the day and, a challenger's, its judgment; on its
+    cohort's review day, its verdict (#473, ``cohort.Verdict``'s member's), once judged."""
 
     version: int
     champion: bool
     today: promotion.PolicyDay | None
     paper: Mapping[str, Any]
     judgment: promotion.Judgment | None = None
+    verdict: str | None = None
 
 
 @dataclass(frozen=True)
@@ -218,6 +234,9 @@ class Report:
     crowned: tuple[Crowned, ...] = ()
     dropped: tuple[int, ...] = ()
     admitted: tuple[int, ...] = ()
+    # #473: the cohorts judged in the night with their verdicts, and those formed in it.
+    judged: tuple[tuple[cohort.Cohort, cohort.Verdict], ...] = ()
+    formed: tuple[cohort.Cohort, ...] = ()
     fitted: tuple[Fitted, ...] = ()
     waiting: int = 0
     halts: tuple[Mapping[str, Any], ...] = ()  # reached that day
@@ -294,9 +313,31 @@ def read(
         champion = _champion_at(db, start) if has_policies else None
         at_end = _champion_at(db, end) if has_policies else None
         challengers = _slots_at(db, start) if has_policies else []
-        records = promotion.records(db, mode, {v for v in (champion, at_end, *challengers) if v is not None})
+        of_cohort = (
+            {v: _resolved(db, cohort.of_member(db, v), calendar) for v in challengers} if has_policies else {}
+        )
+        against = {c.champion for c in of_cohort.values() if c is not None and c.champion is not None}
+        records = promotion.records(
+            db, mode, {v for v in (champion, at_end, *challengers, *against) if v is not None}
+        )
         to_day = {v: _upto(r, day) for v, r in records.items()}
-        standings = _standings(day, champion, challengers, to_day)
+        verdicts = {
+            int(m["version"]): str(m["verdict"])
+            for c in of_cohort.values()
+            if c is not None
+            and c.review == day
+            and (v := cohort.verdict_of(db, c.evaluation, c.cycle)) is not None
+            for m in v.members
+        }
+        standings = _standings(day, champion, challengers, to_day, of_cohort, verdicts)
+        judged = tuple(
+            (cohort.resolved(db, c, calendar.session), v)
+            for c in cohort.cohorts(db)
+            if (v := cohort.verdict_of(db, c.evaluation, c.cycle)) is not None and start <= v.judged_at < end
+        )
+        formed = tuple(
+            cohort.resolved(db, c, calendar.session) for c in cohort.cohorts(db) if start <= c.formed_at < end
+        )
         crowned: tuple[Crowned, ...] = ()
         dropped: tuple[int, ...] = ()
         admitted: tuple[int, ...] = ()
@@ -346,6 +387,8 @@ def read(
             crowned=crowned,
             dropped=dropped,
             admitted=admitted,
+            judged=judged,
+            formed=formed,
             fitted=fitted,
             waiting=waiting,
             halts=_halts(db, mode, day) if "halts" in tables else (),
@@ -507,10 +550,16 @@ def _champion_at(db: sqlite3.Connection, moment: datetime) -> int | None:
     return None if row is None else int(row[0])
 
 
+def _resolved(
+    db: sqlite3.Connection, found: cohort.Cohort | None, calendar: MarketCalendar
+) -> cohort.Cohort | None:
+    """A challenger's cohort, its days counted on ``calendar`` as it is now (#473)."""
+    return None if found is None else cohort.resolved(db, found, calendar.session)
+
+
 def _slots_at(db: sqlite3.Connection, moment: datetime) -> list[int]:
-    """The challengers in a running slot just before ``moment``, oldest first: admitted before it,
-    not dropped nor the champion by then: those the night's judgment judges
-    (``policy.challenger_versions``)."""
+    """The challengers just before ``moment``, oldest first: entered a cohort before it, not dropped
+    nor the champion by then (``policy.challenger_versions``)."""
     columns = _columns(db, "policies")
     if "admitted_at" not in columns:
         return []
@@ -528,19 +577,22 @@ def _upto(record: promotion.Record, day: date) -> promotion.Record:
 
 
 def _standings(
-    day: date, champion: int | None, challengers: Sequence[int], records: Mapping[int, promotion.Record]
+    day: date,
+    champion: int | None,
+    challengers: Sequence[int],
+    records: Mapping[int, promotion.Record],
+    of_cohort: Mapping[int, cohort.Cohort | None],
+    verdicts: Mapping[int, str],
 ) -> tuple[Standing, ...]:
-    judged = (
-        {j.challenger: j for j in promotion.judge(champion, records, challengers)}
-        if champion is not None
-        else {}
-    )
+    found = {(c.evaluation, c.cycle): c for c in of_cohort.values() if c is not None}
+    judged = {j.challenger: j for c in found.values() for j in promotion.judge_cohort(c, records)}
     out = []
     for version in [*([] if champion is None else [champion]), *challengers]:
         record = records.get(version)
         today = None if record is None else next((d for d in record.days if d.day == day), None)
+        paper = promotion.paper(record)
         out.append(
-            Standing(version, version == champion, today, promotion.paper(record), judged.get(version))
+            Standing(version, version == champion, today, paper, judged.get(version), verdicts.get(version))
         )
     return tuple(out)
 
@@ -1052,7 +1104,7 @@ def _standings_section(report: Report) -> str:
             "그날 돌지 않았다"
             if s.today is None
             else f"그날 매매 {s.today.trades}건, 순손익 {_won(s.today.net)}"
-            + (" (멈춘 날: 정지나 한도)" if s.today.stopped else "")
+            + (" (멈춘 날: 정지나 주문 실패)" if s.today.stopped else "")
         )
         p = s.paper
         line = (
@@ -1061,11 +1113,15 @@ def _standings_section(report: Report) -> str:
         )
         j = s.judgment
         if j is not None:
-            verdict = VERDICTS[j.why] + (f", {j.until}일을 채워 내림" if j.retires else "")
             line += (
-                f" · 챔피언과 함께 돈 거래일 {j.days}일, (도전 − 챔피언) 평균 {_won(j.mean)}, "
-                f"하한 {_won(j.low)}"
-                f"(신뢰수준 {j.level:.2%}) → {verdict}"
+                f" · 챔피언 정책 {j.champion}과 함께 돈 거래일 {j.days}일, "
+                f"(도전 − 챔피언) 평균 {_won(j.mean)}, 하한 {_won(j.low)}"
+                f"(신뢰수준 {j.level:.2%}, 묶음 안 Bonferroni) · "
+                + (
+                    f"{STANDS[j.why]} · 검토 날 {j.review} 밤에 한 번 판정한다"
+                    if s.verdict is None
+                    else f"그 밤 판정: {promotion.VERDICTS.get(s.verdict, s.verdict)}"
+                )
             )
         lines.append(line)
     return "\n".join(lines)
@@ -1080,15 +1136,26 @@ def _night_section(report: Report) -> str:
             lines.append(
                 f"- 챔피언 교체: 정책 {c.replaced} → 정책 {c.version}({_when(c.at, report.day)}). {c.reason}"
             )
+    for judged, v in report.judged:
+        figures = ", ".join(
+            f"정책 {m['version']} {promotion.VERDICTS.get(str(m['verdict']), m['verdict'])}"
+            + ("" if m.get("low") is None else f"(하한 {_won(m['low'])}, {m['days']}일)")
+            for m in v.members
+        )
+        lines.append(
+            f"- 묶음 판정 (#473): 주기 {judged.cycle}({judged.first}–{judged.review}) · "
+            f"챔피언 정책 {judged.champion}과 견줌 · " + (figures or "도전 정책 없음")
+        )
     if report.dropped:
         lines.append(
-            f"- 내린 도전 정책(함께 돈 거래일 {promotion.RETIRE_DAYS}일 동안 이기지 못함): "
+            "- 내린 정책(묶음에서 뽑히지 않았거나 묶음에 들지 못함, 다시 돌지 않는다): "
             + ", ".join(f"정책 {v}" for v in report.dropped)
         )
-    if report.admitted:
+    for formed in report.formed:
         lines.append(
-            "- 빈 자리에 들어간 정책(다음 거래일부터 모의로 돈다): "
-            + ", ".join(f"정책 {v}" for v in report.admitted)
+            f"- 새 묶음 (#473): 주기 {formed.cycle}({formed.first}–{formed.review}) · "
+            + (", ".join(f"정책 {v}" for v in formed.members) or "도전 정책 없음")
+            + f" · 비교할 챔피언 정책 {formed.champion} · 검토 날 {formed.review} 밤에 한 번 판정한다"
         )
     for f in report.fitted:
         status = POLICY_STATUSES.get(f.status, f.status)
@@ -1108,13 +1175,16 @@ def _night_section(report: Report) -> str:
                 f"  뺀 칸: {_cell(str(x.get('kind')), x.get('predictor'), x.get('role'))}: {x.get('why')}"
             )
     if report.waiting:
-        lines.append(f"- 자리를 기다리는 정책: {report.waiting}개(자리가 나면 가장 새 것부터 들어간다)")
+        lines.append(
+            f"- 다음 묶음을 기다리는 정책: {report.waiting}개(검토 날 밤에 새것부터 셋까지 들어간다)"
+        )
     if report.refit is not None:
         if report.refit:
             lines.append(f"- 밤 정책 맞추기: 실패(종료 코드 {report.refit}). 까닭은 아래 출력에 있다")
         elif not report.fitted:
             lines.append(
-                "- 밤 정책 맞추기: 새 정책을 저장하지 않았다(맞춘 값이 챔피언이나 도는 도전 정책과 같거나, "
+                "- 밤 정책 맞추기: 새 정책을 저장하지 않았다(맞춘 값이 챔피언, 도는 도전 정책이나 기다리는 "
+                "정책과 같거나, "
                 "#472: 정책 전체의 재생이 하한을 넘지 못했다. 까닭은 아래 출력에 있다)"
             )
     if len(lines) == 1:

@@ -46,6 +46,7 @@ from tests.trader_doubles import (
     Event,
     Read,
     at,
+    challenger,
     keep,
     policy_cell,
     quote,
@@ -303,20 +304,20 @@ def test_a_challenger_sizes_by_the_loss_budget_and_its_loss_limit_holds_it_as_th
     daily limit before the stop, and neither buys the 10:20 rise. The challenger's limit is its own,
     simulated: no halt is kept for it, and the champion's day counts the champion's trades alone."""
     assert keep(tmp_path, at("2026-10-12 22:31:00"), policy_cell(BARRIER, 0.6)) == 1
-    assert keep(tmp_path, at("2026-10-13 22:31:00"), policy_cell(BARRIER, 0.6)) == 2
+    assert challenger(tmp_path, at("2026-10-13 22:31:00"), policy_cell(BARRIER, 0.6)) == 2
     day = Day(tmp_path, desk=True, rules=TRADER)
 
     champion = day.run(GAP)
 
-    challenger = day.trades(policy=2)
-    for trades in (champion, challenger):
+    theirs = day.trades(policy=2)
+    for trades in (champion, theirs):
         assert [
             (t["entry"]["quantity"], t["exit"]["reason"], t["exit"]["price"]) for t in reversed(trades)
         ] == [
             (9, STOP_LOSS, 59_500),
             (9, DAILY_LIMIT, 69_860),
         ]
-    assert sum(t["net"] for t in challenger) == pytest.approx(-96_645.96 - 3_606.426)
+    assert sum(t["net"] for t in theirs) == pytest.approx(-96_645.96 - 3_606.426)
     skipped = [(d["policy_id"], d["reason"]) for d in day.decisions() if d["bar_close"][11:16] == "10:20"]
     assert skipped == [(1, DAILY_LIMIT), (2, DAILY_LIMIT)]
     state = day.state_now("10:20:02.5")
@@ -328,7 +329,7 @@ def test_a_challenger_s_cumulative_limit_is_rearmed_with_the_trader_s(tmp_path: 
     the challenger alike; the trader re-armed at 10:05 re-arms the challenger's simulated one too, and
     both buy the 10:10 rise."""
     assert keep(tmp_path, at("2026-10-12 22:31:00"), policy_cell(BARRIER, 0.6)) == 1
-    assert keep(tmp_path, at("2026-10-13 22:31:00"), policy_cell(BARRIER, 0.6)) == 2
+    assert challenger(tmp_path, at("2026-10-13 22:31:00"), policy_cell(BARRIER, 0.6)) == 2
     day = Day(tmp_path, desk=True, rules=Rules(fee_rate=FEE, cumulative_loss_percent=9.0))
 
     day.run(

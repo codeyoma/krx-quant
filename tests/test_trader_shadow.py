@@ -49,6 +49,7 @@ from tests.trader_doubles import (
     Read,
     Tick,
     at,
+    challenger,
     keep,
     pick,
     policy_cell,
@@ -91,7 +92,7 @@ def _time(event: Event) -> datetime:
 
 def champion_and_challenger(state: Path) -> None:
     assert keep(state, at("2026-10-12 22:31:00"), policy_cell(BARRIER, 0.6)) == 1
-    assert keep(state, at("2026-10-13 22:31:00"), policy_cell(BARRIER, 0.6)) == 2
+    assert challenger(state, at("2026-10-13 22:31:00"), policy_cell(BARRIER, 0.6)) == 2
 
 
 @dataclass

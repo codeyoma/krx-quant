@@ -1,13 +1,17 @@
 """The nightly re-fit of the trader's policy (#399, #393 "정책과 자기 개선"): ``krx-quant
 refit-policy``, run every trading day's night after the nightly training by the scheduled job
 ``trader-report`` (#402: ``--report`` prints the day's report above this output). It first
-judges the challengers that ran against the champion and promotes one that beat it (#400,
-``promotion.promote``: after the market only), then writes a new policy
-version (``policy.py``): the first one becomes the champion, every later one a challenger, which
-takes a free one of the three running slots (it runs in paper beside the champion from the next
-trading day) or waits for one. A fit with the values of the champion or of a running challenger is
-not kept (``policy.same_as``). At the night's end the slots freed are filled, the newest waiting
-first (``policy.admit``).
+judges, on a review night alone, the cohort of challengers that ran against the champion for the
+cycle and promotes one that beat it (#400, #473, ``promotion.promote``: after the market only), then
+writes a new policy version (``policy.py``), which waits for the next cohort. A fit with the values of
+the champion, of a running challenger or of a policy waiting is not kept (``policy.same_as``). At the
+night's end the next cycle's cohort is formed from the policies waiting, the newest first, when its
+first day is the next trading day (#473, ``cohort.form_tonight``): on a review night.
+
+> **바뀜** (2026-11-03, #481): a new policy took a free one of three running slots (it ran from the
+> next trading day) or waited for one, and the slots freed were filled at the night's end
+> (``policy.admit``) → it waits for the next cohort, formed on a review night. 이유: spec #468 5
+> "도전 정책".
 
 **Which cells** (#472). Every cell tonight's cost map of 005930 names (``GET /v1/cost-map``, as the
 trader reads it at 08:30, ``selection.pick``: ``Selection.named``), whatever its verdict: the cost
@@ -58,6 +62,15 @@ challenges, #399).
 
 **Development evidence.** The cells and θ are chosen on the days they are judged on, so a policy kept
 is a challenger alone: it becomes the champion only by its forward shadow record (``promotion.py``).
+On a store without a champion, the fit of a policy with cells keeps an empty one first (``BOOTSTRAP``,
+#473): the empty policy is the first champion, which trades nothing, and the fit waits for a cohort,
+as every later one does: no policy trades before a review crowned it. A fit with no cell is that
+empty champion itself.
+
+> **바뀜** (2026-11-03, #481): on a store without a champion the first policy kept was the champion,
+> cells and all (#399) → a policy with cells waits for a cohort, an empty champion kept before it.
+> 이유: spec #468 1 and 3: every change of the policy that trades goes through a review, and a fit is
+> development evidence.
 
 > **바뀜** (2026-11-03, #480): the cells were fitted one at a time in the cost map's rank, each at
 > the point of the grid whose replayed policy grew the capital most (Σ log(1 + net ÷ capital)), kept
@@ -103,7 +116,7 @@ from krx_quant.predictions import KIND_ANSWER_JOIN, KIND_SCORED, SCORED, TOUCH_J
 from krx_quant.pricing import tick_size
 from krx_quant.special import Window
 from krx_quant.stats import Interval, day_mean
-from krx_quant.trader import ROLES, SYMBOL, TRADED_KINDS, promotion, review
+from krx_quant.trader import ROLES, SYMBOL, TRADED_KINDS, cohort, promotion, review
 from krx_quant.trader import policy as policies
 from krx_quant.trader.cells import Cell, Signal, open_engine_db, special_windows, traded_kind
 from krx_quant.trader.paper import NO_QUOTE, Plan, Rules, plan
@@ -146,6 +159,8 @@ NO_GAIN = "no_gain"
 NOT_ABOVE = "policy_not_above"
 # The waiting policies the night's output names, newest first.
 WAITING_SHOWN = 5
+# Why the empty policy kept before the first fit with cells is the champion (#473).
+BOOTSTRAP = "빈 챔피언(#473): 맞춘 정책은 검토 날의 묶음 판정으로만 챔피언이 된다"
 # What the job's exit code says: 0 a policy kept (or the same values running already, or one its
 # whole replay did not keep), 1 none (the cost map or the engine's database could not be read).
 NO_POLICY_KEPT = 1
@@ -458,16 +473,17 @@ class Refitted:
     left_out: tuple[dict[str, Any], ...]
     fit: Mapping[str, Any]
     named: int  # the cells the cost map named, each tried (#472)
-    # #400: the champion or running challenger it equals (then it is not kept: ``version`` is that
-    # one's), whether it was admitted to a running slot, the challengers running after it (oldest
-    # first) and the policies waiting (newest first).
+    # #400: the champion, running challenger or policy waiting it equals (then it is not kept:
+    # ``version`` is that one's), the challengers running after it (oldest first) and the policies
+    # waiting (newest first).
     same_as: int | None = None
-    admitted: bool = False
     challengers: tuple[int, ...] = ()
     waiting: tuple[int, ...] = ()
     # #472: why the policy fitted was not kept (``NOT_ABOVE``: its whole replay's daily net has no
     # lower bound above 0); None when kept.
     rejected: str | None = None
+    # #473: the empty champion kept before it, on a store without a champion (``BOOTSTRAP``).
+    bootstrap: int | None = None
 
 
 def refit_from(
@@ -641,12 +657,16 @@ def refit_from(
         except policies.PolicyError as e:  # one it would be compared with cannot be read: kept
             log.warning("refit: cannot compare with the policies running (%s): kept all the same", e)
             same = None
+        bootstrap = None
         if same is None:
+            if cells and policies.champion_version(store) is None:  # #473: an empty champion first
+                bootstrap, _ = policies.add(
+                    store, now, BOOTSTRAP, [], [], {"evaluation": review.EVALUATION}, first_reason=BOOTSTRAP
+                )
             version, first_champion = policies.add(store, now, reason, cells, left_out, fit_json)
         else:
             version, first_champion = same, False
         champion = policies.champion_version(store)
-        admitted = version in policies.admitted_at(store, now)
         challengers = tuple(policies.challenger_versions(store))
         waiting = tuple(policies.waiting_versions(store))
     finally:
@@ -660,9 +680,9 @@ def refit_from(
         fit=fit_json,
         named=len(picks),
         same_as=same,
-        admitted=admitted,
         challengers=challengers,
         waiting=waiting,
+        bootstrap=bootstrap,
     )
 
 
@@ -695,18 +715,21 @@ def report(done: Refitted) -> str:
     elif done.champion:
         head = f"정책 {done.version} · 챔피언(처음 맞춘 정책)"
     elif done.same_as is not None:
-        whose = "챔피언" if done.same_as == done.champion_version else "도는 도전 정책"
-        head = f"새 정책 없음 · 맞춘 값이 {whose} 정책 {done.same_as}과 같아 저장하지 않았다"
-    elif done.admitted:
-        head = (
-            f"정책 {done.version} · 도전 정책(챔피언은 정책 {done.champion_version}, "
-            "다음 거래일부터 모의로 함께 돈다)"
+        whose = (
+            "챔피언"
+            if done.same_as == done.champion_version
+            else "도는 도전 정책"
+            if done.same_as in done.challengers
+            else "기다리는 정책"
         )
+        head = f"새 정책 없음 · 맞춘 값이 {whose} 정책 {done.same_as}과 같아 저장하지 않았다"
     else:
         head = (
-            f"정책 {done.version} · 기다리는 정책"
-            "(도전 정책 셋이 돌고 있다: 자리가 나면 가장 새 것부터 들어간다)"
+            f"정책 {done.version} · 기다리는 정책(#473: 다음 묶음을 기다린다. 검토 날 밤에 기다리는 정책 "
+            "가운데 새것부터 셋까지 다음 주기의 도전 정책으로 들어간다)"
         )
+        if done.bootstrap is not None:
+            head += f" · 챔피언이 없어 빈 정책 {done.bootstrap}을 챔피언으로 먼저 두었다"
     grid = fit_json["grid"]
     judged = fit_json["judged"]
     lines = [
@@ -755,11 +778,13 @@ def report(done: Refitted) -> str:
         )
         lines += _alone(x.get("signals") or {})
     if done.challengers:
-        lines.append("모의로 도는 도전 정책(셋까지): " + ", ".join(f"정책 {v}" for v in done.challengers))
+        lines.append(
+            "모의로 도는 도전 정책(묶음, 셋까지): " + ", ".join(f"정책 {v}" for v in done.challengers)
+        )
     if done.waiting:
         shown = ", ".join(f"정책 {v}" for v in done.waiting[:WAITING_SHOWN])
         more = f" 외 {len(done.waiting) - WAITING_SHOWN}개" if len(done.waiting) > WAITING_SHOWN else ""
-        lines.append(f"자리를 기다리는 정책(새 것부터): {shown}{more}")
+        lines.append(f"다음 묶음을 기다리는 정책(새것부터): {shown}{more}")
     run = fit_json["run"]
     missing = total.get("missing") or {}
     left = (
@@ -906,41 +931,95 @@ def promote_now(trader_db: Path, sessions: Callable[[date], Session | None], now
 async def run_refit(
     settings: Settings, trader: TraderSettings, now: datetime, engine_url: str | None = None
 ) -> int:
-    """``krx-quant refit-policy``: first the challengers judged and one promoted if it beat the
-    champion (#400, ``promotion.promote``), then tonight's cost map from the Engine API
-    (``engine_url``, else the trader's ``KRX_TRADER_ENGINE_URL``), the fit, the policy kept; both
-    reports printed. 0 when a policy is kept, ``NO_POLICY_KEPT`` when the cost map or the engine's
-    database cannot be read (the promotion is judged all the same)."""
+    """``krx-quant refit-policy``: first the challengers' cohort judged on a review night and one
+    promoted if it beat the champion (#400, #473, ``promotion.promote``), then tonight's cost map from
+    the Engine API (``engine_url``, else the trader's ``KRX_TRADER_ENGINE_URL``), the fit, the policy
+    kept, and at the end the next cycle's cohort formed on a review night (``form_now``); each printed.
+    0 when a policy is kept, ``NO_POLICY_KEPT`` when the cost map or the engine's database cannot be
+    read (the promotion is judged and the cohort formed all the same)."""
     url = engine_url or trader.engine_url
     calendar = calendar_store(settings).calendar
     promote_now(settings.state_dir / TRADER_DB, calendar.session, now)
     try:
         return await _refit(settings, trader, url, calendar.session, now)
     finally:
-        admit_now(settings.state_dir / TRADER_DB, now)
+        form_now(settings.state_dir / TRADER_DB, calendar.session, now)
 
 
-def admit_now(trader_db: Path, now: datetime) -> None:
-    """The night's end (#400): the running slots freed tonight (a promotion, a challenger dropped)
-    and not taken by tonight's fit given to the newest policies waiting; printed when any is."""
+def form_now(trader_db: Path, sessions: Callable[[date], Session | None], now: datetime) -> None:
+    """The night's end (#473, ``cohort.form_tonight``): the next cycle's cohort formed from the
+    policies waiting on a review night, its lines printed (and why not, when the store cannot be
+    written). Without a store there is no champion yet, and none is made for it."""
     if not trader_db.exists():
         return
     try:
         db = policies.connect(trader_db)
         try:
-            admitted = policies.admit(db, now)
+            tonight = cohort.form_tonight(db, now, sessions)
         finally:
             db.close()
-    except sqlite3.Error as e:
-        print(f"도전 정책 자리 (#400): 저장소를 쓰지 못해 기다리는 정책을 들이지 못했다: {e}")
-        log.error("admission: %s", e)
+    except (sqlite3.Error, ValueError) as e:  # ValueError: a calendar without the cycle's days
+        print(f"\n{COHORT_HEAD}: 저장소를 쓰지 못해 묶음을 만들지 못했다: {e}")
+        log.error("cohort: %s", e)
         return
-    if admitted:
-        log.info("admission: policy %s take(s) a challenger's slot", ", ".join(map(str, admitted)))
-        print(
-            "\n도전 정책 자리 (#400): 빈 자리에 들어간 정책(다음 거래일부터 돈다): "
-            + ", ".join(f"정책 {v}" for v in admitted)
+    if tonight.formed and tonight.cohort is not None:
+        log.info(
+            "cohort: cycle %s's challengers are %s, against policy %s, judged on its review night (%s)",
+            tonight.cohort.cycle,
+            ", ".join(map(str, tonight.cohort.members)) or "none",
+            tonight.cohort.champion,
+            tonight.cohort.review,
         )
+    print("\n" + said_tonight(tonight))
+
+
+COHORT_HEAD = "도전 정책 묶음 (#473)"
+
+
+def said_tonight(tonight: cohort.Tonight) -> str:
+    """The night's end for the job's output (``form_now``): counts, versions and dates, no price."""
+    c, found = tonight.cycle, tonight.cohort
+    waiting = f"다음 묶음을 기다리는 정책 {len(tonight.waiting)}개"
+    span = f"주기 {c.number}({c.first}–{c.review})"
+    if tonight.why == cohort.NO_CHAMPION:
+        return f"{COHORT_HEAD}: 챔피언이 아직 없어 {span}의 묶음을 만들지 않았다 · {waiting}"
+    if found is None:
+        return (
+            f"{COHORT_HEAD}: {span}은 묶음 없이 시작했다(주기 중간에는 넣지 않는다) · {waiting}: "
+            f"검토 날 {c.review} 밤에 새것부터 셋까지 들어간다"
+        )
+    members = ", ".join(f"정책 {v}" for v in found.members) or "없음"
+    if not tonight.formed:
+        return (
+            f"{COHORT_HEAD}: {span}의 묶음 {members} · 챔피언 정책 {found.champion}과 견준다 · "
+            f"검토 날 {found.review} 밤에 한 번 판정 · {waiting}"
+        )
+    lines = [
+        f"{COHORT_HEAD}: {span}의 묶음을 만들었다: {members}(새것부터) · 비교할 챔피언 정책 {found.champion}"
+        f"(고정) · 주기 동안 모의로 돌고 검토 날 {found.review} 밤에 한 번 판정한다"
+    ]
+    if not found.members:
+        lines[0] = (
+            f"{COHORT_HEAD}: {span}의 묶음: 기다리는 정책이 없어 비었다(이 주기에는 도전 정책이 돌지 않는다)"
+        )
+    if found.passed_over:
+        lines.append(
+            "묶음에 들지 못해 내린 정책: "
+            + ", ".join(
+                f"정책 {p['version']}({PASSED_OVER.get(p['why'], p['why'])})" for p in found.passed_over
+            )
+        )
+    return "\n".join(lines)
+
+
+# How the night's output names why a policy waiting is passed over (``cohort.choose``).
+PASSED_OVER = {
+    cohort.OLDER: "새것 셋에 밀림",
+    cohort.CHAMPION_VALUES: "챔피언과 같은 값",
+    cohort.ALIKE: "더 새것과 같은 값",
+    cohort.UNREADABLE: "읽지 못함",
+    cohort.EARLIER_EVALUATION: "평가 버전 전에 맞춤",
+}
 
 
 async def _refit(
@@ -992,9 +1071,9 @@ async def _refit(
         if done.champion
         else f"the same values as policy {done.same_as}: not kept again"
         if done.same_as is not None
-        else "a challenger running"
-        if done.admitted
-        else "a challenger waiting",
+        else f"a challenger waiting for the next cohort, after an empty champion, policy {done.bootstrap}"
+        if done.bootstrap is not None
+        else "a challenger waiting for the next cohort",
         len(done.cells),
         done.named,
         done.fit["replay"]["days"],

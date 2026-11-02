@@ -7,7 +7,8 @@ The example of ``test_trader_paper.py``: the 10:00 barrier prediction (up_first 
 10:00:02.3, the first quote after it asking 70,100 (14 shares: a loss budget of the whole capital,
 ``trader_doubles.whole_rules``; ``test_trader_risk.py`` sizes by the trader's), the target 70,250,
 the stop 69,850, the time barrier 10:04. Policy 1, the champion, was kept on the night of 10-12;
-policy 2, a challenger, on the night of 10-13: both run on 10-14. Every price is made up.
+policy 2, a challenger, on the night of 10-13, entered as a cohort then (#473, ``enter``): both run on
+10-14. Every price is made up.
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ from krx_quant.trader.paper import BELOW_THRESHOLD, STOP_LOSS, TAKE_PROFIT, TIME
 from krx_quant.trader.store import DAILY_LIMIT, DB_NAME, TraderStore, read_trader
 from tests.trader_doubles import (
     BARRIER,
+    CALENDAR,
     AskPause,
     Barrier,
     Day,
@@ -34,6 +36,8 @@ from tests.trader_doubles import (
     Repick,
     Tick,
     at,
+    challenger,
+    enter,
     keep,
     policy_cell,
     quote,
@@ -47,7 +51,7 @@ TAKEN = quote("10:02:00", 70_300, 70_400)
 
 def champion_and_challenger(state: Path, champion_threshold: float, challenger_threshold: float) -> None:
     assert keep(state, at("2026-10-12 22:31:00"), policy_cell(BARRIER, champion_threshold)) == 1
-    assert keep(state, at("2026-10-13 22:31:00"), policy_cell(BARRIER, challenger_threshold)) == 2
+    assert challenger(state, at("2026-10-13 22:31:00"), policy_cell(BARRIER, challenger_threshold)) == 2
 
 
 def decisions(day: Day) -> list[tuple[int | None, int, str, str | None]]:
@@ -135,7 +139,24 @@ def test_a_pause_holds_the_champion_alone_and_marks_its_day_stopped(tmp_path: Pa
     assert records(tmp_path) == {
         1: [("2026-10-14", 0.0, 0, True, True)],
         2: [("2026-10-14", pytest.approx(challenger["net"]), 1, False, False)],
-    }, "the champion's day is stopped: no common day for a promotion"
+    }, "the champion's day is stopped by a pause: no common day for a promotion"
+
+
+def test_a_loss_limit_that_stops_the_champion_leaves_its_day_a_common_one(tmp_path: Path) -> None:
+    """#473: the daily limit narrowed to 0.5% (5,000 won); the champion's stop at 69,800 loses
+    6,448.19 and reaches it. The limit is its policy's rule, as a challenger's simulated one is: the
+    day is not stopped, and a cohort's judgment counts it (a pause's day it does not, above)."""
+    champion_and_challenger(tmp_path, 0.6, 0.8)
+    day = Day(tmp_path, desk=True, rules=whole_rules(daily_loss_percent=0.5))
+
+    [lost] = day.run([TEN, BOUGHT, quote("10:01:30", 69_800, 69_900), Tick("10:05:00")])
+
+    assert (lost["exit"]["reason"], lost["net"]) == (STOP_LOSS, pytest.approx(-6_448.19))
+    assert day.state_now("10:05:00")["status"] == DAILY_LIMIT
+    assert records(tmp_path) == {
+        1: [("2026-10-14", pytest.approx(-6_448.19), 1, True, False)],
+        2: [("2026-10-14", 0.0, 0, False, False)],
+    }
 
 
 def records(state: Path) -> dict[int, list[tuple[str, float, int, bool, bool]]]:
@@ -163,10 +184,14 @@ def test_each_policy_running_keeps_the_day_it_ran_while_the_session_is_open(tmp_
     }
 
 
-def test_a_challenger_kept_tonight_runs_from_the_next_trading_day(tmp_path: Path) -> None:
-    """Policy 2 kept on the night of 10-14, after its pick: it runs on 10-15 from that day's pick."""
+def test_a_policy_kept_waits_and_a_cohort_entered_tonight_runs_from_the_next_trading_day(
+    tmp_path: Path,
+) -> None:
+    """Policy 2 kept on the night of 10-14, after its pick, waits for a cohort (#473): it runs on
+    neither day. Policy 3, entered as a cohort that night, runs on 10-15 from that day's pick."""
     keep(tmp_path, at("2026-10-12 22:31:00"), policy_cell(BARRIER, 0.8))
-    keep(tmp_path, at("22:31:00"), policy_cell(BARRIER, 0.6))
+    keep(tmp_path, at("22:31:00"), policy_cell(BARRIER, 0.65))
+    challenger(tmp_path, at("22:32:00"), policy_cell(BARRIER, 0.6))
     day = Day(tmp_path, desk=True)
 
     day.run(
@@ -180,18 +205,21 @@ def test_a_challenger_kept_tonight_runs_from_the_next_trading_day(tmp_path: Path
         ]
     )
 
-    [trade] = day.trades(policy=2)
-    assert trade["bar_close"][:10] == "2026-10-15", "nothing on 10-14: it was kept that night"
-    assert [d[0] for d in records(tmp_path)[2]] == ["2026-10-15"]
+    [trade] = day.trades(policy=3)
+    assert trade["bar_close"][:10] == "2026-10-15", "nothing on 10-14: it entered that night"
+    assert [d[0] for d in records(tmp_path)[3]] == ["2026-10-15"]
+    assert day.trades(policy=2) == [] and 2 not in records(tmp_path), "waiting: it does not run"
 
 
-def test_a_fit_kept_while_the_slots_are_full_waits_and_runs_once_one_frees(tmp_path: Path) -> None:
-    """Policies 2, 3 and 4 take the three slots on the night of 10-13; policy 5, kept that night
-    too, waits: it does not run on 10-14. Policy 2 dropped on the night of 10-14, policy 5 takes its
-    slot: on 10-15 policies 3, 4 and 5 run."""
+def test_a_cohort_runs_in_its_cycle_alone_and_a_fit_kept_meanwhile_waits(tmp_path: Path) -> None:
+    """Policies 2, 3 and 4 enter as the cohort of the cycle from 10-13 (#473) on that night; policy 5,
+    kept that night too, waits: it does not run on 10-14. Policy 2 dropped on the night of 10-14 (its
+    cohort judged, say): on 10-15 policies 3 and 4 run, and 5 still waits for the next cohort. Past the
+    cycle's review day (11-09, its 20th weekday) none of the cohort runs, dropped or not."""
     keep(tmp_path, at("2026-10-12 22:31:00"), policy_cell(BARRIER, 0.8))
     for n, made in enumerate(("2026-10-13 22:31:00", "2026-10-13 22:32:00", "2026-10-13 22:33:00")):
         keep(tmp_path, at(made), policy_cell(BARRIER, 0.6 - n / 100))
+    [cycle] = {enter(tmp_path, at("2026-10-13 22:33:30"), 4, 3, 2).review}
     keep(tmp_path, at("2026-10-13 22:34:00"), policy_cell(BARRIER, 0.5))
     day = Day(tmp_path, desk=True)
     day.run([Tick("09:00:01")])
@@ -199,19 +227,20 @@ def test_a_fit_kept_while_the_slots_are_full_waits_and_runs_once_one_frees(tmp_p
     try:
         assert (policies.challenger_versions(db), policies.waiting_versions(db)) == ([2, 3, 4], [5])
         policies.drop(db, at("22:40:00"), [2])
-        assert policies.admit(db, at("22:41:00")) == [5]
+        assert policies.running_versions(db, cycle, CALENDAR.session) == [3, 4]
+        assert policies.running_versions(db, date(2026, 11, 10), CALENDAR.session) == [], "past its cycle"
     finally:
         db.close()
 
     day.run([Repick("2026-10-15 08:30:00"), Tick("2026-10-15 09:00:01")])
 
     ran = {v: [d[0] for d in days] for v, days in records(tmp_path).items()}
+    assert cycle == date(2026, 11, 9)
     assert ran == {
         1: ["2026-10-14", "2026-10-15"],
         2: ["2026-10-14"],
         3: ["2026-10-14", "2026-10-15"],
         4: ["2026-10-14", "2026-10-15"],
-        5: ["2026-10-15"],
     }
 
 
@@ -286,12 +315,24 @@ def test_the_trader_s_state_shows_the_policies_running_and_the_gate(tmp_path: Pa
         "days": 1,
         "required": 10,
         "until": 20,
+        "review": "2026-11-09",  # its cohort's (#473): the 20th weekday of the cycle from 10-13
         "mean": pytest.approx(-161.735),
         "low": None,
         "level": 0.95,
         "challengers": 1,
         "passed": False,
         "why": "few_days",
+    }
+    assert state["cohort"] == {
+        "evaluation": 2,
+        "cycle": 1,
+        "formed_at": "2026-10-13T22:31:00+09:00",
+        "start": "2026-10-13",
+        "review": "2026-11-09",
+        "champion": 1,
+        "members": [2],
+        "passed_over": [],
+        "verdict": None,
     }
 
 

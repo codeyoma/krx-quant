@@ -135,6 +135,18 @@ def current(db: sqlite3.Connection) -> Evaluation | None:
     return Evaluation(int(row[0]), datetime.fromisoformat(row[1]), date.fromisoformat(row[2]), int(row[3]))
 
 
+def of(db: sqlite3.Connection, version: int) -> Evaluation | None:
+    """Evaluation version ``version`` as kept; None if it was not begun."""
+    if not _has_table(db, "evaluations"):
+        return None
+    row = db.execute(
+        "SELECT version, begun_at, first_day, review_days FROM evaluations WHERE version = ?", (version,)
+    ).fetchone()
+    if row is None:
+        return None
+    return Evaluation(int(row[0]), datetime.fromisoformat(row[1]), date.fromisoformat(row[2]), int(row[3]))
+
+
 def version_on(db: sqlite3.Connection, day: date) -> int:
     """The evaluation version in force on ``day``: the latest begun by then, else ``PREVIOUS``."""
     if not _has_table(db, "evaluations"):
@@ -183,6 +195,24 @@ def cycle_of(evaluation: Evaluation, day: date, sessions: Sessions) -> Cycle:
                 place = count - (number - 1) * length
             if count % length == 0 and (asked is None or cursor >= asked):
                 return Cycle(evaluation.version, number, first, cursor, place, length)
+        else:
+            gap += 1
+            if gap > SEARCH_DAYS:
+                raise ValueError(f"no trading day within {SEARCH_DAYS} days of {cursor}")
+        cursor += timedelta(days=1)
+
+
+def nth(evaluation: Evaluation, number: int, sessions: Sessions) -> Cycle:
+    """Review cycle ``number`` of ``evaluation``, counted on ``sessions`` as they are now: a holiday
+    announced after a cycle's days were first counted moves them (#473: a cohort runs, is judged and
+    is closed by its cycle so counted)."""
+    target = (number - 1) * evaluation.review_days + 1
+    count, cursor, gap = 0, evaluation.first_day, 0
+    while True:
+        if sessions(cursor) is not None:
+            gap, count = 0, count + 1
+            if count == target:
+                return cycle_of(evaluation, cursor, sessions)
         else:
             gap += 1
             if gap > SEARCH_DAYS:

@@ -259,7 +259,12 @@ def test_the_store_from_before_policies_gets_their_tables_and_columns(tmp_path: 
         pick_columns = {r[1] for r in db.execute("PRAGMA table_info(selections)")}
     assert {"policies", "champions"} <= tables
     assert "policy_id" in trade_columns and "policy_id" in pick_columns
-    assert policies.read_policies(path, 10) == {"champion": None, "policies": [], "champions": []}
+    assert policies.read_policies(path, 10) == {
+        "champion": None,
+        "policies": [],
+        "champions": [],
+        "cohorts": [],
+    }
 
 
 async def test_the_trader_picks_under_the_champion_at_its_start(tmp_path: Path) -> None:
