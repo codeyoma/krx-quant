@@ -1279,7 +1279,9 @@ async def test_the_trader_in_mock_mode_orders_on_kis_from_its_stream(
                 await until(lambda: feed.clients > 0)
                 account.bid, account.ask = 70_000, 70_100
                 feed.on_event(BOOK.tr_id, book(at("10:00:02.5"), 70_000, 70_100))
-                await until(lambda: len(resting_sells(account)) == 1)
+                # The broker's own pace, one call in any 1.1 s (#461): the buy's calls and the
+                # take-profit's sell each wait out the window of the one before.
+                await until(lambda: len(resting_sells(account)) == 1, 15.0)
                 clock[0] = at("10:02:00")
                 account.bid, account.improvement = 70_300, 0.0
                 account.fill(resting_sells(account)[0])

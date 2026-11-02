@@ -41,6 +41,7 @@ from krx_quant.kis_orders import (
     Unanswered,
     Unexpected,
     trader_broker,
+    trader_live_broker,
 )
 from krx_quant.ratelimit import RateLimiter
 from tests.test_ratelimit import Monotonic
@@ -52,6 +53,9 @@ TRADER_KEY = "PStrader" + "q" * 28
 TRADER_SECRET = "Sq" + "z" * 60
 COLLECTOR_KEY = "PScollector" + "c" * 25
 ACCOUNT = "50123456-01"
+LIVE_KEY = "PSlive" + "l" * 30
+LIVE_SECRET = "Sl" + "v" * 60
+LIVE_ACCOUNT = "70123456-01"
 # Short waits: the fake answers at once. A wait a test relies on is a bound, not a pause.
 WAIT, POLL = 1.0, 0.01
 
@@ -350,16 +354,47 @@ async def test_without_a_token_nothing_is_sent(trader: tuple[FakeKis, FakeAccoun
 # The pace
 
 
-async def test_the_trader_s_calls_are_paced_two_a_second(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    built: list[RateLimiter] = []
+class Paced(RateLimiter):
+    """The broker's limiter, keeping when it let each call through."""
 
-    def build(*args: Any, **kwargs: Any) -> RateLimiter:
-        built.append(RateLimiter(*args, **kwargs))
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.let_through: list[float] = []
+
+    async def acquire(self) -> float:
+        self.let_through.append(await super().acquire())
+        return self.let_through[-1]
+
+
+def paced(monkeypatch: pytest.MonkeyPatch) -> list[Paced]:
+    """The limiters the brokers made from here on, on a clock that moves only when they wait."""
+    built: list[Paced] = []
+
+    def build(*args: Any, **kwargs: Any) -> Paced:
+        built.append(Paced(*args, **kwargs))
         return built[-1]
 
     monkeypatch.setattr(kis_orders, "RateLimiter", build)
+    clock = Monotonic()
+    monkeypatch.setattr(ratelimit, "time", SimpleNamespace(monotonic=clock))
+    monkeypatch.setattr(ratelimit, "asyncio", SimpleNamespace(sleep=clock.sleep))
+    return built
+
+
+@pytest.mark.parametrize(
+    ("make", "let_through"),
+    [
+        # Of five sent at once the mock server refused two; of thirty sent a second apart, none
+        # (#403). Two in a window were refused on every mock trade of 2026-11-02 (#461): one.
+        (trader_broker, [0.0, 1.1, 2.2, 3.3, 4.4]),
+        # The live server's limit was not measured: the live broker keeps two in a window.
+        (trader_live_broker, [0.0, 0.0, 1.1, 1.1, 2.2]),
+    ],
+)
+async def test_each_mode_s_broker_paces_its_calls_over_a_1_1_second_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make: Callable[..., Broker], let_through: list[float]
+) -> None:
+    limiters = paced(monkeypatch)
     settings = Settings(
         kis_app_key=COLLECTOR_KEY,
         kis_app_secret="collector-secret",
@@ -367,15 +402,58 @@ async def test_the_trader_s_calls_are_paced_two_a_second(
         trader_kis_app_key=TRADER_KEY,
         trader_kis_app_secret=TRADER_SECRET,
         trader_kis_account=ACCOUNT,
+        trader_live_kis_app_key=LIVE_KEY,
+        trader_live_kis_app_secret=LIVE_SECRET,
+        trader_live_kis_account=LIVE_ACCOUNT,
     )
     async with kis.rest_session() as session:
-        trader_broker(session, settings, lambda: NOW)  # the mock servers, the default pace
-    [limiter] = built
-    clock = Monotonic()
-    monkeypatch.setattr(ratelimit, "time", SimpleNamespace(monotonic=clock))
-    monkeypatch.setattr(ratelimit, "asyncio", SimpleNamespace(sleep=clock.sleep))
-    # Of five sent at once the mock server answered three (#403): two a second, over a 1.1 s window.
-    assert [await limiter.acquire() for _ in range(5)] == pytest.approx([0.0, 0.0, 1.1, 1.1, 2.2])
+        make(session, settings, lambda: NOW)  # KIS's servers of the mode, the default pace
+    [limiter] = limiters
+    assert [await limiter.acquire() for _ in range(5)] == pytest.approx(let_through)
+
+
+async def test_the_mock_broker_sends_no_two_calls_within_1_1_seconds(
+    trader: tuple[FakeKis, FakeAccount], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A buy and the inquiry of its fill right after it, as every mock trade of 2026-11-02 sent them
+    (#461): the inquiry waits out the buy's window."""
+    fake, account = trader
+    limiters = paced(monkeypatch)
+    async with kis.rest_session() as session:
+        broker = trader_broker(
+            session, settings_of(fake, tmp_path), lambda: NOW, servers=Servers(fake.rest_url, fake.ws_url)
+        )
+        sent = await broker.buy(SYMBOL, 1, account.ask)
+        [row] = await broker.orders(DAY)
+    [limiter] = limiters
+    assert sent.accepted and sent.ref is not None and row.number == sent.ref.number
+    assert limiter.let_through == pytest.approx([0.0, 1.1])
+
+
+async def test_a_call_sent_again_after_a_refusal_for_the_limit_waits_for_the_limiter_too(
+    trader: tuple[FakeKis, FakeAccount], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The inquiry refused once for the limit goes again after the pause (a hundredth of a second
+    here) and through the limiter, as does the call after it: none of them within 1.1 s of another."""
+    fake, account = trader
+    fake.busy[kis_orders.FILLS.mock] = 1
+    limiters = paced(monkeypatch)
+    async with kis.rest_session() as session:
+        broker = trader_broker(
+            session,
+            settings_of(fake, tmp_path),
+            lambda: NOW,
+            servers=Servers(fake.rest_url, fake.ws_url),
+            pause=0.01,
+        )
+        sent = await broker.buy(SYMBOL, 1, account.ask)
+        [row] = await broker.orders(DAY)
+        balance = await broker.balance()
+    [limiter] = limiters
+    assert sent.accepted and sent.ref is not None and row.number == sent.ref.number
+    assert balance.held(SYMBOL) == 1
+    assert len(asked(fake, kis_orders.FILLS.mock)) == 2, "the inquiry, refused once and sent again"
+    assert limiter.let_through == pytest.approx([0.0, 1.1, 2.2, 3.3])
 
 
 # The trader's own key, on the mock server only
