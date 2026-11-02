@@ -765,6 +765,13 @@ def _trades(db: sqlite3.Connection, mode: str, day: date) -> tuple[Trade, ...]:
         (mode, day.isoformat()),
     ):
         orders.setdefault(int(o["trade_id"]), []).append(dict(o))
+    fills: dict[int, list[dict[str, Any]]] = {}
+    for f in db.execute(
+        "SELECT f.* FROM fills f JOIN orders o ON o.id = f.order_id JOIN trades t ON t.id = o.trade_id"
+        " WHERE t.mode = ? AND substr(t.entry_at, 1, 10) = ? ORDER BY f.id",
+        (mode, day.isoformat()),
+    ):
+        fills.setdefault(int(f["order_id"]), []).append(dict(f))
     measured = "decided_mid" in _columns(db, "trades")  # #475: a store the trader opened since
     out = []
     for row in rows:
@@ -790,7 +797,7 @@ def _trades(db: sqlite3.Connection, mode: str, day: date) -> tuple[Trade, ...]:
                 net=r["net"],
                 practice=bool(r.get("practice")),
                 # The champion's book's trades: a KIS day's are KIS's fills (#405).
-                execution=execution(r, orders.get(int(r["id"]), []), kis=mode in KIS_MODES)
+                execution=execution(r, orders.get(int(r["id"]), []), fills, kis=mode in KIS_MODES)
                 if measured
                 else None,
             )

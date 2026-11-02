@@ -2107,7 +2107,10 @@ def _trade_json(
         "stalls": stalls,
         # Its execution cost (#475): each leg's adverse ticks and delays.
         "execution": execution(
-            row, orders, kis=row["mode"] in KIS_MODES and bool(row["by_champion"]) and not row.get("shadow")
+            row,
+            orders,
+            fills,
+            kis=row["mode"] in KIS_MODES and bool(row["by_champion"]) and not row.get("shadow"),
         ),
     }
 
@@ -2122,48 +2125,82 @@ QUOTE_CLOCK, TRADER_CLOCK = "quote", "trader"
 MID, TARGET = "mid", "target"
 
 
-def execution(row: Mapping[str, Any], orders: Sequence[Mapping[str, Any]], kis: bool) -> dict[str, Any]:
-    """A trade's execution cost (#475, spec #468 8 "실행 비용"), from its row and its orders: each leg's
-    adverse difference in the trade's ticks (positive: bought above, or sold below, its reference) from
-    the mid-point the book knew when it decided it (the buy's ``decided_mid``; a sale's ``sale_mid``, the
-    stop crossed, the time barrier, a pause or a limit selling); a take-profit's from its target, the
-    limit it rested at from the buy. And each leg's delays in seconds: from its decision to its first
-    order's placing (``placed``) and to its fill (``filled``: the trade's entry or exit, a KIS one's last
-    fill read); a take-profit's from the buy's fill to its placing alone, as it rests until the market
-    comes to it. ``clock``: whose clock the times are on (``kis``: a KIS book's trade, ``TRADER_CLOCK``;
-    else ``QUOTE_CLOCK``). None where the trade has none: kept before #475, its exit to come."""
+def execution(
+    row: Mapping[str, Any],
+    orders: Sequence[Mapping[str, Any]],
+    fills: Mapping[int, Sequence[Mapping[str, Any]]],
+    kis: bool,
+) -> dict[str, Any]:
+    """A trade's execution cost (#475, spec #468 8 "실행 비용"), from its row, its orders and their fills
+    (by order): each leg's adverse difference in the trade's ticks (positive: bought above, or sold
+    below, its reference) and its delays in seconds. ``clock``: whose clock the times are on (``kis``: a
+    KIS book's trade, ``TRADER_CLOCK``; else ``QUOTE_CLOCK``). None where the trade has none: kept before
+    #475, its exit to come.
+
+    - The buy: its price against the mid-point the book knew when it decided it (``decided_mid``); from
+      the decision to its order's placing (``placed``) and to its last fill (``filled``: a KIS buy whose
+      cancel did not take may fill more later, ``grow_position``; ``entry_at`` stays the first's).
+    - The sale: each portion of the shares sold against its own reference, averaged by its shares: a
+      take-profit's fills against the target, the limit it rested at from the buy; a sale's (the stop
+      crossed, the time barrier, a pause or a limit selling) against the mid-point the book knew when it
+      decided it (``sale_mid``). A take-profit that filled in part before a stop sold the rest is so
+      neither the one nor the other's. ``reference`` is the exit reason's (``TARGET`` for a take-profit,
+      else ``MID``); a take-profit's delay is from the buy's fill to its placing alone, as it rests until
+      the market comes to it; a sale's from its decision to its first sell and to the exit."""
     tick = row.get("tick") or None
     placed: dict[str, str] = {}
     for o in orders:
         key = o["purpose"] if o["side"] == BUY or o["purpose"] == "take_profit" else SELL
         placed.setdefault(key, o["placed_at"])
+    bought = [f for o in orders if o["side"] == BUY for f in fills.get(int(o["id"]), ())]
     decided = row.get("decided_mid")
     entry = {
         "ticks": _ticks((row["entry_price"] - decided) / tick if decided is not None and tick else None),
         "placed": _seconds(row["decided_at"], placed.get(ENTRY)),
-        "filled": _seconds(row["decided_at"], row["entry_at"]),
+        "filled": _seconds(row["decided_at"], max((f["at"] for f in bought), default=row["entry_at"])),
     }
     out: dict[str, Any] | None = None
     if row.get("exit_at") is not None:
-        reason = row["exit_reason"]
-        if reason == "take_profit":
-            out = {
-                "reason": reason,
-                "reference": TARGET,
-                "ticks": _ticks((row["target"] - row["exit_price"]) / tick if tick else None),
-                "placed": _seconds(row["entry_at"], placed.get("take_profit")),
-                "filled": None,
-            }
-        else:
-            mid, sale_at = row.get("sale_mid"), row.get("sale_at")
-            out = {
-                "reason": reason,
-                "reference": MID,
-                "ticks": _ticks((mid - row["exit_price"]) / tick if mid is not None and tick else None),
-                "placed": _seconds(sale_at, placed.get(SELL)),
-                "filled": _seconds(sale_at, row["exit_at"]),
-            }
+        reason, sale_at = row["exit_reason"], row.get("sale_at")
+        taking = reason == "take_profit"
+        out = {
+            "reason": reason,
+            "reference": TARGET if taking else MID,
+            "ticks": _sold_ticks(row, orders, fills, tick),
+            "placed": _seconds(row["entry_at"], placed.get("take_profit"))
+            if taking
+            else _seconds(sale_at, placed.get(SELL)),
+            "filled": None if taking else _seconds(sale_at, row["exit_at"]),
+        }
     return {"clock": TRADER_CLOCK if kis else QUOTE_CLOCK, "entry": entry, "exit": out}
+
+
+def _sold_ticks(
+    row: Mapping[str, Any],
+    orders: Sequence[Mapping[str, Any]],
+    fills: Mapping[int, Sequence[Mapping[str, Any]]],
+    tick: float | None,
+) -> float | None:
+    """The shares sold's adverse ticks (``execution``): each sell's fills against its reference (a
+    take-profit's the target, a sale's ``sale_mid``), averaged by their shares; without the sells' fills,
+    the exit's price against the exit reason's reference. None without a reference or a tick."""
+    if not tick:
+        return None
+    mid = row.get("sale_mid")
+    portions = [
+        (row["target"] if o["purpose"] == "take_profit" else mid, float(f["price"]), int(f["quantity"]))
+        for o in orders
+        if o["side"] == SELL
+        for f in fills.get(int(o["id"]), ())
+    ]
+    if not portions:
+        reference = row["target"] if row["exit_reason"] == "take_profit" else mid
+        portions = [(reference, float(row["exit_price"]), 1)]
+    known = [(float(reference), price, q) for reference, price, q in portions if reference is not None]
+    shares = sum(q for _, _, q in known)
+    if shares <= 0 or len(known) < len(portions):
+        return None
+    return _ticks(sum((reference - price) * q for reference, price, q in known) / shares / tick)
 
 
 def _ticks(value: float | None) -> float | None:

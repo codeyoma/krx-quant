@@ -364,6 +364,12 @@ async def test_a_partial_fill_of_the_take_profit_is_kept_and_the_stop_sells_the_
     ]
     assert trade["exit"]["reason"] == STOP_LOSS
     assert trade["exit"]["price"] == pytest.approx((5 * 70_300 + 9 * 69_850) / 14)
+    # #475 (Codex's review): each portion against its own reference. The five at 70,300, half a tick over
+    # the target 70,250 (KIS's take-profit rests at it rounded up); the nine at the stop's decision's
+    # mid-point, 69,850: not the later sale's mid-point against the five's gain.
+    assert trade["execution"]["exit"]["ticks"] == pytest.approx(
+        (5 * (70_250 - 70_300) + 9 * 0) / 14 / 100, abs=1e-4
+    )
 
 
 # Stop, time

@@ -2909,7 +2909,7 @@
       "properties": {
         "clock": {"enum": ["quote", "trader"]},
         "entry": {
-          "description": "ticks: the fill's price less the mid-point of the latest quote the book had when it decided the buy, in the trade's ticks (positive: adverse); placed: seconds from the decision to its order (a paper buy's is its fill); filled: seconds from the decision to the entry (a KIS buy's fills read). Null where the trade has none (kept before #475).",
+          "description": "ticks: the fill's price less the mid-point of the latest quote the book had when it decided the buy, in the trade's ticks (positive: adverse); placed: seconds from the decision to its order (a paper buy's is its fill); filled: seconds from the decision to its last fill (a KIS buy whose cancel did not take may fill more after the entry's time, its first fill's). Null where the trade has none (kept before #475).",
           "type": "object",
           "required": ["ticks", "placed", "filled"],
           "additionalProperties": false,
@@ -2920,7 +2920,7 @@
           }
         },
         "exit": {
-          "description": "reason: the trade's exit reason. reference mid (the stop crossed, the time barrier, a pause or a limit selling): ticks the mid-point of the latest quote when the sale was decided less the exit's price (positive: adverse), placed and filled seconds from that decision to its first sell and to the exit (a KIS sale's last fill read). reference target (a take-profit): ticks the target less the exit's price, the limit it rested at from the buy (KIS's at the target rounded up to the tick, or a fill better than it, below 0); placed seconds from the buy's fill to the take-profit's order, filled null (it rests until the market comes to it). Null where the trade has none (kept before #475).",
+          "description": "reason: the trade's exit reason. ticks: the shares sold, each portion against its own reference and averaged by its shares (positive: adverse): a take-profit's fills against the target, the limit it rested at from the buy (KIS's rests at the target rounded up to the tick, below 0); a sale's (the stop crossed, the time barrier, a pause or a limit selling) against the mid-point of the latest quote when it was decided. A take-profit that filled in part before a stop sold the rest has both. reference: the exit reason's, target for a take-profit, else mid. mid: placed and filled seconds from the sale's decision to its first sell and to the exit (a KIS sale's last fill read). target: placed seconds from the buy's fill to the take-profit's order, filled null (it rests until the market comes to it). Null where the trade has none (kept before #475).",
           "oneOf": [
             {"type": "null"},
             {

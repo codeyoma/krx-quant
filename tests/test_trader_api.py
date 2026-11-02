@@ -19,6 +19,7 @@ from krx_quant.predictions import DB_NAME as ENGINE_DB
 from krx_quant.touch import TARGET_VERSION
 from krx_quant.trader.refit import BOOTSTRAP, refit_from
 from krx_quant.trader.store import DB_NAME as TRADER_DB
+from krx_quant.trader.store import execution
 from tests.api_schema import check
 from tests.replay_events import at as replay_at
 from tests.replay_events import run
@@ -102,6 +103,54 @@ async def test_the_trades_newest_first_each_with_its_orders_and_fills(tmp_path: 
         "filled": None,
     }
     assert open_["execution"]["exit"] is None
+
+
+def test_a_trade_s_execution_worked_by_hand() -> None:
+    """#475 (Codex's review): a KIS buy of 14 decided at 10:00:02.3 with the mid-point 69,950 known, 4
+    filled at 70,050 at 10:00:02.5 and 10 more at 10:00:40 after its cancel failed (``grow_position``):
+    1.0 tick adverse, its delay to the last fill (37.7 s), not the first. Its take-profit at 70,300 (the
+    target 70,250 rounded up) filled 5; the stop decided at 10:01:30 on the mid-point 69,850 sold 9 at
+    69,850 at 10:01:31: −0.5 tick on five, 0 on nine, (−250 + 0) ÷ 14 ÷ 100 a share."""
+    row = {
+        "tick": 100.0,
+        "decided_at": "2026-10-14T10:00:02.300000+09:00",
+        "decided_mid": 69_950.0,
+        "entry_at": "2026-10-14T10:00:02.500000+09:00",
+        "entry_price": 70_050.0,
+        "target": 70_250.0,
+        "exit_at": "2026-10-14T10:01:31+09:00",
+        "exit_price": (5 * 70_300 + 9 * 69_850) / 14,
+        "exit_reason": "stop_loss",
+        "sale_at": "2026-10-14T10:01:30+09:00",
+        "sale_mid": 69_850.0,
+    }
+    orders = [
+        {"id": 1, "side": "buy", "purpose": "entry", "placed_at": "2026-10-14T10:00:02.500000+09:00"},
+        {"id": 2, "side": "sell", "purpose": "take_profit", "placed_at": "2026-10-14T10:00:41+09:00"},
+        {"id": 3, "side": "sell", "purpose": "stop_loss", "placed_at": "2026-10-14T10:01:30.400000+09:00"},
+    ]
+    fills = {
+        1: [
+            {"at": "2026-10-14T10:00:02.500000+09:00", "price": 70_050.0, "quantity": 4},
+            {"at": "2026-10-14T10:00:40+09:00", "price": 70_050.0, "quantity": 10},
+        ],
+        2: [{"at": "2026-10-14T10:01:00+09:00", "price": 70_300.0, "quantity": 5}],
+        3: [{"at": "2026-10-14T10:01:31+09:00", "price": 69_850.0, "quantity": 9}],
+    }
+
+    found = execution(row, orders, fills, kis=True)
+
+    assert found["clock"] == "trader"
+    assert found["entry"] == {"ticks": 1.0, "placed": 0.2, "filled": 37.7}
+    assert found["exit"] == {
+        "reason": "stop_loss",
+        "reference": "mid",
+        "ticks": pytest.approx(-250 / 14 / 100, abs=1e-4),
+        "placed": 0.4,
+        "filled": 1.0,
+    }
+    # A stop decided on no quote known: the take-profit's portion has its target, the sale's none.
+    assert execution({**row, "sale_mid": None}, orders, fills, kis=True)["exit"]["ticks"] is None
 
 
 async def test_before_and_limit_page_back(tmp_path: Path) -> None:
