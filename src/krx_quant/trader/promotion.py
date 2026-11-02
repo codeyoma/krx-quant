@@ -39,7 +39,7 @@ dropped (``BETWEEN_REVIEWS``). The records, the promotion and the live gate read
 evaluation version's days alone (``since``, from its first day): an earlier version's evidence stays
 in the store, archived, and is not inherited.
 
-> **바뀜** (2026-11-02, #469): a challenger was judged every night from its tenth common day → on a
+> **바뀜** (2026-11-02, #476): a challenger was judged every night from its tenth common day → on a
 > review night alone, and on the current evaluation version's days alone. 이유: spec #468 "버전과
 > 검토 주기": the version that trades is frozen between reviews.
 

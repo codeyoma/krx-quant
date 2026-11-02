@@ -39,7 +39,7 @@ stays its own (``OFF_MAP`` while the cost map does not name it, never the other 
 whose predictor stopped predicting (``GONE``, ``cells.gone``) trades no more until the next review.
 Each pick keeps every cell of the policy and why it does not trade (``Selection.cells``).
 
-> **바뀜** (2026-11-02, #469): before the first champion the trader traded the cost map's cells at
+> **바뀜** (2026-11-02, #476): before the first champion the trader traded the cost map's cells at
 > ``KRX_TRADER_THRESHOLD`` and ``KELLY_FRACTION`` → nothing. 이유: spec #468 "챔피언 전 기본 매매는
 > 없앤다". A policy's values compare by its cells' predictors' names, θ and λ, no longer their roles.
 
