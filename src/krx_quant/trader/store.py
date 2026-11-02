@@ -1245,13 +1245,14 @@ class TraderStore:
         shadow: bool = False,
         practice: bool = False,
     ) -> list[tuple[datetime, float]]:
-        """A book's trades of ``mode`` entered at or after ``since`` (its day's 00:00) and exited, each
-        one's exit time and net, in the order they exited: the risk rules' losses in a row (#471,
-        ``paper.risk_held``). A trade exits on the day it is entered."""
+        """A book's trades of ``mode`` exited at or after ``since`` (its day's 00:00), each one's exit
+        time and net, in the order they exited: the risk rules' losses in a row (#471,
+        ``paper.risk_held``). By the exit, not the entry: a position carried overnight (the trader down
+        at its time barrier, a sale not settled, ``mock.py``) counts on the day it is sold."""
         whose, params = _whose(challenger, shadow, practice)
         rows = self._db.execute(
-            "SELECT t.exit_at, t.net FROM trades t WHERE t.mode = ? AND t.entry_at >= ?"
-            f" AND t.exit_at IS NOT NULL AND {whose} ORDER BY t.exit_at, t.id",
+            "SELECT t.exit_at, t.net FROM trades t WHERE t.mode = ? AND t.exit_at >= ?"
+            f" AND {whose} ORDER BY t.exit_at, t.id",
             (mode, iso(since), *params),
         )
         return [(datetime.fromisoformat(r[0]), float(r[1])) for r in rows]

@@ -209,6 +209,23 @@ def test_the_cooldown_goes_on_across_a_restart(tmp_path: Path) -> None:
     assert reasons(again)[-1] == ("10:30", COOLING_DOWN)
 
 
+def test_a_trade_carried_overnight_counts_on_the_day_it_is_sold(tmp_path: Path) -> None:
+    """Bought at 15:00 on 10-13 and the trader down at its 15:04 barrier: sold at a loss on the first
+    quote of 10-14 (#478, Codex's review). With the 10:00 and 10:10 stops it is the third net loss in a
+    row that day: the 10:20 rise is cooling down."""
+    before = Day(tmp_path, rules=TRADER, started_at=at("2026-10-13 09:00:00"))
+    [opened] = before.run([rise("15:00", day="2026-10-13 "), bought("15:00", day="2026-10-13 ")])
+    assert opened["exit"] is None, "still open when the trader stopped"
+
+    again = Day(tmp_path, rules=TRADER, started_at=at("2026-10-14 09:00:00"))
+    trades = again.run([quote("09:00:30", 69_800, 69_900), *loss("10:00"), *loss("10:10"), rise("10:20")])
+
+    carried = trades[-1]
+    assert (carried["bar_close"][:10], carried["exit"]["at"][:10]) == ("2026-10-13", "2026-10-14")
+    assert carried["net"] < 0
+    assert reasons(again)[-1] == ("10:20", COOLING_DOWN)
+
+
 # The buy orders a day.
 
 

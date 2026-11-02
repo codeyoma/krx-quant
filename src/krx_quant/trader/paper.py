@@ -66,13 +66,15 @@ capital. The budget bounds the loss planned, not a gap past the stop.
 
 **Risk rules** (#471, spec #468 7 "위험 규칙", ``risk_held``), of every book (the champion's, a
 challenger's, a shadow's, the practice's: #427's cell trades by the champion's rules but its shares),
-from its own orders and trades of the day (00:00 KST on; from the store, so a restart goes on with
-them; the re-fit's replay keeps its own): at ``Rules.daily_buys`` (20) buy orders that day nothing more
-is bought (``buy_limit``: a paper buy is its fill; the KIS book's each order it sent, those KIS refused
-counted, ``store.day_buys``); and ``Rules.loss_streak`` (3) trades in a row that exited at a net loss
-start a cooldown of ``Rules.cooldown`` (30 minutes) from the last one's exit (``cooldown``): a net of
-0 or more ends the row, and each loss after the third begins the cooldown again. Sells and cancels
-count for neither. ``.env`` may make them stricter, never looser (``settings.py``).
+from its own orders and trades of the day (00:00 KST on: the buys it placed, the trades it sold that
+day, one carried overnight on the day it is sold; from the store, so a restart goes on with them;
+the re-fit's replay keeps its own, whose trades are sold on their day): at ``Rules.daily_buys`` (20)
+buy orders that day nothing more is bought (``buy_limit``: a paper buy is its fill; the KIS book's
+each order it sent, those KIS refused counted, ``store.day_buys``); and ``Rules.loss_streak`` (3)
+trades in a row that exited at a net loss start a cooldown of ``Rules.cooldown`` (30 minutes) from
+the last one's exit (``cooldown``): a net of 0 or more ends the row, and each loss after the third
+begins the cooldown again. Sells and cancels count for neither. ``.env`` may make them stricter,
+never looser (``settings.py``).
 
 **Practice** (#427, ``desk.Desk``): the mock book's practice cell is a pick like another, its trade
 marked ``practice``, of no policy (``Entry.policy_id`` None: no record counts it), buying its shares
