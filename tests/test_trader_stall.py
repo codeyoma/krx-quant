@@ -18,7 +18,7 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Sequence
 from contextlib import closing
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -49,6 +49,7 @@ from krx_quant.trader.store import (
     request_pause,
 )
 from tests.test_trader_mock import TIMING, kis_mock, resting_sells, settings_of
+from tests.test_trader_reconcile import Lost, next_day
 from tests.trader_doubles import (
     BARRIER,
     CALENDAR,
@@ -527,6 +528,44 @@ async def test_a_pause_selling_at_once_asked_in_a_stall_sells_on_kis_s_next_rest
     assert resting_sells(account) == [] and account.holdings[SYMBOL] == 0
     assert desk.rest_reads() == 2
     assert said(desk.notices) == [STALL_SAID, "정지하고 즉시 매도 요청을 받았습니다"]
+
+
+async def test_a_live_lost_sell_settled_in_a_night_s_stall_sells_once_krx_takes_orders_not_on_a_rest_quote(
+    kis_mock: tuple[FakeKis, FakeAccount], tmp_path: Path
+) -> None:
+    """The live stop's sell (10:01:30) is lost before KIS takes it, and the stream stops right after:
+    the stall lasts through the night, KIS's book read over REST at each turn and stamped with the
+    clock. The sell is absent at the first look after midnight (#464). The REST quotes of the night
+    and of 08:00 sell nothing, KRX taking no order then (a refused sell would stop that day's
+    entries); the first one from 08:30, the opening auction, sells."""
+    fake, account = kis_mock
+    Lost(fake, account, 69_800, taken=False)
+    desk = StallDesk(tmp_path, fake, account, timing=replace(TIMING, retry=1.0), mode=LIVE)
+
+    await desk.run(
+        [
+            *flowing("10:00:00", "10:00:02"),
+            TEN,
+            BOUGHT,
+            *flowing("10:00:03", "10:01:29"),
+            quote("10:01:30", 69_800, 69_900),  # at the stop: its sell lost
+            Tick("10:01:36"),  # the stall, read over REST from now on
+            Tick("15:40:00"),
+            Tick(next_day("00:00:30")),  # its day over: absent
+            Tick(next_day("00:00:33")),
+            Tick(next_day("08:00:00")),
+            Tick(next_day("08:30:01")),
+        ]
+    )
+
+    orders = rows(tmp_path, "orders")
+    stops = [(o["status"], o["placed_at"]) for o in orders if o["mode"] == LIVE and o["purpose"] == STOP_LOSS]
+    assert stops == [
+        ("absent", "2026-10-14T10:01:30+09:00"),
+        ("filled", "2026-10-15T08:30:01+09:00"),
+    ], "sold on the first REST quote KRX takes an order at"
+    assert [t["exit"]["reason"] for t in desk.trades()] == [STOP_LOSS]
+    assert [f["day"] for f in rows(tmp_path, "failures")] == ["2026-10-14"], "the lost sell's alone"
 
 
 # The call limit

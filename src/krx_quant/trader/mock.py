@@ -84,7 +84,9 @@ this the trade would never be sold). The live account waits for the day: the win
 candidates is no bound on how late KIS's inquiry may show an order. It is told on Telegram (the
 symbol and the shares), and the trade is sold by its rules again (``_go_on``: past its time barrier
 sold, else its take-profit placed again). A sale goes on at the first quote received after a lost
-sell is settled, found or not gone in (``_settled_at``): on the live account, the next session's.
+sell is settled, found or not gone in (``_settled_at``), while KRX takes orders (``ORDERABLE``, a
+trading day from its opening auction to its close): on the live account, the next session's; a REST
+quote of a stall lasting through the night, stamped with the clock, does not count.
 The stop, the time barrier, a pause that sells and the loss limits sell nothing while it is not
 settled; their sale begins (kept for once it is settled) and is told on Telegram, to check the KIS
 account. Nothing clears it but KIS's inquiry and balance: ``krx-quant trade resume`` does not (it
@@ -170,7 +172,7 @@ from krx_quant.kis_orders import (
     Unexpected,
     same_number,
 )
-from krx_quant.market_calendar import Session
+from krx_quant.market_calendar import Phase, Session
 from krx_quant.pricing import SELL_TAX, tick_size
 from krx_quant.trader import LIVE, MOCK, SYMBOL
 from krx_quant.trader.cells import Signal
@@ -253,6 +255,9 @@ ABSENT_AFTER = LOST_AFTER
 ABSENT_APART = timedelta(seconds=30)
 # How such a sell was settled (``MockTrader._settle_lost``): found on KIS, or ``store.ABSENT``.
 _FOUND = "found"
+# When KRX takes an order: from the opening auction (08:30) to the close. A sale that waited for a
+# lost sell to be settled goes on at a quote of these alone (#464).
+ORDERABLE = frozenset({Phase.OPENING_AUCTION, Phase.CONTINUOUS, Phase.CLOSING_AUCTION})
 
 
 @dataclass(frozen=True)
@@ -531,7 +536,7 @@ class MockTrader(PaperTrader):
             self._begin_sale(trade, SALE[status])
         if self._selling is not None:
             if self._settled_at is not None:  # a lost sell settled (#464): a bid not older than that
-                if not self._quoted_after(self._settled_at):
+                if not self._quoted_orderable_after(self._settled_at):
                     return  # the live one's day over, the next session's first quote
                 self._settled_at = None
             if (self._retry_at is None or now >= self._retry_at) and self._bid() is not None:
@@ -573,6 +578,16 @@ class MockTrader(PaperTrader):
     def _quoted_after(self, moment: datetime) -> bool:
         last = self._last
         return last is not None and last.received_at > moment
+
+    def _quoted_orderable_after(self, moment: datetime) -> bool:
+        """Whether the latest quote came after ``moment`` while KRX takes orders: a trading day's
+        session, from its opening auction (08:30) to its close (#464). Not a REST quote of a stall
+        lasting through the night, stamped with the clock when it is read."""
+        last = self._last
+        if last is None or last.received_at <= moment:
+            return False
+        session = self._sessions(kst_day(last.received_at))
+        return session is not None and session.phase(last.received_at) in ORDERABLE
 
     def _stop_following(self) -> None:
         follower = self._follower
