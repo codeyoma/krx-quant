@@ -553,7 +553,10 @@ def test_twenty_nights_of_fits_wait_and_the_review_night_judges_the_cohort_once(
     for n, day in enumerate(WEEKDAYS[:20]):
         db = policies.connect(tmp_path / DB_NAME)
         try:
-            champion, running = policies.champion_version(db), policies.running_versions(db, day)
+            champion, running = (
+                policies.champion_version(db),
+                policies.running_versions(db, day, CALENDAR.session),
+            )
         finally:
             db.close()
         assert (champion, running) == (1, [2, 3]), f"day {n + 1}: the cohort of the cycle"
@@ -575,7 +578,7 @@ def test_twenty_nights_of_fits_wait_and_the_review_night_judges_the_cohort_once(
         assert policies.champion_version(db) == 2
         assert policies.challenger_versions(db) == [21, 22, 23], "the next cycle's cohort: the newest three"
         assert policies.waiting_versions(db) == [], "the older fits are dropped: newer ones replaced them"
-        assert policies.running_versions(db, WEEKDAYS[20]) == [21, 22, 23]
+        assert policies.running_versions(db, WEEKDAYS[20], CALENDAR.session) == [21, 22, 23]
 
 
 def values_now(state: Path) -> tuple[int | None, tuple[tuple[str, str, float], ...]]:

@@ -771,6 +771,8 @@ def promote(
         gate = gate_of(db, champion)
         return Promotion(now, champion, (), None, BETWEEN_REVIEWS, gate, review=upcoming, **found)
     judged = cohorts.of(db, evaluation.version, review.cycle_of(evaluation, day, sessions).number)
+    if judged is not None:  # its cycle's days on the calendar now, as ``reviewing`` counts them
+        judged = cohorts.resolved(db, judged, sessions)
     if judged is None:
         return Promotion(now, champion, (), None, NO_COHORT, gate_of(db, champion), review=day, **found)
     kept = cohorts.verdict_of(db, judged.evaluation, judged.cycle)
@@ -838,18 +840,25 @@ def _won(value: float | None) -> str:
     return "없음" if value is None else f"{value:+,.0f}원"
 
 
-def progress(db: sqlite3.Connection, mode: str | None = None) -> dict[str, Any]:
+def progress(
+    db: sqlite3.Connection, mode: str | None = None, sessions: Callable[[date], Session | None] | None = None
+) -> dict[str, Any]:
     """``GET /v1/trader``'s policies (#400): the champion's version, the live gate on its record,
     and the champion and each challenger with their records and, for a challenger, where it stands
     against its cohort's champion so far (#473: ``judge_cohort`` on the days of its cycle to now; a
     figure, not a verdict: it is judged on its cycle's review night alone); the cohort formed last
-    with its verdict (``cohort``, #473); the records ``mode``'s (None: the mode the trader last started
-    in, #405). Read-only; empty from a store without policies."""
+    with its verdict (``cohort``, #473); a cohort's days counted on ``sessions`` as they are now
+    (``cohort.resolved``; as formed without them); the records ``mode``'s (None: the mode the trader
+    last started in, #405). Read-only; empty from a store without policies."""
     if not _has_table(db, "policies") or not _has_table(db, "champions"):
         return {"champion": None, "gate": no_gate().as_json(), "policies": [], "cohort": None}
     current = policies.champion_version(db)
     running = policies.challenger_versions(db)
-    running_cohorts = [c for c in cohorts.unjudged(db) if c.champion is not None]
+
+    def now(found: cohorts.Cohort) -> cohorts.Cohort:
+        return found if sessions is None else cohorts.resolved(db, found, sessions)
+
+    running_cohorts = [now(c) for c in cohorts.unjudged(db) if c.champion is not None]
     against = {c.champion for c in running_cohorts if c.champion is not None}
     kept = records(db, mode, {*([] if current is None else [current]), *running, *against})
     judged = {j.challenger: j for c in running_cohorts for j in judge_cohort(c, kept)}
@@ -881,7 +890,7 @@ def progress(db: sqlite3.Connection, mode: str | None = None) -> dict[str, Any]:
         "policies": listed,
         "cohort": None
         if last is None
-        else {**last.as_json(), "verdict": None if verdict is None else verdict.as_json()},
+        else {**now(last).as_json(), "verdict": None if verdict is None else verdict.as_json()},
     }
 
 

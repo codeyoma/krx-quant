@@ -1561,7 +1561,9 @@ async def _trader_policies(request: web.Request) -> web.Response:
     state_dir = request.app[STATE_DIR_KEY]
     if state_dir is None:
         return _json({"champion": None, "policies": [], "champions": [], "cohorts": []})
-    return _json(await asyncio.to_thread(read_policies, state_dir / TRADER_DB, limit))
+    # The cohorts' days (#473) counted on the engine's market calendar.
+    calendar = request.app[ENGINE_KEY].calendar.session
+    return _json(await asyncio.to_thread(read_policies, state_dir / TRADER_DB, limit, None, calendar))
 
 
 async def _trader_marks(request: web.Request) -> web.Response:

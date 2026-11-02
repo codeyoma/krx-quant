@@ -24,6 +24,12 @@ judged against.
 trading days of its cycle, from its first to its review day, as every shadow book does (#471: sized
 by the loss budget, held by the risk rules and the simulated loss limits).
 
+**The calendar now** (``resolved``): a cohort keeps the first and review days of its cycle as they
+were counted when it was formed, but it runs, is judged and is closed by its cycle counted on the
+market calendar as it is now (``review.nth``), as the review night itself is (``review.reviewing``):
+a holiday announced after it was formed moves its review day, and its members run to that day and
+are judged that night.
+
 **Judged once** (``promotion.promote``): on the cycle's review night, after its close, never before:
 each member against the cohort's champion on the days of the cycle both ran
 (``promotion.judge_cohort``), Bonferroni over the cohort's members; the one crowned and every other
@@ -49,7 +55,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 from typing import Any
 
@@ -216,14 +222,26 @@ def verdict_of(db: sqlite3.Connection, evaluation: int, cycle: int) -> Verdict |
     )
 
 
-def read_cohorts(db: sqlite3.Connection) -> list[dict[str, Any]]:
+def read_cohorts(db: sqlite3.Connection, sessions: Sessions | None = None) -> list[dict[str, Any]]:
     """``GET /v1/trader/policies``'s ``cohorts``: every cohort, the newest first, with its verdict
-    (null until judged)."""
+    (null until judged); its days counted on ``sessions`` as they are now (``resolved``), as formed
+    without them."""
     out = []
     for c in reversed(cohorts(db)):
         found = verdict_of(db, c.evaluation, c.cycle)
-        out.append({**c.as_json(), "verdict": None if found is None else found.as_json()})
+        shown = c if sessions is None else resolved(db, c, sessions)
+        out.append({**shown.as_json(), "verdict": None if found is None else found.as_json()})
     return out
+
+
+def resolved(db: sqlite3.Connection, found: Cohort, sessions: Sessions) -> Cohort:
+    """``found`` with its cycle's first and review days counted on ``sessions`` as they are now
+    (module doc "The calendar now"); as kept without its evaluation version kept (a demo's)."""
+    evaluation = review.of(db, found.evaluation)
+    if evaluation is None:
+        return found
+    cycle = review.nth(evaluation, found.cycle, sessions)
+    return replace(found, first=cycle.first, review=cycle.review)
 
 
 def _cohort(db: sqlite3.Connection, row: Sequence[Any]) -> Cohort:
@@ -328,7 +346,7 @@ def form_tonight(db: sqlite3.Connection, now: datetime, sessions: Sessions) -> T
     cycle = review.cycle_at(evaluation, now, sessions)
     kept = of(db, evaluation.version, cycle.number)
     if kept is not None:
-        return Tonight(cycle, kept, waiting=tuple(policies.waiting_versions(db)))
+        return Tonight(cycle, resolved(db, kept, sessions), waiting=tuple(policies.waiting_versions(db)))
     if now >= datetime.combine(cycle.first, PICK_AT, KST):
         return Tonight(cycle, None, waiting=tuple(policies.waiting_versions(db)), why=BEGUN)
     champion = policies.champion_version(db)
@@ -400,7 +418,7 @@ def close_missed(db: sqlite3.Connection, now: datetime, sessions: Sessions) -> l
     night = review.night_of(now, sessions)
     out = []
     for found in unjudged(db):
-        if night <= found.review:
+        if night <= resolved(db, found, sessions).review:  # its review day on the calendar now
             continue
         with db:
             db.execute("BEGIN IMMEDIATE")

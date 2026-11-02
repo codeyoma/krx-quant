@@ -313,7 +313,9 @@ def read(
         champion = _champion_at(db, start) if has_policies else None
         at_end = _champion_at(db, end) if has_policies else None
         challengers = _slots_at(db, start) if has_policies else []
-        of_cohort = {v: cohort.of_member(db, v) for v in challengers} if has_policies else {}
+        of_cohort = (
+            {v: _resolved(db, cohort.of_member(db, v), calendar) for v in challengers} if has_policies else {}
+        )
         against = {c.champion for c in of_cohort.values() if c is not None and c.champion is not None}
         records = promotion.records(
             db, mode, {v for v in (champion, at_end, *challengers, *against) if v is not None}
@@ -329,11 +331,13 @@ def read(
         }
         standings = _standings(day, champion, challengers, to_day, of_cohort, verdicts)
         judged = tuple(
-            (c, v)
+            (cohort.resolved(db, c, calendar.session), v)
             for c in cohort.cohorts(db)
             if (v := cohort.verdict_of(db, c.evaluation, c.cycle)) is not None and start <= v.judged_at < end
         )
-        formed = tuple(c for c in cohort.cohorts(db) if start <= c.formed_at < end)
+        formed = tuple(
+            cohort.resolved(db, c, calendar.session) for c in cohort.cohorts(db) if start <= c.formed_at < end
+        )
         crowned: tuple[Crowned, ...] = ()
         dropped: tuple[int, ...] = ()
         admitted: tuple[int, ...] = ()
@@ -544,6 +548,13 @@ def _champion_at(db: sqlite3.Connection, moment: datetime) -> int | None:
         "SELECT policy_id FROM champions WHERE at < ? ORDER BY id DESC LIMIT 1", (_iso(moment),)
     ).fetchone()
     return None if row is None else int(row[0])
+
+
+def _resolved(
+    db: sqlite3.Connection, found: cohort.Cohort | None, calendar: MarketCalendar
+) -> cohort.Cohort | None:
+    """A challenger's cohort, its days counted on ``calendar`` as it is now (#473)."""
+    return None if found is None else cohort.resolved(db, found, calendar.session)
 
 
 def _slots_at(db: sqlite3.Connection, moment: datetime) -> list[int]:

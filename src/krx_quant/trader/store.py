@@ -723,9 +723,10 @@ class TraderStore:
         cannot be read."""
         return policy.champion(self._db)
 
-    def running_challengers(self, day: date) -> list[int]:
-        """The challengers that run on ``day`` (#400, ``policy.running_versions``)."""
-        return policy.running_versions(self._db, day)
+    def running_challengers(self, day: date, sessions: Callable[[date], Session | None]) -> list[int]:
+        """The challengers that run on ``day`` (#400, ``policy.running_versions``: #473, its cohort's,
+        its cycle counted on ``sessions``)."""
+        return policy.running_versions(self._db, day, sessions)
 
     def read_policy(self, version: int) -> policy.Policy:
         """Policy ``version`` (#400); ``policy.PolicyError`` when it cannot be read."""
@@ -1817,8 +1818,9 @@ def read_trader(
                 body["updated_at"] = iso(updated)
                 body["alive"] = abs((now - updated).total_seconds()) <= ALIVE_SECONDS
         # The records of the mode it runs in (#405): its state's, else the mode it last started in.
-        body |= promotion.progress(db, body["mode"])
-        body["cycle"] = review.state(db, now, sessions or MarketCalendar().session)
+        calendar = sessions or MarketCalendar().session
+        body |= promotion.progress(db, body["mode"], calendar)
+        body["cycle"] = review.state(db, now, calendar)
         if "controls" in tables:
             rows = db.execute("SELECT * FROM controls ORDER BY id DESC LIMIT ?", (CONTROLS_SHOWN,))
             body["controls"] = [_control(r).as_json() for r in rows]

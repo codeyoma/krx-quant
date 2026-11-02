@@ -11,12 +11,13 @@ from __future__ import annotations
 
 import sqlite3
 from contextlib import closing
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
 import pytest
 
 from krx_quant.feeds.base import KST
+from krx_quant.market_calendar import MarketCalendar
 from krx_quant.trader import cohort, promotion, review
 from krx_quant.trader import policy as policies
 from krx_quant.trader.promotion import BETWEEN_REVIEWS, FEW_DAYS, NO_COHORT, REVIEWED
@@ -111,10 +112,12 @@ def test_a_cohort_takes_the_three_newest_with_their_own_values_and_fixes_its_cha
     with closing(connected(tmp_path)) as db:
         assert policies.challenger_versions(db) == [3, 5, 6]
         assert policies.waiting_versions(db) == []
-        assert policies.running_versions(db, REVIEW) == [], "not in the cycle reviewed"
-        assert policies.running_versions(db, NEXT) == [3, 5, 6], "from the next cycle's first day"
-        assert policies.running_versions(db, NEXT_REVIEW) == [3, 5, 6]
-        assert policies.running_versions(db, LONG[40]) == [], "nor after its review day"
+        assert policies.running_versions(db, REVIEW, CALENDAR.session) == [], "not in the cycle reviewed"
+        assert policies.running_versions(db, NEXT, CALENDAR.session) == [3, 5, 6], (
+            "from the next cycle's first day"
+        )
+        assert policies.running_versions(db, NEXT_REVIEW, CALENDAR.session) == [3, 5, 6]
+        assert policies.running_versions(db, LONG[40], CALENDAR.session) == [], "nor after its review day"
     again = tonight(tmp_path, night(REVIEW) + timedelta(minutes=9))
     assert (again.formed, again.cohort) == (False, c), "one cohort a cycle"
 
@@ -127,7 +130,7 @@ def test_a_policy_fitted_during_a_cycle_waits_for_the_next_cohort(tmp_path: Path
 
     mid = tonight(tmp_path, at(f"{WEEKDAYS[4]} 22:35:00"))
     with closing(connected(tmp_path)) as db:
-        running = policies.running_versions(db, WEEKDAYS[5])
+        running = policies.running_versions(db, WEEKDAYS[5], CALENDAR.session)
     judged_at(tmp_path, night(REVIEW))
     end = tonight(tmp_path, night(REVIEW) + timedelta(minutes=5))
 
@@ -262,7 +265,10 @@ def test_an_undecided_member_is_dropped_and_its_window_is_never_stretched(tmp_pa
     assert done.verdict is not None and done.verdict.members[0]["verdict"] == cohort.UNDECIDED
     assert {n.deferred for n in later} == {BETWEEN_REVIEWS, NO_COHORT}
     with closing(connected(tmp_path)) as db:
-        assert policies.running_versions(db, NEXT) == [] and policies.challenger_versions(db) == []
+        assert (
+            policies.running_versions(db, NEXT, CALENDAR.session) == []
+            and policies.challenger_versions(db) == []
+        )
     assert len(verdicts(tmp_path)) == 1
 
 
@@ -285,7 +291,45 @@ def test_a_missed_review_night_closes_the_cohort_unjudged_and_the_champion_stays
     assert review_night.deferred == NO_COHORT and review_night.missed == ()
     with closing(connected(tmp_path)) as db:
         assert policies.champion_version(db) == 1
-        assert policies.running_versions(db, NEXT) == [] and policies.challenger_versions(db) == []
+        assert (
+            policies.running_versions(db, NEXT, CALENDAR.session) == []
+            and policies.challenger_versions(db) == []
+        )
+
+
+def test_a_holiday_announced_after_the_cohort_was_formed_moves_its_review_and_its_running(
+    tmp_path: Path,
+) -> None:
+    """Policy 2's cohort was formed for the cycle from 09-01, its review day then 09-28 (its 20th
+    weekday). 09-25 is announced closed afterwards: on the calendar now the 20th trading day is 09-29.
+    The night of 09-28 judges nothing and closes nothing; policy 2 runs on 09-29; the night of 09-29
+    judges it, never ``missed``. The cohort as formed stays kept; the API counts its days on the
+    calendar now."""
+    setup(tmp_path, CLOSE_CALL)
+    later = MarketCalendar({date(2026, 9, 25): False})
+    moved = date(2026, 9, 29)
+
+    db = connected(tmp_path)
+    try:
+        before = promotion.promote(db, night(REVIEW), later.session)
+        running = policies.running_versions(db, moved, later.session)
+        done = promotion.promote(db, night(moved), later.session)
+        kept = cohort.of(db, 2, 1)
+    finally:
+        db.close()
+
+    assert (before.deferred, before.missed, before.review) == (BETWEEN_REVIEWS, (), moved)
+    assert running == [2], "it runs to its review day on the calendar now"
+    assert done.missed == () and done.verdict is not None
+    assert (done.verdict.outcome, done.promoted, done.review) == (cohort.PROMOTED, 2, moved)
+    assert [j.review for j in done.judgments] == [moved]
+    assert kept is not None and kept.review == REVIEW, "the cohort as formed"
+    [shown] = policies.read_policies(tmp_path / DB_NAME, 10, sessions=later.session)["cohorts"]
+    assert shown["review"] == moved.isoformat()
+    assert (
+        "주기 1 묶음의 검토 날 2026-09-29"
+        in policies.read_policies(tmp_path / DB_NAME, 10)["champions"][0]["reason"]
+    )
 
 
 # Kept for good.

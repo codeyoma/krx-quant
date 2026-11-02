@@ -80,7 +80,7 @@ from pathlib import Path
 from typing import Any
 
 from krx_quant.feeds.base import KST
-from krx_quant.trader import PICK_AT
+from krx_quant.trader import PICK_AT, review
 from krx_quant.trader.cells import Cell
 from krx_quant.trader.selection import (
     GONE,
@@ -417,19 +417,24 @@ def challenger_versions(db: sqlite3.Connection) -> list[int]:
     return [int(r[0]) for r in rows]
 
 
-def running_versions(db: sqlite3.Connection, day: date) -> list[int]:
-    """The challengers that run on ``day``, oldest first: the members of the cohort whose review
-    cycle holds ``day`` (#473: from its first trading day to its review day), entered before its pick
-    (``PICK_AT``, 08:30), so that a cohort formed on a night runs from the next trading day, whenever
-    the trader reads it."""
+def running_versions(db: sqlite3.Connection, day: date, sessions: review.Sessions) -> list[int]:
+    """The challengers that run on ``day``, oldest first: the members of the cohort of ``day``'s
+    review cycle (#473: from its first trading day to its review day, counted on ``sessions`` as they
+    are now, ``cohort.resolved``), entered before its pick (``PICK_AT``, 08:30), so that a cohort
+    formed on a night runs from the next trading day, whenever the trader reads it."""
     versions = challenger_versions(db)
-    if not versions or not _has_table(db, "cohort_members"):
+    evaluation = review.current(db)
+    if (
+        not versions
+        or evaluation is None
+        or day < evaluation.first_day
+        or not _has_table(db, "cohort_members")
+    ):
         return []
     rows = db.execute(
-        "SELECT p.id, p.admitted_at FROM cohort_members m"
-        " JOIN cohorts c ON c.evaluation = m.evaluation AND c.cycle = m.cycle"
-        " JOIN policies p ON p.id = m.policy_id WHERE c.first_day <= :day AND c.review_day >= :day",
-        {"day": day.isoformat()},
+        "SELECT p.id, p.admitted_at FROM cohort_members m JOIN policies p ON p.id = m.policy_id"
+        " WHERE m.evaluation = ? AND m.cycle = ?",
+        (evaluation.version, review.cycle_of(evaluation, day, sessions).number),
     )
     cutoff = datetime.combine(day, PICK_AT, KST)
     return sorted(
@@ -514,12 +519,15 @@ def status_of(
     return CHALLENGER if admitted else WAITING
 
 
-def read_policies(path: Path, limit: int, mode: str | None = None) -> dict[str, Any]:
+def read_policies(
+    path: Path, limit: int, mode: str | None = None, sessions: review.Sessions | None = None
+) -> dict[str, Any]:
     """The last ``limit`` policy versions, newest first, each with its status (``status_of``) and
     its record (#400, ``promotion.records``: ``mode``'s, by default the mode the trader last started
     in, #405), every change of the champion, newest first, and every challenger cohort with its
-    verdict, newest first (#473, ``cohort.read_cohorts``): ``GET /v1/trader/policies``. Read-only;
-    none without the store or before the first policy."""
+    verdict, newest first (#473, ``cohort.read_cohorts``: its days counted on ``sessions``, the
+    engine's market calendar, as they are now): ``GET /v1/trader/policies``. Read-only; none without
+    the store or before the first policy."""
     from krx_quant.trader import cohort, promotion  # they import this module
 
     if not path.exists():
@@ -532,7 +540,7 @@ def read_policies(path: Path, limit: int, mode: str | None = None) -> dict[str, 
         changes = [dict(r) for r in db.execute("SELECT * FROM champions ORDER BY id DESC")]
         rows = db.execute("SELECT * FROM policies ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
         records = promotion.records(db, mode, [r["id"] for r in rows])
-        cohorts = cohort.read_cohorts(db)
+        cohorts = cohort.read_cohorts(db, sessions)
     finally:
         db.close()
     now = changes[0]["policy_id"] if changes else None

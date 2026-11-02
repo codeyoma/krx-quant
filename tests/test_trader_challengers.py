@@ -28,6 +28,7 @@ from krx_quant.trader.paper import BELOW_THRESHOLD, STOP_LOSS, TAKE_PROFIT, TIME
 from krx_quant.trader.store import DAILY_LIMIT, DB_NAME, TraderStore, read_trader
 from tests.trader_doubles import (
     BARRIER,
+    CALENDAR,
     AskPause,
     Barrier,
     Day,
@@ -226,8 +227,8 @@ def test_a_cohort_runs_in_its_cycle_alone_and_a_fit_kept_meanwhile_waits(tmp_pat
     try:
         assert (policies.challenger_versions(db), policies.waiting_versions(db)) == ([2, 3, 4], [5])
         policies.drop(db, at("22:40:00"), [2])
-        assert policies.running_versions(db, cycle) == [3, 4]
-        assert policies.running_versions(db, date(2026, 11, 10)) == [], "past its cycle"
+        assert policies.running_versions(db, cycle, CALENDAR.session) == [3, 4]
+        assert policies.running_versions(db, date(2026, 11, 10), CALENDAR.session) == [], "past its cycle"
     finally:
         db.close()
 

@@ -342,7 +342,7 @@ class Desk:
                 self.practice_shadow.retire(at)
         running: dict[int, policy.Policy] = {}
         try:
-            versions = self.store.running_challengers(kst_day(at))
+            versions = self.store.running_challengers(kst_day(at), self._sessions)
         except sqlite3.Error as e:
             log.error("trader: cannot read the challengers (%s): none runs until the next pick", e)
             versions = []
