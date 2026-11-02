@@ -155,6 +155,18 @@ def next_on_trading_day(calendar: MarketCalendar, at: time, after: datetime) -> 
         day += timedelta(days=1)
 
 
+def first_whole_day(calendar: MarketCalendar, since: datetime) -> date:
+    """The first trading day whose continuous trading starts at or after ``since``: the first one
+    seen whole from then (#454, a revision's first day). The day of ``since`` if it is before that
+    day's open, else a later one."""
+    day = since.astimezone(KST).date()
+    while True:
+        session = calendar.session(day)
+        if session is not None and since <= session.open:
+            return day
+        day += timedelta(days=1)
+
+
 def calendar_store(settings: Settings) -> CalendarStore:
     """The store kept in the state directory, covering the one-minute bar backfill window."""
     return CalendarStore(settings.state_dir / "market_calendar.json", settings.backfill_days)

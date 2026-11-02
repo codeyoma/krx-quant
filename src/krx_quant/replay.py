@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from functools import partial
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pyarrow.parquet as pq
 
@@ -48,6 +49,9 @@ from krx_quant.market_calendar import MarketCalendar, calendar_store
 from krx_quant.predictions import DB_NAME, AlgorithmSummary, PredictionStore
 from krx_quant.stats import DEFAULT_MIN_SAMPLE
 
+if TYPE_CHECKING:  # the revisions read the pre-validation, which replays through this module
+    from krx_quant.revisions import RevisionGate
+
 log = logging.getLogger(__name__)
 
 # Rows read and converted to Python at a time, per partition, while reading a recorded day.
@@ -74,6 +78,7 @@ async def replay(
     leaders: Leaders | None = None,
     regimes: Regimes | None = None,
     admits: Admits | None = None,
+    revisions: RevisionGate | None = None,
     review_rules: Rules | None = None,
     target_version: int = 1,
     climate: Model | None = None,
@@ -95,7 +100,8 @@ async def replay(
     ``target_version``'s target, with the climate baseline's table ``climate`` (#169), and
     the ``kinds`` besides the direction with their algorithms (#179); the symbols' previous
     trading days' ranges from ``previous`` (#181; without: unknown); the daily kinds (#264) only
-    given their KRX days (``daily``), with their algorithms and features.
+    given their KRX days (``daily``), with their algorithms and features. With ``revisions`` (#454,
+    tests) it keeps the code each running bar-close algorithm runs, as live.
     """
     clock = FakeClock(start or datetime.combine(kst_day(until), time(), KST))
     engine = PredictionEngine(
@@ -114,6 +120,7 @@ async def replay(
         leaders=leaders,
         regimes=regimes,
         admits=admits,
+        revisions=revisions,
         review_rules=review_rules,
         target_version=target_version,
         climate=climate,

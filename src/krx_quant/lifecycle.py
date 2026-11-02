@@ -92,6 +92,14 @@ REGISTERED = "registered"
 _RESTARTS = ": probation restarts with a model trained on it"
 # How a simulation's review starts its reasons (#298, ``review_at_once``).
 SIMULATED = "simulated probation"
+# The reason of the probation a running bar-close algorithm restarts on when its code changes
+# (#454, ``revisions.py``): judged on the days after the change only, never simulated.
+CODE_CHANGED = "code changed"
+# How the reason it is retired for starts when that new code's pre-validation refuses it (#454).
+CODE_REFUSED = "the pre-validation of its new code refused it"
+# How the reason it is made active ends when a review day passed while that pre-validation was due,
+# and it then passed (#454).
+CODE_PASSED = "the pre-validation of its new code passed since"
 
 
 def target_changed(kind: str, version: int) -> str:
@@ -104,7 +112,8 @@ def target_changed(kind: str, version: int) -> str:
 def starts_simulation(reason: str) -> bool:
     """Whether a probation begun for ``reason`` is simulated (#298): a new algorithm's, once its
     pre-validation passed (``REGISTERED``), and a restart on a new target (#170, #187). Not one
-    put back by command (``unretire``) or a clone's return."""
+    put back by command (``unretire``), a clone's return, nor a restart on new code
+    (``CODE_CHANGED``, #454: the latest days replayed may be those the change was chosen on)."""
     return reason == REGISTERED or reason.endswith(_RESTARTS)
 
 

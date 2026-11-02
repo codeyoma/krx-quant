@@ -36,6 +36,13 @@ are dropped before the next day is trained, and the memory they freed is handed 
 (``footprint.give_back``). Without, the process grew a replayed day after another until the kernel
 killed it (2026-10-27).
 
+A running bar-close algorithm whose code changed (#454, ``revisions.py``) is judged again by the
+same check on the recorded days after the change only (``prevalidate --revision``, ``since``: the
+first whole trading day of its revision): its report holds that revision (``revision``: its
+boundary and first day), and the engine reads its verdict for that revision only
+(``revision_report``). Those registered before pre-validation are judged so too: their exemption
+holds for the code they first ran under the engine's revisions.
+
 The report is saved to ``state/prevalidations/<name>.json``, passed or not, with a digest
 of the algorithm's code; the engine reads it at each bar close. The server's scheduled job
 runs this check itself, one waiting algorithm a night (``scheduled.py``, #204), and reads the
@@ -329,21 +336,45 @@ def refusals(
         if last is None or not last.judged or last.passed:
             return None
         report = _read_report(state_dir, algorithm.name) or {}
-        checks = report.get("checks")
-        failed = [
-            f"{c.get('check')}: {c.get('detail')}"
-            for c in (checks if isinstance(checks, list) else [])
-            if isinstance(c, Mapping) and c.get("passed") is not True
-        ]
         judged = {
             "prevalidated_at": report.get("prevalidated_at"),
             "code": code_digest(algorithm),
             "target_version": _target(algorithm, target_version, kinds),
             "inputs": _raised(inputs_of(algorithm)),
         }
-        return Refusal(json.dumps(judged, sort_keys=True), "; ".join(failed) or "no failed check recorded")
+        return Refusal(json.dumps(judged, sort_keys=True), failed_checks(report))
 
     return refusal
+
+
+def failed_checks(report: Mapping[str, Any]) -> str:
+    """The checks a report failed, as ``check: detail`` joined by ``; ``."""
+    checks = report.get("checks")
+    failed = [
+        f"{c.get('check')}: {c.get('detail')}"
+        for c in (checks if isinstance(checks, list) else [])
+        if isinstance(c, Mapping) and c.get("passed") is not True
+    ]
+    return "; ".join(failed) or "no failed check recorded"
+
+
+def revision_report(
+    state_dir: Path,
+    algorithm: Algorithm | KindAlgorithm | DailyAlgorithm,
+    boundary: datetime,
+    target_version: int = 1,
+    kinds: Sequence[Kind] = KINDS,
+) -> tuple[LastReport, str] | None:
+    """The algorithm's latest report if it was made for its revision begun at ``boundary`` (#454,
+    ``prevalidate --revision``: its ``revision``), as it stands for the code and target it runs now
+    (``last_report``), with the checks it failed; None for any other (none, a first pre-validation,
+    another revision's)."""
+    report = _read_report(state_dir, algorithm.name)
+    revision = None if report is None else report.get("revision")
+    if not isinstance(revision, Mapping) or revision.get("boundary") != boundary.astimezone(KST).isoformat():
+        return None
+    last = last_report(state_dir, algorithm, target_version, kinds)
+    return None if last is None else (last, failed_checks(report or {}))
 
 
 def _read_report(state_dir: Path, name: str) -> dict[str, Any] | None:
@@ -438,6 +469,9 @@ class Prevalidation:
     # report keeps it and as the command prints it; None for one that offers none. Never judged.
     diagnostics: dict[str, Any] | None = None
     diagnostic_lines: tuple[str, ...] = ()
+    # The revision it judged (#454, ``prevalidate --revision``): its boundary and first day; None
+    # for a first pre-validation.
+    revision: dict[str, str] | None = None
 
     @property
     def passed(self) -> bool:
@@ -470,6 +504,8 @@ class Prevalidation:
             out["inputs"] = self.inputs
         if self.diagnostics is not None:
             out["diagnostics"] = self.diagnostics
+        if self.revision is not None:
+            out["revision"] = self.revision
         return out
 
 
@@ -503,12 +539,16 @@ async def prevalidate(
     kinds: Sequence[Kind] = KINDS,
     days: int = PREVALIDATION_DAYS,
     now: datetime | None = None,
+    revision: datetime | None = None,
+    since: date | None = None,
 ) -> Prevalidation:
-    """Replay ``name`` on the latest ``days`` recorded trading days and save its report.
+    """Replay ``name`` on the latest ``days`` recorded trading days and save its report; for a
+    revision of it (#454: ``revision``, when it began, and ``since``, its first whole trading
+    day), only on those from ``since``, the report bound to it.
 
     Raises ValueError for an algorithm not registered (RegistrationError for a registry
-    that fails the registration check), FileNotFoundError when no day was recorded,
-    PrevalidationRunning while another pre-validation of ``name`` runs.
+    that fails the registration check), FileNotFoundError when no day was recorded (from
+    ``since``), PrevalidationRunning while another pre-validation of ``name`` runs.
     """
     candidate: Algorithm | KindAlgorithm | None = next((a for a in algorithms if a.name == name), None)
     if candidate is None:
@@ -526,10 +566,15 @@ async def prevalidate(
     with _held(settings.state_dir, name):
         now = now or datetime.now(KST)
         available = finished_days(settings.data_dir, settings.symbols, now)
-        replayed = [d for d in available if is_recorded(settings.data_dir, d, settings.symbols)][-days:]
+        replayed = [
+            d
+            for d in available
+            if (since is None or d >= since) and is_recorded(settings.data_dir, d, settings.symbols)
+        ][-days:]
         if not replayed:
             symbols = ", ".join(settings.symbols)
-            raise FileNotFoundError(f"no recorded day of {symbols} in {settings.data_dir}")
+            after = "" if since is None else f" from {since}"
+            raise FileNotFoundError(f"no recorded day of {symbols}{after} in {settings.data_dir}")
         db = settings.state_dir / f"prevalidation-{name}.sqlite3"
         for leftover in sqlite_files(db):
             leftover.unlink(missing_ok=True)
@@ -568,6 +613,12 @@ async def prevalidate(
         if measured is not None:
             diagnostics, lines = measured.result()
             result = replace(result, diagnostics=diagnostics, diagnostic_lines=lines)
+        if revision is not None:
+            bound = {
+                "boundary": revision.astimezone(KST).isoformat(),
+                "since": (since or replayed[0]).isoformat(),
+            }
+            result = replace(result, revision=bound)
         path = report_path(settings.state_dir, name)
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".json.tmp")

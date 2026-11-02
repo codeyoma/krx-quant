@@ -81,6 +81,7 @@ from krx_quant.products import products_of
 from krx_quant.ratelimit import RateLimiter
 from krx_quant.recorder import ParquetRecorder
 from krx_quant.rescore import EngineLock, keep_touches_filled
+from krx_quant.revisions import RevisionGate
 from krx_quant.scheduled import keep_jobs
 from krx_quant.signals import Signals
 from krx_quant.snapshot import keep_snapshots
@@ -280,6 +281,8 @@ async def run_collector(
         admits=admits(settings.state_dir, settings.target_version),
         # One its latest pre-validation refused is told once, not as waiting (#310).
         refused=refusals(settings.state_dir, settings.target_version),
+        # A running bar-close algorithm whose code changed is judged again (#454).
+        revisions=RevisionGate(settings.state_dir, settings.target_version),
         commit=settings.commit,
         review_rules=Rules.of(settings),
         target_version=settings.target_version,  # the target learned and forecast (#169)

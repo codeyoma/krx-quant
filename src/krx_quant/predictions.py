@@ -42,6 +42,13 @@ stream) reads them; the lifecycle does (``lifecycle.Simulated``). ``statuses.sim
 status change whose review counted simulated days, a column added as ``kind_predictions.band``
 was.
 
+``revisions`` (#454, ``revisions.py``) keeps each code a bar-close algorithm ran, oldest first: its
+code digest, target and inputs, when the engine first ran it, the boundary of the revision it
+belongs to (that time, or the earlier revision's for a code mapped to it) and how it began (as
+found on the first start, or a change that put it back on probation), with the verdict of a changed
+one's pre-validation. A table of its own, as ``touches``: an engine from before it still opens the
+database (``_REVISION_SCHEMA``).
+
 Times are ISO 8601 strings in KST, which sort in time order.
 """
 
@@ -60,7 +67,7 @@ from krx_quant.baselines import Forecast
 from krx_quant.consensus import Weights
 from krx_quant.feeds.base import KST
 from krx_quant.kinds import DIRECTION, Answer
-from krx_quant.lifecycle import Simulated, Standing, Status, starts_simulation
+from krx_quant.lifecycle import CODE_CHANGED, Simulated, Standing, Status, starts_simulation
 from krx_quant.pricing import Direction
 from krx_quant.special import Window
 from krx_quant.touch import TARGET_VERSION, TouchResult, touch_path
@@ -305,6 +312,33 @@ CREATE TABLE IF NOT EXISTS sim_predictions (  -- a replay's direction prediction
 );
 CREATE INDEX IF NOT EXISTS sim_predictions_by_close ON sim_predictions (run, bar_close);
 """
+
+# The revisions of the running bar-close algorithms (#454): a table of its own, as touches, so an
+# engine from before it still opens the database; the schema version stays.
+_REVISION_SCHEMA = """
+CREATE TABLE IF NOT EXISTS revisions (  -- each code a bar-close algorithm ran, oldest first (#454)
+    id INTEGER PRIMARY KEY,
+    algorithm TEXT NOT NULL,
+    code TEXT NOT NULL,               -- prevalidation.code_digest
+    target_version INTEGER,           -- the target it ran on then (a kind's answer version)
+    inputs TEXT NOT NULL,             -- JSON: its inputs' versions; {} for the bar-close kinds
+    seen_at TEXT NOT NULL,            -- when the engine first ran this code
+    boundary TEXT NOT NULL,           -- when its revision began: seen_at, or a mapped code's revision's
+    state TEXT NOT NULL,              -- first: as found when first recorded; changed: back on probation
+    mapped_from TEXT,                 -- the code this one maps (a reviewed refactor); else null
+    verdict TEXT,                     -- a changed one's pre-validation: passed, refused; null: none yet
+    judged_at TEXT,
+    detail TEXT                       -- the refusal's failed checks; a mapping's evidence
+);
+CREATE INDEX IF NOT EXISTS revisions_by_algorithm ON revisions (algorithm, id);
+"""
+
+# How a revision began (#454): as the engine found it when it first recorded one (the first start
+# of #454, a new algorithm, one with no revision yet), or a change of code that put it back on
+# probation (``lifecycle.CODE_CHANGED``).
+REVISION_FIRST, REVISION_CHANGED = "first", "changed"
+# A changed revision's pre-validation verdict (#454).
+REVISION_PASSED, REVISION_REFUSED = "passed", "refused"
 
 # Columns added to a table after it was first made, without a schema version (#200): a
 # database made before has the table without them, and gets them when an engine opens it.
@@ -629,6 +663,70 @@ class SimulationRecord:
 
 
 @dataclass(frozen=True)
+class Revision:
+    """A code a bar-close algorithm ran (#454): a row of ``revisions``."""
+
+    id: int
+    algorithm: str
+    code: str  # prevalidation.code_digest
+    target_version: int | None
+    inputs: Mapping[str, int]
+    seen_at: datetime  # when the engine first ran this code
+    boundary: datetime  # when its revision began: ``seen_at``, or a mapped code's revision's
+    state: str  # REVISION_FIRST, REVISION_CHANGED
+    mapped_from: str | None  # the code this one maps (``revisions.SAME_REVISION``); None
+    verdict: str | None  # a changed one's pre-validation: REVISION_PASSED, REVISION_REFUSED; None
+    judged_at: datetime | None
+    detail: str | None
+
+    @property
+    def pending(self) -> bool:
+        """A changed revision no pre-validation has judged yet: one is due."""
+        return self.state == REVISION_CHANGED and self.verdict is None
+
+    @property
+    def held(self) -> bool:
+        """Kept from becoming active: a changed revision its pre-validation has not passed."""
+        return self.state == REVISION_CHANGED and self.verdict != REVISION_PASSED
+
+
+_REVISION_COLUMNS = (
+    "id, algorithm, code, target_version, inputs, seen_at, boundary, state, mapped_from, verdict,"
+    " judged_at, detail"
+)
+
+
+def _revision(row: Sequence[Any]) -> Revision:
+    judged = row[10]
+    return Revision(
+        id=int(row[0]),
+        algorithm=row[1],
+        code=row[2],
+        target_version=row[3],
+        inputs={str(k): int(v) for k, v in json.loads(row[4] or "{}").items()},
+        seen_at=datetime.fromisoformat(row[5]),
+        boundary=datetime.fromisoformat(row[6]),
+        state=row[7],
+        mapped_from=row[8],
+        verdict=row[9],
+        judged_at=None if judged is None else datetime.fromisoformat(judged),
+        detail=row[11],
+    )
+
+
+def latest_revisions(db: sqlite3.Connection) -> dict[str, Revision]:
+    """Each algorithm's latest revision (#454); none in a database an engine before it wrote."""
+    try:
+        rows = db.execute(
+            f"SELECT {_REVISION_COLUMNS} FROM revisions"
+            " WHERE id IN (SELECT MAX(id) FROM revisions GROUP BY algorithm)"
+        ).fetchall()
+    except sqlite3.OperationalError:  # no such table: read beside an engine from before #454
+        return {}
+    return {r[1]: _revision(r) for r in rows}
+
+
+@dataclass(frozen=True)
 class Pending:
     prediction_id: int
     symbol: str
@@ -686,6 +784,7 @@ class PredictionStore:
             + _KIND_SCHEMA
             + _SPECIAL_SCHEMA
             + _SIMULATION_SCHEMA
+            + _REVISION_SCHEMA
             + _added_columns(self._db)
             + f"PRAGMA user_version={_VERSION};"
         )
@@ -789,22 +888,111 @@ class PredictionStore:
         """
         self.version += 1
         with self._db:
+            return self._change_status(algorithm, at, previous, status, reason, simulated)
+
+    def _change_status(
+        self, algorithm: str, at: datetime, previous: Status, status: Status, reason: str, simulated: bool
+    ) -> bool:
+        """``change_status``'s statement, in the transaction under way."""
+        cursor = self._db.execute(
+            "INSERT INTO statuses (algorithm, at, previous, status, reason, simulated)"
+            " SELECT ?, ?, ?, ?, ?, ?"
+            " WHERE (SELECT status FROM statuses WHERE algorithm = ? ORDER BY id DESC LIMIT 1) = ?",
+            (
+                algorithm,
+                iso(at),
+                previous.value,
+                status.value,
+                reason,
+                int(simulated),
+                algorithm,
+                previous.value,
+            ),
+        )
+        return cursor.rowcount == 1
+
+    def revisions(self) -> dict[str, Revision]:
+        """Each algorithm's latest revision (#454): the code it runs, as the engine recorded it."""
+        return latest_revisions(self._db)
+
+    def revision_history(self, algorithm: str) -> list[Revision]:
+        """Every code ``algorithm`` ran, oldest first (#454)."""
+        rows = self._db.execute(
+            f"SELECT {_REVISION_COLUMNS} FROM revisions WHERE algorithm = ? ORDER BY id", (algorithm,)
+        ).fetchall()
+        return [_revision(r) for r in rows]
+
+    def add_revision(
+        self,
+        algorithm: str,
+        code: str,
+        target_version: int | None,
+        inputs: Mapping[str, int],
+        at: datetime,
+        *,
+        boundary: datetime,
+        state: str,
+        mapped_from: str | None = None,
+        verdict: str | None = None,
+        judged_at: datetime | None = None,
+        detail: str | None = None,
+        restart: Status | None = None,
+    ) -> Revision:
+        """Keep ``code`` as the one ``algorithm`` runs from ``at`` (#454); with ``restart`` (its status
+        as read), put it back on probation for it in the same transaction (``lifecycle.CODE_CHANGED``),
+        if its status is still that: a stop between the two never leaves new code recorded on an
+        unchanged status, nor a status changed for code not recorded."""
+        self.version += 1
+        with self._db:
             cursor = self._db.execute(
-                "INSERT INTO statuses (algorithm, at, previous, status, reason, simulated)"
-                " SELECT ?, ?, ?, ?, ?, ?"
-                " WHERE (SELECT status FROM statuses WHERE algorithm = ? ORDER BY id DESC LIMIT 1) = ?",
+                "INSERT INTO revisions (algorithm, code, target_version, inputs, seen_at, boundary, state,"
+                " mapped_from, verdict, judged_at, detail) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     algorithm,
+                    code,
+                    target_version,
+                    json.dumps(dict(inputs), sort_keys=True),
                     iso(at),
-                    previous.value,
-                    status.value,
-                    reason,
-                    int(simulated),
-                    algorithm,
-                    previous.value,
+                    iso(boundary),
+                    state,
+                    mapped_from,
+                    verdict,
+                    None if judged_at is None else iso(judged_at),
+                    detail,
                 ),
             )
-        return cursor.rowcount == 1
+            if restart is not None:
+                self._change_status(algorithm, at, restart, Status.PROBATION, CODE_CHANGED, False)
+        row = self._db.execute(
+            f"SELECT {_REVISION_COLUMNS} FROM revisions WHERE id = ?", (cursor.lastrowid,)
+        ).fetchone()
+        return _revision(row)
+
+    def judge_revision(
+        self,
+        revision: Revision,
+        verdict: str,
+        at: datetime,
+        detail: str | None,
+        *,
+        change: tuple[Status, Status, str] | None = None,
+    ) -> Revision:
+        """Keep the verdict of ``revision``'s pre-validation (#454); with ``change`` (its status as
+        read, the status it goes to and why: a refusal's retirement, a pass's held promotion), make
+        it in the same transaction, if its status is still the one read."""
+        self.version += 1
+        with self._db:
+            self._db.execute(
+                "UPDATE revisions SET verdict = ?, judged_at = ?, detail = ? WHERE id = ?",
+                (verdict, iso(at), detail, revision.id),
+            )
+            if change is not None:
+                previous, status, reason = change
+                self._change_status(revision.algorithm, at, previous, status, reason, False)
+        row = self._db.execute(
+            f"SELECT {_REVISION_COLUMNS} FROM revisions WHERE id = ?", (revision.id,)
+        ).fetchone()
+        return _revision(row)
 
     def record_models(self, models: Sequence[tuple[str, str, int | None]]) -> None:
         """Keep which target each model the engine runs was trained on (#170): (algorithm,
@@ -1739,8 +1927,13 @@ class PredictionStore:
     def to_simulate(self, names: Sequence[str]) -> list[str]:
         """Of ``names``, in order, the algorithms on a probation that waits for its simulation
         (#298): begun for a reason that is simulated (``lifecycle.starts_simulation``: a new
-        algorithm's, a new target's), no simulation kept for it yet."""
+        algorithm's, a new target's), no simulation kept for it yet. Not one whose code changed and
+        whose pre-validation has not passed that revision (#454, ``Revision.held``: not judged yet,
+        or refused and unretired since): it is judged on the days after the change only, a replay of
+        the latest days could hold those it was chosen on, and a simulation's review is applied
+        without the engine's (a new target's restart in the meantime would be simulated otherwise)."""
         standings, done = self.statuses(), self.simulated_stints()
+        revisions = self.revisions()
         return [
             n
             for n in names
@@ -1748,6 +1941,7 @@ class PredictionStore:
             and s.status is Status.PROBATION
             and starts_simulation(s.reason)
             and (n, s.since) not in done
+            and not ((r := revisions.get(n)) is not None and r.held)
         ]
 
     def simulated(self, kind: str, answer_version: int) -> dict[str, Simulated]:
