@@ -701,9 +701,9 @@ class PredictionEngine:
             now = self.clock.now()
             standing = standings.get(name)
             if verdict.passed:
-                passed = self._held_review(revision)
+                passed = None if standing is None else self._held_review(revision, standing)
                 promote = None
-                if passed is not None and standing is not None and standing.status is Status.PROBATION:
+                if passed is not None:
                     promote = (Status.PROBATION, Status.ACTIVE, f"{passed}; {CODE_PASSED}")
                 self._revision_of[name] = self.store.judge_revision(
                     revision, REVISION_PASSED, now, None, change=promote
@@ -720,17 +720,25 @@ class PredictionEngine:
             )
             log.info("%s: -> retired (%s: %s)", name, CODE_REFUSED, verdict.why)
 
-    def _held_review(self, revision: Revision) -> str | None:
-        """The reason of the probation review day ``revision``'s algorithm passed live while its new
-        code waited for its pre-validation (#454), if the latest review day it reached since its
-        boundary passed; None if none did, or the latest did not (``_review`` keeps each:
-        ``REVISION_REVIEW_RUN``)."""
+    def _held_review(self, revision: Revision, standing: Standing) -> str | None:
+        """The reason of the review day ``revision``'s algorithm passed live while its new code
+        waited for its pre-validation (#454), if the latest review day of its probation now
+        (``standing``: the stint, since a new target's restart begins another) passed; None if it is
+        not on probation, no review day of this stint was reached, or the latest did not pass
+        (``_review`` keeps each: ``REVISION_REVIEW_RUN``)."""
+        if standing.status is not Status.PROBATION:
+            return None
         detail = self.store.last_detail(REVISION_REVIEW_RUN, revision.algorithm)
         try:
             kept = json.loads(detail or "null")
         except ValueError:
             return None
-        if not isinstance(kept, dict) or kept.get("revision") != revision.id or not kept.get("passed"):
+        if (
+            not isinstance(kept, dict)
+            or kept.get("revision") != revision.id
+            or kept.get("stint") != standing.since.astimezone(KST).isoformat()
+            or not kept.get("passed")
+        ):
             return None
         return str(kept.get("reason") or "")
 
@@ -1155,6 +1163,9 @@ class PredictionEngine:
             c = promoted.get(name)
             kept = {
                 "revision": revision.id,
+                "stint": standing.since.astimezone(
+                    KST
+                ).isoformat(),  # its probation's: a restart begins another
                 "days": counted,
                 "passed": c is not None,
                 "reason": c and c.reason,

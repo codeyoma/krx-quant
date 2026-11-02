@@ -349,11 +349,12 @@ async def test_a_review_day_passed_while_it_waited_makes_it_active_once_its_pre_
     passes while a2's pre-validation has not (#457 review: a later pass must not wait for, or
     past day 40 miss, a review day). Output: it stays on probation and the review day is kept;
     the pass that night makes it active at the engine's next start, the reason saying both. Had a
-    later review day not passed, the pass would leave it on probation."""
+    later review day of the same probation not passed, or a new target restarted its probation
+    since, the pass would leave it on probation."""
     deploy = at("06:00:00", weekdays_before(DAY, 9)[0])
-    later = tmp_path / "later.db"
+    later, restarted = tmp_path / "later.db", tmp_path / "restarted.db"
     db = tmp_path / "engine.db"
-    for each in (db, later):
+    for each in (db, later, restarted):
         await ten_days_right(each, deploy)
         await run(
             db=each,
@@ -369,13 +370,18 @@ async def test_a_review_day_passed_while_it_waited_makes_it_active_once_its_pre_
         kept = json.loads(store.last_detail(REVISION_REVIEW_RUN, "alpha") or "{}")
         assert (kept["days"], kept["passed"]) == (10, True)
         assert kept["revision"] == store.revisions()["alpha"].id
-    with stored(later) as store:  # a later review day that did not pass, as the review keeps it
-        failed = {"revision": store.revisions()["alpha"].id, "days": 20, "passed": False, "reason": None}
+    assert kept["stint"] == deploy.isoformat(), "its probation's"
+    with stored(later) as store:  # a later review day of the same stint that did not pass
+        failed = {**kept, "days": 20, "passed": False, "reason": None}
         store.add_run(REVISION_REVIEW_RUN, at("15:41:00"), "alpha", json.dumps(failed))
+    with stored(restarted) as store:  # a new target restarted its probation since (#457 review)
+        store.change_status(
+            "alpha", at("20:00:00"), Status.PROBATION, Status.PROBATION, target_changed("direction", 9)
+        )
     night_pass = Gate({"alpha": "a2"}, {("alpha", deploy): Verdict(True, "")})
     next_day = DAY + timedelta(days=1)
 
-    for each in (db, later):
+    for each in (db, later, restarted):
         await start(each, at("06:00:00", next_day), night_pass, [ALPHA])
 
     previous, status, reason = last_change_of(db, "alpha")
@@ -384,7 +390,10 @@ async def test_a_review_day_passed_while_it_waited_makes_it_active_once_its_pre_
     assert last_change_of(later, "alpha") == ("active", "probation", CODE_CHANGED), (
         "its latest review day failed"
     )
-    for each in (db, later):
+    assert last_change_of(restarted, "alpha")[1:] == ("probation", target_changed("direction", 9)), (
+        "another stint: its review day was the earlier probation's"
+    )
+    for each in (db, later, restarted):
         with stored(each) as store:
             assert store.revisions()["alpha"].verdict == REVISION_PASSED
 
