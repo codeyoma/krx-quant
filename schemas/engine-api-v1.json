@@ -2786,7 +2786,7 @@
               "price": {"type": "number", "exclusiveMinimum": 0},
               "quantity": {"type": "integer", "minimum": 1},
               "placed_at": {"$ref": "#/$defs/time"},
-              "status": {"enum": ["open", "filled", "cancelled", "sent"]},
+              "status": {"enum": ["open", "filled", "cancelled", "sent", "absent"]},
               "closed_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]},
               "broker_id": {"type": ["string", "null"]},
               "fills": {

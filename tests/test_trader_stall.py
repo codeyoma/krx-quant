@@ -30,10 +30,10 @@ from krx_quant.fake_kis import SELL_SIDE, FakeAccount, FakeKis
 from krx_quant.kis_orders import Servers, trader_broker
 from krx_quant.predictions import DB_NAME as ENGINE_DB
 from krx_quant.predictions import PredictionStore
-from krx_quant.trader import MOCK, PAPER, SYMBOL
+from krx_quant.trader import LIVE, MOCK, PAPER, SYMBOL
 from krx_quant.trader.cells import EngineReader
 from krx_quant.trader.desk import Desk
-from krx_quant.trader.mock import REST_SECONDS, Timing
+from krx_quant.trader.mock import LIVE_REST_SECONDS, REST_SECONDS, Timing
 from krx_quant.trader.paper import STALLED, STOP_LOSS, TIME, Rules
 from krx_quant.trader.quotes import BestQuote
 from krx_quant.trader.selection import Selection
@@ -317,12 +317,13 @@ class StallDesk:
     started_at: datetime = field(default_factory=lambda: at("10:00:00"))
     notices: list[str] = field(default_factory=list)
     timing: Timing = TIMING
+    mode: str = MOCK  # or ``live`` on the same fake account (#464: its REST quotes' pace)
 
     async def run(self, events: Sequence[Event]) -> None:
         keep(self.state, at("2026-10-13 22:31:00"), policy_cell(BARRIER, 0.6))
         engine = PredictionStore(self.state / ENGINE_DB)
         store = TraderStore(self.state / DB_NAME)
-        store.add_run(self.started_at, MOCK, {})
+        store.add_run(self.started_at, self.mode, {})
         clock = [self.started_at]
         self.account.clock = lambda: clock[0]  # KIS's time and day are the test's
         try:
@@ -340,7 +341,7 @@ class StallDesk:
                     self.rules,
                     CALENDAR.session,
                     self.started_at,
-                    MOCK,
+                    self.mode,
                     self.notices.append,
                     broker=broker,
                     clock=lambda: clock[0],
@@ -467,10 +468,11 @@ async def test_in_a_stall_the_mock_book_sells_at_its_stop_on_kis_s_rest_quote_an
 async def test_in_a_stall_the_mock_book_sells_at_its_time_barrier_on_kis_s_rest_quote(
     kis_mock: tuple[FakeKis, FakeAccount], tmp_path: Path
 ) -> None:
-    """The stream stops after 10:03:52. KIS's best quotes are read at the stall (10:03:57.5) and two
-    seconds later (10:03:59.5), not in between; the time barrier passed (10:04:01, its second of
-    grace), the champion sells at the last of them, the last quote before the barrier (bid 70,000,
-    filled at 70,050). The shadow sells by its time barrier on the first stream quote after the stall."""
+    """The stream stops after 10:03:49. KIS's best quotes are read at the stall (10:03:54.5) and five
+    seconds later (10:03:59.5, the mock server's pace, #464), not in between; the time barrier passed
+    (10:04:01, its second of grace), the champion sells at the last of them, the last quote before the
+    barrier (bid 70,000, filled at 70,050). The shadow sells by its time barrier on the first stream
+    quote after the stall."""
     fake, account = kis_mock
     desk = StallDesk(tmp_path, fake, account)
 
@@ -479,9 +481,9 @@ async def test_in_a_stall_the_mock_book_sells_at_its_time_barrier_on_kis_s_rest_
             *flowing("10:00:00", "10:00:02"),
             TEN,
             BOUGHT,
-            *flowing("10:00:03", "10:03:52"),
-            Tick("10:03:57.5"),
-            Tick("10:03:58.5"),
+            *flowing("10:00:03", "10:03:49"),
+            Tick("10:03:54.5"),
+            Tick("10:03:57"),
             Tick("10:03:59.5"),
             Tick("10:04:01"),
             quote("10:04:30", 69_900, 70_000),
@@ -501,8 +503,8 @@ async def test_a_pause_selling_at_once_asked_in_a_stall_sells_on_kis_s_next_rest
     kis_mock: tuple[FakeKis, FakeAccount], tmp_path: Path
 ) -> None:
     """The pause (10:01:06) sells on the first quote received after it, as ever: in the stall, KIS's
-    REST quote of 10:01:07.5, two seconds after the stall's first read (bid 70,000, filled at
-    70,050)."""
+    REST quote of 10:01:10.5, five seconds after the stall's first read (the mock server's pace,
+    #464; bid 70,000, filled at 70,050)."""
     fake, account = kis_mock
     desk = StallDesk(tmp_path, fake, account)
 
@@ -514,13 +516,13 @@ async def test_a_pause_selling_at_once_asked_in_a_stall_sells_on_kis_s_next_rest
             *flowing("10:00:03", "10:01:00"),
             Tick("10:01:05.5"),
             PauseNow("10:01:06"),
-            Tick("10:01:07"),
-            Tick("10:01:07.5"),
+            Tick("10:01:08"),
+            Tick("10:01:10.5"),
         ]
     )
 
     [trade] = desk.trades()
-    assert trade["exit"] == {"at": "2026-10-14T10:01:07.500000+09:00", "price": 70_050, "reason": "pause"}
+    assert trade["exit"] == {"at": "2026-10-14T10:01:10.500000+09:00", "price": 70_050, "reason": "pause"}
     assert [s["effect"] for s in trade["stalls"]] == [REST]
     assert resting_sells(account) == [] and account.holdings[SYMBOL] == 0
     assert desk.rest_reads() == 2
@@ -530,33 +532,42 @@ async def test_a_pause_selling_at_once_asked_in_a_stall_sells_on_kis_s_next_rest
 # The call limit
 
 
-def test_the_rest_reads_leave_the_order_calls_room_within_the_live_call_limit() -> None:
-    """Every call on the trader's key goes through one limiter. The live broker's lets
-    ``LIVE_PER_SECOND`` through in any window of 1.1 s: a read every ``REST_SECONDS`` takes at most
-    one slot of any window, leaving the other to the orders; with a sale's inquiry every ``POLL``
-    seconds beside it, the calls a second stay under the limiter's pace. The mock broker's lets one
-    through (``PER_SECOND``, #461: two in a window were refused): there the reads beside the
-    take-profit's already fill it, and an order call waits its turn."""
+def test_the_rest_reads_leave_the_order_calls_room_within_each_server_s_call_limit() -> None:
+    """Every call on the trader's key goes through one limiter over a window of 1.1 s. The live
+    broker's lets ``LIVE_PER_SECOND`` through: a read every ``LIVE_REST_SECONDS`` takes at most one
+    slot of any window, leaving the other to the orders; with a sale's inquiry every ``POLL`` seconds
+    beside it, the calls a second stay under the limiter's pace. The mock broker's lets one through
+    (``PER_SECOND``, #461: two in a window were refused): a read every ``REST_SECONDS`` beside the
+    take-profit's row asks for less than that, so an order call finds its slot (#464); a read every
+    two seconds asked for more, and the order calls queued."""
     window = 1.0 + 0.1  # RateLimiter's period and its margin, as ``trader_broker`` makes it
-    assert Timing().rest == REST_SECONDS >= window, "at most one read in any window"
+    assert Timing().rest is None, "the server's pace, by the book's mode"
+    assert (REST_SECONDS, LIVE_REST_SECONDS) == (5.0, 2.0)
+    assert LIVE_REST_SECONDS >= window, "at most one read in any window"
     assert kis_orders.LIVE_PER_SECOND - 1 >= 1, "a slot of each window for the order calls"
-    resting = 1 / REST_SECONDS + 1 / Timing().follow  # the take-profit's row read as it rests
-    selling = 1 / REST_SECONDS + 1 / kis_orders.POLL  # a sale's inquiry, the take-profit's reading stopped
+    follow = 1 / Timing().follow  # the take-profit's row read as it rests
+    resting = 1 / LIVE_REST_SECONDS + follow
+    selling = (
+        1 / LIVE_REST_SECONDS + 1 / kis_orders.POLL
+    )  # a sale's inquiry, the take-profit's reading stopped
     assert max(resting, selling) == pytest.approx(1.5)
     assert max(resting, selling) < kis_orders.LIVE_PER_SECOND / window
-    assert resting > kis_orders.PER_SECOND / window, "on the mock server the order calls wait"
+    mock = 1 / REST_SECONDS + follow
+    assert mock == pytest.approx(0.7) and mock < kis_orders.PER_SECOND / window, "room for an order call"
+    assert 1 / 2.0 + follow > kis_orders.PER_SECOND / window, "every two seconds, the order calls waited"
 
 
-async def test_kis_s_rest_quotes_are_read_every_two_seconds_of_a_stall_with_a_position_open_and_no_more(
-    kis_mock: tuple[FakeKis, FakeAccount], tmp_path: Path
+@pytest.mark.parametrize(("mode", "reads"), [(MOCK, 3), (LIVE, 8)])
+async def test_kis_s_rest_quotes_are_read_at_the_server_s_pace_in_a_stall_with_a_position_open_and_no_more(
+    kis_mock: tuple[FakeKis, FakeAccount], tmp_path: Path, mode: str, reads: int
 ) -> None:
     """The clock ticks every quarter of a second (as the trader's does) through 20 seconds of stall
-    with the position open, then the stream comes back: KIS's book is read at the stall and every two
-    seconds after, never two in flight, and not once more after the return."""
+    with the position open, then the stream comes back at 10:00:50: KIS's book is read at the stall
+    and every five seconds after on the mock server, every two on the live one (#464), never two in
+    flight, and not once more after the return."""
     fake, account = kis_mock
-    desk = StallDesk(tmp_path, fake, account)
-    assert desk.timing.rest == REST_SECONDS
-    stalled = [Tick(f"10:00:{30 + n / 4:06.3f}") for n in range(1, 81)]  # 10:00:30.25 to 10:00:50
+    desk = StallDesk(tmp_path, fake, account, mode=mode)
+    stalled = [Tick(f"10:00:{30 + n / 4:06.3f}") for n in range(1, 80)]  # 10:00:30.25 to 10:00:49.75
 
     await desk.run(
         [
@@ -565,13 +576,14 @@ async def test_kis_s_rest_quotes_are_read_every_two_seconds_of_a_stall_with_a_po
             BOUGHT,
             *flowing("10:00:03", "10:00:30"),
             *stalled,
-            *flowing("10:00:51", "10:00:55"),
+            *flowing("10:00:50", "10:00:55"),
         ]
     )
 
-    # The stall seen at 10:00:35.25; read then, at 37.25, …, 49.25: eight reads in 15 seconds.
+    # The stall seen at 10:00:35.25 and read then: on the mock server again at 40.25 and 45.25, three
+    # reads (the next would be at 50.25); on the live one at 37.25, …, 49.25, eight.
     [kept] = stalls(tmp_path)
     assert kept["began_at"] == "2026-10-14T10:00:35.250000+09:00"
-    assert desk.rest_reads() == kept["rest_reads"] == 8
+    assert desk.rest_reads() == kept["rest_reads"] == reads
     [trade] = desk.trades()
     assert trade["exit"] is None and len(account.placed(SELL_SIDE)) == 1, "the take-profit rests as ever"

@@ -713,7 +713,9 @@ async def test_a_lost_sell_kis_shows_none_or_two_of_stays_sent_and_a_restart_sen
     """The stop's sell has no answer. KIS never took it (``none``), or took it with another of the
     same limit and quantity (``two``: the account held 14 more, accepted outside the ledger). The
     trader cannot tell, so the sell stays as sent: looked up again and again, no other sell sent,
-    the stop and the time barrier selling nothing; a restart neither."""
+    the stop and the time barrier selling nothing; a restart neither. (``none`` is concluded absent
+    once a second look finds none 30 s after the first one past two minutes, #464, below: here the
+    last look is that first.)"""
     fake, account = kis_mock
     if seen == "two":
         account.holdings[SYMBOL], account.paid[SYMBOL] = 14, 14 * 60_000.0
@@ -842,6 +844,218 @@ async def test_a_take_profit_whose_answer_was_lost_is_never_placed_again_and_the
         in found
     )
     assert [(f["what"], f["outcome"]) for f in day.failures()] == [("take_profit", "unknown")]
+
+
+# A lost sell that never reached KIS did not go in (#464)
+
+ABSENT_SAID = (
+    "자동 매매({mode}): 응답이 없던 매도 주문(005930 14주)은 KIS에 들어가지 않은 것으로 정했습니다({why},"
+    " 계좌에 이 매매의 005930 14주가 있습니다). 이 매매는 이 뒤에 받은 호가부터 원래 규칙(목표가, 손절가,"
+    " 시간)대로 다시 팝니다."
+)
+MOCK_WHY = "보낸 지 2분이 지난 뒤 30초 이상 사이를 둔 두 번의 주문 체결 조회에 없고"
+DAY_OVER_WHY = "그날이 지난 뒤 읽은 그날의 주문 체결 조회에 없고"
+# A look again a second later: each event a second or more after the last looks again (the clock is
+# the test's; with no wait at all a look would begin the next at once, on the same clock).
+EACH_SECOND = replace(TIMING, retry=1.0)
+
+
+def stop_sells(state: Path) -> list[tuple[float, str, str | None]]:
+    """(limit, status, placed_at) of each stop sell kept, in order."""
+    return [
+        (o["price"], o["status"], o["placed_at"]) for o in rows(state, "orders") if o["purpose"] == STOP_LOSS
+    ]
+
+
+def absent_notices(notices: list[str]) -> list[str]:
+    return [n for n in notices if "들어가지 않은 것으로" in n]
+
+
+async def test_a_mock_sell_that_never_reached_kis_is_absent_after_two_empty_looks_and_sold_again(
+    kis_mock: tuple[FakeKis, FakeAccount], tmp_path: Path
+) -> None:
+    """The stop's sell (10:01:30) is lost before KIS takes it: no inquiry will ever show it. On the
+    mock account a look finding none from two minutes after it was sent (10:03:30) begins a run, and
+    one finding none 30 s after that (10:04:00), the account holding the trade's 14, ends it: the
+    sell did not go in. Its row stays, ``absent``; it is told; and the sale goes on at the next
+    quote's bid (10:04:10), not at the bid it was lost at. Before then it stays as sent."""
+    fake, account = kis_mock
+    Lost(fake, account, 69_800, taken=False)
+    seen: list[list[tuple[float, str, str | None]]] = []
+    day = Acting(tmp_path, fake, account, timing=EACH_SECOND)
+    events = [
+        TEN,
+        BOUGHT,
+        quote("10:01:30", 69_800, 69_900),
+        Tick("10:03:29"),  # under two minutes: no look counts
+        Tick("10:03:30"),  # the run's first
+        Tick("10:03:59"),  # 29 s after it
+        Do("10:03:59.1", lambda: seen.append(stop_sells(tmp_path))),
+        Tick("10:04:00"),  # 30 s after it: absent
+        Do("10:04:05", lambda: seen.append(stop_sells(tmp_path))),
+        quote("10:04:10", 69_700, 69_800),
+    ]
+
+    [trade] = await day.run(cast(Sequence[Event], events))
+
+    assert seen == [
+        [(69_800, "sent", "2026-10-14T10:01:30+09:00")],
+        [(69_800, "absent", "2026-10-14T10:01:30+09:00")],
+    ], "no sell at the old bid once it is absent: the next quote's"
+    assert sells(fake) == [70_300, 69_800, 69_700]
+    assert trade["exit"]["reason"] == STOP_LOSS and account.holdings[SYMBOL] == 0
+    assert orders_of(trade) == [
+        ("buy", "entry", 70_100, 14, "filled", 14),
+        ("sell", "take_profit", 70_300, 14, "cancelled", 0),
+        ("sell", "stop_loss", 69_800, 14, "absent", 0),
+        ("sell", "stop_loss", 69_700, 14, "filled", 14),
+    ]
+    absent = trade["orders"][2]
+    assert (absent["broker_id"], absent["closed_at"]) == (None, "2026-10-14T10:04:00+09:00")
+    check("trader_trade", trade)
+    assert absent_notices(day.notices) == [ABSENT_SAID.format(mode=MOCK, why=MOCK_WHY)]
+    assert [(f["what"], f["outcome"]) for f in day.failures()] == [("sell", "unknown")]
+    with closing(sqlite3.connect(tmp_path / DB_NAME)) as db:
+        assert live.exposure(db, MOCK) == 0, "nothing left on KIS"
+
+
+async def test_a_mock_take_profit_that_never_reached_kis_is_absent_and_rests_again_with_time_left(
+    kis_mock: tuple[FakeKis, FakeAccount], tmp_path: Path
+) -> None:
+    """The take-profit (10:00:02.5) is lost before KIS takes it. Absent at 10:03:02.5, with the time
+    barrier (10:04) still ahead: by the trade's rules its take-profit rests again for the 14, and
+    the trade exits there."""
+    fake, account = kis_mock
+    Lost(fake, account, 70_300, taken=False)
+    day = Acting(tmp_path, fake, account, timing=EACH_SECOND)
+
+    [trade] = await day.run([TEN, BOUGHT, Tick("10:02:32.5"), Tick("10:03:02.5"), Fill("10:03:30")])
+
+    assert sells(fake) == [70_300, 70_300]
+    assert orders_of(trade)[1:] == [
+        ("sell", "take_profit", 70_300, 14, "absent", 0),
+        ("sell", "take_profit", 70_300, 14, "filled", 14),
+    ]
+    assert trade["exit"]["reason"] == TAKE_PROFIT and account.holdings[SYMBOL] == 0
+    [said] = absent_notices(day.notices)
+    assert said.startswith("자동 매매(mock): 응답이 없던 익절 매도 주문(005930 14주)은 KIS에 들어가지 않은")
+
+
+@pytest.mark.parametrize("through", ["running", "restarted"])
+async def test_a_live_sell_that_never_reached_kis_is_absent_once_its_day_is_over_and_sold_the_next_session(
+    kis_mock: tuple[FakeKis, FakeAccount], tmp_path: Path, through: str
+) -> None:
+    """The same lost stop sell on the live account stays as sent all its day, however many looks find
+    none: the window of the candidates is no bound on how late KIS's inquiry may show an order. Once
+    the day is over, the first look (the trader running through the night, or started again at
+    06:00) finds none on that day's inquiry, the account holding the 14: absent. The trade is sold at
+    the next session's first quote, not at the night's look on the day before's last bid."""
+    fake, account = kis_mock
+    Lost(fake, account, 69_800, taken=False)
+    seen: list[list[tuple[float, str, str | None]]] = []
+
+    def look() -> None:
+        seen.append(stop_sells(tmp_path))
+
+    events: list[Any] = [
+        TEN,
+        BOUGHT,
+        quote("10:01:30", 69_800, 69_900),
+        Tick("10:03:30"),
+        Tick("10:04:00"),
+        Tick("10:30:00"),
+        Tick("15:40:00"),
+        Do("15:40:01", look),
+    ]
+    rest = [Tick(next_day("08:00:00")), quote(next_day("09:00:30"), 69_900, 70_000)]
+    if through == "running":
+        events += [Tick(next_day("00:00:30")), Do(next_day("00:00:31"), look), *rest]
+    first = Acting(tmp_path, fake, account, timing=EACH_SECOND, mode=LIVE)
+    await first.run(cast(Sequence[Event], events))
+    notices = first.notices
+    if through == "restarted":
+        later = Acting(
+            tmp_path, fake, account, started_at=at(next_day("06:00:00")), timing=EACH_SECOND, mode=LIVE
+        )
+        await later.run(cast(Sequence[Event], [Do(next_day("06:00:01"), look), *rest]))
+        notices += later.notices
+
+    sent, absent = "2026-10-14T10:01:30+09:00", "2026-10-15T09:00:30+09:00"
+    assert seen == [[(69_800, "sent", sent)], [(69_800, "absent", sent)]], "nothing sold in the night"
+    assert stop_sells(tmp_path) == [(69_800, "absent", sent), (69_900, "filled", absent)]
+    [trade] = read_trades(tmp_path / DB_NAME, None, 10)
+    assert trade["exit"]["reason"] == STOP_LOSS and account.holdings[SYMBOL] == 0
+    assert sells(fake) == [70_300, 69_800, 69_900]
+    assert absent_notices(notices) == [ABSENT_SAID.format(mode=LIVE, why=DAY_OVER_WHY)]
+    assert [(f["what"], f["outcome"], f["day"]) for f in rows(tmp_path, "failures")] == [
+        ("sell", "unknown", "2026-10-14")
+    ], "no sell refused in the night: the next day's entries go on"
+
+
+@pytest.mark.parametrize("case", ["unread", "short", "two"])
+async def test_a_lost_sell_is_not_absent_while_kis_is_not_read_the_shares_are_short_or_two_could_be_it(
+    kis_mock: tuple[FakeKis, FakeAccount], tmp_path: Path, case: str
+) -> None:
+    """The stop's sell has no answer, and the mock's looks go on past its two minutes and into the
+    next day. KIS answers no inquiry from then on (``unread``); or the account holds 13 of the trade's
+    14 (``short``: one sold outside the trader); or KIS took it with another of the same limit and
+    quantity (``two``: the account held 14 more, accepted). None is concluded absent: the sell stays
+    as sent, no other sell goes, nothing more is told."""
+    fake, account = kis_mock
+    if case == "two":
+        account.holdings[SYMBOL], account.paid[SYMBOL] = 14, 14 * 60_000.0
+        accept(tmp_path, {SYMBOL: 14})
+    Lost(fake, account, 69_800, taken=case == "two", alike=case == "two", unread=case == "unread")
+
+    def sold_one() -> None:
+        account.holdings[SYMBOL] -= 1
+
+    events: list[Any] = [TEN, BOUGHT, quote("10:01:30", 69_800, 69_900)]
+    if case == "short":
+        events.append(Do("10:02:00", sold_one))
+    events += [
+        Tick("10:03:30"),
+        Tick("10:04:00"),
+        Tick("10:05:00"),
+        Tick(next_day("00:00:30")),
+        Tick(next_day("00:01:00")),
+    ]
+    day = Acting(tmp_path, fake, account, timing=EACH_SECOND)
+
+    [trade] = await day.run(cast(Sequence[Event], events))
+
+    assert trade["exit"] is None
+    assert orders_of(trade)[2:] == [("sell", "stop_loss", 69_800, 14, "sent", 0)]
+    assert sells(fake) == [70_300, 69_800], "never sent again"
+    assert absent_notices(day.notices) == []
+    with closing(sqlite3.connect(tmp_path / DB_NAME)) as db:
+        assert live.exposure(db, MOCK) == 2, "the trade and its sell sent"
+
+
+async def test_an_absent_sell_stays_in_the_ledger_and_a_restart_neither_looks_for_it_nor_sends_it(
+    kis_mock: tuple[FakeKis, FakeAccount], tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The mock's lost stop sell is absent at 10:04:00, and the trader stops before the next quote.
+    Started again, the sell is no longer one whose answer was lost: not looked up, not told; its row
+    stays as it was, and the sale goes on at the first quote after the start."""
+    fake, account = kis_mock
+    Lost(fake, account, 69_800, taken=False)
+    first = MockDay(tmp_path, fake, account, timing=EACH_SECOND)
+    await first.run([TEN, BOUGHT, quote("10:01:30", 69_800, 69_900), Tick("10:03:30"), Tick("10:04:00")])
+    [absent] = [o for o in rows(tmp_path, "orders") if o["status"] == "absent"]
+
+    caplog.clear()
+    later = MockDay(tmp_path, fake, account, started_at=at("10:05:00"), timing=EACH_SECOND)
+    [trade] = await later.run([Tick("10:05:00.5"), quote("10:05:10", 69_700, 69_800)])
+
+    assert [o for o in rows(tmp_path, "orders") if o["id"] == absent["id"]] == [absent], "kept as it was"
+    assert orders_of(trade)[2:] == [
+        ("sell", "stop_loss", 69_800, 14, "absent", 0),
+        ("sell", "stop_loss", 69_700, 14, "filled", 14),
+    ]
+    assert trade["exit"]["reason"] == STOP_LOSS and sells(fake) == [70_300, 69_800, 69_700]
+    assert later.notices == [] and not [r for r in caplog.records if "answer was" in r.getMessage()]
+    assert [r[0] for r in reconciles(tmp_path)][-1] == "clean"
 
 
 # The live account's own 005930 (#460)
