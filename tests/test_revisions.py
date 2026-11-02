@@ -205,6 +205,44 @@ async def test_a_reviewed_refactor_is_the_same_revision(tmp_path: Path) -> None:
     assert last_change_of(db, "alpha") == ("active", "probation", CODE_CHANGED)
 
 
+class Broken(Gate):
+    """A gate that cannot read any code or report."""
+
+    def code(self, algorithm: Algorithm | KindAlgorithm) -> Code:
+        raise ValueError(f"{algorithm.name}: no source file to check")
+
+    def verdict(self, algorithm: Algorithm | KindAlgorithm, boundary: datetime) -> Verdict | None:
+        raise OSError("unreadable")
+
+
+async def test_a_gate_that_fails_never_stops_the_engine_nor_changes_a_status(tmp_path: Path) -> None:
+    """Input: alpha active; beta back on probation for new code, its verdict unreadable; a gate
+    that fails on every read. Output: the engine starts and predicts; no status changes and
+    nothing new is recorded."""
+    db = tmp_path / "engine.db"
+    put_statuses(db, {"alpha": ("active", "set by the test"), "beta": ("active", "set by the test")}, EARLIER)
+    await start(db, at("06:00:00", weekdays_before(DAY, 1)[0]), Gate(), [ALPHA, BETA])
+    await start(db, at("06:00:00"), Gate({"beta": "a2"}), [ALPHA, BETA])
+    before = {name: history(db, name) for name in ("alpha", "beta")}
+
+    engine = await run(
+        db,
+        [],
+        start=at("08:00:00"),
+        until=at("09:02:00"),
+        algorithms=[ALPHA, BETA],
+        kind_algorithms=(),
+        revisions=Broken(),
+    )
+
+    assert {name: history(db, name) for name in ("alpha", "beta")} == before
+    with stored(db) as store:
+        assert [r.code for r in store.revision_history("alpha")] == ["a1"]
+        assert store.revisions()["beta"].pending
+        assert store.recent("005930", 10, "alpha"), "it predicted"
+    assert [a.name for a, _ in engine.revising()] == ["beta"]
+
+
 def last_change_of(db: Path, name: str) -> tuple[str | None, str, str]:
     h = history(db, name)[-1]
     return h["previous"], h["status"], h["reason"]

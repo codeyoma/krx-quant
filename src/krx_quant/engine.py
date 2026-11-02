@@ -632,7 +632,10 @@ class PredictionEngine:
             last = self._revision_of.get(a.name)
             if last is not None and standing.status is Status.RETIRED:
                 continue  # never revived: a later unretire and start find its code changed then
-            self._revise(a, last, now, standing.status)
+            try:
+                self._revise(a, last, now, standing.status)
+            except Exception:  # its code unreadable, say: it runs on as before, and the engine starts
+                log.exception("%s: its code could not be recorded; its status stays as it is", a.name)
 
     def _revise(
         self, algorithm: Algorithm | KindAlgorithm, last: Revision | None, now: datetime, status: Status
@@ -681,7 +684,11 @@ class PredictionEngine:
         for revision in pending:
             name = revision.algorithm
             algorithm = self._bar_close_named(name)
-            verdict = None if algorithm is None else self._revisions.verdict(algorithm, revision.boundary)
+            try:
+                verdict = None if algorithm is None else self._revisions.verdict(algorithm, revision.boundary)
+            except Exception:  # read again at the next bar close
+                log.exception("%s: the verdict of its new code could not be read", name)
+                continue
             if verdict is None:
                 continue
             now = self.clock.now()
@@ -757,7 +764,10 @@ class PredictionEngine:
             if a.name not in known:
                 self.store.add_status(a.name, self.clock.now(), None, Status.PROBATION, REGISTERED)
                 if self._revisions is not None and a.name not in self._revision_of:
-                    self._revise(a, None, self.clock.now(), Status.PROBATION)
+                    try:
+                        self._revise(a, None, self.clock.now(), Status.PROBATION)
+                    except Exception:  # recorded at the next start, as one never recorded
+                        log.exception("%s: its code could not be recorded", a.name)
         for d in daily_admitted:
             if d.name not in known:
                 self.store.add_status(d.name, self.clock.now(), None, Status.PROBATION, REGISTERED)
