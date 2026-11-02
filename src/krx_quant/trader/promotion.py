@@ -10,8 +10,9 @@ and as the champion are one record: a challenger promoted brings its own. Always
 (``records_of``, #405), whatever the trader's mode: every policy, the champion and the challengers
 alike, on one fill model, so that a switch from paper to mock to live never starts the history
 again. In paper mode the champion's record is its book's, whose trades the limits hold (#396); in
-mock mode it is its paper shadow's (``desk.Desk.shadow``, held by nothing, as a challenger's book
-is), never its KIS fills; a challenger's trades are held by none (``limits.Unlimited``). The
+mock mode it is its paper shadow's (``desk.Desk.shadow``, held by no pause, as a challenger's book
+is), never its KIS fills; a challenger's trades are held by no pause, their loss limits simulated
+(#471, ``limits.Simulated``), as the shadow's are. The
 records are simulated evidence: what a policy would have made filled in paper, not what an
 execution makes (rejects, partial fills, the account's reconciliation, the fill gap between KIS
 and the shadow, ``gap.py``), which the live mode must check apart (#408).

@@ -16,8 +16,6 @@ from aiohttp.test_utils import TestClient, TestServer
 from krx_quant.api import create_app
 from krx_quant.predictions import DB_NAME as ENGINE_DB
 from krx_quant.touch import TARGET_VERSION
-from krx_quant.trader import CAPITAL
-from krx_quant.trader.paper import Rules
 from krx_quant.trader.policy import FIRST
 from krx_quant.trader.refit import Grid, refit_from
 from krx_quant.trader.store import DB_NAME as TRADER_DB
@@ -28,7 +26,6 @@ from tests.test_trader_refit import DAYS, UP, write_five
 from tests.trader_doubles import (
     BARRIER,
     CALENDAR,
-    FEE,
     AskPause,
     AskResume,
     Barrier,
@@ -40,6 +37,7 @@ from tests.trader_doubles import (
     keep,
     policy_cell,
     quote,
+    whole_rules,
 )
 
 DAY: list[Event] = [
@@ -245,9 +243,7 @@ async def test_the_chart_marks_a_sale_by_a_pause_or_a_limit(tmp_path: Path) -> N
     paused = tmp_path / "paused"
     Day(paused).run([*DAY[:2], AskPause("10:00:30", sell_now=True), quote("10:00:31", 70_000, 70_100)])
     limited = tmp_path / "limited"
-    Day(limited, rules=Rules(fee_rate=FEE, daily_loss_percent=0.5)).run(
-        [*DAY[:2], quote("10:01:30", 69_900, 70_000)]
-    )
+    Day(limited, rules=whole_rules(daily_loss_percent=0.5)).run([*DAY[:2], quote("10:01:30", 69_900, 70_000)])
 
     for state, reason in ((paused, "pause"), (limited, "daily_limit")):
         async with engine_api(tmp_path, state) as client:
@@ -268,12 +264,12 @@ async def policies_answer(scratch: Path, state: Path | None, query: str = "") ->
 
 
 async def test_the_policies_newest_first_the_champion_marked(tmp_path: Path) -> None:
-    """Two nights' re-fits of the same five predictions: the first the champion, the second a
-    challenger in a running slot, its grid's λ a quarter (the same values would not be kept, #400)."""
+    """Two nights' re-fits of the same five predictions: the first the champion (θ 0.7), the second a
+    challenger in a running slot, its grid's θ 0.8 alone (the same values would not be kept, #400)."""
     write_five(tmp_path)
     for night, grid in (
         ("22:31:00", Grid(min_trades=1)),
-        ("22:45:00", Grid(min_trades=1, kelly_fractions=(0.25,))),
+        ("22:45:00", Grid(min_trades=1, thresholds=(0.8,))),
     ):
         refit_from(
             DAYS,
@@ -281,8 +277,7 @@ async def test_the_policies_newest_first_the_champion_marked(tmp_path: Path) -> 
             tmp_path / TRADER_DB,
             tmp_path / "data",
             CALENDAR.session,
-            capital=CAPITAL,
-            fee_rate=FEE,
+            rules=whole_rules(),
             target_version=TARGET_VERSION,
             grid=grid,
             now=at(night),
@@ -297,17 +292,13 @@ async def test_the_policies_newest_first_the_champion_marked(tmp_path: Path) -> 
     assert [(p["version"], p["status"]) for p in body["policies"]] == [(2, "challenger"), (1, "champion")]
     assert [p["version"] for p in page["policies"]] == [2]
     challenger, champion = body["policies"]
-    assert [{**c, "kelly_fraction": 0.5, "fitted": None} for c in challenger["cells"]] == [
+    assert [{**c, "threshold": 0.7, "fitted": None} for c in challenger["cells"]] == [
         {**c, "fitted": None} for c in champion["cells"]
-    ], "but λ"
+    ], "but θ"
     assert (challenger["admitted_at"], champion["admitted_at"]) == ("2026-10-14T22:45:00+09:00", None)
     [cell] = champion["cells"]
-    assert (cell["kind"], cell["predictor"], cell["threshold"], cell["kelly_fraction"]) == (
-        "barrier",
-        "breiman",
-        0.7,
-        0.5,
-    )
+    assert (cell["kind"], cell["predictor"], cell["threshold"]) == ("barrier", "breiman", 0.7)
+    assert "kelly_fraction" not in cell, "no λ (#471)"
     assert champion["fit"]["result"]["net"] == pytest.approx(2 * UP), "two take-profits of 14 shares"
     assert body["champions"] == [
         {"at": "2026-10-14T22:31:00+09:00", "version": 1, "reason": FIRST, "detail": None}
@@ -344,8 +335,7 @@ async def test_a_store_the_nightly_fit_made_before_the_trader_s_first_start_answ
         tmp_path / TRADER_DB,
         tmp_path / "data",
         CALENDAR.session,
-        capital=CAPITAL,
-        fee_rate=FEE,
+        rules=whole_rules(),
         target_version=TARGET_VERSION,
         grid=Grid(min_trades=1),
         now=at("22:31:00"),

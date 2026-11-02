@@ -39,6 +39,7 @@ from tests.trader_doubles import (
     Tick,
     at,
     quote,
+    whole_rules,
 )
 
 TEN = Read("10:00:02.3", [Barrier("10:00:00")])
@@ -46,7 +47,7 @@ BOUGHT = quote("10:00:02.5", 70_000, 70_100)
 
 
 def rules(daily: float = 10.0, cumulative: float = 20.0) -> Rules:
-    return Rules(fee_rate=FEE, daily_loss_percent=daily, cumulative_loss_percent=cumulative)
+    return whole_rules(daily_loss_percent=daily, cumulative_loss_percent=cumulative)
 
 
 def on(day: str, hms: str) -> str:
@@ -316,10 +317,10 @@ def test_the_state_shows_the_position_its_bid_the_cash_and_the_limits_used(tmp_p
 
 def test_a_buy_takes_no_more_than_the_paper_account_s_cash() -> None:
     """980,000 won of cash pays 979,853 of notional with its 0.015% commission: 13 shares at 70,100,
-    where the capital alone buys 14."""
-    assert shares(1.0, 1_000_000, 70_100) == 14
-    assert shares(1.0, 1_000_000, 70_100, cash=980_000, fee_rate=FEE) == 13
-    assert shares(1.0, 1_000_000, 70_100, cash=-5_000, fee_rate=FEE) == 0
+    where the capital alone buys 14 (#471: the capital with its commission too)."""
+    assert shares(1_000_000, 70_100, 1_000_000, FEE) == 14
+    assert shares(1_000_000, 70_100, 980_000, FEE) == 13
+    assert shares(1_000_000, 70_100, -5_000, FEE) == 0
 
 
 def test_the_controls_are_read_within_a_second() -> None:

@@ -1,5 +1,6 @@
-"""The cells the trader trades (#395): picked from the cost map, ranked, sized by their Kelly
-fraction, and not bought in a special situation.
+"""The cells the trader trades (#395): picked from the cost map, ranked, their Kelly f* kept as a
+diagnosis (#471: a trade's loss budget sizes the buy, ``tests/test_trader_risk.py``), and not bought
+in a special situation.
 
 Input: made-up cost maps within the /v1 schema (``tests/trader_doubles.py``) and the engine's own
 cost map; predictions, special windows and quotes as the trader reads them. Output: the cells
@@ -19,16 +20,13 @@ import aiohttp
 import pytest
 
 from krx_quant.special import Kind as SpecialKind
-from krx_quant.trader import KELLY_FRACTION
 from krx_quant.trader.cells import Cell
 from krx_quant.trader.paper import (
     BLOCKED,
     HOLDING,
-    NO_SHARES,
     NOT_UP,
     OUTRANKED,
     SPECIAL,
-    Rules,
 )
 from krx_quant.trader.selection import NO_PASS, CostMapError, choose, kelly, read_cost_map
 from krx_quant.trader.store import DB_NAME, TraderStore, read_trades
@@ -38,7 +36,6 @@ from tests.test_cost_map_api import cost_map as engine_cost_map
 from tests.trader_doubles import (
     BARRIER,
     DIRECTION,
-    FEE,
     Barrier,
     Day,
     Direction,
@@ -120,7 +117,8 @@ def test_only_the_cells_passing_at_a_market_order_s_round_trip_are_picked() -> N
 def test_the_kelly_fraction_worked_by_hand() -> None:
     """W 10 and C 2 ticks at 100,000 won (tick 100): a call right gains 8 ticks, g = 0.008 of the
     price; one wrong loses 12 ticks, ℓ = 0.012. p* = 12 ÷ 20 = 0.6. At a lower bound of 0.6024,
-    f* = 0.6024 ÷ 0.012 − 0.3976 ÷ 0.008 = 50.2 − 49.7 = 0.5: half of it, 0.25 of the capital."""
+    f* = 0.6024 ÷ 0.012 − 0.3976 ÷ 0.008 = 50.2 − 49.7 = 0.5, kept with the pick as a diagnosis: no
+    share of the capital is bought by it (#471)."""
     assert kelly(0.6024, 10, 2, 100, 100_000) == pytest.approx(0.5)
     assert kelly(0.6, 10, 2, 100, 100_000) == pytest.approx(0.0), "at p* exactly nothing"
     assert kelly(0.9, 2, 2.6, 100, 70_050) is None, "W ≤ C: a call right does not pay its cost"
@@ -133,9 +131,10 @@ def test_the_kelly_fraction_worked_by_hand() -> None:
 
     tight, wide = sorted(choose(body).picks, key=lambda p: p.low)
 
-    assert (tight.kelly, tight.fraction) == pytest.approx((0.5, KELLY_FRACTION * 0.5))
-    # 0.70 ÷ 0.012 − 0.30 ÷ 0.008 = 58.33 − 37.5 = 20.8: far above 1, the whole capital.
-    assert (wide.kelly, wide.fraction) == pytest.approx((20.8333, 1.0), abs=1e-3)
+    assert tight.kelly == pytest.approx(0.5)
+    # 0.70 ÷ 0.012 − 0.30 ÷ 0.008 = 58.33 − 37.5 = 20.8: far above 1 (the whole capital before #471).
+    assert wide.kelly == pytest.approx(20.8333, abs=1e-3)
+    assert "fraction" not in tight.as_json(), "no λ × f* (#471)"
 
 
 def test_a_pass_whose_kelly_is_not_above_zero_is_not_picked() -> None:
@@ -176,7 +175,6 @@ async def test_the_engine_s_own_cost_map_is_read_and_picked_from(tmp_path: Path)
     assert (only.kind, only.role, only.predictor) == ("barrier", "top", "alpha")
     assert only.p_star == pytest.approx((10 + 2.86875) / 20)
     assert (only.width, only.reference_price, only.tick) == (10, 81_250, 100)
-    assert only.fraction == 1.0
     verdicts = {(c["kind"], c["role"]): c["verdict"] for c in chosen.considered}
     assert verdicts[("barrier", "baseline")] == "fail"
     assert verdicts[("direction", "top")] is None
@@ -282,39 +280,18 @@ def test_a_first_ranked_cell_without_a_rise_lets_the_next_buy_at_once(tmp_path: 
     assert [(d["kind"], d["reason"]) for d in day.decisions()] == [("barrier", NOT_UP), ("barrier_15m", None)]
 
 
-# The size.
-
-
-@pytest.mark.parametrize(
-    ("fraction", "capital", "quantity"),
-    [
-        (1.0, 1_000_000, 14),  # a Kelly above 1: the whole capital, ⌊1,000,000 ÷ 70,100⌋
-        (0.25, 1_000_000, 3),  # ⌊250,000 ÷ 70,100⌋ = ⌊3.57⌋
-        (0.5, 100_000, None),  # 50,000 won does not buy a share at 70,100: nothing
-    ],
-)
-def test_a_buy_takes_its_cell_s_fraction_of_the_capital_in_whole_shares(
-    tmp_path: Path, fraction: float, capital: int, quantity: int | None
-) -> None:
-    day = Day(tmp_path, picks=[pick(BARRIER, fraction=fraction)], rules=Rules(fee_rate=FEE, capital=capital))
-
-    trades = day.run([Read("10:00:02.3", [Barrier("10:00:00")]), quote("10:00:02.5", 70_000, 70_100)])
-
-    if quantity is None:
-        assert trades == []
-        assert [d["reason"] for d in day.decisions()] == [NO_SHARES]
-    else:
-        assert [t["entry"]["quantity"] for t in trades] == [quantity]
+# The pick a trade keeps.
 
 
 def test_a_trade_keeps_its_cell_s_pick(tmp_path: Path) -> None:
-    [trade] = Day(tmp_path, picks=[pick(BARRIER, low=0.70, p_star=0.62, fraction=0.25)]).run(
+    """Its f* a diagnosis alone, no fraction bought (#471: ``tests/test_trader_risk.py`` sizes it)."""
+    [trade] = Day(tmp_path, picks=[pick(BARRIER, low=0.70, p_star=0.62)]).run(
         [Read("10:00:02.3", [Barrier("10:00:00")]), quote("10:00:02.5", 70_000, 70_100)]
     )
 
     f = kelly(0.70, 10, 2.6, 100, 70_050)
     assert (trade["role"], trade["p_star"], trade["precision_low"]) == ("top", 0.62, 0.70)
-    assert (trade["kelly"], trade["fraction"]) == (pytest.approx(f), 0.25)
+    assert (trade["kelly"], trade["fraction"]) == (pytest.approx(f), None)
 
 
 # Special situations.

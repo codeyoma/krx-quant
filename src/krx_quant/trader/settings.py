@@ -13,6 +13,12 @@ narrow the capital, never widen it (#393).
 - ``KRX_TRADER_CAPITAL``: the capital in won (1,000,000 unless set; at most that);
 - ``KRX_TRADER_DAILY_LOSS_PERCENT``, ``KRX_TRADER_CUMULATIVE_LOSS_PERCENT`` (#396): the loss
   limits in percent of the capital (10 and 20 unless set; above 0 and at most those);
+- ``KRX_TRADER_RISK_PER_TRADE_PERCENT`` (#471): a trade's loss budget in percent of the capital it
+  trades on (0.5 unless set; above 0 and at most that), which sizes each buy (``paper.size``);
+- ``KRX_TRADER_LOSS_STREAK``, ``KRX_TRADER_COOLDOWN_MINUTES`` (#471): the net losses in a row (3
+  unless set; from 1 to 3) that stop new buys for the cooldown (30 minutes unless set; at least 30);
+- ``KRX_TRADER_DAILY_BUY_ORDERS`` (#471): the buy orders a day, those refused counted (20 unless set;
+  from 1 to 20). The risk rules, ``paper.risk_held``: ``.env`` may make them stricter, never looser;
 - ``KRX_TRADER_QUOTES_URL``: the collector's quote stream (``quotes.py``); compose sets it to the
   engine service's;
 - ``KRX_TRADER_ENGINE_URL``: the Engine API the cost map is read from (``selection.py``, #395);
@@ -37,11 +43,15 @@ from pathlib import Path
 from krx_quant.config import SettingsError, read_values
 from krx_quant.trader import (
     CAPITAL,
+    COOLDOWN,
     CUMULATIVE_LOSS_PERCENT,
+    DAILY_BUY_ORDERS,
     DAILY_LOSS_PERCENT,
+    LOSS_STREAK,
     MOCK,
     MODES,
     PAPER,
+    RISK_PER_TRADE_PERCENT,
     THRESHOLD,
 )
 
@@ -61,6 +71,12 @@ class TraderSettings:
     capital: int = CAPITAL
     daily_loss_percent: float = DAILY_LOSS_PERCENT
     cumulative_loss_percent: float = CUMULATIVE_LOSS_PERCENT
+    # The risk rules (#471): a trade's loss budget, the losses in a row and the cooldown they start,
+    # the buy orders a day.
+    risk_per_trade_percent: float = RISK_PER_TRADE_PERCENT
+    loss_streak: int = LOSS_STREAK
+    cooldown_minutes: float = COOLDOWN.total_seconds() / 60
+    daily_buy_orders: int = DAILY_BUY_ORDERS
     quotes_url: str = DEFAULT_QUOTES_URL
     engine_url: str = DEFAULT_ENGINE_URL
     poll_seconds: float = 0.5  # how often the engine's database is read for new predictions
@@ -85,6 +101,19 @@ class TraderSettings:
             )
         daily = _limit(values, "KRX_TRADER_DAILY_LOSS_PERCENT", DAILY_LOSS_PERCENT)
         cumulative = _limit(values, "KRX_TRADER_CUMULATIVE_LOSS_PERCENT", CUMULATIVE_LOSS_PERCENT)
+        risk = _limit(values, "KRX_TRADER_RISK_PER_TRADE_PERCENT", RISK_PER_TRADE_PERCENT)
+        streak = _fewer(values, "KRX_TRADER_LOSS_STREAK", LOSS_STREAK, "net losses in a row")
+        orders = _fewer(values, "KRX_TRADER_DAILY_BUY_ORDERS", DAILY_BUY_ORDERS, "buy orders a day")
+        cooldown = float(
+            _number(
+                values, "KRX_TRADER_COOLDOWN_MINUTES", f"{COOLDOWN.total_seconds() / 60:g}", float, 0.0, None
+            )
+        )
+        if cooldown < COOLDOWN.total_seconds() / 60:
+            raise SettingsError(
+                f"KRX_TRADER_COOLDOWN_MINUTES ({cooldown:g}) is below the trader's cooldown of"
+                f" {COOLDOWN.total_seconds() / 60:g} minutes: .env may lengthen it, never shorten it"
+            )
         quotes_url = values.get("KRX_TRADER_QUOTES_URL", DEFAULT_QUOTES_URL).strip() or DEFAULT_QUOTES_URL
         if not quotes_url.startswith(("ws://", "wss://")):
             raise SettingsError(f"KRX_TRADER_QUOTES_URL must be a ws:// URL, got {quotes_url!r}")
@@ -109,6 +138,10 @@ class TraderSettings:
             capital=capital,
             daily_loss_percent=daily,
             cumulative_loss_percent=cumulative,
+            risk_per_trade_percent=risk,
+            loss_streak=streak,
+            cooldown_minutes=cooldown,
+            daily_buy_orders=orders,
             quotes_url=quotes_url,
             engine_url=engine_url,
             ignored=tuple(name for name in GONE if values.get(name, "").strip()),
@@ -126,6 +159,17 @@ def _limit(values: Mapping[str, str], name: str, code: float) -> float:
         raise SettingsError(
             f"{name} ({value:g}%) is above the trader's limit of {code:g}% of the capital: "
             ".env may narrow it, never widen it"
+        )
+    return value
+
+
+def _fewer(values: Mapping[str, str], name: str, code: int, what: str) -> int:
+    """A count of the risk rules (#471): from 1, and at most the code's (``.env`` makes a rule
+    stricter, never looser)."""
+    value = int(_number(values, name, str(code), int, 1, None))
+    if value > code:
+        raise SettingsError(
+            f"{name} ({value}) is above the trader's {code} {what}: .env may lower it, never raise it"
         )
     return value
 

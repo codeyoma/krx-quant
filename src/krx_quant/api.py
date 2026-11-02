@@ -76,7 +76,7 @@ Endpoints (all under ``/v1``):
   resumes nor re-arms the trader, nor changes its mode or limits.
 - ``GET /trader/policies?limit=N``: the trader's last N policy versions (#399, default 100, at most
   1000), newest first, each with its status (``champion``, ``challenger``, ``former``,
-  ``dropped``), its cells with their θ and Kelly fraction, the cells it left out, what it was
+  ``dropped``), its cells with their θ (and a Kelly fraction, before #471), the cells it left out, what it was
   fitted on and its paper record (#400); and every change of the champion, a promotion's with its
   figures (``trader/policy.py``); none before the first nightly fit.
 - ``GET /symbols/{symbol}/trader-marks?before=T&limit=N``: the trader's buys and sells of the

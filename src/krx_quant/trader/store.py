@@ -4,14 +4,15 @@ by the nightly re-fit (#399, from the engine's container).
 - ``runs``: each start of the trader, with its mode and settings;
 - ``selections``: each pick of the cells from the cost map (#395): when, the cost map's time, the
   cells picked in their rank with what they were picked on (p*, the hit rate's lower bound, the
-  Kelly fraction), every cell considered with its verdict, and, when none trades, why (no cell
-  passes, or the cost map could not be read);
+  Kelly f*; its fraction before #471), every cell considered with its verdict, and, when none
+  trades, why (no cell passes, or the cost map could not be read);
 - ``decisions``: each prediction of a picked cell a book read (#400: the champion's and each
   challenger's), and what it did: bought, or why not (``paper.py``'s reasons), under which pick
   and policy; unique by (mode, policy, kind, predictor, prediction), a store from before made
   again so (``_key_decisions``);
 - ``trades``: each position, from its entry to its exit: the cell and its pick (the predictor's
-  role, p*, the hit rate's lower bound, the Kelly f* and the fraction bought), the prediction and
+  role, p*, the hit rate's lower bound, the Kelly f* and the fraction bought: null since #471, which
+  sizes by a loss budget), the prediction and
   its probability, the reference price, target, stop and time barrier, the entry and the exit
   (why it ended: take_profit, stop_loss, time), the costs (both commissions and the sell tax) and
   the P&L before and after them, in won;
@@ -103,7 +104,7 @@ from typing import TYPE_CHECKING, Any
 from krx_quant.feeds.base import KST
 from krx_quant.market_calendar import MarketCalendar, Session
 from krx_quant.pricing import SELL_TAX
-from krx_quant.trader import MOCK, PAPER, policy, promotion, review
+from krx_quant.trader import KIS_MODES, MOCK, PAPER, policy, promotion, review
 from krx_quant.trader.cells import Cell
 from krx_quant.trader.gap import day_gap
 from krx_quant.trader.selection import GONE
@@ -367,7 +368,8 @@ _ADDED = {
         ("p_star", "REAL"),  # the breakeven hit rate at a market order's round trip
         ("precision_low", "REAL"),  # the cell's hit rate's lower bound
         ("kelly", "REAL"),  # f*, uncut
-        ("fraction", "REAL"),  # the share of the capital bought: λ × f*, cut to 0-1
+        # The share of the capital bought: λ × f*, cut to 0-1; null since #471 (a loss budget sizes it).
+        ("fraction", "REAL"),
         ("policy_id", "INTEGER REFERENCES policies (id)"),  # the policy it was made under (#399)
         # 1: made by the champion's book, the trader's own; 0: a challenger's paper trade (#400); null:
         # before #400, when the champion's book was the only one.
@@ -492,7 +494,7 @@ class Entry:
     p_star: float | None = None
     low: float | None = None
     kelly: float | None = None
-    fraction: float | None = None
+    fraction: float | None = None  # λ × f* bought; None since #471 (a loss budget sizes the buy)
     # The policy version it was made under (#399); None before the first champion.
     policy_id: int | None = None
     # Made by the champion's book (#400), the trader's own; False: a challenger's paper trade, or the
@@ -1189,20 +1191,12 @@ class TraderStore:
         #427) not exited yet, if any (one position at a time); with ``challenger``, that challenger's
         paper trade not exited (#400); with ``shadow``, the champion's paper shadow's (#405,
         ``SHADOW_TRADE``), or with ``practice`` too the practice shadow's (#427)."""
-        params: tuple[Any, ...]
-        if shadow:
-            which = PRACTICE_TRADE if practice else f"NOT {PRACTICE_TRADE}"
-            whose, params = f"{SHADOW_TRADE} AND {which}", (mode,)
-        elif challenger is None:
-            whose, params = CHAMPION_TRADE, (mode,)
-        else:
-            whose = f"t.policy_id = ? AND t.champion = 0 AND NOT {SHADOW_TRADE}"
-            params = (mode, challenger)
+        whose, params = _whose(challenger, shadow, practice)
         row = self._db.execute(
             "SELECT t.*, o.id AS resting FROM trades t LEFT JOIN orders o ON o.trade_id = t.id"
             " AND o.purpose = 'take_profit' AND o.status = 'open'"
             f" WHERE t.mode = ? AND t.exit_at IS NULL AND {whose} ORDER BY t.id DESC LIMIT 1",
-            params,
+            (mode, *params),
         ).fetchone()
         if row is None:
             return None
@@ -1221,6 +1215,71 @@ class TraderStore:
             datetime.fromisoformat(row["entry_at"]),
             bool(row["practice"]),
         )
+
+    def realized_of(
+        self,
+        mode: str,
+        since: datetime | None,
+        challenger: int | None = None,
+        shadow: bool = False,
+        practice: bool = False,
+    ) -> float:
+        """The net P&L of a book's trades of ``mode`` exited at or after ``since`` (all if None): the
+        champion's (``CHAMPION_TRADE``), ``challenger``'s, the shadow's or the practice shadow's (as
+        ``open_trade`` tells them apart). What a challenger's or a shadow's simulated loss limits start
+        from (#471, ``limits.Simulated``)."""
+        whose, params = _whose(challenger, shadow, practice)
+        where, after = ("AND t.exit_at >= ?", (iso(since),)) if since is not None else ("", ())
+        row = self._db.execute(
+            f"SELECT coalesce(sum(t.net), 0) FROM trades t WHERE t.mode = ? AND t.exit_at IS NOT NULL"
+            f" AND {whose} {where}",
+            (mode, *params, *after),
+        ).fetchone()
+        return float(row[0])
+
+    def day_exits(
+        self,
+        mode: str,
+        since: datetime,
+        challenger: int | None = None,
+        shadow: bool = False,
+        practice: bool = False,
+    ) -> list[tuple[datetime, float]]:
+        """A book's trades of ``mode`` exited at or after ``since`` (its day's 00:00), each one's exit
+        time and net, in the order they exited: the risk rules' losses in a row (#471,
+        ``paper.risk_held``). By the exit, not the entry: a position carried overnight (the trader down
+        at its time barrier, a sale not settled, ``mock.py``) counts on the day it is sold."""
+        whose, params = _whose(challenger, shadow, practice)
+        rows = self._db.execute(
+            "SELECT t.exit_at, t.net FROM trades t WHERE t.mode = ? AND t.exit_at >= ?"
+            f" AND {whose} ORDER BY t.exit_at, t.id",
+            (mode, iso(since), *params),
+        )
+        return [(datetime.fromisoformat(r[0]), float(r[1])) for r in rows]
+
+    def day_buys(
+        self,
+        mode: str,
+        since: datetime,
+        challenger: int | None = None,
+        shadow: bool = False,
+        practice: bool = False,
+    ) -> int:
+        """A book's buy orders of ``mode`` since ``since`` (its day's 00:00), the risk rules' day count
+        (#471, ``paper.risk_held``): the KIS book's (#405: ``mock``, ``live``) each buy it sent or tried
+        to send, kept before it is (``unfilled_buys``, #406: those KIS refused, of which nothing filled
+        or whose answer was lost too); a paper book's each buy it filled (a trade)."""
+        if mode in KIS_MODES and challenger is None and not shadow:
+            row = self._db.execute(
+                "SELECT count(*) FROM unfilled_buys WHERE mode = ? AND placed_at >= ?", (mode, iso(since))
+            ).fetchone()
+            return int(row[0])
+        whose, params = _whose(challenger, shadow, practice)
+        row = self._db.execute(
+            f"SELECT count(*) FROM trades t WHERE t.mode = ? AND t.entry_at >= ? AND {whose}",
+            (mode, iso(since), *params),
+        ).fetchone()
+        return int(row[0])
 
     def open_challengers(self, mode: str) -> list[int]:
         """The challengers with a paper trade of ``mode`` not exited (#400: the trader stopped before
@@ -1601,6 +1660,18 @@ class TraderStore:
             "INSERT INTO fills (order_id, at, price, quantity, quote_at) VALUES (?, ?, ?, ?, ?)",
             (order, at, price, quantity, iso(quote_at)),
         )
+
+
+def _whose(challenger: int | None, shadow: bool, practice: bool) -> tuple[str, tuple[Any, ...]]:
+    """A book's trades ``t`` (``TraderStore.open_trade``): the shadow's or with ``practice`` the
+    practice shadow's (#405, #427), else the champion's (``CHAMPION_TRADE``, a practice one of the mock
+    book's too) or ``challenger``'s (#400); the condition and its parameters."""
+    if shadow:
+        which = PRACTICE_TRADE if practice else f"NOT {PRACTICE_TRADE}"
+        return f"{SHADOW_TRADE} AND {which}", ()
+    if challenger is None:
+        return CHAMPION_TRADE, ()
+    return f"t.policy_id = ? AND t.champion = 0 AND NOT {SHADOW_TRADE}", (challenger,)
 
 
 def _keyed_by_policy(db: sqlite3.Connection) -> bool:

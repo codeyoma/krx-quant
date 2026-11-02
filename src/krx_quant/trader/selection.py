@@ -23,8 +23,12 @@ row's width W and market cost C (ticks) at its reference price: a call right gai
 one wrong loses W + C (the target and the stop are W ticks off, the cost paid both ways), as
 fractions of the price g = (W − C) × tick ÷ price and ℓ = (W + C) × tick ÷ price. The growth
 p log(1 + f g) + (1 − p) log(1 − f ℓ) is greatest at f* = p ÷ ℓ − (1 − p) ÷ g, positive exactly
-when p > p* = (W + C) ÷ 2W. The trader buys ``KELLY_FRACTION`` of it, cut to 0–1
-(``Pick.fraction``): with stops a few ticks away f* is mostly far above 1, the whole capital.
+when p > p* = (W + C) ÷ 2W. It is a diagnosis alone (``Pick.kelly``, #471): a trade's loss budget
+sizes the buy (``paper.size``).
+
+> **바뀜** (2026-11-03, #478): the trader bought ``KELLY_FRACTION`` (a half) of f*, cut to 0–1
+> (``Pick.fraction``), of the capital → f* sizes nothing. 이유: spec #468 4 "크기": with stops a few
+> ticks away f* is mostly far above 1, the whole capital.
 
 **Practice** (#427, ``Selection.practice``). Each cost map also names the cell the mock book
 practises on a day no champion cell trades (``desk.Desk``, ``KRX_TRADER_MOCK_PRACTICE``): of the
@@ -48,7 +52,7 @@ from typing import Any
 
 import aiohttp
 
-from krx_quant.trader import COST_MAP_PERIOD, KELLY_FRACTION, ROLES, SYMBOL, TRADED_KINDS
+from krx_quant.trader import COST_MAP_PERIOD, ROLES, SYMBOL, TRADED_KINDS
 from krx_quant.trader.cells import Cell
 
 log = logging.getLogger(__name__)
@@ -92,14 +96,13 @@ class Pick:
     cost: float  # the row's market round trip C, ticks
     reference_price: float  # where W and C were read
     tick: float
-    kelly: float | None  # f*, uncut; None for a practice cell whose call right does not pay (#427)
-    # λ × f*, cut to 0–1: the share of the capital it buys (λ: KELLY_FRACTION, or the policy's, #399).
-    fraction: float
+    # f*, uncut, a diagnosis alone (#471); None for a practice cell whose call right does not pay (#427)
+    kelly: float | None
     # The rise's probability that buys, the policy's for this cell (#399); None: the trader's
     # ``Rules.threshold`` (before the first policy).
     threshold: float | None = None
-    # The shares it buys, within the cash and the capital, in place of ``fraction`` (#427: a practice
-    # cell's one); None: ``fraction`` of the capital.
+    # The shares it buys, within the cash and the capital, in place of a loss budget's (#427: a practice
+    # cell's one); None: the loss budget's (#471, ``paper.size``).
     quantity: int | None = None
     # The mock book's practice cell (#427, module doc), not a champion's.
     practice: bool = False
@@ -126,7 +129,6 @@ class Pick:
             "reference_price": self.reference_price,
             "tick": self.tick,
             "kelly": self.kelly,
-            "fraction": self.fraction,
             "threshold": self.threshold,
             "quantity": self.quantity,
             "practice": self.practice,
@@ -169,9 +171,7 @@ class Selection:
             under = "" if self.policy is None else f"policy {self.policy}: "
             return under + "; ".join(
                 f"{p.kind} {p.predictor} ({p.role}: low {p.low:.3f} − p* {p.p_star:.3f} = {p.priority:+.3f},"
-                f" Kelly {p.kelly or 0:.2f} → {p.fraction:.2f}"
-                + ("" if p.threshold is None else f", θ {p.threshold:g}")
-                + ")"
+                f" f* {p.kelly or 0:.2f}" + ("" if p.threshold is None else f", θ {p.threshold:g}") + ")"
                 for p in self.picks
             )
         if self.reason == NO_COST_MAP:
@@ -209,7 +209,7 @@ def kelly(low: float, width: float, cost: float, tick: float, price: float) -> f
     return low / loss - (1 - low) / gain
 
 
-def choose(body: Mapping[str, Any], kelly_fraction: float = KELLY_FRACTION) -> Selection:
+def choose(body: Mapping[str, Any]) -> Selection:
     """The cells ``body``, a cost map of 005930, passes (module doc); ``CostMapError`` when it is
     not the cost map asked for."""
     if not isinstance(body, Mapping) or not isinstance(body.get("rows"), list):
@@ -265,7 +265,7 @@ def choose(body: Mapping[str, Any], kelly_fraction: float = KELLY_FRACTION) -> S
             name = predictor["algorithm"]
             if verdict in PRACTISED and _sound(known, len(figures)):
                 practised.append(
-                    _pick(kind, role, name, calls or 0, known, f, 0.0, PRACTICE_SHARES, practice=True)
+                    _pick(kind, role, name, calls or 0, known, f, PRACTICE_SHARES, practice=True)
                 )
             if verdict != PASS:
                 continue
@@ -273,9 +273,7 @@ def choose(body: Mapping[str, Any], kelly_fraction: float = KELLY_FRACTION) -> S
                 seen["why"] = "its pass cannot be sized" if f is None else "Kelly at most 0"
                 continue
             seen["picked"] = True
-            picks.append(
-                _pick(kind, role, name, calls or 0, known, f, min(1.0, max(0.0, kelly_fraction * f)))
-            )
+            picks.append(_pick(kind, role, name, calls or 0, known, f))
     picks.sort(key=_rank)
     unique: dict[Cell, Pick] = {}
     for p in picks:
@@ -293,7 +291,6 @@ def _pick(
     calls: int,
     known: Mapping[str, float],
     f: float | None,
-    fraction: float,
     quantity: int | None = None,
     practice: bool = False,
 ) -> Pick:
@@ -310,7 +307,6 @@ def _pick(
         reference_price=known["reference_price"],
         tick=known["tick"],
         kelly=f,
-        fraction=fraction,
         quantity=quantity,
         practice=practice,
     )

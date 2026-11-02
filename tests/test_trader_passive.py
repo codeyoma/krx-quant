@@ -379,7 +379,7 @@ def test_the_champion_s_threshold_is_the_cell_s(tmp_path: Path) -> None:
 
     db = policies.connect(tmp_path / TRADER_DB)
     try:
-        cell = policies.PolicyCell("barrier", "top", "breiman", 0.7, 0.5)
+        cell = policies.PolicyCell("barrier", "top", "breiman", 0.7)
         policies.add(db, moment(FIRST, "22:31:00"), "test", (cell,), (), {})
     finally:
         db.close()

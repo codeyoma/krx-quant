@@ -26,11 +26,14 @@ with its reason:
   (``special_windows``, #236; the open span, ``special.touching``, as the engine blocks a final
   consensus);
 - the trader is running (#396, ``limits.py``): not paused (``entries_paused``, ``paused``) nor
-  stopped by a loss limit (``daily_limit``, ``cumulative_limit``), the status its reason;
+  stopped by a loss limit (``daily_limit``, ``cumulative_limit``), the status its reason; a book of a
+  challenger or a shadow, by its own simulated loss limits (#471, ``limits.Simulated``);
 - the collector's quotes flow (``quotes_stalled``, #407, ``stall.py``): none for more than five
   seconds in continuous trading is a stall, and nothing new is bought until a quote comes again;
 - nothing is held, nor waiting to be bought (``holding``): one position at a time;
-- no cell ranked above it buys on the same bar close (``outranked``).
+- no cell ranked above it buys on the same bar close (``outranked``);
+- the risk rules let the book buy (#471, ``risk_held``, module doc "Risk rules"): ``buy_limit``,
+  ``cooldown``.
 
 **Priority.** Of the rises of one bar close, the cell ranked first (``Selection.picks``: the
 champion policy's order, #399; picks without a policy, the greatest hit rate's lower bound less
@@ -41,19 +44,42 @@ them has a prediction of that bar close read, or at the latest ``Rules.fresh`` a
 displayed (it would be stale after). A higher-ranked cell whose prediction comes later than that
 finds the position taken (``holding``).
 
-**Size.** The cell's Kelly fraction (``Pick.fraction``: λ of its Kelly f*, cut to 0–1; λ the
-champion policy's for the cell, #399; a pick without a policy, ``KELLY_FRACTION``, a half) of the
-capital, over the best ask, rounded down: ⌊min(capital − what is open, fraction × capital, cash)
-÷ ask⌋ (nothing is open: one position at a time). The cash is the paper account's (#396): the
-capital, plus the net P&L of every trade of the mode exited, less the open position's cost; a
-buy pays its commission from it too. Below one share it buys nothing (``no_shares``). A cap below
-the capital (``cap``: the live mode's first period, #408, ``live.py``) takes the capital's place in
-both terms. A pick of fixed shares (``Pick.quantity``: the mock book's practice cell, #427) buys that
-many in place of its fraction, within the same cash and capital: ⌊min(capital, cash) ÷ ask⌋ at most.
+**Size** (#471, spec #468 4 "크기", ``size``). A trade's loss budget over what a share loses at its
+stop, rounded down: ⌊budget ÷ (ask − stop + one tick + the commissions and the sell tax)⌋. The budget
+is ``Rules.risk_percent`` (``KRX_TRADER_RISK_PER_TRADE_PERCENT``, 0.5%) of the capital; a share's loss
+(``at_risk``) is the best ask it is bought at less the stop, the commissions and the sell tax at those
+prices (the buy's at the ask, the sale's at the stop) and one adverse tick (the stop sells at the
+first best bid at or below the stop: a tick under it, the stop's band's, at worst). The spread is not
+counted again: the ask is above the bid by it already. Within the cash and the capital, the buy's commission
+included: ⌊min(capital, cash) ÷ (ask × (1 + commission))⌋ at most (nothing is open: one position at a
+time). The cash is the paper account's (#396): the capital, plus the net P&L of every trade of the mode
+exited, less the open position's cost. Below one share it buys nothing (``no_shares``), nor with a
+stop that is not below the ask, or not a price (``bad_stop``: a fall through the stop before the buy,
+which would stop it out at once). A cap below the capital (``cap``: the live mode's first period,
+#408, ``live.py``) takes the capital's place in both. A pick of fixed shares (``Pick.quantity``: the
+mock book's practice cell, #427) buys that many in place of its budget, within the same cash and
+capital. The budget bounds the loss planned, not a gap past the stop.
+
+> **바뀜** (2026-11-03, #478): the cell's Kelly fraction (λ × f*, cut to 0–1) of the capital over
+> the ask → the loss budget over a share's loss at the stop. 이유: spec #468 "크기가 사실상 전액이다":
+> with stops a few ticks away f* is mostly far above 1, the whole capital.
+
+**Risk rules** (#471, spec #468 7 "위험 규칙", ``risk_held``), of every book (the champion's, a
+challenger's, a shadow's, the practice's: #427's cell trades by the champion's rules but its shares),
+from its own orders and trades of the day (00:00 KST on: the buys it placed, the trades it sold that
+day, one carried overnight on the day it is sold; from the store, so a restart goes on with them;
+the re-fit's replay keeps its own, whose trades are sold on their day): at ``Rules.daily_buys`` (20)
+buy orders that day nothing more is bought (``buy_limit``: a paper buy is its fill; the KIS book's
+each order it sent, those KIS refused counted, ``store.day_buys``); and ``Rules.loss_streak`` (3)
+trades in a row that exited at a net loss start a cooldown of ``Rules.cooldown`` (30 minutes) from
+the last one's exit (``cooldown``): a net of 0 or more ends the row, and each loss after the third
+begins the cooldown again. Sells and cancels count for neither. ``.env`` may make them stricter,
+never looser (``settings.py``).
 
 **Practice** (#427, ``desk.Desk``): the mock book's practice cell is a pick like another, its trade
-marked ``practice``, of no policy (``Entry.policy_id`` None: no record counts it), its fraction none
-(it buys its shares). Its paper shadow is a book of its own (``practice``), as the champion's shadow
+marked ``practice``, of no policy (``Entry.policy_id`` None: no record counts it), buying its shares
+in place of a loss budget, by the same risk rules (#471: the champion's KIS book's, whose orders and
+trades they are). Its paper shadow is a book of its own (``practice``), as the champion's shadow
 is (``shadow``), so that the champion policy's shadow never holds a practice position.
 
 Its reference price is the prediction's ``anchor`` (the bar close's integrated mid-point), the
@@ -65,9 +91,9 @@ barrier the bar close plus the kind's horizon: the trade is the event its hit ra
 - the buy at the best ask of the first quote received after the decision. None if a special
   window learned before that quote touches its window (``special``), if that quote's ask is at or
   above the target (``target_reached``: it was reached already), if the size is
-  below one share (``no_shares``), if no quote comes within ``Rules.quote_wait``
-  (``no_quote``), or if it comes at or after the time barrier (``expired``). The take-profit's
-  sell rests at the target from then on;
+  below one share (``no_shares``) or the stop not below the ask (``bad_stop``), if no quote comes
+  within ``Rules.quote_wait`` (``no_quote``), or if it comes at or after the time barrier
+  (``expired``). The take-profit's sell rests at the target from then on;
 - the take-profit at the target, once a quote received after the buy has its best bid at or above
   it (no place at the front of the queue is assumed);
 - the stop at the best bid of the first quote after the buy whose best bid is at or below the stop;
@@ -100,10 +126,11 @@ one that sells sells it at the first quote. The same picks, the same predictions
 times, and the same quotes always make the same trades.
 
 **One set of rules** (#470): the entry (``plan``, ``admit``), the priority (``settle``), the buy's fill
-(``refused``, ``size``), the exits (``exit_on``, ``clock_exit``) and the costs (``costs``, ``net_of``)
-are functions of this module that the paper book calls, and so does the nightly re-fit's replay of
-the recorded days (``replay.py``): the same predictions and the same quotes make the same trades
-there (``tests/test_trader_replay.py``).
+(``refused``, ``size``), the risk rules (``risk_held``, #471), the exits (``exit_on``, ``clock_exit``)
+and the costs (``costs``, ``net_of``) are functions of this module that the paper book calls, and so
+does the nightly re-fit's replay of the recorded days (``replay.py``), with the loss limits a
+challenger's book simulates (``limits.Simulated``): the same predictions and the same quotes make the
+same trades there (``tests/test_trader_replay.py``).
 
 **State.** The trader writes its state (``state``: status, cash, position, the day's and the
 cumulative P&L, the limits' use, the pause) into its store as it changes, at most every
@@ -117,21 +144,25 @@ import logging
 import math
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
-from typing import Any, Protocol
+from datetime import date, datetime, time, timedelta
+from typing import TYPE_CHECKING, Any, Protocol
 
-from krx_quant.feeds.base import kst_day
+from krx_quant.feeds.base import KST, kst_day
 from krx_quant.kinds import most_likely
 from krx_quant.market_calendar import Session
-from krx_quant.pricing import SELL_TAX
+from krx_quant.pricing import SELL_TAX, tick_size
 from krx_quant.special import Window, touching
 from krx_quant.trader import (
     CAPITAL,
+    COOLDOWN,
     CUMULATIVE_LOSS_PERCENT,
+    DAILY_BUY_ORDERS,
     DAILY_LOSS_PERCENT,
     ENTRY_AFTER_OPEN,
     EXIT_BEFORE_AUCTION,
+    LOSS_STREAK,
     PAPER,
+    RISK_PER_TRADE_PERCENT,
     SYMBOL,
     THRESHOLD,
 )
@@ -145,11 +176,14 @@ from krx_quant.trader.limits import (
     Holds,
     Limits,
     Notify,
-    Unlimited,
+    Simulated,
 )
 from krx_quant.trader.quotes import BestQuote
 from krx_quant.trader.selection import Pick, Selection
 from krx_quant.trader.store import WAITED, Entry, Exit, OpenTrade, Stall, TraderStore, iso
+
+if TYPE_CHECKING:
+    from krx_quant.trader.settings import TraderSettings
 
 log = logging.getLogger(__name__)
 
@@ -165,6 +199,9 @@ HOLDING, OUTRANKED = "holding", "outranked"
 STALLED = "quotes_stalled"
 # Why a buy decided did not fill.
 TARGET_REACHED, NO_SHARES, NO_QUOTE, RESTARTED = "target_reached", "no_shares", "no_quote", "restarted"
+BAD_STOP = "bad_stop"  # its stop not below the ask, or not a price (#471, ``size``)
+# The risk rules hold new buys (#471, ``risk_held``): the day's buy orders, the losses in a row.
+BUY_LIMIT, COOLING_DOWN = "buy_limit", "cooldown"
 BUY, SKIP = "buy", "skip"
 # The status of a prediction the engine did not make for a VI (``engine._record_not_predicted``).
 VI_STATUS = "vi"
@@ -176,6 +213,12 @@ class Rules:
     capital: int = CAPITAL
     daily_loss_percent: float = DAILY_LOSS_PERCENT  # the loss limits, of the capital (#396)
     cumulative_loss_percent: float = CUMULATIVE_LOSS_PERCENT
+    # The risk rules (#471, module doc "Size" and "Risk rules"): a trade's loss budget in percent of
+    # the capital it trades on; the net losses in a row that start a cooldown; the buy orders a day.
+    risk_percent: float = RISK_PER_TRADE_PERCENT
+    loss_streak: int = LOSS_STREAK
+    cooldown: timedelta = COOLDOWN
+    daily_buys: int = DAILY_BUY_ORDERS
     fee_rate: float = 0.00015  # the commission per side, as a fraction
     entry_after_open: timedelta = ENTRY_AFTER_OPEN
     exit_before_auction: timedelta = EXIT_BEFORE_AUCTION
@@ -191,6 +234,27 @@ class Rules:
     @property
     def limits(self) -> Limits:
         return Limits(self.capital, self.daily_loss_percent, self.cumulative_loss_percent)
+
+    @classmethod
+    def of(cls, trader: TraderSettings, fee_rate: float) -> Rules:
+        """The rules the trader's settings (``.env``, #394) make, at the engine's commission
+        (``KRX_FEE_PERCENT``): the trader's and the nightly re-fit's replay's."""
+        return cls(
+            threshold=trader.threshold,
+            capital=trader.capital,
+            daily_loss_percent=trader.daily_loss_percent,
+            cumulative_loss_percent=trader.cumulative_loss_percent,
+            risk_percent=trader.risk_per_trade_percent,
+            loss_streak=trader.loss_streak,
+            cooldown=timedelta(minutes=trader.cooldown_minutes),
+            daily_buys=trader.daily_buy_orders,
+            fee_rate=fee_rate,
+        )
+
+    def budget(self, capital: float) -> float:
+        """A trade's loss budget in won, on ``capital`` (the live first period's cap below the
+        capital): ``risk_percent`` of it (#471)."""
+        return capital * self.risk_percent / 100
 
 
 @dataclass(frozen=True)
@@ -220,15 +284,17 @@ def costs(entry_price: float, exit_price: float, quantity: int, fee_rate: float)
     return Costs(entry_price * quantity * fee_rate, sold * fee_rate, sold * SELL_TAX)
 
 
-def shares(
-    fraction: float, capital: float, ask: float, cash: float | None = None, fee_rate: float = 0.0
-) -> int:
-    """What a buy at ``ask`` takes: ``fraction`` of the capital, within the ``cash`` (if given) its
-    notional and commission may use, rounded down to whole shares."""
-    budget = min(capital, fraction * capital)
-    if cash is not None:
-        budget = min(budget, max(0.0, cash) / (1 + fee_rate))
-    return math.floor(budget / ask)
+def at_risk(ask: float, stop: float, fee_rate: float) -> float:
+    """What a share bought at ``ask`` loses at its ``stop`` (#471, module doc "Size"), in won: the ask
+    less the stop, the commissions and the tax at those prices (the buy's at the ask, the sale's at the
+    stop), and one adverse tick (the stop's band's: the first bid at or below it sells)."""
+    return ask - stop + ask * fee_rate + stop * (fee_rate + SELL_TAX) + tick_size(stop)
+
+
+def shares(capital: float, ask: float, cash: float, fee_rate: float) -> int:
+    """The whole shares a buy at ``ask`` may take, its notional and commission within the capital and
+    the ``cash`` (#471)."""
+    return math.floor(round(min(capital, max(0.0, cash)) / (ask * (1 + fee_rate)), 9))
 
 
 def unrealized(trade: OpenTrade, bid: float, fee_rate: float) -> float:
@@ -401,14 +467,45 @@ def refused(decided_at: datetime, barriers: Barriers, quote: BestQuote, rules: R
 
 
 def size(
-    fraction: float, quantity: int | None, capital: float, ask: float, cash: float, fee_rate: float
-) -> int:
-    """The shares a buy at ``ask`` takes (module doc "Size"): ``fraction`` of the capital, or a pick's
-    fixed ``quantity`` (#427) within the capital, within the ``cash`` its notional and commission may
-    use, rounded down."""
-    if quantity is not None:
-        return min(quantity, shares(1.0, capital, ask, cash, fee_rate))
-    return shares(fraction, capital, ask, cash, fee_rate)
+    ask: float,
+    stop: float,
+    budget: float,
+    capital: float,
+    cash: float,
+    fee_rate: float,
+    quantity: int | None = None,
+) -> int | str:
+    """The shares a buy at ``ask`` takes (#471, module doc "Size"): the loss ``budget`` over a share's
+    loss at ``stop`` (``at_risk``), or a pick's fixed ``quantity`` (#427), within the capital and the
+    ``cash`` (``shares``), rounded down; or why none: ``bad_stop`` (the stop not below the ask, or not
+    a price), ``no_shares`` (below one share)."""
+    if not (math.isfinite(stop) and 0 < stop < ask):
+        return BAD_STOP
+    most = shares(capital, ask, cash, fee_rate)
+    wanted = quantity if quantity is not None else math.floor(round(budget / at_risk(ask, stop, fee_rate), 9))
+    taken = min(wanted, most)
+    return taken if taken >= 1 else NO_SHARES
+
+
+def risk_held(rules: Rules, at: datetime, buys: int, exits: Sequence[tuple[datetime, float]]) -> str | None:
+    """Why the risk rules hold a book's new buy at ``at`` (#471, module doc "Risk rules"), from its buy
+    orders of ``at``'s day (``buys``) and its trades exited that day (``exits``: each one's exit time and
+    net, in the order they exited): ``buy_limit`` at ``rules.daily_buys`` of them, ``cooldown`` less than
+    ``rules.cooldown`` after the exit that made ``rules.loss_streak`` net losses in a row; None if
+    neither holds."""
+    if buys >= rules.daily_buys:
+        return BUY_LIMIT
+    losses, until = 0, None
+    for exited_at, net in exits:
+        losses = losses + 1 if net < 0 else 0
+        if losses >= rules.loss_streak:
+            until = exited_at + rules.cooldown
+    return COOLING_DOWN if until is not None and at < until else None
+
+
+def midnight(at: datetime) -> datetime:
+    """00:00 KST of ``at``'s day: where a day's risk rules count from (#471)."""
+    return datetime.combine(kst_day(at), time(), KST)
 
 
 @dataclass(frozen=True)
@@ -492,12 +589,14 @@ class PaperTrader:
 
     The champion's book by default: the trades the trader makes, which its limits and pauses hold
     (``guard``), with its state and ledger. With ``challenger`` (#400, ``desk.Desk``), that
-    challenger policy's book: the same rules on the same quotes, in paper, held by no limit nor pause
-    (``limits.Unlimited``, buying on ``account``'s cash), writing no state; its decisions and trades
-    carry its version. With ``shadow`` (#405), the champion policy's paper shadow in mock mode: held
-    and sized as a challenger's book is, its trades the champion policy's paper record (``champion``
-    0, ``shadow`` 1), never the trader's; ``carry`` also goes on with the paper champion book's trade
-    left open by paper mode."""
+    challenger policy's book: the same rules on the same quotes, in paper, held by no pause, its loss
+    limits simulated on its own trades (#471, ``limits.Simulated``: the cumulative one counted from
+    ``since``; buying on ``account``'s cash), writing no state; its decisions and trades carry its
+    version. With ``shadow`` (#405), the champion policy's paper shadow in mock mode: held and sized as
+    a challenger's book is, its trades the champion policy's paper record (``champion`` 0, ``shadow``
+    1), never the trader's; ``carry`` also goes on with the paper champion book's trade left open by
+    paper mode. Every book sizes by the loss budget and keeps the risk rules on its own orders and
+    trades (#471, module doc)."""
 
     def __init__(
         self,
@@ -513,6 +612,7 @@ class PaperTrader:
         shadow: bool = False,
         carry: bool = False,
         practice: bool = False,
+        since: datetime | None = None,
     ) -> None:
         self.store = store
         self.rules = rules
@@ -534,8 +634,20 @@ class PaperTrader:
         if challenger is None and not shadow:
             self._guard = Guard(store, mode, rules.limits, started_at, notify or (lambda text: None))
             self.holds = self._guard
-        else:
-            self.holds = Unlimited(account or (lambda: 0.0))
+        else:  # its own trades' P&L, of the day and since ``since`` (#471)
+            book = self._book()
+
+            def day_realized(day: date) -> float:
+                return store.realized_of(mode, datetime.combine(day, time(), KST), **book)
+
+            self.holds = Simulated(
+                rules.limits,
+                kst_day(started_at),
+                day_realized(kst_day(started_at)),
+                store.realized_of(mode, since, **book),
+                account or (lambda: 0.0),
+                day_realized,
+            )
         # A sale the status asks for sells at the first quote received after this (#396).
         self._sell_after: datetime | None = None
         self._written: tuple[datetime, dict[str, Any]] | None = None  # the state last written
@@ -613,6 +725,18 @@ class PaperTrader:
     def busy(self) -> bool:
         """Whether it holds a position or waits to buy one."""
         return self._busy()
+
+    def _book(self) -> dict[str, Any]:
+        """Which book's trades and orders are its own in the store (#471): the champion's, a
+        challenger's, the shadow's or the practice shadow's."""
+        return {"challenger": self.challenger, "shadow": self.shadow, "practice": self.practice}
+
+    def rearm(self, at: datetime) -> None:
+        """The trader's cumulative loss limit re-armed at ``at`` (#471): a challenger's or a shadow's
+        simulated one counts again from then too."""
+        if isinstance(self.holds, Simulated):
+            self.holds.rearm()
+            log.info("%s: its simulated cumulative loss counted again from %s", self._whose(), iso(at))
 
     def _whose(self) -> str:
         """Its log lines' start: the champion's as they were (``trader: bought …``), a challenger's
@@ -929,7 +1053,18 @@ class PaperTrader:
             return STALLED
         if self._busy():
             return self._held_off(signal)
-        return None
+        return self._risk(at)
+
+    def _risk(self, at: datetime) -> str | None:
+        """Why the risk rules hold a buy at ``at`` (#471, ``risk_held``): the book's buy orders and
+        exits of the day, as the store has them."""
+        since, book = midnight(at), self._book()
+        return risk_held(
+            self.rules,
+            at,
+            self.store.day_buys(self.mode, since, **book),
+            self.store.day_exits(self.mode, since, **book),
+        )
 
     def _settle(self, now: datetime) -> None:
         """Decide the rises waiting (``settle``): a rise a special window learned while it waited now
@@ -952,7 +1087,7 @@ class PaperTrader:
         _, pick = self._picks[candidate.cell]
         decision = self._add_decision(signal, at, BUY, None)
         log.info(
-            "%s buying on %s %s of %s (p %.3f): target %s, stop %s, until %s, %.0f%% of the capital",
+            "%s buying on %s %s of %s (p %.3f): target %s, stop %s, until %s, %s",
             self._whose(),
             signal.kind,
             signal.predictor,
@@ -961,7 +1096,9 @@ class PaperTrader:
             planned.target,
             planned.stop,
             planned.time_barrier.strftime("%H:%M"),
-            pick.fraction * 100,
+            f"{pick.quantity} share(s)"
+            if pick.quantity is not None
+            else f"a loss budget of {self.rules.budget(self._capital()):.0f} won",
         )
         self._waiting = _Waiting(decision, signal, pick, planned, at)
 
@@ -995,16 +1132,28 @@ class PaperTrader:
         if reason is not None:
             self._give_up(waiting, reason)
             return
-        pick = waiting.pick
-        capital = self.rules.capital if self.cap is None else min(self.rules.capital, self.cap)
+        capital = self._capital()
         cash = self.rules.capital + self.holds.realized_all  # nothing open: one at a time
-        # A practice pick buys its shares, within the cash and the capital (#427).
-        quantity = size(pick.fraction, pick.quantity, capital, quote.ask, cash, self.rules.fee_rate)
-        if quantity < 1:
-            self._give_up(waiting, NO_SHARES)
+        # The loss budget over a share's loss at the stop (#471); a practice pick buys its shares,
+        # within the cash and the capital (#427).
+        quantity = size(
+            quote.ask,
+            waiting.plan.stop,
+            self.rules.budget(capital),
+            capital,
+            cash,
+            self.rules.fee_rate,
+            waiting.pick.quantity,
+        )
+        if isinstance(quantity, str):
+            self._give_up(waiting, quantity)
             return
         self._waiting = None
         self._fill_buy(waiting, quote, quantity)
+
+    def _capital(self) -> float:
+        """The capital a buy sizes on: the cap, if below it (#408: the live first period's)."""
+        return self.rules.capital if self.cap is None else min(self.rules.capital, self.cap)
 
     def _fill_buy(self, waiting: _Waiting, quote: BestQuote, quantity: int) -> None:
         """The buy decided, of ``quantity`` shares at ``quote``'s ask: in paper, filled whole at once.
@@ -1048,9 +1197,7 @@ class PaperTrader:
             role=pick.role,
             p_star=pick.p_star,
             low=pick.low,
-            kelly=pick.kelly,
-            # A practice pick buys its shares (#427): no share of the capital.
-            fraction=None if pick.quantity is not None else pick.fraction,
+            kelly=pick.kelly,  # f*, a diagnosis alone (#471): no trade is sized by it
             # A practice trade is of no policy (#427): no record, promotion or gate counts it.
             policy_id=None if pick.practice else self._policy,
             champion=self.challenger is None and not self.shadow,

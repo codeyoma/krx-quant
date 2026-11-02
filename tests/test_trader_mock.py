@@ -42,7 +42,7 @@ from krx_quant.trader.cells import EngineReader
 from krx_quant.trader.desk import Desk
 from krx_quant.trader.limits import ORDER_FAILED, RUNNING
 from krx_quant.trader.mock import UNFILLED, MockTrader, Timing, tick_up
-from krx_quant.trader.paper import STOP_LOSS, TAKE_PROFIT, TIME, PaperTrader, Rules
+from krx_quant.trader.paper import BUY_LIMIT, STOP_LOSS, TAKE_PROFIT, TIME, PaperTrader, Rules
 from krx_quant.trader.quotes import BestQuote, QuoteFeed
 from krx_quant.trader.run import run_trader
 from krx_quant.trader.selection import Selection
@@ -50,7 +50,19 @@ from krx_quant.trader.settings import TraderSettings
 from krx_quant.trader.store import DB_NAME, TraderStore, read_trader, read_trades, request_pause
 from tests.test_live_predictions import free_port
 from tests.test_trader_run import PASSING, EngineApi, book
-from tests.trader_doubles import BARRIER, CALENDAR, FEE, Barrier, Read, Tick, at, first_champion, pick, quote
+from tests.trader_doubles import (
+    BARRIER,
+    CALENDAR,
+    FEE,
+    Barrier,
+    Read,
+    Tick,
+    at,
+    first_champion,
+    pick,
+    quote,
+    whole_rules,
+)
 
 KEY = "PStrader" + "m" * 28
 SECRET = "Sm" + "k" * 60
@@ -60,6 +72,7 @@ TIMING = Timing(wait=0.2, poll=0.01, follow=0.01, retry=0.0, rounds=5)
 
 TEN = Read("10:00:02.3", [Barrier("10:00:00")])
 BOUGHT = quote("10:00:02.5", 70_000, 70_100)
+BOUGHT_LATER = quote("10:08:02.5", 70_000, 70_100)
 
 
 @dataclass(frozen=True)
@@ -157,7 +170,7 @@ class MockDay:
     state: Path
     fake: FakeKis
     account: FakeAccount
-    rules: Rules = field(default_factory=lambda: Rules(fee_rate=FEE))
+    rules: Rules = field(default_factory=whole_rules)
     started_at: datetime = field(default_factory=lambda: at("09:00:00"))
     notices: list[str] = field(default_factory=list)
     status: str | None = None  # the book's status after the last event
@@ -449,7 +462,7 @@ async def test_a_partly_filled_take_profit_is_valued_at_its_fills_and_the_rest_a
     980,700 paid, less 147.105 for the buy and 983,800 × 0.215% = 2,115.17 for the sales: 837.725 won.
     Valued as 14 shares at that bid it would be −4,351, past a 4,000-won daily limit."""
     fake, account = kis_mock
-    day = MockDay(tmp_path, fake, account, rules=Rules(fee_rate=FEE, daily_loss_percent=0.4))
+    day = MockDay(tmp_path, fake, account, rules=whole_rules(daily_loss_percent=0.4))
 
     [trade] = await day.run([TEN, BOUGHT, Fill("10:01:00", 13), quote("10:01:30", 69_900, 70_000)])
 
@@ -1052,6 +1065,22 @@ async def test_a_buy_nothing_of_which_fills_buys_nothing(
     assert kept["broker_id"] == order.number
 
 
+async def test_a_buy_order_kis_took_counts_toward_the_day_s_buy_orders_though_nothing_filled(
+    kis_mock: tuple[FakeKis, FakeAccount], tmp_path: Path
+) -> None:
+    """#471, the buy orders a day narrowed to 1: the 10:00 buy KIS took, of which nothing filled before
+    its cancel, is the day's one; the 10:08 rise buys nothing (``buy_limit``) and sends KIS nothing. The
+    cancel is no buy order."""
+    fake, account = kis_mock
+    account.fills = False
+    day = MockDay(tmp_path, fake, account, rules=whole_rules(daily_buys=1))
+
+    assert await day.run([TEN, BOUGHT, Read("10:08:02.3", [Barrier("10:08:00")]), BOUGHT_LATER]) == []
+    assert [(d["action"], d["reason"]) for d in day.decisions()] == [("buy", UNFILLED), ("skip", BUY_LIMIT)]
+    assert len(account.placed(BUY_SIDE)) == 1, "one buy order sent"
+    assert day.status == RUNNING, "a risk rule is no status"
+
+
 # Failures
 
 
@@ -1185,7 +1214,7 @@ async def test_a_loss_limit_reached_sells_on_kis_at_the_bid(
     """A daily limit of 0.5% (5,000 won) and a stop four ticks down (69,650): at the bid of 69,700
     the open position nets (69,700 − 70,050) × 14 = −4,900 less its costs, past the limit."""
     fake, account = kis_mock
-    rules = Rules(fee_rate=FEE, daily_loss_percent=0.5)
+    rules = whole_rules(daily_loss_percent=0.5)
     day = MockDay(tmp_path, fake, account, rules=rules)
 
     [trade] = await day.run(
@@ -1255,7 +1284,7 @@ async def test_the_challengers_stay_in_paper_beside_the_mock_champion(
             )
             desk = Desk(
                 store,
-                Rules(fee_rate=FEE),
+                whole_rules(),
                 CALENDAR.session,
                 at("09:00:00"),
                 MOCK,
@@ -1270,7 +1299,7 @@ async def test_the_challengers_stay_in_paper_beside_the_mock_champion(
             assert challenger.mode == PAPER, "labelled paper, filled in paper"
             await desk.close()
         with pytest.raises(ValueError, match="broker"):
-            Desk(store, Rules(fee_rate=FEE), CALENDAR.session, at("09:00:00"), MOCK)
+            Desk(store, whole_rules(), CALENDAR.session, at("09:00:00"), MOCK)
     finally:
         store.close()
 

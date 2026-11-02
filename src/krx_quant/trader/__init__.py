@@ -29,19 +29,21 @@ challengers stay in paper. The trader holds no order code: the KIS order calls l
   for the direction) and the time barrier the bar close plus the kind's horizon. Entries from five
   minutes after the open (09:05), and only when the time barrier is by five minutes before the
   closing auction (15:15); no buy when the best ask has reached the target already.
-- **Size**: the cell's fractional Kelly (λ × f*, from its hit rate's lower bound and its payoff:
-  the target less the cost against the stop and the cost), cut to 0–1, of the capital (1,000,000
-  won), over the best ask, rounded down; none below one share.
+- **Size** (#471): a loss budget a trade, ``RISK_PER_TRADE_PERCENT`` (0.5%) of the capital it trades
+  on (1,000,000 won; the live first period's cap below it), over what a share loses at its stop (the
+  best ask less the stop, one adverse tick, the commission and the sell tax), rounded down; within
+  the cash and the capital, the buy's commission included; none below one share. The Kelly f* is
+  kept as a diagnosis alone.
 - **Paper fills**: the buy at the best ask of the first quote received after the decision; the
   take-profit at the target once a best bid reaches it; the stop and the time exit at the best
   bid then. Costs: the commission on both sides and the sell tax.
 - **Policy** (``policy.py``, ``refit.py``, #399): a versioned set of values: the cells traded and
-  their order, each cell's threshold θ and Kelly fraction λ; no limit. Every trading day's night,
-  after the nightly training, the scheduled job ``trader-report`` (#402) fits a new version on the
-  cost map's 20 days, replaying their recordings and stored predictions by the paper trader's own
-  rules (#470, ``replay.py``) at each point of a small grid. The first is the champion, the later ones
-  challengers. At each pick the trader trades the champion's cells among those the cost map
-  passes, in its order, at its θ and λ; before the first champion, nothing (#469).
+  their order, each cell's threshold θ; no limit (#471: no Kelly fraction λ either). Every trading
+  day's night, after the nightly training, the scheduled job ``trader-report`` (#402) fits a new
+  version on the cost map's 20 days, replaying their recordings and stored predictions by the paper
+  trader's own rules (#470, ``replay.py``) at each point of a small grid. The first is the champion,
+  the later ones challengers. At each pick the trader trades the champion's cells among those the
+  cost map passes, in its order, at its θ; before the first champion, nothing (#469).
 - **Frozen version** (``review.py``, #469): the champion's cells (by their predictors' names), their
   order and θ hold from one review to the next; a review falls every 20 trading days of the
   trader's calendar, judged after its close and applied from the next trading day. The nightly
@@ -49,7 +51,8 @@ challengers stay in paper. The trader holds no order code: the KIS order calls l
   evaluation version (2) reads the records and the live gate from its first day alone.
 - **Challengers** (``desk.py``, ``promotion.py``, #400): up to three run in paper beside the
   champion from the next trading day, each in its own book on the same predictions and quotes,
-  held by no limit nor pause; trades and decisions are split by policy version. The nightly job
+  held by no pause, its size, risk rules and loss limits the champion's, simulated on its own trades
+  (#471, ``limits.Simulated``); trades and decisions are split by policy version. The nightly job
   promotes, on a review night alone (#469), one that beat the champion on at least ten common
   trading days (the day-level lower
   bound of challenger − champion net P&L above 0, Bonferroni over the challengers), after the
@@ -67,9 +70,11 @@ challengers stay in paper. The trader holds no order code: the KIS order calls l
 - **Limits and pauses** (``limits.py``, #396): the loss is the net realized P&L plus the open
   position's at the best bid, after its costs; a day's of 10% of the capital stops the day (sold
   at once, trading again the next trading day), a cumulative one of 20% stops the trader until
-  ``krx-quant trade rearm``. The screen's two pauses (``POST /v1/trader/pause``: new entries, or
-  that and a sale now) last until ``krx-quant trade resume`` on the server. They hold the trades
-  the trader makes, the champion's: no policy changes them.
+  ``krx-quant trade rearm``. The risk rules (#471, ``paper.risk_held``): three net losses in a row
+  stop new buys for 30 minutes, and at most 20 buy orders go a day, those refused counted. The
+  screen's two pauses (``POST /v1/trader/pause``: new entries, or that and a sale now) last until
+  ``krx-quant trade resume`` on the server. They hold the trades the trader makes, the champion's: no
+  policy changes them.
 - **Report** (``report.py``, #402): the same night's job prints the day's report above the
   re-fit's output (``krx-quant refit-policy --report``), one comment on the report issue, labelled
   ``ready-for-agent`` on the week's last trading day and on the nights of a limit halt, a change
@@ -132,9 +137,14 @@ CUMULATIVE_LOSS_PERCENT = 20.0
 # mock practice cell's (#427) and the nightly fit's default, a champion policy's cell having its own θ
 # (#399). Before the first champion nothing but the practice trades (#469).
 THRESHOLD = 0.6
-# The share of a cell's Kelly fraction bought (#395): half Kelly, cut to 0–1 after; the nightly fit's
-# default, a champion policy's cell having its own λ (#399).
-KELLY_FRACTION = 0.5
+# The risk rules (#471, spec #468 4 "크기", 7 "위험 규칙"; ``paper.size``, ``paper.risk_held``), the
+# code's at most: ``.env`` may narrow them, never widen them, and no policy touches them. A trade's loss
+# budget, in percent of the capital it trades on (the live first period's cap below the capital); the
+# net losses in a row that stop new buys for ``COOLDOWN``; the buy orders a day, those refused counted.
+RISK_PER_TRADE_PERCENT = 0.5
+LOSS_STREAK = 3
+COOLDOWN = timedelta(minutes=30)
+DAILY_BUY_ORDERS = 20
 
 # The cost map the cells are picked from (#395): 005930's, its last 20 days with predictions, the
 # special situations left out (the trader buys in none). Picked at each start, and every day at

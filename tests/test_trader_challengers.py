@@ -1,11 +1,13 @@
 """The challengers in paper beside the champion (#400, ``desk.py``): the same predictions and the same
-quotes, trades and decisions split by policy version, no limit nor pause on a challenger, the
-records of the days each ran, a restart, and the store from before #400.
+quotes, trades and decisions split by policy version, no pause on a challenger and its loss limits
+its own, simulated (#471), the records of the days each ran, a restart, and the store from before
+#400.
 
 The example of ``test_trader_paper.py``: the 10:00 barrier prediction (up_first 0.7) read at
-10:00:02.3, the first quote after it asking 70,100 (14 shares), the target 70,250, the stop 69,850,
-the time barrier 10:04. Policy 1, the champion, was kept on the night of 10-12; policy 2, a
-challenger, on the night of 10-13: both run on 10-14. Every price is made up.
+10:00:02.3, the first quote after it asking 70,100 (14 shares: a loss budget of the whole capital,
+``trader_doubles.whole_rules``; ``test_trader_risk.py`` sizes by the trader's), the target 70,250,
+the stop 69,850, the time barrier 10:04. Policy 1, the champion, was kept on the night of 10-12;
+policy 2, a challenger, on the night of 10-13: both run on 10-14. Every price is made up.
 """
 
 from __future__ import annotations
@@ -21,11 +23,10 @@ import pytest
 from krx_quant.trader import policy as policies
 from krx_quant.trader import promotion
 from krx_quant.trader.limits import ENTRIES_PAUSED, RUNNING
-from krx_quant.trader.paper import BELOW_THRESHOLD, STOP_LOSS, TAKE_PROFIT, TIME, Rules
-from krx_quant.trader.store import DB_NAME, TraderStore, read_trader
+from krx_quant.trader.paper import BELOW_THRESHOLD, STOP_LOSS, TAKE_PROFIT, TIME
+from krx_quant.trader.store import DAILY_LIMIT, DB_NAME, TraderStore, read_trader
 from tests.trader_doubles import (
     BARRIER,
-    FEE,
     AskPause,
     Barrier,
     Day,
@@ -36,6 +37,7 @@ from tests.trader_doubles import (
     keep,
     policy_cell,
     quote,
+    whole_rules,
 )
 
 TEN = Read("10:00:02.3", [Barrier("10:00:00")])
@@ -88,12 +90,13 @@ def test_the_champion_and_a_challenger_alike_make_the_same_trade_apart(tmp_path:
     assert champion["net"] == pytest.approx(-161.735)
 
 
-def test_a_challenger_s_loss_is_not_in_the_limits_and_no_limit_stops_it(tmp_path: Path) -> None:
+def test_a_challenger_s_loss_is_not_in_the_limits_and_its_own_simulated_one_stops_it(tmp_path: Path) -> None:
     """The daily limit narrowed to 0.5% (5,000 won). The challenger's stop at 69,800 loses 6,448.19,
     past it: the champion is still running, its day's P&L 0, and it buys the 10:10 rise at 0.85.
-    The challenger buys that rise too: no limit holds it either."""
+    The challenger does not (#471): its own loss reached its simulated daily limit, which no halt
+    keeps."""
     champion_and_challenger(tmp_path, 0.8, 0.6)
-    day = Day(tmp_path, desk=True, rules=Rules(fee_rate=FEE, daily_loss_percent=0.5))
+    day = Day(tmp_path, desk=True, rules=whole_rules(daily_loss_percent=0.5))
 
     [champion] = day.run(
         [
@@ -106,9 +109,10 @@ def test_a_challenger_s_loss_is_not_in_the_limits_and_no_limit_stops_it(tmp_path
         ]
     )
 
-    stopped, later = sorted(day.trades(policy=2), key=lambda t: t["id"])
+    [stopped] = day.trades(policy=2)
     assert (stopped["exit"]["reason"], stopped["net"]) == (STOP_LOSS, pytest.approx(-6_448.19))
-    assert later["exit"]["reason"] == TAKE_PROFIT
+    [prediction] = {d[1] for d in decisions(day) if d[0] == 2 and d[3] == DAILY_LIMIT}
+    assert (2, prediction, "skip", DAILY_LIMIT) in decisions(day), "the 10:10 rise: its own limit"
     assert (champion["bar_close"][11:16], champion["exit"]["reason"]) == ("10:10", TAKE_PROFIT)
     state = day.state_now("10:12:00")
     assert state["status"] == RUNNING

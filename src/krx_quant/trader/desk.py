@@ -8,10 +8,12 @@ same cells' predictions and the same quotes, in one process.
   pauses hold; in mock mode ``mock.MockTrader``, #405, its orders on KIS's mock server); and each
   challenger that runs that day (``policy.running_versions``: at most
   three, kept before that day's 08:30, so one fitted tonight runs from the next trading day)
-  applied to the same cells, for its own paper book. A challenger book holds no limit nor pause
-  (``limits.Unlimited``) and buys on the paper account's cash with nothing open, as the champion's
-  book would. A challenger that no longer runs (dropped for a newer one, promoted) is retired: its
-  book buys nothing more and is let go once it holds nothing. A champion that cannot be read
+  applied to the same cells, for its own paper book. No pause holds a challenger book; it sizes by
+  the loss budget and keeps the risk rules on its own orders and trades, its loss limits simulated
+  on its own trades (#471, ``limits.Simulated``: the cumulative one from ``simulated_since``, counted
+  again when the trader is re-armed), and it buys on the paper account's cash with nothing open, as
+  the champion's book would. A challenger that no longer runs (dropped for a newer one, promoted) is
+  retired: its book buys nothing more and is let go once it holds nothing. A champion that cannot be read
   trades nothing until the next pick (``NO_POLICY``); a challenger that cannot be read does not
   run until then.
 - **Predictions** (``on_signal``): each to every book trading its cell; one of a cell no book
@@ -27,7 +29,8 @@ same cells' predictions and the same quotes, in one process.
   KIS orders, its trades of mode ``mock``, the limits and pauses, the state and ledger. At the start
   (``start``, #406) it reconciles the KIS account with the ledger before any book trades. Beside it
   the champion policy keeps a paper shadow (``shadow``: ``paper.PaperTrader`` in paper, held by no
-  limit nor pause, as a challenger's book is), on the same picks, predictions and quotes. The
+  pause, its loss limits simulated, as a challenger's book is), on the same picks, predictions and
+  quotes. The
   shadow and the challengers size on the paper account (``store.paper_account``: the net of the
   champion's paper book), never on the KIS fills, so no difference of execution reaches them.
 - **Live mode** (#408): with the live gate and the execution checks passed (``live.py``, judged by
@@ -43,15 +46,16 @@ same cells' predictions and the same quotes, in one process.
   at a time whichever cell it is of. Once a pick finds a champion cell again, the practice cell is
   picked no more (a rise of it waiting is ``not_picked``); a practice position is sold by its own
   barriers, and holds the champion's cells off (``holding``) until it is. Its paper shadow is a book
-  of its own (``practice_shadow``, held by nothing, as the shadow is), so that the champion policy's
+  of its own (``practice_shadow``, held by no pause, as the shadow is), so that the champion policy's
   shadow and record never hold a practice trade; a practice shadow's trade left open is sold by its
   barriers whatever the mode or the setting. The practice trades are of no policy and no record
   counts them (``store.PRACTICE_TRADE``); the KIS checks, the limits and the cash do (#427).
 - **Records** (``record``): while a trading day's session is open (from its open to the end of its
   closing auction), each running book's policy ran that day (``policy_days``), always in paper
   (#405): the champion's (in mock and live mode its shadow's), stopped once its status is not
-  ``running`` in the session (in mock and live mode never: the shadow is held by nothing); each
-  challenger's. Each policy-day once. The promotion and the live gate read them (``promotion.py``).
+  ``running`` in the session (in mock and live mode never: no pause holds the shadow); each
+  challenger's, never stopped (a simulated loss limit is its policy's own evidence, #471). Each
+  policy-day once. The promotion and the live gate read them (``promotion.py``).
   Before the first champion the champion's book has no policy and keeps no record.
 
 The champion never changes during a session: it is read at the picks only, and a promotion is
@@ -70,11 +74,11 @@ import logging
 import sqlite3
 from collections.abc import Callable, Collection, Sequence
 from dataclasses import replace
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
 
-from krx_quant.feeds.base import kst_day
+from krx_quant.feeds.base import KST, kst_day
 from krx_quant.kis_orders import Broker
 from krx_quant.market_calendar import Session
 from krx_quant.special import Window
@@ -174,12 +178,20 @@ class Desk:
                 shadow=True,
                 carry=True,
                 account=self._paper_account,
+                since=self.simulated_since(),
             )
         elif store.open_trade(PAPER, shadow=True) is not None:
             # A shadow's trade left open by mock mode: a shadow book of its own sells it by its
             # barriers, picking nothing, apart from the champion's book, whose limits never count it.
             self.shadow = PaperTrader(
-                store, rules, sessions, started_at, PAPER, shadow=True, account=self._paper_account
+                store,
+                rules,
+                sessions,
+                started_at,
+                PAPER,
+                shadow=True,
+                account=self._paper_account,
+                since=self.simulated_since(),
             )
         # The practice cell's paper shadow (#427): practising, or a trade of it left open (the practice
         # turned off, or the mode changed), which it sells by its barriers, picking nothing.
@@ -194,6 +206,7 @@ class Desk:
                 shadow=True,
                 practice=True,
                 account=self._paper_account,
+                since=self.simulated_since(),
             )
         self.champion.practice_state = {"enabled": practice, "active": False, "cell": None}
         self.challengers: dict[int, PaperTrader] = {}
@@ -204,6 +217,23 @@ class Desk:
             self.challengers[version] = self._book(version)
         for book in [self.champion, *self._shadows]:
             self._told(book, started_at)
+
+    def simulated_since(self) -> datetime | None:
+        """Where a challenger's or a shadow's simulated cumulative loss counts from (#471,
+        ``limits.Simulated``): the evaluation's first day (#469: its evidence alone), or the trader's
+        last re-arm of its mode if later; None (every trade of its book) before either."""
+        found = []
+        try:
+            evaluation = review.current(self.store.db)
+            if evaluation is not None:
+                found.append(datetime.combine(evaluation.first_day, time(), KST))
+            rearmed = self.store.rearmed_at(self.mode)
+        except sqlite3.Error as e:
+            log.error("trader: cannot tell where the simulated loss limits count from (%s): every trade", e)
+            return None
+        if rearmed is not None:
+            found.append(rearmed)
+        return max(found, default=None)
 
     def _paper_account(self) -> float:
         """The net P&L the paper books size on: the champion's book's in paper mode (the trades its
@@ -224,6 +254,7 @@ class Desk:
             PAPER,
             challenger=version,
             account=self._paper_account,
+            since=self.simulated_since(),
         )
         return self._told(book, at or self._started_at)
 
@@ -372,7 +403,11 @@ class Desk:
         self._prune()
 
     def on_controls(self, now: datetime) -> None:
+        since = self.champion.guard.since
         self.champion.on_controls(now)
+        if self.champion.guard.since != since:  # re-armed (#471): the simulated limits count again too
+            for book in [*self._shadows, *self.challengers.values()]:
+                book.rearm(now)
 
     def on_time(self, now: datetime) -> None:
         begun = self.watch.on_time(now)  # the quotes stalled (#407)

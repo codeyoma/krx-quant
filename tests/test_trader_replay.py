@@ -33,6 +33,7 @@ from krx_quant.touch import TARGET_VERSION
 from krx_quant.trader import CAPITAL, SYMBOL, replay
 from krx_quant.trader.cells import Cell, open_engine_db, special_windows
 from krx_quant.trader.paper import (
+    COOLING_DOWN,
     EXPIRED,
     HOLDING,
     NO_QUOTE,
@@ -59,6 +60,7 @@ from krx_quant.trader.replay import (
     Trade,
 )
 from krx_quant.trader.selection import Pick
+from krx_quant.trader.store import DAILY_LIMIT
 from tests.trader_doubles import (
     BARRIER,
     CALENDAR,
@@ -105,12 +107,13 @@ def replayed(
     picks: Sequence[Pick],
     *,
     days: Sequence[date] = (TODAY,),
-    capital: float = CAPITAL,
+    capital: int = CAPITAL,
     thresholds: Sequence[float] = (0.6,),
     alone: Cell | None = None,
 ) -> tuple[Pass, list[Trade], Replayer]:
-    """The replay of ``picks`` as one policy (each at its θ, else 0.6, and its fraction) on the engine
-    database in ``state`` and the recordings under ``state / "data"``; its trades."""
+    """The replay of ``picks`` as one policy (each at its θ, else 0.6), by the trader's rules on
+    ``capital``, on the engine database in ``state`` and the recordings under ``state / "data"``; its
+    trades."""
     trades: list[Trade] = []
     db = open_engine_db(state / ENGINE_DB)
     try:
@@ -121,12 +124,11 @@ def replayed(
             CALENDAR.session,
             windows,
             {p.cell: replay.Source(p.role, tuple(days)) for p in picks},
-            capital=capital,
-            fee_rate=FEE,
+            rules=Rules(fee_rate=FEE, capital=capital),
             target_version=TARGET_VERSION,
             thresholds=thresholds,
         )
-        policy = [Ranked(p.cell, 0.6 if p.threshold is None else p.threshold, p.fraction) for p in picks]
+        policy = [Ranked(p.cell, 0.6 if p.threshold is None else p.threshold) for p in picks]
         done = replayer.run([policy], alone=alone, record=trades.append)
     finally:
         db.close()
@@ -171,7 +173,8 @@ def of_paper(trades: Sequence[dict[str, Any]]) -> list[tuple[Any, ...]]:
 # The same trades as the paper trader.
 
 # One cell's day: a take-profit, a rise held off, a stop on the best bid, a time exit on the quote before
-# the barrier, a target reached already, a time exit on the quote after it, buys sized by the cash.
+# the barrier, a target reached already, a time exit on the quote after it. Each signal alone, a share;
+# as a policy, by the trader's rules (#471): nine shares a buy, and three net losses in a row by 10:24.
 ONE_CELL: list[Event] = [
     quote("10:00:01", 69_900, 70_000),  # before the decision: not the buy's
     Read("10:00:02", [Barrier("10:00:00")]),
@@ -215,25 +218,87 @@ ALONE = [
 
 def test_the_replay_makes_the_paper_trader_s_trades_on_one_cell(tmp_path: Path) -> None:
     """The paper trader on its quotes and the replay on them recorded: the same entries (time, price,
-    shares), exits (time, price, why) and nets. 142,000 won buys two shares at 70,100 while the cash
-    holds 140,221 (two shares and their commission): after the 10:31 trade's loss it buys one."""
-    paper, trades, done = both(tmp_path, ONE_CELL, [pick(BARRIER)], capital=142_000)
+    shares), exits (time, price, why) and nets. Each buy nine shares (#471: 5,000 won ÷ 510.6925 a
+    share at its stop). The 10:00 take-profit nets −103.97 won (bought at the ask), and with the 10:10
+    stop and the 10:20 time exit it is the third net loss in a row at 10:24: the 10:30, 10:31 and 10:50
+    rises are cooling down, and the 11:00 one, past 10:54, buys."""
+    paper, trades, done = both(tmp_path, ONE_CELL, [pick(BARRIER)])
 
     assert of_paper(paper) == as_paper(trades)
     assert [(t.entry_at, t.entry, t.quantity, t.reason, t.exit_at, t.exit) for t in trades] == [
-        (at("10:00:02.5"), 70_100, 2, TAKE_PROFIT, at("10:02:00"), 70_250),
-        (at("10:10:02.4"), 70_100, 2, STOP_LOSS, at("10:11:30"), 69_800),
-        (at("10:20:02.3"), 70_100, 2, TIME, at("10:24:00"), 70_000),
-        (at("10:31:02.5"), 70_100, 2, TIME, at("10:35:01"), 70_000),
-        (at("10:50:02.5"), 70_100, 1, STOP_LOSS, at("10:51:00"), 69_700),
-        (at("11:00:02.5"), 70_100, 1, TAKE_PROFIT, at("11:01:00"), 70_250),
+        (at("10:00:02.5"), 70_100, 9, TAKE_PROFIT, at("10:02:00"), 70_250),
+        (at("10:10:02.4"), 70_100, 9, STOP_LOSS, at("10:11:30"), 69_800),
+        (at("10:20:02.3"), 70_100, 9, TIME, at("10:24:00"), 70_000),
+        (at("11:00:02.5"), 70_100, 9, TAKE_PROFIT, at("11:01:00"), 70_250),
     ]
-    cash = 142_000 + sum(t.net for t in trades[:4])  # before the 10:50 buy
-    assert 70_100 <= cash / (1 + FEE) < 2 * 70_100, "one share: the cash, not the capital"
+    assert trades[0].net == pytest.approx(9 * 150 - 9 * 70_100 * FEE - 9 * 70_250 * (FEE + 0.002))
     [result] = done.results
-    assert result.total.trades == 6 and result.total.net == pytest.approx(sum(t["net"] for t in paper))
-    assert result.skipped == {HOLDING: 1, TARGET_REACHED: 1}
+    assert result.total.trades == 4 and result.total.net == pytest.approx(sum(t["net"] for t in paper))
+    assert result.skipped == {HOLDING: 1, COOLING_DOWN: 3}
     assert result.days == {TODAY: pytest.approx(result.total.net)}
+
+
+def test_the_daily_limit_sells_and_stops_the_replay_as_it_does_the_paper_trader(tmp_path: Path) -> None:
+    """Bought nine at 70,100, the bid gaps to 59,500 under the stop: stopped there, −96,645.96 won. Nine
+    bought again at 10:10; a bid of 69,860, above the stop, opens −3,606.43: the day's −100,252.39
+    reaches the daily limit (100,000 won), and the position is sold at that bid at once. The 10:20 rise
+    buys nothing (``daily_limit``); the next day trades again (#471: the replay holds the limits as a
+    challenger's book simulates them)."""
+    events: list[Event] = [
+        Read("10:00:02", [Barrier("10:00:00")]),
+        quote("10:00:02.5", 70_000, 70_100),
+        quote("10:01:00", 59_500, 59_600),
+        Read("10:10:02", [Barrier("10:10:00")]),
+        quote("10:10:02.5", 70_000, 70_100),
+        quote("10:11:00", 69_860, 69_960),
+        Read("10:20:02", [Barrier("10:20:00")]),
+        quote("10:20:02.5", 70_000, 70_100),
+        Read("2026-10-15 10:00:02", [Barrier("2026-10-15 10:00:00")]),
+        quote("2026-10-15 10:00:02.5", 70_000, 70_100),
+        quote("2026-10-15 10:01:00", 70_300, 70_400),
+    ]
+    models(tmp_path)
+    paper = list(reversed(Day(tmp_path, picks=[pick(BARRIER)], rules=Rules(fee_rate=FEE)).run(events)))
+    record_quotes(tmp_path / "data", [e for e in events if isinstance(e, BestQuote)])
+
+    done, trades, _ = replayed(tmp_path, [pick(BARRIER)], days=(TODAY, SECOND))
+
+    assert of_paper(paper) == as_paper(trades)
+    assert [(t.reason, t.exit) for t in trades] == [
+        (STOP_LOSS, 59_500),
+        (DAILY_LIMIT, 69_860),
+        (TAKE_PROFIT, 70_250),
+    ]
+    assert sum(t.net for t in trades[:2]) == pytest.approx(-96_645.96 - 3_606.426)
+    assert done.results[0].skipped == {DAILY_LIMIT: 1}
+
+
+def test_a_buy_whose_own_quote_reaches_the_daily_limit_is_sold_on_it_as_the_paper_trader_sells_it(
+    tmp_path: Path,
+) -> None:
+    """The day's realized −96,645.96 won (the gap's stop at 59,500), nine shares bought at 70,100 against
+    a bid of 69,860: open at once −3,606.43, the day's −100,252.39 past the daily limit on the buy's own
+    quote. The paper trader marks a position on the quote that fills it and sells there (``_take``);
+    the replay too, never the 10:11 take-profit (#478, Codex's review)."""
+    events: list[Event] = [
+        Read("10:00:02", [Barrier("10:00:00")]),
+        quote("10:00:02.5", 70_000, 70_100),
+        quote("10:01:00", 59_500, 59_600),
+        Read("10:10:02", [Barrier("10:10:00")]),
+        quote("10:10:02.5", 69_860, 70_100),  # bought on it, and past the limit on it
+        quote("10:11:00", 70_300, 70_400),
+        Read("10:20:02", [Barrier("10:20:00")]),
+        quote("10:20:02.5", 70_000, 70_100),
+    ]
+
+    paper, trades, done = both(tmp_path, events, [pick(BARRIER)])
+
+    assert of_paper(paper) == as_paper(trades)
+    assert [(t.reason, t.entry_at, t.exit_at, t.exit) for t in trades] == [
+        (STOP_LOSS, at("10:00:02.5"), at("10:01:00"), 59_500),
+        (DAILY_LIMIT, at("10:10:02.5"), at("10:10:02.5"), 69_860),
+    ]
+    assert done.results[0].skipped == {DAILY_LIMIT: 1}
 
 
 def test_the_rank_waits_are_the_paper_trader_s(tmp_path: Path) -> None:
@@ -379,7 +444,8 @@ def test_the_clock_sells_on_the_last_quote_before_the_barrier_when_none_comes_af
 
 def test_a_signal_in_a_gap_of_the_recording_is_left_out_and_counted(tmp_path: Path) -> None:
     """The book's feed of 005930 gone from 10:11:10 to 10:11:20, in the 10:10 rise's window: it is left
-    out of the policy and of the signals alone (``gap``), the rest replayed as before."""
+    out of the policy and of the signals alone (``gap``), the rest replayed as before: the 10:31 trade's
+    loss is the third in a row, and the 10:50 and 11:00 rises are cooling down (#471)."""
     models(tmp_path)
     Day(tmp_path, picks=[pick(BARRIER)], rules=Rules(fee_rate=FEE)).run(ONE_CELL)
     record_quotes(tmp_path / "data", [e for e in ONE_CELL if isinstance(e, BestQuote)])
@@ -389,9 +455,9 @@ def test_a_signal_in_a_gap_of_the_recording_is_left_out_and_counted(tmp_path: Pa
 
     [result] = done.results
     assert result.missing == {GAP: 1}
-    assert [t.bar_close for t in trades] == [
-        at(f"{hm}:00") for hm in ("10:00", "10:20", "10:31", "10:50", "11:00")
-    ], "the 10:10 rise neither traded nor held anything"
+    assert [t.bar_close for t in trades] == [at(f"{hm}:00") for hm in ("10:00", "10:20", "10:31")], (
+        "the 10:10 rise neither traded nor held anything"
+    )
     alone = done.signals[0.6]
     assert (alone.signals, alone.measured, dict(alone.missing)) == (8, 7, {GAP: 1})
     assert replayer.recordings == {TODAY: replay.GAPPED}, "a gap in the session"

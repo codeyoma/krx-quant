@@ -555,8 +555,8 @@ def test_a_challenger_better_from_its_tenth_day_is_promoted_on_the_review_night_
         assert policies.waiting_versions(db) == list(range(21, 4, -1))
 
 
-def values_now(state: Path) -> tuple[int | None, tuple[tuple[str, str, float, float], ...]]:
-    """The champion's version and values (its cells by name, their order, θ and λ)."""
+def values_now(state: Path) -> tuple[int | None, tuple[tuple[str, str, float], ...]]:
+    """The champion's version and values (its cells by name, their order and θ)."""
     db = policies.connect(state / DB_NAME)
     try:
         found = policies.champion(db)
