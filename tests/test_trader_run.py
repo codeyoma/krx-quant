@@ -31,7 +31,7 @@ from krx_quant.trader.cells import open_engine_db
 from krx_quant.trader.limits import ask
 from krx_quant.trader.quotes import QuoteFeed
 from krx_quant.trader.run import next_pick, run_trader
-from krx_quant.trader.selection import NO_COST_MAP, NO_PASS
+from krx_quant.trader.selection import NO_COST_MAP
 from krx_quant.trader.settings import TraderSettings
 from krx_quant.trader.store import CUMULATIVE_LIMIT, TraderStore, read_trades, request_pause
 from krx_quant.trader.store import DB_NAME as TRADER_DB
@@ -216,8 +216,9 @@ async def test_without_a_cost_map_no_cell_trades_until_it_is_read(tmp_path: Path
 
 
 async def test_the_cells_are_picked_again_every_day_at_08_30(tmp_path: Path) -> None:
-    """Started at 08:00 on a cost map passing none; at 08:30 it passes the barrier's breiman, the
-    champion's cell. The clock moves as the trader's loops wait."""
+    """Started at 08:00 on a cost map failing the barrier's breiman, the champion's cell; at 08:30 it
+    passes it. The champion's cell trades on both (#472: the cost map's verdict is no condition), each
+    pick with that cost map's figures. The clock moves as the trader's loops wait."""
     clock = [at("08:00:00")]
     keep(tmp_path, at("2026-10-13 22:31:00"), policy_cell(BARRIER))
 
@@ -240,8 +241,10 @@ async def test_the_cells_are_picked_again_every_day_at_08_30(tmp_path: Path) -> 
             await asyncio.wait_for(task, 5)
 
     first, again = rows(tmp_path, "selections")
-    assert first["at"] < "2026-10-14T08:30:00+09:00" and first["reason"] == NO_PASS
+    assert first["at"] < "2026-10-14T08:30:00+09:00" and first["reason"] is None
     assert again["at"] >= "2026-10-14T08:30:00+09:00" and again["reason"] is None
+    assert [(p["predictor"], p["low"]) for p in json.loads(first["picks"])] == [("breiman", 0.6)]
+    assert [(p["predictor"], p["low"]) for p in json.loads(again["picks"])] == [("breiman", 0.7)]
 
 
 def test_the_next_pick_is_the_first_08_30_after_now() -> None:

@@ -112,7 +112,7 @@ LIMITS = {DAILY_LIMIT: "하루 손실 한도", CUMULATIVE_LIMIT: "누적 손실 
 NO_CELL = {
     "no_pass": "비용 지도에서 시장가 왕복으로 통과한 칸이 없다",
     "no_cost_map": "비용 지도를 읽지 못했다",
-    "not_in_policy": "통과한 칸 가운데 챔피언 정책의 칸이 없다",
+    "not_in_policy": "챔피언 정책의 칸 가운데 사는 칸이 없다",
     "no_policy": "챔피언 정책을 읽지 못했다",
 }
 POLICY_STATUSES = {
@@ -957,8 +957,7 @@ def _pick_section(report: Report) -> str:
             # #471: a loss budget sizes the buy; a pick kept before it bought a fraction of the capital.
             sized = f"비율 {p['fraction']:.2f}" if p.get("fraction") is not None else "손실 예산"
             lines.append(
-                f"{n}. {_cell(p['kind'], p['predictor'], p['role'])}: 하한 {_ratio(p['low'])} − p* "
-                f"{_ratio(p['p_star'])} = {p['low'] - p['p_star']:+.3f} · {p['calls']}건 · θ {theta} · "
+                f"{n}. {_cell(p['kind'], p['predictor'], p['role'])}: {_pick_figures(p)} · θ {theta} · "
                 + sized
             )
         return "\n".join(lines)
@@ -978,6 +977,15 @@ def _pick_section(report: Report) -> str:
         extra = f", {c['why']}" if c.get("why") else ""
         lines.append(f"- {c['kind']} {c['role']} {c.get('predictor') or '-'}: {verdict}({figures}){extra}")
     return "\n".join(lines)
+
+
+def _pick_figures(p: Mapping[str, Any]) -> str:
+    """A pick's cost map figures (#472: a champion's cell trades whatever they are, off the map too)."""
+    low, p_star = p.get("low"), p.get("p_star")
+    if low is None and p_star is None:
+        return "비용 지도에 없음"
+    margin = "" if low is None or p_star is None else f" = {low - p_star:+.3f}"
+    return f"하한 {_ratio(low)} − p* {_ratio(p_star)}{margin} · {p.get('calls') or 0}건"
 
 
 def _cycle_line(report: Report) -> list[str]:
@@ -1065,7 +1073,8 @@ def _night_section(report: Report) -> str:
             lines.append(f"- 밤 정책 맞추기: 실패(종료 코드 {report.refit}). 까닭은 아래 출력에 있다")
         elif not report.fitted:
             lines.append(
-                "- 밤 정책 맞추기: 새 정책을 저장하지 않았다(맞춘 값이 챔피언이나 도는 도전 정책과 같다)"
+                "- 밤 정책 맞추기: 새 정책을 저장하지 않았다(맞춘 값이 챔피언이나 도는 도전 정책과 같거나, "
+                "#472: 정책 전체의 재생이 하한을 넘지 못했다. 까닭은 아래 출력에 있다)"
             )
     if len(lines) == 1:
         lines.append("- 바뀐 것 없음")

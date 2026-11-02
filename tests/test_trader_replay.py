@@ -109,7 +109,7 @@ def replayed(
     days: Sequence[date] = (TODAY,),
     capital: int = CAPITAL,
     thresholds: Sequence[float] = (0.6,),
-    alone: Cell | None = None,
+    alone: Sequence[Cell] = (),
 ) -> tuple[Pass, list[Trade], Replayer]:
     """The replay of ``picks`` as one policy (each at its θ, else 0.6), by the trader's rules on
     ``capital``, on the engine database in ``state`` and the recordings under ``state / "data"``; its
@@ -388,14 +388,14 @@ def test_each_signal_alone_buys_on_the_first_quote_after_its_display_and_pays_on
     Day(tmp_path, picks=[pick(BARRIER)], rules=Rules(fee_rate=FEE)).run(ONE_CELL)
     record_quotes(tmp_path / "data", [e for e in ONE_CELL if isinstance(e, BestQuote)])
 
-    done, _, _ = replayed(tmp_path, [pick(BARRIER)], thresholds=(0.6, 0.8), alone=BARRIER)
+    done, _, _ = replayed(tmp_path, [pick(BARRIER)], thresholds=(0.6, 0.8), alone=(BARRIER,))
 
     up = 70_250 - 70_100 - (70_100 * FEE + 70_250 * FEE + 70_250 * 0.002)
     assert up == pytest.approx(-11.5525) and net_of(70_100, 70_250, 1, FEE) == pytest.approx(up)
     down = 69_800 - 70_100 - (70_100 * FEE + 69_800 * FEE + 69_800 * 0.002)
     assert down == pytest.approx(-460.585) and net_of(70_100, 69_800, 1, FEE) == pytest.approx(down)
-    assert done.counts == {"read": 8, "rises": 8}
-    alone = done.signals[0.6]
+    assert done.counts[BARRIER] == {"read": 8, "rises": 8}
+    alone = done.signals[BARRIER][0.6]
     assert (alone.signals, alone.measured, alone.bought, dict(alone.refused)) == (
         8,
         8,
@@ -406,7 +406,33 @@ def test_each_signal_alone_buys_on_the_first_quote_after_its_display_and_pays_on
     assert alone.net == pytest.approx(sum(net_of(bought, sold, 1, FEE) for bought, sold in ALONE))
     assert alone.ticks == pytest.approx(alone.net / 100), "ticks of the reference: 100 won"
     assert alone.days == {TODAY: [8, pytest.approx(alone.ticks)]}, "the one not bought nets 0"
-    assert done.signals[0.8].signals == 0, "every rise at 0.7"
+    assert alone.bought_on == {TODAY: 7} and alone.days_bought == 1, "#472: the days with a buy"
+    assert done.signals[BARRIER][0.8].signals == 0, "every rise at 0.7"
+
+
+def test_several_cells_are_measured_alone_in_one_pass(tmp_path: Path) -> None:
+    """#472: the fit measures every cell alone in one pass. The 4-minute and the 15-minute barrier both
+    rise at 10:00, each bought alone a share at 70,100 and sold at the target 70,250 (w 2): neither
+    holds the other off, and the day's recording is read once."""
+    models(tmp_path)
+    fifteen = Barrier("10:00:00", kind=FIFTEEN.kind, predictor=FIFTEEN.predictor)
+    events: list[Event] = [
+        Read("10:00:02", [Barrier("10:00:00"), fifteen]),
+        quote("10:00:02.5", 70_000, 70_100),
+        quote("10:01:00", 70_300, 70_400),
+    ]
+    cells = [pick(BARRIER), pick(FIFTEEN, role="baseline")]
+    Day(tmp_path, picks=cells, rules=Rules(fee_rate=FEE)).run(events)
+    record_quotes(tmp_path / "data", [e for e in events if isinstance(e, BestQuote)])
+
+    done, _, replayer = replayed(tmp_path, cells, alone=(BARRIER, FIFTEEN))
+
+    assert (replayer.passes, replayer.days_read) == (1, 1)
+    for cell in (BARRIER, FIFTEEN):
+        alone = done.signals[cell][0.6]
+        assert (alone.signals, alone.bought, alone.days_bought) == (1, 1, 1), cell
+        assert alone.net == pytest.approx(net_of(70_100, 70_250, 1, FEE)), cell
+        assert done.counts[cell] == {"read": 1, "rises": 1}, cell
 
 
 def test_a_rise_read_after_its_time_barrier_s_last_five_seconds_is_not_bought(tmp_path: Path) -> None:
@@ -451,14 +477,14 @@ def test_a_signal_in_a_gap_of_the_recording_is_left_out_and_counted(tmp_path: Pa
     record_quotes(tmp_path / "data", [e for e in ONE_CELL if isinstance(e, BestQuote)])
     record_gap(tmp_path / "data", at("10:11:10"), at("10:11:20"))
 
-    done, trades, replayer = replayed(tmp_path, [pick(BARRIER)], alone=BARRIER)
+    done, trades, replayer = replayed(tmp_path, [pick(BARRIER)], alone=(BARRIER,))
 
     [result] = done.results
     assert result.missing == {GAP: 1}
     assert [t.bar_close for t in trades] == [at(f"{hm}:00") for hm in ("10:00", "10:20", "10:31")], (
         "the 10:10 rise neither traded nor held anything"
     )
-    alone = done.signals[0.6]
+    alone = done.signals[BARRIER][0.6]
     assert (alone.signals, alone.measured, dict(alone.missing)) == (8, 7, {GAP: 1})
     assert replayer.recordings == {TODAY: replay.GAPPED}, "a gap in the session"
 
@@ -479,23 +505,23 @@ def test_no_quote_after_the_decision_or_none_to_sell_on_leaves_the_signal_out(tm
     Day(tmp_path, picks=[pick(BARRIER)], rules=Rules(fee_rate=FEE)).run(events)
     record_quotes(tmp_path / "data", [e for e in events if isinstance(e, BestQuote)])
 
-    done, trades, _ = replayed(tmp_path, [pick(BARRIER)], alone=BARRIER)
+    done, trades, _ = replayed(tmp_path, [pick(BARRIER)], alone=(BARRIER,))
 
     assert trades == []
     assert done.results[0].missing == {NO_QUOTE: 1, NO_EXIT_QUOTE: 1}
-    assert done.signals[0.6].missing == {NO_QUOTE: 1, NO_EXIT_QUOTE: 1}
+    assert done.signals[BARRIER][0.6].missing == {NO_QUOTE: 1, NO_EXIT_QUOTE: 1}
 
 
 def test_a_day_without_its_recording_is_left_out_and_counted(tmp_path: Path) -> None:
     models(tmp_path)
     Day(tmp_path, picks=[pick(BARRIER)], rules=Rules(fee_rate=FEE)).run(ONE_CELL)
 
-    done, trades, replayer = replayed(tmp_path, [pick(BARRIER)], alone=BARRIER)
+    done, trades, replayer = replayed(tmp_path, [pick(BARRIER)], alone=(BARRIER,))
 
     assert trades == []
     assert done.results[0].missing == {NO_RECORDING: 8}, "each rise decided, none traded nor held"
-    assert done.signals[0.6].missing == {NO_RECORDING: 8}
-    assert done.signals[0.6].measured == 0 and done.signals[0.6].per_signal() is None
+    assert done.signals[BARRIER][0.6].missing == {NO_RECORDING: 8}
+    assert done.signals[BARRIER][0.6].measured == 0 and done.signals[BARRIER][0.6].per_signal() is None
     assert replayer.recordings == {TODAY: NO_RECORDING}
 
 
@@ -506,11 +532,11 @@ def test_an_algorithm_s_prediction_of_another_target_s_model_never_buys(tmp_path
     Day(tmp_path, picks=[pick(BARRIER)], rules=Rules(fee_rate=FEE)).run(events)  # no model recorded
     record_quotes(tmp_path / "data", [e for e in events if isinstance(e, BestQuote)])
 
-    done, trades, _ = replayed(tmp_path, [pick(BARRIER)], alone=BARRIER)
+    done, trades, _ = replayed(tmp_path, [pick(BARRIER)], alone=(BARRIER,))
 
     assert trades == []
     assert done.results[0].skipped == {OFF_TARGET: 1}
-    assert done.counts == {"read": 1, OFF_TARGET: 1}
+    assert done.counts[BARRIER] == {"read": 1, OFF_TARGET: 1}
 
 
 # A day at a time.
@@ -543,7 +569,7 @@ def test_the_recordings_are_read_a_day_at_a_time(tmp_path: Path, monkeypatch: py
 
     monkeypatch.setattr(replay, "read_recording", tracked)
 
-    done, trades, replayer = replayed(tmp_path, [pick(BARRIER)], days=(TODAY, SECOND), alone=BARRIER)
+    done, trades, replayer = replayed(tmp_path, [pick(BARRIER)], days=(TODAY, SECOND), alone=(BARRIER,))
 
     assert len(alive) == 2 and len(trades) == 2
     assert replayer.recordings == {TODAY: replay.RECORDED, SECOND: replay.RECORDED}

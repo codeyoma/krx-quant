@@ -10,13 +10,22 @@ trader depends on nothing more.
 
 **Which cells.** A cell is a (kind, predictor) of the traded kinds (``TRADED_KINDS``) and the cost
 map's three predictors (``ROLES``): the final consensus (the direction's only), the kind's
-first-ranked algorithm, its strongest baseline. A cell is picked when its verdict at a market
-order's round trip (``verdict.market``) is ``pass``: its hit rate's lower bound above the
-breakeven p*. ``fail`` and ``few`` are not traded, nor a cell whose verdict is missing (no p*).
+first-ranked algorithm, its strongest baseline. Every cell the cost map names is kept with its
+figures (``Selection.named``, a figure the cost map lacks None): the champion's cells trade whatever
+their verdict (#472, ``policy.apply``: the nightly fit judged each on its replayed one-share net). A
+cell whose verdict at a market order's round trip (``verdict.market``) is ``pass`` (its hit rate's
+lower bound above the breakeven p*) is also a pick (``Selection.picks``): what the cost map alone
+would trade, kept as a diagnosis (``no_pass`` when none passes) and no longer a condition.
+
+> **바뀜** (2026-11-03, #472): a cell traded only when it passed (``fail``, ``few`` and no verdict
+> never traded), and a pass whose f* was not above 0 was not picked → the cost map's verdict is a
+> diagnosis; the champion's cells trade. 이유: spec #468 3 "진입": the nightly fit enters a cell by
+> the lower bound of its replayed one-share net instead.
 
 **Rank.** The picks are ranked by their hit rate's lower bound less p* (``Pick.priority``),
-greatest first; of two alike, by the kinds' order, then the predictors'. Of the rises of one bar
-close, the first ranked buys (``paper.py``).
+greatest first; of two alike, by the kinds' order, then the predictors'. Under a policy its own order
+ranks its cells (``policy.apply``). Of the rises of one bar close, the first ranked buys
+(``paper.py``).
 
 **Kelly.** Each pick's Kelly fraction of the capital, from its hit rate's lower bound p and the
 row's width W and market cost C (ticks) at its reference price: a call right gains W − C ticks,
@@ -59,15 +68,18 @@ log = logging.getLogger(__name__)
 
 PASS = "pass"
 # Why no cell trades.
-NO_PASS = "no_pass"  # the cost map was read: no cell's verdict passes
+NO_PASS = "no_pass"  # the cost map was read: no cell's verdict passes (and no champion's cell trades)
 NO_COST_MAP = "no_cost_map"  # it could not be read
-NOT_IN_POLICY = "not_in_policy"  # cells pass, none of them the champion policy's (#399, ``policy.apply``)
+NOT_IN_POLICY = (
+    "not_in_policy"  # cells pass, none of them the champion's, none of its trading (``policy.apply``)
+)
 NO_POLICY = "no_policy"  # the champion policy could not be read (#399): nothing trades
 NO_CHAMPION = "no_champion"  # no champion yet (#469): nothing trades before the first
-# Why a policy's cell does not trade (#469, ``policy.apply``), besides the cost map's verdict: its
-# predictor stopped predicting (for the rest of the review cycle), or the cost map does not name it
-# today (another predictor holds its role).
+# Why a policy's cell does not trade (#469, ``policy.apply``): its predictor stopped predicting (for
+# the rest of the review cycle), or (#472) the cost map could not be read (``NO_COST_MAP``).
 GONE = "gone"
+# Why it did not trade before #472, kept by the picks of then: the cost map did not name it that day
+# (another predictor held its role). Since #472 such a cell trades (``Pick.unmapped``).
 OFF_MAP = "not_on_cost_map"
 # A cell with one of these verdicts may be practised (#427): ``few`` and none are left out.
 FAIL = "fail"
@@ -84,18 +96,19 @@ class CostMapError(Exception):
 
 @dataclass(frozen=True)
 class Pick:
-    """A cell the cost map passes, with what it was picked on."""
+    """A cell of the cost map, with its figures there (#472: each None the cost map lacks, every one
+    for a champion's cell it does not name)."""
 
     kind: str
     role: str  # consensus, top or baseline
     predictor: str  # its name: consensus-final, an algorithm's, a baseline's
-    p_star: float  # the breakeven hit rate at a market order's round trip
-    low: float  # its hit rate's lower bound (the Wilson 95%)
+    p_star: float | None  # the breakeven hit rate at a market order's round trip
+    low: float | None  # its hit rate's lower bound (the Wilson 95%)
     calls: int
-    width: float  # the row's W, ticks
-    cost: float  # the row's market round trip C, ticks
-    reference_price: float  # where W and C were read
-    tick: float
+    width: float | None  # the row's W, ticks
+    cost: float | None  # the row's market round trip C, ticks
+    reference_price: float | None  # where W and C were read
+    tick: float | None
     # f*, uncut, a diagnosis alone (#471); None for a practice cell whose call right does not pay (#427)
     kelly: float | None
     # The rise's probability that buys, the policy's for this cell (#399); None: the trader's
@@ -112,8 +125,15 @@ class Pick:
         return Cell(self.kind, self.predictor)
 
     @property
-    def priority(self) -> float:
-        return self.low - self.p_star
+    def priority(self) -> float | None:
+        """Its hit rate's lower bound less p*; None without either."""
+        return None if self.low is None or self.p_star is None else self.low - self.p_star
+
+    @classmethod
+    def unmapped(cls, kind: str, role: str, predictor: str) -> Pick:
+        """A champion's cell the cost map does not name today (#472: it trades all the same): no
+        figure."""
+        return cls(kind, role, predictor, None, None, 0, None, None, None, None, None)
 
     def as_json(self) -> dict[str, Any]:
         return {
@@ -150,12 +170,15 @@ class Selection:
     # The cell the mock book would practise on this cost map (#427, module doc); None: no cell can.
     practice: Pick | None = None
     # Under a policy (#469, ``policy.apply``): each of its cells in its order, whether it trades and,
-    # if not, why (``GONE``, ``OFF_MAP``, or the cost map's verdict).
+    # if not, why (``GONE``, ``NO_COST_MAP``; ``OFF_MAP`` or the cost map's verdict before #472).
     cells: tuple[dict[str, Any], ...] = ()
     # The evaluation version and the review cycle the pick is made in (#469, ``review.py``); None
     # before the evaluation was begun.
     evaluation: int | None = None
     cycle: int | None = None
+    # Every cell the cost map names, with its figures, whatever its verdict (#472): what a policy's
+    # cells trade on (``policy.apply``); empty under a policy and for a cost map not read.
+    named: tuple[Pick, ...] = ()
 
     @property
     def practising(self) -> bool:
@@ -170,8 +193,9 @@ class Selection:
         if self.picks:
             under = "" if self.policy is None else f"policy {self.policy}: "
             return under + "; ".join(
-                f"{p.kind} {p.predictor} ({p.role}: low {p.low:.3f} − p* {p.p_star:.3f} = {p.priority:+.3f},"
-                f" f* {p.kelly or 0:.2f}" + ("" if p.threshold is None else f", θ {p.threshold:g}") + ")"
+                f"{p.kind} {p.predictor} ({p.role}: {_figures(p)}"
+                + ("" if p.threshold is None else f", θ {p.threshold:g}")
+                + ")"
                 for p in self.picks
             )
         if self.reason == NO_COST_MAP:
@@ -186,17 +210,21 @@ class Selection:
         if self.reason == NO_CHAMPION:
             return "no champion yet: nothing trades before the first (#469); " + "; ".join(seen)
         if self.reason == NOT_IN_POLICY:
-            return f"none of policy {self.policy}'s cells passes: " + "; ".join(seen) + self._missing()
+            return f"none of policy {self.policy}'s cells trades: " + "; ".join(seen) + self._missing()
         return "none passes: " + "; ".join(seen) + self._missing()
 
     def _missing(self) -> str:
-        """The policy's cells off the cost map or gone (#469), for the log line."""
-        found = [
-            f"{c['kind']} {c['predictor']} {c['why']}"
-            for c in self.cells
-            if not c["traded"] and c["why"] in (GONE, OFF_MAP)
-        ]
+        """The policy's cells gone (#469), for the log line."""
+        found = [f"{c['kind']} {c['predictor']} {c['why']}" for c in self.cells if not c["traded"]]
         return f" (policy {self.policy}: " + "; ".join(found) + ")" if found else ""
+
+
+def _figures(p: Pick) -> str:
+    """A pick's cost map figures for the log line (#472: off the cost map, none)."""
+    if p.priority is None:
+        return "not on the cost map" if p.low is None and p.p_star is None else "no lower bound or p*"
+    assert p.low is not None and p.p_star is not None
+    return f"low {p.low:.3f} − p* {p.p_star:.3f} = {p.priority:+.3f}, f* {p.kelly or 0:.2f}"
 
 
 def kelly(low: float, width: float, cost: float, tick: float, price: float) -> float | None:
@@ -220,6 +248,7 @@ def choose(body: Mapping[str, Any]) -> Selection:
     as_of = body.get("as_of") if isinstance(body.get("as_of"), str) else None
     rows = {r.get("kind"): r for r in body["rows"] if isinstance(r, Mapping)}
     picks: list[Pick] = []
+    named: dict[Cell, Pick] = {}  # every cell named, the first of a predictor named twice (#472)
     practised: list[Pick] = []  # the cells that may be practised (#427, module doc)
     considered: list[dict[str, Any]] = []
     for kind in TRADED_KINDS:
@@ -245,9 +274,6 @@ def choose(body: Mapping[str, Any]) -> Selection:
             seen["low"], seen["p_star"] = low, p_star
             verdict = _dig(predictor, "verdict", "market")
             seen["verdict"] = verdict
-            if verdict is None:
-                seen["why"] = row.get("breakeven_missing") or "no p*"
-                continue
             figures = {
                 "low": low,
                 "p_star": p_star,
@@ -263,24 +289,31 @@ def choose(body: Mapping[str, Any]) -> Selection:
                     known["low"], known["width"], known["cost"], known["tick"], known["reference_price"]
                 )
             name = predictor["algorithm"]
+            cell = _pick(kind, role, name, calls or 0, figures, f)
+            named.setdefault(cell.cell, cell)
+            if verdict is None:
+                seen["why"] = row.get("breakeven_missing") or "no p*"
+                continue
             if verdict in PRACTISED and _sound(known, len(figures)):
                 practised.append(
-                    _pick(kind, role, name, calls or 0, known, f, PRACTICE_SHARES, practice=True)
+                    _pick(kind, role, name, calls or 0, figures, f, PRACTICE_SHARES, practice=True)
                 )
             if verdict != PASS:
                 continue
-            if f is None or f <= 0:
-                seen["why"] = "its pass cannot be sized" if f is None else "Kelly at most 0"
-                continue
             seen["picked"] = True
-            picks.append(_pick(kind, role, name, calls or 0, known, f))
+            picks.append(cell)
     picks.sort(key=_rank)
     unique: dict[Cell, Pick] = {}
     for p in picks:
         unique.setdefault(p.cell, p)
     practice = min(practised, key=_rank) if practised else None
     return Selection(
-        tuple(unique.values()), tuple(considered), as_of, None if unique else NO_PASS, practice=practice
+        tuple(unique.values()),
+        tuple(considered),
+        as_of,
+        None if unique else NO_PASS,
+        practice=practice,
+        named=tuple(named.values()),
     )
 
 
@@ -289,23 +322,23 @@ def _pick(
     role: str,
     predictor: str,
     calls: int,
-    known: Mapping[str, float],
+    figures: Mapping[str, float | None],
     f: float | None,
     quantity: int | None = None,
     practice: bool = False,
 ) -> Pick:
-    """A cell picked on a row's figures ``known`` (every one of them there)."""
+    """A cell on a row's ``figures`` (each None the row lacks)."""
     return Pick(
         kind=kind,
         role=role,
         predictor=predictor,
-        p_star=known["p_star"],
-        low=known["low"],
+        p_star=figures["p_star"],
+        low=figures["low"],
         calls=calls,
-        width=known["width"],
-        cost=known["cost"],
-        reference_price=known["reference_price"],
-        tick=known["tick"],
+        width=figures["width"],
+        cost=figures["cost"],
+        reference_price=figures["reference_price"],
+        tick=figures["tick"],
         kelly=f,
         quantity=quantity,
         practice=practice,
@@ -313,9 +346,10 @@ def _pick(
 
 
 def _rank(p: Pick) -> tuple[float, int, int]:
-    """The picks' order (module doc): the greatest lower bound less p* first, then the kinds', then the
-    predictors'."""
-    return (-p.priority, TRADED_KINDS.index(p.kind), ROLES.index(p.role))
+    """The picks' order (module doc): the greatest lower bound less p* first (one without either
+    last), then the kinds', then the predictors'."""
+    priority = p.priority
+    return (math.inf if priority is None else -priority, TRADED_KINDS.index(p.kind), ROLES.index(p.role))
 
 
 def _sound(known: Mapping[str, float], wanted: int) -> bool:

@@ -42,7 +42,12 @@ leaderboard's query (symbol, period, special situations):
   share wrong the other way: P(rise | long) − P(fall | long) and the short's alike), its
   calls, and its research P&L per trade (the kind's own: ticks, a daily kind's basis points;
   a short of the stock, and through the inverse product). The leaderboard's own statistics,
-  so the same query gives the same numbers there and in the stats window;
+  so the same query gives the same numbers there and in the stats window. Beside them its rise
+  calls alone (#472, ``long``: the trader buys on rises only): how many, and the share whose answer
+  was the rise, with its Wilson interval. The direction's rise is its touch label's ``up`` (the
+  best bid reached the upper target in the four minutes, whether or not the lower one was reached
+  first, ``touch.py``), a barrier's ``up_first`` (the upper one reached first). A description:
+  neither the verdict nor the trader reads it;
 - a verdict a predictor and cost: ``pass`` when the hit rate's lower bound is above p*,
   ``fail`` when not, ``few`` with fewer calls than the leaderboard's minimum sample; None
   without p*.
@@ -73,7 +78,7 @@ from krx_quant.pricing import (
     tick_size,
 )
 from krx_quant.products import INVERSE_PRODUCTS
-from krx_quant.stats import Entry, Interval, Leaderboard, Scored, interval_json
+from krx_quant.stats import Entry, Interval, Leaderboard, Scored, interval_json, wilson
 
 BP = 10_000
 SPREAD_TICKS = 1  # a market order's spread, as the research's cost table assumes
@@ -289,6 +294,7 @@ def _row(
             return None
         made = [sides(r) for r in records.get(e.algorithm, [])]
         calls = [(call, outcome) for call, outcome in made if call != 0]
+        rises = [outcome for call, outcome in calls if call == 1]
         precision = e.summary.precision
         verdict = None
         if breakeven is not None:
@@ -302,6 +308,10 @@ def _row(
             "calls": len(calls),
             "precision": interval_json(precision),
             "edge": sum(call * outcome for call, outcome in calls) / len(calls) if calls else None,
+            "long": {
+                "calls": len(rises),
+                "precision": interval_json(wilson(sum(o == 1 for o in rises), len(rises))),
+            },
             "pnl": pnl,
             "pnl_inverse": inverse,
             "verdict": verdict,

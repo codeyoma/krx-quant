@@ -18,7 +18,7 @@ import json
 import sqlite3
 from contextlib import closing
 from dataclasses import replace
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -61,7 +61,6 @@ from tests.trader_doubles import (
     at,
     cost_map,
     cost_row,
-    first_champion,
     keep,
     policy_cell,
     predictor,
@@ -74,11 +73,20 @@ __all__ = ["kis_mock"]  # the fixture, used here
 # No cell passes: the barrier's breiman fails (0.60 under p* 0.63), the practice cell.
 FAILING = cost_map([cost_row("barrier", top=predictor("breiman", 0.60, "fail"))])
 PASSING = cost_map([cost_row("barrier", top=predictor("breiman", 0.70, "pass"))])
-OTHER = Cell("barrier_15m", "breiman")  # a cell of the champion the cost map does not pass
 
 
 def practised() -> Selection:
     return choose(FAILING)
+
+
+def crowned(state: Path, made: datetime, *cells: policies.PolicyCell) -> int:
+    """A policy of ``cells`` kept at ``made`` and crowned the champion at once (#472: a champion's cell
+    trades whatever the cost map's verdict, so a champion cell comes back with a champion). Its
+    version."""
+    version = keep(state, made, *cells)
+    with closing(sqlite3.connect(state / DB_NAME)) as db:
+        assert policies.crown(db, made, version, "test", {})
+    return version
 
 
 def shadows(state: Path) -> list[dict[str, Any]]:
@@ -225,8 +233,8 @@ async def test_the_practice_is_picked_only_on_a_cost_map_and_a_champion_read_wit
             assert on.champion.cells == [cell] and on.champion.practice_state["active"]
             assert on.champion.practice_state["cell"]["quantity"] == 1
             assert mock_picks(tmp_path)[-1]["reason"] == NO_CHAMPION
-            keep(tmp_path, at("2026-10-13 22:31:00"), policy_cell(OTHER))
-            on.select(choose(PASSING), at("09:03:00"))  # the champion's cell is not the one passing
+            keep(tmp_path, at("2026-10-13 22:31:00"))  # an empty champion (#472: its cells trade)
+            on.select(choose(PASSING), at("09:03:00"))  # the champion has not the one passing
             assert on.champion.cells == [cell] and on.champion.practice_state["active"]
             last = mock_picks(tmp_path)[-1]
             assert (last["mode"], last["reason"], last["practice"], last["policy_id"]) == (
@@ -263,7 +271,7 @@ async def test_a_day_without_a_champion_cell_practises_a_share_on_kis_kept_as_pr
     kis_mock: tuple[FakeKis, FakeAccount], tmp_path: Path
 ) -> None:
     fake, account = kis_mock
-    assert keep(tmp_path, at("2026-10-12 22:31:00"), policy_cell(OTHER)) == 1  # the champion
+    assert keep(tmp_path, at("2026-10-12 22:31:00")) == 1  # the champion, empty
     desk = MockDesk(tmp_path, fake, account, selection=practised(), practice=True)
 
     await desk.run([TEN, BOUGHT, TAKEN, Fill("10:02:30")])
@@ -375,7 +383,7 @@ async def test_the_kis_checks_count_the_practice_and_the_records_and_the_gate_do
     mode's execution checks count the day, its round trip and its legs against the practice shadow;
     the champion's record, its paper account and the live gate hold nothing of it."""
     fake, account = kis_mock
-    keep(tmp_path, at("2026-10-12 22:31:00"), policy_cell(OTHER))
+    keep(tmp_path, at("2026-10-12 22:31:00"))  # an empty champion
     desk = MockDesk(
         tmp_path,
         fake,
@@ -417,9 +425,10 @@ async def test_a_restart_with_a_practice_position_sells_it_and_the_reconcile_hol
     as the ledger has it (the share is the ledger's), and the share is sold at the first quote's bid,
     as is the practice shadow's in paper. The champion's cell then buys as ever."""
     fake, account = kis_mock
-    keep(tmp_path, at("2026-10-12 22:31:00"), policy_cell(BARRIER))
+    keep(tmp_path, at("2026-10-12 22:31:00"))  # an empty champion: no champion cell (#472)
     await MockDesk(tmp_path, fake, account, selection=practised(), practice=True).run([TEN, BOUGHT])
     assert [(t["practice"], t["exit"]) for t in read_trades(tmp_path / DB_NAME, None, 10)] == [(True, None)]
+    crowned(tmp_path, at("10:04:00"), policy_cell(BARRIER))  # a champion cell back
 
     again = MockDesk(
         tmp_path,
@@ -447,7 +456,7 @@ async def test_a_restart_with_a_practice_position_sells_it_and_the_reconcile_hol
         1,
         TIME,
     )
-    assert (champion["practice"], champion["policy"], champion["entry"]["quantity"]) == (False, 1, 14)
+    assert (champion["practice"], champion["policy"], champion["entry"]["quantity"]) == (False, 2, 14)
     [shadowed, _] = shadows(tmp_path)
     assert (shadowed["practice"], shadowed["exit_reason"]) == (1, TIME), "the practice shadow sold it"
     assert again.state_now is not None
@@ -461,10 +470,11 @@ async def test_a_champion_cell_back_stops_new_practice_and_the_practice_position
     barrier's breiman: the practice is picked no more, and the barrier's rise of 10:01 finds the
     account's one position taken (``holding``) while the champion's shadow buys it in paper. The
     practice share is sold at its time barrier (10:04); the barrier's rise of 10:08 buys on KIS. The
-    barrier's breiman is the champion's cell throughout (#469: nothing but the practice trades before
-    the first champion)."""
+    champion is empty until the barrier's breiman's policy is crowned for the 10:01 pick (#472: a
+    champion's cell trades whatever the cost map's verdict, so only a champion with a cell stops the
+    practice; #469: nothing but the practice trades before the first champion)."""
     fake, account = kis_mock
-    first_champion(tmp_path)
+    keep(tmp_path, at("2026-10-13 22:31:00"))
     start = choose(
         cost_map(
             [
@@ -480,7 +490,11 @@ async def test_a_champion_cell_back_stops_new_practice_and_the_practice_position
         [
             Read("10:00:02.3", [Direction("10:00:00")]),
             quote("10:00:02.5", 70_000, 70_100),
-            Repicked("10:01:00", choose(PASSING)),
+            Repicked(
+                "10:01:00",
+                choose(PASSING),
+                before=lambda: crowned(tmp_path, at("10:00:59"), policy_cell(BARRIER)),
+            ),
             Read("10:01:02.3", [Barrier("10:01:00")]),
             quote("10:01:02.5", 70_000, 70_100),
             quote("10:03:59", 70_000, 70_100),

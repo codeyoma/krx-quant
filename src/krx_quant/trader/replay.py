@@ -44,7 +44,9 @@ stalls: a gap leaves its signals out instead (below).
 - *Each signal alone, a share* (``Signals``): each rise of a cell the entry rules let buy, decided
   at its read as if nothing were held and no other cell ranked: bought or not (``special``,
   ``expired``, ``target_reached``), its exit and its net in won and in ticks of its reference;
-  tallied at each θ of the grid its probability reaches.
+  tallied at each θ of the grid its probability reaches, by day (the signals measured, their net,
+  those bought: #472's fit enters a cell on them). A pass measures every cell it is asked for
+  (``Replayer.run``'s ``alone``), each on its own.
 - *The policy* (``Policy``): its cells in their rank at their θ, one position at a time, with the
   waits the priority makes, sized and held as the paper book is (#471): its trades, those that
   gained, their net in won and the capital's log growth, by cell and by day (``Result``).
@@ -71,7 +73,7 @@ import logging
 import math
 import sqlite3
 from collections import Counter
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
@@ -141,6 +143,8 @@ GAP_FEEDS = frozenset({BOOK.tr_id, TRADE.tr_id})
 GAP_LOOKBACK = 10
 # A day's recording, as the replay found it (``Replayer.recordings``).
 RECORDED, GAPPED = "recorded", "gaps"
+# The intervals' level, two-sided: the engine's "95%".
+LEVEL = 0.95
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 _MICRO = timedelta(microseconds=1)
@@ -406,7 +410,7 @@ class Signals:
     """A cell's signals at a θ, each measured alone a share (module doc): how many, those whose data
     is missing and those given up by why, those bought, their exits, those that gained and their net
     in won and in ticks of their reference; by day, the signals measured and their net in ticks (one
-    given up nets 0)."""
+    given up nets 0), and those bought (#472: the fit asks for trades on enough days)."""
 
     signals: int = 0
     missing: Counter[str] = field(default_factory=Counter)
@@ -417,10 +421,16 @@ class Signals:
     net: float = 0.0
     ticks: float = 0.0
     days: dict[date, list[float]] = field(default_factory=dict)  # [signals measured, Σ ticks]
+    bought_on: Counter[date] = field(default_factory=Counter)
 
     @property
     def measured(self) -> int:
         return self.signals - sum(self.missing.values())
+
+    @property
+    def days_bought(self) -> int:
+        """The days with a signal bought."""
+        return len(self.bought_on)
 
     def add(self, signal: Signal, filled: Fill, fee_rate: float) -> None:
         self.signals += 1
@@ -436,16 +446,18 @@ class Signals:
         net = net_of(filled.entry, filled.sale.price, 1, fee_rate)
         ticks = net / signal.tick
         self.bought += 1
+        self.bought_on[kst_day(signal.bar_close)] += 1
         self.wins += net > 0
         self.exits[filled.sale.reason] += 1
         self.net += net
         self.ticks += ticks
         day[1] += ticks
 
-    def per_signal(self) -> Interval | None:
+    def per_signal(self, level: float = LEVEL) -> Interval | None:
         """The net in ticks per signal measured (one given up 0), each day's mean one value, with its
-        day-level 95% interval (``stats.day_mean``); None from fewer than two days."""
-        return day_mean({d: [total / n] for d, (n, total) in self.days.items() if n})
+        day-level interval two-sided at ``level`` (``stats.day_mean``; 95% unless asked, #472's fit
+        asks for its Bonferroni level); None from fewer than two days."""
+        return day_mean({d: [total / n] for d, (n, total) in self.days.items() if n}, level)
 
     def as_json(self) -> dict[str, Any]:
         interval = self.per_signal()
@@ -457,6 +469,7 @@ class Signals:
             "bought": self.bought,
             "wins": self.wins,
             "exits": dict(sorted(self.exits.items())),
+            "days_bought": self.days_bought,
             "net": round(self.net, 3),
             "ticks": round(self.ticks, 4),
             "per_signal": None
@@ -718,13 +731,13 @@ class Source:
 
 @dataclass(frozen=True)
 class Pass:
-    """A pass's outputs: each policy's ``Result``, in the order asked; the cell measured alone, its
+    """A pass's outputs: each policy's ``Result``, in the order asked; each cell measured alone, its
     ``Signals`` at each θ and the counts of its predictions read (``read``, ``off_target``, the entry
     rules' reasons, ``rises``)."""
 
     results: tuple[Result, ...]
-    signals: Mapping[float, Signals]
-    counts: Mapping[str, int]
+    signals: Mapping[Cell, Mapping[float, Signals]]
+    counts: Mapping[Cell, Mapping[str, int]]
 
 
 class Replayer:
@@ -763,16 +776,17 @@ class Replayer:
     def run(
         self,
         policies: Sequence[Sequence[Ranked]],
-        alone: Cell | None = None,
+        alone: Collection[Cell] = (),
         record: Callable[[Trade], None] | None = None,
     ) -> Pass:
         """One pass over the days: each of ``policies`` replayed (its trades to ``record``, if given)
-        and ``alone``'s signals measured alone."""
+        and the signals of each cell of ``alone`` measured alone (#472: every cell the fit tries, in
+        the one pass)."""
         self.passes += 1
         books = [Policy(p, self.rules, self._sessions, record) for p in policies]
-        cells = {r.cell for p in policies for r in p} | ({alone} if alone is not None else set())
-        signals = {t: Signals() for t in self._thresholds}
-        counts: Counter[str] = Counter()
+        cells = {r.cell for p in policies for r in p} | set(alone)
+        signals = {c: {t: Signals() for t in self._thresholds} for c in alone}
+        counts: dict[Cell, Counter[str]] = {c: Counter() for c in alone}
         for day in sorted({d for c in cells for d in self._cells[c].days}):
             self._meter.reset()
             recording = read_recording(self._data_dir, day)
@@ -787,14 +801,18 @@ class Replayer:
             }
             for book in books:
                 book.day(reads, fills, windows)
-            if alone is not None:
-                self._alone(reads.get(alone, ()), fills, windows, signals, counts)
+            for cell in alone:
+                self._alone(reads.get(cell, ()), fills, windows, signals[cell], counts[cell])
             del recording, fills, reads
             give_back()  # the day's arrays and Arrow's buffers, before the next day's
             peak = self._meter.peak_mb()
             before = self.peaks.get(day)
             self.peaks[day] = peak if before is None or (peak is not None and peak > before) else before
-        return Pass(tuple(b.result() for b in books), signals, dict(sorted(counts.items())))
+        return Pass(
+            tuple(b.result() for b in books),
+            signals,
+            {c: dict(sorted(n.items())) for c, n in counts.items()},
+        )
 
     @property
     def peak_since(self) -> str:

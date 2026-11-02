@@ -2374,9 +2374,9 @@
       "properties": {"c_over_w": {"type": "number"}, "p_star": {"type": "number"}}
     },
     "cost_predictor": {
-      "description": "A predictor on a cost-map row (#307): its hit rate of rise and fall calls (the leaderboard's precision), the edge (the share right less the share wrong the other way), its calls, its research P&L per trade in the row's unit (null for a kind without one), and its verdict against each cost's p* (pass, fail, few calls; null without p*).",
+      "description": "A predictor on a cost-map row (#307): its hit rate of rise and fall calls (the leaderboard's precision), the edge (the share right less the share wrong the other way), its calls, its rise calls alone (long, #472), its research P&L per trade in the row's unit (null for a kind without one), and its verdict against each cost's p* (pass, fail, few calls; null without p*).",
       "type": "object",
-      "required": ["algorithm", "rank", "calls", "precision", "edge", "pnl", "pnl_inverse", "verdict"],
+      "required": ["algorithm", "rank", "calls", "precision", "edge", "long", "pnl", "pnl_inverse", "verdict"],
       "additionalProperties": false,
       "properties": {
         "algorithm": {"type": "string"},
@@ -2384,6 +2384,13 @@
         "calls": {"type": "integer", "minimum": 0},
         "precision": {"$ref": "#/$defs/interval"},
         "edge": {"type": ["number", "null"]},
+        "long": {
+          "description": "#472: the rise calls alone (the trader buys on rises only): calls, and precision, the share whose answer was the rise with its Wilson 95% interval (null without a rise call). The direction's rise is its touch label's up: the best bid reached the upper target (mid + k ticks) within the four minutes, whether or not the lower target was reached first; a barrier's is up_first (the upper barrier reached first); a daily kind's its up. A description alone: the verdict is the rise and fall calls' (precision), and the trader does not read it.",
+          "type": "object",
+          "required": ["calls", "precision"],
+          "additionalProperties": false,
+          "properties": {"calls": {"type": "integer", "minimum": 0}, "precision": {"$ref": "#/$defs/interval"}}
+        },
         "pnl": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/cost_pnl"}]},
         "pnl_inverse": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/cost_pnl"}]},
         "verdict": {
@@ -2638,7 +2645,7 @@
       }
     },
     "trader_policy": {
-      "description": "A policy version (#399): the cells it trades, first ranked first, each with its threshold (and its Kelly fraction, a policy fitted before #471 alone: not read since) and what it was fitted on; the cells the cost map passed that it left out, and why; what it was fitted on (the cost map, the grid, the recorded days replayed (#470), the replayed result, the run). It holds no limit: those come from the code and the server's .env alone. status (#400): champion now, former once, dropped (a challenger dropped at dropped_at, unpromoted by its 20th common day), challenger (in one of the three running slots since admitted_at), else waiting (kept while the slots were full, admitted when one frees, the newest first); paper: its paper record.",
+      "description": "A policy version (#399): the cells it trades, first ranked first, each with its threshold (and its Kelly fraction, a policy fitted before #471 alone: not read since) and what it was fitted on; the cells the cost map named (#472; before it, those it passed) that it left out, and why; what it was fitted on (the cost map, the grid, the recorded days replayed (#470), the replayed result, the run). It holds no limit: those come from the code and the server's .env alone. status (#400): champion now, former once, dropped (a challenger dropped at dropped_at, unpromoted by its 20th common day), challenger (in one of the three running slots since admitted_at), else waiting (kept while the slots were full, admitted when one frees, the newest first); paper: its paper record.",
       "type": "object",
       "required": ["version", "status", "created_at", "reason", "cells", "left_out", "fit", "admitted_at", "dropped_at",
                    "paper"],
@@ -2668,9 +2675,12 @@
                 "required": ["p_star", "low", "kelly", "days", "read", "trades", "wins", "net", "growth"],
                 "additionalProperties": false,
                 "properties": {
-                  "p_star": {"type": "number"},
-                  "low": {"type": "number", "minimum": 0, "maximum": 1},
-                  "kelly": {"type": "number"},
+                  "p_star": {"type": ["number", "null"], "description": "The cost map's, a diagnosis (#472: null when it has none)."},
+                  "low": {"type": ["number", "null"], "minimum": 0, "maximum": 1, "description": "The cost map's hit rate's lower bound, a diagnosis (#472: null when it has none)."},
+                  "kelly": {"type": ["number", "null"], "description": "f*, a diagnosis (#471); null when a call right does not pay its cost (#472)."},
+                  "verdict": {"enum": ["pass", "fail", "few", null], "description": "#472: the cost map's verdict at a market order's round trip, for the record: no condition since #472. Missing from a policy fitted before."},
+                  "recorded_days": {"type": "integer", "minimum": 0, "description": "#472: the cell's days whose recording was read (recorded, or with gaps)."},
+                  "bound": {"$ref": "#/$defs/trader_bound", "description": "#472: what the cell entered on: its net per signal (ticks) at its threshold, with the day-level interval at the night's Bonferroni level. Missing from a policy fitted before #472."},
                   "fraction": {"type": "number", "minimum": 0, "maximum": 1, "description": "#471: a policy fitted before #471 alone (λ × f*, cut to 0–1)."},
                   "days": {"type": "array", "items": {"type": "string", "format": "date"}},
                   "read": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
@@ -2694,12 +2704,15 @@
               "kind": {"type": "string"},
               "role": {"enum": ["consensus", "top", "baseline"]},
               "predictor": {"type": "string"},
-              "p_star": {"type": "number"},
-              "low": {"type": "number"},
-              "kelly": {"type": "number"},
-              "why": {"enum": ["few_trades", "no_gain"]},
-              "most_trades": {"type": "integer", "minimum": 0},
-              "best": {"type": "object"},
+              "p_star": {"type": ["number", "null"]},
+              "low": {"type": ["number", "null"]},
+              "kelly": {"type": ["number", "null"]},
+              "verdict": {"enum": ["pass", "fail", "few", null], "description": "#472: the cost map's verdict at a market order's round trip, for the record."},
+              "why": {"enum": ["few_days", "few_trades", "no_edge", "no_gain"], "description": "#472: few_days (fewer of its days recorded than min_days), few_trades (no threshold with min_trades signals bought alone on min_trade_days days), no_edge (no threshold's lower bound above 0); no_gain before #472 alone (it did not grow the replayed capital)."},
+              "recorded_days": {"type": "integer", "minimum": 0},
+              "most_trades": {"type": "integer", "minimum": 0, "description": "few_trades: the most signals bought alone at a threshold (#472; before it, the most replayed trades at a point)."},
+              "most_days": {"type": "integer", "minimum": 0, "description": "#472, few_trades: the most days with a buy at a threshold."},
+              "best": {"type": "object", "description": "no_edge (#472): the threshold whose lower bound is the highest (the lowest of those alike) and its bound (trader_bound); no_gain (before #472): the best point and its replayed result."},
               "read": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
               "signals": {"$ref": "#/$defs/trader_signals_by_threshold"}
             }
@@ -2708,13 +2721,31 @@
         "fit": {"type": "object"}
       }
     },
+    "trader_bound": {
+      "description": "#472: a cell's net per signal measured alone a share (ticks of the reference, one not bought 0), each day's mean one value: the mean (value), its day-level interval (low, high; null from fewer than two days) two-sided at level (1 − 0.05 ÷ the cell × threshold points judged that night), over days.",
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "required": ["value", "low", "high", "days", "level"],
+          "additionalProperties": false,
+          "properties": {
+            "value": {"type": "number"},
+            "low": {"type": ["number", "null"]},
+            "high": {"type": ["number", "null"]},
+            "days": {"type": "integer", "minimum": 0},
+            "level": {"type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1}
+          }
+        }
+      ]
+    },
     "trader_signals_by_threshold": {
       "description": "#470: a cell's signals on the recorded days the night's re-fit replayed, each measured alone a share by the paper trader's rules, at each threshold of the grid (the key, as written: \"0.6\"). Missing from a policy fitted before #470.",
       "type": "object",
       "additionalProperties": {"$ref": "#/$defs/trader_signals"}
     },
     "trader_signals": {
-      "description": "#470: the rises at or above a threshold, each decided at its display as if nothing were held: signals; missing (left out, by why: no_recording, gap, no_quote, no_exit_quote); measured (the others); refused (measured and not bought: special, expired, target_reached); bought, wins (net above 0), exits (take_profit, stop_loss, time); net in won and ticks in ticks of the reference, summed over those bought; per_signal: the net in ticks per signal measured (one not bought 0), each day's mean one value, with its day-level 95% interval over days (null from fewer than two days).",
+      "description": "#470: the rises at or above a threshold, each decided at its display as if nothing were held: signals; missing (left out, by why: no_recording, gap, no_quote, no_exit_quote); measured (the others); refused (measured and not bought: special, expired, target_reached); bought, wins (net above 0), exits (take_profit, stop_loss, time), days_bought (#472: the days with one bought); net in won and ticks in ticks of the reference, summed over those bought; per_signal: the net in ticks per signal measured (one not bought 0), each day's mean one value, with its day-level 95% interval over days (null from fewer than two days).",
       "type": "object",
       "required": ["signals", "measured", "missing", "refused", "bought", "wins", "exits", "net", "ticks", "per_signal"],
       "additionalProperties": false,
@@ -2726,6 +2757,7 @@
         "bought": {"type": "integer", "minimum": 0},
         "wins": {"type": "integer", "minimum": 0},
         "exits": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
+        "days_bought": {"type": "integer", "minimum": 0, "description": "#472: the days with a signal bought. Missing from a policy fitted before."},
         "net": {"type": "number"},
         "ticks": {"type": "number"},
         "per_signal": {

@@ -129,7 +129,7 @@ def test_the_kelly_fraction_worked_by_hand() -> None:
         ]
     )
 
-    tight, wide = sorted(choose(body).picks, key=lambda p: p.low)
+    tight, wide = sorted(choose(body).picks, key=lambda p: p.low or 0.0)
 
     assert tight.kelly == pytest.approx(0.5)
     # 0.70 ÷ 0.012 − 0.30 ÷ 0.008 = 58.33 − 37.5 = 20.8: far above 1 (the whole capital before #471).
@@ -137,17 +137,36 @@ def test_the_kelly_fraction_worked_by_hand() -> None:
     assert "fraction" not in tight.as_json(), "no λ × f* (#471)"
 
 
-def test_a_pass_whose_kelly_is_not_above_zero_is_not_picked() -> None:
-    """The verdict is the engine's; the trader sizes the cells it trades on the same figures."""
+def test_every_cell_named_is_kept_with_its_figures_and_a_pass_is_picked_whatever_its_kelly() -> None:
+    """#472: the cost map's verdict is a diagnosis. Every cell it names is kept with its figures
+    (``named``): the pass, the fail, the 15-minute baseline with too few calls and no precision (its
+    lower bound None). A pass is a pick on its verdict alone: its f* of 0 (at p* exactly) no longer
+    keeps it out (#478's note: redundant with the pass, the engine's ``low > p*``)."""
+    few = {**predictor("persist-15m", 0.5, "few"), "precision": None}
     body = cost_map(
-        [cost_row("barrier", width=10, cost=2, price=100_000, top=predictor("breiman", 0.6, "pass"))]
+        [
+            cost_row(
+                "barrier",
+                width=10,
+                cost=2,
+                price=100_000,
+                top=predictor("breiman", 0.6, "pass"),
+                baseline=predictor("persist", 0.4, "fail"),
+            ),
+            cost_row("barrier_15m", baseline=few),
+        ]
     )
 
     chosen = choose(body)
 
-    assert chosen.picks == () and chosen.reason == NO_PASS
-    [found] = [c for c in chosen.considered if c["role"] == "top" and c["kind"] == "barrier"]
-    assert (found["verdict"], found["picked"], found["why"]) == ("pass", False, "Kelly at most 0")
+    [picked] = chosen.picks
+    assert picked.predictor == "breiman" and picked.kelly == pytest.approx(0.0)
+    assert chosen.reason is None
+    named = {p.predictor: p for p in chosen.named}
+    assert list(named) == ["breiman", "persist", "persist-15m"], "in the kinds' order, then the roles'"
+    assert (named["persist"].low, named["persist"].p_star) == (0.4, 0.6)
+    assert (named["persist-15m"].low, named["persist-15m"].priority) == (None, None)
+    assert named["persist-15m"].width == 10.0, "the row's figures, whatever the predictor's"
 
 
 def test_a_cost_map_of_another_symbol_or_period_is_not_read() -> None:
