@@ -498,6 +498,7 @@ def predictor(
         "calls": calls,
         "precision": {"value": min(1.0, low + 0.05), "low": low, "high": min(1.0, low + 0.1), "n": calls},
         "edge": 0.3,
+        "long": {"calls": calls // 2, "precision": None},
         "pnl": None,
         "pnl_inverse": None,
         "verdict": verdicts,

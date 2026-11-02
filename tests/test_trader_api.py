@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -17,12 +18,12 @@ from krx_quant.api import create_app
 from krx_quant.predictions import DB_NAME as ENGINE_DB
 from krx_quant.touch import TARGET_VERSION
 from krx_quant.trader.policy import FIRST
-from krx_quant.trader.refit import Grid, refit_from
+from krx_quant.trader.refit import refit_from
 from krx_quant.trader.store import DB_NAME as TRADER_DB
 from tests.api_schema import check
 from tests.replay_events import at as replay_at
 from tests.replay_events import run
-from tests.test_trader_refit import DAYS, UP, write_five
+from tests.test_trader_refit import DAYS, SMALL, UP, write_five
 from tests.trader_doubles import (
     BARRIER,
     CALENDAR,
@@ -268,8 +269,8 @@ async def test_the_policies_newest_first_the_champion_marked(tmp_path: Path) -> 
     challenger in a running slot, its grid's θ 0.8 alone (the same values would not be kept, #400)."""
     write_five(tmp_path)
     for night, grid in (
-        ("22:31:00", Grid(min_trades=1)),
-        ("22:45:00", Grid(min_trades=1, thresholds=(0.8,))),
+        ("2026-10-15 22:31:00", SMALL),
+        ("2026-10-15 22:45:00", replace(SMALL, thresholds=(0.8,))),
     ):
         refit_from(
             DAYS,
@@ -295,13 +296,13 @@ async def test_the_policies_newest_first_the_champion_marked(tmp_path: Path) -> 
     assert [{**c, "threshold": 0.7, "fitted": None} for c in challenger["cells"]] == [
         {**c, "fitted": None} for c in champion["cells"]
     ], "but θ"
-    assert (challenger["admitted_at"], champion["admitted_at"]) == ("2026-10-14T22:45:00+09:00", None)
+    assert (challenger["admitted_at"], champion["admitted_at"]) == ("2026-10-15T22:45:00+09:00", None)
     [cell] = champion["cells"]
     assert (cell["kind"], cell["predictor"], cell["threshold"]) == ("barrier", "breiman", 0.7)
     assert "kelly_fraction" not in cell, "no λ (#471)"
-    assert champion["fit"]["result"]["net"] == pytest.approx(2 * UP), "two take-profits of 14 shares"
+    assert champion["fit"]["result"]["net"] == pytest.approx(4 * UP), "two take-profits of 14 shares a day"
     assert body["champions"] == [
-        {"at": "2026-10-14T22:31:00+09:00", "version": 1, "reason": FIRST, "detail": None}
+        {"at": "2026-10-15T22:31:00+09:00", "version": 1, "reason": FIRST, "detail": None}
     ]
 
 
@@ -337,8 +338,8 @@ async def test_a_store_the_nightly_fit_made_before_the_trader_s_first_start_answ
         CALENDAR.session,
         rules=whole_rules(),
         target_version=TARGET_VERSION,
-        grid=Grid(min_trades=1),
-        now=at("22:31:00"),
+        grid=SMALL,
+        now=at("2026-10-15 22:31:00"),
     )
 
     engine = await run(tmp_path / "replay.db", [], until=replay_at("09:00:00"))

@@ -881,7 +881,7 @@ KRX 마감 흐름 화면이 읽는 그날의 마감 리밸런싱 수요다(`clos
 
 ### `GET /v1/cost-map?symbol=&period=&special=` (#307)
 
-비용 지도다. 상승·하락 신호가 왕복 비용을 갚으려면 얼마나 맞혀야 하는지를, 엔진이 예측하는 지평마다 실제 맞힘률 옆에 놓는다(`cost_map.py`). 지평·비용 화면이 읽는다. 자동 매매 trader도 시작할 때와 매일 08:30에 `?symbol=005930&period=20d&special=exclude`로 읽어 매매할 칸을 고른다(#395, 설계 [14장](design.md#14-자동-매매-393) "칸"): 방향과 4·15·30분 장벽 줄의 세 예측자 가운데 `verdict.market`이 `pass`인 것. 리서치의 결론(`research/reports/`)이 바탕이다: 대칭 목표 ±W틱, 왕복 비용 C틱이면 P(상승|신호) − P(하락|신호) ≥ C/W여야 본전이고, 맞힘률로 말하면 p* = (W + C) ÷ 2W를 넘어야 한다. W < C면 다 맞혀도 손해다.
+비용 지도다. 상승·하락 신호가 왕복 비용을 갚으려면 얼마나 맞혀야 하는지를, 엔진이 예측하는 지평마다 실제 맞힘률 옆에 놓는다(`cost_map.py`). 지평·비용 화면이 읽는다. 자동 매매 trader도 시작할 때와 매일 08:30에 `?symbol=005930&period=20d&special=exclude`로 읽는다(#395, 설계 [14장](design.md#14-자동-매매-393) "칸"): 방향과 4·15·30분 장벽 줄의 세 예측자의 이름과 수치. 밤 정책 맞추기는 그 이름이 있는 칸 모두를 녹화로 재생해 실행 손익의 하한으로 고르고(#472), trader는 챔피언 정책의 칸을 판정과 상관없이 산다. **바뀜** (2026-11-03, #480): trader는 `verdict.market`이 `pass`인 칸만 매매했다 → 판정은 진단이다. 이유: spec #468 3절 "진입". 리서치의 결론(`research/reports/`)이 바탕이다: 대칭 목표 ±W틱, 왕복 비용 C틱이면 P(상승|신호) − P(하락|신호) ≥ C/W여야 본전이고, 맞힘률로 말하면 p* = (W + C) ÷ 2W를 넘어야 한다. W < C면 다 맞혀도 손해다.
 
 질의 값은 순위표와 같다(`symbol`, `period`, `special`. `kind`와 `basis`는 받지 않는다). 잘못된 값은 400이다. `symbol`을 빼면(`all`) 모든 종목이다.
 
@@ -905,11 +905,12 @@ KRX 마감 흐름 화면이 읽는 그날의 마감 리밸런싱 수요다(`clos
      "breakeven_missing": null,
      "consensus": null,
      "top": {"algorithm": "breiman-15m", "rank": 1, "calls": 240, "precision": {"value": 0.66, "low": 0.60, "high": 0.72, "n": 240},
-             "edge": 0.41, "pnl": {"trades": 240, "per_trade": {"value": 0.8, "low": -0.2, "high": 1.8, "n": 240}},
+             "edge": 0.41, "long": {"calls": 150, "precision": {"value": 0.62, "low": 0.54, "high": 0.69, "n": 150}},
+             "pnl": {"trades": 240, "per_trade": {"value": 0.8, "low": -0.2, "high": 1.8, "n": 240}},
              "pnl_inverse": {"trades": 240, "per_trade": {"value": 1.1, "low": 0.1, "high": 2.1, "n": 240}},
              "verdict": {"limit": "pass", "market": "fail"}},
      "baseline": {"algorithm": "barrier-persist-15m", "rank": null, "calls": 217, "precision": {"value": 0.32, "low": 0.26, "high": 0.38, "n": 217},
-                  "edge": 0.08, "pnl": {"trades": 217, "per_trade": {"value": -4.8, "low": -6.9, "high": -2.6, "n": 217}},
+                  "edge": 0.08, "long": {"calls": 120, "precision": {"value": 0.30, "low": 0.23, "high": 0.39, "n": 120}}, "pnl": {"trades": 217, "per_trade": {"value": -4.8, "low": -6.9, "high": -2.6, "n": 217}},
                   "pnl_inverse": {"trades": 217, "per_trade": {"value": -4.5, "low": -6.6, "high": -2.4, "n": 217}},
                   "verdict": {"limit": "fail", "market": "fail"}}}
   ],
@@ -952,6 +953,7 @@ KRX 마감 흐름 화면이 읽는 그날의 마감 리밸런싱 수요다(`clos
   - `precision`: 상승·하락 신호의 맞힘률과 Wilson 95% 구간. 순위표·상세 통계의 `precision`과 같은 값이다(같은 통계 함수, 같은 질의).
   - `calls`: 상승·하락 신호 수.
   - `edge`: 신호 가운데 맞은 몫 − 반대로 틀린 몫. 상승 신호면 P(상승|신호) − P(하락|신호), 하락 신호면 그 반대다. `c_over_w`와 견준다. 신호가 없으면 `null`이다.
+  - `long`(#472): 상승 신호만(trader는 상승에만 산다). `calls`는 상승 신호 수, `precision`은 그 가운데 정답이 상승인 몫과 Wilson 95% 구간(상승 신호가 없으면 `null`)이다. 위 `calls`·`precision`(상승·하락을 합친 것)은 그대로다. 방향의 상승은 도달 정답의 `up`이다: 4분 안에 매수 호가가 위 목표(중간가 + k틱)에 닿았다는 것이지, 위 목표에 먼저 닿았다는 것이 아니다(`touch.py`: 아래 목표에 먼저 닿았어도 위에 닿았으면 `up`). 장벽의 상승은 `up_first`(위 장벽에 먼저 닿았다), 시가→종가는 `up`이다. 설명용이다: `verdict`는 합친 맞힘률로 그대로 내고, trader도 밤 정책 맞추기도 이것을 읽지 않는다.
   - `pnl`, `pnl_inverse`: 연구용 손익의 거래 수와 거래당 평균(Wilson이 아닌 정규 95% 구간). 줄의 단위다(틱, 시가→종가는 bp). 방향은 닿음 손익(`pnl`, `pnl_inverse`), 다른 종류는 그 종류 통계(`extra`의 `pnl`, `pnl_inverse`)다. 없는 종류면 `null`이다.
   - `verdict`: 비용마다 `pass`(맞힘률의 신뢰구간 하한 > p*), `fail`(아니면), `few`(신호 수가 순위표의 최소 표본 `min_sample`보다 적다). 맞힘률 자체가 아니라 하한으로 판정해 우연히 넘은 줄을 넘음으로 보지 않는다. p*가 없으면 `null`이다.
 - 통계는 순위표처럼 작업 스레드에서 계산하고 예측 저장소가 바뀔 때까지 둔다(종류마다 따로).
@@ -1498,22 +1500,26 @@ trader가 돈 거래일마다의 장부다. `from`부터 `to`까지(KST 날짜, 
 ```json
 {"champion": 1,
  "policies": [{"version": 2, "status": "challenger", "created_at": "2026-10-15T22:31:04+09:00",
-   "reason": "2026-10-15 밤 맞추기: 비용 지도(2026-10-15T22:31:02+09:00)가 시장가 왕복으로 통과시킨 2칸 가운데 1칸",
+   "reason": "2026-10-15 밤 맞추기: 비용 지도(2026-10-15T22:31:02+09:00)의 9칸 가운데 실행 손익 하한을 넘은 1칸",
    "cells": [{"kind": "barrier", "role": "top", "predictor": "breiman", "threshold": 0.7,
-     "fitted": {"p_star": 0.63, "low": 0.7, "kelly": 10.5, "days": ["2026-09-17", "...", "2026-10-15"],
-       "read": {"read": 7580, "rises": 5120, "not_up": 1900, "past_last_exit": 240, "...": 0},
+     "fitted": {"p_star": 0.63, "low": 0.6, "kelly": -1.2, "verdict": "fail", "days": ["2026-09-17", "...", "2026-10-15"],
+       "recorded_days": 20, "read": {"read": 7580, "rises": 5120, "not_up": 1900, "past_last_exit": 240, "...": 0},
+       "bound": {"value": 0.31, "low": 0.04, "high": 0.58, "days": 20, "level": 0.99889},
        "trades": 64, "wins": 38, "net": 21000.0, "growth": 0.02095,
        "signals": {"0.7": {"signals": 980, "measured": 974, "missing": {"gap": 6}, "refused": {"target_reached": 31},
-         "bought": 943, "wins": 512, "exits": {"take_profit": 470, "stop_loss": 301, "time": 172}, "net": 4100.0,
-         "ticks": 41.0, "per_signal": {"value": 0.04, "low": -0.02, "high": 0.10, "days": 20}}, "...": {}}}}],
+         "bought": 943, "wins": 512, "exits": {"take_profit": 470, "stop_loss": 301, "time": 172}, "days_bought": 20,
+         "net": 30100.0, "ticks": 301.0, "per_signal": {"value": 0.31, "low": 0.15, "high": 0.47, "days": 20}}, "...": {}}}}],
    "left_out": [{"kind": "barrier_15m", "role": "baseline", "predictor": "barrier-persist-15m", "p_star": 0.6, "low": 0.66,
-     "kelly": 8.1, "why": "no_gain", "best": {"threshold": 0.6, "trades": 41, "wins": 18, "net": -9800.0, "growth": -0.0098},
+     "kelly": 8.1, "verdict": "pass", "why": "no_edge", "recorded_days": 20,
+     "best": {"threshold": 0.6, "bound": {"value": -0.2, "low": -0.9, "high": 0.5, "days": 20, "level": 0.99889}},
      "read": {"read": 7580, "rises": 4200}, "signals": {"0.6": {"...": 0}}}],
-   "fit": {"cost_map": {"as_of": "2026-10-15T22:31:02+09:00", "period": "20d", "passed": 2},
-     "grid": {"thresholds": [0.4, 0.5, 0.6, 0.7, 0.8], "defaults": {"threshold": 0.6}, "min_trades": 20},
+   "fit": {"cost_map": {"as_of": "2026-10-15T22:31:02+09:00", "period": "20d", "named": 9, "passed": 1},
+     "grid": {"thresholds": [0.4, 0.5, 0.6, 0.7, 0.8], "min_days": 20, "min_trades": 20, "min_trade_days": 10, "alpha": 0.05},
+     "judged": {"points": 45, "level": 0.99889},
      "fee_rate": 0.00015,
      "replay": {"days": 20, "no_recording": [], "gaps": ["2026-10-02"], "passes": 2, "days_read": 40},
-     "result": {"trades": 64, "wins": 38, "net": 21000.0, "growth": 0.02095, "days_traded": 18, "missing": {"gap": 2}},
+     "result": {"trades": 64, "wins": 38, "net": 21000.0, "growth": 0.02095, "days_traded": 18, "missing": {"gap": 2},
+       "days": 20, "per_day": {"value": 1050.0, "low": 210.0, "high": 1890.0, "level": 0.95}},
      "run": {"commit": "…", "seconds": 8.1, "rss_start_mb": 131.0, "peak_rss_mb": 188.4, "rss_mb": 140.2, "peak_since": "step",
              "day_peak_rss_mb": 188.4, "day_peak_on": "2026-10-08", "days": {"2026-09-17": 176.5, "...": 0}}},
    "admitted_at": "2026-10-15T22:31:04+09:00", "dropped_at": null,
@@ -1533,11 +1539,11 @@ trader가 돈 거래일마다의 장부다. `from`부터 `to`까지(KST 날짜, 
 
   > **바뀜** (2026-10-30, #416): "#399에서는 처음 것이 챔피언이고 나머지는 도전 정책이다" → 도전 정책은 자리 셋에서 모의로 돌고(`challenger`, 자리가 차면 `waiting`), 이기면 챔피언이 되며(`former`가 생긴다), 20일까지 이기지 못하면 `dropped`가 된다. 이유: #400. 넷째가 들어오면 가장 오래된 것을 내리면 어느 도전 정책도 10일을 채우지 못해서 자리를 기다리게 했다(Codex 리뷰).
 - `policies[].paper`(#400): 그 정책의 모의 기록(`GET /v1/trader`의 `policies[].paper`와 같다). 돈 적이 없으면 0일이다. 어느 모드에서도 paper의 기록이다(mock에서 챔피언의 것은 그림자 장부의 것, #405).
-- `cells`: 매매하는 칸, 순위대로. `threshold`는 사는 오름 확률의 문턱 θ다. `kelly_fraction`은 #471 전에 맞춘 정책에만 있다: 그때의 Kelly 비율 λ(산 비율 = λ × 그날 f*, 0–1로 자름)를 저장한 그대로 주고, trader는 읽지 않는다. `fitted`는 그 밤에 무엇으로 맞췄는지다: 그 밤 비용 지도의 `p_star`, 맞힘률 하한 `low`, Kelly f* `kelly`(진단, #471 전의 정책에는 그것으로 낸 비율 `fraction`도), 맞춘 날(`days`), 읽은 예측 수(`read.read`)와 오름(`read.rises`)과 거른 이유별 수(`paper.plan`의 이유, `off_target`: 지금 정답으로 학습하지 않은 모델의 예측), 정책 전체를 녹화로 재생한 매매에서 그 칸의 매매 수·이익 낸 수·순손익(원)·로그 성장, 그리고 `signals`(#470): 그 칸의 신호를 하나씩 따로 1주로 재생한 결과를 격자의 θ마다(키는 θ, `"0.6"`. 스키마 `trader_signals`): 확률이 그 θ 이상인 신호 수(`signals`), 녹화가 빠져 뺀 것(`missing`: `no_recording`, `gap`, `no_quote`, `no_exit_quote`)과 나머지(`measured`), 그 가운데 사지 않은 것(`refused`: `special`, `expired`, `target_reached`)과 산 것(`bought`), 이익 낸 것(`wins`), 청산 이유(`exits`), 산 것의 순손익 합(`net` 원, `ticks` 기준가의 틱), 잰 신호당 틱(안 산 것 0)의 날 단위 평균과 95% 구간(`per_signal`, 날이 둘 미만이면 `null`). **바뀜** (2026-11-03, #477): `read`에 `unpriced`(정답 경로에 손익을 셀 호가가 없음)가 있었고, 매매는 정답 경로로 흉내 낸 것이었다 → 녹화를 재생하므로 `unpriced`는 없고(빠진 녹화는 `signals`와 `fit.result.missing`에), `signals`가 더해졌다. #470 전의 정책에는 `signals`가 없다. 이유: spec #468 2절 "실행 그대로의 재생"(#470).
+- `cells`: 매매하는 칸, 순위대로. `threshold`는 사는 오름 확률의 문턱 θ다. `kelly_fraction`은 #471 전에 맞춘 정책에만 있다: 그때의 Kelly 비율 λ(산 비율 = λ × 그날 f*, 0–1로 자름)를 저장한 그대로 주고, trader는 읽지 않는다. `fitted`는 그 밤에 무엇으로 맞췄는지다: 그 밤 비용 지도의 `p_star`, 맞힘률 하한 `low`, Kelly f* `kelly`(진단, #471 전의 정책에는 그것으로 낸 비율 `fraction`도. #472부터 비용 지도에 없으면 `null`), 비용 지도의 시장가 왕복 판정(`verdict`, #472: 기록일 뿐 조건이 아니다), 맞춘 날(`days`)과 그 가운데 녹화를 읽은 날 수(`recorded_days`, #472), 읽은 예측 수(`read.read`)와 오름(`read.rises`)과 거른 이유별 수(`paper.plan`의 이유, `off_target`: 지금 정답으로 학습하지 않은 모델의 예측), 그 칸을 넣은 근거(`bound`, #472, 스키마 `trader_bound`: 넣은 θ에서 1주씩 따로 잰 신호당 틱의 날 단위 평균 `value`, 그 밤의 Bonferroni 신뢰수준 `level`(1 − 0.05 ÷ 판정한 칸 × θ 수)의 하한 `low`·상한 `high`, 날 수 `days`), 정책 전체를 녹화로 재생한 매매에서 그 칸의 매매 수·이익 낸 수·순손익(원)·로그 성장, 그리고 `signals`(#470): 그 칸의 신호를 하나씩 따로 1주로 재생한 결과를 격자의 θ마다(키는 θ, `"0.6"`. 스키마 `trader_signals`): 확률이 그 θ 이상인 신호 수(`signals`), 녹화가 빠져 뺀 것(`missing`: `no_recording`, `gap`, `no_quote`, `no_exit_quote`)과 나머지(`measured`), 그 가운데 사지 않은 것(`refused`: `special`, `expired`, `target_reached`)과 산 것(`bought`), 산 것이 있는 날 수(`days_bought`, #472), 이익 낸 것(`wins`), 청산 이유(`exits`), 산 것의 순손익 합(`net` 원, `ticks` 기준가의 틱), 잰 신호당 틱(안 산 것 0)의 날 단위 평균과 95% 구간(`per_signal`, 날이 둘 미만이면 `null`). #472 전의 정책에는 `verdict`, `recorded_days`, `bound`, `days_bought`가 없다. **바뀜** (2026-11-03, #477): `read`에 `unpriced`(정답 경로에 손익을 셀 호가가 없음)가 있었고, 매매는 정답 경로로 흉내 낸 것이었다 → 녹화를 재생하므로 `unpriced`는 없고(빠진 녹화는 `signals`와 `fit.result.missing`에), `signals`가 더해졌다. #470 전의 정책에는 `signals`가 없다. 이유: spec #468 2절 "실행 그대로의 재생"(#470).
 
   > **바뀜** (2026-11-03, #478): 칸마다 `kelly_fraction`(λ)이 있었고 `fitted.fraction`(λ × f*)이 있었다 → 새 정책에는 없다(옛 정책의 것은 저장한 그대로 주고 읽지 않는다). 이유: spec #468 4절 "Kelly 비율 λ는 크기와 정책에서 뺀다"(#471).
-- `left_out`: 비용 지도는 통과시켰지만 넣지 않은 칸과 이유. `few_trades`면 `most_trades`(어느 점에서도 모의 매매가 `min_trades`에 못 미침, 가장 많을 때의 수), `no_gain`이면 `best`(넣어도 정책의 로그 성장이 늘지 않음, 가장 나은 점(`threshold`, #471 전에는 `kelly_fraction`도)과 그 결과). `read`와 `signals`(#470)는 `cells`의 `fitted`와 같다.
-- `fit`: 비용 지도(`as_of`, `period`, 통과한 칸 수 `passed`), 격자(`thresholds`, 같을 때 고르는 기본값 `defaults`(`threshold`), 칸마다 최소 모의 매매 수 `min_trades`. #471 전의 정책에는 `kelly_fractions`와 `defaults.kelly_fraction`도), 수수료율, 재생한 녹화(`replay`, #470: 날 수 `days`, 녹화가 없는 날 `no_recording`, 장중에 결측 구간이 있는 날 `gaps`, 재생 횟수 `passes`(비용 지도를 통과한 칸마다 한 번), 녹화를 읽은 횟수 `days_read`), 정책 전체를 재생한 결과(`result`: 매매 수, 이익 낸 수, 순손익(원), 로그 성장, 매매한 날 수, 녹화가 빠져 뺀 신호 `missing`(#470)), 실행(`run`: 커밋, 걸린 초, 시작·최대·끝 RSS(MB), `peak_since`: `step`이면 최대가 맞추기 동안의 것, `start`면 프로세스 시작부터의 것. #470부터 하루 최대 RSS `day_peak_rss_mb`와 그 날 `day_peak_on`, 날마다의 최대 `days`(그 날을 재생한 횟수 가운데 가장 높은 것)). `fit`은 형식을 정하지 않은 객체다(스키마 `{"type": "object"}`). #470 전의 정책에는 `replay`, `result.missing`, `run.day_*`, `run.days`가 없다.
+- `left_out`: 비용 지도에 이름이 있지만 넣지 않은 칸과 이유(#472, 설계 14장 "밤 정책 맞추기"의 "진입"). `few_days`면 녹화를 읽은 날이 `min_days`(20)에 못 미침(`recorded_days`), `few_trades`면 어느 θ에서도 1주씩 따로 산 신호가 `min_trades`(20)건·`min_trade_days`(10)일에 못 미침(`most_trades`, `most_days`: θ 가운데 가장 많을 때), `no_edge`면 어느 θ의 하한도 0을 넘지 않음(`best`: 하한이 가장 높은 `threshold`와 그 `bound`). `verdict`, `read`, `signals`(#470)는 `cells`의 `fitted`와 같다. `p_star`, `low`, `kelly`는 비용 지도에 없으면 `null`이다. **바뀜** (2026-11-03, #480): 비용 지도가 통과시킨 칸 가운데였고, 이유는 `few_trades`(`most_trades`: 어느 점에서도 정책 재생의 모의 매매가 `min_trades`에 못 미침)와 `no_gain`(`best`: 넣어도 정책의 로그 성장이 늘지 않음, 가장 나은 점(`threshold`, #471 전에는 `kelly_fraction`도)과 그 결과)이었다 → 위와 같다. #472 전의 정책에는 `no_gain`이 남아 있다. 이유: spec #468 3절 "진입".
+- `fit`: 비용 지도(`as_of`, `period`, 이름이 있어 시험한 칸 수 `named`(#472), 시장가 왕복으로 통과한 칸 수 `passed`(#472부터 기록일 뿐)), 격자와 표본 조건(`thresholds`, `min_days`, `min_trades`, `min_trade_days`, 오류 `alpha` 0.05, #472), 판정한 칸 × θ 수와 하한의 신뢰수준(`judged`: `points`, `level`, #472), 수수료율, 재생한 녹화(`replay`, #470: 날 수 `days`, 녹화가 없는 날 `no_recording`, 장중에 결측 구간이 있는 날 `gaps`, 재생 횟수 `passes`(#472: 칸을 따로 재는 한 번과, 넣은 칸이 있으면 정책의 한 번), 녹화를 읽은 횟수 `days_read`), 정책 전체를 재생한 결과(`result`: 매매 수, 이익 낸 수, 순손익(원), 로그 성장, 매매한 날 수, 녹화가 빠져 뺀 신호 `missing`(#470), 넣은 칸들의 녹화를 읽은 날 수 `days`와 날마다 순손익(매매가 없는 날 0)의 평균과 95% 구간 `per_day`(#472: 하한이 0을 넘어야 저장한다, 칸이 없으면 `null`)), 실행(`run`: 커밋, 걸린 초, 시작·최대·끝 RSS(MB), `peak_since`: `step`이면 최대가 맞추기 동안의 것, `start`면 프로세스 시작부터의 것. #470부터 하루 최대 RSS `day_peak_rss_mb`와 그 날 `day_peak_on`, 날마다의 최대 `days`(그 날을 재생한 횟수 가운데 가장 높은 것)). `fit`은 형식을 정하지 않은 객체다(스키마 `{"type": "object"}`). #470 전의 정책에는 `replay`, `result.missing`, `run.day_*`, `run.days`가 없다. **바뀜** (2026-11-03, #480): 격자에 같을 때 고르는 기본값 `defaults`(`threshold`)가 있었고 `passes`는 비용 지도를 통과한 칸마다 한 번이었다 → 표본 조건과 `judged`, 칸 재기 한 번과 정책 한 번. #472 전의 정책에는 `defaults`가 있고 `named`, `judged`, `result.days`, `result.per_day`가 없다. 이유: spec #468 3절 "진입".
 - 한도(운용 상한, 하루·누적 손실 한도, 손실 예산과 위험 규칙, #471)는 정책에 없다. 코드의 기본값과 서버 `.env`에서만 온다.
 
 ### 호가 스트림 (수집기 안, #394)

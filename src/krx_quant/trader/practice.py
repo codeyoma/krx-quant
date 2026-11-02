@@ -268,7 +268,8 @@ def measure(
 ) -> tuple[list[Measured], Replayer | None]:
     """Each of ``picks`` replayed alone a share at each of ``thresholds`` (module doc "Which"), on its
     kind's days (``days_of``), from the engine's database (read-only) and the recordings under
-    ``data_dir``, by ``rules``: a pass of the replay a pick. With the replayer, for its counts."""
+    ``data_dir``, by ``rules``: one pass of the replay for them all (#480: ``Replayer.run`` measures
+    several cells alone; a pass a pick before). With the replayer, for its counts."""
     days = [d for p in picks for d in days_of.get(p.kind, ())]
     if not days:
         return [], None
@@ -285,10 +286,12 @@ def measure(
             target_version=target_version,
             thresholds=thresholds,
         )
-        tried: list[Measured] = []
-        for pick in picks:
-            done = replayer.run([], alone=pick.cell)
-            tried += [Measured(pick, threshold, signals) for threshold, signals in done.signals.items()]
+        done = replayer.run([], alone=[p.cell for p in picks])
+        tried = [
+            Measured(pick, threshold, signals)
+            for pick in picks
+            for threshold, signals in done.signals[pick.cell].items()
+        ]
         return tried, replayer
     finally:
         db.close()

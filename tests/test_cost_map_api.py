@@ -203,6 +203,36 @@ async def test_the_direction_s_row_sets_its_hit_rates_against_its_breakeven(tmp_
     assert baseline["precision"] == entry(board, "baseline-persist")["precision"]
 
 
+async def test_a_predictor_s_rise_calls_are_counted_apart_from_its_rise_and_fall_calls(
+    tmp_path: Path,
+) -> None:
+    """#472: alpha calls each bar close's rise right (10), a fall where it stayed flat (10, wrong) and
+    each fall right (10): its rise and fall calls hit 20 of 30, as the leaderboard's precision, and its
+    rise calls alone (``long``) 10 of 10, with their own Wilson interval (10 of 10: 0.7225 to 1). The
+    baseline calling every bar close up has no fall call: the two alike. The direction's rise is its
+    touch label's up."""
+    calls = [UP, DOWN, DOWN, FLAT] * 10  # against OUTCOMES: up, flat, down, flat
+    async with cost_map(tmp_path) as (engine, client):
+        baselines(engine.store)
+        store_scored(engine.store, "alpha", calls)
+        body = await ask(client)
+        board = await get(client, "/v1/leaderboard")
+
+    top, baseline = row(body, "direction")["top"], row(body, "direction")["baseline"]
+    assert top["algorithm"] == "alpha"
+    assert (top["calls"], top["precision"]["n"]) == (30, 30)
+    assert top["precision"]["value"] == pytest.approx(20 / 30) == entry(board, "alpha")["precision"]["value"]
+    assert top["long"]["calls"] == 10
+    assert top["long"]["precision"] == {
+        "value": 1.0,
+        "low": pytest.approx(0.72246, abs=1e-5),
+        "high": 1.0,
+        "n": 10,
+    }
+    assert baseline["long"]["calls"] == baseline["calls"] == 40
+    assert baseline["long"]["precision"] == baseline["precision"], "no fall call: the same"
+
+
 def store_barrier(store: PredictionStore, algorithm: str, calls: Sequence[str], width: int = 10) -> None:
     """``calls`` (one sure call per bar close from 09:01) of the barrier on 005930, answered by
     BARRIER_OUTCOMES, ``width`` ticks from 81,250 won."""

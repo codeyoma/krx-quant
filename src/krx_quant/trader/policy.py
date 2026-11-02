@@ -2,12 +2,12 @@
 on, fitted again every night from the stored predictions (``refit.py``).
 
 **What a policy is.** The cells it trades, first ranked first, and for each its threshold θ (the
-rise's probability that buys); with when it was made and why, the cells the cost map passed that it
-leaves out and why, and what it was fitted on (``fit``). No limit is part of it: the capital, the
-loss limits and the risk rules (#471: a trade's loss budget, which sizes the buy) come from the code
-and the server's ``.env`` alone (#393 "한도와 정지"). A policy holds none of them, a stored one that
-carried one would be read without it (``PolicyCell.from_json``), and nothing here reads or writes
-the trader's settings.
+rise's probability that buys); with when it was made and why, the cells the cost map named (#472;
+before it, those it passed) that it leaves out and why, and what it was fitted on (``fit``). No
+limit is part of it: the capital, the loss limits and the risk rules (#471: a trade's loss budget,
+which sizes the buy) come from the code and the server's ``.env`` alone (#393 "한도와 정지"). A policy
+holds none of them, a stored one that carried one would be read without it
+(``PolicyCell.from_json``), and nothing here reads or writes the trader's settings.
 
 > **바뀜** (2026-11-03, #478): each cell had a Kelly fraction λ too (the share of the cell's f*
 > bought) → none: a policy that kept one (``kelly_fraction``, versions fitted before #471) is read
@@ -28,20 +28,26 @@ A challenger runs on a trading day when it was admitted before that day's pick (
 > reached the promotion's ten days (#416, Codex's review).
 
 **How the trader applies the champion** (``apply``), at each pick (its start and 08:30, #395):
-the cost map still decides what may trade (a cell passing at a market order's round trip, a
-necessary condition), and the champion what does. The trader trades the champion's cells among
-those passing, in the champion's order, each at its θ, sized by the loss budget (``paper.size``).
-A cell passing that the champion does not have is not traded (``NOT_IN_POLICY`` when that leaves
-none): it comes in through a challenger fitted on a later night, once promoted (#400). An empty
-champion (no cell passed the night it was fitted) trades nothing. Before the first champion nothing
-trades (#469, ``NO_CHAMPION``).
+the champion decides what trades. The trader trades the champion's cells, in the champion's order,
+each at its θ, sized by the loss budget (``paper.size``), whatever the cost map's verdict on them
+(#472: the nightly fit entered each on the lower bound of its replayed one-share net), with the cost
+map's figures where it names the cell (``Selection.named``) and none where it does not
+(``selection.Pick.unmapped``). A cell the champion does not have is not traded, whatever its verdict
+(``NOT_IN_POLICY`` when that leaves none): it comes in through a challenger fitted on a later night,
+once promoted (#400). An empty champion trades nothing. Before the first champion nothing trades
+(#469, ``NO_CHAMPION``), nor while the cost map cannot be read (``NO_COST_MAP``).
+
+> **바뀜** (2026-11-03, #480): the champion's cells traded only among those the cost map passed at a
+> market order's round trip (a necessary condition), and a cell the cost map did not name that day
+> did not trade (``OFF_MAP``) → the champion's cells trade, named or not. 이유: spec #468 3 "진입":
+> the execution lower bound of the nightly fit replaces the cost map's pass.
 
 **The frozen version** (#469, ``review.py``): the champion's cells, their order and θ hold from one
 review to the next. A cell is its predictor's name (``Cell``: kind and predictor), never the cost
 map's role: when the cost map's ``top`` of a kind becomes another algorithm, the champion's cell
-stays its own (``OFF_MAP`` while the cost map does not name it, never the other algorithm), and one
-whose predictor stopped predicting (``GONE``, ``cells.gone``) trades no more until the next review.
-Each pick keeps every cell of the policy and why it does not trade (``Selection.cells``).
+stays its own (and trades, #472: never the other algorithm), and one whose predictor stopped
+predicting (``GONE``, ``cells.gone``) trades no more until the next review. Each pick keeps every
+cell of the policy and why it does not trade (``Selection.cells``).
 
 > **바뀜** (2026-11-02, #476): before the first champion the trader traded the cost map's cells at
 > ``KRX_TRADER_THRESHOLD`` and ``KELLY_FRACTION`` → nothing. 이유: spec #468 "챔피언 전 기본 매매는
@@ -72,7 +78,7 @@ from krx_quant.trader.selection import (
     NO_CHAMPION,
     NO_COST_MAP,
     NOT_IN_POLICY,
-    OFF_MAP,
+    Pick,
     Selection,
 )
 
@@ -82,7 +88,7 @@ CREATE TABLE IF NOT EXISTS policies (   -- each policy version (#399): what the 
     created_at TEXT NOT NULL,
     reason TEXT NOT NULL,               -- why it was made
     cells TEXT NOT NULL,                -- JSON: the cells it trades, first ranked first, with θ (λ to #471)
-    left_out TEXT NOT NULL,             -- JSON: the cells the cost map passed that it does not trade, and why
+    left_out TEXT NOT NULL,             -- JSON: the cells the cost map named that it does not trade, and why
     fit TEXT NOT NULL,                  -- JSON: what it was fitted on: cost map, grid, result, run
     admitted_at TEXT,                   -- a challenger given a running slot (#400); null: waiting
     dropped_at TEXT                     -- a challenger dropped unpromoted (#400); null: not dropped
@@ -171,11 +177,11 @@ class Policy:
 
 
 def apply(policy: Policy | None, selection: Selection, gone: Collection[Cell] = ()) -> Selection:
-    """``selection`` (the cells the cost map passes today) under ``policy`` (module doc): its cells,
-    by their predictors' names, among those passing, in its order, each at its θ; the others marked
-    as not in it. Each of its cells kept with whether it trades and why
-    not (``Selection.cells``, #469): ``GONE`` (in ``gone``: its predictor stopped predicting),
-    ``OFF_MAP`` (the cost map does not name it today), else the cost map's verdict. Without a policy
+    """``selection`` (today's cost map) under ``policy`` (module doc): its cells, by their predictors'
+    names, in its order, each at its θ, whatever the cost map's verdict (#472), with the cost map's
+    figures where it names them; the cells the cost map passes that it does not have marked as not in
+    it. Each of its cells kept with whether it trades and why not (``Selection.cells``, #469):
+    ``GONE`` (in ``gone``: its predictor stopped predicting), ``NO_COST_MAP``. Without a policy
     nothing trades (``NO_CHAMPION``, #469), and a cost map that could not be read stays as it is."""
     if policy is None:
         if selection.reason == NO_COST_MAP:
@@ -184,30 +190,27 @@ def apply(policy: Policy | None, selection: Selection, gone: Collection[Cell] = 
             {**seen, "picked": False, "why": NO_CHAMPION} if seen.get("picked") else seen
             for seen in selection.considered
         )
-        return replace(selection, picks=(), considered=unpicked, reason=NO_CHAMPION)
-    passing = {p.cell: p for p in selection.picks}
-    named = {Cell(c["kind"], c["predictor"]): c for c in selection.considered if c.get("predictor")}
-    picks = []
+        return replace(selection, picks=(), considered=unpicked, reason=NO_CHAMPION, named=())
+    # The cost map's figures of each cell it names: its passing picks are among them.
+    named = {p.cell: p for p in (*selection.picks, *selection.named)}
+    picks: list[Pick] = []
     cells = []
     for cell in policy.cells:
-        found = None if cell.cell in gone else passing.get(cell.cell)
         why = None
-        if found is not None:
-            picks.append(replace(found, threshold=cell.threshold))
+        if selection.reason == NO_COST_MAP:
+            why = NO_COST_MAP
         elif cell.cell in gone:
             why = GONE
-        elif cell.cell not in named:
-            why = OFF_MAP
         else:
-            seen = named[cell.cell]
-            why = seen.get("why") or seen.get("verdict") or "no verdict"
+            found = named.get(cell.cell) or Pick.unmapped(cell.kind, cell.role, cell.predictor)
+            picks.append(replace(found, threshold=cell.threshold))
         cells.append(
             {
                 "kind": cell.kind,
                 "role": cell.role,
                 "predictor": cell.predictor,
                 "threshold": cell.threshold,
-                "traded": found is not None,
+                "traded": why is None,
                 "why": why,
             }
         )
@@ -216,11 +219,13 @@ def apply(policy: Policy | None, selection: Selection, gone: Collection[Cell] = 
     considered = []
     for seen in selection.considered:
         named_cell = Cell(seen["kind"], seen.get("predictor") or "")
-        if seen.get("picked") and named_cell not in kept:
+        if named_cell in kept:  # #472: a champion's cell trades whatever its verdict
+            seen = {**seen, "picked": True}
+        elif seen.get("picked"):
             why = GONE if named_cell in mine else f"not in policy {policy.version}"
             seen = {**seen, "picked": False, "why": why}
         considered.append(seen)
-    reason = selection.reason if picks or selection.reason is not None else NOT_IN_POLICY
+    reason = None if picks else selection.reason or NOT_IN_POLICY
     return replace(
         selection,
         picks=tuple(picks),
@@ -228,6 +233,7 @@ def apply(policy: Policy | None, selection: Selection, gone: Collection[Cell] = 
         reason=reason,
         policy=policy.version,
         cells=tuple(cells),
+        named=(),
     )
 
 

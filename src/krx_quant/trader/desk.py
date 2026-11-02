@@ -2,7 +2,8 @@
 same cells' predictions and the same quotes, in one process.
 
 - **Picks** (``select``, at the trader's start and every day at 08:30): the champion read from the
-  store, applied to the cells the cost map passes (``under_champion``, ``policy.apply``; none before
+  store, applied to the cost map's cells (``under_champion``, ``policy.apply``: #472, its cells
+  whatever their verdict; none before
   the first champion, #469), for the
   champion's book (``paper.PaperTrader``: the trades the trader makes, which its loss limits and
   pauses hold; in mock mode ``mock.MockTrader``, #405, its orders on KIS's mock server); and each
@@ -309,7 +310,7 @@ class Desk:
         return sorted(self._running)
 
     def select(self, selection: Selection, at: datetime) -> None:
-        """The cells the cost map passes at ``at`` (``selection``) under the champion for its book
+        """The cost map's cells at ``at`` (``selection``) under the champion for its book
         (and its shadow's), and under each challenger running that day for its own, in the review
         cycle in force (module doc)."""
         cycle = self._cycle(at)

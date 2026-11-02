@@ -1,7 +1,7 @@
-"""The trader (#393, #394, #395): trades 005930 by the triple barrier on the cells the cost map
-passes, as its own process (``krx-quant trade``, compose service ``trader``), apart from the
-collector. In live mode (#408, ``live.py``) the champion orders on the new live account, past the
-live gate and the execution checks alone.
+"""The trader (#393, #394, #395): trades 005930 by the triple barrier on the champion policy's
+cells (#472: the cost map's pass no longer a condition), as its own process (``krx-quant trade``,
+compose service ``trader``), apart from the collector. In live mode (#408, ``live.py``) the champion
+orders on the new live account, past the live gate and the execution checks alone.
 
 In paper (``KRX_TRADER_MODE=paper``, the default, #394) the trader fills its orders on the
 collector's live best quotes (``quotes.py``) and writes what it did to its own store,
@@ -16,11 +16,12 @@ challengers stay in paper. The trader holds no order code: the KIS order calls l
 - **Cells** (``selection.py``, #395): a cell is a (kind, predictor): the four-minute direction
   (width k) or the 4-, 15- or 30-minute barrier (width w), and the final consensus (the
   direction's only), the kind's first-ranked algorithm or its strongest baseline. The trader
-  trades the cells whose verdict on the engine's cost map (``GET /v1/cost-map``, 005930, the last
-  20 days) is ``pass`` at a market order's round trip, picked at each start and every day at
-  08:30; none passing, it trades nothing that day and keeps why. It reads their predictions from
-  the engine's database (``state/engine.sqlite3``) read-only as they are displayed
-  (``displayed_at``, ``cells.py``).
+  trades the champion policy's cells (below), whatever their verdict on the engine's cost map
+  (``GET /v1/cost-map``, 005930, the last 20 days), read at each start and every day at 08:30 for
+  their figures (#472: its pass at a market order's round trip is a diagnosis, no condition); none
+  trading, it trades nothing that day and keeps why. It reads their predictions from the engine's
+  database (``state/engine.sqlite3``) read-only as they are displayed (``displayed_at``,
+  ``cells.py``).
 - **Rules** (``paper.py``): a prediction of the rise (up; the barrier's up_first) at or above the
   threshold (its cell's under the champion policy) buys, when nothing is held and no special
   situation (a VI, a circuit breaker, a sidecar) touches its window. Of the rises of one bar
@@ -41,9 +42,11 @@ challengers stay in paper. The trader holds no order code: the KIS order calls l
   their order, each cell's threshold θ; no limit (#471: no Kelly fraction λ either). Every trading
   day's night, after the nightly training, the scheduled job ``trader-report`` (#402) fits a new
   version on the cost map's 20 days, replaying their recordings and stored predictions by the paper
-  trader's own rules (#470, ``replay.py``) at each point of a small grid. The first is the champion,
-  the later ones challengers. At each pick the trader trades the champion's cells among those the
-  cost map passes, in its order, at its θ; before the first champion, nothing (#469).
+  trader's own rules (#470, ``replay.py``): each cell the cost map names enters at the lowest θ of a
+  small grid whose one-share net per signal has a day-level lower bound above 0, Bonferroni over every
+  cell and θ judged, and the policy of those cells must replay above 0 too (#472). The first is the
+  champion, the later ones challengers. At each pick the trader trades the champion's cells, in its
+  order, at its θ; before the first champion, nothing (#469).
 - **Frozen version** (``review.py``, #469): the champion's cells (by their predictors' names), their
   order and θ hold from one review to the next; a review falls every 20 trading days of the
   trader's calendar, judged after its close and applied from the next trading day. The nightly

@@ -27,7 +27,15 @@ from krx_quant.trader.desk import under_champion
 from krx_quant.trader.paper import BELOW_THRESHOLD, OUTRANKED, Rules
 from krx_quant.trader.policy import PolicyCell, PolicyError
 from krx_quant.trader.run import run_trader
-from krx_quant.trader.selection import NO_CHAMPION, NO_PASS, NO_POLICY, NOT_IN_POLICY, Selection, choose
+from krx_quant.trader.selection import (
+    NO_CHAMPION,
+    NO_COST_MAP,
+    NO_PASS,
+    NO_POLICY,
+    NOT_IN_POLICY,
+    Selection,
+    choose,
+)
 from krx_quant.trader.settings import TraderSettings
 from krx_quant.trader.store import DB_NAME, TraderStore, read_trades
 from tests.test_live_predictions import free_port
@@ -94,7 +102,11 @@ def test_the_champion_s_cells_trade_at_its_threshold_sized_by_the_loss_budget(tm
     assert json.loads(selection["picks"])[0]["threshold"] == 0.7
 
 
-def test_a_cell_passing_that_the_champion_lacks_is_not_traded(tmp_path: Path) -> None:
+def test_the_champion_s_cell_trades_whatever_its_verdict_and_one_passing_it_lacks_does_not(
+    tmp_path: Path,
+) -> None:
+    """#472: the champion's 15-minute baseline trades though the cost map fails it today, with the cost
+    map's figures; the barrier's breiman passes but is not the champion's: not traded."""
     kept = champion(tmp_path, cell(FIFTEEN, role="baseline"))
     body = cost_map(
         [
@@ -105,11 +117,24 @@ def test_a_cell_passing_that_the_champion_lacks_is_not_traded(tmp_path: Path) ->
 
     under = policies.apply(kept, choose(body))
 
-    assert (under.picks, under.reason, under.policy) == ((), NOT_IN_POLICY, 1)
+    [traded] = under.picks
+    assert (traded.cell, traded.low, traded.threshold) == (FIFTEEN, 0.66, 0.7)
+    assert (under.reason, under.policy) == (None, 1)
     seen = {(c["kind"], c["predictor"]): (c["picked"], c["why"]) for c in under.considered}
     assert seen[("barrier", "breiman")] == (False, "not in policy 1"), "it passes, but is not the champion's"
-    assert seen[("barrier_15m", FIFTEEN.predictor)] == (False, None), "the champion's, but it fails today"
-    assert under.describe().startswith("none of policy 1's cells passes: ")
+    assert seen[("barrier_15m", FIFTEEN.predictor)] == (True, None), "the champion's: it fails, and trades"
+    assert under.cells[0]["traded"] and under.cells[0]["why"] is None
+
+
+def test_without_the_cost_map_no_champion_s_cell_trades(tmp_path: Path) -> None:
+    """The cost map could not be read: the champion's cells trade nothing until it is (as ever), each
+    kept with why."""
+    kept = champion(tmp_path, cell(BARRIER))
+
+    under = policies.apply(kept, Selection((), reason=NO_COST_MAP, detail="starting"))
+
+    assert (under.picks, under.reason, under.detail) == ((), NO_COST_MAP, "starting")
+    assert [(c["predictor"], c["traded"], c["why"]) for c in under.cells] == [("breiman", False, NO_COST_MAP)]
 
 
 def test_the_champion_s_order_ranks_the_rises_of_a_bar_close(tmp_path: Path) -> None:

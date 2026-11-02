@@ -134,12 +134,13 @@ def test_the_cell_and_theta_chosen_have_the_greatest_lower_bound_of_the_net_a_si
 
 
 def test_each_cell_is_replayed_alone_a_share_at_each_theta(tmp_path: Path) -> None:
-    """The night's measurement is #470's replay, a pass a cell: the barrier's breiman on the recorded
-    day, at θ 0.6 and 0.8, as the replay measures it alone. One day: no lower bound, none chosen."""
+    """The night's measurement is #470's replay, one pass for every cell (#480): the barrier's breiman
+    on the recorded day, at θ 0.6 and 0.8, as the replay measures it alone. One day: no lower bound,
+    none chosen."""
     models(tmp_path)
     Day(tmp_path, picks=[pick(BARRIER)], rules=Rules(fee_rate=FEE)).run(ONE_CELL)
     record_quotes(tmp_path / "data", [e for e in ONE_CELL if isinstance(e, BestQuote)])
-    direct, _, _ = replayed(tmp_path, [pick(BARRIER)], thresholds=(0.6, 0.8), alone=BARRIER)
+    direct, _, _ = replayed(tmp_path, [pick(BARRIER)], thresholds=(0.6, 0.8), alone=(BARRIER,))
 
     tried, replayer = measure(
         [pick(BARRIER)],
@@ -154,8 +155,8 @@ def test_each_cell_is_replayed_alone_a_share_at_each_theta(tmp_path: Path) -> No
 
     assert [(m.pick.cell, m.threshold) for m in tried] == [(BARRIER, 0.6), (BARRIER, 0.8)]
     assert [m.signals.as_json() for m in tried] == [
-        direct.signals[0.6].as_json(),
-        direct.signals[0.8].as_json(),
+        direct.signals[BARRIER][0.6].as_json(),
+        direct.signals[BARRIER][0.8].as_json(),
     ]
     assert (tried[0].signals.signals, tried[0].signals.bought) == (8, 7)
     assert replayer is not None and replayer.passes == 1

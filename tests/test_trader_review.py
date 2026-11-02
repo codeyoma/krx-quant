@@ -29,7 +29,7 @@ from krx_quant.trader.cells import gone
 from krx_quant.trader.desk import under_champion
 from krx_quant.trader.promotion import BETWEEN_REVIEWS, REVIEWED
 from krx_quant.trader.run import run_trader
-from krx_quant.trader.selection import NOT_IN_POLICY, OFF_MAP, choose
+from krx_quant.trader.selection import NOT_IN_POLICY, choose
 from krx_quant.trader.settings import TraderSettings
 from krx_quant.trader.store import DB_NAME, TraderStore, read_trader
 from tests.api_schema import check
@@ -155,9 +155,9 @@ def test_the_champion_s_cell_is_its_predictor_s_when_the_cost_map_s_top_turns_to
     tmp_path: Path,
 ) -> None:
     """The champion's cell is the barrier's breiman, the cost map's top when it was fitted. Today the
-    cost map's top is neyman, passing: the champion's cell is still breiman, kept as not on the cost
-    map (not traded until it is again), and neyman, not the champion's, is not traded in its place.
-    Back on the cost map, breiman trades."""
+    cost map's top is neyman, passing: the champion's cell is still breiman, and it trades off the cost
+    map, without its figures (#472: the cost map's pass is no condition), while neyman, not the
+    champion's, is not traded in its place. Back on the cost map, breiman trades with them."""
     first_champion(tmp_path)
     turned = choose(cost_map([cost_row("barrier", top=predictor("neyman", 0.72, "pass"))]))
     back = choose(cost_map([cost_row("barrier", top=predictor("breiman", 0.70, "pass"))]))
@@ -168,32 +168,43 @@ def test_the_champion_s_cell_is_its_predictor_s_when_the_cost_map_s_top_turns_to
     finally:
         store.close()
 
-    assert (under.picks, under.reason, under.policy) == ((), NOT_IN_POLICY, 1)
+    [off] = under.picks
+    assert (off.cell, off.threshold, off.low, off.p_star, under.reason, under.policy) == (
+        BARRIER,
+        0.6,
+        None,
+        None,
+        None,
+        1,
+    )
     assert under.cells == (
         {
             "kind": "barrier",
             "role": "top",
             "predictor": "breiman",
             "threshold": 0.6,
-            "traded": False,
-            "why": OFF_MAP,
+            "traded": True,
+            "why": None,
         },
     )
     [neyman] = [c for c in under.considered if c["predictor"] == "neyman"]
     assert (neyman["picked"], neyman["why"]) == (False, "not in policy 1")
-    assert "(policy 1: barrier breiman not_on_cost_map)" in under.describe()
-    assert [p.cell for p in again.picks] == [BARRIER] and again.cells[0]["traded"]
+    assert "barrier breiman (top: not on the cost map, θ 0.6)" in under.describe()
+    [found] = again.picks
+    assert (found.cell, found.low) == (BARRIER, 0.70) and again.cells[0]["traded"]
 
     trades = Day(tmp_path, desk=True, selection=turned).run(
         [
             Read("10:00:02.3", [Barrier("10:00:00", predictor="neyman")]),
             quote("10:00:02.5", 70_000, 70_100),
+            Read("10:05:02.3", [Barrier("10:05:00")]),
+            quote("10:05:02.5", 70_000, 70_100),
         ]
     )
-    assert trades == [], "no other cell takes the champion's place"
+    assert [t["predictor"] for t in trades] == ["breiman"], "no other cell takes the champion's place"
     [kept] = [r for r in rows(tmp_path, "selections")]
-    assert (kept["reason"], kept["evaluation"], kept["cycle"]) == (NOT_IN_POLICY, 2, 1)
-    assert '"why": "not_on_cost_map"' in kept["cells"]
+    assert (kept["reason"], kept["evaluation"], kept["cycle"]) == (None, 2, 1)
+    assert '"traded": true' in kept["cells"]
 
 
 def test_a_cell_whose_predictor_is_gone_trades_no_more_until_the_next_review(

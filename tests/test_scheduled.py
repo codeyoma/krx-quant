@@ -1500,8 +1500,9 @@ async def test_the_report_issue_is_ready_for_an_agent_only_on_the_nights_the_rep
 async def test_the_trader_report_job_runs_the_real_command(
     empty_server: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Against an Engine API whose cost map passes no cell: the first policy, empty, is the champion,
-    crowned in the night, so the report calls an agent and the issue is labelled."""
+    """Against an Engine API whose cost map names one cell, never predicting (#472: tried, and left
+    out): the first policy, empty, is the champion, crowned in the night, so the report calls an agent
+    and the issue is labelled."""
     PredictionStore(empty_server / "state" / ENGINE_DB).close()
     failing = cost_map([cost_row("barrier", top=predictor("breiman", 0.60, "fail"))])
     state = JobState.load(empty_server / STATE_FILE)
@@ -1530,7 +1531,7 @@ async def test_the_trader_report_job_runs_the_real_command(
     assert "- 맞춘 정책 1(챔피언): 칸 없음" in report
     assert "도전 정책 판정 (#400)" in refit and "챔피언이 아직 없다" in refit, "judged first: no champion yet"
     assert "정책 맞추기 (#399): 정책 1 · 챔피언(처음 맞춘 정책)" in refit
-    assert "매매할 칸: 없음 (비용 지도를 통과한 칸이 없다)" in refit
+    assert "매매할 칸: 없음" in refit and "뺀 칸: barrier breiman (top): few_days" in refit
     assert state.jobs["trader-report"].exit_code == 0
     assert hub.labels.get(417) == {"ready-for-agent"}, "a champion crowned in the night calls an agent"
 

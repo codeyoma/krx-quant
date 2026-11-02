@@ -3,9 +3,10 @@
 Five loops in one event loop, all into one ``desk.Desk`` (#400: the champion's book and each
 running challenger's):
 
-- the picks (``selection.pick``): the cells the cost map passes, read from the Engine API at the
+- the picks (``selection.pick``): the cost map's cells, read from the Engine API at the
   start and every day at ``PICK_AT`` (08:30), under the champion policy read from the store then
-  (#399, ``policy.apply``: its cells among them, in its order, at its θ; #471: no λ), and under each
+  (#399, ``policy.apply``: its cells, in its order, at its θ, whatever the cost map's verdict, #472;
+  #471: no λ), and under each
   challenger running that day for its paper book (#400). A cost map that cannot be read is asked
   for again every ``PICK_RETRY_SECONDS``, and no cell trades until it is read: a pick is never
   older than the day's. A champion that cannot be read trades nothing (``NO_POLICY``) until the
@@ -341,7 +342,7 @@ async def _trade(
     the champion's book is open (True)."""
     reader = EngineReader(settings.state_dir / ENGINE_DB, SYMBOL)
     log.info(
-        "trader: %s trading %s on the cells the cost map of %s passes (threshold %g, capital %s won,"
+        "trader: %s trading %s on the champion's cells, the cost map from %s (threshold %g, capital %s won,"
         " loss limits %g%% a day and %g%% in all), quotes from %s",
         book.mode,
         SYMBOL,

@@ -66,10 +66,12 @@ TAKEN = quote("10:02:00", 70_300, 70_400)
 
 @dataclass(frozen=True)
 class Repicked:
-    """The desk's pick at ``hms`` (its 08:30 one, or a start's): the cost map's cells ``selection``."""
+    """The desk's pick at ``hms`` (its 08:30 one, or a start's): the cost map's cells ``selection``;
+    ``before`` done first (#472: a change to the store the pick reads, a champion crowned)."""
 
     hms: str
     selection: Selection
+    before: Callable[[], object] | None = None
 
     @property
     def time(self) -> datetime:
@@ -170,6 +172,8 @@ class MockDesk:
                             self.account.improvement = 0.5
                             await until(lambda: not desk.champion.busy)
                         elif isinstance(event, Repicked):
+                            if event.before is not None:
+                                event.before()
                             desk.select(event.selection, event.time)
                             reader.follow(desk.cells, event.time - timedelta(minutes=2))
                         if n == len(ordered) and self.stop_when is not None:
