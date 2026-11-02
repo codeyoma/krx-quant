@@ -98,7 +98,6 @@ class CellReader:
         self.cell = cell
         self.symbol = symbol
         self._kind = traded_kind(cell.kind)
-        self._rise = self._kind.index(self._kind.sides[0]) if self._kind.sides else 0
         # The latest bar close read, as the engine stores times: ISO 8601 in KST, which sorts in time.
         self._after = since.astimezone(KST).isoformat()
 
@@ -110,72 +109,93 @@ class CellReader:
 
     def _direction(self, db: sqlite3.Connection) -> list[Signal]:
         rows = db.execute(
-            "SELECT p.id, p.bar_close, p.displayed_at, p.status, p.p_up, p.p_flat, p.p_down,"
-            " p.model_version, o.mid_close, o.flat_ticks, b.reason AS blocked"
-            " FROM predictions p LEFT JOIN outcomes o ON o.prediction_id = p.id"
-            " LEFT JOIN blocks b ON b.prediction_id = p.id"
+            f"SELECT {DIRECTION_COLUMNS} FROM {DIRECTION_FROM}"
             " WHERE p.algorithm = ? AND p.symbol = ? AND p.bar_close > ? ORDER BY p.bar_close, p.id",
             (self.cell.predictor, self.symbol, self._after),
         ).fetchall()
-        signals = []
-        for r in rows:
-            ok = r["status"] == "ok" and None not in (r["p_up"], r["p_flat"], r["p_down"])
-            anchor = r["mid_close"]
-            signals.append(
-                Signal(
-                    prediction_id=r["id"],
-                    kind=self._kind.name,
-                    predictor=self.cell.predictor,
-                    symbol=self.symbol,
-                    bar_close=datetime.fromisoformat(r["bar_close"]),
-                    displayed_at=datetime.fromisoformat(r["displayed_at"]),
-                    status=r["status"],
-                    probabilities=(r["p_up"], r["p_flat"], r["p_down"]) if ok else None,
-                    rise=self._rise,
-                    anchor=anchor,
-                    tick=None if anchor is None else float(tick_size(anchor)),
-                    width=r["flat_ticks"],
-                    horizon=self._kind.horizon,
-                    blocked=r["blocked"],
-                    model_version=r["model_version"],
-                )
-            )
-        return signals
+        return [direction_signal(r, self.cell, self.symbol) for r in rows]
 
     def _other(self, db: sqlite3.Connection) -> list[Signal]:
         rows = db.execute(
-            "SELECT id, bar_close, displayed_at, status, output, anchor, tick, width_ticks, model_version"
-            " FROM kind_predictions WHERE kind = ? AND symbol = ? AND algorithm = ? AND bar_close > ?"
-            " ORDER BY bar_close, id",
+            f"SELECT {KIND_COLUMNS} FROM kind_predictions p"
+            " WHERE p.kind = ? AND p.symbol = ? AND p.algorithm = ? AND p.bar_close > ?"
+            " ORDER BY p.bar_close, p.id",
             (self._kind.name, self.symbol, self.cell.predictor, self._after),
         ).fetchall()
-        signals = []
-        for r in rows:
-            probabilities = None
-            if r["status"] == "ok" and r["output"] is not None:
-                try:
-                    probabilities = self._kind.probabilities(json.loads(r["output"]))
-                except (ValueError, KeyError, TypeError):
-                    log.warning("trader: kind prediction %s has an output it cannot read", r["id"])
-            signals.append(
-                Signal(
-                    prediction_id=r["id"],
-                    kind=self._kind.name,
-                    predictor=self.cell.predictor,
-                    symbol=self.symbol,
-                    bar_close=datetime.fromisoformat(r["bar_close"]),
-                    displayed_at=datetime.fromisoformat(r["displayed_at"]),
-                    status=r["status"],
-                    probabilities=probabilities,
-                    rise=self._rise,
-                    anchor=r["anchor"],
-                    tick=None if r["tick"] is None else float(r["tick"]),
-                    width=r["width_ticks"],
-                    horizon=self._kind.horizon,
-                    model_version=r["model_version"],
-                )
-            )
-        return signals
+        return [kind_signal(r, self.cell, self.symbol) for r in rows]
+
+
+# A cell's predictions as the trader reads them (``CellReader``; the re-fit's replay of the recorded
+# days reads them so too, #470, ``replay.py``): the columns and the tables of a direction's (``p``,
+# its outcome ``o`` written with it, its block ``b``) and a kind's (``p``), and a row read as a signal.
+DIRECTION_COLUMNS = (
+    "p.id, p.bar_close, p.displayed_at, p.status, p.p_up, p.p_flat, p.p_down, p.model_version,"
+    " o.mid_close, o.flat_ticks, b.reason AS blocked"
+)
+DIRECTION_FROM = (
+    "predictions p LEFT JOIN outcomes o ON o.prediction_id = p.id"
+    " LEFT JOIN blocks b ON b.prediction_id = p.id"
+)
+KIND_COLUMNS = (
+    "p.id, p.bar_close, p.displayed_at, p.status, p.output, p.anchor, p.tick, p.width_ticks, p.model_version"
+)
+
+
+def direction_signal(r: sqlite3.Row, cell: Cell, symbol: str) -> Signal:
+    """A direction's prediction row (``DIRECTION_COLUMNS``) as the trader reads it."""
+    kind = traded_kind(cell.kind)
+    ok = r["status"] == "ok" and None not in (r["p_up"], r["p_flat"], r["p_down"])
+    anchor = r["mid_close"]
+    return Signal(
+        prediction_id=r["id"],
+        kind=kind.name,
+        predictor=cell.predictor,
+        symbol=symbol,
+        bar_close=datetime.fromisoformat(r["bar_close"]),
+        displayed_at=datetime.fromisoformat(r["displayed_at"]),
+        status=r["status"],
+        probabilities=(r["p_up"], r["p_flat"], r["p_down"]) if ok else None,
+        rise=_rise(kind),
+        anchor=anchor,
+        tick=None if anchor is None else float(tick_size(anchor)),
+        width=r["flat_ticks"],
+        horizon=kind.horizon,
+        blocked=r["blocked"],
+        model_version=r["model_version"],
+    )
+
+
+def kind_signal(r: sqlite3.Row, cell: Cell, symbol: str) -> Signal:
+    """A kind's prediction row (``KIND_COLUMNS``) as the trader reads it: an output it cannot read
+    gives no probabilities (logged)."""
+    kind = traded_kind(cell.kind)
+    probabilities = None
+    if r["status"] == "ok" and r["output"] is not None:
+        try:
+            probabilities = kind.probabilities(json.loads(r["output"]))
+        except (ValueError, KeyError, TypeError):
+            log.warning("trader: kind prediction %s has an output it cannot read", r["id"])
+    return Signal(
+        prediction_id=r["id"],
+        kind=kind.name,
+        predictor=cell.predictor,
+        symbol=symbol,
+        bar_close=datetime.fromisoformat(r["bar_close"]),
+        displayed_at=datetime.fromisoformat(r["displayed_at"]),
+        status=r["status"],
+        probabilities=probabilities,
+        rise=_rise(kind),
+        anchor=r["anchor"],
+        tick=None if r["tick"] is None else float(r["tick"]),
+        width=r["width_ticks"],
+        horizon=kind.horizon,
+        model_version=r["model_version"],
+    )
+
+
+def _rise(kind: Kind) -> int:
+    """The place of the kind's rise among its probabilities: up, up_first."""
+    return kind.index(kind.sides[0]) if kind.sides else 0
 
 
 class EngineReader:

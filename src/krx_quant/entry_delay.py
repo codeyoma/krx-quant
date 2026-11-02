@@ -33,11 +33,12 @@ from pathlib import Path
 import numpy as np
 import pyarrow as pa
 import pyarrow.compute as pc
+import pyarrow.parquet as pq
 
+from krx_quant.archive import partition_files
 from krx_quant.baselines import baselines_for
 from krx_quant.consensus import NAMES
 from krx_quant.feeds import BOOK, TRADE
-from krx_quant.macro import read_partition
 from krx_quant.predictions import scored_rows
 from krx_quant.pricing import Direction
 from krx_quant.skill import skill, skill_text
@@ -57,25 +58,56 @@ class Quotes:
     asks: np.ndarray
 
 
+# The quotes' feeds and their best bid's and ask's columns, the book's first.
+_QUOTE_FEEDS = ((BOOK.tr_id, "bid_px_1", "ask_px_1"), (TRADE.tr_id, "bid1", "ask1"))
+# Rows read at a time from a recorded file (``day_quotes``, #470): a day's quotes are held in their
+# three arrays alone, never in tables of the whole day (about 570,000 quotes on a recorded day: 14 MB
+# of arrays, where the tables took some 80 MB more at their peak).
+BATCH_ROWS = 65_536
+
+
 def day_quotes(data_dir: Path, day: date, symbol: str) -> Quotes | None:
-    """``symbol``'s recorded book and trade quotes on ``day``; None without either."""
-    parts = []
-    for feed, bid, ask in ((BOOK.tr_id, "bid_px_1", "ask_px_1"), (TRADE.tr_id, "bid1", "ask1")):
+    """``symbol``'s recorded book and trade quotes on ``day``; None without either. Each file is read
+    ``BATCH_ROWS`` rows at a time into the day's arrays."""
+    try:
+        return _day_quotes(data_dir, day, symbol)
+    except FileNotFoundError:  # the archive merged the parts in between: list them again
+        return _day_quotes(data_dir, day, symbol)
+
+
+def _day_quotes(data_dir: Path, day: date, symbol: str) -> Quotes | None:
+    sources = []
+    for feed, bid, ask in _QUOTE_FEEDS:
         partition = data_dir / "events" / f"date={day}" / f"feed={feed}" / f"symbol={symbol}"
-        table = read_partition(partition, ("received_at", bid, ask))
-        if table is None or table.num_rows == 0:
-            continue
-        table = table.select(["received_at", bid, ask]).rename_columns(["received_at", "bid", "ask"])
-        table = table.set_column(1, "bid", pc.cast(table["bid"], pa.float64()))
-        table = table.set_column(2, "ask", pc.cast(table["ask"], pa.float64()))
-        two_sided = pc.and_(pc.greater(table["bid"], 0), pc.greater(table["ask"], 0))
-        parts.append(table.filter(pc.fill_null(two_sided, False)))
-    if not parts:
+        files = partition_files(partition)
+        columns = ("received_at", bid, ask)
+        if files and set(columns) <= set(pq.read_schema(files[0]).names):  # as ``read_partition``
+            sources.append((files, columns))
+    if not sources:
         return None
-    quotes = pa.concat_tables(parts)
-    times = pc.cast(pc.cast(quotes["received_at"], pa.timestamp("us", tz="UTC")), pa.int64()).to_numpy()
-    order = np.argsort(times, kind="stable")
-    return Quotes(times[order], quotes["bid"].to_numpy()[order], quotes["ask"].to_numpy()[order])
+    rows = sum(pq.ParquetFile(f).metadata.num_rows for files, _ in sources for f in files)
+    if rows == 0:
+        return None
+    times, bids, asks = np.empty(rows, np.int64), np.empty(rows, np.float64), np.empty(rows, np.float64)
+    n = 0
+    for files, (received, bid, ask) in sources:
+        for path in files:
+            for batch in pq.ParquetFile(path).iter_batches(BATCH_ROWS, columns=[received, bid, ask]):
+                b, a = pc.cast(batch[bid], pa.float64()), pc.cast(batch[ask], pa.float64())
+                two_sided = pc.fill_null(pc.and_(pc.greater(b, 0), pc.greater(a, 0)), False)
+                t = pc.cast(pc.cast(batch[received], pa.timestamp("us", tz="UTC")), pa.int64())
+                taken = pc.filter(t, two_sided).to_numpy()
+                end = n + len(taken)
+                times[n:end] = taken
+                bids[n:end] = pc.filter(b, two_sided).to_numpy()
+                asks[n:end] = pc.filter(a, two_sided).to_numpy()
+                n = end
+    times, bids, asks = times[:n], bids[:n], asks[:n]
+    order = np.argsort(times, kind="stable")  # the book's first of quotes received at once
+    times = times[order]
+    bids = bids[order]
+    asks = asks[order]
+    return Quotes(times, bids, asks)
 
 
 def _micros(at: datetime) -> int:

@@ -7,7 +7,8 @@ The engine's predictions and special windows are written into a real engine data
 up, received in the order given; the pauses are written into the trader's store as the Engine API
 writes them, the resumes and re-arms as ``krx-quant trade`` does. With ``Day.desk`` the trader is
 the whole desk (#400: the champion's book and each challenger running, the policies kept in the
-store as the nightly re-fit keeps them, ``keep``). Every price and hit rate is made up.
+store as the nightly re-fit keeps them, ``keep``). The same quotes recorded as the collector records
+them (``record_quotes``) are what the re-fit replays (#470). Every price and hit rate is made up.
 """
 
 from __future__ import annotations
@@ -16,16 +17,18 @@ import sqlite3
 from collections.abc import Sequence
 from contextlib import closing
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from krx_quant.baselines import Forecast
 from krx_quant.consensus import FINAL
+from krx_quant.feeds import BOOK
 from krx_quant.feeds.base import KST
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.predictions import DB_NAME as ENGINE_DB
 from krx_quant.predictions import NewKindPrediction, NewPrediction, PredictionStore
+from krx_quant.recorder import ParquetRecorder
 from krx_quant.special import Kind as SpecialKind
 from krx_quant.special import Window
 from krx_quant.trader import KELLY_FRACTION, SYMBOL, review
@@ -71,6 +74,18 @@ def at(hms: str) -> datetime:
 
 def quote(hms: str, bid: float, ask: float) -> BestQuote:
     return BestQuote(at(hms), bid, ask, 10.0, 10.0)
+
+
+def record_quotes(data: Path, quotes: Sequence[BestQuote]) -> None:
+    """``quotes`` as the collector records them (#470: what the re-fit replays): the integrated book's
+    best quotes of 005930, each day's under its own date, in the order given."""
+    recorder = ParquetRecorder(data, flush_rows=1_000, flush_seconds=3600)
+    for q in quotes:
+        day = q.received_at.astimezone(KST).date()
+        row = {"symbol": SYMBOL, "event_time": q.received_at, "received_at": q.received_at.astimezone(UTC)}
+        row |= {"hour_cls": "0", "bid_px_1": q.bid, "ask_px_1": q.ask, "bid_qty_1": 10, "ask_qty_1": 10}
+        recorder.record("events", day, BOOK.tr_id, SYMBOL, row, BOOK.schema)
+    recorder.close()
 
 
 def pick(

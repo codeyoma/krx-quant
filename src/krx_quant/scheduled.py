@@ -1698,8 +1698,10 @@ MEMBER_FRAMES_PROBE = Job(
 # prints the day's report (#402, ``trader/report.py``, read from the same store) above the re-fit's
 # own output: the day's ledger and the champion's trades, why no cell traded when none did, each
 # policy's paper record and judgment, what the night changed, the live gate, the limits, halts and
-# pauses. It predicts nothing again and keeps only the cells' rises, so it takes seconds and little
-# memory; its peak resident memory is in its output. Its output holds cells, thresholds, probabilities,
+# pauses. It predicts nothing again: it replays the cost map's 20 recorded days by the paper trader's
+# rules (#470, ``trader/replay.py``), a day's recording at a time, once a cell the cost map passes
+# (four cells of 20 server-sized days in about 5 s on a Mac, about 200 MB at the peak); its peak
+# resident memory and a day's highest are in its output. Its output holds cells, thresholds, probabilities,
 # counts, ticks, shares, P&L and limits in won, log growth and times, no price, account, order number
 # nor key. The ten minutes are a bound (the cost map, computed by the collector, is waited for at most
 # two): it runs before the simulations and pre-validations, which must start by 00:30.

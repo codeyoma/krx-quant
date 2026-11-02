@@ -14,76 +14,65 @@ first (``policy.admit``).
 trip, ranked by their hit rate's lower bound less p*. The policy keeps that order; the fit sets
 each cell's threshold θ and Kelly fraction λ, or leaves the cell out.
 
-**From what.** Each cell's stored predictions of 005930 on the cost map's days for its kind (the
-row's ``days``: the latest 20 with predictions) and their answers, read from the engine's
-database read-only, as the cost map counts them: made, their answer known and no special
-situation in their window; an algorithm's by models trained on the answers they are scored on
-(``stats.on_target``); the direction's on its touch label. Nothing is predicted again.
+**From what** (#470): the recorded days, replayed by the paper trader's own rules
+(``replay.py``): each cell's predictions of 005930 on the cost map's days for its kind (the row's
+``days``: the latest 20 with predictions), read from the engine's database read-only as the trader
+reads them (an algorithm's by models trained on the answers they are scored on,
+``stats.on_target``), and each day's quotes as the collector recorded them and streamed them to the
+trader. Nothing is predicted again, and no answer is read.
 
-**The trades simulated** on the answers' paths, by the trader's rules (``paper.plan``) and its
-costs, one position at a time, of the cells in their rank:
-
-- a prediction buys when ``paper.plan`` would at the cell's θ (its most likely class the rise and
-  its probability at least θ, its reference known, the entry window from 09:05 to a time barrier
-  by 15:15, no special window touching it, a final consensus the engine did not block), nothing is
-  held, and no cell ranked above it buys on the same bar close;
-- it buys at the bar close's best ask (the path's ``ask_start``), nothing when that is at or above
-  the target already (``target_reached``), ⌊min(capital, fraction × capital) ÷ ask⌋ shares with the
-  fraction λ × the cell's f* cut to 0–1 (``paper.shares``), nothing below one share;
-- its P&L per share is its kind's research P&L, the rule the hit rates are read by: a barrier's
-  ``barriers.barrier_profit`` of a long (sold at the target when the upper barrier was reached
-  first, at the best bid when the lower one was, else at the last best bid), the direction's
-  ``stats.touch_profit`` of an up call (at the target when reached, else at the last best bid);
-  less the round trip on the reference price (the sell tax and both commissions,
-  ``KRX_FEE_PERCENT``); in won, × the shares × the tick;
-- it is held until a barrier was reached (the path's time) or the time barrier: a later bar
-  close buys from then on.
-
-What the paths keep makes these differ from the paper trader's fills: the buy is at the bar
-close's best ask, not the first quote after the decision; a barrier's stop is reached when a
-best ask reaches it (the answer's rule), the trader's when a best bid does; the direction's touch
-P&L has no stop (its path keeps no best bid at the stop).
+**The trades replayed** (``replay.Policy``): the policy's cells in their rank at their θ and λ, one
+position at a time, as the paper book would have traded them on those quotes: a rise decided as
+``paper.plan`` and ``paper.settle`` decide it (the entry rules at the cell's θ, with the special
+windows known then; of a bar close's rises the first ranked buys, a rise waiting for the cells
+ranked above it), bought at the best ask of the first quote after the decision, ⌊min(capital,
+λ × f* × capital, cash) ÷ ask⌋ shares (``paper.size``, the cash the capital plus the replay's net so
+far), sold at the target once a best bid reaches it, at the first best bid at or below the stop (the
+direction's too), or at the time barrier; its net in won after the commission on both fills and the
+sell tax. A signal in a gap of the recording, or of a day without one, is left out and counted, not
+traded.
 
 **The fit** (``fit``): the cells one at a time in rank order, each at every point of the grid
 (``Grid``: θ in ``THRESHOLDS`` × λ in ``KELLY_FRACTIONS``) with the cells kept before it as they
-were kept. The point whose simulated days grow the capital most (Σ log(1 + net ÷ capital) over the
+were kept. The point whose replayed days grow the capital most (Σ log(1 + net ÷ capital) over the
 trades, the Kelly criterion: the capital does not compound in the trader, but λ is a Kelly
 fraction) is kept when the cell made at least ``MIN_TRADES`` trades there and it grows the capital
 more than leaving the cell out. Of points that grow it alike, the one nearest the trader's
 defaults (θ ``KRX_TRADER_THRESHOLD``, λ ``KELLY_FRACTION``) is kept, then the higher θ, then the
 lower λ. A cell kept at no point is left out, and why: ``few_trades`` (fewer than ``MIN_TRADES``
-at every point), ``no_gain`` (no point grows the capital more). The same predictions, answers,
+at every point), ``no_gain`` (no point grows the capital more). The same predictions, recordings,
 cost map, calendar and settings make the same policy.
 
-**Limits.** None is fitted nor kept: the capital sizes the simulated trades as it sizes the
+**Each signal alone** (#470, ``replay.Signals``): each cell's rises, each measured alone a share at
+each θ of the grid, kept in its policy cell (``fitted.signals``) or in its entry of the cells left
+out, and shown in the report. The fit does not use them yet (#472).
+
+**Limits.** None is fitted nor kept: the capital sizes the replayed trades as it sizes the
 trader's (``KRX_TRADER_CAPITAL``), and the fit only writes ``policies`` and ``champions``.
 
-**Memory** (the server has 2 GB; pre-validation replays have been killed for it): one cell's
-predictions are read at a time on the engine database's indexes, each row parsed as it comes and
-kept as a small ``Candidate`` (its rises only: a prediction whose most likely class is not the
-rise never buys); the scores and the paths are not kept. The process's peak resident memory over
-the fit (``footprint.Meter``) is printed, logged and kept in the policy's ``fit.run``.
+**Memory** (the server has 2 GB; pre-validation replays have been killed for it): a pass of the
+replay for each cell the cost map passes, its points of the grid replayed together with the cells
+kept before it; a pass reads one day at a time, its recording once, and lets it go before the next
+(``replay.Replayer``). Each day's peak resident memory (``footprint.Meter``, the highest of its
+passes) is kept in the policy's ``fit.run.days``, the highest printed and logged.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import math
 import sqlite3
 import time as clock
 from collections import Counter
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from itertools import product
-from operator import itemgetter
 from pathlib import Path
 from typing import Any
 
 import aiohttp
 
-from krx_quant.barriers import DOWN_FIRST, UP_FIRST, barrier_profit
 from krx_quant.config import Settings
 from krx_quant.feeds.base import KST, kst_day
 from krx_quant.footprint import Meter
@@ -91,13 +80,26 @@ from krx_quant.kinds import DIRECTION
 from krx_quant.market_calendar import Session, calendar_store
 from krx_quant.predictions import DB_NAME as ENGINE_DB
 from krx_quant.predictions import KIND_ANSWER_JOIN, KIND_SCORED, SCORED, TOUCH_JOIN
-from krx_quant.pricing import Direction, tick_size
+from krx_quant.pricing import tick_size
 from krx_quant.special import Window
-from krx_quant.stats import Prices, touch_profit
 from krx_quant.trader import KELLY_FRACTION, SYMBOL, THRESHOLD, promotion, review
 from krx_quant.trader import policy as policies
 from krx_quant.trader.cells import Cell, Signal, open_engine_db, special_windows, traded_kind
-from krx_quant.trader.paper import Plan, Rules, plan, shares
+from krx_quant.trader.paper import NO_QUOTE, Plan, Rules, plan
+from krx_quant.trader.replay import (
+    GAP,
+    GAPPED,
+    NO_EXIT_QUOTE,
+    NO_RECORDING,
+    OFF_TARGET,
+    Pass,
+    Ranked,
+    Replayer,
+    Result,
+    Source,
+    Tally,
+    target_of,
+)
 from krx_quant.trader.selection import CostMapError, Pick, choose, read_cost_map
 from krx_quant.trader.settings import TraderSettings
 from krx_quant.trader.store import DB_NAME as TRADER_DB
@@ -107,7 +109,7 @@ log = logging.getLogger(__name__)
 # The grid (#399: small): the thresholds θ and the Kelly fractions λ tried for each cell.
 THRESHOLDS = (0.4, 0.5, 0.6, 0.7, 0.8)
 KELLY_FRACTIONS = (0.25, 0.5, 1.0)
-# A cell is kept at a point only if it made this many simulated trades there: one a trading day of
+# A cell is kept at a point only if it made this many replayed trades there: one a trading day of
 # the cost map's 20 on average, so a θ is not picked for a few lucky trades.
 MIN_TRADES = 20
 # Why a cell the cost map passed is left out.
@@ -117,30 +119,6 @@ WAITING_SHOWN = 5
 # What the job's exit code says: 0 a policy kept (or the same values running already), 1 none (the
 # cost map or the engine's database could not be read).
 NO_POLICY_KEPT = 1
-
-
-@dataclass(frozen=True, slots=True)
-class Candidate:
-    """A stored rise of a cell: a prediction ``paper.plan`` lets buy at a θ its probability reaches,
-    with the trade the answer's path makes of it."""
-
-    bar_close: datetime
-    probability: float  # the rise's
-    ask: float  # the best ask at the bar close: the buy
-    bought: bool  # False: the ask is at or above the target already (target_reached)
-    profit: float  # ticks of the reference price per share, less the round trip
-    tick: float
-    exit_at: datetime  # when the trade ends: a barrier reached, or the time barrier
-
-
-@dataclass
-class CellRead:
-    """A cell's stored predictions as the fit reads them: its rises (``candidates``), and how many
-    rows were read and what kept the others out (``counts``: ``paper.plan``'s reasons, ``unpriced``
-    for a path without the quotes the P&L needs)."""
-
-    candidates: list[Candidate] = field(default_factory=list)
-    counts: Counter[str] = field(default_factory=Counter)
 
 
 @dataclass(frozen=True)
@@ -185,95 +163,39 @@ class Point:
         """The share of the capital it buys: λ × f*, cut to 0–1 (``policy.apply``'s)."""
         return min(1.0, max(0.0, self.kelly_fraction * (self.pick.kelly or 0.0)))
 
-
-@dataclass
-class Tally:
-    """Simulated trades: how many, those that gained, the net in won and the capital's log growth."""
-
-    trades: int = 0
-    wins: int = 0
-    net: float = 0.0
-    growth: float = 0.0
-
-    def add(self, net: float, capital: float) -> None:
-        self.trades += 1
-        self.wins += net > 0
-        self.net += net
-        self.growth += math.log1p(net / capital) if net > -capital else -math.inf
-
-    def as_json(self) -> dict[str, Any]:
-        growth = self.growth if math.isfinite(self.growth) else None  # a trade that lost the capital
-        return {"trades": self.trades, "wins": self.wins, "net": round(self.net, 3), "growth": growth}
-
-
-@dataclass(frozen=True)
-class Result:
-    """A policy's simulated days: all its trades, each cell's, and the net of each day traded."""
-
-    total: Tally
-    cells: Mapping[Cell, Tally]
-    days: Mapping[date, float]
-
-
-def simulate(
-    points: Sequence[Point], candidates: Mapping[Cell, Sequence[Candidate]], capital: float
-) -> Result:
-    """The trades of ``points`` (cells at their θ and λ, first ranked first) on their candidates
-    (module doc: the first ranked rise of a bar close is decided, if nothing is held; it buys
-    nothing when its ask reached the target or its size is below one share)."""
-    eligible = [
-        (c.bar_close, rank, c)
-        for rank, point in enumerate(points)
-        for c in candidates.get(point.pick.cell, ())
-        if c.probability >= point.threshold
-    ]
-    eligible.sort(key=itemgetter(0, 1))  # one prediction a cell a bar close: never a tie
-    total = Tally()
-    cells = {p.pick.cell: Tally() for p in points}
-    days: dict[date, float] = {}
-    free_from: datetime | None = None
-    decided: datetime | None = None
-    for close, rank, c in eligible:
-        if close == decided or (free_from is not None and close < free_from):
-            continue  # outranked, or something is held
-        decided = close
-        point = points[rank]
-        quantity = shares(point.fraction, capital, c.ask)
-        if not c.bought or quantity < 1:
-            continue  # target_reached, no_shares: nothing bought, nothing held
-        net = quantity * c.profit * c.tick
-        total.add(net, capital)
-        cells[point.pick.cell].add(net, capital)
-        day = kst_day(close)
-        days[day] = days.get(day, 0.0) + net
-        free_from = c.exit_at
-    return Result(total, cells, days)
+    def ranked(self) -> Ranked:
+        """As the replay trades it."""
+        return Ranked(self.pick.cell, self.threshold, self.fraction)
 
 
 @dataclass(frozen=True)
 class Fitted:
     """The fit's outcome: the points kept (the policy's cells), the cells left out and why, and the
-    kept policy's simulated days."""
+    kept policy's replayed days."""
 
     kept: tuple[Point, ...]
     left_out: tuple[dict[str, Any], ...]
     result: Result
 
 
-def fit(
-    picks: Sequence[Pick], candidates: Mapping[Cell, Sequence[Candidate]], capital: float, grid: Grid
-) -> Fitted:
-    """The cells' θ and λ (module doc "The fit")."""
+# A pass of the replay as the fit asks for one (``replay.Replayer.run``): with the pick it fits, the
+# policies to replay, each its points in rank order; their results, in that order.
+Replay = Callable[[Pick, Sequence[Sequence[Point]]], Sequence[Result]]
+
+
+def fit(picks: Sequence[Pick], replay: Replay, grid: Grid) -> Fitted:
+    """The cells' θ and λ (module doc "The fit"): one pass of ``replay`` a pick, every point of the
+    grid replayed in it with the points kept before."""
     kept: list[Point] = []
     left_out: list[dict[str, Any]] = []
-    current = simulate(kept, candidates, capital)
+    current = Result(Tally(), {}, {})  # no cell: no trade
     for pick in picks:
+        points = [Point(pick, threshold, fraction) for threshold, fraction in grid.points()]
+        results = replay(pick, [[*kept, point] for point in points])
         best: tuple[Point, Result] | None = None
         tried: tuple[Point, Result] | None = None  # the best with enough trades, kept or not
         most = 0
-        for threshold, fraction in grid.points():
-            point = Point(pick, threshold, fraction)
-            result = simulate([*kept, point], candidates, capital)
+        for point, result in zip(points, results, strict=True):
             made = result.cells[pick.cell].trades
             most = max(most, made)
             if made < grid.min_trades:
@@ -298,7 +220,8 @@ def fit(
     return Fitted(tuple(kept), tuple(left_out), current)
 
 
-# Reading the stored predictions.
+# The stored predictions with their answers, as the cost map counts them: the passive entry's
+# measurement reads its signals so (#432, ``passive.py``).
 
 
 def _on_days(days: Sequence[date]) -> tuple[str, list[Any]]:
@@ -317,30 +240,6 @@ def _on_days(days: Sequence[date]) -> tuple[str, list[Any]]:
     return where, params
 
 
-def read_cell(
-    db: sqlite3.Connection,
-    pick: Pick,
-    days: Sequence[date],
-    sessions: Callable[[date], Session | None],
-    windows: Sequence[Window],
-    fee_rate: float,
-    target_version: int,
-) -> CellRead:
-    """``pick``'s stored predictions of ``days`` and their answers, as the cost map counts them, read
-    a row at a time (module doc "From what")."""
-    read = CellRead()
-    for signal, planned, path, label in rises(
-        db, pick.cell, pick.role, days, sessions, windows, target_version, read.counts
-    ):
-        candidate = _candidate(signal, planned, path, label, fee_rate)
-        if candidate is None:
-            read.counts["unpriced"] += 1
-            continue
-        read.counts["rises"] += 1
-        read.candidates.append(candidate)
-    return read
-
-
 def rises(
     db: sqlite3.Connection,
     cell: Cell,
@@ -353,23 +252,23 @@ def rises(
 ) -> Iterator[tuple[Signal, Plan, Mapping[str, Any], str]]:
     """``cell``'s stored predictions of ``days`` that ``paper.plan`` lets buy at some θ (its rises,
     the entry rules met), each with its plan, its answer's path and its answer's class; read a row
-    at a time, as the cost map counts them (module doc "From what"). Each row read is counted in
+    at a time, as the cost map counts them: made, their answer known and no special situation in
+    their window, an algorithm's by models trained on its target. Each row read is counted in
     ``counts`` (``read``), and each kept out by why: ``off_target``, ``paper.plan``'s reasons. The
-    passive entry's measurement (#432, ``passive.py``) reads its signals so too."""
+    passive entry's measurement (#432, ``passive.py``) reads its signals so; the re-fit replays the
+    recordings instead (#470, ``replay.day_reads``)."""
     if not days:
         return
     kind = traded_kind(cell.kind)
     rules = Rules(threshold=0.0)  # every rise: θ is the caller's
     rows = _direction_rows(db, cell, days) if kind.name == DIRECTION else _kind_rows(db, cell, days)
     # An algorithm's predictions by models trained on the answers they are scored on, as the
-    # statistics keep them (``stats.on_target``); the direction's only from touch target 2 on.
-    target = kind.answer_version if kind.name != DIRECTION else target_version
-    # Every one of a baseline's and a consensus's.
-    every = role != "top" or (kind.name == DIRECTION and target_version < 2)
+    # statistics keep them (``stats.on_target``); every one of a baseline's and a consensus's.
+    target = target_of(cell, role, target_version)
     for row, signal, path, label in rows:
         counts["read"] += 1
-        if not every and row["model_target"] != target:
-            counts["off_target"] += 1
+        if target is not None and row["model_target"] != target:
+            counts[OFF_TARGET] += 1
             continue
         planned = plan(signal, rules, sessions(kst_day(signal.bar_close)), signal.displayed_at, windows)
         if not isinstance(planned, Plan):
@@ -452,39 +351,6 @@ def _kind_rows(db: sqlite3.Connection, cell: Cell, days: Sequence[date]) -> Iter
         yield r, signal, json.loads(r["path"]), r["label"]
 
 
-def _candidate(
-    signal: Signal, planned: Plan, path: Mapping[str, Any], label: str, fee_rate: float
-) -> Candidate | None:
-    """The trade a rise makes on its answer's path (module doc); None without the quotes it needs."""
-    probability = signal.rise_probability
-    assert probability is not None  # planned: made, with its probabilities
-    ask: Any
-    tick: Any
-    if signal.kind == DIRECTION:
-        prices = Prices.of(path)
-        if prices is None or prices.ask_start is None:
-            return None
-        profit = touch_profit(Direction.UP, prices, fee_rate)
-        ask, tick = prices.ask_start, prices.tick
-        reached = path.get("upper_at") if prices.upper_reached else None
-    else:
-        ask, tick = path.get("ask_start"), path.get("tick")
-        profit = barrier_profit(UP_FIRST, label, path)
-        reached = {UP_FIRST: path.get("up_at"), DOWN_FIRST: path.get("down_at")}.get(label)
-    if profit is None or ask is None or not tick:
-        return None
-    exit_at = datetime.fromisoformat(reached) if isinstance(reached, str) else planned.time_barrier
-    return Candidate(
-        bar_close=signal.bar_close,
-        probability=probability,
-        ask=float(ask),
-        bought=float(ask) < planned.target,
-        profit=float(profit),
-        tick=float(tick),
-        exit_at=exit_at,
-    )
-
-
 def cost_map_days(body: Mapping[str, Any]) -> dict[str, tuple[date, ...]]:
     """Each row's days (the cost map's period for its kind), by kind; a row without readable days
     has none."""
@@ -526,6 +392,7 @@ def refit_from(
     body: Mapping[str, Any],
     engine_db: Path,
     trader_db: Path,
+    data_dir: Path,
     sessions: Callable[[date], Session | None],
     *,
     capital: float,
@@ -536,30 +403,56 @@ def refit_from(
     commit: str = "unknown",
     meter: Meter | None = None,
 ) -> Refitted:
-    """Fit a policy on the cost map ``body`` and the engine's database at ``engine_db`` (read-only),
-    and keep it in the trader's store at ``trader_db``. ``CostMapError`` when ``body`` is not the cost
-    map asked for."""
+    """Fit a policy on the cost map ``body``, the engine's database at ``engine_db`` (read-only) and
+    the recordings under ``data_dir`` (module doc), and keep it in the trader's store at
+    ``trader_db``. ``CostMapError`` when ``body`` is not the cost map asked for."""
     meter = meter or Meter()
     started = clock.monotonic()
     meter.reset()
     start_mb = meter.rss_mb()
     selection = choose(body)
     days_of = cost_map_days(body)
-    candidates: dict[Cell, list[Candidate]] = {}
-    seen: dict[Cell, dict[str, int]] = {}
+    alone: dict[Cell, Pass] = {}  # each pick's pass: its signals measured alone
+    replayer: Replayer | None = None
+    fitted = Fitted((), (), Result(Tally(), {}, {}))  # no pick: nothing replayed
     if selection.picks:
         db = open_engine_db(engine_db)
         try:
             first = min((min(d) for d in days_of.values() if d), default=kst_day(now))
             windows = special_windows(db, SYMBOL, datetime.combine(first, time(), KST))
-            for pick in selection.picks:
-                days = days_of.get(pick.kind, ())
-                read = read_cell(db, pick, days, sessions, windows, fee_rate, target_version)
-                candidates[pick.cell] = read.candidates
-                seen[pick.cell] = dict(sorted(read.counts.items()))
+            sources = {p.cell: Source(p.role, days_of.get(p.kind, ())) for p in selection.picks}
+            replayer = Replayer(
+                db,
+                data_dir,
+                sessions,
+                windows,
+                sources,
+                capital=capital,
+                fee_rate=fee_rate,
+                target_version=target_version,
+                thresholds=grid.thresholds,
+                meter=meter,
+            )
+            run = replayer.run
+
+            def replay(pick: Pick, policies: Sequence[Sequence[Point]]) -> Sequence[Result]:
+                done = run([[p.ranked() for p in policy] for policy in policies], alone=pick.cell)
+                alone[pick.cell] = done
+                return done.results
+
+            fitted = fit(selection.picks, replay, grid)
         finally:
             db.close()
-    fitted = fit(selection.picks, candidates, capital, grid)
+
+    def measured(cell: Cell) -> dict[str, Any]:
+        done = alone.get(cell)
+        if done is None:
+            return {"read": {}, "signals": {}}
+        return {
+            "read": dict(done.counts),
+            "signals": {f"{t:g}": s.as_json() for t, s in done.signals.items()},
+        }
+
     cells = tuple(
         policies.PolicyCell(
             kind=p.pick.kind,
@@ -573,27 +466,44 @@ def refit_from(
                 "kelly": p.pick.kelly,
                 "fraction": p.fraction,
                 "days": [d.isoformat() for d in days_of.get(p.pick.kind, ())],
-                "read": seen.get(p.pick.cell, {}),
+                **measured(p.pick.cell),
                 **fitted.result.cells[p.pick.cell].as_json(),
             },
         )
         for p in fitted.kept
     )
-    left_out = tuple({**x, "read": seen.get(Cell(x["kind"], x["predictor"]), {})} for x in fitted.left_out)
+    left_out = tuple({**x, **measured(Cell(x["kind"], x["predictor"]))} for x in fitted.left_out)
     result = fitted.result
+    peaks = {} if replayer is None else replayer.peaks
+    recordings = {} if replayer is None else replayer.recordings
+    day_peak = max(((mb, d) for d, mb in peaks.items() if mb is not None), default=None)
     fit_json: dict[str, Any] = {
         "evaluation": review.EVALUATION,  # #469: the rules it is fitted and judged under
         "cost_map": {"as_of": selection.as_of, "period": body.get("period"), "passed": len(selection.picks)},
         "grid": grid.as_json(),
         "fee_rate": fee_rate,
-        "result": {**result.total.as_json(), "days_traded": len(result.days)},
+        "replay": {  # #470: the recorded days replayed
+            "days": len(recordings),
+            "no_recording": [d.isoformat() for d, r in sorted(recordings.items()) if r == NO_RECORDING],
+            "gaps": [d.isoformat() for d, r in sorted(recordings.items()) if r == GAPPED],
+            "passes": 0 if replayer is None else replayer.passes,
+            "days_read": 0 if replayer is None else replayer.days_read,
+        },
+        "result": {
+            **result.total.as_json(),
+            "days_traded": len(result.days),
+            "missing": dict(sorted(result.missing.items())),
+        },
         "run": {
             "commit": commit,
             "seconds": round(clock.monotonic() - started, 2),
             "rss_start_mb": start_mb,
-            "peak_rss_mb": meter.peak_mb(),
+            "peak_rss_mb": _highest(meter.peak_mb(), *peaks.values()),
             "rss_mb": meter.rss_mb(),
             "peak_since": meter.peak_since,
+            "day_peak_rss_mb": None if day_peak is None else day_peak[0],
+            "day_peak_on": None if day_peak is None else day_peak[1].isoformat(),
+            "days": {d.isoformat(): mb for d, mb in sorted(peaks.items())},
         },
     }
     night = kst_day(now)
@@ -662,6 +572,7 @@ def report(done: Refitted) -> str:
         + " × λ "
         + " ".join(f"{k:g}" for k in grid["kelly_fractions"])
         + f" · 칸마다 모의 매매 {grid['min_trades']}건 이상",
+        _replayed(fit_json.get("replay")),
         "",
     ]
     if not done.cells:
@@ -674,6 +585,7 @@ def report(done: Refitted) -> str:
             f"로그 성장 {_growth(f['growth'])} · 읽은 예측 {f['read'].get('read', 0)}, "
             f"오름 {f['read'].get('rises', 0)}"
         )
+        lines += _alone(f.get("signals") or {})
     for x in done.left_out:
         why = x["why"]
         if why == FEW_TRADES:
@@ -685,6 +597,7 @@ def report(done: Refitted) -> str:
                 f"{best['kelly_fraction']:g}: 모의 {best['trades']}건, 순손익 {best['net']:+,.0f}원)"
             )
         lines.append(f"뺀 칸: {x['kind']} {x['predictor']} ({x['role']}): {why}, {detail}")
+        lines += _alone(x.get("signals") or {})
     if done.challengers:
         lines.append("모의로 도는 도전 정책(셋까지): " + ", ".join(f"정책 {v}" for v in done.challengers))
     if done.waiting:
@@ -693,15 +606,68 @@ def report(done: Refitted) -> str:
         lines.append(f"자리를 기다리는 정책(새 것부터): {shown}{more}")
     total = fit_json["result"]
     run = fit_json["run"]
+    missing = total.get("missing") or {}
+    left = (
+        f" · 데이터가 빠져 뺀 신호 {sum(missing.values())}({_counted(missing, MISSING_NAMES)})"
+        if missing
+        else ""
+    )
+    day_peak = run.get("day_peak_rss_mb")
     lines += [
         "",
         f"정책 전체: 모의 {total['trades']}건(이익 {total['wins']}), 매매한 날 {total['days_traded']}일, "
-        f"순손익 {total['net']:+,.0f}원, 로그 성장 {_growth(total['growth'])}",
+        f"순손익 {total['net']:+,.0f}원, 로그 성장 {_growth(total['growth'])}{left}",
         f"메모리: 최대 RSS {_mb(run['peak_rss_mb'])} MB("
         + ("맞추기 동안" if run["peak_since"] == "step" else "프로세스 시작부터")
-        + f"), 시작 {_mb(run['rss_start_mb'])} MB, 끝 {_mb(run['rss_mb'])} MB · {run['seconds']:.1f}초",
+        + ")"
+        + ("" if day_peak is None else f", 하루 최대 {_mb(day_peak)} MB({run['day_peak_on']})")
+        + f", 시작 {_mb(run['rss_start_mb'])} MB, 끝 {_mb(run['rss_mb'])} MB · {run['seconds']:.1f}초",
     ]
     return "\n".join(lines)
+
+
+# How the report names why a signal is left out or bought nothing (``replay.py``).
+MISSING_NAMES = {
+    NO_RECORDING: "녹화 없음",
+    GAP: "결측 구간",
+    NO_QUOTE: "결정 뒤 호가 없음",
+    NO_EXIT_QUOTE: "청산 호가 없음",
+}
+
+
+def _replayed(replay: Mapping[str, Any] | None) -> str:
+    """The line on the recorded days replayed (#470)."""
+    if not replay or not replay.get("days"):
+        return "재생 (#470): 녹화한 날을 trader의 모의 체결 규칙 그대로 다시 돌린다 · 돌린 날 없음"
+    absent, gaps = len(replay.get("no_recording") or ()), len(replay.get("gaps") or ())
+    return (
+        f"재생 (#470): 녹화한 날을 trader의 모의 체결 규칙 그대로 다시 돌린다 · {replay['days']}일"
+        f"(녹화 없음 {absent}일, 장중 결측 구간 {gaps}일) · 재생 {replay['passes']}번, 날 읽기 "
+        f"{replay['days_read']}번"
+    )
+
+
+def _alone(signals: Mapping[str, Mapping[str, Any]]) -> list[str]:
+    """A cell's signals measured alone a share at each θ (#470), one line: signals, those bought, the
+    net per signal measured in ticks, and the signals left out for missing data."""
+    if not signals:
+        return []
+    parts = []
+    for threshold, s in signals.items():
+        part = f"θ {threshold} 신호 {s['signals']}, 체결 {s['bought']}"
+        if s["measured"]:
+            part += f", 신호당 {s['ticks'] / s['measured']:+.2f}틱"
+        interval = s.get("per_signal")
+        if interval is not None and interval["low"] is not None:
+            part += f"(날 단위 하한 {interval['low']:+.2f}, {interval['days']}일)"
+        if s["missing"]:
+            part += f", 빠짐 {sum(s['missing'].values())}"
+        parts.append(part)
+    return ["   1주씩 따로 잰 신호: " + " · ".join(parts)]
+
+
+def _counted(counts: Mapping[str, int], names: Mapping[str, str]) -> str:
+    return ", ".join(f"{names.get(r, r)} {n}" for r, n in counts.items() if n)
 
 
 def _growth(value: float | None) -> str:
@@ -710,6 +676,11 @@ def _growth(value: float | None) -> str:
 
 def _mb(value: float | None) -> str:
     return "?" if value is None else f"{value:.1f}"
+
+
+def _highest(*values: float | None) -> float | None:
+    known = [v for v in values if v is not None]
+    return max(known) if known else None
 
 
 def promote_now(trader_db: Path, sessions: Callable[[date], Session | None], now: datetime) -> None:
@@ -806,6 +777,7 @@ async def _refit(
             body,
             engine_db,
             settings.state_dir / TRADER_DB,
+            settings.data_dir,
             sessions,
             capital=trader.capital,
             fee_rate=settings.fee_rate,
@@ -823,7 +795,8 @@ async def _refit(
         return NO_POLICY_KEPT
     run = done.fit["run"]
     log.info(
-        "refit: policy %s kept (%s), %s of %s cell(s); peak RSS %s MB (since the %s), %.1fs",
+        "refit: policy %s kept (%s), %s of %s cell(s); %s recorded day(s) replayed in %s pass(es);"
+        " peak RSS %s MB (since the %s), a day's %s MB (%s), %.1fs",
         done.version,
         "the champion"
         if done.champion
@@ -834,8 +807,12 @@ async def _refit(
         else "a challenger waiting",
         len(done.cells),
         done.passed,
+        done.fit["replay"]["days"],
+        done.fit["replay"]["passes"],
         _mb(run["peak_rss_mb"]),
         "fit" if run["peak_since"] == "step" else "process started",
+        _mb(run["day_peak_rss_mb"]),
+        run["day_peak_on"],
         run["seconds"],
     )
     print(report(done))

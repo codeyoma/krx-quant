@@ -38,8 +38,8 @@ challengers stay in paper. The trader holds no order code: the KIS order calls l
 - **Policy** (``policy.py``, ``refit.py``, #399): a versioned set of values: the cells traded and
   their order, each cell's threshold θ and Kelly fraction λ; no limit. Every trading day's night,
   after the nightly training, the scheduled job ``trader-report`` (#402) fits a new version on the
-  stored predictions and answers of the cost map's 20 days, simulating the trader's trades on the
-  answers' paths at each point of a small grid. The first is the champion, the later ones
+  cost map's 20 days, replaying their recordings and stored predictions by the paper trader's own
+  rules (#470, ``replay.py``) at each point of a small grid. The first is the champion, the later ones
   challengers. At each pick the trader trades the champion's cells among those the cost map
   passes, in its order, at its θ and λ; before the first champion, nothing (#469).
 - **Frozen version** (``review.py``, #469): the champion's cells (by their predictors' names), their

@@ -62,7 +62,7 @@ from krx_quant.scheduled import (
     JobRecord,
     Night,
 )
-from krx_quant.trader import SYMBOL, passive
+from krx_quant.trader import SYMBOL, passive, replay
 from krx_quant.trader.cells import Cell
 from krx_quant.trader.paper import STOP_LOSS, TAKE_PROFIT, TIME
 from krx_quant.trader.passive import (
@@ -78,11 +78,11 @@ from krx_quant.trader.passive import (
     Tally,
     measure,
     measure_one,
-    micros,
     report,
     run_passive_entry,
     sale_of,
 )
+from krx_quant.trader.replay import micros
 from krx_quant.trader.settings import TraderSettings
 from krx_quant.trader.store import DB_NAME as TRADER_DB
 from tests.test_trader_refit import barrier, engine
@@ -572,7 +572,7 @@ def test_an_open_gap_over_before_the_session_leaves_nothing_out(tmp_path: Path) 
 def test_a_gap_older_than_the_lookback_is_not_read(tmp_path: Path) -> None:
     """Gaps are read from ``GAP_LOOKBACK`` days before a measured day: one that began earlier would
     have been closed by a restart, and is not looked for."""
-    long_ago = moment(FIRST, "10:00:00") - timedelta(days=passive.GAP_LOOKBACK + 1)  # before both
+    long_ago = moment(FIRST, "10:00:00") - timedelta(days=replay.GAP_LOOKBACK + 1)  # before both
     record_gap(tmp_path / "data", long_ago, moment(SECOND, "10:00:20"))
 
     assert measured_with(tmp_path).tallies[BREIMAN].missing == {GAP: 1, NO_QUOTE: 1}

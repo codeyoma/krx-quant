@@ -1496,15 +1496,21 @@ trader가 돈 거래일마다의 장부다. `from`부터 `to`까지(KST 날짜, 
    "cells": [{"kind": "barrier", "role": "top", "predictor": "breiman", "threshold": 0.7, "kelly_fraction": 0.5,
      "fitted": {"p_star": 0.63, "low": 0.7, "kelly": 10.5, "fraction": 1.0, "days": ["2026-09-17", "...", "2026-10-15"],
        "read": {"read": 7580, "rises": 5120, "not_up": 1900, "past_last_exit": 240, "...": 0},
-       "trades": 64, "wins": 38, "net": 21000.0, "growth": 0.02095}}],
+       "trades": 64, "wins": 38, "net": 21000.0, "growth": 0.02095,
+       "signals": {"0.7": {"signals": 980, "measured": 974, "missing": {"gap": 6}, "refused": {"target_reached": 31},
+         "bought": 943, "wins": 512, "exits": {"take_profit": 470, "stop_loss": 301, "time": 172}, "net": 4100.0,
+         "ticks": 41.0, "per_signal": {"value": 0.04, "low": -0.02, "high": 0.10, "days": 20}}, "...": {}}}}],
    "left_out": [{"kind": "barrier_15m", "role": "baseline", "predictor": "barrier-persist-15m", "p_star": 0.6, "low": 0.66,
      "kelly": 8.1, "why": "no_gain", "best": {"threshold": 0.6, "kelly_fraction": 0.5, "trades": 41, "wins": 18, "net": -9800.0, "growth": -0.0098},
-     "read": {"read": 7580, "rises": 4200}}],
+     "read": {"read": 7580, "rises": 4200}, "signals": {"0.6": {"...": 0}}}],
    "fit": {"cost_map": {"as_of": "2026-10-15T22:31:02+09:00", "period": "20d", "passed": 2},
      "grid": {"thresholds": [0.4, 0.5, 0.6, 0.7, 0.8], "kelly_fractions": [0.25, 0.5, 1.0],
               "defaults": {"threshold": 0.6, "kelly_fraction": 0.5}, "min_trades": 20},
-     "fee_rate": 0.00015, "result": {"trades": 64, "wins": 38, "net": 21000.0, "growth": 0.02095, "days_traded": 18},
-     "run": {"commit": "…", "seconds": 2.4, "rss_start_mb": 131.0, "peak_rss_mb": 139.8, "rss_mb": 136.2, "peak_since": "step"}},
+     "fee_rate": 0.00015,
+     "replay": {"days": 20, "no_recording": [], "gaps": ["2026-10-02"], "passes": 2, "days_read": 40},
+     "result": {"trades": 64, "wins": 38, "net": 21000.0, "growth": 0.02095, "days_traded": 18, "missing": {"gap": 2}},
+     "run": {"commit": "…", "seconds": 8.1, "rss_start_mb": 131.0, "peak_rss_mb": 188.4, "rss_mb": 140.2, "peak_since": "step",
+             "day_peak_rss_mb": 188.4, "day_peak_on": "2026-10-08", "days": {"2026-09-17": 176.5, "...": 0}}},
    "admitted_at": "2026-10-15T22:31:04+09:00", "dropped_at": null,
    "paper": {"since": "2026-10-16", "last": "2026-10-29", "days": 10, "trades": 23, "net": 11000.0, "mean": 1100.0, "low": 63.35}},
   {"version": 1, "status": "former", "...": "..."}],
@@ -1522,9 +1528,9 @@ trader가 돈 거래일마다의 장부다. `from`부터 `to`까지(KST 날짜, 
 
   > **바뀜** (2026-10-30, #416): "#399에서는 처음 것이 챔피언이고 나머지는 도전 정책이다" → 도전 정책은 자리 셋에서 모의로 돌고(`challenger`, 자리가 차면 `waiting`), 이기면 챔피언이 되며(`former`가 생긴다), 20일까지 이기지 못하면 `dropped`가 된다. 이유: #400. 넷째가 들어오면 가장 오래된 것을 내리면 어느 도전 정책도 10일을 채우지 못해서 자리를 기다리게 했다(Codex 리뷰).
 - `policies[].paper`(#400): 그 정책의 모의 기록(`GET /v1/trader`의 `policies[].paper`와 같다). 돈 적이 없으면 0일이다. 어느 모드에서도 paper의 기록이다(mock에서 챔피언의 것은 그림자 장부의 것, #405).
-- `cells`: 매매하는 칸, 순위대로. `threshold`는 사는 오름 확률의 문턱 θ, `kelly_fraction`은 Kelly 비율 λ(산 비율 = λ × 그날 f*, 0–1로 자름). `fitted`는 그 밤에 무엇으로 맞췄는지다: 그 밤 비용 지도의 `p_star`, 맞힘률 하한 `low`, Kelly f* `kelly`와 그것으로 낸 비율 `fraction`, 맞춘 날(`days`), 읽은 예측 수(`read.read`)와 오름(`read.rises`)과 거른 이유별 수(`paper.plan`의 이유, `off_target`: 지금 정답으로 학습하지 않은 모델의 예측, `unpriced`: 경로에 손익을 셀 호가가 없음), 정책 전체 모의에서 그 칸의 매매 수·이익 낸 수·순손익(원)·로그 성장.
-- `left_out`: 비용 지도는 통과시켰지만 넣지 않은 칸과 이유. `few_trades`면 `most_trades`(어느 점에서도 모의 매매가 `min_trades`에 못 미침, 가장 많을 때의 수), `no_gain`이면 `best`(넣어도 정책의 로그 성장이 늘지 않음, 가장 나은 점과 그 결과).
-- `fit`: 비용 지도(`as_of`, `period`, 통과한 칸 수 `passed`), 격자(`thresholds`, `kelly_fractions`, 같을 때 고르는 기본값 `defaults`, 칸마다 최소 모의 매매 수 `min_trades`), 수수료율, 정책 전체의 모의 결과(`result`: 매매 수, 이익 낸 수, 순손익(원), 로그 성장, 매매한 날 수), 실행(`run`: 커밋, 걸린 초, 시작·최대·끝 RSS(MB), `peak_since`: `step`이면 최대가 맞추기 동안의 것, `start`면 프로세스 시작부터의 것).
+- `cells`: 매매하는 칸, 순위대로. `threshold`는 사는 오름 확률의 문턱 θ, `kelly_fraction`은 Kelly 비율 λ(산 비율 = λ × 그날 f*, 0–1로 자름). `fitted`는 그 밤에 무엇으로 맞췄는지다: 그 밤 비용 지도의 `p_star`, 맞힘률 하한 `low`, Kelly f* `kelly`와 그것으로 낸 비율 `fraction`, 맞춘 날(`days`), 읽은 예측 수(`read.read`)와 오름(`read.rises`)과 거른 이유별 수(`paper.plan`의 이유, `off_target`: 지금 정답으로 학습하지 않은 모델의 예측), 정책 전체를 녹화로 재생한 매매에서 그 칸의 매매 수·이익 낸 수·순손익(원)·로그 성장, 그리고 `signals`(#470): 그 칸의 신호를 하나씩 따로 1주로 재생한 결과를 격자의 θ마다(키는 θ, `"0.6"`. 스키마 `trader_signals`): 확률이 그 θ 이상인 신호 수(`signals`), 녹화가 빠져 뺀 것(`missing`: `no_recording`, `gap`, `no_quote`, `no_exit_quote`)과 나머지(`measured`), 그 가운데 사지 않은 것(`refused`: `special`, `expired`, `target_reached`)과 산 것(`bought`), 이익 낸 것(`wins`), 청산 이유(`exits`), 산 것의 순손익 합(`net` 원, `ticks` 기준가의 틱), 잰 신호당 틱(안 산 것 0)의 날 단위 평균과 95% 구간(`per_signal`, 날이 둘 미만이면 `null`). **바뀜** (2026-11-03, #477): `read`에 `unpriced`(정답 경로에 손익을 셀 호가가 없음)가 있었고, 매매는 정답 경로로 흉내 낸 것이었다 → 녹화를 재생하므로 `unpriced`는 없고(빠진 녹화는 `signals`와 `fit.result.missing`에), `signals`가 더해졌다. #470 전의 정책에는 `signals`가 없다. 이유: spec #468 2절 "실행 그대로의 재생"(#470).
+- `left_out`: 비용 지도는 통과시켰지만 넣지 않은 칸과 이유. `few_trades`면 `most_trades`(어느 점에서도 모의 매매가 `min_trades`에 못 미침, 가장 많을 때의 수), `no_gain`이면 `best`(넣어도 정책의 로그 성장이 늘지 않음, 가장 나은 점과 그 결과). `read`와 `signals`(#470)는 `cells`의 `fitted`와 같다.
+- `fit`: 비용 지도(`as_of`, `period`, 통과한 칸 수 `passed`), 격자(`thresholds`, `kelly_fractions`, 같을 때 고르는 기본값 `defaults`, 칸마다 최소 모의 매매 수 `min_trades`), 수수료율, 재생한 녹화(`replay`, #470: 날 수 `days`, 녹화가 없는 날 `no_recording`, 장중에 결측 구간이 있는 날 `gaps`, 재생 횟수 `passes`(비용 지도를 통과한 칸마다 한 번), 녹화를 읽은 횟수 `days_read`), 정책 전체를 재생한 결과(`result`: 매매 수, 이익 낸 수, 순손익(원), 로그 성장, 매매한 날 수, 녹화가 빠져 뺀 신호 `missing`(#470)), 실행(`run`: 커밋, 걸린 초, 시작·최대·끝 RSS(MB), `peak_since`: `step`이면 최대가 맞추기 동안의 것, `start`면 프로세스 시작부터의 것. #470부터 하루 최대 RSS `day_peak_rss_mb`와 그 날 `day_peak_on`, 날마다의 최대 `days`(그 날을 재생한 횟수 가운데 가장 높은 것)). `fit`은 형식을 정하지 않은 객체다(스키마 `{"type": "object"}`). #470 전의 정책에는 `replay`, `result.missing`, `run.day_*`, `run.days`가 없다.
 - 한도(운용 상한, 하루·누적 손실 한도)는 정책에 없다. 코드의 기본값과 서버 `.env`에서만 온다.
 
 ### 호가 스트림 (수집기 안, #394)
