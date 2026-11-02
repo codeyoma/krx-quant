@@ -69,7 +69,7 @@ same cells' predictions and the same quotes, in one process.
   The promotion and the live gate read them (``promotion.py``). Before the first champion the
   champion's book has no policy and keeps no record.
 
-  > **바뀜** (2026-11-03, #PR473): the champion's day was stopped once its status was not
+  > **바뀜** (2026-11-03, #481): the champion's day was stopped once its status was not
   > ``running`` (a loss limit too) → by a pause or a failed order alone. 이유: spec #468 5: the days a
   > loss limit stopped count in the judgment.
 

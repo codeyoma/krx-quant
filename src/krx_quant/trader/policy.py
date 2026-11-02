@@ -29,7 +29,7 @@ runs from the next trading day, the cycle's first.
 > Spec #393 dropped the oldest of three for each new one; with a fit every night, none would have
 > reached the promotion's ten days (#416, Codex's review).
 
-> **바뀜** (2026-11-03, #PR473): a later policy took a free one of three running slots at once, or
+> **바뀜** (2026-11-03, #481): a later policy took a free one of three running slots at once, or
 > waited and was admitted when one freed, the newest first (``admit``); a challenger left its slot
 > when promoted or after 20 common days unpromoted; a fit equal to a policy waiting was kept → a
 > later policy waits for the next cohort, formed at a review cycle's start; every member leaves at

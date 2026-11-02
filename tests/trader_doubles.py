@@ -411,8 +411,8 @@ class Day:
 
 def keep(state: Path, made: datetime, *cells: policies.PolicyCell, reason: str = "밤 맞추기") -> int:
     """A policy version kept at ``made`` as the nightly re-fit keeps it (``policy.add``): the first
-    the champion, a later one a challenger (#400: it runs from the trading day after ``made``'s
-    pick). Its version. The evaluation version (#469) begun then if it was not yet, as the night's
+    the champion, a later one waiting for a cohort (#473: ``enter`` makes it a challenger). Its
+    version. The evaluation version (#469) begun then if it was not yet, as the night's
     job begins it (``promotion.promote``): its first cycle from the first trading day after
     ``made``."""
     db = policies.connect(state / DB_NAME)

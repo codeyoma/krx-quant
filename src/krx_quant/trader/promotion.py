@@ -45,7 +45,7 @@ archived, and is not inherited.
 > review night alone, and on the current evaluation version's days alone. 이유: spec #468 "버전과
 > 검토 주기": the version that trades is frozen between reviews.
 
-> **바뀜** (2026-11-03, #PR473): each challenger in a running slot was judged on every review night
+> **바뀜** (2026-11-03, #481): each challenger in a running slot was judged on every review night
 > from its tenth common day, Bonferroni over the challengers running, and dropped once it reached
 > 20 common days unpromoted; a day the champion was stopped by a loss limit was not a common day →
 > a cohort formed at a cycle's start is judged once, on that cycle's review night, Bonferroni within

@@ -8,7 +8,7 @@ the champion, of a running challenger or of a policy waiting is not kept (``poli
 night's end the next cycle's cohort is formed from the policies waiting, the newest first, when its
 first day is the next trading day (#473, ``cohort.form_tonight``): on a review night.
 
-> **바뀜** (2026-11-03, #PR473): a new policy took a free one of three running slots (it ran from the
+> **바뀜** (2026-11-03, #481): a new policy took a free one of three running slots (it ran from the
 > next trading day) or waited for one, and the slots freed were filled at the night's end
 > (``policy.admit``) → it waits for the next cohort, formed on a review night. 이유: spec #468 5
 > "도전 정책".
@@ -67,7 +67,7 @@ On a store without a champion, the fit of a policy with cells keeps an empty one
 as every later one does: no policy trades before a review crowned it. A fit with no cell is that
 empty champion itself.
 
-> **바뀜** (2026-11-03, #PR473): on a store without a champion the first policy kept was the champion,
+> **바뀜** (2026-11-03, #481): on a store without a champion the first policy kept was the champion,
 > cells and all (#399) → a policy with cells waits for a cohort, an empty champion kept before it.
 > 이유: spec #468 1 and 3: every change of the policy that trades goes through a review, and a fit is
 > development evidence.
