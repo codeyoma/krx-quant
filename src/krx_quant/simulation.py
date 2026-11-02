@@ -416,12 +416,22 @@ def _apply(
     store: PredictionStore, verdicts: Sequence[AtOnce], kind: str, now: datetime
 ) -> dict[str, Simulation]:
     """Make each verdict's change (from probation, as read: a command may have landed meanwhile)
-    and keep it with its simulation."""
+    and keep it with its simulation. One that would make active an algorithm whose new code has not
+    passed its pre-validation (#454, ``Revision.held``) is not made: it stays on probation, as the
+    engine's review leaves it (``to_simulate`` does not pick such an algorithm in the first place)."""
     out: dict[str, Simulation] = {}
     records = store.simulations()
+    held = {name for name, r in store.revisions().items() if r.held}
     for v in verdicts:
         status = Status.PROBATION
         c = v.change
+        if c is not None and c.status is Status.ACTIVE and c.algorithm in held:
+            log.info(
+                "%s: stays on probation (%s), the pre-validation of its new code has not passed",
+                c.algorithm,
+                c.reason,
+            )
+            c = None
         if c is not None and store.change_status(
             c.algorithm, now, c.previous, c.status, c.reason, simulated=True
         ):

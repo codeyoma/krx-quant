@@ -1927,9 +1927,10 @@ class PredictionStore:
         """Of ``names``, in order, the algorithms on a probation that waits for its simulation
         (#298): begun for a reason that is simulated (``lifecycle.starts_simulation``: a new
         algorithm's, a new target's), no simulation kept for it yet. Not one whose code changed and
-        whose pre-validation has not judged that revision yet (#454): it is judged on the days
-        after the change only, and a replay of the latest days could hold those it was chosen on
-        (a new target's restart in the meantime would be simulated otherwise)."""
+        whose pre-validation has not passed that revision (#454, ``Revision.held``: not judged yet,
+        or refused and unretired since): it is judged on the days after the change only, a replay of
+        the latest days could hold those it was chosen on, and a simulation's review is applied
+        without the engine's (a new target's restart in the meantime would be simulated otherwise)."""
         standings, done = self.statuses(), self.simulated_stints()
         revisions = self.revisions()
         return [
@@ -1939,7 +1940,7 @@ class PredictionStore:
             and s.status is Status.PROBATION
             and starts_simulation(s.reason)
             and (n, s.since) not in done
-            and not ((r := revisions.get(n)) is not None and r.pending)
+            and not ((r := revisions.get(n)) is not None and r.held)
         ]
 
     def simulated(self, kind: str, answer_version: int) -> dict[str, Simulated]:

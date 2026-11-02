@@ -19,7 +19,7 @@ import pytest
 from krx_quant.algorithms import ALGORITHMS, Algorithm, KindAlgorithm, Model
 from krx_quant.cli import main
 from krx_quant.feeds import KST
-from krx_quant.lifecycle import CODE_CHANGED, CODE_REFUSED, REGISTERED, Status, target_changed
+from krx_quant.lifecycle import CODE_CHANGED, CODE_REFUSED, REGISTERED, AtOnce, Change, Status, target_changed
 from krx_quant.market_calendar import MarketCalendar, first_whole_day
 from krx_quant.predictions import (
     DB_NAME,
@@ -32,6 +32,7 @@ from krx_quant.predictions import (
 from krx_quant.prevalidation import MIN_DAYS, code_digest, report_path, revision_report
 from krx_quant.revisions import Code, Refactor, RevisionGate, Verdict
 from krx_quant.scheduled import Revising, revising_facts
+from krx_quant.simulation import _apply
 from krx_quant.touch import TARGET_VERSION
 from tests.replay_events import DAY, at, run
 from tests.test_lifecycle import (
@@ -434,8 +435,9 @@ async def test_a_new_algorithm_s_first_revision_is_the_code_it_passed_with(tmp_p
 
 async def test_a_new_target_s_restart_waits_for_a_changed_revision_s_verdict(tmp_path: Path) -> None:
     """Input: alpha on probation for new code a2, not judged yet; a new target restarts it (a
-    reason that is simulated). Output: no simulation while a2 waits for its pre-validation (the days
-    replayed may be those a2 was chosen on); once it passed, it is simulated as before."""
+    reason that is simulated). Output: no simulation while a2 has not passed its pre-validation
+    (the days replayed may be those a2 was chosen on), refused included; once it passed, it is
+    simulated as before."""
     db = tmp_path / "engine.db"
     put_statuses(db, {"alpha": ("active", "set by the test")}, EARLIER)
     await start(db, at("06:00:00", weekdays_before(DAY, 1)[0]), Gate(), [ALPHA])
@@ -446,7 +448,11 @@ async def test_a_new_target_s_restart_waits_for_a_changed_revision_s_verdict(tmp
             "alpha", at("07:00:00"), Status.PROBATION, Status.PROBATION, target_changed("direction", 9)
         )
         assert store.to_simulate(["alpha"]) == []
-        store.judge_revision(store.revisions()["alpha"], REVISION_PASSED, at("07:30:00"), None)
+        # Refused, then unretired on the same code and restarted for a new target: still held, so
+        # not simulated either (a simulation's review would make it active, #457 review).
+        refused = store.judge_revision(store.revisions()["alpha"], REVISION_REFUSED, at("07:10:00"), "stats")
+        assert store.to_simulate(["alpha"]) == []
+        store.judge_revision(refused, REVISION_PASSED, at("07:30:00"), None)
         assert store.to_simulate(["alpha"]) == ["alpha"]
 
 
@@ -605,3 +611,20 @@ def test_the_jobs_count_the_recorded_days_from_the_revision_s_first_whole_day(tm
 
     assert facts == {"turing": Revising(boundary, PV_DAYS[2], 1, None)}
     assert revising_facts(s, MarketCalendar(), after, []) == {}
+
+
+def test_a_simulation_s_review_never_makes_a_held_revision_active(tmp_path: Path) -> None:
+    """Input: alpha on probation whose new code a2 has not passed its pre-validation, and a
+    simulation's review that would make it active. Output: it stays on probation, as the engine's
+    review leaves it (#457 review: the simulation applies its review itself)."""
+    store = PredictionStore(tmp_path / "engine.db")
+    store.add_status("alpha", EARLIER, None, Status.PROBATION, target_changed("direction", 9))
+    store.add_revision("alpha", "a2", TARGET_VERSION, {}, EARLIER, boundary=EARLIER, state=REVISION_CHANGED)
+    store.add_simulation("alpha", EARLIER, "direction", None, at("22:30:00"), {"training": {}})
+    promote = Change("alpha", Status.PROBATION, Status.ACTIVE, "simulated probation: passed", simulated=True)
+
+    applied = _apply(store, [AtOnce("alpha", 10, 10, None, 300, True, promote)], "direction", at("23:00:00"))
+
+    assert store.statuses()["alpha"].status is Status.PROBATION
+    assert applied["alpha"].status is Status.PROBATION
+    store.close()
