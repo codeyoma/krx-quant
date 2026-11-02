@@ -77,7 +77,10 @@ from); a trade's orders and fills are its trade's. A practice trade of the mock 
 own (``champion`` 1: the loss limits, the cash, the KIS checks, the reconcile and the chart count
 it), of no policy (``policy_id`` null: no record, promotion or live gate counts it); its paper
 shadow's (``shadow`` 1) is of no policy either, and the paper account leaves it out
-(``paper_account``).
+(``paper_account``). The cell practised is frozen for each review cycle (#474, ``practice.py``):
+``practice_cycles`` keeps it, one row a cycle, written by the nightly job (its cell, its θ, the cost
+map's figures of it that night, and every cell × θ it measured on the replay, best first) and, once a
+pick finds its predictor gone, by the trader (``gone_at``: no practice for the rest of the cycle).
 
 Every row carries its mode (``paper``, ``mock``, ``live``): paper, KIS mock and live trades are told
 apart in the same tables (a pause and a resume hold whatever the mode). The records (``policy_days`` and the
@@ -412,6 +415,23 @@ CREATE TABLE IF NOT EXISTS trade_stalls (  -- each stall a trade was open throug
     PRIMARY KEY (trade_id, stall_id)
 );
 """
+# The mock practice cell frozen for each review cycle (#474, ``practice.py``).
+_PRACTICE = """
+CREATE TABLE IF NOT EXISTS practice_cycles (  -- the mock practice cell of each review cycle (#474)
+    evaluation INTEGER NOT NULL,       -- the evaluation version (#469, review.py)
+    cycle INTEGER NOT NULL,            -- the review cycle, from 1
+    chosen_at TEXT NOT NULL,           -- when the nightly job chose it
+    kind TEXT NOT NULL,
+    role TEXT NOT NULL,                -- the predictor's on the cost map that night
+    predictor TEXT NOT NULL,
+    threshold REAL NOT NULL,           -- its θ
+    pick TEXT NOT NULL,                -- JSON: the cell as the cost map gave it that night (selection.Pick)
+    measured TEXT NOT NULL,            -- JSON: each cell × θ replayed alone a share, best first (#470)
+    gone_at TEXT,                      -- a pick found its predictor gone: no practice until the cycle ends
+    PRIMARY KEY (evaluation, cycle)
+);
+"""
+
 # What a stall did to a trade's exit (``trade_stalls.effect``): its exit was made on the first quote
 # after the stall (paper waits for the quotes), or its sale decided on a REST quote during it (mock).
 WAITED, REST = "waited", "rest"
@@ -639,7 +659,7 @@ class TraderStore:
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.execute("PRAGMA synchronous=NORMAL")
         self._db.executescript(
-            f"BEGIN;{_SCHEMA.format(decisions=_DECISIONS.format(name='decisions'))}{_STALLS}COMMIT;"
+            f"BEGIN;{_SCHEMA.format(decisions=_DECISIONS.format(name='decisions'))}{_STALLS}{_PRACTICE}COMMIT;"
         )
         policy.ensure_schema(self._db)
         review.ensure_schema(self._db)

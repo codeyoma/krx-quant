@@ -134,8 +134,9 @@ CAPITAL = 1_000_000
 DAILY_LOSS_PERCENT = 10.0
 CUMULATIVE_LOSS_PERCENT = 20.0
 # The default threshold: a rise's probability at least this buys (the signal alerts' default); the
-# mock practice cell's (#427) and the nightly fit's default, a champion policy's cell having its own θ
-# (#399). Before the first champion nothing but the practice trades (#469).
+# nightly fit's default, a champion policy's cell having its own θ (#399) and the mock practice cell
+# the θ frozen for its review cycle (#474; this one before). Before the first champion nothing but
+# the practice trades (#469).
 THRESHOLD = 0.6
 # The risk rules (#471, spec #468 4 "크기", 7 "위험 규칙"; ``paper.size``, ``paper.risk_held``), the
 # code's at most: ``.env`` may narrow them, never widen them, and no policy touches them. A trade's loss

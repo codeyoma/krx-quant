@@ -1,15 +1,17 @@
 """The mock practice (#427, ``KRX_TRADER_MOCK_PRACTICE``): on a day no champion cell trades, the mock
-book trades the cost map's practice cell a share at a time on KIS's mock server, its trades, orders
-and fills kept as practice, its paper shadow a book of its own; the KIS checks and the loss limits
-count them, no record, promotion or live gate does.
+book trades the practice cell a share at a time on KIS's mock server, its trades, orders and fills
+kept as practice, its paper shadow a book of its own; the KIS checks and the loss limits count them,
+no record, promotion or live gate does. The cell is the one kept for the review cycle (#474,
+``tests/test_trader_practice_cycle.py``): here kept as the nightly job keeps it (``practise``).
 
 KIS is the fake one (``tests/test_trader_mock.py``). The example: the cost map fails the 4-minute
-barrier's breiman (its hit rate's lower bound 0.60 under p* 0.63): no cell passes, the practice cell
-is that one. The 10:00 barrier prediction (up_first 0.7 ≥ θ 0.6, target 70,250, stop 69,850, time
-barrier 10:04) read at 10:00:02.3; the first quote after it asks 70,100: KIS fills the practice's one
-share at 70,050 and its take-profit rests at 70,300; the practice shadow fills its share at 70,100 in
-paper. The bid reaches 70,300 at 10:02: the shadow takes profit at the target (70,250), KIS fills the
-take-profit at its limit (70,300) at 10:02:30. Every value is made up.
+barrier's breiman (its hit rate's lower bound 0.60 under p* 0.63): no cell passes, and the practice
+cell kept for the cycle is that one, at θ 0.6. The 10:00 barrier prediction (up_first 0.7 ≥ θ 0.6,
+target 70,250, stop 69,850, time barrier 10:04) read at 10:00:02.3; the first quote after it asks
+70,100: KIS fills the practice's one share at 70,050 and its take-profit rests at 70,300; the
+practice shadow fills its share at 70,100 in paper. The bid reaches 70,300 at 10:02: the shadow takes
+profit at the target (70,250), KIS fills the take-profit at its limit (70,300) at 10:02:30. Every
+value is made up.
 """
 
 from __future__ import annotations
@@ -29,7 +31,7 @@ from krx_quant.config import SettingsError
 from krx_quant.consensus import FINAL
 from krx_quant.fake_kis import BUY_SIDE, SELL_SIDE, FakeAccount, FakeKis
 from krx_quant.kis_orders import Servers, trader_broker
-from krx_quant.trader import MOCK, PAPER, SYMBOL, live, promotion, report
+from krx_quant.trader import MOCK, PAPER, SYMBOL, live, practice, promotion, report
 from krx_quant.trader import policy as policies
 from krx_quant.trader.cells import Cell
 from krx_quant.trader.desk import Desk
@@ -64,6 +66,7 @@ from tests.trader_doubles import (
     first_champion,
     keep,
     policy_cell,
+    practise,
     predictor,
     quote,
     whole_rules,
@@ -79,6 +82,11 @@ OTHER = Cell("barrier_15m", "breiman")  # a cell of the champion the cost map do
 
 def practised() -> Selection:
     return choose(FAILING)
+
+
+def frozen_here(state: Path, threshold: float = 0.6) -> practice.Frozen:
+    """FAILING's barrier breiman kept as the practice cell of the first cycle (#474), at ``threshold``."""
+    return practise(state, practised().practisable[0], threshold)
 
 
 def shadows(state: Path) -> list[dict[str, Any]]:
@@ -137,9 +145,10 @@ def test_the_practice_is_a_setting_of_the_mock_mode_alone(
 # The practice cell
 
 
-def test_the_practice_cell_has_the_greatest_lower_bound_less_p_star_of_the_cells_with_a_verdict() -> None:
+def test_the_cells_that_may_be_practised_are_those_with_a_verdict_and_a_sound_row() -> None:
     """``fail`` counts and ``few`` does not; a cell without a predictor or p*, one whose lower bound is
-    not finite, one whose row has no barrier width are left out. One share at the default θ."""
+    not finite, one whose row has no barrier width are left out. Each one share, θ to be frozen (#474),
+    in the picks' order: the greatest lower bound less p* first."""
     no_width = cost_row("barrier_30m", top=predictor("turing", 0.629, "fail"))
     no_width["width"] = 0  # its barrier is not sound
     found = choose(
@@ -160,12 +169,15 @@ def test_the_practice_cell_has_the_greatest_lower_bound_less_p_star_of_the_cells
     )
 
     assert (found.picks, found.reason) == ((), NO_PASS)
-    practice = found.practice
-    assert practice is not None
-    assert (practice.kind, practice.role, practice.predictor) == ("barrier", "top", "breiman")
-    assert practice.priority == pytest.approx(0.62 - 0.63)
-    assert (practice.quantity, practice.practice, practice.threshold) == (1, True, None)
-    assert practice.kelly is not None and practice.kelly < 0, "its Kelly at most 0: one share"
+    assert [(p.kind, p.role, p.predictor) for p in found.practisable] == [
+        ("barrier", "top", "breiman"),
+        ("direction", "top", "turing"),
+        ("barrier", "baseline", "ar"),
+    ]
+    first = found.practisable[0]
+    assert first.priority == pytest.approx(0.62 - 0.63)
+    assert (first.quantity, first.practice, first.threshold) == (1, True, None)
+    assert first.kelly is not None and first.kelly < 0, "its Kelly at most 0: one share"
 
     tie = choose(
         cost_map(
@@ -175,17 +187,19 @@ def test_the_practice_cell_has_the_greatest_lower_bound_less_p_star_of_the_cells
             ]
         )
     )
-    assert tie.practice is not None and tie.practice.kind == "barrier", "of two alike, the kinds' order"
-    assert choose(cost_map([cost_row("barrier", top=predictor("breiman", 0.6, "few"))])).practice is None
+    assert [p.kind for p in tie.practisable] == ["barrier", "barrier_15m"], "of two alike, the kinds' order"
+    assert choose(cost_map([cost_row("barrier", top=predictor("breiman", 0.6, "few"))])).practisable == ()
 
 
 async def test_the_practice_is_picked_only_on_a_cost_map_and_a_champion_read_with_no_champion_cell(
     kis_mock: tuple[FakeKis, FakeAccount], tmp_path: Path
 ) -> None:
     """``no_pass``, ``not_in_policy`` and ``no_champion`` (#469: a cell passing before the first
-    champion trades no more) practise; ``no_cost_map``, ``no_policy`` and a day with a champion cell
-    do not. The practice off, none does."""
+    champion trades no more) practise the cell kept for the cycle, at its θ; ``no_cost_map``,
+    ``no_policy`` and a day with a champion cell do not, each said in ``practice.why``. The practice
+    off, none does."""
     fake, _ = kis_mock
+    kept = frozen_here(tmp_path, threshold=0.7)
     store = TraderStore(tmp_path / DB_NAME)
     try:
         async with kis.rest_session() as session:
@@ -213,14 +227,21 @@ async def test_the_practice_is_picked_only_on_a_cost_map_and_a_champion_read_wit
             on.select(practised(), at("09:00:00"))  # before the first champion: no_pass
             assert on.champion.cells == [cell] and on.shadow is not None and on.shadow.cells == []
             assert on.practice_shadow is not None and on.practice_shadow.cells == [cell]
-            assert on.champion.practice_state is not None
-            assert (
-                on.champion.practice_state["active"] and on.champion.practice_state["cell"]["quantity"] == 1
-            )
-            no_map = Selection((), reason=NO_COST_MAP, detail="starting", practice=practised().practice)
+            state = on.champion.practice_state
+            assert state is not None and state["active"] and state["why"] is None
+            assert (state["cell"]["quantity"], state["cell"]["threshold"]) == (1, 0.7), "the cycle's θ"
+            assert state["frozen"] == kept.as_json()
+            assert (state["frozen"]["cycle"], state["frozen"]["threshold"]) == (1, 0.7)
+            no_map = Selection((), reason=NO_COST_MAP, detail="starting")
             on.select(no_map, at("09:01:00"))
             assert on.champion.cells == [] and on.practice_shadow.cells == []
-            assert on.champion.practice_state == {"enabled": True, "active": False, "cell": None}
+            assert on.champion.practice_state == {
+                "enabled": True,
+                "active": False,
+                "cell": None,
+                "frozen": kept.as_json(),
+                "why": NO_COST_MAP,
+            }
             on.select(choose(PASSING), at("09:02:00"))  # passing, but no champion yet (#469)
             assert on.champion.cells == [cell] and on.champion.practice_state["active"]
             assert on.champion.practice_state["cell"]["quantity"] == 1
@@ -240,17 +261,25 @@ async def test_the_practice_is_picked_only_on_a_cost_map_and_a_champion_read_wit
             on.select(choose(PASSING), at("09:03:30"))  # a champion cell: no practice
             assert on.champion.cells == [cell] and not on.champion.practice_state["active"]
             assert on.champion.practice_state["cell"] is None
+            assert on.champion.practice_state["why"] == practice.CHAMPION
             with store.db:  # the champion cannot be read
                 store.db.execute("UPDATE policies SET cells = 'broken' WHERE id = 2")
             on.select(practised(), at("09:04:00"))
             assert on.champion.cells == [] and not on.champion.practice_state["active"]
+            assert on.champion.practice_state["why"] == NO_POLICY
             assert mock_picks(tmp_path)[-1]["reason"] == NO_POLICY
             await on.close()
 
             off = desk(practice=False)
             off.select(practised(), at("09:05:00"))
             assert off.champion.cells == [] and off.practice_shadow is None
-            assert off.champion.practice_state == {"enabled": False, "active": False, "cell": None}
+            assert off.champion.practice_state == {
+                "enabled": False,
+                "active": False,
+                "cell": None,
+                "frozen": None,
+                "why": None,
+            }
             await off.close()
     finally:
         store.close()
@@ -264,6 +293,7 @@ async def test_a_day_without_a_champion_cell_practises_a_share_on_kis_kept_as_pr
 ) -> None:
     fake, account = kis_mock
     assert keep(tmp_path, at("2026-10-12 22:31:00"), policy_cell(OTHER)) == 1  # the champion
+    frozen_here(tmp_path)
     desk = MockDesk(tmp_path, fake, account, selection=practised(), practice=True)
 
     await desk.run([TEN, BOUGHT, TAKEN, Fill("10:02:30")])
@@ -349,6 +379,7 @@ async def test_a_day_without_a_champion_cell_practises_a_share_on_kis_kept_as_pr
     assert state is not None and state["practice"] is not None
     assert (state["practice"]["enabled"], state["practice"]["active"]) == (True, True)
     assert (state["practice"]["cell"]["kind"], state["practice"]["cell"]["quantity"]) == ("barrier", 1)
+    assert (state["practice"]["frozen"]["predictor"], state["practice"]["frozen"]["cycle"]) == ("breiman", 1)
     check("trader", state)
     # The chart marks it as the trader's, practice.
     marks = read_marks(tmp_path / DB_NAME, SYMBOL, None, 10)
@@ -361,7 +392,11 @@ async def test_a_day_without_a_champion_cell_practises_a_share_on_kis_kept_as_pr
     text = report.render(report.read(tmp_path / DB_NAME, DAY, CALENDAR))
     assert "매매 없음." in text, "no trade of the champion's"
     assert "연습 매매 1건(KIS 모의" in text
-    assert "연습 칸(KIS 모의, KRX_TRADER_MOCK_PRACTICE): barrier breiman(top)" in text
+    assert (
+        "연습 칸(KIS 모의, KRX_TRADER_MOCK_PRACTICE): barrier breiman(top): 검토 주기에 고정한 칸(#474)"
+        " · θ 0.6" in text
+    )
+    assert "연습 칸 (#474): 주기 1에 고정 · barrier breiman(top) · θ 0.6(2026-10-13 22:40에 고름)" in text
     assert "매매할 칸 없음: 비용 지도에서 시장가 왕복으로 통과한 칸이 없다(no_pass)" in text
     assert "- 10:00 barrier breiman(연습): 진입 -0.50틱 · 청산 +0.50틱 · 1주 ↔ 1주" in text
     assert "읽은 예측(연습 칸 고르기의 챔피언 장부): 읽은 예측 1 · 산 것 1" in text
@@ -376,6 +411,7 @@ async def test_the_kis_checks_count_the_practice_and_the_records_and_the_gate_do
     the champion's record, its paper account and the live gate hold nothing of it."""
     fake, account = kis_mock
     keep(tmp_path, at("2026-10-12 22:31:00"), policy_cell(OTHER))
+    frozen_here(tmp_path)
     desk = MockDesk(
         tmp_path,
         fake,
@@ -418,6 +454,7 @@ async def test_a_restart_with_a_practice_position_sells_it_and_the_reconcile_hol
     as is the practice shadow's in paper. The champion's cell then buys as ever."""
     fake, account = kis_mock
     keep(tmp_path, at("2026-10-12 22:31:00"), policy_cell(BARRIER))
+    kept = frozen_here(tmp_path)
     await MockDesk(tmp_path, fake, account, selection=practised(), practice=True).run([TEN, BOUGHT])
     assert [(t["practice"], t["exit"]) for t in read_trades(tmp_path / DB_NAME, None, 10)] == [(True, None)]
 
@@ -451,7 +488,13 @@ async def test_a_restart_with_a_practice_position_sells_it_and_the_reconcile_hol
     [shadowed, _] = shadows(tmp_path)
     assert (shadowed["practice"], shadowed["exit_reason"]) == (1, TIME), "the practice shadow sold it"
     assert again.state_now is not None
-    assert again.state_now["practice"] == {"enabled": practice, "active": False, "cell": None}
+    assert again.state_now["practice"] == {
+        "enabled": practice,
+        "active": False,
+        "cell": None,
+        "frozen": kept.as_json() if practice else None,
+        "why": "champion" if practice else None,
+    }
 
 
 async def test_a_champion_cell_back_stops_new_practice_and_the_practice_position_sells_by_its_rules(
@@ -473,7 +516,8 @@ async def test_a_champion_cell_back_stops_new_practice_and_the_practice_position
             ]
         )
     )
-    assert start.practice is not None and start.practice.predictor == FINAL
+    assert start.practisable[0].predictor == FINAL
+    practise(tmp_path, start.practisable[0])
     desk = MockDesk(tmp_path, fake, account, selection=start, practice=True)
 
     await desk.run(
@@ -523,6 +567,7 @@ async def test_a_practice_buy_whose_answer_was_lost_is_adopted_as_practice(
 ) -> None:
     fake, account = kis_mock
     account.lose_answers = 1
+    frozen_here(tmp_path)
     await MockDesk(tmp_path, fake, account, selection=practised(), practice=True).run([TEN, BOUGHT])
 
     [trade] = read_trades(tmp_path / DB_NAME, None, 10)
@@ -539,6 +584,7 @@ async def test_a_practice_buy_kis_took_before_a_stop_is_recovered_as_practice_af
     fake, account = kis_mock
     account.fills, account.fills_late = False, True
     held = lambda: any(r["status"] == "open" for r in rows(tmp_path, "unfilled_buys"))  # noqa: E731
+    frozen_here(tmp_path)
     first = MockDesk(
         tmp_path,
         fake,
@@ -563,6 +609,7 @@ async def test_a_practice_buy_of_which_nothing_filled_is_kept_as_practice(
 ) -> None:
     fake, account = kis_mock
     account.fills, account.fills_late = False, False
+    frozen_here(tmp_path)
     await MockDesk(tmp_path, fake, account, selection=practised(), practice=True).run([TEN, BOUGHT])
 
     assert read_trades(tmp_path / DB_NAME, None, 10) == []
@@ -611,6 +658,7 @@ async def test_the_loss_limits_count_the_champion_and_the_practice_kis_net_toget
         store.exit(trade, Exit(at("09:34:00"), 65_000, STOP_LOSS, 0.0, 0.0, at("09:34:00")))
     finally:
         store.close()
+    frozen_here(tmp_path)
     desk = MockDesk(tmp_path, fake, account, rules=rules, selection=practised(), practice=True)
 
     await desk.run([TEN, BOUGHT, quote("10:01:00", 66_000, 66_100)])
