@@ -63,12 +63,13 @@ Endpoints (all under ``/v1``):
   at most 1000) entered before ``T`` if given, newest first, each with its orders and their fills,
   as the trader keeps them (``state/trader.sqlite3``, ``trader/store.py``); none before the
   trader's first. The champion's trades, or with ``policy`` that policy version's (#400: a
-  challenger's paper trades too);
+  challenger's paper trades too); each with its execution cost (#475, ``store.execution``);
 - ``GET /trader``: the trader's state as it last wrote it (#396): its mode and status, cash,
   position, the day's and the cumulative P&L, the loss limits' use, the pause, whether it is
   running, and the last pauses, resumes and re-arms asked for; the champion, the live gate's
   progress and the policies running with their paper records (#400, ``trader/promotion.py``), and
-  the challengers' cohort formed last with its verdict (#473, ``trader/cohort.py``);
+  the challengers' cohort formed last with its verdict (#473, ``trader/cohort.py``); the loss
+  budget and the risk rules' state (#475, ``paper.risk_state``);
 - ``GET /trader/days?from=D&to=D``: its ledger of each trading day (#396; default the year to
   today, at most 4,000 days), oldest first;
 - ``POST /trader/pause`` (``{"sell_now": false|true}``, ``Content-Type: application/json``): the
@@ -78,7 +79,8 @@ Endpoints (all under ``/v1``):
 - ``GET /trader/policies?limit=N``: the trader's last N policy versions (#399, default 100, at most
   1000), newest first, each with its status (``champion``, ``challenger``, ``former``,
   ``dropped``), its cells with their θ (and a Kelly fraction, before #471), the cells it left out, what it was
-  fitted on and its paper record (#400); every change of the champion, a promotion's with its
+  fitted on (#475: each cell's calibration among it) and its paper record (#400); every change of
+  the champion, a promotion's with its
   figures (``trader/policy.py``); and every cohort of challengers with its verdict (#473); none
   before the first nightly fit.
 - ``GET /symbols/{symbol}/trader-marks?before=T&limit=N``: the trader's buys and sells of the

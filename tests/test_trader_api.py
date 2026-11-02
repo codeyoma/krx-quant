@@ -85,6 +85,23 @@ async def test_the_trades_newest_first_each_with_its_orders_and_fills(tmp_path: 
         }
     ]
     assert {t["mode"] for t in body["trades"]} == {"paper"}
+    # #475: each leg's adverse ticks and delays, on the quotes' clock. No quote came before the 10:00
+    # decision: no mid-point known; the 10:05 one knew the 10:02 quote's (70,350), 2.5 ticks over the
+    # ask it bought at, and its stop was decided on its quote, half a tick under that one's mid-point.
+    assert taken["execution"]["entry"] == {"ticks": None, "placed": 0.2, "filled": 0.2}
+    assert stopped["execution"] == {
+        "clock": "quote",
+        "entry": {"ticks": -2.5, "placed": 0.2, "filled": 0.2},
+        "exit": {"reason": "stop_loss", "reference": "mid", "ticks": 0.5, "placed": 0.0, "filled": 0.0},
+    }
+    assert taken["execution"]["exit"] == {
+        "reason": "take_profit",
+        "reference": "target",
+        "ticks": 0.0,
+        "placed": 0.0,
+        "filled": None,
+    }
+    assert open_["execution"]["exit"] is None
 
 
 async def test_before_and_limit_page_back(tmp_path: Path) -> None:
@@ -305,6 +322,12 @@ async def test_the_policies_newest_first_the_champion_marked(tmp_path: Path) -> 
     [cell] = first["cells"]
     assert (cell["kind"], cell["predictor"], cell["threshold"]) == ("barrier", "breiman", 0.7)
     assert "kelly_fraction" not in cell, "no λ (#471)"
+    calibration = cell["fitted"]["calibration"]  # #475: one rise of each bin a day, two days
+    assert [b["signals"] for b in calibration["bins"]] == [2] * 5 and calibration["below"] == 0
+    [(late, cut)] = [(b["from"], b["to"]) for b in second["cells"][0]["fitted"]["calibration"]["bins"]]
+    assert (late, cut, second["cells"][0]["fitted"]["calibration"]["below"]) == (0.8, 1.0, 8), (
+        "the grid's θ 0.8 alone: one bin, the rises under it apart"
+    )
     assert first["fit"]["result"]["net"] == pytest.approx(4 * UP), "two take-profits of 14 shares a day"
     assert body["champions"] == [
         {"at": "2026-10-15T22:31:00+09:00", "version": 1, "reason": BOOTSTRAP, "detail": None}

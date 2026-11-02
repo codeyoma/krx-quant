@@ -193,7 +193,7 @@ from krx_quant.trader.mock_check import DIFFERENT as CHECK_DIFFERENT
 from krx_quant.trader.mock_check import NO_ORDERS as CHECK_NO_ORDERS
 from krx_quant.trader.mock_check import SAME as CHECK_SAME
 from krx_quant.trader.mock_check import Check, failures, ledger_orders, probe_window
-from krx_quant.trader.paper import NO_SHARES, TAKE_PROFIT, TIME, PaperTrader, Rules, _Waiting
+from krx_quant.trader.paper import NO_SHARES, TAKE_PROFIT, TIME, PaperTrader, Rules, _Waiting, mid_of
 from krx_quant.trader.quotes import BestQuote
 from krx_quant.trader.reconcile import LOST_AFTER, Finding, Outside, Window, candidates, compare
 from krx_quant.trader.store import (
@@ -457,8 +457,8 @@ class MockTrader(PaperTrader):
         self._kick(now)
         self._check_days(now)
 
-    def state(self) -> dict[str, Any]:
-        body = super().state()
+    def state(self, now: datetime | None = None) -> dict[str, Any]:
+        body = super().state(now)
         if body["position"] is not None and self._selling is not None:
             body["position"]["selling"] = True
         return body
@@ -563,7 +563,8 @@ class MockTrader(PaperTrader):
         """The sale of ``trade`` decided: latched, and kept on the trade for a restart (#405); begun
         during a stall, on the REST quotes, or on the first quote after one, kept so (#407)."""
         self._selling = reason
-        self.store.begin_sale(trade.id, reason)
+        # #475: when it was decided, on the trader's clock, and the mid-point of the latest quote then.
+        self.store.begin_sale(trade.id, reason, self._clock(), mid_of(self._last))
         if self._stall is not None:
             self.store.stall_effect(trade.id, self._stall.id, REST)
         elif self._returned is not None:

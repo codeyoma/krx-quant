@@ -15,7 +15,8 @@ what the nightly re-fit fits a policy on (``refit.py``).
 - the special windows the engine kept (``special_windows``), each known from its start (the engine
   learns a VI, a circuit breaker or a sidecar as it begins), with the end it kept.
 
-No answer is read, nor its special flag: nothing the trader could not have known then.
+No answer is read for a decision, nor its special flag: nothing the trader could not have known
+then. The calibration alone (#475, below) reads each rise's answer, once it is measured.
 
 **By the paper trader's rules**, called, not copied (``paper.py``): the entry (``plan`` at the read,
 at the cell's θ, with the special windows known then); the priority (``admit``, ``settle``: of a bar
@@ -51,6 +52,17 @@ stalls: a gap leaves its signals out instead (below).
   waits the priority makes, sized and held as the paper book is (#471): its trades, those that
   gained, their net in won and the capital's log growth, by cell and by day (``Result``).
 
+**The calibration** (#475, spec #468 8 "확률 보정", ``Calibration``): beside each cell's signals alone,
+its rises in five bins of the rise's probability, of fixed edges (the grid's θ: a θ buys its bin and
+those above it, the last bin to 1; the rises under the first counted apart): in each, the rises
+measured (their data missing apart), their answers' classes (the kind's rise, middle and fall), how
+many had the class right (the answer the rise), how many reached the upper target first (a
+barrier's ``up_first``; the direction's touch label reaching its upper target before its lower one,
+or that one alone: its ``up`` is a touch at any time, ``touch.py``), and of those bought alone a share
+how many netted above 0 after the costs. The answers are the engine's (``touches``, ``kind_answers``),
+read a cell's day at a time after its signals are measured: no decision reads them. A description:
+the fit enters a cell on its net alone (``refit.py``), and nothing changes a θ by it.
+
 **Missing data**, left out of both and counted apart, never a trade that made nothing: a day without
 its recording of the book, or whose files cannot be read (``no_recording``); a recorded gap of the
 book's or the trades' feed of 005930 in the signal's window, from its decision to its time barrier,
@@ -69,6 +81,7 @@ memory is kept (``Replayer.peaks``: the highest of the day's passes).
 from __future__ import annotations
 
 import heapq
+import json
 import logging
 import math
 import sqlite3
@@ -92,6 +105,7 @@ from krx_quant.gaps_probe import Unread, read_gaps
 from krx_quant.kinds import DIRECTION
 from krx_quant.macro import read_partition
 from krx_quant.market_calendar import Session
+from krx_quant.predictions import KIND_ANSWER_JOIN, TOUCH_JOIN
 from krx_quant.pricing import SELL_TAX
 from krx_quant.special import Window, touching
 from krx_quant.stats import Interval, day_mean
@@ -244,7 +258,7 @@ def _back_at(data_dir: Path, day: date, feed: str, after: int) -> int | None:
     return int(later.min()) if len(later) else None
 
 
-# The predictions.
+# The predictions, and their answers for the calibration (#475).
 
 
 @dataclass(frozen=True, slots=True)
@@ -297,6 +311,61 @@ def day_reads(db: sqlite3.Connection, cell: Cell, role: str, day: date, target_v
         )
         made = kind_signal
     return [Read(made(r, cell, SYMBOL), target is None or r["model_target"] == target) for r in rows]
+
+
+# A rise's answer as the calibration counts it (#475): its class (``UP``, ``FLAT``, ``DOWN``: the kind's
+# rise, middle and fall) and whether it reached the upper target first.
+UP, FLAT, DOWN = "up", "flat", "down"
+
+
+@dataclass(frozen=True, slots=True)
+class Answer:
+    outcome: str
+    first: bool
+
+
+def day_answers(db: sqlite3.Connection, cell: Cell, day: date) -> dict[int, Answer]:
+    """The answers of ``cell``'s predictions of 005930 with bar closes on ``day``, by prediction: the
+    direction's touch label (``touches``, the touch target's version) and a kind's answer of its answer
+    version (``kind_answers``); those with a class alone (the calibration's, #475)."""
+    kind = traded_kind(cell.kind)
+    start = datetime.combine(day, time(), KST)
+    span = (start.isoformat(), (start + timedelta(days=1)).isoformat())
+    if kind.name == DIRECTION:
+        rows = db.execute(
+            f"SELECT p.id, t.class AS label, t.path AS path FROM predictions p {TOUCH_JOIN}"
+            " WHERE p.algorithm = ? AND p.symbol = ? AND p.bar_close >= ? AND p.bar_close < ?"
+            " AND t.class IS NOT NULL",
+            (cell.predictor, SYMBOL, *span),
+        )
+    else:
+        rows = db.execute(
+            f"SELECT p.id, a.class AS label, NULL AS path FROM kind_predictions p {KIND_ANSWER_JOIN}"
+            " WHERE p.kind = ? AND p.symbol = ? AND p.algorithm = ? AND p.bar_close >= ? AND p.bar_close < ?"
+            " AND a.class IS NOT NULL",
+            (kind.answer_version, kind.name, SYMBOL, cell.predictor, *span),
+        )
+    rise, fall = kind.sides or (kind.classes[0], kind.classes[-1])
+    out = {}
+    for r in rows:
+        label = r["label"]
+        outcome = UP if label == rise else DOWN if label == fall else FLAT
+        first = outcome == UP and (kind.name != DIRECTION or _upper_first(r["path"]))
+        out[int(r["id"])] = Answer(outcome, first)
+    return out
+
+
+def _upper_first(path: str | None) -> bool:
+    """Whether a touch label's path reached its upper target before its lower one, or that one alone
+    (``touch.touch_path``'s ``upper_at`` and ``lower_at``); False when it cannot be read."""
+    try:
+        reached = json.loads(path) if path else {}
+    except ValueError:
+        return False
+    upper, lower = reached.get("upper_at"), reached.get("lower_at")
+    if upper is None:
+        return False
+    return lower is None or datetime.fromisoformat(upper) < datetime.fromisoformat(lower)
 
 
 def known(windows: Sequence[Window], at: datetime) -> list[Window]:
@@ -476,6 +545,77 @@ class Signals:
             if interval is None
             else {"value": interval.value, "low": interval.low, "high": interval.high, "days": interval.n},
         }
+
+
+# The calibration (#475, module doc).
+
+
+@dataclass
+class Bin:
+    """The rises of a calibration's bin, of probability ``low`` to ``high`` (module doc)."""
+
+    low: float
+    high: float
+    signals: int = 0
+    missing: int = 0
+    answered: int = 0
+    outcomes: Counter[str] = field(default_factory=Counter)
+    hits: int = 0
+    first: int = 0
+    bought: int = 0
+    profitable: int = 0
+
+    def as_json(self) -> dict[str, Any]:
+        return {
+            "from": self.low,
+            "to": self.high,
+            "signals": self.signals,
+            "missing": self.missing,
+            "answered": self.answered,
+            "outcomes": {o: self.outcomes[o] for o in (UP, FLAT, DOWN)},
+            "hits": self.hits,
+            "first": self.first,
+            "bought": self.bought,
+            "profitable": self.profitable,
+        }
+
+
+@dataclass
+class Calibration:
+    """A cell's rises in bins of their probability (module doc): the bins, and the rises under the
+    first edge (``below``)."""
+
+    bins: list[Bin]
+    below: int = 0
+
+    @classmethod
+    def of(cls, edges: Sequence[float]) -> Calibration:
+        """Bins from each of ``edges`` (sorted) to the next, the last to 1."""
+        ordered = sorted(edges)
+        return cls([Bin(low, high) for low, high in zip(ordered, [*ordered[1:], 1.0], strict=True)])
+
+    def add(self, probability: float, filled: Fill, answer: Answer | None, net: float | None) -> None:
+        """A rise of ``probability`` measured as ``filled``, its ``answer`` (None: not known) and, if it
+        was bought, its ``net`` a share."""
+        found = next((b for b in reversed(self.bins) if probability >= b.low), None)
+        if found is None:
+            self.below += 1
+            return
+        if filled.missing is not None:
+            found.missing += 1
+            return
+        found.signals += 1
+        if answer is not None:
+            found.answered += 1
+            found.outcomes[answer.outcome] += 1
+            found.hits += answer.outcome == UP
+            found.first += answer.first
+        if net is not None:
+            found.bought += 1
+            found.profitable += net > 0
+
+    def as_json(self) -> dict[str, Any]:
+        return {"bins": [b.as_json() for b in self.bins], "below": self.below}
 
 
 # A policy.
@@ -732,12 +872,13 @@ class Source:
 @dataclass(frozen=True)
 class Pass:
     """A pass's outputs: each policy's ``Result``, in the order asked; each cell measured alone, its
-    ``Signals`` at each θ and the counts of its predictions read (``read``, ``off_target``, the entry
-    rules' reasons, ``rises``)."""
+    ``Signals`` at each θ, the counts of its predictions read (``read``, ``off_target``, the entry
+    rules' reasons, ``rises``) and its calibration (#475)."""
 
     results: tuple[Result, ...]
     signals: Mapping[Cell, Mapping[float, Signals]]
     counts: Mapping[Cell, Mapping[str, int]]
+    calibration: Mapping[Cell, Calibration] = field(default_factory=dict)
 
 
 class Replayer:
@@ -787,6 +928,7 @@ class Replayer:
         cells = {r.cell for p in policies for r in p} | set(alone)
         signals = {c: {t: Signals() for t in self._thresholds} for c in alone}
         counts: dict[Cell, Counter[str]] = {c: Counter() for c in alone}
+        calibration = {c: Calibration.of(self._thresholds) for c in alone}
         for day in sorted({d for c in cells for d in self._cells[c].days}):
             self._meter.reset()
             recording = read_recording(self._data_dir, day)
@@ -802,7 +944,19 @@ class Replayer:
             for book in books:
                 book.day(reads, fills, windows)
             for cell in alone:
-                self._alone(reads.get(cell, ()), fills, windows, signals[cell], counts[cell])
+                if day not in self._cells[cell].days:
+                    continue
+                answers = day_answers(self._db, cell, day)
+                self._alone(
+                    reads.get(cell, ()),
+                    fills,
+                    windows,
+                    signals[cell],
+                    counts[cell],
+                    calibration[cell],
+                    answers,
+                )
+                del answers
             del recording, fills, reads
             give_back()  # the day's arrays and Arrow's buffers, before the next day's
             peak = self._meter.peak_mb()
@@ -812,6 +966,7 @@ class Replayer:
             tuple(b.result() for b in books),
             signals,
             {c: dict(sorted(n.items())) for c, n in counts.items()},
+            calibration,
         )
 
     @property
@@ -841,9 +996,11 @@ class Replayer:
         windows: Sequence[Window],
         signals: Mapping[float, Signals],
         counts: Counter[str],
+        calibration: Calibration,
+        answers: Mapping[int, Answer],
     ) -> None:
         """Each rise of ``reads`` decided at its read alone, a share (module doc), tallied at each θ its
-        probability reaches."""
+        probability reaches, and in its bin of the ``calibration`` with its answer (#475)."""
         rules = self.rules
         for read in reads:
             counts["read"] += 1
@@ -863,3 +1020,7 @@ class Replayer:
             for threshold, tally in signals.items():
                 if p >= threshold:
                     tally.add(signal, filled, rules.fee_rate)
+            net = None  # a share's net, of a rise bought alone
+            if filled.entry is not None and filled.sale is not None:
+                net = net_of(filled.entry, filled.sale.price, 1, rules.fee_rate)
+            calibration.add(p, filled, answers.get(signal.prediction_id), net)

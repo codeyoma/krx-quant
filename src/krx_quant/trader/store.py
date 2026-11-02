@@ -15,7 +15,8 @@ by the nightly re-fit (#399, from the engine's container).
   sizes by a loss budget), the prediction and
   its probability, the reference price, target, stop and time barrier, the entry and the exit
   (why it ended: take_profit, stop_loss, time), the costs (both commissions and the sell tax) and
-  the P&L before and after them, in won;
+  the P&L before and after them, in won; since #475 the mid-point of the latest quote the book had
+  when it decided the buy, and when its sale was decided with the mid-point then (``execution``);
 - ``orders``: each order of a trade (the entry's buy, the take-profit's sell resting at the
   target, the stop's or the time exit's sell), its limit, quantity and status (open, filled,
   cancelled), and the broker's order, its number and branch (#405: KIS's, in mock; none in paper).
@@ -102,7 +103,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import date, datetime
@@ -396,6 +397,13 @@ _ADDED = {
         # (``review.version_on``). Null before #469.
         ("model_version", "TEXT"),
         ("evaluation", "INTEGER"),
+        # Its execution cost (#475, ``execution``): the mid-point of the latest quote the book had when
+        # it decided the buy, and when its sale was decided (the stop crossed, the time barrier, a pause
+        # or a limit selling) with the mid-point of the latest quote then. A take-profit's is none: it
+        # rests at the target from the buy. Null before #475.
+        ("decided_mid", "REAL"),
+        ("sale_at", "TEXT"),
+        ("sale_mid", "REAL"),
     ),
     "unfilled_buys": (
         ("practice", "INTEGER"),  # 1: a practice buy (#427); null or 0 otherwise
@@ -531,6 +539,8 @@ class Entry:
     practice: bool = False
     # The model version of the prediction that bought it (#469); None for one read before #469.
     model_version: str | None = None
+    # The mid-point of the latest quote the book had at its decision (#475); None without one.
+    decided_mid: float | None = None
 
 
 @dataclass(frozen=True)
@@ -541,6 +551,10 @@ class Exit:
     sell_fee: float
     tax: float
     quote_at: datetime
+    # When its sale was decided and the mid-point of the quote it was decided on (#475); None for a
+    # take-profit, which rests at the target from the buy.
+    decided_at: datetime | None = None
+    mid: float | None = None
 
 
 @dataclass(frozen=True)
@@ -901,6 +915,11 @@ class TraderStore:
                 " cost = ?, gross = ?, net = ? WHERE id = ?",
                 (at, out.price, out.reason, out.sell_fee, out.tax, cost, gross, gross - cost, trade.id),
             )
+            if out.decided_at is not None:  # #475: the sale's decision, for its execution cost
+                self._db.execute(
+                    "UPDATE trades SET sale_at = ?, sale_mid = ? WHERE id = ?",
+                    (iso(out.decided_at), out.mid, trade.id),
+                )
 
     # Mock trades (#405): each order as KIS took it, each fill as its order inquiry showed it.
 
@@ -1022,12 +1041,16 @@ class TraderStore:
             for r in rows
         ]
 
-    def begin_sale(self, trade: int, reason: str) -> None:
+    def begin_sale(
+        self, trade: int, reason: str, at: datetime | None = None, mid: float | None = None
+    ) -> None:
         """Why ``trade``'s sale began (#405), kept when it is decided: a restart goes on selling it
-        though none of its sells is open (each cancelled, or refused)."""
+        though none of its sells is open (each cancelled, or refused); with when it was decided and the
+        mid-point of the latest quote then (#475: its execution cost)."""
         with self._db:
             self._db.execute(
-                "UPDATE trades SET selling = ? WHERE id = ? AND selling IS NULL", (reason, trade)
+                "UPDATE trades SET selling = ?, sale_at = ?, sale_mid = ? WHERE id = ? AND selling IS NULL",
+                (reason, None if at is None else iso(at), mid, trade),
             )
 
     def sale_begun(self, trade: int) -> str | None:
@@ -1275,13 +1298,7 @@ class TraderStore:
         time and net, in the order they exited: the risk rules' losses in a row (#471,
         ``paper.risk_held``). By the exit, not the entry: a position carried overnight (the trader down
         at its time barrier, a sale not settled, ``mock.py``) counts on the day it is sold."""
-        whose, params = _whose(challenger, shadow, practice)
-        rows = self._db.execute(
-            "SELECT t.exit_at, t.net FROM trades t WHERE t.mode = ? AND t.exit_at >= ?"
-            f" AND {whose} ORDER BY t.exit_at, t.id",
-            (mode, iso(since), *params),
-        )
-        return [(datetime.fromisoformat(r[0]), float(r[1])) for r in rows]
+        return day_exits(self._db, mode, since, None, challenger, shadow, practice)
 
     def day_buys(
         self,
@@ -1295,17 +1312,7 @@ class TraderStore:
         (#471, ``paper.risk_held``): the KIS book's (#405: ``mock``, ``live``) each buy it sent or tried
         to send, kept before it is (``unfilled_buys``, #406: those KIS refused, of which nothing filled
         or whose answer was lost too); a paper book's each buy it filled (a trade)."""
-        if mode in KIS_MODES and challenger is None and not shadow:
-            row = self._db.execute(
-                "SELECT count(*) FROM unfilled_buys WHERE mode = ? AND placed_at >= ?", (mode, iso(since))
-            ).fetchone()
-            return int(row[0])
-        whose, params = _whose(challenger, shadow, practice)
-        row = self._db.execute(
-            f"SELECT count(*) FROM trades t WHERE t.mode = ? AND t.entry_at >= ? AND {whose}",
-            (mode, iso(since), *params),
-        ).fetchone()
-        return int(row[0])
+        return day_buys(self._db, mode, since, None, challenger, shadow, practice)
 
     def open_challengers(self, mode: str) -> list[int]:
         """The challengers with a paper trade of ``mode`` not exited (#400: the trader stopped before
@@ -1619,8 +1626,8 @@ class TraderStore:
             "INSERT INTO trades (mode, symbol, kind, predictor, prediction_id, bar_close, probability,"
             " threshold, anchor, tick, width_ticks, target, stop, time_barrier, decided_at, entry_at,"
             " entry_price, quantity, buy_fee, selection_id, role, p_star, precision_low, kelly, fraction,"
-            " policy_id, champion, shadow, practice, model_version, evaluation)"
-            f" VALUES ({', '.join('?' * 31)})",
+            " policy_id, champion, shadow, practice, model_version, evaluation, decided_mid)"
+            f" VALUES ({', '.join('?' * 32)})",
             (
                 entry.mode,
                 entry.symbol,
@@ -1653,6 +1660,7 @@ class TraderStore:
                 int(entry.practice),
                 entry.model_version,
                 review.version_on(self._db, entry.entry_at.astimezone(KST).date()),
+                entry.decided_mid,
             ),
         )
         assert cursor.lastrowid is not None
@@ -1686,6 +1694,54 @@ class TraderStore:
             "INSERT INTO fills (order_id, at, price, quantity, quote_at) VALUES (?, ?, ?, ?, ?)",
             (order, at, price, quantity, iso(quote_at)),
         )
+
+
+def day_exits(
+    db: sqlite3.Connection,
+    mode: str,
+    since: datetime,
+    until: datetime | None = None,
+    challenger: int | None = None,
+    shadow: bool = False,
+    practice: bool = False,
+) -> list[tuple[datetime, float]]:
+    """``TraderStore.day_exits`` on ``db`` (the trader's, or the report's read-only one, #475), to
+    ``until`` (excluded) if given."""
+    whose, params = _whose(challenger, shadow, practice)
+    to, before = ("", ()) if until is None else (" AND t.exit_at < ?", (iso(until),))
+    rows = db.execute(
+        f"SELECT t.exit_at, t.net FROM trades t WHERE t.mode = ? AND t.exit_at >= ?{to}"
+        f" AND {whose} ORDER BY t.exit_at, t.id",
+        (mode, iso(since), *before, *params),
+    )
+    return [(datetime.fromisoformat(r[0]), float(r[1])) for r in rows]
+
+
+def day_buys(
+    db: sqlite3.Connection,
+    mode: str,
+    since: datetime,
+    until: datetime | None = None,
+    challenger: int | None = None,
+    shadow: bool = False,
+    practice: bool = False,
+) -> int:
+    """``TraderStore.day_buys`` on ``db`` (the trader's, or the report's read-only one, #475), to
+    ``until`` (excluded) if given."""
+    if mode in KIS_MODES and challenger is None and not shadow:
+        to, before = ("", ()) if until is None else (" AND placed_at < ?", (iso(until),))
+        row = db.execute(
+            f"SELECT count(*) FROM unfilled_buys WHERE mode = ? AND placed_at >= ?{to}",
+            (mode, iso(since), *before),
+        ).fetchone()
+        return int(row[0])
+    whose, params = _whose(challenger, shadow, practice)
+    to, before = ("", ()) if until is None else (" AND t.entry_at < ?", (iso(until),))
+    row = db.execute(
+        f"SELECT count(*) FROM trades t WHERE t.mode = ? AND t.entry_at >= ?{to} AND {whose}",
+        (mode, iso(since), *before, *params),
+    ).fetchone()
+    return int(row[0])
 
 
 def _whose(challenger: int | None, shadow: bool, practice: bool) -> tuple[str, tuple[Any, ...]]:
@@ -1797,7 +1853,8 @@ def read_trader(
     and the policies running with theirs (#400, ``promotion.progress``; #473: the cohort formed
     last, with its verdict), in the mode it runs in (#405); the review cycle in force and its
     evaluation version (#469, ``review.state``), counted on ``sessions`` (the engine's market
-    calendar; by default one that guesses the weekdays trade). Its fields null without a store (an
+    calendar; by default one that guesses the weekdays trade); the loss budget and the risk rules'
+    state as the trader wrote it (#475, ``paper.risk_state``). Its fields null without a store (an
     engine without a state folder, a trader not started yet)."""
     body: dict[str, Any] = dict.fromkeys(TRADER_FIELDS)
     body |= {"updated_at": None, "alive": False, "controls": []}
@@ -1841,6 +1898,7 @@ TRADER_FIELDS = (
     "pause",
     "live",
     "practice",
+    "risk",  # #475: the loss budget and the risk rules' state; null in a state written before #475
 )
 
 
@@ -2047,4 +2105,73 @@ def _trade_json(
         # The stalls of the collector's quotes the trade was open through (#407), and what each did
         # to its exit.
         "stalls": stalls,
+        # Its execution cost (#475): each leg's adverse ticks and delays.
+        "execution": execution(
+            row, orders, kis=row["mode"] in KIS_MODES and bool(row["by_champion"]) and not row.get("shadow")
+        ),
     }
+
+
+# Whose clock a trade's times are on (#475, ``execution``): a paper fill's is the quote's it was made on,
+# as the collector received it (``quote``); a KIS fill's (mock, live) is when the trader read it off KIS's
+# day order inquiry (``trader``), never KIS's own time of the fill (the inquiry's ``ord_tmd`` is the
+# order's, and no probe measured a fill time of KIS's).
+QUOTE_CLOCK, TRADER_CLOCK = "quote", "trader"
+# What a leg's adverse ticks are from (#475): the mid-point the book knew at its decision, or a
+# take-profit's target, the limit it rested at from the buy.
+MID, TARGET = "mid", "target"
+
+
+def execution(row: Mapping[str, Any], orders: Sequence[Mapping[str, Any]], kis: bool) -> dict[str, Any]:
+    """A trade's execution cost (#475, spec #468 8 "실행 비용"), from its row and its orders: each leg's
+    adverse difference in the trade's ticks (positive: bought above, or sold below, its reference) from
+    the mid-point the book knew when it decided it (the buy's ``decided_mid``; a sale's ``sale_mid``, the
+    stop crossed, the time barrier, a pause or a limit selling); a take-profit's from its target, the
+    limit it rested at from the buy. And each leg's delays in seconds: from its decision to its first
+    order's placing (``placed``) and to its fill (``filled``: the trade's entry or exit, a KIS one's last
+    fill read); a take-profit's from the buy's fill to its placing alone, as it rests until the market
+    comes to it. ``clock``: whose clock the times are on (``kis``: a KIS book's trade, ``TRADER_CLOCK``;
+    else ``QUOTE_CLOCK``). None where the trade has none: kept before #475, its exit to come."""
+    tick = row.get("tick") or None
+    placed: dict[str, str] = {}
+    for o in orders:
+        key = o["purpose"] if o["side"] == BUY or o["purpose"] == "take_profit" else SELL
+        placed.setdefault(key, o["placed_at"])
+    decided = row.get("decided_mid")
+    entry = {
+        "ticks": _ticks((row["entry_price"] - decided) / tick if decided is not None and tick else None),
+        "placed": _seconds(row["decided_at"], placed.get(ENTRY)),
+        "filled": _seconds(row["decided_at"], row["entry_at"]),
+    }
+    out: dict[str, Any] | None = None
+    if row.get("exit_at") is not None:
+        reason = row["exit_reason"]
+        if reason == "take_profit":
+            out = {
+                "reason": reason,
+                "reference": TARGET,
+                "ticks": _ticks((row["target"] - row["exit_price"]) / tick if tick else None),
+                "placed": _seconds(row["entry_at"], placed.get("take_profit")),
+                "filled": None,
+            }
+        else:
+            mid, sale_at = row.get("sale_mid"), row.get("sale_at")
+            out = {
+                "reason": reason,
+                "reference": MID,
+                "ticks": _ticks((mid - row["exit_price"]) / tick if mid is not None and tick else None),
+                "placed": _seconds(sale_at, placed.get(SELL)),
+                "filled": _seconds(sale_at, row["exit_at"]),
+            }
+    return {"clock": TRADER_CLOCK if kis else QUOTE_CLOCK, "entry": entry, "exit": out}
+
+
+def _ticks(value: float | None) -> float | None:
+    return None if value is None else round(value, 4)
+
+
+def _seconds(start: str | None, end: str | None) -> float | None:
+    """From ``start`` to ``end`` (ISO 8601), in seconds; None without either."""
+    if start is None or end is None:
+        return None
+    return round((datetime.fromisoformat(end) - datetime.fromisoformat(start)).total_seconds(), 3)

@@ -14,9 +14,12 @@ The 4-minute barrier throughout (``trader_doubles.Barrier``): the reference 70,0
 
 from __future__ import annotations
 
+import json
+import sqlite3
 import weakref
 from collections.abc import Sequence
-from datetime import date, datetime
+from contextlib import closing
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -591,3 +594,49 @@ def test_a_quote_not_newer_than_the_one_before_is_passed_over(tmp_path: Path) ->
 
     assert of_paper(paper) == as_paper(trades)
     assert trades[0].entry == 70_100
+
+
+# The calibration's answers (#475).
+
+
+def test_the_calibration_reads_the_direction_s_upper_target_first_from_its_touch_path(tmp_path: Path) -> None:
+    """The direction's ``up`` is a touch at any time (``touch.py``): reached after the lower target it
+    has the class right, not the target first; alone, or before the lower one, both. A flat and a down
+    neither; a prediction without a label has no answer."""
+    PredictionStore(tmp_path / ENGINE_DB).close()
+    t = datetime(2026, 10, 14, 10, 0, tzinfo=KST)
+    paths = [
+        ("up", {"upper_at": "2026-10-14T10:01:00+09:00", "lower_at": "2026-10-14T10:00:30+09:00"}),
+        ("up", {"upper_at": "2026-10-14T10:01:00+09:00", "lower_at": None}),
+        ("up", {"upper_at": "2026-10-14T10:01:00+09:00", "lower_at": "2026-10-14T10:02:00+09:00"}),
+        ("flat", {"upper_at": None, "lower_at": None}),
+        ("down", {"upper_at": None, "lower_at": "2026-10-14T10:01:00+09:00"}),
+        (None, {}),
+    ]
+    with closing(sqlite3.connect(tmp_path / ENGINE_DB)) as db, db:
+        for n, (label, path) in enumerate(paths, 1):
+            close = (t + timedelta(minutes=4 * n)).isoformat()
+            db.execute(
+                "INSERT INTO predictions (id, symbol, algorithm, model_version, bar_close, displayed_at,"
+                " p_up, p_flat, p_down, expected_ticks, status)"
+                " VALUES (?, ?, 'consensus-final', 'v1', ?, ?, 0.6, 0.3, 0.1, 0, 'ok')",
+                (n, SYMBOL, close, close),
+            )
+            db.execute(
+                "INSERT INTO touches (symbol, bar_close, target_version, class, unscorable, path, scored_at)"
+                " VALUES (?, ?, ?, ?, NULL, ?, ?)",
+                (SYMBOL, close, TARGET_VERSION, label, json.dumps(path), close),
+            )
+    db = open_engine_db(tmp_path / ENGINE_DB)
+    try:
+        answers = replay.day_answers(db, Cell("direction", "consensus-final"), date(2026, 10, 14))
+    finally:
+        db.close()
+
+    assert answers == {
+        1: replay.Answer(replay.UP, first=False),
+        2: replay.Answer(replay.UP, first=True),
+        3: replay.Answer(replay.UP, first=True),
+        4: replay.Answer(replay.FLAT, first=False),
+        5: replay.Answer(replay.DOWN, first=False),
+    }

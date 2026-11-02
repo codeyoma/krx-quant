@@ -52,8 +52,13 @@ server's resume on the 12th. Policy 1, fitted on the 7th's night, is the first c
 trades from the 8th are its, with their cell's p* and lower bound (the 7th's has none, entered
 before the picks, #395); policy 2, fitted on the 8th's night, is a challenger with two paper trades
 of its own on the morning (#400), and each policy's paper days are kept, so the state has the
-champion, the live gate's progress and the challenger's standing. A paced demo has that 10:30 state
-from the start:
+champion, the live gate's progress and the challenger's standing. The evaluation version (#469) is
+begun on the 8th's night, so the records count from the 12th, the first day of its first review
+cycle, whose cohort (#473) is policy 2 against policy 1. Each policy's cell carries the nightly fit's
+figures (#472: its signals measured alone a share at each θ, the bound it entered on) and its
+calibration (#475), with a cell it left out (``no_edge``); each trade its execution cost (#475: the
+mid-point known at each decision) and the live book's buys their orders (``unfilled_buys``), which
+the state's risk rules count. A paced demo has that 10:30 state from the start:
 not alive (it is written at 10:30) until its clock gets near there. A pause posted to the demo is
 written as the engine writes it, and stays unread: no trader runs.
 """
@@ -153,6 +158,7 @@ from krx_quant.trader.store import API, CLI, PAUSE, RESUME, TraderStore
 from krx_quant.trader.store import DB_NAME as TRADER_DB
 from krx_quant.trader.store import Entry as TraderEntry
 from krx_quant.trader.store import Exit as TraderExit
+from krx_quant.trader.store import Placed as TraderPlaced
 from krx_quant.us_daily import write_us_daily
 
 DEMO_DAY = date(2026, 10, 12)
@@ -528,15 +534,22 @@ def write_demo_trader(state_dir: Path, books: Sequence[Event]) -> None:
         db = policies.connect(state_dir / TRADER_DB)
         try:
             versions = [
-                policies.add(db, night, _demo_policy_reason(night), [_demo_policy_cell(night, θ)], [], {})
+                policies.add(
+                    db,
+                    night,
+                    _demo_policy_reason(night),
+                    [_demo_policy_cell(night, θ)],
+                    [_demo_left_out(night)],
+                    {},
+                )
                 for night, θ in _DEMO_POLICIES
             ]
             (champion, _), (challenger, _) = versions
-            # Its cohort (#473): a cycle from the 12th, judged against policy 1 on its review night.
+            # The evaluation version (#469), begun on the 8th's night: its first review cycle from the
+            # 12th, the records counted from it. Its cohort (#473): judged against policy 1 on the cycle's
+            # review night.
             entered = _DEMO_POLICIES[1][0]
-            cycle = review.cycle_of(
-                review.Evaluation(review.EVALUATION, entered, DEMO_DAY), DEMO_DAY, _CALENDAR.session
-            )
+            cycle = review.cycle_of(review.begin(db, entered, _CALENDAR.session), DEMO_DAY, _CALENDAR.session)
             cohort.form(db, entered, review.EVALUATION, cycle, champion, [challenger])
         finally:
             db.close()
@@ -612,12 +625,97 @@ def _demo_policy_reason(night: datetime) -> str:
 
 
 def _demo_policy_cell(night: datetime, threshold: float) -> policies.PolicyCell:
-    """The demo policy's one cell, fitted as the nightly re-fit keeps it (made-up figures)."""
+    """The demo policy's one cell, fitted as the nightly re-fit keeps it (made-up figures): the cost
+    map's figures, a diagnosis (#472), the days its recording was read, its signals measured alone a
+    share at each θ (#470) and the bound it entered on (#472), its calibration (#475) and its policy's
+    replayed trades."""
     role, p_star, low, kelly = _DEMO_PICK
-    fitted: dict[str, Any] = {"p_star": p_star, "low": low, "kelly": kelly}
-    fitted |= {"days": [night.date().isoformat()], "read": {"read": 380, "rises": 120}}
+    fitted: dict[str, Any] = {"p_star": p_star, "low": low, "kelly": kelly, "verdict": "pass"}
+    fitted |= {"days": [night.date().isoformat()], "recorded_days": 20, "read": {"read": 380, "rises": 120}}
+    fitted |= {"signals": _demo_signals(), "calibration": _demo_calibration()}
+    fitted |= {"bound": {"value": 0.42, "low": 0.08, "high": 0.76, "days": 20, "level": 0.99}}
     fitted |= {"trades": 24, "wins": 14, "net": 8_400.0, "growth": 0.0084}
     return policies.PolicyCell("barrier", role, "breiman", threshold, fitted)
+
+
+def _demo_left_out(night: datetime) -> dict[str, Any]:
+    """The cell the demo's nightly fit left out (made up): the direction's consensus, whose replayed net
+    per signal has no lower bound above 0 at any θ (#472, ``no_edge``)."""
+    best = {"value": -0.31, "low": -0.9, "high": 0.28, "days": 20, "level": 0.99}
+    return {
+        "kind": "direction",
+        "role": "consensus",
+        "predictor": "consensus-final",
+        "p_star": 0.58,
+        "low": 0.52,
+        "kelly": None,
+        "verdict": "fail",
+        "why": "no_edge",
+        "recorded_days": 20,
+        "best": {"threshold": 0.6, "bound": best},
+        "read": {"read": 1_640, "rises": 410},
+        "signals": _demo_signals(-0.3),
+        "calibration": _demo_calibration(-1),
+    }
+
+
+def _demo_signals(shift: float = 0.0) -> dict[str, Any]:
+    """A cell's made-up signals measured alone a share at each θ of the grid (#470, #472)."""
+    out = {}
+    for n, threshold in enumerate((0.4, 0.5, 0.6, 0.7, 0.8)):
+        signals = 120 - 25 * n
+        bought = signals - 6
+        per = round(-0.2 + 0.18 * n + shift, 2)
+        out[f"{threshold:g}"] = {
+            "signals": signals,
+            "measured": signals - 2,
+            "missing": {"gap": 2},
+            "refused": {"target_reached": 4},
+            "bought": bought,
+            "wins": bought // 2 + n,
+            "exits": {
+                "stop_loss": bought // 3,
+                "take_profit": bought // 2,
+                "time": bought - bought // 3 - bought // 2,
+            },
+            "days_bought": 20 - n,
+            "net": round(per * 100 * (signals - 2), 3),
+            "ticks": round(per * (signals - 2), 4),
+            "per_signal": {
+                "value": per,
+                "low": round(per - 0.35, 2),
+                "high": round(per + 0.35, 2),
+                "days": 20,
+            },
+        }
+    return out
+
+
+def _demo_calibration(shift: int = 0) -> dict[str, Any]:
+    """A cell's made-up calibration (#475): its rises in the grid's five bins, the higher the score the
+    more of them rose first."""
+    bins = []
+    edges = (0.4, 0.5, 0.6, 0.7, 0.8, 1.0)
+    for n, (low, high) in enumerate(zip(edges, edges[1:], strict=False)):
+        signals = (25, 25, 25, 25, 18)[n]
+        up = max(0, 8 + 2 * n + shift)
+        down = max(0, 9 - 2 * n - shift)
+        flat = signals - up - down
+        bins.append(
+            {
+                "from": low,
+                "to": high,
+                "signals": signals,
+                "missing": 1 if n == 2 else 0,
+                "answered": signals,
+                "outcomes": {"up": up, "flat": flat, "down": down},
+                "hits": up,
+                "first": max(0, up - 1),
+                "bought": signals - 2,
+                "profitable": max(0, up - 2),
+            }
+        )
+    return {"bins": bins, "below": 7}
 
 
 def _demo_trade(
@@ -641,6 +739,7 @@ def _demo_trade(
     sold on (that one sells it, as the trader's ``on_quote`` does): the day's lowest P&L and the
     cumulative one's count those dips, not the exit alone; then its exit, and the day's ledger kept."""
     after = [q for q in quotes if q[0] > decided]
+    known = [q for q in quotes if q[0] <= decided]  # #475: the latest quote known at the decision
     bought_at, bid, ask = after[0]
     tick = _OPENS[TRADER_SYMBOL][1]
     anchor = (bid + ask) / 2
@@ -689,8 +788,11 @@ def _demo_trade(
         fraction=1.0 if pick else None,
         policy_id=policy_id,
         champion=champion,
+        decided_mid=(known[-1][1] + known[-1][2]) / 2 if known else None,
     )
     trade = store.enter(decision, entry)
+    if mode == "live":  # a KIS book keeps each buy it sends (#406), the day's buy orders' count (#471)
+        store.add_unfilled_buy(decision, mode, TraderPlaced(ask, quantity), bought_at, "filled")
     out = _demo_exit(entry, [q for q in after[1:] if q[0] < entry.time_barrier])
     if out is None:
         return None
@@ -720,16 +822,18 @@ def _demo_exit(entry: TraderEntry, held: Sequence[tuple[datetime, float, float]]
     and asks, before its time barrier), by the paper rules; None while it is still held at 10:30."""
     taken = next((q for q in held if q[1] >= entry.target), None)
     stopped = next((q for q in held if q[1] <= entry.stop), None)
+    sold: tuple[datetime, float, float] | None = None  # the quote a sale was decided on (#475)
     if stopped is not None and (taken is None or stopped[0] < taken[0]):
-        at, price, reason, quote_at = stopped[0], stopped[1], "stop_loss", stopped[0]
+        at, price, reason, quote_at, sold = stopped[0], stopped[1], "stop_loss", stopped[0], stopped
     elif taken is not None:
         at, price, reason, quote_at = taken[0], entry.target, "take_profit", taken[0]
     elif held and entry.time_barrier <= _at(_END):  # sold at the barrier, at the last bid before it
-        at, price, reason, quote_at = entry.time_barrier, held[-1][1], "time", held[-1][0]
+        at, price, reason, quote_at, sold = entry.time_barrier, held[-1][1], "time", held[-1][0], held[-1]
     else:
         return None
     cost = costs(entry.entry_price, price, entry.quantity, _FEE)
-    return TraderExit(at, price, reason, cost.sell_fee, cost.tax, quote_at)
+    decided = (None, None) if sold is None else (at, (sold[1] + sold[2]) / 2)
+    return TraderExit(at, price, reason, cost.sell_fee, cost.tax, quote_at, *decided)
 
 
 def _finished_periods(days: list[Row], period: str) -> list[Row]:

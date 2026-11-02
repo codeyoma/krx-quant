@@ -548,7 +548,10 @@ async def test_the_demo_has_the_trader_s_state_days_and_controls(tmp_path: Path)
     day's and the cumulative P&L of its trades, the limits' use; the screen's pause of the 8th and
     the server's resume of the 12th; each mode's days, the 8th paused, each day's lowest P&L with
     its trades' dips while held; the champion's trades from the 8th under policy 1 with the cell's p*
-    and lower bound; the live gate on its paper record and a challenger's (#400)."""
+    and lower bound; the live gate on its paper record and a challenger's (#400), counted from the
+    evaluation version begun on the 8th's night (#469: its first review cycle from the 12th); the risk
+    rules' state (#475), each trade's execution cost and the policies' fitted figures with their
+    calibration and a cell left out (#472, #475)."""
     app = await demo_app(tmp_path / "demo.sqlite3")
 
     async with TestClient(TestServer(app)) as client:
@@ -556,9 +559,12 @@ async def test_the_demo_has_the_trader_s_state_days_and_controls(tmp_path: Path)
         days = await get_json(client, "/v1/trader/days")
         trades = await get_json(client, "/v1/trader/trades")
         theirs = await get_json(client, "/v1/trader/trades?policy=2")
+        policies = await get_json(client, "/v1/trader/policies")
 
     check("trader", state)
     check("trader_days", days)
+    check("trader_trades", trades)
+    check("trader_policies", policies)
     assert (state["mode"], state["status"], state["alive"]) == ("live", "running", True)
     assert state["updated_at"] == "2026-10-12T10:30:00+09:00"
     position = state["position"]
@@ -618,7 +624,33 @@ async def test_the_demo_has_the_trader_s_state_days_and_controls(tmp_path: Path)
     # challenger running beside it from the 12th, its paper trades its own.
     assert state["champion"] == 1
     gate = state["gate"]
-    assert (gate["policy"], gate["days"], gate["required"], gate["passed"]) == (1, 2, 20, False)
+    assert (gate["policy"], gate["days"], gate["required"], gate["passed"]) == (1, 1, 20, False), (
+        "its record from the evaluation's first day, the 12th"
+    )
+    assert state["cycle"] == {
+        "evaluation": 2,
+        "since": "2026-10-12",
+        "number": 1,
+        "start": "2026-10-12",
+        "review": state["cohort"]["review"],
+        "day": 1,
+        "days": 20,
+    }
+    risk = state["risk"]
+    assert (risk["day"], risk["buys"], risk["daily_buys"], risk["held"]) == ("2026-10-12", 4, 20, None), (
+        "the live book's four buys of the morning"
+    )
+    sold = [t["execution"] for t in trades["trades"] if t["exit"] is not None]
+    assert all(e["entry"]["ticks"] is not None for e in sold)
+    assert {e["clock"] for e in sold} == {"quote", "trader"}, "paper's on the quotes, the live book's read"
+    assert {e["exit"]["reference"] for e in sold} == {"mid", "target"}
+    [left] = policies["policies"][0]["left_out"]
+    assert (left["why"], len(left["calibration"]["bins"])) == ("no_edge", 5)
+    assert all(
+        "calibration" in c["fitted"] and "bound" in c["fitted"]
+        for p in policies["policies"]
+        for c in p["cells"]
+    )
     assert [(p["version"], p["status"]) for p in state["policies"]] == [(1, "champion"), (2, "challenger")]
     challenger = state["policies"][1]
     assert challenger["paper"]["days"] == 1 and challenger["paper"]["trades"] == len(theirs["trades"]) == 2

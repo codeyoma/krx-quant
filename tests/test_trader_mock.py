@@ -391,6 +391,36 @@ async def test_a_bid_at_or_below_the_stop_cancels_the_take_profit_and_sells_at_t
     assert account.holdings[SYMBOL] == 0
 
 
+async def test_a_kis_trade_s_execution_cost_is_on_the_trader_s_clock(
+    kis_mock: tuple[FakeKis, FakeAccount], tmp_path: Path
+) -> None:
+    """#475: decided with the 10:00:01 quote's mid-point (69,950) known, filled by KIS at 70,050 (half a
+    tick better than the ask): 1.0 tick adverse; the sale decided on the 10:01:30 quote (mid-point
+    69,850) and filled at 69,850: 0. Its times are the trader's reads of KIS's inquiry."""
+    fake, account = kis_mock
+    [trade] = await MockDay(tmp_path, fake, account).run(
+        [
+            quote("10:00:01", 69_900, 70_000),
+            TEN,
+            BOUGHT,
+            quote("10:01:00", 69_900, 70_000),
+            quote("10:01:30", 69_800, 69_900),
+        ]
+    )
+
+    execution = trade["execution"]
+    assert execution["clock"] == "trader"
+    assert execution["entry"]["ticks"] == pytest.approx(1.0)
+    assert execution["entry"]["placed"] is not None and execution["entry"]["filled"] >= 0
+    assert execution["exit"] == {
+        "reason": STOP_LOSS,
+        "reference": "mid",
+        "ticks": pytest.approx(0.0),
+        "placed": pytest.approx(0.0),
+        "filled": pytest.approx(0.0),
+    }
+
+
 async def test_the_time_barrier_sells_at_the_bid(
     kis_mock: tuple[FakeKis, FakeAccount], tmp_path: Path
 ) -> None:

@@ -37,6 +37,14 @@ is the one kept for the day's review cycle (#474, ``practice.py``): its θ, when
 its replayed figures; the night's choice of the next cycle's is in the re-fit's output below
 (``practice.freeze_now``, which ``run_night`` runs after the re-fit).
 
+**Execution cost and the risk rules** (#475, spec #468 8): under each trade its legs' adverse ticks
+from the mid-point the book knew at each decision (a take-profit's from its target) and their delays
+(``store.execution``), then the day's means and whose clock the times are on (a paper fill's quote, or
+the trader's read of KIS's order inquiry: never KIS's own time of the fill); in the limits, the loss
+budget, the day's buy orders against their limit, the cooldowns the net losses in a row began and those
+losses at the day's last exit (``Risk``, of the trader's last start's rules). Each cell's calibration
+is in the re-fit's output below (``refit.calibrated``). None of it changes a θ or a rule.
+
 **What it never holds**: a price (no fill, reference, target, stop or quote), a broker's order
 number, an account, a key. The scheduled job's output is masked besides, as every job's
 (``redaction.py``).
@@ -80,9 +88,23 @@ from krx_quant.trader import (
 from krx_quant.trader import policy as policies
 from krx_quant.trader.gap import day_gap
 from krx_quant.trader.limits import Pause, pause_of
+from krx_quant.trader.paper import Rules, cooldowns
 from krx_quant.trader.refit import NO_POLICY_KEPT, run_refit
 from krx_quant.trader.settings import TraderSettings
-from krx_quant.trader.store import BREACH, CUMULATIVE_LIMIT, DAILY_LIMIT, DB_NAME, LIFT, Control, champion_of
+from krx_quant.trader.store import (
+    BREACH,
+    CUMULATIVE_LIMIT,
+    DAILY_LIMIT,
+    DB_NAME,
+    LIFT,
+    MID,
+    TRADER_CLOCK,
+    Control,
+    champion_of,
+    day_buys,
+    day_exits,
+    execution,
+)
 
 log = logging.getLogger(__name__)
 
@@ -165,6 +187,9 @@ class Trade:
     cost: float | None
     net: float | None
     practice: bool = False  # the mock book's practice trade (#427)
+    # Its execution cost (#475, ``store.execution``): each leg's adverse ticks and delays; None from a
+    # store the trader has not opened since #475.
+    execution: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -201,6 +226,20 @@ class Fitted:
     left_out: tuple[Mapping[str, Any], ...] = ()
     result: Mapping[str, Any] = field(default_factory=dict)
     error: str | None = None
+
+
+@dataclass(frozen=True)
+class Risk:
+    """The risk rules of the champion's book on the day (#471, #475): the rules of the trader's last
+    start by the night's end (``runs``), the capital a buy sized on, the buy orders that day, the
+    cooldowns its net losses in a row began (each one's start and end) and those losses in a row at
+    its last exit."""
+
+    rules: Rules
+    capital: float
+    buys: int
+    cooldowns: tuple[tuple[datetime, datetime], ...]
+    losses: int
 
 
 @dataclass(frozen=True)
@@ -249,6 +288,7 @@ class Report:
     cycle: review.Cycle | None = None  # the day's review cycle (#469); None before the evaluation
     # The mock practice cell kept for the day's review cycle (#474); None: none kept (yet).
     practice: practice.Frozen | None = None
+    risk: Risk | None = None  # the risk rules that day (#471, #475); None before #471's trader
 
     @property
     def gate_passed(self) -> bool:
@@ -357,6 +397,11 @@ def read(
         points = promotion.checkpoints(db)
         later = day + timedelta(days=1)
         cycle = _cycle(db, day, calendar)
+        ramp = (
+            live.ramp(db, calendar.session, datetime.combine(later, time(), KST), _capital_of(db, end))
+            if mode == LIVE
+            else None
+        )
         return Report(
             day=day,
             mode=mode,
@@ -365,9 +410,7 @@ def read(
             checked=tuple(c for c in points if c.at is not None and start <= c.at < end),
             night=(start, end),
             readiness=live.readiness(db, calendar.session, later),
-            ramp=live.ramp(db, calendar.session, datetime.combine(later, time(), KST), _capital_of(db, end))
-            if mode == LIVE
-            else None,
+            ramp=ramp,
             ramp_events=_ramp_events(db, start, end) if "ramp" in tables else (),
             order_check=_order_check(db, mode, day)
             if mode in KIS_MODES and "order_checks" in tables
@@ -400,7 +443,32 @@ def read(
             refit=refit,
             cycle=cycle,
             practice=None if cycle is None else practice.frozen(db, cycle.evaluation, cycle.number),
+            risk=_risk(db, mode, day, end, ramp) if {"runs", "trades", "unfilled_buys"} <= tables else None,
         )
+
+
+def _risk(db: sqlite3.Connection, mode: str, day: date, end: datetime, ramp: live.Ramp | None) -> Risk | None:
+    """The risk rules of the champion's book on ``day`` (#475, ``Risk``): of the trader's last start of
+    ``mode`` before the night's ``end``; None without one that kept them (a start before #471)."""
+    row = db.execute(
+        "SELECT detail FROM runs WHERE mode = ? AND at < ? ORDER BY id DESC LIMIT 1", (mode, _iso(end))
+    ).fetchone()
+    detail = json.loads(row[0]) if row is not None else {}
+    keys = ("capital", "risk_per_trade_percent", "loss_streak", "cooldown_minutes", "daily_buy_orders")
+    if not all(isinstance(detail.get(k), int | float) and not isinstance(detail.get(k), bool) for k in keys):
+        return None
+    rules = Rules(
+        capital=int(detail["capital"]),
+        risk_percent=float(detail["risk_per_trade_percent"]),
+        loss_streak=int(detail["loss_streak"]),
+        cooldown=timedelta(minutes=float(detail["cooldown_minutes"])),
+        daily_buys=int(detail["daily_buy_orders"]),
+    )
+    since = datetime.combine(day, time(), KST)
+    until = since + timedelta(days=1)
+    capital = rules.capital if ramp is None or ramp.lifted_at is not None else min(rules.capital, ramp.cap)
+    began, losses = cooldowns(rules, day_exits(db, mode, since, until))
+    return Risk(rules, capital, day_buys(db, mode, since, until), tuple(began), losses)
 
 
 def _cycle(db: sqlite3.Connection, day: date, calendar: MarketCalendar) -> review.Cycle | None:
@@ -689,7 +757,15 @@ def _trades(db: sqlite3.Connection, mode: str, day: date) -> tuple[Trade, ...]:
         f"SELECT t.* FROM trades t WHERE t.mode = ? AND substr(t.entry_at, 1, 10) = ? AND {champion_of(db)}"
         " ORDER BY t.entry_at, t.id",
         (mode, day.isoformat()),
-    )
+    ).fetchall()
+    orders: dict[int, list[dict[str, Any]]] = {}
+    for o in db.execute(
+        "SELECT o.* FROM orders o JOIN trades t ON t.id = o.trade_id"
+        " WHERE t.mode = ? AND substr(t.entry_at, 1, 10) = ? ORDER BY o.id",
+        (mode, day.isoformat()),
+    ):
+        orders.setdefault(int(o["trade_id"]), []).append(dict(o))
+    measured = "decided_mid" in _columns(db, "trades")  # #475: a store the trader opened since
     out = []
     for row in rows:
         r = dict(row)
@@ -713,6 +789,10 @@ def _trades(db: sqlite3.Connection, mode: str, day: date) -> tuple[Trade, ...]:
                 cost=r["cost"],
                 net=r["net"],
                 practice=bool(r.get("practice")),
+                # The champion's book's trades: a KIS day's are KIS's fills (#405).
+                execution=execution(r, orders.get(int(r["id"]), []), kis=mode in KIS_MODES)
+                if measured
+                else None,
             )
         )
     return tuple(out)
@@ -949,7 +1029,7 @@ def _day_section(report: Report) -> str:
     if champions:
         net = sum(t.net or 0.0 for t in champions)
         lines.append(f"매매 {len(champions)}건(진입 순, 가격은 싣지 않는다), 순손익 합 {_won(net)}:")
-        lines += [_trade_line(n, t, report.day) for n, t in enumerate(champions, 1)]
+        lines += [line for n, t in enumerate(champions, 1) for line in _trade_lines(n, t, report.day)]
     else:
         lines.append("매매 없음.")
     if practised:  # #427: the mock book's practice, apart from the champion's trades
@@ -958,11 +1038,92 @@ def _day_section(report: Report) -> str:
             f"연습 매매 {len(practised)}건(KIS 모의, 챔피언 칸이 없던 때 1주씩: 승격·관문·모의 기록에는 세지"
             f" 않고, 장부·한도·실행 점검에는 센다), 순손익 합 {_won(net)}:"
         )
-        lines += [_trade_line(n, t, report.day) for n, t in enumerate(practised, 1)]
+        lines += [line for n, t in enumerate(practised, 1) for line in _trade_lines(n, t, report.day)]
+    lines += _execution_lines(report)
     lines.append(_decisions_line(report.decisions))
     if report.practice_decisions:
         lines.append(_decisions_line(report.practice_decisions, "연습 칸 고르기의 챔피언 장부"))
     return "\n".join(lines)
+
+
+def _trade_lines(n: int, t: Trade, day: date) -> list[str]:
+    """A trade's line, and under it its execution cost (#475), when the store has it."""
+    executed = _executed(t.execution)
+    return [_trade_line(n, t, day), *([] if executed is None else [f"   실행: {executed}"])]
+
+
+def _executed(found: Mapping[str, Any] | None) -> str | None:
+    """A trade's legs' adverse ticks and delays (#475, ``store.execution``): ticks and seconds, no
+    price."""
+    if found is None:
+        return None
+    entry, out = found["entry"], found["exit"]
+    parts = [
+        f"매수 {_versus(entry['ticks'], '결정 때 중간가')} · 결정 뒤 주문 {_secs(entry['placed'])}, "
+        f"체결 {_secs(entry['filled'])}"
+    ]
+    if out is None:
+        parts.append("매도 아직")
+    elif out["reference"] == MID:
+        parts.append(
+            f"매도({out['reason']}) {_versus(out['ticks'], '결정 때 중간가')} · 결정 뒤 주문 "
+            f"{_secs(out['placed'])}, 체결 {_secs(out['filled'])}"
+        )
+    else:  # a take-profit: the limit at its target, resting from the buy
+        parts.append(
+            f"매도({out['reason']}) {_ticks(out['ticks'])}(목표가 대비: 매수 뒤 걸어 둔 지정가) · "
+            f"매수 체결 뒤 주문 {_secs(out['placed'])}"
+        )
+    return " · ".join(parts)
+
+
+def _versus(ticks: float | None, reference: str) -> str:
+    """A leg's adverse ticks from ``reference``; without it (no quote known at the decision), so."""
+    return f"?({reference} 없음)" if ticks is None else f"{_ticks(ticks)}({reference} 대비)"
+
+
+def _execution_lines(report: Report) -> list[str]:
+    """The day's execution cost (#475, spec #468 8 "실행 비용"): each leg's mean adverse ticks and delay
+    to its fill, and whose clock the times are on."""
+    found = [t.execution for t in report.trades if t.execution is not None]
+    if not found:
+        return []
+    kis = any(e["clock"] == TRADER_CLOCK for e in found)
+    clock = (
+        "시각은 trader가 KIS 주문 체결 조회에서 체결을 읽은 때다(KIS가 알린 체결 시각이 아니다)"
+        if kis
+        else "시각은 체결한 호가를 받은 때다(모의 체결: collector가 받은 호가 시각)"
+    )
+    bought = [e["entry"] for e in found]
+    sold = [e["exit"] for e in found if e["exit"] is not None]
+    at_mid = [x for x in sold if x["reference"] == MID]
+    at_target = [x for x in sold if x["reference"] != MID]
+    parts = [
+        f"매수 {_mean(bought, 'ticks', _ticks)}, 결정 뒤 체결 {_mean(bought, 'filled', _secs)}"
+        f"({len(bought)}건)"
+    ]
+    if at_mid:
+        parts.append(
+            f"손절·시간·정지·한도 매도 {_mean(at_mid, 'ticks', _ticks)}, 결정 뒤 체결 "
+            f"{_mean(at_mid, 'filled', _secs)}({len(at_mid)}건)"
+        )
+    if at_target:
+        parts.append(f"익절 목표가 대비 {_mean(at_target, 'ticks', _ticks)}({len(at_target)}건)")
+    return [
+        "실행 비용 (#475): 틱은 불리한 쪽이 +(매수는 결정 때 중간가보다 비싸게, 매도는 싸게 체결; 익절은 "
+        f"목표가 대비), 지연은 결정부터 · {clock}",
+        "- 평균: " + " · ".join(parts),
+    ]
+
+
+def _mean(legs: Sequence[Mapping[str, Any]], key: str, said: Any) -> str:
+    """The mean of ``key`` over the ``legs`` that have it, as ``said`` says it; "없음" without any."""
+    values = [x[key] for x in legs if x.get(key) is not None]
+    return said(sum(values) / len(values)) if values else "없음"
+
+
+def _secs(value: float | None) -> str:
+    return "?" if value is None else f"{value:.1f}초"
 
 
 def _trade_line(n: int, t: Trade, day: date) -> str:
@@ -1286,6 +1447,7 @@ def _limits_section(report: Report) -> str:
             )
     else:
         lines.append("- 그날 닿은 한도: 없음")
+    lines += _risk_lines(report.risk)
     for f in report.failures:  # #405: KIS's code and message, never an order or account number
         lines.append(
             f"- KIS 주문 실패: {_hms(f['at'])} {FAILED_ORDERS.get(f['what'], f['what'])} · "
@@ -1312,6 +1474,29 @@ def _limits_section(report: Report) -> str:
     if report.controls:
         lines.append("- 그날과 그 밤의 요청: " + " · ".join(_control(c, report.day) for c in report.controls))
     return "\n".join(lines)
+
+
+def _risk_lines(risk: Risk | None) -> list[str]:
+    """The risk rules that day (#471, #475): the loss budget, the buy orders and their limit, the
+    cooldowns begun and the net losses in a row at the day's last exit; won, counts and times."""
+    if risk is None:
+        return []
+    rules = risk.rules
+    minutes = f"{rules.cooldown.total_seconds() / 60:g}"
+    rested = (
+        "그날 쉼 없음"
+        if not risk.cooldowns
+        else f"그날 쉼 {len(risk.cooldowns)}번("
+        + ", ".join(f"{_hms(start)}–{_hms(end)}" for start, end in risk.cooldowns)
+        + ")"
+    )
+    return [
+        f"- 위험 규칙 (#471): 매매마다 손실 예산 {_amount(rules.budget(risk.capital))}(운용 상한 "
+        f"{_amount(risk.capital)}의 {rules.risk_percent:g}%) · 그날 매수 주문 {risk.buys}/{rules.daily_buys}"
+        + (" (한도에 닿아 그 뒤 사지 않았다)" if risk.buys >= rules.daily_buys else "")
+        + f" · 순손실 {rules.loss_streak}번 연달으면 {minutes}분 쉰다: {rested} · 그날 마지막 청산까지 "
+        f"연달은 순손실 {risk.losses}번"
+    ]
 
 
 def _source(source: str) -> str:

@@ -322,6 +322,51 @@ def test_a_cell_the_cost_map_fails_enters_at_the_lowest_threshold_its_lower_boun
     )
 
 
+def test_each_cell_s_calibration_counts_its_rises_by_score_with_no_price(tmp_path: Path) -> None:
+    """#475 (spec #468 8 "확률 보정"): the five rises of each day fall one in each bin of the grid's θ
+    (0.45, 0.55, 0.65, 0.75, 0.85): those reaching the upper barrier first (10:30, 10:00, 10:40) have
+    the class right, reached the target first and netted above 0 bought alone a share; the others fell
+    first and lost. Kept in the cell's fit (``GET /v1/trader/policies``) and printed under it."""
+    write_five(tmp_path)
+
+    done = refit(tmp_path)
+
+    [cell] = done.cells
+    calibration = cell.fitted["calibration"]
+    assert calibration["below"] == 0
+    assert [(b["from"], b["to"]) for b in calibration["bins"]] == [
+        (0.4, 0.5),
+        (0.5, 0.6),
+        (0.6, 0.7),
+        (0.7, 0.8),
+        (0.8, 1.0),
+    ]
+    rose = {"up": 2, "flat": 0, "down": 0}
+    fell = {"up": 0, "flat": 0, "down": 2}
+    assert [
+        (b["signals"], b["answered"], b["outcomes"], b["hits"], b["first"], b["bought"], b["profitable"])
+        for b in calibration["bins"]
+    ] == [
+        (2, 2, rose, 2, 2, 2, 2),
+        (2, 2, fell, 0, 0, 2, 0),
+        (2, 2, fell, 0, 0, 2, 0),
+        (2, 2, rose, 2, 2, 2, 2),
+        (2, 2, rose, 2, 2, 2, 2),
+    ]
+    printed = report(done).splitlines()
+    head = printed.index(
+        "   보정 (#475, 점수 구간마다 오름 신호, 1주씩 따로 잰 것: 설명일 뿐 θ를 바꾸지 않는다)"
+    )
+    assert printed[head + 1 : head + 3] == [
+        "   - [0.4, 0.5): 신호 2 · 결과 상승 100%, 보합 0%, 하락 0%(답 2) · 클래스 맞음 100% · "
+        "목표 먼저 100% · 순이익 100%(체결 2)",
+        "   - [0.5, 0.6): 신호 2 · 결과 상승 0%, 보합 0%, 하락 100%(답 2) · 클래스 맞음 0% · "
+        "목표 먼저 0% · 순이익 0%(체결 2)",
+    ]
+    assert printed[head + 5].startswith("   - [0.8, 1]: 신호 2")
+    assert not re.search(r"70[,.]?[0-9]{3}", report(done)), "no price"
+
+
 def test_the_replay_buys_what_the_trader_s_loss_budget_pays(tmp_path: Path) -> None:
     """By the trader's rules (#471): a share bought at 70,100 loses 70,100 − 69,550 (the stop) + 10.515 +
     69,550 × 0.215% + a tick of 100 = 810.0475 won at its stop; 0.5% of 1,000,000 won buys
