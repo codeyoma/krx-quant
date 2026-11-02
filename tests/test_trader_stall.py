@@ -309,7 +309,8 @@ def _time(event: Event) -> datetime:
 class StallDesk:
     """The whole desk in mock mode on ``state`` against ``fake``'s account, its quotes watched: each
     event in time order (the clock at it), the champion's order and REST read in flight awaited after
-    each. The champion policy (1) is kept, so that its paper shadow's trades are its policy's."""
+    each. The champion policy (1) is kept (at the first run on ``state``), so that its paper shadow's
+    trades are its policy's."""
 
     state: Path
     fake: FakeKis
@@ -321,7 +322,8 @@ class StallDesk:
     mode: str = MOCK  # or ``live`` on the same fake account (#464: its REST quotes' pace)
 
     async def run(self, events: Sequence[Event]) -> None:
-        keep(self.state, at("2026-10-13 22:31:00"), policy_cell(BARRIER, 0.6))
+        if not (self.state / DB_NAME).exists():  # a trader started again keeps its champion
+            keep(self.state, at("2026-10-13 22:31:00"), policy_cell(BARRIER, 0.6))
         engine = PredictionStore(self.state / ENGINE_DB)
         store = TraderStore(self.state / DB_NAME)
         store.add_run(self.started_at, self.mode, {})
@@ -566,6 +568,59 @@ async def test_a_live_lost_sell_settled_in_a_night_s_stall_sells_once_krx_takes_
     ], "sold on the first REST quote KRX takes an order at"
     assert [t["exit"]["reason"] for t in desk.trades()] == [STOP_LOSS]
     assert [f["day"] for f in rows(tmp_path, "failures")] == ["2026-10-14"], "the lost sell's alone"
+
+
+async def test_a_restart_in_the_evening_takes_up_the_day_s_stall_and_sells_on_no_rest_quote_of_the_night(
+    kis_mock: tuple[FakeKis, FakeAccount], tmp_path: Path
+) -> None:
+    """The mock's stop sell (10:01:30) is lost before KIS takes it, and the stream stops right after.
+    The sell is absent at 10:04:00 (#464), and the trader stops before its next REST read. Started
+    again that evening, it takes up the day's stall and reads KIS's book over REST, each read stamped
+    with the clock: none of the night's reads, nor 08:00's, sells, KRX taking no order then (#466);
+    the first one from 08:30, of the opening auction, sells."""
+    fake, account = kis_mock
+    Lost(fake, account, 69_800, taken=False)
+    timing = replace(TIMING, retry=1.0)
+    await StallDesk(tmp_path, fake, account, timing=timing).run(
+        [
+            *flowing("10:00:00", "10:00:02"),
+            TEN,
+            BOUGHT,
+            *flowing("10:00:03", "10:01:29"),
+            quote("10:01:30", 69_800, 69_900),  # at the stop: its sell lost
+            Tick("10:01:36"),  # the stall, read over REST from now on
+            Tick("10:03:30"),
+            Tick("10:04:00"),  # absent
+        ]
+    )
+
+    def stops() -> list[tuple[str, str]]:
+        return [
+            (o["status"], o["placed_at"])
+            for o in rows(tmp_path, "orders")
+            if o["mode"] == MOCK and o["purpose"] == STOP_LOSS
+        ]
+
+    assert stops() == [("absent", "2026-10-14T10:01:30+09:00")]
+
+    later = StallDesk(tmp_path, fake, account, started_at=at("20:00:00"), timing=timing)
+    await later.run(
+        [
+            Tick("20:00:01"),
+            Tick("20:00:06"),
+            Tick(next_day("00:00:30")),
+            Tick(next_day("08:00:00")),
+            Tick(next_day("08:30:01")),
+        ]
+    )
+
+    assert stops() == [
+        ("absent", "2026-10-14T10:01:30+09:00"),
+        ("filled", "2026-10-15T08:30:01+09:00"),
+    ], "sold on the first REST quote KRX takes an order at"
+    assert [t["exit"]["reason"] for t in later.trades() if t["mode"] == MOCK] == [STOP_LOSS]
+    assert [(f["what"], f["day"]) for f in rows(tmp_path, "failures")] == [("sell", "2026-10-14")]
+    assert later.rest_reads() >= 4, "read over REST in the night: the day's stall taken up"
 
 
 # The call limit

@@ -611,7 +611,8 @@ class Lost:
     """The trader's sell at ``price`` has no answer: KIS takes it first (``taken``), or the connection
     drops before it does. With ``alike``, another sell of the same limit and quantity goes in on KIS
     at the same moment (someone else's). With ``unread``, KIS answers no order inquiry from then on
-    until ``answer``. Every value is made up."""
+    until ``answer``; with ``hidden``, KIS's inquiry shows no sell at ``price`` (it lags behind the
+    order it took, #466). Every value is made up."""
 
     fake: FakeKis
     account: FakeAccount
@@ -619,6 +620,7 @@ class Lost:
     taken: bool = True
     alike: bool = False
     unread: bool = False
+    hidden: bool = False
     failing: bool = False  # KIS answers no order inquiry now
     sent: bool = False  # the sell sent
 
@@ -631,7 +633,16 @@ class Lost:
         def inquiry(params: dict[str, str]) -> Any:
             if self.failing:
                 return {"rt_cd": "1", "msg_cd": "FK0010", "msg1": "made up: 조회하지 못했습니다"}
-            return read(params)
+            answer = read(params)
+            if not self.hidden:
+                return answer
+            body, headers = answer if isinstance(answer, tuple) else (answer, {})
+            shown = [
+                r
+                for r in body["output1"]
+                if not (r["sll_buy_dvsn_cd"] == SELL_SIDE and int(r["ord_unpr"]) == self.price)
+            ]
+            return {**body, "output1": shown}, headers
 
         def selling(body: dict[str, Any]) -> Any:
             if int(body["ORD_UNPR"]) != self.price or self.sent:
@@ -1032,6 +1043,38 @@ async def test_a_lost_sell_is_not_absent_while_kis_is_not_read_the_shares_are_sh
         assert live.exposure(db, MOCK) == 2, "the trade and its sell sent"
 
 
+async def test_with_a_share_outside_the_ledger_accepted_a_filled_lost_sell_the_inquiry_lags_is_not_absent(
+    kis_mock: tuple[FakeKis, FakeAccount], tmp_path: Path
+) -> None:
+    """The account holds a share outside the ledger, accepted; the trader buys one more. The stop's
+    sell fills on KIS, its answer lost, and KIS's inquiry shows it on none of the looks (it lags). Two
+    looks 30 s apart past two minutes find none, and the balance holds one share: the one accepted
+    outside the ledger, not the trade's (#466). The sell is not concluded absent, and no second sell
+    goes (KIS would sell the account's share)."""
+    fake, account = kis_mock
+    account.cash = 100_000  # the orderable cash buys one share
+    account.holdings[SYMBOL], account.paid[SYMBOL] = 1, 60_000.0
+    accept(tmp_path, {SYMBOL: 1})
+    Lost(fake, account, 69_800, hidden=True)
+    day = MockDay(tmp_path, fake, account, timing=EACH_SECOND)
+    events: list[Event] = [
+        TEN,
+        BOUGHT,
+        quote("10:01:30", 69_800, 69_900),
+        Tick("10:03:30"),  # the run's first
+        Tick("10:04:00"),  # 30 s after it: none again, but the share held is the accepted one
+        quote("10:04:10", 69_700, 69_800),
+        Tick("10:05:00"),
+    ]
+
+    [trade] = await day.run(events)
+
+    assert trade["entry"]["quantity"] == 1 and sells(fake) == [70_300, 69_800], "no second sell"
+    assert account.holdings[SYMBOL] == 1, "the account's own share left alone"
+    assert trade["exit"] is None and orders_of(trade)[2:] == [("sell", "stop_loss", 69_800, 1, "sent", 0)]
+    assert absent_notices(day.notices) == []
+
+
 async def test_an_absent_sell_stays_in_the_ledger_and_a_restart_neither_looks_for_it_nor_sends_it(
     kis_mock: tuple[FakeKis, FakeAccount], tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -1056,6 +1099,38 @@ async def test_an_absent_sell_stays_in_the_ledger_and_a_restart_neither_looks_fo
     assert trade["exit"]["reason"] == STOP_LOSS and sells(fake) == [70_300, 69_800, 69_700]
     assert later.notices == [] and not [r for r in caplog.records if "answer was" in r.getMessage()]
     assert [r[0] for r in reconciles(tmp_path)][-1] == "clean"
+
+
+@pytest.mark.parametrize("restarted", ["evening", "morning"])
+async def test_a_restart_in_the_night_after_an_absent_sell_sells_nothing_until_krx_takes_orders(
+    kis_mock: tuple[FakeKis, FakeAccount], tmp_path: Path, restarted: str
+) -> None:
+    """The mock's lost stop sell is absent at 10:04:00, and the trader stops before the next quote.
+    It starts again that evening (20:00) or the next morning (06:00): the stream's quotes of the
+    night and of 08:00 sell nothing, KRX taking no order then (#466; a refused sell would stop that
+    day's entries); the first quote from 08:30, of the opening auction, sells the 14."""
+    fake, account = kis_mock
+    Lost(fake, account, 69_800, taken=False)
+    first = MockDay(tmp_path, fake, account, timing=EACH_SECOND)
+    await first.run([TEN, BOUGHT, quote("10:01:30", 69_800, 69_900), Tick("10:03:30"), Tick("10:04:00")])
+    assert [s[1] for s in stop_sells(tmp_path)] == ["absent"]
+
+    start = "20:00:00" if restarted == "evening" else next_day("06:00:00")
+    events: list[Any] = [quote(next_day("08:00:00"), 69_700, 69_800), Tick(next_day("08:29:59"))]
+    if restarted == "evening":
+        events = [quote("20:00:30", 69_700, 69_800), Tick("23:00:00"), *events]
+    later = MockDay(tmp_path, fake, account, started_at=at(start), timing=EACH_SECOND)
+    [trade] = await later.run([*events, quote(next_day("08:30:30"), 69_600, 69_700)])
+
+    sent = "2026-10-14T10:01:30+09:00"
+    assert stop_sells(tmp_path) == [
+        (69_800, "absent", sent),
+        (69_600, "filled", "2026-10-15T08:30:30+09:00"),
+    ], "nothing sold before 08:30"
+    assert trade["exit"]["reason"] == STOP_LOSS and account.holdings[SYMBOL] == 0
+    assert [(f["what"], f["outcome"], f["day"]) for f in rows(tmp_path, "failures")] == [
+        ("sell", "unknown", "2026-10-14")
+    ], "no sell refused in the night: the next day's entries go on"
 
 
 # The live account's own 005930 (#460)

@@ -79,18 +79,29 @@ ended at the close). None (#464): it did not go in (``store.ABSENT``, its row ke
 over (a day order ends at the close: nothing of it fills after), or on the mock account also during
 its day, once two looks ``ABSENT_APART`` apart found none, the first ``ABSENT_AFTER`` after it was
 sent; and in either case only if a balance read right after holds every share of the trade not
-sold. Else it stays as sent, looked up again (a sell KIS never took shows on no inquiry: without
-this the trade would never be sold). The live account waits for the day: the window of the
-candidates is no bound on how late KIS's inquiry may show an order. It is told on Telegram (the
-symbol and the shares), and the trade is sold by its rules again (``_go_on``: past its time barrier
-sold, else its take-profit placed again). A sale goes on at the first quote received after a lost
-sell is settled, found or not gone in (``_settled_at``), while KRX takes orders (``ORDERABLE``, a
-trading day from its opening auction to its close): on the live account, the next session's; a REST
-quote of a stall lasting through the night, stamped with the clock, does not count.
-The stop, the time barrier, a pause that sells and the loss limits sell nothing while it is not
-settled; their sale begins (kept for once it is settled) and is told on Telegram, to check the KIS
+sold beyond those accepted outside the ledger (#466, ``store.accepted_outside``: a lost sell that
+filled would leave those alone, and they would pass for the trade's). Else it stays as sent, looked
+up again (a sell KIS never took shows on no inquiry: without this the trade would never be sold).
+The live account waits for the day: the window of the candidates is no bound on how late KIS's
+inquiry may show an order. It is told on Telegram (the symbol and the shares), and the trade is
+sold by its rules again (``_go_on``: past its time barrier sold, else its take-profit placed
+again). A sale goes on at the first quote received after a lost sell is settled, found or not gone
+in (``_settled_at``), and only while KRX takes orders (below): on the live account, the next
+session's. The stop, the time barrier, a pause that sells and the loss limits sell nothing while it
+is not settled; their sale begins (kept for once it is settled) and is told on Telegram, to check the KIS
 account. Nothing clears it but KIS's inquiry and balance: ``krx-quant trade resume`` does not (it
 cannot tell whether the sell went in).
+
+**When KRX takes orders** (#466): a sell, a sale's or the take-profit's, is sent only while KRX takes
+orders (``ORDERABLE``: a trading day of the trader's market calendar, from its opening auction, 08:30,
+to its close), and a sale's only at a bid of that session (``_bid``: the latest quote received in it,
+from 08:30). This is checked right before each sell is sent, whatever led to it: a sale, its next
+batch or retry, a start, a lost sell settled. Outside it no sell goes: a sale waits for the first
+quote of the next session (a sale begun before 09:00 sells into the opening auction), the wait no
+failed order. Not the stream's quotes before 08:30 nor after the close, nor a REST quote of a stall
+lasting through the night (stamped with the clock). A take-profit due then is not placed: the trade
+is sold by its rules from the next session's first quote (its time barrier, within its day's
+session, is past by then).
 
 **The live account's own 005930** (#460): before each live buy, the account's balance is read; while
 it holds 005930 (nothing of the ledger's is open then: one position at a time), the buy is not sent
@@ -255,8 +266,8 @@ ABSENT_AFTER = LOST_AFTER
 ABSENT_APART = timedelta(seconds=30)
 # How such a sell was settled (``MockTrader._settle_lost``): found on KIS, or ``store.ABSENT``.
 _FOUND = "found"
-# When KRX takes an order: from the opening auction (08:30) to the close. A sale that waited for a
-# lost sell to be settled goes on at a quote of these alone (#464).
+# When KRX takes an order: from the opening auction (08:30) to the close. A sell is sent then alone,
+# a sale's at a quote received then, in the same session (#464, #466).
 ORDERABLE = frozenset({Phase.OPENING_AUCTION, Phase.CONTINUOUS, Phase.CLOSING_AUCTION})
 
 
@@ -367,7 +378,7 @@ class MockTrader(PaperTrader):
         self._live: Resting | None = None  # a sale's sell whose cancel did not take: open on KIS still
         self._live_buy: _LiveBuy | None = None  # a buy whose cancel did not take: open on KIS still
         self._lost: _Lost | None = None  # a sell sent whose answer was not had (#460): never sent again
-        # When such a sell was settled (#464): the sale goes on at the first quote received after it.
+        # When such a sell was settled (#464): the sale goes on at a quote received after it.
         self._settled_at: datetime | None = None
         self._outside_told = False  # a live buy not sent for the account's own 005930, told (#460)
         self._reading: asyncio.Task[None] | None = None  # KIS's best quotes read in a stall (#407)
@@ -536,9 +547,10 @@ class MockTrader(PaperTrader):
             self._begin_sale(trade, SALE[status])
         if self._selling is not None:
             if self._settled_at is not None:  # a lost sell settled (#464): a bid not older than that
-                if not self._quoted_orderable_after(self._settled_at):
-                    return  # the live one's day over, the next session's first quote
+                if not self._quoted_after(self._settled_at):
+                    return
                 self._settled_at = None
+            # No bid outside KRX's session, nor before its first quote (#466): the sale waits for it.
             if (self._retry_at is None or now >= self._retry_at) and self._bid() is not None:
                 self._retry_at = None
                 self._stop_following()
@@ -579,15 +591,16 @@ class MockTrader(PaperTrader):
         last = self._last
         return last is not None and last.received_at > moment
 
-    def _quoted_orderable_after(self, moment: datetime) -> bool:
-        """Whether the latest quote came after ``moment`` while KRX takes orders: a trading day's
-        session, from its opening auction (08:30) to its close (#464). Not a REST quote of a stall
-        lasting through the night, stamped with the clock when it is read."""
-        last = self._last
-        if last is None or last.received_at <= moment:
+    def _orderable(self, quoted: datetime | None = None) -> bool:
+        """Whether KRX takes an order now (#466, module doc): a trading day of the trader's market
+        calendar, from its opening auction (08:30) to its close; with ``quoted``, also whether that
+        moment (a quote's) fell in the same session since its opening auction. Read right before
+        each sell is sent."""
+        now = self._clock()
+        session = self._sessions(kst_day(now))
+        if session is None or session.phase(now) not in ORDERABLE:
             return False
-        session = self._sessions(kst_day(last.received_at))
-        return session is not None and session.phase(last.received_at) in ORDERABLE
+        return quoted is None or session.phase(quoted) in ORDERABLE
 
     def _stop_following(self) -> None:
         follower = self._follower
@@ -597,9 +610,10 @@ class MockTrader(PaperTrader):
 
     def _bid(self) -> int | None:
         """The best bid a sell is placed at: the latest quote's, received since the trader started (in a
-        stall, KIS's REST one, #407)."""
+        stall, KIS's REST one, #407), while KRX takes orders and in that session (#466, ``_orderable``):
+        None outside it, and until its first quote (not one of the pre-open, nor the day before's)."""
         last = self._last
-        if last is None or last.received_at < self._started_at:
+        if last is None or last.received_at < self._started_at or not self._orderable(last.received_at):
             return None
         return round(last.bid)
 
@@ -1175,6 +1189,13 @@ class MockTrader(PaperTrader):
         left = trade.quantity - self.store.sold(trade.id)  # placed again after a restart (#406): the rest
         if left <= 0:
             return
+        if not self._orderable():  # #466: not placed; the trade's rules sell it in the next session
+            log.info(
+                "trader: KRX takes no order now: the take-profit of trade %s is not placed; the trade is"
+                " sold by its rules from the next session's first quote",
+                trade.id,
+            )
+            return
         order = self._send(trade, TAKE_PROFIT, price, left)
         try:
             sent = await self._broker.sell(SYMBOL, left, price)
@@ -1341,6 +1362,13 @@ class MockTrader(PaperTrader):
                 return
         if trade.quantity - self.store.sold(trade.id) <= 0:
             self._finish(trade, reason)
+        elif self._bid() is None:  # #466: KRX's session over meanwhile, the next one's first quote sells
+            log.info(
+                "trader: trade %s: KRX takes no order now: %s share(s) left are sold from the next"
+                " session's first quote",
+                trade.id,
+                trade.quantity - self.store.sold(trade.id),
+            )
         else:  # rounds spent with shares left (no bid that sells them): the next batch waits a while
             self._retry_at = self._clock() + timedelta(seconds=self._timing.wait)
             log.info(
@@ -1528,8 +1556,9 @@ class MockTrader(PaperTrader):
         did not go in (module doc, #464): its day is over (``today`` later), or on the mock account
         this look comes ``ABSENT_APART`` at least after the first of a run of looks that found none,
         that first ``ABSENT_AFTER`` at least after it was sent; and the balance, read now, holds every
-        share of the trade not sold. If so, kept ``absent`` (``store.ABSENT``), told, and the trade
-        sold by its rules again."""
+        share of the trade not sold beyond those accepted outside the ledger (#466: a lost sell that
+        filled leaves those alone). If so, kept ``absent`` (``store.ABSENT``), told, and the trade sold
+        by its rules again."""
         lost = self._lost
         assert lost is not None and lost.placed.at is not None
         now = self._clock()
@@ -1543,6 +1572,8 @@ class MockTrader(PaperTrader):
             if now - lost.empty < ABSENT_APART:
                 return False
         held = (await self._broker.balance()).held(SYMBOL)  # after the inquiry: a fill between shows
+        # The shares accepted outside the ledger are not the trade's (#466).
+        held -= Outside.of(self.store.accepted_outside(self.mode)).holdings.get(SYMBOL, 0)
         left = trade.quantity - self.store.sold(trade.id)
         lost = self._lost
         assert lost is not None
@@ -1550,7 +1581,8 @@ class MockTrader(PaperTrader):
             if not lost.short:  # said when it begins, not at every look
                 log.warning(
                     "trader: the %s sell of trade %s whose answer was lost is on no KIS order, but the"
-                    " account holds %s of the %s share(s) the trade has not sold: not settled",
+                    " account holds %s of the %s share(s) the trade has not sold (beyond those accepted"
+                    " outside the ledger): not settled",
                     lost.purpose,
                     trade.id,
                     held,
