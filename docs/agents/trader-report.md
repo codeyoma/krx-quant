@@ -56,9 +56,11 @@ The comment shows no prices, account numbers, order numbers or keys. For more, s
   - in live mode, the first period breached (a pause of source `ramp`) or a day's orders differ from KIS's (`그날 주문의 KIS 대조: 다르다`): only the user can check the live account and resume. Read the live day's report against `docs/kis-feeds.md` "실전 서버 (#408)": the first live days measure the live server's answers, and a field that differs from the mock's is a bug to fix in a PR (the trader stops new entries meanwhile);
   - a change would touch the limits, the capital, the modes, the live gate or the promotion rule;
   - losses or halts recur and the evidence does not point to one fix;
-  - a KIS order's outcome is not known (`응답 없음(결과 모름)`) and was not settled: the trader looks up a buy whose answer was lost and adopts it when exactly one KIS order can be it (#406), but a sell's is not looked up. If the report shows a pause of source `계좌 맞추기` (a mock start found the account unlike the ledger, #406), only the user can check the account and resume, which accepts what is outside the ledger. A refused order with a code the trader should not have caused (off the tick, more than held) is a bug: open an issue with the code and the failure's line.
+  - a KIS order's outcome is not known (`응답 없음(결과 모름)`) and was not settled: the trader looks up a buy or a sell whose answer was lost and adopts it when exactly one KIS order can be it (#406, #460); a sell no KIS order can be is concluded `absent` once the inquiry and a balance read show it did not go in (#464: on the mock account about two and a half minutes after it was sent, on the live one once its day is over). A sell left unsettled is one that more than one KIS order could be, or one the account lacks the shares for: ask the user to check the account. If the report shows a pause of source `계좌 맞추기` (a mock start found the account unlike the ledger, #406), only the user can check the account and resume, which accepts what is outside the ledger. A refused order with a code the trader should not have caused (off the tick, more than held) is a bug: open an issue with the code and the failure's line.
 
   > **바뀜** (2026-10-31, #424): "결과를 모르는 주문은 계좌 맞추기(#406) 전까지 사용자만 보고 정리한다" → trader가 mock 시작에서 계좌를 맞추고 응답이 사라진 매수를 장부에 넣는다. 계좌 맞추기의 정지는 여전히 사용자가 확인하고 재개한다. 이유: #406.
+
+  > **바뀜** (2026-11-02, #PRNUM): "but a sell's is not looked up" → 응답이 사라진 매도도 찾아 장부에 넣고(#460, PR #463), 아무 KIS 주문도 아니면 `absent`로 정한다. 이유: 매도를 다시 보내지 않고 KIS에서 찾게 됐고(#460), KIS에 닿지 않은 매도는 조회에 끝내 보이지 않아 그 매매가 팔리지 않았다(#464).
 
 ## Never
 
