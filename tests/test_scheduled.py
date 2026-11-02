@@ -1529,7 +1529,9 @@ async def test_the_trader_report_job_runs_the_real_command(
     report, refit = body.split("밤 정책 맞추기의 출력 (krx-quant refit-policy, #399 #400)")
     assert "자동 매매 리포트 (#402)" in report and "첫 챔피언(정책 1)" in report, "the report first"
     assert "- 맞춘 정책 1(챔피언): 칸 없음" in report
-    assert "도전 정책 판정 (#400)" in refit and "챔피언이 아직 없다" in refit, "judged first: no champion yet"
+    assert "도전 정책 판정 (#473: 묶음을 검토 날 밤에 한 번)" in refit and "챔피언이 아직 없다" in refit, (
+        "judged first: no champion yet"
+    )
     assert "정책 맞추기 (#399): 정책 1 · 챔피언(처음 맞춘 정책)" in refit
     assert "매매할 칸: 없음" in refit and "뺀 칸: barrier breiman (top): few_days" in refit
     assert state.jobs["trader-report"].exit_code == 0
