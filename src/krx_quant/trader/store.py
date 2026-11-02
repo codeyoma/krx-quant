@@ -18,7 +18,9 @@ by the nightly re-fit (#399, from the engine's container).
 - ``orders``: each order of a trade (the entry's buy, the take-profit's sell resting at the
   target, the stop's or the time exit's sell), its limit, quantity and status (open, filled,
   cancelled), and the broker's order, its number and branch (#405: KIS's, in mock; none in paper).
-  A mock sale may take several sells at the best bid (``mock.py``), each its own order;
+  A mock sale may take several sells at the best bid (``mock.py``), each its own order. Since #460
+  each mock sell is kept before it is sent (``sent``, no number yet: its answer not had, or lost),
+  so that one whose answer was lost is never sent again but looked up on KIS (``mock.py``);
 - ``fills``: each order's fills, with the quote a paper fill was made on (none in mock: a mock
   fill is KIS's, at its average price ``avg_prvs``, as the day's order inquiry shows it);
 - ``unfilled_buys`` (#405): each mock buy KIS took of which nothing filled (no trade opened), with
@@ -191,9 +193,9 @@ CREATE TABLE IF NOT EXISTS orders (
     price REAL NOT NULL,               -- the limit
     quantity INTEGER NOT NULL,
     placed_at TEXT NOT NULL,
-    status TEXT NOT NULL,              -- open, filled, cancelled
+    status TEXT NOT NULL,              -- open, filled, cancelled; sent (#460): a sell's answer not had
     closed_at TEXT,
-    broker_id TEXT                     -- the broker's order number; null in paper
+    broker_id TEXT                     -- the broker's order number; null in paper, and while sent
 );
 CREATE INDEX IF NOT EXISTS orders_by_trade ON orders (trade_id);
 CREATE TABLE IF NOT EXISTS fills (
@@ -415,7 +417,8 @@ PRACTICE_TRADE = "coalesce(t.practice, 0) = 1"
 BUY, SELL = "buy", "sell"
 OPEN, FILLED, CANCELLED = "open", "filled", "cancelled"
 # A mock buy's (``unfilled_buys``, #406): sent, its answer not had (lost, or the trader stopped
-# before it came); refused; not sent (no token); looked up and not on KIS.
+# before it came); refused; not sent (no token); looked up and not on KIS. A mock sell's
+# (``orders``, #460) while its answer is not had is ``sent`` too.
 SENT, BUY_REFUSED, UNSENT, ABSENT = "sent", "refused", "unsent", "absent"
 ENTRY = "entry"
 # What a control asks for (#396), and who asks: the reconcile's pause (#406) is a mock start's; the
@@ -874,7 +877,8 @@ class TraderStore:
     def add_order(
         self, trade: int, side: str, purpose: str, placed: Placed, at: datetime, status: str = OPEN
     ) -> int:
-        """An order of ``trade`` as KIS took it (#405); a closed one is closed at ``at``."""
+        """An order of ``trade`` as KIS took it (#405), or a sell kept before it is sent (#460,
+        ``sent``: no number yet, ``accept_order`` names it); a closed one is closed at ``at``."""
         when = iso(at)
         with self._db:
             order = self._order(
@@ -882,9 +886,33 @@ class TraderStore:
             )
             self._db.execute(
                 "UPDATE orders SET closed_at = ?, broker_id = ?, broker_branch = ? WHERE id = ?",
-                (None if status == OPEN else when, placed.number, placed.branch, order),
+                (None if status in (OPEN, SENT) else when, placed.number, placed.branch, order),
             )
         return order
+
+    def accept_order(self, order: int, branch: str | None, number: str) -> None:
+        """A sell kept before it was sent (#460), as KIS took it: its order (``branch`` None for one
+        found on the inquiry, which names it by number alone), open."""
+        with self._db:
+            self._db.execute(
+                "UPDATE orders SET broker_id = ?, broker_branch = ?, status = ? WHERE id = ?",
+                (number, branch, OPEN, order),
+            )
+
+    def drop_order(self, order: int) -> None:
+        """A sell kept before it was sent (#460) that KIS refused, or that could not be sent: no order
+        KIS has, so none of the ledger's (the failure keeps it, ``failures``)."""
+        with self._db:
+            self._db.execute("DELETE FROM orders WHERE id = ? AND status = ?", (order, SENT))
+
+    def sent_sell(self, trade: int) -> tuple[int, str, Placed] | None:
+        """``trade``'s sell sent whose answer was not had (#460: lost, or the trader stopped before it
+        came), if any: its row, its purpose and the order (no number: ``Placed.at`` when it was sent)."""
+        row = self._db.execute(
+            "SELECT * FROM orders WHERE trade_id = ? AND side = ? AND status = ? ORDER BY id LIMIT 1",
+            (trade, SELL, SENT),
+        ).fetchone()
+        return None if row is None else (row["id"], row["purpose"], _placed(row))
 
     def add_fill(self, order: int, at: datetime, price: float, quantity: int) -> None:
         """A fill of ``order`` as KIS's order inquiry showed it (#405): its average price."""

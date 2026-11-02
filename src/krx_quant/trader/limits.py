@@ -144,6 +144,7 @@ _WHAT = {
     "cancel": "취소",
     "sell": "매도",
     "orderable": "주문 가능 현금 조회",
+    "balance": "잔고 조회",  # #460: a live buy's, before it is sent
     "reconcile": "계좌 맞추기",
 }
 
@@ -313,18 +314,19 @@ class Guard:
         detail: str,
         code: str | None = None,
         trade: int | None = None,
+        told: bool = False,
     ) -> None:
-        """A KIS order of ``what`` (buy, take_profit, cancel, sell, orderable) failed at ``at``
-        (#405): kept, and new entries stop for the rest of the day; the day's first is sent to
-        Telegram. ``detail`` is KIS's code and message or the error, never an account or order
-        number."""
+        """A KIS order of ``what`` (buy, take_profit, cancel, sell, orderable, balance) failed at
+        ``at`` (#405): kept, and new entries stop for the rest of the day; the day's first is sent to
+        Telegram, unless the caller tells it itself (``told``: a sell whose answer was lost, #460).
+        ``detail`` is KIS's code and message or the error, never an account or order number."""
         self.roll(at)
         kept = self.store.add_failure(at, self.mode, what, outcome, detail, code, trade)
         first = self.failure is None
         if first:
             self.failure = kept
         log.error("trader: the %s order %s (%s): %s", what, outcome, code or "-", detail)
-        if not first:
+        if not first or told:
             return
         said = _SAID.get(outcome, "보내지 못했습니다")
         self._notify(

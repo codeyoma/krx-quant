@@ -31,7 +31,8 @@ left (``Timing.rounds`` at a time, then on the next quote or tick). A sell whose
 take stays open in the ledger and is followed: before anything more is sold it is cancelled again
 and its fills kept, so that a fill of it during the wait is never sold twice. The trade exits once
 every share is sold, at the average of its sells' fills, with the reason the sale began with. A
-take-profit sell KIS did not take is sold so, at the best bid, once that bid reaches the target.
+take-profit sell KIS refused, or that could not be sent, is sold so, at the best bid, once that bid
+reaches the target.
 
 **Ledger.** A trade's entry, exit, costs and P&L come from KIS's fills: the commission
 (``KRX_FEE_PERCENT``) a side and the sell tax on the fills' notional, as in paper. Each order is
@@ -44,8 +45,9 @@ trades are of mode ``mock``.
 
 **A failed order**: KIS refused it, it had no answer (whether it went in is not known), or it could
 not be sent (no token, an inquiry KIS did not answer). It is kept (``failures``) and sent to
-Telegram, and new entries stop for the rest of the day (``limits.ORDER_FAILED``); a sale that failed
-is tried again ``Timing.retry`` seconds later.
+Telegram, and new entries stop for the rest of the day (``limits.ORDER_FAILED``); a sale whose sell
+KIS refused or that could not be sent is tried again ``Timing.retry`` seconds later, never one whose
+answer was lost (below).
 
 **A buy whose answer was lost** (#406): each buy is kept before it is sent (``unfilled_buys``,
 ``store.SENT``), with its decision and the trade it would open. One KIS took but whose answer did
@@ -59,11 +61,35 @@ KIS's branch from the inquiry, ``ord_gno_brno``, not measured yet), and new entr
 server resumes them (below). Right after the lost answer it is looked up for ``Timing.wait``; what
 is not settled then, the next start looks up again.
 
+**A sell whose answer was lost** (#460): each sell, the take-profit's and a sale's, is kept before it
+is sent (``orders``, ``store.SENT``, no KIS number yet). One whose answer did not come (or the
+trader stopped before it came) is never sent again, nor is any other sell of its trade while it is
+not settled (``_lost``): KIS sells what the account holds, and the account may hold shares outside
+the ledger (``store.accepted_outside``; on the live account, the user's own), so a second sell could
+sell those. It is a failed order (no new entry that day) and told on Telegram, and it is looked up
+on its day's order inquiry (``reconcile.candidates``: a sell of 005930 at its limit and of its
+quantity, placed around when it was sent, whose number the ledger does not keep, not the order
+probe's): for ``Timing.wait`` right after, then every ``Timing.retry`` seconds, and at a start. When
+exactly one KIS order can be it and nothing is left of it (or its day is over), its fills are the
+trade's, and the sale goes on with what is left. None, more than one, an inquiry not read, or one
+with something left: it stays as sent. One with something left is not cancelled: a cancel names
+KIS's branch, which the inquiry shows as ``ord_gno_brno``, not measured yet to be the order answer's
+``KRX_FWDG_ORD_ORGNO`` (#403 ⚠), as for a lost buy; it is adopted once it is over on KIS (filled, or
+ended at the close). The stop, the time barrier, a pause that sells and the loss limits then sell
+nothing; their sale begins (kept for once it is settled) and is told on Telegram, to check the KIS
+account. Nothing clears it but KIS's inquiry: ``krx-quant trade resume`` does not (it cannot tell
+whether the sell went in).
+
+**The live account's own 005930** (#460): before each live buy, the account's balance is read; while
+it holds 005930 (nothing of the ledger's is open then: one position at a time), the buy is not sent
+(``OUTSIDE_HELD``), told on Telegram once until a buy goes again. A resume does not lift it: a sell
+of the trader's could sell those shares. Other symbols do not stop it, nor does anything in mock.
+
 **Start** (#406, ``start``, before anything is bought or sold): the ledger's orders open on KIS when
 the trader stopped are read, each on the day it was placed: their fills kept, one with nothing left
 closed, one of a day gone by over with what filled (a KRX limit order is a day order: it is not
 cancelled, KIS ended it at the close). A trade whose sells hold every share exits. The buys sent
-whose answer was not had are looked up (above). Then the account against the ledger
+whose answer was not had are looked up (above), and a sell's. Then the account against the ledger
 (``reconcile.compare``): the shares held, the other symbols held, the day's orders with something
 left that the trader does not follow. What is outside the ledger beyond what was accepted last, a
 share of the ledger the account does not hold, or a lost buy not adopted: the trader touches none of
@@ -72,10 +98,11 @@ Telegram; the open trade is sold by its own rules still. ``krx-quant trade resum
 accepts what is outside the ledger then as the account's (``reconciles``). Then the open trade: past
 its time barrier, it is sold at once (at the first quote's best bid, ``time``); with time left and
 no take-profit resting on KIS (it was cancelled there, expired with its day, refused, or never
-placed), the take-profit is placed again for the shares not sold. A restart never sends an order
-twice: an order kept open is read, never sent again, and a buy decided is never decided again. While
-KIS cannot be read the start is tried again every ``Timing.retry`` seconds, and nothing is bought or
-sold until it is done (a prediction read meanwhile is ``reconciling``).
+placed), the take-profit is placed again for the shares not sold (not while a sell whose answer
+was lost is not settled). A restart never sends an order twice: an order kept open is read, never
+sent again, a sell whose answer was lost is looked up (above), and a buy decided is never decided
+again. While KIS cannot be read the start is tried again every ``Timing.retry`` seconds, and nothing
+is bought or sold until it is done (a prediction read meanwhile is ``reconciling``).
 
 One order is in flight at a time (``_work``): while it is, nothing else is bought or sold, and a
 sale asked for meanwhile begins once it ends. A trader stopped waits for it (``close``).
@@ -112,7 +139,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
-from collections.abc import Awaitable, Callable, Coroutine
+from collections.abc import Awaitable, Callable, Coroutine, Sequence
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 from typing import Any
@@ -177,6 +204,8 @@ log = logging.getLogger(__name__)
 UNFILLED = "unfilled"
 # Why a prediction bought nothing (#406): the start's reconcile of the account was not done yet.
 RECONCILING = "reconciling"
+# Why a live buy decided bought nothing (#460): the live account holds 005930 outside the ledger.
+OUTSIDE_HELD = "outside_held"
 # What became of a failed order (``failures.outcome``): KIS refused it, it had no answer, or it
 # could not be sent.
 UNKNOWN, ERROR = "unknown", "error"
@@ -232,6 +261,26 @@ class _LiveBuy:
     unfilled: int | None = None
 
 
+@dataclass(frozen=True)
+class _Lost:
+    """A sell of the open trade sent whose answer was not had (#460): kept ``sent`` in the ledger
+    (``order``, no KIS number), never sent again, looked up on its day's inquiry until one KIS order
+    alone can be it. ``found`` is how many could be it at the last look, ``unread`` whether the last
+    look could not read KIS: each said when it changes, not at every look."""
+
+    order: int
+    purpose: str  # take_profit, or a sale's (stop_loss, time, ...)
+    placed: Placed  # its limit and quantity, and when it was sent
+    found: int = -1
+    unread: bool = False
+
+    @property
+    def day(self) -> date:
+        """The day it was sent on: the day order inquiry that shows it, if KIS took it."""
+        assert self.placed.at is not None
+        return kst_day(self.placed.at)
+
+
 def tick_up(price: float) -> int:
     """The first price on KRX's tick at or above ``price``."""
     up = math.ceil(round(price / tick_size(price), 9)) * tick_size(price)
@@ -280,6 +329,8 @@ class MockTrader(PaperTrader):
         self._resting: Resting | None = None  # the take-profit sell resting on KIS
         self._live: Resting | None = None  # a sale's sell whose cancel did not take: open on KIS still
         self._live_buy: _LiveBuy | None = None  # a buy whose cancel did not take: open on KIS still
+        self._lost: _Lost | None = None  # a sell sent whose answer was not had (#460): never sent again
+        self._outside_told = False  # a live buy not sent for the account's own 005930, told (#460)
         self._reading: asyncio.Task[None] | None = None  # KIS's best quotes read in a stall (#407)
         self._checking: asyncio.Task[None] | None = None  # a day's orders compared with KIS's (#408)
         self._check_after: datetime | None = None  # a comparison that could not read KIS goes again then
@@ -302,6 +353,14 @@ class MockTrader(PaperTrader):
                     self._live, self._selling = order, order.purpose
             # A sale begun goes on, though none of its sells is open (each cancelled, or refused).
             self._selling = store.sale_begun(self._open.id) or self._selling
+            sent = store.sent_sell(self._open.id)
+            if sent is not None:  # its answer lost, or not had at the stop (#460): looked up, not sent
+                self._lost = _Lost(*sent)
+                log.warning(
+                    "trader: a sell of trade %s whose answer was not had is not settled: it is looked up"
+                    " on KIS, and nothing of the trade is sold until it is",
+                    self._open.id,
+                )
         else:  # a restart: a buy of which nothing filled yet, open on KIS, is followed still
             kept = store.open_unfilled_buy(self.mode)
             if kept is not None:
@@ -426,6 +485,11 @@ class MockTrader(PaperTrader):
             return
         if trade is None:
             return
+        if self._lost is not None:  # a sell whose answer was lost (#460): looked up, never sent again
+            if self._retry_at is None or now >= self._retry_at:
+                self._retry_at = None
+                self._start(self._find_lost())
+            return
         status = self.status
         if self._selling is None and status in SALE:  # a pause or a limit while it was bought
             if self._sell_after is not None and not self._quoted_after(self._sell_after):
@@ -455,6 +519,18 @@ class MockTrader(PaperTrader):
             reason,
             ", on KIS's REST quotes: the quotes stalled" if self._stall is not None else "",
         )
+        if self._lost is not None:  # #460: nothing is sold until the sell whose answer was lost is found
+            log.warning(
+                "trader: trade %s is to be sold (%s), but a sell of it whose answer was lost is not"
+                " settled: no new sell",
+                trade.id,
+                reason,
+            )
+            self._notify(
+                f"자동 매매({self.mode}): 매매를 팔 때가 됐지만({reason}) 응답이 없던 매도를 KIS 주문"
+                " 체결 조회에서 아직 찾지 못해 새 매도를 내지 않습니다. 찾으면 이어서 팝니다."
+                " KIS 계좌에서 확인하세요."
+            )
 
     def _quoted_after(self, moment: datetime) -> bool:
         last = self._last
@@ -498,6 +574,8 @@ class MockTrader(PaperTrader):
         try:
             await self._settle_kept(rows, today)
             doubtful = await self._find_sent(rows, today)
+            if self._lost is not None:  # a sell whose answer was lost (#460), looked up as ever
+                self._settle_lost(await rows(self._lost.day), today)
             today_rows = await rows(today)  # before the balance: a fill between is in the bounds
             balance = await self._broker.balance()
         except BrokerError as e:
@@ -581,7 +659,7 @@ class MockTrader(PaperTrader):
                     still.quantity,
                 )
         trade = self._open
-        if trade is not None and self._live_buy is None and self._all_sold(trade):
+        if trade is not None and self._live_buy is None and self._lost is None and self._all_sold(trade):
             self._finish(trade, reason)
 
     async def _find_sent(self, rows: Callable[[date], Awaitable[list[OrderRow]]], today: date) -> int:
@@ -704,10 +782,13 @@ class MockTrader(PaperTrader):
 
     def _held(self) -> tuple[int, int]:
         """The fewest and the most shares of 005930 the ledger can hold now: its open trade's shares
-        not sold yet, less what its open sells may still sell, plus what its open buy may still buy."""
+        not sold yet, less what its open sells and a sell whose answer was lost (#460) may still sell,
+        plus what its open buy may still buy."""
         trade = self._open
         shares = 0 if trade is None else trade.quantity - self.store.sold(trade.id)
         low = shares - sum(o.quantity - o.filled for o in (self._resting, self._live) if o is not None)
+        if self._lost is not None:
+            low -= self._lost.placed.quantity
         live = self._live_buy
         high = shares + (0 if live is None else live.placed.quantity - live.filled)
         return max(0, low), high
@@ -841,6 +922,8 @@ class MockTrader(PaperTrader):
     async def _enter(self, waiting: _Waiting, quote: BestQuote, quantity: int) -> None:
         ask = round(quote.ask)
         day = kst_day(quote.received_at)
+        if self.mode == LIVE and not await self._account_clear(waiting):
+            return
         try:
             orderable = await self._broker.orderable(SYMBOL, ask)
         except BrokerError as e:
@@ -923,6 +1006,29 @@ class MockTrader(PaperTrader):
         )
         if not live:
             await self._place_take_profit(trade)
+
+    async def _account_clear(self, waiting: _Waiting) -> bool:
+        """Whether the live account holds no 005930 before a buy (#460, module doc): nothing of the
+        ledger's is open then, so any it holds is outside the ledger (the user's own), which a sell of
+        the trader's could sell. Else the buy is not sent (``OUTSIDE_HELD``), told once until one is."""
+        try:
+            held = (await self._broker.balance()).held(SYMBOL)
+        except BrokerError as e:
+            self._buy_failed(waiting, "balance", ERROR, str(e))
+            return False
+        if held <= 0:
+            self._outside_told = False
+            return True
+        self._give_up(waiting, OUTSIDE_HELD)
+        log.warning("trader: the live account holds %s share(s) of 005930 outside the ledger: no buy", held)
+        if not self._outside_told:
+            self._outside_told = True
+            self._notify(
+                f"자동 매매({self.mode}): 실전 계좌에 장부 밖의 005930 {held}주가 있어 새로 사지 않습니다"
+                "(#460): trader의 매도가 그 주식을 팔 수 있습니다. krx-quant trade resume으로는 풀리지 않고,"
+                " 계좌에 005930이 없으면 다시 삽니다."
+            )
+        return False
 
     async def _settle_buy(self) -> None:
         """The buy open on KIS taken off: cancelled again and read until nothing is left of it, its
@@ -1008,27 +1114,28 @@ class MockTrader(PaperTrader):
     async def _place_take_profit(self, trade: OpenTrade) -> None:
         if self._selling is not None or self.status in SALE:
             return  # it sells at once instead
+        if self._lost is not None:  # #460: no sell while one whose answer was lost is not settled
+            return
         price = tick_up(trade.target)
         left = trade.quantity - self.store.sold(trade.id)  # placed again after a restart (#406): the rest
         if left <= 0:
             return
+        order = self._send(trade, TAKE_PROFIT, price, left)
         try:
             sent = await self._broker.sell(SYMBOL, left, price)
         except BrokerError as e:
+            self._unsent(order)
             self._failed("take_profit", ERROR, str(e), trade=trade.id)
             return
-        if not sent.accepted or sent.ref is None:
-            refused = sent.outcome == REFUSED
-            self._failed(
-                "take_profit",
-                REFUSED if refused else UNKNOWN,
-                sent.reason if refused else _unknown(sent),
-                sent.code if refused else None,
-                trade.id,
-            )
+        if sent.outcome == REFUSED:
+            self._unsent(order)
+            self._failed("take_profit", REFUSED, sent.reason, sent.code, trade.id)
             return
-        placed = Placed(price, left, sent.ref.branch, sent.ref.number, self._clock())
-        order = self.store.add_order(trade.id, SELL, TAKE_PROFIT, placed, self._clock())
+        if not sent.accepted or sent.ref is None:  # no answer: never sent again, looked up (#460)
+            await self._lose(trade, _unknown(sent))
+            return
+        self.store.accept_order(order, sent.ref.branch, sent.ref.number)
+        self._lost = None
         self._open = replace(trade, take_profit_order=order)
         day = kst_day(self._clock())
         self._resting = Resting(
@@ -1114,12 +1221,16 @@ class MockTrader(PaperTrader):
             if left <= 0 or bid is None:
                 break
 
-            def accepted(sent: Sent, trade: OpenTrade = trade, bid: int = bid, left: int = left) -> None:
+            # Kept before it is sent (#460): a sell whose answer is lost, or a stop before it comes,
+            # leaves its row to be looked up on KIS, never sent again.
+            order = self._send(trade, reason, bid, left)
+
+            def accepted(sent: Sent, order: int = order, bid: int = bid, left: int = left) -> None:
                 # Write-ahead: the sell kept open the moment KIS takes it, before its fills are read,
                 # so that a stop meanwhile leaves it to be taken off and reconciled.
                 assert sent.ref is not None
-                placed = Placed(bid, left, sent.ref.branch, sent.ref.number)
-                order = self.store.add_order(trade.id, SELL, reason, placed, self._clock(), OPEN)
+                self.store.accept_order(order, sent.ref.branch, sent.ref.number)
+                self._lost = None
                 day = kst_day(self._clock())  # the day its row is on: a sale may come after the entry's
                 self._live = Resting(order, bid, left, sent.ref.branch, sent.ref.number, 0, 0.0, reason, day)
 
@@ -1134,7 +1245,8 @@ class MockTrader(PaperTrader):
                     poll=self._timing.poll,
                     on_accepted=accepted,
                 )
-            except BrokerError as e:
+            except BrokerError as e:  # no token: nothing was sent
+                self._unsent(order)
                 self._sale_failed(trade, "sell", ERROR, str(e))
                 return
             sent, at = taken.sent, self._clock()
@@ -1157,10 +1269,16 @@ class MockTrader(PaperTrader):
                     trade.id,
                 )
             if sent.outcome == REFUSED:
+                self._unsent(order)
                 self._sale_failed(trade, "sell", REFUSED, sent.reason, sent.code)
                 return
-            if taken.left is None or sent.ref is None:
-                self._sale_failed(trade, "sell", UNKNOWN, _unknown(sent))
+            if sent.ref is None:  # no answer: never sent again, looked up on KIS (#460)
+                await self._lose(trade, _unknown(sent))
+                return
+            if taken.left is None:  # taken, but never seen on the inquiry: followed (``_live``)
+                self._sale_failed(
+                    trade, "sell", UNKNOWN, "주문이 받아들여졌으나 주문 체결 조회에 보이지 않는다"
+                )
                 return
             if taken.left > 0:  # its cancel did not take
                 self._cancel_failed(taken.cancel, trade.id)
@@ -1246,6 +1364,126 @@ class MockTrader(PaperTrader):
         self._failed(what, outcome, detail, code, trade.id)
         self._retry_at = self._clock() + timedelta(seconds=self._timing.retry)
 
+    # A sell whose answer was lost (#460).
+
+    def _send(self, trade: OpenTrade, purpose: str, price: int, quantity: int) -> int:
+        """A sell of ``trade`` kept before it is sent (``sent``): its row; and the sell whose answer is
+        not had (``_lost``) until KIS's answer says what became of it, so that nothing breaking off
+        meanwhile sends another."""
+        at = self._clock()
+        placed = Placed(price, quantity, at=at)
+        order = self.store.add_order(trade.id, SELL, purpose, placed, at, SENT)
+        self._lost = _Lost(order, purpose, placed)
+        return order
+
+    def _unsent(self, order: int) -> None:
+        """The sell kept as ``order`` was refused, or could not be sent: no order KIS has."""
+        self.store.drop_order(order)
+        self._lost = None
+
+    async def _lose(self, trade: OpenTrade, detail: str) -> None:
+        """The sell just sent had no answer (module doc): left as sent, never sent again; a failed
+        order (no new entry today), told, and looked up on KIS for ``Timing.wait`` seconds."""
+        lost = self._lost
+        assert lost is not None
+        what = TAKE_PROFIT if lost.purpose == TAKE_PROFIT else "sell"
+        self._failed(what, UNKNOWN, detail, trade=trade.id, told=True)
+        log.warning(
+            "trader: the %s sell of trade %s had no answer: it is not sent again, nor any sell of the"
+            " trade, until KIS's inquiry shows what became of it",
+            lost.purpose,
+            trade.id,
+        )
+        said = "익절 매도" if lost.purpose == TAKE_PROFIT else "매도"
+        self._notify(
+            f"자동 매매({self.mode}): {said} 주문({lost.placed.quantity}주)에 응답이 없어 KIS에 들어갔는지"
+            f" 모릅니다({detail}). 다시 보내지 않고, KIS 주문 체결 조회에서 그 주문을 찾을 때까지 이 매매의"
+            f" 주식은 팔지 않습니다(손절가·시간이 와도). {self._timing.retry:g}초마다 다시 찾고, 오늘은"
+            " 새로 사지 않습니다. KIS 계좌에서 확인하세요."
+        )
+        await self._find_lost(self._timing.wait)
+
+    async def _find_lost(self, wait: float = 0.0) -> None:
+        """The sell whose answer was lost looked up on its day's order inquiry for ``wait`` seconds
+        (right after it was lost) or once: settled once one KIS order alone can be it (``_settle_lost``),
+        else looked up again ``Timing.retry`` seconds later. It is never sent again."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + wait
+        while True:
+            lost = self._lost
+            assert lost is not None
+            try:
+                rows = await self._broker.orders(lost.day)
+            except BrokerError as e:
+                if not lost.unread:
+                    log.warning(
+                        "trader: could not look up the sell whose answer was lost (%s); again every %gs",
+                        e,
+                        self._timing.retry,
+                    )
+                    self._lost = replace(lost, unread=True)
+            else:
+                if self._settle_lost(rows, kst_day(self._clock())):
+                    return
+            if loop.time() >= deadline:
+                break
+            await asyncio.sleep(self._timing.poll)
+        self._retry_at = self._clock() + timedelta(seconds=self._timing.retry)
+
+    def _settle_lost(self, rows: Sequence[OrderRow], today: date) -> bool:
+        """The sell whose answer was lost against its day's inquiry ``rows`` (module doc): the trade's
+        once exactly one KIS order can be it and nothing is left of it (or its day is over). Whether
+        it was settled."""
+        lost, trade = self._lost, self._open
+        assert lost is not None and trade is not None
+        known = self.store.broker_numbers(self.mode)
+        found = candidates(rows, lost.placed, lost.day, known, self._probe(lost.day), SIDE_SELL)
+        row = found[0] if len(found) == 1 else None
+        if row is not None and (lost.day < today or row.left == 0):
+            self._adopt_sell(trade, lost, row)
+            return True
+        if len(found) != lost.found or lost.unread:  # said when it changes, not at every look
+            log.warning(
+                "trader: the %s sell of trade %s whose answer was lost is not settled: %s KIS order(s) can"
+                " be it%s; looked up again in %gs, never sent again",
+                lost.purpose,
+                trade.id,
+                len(found),
+                ", with shares left on KIS (not cancelled: its branch is not measured)" if row else "",
+                self._timing.retry,
+            )
+            self._lost = replace(lost, found=len(found), unread=False)
+        return False
+
+    def _adopt_sell(self, trade: OpenTrade, lost: _Lost, row: OrderRow) -> None:
+        """The sell whose answer was lost is KIS's order ``row``, over: its fills are the trade's, and
+        it is closed. Every share sold, the trade exits; else its sale goes on with what is left."""
+        self.store.accept_order(lost.order, None, row.number)  # found on the inquiry: no branch named
+        placed = lost.placed
+        order = Resting(
+            lost.order, placed.price, placed.quantity, "", row.number, 0, 0.0, lost.purpose, lost.day
+        )
+        self._lost = None
+        kept = self._keep(order, row)
+        self._close_sell(kept)
+        self._dirty = True
+        log.warning(
+            "trader: the %s sell of trade %s whose answer was lost was found on KIS, over: %s of %s filled",
+            lost.purpose,
+            trade.id,
+            row.filled,
+            placed.quantity,
+        )
+        said = "익절 매도" if lost.purpose == TAKE_PROFIT else "매도"
+        self._notify(
+            f"자동 매매({self.mode}): 응답이 없던 {said} 주문을 KIS 주문 체결 조회에서 찾아 장부에 넣었습니다"
+            f"({placed.quantity}주 가운데 {row.filled}주 체결). 이 매매는 원래 규칙(목표가, 손절가, 시간)대로"
+            " 팝니다."
+        )
+        if self._all_sold(trade):
+            whole = lost.purpose == TAKE_PROFIT and kept.filled >= kept.quantity
+            self._finish(trade, TAKE_PROFIT if whole else self._selling or lost.purpose)
+
     def _finish(self, trade: OpenTrade, reason: str) -> None:
         """Every share of ``trade`` sold: its exit kept from its sells' fills."""
         at = self._clock()
@@ -1258,6 +1496,7 @@ class MockTrader(PaperTrader):
         self._resting = None
         self._live = None
         self._live_buy = None
+        self._lost = None
         self._retry_at = None
         self._stop_following()
         self._dirty = True
@@ -1266,11 +1505,18 @@ class MockTrader(PaperTrader):
             self._enforce(at)
 
     def _failed(
-        self, what: str, outcome: str, detail: str, code: str | None = None, trade: int | None = None
+        self,
+        what: str,
+        outcome: str,
+        detail: str,
+        code: str | None = None,
+        trade: int | None = None,
+        told: bool = False,
     ) -> None:
-        """A KIS order that failed (module doc): kept and told, and no new entry today."""
+        """A KIS order that failed (module doc): kept and told (unless the caller tells it, ``told``),
+        and no new entry today."""
         at = self._clock()
-        self.guard.order_failed(at, what, outcome, detail, code, trade)
+        self.guard.order_failed(at, what, outcome, detail, code, trade, told)
         self._dirty = True
         self._enforce(at)
 

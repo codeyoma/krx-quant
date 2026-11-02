@@ -97,6 +97,7 @@ FAILED_ORDERS = {
     "cancel": "취소",
     "sell": "매도",
     "orderable": "주문 가능 현금 조회",
+    "balance": "잔고 조회",  # #460: a live buy's, before it is sent
 }
 FAILED_OUTCOMES = {"refused": "KIS가 거부", "unknown": "응답 없음(결과 모름)", "error": "보내지 못함"}
 EXITS = {
