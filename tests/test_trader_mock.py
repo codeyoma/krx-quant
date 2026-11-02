@@ -34,6 +34,7 @@ from krx_quant.config import DEFAULT_REST_URL, DEFAULT_WS_URL, Settings, Setting
 from krx_quant.fake_kis import BUY_SIDE, OFF_TICK, SELL_SIDE, FakeAccount, FakeKis, FakeOrder
 from krx_quant.feeds import BOOK
 from krx_quant.kis_orders import Servers, trader_broker
+from krx_quant.market_calendar import MarketCalendar
 from krx_quant.predictions import DB_NAME as ENGINE_DB
 from krx_quant.predictions import PredictionStore
 from krx_quant.trader import MOCK, PAPER, SYMBOL, promotion, report
@@ -166,6 +167,7 @@ class MockDay:
     # that does not wait for it): None waits for the order as ever.
     stop_when: Callable[[], bool] | None = None
     mode: str = MOCK  # the book's: ``live`` on the same fake account (#460), KIS's answers alike
+    calendar: MarketCalendar = CALENDAR  # the trader's market calendar (#466: a holiday in it)
 
     async def run(self, events: Sequence[Event]) -> list[dict[str, Any]]:
         engine = PredictionStore(self.state / ENGINE_DB)
@@ -186,7 +188,7 @@ class MockDay:
                 book = MockTrader(
                     store,
                     self.rules,
-                    CALENDAR.session,
+                    self.calendar.session,
                     self.started_at,
                     broker,
                     lambda: clock[0],
@@ -629,6 +631,82 @@ async def test_a_batch_of_sells_used_up_waits_for_a_later_quote_or_tick(
     restarted = MockDay(tmp_path, fake, account, started_at=at("10:01:30"), timing=replace(TIMING, rounds=2))
     [trade] = await restarted.run([Depth("10:01:30.5", 1), quote("10:01:31", 69_800, 69_900)])
     assert [o[3] for o in orders_of(trade) if o[1] == "stop_loss"] == [14, 13, 12, 11]
+
+
+# A sell goes only while KRX takes orders (#466)
+
+
+def placed_sells(state: Path, purpose: str) -> list[tuple[float, int, str, int, str]]:
+    """(limit, quantity, status, filled, placed_at) of each of the trades' sells of ``purpose``."""
+    return [
+        (o[2], o[3], o[4], o[5], kept["placed_at"])
+        for trade in read_trades(state / DB_NAME, None, 100)
+        for o, kept in zip(orders_of(trade), trade["orders"], strict=True)
+        if o[0] == "sell" and o[1] == purpose
+    ]
+
+
+async def test_a_sale_s_sells_wait_through_the_close_a_holiday_and_the_pre_open_for_the_next_session(
+    kis_mock: tuple[FakeKis, FakeAccount], tmp_path: Path
+) -> None:
+    """KIS's book takes one share at a time: the stop's batch of two sells leaves 12 unsold, the next
+    batch waiting for the clock to move (as above). The clock next moves at the close (15:30:00),
+    and quotes and ticks come after it, on the next day (a holiday in the trader's calendar) and
+    before the opening auction of the day after: KRX takes no order then, so no sell goes, and the
+    wait is no failed order. A tick at 08:30:00 sells nothing either (the latest quote is of the pre-
+    open); the first quote from 08:30, of the opening auction, sells the 12."""
+    fake, account = kis_mock
+    holiday = "2026-10-15"
+    calendar = MarketCalendar({date(2026, 10, 15): False})
+    day = MockDay(tmp_path, fake, account, timing=replace(TIMING, rounds=2), calendar=calendar)
+    events: list[Event] = [
+        TEN,
+        BOUGHT,
+        Depth("10:01:00", 1),
+        quote("10:01:30", 69_800, 69_900),
+        Depth("15:30:00", None),  # the close: its clock moves on, KIS's book takes all again
+        quote("15:40:00", 69_700, 69_800),
+        Tick("23:59:00"),
+        quote(f"{holiday} 10:00:00", 69_700, 69_800),
+        Tick(f"{holiday} 10:00:30"),
+        quote("2026-10-16 08:29:59", 69_700, 69_800),
+        Tick("2026-10-16 08:30:00"),
+        quote("2026-10-16 08:30:00.5", 69_600, 69_700),
+    ]
+
+    [trade] = await day.run(events)
+
+    assert placed_sells(tmp_path, STOP_LOSS) == [
+        (69_800, 14, "cancelled", 1, "2026-10-14T10:01:30+09:00"),
+        (69_800, 13, "cancelled", 1, "2026-10-14T10:01:30+09:00"),
+        (69_600, 12, "filled", 12, "2026-10-16T08:30:00.500000+09:00"),
+    ]
+    assert trade["exit"]["reason"] == STOP_LOSS and account.holdings[SYMBOL] == 0
+    assert day.failures() == [], "the wait for the session is no failed order"
+    assert day.status == RUNNING
+
+
+async def test_a_take_profit_due_after_the_close_is_not_placed_and_the_next_session_sells_by_time(
+    kis_mock: tuple[FakeKis, FakeAccount], tmp_path: Path
+) -> None:
+    """4 of 14 fill at the ask and KIS refuses the cancel of the 10 left (the buy followed). Its next
+    try comes after the close (15:31): the 10 filled meanwhile join the trade, but KRX takes no order
+    then, so its take-profit is not placed. Its time barrier long past, the next session's first
+    quote (08:30:30, the opening auction) sells the 14 by time."""
+    fake, account = kis_mock
+    account.depth = 4
+    cancel_refused_once(fake, account, BUY_SIDE)
+    day = MockDay(tmp_path, fake, account, timing=replace(TIMING, retry=30.0))
+
+    [trade] = await day.run([TEN, BOUGHT, Tick("15:31:00"), quote("2026-10-15 08:30:30", 70_000, 70_100)])
+
+    assert orders_of(trade) == [
+        ("buy", "entry", 70_100, 14, "filled", 14),  # 4, then 10
+        ("sell", "time", 70_000, 14, "filled", 14),
+    ], "no take-profit after the close"
+    assert placed_sells(tmp_path, TIME) == [(70_000, 14, "filled", 14, "2026-10-15T08:30:30+09:00")]
+    assert trade["exit"]["reason"] == TIME and account.holdings[SYMBOL] == 0
+    assert [(f["what"], f["outcome"]) for f in day.failures()] == [("cancel", "refused")]
 
 
 Pick = Callable[[FakeOrder], bool]
