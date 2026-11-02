@@ -63,6 +63,7 @@ from krx_quant.member_frames_probe import probe_member_frames
 from krx_quant.model_shelf import Shelf
 from krx_quant.nav_probe import probe_nav
 from krx_quant.net_buys_probe import probe_net_buys
+from krx_quant.neyman_variants import neyman_variants
 from krx_quant.night_probe import probe_night
 from krx_quant.nightly import from_the_server, run_training
 from krx_quant.nightly_hit_rates import HIT_RATE_NIGHTS, compared_nights
@@ -559,6 +560,20 @@ def _turing_prior(days: int) -> int:
         print(e, file=sys.stderr)
         return 1
     print("\n".join(turing_prior_lines(result, settings.state_dir / TURING_PRIOR_REPORT)))
+    return 0
+
+
+def _neyman_variants() -> int:
+    """Neyman's variants experiment (#455): its next step's lines (the discovery, the window's
+    progress or its verdict); exit 1 without a recorded day in the discovery period, with a report
+    that cannot be read, or a discovery that cannot set N."""
+    settings = Settings.from_env(require_kis=False)
+    try:
+        run = neyman_variants(settings)
+    except (FileNotFoundError, ValueError) as e:
+        print(e, file=sys.stderr)
+        return 1
+    print("\n".join(run.lines))
     return 0
 
 
@@ -1065,6 +1080,11 @@ def main(argv: list[str] | None = None) -> int:
         default=PREVALIDATION_DAYS,
         help=f"recorded trading days to predict (default: {PREVALIDATION_DAYS})",
     )
+    sub.add_parser(
+        "neyman-variants",
+        help="neyman's variants (#455): the discovery that fixes the window's N, then the verdict on the"
+        " window after 2026-11-02 once it is full (reads the training samples, replays nothing)",
+    )
     train_cmd = sub.add_parser(
         "train", help="train every algorithm on KRX_OBJECT_STORE's latest days and store the promotion list"
     )
@@ -1314,6 +1334,8 @@ def _command(args: argparse.Namespace) -> int:
         return _poisson_link(args.days)
     elif args.command == "turing-prior":
         return _turing_prior(args.days)
+    elif args.command == "neyman-variants":
+        return _neyman_variants()
     elif args.command == "train":
         return _train(args.day, args.from_store)
     elif args.command == "simulate":
