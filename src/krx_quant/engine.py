@@ -625,6 +625,12 @@ class PredictionEngine:
         for a in [*running, *daily_admitted]:
             if a.name not in known:
                 self.store.add_status(a.name, self.clock.now(), None, Status.PROBATION, REGISTERED)
+                if self._admits is not None:  # let in by the gate: told once, for Loki (#456)
+                    log.info(
+                        "%s: admitted on probation through the pre-validation gate (code %s)",
+                        a.name,
+                        _code(a),
+                    )
         self.algorithms = tuple(admitted)
         self.kind_algorithms = tuple(kind_admitted)
         self.daily_algorithms = tuple(daily_admitted)
@@ -1729,6 +1735,17 @@ def _with_status(standings: Mapping[str, Standing], status: Status) -> set[str]:
 
 # An algorithm's forecasts by symbol, and why for each symbol it did not predict.
 _Predicted = tuple[dict[str, Forecast], dict[str, Abstention]]
+
+
+def _code(algorithm: Algorithm | KindAlgorithm | DailyAlgorithm) -> str:
+    """The digest of the code its pre-validation judged (``prevalidation.code_digest``), for a log
+    line: never in the way of the admission it tells."""
+    from krx_quant.prevalidation import code_digest  # the pre-validation replays through this module
+
+    try:
+        return code_digest(algorithm)
+    except (OSError, ValueError):
+        return "unknown"
 
 
 def _predict_symbols(

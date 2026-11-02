@@ -38,6 +38,13 @@ server, or an agent reading an issue, looks at first when something seems wrong.
 9. The model files (#361): how many and how large, in ``state/models`` (the models the engine
    runs, and ``versions/``) and in the store's ``models/``, with the algorithm that has the most
    (two each once pruned; the store may keep a third, a night's promoted model not applied yet).
+10. The algorithms (#456), by kind: each one with a status, its status, since when and why (the
+   engine DB's ``statuses``, as ``/v1/algorithms`` gives them) and the model it runs; then those
+   waiting for their pre-validation, those it refused (``prevalidation.refusals``) and those passed
+   but held for their kind's review days. Names, statuses, times, versions and counts only. The
+   engine's own in the collector (``engine_algorithms``); in the command, a process apart, the
+   statuses from the engine DB, the models from ``state/models``, and who waits for or was refused
+   at the gate unknown: only the engine knows.
 
 The command reads the settings leniently (``doctor_settings``): a malformed one, which keeps
 the engine from starting, is a finding at the top, and the rest comes from the data and state
@@ -72,11 +79,14 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from krx_quant import kis, loki
+from krx_quant.algorithms import ALGORITHMS, DAILY_ALGORITHMS, KIND_ALGORITHMS, load_models
 from krx_quant.archive import partition_files
 from krx_quant.config import Settings, SettingsError, read_values
 from krx_quant.disk_watch import LABELS as DISK_LABELS
 from krx_quant.disk_watch import alerted as disk_alerted
 from krx_quant.feeds.base import KST
+from krx_quant.kinds import DIRECTION
+from krx_quant.lifecycle import Status as AlgorithmStatus
 from krx_quant.market_calendar import calendar_store
 from krx_quant.model_shelf import Shelf, size_text
 from krx_quant.object_store import open_store
@@ -88,6 +98,8 @@ from krx_quant.training_nights import FILE as NIGHTS_FILE
 from krx_quant.training_nights import TrainingNights
 
 if TYPE_CHECKING:
+    from krx_quant.algorithms import Algorithm, KindAlgorithm
+    from krx_quant.daily import DailyAlgorithm
     from krx_quant.engine import PredictionEngine
     from krx_quant.stream import LiveStatus
 
@@ -106,8 +118,44 @@ HOURS_PER_ROW = 8
 # deploy/kernel-recovery.sh sets.
 KERNEL = Path("/proc/sys/kernel")
 KERNEL_RECOVERY = {"panic": "10", "panic_on_oops": "1", "softlockup_panic": "1"}
+# Where section 10's algorithms come from (#456): the engine itself, or its DB and model files.
+ENGINE_SOURCE = "엔진 프로세스"
+STORED_SOURCE = "엔진 DB의 statuses와 state/models"
 _MB = 1024 * 1024
 _GB = 1024 * _MB
+
+
+@dataclass(frozen=True)
+class Enrolled:
+    """An algorithm with a status (#456), named as ``/v1/algorithms`` names its fields: its
+    ``kind``, ``status.status`` and ``status.since``, the reason of that change, ``model.version``."""
+
+    name: str
+    kind: str | None  # None: a name not registered now
+    status: str
+    since: str  # as stored (``statuses.at``)
+    reason: str
+    model: str | None  # the version it runs; None: none known
+
+
+@dataclass(frozen=True)
+class Gate:
+    """The registered algorithms not run for want of a pre-validation passed (#456), as the engine
+    has them: ``waiting()``, ``refused()`` (each with its failed checks) and ``held()``."""
+
+    waiting: tuple[str, ...] = ()
+    refused: tuple[tuple[str, str], ...] = ()  # (name, why)
+    held: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class Algorithms:
+    """The algorithms for section 10 (#456): where from, or why they could not be read."""
+
+    source: str
+    enrolled: tuple[Enrolled, ...] = ()
+    gate: Gate | None = None  # None: only the engine knows (the command)
+    error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -117,6 +165,8 @@ class Status:
     body: Mapping[str, Any] | None
     source: str  # which API answered, or "the engine process"
     errors: tuple[str, ...] = ()  # the APIs that did not answer, and why
+    # Its algorithms, read from the engine itself (the collector); None: from the DB and files.
+    algorithms: Algorithms | None = None
 
 
 def api_candidates(settings: Settings) -> list[tuple[str, str]]:
@@ -166,7 +216,61 @@ def engine_status(engine: PredictionEngine, live: LiveStatus | None) -> Status:
     if live is not None:
         body["kis"] = live()
     body["loki"] = loki.status_json()  # this process's: the engine's (#358)
-    return Status(body, "엔진 프로세스")
+    try:
+        algorithms = engine_algorithms(engine)
+    except Exception as e:  # section 10 says why; the rest is still read
+        algorithms = Algorithms(ENGINE_SOURCE, error=f"읽지 못함({_error(e)})")
+    return Status(body, ENGINE_SOURCE, algorithms=algorithms)
+
+
+def engine_algorithms(engine: PredictionEngine) -> Algorithms:
+    """The algorithms as the engine holds them (#456), read on its thread (its DB connection is
+    the loop's): each one with a status, its kind and the model it runs, and its gate."""
+    enrolled = []
+    for name, standing in engine.store.statuses().items():
+        kind, model = engine.kind_of_algorithm(name), engine.models.get(name)
+        enrolled.append(
+            Enrolled(
+                name,
+                None if kind is None else kind.name,
+                standing.status.value,
+                iso(standing.since),
+                standing.reason,
+                None if model is None else model.version,
+            )
+        )
+    gate = Gate(
+        tuple(engine.waiting()),
+        tuple(sorted((name, r.why) for name, r in engine.refused().items())),
+        tuple(engine.held()),
+    )
+    return Algorithms(ENGINE_SOURCE, tuple(enrolled), gate)
+
+
+def stored_algorithms(settings: Settings) -> Algorithms:
+    """The algorithms as a process apart from the engine reads them (#456): the statuses from the
+    engine DB (read only, as ``PredictionStore.statuses``), the kinds from the registries, the
+    models as the engine loads them from ``state/models``; the gate is the engine's to know."""
+    with read_only(settings.state_dir / DB_NAME) as conn:
+        if conn is None:
+            return Algorithms(STORED_SOURCE, error="엔진 DB 없음")
+        rows = conn.execute(
+            "SELECT algorithm, status, at, reason FROM statuses"
+            " WHERE id IN (SELECT MAX(id) FROM statuses GROUP BY algorithm)"
+        ).fetchall()
+    registered: list[Algorithm | KindAlgorithm | DailyAlgorithm] = [
+        *ALGORITHMS,
+        *KIND_ALGORITHMS,
+        *DAILY_ALGORITHMS,
+    ]
+    kinds = {a.name: str(getattr(a, "kind", DIRECTION)) for a in registered}
+    names = {r[0] for r in rows}
+    models = load_models(settings.state_dir, [a for a in registered if a.name in names])
+    enrolled = tuple(
+        Enrolled(name, kinds.get(name), status, at, reason, m.version if (m := models.get(name)) else None)
+        for name, status, at, reason in rows
+    )
+    return Algorithms(STORED_SOURCE, enrolled)
 
 
 class RecentLog(logging.Handler):
@@ -351,6 +455,7 @@ def report(
         ("7. 밤 학습", lambda: _training(settings, now)),
         ("8. Loki 전송", lambda: _loki(settings, status, now)),
         ("9. 모델 파일", lambda: _models(settings)),
+        ("10. 알고리즘", lambda: _algorithms(settings, status.algorithms, now)),
     ]
     sections = [head]
     for title, part in parts:
@@ -745,6 +850,56 @@ def _models(settings: Settings) -> list[str]:
             " 그동안 파일은 그대로 남는다"
         )
     return lines
+
+
+def _algorithms(settings: Settings, found: Algorithms | None, now: datetime) -> list[str]:
+    """The algorithms (#456): by kind, each one with a status (``name status since model.version
+    reason``), then the gate's waiting, refused and held. Names, statuses, times, versions and
+    counts only."""
+    if found is None:
+        found = stored_algorithms(settings)
+    title = f"10. 알고리즘 (#456, {found.source})"
+    if found.error is not None:
+        return [f"{title}: {found.error}"]
+    today = now.astimezone(KST).date()
+    counts = Counter(e.status for e in found.enrolled)
+    shown = " · ".join(f"{s.value} {counts[s.value]}" for s in AlgorithmStatus if counts[s.value])
+    lines = [title, f"  상태가 있는 알고리즘 {len(found.enrolled)}개" + (f": {shown}" if shown else "")]
+    by_kind: dict[str | None, list[Enrolled]] = {}
+    for e in sorted(found.enrolled, key=lambda e: e.name):
+        by_kind.setdefault(e.kind, []).append(e)
+    if by_kind:
+        lines.append("  종류: name status since model.version reason")
+    # The direction first, then the other kinds, then the names not registered now.
+    for kind in sorted(by_kind, key=lambda k: (k is None, k != DIRECTION, k or "")):
+        lines.append(f"  {kind or '등록되지 않은 이름'}:")
+        for e in by_kind[kind]:
+            reason = " ".join(e.reason.split())  # one line
+            lines.append(_cut(f"    {e.name} {e.status} {_clock(e.since, today)} {e.model or '-'} {reason}"))
+    gate = found.gate
+    if gate is None:
+        lines.append(
+            "  사전 검증 대기·거부: 모른다(엔진 프로세스만 안다)."
+            " 이슈에 needs-server-snapshot 라벨을 붙여 받는 요약에 실린다"
+        )
+        return lines
+    lines.append(
+        f"  사전 검증을 기다리는 알고리즘(waiting) {len(gate.waiting)}개"
+        + (f": {', '.join(gate.waiting)}" if gate.waiting else "")
+    )
+    lines.append(
+        f"  사전 검증이 거부한 알고리즘(refused) {len(gate.refused)}개" + (":" if gate.refused else "")
+    )
+    lines += [_cut(f"    {name}: {why}") for name, why in gate.refused]
+    lines.append(
+        "  사전 검증은 통과했고 그 종류의 리뷰 날을 기다리는 알고리즘(held, #310): "
+        + (", ".join(gate.held) or "없음")
+    )
+    return lines
+
+
+def _cut(line: str) -> str:
+    return line if len(line) <= LOG_WIDTH else line[: LOG_WIDTH - 1] + "…"
 
 
 # The files in ``state/models`` that are not a model the engine runs (``model_shelf``).

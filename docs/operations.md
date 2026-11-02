@@ -1887,7 +1887,7 @@ docker compose run --rm --no-deps engine prevalidate <이름>
 - **결과:** #204에 댓글로 남는다. 첫 줄(작업, 밤, 커밋, 종료 코드, 걸린 시간), 손으로 다시 돌리는 명령, 통과·거부 뒤 일어나는 일, 출력(검사 다섯 가지 `days`·`features`·`budget`·`correlation`·`stats`의 결과와 `passed`/`refused`), 리포트 JSON(`state/prevalidations/<이름>.json`)을 `<details>`로, 로그(stderr)도 `<details>`로. 리포트는 그 실행이 쓴 것만 붙인다(쓰지 못했으면 그렇다고 한 줄 적는다). 진단을 내는 알고리즘(#283, 지금은 `neyman`)은 출력에 진단 줄(`neyman diagnostics …`)이, 리포트에 `diagnostics`가 더 있다. 판정에 쓰지 않는 측정이고([engine-api.md](engine-api.md#neyman-266)의 "사전 검증의 진단"), 댓글의 노트가 에이전트에게 그 숫자를 #283에 요약하라고 한다. 그 뒤 #204가 `ready-for-agent`가 된다. 댓글 첫 줄과 텔레그램 줄은 무엇으로 끝났는지를 말한다: `통과`, `거부`, `예외`, `시간 초과`, `신호로 죽음`(아래 "예약 작업 (#215)"의 "텔레그램", #440). 거부도 종료 코드는 오류처럼 1이다. 그 실행이 새로 쓴 완전한 리포트(`passed`가 `false`이고 `prevalidated_at`이 실행이 시작한 뒤인 `state/prevalidations/<이름>.json`)가 있을 때만 거부로 친다. 없으면(녹화일이 없음, 잠금, 판정 전에 난 예외) `예외`다. 명령의 종료 코드는 그대로이고, 상태 파일에서도 거부의 `outcome`은 전처럼 `failed`(판정은 `verdict`에 `refused`)라 다시 도는 규칙은 바뀌지 않았다(위 "다시 돌지 않는 것", "판정 없이 끝난 실행").
 
   > **바뀜** (2026-11-01, #443): 거부도 종료 코드 1이라 텔레그램 줄에 `실패, 종료 코드 1`로 나왔고 댓글 첫 줄에는 종료 코드만 있었다 → 둘 다 `거부`라고 하고, 판정 없이 끝난 실행은 `예외`, `시간 초과`, `신호로 죽음`으로 나눠 말한다. 이유: 2026-10-31 밤 poisson의 거부가 `실패, 종료 코드 1`로 알려져, 메모리 부족으로 죽은 실행(2026-10-27 breiman, 종료 코드 -9)과 같은 말이었다. 알림만으로는 정상적인 판정과 고장을 가를 수 없었다(#440).
-- 통과하면 엔진은 지금처럼 다음 봉 마감부터 수습으로 돌린다(손으로 돌려 통과한 것과 같다). 그 밤 `simulate-bar-close-298`이 그 수습을 최근 녹화일로 시뮬레이션해 바로 판정한다(아래 "수습 시뮬레이션 (#298)". 그 밤 다음 알고리즘의 사전 검증이 때가 됐으면 그 뒤나 다음 밤이다, #376). 거부되면 에이전트가 #204의 댓글로 원인을 보고 고친다. 고친 코드가 배포되면 이 작업이 다시 돌린다. 다섯이 다 통과하면 #204를 닫는다. 그 뒤 새 알고리즘의 결과도 #204로 가므로, 새 알고리즘의 PR은 결과를 남길 열린 이슈로 `PREVALIDATION_ISSUE`(`src/krx_quant/scheduled.py`)를 바꾼다.
+- 통과하면 엔진은 지금처럼 다음 봉 마감부터 수습으로 돌린다(손으로 돌려 통과한 것과 같다). 들일 때 엔진은 INFO 한 줄을 남긴다: `<이름>: admitted on probation through the pre-validation gate (code <digest>)`(#456. digest는 리포트의 `code`와 같다). 알고리즘에 처음 상태가 생길 때 한 번이고, 봉 마감마다 남지 않는다. 하루 한 번 알고리즘이 수습 중 다시 판정받고 다시 돌 때(#264)와 관문 없이 도는 재생(`replay`, 사전 검증·시뮬레이션의 재생)은 남기지 않는다. Loki에서는 `{service="krx-quant", process="engine"} |= "admitted on probation"`. 지금 상태는 서버 요약 10절(6장 "서버 상태 보기 (#322)")에 있다. 그 밤 `simulate-bar-close-298`이 그 수습을 최근 녹화일로 시뮬레이션해 바로 판정한다(아래 "수습 시뮬레이션 (#298)". 그 밤 다음 알고리즘의 사전 검증이 때가 됐으면 그 뒤나 다음 밤이다, #376). 거부되면 에이전트가 #204의 댓글로 원인을 보고 고친다. 고친 코드가 배포되면 이 작업이 다시 돌린다. 다섯이 다 통과하면 #204를 닫는다. 그 뒤 새 알고리즘의 결과도 #204로 가므로, 새 알고리즘의 PR은 결과를 남길 열린 이슈로 `PREVALIDATION_ISSUE`(`src/krx_quant/scheduled.py`)를 바꾼다.
 - 손으로 돌릴 때는 예약 작업이 도는 밤(22:30–05:30)을 피한다. 같은 알고리즘의 사전 검증은 한 번에 하나만 돈다(아래 잠금). 손으로 돌린 결과도 리포트로 남으므로 예약 작업은 그것을 판정으로 본다.
 
 예(#204, 출력과 리포트는 줄임):
@@ -2296,7 +2296,7 @@ sudo systemctl disable --now krx-quant-update.timer   # 자동 업데이트 끄�
 
 ```bash
 docker compose ps
-docker compose exec engine krx-quant doctor   # 엔진, KIS, PINGPONG, 예약 작업, 디스크·메모리, 밤 학습, Loki 전송 요약(#322)
+docker compose exec engine krx-quant doctor   # 엔진, KIS, PINGPONG, 예약 작업, 디스크·메모리, 밤 학습, Loki 전송, 모델 파일, 알고리즘 요약(#322)
 docker compose logs --tail 200 engine
 ```
 
@@ -2455,13 +2455,15 @@ docker compose run --rm engine doctor
 
 설정이 틀려 엔진이 뜨지 못할 때(`configuration error`)도 `doctor`는 돈다. 다른 명령과 달리 설정 오류로 끝나지 않고, 머리줄 아래 `설정 오류: <오류>`로 적은 뒤 데이터·상태 폴더(`KRX_DATA_DIR`, `KRX_STATE_DIR`), 엔진 API 주소(`KRX_API_HOST`, `KRX_API_PORT`), `KRX_COMMIT`, 가릴 비밀값만 그대로 읽어 나머지 절을 낸다. 다른 설정은 모르므로 5절의 `KRX_JOBS_AT`은 `?`다. 8절은 이 명령이 읽은 Loki 설정을 그대로 쓴다.
 
-**출력.** 머리줄(시각) 아래 아홉 절이다. 필드 이름은 `/v1/status`의 것 그대로다.
+**출력.** 머리줄(시각) 아래 열 절이다. 필드 이름은 `/v1/status`의 것 그대로다(10절은 `/v1/algorithms`의 것).
 
 > **바뀜** (2026-10-23, #357, #359): 여섯 절 → 여덟 절(7절 밤 학습, 8절 로그 파일). 이유: 적용되지 않은 밤 학습을 보이고(#355), 로그를 상태 폴더에 날마다 남기게 되어(#356) 그 폴더의 상태도 보인다.
 
 > **바뀜** (2026-10-23, #360): 8절 로그 파일(`state/logs`의 종류마다 파일 수, 크기, 날, 합계와 `KRX_LOG_MAX_MB`, 꾸러미) → 8절 Loki 전송. 이유: 사용자가 로그를 Grafana Cloud Loki로만 남기기로 정했다(2026-10-23). 로그 파일이 없어졌고, 그 대신 Loki로 보내는 것이 되는지 보인다(#358).
 
 > **바뀜** (2026-10-23, #362): 여덟 절 → 아홉 절(9절 모델 파일). 이유: 모델 파일을 알고리즘마다 둘만 남기게 되어(#361) 그 수와 크기를 보인다.
+
+> **바뀜** (2026-11-02, #459): 아홉 절 → 열 절(10절 알고리즘). 이유: 알고리즘이 사전 검증을 통과한 뒤 수습에 올랐는지 서버 요약에도 Loki에도 보이지 않았다(2026-11-02 아침 neyman, #456).
 
 1. 엔진: `commit`, `started_at`(그리고 지난 시간), `mode`, `phase`, `now`. 엔진 API는 이 컨테이너의 것(`127.0.0.1:8080`), 그다음 compose의 `engine` 서비스 순서로 묻는다. 둘 다 닿지 않으면 각각의 이유, DB `runs`의 마지막 `start`(시각과 커밋), 이 명령 이미지의 `KRX_COMMIT`을 적는다.
 2. KIS: `kis.connected`, `kis.last_frame_at`, `kis.seconds_since_frame`(#311), 피드·키 수와 60초 넘게 조용하거나 아직 안 온 키 수, 열린 `gap` 수, 필드가 모자라 raw에만 남긴 오늘의 프레임 수(`kis.feeds[].short_frames`의 합과 그 피드·키마다의 수, 없으면 `없음`, 그 필드가 없는 #419 전 엔진이면 `모른다`, #381), REST 조회(`kis.polls`, #441): 오늘 부른 키 수와 시도·실패·장애 수, 지금 장애 중인 키 수(아직 부른 키가 없으면 `아직 없음`, 그 필드가 없는 #441 전 엔진이면 `모른다`), 끝점·오류 코드별 실패 수(`HHPTJ04160200 OPSQ1002 20`), 오늘 실패했거나 지금 실패 중인 키마다 `feed key attempts failures outages max_consecutive_failures consecutive_failures outage_since last_success_at last_recovery_seconds` 한 줄, 그리고 피드·키마다 `feed key last_received_at seconds_since gap` 한 줄(오늘이면 시각만, 아니면 날짜도).
@@ -2483,6 +2485,7 @@ docker compose run --rm engine doctor
 8. Loki 전송(#358): 엔진의 `/v1/status` `loki`다. 켜짐이면 보낸 줄(Loki가 받은 줄), 버린 줄, 버퍼에 기다리는 줄, 마지막 성공 시각과 지난 시간, 마지막 오류의 종류(`HTTP 503`, `URLError(ConnectionRefusedError)`. 오류의 글은 싣지 않는다)와 그 시각이다. 꺼짐이면 그 이유(`KRX_LOKI_TOKEN is not set: …`)다. 엔진에 닿지 않거나 #358 전의 엔진이면 그렇다고 적고, 이 명령이 읽은 세 설정으로 켜질지를 적는다(6장 "Grafana Cloud Loki로 보내는 로그 (#358)").
 
 9. 모델 파일(#361): `state/models`의 지금 모델(`<알고리즘>.json`. `history.json`과 `applied.json`은 빼고)과 `versions/`의 파일 수와 크기, 학습 저장소 `models/`의 파일 수와 크기, 그리고 각각 알고리즘 수와 파일이 가장 많은 알고리즘이다: `state/models: 지금 모델 21개 12.3 MB · versions/ 40개 24.0 MB (알고리즘 21개, 가장 많은 turing 2개)`, `학습 저장소 models/: 43개 26.1 MB (알고리즘 21개, 가장 많은 turing 3개)`. 정리된 뒤에는 `versions/`가 알고리즘마다 2개까지다. 저장소는 아직 적용되지 않은 밤의 승격 모델이나 학습 중인 밤의 모델이 있으면 그보다 많다. 저장소가 없으면 `학습 저장소: 없음(KRX_OBJECT_STORE)`, 읽지 못하면 오류의 종류만 적는다. 저장소가 모델 지우기를 거부한 적이 있고 아직 다시 되지 않았으면(`state/models/store_refused.json`) `학습 저장소가 모델 지우기를 거부함(마지막으로 <날짜> 밤, AccessDenied 등): …`과 할 일(2.1의 IAM 정책)을 한 줄 더 적는다. 저장소의 위치(버킷)는 적지 않는다.
+10. 알고리즘(#456): 종류마다(`direction` 먼저, 그다음 다른 종류, 끝에 지금 등록되지 않은 이름) 상태가 있는 알고리즘을 한 줄씩 `name status since model.version reason`으로 적는다: 지금 상태(`probation` 수습, `active` 정식, `bench` 벤치, `retired` 은퇴, `clone` 복제), 그 상태가 된 시각(오늘이면 시각만), 지금 도는 모델 버전, 그 상태가 된 사유다. 상태와 시각, 사유는 엔진 DB `statuses`의 알고리즘마다 마지막 줄로, `/v1/algorithms`의 `status.status`, `status.since`, `status.history[]`의 마지막 `reason`과 같다. 맨 위에 상태별 수를 적는다(`상태가 있는 알고리즘 <N>개: probation <n> · active <n> · …`, 없는 상태는 빼고). 그 아래 세 줄이 관문이다: 사전 검증을 기다리는 알고리즘(`waiting`, 엔진의 `waiting()`, 15:40 `사전 검증 대기` 알림의 목록), 사전 검증이 지금 코드·정답 버전을 거부한 알고리즘과 통과하지 못한 검사(`refused`, `prevalidation.refusals`), 통과했지만 그 종류의 리뷰 날이 아직 정해지지 않아 기다리는 하루 한 번 알고리즘(`held`, #310). 이름, 상태, 시각, 버전, 개수, 사유만 싣는다. 사유와 거부한 검사에는 lift 같은 통계가 있을 수 있고, 시세 값은 없다. 한 줄은 300자에서 자른다. 서버 요약(라벨)은 엔진을 바로 읽는다(`엔진 프로세스`). `doctor` 명령은 엔진과 다른 프로세스라 상태는 엔진 DB에서, 모델은 `state/models`(엔진이 시작할 때 읽는 파일, 없으면 기본값)에서 읽고(`엔진 DB의 statuses와 state/models`), 관문은 `사전 검증 대기·거부: 모른다(엔진 프로세스만 안다)`고 적는다. 엔진 DB가 없으면 `엔진 DB 없음`이다. 엔진이 관문으로 새 알고리즘을 들일 때 남기는 로그 줄은 3장 "새 알고리즘 사전 검증 (#24)"에 있다.
 
 한 절을 읽다 실패하면 그 절에 이유를 적고 나머지 절은 그대로 낸다.
 
