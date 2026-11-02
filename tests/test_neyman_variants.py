@@ -144,20 +144,31 @@ def test_b_swaps_back_only_a_flip_and_takes_the_expected_ticks_again() -> None:
     assert swapped(to_flat, kept, params(0.6)) is kept
     flat = [0.2, 0.5, 0.3]
     assert swapped(flat, _second_opinion(flat, features(), p), p) == _second_opinion(flat, features(), p)
-    # In the arms: B differs from A exactly where A's call is the opposite of the first model's.
-    days = split_days(made_up(3000))
+    # In the arms: B differs from A exactly where A's call is the opposite of the first model's. Days
+    # that never stay flat, and a second model that doubts every call (right 5% of the time): the
+    # opposite side takes most of what the call gives up.
+    days = split_days([replace(x, outcome=UP if (x.change_ticks or 0) > 0 else DOWN) for x in made_up(3000)])
     *before, last = sorted(days)
     fit = fit_arms([s for d in before for s in days[d]])
     assert fit is not None
+    doubting = (
+        fit.params[A] | {"meta.intercept": math.log(0.05 / 0.95)} | {f"meta.coef.{n}": 0.0 for n in INPUTS}
+    )
+    fit = replace(fit, params=fit.params | {A: doubting})
     made = forecasts(fit, days[last])
     assert made.first is not None
+    flips = 0
     for first, a_f, b_f in zip(made.first, made.by_arm[A], made.by_arm[B], strict=True):
         p_down, p_flat, p_up = first / first.sum()
         call = most_likely(p_up, p_flat, p_down)
         final = most_likely(a_f.p_up, a_f.p_flat, a_f.p_down)
         flip = call is not FLAT and final not in (FLAT, call)
+        flips += flip
         assert (b_f != a_f) is flip
         assert b_f.p_flat == a_f.p_flat
+        if flip:
+            assert most_likely(b_f.p_up, b_f.p_flat, b_f.p_down) is call
+    assert flips > 0
 
 
 def test_c_drops_the_two_slot_returns_from_the_fold_models_and_the_final_one() -> None:
@@ -389,7 +400,7 @@ def test_the_discovery_fixes_n_and_the_evaluation_judges_the_window_once(
     assert "discovery on neyman's pre-validation days 2026-09-14..2026-09-16: 3 recorded days" in text
     assert "N = 2, the largest" in text and "never computed again" in text
     assert not re.search(r"\b8[01][0-9],?[0-9]{3}\b", text), "no price"
-    assert progress(s, morning_after(days[3])) == Progress(2, False, 1), "one day after the start"
+    assert progress(s, morning_after(days[3])) == Progress(True, 2, False, 1), "one day after the start"
 
     # The next nights: N stands; nothing computed until two days can be in the window.
     waiting = neyman_variants(s, now=morning_after(days[3]), least=30, delta=0.003)
@@ -402,7 +413,7 @@ def test_the_discovery_fixes_n_and_the_evaluation_judges_the_window_once(
     short = neyman_variants(s, now=morning_after(days[4]))
     assert short.stage == module.NOT_FULL and short.evaluation is not None
     assert (short.evaluation.window, short.evaluation.short) == ([days[4]], [days[3]])
-    assert progress(s, morning_after(days[4])) == Progress(2, False, 1), "the short day is counted out"
+    assert progress(s, morning_after(days[4])) == Progress(True, 2, False, 1), "the short day is counted out"
     assert "has 1 of its 2 days" in short.lines[0] and "Not judged" in short.lines[0]
 
     # A day more: the window is full, judged once.
@@ -414,7 +425,7 @@ def test_the_discovery_fixes_n_and_the_evaluation_judges_the_window_once(
     assert {a.n for a in e.arms.values()} == {sum(f.scored for f in e.folds)}
     saved = json.loads(report.read_text())
     assert saved["evaluation"]["judged"] is True and set(saved["evaluation"]["verdict"]) == {B, C, D}
-    assert progress(s, AFTER) == Progress(2, True, 2)
+    assert progress(s, AFTER) == Progress(True, 2, True, 2)
     text = "\n".join(judged.lines)
     assert "verdict on the window 2026-09-18..2026-09-21, its 2 days" in text
     assert len(re.findall(r"^  [BCD] .* - A: .* -> (a candidate|not a candidate)$", text, re.M)) == 3
@@ -450,6 +461,8 @@ def test_the_command_says_what_it_cannot_do(
     assert main(["neyman-variants"]) == 1
     assert "never computed again" in capsys.readouterr().err
     assert report.read_text() == "{cut short"
+    # The night's condition reads no discovery from it: the job runs, and its command says why not.
+    assert progress(Settings.from_env(require_kis=False), AFTER) == Progress(read=True)
 
 
 def test_the_job_discovers_once_then_judges_the_window_once_it_can_be_full() -> None:
@@ -472,16 +485,17 @@ def test_the_job_discovers_once_then_judges_the_window_once_it_can_be_full() -> 
     def night(found: Progress, record: JobRecord | None = None, commit: str = "abc") -> Night:
         return Night(sunday + timedelta(days=1), False, commit, record, {}, Facts(neyman_variants=found))
 
-    assert job.due(night(Progress())), "the discovery, trading or not"
-    assert not job.due(night(Progress(), failed)), "a failure is not run again on the same code"
-    assert job.due(night(Progress(), failed, "def")), "but again once a deploy brings other code"
-    assert not job.due(night(Progress(30, False, 0), ran)), "discovered: the window waits"
-    assert not job.due(night(Progress(30, False, 29), ran))
-    assert job.due(night(Progress(30, False, 30), ran)), "the window can be full"
-    assert not job.due(night(Progress(30, False, 30), failed)) and job.due(
-        night(Progress(30, False, 30), failed, "def")
-    )
-    assert not job.due(night(Progress(30, True, 45), ran)), "judged once"
+    new = Progress(read=True)
+    assert job.due(night(new)), "the discovery, trading or not"
+    assert not job.due(night(Progress())), "not on a night its progress was not read"
+    assert not job.due(night(new, failed)), "a failure is not run again on the same code"
+    assert job.due(night(new, failed, "def")), "but again once a deploy brings other code"
+    assert not job.due(night(Progress(True, 30, False, 0), ran)), "discovered: the window waits"
+    assert not job.due(night(Progress(True, 30, False, 29), ran))
+    assert job.due(night(Progress(True, 30, False, 30), ran)), "the window can be full"
+    assert not job.due(night(Progress(True, 30, False, 30), failed))
+    assert job.due(night(Progress(True, 30, False, 30), failed, "def"))
+    assert not job.due(night(Progress(True, 30, True, 45), ran)), "judged once"
 
 
 def test_what_is_collected_names_each_day_s_window() -> None:

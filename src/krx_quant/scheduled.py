@@ -2676,11 +2676,14 @@ NEYMAN_VARIANTS_ISSUE = 455
 
 def _neyman_variants_due(night: Night) -> bool:
     """The discovery on the first night; then the evaluation on the first night its window can be full,
-    until it is judged; after a failed run, again on other code."""
+    until it is judged; after a failed run, again on other code. Not on a night its progress was not
+    read."""
     record = night.record
     if record is not None and record.outcome == FAILED and record.commit == night.commit:
         return False
     found = night.facts.neyman_variants
+    if not found.read:
+        return False
     if found.n is None:
         return True
     return not found.judged and found.candidates >= found.n

@@ -1123,6 +1123,7 @@ def _write(path: Path, report: Mapping[str, Any]) -> None:
 class Progress:
     """Where the experiment stands, as the scheduled job's condition reads it (``progress``)."""
 
+    read: bool = False  # read tonight: without (the night's facts not read), the job waits
     n: int | None = None  # the window's days, from the discovery; None before it (or no report)
     judged: bool = False  # the window judged
     candidates: int = 0  # recorded days after the window's start not counted short already
@@ -1135,7 +1136,7 @@ def progress(settings: Settings, now: datetime) -> Progress:
     try:
         saved = read_report(settings.state_dir / REPORT)
         if not saved or not saved.get("discovery"):
-            return Progress()
+            return Progress(read=True)
         discovery, evaluation = saved["discovery"], saved.get("evaluation") or {}
         after = date.fromisoformat(discovery["after"])
         short = set(evaluation.get("short", []))
@@ -1146,10 +1147,10 @@ def progress(settings: Settings, now: datetime) -> Progress:
             and d.isoformat() not in short
             and is_recorded(settings.data_dir, d, settings.symbols)
         ]
-        return Progress(int(discovery["n"]), bool(evaluation.get("judged")), len(days))
+        return Progress(True, int(discovery["n"]), bool(evaluation.get("judged")), len(days))
     except (OSError, ValueError, KeyError, TypeError):
         log.exception("could not read where neyman's variants experiment (#455) stands")
-        return Progress()
+        return Progress(read=True)
 
 
 # The run
