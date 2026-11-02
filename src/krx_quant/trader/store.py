@@ -20,7 +20,8 @@ by the nightly re-fit (#399, from the engine's container).
   cancelled), and the broker's order, its number and branch (#405: KIS's, in mock; none in paper).
   A mock sale may take several sells at the best bid (``mock.py``), each its own order. Since #460
   each mock sell is kept before it is sent (``sent``, no number yet: its answer not had, or lost),
-  so that one whose answer was lost is never sent again but looked up on KIS (``mock.py``);
+  so that one whose answer was lost is never sent again but looked up on KIS (``mock.py``), and
+  kept ``absent`` once KIS shows it did not go in (#464);
 - ``fills``: each order's fills, with the quote a paper fill was made on (none in mock: a mock
   fill is KIS's, at its average price ``avg_prvs``, as the day's order inquiry shows it);
 - ``unfilled_buys`` (#405): each mock buy KIS took of which nothing filled (no trade opened), with
@@ -193,7 +194,8 @@ CREATE TABLE IF NOT EXISTS orders (
     price REAL NOT NULL,               -- the limit
     quantity INTEGER NOT NULL,
     placed_at TEXT NOT NULL,
-    status TEXT NOT NULL,              -- open, filled, cancelled; sent (#460): a sell's answer not had
+    -- open, filled, cancelled; sent (#460): a sell's answer not had; absent (#464): it did not go in
+    status TEXT NOT NULL,
     closed_at TEXT,
     broker_id TEXT                     -- the broker's order number; null in paper, and while sent
 );
@@ -418,7 +420,8 @@ BUY, SELL = "buy", "sell"
 OPEN, FILLED, CANCELLED = "open", "filled", "cancelled"
 # A mock buy's (``unfilled_buys``, #406): sent, its answer not had (lost, or the trader stopped
 # before it came); refused; not sent (no token); looked up and not on KIS. A mock sell's
-# (``orders``, #460) while its answer is not had is ``sent`` too.
+# (``orders``, #460) while its answer is not had is ``sent`` too, and ``absent`` once it was looked
+# up and did not go in (#464, ``mock.py``).
 SENT, BUY_REFUSED, UNSENT, ABSENT = "sent", "refused", "unsent", "absent"
 ENTRY = "entry"
 # What a control asks for (#396), and who asks: the reconcile's pause (#406) is a mock start's; the

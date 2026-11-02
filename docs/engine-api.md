@@ -1352,7 +1352,7 @@ KRX 마감 흐름 화면이 읽는 그날의 마감 리밸런싱 수요다(`clos
 
   > **바뀜** (2026-10-31, #423): `stalls`가 더해졌다. 이유: spec #393 "호가"대로 모의 장부가 호가를 기다린 일을 매매 기록에 남긴다(#407).
 - `buy_fee`, `sell_fee`, `tax`, `cost`, `gross`, `net`: 원. 수수료는 산 금액과 판 금액에 각각 `KRX_FEE_PERCENT`, 매도세는 판 금액에 `pricing.SELL_TAX`. `gross` = (매도가 − 매수가) × 수량, `net` = `gross` − `cost`.
-- `orders`: 그 매매의 주문, 낸 순서대로. 매수(`entry`), 목표가에 걸어 둔 매도(`take_profit`: 익절이면 `filled`, 손절·시간·정지·한도면 `cancelled`), 손절·시간·정지·한도의 매도(`stop_loss`, `time`, `pause`, `daily_limit`, `cumulative_limit`). `broker_id`는 증권사 주문 번호(모의는 `null`, mock은 KIS의 주문 번호, #405). `fills`의 `quote_at`은 모의 체결이 쓴 호가의 받은 시각이다(mock은 `null`: 체결은 KIS 주문 체결 조회의 평균가와 수량이다). mock의 매매는 일부만 체결된 주문(남은 것을 취소해 `cancelled`인데 체결이 있다)과, 한 번의 팔기에 매도 주문 여럿(같은 목적, 매수 1호가로 다시 낸 것)을 가질 수 있다. 그 매매의 `exit.price`는 매도 체결들의 평균이다. `status`는 `open`, `filled`, `cancelled`와, mock·live에서 응답을 받지 못한 매도의 `sent`(#460: `broker_id` `null`, 체결 없음. trader가 KIS 주문 체결 조회에서 그 매도를 찾으면 번호를 받아 다른 주문처럼 된다. 그동안 그 매매는 팔리지 않는다, [design.md](design.md#14-자동-매매-393) 14장 "응답이 사라진 매도 (#460)")다.
+- `orders`: 그 매매의 주문, 낸 순서대로. 매수(`entry`), 목표가에 걸어 둔 매도(`take_profit`: 익절이면 `filled`, 손절·시간·정지·한도면 `cancelled`), 손절·시간·정지·한도의 매도(`stop_loss`, `time`, `pause`, `daily_limit`, `cumulative_limit`). `broker_id`는 증권사 주문 번호(모의는 `null`, mock은 KIS의 주문 번호, #405). `fills`의 `quote_at`은 모의 체결이 쓴 호가의 받은 시각이다(mock은 `null`: 체결은 KIS 주문 체결 조회의 평균가와 수량이다). mock의 매매는 일부만 체결된 주문(남은 것을 취소해 `cancelled`인데 체결이 있다)과, 한 번의 팔기에 매도 주문 여럿(같은 목적, 매수 1호가로 다시 낸 것)을 가질 수 있다. 그 매매의 `exit.price`는 매도 체결들의 평균이다. `status`는 `open`, `filled`, `cancelled`와, mock·live에서 응답을 받지 못한 매도의 `sent`(#460: `broker_id` `null`, 체결 없음. trader가 KIS 주문 체결 조회에서 그 매도를 찾으면 번호를 받아 다른 주문처럼 된다. 그동안 그 매매는 팔리지 않는다, [design.md](design.md#14-자동-매매-393) 14장 "응답이 사라진 매도 (#460)")와, 그 매도가 KIS에 들어가지 않았다고 정한 `absent`(#464: `broker_id` `null`, 체결 없음, `closed_at`은 정한 때. 그 뒤 그 매매는 원래 규칙대로 다시 팔린다)다.
 - 데모 엔진의 매매는 아래 `trader-marks`의 것과 같다. 10-07 밤에 맞춘 정책 1이 첫 챔피언이라, 10-08부터의 매매는 `policy`가 1이고 칸의 값이 있다(지어낸 값: `role` `top`, `p_star` 0.61, `precision_low` 0.66, `kelly` 9.6, `fraction` 1.0, `threshold` 0.6). 10-07의 매매는 첫 챔피언 전이고 칸 고르기(#395) 전에 들어간 매매라 넷 다 `null`이다. `policy=2`는 10-08 밤에 맞춘 도전 정책 2가 10-12 아침에 모의로 낸 매매 둘(`threshold` 0.65)이다(#400). 기본 답(챔피언의 매매)에는 없다.
 
   > **바뀜** (2026-10-30, #415): 데모의 매매는 모두 칸의 값(`role`, `p_star`, `precision_low`, `kelly`, `fraction`)과 정책이 `null`이었고 정책도 없었다 → 정책 1(챔피언)과 2(도전 정책)가 있고, 10-08부터의 매매는 정책 1의 것으로 지어낸 칸의 값이 있으며, 도전 정책의 모의 매매도 있다. 이유: 자동 매매 화면(#397)의 매매 표가 p*와 하한을 보이고, 데모의 `GET /v1/trader`가 챔피언과 관문 진행(#400)을 보이게.
@@ -1360,6 +1360,8 @@ KRX 마감 흐름 화면이 읽는 그날의 마감 리밸런싱 수요다(`clos
 > **바뀜** (2026-10-30, #413): `exit.reason`과 `orders[].purpose`는 `take_profit`, `stop_loss`, `time`(과 `entry`)이었다 → `pause`, `daily_limit`, `cumulative_limit`도 있다. `entry.quantity`는 주문 가능 현금도 넘지 않는다. 이유: 손실 한도와 화면의 정지가 열린 포지션을 바로 판다(#396).
 
 > **바뀜** (2026-11-02, #463): `orders[].status`는 `open`, `filled`, `cancelled`였다 → 응답을 받지 못한 mock·live 매도의 `sent`도 있다. 이유: 응답이 사라진 매도를 다시 보내지 않고 장부에 남겨 KIS에서 찾는다(#460).
+
+> **바뀜** (2026-11-02, #465): `orders[].status`에 `absent`가 더해졌다(`open`, `filled`, `cancelled`, `sent`였다). 이유: KIS에 닿지 않은 매도는 조회에 끝내 보이지 않아 `sent`로 남은 매매가 팔리지 않았다. 그 행을 지우지 않고 `absent`로 남긴다(#464).
 
 ### `GET /v1/trader` (#396)
 

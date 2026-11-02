@@ -71,14 +71,26 @@ on its day's order inquiry (``reconcile.candidates``: a sell of 005930 at its li
 quantity, placed around when it was sent, whose number the ledger does not keep, not the order
 probe's): for ``Timing.wait`` right after, then every ``Timing.retry`` seconds, and at a start. When
 exactly one KIS order can be it and nothing is left of it (or its day is over), its fills are the
-trade's, and the sale goes on with what is left. None, more than one, an inquiry not read, or one
-with something left: it stays as sent. One with something left is not cancelled: a cancel names
-KIS's branch, which the inquiry shows as ``ord_gno_brno``, not measured yet to be the order answer's
+trade's, and the sale goes on with what is left. More than one, an inquiry not read, or one with
+something left: it stays as sent. One with something left is not cancelled: a cancel names KIS's
+branch, which the inquiry shows as ``ord_gno_brno``, not measured yet to be the order answer's
 ``KRX_FWDG_ORD_ORGNO`` (#403 ⚠), as for a lost buy; it is adopted once it is over on KIS (filled, or
-ended at the close). The stop, the time barrier, a pause that sells and the loss limits then sell
-nothing; their sale begins (kept for once it is settled) and is told on Telegram, to check the KIS
-account. Nothing clears it but KIS's inquiry: ``krx-quant trade resume`` does not (it cannot tell
-whether the sell went in).
+ended at the close). None (#464): it did not go in (``store.ABSENT``, its row kept) once its day is
+over (a day order ends at the close: nothing of it fills after), or on the mock account also during
+its day, once two looks ``ABSENT_APART`` apart found none, the first ``ABSENT_AFTER`` after it was
+sent; and in either case only if a balance read right after holds every share of the trade not
+sold. Else it stays as sent, looked up again (a sell KIS never took shows on no inquiry: without
+this the trade would never be sold). The live account waits for the day: the window of the
+candidates is no bound on how late KIS's inquiry may show an order. It is told on Telegram (the
+symbol and the shares), and the trade is sold by its rules again (``_go_on``: past its time barrier
+sold, else its take-profit placed again). A sale goes on at the first quote received after a lost
+sell is settled, found or not gone in (``_settled_at``), while KRX takes orders (``ORDERABLE``, a
+trading day from its opening auction to its close): on the live account, the next session's; a REST
+quote of a stall lasting through the night, stamped with the clock, does not count.
+The stop, the time barrier, a pause that sells and the loss limits sell nothing while it is not
+settled; their sale begins (kept for once it is settled) and is told on Telegram, to check the KIS
+account. Nothing clears it but KIS's inquiry and balance: ``krx-quant trade resume`` does not (it
+cannot tell whether the sell went in).
 
 **The live account's own 005930** (#460): before each live buy, the account's balance is read; while
 it holds 005930 (nothing of the ledger's is open then: one position at a time), the buy is not sent
@@ -124,7 +136,8 @@ period read them (``live.py``): a day not compared is no pass.
 **The quotes stalled** (#407, ``stall.py``): nothing new is bought, as in paper. While a position is
 open, KIS's best quotes (``Broker.best``: KRX's best bid and ask, the market the trader orders on)
 are read on the trader's key, one read at a time, at the stall and then on the clock's ticks
-``Timing.rest`` seconds after the last read began; each is taken as a quote, stamped with the clock
+``Timing.rest`` seconds after the last read began (#464: five on the mock server, two on the live
+one, ``REST_SECONDS``, ``LIVE_REST_SECONDS``); each is taken as a quote, stamped with the clock
 at its answer. The take-profit rests on KIS as ever, and the stop, the time barrier, a pause that
 sells and the loss limits are checked on them, the sale's sells placed at their best bid. A sale
 begun on them keeps that on its trade (``trade_stalls.effect`` ``rest``). A read that fails is said
@@ -159,7 +172,7 @@ from krx_quant.kis_orders import (
     Unexpected,
     same_number,
 )
-from krx_quant.market_calendar import Session
+from krx_quant.market_calendar import Phase, Session
 from krx_quant.pricing import SELL_TAX, tick_size
 from krx_quant.trader import LIVE, MOCK, SYMBOL
 from krx_quant.trader.cells import Signal
@@ -171,7 +184,7 @@ from krx_quant.trader.mock_check import SAME as CHECK_SAME
 from krx_quant.trader.mock_check import Check, failures, ledger_orders, probe_window
 from krx_quant.trader.paper import NO_SHARES, TAKE_PROFIT, TIME, PaperTrader, Rules, _Waiting
 from krx_quant.trader.quotes import BestQuote
-from krx_quant.trader.reconcile import Finding, Outside, Window, candidates, compare
+from krx_quant.trader.reconcile import LOST_AFTER, Finding, Outside, Window, candidates, compare
 from krx_quant.trader.store import (
     ABSENT,
     BUY_REFUSED,
@@ -212,15 +225,19 @@ UNKNOWN, ERROR = "unknown", "error"
 # A trader stopping waits this long for the order in flight (compose gives it 10 s).
 CLOSE_SECONDS = 8.0
 # While the collector's quotes stall (#407), KIS's best quotes are read this often, with a position
-# open. Every call on the trader's key goes through one limiter, two in any 1.1 s
-# (``kis_orders.PER_SECOND``: of five sent at once the mock server answered three, and none of
-# thirty sent a second apart was refused, #403). Two seconds apart, at most one read falls in any
-# 1.1 s window, so the other slot is always an order call's. Beside the take-profit's row read every
-# two seconds (``Timing.follow``) that is one call a second; during a sale (the take-profit's reading
-# stopped), its inquiry every second (``kis_orders.POLL``) and the reads make 1.5 a second, under the
-# limiter's 1.8. A read every second would make a sale's 2 a second, over it: the order calls would
-# wait their turn.
-REST_SECONDS = 2.0
+# open: every five seconds on the mock server, every two on the live one (``LIVE_REST_SECONDS``).
+# Every call on the trader's key goes through one limiter over a 1.1 s window: one call in it on the
+# mock server (``kis_orders.PER_SECOND``, #461: two in a window were refused), two on the live one
+# (``kis_orders.LIVE_PER_SECOND``). On the mock server, beside the take-profit's row read every two
+# seconds (``Timing.follow``), reads every five seconds ask for 0.7 calls a second, under the
+# limiter's 0.9, so an order call finds its slot (#464); every two seconds they asked for one a
+# second, over it, and the order calls queued. During a sale (the take-profit's reading stopped) its
+# inquiry every second (``kis_orders.POLL``) alone asks for one a second there: the calls take their
+# turn. On the live server, two seconds apart, at most one read falls in any window, so the other
+# slot is always an order call's; beside the take-profit's row that is one call a second, and during
+# a sale the inquiry and the reads make 1.5 a second, under the limiter's 1.8.
+REST_SECONDS = 5.0
+LIVE_REST_SECONDS = 2.0
 # A day's orders are compared with KIS's this long after its closing auction ends (#408), and a
 # start compares the days of this far back it has not (KIS's day inquiry reaches three months).
 CHECK_AFTER = timedelta(minutes=1)
@@ -230,6 +247,17 @@ CHECK_REACH = timedelta(days=80)
 CHECK_IDLE = timedelta(minutes=10)
 # The verdict a day's comparison keeps (``mock_check.Check.code``).
 VERDICTS = {CHECK_SAME: SAME, CHECK_DIFFERENT: DIFFERENT, CHECK_NO_ORDERS: NO_ORDERS}
+# A sell whose answer was lost that its day's inquiry shows no KIS order of did not go in (#464,
+# ``store.ABSENT``): once its day is over (a day order ends at the close, nothing of it fills after);
+# on the mock account also during its day, once two looks this far apart found none, the first at
+# least ``ABSENT_AFTER`` after it was sent (the candidates' window, ``reconcile.LOST_AFTER``).
+ABSENT_AFTER = LOST_AFTER
+ABSENT_APART = timedelta(seconds=30)
+# How such a sell was settled (``MockTrader._settle_lost``): found on KIS, or ``store.ABSENT``.
+_FOUND = "found"
+# When KRX takes an order: from the opening auction (08:30) to the close. A sale that waited for a
+# lost sell to be settled goes on at a quote of these alone (#464).
+ORDERABLE = frozenset({Phase.OPENING_AUCTION, Phase.CONTINUOUS, Phase.CLOSING_AUCTION})
 
 
 @dataclass(frozen=True)
@@ -241,7 +269,9 @@ class Timing:
     follow: float = 2.0  # the take-profit sell's row read this often while it rests
     retry: float = 30.0  # a sale whose order failed is tried again this long after
     rounds: int = 5  # sells at the best bid in one go; then the next go no sooner than ``wait`` later
-    rest: float = REST_SECONDS  # KIS's best quotes read this often while the quotes stall (#407)
+    # KIS's best quotes read this often while the quotes stall (#407); None: the server's, every
+    # ``REST_SECONDS`` on the mock one, ``LIVE_REST_SECONDS`` on the live one (#464).
+    rest: float | None = None
     check: float = 600.0  # a day's comparison whose inquiry could not be read is tried again (#408)
 
 
@@ -265,14 +295,18 @@ class _LiveBuy:
 class _Lost:
     """A sell of the open trade sent whose answer was not had (#460): kept ``sent`` in the ledger
     (``order``, no KIS number), never sent again, looked up on its day's inquiry until one KIS order
-    alone can be it. ``found`` is how many could be it at the last look, ``unread`` whether the last
-    look could not read KIS: each said when it changes, not at every look."""
+    alone can be it, or none is and it did not go in (#464). ``found`` is how many could be it at the
+    last look, ``unread`` whether the last look could not read KIS, ``short`` whether the last
+    balance held fewer shares than the trade has not sold: each said when it changes, not at every
+    look. ``empty`` is when the first look of the mock's run of looks that found none was (#464)."""
 
     order: int
     purpose: str  # take_profit, or a sale's (stop_loss, time, ...)
     placed: Placed  # its limit and quantity, and when it was sent
     found: int = -1
     unread: bool = False
+    short: bool = False
+    empty: datetime | None = None
 
     @property
     def day(self) -> date:
@@ -322,6 +356,9 @@ class MockTrader(PaperTrader):
         self._broker = broker
         self._clock = clock
         self._timing = timing or Timing()
+        # The REST quotes' pace in a stall (#407): the server's unless the timing names one (#464).
+        rest = self._timing.rest
+        self._rest = rest if rest is not None else LIVE_REST_SECONDS if mode == LIVE else REST_SECONDS
         self._work: asyncio.Task[None] | None = None  # the order in flight: a buy, or a sale
         self._follower: asyncio.Task[None] | None = None  # the take-profit sell's row, read as it rests
         self._selling: str | None = None  # the reason the open trade's sale began with
@@ -330,6 +367,8 @@ class MockTrader(PaperTrader):
         self._live: Resting | None = None  # a sale's sell whose cancel did not take: open on KIS still
         self._live_buy: _LiveBuy | None = None  # a buy whose cancel did not take: open on KIS still
         self._lost: _Lost | None = None  # a sell sent whose answer was not had (#460): never sent again
+        # When such a sell was settled (#464): the sale goes on at the first quote received after it.
+        self._settled_at: datetime | None = None
         self._outside_told = False  # a live buy not sent for the account's own 005930, told (#460)
         self._reading: asyncio.Task[None] | None = None  # KIS's best quotes read in a stall (#407)
         self._checking: asyncio.Task[None] | None = None  # a day's orders compared with KIS's (#408)
@@ -396,7 +435,7 @@ class MockTrader(PaperTrader):
         if self._open is not None:
             log.info(
                 "trader: reading KIS's best quotes over REST every %gs while the quotes stall (trade %s)",
-                self._timing.rest,
+                self._rest,
                 self._open.id,
             )
         self._read_rest(at)
@@ -496,6 +535,10 @@ class MockTrader(PaperTrader):
                 return  # it sells on the first quote received after the status began, as in paper
             self._begin_sale(trade, SALE[status])
         if self._selling is not None:
+            if self._settled_at is not None:  # a lost sell settled (#464): a bid not older than that
+                if not self._quoted_orderable_after(self._settled_at):
+                    return  # the live one's day over, the next session's first quote
+                self._settled_at = None
             if (self._retry_at is None or now >= self._retry_at) and self._bid() is not None:
                 self._retry_at = None
                 self._stop_following()
@@ -536,6 +579,16 @@ class MockTrader(PaperTrader):
         last = self._last
         return last is not None and last.received_at > moment
 
+    def _quoted_orderable_after(self, moment: datetime) -> bool:
+        """Whether the latest quote came after ``moment`` while KRX takes orders: a trading day's
+        session, from its opening auction (08:30) to its close (#464). Not a REST quote of a stall
+        lasting through the night, stamped with the clock when it is read."""
+        last = self._last
+        if last is None or last.received_at <= moment:
+            return False
+        session = self._sessions(kst_day(last.received_at))
+        return session is not None and session.phase(last.received_at) in ORDERABLE
+
     def _stop_following(self) -> None:
         follower = self._follower
         if follower is not None and not follower.done() and follower is not asyncio.current_task():
@@ -575,7 +628,7 @@ class MockTrader(PaperTrader):
             await self._settle_kept(rows, today)
             doubtful = await self._find_sent(rows, today)
             if self._lost is not None:  # a sell whose answer was lost (#460), looked up as ever
-                self._settle_lost(await rows(self._lost.day), today)
+                await self._settle_lost(await rows(self._lost.day), today)
             today_rows = await rows(today)  # before the balance: a fill between is in the bounds
             balance = await self._broker.balance()
         except BrokerError as e:
@@ -621,7 +674,7 @@ class MockTrader(PaperTrader):
         if self._unreadable:
             self._notify(f"자동 매매({self.mode}): KIS 계좌를 읽어 장부와 맞췄습니다.")
         self._reconciled, self._unreadable, self._dirty = True, False, True
-        await self._go_on(at, finding)
+        await self._go_on(at, bool(finding.missing))
 
     async def _settle_kept(self, rows: Callable[[date], Awaitable[list[OrderRow]]], today: date) -> None:
         """The ledger's orders open on KIS when the trader stopped, each read on the day it was
@@ -759,16 +812,18 @@ class MockTrader(PaperTrader):
         self._dirty = True
         self._enforce(at)
 
-    async def _go_on(self, now: datetime, finding: Finding) -> None:
-        """The open trade after the reconcile: past its time barrier, sold at once; with time left
-        and no take-profit resting on KIS, the take-profit placed again for the shares not sold."""
+    async def _go_on(self, now: datetime, missing: bool = False) -> None:
+        """The open trade after the reconcile, or after a sell of it whose answer was lost did not go
+        in (#464): past its time barrier, sold at once; with time left and no take-profit resting on
+        KIS, the take-profit placed again for the shares not sold (not while shares of the ledger
+        are ``missing`` from the account)."""
         trade = self._open
         if trade is None:
             return
         if self._selling is None and now >= trade.time_barrier:
             self._begin_sale(trade, TIME)
             return
-        if self._resting is None and self._live_buy is None and not finding.missing:
+        if self._resting is None and self._live_buy is None and not missing:
             await self._place_take_profit(trade)
 
     def _followed(self) -> list[str]:
@@ -880,7 +935,7 @@ class MockTrader(PaperTrader):
         stall = self._stall
         if stall is None or self._open is None or self._closing or self._reading is not None:
             return
-        if self._rest_at is not None and (now - self._rest_at).total_seconds() < self._timing.rest:
+        if self._rest_at is not None and (now - self._rest_at).total_seconds() < self._rest:
             return
         self._rest_at = now
         self._reading = asyncio.get_running_loop().create_task(self._read_best(stall))
@@ -897,7 +952,7 @@ class MockTrader(PaperTrader):
                     log.warning(
                         "trader: could not read KIS's best quotes over REST (%s); read again every %gs",
                         e,
-                        self._timing.rest,
+                        self._rest,
                     )
                 self._rest_failing = True
                 return
@@ -1405,8 +1460,9 @@ class MockTrader(PaperTrader):
 
     async def _find_lost(self, wait: float = 0.0) -> None:
         """The sell whose answer was lost looked up on its day's order inquiry for ``wait`` seconds
-        (right after it was lost) or once: settled once one KIS order alone can be it (``_settle_lost``),
-        else looked up again ``Timing.retry`` seconds later. It is never sent again."""
+        (right after it was lost) or once: settled once one KIS order alone can be it, or none is and
+        it did not go in (``_settle_lost``), else looked up again ``Timing.retry`` seconds later. It is
+        never sent again. One that did not go in, the trade goes on by its rules (``_go_on``)."""
         loop = asyncio.get_running_loop()
         deadline = loop.time() + wait
         while True:
@@ -1414,7 +1470,10 @@ class MockTrader(PaperTrader):
             assert lost is not None
             try:
                 rows = await self._broker.orders(lost.day)
-            except BrokerError as e:
+                settled = await self._settle_lost(rows, kst_day(self._clock()))
+            except BrokerError as e:  # the inquiry, or the balance that would settle it (#464)
+                lost = self._lost
+                assert lost is not None
                 if not lost.unread:
                     log.warning(
                         "trader: could not look up the sell whose answer was lost (%s); again every %gs",
@@ -1423,17 +1482,20 @@ class MockTrader(PaperTrader):
                     )
                     self._lost = replace(lost, unread=True)
             else:
-                if self._settle_lost(rows, kst_day(self._clock())):
+                if settled == ABSENT:
+                    await self._go_on(self._clock())
+                if settled is not None:
                     return
             if loop.time() >= deadline:
                 break
             await asyncio.sleep(self._timing.poll)
         self._retry_at = self._clock() + timedelta(seconds=self._timing.retry)
 
-    def _settle_lost(self, rows: Sequence[OrderRow], today: date) -> bool:
+    async def _settle_lost(self, rows: Sequence[OrderRow], today: date) -> str | None:
         """The sell whose answer was lost against its day's inquiry ``rows`` (module doc): the trade's
-        once exactly one KIS order can be it and nothing is left of it (or its day is over). Whether
-        it was settled."""
+        once exactly one KIS order can be it and nothing is left of it (or its day is over); not gone
+        in once none can be and the rules of ``_absent`` hold (#464). How it was settled (``_FOUND``,
+        ``ABSENT``), or None."""
         lost, trade = self._lost, self._open
         assert lost is not None and trade is not None
         known = self.store.broker_numbers(self.mode)
@@ -1441,7 +1503,13 @@ class MockTrader(PaperTrader):
         row = found[0] if len(found) == 1 else None
         if row is not None and (lost.day < today or row.left == 0):
             self._adopt_sell(trade, lost, row)
-            return True
+            return _FOUND
+        if found:  # a KIS order can be it: no run of looks that found none
+            self._lost = replace(lost, empty=None)
+        elif await self._absent(trade, today):
+            return ABSENT
+        lost = self._lost
+        assert lost is not None
         if len(found) != lost.found or lost.unread:  # said when it changes, not at every look
             log.warning(
                 "trader: the %s sell of trade %s whose answer was lost is not settled: %s KIS order(s) can"
@@ -1453,17 +1521,79 @@ class MockTrader(PaperTrader):
                 self._timing.retry,
             )
             self._lost = replace(lost, found=len(found), unread=False)
-        return False
+        return None
+
+    async def _absent(self, trade: OpenTrade, today: date) -> bool:
+        """Whether the sell whose answer was lost, of which the inquiry just read shows no KIS order,
+        did not go in (module doc, #464): its day is over (``today`` later), or on the mock account
+        this look comes ``ABSENT_APART`` at least after the first of a run of looks that found none,
+        that first ``ABSENT_AFTER`` at least after it was sent; and the balance, read now, holds every
+        share of the trade not sold. If so, kept ``absent`` (``store.ABSENT``), told, and the trade
+        sold by its rules again."""
+        lost = self._lost
+        assert lost is not None and lost.placed.at is not None
+        now = self._clock()
+        over = lost.day < today
+        if not over:
+            if self.mode != MOCK or now < lost.placed.at + ABSENT_AFTER:
+                return False  # the live account's waits for its day to be over
+            if lost.empty is None:
+                self._lost = replace(lost, empty=now)
+                return False
+            if now - lost.empty < ABSENT_APART:
+                return False
+        held = (await self._broker.balance()).held(SYMBOL)  # after the inquiry: a fill between shows
+        left = trade.quantity - self.store.sold(trade.id)
+        lost = self._lost
+        assert lost is not None
+        if held < left:
+            if not lost.short:  # said when it begins, not at every look
+                log.warning(
+                    "trader: the %s sell of trade %s whose answer was lost is on no KIS order, but the"
+                    " account holds %s of the %s share(s) the trade has not sold: not settled",
+                    lost.purpose,
+                    trade.id,
+                    held,
+                    left,
+                )
+                self._lost = replace(lost, short=True)
+            return False
+        self.store.close_order(lost.order, ABSENT, now)  # kept: the ledger says what became of it
+        self._lost = None
+        self._settled_at = now
+        self._dirty = True
+        log.warning(
+            "trader: the %s sell of trade %s whose answer was lost is not on KIS: it did not go in"
+            " (absent, %s), and the account holds the trade's %s share(s): sold by its rules again",
+            lost.purpose,
+            trade.id,
+            "its day over" if over else "two looks found none",
+            left,
+        )
+        said = "익절 매도" if lost.purpose == TAKE_PROFIT else "매도"
+        why = (
+            "그날이 지난 뒤 읽은 그날의 주문 체결 조회에 없고"
+            if over
+            else "보낸 지 2분이 지난 뒤 30초 이상 사이를 둔 두 번의 주문 체결 조회에 없고"
+        )
+        self._notify(
+            f"자동 매매({self.mode}): 응답이 없던 {said} 주문({SYMBOL} {lost.placed.quantity}주)은 KIS에"
+            f" 들어가지 않은 것으로 정했습니다({why}, 계좌에 이 매매의 {SYMBOL} {left}주가 있습니다)."
+            " 이 매매는 이 뒤에 받은 호가부터 원래 규칙(목표가, 손절가, 시간)대로 다시 팝니다."
+        )
+        return True
 
     def _adopt_sell(self, trade: OpenTrade, lost: _Lost, row: OrderRow) -> None:
         """The sell whose answer was lost is KIS's order ``row``, over: its fills are the trade's, and
-        it is closed. Every share sold, the trade exits; else its sale goes on with what is left."""
+        it is closed. Every share sold, the trade exits; else its sale goes on with what is left, at
+        the first quote received after (#464: of the next session, its day over)."""
         self.store.accept_order(lost.order, None, row.number)  # found on the inquiry: no branch named
         placed = lost.placed
         order = Resting(
             lost.order, placed.price, placed.quantity, "", row.number, 0, 0.0, lost.purpose, lost.day
         )
         self._lost = None
+        self._settled_at = self._clock()
         kept = self._keep(order, row)
         self._close_sell(kept)
         self._dirty = True
@@ -1497,6 +1627,7 @@ class MockTrader(PaperTrader):
         self._live = None
         self._live_buy = None
         self._lost = None
+        self._settled_at = None
         self._retry_at = None
         self._stop_following()
         self._dirty = True
