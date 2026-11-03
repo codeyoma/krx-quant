@@ -716,9 +716,9 @@ async def _doctor(api: str | None) -> int:
     return 0
 
 
-def _signal_review(days: int) -> int:
+def _signal_review(days: int, since: date | None) -> int:
     settings = Settings.from_env(require_kis=False)
-    print(signal_review(settings.state_dir / DB_NAME, settings, datetime.now(KST).date(), days))
+    print(signal_review(settings.state_dir / DB_NAME, settings, datetime.now(KST).date(), days, since))
     return 0
 
 
@@ -1171,6 +1171,13 @@ def main(argv: list[str] | None = None) -> int:
         default=SIGNAL_REVIEW_DAYS,
         help=f"the latest N days with predictions (default {SIGNAL_REVIEW_DAYS}, the leaderboard's 20d)",
     )
+    signal_review_cmd.add_argument(
+        "--from",
+        dest="since",
+        type=date.fromisoformat,
+        help="instead, the first N days with predictions on or after this day, YYYY-MM-DD: a fixed window,"
+        " the same days however late it runs (#206)",
+    )
     error_cmd = sub.add_parser(
         "error-breakdown",
         help="print where an algorithm errs (#431): confusion matrices and lift over the climate baseline"
@@ -1379,7 +1386,7 @@ def _command(args: argparse.Namespace) -> int:
     elif args.command == "doctor":
         return asyncio.run(_doctor(args.api))
     elif args.command == "signal-review":
-        return _signal_review(args.days)
+        return _signal_review(args.days, args.since)
     elif args.command == "error-breakdown":
         return _error_breakdown(args.days, args.algorithm)
     elif args.command == "error-holdout":
