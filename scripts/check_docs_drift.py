@@ -24,6 +24,9 @@ Variables the engine does not read but compose and the deploy scripts do are in 
 table with a `읽는 곳` column: each file a row names there must name the variable. Settings the
 engine reads that the docs leave out by design are in UNDOCUMENTED, with why.
 
+It also fails a table row right after a quote line anywhere in README.md and docs/: Markdown
+reads it as the quote's text, so the table stops showing (found in "설정 값 전체" on 2026-11-04).
+
 Only the section headings, the tables' first columns and the notes are read; the wording around
 them is free, and table rows separated by blank lines or notes still belong to their table. Fenced
 code is skipped. A section, table or list that is not found fails the check rather than passing.
@@ -90,6 +93,10 @@ ANY_NAME = "[a-z0-9][a-z0-9-]*"
 PATH = re.compile(r"[\w.-]+(?:/[\w.-]+)*\.\w+")
 
 GONE_HINT = "remove it, or leave a 삭제됨 or 바뀜 note in its section that names it"
+QUOTED_ROW = (
+    "a table row right after a quote is read as the quote's text: leave a blank line and repeat the"
+    " table's header row above it"
+)
 
 
 @dataclass(frozen=True, order=True)
@@ -349,8 +356,31 @@ def problems(root: Path, jobs: Iterable[str], undocumented: Mapping[str, str] = 
         *_settings(root, undocumented),
         *_commands(root),
         *_jobs(root, list(jobs)),
+        *_quoted_rows(root),
     ]
     return [str(problem) for problem in sorted(found)]
+
+
+def _quoted_rows(root: Path) -> list[Problem]:
+    """Each table row right after a quote line, in README.md and docs/: Markdown reads such a row,
+    and the rows after it up to a blank line, as the quote's text, so the table stops showing there.
+    A 바뀜 note put between a table's rows does this unless a blank line and the header follow it."""
+    found: list[Problem] = []
+    paths = [root / "README.md", *sorted((root / "docs").rglob("*.md"))]
+    for path in paths:
+        if not path.is_file():
+            continue
+        previous: Line | None = None
+        for line in prose(path.read_text(encoding="utf-8")):
+            if (
+                previous is not None
+                and previous.number == line.number - 1
+                and previous.text.lstrip().startswith(">")
+                and line.text.lstrip().startswith("|")
+            ):
+                found.append(Problem(path.relative_to(root).as_posix(), line.number, QUOTED_ROW))
+            previous = line
+    return found
 
 
 def _read(root: Path, path: str) -> str:
