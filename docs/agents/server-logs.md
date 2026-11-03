@@ -129,7 +129,7 @@ scripts/loki-query.sh '{service="krx-quant", process="command"} |= "command=doct
 
 - The heartbeats: `{service="krx-quant", process="engine"} |= "heartbeat: "` (one a minute while the engine runs).
 - The shipping's own warnings (dropped lines, failures): `{service="krx-quant"} |= "Loki: "`.
-- Whether an engine alert reached Telegram: `{service="krx-quant", process="engine"} |~ "telegram sent: |telegram send failed"` (each alert is logged as `alert: …` before it is sent).
+- Whether an engine alert reached Telegram: `{service="krx-quant", process="engine"} |~ "telegram sent: |telegram send failed"` (each alert is logged as `alert: …` before it is queued; a try followed by another as `telegram send retry in <n>s: …`; `telegram send failed` means it was dropped, after about two minutes of tries, #489). The trader's are under `process="trader"`.
 - No line at all for minutes means the engine (or the server) is down, or cannot reach Grafana Cloud. Then ask for a snapshot ([server-snapshot.md](server-snapshot.md)): `krx-quant doctor` section 8 shows the engine's shipping (on or off, lines sent and dropped, the last success, the last failure's kind).
 
 ## Alert rules

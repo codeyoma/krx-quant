@@ -116,7 +116,8 @@ async def test_a_summary_that_could_not_be_sent_is_sent_on_the_next_wait(
     night_list(tmp_path / "store", finalized=at(NIGHT, "22:10"), promoted={"newton": TRAINED})
     late = at(MORNING, "08:00")  # past the deadline: no retrying within this wait
     async with aiohttp.ClientSession() as session:
-        unreachable = Alerts(session, "123:fake", "42", "http://127.0.0.1:9")
+        # One try (#489): its two minutes of tries would outlast the test.
+        unreachable = Alerts(session, "123:fake", "42", "http://127.0.0.1:9", retry_seconds=0)
         assert (
             await await_spot_night(store, CALENDAR, NIGHT, unreachable, lambda: late, tmp_path / "state")
             is None
