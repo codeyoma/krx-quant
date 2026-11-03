@@ -23,7 +23,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
-from krx_quant import notify
+from krx_quant import collector, notify
 from krx_quant.collector import run_collector
 from krx_quant.config import Settings
 from krx_quant.fake_kis import FakeKis
@@ -35,8 +35,8 @@ from krx_quant.trader.store import request_pause
 from tests.test_collector import FIXED_NOW, settings_for
 from tests.test_live_predictions import free_port
 from tests.test_resilience import TRADE_KEY, fast
-from tests.test_subscription_limit import until
 from tests.trader_doubles import FEE, at
+from tests.waiting import until
 
 TEXT = "2026-10-22 밤 학습이 실패했습니다: exit -9 (SIGKILL)"
 UNREACHABLE = "http://127.0.0.1:9"  # nothing listens there
@@ -370,6 +370,7 @@ async def test_the_engine_s_alerts_go_through_the_queue(
     kis: FakeKis, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(notify, "RETRY_DELAYS", (0.01,))
+    monkeypatch.setattr(collector, "WS_ALERT_AFTER_SECONDS", 0.2)  # a drop is alerted once this old (#488)
     kis.script[TRADE_KEY] = []
     async with bot([503]) as telegram_:
         settings = replace(

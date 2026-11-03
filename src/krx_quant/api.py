@@ -187,6 +187,8 @@ ENGINE_KEY = web.AppKey("engine", PredictionEngine)
 Mode = Literal["live", "demo", "replay"]
 MODE_KEY = web.AppKey("mode", str)
 LIVE_STATUS_KEY: web.AppKey[LiveStatus] = web.AppKey("live_status")
+# The stream's fan-out: a test waits on its clients and polls (#490).
+STREAM_KEY = web.AppKey("stream", EventStream)
 # The symbols' company names (#250): the collector fills them in after the API starts.
 NAMES_KEY: web.AppKey[Mapping[str, str]] = web.AppKey("names")
 
@@ -287,6 +289,7 @@ def create_app(
     app[KRX_DAYS_KEY] = None if data_dir is None else StoredDays(data_dir)
     app[NAMES_KEY] = {} if names is None else names
     stream = EventStream(engine, live_status, stream_poll_seconds)
+    app[STREAM_KEY] = stream
 
     async def streaming(app: web.Application) -> AsyncIterator[None]:
         engine.listeners.append(stream.changed)

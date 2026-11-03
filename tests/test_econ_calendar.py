@@ -158,6 +158,7 @@ class Setup:
     data_dir: Path
     make: Callable[[], CalendarCollector]
     recorder: ParquetRecorder
+    alerts: Alerts
 
 
 @pytest.fixture
@@ -182,7 +183,7 @@ async def setup(tmp_path: Path) -> AsyncIterator[Setup]:
                 url=f"{base}/events",
             )
 
-        yield Setup(feed, data_dir, make, recorder)
+        yield Setup(feed, data_dir, make, recorder, alerts)
         await alerts.close()
     await server.close()
 
@@ -259,13 +260,13 @@ async def test_failures_keep_the_last_answer_and_alert_after_an_hour(setup: Setu
     setup.feed.down = True
     for _ in range(ALERT_AFTER + 2):
         assert not await collector.run()
-    await asyncio.sleep(0.2)  # the alert is sent in the background
+    await setup.alerts.close()  # the alerts are sent in the background: until they are
     assert read_latest(setup.data_dir) == kept
     assert len(setup.feed.sent) == 1
     assert setup.feed.sent[0].startswith("[장애] 경제 캘린더(TradingView)를 4번 연속 읽지 못했습니다")
     setup.feed.down = False
     assert await collector.run()
-    await asyncio.sleep(0.2)
+    await setup.alerts.close()
     assert setup.feed.sent[1:] == ["[복구] 경제 캘린더를 다시 읽습니다."]
     assert collector.failures == 0
 

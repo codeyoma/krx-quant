@@ -14,6 +14,7 @@ import pytest
 from krx_quant.collector import measure_subscription_limit, run_collector
 from krx_quant.fake_kis import FakeKis
 from tests.test_collector import FIXED_NOW, read, settings_for
+from tests.waiting import until as until  # test_resilience.py still imports it from here
 
 QUOTE, BOOK_SNAPSHOT = "FHKST01010100", "FHKST01010200"
 
@@ -30,14 +31,6 @@ def serve_snapshots(kis: FakeKis, **quote: str) -> None:
     book |= {"aspr_acpt_hour": "093016", "total_askp_rsqn": "100", "total_bidp_rsqn": "200"}
     output2 = {"stck_prpr": "190500", **quote}
     kis.rest_responses[BOOK_SNAPSHOT] = lambda q: ok(None, output1=book, output2=output2)
-
-
-async def until(condition: Callable[[], bool], timeout: float = 5.0) -> None:
-    async def poll() -> None:
-        while not condition():
-            await asyncio.sleep(0.02)
-
-    await asyncio.wait_for(poll(), timeout)
 
 
 def polled(kis: FakeKis, tr_id: str, symbol: str) -> bool:

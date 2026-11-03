@@ -22,10 +22,11 @@ from krx_quant.market_calendar import MarketCalendar
 from krx_quant.night_probe import master_lines, report, subscribed_nights
 from tests.kis_frames import FUTURES_COLUMNS, frame, master_zips, night_book_frame, night_futures_frame
 from tests.kis_rest import HOLIDAYS, holiday_api
+from tests.test_calendar_health import health_checks
 from tests.test_collector import collect, settings_for
-from tests.test_resilience import TRADE_KEY, Clock
-from tests.test_subscription_limit import until
+from tests.test_resilience import TRADE_KEY, Clock, with_telegram
 from tests.test_subscription_plan import serve_masters
+from tests.waiting import until
 
 THURSDAY, FRIDAY, SATURDAY, MONDAY = (
     date(2026, 10, 15),
@@ -212,25 +213,30 @@ def test_an_expiry_a_holiday_moved_moves_the_night_s_roll() -> None:
 # ---- silence
 
 
-async def test_the_night_feeds_quiet_all_day_are_never_stale(kis: FakeKis, tmp_path: Path) -> None:
+async def test_the_night_feeds_quiet_all_day_are_never_stale(
+    kis: FakeKis, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    checks = health_checks(monkeypatch)
     serve_masters(kis)
     kis.rest_responses[HOLIDAYS] = holiday_api(())
     kis.script[TRADE_KEY] = []  # registered, never delivers
     kis.script[TRADES] = []
     start = at(THURSDAY, "09:30:16")
     clock = Clock(start)
-    settings = replace(settings_for(kis, tmp_path), health_check_seconds=0.05, backfill_days=1)
+    quick = replace(settings_for(kis, tmp_path), health_check_seconds=0.05, backfill_days=1)
+    settings = with_telegram(kis, quick)
     stop = asyncio.Event()
     task = asyncio.create_task(run_collector(settings, stop=stop, clock=clock))
     await until(lambda: (settings.state_dir / "market_calendar.json").exists())
     clock.at = start + timedelta(hours=2)  # quiet through continuous trading
-    await asyncio.sleep(0.3)
+    await until(lambda: checks.stale(TRADE_KEY))  # the check that found it saw the night feeds too
     stop.set()
-    await asyncio.wait_for(task, 5)
+    await asyncio.wait_for(task, 5)  # the alerts are sent by then
 
     assert list(tmp_path.glob("gaps/*/feed=H0UNCNT0/*")), "the stock trades went stale"
     assert not list(tmp_path.glob("gaps/*/feed=H0MF*")), "the night feeds did not"
     alerts = " ".join(m["text"] for m in kis.telegram_messages)
+    assert "stale H0UNCNT0" in alerts
     assert "H0MF" not in alerts
 
 

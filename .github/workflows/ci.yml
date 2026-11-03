@@ -8,17 +8,25 @@ on:
 permissions:
   contents: read
 
+# A new push to a pull request cancels its run still going: only the newest commit's result
+# counts. A push to main is never cancelled; its group is the run's own (#486).
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
-  test:
+  # Everything but the tests, once. It also lists the suite's tests for the check in `test`.
+  lint:
     runs-on: ubuntu-latest
-    # About four times a usual run (11-22 minutes): a stuck job fails here, not after 6 hours.
-    timeout-minutes: 60
+    # Usually about a minute: a stuck job fails here, not after 6 hours.
+    timeout-minutes: 10
     steps:
       # The fincept/ submodule is not needed for engine checks.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: false
-      - uses: astral-sh/setup-uv@v6
+      # setup-uv publishes no major tags since v8; its release tags are immutable.
+      - uses: astral-sh/setup-uv@v10.3.3
         with:
           version: "0.12.23"
       - run: uv sync --frozen
@@ -27,4 +35,75 @@ jobs:
       - run: uv run ruff check
       - run: uv run ruff format --check
       - run: uv run mypy
-      - run: uv run pytest -q
+      - name: The suite's tests
+        run: uv run python scripts/ci_shard.py collect results/suite.json
+      - uses: actions/upload-artifact@v7
+        with:
+          name: suite
+          path: results/suite.json
+          retention-days: 1
+          # A re-run of a failed job uploads its file again.
+          overwrite: true
+
+  # The tests on four runners at once, each shard one test at a time as on one runner before:
+  # tests on one runner would compete for its CPU, and some measure wall time (#486).
+  pytest:
+    name: pytest ${{ matrix.shard }}
+    runs-on: ubuntu-latest
+    # About four times a usual shard (6-8 minutes; on one runner the tests took 26).
+    timeout-minutes: 30
+    strategy:
+      # Every shard runs to its end, so one run shows all the failures.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: false
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          version: "0.12.23"
+      - run: uv sync --frozen
+      - name: The shard's tests
+        run: uv run python scripts/ci_shard.py run ${{ matrix.shard }} ${{ strategy.job-total }} results/shard-${{ matrix.shard }}.json -- -q
+      - uses: actions/upload-artifact@v7
+        if: ${{ !cancelled() }}
+        with:
+          name: shard-${{ matrix.shard }}
+          path: results/shard-${{ matrix.shard }}.json
+          retention-days: 1
+          overwrite: true
+
+  # The one check a merge waits for, whatever the number of shards: lint and every shard
+  # passed, and every test of the suite ran in exactly one shard.
+  test:
+    needs: [lint, pytest]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Lint and every shard passed
+        if: ${{ needs.lint.result != 'success' || needs.pytest.result != 'success' }}
+        run: |
+          echo "::error::lint: ${{ needs.lint.result }}, pytest: ${{ needs.pytest.result }}"
+          exit 1
+      # Only the script: no submodule, no project install.
+      - uses: actions/checkout@v7
+        with:
+          submodules: false
+          sparse-checkout: scripts
+      - uses: actions/download-artifact@v8
+        with:
+          path: results
+          merge-multiple: true
+      - name: Every test ran in exactly one shard
+        run: python3 scripts/ci_shard.py verify results/suite.json results/shard-*.json --seconds ci_shard_seconds.json
+      # Each file's seconds in this run: copy them over scripts/ci_shard_seconds.json when the
+      # shards drift apart (scripts/ci_shard.py).
+      - uses: actions/upload-artifact@v7
+        if: ${{ !cancelled() }}
+        with:
+          name: ci-shard-seconds
+          path: ci_shard_seconds.json
+          overwrite: true

@@ -72,6 +72,13 @@ class FakeKis:
     token_min_interval: float = 0.0
     tokens_issued: list[str] = field(default_factory=list)
     approvals_issued: list[str] = field(default_factory=list)
+    # The next approval-key requests refused (HTTP 403), however right the key.
+    approval_refusals: int = 0
+    # Each subscription's answer gives a key and IV of its own (#484: KIS gives a new connection
+    # new ones), which encrypt the fill notices pushed to its connection (``push_notice``); else
+    # every answer gives ``NOTICE_KEY`` and ``NOTICE_IV``.
+    rotate_notice_keys: bool = False
+    notice_keys_issued: list[tuple[str, str]] = field(default_factory=list)
     _last_token_at: float | None = None
     # Telegram Bot API stand-in: messages sent to /bot<token>/sendMessage.
     telegram_messages: list[dict[str, Any]] = field(default_factory=list)
@@ -107,6 +114,8 @@ class FakeKis:
     _site: web.SockSite | None = None
     _sockets: list[web.WebSocketResponse] = field(default_factory=list)
     _transports: dict[web.WebSocketResponse, asyncio.Transport] = field(default_factory=dict)
+    # The key and IV each connection's subscription answer gave (``rotate_notice_keys``).
+    _socket_keys: dict[web.WebSocketResponse, tuple[str, str]] = field(default_factory=dict)
     # Connections gone silent (go_silent): neither written to nor read from, until stop.
     _silent: list[asyncio.Transport] = field(default_factory=list)
     _pong_event: asyncio.Event = field(default_factory=asyncio.Event)
@@ -196,6 +205,17 @@ class FakeKis:
         for ws in self._sockets:
             await ws.send_str(frame)
 
+    async def push_notice(self, records: list[list[str]] | str, count: int | None = None) -> None:
+        """Send a fill notice frame to every connected client now, encrypted with the key and IV its
+        subscription's answer gave (``NOTICE_KEY``, ``NOTICE_IV`` without one): ``records``' fields
+        joined by ``^`` (or the fields' text as it is), under the header's ``count`` (the records'
+        by default: another makes a frame its fields do not divide by)."""
+        text = records if isinstance(records, str) else "^".join("^".join(r) for r in records)
+        said = count if count is not None else (1 if isinstance(records, str) else len(records))
+        for ws in list(self._sockets):
+            key, iv = self._socket_keys.get(ws, (NOTICE_KEY, NOTICE_IV))
+            await ws.send_str(f"1|{kis_orders.FILL_NOTICE.mock}|{said:03d}|{encrypt(key, iv, text)}")
+
     async def close_connections(self) -> None:
         """Drop every client connection, as KIS does on maintenance or errors."""
         for ws in list(self._sockets):
@@ -264,6 +284,9 @@ class FakeKis:
         body = await request.json()
         if body.get("appkey") != self.app_key or body.get("secretkey") != self.app_secret:
             return web.json_response({"error_description": "invalid app key"}, status=403)
+        if self.approval_refusals > 0:
+            self.approval_refusals -= 1
+            return web.json_response({"error_description": "approval refused"}, status=403)
         key = f"fake-approval-key-{len(self.approvals_issued) + 1}"
         self.approvals_issued.append(key)
         return web.json_response({"approval_key": key})
@@ -397,6 +420,7 @@ class FakeKis:
             if ws in self._sockets:  # a silent one left the list already
                 self._sockets.remove(ws)
             self._transports.pop(ws, None)
+            self._socket_keys.pop(ws, None)
         return ws
 
     async def _on_subscribe(
@@ -414,7 +438,13 @@ class FakeKis:
         elif self.max_subscriptions is not None and len(active) >= self.max_subscriptions:
             ok, reply = False, _ack(key, "1", LIMIT_MSG_CD, LIMIT_MSG)
         else:
-            ok, reply = True, _ack(key, "0", "OPSP0000", "SUBSCRIBE SUCCESS")
+            key_iv = (NOTICE_KEY, NOTICE_IV)
+            if self.rotate_notice_keys and key[0] == kis_orders.FILL_NOTICE.mock:
+                n = len(self.notice_keys_issued) + 1
+                key_iv = (f"{n:032d}", f"{n:016d}")
+                self.notice_keys_issued.append(key_iv)
+                self._socket_keys[ws] = key_iv
+            ok, reply = True, _ack(key, "0", "OPSP0000", "SUBSCRIBE SUCCESS", key_iv)
             active.add(key)
         await ws.send_str(reply)
         async with self._subscribed:
@@ -435,7 +465,13 @@ NOTICE_KEY = "0123456789abcdef0123456789abcdef"
 NOTICE_IV = "0123456789abcdef"
 
 
-def _ack(key: tuple[str, str], rt_cd: str, msg_cd: str, msg1: str) -> str:
+def _ack(
+    key: tuple[str, str],
+    rt_cd: str,
+    msg_cd: str,
+    msg1: str,
+    key_iv: tuple[str, str] = (NOTICE_KEY, NOTICE_IV),
+) -> str:
     return json.dumps(
         {
             "header": {"tr_id": key[0], "tr_key": key[1], "encrypt": "N"},
@@ -443,7 +479,7 @@ def _ack(key: tuple[str, str], rt_cd: str, msg_cd: str, msg1: str) -> str:
                 "rt_cd": rt_cd,
                 "msg_cd": msg_cd,
                 "msg1": msg1,
-                "output": {"iv": NOTICE_IV, "key": NOTICE_KEY},
+                "output": {"iv": key_iv[1], "key": key_iv[0]},
             },
         }
     )
@@ -526,8 +562,10 @@ class FakeAccount:
     marketable order fills at once (a partial fill: the rest rests). A price off the tick is
     refused, and a sell of shares not held; a buy beyond the cash is not, as the mock accepted
     one. Each order, fill, cancel and refusal is told on the fill notice (encrypted, to every open
-    WebSocket) when ``notices``: in KIS's example's 26 fields, or the first ``notice_fields`` of
-    them (the mock's records had 23). The cancellable-orders inquiry is not a mock TR (HTTP 500).
+    WebSocket, with the key and IV of its subscription's answer, ``FakeKis.push_notice``) when
+    ``notices``: in KIS's example's 26 fields, or the first ``notice_fields`` of them, or the columns
+    ``notice_columns`` names (the mock's records had 23, #403, not known which). The
+    cancellable-orders inquiry is not a mock TR (HTTP 500).
 
     Its time is ``clock``'s (KST; the wall clock without one), its day ``clock``'s date (``today``
     without one). An order is a day order (#406): the inquiry of a day shows that day's orders
@@ -559,6 +597,9 @@ class FakeAccount:
     fee_rate: float = 0.00014  # the mock's commission: thdt_tlex_amt rose by 0.00014 of a buy's amount
     notices: bool = True
     notice_fields: int | None = None
+    # The notice's columns, by ``FILL_NOTICE_COLUMNS``' names, in order (#484: a made-up 23 that are
+    # not the example's first 23); over ``notice_fields`` when given.
+    notice_columns: tuple[str, ...] | None = None
     hts_id: str = "testhts01"
     account: str = "1234567801"
     # The live account (#408): the live server's TR IDs, the codes and messages made up (``LIVE_SAID``).
@@ -955,10 +996,8 @@ class FakeAccount:
             "CNTG_ISNM40": "삼성전자",
             "ODER_PRC": str(order.price),
         }
-        columns = kis_orders.FILL_NOTICE_COLUMNS[: self.notice_fields]
-        fields = "^".join(values[c] for c in columns)
-        frame = f"1|{kis_orders.FILL_NOTICE.mock}|001|{encrypt(NOTICE_KEY, NOTICE_IV, fields)}"
-        task = asyncio.get_running_loop().create_task(self.kis.push(frame))
+        columns = self.notice_columns or kis_orders.FILL_NOTICE_COLUMNS[: self.notice_fields]
+        task = asyncio.get_running_loop().create_task(self.kis.push_notice([[values[c] for c in columns]]))
         self._pushes.add(task)
         task.add_done_callback(self._pushes.discard)
 

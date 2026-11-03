@@ -45,7 +45,7 @@ from krx_quant.loki import (
 from krx_quant.process_log import formatter
 from krx_quant.redaction import MASK
 from tests.loki_fake import TOKEN, USER, FakeLoki
-from tests.test_subscription_limit import until
+from tests.waiting import until
 
 NIGHT = date(2026, 10, 22)
 APP_KEY = "P" + "k" * 35

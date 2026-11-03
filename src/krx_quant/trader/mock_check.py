@@ -11,7 +11,8 @@ number, an account number, a key or a price.
 
 KIS's orders the ledger does not hold are listed. One placed while the order probe (#403,
 ``probe-kis-orders-403``) ran that day on the same mock account, by the scheduler's state
-(``state/scheduled.json``), is the probe's and does not count against the ledger.
+(``state/scheduled.json``), is the probe's and does not count against the ledger. That job left
+``JOBS`` (#484): a run of ``probe-kis-orders`` by hand is not in the state, so its orders count.
 """
 
 from __future__ import annotations

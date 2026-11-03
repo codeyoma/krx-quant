@@ -34,7 +34,11 @@ uv sync
 uv run python scripts/check_forbidden.py && uv run ruff check && uv run ruff format --check && uv run mypy && uv run pytest -q
 ```
 
-테스트 하나가 시간 한도(`pyproject.toml`의 `timeout`, 30초)를 넘으면 `pytest`는 모든 스레드의 스택을 출력하고 그 자리에서 실행 전체를 끝낸다(`timeout_method = "thread"`, #335). 그 뒤의 테스트는 돌지 않는다. 더 오래 걸려야 하는 테스트는 `@pytest.mark.timeout(N)`과 이유를 단다. CI의 테스트 job은 60분을 넘으면 멈춘다(`timeout-minutes`, 평소 11–22분).
+테스트 하나가 시간 한도(`pyproject.toml`의 `timeout`, 30초)를 넘으면 `pytest`는 모든 스레드의 스택을 출력하고 그 자리에서 실행 전체를 끝낸다(`timeout_method = "thread"`, #335). 그 뒤의 테스트는 돌지 않는다. 더 오래 걸려야 하는 테스트는 `@pytest.mark.timeout(N)`과 이유를 단다.
+
+CI(`.github/workflows/ci.yml`, #486)는 위의 검사를 job `lint`에서 한 번 돌리고, pytest는 shard 4개(`pytest 1`–`pytest 4`)로 나눠 러너 4개에서 동시에 돌린다. 한 shard 안에서는 테스트가 하나씩 차례로 돈다. 한 러너에서 pytest-xdist로 나누지 않는 것은 테스트끼리 CPU를 다투지 않게 하려는 것이다(실제 경과 시간을 재는 테스트가 있다). `scripts/ci_shard.py`가 테스트 파일을 지난 기록의 초(`scripts/ci_shard_seconds.json`)로 나눈다: 긴 파일부터, 지금까지 초가 가장 적은 shard에 넣는다. 기록에 없는 파일은 기록된 파일의 중앙값으로 친다. 같은 커밋은 늘 같게 나뉜다. 머지 전에 보는 검사는 `test` 하나다: `lint`와 모든 shard가 통과했고, `lint`가 모은 테스트 모두가 정확히 한 shard에서 돌았을 때(빠진 것도 겹친 것도 없을 때) 통과한다. shard 하나의 파일만 돌리려면 `uv run pytest -q $(python3 scripts/ci_shard.py files <shard> 4)`. shard마다 걸린 초는 `test` job의 요약에 나온다. shard끼리 시간이 벌어지면 최근 `main` 실행의 `ci-shard-seconds` artifact(`gh run download <run id> -n ci-shard-seconds`)로 `scripts/ci_shard_seconds.json`을 덮어쓴다. shard는 30분, `lint`는 10분을 넘으면 멈춘다(`timeout-minutes`, 평소 shard 6–8분, `lint` 1분, 실행 전체 약 8분). PR에 새 커밋을 push 하면 그 PR의 아직 도는 실행은 취소된다. `main` push의 실행은 취소되지 않는다.
+
+> **바뀜** (2026-11-04, #491): CI의 job 하나가 검사와 pytest 전체를 한 러너에서 차례로 돌렸고 60분을 넘으면 멈췄다(평소 11–22분) → `lint` 하나와 pytest shard 4개가 동시에 돌고, 모음 검사 `test`가 모두를 기다린다. PR의 지난 실행은 새 push가 취소한다. 이유: 성공한 실행의 중앙값이 2026-10-19 15.8분에서 11-03 26.9분이 되어(pytest 1,549초) 약 7주 뒤 60분 제한에 닿을 참이었고, 10-19 이후 PR 실행 294번 중 102번이 같은 브랜치의 새 실행이 시작된 뒤에도 돌고 있었다(#486).
 
 `scripts/check_forbidden.py`는 KIS 주문 TR 코드와 주문 엔드포인트(trader의 KIS 주문 모듈 `src/krx_quant/kis_orders.py` 밖에서, `forbidden.ALLOWED_IN`), 비밀값 패턴(`RULES`)과 바뀜·삭제됨 노트에 남은 PR 번호 자리표시(`REPOSITORY_RULES`, #321)가 저장소에 들어오면 실패한다. CI도 같은 검사를 한다. 패턴은 `src/krx_quant/forbidden.py`에 있다. 예약 작업이 GitHub 이슈에 남기는 댓글에서는 `RULES`만 가린다(#215).
 
@@ -69,6 +73,7 @@ uv run krx-quant measure-subscriptions
 - **토큰 재사용**: REST 접근 토큰은 `state/kis_token.json`(권한 600)에 캐시해서 재시작해도 다시 발급하지 않는다. 만료 1시간 전부터 갱신하고, 발급 간격은 61초 이상으로 둔다(KIS는 분당 1회).
 - **텔레그램 알림**: `TELEGRAM_BOT_TOKEN`과 `TELEGRAM_CHAT_ID`를 넣으면 장애가 시작될 때 한 번, 복구될 때 한 번 텔레그램으로 알린다. 넣지 않으면 로그만 남긴다.
 - **로그**: 모든 프로세스의 로그 줄이 stdout에 나온다(`docker compose logs`, 다음 배포까지). `KRX_LOKI_URL`, `KRX_LOKI_USER`, `KRX_LOKI_TOKEN`을 넣으면 같은 줄을 가려서 Grafana Cloud Loki로 보내고, 로그는 거기 남는다(#358). 엔진이 띄운 밤 학습과 예약 작업의 출력도 간다. 묶어서 보내고, 실패하면 다시 보내고, 넘치면 버리고 센다. 엔진은 Loki를 기다리지 않는다. 에이전트는 거기서 질의하고([docs/agents/server-logs.md](docs/agents/server-logs.md)), Grafana의 알림 규칙이 엔진이 스스로 보내지 못하는 것(엔진 로그 끊김 등)을 텔레그램으로 보낸다([docs/operations.md](docs/operations.md#grafana-cloud-loki로-보내는-로그-358)).
+  - WebSocket 끊김 알림은 끊긴 뒤 30초가 지나도 다시 붙지 않았을 때만 보낸다. KIS가 하루 몇 번 닫았다가 몇 초 안에 다시 붙는 끊김은 알리지 않고, 로그(WARNING)에 그날 수와 함께 남긴다. 결측은 그대로 기록한다(#488).
   - 재연결 복구 알림은 연결이 60초(`KRX_RECOVERY_HOLD_SECONDS`) 이상 유지된 뒤에 보낸다. 그래서 끊겼다 붙기를 반복해도 알림이 매번 가지 않는다.
   - 지연 알림은 새로 지연된 피드들을 한 메시지로 묶어 보내고, 다시 들어온 피드도 묶어서 알린다.
   - 예측 신호(`[신호] ...`)는 선택이다. `KRX_SIGNAL_ALERT=on`이면 최종 합의가 충분히 확실하고 정식 알고리즘 N개 이상이 같은 방향일 때 보낸다. VI·서킷브레이커, 기준가 없음, 목표 시각 지남이면 보내지 않는다([docs/engine-api.md](docs/engine-api.md#텔레그램-신호-알림-19)).

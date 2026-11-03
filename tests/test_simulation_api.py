@@ -5,7 +5,6 @@ schema."""
 
 from __future__ import annotations
 
-import asyncio
 from datetime import datetime, time, timedelta
 from pathlib import Path
 from typing import Any
@@ -20,7 +19,7 @@ from krx_quant.simulation import simulate_daily
 from krx_quant.touch import TARGET_VERSION
 from tests.api_schema import check
 from tests.replay_events import api, get_json
-from tests.test_api_stream import engine_at, receive_until
+from tests.test_api_stream import engine_at, listening, receive_until
 from tests.test_simulation_daily import (
     LAST,
     NIGHT,
@@ -119,8 +118,7 @@ async def test_a_simulated_status_change_is_streamed_marked(tmp_path: Path) -> N
     engine, _ = engine_at(tmp_path / "engine.db", datetime(2026, 10, 12, 9, tzinfo=NIGHT.tzinfo))
 
     async with TestClient(TestServer(create_app(engine, stream_poll_seconds=0.01))) as client:
-        ws = await client.ws_connect("/v1/stream")
-        await asyncio.sleep(0.05)  # the stream is polling
+        ws = await listening(client)
         command = PredictionStore(tmp_path / "engine.db")  # `krx-quant simulate`, another process
         command.change_status(
             "second",
