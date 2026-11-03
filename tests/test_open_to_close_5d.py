@@ -551,7 +551,7 @@ async def test_a_kind_awaiting_a_probe_is_listed_but_not_run(
     """#310 review (#338): a daily kind whose answers read data a probe has not settled
     (``DailyKind.awaiting``, as ``open_to_close_5d`` was until ``probe-dividends-310``'s result) is
     listed with the reason, and nothing of it is predicted, answered, trained or pre-validated."""
-    import krx_quant.scheduled as scheduled
+    import krx_quant.scheduled.prevalidations as prevalidations
     from krx_quant.daily_features import DailyFiles
     from krx_quant.daily_training import DailyTrainer, prevalidate_daily
     from krx_quant.scheduled import Facts, Night, daily_prevalidation_jobs
@@ -610,7 +610,8 @@ async def test_a_kind_awaiting_a_probe_is_listed_but_not_run(
             algorithms=[algorithm],
             kinds=[OPEN_TO_CLOSE, gated],
         )
-    monkeypatch.setattr(scheduled, "daily_kind_named", lambda name: gated)
+    # The daily pre-validations' module looks the kind up (#500).
+    monkeypatch.setattr(prevalidations, "daily_kind_named", lambda name: gated)
     [job] = daily_prevalidation_jobs([algorithm.name], {}, {algorithm.name: gated.name})
     night = Night(date(2026, 10, 16), True, "c", None, {}, Facts(waiting=(algorithm.name,)))
     assert not job.due(night)

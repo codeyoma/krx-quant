@@ -2,7 +2,7 @@
 latest days broken down by symbol, 30-minute slot, spread and volatility, each cell with its
 confusion matrix, the precision of each class it called and its lift over the climate baseline,
 as text to paste. A scheduled job runs it once for ``turing`` and posts it on #431
-(``scheduled.py``); an agent reads it for where accuracy work could go, the user decides.
+(``scheduled/research.py``); an agent reads it for where accuracy work could go, the user decides.
 
 It is exploratory, and says so at its head: a cell picked from it is judged on the days after
 the period (a holdout), not on these.

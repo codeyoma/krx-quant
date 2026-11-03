@@ -1,0 +1,473 @@
+"""The pre-validation and simulation jobs (#204, #298, #454; a module of their own since #500),
+built from the algorithm registries: one pre-validation for each algorithm registered after
+pre-validation existed, one for each bar-close algorithm's changed code and one for each daily
+algorithm, and the simulated probations. ``JOBS`` (``krx_quant.scheduled``) builds them from the
+registries and lists them in the order they run.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Mapping, Sequence
+from datetime import timedelta
+from pathlib import Path
+
+from krx_quant.algorithms import DAILY_ALGORITHMS
+from krx_quant.daily import DailyAlgorithm, DailyKind
+from krx_quant.kind_registry import DAILY_KINDS, daily_kind_named
+from krx_quant.prevalidation import MIN_DAYS, REGISTERED_BEFORE, report_path
+from krx_quant.scheduled.core import FAILED, OK, Attachment, Job, Night, Target
+from krx_quant.scheduled.probes import DAILY_CHECK_ISSUE
+
+# ⑤ The pre-validations (#204): a new algorithm runs live once its pre-validation has passed
+# (``prevalidation.py``). Once ``MIN_DAYS`` trading days are recorded, one waiting algorithm
+# is pre-validated a night, at most (``prevalidation_tonight``): a run replays 20 days beside
+# the live engine, on a 2 GB server with burst CPU. They go in this order, then any other
+# waiting algorithm in the registry's. A verdict on the code and the target an algorithm runs
+# now (passed, or refused) is not asked for again: a deploy that changes its code, or the
+# target, asks again. A run that left no verdict on them (it crashed, or hit its time limit)
+# runs again after a new deploy, once the algorithms not tried yet have had their turn. A run
+# a restart cut runs again the next night (the scheduler).
+PREVALIDATE_FIRST = ("mandelbrot", "breiman", "kalman", "shannon", "poisson")
+PREVALIDATION_ISSUE = 204
+# A run takes about 20 times a day's replay (20 days, the algorithm retrained before each);
+# breiman retrains LightGBM each day and takes longest, and so does each Breiman of the
+# barrier's horizon ladder (#263). Bounds, not estimates: room for the burst CPU running out.
+# Each must start by 05:30 less its limit (00:30, the Breimans 23:30).
+PREVALIDATION_TIMEOUT = timedelta(hours=5)
+PREVALIDATION_TIMEOUTS = {
+    name: timedelta(hours=6) for name in ("breiman", "breiman-15m", "breiman-30m", "breiman-60m")
+}
+# An algorithm's turn tonight: never tried (or cut by a restart), or tried again.
+FRESH, AGAIN = "fresh", "again"
+
+
+def prevalidation_job_name(algorithm: str) -> str:
+    return f"prevalidate-{algorithm}"
+
+
+def prevalidation_order(names: Sequence[str]) -> tuple[str, ...]:
+    """The algorithms to pre-validate, in turn: those of ``PREVALIDATE_FIRST`` registered, then
+    any other registered after pre-validation existed (``names``: the registries' order)."""
+    new = [name for name in names if name not in REGISTERED_BEFORE]
+    return (*(n for n in PREVALIDATE_FIRST if n in new), *(n for n in new if n not in PREVALIDATE_FIRST))
+
+
+def prevalidation_turn(night: Night, algorithm: str) -> str | None:
+    """Whether ``algorithm`` would be pre-validated tonight: FRESH, AGAIN (its last run left
+    no verdict, on older code: it waits for the FRESH ones), or None (not tonight)."""
+    facts = night.facts
+    if facts.recorded_days < MIN_DAYS or algorithm not in facts.waiting:
+        return None
+    report = facts.reports.get(algorithm)
+    if report is not None and report.judged:
+        return None  # it judged the code and target the algorithm runs now: it would again
+    record = night.records.get(prevalidation_job_name(algorithm))
+    if record is None or record.outcome not in (OK, FAILED):
+        return FRESH  # never ran, or a restart cut it
+    if (
+        report is not None
+        and not report.current
+        and report.made_at is not None
+        and report.made_at >= record.started_at
+    ):
+        return FRESH  # the run left its report, and the code or the target has changed since
+    ended = record.started_at + timedelta(seconds=record.seconds or 0.0)
+    if report is not None and report.made_at is not None and report.made_at > ended:
+        # A run started after it (by hand, e.g. a look on fewer days) left the latest report,
+        # without a verdict on this code: ask again for one.
+        return FRESH
+    if record.commit == night.commit:
+        return None  # it ran on this code without a verdict: another deploy may give one
+    return AGAIN  # it crashed or ran out of time on older code
+
+
+def prevalidation_tonight(night: Night, order: Sequence[str]) -> str | None:
+    """The algorithm pre-validated tonight, of ``order``: none if one was tonight already
+    (whatever came of it), a changed code's too (#454, ``revision_tonight``); else the first FRESH,
+    else the first AGAIN."""
+    if _revision_ran_tonight(night) or any(
+        (record := night.records.get(prevalidation_job_name(name))) is not None and record.day == night.day
+        for name in order
+    ):
+        return None
+    turns = [(name, prevalidation_turn(night, name)) for name in order]
+    return next((n for n, t in turns if t == FRESH), None) or next((n for n, t in turns if t == AGAIN), None)
+
+
+def _prevalidation_due(algorithm: str, order: tuple[str, ...]) -> Callable[[Night], bool]:
+    def due(night: Night) -> bool:
+        return prevalidation_tonight(night, order) == algorithm
+
+    return due
+
+
+def prevalidation_jobs(names: Sequence[str]) -> tuple[Job, ...]:
+    """A pre-validation job for each algorithm of ``names`` (the registries) registered after
+    pre-validation existed, in ``prevalidation_order``."""
+    order = prevalidation_order(names)
+    return tuple(
+        Job(
+            name=prevalidation_job_name(name),
+            due=_prevalidation_due(name, order),
+            command=("prevalidate", name),
+            timeout=PREVALIDATION_TIMEOUTS.get(name, PREVALIDATION_TIMEOUT),
+            targets=(Target(PREVALIDATION_ISSUE, note=_prevalidation_note(name)),),
+            attach=(Attachment(f"리포트 state/{_report_of(name)}", _report_of(name)),),
+            report=_report_of(name),
+        )
+        for name in order
+    )
+
+
+def _prevalidation_note(algorithm: str) -> str:
+    """The note on an algorithm's pre-validation result: what passing and refusing do, and
+    what to do with what it measured besides the checks (``_DIAGNOSTICS_NOTES``)."""
+    return " ".join(n for n in (_PREVALIDATION_NOTE, _DIAGNOSTICS_NOTES.get(algorithm)) if n)
+
+
+# The pre-validations of changed code (#454, ``revisions.py``): a running bar-close algorithm whose
+# code changed is back on probation, and is pre-validated on the recorded days after the change only
+# (``prevalidate <name> --revision``: from its first whole trading day), once ``MIN_DAYS`` of them are
+# recorded. Every check, as a first pre-validation's. It shares the one a night of the bar-close
+# pre-validations (a run replays the same days beside the live engine) and comes first: its algorithm
+# runs already, and its probation cannot make it active before it passed; the waiting ones run on the
+# nights after. One a night among them, in the registries' order (turing too: its exemption is its
+# first revision's). Its verdict is not asked for again; a run that left none runs again after a
+# deploy, after the ones not tried yet, as a first pre-validation does. Its result goes to #204.
+REVISION_JOB = "prevalidate-revision-"
+
+
+def revision_job_name(algorithm: str) -> str:
+    return f"{REVISION_JOB}{algorithm}"
+
+
+def _revision_ran_tonight(night: Night) -> bool:
+    return any(name.startswith(REVISION_JOB) and r.day == night.day for name, r in night.records.items())
+
+
+def revision_turn(night: Night, algorithm: str) -> str | None:
+    """Whether ``algorithm``'s changed code would be pre-validated tonight (#454): FRESH, AGAIN (its
+    last run for this revision left no verdict, on older code: it waits for the FRESH ones), or None
+    (not tonight: none waits, too few days after the change, or judged)."""
+    revising = night.facts.revising.get(algorithm)
+    if revising is None or revising.recorded_days < MIN_DAYS:
+        return None
+    report = revising.report
+    if report is not None and report.judged:
+        return None  # the engine keeps its verdict at its next bar close
+    record = night.records.get(revision_job_name(algorithm))
+    if record is None or record.outcome not in (OK, FAILED) or record.started_at < revising.boundary:
+        return FRESH  # never ran for this revision, or a restart cut it
+    if (
+        report is not None
+        and not report.current
+        and report.made_at is not None
+        and report.made_at >= record.started_at
+    ):
+        return FRESH  # the run left its report, and the target has changed since
+    ended = record.started_at + timedelta(seconds=record.seconds or 0.0)
+    if report is not None and report.made_at is not None and report.made_at > ended:
+        return FRESH  # a look by hand since replaced its verdict
+    if record.commit == night.commit:
+        return None  # it ran on this code without a verdict: another deploy may give one
+    return AGAIN
+
+
+def revision_tonight(night: Night, order: Sequence[str]) -> str | None:
+    """The algorithm of ``order`` whose changed code is pre-validated tonight (#454): none if a
+    bar-close pre-validation (a first one or a changed code's) ran tonight; else the first FRESH,
+    else the first AGAIN."""
+    if _revision_ran_tonight(night) or any(
+        (record := night.records.get(prevalidation_job_name(name))) is not None and record.day == night.day
+        for name in order
+    ):
+        return None
+    turns = [(name, revision_turn(night, name)) for name in order]
+    return next((n for n, t in turns if t == FRESH), None) or next((n for n, t in turns if t == AGAIN), None)
+
+
+def _revision_due(algorithm: str, order: tuple[str, ...]) -> Callable[[Night], bool]:
+    def due(night: Night) -> bool:
+        return revision_tonight(night, order) == algorithm
+
+    return due
+
+
+def revision_jobs(names: Sequence[str]) -> tuple[Job, ...]:
+    """A job pre-validating the changed code of each bar-close algorithm of ``names`` (the
+    registries' order), those registered before pre-validation too (#454)."""
+    order = tuple(names)
+    return tuple(
+        Job(
+            name=revision_job_name(name),
+            due=_revision_due(name, order),
+            command=("prevalidate", name, "--revision"),
+            timeout=PREVALIDATION_TIMEOUTS.get(name, PREVALIDATION_TIMEOUT),
+            targets=(Target(PREVALIDATION_ISSUE, note=_revision_note(name)),),
+            attach=(Attachment(f"리포트 state/{_report_of(name)}", _report_of(name)),),
+            report=_report_of(name),
+        )
+        for name in order
+    )
+
+
+_REVISION_NOTE = (
+    "코드가 바뀐 돌고 있는 알고리즘의 사전 검증(#454): 코드가 바뀐 뒤 첫 온전한 거래일부터의 녹화일만 "
+    "재생했다(검사는 처음 사전 검증과 같다). 거부(`refused`)되면 엔진이 다음 봉 마감에 은퇴시키고 다음 15:40 "
+    "점검에 한 번 알린다. 통과(`passed`)만으로는 정식이 되지 않는다: 수습은 이어지고, 실시간 수습의 판정일 "
+    "판정도 통과해야 정식이다. 같은 코드로는 다시 돌지 않는다."
+)
+
+
+def _revision_note(algorithm: str) -> str:
+    return " ".join(n for n in (_REVISION_NOTE, _DIAGNOSTICS_NOTES.get(algorithm)) if n)
+
+
+# The daily kinds' algorithms' pre-validations (#264): a walk-forward over ten years of KRX day
+# candles (``daily_training``), not a replay of the recorded days, so neither the recorded days'
+# count nor the one-a-night turn of the bar-close ones holds them back: each runs on the first
+# night it waits without a verdict on the code and inputs it runs (and again once a deploy changes
+# them, or after a run that left no verdict, on newer code). While the data of one of its
+# features is behind the feature's version on this server (#297: KRX's net buys before NXT, until
+# the keeper has stored them), it waits: a run then would be judged on the old data. Minutes, not
+# hours; the hour is a bound. Before the bar-close pre-validations, which may take the rest of the
+# night. Its result goes to #204, with them, and to its daily kind's issue (``DAILY_KIND_ISSUES``:
+# open_to_close's #264, open_to_close_5d's #310, whose review days were fixed from the variance
+# ratio its first pre-validation measured: a later algorithm's report measures it again).
+DAILY_PREVALIDATION_TIMEOUT = timedelta(hours=1)
+DAILY_KIND_ISSUES = {"open_to_close": DAILY_CHECK_ISSUE, "open_to_close_5d": 310}
+
+
+def _daily_prevalidation_due(
+    algorithm: str, features: Sequence[str] = (), kind: str | None = None
+) -> Callable[[Night], bool]:
+    of_kind = daily_kind_named(kind) if kind is not None else None
+
+    def due(night: Night) -> bool:
+        facts = night.facts
+        if algorithm not in facts.waiting:
+            return False
+        if of_kind is not None and not of_kind.runs:
+            return False  # its kind awaits a probe's result (#310): it is not pre-validated
+        if set(features) & set(facts.pending_inputs):
+            return False  # its data is not all in yet (#297): it would be judged on the old
+        if kind in facts.pending_answers:
+            return False  # its kind's latest answers are not all in (#264): fewer days than there are
+        report = facts.reports.get(algorithm)
+        if report is not None and report.judged:
+            return False  # it judged the code the algorithm runs now
+        record = night.records.get(prevalidation_job_name(algorithm))
+        if record is None or record.outcome not in (OK, FAILED):
+            return True  # never ran, or a restart cut it
+        if report is not None and not report.current and report.made_at is not None:
+            if report.made_at >= record.started_at:
+                return True  # the run left its report, and the code has changed since
+        return record.commit != night.commit  # it ran without a verdict: again on new code
+
+    return due
+
+
+def daily_prevalidation_jobs(
+    names: Sequence[str],
+    features: Mapping[str, Sequence[str]] | None = None,
+    kinds: Mapping[str, str] | None = None,
+) -> tuple[Job, ...]:
+    """A pre-validation job for each daily algorithm of ``names`` (#264), waiting for its
+    ``features``' data and its kind's answers (``kinds``: algorithm -> kind), posting to #204 and
+    its kind's issue (``DAILY_KIND_ISSUES``)."""
+    out = []
+    for name in names:
+        kind = (kinds or {}).get(name)
+        note = _DAILY_PREVALIDATION_NOTES.get(kind or "", _DAILY_PREVALIDATION_NOTE)
+        out.append(
+            Job(
+                name=prevalidation_job_name(name),
+                due=_daily_prevalidation_due(name, (features or {}).get(name, ()), kind),
+                command=("prevalidate", name),
+                timeout=DAILY_PREVALIDATION_TIMEOUT,
+                targets=(
+                    Target(PREVALIDATION_ISSUE, note=note),
+                    Target(DAILY_KIND_ISSUES.get(kind or "", DAILY_CHECK_ISSUE), note=note),
+                ),
+                attach=(Attachment(f"리포트 state/{_report_of(name)}", _report_of(name)),),
+                report=_report_of(name),
+            )
+        )
+    return tuple(out)
+
+
+_DAILY_PREVALIDATION_NOTE = (
+    "하루 한 번 예측 종류의 알고리즘(#264)의 사전 검증: KRX 일봉 10년의 walk-forward다. 통과(`passed`)하면 "
+    "그 밤 `simulate-daily-298`이 수습에 올리고 최근 20거래일을 시뮬레이션해 바로 판정한다(#298, 판정은 "
+    "20·40·60일째). 거부(`refused`)되면 같은 코드로는 다시 돌지 않는다."
+)
+_DAILY_PREVALIDATION_NOTES = {
+    "open_to_close_5d": (
+        "5거래일 창 `open_to_close_5d`(#310)의 알고리즘의 사전 검증: KRX 일봉 10년의 walk-forward다. 이 "
+        "종류의 판정일은 `cox-5d`의 첫 사전 검증(2026-10-23 밤)이 잰 분산 배율(VR 2.220)로 규칙에 따라 "
+        "60·120·180일로 고정했다. 통과(`passed`)하면 그 밤 `simulate-daily-298`이 수습에 올리고 끝난 최근 "
+        "창 60개를 시뮬레이션해 바로 판정한다(#298). 리포트의 `walk_forward.overlap`이 이 실행의 VR과 규칙이 "
+        "주는 판정일(`review_days`)을 다시 잰다. 출력의 `review days of open_to_close_5d` 줄이 고정한 "
+        '판정일보다 길다고 하면 에이전트가 판정일을 다시 정하는 이슈를 연다(#310 "상태 판정"의 "다음 '
+        '알고리즘"). 거부(`refused`)되면 같은 코드로는 다시 돌지 않는다.'
+    ),
+}
+
+
+# The daily kinds' simulated probations (#298, ``simulation.py``): a daily algorithm starts on
+# probation with its latest 20 trading days replayed (refitted before each, as its nights would),
+# judged at once. The job runs right after the daily pre-validations: on the night one passes, it
+# enrolls the algorithm on probation (the engine would at its next start) and simulates it, so it
+# is active by the next 08:50 if it passes. It also runs on a night a daily probation waits for it
+# (begun by the engine, or a run cut short). Once a night; a run that failed waits for new code (or
+# a new pass), as a pre-validation that left no verdict does. Cox fits in seconds: 20 fits and ten
+# years of samples are minutes; the hour is a bound. Its result goes to #298 and #264. It waits for
+# the algorithms of a kind whose answers of the latest days are not all in on this server
+# (``Facts.pending_answers``, #264: ``open_to_close``'s closing auction prices).
+# It gives way to a bar-close pre-validation as the bar-close simulation does (below, #376). It never
+# holds back the daily pre-validations: they run before it (a pass enrolls that night), take about a
+# minute, are not one a night, and start by 04:30. Judged by its hour, it gives way only when it
+# would start after 22:30 with a Breiman due (last start 23:30) or after 23:30 with another one.
+SIMULATION_ISSUE = 298
+DAILY_SIMULATION_TIMEOUT = timedelta(hours=1)
+
+
+def _a_prevalidation(job: Job) -> bool:
+    """A pre-validation's job: the simulations give way to it (#376)."""
+    return job.command[:1] == ("prevalidate",)
+
+
+def _daily_simulation_due(
+    algorithms: Sequence[DailyAlgorithm], kinds: Sequence[DailyKind] = DAILY_KINDS
+) -> Callable[[Night], bool]:
+    held = {k.name for k in kinds if k.review_hold is not None}
+
+    def due(night: Night) -> bool:
+        # Not for an algorithm whose kind's latest answers are not all in on this server (#264):
+        # the days replayed would not be the latest; nor for one whose kind's review days are not
+        # fixed yet (#310, ``DailyKind.review_hold``): it is not enrolled.
+        names = [
+            a.name for a in algorithms if a.kind not in night.facts.pending_answers and a.kind not in held
+        ]
+        if not names:
+            return False
+        record = night.record
+        if record is not None and record.day == night.day:
+            return False  # once a night
+        passed = any(
+            (r := night.records.get(prevalidation_job_name(name))) is not None
+            and r.day == night.day
+            and r.outcome == OK
+            for name in names
+        )
+        if passed:
+            return True  # a daily algorithm passed tonight: enrolled and simulated at once
+        if not set(night.facts.simulating_daily) & set(names):
+            return False
+        return not (record is not None and record.outcome == FAILED and record.commit == night.commit)
+
+    return due
+
+
+DAILY_SIMULATION = Job(
+    name="simulate-daily-298",
+    due=_daily_simulation_due(DAILY_ALGORITHMS),
+    command=("simulate", "daily"),
+    timeout=DAILY_SIMULATION_TIMEOUT,
+    gives_way_to=_a_prevalidation,
+    targets=(
+        Target(
+            SIMULATION_ISSUE,
+            note=(
+                "하루 한 번 예측 종류의 수습 시뮬레이션(#298): 그 종류의 첫 판정일만큼의 최근 거래일"
+                "(`open_to_close`는 20일, `open_to_close_5d`는 끝난 창 60개, #310)을 그 알고리즘이 수습으로 "
+                "돌았다고 치고 다시 재생했다(날마다 그 전날까지로 다시 학습). 그 판정을 바로 했다. 통과하면 "
+                "지금부터 정식이고, 못 하면 수습이 "
+                "이어진다(다음 판정은 그 둘째 판정일). 출력에는 시세 값이 없다(날짜, 개수, lift만)."
+            ),
+        ),
+        Target(
+            DAILY_CHECK_ISSUE,
+            note="수습 시뮬레이션(#298)의 결과. 자세한 것은 #298.",
+        ),
+    ),
+)
+
+
+# The bar-close kinds' simulated probations (#298, ``simulation.py``): the direction's, the range's
+# and the barriers' algorithms start on probation with the latest recorded days replayed (10 to 20:
+# as many as there are), each trained once before them, judged at once. Due on a night a bar-close
+# probation waits for it (a pre-validation passed, the engine enrolled it at the next bar close; a
+# new target's restart) once 10 days are recorded (``MIN_DAYS``: with fewer there is nothing to
+# simulate and the probation goes on live). The algorithms waiting are replayed together, in one
+# run: the replay of a day's events through the Market View, which they share, is most of the cost,
+# and live the engine runs them all at each bar close anyway; one run a night also leaves the rest of
+# the night to a pre-validation. It is listed before the pre-validations (#298: it can make
+# algorithms already running official at once), but gives way to the night's pre-validation when,
+# run first to its limit, it would carry that one past its last start (00:30, the Breimans 23:30):
+# the pre-validation runs first and the simulation after it, that night if it can still start by
+# 00:30, else the next (#376, the decision of 2026-10-26). Its limit never fits before a 5- or
+# 6-hour pre-validation inside the night, so on a night both are due the pre-validation goes first.
+# Before, the simulation the night after each pass pushed the next pre-validation back a night (8
+# waited on 2026-10-26), and an algorithm not pre-validated does not run at all, while a simulation
+# put off only judges a night later: its probation's live days count on. After it gave way on two nights
+# (``GIVE_WAY_NIGHTS``) it runs first. A run that failed waits for new code, as a pre-validation that
+# left no verdict does. The limit is a pre-validation's: up to 20 days' replay (without its 20
+# retrainings), plus the burst CPU running out; it starts by 00:30. Its result goes to #298 and
+# #204.
+SIMULATION_TIMEOUT = timedelta(hours=5)
+
+
+def _bar_close_simulation_due(night: Night) -> bool:
+    facts = night.facts
+    if facts.recorded_days < MIN_DAYS or not facts.simulating:
+        return False
+    record = night.record
+    if record is None or record.outcome not in (OK, FAILED):
+        return True  # never ran, or a restart cut it
+    if record.day == night.day:
+        return False  # once a night
+    return not (record.outcome == FAILED and record.commit == night.commit)
+
+
+BAR_CLOSE_SIMULATION = Job(
+    name="simulate-bar-close-298",
+    due=_bar_close_simulation_due,
+    command=("simulate", "bar-close"),
+    timeout=SIMULATION_TIMEOUT,
+    gives_way_to=_a_prevalidation,
+    targets=(
+        Target(
+            SIMULATION_ISSUE,
+            note=(
+                "4분(봉 마감) 종류의 수습 시뮬레이션(#298): 녹화된 최근 거래일(10–20일)을 그 알고리즘들이 "
+                "수습으로 돌았다고 치고 다시 재생했다(첫날 전까지로 한 번 학습). 그 판정을 바로 했다. "
+                "통과하면 지금부터 정식이고, 못 하면 수습이 이어진다(다음 판정일까지 실시간 날이 더해진다). "
+                "출력에는 시세 값이 없다(날짜, 개수, lift만)."
+            ),
+        ),
+        Target(PREVALIDATION_ISSUE, note="수습 시뮬레이션(#298)의 결과. 자세한 것은 #298."),
+    ),
+)
+
+
+_PREVALIDATION_NOTE = (
+    "통과(`passed`)하면 엔진이 다음 봉 마감부터 수습으로 돌리고, 수습이 시작된 그 밤 "
+    "`simulate-bar-close-298`이 최근 녹화일로 수습을 시뮬레이션해 바로 판정한다(#298). "
+    "거부(`refused`)되면 같은 코드·정답 버전으로는 다시 돌지 않고, 고친 코드가 배포되면 다시 돈다."
+)
+# What an agent does with the diagnostics a candidate's report carries (#283,
+# ``contract.Diagnostics``): measured besides the checks, never judged.
+_DIAGNOSTICS_NOTES = {
+    "neyman": (
+        "출력의 `neyman diagnostics` 줄과 리포트의 `diagnostics`(#283)는 판정에 쓰지 않는 측정이다: "
+        "1차의 상승·하락 예측이 2차 뒤 반대쪽으로 뒤집힌 수와 그 정밀도(뒤집히지 않은 예측의 정밀도와 함께), "
+        "상승·하락 동률, 1차 확률의 표본 밖·표본 안·실시간 분포. 에이전트가 이 숫자를 #283에 요약한다. "
+        "사용자가 그것으로 #283의 모델 변경 순서를 정한다."
+    ),
+}
+
+
+def _report_of(algorithm: str) -> str:
+    """The report's path under the state directory."""
+    return report_path(Path(), algorithm).as_posix()
