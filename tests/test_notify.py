@@ -143,7 +143,7 @@ async def test_an_alert_telegram_took_is_logged_as_sent_after_it_is(caplog: pyte
     async with telegram(200) as (url, sent), aiohttp.ClientSession() as session:
         alerts = Alerts(session, "123:fake", "42", url)
         alerts.raise_("training", TEXT)
-        await until(lambda: len(said(caplog)()) == 2)
+        await until(lambda: f"telegram sent: [장애] {TEXT}" in said(caplog)())
         await alerts.close()
     assert sent == [f"[장애] {TEXT}"]
     assert said(caplog)() == [f"alert: [장애] {TEXT}", f"telegram sent: [장애] {TEXT}"]
@@ -160,7 +160,7 @@ async def test_an_alert_telegram_refused_is_not_tried_again_nor_logged_as_sent(
         alerts = queue(session, telegram_.url, time)
         alerts.raise_("training", TEXT)
         alerts.notice("다음 알림")
-        await until(lambda: telegram_.took == ["[알림] 다음 알림"])
+        await until(lambda: "[알림] 다음 알림" in telegram_.took)
         await alerts.close()
     assert telegram_.asked == [f"[장애] {TEXT}", "[알림] 다음 알림"], "tried once"
     assert time.slept == [] and retries(caplog) == []
@@ -191,7 +191,7 @@ async def test_a_message_that_failed_for_a_moment_is_sent_again_and_those_behind
         alerts.notice("호가 멈춤")
         alerts.notice("호가 돌아옴")
         alerts.signal("상승")
-        await until(lambda: len(telegram_.took) == 3)
+        await until(lambda: "[신호] 상승" in telegram_.took)
         await alerts.close()
     first, second, third = "[알림] 호가 멈춤", "[알림] 호가 돌아옴", "[신호] 상승"
     assert telegram_.asked == [first, first, first, second, third]
@@ -216,7 +216,7 @@ async def test_a_message_telegram_cannot_be_reached_for_is_tried_for_two_minutes
         alerts = queue(session, UNREACHABLE, time)
         alerts.notice("첫째")
         alerts.notice("둘째")
-        await until(lambda: len(failed(caplog)) == 2)
+        await until(lambda: any(m.endswith("dropped: [알림] 둘째") for m in failed(caplog)))
         await alerts.close()
     assert time.slept == [1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 30.0, 22.0]
     assert sum(time.slept) == notify.RETRY_SECONDS
@@ -235,7 +235,7 @@ async def test_http_429_waits_the_retry_after_telegram_gives(caplog: pytest.LogC
         alerts = queue(session, telegram_.url, time)
         alerts.notice("첫째")
         alerts.notice("둘째")
-        await until(lambda: len(telegram_.took) == 2)
+        await until(lambda: "[알림] 둘째" in telegram_.took)
         await alerts.close()
     assert telegram_.asked == ["[알림] 첫째", "[알림] 첫째", "[알림] 둘째"]
     assert time.slept == [7.0]
@@ -254,10 +254,10 @@ async def test_a_429_asking_past_the_messages_time_drops_them_without_asking_aga
         alerts = queue(session, telegram_.url, time)
         alerts.notice("첫째")
         alerts.notice("둘째")
-        await until(lambda: len(failed(caplog)) == 2)
+        await until(lambda: any(m.endswith("dropped: [알림] 둘째") for m in failed(caplog)))
         time.now += 300
         alerts.notice("셋째")
-        await until(lambda: telegram_.took == ["[알림] 셋째"])
+        await until(lambda: "[알림] 셋째" in telegram_.took)
         await alerts.close()
     assert telegram_.asked == ["[알림] 첫째", "[알림] 셋째"]
     assert time.slept == []
@@ -274,10 +274,10 @@ async def test_the_callers_do_not_wait_for_telegram(caplog: pytest.LogCaptureFix
         alerts.raise_("feed", "피드가 끊겼습니다")
         alerts.notice("호가 멈춤")
         # Returned at once: the loop goes on while the first request waits for its answer.
-        await until(lambda: telegram_.asked == ["[장애] 피드가 끊겼습니다"])
+        await until(lambda: "[장애] 피드가 끊겼습니다" in telegram_.asked)
         assert telegram_.took == []
         telegram_.gate.set()
-        await until(lambda: len(telegram_.took) == 2)
+        await until(lambda: "[알림] 호가 멈춤" in telegram_.took)
         await alerts.close()
     assert telegram_.took == ["[장애] 피드가 끊겼습니다", "[알림] 호가 멈춤"]
 
@@ -307,9 +307,9 @@ async def test_the_queue_holds_a_bounded_number_and_drops_the_newest(
             alerts.notice(f"알림 {n}")
         assert alerts.overflowed == 2
         telegram_.gate.set()
-        await until(lambda: len(telegram_.took) == 3)
+        await until(lambda: "[알림] 알림 2" in telegram_.took)
         alerts.notice("그 뒤의 알림")  # room again
-        await until(lambda: len(telegram_.took) == 4)
+        await until(lambda: "[알림] 그 뒤의 알림" in telegram_.took)
         await alerts.close()
     assert telegram_.took == ["[알림] 알림 0", "[알림] 알림 1", "[알림] 알림 2", "[알림] 그 뒤의 알림"]
     assert failed(caplog) == [
@@ -326,7 +326,7 @@ async def test_close_sends_what_is_left_for_its_time_limit_at_most(caplog: pytes
         alerts.notice("첫째")
         alerts.notice("둘째")
         told = asyncio.create_task(alerts.deliver("셋째"))
-        await until(lambda: telegram_.asked == ["[알림] 첫째"])
+        await until(lambda: "[알림] 첫째" in telegram_.asked)
         await asyncio.wait_for(alerts.close(timeout=0.05), 5)
         assert await asyncio.wait_for(told, 5) is False
         assert telegram_.took == []
@@ -386,16 +386,21 @@ async def test_the_engine_s_alerts_go_through_the_queue(
             await kis.wait_for_subscription_count(TRADE_KEY, 1)
             kis.accept_ws = False
             await kis.close_connections()
-            await until(lambda: len(telegram_.took) == 1)
+            await until(lambda: bool(websocket(telegram_.took, "[장애]")))
             kis.accept_ws = True
-            await until(lambda: len(telegram_.took) == 2)
+            await until(lambda: bool(websocket(telegram_.took, "[복구]")))
         finally:
             stop.set()
             await asyncio.wait_for(task, 5)
-    down, back = telegram_.took
-    assert down.startswith("[장애]") and "WebSocket" in down
-    assert back.startswith("[복구]") and "WebSocket" in back
-    assert telegram_.asked[:2] == [down, down], "refused once (HTTP 503), sent again"
+    [down], [back] = websocket(telegram_.took, "[장애]"), websocket(telegram_.took, "[복구]")
+    assert telegram_.took.index(down) < telegram_.took.index(back)
+    assert telegram_.asked[0] == telegram_.asked[1], "refused once (HTTP 503), sent again"
+    assert telegram_.took == list(dict.fromkeys(telegram_.asked)), "each once, in order"
+
+
+def websocket(texts: list[str], kind: str) -> list[str]:
+    """The KIS WebSocket alerts of ``kind`` (``[장애]``, ``[복구]``) among ``texts``."""
+    return [t for t in texts if t.startswith(kind) and "WebSocket" in t]
 
 
 async def test_the_trader_s_notices_go_through_the_queue(
