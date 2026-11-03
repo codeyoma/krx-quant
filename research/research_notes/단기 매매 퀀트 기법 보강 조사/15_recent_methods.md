@@ -255,4 +255,4 @@ IRM은 이론적으로 쉽게 실패하고, 세심하게 구현한 ERM이 domain
 - **IRM·causal representation**: 일반 ML에서도 ERM을 넘지 못했고, 금융 근거는 저자 자체 결과뿐이다. PCMCI(tigramite)는 GPL-3.0 라이선스 문제가 있다.
 - **GNN·DeltaLag·lead-lag 군집**: 종목이 3개라 그래프 구조가 없다.
 - **OU 최적 진입 문턱(Bertram, Leung–Li)과 Kalman pairs hedge ratio**: Gauss가 κ ≈ 0을 배운 지금은 줄 것이 없다. κ > 0이 유의한 조건부 국면을 먼저 찾으면 그때 다시 본다. pairs 종류(삼성전자–SK하이닉스 상대강도)를 만들 때 Kalman hedge ratio를 재검토한다.
-- **MBOFormer 류 소형 LOB transformer**: LOB가 수개월 쌓이면 다시 본다. 재평가 시점은 LOB 기록 일수를 조건으로 하는 예약 작업(`src/krx_quant/scheduled.py`)으로 둘 수 있다.
+- **MBOFormer 류 소형 LOB transformer**: LOB가 수개월 쌓이면 다시 본다. 재평가 시점은 LOB 기록 일수를 조건으로 하는 예약 작업(`src/krx_quant/scheduled/`)으로 둘 수 있다.

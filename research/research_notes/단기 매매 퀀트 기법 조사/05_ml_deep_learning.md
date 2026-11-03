@@ -178,7 +178,7 @@ RL 트레이딩의 근거는 대부분 저자가 설계한 백테스트다. 리�
 4. **(낮은 우선순위) Kronos zero-shot을 오프라인에서 한 번 시험**. 3종목 1분봉에서 Kronos의 예측값을 LightGBM feature로 넣어 본다. 근거는 저자 보고뿐이다. 사전학습 데이터 기간을 확인하기 전까지는 오염 가능성을 적어 둔다.
 
 **지금은 하지 않을 것**
-- **DeepLOB, TransLOB, DeepLOB-Attention 같은 raw LOB 딥러닝**: LOB 이력이 수 주라 학습량이 턱없이 부족하다. 데이터가 많은 연구에서도 새 데이터에서 F1이 ~60으로 떨어졌다(LOBCAST). 예측 horizon(가격 변화 ~2회)도 엔진의 분 단위 horizon보다 짧다. LOB가 수개월 쌓이면 다시 본다. 그때도 raw book 대신 OFI 같은 stationary 입력에 작은 모델을 쓴다(Kolm 등). 재평가 시점은 LOB 기록 일수를 조건으로 하는 예약 작업(`src/krx_quant/scheduled.py`)으로 두면 된다.
+- **DeepLOB, TransLOB, DeepLOB-Attention 같은 raw LOB 딥러닝**: LOB 이력이 수 주라 학습량이 턱없이 부족하다. 데이터가 많은 연구에서도 새 데이터에서 F1이 ~60으로 떨어졌다(LOBCAST). 예측 horizon(가격 변화 ~2회)도 엔진의 분 단위 horizon보다 짧다. LOB가 수개월 쌓이면 다시 본다. 그때도 raw book 대신 OFI 같은 stationary 입력에 작은 모델을 쓴다(Kolm 등). 재평가 시점은 LOB 기록 일수를 조건으로 하는 예약 작업(`src/krx_quant/scheduled/`)으로 두면 된다.
 - **범용 TSFM(Chronos, TimesFM, Moirai)으로 수익률 예측**: 금융 수익률에서 zero-shot과 fine-tuning 모두 약하고, random walk 대비 이득도 작고 드물다.
 - **LLM 뉴스 감성과 LLM agent**: 강한 예측력은 거래할 수 없는 초기 반응에 몰려 있고, 장기 평가에서는 우위가 사라졌다. 분 단위 엔진에 붙이려면 한국어 실시간 뉴스와 비용이 들고, 백테스트는 오염된다. 필요하면 나중에 일 단위 "이벤트 있음" 플래그 정도로만 검토한다.
 - **RL**: 근거의 질이 낮고, signals-only 엔진과 목적이 다르다.

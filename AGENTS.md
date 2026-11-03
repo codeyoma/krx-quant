@@ -53,7 +53,8 @@ Worktree, checks, commits, docs, PRs, reviews and stacked PRs: `docs/agents/pr-c
 
 ## Timed server work
 
-- Work that must run on the server on a given day or at a given time (a diagnosis after a deploy, a pre-validation once enough days are recorded, a measurement a decision waits for) is a scheduled job: add an entry to `JOBS` in `src/krx_quant/scheduled.py` in a PR, with its condition, command, time limit, issues and labels. Do not open a `ready-for-human` issue asking the user to remember a date and run a command.
+- Work that must run on the server on a given day or at a given time (a diagnosis after a deploy, a pre-validation once enough days are recorded, a measurement a decision waits for) is a scheduled job: in a PR, define it in its family's module of `src/krx_quant/scheduled/` (`probes`, `research`, `trader`, `prevalidations`) with its condition, command, time limit, issues and labels, and add it to `JOBS` in that package's `__init__.py`. Do not open a `ready-for-human` issue asking the user to remember a date and run a command.
+  > **바뀜** (2026-11-04, #503): `src/krx_quant/scheduled.py`의 `JOBS`에 더했다 → 작업 종류별 모듈에 두고 `scheduled/__init__.py`의 `JOBS`에 더한다. 이유: 작업을 더하는 PR마다 3,000줄 한 파일을 고쳐 동시에 열린 PR끼리 부딪혔다(#500).
 - The server runs it at night, after the nightly training, and posts the result as a comment on the job's issues, which then get `ready-for-agent`. Read it with `gh issue view <n> --comments`. See `docs/operations.md` "예약 작업 (#215)".
 - Work only the market's hours can do (an order on KIS's mock server fills only then) is a session job: give its entry a `session` time, and it runs on a trading day at that time instead of at night, ending by 15:15 (`SESSION_UNTIL`). Its condition sees cheap `Facts` (`session_facts`), not the night's.
   > **바뀜** (2026-10-29, #410): scheduled jobs ran at night only → a session job runs in the market's hours of a trading day. 이유: KIS 모의투자 서버는 장중에만 체결하는데, 주문 응답은 쓰기 전에 서버에서 재야 한다(#403).
