@@ -85,6 +85,8 @@ class Settings:
     usd_futures_code: str | None = None
     # KOSPI200 options recorded: the ATM strike and this many strikes on each side, calls and puts.
     option_strikes_each_side: int = 2
+    # How often each symbol's investor estimates are polled, from the open to the close of a
+    # trading day (#488).
     foreign_estimate_poll_seconds: float = 300.0
     # How often each symbol's VIs are polled while the market is open.
     vi_poll_seconds: float = 5.0
@@ -107,7 +109,8 @@ class Settings:
     # How often feed health (stale feeds) is checked.
     health_check_seconds: float = 5.0
     # A reconnect counts as recovered (and is announced) only after staying up this long,
-    # so a flapping connection does not send an alert pair on every cycle.
+    # so a flapping connection does not send an alert pair on every cycle. Only an alerted drop
+    # is announced: one back within ``collector.WS_ALERT_AFTER_SECONDS`` sends neither (#488).
     recovery_hold_seconds: float = 60.0
     # WebSocket reconnect backoff: starts here, doubles per failed attempt, capped at the max.
     reconnect_initial_seconds: float = 1.0

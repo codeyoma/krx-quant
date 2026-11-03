@@ -775,21 +775,32 @@ async def test_vi_status_is_polled_for_the_day_and_recorded_when_it_changes(
     )
 
 
-async def test_vis_are_not_polled_while_the_market_is_closed(kis: FakeKis, tmp_path: Path) -> None:
+async def test_vis_and_estimates_are_not_polled_while_the_market_is_closed(
+    kis: FakeKis, tmp_path: Path
+) -> None:
+    """The investor estimates keep a trading day's session too (#488). A REST fallback, polled at
+    any hour, shows the poll jobs have gone round: the book is refused for the session limit."""
+    kis.max_subscriptions = 3  # the night futures (#264) and the trade feed fit
+    kis.rest_responses["FHKST01010200"] = lambda q: {"rt_cd": "1", "msg1": "not needed here"}
     kis.rest_responses["FHPST01390000"] = lambda q: ok(output=[])
     kis.rest_responses["HHPTJ04160200"] = lambda q: ok(output2=[])
-    settings = replace(settings_for(kis, tmp_path), vi_poll_seconds=0.02, foreign_estimate_poll_seconds=0.02)
+    settings = replace(
+        settings_for(kis, tmp_path),
+        vi_poll_seconds=0.02,
+        foreign_estimate_poll_seconds=0.02,
+        fallback_poll_seconds=0.02,
+    )
     evening = datetime(2026, 10, 8, 20, 30, tzinfo=KST)
 
     stop = asyncio.Event()
     task = asyncio.create_task(run_collector(settings, stop=stop, clock=lambda: evening))
     try:
-        await until(lambda: sum(t == "HHPTJ04160200" for _, t, _, _ in kis.rest_requests) >= 3)
+        await until(lambda: sum(t == "FHKST01010200" for _, t, _, _ in kis.rest_requests) >= 3)
     finally:
         stop.set()
         await asyncio.wait_for(task, 5)
 
-    assert not any(t == "FHPST01390000" for _, t, _, _ in kis.rest_requests)
+    assert not any(t in ("FHPST01390000", "HHPTJ04160200") for _, t, _, _ in kis.rest_requests)
 
 
 async def test_each_fallback_of_the_plan_can_be_checked_once_beside_the_collector(
