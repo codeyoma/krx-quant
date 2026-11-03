@@ -25,8 +25,8 @@ from tests.kis_frames import (
     us_trade_frame,
 )
 from tests.test_collector import FIXED_NOW, KST, collect, read, settings_for
-from tests.test_subscription_limit import until
 from tests.test_subscription_plan import CALLS, NOVEMBER_CALLS, NOVEMBER_PUTS, PUTS, options_of, serve_masters
+from tests.waiting import until
 
 
 async def test_program_trading(kis: FakeKis, tmp_path: Path) -> None:

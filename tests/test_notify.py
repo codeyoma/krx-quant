@@ -14,7 +14,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestServer
 
 from krx_quant.notify import Alerts
-from tests.test_subscription_limit import until
+from tests.waiting import until
 
 TEXT = "2026-10-22 밤 학습이 실패했습니다: exit -9 (SIGKILL)"
 

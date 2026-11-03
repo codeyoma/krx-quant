@@ -58,7 +58,7 @@ from tests.test_scheduled import (
     scheduling,
     settle,
 )
-from tests.test_subscription_limit import until
+from tests.waiting import until
 
 TEN = time(10, 0)
 

@@ -33,8 +33,8 @@ from krx_quant.swap import await_spot_night, first_spot_wait, publish_training_i
 from tests.test_collector import KST, settings_for
 from tests.test_nightly import DAYS, archive_bars
 from tests.test_nightly import NIGHT as LAST_DAY
-from tests.test_subscription_limit import until
 from tests.test_swap import MORNING, NIGHT, TRAINED, at, night_list
+from tests.waiting import until
 
 CALENDAR = MarketCalendar({NIGHT: True, MORNING: True})
 

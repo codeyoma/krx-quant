@@ -14,10 +14,10 @@ from pathlib import Path
 from typing import Any
 
 import aiohttp
-from aiohttp import ClientWebSocketResponse
+from aiohttp import ClientWebSocketResponse, web
 from aiohttp.test_utils import TestClient, TestServer
 
-from krx_quant.api import create_app
+from krx_quant.api import STREAM_KEY, create_app
 from krx_quant.baselines import Forecast
 from krx_quant.clock import FakeClock
 from krx_quant.engine import PredictionEngine
@@ -29,6 +29,7 @@ from tests.algorithm_doubles import FixedAlgorithm
 from tests.api_schema import check
 from tests.replay_events import CALENDAR, FEE, SYMBOL, at, trade
 from tests.test_replay import busy_morning
+from tests.waiting import until
 
 UP = Forecast(0.7, 0.2, 0.1, 2.0)
 
@@ -48,6 +49,15 @@ def engine_at(db: Path, start: datetime) -> tuple[PredictionEngine, FakeClock]:
         FixedAlgorithm("second", features=("acceleration",), unique=("acceleration",), forecast=UP),
     ]
     return PredictionEngine(store, CALENDAR, (SYMBOL,), FEE, clock, algorithms=algorithms), clock
+
+
+async def listening(client: TestClient[web.Request, web.Application]) -> ClientWebSocketResponse:
+    """A connection to the stream, once the stream counts it: an event made before then reaches
+    no one."""
+    stream = client.app[STREAM_KEY]
+    ws = await client.ws_connect("/v1/stream")
+    await until(lambda: stream.clients == 1)
+    return ws
 
 
 async def receive_until(
@@ -94,8 +104,7 @@ async def test_a_status_change_from_another_process_is_streamed(tmp_path: Path) 
     engine, _ = engine_at(tmp_path / "engine.db", at("09:00:00"))
 
     async with TestClient(TestServer(create_app(engine, stream_poll_seconds=0.01))) as client:
-        ws = await client.ws_connect("/v1/stream")
-        await asyncio.sleep(0.05)  # the stream is polling
+        ws = await listening(client)
         command = PredictionStore(tmp_path / "engine.db")  # `krx-quant retire second`
         command.change_status("second", at("09:00:00"), Status.ACTIVE, Status.RETIRED, "retired by command")
         command.close()
@@ -158,7 +167,8 @@ async def test_the_bar_being_made_is_sent_once_a_poll_with_its_last_values(tmp_p
     store = PredictionStore(tmp_path / "engine.db")
     clock = FakeClock(at("09:30:00"))
     engine = PredictionEngine(store, CALENDAR, (SYMBOL, OTHER), FEE, clock, algorithms=[])
-    app = create_app(engine, stream_poll_seconds=0.3)
+    app = create_app(engine, stream_poll_seconds=0.01)
+    stream = app[STREAM_KEY]
 
     def trades(*made: tuple[str, str, int, int]) -> None:
         """At once, between two polls: no await in between."""
@@ -167,8 +177,7 @@ async def test_the_bar_being_made_is_sent_once_a_poll_with_its_last_values(tmp_p
             engine.on_event(*trade(at(when), price, qty, symbol=symbol))
 
     async with TestClient(TestServer(app)) as client:
-        ws = await client.ws_connect("/v1/stream")
-        await asyncio.sleep(0.05)
+        ws = await listening(client)
         trades(
             (SYMBOL, "09:30:01", 81_200, 10),
             (SYMBOL, "09:30:02", 81_400, 5),
@@ -177,7 +186,8 @@ async def test_the_bar_being_made_is_sent_once_a_poll_with_its_last_values(tmp_p
         )
         first = await receive_until(ws, lambda e: e["type"] == "bar")
         second = await receive_until(ws, lambda e: e["type"] == "bar")
-        await asyncio.sleep(0.7)  # two more polls: nothing changed, nothing sent
+        polls = stream.polls
+        await until(lambda: stream.polls >= polls + 2)  # two more polls: nothing changed, nothing sent
         trades((SYMBOL, "09:31:00.5", 81_100, 3))  # the next minute begins
         third = await receive_until(ws, lambda e: e["type"] == "bar")
         await ws.close()
