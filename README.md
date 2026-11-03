@@ -263,7 +263,7 @@ uv run python -c "import glob, pyarrow.parquet as pq; d = sorted(glob.glob('data
 
 > **삭제됨** (2026-10-23, #360): `logs-bundle [--days N | --since 때] [--grep 패턴]`(상태 폴더의 로그 파일 `state/logs/`를 가려서 한 파일로 묶던 명령, #356). 이유: 사용자가 로그를 Grafana Cloud Loki로만 남기기로 정했다(2026-10-23). 대신: Loki에서 질의한다([docs/agents/server-logs.md](docs/agents/server-logs.md)).
 
-종료 코드: 0은 성공이다. 2는 설정 오류(`configuration error: ...`)나 잘못된 인자다. 1은 KIS 오류(`KIS error: ...`, Docker가 다시 띄운다)이거나 명령이 할 일을 못 한 경우다. 예: 업로드에 실패한 파티션, 학습할 1분봉 없음, 되돌릴 모델 없음, 텔레그램 전송 실패, 사전 검증 거부, 실패한 REST 대체 조회, 답을 하나도 받지 못한 `probe-supply`.
+종료 코드: 0은 성공이다. 2는 설정 오류(`configuration error: ...`)나 잘못된 인자다. 1은 KIS 오류(`KIS error: ...`, Docker가 다시 띄운다)이거나 명령이 할 일을 못 한 경우다. 예: 업로드에 실패한 파티션, 학습할 1분봉 없음, 되돌릴 모델 없음, 텔레그램 전송 실패, 사전 검증 거부, 실패한 REST 대체 조회, 답을 하나도 받지 못한 `probe-supply`. 처리 함수가 없는 명령도 1이다(#499, 아무것도 하지 않고 0으로 끝나지 않는다).
 
 ## 문서
 

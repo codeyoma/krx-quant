@@ -117,8 +117,11 @@ from krx_quant.turing_prior import REPORT as TURING_PRIOR_REPORT
 from krx_quant.turing_prior import lines as turing_prior_lines
 from krx_quant.turing_prior import turing_prior_experiment
 
+# A command's handler (#499): the parsed arguments in, the exit code out.
+Run = Callable[[argparse.Namespace], int]
 
-async def _collect() -> None:
+
+async def _collect() -> int:
     settings = Settings.from_env()
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -131,9 +134,10 @@ async def _collect() -> None:
         "recording %s into %s", ",".join(settings.symbols), settings.data_dir.resolve()
     )
     await run_collector(settings, stop=stop)
+    return 0
 
 
-async def _trade() -> None:
+async def _trade() -> int:
     # The KIS keys are the collector's, which the trader never uses (#393): paper needs none, mock
     # its own (KRX_TRADER_KIS_*, #405) and live the live account's (KRX_TRADER_LIVE_KIS_*, #408), which
     # the trader checks as it starts. A trader that stops by itself (#408: the live mode's answer
@@ -148,6 +152,7 @@ async def _trade() -> None:
         except NotImplementedError:  # Windows: Ctrl+C raises KeyboardInterrupt instead
             pass
     await run_trader(settings, trader, stop=stop)
+    return 0
 
 
 def _trade_control(action: str) -> int:
@@ -218,10 +223,11 @@ def _trader_report(day: date | None) -> int:
     return run_report(Settings.from_env(require_kis=False), datetime.now(KST), day)
 
 
-async def _measure() -> None:
+async def _measure() -> int:
     limit = await measure_subscription_limit(Settings.from_env())
     print(f"KIS accepted {limit} real-time registrations in one session.")
     print(f"Set KIS_WS_MAX_SUBSCRIPTIONS={limit} in .env to stay within it.")
+    return 0
 
 
 async def _check_fallbacks() -> int:
@@ -330,9 +336,10 @@ async def _probe_krx_etf() -> int:
     return 0 if with_rows else 1  # no day answered with rows
 
 
-async def _backfill() -> None:
+async def _backfill() -> int:
     filled = await run_backfill(Settings.from_env())
     print(f"filled one-minute bars for {filled} series-days")
+    return 0
 
 
 async def _archive(recheck: bool) -> int:
@@ -691,7 +698,7 @@ async def _test_alert() -> int:
     return 0
 
 
-async def _fake_kis(port: int, host: str, trades: bool) -> None:
+async def _fake_kis(port: int, host: str, trades: bool) -> int:
     fake = FakeKis(port=port, host=host)
     await fake.start()
     print(f"fake KIS listening: KIS_REST_URL={fake.rest_url} KIS_WS_URL={fake.ws_url}", flush=True)
@@ -705,6 +712,7 @@ async def _fake_kis(port: int, host: str, trades: bool) -> None:
                 await fake.send_pingpong()
     finally:
         await fake.stop()
+    return 0  # never reached: it serves until interrupted
 
 
 def _diagnose(days: int) -> int:
@@ -850,10 +858,15 @@ def _positive(text: str) -> int:
     return value
 
 
-def main(argv: list[str] | None = None) -> int:
+def _parser() -> argparse.ArgumentParser:
+    """``krx-quant``'s parser. Each command's parser carries the handler that runs it, as its ``run``
+    default (#499): it takes the parsed arguments and returns the exit code. A new command adds its
+    parser here with ``set_defaults(run=...)`` and a row in README's command table."""
     parser = argparse.ArgumentParser(prog="krx-quant")
     sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("collect", help="record KIS real-time feeds until interrupted")
+    sub.add_parser("collect", help="record KIS real-time feeds until interrupted").set_defaults(
+        run=lambda args: asyncio.run(_collect())
+    )
     trade_cmd = sub.add_parser(
         "trade",
         help="trade 005930 on the cells the cost map passes, in paper (#394, #395), on KIS's mock server"
@@ -867,6 +880,9 @@ def main(argv: list[str] | None = None) -> int:
         choices=("resume", "rearm"),
         help="instead of trading, ask the running trader to resume after a pause, or to re-arm its"
         " cumulative loss limit (counted again from then)",
+    )
+    trade_cmd.set_defaults(
+        run=lambda args: asyncio.run(_trade()) if args.control is None else _trade_control(args.control)
     )
     refit_cmd = sub.add_parser(
         "refit-policy",
@@ -885,6 +901,7 @@ def main(argv: list[str] | None = None) -> int:
         help="then print the day's trader report (#402) above the re-fit's output: the scheduled job"
         " trader-report's",
     )
+    refit_cmd.set_defaults(run=lambda args: asyncio.run(_refit_policy(args.engine_url, args.report)))
     passive_cmd = sub.add_parser(
         "measure-passive-entry",
         help="measure on the recorded quotes and KRX trades how a buy resting at the best bid would have"
@@ -896,6 +913,7 @@ def main(argv: list[str] | None = None) -> int:
         help="the Engine API the cost map is read from (default KRX_TRADER_ENGINE_URL, which compose sets"
         " to the engine service's, http://engine:8080; else http://127.0.0.1:8080)",
     )
+    passive_cmd.set_defaults(run=lambda args: asyncio.run(_measure_passive_entry(args.engine_url)))
     audit_cmd = sub.add_parser(
         "cost-map-audit",
         help="judge every ranked algorithm of the trader's kinds as tonight's cost map judges its top"
@@ -907,6 +925,7 @@ def main(argv: list[str] | None = None) -> int:
         help="the Engine API the cost map is read from (default KRX_TRADER_ENGINE_URL, which compose sets"
         " to the engine service's, http://engine:8080; else http://127.0.0.1:8080)",
     )
+    audit_cmd.set_defaults(run=lambda args: asyncio.run(_cost_map_audit(args.engine_url)))
     report_cmd = sub.add_parser(
         "trader-report",
         help="print the trader's report of a trading day (#402), read-only from state/trader.sqlite3: its"
@@ -918,6 +937,7 @@ def main(argv: list[str] | None = None) -> int:
         type=date.fromisoformat,
         help="the trading day, YYYY-MM-DD (default: the latest at or before tonight's evening)",
     )
+    report_cmd.set_defaults(run=lambda args: _trader_report(args.day))
     mock_check_cmd = sub.add_parser(
         "check-mock-trades",
         help="compare a mock trading day's orders in the trader's ledger with KIS's order inquiry (#405),"
@@ -929,54 +949,55 @@ def main(argv: list[str] | None = None) -> int:
         type=date.fromisoformat,
         help="the trading day, YYYY-MM-DD (default: the latest at or before tonight's evening)",
     )
+    mock_check_cmd.set_defaults(run=lambda args: asyncio.run(_check_mock_trades(args.day)))
     sub.add_parser(
         "fill-notice-layout",
         help="measure the mock fill notices the trader recorded (state/fill_notices.sqlite3, #484) column by"
         " column against the day's orders in its ledger and on KIS's order inquiry (KRX_TRADER_KIS_*,"
         " read-only): each column's shape, lengths, values' count and matches; no value, order number,"
         " account or price",
-    )
+    ).set_defaults(run=lambda args: asyncio.run(_fill_notice_layout()))
     sub.add_parser(
         "measure-subscriptions",
         help="count how many real-time registrations KIS allows per session (stop the collector first)",
-    )
+    ).set_defaults(run=lambda args: asyncio.run(_measure()))
     sub.add_parser(
         "check-fallbacks",
         help="ask each feed's REST fallback once and print what it would record (safe beside the collector)",
-    )
+    ).set_defaults(run=lambda args: asyncio.run(_check_fallbacks()))
     sub.add_parser(
         "probe-candles",
         help="measure what KIS's day/week/month/year chart query gives, read-only (safe beside collect)",
-    )
+    ).set_defaults(run=lambda args: asyncio.run(_probe_candles()))
     sub.add_parser(
         "probe-supply",
         help="ask where KIS gives the daily supply indicators (#226), read-only; prints no market value",
-    )
+    ).set_defaults(run=lambda args: asyncio.run(_probe_supply()))
     sub.add_parser(
         "probe-net-buys",
         help="compare KIS's KRX (J) and integrated (UN) investor net buys by era and count the stored"
         " ones (#264), read-only; prints no market value",
-    )
+    ).set_defaults(run=lambda args: asyncio.run(_probe_net_buys()))
     sub.add_parser(
         "probe-close",
         help="compare the KRX day candle's close with KRX's one-minute bars and the recorded closing"
         " auction (#264), read-only; prints no market value",
-    )
+    ).set_defaults(run=lambda args: asyncio.run(_probe_close()))
     sub.add_parser(
         "probe-dividends",
         help="compare KIS's adjusted and as-traded KRX day candles and count their ex-date flags (#310),"
         " read-only; prints no market value",
-    )
+    ).set_defaults(run=lambda args: asyncio.run(_probe_dividends()))
     sub.add_parser(
         "probe-nav",
         help="ask where KIS gives the single-stock leveraged and inverse ETFs' net assets (#305),"
         " read-only; prints no market value",
-    )
+    ).set_defaults(run=lambda args: asyncio.run(_probe_nav()))
     sub.add_parser(
         "probe-krx-etf",
         help="ask what the KRX Open API's ETF daily trading service gives for the single-stock ETFs"
         " (#305), against KIS, read-only; prints no market value",
-    )
+    ).set_defaults(run=lambda args: asyncio.run(_probe_krx_etf()))
     night_cmd = sub.add_parser(
         "probe-night",
         help="summarize a recorded KOSPI200 night session (#264), read-only; prints no market value",
@@ -986,6 +1007,7 @@ def main(argv: list[str] | None = None) -> int:
         type=date.fromisoformat,
         help="the evening whose night to read, YYYY-MM-DD (default: the latest one subscribed for)",
     )
+    night_cmd.set_defaults(run=lambda args: asyncio.run(_probe_night(args.day)))
     expected_cmd = sub.add_parser(
         "probe-expected-open",
         help="count what the recorded books carried of the auctions' expected fill (#304), read-only;"
@@ -997,51 +1019,52 @@ def main(argv: list[str] | None = None) -> int:
         default=EXPECTED_OPEN_DAYS,
         help=f"the latest recorded trading days to read (default {EXPECTED_OPEN_DAYS})",
     )
+    expected_cmd.set_defaults(run=lambda args: _probe_expected_open(args.days))
     sub.add_parser(
         "probe-gaps",
         help="summarize every recorded day's gaps and the closing auction window's frames, trades and"
         " bars (#344), read-only; prints no market value",
-    )
+    ).set_defaults(run=lambda args: _probe_gaps())
     sub.add_parser(
         "probe-member-frames",
         help="count the member feed's raw frames whose field count is not 78 (#381), with each one's"
         " field shapes beside the next full frame's and the other feeds' frames around it, read-only;"
         " prints no field value",
-    )
+    ).set_defaults(run=lambda args: _probe_member_frames())
     sub.add_parser(
         "probe-live-account",
         help="read the trader's live account with KRX_TRADER_LIVE_KIS_* by inquiry calls alone (#408): the"
         " price, the balance, the orderable cash and the day's order inquiry, each field the trader's broker"
         " reads checked against how it reads it; places no order; keeps the result for the live mode;"
         " prints codes and field names, no key, account, order number or value",
-    )
+    ).set_defaults(run=lambda args: asyncio.run(_probe_live_account()))
     sub.add_parser(
         "probe-kis-orders",
         help="place the trader's probe orders on KIS's mock-trading server with KRX_TRADER_KIS_* (#403):"
         " a 1-share marketable buy and sell of 005930, a far limit buy and its cancel, three orders KIS"
         " should refuse; refuses any server but the mock one and runs only in the KRX session; prints"
         " the answers' codes and field shapes, no key, account, order number or market value",
-    )
+    ).set_defaults(run=lambda args: asyncio.run(_probe_kis_orders()))
     sub.add_parser(
         "check-closing-flow",
         help="summarize what the closing flow kept (#305): the net assets by day and when they came,"
         " the 15:20 rows, the days, and the integrated and KRX one-minute bars' closing auction values"
         " against the recorded prints (asks KIS for the KRX bars); writes nothing, no market value",
-    )
+    ).set_defaults(run=lambda args: asyncio.run(_check_closing_flow()))
     sub.add_parser(
         "check-krx-net-assets",
         help="summarize the ETF net assets kept from the KRX Open API (#305): the days, when they came,"
         " which day's listed units the net asset total matches, KRX against KIS; reads the state file"
         " only, prints no value",
-    )
+    ).set_defaults(run=lambda args: _check_krx_net_assets())
     sub.add_parser(
         "registry-password",
         help="print the ECR registry's docker login password (deploy/push-image.sh, EC2 Spot training)",
-    )
+    ).set_defaults(run=lambda args: _registry_password())
     sub.add_parser(
         "backfill",
         help="fill missing one-minute bars for the past year and exit (stop the collector first)",
-    )
+    ).set_defaults(run=lambda args: asyncio.run(_backfill()))
     archive_cmd = sub.add_parser(
         "archive",
         help="merge recorded part files and upload every day to KRX_OBJECT_STORE (safe to rerun)",
@@ -1049,6 +1072,7 @@ def main(argv: list[str] | None = None) -> int:
     archive_cmd.add_argument(
         "--recheck", action="store_true", help="compare every file with the store and upload what it lacks"
     )
+    archive_cmd.set_defaults(run=lambda args: asyncio.run(_archive(args.recheck)))
     replay_cmd = sub.add_parser(
         "replay", help="replay a recorded day through the engine into its own database (no KIS needed)"
     )
@@ -1058,10 +1082,11 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         help="database to write, replaced if it exists (default: state/replay-<day>.sqlite3)",
     )
+    replay_cmd.set_defaults(run=lambda args: _replay(args.day, args.db))
     sub.add_parser(
         "rescore",
         help="label every recorded day's bar closes again with the touch target (stop the engine first)",
-    )
+    ).set_defaults(run=lambda args: _rescore())
     fit_cmd = sub.add_parser(
         "fit", help="train an algorithm on the latest recorded or backfilled days and save its model"
     )
@@ -1069,6 +1094,7 @@ def main(argv: list[str] | None = None) -> int:
     fit_cmd.add_argument(
         "--days", type=_positive, help="trading days to train on (default: the algorithm's own)"
     )
+    fit_cmd.set_defaults(run=lambda args: _fit(args.algorithm, args.days))
     prevalidate_cmd = sub.add_parser(
         "prevalidate",
         help="replay a new algorithm on the latest recorded days; the engine starts it only if it passes",
@@ -1085,6 +1111,7 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="judge the running algorithm's changed code on the recorded days after the change (#454)",
     )
+    prevalidate_cmd.set_defaults(run=lambda args: _prevalidate(args.algorithm, args.days, args.revision))
     climate_prior_cmd = sub.add_parser(
         "climate-prior",
         help="compare the climate baseline, shannon and shannon with each slot's class frequencies on"
@@ -1096,6 +1123,7 @@ def main(argv: list[str] | None = None) -> int:
         default=PREVALIDATION_DAYS,
         help=f"recorded trading days to predict (default: {PREVALIDATION_DAYS})",
     )
+    climate_prior_cmd.set_defaults(run=lambda args: _climate_prior(args.days))
     poisson_link_cmd = sub.add_parser(
         "poisson-link",
         help="compare the climate baseline, poisson and poisson's lean through an asymmetric multinomial"
@@ -1107,6 +1135,7 @@ def main(argv: list[str] | None = None) -> int:
         default=PREVALIDATION_DAYS,
         help=f"recorded trading days to predict (default: {PREVALIDATION_DAYS})",
     )
+    poisson_link_cmd.set_defaults(run=lambda args: _poisson_link(args.days))
     turing_prior_cmd = sub.add_parser(
         "turing-prior",
         help="compare the climate baseline, turing, and turing with the symbol, each slot's class frequencies"
@@ -1118,11 +1147,12 @@ def main(argv: list[str] | None = None) -> int:
         default=PREVALIDATION_DAYS,
         help=f"recorded trading days to predict (default: {PREVALIDATION_DAYS})",
     )
+    turing_prior_cmd.set_defaults(run=lambda args: _turing_prior(args.days))
     sub.add_parser(
         "neyman-variants",
         help="neyman's variants (#455): the discovery that fixes the window's N, then the verdict on the"
         " window after 2026-11-02 once it is full (reads the training samples, replays nothing)",
-    )
+    ).set_defaults(run=lambda args: _neyman_variants())
     train_cmd = sub.add_parser(
         "train", help="train every algorithm on KRX_OBJECT_STORE's latest days and store the promotion list"
     )
@@ -1134,6 +1164,7 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="train with the settings and market calendar the server published (EC2 Spot)",
     )
+    train_cmd.set_defaults(run=lambda args: _train(args.day, args.from_store))
     simulate_cmd = sub.add_parser(
         "simulate",
         help="replay the latest trading days as the probation of each algorithm that waits for it (#298),"
@@ -1145,17 +1176,25 @@ def main(argv: list[str] | None = None) -> int:
         help="daily: the daily kinds' algorithms; bar-close: the direction's and the other kinds'"
         " (the latest recorded days, 10 to 20)",
     )
+    simulate_cmd.set_defaults(run=lambda args: _simulate(args.which))
     rollback_cmd = sub.add_parser(
         "rollback",
         help="put an algorithm back one step, on the model it ran before (only that one is kept, #361)",
     )
     rollback_cmd.add_argument("algorithm")
+    rollback_cmd.set_defaults(run=lambda args: _rollback(args.algorithm))
     retire_cmd = sub.add_parser("retire", help="retire an algorithm: it is no longer run; its records stay")
     retire_cmd.add_argument("algorithm")
+    retire_cmd.set_defaults(run=lambda args: _retire(args.algorithm))
     unretire_cmd = sub.add_parser("unretire", help="put a retired algorithm back on probation")
     unretire_cmd.add_argument("algorithm")
-    sub.add_parser("test-alert", help="send a test message to the Telegram chat that receives alerts")
-    sub.add_parser("macro", help="read today's macro indicators and decide the regime, once")
+    unretire_cmd.set_defaults(run=lambda args: _unretire(args.algorithm))
+    sub.add_parser(
+        "test-alert", help="send a test message to the Telegram chat that receives alerts"
+    ).set_defaults(run=lambda args: asyncio.run(_test_alert()))
+    sub.add_parser("macro", help="read today's macro indicators and decide the regime, once").set_defaults(
+        run=lambda args: _macro()
+    )
     diagnose_cmd = sub.add_parser(
         "diagnose", help="print the measurements the open decisions need; reads only, writes nothing"
     )
@@ -1165,6 +1204,7 @@ def main(argv: list[str] | None = None) -> int:
         default=DEFAULT_DAYS,
         help=f"the latest N trading days with data (default {DEFAULT_DAYS})",
     )
+    diagnose_cmd.set_defaults(run=lambda args: _diagnose(args.days))
     doctor_cmd = sub.add_parser(
         "doctor",
         help="print the server's state, masked (engine, KIS, PINGPONG, scheduled jobs, disk, memory, #322);"
@@ -1175,6 +1215,7 @@ def main(argv: list[str] | None = None) -> int:
         help="the Engine API to ask, e.g. http://127.0.0.1:8080 (default: this container's, then compose's"
         " engine service)",
     )
+    doctor_cmd.set_defaults(run=lambda args: asyncio.run(_doctor(args.api)))
     signal_review_cmd = sub.add_parser(
         "signal-review",
         help="print what choosing the Telegram signal settings needs (#206); reads only, writes nothing",
@@ -1192,6 +1233,7 @@ def main(argv: list[str] | None = None) -> int:
         help="instead, the first N days with predictions on or after this day, YYYY-MM-DD: a fixed window,"
         " the same days however late it runs (#206)",
     )
+    signal_review_cmd.set_defaults(run=lambda args: _signal_review(args.days, args.since))
     error_cmd = sub.add_parser(
         "error-breakdown",
         help="print where an algorithm errs (#431): confusion matrices and lift over the climate baseline"
@@ -1206,16 +1248,17 @@ def main(argv: list[str] | None = None) -> int:
     error_cmd.add_argument(
         "--algorithm", default=ERROR_ALGORITHM, help=f"the algorithm (default {ERROR_ALGORITHM})"
     )
+    error_cmd.set_defaults(run=lambda args: _error_breakdown(args.days, args.algorithm))
     sub.add_parser(
         "error-holdout",
         help="print turing's four pre-registered hypotheses of #431's report judged on the fixed holdout"
         " (#447): the first 10 trading days after 2026-10-30; reads only, writes nothing, no price",
-    )
+    ).set_defaults(run=lambda args: _error_holdout())
     sub.add_parser(
         "climate-gate",
         help="print the gate that takes baseline-climate's prediction when quiet or at lunch and turing's"
         " elsewhere, against both, on #447's holdout (#449); reads only, writes nothing, no price",
-    )
+    ).set_defaults(run=lambda args: _climate_gate())
     hit_rates_cmd = sub.add_parser(
         "nightly-hit-rates",
         help="print the champion's and the challenger's hit rates the nightly reports carry beside the"
@@ -1228,6 +1271,7 @@ def main(argv: list[str] | None = None) -> int:
         default=HIT_RATE_NIGHTS,
         help=f"the latest N nights whose promotion lists carry the hit rates (default {HIT_RATE_NIGHTS})",
     )
+    hit_rates_cmd.set_defaults(run=lambda args: _nightly_hit_rates(args.nights))
     daily_cmd = sub.add_parser(
         "daily-check",
         help="print what the daily kinds did on the latest trading days (#264); reads only, writes nothing",
@@ -1238,6 +1282,7 @@ def main(argv: list[str] | None = None) -> int:
         default=DAILY_CHECK_DAYS,
         help=f"the latest N trading days (default {DAILY_CHECK_DAYS})",
     )
+    daily_cmd.set_defaults(run=lambda args: _daily_check(args.days))
     structure_cmd = sub.add_parser(
         "structure-check",
         help="measure the research's market-structure claims on the stored bars and candles; reads only",
@@ -1248,12 +1293,15 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="the latest N trading days with one-minute bars (default: all)",
     )
+    structure_cmd.set_defaults(run=lambda args: _structure_check(args.days))
     notify_cmd = sub.add_parser("notify", help="send a notice to the Telegram chat that receives alerts")
     notify_cmd.add_argument("text")
+    notify_cmd.set_defaults(run=lambda args: asyncio.run(_notify(args.text)))
     fake = sub.add_parser("fake-kis", help="run a local fake KIS server for offline testing")
     fake.add_argument("--port", type=int, default=18080)
     fake.add_argument("--host", default="127.0.0.1", help="address to listen on (0.0.0.0 inside Docker)")
     fake.add_argument("--trades", action="store_true", help="push a synthetic trade per stock every second")
+    fake.set_defaults(run=lambda args: asyncio.run(_fake_kis(args.port, args.host, args.trades)))
     demo = sub.add_parser(
         "demo-engine", help="serve the Engine API on a made-up morning, to build screens without the server"
     )
@@ -1265,7 +1313,12 @@ def main(argv: list[str] | None = None) -> int:
         type=_seconds_per_minute,
         help="open at 10:00 and go on to 10:30 a minute every PACE seconds, streaming as it goes",
     )
-    args = parser.parse_args(argv)
+    demo.set_defaults(run=lambda args: asyncio.run(_demo_engine(args.port, args.host, args.db, args.pace)))
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parser().parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
     # This process's lines also go to Loki when it is set (#358), masked, between a start line and
@@ -1308,120 +1361,14 @@ def _log_secrets(values: dict[str, str]) -> tuple[str, ...]:
 
 
 def _command(args: argparse.Namespace) -> int:
-    """Run the command ``args`` name; its exit code."""
-    if args.command == "collect":
-        asyncio.run(_collect())
-    elif args.command == "trade":
-        if args.control is not None:
-            return _trade_control(args.control)
-        asyncio.run(_trade())
-    elif args.command == "refit-policy":
-        return asyncio.run(_refit_policy(args.engine_url, args.report))
-    elif args.command == "measure-passive-entry":
-        return asyncio.run(_measure_passive_entry(args.engine_url))
-    elif args.command == "cost-map-audit":
-        return asyncio.run(_cost_map_audit(args.engine_url))
-    elif args.command == "trader-report":
-        return _trader_report(args.day)
-    elif args.command == "check-mock-trades":
-        return asyncio.run(_check_mock_trades(args.day))
-    elif args.command == "fill-notice-layout":
-        return asyncio.run(_fill_notice_layout())
-    elif args.command == "measure-subscriptions":
-        asyncio.run(_measure())
-    elif args.command == "check-fallbacks":
-        return asyncio.run(_check_fallbacks())
-    elif args.command == "probe-candles":
-        return asyncio.run(_probe_candles())
-    elif args.command == "probe-supply":
-        return asyncio.run(_probe_supply())
-    elif args.command == "probe-net-buys":
-        return asyncio.run(_probe_net_buys())
-    elif args.command == "probe-close":
-        return asyncio.run(_probe_close())
-    elif args.command == "probe-dividends":
-        return asyncio.run(_probe_dividends())
-    elif args.command == "probe-nav":
-        return asyncio.run(_probe_nav())
-    elif args.command == "probe-krx-etf":
-        return asyncio.run(_probe_krx_etf())
-    elif args.command == "probe-night":
-        return asyncio.run(_probe_night(args.day))
-    elif args.command == "probe-expected-open":
-        return _probe_expected_open(args.days)
-    elif args.command == "probe-gaps":
-        return _probe_gaps()
-    elif args.command == "probe-member-frames":
-        return _probe_member_frames()
-    elif args.command == "probe-live-account":
-        return asyncio.run(_probe_live_account())
-    elif args.command == "probe-kis-orders":
-        return asyncio.run(_probe_kis_orders())
-    elif args.command == "check-closing-flow":
-        return asyncio.run(_check_closing_flow())
-    elif args.command == "check-krx-net-assets":
-        return _check_krx_net_assets()
-    elif args.command == "registry-password":
-        return _registry_password()
-    elif args.command == "backfill":
-        asyncio.run(_backfill())
-    elif args.command == "archive":
-        return asyncio.run(_archive(args.recheck))
-    elif args.command == "replay":
-        return _replay(args.day, args.db)
-    elif args.command == "rescore":
-        return _rescore()
-    elif args.command == "fit":
-        return _fit(args.algorithm, args.days)
-    elif args.command == "prevalidate":
-        return _prevalidate(args.algorithm, args.days, args.revision)
-    elif args.command == "climate-prior":
-        return _climate_prior(args.days)
-    elif args.command == "poisson-link":
-        return _poisson_link(args.days)
-    elif args.command == "turing-prior":
-        return _turing_prior(args.days)
-    elif args.command == "neyman-variants":
-        return _neyman_variants()
-    elif args.command == "train":
-        return _train(args.day, args.from_store)
-    elif args.command == "simulate":
-        return _simulate(args.which)
-    elif args.command == "rollback":
-        return _rollback(args.algorithm)
-    elif args.command == "retire":
-        return _retire(args.algorithm)
-    elif args.command == "unretire":
-        return _unretire(args.algorithm)
-    elif args.command == "notify":
-        return asyncio.run(_notify(args.text))
-    elif args.command == "macro":
-        return _macro()
-    elif args.command == "diagnose":
-        return _diagnose(args.days)
-    elif args.command == "doctor":
-        return asyncio.run(_doctor(args.api))
-    elif args.command == "signal-review":
-        return _signal_review(args.days, args.since)
-    elif args.command == "error-breakdown":
-        return _error_breakdown(args.days, args.algorithm)
-    elif args.command == "error-holdout":
-        return _error_holdout()
-    elif args.command == "climate-gate":
-        return _climate_gate()
-    elif args.command == "nightly-hit-rates":
-        return _nightly_hit_rates(args.nights)
-    elif args.command == "structure-check":
-        return _structure_check(args.days)
-    elif args.command == "daily-check":
-        return _daily_check(args.days)
-    elif args.command == "test-alert":
-        return asyncio.run(_test_alert())
-    elif args.command == "fake-kis":
-        asyncio.run(_fake_kis(args.port, args.host, args.trades))
-    elif args.command == "demo-engine":
-        return asyncio.run(_demo_engine(args.port, args.host, args.db, args.pace))
-    return 0
+    """Run the command ``args`` name with the handler its parser carries (``_parser``, #499); its
+    exit code. A command whose parser carries none fails rather than doing nothing and exiting 0,
+    which a scheduled job calling it would report as done."""
+    run: Run | None = getattr(args, "run", None)
+    if run is None:
+        print(f"krx-quant: command {args.command} has no handler (set_defaults(run=...))", file=sys.stderr)
+        return 1
+    return run(args)
 
 
 if __name__ == "__main__":
