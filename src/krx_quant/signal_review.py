@@ -1,6 +1,6 @@
 """The signal-threshold review (``krx-quant signal-review``, #206): what choosing the Telegram
 signal settings (``KRX_SIGNAL_MIN_PROBABILITY``, ``KRX_SIGNAL_MIN_AGREE``) needs, as text to
-paste. Scheduled jobs run it and post it on #206 (``scheduled.py``): on the first night with an
+paste. Scheduled jobs run it and post it on #206 (``scheduled/research.py``): on the first night with an
 official algorithm, again from 2026-11-02, and on a fixed window after the default moved to 0.70
 (2026-11-03); an agent recommends from it, the user decides.
 

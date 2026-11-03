@@ -48,7 +48,7 @@ holds for the code they first ran under the engine's revisions.
 
 The report is saved to ``state/prevalidations/<name>.json``, passed or not, with a digest
 of the algorithm's code; the engine reads it at each bar close. The server's scheduled job
-runs this check itself, one waiting algorithm a night (``scheduled.py``, #204), and reads the
+runs this check itself, one waiting algorithm a night (``scheduled/prevalidations.py``, #204), and reads the
 report (``last_report``) to know whether the code it runs now has been judged already. An
 algorithm whose report refused the code and target it runs now is refused, not waiting
 (``refusals``): the engine tells it once, until its code or target changes.

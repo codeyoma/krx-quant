@@ -11,7 +11,7 @@ which ``docker compose logs`` keeps until the 06:00 deploy makes a new container
   exit code, or the traceback that ended it (``open_process_log``). The start and end lines go to
   Loki only, as they went to the files before.
 - A process the engine starts (the nightly training, ``swap._train``; a scheduled job,
-  ``scheduled.py``) is run by ``run_logged``: its whole output (stdout and stderr, as printed: what
+  ``scheduled/core.py``) is run by ``run_logged``: its whole output (stdout and stderr, as printed: what
   logging never sees too, such as a traceback) is read as it comes and sent, labelled as ``Child``
   says (``process="training"``, ``night=<night>``; ``process="job"``, ``job=<name>
   night=<night>``), between a line saying what started and one with its exit code (or the time

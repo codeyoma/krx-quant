@@ -36,7 +36,7 @@ the cost map was computed, or the reads are not the API's; the text says so and 
 ``DIFFERS``.
 
 No price is printed: hit rates, p*, W and C in ticks, counts and dates. A scheduled job runs it once
-and posts it on #438 (``scheduled.py``).
+and posts it on #438 (``scheduled/trader.py``).
 """
 
 from __future__ import annotations
