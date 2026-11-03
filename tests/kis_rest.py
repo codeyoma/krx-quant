@@ -94,8 +94,8 @@ def rest_grants(monkeypatch: pytest.MonkeyPatch) -> list[float]:
     grants: list[float] = []
 
     class Recorded(RateLimiter):
-        async def acquire(self) -> float:
-            grants.append(await super().acquire())
+        async def acquire(self, *, last: bool = False) -> float:
+            grants.append(await super().acquire(last=last))
             return grants[-1]
 
     monkeypatch.setattr(auth, "RateLimiter", Recorded)

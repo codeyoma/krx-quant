@@ -103,6 +103,7 @@ from krx_quant.trader import LIVE
 from krx_quant.trader.limits import CONTROL_SECONDS
 from krx_quant.trader.limits import ask as ask_trader
 from krx_quant.trader.mock_check import check_mock_trades
+from krx_quant.trader.notice_layout import fill_notice_layout
 from krx_quant.trader.passive import run_passive_entry
 from krx_quant.trader.promotion import mode_at
 from krx_quant.trader.refit import run_refit
@@ -204,6 +205,12 @@ async def _cost_map_audit(engine_url: str | None) -> int:
 async def _check_mock_trades(day: date | None) -> int:
     """A mock trading day's orders in the ledger against KIS's order inquiry (#405), read-only."""
     return await check_mock_trades(Settings.from_env(require_kis=False), datetime.now(KST), day)
+
+
+async def _fill_notice_layout() -> int:
+    """The mock fill notices the trader recorded, measured against the day's orders (#484),
+    read-only."""
+    return await fill_notice_layout(Settings.from_env(require_kis=False), datetime.now(KST))
 
 
 def _trader_report(day: date | None) -> int:
@@ -923,6 +930,13 @@ def main(argv: list[str] | None = None) -> int:
         help="the trading day, YYYY-MM-DD (default: the latest at or before tonight's evening)",
     )
     sub.add_parser(
+        "fill-notice-layout",
+        help="measure the mock fill notices the trader recorded (state/fill_notices.sqlite3, #484) column by"
+        " column against the day's orders in its ledger and on KIS's order inquiry (KRX_TRADER_KIS_*,"
+        " read-only): each column's shape, lengths, values' count and matches; no value, order number,"
+        " account or price",
+    )
+    sub.add_parser(
         "measure-subscriptions",
         help="count how many real-time registrations KIS allows per session (stop the collector first)",
     )
@@ -1311,6 +1325,8 @@ def _command(args: argparse.Namespace) -> int:
         return _trader_report(args.day)
     elif args.command == "check-mock-trades":
         return asyncio.run(_check_mock_trades(args.day))
+    elif args.command == "fill-notice-layout":
+        return asyncio.run(_fill_notice_layout())
     elif args.command == "measure-subscriptions":
         asyncio.run(_measure())
     elif args.command == "check-fallbacks":

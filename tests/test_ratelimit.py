@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -58,3 +59,30 @@ async def test_the_app_keys_rest_limiter_lets_twenty_calls_through_per_1_1_secon
     # size (docs/kis-feeds.md). Counting the limiter's grants in the busiest second cannot tell
     # this window from a 1.0 s one, so the window is checked here.
     assert let_through == pytest.approx([0.0] * 20 + [1.1])
+
+
+async def test_a_call_that_goes_last_waits_while_another_call_waits_for_room() -> None:
+    """#484: the fill notice recorder's approval key goes after the trader's orders and reads. A read
+    and an order wait for the full window, the approval key asked between them: it is let through
+    once neither waits, whatever order the two wake in."""
+    limiter = RateLimiter(1, period=0.05, margin=0.0)
+    await limiter.acquire()  # the window is full
+    went: list[str] = []
+
+    async def call(name: str, *, last: bool = False) -> None:
+        await limiter.acquire(last=last)
+        went.append(name)
+
+    calls = [
+        asyncio.create_task(call("read")),
+        asyncio.create_task(call("approval", last=True)),
+        asyncio.create_task(call("order")),
+    ]
+    await asyncio.wait_for(asyncio.gather(*calls), 10)
+
+    assert sorted(went[:2]) == ["order", "read"] and went[2] == "approval"
+
+
+async def test_a_call_that_goes_last_goes_at_once_when_nothing_waits() -> None:
+    limiter = RateLimiter(1, period=60.0)
+    assert await asyncio.wait_for(limiter.acquire(last=True), 5) > 0
