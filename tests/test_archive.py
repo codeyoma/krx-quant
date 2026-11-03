@@ -8,18 +8,19 @@ from __future__ import annotations
 import asyncio
 import os
 import time
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import boto3
+import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 from moto import mock_aws
 
-from krx_quant.archive import archive
+from krx_quant.archive import archive, partition_batches, partition_files
 from krx_quant.candles import write_candles
 from krx_quant.collector import run_collector
 from krx_quant.fake_kis import FakeKis
@@ -341,6 +342,60 @@ async def test_a_column_added_to_a_feed_during_the_day_is_null_in_the_rows_befor
         (1056.3, None),
         (1057.1, -1.2),
     ]
+
+
+def messages(read: Iterable[tuple[Path, pa.RecordBatch]]) -> list[str]:
+    return [m for _, batch in read for m in batch.column("message").to_pylist()]
+
+
+async def test_a_part_merged_away_while_its_partition_is_read_is_left_out(tmp_path: Path) -> None:
+    # A probe reads the partition beside the collector, whose archive run merges its parts.
+    data = tmp_path / "data"
+    record(data, ["m0", "m1", "m2", "m3", "m4"])  # three part files
+    reading = partition_batches(data / PARTITION, ["message"])
+    first = next(reading)
+
+    await archive(data, LocalObjectStore(tmp_path / "store"))
+
+    assert first[0].name.startswith("part-")
+    assert messages([first, *reading]) == messages([first])  # the other parts were gone
+    assert messages(partition_batches(data / PARTITION, ["message"])) == ["m0", "m1", "m2", "m3", "m4"]
+
+
+def test_a_file_read_as_it_is_written_is_left_out_and_the_others_still_count(tmp_path: Path) -> None:
+    data = tmp_path / "data"
+    record(data, ["m0", "m1", "m2", "m3"])  # two part files
+    first, second = partition_files(data / PARTITION)
+    first.write_bytes(first.read_bytes()[:20])  # not a whole Parquet file yet
+
+    assert (
+        messages(partition_batches(data / PARTITION, ["message"]))
+        == pq.read_table(second).column("message").to_pylist()
+    )
+
+
+def test_the_columns_read_can_be_chosen_for_each_file_by_its_schema(tmp_path: Path) -> None:
+    data = tmp_path / "data"
+    new = KOSPI200_FUTURES.schema
+    old = new.remove(new.get_field_index("change_pct"))
+    at = datetime(2026, 10, 8, 9, 30, tzinfo=KST)
+    for schema, price, extra in ((old, 1056.3, {}), (new, 1057.1, {"change_pct": -1.2})):
+        recorder = ParquetRecorder(data, flush_rows=1, flush_seconds=3600)
+        row = {"symbol": "A01612", "event_time": at, "received_at": at, "price": price, **extra}
+        recorder.record("events", DAY, "H0IFCNT0", "A01612", row, schema)
+        recorder.close()
+    partition = data / "events/date=2026-10-08/feed=H0IFCNT0/symbol=A01612"
+    asked: list[tuple[str, bool]] = []
+
+    def with_change(path: Path, schema: pa.Schema) -> list[str] | None:
+        asked.append((path.name, "change_pct" in schema.names))
+        return ["price", "change_pct"] if "change_pct" in schema.names else None
+
+    read = [batch.to_pylist() for _, batch in partition_batches(partition, with_change)]
+
+    assert read == [[{"price": 1057.1, "change_pct": -1.2}]]  # the older file left out
+    assert [name for name, _ in asked] == [p.name for p in partition_files(partition)]
+    assert sorted(has for _, has in asked) == [False, True]
 
 
 def test_objects_can_be_listed_by_prefix_and_kept_as_json(store: ObjectStore) -> None:

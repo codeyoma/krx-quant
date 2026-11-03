@@ -38,10 +38,9 @@ from pathlib import Path
 from typing import Any
 
 import pyarrow as pa
-import pyarrow.parquet as pq
 
 from krx_quant import kis
-from krx_quant.archive import partition_files
+from krx_quant.archive import partition_batches
 from krx_quant.candles import read_krx_days
 from krx_quant.config import Settings
 from krx_quant.feeds import BOOK, BOOK_SNAPSHOT
@@ -72,17 +71,15 @@ def part_of(session: Session, at: datetime) -> str:
 
 
 def _batches(partition: Path, columns: Sequence[str]) -> Iterator[dict[str, list[Any]]]:
-    """A partition's rows, a batch at a time, each row once (the merged file, then the parts it
-    does not hold)."""
-    for path in partition_files(partition):
-        try:
-            schema = pq.read_schema(path)
-            present = [c for c in columns if c in schema.names]
-            for batch in pq.ParquetFile(path).iter_batches(columns=present):
-                rows = batch.to_pydict()
-                yield {c: rows.get(c, [None] * batch.num_rows) for c in columns}
-        except (FileNotFoundError, pa.ArrowInvalid, OSError):
-            continue  # merged away in between, or written as it was read: the rest still counts
+    """A partition's rows, a batch at a time, each row once (``archive.partition_batches``); a
+    column a file lacks is None in its rows."""
+
+    def present(_: Path, schema: pa.Schema) -> list[str]:
+        return [c for c in columns if c in schema.names]
+
+    for _, batch in partition_batches(partition, present):
+        rows = batch.to_pydict()
+        yield {c: rows.get(c, [None] * batch.num_rows) for c in columns}
 
 
 def _partition(data_dir: Path, layer: str, day: date, tr_id: str, symbol: str) -> Path:

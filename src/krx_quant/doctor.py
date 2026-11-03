@@ -75,12 +75,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import aiohttp
-import pyarrow as pa
-import pyarrow.parquet as pq
 
 from krx_quant import kis, loki
 from krx_quant.algorithms import ALGORITHMS, DAILY_ALGORITHMS, KIND_ALGORITHMS, load_models
-from krx_quant.archive import partition_files
+from krx_quant.archive import partition_batches
 from krx_quant.config import Settings, SettingsError, read_values
 from krx_quant.disk_watch import LABELS as DISK_LABELS
 from krx_quant.disk_watch import alerted as disk_alerted
@@ -628,21 +626,17 @@ def _pingpong(settings: Settings, now: datetime) -> list[str]:
 
 def _pingpongs(partition: Path) -> Iterator[datetime]:
     """When each PINGPONG of the partition was received, in KST."""
-    for path in partition_files(partition):
-        try:
-            for batch in pq.ParquetFile(path).iter_batches(columns=["received_at", "message"]):
-                data = batch.to_pydict()
-                for at, text in zip(data["received_at"], data["message"], strict=True):
-                    if "PINGPONG" not in text:
-                        continue
-                    try:
-                        message = kis.parse_message(text)
-                    except kis.KisError:
-                        continue
-                    if isinstance(message, kis.SystemMessage) and message.is_pingpong:
-                        yield at.astimezone(KST)
-        except (FileNotFoundError, pa.ArrowInvalid, OSError):
-            continue  # merged away in between, or written as it was read
+    for _, batch in partition_batches(partition, ["received_at", "message"]):
+        data = batch.to_pydict()
+        for at, text in zip(data["received_at"], data["message"], strict=True):
+            if "PINGPONG" not in text:
+                continue
+            try:
+                message = kis.parse_message(text)
+            except kis.KisError:
+                continue
+            if isinstance(message, kis.SystemMessage) and message.is_pingpong:
+                yield at.astimezone(KST)
 
 
 def _logs(logs: RecentLog | None) -> list[str]:
