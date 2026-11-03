@@ -1,6 +1,6 @@
 # Coding standards
 
-Rules a reviewer applies to every diff, beyond what CI checks. Each rule cites what it came from here. Mechanical rules live in CI instead (`scripts/check_forbidden.py`, ruff, mypy, pytest), so this file holds only judgement calls.
+Rules a reviewer applies to every diff, beyond what CI checks. Each rule cites what it came from here. Mechanical rules live in CI instead (`scripts/check_forbidden.py`, `scripts/check_docs_drift.py`, ruff, mypy, pytest), so this file holds only judgement calls.
 
 ## External data is probed before it is used
 
