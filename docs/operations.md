@@ -345,12 +345,14 @@ curl http://krx-quant:8080/v1/macro
 | `KRX_TRAINING_SCHEDULES` | (없음) | 상한에서 끄고 다음 달 1일에 다시 켤 EventBridge Scheduler 스케줄(쉼표로 구분, `krx-quant-training,krx-quant-training-resume`) |
 | `KRX_COST_CHECK_SECONDS` | 3600 | 비용을 읽는 간격(초). 60 이상 |
 | `KRX_DISK_MIN_FREE_PERCENT` | 20 | 수집기가 시작할 때와 10분마다 데이터·상태 폴더가 있는 디스크의 여유를 읽어, 전체의 이만큼(%)보다 작으면 텔레그램으로 한 번 알린다(#379, 6장 "디스크가 찬다"). 기준보다 2%p 넘게 여유가 생기면 `[복구]`를 보낸다. 0–99. 0이면 알리지 않는다 |
-| `KRX_IMAGE_REPOSITORY` | (없음) | Spot 학습용 이미지를 올릴 ECR 저장소 URI. 엔진은 읽지 않고 `deploy/push-image.sh`(자동 업데이트가 부른다)만 읽는다. 없으면 올리지 않는다 |
 | `KRX_RESTART_AT` | `07:20` | 수집기가 시작한 날 다음 거래일의 이 시각(KST)에 스스로 멈추면 Docker가 다시 띄운다(#115). 새 수집기가 그날의 선물·옵션 월물과 등가격 행사가를 다시 고른다. `off`면 하지 않는다. `KRX_MACRO_AT`과 08:00(NXT 장전) 전이어야 한다. 매크로를 읽은 뒤 다시 띄우면 새 수집기가 그날 아침을 다시 읽어, 그때 실패한 출처가 앞서 정한 국면을 하루 내내 덮기 때문이다 |
 | `KRX_MACRO_AT` | `07:30` | 거래일 매크로 지표를 읽고 국면을 정하는 시각(KST). `off`나 빈 값이면 하지 않는다. 개장 전이어야 한다. 개장 이후 시각이면 읽지 않고 `macro read skipped` 경고를 남긴다 |
 | `KRX_ECOS_API_KEY` | (없음) | 한국은행 ECOS 키. https://ecos.bok.or.kr/api/ 에서 회원가입 후 "인증키 신청"으로 받는다(무료, 즉시). 없으면 ECOS 지표(원/달러, 국고채 3년)를 건너뛴다 |
 | `KRX_FRED_API_KEY` | (없음) | FRED 키. https://fred.stlouisfed.org/docs/api/api_key.html 에서 계정을 만든 뒤 받는다(무료). 없으면 FRED 지표(미국 10년물, WTI)를 건너뛴다 |
 | `KRX_ECOS_URL`, `KRX_FRED_URL`, `KRX_YAHOO_URL` | 각 공식 주소 | 매크로 출처 주소. 테스트용이다 |
+| `KRX_CALENDAR_EVERY` | 15 | 수집기가 경제 캘린더(#150, [design.md](design.md) 4.5)를 읽는 간격(분). 5 이상의 정수. `off`나 빈 값이면 읽지 않는다 |
+| `KRX_CALENDAR_COUNTRIES` | `US,KR,CN,JP,EU,DE,GB` | 경제 캘린더를 읽을 나라(두 글자 코드, 쉼표로 구분, 대소문자 상관없음). 하나 이상. 두 글자 알파벳이 아니면 설정 오류 |
+| `KRX_CALENDAR_URL` | `https://economic-calendar.tradingview.com/events` | 경제 캘린더 주소(TradingView의 공개 피드). 테스트용이다 |
 | `KRX_REGIME_SHOCK_SOX_PERCENT`, `KRX_REGIME_SHOCK_VIX`, `KRX_REGIME_SHOCK_USDKRW_PERCENT`, `KRX_REGIME_SOX_MOVE_PERCENT`, `KRX_REGIME_WEAK_WON_PERCENT` | `3`, `30`, `1`, `1`, `0.5` | 일일 국면 문턱값([design.md](design.md#45-매크로-지표)) |
 | `KRX_SIGNAL_ALERT` | `off` | `on`이면 텔레그램 신호 알림을 보낸다([engine-api.md](engine-api.md#텔레그램-신호-알림-19)). VI·서킷브레이커, 기준가 없음, 목표 시각 지남이면 보내지 않는다. 보낸·막힌 신호는 DB `runs`에 `signal_sent`, `signal_blocked`로 남는다 |
 | `KRX_SIGNAL_MIN_PROBABILITY` | `0.7` | 신호를 보낼 최종 합의의 상승(하락) 확률. 0.5–1. 알림이 꺼져 있어도 값을 검사한다. 0.70은 잠정값이다: 2026-11-04부터 20거래일 뒤 예약 작업 `signal-review-206-1201`이 다시 잰다(2장 "신호 기준 검토 (#206)") |
@@ -395,6 +397,7 @@ compose와 스크립트가 읽는 변수다. 엔진은 `KRX_BIND_ADDRESS`를 예
 |---|---|---|---|
 | `KRX_BIND_ADDRESS` | `compose.yaml`, 엔진(가림만) | 없음(없으면 compose가 멈춘다) | 엔진 포트를 열 서버의 Tailscale IPv4. `deploy/setup-server.sh`가 쓴다. compose가 `.env`를 넘기므로 엔진도 받아, 예약 작업의 댓글에서 이 값을 가린다(#215) |
 | `KRX_ENGINE_PORT` | `compose.yaml`, `deploy/setup-server.sh`, `deploy/smoke-local.sh` | 8080 | 엔진 API를 여는 서버 쪽 포트. 컨테이너 안은 늘 8080 |
+| `KRX_IMAGE_REPOSITORY` | `deploy/push-image.sh`(자동 업데이트가 부른다) | (없음) | Spot 학습용 이미지를 올릴 ECR 저장소 URI. 없으면 올리지 않는다 |
 | `TS_AUTHKEY` | `deploy/setup-server.sh` | 없음(브라우저 로그인) | Tailscale auth key |
 | `KRX_UPDATE_TRIES`, `KRX_UPDATE_PAUSE` | `deploy/auto-update.sh` | 36, 5 | 새 엔진이 API에 답하는지 이 횟수만큼, 이 초 간격으로 본다(기본 3분) |
 | `KRX_UPDATE_NOW` | `deploy/auto-update.sh` | 지금(KST) | `<요일 1–7> <HHMM>`. 장 시간 판정을 테스트에서 바꾼다 |

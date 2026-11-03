@@ -32,6 +32,10 @@ jobs:
       - run: uv sync --frozen
       - name: Forbidden patterns (order code, secrets)
         run: uv run python scripts/check_forbidden.py
+      # Settings, commands and scheduled jobs against .env.example, README.md and
+      # docs/operations.md, both ways (#495).
+      - name: Docs agree with the code (settings, commands, jobs)
+        run: uv run python scripts/check_docs_drift.py
       - run: uv run ruff check
       - run: uv run ruff format --check
       - run: uv run mypy

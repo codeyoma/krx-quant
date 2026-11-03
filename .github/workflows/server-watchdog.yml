@@ -54,13 +54,13 @@ jobs:
           fi
 
       # Only the script: no submodule, no project install (it is standard library only).
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         if: steps.key.outputs.set == 'true'
         with:
           submodules: false
           sparse-checkout: scripts
 
-      - uses: aws-actions/configure-aws-credentials@v4
+      - uses: aws-actions/configure-aws-credentials@v6
         if: steps.key.outputs.set == 'true'
         with:
           aws-access-key-id: ${{ secrets.AWS_WATCHDOG_ACCESS_KEY_ID }}
