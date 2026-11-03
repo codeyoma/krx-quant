@@ -1,27 +1,42 @@
-"""Reconnects, gap records and alerts, observed through the fake KIS seam."""
+"""Reconnects, gap records and alerts, observed through the fake KIS seam, and the REST polls
+kept to the hours they answer in (#488)."""
 
 from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
 from krx_quant import collector
-from krx_quant.collector import run_collector
+from krx_quant.collector import rest_plan, run_collector
 from krx_quant.config import Settings
 from krx_quant.fake_kis import FakeKis
+from krx_quant.feeds import FOREIGN_ESTIMATE, KST, VI_STATUS
+from krx_quant.market_calendar import MarketCalendar
 from tests.kis_frames import book_frame, trade_frame, us_trade_frame
 from tests.test_collector import FIXED_NOW, read, settings_for
 from tests.test_subscription_limit import until
 
 TRADE_KEY = ("H0UNCNT0", "005930")
+DOWN = "KIS WebSocket down"  # each failed connection's WARNING
+SHORT = "not alerted"  # a drop back before its alert's WARNING (#488)
 
 
 def fast(settings: Settings) -> Settings:
     return replace(settings, reconnect_initial_seconds=0.05, reconnect_max_seconds=0.2)
+
+
+def alert_after(monkeypatch: pytest.MonkeyPatch, seconds: float) -> None:
+    """A drop is alerted once it is ``seconds`` old with the connection not back (#488; 30 s on
+    the server, ``collector.WS_ALERT_AFTER_SECONDS``)."""
+    monkeypatch.setattr(collector, "WS_ALERT_AFTER_SECONDS", seconds)
+
+
+def logged(caplog: pytest.LogCaptureFixture, text: str) -> list[str]:
+    return [m for r in caplog.records if text in (m := r.getMessage())]
 
 
 def fill(price: str, symbol: str = "005930") -> str:
@@ -104,9 +119,64 @@ def with_telegram(kis: FakeKis, settings: Settings) -> Settings:
     )
 
 
-async def test_a_disconnect_alerts_once_and_the_reconnect_sends_a_recovery(
-    kis: FakeKis, tmp_path: Path
+async def drop_and_return(
+    kis: FakeKis, clock: Clock, caplog: pytest.LogCaptureFixture, down: datetime, up: datetime, n: int
 ) -> None:
+    """KIS closes the connection at ``down`` and refuses new ones until ``up``, then takes the
+    ``n``th and answers its registrations."""
+    clock.at = down
+    kis.accept_ws = False
+    failed = len(logged(caplog, DOWN))
+    await kis.close_connections()
+    await until(lambda: len(logged(caplog, DOWN)) > failed)  # the drop is marked lost
+    clock.at = up
+    kis.accept_ws = True
+    await kis.wait_for_subscription_count(TRADE_KEY, n)
+    await kis.round_trip()
+
+
+async def test_a_drop_back_within_the_alert_wait_sends_nothing_but_its_gap_and_count_are_kept(
+    kis: FakeKis, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Input: KIS closes the connection and takes the next one a moment later, well inside the
+    30 s the alert waits (code 1006 at 06:34 every day, data back in 1.7-3.0 s, #488), twice.
+    Output: no Telegram message; each drop's gap runs from the drop to the new registration, as
+    without the wait; a WARNING counts the day's short drops."""
+    kis.script[TRADE_KEY] = []
+    clock = Clock(FIXED_NOW)
+    stop = asyncio.Event()
+    settings = with_telegram(kis, fast(settings_for(kis, tmp_path)))
+    task = asyncio.create_task(run_collector(settings, stop=stop, clock=clock))
+    await kis.wait_for_subscription_count(TRADE_KEY, 1)
+
+    first = (FIXED_NOW + timedelta(seconds=10), FIXED_NOW + timedelta(seconds=12))
+    second = (FIXED_NOW + timedelta(seconds=100), FIXED_NOW + timedelta(seconds=103))
+    await drop_and_return(kis, clock, caplog, *first, n=2)
+    await until(lambda: len(logged(caplog, SHORT)) == 1)
+    await drop_and_return(kis, clock, caplog, *second, n=3)
+    await until(lambda: len(logged(caplog, SHORT)) == 2)
+    stop.set()
+    await asyncio.wait_for(task, 5)
+
+    assert kis.telegram_messages == []
+    gaps = read(tmp_path, "gaps", "H0UNCNT0")
+    assert [(g["start"], g["end"]) for g in gaps] == [first, second]
+    assert all(g["reason"].startswith("disconnected: websocket closed by KIS") for g in gaps), gaps
+    short = logged(caplog, SHORT)
+    assert all(line.startswith("KIS WebSocket back ") for line in short), short
+    assert [line.rsplit("(", 1)[1] for line in short] == [
+        "short drop 1 today, #488)",
+        "short drop 2 today, #488)",
+    ]
+
+
+async def test_a_drop_not_back_within_the_alert_wait_alerts_once_and_its_reconnect_recovers(
+    kis: FakeKis, tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Input: KIS refuses every reconnect for longer than the alert waits (0.2 s here). Output:
+    one [장애] however many attempts fail, sent once the wait is over, not at the drop; one
+    [복구] once the connection is back and stays up. It is not counted as a short drop."""
+    alert_after(monkeypatch, 0.2)
     kis.script[TRADE_KEY] = []
     stop = asyncio.Event()
     settings = with_telegram(kis, fast(settings_for(kis, tmp_path)))
@@ -115,7 +185,8 @@ async def test_a_disconnect_alerts_once_and_the_reconnect_sends_a_recovery(
 
     kis.accept_ws = False
     await kis.close_connections()
-    await asyncio.sleep(0.5)  # several refused reconnect attempts: still a single outage
+    await until(lambda: len(kis.telegram_messages) >= 1)
+    await until(lambda: len(logged(caplog, DOWN)) >= 4)  # refused attempts after the alert too
     kis.accept_ws = True
     await kis.wait_for_subscription_count(TRADE_KEY, 2)
     await until(lambda: len(kis.telegram_messages) >= 2)
@@ -124,9 +195,15 @@ async def test_a_disconnect_alerts_once_and_the_reconnect_sends_a_recovery(
 
     texts = [m["text"] for m in kis.telegram_messages]
     assert len(texts) == 2, texts
-    assert texts[0].startswith("[장애]") and "WebSocket" in texts[0]
+    assert texts[0].startswith("[장애] KIS WebSocket 연결이 끊겼습니다 (websocket closed by KIS"), texts
     assert texts[1].startswith("[복구]") and "WebSocket" in texts[1]
     assert {(m["bot_token"], m["chat_id"]) for m in kis.telegram_messages} == {("123:fake", "42")}
+    dropped = next(r.created for r in caplog.records if DOWN in r.getMessage())
+    [alerted] = [
+        r.created for r in caplog.records if r.getMessage().startswith("alert: [장애] KIS WebSocket")
+    ]
+    assert alerted - dropped >= 0.15, "the alert waited for the drop to be 0.2 s old"
+    assert logged(caplog, SHORT) == []
 
 
 async def test_a_reconnect_after_a_long_session_uses_a_fresh_approval_key(
@@ -281,16 +358,24 @@ async def test_backoff_keeps_growing_when_kis_drops_the_connection_before_answer
     assert 2 <= kis.ws_connections <= 7, kis.ws_connections
 
 
-async def test_a_flapping_connection_does_not_repeat_alerts(kis: FakeKis, tmp_path: Path) -> None:
+async def test_a_flapping_connection_does_not_repeat_alerts(
+    kis: FakeKis, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    alert_after(monkeypatch, 0.1)
     kis.script[TRADE_KEY] = []
     stop = asyncio.Event()
     settings = replace(with_telegram(kis, fast(settings_for(kis, tmp_path))), recovery_hold_seconds=0.6)
     task = asyncio.create_task(run_collector(settings, stop=stop, clock=lambda: FIXED_NOW))
     await kis.wait_for_subscription_count(TRADE_KEY, 1)
-    for n in (2, 3, 4):  # drops again shortly after every reconnect
+    kis.accept_ws = False
+    await kis.close_connections()
+    await until(lambda: len(kis.telegram_messages) >= 1)  # down past the alert's wait
+    kis.accept_ws = True
+    await kis.wait_for_subscription_count(TRADE_KEY, 2)
+    for n in (3, 4):  # drops again shortly after every reconnect
         await kis.close_connections()
         await kis.wait_for_subscription_count(TRADE_KEY, n)
-    await asyncio.sleep(1.0)  # then stays up longer than the hold
+    await until(lambda: len(kis.telegram_messages) >= 2)  # then stays up longer than the hold
     stop.set()
     await asyncio.wait_for(task, 5)
 
@@ -326,8 +411,10 @@ async def test_a_connection_that_goes_silent_without_closing_is_reconnected_with
     """Input: KIS stops sending on a connection without closing it (half-open, as on
     2026-10-19 at 16:33, #308), and never answers the close. Output: after the silence limit
     the collector reconnects and registers every subscription again, a disconnect gap runs
-    from the last frame to the new registration, and one alert pair goes out."""
+    from the last frame to the new registration, and one alert pair goes out: the drop began at
+    the last frame, longer ago than the alert waits (30 s against 60 s on the server, #488)."""
     monkeypatch.setattr(collector, "WS_CLOSE_SECONDS", 0.2)  # the dead side never replies
+    alert_after(monkeypatch, 0.1)
     kis.script[TRADE_KEY] = [fill("81200")]
     clock = Clock(FIXED_NOW)  # 09:30:16; the watchdog's silence is real time, not this clock
     stop = asyncio.Event()
@@ -372,6 +459,7 @@ async def test_a_silent_connection_is_marked_lost_before_its_close_is_waited_for
     health check. Output: the connection was marked lost when the silence was noticed, so the
     gaps are the silent disconnect, not stale, and only the WebSocket alert goes out."""
     monkeypatch.setattr(collector, "WS_CLOSE_SECONDS", 1.5)
+    alert_after(monkeypatch, 0.1)  # under the silence: alerted when it is noticed (#488)
     book = ("H0UNASP0", "005930")
     kis.script[TRADE_KEY] = [fill("81200")]
     kis.script[book] = [
@@ -412,6 +500,7 @@ async def test_the_silence_alert_goes_out_of_market_hours_too(
 ) -> None:
     """The incident's silence began at 16:33, after the close, when no stale check runs."""
     monkeypatch.setattr(collector, "WS_CLOSE_SECONDS", 0.2)
+    alert_after(monkeypatch, 0.1)
     kis.script[TRADE_KEY] = []
     evening = FIXED_NOW.replace(hour=16, minute=33, second=43)
     stop = asyncio.Event()
@@ -450,3 +539,32 @@ async def test_a_quiet_connection_that_still_gets_pingpong_or_data_is_not_reconn
     assert kis.subscription_count(TRADE_KEY) == 1
     assert kis.telegram_messages == []
     assert not (tmp_path / "gaps").exists()
+
+
+def test_the_investor_estimates_are_asked_only_in_a_trading_days_session() -> None:
+    """Input: the REST plan, asked about a trading day's hours, a weekday holiday and a Saturday
+    (2026-10-31, when KIS refused HHPTJ04160200 41 times, #441). Output: the investor estimates
+    are asked from the open (09:00) to the close (15:30) of a trading day only, each symbol's
+    alike (#488); the VIs keep their hours, from the opening auction."""
+    thursday, holiday, saturday = date(2026, 10, 8), date(2026, 10, 9), date(2026, 10, 31)
+    calendar = MarketCalendar({thursday: True, holiday: False, saturday: False})
+    settings = Settings(kis_app_key="key", kis_app_secret="secret", symbols=("005930", "000660"))
+    plan = rest_plan(settings, calendar)
+    estimates = [job for job in plan if job.feed is FOREIGN_ESTIMATE]
+    [vi, *_] = [job for job in plan if job.feed is VI_STATUS]
+    assert [job.key for job in estimates] == ["005930", "000660"]
+
+    def asked(day: date, hour: int, minute: int, second: int = 0) -> set[bool]:
+        at = datetime(day.year, day.month, day.day, hour, minute, second, tzinfo=KST)
+        return {job.when is not None and job.when(at) for job in estimates}
+
+    assert asked(thursday, 8, 59, 59) == {False}
+    assert asked(thursday, 9, 0) == {True}
+    assert asked(thursday, 15, 29, 59) == {True}
+    assert asked(thursday, 15, 30) == {False}
+    assert asked(thursday, 20, 48) == {False}  # 2026-10-19's poll that evening (#308)
+    assert asked(holiday, 10, 0) == {False}
+    assert asked(saturday, 9, 21) == asked(saturday, 15, 32) == {False}
+    opening_auction = datetime(2026, 10, 8, 8, 30, tzinfo=KST)
+    assert vi.when is not None and vi.when(opening_auction)
+    assert asked(thursday, 8, 30) == {False}
