@@ -1248,7 +1248,7 @@ SIGNAL_REVIEW_AGAIN = Job(
 )
 
 # ②″ The signal-threshold review on a fixed window (#206): on 2026-11-03 the user moved the default
-# of ``KRX_SIGNAL_MIN_PROBABILITY`` from 0.6 to 0.70 (#PR_NUMBER), provisionally: on section 5 of the
+# of ``KRX_SIGNAL_MIN_PROBABILITY`` from 0.6 to 0.70 (#483), provisionally: on section 5 of the
 # second run (seven days), 0.70's up signals hit 67.0% [57.7–75.1%], its lower bound below 0.60's
 # 58.1%. The default is held for ``SIGNAL_REVIEW_FIXED_DAYS`` (20) trading days and measured again on
 # them alone: the first days with predictions from ``SIGNAL_REVIEW_FROM`` (2026-11-04, the first day
@@ -1289,7 +1289,7 @@ SIGNAL_REVIEW_FIXED = Job(
             SIGNAL_REVIEW_ISSUE,
             note=(
                 "신호 기준 검토의 세 번째 실행이다. 2026-11-03 사용자가 "
-                "`KRX_SIGNAL_MIN_PROBABILITY` 기본값을 0.6에서 0.70으로 바꿨다(#PR_NUMBER, 잠정값). "
+                "`KRX_SIGNAL_MIN_PROBABILITY` 기본값을 0.6에서 0.70으로 바꿨다(#483, 잠정값). "
                 "그 뒤 고정 창 20거래일(2026-11-04부터 예측이 있는 첫 20일)만으로 다시 잰 결과다. "
                 "판정 규칙은 그날들을 보기 전에 정했고 결과를 보고 바꾸지 않는다: 5절의 구간 비교"
                 "(같은 방향 ≥ 2, 상승 신호, 거래일 단위 95% 구간)로 위에서부터 처음 맞는 갈래를 "
