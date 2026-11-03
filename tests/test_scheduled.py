@@ -21,6 +21,7 @@ import aiohttp
 import pytest
 
 from krx_quant.barriers import BARRIER
+from krx_quant.baselines import Forecast
 from krx_quant.clock import FakeClock
 from krx_quant.collector import run_collector
 from krx_quant.config import Settings, SettingsError
@@ -30,7 +31,7 @@ from krx_quant.github import GitHub
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.notify import Alerts
 from krx_quant.predictions import DB_NAME as ENGINE_DB
-from krx_quant.predictions import PredictionStore
+from krx_quant.predictions import NewPrediction, PredictionStore
 from krx_quant.process_log import Child
 from krx_quant.scheduled import (
     CLOSE_PROBE,
@@ -56,6 +57,9 @@ from krx_quant.scheduled import (
     SIGNAL_REVIEW,
     SIGNAL_REVIEW_AGAIN,
     SIGNAL_REVIEW_AGAIN_FROM,
+    SIGNAL_REVIEW_FIXED,
+    SIGNAL_REVIEW_FIXED_DAYS,
+    SIGNAL_REVIEW_FROM,
     STATE_FILE,
     STRUCTURE_CHECK,
     STRUCTURE_SUPPLY,
@@ -968,6 +972,108 @@ def test_the_signal_review_runs_again_once_on_the_first_trading_night_from_novem
     assert SIGNAL_REVIEW_AGAIN.due(official(tuesday, 2, replace(ran, outcome=INTERRUPTED)))
 
 
+def fixed(day: date, days: int, n: int = 2, record: JobRecord | None = None) -> Night:
+    facts = Facts(official=n, signal_review_days=days)
+    return Night(day, CALENDAR.is_trading_day(day), COMMIT, record, {}, facts)
+
+
+def test_the_signal_review_runs_a_third_time_once_its_fixed_window_of_20_days_is_in() -> None:
+    job = SIGNAL_REVIEW_FIXED
+    assert (job.name, job.timeout) == ("signal-review-206-1201", timedelta(hours=1))
+    # The window is fixed: the first 20 days with predictions from 2026-11-04, however late it runs.
+    assert job.command == ("signal-review", "--from", "2026-11-04", "--days", "20")
+    assert (SIGNAL_REVIEW_FROM, SIGNAL_REVIEW_FIXED_DAYS) == (date(2026, 11, 4), 20)
+    assert [t.issue for t in job.targets] == [206] and job.label == ("ready-for-agent",)
+    note = job.targets[0].note
+    for rule in (
+        "0.75로 올린다",
+        "0.60으로 되돌린다",
+        "0.70을 둔다",
+        "하루 5번 이상",
+        "점추정이 0 이하",
+        "30번 미만이나 5일 미만",
+        "`KRX_SIGNAL_ALERT`",
+        "사용자가 정한다",
+    ):
+        assert rule in note, rule
+    names = [j.name for j in JOBS]
+    first_prevalidation = next(i for i, j in enumerate(JOBS) if j.command[0] == "prevalidate")
+    assert names.index(SIGNAL_REVIEW_AGAIN.name) < names.index(job.name) < first_prevalidation
+
+    tuesday = date(2026, 12, 1)  # the 20th trading day from 11-04: no market holiday in between
+    assert not job.due(fixed(tuesday, 19)), "19 days: the window is not in"
+    assert job.due(fixed(tuesday, 20))
+    assert not job.due(fixed(tuesday, 20, 0)), "no official algorithm: no consensus to review"
+    assert not job.due(fixed(date(2026, 12, 5), 20)), "a Saturday: it waits for a trading night"
+    ran = JobRecord(tuesday, OK, at(tuesday, "22:30"), COMMIT, 0, 30.0)
+    wednesday = tuesday + timedelta(days=1)
+    assert not job.due(fixed(wednesday, 20, record=ran)), "once"
+    assert not job.due(fixed(wednesday, 20, record=replace(ran, outcome=FAILED, exit_code=1)))
+    assert job.due(fixed(wednesday, 20, record=replace(ran, outcome=INTERRUPTED))), "a cut run is not a run"
+
+
+async def test_the_nightly_facts_count_the_fixed_window_s_days_in_the_engine_db(tmp_path: Path) -> None:
+    from krx_quant.scheduled import read_facts
+    from tests.test_simulation_daily import CALENDAR as DAILY_CALENDAR
+    from tests.test_simulation_daily import NIGHT, engine_on
+    from tests.test_simulation_daily import settings as daily_settings
+
+    s = daily_settings(tmp_path, signal=0.0, days=30)
+    store = PredictionStore(s.state_dir / ENGINE_DB)
+    for day in (date(2026, 11, 3), date(2026, 11, 4), date(2026, 11, 5), date(2026, 11, 6)):
+        t = datetime.combine(day, time(9, 1), KST)
+        store.add_all(
+            [
+                NewPrediction(
+                    "005930",
+                    "newton",
+                    "v1",
+                    t,
+                    t,
+                    Forecast(0.4, 0.3, 0.3, 0.0),
+                    t + timedelta(minutes=4),
+                    1,
+                    1,
+                    2,
+                )
+            ]
+        )
+    store.close()
+    clock = FakeClock(NIGHT)
+    e = engine_on(s, clock, [])
+    try:
+        facts = await read_facts(s, DAILY_CALENDAR, clock, e)
+    finally:
+        e.store.close()
+    assert facts.signal_review_days == 3  # 11-04 to 11-06: the day before the window is not counted
+
+
+async def test_the_fixed_signal_review_job_runs_the_real_command(empty_server: Path) -> None:
+    state = JobState.load(empty_server / STATE_FILE)
+
+    async def facts() -> Facts:
+        return Facts(official=1, signal_review_days=SIGNAL_REVIEW_FIXED_DAYS)
+
+    async with fake_github() as hub, aiohttp.ClientSession() as session:
+        scheduler = Scheduler(
+            [SIGNAL_REVIEW_FIXED],
+            AT,
+            CALENDAR,
+            state,
+            GitHub(session, TOKEN, REPO, hub.url),
+            Told(),
+            FakeClock(at(FRIDAY, "23:00")),
+            commit=COMMIT,
+            facts=facts,
+        )
+        await asyncio.wait_for(scheduler.run_night(FRIDAY), 25)
+    [body] = hub.bodies(206)
+    assert "신호 기준 검토: 데이터 없음" in body
+    assert "KRX_SIGNAL_MIN_PROBABILITY 0.7 · KRX_SIGNAL_MIN_AGREE 2" in body  # the new default
+    assert "signal-review --from 2026-11-04 --days 20" in body  # how to run it again
+    assert state.jobs["signal-review-206-1201"].exit_code == 0
+
+
 def test_the_supply_probe_runs_once_on_the_first_night_trading_or_not() -> None:
     assert SUPPLY_PROBE.command == ("probe-supply",)
     assert SUPPLY_PROBE.timeout == timedelta(minutes=30)
@@ -1269,7 +1375,7 @@ async def test_the_signal_review_job_runs_the_real_command(empty_server: Path) -
         await asyncio.wait_for(scheduler.run_night(FRIDAY), 25)
     [body] = hub.bodies(206)
     assert "신호 기준 검토: 데이터 없음" in body and "1. 신호 설정과 엔진이 남긴 신호" in body
-    assert "KRX_SIGNAL_MIN_PROBABILITY 0.6 · KRX_SIGNAL_MIN_AGREE 2" in body
+    assert "KRX_SIGNAL_MIN_PROBABILITY 0.7 · KRX_SIGNAL_MIN_AGREE 2" in body  # #206: 0.6 until 11-03
     assert "추천값" in body  # what the agent does with it
     assert state.jobs["signal-review-206"].exit_code == 0
 

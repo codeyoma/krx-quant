@@ -1,11 +1,14 @@
 """The signal-threshold review (``krx-quant signal-review``, #206): what choosing the Telegram
 signal settings (``KRX_SIGNAL_MIN_PROBABILITY``, ``KRX_SIGNAL_MIN_AGREE``) needs, as text to
-paste. A scheduled job runs it once, on the first night with an official algorithm, and
-posts it on #206 (``scheduled.py``); an agent recommends from it, the user decides.
+paste. Scheduled jobs run it and post it on #206 (``scheduled.py``): on the first night with an
+official algorithm, again from 2026-11-02, and on a fixed window after the default moved to 0.70
+(2026-11-03); an agent recommends from it, the user decides.
 
 It reads the engine DB without writing to it (``predictions.read_only``, as ``diagnose``),
-over the latest ``days`` days with predictions (as the leaderboard's ``20d``). The scored
-predictions are read a day at a time, to stay within the server's memory.
+over the latest ``days`` days with predictions (as the leaderboard's ``20d``), or with ``since``
+the first ``days`` days with predictions from that day (``days_from``: a fixed window, the same
+days however late it runs). The scored predictions are read a day at a time, to stay within the
+server's memory.
 
 1. The signal settings in force, the rules the engine started with in the period (``runs``
    ``start``), and the signals it kept (``signal_sent``, ``signal_blocked``).
@@ -30,14 +33,34 @@ predictions are read a day at a time, to stay within the server's memory.
    elsewhere one is guessed from what was stored: a special situation in the window (a
    sidecar, or one learned later, included) or no reference price.
 
+   Sections 4 and 5 then compare bands of the probability (``BANDS``, at ``BAND_AGREE``
+   agreeing, up signals only, #206): [0.60, 0.70) against ≥ 0.70 and [0.70, 0.75) against
+   ≥ 0.75. A band [a, b) is the up signals the rule of a sends whose probability is below b
+   (what moving from b down to a would add); ≥ b is the up signals the rule of b sends. Each has
+   its signals a day, its hit rate and its touch P&L per signal, and each pair the difference of
+   their hit rates (``Comparison``). A band of fewer than ``MIN_BAND_SIGNALS`` scored signals or
+   on fewer than ``MIN_BAND_DAYS`` trading days is not judged (``NOT_JUDGED``): no interval.
+6. The rule fixed on 2026-11-03 before the days it judges (#206, ``verdict``), on section 5's
+   comparisons, from the top: to 0.75 if ≥ 0.75 beats [0.70, 0.75) with the difference's lower
+   bound above 0 and ≥ 0.75 gives at least ``MIN_A_DAY`` up signals a day; back to 0.60 if
+   [0.60, 0.70) is not worse than ≥ 0.70 (the difference's point at most 0); else 0.70 stays. A
+   comparison not judged meets neither branch. The alerts stay off whatever it picks.
+
 Ratios come with 95% Wilson intervals. They count each prediction or signal as independent:
 they are not (a window overlaps the next three, and the symbols move together), so the
-intervals are narrower than they should be. Nothing is judged against a threshold.
+intervals are narrower than they should be. So the up signals' hit rates, and the bands'
+differences, are also taken a trading day at a time (#206, ``day_ratio``,
+``day_ratio_difference``): each day is a cluster, the ratio's linearized variance is robust to
+the clustering (CR1, the G days with a signal), and the interval is Student's t with G − 1
+degrees of freedom. The signals of different days are taken as independent: the four-minute
+windows overlap within a day only.
 """
 
 from __future__ import annotations
 
 import json
+import logging
+import math
 import sqlite3
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
@@ -50,12 +73,12 @@ from krx_quant.algorithms import ALGORITHMS, KIND_ALGORITHMS
 from krx_quant.baselines import Forecast, baselines_for
 from krx_quant.config import Settings
 from krx_quant.consensus import FINAL, NAMES, NO_WEIGHTS, Weights, pool
-from krx_quant.feeds.base import KST
+from krx_quant.feeds.base import KST, kst_day
 from krx_quant.lifecycle import Standing, Status
 from krx_quant.market_view import HORIZON
 from krx_quant.predictions import days_with_predictions, iso, read_only, scored_rows
 from krx_quant.pricing import Direction
-from krx_quant.signals import BLOCKED, SENT, Blocked, Judged, SignalRule, Signals
+from krx_quant.signals import BLOCKED, SENT, Blocked, Judged, Signal, SignalRule, Signals
 from krx_quant.skill import calls_by_day, skill_text
 from krx_quant.stats import (
     Entry,
@@ -68,14 +91,25 @@ from krx_quant.stats import (
     on_target,
     scored_by_algorithm,
     split,
+    t_quantile,
     touch_profit,
     wilson,
 )
 from krx_quant.touch import TARGET_VERSION
 
+log = logging.getLogger(__name__)
+
 DEFAULT_DAYS = 20
 # The final consensus probabilities tried, besides the one in force.
 PROBABILITIES = (0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8)
+# The band comparisons (#206, fixed on 2026-11-03 with the rule they feed, ``verdict``): at this
+# many agreeing, each band [low, high) against the rule of its upper end.
+BAND_AGREE = 2
+BANDS = ((0.6, 0.7), (0.7, 0.75))
+MIN_BAND_SIGNALS = 30  # scored up signals a band needs to be judged
+MIN_BAND_DAYS = 5  # trading days with one it needs
+MIN_A_DAY = 5  # the 0.75 rule's up signals a day the move to 0.75 needs
+NOT_JUDGED = "판정 불가"
 STATUS_NAMES = {
     Status.PROBATION: "수습",
     Status.ACTIVE: "정식",
@@ -152,13 +186,17 @@ class Review:
     weights: dict[str, Weights]
 
 
-def signal_review(db: Path, settings: Settings, until: date, days: int = DEFAULT_DAYS) -> str:
-    """The review of the latest ``days`` days with predictions up to ``until``."""
+def signal_review(
+    db: Path, settings: Settings, until: date, days: int = DEFAULT_DAYS, since: date | None = None
+) -> str:
+    """The review of the latest ``days`` days with predictions up to ``until``; with ``since``,
+    of the first ``days`` days with predictions from it (up to ``until``)."""
     rule = settings.signal_thresholds
     with read_only(db) as conn:
-        data = None if conn is None else read(conn, settings, until, days)
+        data = None if conn is None else read(conn, settings, until, days, since)
+    which = "예측이 있는 날" if since is None else f"{since}부터 예측이 있는 날"
     lines = (
-        [f"신호 기준 검토 {data.days[0]} – {data.days[-1]} ({len(data.days)}일, 예측이 있는 날)"]
+        [f"신호 기준 검토 {data.days[0]} – {data.days[-1]} ({len(data.days)}일, {which})"]
         if data is not None and data.days
         else ["신호 기준 검토: 데이터 없음"]
     )
@@ -172,6 +210,7 @@ def signal_review(db: Path, settings: Settings, until: date, days: int = DEFAULT
         official = _official(data.standings)
         stored, left_out = stored_closes(data.finals, data.members)
         rebuilt = rebuilt_closes(data.finals, data.members, official, data.weights)
+        rebuilt_bands = bands(rebuilt, data.answers, settings.fee_rate)
         sections += [
             (
                 f"2. 순위표(도달 정답, 특수 상황 제외, 채점과 기준 예측마다 짝이 {settings.min_sample}개 "
@@ -185,12 +224,25 @@ def signal_review(db: Path, settings: Settings, until: date, days: int = DEFAULT
             (
                 "4. 기준 후보: 엔진이 저장한 최종 합의로(최종 합의 확률 이상 × 같은 방향 정식 알고리즘 수 "
                 "이상)",
-                _grid(stored, data, rule, settings.fee_rate, left_out=left_out, kept=True),
+                _grid(
+                    stored,
+                    data,
+                    rule,
+                    settings.fee_rate,
+                    left_out=left_out,
+                    kept=True,
+                    comparisons=bands(stored, data.answers, settings.fee_rate),
+                ),
             ),
             (
                 "5. 기준 후보: 지금 정식 알고리즘이 기간 내내 합의의 구성원이었다면"
                 f"({', '.join(official) or '정식 없음'})",
-                _grid(rebuilt, data, rule, settings.fee_rate),
+                _grid(rebuilt, data, rule, settings.fee_rate, comparisons=rebuilt_bands),
+            ),
+            (
+                "6. 판정 규칙(#206, 2026-11-03 그 뒤의 날을 보기 전에 정함. 5절의 구간 비교로, "
+                "1)부터 처음 맞는 갈래)",
+                _rule_lines(rebuilt_bands),
             ),
         ]
     for title, body in sections:
@@ -233,10 +285,17 @@ def _within(days: Sequence[date], column: str) -> tuple[str, list[str]]:
     )
 
 
-def read(conn: sqlite3.Connection, settings: Settings, until: date, days: int) -> Review:
-    """What the review needs of the latest ``days`` days with predictions up to ``until``."""
+def read(
+    conn: sqlite3.Connection, settings: Settings, until: date, days: int, since: date | None = None
+) -> Review:
+    """What the review needs of the latest ``days`` days with predictions up to ``until``; with
+    ``since``, of the first ``days`` from it."""
     conn.row_factory = sqlite3.Row  # as the store's rows (``select_predictions``)
-    chosen = sorted(days_with_predictions(conn, until, days))
+    chosen = (
+        sorted(days_with_predictions(conn, until, days))
+        if since is None
+        else days_from(conn, since, days, until)
+    )
     standings = {
         r["algorithm"]: Standing(Status(r["status"]), datetime.fromisoformat(r["at"]))
         for r in conn.execute(
@@ -260,6 +319,40 @@ def read(conn: sqlite3.Connection, settings: Settings, until: date, days: int) -
         _answers(conn, chosen),
         _weights(conn, versions),
     )
+
+
+def days_from(conn: sqlite3.Connection, since: date, limit: int, until: date | None = None) -> list[date]:
+    """The first ``limit`` days with predictions on or after ``since`` (and up to ``until``),
+    oldest first; fewer while they fill. A fixed window, unlike ``days_with_predictions``' latest
+    days: a later run reads the same days. Steps from one day with predictions to the next on the
+    bar-close index: a few small queries, cheap enough for a night's conditions."""
+    found: list[date] = []
+    start = since
+    while len(found) < limit:
+        first = conn.execute(
+            "SELECT MIN(bar_close) FROM predictions WHERE bar_close >= ?",
+            (iso(datetime.combine(start, time(), KST)),),
+        ).fetchone()[0]
+        if first is None:
+            break
+        day = date.fromisoformat(first[:10])  # stored in KST
+        if until is not None and day > until:
+            break
+        found.append(day)
+        start = day + timedelta(days=1)
+    return found
+
+
+def fixed_days(db: Path, since: date, limit: int) -> int:
+    """How many of the first ``limit`` days with predictions from ``since`` are in
+    (``scheduled.Facts.signal_review_days``, #206): 0 without the DB, or when it cannot be read
+    (logged; the jobs' other conditions are read all the same)."""
+    try:
+        with read_only(db) as conn:
+            return 0 if conn is None else len(days_from(conn, since, limit))
+    except sqlite3.Error:
+        log.exception("could not count the fixed signal review window's days (#206) in the engine DB")
+        return 0
 
 
 def _runs(conn: sqlite3.Connection, days: Sequence[date]) -> list[tuple[str, datetime, dict[str, Any]]]:
@@ -454,6 +547,215 @@ def rebuilt_closes(
     return list(closes.values())
 
 
+# By trading day (#206): each day a cluster
+
+
+def _shares(by_day: Mapping[date, tuple[int, int]]) -> tuple[float, dict[date, float]] | None:
+    """The hit rate of ``by_day`` (each trading day's hits and signals) and each day's share of
+    its linearized error, (h − p n) ÷ N; None without a signal."""
+    used = {day: c for day, c in by_day.items() if c[1] > 0}
+    total = sum(n for _, n in used.values())
+    if not total:
+        return None
+    p = sum(h for h, _ in used.values()) / total
+    return p, {day: (h - p * n) / total for day, (h, n) in used.items()}
+
+
+def _half(shares: Sequence[float], level: float) -> float | None:
+    """The half width of a two-sided ``level`` interval from the G days' ``shares``: the
+    cluster-robust (CR1) variance G ÷ (G − 1) × Σ share², and Student's t with G − 1 degrees of
+    freedom. None from fewer than two days."""
+    g = len(shares)
+    if g < 2:
+        return None
+    return t_quantile(1 - (1 - level) / 2, g - 1) * math.sqrt(g / (g - 1) * sum(x * x for x in shares))
+
+
+def day_ratio(by_day: Mapping[date, tuple[int, int]], level: float = 0.95) -> Interval | None:
+    """Hits over signals (``by_day``: each trading day's hits and signals), with a two-sided
+    ``level`` interval taken a trading day at a time: each day a cluster (``_half``, over the days
+    with a signal), cut to [0, 1]. The ratio of the sums, not the days' mean rate. Its ``n`` is the
+    days; None without a signal; no bounds from one day."""
+    found = _shares(by_day)
+    if found is None:
+        return None
+    p, shares = found
+    half = _half(list(shares.values()), level)
+    if half is None:
+        return Interval(p, None, None, len(shares))
+    return Interval(p, max(0.0, p - half), min(1.0, p + half), len(shares))
+
+
+def day_ratio_difference(
+    lower: Mapping[date, tuple[int, int]], upper: Mapping[date, tuple[int, int]], level: float = 0.95
+) -> Interval | None:
+    """``upper``'s hit rate less ``lower``'s (each as ``day_ratio``'s), with a two-sided ``level``
+    interval a trading day at a time: a day's share of the difference's error is its share of
+    ``upper``'s less its share of ``lower``'s, so the two sides' signals of a day move together
+    (``_half``, over the days with a signal on either side). Its ``n`` is the days; None without a
+    signal on either side; no bounds from one day."""
+    below, above = _shares(lower), _shares(upper)
+    if below is None or above is None:
+        return None
+    difference = above[0] - below[0]
+    days = sorted(set(below[1]) | set(above[1]))
+    half = _half([above[1].get(d, 0.0) - below[1].get(d, 0.0) for d in days], level)
+    if half is None:
+        return Interval(difference, None, None, len(days))
+    return Interval(difference, difference - half, difference + half, len(days))
+
+
+@dataclass(frozen=True)
+class _Outcome:
+    """A signal sent, on its touch answer."""
+
+    signal: Signal
+    hit: bool | None  # None: no answer (unscorable, or its four minutes not over)
+    profit: float | None  # touch P&L, ticks; None without the quotes it needs
+
+
+def _outcomes(
+    judged: Iterable[Judged],
+    answers: Mapping[Key, _Answer],
+    prices: dict[str, Prices | None],
+    fee_rate: float,
+) -> list[_Outcome]:
+    """The signals of ``judged`` sent, each on its touch answer (``prices``: the touch paths read)."""
+    out = []
+    for j in judged:
+        if j.blocked is not None:
+            continue
+        s = j.signal
+        answer = answers.get((s.symbol, iso(s.bar_close)))
+        if answer is None or answer.label is None:
+            out.append(_Outcome(s, None, None))
+            continue
+        if answer.path not in prices:
+            prices[answer.path] = Prices.of(json.loads(answer.path))
+        out.append(
+            _Outcome(s, answer.label is s.direction, touch_profit(s.direction, prices[answer.path], fee_rate))
+        )
+    return out
+
+
+def _by_day(outcomes: Iterable[_Outcome]) -> dict[date, tuple[int, int]]:
+    """The scored ones' hits and number, by trading day."""
+    counts: dict[date, list[int]] = {}
+    for o in outcomes:
+        if o.hit is not None:
+            c = counts.setdefault(kst_day(o.signal.bar_close), [0, 0])
+            c[0] += o.hit
+            c[1] += 1
+    return {day: (h, n) for day, (h, n) in counts.items()}
+
+
+@dataclass(frozen=True)
+class Band:
+    """A band's up signals at ``BAND_AGREE`` agreeing (#206): those the rule of ``low`` sends whose
+    probability is below ``high``; ``high`` None, all it sends."""
+
+    low: float
+    high: float | None
+    sent: int  # up signals sent, scored or not
+    days: int  # the section's days, which a day's signals are counted over
+    by_day: Mapping[date, tuple[int, int]]  # hits and those scored on a touch answer, by trading day
+    profit: Interval | None  # touch P&L per scored signal, ticks
+
+    @property
+    def name(self) -> str:
+        if self.high is None:
+            return f"≥ {_probability(self.low)}"
+        return f"[{_probability(self.low)}, {_probability(self.high)})"
+
+    @property
+    def scored(self) -> int:
+        return sum(n for _, n in self.by_day.values())
+
+    @property
+    def scored_days(self) -> int:
+        return sum(1 for _, n in self.by_day.values() if n)
+
+    @property
+    def judged(self) -> bool:
+        """Enough to judge: ``MIN_BAND_SIGNALS`` scored signals on ``MIN_BAND_DAYS`` days."""
+        return self.scored >= MIN_BAND_SIGNALS and self.scored_days >= MIN_BAND_DAYS
+
+    @property
+    def a_day(self) -> float:
+        return self.sent / self.days if self.days else 0.0
+
+
+@dataclass(frozen=True)
+class Comparison:
+    """A band [low, high) against the rule of its upper end, ≥ high (#206)."""
+
+    below: Band
+    above: Band
+
+    @property
+    def difference(self) -> Interval | None:
+        """``above``'s hit rate less ``below``'s, by trading day; None (``NOT_JUDGED``) unless both
+        are judged."""
+        if not (self.below.judged and self.above.judged):
+            return None
+        return day_ratio_difference(self.below.by_day, self.above.by_day)
+
+
+def _band(low: float, high: float | None, outcomes: Sequence[_Outcome], days: int) -> Band:
+    up = [o for o in outcomes if o.signal.direction is Direction.UP]
+    if high is not None:
+        up = [o for o in up if o.signal.probability < high]
+    profits = [o.profit for o in up if o.hit is not None and o.profit is not None]
+    return Band(low, high, len(up), days, _by_day(up), mean_interval(profits))
+
+
+def bands(closes: Sequence[BarClose], answers: Mapping[Key, _Answer], fee_rate: float) -> list[Comparison]:
+    """Each band of ``BANDS`` over ``closes`` against the rule of its upper end, by the engine's own
+    rule (``replay``)."""
+    days = len({c.at.date() for c in closes})
+    prices: dict[str, Prices | None] = {}
+    out = []
+    for low, high in BANDS:
+        below = _outcomes(replay(closes, SignalRule(low, BAND_AGREE)), answers, prices, fee_rate)
+        above = _outcomes(replay(closes, SignalRule(high, BAND_AGREE)), answers, prices, fee_rate)
+        out.append(Comparison(_band(low, high, below, days), _band(high, None, above, days)))
+    return out
+
+
+def verdict(back: Comparison, up: Comparison) -> tuple[float, str]:
+    """The rule fixed in #206 on 2026-11-03, before the days it judges: the setting it picks and
+    why, from ``back`` ([0.60, 0.70) against ≥ 0.70) and ``up`` ([0.70, 0.75) against ≥ 0.75),
+    the first branch met:
+
+    1. 0.75, if ≥ 0.75 beats [0.70, 0.75) with the difference's lower bound by trading day above 0,
+       and ≥ 0.75 gives at least ``MIN_A_DAY`` up signals a day;
+    2. 0.60, if [0.60, 0.70) is not worse than ≥ 0.70: the difference (≥ 0.70 less [0.60, 0.70))
+       at most 0 at its point;
+    3. else 0.70.
+
+    A comparison not judged (``NOT_JUDGED``) meets neither branch."""
+    rise, fall = up.difference, back.difference
+    if rise is not None and rise.low is not None and rise.low > 0 and up.above.a_day >= MIN_A_DAY:
+        return 0.75, (
+            f"0.75로 올린다({up.above.name} − {up.below.name}의 하한 {_points(rise.low)} > 0 · "
+            f"{up.above.name} 하루 {up.above.a_day:.1f}번 ≥ {MIN_A_DAY})"
+        )
+    if fall is not None and fall.value <= 0:
+        return (
+            0.6,
+            f"0.60으로 되돌린다({back.above.name} − {back.below.name}의 점추정 {_points(fall.value)} ≤ 0)",
+        )
+    if rise is None:
+        not_up = NOT_JUDGED
+    else:
+        short = [] if rise.low is not None and rise.low > 0 else [f"하한 {_points(rise.low)} ≤ 0"]
+        if up.above.a_day < MIN_A_DAY:
+            short.append(f"하루 {up.above.a_day:.1f}번 < {MIN_A_DAY}")
+        not_up = ", ".join(short)
+    not_back = NOT_JUDGED if fall is None else f"점추정 {_points(fall.value)} > 0"
+    return 0.7, f"0.70 유지(0.75 갈래: {not_up} · 0.60 갈래: {not_back})"
+
+
 # Writing
 
 
@@ -606,9 +908,10 @@ def _grid(
     *,
     left_out: int = 0,
     kept: bool = False,
+    comparisons: Sequence[Comparison] = (),
 ) -> list[str]:
-    """Each candidate's signals over ``closes``; with ``kept``, the cell in force against the
-    signals the engine kept."""
+    """Each candidate's signals over ``closes``, then the band ``comparisons``; with ``kept``, the
+    cell in force against the signals the engine kept."""
     lines = (
         [f"옛 정답 모델을 합쳤거나 구성원의 예측이 없는 최종 합의 {left_out:,}개(종목 × 봉 마감)는 뺐다"]
         if left_out
@@ -642,6 +945,7 @@ def _grid(
             judged = replay(closes, candidate)
             line = _cell(candidate, judged, data.answers, prices, len(days), fee_rate)
             lines.append(line + (" (지금 설정)" if candidate == rule else ""))
+    lines += _band_lines(comparisons)
     if kept:
         lines.append(_against_kept(replay(closes, rule), closes, data, rule))
     return lines
@@ -655,30 +959,25 @@ def _cell(
     days: int,
     fee_rate: float,
 ) -> str:
-    sent = [j.signal for j in judged if j.blocked is None]
-    hits: dict[Direction, list[bool]] = {Direction.UP: [], Direction.DOWN: []}
-    unlabeled = 0
-    profits: list[float] = []
-    for s in sent:
-        answer = answers.get((s.symbol, iso(s.bar_close)))
-        if answer is None or answer.label is None:
-            unlabeled += 1
-            continue
-        hits[s.direction].append(answer.label is s.direction)
-        if answer.path not in prices:
-            prices[answer.path] = Prices.of(json.loads(answer.path))
-        if (profit := touch_profit(s.direction, prices[answer.path], fee_rate)) is not None:
-            profits.append(profit)
+    sent = _outcomes(judged, answers, prices, fee_rate)
+    scored = [o for o in sent if o.hit is not None]
+    hits = {
+        d: [bool(o.hit) for o in scored if o.signal.direction is d] for d in (Direction.UP, Direction.DOWN)
+    }
+    unlabeled = len(sent) - len(scored)
+    profits = [o.profit for o in scored if o.profit is not None]
     both = hits[Direction.UP] + hits[Direction.DOWN]
     mean = mean_interval(profits)
+    up_by_day = day_ratio(_by_day(o for o in scored if o.signal.direction is Direction.UP))
     return " · ".join(
         [
             f"확률 ≥ {_probability(rule.min_probability)} · 같은 방향 ≥ {rule.min_agree}:"
             f" 신호 {len(sent):,}번 (하루 {len(sent) / days:.1f}번)",
             f"막힘 {len(judged) - len(sent):,}",
             *(
-                f"{CALLED[d]} {sum(1 for s in sent if s.direction is d):,}번 적중 "
+                f"{CALLED[d]} {sum(1 for o in sent if o.signal.direction is d):,}번 적중 "
                 f"{_ratio(wilson(sum(hits[d]), len(hits[d])))}"
+                + (_by_days(up_by_day) if d is Direction.UP else "")
                 for d in (Direction.UP, Direction.DOWN)
             ),
             f"합쳐 {_ratio(wilson(sum(both), len(both)))}",
@@ -686,6 +985,67 @@ def _cell(
             f"닿음 손익 {'—' if mean is None else f'{mean.value:+.2f}'}틱/번",
         ]
     )
+
+
+def _by_days(i: Interval | None) -> str:
+    """The up signals' hit rate by trading day (``day_ratio``), beside its Wilson interval."""
+    if i is None:
+        return ""
+    if i.low is None or i.high is None:
+        return f" (거래일 — {i.n}일)"
+    return f" (거래일 [{i.low * 100:.1f}–{i.high * 100:.1f}%] {i.n}일)"
+
+
+def _band_line(b: Band) -> str:
+    rate = day_ratio(b.by_day)
+    shown = "—" if rate is None else f"{rate.value:.1%}"
+    if b.judged and rate is not None and rate.low is not None and rate.high is not None:
+        shown += f" [{rate.low * 100:.1f}–{rate.high * 100:.1f}%]"
+    line = (
+        f"{b.name}: 상승 신호 {b.sent:,}번 (하루 {b.a_day:.1f}번) · 채점 {b.scored:,}번 {b.scored_days}일 · "
+        f"적중 {shown} · 닿음 손익 {'—' if b.profit is None else f'{b.profit.value:+.2f}'}틱/번"
+    )
+    if not b.judged:
+        line += f" · {NOT_JUDGED}(채점 {MIN_BAND_SIGNALS}번·{MIN_BAND_DAYS}일 미만)"
+    return line
+
+
+def _band_lines(comparisons: Sequence[Comparison]) -> list[str]:
+    if not comparisons:
+        return []
+    lines = [
+        f"구간 비교(같은 방향 ≥ {BAND_AGREE}, 상승 신호만): [a, b)는 확률 ≥ a 규칙이 보낸 신호 중 "
+        "확률이 b 미만인 것, ≥ b는 확률 ≥ b 규칙이 보낸 신호. 구간은 거래일 단위 95%(날마다 한 묶음)이고, "
+        f"채점 {MIN_BAND_SIGNALS}번이나 {MIN_BAND_DAYS}일 미만인 구간은 {NOT_JUDGED}"
+    ]
+    for c in comparisons:
+        d = c.difference
+        lines += [
+            _band_line(c.below),
+            _band_line(c.above),
+            f"{c.above.name} − {c.below.name}: "
+            + (
+                NOT_JUDGED
+                if d is None
+                else f"{_points(d.value)} [{_points(d.low)}, {_points(d.high)}] {d.n}일"
+            ),
+        ]
+    return lines
+
+
+def _rule_lines(comparisons: Sequence[Comparison]) -> list[str]:
+    back, up = comparisons
+    _, why = verdict(back, up)
+    return [
+        "1) 0.75로 올린다: ≥ 0.75 − [0.70, 0.75)의 거래일 하한이 0보다 크고, "
+        f"≥ 0.75의 상승 신호가 하루 {MIN_A_DAY}번 이상",
+        "2) 0.60으로 되돌린다: ≥ 0.70 − [0.60, 0.70)의 점추정이 0 이하"
+        "([0.60, 0.70)가 ≥ 0.70보다 나쁘지 않다)",
+        f"3) 그 밖: 0.70 유지. {NOT_JUDGED}인 비교는 그 갈래를 채우지 않는다",
+        f"판정: {why}",
+        "알림(KRX_SIGNAL_ALERT)은 판정과 상관없이 끈 채로 둔다. 켜는 것은 사용자가 따로 정한다. "
+        "에이전트가 이 판정으로 추천하고 사용자가 정한다",
+    ]
 
 
 def _against_kept(

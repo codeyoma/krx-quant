@@ -29,6 +29,7 @@ from krx_quant.predictions import PredictionStore
 from krx_quant.replay import replay_into
 from krx_quant.signals import SignalRule, Signals
 from krx_quant.touch import TARGET_VERSION
+from krx_quant.trader import THRESHOLD as TRADER_THRESHOLD
 from tests.algorithm_doubles import FixedAlgorithm
 from tests.api_schema import check
 from tests.replay_events import (
@@ -330,11 +331,17 @@ async def test_a_restarted_engine_does_not_repeat_a_running_signal(
 def test_signals_are_off_by_default_and_their_settings_are_checked() -> None:
     keys = {"KIS_APP_KEY": "key", "KIS_APP_SECRET": "secret"}
 
-    assert Settings.from_env(keys, dotenv_path=None).signal_rule is None
+    off = Settings.from_env(keys, dotenv_path=None)
+    assert off.signal_rule is None
+    # #206 (2026-11-03): the default moved from 0.6 to 0.70; the trader's threshold is its own.
+    assert off.signal_thresholds == SignalRule(min_probability=0.7, min_agree=2)
+    assert TRADER_THRESHOLD == 0.6
     on = Settings.from_env(
         {**keys, "KRX_SIGNAL_ALERT": "on", "KRX_SIGNAL_MIN_AGREE": "3"}, dotenv_path=None
     ).signal_rule
-    assert on == SignalRule(min_probability=0.6, min_agree=3)
+    assert on == SignalRule(min_probability=0.7, min_agree=3)
+    set_ = Settings.from_env({**keys, "KRX_SIGNAL_MIN_PROBABILITY": "0.6"}, dotenv_path=None)
+    assert set_.signal_thresholds == SignalRule(0.6, 2)  # a value set in .env still wins
     with pytest.raises(SettingsError, match="KRX_SIGNAL_MIN_PROBABILITY"):
         Settings.from_env({**keys, "KRX_SIGNAL_MIN_PROBABILITY": "0.4"}, dotenv_path=None)
     with pytest.raises(SettingsError, match="KRX_SIGNAL_ALERT"):

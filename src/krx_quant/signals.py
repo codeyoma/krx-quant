@@ -40,7 +40,9 @@ BLOCKED = "signal_blocked"
 
 @dataclass(frozen=True)
 class SignalRule:
-    min_probability: float = 0.6  # of the move, in the final consensus; at least 0.5
+    # Of the move, in the final consensus; at least 0.5. 0.6 until 2026-11-03: #206 moved it to 0.70,
+    # provisionally, until the scheduled job ``signal-review-206-1201`` measures it again.
+    min_probability: float = 0.7
     min_agree: int = 2  # active algorithms predicting the move
 
 

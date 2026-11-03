@@ -138,7 +138,8 @@ CAPITAL = 1_000_000
 # and the policy never touches them (``limits.py``).
 DAILY_LOSS_PERCENT = 10.0
 CUMULATIVE_LOSS_PERCENT = 20.0
-# The default threshold: a rise's probability at least this buys (the signal alerts' default); the
+# The default threshold: a rise's probability at least this buys (the signal alerts' default until #206
+# moved theirs to 0.70 on 2026-11-03; this one is its own and stays); the
 # nightly fit's default, a champion policy's cell having its own θ (#399) and the mock practice cell
 # the θ frozen for its review cycle (#474; this one before). Before the first champion nothing but
 # the practice trades (#469).

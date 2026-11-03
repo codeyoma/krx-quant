@@ -94,6 +94,7 @@ from krx_quant.prevalidation import (
 from krx_quant.process_log import KRX_QUANT, Child, run_logged
 from krx_quant.process_log import Ran as Ran  # a job's process, once it ended
 from krx_quant.redaction import redact, secrets_of
+from krx_quant.signal_review import fixed_days
 from krx_quant.swap import NightTraining
 from krx_quant.trader.mock_check import DIFFERENT as MOCK_DIFFERENT
 from krx_quant.trader.mock_check import SAME as MOCK_SAME
@@ -348,6 +349,10 @@ class Facts:
     # report and the day folders): its window's N once discovered, whether it was judged, and the
     # recorded days after 2026-11-02 that can be in the window.
     neyman_variants: NeymanVariants = field(default_factory=NeymanVariants)
+    # How many of the first ``SIGNAL_REVIEW_FIXED_DAYS`` days with predictions from
+    # ``SIGNAL_REVIEW_FROM`` are in the engine DB (#206, ``signal_review.fixed_days``): the signal
+    # review's fixed window waits for them all.
+    signal_review_days: int = 0
 
 
 @dataclass(frozen=True)
@@ -1083,6 +1088,9 @@ async def read_facts(
         hit_rate_nights=await asyncio.to_thread(nights_with_hit_rates, settings),
         holdout_days=await asyncio.to_thread(days_in_window, settings.state_dir / DB_NAME),
         neyman_variants=await asyncio.to_thread(neyman_variants_progress, settings, clock.now()),
+        signal_review_days=await asyncio.to_thread(
+            fixed_days, settings.state_dir / DB_NAME, SIGNAL_REVIEW_FROM, SIGNAL_REVIEW_FIXED_DAYS
+        ),
     )
 
 
@@ -1234,6 +1242,65 @@ SIGNAL_REVIEW_AGAIN = Job(
                 "하루뿐이라 기준을 그대로 두고 2026-11-02쯤 다시 보기로 했다. 에이전트가 이 출력으로 "
                 "`KRX_SIGNAL_MIN_PROBABILITY`, `KRX_SIGNAL_MIN_AGREE`의 추천값을 낸다. 사용자가 정하면 "
                 "서버 `.env`의 두 값을 바꾸거나 기본값을 PR로 바꾼다."
+            ),
+        ),
+    ),
+)
+
+# ②″ The signal-threshold review on a fixed window (#206): on 2026-11-03 the user moved the default
+# of ``KRX_SIGNAL_MIN_PROBABILITY`` from 0.6 to 0.70 (#483), provisionally: on section 5 of the
+# second run (seven days), 0.70's up signals hit 67.0% [57.7–75.1%], its lower bound below 0.60's
+# 58.1%. The default is held for ``SIGNAL_REVIEW_FIXED_DAYS`` (20) trading days and measured again on
+# them alone: the first days with predictions from ``SIGNAL_REVIEW_FROM`` (2026-11-04, the first day
+# the 06:00 deploy runs the new default), a fixed window (``signal-review --from``) that a later run
+# reads the same. Once, on the first trading night they are all in (``Facts.signal_review_days``,
+# counted in the engine DB read-only when the night's conditions are read: up to 20 small queries)
+# with an official algorithm: the night of 2026-12-01 if every trading day from 11-04 has
+# predictions (no market holiday in between). Its sections 4 and 5 compare the bands by trading day
+# and section 6 prints the branch of the rule fixed here, before those days (``signal_review.verdict``,
+# the note, docs/operations.md). Before the pre-validations, as the first run.
+SIGNAL_REVIEW_FROM = date(2026, 11, 4)
+SIGNAL_REVIEW_FIXED_DAYS = 20
+
+
+def _signal_review_window_in(night: Night) -> bool:
+    """Once, on the first trading night the fixed window's days are all in, with an official algorithm."""
+    return (
+        night.trading_day
+        and night.facts.signal_review_days >= SIGNAL_REVIEW_FIXED_DAYS
+        and night.facts.official > 0
+        and not night.ran
+    )
+
+
+SIGNAL_REVIEW_FIXED = Job(
+    name="signal-review-206-1201",
+    due=_signal_review_window_in,
+    command=(
+        "signal-review",
+        "--from",
+        SIGNAL_REVIEW_FROM.isoformat(),
+        "--days",
+        str(SIGNAL_REVIEW_FIXED_DAYS),
+    ),
+    timeout=timedelta(hours=1),
+    targets=(
+        Target(
+            SIGNAL_REVIEW_ISSUE,
+            note=(
+                "신호 기준 검토의 세 번째 실행이다. 2026-11-03 사용자가 "
+                "`KRX_SIGNAL_MIN_PROBABILITY` 기본값을 0.6에서 0.70으로 바꿨다(#483, 잠정값). "
+                "그 뒤 고정 창 20거래일(2026-11-04부터 예측이 있는 첫 20일)만으로 다시 잰 결과다. "
+                "판정 규칙은 그날들을 보기 전에 정했고 결과를 보고 바꾸지 않는다: 5절의 구간 비교"
+                "(같은 방향 ≥ 2, 상승 신호, 거래일 단위 95% 구간)로 위에서부터 처음 맞는 갈래를 "
+                "고른다. (1) ≥ 0.75가 [0.70, 0.75)보다 높고 그 차이의 하한이 0보다 크며 ≥ 0.75의 "
+                "상승 신호가 하루 5번 이상이면 0.75로 올린다. (2) ≥ 0.70 − [0.60, 0.70)의 점추정이 "
+                "0 이하이면([0.60, 0.70)가 ≥ 0.70보다 나쁘지 않으면) 0.60으로 되돌린다. (3) 그 밖에는 "
+                "0.70을 둔다. 채점 30번 미만이나 5일 미만인 구간의 비교는 판정 불가이고 그 갈래를 "
+                "채우지 않는다. 6절이 고른 갈래를 적는다. 알림(`KRX_SIGNAL_ALERT`)은 판정과 상관없이 "
+                "끈 채로 둔다. 켜는 것은 사용자가 따로 정한다. 에이전트가 6절의 갈래로 추천하고 "
+                "사용자가 정한다. 1절의 지금 설정이 0.7이 아니면 서버 `.env`가 "
+                "`KRX_SIGNAL_MIN_PROBABILITY`를 따로 적고 있다."
             ),
         ),
     ),
@@ -2892,6 +2959,7 @@ JOBS: tuple[Job, ...] = (
     MOCK_CHECK,
     KIS_ORDER_PROBE,
     SIGNAL_REVIEW_AGAIN,
+    SIGNAL_REVIEW_FIXED,
     LIVE_PROBE,
     ERROR_BREAKDOWN,
     ERROR_HOLDOUT,
