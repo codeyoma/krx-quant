@@ -349,7 +349,9 @@ def kind_scoring(kind: Kind, calendar: MarketCalendar | None = None) -> Scoring:
     def measure(
         name: str, rows: list[dict[str, Any]], baselines: Collection[str], fee_rate: float, level: float
     ) -> Lifted:
-        algorithms, scored = split(scored_of_kind(rows, kind), baselines)
+        # Its rows and the baselines' only (#487), as the direction's.
+        judged = [r for r in rows if r["algorithm"] == name or r["algorithm"] in baselines]
+        algorithms, scored = split(scored_of_kind(judged, kind), baselines)
         return entry(name, algorithms.get(name, []), scored, kind, level, calendar)
 
     def lean(row: Mapping[str, Any]) -> float:

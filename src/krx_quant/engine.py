@@ -1094,7 +1094,7 @@ class PredictionEngine:
             standings,
             {name: self._counted_from(name, s) for name, s in standings.items()},
             self.store.prediction_days(at.astimezone(KST).date(), _REVIEW_DAYS),
-            lambda chosen, special: self.store.scored_predictions(chosen, None, special),
+            self.store.reviewed,  # the fields it reads (#487)
             min_sample=self.min_sample,
             fee_rate=self.fee_rate,
             alerted=alerted,
@@ -1289,7 +1289,8 @@ class PredictionEngine:
         """The consensus weights of the members active after the review."""
         members = self.members()
         days = self.store.prediction_days(at.astimezone(KST).date(), max(SPANS))
-        rows = await asyncio.to_thread(self.store.scored_predictions, days, None, False)
+        # The members' rows only, none without a member (#487): the weights read no other's.
+        rows = await asyncio.to_thread(self.store.reviewed, days, False, members)
         self.weights = await asyncio.to_thread(fit_weights, rows, members, days, at)
         self.store.save_weights(self.weights)
         log.info("consensus weights %s for %s", self.weights.version, ", ".join(members) or "no member")
@@ -1333,8 +1334,9 @@ class PredictionEngine:
         return None if started is None else max(first, started.astimezone(KST).date())
 
     def _kind_rows(self, kind: PredictionKind, chosen: Sequence[date], special: bool) -> list[dict[str, Any]]:
-        """``kind``'s scored predictions made on ``chosen`` days, as the lifecycle reads them."""
-        return self.store.kind_scored(kind.name, kind.answer_version, chosen, None, special)
+        """``kind``'s scored predictions made on ``chosen`` days, as the lifecycle reads them
+        (``kind_reviewed``, #487)."""
+        return self.store.kind_reviewed(kind.name, kind.answer_version, chosen, special)
 
     def _daily_days(self, kind: DailyKind, until: date) -> list[date]:
         """The days a daily kind's lifecycle counts up to ``until`` (#264): those with an answer,
@@ -1369,7 +1371,7 @@ class PredictionEngine:
             standings,
             {name: self._counted_from(name, s) for name, s in standings.items()},
             reviewed,
-            lambda chosen, special: self.store.scored_predictions(chosen, None, special),
+            self.store.reviewed,  # the fields it reads (#487)
             min_sample=self.min_sample,
             fee_rate=self.fee_rate,
             rules=self.review_rules,
