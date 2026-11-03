@@ -19,9 +19,13 @@ After the merge, remove the worktree and delete the branch, locally and on the r
 
 - krx-quant runs what CI runs (`.github/workflows/ci.yml`): `uv run python scripts/check_forbidden.py`, `uv run ruff check`, `uv run ruff format --check`, `uv run mypy`, `uv run pytest -q`. All pass before the PR is opened.
   - A test past its time limit ends the pytest run with every thread's stack, and the tests after it do not run (CODING_STANDARDS.md, "Tests wait for conditions"). Fix that test and run again.
+  - CI runs the checks once (job `lint`) and pytest in four shards on runners of their own (`pytest 1` to `pytest 4`, `scripts/ci_shard.py`, #486). The check to wait for is `test`: it passes when `lint` and every shard passed and every test ran in exactly one shard. Locally, run the whole suite in one `pytest`; to run one shard's files, `uv run pytest -q $(python3 scripts/ci_shard.py files <shard> 4)`.
+  - A push to a PR cancels that PR's run still going; wait for the newest commit's run.
 - Fork: a dev build with `CI=1` (`-Werror`) and `ctest -R krx` (`fincept/custom/README.md`).
   - MSVC treats warnings as errors and macOS clang misses some of them: pass `f` literals to Qt float parameters (`setAlphaF(0.3f)`), and avoid narrowing double → float.
-  - Until fork PRs run checks of their own (#324), run the Windows branch check before merging: `gh workflow run custom-release.yml --repo codeyoma/FinceptTerminal --ref <branch>`.
+  - A fork PR runs the Windows build check by itself (AGENTS.md "Submodule workflow", step 7); merge once it passes.
+
+    > **삭제됨** (2026-11-04, #491): "Until fork PRs run checks of their own (#324), run the Windows branch check before merging: `gh workflow run custom-release.yml --repo codeyoma/FinceptTerminal --ref <branch>`." 이유: fork PR이 스스로 검사를 돈다(#324, 2026-10-20 닫힘). 대신: fork PR의 검사가 통과하면 머지한다.
 
 ## Commits
 
