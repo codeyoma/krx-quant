@@ -158,3 +158,16 @@ def test_a_failing_test_fails_its_shard_but_the_shard_still_reports(tmp_path: Pa
     ran = shard_script(tmp_path, "run", "1", "1", str(out), "--", "-q", "-p", "no:cacheprovider")
     assert ran.returncode == 1
     assert json.loads(out.read_text())["tests"] == ["tests/test_a.py::test_x"]
+
+
+def test_ci_runs_four_shards_behind_one_check_and_cancels_only_superseded_pr_runs() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+    assert "shard: [1, 2, 3, 4]" in workflow
+    assert "scripts/ci_shard.py run ${{ matrix.shard }} ${{ strategy.job-total }}" in workflow
+    assert "scripts/ci_shard.py collect" in workflow and "scripts/ci_shard.py verify" in workflow
+    # The check a merge waits for keeps its name, whatever the number of shards.
+    test_job = workflow.split("\n  test:\n", 1)[1]
+    assert "needs: [lint, pytest]" in test_job and "if: ${{ !cancelled() }}" in test_job
+    # A push to main is never cancelled: its group is the run's own.
+    assert "group: ci-${{ github.event.pull_request.number || github.run_id }}" in workflow
+    assert "cancel-in-progress: ${{ github.event_name == 'pull_request' }}" in workflow
