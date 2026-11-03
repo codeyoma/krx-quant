@@ -36,11 +36,9 @@ from pathlib import Path
 from typing import Any
 
 import aiohttp
-import pyarrow as pa
-import pyarrow.parquet as pq
 
 from krx_quant import kis
-from krx_quant.archive import partition_files
+from krx_quant.archive import partition_batches
 from krx_quant.config import Settings
 from krx_quant.contracts import KOSPI200, NIGHT_END, night_front_month
 from krx_quant.feeds import KOSPI200_FUTURES, NIGHT_FUTURES, NIGHT_FUTURES_BOOK, Feed
@@ -84,14 +82,9 @@ class Ack:
 
 
 def _batches(partition: Path, columns: Sequence[str]) -> Iterator[dict[str, list[Any]]]:
-    """A partition's rows, a batch at a time, each row once (the merged file, then the parts it
-    does not hold)."""
-    for path in partition_files(partition):
-        try:
-            for batch in pq.ParquetFile(path).iter_batches(columns=list(columns)):
-                yield batch.to_pydict()
-        except (FileNotFoundError, pa.ArrowInvalid, OSError):
-            continue  # merged away in between, or written as it was read: the rest still counts
+    """A partition's rows, a batch at a time, each row once (``archive.partition_batches``)."""
+    for _, batch in partition_batches(partition, columns):
+        yield batch.to_pydict()
 
 
 def acknowledgements(data_dir: Path, day: date) -> list[Ack]:

@@ -49,7 +49,7 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 from krx_quant import kis
-from krx_quant.archive import partition_files
+from krx_quant.archive import partition_batches
 from krx_quant.config import Settings
 from krx_quant.feeds import MEMBER, RAW_SCHEMA, WS_FEEDS
 from krx_quant.feeds.base import KST
@@ -200,8 +200,7 @@ class Unread:
         ]
 
 
-def _readable(path: Path, unread: Unread, label: str) -> bool:
-    schema = pq.read_schema(path)
+def _readable(path: Path, schema: pa.Schema, unread: Unread, label: str) -> bool:
     for column in (_RECEIVED, _MESSAGE):
         if column not in schema.names:
             unread.file(f"{label} {column} 없음(읽지 않음)", path)
@@ -227,33 +226,32 @@ def _between(values: Any, start: datetime, end: datetime) -> Any:
 def rows(
     partition: Path, unread: Unread, label: str, window: tuple[datetime, datetime] | None = None
 ) -> Iterator[tuple[datetime, str]]:
-    """A raw partition's (receipt, text) rows, each once (the merged file, then the parts it does
-    not hold), in the files' order; with ``window``, those received in it only (a file with none
-    there is not read past its times)."""
-    for path in partition_files(partition):
-        empty = 0
-        try:
-            if not _readable(path, unread, label):
-                continue
+    """A raw partition's (receipt, text) rows, each once (``archive.partition_batches``), in the
+    files' order; with ``window``, those received in it only (a file with none there is not read
+    past its times)."""
+
+    def readable(path: Path, schema: pa.Schema) -> list[str] | None:
+        if not _readable(path, schema, unread, label):
+            return None
+        if window is not None:
+            times = pq.read_table(path, columns=[_RECEIVED]).column(0)
+            if not pc.any(_between(times, *window)).as_py():
+                return None
+        return [_RECEIVED, _MESSAGE]
+
+    empty: Counter[Path] = Counter()  # by file
+    try:
+        for path, batch in partition_batches(partition, readable):
             if window is not None:
-                times = pq.read_table(path, columns=[_RECEIVED]).column(0)
-                if not pc.any(_between(times, *window)).as_py():
+                batch = batch.filter(_between(batch.column(0), *window))
+            for received, text in zip(batch.column(0).to_pylist(), batch.column(1).to_pylist(), strict=True):
+                if received is None or text is None:
+                    empty[path] += 1
                     continue
-            for batch in pq.ParquetFile(path).iter_batches(columns=[_RECEIVED, _MESSAGE]):
-                if window is not None:
-                    batch = batch.filter(_between(batch.column(0), *window))
-                for received, text in zip(
-                    batch.column(0).to_pylist(), batch.column(1).to_pylist(), strict=True
-                ):
-                    if received is None or text is None:
-                        empty += 1
-                        continue
-                    yield received, text
-        except (FileNotFoundError, pa.ArrowInvalid, OSError):
-            continue  # merged away in between, or written as it was read: the rest still counts
-        finally:
-            if empty:
-                unread.row(f"{label} 빈 값(그 행을 읽지 않음)", path, empty)
+                yield received, text
+    finally:
+        for path, count in empty.items():
+            unread.row(f"{label} 빈 값(그 행을 읽지 않음)", path, count)
 
 
 def _raw(data_dir: Path, day: date, feed: str) -> Path:

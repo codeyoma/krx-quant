@@ -60,7 +60,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
-from krx_quant.archive import partition_files
+from krx_quant.archive import partition_batches
 from krx_quant.auctions import PRINT_WITHIN
 from krx_quant.backfill import BAR_SCHEMA, MINUTE_BARS_TR, stock_bars_path
 from krx_quant.config import Settings
@@ -149,24 +149,24 @@ class Unread:
 def _batches(
     partition: Path, columns: Sequence[str], unread: Unread, optional: Sequence[str] = ()
 ) -> Iterator[Any]:
-    """A partition's rows, a batch at a time, each row once (the merged file, then the parts it
-    does not hold), with ``columns`` and those of ``optional`` the file has. A file without one of
-    ``columns`` is not read; it and one without an ``optional`` column are counted in ``unread``."""
+    """A partition's rows, a batch at a time, each row once (``archive.partition_batches``), with
+    ``columns`` and those of ``optional`` the file has. A file without one of ``columns`` is not
+    read; it and one without an ``optional`` column are counted in ``unread``."""
     label = f"{partition.parent.parent.parent.name} {partition.parent.name.removeprefix('feed=')}"
-    for path in partition_files(partition):
-        try:
-            names = pq.read_schema(path).names
-            absent = [c for c in columns if c not in names]
-            for column in absent:
-                unread.files[f"{label} {column} 없음(읽지 않음)"] += 1
-            for column in (c for c in optional if c not in names):
-                unread.files[f"{label} {column} 없음(그 열 없이 읽음)"] += 1
-            if absent:
-                continue
-            present = [*columns, *(c for c in optional if c in names)]
-            yield from pq.ParquetFile(path).iter_batches(columns=present)
-        except (FileNotFoundError, pa.ArrowInvalid, OSError):
-            continue  # merged away in between, or written as it was read: the rest still counts
+
+    def present(_: Path, schema: pa.Schema) -> list[str] | None:
+        names = schema.names
+        absent = [c for c in columns if c not in names]
+        for column in absent:
+            unread.files[f"{label} {column} 없음(읽지 않음)"] += 1
+        for column in (c for c in optional if c not in names):
+            unread.files[f"{label} {column} 없음(그 열 없이 읽음)"] += 1
+        if absent:
+            return None
+        return [*columns, *(c for c in optional if c in names)]
+
+    for _, batch in partition_batches(partition, present):
+        yield batch
 
 
 def _timestamps(batch: Any, column: str, unread: Unread, label: str) -> Any | None:

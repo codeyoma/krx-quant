@@ -31,7 +31,7 @@ import logging
 import os
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from datetime import time as clock_time
@@ -184,6 +184,28 @@ def partition_files(partition: Path) -> list[Path]:
     held = set(_held_parts(merged)) if merged.exists() else set()
     parts = sorted(partition.glob(f"{PART_PREFIX}*.parquet"), key=lambda p: (p.stat().st_mtime_ns, p.name))
     return ([merged] if merged.exists() else []) + [p for p in parts if p.name not in held]
+
+
+def partition_batches(
+    partition: Path, columns: Sequence[str] | Callable[[Path, pa.Schema], Sequence[str] | None]
+) -> Iterator[tuple[Path, pa.RecordBatch]]:
+    """A partition's rows, a batch at a time, each row once (``partition_files``), with the file
+    each batch is from: for reading beside the collector, whose archive runs merge the parts.
+
+    ``columns`` are the columns read; or, called with each file and its schema, it gives the
+    columns read from that file, None to leave the file out. A file merged away while the
+    partition is read, or read as it was written, is left out and the rest still counts; the
+    batches it gave before stay given.
+    """
+    for path in partition_files(partition):
+        try:
+            chosen = columns(path, pq.read_schema(path)) if callable(columns) else columns
+            if chosen is None:
+                continue
+            for batch in pq.ParquetFile(path).iter_batches(columns=list(chosen)):
+                yield path, batch
+        except (FileNotFoundError, pa.ArrowInvalid, OSError):
+            continue  # merged away in between, or written as it was read: the rest still counts
 
 
 def _held_parts(merged: Path) -> list[str]:
