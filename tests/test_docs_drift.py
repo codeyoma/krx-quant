@@ -77,6 +77,9 @@ OPERATIONS = """\
 | `KRX_ALPHA`, `KRX_BETA` | 1, 2 | 알파와 베타 |
 
 > **바뀜** (2026-11-01, #1): 알파의 기본값 0 → 1. 이유: 시험.
+
+| 변수 | 기본값 | 뜻과 범위 |
+|---|---|---|
 | `KRX_TRADER_GAMMA` | 3 | trader만 읽는 감마 |
 
 compose와 스크립트가 읽는 변수다.
@@ -224,16 +227,31 @@ def test_a_note_names_a_setting_only_after_its_marker_and_as_a_whole_name(tmp_pa
 
 
 def test_rows_after_notes_and_blank_lines_still_belong_to_their_table(tmp_path: Path) -> None:
-    # KRX_TRADER_GAMMA's row follows a note without a blank line (the table goes on after it).
+    # KRX_TRADER_GAMMA's row follows a note and the table's header repeated after it.
     trader = TRADER.replace('"KRX_TRADER_GAMMA"', '"KRX_TRADER_EPSILON"')
     found = problems(repo(tmp_path, trader=trader, env=ENV_EXAMPLE.replace("GAMMA", "EPSILON")))
     assert found == [
-        "docs/operations.md:12: KRX_TRADER_GAMMA is in the settings table, but no setting reads it"
+        "docs/operations.md:15: KRX_TRADER_GAMMA is in the settings table, but no setting reads it"
         " (src/krx_quant/config.py, src/krx_quant/trader/settings.py): remove it, or leave a"
         " 삭제됨 or 바뀜 note in its section that names it",
         "src/krx_quant/trader/settings.py:5: KRX_TRADER_EPSILON is read but not in docs/operations.md"
         ' "설정 값 전체"',
     ]
+
+
+def test_a_table_row_right_after_a_quote_is_caught_in_any_doc(tmp_path: Path) -> None:
+    # Markdown reads a row with no blank line after a quote as the quote's text (#495's finding).
+    header = "\n| 변수 | 기본값 | 뜻과 범위 |\n|---|---|---|\n"
+    operations = OPERATIONS.replace("이유: 시험.\n" + header, "이유: 시험.\n")
+    root = repo(tmp_path, operations=operations)
+    (root / "docs" / "agents").mkdir(parents=True)
+    (root / "docs" / "agents" / "note.md").write_text("| 필드 | 뜻 |\n|---|---|\n\n> 인용\n| `a` | 가 |\n")
+    (root / "docs" / "fenced.md").write_text("```\n> 인용\n| `a` | 가 |\n```\n")
+    quoted = "a table row right after a quote is read as the quote's text: leave a blank line and repeat"
+    found = problems(root)
+    assert f"docs/agents/note.md:5: {quoted} the table's header row above it" in found
+    assert f"docs/operations.md:12: {quoted} the table's header row above it" in found
+    assert not any("fenced.md" in problem for problem in found)
 
 
 def test_fenced_code_is_not_read_as_docs(tmp_path: Path) -> None:
@@ -245,11 +263,11 @@ def test_fenced_code_is_not_read_as_docs(tmp_path: Path) -> None:
 def test_a_variable_read_elsewhere_is_checked_against_the_files_its_row_names(tmp_path: Path) -> None:
     found = problems(repo(tmp_path, compose="ports: []\n"))
     assert found == [
-        "docs/operations.md:18: KRX_PORT: compose.yaml, which its row says reads it, does not name it",
+        "docs/operations.md:21: KRX_PORT: compose.yaml, which its row says reads it, does not name it",
     ]
     operations = OPERATIONS.replace("`compose.yaml`,", "`deploy/gone.sh`, `compose.yaml`,")
     assert problems(repo(tmp_path, operations=operations)) == [
-        "docs/operations.md:18: KRX_PORT: deploy/gone.sh, which its row says reads it, is not in the"
+        "docs/operations.md:21: KRX_PORT: deploy/gone.sh, which its row says reads it, is not in the"
         " repository",
     ]
     # Without that row the .env.example line has no reader.
@@ -302,7 +320,7 @@ def test_a_table_job_not_in_jobs_passes_only_with_a_note_in_its_row_or_section(t
     row = "| `old-3` | 첫 밤, 한 번 | `old` |\n"
     operations = OPERATIONS.replace("\n### 다음 절", row + "\n### 다음 절")
     assert problems(repo(tmp_path, operations=operations)) == [
-        "docs/operations.md:26: job old-3 is in the table, but not in scheduled.JOBS: remove it, or"
+        "docs/operations.md:29: job old-3 is in the table, but not in scheduled.JOBS: remove it, or"
         " leave a 삭제됨 or 바뀜 note in its section that names it",
     ]
     noted = row.replace("첫 밤, 한 번", "**삭제됨** (2026-11-04, #3): `JOBS`에서 뺐다")
@@ -320,7 +338,7 @@ def test_a_table_job_not_in_jobs_passes_only_with_a_note_in_its_row_or_section(t
 
 def test_a_template_row_that_matches_no_job_is_caught(tmp_path: Path) -> None:
     assert problems(repo(tmp_path), ["probe-1"]) == [
-        "docs/operations.md:25: job prevalidate-<이름> is in the table, but no job in scheduled.JOBS"
+        "docs/operations.md:28: job prevalidate-<이름> is in the table, but no job in scheduled.JOBS"
         " matches it: remove it, or leave a 삭제됨 or 바뀜 note in its section that names it",
     ]
 
