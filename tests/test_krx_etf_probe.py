@@ -1,6 +1,6 @@
 """``krx-quant probe-krx-etf`` (#305): what the KRX Open API's ETF daily trading service gives for
-the single-stock ETFs, asked through a fake KRX (``tests/fake_krx_openapi.py``) and the fake KIS;
-and the scheduled job that waits for the key.
+the single-stock ETFs, asked through a fake KRX (``tests/fake_krx_openapi.py``) and the fake KIS.
+Its scheduled job (``probe-krx-etf-305``) ran on 2026-10-23 and left ``JOBS`` (#505).
 
 Input: the fake service answers each day with two other ETFs and 15 of the 16 products (0198D0
 never; 0194M0 not on its listing day), as the service page describes it: ``OutBlock_1``, every
@@ -16,42 +16,23 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 from dataclasses import replace
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
-import aiohttp
 import pytest
 
 from krx_quant import cli, krx_etf_probe
-from krx_quant.clock import FakeClock
 from krx_quant.config import Settings
 from krx_quant.fake_kis import FakeKis
 from krx_quant.feeds.base import KST
-from krx_quant.github import GitHub
 from krx_quant.krx_etf_probe import DOCUMENTED, MAX_FAILED_IN_A_ROW, probe_krx_etf
 from krx_quant.nav_probe import DAILY, PRICE
 from krx_quant.products import PRODUCTS
 from krx_quant.redaction import secrets_of
-from krx_quant.scheduled import (
-    FAILED,
-    GAPS_PROBE,
-    INTERRUPTED,
-    JOBS,
-    KRX_ETF_PROBE,
-    NAV_PROBE,
-    OK,
-    STATE_FILE,
-    Facts,
-    JobRecord,
-    JobState,
-    Night,
-    Scheduler,
-)
 from tests.fake_krx_openapi import KEY, PATH, FakeKrx, fake_krx
 from tests.test_collector import settings_for
 from tests.test_nav_probe import ok, trading_days, write_calendar
-from tests.test_scheduled import AT, CALENDAR, COMMIT, FRIDAY, MONDAY, SATURDAY, SUNDAY, Runs, Told, at
 
 NOW = datetime(2026, 10, 22, 23, 40, tzinfo=KST)
 LISTED, LATEST, PREVIOUS = date(2026, 5, 27), date(2026, 10, 22), date(2026, 10, 21)
@@ -406,81 +387,3 @@ def test_the_key_is_optional_secret_and_masked(tmp_path: Path) -> None:
     settings = Settings.from_env(env, None)
     assert settings.krx_openapi_key == KEY and settings.krx_openapi_url == "http://x.test"
     assert KEY in secrets_of(settings) and KEY not in repr(settings)
-
-
-# The scheduled job
-
-
-def night(day: date, facts: Facts, record: JobRecord | None = None) -> Night:
-    return Night(day, CALENDAR.is_trading_day(day), COMMIT, record, {}, facts)
-
-
-def test_the_job_waits_for_the_key_then_runs_once_any_night() -> None:
-    assert KRX_ETF_PROBE.name == "probe-krx-etf-305"
-    assert KRX_ETF_PROBE.command == ("probe-krx-etf",)
-    assert KRX_ETF_PROBE.timeout == timedelta(minutes=15), "short: the simulations and pre-validations follow"
-    assert [t.issue for t in KRX_ETF_PROBE.targets] == [305]
-    assert KRX_ETF_PROBE.label == ("ready-for-agent",)
-    assert JOBS.index(NAV_PROBE) < JOBS.index(KRX_ETF_PROBE) < JOBS.index(GAPS_PROBE)
-    first = next(i for i, j in enumerate(JOBS) if j.name.startswith(("prevalidate-", "simulate-")))
-    assert JOBS.index(KRX_ETF_PROBE) < first, "before the simulations and pre-validations"
-    keyed = Facts(krx_openapi=True)
-    assert not KRX_ETF_PROBE.due(night(FRIDAY, Facts())), "no key: it waits"
-    assert KRX_ETF_PROBE.due(night(FRIDAY, keyed)) and KRX_ETF_PROBE.due(night(SATURDAY, keyed))
-    ran = JobRecord(FRIDAY, OK, at(FRIDAY, "22:30"), COMMIT, 0, 60.0)
-    assert not KRX_ETF_PROBE.due(night(MONDAY, keyed, ran))
-    failed = replace(ran, outcome=FAILED, exit_code=1)
-    assert KRX_ETF_PROBE.due(night(MONDAY, keyed, failed)), "a failed run (401) runs again"
-    assert not KRX_ETF_PROBE.due(night(FRIDAY, keyed, failed)), "but not the same night"
-    assert not KRX_ETF_PROBE.due(night(MONDAY, Facts(), failed)), "nor once the key is gone"
-    assert KRX_ETF_PROBE.due(night(MONDAY, keyed, replace(ran, outcome=INTERRUPTED)))
-    output = "KRX Open API ETF 일별매매정보 확인 (#305) 2026-10-22 23:40 KST\n\n1. 날마다의 답"
-    assert KRX_ETF_PROBE.targets[0].part(output) == output, "the whole output"
-    assert "시세 값이 없다" in KRX_ETF_PROBE.targets[0].note
-
-
-async def test_the_scheduler_runs_it_on_the_first_night_with_the_key_and_not_again(tmp_path: Path) -> None:
-    clock = FakeClock(at(FRIDAY, "23:00"))
-    runs = Runs(clock)
-    state = JobState.load(tmp_path / STATE_FILE)
-    key_set = {FRIDAY: False, SATURDAY: True, SUNDAY: True}
-    tonight = [FRIDAY]
-
-    async def facts() -> Facts:
-        return Facts(krx_openapi=key_set[tonight[0]])
-
-    async with aiohttp.ClientSession() as session:
-        scheduler = Scheduler(
-            [KRX_ETF_PROBE],
-            AT,
-            CALENDAR,
-            state,
-            GitHub(session, None, "codeyoma/krx-quant", "http://127.0.0.1:9"),
-            Told(),
-            clock,
-            commit=COMMIT,
-            facts=facts,
-            runner=runs,
-        )
-        for day in (FRIDAY, SATURDAY, SUNDAY):
-            tonight[0] = day
-            await scheduler.run_night(day)
-    assert runs.started == [("probe-krx-etf", at(FRIDAY, "23:00"))], "once, on the night the key was set"
-    assert state.jobs["probe-krx-etf-305"].day == SATURDAY
-
-
-async def test_the_nightly_facts_say_whether_the_key_is_set(tmp_path: Path) -> None:
-    from krx_quant.scheduled import read_facts
-    from tests.test_simulation_daily import CALENDAR as DAILY_CALENDAR
-    from tests.test_simulation_daily import NIGHT, engine_on
-    from tests.test_simulation_daily import settings as daily_settings
-
-    s = daily_settings(tmp_path, signal=0.0, days=30)
-    clock = FakeClock(NIGHT)
-    for key, said in ((None, False), (KEY, True)):
-        e = engine_on(s, clock, [])
-        try:
-            facts = await read_facts(replace(s, krx_openapi_key=key), DAILY_CALENDAR, clock, e)
-        finally:
-            e.store.close()
-        assert facts.krx_openapi is said

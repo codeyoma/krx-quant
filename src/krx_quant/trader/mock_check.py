@@ -3,11 +3,12 @@ one trading day in the trader's ledger (``state/trader.sqlite3``, mode ``mock``)
 row on KIS's day order inquiry (``kis_orders.Broker.orders``, the trader's own key), matched by
 KIS's order number: its side, quantity, what filled and the fills' average price.
 
-``krx-quant check-mock-trades`` prints it, the scheduled job ``check-mock-trades-405``'s, run on the
-night of the first trading day the trader ran in mock mode (``mock_days``), and again each such
-night until a day had orders to compare. It writes nothing but the trader's KIS token cache. The
-output holds counts, quantities, sides, order times and price differences in ticks: never an order
-number, an account number, a key or a price.
+``krx-quant check-mock-trades`` prints it. The scheduled job ``check-mock-trades-405`` ran it on the
+nights of the trading days the trader ran in mock mode (``mock_days``) until a day had orders to
+compare, found them the same on 2026-11-02 and left ``JOBS`` (#505); the command stays for a run by
+hand (``--day``). It writes nothing but the trader's KIS token cache. The output holds counts,
+quantities, sides, order times and price differences in ticks: never an order number, an account
+number, a key or a price.
 
 KIS's orders the ledger does not hold are listed. One placed while the order probe (#403,
 ``probe-kis-orders-403``) ran that day on the same mock account, by the scheduler's state

@@ -239,7 +239,8 @@ class Settings:
     toss_url: str = DEFAULT_TOSS_URL
     # The KRX Open API key (KRX_OPENAPI_KEY, from openapi.krx.co.kr, each service applied for and
     # approved there; #305): the single-stock ETFs' daily net assets and listed units. Unset:
-    # nothing asks KRX, and the scheduled probe of it (``probe-krx-etf-305``) waits.
+    # nothing asks KRX (its scheduled probe, ``probe-krx-etf-305``, ran on 2026-10-23 and left
+    # ``JOBS``, #505).
     krx_openapi_key: str | None = field(default=None, repr=False)
     krx_openapi_url: str = DEFAULT_KRX_OPENAPI_URL
     # Grafana Cloud Loki (#358): each process's log lines also go to

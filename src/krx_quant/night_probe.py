@@ -4,7 +4,8 @@ The collector registers the night futures' trades (``H0MFCNT0``) and book (``H0M
 all day; KRX trades them from 18:00 to 06:00 the next morning. What only the server can
 see is whether KIS streams them for this app key, under the contract code the collector
 asks for, in the layout KIS's example gives. So after the first night the collector
-subscribed for, a scheduled job (``scheduled.NIGHT_PROBE``) runs this and posts it on #264.
+subscribed for, a scheduled job (``probe-night-264``) ran this once, on 2026-10-20, and posted it
+on #264; it left ``JOBS`` then (#505), and the command stays for a run by hand.
 
 For a night (the evening of a trading day, from 18:00 to 06:00 the next morning, read from
 the two days' partitions) it prints:

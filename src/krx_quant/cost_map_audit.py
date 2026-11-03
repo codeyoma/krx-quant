@@ -35,8 +35,9 @@ C, p*, days, bar closes): the same, or which differ. A difference means the data
 the cost map was computed, or the reads are not the API's; the text says so and the exit code is
 ``DIFFERS``.
 
-No price is printed: hit rates, p*, W and C in ticks, counts and dates. A scheduled job runs it once
-and posts it on #438 (``scheduled/trader.py``).
+No price is printed: hit rates, p*, W and C in ticks, counts and dates. A scheduled job
+(``cost-map-audit-438``) ran it on 2026-11-02 and posted it on #438; it left ``JOBS`` then (#505),
+and the command stays for a run by hand.
 """
 
 from __future__ import annotations

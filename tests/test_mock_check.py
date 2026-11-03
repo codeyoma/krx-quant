@@ -1,6 +1,7 @@
-"""The mock day's check (#405, its third acceptance criterion): the scheduled job
-``check-mock-trades-405`` and its command, which compares a mock trading day's orders in the
-trader's ledger with KIS's day order inquiry, order by order.
+"""The mock day's check (#405, its third acceptance criterion): ``krx-quant check-mock-trades``,
+which compares a mock trading day's orders in the trader's ledger with KIS's day order inquiry,
+order by order. Its scheduled job ``check-mock-trades-405`` ran on 2026-11-02 and left ``JOBS``
+(#505).
 
 The ledger is made by the mock book on the fake KIS (``tests/test_trader_mock.py``'s ``MockDay``),
 whose account the check then reads. Every value is made up.
@@ -10,8 +11,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import replace
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -20,17 +20,7 @@ import pytest
 from krx_quant.fake_kis import FakeAccount, FakeKis
 from krx_quant.feeds.base import KST
 from krx_quant.kis_orders import Servers
-from krx_quant.scheduled import (
-    FAILED,
-    INTERRUPTED,
-    JOBS,
-    MOCK_CHECK,
-    OK,
-    TRADER_REPORT,
-    Facts,
-    JobRecord,
-    Night,
-)
+from krx_quant.scheduled import FAILED
 from krx_quant.trader import MOCK, PAPER
 from krx_quant.trader.mock_check import (
     DIFFERENT,
@@ -43,51 +33,13 @@ from krx_quant.trader.mock_check import (
 )
 from krx_quant.trader.store import DB_NAME as TRADER_DB
 from krx_quant.trader.store import TraderStore
-from tests.test_scheduled import CALENDAR, COMMIT, FRIDAY, MONDAY, SATURDAY, THURSDAY, at
+from tests.test_scheduled import COMMIT, THURSDAY, at
 from tests.test_trader_mock import ACCOUNT, BOUGHT, TEN, MockDay, kis_mock, settings_of
 from tests.trader_doubles import quote
 
 __all__ = ["kis_mock"]  # the fixture, used here
 
 DAY = date(2026, 10, 14)  # the trading day of ``tests/trader_doubles.py``
-
-
-def night(when: date, record: JobRecord | None = None, mock: tuple[date, ...] = ()) -> Night:
-    return Night(when, CALENDAR.is_trading_day(when), COMMIT, record, {}, Facts(mock_days=mock))
-
-
-# The job
-
-
-def test_the_check_runs_at_night_after_the_report_and_posts_to_405() -> None:
-    assert MOCK_CHECK in JOBS and JOBS.index(TRADER_REPORT) < JOBS.index(MOCK_CHECK)
-    assert MOCK_CHECK.name == "check-mock-trades-405"
-    assert MOCK_CHECK.command == ("check-mock-trades",)
-    assert MOCK_CHECK.session is None, "after the close, at night"
-    assert MOCK_CHECK.timeout == timedelta(minutes=5)
-    assert [t.issue for t in MOCK_CHECK.targets] == [405]
-    note = MOCK_CHECK.targets[0].note
-    assert "주문번호, 계좌번호, 키, 가격이 없다" in note and "#403" in note
-
-
-def test_the_check_runs_on_the_first_mock_trading_night_until_one_compared() -> None:
-    due = MOCK_CHECK.due
-    assert not due(night(FRIDAY)), "the trader has not run in mock"
-    assert not due(night(FRIDAY, mock=(THURSDAY,))), "not that day"
-    assert due(night(FRIDAY, mock=(THURSDAY, FRIDAY)))
-    assert not due(night(SATURDAY, mock=(SATURDAY,))), "trading days only"
-    ran = JobRecord(FRIDAY, OK, at(FRIDAY, "23:00"), COMMIT, SAME, 3.0)
-    both = (FRIDAY, MONDAY)
-    assert not due(night(MONDAY, ran, both)), "done: the same"
-    assert not due(night(MONDAY, replace(ran, outcome=FAILED, exit_code=DIFFERENT), both)), (
-        "done: an agent looks"
-    )
-    for code in (NO_ORDERS, UNREADABLE, 1, 2):
-        failed = replace(ran, outcome=FAILED, exit_code=code)
-        assert due(night(MONDAY, failed, both)), code
-        assert not due(night(FRIDAY, failed, both)), "not twice a night"
-        assert not due(night(MONDAY, failed, (FRIDAY,))), "nor on a day that was not in mock"
-    assert due(night(MONDAY, replace(ran, outcome=INTERRUPTED), both))
 
 
 def test_the_mock_days_are_those_with_a_mock_ledger(tmp_path: Path) -> None:
