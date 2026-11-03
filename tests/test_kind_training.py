@@ -39,7 +39,17 @@ from tests.replay_events import CALENDAR, DAY, FEE, SYMBOL, at, run
 from tests.synthetic_bars import day_of_bars
 from tests.test_nightly import DAYS as NIGHT_DAYS
 from tests.test_nightly import FINISHED, NIGHT, archive_bars, read
-from tests.test_prevalidation import AFTER, ALPHA, Contrarian, report, settings
+from tests.test_prevalidation import (
+    AFTER,
+    ALPHA,
+    DAYS,
+    Contrarian,
+    _verdict,
+    read_as_before_487,
+    replayed_rows,
+    report,
+    settings,
+)
 from tests.test_replay import busy_morning
 from tests.test_replay_cli import record
 
@@ -251,6 +261,40 @@ async def test_a_kind_s_algorithm_is_prevalidated_on_its_kind(tmp_path: Path) ->
     gate = admits(s.state_dir, 2, (TEST_KIND,))
     assert gate(turner), "on the drift's answer version, not the engine's target"
     assert not admits(s.state_dir, 2)(turner), "an engine without the drift does not know it"
+
+
+# Two pre-validations of five days, each a whole session: about 20 s on a laptop, past the 30 s
+# default (``pyproject.toml``) on a loaded CI runner (#327).
+@pytest.mark.timeout(120)
+async def test_a_kind_s_review_in_a_replay_decides_the_same_on_the_fields_it_reads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Input: five recorded days, probation judged from its second day on, and the drift's turner.
+    Output (#487): the drift's reviews in the replay read the fields they
+    judge by (``kind_reviewed``) and decide what they did on every predictor's whole rows: the same
+    report, predictions, status changes and weights."""
+
+    async def judged(root: Path) -> Any:
+        s = replace(settings(root, DAYS[:5]), probation_review_days=(2, 3, 4))
+        return await prevalidate(
+            s,
+            "turner",
+            algorithms=[ALPHA, Contrarian("contrarian")],
+            kind_algorithms=[Turner()],
+            kinds=(TEST_KIND,),
+            now=AFTER,
+        )
+
+    now = await judged(tmp_path / "now")
+    read_as_before_487(monkeypatch)
+    before = await judged(tmp_path / "before")
+
+    replayed = replayed_rows(now.db)
+    assert {(a, status) for a, _, _, status, _ in replayed["statuses"]} >= {("turner", "active")}, (
+        "the drift's review judged it on the replayed days"
+    )
+    assert _verdict(now) == _verdict(before)
+    assert replayed == replayed_rows(before.db)
 
 
 def test_a_model_fitted_on_a_kind_s_samples_learned_its_answer_version() -> None:

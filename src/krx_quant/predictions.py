@@ -57,7 +57,7 @@ from __future__ import annotations
 import contextlib
 import json
 import sqlite3
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
@@ -453,6 +453,16 @@ def read_only(db: Path) -> Iterator[sqlite3.Connection | None]:
         conn.close()
 
 
+# The predictions ``p`` with their outcome, block, votes, touch label and model target.
+_PREDICTIONS_FROM = (
+    " FROM predictions p LEFT JOIN outcomes o ON o.prediction_id = p.id"
+    " LEFT JOIN blocks b ON b.prediction_id = p.id"
+    " LEFT JOIN votes v ON v.prediction_id = p.id"
+    f" {TOUCH_JOIN}"
+    " LEFT JOIN model_targets m ON m.algorithm = p.algorithm AND m.version = p.model_version "
+)
+
+
 def select_predictions(db: sqlite3.Connection, where: str, params: Sequence[Any]) -> list[dict[str, Any]]:
     """The predictions ``where`` selects (on ``p``), each with its outcome, block, votes, touch
     label, model target and members (``pooled``), as the store and the API read them; ``db``'s
@@ -462,12 +472,7 @@ def select_predictions(db: sqlite3.Connection, where: str, params: Sequence[Any]
         " o.class_a, o.class_b, o.special, o.unscorable, o.scored_at, b.reason AS blocked,"
         " v.up AS votes_up, v.flat AS votes_flat, v.down AS votes_down,"
         " t.class AS touch_class, t.unscorable AS touch_unscorable, t.path AS touch_path,"
-        " m.target_version AS model_target"
-        " FROM predictions p LEFT JOIN outcomes o ON o.prediction_id = p.id"
-        " LEFT JOIN blocks b ON b.prediction_id = p.id"
-        " LEFT JOIN votes v ON v.prediction_id = p.id"
-        f" {TOUCH_JOIN}"
-        " LEFT JOIN model_targets m ON m.algorithm = p.algorithm AND m.version = p.model_version " + where,
+        " m.target_version AS model_target" + _PREDICTIONS_FROM + where,
         tuple(params),
     ).fetchall()
     out = [dict(r) for r in rows]
@@ -500,6 +505,59 @@ def scored_rows(
     if not include_special:
         where += " AND o.special = 0"
     return select_predictions(db, where, params)
+
+
+# What a status review (``lifecycle.review``, ``stages``) and the consensus refit read of a scored
+# prediction (#487): the fields their stats, clone check and weights go by
+# (``stats.scored_by_algorithm``, ``stats.on_target``, the lean), no more.
+REVIEWED = (
+    "algorithm",
+    "model_version",
+    "symbol",
+    "bar_close",
+    "p_up",
+    "p_flat",
+    "p_down",
+    "touch_class",
+    "touch_path",
+    "model_target",
+)
+
+
+def reviewed_rows(
+    db: sqlite3.Connection,
+    days: Sequence[date],
+    include_special: bool,
+    algorithms: Collection[str] | None = None,
+) -> list[dict[str, Any]]:
+    """``scored_rows`` of every symbol as a review reads them (#487): the ``REVIEWED`` fields of
+    each, in the same order (the same query), of ``algorithms`` only if given.
+
+    A review reads every predictor's rows of every day it judges, and a pre-validation's replay
+    reviews each replayed day on the days before it too: whole rows (``select_predictions``, about
+    2.2 kB each) grew its peak by about 60 MB a replayed day. These are about 0.4 kB: the rows are
+    read one at a time rather than all at once, and a string repeated across them (a bar close's
+    time and touch path, in each of its predictors' rows) is kept once."""
+    if not days or (algorithms is not None and not algorithms):
+        return []
+    on, params = _made_on(days, None)
+    where = f"WHERE {on} AND {SCORED}"
+    if not include_special:
+        where += " AND o.special = 0"
+    cursor = db.cursor()
+    cursor.row_factory = None
+    cursor.execute(
+        "SELECT p.algorithm, p.model_version, p.symbol, p.bar_close, p.p_up, p.p_flat, p.p_down,"
+        " t.class, t.path, m.target_version" + _PREDICTIONS_FROM + where,
+        params,
+    )
+    keep = None if algorithms is None else set(algorithms)
+    once: dict[str, str] = {}
+    return [
+        {k: once.setdefault(v, v) if isinstance(v, str) else v for k, v in zip(REVIEWED, row, strict=True)}
+        for row in cursor
+        if keep is None or row[0] in keep
+    ]
 
 
 def select_kind_predictions(
@@ -544,6 +602,69 @@ def kind_scored_rows(
     if not include_special:
         where += " AND a.special = 0"
     return select_kind_predictions(db, answer_version, where, (kind, *params))
+
+
+# ``REVIEWED`` of a kind's prediction (#487): what ``kind_stats.scored_of_kind``, ``on_target`` and
+# the kind's lean read.
+KIND_REVIEWED = (
+    "algorithm",
+    "model_version",
+    "symbol",
+    "bar_close",
+    "output",
+    "answer_class",
+    "answer_path",
+    "model_target",
+)
+
+
+def kind_reviewed_rows(
+    db: sqlite3.Connection,
+    kind: str,
+    answer_version: int,
+    days: Sequence[date],
+    include_special: bool,
+) -> list[dict[str, Any]]:
+    """``kind_scored_rows`` of every symbol as a review reads them (``reviewed_rows``, #487): the
+    ``KIND_REVIEWED`` fields of each, in the same order, the output and the answer's path parsed; a
+    bar close's path parsed once for all its predictors' rows."""
+    if not days:
+        return []
+    on, params = _made_on(days, None)
+    where = f"WHERE p.kind = ? AND {on} AND {KIND_SCORED}"
+    if not include_special:
+        where += " AND a.special = 0"
+    cursor = db.cursor()
+    cursor.row_factory = None
+    cursor.execute(
+        "SELECT p.algorithm, p.model_version, p.symbol, p.bar_close, p.output, a.class, a.path,"
+        f" m.target_version FROM kind_predictions p {KIND_ANSWER_JOIN}"
+        " LEFT JOIN model_targets m ON m.algorithm = p.algorithm AND m.version = p.model_version " + where,
+        (answer_version, kind, *params),
+    )
+    once: dict[str, str] = {}
+    paths: dict[str, Any] = {}
+    out = []
+    for algorithm, version, symbol, bar_close, output, label, path, target in cursor:
+        if path is not None and path not in paths:
+            paths[path] = json.loads(path)
+        values = (
+            algorithm,
+            version,
+            symbol,
+            bar_close,
+            None if output is None else json.loads(output),
+            label,
+            None if path is None else paths[path],
+            target,
+        )
+        out.append(
+            {
+                k: once.setdefault(v, v) if isinstance(v, str) else v
+                for k, v in zip(KIND_REVIEWED, values, strict=True)
+            }
+        )
+    return out
 
 
 def days_with_predictions(db: sqlite3.Connection, until: date, limit: int) -> list[date]:
@@ -1713,6 +1834,16 @@ class PredictionStore:
     ) -> list[dict[str, Any]]:
         return kind_scored_rows(db, kind, answer_version, days, symbol, include_special)
 
+    def kind_reviewed(
+        self, kind: str, answer_version: int, days: Sequence[date], include_special: bool
+    ) -> list[dict[str, Any]]:
+        """``kind_scored`` of every symbol as a status review reads them (``kind_reviewed_rows``,
+        #487), on a connection of its own."""
+        if not days:
+            return []
+        with self._reading() as db:
+            return kind_reviewed_rows(db, kind, answer_version, days, include_special)
+
     def kind_scored_and_excluded(
         self, kind: str, answer_version: int, days: Sequence[date], symbol: str | None, include_special: bool
     ) -> tuple[list[dict[str, Any]], dict[str, Excluded]]:
@@ -2132,6 +2263,17 @@ class PredictionStore:
         self, days: Sequence[date], symbol: str | None, include_special: bool, db: sqlite3.Connection
     ) -> list[dict[str, Any]]:
         return scored_rows(db, days, symbol, include_special)
+
+    def reviewed(
+        self, days: Sequence[date], include_special: bool, algorithms: Collection[str] | None = None
+    ) -> list[dict[str, Any]]:
+        """``scored_predictions`` of every symbol as a status review and the consensus refit read
+        them (``reviewed_rows``, #487), of ``algorithms`` only if given, on a connection of its
+        own."""
+        if not days or (algorithms is not None and not algorithms):
+            return []
+        with self._reading() as db:
+            return reviewed_rows(db, days, include_special, algorithms)
 
     def scored_and_excluded(
         self, days: Sequence[date], symbol: str | None, include_special: bool
