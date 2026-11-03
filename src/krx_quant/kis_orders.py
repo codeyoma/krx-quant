@@ -5,9 +5,10 @@ real-time fill notice.
 This is the one file of the repository the forbidden-pattern check lets hold KIS order TR IDs and
 order endpoints (``forbidden.ALLOWED_IN``, ``scripts/check_forbidden.py``): they are written here
 and nowhere else, and every other module reaches them through this one. The collector never
-calls it. The order probe (``order_probe.py``) does, in a scheduled job's own process, and so do the
-trader in mock and live mode (#405, #408, ``trader/mock.py``, through ``Broker``) and the mock day's
-check (``trader/mock_check.py``, another scheduled job's process).
+calls it. The order probe (``order_probe.py``) does, in its own process (run by hand since its
+scheduled job left, #484), and so do the trader in mock and live mode (#405, #408, ``trader/mock.py``,
+through ``Broker``), the mock day's check (``trader/mock_check.py``, a scheduled job's process) and
+the fill notice layout's night (``trader/notice_layout.py``, another, read-only).
 
 Each TR ID comes in two, the live server's and the mock (모의투자) server's (``Tr``): an
 ``Account`` is made for one of them (``mock``), with the server it calls. The mock broker
@@ -30,6 +31,9 @@ Two layers:
   inquiry, polled after each order (``Broker.take``), never from the real-time fill notice: on the
   mock server each notice record had 23 fields where KIS's example lists 26
   (``FILL_NOTICE_COLUMNS``), so its fields are not known yet (``docs/kis-feeds.md``, "주문 (#403)").
+  In mock mode the trader's fill notice recorder (#484, ``trader/fill_notices.py``) subscribes to it
+  with the trader's key (``Account.approval_key``) and keeps its records for them to be measured;
+  nothing of it reaches the trading.
 
 What is sent again: a call KIS refused for its per-second limit (``BUSY``) after ``BUSY_PAUSE``,
 and one it refused for its token (``TOKEN_REJECTED``) once with a new token. Both are KIS's
@@ -174,8 +178,9 @@ TOKEN_FILE = "trader_kis_token.json"
 LIVE_TOKEN_FILE = "trader_live_kis_token.json"
 
 # The fill notice's fields, in order (KIS's example, ``notice_cols``): 26, the live server's layout
-# as the example gives it. On the mock server each record had 23 fields (#403), which the probe
-# shows by position until they are named; the broker does not read the notice.
+# as the example gives it. On the mock server each record had 23 fields (#403): the trader's recorder
+# keeps them as they come and the night job ``fill-notice-layout-403`` measures them by position
+# (#484, ``trader/notice_layout.py``) until a change names them; the broker does not read the notice.
 FILL_NOTICE_COLUMNS = (
     "CUST_ID ACNT_NO ODER_NO OODER_NO SELN_BYOV_CLS RCTF_CLS ODER_KIND ODER_COND STCK_SHRN_ISCD "
     "CNTG_QTY CNTG_UNPR STCK_CNTG_HOUR RFUS_YN CNTG_YN ACPT_YN BRNC_NO ODER_QTY ACNT_NAME "
@@ -440,6 +445,25 @@ class Account:
     async def book(self, symbol: str) -> Answer:
         params = {"FID_COND_MRKT_DIV_CODE": QUOTES_MARKET, "FID_INPUT_ISCD": symbol}
         return await self.get(BOOK, BOOK_PATH, params)
+
+    # The fill notice's WebSocket (#484).
+
+    @property
+    def session(self) -> aiohttp.ClientSession:
+        """The client session the calls go on (the fill notice's WebSocket goes on it too)."""
+        return self._session
+
+    async def approval_key(self) -> str:
+        """The WebSocket approval key of this app key (``kis.issue_approval_key``), for the fill
+        notice (#484): sent through the limiter after every call waiting there
+        (``RateLimiter.acquire(last=True)``: an order or a read of the trader goes first). Not kept
+        in ``answers``. ``kis.KisError`` when KIS refuses it; aiohttp's errors, OSError or
+        TimeoutError when it does not answer within the account's timeout."""
+        await self._limiter.acquire(last=True)
+        async with asyncio.timeout(self._timeout.total):
+            return await kis.issue_approval_key(
+                self._session, self._rest_url, self._headers["appkey"], self._headers["appsecret"]
+            )
 
     # The two ways a call is sent.
 

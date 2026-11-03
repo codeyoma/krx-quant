@@ -39,8 +39,8 @@ class Recorded(RateLimiter):
         super().__init__(*args, **kwargs)
         self.grants: list[float] = []
 
-    async def acquire(self) -> float:
-        self.grants.append(await super().acquire())
+    async def acquire(self, *, last: bool = False) -> float:
+        self.grants.append(await super().acquire(last=last))
         return self.grants[-1]
 
 

@@ -361,8 +361,8 @@ class Paced(RateLimiter):
         super().__init__(*args, **kwargs)
         self.let_through: list[float] = []
 
-    async def acquire(self) -> float:
-        self.let_through.append(await super().acquire())
+    async def acquire(self, *, last: bool = False) -> float:
+        self.let_through.append(await super().acquire(last=last))
         return self.let_through[-1]
 
 

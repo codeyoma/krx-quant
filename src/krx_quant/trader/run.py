@@ -38,6 +38,12 @@ on KIS, the buys whose answer was lost looked up, what is outside the ledger pau
 sold past its time barrier or its take-profit placed again. A trader stopping waits for the order in
 flight (``mock.CLOSE_SECONDS``).
 
+In mock mode the trader also records its mock account's fill notices (#484, ``fill_notices.py``:
+with ``KRX_TRADER_KIS_HTS_ID``, on each trading day from 08:20 to 15:40, in
+``state/fill_notices.sqlite3``), beside the loops and never in their set: its failures stop neither
+the start nor the trading, and no book reads it (the fills are the order inquiry's, #404). The night
+job ``fill-notice-layout-403`` measures them (``notice_layout.py``). Paper and live record none.
+
 In live mode (#408, ``KRX_TRADER_MODE=live``) the trader makes the live broker as it starts
 (``kis_orders.trader_live_broker``: the live key, ``KRX_TRADER_LIVE_KIS_*``, on KIS's live servers; it
 does not start without it, ``SettingsError``), and judges at its start and at each pick whether the
@@ -84,6 +90,7 @@ from krx_quant.trader import (
     PAPER,
     PICK_AT,
     SYMBOL,
+    fill_notices,
     live,
     review,
 )
@@ -142,12 +149,13 @@ async def run_trader(
     servers: Servers = MOCK_SERVERS,
     live_servers: Servers = LIVE_SERVERS,
     timing: Timing | None = None,
+    notice_pace: fill_notices.Pace | None = None,
 ) -> str | None:
     """Trade the cells picked until ``stop`` is set, or until the live mode's answer changes at a pick
     (``SWITCH``, returned; None after ``stop``). ``now`` is the clock (KST), ``sleep`` the loops' wait.
     In mock mode the broker orders on ``servers`` alone (KIS's mock ones; a test's fake KIS), in live
     mode on ``live_servers`` (KIS's live ones; a test's fake KIS), with the KIS book's waits
-    ``timing``."""
+    ``timing``; in mock mode the fill notice recorder (#484) waits ``notice_pace``."""
     clock: Clock = now if now is not None else (lambda: datetime.now(KST))
     async with kis.rest_session() as orders:
         # Made before anything is kept: a mock or live trader that cannot order does not start (#405,
@@ -157,7 +165,16 @@ async def run_trader(
             broker = trader_broker(orders, settings, clock, servers=servers)
         elif trader.mode == LIVE:
             broker = trader_live_broker(orders, settings, clock, servers=live_servers)
-        return await _run(settings, trader, stop=stop, clock=clock, sleep=sleep, broker=broker, timing=timing)
+        return await _run(
+            settings,
+            trader,
+            stop=stop,
+            clock=clock,
+            sleep=sleep,
+            broker=broker,
+            timing=timing,
+            notice_pace=notice_pace,
+        )
 
 
 async def _run(
@@ -169,6 +186,7 @@ async def _run(
     sleep: Callable[[float], Awaitable[None]],
     broker: Broker | None,
     timing: Timing | None,
+    notice_pace: fill_notices.Pace | None = None,
 ) -> str | None:
     started = clock()
     store = TraderStore(settings.state_dir / DB_NAME)
@@ -234,6 +252,23 @@ async def _run(
                 )
                 watch = LiveWatch(trader.mode, mode, book, sessions, alerts.notice)
                 watch.judge(started, ready, start=True)
+                # The mock account's fill notices recorded (#484): beside the loops, never in their set,
+                # and never read by a book. Its own task catches what it raises: it stops neither the
+                # trading nor the start.
+                recording = (
+                    fill_notices.start(
+                        broker.account.session,
+                        settings.trader_kis_ws_url,
+                        settings.trader_kis_hts_id,
+                        broker.account.approval_key,
+                        settings.state_dir,
+                        clock,
+                        sessions,
+                        pace=notice_pace,
+                    )
+                    if mode == MOCK and broker is not None
+                    else None
+                )
                 try:
                     await book.start()  # in mock and live mode the KIS account reconciled (#406)
                     switched = await _trade(
@@ -241,6 +276,7 @@ async def _run(
                     )
                 finally:
                     await book.close()  # the order in flight on KIS, waited for (#405)
+                    await fill_notices.stop(recording)
             finally:
                 await alerts.close()
     finally:
