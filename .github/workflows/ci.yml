@@ -18,8 +18,8 @@ jobs:
   # Everything but the tests, once. It also lists the suite's tests for the check in `test`.
   lint:
     runs-on: ubuntu-latest
-    # About four times a usual run (TIME_LINT): a stuck job fails here, not after 6 hours.
-    timeout-minutes: 15
+    # Usually about a minute: a stuck job fails here, not after 6 hours.
+    timeout-minutes: 10
     steps:
       # The fincept/ submodule is not needed for engine checks.
       - uses: actions/checkout@v7
@@ -50,7 +50,7 @@ jobs:
   pytest:
     name: pytest ${{ matrix.shard }}
     runs-on: ubuntu-latest
-    # About four times a usual shard (TIME_SHARD).
+    # About four times a usual shard (6-8 minutes; on one runner the tests took 26).
     timeout-minutes: 30
     strategy:
       # Every shard runs to its end, so one run shows all the failures.
