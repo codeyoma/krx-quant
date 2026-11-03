@@ -10,29 +10,36 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import tracemalloc
 import weakref
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time, timedelta
+from functools import partial
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from krx_quant import engine as engine_module
 from krx_quant import prevalidation, stats
 from krx_quant.algorithms import Algorithm, Model, NothingToLearn, RegistrationError, Sample, save_model
-from krx_quant.baselines import Forecast
+from krx_quant.baselines import TOUCH_BASELINES, Forecast
 from krx_quant.cli import main
 from krx_quant.clock import FakeClock
 from krx_quant.config import Settings
+from krx_quant.consensus import fit as fit_weights
 from krx_quant.engine import Event, PredictionEngine
 from krx_quant.features import FeatureVector
 from krx_quant.feeds import KST
 from krx_quant.footprint import give_back
-from krx_quant.lifecycle import Status
+from krx_quant.kind_stats import entry as kind_entry
+from krx_quant.kind_stats import kind_scoring, scored_of_kind
+from krx_quant.kind_stats import split as kind_split
+from krx_quant.lifecycle import DIRECTION_SCORING, Status
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.model_shelf import Shelf
-from krx_quant.predictions import DB_NAME, PredictionStore
+from krx_quant.predictions import DB_NAME, KIND_REVIEWED, REVIEWED, PredictionStore
 from krx_quant.prevalidation import (
     LastReport,
     PrevalidationRunning,
@@ -55,9 +62,10 @@ from krx_quant.stats import Lift
 from krx_quant.swap import reload_models
 from krx_quant.touch import TARGET_VERSION
 from tests.algorithm_doubles import FixedAlgorithm, stand_in_card, stand_in_meanings
-from tests.replay_events import api, at, book, get_json, run, trade
+from tests.kind_doubles import DRIFT, TEST_KIND, FixedKindAlgorithm
+from tests.replay_events import FEE, api, at, book, get_json, run, trade
 from tests.test_lifecycle import Outbox
-from tests.test_replay import busy_morning
+from tests.test_replay import busy_morning, stored
 from tests.test_replay_cli import record
 
 # Ten trading days, the fewest that can pass: Monday 14 to Friday 25 September.
@@ -735,6 +743,173 @@ async def test_each_replayed_day_logs_its_memory_and_lets_its_engine_go_before_t
     )
     assert alive_at_fits == [1, 1], "the previous day's engine was still alive"
     assert _verdict(before) == _verdict(result), "the same replay, the same verdict"
+
+
+def read_as_before_487(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The status reviews and the consensus refit read as before #487: every predictor's whole
+    rows (``scored_predictions``, ``kind_scored``), the refit's too."""
+
+    def whole(store: PredictionStore, days: Sequence[date], special: bool, algorithms: Any = None) -> Any:
+        return store.scored_predictions(days, None, special)
+
+    def whole_of_kind(
+        store: PredictionStore, kind: str, version: int, days: Sequence[date], special: bool
+    ) -> Any:
+        return store.kind_scored(kind, version, days, None, special)
+
+    monkeypatch.setattr(PredictionStore, "reviewed", whole)
+    monkeypatch.setattr(PredictionStore, "kind_reviewed", whole_of_kind)
+
+
+def replayed_rows(db: Path) -> dict[str, list[tuple[Any, ...]]]:
+    """What a replay stored that its reviews and consensus decide (#487): every prediction with its
+    outcome (the consensus's too), every kind's, the status changes and the consensus weights."""
+    conn = sqlite3.connect(db)
+    try:
+        return {
+            "predictions": stored(db),
+            "kind_predictions": conn.execute(
+                "SELECT kind, symbol, algorithm, model_version, bar_close, displayed_at, status, output"
+                " FROM kind_predictions ORDER BY kind, bar_close, symbol, algorithm"
+            ).fetchall(),
+            "statuses": conn.execute(
+                "SELECT algorithm, at, previous, status, reason FROM statuses ORDER BY id"
+            ).fetchall(),
+            "weights": conn.execute(
+                "SELECT * FROM consensus_weights ORDER BY version, symbol, slot, algorithm"
+            ).fetchall(),
+        }
+    finally:
+        conn.close()
+
+
+async def test_a_review_reads_the_fields_it_judges_by_in_the_order_stored_and_judges_the_same(
+    tmp_path: Path,
+) -> None:
+    """Input: two replayed days of the direction and of the drift. Output (#487): what a status
+    review reads (``reviewed``, ``kind_reviewed``) is each whole row's fields the review reads, in the
+    same order, each string repeated across rows kept once, in a fraction of the memory; and the
+    stats it judges each algorithm by are those of the whole rows."""
+    s = settings(tmp_path, DAYS[:2])
+    steady = FixedKindAlgorithm("steady", features=("vwap_gap",), unique=("vwap_gap",))
+    result = await prevalidate(
+        s,
+        "steady",
+        algorithms=[ALPHA, Contrarian("contrarian")],
+        kind_algorithms=[steady],
+        kinds=(TEST_KIND,),
+        now=AFTER,
+    )
+    store = PredictionStore(result.db or Path())
+    try:
+        days = store.prediction_days(DAYS[1], 10)
+        touch = {b.name for b in TOUCH_BASELINES}
+        drift = {b.name for b in TEST_KIND.baselines}
+        for special in (True, False):
+            whole, read = _traced(partial(store.scored_predictions, days, None, special))
+            slim, held = _traced(partial(store.reviewed, days, special))
+            assert slim == [{k: r[k] for k in REVIEWED} for r in whole] and len(slim) > 1000
+            assert held < read / 4, f"{held / len(slim):.0f} B a row, {read / len(whole):.0f} B a whole one"
+            assert len({id(r["touch_path"]) for r in slim}) == len({r["touch_path"] for r in slim})
+            assert store.reviewed(days, special, ["alpha"]) == [r for r in slim if r["algorithm"] == "alpha"]
+            assert store.reviewed(days, special, []) == []
+            for name in {r["algorithm"] for r in whole} - touch:
+                assert DIRECTION_SCORING.measure(name, slim, touch, FEE, 0.95) == _whole_measure(
+                    name, whole, touch
+                )
+
+            whole = store.kind_scored(DRIFT, TEST_KIND.answer_version, days, None, special)
+            slim = store.kind_reviewed(DRIFT, TEST_KIND.answer_version, days, special)
+            assert slim == [{k: r[k] for k in KIND_REVIEWED} for r in whole] and len(slim) > 100
+            assert len({id(r["answer_path"]) for r in slim}) == len(
+                {json.dumps(r["answer_path"]) for r in slim}
+            )
+            scoring = kind_scoring(TEST_KIND)
+            for name in {r["algorithm"] for r in whole} - drift:
+                as_before = kind_split(scored_of_kind(whole, TEST_KIND), drift)
+                expected = kind_entry(name, as_before[0].get(name, []), as_before[1], TEST_KIND, 0.95)
+                assert scoring.measure(name, slim, drift, FEE, 0.95) == expected
+    finally:
+        store.close()
+
+
+def _traced(read: Callable[[], list[dict[str, Any]]]) -> tuple[list[dict[str, Any]], int]:
+    """What ``read`` returns, and the memory it holds (tracemalloc)."""
+    tracemalloc.start()
+    try:
+        before = tracemalloc.get_traced_memory()[0]
+        rows = read()
+        return rows, tracemalloc.get_traced_memory()[0] - before
+    finally:
+        tracemalloc.stop()
+
+
+def _whole_measure(name: str, rows: list[dict[str, Any]], baselines: set[str]) -> stats.Lifted:
+    """The direction's stats of ``name`` as the review took them before #487: from every
+    predictor's whole rows."""
+    algorithms, scored = stats.split(stats.scored_by_algorithm(rows), baselines)
+    return stats.entry(name, algorithms.get(name, []), scored, FEE, 0.95)
+
+
+# Two pre-validations of five days, each a whole session, traced (tracemalloc): about 50 s on a
+# laptop, past the 30 s default (``pyproject.toml``) on a loaded CI runner (#327).
+@pytest.mark.timeout(240)
+async def test_a_replayed_day_s_review_holds_a_fraction_of_what_it_did_and_decides_the_same(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Input: five recorded days, probation judged from its second day on, so that the candidate is
+    made active on the fourth and the consensus has a member on the fifth. Output (#487): the end of
+    each replayed day (the review, which judges the days before it too, and the consensus refit)
+    holds the fields it reads of each prediction, and the refit its members' only (none before the
+    first): what it holds grows by under a third of what it did a replayed day, when it read every
+    predictor's whole rows. The same report, predictions (the consensus's too), status changes and
+    weights as then."""
+
+    async def traced(
+        root: Path,
+    ) -> tuple[prevalidation.Prevalidation, list[int], list[tuple[set[str], set[str]]]]:
+        """The run's report, each replayed day's end's peak above what it started with, and the
+        algorithms of the rows each refit read with its members."""
+        peaks: list[int] = []
+        refits: list[tuple[set[str], set[str]]] = []
+        review = PredictionEngine._review
+
+        async def measured(self: PredictionEngine, at: datetime) -> None:
+            tracemalloc.start()  # what it allocates, at most at once
+            try:
+                await review(self, at)
+                peaks.append(tracemalloc.get_traced_memory()[1])
+            finally:
+                tracemalloc.stop()
+
+        def fitted(rows: Sequence[dict[str, Any]], members: Sequence[str], *args: Any) -> Any:
+            refits.append(({r["algorithm"] for r in rows}, set(members)))
+            return fit_weights(rows, members, *args)
+
+        monkeypatch.setattr(PredictionEngine, "_review", measured)
+        monkeypatch.setattr(engine_module, "fit_weights", fitted)
+        s = replace(settings(root, DAYS[:5]), probation_review_days=(2, 3, 4))
+        algorithms: list[Algorithm] = [ALPHA, Contrarian("contrarian"), Contrarian("looking", own="vwap_gap")]
+        try:
+            result = await prevalidate(s, "looking", algorithms=algorithms, now=AFTER)
+        finally:
+            monkeypatch.setattr(PredictionEngine, "_review", review)
+            monkeypatch.setattr(engine_module, "fit_weights", fit_weights)
+        return result, peaks, refits
+
+    now, peaks, refits = await traced(tmp_path / "now")
+    read_as_before_487(monkeypatch)
+    before, peaks_before, refits_before = await traced(tmp_path / "before")
+
+    assert [members for _, members in refits] == [set()] * 3 + [{"looking"}] * 2, "active on the fourth day"
+    assert [read for read, _ in refits] == [set()] * 3 + [{"looking"}] * 2, "its members' rows only"
+    assert refits_before[0][0] >= {"alpha", "contrarian", "looking", "baseline-flat"}, "before: every one's"
+    grown, grown_before = peaks[-1] - peaks[0], peaks_before[-1] - peaks_before[0]
+    assert grown < grown_before / 3, (
+        f"{grown / 2**20:.2f} MB over four days, {grown_before / 2**20:.2f} MB before"
+    )
+    assert _verdict(now) == _verdict(before)
+    assert replayed_rows(now.db or Path()) == replayed_rows(before.db or Path())
 
 
 async def test_a_day_with_nothing_the_algorithm_can_learn_from_is_predicted_by_its_defaults(

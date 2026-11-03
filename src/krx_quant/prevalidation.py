@@ -34,7 +34,10 @@ Each replayed day logs the process's memory, at its start and after its training
 with their peaks (#383, ``footprint.DayUsage``), and is let go once replayed: its engine and events
 are dropped before the next day is trained, and the memory they freed is handed back to the system
 (``footprint.give_back``). Without, the process grew a replayed day after another until the kernel
-killed it (2026-10-27).
+killed it (2026-10-27). A replayed day's end (the engine's status review, which judges the days
+replayed before it too, and the consensus refit) reads only the fields it judges by of each scored
+prediction, the refit its members' only (#487, ``PredictionStore.reviewed``): reading whole rows,
+each replayed day's peak grew by about 60 MB a day replayed before it (2026-11-03).
 
 A running bar-close algorithm whose code changed (#454, ``revisions.py``) is judged again by the
 same check on the recorded days after the change only (``prevalidate --revision``, ``since``: the

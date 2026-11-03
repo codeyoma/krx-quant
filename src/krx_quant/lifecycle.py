@@ -137,7 +137,9 @@ class Scoring:
 def _direction_measure(
     name: str, rows: list[dict[str, Any]], baselines: Collection[str], fee_rate: float, level: float
 ) -> Lifted:
-    algorithms, scored = split(scored_by_algorithm(rows), baselines)
+    # Its rows and the baselines' only (#487): a review's rows are every predictor's.
+    judged = [r for r in rows if r["algorithm"] == name or r["algorithm"] in baselines]
+    algorithms, scored = split(scored_by_algorithm(judged), baselines)
     return entry(name, algorithms.get(name, []), scored, fee_rate, level)
 
 
