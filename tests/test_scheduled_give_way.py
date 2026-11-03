@@ -35,7 +35,7 @@ from krx_quant.scheduled import (
     Ran,
 )
 from tests.test_scheduled import COMMIT, FRIDAY, MONDAY, SATURDAY, SUNDAY, Runs, at, saved, scheduling
-from tests.test_subscription_limit import until
+from tests.waiting import until
 
 BAR_CLOSE = "simulate bar-close"
 DAILY = "simulate daily"

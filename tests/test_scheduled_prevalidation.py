@@ -78,7 +78,7 @@ from tests.test_scheduled import (
     scheduling,
     settle,
 )
-from tests.test_subscription_limit import until
+from tests.waiting import until
 
 ORDER = ("mandelbrot", "breiman", "kalman", "shannon", "poisson")
 EVERYONE: dict[str, Algorithm | KindAlgorithm] = {

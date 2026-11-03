@@ -123,6 +123,13 @@ _APPROVAL_MAX_AGE = timedelta(hours=20)
 # dead and never replies: the reconnect waits this long, not more. A live KIS answers at once.
 WS_CLOSE_SECONDS = 5.0
 
+# How old a KIS WebSocket drop is, with the connection not back (KIS has not answered a
+# registration again), when its [장애] is sent (#488). One back sooner sends neither the [장애] nor
+# the [복구] and is counted in a WARNING instead. KIS closed the connection (code 1006) 17 times
+# from 2026-10-27 to 11-03, and data came back 1.7-3.0 s later each time. The gap, ``connected``
+# and the health change at the drop, as before.
+WS_ALERT_AFTER_SECONDS = 30.0
+
 # How often buffered partitions whose time limit has passed are flushed.
 _TICK_SECONDS = 1.0
 
@@ -167,11 +174,23 @@ def subscription_plan(
 # The phases in which a VI can matter to predictions: from the opening auction to the close.
 _VI_PHASES = {Phase.OPENING_AUCTION, Phase.CONTINUOUS, Phase.CLOSING_AUCTION}
 
+# The phases in which the investor estimates are asked for (#488): a trading day's session, from
+# the open to the close. KIS describes them as entered during it (foreign 09:30, 11:20, 13:20,
+# 14:30; institutions 10:00 to 14:30); when they arrive has not been measured. Asked at any hour
+# before, KIS refused them 41 times on Saturday 2026-10-31 (#441).
+_ESTIMATE_PHASES = {Phase.CONTINUOUS, Phase.CLOSING_AUCTION}
+
 
 def rest_plan(settings: Settings, calendar: MarketCalendar) -> list[PollJob]:
     """Feeds that are only available over REST."""
     plan = [
-        PollJob(FOREIGN_ESTIMATE, sym, settings.foreign_estimate_poll_seconds) for sym in settings.symbols
+        PollJob(
+            FOREIGN_ESTIMATE,
+            sym,
+            settings.foreign_estimate_poll_seconds,
+            when=lambda now: calendar.phase(now) in _ESTIMATE_PHASES,
+        )
+        for sym in settings.symbols
     ]
     # The day's VI list is asked for again and again; it is recorded when it changes.
     plan += [
@@ -931,6 +950,16 @@ def silence(seconds: float) -> str:
     return f"silent {seconds:g}s"
 
 
+@dataclass(frozen=True)
+class _Drop:
+    """A KIS WebSocket drop not alerted yet (#488): when it began on the loop's clock, why, and the
+    task that alerts it once it is ``WS_ALERT_AFTER_SECONDS`` old."""
+
+    began: float
+    detail: str
+    alert: asyncio.Task[None]
+
+
 class _Stream:
     """The KIS WebSocket session: kept up across reconnects, every message recorded."""
 
@@ -967,6 +996,11 @@ class _Stream:
         # one, #308): the backoff starts over after a connection that worked.
         self._answered = False
         self._recovery: asyncio.Task[None] | None = None
+        # The drop going on, until it is alerted or the connection is back (#488).
+        self._drop: _Drop | None = None
+        # Drops back before they were alerted, on the KST day of the last one.
+        self._short_drops = 0
+        self._short_drops_day: date | None = None
         # The last frame of any kind, on any connection (engine clock; for the status).
         self._last_frame_at: datetime | None = None
         # The current connection's last sign of life (its start or its last frame): on the
@@ -1024,9 +1058,12 @@ class _Stream:
         return self._last_frame_at
 
     async def close(self) -> None:
-        if self._recovery is not None:
-            self._recovery.cancel()
-            await asyncio.gather(self._recovery, return_exceptions=True)
+        tasks = [] if self._recovery is None else [self._recovery]
+        if self._drop is not None:
+            tasks.append(self._drop.alert)  # stopping: a drop not alerted yet is not alerted
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     def check_stale(self) -> None:
         """Alert, in one message, on feeds whose every key went quiet; announce the ones that
@@ -1054,15 +1091,51 @@ class _Stream:
         assert self._approval is not None
         return kis.subscribe_message(self._approval, tr_id, key)
 
-    def _connection_lost(self, detail: str, since: datetime | None = None) -> None:
-        """Mark the subscriptions as in a disconnect gap (from ``since``, else now) and
-        alert; the alert goes at any hour, in or out of market hours."""
+    def _connection_lost(self, detail: str, *, silent: bool = False) -> None:
+        """Mark the subscriptions as in a disconnect gap at once, and alert once the drop is
+        ``WS_ALERT_AFTER_SECONDS`` old with the connection not back (#488). The alert goes at any
+        hour, in or out of market hours. A ``silent`` connection's drop began at its last sign of
+        life (#308), ``ws_silence_seconds`` ago: its gap starts there, and with the default 60 s
+        its alert goes at once."""
         self._acknowledged = False
         if self._recovery is not None:
             self._recovery.cancel()  # it did not stay up long enough to count as recovered
             self._recovery = None
+        since = self._heard_wall if silent else None
         self._health.connection_lost(((f.tr_id, k) for f, k in self._subscriptions), detail, since)
-        self._alerts.raise_(_WS_ALERT, f"KIS WebSocket 연결이 끊겼습니다 ({detail}). 재연결을 시도합니다.")
+        if self._drop is not None or self._alerts.is_active(_WS_ALERT):
+            return  # the same outage: a reconnect failed, or it dropped again before recovering
+        loop = asyncio.get_running_loop()
+        began = self._heard_at if silent else loop.time()
+        text = f"KIS WebSocket 연결이 끊겼습니다 ({detail}). 재연결을 시도합니다."
+        left = began + WS_ALERT_AFTER_SECONDS - loop.time()
+        if left <= 0:
+            self._alerts.raise_(_WS_ALERT, text)
+        else:
+            self._drop = _Drop(began, detail, asyncio.create_task(self._alert_drop(left, text)))
+
+    async def _alert_drop(self, seconds: float, text: str) -> None:
+        await asyncio.sleep(seconds)
+        self._drop = None
+        self._alerts.raise_(_WS_ALERT, text)
+
+    def _back_before_the_alert(self, drop: _Drop) -> None:
+        """The connection is back before its drop was alerted (#488): neither the [장애] nor the
+        [복구], a WARNING with the day's count of such drops instead."""
+        drop.alert.cancel()
+        self._drop = None
+        day = kst_day(self._now())
+        if day != self._short_drops_day:
+            self._short_drops, self._short_drops_day = 0, day
+        self._short_drops += 1
+        log.warning(
+            "KIS WebSocket back %.1fs after it dropped (%s), within %gs: not alerted "
+            "(short drop %d today, #488)",
+            asyncio.get_running_loop().time() - drop.began,
+            drop.detail,
+            WS_ALERT_AFTER_SECONDS,
+            self._short_drops,
+        )
 
     def _heard(self, frame: bool = False) -> None:
         """A sign of life on the current connection: it opened, or a ``frame`` came."""
@@ -1076,7 +1149,9 @@ class _Stream:
         if self._acknowledged:
             return
         self._acknowledged = True
-        if self._alerts.is_active(_WS_ALERT) and self._recovery is None:
+        if self._drop is not None:
+            self._back_before_the_alert(self._drop)
+        elif self._alerts.is_active(_WS_ALERT) and self._recovery is None:
             self._recovery = asyncio.create_task(self._announce_recovery())
 
     async def _announce_recovery(self) -> None:
@@ -1120,7 +1195,7 @@ class _Stream:
             # Marked lost now, not once the close is done: that waits for the dead side's
             # reply (up to WS_CLOSE_SECONDS), and meanwhile the stale check would take the
             # subscriptions (the book's threshold is 60 s too) for quiet feeds and alert.
-            self._connection_lost(silence(limit), since=self._heard_wall)
+            self._connection_lost(silence(limit), silent=True)
             await ws.close()
 
         helpers = [asyncio.create_task(close_on_stop()), asyncio.create_task(close_when_silent())]

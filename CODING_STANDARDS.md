@@ -27,6 +27,8 @@ Seen here:
 
 A test waits for the state it needs before it checks anything: a request to a path arriving, `reading()` turning false, a row being written. That readiness condition is never the order of requests, a fixed request count or wall-clock time: requests made in parallel arrive in any order, and a read asked while the same read is under way joins it. Once the work is done, the test may assert counts and order where they are the behaviour under test (pagination, retries, caching, fan-out).
 
+Tests wait with `until` (`tests/waiting.py`). A test that checks that nothing happened (no event sent, no gap opened) first waits for the event that marks the moment, such as the stream's next poll or the collector's next stale check. After a sleep instead, a slow machine may not have run the check yet, and the test passes for no reason.
+
 A test that measures a time budget uses stand-in algorithms with fixed costs, not real algorithms, whose speed depends on the machine. A sleep alone is not a fixed cost: a loaded machine wakes it late, and the engine counts the wait. A CPU budget test takes the `fixed_costs` fixture (`tests/conftest.py`), which times each stand-in by the seconds it spends (`spend` in `tests/algorithm_doubles.py`). Time limits still count real time, so a stand-in meant to go over one sleeps well past it.
 
 A test's time limit is pytest-timeout's, 30 s by default (`pyproject.toml`). A test that passes it ends the whole run with every thread's stack (`timeout_method = "thread"`). The tests after it do not run, so fix the stuck test first. A test that needs longer by design gets its own `@pytest.mark.timeout(N)` and a comment saying why. The method stays `thread`: the `signal` method raises its exception wherever the main thread is, and asyncio drops one raised in a callback, so the test waits forever (`tests/test_timeouts.py`).
@@ -34,6 +36,7 @@ A test's time limit is pytest-timeout's, 30 s by default (`pyproject.toml`). A t
 Seen here:
 
 - `tst_krx_cost` waited for requests in a fixed order (fork #99).
+- Tests slept a fixed time before they checked: for the stream to count a new client, for an alert sent in the background, for the collector's stale checks to run. The checks that nothing went stale could pass before any check had run (#490).
 - `test_algorithms_replay` ran the real Mandelbrot and Breiman ladder against a 0.6 s budget and failed on slower runners (#327).
 - `test_the_replay_shares_the_cpu_budget_with_the_live_algorithms_as_live` slept 3 ms and 4 ms against a 5.5 ms budget. On a loaded machine the late wake-ups alone went over it (#327).
 - At load averages of 150–600, runs of the replay tests that went past their limits stopped for good at 0% CPU, in 3 of about 70 runs. pytest-timeout's `signal` method had raised its timeout inside an asyncio callback, such as `gather`'s, which wakes the awaiting task, or the one that hands a worker thread's result to the loop. asyncio logged the exception and went on, and the test never woke. Other runs ended in a pytest `INTERNALERROR` while it formatted such a timeout's traceback (#335).

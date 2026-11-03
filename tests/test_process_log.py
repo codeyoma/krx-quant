@@ -29,7 +29,7 @@ from krx_quant.scheduled import Job, JobState, Scheduler, run_command
 from krx_quant.scheduled import Target as IssueTarget
 from krx_quant.swap import _train
 from tests.loki_fake import FakeLoki
-from tests.test_subscription_limit import until
+from tests.waiting import until
 
 NIGHT = date(2026, 10, 22)
 

@@ -85,6 +85,12 @@ class EventStream:
         self._closing: set[asyncio.Task[Any]] = set()
         self._last_status = engine.store.last_status_id()
         self._bars: dict[str, dict[str, Any]] = {}  # each symbol's bar as last sent
+        self.polls = 0  # polls done: a test waits for the next ones (#490)
+
+    @property
+    def clients(self) -> int:
+        """The clients connected now: an event published before a client is counted misses it."""
+        return len(self._clients)
 
     def changed(self, change: Change) -> None:
         """The engine's listener."""
@@ -166,6 +172,7 @@ class EventStream:
                         self._publish({"type": "health", "kis": kis})
             except Exception:
                 log.exception("stream poll failed")
+            self.polls += 1
             await asyncio.sleep(self._poll_seconds)
 
     async def handle(self, request: web.Request) -> web.WebSocketResponse:

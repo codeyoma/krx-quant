@@ -83,9 +83,9 @@ from krx_quant.scheduled import (
 from krx_quant.swap import TRAINING_TIMEOUT, NightTraining, keep_training
 from tests.fake_github import REPO, TOKEN, FakeGitHub, fake_github
 from tests.test_collector import settings_for
-from tests.test_subscription_limit import until
 from tests.test_trader_run import EngineApi
 from tests.trader_doubles import cost_map, cost_row, predictor
+from tests.waiting import until
 
 THURSDAY, FRIDAY, SATURDAY, SUNDAY, MONDAY = (date(2026, 10, d) for d in (15, 16, 17, 18, 19))
 CALENDAR = MarketCalendar({THURSDAY: True, FRIDAY: True, SATURDAY: False, SUNDAY: False, MONDAY: True})

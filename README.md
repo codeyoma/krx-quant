@@ -75,6 +75,7 @@ uv run krx-quant measure-subscriptions
 - **토큰 재사용**: REST 접근 토큰은 `state/kis_token.json`(권한 600)에 캐시해서 재시작해도 다시 발급하지 않는다. 만료 1시간 전부터 갱신하고, 발급 간격은 61초 이상으로 둔다(KIS는 분당 1회).
 - **텔레그램 알림**: `TELEGRAM_BOT_TOKEN`과 `TELEGRAM_CHAT_ID`를 넣으면 장애가 시작될 때 한 번, 복구될 때 한 번 텔레그램으로 알린다. 넣지 않으면 로그만 남긴다.
 - **로그**: 모든 프로세스의 로그 줄이 stdout에 나온다(`docker compose logs`, 다음 배포까지). `KRX_LOKI_URL`, `KRX_LOKI_USER`, `KRX_LOKI_TOKEN`을 넣으면 같은 줄을 가려서 Grafana Cloud Loki로 보내고, 로그는 거기 남는다(#358). 엔진이 띄운 밤 학습과 예약 작업의 출력도 간다. 묶어서 보내고, 실패하면 다시 보내고, 넘치면 버리고 센다. 엔진은 Loki를 기다리지 않는다. 에이전트는 거기서 질의하고([docs/agents/server-logs.md](docs/agents/server-logs.md)), Grafana의 알림 규칙이 엔진이 스스로 보내지 못하는 것(엔진 로그 끊김 등)을 텔레그램으로 보낸다([docs/operations.md](docs/operations.md#grafana-cloud-loki로-보내는-로그-358)).
+  - WebSocket 끊김 알림은 끊긴 뒤 30초가 지나도 다시 붙지 않았을 때만 보낸다. KIS가 하루 몇 번 닫았다가 몇 초 안에 다시 붙는 끊김은 알리지 않고, 로그(WARNING)에 그날 수와 함께 남긴다. 결측은 그대로 기록한다(#488).
   - 재연결 복구 알림은 연결이 60초(`KRX_RECOVERY_HOLD_SECONDS`) 이상 유지된 뒤에 보낸다. 그래서 끊겼다 붙기를 반복해도 알림이 매번 가지 않는다.
   - 지연 알림은 새로 지연된 피드들을 한 메시지로 묶어 보내고, 다시 들어온 피드도 묶어서 알린다.
   - 예측 신호(`[신호] ...`)는 선택이다. `KRX_SIGNAL_ALERT=on`이면 최종 합의가 충분히 확실하고 정식 알고리즘 N개 이상이 같은 방향일 때 보낸다. VI·서킷브레이커, 기준가 없음, 목표 시각 지남이면 보내지 않는다([docs/engine-api.md](docs/engine-api.md#텔레그램-신호-알림-19)).

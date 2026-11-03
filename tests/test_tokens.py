@@ -13,7 +13,7 @@ from krx_quant.config import Settings
 from krx_quant.fake_kis import FakeKis
 from tests.test_collector import FIXED_NOW, settings_for
 from tests.test_resilience import Clock
-from tests.test_subscription_limit import until
+from tests.waiting import until
 
 QUOTE = "FHKST01010100"
 
