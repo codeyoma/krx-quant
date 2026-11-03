@@ -36,7 +36,7 @@ from krx_quant.object_store import (
 from krx_quant.recorder import ParquetRecorder
 from tests.kis_frames import trade_frame
 from tests.test_collector import settings_for
-from tests.test_subscription_limit import until
+from tests.waiting import until
 
 DAY = date(2026, 10, 8)
 PARTITION = "raw/date=2026-10-08/feed=H0UNCNT0/symbol=005930"

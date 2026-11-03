@@ -35,7 +35,7 @@ from krx_quant.recorder import ParquetRecorder
 from tests.kis_rest import query_error, requests_for, session_full
 from tests.test_collector import settings_for
 from tests.test_live_predictions import free_port, poll
-from tests.test_subscription_limit import until
+from tests.waiting import until
 
 FOREIGN = FOREIGN_ESTIMATE.tr_id
 KEY = (FOREIGN, "005930")
