@@ -226,12 +226,16 @@ def test_without_a_recorded_day_or_with_an_unknown_algorithm_nothing_is_made(tmp
     s = settings(tmp_path / "data", tmp_path / "state")
 
     assert sample_profile.sample_profile(s, FINISHED, lines.append) == 1
+    assert sample_profile.sample_profile(s, FINISHED, lines.append, day=NIGHT) == 1
     assert sample_profile.sample_profile(s, FINISHED, lines.append, algorithms=("nobody",)) == 2
 
     assert lines[0] == (
         "sample profile (#512): no finished day has every symbol's trades recorded; nothing to make"
     )
-    assert lines[1].startswith("sample profile (#512): unknown algorithm nobody; registered: newton,")
+    assert lines[1] == (
+        f"sample profile (#512): {NIGHT} does not have every symbol's trades recorded; nothing to make"
+    )
+    assert lines[2].startswith("sample profile (#512): unknown algorithm nobody; registered: newton,")
 
 
 def test_the_command_runs_on_the_settings(

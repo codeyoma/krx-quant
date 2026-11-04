@@ -21,8 +21,9 @@ bars as they stood, the snapshot, the Feature Store), the answers (following eac
 window, and the kinds' quotes, through the quotes and trades after it; the barriers' widths; the
 labels) and storing the day (encoded, read back to check it, gzipped and written, into a temporary
 sample store). What is in none (the bar closes' loop, the special situations' lookups, the samples
-built) is the rest. The day's key (the input files' SHA-256) is reckoned once, outside the runs: a
-night takes the digests the Object Store keeps.
+built) is the rest. The day's key (the input files' SHA-256) is reckoned once, before the runs and
+outside them: a night takes the digests the Object Store keeps. Hashing reads every file first, as a
+night's fetch does when it checks its cached copies, so the runs read them warm, as the night does.
 
 The code that makes samples is not changed for this: its digest keys the sample store
 (``sample_store.code_digest``), and a change would make every day again on the next night. The stages
@@ -339,8 +340,8 @@ def sample_profile(
     symbols = settings.symbols
     chosen = day or latest_recorded(settings.data_dir, symbols, now)
     if chosen is None or not is_recorded(settings.data_dir, chosen, symbols):
-        which = "no finished day" if chosen is None else f"not {chosen}"
-        out(f"sample profile (#512): {which} has every symbol's trades recorded; nothing to make")
+        which = "no finished day has" if chosen is None else f"{chosen} does not have"
+        out(f"sample profile (#512): {which} every symbol's trades recorded; nothing to make")
         return 1
     calendar = calendar_store(settings).calendar
     leaders = Leaders.of(settings)
