@@ -87,6 +87,19 @@ def test_the_drift_is_shrunk_by_the_minutes_behind_it() -> None:
     assert later.expected_ticks > 0
 
 
+def test_the_expected_move_is_the_lognormal_mean_in_ticks() -> None:
+    # E[S₄ ÷ S₀ − 1] = e^(ν + σ²/2) − 1 with ν and σ as log returns (bp ÷ 10⁴), over a tick's share.
+    share = math.expm1(TICK_BP / 1e4)
+
+    still = gbm_forecast(0.0, 24.0, TICK_BP, 2.0, 0.5)
+    falling = gbm_forecast(-10.0, 24.0, TICK_BP, 2.0, 0.5)
+
+    assert still.expected_ticks == pytest.approx(math.expm1((24e-4) ** 2 / 2) / share)
+    assert 0 < still.expected_ticks < 0.01  # σ²/2 alone moves the mean a hair, not ticks
+    assert falling.expected_ticks == pytest.approx(math.expm1(-10e-4 + (24e-4) ** 2 / 2) / share)
+    assert falling.expected_ticks < 0
+
+
 def test_the_four_minute_move_ends_past_the_targets() -> None:
     f = Samuelson().predict(features(0.0, touch=False), Samuelson().default_model())
     up, down = log_targets(2.0, TICK_BP)

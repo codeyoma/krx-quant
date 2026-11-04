@@ -105,7 +105,7 @@ def gbm_forecast(
         p_down = _upper_tail((down + drift) / spread) if math.isfinite(down) else 0.0
         p_flat = max(0.0, 1 - p_up - p_down)
     total = p_up + p_flat + p_down
-    exponent = min((drift + spread * spread / 2) / 1e4, 50.0)
+    exponent = min(drift / 1e4 + (spread / 1e4) ** 2 / 2, 50.0)  # in log returns, not bp
     expected = math.expm1(exponent) / _share(tick_bp)
     return Forecast(p_up / total, p_flat / total, p_down / total, expected)
 
