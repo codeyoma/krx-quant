@@ -99,10 +99,10 @@ def terms(features: FeatureVector) -> Terms | None:
         return None
     fast = features["parkinson_5"]
     fast = slow if fast is None else fast
-    up, down = features["semivol_up"], features["semivol_down"]
-    mean = math.sqrt((up * up + down * down) / 2) if up is not None and down is not None else 0.0
-    known = up is not None and down is not None and mean > 0
-    up, down = (max(up / mean, MIN_SIDE), max(down / mean, MIN_SIDE)) if known else (1.0, 1.0)
+    rise, fall = features["semivol_up"], features["semivol_down"]
+    up = down = 1.0  # unknown semideviations: symmetric
+    if rise is not None and fall is not None and (mean := math.sqrt((rise * rise + fall * fall) / 2)) > 0:
+        up, down = max(rise / mean, MIN_SIDE), max(fall / mean, MIN_SIDE)
     touch = features.touch
     distance = max(k + (0.0 if touch is None else touch.half_spread), MIN_SPREAD_TICKS)
     widest = 2 * max(fast, slow) * max(up, down) * max(SCALES)

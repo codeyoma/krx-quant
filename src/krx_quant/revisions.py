@@ -60,7 +60,7 @@ class Refactor:
 # The reviewed map (#454). An entry goes in the PR that changes the code, with its evidence; the
 # engine never infers one.
 _LEFT_OUT_518 = (
-    "#518: only the features' rule changed, to leave the stochastic processes' new features out, "
+    "#518, PR #525: only the features' rule changed, to leave the stochastic processes' new features out, "
     "and its features are the same, in the same order; tests/test_stochastic_refactor.py trains the "
     "code and the rule before #518 on the same samples: the same model and the same forecasts"
 )

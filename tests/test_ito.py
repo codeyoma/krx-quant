@@ -29,7 +29,7 @@ def solved(
 ) -> np.ndarray:
     """Up, flat and down for σ a minute held for four minutes."""
     t = Terms(distance, touch, sigma * sigma, sigma * sigma, up, down, max(2 * sigma * 1.25, 0.5))
-    return probabilities(t, chains(t, 1.0), np.array([clock(t.fast, t.slow, 0.0, 1.0)]))[0]
+    return np.asarray(probabilities(t, chains(t, 1.0), np.array([clock(t.fast, t.slow, 0.0, 1.0)]))[0])
 
 
 @pytest.mark.parametrize(("distance", "sigma"), [(2.5, 1.0), (2.5, 3.0), (1.5, 0.3), (3.5, 8.0)])
@@ -67,7 +67,13 @@ def test_the_variance_clock_runs_from_the_fast_variance_to_the_slow() -> None:
 
 
 def features(**values: float | None) -> FeatureVector:
-    known = {"semivol_up": 1.0, "semivol_down": 1.0, "parkinson_5": 1.0, "volatility": 1.0, "flat_ticks": 2.0}
+    known: dict[str, float | None] = {
+        "semivol_up": 1.0,
+        "semivol_down": 1.0,
+        "parkinson_5": 1.0,
+        "volatility": 1.0,
+        "flat_ticks": 2.0,
+    }
     return FeatureVector(known | values, Ito.features, TouchTerms(0.5))
 
 

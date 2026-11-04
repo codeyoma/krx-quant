@@ -111,7 +111,7 @@ def draws(size: np.ndarray, block: float, pick: np.ndarray, stay: np.ndarray) ->
     carry = stay < 1 - 1 / block
     for m in range(1, MINUTES):
         out[..., m] = np.where(carry[..., m], (out[..., m - 1] + 1) % sizes[..., m], fresh[..., m])
-    return out
+    return np.asarray(out)
 
 
 def outcomes(
@@ -137,7 +137,7 @@ def shares(up: np.ndarray, down: np.ndarray) -> np.ndarray:
     n_up, n_down = up.sum(axis=-1), down.sum(axis=-1)
     n_flat = paths - n_up - n_down
     counts = np.stack([n_up, n_flat, n_down], axis=-1) + SMOOTHING
-    return counts / (paths + 3 * SMOOTHING)
+    return np.asarray(counts / (paths + 3 * SMOOTHING))
 
 
 class Ulam:
@@ -234,8 +234,8 @@ class Ulam:
         width = max(len(p.changes) for p, _ in chunk)
         changes, highs, lows = (np.zeros((n, width)) for _ in range(3))
         for i, (p, _) in enumerate(chunk):
-            size = len(p.changes)
-            changes[i, :size], highs[i, :size], lows[i, :size] = p.changes, p.highs, p.lows
+            n_i = len(p.changes)
+            changes[i, :n_i], highs[i, :n_i], lows[i, :n_i] = p.changes, p.highs, p.lows
         size = np.array([len(p.changes) for p, _ in chunk])
         distance = np.array([p.distance for p, _ in chunk])
         touch = np.array([p.touch for p, _ in chunk])

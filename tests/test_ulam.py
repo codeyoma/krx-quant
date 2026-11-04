@@ -15,7 +15,7 @@ import pytest
 from krx_quant.algorithms.contract import Model
 from krx_quant.algorithms.forecasts import UNKNOWN, forecasting, ordered_forecast
 from krx_quant.algorithms.ulam import MIN_POOL, PATHS, SMOOTHING, Ulam, draws
-from krx_quant.features import FeatureVector, TouchTerms
+from krx_quant.features import FeatureVector, TouchTerms, Value
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.training import samples
 from tests.synthetic_bars import random_walk, trending
@@ -29,7 +29,7 @@ NONE = SMOOTHING / (PATHS + 3 * SMOOTHING)
 def features(
     changes: list[float], highs: list[float], lows: list[float], *, touch: bool = True, k: float = 2.0
 ) -> FeatureVector:
-    values = {
+    values: dict[str, Value] = {
         "minute_ticks": tuple(changes),
         "minute_highs": tuple(highs),
         "minute_lows": tuple(lows),
