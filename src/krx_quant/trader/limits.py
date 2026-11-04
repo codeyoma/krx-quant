@@ -19,7 +19,7 @@ the ledger and the report to show apart. The risk rules count the practice as ev
 ``paper.risk_held``). The practice shadow's simulated limits count none of its trades either: they
 are all practice.
 
-> **바뀜** (2026-11-05, #NNN): the loss counted the mock book's practice trades with the champion's
+> **바뀜** (2026-11-05, #534): the loss counted the mock book's practice trades with the champion's
 > (the same KIS account) → it counts none of them. 이유: the user's decision (2026-11-04): a practice
 > may trade many times; at 2026-11-04's pace (−9,140 won in 20 trades) its losses alone would have
 > reached the cumulative limit around 2026-12-03 and stopped the champion until a re-arm.
