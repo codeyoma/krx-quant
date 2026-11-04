@@ -126,6 +126,8 @@ from krx_quant.scheduled.research import (
     NIGHTLY_HIT_RATES,
     SAMPLE_PROFILE,
     SIGNAL_REVIEW_FIXED,
+    SMT_DISCOVERY,
+    SMT_HOLDOUT,
 )
 from krx_quant.scheduled.trader import (
     FILL_NOTICE_LAYOUT,
@@ -163,6 +165,8 @@ __all__ = [
     "SIGNAL_REVIEW_FIXED",
     "SIGNAL_REVIEW_FIXED_DAYS",
     "SIGNAL_REVIEW_FROM",
+    "SMT_DISCOVERY",
+    "SMT_HOLDOUT",
     "STATE_FILE",
     "TRADER_REPORT",
     "Attachment",
@@ -262,4 +266,6 @@ JOBS: tuple[Job, ...] = (
     *revision_jobs([*(a.name for a in ALGORITHMS), *(a.name for a in KIND_ALGORITHMS)]),
     *prevalidation_jobs([*(a.name for a in ALGORITHMS), *(a.name for a in KIND_ALGORITHMS)]),
     NEYMAN_VARIANTS,
+    SMT_DISCOVERY,
+    SMT_HOLDOUT,
 )
