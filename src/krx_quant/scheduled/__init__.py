@@ -122,6 +122,7 @@ from krx_quant.scheduled.prevalidations import (
 from krx_quant.scheduled.research import (
     CLIMATE_GATE,
     ERROR_HOLDOUT,
+    NEYMAN_BACKFILL,
     NEYMAN_VARIANTS,
     NIGHTLY_HIT_RATES,
     NORMAL_ORDER,
@@ -154,6 +155,7 @@ __all__ = [
     "INTERRUPTED",
     "JOBS",
     "LIVE_PROBE",
+    "NEYMAN_BACKFILL",
     "NEYMAN_VARIANTS",
     "NIGHTLY_HIT_RATES",
     "NORMAL_ORDER",
@@ -271,4 +273,5 @@ JOBS: tuple[Job, ...] = (
     NORMAL_ORDER,
     SMT_DISCOVERY,
     SMT_HOLDOUT,
+    NEYMAN_BACKFILL,
 )

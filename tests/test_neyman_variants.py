@@ -380,6 +380,7 @@ def test_the_discovery_fixes_n_and_the_evaluation_judges_the_window_once(
         "min_scored": 50,
         "least": 2,
         "delta": 10.0,  # a lift of ten points: N is the least, 2
+        "live_delta": 10.0,  # and the live plan's (#532) the least too
         "algorithms": [NEYMAN],
         "kind_algorithms": [],
         "kinds": [],
@@ -396,6 +397,10 @@ def test_the_discovery_fixes_n_and_the_evaluation_judges_the_window_once(
     saved = json.loads(report.read_text())
     assert saved["discovery"]["n"] == 2 and saved["discovery"]["after"] == days[2].isoformat()
     assert saved["discovery"]["rule"]["z_level"] == 2.394 and saved.get("evaluation") is None
+    # The live plan (#532) with it: D - A alone at 95%, N from the discovery's s_d of D - A.
+    assert (saved["plan"]["judged"], saved["plan"]["level"], saved["plan"]["n"]) == (["D"], 0.95, 2)
+    assert saved["plan"]["sd"] == saved["discovery"]["spreads"]["D"]["sd"]
+    assert saved["plan"]["before"]["judged"] == ["B", "C", "D"] and saved["plan"]["before"]["n"] == 2
     text = "\n".join(first.lines)
     assert "discovery on neyman's pre-validation days 2026-09-14..2026-09-16: 3 recorded days" in text
     assert "N = 2, the largest" in text and "never computed again" in text
@@ -424,11 +429,19 @@ def test_the_discovery_fixes_n_and_the_evaluation_judges_the_window_once(
     assert [f.composition for f in e.folds] == ["4+0", "5+0"]
     assert {a.n for a in e.arms.values()} == {sum(f.scored for f in e.folds)}
     saved = json.loads(report.read_text())
-    assert saved["evaluation"]["judged"] is True and set(saved["evaluation"]["verdict"]) == {B, C, D}
+    # The live plan judges D - A alone at 95% (#532); B - A and C - A are described.
+    assert saved["evaluation"]["judged"] is True and set(saved["evaluation"]["verdict"]) == {D}
+    assert set(saved["evaluation"]["described_over_a"]) == {B, C} and saved["evaluation"]["level"] == 0.95
+    assert set(saved["evaluation"]["candidates"]) <= {D}
+    assert e.verdicts[D] == Verdict.of(e.records[D], e.records[A], 0.95)
     assert progress(s, AFTER) == Progress(True, 2, True, 2)
     text = "\n".join(judged.lines)
     assert "verdict on the window 2026-09-18..2026-09-21, its 2 days" in text
-    assert len(re.findall(r"^  [BCD] .* - A: .* -> (a candidate|not a candidate)$", text, re.M)) == 3
+    assert "verdict (fixed before the run; the plan of 2026-11-04, #532): D against A;" in text
+    assert "a two-sided 95% Student t interval;" in text and "Bonferroni" not in text.split("verdict (")[1]
+    assert len(re.findall(r"^  D .* - A: .* -> (a candidate|not a candidate)$", text, re.M)) == 1
+    assert len(re.findall(r"^  [BC] .* - A \(described, not judged\): ", text, re.M)) == 2
+    assert "described, not judged (every interval at 95%)" in text
     assert "(2) diagnosis (reported, not judged)" in text and f"    {R}: unknown" in text
     assert not re.search(r"\b8[01][0-9],?[0-9]{3}\b", text), "no price"
     logged = [r.getMessage() for r in caplog.records if ": memory on " in r.getMessage()]
@@ -441,6 +454,107 @@ def test_the_discovery_fixes_n_and_the_evaluation_judges_the_window_once(
     assert again.stage == module.JUDGED_BEFORE and again.evaluation is None
     assert json.loads(report.read_text()) == saved
     assert "it stands, not computed again" in again.lines[0] and again.lines[2] == judged.lines[0]
+
+
+# The discovery as the server saved it on the night of 2026-11-03 (#455's comment): what later runs read
+# of it (its days, folds and arms left out).
+SERVER_DISCOVERY = {
+    "made_at": "2026-11-04T00:21:14.754831+09:00",
+    "period": ["2026-10-12", "2026-10-30"],
+    "short": [],
+    "spreads": {
+        "B": {"days": 15, "mean": 0.0028455032886261756, "sd": 0.009997573371821807, "n": 117},
+        "C": {"days": 15, "mean": 0.005830264632555385, "sd": 0.0100640652048084, "n": 118},
+        "D": {"days": 15, "mean": 0.009392958976663056, "sd": 0.013283747868090213, "n": 206},
+    },
+    "rule": {
+        "z_level": 2.394,
+        "z_power": 0.842,
+        "delta": 0.003,
+        "least": 30,
+        "level": 0.9833333333333333,
+        "decide_above": 60,
+    },
+    "n": 206,
+    "after": "2026-11-02",
+    "min_scored": 200,
+}
+
+
+def saved_discovery(s: Settings) -> Path:
+    report = s.state_dir / module.REPORT
+    report.parent.mkdir(parents=True, exist_ok=True)
+    saved = {"experiment": module.EXPERIMENT, "issue": 455, "discovery": SERVER_DISCOVERY}
+    report.write_text(json.dumps(saved))
+    return report
+
+
+def test_the_live_window_judges_d_alone_its_n_56_from_the_saved_s_d(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #532: the plan moves into the saved report; the discovery is never run again.
+    s = recorded(tmp_path, [])
+    report = saved_discovery(s)
+
+    def never(*args: object, **kwargs: object) -> None:
+        raise AssertionError("the discovery ran again")
+
+    monkeypatch.setattr(module, "discover", never)
+    night = datetime(2026, 11, 5, 23, tzinfo=KST)
+    run = neyman_variants(s, now=night)
+    assert run.stage == module.WAITING
+    saved = json.loads(report.read_text())
+    assert saved["discovery"] == SERVER_DISCOVERY, "the discovery as it was"
+    plan = saved["plan"]
+    assert (plan["judged"], plan["described"]) == (["D"], ["B", "C"])
+    assert (plan["level"], plan["z_level"], plan["z_power"], plan["delta"], plan["least"]) == (
+        0.95,
+        1.96,
+        0.842,
+        0.005,
+        30,
+    )
+    # N = max(30, ceil(((1.96 + 0.842) x s_d / 0.005)^2)) from D - A's saved s_d: 56.
+    sd = SERVER_DISCOVERY["spreads"]["D"]["sd"]  # type: ignore[index]
+    assert plan["sd"] == sd and math.ceil(((1.96 + 0.842) * sd / 0.005) ** 2) == 56 == plan["n"]
+    assert required_days(sd, 30, 0.005, 1.96) == 56
+    assert (plan["changed"], plan["issue"]) == ("2026-11-04", 532) and "2027" in plan["reason"]
+    assert plan["before"] | {"reason": None} == {
+        "judged": ["B", "C", "D"],
+        "described": [],
+        "level": LEVEL,
+        "z_level": Z_LEVEL,
+        "z_power": Z_POWER,
+        "delta": 0.003,
+        "least": 30,
+        "sd": None,
+        "n": 206,
+        "changed": None,
+        "issue": None,
+        "reason": None,
+    }
+    text = "\n".join(run.lines)
+    assert "the live window's plan, changed on 2026-11-04 (#532): D against A, a lift of 0.5 points" in text
+    assert "two-sided at 95% with 80% power" in text and "= 56 from the discovery's s_d of D - A" in text
+    assert "before: B, C and D each against A, 0.3 points at 98.333%, N 206" in text
+    assert "moved into the report now" in text and "of 56" in text
+    assert progress(s, night) == Progress(True, 56, False, 0)
+
+    # Later runs read it: nothing moves again, and the job waits for 56 recorded days.
+    again = neyman_variants(s, now=night + timedelta(days=1))
+    assert json.loads(report.read_text()) == saved
+    assert "moved into the report now" not in "\n".join(again.lines)
+    sunday = date(2026, 11, 8)
+    ran = JobRecord(sunday, "ok", datetime(2026, 11, 8, 23, tzinfo=KST), "abc", 0, 600.0)
+
+    def due(found: Progress) -> bool:
+        return NEYMAN_VARIANTS.due(Night(sunday, False, "abc", ran, {}, Facts(neyman_variants=found)))
+
+    assert not due(Progress(True, 56, False, 55)) and due(Progress(True, 56, False, 56))
+    # A report with a plan keeps it; one whose discovery holds no s_d of D - A cannot set N.
+    assert module.migrated(saved) == (saved, False)
+    with pytest.raises(ValueError, match="no s_d of D - A"):
+        module.live_plan(SERVER_DISCOVERY | {"spreads": {}})
 
 
 def test_the_command_says_what_it_cannot_do(

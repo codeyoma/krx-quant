@@ -68,13 +68,25 @@ two-sided ``LEVEL`` (98.333%) Student t interval (Bonferroni over the three). An
 **candidate** when its paired lift is above 0 and the lower bound by trading day too. Judged once,
 when the window is full: no verdict before, and the window is never made longer.
 
+**The live window's plan, changed** (``Plan``, #532). The discovery set N = 206 (D − A's s_d 0.0133):
+a verdict in August–September 2027. On 2026-11-04, before any day judged them, the user decided to
+judge the three comparisons as registered on the backfilled days before the discovery's training
+instead (``neyman_backfill``), and to keep a smaller live check: the window judges D − A alone
+(``LIVE_JUDGED``), a lift of ``LIVE_DELTA`` (0.5 points) two-sided at ``LIVE_LEVEL`` (95%), N =
+max(30, ⌈((1.96 + 0.842) × s_d ÷ 0.005)²⌉) from the discovery's saved s_d of D − A (56 on the
+server's); B − A and C − A are described only. The window is as it was: the first N days after
+2026-11-02 with 200 bar closes. The discovery is not run again: the first run that finds a report
+without the plan moves it there (``migrated``), with its date, its reason and the plan before, and the
+backfilled days' results never change it.
+
 Described, never judged: each arm's Brier score, log loss and lift over the climate baseline (the
 table refitted before each day on the 20 days before it); the hit rates on the bar closes B swapped;
 the lifts by 30-minute slot (``consensus.slot``) and by σ̂₄'s tercile (σ̂₄ = w ÷ ``barrier_sigma``,
 each symbol's cuts from the window's bar closes, ``api.volatility_cuts``); D − C; and how the
 verdict's interval moves if the days depend on each other (``stats.day_lift`` takes them as
 independent): the days' lag-1 autocorrelation and the interval by trading day as if they were
-windows of two and three sessions (``stats.overlap_t_test``).
+windows of two and three sessions (``stats.overlap_t_test``). Every interval is at the plan's level
+(95% since #532), and so are the lifts of the comparisons it does not judge.
 
 **(2)'s diagnosis** (``_Diagnosis``, the same report, never judged), on the window's days: the same
 rows predicted by A's final first model and by the mean of its fold models: their probabilities'
@@ -85,9 +97,9 @@ model's inputs (D's r with them) live against out of sample (the fold models' ca
 unknown, beyond the out-of-sample 1st and 99th percentiles, and the KS distance. The folds' mean
 mixes a smaller training set with an ensemble: the two effects are not told apart.
 
-**The report** (``state/experiments/neyman-variants-283.json``): the discovery, then the evaluation;
-each with its lines. A run after the verdict prints it again and computes nothing. Counts, rates,
-lifts, scores and dates only: no price, σ̂₄ or cut.
+**The report** (``state/experiments/neyman-variants-283.json``): the discovery, the live window's
+plan, then the evaluation; each with its lines. A run after the verdict prints it again and computes
+nothing. Counts, rates, lifts, scores and dates only: no price, σ̂₄ or cut.
 
 **Memory.** A pre-validation's training phase's, without its replay (#383): the window's days are
 kept and the older let go as the days move on; each day logs its memory, then hands back what it
@@ -111,7 +123,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, TypeVar
 
 import lightgbm as lgb
 import numpy as np
@@ -158,6 +170,7 @@ from krx_quant.pricing import Direction, most_likely
 from krx_quant.sample_store import night_reads
 from krx_quant.stats import (
     Lift,
+    Paired,
     Scored,
     day_lift,
     gains_by_day,
@@ -186,10 +199,23 @@ Z_LEVEL = 2.394  # the two-sided z at LEVEL (#455's)
 Z_POWER = 0.842  # the z of 80% power
 DELTA = 0.003  # the lift to find: 0.3 points of hit rate
 
+# The live window's plan since #532 (``Plan``), fixed on 2026-11-04 before any backfilled day was judged.
+PLAN_CHANGED = date(2026, 11, 4)
+PLAN_ISSUE = 532
+LIVE_LEVEL = 0.95  # two-sided: one comparison judged
+LIVE_Z_LEVEL = 1.96  # the two-sided z at LIVE_LEVEL
+LIVE_DELTA = 0.005  # the lift to find live: 0.5 points of hit rate
+PLAN_REASON = (
+    "N 206 recorded days would judge in August-September 2027; the user decided (2026-11-04) to judge"
+    " the three comparisons as registered on the backfilled days before the discovery's training"
+    " (neyman-variants --backfill, #532) and to keep a smaller live check, D - A alone"
+)
+
 A, B, C, D = "A", "B", "C", "D"
 CLIMATE_ARM = "climate"  # described only: the lift over the climate baseline
 ARMS = (A, B, C, D)
 VARIANTS = (B, C, D)  # each judged against A
+LIVE_JUDGED = (D,)  # the live window's since #532: B and C are described there
 LABELS = {
     A: "A neyman as it is",
     B: "B A, its flips swapped back",
@@ -212,6 +238,7 @@ UP, FLAT, DOWN = Direction.UP, Direction.FLAT, Direction.DOWN
 CALL_CLASSES = (UP, FLAT, DOWN)
 
 Inputs = Callable[[float, float, float, Direction, FeatureVector], list[float]]
+P = TypeVar("P", bound=Paired)  # a scored bar close: ``Scored``, or the backfill's compact ``Hit`` (#532)
 
 
 # The arms
@@ -550,6 +577,25 @@ def walk(
     fitted on the days before it; the days with fewer are left out (the second value). Its memory a
     day (#383)."""
     collected = Collected(diagnose)
+    return collected, walk_into(collected.add, trainer, days, min_scored, diagnose=diagnose)
+
+
+# What a walk hands each day it predicts to: the day, its arms (None untrained), its climate table and
+# its bar closes with a label (``Collected.add``; the backfill's tally, #532).
+Add = Callable[[date, Fit | None, Model, Sequence[Sample]], None]
+
+
+def walk_into(
+    add: Add,
+    trainer: Days,
+    days: Sequence[date],
+    min_scored: int,
+    *,
+    diagnose: bool = False,
+    name: str = "neyman variants",
+) -> list[date]:
+    """``walk``'s days, each handed to ``add``; the days with fewer than ``min_scored`` bar closes
+    with a label left out (returned). Its memory a day (#383), logged as ``name``'s."""
     short: list[date] = []
     meter = Meter()
     for n, day in enumerate(days, 1):
@@ -561,16 +607,14 @@ def walk(
             climate = trainer.climate_before(day) if enough else None
         if climate is None:
             short.append(day)
-            log.info(
-                "neyman variants: %s has %d scored bar closes, fewer than %d", day, len(samples), min_scored
-            )
+            log.info("%s: %s has %d scored bar closes, fewer than %d", name, day, len(samples), min_scored)
         else:
             with usage.phase("scoring"):
-                collected.add(day, fit, climate, samples)
+                add(day, fit, climate, samples)
         del samples, fit
         give_back()
-        log.info("neyman variants: memory on %s (day %d of %d): %s", day, n, len(days), usage.line())
-    return collected, short
+        log.info("%s: memory on %s (day %d of %d): %s", name, day, n, len(days), usage.line())
+    return short
 
 
 def _count(make: Callable[[], Days], day: date) -> int:
@@ -598,16 +642,17 @@ class Spread:
         return {"days": self.days, "mean": self.mean, "sd": self.sd, "n": self.n}
 
 
-def required_days(sd: float, least: int = LEAST, delta: float = DELTA) -> int:
-    """N = max(``least``, ⌈((``Z_LEVEL`` + ``Z_POWER``) × s_d ÷ ``delta``)²⌉): the days a lift of
-    ``delta`` needs to be found with 80% power at ``LEVEL``, two-sided."""
-    days = ((Z_LEVEL + Z_POWER) * sd / delta) ** 2
+def required_days(sd: float, least: int = LEAST, delta: float = DELTA, z_level: float = Z_LEVEL) -> int:
+    """N = max(``least``, ⌈((``z_level`` + ``Z_POWER``) × s_d ÷ ``delta``)²⌉): the days a lift of
+    ``delta`` needs to be found with 80% power, two-sided at the level of ``z_level`` (``LEVEL``'s;
+    the live plan's ``LIVE_Z_LEVEL`` since #532)."""
+    days = ((z_level + Z_POWER) * sd / delta) ** 2
     # Rounded first so a whole number of days is not pushed up by float error.
     return max(least, math.ceil(round(days, 9)))
 
 
 def spread(
-    records: Sequence[Scored], baseline: Sequence[Scored], least: int = LEAST, delta: float = DELTA
+    records: Sequence[Paired], baseline: Sequence[Paired], least: int = LEAST, delta: float = DELTA
 ) -> Spread:
     """``records``' days' mean paired gains over ``baseline``, and the N they ask for."""
     means = [sum(g) / len(g) for g in gains_by_day(records, baseline).values() if g]
@@ -701,7 +746,8 @@ def discover(
 
 @dataclass(frozen=True)
 class Verdict:
-    """A variant against A: its paired lift (by bar close) and by trading day, both at ``LEVEL``."""
+    """A variant against A: its paired lift (by bar close) and by trading day, both at one level
+    (``LEVEL`` as #455 registered it; the live window's plan's 95% since #532)."""
 
     pairs: Lift
     by_day: Lift | None
@@ -713,8 +759,8 @@ class Verdict:
         return value is not None and value > 0 and low is not None and low > 0
 
     @classmethod
-    def of(cls, records: Sequence[Scored], baseline: Sequence[Scored]) -> Verdict:
-        return cls(lift(records, baseline, LEVEL), day_lift(records, baseline, LEVEL))
+    def of(cls, records: Sequence[Paired], baseline: Sequence[Paired], level: float = LEVEL) -> Verdict:
+        return cls(lift(records, baseline, level), day_lift(records, baseline, level))
 
     def as_dict(self) -> dict[str, Any]:
         return {"pairs": _lift(self.pairs), "by_day": None if self.by_day is None else _lift(self.by_day)}
@@ -732,11 +778,14 @@ def log_loss(records: Sequence[Scored]) -> float | None:
 
 
 def _cells(
-    records: Mapping[str, Sequence[Scored]], cell: Callable[[Scored], str], cells: Sequence[str]
+    records: Mapping[str, Sequence[P]],
+    cell: Callable[[P], str],
+    cells: Sequence[str],
+    level: float = LEVEL,
 ) -> dict[str, dict[str, Any]]:
     """In each of ``cells`` (the cell of each bar close: ``cell``), its bar closes, A's hit rate and
-    each variant against A; a cell without a bar close is left out."""
-    grouped: dict[str, dict[str, list[Scored]]] = {c: {arm: [] for arm in ARMS} for c in cells}
+    each variant against A at ``level``; a cell without a bar close is left out."""
+    grouped: dict[str, dict[str, list[P]]] = {c: {arm: [] for arm in ARMS} for c in cells}
     for arm in ARMS:
         for r in records[arm]:
             grouped[cell(r)][arm].append(r)
@@ -747,24 +796,24 @@ def _cells(
         out[c] = {
             "n": len(by_arm[A]),
             "hit": {arm: sum(r.correct for r in rs) / len(rs) for arm, rs in by_arm.items()},
-            "over_a": {arm: Verdict.of(by_arm[arm], by_arm[A]).as_dict() for arm in VARIANTS},
+            "over_a": {arm: Verdict.of(by_arm[arm], by_arm[A], level).as_dict() for arm in VARIANTS},
         }
     return out
 
 
-def _sigma_cell(sigmas: Mapping[tuple[str, str], float]) -> Callable[[Scored], str]:
+def _sigma_cell(sigmas: Mapping[tuple[str, str], float]) -> Callable[[Paired], str]:
     cuts = volatility_cuts(sigmas)
 
-    def cell(r: Scored) -> str:
+    def cell(r: Paired) -> str:
         sigma = sigmas.get((r.symbol, iso(r.bar_close)))
         return NO_SIGMA if sigma is None else tercile(sigma, cuts[r.symbol])
 
     return cell
 
 
-def serial(records: Sequence[Scored], baseline: Sequence[Scored]) -> dict[str, Any]:
+def serial(records: Sequence[Scored], baseline: Sequence[Scored], level: float = LEVEL) -> dict[str, Any]:
     """How ``records``' lift over ``baseline`` by trading day moves if the days depend on each other:
-    the days' gains' lag-1 autocorrelation, and the interval at ``LEVEL`` as if they were windows of
+    the days' gains' lag-1 autocorrelation, and the interval at ``level`` as if they were windows of
     ``SERIAL`` sessions (Newey–West, ``stats.overlap_t_test``)."""
     by_day = gains_by_day(records, baseline)
     days = sorted(d for d, g in by_day.items() if g)
@@ -773,7 +822,7 @@ def serial(records: Sequence[Scored], baseline: Sequence[Scored]) -> dict[str, A
     positions = [places[d] for d in days]
     out: dict[str, Any] = {"lag1": _autocorrelation(means)}
     for sessions in SERIAL:
-        found = overlap_t_test(means, positions, sessions, LEVEL)
+        found = overlap_t_test(means, positions, sessions, level)
         out[f"sessions_{sessions}"] = None if found is None else _lift(found)
     return out
 
@@ -788,8 +837,8 @@ def _autocorrelation(values: Sequence[float]) -> float | None:
     return None if total <= 0 else float(x[:-1] @ x[1:]) / total
 
 
-def described(collected: Collected) -> dict[str, Any]:
-    """What the evaluation describes and never judges (module doc)."""
+def described(collected: Collected, level: float = LEVEL) -> dict[str, Any]:
+    """What the evaluation describes and never judges (module doc), every interval at ``level``."""
     records = collected.records
     stats = {arm: arm_stats(records[arm]).as_dict() | {"log_loss": log_loss(records[arm])} for arm in ARMS}
     swaps = [(a, b) for a, b in zip(records[A], records[B], strict=True) if a.predicted is not b.predicted]
@@ -797,20 +846,22 @@ def described(collected: Collected) -> dict[str, Any]:
     sigma = _sigma_cell(collected.sigmas)
     return {
         "arms": stats,
-        "over_climate": {arm: Verdict.of(records[arm], records[CLIMATE_ARM]).as_dict() for arm in ARMS},
+        "over_climate": {
+            arm: Verdict.of(records[arm], records[CLIMATE_ARM], level).as_dict() for arm in ARMS
+        },
         "climate_hit": _share(sum(r.correct for r in records[CLIMATE_ARM]), len(records[CLIMATE_ARM])),
         "swapped": {
             "n": len(swaps),
             "a_hit": _share(sum(a.correct for a, _ in swaps), len(swaps)),
             "b_hit": _share(sum(b.correct for _, b in swaps), len(swaps)),
         },
-        "d_over_c": Verdict.of(records[D], records[C]).as_dict(),
-        "by_slot": _cells(records, lambda r: slot(r.bar_close), slots),
+        "d_over_c": Verdict.of(records[D], records[C], level).as_dict(),
+        "by_slot": _cells(records, lambda r: slot(r.bar_close), slots, level),
         "by_volatility": {
             "with_sigma": sum(1 for r in records[A] if sigma(r) != NO_SIGMA),
-            "cells": _cells(records, sigma, VOLATILITY),
+            "cells": _cells(records, sigma, VOLATILITY, level),
         },
-        "serial": {arm: serial(records[arm], records[A]) for arm in VARIANTS},
+        "serial": {arm: serial(records[arm], records[A], level) for arm in VARIANTS},
     }
 
 
@@ -998,8 +1049,9 @@ def _value(i: Any) -> float | None:
 @dataclass(frozen=True)
 class Evaluation:
     """The window as found (``window``: ``n`` days once full) and, once full, the arms on it: the
-    verdict, what is described and (2)'s diagnosis. Its recorded days after ``after`` with fewer
-    than ``min_scored`` scored bar closes before its last day are ``short``."""
+    verdict (``judging``: the comparisons the plan judges, at ``level``; the others described at it),
+    what is described and (2)'s diagnosis. Its recorded days after ``after`` with fewer than
+    ``min_scored`` scored bar closes before its last day are ``short``."""
 
     made_at: datetime
     n: int
@@ -1015,10 +1067,20 @@ class Evaluation:
     found: dict[str, Any] | None = None
     diagnosis: dict[str, Any] | None = None
     records: dict[str, list[Scored]] = field(default_factory=dict, repr=False)  # not in the report
+    judging: tuple[str, ...] = VARIANTS  # the plan's (``Plan``): D alone since #532
+    level: float = LEVEL
 
     @classmethod
     def judged(
-        cls, made_at: datetime, n: int, after: date, min_scored: int, short: list[date], collected: Collected
+        cls,
+        made_at: datetime,
+        n: int,
+        after: date,
+        min_scored: int,
+        short: list[date],
+        collected: Collected,
+        judging: Sequence[str] = VARIANTS,
+        level: float = LEVEL,
     ) -> Evaluation:
         records = collected.records
         return cls(
@@ -1029,11 +1091,13 @@ class Evaluation:
             collected.days,
             short,
             collected.folds,
-            {arm: Verdict.of(records[arm], records[A]) for arm in VARIANTS},
+            {arm: Verdict.of(records[arm], records[A], level) for arm in VARIANTS},
             {arm: arm_stats(records[arm]) for arm in ARMS},
-            described(collected),
+            described(collected, level),
             None if collected.diagnosis is None else collected.diagnosis.as_dict(),
             records,
+            tuple(judging),
+            level,
         )
 
     @property
@@ -1042,7 +1106,8 @@ class Evaluation:
 
     @property
     def candidates(self) -> list[str]:
-        return [arm for arm, v in self.verdicts.items() if v.candidate]
+        """The judged comparisons' candidates; a comparison only described is never one."""
+        return [arm for arm in self.judging if self.verdicts[arm].candidate]
 
     def as_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -1058,7 +1123,14 @@ class Evaluation:
             return out
         return out | {
             "folds": [f.as_dict() for f in self.folds],
-            "verdict": {arm: v.as_dict() | {"candidate": v.candidate} for arm, v in self.verdicts.items()},
+            "level": self.level,
+            "verdict": {
+                arm: self.verdicts[arm].as_dict() | {"candidate": self.verdicts[arm].candidate}
+                for arm in self.judging
+            },
+            "described_over_a": {
+                arm: v.as_dict() for arm, v in self.verdicts.items() if arm not in self.judging
+            },
             "candidates": self.candidates,
             "described": self.found,
             "diagnosis": self.diagnosis,
@@ -1074,10 +1146,13 @@ def evaluate(
     after: date,
     min_scored: int,
     known: Mapping[date, bool] | None = None,
+    judging: Sequence[str] = VARIANTS,
+    level: float = LEVEL,
 ) -> Evaluation:
     """The window among ``candidates`` (the recorded days after ``after``, oldest first): its days
     counted one at a time (``known``: a day an earlier run counted, in the window or not), and once
-    ``n`` are in, the arms on them. Before, nothing is fitted."""
+    ``n`` are in, the arms on them: ``judging`` judged against A at ``level`` (the plan's), the
+    others described. Before, nothing is fitted."""
     window: list[date] = []
     short: list[date] = []
     for day in candidates:
@@ -1092,21 +1167,121 @@ def evaluate(
     collected, left = walk(make(), window, min_scored, diagnose=True)
     if left:
         raise ValueError(f"neyman variants: {', '.join(map(str, left))} counted again with fewer bar closes")
-    return Evaluation.judged(now, n, after, min_scored, short, collected)
+    return Evaluation.judged(now, n, after, min_scored, short, collected, judging, level)
+
+
+# The live window's plan (#532)
+
+
+@dataclass(frozen=True)
+class Plan:
+    """What the live window judges: ``judging`` against A, a lift of ``delta`` two-sided at ``level``
+    (z ``z_level``) with 80% power, on N = ``n`` = max(``least``, ⌈((``z_level`` + ``Z_POWER``) ×
+    ``sd`` ÷ ``delta``)²⌉) days; ``sd`` the discovery's s_d it is taken from (None: the largest N of
+    the three, as #455 registered it). ``changed``, ``issue`` and ``reason`` say when and why it
+    changed; None as registered."""
+
+    judging: tuple[str, ...]
+    level: float
+    z_level: float
+    delta: float
+    least: int
+    sd: float | None
+    n: int
+    changed: date | None = None
+    issue: int | None = None
+    reason: str | None = None
+
+    @property
+    def describing(self) -> tuple[str, ...]:
+        """The comparisons the window describes only."""
+        return tuple(arm for arm in VARIANTS if arm not in self.judging)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "judged": list(self.judging),
+            "described": list(self.describing),
+            "level": self.level,
+            "z_level": self.z_level,
+            "z_power": Z_POWER,
+            "delta": self.delta,
+            "least": self.least,
+            "sd": self.sd,
+            "n": self.n,
+            "changed": None if self.changed is None else self.changed.isoformat(),
+            "issue": self.issue,
+            "reason": self.reason,
+        }
+
+    @classmethod
+    def read(cls, data: Mapping[str, Any]) -> Plan:
+        changed = data.get("changed")
+        return cls(
+            tuple(data["judged"]),
+            float(data["level"]),
+            float(data["z_level"]),
+            float(data["delta"]),
+            int(data["least"]),
+            None if data.get("sd") is None else float(data["sd"]),
+            int(data["n"]),
+            None if changed is None else date.fromisoformat(changed),
+            data.get("issue"),
+            data.get("reason"),
+        )
+
+
+def registered_plan(discovery: Mapping[str, Any]) -> Plan:
+    """The plan #455 registered, as the saved discovery holds it: B, C and D at ``LEVEL``, its N."""
+    rule = discovery["rule"]
+    return Plan(VARIANTS, LEVEL, Z_LEVEL, float(rule["delta"]), int(rule["least"]), None, int(discovery["n"]))
+
+
+def live_plan(discovery: Mapping[str, Any], delta: float = LIVE_DELTA) -> Plan:
+    """The live window's plan since #532, from the saved discovery: D − A alone, a lift of ``delta``
+    (0.5 points) two-sided at ``LIVE_LEVEL`` (95%), N from the discovery's s_d of D − A and its least
+    days (``required_days``: 56 from the server's 0.0133). Raises ValueError without that s_d."""
+    try:
+        sd = (discovery.get("spreads") or {}).get(D, {}).get("sd")
+        least = int(discovery["rule"]["least"])
+    except (KeyError, TypeError, ValueError, AttributeError) as e:
+        raise ValueError(f"neyman variants: cannot read the discovery ({e}): the live N cannot be set") from e
+    if sd is None:
+        raise ValueError("neyman variants: the discovery holds no s_d of D - A: the live N cannot be set")
+    n = required_days(float(sd), least, delta, LIVE_Z_LEVEL)
+    changed = (PLAN_CHANGED, PLAN_ISSUE, PLAN_REASON)
+    return Plan(LIVE_JUDGED, LIVE_LEVEL, LIVE_Z_LEVEL, delta, least, float(sd), n, *changed)
+
+
+def migrated(saved: Mapping[str, Any], delta: float = LIVE_DELTA) -> tuple[dict[str, Any], bool]:
+    """``saved`` (a report with a discovery) with the live window's plan, and whether it was moved
+    there now: a report without one gets ``live_plan`` and the plan before (``registered_plan``), the
+    discovery as it is; one with a plan is as it is. Never computed again once there."""
+    if saved.get("plan"):
+        return dict(saved), False
+    discovery = saved["discovery"]
+    plan = live_plan(discovery, delta).as_dict() | {"before": registered_plan(discovery).as_dict()}
+    return dict(saved) | {"plan": plan}, True
+
+
+def plan_of(saved: Mapping[str, Any], delta: float = LIVE_DELTA) -> Plan:
+    """The live window's plan of ``saved`` (a report with a discovery): its own, or the one
+    ``migrated`` would move there."""
+    return Plan.read(saved["plan"]) if saved.get("plan") else live_plan(saved["discovery"], delta)
 
 
 # The report
 
 
-def read_report(path: Path) -> dict[str, Any] | None:
+def read_report(path: Path, holds: str = "the window's N, never computed again") -> dict[str, Any] | None:
     """The report as saved; None without one. Raises ValueError for one that cannot be read: it holds
-    the discovery's N, which is never computed again."""
+    the discovery's N, which is never computed again (``holds``: what another report holds, the
+    backfill's fixed days, #532)."""
     try:
         data = json.loads(path.read_text())
     except FileNotFoundError:
         return None
     except (OSError, ValueError) as e:
-        raise ValueError(f"cannot read {path} ({e}): it holds the window's N, never computed again") from e
+        raise ValueError(f"cannot read {path} ({e}): it holds {holds}") from e
     if not isinstance(data, dict):
         raise ValueError(f"cannot read {path}: not a report")
     return data
@@ -1124,7 +1299,7 @@ class Progress:
     """Where the experiment stands, as the scheduled job's condition reads it (``progress``)."""
 
     read: bool = False  # read tonight: without (the night's facts not read), the job waits
-    n: int | None = None  # the window's days, from the discovery; None before it (or no report)
+    n: int | None = None  # the window's days, the live plan's (#532); None before a discovery (or no report)
     judged: bool = False  # the window judged
     candidates: int = 0  # recorded days after the window's start not counted short already
 
@@ -1147,7 +1322,7 @@ def progress(settings: Settings, now: datetime) -> Progress:
             and d.isoformat() not in short
             and is_recorded(settings.data_dir, d, settings.symbols)
         ]
-        return Progress(True, int(discovery["n"]), bool(evaluation.get("judged")), len(days))
+        return Progress(True, plan_of(saved).n, bool(evaluation.get("judged")), len(days))
     except (OSError, ValueError, KeyError, TypeError):
         log.exception("could not read where neyman's variants experiment (#455) stands")
         return Progress(read=True)
@@ -1184,13 +1359,16 @@ def neyman_variants(
     min_scored: int = MIN_SCORED,
     least: int = LEAST,
     delta: float = DELTA,
+    live_delta: float = LIVE_DELTA,
 ) -> Run:
     """The experiment's next step (module doc), its report saved: the discovery when the report has
     none (``period``, ``after``, ``min_scored``, ``least`` and ``delta`` are its, and the report keeps
-    them: later runs read N, the window's start and its least bar closes from it); then the
-    evaluation once the window can be full, judged once. The registries name the days the nights
-    stored (#370, ``night_reads``). Raises FileNotFoundError without a recorded day in the discovery
-    period, ValueError for a report that cannot be read or a discovery that cannot set N."""
+    them: later runs read N, the window's start and its least bar closes from it), and the live
+    window's plan (#532, ``live_delta`` its lift), moved into a report that has none; then the
+    evaluation once the window of the plan's N can be full, judged once by the plan. The registries
+    name the days the nights stored (#370, ``night_reads``). Raises FileNotFoundError without a
+    recorded day in the discovery period, ValueError for a report that cannot be read or a discovery
+    that cannot set N."""
     now = now or datetime.now(KST)
     path = settings.state_dir / REPORT
     saved = read_report(path)
@@ -1212,18 +1390,33 @@ def neyman_variants(
             make(), days, now, period=period, after=after, min_scored=min_scored, least=least, delta=delta
         )
         since = sum(1 for d in recorded if d > found.after)
-        lines = [*discovery_lines(found), *_waiting(found.n, found.after, found.min_scored, since)]
+        discovered = found.as_dict()
+        saved, _ = migrated({"discovery": discovered}, live_delta)
+        plan = Plan.read(saved["plan"])
+        lines = [
+            *discovery_lines(found),
+            *plan_lines(plan, registered_plan(discovered)),
+            *_waiting(plan.n, found.after, found.min_scored, since),
+        ]
         _write(
-            path, {"experiment": EXPERIMENT, "issue": ISSUE, "discovery": found.as_dict() | {"lines": lines}}
+            path,
+            {"experiment": EXPERIMENT, "issue": ISSUE, "discovery": discovered | {"lines": lines}}
+            | {"plan": saved["plan"]},
         )
         return Run(DISCOVERED, [*lines, f"report: {path}"], discovery=found)
+    saved, moved = migrated(saved, live_delta)
+    plan = Plan.read(saved["plan"])
     discovery, evaluation = saved["discovery"], saved.get("evaluation") or {}
+    head: list[str] = []
+    if moved:
+        _write(path, saved)  # before anything else: the discovery as it was, never run again
+        head = [*plan_lines(plan, registered_plan(discovery), moved=True), ""]
     if evaluation.get("judged"):
         made = str(evaluation.get("made_at", "?"))[:10]
-        head = f"neyman variants (#{ISSUE}): judged on the night of {made}; it stands, not computed again"
-        return Run(JUDGED_BEFORE, [head, "", *evaluation.get("lines", []), f"report: {path}"])
+        line = f"neyman variants (#{ISSUE}): judged on the night of {made}; it stands, not computed again"
+        return Run(JUDGED_BEFORE, [*head, line, "", *evaluation.get("lines", []), f"report: {path}"])
     n, start, least_scored = (
-        int(discovery["n"]),
+        plan.n,
         date.fromisoformat(discovery["after"]),
         int(discovery["min_scored"]),
     )
@@ -1233,11 +1426,21 @@ def neyman_variants(
     open_days = [d for d in candidates if known.get(d) is not False]
     if len(open_days) < n:
         lines = _waiting(n, start, least_scored, len(open_days), str(discovery.get("made_at", "?"))[:10])
-        return Run(WAITING, [*lines, f"report: {path}"])
-    result = evaluate(make, candidates, now, n=n, after=start, min_scored=least_scored, known=known)
-    lines = evaluation_lines(result, str(discovery.get("made_at", "?"))[:10])
+        return Run(WAITING, [*head, *lines, f"report: {path}"])
+    result = evaluate(
+        make,
+        candidates,
+        now,
+        n=n,
+        after=start,
+        min_scored=least_scored,
+        known=known,
+        judging=plan.judging,
+        level=plan.level,
+    )
+    lines = evaluation_lines(result, str(discovery.get("made_at", "?"))[:10], plan)
     _write(path, saved | {"evaluation": result.as_dict() | {"lines": lines}})
-    return Run(JUDGED if result.full else NOT_FULL, [*lines, f"report: {path}"], evaluation=result)
+    return Run(JUDGED if result.full else NOT_FULL, [*head, *lines, f"report: {path}"], evaluation=result)
 
 
 # The command's lines: counts, rates, lifts, scores and dates; no price, σ̂₄ or cut.
@@ -1322,7 +1525,38 @@ def discovery_lines(d: Discovery) -> list[str]:
     return out
 
 
-def evaluation_lines(e: Evaluation, made: str) -> list[str]:
+def percent(level: float) -> str:
+    """``level`` as the lines write it: 98.333%, 95%."""
+    return f"{level * 100:.3f}".rstrip("0").rstrip(".") + "%"
+
+
+def _which(judging: Sequence[str]) -> str:
+    """The comparisons judged, as the lines say them: "B, C and D each against A", "D against A"."""
+    names = list(judging)
+    if len(names) == 1:
+        return f"{names[0]} against A"
+    return f"{', '.join(names[:-1])} and {names[-1]} each against A"
+
+
+def plan_lines(plan: Plan, before: Plan, moved: bool = False) -> list[str]:
+    """The live window's plan, and the one before it; ``moved``: moved into the report by this run."""
+    described = " and ".join(f"{arm} - A" for arm in plan.describing) or "none"
+    changed = "" if plan.changed is None else f", changed on {plan.changed} (#{plan.issue})"
+    out = [
+        f"neyman variants (#{ISSUE}): the live window's plan{changed}: {_which(plan.judging)}, a lift of"
+        f" {plan.delta * 100:g} points two-sided at {percent(plan.level)} with 80% power, N ="
+        f" max({plan.least}, ceil((({plan.z_level:g} + {Z_POWER}) x s_d / {plan.delta:g})^2)) = {plan.n} from"
+        f" the discovery's s_d of D - A ({_number(plan.sd)}); {described} described only",
+        f"  before: {_which(before.judging)}, {before.delta * 100:g} points at {percent(before.level)}, N"
+        f" {before.n}. Why: {plan.reason or '-'}. Fixed before any backfilled day was judged; the discovery"
+        " is not run again",
+    ]
+    if moved:
+        out.append("  moved into the report now, the discovery as it was")
+    return out
+
+
+def evaluation_lines(e: Evaluation, made: str, plan: Plan | None = None) -> list[str]:
     left = ", ".join(map(str, e.short)) or "none"
     window = f"{e.window[0]}..{e.window[-1]}" if e.window else "-"
     if e.found is None:
@@ -1343,30 +1577,45 @@ def evaluation_lines(e: Evaluation, made: str) -> list[str]:
         f" {total} bar"
         " closes, every arm on each",
         "",
-        "verdict (fixed before the run): B, C and D each against A; a day's mean paired gain in hit rate is"
-        " one"
-        f" value, every day the same weight; a two-sided {LEVEL:.3%} Student t interval (Bonferroni over the"
-        " three); a candidate when the paired lift is above 0 and the lower bound by trading day too",
+        _verdict_rule(e.judging, e.level, plan),
     ]
-    for arm, v in e.verdicts.items():
+    for arm in e.judging:
+        v = e.verdicts[arm]
         out.append(
             f"  {LABELS[arm]} - A: {_verdict(v)} -> {'a candidate' if v.candidate else 'not a candidate'}"
         )
+    for arm in [a for a in VARIANTS if a not in e.judging]:
+        out.append(f"  {LABELS[arm]} - A (described, not judged): {_verdict(e.verdicts[arm])}")
     chosen = ", ".join(LABELS[arm] for arm in e.candidates)
     out.append(
         f"candidates: {chosen}; none goes into neyman from this (#454, then the user decides)"
         if chosen
         else "candidates: none; neyman stays as it is"
     )
-    out += ["", *_described_lines(e.found, e.arms, total)]
+    out += ["", *_described_lines(e.found, e.arms, total, e.level)]
     if e.diagnosis is not None:
         out += ["", *_diagnosis_lines(e.diagnosis)]
     return out
 
 
-def _described_lines(found: Mapping[str, Any], arms: Mapping[str, ArmStats], total: int) -> list[str]:
+def _verdict_rule(judging: Sequence[str], level: float, plan: Plan | None = None) -> str:
+    """The verdict's rule, as fixed before the run."""
+    fixed = "fixed before the run"
+    if plan is not None and plan.changed is not None:
+        fixed += f"; the plan of {plan.changed}, #{plan.issue}"
+    split = " (Bonferroni over the three)" if len(judging) == COMPARISONS else ""
+    return (
+        f"verdict ({fixed}): {_which(judging)}; a day's mean paired gain in hit rate is one value, every day"
+        f" the same weight; a two-sided {percent(level)} Student t interval{split}; a candidate when the"
+        " paired lift is above 0 and the lower bound by trading day too"
+    )
+
+
+def _described_lines(
+    found: Mapping[str, Any], arms: Mapping[str, ArmStats], total: int, level: float = LEVEL
+) -> list[str]:
     losses = {arm: found["arms"][arm]["log_loss"] for arm in ARMS}
-    out = [f"described, not judged (every interval at {LEVEL:.3%}):", *_arm_table(arms, losses)]
+    out = [f"described, not judged (every interval at {percent(level)}):", *_arm_table(arms, losses)]
     out.append(f"over the climate baseline (its hit rate {_number(found['climate_hit'])}):")
     out += [f"  {LABELS[arm]}: {_verdict_dict(found['over_climate'][arm])}" for arm in ARMS]
     swaps = found["swapped"]

@@ -1,7 +1,7 @@
 """The research and review jobs (#500): the signal threshold's review on a fixed window, the official
 algorithm's fixed holdout and its regime gate, the nightly swap's hit rates, the measure of where making
 a recorded day's samples spends its time, and the experiments on an algorithm's inputs and on the SMT,
-which run last.
+which run last, the backfilled days' verdict on neyman's variants (#532) the very last.
 ``JOBS`` (``krx_quant.scheduled``) lists them in the order they run.
 
 The diagnosis and the entry delay, the first two signal reviews, the structure check, the error
@@ -15,6 +15,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 from krx_quant.holdout import DAYS as HOLDOUT_DAYS
+from krx_quant.neyman_backfill import REPORT as NEYMAN_BACKFILL_REPORT
 from krx_quant.neyman_variants import REPORT as NEYMAN_VARIANTS_REPORT
 from krx_quant.nightly_hit_rates import HIT_RATE_NIGHTS
 from krx_quant.normal_order import REPORT as NORMAL_ORDER_REPORT
@@ -287,7 +288,11 @@ SAMPLE_PROFILE = Job(
 # a window of 60 about an hour; the four hours are a bound, with room for the burst CPU running out
 # and for the window's first days the sample store has let go by then (made again, minutes a recorded
 # day). Last: it holds back no simulation nor pre-validation. Its output holds counts, rates, lifts,
-# scores and dates, no price nor σ̂₄. Adopting a candidate is #454's, and the user decides.
+# scores and dates, no price nor σ̂₄. Adopting a candidate is #454's, and the user decides. Since #532
+# the window's plan judges D − A alone (0.5 points at 95%, N 56 from the discovery's s_d, moved into the
+# report with its date and reason; B − A and C − A described): the three are judged as registered on
+# backfilled days instead (``neyman-backfill-532``, below). The window is as it was: 56 recorded days
+# after 2026-11-02 are in late January 2027 at the earliest.
 NEYMAN_VARIANTS_ISSUE = 455
 
 
@@ -317,9 +322,11 @@ NEYMAN_VARIANTS = Job(
             note=(
                 "에이전트가 이 출력으로 이 이슈에 안을 남긴다. 발견 단계(첫 실행)면 N과 비교마다의 s_d를 "
                 "정리한다. N이 60을 넘으면 평가 전에 비교를 줄일지 그대로 기다릴지 사용자에게 묻는다. "
-                "평가면 돌리기 전에 정한 판정을 그대로 읽는다: B, C, D 중 A 대비 짝 lift가 0보다 크고 "
-                '거래일 단위 98.333% 하한도 0보다 큰 팔이 "후보"다. 창, N, 판정 규칙은 결과를 보고 '
-                "바꾸지 않는다. 후보도 바로 neyman에 넣지 않는다(#454가 끝난 뒤 사용자가 정한다). "
+                "평가면 돌리기 전에 정한 판정을 그대로 읽는다: 2026-11-04에 바꾼 계획(#532)대로 D − A "
+                '하나만 판정한다. 짝 lift가 0보다 크고 거래일 단위 95% 하한도 0보다 크면 D가 "후보"다. '
+                "B − A, C − A는 설명일 뿐이다(세 비교는 백필 날로 판정했다, `neyman-backfill-532`). 창, N, "
+                "판정 규칙은 결과를 보고 바꾸지 않는다. 후보도 바로 neyman에 넣지 않는다(#454가 끝난 뒤 "
+                "사용자가 정한다). "
                 "출력에는 시세 값이 없다(날짜, 개수, 비율, lift, 점수만. σ̂₄ 값과 경계도 없다)."
             ),
         ),
@@ -458,4 +465,66 @@ SMT_HOLDOUT = Job(
             ),
         ),
     ),
+)
+
+
+# Neyman's variants on backfilled days (#532, after #455's discovery set N = 206 recorded days: a verdict
+# in August–September 2027): ``neyman-variants --backfill`` judges #455's three comparisons as
+# registered on the backfilled days before the discovery's training, each day predicted by the arms
+# fitted on the 20 trading days before it (``neyman_backfill.py``), and moves the live window's saved
+# plan to D − A alone (0.5 points at 95%, N 56 from the saved s_d; the discovery is not run again).
+# Once, on the first night after the deploy that brings it with the discovery in its report
+# (``Facts.neyman_variants``), trading or not; after a failure (a run cut by its limit among them), again
+# on other code, reading the days the first run listed. A day fits ten tree models on its 20 days
+# (about 51 s on the server: the discovery's 15 days took 11 minutes) and makes the one backfilled day
+# that enters its window (4–6 s; the sample store keeps only the nights' days); the list's count makes
+# each day once more, with no feature. The backfill reaches 365 calendar days back, so about 200 days
+# (the oldest is the server's: the output says it), about three hours and a half; the five hours are a
+# bound (last start 00:30). Last in the list: after the pre-validations, which it never holds back,
+# and after the experiments due the night of 2026-11-05 (``normal-order-529``, ``smt-discovery-519``),
+# which it does not push to another night: on a night they take, its last start passes and it waits
+# for the next. It only reads the sample store, so the nightly training's days stay (#512). Its output
+# holds dates, counts, rates, lifts and powers, no price nor σ̂₄.
+
+
+def _neyman_backfill_due(night: Night) -> bool:
+    """Once, on the first night with the variants' discovery in its report, trading or not; after a
+    failed run, again on other code. Not on a night its progress was not read."""
+    found = night.facts.neyman_variants
+    if not found.read or found.n is None:
+        return False
+    record = night.record
+    return not night.ran or (
+        record is not None and record.outcome == FAILED and record.commit != night.commit
+    )
+
+
+NEYMAN_BACKFILL = Job(
+    name="neyman-backfill-532",
+    due=_neyman_backfill_due,
+    command=("neyman-variants", "--backfill"),
+    timeout=timedelta(hours=5),
+    targets=(
+        Target(
+            NEYMAN_VARIANTS_ISSUE,
+            note=(
+                "#455의 세 비교(B, C, D 각각 대 A)를 등록 그대로 백필 날로 판정한 결과다(#532). 평가 날은 "
+                "발견 단계가 학습한 첫날보다 앞선 백필 거래일 중, 그 앞에 데이터가 있는 날이 40일(학습 "
+                "20거래일과 피처 준비 20거래일) 이상이고 네 팔 모두에 맞춘 채점 봉 마감이 200개 이상인 "
+                "날이다. 날짜 목록은 어느 팔도 학습하기 전에 정해 리포트에 남겼다. 판정 규칙은 등록 "
+                '그대로다: 짝 lift > 0이고 거래일 단위 98.333% 하한 > 0이면 "후보(백필)"다. N_avail이 '
+                "206보다 적어도 판정한다. 통과하지 못했고 0.3%p를 찾을 검정력(발견의 s_d로)이 80%보다 "
+                '낮으면 "결론 없음"이다. 월별·시간대별·σ̂₄ 삼분위별 결과와 주의점(정답이 1분봉 도달 '
+                "정답, 호가·체결 흐름·테이프·IV 입력 없음, 국면이 다름)은 설명으로만 낸다. 후보(백필)는 "
+                "지난 데이터에서의 후보이고, 실시간 맞힘률이 오른다는 뜻이 아니다. 같은 실행이 저장된 "
+                "리포트의 실시간 계획을 D − A 하나(0.5%p, 양측 95%, N 56)로 옮긴다(사용자 결정 2026-11-04, "
+                "발견 단계는 다시 돌지 않는다). 에이전트가 판정을 그대로 읽어 안을 이 이슈에 남긴다. "
+                "후보를 neyman에 넣는 것은 #454가 끝난 뒤 사용자가 정한다. 날짜 목록, 규칙, 실시간 계획은 "
+                "결과를 보고 바꾸지 않는다. 다시 돌리기(판정 뒤에는 저장한 줄만 다시 낸다): "
+                "`docker compose run --rm engine neyman-variants --backfill`. 출력에는 시세 값이 없다"
+                "(날짜, 개수, 비율, lift, 검정력만. σ̂₄ 값과 경계도 없다)."
+            ),
+        ),
+    ),
+    attach=(Attachment(f"리포트 state/{NEYMAN_BACKFILL_REPORT}", NEYMAN_BACKFILL_REPORT),),
 )

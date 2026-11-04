@@ -63,6 +63,7 @@ from krx_quant.member_frames_probe import probe_member_frames
 from krx_quant.model_shelf import Shelf
 from krx_quant.nav_probe import probe_nav
 from krx_quant.net_buys_probe import probe_net_buys
+from krx_quant.neyman_backfill import neyman_backfill
 from krx_quant.neyman_variants import neyman_variants
 from krx_quant.night_probe import probe_night
 from krx_quant.nightly import from_the_server, run_training
@@ -655,13 +656,14 @@ def _turing_prior(days: int) -> int:
     return 0
 
 
-def _neyman_variants() -> int:
+def _neyman_variants(backfill: bool = False) -> int:
     """Neyman's variants experiment (#455): its next step's lines (the discovery, the window's
-    progress or its verdict); exit 1 without a recorded day in the discovery period, with a report
-    that cannot be read, or a discovery that cannot set N."""
+    progress or its verdict), or with ``backfill`` its verdict on the backfilled days (#532); exit 1
+    without a recorded day in the discovery period (without a discovery, for the backfill), with a
+    report that cannot be read, or a discovery that cannot set N."""
     settings = Settings.from_env(require_kis=False)
     try:
-        run = neyman_variants(settings)
+        run = neyman_backfill(settings) if backfill else neyman_variants(settings)
     except (FileNotFoundError, ValueError) as e:
         print(e, file=sys.stderr)
         return 1
@@ -1265,11 +1267,18 @@ def _parser() -> argparse.ArgumentParser:
         help=f"recorded trading days to predict (default: {PREVALIDATION_DAYS})",
     )
     turing_prior_cmd.set_defaults(run=lambda args: _turing_prior(args.days))
-    sub.add_parser(
+    neyman_variants_cmd = sub.add_parser(
         "neyman-variants",
         help="neyman's variants (#455): the discovery that fixes the window's N, then the verdict on the"
         " window after 2026-11-02 once it is full (reads the training samples, replays nothing)",
-    ).set_defaults(run=lambda args: _neyman_variants())
+    )
+    neyman_variants_cmd.add_argument(
+        "--backfill",
+        action="store_true",
+        help="judge the three comparisons as registered on the backfilled days before the discovery's"
+        " training instead, once (#532)",
+    )
+    neyman_variants_cmd.set_defaults(run=lambda args: _neyman_variants(args.backfill))
     train_cmd = sub.add_parser(
         "train", help="train every algorithm on KRX_OBJECT_STORE's latest days and store the promotion list"
     )
