@@ -17,7 +17,6 @@ well under the REST limit the collector shares.
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Callable
 from datetime import date, datetime, timedelta
 from typing import Any
@@ -26,6 +25,7 @@ from krx_quant.auth import tokens_and_client
 from krx_quant.candles import CANDLES_PATH, CANDLES_TR
 from krx_quant.config import Settings
 from krx_quant.kis import KisError, RestClient, rest_session
+from krx_quant.probe_calls import Calls
 
 MARKETS = ("UN", "J", "NX")
 PERIODS = ("D", "W", "M", "Y")
@@ -63,13 +63,11 @@ class _Prober:
     def __init__(self, client: RestClient, out: Out) -> None:
         self._client = client
         self._out = out
-        self.calls = 0
+        self.calls = Calls(PACE)
 
     async def candles(self, params: dict[str, str]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         """The answer's dated rows (``output2``) and its ``output1``; raises KisError."""
-        if self.calls:
-            await asyncio.sleep(PACE)
-        self.calls += 1
+        await self.calls.turn()
         body = await self._client.get(CANDLES_TR, CANDLES_PATH, params)
         rows = [r for r in body.get("output2") or [] if _day(r) is not None]
         return rows, body.get("output1") or {}
@@ -149,5 +147,5 @@ async def probe_candles(settings: Settings, today: date, out: Out = print) -> in
                 await prober.history(market, stock, period, today)
         out(f"adjusted prices of {SPLIT_SYMBOL} around its 2018-05-04 split (J, D):")
         await prober.adjusted("J")
-        out(f"{prober.calls} calls")
-        return prober.calls
+        out(f"{prober.calls.made} calls")
+        return prober.calls.made

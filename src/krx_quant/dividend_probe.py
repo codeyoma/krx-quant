@@ -30,7 +30,6 @@ shares, with the cached access token while it is valid (no early refresh).
 
 from __future__ import annotations
 
-import asyncio
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -43,6 +42,7 @@ from krx_quant.auth import tokens_and_client
 from krx_quant.candles import CANDLES_PATH, CANDLES_PER_QUERY, CANDLES_TR, KRX_MARKET
 from krx_quant.config import Settings
 from krx_quant.kis import KisError, RestClient, rest_session
+from krx_quant.probe_calls import CALL_ERRORS, Calls
 from krx_quant.supply_probe import REQUEST_TIMEOUT, kis_error
 
 Out = Callable[[str], None]
@@ -93,30 +93,21 @@ class _Failed(Exception):
 class _Asker:
     def __init__(self, client: RestClient) -> None:
         self._client = client
-        self.calls = 0
-        self.failed = 0
-        self._failed_in_a_row = 0
-
-    @property
-    def stopped(self) -> bool:
-        return self._failed_in_a_row >= MAX_FAILED_IN_A_ROW
+        self.calls = Calls(PACE, MAX_FAILED_IN_A_ROW)
 
     async def rows(self, params: dict[str, str]) -> list[dict[str, Any]]:
         """The answer's dated rows; raises ``_Failed`` with KIS's refusal."""
-        if self.calls:
-            await asyncio.sleep(PACE)
-        self.calls += 1
+        await self.calls.turn()
         try:
             body = await self._client.get(CANDLES_TR, CANDLES_PATH, params)
         except KisError as e:
             reason = kis_error(e)
-        except (aiohttp.ClientError, OSError, ValueError, KeyError) as e:  # OSError: timeouts too
+        except (*CALL_ERRORS, KeyError) as e:  # KeyError: a token issued mid-run, short of a field
             reason = f"error {type(e).__name__}"
         else:
-            self._failed_in_a_row = 0
+            self.calls.answered(True)
             return [r for r in body.get("output2") or [] if _day(r) is not None]
-        self.failed += 1
-        self._failed_in_a_row += 1
+        self.calls.answered(False)
         raise _Failed(reason)
 
     async def history(
@@ -265,13 +256,13 @@ async def probe_dividends(settings: Settings, today: date, out: Out = print) -> 
         asker = _Asker(client)
         try:
             await tokens.get()
-        except (KisError, aiohttp.ClientError, OSError, ValueError) as e:
+        except (KisError, *CALL_ERRORS) as e:
             reason = kis_error(e) if isinstance(e, KisError) else f"error {type(e).__name__}"
             out(f"멈춤: KIS 접근 토큰이 없다: {reason}")
             return 1, 1
         for symbol in symbols:
             out("")
-            if asker.stopped:
+            if asker.calls.stopped:
                 out(f"{symbol}: 묻지 않음: {MAX_FAILED_IN_A_ROW}번 잇달아 실패")
                 continue
             try:
@@ -283,5 +274,5 @@ async def probe_dividends(settings: Settings, today: date, out: Out = print) -> 
             for line in report(symbol, adjusted, traded):
                 out(line)
     out("")
-    out(f"KIS: {asker.calls}번 조회, {asker.failed}번 실패")
-    return asker.calls, asker.failed
+    out(f"KIS: {asker.calls.made}번 조회, {asker.calls.failed}번 실패")
+    return asker.calls.made, asker.calls.failed

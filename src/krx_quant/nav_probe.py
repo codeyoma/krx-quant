@@ -35,7 +35,6 @@ refresh). KIS's examples list these queries for real accounts only (the server's
 
 from __future__ import annotations
 
-import asyncio
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -49,6 +48,7 @@ from krx_quant.config import Settings
 from krx_quant.feeds.base import KST
 from krx_quant.kis import KisError, RestClient, rest_session
 from krx_quant.market_calendar import MarketCalendar, calendar_store
+from krx_quant.probe_calls import CALL_ERRORS, Calls
 from krx_quant.probe_fields import MISSING, day_of, describe, flags, order_of, present, same
 from krx_quant.products import PRODUCTS, Product, Structure
 from krx_quant.supply_probe import REQUEST_TIMEOUT, kis_error
@@ -151,34 +151,29 @@ class Asked:
 class _Asker:
     def __init__(self, client: RestClient) -> None:
         self._client = client
-        self.calls = 0
-        self.failed = 0
-        self._failed_in_a_row = 0
+        self.calls = Calls(PACE, MAX_FAILED_IN_A_ROW)
 
     async def ask(
         self, query: Query, params: dict[str, str], parse: Callable[[Mapping[str, Any]], Any]
     ) -> Asked:
         """``parse``'s reading of the answer; an answer it reads as None is no usable answer, a
         failed call (#297)."""
-        if self._failed_in_a_row >= MAX_FAILED_IN_A_ROW:
+        if self.calls.stopped:
             return Asked(error=f"묻지 않음: {MAX_FAILED_IN_A_ROW}번 잇달아 실패")
-        if self.calls:
-            await asyncio.sleep(PACE)
-        self.calls += 1
+        await self.calls.turn()
         try:
             body, more = await self._client.get_page(query.tr, query.path, params)
         except KisError as e:
             error = kis_error(e)
-        except (aiohttp.ClientError, OSError, ValueError) as e:  # OSError: timeouts too
+        except CALL_ERRORS as e:
             error = f"error {type(e).__name__}"
         else:
             value = parse(body)
             if value is not None:
-                self._failed_in_a_row = 0
+                self.calls.answered(True)
                 return Asked(value=value, more=more)
             error = f"OK, 읽을 것이 없다(본문 키: {', '.join(sorted(body))})"
-        self.failed += 1
-        self._failed_in_a_row += 1
+        self.calls.answered(False)
         return Asked(error=error)
 
 
@@ -553,7 +548,7 @@ async def probe_nav(
         asker = _Asker(client)
         try:
             await tokens.get()
-        except (KisError, aiohttp.ClientError, OSError, ValueError) as e:
+        except (KisError, *CALL_ERRORS) as e:
             reason = kis_error(e) if isinstance(e, KisError) else f"error {type(e).__name__}"
             out("")
             out(f"멈춤: KIS 접근 토큰이 없다: {reason}")
@@ -571,5 +566,5 @@ async def probe_nav(
         for line in section:
             out(line)
     out("")
-    out(f"KIS: {asker.calls}번 조회, {asker.failed}번 실패")
-    return asker.calls, asker.failed
+    out(f"KIS: {asker.calls.made}번 조회, {asker.calls.failed}번 실패")
+    return asker.calls.made, asker.calls.failed
