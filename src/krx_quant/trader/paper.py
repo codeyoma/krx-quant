@@ -174,6 +174,7 @@ from krx_quant.trader import (
     THRESHOLD,
 )
 from krx_quant.trader.cells import Cell, Signal
+from krx_quant.trader.db import iso
 from krx_quant.trader.limits import (
     HEARTBEAT,
     RUNNING,
@@ -187,7 +188,7 @@ from krx_quant.trader.limits import (
 )
 from krx_quant.trader.quotes import BestQuote
 from krx_quant.trader.selection import Pick, Selection
-from krx_quant.trader.store import WAITED, Entry, Exit, OpenTrade, Stall, TraderStore, iso
+from krx_quant.trader.store import WAITED, Entry, Exit, OpenTrade, Stall, TraderStore
 
 if TYPE_CHECKING:
     from krx_quant.trader.settings import TraderSettings

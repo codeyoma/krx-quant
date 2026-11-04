@@ -21,8 +21,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-from collections.abc import Iterator, Sequence
-from contextlib import contextmanager
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
@@ -43,6 +42,7 @@ from krx_quant.kis_orders import (
 from krx_quant.market_calendar import calendar_store
 from krx_quant.pricing import tick_size
 from krx_quant.trader import MOCK, SYMBOL
+from krx_quant.trader.db import reading
 from krx_quant.trader.promotion import mode_at
 from krx_quant.trader.report import WEEKDAYS, report_day
 from krx_quant.trader.store import DB_NAME, champion_of
@@ -107,24 +107,11 @@ class Compared:
         )
 
 
-@contextmanager
-def _reading(path: Path) -> Iterator[sqlite3.Connection | None]:
-    if not path.exists():
-        yield None
-        return
-    db = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
-    db.row_factory = sqlite3.Row
-    try:
-        yield db
-    finally:
-        db.close()
-
-
 def mock_days(state_dir: Path) -> tuple[date, ...]:
     """The trading days the trader ran in mock mode: those with a mock ledger (``days``, which it
     writes on a trading day while it runs). None without the store."""
     try:
-        with _reading(state_dir / DB_NAME) as db:
+        with reading(state_dir / DB_NAME) as db:
             if db is None or not _has(db, "days"):
                 return ()
             rows = db.execute("SELECT day FROM days WHERE mode = ? ORDER BY day", (MOCK,))
@@ -138,7 +125,7 @@ def trader_in_mock(state_dir: Path) -> bool:
     """Whether the trader last started in mock mode (its store's ``runs``): it may then hold 005930
     and order on the mock account in the session (#405). False without the store."""
     try:
-        with _reading(state_dir / DB_NAME) as db:
+        with reading(state_dir / DB_NAME) as db:
             return db is not None and mode_at(db) == MOCK
     except sqlite3.Error as e:
         log.warning("cannot read the trader's mode (%s): taken as mock", e)
@@ -363,7 +350,7 @@ async def check_mock_trades(
     day = day or report_day(calendar_store(settings).calendar, now)
     heading = f"KIS 모의 매매 대조 (#405) · {day}({WEEKDAYS[day.weekday()]}) · {SYMBOL}"
     try:
-        with _reading(settings.state_dir / DB_NAME) as db:
+        with reading(settings.state_dir / DB_NAME) as db:
             if db is None:
                 print(f"{heading}\n결과: trader의 저장소(state/trader.sqlite3)가 없다")
                 return UNREADABLE

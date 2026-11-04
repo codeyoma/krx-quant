@@ -82,6 +82,7 @@ from typing import Any
 from krx_quant.feeds.base import KST
 from krx_quant.trader import PICK_AT, review
 from krx_quant.trader.cells import Cell
+from krx_quant.trader.db import iso, reading
 from krx_quant.trader.selection import (
     GONE,
     NO_CHAMPION,
@@ -327,7 +328,7 @@ def add(
         cursor = db.execute(
             "INSERT INTO policies (created_at, reason, cells, left_out, fit) VALUES (?, ?, ?, ?, ?)",
             (
-                _iso(at),
+                iso(at),
                 reason,
                 _dumps([c.as_json() for c in cells]),
                 _dumps([dict(x) for x in left_out]),
@@ -340,7 +341,7 @@ def add(
         if first:
             db.execute(
                 "INSERT INTO champions (at, policy_id, reason) VALUES (?, ?, ?)",
-                (_iso(at), version, first_reason),
+                (iso(at), version, first_reason),
             )
     return version, first
 
@@ -372,7 +373,7 @@ def drop(db: sqlite3.Connection, at: datetime, versions: Collection[int]) -> Non
 def _drop(db: sqlite3.Connection, at: datetime, versions: Collection[int]) -> None:
     for version in versions:
         db.execute(
-            "UPDATE policies SET dropped_at = ? WHERE id = ? AND dropped_at IS NULL", (_iso(at), version)
+            "UPDATE policies SET dropped_at = ? WHERE id = ? AND dropped_at IS NULL", (iso(at), version)
         )
 
 
@@ -480,7 +481,7 @@ def _crown(
     """``version`` the champion from ``at``, in the caller's transaction."""
     db.execute(
         "INSERT INTO champions (at, policy_id, reason, detail) VALUES (?, ?, ?, ?)",
-        (_iso(at), version, reason, _dumps(dict(detail))),
+        (iso(at), version, reason, _dumps(dict(detail))),
     )
 
 
@@ -530,19 +531,13 @@ def read_policies(
     the store or before the first policy."""
     from krx_quant.trader import cohort, promotion  # they import this module
 
-    if not path.exists():
-        return {"champion": None, "policies": [], "champions": [], "cohorts": []}
-    db = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
-    db.row_factory = sqlite3.Row
-    try:
-        if not _has_policies(db):
+    with reading(path) as db:
+        if db is None or not _has_policies(db):
             return {"champion": None, "policies": [], "champions": [], "cohorts": []}
         changes = [dict(r) for r in db.execute("SELECT * FROM champions ORDER BY id DESC")]
         rows = db.execute("SELECT * FROM policies ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
         records = promotion.records(db, mode, [r["id"] for r in rows])
         cohorts = cohort.read_cohorts(db, sessions)
-    finally:
-        db.close()
     now = changes[0]["policy_id"] if changes else None
     once = {c["policy_id"] for c in changes}
     policies = []
@@ -616,10 +611,6 @@ def _unit(value: Any) -> float | None:
     if isinstance(value, bool) or not isinstance(value, int | float):
         return None
     return float(value) if math.isfinite(value) and 0 <= value <= 1 else None
-
-
-def _iso(at: datetime) -> str:
-    return at.astimezone(KST).isoformat()
 
 
 def _dumps(value: Any) -> str:

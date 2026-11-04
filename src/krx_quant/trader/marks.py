@@ -24,7 +24,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from krx_quant.trader.store import _reading, champion_of, iso, practice_of
+from krx_quant.trader.db import iso, reading
+from krx_quant.trader.store import champion_of, practice_of
 
 # A trade's buy (its entry) and its sell (its exit, once out), as one table of marks, of the
 # champion's trades (#399): its policy version, and which trades.
@@ -43,7 +44,7 @@ _NEWEST_FIRST = "ORDER BY at DESC, trade_id DESC, side DESC"
 def read_marks(path: Path, symbol: str, before: datetime | None, limit: int) -> list[dict[str, Any]]:
     """The last ``limit`` marks of ``symbol`` before ``before`` (if given), newest first, and any
     more at the moment of the last of them; none without the store."""
-    with _reading(path) as db:
+    with reading(path) as db:
         if db is None:
             return []
         marks = _marks(db)
