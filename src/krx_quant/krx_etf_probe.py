@@ -44,7 +44,6 @@ is valid. Nothing more is asked after ``BUDGET``.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import math
 import re
@@ -74,6 +73,7 @@ from krx_quant.nav_probe import (
     one_object,
     row_list,
 )
+from krx_quant.probe_calls import CALL_ERRORS, Calls
 from krx_quant.probe_fields import day_of, describe, flags
 from krx_quant.products import PRODUCTS, Product
 from krx_quant.redaction import MASK
@@ -259,34 +259,14 @@ def find_products(answer: Answer, products: Sequence[Product]) -> None:
             break
 
 
-class _Calls:
-    """Calls to one source: spaced, counted, stopped after failures in a row or the deadline."""
-
-    def __init__(self, pace: float, max_failed: int, deadline: float) -> None:
-        self._pace = pace
-        self._max_failed = max_failed
-        self._deadline = deadline
-        self.calls = 0
-        self.failed = 0
-        self._failed_in_a_row = 0
-
-    async def turn(self) -> str | None:
-        """Wait for the next call's turn; why not to call, if so."""
-        if self._failed_in_a_row >= self._max_failed:
-            return f"묻지 않음: {self._max_failed}번 잇달아 실패"
-        if monotonic() > self._deadline:
-            return f"묻지 않음: {int(BUDGET.total_seconds() // 60)}분이 지났다"
-        if self.calls:
-            await asyncio.sleep(self._pace)
-        self.calls += 1
-        return None
-
-    def answered(self, ok: bool) -> None:
-        if ok:
-            self._failed_in_a_row = 0
-        else:
-            self.failed += 1
-            self._failed_in_a_row += 1
+async def _turn(calls: Calls, deadline: float) -> str | None:
+    """Wait for ``calls``' next turn; why not to call, if so: failures in a row, or the deadline."""
+    if calls.stopped:
+        return f"묻지 않음: {calls.max_failed_in_a_row}번 잇달아 실패"
+    if monotonic() > deadline:
+        return f"묻지 않음: {int(BUDGET.total_seconds() // 60)}분이 지났다"
+    await calls.turn()
+    return None
 
 
 class Krx:
@@ -297,10 +277,11 @@ class Krx:
         self._session = session
         self._url = f"{settings.krx_openapi_url}{PATH}"
         self._key = settings.krx_openapi_key
-        self.calls = _Calls(PACE, MAX_FAILED_IN_A_ROW, deadline)
+        self._deadline = deadline
+        self.calls = Calls(PACE, MAX_FAILED_IN_A_ROW)
 
     async def ask(self, day: date) -> Answer:
-        why_not = await self.calls.turn()
+        why_not = await _turn(self.calls, self._deadline)
         if why_not is not None:
             return Answer(day, error=why_not)
         try:
@@ -311,7 +292,7 @@ class Krx:
                 allow_redirects=False,
             ) as resp:
                 status, text = resp.status, await resp.text(errors="replace")
-        except (aiohttp.ClientError, OSError, ValueError) as e:  # OSError: timeouts too
+        except CALL_ERRORS as e:
             answer = Answer(day, error=f"error {type(e).__name__}")
         else:
             answer = read_answer(day, status, text)
@@ -337,20 +318,21 @@ class Kis:
 
     def __init__(self, client: RestClient, deadline: float) -> None:
         self._client = client
-        self.calls = _Calls(KIS_PACE, KIS_FAILED_IN_A_ROW, deadline)
+        self._deadline = deadline
+        self.calls = Calls(KIS_PACE, KIS_FAILED_IN_A_ROW)
 
     async def ask(
         self, query: Query, params: dict[str, str], parse: Callable[[Mapping[str, Any]], Any]
     ) -> tuple[Any, str | None]:
         """``parse``'s reading of the answer, or the error; an answer it reads as None fails (#297)."""
-        why_not = await self.calls.turn()
+        why_not = await _turn(self.calls, self._deadline)
         if why_not is not None:
             return None, why_not
         try:
             body, _ = await self._client.get_page(query.tr, query.path, params)
         except KisError as e:
             error = kis_error(e)
-        except (aiohttp.ClientError, OSError, ValueError) as e:
+        except CALL_ERRORS as e:
             error = f"error {type(e).__name__}"
         else:
             value = parse(body)
@@ -711,7 +693,7 @@ async def _ask_kis(
     tokens, client = tokens_and_client(session, settings, lambda: datetime.now().astimezone())
     try:
         await tokens.get()
-    except (KisError, aiohttp.ClientError, OSError, ValueError) as e:
+    except (KisError, *CALL_ERRORS) as e:
         reason = kis_error(e) if isinstance(e, KisError) else f"error {type(e).__name__}"
         return [], None, f"KIS 접근 토큰이 없다: {reason}"
     kis = Kis(client, deadline)
@@ -786,8 +768,8 @@ async def probe_krx_etf(
             out(line)
     with_rows = sum(a.has_rows for a in answers)
     out("")
-    tail = f"KRX: {krx.calls.calls}번 조회, {krx.calls.failed}번 실패, 행이 있는 날 {with_rows}"
+    tail = f"KRX: {krx.calls.made}번 조회, {krx.calls.failed}번 실패, 행이 있는 날 {with_rows}"
     if kis is not None:
-        tail += f" · KIS: {kis.calls.calls}번 조회, {kis.calls.failed}번 실패"
+        tail += f" · KIS: {kis.calls.made}번 조회, {kis.calls.failed}번 실패"
     out(tail)
-    return krx.calls.calls, with_rows
+    return krx.calls.made, with_rows

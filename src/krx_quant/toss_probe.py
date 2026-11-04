@@ -31,6 +31,7 @@ from typing import Any
 import aiohttp
 
 from krx_quant.config import Settings
+from krx_quant.probe_calls import CALL_ERRORS, Calls
 from krx_quant.probe_fields import MISSING, day_of, describe, flags, order_of, same
 from krx_quant.toss import IP_MESSAGE, STOCKS, TOKEN_FILE, TossClient, TossError, TossTokens
 
@@ -367,21 +368,19 @@ class _TossProber:
         self._today = today
         self._budget = budget
         self._deadline = time.monotonic() + budget.total_seconds()
-        self.calls = 0
-        self.failed = 0
-        self._failed_in_a_row = 0
+        self.calls = Calls(None, MAX_FAILED_IN_A_ROW)  # TossClient spaces them, PACE apart
         self.stopped: str | None = None  # why nothing more is asked (an address Toss refuses)
         self.history: dict[str, list[dict[str, Any]]] = {}  # the first symbol's records, by source
 
     async def ask(self, source: TossSource, symbol: str, until: str | None = None) -> Page:
         if self.stopped is not None:
             return Page(error=f"not asked: {self.stopped}")
-        if self._failed_in_a_row >= MAX_FAILED_IN_A_ROW:
+        if self.calls.stopped:
             return Page(error=f"not asked: {MAX_FAILED_IN_A_ROW} calls in a row failed")
         if time.monotonic() >= self._deadline:
             minutes = self._budget.total_seconds() / 60
             return Page(error=f"not asked: the Toss part's {minutes:g}-minute budget is used up")
-        self.calls += 1
+        await self.calls.turn()
         params = {"count": str(COUNT), **({"until": until} if until else {})}
         try:
             result = await self._client.get(f"{STOCKS}/{symbol}/{source.name}", params)
@@ -389,13 +388,12 @@ class _TossProber:
             if e.ip_not_allowed:
                 self.stopped = IP_MESSAGE
             page = Page(error=f"error {e}")
-        except (aiohttp.ClientError, OSError, ValueError) as e:  # OSError: timeouts, the cache
+        except CALL_ERRORS as e:  # OSError: the token cache too
             page = Page(error=f"error {type(e).__name__}")
         else:
-            self._failed_in_a_row = 0
+            self.calls.answered(True)
             return parse(result)
-        self.failed += 1
-        self._failed_in_a_row += 1
+        self.calls.answered(False)
         return page
 
     async def source(self, n: int, source: TossSource, symbols: Sequence[str]) -> None:
@@ -519,7 +517,7 @@ async def probe_toss(
         out(f"  stopped: no Toss access token: {IP_MESSAGE if e.ip_not_allowed else e}")
         out("Toss: 1 call, 1 failed")
         return 1, 1
-    except (aiohttp.ClientError, OSError, ValueError) as e:
+    except CALL_ERRORS as e:
         out(f"  stopped: no Toss access token: error {type(e).__name__}")
         out("Toss: 1 call, 1 failed")
         return 1, 1
@@ -545,5 +543,5 @@ async def probe_toss(
     for line in snapshot_checks(prober.history.get(INVESTOR.name, []), kis):
         out(line)
     out("")
-    out(f"Toss: {prober.calls} calls, {prober.failed} failed; tokens issued: {tokens.issued}")
-    return prober.calls, prober.failed
+    out(f"Toss: {prober.calls.made} calls, {prober.calls.failed} failed; tokens issued: {tokens.issued}")
+    return prober.calls.made, prober.calls.failed

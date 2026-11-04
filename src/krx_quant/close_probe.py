@@ -41,7 +41,6 @@ while it is valid (no early refresh).
 
 from __future__ import annotations
 
-import asyncio
 from collections import Counter
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
@@ -74,6 +73,7 @@ from krx_quant.config import Settings
 from krx_quant.feeds.base import KST, Row
 from krx_quant.kis import KisError, RestClient, rest_session
 from krx_quant.market_calendar import MarketCalendar, calendar_store
+from krx_quant.probe_calls import CALL_ERRORS, Calls
 from krx_quant.supply_probe import REQUEST_TIMEOUT, kis_error
 
 Out = Callable[[str], None]
@@ -187,49 +187,37 @@ def _hhmm(bar: Row | None) -> str | None:
 class _Asker:
     def __init__(self, client: RestClient) -> None:
         self._client = client
-        self.calls = 0
-        self.failed = 0
-        self._failed_in_a_row = 0
-
-    @property
-    def stopped(self) -> bool:
-        return self._failed_in_a_row >= MAX_FAILED_IN_A_ROW
+        self.calls = Calls(PACE, MAX_FAILED_IN_A_ROW)
 
     async def page(self, symbol: str, day: date, before: datetime) -> list[Row]:
         """A page of the day's J bars; raises ``_Failed`` with KIS's refusal."""
-        if self.calls:
-            await asyncio.sleep(PACE)
-        self.calls += 1
+        await self.calls.turn()
         try:
             rows = await bars_page(self._client, symbol, day, before)
         except KisError as e:
             reason = kis_error(e)
-        except (aiohttp.ClientError, OSError, ValueError, KeyError) as e:  # OSError: timeouts too
+        except (*CALL_ERRORS, KeyError) as e:  # KeyError: a bar short of a field bars_page reads
             reason = f"error {type(e).__name__}"
         else:
-            self._failed_in_a_row = 0
+            self.calls.answered(True)
             return rows
-        self.failed += 1
-        self._failed_in_a_row += 1
+        self.calls.answered(False)
         raise _Failed(reason)
 
     async def candles(self, symbol: str, first: date, last: date) -> dict[date, Row]:
         """KIS's KRX (``J``) day candles from ``first`` to ``last`` as they are now, by day; raises
         ``_Failed`` with KIS's refusal."""
-        if self.calls:
-            await asyncio.sleep(PACE)
-        self.calls += 1
+        await self.calls.turn()
         try:
             labelled = await candles_page(self._client, "day", KRX_MARKET, symbol, first, last)
         except KisError as e:
             reason = kis_error(e)
-        except (aiohttp.ClientError, OSError, ValueError, KeyError) as e:  # OSError: timeouts too
+        except (*CALL_ERRORS, KeyError) as e:  # KeyError: a candle short of a field candles_page reads
             reason = f"error {type(e).__name__}"
         else:
-            self._failed_in_a_row = 0
+            self.calls.answered(True)
             return {r["date"]: r for _, r in labelled}
-        self.failed += 1
-        self._failed_in_a_row += 1
+        self.calls.answered(False)
         raise _Failed(reason)
 
 
@@ -293,7 +281,7 @@ async def probe_close(settings: Settings, today: date, out: Out = print) -> tupl
         asker = _Asker(client)
         try:
             await tokens.get()
-        except (KisError, aiohttp.ClientError, OSError, ValueError) as e:
+        except (KisError, *CALL_ERRORS) as e:
             reason = kis_error(e) if isinstance(e, KisError) else f"error {type(e).__name__}"
             out(f"멈춤: KIS 접근 토큰이 없다: {reason}")
             return 1, 1
@@ -301,7 +289,7 @@ async def probe_close(settings: Settings, today: date, out: Out = print) -> tupl
             candles = [r for r in read_krx_days(settings.data_dir, symbol) if first <= r["date"] <= today]
             before, after = Tally(), Tally()
             for candle in candles:
-                if asker.stopped:
+                if asker.calls.stopped:
                     found = Day(candle["date"], error=f"묻지 않음: {MAX_FAILED_IN_A_ROW}번 잇달아 실패")
                 else:
                     found = await _day(asker, settings.data_dir, calendar, symbol, candle)
@@ -318,8 +306,8 @@ async def probe_close(settings: Settings, today: date, out: Out = print) -> tupl
             for line in _replaced(settings.data_dir, symbol):
                 out(line)
     out("")
-    out(f"KIS: {asker.calls}번 조회, {asker.failed}번 실패")
-    return asker.calls, asker.failed
+    out(f"KIS: {asker.calls.made}번 조회, {asker.calls.failed}번 실패")
+    return asker.calls.made, asker.calls.failed
 
 
 async def _recent(asker: _Asker, symbol: str, stored: Sequence[Row], days: dict[date, Day]) -> list[str]:
@@ -328,7 +316,7 @@ async def _recent(asker: _Asker, symbol: str, stored: Sequence[Row], days: dict[
     if not stored:
         return []
     title = f"  KIS가 지금 주는 KRX 일봉(최근 {len(stored)}일, 다시 받음)"
-    if asker.stopped:
+    if asker.calls.stopped:
         return [f"{title}: 묻지 않음: {MAX_FAILED_IN_A_ROW}번 잇달아 실패"]
     try:
         now = await asker.candles(symbol, stored[0]["date"], stored[-1]["date"])

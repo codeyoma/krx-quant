@@ -26,7 +26,6 @@ whole probe ends well inside the job's time limit.
 
 from __future__ import annotations
 
-import asyncio
 import re
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -39,6 +38,7 @@ import aiohttp
 from krx_quant.auth import tokens_and_client
 from krx_quant.config import Settings
 from krx_quant.kis import KisError, RestClient, rest_session
+from krx_quant.probe_calls import CALL_ERRORS, Calls
 from krx_quant.probe_fields import MISSING, day_of, describe, flags, order_of, present, same
 from krx_quant.toss_probe import probe_toss
 
@@ -349,35 +349,30 @@ class _Prober:
     def __init__(self, client: RestClient, out: Out, budget: timedelta = KIS_BUDGET) -> None:
         self._client = client
         self._out = out
-        self.calls = 0
-        self.failed = 0
-        self._failed_in_a_row = 0
+        self.calls = Calls(PACE, MAX_FAILED_IN_A_ROW)
         self._budget = budget
         self._deadline = time.monotonic() + budget.total_seconds()
         self.first: dict[tuple[str, str], Answer] = {}  # the first stock's latest answers
 
     async def ask(self, source: Source, market: str, symbol: str, end: date, tr_cont: str = "") -> Answer:
-        if self._failed_in_a_row >= MAX_FAILED_IN_A_ROW:
+        if self.calls.stopped:
             return Answer(error=f"not asked: {MAX_FAILED_IN_A_ROW} calls in a row failed")
         if time.monotonic() >= self._deadline:
             minutes = self._budget.total_seconds() / 60
             return Answer(error=f"not asked: the KIS part's {minutes:g}-minute budget is used up")
-        if self.calls:
-            await asyncio.sleep(PACE)
-        self.calls += 1
+        await self.calls.turn()
         try:
             body, more = await self._client.get_page(
                 source.tr, source.path, source.query(market, symbol, end), tr_cont
             )
         except KisError as e:
             answer = Answer(error=kis_error(e))
-        except (aiohttp.ClientError, OSError, ValueError) as e:  # OSError: timeouts too
+        except CALL_ERRORS as e:
             answer = Answer(error=f"error {type(e).__name__}")
         else:
-            self._failed_in_a_row = 0
+            self.calls.answered(True)
             return parse(source, body, more)
-        self.failed += 1
-        self._failed_in_a_row += 1
+        self.calls.answered(False)
         return answer
 
     async def source(
@@ -555,9 +550,9 @@ async def probe_supply(settings: Settings, today: date, out: Out = print) -> tup
         out("KIS (primary)")
         try:
             await tokens.get()
-        except (KisError, aiohttp.ClientError, OSError, ValueError) as e:
-            prober.calls += 1
-            prober.failed += 1
+        except (KisError, *CALL_ERRORS) as e:
+            prober.calls.made += 1
+            prober.calls.failed += 1
             reason = kis_error(e) if isinstance(e, KisError) else f"error {type(e).__name__}"
             out(f"  stopped: no KIS access token: {reason}")
         else:
@@ -567,12 +562,12 @@ async def probe_supply(settings: Settings, today: date, out: Out = print) -> tup
             out("")
             prober.cross_checks(stocks[0])
         out("")
-        out(f"KIS: {prober.calls} calls, {prober.failed} failed")
+        out(f"KIS: {prober.calls.made} calls, {prober.calls.failed} failed")
         out("")
         toss_calls, toss_failed = await probe_toss(
             session, settings, [*stocks, *([etf] if etf else [])], today, kis_rows(prober.first), out
         )
-    calls, failed = prober.calls + toss_calls, prober.failed + toss_failed
+    calls, failed = prober.calls.made + toss_calls, prober.calls.failed + toss_failed
     out("")
     out(f"{calls} calls, {failed} failed")
     return calls, failed
