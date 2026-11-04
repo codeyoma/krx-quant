@@ -877,20 +877,35 @@ def latest_revisions(db: sqlite3.Connection) -> dict[str, Revision]:
     return {r[1]: _revision(r) for r in rows}
 
 
-_SMT_COLUMNS = "bar_close, a, b, direction, minutes, swept, source, definition, version, a_extreme, b_extreme"
+_SMT_FIELDS = (
+    "bar_close",
+    "a",
+    "b",
+    "direction",
+    "minutes",
+    "swept",
+    "source",
+    "definition",
+    "version",
+    "a_extreme",
+    "b_extreme",
+)
+_SMT_COLUMNS = ", ".join(_SMT_FIELDS)
 
 
 def smt_events(db: sqlite3.Connection, since: datetime, until: datetime) -> list[SmtEvent]:
     """The SMT events kept (#520) whose bar close is in ``[since, until)``, in time order; none in
-    a database an engine before #520 wrote."""
-    try:
-        rows = db.execute(
-            f"SELECT {_SMT_COLUMNS} FROM smt_events WHERE bar_close >= ? AND bar_close < ?"
-            " ORDER BY bar_close, a, b, direction, minutes",
-            (iso(since), iso(until)),
-        ).fetchall()
-    except sqlite3.OperationalError:  # no such table: read beside an engine from before #520
+    a database an engine before #520 wrote. A table no engine of #521 has opened yet (read only,
+    ``read_only``, so its columns are not added) has no extremes: they are None."""
+    have = {row[1] for row in db.execute("PRAGMA table_info(smt_events)")}
+    if not have:  # no such table: read beside an engine from before #520
         return []
+    columns = ", ".join(f if f in have else f"NULL AS {f}" for f in _SMT_FIELDS)
+    rows = db.execute(
+        f"SELECT {columns} FROM smt_events WHERE bar_close >= ? AND bar_close < ?"
+        " ORDER BY bar_close, a, b, direction, minutes",
+        (iso(since), iso(until)),
+    ).fetchall()
     return [
         SmtEvent(
             datetime.fromisoformat(r[0]),

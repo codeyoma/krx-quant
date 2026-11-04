@@ -26,7 +26,7 @@ from krx_quant.engine import Event
 from krx_quant.feeds import KOSPI200_FUTURES, TRADE
 from krx_quant.feeds.base import KST
 from krx_quant.market_calendar import MarketCalendar
-from krx_quant.predictions import DB_NAME, PredictionStore, smt_events
+from krx_quant.predictions import DB_NAME, PredictionStore, read_only, smt_events
 from krx_quant.recorder import ParquetRecorder
 from krx_quant.reference import BAR, Bar
 from krx_quant.smt import (
@@ -396,8 +396,9 @@ def test_kept_events_are_never_rewritten(tmp_path: Path) -> None:
 
 
 def test_a_table_kept_before_the_extremes_gains_them_and_its_rows_have_none(tmp_path: Path) -> None:
-    """#521. Input: ``smt_events`` as #520 made it, with a row. Output: the store opens it, adds
-    the columns, reads that row without extremes and keeps a new one's."""
+    """#521. Input: ``smt_events`` as #520 made it, with a row. Output: read only, as
+    ``krx-quant smt`` reads it, the row without extremes; the store opens it, adds the columns,
+    reads that row without extremes and keeps a new one's."""
     path = tmp_path / DB_NAME
     with sqlite3.connect(path) as before:
         before.executescript(
@@ -412,6 +413,10 @@ def test_a_table_kept_before_the_extremes_gains_them_and_its_rows_have_none(tmp_
             """
         )
     before.close()
+    # Read as `krx-quant smt` reads it (read only, no column added): the row, without extremes.
+    with read_only(path) as db:
+        assert db is not None
+        assert smt_events(db, at("10:00"), at("12:00")) == [SmtEvent(at("10:01"), A, B, BEARISH, 15, A, LIVE)]
     store = PredictionStore(path)
     kept = SmtEvent(at("11:01"), A, B, BULLISH, 30, B, LIVE, a_extreme=at("10:50"), b_extreme=at("10:59"))
     store.add_smt_events([kept], at("11:01:00.2"))
