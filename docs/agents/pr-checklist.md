@@ -17,7 +17,7 @@ After the merge, remove the worktree and delete the branch, locally and on the r
 
 ## Checks
 
-- krx-quant runs what CI runs (`.github/workflows/ci.yml`): `uv run python scripts/check_forbidden.py`, `uv run python scripts/check_docs_drift.py`, `uv run ruff check`, `uv run ruff format --check`, `uv run mypy`, `uv run pytest -q`. All pass before the PR is opened.
+- krx-quant runs what CI runs (`.github/workflows/ci.yml`): `uv run python scripts/check_forbidden.py`, `uv run python scripts/check_docs_drift.py`, `uv run ruff check`, `uv run ruff format --check`, `uv run mypy`, `uv run pytest -q`. All pass before the PR is opened, but for the PR number stand-ins, which wait for the PR's number: until then run `uv run python scripts/check_forbidden.py --draft` (Docs).
   - A test past its time limit ends the pytest run with every thread's stack, and the tests after it do not run (CODING_STANDARDS.md, "Tests wait for conditions"). Fix that test and run again.
   - CI runs the checks once (job `lint`) and pytest in four shards on runners of their own (`pytest 1` to `pytest 4`, `scripts/ci_shard.py`, #486). The check to wait for is `test`: it passes when `lint` and every shard passed and every test ran in exactly one shard. Locally, run the whole suite in one `pytest`; to run one shard's files, `uv run pytest -q $(python3 scripts/ci_shard.py files <shard> 4)`.
   - A push to a PR cancels that PR's run still going; wait for the newest commit's run.
@@ -36,12 +36,16 @@ After the merge, remove the worktree and delete the branch, locally and on the r
 ## Docs
 
 - Every PR updates the docs for what it adds or changes (AGENTS.md "Documentation").
-- A change note cites the real PR number: open the PR, then put its number in the notes. CI fails on a stand-in (#321).
+- A change note cites the real PR number. Write a stand-in, open the PR as a draft, run `uv run python scripts/fill_pr_number.py <PR>` in the worktree, commit and push, then mark the PR ready (`gh pr ready`). The script replaces what the placeholder rule finds, only in the files the branch changed against `origin/main`, and prints each file and its lines; run again, it changes nothing. A stand-in glued to another repository's name (`codeyoma/FinceptTerminal#…`) is left and listed: fill that in by hand.
+- A draft's CI run skips the placeholder rule alone (`check_forbidden.py --draft`, #507) and lists the stand-ins it skipped. The run that marking the PR ready starts, and a push to `main`, fail on one (#321).
+  > **바뀜** (2026-11-04, #513): PR을 연 뒤 노트에 번호를 손으로 넣었고, 자리표시는 초안의 CI도 실패시켰다 → 초안으로 열고 `scripts/fill_pr_number.py`로 채운 뒤 리뷰 준비로 바꾼다. 이유: CI 실패 31번 중 22번이 첫 push의 자리표시였다(#507).
+- A PR that changes `src/` but nothing under `docs/`, nor `README.md` or `.env.example`, fails the `pr-docs` check (`scripts/check_pr_docs.py`, #507). When no doc needs a change, say why in a line of the body of its own: `Docs: none (<reason>)`. A line with no reason fails; editing the body runs the check again.
 - Product docs are Korean; agent-facing files (AGENTS.md, `docs/agents/`, `CODING_STANDARDS.md`) are English.
 
 ## Pull requests
 
 - Against `main` (krx-quant) or `custom` (fork). Never push to either directly; never enable auto-merge.
+- Open a krx-quant PR as a draft, and mark it ready once its PR numbers are filled in (Docs). Marking it ready runs CI again.
 - English title and body: what changed and why, tests, what the next 06:00 deploy does, and decisions left for the user. `Closes #N` for the issue it finishes, `Refs #N` for a part of it. A fork PR names `codeyoma/krx-quant#N`.
   - A PR that keeps its issue open never writes a closing keyword (close, closes, closed, fix, fixes, fixed, resolve, resolves, resolved) followed by the issue's number anywhere in the body: GitHub closes the issue on merge even inside backticks or after "not" (#340, #341). Quote it as "Closes" without the number if you must mention it. The `pr-refs` check (`.github/workflows/pr-refs.yml`) fails such a PR and runs again when the body is edited.
 - End the body with the attribution line the session's instructions give.

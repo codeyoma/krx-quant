@@ -7,6 +7,7 @@ find them in this file.
 
 from __future__ import annotations
 
+import importlib.util
 import subprocess
 import sys
 from pathlib import Path
@@ -145,3 +146,57 @@ def test_posted_output_is_masked_of_the_module_s_tr_ids_too() -> None:
         assert MASK in redact(f"sent {tr.mock} and {tr.live}", ())
         assert tr.mock not in redact(f"sent {tr.mock}", ()) and tr.live not in redact(tr.live, ())
     assert redact(f"POST {kis_orders.ORDER_PATH}", ()) != f"POST {kis_orders.ORDER_PATH}"
+
+
+# A draft pull request's run skips the placeholder rule alone (#507): its number is filled in once
+# it is open (scripts/fill_pr_number.py). Marking it ready, a push to main and a run by hand check
+# everything.
+TELEGRAM = "1234567890" + ":" + "A" * 35
+
+
+def check(*args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run([sys.executable, str(SCRIPT), *args], capture_output=True, text=True, timeout=20)
+
+
+def test_a_draft_s_check_skips_the_placeholder_rule_and_still_shows_it(tmp_path: Path) -> None:
+    doc = tmp_path / "notes.md"
+    doc.write_text(f"> **바뀜** (2026-11-04, {HASH}PRNUM): 이전 → 지금.\n", encoding="utf-8")
+    draft = check("--draft", str(doc))
+    assert draft.returncode == 0, draft.stdout
+    assert "notes.md:1: PR number placeholder (skipped on a draft" in draft.stdout
+    assert "::warning::" in draft.stdout and "scripts/fill_pr_number.py" in draft.stdout
+
+    ready = check(str(doc))
+    assert ready.returncode == 1
+    assert "notes.md:1: PR number placeholder\n" in ready.stdout
+
+
+def test_a_draft_s_check_still_fails_every_other_rule(tmp_path: Path) -> None:
+    doc = tmp_path / "notes.md"
+    doc.write_text(f'TOKEN = "{TELEGRAM}"\nsee {HASH}PRNUM\ntr_id = "{ORDER_TR_ID}"\n', encoding="utf-8")
+    draft = check("--draft", str(doc))
+    assert draft.returncode == 1
+    assert "notes.md:1: Telegram bot token\n" in draft.stdout
+    assert "notes.md:3: KIS order TR ID\n" in draft.stdout
+    assert "notes.md:2: PR number placeholder (skipped on a draft" in draft.stdout
+
+
+def test_the_skipped_rule_is_forbidden_py_s_placeholder_rule() -> None:
+    from krx_quant import forbidden
+
+    spec = importlib.util.spec_from_file_location("check_forbidden", SCRIPT)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    [(name, pattern)] = forbidden.REPOSITORY_RULES
+    assert (module.PLACEHOLDER, module.PLACEHOLDER_PATTERN) == (name, pattern)
+
+
+def test_ci_passes_draft_only_on_a_draft_pull_request_and_runs_again_once_it_is_ready() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+    # A push to main has no pull_request: the expression gives "" and every rule holds.
+    flag = "${{ github.event.pull_request.draft && '--draft' || '' }}"
+    assert f"run: uv run python scripts/check_forbidden.py {flag}\n" in workflow
+    assert workflow.count("check_forbidden.py") == 1
+    # Marking a draft ready runs the checks again, with the placeholder rule.
+    assert "types: [opened, synchronize, reopened, ready_for_review]" in workflow
