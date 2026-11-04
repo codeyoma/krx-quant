@@ -852,6 +852,40 @@ async def test_on_a_day_of_the_practice_and_the_champion_the_limits_count_the_ch
     assert (champion["practice"], champion["entry"]["price"]) == (False, 70_050)
 
 
+def test_a_ledger_written_before_533_does_not_carry_its_practice_lows_into_the_limits_count(
+    tmp_path: Path,
+) -> None:
+    """The deploy day: the trader before #533 rolled to 10-14 at 00:00 and wrote its ledger, whose lows
+    counted the practice (here a practice trade sold at 09:30 for −2,000 won, its position marked at
+    −2,500 before: the day's and the cumulative low −2,500), and left the practice columns null. The
+    trader since #533 started at 10:00 takes no low of that row: the limits' count starts again from
+    its own realized P&L (0), and its next write splits the row, the practice's beside it. A ledger it
+    wrote itself keeps its lows (−300 here, a champion position's mark)."""
+    kept_trade(tmp_path, "09:26:00", "09:30:00", 68_000, practice=True)
+    limits_ = limits.Limits(1_000_000, 10, 20)
+    store = TraderStore(tmp_path / DB_NAME)
+    try:
+        store.add_run(at("2026-10-13 09:00:00"), MOCK, {})
+        legacy = {"realized": -2_000.0, "trades": 1, "worst": -2_500.0, "cumulative": -2_000.0}
+        legacy |= {"cumulative_worst": -2_500.0, "daily_limit": 100_000.0, "cumulative_limit": 200_000.0}
+        store.put_day(MOCK, DAY, legacy | {"status": RUNNING, "halt": None}, at("09:30:01"))
+        guard = limits.Guard(store, MOCK, limits_, at("10:00:00"), lambda _: None)
+        assert (guard.worst, guard.cumulative_worst) == (0.0, 0.0), "no practice in the limits' lows"
+        assert (guard.realized_day, guard.practice_day, guard.practice_trades_day) == (0.0, -2_000, 1)
+        store.put_day(MOCK, DAY, guard.ledger(), at("10:00:01"))
+        [day] = read_days(tmp_path / DB_NAME, DAY, DAY)
+        assert (day["net"], day["daily"]["worst"], day["daily"]["used"]) == (0.0, 0.0, 0.0)
+        assert (day["cumulative"]["worst"], day["cumulative"]["used"]) == (0.0, 0.0)
+        assert day["practice"] == {"net": -2_000, "trades": 1, "cumulative": -2_000}
+
+        mine = guard.ledger() | {"worst": -300.0, "cumulative_worst": -300.0}
+        store.put_day(MOCK, DAY, mine, at("10:30:00"))
+        again = limits.Guard(store, MOCK, limits_, at("10:31:00"), lambda _: None)
+        assert (again.worst, again.cumulative_worst) == (-300.0, -300.0), "a split ledger's lows kept"
+    finally:
+        store.close()
+
+
 @pytest.mark.parametrize(
     ("changes", "after", "held"),
     [

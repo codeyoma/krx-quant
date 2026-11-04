@@ -15,9 +15,10 @@ counts none of them (#533): neither their realized P&L nor a practice position's
 the champion's trades reach holds them all the same (the status buys nothing, a practice position is
 sold). The account's P&L is both (``realized_all``: the cash buys on it), the practice's kept beside
 the limits' count (``practice_day``, ``practice_cumulative``, ``practice_unrealized``) for the state,
-the ledger and the report to show apart. The risk rules count the practice as ever (#471,
-``paper.risk_held``). The practice shadow's simulated limits count none of its trades either: they
-are all practice.
+the ledger and the report to show apart. A day's ledger written before #533 (the deploy day's, from
+its 00:00) counted the practice in its lows: a start takes none of them (``_load``). The risk rules
+count the practice as ever (#471, ``paper.risk_held``). The practice shadow's simulated limits count
+none of its trades either: they are all practice.
 
 > **바뀜** (2026-11-05, #534): the loss counted the mock book's practice trades with the champion's
 > (the same KIS account) → it counts none of them. 이유: the user's decision (2026-11-04): a practice
@@ -93,6 +94,7 @@ from krx_quant.trader.store import (
     Failure,
     Halt,
     TraderStore,
+    day_split,
 )
 
 log = logging.getLogger(__name__)
@@ -209,6 +211,11 @@ class Guard:
         self.daily_halt, self.cumulative_halt = self.store.halts(self.mode, self.day)
         self.failure: Failure | None = self.store.failure(self.mode, self.day)  # #405
         kept = self.store.day(self.mode, self.day) or {}
+        if kept and day_split(kept) is None:
+            # Written before #533 (the deploy day's, from its 00:00 on): its lows counted the practice
+            # too, so none is taken; they start again from what the limits count, and the next write
+            # splits the row.
+            kept = {}
         self.worst = min(0.0, self.realized_day, kept.get("worst", 0.0))
         self.cumulative_worst = min(0.0, self.realized_cumulative, kept.get("cumulative_worst", 0.0))
 
