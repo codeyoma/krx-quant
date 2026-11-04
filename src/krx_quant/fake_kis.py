@@ -513,6 +513,9 @@ NOTHING_TO_CANCEL = ("FK0004", "정정/취소할 수량이 없습니다.")
 PAST_DAY = ("FK0005", "당일 주문만 취소할 수 있습니다.")
 BUY_SIDE, SELL_SIDE = kis_orders.SIDE_BUY, kis_orders.SIDE_SELL
 BRANCH = "01790"  # made up: the order's branch (KRX_FWDG_ORD_ORGNO, ord_gno_brno)
+# Made up: the fill notice's CNTG_ISNM in the mock server's 23 columns, of two characters as there
+# (#403); what they are was not measured.
+SHORT_NAME = "삼전"
 # Not measured, made up (#408): the live server's codes and messages for the mock server's above.
 LIVE_SAID = {
     BOUGHT: ("FK1001", "매수주문이 완료 되었습니다."),
@@ -564,7 +567,9 @@ class FakeAccount:
     one. Each order, fill, cancel and refusal is told on the fill notice (encrypted, to every open
     WebSocket, with the key and IV of its subscription's answer, ``FakeKis.push_notice``) when
     ``notices``: in KIS's example's 26 fields, or the first ``notice_fields`` of them, or the columns
-    ``notice_columns`` names (the mock's records had 23, #403, not known which). The
+    ``notice_columns`` names (the mock server's 23 are ``kis_orders.MOCK_FILL_NOTICE_COLUMNS``,
+    #403; the fake's values are made up, and an order's acceptance carries its price in ODER_PRC
+    with CNTG_UNPR 0, where KIS's example reads the acceptance's price from CNTG_UNPR). The
     cancellable-orders inquiry is not a mock TR (HTTP 500).
 
     Its time is ``clock``'s (KST; the wall clock without one), its day ``clock``'s date (``today``
@@ -597,8 +602,8 @@ class FakeAccount:
     fee_rate: float = 0.00014  # the mock's commission: thdt_tlex_amt rose by 0.00014 of a buy's amount
     notices: bool = True
     notice_fields: int | None = None
-    # The notice's columns, by ``FILL_NOTICE_COLUMNS``' names, in order (#484: a made-up 23 that are
-    # not the example's first 23); over ``notice_fields`` when given.
+    # The notice's columns, by name, in order (``kis_orders.MOCK_FILL_NOTICE_COLUMNS``, or #484's
+    # made-up 23 that are not the example's first 23); over ``notice_fields`` when given.
     notice_columns: tuple[str, ...] | None = None
     hts_id: str = "testhts01"
     account: str = "1234567801"
@@ -987,6 +992,7 @@ class FakeAccount:
             "BRNC_NO": BRANCH,
             "ODER_QTY": str(order.quantity),
             "ACNT_NAME": "홍길동",
+            "CNTG_ISNM": SHORT_NAME,
             "ORD_COND_PRC": "0",
             "ORD_EXG_GB": "1",
             "POPUP_YN": "N",

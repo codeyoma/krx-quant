@@ -30,10 +30,11 @@ Two layers:
   ``LIVE_PER_SECOND``), and retried by the rules below. Its fills come from the day's order
   inquiry, polled after each order (``Broker.take``), never from the real-time fill notice: on the
   mock server each notice record had 23 fields where KIS's example lists 26
-  (``FILL_NOTICE_COLUMNS``), so its fields are not known yet (``docs/kis-feeds.md``, "주문 (#403)").
-  In mock mode the trader's fill notice recorder (#484, ``trader/fill_notices.py``) subscribes to it
-  with the trader's key (``Account.approval_key``) and keeps its records for them to be measured;
-  nothing of it reaches the trading.
+  (``FILL_NOTICE_COLUMNS``), and whether to take fills from it is to be decided apart now that the
+  23 are named (``MOCK_FILL_NOTICE_COLUMNS``, ``docs/kis-feeds.md``, "주문 (#403)"). In mock mode
+  the trader's fill notice recorder (#484, ``trader/fill_notices.py``) subscribes to it with the
+  trader's key (``Account.approval_key``) and keeps its records as they come; nothing of it reaches
+  the trading.
 
 What is sent again: a call KIS refused for its per-second limit (``BUSY``) after ``BUSY_PAUSE``,
 and one it refused for its token (``TOKEN_REJECTED``) once with a new token. Both are KIS's
@@ -178,14 +179,41 @@ TOKEN_FILE = "trader_kis_token.json"
 LIVE_TOKEN_FILE = "trader_live_kis_token.json"
 
 # The fill notice's fields, in order (KIS's example, ``notice_cols``): 26, the live server's layout
-# as the example gives it. On the mock server each record had 23 fields (#403): the trader's recorder
-# keeps them as they come and the night job ``fill-notice-layout-403`` measures them by position
-# (#484, ``trader/notice_layout.py``) until a change names them; the broker does not read the notice.
+# as the example gives it (not measured). On the mock server each record had 23 fields (#403): the
+# trader's recorder keeps them as they come, and the night job ``fill-notice-layout-403`` measured
+# them by position (#484, ``trader/notice_layout.py``). The broker does not read the notice.
 FILL_NOTICE_COLUMNS = (
     "CUST_ID ACNT_NO ODER_NO OODER_NO SELN_BYOV_CLS RCTF_CLS ODER_KIND ODER_COND STCK_SHRN_ISCD "
     "CNTG_QTY CNTG_UNPR STCK_CNTG_HOUR RFUS_YN CNTG_YN ACPT_YN BRNC_NO ODER_QTY ACNT_NAME "
     "ORD_COND_PRC ORD_EXG_GB POPUP_YN FILLER CRDT_CLS CRDT_LOAN_DATE CNTG_ISNM40 ODER_PRC"
 ).split()
+# The mock server's 23 (``FILL_NOTICE.mock``): KIS's example's list before its change of 2025-07-10
+# (koreainvestment/open-trading-api 48d51728ed put ORD_COND_PRC, ORD_EXG_GB, POPUP_YN and FILLER
+# where CNTG_ISNM was, making the 26 above). The night job's result of 2026-11-04 (``LAYOUT_COMMENT``:
+# 108 records of the trader's mock orders, each joined to its order) found at their places in it the
+# HTS ID, the account, the order's and the original order's numbers, the side, the symbol, the time,
+# CNTG_YN (one record of 1 an order, one of the other value a fill) and the fill's price (CNTG_UNPR on
+# the fills); the shapes of 19 to 23 are those of the example's tail. The other names rest on the
+# example alone: every order was of one share, so CNTG_QTY and ODER_QTY were not told apart, and the
+# HTS ID was in ACNT_NAME too (``docs/kis-feeds.md`` "주문 (#403)", "체결 통보"). On an order's
+# acceptance (CNTG_YN 1) the example reads CNTG_QTY as the order's quantity, CNTG_UNPR as its price,
+# CNTG_ISNM as 주문종목명 and ODER_PRC as 체결단가.
+MOCK_FILL_NOTICE_COLUMNS = (
+    "CUST_ID ACNT_NO ODER_NO OODER_NO SELN_BYOV_CLS RCTF_CLS ODER_KIND ODER_COND STCK_SHRN_ISCD "
+    "CNTG_QTY CNTG_UNPR STCK_CNTG_HOUR RFUS_YN CNTG_YN ACPT_YN BRNC_NO ODER_QTY ACNT_NAME "
+    "CNTG_ISNM CRDT_CLS CRDT_LOAN_DATE CNTG_ISNM40 ODER_PRC"
+).split()
+LAYOUT_COMMENT = "https://github.com/codeyoma/krx-quant/issues/403#issuecomment-6631951108"
+
+
+def notice_columns(width: int) -> list[str] | None:
+    """The fill notice's names for a record of ``width`` fields: KIS's example's 26
+    (``FILL_NOTICE_COLUMNS``) or the mock server's 23 (``MOCK_FILL_NOTICE_COLUMNS``); None for
+    another width, whose fields have no names."""
+    for columns in (FILL_NOTICE_COLUMNS, MOCK_FILL_NOTICE_COLUMNS):
+        if len(columns) == width:
+            return columns
+    return None
 
 
 @dataclass(frozen=True)
