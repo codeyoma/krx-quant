@@ -109,6 +109,14 @@ def test_a_docs_none_line_without_a_reason_fails(line: str) -> None:
     assert not verdict.passes
 
 
+def test_a_body_with_crlf_line_endings_is_read_by_line() -> None:
+    # The web editor sends a body's lines ending in CRLF.
+    passed = check.verdict(CODE, "Closes #1\r\n\r\nDocs: none (an internal refactor)\r\n\r\nend\r\n")
+    assert passed.passes and passed.reason == "an internal refactor"
+    assert check.verdict(CODE, "Docs: none (an internal refactor)\r\n").passes
+    assert not check.verdict(CODE, "Docs: none ()\r\nend\r\n").passes
+
+
 def test_an_empty_reason_is_named_in_the_report() -> None:
     verdict = check.verdict(CODE, "Docs: none ()\n")
     assert "gives no reason" in check.report(verdict)
@@ -150,7 +158,7 @@ def test_the_check_names_the_code_and_passes_once_the_body_says_why(tmp_path: Pa
     args = (tmp_path / "args.txt").read_text()
     assert "--paginate" in args and "previous_filename" in args
 
-    passed = run(fake_gh(tmp_path, "Closes #1\n\nDocs: none (wording of a log line)\n", files))
+    passed = run(fake_gh(tmp_path, "Closes #1\r\n\r\nDocs: none (wording of a log line)\r\n", files))
     assert passed.returncode == 0, passed.stdout
     assert "wording of a log line" in passed.stdout
 

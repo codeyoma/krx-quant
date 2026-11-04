@@ -30,8 +30,8 @@ from dataclasses import dataclass
 CODE = "src/"
 DOCS_DIR = "docs/"
 DOC_FILES = frozenset({"README.md", ".env.example"})
-# A line of its own; the reason runs to the line's last ")", so it may hold parentheses itself.
-EXEMPTION = re.compile(r"^[ \t]*Docs:[ \t]*none[ \t]*\((?P<reason>.*)\)[ \t]*$", re.IGNORECASE | re.MULTILINE)
+# A whole line; the reason runs to the line's last ")", so it may hold parentheses itself.
+EXEMPTION = re.compile(r"[ \t]*Docs:[ \t]*none[ \t]*\((?P<reason>.*)\)[ \t]*", re.IGNORECASE)
 # The format's own stand-in, "<reason>" or "<이유>", copied without a reason.
 STAND_IN = re.compile(r"<[^<>]*>")
 FORMAT = "Docs: none (<reason>)"
@@ -54,11 +54,13 @@ class Verdict:
 
 
 def reasons(body: str) -> list[str]:
-    """The reasons of the body's "Docs: none" lines, stripped; empty for one that gives none."""
+    """The reasons of the body's "Docs: none" lines, stripped; empty for one that gives none.
+    Read by line, whatever the line endings: the web editor sends CRLF."""
     found = []
-    for match in EXEMPTION.finditer(body):
-        reason = match.group("reason").strip()
-        found.append("" if STAND_IN.fullmatch(reason) else reason)
+    for line in body.splitlines():
+        if match := EXEMPTION.fullmatch(line):
+            reason = match.group("reason").strip()
+            found.append("" if STAND_IN.fullmatch(reason) else reason)
     return found
 
 
