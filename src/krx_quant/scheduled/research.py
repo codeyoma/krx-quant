@@ -1,7 +1,7 @@
 """The research and review jobs (#500): the signal threshold's review on a fixed window, the official
-algorithm's fixed holdout and its regime gate, the nightly swap's hit rates, and the experiments on an
-algorithm's inputs, which run last. ``JOBS`` (``krx_quant.scheduled``) lists them in the order they
-run.
+algorithm's fixed holdout and its regime gate, the nightly swap's hit rates, the measure of where making
+a recorded day's samples spends its time, and the experiments on an algorithm's inputs, which run last.
+``JOBS`` (``krx_quant.scheduled``) lists them in the order they run.
 
 The diagnosis and the entry delay, the first two signal reviews, the structure check, the error
 breakdown and the climate, link and turing prior experiments ran, posted their results and left
@@ -16,6 +16,7 @@ from datetime import timedelta
 from krx_quant.holdout import DAYS as HOLDOUT_DAYS
 from krx_quant.neyman_variants import REPORT as NEYMAN_VARIANTS_REPORT
 from krx_quant.nightly_hit_rates import HIT_RATE_NIGHTS
+from krx_quant.sample_profile import LIMIT as SAMPLE_PROFILE_LIMIT
 from krx_quant.scheduled.core import (
     FAILED,
     SIGNAL_REVIEW_FIXED_DAYS,
@@ -25,6 +26,7 @@ from krx_quant.scheduled.core import (
     Night,
     Target,
 )
+from krx_quant.scheduled.prevalidations import _a_prevalidation
 
 # ②″ The signal-threshold review on a fixed window (#206): on 2026-11-03 the user moved the default
 # of ``KRX_SIGNAL_MIN_PROBABILITY`` from 0.6 to 0.70 (#483), provisionally: on section 5 of the
@@ -205,6 +207,63 @@ CLIMATE_GATE = Job(
             ),
         ),
     ),
+)
+
+
+# Where making a recorded day's samples spends its time (#512): on the nights the code that makes
+# samples changed, the night made every day again, and newton's step took 9,013 s (2026-10-26) and
+# 11,600 s (10-29) for 23 days, turing's 240 s for 40; but newton, the first step, makes each day for
+# every step, so the steps' times do not say what is slow. ``sample-profile`` makes the latest finished
+# recorded day from scratch, as a night does, with the night's reads, with newton's and turing's
+# features alone, and with the night's reads under cProfile: seconds and calls by stage and the top
+# functions (``sample_profile.py``). Once, on the first night of a day that does not trade (no
+# training of a new day before it, and the day's recording finished), with a recorded day to make;
+# after a failure (a run cut by its limit among them), again on other code. A recorded day took
+# 515–1,258 s to make on 10-29; four runs make it, one under the profiler, several times slower; the
+# command stops itself at ``sample_profile.LIMIT`` (170 minutes), ten minutes before the job's limit.
+# Between the simulations and the bar-close pre-validations: it gives way to a pre-validation it would
+# carry past its last start, as the simulations do (#376), two nights at most. It reads the data
+# directory and writes only a temporary directory. Its output holds seconds, counts, sizes and function
+# names, no price. What to change (faster, made earlier in the evening, or as it is) is the next PR's.
+SAMPLE_PROFILE_ISSUE = 512
+
+
+def _first_quiet_night(night: Night) -> bool:
+    """Once, on the first night of a day that does not trade, with a recorded day to make; after a
+    failed run, again on other code."""
+    if night.trading_day or night.facts.recorded_days < 1:
+        return False
+    record = night.record
+    return not night.ran or (
+        record is not None and record.outcome == FAILED and record.commit != night.commit
+    )
+
+
+SAMPLE_PROFILE = Job(
+    name="sample-profile-512",
+    due=_first_quiet_night,
+    command=("sample-profile",),
+    timeout=SAMPLE_PROFILE_LIMIT + timedelta(minutes=10),
+    targets=(
+        Target(
+            SAMPLE_PROFILE_ISSUE,
+            note=(
+                "녹화일 하루의 표본을 밤 학습처럼 처음부터 만들며 잰 결과다. 밤의 읽기(모든 알고리즘의 "
+                "피처와 종류의 정답: 밤에 그 날을 처음 읽는 단계, newton이 모든 단계를 위해 만든다), "
+                "newton·turing의 피처만, 그리고 밤의 읽기를 cProfile로 한 번 더 만든다. 단계(파일 읽기 "
+                "`reading the files`, 이벤트 재생 `replaying the events`, 피처 `the features`, 정답 "
+                "`the answers`, 저장 `storing the day`, 그 밖 `the rest`)마다 초와 호출 수, 함수별 상위 "
+                "목록이다. 에이전트가 "
+                "이 출력으로 고칠 방법(더 빠르게: 가장 큰 단계와 함수부터, 미리 만들기: 15:40–21:30에 "
+                "그날 표본을 만들어 두기, 그대로 두기)에 대한 안을 이 이슈에 남기고 `ready-for-human`으로 "
+                "돌린다. 고치는 것은 다음 PR이고 사용자가 정한다. 표본을 만드는 코드를 고치면 그 다음 "
+                "밤에 모든 날을 다시 만든다는 것도 안에 적는다. 다시 돌리기(읽기만, 엔진 옆에서 돌아도 "
+                "된다): `docker compose run --rm engine sample-profile`. 출력에는 시세 값이 없다(초, "
+                "횟수, 크기, 날짜, 함수 이름만)."
+            ),
+        ),
+    ),
+    gives_way_to=_a_prevalidation,
 )
 
 

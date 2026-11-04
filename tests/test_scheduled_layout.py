@@ -25,8 +25,9 @@ FIRST = (
     "climate-gate-449",
     "nightly-hit-rates-437",
 )
-# Between the daily kinds' pre-validations and the bar-close ones.
-SIMULATIONS = ("simulate-daily-298", "simulate-bar-close-298")
+# Between the daily kinds' pre-validations and the bar-close ones: the simulations, then the measure of
+# where making a day's samples spends its time (#512), which gives way to a pre-validation as they do.
+SIMULATIONS = ("simulate-daily-298", "simulate-bar-close-298", "sample-profile-512")
 # After the bar-close pre-validations: the experiments.
 LAST = ("neyman-variants-283",)
 # The one-off jobs that ran, posted their results and left the list (#505), each with the command it
