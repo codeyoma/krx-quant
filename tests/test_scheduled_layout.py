@@ -29,7 +29,7 @@ FIRST = (
 # where making a day's samples spends its time (#512), which gives way to a pre-validation as they do.
 SIMULATIONS = ("simulate-daily-298", "simulate-bar-close-298", "sample-profile-512")
 # After the bar-close pre-validations: the experiments.
-LAST = ("neyman-variants-283", "smt-discovery-519", "smt-holdout-519")
+LAST = ("neyman-variants-283", "normal-order-529", "smt-discovery-519", "smt-holdout-519")
 # The one-off jobs that ran, posted their results and left the list (#505), each with the command it
 # ran, which stays for a run by hand (as ``probe-kis-orders-403``'s did, #484).
 RETIRED = {

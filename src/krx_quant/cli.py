@@ -68,6 +68,9 @@ from krx_quant.night_probe import probe_night
 from krx_quant.nightly import from_the_server, run_training
 from krx_quant.nightly_hit_rates import HIT_RATE_NIGHTS, compared_nights
 from krx_quant.nightly_hit_rates import lines as hit_rate_lines
+from krx_quant.normal_order import REPORT as NORMAL_ORDER_REPORT
+from krx_quant.normal_order import lines as normal_order_lines
+from krx_quant.normal_order import normal_order_experiment
 from krx_quant.notify import send_notice, send_test_alert
 from krx_quant.object_store import open_store
 from krx_quant.order_probe import probe_kis_orders
@@ -611,6 +614,19 @@ def _climate_prior(days: int) -> int:
         print(e, file=sys.stderr)
         return 1
     print("\n".join(climate_prior_lines(result, settings.state_dir / CLIMATE_PRIOR_REPORT)))
+    return 0
+
+
+def _normal_order(days: int) -> int:
+    """The label-order experiment for normal_forecast's algorithms (#529): its lines; exit 1 without a
+    recorded day."""
+    settings = Settings.from_env(require_kis=False)
+    try:
+        result = normal_order_experiment(settings, days=days)
+    except FileNotFoundError as e:
+        print(e, file=sys.stderr)
+        return 1
+    print("\n".join(normal_order_lines(result, settings.state_dir / NORMAL_ORDER_REPORT)))
     return 0
 
 
@@ -1224,6 +1240,19 @@ def _parser() -> argparse.ArgumentParser:
         help=f"recorded trading days to predict (default: {PREVALIDATION_DAYS})",
     )
     poisson_link_cmd.set_defaults(run=lambda args: _poisson_link(args.days))
+    normal_order_cmd = sub.add_parser(
+        "normal-order",
+        help="compare newton, gauss, granger, markov and kalman with normal_forecast's targets taken as"
+        " independent and in the touch label's order on the pre-validation's folds (#529; reads the"
+        " training samples, replays nothing)",
+    )
+    normal_order_cmd.add_argument(
+        "--days",
+        type=_positive,
+        default=PREVALIDATION_DAYS,
+        help=f"recorded trading days to predict (default: {PREVALIDATION_DAYS})",
+    )
+    normal_order_cmd.set_defaults(run=lambda args: _normal_order(args.days))
     turing_prior_cmd = sub.add_parser(
         "turing-prior",
         help="compare the climate baseline, turing, and turing with the symbol, each slot's class frequencies"

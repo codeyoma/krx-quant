@@ -2408,6 +2408,7 @@ Newton, Gauss, Granger, Markov, Kalman은 4분 변화의 정규분포(평균 μ,
   - p_up = P(위 닿음), p_down = P(아래 닿음)·(1 − p_up), p_flat = 1 − p_up − p_down. "위가 닿지 않았을 때만 하락"을 독립으로 근사한 것이다. 기대수익(`expected_ticks`)은 그대로 μ(4분 뒤 변화)다.
   - 예(손계산, `tests/test_touch_forecast.py`): k = 2, 1틱 스프레드(a = 2.5), μ = 0, s = 2이면 p_up = 2·(1 − Φ(1.25)) = 0.2113, p_down = 0.2113 × 0.7887 = 0.1667, p_flat = 0.6220. 끝점 확률(버전 1)은 p_up = 1 − Φ(1) = 0.1587이다.
 - **정답의 순서대로(`ordered_forecast`, `stay_probability`, #518).** 위 p_down의 독립 근사는 하락을 꽤 작게 본다. 표류 있는 브라운 운동이 4분 동안 두 목표 사이에 머물 확률(띠 생존 확률)은 상의 방법(method of images)에 표류의 Girsanov 가중을 곱해 닫힌 꼴로 낸다: P(머묾) = Σ_k [e^(μc₁/s²)·(Φ((b − c₁ − μ)/s) − Φ((−a − c₁ − μ)/s)) − e^(μc₂/s²)·(Φ((b − c₂ − μ)/s) − Φ((−a − c₂ − μ)/s))], c₁ = 2kL, c₂ = 2b − 2kL, L = a + b(아래 거리 a, 위 거리 b). 그러면 p_up = P(위 닿음), p_flat = P(머묾), p_down = 나머지로 정답의 순서("위가 닿으면 상승") 그대로다. 위 예(a = 2.5, μ = 0, s = 2)에서 p_flat = 0.5778, p_down = 0.2109로, 독립 근사(0.1667)보다 0.044 크다(그만큼 보합이 작다). `ordered_forecast`는 끝점(정답 버전 1)이면 `normal_forecast`와 같다. 새 알고리즘 Samuelson(로그 가격으로), Bishop, Ulam의 대체 예측이 이것을 쓰고, Itô는 격자 풀이로 같은 순서를 낸다. `normal_forecast`와 그것을 쓰는 다섯 알고리즘은 그대로다(바꾸면 다섯 모두 코드가 바뀐 리비전으로 수습에 돌아간다, #454). 확인은 `tests/test_samuelson.py`(코사인 급수, 브라운 경로 모의, 대칭)와 `tests/test_ito.py`다.
+- **정답 순서 스위치(`label_order`, #529).** `forecasts.label_order()` 안에서만 `normal_forecast`가 도달 정답을 정답의 순서대로 낸다(`ordered_forecast`와 같다). 엔진, 밤 학습, 사전 검증은 이 안에 들어가지 않으므로 다섯의 예측은 그대로다. `forecasts.py`는 다섯의 코드 digest(각자의 패키지)에 들어 있지 않아, 함수를 바로 고치면 수정 판정(#454) 없이 실시간 예측이 바뀐다. 그래서 바꾸기 전에 다섯을 두 순서로 견주는 실험을 먼저 돌린다(아래 "정답 순서 실험 (#529)"). 바꾸는 것은 그 결과를 보고 사용자가 정한다. 바꾸면 `forecasts.py`를 다섯의 `code_from`에 넣어 다섯이 수습으로 돌아간다.
 - Shannon, Poisson, Turing은 정답과 방향별 움직임에서 직접 배우므로 이 함수를 쓰지 않는다. 학습 정답이 바뀌면 그대로 새 정답을 배운다.
 - 카드의 "예측 방식" 글(`NORMAL_CLASSES`)은 도달 정답(닿을 확률)의 글이다(#170).
 
@@ -2763,6 +2764,26 @@ docker compose run --rm --no-deps engine neyman-variants   # 다음 단계: 발�
 - **메모리.** 사전 검증의 학습 단계와 같다(재생은 없다, #383). 학습 창의 날만 들고 지나간 날은 버린다. 날마다 메모리 줄(`neyman variants: memory on <날> (day i of n): …`)을 남기고 비운 메모리를 돌려준다. 창의 날을 셀 때는 날마다 따로 읽고 놓는다.
 - **비용.** 하루에 트리 열 개를 20거래일로 맞춘다(맥에서 만든 표본 22,000개에 한 번 1.7초쯤, 서버는 3배쯤 느리다). 날은 표본 저장소에서 읽는데, 저장소는 밤 학습이 읽는 날(약 61거래일)만 둔다. N이 40쯤을 넘으면 창이 찰 때 창의 첫 날들의 학습 창이 저장소에서 빠져 있어 다시 만든다(녹화일 하루에 몇 분).
 - **서버에서는** 예약 작업 `neyman-variants-283`이 돌린다([operations.md](operations.md#예약-작업-215)). 에이전트가 결과를 보고 안을 #455에 남긴다. 후보를 Neyman에 넣는 것은 #454가 끝난 뒤 사용자가 정한다.
+
+#### 정답 순서 실험 (#529)
+
+공통 정규분포 함수를 쓰는 다섯(Newton, Gauss, Granger, Markov, Kalman)이 도달 정답을 정답의 순서대로 내면 더 맞히는지 잰다(`normal_order.py`). 지금 함수는 위·아래 목표를 독립으로 보아 하락을 작게, 보합을 크게 본다(위 "공통 정규분포 함수"). 다섯의 코드는 바꾸지 않는다. 이 모듈은 다섯의 패키지 밖이라 코드 digest가 그대로다.
+
+```bash
+docker compose run --rm --no-deps engine normal-order            # 최근 20 녹화일
+docker compose run --rm --no-deps engine normal-order --days 5   # 빨리 훑어보기
+```
+
+- **팔 둘.** 알고리즘마다 같은 봉 마감에서 견준다.
+  - `independent`: 지금 도는 그대로다. 사전 검증처럼 학습한다(`_WalkForward.before`).
+  - `ordered`: 같은 표본으로 `label_order()` 안에서 학습하고 예측한다. Newton과 Gauss는 log loss가 가장 작은 격자를 고르므로 매개변수가 달라질 수 있다. Granger, Markov, Kalman은 매개변수를 다른 방법으로 정하므로 모델이 같고 예측만 다르다.
+- **겹.** 사전 검증의 겹이다: 최근 20 녹화일, 하루마다 그 전 20거래일(백필일 포함)로 학습한다. 표본은 밤 학습의 학습 데이터다(표본 저장소에 있으면 거기서 읽는다, #370). 재생하지 않는다. 한 알고리즘이 예측하지 않는 봉 마감(Kalman은 호가가 없으면)은 두 팔 모두에서 뺀다. 알고리즘을 하나씩 돌리고 다음으로 가기 전에 그 날들을 놓는다.
+- **리포트** `state/experiments/normal-order-529.json`. 돌릴 때마다 덮어쓴다. `days`, `comparisons`(알고리즘마다 `folds`(날마다 두 팔의 모델 버전, `scored`, `not_predicted`), `arms`(팔마다 `n`, 맞힘률, `log_loss`, 커버리지, 방향 정밀도, Brier, `by_class`(클래스마다 재현율, 정밀도, 예측 수, 일어난 수, `mean_probability`, 그 클래스가 일어난 봉 마감의 `log_loss`)), `ordered_over_independent`(`hit_rate`: 봉 마감 짝과 거래일 단위 lift, `log_loss_by_day`: 거래일마다 독립 팔 손실 − 순서 팔 손실의 평균), `rule`), `candidates`.
+- **판정(돌리기 전에 고정, `Comparison.candidate`).** 순서 팔의 맞힘률 lift(봉 마감 짝)가 0보다 크고 평균 log loss가 낮으면 그 알고리즘의 후보다. 후보라도 바로 바꾸지 않는다. 에이전트가 숫자로 안을 #529에 남기고 사용자가 정한다.
+- **출력.** 날, 개수, 비율, 손실만 낸다. 가격은 없다. 알고리즘마다 팔의 표, 클래스마다 `재현율 / 정밀도 (예측 수) / 평균 확률 / 일어난 봉 마감의 log loss`, 일어난 수와 비율, 순서 팔의 lift와 log loss 이득, `#529 rule: ... -> a candidate`(또는 `not a candidate`) 줄, 끝에 `candidates (#529 rule): ...`.
+- **메모리.** 사전 검증의 학습 단계와 같다(재생은 없다, #383). 날마다 메모리 줄(`normal order: <알고리즘>'s memory on <날> (day i of n): …`)을 남기고 비운 메모리를 돌려준다.
+- **비용.** 하루에 알고리즘마다 두 번 맞춘다. 정답의 순서는 한 번 계산에 10배쯤 든다: 맥에서 만든 표본 20,000개로 Newton 1.9초 → 17.7초, Gauss 1.1초 → 11.1초다(서버는 3배쯤 느리다). Markov는 서버 밤 학습에서 한 번에 74초쯤이다. 20일이면 모두 두 시간쯤이다.
+- **서버에서는** 예약 작업 `normal-order-529`가 돌린다([operations.md](operations.md#예약-작업-215)). 에이전트가 결과를 보고 안을 #529에 남긴다.
 
 ### 확률 과정 넷 (#518)
 
