@@ -63,6 +63,7 @@ from tests.trader_doubles import (
     quote,
     whole_rules,
 )
+from tests.waiting import until
 
 KEY = "PStrader" + "m" * 28
 SECRET = "Sm" + "k" * 60
@@ -130,12 +131,6 @@ def _time(event: Event) -> datetime:
     if isinstance(event, Fill | Depth | Resting_ | PauseNow):
         return at(event.hms)
     return event.time
-
-
-async def until(ready: Callable[[], bool], seconds: float = 5.0) -> None:
-    async with asyncio.timeout(seconds):
-        while not ready():
-            await asyncio.sleep(0.005)
 
 
 @pytest.fixture
@@ -1427,7 +1422,7 @@ async def test_the_trader_in_mock_mode_orders_on_kis_from_its_stream(
                 feed.on_event(BOOK.tr_id, book(at("10:00:02.5"), 70_000, 70_100))
                 # The broker's own pace, one call in any 1.1 s (#461): the buy's calls and the
                 # take-profit's sell each wait out the window of the one before.
-                await until(lambda: len(resting_sells(account)) == 1, 15.0)
+                await until(lambda: len(resting_sells(account)) == 1, timeout=15.0)
                 clock[0] = at("10:02:00")
                 account.bid, account.improvement = 70_300, 0.0
                 account.fill(resting_sells(account)[0])

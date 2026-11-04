@@ -60,9 +60,10 @@ from krx_quant.trader.store import (
 )
 from tests.test_live_predictions import free_port
 from tests.test_notify import telegram
-from tests.test_trader_mock import ACCOUNT, KEY, SECRET, TIMING, until
+from tests.test_trader_mock import ACCOUNT, KEY, SECRET, TIMING
 from tests.test_trader_run import PASSING, EngineApi, book
 from tests.trader_doubles import BARRIER, CALENDAR, FEE, Barrier, at, keep, policy_cell, whole_rules
+from tests.waiting import until
 
 LIVE_KEY = "PSlive" + "l" * 30
 LIVE_SECRET = "Sl" + "v" * 60

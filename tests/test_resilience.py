@@ -18,7 +18,7 @@ from krx_quant.feeds import FOREIGN_ESTIMATE, KST, VI_STATUS
 from krx_quant.market_calendar import MarketCalendar
 from tests.kis_frames import book_frame, trade_frame, us_trade_frame
 from tests.test_collector import FIXED_NOW, read, settings_for
-from tests.test_subscription_limit import until
+from tests.waiting import until
 
 TRADE_KEY = ("H0UNCNT0", "005930")
 DOWN = "KIS WebSocket down"  # each failed connection's WARNING

@@ -57,8 +57,9 @@ from krx_quant.trader.notice_layout import (
     measure,
     render,
 )
-from tests.test_trader_mock import BOUGHT, TEN, Fill, MockDay, kis_mock, settings_of, until
+from tests.test_trader_mock import BOUGHT, TEN, Fill, MockDay, kis_mock, settings_of
 from tests.trader_doubles import CALENDAR, at, quote
+from tests.waiting import until
 
 __all__ = ["kis_mock"]  # a fixture
 

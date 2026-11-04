@@ -33,6 +33,7 @@ from krx_quant.snapshot import (
 )
 from tests.fake_github import REPO, TOKEN, FakeGitHub, fake_github
 from tests.test_collector import settings_for
+from tests.waiting import until
 
 START = datetime(2026, 10, 20, 10, 0, tzinfo=KST)
 SUMMARY = "서버 상태 (가짜 요약)\n1. 엔진\n"
@@ -246,10 +247,7 @@ async def test_an_unexpected_error_ends_one_look_only(
         monkeypatch.setattr(looker, "_every", timedelta(seconds=0.01))
         task = asyncio.create_task(looker.run())
         try:
-            for _ in range(200):
-                if looks >= 3:
-                    break
-                await asyncio.sleep(0.01)
+            await until(lambda: looks >= 3, timeout=2)
         finally:
             task.cancel()
         assert looks >= 3
@@ -303,10 +301,7 @@ async def test_the_collector_answers_a_labelled_issue_with_its_summary(kis: Fake
         stop = asyncio.Event()
         task = asyncio.create_task(run_collector(settings, stop=stop, clock=lambda: START))
         try:
-            for _ in range(400):
-                if hub.comments and hub.labels[400] == set():
-                    break
-                await asyncio.sleep(0.05)
+            await until(lambda: bool(hub.comments) and hub.labels[400] == set(), timeout=20)
         finally:
             stop.set()
             await asyncio.wait_for(task, 10)

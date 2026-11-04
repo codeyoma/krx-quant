@@ -36,7 +36,6 @@ from tests.api_schema import check
 from tests.test_live_predictions import free_port
 from tests.test_trader_promotion import GOOD, LONG, WEEKDAYS, day_ran, judged_at, night, setup
 from tests.test_trader_report import reported
-from tests.test_trader_run import until
 from tests.trader_doubles import (
     BARRIER,
     CALENDAR,
@@ -54,6 +53,7 @@ from tests.trader_doubles import (
     predictor,
     quote,
 )
+from tests.waiting import until
 
 # Hangul Day, a Friday the market is closed.
 HOLIDAYS = MarketCalendar({date(2026, 10, 9): False})

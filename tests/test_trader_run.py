@@ -9,7 +9,7 @@ import asyncio
 import hashlib
 import json
 import sqlite3
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, closing
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
@@ -40,6 +40,7 @@ from tests.replay_events import run
 from tests.test_live_predictions import free_port
 from tests.test_notify import telegram
 from tests.trader_doubles import BARRIER, FEE, Barrier, at, cost_map, cost_row, keep, policy_cell, predictor
+from tests.waiting import until
 
 PASSING = cost_map([cost_row("barrier", top=predictor("breiman", 0.70, "pass"))])
 FAILING = cost_map([cost_row("barrier", top=predictor("breiman", 0.60, "fail"))])
@@ -58,12 +59,6 @@ def book(received: datetime, bid: int, ask: int) -> dict[str, Any]:
 
 def digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
-async def until(ready: Callable[[], bool], seconds: float = 5.0) -> None:
-    async with asyncio.timeout(seconds):
-        while not ready():
-            await asyncio.sleep(0.01)
 
 
 @dataclass
@@ -235,7 +230,7 @@ async def test_the_cells_are_picked_again_every_day_at_08_30(tmp_path: Path) -> 
         stop = asyncio.Event()
         task = asyncio.create_task(run_trader(settings, trader, stop=stop, now=lambda: clock[0], sleep=sleep))
         try:
-            await until(lambda: len(rows(tmp_path, "selections")) == 2, seconds=20)
+            await until(lambda: len(rows(tmp_path, "selections")) == 2, timeout=20)
         finally:
             stop.set()
             await asyncio.wait_for(task, 5)

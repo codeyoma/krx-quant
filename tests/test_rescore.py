@@ -45,6 +45,7 @@ from tests.test_live_predictions import free_port, poll
 from tests.test_replay import busy_morning
 from tests.test_replay_cli import END_OF_DAY, record
 from tests.test_special import VI, held
+from tests.waiting import until
 
 NEXT_MORNING = at("06:00:00", DAY + timedelta(days=1))  # the 06:00 deploy after the day
 BAR_CLOSES = 376  # 09:01 to 15:16
@@ -566,9 +567,7 @@ async def test_the_engine_answers_first_then_fills_the_kinds_answers(
         status = await poll(f"http://127.0.0.1:{port}/v1/status", lambda b: True)
         waiting = kind_answers(db)
         rescoring.release()
-        async with asyncio.timeout(10):
-            while len(kind_answers(db)) < len(kind_answers(replayed)):
-                await asyncio.sleep(0.05)
+        await until(lambda: len(kind_answers(db)) >= len(kind_answers(replayed)), timeout=10)
     finally:
         rescoring.release()
         stop.set()

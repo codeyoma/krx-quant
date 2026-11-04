@@ -39,7 +39,7 @@ from krx_quant.trader.selection import (
 from krx_quant.trader.settings import TraderSettings
 from krx_quant.trader.store import DB_NAME, TraderStore, read_trades
 from tests.test_live_predictions import free_port
-from tests.test_trader_run import EngineApi, rows, until
+from tests.test_trader_run import EngineApi, rows
 from tests.trader_doubles import (
     BARRIER,
     FEE,
@@ -53,6 +53,7 @@ from tests.trader_doubles import (
     predictor,
     quote,
 )
+from tests.waiting import until
 
 FIFTEEN = Cell("barrier_15m", "barrier-persist-15m")
 

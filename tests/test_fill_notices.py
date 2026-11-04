@@ -51,8 +51,8 @@ from krx_quant.trader.fill_notices import (
     read_recorded,
     recording_window,
 )
-from tests.test_subscription_limit import until
 from tests.trader_doubles import CALENDAR, at
+from tests.waiting import until
 
 KEY = "PStrader" + "n" * 28
 SECRET = "Sn" + "k" * 60
