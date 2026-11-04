@@ -2407,7 +2407,9 @@ Newton, Gauss, Granger, Markov, Kalman은 4분 변화의 정규분포(평균 μ,
   - P(위 닿음) = 1 − Φ((a − μ)/s) + exp(2μa/s²)·Φ((−a − μ)/s)(표류 있는 브라운 운동의 최대값 분포, 반사 원리). 표류가 없으면 2·(1 − Φ(a/s))로, 같은 거리에서 끝날 확률의 2배다. P(아래 닿음)은 μ의 부호를 바꾼 같은 식이다.
   - p_up = P(위 닿음), p_down = P(아래 닿음)·(1 − p_up), p_flat = 1 − p_up − p_down. "위가 닿지 않았을 때만 하락"을 독립으로 근사한 것이다. 기대수익(`expected_ticks`)은 그대로 μ(4분 뒤 변화)다.
   - 예(손계산, `tests/test_touch_forecast.py`): k = 2, 1틱 스프레드(a = 2.5), μ = 0, s = 2이면 p_up = 2·(1 − Φ(1.25)) = 0.2113, p_down = 0.2113 × 0.7887 = 0.1667, p_flat = 0.6220. 끝점 확률(버전 1)은 p_up = 1 − Φ(1) = 0.1587이다.
-- **정답의 순서대로(`ordered_forecast`, `stay_probability`, #518).** 위 p_down의 독립 근사는 하락을 꽤 작게 본다. 표류 있는 브라운 운동이 4분 동안 두 목표 사이에 머물 확률(띠 생존 확률)은 상의 방법(method of images)에 표류의 Girsanov 가중을 곱해 닫힌 꼴로 낸다: P(머묾) = Σ_k [e^(μc₁/s²)·(Φ((b − c₁ − μ)/s) − Φ((−a − c₁ − μ)/s)) − e^(μc₂/s²)·(Φ((b − c₂ − μ)/s) − Φ((−a − c₂ − μ)/s))], c₁ = 2kL, c₂ = 2b − 2kL, L = a + b(아래 거리 a, 위 거리 b). 그러면 p_up = P(위 닿음), p_flat = P(머묾), p_down = 나머지로 정답의 순서("위가 닿으면 상승") 그대로다. 위 예(a = 2.5, μ = 0, s = 2)에서 p_flat = 0.5778, p_down = 0.2109로, 독립 근사(0.1667)보다 0.044 크다(그만큼 보합이 작다). `ordered_forecast`는 끝점(정답 버전 1)이면 `normal_forecast`와 같다. 새 알고리즘 Samuelson(로그 가격으로), Bishop, Ulam의 대체 예측이 이것을 쓰고, Itô는 격자 풀이로 같은 순서를 낸다. `normal_forecast`와 그것을 쓰는 다섯 알고리즘은 그대로다(바꾸면 다섯 모두 코드가 바뀐 리비전으로 수습에 돌아간다, #454). 확인은 `tests/test_samuelson.py`(코사인 급수, 브라운 경로 모의, 대칭)와 `tests/test_ito.py`다.
+- **정답의 순서대로(`ordered_forecast`, `stay_probability`, #518).** 위 p_down의 독립 근사는 하락을 꽤 작게 본다. 표류 있는 브라운 운동이 4분 동안 두 목표 사이에 머물 확률(띠 생존 확률)은 상의 방법(method of images)에 표류의 Girsanov 가중을 곱해 닫힌 꼴로 낸다: P(머묾) = Σ_k [e^(μc₁/s²)·(Φ((b − c₁ − μ)/s) − Φ((−a − c₁ − μ)/s)) − e^(μc₂/s²)·(Φ((b − c₂ − μ)/s) − Φ((−a − c₂ − μ)/s))], c₁ = 2kL, c₂ = 2b − 2kL, L = a + b(아래 거리 a, 위 거리 b). 그러면 p_up = P(위 닿음), p_flat = P(머묾), p_down = 나머지로 정답의 순서("위가 닿으면 상승") 그대로다. 위 예(a = 2.5, μ = 0, s = 2)에서 p_flat = 0.5778, p_down = 0.2109로, 독립 근사(0.1667)보다 0.044 크다(그만큼 보합이 작다). `ordered_forecast`는 끝점(정답 버전 1)이면 `normal_forecast`와 같다. 새 알고리즘 Samuelson(로그 가격으로), Bishop, Ulam의 대체 예측이 이것을 쓰고, Itô는 격자 풀이로 같은 순서를 낸다. `normal_forecast`와 그것을 쓰는 다섯 알고리즘은 그대로다(아래 "정답 순서 스위치"). 확인은 `tests/test_samuelson.py`(코사인 급수, 브라운 경로 모의, 대칭)와 `tests/test_ito.py`다.
+
+  > **바뀜** (2026-11-04, #530): "공통 함수를 바꾸면 다섯 모두 코드가 바뀐 리비전으로 수습에 돌아간다" → `forecasts.py`는 다섯의 코드 digest(각자의 패키지와 `code_from`)에 들어 있지 않아, 함수를 고쳐도 저절로 수습에 돌아가지 않고 실시간 예측만 바뀐다. 바꿀 때 `forecasts.py`를 다섯의 `code_from`에 넣어야 수습에 돌아간다. 이유: #529를 준비하며 `prevalidation.code_digest`를 다시 읽고 바로잡았다.
 - **정답 순서 스위치(`label_order`, #529).** `forecasts.label_order()` 안에서만 `normal_forecast`가 도달 정답을 정답의 순서대로 낸다(`ordered_forecast`와 같다). 엔진, 밤 학습, 사전 검증은 이 안에 들어가지 않으므로 다섯의 예측은 그대로다. `forecasts.py`는 다섯의 코드 digest(각자의 패키지)에 들어 있지 않아, 함수를 바로 고치면 수정 판정(#454) 없이 실시간 예측이 바뀐다. 그래서 바꾸기 전에 다섯을 두 순서로 견주는 실험을 먼저 돌린다(아래 "정답 순서 실험 (#529)"). 바꾸는 것은 그 결과를 보고 사용자가 정한다. 바꾸면 `forecasts.py`를 다섯의 `code_from`에 넣어 다섯이 수습으로 돌아간다.
 - Shannon, Poisson, Turing은 정답과 방향별 움직임에서 직접 배우므로 이 함수를 쓰지 않는다. 학습 정답이 바뀌면 그대로 새 정답을 배운다.
 - 카드의 "예측 방식" 글(`NORMAL_CLASSES`)은 도달 정답(닿을 확률)의 글이다(#170).
@@ -2767,7 +2769,7 @@ docker compose run --rm --no-deps engine neyman-variants   # 다음 단계: 발�
 
 #### 정답 순서 실험 (#529)
 
-공통 정규분포 함수를 쓰는 다섯(Newton, Gauss, Granger, Markov, Kalman)이 도달 정답을 정답의 순서대로 내면 더 맞히는지 잰다(`normal_order.py`). 지금 함수는 위·아래 목표를 독립으로 보아 하락을 작게, 보합을 크게 본다(위 "공통 정규분포 함수"). 다섯의 코드는 바꾸지 않는다. 이 모듈은 다섯의 패키지 밖이라 코드 digest가 그대로다.
+공통 정규분포 함수를 쓰는 다섯(Newton, Gauss, Granger, Markov, Kalman)이 도달 정답을 정답의 순서대로 내면 더 맞히는지 잰다(`normal_order.py`, #530). 지금 함수는 위·아래 목표를 독립으로 보아 하락을 작게, 보합을 크게 본다(위 "공통 정규분포 함수"). 다섯의 코드는 바꾸지 않는다. 이 모듈은 다섯의 패키지 밖이라 코드 digest가 그대로다.
 
 ```bash
 docker compose run --rm --no-deps engine normal-order            # 최근 20 녹화일
