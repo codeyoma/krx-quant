@@ -50,7 +50,7 @@ Worktree, checks, commits, docs, PRs, reviews and stacked PRs: `docs/agents/pr-c
   - `> **바뀜** (YYYY-MM-DD, #PR): 이전 → 지금. 이유: ….`
 - The reason is the one recorded in the PR or the commit. If none was recorded, write "이유 기록 없음".
 - `#PR` is the real number. Write a stand-in, open the PR as a draft, then run `uv run python scripts/fill_pr_number.py <PR>`, push, and mark it ready. A draft's CI run skips the placeholder rule alone; once the PR is ready, and on `main`, the forbidden-pattern check fails while a stand-in is left (#321, #507).
-  > **바뀜** (2026-11-04, #PRNUM): PR을 연 뒤 노트에 번호를 손으로 넣었고, 자리표시는 초안의 CI도 실패시켰다 → 초안으로 열고 `scripts/fill_pr_number.py`로 채운 뒤 리뷰 준비로 바꾼다. 이유: CI 실패 31번 중 22번이 첫 push의 자리표시였다(#507).
+  > **바뀜** (2026-11-04, #513): PR을 연 뒤 노트에 번호를 손으로 넣었고, 자리표시는 초안의 CI도 실패시켰다 → 초안으로 열고 `scripts/fill_pr_number.py`로 채운 뒤 리뷰 준비로 바꾼다. 이유: CI 실패 31번 중 22번이 첫 push의 자리표시였다(#507).
 - Changes committed straight to `main` before PR #31 are cited by commit SHA instead of `#PR`.
 
 ## Timed server work

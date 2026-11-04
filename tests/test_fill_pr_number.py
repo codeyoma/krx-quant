@@ -118,6 +118,19 @@ def test_the_filled_files_pass_the_check(repo: Path) -> None:
     assert subprocess.run([sys.executable, str(CHECK), path], capture_output=True).returncode == 0
 
 
+def test_line_endings_and_binary_files_stay_as_they_are(repo: Path) -> None:
+    crlf = repo / "docs" / "windows.md"
+    crlf.write_bytes(f"첫 줄\r\n노트 ({HASH}PRNUM).\r\n".encode())
+    blob = repo / "docs" / "chart.png"
+    blob.write_bytes(b"\x89PNG\xff" + f"{HASH}PRNUM".encode())
+    git(repo, "add", "docs")
+    filled = fill(repo, "512")
+    assert filled.returncode == 0, filled.stderr
+    assert crlf.read_bytes() == "첫 줄\r\n노트 (#512).\r\n".encode()
+    assert blob.read_bytes() == b"\x89PNG\xff" + f"{HASH}PRNUM".encode()
+    assert "docs/windows.md: 1 line(s) (2)" in filled.stdout
+
+
 def test_the_rules_file_keeps_its_examples(repo: Path) -> None:
     """``forbidden.py`` spells the placeholders out, so the check skips it, and so does the filler."""
     rules = repo / "src" / "krx_quant" / "forbidden.py"

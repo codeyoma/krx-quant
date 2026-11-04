@@ -38,7 +38,7 @@ After the merge, remove the worktree and delete the branch, locally and on the r
 - Every PR updates the docs for what it adds or changes (AGENTS.md "Documentation").
 - A change note cites the real PR number. Write a stand-in, open the PR as a draft, run `uv run python scripts/fill_pr_number.py <PR>` in the worktree, commit and push, then mark the PR ready (`gh pr ready`). The script replaces what the placeholder rule finds, only in the files the branch changed against `origin/main`, and prints each file and its lines; run again, it changes nothing. A stand-in glued to another repository's name (`codeyoma/FinceptTerminal#…`) is left and listed: fill that in by hand.
 - A draft's CI run skips the placeholder rule alone (`check_forbidden.py --draft`, #507) and lists the stand-ins it skipped. The run that marking the PR ready starts, and a push to `main`, fail on one (#321).
-  > **바뀜** (2026-11-04, #PRNUM): PR을 연 뒤 노트에 번호를 손으로 넣었고, 자리표시는 초안의 CI도 실패시켰다 → 초안으로 열고 `scripts/fill_pr_number.py`로 채운 뒤 리뷰 준비로 바꾼다. 이유: CI 실패 31번 중 22번이 첫 push의 자리표시였다(#507).
+  > **바뀜** (2026-11-04, #513): PR을 연 뒤 노트에 번호를 손으로 넣었고, 자리표시는 초안의 CI도 실패시켰다 → 초안으로 열고 `scripts/fill_pr_number.py`로 채운 뒤 리뷰 준비로 바꾼다. 이유: CI 실패 31번 중 22번이 첫 push의 자리표시였다(#507).
 - A PR that changes `src/` but nothing under `docs/`, nor `README.md` or `.env.example`, fails the `pr-docs` check (`scripts/check_pr_docs.py`, #507). When no doc needs a change, say why in a line of the body of its own: `Docs: none (<reason>)`. A line with no reason fails; editing the body runs the check again.
 - Product docs are Korean; agent-facing files (AGENTS.md, `docs/agents/`, `CODING_STANDARDS.md`) are English.
 

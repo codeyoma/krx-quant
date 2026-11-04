@@ -81,13 +81,14 @@ def main(argv: list[str]) -> int:
         return 2
     total_files = total_lines = 0
     for path in paths:
+        # As bytes, so a file's line endings stay as they are.
         try:
-            text = (root / path).read_text(encoding="utf-8")
+            text = (root / path).read_bytes().decode("utf-8")
         except (UnicodeDecodeError, IsADirectoryError, FileNotFoundError):
-            continue
+            continue  # a binary file, a submodule's directory
         new, filled, left = fill(text, number)
         if filled:
-            (root / path).write_text(new, encoding="utf-8")
+            (root / path).write_bytes(new.encode("utf-8"))
             total_files, total_lines = total_files + 1, total_lines + len(filled)
             print(f"{path}: {len(filled)} line(s) ({', '.join(map(str, filled))})")
         for lineno in left:
