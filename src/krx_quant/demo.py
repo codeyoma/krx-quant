@@ -16,13 +16,15 @@ timings, which are measured.
 
 Before the morning come the last 80 minutes (14:00–15:20) of the two trading days before
 it, 2026-10-07 and 2026-10-08 (Friday the 9th is Hangul Day, closed), so a chart scrolls back into them
-(#108): their predictions are in the database, and their one-minute bars are stored as
-the backfill stores them, under ``<db stem>-data/bars/``. Each symbol also has two years of
-made-up day candles up to the 8th (``candles/``), for the chart's day view (#111), and the
-finished week, month and year candles made of them (#112), and made-up daily supply data on
-the same days (``state/supply/``, #226): the 12th's is not out yet, as on the server that
-morning. The cost map's period base rates (``state/base_rates.json``, #307) are made up too,
-each symbol's four periods.
+(#108): their predictions are in the database, and their one-minute bars (the KOSPI200 futures'
+too) are stored as the backfill stores them, under ``<db stem>-data/bars/``. The SMT divergences
+(#521): the engine kept the 8th's and the morning's live; the 7th's are taken out, as on a day
+before the engine judged them (#520), so the API makes that day again from its backfilled bars.
+Each symbol also has two years of made-up day candles up to the 8th (``candles/``), for the
+chart's day view (#111), and the finished week, month and year candles made of them (#112), and
+made-up daily supply data on the same days (``state/supply/``, #226): the 12th's is not out yet,
+as on the server that morning. The cost map's period base rates (``state/base_rates.json``, #307)
+are made up too, each symbol's four periods.
 
 The daily kind ``open_to_close`` (#264) has KRX day candles of its own (``krx.parquet``, the
 same days, an open a tick off the integrated one's) and, for its last 20 days up to the 8th,
@@ -70,6 +72,7 @@ import contextlib
 import json
 import random
 import shutil
+import sqlite3
 from collections import defaultdict
 from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, date, datetime, time, timedelta
@@ -84,7 +87,14 @@ from aiohttp import web
 from krx_quant.algorithms import ALGORITHMS, DAILY_ALGORITHMS, Model
 from krx_quant.api import create_app
 from krx_quant.auctions import KEEP_DAYS, MINUTE_BAR, write_auctions
-from krx_quant.backfill import BAR_SCHEMA, PreviousDay, stock_bars_path
+from krx_quant.backfill import (
+    BAR_SCHEMA,
+    FUTURES_BAR_SCHEMA,
+    FUTURES_BARS_TR,
+    PreviousDay,
+    bars_key,
+    stock_bars_path,
+)
 from krx_quant.base_rates import write_base_rates
 from krx_quant.candles import EX_CODE, PERIODS, period_start, read_candles, write_candles, write_krx_days
 from krx_quant.clock import FakeClock
@@ -98,6 +108,7 @@ from krx_quant.closing_flow import (
     write_days,
     write_demand,
 )
+from krx_quant.contracts import KOSPI200
 from krx_quant.daily import ANSWER_FROM, NO_EX_CODE, StoredDays
 from krx_quant.daily_features import DAILY_FEATURES, LiveFeatures
 from krx_quant.engine import Event, PredictionEngine
@@ -265,25 +276,33 @@ def _session_events(start: datetime, end: datetime, seed: int) -> list[Event]:
 
 
 def write_past_bars(data_dir: Path, day: date, events: Sequence[Event]) -> None:
-    """``day``'s one-minute bars of the demo symbols from its trades, stored as the backfill
-    stores them (``backfill.py``), replacing earlier ones."""
-    minutes: dict[str, dict[datetime, list[tuple[int, int]]]] = defaultdict(lambda: defaultdict(list))
+    """``day``'s one-minute bars of the demo symbols and of the KOSPI200 futures (their continuous
+    series, #521) from its trades, stored as the backfill stores them (``backfill.py``), replacing
+    earlier ones."""
+    minutes: dict[str, dict[datetime, list[tuple[float, int]]]] = defaultdict(lambda: defaultdict(list))
+    contract = None  # the futures' month
     for tr_id, row in events:
         if tr_id == TRADE.tr_id:
-            traded = row["received_at"].astimezone(KST)
-            minutes[row["symbol"]][traded.replace(second=0, microsecond=0)].append((row["price"], row["qty"]))
-    for symbol, bars in minutes.items():
+            name = row["symbol"]
+        elif tr_id == KOSPI200_FUTURES.tr_id:
+            name, contract = KOSPI200.series, row["symbol"]
+        else:
+            continue
+        traded = row["received_at"].astimezone(KST)
+        minutes[name][traded.replace(second=0, microsecond=0)].append((row["price"], row["qty"]))
+    for name, bars in minutes.items():
+        stock = name != KOSPI200.series
         cum = 0
         rows = []
         for start in sorted(bars):
             prices = [p for p, _ in bars[start]]
             volume = sum(q for _, q in bars[start])
-            cum += sum(p * q for p, q in bars[start])
+            cum += int(sum(p * q for p, q in bars[start]))
             rows.append(
                 {
-                    "symbol": symbol,
+                    "symbol": name,
                     "bar_time": start,
-                    "venue": "UN",
+                    **({"venue": "UN"} if stock else {"contract": contract}),
                     "open": prices[0],
                     "high": max(prices),
                     "low": min(prices),
@@ -292,11 +311,24 @@ def write_past_bars(data_dir: Path, day: date, events: Sequence[Event]) -> None:
                     "cum_value": cum,
                 }
             )
-        path = stock_bars_path(data_dir, day, symbol)
+        path = (
+            stock_bars_path(data_dir, day, name) if stock else data_dir / bars_key(day, FUTURES_BARS_TR, name)
+        )
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_name(f".{path.name}.tmp")  # whole or absent, as the backfill writes
-        pq.write_table(pa.Table.from_pylist(rows, schema=BAR_SCHEMA), tmp)
+        pq.write_table(pa.Table.from_pylist(rows, schema=BAR_SCHEMA if stock else FUTURES_BAR_SCHEMA), tmp)
         tmp.rename(path)
+
+
+def forget_smt(db: Path, day: date) -> None:
+    """``day`` as an engine from before #520 left it: no live SMT events, so the API makes the day
+    again from its bars (#521)."""
+    start = datetime.combine(day, time(), KST)
+    with contextlib.closing(sqlite3.connect(db)) as kept, kept:
+        kept.execute(
+            "DELETE FROM smt_events WHERE bar_close >= ? AND bar_close < ?",
+            (iso(start), iso(start + timedelta(days=1))),
+        )
 
 
 def write_demo_candles(data_dir: Path) -> None:
@@ -902,6 +934,7 @@ async def demo_app(db: Path, pace: float | None = None) -> web.Application:
             previous=PreviousDay(data_dir, _CALENDAR),  # range_prev_day, slot returns (#181, #265)
         )  # no macro read those mornings: no regime
         engine.store.close()
+    forget_smt(db, PAST_DAYS[0])  # the API makes the 7th again from its backfilled bars (#521)
     cox = write_demo_daily(db, data_dir)  # the daily kind's last 20 days (#264)
     write_demo_windows(db, data_dir)  # the five-session kind's last 20 windows (#310)
     events = demo_events()

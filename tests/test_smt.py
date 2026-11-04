@@ -192,6 +192,39 @@ def test_the_side_that_sweeps_may_change_within_an_episode() -> None:
     )
 
 
+def test_an_event_keeps_when_each_side_set_the_extreme_it_was_judged_against() -> None:
+    """#521: at the event's first bar close, the start of each side's look-back bar holding its
+    highest high (bearish) or lowest low (bullish), the latest of equal ones."""
+    events = day_events(
+        CALENDAR,
+        DAY,
+        day_bars(
+            {
+                (B, "09:40"): (1012, 990),  # in the 30 minutes before 10:00, not in the 15
+                (A, "09:50"): (1015, 990),
+                (A, "09:55"): (1015, 990),  # as high as 09:50: the later is kept
+                (A, "10:00"): (1016, 990),  # past it alone: bearish
+                (A, "10:50"): (1010, 985),
+                (B, "11:00"): (1010, 989),  # past its low alone: bullish
+            }
+        ),
+    )
+    extremes = {
+        (f"{e.bar_close:%H:%M}", e.a, e.b, e.direction, e.minutes): (
+            f"{e.a_extreme:%H:%M}" if e.a_extreme else None,
+            f"{e.b_extreme:%H:%M}" if e.b_extreme else None,
+        )
+        for e in events
+    }
+    # 000660's and the futures' bars are all at their extreme: the latest is the minute before.
+    assert extremes[("10:01", A, B, BEARISH, 15)] == ("09:55", "09:59")
+    assert extremes[("10:01", A, B, BEARISH, 30)] == ("09:55", "09:40")
+    assert extremes[("10:01", A, F, BEARISH, 15)] == ("09:55", "09:59")
+    assert extremes[("11:01", A, B, BULLISH, 15)] == ("10:50", "10:59")
+    assert extremes[("11:01", B, F, BULLISH, 30)] == ("10:59", "10:59")
+    assert all(None not in both_sides for both_sides in extremes.values())
+
+
 def test_a_missing_bar_is_unknown_never_not_swept_and_leaves_an_episode_going_on() -> None:
     rising = {(A, f"10:{m:02d}"): (1011.0 + m, 990.0) for m in range(41)}  # past its high every minute
     events = day_events(
@@ -318,6 +351,7 @@ async def test_the_engine_judges_live_what_the_day_made_again_gives(tmp_path: Pa
         | both("10:21", B, F, BEARISH, F)
     )
     assert {e.source for e in live} == {LIVE}
+    assert all(e.a_extreme and e.b_extreme for e in live), "kept with its extremes (#521)"
     assert [replace(e, source=RECONSTRUCTED) for e in live] == sorted(
         again, key=lambda e: (e.bar_close, e.a, e.b, e.direction, e.minutes)
     )
@@ -359,6 +393,33 @@ def test_kept_events_are_never_rewritten(tmp_path: Path) -> None:
     old = sqlite3.connect(tmp_path / "old.sqlite3")
     assert smt_events(old, at("00:00"), at("00:00", NEXT)) == []
     old.close()
+
+
+def test_a_table_kept_before_the_extremes_gains_them_and_its_rows_have_none(tmp_path: Path) -> None:
+    """#521. Input: ``smt_events`` as #520 made it, with a row. Output: the store opens it, adds
+    the columns, reads that row without extremes and keeps a new one's."""
+    path = tmp_path / DB_NAME
+    with sqlite3.connect(path) as before:
+        before.executescript(
+            """
+            CREATE TABLE smt_events (definition TEXT NOT NULL, version INTEGER NOT NULL,
+                bar_close TEXT NOT NULL, a TEXT NOT NULL, b TEXT NOT NULL, direction TEXT NOT NULL,
+                minutes INTEGER NOT NULL, swept TEXT NOT NULL, source TEXT NOT NULL,
+                recorded_at TEXT NOT NULL,
+                PRIMARY KEY (definition, version, bar_close, a, b, direction, minutes, source));
+            INSERT INTO smt_events VALUES ('rolling_extreme', 1, '2026-10-12T10:01:00+09:00',
+                '005930', '000660', 'bearish', 15, '005930', 'live', '2026-10-12T10:01:00.2+09:00');
+            """
+        )
+    before.close()
+    store = PredictionStore(path)
+    kept = SmtEvent(at("11:01"), A, B, BULLISH, 30, B, LIVE, a_extreme=at("10:50"), b_extreme=at("10:59"))
+    store.add_smt_events([kept], at("11:01:00.2"))
+    assert store.smt_events(at("10:00"), at("12:00")) == [
+        SmtEvent(at("10:01"), A, B, BEARISH, 15, A, LIVE),
+        kept,
+    ]
+    store.close()
 
 
 def store_backfill(data: Path, day: date, bars: Mapping[str, Sequence[Bar]]) -> None:
@@ -419,6 +480,12 @@ def test_a_day_is_made_again_from_its_recording_before_its_backfilled_bars(tmp_p
     assert from_recording is not None and from_recording.bars == RECORDED
     assert from_recording.events == replayed(CALENDAR, DAY, events)
     assert found(from_recording.events) == both("10:11", A, B, BULLISH, B) | both("10:11", B, F, BULLISH, B)
+    # The Engine API's (#521): the backfilled bars first, the recording without them.
+    first = reconstruct(data, DAY, CALENDAR, first=BACKFILLED)
+    assert first is not None and (first.bars, first.events) == (BACKFILLED, from_bars.events)
+    (data / bars_key(DAY, MINUTE_BARS_TR, B)).unlink()
+    without = reconstruct(data, DAY, CALENDAR, first=BACKFILLED)
+    assert without is not None and (without.bars, without.events) == (RECORDED, from_recording.events)
 
 
 def test_the_smt_command_counts_a_day_beside_its_live_events_and_prints_no_price(

@@ -233,9 +233,9 @@
 | `kind_answers` | `kind`, `symbol`, `bar_close`, `answer_version`, `class`(종류의 클래스 중 하나, 채점할 수 없으면 비어 있음), `unscorable`(`missing mid`, `rest quotes`, `silent quotes`, `restarted`, 정답 함수가 클래스를 내지 않으면 그 이유(장벽의 `ambiguous`, #183)나 `no answer`, 지난 정답을 채울 때 녹화가 없으면 `not recorded`(#180), 하루 한 번 예측 종류의 `no band`·`no closing auction`(정답 버전 2)·`no candle`(정답 버전 1, #264)), `special`(VI·서킷브레이커·사이드카가 4분에 닿음), `path`(JSON: 종류의 경로 요약), `scored_at`. 종류의 정답(#179). (종류, 종목, 봉 마감, 정답 버전)마다 하나이고 그 봉 마감의 그 종류 예측이 모두 이것으로 채점된다. 예측하지 않은 봉 마감에도 있다. 엔진은 이미 있는 행을 덮어쓰지 않는다. 지난 봉 마감의 빠진 행은 엔진이 시작할 때 녹화로 채운다(아래 "변동폭"의 "지난 정답", #180). 따로 둔 표다 |
 | `special_windows` | `kind`(`vi`, `circuit_breaker`, `sidecar`), `symbol`(VI의 종목, 시장 전체면 비어 있음), `start`, `end`(해제 시각. 해제를 아직 모르는 VI는 발동 + 3분, 서킷브레이커 3단계는 그날 끝), `detail`(서킷브레이커의 `1단계`·`2단계`·`3단계`, VI 종류 `static`·`dynamic`·`both`, 그 밖에는 비어 있음), `learned_at`(이 판을 받은 시각). 엔진이 알게 된 특수 상황 구간(#236, 위 "특수 상황"). (`kind`, `symbol`, `start`)마다 하나이고, 새 판을 알면 그 행의 `end`, `detail`, `learned_at`을 바꾼다. 지난날은 엔진이 시작할 때 녹화로 채운다(아래 "지난 특수 상황 구간"). 따로 둔 표다 |
 | `special_days` | `day`, `source`(녹화를 읽은 곳. 어디에도 없었으면 비어 있음), `windows`(판정한 구간 수), `decided_at`. 녹화로 특수 상황 구간을 판정한 지난날(#236). 구간이 없던 날도 남아서 다음 시작 때 다시 읽지 않는다. 따로 둔 표다 |
-| `smt_events` | `definition`(`rolling_extreme`), `version`(정의의 판, 지금 1), `bar_close`(묶음의 첫 봉 마감 t), `a`, `b`(쌍, `smt.PAIRS`의 순서: `005930`·`000660`, `005930`·`KOSPI200F`, `000660`·`KOSPI200F`), `direction`(`bearish`, `bullish`), `minutes`(L: 15, 30), `swept`(직전 L분의 극값을 넘은 쪽: `a`나 `b`의 코드), `source`(`live`), `recorded_at`(엔진이 쓴 시각). 엔진이 봉 마감마다 판정한 SMT 다이버전스의 묶음 하나에 한 행(#520, [design.md](design.md) 5장 "SMT 다이버전스"). (`definition`, `version`, `bar_close`, `a`, `b`, `direction`, `minutes`, `source`)마다 하나이고, 한 번 쓴 행은 바꾸지 않는다. 따로 둔 표다 |
+| `smt_events` | `definition`(`rolling_extreme`), `version`(정의의 판, 지금 1), `bar_close`(묶음의 첫 봉 마감 t), `a`, `b`(쌍, `smt.PAIRS`의 순서: `005930`·`000660`, `005930`·`KOSPI200F`, `000660`·`KOSPI200F`), `direction`(`bearish`, `bullish`), `minutes`(L: 15, 30), `swept`(직전 L분의 극값을 넘은 쪽: `a`나 `b`의 코드), `source`(`live`), `recorded_at`(엔진이 쓴 시각), `a_extreme`, `b_extreme`(#521: 첫 봉 마감에서 `a`와 `b`가 견준 직전 L분 극값(하락은 최고가, 상승은 최저가)을 가진 1분봉의 시작. 같은 값이 여럿이면 가장 늦은 것. #521 전에 쓴 행은 비어 있다). 엔진이 봉 마감마다 판정한 SMT 다이버전스의 묶음 하나에 한 행(#520, [design.md](design.md) 5장 "SMT 다이버전스"). (`definition`, `version`, `bar_close`, `a`, `b`, `direction`, `minutes`, `source`)마다 하나이고, 한 번 쓴 행은 바꾸지 않는다. 따로 둔 표다 |
 
-`predictions`에는 (`algorithm`, `bar_close`) 인덱스도 있다(#170, 알고리즘마다 도달 정답 모델의 첫 예측을 찾는다). `kind_predictions`에는 (`kind`, `bar_close`), (`kind`, `symbol`, `bar_close`), (`algorithm`, `bar_close`) 인덱스가 있다(#179). 새 표와 인덱스는 스키마 버전을 올리지 않는다. `kind_predictions.flat_ticks`(#200)도 스키마 버전을 올리지 않고 더한 열이다: 엔진이 열 때 그 열이 없는 DB(#200 전)에 `ALTER TABLE … ADD COLUMN`으로 더한다(`predictions._ADDED_COLUMNS`). 옛 엔진은 쓰는 열을 이름으로 적으므로 그 열이 있는 DB도 열고 쓴다. 그 행의 `flat_ticks`는 비어 있다. `kind_predictions.width_ticks`(#183)와 `anchor`·`tick`(#210), `band`(#264), `inputs`(#304)도 같은 방식으로 더한 열이다. `special_windows`(유일 인덱스 (`kind`, `ifnull(symbol, '')`, `start`)와 `start` 인덱스)와 `special_days`(#236)도 스키마 버전을 올리지 않은 새 표다. `smt_events`(#520, `bar_close` 인덱스)도 그렇다. 수습 시뮬레이션의 표 `simulation_runs`, `simulations`, `sim_predictions`(인덱스 (`run`, `bar_close`)), `sim_kind_predictions`(인덱스 (`run`, `kind`, `bar_close`))도 그렇고, `statuses.simulated`(#298)는 `band`처럼 더한 열이다(기본 0).
+`predictions`에는 (`algorithm`, `bar_close`) 인덱스도 있다(#170, 알고리즘마다 도달 정답 모델의 첫 예측을 찾는다). `kind_predictions`에는 (`kind`, `bar_close`), (`kind`, `symbol`, `bar_close`), (`algorithm`, `bar_close`) 인덱스가 있다(#179). 새 표와 인덱스는 스키마 버전을 올리지 않는다. `kind_predictions.flat_ticks`(#200)도 스키마 버전을 올리지 않고 더한 열이다: 엔진이 열 때 그 열이 없는 DB(#200 전)에 `ALTER TABLE … ADD COLUMN`으로 더한다(`predictions._ADDED_COLUMNS`). 옛 엔진은 쓰는 열을 이름으로 적으므로 그 열이 있는 DB도 열고 쓴다. 그 행의 `flat_ticks`는 비어 있다. `kind_predictions.width_ticks`(#183)와 `anchor`·`tick`(#210), `band`(#264), `inputs`(#304)도 같은 방식으로 더한 열이다. `special_windows`(유일 인덱스 (`kind`, `ifnull(symbol, '')`, `start`)와 `start` 인덱스)와 `special_days`(#236)도 스키마 버전을 올리지 않은 새 표다. `smt_events`(#520, `bar_close` 인덱스)도 그렇고, `smt_events.a_extreme`·`b_extreme`(#521)은 `band`처럼 더한 열이다. 수습 시뮬레이션의 표 `simulation_runs`, `simulations`, `sim_predictions`(인덱스 (`run`, `bar_close`)), `sim_kind_predictions`(인덱스 (`run`, `kind`, `bar_close`))도 그렇고, `statuses.simulated`(#298)는 `band`처럼 더한 열이다(기본 0).
 
 시각은 KST ISO 8601 문자열이다. 스키마 버전은 `PRAGMA user_version`에 있다(지금 4). 엔진이 시작할 때 예전 버전의 DB를 데이터를 지키며 올린다. 더 새 버전의 DB는 거부하고 시작하지 않는다(`... was written by a newer engine (schema N)`). 그래서 스키마를 올린 엔진을 배포한 뒤에는 옛 커밋으로 되돌려도 엔진이 뜨지 않는다([operations.md](operations.md#4-업데이트-배포) 4장).
 
@@ -250,7 +250,7 @@
 
 ### 계약 (JSON 스키마, #19)
 
-- `schemas/engine-api-v1.json`이 모든 `/v1` 응답의 형식이다(JSON Schema 2020-12). 엔드포인트마다 `$defs`에 정의가 하나씩 있다: `status`, `symbols`, `latest`, `predictions`, `bars`, `candles`, `special`(항목은 `special_window`, #236), `supply`(항목은 `supply_day`, #226), `algorithms`, `algorithm_detail`, `leaderboard`, `algorithm_stats`, `consensus`, `macro`, `calendar`, `kinds`, `kind_latest`, `kind_predictions`, `trader_trades`(항목은 `trader_trade`, #394), `trader_marks`(항목은 `trader_mark`, #398), `trader_policies`(항목은 `trader_policy`, #399), `trader`(한도는 `trader_limit`, 요청은 `trader_control`, #396. 정책의 모의 기록은 `trader_paper`, 실전 관문은 `trader_gate`(판정점은 `trader_checkpoint`, #408), 도전 정책의 승격 판정은 `trader_promotion`, #400. 도전 정책 묶음은 `trader_cohort`, 그 판정은 `trader_cohort_verdict`, #473. live 모드는 `trader_live`, 그 점검은 `trader_live_check`, #408), `trader_days`(항목은 `trader_day`), `POST /v1/trader/pause`의 응답 `trader_pause`, 오류는 `error`. 스트림의 메시지는 `event`(종류마다 `prediction_event` 등)다.
+- `schemas/engine-api-v1.json`이 모든 `/v1` 응답의 형식이다(JSON Schema 2020-12). 엔드포인트마다 `$defs`에 정의가 하나씩 있다: `status`, `symbols`, `latest`, `predictions`, `bars`, `candles`, `special`(항목은 `special_window`, #236), `smt`(날은 `smt_day`, 사건은 `smt_event`, #521), `supply`(항목은 `supply_day`, #226), `algorithms`, `algorithm_detail`, `leaderboard`, `algorithm_stats`, `consensus`, `macro`, `calendar`, `kinds`, `kind_latest`, `kind_predictions`, `trader_trades`(항목은 `trader_trade`, #394), `trader_marks`(항목은 `trader_mark`, #398), `trader_policies`(항목은 `trader_policy`, #399), `trader`(한도는 `trader_limit`, 요청은 `trader_control`, #396. 정책의 모의 기록은 `trader_paper`, 실전 관문은 `trader_gate`(판정점은 `trader_checkpoint`, #408), 도전 정책의 승격 판정은 `trader_promotion`, #400. 도전 정책 묶음은 `trader_cohort`, 그 판정은 `trader_cohort_verdict`, #473. live 모드는 `trader_live`, 그 점검은 `trader_live_check`, #408), `trader_days`(항목은 `trader_day`), `POST /v1/trader/pause`의 응답 `trader_pause`, 오류는 `error`. 스트림의 메시지는 `event`(종류마다 `prediction_event` 등)다.
 - 다른 종류 항목의 `output`, 정답의 `path`, 통계의 `extra`는 종류마다 형식이 다르다. 변동폭의 것은 `range_output`, `range_path`, `range_stats`다(#180, 아래 "변동폭"). 장벽의 것은 `barrier_output`, `barrier_path`, `barrier_stats`다(#183, 아래 "장벽").
 - `leaderboard`와 `algorithm_stats`는 둘 중 하나다(#179): 방향의 것(`direction_leaderboard`, `direction_algorithm_stats`, 이전과 같은 형식)과 다른 종류의 것(`kind_leaderboard`, `kind_algorithm_stats`, 맨 위에 `kind`가 있다).
 
@@ -610,6 +610,48 @@ KRX 마감 흐름 화면이 읽는 그날의 마감 리밸런싱 수요다(`clos
 - 같은 순간에 시작한 구간은 `kind`, `symbol` 순이다.
 - 오늘 구간은 엔진이 알게 된 때부터 온다. 지난날은 그날 엔진이 남긴 것과, 엔진이 시작할 때 녹화로 채운 것이다(아래 "지난 특수 상황 구간"). 녹화가 시작된 2026-10-12 전의 날은 비어 있다.
 - 데모 엔진은 2026-10-12 09:06–09:36의 서킷브레이커 1단계(모든 종목)와 000660의 VI(09:40:10–09:42:20, `dynamic`)를 준다. 그 30분 동안 데모의 체결과 호가가 없어 1분봉도 없다. 사이드카는 없다.
+
+### `GET /v1/symbols/{symbol}/smt?from=YYYY-MM-DD&to=YYYY-MM-DD` (#521)
+
+그 종목이 든 쌍의 SMT 다이버전스 사건이다(구간 극값 SMT, [design.md](design.md) 5장 "SMT 다이버전스", `smt.py`). 그 종목이 넘은 쪽이 아니어도 그 종목이 든 쌍의 사건이면 준다. 선물이 넘고 주식이 못 넘은 사건도 주식 쪽에 온다. Fincept 차트가 예측 종목의 1분봉에 하락 SMT는 봉 위 ▼, 상승 SMT는 봉 아래 ▲로 그린다(#522).
+
+```json
+{
+  "symbol": "005930",
+  "from": "2026-10-06",
+  "to": "2026-10-12",
+  "pairs": [{"a": "005930", "b": "000660"}, {"a": "005930", "b": "KOSPI200F"}],
+  "days": [
+    {"date": "2026-10-06", "source": null, "bars": null},
+    {"date": "2026-10-07", "source": "reconstructed", "bars": "backfilled"},
+    {"date": "2026-10-08", "source": "live", "bars": null},
+    {"date": "2026-10-12", "source": "live", "bars": null}
+  ],
+  "events": [
+    {"bar_close": "2026-10-07T14:21:00+09:00", "bar_start": "2026-10-07T14:20:00+09:00", "a": "005930", "b": "000660", "direction": "bullish", "minutes": 15, "swept": "000660", "other": "005930", "swept_extreme_at": "2026-10-07T14:19:00+09:00", "other_extreme_at": "2026-10-07T14:12:00+09:00", "definition": "rolling_extreme", "version": 1, "source": "reconstructed"},
+    {"bar_close": "2026-10-12T10:30:00+09:00", "bar_start": "2026-10-12T10:29:00+09:00", "a": "005930", "b": "KOSPI200F", "direction": "bearish", "minutes": 30, "swept": "005930", "other": "KOSPI200F", "swept_extreme_at": "2026-10-12T10:28:00+09:00", "other_extreme_at": "2026-10-12T10:27:00+09:00", "definition": "rolling_extreme", "version": 1, "source": "live"}
+  ]
+}
+```
+
+(값은 데모 엔진의 것이고 사건은 둘만 옮겼다.)
+
+- `from`, `to`: `YYYY-MM-DD`. `to`가 없으면 오늘(엔진 시계)이고, `from`이 없으면 `to`까지의 마지막 5거래일의 첫날이다(휴장일 정보가 없는 평일은 거래일로 본다). 응답의 `from`, `to`는 실제로 쓴 날이다. 날짜가 아니거나, `from`이 `to`보다 뒤거나, 둘 사이가 31일(둘 다 포함)을 넘으면 400이다. 예측하지 않는 종목은 404다(다른 `/symbols` 경로와 같다).
+- `pairs`: 그 종목이 든 쌍, `smt.PAIRS`의 순서다(`005930`·`000660`, `005930`·`KOSPI200F`, `000660`·`KOSPI200F`). 쌍에 들지 않는 예측 종목(009150)은 `pairs`, `days`, `events`가 모두 빈 목록이다.
+- `days`: `from`부터 `to`까지의 거래일 중 오늘까지의 날마다, 그날 사건이 어디서 왔는지다. 휴장일과 오늘 뒤의 날은 없다.
+  - `source: "live"`, `bars: null`: 엔진이 장중에 판정해 남긴 사건(`smt_events`)이다. 그날 남긴 사건이 하나라도 있는 날(어느 쌍의 것이든)과 오늘(아직 하나도 없어도)이다. 그날은 live만 주고 다시 계산한 것과 섞지 않는다. 엔진이 그날 다시 시작해 일부 창을 판정하지 못했어도 그렇다(장중 사건은 바뀌지 않는다, 스펙 #519).
+  - `source: "reconstructed"`: live 사건이 없는 지난날을 같은 판정으로 다시 계산한 것이다(`smt.reconstruct(…, first=BACKFILLED)`). `bars`가 무엇으로 했는지다: `backfilled`(채운 1분봉. 주식은 `FHKST03010230`, 선물은 `FHKIF03020200`)를 먼저 쓰고, 그날 두 주식의 채운 1분봉이 없으면 `recorded`(그날 녹화한 통합 체결과 KOSPI200 선물 체결을 엔진의 시장 보기로 재생)다. 선물 봉이 없으면 선물과의 쌍은 그날 사건이 없다.
+  - `source: null`, `bars: null`: live 사건도 다시 계산할 봉도 없는 날이다(데이터 디렉터리가 없는 재생 엔진의 지난날도 그렇다).
+- 채운 1분봉을 먼저 쓰는 이유: 차트가 지난날 그리는 봉이 채운 1분봉(`/bars?before=`)이라 표시가 보이는 봉과 맞고, 하루를 몇 ms에 읽는다. 녹화 재생은 하루에 몇 초 걸리고, 그동안 같은 프로세스의 장중 예측과 CPU를 나눈다. `krx-quant smt --day`는 녹화를 먼저 쓴다: 엔진이 장중에 본 봉으로 live와 견주려고다. 채운 1분봉은 늦게 들어온 체결도 담아 엔진이 장중에 본 봉과 다를 수 있다.
+- `events`: 그 날들의 사건 중 그 종목이 든 쌍의 것이다. 봉 마감, 쌍(`pairs`의 순서), L, 방향 순이다.
+  - `bar_close`: 묶음(episode)의 첫 봉 마감 t다. `bar_start`: 그 봉의 시작(t − 1분)이다. 차트가 표시를 붙이는 1분봉이고 `/bars`의 `start`와 같은 시각이다.
+  - `a`, `b`: 쌍(`pairs`의 하나). `direction`: `bearish`(하락 SMT), `bullish`(상승 SMT). `minutes`: L(15, 30).
+  - `swept`: 지금 봉이 직전 L분의 극값(하락은 최고가, 상승은 최저가)을 넘은 종목이다. `other`: 넘지 못한 쌍의 다른 종목이다(극값과 같으면 못 넘은 것이다). 묶음 안에서 넘은 쪽이 바뀌어도 첫 봉 마감의 것이다. 그 종목 차트의 상대 종목은 `a`와 `b` 중 그 종목이 아닌 것이다.
+  - `swept_extreme_at`, `other_extreme_at`: 두 직전 극값의 시각이다. 첫 봉 마감에서 각 종목의 직전 L분 봉 가운데 견준 극값을 가진 1분봉의 시작이고, 같은 값이 여럿이면 가장 늦은 것이다(`SmtEvent.a_extreme`, `b_extreme`). #521 전의 엔진이 남긴 live 사건은 `null`이다.
+  - `definition`, `version`: 정의의 이름(`rolling_extreme`)과 판(지금 1)이다. 판이 바뀐 뒤에도 지난날의 live 사건은 남긴 판 그대로 온다. `source`: `live` 또는 `reconstructed`이고 그날 `days`의 `source`와 같다.
+- 가격은 없다. 차트가 봉으로 그린다. 새 스트림 메시지도 없다: 오늘 것은 화면이 다시 읽어 간다(엔진은 봉 마감마다 기준 예측을 저장한 뒤 판정해 남긴다).
+- 다시 계산한 날은 엔진 API의 메모리에 날마다 둔다(`api.SMT_CACHED_DAYS`, 32일. 가장 오래 묻지 않은 날부터 버린다). 한 요청의 최대 거래일(31일에 23일)보다 많아서 같은 요청을 다시 해도 다시 계산하지 않는다. 하루의 사건은 수백 건이라 몇 MB를 넘지 않는다. 다시 계산은 한 번에 한 요청만, 이벤트 루프 밖에서 한다(같은 날을 동시에 물어도 한 번 계산한다). 다시 계산할 봉이 없던 날은 두지 않아, 나중에 봉이 생기면(손으로 돌린 `backfill`) 다음 요청이 다시 찾는다. 수집기가 다시 시작하면 비운다.
+- 데모 엔진: 10-08과 10-12 아침은 엔진이 장중에 남긴 live 사건이다. 10-07은 #520 전의 날처럼 live 사건을 지워 두어, 채운 1분봉(주식과 KOSPI200 선물, 14:00–15:20)으로 다시 계산한 사건이 온다. 10-06은 `null`이다. 10-12의 서킷브레이커(09:06–09:36)와 그 뒤 15분은 봉이 모자라 사건이 없다. 009150은 쌍에 없다.
 
 ### `GET /v1/algorithms`
 

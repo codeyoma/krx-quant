@@ -32,6 +32,12 @@ Endpoints (all under ``/v1``):
   that start on the days ``from`` to ``to`` (KST dates, both included; default the last five
   trading days to today, at most 60 days): the symbol's VIs and the whole market's circuit
   breakers and sidecars, oldest first;
+- ``GET /symbols/{symbol}/smt?from=D&to=D``: the SMT divergences (#521, ``smt.py``) of every pair
+  holding the symbol, whichever side swept, on the trading days ``from`` to ``to`` (default the
+  last five trading days to today, at most 31 days): each day's the engine's live events where it
+  kept any (today's always), else the day made again from its backfilled bars, else from its
+  recording, and where each day's came from. The days made again are kept, the least recently
+  asked let go first (``SMT_CACHED_DAYS``), and made one question at a time, off the event loop;
 - ``GET /algorithms``: each registered algorithm's card, features, current model (with what
   it trained on) and status (probation, active, bench, retired, clone) with its history, the
   meaning of each feature and model parameter, its report of the latest night's training,
@@ -110,6 +116,7 @@ import asyncio
 import contextlib
 import json
 import re
+from collections import OrderedDict, defaultdict
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
@@ -157,8 +164,9 @@ from krx_quant.net_assets import read_net_assets
 from krx_quant.open_to_close import OPEN_TO_CLOSE
 from krx_quant.predictions import Excluded, SimulationRecord, iso
 from krx_quant.pricing import flat_ticks, tick_size
-from krx_quant.reference import Bar
+from krx_quant.reference import BAR, Bar
 from krx_quant.skill import Skill, calls_by_day, day_kappa, skill
+from krx_quant.smt import BACKFILLED, LIVE, PAIRS, RECONSTRUCTED, Reconstruction, SmtEvent, reconstruct
 from krx_quant.stats import (
     DEFAULT_MIN_SAMPLE,
     CalibrationBin,
@@ -238,6 +246,12 @@ MAX_CANDLES = 2000
 # Special windows (#236): the trading days asked for by default, and the most days one question spans.
 DEFAULT_SPECIAL_DAYS = 5
 MAX_SPECIAL_DAYS = 60
+# SMT events (#521): the trading days asked for by default, the most days one question spans, and
+# the past days made again kept (a day's events are a few hundred: a few MB at most). They hold the
+# trading days of the longest question, so asking it again makes none.
+DEFAULT_SMT_DAYS = 5
+MAX_SMT_DAYS = 31
+SMT_CACHED_DAYS = 32
 # Daily supply (#226): the days asked for by default, and the most one question spans (the ten
 # years kept, ``supply.HISTORY_YEARS``, and more: a year view asks for all of it).
 DEFAULT_SUPPLY_DAYS = 365
@@ -251,6 +265,31 @@ MAX_TRADER_DAYS = 4000
 # The KRX days (``auctions.days_of``) the closing flow's previous close is read from, re-read
 # when their files change.
 KRX_DAYS_KEY: web.AppKey[StoredDays | None] = web.AppKey("krx_days")
+
+
+class MadeAgain:
+    """The past days' SMT events made again (#521), by day: at most ``size`` days, the least
+    recently asked let go first. ``lock``: one question makes days at a time."""
+
+    def __init__(self, size: int) -> None:
+        self.size = size
+        self.lock = asyncio.Lock()
+        self._days: OrderedDict[date, Reconstruction] = OrderedDict()
+
+    def get(self, day: date) -> Reconstruction | None:
+        made = self._days.get(day)
+        if made is not None:
+            self._days.move_to_end(day)
+        return made
+
+    def put(self, made: Reconstruction) -> None:
+        self._days[made.day] = made
+        self._days.move_to_end(made.day)
+        while len(self._days) > self.size:
+            self._days.popitem(last=False)
+
+
+SMT_KEY = web.AppKey("smt_made_again", MadeAgain)
 
 
 def create_app(
@@ -287,6 +326,7 @@ def create_app(
     app[BRIEFING_CACHE_KEY] = {}
     app[FLOW_CACHE_KEY] = {}
     app[KRX_DAYS_KEY] = None if data_dir is None else StoredDays(data_dir)
+    app[SMT_KEY] = MadeAgain(SMT_CACHED_DAYS)
     app[NAMES_KEY] = {} if names is None else names
     stream = EventStream(engine, live_status, stream_poll_seconds)
     app[STREAM_KEY] = stream
@@ -314,6 +354,7 @@ def create_app(
     app.router.add_get("/v1/symbols/{symbol}/bars", _bars)
     app.router.add_get("/v1/symbols/{symbol}/candles", _candles)
     app.router.add_get("/v1/symbols/{symbol}/special", _special)
+    app.router.add_get("/v1/symbols/{symbol}/smt", _smt)
     app.router.add_get("/v1/symbols/{symbol}/supply", _supply)
     app.router.add_get("/v1/symbols/{symbol}/flow", _flow)
     app.router.add_get("/v1/symbols/{symbol}/closing-flow", _closing_flow)
@@ -507,6 +548,115 @@ async def _special(request: web.Request) -> web.Response:
     fields = ("kind", "symbol", "start", "end", "detail")
     windows = [{f: r[f] for f in fields} for r in rows]
     return _json({"symbol": symbol, "from": since.isoformat(), "to": to.isoformat(), "special": windows})
+
+
+async def _smt(request: web.Request) -> web.Response:
+    """The SMT events (#521) of every pair holding the symbol, whichever side swept, on the days
+    asked for: each day's the engine's live events if it kept any (today's always), else the day
+    made again from its backfilled bars, else its recording; and where each day's came from."""
+    engine, symbol = _engine_and_symbol(request)
+    today = kst_day(engine.clock.now())
+    to = _day_query(request, "to") or today
+    since = _day_query(request, "from") or _trading_days_back(engine.calendar, to, DEFAULT_SMT_DAYS)
+    if since > to:
+        raise _error(web.HTTPBadRequest, f"from must not be after to, got {since} and {to}")
+    if (span := (to - since).days + 1) > MAX_SMT_DAYS:
+        raise _error(web.HTTPBadRequest, f"from and to span at most {MAX_SMT_DAYS} days, got {span}")
+    pairs = [(a, b) for a, b in PAIRS if symbol in (a, b)]
+    days = [] if not pairs else _trading_days(engine.calendar, since, min(to, today))
+    live: dict[date, list[SmtEvent]] = defaultdict(list)
+    if days:
+        start = datetime.combine(days[0], time(), KST)
+        for e in engine.store.smt_events(start, datetime.combine(days[-1] + timedelta(days=1), time(), KST)):
+            live[kst_day(e.bar_close)].append(e)
+    made = await _made_again(request, [d for d in days if d < today and d not in live])
+    sources, events = [], []
+    for day in days:
+        again = made.get(day)
+        if day in live or day == today:
+            sources.append({"date": day.isoformat(), "source": LIVE, "bars": None})
+            events += live.get(day, [])
+        elif again is not None:
+            sources.append({"date": day.isoformat(), "source": RECONSTRUCTED, "bars": again.bars})
+            events += again.events
+        else:
+            sources.append({"date": day.isoformat(), "source": None, "bars": None})
+    mine = sorted((e for e in events if symbol in (e.a, e.b)), key=_smt_order)
+    return _json(
+        {
+            "symbol": symbol,
+            "from": since.isoformat(),
+            "to": to.isoformat(),
+            "pairs": [{"a": a, "b": b} for a, b in pairs],
+            "days": sources,
+            "events": [_smt_json(e) for e in mine],
+        }
+    )
+
+
+async def _made_again(request: web.Request, days: Sequence[date]) -> dict[date, Reconstruction | None]:
+    """The past ``days`` made again (#521): those kept, the others made off the event loop, one
+    question at a time (another may have made them meanwhile); a day with nothing to make it again
+    from is not kept, so it is looked for again. None without a data directory."""
+    data_dir, kept = request.app[DATA_DIR_KEY], request.app[SMT_KEY]
+    if data_dir is None or not days:
+        return {}
+    found: dict[date, Reconstruction | None] = {day: kept.get(day) for day in days}
+    if all(again is not None for again in found.values()):
+        return found
+    async with kept.lock:
+        for day in days:
+            if found[day] is None:  # made by another question meanwhile?
+                found[day] = kept.get(day)
+        todo = [day for day in days if found[day] is None]
+        made = await asyncio.to_thread(_make_again, data_dir, todo, request.app[ENGINE_KEY].calendar)
+        for day, again in made.items():
+            found[day] = again
+            if again is not None:
+                kept.put(again)
+    return found
+
+
+def _make_again(
+    data_dir: Path, days: Sequence[date], calendar: MarketCalendar
+) -> dict[date, Reconstruction | None]:
+    """Each of ``days`` made again from its backfilled bars, else its recording (#521): the bars a
+    chart shows of a past day, read in milliseconds, where a recording takes seconds to replay."""
+    return {day: reconstruct(data_dir, day, calendar, BACKFILLED) for day in days}
+
+
+def _trading_days(calendar: MarketCalendar, since: date, to: date) -> list[date]:
+    """The trading days from ``since`` to ``to``, both included."""
+    return [
+        d for n in range((to - since).days + 1) if calendar.is_trading_day(d := since + timedelta(days=n))
+    ]
+
+
+def _smt_order(e: SmtEvent) -> tuple[datetime, int, int, str]:
+    """An SMT event's place: by bar close, pair (as ``smt.PAIRS`` lists them), L and direction."""
+    pair = PAIRS.index((e.a, e.b)) if (e.a, e.b) in PAIRS else len(PAIRS)
+    return e.bar_close, pair, e.minutes, e.direction
+
+
+def _smt_json(e: SmtEvent) -> dict[str, Any]:
+    other = e.b if e.swept == e.a else e.a
+    extremes = {e.a: e.a_extreme, e.b: e.b_extreme}
+    swept_extreme, other_extreme = extremes[e.swept], extremes[other]
+    return {
+        "bar_close": iso(e.bar_close),
+        "bar_start": iso(e.bar_close - BAR),
+        "a": e.a,
+        "b": e.b,
+        "direction": e.direction,
+        "minutes": e.minutes,
+        "swept": e.swept,
+        "other": other,
+        "swept_extreme_at": None if swept_extreme is None else iso(swept_extreme),
+        "other_extreme_at": None if other_extreme is None else iso(other_extreme),
+        "definition": e.definition,
+        "version": e.version,
+        "source": e.source,
+    }
 
 
 async def _flow(request: web.Request) -> web.Response:
