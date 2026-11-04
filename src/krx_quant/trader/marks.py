@@ -64,7 +64,7 @@ def _marks(db: sqlite3.Connection) -> str:
     null in a store from before the policies (#399)."""
     columns = {r[1] for r in db.execute("PRAGMA table_info(trades)")}
     policy = "t.policy_id" if "policy_id" in columns else "NULL"
-    # The loss limits count the same; a practice trade is the trader's own (#427).
+    # The trader's trades; a practice trade is its own (#427), though no loss limit counts it (#533).
     return _MARKS.format(policy=policy, champions=champion_of(db), practice=practice_of(db))
 
 

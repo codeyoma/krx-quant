@@ -55,7 +55,9 @@ by the nightly re-fit (#399, from the engine's container).
   a cumulative one's re-arm (``lifted_at``);
 - ``snapshot`` (#396): the trader's state now, one row it rewrites (``GET /v1/trader``);
 - ``days`` (#396): each trading day's ledger by mode: the net P&L realized, the trades, the day's
-  and the cumulative P&L at their lowest, the limits, the status and the limit reached;
+  and the cumulative P&L at their lowest, the limits, the status and the limit reached; all of it the
+  loss limits' count, and since #533 the mock book's practice trades beside it (their net that day,
+  how many and the cumulative one), which the limits do not count;
 - ``stalls`` (#407, ``stall.py``): each stall of the collector's quotes: when the trader saw it
   (more than five seconds with no quote in the session), the last quote before it, when a quote
   came again (or the trader started again instead), and the REST quotes the mock book read
@@ -80,8 +82,9 @@ practises one cell a share at a time (``desk.Desk``). Its pick is kept with ``se
 1, its trades with ``trades.practice`` 1 (``PRACTICE_TRADE``) and the buys of which nothing filled
 with ``unfilled_buys.practice`` 1 (and in their ``entry``, which a restart adopts or opens a trade
 from); a trade's orders and fills are its trade's. A practice trade of the mock book is the trader's
-own (``champion`` 1: the loss limits, the cash, the KIS checks, the reconcile and the chart count
-it), of no policy (``policy_id`` null: no record, promotion or live gate counts it); its paper
+own (``champion`` 1: the cash, the risk rules, the KIS checks, the reconcile and the chart count
+it), of no policy (``policy_id`` null: no record, promotion or live gate counts it), and since #533
+no loss limit counts it (``realized``: the account's P&L, not the limits'); its paper
 shadow's (``shadow`` 1) is of no policy either, and the paper account leaves it out
 (``paper_account``). The cell practised is frozen for each review cycle (#474, ``practice.py``):
 ``practice_cycles`` keeps it, one row a cycle, written by the nightly job (its cell, its θ, the cost
@@ -276,7 +279,7 @@ CREATE TABLE IF NOT EXISTS halts (      -- each loss limit reached (#396)
     mode TEXT NOT NULL,
     day TEXT NOT NULL,                 -- the KST date it was reached on
     kind TEXT NOT NULL,                -- daily_limit, cumulative_limit
-    pnl REAL NOT NULL,                 -- the P&L that reached it: realized + open, won
+    pnl REAL NOT NULL,                 -- the P&L that reached it: realized + open, won (#533: no practice)
     realized REAL NOT NULL,
     unrealized REAL NOT NULL,          -- the open position's at the best bid, after its costs
     limit_won REAL NOT NULL,           -- the limit then, won
@@ -408,7 +411,18 @@ _ADDED = {
     "unfilled_buys": (
         ("practice", "INTEGER"),  # 1: a practice buy (#427); null or 0 otherwise
     ),
+    # The mock book's practice trades of the day (#533), which the loss limits do not count: their net
+    # P&L realized that day, how many exited, and the cumulative P&L at the day's last update (from
+    # where the limits' count starts). The account's are these plus the limits' (``realized``,
+    # ``trades``, ``cumulative``). Null before #533, whose ledger counted them with the others.
+    "days": (
+        ("practice", "REAL"),
+        ("practice_trades", "INTEGER"),
+        ("practice_cumulative", "REAL"),
+    ),
 }
+# A day's ledger's columns of the mock book's practice trades (#533), beside the limits' count.
+_PRACTICE_DAY = tuple(name for name, _ in _ADDED["days"])
 
 # The stalls of the collector's quotes (#407, ``stall.py``), and the trades open through them.
 _STALLS = """
@@ -462,8 +476,8 @@ CHAMPION_TRADE = "coalesce(t.champion, 1) = 1"
 # counts it; its policy's paper record does (``promotion.records``).
 SHADOW_TRADE = "coalesce(t.shadow, 0) = 1"
 # A practice trade ``t`` (#427, module doc): the mock book's on its practice cell (``champion`` 1, the
-# trader's own: the limits, the cash and the KIS checks count it) or its paper shadow's (``shadow``
-# 1). Of no policy: no record counts it.
+# trader's own: the cash, the risk rules and the KIS checks count it) or its paper shadow's
+# (``shadow`` 1). Of no policy: no record counts it; since #533 no loss limit either.
 PRACTICE_TRADE = "coalesce(t.practice, 0) = 1"
 
 BUY, SELL = "buy", "sell"
@@ -1271,13 +1285,14 @@ class TraderStore:
     ) -> float:
         """The net P&L of a book's trades of ``mode`` exited at or after ``since`` (all if None): the
         champion's (``CHAMPION_TRADE``), ``challenger``'s, the shadow's or the practice shadow's (as
-        ``open_trade`` tells them apart). What a challenger's or a shadow's simulated loss limits start
-        from (#471, ``limits.Simulated``)."""
+        ``open_trade`` tells them apart), never a practice trade's (#533: no loss limit counts one, so
+        the practice shadow's count nothing). What a challenger's or a shadow's simulated loss limits
+        start from (#471, ``limits.Simulated``)."""
         whose, params = _whose(challenger, shadow, practice)
         where, after = ("AND t.exit_at >= ?", (iso(since),)) if since is not None else ("", ())
         row = self._db.execute(
             f"SELECT coalesce(sum(t.net), 0) FROM trades t WHERE t.mode = ? AND t.exit_at IS NOT NULL"
-            f" AND {whose} {where}",
+            f" AND {whose} AND NOT {PRACTICE_TRADE} {where}",
             (mode, *params, *after),
         ).fetchone()
         return float(row[0])
@@ -1345,15 +1360,17 @@ class TraderStore:
         ).fetchone()
         return float(row[0])
 
-    def realized(self, mode: str, since: datetime | None) -> tuple[float, int]:
+    def realized(self, mode: str, since: datetime | None, practice: bool = False) -> tuple[float, int]:
         """The net P&L of ``mode``'s trades exited at or after ``since`` (all if None), and how many:
-        the champion's alone (``CHAMPION_TRADE``), the trades the limits and the cash hold (#396), the
-        mock book's practice trades with them (#427: its KIS fills, the same account); a challenger's
-        paper trades (#400) are not, nor a shadow's."""
+        the champion's alone (``CHAMPION_TRADE``), the trades the loss limits hold (#396), but for the
+        mock book's practice trades (#427), which they do not count (#533); with ``practice``, those
+        alone. The account's P&L, which the cash buys on, is both (#427: its KIS fills, the same
+        account). A challenger's paper trades (#400) are neither, nor a shadow's."""
+        which = PRACTICE_TRADE if practice else f"NOT {PRACTICE_TRADE}"
         where, params = ("AND exit_at >= ?", [iso(since)]) if since is not None else ("", [])
         row = self._db.execute(
             "SELECT coalesce(sum(net), 0), count(*) FROM trades t"
-            f" WHERE mode = ? AND exit_at IS NOT NULL AND {CHAMPION_TRADE} {where}",
+            f" WHERE mode = ? AND exit_at IS NOT NULL AND {CHAMPION_TRADE} AND {which} {where}",
             (mode, *params),
         ).fetchone()
         return float(row[0]), int(row[1])
@@ -1541,12 +1558,14 @@ class TraderStore:
             )
 
     def put_day(self, mode: str, day: date, row: Mapping[str, Any], at: datetime) -> None:
-        """``mode``'s ledger of ``day`` as it stands at ``at`` (``days``' columns)."""
-        columns = (
+        """``mode``'s ledger of ``day`` as it stands at ``at`` (``days``' columns; the practice's, #533,
+        null if ``row`` has none)."""
+        required = (
             *("realized", "trades", "worst", "cumulative", "cumulative_worst"),
             *("daily_limit", "cumulative_limit", "status", "halt"),
         )
-        values = [row[c] for c in columns]
+        columns = (*required, *_PRACTICE_DAY)
+        values = [row[c] for c in required] + [row.get(c) for c in _PRACTICE_DAY]
         with self._db:
             self._db.execute(
                 f"INSERT INTO days (mode, day, {', '.join(columns)}, updated_at)"
@@ -1926,12 +1945,32 @@ def _used(worst: float, limit: float) -> float:
     return max(0.0, -worst) / limit if limit > 0 else 0.0
 
 
+def day_split(row: Mapping[str, Any]) -> dict[str, Any] | None:
+    """A day's ledger's P&L split three ways (#533): what the loss limits count (``realized``,
+    ``trades``, ``cumulative``), the mock book's practice trades' and the account's (both); each its
+    net that day, its trades exited and its cumulative net. None for a ledger from before #533, which
+    counted the practice with the rest (or a store the trader has not opened since)."""
+    if any(row.get(c) is None for c in _PRACTICE_DAY):
+        return None
+    counted = {"net": row["realized"], "trades": row["trades"], "cumulative": row["cumulative"]}
+    practice = {
+        "net": row["practice"],
+        "trades": row["practice_trades"],
+        "cumulative": row["practice_cumulative"],
+    }
+    account = {k: counted[k] + practice[k] for k in counted}
+    return {"counted": counted, "practice": practice, "account": account}
+
+
 def _day_json(row: dict[str, Any]) -> dict[str, Any]:
+    split = day_split(row)
     return {
         "day": row["day"],
         "mode": row["mode"],
         "net": row["realized"],
         "trades": row["trades"],
+        "practice": None if split is None else split["practice"],  # #533
+        "account": None if split is None else split["account"],
         "daily": {
             "limit": row["daily_limit"],
             "worst": row["worst"],
@@ -1970,8 +2009,9 @@ def read_trades(
     """The last ``limit`` trades entered before ``before`` (if given), newest first, each with its
     orders and their fills: ``GET /v1/trader/trades``. The champion's (``CHAMPION_TRADE``: the
     trades the trader makes, which the limits hold and the chart marks; the mock book's practice
-    trades among them, each ``practice``, #427), or with ``policy_id`` that policy's (#400: in paper
-    as a challenger, and as the champion; a practice trade is of no policy)."""
+    trades among them, each ``practice``, #427, which no loss limit counts, #533), or with
+    ``policy_id`` that policy's (#400: in paper as a challenger, and as the champion; a practice
+    trade is of no policy)."""
     with reading(path) as db:
         if db is None:
             return []

@@ -10,16 +10,30 @@ of its policy's rules, which a promotion compares with the champion's (``promoti
 #471 the loss limits are simulated on its own trades (``Simulated``), so that it is held as the
 champion would have been.
 
+**The practice** (#427, mock mode): the mock book's practice trades are the trader's own, but the loss
+counts none of them (#533): neither their realized P&L nor a practice position's open one. A limit
+the champion's trades reach holds them all the same (the status buys nothing, a practice position is
+sold). The account's P&L is both (``realized_all``: the cash buys on it), the practice's kept beside
+the limits' count (``practice_day``, ``practice_cumulative``, ``practice_unrealized``) for the state,
+the ledger and the report to show apart. The risk rules count the practice as ever (#471,
+``paper.risk_held``). The practice shadow's simulated limits count none of its trades either: they
+are all practice.
+
+> **바뀜** (2026-11-05, #NNN): the loss counted the mock book's practice trades with the champion's
+> (the same KIS account) → it counts none of them. 이유: the user's decision (2026-11-04): a practice
+> may trade many times; at 2026-11-04's pace (−9,140 won in 20 trades) its losses alone would have
+> reached the cumulative limit around 2026-12-03 and stopped the champion until a re-arm.
+
 > **바뀜** (2026-11-03, #478): no limit held a challenger's book nor a shadow's (``Unlimited``) → the
 > daily and the cumulative loss limits are simulated on its own trades (``Simulated``). 이유: spec #468
 > 5 "모든 그림자 장부 … 기존 손실 한도를 흉내 낸다": unheld, they could not be compared with the champion.
 
 **Loss.** A P&L is the net realized one (the trades exited, after their costs) plus the open
-position's at the best bid: what selling it at that bid would net, after the buy's commission and
-the sale's commission and tax (``paper.unrealized``). The day's counts from 00:00 KST of that day;
-the cumulative one from the mode's first start, or from its last re-arm. A limit is reached when
-the P&L is at or below its negative: the open position's on every quote, the realized one at
-every exit.
+position's at the best bid (neither a practice trade's, #533): what selling it at that bid would
+net, after the buy's commission and the sale's commission and tax (``paper.unrealized``). The
+day's counts from 00:00 KST of that day; the cumulative one from the mode's first start, or from its
+last re-arm. A limit is reached when the P&L is at or below its negative: the open position's on
+every quote, the realized one at every exit.
 
 - **The daily limit** (``KRX_TRADER_DAILY_LOSS_PERCENT``, 10% of the capital: 100,000 won): the
   trader buys nothing more that day and sells the open position at once. It holds for that day
@@ -171,6 +185,7 @@ class Guard:
         self._first_run = store.first_run(mode)
         self._rearmed_at = store.rearmed_at(mode)
         self.unrealized = 0.0  # the open position's P&L at the last bid, after its costs
+        self.practising = False  # the open position is a practice one (#533): no limit counts it
         self.day = kst_day(now)
         self._load()
         self._check(now)  # a limit narrowed below what was realized holds from the start
@@ -181,11 +196,16 @@ class Guard:
         return self._rearmed_at or self._first_run
 
     def _load(self) -> None:
-        """The day's figures, and the cumulative ones, as the store has them."""
+        """The day's figures, and the cumulative ones, as the store has them: the limits' count and
+        the practice's apart (#533)."""
         midnight = datetime.combine(self.day, time(), KST)
         self.realized_day, self.trades_day = self.store.realized(self.mode, midnight)
+        self.practice_day, self.practice_trades_day = self.store.realized(self.mode, midnight, practice=True)
         self.realized_cumulative, _ = self.store.realized(self.mode, self._rearmed_at)
-        self.realized_all, _ = self.store.realized(self.mode, None)
+        self.practice_cumulative, _ = self.store.realized(self.mode, self._rearmed_at, practice=True)
+        # The account's, every trade of the trader's (#427: the practice too): the cash buys on it.
+        self.realized_all = self.store.realized(self.mode, None)[0]
+        self.realized_all += self.store.realized(self.mode, None, practice=True)[0]
         self.daily_halt, self.cumulative_halt = self.store.halts(self.mode, self.day)
         self.failure: Failure | None = self.store.failure(self.mode, self.day)  # #405
         kept = self.store.day(self.mode, self.day) or {}
@@ -230,27 +250,36 @@ class Guard:
         self._check(now)
         return True
 
-    def mark(self, unrealized: float, at: datetime) -> str | None:
-        """The open position's P&L at the bid at ``at``, after its costs (0 with none): the limit it
-        makes reached, if one is."""
+    def mark(self, unrealized: float, at: datetime, practice: bool = False) -> str | None:
+        """The open position's P&L at the bid at ``at``, after its costs (0 with none), a practice
+        position's if ``practice`` (#533: no limit counts it): the limit it makes reached, if one is."""
         self.roll(at)
         self.unrealized = unrealized
+        self.practising = practice
         return self._check(at)
 
-    def exited(self, net: float, at: datetime) -> str | None:
-        """A trade exited at ``at`` with ``net``, kept in the store already: the limit its realized
-        P&L makes reached, if one is. The caller rolls the day before it keeps the exit (``roll``);
-        if the exit rolls it here instead, the day's figures read again hold the exit already."""
+    def exited(self, net: float, at: datetime, practice: bool = False) -> str | None:
+        """A trade exited at ``at`` with ``net``, kept in the store already, a practice one if
+        ``practice`` (#533: no limit counts it): the limit its realized P&L makes reached, if one is.
+        The caller rolls the day before it keeps the exit (``roll``); if the exit rolls it here
+        instead, the day's figures read again hold the exit already."""
         self.unrealized = 0.0
+        self.practising = False
         if not self.roll(at):
-            self.realized_day += net
-            self.trades_day += 1
-            self.realized_cumulative += net
+            if practice:
+                self.practice_day += net
+                self.practice_trades_day += 1
+                self.practice_cumulative += net
+            else:
+                self.realized_day += net
+                self.trades_day += 1
+                self.realized_cumulative += net
             self.realized_all += net
         return self._check(at)
 
     def ledger(self) -> dict[str, Any]:
-        """The day's ledger as it stands (``days``' columns)."""
+        """The day's ledger as it stands (``days``' columns): the limits' count, and the practice's
+        beside it (#533)."""
         return {
             "realized": self.realized_day,
             "trades": self.trades_day,
@@ -261,15 +290,30 @@ class Guard:
             "cumulative_limit": self.limits.cumulative,
             "status": self.status,
             "halt": self.halt,
+            "practice": self.practice_day,
+            "practice_trades": self.practice_trades_day,
+            "practice_cumulative": self.practice_cumulative + self.practice_unrealized,
         }
 
     @property
+    def counted_unrealized(self) -> float:
+        """The open position's P&L the limits count: none of a practice position's (#533)."""
+        return 0.0 if self.practising else self.unrealized
+
+    @property
+    def practice_unrealized(self) -> float:
+        """A practice position's open P&L (#533), which no limit counts; 0 with none."""
+        return self.unrealized if self.practising else 0.0
+
+    @property
     def day_pnl(self) -> float:
-        return self.realized_day + self.unrealized
+        """The day's P&L the daily limit counts (#533: no practice trade's)."""
+        return self.realized_day + self.counted_unrealized
 
     @property
     def cumulative_pnl(self) -> float:
-        return self.realized_cumulative + self.unrealized
+        """The cumulative P&L the cumulative limit counts (#533: no practice trade's)."""
+        return self.realized_cumulative + self.counted_unrealized
 
     def _check(self, at: datetime) -> str | None:
         day, cumulative = self.day_pnl, self.cumulative_pnl
@@ -287,9 +331,15 @@ class Guard:
         return reached
 
     def _halt(self, kind: str, at: datetime, pnl: float, realized: float, limit: float) -> Halt:
-        halt = self.store.add_halt(at, self.mode, kind, pnl, realized, self.unrealized, limit)
+        open_ = self.counted_unrealized
+        halt = self.store.add_halt(at, self.mode, kind, pnl, realized, open_, limit)
         what = "하루" if kind == DAILY_LIMIT else "누적"
         percent = self.limits.daily_percent if kind == DAILY_LIMIT else self.limits.cumulative_percent
+        # The practice's P&L beside it (#533), which the limit does not count.
+        practised = (self.practice_day if kind == DAILY_LIMIT else self.practice_cumulative) + (
+            self.practice_unrealized
+        )
+        aside = f" 연습 매매의 손익 {won(practised)}은 한도에 세지 않습니다." if practised else ""
         until = (
             "다음 거래일에 다시 돕니다."
             if kind == DAILY_LIMIT
@@ -300,12 +350,12 @@ class Guard:
             "daily" if kind == DAILY_LIMIT else "cumulative",
             pnl,
             realized,
-            self.unrealized,
+            open_,
             limit,
         )
         self._notify(
             f"자동 매매({self.mode}): {what} 손실 한도에 닿았습니다. {what} 손익 {won(pnl)}"
-            f"(실현 {won(realized)}, 열린 포지션 {won(self.unrealized)}), 한도 -{won(limit)}({percent:g}%)."
+            f"(실현 {won(realized)}, 열린 포지션 {won(open_)}), 한도 -{won(limit)}({percent:g}%).{aside}"
             f" 새로 사지 않고 열린 포지션을 바로 팝니다. {until}"
         )
         return halt
@@ -402,7 +452,8 @@ class Guard:
         self.cumulative_halt = None
         self._rearmed_at = at
         self.realized_cumulative = 0.0  # counted again from now
-        self.cumulative_worst = min(0.0, self.unrealized)
+        self.practice_cumulative = 0.0  # and the practice's beside it (#533)
+        self.cumulative_worst = min(0.0, self.counted_unrealized)
         log.warning("trader: the cumulative loss limit re-armed (control %s): %s", control.id, self.status)
         self._notify(
             f"자동 매매({self.mode}): 누적 손실 한도를 다시 켰습니다(krx-quant trade rearm)."
@@ -437,9 +488,9 @@ class Holds(Protocol):
 
     def roll(self, now: datetime) -> bool: ...
 
-    def mark(self, unrealized: float, at: datetime) -> str | None: ...
+    def mark(self, unrealized: float, at: datetime, practice: bool = False) -> str | None: ...
 
-    def exited(self, net: float, at: datetime) -> str | None: ...
+    def exited(self, net: float, at: datetime, practice: bool = False) -> str | None: ...
 
 
 class Simulated:
@@ -447,13 +498,14 @@ class Simulated:
     practice shadow (#427), simulated (#471, module doc "Whose"): the champion's limits (``Guard``'s
     rules: the P&L realized and open at the best bid, after its costs, the day's from 00:00 KST and the
     cumulative one's from where it was given, ``realized_day`` and ``realized_cumulative``) on the
-    book's own trades. A limit reached holds its book as the champion's: its status (``daily_limit``,
-    ``cumulative_limit``) buys nothing and sells the open position at once; the daily one ends with its
-    day, the cumulative one with the trader's re-arm (``rearm``). Nothing of it is kept nor told: it is
-    read again from the book's trades at a start, and a new day's P&L from them too (``day_realized``,
-    as ``Guard.roll`` reads the store; none: from 0). No pause holds it. It buys on the paper account's cash
-    as it stands with nothing open (``account``: the capital plus the champion's realized P&L, the cash
-    the trader buys on), so that its size is the one it would have as the champion."""
+    book's own trades, never a practice one's (#533: the practice shadow's count nothing). A limit
+    reached holds its book as the champion's: its status (``daily_limit``, ``cumulative_limit``) buys
+    nothing and sells the open position at once; the daily one ends with its day, the cumulative one
+    with the trader's re-arm (``rearm``). Nothing of it is kept nor told: it is read again from the
+    book's trades at a start, and a new day's P&L from them too (``day_realized``, as ``Guard.roll``
+    reads the store; none: from 0). No pause holds it. It buys on the paper account's cash as it
+    stands with nothing open (``account``: the capital plus the champion's realized P&L, the cash the
+    trader buys on), so that its size is the one it would have as the champion."""
 
     def __init__(
         self,
@@ -498,18 +550,21 @@ class Simulated:
         self._check()
         return True
 
-    def mark(self, unrealized: float, at: datetime) -> str | None:
-        """The open position's P&L at the bid at ``at``: the limit it makes reached, if one is."""
+    def mark(self, unrealized: float, at: datetime, practice: bool = False) -> str | None:
+        """The open position's P&L at the bid at ``at`` (none counted of a practice one, #533): the limit
+        it makes reached, if one is."""
         self.roll(at)
-        self.unrealized = unrealized
+        self.unrealized = 0.0 if practice else unrealized
         return self._check()
 
-    def exited(self, net: float, at: datetime) -> str | None:
-        """A trade exited at ``at`` with ``net``: the limit its realized P&L makes reached, if one is."""
+    def exited(self, net: float, at: datetime, practice: bool = False) -> str | None:
+        """A trade exited at ``at`` with ``net`` (not counted if a practice one, #533): the limit its
+        realized P&L makes reached, if one is."""
         self.roll(at)
         self.unrealized = 0.0
-        self.realized_day += net
-        self.realized_cumulative += net
+        if not practice:
+            self.realized_day += net
+            self.realized_cumulative += net
         return self._check()
 
     def rearm(self) -> None:
