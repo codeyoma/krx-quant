@@ -1,8 +1,9 @@
 """The mock practice (#427, ``KRX_TRADER_MOCK_PRACTICE``): on a day no champion cell trades, the mock
 book trades the practice cell a share at a time on KIS's mock server, its trades, orders and fills
-kept as practice, its paper shadow a book of its own; the KIS checks and the loss limits count them,
-no record, promotion or live gate does. The cell is the one kept for the review cycle (#474,
-``tests/test_trader_practice_cycle.py``): here kept as the nightly job keeps it (``practise``).
+kept as practice, its paper shadow a book of its own; the KIS checks and the risk rules count them,
+no record, promotion, live gate nor, since #533, loss limit does. The cell is the one kept for the
+review cycle (#474, ``tests/test_trader_practice_cycle.py``): here kept as the nightly job keeps it
+(``practise``).
 
 KIS is the fake one (``tests/test_trader_mock.py``). The example: the cost map fails the 4-minute
 barrier's breiman (its hit rate's lower bound 0.60 under p* 0.63): no cell passes, and the practice
@@ -20,7 +21,7 @@ import json
 import sqlite3
 from contextlib import closing
 from dataclasses import replace
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -31,14 +32,14 @@ from krx_quant.config import SettingsError
 from krx_quant.consensus import FINAL
 from krx_quant.fake_kis import BUY_SIDE, SELL_SIDE, FakeAccount, FakeKis
 from krx_quant.kis_orders import Servers, trader_broker
-from krx_quant.trader import MOCK, PAPER, SYMBOL, live, practice, promotion, report
+from krx_quant.trader import MOCK, PAPER, SYMBOL, limits, live, practice, promotion, report
 from krx_quant.trader import policy as policies
 from krx_quant.trader.cells import Cell
 from krx_quant.trader.desk import Desk
 from krx_quant.trader.gap import day_gap, pairing
 from krx_quant.trader.limits import RUNNING
 from krx_quant.trader.marks import read_marks
-from krx_quant.trader.paper import STOP_LOSS, TAKE_PROFIT, TIME
+from krx_quant.trader.paper import BUY_LIMIT, COOLING_DOWN, STOP_LOSS, TAKE_PROFIT, TIME
 from krx_quant.trader.selection import (
     NO_CHAMPION,
     NO_COST_MAP,
@@ -49,7 +50,17 @@ from krx_quant.trader.selection import (
     choose,
 )
 from krx_quant.trader.settings import TraderSettings
-from krx_quant.trader.store import DAILY_LIMIT, DB_NAME, Entry, Exit, TraderStore, read_days, read_trades
+from krx_quant.trader.store import (
+    CUMULATIVE_LIMIT,
+    DAILY_LIMIT,
+    DB_NAME,
+    REARM,
+    Entry,
+    Exit,
+    TraderStore,
+    read_days,
+    read_trades,
+)
 from tests.api_schema import check
 from tests.kis_doubles import TIMING, Fill, kis_mock, orders_of, rows, settings_of
 from tests.test_trader_shadow import BOUGHT, DAY, TAKEN, TEN, MockDesk, Repicked
@@ -631,67 +642,341 @@ async def test_a_practice_buy_of_which_nothing_filled_is_kept_as_practice(
     assert (kept["status"], kept["practice"], kept["quantity"]) == ("cancelled", 1, 1)
 
 
-# The loss limits
+# The loss limits (#533: they count no practice trade)
 
 
-async def test_the_loss_limits_count_the_champion_and_the_practice_kis_net_together(
-    kis_mock: tuple[FakeKis, FakeAccount], tmp_path: Path
-) -> None:
-    """A capital of 80,000 won: a day's limit of 8,000. The champion's KIS trade lost 5,000 won that
-    morning; the practice's share bought at 70,050 is marked at a bid of 66,000: (66,000 − 70,050) less
-    the buy's commission (10.5075) and the sale's commission and tax at the bid (66,000 × 0.215% =
-    141.9): −4,202.4 won. Together −9,202.4: the day's limit, though neither alone reaches it. The
-    paper shadows count nowhere, and a start with the practice off holds the day's loss still."""
-    fake, account = kis_mock
-    rules = whole_rules(capital=80_000)
-    store = TraderStore(tmp_path / DB_NAME)
+def kept_trade(state: Path, entry: str, out: str, sold: float, *, practice: bool) -> None:
+    """A KIS trade of the mock book kept as the trader keeps one: a share bought at 70,000 at ``entry``
+    and sold at ``sold`` at ``out``, no costs; the practice's if ``practice``, else the champion's."""
+    store = TraderStore(state / DB_NAME)
     try:
-        lost = Entry(
-            mode=MOCK,
-            symbol=SYMBOL,
-            kind="barrier",
-            predictor="breiman",
-            prediction_id=0,
-            bar_close=at("09:30:00"),
-            probability=0.7,
-            threshold=0.6,
-            anchor=70_050,
-            tick=100,
-            width_ticks=2,
-            target=70_250,
-            stop=69_850,
-            time_barrier=at("09:34:00"),
-            decided_at=at("09:30:02"),
-            entry_at=at("09:30:02"),
-            entry_price=70_000,
-            quantity=1,
-            buy_fee=0.0,
-            quote_at=at("09:30:02"),
+        trade = store.enter(
+            0,
+            Entry(
+                mode=MOCK,
+                symbol=SYMBOL,
+                kind="barrier",
+                predictor="breiman",
+                prediction_id=0,
+                bar_close=at(entry),
+                probability=0.7,
+                threshold=0.6,
+                anchor=70_050,
+                tick=100,
+                width_ticks=2,
+                target=70_250,
+                stop=69_850,
+                time_barrier=at(entry) + timedelta(minutes=4),
+                decided_at=at(entry),
+                entry_at=at(entry),
+                entry_price=70_000,
+                quantity=1,
+                buy_fee=0.0,
+                quote_at=at(entry),
+                practice=practice,
+            ),
         )
-        trade = store.enter(0, lost)
-        store.exit(trade, Exit(at("09:34:00"), 65_000, STOP_LOSS, 0.0, 0.0, at("09:34:00")))
+        store.exit(trade, Exit(at(out), sold, STOP_LOSS, 0.0, 0.0, at(out)))
     finally:
         store.close()
+
+
+async def test_a_practice_loss_alone_reaches_neither_loss_limit(
+    kis_mock: tuple[FakeKis, FakeAccount], tmp_path: Path
+) -> None:
+    """A capital of 80,000 won, its daily limit narrowed to 1% (800 won) and its cumulative one to 2%
+    (1,600). The practice's share bought at 70,050 is marked at a bid of 68,000: (68,000 − 70,050) less
+    the buy's commission (10.5075) and the sale's commission and tax at the bid (68,000 × 0.215% =
+    146.2): −2,206.7 won, past both limits, and its stop sells it. Before #533 that reached both; now
+    no limit counts a practice trade: no halt, the trader runs on, and the 10:08 rise buys the
+    practice's next share (as does the practice shadow, its simulated limits counting nothing). The
+    state, the day's ledger and the report give the three P&Ls apart."""
+    fake, account = kis_mock
+    rules = whole_rules(capital=80_000, daily_loss_percent=1.0, cumulative_loss_percent=2.0)
+    frozen_here(tmp_path)
+    desk = MockDesk(tmp_path, fake, account, rules=rules, selection=practised(), practice=True)
+
+    await desk.run(
+        [
+            TEN,
+            BOUGHT,
+            quote("10:01:00", 68_000, 68_100),
+            Read("10:08:02.3", [Barrier("10:08:00")]),
+            quote("10:08:02.5", 70_000, 70_100),
+            quote("10:09:00", 70_000, 70_100),
+        ]
+    )
+
+    assert rows(tmp_path, "halts") == [] and desk.status == RUNNING
+    assert not [n for n in desk.notices if "손실 한도" in n]
+    second, first = desk.trades()
+    assert (first["practice"], first["exit"]["reason"], second["practice"], second["exit"]) == (
+        True,
+        STOP_LOSS,
+        True,
+        None,
+    )
+    assert first["net"] < -1_600, "past both limits"
+    assert [(t["practice"], t["entry_price"]) for t in shadows(tmp_path)] == [(1, 70_100), (1, 70_100)]
+    # GET /v1/trader: the limits' count holds none of it; the practice's and the account's hold it all.
+    state = desk.state_now
+    assert state is not None
+    open_ = state["position"]["unrealized"]
+    assert state["position"]["practice"] and open_ == pytest.approx(-50 - 10.5075 - 70_000 * 0.00215)
+    today, cumulative = state["today"], state["cumulative"]
+    assert (today["realized"], today["unrealized"], today["net"], today["trades"], today["worst"]) == (
+        0.0,
+        0.0,
+        0.0,
+        0,
+        0.0,
+    )
+    assert today["practice"] == {
+        "realized": first["net"],
+        "unrealized": open_,
+        "net": pytest.approx(first["net"] + open_),
+        "trades": 1,
+    }
+    assert today["account"] == today["practice"]
+    assert (cumulative["net"], cumulative["worst"]) == (0.0, 0.0)
+    assert (
+        cumulative["practice"]
+        == cumulative["account"]
+        == {
+            "realized": first["net"],
+            "unrealized": open_,
+            "net": pytest.approx(first["net"] + open_),
+        }
+    )
+    assert state["limits"]["daily"]["used"] == state["limits"]["cumulative"]["used"] == 0.0
+    check("trader", state)
+    # GET /v1/trader/days: the day's ledger is the limits' count, the practice's beside it.
+    [day] = [d for d in read_days(tmp_path / DB_NAME, DAY, DAY) if d["mode"] == MOCK]
+    assert (day["net"], day["trades"], day["daily"]["worst"], day["cumulative"]["used"]) == (0.0, 0, 0.0, 0.0)
+    assert day["practice"] == {
+        "net": first["net"],
+        "trades": 1,
+        "cumulative": pytest.approx(first["net"] + open_),
+    }
+    assert day["account"] == day["practice"]
+    check("trader_days", {"from": "2026-10-14", "to": "2026-10-14", "days": [day]})
+
+
+async def test_on_a_day_of_the_practice_and_the_champion_the_limits_count_the_champion_s_alone(
+    kis_mock: tuple[FakeKis, FakeAccount], tmp_path: Path
+) -> None:
+    """A capital of 90,000 won: a day's limit of 9,000. The champion's KIS trade lost 5,000 won that
+    morning; the practice's share bought at 70,050 is marked at a bid of 66,000: (66,000 − 70,050) less
+    the buy's commission (10.5075) and the sale's commission and tax at the bid (66,000 × 0.215% =
+    141.9): −4,202.4 won. Together −9,202.4, the day's limit
+    before #533; now the limit counts −5,000, and the practice's stop sells its share. The account's
+    P&L is both. At 10:30 a champion cell is back (crowned at 10:20) and buys its share on KIS at
+    70,050; marked at 66,000 it is −4,202.4 too: −9,202.4 with the morning's, the day's limit, its halt
+    holding the champion's P&L alone."""
+    fake, account = kis_mock
+    rules = whole_rules(capital=90_000)
+    keep(tmp_path, at("2026-10-12 22:31:00"))  # an empty champion: no champion cell (#472)
+    kept_trade(tmp_path, "09:30:00", "09:34:00", 65_000, practice=False)
     frozen_here(tmp_path)
     desk = MockDesk(tmp_path, fake, account, rules=rules, selection=practised(), practice=True)
 
     await desk.run([TEN, BOUGHT, quote("10:01:00", 66_000, 66_100)])
 
+    assert rows(tmp_path, "halts") == [] and desk.status == RUNNING
+    [practised_, _] = desk.trades()
+    assert practised_["practice"] and practised_["exit"]["reason"] == STOP_LOSS
+    practice_net = practised_["net"]
+    assert practice_net < -4_000, "with the champion's −5,000, past the day's 9,000"
+    state = desk.state_now
+    assert state is not None
+    today = state["today"]
+    assert (today["realized"], today["trades"], today["net"]) == (-5_000, 1, -5_000)
+    assert today["practice"] == {
+        "realized": practice_net,
+        "unrealized": 0.0,
+        "net": practice_net,
+        "trades": 1,
+    }
+    assert today["account"] == {
+        "realized": -5_000 + practice_net,
+        "unrealized": 0.0,
+        "net": -5_000 + practice_net,
+        "trades": 2,
+    }
+    assert state["limits"]["daily"]["used"] == pytest.approx(5_000 / 9_000)
+    assert state["cash"] == pytest.approx(90_000 - 5_000 + practice_net), "the account's cash: both"
+    [day] = [d for d in read_days(tmp_path / DB_NAME, DAY, DAY) if d["mode"] == MOCK]
+    assert (day["net"], day["trades"]) == (-5_000, 1)
+    assert day["practice"] == {"net": practice_net, "trades": 1, "cumulative": practice_net}
+    assert day["account"] == {"net": -5_000 + practice_net, "trades": 2, "cumulative": -5_000 + practice_net}
+    text = report.render(report.read(tmp_path / DB_NAME, DAY, CALENDAR))
+    said = (
+        f"손익 셋 (#533): 계좌(KIS) {-5_000 + practice_net:+,.0f}원(매매 2건) = 한도가 세는 것 -5,000원(1건)"
+        f" + 연습 {practice_net:+,.0f}원(1건)"
+    )
+    assert said in text
+    assert (
+        "연습 매매 1건(KIS 모의, 챔피언 칸이 없던 때 1주씩: 승격·관문·모의 기록·손실 한도에는 세지 않고"
+        in text
+    )
+    assert f"· 연습 1건 {practice_net:+,.0f}원(한도에 세지 않음)" in text, "the last trading days"
+
+    # The champion's cell back: its loss reaches the day's limit as ever.
+    crowned(tmp_path, at("10:20:00"), policy_cell(BARRIER))
+    again = MockDesk(
+        tmp_path,
+        fake,
+        account,
+        rules=rules,
+        started_at=at("10:30:00"),
+        selection=choose(PASSING),
+        practice=True,
+    )
+    await again.run(
+        [
+            Read("10:30:02.3", [Barrier("10:30:00")]),
+            quote("10:30:02.5", 70_000, 70_100),
+            quote("10:31:00", 66_000, 66_100),
+        ]
+    )
+
     [halt] = rows(tmp_path, "halts")
     assert (halt["mode"], halt["kind"]) == (MOCK, DAILY_LIMIT)
-    assert halt["realized"] == pytest.approx(-5_000), "the champion's KIS trade alone: no shadow"
+    assert halt["realized"] == pytest.approx(-5_000), "the champion's KIS trade alone: no practice"
     assert halt["unrealized"] == pytest.approx(-4_202.4075)
     assert halt["pnl"] == pytest.approx(-9_202.4075)
-    assert desk.status == DAILY_LIMIT
-    practised_, _ = read_trades(tmp_path / DB_NAME, None, 10)
-    assert practised_["practice"] and practised_["exit"] is not None
-    net = -5_000 + practised_["net"]
+    assert again.status == DAILY_LIMIT
+    [notice] = [n for n in again.notices if "하루 손실 한도에 닿았습니다" in n]
+    assert f"연습 매매의 손익 {practice_net:+,.0f}원은 한도에 세지 않습니다" in notice
+    champion, _, _ = again.trades()
+    assert (champion["practice"], champion["entry"]["price"]) == (False, 70_050)
 
-    off = MockDesk(tmp_path, fake, account, rules=rules, started_at=at("10:30:00"), practice=False)
-    await off.run([Tick("10:30:01")])
 
-    assert off.status == DAILY_LIMIT, "the practice off, the day's loss holds"
-    assert off.state_now is not None and off.state_now["today"]["realized"] == pytest.approx(net)
+def test_a_ledger_written_before_533_does_not_carry_its_practice_lows_into_the_limits_count(
+    tmp_path: Path,
+) -> None:
+    """The deploy day: the trader before #533 rolled to 10-14 at 00:00 and wrote its ledger, whose lows
+    counted the practice (here a practice trade sold at 09:30 for −2,000 won, its position marked at
+    −2,500 before: the day's and the cumulative low −2,500), and left the practice columns null. The
+    trader since #533 started at 10:00 takes no low of that row: the limits' count starts again from
+    its own realized P&L (0), and its next write splits the row, the practice's beside it. A ledger it
+    wrote itself keeps its lows (−300 here, a champion position's mark)."""
+    kept_trade(tmp_path, "09:26:00", "09:30:00", 68_000, practice=True)
+    limits_ = limits.Limits(1_000_000, 10, 20)
+    store = TraderStore(tmp_path / DB_NAME)
+    try:
+        store.add_run(at("2026-10-13 09:00:00"), MOCK, {})
+        legacy = {"realized": -2_000.0, "trades": 1, "worst": -2_500.0, "cumulative": -2_000.0}
+        legacy |= {"cumulative_worst": -2_500.0, "daily_limit": 100_000.0, "cumulative_limit": 200_000.0}
+        store.put_day(MOCK, DAY, legacy | {"status": RUNNING, "halt": None}, at("09:30:01"))
+        guard = limits.Guard(store, MOCK, limits_, at("10:00:00"), lambda _: None)
+        assert (guard.worst, guard.cumulative_worst) == (0.0, 0.0), "no practice in the limits' lows"
+        assert (guard.realized_day, guard.practice_day, guard.practice_trades_day) == (0.0, -2_000, 1)
+        store.put_day(MOCK, DAY, guard.ledger(), at("10:00:01"))
+        [day] = read_days(tmp_path / DB_NAME, DAY, DAY)
+        assert (day["net"], day["daily"]["worst"], day["daily"]["used"]) == (0.0, 0.0, 0.0)
+        assert (day["cumulative"]["worst"], day["cumulative"]["used"]) == (0.0, 0.0)
+        assert day["practice"] == {"net": -2_000, "trades": 1, "cumulative": -2_000}
+
+        mine = guard.ledger() | {"worst": -300.0, "cumulative_worst": -300.0}
+        store.put_day(MOCK, DAY, mine, at("10:30:00"))
+        again = limits.Guard(store, MOCK, limits_, at("10:31:00"), lambda _: None)
+        assert (again.worst, again.cumulative_worst) == (-300.0, -300.0), "a split ledger's lows kept"
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize(
+    ("changes", "after", "held"),
+    [
+        ({"daily_buys": 1}, [TAKEN, Fill("10:02:30")], BUY_LIMIT),
+        ({"loss_streak": 1}, [quote("10:01:00", 68_000, 68_100)], COOLING_DOWN),
+    ],
+)
+async def test_the_risk_rules_count_the_practice_as_ever(
+    kis_mock: tuple[FakeKis, FakeAccount],
+    tmp_path: Path,
+    changes: dict[str, int],
+    after: list[Any],
+    held: str,
+) -> None:
+    """#533 leaves the risk rules as they were (spec #468 6: the practice trades by the champion's
+    rules): with a day's buy orders narrowed to one, the practice's buy is the day's last; with a
+    loss in a row starting a cooldown, the practice's stop loss starts one. Either holds the 10:08
+    rise; the execution checks count the practice's round trip (as
+    ``test_the_kis_checks_count_the_practice_and_the_records_and_the_gate_do_not`` shows of them all)."""
+    fake, account = kis_mock
+    frozen_here(tmp_path)
+    desk = MockDesk(
+        tmp_path, fake, account, rules=whole_rules(**changes), selection=practised(), practice=True
+    )
+
+    await desk.run([TEN, BOUGHT, *after, Read("10:08:02.3", [Barrier("10:08:00")])])
+
+    [trade] = desk.trades()
+    assert trade["practice"] and trade["exit"] is not None
+    skipped = [d["reason"] for d in rows(tmp_path, "decisions") if d["mode"] == MOCK][-1]
+    assert skipped == held
+    assert desk.state_now is not None and desk.state_now["risk"]["held"] == held
+    assert desk.state_now["risk"]["buys"] == 1
+    with closing(sqlite3.connect(tmp_path / DB_NAME)) as db:
+        assert live.trips(db, MOCK, [DAY]) == 1
+
+
+async def test_a_cumulative_halt_the_practice_reached_before_533_holds_until_re_armed(
+    kis_mock: tuple[FakeKis, FakeAccount], tmp_path: Path
+) -> None:
+    """A capital of 80,000 won, its cumulative limit narrowed to 2% (1,600). On 10-13 a practice trade
+    lost 2,000 won and, counted as it was before #533, reached the cumulative limit (``halts``). The
+    trades counted again leave the practice out (the cumulative P&L the limit counts is 0), but the
+    halt kept holds as any (a halt is kept and no later count lifts it, #396): the practice buys
+    nothing until ``krx-quant trade rearm``, which counts again from then, the practice still out."""
+    fake, account = kis_mock
+    rules = whole_rules(capital=80_000, cumulative_loss_percent=2.0)
+    store = TraderStore(tmp_path / DB_NAME)
+    try:
+        store.add_run(at("2026-10-13 09:00:00"), MOCK, {})
+    finally:
+        store.close()
+    kept_trade(tmp_path, "2026-10-13 10:00:00", "2026-10-13 10:04:00", 68_000, practice=True)
+    store = TraderStore(tmp_path / DB_NAME)
+    try:
+        store.add_halt(at("2026-10-13 10:04:00"), MOCK, CUMULATIVE_LIMIT, -2_000, -2_000, 0.0, 1_600)
+    finally:
+        store.close()
+    frozen_here(tmp_path)
+    held = MockDesk(tmp_path, fake, account, rules=rules, selection=practised(), practice=True)
+
+    await held.run([TEN, BOUGHT])
+
+    assert held.status == CUMULATIVE_LIMIT
+    assert [d["reason"] for d in rows(tmp_path, "decisions") if d["mode"] == MOCK] == [CUMULATIVE_LIMIT]
+    assert held.state_now is not None
+    cumulative = held.state_now["cumulative"]
+    assert (cumulative["realized"], cumulative["practice"]["realized"]) == (0.0, -2_000)
+    assert held.state_now["limits"]["cumulative"]["used"] == 0.0
+    assert held.state_now["limits"]["cumulative"]["reached_at"] == "2026-10-13T10:04:00+09:00"
+
+    store = TraderStore(tmp_path / DB_NAME)
+    try:
+        asked = limits.ask(store, REARM, MOCK, at("10:05:00"))
+    finally:
+        store.close()
+    assert not isinstance(asked, str)
+    again = MockDesk(
+        tmp_path, fake, account, rules=rules, started_at=at("10:06:00"), selection=practised(), practice=True
+    )
+    await again.run([Read("10:08:02.3", [Barrier("10:08:00")]), quote("10:08:02.5", 70_000, 70_100)])
+
+    assert again.status == RUNNING
+    [trade, _] = again.trades()
+    assert trade["practice"] and trade["entry"]["at"] == "2026-10-14T10:08:02.500000+09:00"
+    assert again.state_now is not None
+    cumulative = again.state_now["cumulative"]
+    assert cumulative["since"] == "2026-10-14T10:06:00+09:00"
+    assert (cumulative["realized"], cumulative["practice"]["realized"]) == (0.0, 0.0), (
+        "counted from the re-arm"
+    )
 
 
 # The pairs

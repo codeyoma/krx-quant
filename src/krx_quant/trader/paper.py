@@ -79,8 +79,9 @@ never looser (``settings.py``).
 **Practice** (#427, ``desk.Desk``): the mock book's practice cell is a pick like another, its trade
 marked ``practice``, of no policy (``Entry.policy_id`` None: no record counts it), buying its shares
 in place of a loss budget, by the same risk rules (#471: the champion's KIS book's, whose orders and
-trades they are). Its paper shadow is a book of its own (``practice``), as the champion's shadow
-is (``shadow``), so that the champion policy's shadow never holds a practice position.
+trades they are). No loss limit counts its P&L, realized or open (#533, ``limits.py`` "The
+practice"); the cash does. Its paper shadow is a book of its own (``practice``), as the champion's
+shadow is (``shadow``), so that the champion policy's shadow never holds a practice position.
 
 Its reference price is the prediction's ``anchor`` (the bar close's integrated mid-point), the
 target ``anchor + w × tick``, the stop ``anchor − w × tick`` (w = k for the direction), the time
@@ -139,7 +140,8 @@ challenger's book simulates (``limits.Simulated``): the same predictions and the
 same trades there (``tests/test_trader_replay.py``).
 
 **State.** The trader writes its state (``state``: status, cash, position, the day's and the
-cumulative P&L, the limits' use, the pause, and since #475 the risk rules' state, ``risk_state``)
+cumulative P&L the limits count with, since #533, the mock practice's and the account's beside them,
+the limits' use, the pause, and since #475 the risk rules' state, ``risk_state``)
 into its store as it changes, at most every
 ``SNAPSHOT_SECONDS`` while only the open position's bid moves and at least every ``HEARTBEAT``,
 with the day's ledger (``days``) on a trading day: ``GET /v1/trader``, ``/v1/trader/days``.
@@ -609,6 +611,12 @@ def clock_exit(
     return Sale(barriers.time_barrier, last.bid, TIME, last)
 
 
+def _pnl(realized: float, unrealized: float, trades: int | None = None) -> dict[str, Any]:
+    """A P&L in the trader's state (#533): realized, open, their sum, and the trades exited if given."""
+    found: dict[str, Any] = {"realized": realized, "unrealized": unrealized, "net": realized + unrealized}
+    return found if trades is None else found | {"trades": trades}
+
+
 def net_of(entry_price: float, exit_price: float, quantity: int, fee_rate: float) -> float:
     """A round trip's net P&L in won: the gross less its costs (``costs``), as a trade keeps it."""
     return (exit_price - entry_price) * quantity - costs(entry_price, exit_price, quantity, fee_rate).total
@@ -922,7 +930,7 @@ class PaperTrader:
         if status in SALE and quote.received_at > (self._sell_after or self._started_at):
             self._exit(trade, quote.received_at, quote.bid, SALE[status], quote)
             return
-        reached = self.holds.mark(self._unrealized(trade, quote.bid), quote.received_at)
+        reached = self.holds.mark(self._unrealized(trade, quote.bid), quote.received_at, trade.practice)
         if reached is not None:
             self._dirty = True
             self._enforce(quote.received_at, quote)
@@ -1031,20 +1039,30 @@ class PaperTrader:
             "capital": self.rules.capital,
             "cash": self.rules.capital + guard.realized_all - cost,
             "position": position,
+            # What the loss limits count (#533: no practice trade's), and beside it the mock book's
+            # practice trades' and the account's (both).
             "today": {
                 "day": guard.day.isoformat(),
                 "realized": guard.realized_day,
-                "unrealized": guard.unrealized,
+                "unrealized": guard.counted_unrealized,
                 "net": guard.day_pnl,
                 "trades": guard.trades_day,
                 "worst": guard.worst,
+                "practice": _pnl(guard.practice_day, guard.practice_unrealized, guard.practice_trades_day),
+                "account": _pnl(
+                    guard.realized_day + guard.practice_day,
+                    guard.unrealized,
+                    guard.trades_day + guard.practice_trades_day,
+                ),
             },
             "cumulative": {
                 "since": None if since is None else iso(since),
                 "realized": guard.realized_cumulative,
-                "unrealized": guard.unrealized,
+                "unrealized": guard.counted_unrealized,
                 "net": guard.cumulative_pnl,
                 "worst": guard.cumulative_worst,
+                "practice": _pnl(guard.practice_cumulative, guard.practice_unrealized),
+                "account": _pnl(guard.realized_cumulative + guard.practice_cumulative, guard.unrealized),
             },
             "limits": {
                 "daily": {
@@ -1314,5 +1332,5 @@ class PaperTrader:
             trade.id,
             net,
         )
-        if self.holds.exited(net, at) is not None:  # its realized loss reached a limit
+        if self.holds.exited(net, at, trade.practice) is not None:  # its realized loss reached a limit
             self._enforce(at)

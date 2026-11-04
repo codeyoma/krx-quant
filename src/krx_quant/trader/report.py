@@ -32,9 +32,10 @@ reached that day, a cumulative halt still holding, the pause in force and the pa
 re-arms asked for; the last trading days' ledger. A mock day's practice (#427,
 ``KRX_TRADER_MOCK_PRACTICE``) is apart: its trades, the predictions the book read on its practice
 pick, the practice cell of the day's pick and its pairs with the practice shadow, each said so
-(``연습``); the ledger and the limits are KIS's, the practice's with the champion's. The practice cell
-is the one kept for the day's review cycle (#474, ``practice.py``): its θ, when it was chosen and
-its replayed figures; the night's choice of the next cycle's is in the re-fit's output below
+(``연습``); the ledger and the limits count the champion's KIS trades alone, never the practice's
+(#533): the practice's P&L and the account's (both) are said beside them. The practice cell is the
+one kept for the day's review cycle (#474, ``practice.py``): its θ, when it was chosen and its
+replayed figures; the night's choice of the next cycle's is in the re-fit's output below
 (``practice.freeze_now``, which ``run_night`` runs after the re-fit).
 
 **Execution cost and the risk rules** (#475, spec #468 8): under each trade its legs' adverse ticks
@@ -104,6 +105,7 @@ from krx_quant.trader.store import (
     champion_of,
     day_buys,
     day_exits,
+    day_split,
     execution,
 )
 
@@ -1028,6 +1030,7 @@ def _day_section(report: Report) -> str:
             f"(누적 한도 {_amount(ledger['cumulative_limit'])}의 "
             f"{_used(ledger['cumulative_worst'], ledger['cumulative_limit'])})"
         )
+        lines += _split_line(ledger)
     champions = [t for t in report.trades if not t.practice]
     practised = [t for t in report.trades if t.practice]
     if champions:
@@ -1039,8 +1042,8 @@ def _day_section(report: Report) -> str:
     if practised:  # #427: the mock book's practice, apart from the champion's trades
         net = sum(t.net or 0.0 for t in practised)
         lines.append(
-            f"연습 매매 {len(practised)}건(KIS 모의, 챔피언 칸이 없던 때 1주씩: 승격·관문·모의 기록에는 세지"
-            f" 않고, 장부·한도·실행 점검에는 센다), 순손익 합 {_won(net)}:"
+            f"연습 매매 {len(practised)}건(KIS 모의, 챔피언 칸이 없던 때 1주씩: 승격·관문·모의 기록·손실"
+            f" 한도에는 세지 않고, 계좌 손익·위험 규칙·실행 점검에는 센다), 순손익 합 {_won(net)}:"
         )
         lines += [line for n, t in enumerate(practised, 1) for line in _trade_lines(n, t, report.day)]
     lines += _execution_lines(report)
@@ -1048,6 +1051,22 @@ def _day_section(report: Report) -> str:
     if report.practice_decisions:
         lines.append(_decisions_line(report.practice_decisions, "연습 칸 고르기의 챔피언 장부"))
     return "\n".join(lines)
+
+
+def _split_line(ledger: Mapping[str, Any]) -> list[str]:
+    """A day's P&L three ways (#533), when the mock practice traded or holds a cumulative P&L: the
+    account's (KIS) is what the loss limits count plus the practice's, which they do not."""
+    split = day_split(ledger)
+    if split is None or not any(split["practice"].values()):
+        return []
+    counted, practice, account = split["counted"], split["practice"], split["account"]
+    return [
+        f"손익 셋 (#533): 계좌(KIS) {_won(account['net'])}(매매 {account['trades']}건) = 한도가 세는 것 "
+        f"{_won(counted['net'])}({counted['trades']}건) + 연습 {_won(practice['net'])}"
+        f"({practice['trades']}건) · 누적 계좌 {_won(account['cumulative'])} = 한도가 세는 것 "
+        f"{_won(counted['cumulative'])} + 연습 {_won(practice['cumulative'])}. 연습 매매의 손익은 손실"
+        " 한도에 세지 않는다(위 장부의 순손익·최저·누적은 한도가 세는 것이다)"
+    ]
 
 
 def _trade_lines(n: int, t: Trade, day: date) -> list[str]:
@@ -1526,6 +1545,10 @@ def _recent_section(report: Report) -> str:
             f"그날 최저 {_won(r['worst'])} · "
             f"누적 {_won(r['cumulative'])} · {STATUSES.get(r['status'], r['status'])}"
         )
+        split = day_split(r)
+        if split is not None and any(split["practice"].values()):  # #533: apart, never in the limits
+            practice = split["practice"]
+            line += f" · 연습 {practice['trades']}건 {_won(practice['net'])}(한도에 세지 않음)"
         if r["halt"]:
             line += f" · {LIMITS.get(r['halt'], r['halt'])}에 닿음"
         lines.append(line)

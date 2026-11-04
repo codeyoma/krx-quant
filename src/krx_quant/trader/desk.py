@@ -53,7 +53,8 @@ same cells' predictions and the same quotes, in one process.
   of its own (``practice_shadow``, held by no pause, as the shadow is), so that the champion policy's
   shadow and record never hold a practice trade; a practice shadow's trade left open is sold by its
   barriers whatever the mode or the setting. The practice trades are of no policy and no record
-  counts them (``store.PRACTICE_TRADE``); the KIS checks, the limits and the cash do (#427).
+  counts them (``store.PRACTICE_TRADE``); the KIS checks, the risk rules and the cash do (#427). No
+  loss limit counts them since #533 (``limits.py`` "The practice"), nor the practice shadow's.
 
   > **바뀜** (2026-11-03, #479): the practice cell was the cost map's at each pick
   > (``Selection.practice``: the greatest lower bound less p* of the cells with a verdict), at

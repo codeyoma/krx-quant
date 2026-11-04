@@ -3019,7 +3019,7 @@
       }
     },
     "trader": {
-      "description": "GET /v1/trader (#396): the trader's state as it last wrote it into its store (at least every 5 s while it runs; alive while that is at most 15 s old), and the last 20 pauses, resumes and re-arms asked for, newest first (applied_at null until the trader has read one). Every field but alive and controls is null before the trader first wrote its state. #400: the champion's version, the live gate on its paper record, and the champion and each challenger running with their paper records (a challenger's with where it stands against the champion), read from the store whatever the trader wrote. #408: live, the live mode as the trader judged it at its start and at its last pick (null before #408's trader first wrote it). #469: cycle, the review cycle in force and its evaluation version; the records, the promotion and the gate read that version's days alone. #475: risk, the loss budget and the risk rules' state of the champion's book (trader_risk).",
+      "description": "GET /v1/trader (#396): the trader's state as it last wrote it into its store (at least every 5 s while it runs; alive while that is at most 15 s old), and the last 20 pauses, resumes and re-arms asked for, newest first (applied_at null until the trader has read one). Every field but alive and controls is null before the trader first wrote its state. #400: the champion's version, the live gate on its paper record, and the champion and each challenger running with their paper records (a challenger's with where it stands against the champion), read from the store whatever the trader wrote. #408: live, the live mode as the trader judged it at its start and at its last pick (null before #408's trader first wrote it). #469: cycle, the review cycle in force and its evaluation version; the records, the promotion and the gate read that version's days alone. #475: risk, the loss budget and the risk rules' state of the champion's book (trader_risk). #533: today and cumulative are the P&L the loss limits count, never the mock book's practice trades'; beside it their practice and account (trader_pnl).",
       "type": "object",
       "required": ["updated_at", "alive", "mode", "status", "started_at", "capital", "cash", "position", "today",
                    "cumulative", "limits", "pause", "live", "practice", "controls", "champion", "gate", "policies",
@@ -3073,7 +3073,9 @@
                 "unrealized": {"type": "number"},
                 "net": {"type": "number"},
                 "trades": {"type": "integer", "minimum": 0},
-                "worst": {"type": "number", "maximum": 0}
+                "worst": {"type": "number", "maximum": 0},
+                "practice": {"$ref": "#/$defs/trader_pnl"},
+                "account": {"$ref": "#/$defs/trader_pnl"}
               }
             }
           ]
@@ -3090,7 +3092,9 @@
                 "realized": {"type": "number"},
                 "unrealized": {"type": "number"},
                 "net": {"type": "number"},
-                "worst": {"type": "number", "maximum": 0}
+                "worst": {"type": "number", "maximum": 0},
+                "practice": {"$ref": "#/$defs/trader_pnl"},
+                "account": {"$ref": "#/$defs/trader_pnl"}
               }
             }
           ]
@@ -3421,6 +3425,34 @@
         "why": {"enum": ["few_days", "not_above", null]}
       }
     },
+    "trader_pnl": {
+      "description": "#533: a P&L of the trader's state beside the one the loss limits count (today, cumulative: never a practice trade's): practice, the mock book's practice trades' (0 in paper and live); account, the account's, both together. Realized, open (a practice position's is the practice's), their sum, and in today the trades exited. Absent in a state written before #533, whose figures counted the practice with the rest.",
+      "type": "object",
+      "required": ["realized", "unrealized", "net"],
+      "additionalProperties": false,
+      "properties": {
+        "realized": {"type": "number"},
+        "unrealized": {"type": "number"},
+        "net": {"type": "number"},
+        "trades": {"type": "integer", "minimum": 0}
+      }
+    },
+    "trader_day_pnl": {
+      "description": "#533: a trading day's P&L beside the one the loss limits count (net, trades, cumulative.net: never a practice trade's): the mock book's practice trades' (practice) or the account's, both together (account); each its net that day, its trades exited and its cumulative net at the day's last update. Null on a day written before #533, whose figures counted the practice with the rest.",
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "required": ["net", "trades", "cumulative"],
+          "additionalProperties": false,
+          "properties": {
+            "net": {"type": "number"},
+            "trades": {"type": "integer", "minimum": 0},
+            "cumulative": {"type": "number"}
+          }
+        }
+      ]
+    },
     "trader_limit": {
       "description": "A loss limit (#396): in percent of the capital and in won, how much of it the P&L (realized + open, after costs) uses now (0: none, 1: all of it), and when it was reached if it holds.",
       "type": "object",
@@ -3469,15 +3501,17 @@
       }
     },
     "trader_day": {
-      "description": "A trading day of the trader (#396): the net P&L of the trades exited that day and how many, the day's P&L at its lowest (realized + open, after costs) against the daily limit, the cumulative P&L at the day's last update and at its lowest against the cumulative limit (used: the lowest over the limit), the status at the day's last update, and the limit reached that day if any.",
+      "description": "A trading day of the trader (#396): the net P&L of the trades exited that day and how many, the day's P&L at its lowest (realized + open, after costs) against the daily limit, the cumulative P&L at the day's last update and at its lowest against the cumulative limit (used: the lowest over the limit), the status at the day's last update, and the limit reached that day if any. #533: all of these the loss limits' count, never a mock practice trade's; practice and account beside them (trader_day_pnl).",
       "type": "object",
-      "required": ["day", "mode", "net", "trades", "daily", "cumulative", "status", "halt", "updated_at", "gap"],
+      "required": ["day", "mode", "net", "trades", "practice", "account", "daily", "cumulative", "status", "halt", "updated_at", "gap"],
       "additionalProperties": false,
       "properties": {
         "day": {"$ref": "#/$defs/day"},
         "mode": {"enum": ["paper", "mock", "live"]},
         "net": {"type": "number"},
         "trades": {"type": "integer", "minimum": 0},
+        "practice": {"$ref": "#/$defs/trader_day_pnl"},
+        "account": {"$ref": "#/$defs/trader_day_pnl"},
         "daily": {
           "type": "object",
           "required": ["limit", "worst", "used"],

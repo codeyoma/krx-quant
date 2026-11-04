@@ -1665,7 +1665,7 @@ class MockTrader(PaperTrader):
         self._stop_following()
         self._dirty = True
         log.info("trader: trade %s sold on KIS (%s): net %.0f won", trade.id, reason, net)
-        if self.holds.exited(net, at) is not None:  # its realized loss reached a limit
+        if self.holds.exited(net, at, trade.practice) is not None:  # its realized loss reached a limit
             self._enforce(at)
 
     def _failed(
