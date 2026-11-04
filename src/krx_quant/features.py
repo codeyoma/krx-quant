@@ -238,6 +238,11 @@ class Snapshot:
     def own_moves(self) -> list[FeatureValue]:
         return _moves(self.bars, self.bar_close) or [None] * len(LEAD_LAGS)
 
+    @cached_property
+    def minute_bars(self) -> list[MinuteBar]:
+        """The session's minutes as ``minute_bars`` gives them (computed once, for every feature)."""
+        return minute_bars(self)
+
 
 Feature = Callable[[Snapshot], Value]
 
@@ -996,6 +1001,150 @@ def _own(lag: int) -> Feature:
     return feature
 
 
+# The stochastic processes' own features (#518): Samuelson's geometric Brownian motion, Itô's
+# diffusion, the minutes Ulam resamples and the bar shapes Bishop reads. Turing, Neyman and the
+# barrier's Breimans do not read them (``STOCHASTIC_FEATURES``): their models stay as they were.
+SEMIVOL_MOVES = 30  # one-minute changes the semideviations are measured over
+MIN_SEMIVOL_MOVES = 10
+PARKINSON_MINUTES = 5
+MINUTE_BAR_MINUTES = 30  # the minutes' series: the last half hour
+
+
+def _session_log_moves(s: Snapshot) -> list[float]:
+    """The session's one-minute log returns of the close since the open, in bp, oldest first: 0
+    for a minute without a trade, up to the bar close."""
+    bars = _session_bars(s)
+    if not bars:
+        return []
+    moves: list[float] = []
+    for before, after in zip(bars, bars[1:], strict=False):
+        quiet = (after.start - before.start) // BAR - 1
+        moves += [0.0] * quiet + [1e4 * math.log(after.close / before.close)]
+    moves += [0.0] * ((s.bar_close - bars[-1].start - BAR) // BAR)
+    return moves
+
+
+def session_drift(s: Snapshot) -> FeatureValue:
+    """The drift of the log price since the open, as a geometric Brownian motion's maximum
+    likelihood has it: the mean one-minute log return, in bp per minute. Unknown with fewer than
+    six minutes' moves."""
+    moves = _session_log_moves(s)
+    return None if len(moves) < MIN_CHANGES else sum(moves) / len(moves)
+
+
+def session_sigma(s: Snapshot) -> FeatureValue:
+    """The standard deviation of those one-minute log returns, in bp: the geometric Brownian
+    motion's σ per √minute. Unknown with fewer than six."""
+    moves = _session_log_moves(s)
+    if len(moves) < MIN_CHANGES:
+        return None
+    mean = sum(moves) / len(moves)
+    return math.sqrt(sum((m - mean) ** 2 for m in moves) / (len(moves) - 1))
+
+
+def tick_bp(s: Snapshot) -> FeatureValue:
+    """One tick at the reference price as a log return, in bp: ticks to log prices and back."""
+    if s.price is None or s.tick is None or s.price <= 0:
+        return None
+    return 1e4 * math.log1p(s.tick / s.price)
+
+
+def _semivol(s: Snapshot, side: int) -> FeatureValue:
+    """√(2 × the mean square of the last 30 one-minute close changes on ``side``), in ticks: the
+    standard deviation a symmetric distribution with that half would have. A change on the other
+    side counts 0. Unknown with fewer than ten changes."""
+    changes = minute_ticks(s)[-SEMIVOL_MOVES:]
+    if len(changes) < MIN_SEMIVOL_MOVES:
+        return None
+    return math.sqrt(2 * sum(c * c for c in changes if c * side > 0) / len(changes))
+
+
+def semivol_up(s: Snapshot) -> FeatureValue:
+    """The upside semideviation of the last 30 one-minute close changes, in ticks."""
+    return _semivol(s, 1)
+
+
+def semivol_down(s: Snapshot) -> FeatureValue:
+    """The downside semideviation of the last 30 one-minute close changes, in ticks."""
+    return _semivol(s, -1)
+
+
+def parkinson_5(s: Snapshot) -> FeatureValue:
+    """Parkinson's volatility of the last five minutes before the bar close, from the open:
+    √(mean (high − low)² ÷ (4 ln 2)), the ranges in ticks of the reference price, a minute
+    without a trade 0. Fewer minutes since the open: those. Unknown without a trade in them, or
+    a reference price."""
+    if s.tick is None:
+        return None
+    start = s.bar_close - PARKINSON_MINUTES * BAR
+    if s.session_open is not None:
+        start = max(start, s.session_open)
+    span = (s.bar_close - start) // BAR
+    squares = []
+    for b in reversed(s.bars):
+        if b.start < start:
+            break
+        squares.append(((b.high - b.low) / s.tick) ** 2)
+    if span <= 0 or not squares:
+        return None
+    return math.sqrt(sum(squares) / span / (4 * math.log(2)))
+
+
+class MinuteBar(NamedTuple):
+    """One minute of the session after its first bar: its close's change, its high's and its
+    low's distance from the close before (in ticks of the reference price) and its volume. A
+    minute without a trade is all 0."""
+
+    change: float
+    high: float
+    low: float
+    volume: float
+
+
+def minute_bars(s: Snapshot) -> list[MinuteBar]:
+    """The session's minutes up to the bar close, the last hour of them, oldest first, aligned
+    with ``minute_ticks``: the same minutes, the same changes."""
+    tick = s.tick
+    bars = _session_bars(s)
+    if tick is None or not bars:
+        return []
+    out: list[MinuteBar] = []
+    quiet_minute = MinuteBar(0.0, 0.0, 0.0, 0.0)
+    for before, after in zip(bars, bars[1:], strict=False):
+        quiet = (after.start - before.start) // BAR - 1
+        out += [quiet_minute] * quiet
+        out.append(
+            MinuteBar(
+                (after.close - before.close) / tick,
+                (after.high - before.close) / tick,
+                (after.low - before.close) / tick,
+                float(after.volume),
+            )
+        )
+    out += [quiet_minute] * ((s.bar_close - bars[-1].start - BAR) // BAR)
+    return out[-MINUTE_MOVES:]
+
+
+def minute_highs(s: Snapshot) -> Series:
+    """Each of the last 30 minutes' high above the close before, in ticks, oldest first."""
+    return tuple(m.high for m in s.minute_bars[-MINUTE_BAR_MINUTES:])
+
+
+def minute_lows(s: Snapshot) -> Series:
+    """Each of the last 30 minutes' low against the close before, in ticks, oldest first."""
+    return tuple(m.low for m in s.minute_bars[-MINUTE_BAR_MINUTES:])
+
+
+def minute_volumes(s: Snapshot) -> Series:
+    """Each of the last 30 minutes' volume over the mean volume a minute of the last hour (1 is
+    usual), oldest first; empty when nothing traded in that hour."""
+    hour = s.minute_bars
+    usual = sum(m.volume for m in hour) / len(hour) if hour else 0.0
+    if usual <= 0:
+        return ()
+    return tuple(m.volume / usual for m in hour[-MINUTE_BAR_MINUTES:])
+
+
 FEATURES: dict[str, Feature] = {
     "velocity": velocity,
     "acceleration": acceleration,
@@ -1036,6 +1185,15 @@ FEATURES: dict[str, Feature] = {
     **{slot_return_feature(d): _slot_return(d) for d in SLOT_RETURN_DAYS},
     BARRIER_WIDTH: barrier_width_feature,
     BARRIER_SIGMA: barrier_sigma,
+    "session_drift": session_drift,
+    "session_sigma": session_sigma,
+    "tick_bp": tick_bp,
+    "semivol_up": semivol_up,
+    "semivol_down": semivol_down,
+    "parkinson_5": parkinson_5,
+    "minute_highs": minute_highs,
+    "minute_lows": minute_lows,
+    "minute_volumes": minute_volumes,
 }
 LEAD_FEATURES = frozenset(lead_feature(group, lag) for group in LEAD_GROUPS for lag in LEAD_LAGS)
 # The features that read the leaders' bars (``Snapshot.leaders``): the lead groups' moves and the
@@ -1050,8 +1208,24 @@ RANGE_FEATURES = frozenset({*(range_feature(m) for m in RANGE_MINUTES), PREVIOUS
 BARRIER_FEATURES = frozenset({BARRIER_WIDTH, BARRIER_SIGMA})
 # The same 10-minute slot's returns on the days before (#265): read from the backfilled bars.
 SLOT_RETURN_FEATURES = frozenset(slot_return_feature(d) for d in SLOT_RETURN_DAYS)
+# The stochastic processes' own features (#518): no algorithm registered before them reads them.
+STOCHASTIC_FEATURES = frozenset(
+    {
+        "session_drift",
+        "session_sigma",
+        "tick_bp",
+        "semivol_up",
+        "semivol_down",
+        "parkinson_5",
+        "minute_highs",
+        "minute_lows",
+        "minute_volumes",
+    }
+)
 # The features that are series of numbers.
-SERIES_FEATURES = frozenset({"minute_ticks", "microprice_ticks", "kospi200f_moves"})
+SERIES_FEATURES = frozenset(
+    {"minute_ticks", "microprice_ticks", "kospi200f_moves", "minute_highs", "minute_lows", "minute_volumes"}
+)
 # The features from the book, and from the trades' sides and venues: none on a day with
 # backfilled bars only.
 BOOK_FEATURES = frozenset(
@@ -1327,6 +1501,58 @@ FEATURE_MEANINGS: dict[str, Meaning] = {
         "변동성이, 1보다 크면 비용 k가 폭을 정했다.",
         "배",
         f"{_BARS} 녹화된 날과 백필 날에 모두 있다. 봉이 20개 미만이거나 σ̂₄가 0이거나 기준가가 없으면 없다.",
+    ),
+    "session_drift": Meaning(
+        "개장부터 봉 마감까지 1분 종가 로그수익률의 평균: 기하 브라운 운동의 로그 가격 드리프트 ν = μ − "
+        "σ²/2의 최대우도 추정이다(#518). 체결이 없는 분은 0이다.",
+        "bp/분",
+        f"{_BARS} 녹화된 날과 백필 날에 모두 있다. 개장 뒤 1분 움직임이 6개 미만이면 없다.",
+    ),
+    "session_sigma": Meaning(
+        "그 1분 로그수익률들의 표준편차: 기하 브라운 운동의 σ(√분당) 추정이다(#518).",
+        "bp",
+        f"{_BARS} 녹화된 날과 백필 날에 모두 있다. 개장 뒤 1분 움직임이 6개 미만이면 없다.",
+    ),
+    "tick_bp": Meaning(
+        "봉 마감 기준가에서 한 호가단위가 로그수익률로 몇 bp인지: 10⁴ × ln(1 + 호가단위 ÷ 기준가). 틱으로 잰 "
+        "목표를 로그 가격으로 옮긴다(#518).",
+        "bp",
+        "봉 마감에 안다(봉 마감 기준가). 기준가가 없으면 없다.",
+    ),
+    **{
+        f"semivol_{side}": Meaning(
+            f"최근 30개 1분 종가 변화(개장부터, 체결이 없는 분은 0) 중 {name} 쪽만의 반편차: "
+            f"√(2 × {name} 변화 제곱의 평균, 반대쪽 변화는 0으로 센다). 위·아래가 같은 분포면 둘 다 "
+            "표준편차와 같다(#518).",
+            "틱",
+            f"{_BARS} 녹화된 날과 백필 날에 모두 있다. 1분 변화가 10개 미만이면 없다.",
+        )
+        for side, name in (("up", "오른"), ("down", "내린"))
+    },
+    "parkinson_5": Meaning(
+        "최근 5분(개장부터) 1분봉 (고가 − 저가)로 잰 Parkinson 변동성: √((고가 − 저가)² 평균 ÷ (4 ln 2)), "
+        "범위는 봉 마감 기준가의 호가단위. 체결이 없는 분은 0으로 센다. 개장 뒤 5분이 안 됐으면 개장부터의 "
+        "분으로 평균한다(#518).",
+        "틱",
+        f"{_BARS} 녹화된 날과 백필 날에 모두 있다. 그 분들에 체결이 하나도 없거나 기준가가 없으면 없다.",
+    ),
+    "minute_highs": Meaning(
+        "개장부터 최근 30분 각 분의 고가가 그 앞 분 종가보다 몇 틱 위인지, 오래된 것부터. `minute_ticks`의 "
+        "마지막 30개와 같은 분이다. 체결이 없는 분은 0이다(#518).",
+        "틱 (숫자 30개까지의 열)",
+        f"{_BARS} 녹화된 날과 백필 날에 모두 있다.",
+    ),
+    "minute_lows": Meaning(
+        "그 분들의 저가가 그 앞 분 종가보다 몇 틱 위인지(아래면 음수), 오래된 것부터. 체결이 없는 분은 "
+        "0이다(#518).",
+        "틱 (숫자 30개까지의 열)",
+        f"{_BARS} 녹화된 날과 백필 날에 모두 있다.",
+    ),
+    "minute_volumes": Meaning(
+        "그 분들의 거래량 ÷ 최근 1시간(개장부터) 분당 평균 거래량, 오래된 것부터. 1이 평소다. 체결이 없는 "
+        "분은 0이다(#518).",
+        "배 (숫자 30개까지의 열)",
+        f"{_BARS} 녹화된 날과 백필 날에 모두 있다. 그 1시간에 체결이 없으면 빈 열이다.",
     ),
 }
 

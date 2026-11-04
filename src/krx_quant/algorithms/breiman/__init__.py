@@ -53,6 +53,7 @@ from krx_quant.features import (
     FEATURES,
     RANGE_FEATURES,
     SERIES_FEATURES,
+    STOCHASTIC_FEATURES,
     FeatureVector,
 )
 from krx_quant.kinds import Kind, KindForecast
@@ -127,9 +128,11 @@ def _logic(minutes: int) -> str:
 class Breiman:
     """The barrier's trees (#184); ``kind`` another barrier of the horizon ladder (#263)."""
 
-    # The numbers Turing reads (every number of the Feature Store but the series and the
-    # range's, #181), and its own, the barrier's (#183).
-    features: tuple[str, ...] = tuple(n for n in FEATURES if n not in SERIES_FEATURES | RANGE_FEATURES)
+    # The numbers Turing reads (every number of the Feature Store but the series, the range's,
+    # #181, and the stochastic processes', #518), and its own, the barrier's (#183).
+    features: tuple[str, ...] = tuple(
+        n for n in FEATURES if n not in SERIES_FEATURES | RANGE_FEATURES | STOCHASTIC_FEATURES
+    )
     training_days = TRAINING_DAYS
     param_meanings = PARAM_MEANINGS
     card = Card(

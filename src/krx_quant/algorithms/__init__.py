@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from collections.abc import Collection, Sequence
 
+from krx_quant.algorithms.bishop import Bishop
 from krx_quant.algorithms.breiman import Breiman
 from krx_quant.algorithms.contract import (
     Abstention,
@@ -45,14 +46,17 @@ from krx_quant.algorithms.cox import Cox
 from krx_quant.algorithms.cox5d import Cox5d
 from krx_quant.algorithms.gauss import Gauss
 from krx_quant.algorithms.granger import Granger
+from krx_quant.algorithms.ito import Ito
 from krx_quant.algorithms.kalman import Kalman
 from krx_quant.algorithms.mandelbrot import Mandelbrot
 from krx_quant.algorithms.markov import Markov
 from krx_quant.algorithms.newton import Newton
 from krx_quant.algorithms.neyman import Neyman
 from krx_quant.algorithms.poisson import Poisson
+from krx_quant.algorithms.samuelson import Samuelson
 from krx_quant.algorithms.shannon import Shannon
 from krx_quant.algorithms.turing import Turing
+from krx_quant.algorithms.ulam import Ulam
 from krx_quant.barriers import BARRIER_LADDER
 from krx_quant.cards import Card, Meaning
 from krx_quant.daily import DailyAlgorithm, register_daily_algorithms
@@ -121,14 +125,31 @@ def _check(algorithms: Sequence[Algorithm | KindAlgorithm]) -> None:
         registered.append(a)
 
 
-# Turing reads every feature in the Feature Store but the series', the range's and the
-# barrier's, so it comes last but one: an algorithm's own features must be added before it,
-# or Turing's taking them refuses it. Neyman (#266) reads Turing's and the barrier's two, its
-# own, after it; being last, it is the first skipped when the CPU budget runs short. Kalman
-# (#25), Shannon (#26), Poisson (#27) and Neyman were registered after pre-validation existed:
-# the engine starts each once it has passed.
+# Turing reads every feature in the Feature Store but the series', the range's, the barrier's
+# and the stochastic processes', so an algorithm's own features must be added before it, or
+# Turing's taking them refuses it; or left out of Turing's, as those are. Neyman (#266) reads
+# Turing's and the barrier's two, its own, after it. The stochastic processes (#518) come
+# last, their own features ``STOCHASTIC_FEATURES``, the cheapest first: Samuelson's geometric
+# Brownian motion, Itô's diffusion, Ulam's Monte Carlo, Bishop's network; the last is the first
+# skipped when the CPU budget runs short. Kalman (#25), Shannon (#26), Poisson (#27), Neyman and
+# the four were registered after pre-validation existed: the engine starts each once it has
+# passed.
 ALGORITHMS: tuple[Algorithm, ...] = register(
-    [Newton(), Gauss(), Granger(), Markov(), Kalman(), Shannon(), Poisson(), Turing(), Neyman()]
+    [
+        Newton(),
+        Gauss(),
+        Granger(),
+        Markov(),
+        Kalman(),
+        Shannon(),
+        Poisson(),
+        Turing(),
+        Neyman(),
+        Samuelson(),
+        Ito(),
+        Ulam(),
+        Bishop(),
+    ]
 )
 
 # The algorithms of the kinds besides the direction (#179), in the kinds' order, all after
