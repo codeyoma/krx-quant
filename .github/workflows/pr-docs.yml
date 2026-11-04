@@ -1,0 +1,35 @@
+name: pr-docs
+
+# A pull request that changes src/ changes the docs too (docs/, README.md, .env.example), or its
+# body says why not in a line `Docs: none (<reason>)` (scripts/check_pr_docs.py, #507).
+#
+# A workflow of its own, not a job in ci.yml, for pr-refs.yml's reason: it runs again when the
+# body is edited, and in ci.yml an edit would run every test shard again.
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: pr-docs-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  docs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # Only the script: no submodule, no project install.
+      - uses: actions/checkout@v7
+        with:
+          submodules: false
+          sparse-checkout: scripts
+      - name: A change to src/ comes with its docs, or the body says why not
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: python3 scripts/check_pr_docs.py "$REPO" "$PR"

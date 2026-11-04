@@ -3,7 +3,12 @@ name: ci
 on:
   push:
     branches: [main]
+  # ready_for_review too: a draft's run skips the PR number placeholder rule (#507), so the run
+  # that marking it ready starts checks the placeholders. The concurrency group below cancels the
+  # draft's run still going. Not `edited`: a body edit would run every test shard again
+  # (pr-docs.yml and pr-refs.yml run on it instead).
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
 
 permissions:
   contents: read
@@ -30,8 +35,11 @@ jobs:
         with:
           version: "0.12.23"
       - run: uv sync --frozen
+      # On a draft pull request every rule but the PR number placeholder (#507): its number is
+      # filled in once it is open (scripts/fill_pr_number.py). A push to main has no pull_request,
+      # so it checks them all.
       - name: Forbidden patterns (order code, secrets)
-        run: uv run python scripts/check_forbidden.py
+        run: uv run python scripts/check_forbidden.py ${{ github.event.pull_request.draft && '--draft' || '' }}
       # Settings, commands and scheduled jobs against .env.example, README.md and
       # docs/operations.md, both ways (#495).
       - name: Docs agree with the code (settings, commands, jobs)
