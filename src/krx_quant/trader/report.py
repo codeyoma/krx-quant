@@ -86,6 +86,7 @@ from krx_quant.trader import (
     review,
 )
 from krx_quant.trader import policy as policies
+from krx_quant.trader.db import iso
 from krx_quant.trader.gap import day_gap
 from krx_quant.trader.limits import Pause, pause_of
 from krx_quant.trader.paper import Rules, cooldowns
@@ -451,7 +452,7 @@ def _risk(db: sqlite3.Connection, mode: str, day: date, end: datetime, ramp: liv
     """The risk rules of the champion's book on ``day`` (#475, ``Risk``): of the trader's last start of
     ``mode`` before the night's ``end``; None without one that kept them (a start before #471)."""
     row = db.execute(
-        "SELECT detail FROM runs WHERE mode = ? AND at < ? ORDER BY id DESC LIMIT 1", (mode, _iso(end))
+        "SELECT detail FROM runs WHERE mode = ? AND at < ? ORDER BY id DESC LIMIT 1", (mode, iso(end))
     ).fetchone()
     detail = json.loads(row[0]) if row is not None else {}
     keys = ("capital", "risk_per_trade_percent", "loss_streak", "cooldown_minutes", "daily_buy_orders")
@@ -606,14 +607,10 @@ def _columns(db: sqlite3.Connection, table: str) -> set[str]:
     return {r[1] for r in db.execute(f"PRAGMA table_info({table})")}
 
 
-def _iso(at: datetime) -> str:
-    return at.astimezone(KST).isoformat()
-
-
 def _champion_at(db: sqlite3.Connection, moment: datetime) -> int | None:
     """The champion before ``moment``: the latest change of it then."""
     row = db.execute(
-        "SELECT policy_id FROM champions WHERE at < ? ORDER BY id DESC LIMIT 1", (_iso(moment),)
+        "SELECT policy_id FROM champions WHERE at < ? ORDER BY id DESC LIMIT 1", (iso(moment),)
     ).fetchone()
     return None if row is None else int(row[0])
 
@@ -635,7 +632,7 @@ def _slots_at(db: sqlite3.Connection, moment: datetime) -> list[int]:
     rows = db.execute(
         "SELECT p.id FROM policies p WHERE p.admitted_at IS NOT NULL AND p.admitted_at < :at"
         f"{dropped} AND p.id NOT IN (SELECT policy_id FROM champions WHERE at < :at) ORDER BY p.id",
-        {"at": _iso(moment)},
+        {"at": iso(moment)},
     )
     return [int(r[0]) for r in rows]
 
@@ -681,7 +678,7 @@ def _changed(db: sqlite3.Connection, column: str, start: datetime, end: datetime
     if column not in _columns(db, "policies"):
         return ()
     rows = db.execute(
-        f"SELECT id FROM policies WHERE {column} >= ? AND {column} < ? ORDER BY id", (_iso(start), _iso(end))
+        f"SELECT id FROM policies WHERE {column} >= ? AND {column} < ? ORDER BY id", (iso(start), iso(end))
     )
     return tuple(int(r[0]) for r in rows)
 
@@ -690,16 +687,16 @@ def _fitted(db: sqlite3.Connection, start: datetime, end: datetime) -> tuple[Fit
     """The policies kept in the night, each with its status at the night's end."""
     columns = _columns(db, "policies")
     champion = _champion_at(db, end)
-    once = {int(r[0]) for r in db.execute("SELECT policy_id FROM champions WHERE at < ?", (_iso(end),))}
+    once = {int(r[0]) for r in db.execute("SELECT policy_id FROM champions WHERE at < ?", (iso(end),))}
     out = []
     for row in db.execute(
         "SELECT * FROM policies WHERE created_at >= ? AND created_at < ? ORDER BY id",
-        (_iso(start), _iso(end)),
+        (iso(start), iso(end)),
     ):
         version = int(row["id"])
-        dropped = "dropped_at" in columns and row["dropped_at"] is not None and row["dropped_at"] < _iso(end)
+        dropped = "dropped_at" in columns and row["dropped_at"] is not None and row["dropped_at"] < iso(end)
         admitted = (
-            "admitted_at" in columns and row["admitted_at"] is not None and row["admitted_at"] < _iso(end)
+            "admitted_at" in columns and row["admitted_at"] is not None and row["admitted_at"] < iso(end)
         )
         status = policies.status_of(version, champion, once, dropped, admitted)
         try:
@@ -721,7 +718,7 @@ def _waiting(db: sqlite3.Connection, end: datetime) -> int:
         " AND (p.admitted_at IS NULL OR p.admitted_at >= :at)"
         " AND (p.dropped_at IS NULL OR p.dropped_at >= :at)"
         " AND p.id NOT IN (SELECT policy_id FROM champions WHERE at < :at)",
-        {"at": _iso(end)},
+        {"at": iso(end)},
     ).fetchone()
     return int(row[0])
 
@@ -729,7 +726,7 @@ def _waiting(db: sqlite3.Connection, end: datetime) -> int:
 def _capital(db: sqlite3.Connection, mode: str, end: datetime) -> float | None:
     """The capital of the trader's last start before the night's end (``runs``)."""
     row = db.execute(
-        "SELECT detail FROM runs WHERE mode = ? AND at < ? ORDER BY id DESC LIMIT 1", (mode, _iso(end))
+        "SELECT detail FROM runs WHERE mode = ? AND at < ? ORDER BY id DESC LIMIT 1", (mode, iso(end))
     ).fetchone()
     if row is None:
         return None
@@ -872,7 +869,7 @@ def _capital_of(db: sqlite3.Connection, end: datetime) -> int:
     """The capital of the trader's last start before ``end``, whatever its mode (``runs``); the code's
     without one."""
     row = (
-        db.execute("SELECT detail FROM runs WHERE at < ? ORDER BY id DESC LIMIT 1", (_iso(end),)).fetchone()
+        db.execute("SELECT detail FROM runs WHERE at < ? ORDER BY id DESC LIMIT 1", (iso(end),)).fetchone()
         if "runs" in _tables(db)
         else None
     )
@@ -884,7 +881,7 @@ def _ramp_events(db: sqlite3.Connection, start: datetime, end: datetime) -> tupl
     """The live first period's lifts and breaches from ``start`` to ``end`` (#408)."""
     rows = db.execute(
         "SELECT event, at FROM ramp WHERE mode = ? AND event IN (?, ?) AND at >= ? AND at < ? ORDER BY id",
-        (LIVE, LIFT, BREACH, _iso(start), _iso(end)),
+        (LIVE, LIFT, BREACH, iso(start), iso(end)),
     )
     return tuple((str(r[0]), datetime.fromisoformat(r[1])) for r in rows)
 
@@ -911,16 +908,16 @@ def _held(db: sqlite3.Connection, mode: str, day: date, end: datetime) -> dict[s
     row = db.execute(
         "SELECT * FROM halts WHERE mode = ? AND kind = ? AND day < ?"
         " AND (lifted_at IS NULL OR lifted_at >= ?) ORDER BY id LIMIT 1",
-        (mode, CUMULATIVE_LIMIT, day.isoformat(), _iso(end)),
+        (mode, CUMULATIVE_LIMIT, day.isoformat(), iso(end)),
     ).fetchone()
     return None if row is None else dict(row)
 
 
 def _controls(db: sqlite3.Connection, start: datetime | None, end: datetime) -> tuple[Control, ...]:
     """The pauses, resumes and re-arms asked for from ``start`` (all if None) to ``end``, in order."""
-    where, params = "at < ?", [_iso(end)]
+    where, params = "at < ?", [iso(end)]
     if start is not None:
-        where, params = "at >= ? AND " + where, [_iso(start), *params]
+        where, params = "at >= ? AND " + where, [iso(start), *params]
     rows = db.execute(f"SELECT * FROM controls WHERE {where} ORDER BY id", params)
     return tuple(
         Control(

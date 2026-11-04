@@ -63,6 +63,7 @@ from krx_quant.feeds.base import KST
 from krx_quant.market_calendar import Session
 from krx_quant.trader import PICK_AT, review
 from krx_quant.trader import policy as policies
+from krx_quant.trader.db import iso
 
 Sessions = Callable[[date], Session | None]
 
@@ -100,7 +101,7 @@ class Cohort:
         return {
             "evaluation": self.evaluation,
             "cycle": self.cycle,
-            "formed_at": _iso(self.formed_at),
+            "formed_at": iso(self.formed_at),
             "start": self.first.isoformat(),
             "review": self.review.isoformat(),
             "champion": self.champion,
@@ -127,7 +128,7 @@ class Verdict:
 
     def as_json(self) -> dict[str, Any]:
         return {
-            "judged_at": _iso(self.judged_at),
+            "judged_at": iso(self.judged_at),
             "champion": self.champion,
             "outcome": self.outcome,
             "promoted": self.promoted,
@@ -314,7 +315,7 @@ def form(
             (
                 evaluation,
                 cycle.number,
-                _iso(at),
+                iso(at),
                 cycle.first.isoformat(),
                 cycle.review.isoformat(),
                 champion,
@@ -329,7 +330,7 @@ def form(
                 )
                 db.execute(
                     "UPDATE policies SET admitted_at = ? WHERE id = ? AND admitted_at IS NULL",
-                    (_iso(at), version),
+                    (iso(at), version),
                 )
             policies._drop(db, at, [int(p["version"]) for p in passed_over])
     found = of(db, evaluation, cycle.number)
@@ -451,7 +452,7 @@ def _keep(
         (
             found.evaluation,
             found.cycle,
-            _iso(at),
+            iso(at),
             found.champion,
             outcome,
             promoted,
@@ -476,7 +477,3 @@ def retire_stale(db: sqlite3.Connection, at: datetime, evaluation: review.Evalua
 def _has(db: sqlite3.Connection, name: str) -> bool:
     found = db.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (name,)).fetchone()
     return found is not None
-
-
-def _iso(at: datetime) -> str:
-    return at.astimezone(KST).isoformat()

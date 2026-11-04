@@ -92,19 +92,18 @@ Every row carries its mode (``paper``, ``mock``, ``live``): paper, KIS mock and 
 apart in the same tables (a pause and a resume hold whatever the mode). The records (``policy_days`` and the
 policies' trades' P&L) are paper's whatever the mode (``promotion.records_of``, #405: in mock mode
 the champion's paper shadow keeps the champion's, ``shadow`` 1). The trader writes it, and the
-nightly re-fit its policies; the Engine API reads it read-only (``read_trades``,
+nightly re-fit its policies; the Engine API reads it read-only (``db.reading``: ``read_trades``,
 ``read_trader``, ``read_days``, ``policy.read_policies``) and writes a pause into it
 (``request_pause``), and ``krx-quant trade resume|rearm`` a resume or a re-arm: nothing else. Times
-are ISO 8601 strings in KST, which sort in time order. The columns #395, #399, #400 and #405 added
-(``_ADDED``) are added to a store made before them, null in its rows.
+are ISO 8601 strings in KST, which sort in time order (``db.iso``). The columns #395, #399, #400 and
+#405 added (``_ADDED``) are added to a store made before them, null in its rows.
 """
 
 from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Callable, Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -115,6 +114,7 @@ from krx_quant.market_calendar import MarketCalendar, Session
 from krx_quant.pricing import SELL_TAX
 from krx_quant.trader import KIS_MODES, MOCK, PAPER, policy, promotion, review
 from krx_quant.trader.cells import Cell
+from krx_quant.trader.db import iso, reading
 from krx_quant.trader.gap import day_gap
 from krx_quant.trader.selection import GONE
 
@@ -491,10 +491,6 @@ DAILY_LIMIT, CUMULATIVE_LIMIT = "daily_limit", "cumulative_limit"
 ALIVE_SECONDS = 15.0
 # GET /v1/trader: the last controls shown.
 CONTROLS_SHOWN = 20
-
-
-def iso(at: datetime) -> str:
-    return at.astimezone(KST).isoformat()
 
 
 @dataclass(frozen=True)
@@ -1862,7 +1858,7 @@ def read_trader(
     body["cycle"] = None
     if path is None:
         return body
-    with _reading(path) as db:
+    with reading(path) as db:
         if db is None:
             return body
         tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
@@ -1906,7 +1902,7 @@ def read_days(path: Path, since: date, to: date) -> list[dict[str, Any]]:
     """``GET /v1/trader/days`` (#396): each day's ledger from ``since`` to ``to`` (both included),
     oldest first, each mode's; a mock day's with its gap to the champion's paper shadow (#405,
     ``gap.day_gap``), null on the others."""
-    with _reading(path) as db:
+    with reading(path) as db:
         if db is None:
             return []
         if (
@@ -1953,20 +1949,6 @@ def _day_json(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-@contextmanager
-def _reading(path: Path) -> Iterator[sqlite3.Connection | None]:
-    """The trader's store, read-only; None if there is none."""
-    if not path.exists():
-        yield None
-        return
-    db = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
-    db.row_factory = sqlite3.Row
-    try:
-        yield db
-    finally:
-        db.close()
-
-
 def practice_of(db: sqlite3.Connection) -> str:
     """``PRACTICE_TRADE`` for this store: none is a practice trade in a store the trader has not
     opened since #427 (no ``practice`` column yet)."""
@@ -1990,7 +1972,7 @@ def read_trades(
     trades the trader makes, which the limits hold and the chart marks; the mock book's practice
     trades among them, each ``practice``, #427), or with ``policy_id`` that policy's (#400: in paper
     as a challenger, and as the champion; a practice trade is of no policy)."""
-    with _reading(path) as db:
+    with reading(path) as db:
         if db is None:
             return []
         champion = champion_of(db)
