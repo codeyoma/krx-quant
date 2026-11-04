@@ -35,12 +35,14 @@ again after one that was subscribed.
 gives (``1|<tr_id>|<count>|<fields joined by ^>``) into records of equal width: each record's
 fields as they came, empty ones too, with when it came, its trading day (KST), the TR ID, the
 connection's number, the frame's number on it, the header's count and the record's place in its
-frame. The columns are not named: a record is not read as ``FILL_NOTICE_COLUMNS`` nor as their first
-23. A frame whose fields do not divide by its count, or that is not decrypted (no key and IV, or
-they do not open it), or not of the frame's form, is kept apart (``odd_frames``: why, its length,
-and its fields when decrypted). Each connection is kept (when it was asked for, subscribed, last
-heard from and ended, and why it ended), so that the night job counts the time within the window
-that none was subscribed. Not kept: the approval key, the key and IV, the subscription's answer.
+frame. The columns are not named here: a record is kept as it came, not read as
+``FILL_NOTICE_COLUMNS``, their first 23, or the mock server's 23 the night job's measure named
+(``MOCK_FILL_NOTICE_COLUMNS``, #403). A frame whose fields do not divide by its count, or that is
+not decrypted (no key and IV, or they do not open it), or not of the frame's form, is kept apart
+(``odd_frames``: why, its length, and its fields when decrypted). Each connection is kept (when it
+was asked for, subscribed, last heard from and ended, and why it ended), so that the night job
+counts the time within the window that none was subscribed. Not kept: the approval key, the key and
+IV, the subscription's answer.
 
 **Bounds.** The frames waiting to be written (``Limits.queue``), a frame's size (``Limits.frame``,
 in characters), the records and the odd frames a day (``Limits.records``, ``Limits.odd``): what is

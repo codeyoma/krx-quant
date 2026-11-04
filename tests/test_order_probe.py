@@ -291,23 +291,37 @@ async def test_with_an_hts_id_notices_that_cannot_be_decrypted_leave_the_run_not
     assert "  - 풀리지 않은 프레임 " in text and "체결 통보 안 됨" in text
 
 
+async def test_notices_in_the_mock_server_s_23_columns_are_read_by_their_names(
+    trader: tuple[FakeKis, FakeAccount], tmp_path: Path
+) -> None:
+    # The mock server's records have 23 fields (#403, named by the night job's result of 2026-11-04).
+    fake, account = trader
+    account.notice_columns = tuple(kis_orders.MOCK_FILL_NOTICE_COLUMNS)
+    code, text = await probe(trader_settings(fake, tmp_path), fake)
+    assert code == 0, text
+    assert "  - 필드 23개로 나뉜 레코드" in text and "칸별 모양" not in text
+    assert "  - 9. 즉시 체결 지정가 매수: 1·0·0·1·02" in text and "2·0·0·2·02" in text
+    assert "토큰 됨, 하한가 매수와 취소 됨, 매수 체결 됨, 매도 체결 됨, 체결 통보 됨" in text
+    # CNTG_ISNM is shown by its look alone: what its two characters are was not measured.
+    assert "CNTG_ISNM" in text and fake_kis.SHORT_NAME not in text
+    for value in [HTS_ID, "9876543201", "01790", "홍길동", *(o.number for o in account.orders)]:
+        assert value not in text, value
+
+
 async def test_notices_of_another_width_are_shown_by_position_without_a_value(
     trader: tuple[FakeKis, FakeAccount], tmp_path: Path
 ) -> None:
-    # The mock server's records had 23 fields where KIS's example names 26 (#403): the run is not
-    # done, and each position is shown by its look for a later change to name it.
+    # A width neither KIS's example's 26 nor the mock server's 23 (#403): the run is not done, and
+    # each position is shown by its look for a later change to name it.
     fake, account = trader
-    account.notice_fields = 23
+    account.notice_fields = 24
     code, text = await probe(trader_settings(fake, tmp_path), fake, timing=replace(FAST, notice_wait=0.5))
     assert code == INCOMPLETE
     assert "체결 통보 안 됨" in text
-    assert "  - 레코드 1개에 필드가 23개인 프레임 " in text
-    assert (
-        "  - 23칸 레코드 " in text
-        and "의 칸별 모양(FILL_NOTICE_COLUMNS는 26칸이라 이름을 붙이지 못한다" in text
-    )
+    assert "  - 레코드 1개에 필드가 24개인 프레임 " in text
+    assert "  - 24칸 레코드 " in text and "의 칸별 모양(칸 이름은 26칸과 모의 서버의 23칸에만 있어" in text
     lines = {line.split(":", 1)[0].strip(): line for line in text.splitlines() if line.startswith("    칸 ")}
-    assert len(lines) == 23
+    assert len(lines) == 24
     # The fake's first fields are KIS's example's: the HTS ID, the account, the order numbers.
     assert "= HTS ID " in lines["칸 1"] and "text" in lines["칸 1"]
     assert "= 계좌 " in lines["칸 2"] and "10자" in lines["칸 2"]
@@ -429,6 +443,24 @@ def test_a_fill_notice_frame_may_hold_several_records() -> None:
     assert order_probe.notice_records(f"0|{kis_orders.FILL_NOTICE.mock}|001|{'^'.join(one)}", None) == [
         dict(zip(kis_orders.FILL_NOTICE_COLUMNS, one, strict=True))
     ]
+
+
+def test_a_fill_notice_record_of_the_mock_server_s_23_fields_is_named_by_them() -> None:
+    key, iv = "k" * 32, "i" * 16
+    mock = kis_orders.MOCK_FILL_NOTICE_COLUMNS
+    # KIS's example's list before 2025-07-10: its 26's first 18, then CNTG_ISNM and its tail (#403).
+    assert len(mock) == 23 == len(set(mock))
+    assert mock == [*kis_orders.FILL_NOTICE_COLUMNS[:18], "CNTG_ISNM", *kis_orders.FILL_NOTICE_COLUMNS[-4:]]
+    assert kis_orders.notice_columns(23) == mock
+    assert kis_orders.notice_columns(26) == kis_orders.FILL_NOTICE_COLUMNS
+    assert kis_orders.notice_columns(24) is None and kis_orders.notice_columns(0) is None
+    one = [f"{name.lower()}1" for name in mock]
+    two = [f"{name.lower()}2" for name in mock]
+    frame = f"1|{kis_orders.FILL_NOTICE.mock}|002|{encrypt(key, iv, '^'.join([*one, *two]))}"
+    records = order_probe.notice_records(frame, (key, iv))
+    assert records == [dict(zip(mock, one, strict=True)), dict(zip(mock, two, strict=True))]
+    other = f"1|{kis_orders.FILL_NOTICE.mock}|001|{encrypt(key, iv, '^'.join([*one, 'x']))}"
+    assert order_probe.notice_records(other, (key, iv)) == "레코드 1개에 필드가 24개인 프레임"
 
 
 def test_an_account_is_eight_digits_and_a_product_code() -> None:

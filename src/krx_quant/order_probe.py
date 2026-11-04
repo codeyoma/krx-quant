@@ -32,10 +32,12 @@ the trader's own mock account (``KRX_TRADER_KIS_*``, never the collector's key),
 13. the fill notices: their frames, decrypted, by kind, matched to the orders, with how long after
     each order's answer they came; with an HTS ID, a step that is done only if the subscription
     was answered with its key and IV and a notice could be read (a run without one is not done).
-    Records of a width ``FILL_NOTICE_COLUMNS`` does not name (the mock server's 23 on 2026-10-30,
-    #403) are shown by position instead (``layout``): each field's look, lengths, how many values
-    it took and what it equals of the orders, the account and the HTS ID, never its value, for a
-    later change to name the columns; the step is then not done;
+    A record is named by its width (``kis_orders.notice_columns``): KIS's example's 26
+    (``FILL_NOTICE_COLUMNS``) or the mock server's 23 (``MOCK_FILL_NOTICE_COLUMNS``, measured by
+    the night job ``fill-notice-layout-403`` on 2026-11-04, #403; on 2026-10-30 this step could not
+    name them). Records of another width are shown by position instead (``layout``): each field's
+    look, lengths, how many values it took and what it equals of the orders, the account and the
+    HTS ID, never its value, for a later change to name the columns; the step is then not done;
 14. a summary: the calls, KIS's per-second refusals, and whether every step was done.
 
 An order it placed that is still open at the end is cancelled. A run a restart cuts may leave a
@@ -76,6 +78,7 @@ from krx_quant.feeds.base import KST
 from krx_quant.kis_orders import (
     FILL_NOTICE_COLUMNS,
     MOCK,
+    MOCK_FILL_NOTICE_COLUMNS,
     Account,
     AccountNo,
     Answer,
@@ -85,6 +88,7 @@ from krx_quant.kis_orders import (
     decrypt,
     issue_token,
     listen_fill_notices,
+    notice_columns,
     order_ref,
     same_number,
 )
@@ -127,6 +131,7 @@ SHOWN = frozenset(
         *("seln_byov_cls", "rctf_cls", "oder_kind", "oder_cond", "stck_shrn_iscd", "cntg_qty"),
         *("stck_cntg_hour", "rfus_yn", "cntg_yn", "acpt_yn", "oder_qty", "ord_exg_gb", "popup_yn"),
         *("crdt_cls", "cntg_isnm40"),
+        # not the mock server's cntg_isnm (#403): what its two characters are was not measured
     }
 )
 # The price fields, shown against the order's own price in ticks.
@@ -782,7 +787,8 @@ class _Probe:
         if not records:
             say("")
             return
-        say(f"  - 필드 {len(FILL_NOTICE_COLUMNS)}개로 나뉜 레코드 {len(records)}개")
+        widths = Counter(len(r) for r in records)
+        say("  - " + ", ".join(f"필드 {w}개로 나뉜 레코드 {n}개" for w, n in sorted(widths.items())))
         kinds = Counter(tuple(r.get(k, "") for k in KIND) for r in records)
         say(
             f"  - 종류({'·'.join(KIND)}): "
@@ -806,7 +812,7 @@ class _Probe:
     ) -> tuple[list[tuple[float, dict[str, str]]], list[str], list[list[str]]]:
         """The notices' records by field name, decrypted, each with when its frame came; lines on
         the frames that could not be read so; and the values of the records decrypted whose width
-        ``FILL_NOTICE_COLUMNS`` does not name (the mock server's 23, #403)."""
+        has no names (``kis_orders.notice_columns``)."""
         records: list[tuple[float, dict[str, str]]] = []
         odd: Counter[str] = Counter()
         unnamed: list[list[str]] = []
@@ -903,29 +909,32 @@ def notice_values(text: str, key_iv: tuple[str, str] | None) -> list[list[str]] 
 
 
 def notice_records(text: str, key_iv: tuple[str, str] | None) -> list[dict[str, str]] | str:
-    """A fill notice frame's records by field name (``FILL_NOTICE_COLUMNS``); else why it could not
-    be read so (``notice_values``, or a width the columns do not name)."""
+    """A fill notice frame's records by field name, of the names of their width
+    (``kis_orders.notice_columns``: KIS's example's 26 or the mock server's 23); else why it could
+    not be read so (``notice_values``, or a width with no names)."""
     found = notice_values(text, key_iv)
     if isinstance(found, str):
         return found
-    if any(len(values) != len(FILL_NOTICE_COLUMNS) for values in found):
+    columns = notice_columns(len(found[0]))
+    if columns is None:
         return f"레코드 {len(found)}개에 필드가 {sum(len(v) for v in found)}개인 프레임"
-    return [dict(zip(FILL_NOTICE_COLUMNS, values, strict=True)) for values in found]
+    return [dict(zip(columns, values, strict=True)) for values in found]
 
 
 def layout(records: Sequence[Sequence[str]], known: Sequence[tuple[str, Callable[[str], bool]]]) -> list[str]:
-    """The fields of records ``FILL_NOTICE_COLUMNS`` cannot name, by width and position, each by its
-    look and never its value (#403: the mock server's records had 23 fields): its flag
-    (``probe_fields.flag``), its lengths, how many values it took, and in how many records it equals
-    something ``known`` (an order number, the account...). From them a later change names the
-    columns."""
+    """The fields of records of a width with no names (``kis_orders.notice_columns``; #403: the mock
+    server's 23 before they were named), by width and position, each by its look and never its
+    value: its flag (``probe_fields.flag``), its lengths, how many values it took, and in how many
+    records it equals something ``known`` (an order number, the account...). From them a later
+    change names the columns."""
     lines: list[str] = []
     widths = Counter(len(record) for record in records)
     for width in sorted(widths):
         group = [record for record in records if len(record) == width]
         lines.append(
-            f"  - {width}칸 레코드 {len(group)}개의 칸별 모양(FILL_NOTICE_COLUMNS는 "
-            f"{len(FILL_NOTICE_COLUMNS)}칸이라 이름을 붙이지 못한다. 값은 보이지 않는다):"
+            f"  - {width}칸 레코드 {len(group)}개의 칸별 모양(칸 이름은 {len(FILL_NOTICE_COLUMNS)}칸과"
+            f" 모의 서버의 {len(MOCK_FILL_NOTICE_COLUMNS)}칸에만 있어 이름을 붙이지 못한다."
+            " 값은 보이지 않는다):"
         )
         for i in range(width):
             values = [record[i].strip() for record in group]
