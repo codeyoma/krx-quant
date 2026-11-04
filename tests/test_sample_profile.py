@@ -42,12 +42,12 @@ from krx_quant.sample_store import day_key, fingerprint
 from krx_quant.scheduled import FAILED, JOBS, OK, Facts, JobRecord, Night, prevalidation_jobs
 from krx_quant.scheduled.research import SAMPLE_PROFILE, SAMPLE_PROFILE_ISSUE
 from krx_quant.training import training_day
-from tests.test_nightly import DAYS, FEE, FINISHED, NIGHT, archive_bars
-from tests.test_replay_cli import SCHEMAS, record
+from tests.nightly_doubles import DAYS, FEE, FINISHED, NIGHT, archive_bars
+from tests.replay_doubles import SCHEMAS, record
+from tests.scheduled_doubles import FRIDAY, scheduling
+from tests.scheduled_doubles import SATURDAY as A_SATURDAY
+from tests.scheduled_doubles import at as at_night
 from tests.test_sample_store import LEADERS, SYMBOLS, archive_futures, rich_morning
-from tests.test_scheduled import FRIDAY, scheduling
-from tests.test_scheduled import SATURDAY as A_SATURDAY
-from tests.test_scheduled import at as at_night
 from tests.test_scheduled_give_way import PREVALIDATIONS, Takes, gave_way, waiting
 from tests.waiting import until
 
