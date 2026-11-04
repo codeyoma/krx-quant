@@ -9,10 +9,13 @@ running challenger's):
   #471: no λ), and under each
   challenger running that day for its paper book (#400). A cost map that cannot be read is asked
   for again every ``PICK_RETRY_SECONDS``, and no cell trades until it is read: a pick is never
-  older than the day's. A champion that cannot be read trades nothing (``NO_POLICY``) until the
-  next pick, nor does the trader before the first champion (#469, ``NO_CHAMPION``). Each pick is
-  made in the review cycle in force (#469, ``review.py``: the evaluation version begun at the
-  trader's first start after its deploy, if the nightly job did not begin it first);
+  older than the day's. While the engine starts (#508: ``ENGINE_START_GRACE`` after the trader
+  starts, until its first answer) a connection refused is asked again every
+  ``STARTING_RETRY_SECONDS`` and logged INFO, as the quotes' are (``quotes.follow_quotes``). A
+  champion that cannot be read trades nothing (``NO_POLICY``) until the next pick, nor does the
+  trader before the first champion (#469, ``NO_CHAMPION``). Each pick is made in the review cycle in
+  force (#469, ``review.py``: the evaluation version begun at the trader's first start after its
+  deploy, if the nightly job did not begin it first);
 - the collector's quotes as they come (``quotes.follow_quotes``), watched for a stall by the desk
   (#407, ``stall.py``);
 - the engine's database every ``TraderSettings.poll_seconds`` (``cells.EngineReader``,
@@ -113,6 +116,13 @@ TICK_SECONDS = 0.25
 LOOK_BACK = timedelta(minutes=2)
 # A cost map that could not be read is asked for again this often.
 PICK_RETRY_SECONDS = 60.0
+# The engine starting (#508): the 06:00 deploy starts the trader and the engine together, and the
+# engine's API answered 8–11 s after its start (Loki, 2026-10-28 – 11-04), its quote stream just
+# after. For this long after the trader starts, a connection refused before the engine first answered
+# is that start: logged INFO, once, and the cost map asked for again every ``STARTING_RETRY_SECONDS``.
+# Past it, or once the engine has answered, a failure is a WARNING as before.
+ENGINE_START_GRACE = timedelta(minutes=3)
+STARTING_RETRY_SECONDS = 5.0
 # Why the trader stopped by itself (#408): the live mode's answer changed at a pick, and Docker
 # starts it again in the other mode.
 SWITCH = "switch"
@@ -272,7 +282,15 @@ async def _run(
                 try:
                     await book.start()  # in mock and live mode the KIS account reconciled (#406)
                     switched = await _trade(
-                        settings, trader, book, session, watch, stop=stop, clock=clock, sleep=sleep
+                        settings,
+                        trader,
+                        book,
+                        session,
+                        watch,
+                        stop=stop,
+                        clock=clock,
+                        sleep=sleep,
+                        started=started,
                     )
                 finally:
                     await book.close()  # the order in flight on KIS, waited for (#405)
@@ -373,10 +391,17 @@ async def _trade(
     stop: asyncio.Event,
     clock: Clock,
     sleep: Callable[[float], Awaitable[None]],
+    started: datetime,
 ) -> bool:
     """The loops until ``stop`` is set (False), or until the live mode's answer changed and nothing of
-    the champion's book is open (True)."""
+    the champion's book is open (True). The trader ``started`` then: the engine's start is waited for
+    until ``ENGINE_START_GRACE`` after it (#508)."""
     reader = EngineReader(settings.state_dir / ENGINE_DB, SYMBOL)
+
+    def starting() -> bool:
+        """Whether the engine may still be starting with the trader (#508)."""
+        return clock() < started + ENGINE_START_GRACE
+
     log.info(
         "trader: %s trading %s on the champion's cells, the cost map from %s (threshold %g, capital %s won,"
         " loss limits %g%% a day and %g%% in all), quotes from %s",
@@ -391,27 +416,43 @@ async def _trade(
     )
 
     async def picking() -> None:
-        failing = False
+        failing = False  # a run of failures, kept once
+        warned = waited = False  # its WARNING said; the INFO of the engine's start said (#508)
+        answered = False  # the engine gave a cost map since the trader started
         while True:
             selection = await pick(session, trader.engine_url)
             at = clock()
             if selection.reason == NO_COST_MAP:
-                if not failing:  # kept and logged once a run of failures
+                if not failing:  # kept once a run of failures
+                    book.select(selection, at)
+                    reader.follow(book.cells, at - LOOK_BACK)
+                    watch.judge(at)
+                failing = True
+                if selection.unreachable and not answered and starting():
+                    if not waited:
+                        log.info(
+                            "trader: waiting for the engine to start (%s): no cell trades until the cost map"
+                            " is read, asked for every %gs",
+                            selection.detail,
+                            STARTING_RETRY_SECONDS,
+                        )
+                        waited = True
+                    await sleep(STARTING_RETRY_SECONDS)
+                    continue
+                if not warned:  # logged once a run of failures
                     log.warning(
                         "trader: could not read the cost map (%s): no cell trades until it is read,"
                         " asked for every %gs",
                         selection.detail,
                         PICK_RETRY_SECONDS,
                     )
-                    book.select(selection, at)
-                    reader.follow(book.cells, at - LOOK_BACK)
-                    watch.judge(at)
-                failing = True
+                    warned = True
                 await sleep(PICK_RETRY_SECONDS)
                 continue
             if failing:
                 log.info("trader: the cost map is read again")
-            failing = False
+            failing = warned = False
+            answered = True
             book.select(selection, at)
             reader.follow(book.cells, at - LOOK_BACK)
             watch.judge(at)
@@ -456,7 +497,9 @@ async def _trade(
 
     tasks = [
         asyncio.create_task(picking()),
-        asyncio.create_task(follow_quotes(session, trader.quotes_url, SYMBOL, book.on_quote)),
+        asyncio.create_task(
+            follow_quotes(session, trader.quotes_url, SYMBOL, book.on_quote, starting=starting)
+        ),
         asyncio.create_task(predictions()),
         asyncio.create_task(ticks()),
         asyncio.create_task(controls()),

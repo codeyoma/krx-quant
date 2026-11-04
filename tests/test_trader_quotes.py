@@ -123,6 +123,79 @@ async def test_the_trader_connects_again_once_the_stream_is_back(caplog: pytest.
     assert got == [quote_of(BOOK.tr_id, book())]
 
 
+async def test_while_the_collector_starts_the_trader_waits_for_it_quietly_then_warns(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#508: the 06:00 deploy starts the trader with the collector. While it may be starting, a
+    connection refused before the stream first answered is an INFO line, once; past that, a WARNING,
+    once. A drop after the stream answered is a WARNING, starting or not."""
+    caplog.set_level("INFO", logger="krx_quant.trader.quotes")
+    port = free_port()
+    starting = [True]
+    failures = [0]  # each connection refused before the stream answered asks whether it is starting
+
+    def is_starting() -> bool:
+        failures[0] += 1
+        return starting[0]
+
+    def said(level: str) -> list[str]:
+        return [
+            r.getMessage()
+            for r in caplog.records
+            if r.name == "krx_quant.trader.quotes" and r.levelname == level
+        ]
+
+    async def failed(more: int) -> None:
+        async with asyncio.timeout(5):
+            seen = failures[0]
+            while failures[0] < seen + more:
+                await asyncio.sleep(0.01)
+
+    got: list[BestQuote] = []
+    feed = QuoteFeed(["005930"])
+    feed.on_event(BOOK.tr_id, book())
+    async with aiohttp.ClientSession() as session:
+        url = f"ws://127.0.0.1:{port}/v1/quotes"
+        task = asyncio.create_task(
+            follow_quotes(
+                session,
+                url,
+                "005930",
+                got.append,
+                retry_seconds=0.01,
+                retry_max_seconds=0.02,
+                starting=is_starting,
+            )
+        )
+        try:
+            await failed(3)
+            assert said("WARNING") == []
+            [waiting] = said("INFO")
+            assert waiting.startswith("quotes: waiting for the engine to start (ClientConnectorError: ")
+            starting[0] = False  # the grace over, still refused
+            await failed(3)
+            [warned] = said("WARNING")
+            assert warned.startswith("quotes: ClientConnectorError: ")
+
+            starting[0] = True
+            runner = web.AppRunner(feed.app())
+            await runner.setup()
+            await web.TCPSite(runner, "127.0.0.1", port).start()
+            async with asyncio.timeout(5):
+                while not got:
+                    await asyncio.sleep(0.01)
+            await runner.cleanup()  # the collector restarts (07:20): the stream drops after it answered
+            async with asyncio.timeout(5):
+                while len(said("WARNING")) < 2:
+                    await asyncio.sleep(0.01)
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    assert said("WARNING")[1] == f"quotes: the stream closed ({url}); connecting again"
+    assert len(said("INFO")) == 2, "the waiting line and the following line: none after the stream answered"
+
+
 async def test_the_collector_streams_the_quotes_on_their_own_port_not_on_the_engine_api_s(
     kis: FakeKis, tmp_path: Path
 ) -> None:

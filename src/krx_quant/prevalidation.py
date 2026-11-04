@@ -341,13 +341,26 @@ def refusals(
         report = _read_report(state_dir, algorithm.name) or {}
         judged = {
             "prevalidated_at": report.get("prevalidated_at"),
-            "code": code_digest(algorithm),
-            "target_version": _target(algorithm, target_version, kinds),
-            "inputs": _raised(inputs_of(algorithm)),
+            **judging(algorithm, target_version, kinds),
         }
         return Refusal(json.dumps(judged, sort_keys=True), failed_checks(report))
 
     return refusal
+
+
+def judging(
+    algorithm: Algorithm | KindAlgorithm | DailyAlgorithm,
+    target_version: int = 1,
+    kinds: Sequence[Kind] = KINDS,
+) -> dict[str, Any]:
+    """What a pre-validation of the algorithm judges now, which its report must match (``_stale``):
+    the digest of its code, its target, and the versions of its inputs not 1. The engine tells a wait
+    for it once for each (#508)."""
+    return {
+        "code": code_digest(algorithm),
+        "target_version": _target(algorithm, target_version, kinds),
+        "inputs": _raised(inputs_of(algorithm)),
+    }
 
 
 def failed_checks(report: Mapping[str, Any]) -> str:

@@ -39,7 +39,9 @@ since: the day the morning swap installed it, nothing before, nothing while it w
 
 Live, a new algorithm runs only once ``admits`` lets it (its pre-validation passed,
 ``prevalidation.py``): from the next bar close it starts on probation. Until then it is
-not run, listed or reviewed; the first review after the engine starts alerts it once. One
+not run, listed or reviewed; the first review it waits at tells it once for the code, target and
+inputs it waits on (``runs``: ``prevalidation_waiting``, #508), saying that the night's scheduled
+jobs pre-validate it by themselves: no restart tells it again until one of them changes. One
 whose latest report refused the code and target it runs now (``refused``) is not waiting: the
 first review after the refusal tells it once (``runs``: ``prevalidation_refused``), and no
 restart tells it again until its code or target changes and it waits again (#310).
@@ -294,6 +296,9 @@ Regimes = Callable[[date, datetime], str | None]
 
 # The ``runs`` kind of a pre-validation refusal told (#310): its detail is what was refused.
 REFUSED_RUN = "prevalidation_refused"
+# The ``runs`` kind of a wait for a pre-validation told (#508): its detail is what that
+# pre-validation would judge (``prevalidation.judging``: the code, target and inputs), as one key.
+WAITING_RUN = "prevalidation_waiting"
 # The ``runs`` kind of a refused revision told (#454): its detail is the revision's id.
 REVISION_REFUSED_RUN = "revision_refused"
 # The ``runs`` kind of a review day of a probation whose new code waits for its pre-validation
@@ -521,7 +526,6 @@ class PredictionEngine:
         self.algorithms: tuple[Algorithm, ...] = ()  # the registered ones that run, in order
         self.kind_algorithms: tuple[KindAlgorithm, ...] = ()  # likewise, of the other kinds
         self._feature_names: list[str] = []
-        self._told_waiting: set[str] = set()  # waiting algorithms already alerted
         self._told_held: set[str] = set()  # held for their review days, already alerted (#310)
         self._budget = budget or Budget()
         self._features = feature_store or FeatureStore()
@@ -852,7 +856,21 @@ class PredictionEngine:
         refused the code and target they run now (what the scheduled pre-validations run, and the
         alert names). Not one of a daily kind not run yet (#310, ``DailyKind.awaiting``): it is not
         pre-validated before its kind runs."""
-        return [a.name for a in self._unvalidated() if self._refusal(a) is None]
+        return [a.name for a in self._waiting()]
+
+    def _waiting(self) -> list[Algorithm | KindAlgorithm | DailyAlgorithm]:
+        return [a for a in self._unvalidated() if self._refusal(a) is None]
+
+    def _waits_on(self, algorithm: Algorithm | KindAlgorithm | DailyAlgorithm) -> str:
+        """What the pre-validation it waits for would judge (``prevalidation.judging``), as one key:
+        the wait is told once for each (#508). Never in the way of the review: ``unknown`` when its
+        code cannot be read."""
+        from krx_quant.prevalidation import judging  # the pre-validation replays through this module
+
+        try:
+            return json.dumps(judging(algorithm, self.target_version, self.kinds), sort_keys=True)
+        except (OSError, ValueError):
+            return "unknown"
 
     def refused(self) -> dict[str, Refusal]:
         """The registered algorithms not run because their latest pre-validation refused the code
@@ -1199,15 +1217,17 @@ class PredictionEngine:
             text = f"{name} 은퇴 후보: {stuck}. 은퇴시키려면 서버에서 krx-quant retire {name}"
             if await self._deliver(text):  # else asked again at the next review
                 self.store.add_run("retire_candidate", at, name, text)
-        untold = [name for name in self.waiting() if name not in self._told_waiting]
+        # A wait for a pre-validation, once for the code, target and inputs it waits on (#508): kept
+        # in ``runs``, so a restart does not tell it again; a new code, target or inputs does.
+        untold = {
+            a.name: (a, key)
+            for a in self._waiting()
+            if self.store.last_detail(WAITING_RUN, a.name) != (key := self._waits_on(a))
+        }
         if untold:
-            names = ", ".join(untold)
-            text = (
-                f"사전 검증 대기: {names}. 검증을 통과해야 돌기 시작합니다. "
-                f"서버에서 장 시간 밖에 krx-quant prevalidate <이름>"
-            )
-            if await self._deliver(text):
-                self._told_waiting.update(untold)
+            if await self._deliver(_waiting_text([a for a, _ in untold.values()], self.daily_registered)):
+                for name, (_, key) in untold.items():  # else told at the next review
+                    self.store.add_run(WAITING_RUN, at, name, key)
         # A refusal of the code and target it runs now, once (#310): kept in ``runs``, so a
         # restart does not tell it again; a new code or target makes it wait again.
         for name, refusal in self.refused().items():
@@ -1999,6 +2019,31 @@ def _with_status(standings: Mapping[str, Standing], status: Status) -> set[str]:
 
 # An algorithm's forecasts by symbol, and why for each symbol it did not predict.
 _Predicted = tuple[dict[str, Forecast], dict[str, Abstention]]
+
+
+def _waiting_text(
+    waiting: Sequence[Algorithm | KindAlgorithm | DailyAlgorithm], daily: Sequence[DailyAlgorithm]
+) -> str:
+    """The alert of the algorithms ``waiting`` for their pre-validation (#508): who pre-validates them
+    and when, as the night's scheduled jobs do (``scheduled/prevalidations.py``: the bar-close ones one
+    a night once ``MIN_DAYS`` trading days are recorded, a daily one on the first night its data is
+    in), and where the result goes. Nothing is asked of anyone."""
+    from krx_quant.prevalidation import MIN_DAYS  # the pre-validation replays through this module
+    from krx_quant.scheduled.prevalidations import PREVALIDATION_ISSUE
+
+    when = []
+    if any(a not in daily for a in waiting):
+        when.append(
+            f"봉 마감 알고리즘은 녹화가 {MIN_DAYS}거래일 이상이면 밤 학습 뒤 예약 작업이 한 밤에 하나씩 "
+            "차례로 검증합니다"
+        )
+    if any(a in daily for a in waiting):
+        when.append("하루 한 번 예측 알고리즘은 그 입력과 정답이 다 들어온 첫 밤에 예약 작업이 검증합니다")
+    return (
+        f"사전 검증 대기: {', '.join(a.name for a in waiting)}. 검증을 통과해야 돌기 시작합니다. "
+        + "".join(f"{w}. " for w in when)
+        + f"결과는 #{PREVALIDATION_ISSUE}에 댓글로 올라옵니다. 손으로 돌릴 것은 없습니다."
+    )
 
 
 def _code(algorithm: Algorithm | KindAlgorithm | DailyAlgorithm) -> str:

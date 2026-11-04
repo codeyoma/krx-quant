@@ -339,6 +339,64 @@ async def test_a_report_counts_only_for_the_code_that_passed(tmp_path: Path) -> 
     assert engine.waiting() == []
 
 
+async def test_a_wait_is_told_once_for_the_code_and_target_it_waits_on_across_restarts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#508: the engine starts again every trading day (the 06:00 deploy, 07:20). The review tells a
+    waiting algorithm once for the code and target it waits on (``runs``: ``prevalidation_waiting``),
+    not at each start; told again on new code or a new target, and at the next review when Telegram
+    did not take it. The alert says the night's scheduled jobs pre-validate it and where the result
+    goes, and asks for no command."""
+    candidate = Contrarian("contrarian")
+    gate = admits(tmp_path / "state")  # no report: it waits
+    days = [date(2026, 9, 28) + timedelta(days=i) for i in range(5)]  # Monday to Friday
+
+    async def start(day: date, target_version: int = 1, down: bool = False) -> list[str]:
+        """An engine started at 07:20 of ``day``: what its review at 15:40 tells of the wait."""
+        outbox = Outbox()
+        outbox.down = down
+        engine = await run(
+            tmp_path / "live.db",
+            [],
+            until=at("15:45:00", day),
+            start=at("07:20:00", day),
+            calendar=MarketCalendar({day: True}),
+            algorithms=[ALPHA, candidate],
+            kind_algorithms=(),
+            admits=lambda a: a.name == "alpha" or gate(a),
+            target_version=target_version,
+            notify=outbox,
+        )
+        assert engine.waiting() == ["contrarian"]
+        engine.store.close()
+        return [m for m in outbox.sent if m.startswith("사전 검증 대기")]
+
+    [lost] = await start(days[0], down=True)
+    [told] = await start(days[0] + timedelta(days=7))
+    assert told == lost, "Telegram did not take it: told at the next review"
+    assert told == (
+        "사전 검증 대기: contrarian. 검증을 통과해야 돌기 시작합니다. 봉 마감 알고리즘은 녹화가 10거래일 "
+        "이상이면 밤 학습 뒤 예약 작업이 한 밤에 하나씩 차례로 검증합니다. 결과는 #204에 댓글로 "
+        "올라옵니다. 손으로 돌릴 것은 없습니다."
+    )
+    assert "krx-quant prevalidate" not in told
+    assert await start(days[1] + timedelta(days=7)) == [], "a restart: told already"
+
+    monkeypatch.setattr(prevalidation, "code_digest", lambda a: "0123456789abcdef")  # a new deploy
+    assert await start(days[2] + timedelta(days=7)) == [told], "new code: told again"
+    assert await start(days[3] + timedelta(days=7)) == []
+    assert await start(days[4] + timedelta(days=7), target_version=TARGET_VERSION) == [told], "a new target"
+
+    store = PredictionStore(tmp_path / "live.db")
+    keys = [json.loads(r.detail) for r in store.runs(engine_module.WAITING_RUN, at("00:00:00", days[0]))]
+    store.close()
+    assert [(k["code"], k["target_version"]) for k in keys] == [
+        (code_digest(candidate), 1),
+        ("0123456789abcdef", 1),
+        ("0123456789abcdef", TARGET_VERSION),
+    ]
+
+
 async def test_the_engine_logs_each_admission_once(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     # #456: the line Loki shows when the gate lets a new algorithm in, once, not at each bar close.
     caplog.set_level("INFO", logger="krx_quant.engine")
@@ -483,9 +541,9 @@ async def test_an_algorithm_waiting_is_alerted_once_after_the_engine_starts(tmp_
     )
 
     [alert] = outbox.sent  # at Thursday's review; not again at Friday's
-    assert "contrarian" in alert and "krx-quant prevalidate" in alert
+    assert "contrarian" in alert and "krx-quant prevalidate" not in alert, "the night's jobs run it (#508)"
     await run(tmp_path / "live.db", [], until=at("15:45:00", monday), start=at("08:00:00", monday), **options)
-    assert len(outbox.sent) == 2, "a restarted engine alerts again"
+    assert outbox.sent == [alert], "a restarted engine does not alert again on the same code (#508)"
 
 
 async def test_the_algorithms_registered_before_and_those_enrolled_run_without_a_report(

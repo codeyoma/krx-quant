@@ -77,27 +77,35 @@ def received_second(received_at: datetime) -> datetime:
     return received_at.astimezone(KST).replace(microsecond=0)
 
 
-# The values kst_or_received took for no time of day, so each is logged once.
-_ODD_TIMES: set[str] = set()
+# The values kst_or_received took for no time of day, by feed, so each is logged once a feed.
+_ODD_TIMES: set[tuple[str, str]] = set()
 
 
-def kst_or_received(hhmmss: str, received_at: datetime) -> datetime:
+def kst_or_received(hhmmss: str, received_at: datetime, *, tr_id: str, key: str, field: str) -> datetime:
     """``hhmmss`` on the day received, or the second received for a closing record or any
-    value that is not a time of day.
+    value that is not a time of day; ``hhmmss`` is ``field`` of a ``tr_id`` record of ``key``.
 
     KIS documents the field only as the time (영업시간). Besides ``999999`` it sent index
     records with an hour of 24 or more just after the 15:30 close (2026-10-19, #308): a real
     time record received now happened now, so it is kept, timed by its receipt, rather than
-    left raw only. Each such value is logged once; the raw frame keeps it.
+    left raw only. Each such value is logged once a feed, with the first record's TR ID, key and
+    field (#508: ``888888`` came daily at about 15:30, from a feed the line did not name); the raw
+    frame keeps it.
     """
     if hhmmss == CLOSING_TIME:
         return received_second(received_at)
     try:
         return kst(kst_day(received_at), hhmmss)
     except ValueError:
-        if hhmmss not in _ODD_TIMES:
-            _ODD_TIMES.add(hhmmss)
-            log.warning("KIS time %r is not a time of day: such records are timed by their receipt", hhmmss)
+        if (tr_id, hhmmss) not in _ODD_TIMES:
+            _ODD_TIMES.add((tr_id, hhmmss))
+            log.warning(
+                "KIS time %r is not a time of day (%s %s, %s): such records are timed by their receipt",
+                hhmmss,
+                tr_id,
+                key,
+                field,
+            )
         return received_second(received_at)
 
 

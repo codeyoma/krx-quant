@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import date, datetime
+from functools import partial
 from typing import Any
 
 import pyarrow as pa
@@ -53,7 +54,9 @@ INDEX_SCHEMA = pa.schema(
 def _normalize_index(f: dict[str, str], received_at: datetime) -> Row:
     return {
         "symbol": f["bstp_cls_code"],
-        "event_time": kst_or_received(f["bsop_hour"], received_at),
+        "event_time": kst_or_received(
+            f["bsop_hour"], received_at, tr_id="H0UPCNT0", key=f["bstp_cls_code"], field="bsop_hour"
+        ),
         "received_at": received_at,
         "value": to_float(f["prpr_nmix"]),
         "change_pct": to_float(f["prdy_ctrt"]),
@@ -133,7 +136,7 @@ FUTURES_SCHEMA = pa.schema(
 
 
 def _normalize_futures(
-    f: dict[str, str], received_at: datetime, when: Callable[[str, datetime], datetime] = kst_or_received
+    f: dict[str, str], received_at: datetime, when: Callable[[str, datetime], datetime]
 ) -> Row:
     return {
         "symbol": f["futs_shrn_iscd"],
@@ -156,8 +159,18 @@ def _normalize_futures(
     }
 
 
-KOSPI200_FUTURES = Feed("H0IFCNT0", tuple(FUTURES_COLUMNS), FUTURES_SCHEMA, _normalize_futures)
-USD_FUTURES = Feed("H0CFCNT0", tuple(FUTURES_COLUMNS), FUTURES_SCHEMA, _normalize_futures)
+def _day_futures(tr_id: str) -> Callable[[dict[str, str], datetime], Row]:
+    """The day futures' records of ``tr_id``: a time not of a day is logged with the feed (#508)."""
+
+    def normalize(f: dict[str, str], received_at: datetime) -> Row:
+        when = partial(kst_or_received, tr_id=tr_id, key=f["futs_shrn_iscd"], field="bsop_hour")
+        return _normalize_futures(f, received_at, when)
+
+    return normalize
+
+
+KOSPI200_FUTURES = Feed("H0IFCNT0", tuple(FUTURES_COLUMNS), FUTURES_SCHEMA, _day_futures("H0IFCNT0"))
+USD_FUTURES = Feed("H0CFCNT0", tuple(FUTURES_COLUMNS), FUTURES_SCHEMA, _day_futures("H0CFCNT0"))
 
 
 # H0MFCNT0, the KOSPI200 futures of KRX's night session, 18:00 to 06:00 the next morning
@@ -453,7 +466,9 @@ OPTION_SCHEMA = pa.schema(
 def _normalize_option(f: dict[str, str], received_at: datetime) -> Row:
     return {
         "symbol": f["optn_shrn_iscd"],
-        "event_time": kst_or_received(f["bsop_hour"], received_at),
+        "event_time": kst_or_received(
+            f["bsop_hour"], received_at, tr_id="H0IOCNT0", key=f["optn_shrn_iscd"], field="bsop_hour"
+        ),
         "received_at": received_at,
         "price": round(to_float(f["optn_prpr"]), 2),
         "qty": to_int(f["last_cnqn"]),
