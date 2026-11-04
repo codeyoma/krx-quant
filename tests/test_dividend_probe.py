@@ -14,8 +14,8 @@ from krx_quant import dividend_probe
 from krx_quant.candles import CANDLES_TR
 from krx_quant.dividend_probe import probe_dividends, steps
 from krx_quant.fake_kis import FakeKis
+from tests.collector_doubles import settings_for
 from tests.kis_rest import requests_for
-from tests.test_collector import settings_for
 
 TODAY = date(2026, 10, 20)
 SPLIT = date(2018, 5, 4)  # 50:1

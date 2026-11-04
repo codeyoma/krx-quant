@@ -3,7 +3,7 @@ day they name, and measured column by column without a value; the job ``fill-not
 
 The records are the fake KIS account's (``fake_kis.FakeAccount``, in a made-up 23-column layout that
 is not the example's first 23), recorded by the trader's recorder while the mock book trades
-(``tests/test_trader_mock.py``'s ``MockDay``), or written here for a case. Every value is made up.
+(``tests/kis_doubles.py``'s ``MockDay``), or written here for a case. Every value is made up.
 """
 
 from __future__ import annotations
@@ -57,14 +57,14 @@ from krx_quant.trader.notice_layout import (
     measure,
     render,
 )
-from tests.test_trader_mock import BOUGHT, TEN, Fill, MockDay, kis_mock, settings_of
+from tests.kis_doubles import BOUGHT, TEN, Fill, MockDay, kis_mock, settings_of
 from tests.trader_doubles import CALENDAR, at, quote
 from tests.waiting import until
 
 __all__ = ["kis_mock"]  # a fixture
 
 HTS_ID = "notice7hts"
-ACCOUNT_DIGITS = "5012345601"  # tests.test_trader_mock.ACCOUNT's
+ACCOUNT_DIGITS = "5012345601"  # tests.kis_doubles.ACCOUNT's
 NAME = "홍길동"
 # A made-up 23 of the example's 26 columns, not its first 23: the order's price last.
 LAYOUT = tuple(c for c in FILL_NOTICE_COLUMNS if c not in ("ORD_COND_PRC", "ORD_EXG_GB", "POPUP_YN"))
@@ -418,10 +418,10 @@ def test_the_job_runs_on_a_trading_night_with_records_not_judged_until_every_kin
 
 async def test_the_night_s_facts_read_the_days_recorded(tmp_path: Path) -> None:
     from krx_quant.scheduled import read_facts
-    from tests.test_simulation_daily import CALENDAR as DAILY_CALENDAR
-    from tests.test_simulation_daily import NIGHT as DAILY_NIGHT
-    from tests.test_simulation_daily import engine_on
-    from tests.test_simulation_daily import settings as daily_settings
+    from tests.daily_doubles import CALENDAR as DAILY_CALENDAR
+    from tests.daily_doubles import NIGHT as DAILY_NIGHT
+    from tests.daily_doubles import engine_on
+    from tests.daily_doubles import settings as daily_settings
 
     s = daily_settings(tmp_path, signal=0.0, days=30)
     store = fill_notices.FillNoticeStore(s.state_dir / fill_notices.DB_NAME, fill_notices.Limits(), DAY)

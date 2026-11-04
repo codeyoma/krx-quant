@@ -32,33 +32,14 @@ from krx_quant.trader.run import run_trader
 from krx_quant.trader.settings import TraderSettings
 from krx_quant.trader.store import DB_NAME as TRADER_DB
 from krx_quant.trader.store import request_pause
-from tests.test_collector import FIXED_NOW, settings_for
-from tests.test_live_predictions import free_port
-from tests.test_resilience import TRADE_KEY, fast
+from tests.collector_doubles import FIXED_NOW, TRADE_KEY, settings_for
+from tests.server_doubles import free_port, telegram
+from tests.test_resilience import fast
 from tests.trader_doubles import FEE, at
 from tests.waiting import until
 
 TEXT = "2026-10-22 밤 학습이 실패했습니다: exit -9 (SIGKILL)"
 UNREACHABLE = "http://127.0.0.1:9"  # nothing listens there
-
-
-@asynccontextmanager
-async def telegram(status: int) -> AsyncIterator[tuple[str, list[str]]]:
-    """A Bot API stand-in answering ``status``; the texts it was sent."""
-    sent: list[str] = []
-
-    async def message(request: web.Request) -> web.Response:
-        sent.append((await request.json())["text"])
-        return web.json_response({"ok": status == 200}, status=status)
-
-    app = web.Application()
-    app.router.add_post("/bot{token}/sendMessage", message)
-    server = TestServer(app, host="127.0.0.1")
-    await server.start_server(access_log=None)
-    try:
-        yield str(server.make_url("")).rstrip("/"), sent
-    finally:
-        await server.close()
 
 
 class Bot:

@@ -11,38 +11,22 @@ import pytest
 
 from krx_quant.config import Settings
 from krx_quant.fake_kis import FakeKis
-from tests.kis_frames import master_zips
-from tests.test_collector import KST, collect, settings_for
+from tests.collector_doubles import (
+    CALLS,
+    KST,
+    PUTS,
+    STRIKES,
+    collect,
+    options_of,
+    serve_masters,
+    settings_for,
+)
 
 SYMBOLS = ("005930", "000660", "009150")
 
 
-# Nearest expiry 202610 with ATM 1,072.5; two strikes each side are recorded, the rest are not.
-STRIKES = ["1,065.0", "1,067.5", "1,070.0", "1,072.5", "1,075.0", "1,077.5", "1,080.0"]
-ATM = "1,072.5"
-CALLS = [f"B01610C{i}" for i in range(len(STRIKES))]
-PUTS = [f"C01610P{i}" for i in range(len(STRIKES))]
 NOVEMBER_CALLS = [f"B01611C{i}" for i in range(len(STRIKES))]
 NOVEMBER_PUTS = [f"C01611P{i}" for i in range(len(STRIKES))]
-
-
-def options_of(month: str, calls: list[str], puts: list[str]) -> list[tuple[str, str, str, bool]]:
-    """A month's options in the master, one call and one put at each strike."""
-    rows = [(c, "C", f"{month} {k}", k == ATM) for c, k in zip(calls, STRIKES, strict=True)]
-    return rows + [(p, "P", f"{month} {k}", k == ATM) for p, k in zip(puts, STRIKES, strict=True)]
-
-
-def serve_masters(kis: FakeKis, options: list[tuple[str, str, str, bool]] | None = None) -> None:
-    if options is None:
-        options = [
-            *options_of("202610", CALLS, PUTS),
-            ("B01611C3", "C", f"202611 {ATM}", True),
-        ]  # later: ignored
-    kis.masters = master_zips(
-        kospi200_futures=[("A01703", "2"), ("A01612", "1")],
-        usd_futures=[("A75611", "2"), ("A75610", "1")],
-        options=options,
-    )
 
 
 def full_settings(kis: FakeKis, tmp_path: Path, symbols: tuple[str, ...] = SYMBOLS) -> Settings:

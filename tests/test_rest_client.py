@@ -23,7 +23,7 @@ from krx_quant.kis import KisError, RestClient, rest_session
 from krx_quant.polling import Poller, PollJob
 from krx_quant.ratelimit import RateLimiter
 from krx_quant.recorder import ParquetRecorder
-from tests.test_collector import FIXED_NOW
+from tests.collector_doubles import FIXED_NOW
 
 TOKEN = "the-token"
 VI = VI_STATUS.tr_id

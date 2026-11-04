@@ -45,13 +45,12 @@ from krx_quant.touch import TARGET_VERSION
 from krx_quant.training import bar_answers, training_day
 from tests.algorithm_doubles import stand_in_card, stand_in_meanings
 from tests.api_schema import check
+from tests.prevalidation_doubles import AFTER, ALPHA
+from tests.prevalidation_doubles import DAYS as PREVALIDATION_DAYS
+from tests.prevalidation_doubles import report as prevalidation_report
+from tests.prevalidation_doubles import settings as prevalidation_settings
+from tests.replay_doubles import busy_morning, record
 from tests.replay_events import CALENDAR, DAY, FEE, SYMBOL, api, at, get_json, run, steady_book
-from tests.test_prevalidation import AFTER, ALPHA
-from tests.test_prevalidation import DAYS as PREVALIDATION_DAYS
-from tests.test_prevalidation import report as prevalidation_report
-from tests.test_prevalidation import settings as prevalidation_settings
-from tests.test_replay import busy_morning
-from tests.test_replay_cli import record
 
 T = at("09:31:00")
 

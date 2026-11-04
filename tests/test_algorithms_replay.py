@@ -24,6 +24,7 @@ from krx_quant.features import FEATURES, FeatureStore, Leaders, Snapshot, Value
 from krx_quant.feeds import USD_FUTURES
 from krx_quant.touch import TARGET_VERSION
 from tests.algorithm_doubles import FixedAlgorithm, PlacedAlgorithm
+from tests.replay_doubles import busy_morning, predictions_of
 from tests.replay_events import (
     SYMBOL,
     api,
@@ -37,16 +38,8 @@ from tests.replay_events import (
     trade,
     us_trade,
 )
-from tests.test_replay import busy_morning
 
 VWAP_FEATURES = ("vwap_gap", "vwap_z", "reversion_speed")
-
-
-async def predictions_of(engine: Any, algorithm: str, limit: int = 1000) -> list[dict[str, Any]]:
-    async with api(engine) as client:
-        body = await get_json(client, f"/v1/symbols/{SYMBOL}/predictions?algorithm={algorithm}&limit={limit}")
-    predictions: list[dict[str, Any]] = body["predictions"]
-    return predictions
 
 
 async def test_newton_predicts_and_is_scored_under_its_model_version(tmp_path: Path) -> None:

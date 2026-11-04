@@ -38,8 +38,8 @@ from krx_quant.pricing import Direction
 from krx_quant.scheduled import run_command
 from krx_quant.stats import leaderboard, on_target, scored_by_algorithm, split
 from krx_quant.touch import TARGET_VERSION
-from tests.test_leaderboard_api import touch
-from tests.test_scheduled import at
+from tests.api_doubles import touch
+from tests.scheduled_doubles import at
 
 UP, FLAT, DOWN = Direction.UP, Direction.FLAT, Direction.DOWN
 SURE = {UP: Forecast(1, 0, 0, 0), FLAT: Forecast(0, 1, 0, 0), DOWN: Forecast(0, 0, 1, 0)}

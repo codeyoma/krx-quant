@@ -18,7 +18,7 @@ from krx_quant.auth import tokens_and_client
 from krx_quant.fake_kis import FakeKis
 from krx_quant.kis import RestClient
 from krx_quant.ratelimit import RateLimiter
-from tests.test_collector import settings_for
+from tests.collector_doubles import settings_for
 
 Responder = Callable[[dict[str, str]], dict[str, Any]]
 

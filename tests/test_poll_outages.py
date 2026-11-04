@@ -32,9 +32,9 @@ from krx_quant.notify import Alerts
 from krx_quant.poll_outages import ALERT_PREFIX, PollOutages, PollState, error_kind
 from krx_quant.polling import Poller, PollJob
 from krx_quant.recorder import ParquetRecorder
+from tests.collector_doubles import settings_for
 from tests.kis_rest import query_error, requests_for, session_full
-from tests.test_collector import settings_for
-from tests.test_live_predictions import free_port, poll
+from tests.server_doubles import free_port, poll
 from tests.waiting import until
 
 FOREIGN = FOREIGN_ESTIMATE.tr_id

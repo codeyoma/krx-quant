@@ -51,7 +51,7 @@ from krx_quant.trader.selection import (
 from krx_quant.trader.settings import TraderSettings
 from krx_quant.trader.store import DAILY_LIMIT, DB_NAME, Entry, Exit, TraderStore, read_days, read_trades
 from tests.api_schema import check
-from tests.test_trader_mock import TIMING, Fill, kis_mock, orders_of, rows, settings_of
+from tests.kis_doubles import TIMING, Fill, kis_mock, orders_of, rows, settings_of
 from tests.test_trader_shadow import BOUGHT, DAY, TAKEN, TEN, MockDesk, Repicked
 from tests.trader_doubles import (
     BARRIER,

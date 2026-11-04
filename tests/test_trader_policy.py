@@ -38,13 +38,14 @@ from krx_quant.trader.selection import (
 )
 from krx_quant.trader.settings import TraderSettings
 from krx_quant.trader.store import DB_NAME, TraderStore, read_trades
-from tests.test_live_predictions import free_port
-from tests.test_trader_run import EngineApi, rows
+from tests.server_doubles import free_port
+from tests.test_trader_run import rows
 from tests.trader_doubles import (
     BARRIER,
     FEE,
     Barrier,
     Day,
+    EngineApi,
     Read,
     at,
     cost_map,

@@ -11,8 +11,7 @@ from typing import Any
 from krx_quant.collector import run_collector
 from krx_quant.config import Settings
 from krx_quant.fake_kis import FakeKis
-from tests.test_collector import FIXED_NOW, settings_for
-from tests.test_resilience import Clock
+from tests.collector_doubles import FIXED_NOW, Clock, settings_for
 from tests.waiting import until
 
 QUOTE = "FHKST01010100"

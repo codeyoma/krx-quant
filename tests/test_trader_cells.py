@@ -30,9 +30,9 @@ from krx_quant.trader.paper import (
 )
 from krx_quant.trader.selection import NO_PASS, CostMapError, choose, kelly, read_cost_map
 from krx_quant.trader.store import DB_NAME, TraderStore, read_trades
+from tests.api_doubles import barrier_board
+from tests.api_doubles import cost_map as engine_cost_map
 from tests.api_schema import check
-from tests.test_cost_map_api import barrier_board
-from tests.test_cost_map_api import cost_map as engine_cost_map
 from tests.trader_doubles import (
     BARRIER,
     DIRECTION,

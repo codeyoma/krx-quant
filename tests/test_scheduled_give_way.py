@@ -34,7 +34,7 @@ from krx_quant.scheduled import (
     JobRecord,
     Ran,
 )
-from tests.test_scheduled import COMMIT, FRIDAY, MONDAY, SATURDAY, SUNDAY, Runs, at, saved, scheduling
+from tests.scheduled_doubles import COMMIT, FRIDAY, MONDAY, SATURDAY, SUNDAY, Runs, at, saved, scheduling
 from tests.waiting import until
 
 BAR_CLOSE = "simulate bar-close"

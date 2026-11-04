@@ -39,7 +39,7 @@ from krx_quant.scheduled import (
 from krx_quant.trader.store import DB_NAME as TRADER_DB
 from krx_quant.trader.store import TraderStore
 from tests.fake_github import REPO, TOKEN, fake_github
-from tests.test_scheduled import (
+from tests.scheduled_doubles import (
     AT,
     CALENDAR,
     COMMIT,

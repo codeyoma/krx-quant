@@ -58,9 +58,9 @@ from krx_quant.turing_prior import (
     split,
     turing_prior_experiment,
 )
+from tests.prevalidation_doubles import AFTER, DAYS
+from tests.replay_doubles import record
 from tests.replay_events import at, book, trade
-from tests.test_prevalidation import AFTER, DAYS
-from tests.test_replay_cli import record
 
 UP, FLAT, DOWN = Direction.UP, Direction.FLAT, Direction.DOWN
 TURING = Turing()

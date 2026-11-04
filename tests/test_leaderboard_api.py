@@ -10,7 +10,7 @@ from __future__ import annotations
 import contextlib
 import math
 import sqlite3
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -25,82 +25,13 @@ from krx_quant.market_calendar import MarketCalendar
 from krx_quant.predictions import NewKindPrediction, NewPrediction, PredictionStore, Score
 from krx_quant.pricing import Direction
 from krx_quant.skill import skill
-from krx_quant.touch import TARGET_VERSION, Reached, TouchResult
+from krx_quant.touch import TARGET_VERSION
+from tests.api_doubles import DOWN, FLAT, OUTCOMES, SURE, UP, baselines, get, store_scored, touch
 from tests.api_schema import check
+from tests.replay_doubles import busy_morning
 from tests.replay_events import DAY, at, run
-from tests.test_replay import busy_morning
 
-UP, FLAT, DOWN = Direction.UP, Direction.FLAT, Direction.DOWN
-SURE = {UP: Forecast(1, 0, 0, 0), FLAT: Forecast(0, 1, 0, 0), DOWN: Forecast(0, 0, 1, 0)}
-# What happened at the 40 bar closes from 09:01: up, flat, down, flat, ...
-OUTCOMES = [UP, FLAT, DOWN, FLAT] * 10
 EARLIER = date(2026, 10, 8)
-
-
-def touch(symbol: str, t: datetime, label: Direction | None, unscorable: str | None = None) -> TouchResult:
-    """Bar close ``t``'s touch label: at 81,250 won between 81,200 and 81,300 (k = 2), the
-    upper target 81,450 reached a minute in for up, the lower 81,050 for down, neither for
-    flat; the quotes back where they started at the end. None: ``unscorable``."""
-    if label is None:
-        return TouchResult(symbol, t, None, unscorable or "silent quotes")
-    reached = Reached(t + timedelta(minutes=1), 81_450 if label is UP else 81_050, None)
-    return TouchResult(
-        symbol,
-        t,
-        label,
-        None,
-        anchor=81_250,
-        tick=100,
-        k=2,
-        upper=81_450,
-        lower=81_050,
-        bid_start=81_200,
-        ask_start=81_300,
-        bid_end=81_200,
-        ask_end=81_300,
-        upper_reached=reached if label is UP else None,
-        lower_reached=reached if label is DOWN else None,
-    )
-
-
-def store_scored(
-    store: PredictionStore,
-    algorithm: str,
-    calls: Sequence[Direction],
-    *,
-    symbol: str = "005930",
-    day: date = DAY,
-    version: str = "v1",
-    special: bool = False,
-) -> None:
-    """Store ``calls`` (one sure call per bar close from 09:01), scored against OUTCOMES: the
-    bar closes' touch labels (and, unread, the old bases' classes)."""
-    start = datetime.combine(day, at("09:01:00").timetz())
-    for i, call in enumerate(calls):
-        t = start + timedelta(minutes=i)
-        [pending] = store.add_all(
-            [
-                NewPrediction(
-                    symbol,
-                    algorithm,
-                    version,
-                    t,
-                    t,
-                    SURE[call],
-                    t + timedelta(minutes=4),
-                    81_250,
-                    81_250,
-                    2,
-                    special=special,
-                )
-            ]
-        ).pending
-        label = OUTCOMES[i]
-        target = 81_250 + {UP: 300, FLAT: 0, DOWN: -300}[label]
-        store.score_all(
-            [(pending.prediction_id, Score(target, label, label, None))], t + timedelta(minutes=4)
-        )
-        store.add_touches([touch(symbol, t, label)])
 
 
 @contextlib.asynccontextmanager
@@ -118,18 +49,6 @@ async def board(
     )
     async with TestClient(TestServer(create_app(engine, min_sample=min_sample))) as client:
         yield engine, client
-
-
-async def get(client: TestClient[Any, Any], path: str, status: int = 200) -> Any:
-    response = await client.get(path)
-    assert response.status == status, await response.text()
-    return await response.json()
-
-
-def baselines(store: PredictionStore, n: int = 40, **kw: Any) -> None:
-    store_scored(store, "baseline-flat", [FLAT] * n, **kw)
-    store_scored(store, "baseline-persist", [UP] * n, **kw)
-    store_scored(store, "baseline-random", [DOWN] * n, **kw)
 
 
 async def test_the_leaderboard_ranks_by_the_lower_bound_of_the_weakest_lift(tmp_path: Path) -> None:

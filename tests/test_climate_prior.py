@@ -36,10 +36,11 @@ from krx_quant.prevalidation import _WalkForward
 from krx_quant.pricing import Direction
 from krx_quant.stats import Interval
 from krx_quant.training import finished_days
+from tests.prevalidation_doubles import AFTER, DAYS
+from tests.replay_doubles import record
 from tests.replay_events import at, book, trade
-from tests.test_prevalidation import AFTER, DAYS
-from tests.test_replay_cli import record
-from tests.test_shannon import a_day, inputs, on_days
+from tests.sample_doubles import a_day, inputs
+from tests.test_shannon import on_days
 
 UP, FLAT, DOWN = Direction.UP, Direction.FLAT, Direction.DOWN
 D1, D2, D3 = DAYS[:3]

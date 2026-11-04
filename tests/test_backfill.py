@@ -17,6 +17,7 @@ from krx_quant.feeds.base import KST
 from krx_quant.health import GAP_SCHEMA
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.recorder import ParquetRecorder
+from tests.collector_doubles import read, settings_for
 from tests.kis_rest import (
     FUTURES_BARS,
     HOLIDAYS,
@@ -30,7 +31,6 @@ from tests.kis_rest import (
     rest_client,
     rest_grants,
 )
-from tests.test_collector import read, settings_for
 
 AFTER_HOURS = datetime(2026, 10, 8, 21, 0, tzinfo=KST)  # every session of the day is over
 

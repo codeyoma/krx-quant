@@ -31,9 +31,8 @@ from krx_quant.touch import TARGET_VERSION
 from krx_quant.training import recorded_samples
 from tests.algorithm_doubles import FixedAlgorithm
 from tests.api_schema import check
+from tests.replay_doubles import busy_morning, predictions_of
 from tests.replay_events import CALENDAR, DAY, FEE, api, at, book, futures_trade, get_json, run
-from tests.test_algorithms_replay import predictions_of
-from tests.test_replay import busy_morning
 
 OWN = ("microprice_ticks", "kospi200f_moves")
 

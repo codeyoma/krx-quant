@@ -9,9 +9,8 @@ import asyncio
 import hashlib
 import json
 import sqlite3
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager, closing
-from dataclasses import dataclass, field, replace
+from contextlib import closing
+from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -37,57 +36,28 @@ from krx_quant.trader.store import CUMULATIVE_LIMIT, TraderStore, read_trades, r
 from krx_quant.trader.store import DB_NAME as TRADER_DB
 from tests.replay_events import at as replay_at
 from tests.replay_events import run
-from tests.test_live_predictions import free_port
-from tests.test_notify import telegram
-from tests.trader_doubles import BARRIER, FEE, Barrier, at, cost_map, cost_row, keep, policy_cell, predictor
+from tests.server_doubles import free_port, telegram
+from tests.trader_doubles import (
+    BARRIER,
+    FEE,
+    PASSING,
+    Barrier,
+    EngineApi,
+    at,
+    book,
+    cost_map,
+    cost_row,
+    keep,
+    policy_cell,
+    predictor,
+)
 from tests.waiting import until
 
-PASSING = cost_map([cost_row("barrier", top=predictor("breiman", 0.70, "pass"))])
 FAILING = cost_map([cost_row("barrier", top=predictor("breiman", 0.60, "fail"))])
-
-
-def book(received: datetime, bid: int, ask: int) -> dict[str, Any]:
-    return {
-        "symbol": "005930",
-        "received_at": received,
-        "bid_px_1": bid,
-        "ask_px_1": ask,
-        "bid_qty_1": 9,
-        "ask_qty_1": 9,
-    }
 
 
 def digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
-@dataclass
-class EngineApi:
-    """The Engine API's cost map, as the engine service answers inside the compose network: each
-    request gets the next of ``answers`` (a body, or a status alone), the last one again after."""
-
-    answers: list[dict[str, Any] | int]
-    asked: list[dict[str, str]] = field(default_factory=list)
-
-    async def _cost_map(self, request: web.Request) -> web.Response:
-        self.asked.append(dict(request.query))
-        answer = self.answers[min(len(self.asked), len(self.answers)) - 1]
-        if isinstance(answer, int):
-            return web.json_response({"error": "starting"}, status=answer)
-        return web.json_response(answer)
-
-    @asynccontextmanager
-    async def serving(self) -> AsyncIterator[str]:
-        app = web.Application()
-        app.router.add_get("/v1/cost-map", self._cost_map)
-        runner = web.AppRunner(app)
-        await runner.setup()
-        port = free_port()
-        await web.TCPSite(runner, "127.0.0.1", port).start()
-        try:
-            yield f"http://127.0.0.1:{port}"
-        finally:
-            await runner.cleanup()
 
 
 def rows(state: Path, table: str) -> list[dict[str, Any]]:

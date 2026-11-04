@@ -32,6 +32,7 @@ from krx_quant.touch import TARGET_VERSION
 from krx_quant.trader import THRESHOLD as TRADER_THRESHOLD
 from tests.algorithm_doubles import FixedAlgorithm
 from tests.api_schema import check
+from tests.replay_doubles import busy_morning
 from tests.replay_events import (
     CALENDAR,
     FEE,
@@ -45,7 +46,6 @@ from tests.replay_events import (
     kospi200_futures,
     vi,
 )
-from tests.test_replay import busy_morning
 
 UP = Forecast(0.7, 0.2, 0.1, 2.0)
 FLAT = Forecast(0.3, 0.4, 0.3, 0.0)

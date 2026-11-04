@@ -25,18 +25,10 @@ from krx_quant.pricing import Direction
 from krx_quant.touch import TARGET_VERSION
 from tests.algorithm_doubles import FixedAlgorithm
 from tests.api_schema import check
+from tests.lifecycle_doubles import RIGHT, put_days, stored, weekdays_before
+from tests.replay_doubles import busy_morning
 from tests.replay_events import DAY, SYMBOL, api, at, get_json, run
-from tests.test_lifecycle import (
-    MISSES_DOWNS,
-    NEXT_DAY,
-    RIGHT,
-    WRONG,
-    morning,
-    put_days,
-    stored,
-    weekdays_before,
-)
-from tests.test_replay import busy_morning
+from tests.test_lifecycle import MISSES_DOWNS, NEXT_DAY, WRONG, morning
 
 QUICK = FixedAlgorithm(
     "quick", features=("velocity",), unique=("velocity",), forecast=Forecast(0.6, 0.3, 0.1, 1.0)

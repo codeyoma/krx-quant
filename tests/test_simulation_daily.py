@@ -28,12 +28,10 @@ from krx_quant.clock import FakeClock
 from krx_quant.config import Settings
 from krx_quant.daily import DailyAlgorithm, DailySample
 from krx_quant.daily_features import input_versions
-from krx_quant.engine import PredictionEngine
 from krx_quant.features import FeatureVector
 from krx_quant.feeds.base import KST
-from krx_quant.kinds import DIRECTION_KIND, Answer, KindForecast
+from krx_quant.kinds import Answer, KindForecast
 from krx_quant.lifecycle import REGISTERED, Status
-from krx_quant.market_calendar import MarketCalendar
 from krx_quant.open_to_close import CLIMATE, FLAT_NAME, OPEN_TO_CLOSE, PERSIST
 from krx_quant.predictions import DB_NAME, NewKindPrediction, PredictionStore
 from krx_quant.prevalidation import code_digest, report_path
@@ -41,27 +39,8 @@ from krx_quant.scheduled import FAILED, JOBS, OK, Facts, JobRecord, Night, preva
 from krx_quant.simulation import DAILY_DAYS, SimulationRun, report, simulate_daily
 from krx_quant.special import Kind as SpecialKind
 from krx_quant.special import Window
-from tests.daily_doubles import SYMBOLS, made_history
+from tests.daily_doubles import CALENDAR, LAST, NIGHT, SYMBOLS, engine_on, settings, store_of
 from tests.replay_events import api, get_json
-
-FEE = 0.015 / 100
-LAST = date(2026, 10, 16)  # a Friday: the last made-up KRX day
-NIGHT = datetime(2026, 10, 16, 23, 0, tzinfo=KST)  # that night's scheduled jobs
-CALENDAR = MarketCalendar()
-
-
-def settings(tmp_path: Path, signal: float, days: int = 420, seed: int = 298) -> Settings:
-    made_history(tmp_path / "data", tmp_path / "state", LAST, days, signal=signal, seed=seed)
-    return Settings(
-        kis_app_key="",
-        kis_app_secret="",
-        symbols=SYMBOLS,
-        etf_symbols=(),
-        index_codes=(),
-        us_symbols=(),
-        data_dir=tmp_path / "data",
-        state_dir=tmp_path / "state",
-    )
 
 
 def passed_report(s: Settings, name: str = "cox", algorithm: DailyAlgorithm | None = None) -> None:
@@ -84,10 +63,6 @@ def passed_report(s: Settings, name: str = "cox", algorithm: DailyAlgorithm | No
             }
         )
     )
-
-
-def store_of(s: Settings) -> PredictionStore:
-    return PredictionStore(s.state_dir / DB_NAME)
 
 
 class AgainstTheNight:
@@ -296,32 +271,6 @@ def add_live_day(store: PredictionStore, name: str, day: date, rng: random.Rando
     store.add_kind_predictions(OPEN_TO_CLOSE.name, made)
     store.add_kind_answers(
         OPEN_TO_CLOSE.name, OPEN_TO_CLOSE.answer_version, answered, scored_at=at + timedelta(hours=12)
-    )
-
-
-class Source:
-    def days(self, symbol: str) -> list[Any]:
-        return []
-
-
-def no_features(algorithm: Any, symbol: str, day: date, past: Sequence[Any], band: Any) -> FeatureVector:
-    return FeatureVector({}, ())
-
-
-def engine_on(s: Settings, clock: FakeClock, algorithms: Sequence[Any]) -> PredictionEngine:
-    return PredictionEngine(
-        store_of(s),
-        CALENDAR,
-        SYMBOLS,
-        FEE,
-        clock,
-        algorithms=(),
-        kinds=(DIRECTION_KIND,),
-        kind_algorithms=(),
-        daily=Source(),
-        daily_algorithms=algorithms,
-        daily_features=no_features,
-        daily_feature_names={"us_sox"},
     )
 
 

@@ -7,13 +7,9 @@ Engine API the collector serves.
 from __future__ import annotations
 
 import asyncio
-import socket
-from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
 
-import aiohttp
 import pytest
 
 from krx_quant import collector
@@ -21,30 +17,10 @@ from krx_quant.clock import FakeClock
 from krx_quant.collector import run_collector
 from krx_quant.fake_kis import FakeKis
 from krx_quant.names import logo_url
+from tests.collector_doubles import settings_for
 from tests.kis_frames import book_frame
 from tests.replay_events import LIVE_PREDICTORS, at
-from tests.test_collector import settings_for
-
-
-def free_port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        port: int = sock.getsockname()[1]
-        return port
-
-
-async def poll(url: str, ready: Callable[[Any], bool], timeout: float = 5.0) -> Any:
-    """GET ``url`` until its JSON body is ``ready``."""
-    async with aiohttp.ClientSession() as http, asyncio.timeout(timeout):
-        while True:
-            try:
-                async with http.get(url) as response:
-                    body = await response.json()
-                    if response.status == 200 and ready(body):
-                        return body
-            except aiohttp.ClientConnectionError:
-                pass  # not listening yet
-            await asyncio.sleep(0.02)
+from tests.server_doubles import free_port, poll
 
 
 async def test_the_collector_predicts_from_live_events_and_serves_them(kis: FakeKis, tmp_path: Path) -> None:

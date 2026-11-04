@@ -13,9 +13,7 @@ predictions of models trained on the touch target (#170).
 
 from __future__ import annotations
 
-import contextlib
-from collections.abc import Iterator
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time
 from pathlib import Path
 from typing import Any
 
@@ -27,15 +25,14 @@ from krx_quant.clock import FakeClock
 from krx_quant.feeds import KST
 from krx_quant.lifecycle import Status, target_changed
 from krx_quant.market_calendar import MarketCalendar
-from krx_quant.predictions import DB_NAME, NewPrediction, PredictionStore, Score
+from krx_quant.predictions import DB_NAME, PredictionStore
 from krx_quant.pricing import Direction
 from krx_quant.replay import replay_into
 from krx_quant.touch import TARGET_VERSION
 from tests.algorithm_doubles import FixedAlgorithm
 from tests.api_schema import check
+from tests.lifecycle_doubles import OUTCOMES, RIGHT, Outbox, put_days, stored, weekdays_before
 from tests.replay_events import DAY, api, at, get_json, run
-from tests.test_leaderboard_api import OUTCOMES as FORTY_OUTCOMES
-from tests.test_leaderboard_api import SURE, touch
 
 ALPHA = FixedAlgorithm("alpha", features=("velocity",), unique=("velocity",))
 BETA = FixedAlgorithm("beta", features=("acceleration",), unique=("acceleration",))
@@ -43,30 +40,10 @@ GAMMA = FixedAlgorithm("gamma", features=("relative_volume",), unique=("relative
 DELTA = FixedAlgorithm("delta", features=("vwap_z",), unique=("vwap_z",))
 NEXT_DAY, THIRD_DAY = date(2026, 10, 13), date(2026, 10, 14)
 THREE_DAYS = MarketCalendar({DAY: True, NEXT_DAY: True, THIRD_DAY: True})
-# What happened at each day's first eight bar closes from 09:01: up, flat, down, flat, twice.
-# Enough for min_sample 20 within three days, and few enough to fill 65 days fast.
-OUTCOMES = FORTY_OUTCOMES[:8]
-BASELINE_CALLS = {
-    "baseline-flat": [Direction.FLAT] * len(OUTCOMES),
-    "baseline-persist": [Direction.UP] * len(OUTCOMES),
-    "baseline-random": [Direction.DOWN] * len(OUTCOMES),
-}
-RIGHT = OUTCOMES  # every call right
 FLAT = [Direction.FLAT] * len(OUTCOMES)  # the same calls as always-flat: no lift
 # Right but on the downs, which it calls flat: better than every baseline, and its p_up − p_down
 # moves with RIGHT's at a correlation of 0.82 (0.25 / √(0.5 × 0.1875)), not a clone.
 MISSES_DOWNS: list[Direction] = [Direction.FLAT if o is Direction.DOWN else o for o in OUTCOMES]
-
-
-def weekdays_before(day: date, n: int) -> list[date]:
-    """The ``n`` weekdays before ``day``, oldest first."""
-    days: list[date] = []
-    d = day
-    while len(days) < n:
-        d -= timedelta(days=1)
-        if d.weekday() < 5:
-            days.append(d)
-    return days[::-1]
 
 
 def morning(day: date) -> datetime:
@@ -94,66 +71,12 @@ async def test_a_new_algorithm_starts_on_probation(tmp_path: Path) -> None:
     assert entered["at"] == "2026-10-12T00:00:00+09:00"  # when the engine first ran it
 
 
-@contextlib.contextmanager
-def stored(db: Path) -> Iterator[PredictionStore]:
-    store = PredictionStore(db)
-    try:
-        yield store
-    finally:
-        store.close()
-
-
 def put_status(db: Path, algorithm: str, status: str, since: date) -> None:
     """``algorithm``'s status since the morning of ``since``, on the touch target already (#170:
     the engine does not restart it)."""
     with stored(db) as store:
         store.add_status(algorithm, morning(since), None, Status(status), "set by the test")
         store.mark_target(TARGET_VERSION, morning(since))
-
-
-def put_days(
-    db: Path,
-    days: list[date],
-    calls: dict[str, list[Direction]],
-    *,
-    with_baselines: bool = True,
-    model: str = "v1",
-    target_version: int | None = TARGET_VERSION,
-) -> None:
-    """Each algorithm's ``calls`` on each of ``days`` (one sure call per bar close from 09:01,
-    by ``model``, trained on ``target_version``: the touch target unless said), scored against
-    OUTCOMES: the bar closes' touch labels (and, unread, the old bases' classes), with the
-    baselines' unless they are there.
-    """
-    with stored(db) as store:
-        store.record_models([(a, model, target_version) for a in calls])
-        if with_baselines:
-            calls = {**calls, **BASELINE_CALLS}
-        for d in days:
-            made = []
-            for algorithm, directions in calls.items():
-                version = "v1" if algorithm in BASELINE_CALLS else model
-                for i, call in enumerate(directions):
-                    t = datetime.combine(d, time(9, 1), KST) + timedelta(minutes=i)
-                    at_target = t + timedelta(minutes=4)
-                    made.append(
-                        NewPrediction(
-                            "005930", algorithm, version, t, t, SURE[call], at_target, 81_250, 81_250, 2
-                        )
-                    )
-            pending = store.add_all(made).pending
-            scores = []
-            for p in pending:
-                outcome = OUTCOMES[
-                    (p.target_at - datetime.combine(d, time(9, 5), KST)) // timedelta(minutes=1)
-                ]
-                mid = 81_250 + {Direction.UP: 300, Direction.FLAT: 0, Direction.DOWN: -300}[outcome]
-                scores.append((p.prediction_id, Score(mid, outcome, outcome, None)))
-            store.score_all(scores, datetime.combine(d, time(15, 30), KST))
-            first = datetime.combine(d, time(9, 1), KST)
-            store.add_touches(
-                [touch("005930", first + timedelta(minutes=i), o) for i, o in enumerate(OUTCOMES)]
-            )
 
 
 def last_change(algorithm: dict[str, Any]) -> tuple[str | None, str, str]:
@@ -269,18 +192,6 @@ async def test_an_active_algorithm_no_better_than_a_baseline_is_benched_and_stil
     async with api(engine) as client:
         body = await get_json(client, "/v1/symbols/005930/predictions?algorithm=alpha&limit=5")
     assert len(body["predictions"]) == 5  # a benched algorithm is still run
-
-
-class Outbox:
-    """Alerts sent, as Telegram would take them, or refuse them while ``down``."""
-
-    def __init__(self) -> None:
-        self.sent: list[str] = []
-        self.down = False
-
-    async def __call__(self, text: str) -> bool:
-        self.sent.append(text)
-        return not self.down
 
 
 async def test_a_benched_algorithm_recovers_or_after_sixty_days_is_a_retirement_candidate(

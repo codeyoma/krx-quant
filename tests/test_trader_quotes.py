@@ -22,10 +22,10 @@ from krx_quant.config import Settings, SettingsError
 from krx_quant.fake_kis import FakeKis
 from krx_quant.feeds import BOOK, KRX_TRADE, TRADE
 from krx_quant.trader.quotes import BestQuote, QuoteFeed, follow_quotes, parse_quote, quote_json, quote_of
+from tests.collector_doubles import settings_for
 from tests.kis_frames import book_frame
 from tests.replay_events import at, run
-from tests.test_collector import settings_for
-from tests.test_live_predictions import free_port, poll
+from tests.server_doubles import free_port, poll
 from tests.waiting import until
 
 RECEIVED = datetime(2026, 10, 14, 1, 0, 2, 500_000, tzinfo=UTC)  # 10:00:02.5 KST

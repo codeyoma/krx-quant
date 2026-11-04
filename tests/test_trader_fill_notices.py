@@ -35,12 +35,10 @@ from krx_quant.trader.quotes import QuoteFeed
 from krx_quant.trader.run import run_trader
 from krx_quant.trader.settings import TraderSettings
 from krx_quant.trader.store import DB_NAME, read_trades
-from tests.test_live_predictions import free_port
-from tests.test_notify import telegram
-from tests.test_trader_live import decided, kis_live, live_settings, ready, run_live
-from tests.test_trader_mock import TIMING, kis_mock, resting_sells, settings_of
-from tests.test_trader_run import PASSING, EngineApi, book
-from tests.trader_doubles import Barrier, at, first_champion
+from tests.kis_doubles import TIMING, kis_mock, live_settings, resting_sells, settings_of
+from tests.server_doubles import free_port, telegram
+from tests.test_trader_live import decided, kis_live, ready, run_live
+from tests.trader_doubles import PASSING, Barrier, EngineApi, at, book, first_champion
 from tests.waiting import until
 
 HTS_ID = "notice7hts"

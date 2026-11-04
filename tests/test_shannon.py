@@ -31,7 +31,7 @@ from krx_quant.algorithms import (
     forecast_of,
 )
 from krx_quant.algorithms.priors import PRIOR_INPUTS, PriorTally, prior_of
-from krx_quant.algorithms.shannon import INPUTS, Shannon, default_params
+from krx_quant.algorithms.shannon import default_params
 from krx_quant.baselines import Forecast
 from krx_quant.engine import Event
 from krx_quant.features import FeatureVector, Leaders
@@ -40,9 +40,9 @@ from krx_quant.feeds.base import LEVELS
 from krx_quant.pricing import Direction
 from krx_quant.training import recorded_samples
 from tests.algorithm_doubles import FixedAlgorithm
+from tests.replay_doubles import busy_morning, predictions_of
 from tests.replay_events import CALENDAR, DAY, FEE, at, book, every, run, trade, with_sides
-from tests.test_algorithms_replay import predictions_of
-from tests.test_replay import busy_morning
+from tests.sample_doubles import SHANNON, a_day, inputs, labelled
 
 OWN = ("ofi_1", "ofi_5", "trade_entropy")
 SHARED = ("depth_imbalance", "trade_imbalance", "nxt_share")
@@ -130,12 +130,7 @@ async def test_without_nxt_s_trades_its_share_is_unknown(tmp_path: Path) -> None
     assert probe.seen[-1]["nxt_share"] is None
 
 
-SHANNON = Shannon()
 NOISE = ("ofi_5", "depth_imbalance", "trade_imbalance", "trade_entropy", "nxt_share")
-
-
-def inputs(**values: float | None) -> FeatureVector:
-    return FeatureVector(dict.fromkeys(INPUTS) | {"depth_imbalance": 0.0} | values, SHANNON.features)
 
 
 LATER = datetime.combine(date(2026, 9, 30), time(9, 5), KST)  # after every made-up sample's day
@@ -248,20 +243,6 @@ def test_without_the_symbol_and_the_bar_close_shannon_does_not_predict() -> None
         forecast_of(SHANNON, inputs(ofi_1=1.0), model, None)
     context = PredictionContext("005930", LATER)
     assert forecast_of(SHANNON, inputs(ofi_1=1.0), model, context) == forecast(inputs(ofi_1=1.0), model)
-
-
-def labelled(day: date, hhmm: str, outcome: Direction | None, symbol: str = "005930") -> Sample:
-    """A bar close whose inputs say nothing (every one the same)."""
-    return Sample(
-        symbol, datetime.combine(day, time.fromisoformat(hhmm), KST), inputs(ofi_1=0.5), outcome, 0.0
-    )
-
-
-def a_day(day: date, opening: Direction = Direction.UP) -> list[Sample]:
-    """Ten bar closes from 09:01 labelled ``opening``, ten from 10:01 flat."""
-    return [labelled(day, f"09:{m:02d}", opening) for m in range(1, 11)] + [
-        labelled(day, f"10:{m:02d}", Direction.FLAT) for m in range(1, 11)
-    ]
 
 
 D1, D2, D3 = (date(2026, 9, 14) + timedelta(days=i) for i in range(3))

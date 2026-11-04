@@ -35,7 +35,7 @@ from krx_quant.trader.paper import STOP_LOSS, TAKE_PROFIT, TIME
 from krx_quant.trader.reconcile import Outside, candidates, compare
 from krx_quant.trader.store import CLEAN, DB_NAME, RESUME, Placed, TraderStore, read_trades
 from tests.api_schema import check
-from tests.test_trader_mock import (
+from tests.kis_doubles import (
     BOUGHT,
     TEN,
     TIMING,
@@ -44,11 +44,11 @@ from tests.test_trader_mock import (
     Fill,
     MockDay,
     kis_mock,
-    open_row,
     orders_of,
     rows,
     settings_of,
 )
+from tests.test_trader_mock import open_row
 from tests.trader_doubles import Barrier, Read, Tick, at, quote
 
 __all__ = ["kis_mock"]  # the fixture, used here

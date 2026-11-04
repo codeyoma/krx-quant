@@ -26,8 +26,9 @@ from krx_quant.predictions import NewKindPrediction
 from krx_quant.pricing import Direction
 from tests.algorithm_doubles import FixedAlgorithm
 from tests.kind_doubles import DRIFT, TEST_KIND, FixedKindAlgorithm
+from tests.lifecycle_doubles import put_days, stored, weekdays_before
 from tests.replay_events import DAY, SYMBOL, api, at, get_json, run
-from tests.test_lifecycle import last_change, put_days, put_status, stored, weekdays_before
+from tests.test_lifecycle import last_change, put_status
 
 ANSWERS = ["rose", "held", "fell", "held"] * 2
 BASELINE_CALLS = {"drift-held": ["held"] * len(ANSWERS), "drift-persist": ["rose"] * len(ANSWERS)}

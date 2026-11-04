@@ -26,9 +26,8 @@ from krx_quant.pricing import Direction, classify
 from krx_quant.reference import Bar
 from krx_quant.training import recorded_samples
 from tests.algorithm_doubles import FixedAlgorithm
+from tests.replay_doubles import busy_morning, predictions_of
 from tests.replay_events import CALENDAR, FEE, at, option_trade, run
-from tests.test_algorithms_replay import predictions_of
-from tests.test_replay import busy_morning
 
 MARKOV = Markov()
 DAY = date(2026, 10, 12)

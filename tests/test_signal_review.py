@@ -50,9 +50,9 @@ from krx_quant.signals import BLOCKED, SENT, SignalRule, Signals
 from krx_quant.stats import Scored
 from krx_quant.touch import TARGET_VERSION
 from tests.algorithm_doubles import FixedAlgorithm
+from tests.api_doubles import touch
+from tests.replay_doubles import busy_morning
 from tests.replay_events import CALENDAR, FEE, SYMBOL, at, vi
-from tests.test_leaderboard_api import touch
-from tests.test_replay import busy_morning
 
 UP, FLAT, DOWN = Direction.UP, Direction.FLAT, Direction.DOWN
 EARLIER, DAY = date(2026, 10, 12), date(2026, 10, 13)

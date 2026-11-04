@@ -27,9 +27,8 @@ from krx_quant.feeds import KST
 from krx_quant.pricing import Direction
 from krx_quant.training import recorded_samples
 from tests.algorithm_doubles import FixedAlgorithm
+from tests.replay_doubles import busy_morning, predictions_of
 from tests.replay_events import CALENDAR, DAY, FEE, at, book, run, trade, with_sides
-from tests.test_algorithms_replay import predictions_of
-from tests.test_replay import busy_morning
 
 OWN = (
     "buy_excitation_10",

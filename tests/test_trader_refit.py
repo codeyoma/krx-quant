@@ -86,11 +86,11 @@ from krx_quant.trader.replay import OFF_TARGET, Signals, day_reads, target_of
 from krx_quant.trader.selection import choose
 from krx_quant.trader.settings import TraderSettings
 from krx_quant.trader.store import DB_NAME as TRADER_DB
-from tests.test_trader_run import EngineApi
 from tests.trader_doubles import (
     CALENDAR,
     DAY,
     FEE,
+    EngineApi,
     at,
     cost_map,
     cost_row,

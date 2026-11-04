@@ -17,9 +17,8 @@ from krx_quant.config import Settings
 from krx_quant.fake_kis import FakeKis
 from krx_quant.feeds.base import KST
 from krx_quant.health import FeedHealth, Key
+from tests.collector_doubles import TRADE_KEY, Clock, settings_for
 from tests.kis_rest import HOLIDAYS, holiday_api
-from tests.test_collector import settings_for
-from tests.test_resilience import TRADE_KEY, Clock
 from tests.waiting import until
 
 

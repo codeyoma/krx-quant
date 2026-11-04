@@ -63,9 +63,9 @@ from krx_quant.scheduled import (
     Scheduler,
 )
 from krx_quant.stats import Lift, Scored, t_quantile
+from tests.api_doubles import touch
 from tests.fake_github import REPO, TOKEN, fake_github
-from tests.test_leaderboard_api import touch
-from tests.test_scheduled import AT, CALENDAR, COMMIT, FRIDAY, MONDAY, SATURDAY, Told, at
+from tests.scheduled_doubles import AT, CALENDAR, COMMIT, FRIDAY, MONDAY, SATURDAY, Told, at
 
 UP, FLAT, DOWN = Direction.UP, Direction.FLAT, Direction.DOWN
 SURE = {UP: Forecast(1, 0, 0, 0), FLAT: Forecast(0, 1, 0, 0), DOWN: Forecast(0, 0, 1, 0)}
@@ -454,9 +454,9 @@ async def test_the_job_runs_the_real_command(tmp_path: Path, monkeypatch: pytest
 
 async def test_the_nightly_facts_count_the_window_s_days_in_the_engine_db(tmp_path: Path) -> None:
     from krx_quant.scheduled import read_facts
-    from tests.test_simulation_daily import CALENDAR as DAILY_CALENDAR
-    from tests.test_simulation_daily import NIGHT, engine_on
-    from tests.test_simulation_daily import settings as daily_settings
+    from tests.daily_doubles import CALENDAR as DAILY_CALENDAR
+    from tests.daily_doubles import NIGHT, engine_on
+    from tests.daily_doubles import settings as daily_settings
 
     s = daily_settings(tmp_path, signal=0.0, days=30)
     clock = FakeClock(NIGHT)

@@ -24,7 +24,7 @@ from krx_quant.trader.promotion import BETWEEN_REVIEWS, FEW_DAYS, NO_COHORT, REV
 from krx_quant.trader.refit import form_now
 from krx_quant.trader.store import DB_NAME, read_trader
 from tests.api_schema import check
-from tests.test_trader_promotion import CLOSE_CALL, LONG, WEEKDAYS, day_ran, judged_at, night, ran, setup
+from tests.promotion_doubles import CLOSE_CALL, LONG, WEEKDAYS, day_ran, judged_at, night, ran, setup
 from tests.trader_doubles import BARRIER, CALENDAR, at, keep, policy_cell
 
 # The first cycle's review day and the next cycle's first and review days.

@@ -8,7 +8,6 @@ checked against the /v1 schema.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -26,9 +25,9 @@ from krx_quant.predictions import PredictionStore
 from krx_quant.replay import replay_into
 from krx_quant.touch import TARGET_VERSION
 from tests.algorithm_doubles import FixedAlgorithm
-from tests.api_schema import check
+from tests.api_doubles import receive_until
+from tests.replay_doubles import busy_morning
 from tests.replay_events import CALENDAR, FEE, SYMBOL, at, trade
-from tests.test_replay import busy_morning
 from tests.waiting import until
 
 UP = Forecast(0.7, 0.2, 0.1, 2.0)
@@ -58,20 +57,6 @@ async def listening(client: TestClient[web.Request, web.Application]) -> ClientW
     ws = await client.ws_connect("/v1/stream")
     await until(lambda: stream.clients == 1)
     return ws
-
-
-async def receive_until(
-    ws: ClientWebSocketResponse, done: Callable[[dict[str, Any]], bool], timeout: float = 5.0
-) -> list[dict[str, Any]]:
-    """Events until one is ``done``, each checked against the schema."""
-    events: list[dict[str, Any]] = []
-    async with asyncio.timeout(timeout):
-        while True:
-            event = await ws.receive_json()
-            check("event", event)
-            events.append(event)
-            if done(event):
-                return events
 
 
 async def test_a_client_receives_predictions_the_consensus_and_outcomes_as_they_are_made(

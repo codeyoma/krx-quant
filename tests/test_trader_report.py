@@ -34,10 +34,10 @@ from krx_quant.trader.report import (
 from krx_quant.trader.selection import choose
 from krx_quant.trader.settings import TraderSettings
 from krx_quant.trader.store import DB_NAME, TraderStore
+from tests.promotion_doubles import CLOSE_CALL, WEEKDAYS, day_ran, judged_at, setup
 from tests.test_trader_limits import BOUGHT, TEN, rules
-from tests.test_trader_promotion import CLOSE_CALL, WEEKDAYS, begun, day_ran, judged_at, setup
+from tests.test_trader_promotion import begun
 from tests.test_trader_risk import TRADER, loss, rise
-from tests.test_trader_run import EngineApi
 from tests.trader_doubles import (
     BARRIER,
     CALENDAR,
@@ -46,6 +46,7 @@ from tests.trader_doubles import (
     AskRearm,
     Barrier,
     Day,
+    EngineApi,
     Read,
     Tick,
     at,

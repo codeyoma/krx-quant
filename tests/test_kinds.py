@@ -48,8 +48,8 @@ from krx_quant.touch import RESTARTED, SILENT, TARGET_VERSION, TouchWindow
 from tests.algorithm_doubles import FixedAlgorithm
 from tests.api_schema import check
 from tests.kind_doubles import DRIFT, SURE_RISE, TEST_KIND, FixedKindAlgorithm, drift_of
+from tests.replay_doubles import busy_morning, stored
 from tests.replay_events import CALENDAR, FEE, SYMBOL, api, at, book, get_json, run, steady_book, vi
-from tests.test_replay import busy_morning, stored
 
 DRIFTER = FixedKindAlgorithm("drifter", features=("velocity",), unique=("velocity",))
 

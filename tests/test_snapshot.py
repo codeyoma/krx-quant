@@ -31,8 +31,8 @@ from krx_quant.snapshot import (
     SnapshotState,
     keep_snapshots,
 )
+from tests.collector_doubles import settings_for
 from tests.fake_github import REPO, TOKEN, FakeGitHub, fake_github
-from tests.test_collector import settings_for
 from tests.waiting import until
 
 START = datetime(2026, 10, 20, 10, 0, tzinfo=KST)

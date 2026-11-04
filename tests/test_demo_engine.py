@@ -21,9 +21,9 @@ from krx_quant.cli import main
 from krx_quant.consensus import NAMES as CONSENSUS
 from krx_quant.demo import DEMO_SYMBOLS, demo_app
 from krx_quant.macro import INDICATORS
+from tests.api_doubles import receive_until
 from tests.api_schema import check
 from tests.replay_events import get_json
-from tests.test_api_stream import receive_until
 
 # The tests that only read the demo share one (#511): building it is most of a test's time, about
 # 8 s. Its client lives on the module's event loop, so they run on it too (fixtures default to the

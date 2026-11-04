@@ -30,9 +30,9 @@ from krx_quant.market_calendar import MarketCalendar
 from krx_quant.notify import Alerts
 from krx_quant.object_store import LocalObjectStore
 from krx_quant.swap import await_spot_night, first_spot_wait, publish_training_inputs, spot_night_deadline
-from tests.test_collector import KST, settings_for
-from tests.test_nightly import DAYS, archive_bars
-from tests.test_nightly import NIGHT as LAST_DAY
+from tests.collector_doubles import KST, settings_for
+from tests.nightly_doubles import DAYS, archive_bars
+from tests.nightly_doubles import NIGHT as LAST_DAY
 from tests.test_swap import MORNING, NIGHT, TRAINED, at, night_list
 from tests.waiting import until
 

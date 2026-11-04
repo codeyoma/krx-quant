@@ -48,7 +48,7 @@ from krx_quant.trader.store import (
     read_trades,
     request_pause,
 )
-from tests.test_trader_mock import TIMING, kis_mock, resting_sells, settings_of
+from tests.kis_doubles import TIMING, kis_mock, resting_sells, settings_of
 from tests.test_trader_reconcile import Lost, next_day
 from tests.trader_doubles import (
     BARRIER,

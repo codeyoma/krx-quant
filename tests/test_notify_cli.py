@@ -7,7 +7,7 @@ from pathlib import Path
 
 from krx_quant.fake_kis import FakeKis
 from krx_quant.notify import send_notice, send_test_alert
-from tests.test_collector import settings_for
+from tests.collector_doubles import settings_for
 
 
 async def test_the_test_alert_reaches_the_configured_chat(kis: FakeKis, tmp_path: Path) -> None:

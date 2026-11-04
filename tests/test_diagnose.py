@@ -29,8 +29,8 @@ from krx_quant.predictions import DB_NAME, NewPrediction, PredictionStore, Score
 from krx_quant.pricing import Direction
 from krx_quant.recorder import ParquetRecorder
 from krx_quant.touch import SILENT, TARGET_VERSION, Reached, TouchResult
+from tests.replay_doubles import record
 from tests.replay_events import DAY, SYMBOL, at, book, futures_trade, trade, vi
-from tests.test_replay_cli import record
 
 EARLIER = date(2026, 10, 8)
 FORECAST = Forecast(0.5, 0.3, 0.2, 1.0)

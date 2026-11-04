@@ -9,18 +9,21 @@ writes them, the resumes and re-arms as ``krx-quant trade`` does. With ``Day.des
 the whole desk (#400: the champion's book and each challenger running, the policies kept in the
 store as the nightly re-fit keeps them, ``keep``, and entered as a cohort, ``enter``, #473). The
 same quotes recorded as the collector records them (``record_quotes``) are what the re-fit replays
-(#470). Every price and hit rate is made up.
+(#470). The Engine API's cost map is served as the engine service answers it (``EngineApi``, #511),
+``PASSING`` one whose barrier row passes. Every price and hit rate is made up.
 """
 
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Mapping, Sequence
-from contextlib import closing
+from collections.abc import AsyncIterator, Mapping, Sequence
+from contextlib import asynccontextmanager, closing
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
+
+from aiohttp import web
 
 from krx_quant.baselines import Forecast
 from krx_quant.consensus import FINAL
@@ -52,6 +55,7 @@ from krx_quant.trader.store import (
     read_trades,
     request_pause,
 )
+from tests.server_doubles import free_port
 
 DAY = (2026, 10, 14)  # a Wednesday: the calendar guesses it trades, 09:00 to 15:30
 CALENDAR = MarketCalendar()
@@ -581,3 +585,46 @@ def cost_map(rows: Sequence[dict[str, Any]], symbol: str = SYMBOL, period: str =
         "regimes": None,
         "regimes_missing": "not computed yet",
     }
+
+
+PASSING = cost_map([cost_row("barrier", top=predictor("breiman", 0.70, "pass"))])
+
+
+def book(received: datetime, bid: int, ask: int) -> dict[str, Any]:
+    return {
+        "symbol": "005930",
+        "received_at": received,
+        "bid_px_1": bid,
+        "ask_px_1": ask,
+        "bid_qty_1": 9,
+        "ask_qty_1": 9,
+    }
+
+
+@dataclass
+class EngineApi:
+    """The Engine API's cost map, as the engine service answers inside the compose network: each
+    request gets the next of ``answers`` (a body, or a status alone), the last one again after."""
+
+    answers: list[dict[str, Any] | int]
+    asked: list[dict[str, str]] = field(default_factory=list)
+
+    async def _cost_map(self, request: web.Request) -> web.Response:
+        self.asked.append(dict(request.query))
+        answer = self.answers[min(len(self.asked), len(self.answers)) - 1]
+        if isinstance(answer, int):
+            return web.json_response({"error": "starting"}, status=answer)
+        return web.json_response(answer)
+
+    @asynccontextmanager
+    async def serving(self) -> AsyncIterator[str]:
+        app = web.Application()
+        app.router.add_get("/v1/cost-map", self._cost_map)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        port = free_port()
+        await web.TCPSite(runner, "127.0.0.1", port).start()
+        try:
+            yield f"http://127.0.0.1:{port}"
+        finally:
+            await runner.cleanup()

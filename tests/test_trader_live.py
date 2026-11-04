@@ -58,16 +58,22 @@ from krx_quant.trader.store import (
     read_trader,
     read_trades,
 )
-from tests.test_live_predictions import free_port
-from tests.test_notify import telegram
-from tests.test_trader_mock import ACCOUNT, KEY, SECRET, TIMING
-from tests.test_trader_run import PASSING, EngineApi, book
-from tests.trader_doubles import BARRIER, CALENDAR, FEE, Barrier, at, keep, policy_cell, whole_rules
+from tests.kis_doubles import ACCOUNT, KEY, LIVE_ACCOUNT, LIVE_KEY, LIVE_SECRET, TIMING, live_settings
+from tests.server_doubles import free_port, telegram
+from tests.trader_doubles import (
+    BARRIER,
+    CALENDAR,
+    PASSING,
+    Barrier,
+    EngineApi,
+    at,
+    book,
+    keep,
+    policy_cell,
+    whole_rules,
+)
 from tests.waiting import until
 
-LIVE_KEY = "PSlive" + "l" * 30
-LIVE_SECRET = "Sl" + "v" * 60
-LIVE_ACCOUNT = "70123456-01"
 TODAY = date(2026, 10, 14)
 DAYS = [d for d in (date(2026, 9, 16) + timedelta(days=i) for i in range(28)) if d.weekday() < 5][:20]
 assert DAYS[-1] == date(2026, 10, 13)
@@ -82,23 +88,6 @@ async def kis_live() -> AsyncIterator[tuple[FakeKis, FakeAccount]]:
     ).install()
     yield fake, account
     await fake.stop()
-
-
-def live_settings(state: Path, **changes: Any) -> Settings:
-    settings = Settings(
-        kis_app_key="PScollector" + "c" * 25,
-        kis_app_secret="collector-secret",
-        state_dir=state,
-        fee_rate=FEE,
-        trader_kis_app_key=KEY,
-        trader_kis_app_secret=SECRET,
-        trader_kis_account=ACCOUNT,
-        trader_live_kis_app_key=LIVE_KEY,
-        trader_live_kis_app_secret=LIVE_SECRET,
-        trader_live_kis_account=LIVE_ACCOUNT,
-        token_min_interval_seconds=0.0,
-    )
-    return replace(settings, **changes)
 
 
 # The stores, as the trader and the nightly job write them.

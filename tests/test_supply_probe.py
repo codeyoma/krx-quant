@@ -35,7 +35,7 @@ from krx_quant.supply_probe import (
     probe_supply,
     status,
 )
-from tests.test_collector import settings_for
+from tests.collector_doubles import settings_for
 
 TODAY = date(2026, 10, 15)
 SHORT_FIRST = date(2021, 1, 4)

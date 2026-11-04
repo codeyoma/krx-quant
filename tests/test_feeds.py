@@ -15,6 +15,17 @@ import pytest
 from krx_quant.collector import check_fallbacks, run_collector
 from krx_quant.fake_kis import FakeKis
 from krx_quant.feeds.base import kst_or_received
+from tests.collector_doubles import (
+    CALLS,
+    FIXED_NOW,
+    KST,
+    PUTS,
+    collect,
+    options_of,
+    read,
+    serve_masters,
+    settings_for,
+)
 from tests.kis_frames import (
     futures_frame,
     index_frame,
@@ -24,8 +35,7 @@ from tests.kis_frames import (
     trade_frame,
     us_trade_frame,
 )
-from tests.test_collector import FIXED_NOW, KST, collect, read, settings_for
-from tests.test_subscription_plan import CALLS, NOVEMBER_CALLS, NOVEMBER_PUTS, PUTS, options_of, serve_masters
+from tests.test_subscription_plan import NOVEMBER_CALLS, NOVEMBER_PUTS
 from tests.waiting import until
 
 

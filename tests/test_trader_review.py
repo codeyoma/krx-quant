@@ -33,8 +33,9 @@ from krx_quant.trader.selection import NOT_IN_POLICY, choose
 from krx_quant.trader.settings import TraderSettings
 from krx_quant.trader.store import DB_NAME, TraderStore, read_trader
 from tests.api_schema import check
-from tests.test_live_predictions import free_port
-from tests.test_trader_promotion import GOOD, LONG, WEEKDAYS, day_ran, judged_at, night, setup
+from tests.promotion_doubles import LONG, WEEKDAYS, day_ran, judged_at, night, setup
+from tests.server_doubles import free_port
+from tests.test_trader_promotion import GOOD
 from tests.test_trader_report import reported
 from tests.trader_doubles import (
     BARRIER,

@@ -15,8 +15,8 @@ from krx_quant.fake_kis import FakeKis
 from krx_quant.feeds import KST, VI_STATUS
 from krx_quant.polling import Poller, PollJob
 from krx_quant.recorder import ParquetRecorder
+from tests.collector_doubles import FIXED_NOW, read, settings_for
 from tests.kis_rest import requests_for, rest_client, rest_grants
-from tests.test_collector import FIXED_NOW, read, settings_for
 
 INQUIRE_PRICE = "FHKST01010100"
 
