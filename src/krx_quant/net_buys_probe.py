@@ -28,7 +28,6 @@ the collector shares, with the cached access token while it is valid (no early r
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime
@@ -41,6 +40,7 @@ from krx_quant import supply_probe
 from krx_quant.auth import tokens_and_client
 from krx_quant.config import Settings
 from krx_quant.kis import KisError, RestClient, rest_session
+from krx_quant.probe_calls import CALL_ERRORS, Calls
 from krx_quant.probe_fields import MISSING, day_of, flags, present, same
 from krx_quant.supply import KIS, NET_MARKET, NXT_OPENED, TOSS, read_supply
 from krx_quant.supply_probe import INVESTOR_DAILY, kis_error, parse
@@ -167,28 +167,24 @@ def stored_lines(state_dir: Path, symbol: str) -> list[str]:
 class _Asker:
     def __init__(self, client: RestClient) -> None:
         self._client = client
-        self.calls = 0
-        self.failed = 0
-        self._failed_in_a_row = 0
+        self.calls = Calls(supply_probe.PACE, MAX_FAILED_IN_A_ROW)
 
     async def ask(self, market: str, symbol: str, end: date) -> Asked:
-        if self._failed_in_a_row >= MAX_FAILED_IN_A_ROW:
+        if self.calls.stopped:
             return Asked(error=f"묻지 않음: {MAX_FAILED_IN_A_ROW}번 잇달아 실패")
-        if self.calls:
-            await asyncio.sleep(supply_probe.PACE)
-        self.calls += 1
+        await self.calls.turn()
         try:
             body, more = await self._client.get_page(
                 INVESTOR_DAILY.tr, INVESTOR_DAILY.path, INVESTOR_DAILY.query(market, symbol, end), ""
             )
         except KisError as e:
             error = kis_error(e)
-        except (aiohttp.ClientError, OSError, ValueError) as e:  # OSError: timeouts too
+        except CALL_ERRORS as e:
             error = f"error {type(e).__name__}"
         else:
             answer = parse(INVESTOR_DAILY, body, more)
             if not answer.body_keys:
-                self._failed_in_a_row = 0
+                self.calls.answered(True)
                 rows: dict[date, Mapping[str, Any]] = {}
                 for row in answer.rows:
                     day = day_of(row, INVESTOR_DAILY.date_field)
@@ -197,8 +193,7 @@ class _Asker:
                 return Asked(rows=rows)
             # KIS said OK, but the rows are not where they belong: no usable answer, a failure.
             error = f"OK, 행 목록이 아니다(본문 키: {', '.join(answer.body_keys)})"
-        self.failed += 1
-        self._failed_in_a_row += 1
+        self.calls.answered(False)
         return Asked(error=error)
 
 
@@ -226,9 +221,9 @@ async def probe_net_buys(settings: Settings, today: date, out: Out = print) -> t
         out("1. 조회(묻는 날까지 30거래일)")
         try:
             await tokens.get()
-        except (KisError, aiohttp.ClientError, OSError, ValueError) as e:
-            asker.calls += 1
-            asker.failed += 1
+        except (KisError, *CALL_ERRORS) as e:
+            asker.calls.made += 1
+            asker.calls.failed += 1
             reason = kis_error(e) if isinstance(e, KisError) else f"error {type(e).__name__}"
             out(f"  멈춤: KIS 접근 토큰이 없다: {reason}")
         else:
@@ -247,5 +242,5 @@ async def probe_net_buys(settings: Settings, today: date, out: Out = print) -> t
         for line in stored_lines(settings.state_dir, symbol):
             out(line)
     out("")
-    out(f"KIS: {asker.calls}번 조회, {asker.failed}번 실패")
-    return asker.calls, asker.failed
+    out(f"KIS: {asker.calls.made}번 조회, {asker.calls.failed}번 실패")
+    return asker.calls.made, asker.calls.failed

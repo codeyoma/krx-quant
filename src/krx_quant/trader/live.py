@@ -84,6 +84,7 @@ from krx_quant.market_calendar import Session
 from krx_quant.pricing import tick_size
 from krx_quant.trader import LIVE, MOCK, promotion
 from krx_quant.trader import policy as policies
+from krx_quant.trader.db import iso
 from krx_quant.trader.gap import pairing
 from krx_quant.trader.store import (
     BREACH,
@@ -96,7 +97,6 @@ from krx_quant.trader.store import (
     SAME,
     TraderStore,
     champion_of,
-    iso,
 )
 
 # The execution checks (#408), on the mock days.

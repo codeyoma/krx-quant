@@ -91,6 +91,7 @@ from krx_quant.stats import day_mean
 from krx_quant.trader import SYMBOL, TRADED_KINDS
 from krx_quant.trader import policy as policies
 from krx_quant.trader.cells import Cell, open_engine_db, special_windows, traded_kind
+from krx_quant.trader.db import reading
 from krx_quant.trader.paper import BELOW_THRESHOLD, STOP_LOSS, TAKE_PROFIT, TIME, Rules, costs
 from krx_quant.trader.refit import cost_map_days, rises
 from krx_quant.trader.replay import day_gaps, micros
@@ -354,15 +355,11 @@ class Thresholds:
 def champion_thresholds(trader_db: Path) -> Thresholds:
     """The champion's θ by cell from the trader's store, opened read-only; none (and why) before the
     first champion, without the store, or when it cannot be read."""
-    if not trader_db.exists():
-        return Thresholds(why="no store")
     try:
-        db = sqlite3.connect(trader_db.resolve().as_uri() + "?mode=ro", uri=True)
-        db.row_factory = sqlite3.Row
-        try:
+        with reading(trader_db) as db:
+            if db is None:
+                return Thresholds(why="no store")
             champion = policies.champion(db)
-        finally:
-            db.close()
     except (sqlite3.Error, policies.PolicyError) as e:
         log.warning("passive entry: cannot read the champion policy (%s): every cell at the default θ", e)
         return Thresholds(why=str(e))
