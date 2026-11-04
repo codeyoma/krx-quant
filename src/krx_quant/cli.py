@@ -74,7 +74,14 @@ from krx_quant.order_probe import probe_kis_orders
 from krx_quant.poisson_link import REPORT as POISSON_LINK_REPORT
 from krx_quant.poisson_link import lines as poisson_link_lines
 from krx_quant.poisson_link import poisson_link_experiment
-from krx_quant.predictions import DB_NAME, REVISION_CHANGED, PredictionStore, latest_revisions, read_only
+from krx_quant.predictions import (
+    DB_NAME,
+    REVISION_CHANGED,
+    PredictionStore,
+    latest_revisions,
+    read_only,
+    smt_events,
+)
 from krx_quant.prevalidation import (
     PREVALIDATION_DAYS,
     REGISTERED_BEFORE,
@@ -100,6 +107,8 @@ from krx_quant.simulation import (
     simulate_bar_close,
     simulate_daily,
 )
+from krx_quant.smt import lines as smt_lines
+from krx_quant.smt import reconstruct as reconstruct_smt
 from krx_quant.structure_check import structure_check
 from krx_quant.supply_probe import probe_supply
 from krx_quant.trader import LIVE
@@ -388,6 +397,20 @@ def _replay(day: date, db: Path | None) -> int:
         s = summary[0]
         print(f"outcomes: {s.up} up, {s.flat} flat, {s.down} down")
     return 0
+
+
+def _smt(day: date | None) -> int:
+    """A day's SMT events (#520), made again from its recording or backfilled bars, beside the
+    engine's live ones: counts and times, no price. 1 if the day has neither."""
+    settings = Settings.from_env(require_kis=False)
+    day = day or datetime.now(KST).date()
+    start = datetime(day.year, day.month, day.day, tzinfo=KST)
+    with read_only(settings.state_dir / DB_NAME) as db:
+        live = [] if db is None else smt_events(db, start, start + timedelta(days=1))
+    made = reconstruct_smt(settings.data_dir, day, calendar_store(settings).calendar)
+    for line in smt_lines(day, made, live):
+        print(line)
+    return 0 if made is not None or live else 1
 
 
 def _rescore() -> int:
@@ -1102,6 +1125,13 @@ def _parser() -> argparse.ArgumentParser:
         help="database to write, replaced if it exists (default: state/replay-<day>.sqlite3)",
     )
     replay_cmd.set_defaults(run=lambda args: _replay(args.day, args.db))
+    smt_cmd = sub.add_parser(
+        "smt",
+        help="count a day's SMT divergences (#520), made again from its recording or backfilled bars,"
+        " beside the engine's live ones; reads only, no price",
+    )
+    smt_cmd.add_argument("--day", type=date.fromisoformat, help="the day, YYYY-MM-DD (default: today)")
+    smt_cmd.set_defaults(run=lambda args: _smt(args.day))
     sample_profile_cmd = sub.add_parser(
         "sample-profile",
         help="make one recorded day's training samples from scratch, as a night does, and time each stage"

@@ -63,6 +63,11 @@ The symbols' bars and reference prices, and the bars of the series that may lead
 View (``market_view.py``) as they stood at the bar close. Training on a recorded day goes
 through the same view.
 
+At each bar close it predicts, once the baselines' predictions are stored, the engine judges the
+SMT divergence of three pairs (#520, ``smt.py``) from the same bars, and keeps the episodes that
+begin there (``smt_events``, source ``live``). It runs on the event loop and reads a few dozen bars;
+a failure is logged as a warning and the bar close's predictions go on.
+
 Special situations (``special.py``): a symbol in a VI at a bar close is not predicted
 (``vi``), and a prediction whose four minutes a VI, circuit breaker or sidecar touches is
 special, marked when it is made or as soon as the situation is learned. Each window learned
@@ -219,6 +224,7 @@ from krx_quant.market_view import (
     HORIZON,
     INDEX_FEEDS,
     LOOKAHEAD_DAYS,
+    BarsAtClose,
     MarketView,
     next_bar_close,
 )
@@ -237,6 +243,8 @@ from krx_quant.predictions import (
 from krx_quant.pricing import Direction, classify, flat_ticks, most_likely, tick_size
 from krx_quant.reference import Bar
 from krx_quant.signals import SENT, Blocked, Judged, Signals
+from krx_quant.smt import LIVE as SMT_LIVE
+from krx_quant.smt import Detector as SmtDetector
 from krx_quant.special import KOSPI, Kind, SpecialSituations, Window, in_vi, touching
 from krx_quant.stats import DEFAULT_MIN_SAMPLE
 from krx_quant.touch import TARGET_VERSION, WINDOW
@@ -544,6 +552,8 @@ class PredictionEngine:
             kinds=self.kinds,
             previous=previous,
         )
+        # The SMT of each bar close predicted (#520), from the view's bars there.
+        self._smt = SmtDetector(calendar, SMT_LIVE)
         # Outcomes waiting for their target time: (target_at, prediction_id, pending).
         self._pending: list[tuple[datetime, int, Pending]] = []
         for p in store.pending():
@@ -1529,6 +1539,7 @@ class PredictionEngine:
             at_close,
             [(name, version, made, status) for (name, version, status), made in made_by.items()],
         )
+        self._judge_smt(frozen)
         if not at_close:
             self._predict_kinds(bar_close, at_close, stopped, kind_running, late)
             return
@@ -1562,6 +1573,16 @@ class PredictionEngine:
             for task in [*runs.values(), *kind_runs]:  # shutting down: none may write after the store closes
                 task.cancel()
             raise
+
+    def _judge_smt(self, frozen: BarsAtClose) -> None:
+        """Keep the SMT episodes that begin at this bar close (#520). A failure is logged, and the
+        bar close's predictions go on."""
+        try:
+            found = self._smt.at_close(frozen.close, {**frozen.leaders, **frozen.symbols})
+            if found:
+                self.store.add_smt_events(found, self.clock.now())
+        except Exception:
+            log.warning("SMT not judged at %s", frozen.close, exc_info=True)
 
     def _predict_kinds(
         self,
