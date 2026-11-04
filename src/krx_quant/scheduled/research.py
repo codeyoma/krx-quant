@@ -1,6 +1,7 @@
 """The research and review jobs (#500): the signal threshold's review on a fixed window, the official
 algorithm's fixed holdout and its regime gate, the nightly swap's hit rates, the measure of where making
-a recorded day's samples spends its time, and the experiments on an algorithm's inputs, which run last.
+a recorded day's samples spends its time, and the experiments on an algorithm's inputs and on the SMT,
+which run last.
 ``JOBS`` (``krx_quant.scheduled``) lists them in the order they run.
 
 The diagnosis and the entry delay, the first two signal reviews, the structure check, the error
@@ -25,8 +26,11 @@ from krx_quant.scheduled.core import (
     Job,
     Night,
     Target,
+    _first_night,
 )
 from krx_quant.scheduled.prevalidations import _a_prevalidation
+from krx_quant.smt_experiment import AFTER as SMT_AFTER
+from krx_quant.smt_experiment import DAYS as SMT_DAYS
 
 # ②″ The signal-threshold review on a fixed window (#206): on 2026-11-03 the user moved the default
 # of ``KRX_SIGNAL_MIN_PROBABILITY`` from 0.6 to 0.70 (#483), provisionally: on section 5 of the
@@ -169,12 +173,11 @@ ERROR_HOLDOUT = Job(
             HOLDOUT_ISSUE,
             note=(
                 "#431의 리포트에서 고른 가설 넷(이 이슈 본문에 고정)을 그 뒤의 고정 창 10거래일로 판정한 "
-                "결과다. 에이전트가 이 출력을 #431의 후속(B #448, C #449)과 엮어 이 이슈에 댓글로 정리하고 "
-                "`ready-for-human`으로 돌린다. `섰다`인 가설만 C의 규칙이나 turing 개선의 근거가 된다. "
-                "`서지 않음`과 `표본 부족`은 근거가 아니다. 가설, 창, σ̂₄ 경계, 구간, 최소 표본은 결과를 보고 "
-                "바꾸지 않는다. 사용자가 정한다. 다시 돌리기(읽기만): "
-                "`docker compose run --rm engine error-holdout`. 출력에는 가격과 시세 값이 없다"
-                "(개수, 비율, lift만)."
+                "결과다. 에이전트가 이 출력을 #431의 후속(B #448, C #449)과 엮어 이 이슈에 댓글로 "
+                "정리하고 `ready-for-human`으로 돌린다. `섰다`인 가설만 C의 규칙이나 turing 개선의 "
+                "근거가 된다. `서지 않음`과 `표본 부족`은 근거가 아니다. 가설, 창, σ̂₄ 경계, 구간, 최소 "
+                "표본은 결과를 보고 바꾸지 않는다. 사용자가 정한다. 다시 돌리기(읽기만): `docker compose "
+                "run --rm engine error-holdout`. 출력에는 가격과 시세 값이 없다(개수, 비율, lift만)."
             ),
         ),
     ),
@@ -320,4 +323,86 @@ NEYMAN_VARIANTS = Job(
         ),
     ),
     attach=(Attachment(f"리포트 state/{NEYMAN_VARIANTS_REPORT}", NEYMAN_VARIANTS_REPORT),),
+)
+
+
+# The SMT experiment (#523, spec #519): does the rolling-extreme SMT (#520) raise the four-minute
+# prediction's hit rate? A frozen rule (a bearish SMT calls down, a bullish one up, for each stock of
+# the pair) against the engine's final consensus on the same bar closes, four claims (direction × L),
+# all fixed in ``smt_experiment.py`` before the holdout's days (``smt-experiment``). Two stages, each
+# run once, after a failure again on other code. The discovery, on the first night after the deploy
+# that brings it, trading or not: the finished recorded days up to ``SMT_AFTER`` (2026-11-04), each
+# day's trades replayed through the Market View as ``krx-quant smt --day`` does, and the days with
+# backfilled bars only (about a year, bars only: a few minutes) apart. The verdict, on the first night
+# the holdout's ``SMT_DAYS`` (10) eligible days after ``SMT_AFTER`` are in (``Facts.smt_holdout_days``,
+# counted from the day folders and the engine DB read-only when the night's conditions are read: a
+# small query a day after the cutoff): the night of 2026-11-18 if every trading day from 11-05 is
+# eligible. A day's replay reads two stocks' and the futures' trades, about as long as ``smt --day``:
+# the discovery's two hours and the verdict's hour are bounds. Last, after the experiments on an
+# algorithm's inputs: they hold back no simulation nor pre-validation. Their output holds counts,
+# rates, percentage points and dates, no price. Opening the feature ticket is the user's, on a claim
+# that stood.
+SMT_ISSUE = 519
+
+
+def _smt_discovery_due(night: Night) -> bool:
+    """Once, on the first night it is asked on, trading or not; after a failed run, again on other
+    code."""
+    record = night.record
+    return _first_night(night) or (
+        record is not None and record.outcome == FAILED and record.commit != night.commit
+    )
+
+
+def _smt_holdout_full(night: Night) -> bool:
+    """Once, on the first night the SMT holdout's days are all in, trading or not; after a failed run,
+    again on other code."""
+    if night.facts.smt_holdout_days < SMT_DAYS:
+        return False
+    return _smt_discovery_due(night)
+
+
+SMT_DISCOVERY = Job(
+    name="smt-discovery-519",
+    due=_smt_discovery_due,
+    command=("smt-experiment",),
+    timeout=timedelta(hours=2),
+    targets=(
+        Target(
+            SMT_ISSUE,
+            note=(
+                f"SMT 실험(#523)의 탐색이다. {SMT_AFTER}까지의 녹화일(사건은 녹화를 시장 보기로 재생해 "
+                "다시 계산)과, 따로 채운 1분봉만 있는 날(정답이 근사, 엔진 예측 없음)로 쟀다. 세 쌍의 "
+                "1분 수익률 상관과 함께 있는 시간, 사건 수, 사건 뒤 상승·보합·하락, 고정 규칙(하락 SMT면 "
+                "하락, 상승 SMT면 상승)과 최종 합의의 같은 봉 마감 맞힘률 차이(%p), 기후 비교다. "
+                "탐색이라 판정하지 않는다. 규칙, 판정 넷(방향 × L), 묶기, 최소 표본, 신뢰 수준, "
+                "홀드아웃(기준일 뒤 자격이 있는 첫 10거래일)은 머지 때 코드와 문서에 고정했고 이 결과를 "
+                "보고 바꾸지 않는다. 에이전트가 이 출력을 이 이슈에 정리한다. 판정은 홀드아웃이 다 찬 "
+                "밤의 `smt-holdout-519`가 낸다. 다시 돌리기(읽기만): `docker compose run --rm engine "
+                "smt-experiment`. 출력에는 가격이 없다(건수, 비율, %p, 날짜만)."
+            ),
+        ),
+    ),
+)
+
+SMT_HOLDOUT = Job(
+    name="smt-holdout-519",
+    due=_smt_holdout_full,
+    command=("smt-experiment", "--holdout"),
+    timeout=timedelta(hours=1),
+    targets=(
+        Target(
+            SMT_ISSUE,
+            note=(
+                f"SMT 실험(#523)의 사전 등록 판정이다. {SMT_AFTER} 뒤 자격이 있는 첫 10거래일(고정 "
+                "창)에서 판정 넷(하락·상승 × L 15·30)마다 고정 규칙과 최종 합의의 같은 봉 마감 맞힘률 "
+                "차이를 거래일 98.75% t 구간(본페로니)으로 봤다. 하한 > 0인 판정만 `섰다`다. `서지 "
+                "않음`과 `표본 부족`은 근거가 아니다. 에이전트가 이 출력을 탐색 결과와 엮어 이 이슈에 "
+                "정리하고 `ready-for-human`으로 돌린다. `섰다`가 있으면 피처와 알고리즘 변경을 다음 "
+                "티켓의 사전 검증으로 넣을지 사용자가 정한다. 규칙, 창, 묶기, 최소 표본, 구간은 결과를 "
+                "보고 바꾸지 않는다. 다시 돌리기(읽기만): `docker compose run --rm engine smt-experiment "
+                "--holdout`. 출력에는 가격이 없다(건수, 비율, %p, 날짜만)."
+            ),
+        ),
+    ),
 )

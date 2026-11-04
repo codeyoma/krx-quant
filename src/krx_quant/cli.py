@@ -109,6 +109,7 @@ from krx_quant.simulation import (
 )
 from krx_quant.smt import lines as smt_lines
 from krx_quant.smt import reconstruct as reconstruct_smt
+from krx_quant.smt_experiment import smt_experiment
 from krx_quant.structure_check import structure_check
 from krx_quant.supply_probe import probe_supply
 from krx_quant.trader import LIVE
@@ -797,6 +798,14 @@ def _climate_gate() -> int:
     return 0
 
 
+def _smt_experiment(holdout: bool) -> int:
+    """The SMT experiment (#523): the discovery, or with ``holdout`` the pre-registered verdict."""
+    settings = Settings.from_env(require_kis=False)
+    calendar = calendar_store(settings).calendar
+    print(smt_experiment(settings, calendar, datetime.now(KST), holdout))
+    return 0
+
+
 def _nightly_hit_rates(nights: int) -> int:
     """The hit rates beside the nightly swap over the latest ``nights`` nights (#437); exit 1 without
     the store or a night that carries them."""
@@ -1338,6 +1347,17 @@ def _parser() -> argparse.ArgumentParser:
         help="print the gate that takes baseline-climate's prediction when quiet or at lunch and turing's"
         " elsewhere, against both, on #447's holdout (#449); reads only, writes nothing, no price",
     ).set_defaults(run=lambda args: _climate_gate())
+    smt_experiment_cmd = sub.add_parser(
+        "smt-experiment",
+        help="print whether the SMT (#520) raises the four-minute prediction's hit rate (#523): the frozen"
+        " rule against the engine's final consensus on the same bar closes, on the recorded days up to"
+        " 2026-11-04 (the discovery), or with --holdout the four pre-registered claims judged on the first"
+        " 10 eligible days after it; reads only, writes nothing, no price",
+    )
+    smt_experiment_cmd.add_argument(
+        "--holdout", action="store_true", help="judge the pre-registered claims on the holdout window"
+    )
+    smt_experiment_cmd.set_defaults(run=lambda args: _smt_experiment(args.holdout))
     hit_rates_cmd = sub.add_parser(
         "nightly-hit-rates",
         help="print the champion's and the challenger's hit rates the nightly reports carry beside the"
