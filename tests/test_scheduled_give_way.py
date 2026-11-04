@@ -109,6 +109,7 @@ def test_the_simulations_give_way_to_the_pre_validations_only() -> None:
     assert [j.name for j in JOBS if j.gives_way_to is not None] == [
         "simulate-daily-298",
         "simulate-bar-close-298",
+        "sample-profile-512",  # as the simulations do (#512, ``tests/test_sample_profile.py``)
     ]
     # Listed as #298 decided; the daily pre-validations before the daily simulation, which enrolls
     # a pass that night, so it never holds them back.

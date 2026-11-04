@@ -13,7 +13,7 @@ import signal
 import sys
 import time
 from collections.abc import Callable
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -87,6 +87,9 @@ from krx_quant.process_log import open_process_log
 from krx_quant.redaction import secrets_of
 from krx_quant.replay import replay_day
 from krx_quant.rescore import EngineRunning, rescore
+from krx_quant.sample_profile import LIMIT as SAMPLE_PROFILE_LIMIT
+from krx_quant.sample_profile import PROFILED, sample_profile
+from krx_quant.sample_profile import TOP as SAMPLE_PROFILE_TOP
 from krx_quant.signal_review import DEFAULT_DAYS as SIGNAL_REVIEW_DAYS
 from krx_quant.signal_review import signal_review
 from krx_quant.simulation import (
@@ -350,6 +353,20 @@ async def _archive(recheck: bool) -> int:
     for partition in report.failed:
         print(f"failed: {partition}", file=sys.stderr)
     return 1 if report.failed else 0
+
+
+def _sample_profile(day: date | None, algorithms: list[str], limit: int, top: int) -> int:
+    """Where making a recorded day's samples spends its time (#512); each run printed as it ends."""
+    settings = Settings.from_env(require_kis=False)
+    return sample_profile(
+        settings,
+        datetime.now(KST),
+        lambda line: print(line, flush=True),
+        day=day,
+        algorithms=algorithms,
+        limit=timedelta(minutes=limit),
+        top=top,
+    )
 
 
 def _replay(day: date, db: Path | None) -> int:
@@ -1085,6 +1102,36 @@ def _parser() -> argparse.ArgumentParser:
         help="database to write, replaced if it exists (default: state/replay-<day>.sqlite3)",
     )
     replay_cmd.set_defaults(run=lambda args: _replay(args.day, args.db))
+    sample_profile_cmd = sub.add_parser(
+        "sample-profile",
+        help="make one recorded day's training samples from scratch, as a night does, and time each stage"
+        " and the top functions (#512); reads only, into a temporary directory, no price",
+    )
+    sample_profile_cmd.add_argument(
+        "--day", type=date.fromisoformat, help="the recorded day, YYYY-MM-DD (default: the latest finished)"
+    )
+    sample_profile_cmd.add_argument(
+        "--algorithms",
+        nargs="+",
+        default=list(PROFILED),
+        help=f"the algorithms also profiled alone, with their own features (default: {' '.join(PROFILED)})",
+    )
+    sample_profile_cmd.add_argument(
+        "--limit",
+        type=_positive,
+        default=round(SAMPLE_PROFILE_LIMIT.total_seconds() / 60),
+        help="minutes for every run together; a run still going stops there, the rest do not start"
+        f" (default {round(SAMPLE_PROFILE_LIMIT.total_seconds() / 60)})",
+    )
+    sample_profile_cmd.add_argument(
+        "--top",
+        type=_positive,
+        default=SAMPLE_PROFILE_TOP,
+        help=f"functions listed by own time (default {SAMPLE_PROFILE_TOP})",
+    )
+    sample_profile_cmd.set_defaults(
+        run=lambda args: _sample_profile(args.day, args.algorithms, args.limit, args.top)
+    )
     sub.add_parser(
         "rescore",
         help="label every recorded day's bar closes again with the touch target (stop the engine first)",
