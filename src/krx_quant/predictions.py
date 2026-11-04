@@ -49,6 +49,10 @@ found on the first start, or a change that put it back on probation), with the v
 one's pre-validation. A table of its own, as ``touches``: an engine from before it still opens the
 database (``_REVISION_SCHEMA``).
 
+``smt_events`` (#520, ``smt.py``) keeps each SMT episode the engine judged at a bar close, by its
+first bar close, pair, direction and L, with the side that swept, source ``live``: written once,
+never rewritten. A table of its own, as ``touches`` (``_SMT_SCHEMA``).
+
 Times are ISO 8601 strings in KST, which sort in time order.
 """
 
@@ -69,6 +73,7 @@ from krx_quant.feeds.base import KST
 from krx_quant.kinds import DIRECTION, Answer
 from krx_quant.lifecycle import CODE_CHANGED, Simulated, Standing, Status, starts_simulation
 from krx_quant.pricing import Direction
+from krx_quant.smt import SmtEvent
 from krx_quant.special import Window
 from krx_quant.touch import TARGET_VERSION, TouchResult, touch_path
 
@@ -331,6 +336,25 @@ CREATE TABLE IF NOT EXISTS revisions (  -- each code a bar-close algorithm ran, 
     detail TEXT                       -- the refusal's failed checks; a mapping's evidence
 );
 CREATE INDEX IF NOT EXISTS revisions_by_algorithm ON revisions (algorithm, id);
+"""
+
+# SMT events (#520, ``smt.py``): a table of its own, as touches, so an engine from before it still
+# opens the database; the schema version stays.
+_SMT_SCHEMA = """
+CREATE TABLE IF NOT EXISTS smt_events (  -- an SMT episode, by its first bar close (#520): never rewritten
+    definition TEXT NOT NULL,         -- smt.DEFINITION: rolling_extreme
+    version INTEGER NOT NULL,         -- the definition's version (smt.VERSION)
+    bar_close TEXT NOT NULL,          -- t, the episode's first bar close
+    a TEXT NOT NULL,                  -- the pair, as smt.PAIRS lists it
+    b TEXT NOT NULL,
+    direction TEXT NOT NULL,          -- bearish, bullish
+    minutes INTEGER NOT NULL,         -- L
+    swept TEXT NOT NULL,              -- a or b: the one past its look-back's extreme
+    source TEXT NOT NULL,             -- live
+    recorded_at TEXT NOT NULL,        -- when the engine kept it
+    PRIMARY KEY (definition, version, bar_close, a, b, direction, minutes, source)
+);
+CREATE INDEX IF NOT EXISTS smt_events_by_close ON smt_events (bar_close);
 """
 
 # How a revision began (#454): as the engine found it when it first recorded one (the first start
@@ -847,6 +871,26 @@ def latest_revisions(db: sqlite3.Connection) -> dict[str, Revision]:
     return {r[1]: _revision(r) for r in rows}
 
 
+_SMT_COLUMNS = "bar_close, a, b, direction, minutes, swept, source, definition, version"
+
+
+def smt_events(db: sqlite3.Connection, since: datetime, until: datetime) -> list[SmtEvent]:
+    """The SMT events kept (#520) whose bar close is in ``[since, until)``, in time order; none in
+    a database an engine before #520 wrote."""
+    try:
+        rows = db.execute(
+            f"SELECT {_SMT_COLUMNS} FROM smt_events WHERE bar_close >= ? AND bar_close < ?"
+            " ORDER BY bar_close, a, b, direction, minutes",
+            (iso(since), iso(until)),
+        ).fetchall()
+    except sqlite3.OperationalError:  # no such table: read beside an engine from before #520
+        return []
+    return [
+        SmtEvent(datetime.fromisoformat(r[0]), r[1], r[2], r[3], int(r[4]), r[5], r[6], r[7], int(r[8]))
+        for r in rows
+    ]
+
+
 @dataclass(frozen=True)
 class Pending:
     prediction_id: int
@@ -906,6 +950,7 @@ class PredictionStore:
             + _SPECIAL_SCHEMA
             + _SIMULATION_SCHEMA
             + _REVISION_SCHEMA
+            + _SMT_SCHEMA
             + _added_columns(self._db)
             + f"PRAGMA user_version={_VERSION};"
         )
@@ -1471,6 +1516,36 @@ class PredictionStore:
             (window.kind.value, window.symbol, iso(window.start), *values),
         )
         return 1
+
+    def add_smt_events(self, events: Sequence[SmtEvent], recorded_at: datetime) -> int:
+        """Keep SMT events (#520) found at ``recorded_at``. One kept already (the same definition,
+        version, bar close, pair, direction, L and source) stays as it was: they are never
+        rewritten. The rows written."""
+        with self._db:
+            cursor = self._db.executemany(
+                f"INSERT OR IGNORE INTO smt_events ({_SMT_COLUMNS}, recorded_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                [
+                    (
+                        iso(e.bar_close),
+                        e.a,
+                        e.b,
+                        e.direction,
+                        e.minutes,
+                        e.swept,
+                        e.source,
+                        e.definition,
+                        e.version,
+                        iso(recorded_at),
+                    )
+                    for e in events
+                ],
+            )
+        return cursor.rowcount
+
+    def smt_events(self, since: datetime, until: datetime) -> list[SmtEvent]:
+        """The SMT events kept whose bar close is in ``[since, until)``, in time order (#520)."""
+        return smt_events(self._db, since, until)
 
     def special_windows(self, symbol: str | None, since: datetime, until: datetime) -> list[dict[str, Any]]:
         """The windows kept that start in ``[since, until)``: ``symbol``'s VIs and the whole
