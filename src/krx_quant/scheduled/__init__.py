@@ -124,6 +124,7 @@ from krx_quant.scheduled.research import (
     ERROR_HOLDOUT,
     NEYMAN_VARIANTS,
     NIGHTLY_HIT_RATES,
+    NORMAL_ORDER,
     SAMPLE_PROFILE,
     SIGNAL_REVIEW_FIXED,
     SMT_DISCOVERY,
@@ -155,6 +156,7 @@ __all__ = [
     "LIVE_PROBE",
     "NEYMAN_VARIANTS",
     "NIGHTLY_HIT_RATES",
+    "NORMAL_ORDER",
     "OK",
     "PASSED",
     "PREVALIDATION_ISSUE",
@@ -266,6 +268,7 @@ JOBS: tuple[Job, ...] = (
     *revision_jobs([*(a.name for a in ALGORITHMS), *(a.name for a in KIND_ALGORITHMS)]),
     *prevalidation_jobs([*(a.name for a in ALGORITHMS), *(a.name for a in KIND_ALGORITHMS)]),
     NEYMAN_VARIANTS,
+    NORMAL_ORDER,
     SMT_DISCOVERY,
     SMT_HOLDOUT,
 )

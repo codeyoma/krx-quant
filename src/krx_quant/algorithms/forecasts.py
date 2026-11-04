@@ -14,6 +14,10 @@ features carry (``FeatureVector.touch``) and ``forecasting`` puts in force:
   wins when both are, as the label has it; taken as independent), flat the rest.
 
 The algorithms' code is the same for both: only this shared function changes.
+
+Inside ``label_order`` (#529's experiment, ``normal_order.py``), ``normal_forecast`` gives the touch
+target in the label's order instead, as ``ordered_forecast`` does. The engine, the nightly training and
+the pre-validations never enter it: the algorithms that use ``normal_forecast`` predict as above.
 """
 
 from __future__ import annotations
@@ -74,6 +78,23 @@ def class_moves(scored: Sequence[Sample]) -> dict[str, float]:
 # The touch target's terms of the bar close being forecast (target versions 2 and up); None: the
 # four-minute move (version 1).
 _TOUCH: ContextVar[TouchTerms | None] = ContextVar("touch", default=None)
+
+
+# ``normal_forecast``'s touch target in the label's order (``label_order``, #529); off as the algorithms
+# that use it run.
+_LABEL_ORDER: ContextVar[bool] = ContextVar("label_order", default=False)
+
+
+@contextmanager
+def label_order() -> Iterator[None]:
+    """Inside, ``normal_forecast`` gives the touch target in the label's order, as ``ordered_forecast``
+    does: what #529's experiment compares with the independent targets. Nothing that runs an algorithm
+    (the engine, the nightly training, the pre-validations) enters it."""
+    token = _LABEL_ORDER.set(True)
+    try:
+        yield
+    finally:
+        _LABEL_ORDER.reset(token)
 
 
 @contextmanager
@@ -174,10 +195,13 @@ def normal_forecast(move: float, spread: float, flat_ticks: float) -> Forecast:
     """Up, flat and down for a move normally distributed around ``move`` with standard
     deviation ``spread`` (both in ticks), against the flat band ``flat_ticks``: of where the
     move ends (target version 1), or of reaching the targets on the way (versions 2 and up, the
-    terms ``forecasting`` put in force).
+    terms ``forecasting`` put in force). Of the touch target the two targets are taken as independent,
+    except inside ``label_order``.
     """
     sigma = max(spread, MIN_SPREAD_TICKS)
     touch = _TOUCH.get()
+    if touch is not None and _LABEL_ORDER.get():  # #529's experiment
+        return ordered_forecast(move, spread, flat_ticks)
     if touch is not None:
         distance = flat_ticks + touch.half_spread
         p_up = reach_probability(distance, move, sigma)

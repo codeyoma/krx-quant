@@ -17,6 +17,8 @@ from datetime import timedelta
 from krx_quant.holdout import DAYS as HOLDOUT_DAYS
 from krx_quant.neyman_variants import REPORT as NEYMAN_VARIANTS_REPORT
 from krx_quant.nightly_hit_rates import HIT_RATE_NIGHTS
+from krx_quant.normal_order import REPORT as NORMAL_ORDER_REPORT
+from krx_quant.prevalidation import MIN_DAYS
 from krx_quant.sample_profile import LIMIT as SAMPLE_PROFILE_LIMIT
 from krx_quant.scheduled.core import (
     FAILED,
@@ -323,6 +325,57 @@ NEYMAN_VARIANTS = Job(
         ),
     ),
     attach=(Attachment(f"리포트 state/{NEYMAN_VARIANTS_REPORT}", NEYMAN_VARIANTS_REPORT),),
+)
+
+
+# normal_forecast's label order (#529): newton, gauss, granger, markov and kalman make their three
+# probabilities with ``normal_forecast``, which takes the touch target's two targets as independent and so
+# gives down too little and flat too much. ``normal-order`` walks their pre-validations' folds over the
+# training samples, replaying nothing, and compares each as it runs with the same trained and predicting
+# in the label's order (``forecasts.label_order``), on the same bar closes (``normal_order.py``). Once, on
+# the first night with ``MIN_DAYS`` recorded days after the deploy that brings it, trading or not; after a
+# failure, again on other code. It fits each algorithm twice a day on its 20 days, one algorithm at a time:
+# in the label's order newton's and gauss's grids take about ten times as long (17.7 s and 11.1 s for
+# 20,000 made-up samples on a Mac, the server about three times slower), and markov fits for about 74 s
+# a night on the server: about two hours in all for 20 days; the four hours are a bound. After neyman's
+# variants: it holds back no simulation nor pre-validation. Its output holds counts, rates, losses and
+# dates, no price. Changing ``normal_forecast`` is the user's decision from it, in another PR (#454).
+NORMAL_ORDER_ISSUE = 529
+
+
+def _with_recorded_days(night: Night) -> bool:
+    """Once, on the first night with at least ``MIN_DAYS`` recorded days, trading or not; after a failed
+    run, again on other code."""
+    if night.facts.recorded_days < MIN_DAYS:
+        return False
+    record = night.record
+    return not night.ran or (
+        record is not None and record.outcome == FAILED and record.commit != night.commit
+    )
+
+
+NORMAL_ORDER = Job(
+    name="normal-order-529",
+    due=_with_recorded_days,
+    command=("normal-order",),
+    timeout=timedelta(hours=4),
+    targets=(
+        Target(
+            NORMAL_ORDER_ISSUE,
+            note=(
+                "공통 함수 `normal_forecast`를 쓰는 다섯(newton, gauss, granger, markov, kalman)을 지금처럼"
+                "(위·아래 목표를 독립으로 본 근사) 돌린 팔과, 같은 표본으로 도달 정답의 순서(보합 = 두 목표 "
+                "사이에 머묾, 하락 = 나머지)로 학습하고 예측한 팔을 사전 검증의 겹(최근 20 녹화일)에서 같은 "
+                "봉 마감으로 비교한 결과다. 돌리기 전에 정한 판정: 순서 팔의 맞힘률 lift(봉 마감 짝)가 0보다 "
+                "크고 평균 log loss가 낮으면 그 알고리즘의 후보다. 판정은 결과를 보고 바꾸지 않는다. "
+                "에이전트가 이 출력(특히 하락의 재현율·정밀도와 평균 확률)으로 바꿀지에 대한 안을 이 이슈에 "
+                "남기고 `ready-for-human`으로 돌린다. 바꾸면 다섯이 수습으로 돌아가고 newton은 그동안 "
+                "합의에서 빠진다(#454). 사용자가 정한다. 다시 돌리기(읽기만): `docker compose run --rm "
+                "engine normal-order`. 출력에는 가격이 없다(개수, 비율, 손실, 날짜만)."
+            ),
+        ),
+    ),
+    attach=(Attachment(f"리포트 state/{NORMAL_ORDER_REPORT}", NORMAL_ORDER_REPORT),),
 )
 
 
