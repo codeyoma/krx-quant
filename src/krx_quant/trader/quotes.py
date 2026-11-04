@@ -199,17 +199,21 @@ async def follow_quotes(
     *,
     retry_seconds: float = 1.0,
     retry_max_seconds: float = 10.0,
+    starting: Callable[[], bool] = lambda: False,
 ) -> None:
     """The trader's side: ``symbol``'s quotes from the collector's stream at ``url`` to
     ``on_quote``, connecting again whenever the stream ends, until cancelled. A failure is logged
-    once until the stream answers again."""
+    once until the stream answers again, a WARNING; but a connection refused before the stream first
+    answered, while the collector may be ``starting`` with the trader (#508), is an INFO line, once."""
     delay = retry_seconds
     down: str | None = None  # why the stream is down, once said
+    answered = waited = False  # the stream answered once; the INFO of the collector's start said
     while True:
+        refused = False
         try:
             async with session.ws_connect(url, heartbeat=10) as ws:
                 log.info("quotes: following %s", url)
-                down, delay = None, retry_seconds
+                down, delay, answered = None, retry_seconds, True
                 async for message in ws:
                     if message.type == aiohttp.WSMsgType.TEXT:
                         quote = parse_quote(message.data, symbol)
@@ -220,8 +224,13 @@ async def follow_quotes(
             why = "the stream closed"
         except (aiohttp.ClientError, OSError) as e:
             why = f"{type(e).__name__}: {e}"
-        if down is None:
+            refused = isinstance(e, aiohttp.ClientConnectorError)
+        if refused and not answered and starting():
+            if not waited:
+                log.info("quotes: waiting for the engine to start (%s, %s); connecting again", why, url)
+                waited = True
+        elif down is None:
             log.warning("quotes: %s (%s); connecting again", why, url)
-        down = why
+            down = why
         await asyncio.sleep(delay)
         delay = min(delay * 2, retry_max_seconds)

@@ -495,8 +495,8 @@ async def test_a_refused_algorithm_is_told_once_across_restarts_and_waits_again_
     """#310: cox-5d's report refused the code it runs (2026-10-23). The review after the engine
     starts tells it once as refused, never as waiting, and a restart the next morning does not tell
     it again (``runs``: ``prevalidation_refused``). Once its code changes it waits for a new
-    pre-validation, told as before; a new refusal is told once again; and without a report it
-    waits, as any new algorithm."""
+    pre-validation, told once for that code (#508); a new refusal is told once again; and without a
+    report it waits, as any new algorithm, not told again for the code it was told waiting on."""
     from krx_quant.engine import REFUSED_RUN
     from krx_quant.prevalidation import admits, refusals
     from krx_quant.replay import replay_into
@@ -540,6 +540,8 @@ async def test_a_refused_algorithm_is_told_once_across_restarts_and_waits_again_
     path.write_text(json.dumps({**refused, "code": "0123456789abcdef"}))  # its code changed since
     [waits] = await start(monday + timedelta(days=2), ["cox-5d"], [])
     assert waits.startswith("사전 검증 대기: cox-5d. ")
+    assert "하루 한 번 예측 알고리즘은 그 입력과 정답이 다 들어온 첫 밤에 예약 작업이 검증합니다" in waits
+    assert "봉 마감 알고리즘" not in waits, "none waits"
 
     path.write_text(json.dumps({**refused, "prevalidated_at": "2026-10-21T23:00:00+09:00"}))
     [again] = await start(monday + timedelta(days=3), [], ["cox-5d"])
@@ -548,7 +550,6 @@ async def test_a_refused_algorithm_is_told_once_across_restarts_and_waits_again_
     assert len(store.runs(REFUSED_RUN, datetime.combine(monday, time(), KST))) == 2
     store.close()
 
-    path.unlink()  # no report: it waits, at each start
+    path.unlink()  # no report: it waits, on the code it was told waiting on (#508)
     for day in (monday + timedelta(days=4), monday + timedelta(days=7)):
-        [waits] = await start(day, ["cox-5d"], [])
-        assert waits.startswith("사전 검증 대기: cox-5d. ")
+        assert await start(day, ["cox-5d"], []) == []

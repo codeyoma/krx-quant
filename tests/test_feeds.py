@@ -146,12 +146,49 @@ def test_a_time_that_is_no_time_of_day_is_the_second_received_and_logged_once(
 ) -> None:
     received = datetime(2026, 10, 19, 6, 32, 5, 700_000, tzinfo=UTC)  # 15:32:05.7 KST
     with caplog.at_level(logging.WARNING, logger="krx_quant.feeds.base"):
-        times = [kst_or_received(hhmmss, received) for hhmmss in ("241532", "241532", "153205")]
+        times = [
+            kst_or_received(hhmmss, received, tr_id="H0UPCNT0", key=key, field="bsop_hour")
+            for hhmmss, key in (("241532", "0001"), ("241532", "2001"), ("153205", "0001"))
+        ]
 
     second = datetime(2026, 10, 19, 15, 32, 5, tzinfo=KST)
     assert times == [second, second, second]
     assert [r.getMessage() for r in caplog.records] == [
-        "KIS time '241532' is not a time of day: such records are timed by their receipt"
+        "KIS time '241532' is not a time of day (H0UPCNT0 0001, bsop_hour): such records are timed by"
+        " their receipt"
+    ]
+
+
+def test_a_time_that_is_no_time_of_day_is_logged_with_its_feed_key_and_field(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#508: ``888888`` came daily at about 15:30 in a line naming no feed. The index, day futures
+    and option feeds share the handling: each feed's value is logged once, with the TR ID, the key
+    and the field of its first record, still a WARNING."""
+    from krx_quant.feeds.market import INDEX, KOSPI200_FUTURES, OPTION, USD_FUTURES
+
+    received = datetime(2026, 11, 3, 6, 30, 1, tzinfo=UTC)  # 15:30:01 KST
+    records = [
+        (INDEX, {"bstp_cls_code": "0001"}),
+        (INDEX, {"bstp_cls_code": "2001"}),  # the same feed's: not again
+        (KOSPI200_FUTURES, {"futs_shrn_iscd": "A01612"}),
+        (USD_FUTURES, {"futs_shrn_iscd": "A75611"}),
+        (OPTION, {"optn_shrn_iscd": "B01611915"}),
+    ]
+    with caplog.at_level(logging.WARNING, logger="krx_quant.feeds.base"):
+        rows = [
+            feed.normalize(dict.fromkeys(feed.columns, "0") | key | {"bsop_hour": "888888"}, received)
+            for feed, key in records
+        ]
+
+    assert {r["event_time"] for r in rows} == {datetime(2026, 11, 3, 15, 30, 1, tzinfo=KST)}
+    assert [(r.levelname, r.getMessage()) for r in caplog.records] == [
+        (
+            "WARNING",
+            f"KIS time '888888' is not a time of day ({about}, bsop_hour): such records are timed by"
+            " their receipt",
+        )
+        for about in ("H0UPCNT0 0001", "H0IFCNT0 A01612", "H0CFCNT0 A75611", "H0IOCNT0 B01611915")
     ]
 
 

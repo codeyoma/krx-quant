@@ -464,3 +464,127 @@ def test_trade_resume_and_rearm_on_the_server(
         ("resume", None),
         ("rearm", "paper"),
     ]
+
+
+# The engine's start (#508): the 06:00 deploy starts the trader with the engine.
+
+
+async def _cost_map_on(port: int, body: dict[str, Any]) -> web.AppRunner:
+    """The Engine API's cost map on ``port``: the engine up."""
+
+    async def cost_map(request: web.Request) -> web.Response:
+        return web.json_response(body)
+
+    app = web.Application()
+    app.router.add_get("/v1/cost-map", cost_map)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    await web.TCPSite(runner, "127.0.0.1", port).start()
+    return runner
+
+
+def _said(caplog: pytest.LogCaptureFixture, level: str, text: str) -> list[str]:
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if r.name == "krx_quant.trader.run" and r.levelname == level and text in r.getMessage()
+    ]
+
+
+async def test_while_the_engine_starts_the_trader_waits_for_it_quietly_then_warns(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#508: for ``ENGINE_START_GRACE`` after the trader starts, while the engine has never answered, a
+    connection refused is the engine starting: an INFO line, once, and the cost map asked for again
+    every ``STARTING_RETRY_SECONDS``. Past the grace it is the WARNING of before, asked for every
+    ``PICK_RETRY_SECONDS``. The run of failures is kept once; the engine up, the cost map is read."""
+    from krx_quant.trader.run import ENGINE_START_GRACE, PICK_RETRY_SECONDS, STARTING_RETRY_SECONDS
+
+    caplog.set_level("INFO", logger="krx_quant.trader")
+    state = tmp_path / "state"
+    keep(state, at("2026-10-13 22:31:00"), policy_cell(BARRIER))
+    started = at("06:00:30")
+    clock = [started]
+    slept: list[float] = []  # the loops' waits (only the cost map's are 5 s or 60 s)
+
+    async def sleep(seconds: float) -> None:
+        slept.append(seconds)
+        await asyncio.sleep(0.005)
+
+    port = free_port()  # nothing listens yet: the engine not up
+    settings = Settings(kis_app_key="", kis_app_secret="", state_dir=state, fee_rate=FEE)
+    trader = TraderSettings(
+        quotes_url=f"ws://127.0.0.1:{free_port()}/v1/quotes",
+        engine_url=f"http://127.0.0.1:{port}",
+        poll_seconds=0.01,
+    )
+    stop = asyncio.Event()
+    task = asyncio.create_task(run_trader(settings, trader, stop=stop, now=lambda: clock[0], sleep=sleep))
+    runner: web.AppRunner | None = None
+    try:
+        await until(lambda: slept.count(STARTING_RETRY_SECONDS) >= 3)  # asked again three times
+        [waiting] = _said(caplog, "INFO", "waiting for the engine to start")
+        assert "ClientConnectorError" in waiting and "asked for every 5s" in waiting
+        assert _said(caplog, "WARNING", "cost map") == [] and PICK_RETRY_SECONDS not in slept
+        await until(lambda: "quotes: waiting for the engine to start" in caplog.text)  # the quotes too
+        assert "connecting again" not in "".join(
+            r.getMessage() for r in caplog.records if r.levelname == "WARNING"
+        )
+
+        clock[0] = started + ENGINE_START_GRACE  # the grace over, the engine still not up
+        await until(lambda: slept.count(PICK_RETRY_SECONDS) >= 2)
+        [warned] = _said(caplog, "WARNING", "could not read the cost map")
+        assert warned.endswith("no cell trades until it is read, asked for every 60s")
+
+        runner = await _cost_map_on(port, PASSING)
+        await until(lambda: bool(_said(caplog, "INFO", "the cost map is read again")))
+    finally:
+        stop.set()
+        await asyncio.wait_for(task, 5)
+        if runner is not None:
+            await runner.cleanup()
+
+    assert [s["reason"] for s in rows(state, "selections")] == [NO_COST_MAP, None], "the failures kept once"
+
+
+async def test_once_the_engine_has_answered_a_refused_connection_is_a_warning_at_once(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#508: the grace is for the engine's start alone. The trader started at 08:29 reads the cost
+    map; the engine gone by the 08:30 pick, still within the grace, its refused connection is the
+    WARNING of before."""
+    caplog.set_level("INFO", logger="krx_quant.trader")
+    state = tmp_path / "state"
+    keep(state, at("2026-10-13 22:31:00"), policy_cell(BARRIER))
+    clock = [at("08:29:00")]
+    port = free_port()
+    runner = await _cost_map_on(port, PASSING)
+    settings = Settings(kis_app_key="", kis_app_secret="", state_dir=state, fee_rate=FEE)
+    trader = TraderSettings(
+        quotes_url=f"ws://127.0.0.1:{free_port()}/v1/quotes",
+        engine_url=f"http://127.0.0.1:{port}",
+        poll_seconds=0.01,
+    )
+    stop = asyncio.Event()
+    task = asyncio.create_task(
+        run_trader(
+            settings,
+            trader,
+            stop=stop,
+            now=lambda: clock[0],
+            sleep=lambda seconds: asyncio.sleep(min(seconds, 0.005)),
+        )
+    )
+    try:
+        await until(lambda: len(rows(state, "selections")) == 1)
+        await runner.cleanup()  # the engine gone
+        clock[0] = at("08:30:00")  # the next pick, a minute after the start
+        await until(lambda: bool(_said(caplog, "WARNING", "could not read the cost map")))
+    finally:
+        stop.set()
+        await asyncio.wait_for(task, 5)
+
+    [warned] = _said(caplog, "WARNING", "could not read the cost map")
+    assert "ClientConnectorError" in warned, "refused, as while the engine starts"
+    assert _said(caplog, "INFO", "waiting for the engine to start") == []
+    assert [s["reason"] for s in rows(state, "selections")] == [None, NO_COST_MAP]

@@ -97,7 +97,12 @@ TIMEOUT_SECONDS = 120.0
 
 
 class CostMapError(Exception):
-    """The cost map could not be read, or is not one."""
+    """The cost map could not be read, or is not one; ``unreachable`` when the Engine API could not be
+    connected to (#508: the engine not up, as while it starts)."""
+
+    def __init__(self, message: str, *, unreachable: bool = False) -> None:
+        super().__init__(message)
+        self.unreachable = unreachable
 
 
 @dataclass(frozen=True)
@@ -186,6 +191,8 @@ class Selection:
     # Every cell the cost map names, with its figures, whatever its verdict (#472): what a policy's
     # cells trade on (``policy.apply``); empty under a policy and for a cost map not read.
     named: tuple[Pick, ...] = ()
+    # A cost map not read because the Engine API could not be connected to (#508, ``CostMapError``).
+    unreachable: bool = False
 
     @property
     def practising(self) -> bool:
@@ -387,7 +394,10 @@ async def read_cost_map(session: aiohttp.ClientSession, engine_url: str) -> dict
             if response.status != 200:
                 raise CostMapError(f"HTTP {response.status} from {url}: {text[:200]}")
     except (TimeoutError, aiohttp.ClientError) as e:
-        raise CostMapError(f"{url}: {e.__class__.__name__} {e}".strip()) from e
+        raise CostMapError(
+            f"{url}: {e.__class__.__name__} {e}".strip(),
+            unreachable=isinstance(e, aiohttp.ClientConnectorError),
+        ) from e
     try:
         body = json.loads(text)
     except ValueError as e:
@@ -402,7 +412,7 @@ async def pick(session: aiohttp.ClientSession, engine_url: str) -> Selection:
     try:
         return choose(await read_cost_map(session, engine_url))
     except CostMapError as e:
-        return Selection((), reason=NO_COST_MAP, detail=str(e))
+        return Selection((), reason=NO_COST_MAP, detail=str(e), unreachable=e.unreachable)
 
 
 def _dig(value: Any, *keys: str) -> Any:
