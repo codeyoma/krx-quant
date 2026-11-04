@@ -16,7 +16,10 @@ from krx_quant.daily import DailyAlgorithm, DailyKind
 from krx_quant.kind_registry import DAILY_KINDS, daily_kind_named
 from krx_quant.prevalidation import MIN_DAYS, REGISTERED_BEFORE, report_path
 from krx_quant.scheduled.core import FAILED, OK, Attachment, Job, Night, Target
-from krx_quant.scheduled.probes import DAILY_CHECK_ISSUE
+
+# The daily kinds' issue (#264), open_to_close's: its pre-validation and simulation post there too.
+# The daily check (``daily-check-264``, ``probes``) named it until that job left ``JOBS`` (#505).
+DAILY_CHECK_ISSUE = 264
 
 # ⑤ The pre-validations (#204): a new algorithm runs live once its pre-validation has passed
 # (``prevalidation.py``). Once ``MIN_DAYS`` trading days are recorded, one waiting algorithm

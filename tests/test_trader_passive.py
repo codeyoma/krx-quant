@@ -1,6 +1,6 @@
 """The passive entry's measurement (#432): a buy resting at the best bid against the trader's
 marketable entry, on hand-built quotes and KRX trades, worked by hand; the missing data counted
-apart; the recordings read a day at a time; the scheduled job.
+apart; the recordings read a day at a time.
 
 Input: an engine database written through the prediction store (barrier predictions of breiman and
 their answers, as the engine keeps them), the recordings as the collector writes them (the
@@ -39,7 +39,6 @@ import re
 import weakref
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 import pytest
@@ -52,16 +51,6 @@ from krx_quant.feeds.base import KST
 from krx_quant.health import GAP_SCHEMA
 from krx_quant.predictions import DB_NAME as ENGINE_DB
 from krx_quant.recorder import ParquetRecorder
-from krx_quant.scheduled import (
-    FAILED,
-    JOBS,
-    OK,
-    PASSIVE_ENTRY,
-    TRADER_REPORT,
-    Facts,
-    JobRecord,
-    Night,
-)
 from krx_quant.trader import SYMBOL, passive, replay
 from krx_quant.trader.cells import Cell
 from krx_quant.trader.paper import STOP_LOSS, TAKE_PROFIT, TIME
@@ -417,7 +406,7 @@ def test_a_tally_of_nothing_reports_its_counts_alone() -> None:
     assert _group("전체", Tally()) == ["전체: 신호 0 · 잰 신호 0"]
 
 
-# The command and its job.
+# The command (its scheduled job ``passive-entry-432`` ran on 2026-11-02 and left ``JOBS``, #505).
 
 
 async def test_the_command_reads_tonight_s_cost_map_and_prints_the_report(
@@ -452,34 +441,6 @@ async def test_without_the_cost_map_nothing_is_measured(
 
     assert code == NOT_MEASURED
     assert "비용 지도를 읽지 못해 재지 않았다" in capsys.readouterr().out
-
-
-MONDAY, TUESDAY, SATURDAY = date(2026, 11, 2), date(2026, 11, 3), date(2026, 10, 31)
-
-
-def night(day: date, record: JobRecord | None = None) -> Night:
-    return Night(day, CALENDAR.is_trading_day(day), "abc", record, {}, Facts())
-
-
-def ran(day: date, outcome: str, code: int) -> JobRecord:
-    return JobRecord(day, outcome, moment(day, "22:40:00"), "abc", code, 30.0)
-
-
-def test_the_job_runs_on_a_trading_night_until_a_run_measures() -> None:
-    assert PASSIVE_ENTRY.command == ("measure-passive-entry",)
-    assert [t.issue for t in PASSIVE_ENTRY.targets] == [432]
-    assert PASSIVE_ENTRY.timeout == timedelta(minutes=15)
-    assert PASSIVE_ENTRY.due(night(MONDAY))
-    assert not PASSIVE_ENTRY.due(night(SATURDAY)), "not a trading day"
-    assert not PASSIVE_ENTRY.due(night(TUESDAY, ran(MONDAY, OK, 0))), "once measured"
-    assert PASSIVE_ENTRY.due(night(TUESDAY, ran(MONDAY, FAILED, NOT_MEASURED))), "again after a failed run"
-    assert not PASSIVE_ENTRY.due(night(MONDAY, ran(MONDAY, FAILED, NOT_MEASURED))), "once a night"
-    assert PASSIVE_ENTRY.due(night(TUESDAY, ran(MONDAY, "interrupted", 0))), "a run a restart cut"
-
-
-def test_the_job_runs_after_the_trader_s_night_and_before_the_simulations() -> None:
-    first: Any = next(i for i, j in enumerate(JOBS) if j.name.startswith(("prevalidate-", "simulate-")))
-    assert JOBS.index(TRADER_REPORT) < JOBS.index(PASSIVE_ENTRY) < first
 
 
 def test_a_recording_that_cannot_be_read_leaves_its_day_s_signals_out(tmp_path: Path) -> None:

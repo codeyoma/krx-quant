@@ -50,7 +50,6 @@ from krx_quant.kinds import Answer
 from krx_quant.predictions import DB_NAME, NewPrediction, PredictionStore, Score, read_only
 from krx_quant.pricing import Direction
 from krx_quant.scheduled import (
-    ERROR_BREAKDOWN,
     ERROR_HOLDOUT,
     FAILED,
     INTERRUPTED,
@@ -415,7 +414,7 @@ def test_the_job_runs_once_on_the_first_night_the_window_is_full_and_posts_to_44
     note = job.targets[0].note
     assert "`섰다`인 가설만" in note and "바꾸지 않는다" in note and "#448" in note and "#449" in note
     first = next(i for i, j in enumerate(JOBS) if j.name.startswith(("prevalidate-", "simulate-")))
-    assert JOBS.index(ERROR_BREAKDOWN) < JOBS.index(job) < first, "before the simulations and pre-validations"
+    assert JOBS.index(job) < first, "before the simulations and pre-validations"
     assert not job.due(night(FRIDAY, DAYS - 1)), "the window is not full"
     assert job.due(night(FRIDAY, DAYS)) and job.due(night(SATURDAY, DAYS)), "trading or not"
     ran = JobRecord(SATURDAY, OK, at(SATURDAY, "22:30"), COMMIT, 0, 30.0)

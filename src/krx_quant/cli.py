@@ -194,14 +194,16 @@ async def _refit_policy(engine_url: str | None, report: bool) -> int:
 
 async def _measure_passive_entry(engine_url: str | None) -> int:
     """A passive entry at the best bid against the trader's marketable one, on the recordings (#432),
-    read-only: the scheduled job ``passive-entry-432``'s, in the engine's container."""
+    read-only, in the engine's container: what the scheduled job ``passive-entry-432`` ran until it
+    left ``JOBS`` (#505)."""
     settings = Settings.from_env(require_kis=False)
     return await run_passive_entry(settings, TraderSettings.from_env(), engine_url)
 
 
 async def _cost_map_audit(engine_url: str | None) -> int:
     """Every ranked algorithm of the trader's kinds judged as the cost map's top (#438), read-only:
-    the scheduled job ``cost-map-audit-438``'s, in the engine's container."""
+    in the engine's container: what the scheduled job ``cost-map-audit-438`` ran until it left
+    ``JOBS`` (#505)."""
     settings = Settings.from_env(require_kis=False)
     url = engine_url or TraderSettings.from_env().engine_url
     return await run_cost_map_audit(settings.state_dir / DB_NAME, url, settings.target_version)

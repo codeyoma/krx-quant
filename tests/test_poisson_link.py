@@ -6,7 +6,8 @@ Input: made-up samples whose arrivals excite each other as a Hawkes process does
 often than flat where the buys lean and flat elsewhere, and recorded days whose first half hour
 swings both ways under buyers (each four minutes reach both targets: up) while the rest stands
 still under sellers. Output: the links' calls, the tuning of the penalty and what it is fitted on,
-the experiment's report and lines, and the scheduled job.
+the experiment's report and lines. Its scheduled job (``poisson-link-439``) ran on 2026-11-02 and
+left ``JOBS`` (#505).
 """
 
 from __future__ import annotations
@@ -37,9 +38,8 @@ from krx_quant.feeds import KST
 from krx_quant.feeds.base import kst_day
 from krx_quant.market_calendar import calendar_store
 from krx_quant.poisson_link import AsymmetricLink, lean_of, lines, poisson_link_experiment, tuned
-from krx_quant.prevalidation import MIN_DAYS, _WalkForward
+from krx_quant.prevalidation import _WalkForward
 from krx_quant.pricing import Direction, most_likely
-from krx_quant.scheduled import JOBS, POISSON_LINK, Facts, JobRecord, Night
 from krx_quant.stats import Interval
 from krx_quant.training import finished_days
 from tests.replay_events import at, book, trade
@@ -310,30 +310,3 @@ def test_the_command_says_when_no_day_was_recorded(
 
     assert "no recorded day of 005930" in capsys.readouterr().err
     assert not (tmp_path / "state" / poisson_link.REPORT).exists()
-
-
-def test_the_job_runs_once_on_the_first_night_with_ten_recorded_days_after_every_pre_validation() -> None:
-    job = POISSON_LINK
-    assert (job.name, job.command, job.timeout) == ("poisson-link-439", ("poisson-link",), timedelta(hours=3))
-    assert [t.issue for t in job.targets] == [439] and "시세 값이 없다" in job.targets[0].note
-    assert "저절로 바꾸지 않는다" in job.targets[0].note
-    assert [a.path for a in job.attach] == ["experiments/poisson-link-439.json"]
-    after = max(i for i, j in enumerate(JOBS) if j.name.startswith(("prevalidate-", "simulate-")))
-    assert JOBS.index(job) > after, "last: it holds back no simulation nor pre-validation"
-    assert job.gives_way_to is None and job.session is None
-    saturday = date(2026, 10, 31)
-    started = datetime(2026, 10, 31, 23, 0, tzinfo=KST)
-    ran = JobRecord(saturday, "ok", started, "abc", 0, 600.0)
-    cut = JobRecord(saturday, "interrupted", started, "abc")
-    failed = JobRecord(saturday, "failed", started, "abc", None, 10800.0, timed_out=True)
-
-    def night(recorded: int, record: JobRecord | None = None, commit: str = "abc") -> Night:
-        return Night(saturday + timedelta(days=1), False, commit, record, {}, Facts(recorded_days=recorded))
-
-    assert not job.due(night(MIN_DAYS - 1)), "too few recorded days"
-    assert job.due(night(MIN_DAYS)), "trading or not"
-    assert not job.due(night(15, ran)), "once"
-    assert not job.due(night(15, ran, "def")), "once, whatever the code"
-    assert job.due(night(15, cut)), "again after a restart cut it"
-    assert not job.due(night(15, failed)), "a failure is not run again on the same code"
-    assert job.due(night(15, failed, "def")), "but again once a deploy brings other code"

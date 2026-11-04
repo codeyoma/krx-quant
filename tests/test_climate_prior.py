@@ -5,7 +5,8 @@ are ``algorithms/priors.py``'s (``tests/test_priors.py``), and shannon's prior `
 
 Input: made-up samples whose labels follow the time of day, and recorded days whose first half hour
 swings both ways (each four minutes reach both targets: up) while the rest stands still. Output: the
-arms' models, the experiment's report and lines, and the scheduled job.
+arms' models, the experiment's report and lines. Its scheduled job (``climate-prior-429``) ran on
+2026-11-01 and left ``JOBS`` (#505).
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ import json
 import math
 import re
 from dataclasses import replace
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -29,12 +30,10 @@ from krx_quant.climate_prior import ShannonAlone, ShannonPrior, climate_prior_ex
 from krx_quant.config import Settings
 from krx_quant.engine import Event
 from krx_quant.features import Leaders
-from krx_quant.feeds import KST
 from krx_quant.feeds.base import kst_day
 from krx_quant.market_calendar import calendar_store
-from krx_quant.prevalidation import MIN_DAYS, _WalkForward
+from krx_quant.prevalidation import _WalkForward
 from krx_quant.pricing import Direction
-from krx_quant.scheduled import CLIMATE_PRIOR, JOBS, Facts, JobRecord, Night
 from krx_quant.stats import Interval
 from krx_quant.training import finished_days
 from tests.replay_events import at, book, trade
@@ -202,33 +201,3 @@ def test_the_command_says_when_no_day_was_recorded(
 
     assert "no recorded day of 005930" in capsys.readouterr().err
     assert not (tmp_path / "state" / climate_prior.REPORT).exists()
-
-
-def test_the_job_runs_once_on_the_first_night_with_ten_recorded_days_after_every_pre_validation() -> None:
-    job = CLIMATE_PRIOR
-    assert (job.name, job.command, job.timeout) == (
-        "climate-prior-429",
-        ("climate-prior",),
-        timedelta(hours=3),
-    )
-    assert [t.issue for t in job.targets] == [429] and "시세 값이 없다" in job.targets[0].note
-    assert [a.path for a in job.attach] == ["experiments/climate-prior-429.json"]
-    after = max(i for i, j in enumerate(JOBS) if j.name.startswith(("prevalidate-", "simulate-")))
-    assert JOBS.index(job) > after, "last: it holds back no simulation nor pre-validation"
-    assert job.gives_way_to is None and job.session is None
-    saturday = date(2026, 10, 31)
-    started = datetime(2026, 10, 31, 23, 0, tzinfo=KST)
-    ran = JobRecord(saturday, "ok", started, "abc", 0, 600.0)
-    cut = JobRecord(saturday, "interrupted", started, "abc")
-    failed = JobRecord(saturday, "failed", started, "abc", None, 10800.0, timed_out=True)
-
-    def night(recorded: int, record: JobRecord | None = None, commit: str = "abc") -> Night:
-        return Night(saturday + timedelta(days=1), False, commit, record, {}, Facts(recorded_days=recorded))
-
-    assert not job.due(night(MIN_DAYS - 1)), "too few recorded days"
-    assert job.due(night(MIN_DAYS)), "trading or not"
-    assert not job.due(night(15, ran)), "once"
-    assert not job.due(night(15, ran, "def")), "once, whatever the code"
-    assert job.due(night(15, cut)), "again after a restart cut it"
-    assert not job.due(night(15, failed)), "a failure is not run again on the same code"
-    assert job.due(night(15, failed, "def")), "but again once a deploy brings other code"

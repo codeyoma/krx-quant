@@ -4,12 +4,11 @@ Input: a store holding hand-made predictions of turing and the climate baseline,
 touch answers (one or two ticks of spread) and the barrier's σ̂₄ there, over two days, with a
 special prediction and one by a model of another target that the leaderboard leaves out. Output:
 each cell's confusion matrix, precisions and lift over the climate baseline, worked out by hand
-below; the text, exploratory at its head, without prices; and the scheduled job that posts it.
+below; the text, exploratory at its head, without prices; and the command in its own process.
 """
 
 from __future__ import annotations
 
-import asyncio
 import math
 import sqlite3
 from collections.abc import Sequence
@@ -17,13 +16,11 @@ from dataclasses import replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-import aiohttp
 import pytest
 
 from krx_quant.barriers import BARRIER
 from krx_quant.baselines import Forecast, baselines_for
 from krx_quant.climate import CLIMATE
-from krx_quant.clock import FakeClock
 from krx_quant.config import Settings
 from krx_quant.consensus import NAMES
 from krx_quant.error_breakdown import (
@@ -35,27 +32,14 @@ from krx_quant.error_breakdown import (
     error_breakdown,
     read,
 )
-from krx_quant.github import GitHub
 from krx_quant.kinds import Answer
 from krx_quant.predictions import NewPrediction, PredictionStore, Score, read_only, scored_rows
 from krx_quant.pricing import Direction
-from krx_quant.scheduled import (
-    ERROR_BREAKDOWN,
-    INTERRUPTED,
-    JOBS,
-    OK,
-    STATE_FILE,
-    Facts,
-    JobRecord,
-    JobState,
-    Night,
-    Scheduler,
-)
+from krx_quant.scheduled import run_command
 from krx_quant.stats import leaderboard, on_target, scored_by_algorithm, split
 from krx_quant.touch import TARGET_VERSION
-from tests.fake_github import REPO, TOKEN, fake_github
 from tests.test_leaderboard_api import touch
-from tests.test_scheduled import AT, CALENDAR, COMMIT, FRIDAY, MONDAY, SATURDAY, Told, at
+from tests.test_scheduled import at
 
 UP, FLAT, DOWN = Direction.UP, Direction.FLAT, Direction.DOWN
 SURE = {UP: Forecast(1, 0, 0, 0), FLAT: Forecast(0, 1, 0, 0), DOWN: Forecast(0, 0, 1, 0)}
@@ -273,47 +257,16 @@ def test_the_breakdown_reads_without_writing(db: Path, tmp_path: Path) -> None:
     assert "견주지 않는다" in error_breakdown(db, SETTINGS, D2, 20, CLIMATE)  # no lift over itself
 
 
-# The scheduled job
+# The command in its own process, as its scheduled job ran it (``error-breakdown-431``, which ran on
+# 2026-11-01 and left ``JOBS``, #505).
 
 
-def night(day: date, record: JobRecord | None = None) -> Night:
-    return Night(day, CALENDAR.is_trading_day(day), COMMIT, record, {}, Facts())
-
-
-def test_the_job_runs_once_on_the_first_night_and_posts_to_431() -> None:
-    assert ERROR_BREAKDOWN.name == "error-breakdown-431"
-    assert ERROR_BREAKDOWN.command == ("error-breakdown", "--days", "20", "--algorithm", "turing")
-    assert ERROR_BREAKDOWN.timeout == timedelta(hours=1)
-    assert [t.issue for t in ERROR_BREAKDOWN.targets] == [431]
-    assert ERROR_BREAKDOWN.label == ("ready-for-agent",)
-    note = ERROR_BREAKDOWN.targets[0].note
-    assert "후속 티켓" in note and "홀드아웃" in note and "표본 부족" in note
-    first = next(i for i, j in enumerate(JOBS) if j.name.startswith(("prevalidate-", "simulate-")))
-    assert JOBS.index(ERROR_BREAKDOWN) < first, "before the simulations and pre-validations"
-    assert ERROR_BREAKDOWN.due(night(FRIDAY))
-    assert ERROR_BREAKDOWN.due(night(SATURDAY))  # it reads the stored days: any night
-    ran = JobRecord(SATURDAY, OK, at(SATURDAY, "22:30"), COMMIT, 0, 30.0)
-    assert not ERROR_BREAKDOWN.due(night(MONDAY, ran))
-    assert ERROR_BREAKDOWN.due(night(MONDAY, replace(ran, outcome=INTERRUPTED)))
-
-
-async def test_the_job_runs_the_real_command(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_the_command_runs_in_its_own_process(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)  # no .env
     monkeypatch.setenv("KRX_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("KRX_STATE_DIR", str(tmp_path / "state"))
-    state = JobState.load(tmp_path / STATE_FILE)
-    async with fake_github() as hub, aiohttp.ClientSession() as session:
-        scheduler = Scheduler(
-            [ERROR_BREAKDOWN],
-            AT,
-            CALENDAR,
-            state,
-            GitHub(session, TOKEN, REPO, hub.url),
-            Told(),
-            FakeClock(at(FRIDAY, "23:00")),
-            commit=COMMIT,
-        )
-        await asyncio.wait_for(scheduler.run_night(FRIDAY), 25)
-    [body] = hub.bodies(431)
-    assert "turing 오류 분석: 데이터 없음" in body and "후속 티켓" in body
-    assert state.jobs["error-breakdown-431"].exit_code == 0
+    ran = await run_command(
+        ["error-breakdown", "--days", "20", "--algorithm", "turing"], timedelta(seconds=25)
+    )
+    assert "turing 오류 분석: 데이터 없음" in ran.stdout
+    assert ran.exit_code == 0

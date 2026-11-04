@@ -6,24 +6,21 @@ with their answers (``test_cost_map_api``'s), the Engine API's cost map of them 
 for it (005930, 20d, special situations left out), and the engine's database file it was computed
 from. Output: each kind's candidates, the visible one against the cost map's top to the number; a
 hidden one that passes where the top fails; the text, exploratory at its head and without prices;
-the exit codes; and the scheduled job that posts it on #438.
+the exit codes; and the command in its own process, as its scheduled job ran it.
 """
 
 from __future__ import annotations
 
-import asyncio
 import copy
 from collections.abc import Sequence
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-import aiohttp
 import pytest
 
 from krx_quant.barriers import ANSWER_VERSION as BARRIER_VERSION
 from krx_quant.barriers import BARRIER, CLIMATE, DOWN_FIRST, PERSIST, TIMEOUT, UP_FIRST
-from krx_quant.clock import FakeClock
 from krx_quant.consensus import NAMES as CONSENSUS
 from krx_quant.cost_map_audit import (
     AUDITED,
@@ -33,30 +30,14 @@ from krx_quant.cost_map_audit import (
     report,
     run_audit,
 )
-from krx_quant.github import GitHub
 from krx_quant.kinds import Answer
 from krx_quant.predictions import NewKindPrediction, PredictionStore
 from krx_quant.pricing import Direction
-from krx_quant.scheduled import (
-    COST_MAP_AUDIT,
-    FAILED,
-    INTERRUPTED,
-    JOBS,
-    OK,
-    STATE_FILE,
-    Facts,
-    JobRecord,
-    JobState,
-    Night,
-    Scheduler,
-)
+from krx_quant.scheduled import run_command
 from krx_quant.trader import TRADED_KINDS
-from tests.fake_github import REPO, TOKEN, fake_github
 from tests.replay_events import DAY, at
 from tests.test_cost_map_api import barrier_board, cost_map, row
 from tests.test_leaderboard_api import OUTCOMES, baselines, get, store_scored
-from tests.test_scheduled import AT, CALENDAR, COMMIT, FRIDAY, MONDAY, SATURDAY, Told
-from tests.test_scheduled import at as at_night
 from tests.test_trader_run import EngineApi
 
 UP, FLAT, DOWN = Direction.UP, Direction.FLAT, Direction.DOWN
@@ -249,60 +230,19 @@ async def test_another_cost_map_than_the_trader_s_is_refused(tmp_path: Path) -> 
     assert code == NOT_READ
 
 
-# The job.
+# The command in its own process, as its scheduled job ran it (``cost-map-audit-438``, which ran on
+# 2026-11-02 and left ``JOBS``, #505).
 
 
-def night(day: date, record: JobRecord | None = None) -> Night:
-    return Night(day, CALENDAR.is_trading_day(day), COMMIT, record, {}, Facts())
-
-
-def ran(day: date, outcome: str, code: int) -> JobRecord:
-    return JobRecord(day, outcome, at_night(day, "22:40"), COMMIT, code, 30.0)
-
-
-def test_the_job_runs_once_on_a_night_until_a_run_audits_and_posts_to_438() -> None:
-    assert COST_MAP_AUDIT.name == "cost-map-audit-438"
-    assert COST_MAP_AUDIT.command == ("cost-map-audit",)
-    assert COST_MAP_AUDIT.timeout == timedelta(minutes=30)
-    assert [t.issue for t in COST_MAP_AUDIT.targets] == [438]
-    note = COST_MAP_AUDIT.targets[0].note
-    assert "매매 허가가 아니다" in note and "paper" in note and "사용자가 정한다" in note
-    first = next(i for i, j in enumerate(JOBS) if j.name.startswith(("prevalidate-", "simulate-")))
-    assert JOBS.index(COST_MAP_AUDIT) < first, "before the simulations and pre-validations"
-    assert COST_MAP_AUDIT.due(night(FRIDAY))
-    assert COST_MAP_AUDIT.due(night(SATURDAY)), "the stored days only: any night"
-    assert not COST_MAP_AUDIT.due(night(MONDAY, ran(FRIDAY, OK, AUDITED))), "once audited"
-    assert COST_MAP_AUDIT.due(night(MONDAY, ran(FRIDAY, FAILED, NOT_READ))), "again after a failed run"
-    assert COST_MAP_AUDIT.due(night(MONDAY, ran(FRIDAY, FAILED, DIFFERS)))
-    assert not COST_MAP_AUDIT.due(night(FRIDAY, ran(FRIDAY, FAILED, NOT_READ))), "once a night"
-    assert COST_MAP_AUDIT.due(night(MONDAY, ran(FRIDAY, INTERRUPTED, 0))), "a run a restart cut"
-
-
-async def test_the_job_runs_the_real_command(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_the_command_runs_in_its_own_process(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Without the engine's database: the command runs, reads the cost map, and says why it stopped."""
     monkeypatch.chdir(tmp_path)  # no .env
     monkeypatch.setenv("KRX_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("KRX_STATE_DIR", str(tmp_path / "state"))
     async with cost_map(tmp_path) as (_, client):
         body = await traders_cost_map(client)
-    state = JobState.load(tmp_path / STATE_FILE)
-    async with (
-        EngineApi([body]).serving() as url,
-        fake_github() as hub,
-        aiohttp.ClientSession() as session,
-    ):
+    async with EngineApi([body]).serving() as url:
         monkeypatch.setenv("KRX_TRADER_ENGINE_URL", url)
-        scheduler = Scheduler(
-            [COST_MAP_AUDIT],
-            AT,
-            CALENDAR,
-            state,
-            GitHub(session, TOKEN, REPO, hub.url),
-            Told(),
-            FakeClock(at_night(FRIDAY, "23:00")),
-            commit=COMMIT,
-        )
-        await asyncio.wait_for(scheduler.run_night(FRIDAY), 25)
-    [posted] = hub.bodies(438)
-    assert "엔진 DB가 없어" in posted and "매매 허가가 아니다" in posted
-    assert state.jobs["cost-map-audit-438"].exit_code == NOT_READ
+        ran = await run_command(["cost-map-audit"], timedelta(seconds=25))
+    assert "엔진 DB가 없어" in ran.stdout
+    assert ran.exit_code == NOT_READ

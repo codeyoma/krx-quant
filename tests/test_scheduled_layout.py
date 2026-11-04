@@ -1,57 +1,66 @@
 """The scheduled jobs' package (#500): each family of jobs in its own module, and ``JOBS``
 gathering them in the order they run.
 
-The names are pinned as they ran before the split: a PR that adds, removes or moves a job changes
-this list with ``JOBS``. The jobs built from the algorithm registries are pinned by where they
-come, not by name: a new algorithm needs no entry (AGENTS.md "Timed server work").
+The names are pinned in the order they ran before the split, less the one-off jobs that have done
+their work and left (#505): a PR that adds, removes or moves a job changes this list with ``JOBS``.
+The jobs built from the algorithm registries are pinned by where they come, not by name: a new
+algorithm needs no entry (AGENTS.md "Timed server work").
 """
 
 from __future__ import annotations
 
 from types import ModuleType
 
+from krx_quant import cli
 from krx_quant.algorithms import ALGORITHMS, DAILY_ALGORITHMS, KIND_ALGORITHMS
 from krx_quant.scheduled import JOBS, Job, daily_prevalidation_jobs, prevalidation_jobs, revision_jobs
 
 # The jobs written by hand, in the list's order, before the daily kinds' pre-validations.
 FIRST = (
-    "diagnose-203-187",
-    "signal-review-206",
-    "probe-supply-226",
-    "structure-check-270",
-    "entry-delay-262",
-    "probe-night-264",
-    "probe-expected-open-314",
-    "probe-expected-open-krx-314",
-    "daily-check-264",
-    "structure-check-supply-264",
-    "probe-net-buys-j-264",
-    "probe-close-264",
-    "probe-close-refresh-264",
-    "probe-nav-305",
-    "probe-dividends-310",
-    "probe-krx-etf-305",
-    "probe-gaps-344",
-    "check-closing-flow-305",
-    "check-krx-net-assets-305",
-    "probe-member-frames-381",
     "trader-report",
-    "check-mock-trades-405",
     "fill-notice-layout-403",
-    "signal-review-206-1102",
     "signal-review-206-1201",
     "probe-live-account-408",
-    "error-breakdown-431",
     "error-holdout-447",
     "climate-gate-449",
-    "passive-entry-432",
-    "cost-map-audit-438",
     "nightly-hit-rates-437",
 )
 # Between the daily kinds' pre-validations and the bar-close ones.
 SIMULATIONS = ("simulate-daily-298", "simulate-bar-close-298")
 # After the bar-close pre-validations: the experiments.
-LAST = ("climate-prior-429", "poisson-link-439", "turing-prior-448", "neyman-variants-283")
+LAST = ("neyman-variants-283",)
+# The one-off jobs that ran, posted their results and left the list (#505), each with the command it
+# ran, which stays for a run by hand (as ``probe-kis-orders-403``'s did, #484).
+RETIRED = {
+    "diagnose-203-187": ("diagnose", "--days", "20"),
+    "signal-review-206": ("signal-review", "--days", "20"),
+    "probe-supply-226": ("probe-supply",),
+    "structure-check-270": ("structure-check",),
+    "entry-delay-262": ("diagnose", "--days", "20"),
+    "probe-night-264": ("probe-night",),
+    "probe-expected-open-314": ("probe-expected-open",),
+    "probe-expected-open-krx-314": ("probe-expected-open",),
+    "daily-check-264": ("daily-check", "--days", "1"),
+    "structure-check-supply-264": ("structure-check",),
+    "probe-net-buys-j-264": ("probe-net-buys",),
+    "probe-close-264": ("probe-close",),
+    "probe-close-refresh-264": ("probe-close",),
+    "probe-nav-305": ("probe-nav",),
+    "probe-dividends-310": ("probe-dividends",),
+    "probe-krx-etf-305": ("probe-krx-etf",),
+    "probe-gaps-344": ("probe-gaps",),
+    "check-closing-flow-305": ("check-closing-flow",),
+    "check-krx-net-assets-305": ("check-krx-net-assets",),
+    "probe-member-frames-381": ("probe-member-frames",),
+    "check-mock-trades-405": ("check-mock-trades",),
+    "signal-review-206-1102": ("signal-review", "--days", "20"),
+    "error-breakdown-431": ("error-breakdown", "--days", "20", "--algorithm", "turing"),
+    "passive-entry-432": ("measure-passive-entry",),
+    "cost-map-audit-438": ("cost-map-audit",),
+    "climate-prior-429": ("climate-prior",),
+    "poisson-link-439": ("poisson-link",),
+    "turing-prior-448": ("turing-prior",),
+}
 
 
 def _families() -> tuple[ModuleType, ...]:
@@ -86,3 +95,12 @@ def test_every_job_a_family_defines_is_listed_once() -> None:
     assert len(names) == len(set(names)), "each in one family"
     built = {j.name for j in JOBS if j.command[:1] == ("prevalidate",) and j.name not in names}
     assert {j.name for j in JOBS} == set(names) | built, "the rest are built from the registries"
+
+
+def test_the_retired_jobs_are_gone_and_their_commands_stay() -> None:
+    """Left in, a lost state file would run them again on closed issues; by hand, each still runs."""
+    assert len(RETIRED) == 28
+    assert sorted(set(RETIRED) & {j.name for j in JOBS}) == []
+    parser = cli._parser()
+    for name, argv in RETIRED.items():
+        assert callable(parser.parse_args(list(argv)).run), name

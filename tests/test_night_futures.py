@@ -20,6 +20,7 @@ from krx_quant.fake_kis import FakeKis
 from krx_quant.feeds.base import KST, kst_nearest
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.night_probe import master_lines, report, subscribed_nights
+from krx_quant.scheduled import run_command
 from tests.kis_frames import FUTURES_COLUMNS, frame, master_zips, night_book_frame, night_futures_frame
 from tests.kis_rest import HOLIDAYS, holiday_api
 from tests.test_calendar_health import health_checks
@@ -316,6 +317,19 @@ def test_the_report_without_a_subscribed_night_says_so(tmp_path: Path) -> None:
     assert "2026-10-15 밤" in text  # the latest trading day's, Thursday's
     assert "없음: 그날 수집기가 야간선물을 구독하지 않았다" in text
     assert "받은 프레임 없음" in text
+
+
+async def test_the_command_runs_in_its_own_process(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """As its scheduled job ran it (``probe-night-264``, which ran on 2026-10-20 and left ``JOBS``,
+    #505): on a server with nothing recorded, the masters out of reach."""
+    monkeypatch.chdir(tmp_path)  # no .env
+    monkeypatch.setenv("KRX_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("KRX_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("KIS_MASTER_URL", "http://127.0.0.1:9/master")  # nothing listens: no network
+    ran = await run_command(["probe-night"], timedelta(seconds=25))
+    assert "야간선물 녹화 확인 (#264)" in ran.stdout and "2. H0MFCNT0 체결" in ran.stdout
+    assert "fo_cme_code.mst를 읽지 못했다" in ran.stdout  # said, not fatal
+    assert ran.exit_code == 0
 
 
 def test_the_masters_show_codes_and_names_only() -> None:

@@ -6,7 +6,8 @@ Input: made-up samples whose labels follow the symbol, or each symbol and slot, 
 features say nothing; recorded days of two symbols, one whose first half hour swings both ways
 (each four minutes reach both targets: up) and one that stands still, with the barrier's σ̂₄ in
 the engine DB; hand-made scored records. Output: the arms' models and forecasts, the experiment's
-report and lines, the rule's candidates, and the scheduled job.
+report and lines, and the rule's candidates. Its scheduled job (``turing-prior-448``) ran on
+2026-11-02 and left ``JOBS`` (#505).
 """
 
 from __future__ import annotations
@@ -38,9 +39,8 @@ from krx_quant.feeds.base import kst_day
 from krx_quant.kinds import Answer
 from krx_quant.market_calendar import calendar_store
 from krx_quant.predictions import DB_NAME, PredictionStore
-from krx_quant.prevalidation import MIN_DAYS, _WalkForward
+from krx_quant.prevalidation import _WalkForward
 from krx_quant.pricing import Direction
-from krx_quant.scheduled import JOBS, TURING_PRIOR, Facts, JobRecord, Night
 from krx_quant.stats import Interval, Scored
 from krx_quant.training import finished_days
 from krx_quant.turing_prior import (
@@ -398,26 +398,3 @@ def test_the_command_says_when_no_day_was_recorded(
 
     assert "no recorded day of 005930" in capsys.readouterr().err
     assert not (tmp_path / "state" / turing_prior.REPORT).exists()
-
-
-def test_the_job_runs_once_on_the_first_night_with_ten_recorded_days_after_every_pre_validation() -> None:
-    job = TURING_PRIOR
-    assert (job.name, job.command, job.timeout) == ("turing-prior-448", ("turing-prior",), timedelta(hours=3))
-    assert [t.issue for t in job.targets] == [448] and "시세 값이 없다" in job.targets[0].note
-    assert [a.path for a in job.attach] == ["experiments/turing-prior-448.json"]
-    after = max(i for i, j in enumerate(JOBS) if j.name.startswith(("prevalidate-", "simulate-")))
-    assert JOBS.index(job) > after, "last: it holds back no simulation nor pre-validation"
-    assert job.gives_way_to is None and job.session is None
-    sunday = date(2026, 11, 8)
-    started = datetime(2026, 11, 8, 23, 0, tzinfo=KST)
-    ran = JobRecord(sunday, "ok", started, "abc", 0, 600.0)
-    failed = JobRecord(sunday, "failed", started, "abc", None, 10800.0, timed_out=True)
-
-    def night(recorded: int, record: JobRecord | None = None, commit: str = "abc") -> Night:
-        return Night(sunday + timedelta(days=1), False, commit, record, {}, Facts(recorded_days=recorded))
-
-    assert not job.due(night(MIN_DAYS - 1)), "too few recorded days"
-    assert job.due(night(MIN_DAYS)), "trading or not"
-    assert not job.due(night(15, ran)) and not job.due(night(15, ran, "def")), "once, whatever the code"
-    assert not job.due(night(15, failed)), "a failure is not run again on the same code"
-    assert job.due(night(15, failed, "def")), "but again once a deploy brings other code"

@@ -1,8 +1,9 @@
 """Where an algorithm errs (``krx-quant error-breakdown``, #431): its live predictions over the
 latest days broken down by symbol, 30-minute slot, spread and volatility, each cell with its
 confusion matrix, the precision of each class it called and its lift over the climate baseline,
-as text to paste. A scheduled job runs it once for ``turing`` and posts it on #431
-(``scheduled/research.py``); an agent reads it for where accuracy work could go, the user decides.
+as text to paste. A scheduled job (``error-breakdown-431``) ran it once for ``turing`` on
+2026-11-01 and posted it on #431, then left ``JOBS`` (#505); an agent reads it for where accuracy
+work could go, the user decides.
 
 It is exploratory, and says so at its head: a cell picked from it is judged on the days after
 the period (a holdout), not on these.

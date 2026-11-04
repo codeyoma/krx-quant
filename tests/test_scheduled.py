@@ -1,8 +1,10 @@
 """Scheduled jobs (#215): when they run, what they remember, and what they post.
 
 The clock is a fake one (``FakeClock``); the jobs' processes are stand-ins, except where
-the process itself is the point (``run_command``) and for the diagnosis job, whose real
-command is cheap on an empty data directory.
+the process itself is the point (``run_command``, the collector's run of a job) and for the
+listed jobs whose real commands are cheap on an empty data directory. The jobs that test the
+scheduler itself are made here: a listed one-off job leaves ``JOBS`` once it has done its work
+(#505).
 """
 
 from __future__ import annotations
@@ -20,7 +22,6 @@ from pathlib import Path
 import aiohttp
 import pytest
 
-from krx_quant.barriers import BARRIER
 from krx_quant.baselines import Forecast
 from krx_quant.clock import FakeClock
 from krx_quant.collector import run_collector
@@ -34,36 +35,15 @@ from krx_quant.predictions import DB_NAME as ENGINE_DB
 from krx_quant.predictions import NewPrediction, PredictionStore
 from krx_quant.process_log import Child
 from krx_quant.scheduled import (
-    CLOSE_PROBE,
-    CLOSE_REFRESH_PROBE,
-    CLOSING_FLOW_CHECK,
-    DIAGNOSE,
-    DIVIDEND_PROBE,
-    ENTRY_DELAY,
-    EXPECTED_OPEN_KRX_PROBE,
-    EXPECTED_OPEN_PROBE,
     FAILED,
-    GAPS_PROBE,
     INTERRUPTED,
     JOBS,
-    KRX_ETF_PROBE,
-    KRX_NET_ASSETS_CHECK,
-    MEMBER_FRAMES_PROBE,
-    NAV_PROBE,
-    NET_BUYS_PROBE,
-    NIGHT_PROBE,
     OK,
     RUNNING,
-    SIGNAL_REVIEW,
-    SIGNAL_REVIEW_AGAIN,
-    SIGNAL_REVIEW_AGAIN_FROM,
     SIGNAL_REVIEW_FIXED,
     SIGNAL_REVIEW_FIXED_DAYS,
     SIGNAL_REVIEW_FROM,
     STATE_FILE,
-    STRUCTURE_CHECK,
-    STRUCTURE_SUPPLY,
-    SUPPLY_PROBE,
     TRADER_REPORT,
     Attachment,
     Facts,
@@ -80,6 +60,7 @@ from krx_quant.scheduled import (
     trader_report_calls,
     window,
 )
+from krx_quant.scheduled.core import _first_night, _first_trading_night
 from krx_quant.swap import TRAINING_TIMEOUT, NightTraining, keep_training
 from tests.fake_github import REPO, TOKEN, FakeGitHub, fake_github
 from tests.test_collector import settings_for
@@ -597,6 +578,21 @@ DIAGNOSIS = "\n".join(
 )
 
 
+# A job whose result goes to two issues, the second with a part of the output only, as the
+# diagnosis's did (``diagnose-203-187``, which left ``JOBS``, #505).
+TWO_ISSUES = job(
+    "two-issues",
+    targets=(
+        Target(203),
+        Target(
+            187,
+            sections("진단", "9. 뒤집힌 호가(#187)"),
+            "출력 중 머리말과 9절(뒤집힌 호가)만 싣는다. 전체 출력은 #203에 있다.",
+        ),
+    ),
+)
+
+
 def first_lines(body: str) -> list[str]:
     return body.splitlines()[:5]
 
@@ -607,7 +603,7 @@ async def test_the_result_goes_on_each_issue_which_is_then_ready_for_an_agent(tm
     async with fake_github() as hub:
         hub.labels = {203: {"ready-for-human"}, 187: {"ready-for-human", "needs-triage", "bug"}}
         async with scheduling(
-            tmp_path, at(FRIDAY, "22:00"), [DIAGNOSE], runs=runs, github=hub, clock=clock
+            tmp_path, at(FRIDAY, "22:00"), [TWO_ISSUES], runs=runs, github=hub, clock=clock
         ) as (_, _, told, state):
             clock.set(at(FRIDAY, "22:30"))
             await until(lambda: bool(told))
@@ -616,9 +612,9 @@ async def test_the_result_goes_on_each_issue_which_is_then_ready_for_an_agent(tm
 
     whole, crossed = hub.bodies(203)[0], hub.bodies(187)[0]
     assert first_lines(whole) == [
-        "**예약 작업 `diagnose-203-187`** · 2026-10-16 밤 · 성공 · 커밋 `0123456789ab` · 종료 코드 0 · 0초",
+        "**예약 작업 `two-issues`** · 2026-10-16 밤 · 성공 · 커밋 `0123456789ab` · 종료 코드 0 · 0초",
         "",
-        "다시 돌리기: `docker compose run --rm engine diagnose --days 20`",
+        "다시 돌리기: `docker compose run --rm engine two-issues --flag`",
         "",
         "```",
     ]
@@ -626,13 +622,13 @@ async def test_the_result_goes_on_each_issue_which_is_then_ready_for_an_agent(tm
     assert "<details>" not in whole  # nothing on stderr
     # #187 gets the heading paragraph and section 9 only.
     assert first_lines(crossed)[2:4] == [
-        "다시 돌리기: `docker compose run --rm engine diagnose --days 20`",
+        "다시 돌리기: `docker compose run --rm engine two-issues --flag`",
         "출력 중 머리말과 9절(뒤집힌 호가)만 싣는다. 전체 출력은 #203에 있다.",
     ]
     assert "진단 2026-09-17 – 2026-10-16 (20거래일)\n\n9. 뒤집힌 호가(#187)" in crossed
     assert "8. 장벽" not in crossed and "1. 알고리즘" not in crossed
 
-    record = state.jobs["diagnose-203-187"]
+    record = state.jobs["two-issues"]
     assert record.outcome == OK and record.exit_code == 0 and record.commit == COMMIT
     assert record.comments == {
         203: f"https://github.com/{REPO}/issues/203#issuecomment-1",
@@ -640,7 +636,7 @@ async def test_the_result_goes_on_each_issue_which_is_then_ready_for_an_agent(tm
     }
     assert state.unposted == []
     assert told == [
-        "예약 작업 diagnose-203-187(2026-10-16 밤): 성공, 종료 코드 0, 0초. 댓글: "
+        "예약 작업 two-issues(2026-10-16 밤): 성공, 종료 코드 0, 0초. 댓글: "
         f"https://github.com/{REPO}/issues/203#issuecomment-1 "
         f"https://github.com/{REPO}/issues/187#issuecomment-2"
     ]
@@ -785,7 +781,7 @@ async def test_a_job_killed_by_a_signal_or_not_started_says_so(tmp_path: Path) -
 
 async def test_without_a_token_the_result_waits_on_the_server_until_there_is_one(tmp_path: Path) -> None:
     async with fake_github() as hub:
-        async with scheduling(tmp_path, at(FRIDAY, "22:00"), [DIAGNOSE], github=hub, token=None) as (
+        async with scheduling(tmp_path, at(FRIDAY, "22:00"), [TWO_ISSUES], github=hub, token=None) as (
             clock,
             _,
             told,
@@ -796,7 +792,7 @@ async def test_without_a_token_the_result_waits_on_the_server_until_there_is_one
             assert [u.issue for u in state.unposted] == [203, 187]
         assert hub.requests == []
         assert told == [
-            "예약 작업 diagnose-203-187(2026-10-16 밤): 성공, 종료 코드 0, 0초. GitHub에 올리지 못했습니다"
+            "예약 작업 two-issues(2026-10-16 밤): 성공, 종료 코드 0, 0초. GitHub에 올리지 못했습니다"
             "(KRX_GITHUB_TOKEN이 없음). 결과는 서버의 state/scheduled.json에 두고 "
             "다음 밤이나 엔진이 다시 뜰 때 올립니다."
         ]
@@ -804,7 +800,7 @@ async def test_without_a_token_the_result_waits_on_the_server_until_there_is_one
         assert isinstance(unposted, list) and [u["issue"] for u in unposted] == [203, 187]
 
         # The token is put in .env and the engine restarted: the results go up at its start.
-        async with scheduling(tmp_path, at(SATURDAY, "08:00"), [DIAGNOSE], github=hub) as (
+        async with scheduling(tmp_path, at(SATURDAY, "08:00"), [TWO_ISSUES], github=hub) as (
             _,
             runs,
             told,
@@ -814,19 +810,51 @@ async def test_without_a_token_the_result_waits_on_the_server_until_there_is_one
             await until(lambda: bool(told))
             assert runs.started == []  # posted, not run again
             assert state.unposted == []
-            assert state.jobs["diagnose-203-187"].comments.keys() == {203, 187}
+            assert state.jobs["two-issues"].comments.keys() == {203, 187}
             assert told == [
-                "예약 작업 diagnose-203-187(2026-10-16 밤)의 결과를 이제 올렸습니다. 댓글: "
+                "예약 작업 two-issues(2026-10-16 밤)의 결과를 이제 올렸습니다. 댓글: "
                 f"https://github.com/{REPO}/issues/203#issuecomment-1 "
                 f"https://github.com/{REPO}/issues/187#issuecomment-2"
             ]
     assert saved(tmp_path)["unposted"] == []
 
 
+async def test_a_result_not_posted_goes_up_once_its_job_has_left_the_list(tmp_path: Path) -> None:
+    """A one-off job leaves ``JOBS`` once it has done its work (#505). A result it could not post
+    goes up all the same, with the body and labels the state kept, and the job does not run again."""
+    async with fake_github() as hub:
+        hub.labels = {1: {"ready-for-human"}}
+        async with scheduling(tmp_path, at(FRIDAY, "22:00"), [job("retired")], github=hub, token=None) as (
+            clock,
+            _,
+            told,
+            state,
+        ):
+            clock.set(at(FRIDAY, "22:30"))
+            await until(lambda: bool(told))
+            assert [u.job for u in state.unposted] == ["retired"]
+        assert hub.requests == []
+
+        # The deploy that takes the job out of the list starts the engine, the token set by then.
+        kept = [job("kept", due=lambda night: False)]
+        async with scheduling(tmp_path, at(SATURDAY, "08:00"), kept, github=hub) as (_, runs, told, state):
+            await until(lambda: bool(told))
+            assert runs.started == []
+            assert state.unposted == []
+            url = f"https://github.com/{REPO}/issues/1#issuecomment-1"
+            assert state.jobs["retired"].comments == {1: url}
+            assert told == [f"예약 작업 retired(2026-10-16 밤)의 결과를 이제 올렸습니다. 댓글: {url}"]
+        [body] = hub.bodies(1)
+        assert body.startswith("**예약 작업 `retired`** · 2026-10-16 밤 · 성공 · ")
+        assert "다시 돌리기: `docker compose run --rm engine retired --flag`" in body
+        assert hub.labels == {1: {"ready-for-agent"}}
+    assert saved(tmp_path)["unposted"] == []
+
+
 async def test_a_result_github_refused_is_posted_the_next_night(tmp_path: Path) -> None:
     async with fake_github() as hub:
         hub.fail_comments = 2
-        async with scheduling(tmp_path, at(FRIDAY, "22:00"), [DIAGNOSE], github=hub) as (
+        async with scheduling(tmp_path, at(FRIDAY, "22:00"), [TWO_ISSUES], github=hub) as (
             clock,
             runs,
             told,
@@ -839,9 +867,9 @@ async def test_a_result_github_refused_is_posted_the_next_night(tmp_path: Path) 
             clock.set(at(SATURDAY, "22:30"))
             await until(lambda: len(hub.comments) == 2)
             await until(lambda: len(told) == 2)
-            assert runs.names() == ["diagnose"]  # posted again, not run again
+            assert runs.names() == ["two-issues"]  # posted again, not run again
             assert state.unposted == []
-            assert told[1].startswith("예약 작업 diagnose-203-187(2026-10-16 밤)의 결과를 이제 올렸습니다.")
+            assert told[1].startswith("예약 작업 two-issues(2026-10-16 밤)의 결과를 이제 올렸습니다.")
 
 
 async def test_labels_that_failed_after_the_comment_do_not_post_it_twice(tmp_path: Path) -> None:
@@ -875,21 +903,32 @@ def test_the_jobs_have_unique_names_and_fit_in_the_night() -> None:
         assert listed.targets and all(t.issue > 0 for t in listed.targets)
 
 
-def test_the_diagnosis_runs_once_on_the_first_trading_day_s_night() -> None:
-    assert DIAGNOSE.command == ("diagnose", "--days", "20")
-    assert DIAGNOSE.timeout == timedelta(hours=1)
-    assert [t.issue for t in DIAGNOSE.targets] == [203, 187]
-    assert DIAGNOSE.label == ("ready-for-agent",)
-    assert DIAGNOSE.due(night(FRIDAY))
-    assert not DIAGNOSE.due(night(SATURDAY))  # not a trading day: it waits for Monday's night
+def test_the_first_trading_night_runs_a_job_once_on_a_trading_day_s_night() -> None:
+    # ``core._first_trading_night``: a one-off job's condition (the diagnosis's, #203, until it left
+    # ``JOBS``, #505).
+    due = _first_trading_night
+    assert due(night(FRIDAY))
+    assert not due(night(SATURDAY))  # not a trading day: it waits for Monday's night
     ran = JobRecord(FRIDAY, OK, at(FRIDAY, "22:30"), COMMIT, 0, 60.0)
-    assert not DIAGNOSE.due(night(MONDAY, ran))
-    assert not DIAGNOSE.due(night(MONDAY, replace(ran, outcome=FAILED, exit_code=1)))
-    assert DIAGNOSE.due(night(MONDAY, replace(ran, outcome=INTERRUPTED)))
+    assert not due(night(MONDAY, ran))
+    assert not due(night(MONDAY, replace(ran, outcome=FAILED, exit_code=1)))
+    assert due(night(MONDAY, replace(ran, outcome=INTERRUPTED)))
 
 
-def test_the_diagnosis_section_9_goes_to_187_alone() -> None:
-    whole, crossed = (t.part(DIAGNOSIS) for t in DIAGNOSE.targets)
+def test_the_first_night_runs_a_job_once_trading_or_not() -> None:
+    # ``core._first_night``: a one-off job's condition (the supply probe's, #226, until it left
+    # ``JOBS``, #505).
+    due = _first_night
+    assert due(night(FRIDAY))
+    assert due(night(SATURDAY))  # any night
+    ran = JobRecord(SATURDAY, OK, at(SATURDAY, "22:30"), COMMIT, 0, 150.0)
+    assert not due(night(MONDAY, ran))
+    assert not due(night(MONDAY, replace(ran, outcome=FAILED, exit_code=1)))
+    assert due(night(MONDAY, replace(ran, outcome=INTERRUPTED)))
+
+
+def test_a_target_s_part_is_the_paragraphs_its_titles_start() -> None:
+    whole, crossed = (t.part(DIAGNOSIS) for t in TWO_ISSUES.targets)
     assert whole == DIAGNOSIS
     assert crossed == "\n".join(
         [
@@ -900,7 +939,7 @@ def test_the_diagnosis_section_9_goes_to_187_alone() -> None:
             "  거래소 귀속: KRX 매수 > NXT 매도 61%",
         ]
     )
-    assert DIAGNOSE.targets[1].part("진단: 데이터 없음\n\n8. 장벽 정답(#183)\n  없음") is None
+    assert TWO_ISSUES.targets[1].part("진단: 데이터 없음\n\n8. 장벽 정답(#183)\n  없음") is None
 
 
 @pytest.fixture
@@ -910,66 +949,6 @@ def empty_server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("KRX_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("KRX_STATE_DIR", str(tmp_path / "state"))
     return tmp_path
-
-
-async def test_the_diagnosis_job_runs_the_real_command(empty_server: Path) -> None:
-    state = JobState.load(empty_server / STATE_FILE)
-    async with fake_github() as hub, aiohttp.ClientSession() as session:
-        scheduler = Scheduler(
-            [DIAGNOSE],
-            AT,
-            CALENDAR,
-            state,
-            GitHub(session, TOKEN, REPO, hub.url),
-            Told(),
-            FakeClock(at(FRIDAY, "23:00")),
-            commit=COMMIT,
-        )
-        await asyncio.wait_for(scheduler.run_night(FRIDAY), 25)
-    whole, crossed = hub.bodies(203)[-1], hub.bodies(187)[-1]
-    barrier = f"8. 장벽 정답(#183, 정답 버전 {BARRIER.answer_version})"  # its version named (#187)
-    assert "진단: 데이터 없음" in whole and barrier in whole and "9. 뒤집힌 호가(#187)" in whole
-    assert "진단: 데이터 없음\n\n9. 뒤집힌 호가(#187)" in crossed and "8. 장벽" not in crossed
-    assert state.jobs["diagnose-203-187"].exit_code == 0
-
-
-def official(day: date, n: int, record: JobRecord | None = None) -> Night:
-    return Night(day, CALENDAR.is_trading_day(day), COMMIT, record, {}, Facts(official=n))
-
-
-def test_the_signal_review_runs_once_on_the_first_night_with_an_official_algorithm() -> None:
-    assert SIGNAL_REVIEW.command == ("signal-review", "--days", "20")
-    assert SIGNAL_REVIEW.timeout == timedelta(hours=1)
-    assert [t.issue for t in SIGNAL_REVIEW.targets] == [206]
-    assert SIGNAL_REVIEW.label == ("ready-for-agent",)
-    assert JOBS[:2] == (DIAGNOSE, SIGNAL_REVIEW)  # before the pre-validations, which may take the night
-    assert not SIGNAL_REVIEW.due(official(FRIDAY, 0))  # no member yet: no consensus, no signal
-    assert SIGNAL_REVIEW.due(official(FRIDAY, 1))
-    assert SIGNAL_REVIEW.due(official(SATURDAY, 2))  # any night, trading or not
-    ran = JobRecord(FRIDAY, OK, at(FRIDAY, "22:30"), COMMIT, 0, 30.0)
-    assert not SIGNAL_REVIEW.due(official(MONDAY, 2, ran))
-    assert not SIGNAL_REVIEW.due(official(MONDAY, 2, replace(ran, outcome=FAILED, exit_code=1)))
-    assert SIGNAL_REVIEW.due(official(MONDAY, 2, replace(ran, outcome=INTERRUPTED)))
-
-
-def test_the_signal_review_runs_again_once_on_the_first_trading_night_from_november_2() -> None:
-    assert SIGNAL_REVIEW_AGAIN.command == SIGNAL_REVIEW.command
-    assert [t.issue for t in SIGNAL_REVIEW_AGAIN.targets] == [206]
-    assert SIGNAL_REVIEW_AGAIN.name != SIGNAL_REVIEW.name  # its own record: the first run does not end it
-    jobs = list(JOBS)
-    first_prevalidation = next(i for i, j in enumerate(jobs) if j.command[0] == "prevalidate")
-    assert jobs.index(SIGNAL_REVIEW_AGAIN) < first_prevalidation  # before them, as the first run
-    monday = SIGNAL_REVIEW_AGAIN_FROM
-    friday, sunday = monday - timedelta(days=3), monday - timedelta(days=1)
-    tuesday = monday + timedelta(days=1)
-    assert not SIGNAL_REVIEW_AGAIN.due(official(friday, 2))  # before November 2
-    assert not SIGNAL_REVIEW_AGAIN.due(official(sunday, 2))
-    assert not SIGNAL_REVIEW_AGAIN.due(official(monday, 0))  # no official algorithm: no consensus to review
-    assert SIGNAL_REVIEW_AGAIN.due(official(monday, 2))
-    assert SIGNAL_REVIEW_AGAIN.due(official(tuesday, 1))  # a later trading night when Monday had none
-    ran = JobRecord(monday, OK, at(monday, "22:30"), COMMIT, 0, 30.0)
-    assert not SIGNAL_REVIEW_AGAIN.due(official(tuesday, 2, ran))
-    assert SIGNAL_REVIEW_AGAIN.due(official(tuesday, 2, replace(ran, outcome=INTERRUPTED)))
 
 
 def fixed(day: date, days: int, n: int = 2, record: JobRecord | None = None) -> Night:
@@ -998,7 +977,7 @@ def test_the_signal_review_runs_a_third_time_once_its_fixed_window_of_20_days_is
         assert rule in note, rule
     names = [j.name for j in JOBS]
     first_prevalidation = next(i for i, j in enumerate(JOBS) if j.command[0] == "prevalidate")
-    assert names.index(SIGNAL_REVIEW_AGAIN.name) < names.index(job.name) < first_prevalidation
+    assert names.index(job.name) < first_prevalidation
 
     tuesday = date(2026, 12, 1)  # the 20th trading day from 11-04: no market holiday in between
     assert not job.due(fixed(tuesday, 19)), "19 days: the window is not in"
@@ -1074,261 +1053,20 @@ async def test_the_fixed_signal_review_job_runs_the_real_command(empty_server: P
     assert state.jobs["signal-review-206-1201"].exit_code == 0
 
 
-def test_the_supply_probe_runs_once_on_the_first_night_trading_or_not() -> None:
-    assert SUPPLY_PROBE.command == ("probe-supply",)
-    assert SUPPLY_PROBE.timeout == timedelta(minutes=30)
-    assert [t.issue for t in SUPPLY_PROBE.targets] == [226]
-    assert SUPPLY_PROBE.label == ("ready-for-agent",)
-    assert JOBS[:3] == (DIAGNOSE, SIGNAL_REVIEW, SUPPLY_PROBE)  # before the pre-validations
-    assert SUPPLY_PROBE.due(night(FRIDAY))
-    assert SUPPLY_PROBE.due(night(SATURDAY))  # KIS answers for the latest trading day any night
-    ran = JobRecord(SATURDAY, OK, at(SATURDAY, "22:30"), COMMIT, 0, 150.0)
-    assert not SUPPLY_PROBE.due(night(MONDAY, ran))
-    assert not SUPPLY_PROBE.due(night(MONDAY, replace(ran, outcome=FAILED, exit_code=1)))
-    assert SUPPLY_PROBE.due(night(MONDAY, replace(ran, outcome=INTERRUPTED)))
-
-
-def test_the_structure_check_runs_once_on_the_first_night_trading_or_not() -> None:
-    assert STRUCTURE_CHECK.command == ("structure-check",)
-    assert STRUCTURE_CHECK.timeout == timedelta(minutes=30)
-    assert [t.issue for t in STRUCTURE_CHECK.targets] == [270]
-    assert JOBS[:4] == (DIAGNOSE, SIGNAL_REVIEW, SUPPLY_PROBE, STRUCTURE_CHECK)  # before the pre-validations
-    assert STRUCTURE_CHECK.due(night(FRIDAY))
-    assert STRUCTURE_CHECK.due(night(SATURDAY))  # it reads finished days only
-    ran = JobRecord(SATURDAY, OK, at(SATURDAY, "22:30"), COMMIT, 0, 120.0)
-    assert not STRUCTURE_CHECK.due(night(MONDAY, ran))
-    assert not STRUCTURE_CHECK.due(night(MONDAY, replace(ran, outcome=FAILED, exit_code=1)))
-    assert STRUCTURE_CHECK.due(night(MONDAY, replace(ran, outcome=INTERRUPTED)))
-
-
-def test_the_structure_check_runs_again_once_and_posts_its_turn_of_the_month_to_264() -> None:
-    # #270: the first run counted KIS's 0 net buys as figures; the second shows where they begin.
-    assert STRUCTURE_SUPPLY.command == ("structure-check",)
-    assert STRUCTURE_SUPPLY.timeout == timedelta(minutes=30)
-    assert [t.issue for t in STRUCTURE_SUPPLY.targets] == [264]
-    assert STRUCTURE_SUPPLY.label == ("ready-for-agent",)
-    assert STRUCTURE_SUPPLY in JOBS and STRUCTURE_SUPPLY.name != STRUCTURE_CHECK.name
-    first = next(i for i, j in enumerate(JOBS) if j.name.startswith("prevalidate-"))
-    assert JOBS.index(STRUCTURE_SUPPLY) < first, "before the pre-validations"
-    assert STRUCTURE_SUPPLY.due(night(SATURDAY))
-    ran = JobRecord(SATURDAY, OK, at(SATURDAY, "22:30"), COMMIT, 0, 120.0)
-    assert not STRUCTURE_SUPPLY.due(night(MONDAY, ran))
-    output = "\n\n".join(
-        [
-            "구조 실측 2025-10-10 – 2026-10-16 (1분봉 249거래일, 005930)\n  기간: …",
-            "1. 일 단위 구조(정규장 시가·종가, 1분봉)\n  없음",
-            "4. 월말·월초 × 전날 외국인 순매수(일봉 전체, KIS 수급)\n  005930 일봉 1985-01-04 – 2026-10-16,"
-            " 외국인 순매수 395일(2025-03-04 – 2026-10-16)",
-        ]
-    )
-    part = STRUCTURE_SUPPLY.targets[0].part(output)
-    assert part is not None and part.startswith("구조 실측") and "1. 일 단위" not in part
-    assert part.endswith("외국인 순매수 395일(2025-03-04 – 2026-10-16)")
-
-
-def test_the_net_buys_probe_runs_once_on_the_first_night_before_cox_s_pre_validation() -> None:
-    # #297: whether KIS's KRX query has the net buys before NXT, and what the keeper stored of
-    # them at the deploy's start, on the night Cox's pre-validation runs again on them.
-    assert NET_BUYS_PROBE.name == "probe-net-buys-j-264"
-    assert NET_BUYS_PROBE.command == ("probe-net-buys",)
-    assert NET_BUYS_PROBE.timeout == timedelta(minutes=30)
-    assert [t.issue for t in NET_BUYS_PROBE.targets] == [264]
-    assert NET_BUYS_PROBE.label == ("ready-for-agent",)
-    names = [j.name for j in JOBS]
-    assert names.index(NET_BUYS_PROBE.name) < names.index("prevalidate-cox"), "before the re-run it informs"
-    assert NET_BUYS_PROBE.due(night(FRIDAY))
-    assert NET_BUYS_PROBE.due(night(SATURDAY)), "any night: KIS answers past days"
-    ran = JobRecord(SATURDAY, OK, at(SATURDAY, "22:30"), COMMIT, 0, 40.0)
-    assert not NET_BUYS_PROBE.due(night(MONDAY, ran))
-    assert not NET_BUYS_PROBE.due(night(MONDAY, replace(ran, outcome=FAILED, exit_code=1)))
-    assert NET_BUYS_PROBE.due(night(MONDAY, replace(ran, outcome=INTERRUPTED)))
-    output = "KIS 투자자 순매수 KRX(J)·통합(UN) 확인 (#264) 2026-10-20: 종목 005930\n\n1. 조회\n\n2. 저장된"
-    assert NET_BUYS_PROBE.targets[0].part(output) == output, "the whole output"
-    assert "시세 값이 없다" in NET_BUYS_PROBE.targets[0].note
-
-
-def test_the_close_probe_runs_once_on_the_first_night_and_posts_to_264() -> None:
-    # #264: what the KRX day candle's close is, before and from the after-market (2026-09-14).
-    assert CLOSE_PROBE.name == "probe-close-264"
-    assert CLOSE_PROBE.command == ("probe-close",)
-    assert CLOSE_PROBE.timeout == timedelta(minutes=30)
-    assert [t.issue for t in CLOSE_PROBE.targets] == [264]
-    assert CLOSE_PROBE.label == ("ready-for-agent",)
-    names = [j.name for j in JOBS]
-    assert names.index(CLOSE_PROBE.name) < names.index("prevalidate-cox")
-    assert CLOSE_PROBE.due(night(FRIDAY)) and CLOSE_PROBE.due(night(SATURDAY)), (
-        "any night: KIS gives past days"
-    )
-    ran = JobRecord(SATURDAY, OK, at(SATURDAY, "22:30"), COMMIT, 0, 400.0)
-    assert not CLOSE_PROBE.due(night(MONDAY, ran))
-    output = "KRX 일봉 종가 확인 (#264) 2026-10-20: 종목 005930\n\n005930: 저장된 KRX 일봉 245일"
-    assert CLOSE_PROBE.targets[0].part(output) == output, "the whole output"
-    assert "가격이 없다" in CLOSE_PROBE.targets[0].note
-
-
-def test_the_close_probe_runs_again_on_the_first_trading_night_after_the_refresh() -> None:
-    # #264: the day candles asked again each run, and checked whole once: on a trading day's night
-    # that evening's candle is stored provisional and the morning's check has replaced the rest.
-    assert CLOSE_REFRESH_PROBE.name == "probe-close-refresh-264" != CLOSE_PROBE.name
-    assert CLOSE_REFRESH_PROBE.command == ("probe-close",)
-    assert CLOSE_REFRESH_PROBE.timeout == timedelta(minutes=45), "the first run took 17 minutes"
-    assert [t.issue for t in CLOSE_REFRESH_PROBE.targets] == [264]
-    names = [j.name for j in JOBS]
-    assert (
-        names.index(CLOSE_PROBE.name) < names.index(CLOSE_REFRESH_PROBE.name) < names.index("prevalidate-cox")
-    )
-    assert CLOSE_REFRESH_PROBE.due(night(FRIDAY))
-    assert not CLOSE_REFRESH_PROBE.due(night(SATURDAY)), (
-        "a trading day's night: its candle stored that evening"
-    )
-    ran = JobRecord(FRIDAY, OK, at(FRIDAY, "22:30"), COMMIT, 0, 1020.0)
-    assert not CLOSE_REFRESH_PROBE.due(night(MONDAY, ran))
-    assert "가격이 없다" in CLOSE_REFRESH_PROBE.targets[0].note
-
-
-def test_the_nav_probe_runs_once_on_the_first_trading_night_and_posts_to_305() -> None:
-    # #305: where KIS gives the single-stock ETFs' net assets, before the closing flow uses any.
-    assert NAV_PROBE.name == "probe-nav-305"
-    assert NAV_PROBE.command == ("probe-nav",)
-    assert NAV_PROBE.timeout == timedelta(minutes=30)
-    assert [t.issue for t in NAV_PROBE.targets] == [305]
-    assert NAV_PROBE.label == ("ready-for-agent",)
-    names = [j.name for j in JOBS]
-    assert names.index(NAV_PROBE.name) < names.index("prevalidate-cox"), "before the pre-validations"
-    assert NAV_PROBE.due(night(FRIDAY))
-    assert not NAV_PROBE.due(night(SATURDAY)), "a trading day's night: whether that day's values are in"
-    ran = JobRecord(FRIDAY, OK, at(FRIDAY, "22:30"), COMMIT, 0, 60.0)
-    assert not NAV_PROBE.due(night(MONDAY, ran))
-    assert not NAV_PROBE.due(night(MONDAY, replace(ran, outcome=FAILED, exit_code=1)))
-    assert NAV_PROBE.due(night(MONDAY, replace(ran, outcome=INTERRUPTED)))
-    output = "KIS ETF 순자산 출처 확인 (#305) 2026-10-21 23:41 KST: 상품 16종\n\n1. (a) FHPST02400000"
-    assert NAV_PROBE.targets[0].part(output) == output, "the whole output"
-    assert "시세 값이 없다" in NAV_PROBE.targets[0].note
-
-
-def test_the_entry_delay_runs_the_diagnosis_once_on_a_trading_night_and_posts_section_10() -> None:
-    # #262: the diagnosis's section 10 alone, with its header, goes to #262.
-    assert ENTRY_DELAY.command == ("diagnose", "--days", "20")
-    assert ENTRY_DELAY.timeout == timedelta(hours=1)
-    assert [t.issue for t in ENTRY_DELAY.targets] == [262]
-    assert JOBS[:5] == (DIAGNOSE, SIGNAL_REVIEW, SUPPLY_PROBE, STRUCTURE_CHECK, ENTRY_DELAY)
-    assert ENTRY_DELAY.due(night(FRIDAY))
-    assert not ENTRY_DELAY.due(night(SATURDAY))  # it waits for a trading day's recording
-    ran = JobRecord(FRIDAY, OK, at(FRIDAY, "22:30"), COMMIT, 0, 60.0)
-    assert not ENTRY_DELAY.due(night(MONDAY, ran))
-    output = "\n\n".join(
-        [
-            "진단 2026-09-21 – 2026-10-19 (20거래일)",
-            "9. 뒤집힌 호가(#187): 종목 × 날 × 30분 칸 비율\n  없음",
-            "10. 예측자별 실력과 진입 지연(#262, 정답 버전 3): 봉 마감·+1초·+5초·+30초에"
-            " 들어갔을 때의 목표 도달과 닿음 손익\n  newton: 채점 2 · 정답률 100.0%",
-        ]
-    )
-    part = ENTRY_DELAY.targets[0].part(output)
-    assert part is not None and part.startswith("진단 2026-09-21") and "9. 뒤집힌" not in part
-    assert part.endswith("newton: 채점 2 · 정답률 100.0%")
-    assert ENTRY_DELAY.targets[0].part("진단: 데이터 없음\n\n9. 뒤집힌 호가(#187)\n  없음") is None
-
-
-def test_the_expected_open_probe_runs_once_on_the_first_trading_night_and_posts_to_314() -> None:
-    # #304: whether the integrated book carries KRX's expected opening price, from the raw
-    # frames already recorded and the deploy day's normalized rows.
-    assert EXPECTED_OPEN_PROBE.name == "probe-expected-open-314"
-    assert EXPECTED_OPEN_PROBE.command == ("probe-expected-open",)
-    assert EXPECTED_OPEN_PROBE.timeout == timedelta(minutes=30)
-    assert [t.issue for t in EXPECTED_OPEN_PROBE.targets] == [314]  # #304's follow-up
-    assert EXPECTED_OPEN_PROBE.label == ("ready-for-agent",)
-    first = next(i for i, j in enumerate(JOBS) if j.name.startswith("prevalidate-"))
-    assert JOBS.index(EXPECTED_OPEN_PROBE) < first, "before the pre-validations"
-    assert EXPECTED_OPEN_PROBE.due(night(FRIDAY))
-    assert not EXPECTED_OPEN_PROBE.due(night(SATURDAY)), "it waits for a day recorded with the new columns"
-    ran = JobRecord(FRIDAY, OK, at(FRIDAY, "22:30"), COMMIT, 0, 90.0)
-    assert not EXPECTED_OPEN_PROBE.due(night(MONDAY, ran))
-    assert EXPECTED_OPEN_PROBE.due(night(MONDAY, replace(ran, outcome=INTERRUPTED)))
-    output = "예상 체결 녹화 확인 (#304): 2026-10-07 – 2026-10-20, 거래일 10일, 종목 005930\n\n1. 통합 호가"
-    assert EXPECTED_OPEN_PROBE.targets[0].part(output) == output, "the whole output"
-    assert "시세 값이 없다" in EXPECTED_OPEN_PROBE.targets[0].note
-
-
-def test_the_expected_open_probe_runs_again_with_krx_s_own_figures_and_posts_to_314() -> None:
-    # #314: the first run counted sections 4 and 5 over every venue code; for 009150 the opening
-    # auction's window also had NXT's '2'. The same command, now KRX's ('1') only, once more.
-    assert EXPECTED_OPEN_KRX_PROBE.name == "probe-expected-open-krx-314"
-    assert EXPECTED_OPEN_KRX_PROBE.command == EXPECTED_OPEN_PROBE.command
-    assert EXPECTED_OPEN_KRX_PROBE.timeout == EXPECTED_OPEN_PROBE.timeout
-    assert [t.issue for t in EXPECTED_OPEN_KRX_PROBE.targets] == [314]
-    assert EXPECTED_OPEN_KRX_PROBE.label == ("ready-for-agent",)
-    assert JOBS.index(EXPECTED_OPEN_PROBE) + 1 == JOBS.index(EXPECTED_OPEN_KRX_PROBE)
-    assert EXPECTED_OPEN_KRX_PROBE.due(night(FRIDAY))
-    assert not EXPECTED_OPEN_KRX_PROBE.due(night(SATURDAY)), "a trading day's night, its rows recorded"
-    ran = JobRecord(FRIDAY, OK, at(FRIDAY, "22:30"), COMMIT, 0, 90.0)
-    assert not EXPECTED_OPEN_KRX_PROBE.due(night(MONDAY, ran))
-    note = EXPECTED_OPEN_KRX_PROBE.targets[0].note
-    assert "009150" in note and "시세 값이 없다" in note
-
-
-def subscribed(day: date, nights: tuple[date, ...], record: JobRecord | None = None) -> Night:
-    return Night(day, CALENDAR.is_trading_day(day), COMMIT, record, {}, Facts(night_futures=nights))
-
-
-def test_the_night_probe_runs_once_after_a_night_subscribed_for() -> None:
-    # #264: the first night the collector recorded from its start is read the next evening.
-    assert NIGHT_PROBE.command == ("probe-night",)
-    assert NIGHT_PROBE.timeout == timedelta(minutes=30)
-    assert [t.issue for t in NIGHT_PROBE.targets] == [264]
-    assert NIGHT_PROBE.label == ("ready-for-agent",)
-    assert JOBS[:6] == (DIAGNOSE, SIGNAL_REVIEW, SUPPLY_PROBE, STRUCTURE_CHECK, ENTRY_DELAY, NIGHT_PROBE)
-    assert not NIGHT_PROBE.due(subscribed(THURSDAY, ()))  # the deploy's evening: none recorded yet
-    assert not NIGHT_PROBE.due(subscribed(THURSDAY, (THURSDAY,)))  # tonight's is not over
-    assert NIGHT_PROBE.due(subscribed(FRIDAY, (THURSDAY,)))
-    assert NIGHT_PROBE.due(subscribed(SUNDAY, (FRIDAY,)))  # any night after one
-    ran = JobRecord(FRIDAY, OK, at(FRIDAY, "22:30"), COMMIT, 0, 5.0)
-    assert not NIGHT_PROBE.due(subscribed(MONDAY, (THURSDAY, FRIDAY), ran))
-    assert not NIGHT_PROBE.due(subscribed(MONDAY, (FRIDAY,), replace(ran, outcome=FAILED, exit_code=1)))
-    assert NIGHT_PROBE.due(subscribed(MONDAY, (FRIDAY,), replace(ran, outcome=INTERRUPTED)))
-
-
-async def test_the_night_probe_job_runs_the_real_command(
-    empty_server: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("KIS_MASTER_URL", "http://127.0.0.1:9/master")  # nothing listens: no network
-    state = JobState.load(empty_server / STATE_FILE)
-
-    async def facts() -> Facts:
-        return Facts(night_futures=(THURSDAY,))
-
-    async with fake_github() as hub, aiohttp.ClientSession() as session:
-        scheduler = Scheduler(
-            [NIGHT_PROBE],
-            AT,
-            CALENDAR,
-            state,
-            GitHub(session, TOKEN, REPO, hub.url),
-            Told(),
-            FakeClock(at(FRIDAY, "23:00")),
-            commit=COMMIT,
-            facts=facts,
-        )
-        await asyncio.wait_for(scheduler.run_night(FRIDAY), 25)
-    [body] = hub.bodies(264)
-    assert "야간선물 녹화 확인 (#264)" in body and "2. H0MFCNT0 체결" in body
-    assert "fo_cme_code.mst를 읽지 못했다" in body  # said, not fatal
-    assert "시세 값이 없다" in body  # the note: what the output holds
-    assert state.jobs["probe-night-264"].exit_code == 0
-
-
-async def test_the_supply_probe_runs_on_the_first_night_then_never(tmp_path: Path) -> None:
-    async with scheduling(tmp_path, at(FRIDAY, "22:00"), [SUPPLY_PROBE]) as (clock, runs, _, state):
+async def test_a_first_night_s_job_runs_on_the_first_night_then_never(tmp_path: Path) -> None:
+    once = job("once", due=_first_night)
+    async with scheduling(tmp_path, at(FRIDAY, "22:00"), [once]) as (clock, runs, _, state):
         clock.set(at(FRIDAY, "22:30"))
-        await until(lambda: state.jobs.get("probe-supply-226") is not None)
-        await until(lambda: state.jobs["probe-supply-226"].outcome == OK)
+        await until(lambda: state.jobs.get("once") is not None)
+        await until(lambda: state.jobs["once"].outcome == OK)
         clock.set(at(SATURDAY, "22:30"))
         clock.set(at(MONDAY, "22:30"))
         await settle()
-        assert runs.started == [("probe-supply", at(FRIDAY, "22:30"))]
+        assert runs.started == [("once", at(FRIDAY, "22:30"))]
 
 
-async def test_the_signal_review_waits_for_an_official_algorithm_then_runs_once(tmp_path: Path) -> None:
+async def test_a_job_waits_for_what_the_engine_knows_then_runs_once(tmp_path: Path) -> None:
+    # As the first signal review waited for an official algorithm (#206), the facts read each night.
     members = {THURSDAY: 0, FRIDAY: 1, SATURDAY: 1, SUNDAY: 2}
     clock = FakeClock(at(THURSDAY, "22:00"))
 
@@ -1336,7 +1074,8 @@ async def test_the_signal_review_waits_for_an_official_algorithm_then_runs_once(
         night = (clock.now() - timedelta(hours=6)).date()
         return Facts(official=members[night])
 
-    async with scheduling(tmp_path, at(THURSDAY, "22:00"), [SIGNAL_REVIEW], facts=facts, clock=clock) as (
+    waits = job("waits", due=lambda night: night.facts.official > 0 and not night.ran)
+    async with scheduling(tmp_path, at(THURSDAY, "22:00"), [waits], facts=facts, clock=clock) as (
         _,
         runs,
         _,
@@ -1346,41 +1085,27 @@ async def test_the_signal_review_waits_for_an_official_algorithm_then_runs_once(
         await settle()
         assert runs.started == []
         clock.set(at(FRIDAY, "22:30"))
-        await until(lambda: runs.started == [("signal-review", at(FRIDAY, "22:30"))])
-        await until(lambda: state.jobs["signal-review-206"].outcome == OK)
+        await until(lambda: runs.started == [("waits", at(FRIDAY, "22:30"))])
+        await until(lambda: state.jobs["waits"].outcome == OK)
         clock.set(at(SATURDAY, "22:30"))
         clock.set(at(SUNDAY, "22:30"))
         await settle()
-        assert runs.names() == ["signal-review"]
+        assert runs.names() == ["waits"]
 
 
-async def test_the_signal_review_job_runs_the_real_command(empty_server: Path) -> None:
-    state = JobState.load(empty_server / STATE_FILE)
-
-    async def facts() -> Facts:
-        return Facts(official=1)
-
-    async with fake_github() as hub, aiohttp.ClientSession() as session:
-        scheduler = Scheduler(
-            [SIGNAL_REVIEW],
-            AT,
-            CALENDAR,
-            state,
-            GitHub(session, TOKEN, REPO, hub.url),
-            Told(),
-            FakeClock(at(FRIDAY, "23:00")),
-            commit=COMMIT,
-            facts=facts,
-        )
-        await asyncio.wait_for(scheduler.run_night(FRIDAY), 25)
-    [body] = hub.bodies(206)
-    assert "신호 기준 검토: 데이터 없음" in body and "1. 신호 설정과 엔진이 남긴 신호" in body
-    assert "KRX_SIGNAL_MIN_PROBABILITY 0.7 · KRX_SIGNAL_MIN_AGREE 2" in body  # #206: 0.6 until 11-03
-    assert "추천값" in body  # what the agent does with it
-    assert state.jobs["signal-review-206"].exit_code == 0
-
-
-async def test_the_collector_runs_the_night_s_jobs(kis: FakeKis, empty_server: Path) -> None:
+async def test_the_collector_runs_the_night_s_jobs(
+    kis: FakeKis, empty_server: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The list as a job made here, whose real command is cheap on an empty server: the diagnosis
+    # (its job ``diagnose-203-187`` left ``JOBS``, #505).
+    diagnosis = Job(
+        name="diagnose",
+        due=never_ran,
+        command=("diagnose", "--days", "20"),
+        timeout=timedelta(hours=1),
+        targets=TWO_ISSUES.targets,
+    )
+    monkeypatch.setattr("krx_quant.scheduled.JOBS", (diagnosis,))
     async with fake_github() as hub:
         settings = replace(
             settings_for(kis, empty_server),
@@ -1394,7 +1119,7 @@ async def test_the_collector_runs_the_night_s_jobs(kis: FakeKis, empty_server: P
 
         def posted() -> bool:
             """Both comments are up and saved (the labels come between a comment and its save)."""
-            record = JobState.load(empty_server / "state" / STATE_FILE).jobs.get("diagnose-203-187")
+            record = JobState.load(empty_server / "state" / STATE_FILE).jobs.get("diagnose")
             return record is not None and record.comments.keys() == {203, 187}
 
         try:
@@ -1402,142 +1127,8 @@ async def test_the_collector_runs_the_night_s_jobs(kis: FakeKis, empty_server: P
         finally:
             stop.set()
             await asyncio.wait_for(task, 10)
-    record = JobState.load(empty_server / "state" / STATE_FILE).jobs["diagnose-203-187"]
+    record = JobState.load(empty_server / "state" / STATE_FILE).jobs["diagnose"]
     assert record.outcome == OK and record.day == FRIDAY and record.comments.keys() == {203, 187}
-
-
-def test_the_gaps_probe_runs_once_on_the_first_night_and_posts_to_344() -> None:
-    # #344: whether the silence the watchdog closed the connection on at 15:30 on 2026-10-21 comes
-    # at every closing auction, from the days already recorded.
-    assert GAPS_PROBE.name == "probe-gaps-344"
-    assert GAPS_PROBE.command == ("probe-gaps",)
-    assert GAPS_PROBE.timeout == timedelta(minutes=15), "short: the simulations and pre-validations follow"
-    assert [t.issue for t in GAPS_PROBE.targets] == [344]
-    assert GAPS_PROBE.label == ("ready-for-agent",)
-    waited_on = (EXPECTED_OPEN_KRX_PROBE, CLOSE_REFRESH_PROBE, NAV_PROBE, DIVIDEND_PROBE, KRX_ETF_PROBE)
-    assert all(JOBS.index(probe) < JOBS.index(GAPS_PROBE) for probe in waited_on), "they go first"
-    first = next(i for i, j in enumerate(JOBS) if j.name.startswith(("prevalidate-", "simulate-")))
-    assert JOBS.index(GAPS_PROBE) < first, "before the simulations and pre-validations"
-    assert GAPS_PROBE.due(night(FRIDAY)) and GAPS_PROBE.due(night(SATURDAY)), "it reads the days recorded"
-    ran = JobRecord(FRIDAY, OK, at(FRIDAY, "22:30"), COMMIT, 0, 60.0)
-    assert not GAPS_PROBE.due(night(MONDAY, ran))
-    assert not GAPS_PROBE.due(night(MONDAY, replace(ran, outcome=FAILED, exit_code=1)))
-    assert GAPS_PROBE.due(night(MONDAY, replace(ran, outcome=INTERRUPTED)))
-    output = "WebSocket 결측과 종가 단일가 녹화 (#344): 2026-10-20 – 2026-10-22\n\n1. 날마다 요약"
-    assert GAPS_PROBE.targets[0].part(output) == output, "the whole output"
-    assert "시세 값이 없다" in GAPS_PROBE.targets[0].note
-
-
-async def test_the_gaps_probe_job_runs_the_real_command(empty_server: Path) -> None:
-    state = JobState.load(empty_server / STATE_FILE)
-    async with fake_github() as hub, aiohttp.ClientSession() as session:
-        scheduler = Scheduler(
-            [GAPS_PROBE],
-            AT,
-            CALENDAR,
-            state,
-            GitHub(session, TOKEN, REPO, hub.url),
-            Told(),
-            FakeClock(at(FRIDAY, "23:00")),
-            commit=COMMIT,
-        )
-        await asyncio.wait_for(scheduler.run_night(FRIDAY), 25)
-    body = hub.bodies(344)[-1]
-    assert (
-        "**예약 작업 `probe-gaps-344`**" in body
-        and "다시 돌리기: `docker compose run --rm engine probe-gaps`" in body
-    )
-    assert (
-        "WebSocket 결측과 종가 단일가 녹화 (#344): raw에 WebSocket 프레임이 있거나 gaps가 있는 날이 없다"
-        in body
-    )
-    assert state.jobs["probe-gaps-344"].exit_code == 0
-
-
-def test_the_closing_flow_check_runs_once_on_the_first_trading_night_and_posts_to_305() -> None:
-    # #305: when KIS moves the ETF net assets to the new day, and the bar's closing auction value
-    # against the recorded one: the morning's retries, the 15:20 row and the evening's days first.
-    assert CLOSING_FLOW_CHECK.name == "check-closing-flow-305"
-    assert CLOSING_FLOW_CHECK.command == ("check-closing-flow",)
-    assert CLOSING_FLOW_CHECK.timeout == timedelta(minutes=15)
-    assert [t.issue for t in CLOSING_FLOW_CHECK.targets] == [305]
-    assert JOBS.index(GAPS_PROBE) < JOBS.index(CLOSING_FLOW_CHECK)
-    first = next(i for i, j in enumerate(JOBS) if j.name.startswith(("prevalidate-", "simulate-")))
-    assert JOBS.index(CLOSING_FLOW_CHECK) < first, "before the simulations and pre-validations"
-    assert CLOSING_FLOW_CHECK.due(night(FRIDAY)) and not CLOSING_FLOW_CHECK.due(night(SATURDAY))
-    ran = JobRecord(FRIDAY, OK, at(FRIDAY, "22:30"), COMMIT, 0, 5.0)
-    assert not CLOSING_FLOW_CHECK.due(night(MONDAY, ran))
-    assert "시세 값이 없다" in CLOSING_FLOW_CHECK.targets[0].note
-
-
-def test_the_krx_net_assets_check_runs_once_on_the_first_trading_night_with_the_key() -> None:
-    # #305: which day's listed units KRX's net asset total matches, when the mornings' rows came,
-    # and KRX against KIS: the start's backfill and a morning's fetch first.
-    assert KRX_NET_ASSETS_CHECK.name == "check-krx-net-assets-305"
-    assert KRX_NET_ASSETS_CHECK.command == ("check-krx-net-assets",)
-    assert KRX_NET_ASSETS_CHECK.timeout == timedelta(minutes=15)
-    assert [t.issue for t in KRX_NET_ASSETS_CHECK.targets] == [305]
-    assert JOBS.index(CLOSING_FLOW_CHECK) < JOBS.index(KRX_NET_ASSETS_CHECK)
-    first = next(i for i, j in enumerate(JOBS) if j.name.startswith(("prevalidate-", "simulate-")))
-    assert JOBS.index(KRX_NET_ASSETS_CHECK) < first, "before the simulations and pre-validations"
-    keyed = Facts(krx_openapi=True)
-
-    def with_key(day: date, record: JobRecord | None = None) -> Night:
-        return Night(day, CALENDAR.is_trading_day(day), COMMIT, record, {}, keyed)
-
-    assert KRX_NET_ASSETS_CHECK.due(with_key(FRIDAY)) and not KRX_NET_ASSETS_CHECK.due(with_key(SATURDAY))
-    assert not KRX_NET_ASSETS_CHECK.due(night(FRIDAY)), "without the key it waits"
-    ran = JobRecord(FRIDAY, OK, at(FRIDAY, "22:30"), COMMIT, 0, 5.0)
-    assert not KRX_NET_ASSETS_CHECK.due(with_key(MONDAY, ran))
-    assert "값이 없다" in KRX_NET_ASSETS_CHECK.targets[0].note
-
-
-def test_the_member_frames_probe_runs_once_on_the_first_night_and_posts_to_381() -> None:
-    # #381: the member frames short of fields around 08:00 (10-23, 10-26), from the days recorded.
-    assert MEMBER_FRAMES_PROBE.name == "probe-member-frames-381"
-    assert MEMBER_FRAMES_PROBE.command == ("probe-member-frames",)
-    assert MEMBER_FRAMES_PROBE.timeout == timedelta(minutes=20), (
-        "short: the simulations and pre-validations follow"
-    )
-    assert [t.issue for t in MEMBER_FRAMES_PROBE.targets] == [381]
-    assert MEMBER_FRAMES_PROBE.label == ("ready-for-agent",)
-    probes = (GAPS_PROBE, CLOSING_FLOW_CHECK, KRX_NET_ASSETS_CHECK, KRX_ETF_PROBE, NAV_PROBE, DIVIDEND_PROBE)
-    assert all(JOBS.index(probe) < JOBS.index(MEMBER_FRAMES_PROBE) for probe in probes), "they go first"
-    first = next(i for i, j in enumerate(JOBS) if j.name.startswith(("prevalidate-", "simulate-")))
-    assert JOBS.index(MEMBER_FRAMES_PROBE) < first, "before the simulations and pre-validations"
-    assert MEMBER_FRAMES_PROBE.due(night(FRIDAY)) and MEMBER_FRAMES_PROBE.due(night(SATURDAY)), (
-        "it reads the days recorded"
-    )
-    ran = JobRecord(FRIDAY, OK, at(FRIDAY, "22:30"), COMMIT, 0, 30.0)
-    assert not MEMBER_FRAMES_PROBE.due(night(MONDAY, ran))
-    assert not MEMBER_FRAMES_PROBE.due(night(MONDAY, replace(ran, outcome=FAILED, exit_code=1)))
-    assert MEMBER_FRAMES_PROBE.due(night(MONDAY, replace(ran, outcome=INTERRUPTED)))
-    output = "회원사 프레임의 필드 수 (#381): 2026-10-08 – 2026-10-28\n\n1. 날마다"
-    assert MEMBER_FRAMES_PROBE.targets[0].part(output) == output, "the whole output"
-    assert "시세 값이 없다" in MEMBER_FRAMES_PROBE.targets[0].note
-
-
-async def test_the_member_frames_probe_job_runs_the_real_command(empty_server: Path) -> None:
-    state = JobState.load(empty_server / STATE_FILE)
-    async with fake_github() as hub, aiohttp.ClientSession() as session:
-        scheduler = Scheduler(
-            [MEMBER_FRAMES_PROBE],
-            AT,
-            CALENDAR,
-            state,
-            GitHub(session, TOKEN, REPO, hub.url),
-            Told(),
-            FakeClock(at(FRIDAY, "23:00")),
-            commit=COMMIT,
-        )
-        await asyncio.wait_for(scheduler.run_night(FRIDAY), 25)
-    body = hub.bodies(381)[-1]
-    assert (
-        "**예약 작업 `probe-member-frames-381`**" in body
-        and "다시 돌리기: `docker compose run --rm engine probe-member-frames`" in body
-    )
-    assert "회원사 프레임의 필드 수 (#381): raw에 H0UNMBC0 프레임이 있는 날이 없다" in body
-    assert state.jobs["probe-member-frames-381"].exit_code == 0
 
 
 def test_the_trader_s_night_is_fitted_and_reported_every_trading_night_on_417() -> None:
@@ -1552,9 +1143,7 @@ def test_the_trader_s_night_is_fitted_and_reported_every_trading_night_on_417() 
     assert TRADER_REPORT.session is None, "a night's job: after the nightly training"
     assert "refit-policy-399" not in [j.name for j in JOBS], "folded into the report (#402)"
     first = next(i for i, j in enumerate(JOBS) if j.name.startswith(("prevalidate-", "simulate-")))
-    assert JOBS.index(MEMBER_FRAMES_PROBE) < JOBS.index(TRADER_REPORT) < first, (
-        "after the probes, before the simulations and pre-validations"
-    )
+    assert JOBS.index(TRADER_REPORT) < first, "before the simulations and pre-validations"
     assert TRADER_REPORT.due(night(FRIDAY)) and not TRADER_REPORT.due(night(SATURDAY)), "trading nights"
     ran = JobRecord(FRIDAY, OK, at(FRIDAY, "22:30"), COMMIT, 0, 3.0)
     assert not TRADER_REPORT.due(night(FRIDAY, ran)), "once a night"
@@ -1642,17 +1231,3 @@ async def test_the_trader_report_job_runs_the_real_command(
     assert "매매할 칸: 없음" in refit and "뺀 칸: barrier breiman (top): few_days" in refit
     assert state.jobs["trader-report"].exit_code == 0
     assert hub.labels.get(417) == {"ready-for-agent"}, "a champion crowned in the night calls an agent"
-
-
-def test_the_dividend_probe_runs_once_on_the_first_night_and_posts_to_310() -> None:
-    # #310: whether KIS's adjusted day candles take cash dividends out, and its ex-date flags.
-    assert DIVIDEND_PROBE.name == "probe-dividends-310"
-    assert DIVIDEND_PROBE.command == ("probe-dividends",)
-    assert DIVIDEND_PROBE.timeout == timedelta(minutes=30)
-    assert [t.issue for t in DIVIDEND_PROBE.targets] == [310]
-    names = [j.name for j in JOBS]
-    assert names.index(DIVIDEND_PROBE.name) < names.index("prevalidate-cox"), "before the pre-validations"
-    assert DIVIDEND_PROBE.due(night(FRIDAY)) and DIVIDEND_PROBE.due(night(SATURDAY)), "KIS gives the past"
-    ran = JobRecord(SATURDAY, OK, at(SATURDAY, "22:30"), COMMIT, 0, 90.0)
-    assert not DIVIDEND_PROBE.due(night(MONDAY, ran))
-    assert "가격이 없다" in DIVIDEND_PROBE.targets[0].note

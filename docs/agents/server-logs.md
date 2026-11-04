@@ -18,7 +18,7 @@ Everything else is in the line, which is the server's stdout line with fields in
 
 - `job=<name> night=<YYYY-MM-DD> <line>` for a job, `night=<YYYY-MM-DD> <line>` for the training, `command=<name> <line>` for a command, the bare line for the engine. A record of several lines (a traceback) is one entry a line.
 - A process's first line says what started (`krx-quant train --day <night> started (pid N)`, with the commit for the engine and commands); its last says how it ended: `ended: exit <code> after <time>`, `exit -9 (SIGKILL)` (the kernel killed it, usually out of memory), `stopped at its time limit (6:00:00)`, or `stopped with the engine`. In a training, the last `started step <name>` before a kill is the step it died in, and the per-step time and memory lines (#355) say what each step used.
-- The line itself: `2026-10-23 09:00:00,123 INFO krx_quant.collector: …` (KST). Filter by text (`|= "job=probe-close-264 "`), not by a label: there is no `job` or `night` label.
+- The line itself: `2026-10-23 09:00:00,123 INFO krx_quant.collector: …` (KST). Filter by text (`|= "job=trader-report "`), not by a label: there is no `job` or `night` label.
 - Secrets and server addresses show as `[가림]`, masked on the server by `doctor`'s rules. Market values from KIS stay. A line that may carry a Toss figure goes as its template with `…` for its values (`loki.TEMPLATE_ONLY`). Lines over 64 KB are cut and say so.
 - The engine also sends `heartbeat: sent N, dropped M, buffered K` every minute (Loki only, not on stdout).
 
@@ -112,11 +112,11 @@ scripts/loki-query.sh '{service="krx-quant", process="engine"} |~ "KIS WebSocket
 - Everything the engine logged then: `{service="krx-quant", process="engine"}` over the same window.
 - The heartbeats and frames themselves are not logged: `/v1/status`'s `kis` and the snapshot's PINGPONG section ([server-snapshot.md](server-snapshot.md)) have them.
 
-**One scheduled job** (`probe-close-264`, its run and the engine's lines about it):
+**One scheduled job** (`trader-report`, which runs every trading night: its run and the engine's lines about it):
 
 ```bash
-scripts/loki-query.sh '{service="krx-quant", process="job"} |= "job=probe-close-264 "' --since 2d --forward --limit 2000
-scripts/loki-query.sh '{service="krx-quant", process="engine"} |= "scheduled job probe-close-264"' --since 2d
+scripts/loki-query.sh '{service="krx-quant", process="job"} |= "job=trader-report "' --since 2d --forward --limit 2000
+scripts/loki-query.sh '{service="krx-quant", process="engine"} |= "scheduled job trader-report"' --since 2d
 ```
 
 **One command run by hand** (`doctor`):

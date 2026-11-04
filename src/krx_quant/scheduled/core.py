@@ -35,7 +35,6 @@ from krx_quant.kind_registry import DAILY_KINDS
 from krx_quant.market_calendar import MarketCalendar, first_whole_day
 from krx_quant.neyman_variants import Progress as NeymanVariants
 from krx_quant.neyman_variants import progress as neyman_variants_progress
-from krx_quant.night_probe import evening, subscribed_nights
 from krx_quant.nightly_hit_rates import nights_with_hit_rates
 from krx_quant.predictions import DB_NAME, Revision
 from krx_quant.prevalidation import LastReport, last_report, revision_report
@@ -45,7 +44,7 @@ from krx_quant.redaction import redact
 from krx_quant.signal_review import fixed_days
 from krx_quant.swap import NightTraining
 from krx_quant.trader.fill_notices import notice_days
-from krx_quant.trader.mock_check import mock_days, trader_in_mock
+from krx_quant.trader.mock_check import trader_in_mock
 from krx_quant.training import finished_days, is_recorded
 
 # The package's logger: the lines name ``krx_quant.scheduled``, as before the split (#500).
@@ -252,9 +251,6 @@ class Facts:
     official: int = 0  # the consensus members: active algorithms on the engine's target (#206)
     # The latest pre-validation report of each registered algorithm that has one (#204).
     reports: Mapping[str, LastReport] = field(default_factory=dict)
-    # The trading days of the week before the night whose night session (18:00–06:00) the
-    # collector subscribed the KOSPI200 night futures for before it began (#264).
-    night_futures: tuple[date, ...] = ()
     # The daily features whose data on this server is behind their version (#297,
     # ``daily_features.pending_inputs``): a pre-validation reading them waits for it.
     pending_inputs: tuple[str, ...] = ()
@@ -270,8 +266,6 @@ class Facts:
     # The running bar-close algorithms whose changed code waits for its pre-validation (#454,
     # ``PredictionEngine.revising``), by name.
     revising: Mapping[str, Revising] = field(default_factory=dict)
-    # Whether ``KRX_OPENAPI_KEY`` is set on this server (#305): the KRX Open API probe waits for it.
-    krx_openapi: bool = False
     # Whether the trader's KIS key, secret and account are set (``Settings.trader_kis``, #403): the
     # order probe's session job waited for them once it had said they were not (it left ``JOBS``,
     # #484); kept for a session job that orders on the mock account.
@@ -279,9 +273,6 @@ class Facts:
     # Whether the trader's live key, secret and account are set (``Settings.trader_live_kis``, #408):
     # the live account's read waits for them.
     trader_live_kis: bool = False
-    # The trading days the trader ran in mock mode (#405, ``mock_check.mock_days``): the mock day's
-    # check waits for the first.
-    mock_days: tuple[date, ...] = ()
     # Whether the trader last started in mock mode (#405, ``mock_check.trader_in_mock``): it may hold
     # 005930 and order on the mock account in the session, so the order probe's session job did not
     # run then (it left ``JOBS``, #484); kept for a session job that orders on the mock account.
@@ -1021,27 +1012,23 @@ async def read_facts(
     reports = await asyncio.to_thread(
         prevalidation_reports, settings.state_dir, everyone, settings.target_version
     )
-    nights = await asyncio.to_thread(subscribed_nights, settings.data_dir, calendar, evening(clock.now()))
     daily = sorted({f for a in engine.daily_registered for f in a.features})
     pending = await asyncio.to_thread(pending_inputs, daily, settings.state_dir, settings.symbols)
     answers = await asyncio.to_thread(pending_answers, settings, calendar, clock.now())
     simulating, simulating_daily = engine.to_simulate()  # the engine's database: on this thread
     revising = engine.revising()  # likewise (#454)
     return Facts(
-        recorded,
-        tuple(engine.waiting()),
-        len(engine.members()),
-        reports,
-        tuple(nights),
-        tuple(pending),
+        recorded_days=recorded,
+        waiting=tuple(engine.waiting()),
+        official=len(engine.members()),
+        reports=reports,
+        pending_inputs=tuple(pending),
         simulating_daily=tuple(simulating_daily),
         simulating=tuple(simulating),
         revising=await asyncio.to_thread(revising_facts, settings, calendar, clock.now(), revising),
         pending_answers=tuple(answers),
-        krx_openapi=settings.krx_openapi_key is not None,
         trader_kis=settings.trader_kis,
         trader_live_kis=settings.trader_live_kis,
-        mock_days=await asyncio.to_thread(mock_days, settings.state_dir),
         hit_rate_nights=await asyncio.to_thread(nights_with_hit_rates, settings),
         holdout_days=await asyncio.to_thread(days_in_window, settings.state_dir / DB_NAME),
         neyman_variants=await asyncio.to_thread(neyman_variants_progress, settings, clock.now()),
@@ -1073,7 +1060,8 @@ def pending_answers(settings: Settings, calendar: MarketCalendar, now: datetime)
     return out
 
 
-# Conditions the jobs of more than one family ask.
+# The conditions a one-off job of any family asks most. No job in ``JOBS`` asks them now: those that
+# did ran, posted their results and left it (#505). They stay for the next one-off job.
 def _first_trading_night(night: Night) -> bool:
     """Once, on the night of the first trading day it is asked on: the first after the
     deploy that brings the job."""
