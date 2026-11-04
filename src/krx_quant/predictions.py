@@ -51,7 +51,9 @@ database (``_REVISION_SCHEMA``).
 
 ``smt_events`` (#520, ``smt.py``) keeps each SMT episode the engine judged at a bar close, by its
 first bar close, pair, direction and L, with the side that swept, source ``live``: written once,
-never rewritten. A table of its own, as ``touches`` (``_SMT_SCHEMA``).
+never rewritten. A table of its own, as ``touches`` (``_SMT_SCHEMA``). ``smt_events.a_extreme`` and
+``b_extreme`` (#521), when each side set the extreme it was judged against, are columns added as
+``kind_predictions.band`` was: a row kept before them has none.
 
 Times are ISO 8601 strings in KST, which sort in time order.
 """
@@ -352,6 +354,8 @@ CREATE TABLE IF NOT EXISTS smt_events (  -- an SMT episode, by its first bar clo
     swept TEXT NOT NULL,              -- a or b: the one past its look-back's extreme
     source TEXT NOT NULL,             -- live
     recorded_at TEXT NOT NULL,        -- when the engine kept it
+    a_extreme TEXT,                   -- the start of the look-back bar of a's extreme (#521); null
+    b_extreme TEXT,                   -- before #521 (and b's)
     PRIMARY KEY (definition, version, bar_close, a, b, direction, minutes, source)
 );
 CREATE INDEX IF NOT EXISTS smt_events_by_close ON smt_events (bar_close);
@@ -375,6 +379,8 @@ _ADDED_COLUMNS = (
     ("kind_predictions", "band", "REAL"),
     ("kind_predictions", "inputs", "TEXT"),
     ("statuses", "simulated", "INTEGER NOT NULL DEFAULT 0"),
+    ("smt_events", "a_extreme", "TEXT"),
+    ("smt_events", "b_extreme", "TEXT"),
 )
 
 
@@ -871,22 +877,49 @@ def latest_revisions(db: sqlite3.Connection) -> dict[str, Revision]:
     return {r[1]: _revision(r) for r in rows}
 
 
-_SMT_COLUMNS = "bar_close, a, b, direction, minutes, swept, source, definition, version"
+_SMT_FIELDS = (
+    "bar_close",
+    "a",
+    "b",
+    "direction",
+    "minutes",
+    "swept",
+    "source",
+    "definition",
+    "version",
+    "a_extreme",
+    "b_extreme",
+)
+_SMT_COLUMNS = ", ".join(_SMT_FIELDS)
 
 
 def smt_events(db: sqlite3.Connection, since: datetime, until: datetime) -> list[SmtEvent]:
     """The SMT events kept (#520) whose bar close is in ``[since, until)``, in time order; none in
-    a database an engine before #520 wrote."""
-    try:
-        rows = db.execute(
-            f"SELECT {_SMT_COLUMNS} FROM smt_events WHERE bar_close >= ? AND bar_close < ?"
-            " ORDER BY bar_close, a, b, direction, minutes",
-            (iso(since), iso(until)),
-        ).fetchall()
-    except sqlite3.OperationalError:  # no such table: read beside an engine from before #520
+    a database an engine before #520 wrote. A table no engine of #521 has opened yet (read only,
+    ``read_only``, so its columns are not added) has no extremes: they are None."""
+    have = {row[1] for row in db.execute("PRAGMA table_info(smt_events)")}
+    if not have:  # no such table: read beside an engine from before #520
         return []
+    columns = ", ".join(f if f in have else f"NULL AS {f}" for f in _SMT_FIELDS)
+    rows = db.execute(
+        f"SELECT {columns} FROM smt_events WHERE bar_close >= ? AND bar_close < ?"
+        " ORDER BY bar_close, a, b, direction, minutes",
+        (iso(since), iso(until)),
+    ).fetchall()
     return [
-        SmtEvent(datetime.fromisoformat(r[0]), r[1], r[2], r[3], int(r[4]), r[5], r[6], r[7], int(r[8]))
+        SmtEvent(
+            datetime.fromisoformat(r[0]),
+            r[1],
+            r[2],
+            r[3],
+            int(r[4]),
+            r[5],
+            r[6],
+            r[7],
+            int(r[8]),
+            None if r[9] is None else datetime.fromisoformat(r[9]),
+            None if r[10] is None else datetime.fromisoformat(r[10]),
+        )
         for r in rows
     ]
 
@@ -1524,7 +1557,7 @@ class PredictionStore:
         with self._db:
             cursor = self._db.executemany(
                 f"INSERT OR IGNORE INTO smt_events ({_SMT_COLUMNS}, recorded_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [
                     (
                         iso(e.bar_close),
@@ -1536,6 +1569,8 @@ class PredictionStore:
                         e.source,
                         e.definition,
                         e.version,
+                        None if e.a_extreme is None else iso(e.a_extreme),
+                        None if e.b_extreme is None else iso(e.b_extreme),
                         iso(recorded_at),
                     )
                     for e in events

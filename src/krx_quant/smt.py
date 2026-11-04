@@ -35,6 +35,9 @@ lows (confirmed some minutes late). Version 1's rules:
   that sweeps does not start another). **Rearming:** a known verdict without that SMT ends the
   episode, and the next SMT starts a new one. An unknown or conflicting bar close leaves an
   episode as it is.
+- **The extremes (#521).** An event keeps, for each instrument, the start of the look-back bar
+  holding the extreme it was judged against at the first bar close: the highest high (bearish)
+  or the lowest low (bullish), the latest of equal ones. They read only the look-back's bars.
 - **Sessions.** Each session starts afresh: no episode carries over from the day before.
 
 Live, the engine judges each bar close it predicts (``Detector``), and keeps the events in its
@@ -91,6 +94,11 @@ class SmtEvent:
     source: str  # LIVE or RECONSTRUCTED
     definition: str = DEFINITION
     version: int = VERSION
+    # The start of the look-back bar holding a's (b's) extreme at the first bar close (#521): its
+    # highest high (BEARISH) or lowest low (BULLISH), the latest of equal ones. None: an event
+    # kept before #521.
+    a_extreme: datetime | None = None
+    b_extreme: datetime | None = None
 
 
 class Detector:
@@ -126,7 +134,19 @@ class Detector:
                         self._going_on.discard(key)  # rearmed
                     elif key not in self._going_on:
                         self._going_on.add(key)
-                        found.append(SmtEvent(close, a, b, direction, minutes, swept, self._source))
+                        found.append(
+                            SmtEvent(
+                                close,
+                                a,
+                                b,
+                                direction,
+                                minutes,
+                                swept,
+                                self._source,
+                                a_extreme=_extreme(bars.get(a), close, minutes, direction),
+                                b_extreme=_extreme(bars.get(b), close, minutes, direction),
+                            )
+                        )
         return found
 
 
@@ -164,6 +184,20 @@ def _past(window: Sequence[Bar]) -> tuple[bool, bool]:
     lowest (equal is not past)."""
     *before, now = window
     return now.high > max(bar.high for bar in before), now.low < min(bar.low for bar in before)
+
+
+def _extreme(bars: Sequence[Bar] | None, close: datetime, minutes: int, direction: str) -> datetime | None:
+    """The start of the look-back bar before ``close`` holding its highest high (``BEARISH``) or
+    lowest low (``BULLISH``), the latest of equal ones; None if a bar of the window is missing."""
+    window = _window(bars, close, minutes)
+    if window is None:
+        return None
+    *before, _ = window
+    if direction == BEARISH:
+        highest = max(bar.high for bar in before)
+        return next(bar.start for bar in reversed(before) if bar.high == highest)
+    lowest = min(bar.low for bar in before)
+    return next(bar.start for bar in reversed(before) if bar.low == lowest)
 
 
 def _alone(a: str, a_past: bool, b: str, b_past: bool) -> str | None:
@@ -228,18 +262,39 @@ class Reconstruction:
     events: list[SmtEvent]
 
 
-def reconstruct(data_dir: Path, day: date, calendar: MarketCalendar) -> Reconstruction | None:
+def reconstruct(
+    data_dir: Path, day: date, calendar: MarketCalendar, first: str = RECORDED
+) -> Reconstruction | None:
     """``day``'s SMT events made again (``RECONSTRUCTED``): from its recording if every stock's
     trades were recorded (as the engine saw them), else from its backfilled bars if every stock
-    has them; None otherwise. A pair whose instrument has neither is unknown all day."""
-    from krx_quant.backfill import FUTURES_BARS_TR, MINUTE_BARS_TR, read_bars
+    has them; None otherwise. ``first=BACKFILLED`` tries the backfilled bars first (the Engine
+    API, #521: they are the bars a chart shows of a past day, and are read in milliseconds where
+    a day's recording takes seconds to replay). A pair whose instrument has neither is unknown
+    all day."""
+    ways = {RECORDED: _recorded, BACKFILLED: _backfilled}
+    for bars in (first, *(b for b in ways if b != first)):
+        made = ways[bars](data_dir, day, calendar)
+        if made is not None:
+            return made
+    return None
+
+
+def _recorded(data_dir: Path, day: date, calendar: MarketCalendar) -> Reconstruction | None:
+    """``day`` made again from its recording, if every stock's trades were recorded."""
     from krx_quant.replay import recorded_events  # they read the recording
     from krx_quant.training import is_recorded
 
-    if is_recorded(data_dir, day, STOCKS):
-        feeds = {TRADE.tr_id, KOSPI200_FUTURES.tr_id}  # the bars' trades
-        events = recorded_events(data_dir, day, STOCKS, Leaders(), feeds=feeds)
-        return Reconstruction(day, RECORDED, replayed(calendar, day, events))
+    if not is_recorded(data_dir, day, STOCKS):
+        return None
+    feeds = {TRADE.tr_id, KOSPI200_FUTURES.tr_id}  # the bars' trades
+    events = recorded_events(data_dir, day, STOCKS, Leaders(), feeds=feeds)
+    return Reconstruction(day, RECORDED, replayed(calendar, day, events))
+
+
+def _backfilled(data_dir: Path, day: date, calendar: MarketCalendar) -> Reconstruction | None:
+    """``day`` made again from its backfilled bars, if every stock has them."""
+    from krx_quant.backfill import FUTURES_BARS_TR, MINUTE_BARS_TR, read_bars
+
     bars = {s: read_bars(data_dir, day, MINUTE_BARS_TR, s) for s in STOCKS}
     if any(found is None for found in bars.values()):
         return None

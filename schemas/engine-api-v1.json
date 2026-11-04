@@ -534,6 +534,85 @@
       ]
     },
 
+    "smt": {
+      "description": "GET /v1/symbols/{symbol}/smt?from=YYYY-MM-DD&to=YYYY-MM-DD (#521): the SMT divergences (smt.py, the rolling-extreme SMT) of every pair holding the symbol, whichever side swept, on the trading days from to to (KST dates, both included; default the last five trading days to today, at most 31 days), days after today left out. Each day's are the engine's live events if it has any (today's always), else the day made again from its backfilled bars, else from its recording. pairs, days and events are empty for a symbol in no pair. Events by bar close, pair (as pairs lists them), L and direction.",
+      "type": "object",
+      "required": ["symbol", "from", "to", "pairs", "days", "events"],
+      "additionalProperties": false,
+      "properties": {
+        "symbol": {"type": "string"},
+        "from": {"$ref": "#/$defs/day"},
+        "to": {"$ref": "#/$defs/day"},
+        "pairs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["a", "b"],
+            "additionalProperties": false,
+            "properties": {"a": {"type": "string"}, "b": {"type": "string"}}
+          }
+        },
+        "days": {"type": "array", "items": {"$ref": "#/$defs/smt_day"}},
+        "events": {"type": "array", "items": {"$ref": "#/$defs/smt_event"}}
+      }
+    },
+    "smt_day": {
+      "description": "Where a trading day's SMT events come from (#521): live (the engine's: a day it kept any on, and today), reconstructed (made again from bars: backfilled, else recorded), or null (neither live events nor bars to make the day again from).",
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["date", "source", "bars"],
+          "additionalProperties": false,
+          "properties": {
+            "date": {"$ref": "#/$defs/day"},
+            "source": {"const": "live"},
+            "bars": {"type": "null"}
+          }
+        },
+        {
+          "type": "object",
+          "required": ["date", "source", "bars"],
+          "additionalProperties": false,
+          "properties": {
+            "date": {"$ref": "#/$defs/day"},
+            "source": {"const": "reconstructed"},
+            "bars": {"enum": ["backfilled", "recorded"]}
+          }
+        },
+        {
+          "type": "object",
+          "required": ["date", "source", "bars"],
+          "additionalProperties": false,
+          "properties": {
+            "date": {"$ref": "#/$defs/day"},
+            "source": {"type": "null"},
+            "bars": {"type": "null"}
+          }
+        }
+      ]
+    },
+    "smt_event": {
+      "description": "An SMT episode by its first bar close (#520, #521). bar_start is its one-minute bar's start (bar_close − 1 minute), where a chart marks it. swept went past the extreme of its last minutes bars before that bar (its highest high for bearish, its lowest low for bullish); other, the pair's other side, did not. swept_extreme_at and other_extreme_at are the starts of the look-back bars holding each one's extreme (the latest of equal ones), null for a live event kept before #521.",
+      "type": "object",
+      "required": ["bar_close", "bar_start", "a", "b", "direction", "minutes", "swept", "other", "swept_extreme_at", "other_extreme_at", "definition", "version", "source"],
+      "additionalProperties": false,
+      "properties": {
+        "bar_close": {"$ref": "#/$defs/time"},
+        "bar_start": {"$ref": "#/$defs/time"},
+        "a": {"type": "string"},
+        "b": {"type": "string"},
+        "direction": {"enum": ["bearish", "bullish"]},
+        "minutes": {"type": "integer", "minimum": 1},
+        "swept": {"type": "string"},
+        "other": {"type": "string"},
+        "swept_extreme_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]},
+        "other_extreme_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]},
+        "definition": {"type": "string"},
+        "version": {"type": "integer", "minimum": 1},
+        "source": {"enum": ["live", "reconstructed"]}
+      }
+    },
+
     "algorithm": {
       "description": "An item of GET /v1/algorithms.",
       "allOf": [{"$ref": "#/$defs/algorithm_fields"}],

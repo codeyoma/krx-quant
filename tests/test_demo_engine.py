@@ -107,6 +107,39 @@ async def test_the_demo_morning_halts_for_a_circuit_breaker_and_has_a_vi(demo: T
 
 
 @ON_THE_SHARED_DEMO
+async def test_the_demo_has_smt_events_live_and_made_again(demo: TestClient[Any, Any]) -> None:
+    """#521. Output, for a screen to draw: the engine's live SMT events on the 8th and the morning,
+    the 7th's made again from its backfilled bars (the stocks' and the futures'), none in the
+    morning's halt; 009150 in no pair."""
+    smt = {
+        s: await get_json(demo, f"/v1/symbols/{s}/smt?from=2026-10-06&to=2026-10-12") for s in DEMO_SYMBOLS
+    }
+
+    for symbol in ("005930", "000660"):
+        body = smt[symbol]
+        check("smt", body)
+        assert body["days"] == [
+            {"date": "2026-10-06", "source": None, "bars": None},
+            {"date": "2026-10-07", "source": "reconstructed", "bars": "backfilled"},
+            {"date": "2026-10-08", "source": "live", "bars": None},
+            {"date": "2026-10-12", "source": "live", "bars": None},
+        ]
+        events = body["events"]
+        by_day = {(e["bar_close"][:10], e["source"]) for e in events}
+        assert by_day == {("2026-10-07", "reconstructed"), ("2026-10-08", "live"), ("2026-10-12", "live")}
+        assert all(symbol in (e["a"], e["b"]) for e in events)
+        assert {e["b"] for e in events} >= {"KOSPI200F"}, "with the futures on every day"
+        assert {e["swept"] == symbol for e in events} == {True, False}, "both its side and the other's"
+        assert {(e["direction"], e["minutes"]) for e in events} == {
+            (d, m) for d in ("bearish", "bullish") for m in (15, 30)
+        }
+        assert all(e["swept_extreme_at"] and e["other_extreme_at"] for e in events)
+        halted = [e for e in events if "2026-10-12T09:06" <= e["bar_close"] <= "2026-10-12T09:51"]
+        assert halted == [], "no bars in the halt, nor in the 15 minutes after it"
+    assert (smt["009150"]["pairs"], smt["009150"]["events"]) == ([], [])
+
+
+@ON_THE_SHARED_DEMO
 async def test_the_demo_scrolls_back_into_two_earlier_afternoons(demo: TestClient[Any, Any]) -> None:
     before = "before=2026-10-12T09:00:00%2B09:00"
     bars = await get_json(demo, f"/v1/symbols/005930/bars?{before}&limit=2000")

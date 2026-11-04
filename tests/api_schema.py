@@ -20,6 +20,7 @@ ROUTES = {
     "/v1/symbols/{symbol}/bars": "bars",
     "/v1/symbols/{symbol}/candles": "candles",
     "/v1/symbols/{symbol}/special": "special",  # #236
+    "/v1/symbols/{symbol}/smt": "smt",  # #521
     "/v1/symbols/{symbol}/supply": "supply",  # #226
     "/v1/symbols/{symbol}/flow": "flow",  # #306
     "/v1/symbols/{symbol}/closing-flow": "closing_flow",  # #305

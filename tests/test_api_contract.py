@@ -77,6 +77,8 @@ async def walk(get: Get) -> dict[str, int]:
         )
         await ask(f"/v1/symbols/{symbol}/special", "special")  # #236
         await ask(f"/v1/symbols/{symbol}/special?from=2026-10-01&to=2026-10-12", "special")
+        await ask(f"/v1/symbols/{symbol}/smt", "smt")  # #521
+        await ask(f"/v1/symbols/{symbol}/smt?from=2026-10-01&to=2026-10-12", "smt")
         await ask(f"/v1/symbols/{symbol}/supply", "supply")  # #226
         await ask(f"/v1/symbols/{symbol}/supply?from=2026-10-01&to=2026-10-12", "supply")
         await ask(f"/v1/symbols/{symbol}/flow", "flow")  # #306
@@ -158,6 +160,10 @@ async def walk(get: Get) -> dict[str, int]:
         ("/v1/symbols/005930/special?from=2026-10-1", 400),
         ("/v1/symbols/005930/special?from=2026-10-12&to=2026-10-11", 400),
         ("/v1/symbols/005930/special?from=2026-08-13&to=2026-10-12", 400),
+        ("/v1/symbols/999999/smt", 404),
+        ("/v1/symbols/005930/smt?from=2026-10-1", 400),
+        ("/v1/symbols/005930/smt?from=2026-10-12&to=2026-10-11", 400),
+        ("/v1/symbols/005930/smt?from=2026-09-11&to=2026-10-12", 400),
         ("/v1/symbols/999999/supply", 404),
         ("/v1/symbols/005930/supply?to=2026-10-1", 400),
         ("/v1/symbols/005930/supply?from=2026-10-12&to=2026-10-11", 400),
