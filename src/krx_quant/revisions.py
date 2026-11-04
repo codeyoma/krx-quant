@@ -57,9 +57,20 @@ class Refactor:
     evidence: str
 
 
-# The reviewed map (#454): none so far. An entry goes in the PR that changes the code, with its
-# evidence; the engine never infers one.
-SAME_REVISION: tuple[Refactor, ...] = ()
+# The reviewed map (#454). An entry goes in the PR that changes the code, with its evidence; the
+# engine never infers one.
+_LEFT_OUT_518 = (
+    "#518: only the features' rule changed, to leave the stochastic processes' new features out, "
+    "and its features are the same, in the same order; tests/test_stochastic_refactor.py trains the "
+    "code and the rule before #518 on the same samples: the same model and the same forecasts"
+)
+SAME_REVISION: tuple[Refactor, ...] = (
+    Refactor("turing", "98623b1057a63aeb", "f7e458161bc1f9e8", _LEFT_OUT_518),
+    *(
+        Refactor(name, "507c7027060fb905", "2aee278e435ab638", _LEFT_OUT_518)
+        for name in ("breiman", "breiman-15m", "breiman-30m", "breiman-60m")
+    ),
+)
 
 
 @dataclass(frozen=True)

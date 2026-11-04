@@ -125,6 +125,10 @@ async def test_a_trained_model_is_used_and_recorded(tmp_path: Path) -> None:
         "poisson",
         "turing",
         "neyman",  # Turing's trees and a second opinion (#266)
+        "samuelson",  # the stochastic processes (#518)
+        "ito",
+        "ulam",
+        "bishop",
         "mandelbrot",  # the range's (#181)
         "breiman",  # the barrier's (#184)
         "breiman-15m",  # the horizon ladder's (#263)

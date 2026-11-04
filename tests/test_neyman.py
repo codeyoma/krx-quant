@@ -77,7 +77,8 @@ def params(m: float, *, calls: float = 500.0) -> dict[str, float]:
 
 
 def test_it_comes_after_turing_with_the_barrier_s_features_its_own() -> None:
-    assert [a.name for a in ALGORITHMS][-2:] == ["turing", "neyman"]
+    names = [a.name for a in ALGORITHMS]
+    assert names[names.index("turing") + 1] == "neyman"  # the stochastic processes after it (#518)
     assert set(NEYMAN.card.unique_features) == BARRIER_FEATURES
     assert not BARRIER_FEATURES & set(Turing.features)  # no direction algorithm before it reads them
     assert set(NEYMAN.features) == set(Turing.features) | BARRIER_FEATURES

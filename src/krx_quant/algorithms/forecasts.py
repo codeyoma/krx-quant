@@ -117,6 +117,59 @@ def reach_probability(distance: float, drift: float, sigma: float) -> float:
     return min(1.0, _upper_tail((a - mu) / s) + (math.exp(reflected) if reflected > -745 else 0.0))
 
 
+def _log_mass(low: float, high: float) -> float:
+    """ln(Φ(high) − Φ(low)) for low < high, from whichever tail keeps its digits; −inf if none."""
+    if low >= high:
+        return -math.inf
+    if low > 0:  # both in the upper tail: 1 − Φ(low) − (1 − Φ(high))
+        first, second = _log_cdf(-low), _log_cdf(-high)
+    else:
+        first, second = _log_cdf(high), _log_cdf(low)
+    gap = second - first
+    return first + math.log1p(-math.exp(gap)) if gap < 0 else -math.inf
+
+
+def stay_probability(below: float, above: float, drift: float, sigma: float) -> float:
+    """The chance that a Brownian motion starting at 0, with ``drift`` and standard deviation
+    ``sigma`` over the horizon, stays between −``below`` and ``above`` the whole horizon: the
+    method of images (the killed density Σ_k φ(y − 2kL) − φ(y − 2·above + 2kL), L = below + above),
+    weighted by Girsanov's e^(μy/σ² − μ²T/2σ²) for the drift and integrated over the strip.
+
+    With the one-sided ``reach_probability`` it gives the touch target's three probabilities as
+    the label orders them (#518): up reaches the upper target, flat stays between the two, down
+    is the rest. ``normal_forecast`` takes the two targets as independent instead.
+    """
+    if below <= 0 or above <= 0:
+        return 0.0
+    s = max(sigma, 1e-12)
+    width = below + above
+    # Images 2kL away matter while 2kL is within a few spreads: more of them for a wide spread.
+    images = min(max(8, math.ceil(2 * s / width) + 4), 60)
+    total = 0.0
+    for k in range(-images, images + 1):
+        for centre, sign in ((2 * k * width, 1.0), (2 * above - 2 * k * width, -1.0)):
+            mass = _log_mass((-below - centre - drift) / s, (above - centre - drift) / s)
+            exponent = drift * centre / (s * s) + mass
+            if exponent > -745:
+                total += sign * math.exp(min(exponent, 700.0))
+    return min(max(total, 0.0), 1.0) if math.isfinite(total) else 0.0
+
+
+def ordered_forecast(move: float, spread: float, flat_ticks: float) -> Forecast:
+    """As ``normal_forecast``, but of the touch target in the label's order (#518): up reaches the
+    upper target, flat stays between the two (``stay_probability``), down is the rest, where
+    ``normal_forecast`` multiplies down by the chance of not reaching up as if the two were
+    independent. Of the four-minute move (target version 1) it is ``normal_forecast``."""
+    touch = _TOUCH.get()
+    if touch is None:
+        return normal_forecast(move, spread, flat_ticks)
+    sigma = max(spread, MIN_SPREAD_TICKS)
+    distance = flat_ticks + touch.half_spread
+    p_up = reach_probability(distance, move, sigma)
+    p_flat = min(stay_probability(distance, distance, move, sigma), 1 - p_up)
+    return Forecast(p_up, p_flat, max(0.0, 1 - p_up - p_flat), move)
+
+
 def normal_forecast(move: float, spread: float, flat_ticks: float) -> Forecast:
     """Up, flat and down for a move normally distributed around ``move`` with standard
     deviation ``spread`` (both in ticks), against the flat band ``flat_ticks``: of where the

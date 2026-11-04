@@ -5,16 +5,26 @@ from __future__ import annotations
 import pytest
 
 from krx_quant.algorithms import ALGORITHMS, RegistrationError, register
+from krx_quant.algorithms.bishop import Bishop
 from krx_quant.algorithms.gauss import Gauss
 from krx_quant.algorithms.granger import Granger
+from krx_quant.algorithms.ito import Ito
 from krx_quant.algorithms.kalman import Kalman
 from krx_quant.algorithms.markov import Markov
 from krx_quant.algorithms.newton import Newton
 from krx_quant.algorithms.neyman import Neyman
 from krx_quant.algorithms.poisson import Poisson
+from krx_quant.algorithms.samuelson import Samuelson
 from krx_quant.algorithms.shannon import Shannon
 from krx_quant.algorithms.turing import Turing
-from krx_quant.features import BARRIER_FEATURES, BOOK_FEATURES, SERIES_FEATURES, SLOT_RETURN_FEATURES
+from krx_quant.algorithms.ulam import Ulam
+from krx_quant.features import (
+    BARRIER_FEATURES,
+    BOOK_FEATURES,
+    SERIES_FEATURES,
+    SLOT_RETURN_FEATURES,
+    STOCHASTIC_FEATURES,
+)
 from tests.algorithm_doubles import FixedAlgorithm
 
 
@@ -69,6 +79,10 @@ def test_each_registered_algorithm_has_a_personality_of_its_own() -> None:
         "poisson",
         "turing",
         "neyman",
+        "samuelson",  # the stochastic processes (#518)
+        "ito",
+        "ulam",
+        "bishop",
     ]
     assert not set(Gauss.card.unique_features) & set(Newton.features)
     assert not set(Granger.card.unique_features) & (set(Newton.features) | set(Gauss.features))
@@ -91,3 +105,11 @@ def test_each_registered_algorithm_has_a_personality_of_its_own() -> None:
     assert set(Neyman.features) == set(Turing.features) | BARRIER_FEATURES
     assert set(Neyman.card.unique_features) == BARRIER_FEATURES
     assert not BARRIER_FEATURES & (others | set(Turing.features))
+    # The stochastic processes (#518) read features no algorithm before them reads, their own;
+    # Turing and Neyman leave them out, so their trees stay as they were.
+    before = others | set(Turing.features) | set(Neyman.features)
+    assert not STOCHASTIC_FEATURES & before
+    stochastic = (Samuelson, Ito, Ulam, Bishop)
+    assert set().union(*(a.card.unique_features for a in stochastic)) == STOCHASTIC_FEATURES
+    assert not set(Ulam.card.unique_features) & (set(Samuelson.features) | set(Ito.features))
+    assert set(Ulam.card.unique_features) < set(Bishop.features), "Bishop reads Ulam's, its own after"
