@@ -21,7 +21,8 @@ from krx_quant.live_probe import DIFFERENT, NO_KEYS, PASSED, REFUSED, UNREADABLE
 from krx_quant.scheduled import JOBS, LIVE_PROBE, Facts, JobRecord, Night
 from krx_quant.trader import live
 from krx_quant.trader.store import DB_NAME
-from tests.test_trader_live import LIVE_ACCOUNT, LIVE_KEY, LIVE_SECRET, TODAY, live_settings
+from tests.kis_doubles import LIVE_ACCOUNT, LIVE_KEY, LIVE_SECRET, live_settings
+from tests.test_trader_live import TODAY
 from tests.trader_doubles import CALENDAR, at
 
 NIGHT = at("22:40:00")  # the evening of the test day, a trading day

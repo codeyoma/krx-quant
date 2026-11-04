@@ -60,9 +60,9 @@ from krx_quant.kind_registry import kind_named
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.training import bar_answers, recorded_samples, samples
 from tests.algorithm_doubles import CAUTIOUS, FixedAlgorithm, PlacedAlgorithm
+from tests.replay_doubles import busy_morning
 from tests.replay_events import with_sides
 from tests.synthetic_bars import random_walk, trending
-from tests.test_replay import busy_morning
 
 FEE = 0.015 / 100
 DAYS = [date(2026, 9, 21), date(2026, 9, 22)]

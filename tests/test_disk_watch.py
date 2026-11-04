@@ -30,6 +30,7 @@ from krx_quant.disk_watch import (
 from krx_quant.doctor import Status, report
 from krx_quant.feeds.base import KST
 from krx_quant.notify import Alerts
+from tests.waiting import until
 
 GB = 1024**3
 KEYS = {"KIS_APP_KEY": "key", "KIS_APP_SECRET": "secret"}
@@ -172,9 +173,7 @@ async def told(watch: DiskWatch, alerts: Sent, every: float) -> None:
     """Run the watch until it sends an alert."""
     task = asyncio.create_task(keep_disks(watch, every))
     try:
-        async with asyncio.timeout(10):
-            while not alerts.sent:
-                await asyncio.sleep(0.01)
+        await until(lambda: bool(alerts.sent), timeout=10)
     finally:
         task.cancel()
 

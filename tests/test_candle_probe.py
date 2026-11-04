@@ -17,7 +17,7 @@ from krx_quant import candle_probe
 from krx_quant.candle_probe import probe_candles
 from krx_quant.candles import CANDLES_TR
 from krx_quant.fake_kis import FakeKis
-from tests.test_collector import settings_for
+from tests.collector_doubles import settings_for
 
 TODAY = date(2026, 10, 13)
 LISTED = {"D": date(1990, 1, 1), "W": date(1990, 1, 1), "M": date(1990, 1, 1), "Y": date(1990, 1, 1)}

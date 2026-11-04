@@ -22,9 +22,8 @@ from krx_quant.feeds import KST
 from krx_quant.reference import Bar
 from krx_quant.touch import TARGET_VERSION
 from krx_quant.training import fit_algorithm
+from tests.replay_doubles import busy_morning, record
 from tests.synthetic_bars import day_of_bars, random_walk, trending
-from tests.test_replay import busy_morning
-from tests.test_replay_cli import record
 
 DAYS = [date(2026, 9, 14) + timedelta(days=i) for i in range(5)]
 

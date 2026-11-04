@@ -8,10 +8,9 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
-from datetime import date, timedelta
+from datetime import timedelta
 from pathlib import Path
 
-import pyarrow as pa
 import pytest
 
 from krx_quant.algorithms import Model, save_model
@@ -19,30 +18,13 @@ from krx_quant.archive import archive
 from krx_quant.cli import main
 from krx_quant.config import Settings
 from krx_quant.engine import Event
-from krx_quant.feeds import INDEX_REST, VI_STATUS, WS_FEEDS
+from krx_quant.feeds import WS_FEEDS
 from krx_quant.lifecycle import Rules
 from krx_quant.object_store import LocalObjectStore
-from krx_quant.recorder import ParquetRecorder
 from krx_quant.replay import recorded_events, replay_recorded
 from krx_quant.touch import TARGET_VERSION
-from tests.replay_events import DAY, at, kospi, kospi200_futures, run
-from tests.test_replay import busy_morning, stored
-from tests.test_special import VI, held
-
-END_OF_DAY = at("23:59:59.999999")
-SCHEMAS = {
-    **{f: feed.schema for f, feed in WS_FEEDS.items()},
-    **{f.tr_id: f.schema for f in (VI_STATUS, INDEX_REST)},
-}
-
-
-def record(
-    data_dir: Path, events: list[Event], schemas: dict[str, pa.Schema] = SCHEMAS, *, day: date = DAY
-) -> None:
-    recorder = ParquetRecorder(data_dir, flush_rows=50, flush_seconds=3600)
-    for feed, row in events:
-        recorder.record("events", day, feed, row["symbol"], row, schemas[feed])
-    recorder.close()
+from tests.replay_doubles import END_OF_DAY, SCHEMAS, VI, busy_morning, held, record, stored
+from tests.replay_events import DAY, kospi, kospi200_futures, run
 
 
 def test_a_recorded_day_replays_like_the_same_events_given_by_hand(

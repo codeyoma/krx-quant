@@ -20,6 +20,7 @@ from krx_quant.recorder import ParquetRecorder
 from krx_quant.touch import TARGET_VERSION
 from krx_quant.training import recorded_samples, training_day
 from tests.algorithm_doubles import FixedAlgorithm
+from tests.replay_doubles import busy_morning, record
 from tests.replay_events import (
     CALENDAR,
     DAY,
@@ -34,8 +35,6 @@ from tests.replay_events import (
     vi,
 )
 from tests.test_algorithms_replay import LEADERS, leaders_morning
-from tests.test_replay import busy_morning
-from tests.test_replay_cli import record
 
 PEER = "000660"
 NAMES = tuple(sorted(FEATURES))

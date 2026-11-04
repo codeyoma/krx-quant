@@ -75,10 +75,10 @@ from krx_quant.prevalidation import code_digest
 from krx_quant.pricing import Direction, most_likely
 from krx_quant.scheduled import FAILED, JOBS, NEYMAN_VARIANTS, Facts, JobRecord, Night
 from krx_quant.stats import Scored
+from tests.prevalidation_doubles import AFTER, DAYS
+from tests.replay_doubles import record
 from tests.replay_events import at
 from tests.test_neyman import features, made_up, params
-from tests.test_prevalidation import AFTER, DAYS
-from tests.test_replay_cli import record
 from tests.test_turing_prior import mornings
 
 UP, FLAT, DOWN = Direction.UP, Direction.FLAT, Direction.DOWN

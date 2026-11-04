@@ -65,8 +65,9 @@ from krx_quant.touch import TARGET_VERSION
 from tests.algorithm_doubles import FrequencyAlgorithm, stand_in_card, stand_in_meanings
 from tests.fake_github import REPO, TOKEN, fake_github
 from tests.kind_doubles import TEST_KIND, DriftFrequency
-from tests.test_nightly import DAYS, FEE, FINISHED, NIGHT, archive_bars, night, outcomes, read
-from tests.test_scheduled import AT, CALENDAR, COMMIT, FRIDAY, MONDAY, SATURDAY, Told, at
+from tests.nightly_doubles import DAYS, FEE, FINISHED, NIGHT, archive_bars, read
+from tests.scheduled_doubles import AT, CALENDAR, COMMIT, FRIDAY, MONDAY, SATURDAY, Told, at
+from tests.test_nightly import night, outcomes
 
 UP, FLAT, DOWN = Direction.UP, Direction.FLAT, Direction.DOWN
 D1, D2 = date(2026, 10, 26), date(2026, 10, 27)

@@ -2,7 +2,7 @@
 trader's kinds judged as the cost map judges its top.
 
 Input: scored predictions of the direction and the barrier stored through the prediction store
-with their answers (``test_cost_map_api``'s), the Engine API's cost map of them as the trader asks
+with their answers (``api_doubles``'s), the Engine API's cost map of them as the trader asks
 for it (005930, 20d, special situations left out), and the engine's database file it was computed
 from. Output: each kind's candidates, the visible one against the cost map's top to the number; a
 hidden one that passes where the top fails; the text, exploratory at its head and without prices;
@@ -35,10 +35,10 @@ from krx_quant.predictions import NewKindPrediction, PredictionStore
 from krx_quant.pricing import Direction
 from krx_quant.scheduled import run_command
 from krx_quant.trader import TRADED_KINDS
+from tests.api_doubles import OUTCOMES, barrier_board, baselines, cost_map, get, store_scored
 from tests.replay_events import DAY, at
-from tests.test_cost_map_api import barrier_board, cost_map, row
-from tests.test_leaderboard_api import OUTCOMES, baselines, get, store_scored
-from tests.test_trader_run import EngineApi
+from tests.test_cost_map_api import row
+from tests.trader_doubles import EngineApi
 
 UP, FLAT, DOWN = Direction.UP, Direction.FLAT, Direction.DOWN
 TRADERS = "?symbol=005930&period=20d&special=exclude"  # the trader's query (``selection.read_cost_map``)
@@ -60,7 +60,7 @@ def store_barrier(
     store: PredictionStore, algorithm: str, calls: Sequence[str], outcomes: Sequence[str], width: int = 10
 ) -> None:
     """``calls`` (one sure call per bar close from 09:01) of the barrier on 005930, answered by
-    ``outcomes``, ``width`` ticks from 81,250 won (``test_cost_map_api.store_barrier``'s, any answers)."""
+    ``outcomes``, ``width`` ticks from 81,250 won (``api_doubles.store_barrier``'s, any answers)."""
     start = datetime.combine(DAY, at("09:01:00").timetz())
     made = []
     for i, call in enumerate(calls):

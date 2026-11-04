@@ -12,11 +12,10 @@ from pathlib import Path
 from typing import Any
 
 from krx_quant.consensus import NAMES as CONSENSUS
-from krx_quant.engine import Event
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.names import logo_url
+from tests.replay_doubles import busy_morning, stored
 from tests.replay_events import (
-    DAY,
     PREDICTING,
     PREDICTORS,
     SYMBOL,
@@ -282,32 +281,6 @@ async def test_the_random_baseline_draws_in_the_proportions_of_the_day_so_far(tm
         assert sorted(forecast(p)[:3]) == [0, 0, 1]  # one class, with certainty
     # By 10:00 sixty flat bars are scored, so flat is drawn about 61 times in 63.
     assert sum(p["p_flat"] for p in draws) >= 27
-
-
-def busy_morning(day: date = DAY, end: str = "10:00:00") -> list[Event]:
-    """A book and trades that wander, so every baseline and class shows up."""
-    events: list[Event] = []
-    when, mid = at("09:00:00", day), 81_250
-    step = 0
-    while when <= at(end, day):
-        step += 1
-        mid += 100 * ((step * 7919) % 5 - 2)  # a deterministic walk of -2..+2 ticks
-        events.append(book(when, mid - 50, mid + 50))
-        events.append(trade(when + timedelta(seconds=1), mid + 50, step % 9 + 1))
-        when += timedelta(seconds=13)
-    return events
-
-
-def stored(db: Path) -> list[tuple[Any, ...]]:
-    """Every prediction with its outcome, without row IDs: algorithms finish in any order."""
-    with sqlite3.connect(db) as conn:
-        return conn.execute(
-            "SELECT p.symbol, p.algorithm, p.model_version, p.bar_close, p.displayed_at, p.p_up, p.p_flat,"
-            " p.p_down, p.expected_ticks, p.status, o.target_at, o.mid_close, o.mid_display, o.mid_target,"
-            " o.flat_ticks, o.class_a, o.class_b, o.special, o.unscorable, o.scored_at"
-            " FROM predictions p LEFT JOIN outcomes o ON o.prediction_id = p.id"
-            " ORDER BY p.bar_close, p.symbol, p.algorithm"
-        ).fetchall()
 
 
 async def test_replaying_the_same_input_twice_gives_the_same_results(tmp_path: Path) -> None:

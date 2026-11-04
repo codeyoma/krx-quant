@@ -35,23 +35,13 @@ from krx_quant.touch import TARGET_VERSION
 from krx_quant.training import bar_answers, fit_algorithm, training_day
 from tests.algorithm_doubles import stand_in_card, stand_in_meanings
 from tests.kind_doubles import DRIFT, TEST_KIND, DriftFrequency
+from tests.nightly_doubles import DAYS as NIGHT_DAYS
+from tests.nightly_doubles import FINISHED, NIGHT, archive_bars, read
+from tests.prevalidation_doubles import AFTER, ALPHA, DAYS, Contrarian, report, settings
+from tests.replay_doubles import busy_morning, record
 from tests.replay_events import CALENDAR, DAY, FEE, SYMBOL, at, run
 from tests.synthetic_bars import day_of_bars
-from tests.test_nightly import DAYS as NIGHT_DAYS
-from tests.test_nightly import FINISHED, NIGHT, archive_bars, read
-from tests.test_prevalidation import (
-    AFTER,
-    ALPHA,
-    DAYS,
-    Contrarian,
-    _verdict,
-    read_as_before_487,
-    replayed_rows,
-    report,
-    settings,
-)
-from tests.test_replay import busy_morning
-from tests.test_replay_cli import record
+from tests.test_prevalidation import _verdict, read_as_before_487, replayed_rows
 
 
 async def test_a_recorded_day_trains_a_kind_on_the_answers_the_engine_scores(tmp_path: Path) -> None:

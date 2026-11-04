@@ -28,12 +28,12 @@ from krx_quant.demo import demo_app
 from krx_quant.fake_kis import FakeKis
 from krx_quant.touch import TARGET_VERSION
 from tests.api_schema import KIND_ROUTES, ROUTES, SCHEMA, STREAM, WRITES, check
+from tests.collector_doubles import settings_for
 from tests.kind_doubles import TEST_KIND, FixedKindAlgorithm
 from tests.kis_frames import book_frame
+from tests.replay_doubles import busy_morning
 from tests.replay_events import LIVE_PREDICTORS, api, at, run
-from tests.test_collector import settings_for
-from tests.test_live_predictions import free_port, poll
-from tests.test_replay import busy_morning
+from tests.server_doubles import free_port, poll
 
 Get = Callable[[str], Awaitable[tuple[int, Any]]]  # a path to its status and JSON body
 

@@ -13,7 +13,7 @@ import pytest
 from krx_quant import auth, ratelimit
 from krx_quant.config import Settings
 from krx_quant.ratelimit import RateLimiter
-from tests.test_collector import FIXED_NOW
+from tests.collector_doubles import FIXED_NOW
 
 
 class Monotonic:

@@ -21,7 +21,7 @@ from krx_quant import cli, supply_probe
 from krx_quant.fake_kis import FakeKis
 from krx_quant.net_buys_probe import MAX_FAILED_IN_A_ROW, WINDOWS, probe_net_buys
 from krx_quant.supply import INVESTORS, KIS, NET_MARKET, NXT_OPENED, TOSS, write_supply
-from tests.test_collector import settings_for
+from tests.collector_doubles import settings_for
 
 TODAY = date(2026, 10, 20)
 SYMBOLS = ("005930", "000660")

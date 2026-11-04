@@ -26,8 +26,8 @@ from krx_quant.fake_kis import FakeKis
 from krx_quant.feeds.base import KST
 from krx_quant.nav_probe import DAILY, MAX_FAILED_IN_A_ROW, MINUTES, PRICE, TREND, probe_nav
 from krx_quant.products import PRODUCTS
+from tests.collector_doubles import settings_for
 from tests.kis_rest import requests_for
-from tests.test_collector import settings_for
 
 NOW = datetime(2026, 10, 21, 23, 41, tzinfo=KST)
 LATEST, PREVIOUS = date(2026, 10, 21), date(2026, 10, 20)

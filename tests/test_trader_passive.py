@@ -75,8 +75,7 @@ from krx_quant.trader.replay import micros
 from krx_quant.trader.settings import TraderSettings
 from krx_quant.trader.store import DB_NAME as TRADER_DB
 from tests.test_trader_refit import barrier, engine
-from tests.test_trader_run import EngineApi
-from tests.trader_doubles import CALENDAR, DAY, FEE, cost_map, cost_row, predictor
+from tests.trader_doubles import CALENDAR, DAY, FEE, EngineApi, cost_map, cost_row, predictor
 
 BREIMAN = Cell("barrier", "breiman")
 FIRST, SECOND = date(*DAY), date(2026, 10, 15)  # a Wednesday and a Thursday: both trade

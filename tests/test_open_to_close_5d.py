@@ -220,7 +220,8 @@ async def test_the_kept_krx_day_candles_mark_the_windows_over_kis_s_ex_dividend_
     answers read from them (``StoredDays``, as the engine and training do) mark the windows whose
     sessions two to five hold a 02 (year-end) or 05 (interim) day."""
     from krx_quant.daily import StoredDays
-    from tests.test_candles import candles_api, keep, kis_candles, trading_days, with_ex_codes
+    from tests.candle_doubles import candles_api, kis_candles
+    from tests.test_candles import keep, trading_days, with_ex_codes
 
     days = trading_days(date(2025, 10, 1), date(2026, 4, 30))  # before the after-market: candles' closes
     marks = {date(2025, 12, 29): "02", date(2026, 3, 30): "05"}

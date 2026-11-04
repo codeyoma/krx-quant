@@ -295,8 +295,8 @@ def test_the_commands_fit_and_prevalidate_cox(tmp_path: Path, monkeypatch: pytes
 def test_the_night_trains_cox_last_and_puts_it_on_the_promotion_list(tmp_path: Path) -> None:
     from krx_quant.nightly import train_night
     from krx_quant.object_store import LocalObjectStore
-    from tests.test_nightly import DAYS as NIGHT_DAYS
-    from tests.test_nightly import FINISHED, archive_bars
+    from tests.nightly_doubles import DAYS as NIGHT_DAYS
+    from tests.nightly_doubles import FINISHED, archive_bars
 
     root = tmp_path / "store"
     for d in NIGHT_DAYS:

@@ -35,12 +35,11 @@ from krx_quant.trader.quotes import QuoteFeed
 from krx_quant.trader.run import run_trader
 from krx_quant.trader.settings import TraderSettings
 from krx_quant.trader.store import DB_NAME, read_trades
-from tests.test_live_predictions import free_port
-from tests.test_notify import telegram
-from tests.test_trader_live import decided, kis_live, live_settings, ready, run_live
-from tests.test_trader_mock import TIMING, kis_mock, resting_sells, settings_of, until
-from tests.test_trader_run import PASSING, EngineApi, book
-from tests.trader_doubles import Barrier, at, first_champion
+from tests.kis_doubles import TIMING, kis_mock, live_settings, resting_sells, settings_of
+from tests.server_doubles import free_port, telegram
+from tests.test_trader_live import decided, kis_live, ready, run_live
+from tests.trader_doubles import PASSING, Barrier, EngineApi, at, book, first_champion
+from tests.waiting import until
 
 HTS_ID = "notice7hts"
 # A made-up 23 of the example's 26 columns, not its first 23: the price of the order last.
@@ -106,10 +105,10 @@ async def trade_on_kis(
                 await until(decisions)
                 await until(lambda: feed.clients > 0)
                 if before is not None:
-                    await until(before, 15.0)
+                    await until(before, timeout=15.0)
                 account.bid, account.ask = 70_000, 70_100
                 feed.on_event(BOOK.tr_id, book(at("10:00:02.5"), 70_000, 70_100))
-                await until(lambda: len(resting_sells(account)) == 1, 15.0)
+                await until(lambda: len(resting_sells(account)) == 1, timeout=15.0)
                 clock[0] = at("10:02:00")
                 account.bid, account.improvement = 70_300, 0.0
                 account.fill(resting_sells(account)[0])

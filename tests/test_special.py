@@ -15,11 +15,8 @@ from pathlib import Path
 from typing import Any
 
 from krx_quant.consensus import NAMES as CONSENSUS
-from tests.replay_events import PREDICTORS, SYMBOL, api, at, every, get_json, kospi, kospi200_futures, run, vi
-from tests.test_replay import busy_morning
-
-# A VI from 09:30:20 to 09:32:40, seen on by 09:30:24 and released by 09:32:44.
-VI = [vi(at("09:30:24"), "09:30:20"), vi(at("09:32:44"), "09:30:20", "09:32:40")]
+from tests.replay_doubles import VI, busy_morning, held
+from tests.replay_events import PREDICTORS, SYMBOL, api, at, get_json, kospi, kospi200_futures, run, vi
 
 
 def made_by(predictions: list[dict[str, Any]]) -> set[str]:
@@ -94,11 +91,6 @@ async def test_special_predictions_are_left_out_of_the_leaderboard_by_default(tm
     assert await flat_n(without) == 41
     assert await flat_n(with_vi) == 41 - 2 - 4
     assert await flat_n(with_vi, "&special=include") == 41 - 2
-
-
-def held(start: str, end: str, make: Any, change_pct: float) -> list[Any]:
-    """Ticks every 5 seconds from ``start`` to ``end``, all ``change_pct`` off the previous close."""
-    return every(at(start), at(end), 5, lambda when: make(when, change_pct))
 
 
 async def test_a_kospi_drop_of_8_percent_held_a_minute_is_a_circuit_breaker(tmp_path: Path) -> None:

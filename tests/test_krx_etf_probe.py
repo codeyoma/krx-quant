@@ -30,8 +30,8 @@ from krx_quant.krx_etf_probe import DOCUMENTED, MAX_FAILED_IN_A_ROW, probe_krx_e
 from krx_quant.nav_probe import DAILY, PRICE
 from krx_quant.products import PRODUCTS
 from krx_quant.redaction import secrets_of
+from tests.collector_doubles import settings_for
 from tests.fake_krx_openapi import KEY, PATH, FakeKrx, fake_krx
-from tests.test_collector import settings_for
 from tests.test_nav_probe import ok, trading_days, write_calendar
 
 NOW = datetime(2026, 10, 22, 23, 40, tzinfo=KST)

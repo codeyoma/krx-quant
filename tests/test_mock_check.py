@@ -3,7 +3,7 @@ which compares a mock trading day's orders in the trader's ledger with KIS's day
 order by order. Its scheduled job ``check-mock-trades-405`` ran on 2026-11-02 and left ``JOBS``
 (#505).
 
-The ledger is made by the mock book on the fake KIS (``tests/test_trader_mock.py``'s ``MockDay``),
+The ledger is made by the mock book on the fake KIS (``tests/kis_doubles.py``'s ``MockDay``),
 whose account the check then reads. Every value is made up.
 """
 
@@ -33,8 +33,8 @@ from krx_quant.trader.mock_check import (
 )
 from krx_quant.trader.store import DB_NAME as TRADER_DB
 from krx_quant.trader.store import TraderStore
-from tests.test_scheduled import COMMIT, THURSDAY, at
-from tests.test_trader_mock import ACCOUNT, BOUGHT, TEN, MockDay, kis_mock, settings_of
+from tests.kis_doubles import ACCOUNT, BOUGHT, TEN, MockDay, kis_mock, settings_of
+from tests.scheduled_doubles import COMMIT, THURSDAY, at
 from tests.trader_doubles import quote
 
 __all__ = ["kis_mock"]  # the fixture, used here

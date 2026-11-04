@@ -39,7 +39,7 @@ from krx_quant.trader.paper import TAKE_PROFIT, Rules
 from krx_quant.trader.quotes import BestQuote
 from krx_quant.trader.selection import Selection
 from krx_quant.trader.store import DB_NAME, TraderStore, read_days, read_trader, read_trades
-from tests.test_trader_mock import TIMING, Fill, kis_mock, resting_sells, settings_of, until
+from tests.kis_doubles import TIMING, Fill, kis_mock, resting_sells, settings_of
 from tests.trader_doubles import (
     BARRIER,
     CALENDAR,
@@ -56,6 +56,7 @@ from tests.trader_doubles import (
     quote,
     whole_rules,
 )
+from tests.waiting import until
 
 __all__ = ["kis_mock"]  # the fixture, used here
 

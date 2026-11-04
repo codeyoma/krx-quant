@@ -42,10 +42,10 @@ from krx_quant.prevalidation import _WalkForward
 from krx_quant.pricing import Direction, most_likely
 from krx_quant.stats import Interval
 from krx_quant.training import finished_days
+from tests.prevalidation_doubles import AFTER, DAYS
+from tests.replay_doubles import record
 from tests.replay_events import at, book, trade
 from tests.test_poisson import TRUE_INTENSITIES, vector
-from tests.test_prevalidation import AFTER, DAYS
-from tests.test_replay_cli import record
 
 UP, FLAT, DOWN = Direction.UP, Direction.FLAT, Direction.DOWN
 VARIANT = AsymmetricLink()

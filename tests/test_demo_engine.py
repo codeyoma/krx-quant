@@ -8,11 +8,12 @@ from __future__ import annotations
 
 import asyncio
 import socket
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
 
 import pytest
+import pytest_asyncio
 from aiohttp.test_utils import TestClient, TestServer
 
 from krx_quant.algorithms import ALGORITHMS
@@ -20,20 +21,31 @@ from krx_quant.cli import main
 from krx_quant.consensus import NAMES as CONSENSUS
 from krx_quant.demo import DEMO_SYMBOLS, demo_app
 from krx_quant.macro import INDICATORS
+from tests.api_doubles import receive_until
 from tests.api_schema import check
 from tests.replay_events import get_json
-from tests.test_api_stream import receive_until
+
+# The tests that only read the demo share one (#511): building it is most of a test's time, about
+# 8 s. Its client lives on the module's event loop, so they run on it too (fixtures default to the
+# test's own loop, ``pyproject.toml``). A test that writes to the demo, paces it or starts it through
+# the command builds its own.
+ON_THE_SHARED_DEMO = pytest.mark.asyncio(loop_scope="module")
 
 
-async def test_the_demo_engine_answers_what_a_screen_reads(tmp_path: Path) -> None:
-    app = await demo_app(tmp_path / "demo.sqlite3")
-
+@pytest_asyncio.fixture(scope="module", loop_scope="module")
+async def demo(tmp_path_factory: pytest.TempPathFactory) -> AsyncIterator[TestClient[Any, Any]]:
+    app = await demo_app(tmp_path_factory.mktemp("demo") / "demo.sqlite3")
     async with TestClient(TestServer(app)) as client:
-        status = await get_json(client, "/v1/status")
-        symbols = await get_json(client, "/v1/symbols")
-        latest = {s: await get_json(client, f"/v1/symbols/{s}/latest") for s in DEMO_SYMBOLS}
-        macro = await get_json(client, "/v1/macro")
-        newton = await get_json(client, "/v1/algorithms/newton")
+        yield client
+
+
+@ON_THE_SHARED_DEMO
+async def test_the_demo_engine_answers_what_a_screen_reads(demo: TestClient[Any, Any]) -> None:
+    status = await get_json(demo, "/v1/status")
+    symbols = await get_json(demo, "/v1/symbols")
+    latest = {s: await get_json(demo, f"/v1/symbols/{s}/latest") for s in DEMO_SYMBOLS}
+    macro = await get_json(demo, "/v1/macro")
+    newton = await get_json(demo, "/v1/algorithms/newton")
 
     assert status["mode"] == "demo"
     assert status["phase"] == "continuous"
@@ -58,15 +70,13 @@ async def test_the_demo_engine_answers_what_a_screen_reads(tmp_path: Path) -> No
         assert all(made[name]["status"] == "ok" for name in CONSENSUS), "the algorithms are active"
 
 
-async def test_the_demo_morning_halts_for_a_circuit_breaker_and_has_a_vi(tmp_path: Path) -> None:
+@ON_THE_SHARED_DEMO
+async def test_the_demo_morning_halts_for_a_circuit_breaker_and_has_a_vi(demo: TestClient[Any, Any]) -> None:
     """#236. Output: the special windows a chart shows (the circuit breaker's first stage from
     09:06 to 09:36 for every symbol, 000660's VI from 09:40:10 to 09:42:20), and no trade
     in the halt: the minute bars skip from 09:05 to 09:36."""
-    app = await demo_app(tmp_path / "demo.sqlite3")
-
-    async with TestClient(TestServer(app)) as client:
-        special = {s: await get_json(client, f"/v1/symbols/{s}/special") for s in DEMO_SYMBOLS}
-        bars = {s: await get_json(client, f"/v1/symbols/{s}/bars") for s in DEMO_SYMBOLS}
+    special = {s: await get_json(demo, f"/v1/symbols/{s}/special") for s in DEMO_SYMBOLS}
+    bars = {s: await get_json(demo, f"/v1/symbols/{s}/bars") for s in DEMO_SYMBOLS}
 
     breaker = {
         "kind": "circuit_breaker",
@@ -96,15 +106,13 @@ async def test_the_demo_morning_halts_for_a_circuit_breaker_and_has_a_vi(tmp_pat
         assert all(b["volume"] > 0 for b in body["bars"])
 
 
-async def test_the_demo_scrolls_back_into_two_earlier_afternoons(tmp_path: Path) -> None:
-    app = await demo_app(tmp_path / "demo.sqlite3")
+@ON_THE_SHARED_DEMO
+async def test_the_demo_scrolls_back_into_two_earlier_afternoons(demo: TestClient[Any, Any]) -> None:
     before = "before=2026-10-12T09:00:00%2B09:00"
-
-    async with TestClient(TestServer(app)) as client:
-        bars = await get_json(client, f"/v1/symbols/005930/bars?{before}&limit=2000")
-        made = await get_json(
-            client, f"/v1/symbols/005930/predictions?algorithm=consensus-final&{before}&limit=1000"
-        )
+    bars = await get_json(demo, f"/v1/symbols/005930/bars?{before}&limit=2000")
+    made = await get_json(
+        demo, f"/v1/symbols/005930/predictions?algorithm=consensus-final&{before}&limit=1000"
+    )
 
     starts = [b["start"] for b in bars["bars"]]
     # 14:00–15:19 of the 7th and the 8th (Friday the 9th is Hangul Day), oldest first.
@@ -125,14 +133,12 @@ async def test_the_demo_scrolls_back_into_two_earlier_afternoons(tmp_path: Path)
     )
 
 
-async def test_the_demo_has_two_years_of_day_candles_before_the_morning(tmp_path: Path) -> None:
-    app = await demo_app(tmp_path / "demo.sqlite3")
-
-    async with TestClient(TestServer(app)) as client:
-        latest = await get_json(client, "/v1/symbols/005930/candles?period=day")
-        older = await get_json(
-            client, "/v1/symbols/005930/candles?period=day&before=2026-10-07T00:00:00%2B09:00&limit=2000"
-        )
+@ON_THE_SHARED_DEMO
+async def test_the_demo_has_two_years_of_day_candles_before_the_morning(demo: TestClient[Any, Any]) -> None:
+    latest = await get_json(demo, "/v1/symbols/005930/candles?period=day")
+    older = await get_json(
+        demo, "/v1/symbols/005930/candles?period=day&before=2026-10-07T00:00:00%2B09:00&limit=2000"
+    )
 
     dates = [c["date"] for c in latest["candles"]]
     assert (latest["venue"], len(dates), dates[-2:]) == ("UN", 400, ["2026-10-07", "2026-10-08"])
@@ -142,14 +148,14 @@ async def test_the_demo_has_two_years_of_day_candles_before_the_morning(tmp_path
     assert abs(last["close"] - 81_250) <= 81_250 * 0.001, "the last close is near the morning's open"
 
 
-async def test_the_demo_has_finished_weeks_months_and_years_made_of_its_days(tmp_path: Path) -> None:
-    app = await demo_app(tmp_path / "demo.sqlite3")
-
-    async with TestClient(TestServer(app)) as client:
-        days = await get_json(client, "/v1/symbols/005930/candles?period=day&limit=2000")
-        weeks = await get_json(client, "/v1/symbols/005930/candles?period=week&limit=2000")
-        months = await get_json(client, "/v1/symbols/005930/candles?period=month")
-        years = await get_json(client, "/v1/symbols/005930/candles?period=year")
+@ON_THE_SHARED_DEMO
+async def test_the_demo_has_finished_weeks_months_and_years_made_of_its_days(
+    demo: TestClient[Any, Any],
+) -> None:
+    days = await get_json(demo, "/v1/symbols/005930/candles?period=day&limit=2000")
+    weeks = await get_json(demo, "/v1/symbols/005930/candles?period=week&limit=2000")
+    months = await get_json(demo, "/v1/symbols/005930/candles?period=month")
+    years = await get_json(demo, "/v1/symbols/005930/candles?period=year")
 
     # The morning (Monday the 12th) is in a new week: the 8th's is the last one over.
     assert weeks["candles"][-1]["date"] == "2026-10-05"
@@ -160,17 +166,16 @@ async def test_the_demo_has_finished_weeks_months_and_years_made_of_its_days(tmp
     assert weeks["candles"][-1]["volume"] == sum(c["volume"] for c in last_week)
 
 
-async def test_the_demo_has_daily_supply_on_its_candles_days_but_the_morning_s(tmp_path: Path) -> None:
+@ON_THE_SHARED_DEMO
+async def test_the_demo_has_daily_supply_on_its_candles_days_but_the_morning_s(
+    demo: TestClient[Any, Any],
+) -> None:
     """#226. Output: every symbol's eight daily values on the 500 candle days, none on the
     morning (its day is not over), so a chart shows them in every view."""
-    app = await demo_app(tmp_path / "demo.sqlite3")
-
-    async with TestClient(TestServer(app)) as client:
-        supply = {
-            s: await get_json(client, f"/v1/symbols/{s}/supply?from=2016-01-01&to=2026-10-12")
-            for s in DEMO_SYMBOLS
-        }
-        candles = await get_json(client, "/v1/symbols/005930/candles?period=day&limit=2000")
+    supply = {
+        s: await get_json(demo, f"/v1/symbols/{s}/supply?from=2016-01-01&to=2026-10-12") for s in DEMO_SYMBOLS
+    }
+    candles = await get_json(demo, "/v1/symbols/005930/candles?period=day&limit=2000")
 
     for symbol, body in supply.items():
         check("supply", body)
@@ -181,17 +186,15 @@ async def test_the_demo_has_daily_supply_on_its_candles_days_but_the_morning_s(t
         assert all(0 < d["foreign_ratio"] < 100 for d in days)
 
 
-async def test_the_demo_has_the_daily_kinds_days_and_its_morning(tmp_path: Path) -> None:
+@ON_THE_SHARED_DEMO
+async def test_the_demo_has_the_daily_kinds_days_and_its_morning(demo: TestClient[Any, Any]) -> None:
     """#264. Output: open_to_close's last 20 days up to the 8th, each with the three baselines' and
     Cox's 08:50 predictions and the day's answer, and the morning's predictions waiting for theirs."""
-    app = await demo_app(tmp_path / "demo.sqlite3")
-
-    async with TestClient(TestServer(app)) as client:
-        kinds = await get_json(client, "/v1/kinds")
-        latest = await get_json(client, "/v1/symbols/005930/kinds/open_to_close/latest")
-        made = await get_json(client, "/v1/symbols/005930/kinds/open_to_close/predictions?limit=21")
-        board = await get_json(client, "/v1/leaderboard?kind=open_to_close&period=20d")
-        cox = await get_json(client, "/v1/algorithms/cox")
+    kinds = await get_json(demo, "/v1/kinds")
+    latest = await get_json(demo, "/v1/symbols/005930/kinds/open_to_close/latest")
+    made = await get_json(demo, "/v1/symbols/005930/kinds/open_to_close/predictions?limit=21")
+    board = await get_json(demo, "/v1/leaderboard?kind=open_to_close&period=20d")
+    cox = await get_json(demo, "/v1/algorithms/cox")
 
     daily = next(k for k in kinds["kinds"] if k["name"] == "open_to_close")
     assert daily["daily"]["predict_at"] == "08:50"
@@ -214,18 +217,16 @@ async def test_the_demo_has_the_daily_kinds_days_and_its_morning(tmp_path: Path)
     assert cox["kind"] == "open_to_close" and cox["model"]["version"].startswith("cox-2026")
 
 
-async def test_the_demo_has_the_five_session_kind_s_windows(tmp_path: Path) -> None:
+@ON_THE_SHARED_DEMO
+async def test_the_demo_has_the_five_session_kind_s_windows(demo: TestClient[Any, Any]) -> None:
     """#310. Output: open_to_close_5d's windows begun on the last 20 days up to the 8th, each with
     its three baselines' 08:50 predictions; those ended by the 8th answered at their end day's
     20:35, the four begun from the 5th and the morning's waiting for their end; and the windows over
     005930's made-up interim ex-dividend day (2026-09-29, 락 구분 05) marked ``ex_dividend``."""
-    app = await demo_app(tmp_path / "demo.sqlite3")
-
-    async with TestClient(TestServer(app)) as client:
-        kinds = await get_json(client, "/v1/kinds")
-        latest = await get_json(client, "/v1/symbols/005930/kinds/open_to_close_5d/latest")
-        made = await get_json(client, "/v1/symbols/005930/kinds/open_to_close_5d/predictions?limit=21")
-        board = await get_json(client, "/v1/leaderboard?kind=open_to_close_5d&period=20d")
+    kinds = await get_json(demo, "/v1/kinds")
+    latest = await get_json(demo, "/v1/symbols/005930/kinds/open_to_close_5d/latest")
+    made = await get_json(demo, "/v1/symbols/005930/kinds/open_to_close_5d/predictions?limit=21")
+    board = await get_json(demo, "/v1/leaderboard?kind=open_to_close_5d&period=20d")
 
     daily = next(k for k in kinds["kinds"] if k["name"] == "open_to_close_5d")["daily"]
     assert daily["awaiting"] is None and daily["review_hold"] is None
@@ -249,13 +250,11 @@ async def test_the_demo_has_the_five_session_kind_s_windows(tmp_path: Path) -> N
     assert {e["algorithm"] for e in board["baselines"]} == baselines
 
 
-async def test_the_demo_has_a_briefing_of_its_morning(tmp_path: Path) -> None:
+@ON_THE_SHARED_DEMO
+async def test_the_demo_has_a_briefing_of_its_morning(demo: TestClient[Any, Any]) -> None:
     """#304. Output: the night begun on the 8th, each symbol's pre-market and the auction's last
     expected price, the morning's economic calendar, US closes and Cox's 08:50 inputs."""
-    app = await demo_app(tmp_path / "demo.sqlite3")
-
-    async with TestClient(TestServer(app)) as client:
-        body = await get_json(client, "/v1/briefing")
+    body = await get_json(demo, "/v1/briefing")
 
     check("briefing", body)
     assert (body["day"], body["previous_day"]) == ("2026-10-12", "2026-10-08")
@@ -274,14 +273,12 @@ async def test_the_demo_has_a_briefing_of_its_morning(tmp_path: Path) -> None:
         assert inputs["algorithm"] == "cox" and inputs["bias"] is not None
 
 
-async def test_the_demo_has_its_morning_s_flows(tmp_path: Path) -> None:
+@ON_THE_SHARED_DEMO
+async def test_the_demo_has_its_morning_s_flows(demo: TestClient[Any, Any]) -> None:
     """#306. Output: each symbol's program trading and member firms through the morning, nothing
     during the halt, the REST stand-ins from 10:00 to 10:10, two estimate slots, and the 8th's
     totals at 10:30."""
-    app = await demo_app(tmp_path / "demo.sqlite3")
-
-    async with TestClient(TestServer(app)) as client:
-        body = await get_json(client, "/v1/symbols/000660/flow")
+    body = await get_json(demo, "/v1/symbols/000660/flow")
 
     check("flow", body)
     assert (body["day"], body["recorded"]) == ("2026-10-12", True)
@@ -297,14 +294,12 @@ async def test_the_demo_has_its_morning_s_flows(tmp_path: Path) -> None:
     assert [w["kind"] for w in body["special"]] == ["circuit_breaker", "vi"]
 
 
-async def test_the_demo_has_a_cost_map(tmp_path: Path) -> None:
+@ON_THE_SHARED_DEMO
+async def test_the_demo_has_a_cost_map(demo: TestClient[Any, Any]) -> None:
     """#307. Output: each symbol's card at its mid-point at 10:30, a row each kind with a
     direction (the range has none), every row's breakeven but the daily kind's, and the made-up
     base rates of the four periods."""
-    app = await demo_app(tmp_path / "demo.sqlite3")
-
-    async with TestClient(TestServer(app)) as client:
-        body = await get_json(client, "/v1/cost-map?period=20d")
+    body = await get_json(demo, "/v1/cost-map?period=20d")
 
     check("cost_map", body)
     cards = {s["symbol"]: s for s in body["symbols"]}
@@ -328,20 +323,18 @@ async def test_the_demo_has_a_cost_map(tmp_path: Path) -> None:
     assert len(regimes["rows"]) == 12, "three symbols, four periods"
 
 
-# Two demos built: about 9 s on a laptop, near the 30 s default (``pyproject.toml``) on a loaded
-# CI runner (#327).
+# Run first, it builds the shared demo: about 9 s on a laptop, near the 30 s default
+# (``pyproject.toml``) on a loaded CI runner (#327).
 @pytest.mark.timeout(120)
-async def test_the_demo_has_its_closing_flow(tmp_path: Path) -> None:
+@ON_THE_SHARED_DEMO
+async def test_the_demo_has_its_closing_flow(demo: TestClient[Any, Any]) -> None:
     """#305. Output: the morning's demand at 10:30 by the engine's price, its products named, one
     without its net assets, the others' KIS's; the 20 days before on KRX's net assets, the last 8
     with their stored 15:20 demand, the others from the bars, a VI day, the first five with KRX's
     closing bar's value in place of a recorded one, and 009150 without demand."""
-    app = await demo_app(tmp_path / "demo.sqlite3")
-
-    async with TestClient(TestServer(app)) as client:
-        today = await get_json(client, "/v1/symbols/000660/closing-flow")
-        days = await get_json(client, "/v1/symbols/000660/closing-flow/days")
-        control = await get_json(client, "/v1/symbols/009150/closing-flow")
+    today = await get_json(demo, "/v1/symbols/000660/closing-flow")
+    days = await get_json(demo, "/v1/symbols/000660/closing-flow/days")
+    control = await get_json(demo, "/v1/symbols/009150/closing-flow")
 
     check("closing_flow", today)
     check("closing_flow_days", days)
@@ -366,13 +359,15 @@ async def test_the_demo_has_its_closing_flow(tmp_path: Path) -> None:
     assert (control["demand"], control["reason"]) == (None, "no_products")
 
 
-# Two demos built: about 13 s on a laptop. It went past the 30 s default (``pyproject.toml``) on a
-# CI runner (#392), as the others did on a loaded one (#327).
+# A second demo built beside the shared one, both when this runs first: about 13 s on a laptop. It
+# went past the 30 s default (``pyproject.toml``) on a CI runner (#392), as the others did on a
+# loaded one (#327).
 @pytest.mark.timeout(120)
-async def test_the_demo_is_the_same_every_time(tmp_path: Path) -> None:
-    first, second = await demo_app(tmp_path / "a.sqlite3"), await demo_app(tmp_path / "b.sqlite3")
+@ON_THE_SHARED_DEMO
+async def test_the_demo_is_the_same_every_time(demo: TestClient[Any, Any], tmp_path: Path) -> None:
+    second = await demo_app(tmp_path / "b.sqlite3")
 
-    async with TestClient(TestServer(first)) as a, TestClient(TestServer(second)) as b:
+    async with TestClient(TestServer(second)) as b:
         for path in (
             "/v1/symbols",
             "/v1/symbols/005930/predictions?limit=20&algorithm=newton",
@@ -386,13 +381,16 @@ async def test_the_demo_is_the_same_every_time(tmp_path: Path) -> None:
             "/v1/symbols/005930/closing-flow/days",
             "/v1/cost-map?period=20d",
         ):
-            assert await get_json(a, path) == await get_json(b, path)
+            assert await get_json(demo, path) == await get_json(b, path)
 
 
-# Two demos built, one of them paced: about 10 s on a laptop, near the 30 s default
-# (``pyproject.toml``) on a loaded CI runner (#327).
+# A paced demo built, and the shared one when this runs first: about 10 s on a laptop, near the 30 s
+# default (``pyproject.toml``) on a loaded CI runner (#327).
 @pytest.mark.timeout(120)
-async def test_a_paced_demo_streams_its_last_half_hour_as_it_goes(tmp_path: Path) -> None:
+@ON_THE_SHARED_DEMO
+async def test_a_paced_demo_streams_its_last_half_hour_as_it_goes(
+    demo: TestClient[Any, Any], tmp_path: Path
+) -> None:
     paced = await demo_app(tmp_path / "paced.sqlite3", pace=0.05)
 
     async with TestClient(TestServer(paced)) as client:
@@ -405,11 +403,9 @@ async def test_a_paced_demo_streams_its_last_half_hour_as_it_goes(tmp_path: Path
     assert any(e["type"] == "prediction" for e in events)
     assert all(e["at"] >= "2026-10-12T10:00:00+09:00" for e in events if e["type"] != "health"), "after 10:00"
     assert status["last_bar_close"] == "2026-10-12T10:30:00+09:00", "it goes on to 10:30, then stays"
-    unpaced = await demo_app(tmp_path / "unpaced.sqlite3")
-    async with TestClient(TestServer(unpaced)) as client:
-        assert await get_json(client, "/v1/symbols/005930/predictions?limit=40&algorithm=newton") == made, (
-            "the same morning as without the pace"
-        )
+    assert await get_json(demo, "/v1/symbols/005930/predictions?limit=40&algorithm=newton") == made, (
+        "the same morning as without the pace"
+    )
 
 
 async def test_a_paced_demo_moves_the_bar_being_made_within_its_minute(tmp_path: Path) -> None:
@@ -521,15 +517,13 @@ def test_a_pace_is_a_finite_number_of_seconds_more_than_0(
     assert "seconds per minute of the demo morning: a finite number more than 0" in capsys.readouterr().err
 
 
-async def test_the_demo_has_the_trader_s_paper_and_live_trades_on_005930(tmp_path: Path) -> None:
+@ON_THE_SHARED_DEMO
+async def test_the_demo_has_the_trader_s_paper_and_live_trades_on_005930(demo: TestClient[Any, Any]) -> None:
     """#398. Output: buys and sells on the two afternoons before and on the morning, paper up to
     10:05 and live after, each sell's exit reason and net P&L, the morning's last trade still open
     at 10:30; none on the other symbols."""
-    app = await demo_app(tmp_path / "demo.sqlite3")
-
-    async with TestClient(TestServer(app)) as client:
-        body = await get_json(client, "/v1/symbols/005930/trader-marks")
-        other = await get_json(client, "/v1/symbols/000660/trader-marks")
+    body = await get_json(demo, "/v1/symbols/005930/trader-marks")
+    other = await get_json(demo, "/v1/symbols/000660/trader-marks")
 
     check("trader_marks", body)
     marks = body["marks"]
@@ -542,7 +536,8 @@ async def test_the_demo_has_the_trader_s_paper_and_live_trades_on_005930(tmp_pat
     assert other["marks"] == []
 
 
-async def test_the_demo_has_the_trader_s_state_days_and_controls(tmp_path: Path) -> None:
+@ON_THE_SHARED_DEMO
+async def test_the_demo_has_the_trader_s_state_days_and_controls(demo: TestClient[Any, Any]) -> None:
     """#397, for the auto trader screen. Output: the live trader running at 10:30 with the
     morning's last trade open (its target, stop and time barrier, marked at the last bid), the
     day's and the cumulative P&L of its trades, the limits' use; the screen's pause of the 8th and
@@ -552,14 +547,11 @@ async def test_the_demo_has_the_trader_s_state_days_and_controls(tmp_path: Path)
     evaluation version begun on the 8th's night (#469: its first review cycle from the 12th); the risk
     rules' state (#475), each trade's execution cost and the policies' fitted figures with their
     calibration and a cell left out (#472, #475)."""
-    app = await demo_app(tmp_path / "demo.sqlite3")
-
-    async with TestClient(TestServer(app)) as client:
-        state = await get_json(client, "/v1/trader")
-        days = await get_json(client, "/v1/trader/days")
-        trades = await get_json(client, "/v1/trader/trades")
-        theirs = await get_json(client, "/v1/trader/trades?policy=2")
-        policies = await get_json(client, "/v1/trader/policies")
+    state = await get_json(demo, "/v1/trader")
+    days = await get_json(demo, "/v1/trader/days")
+    trades = await get_json(demo, "/v1/trader/trades")
+    theirs = await get_json(demo, "/v1/trader/trades?policy=2")
+    policies = await get_json(demo, "/v1/trader/policies")
 
     check("trader", state)
     check("trader_days", days)

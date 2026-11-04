@@ -16,11 +16,10 @@ from krx_quant.config import Settings
 from krx_quant.fake_kis import FakeKis
 from krx_quant.feeds import FOREIGN_ESTIMATE, KST, VI_STATUS
 from krx_quant.market_calendar import MarketCalendar
+from tests.collector_doubles import FIXED_NOW, TRADE_KEY, Clock, read, settings_for
 from tests.kis_frames import book_frame, trade_frame, us_trade_frame
-from tests.test_collector import FIXED_NOW, read, settings_for
-from tests.test_subscription_limit import until
+from tests.waiting import until
 
-TRADE_KEY = ("H0UNCNT0", "005930")
 DOWN = "KIS WebSocket down"  # each failed connection's WARNING
 SHORT = "not alerted"  # a drop back before its alert's WARNING (#488)
 
@@ -71,16 +70,6 @@ async def test_reconnects_and_restores_every_subscription_after_kis_drops_the_co
     ]
     assert second_round == first_round
     assert [t["price"] for t in read(tmp_path, "events", "H0UNCNT0")] == [81200, 81300]
-
-
-class Clock:
-    """A settable clock for the collector (time is a system boundary)."""
-
-    def __init__(self, at: datetime) -> None:
-        self.at = at
-
-    def __call__(self) -> datetime:
-        return self.at
 
 
 async def test_a_dropped_connection_is_recorded_as_a_gap_for_every_subscription(

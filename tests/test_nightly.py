@@ -18,8 +18,6 @@ from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
 
-import pyarrow as pa
-import pyarrow.parquet as pq
 import pytest
 
 from krx_quant.algorithms import ALGORITHMS, KIND_ALGORITHMS, Algorithm, Model, Sample
@@ -28,7 +26,7 @@ from krx_quant.algorithms.granger import Granger
 from krx_quant.algorithms.mandelbrot import NAME as MANDELBROT
 from krx_quant.algorithms.markov import Markov
 from krx_quant.archive import archive
-from krx_quant.backfill import BAR_SCHEMA, MINUTE_BARS_TR
+from krx_quant.backfill import MINUTE_BARS_TR
 from krx_quant.barriers import BARRIER
 from krx_quant.barriers import CLIMATE as BARRIER_CLIMATE
 from krx_quant.cli import main
@@ -57,49 +55,9 @@ from krx_quant.touch import TARGET_VERSION
 from krx_quant.training import TrainingDay, training_day
 from tests.algorithm_doubles import FrequencyAlgorithm, PlacedAlgorithm
 from tests.api_schema import check
+from tests.nightly_doubles import DAYS, FEE, FINISHED, NIGHT, archive_bars, archive_events, read
+from tests.replay_doubles import busy_morning
 from tests.replay_events import api, at, book, every, get_json, index_tick, trade
-from tests.synthetic_bars import trending
-from tests.test_replay import busy_morning
-from tests.test_replay_cli import record
-
-FEE = 0.015 / 100
-# Eight trading days: the last three validate, the four before them train (the stand-ins
-# train on 4), and the first is too old to be used.
-DAYS = [d for d in (date(2026, 9, 14) + timedelta(days=i) for i in range(12)) if d.weekday() < 5][:8]
-NIGHT = DAYS[-1]
-FINISHED = datetime.combine(NIGHT, time(21, 40), KST)  # when the run writes its list
-
-
-def archive_bars(root: Path, day: date, symbol: str = "005930", ticks_per_minute: float = 1.0) -> None:
-    """A rising (or falling) day of bars, where the archive puts it."""
-    rows = [
-        {
-            "symbol": symbol,
-            "bar_time": b.start,
-            "venue": "UN",
-            "open": b.open,
-            "high": b.high,
-            "low": b.low,
-            "close": b.close,
-            "volume": b.volume,
-            "cum_value": 0,
-        }
-        for b in trending(day, ticks_per_minute, seed=day.day)
-    ]
-    path = root / "bars" / f"date={day}" / f"feed={MINUTE_BARS_TR}" / f"symbol={symbol}" / "bars.parquet"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    pq.write_table(pa.Table.from_pylist(rows, schema=BAR_SCHEMA), path)
-
-
-def archive_events(root: Path, day: date, events: list[Event], work: Path) -> None:
-    """A recorded day of ``events``, stored where the archive puts it."""
-    data = work / f"recorded-{day}"
-    record(data, sorted(events, key=lambda e: e[1]["received_at"]), day=day)
-    asyncio.run(archive(data, LocalObjectStore(root)))
-
-
-def read(root: Path, key: str) -> Any:
-    return json.loads((root / key).read_text())
 
 
 @pytest.fixture

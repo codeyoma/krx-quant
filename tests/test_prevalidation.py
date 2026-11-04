@@ -24,13 +24,12 @@ import pytest
 from krx_quant import engine as engine_module
 from krx_quant import prevalidation, stats
 from krx_quant.algorithms import Algorithm, Model, NothingToLearn, RegistrationError, Sample, save_model
-from krx_quant.baselines import TOUCH_BASELINES, Forecast
+from krx_quant.baselines import TOUCH_BASELINES
 from krx_quant.cli import main
 from krx_quant.clock import FakeClock
 from krx_quant.config import Settings
 from krx_quant.consensus import fit as fit_weights
-from krx_quant.engine import Event, PredictionEngine
-from krx_quant.features import FeatureVector
+from krx_quant.engine import PredictionEngine
 from krx_quant.feeds import KST
 from krx_quant.footprint import give_back
 from krx_quant.kind_stats import entry as kind_entry
@@ -61,84 +60,12 @@ from krx_quant.replay import recorded_events, replay_into, replay_recorded
 from krx_quant.stats import Lift
 from krx_quant.swap import reload_models
 from krx_quant.touch import TARGET_VERSION
-from tests.algorithm_doubles import FixedAlgorithm, stand_in_card, stand_in_meanings
+from tests.algorithm_doubles import FixedAlgorithm
 from tests.kind_doubles import DRIFT, TEST_KIND, FixedKindAlgorithm
-from tests.replay_events import FEE, api, at, book, get_json, run, trade
-from tests.test_lifecycle import Outbox
-from tests.test_replay import busy_morning, stored
-from tests.test_replay_cli import record
-
-# Ten trading days, the fewest that can pass: Monday 14 to Friday 25 September.
-DAYS = [d for d in (date(2026, 9, 14) + timedelta(days=i) for i in range(12)) if d.weekday() < 5]
-AFTER = datetime.combine(date(2026, 9, 28), time(8), KST)  # the next Monday morning
-ALPHA = FixedAlgorithm("alpha", features=("velocity",), unique=("velocity",))
-
-
-def swings(day: date, end: str = "10:30:00") -> list[Event]:
-    """A mid-point four ticks up and down every eight minutes: what went up for four
-    minutes comes down the next four. A trade at the ask every ten seconds.
-    """
-    events: list[Event] = []
-    start = when = at("09:00:00", day)
-    while when <= at(end, day):
-        phase = (when - start) / timedelta(minutes=8) % 1
-        level = 4 * (4 * phase - 1 if phase < 0.5 else 3 - 4 * phase)
-        mid = 81_250 + 100 * round(level)
-        events += [book(when, mid - 50, mid + 50), trade(when + timedelta(seconds=1), mid + 50, 3)]
-        when += timedelta(seconds=10)
-    return events
-
-
-class Contrarian:
-    """Calls the last ``lag`` minutes undone: right on a market that swings back. Its own
-    feature is ``own``; it reads the minutes' moves whatever it is."""
-
-    training_days = 2
-
-    def __init__(self, name: str, own: str = "minute_ticks", lag: int = 4) -> None:
-        self.name = name
-        self.features: tuple[str, ...] = tuple(dict.fromkeys(("minute_ticks", own)))
-        self.card = stand_in_card(name, "the last minutes undone", (own,), "nothing")
-        self.param_meanings = stand_in_meanings()
-        self._lag = lag
-        self.fitted: list[list[date]] = []  # the days each fit trained on
-
-    def default_model(self) -> Model:
-        return Model(f"{self.name}-default", {})
-
-    def fit(self, samples: Sequence[Sample]) -> Model:
-        self.fitted.append(sorted({s.bar_close.astimezone(KST).date() for s in samples}))
-        return Model.fitted(self.name, {}, [s for s in samples if s.outcome is not None], 0.0)
-
-    def predict(self, features: FeatureVector, model: Model) -> Forecast:
-        change = sum(features.series("minute_ticks")[-self._lag :])
-        if change >= 2:
-            return Forecast(0.1, 0.2, 0.7, -change)
-        if change <= -2:
-            return Forecast(0.7, 0.2, 0.1, -change)
-        return Forecast(0.2, 0.6, 0.2, 0.0)
-
-
-def settings(tmp_path: Path, days: Sequence[date] = DAYS) -> Settings:
-    data = tmp_path / "data"
-    for day in days:
-        record(data, swings(day), day=day)
-    return Settings(
-        kis_app_key="",
-        kis_app_secret="",
-        symbols=("005930",),
-        etf_symbols=(),
-        index_codes=(),
-        us_symbols=(),
-        data_dir=data,
-        state_dir=tmp_path / "state",
-        min_sample=20,
-    )
-
-
-def report(s: Settings, name: str) -> dict[str, Any]:
-    data: dict[str, Any] = json.loads((s.state_dir / "prevalidations" / f"{name}.json").read_text())
-    return data
+from tests.lifecycle_doubles import Outbox
+from tests.prevalidation_doubles import AFTER, ALPHA, DAYS, Contrarian, report, settings, swings
+from tests.replay_doubles import busy_morning, stored
+from tests.replay_events import FEE, api, at, get_json, run
 
 
 # Ten recorded days are the fewest that pass (``MIN_DAYS``), each a whole session replayed:

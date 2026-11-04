@@ -39,8 +39,9 @@ from krx_quant.scheduled import FAILED, JOBS, OK, Facts, JobRecord, Night
 from krx_quant.simulation import BAR_CLOSE_DAYS, SimulationRun, report, simulate_bar_close
 from krx_quant.touch import TARGET_VERSION
 from tests.algorithm_doubles import FixedAlgorithm, spend
-from tests.test_prevalidation import MEMORY_LINE, Contrarian, swings
-from tests.test_replay_cli import record
+from tests.prevalidation_doubles import Contrarian, swings
+from tests.replay_doubles import record
+from tests.test_prevalidation import MEMORY_LINE
 
 SYMBOL = "005930"
 ALPHA = FixedAlgorithm("alpha", features=("velocity",), unique=("velocity",))

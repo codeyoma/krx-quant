@@ -5,6 +5,10 @@ daily closes and KIS daily supply, written as the collector stores them.
 ``signal`` the day's open→close leans against the night's SOX move (the US shock given back
 during the day) and with the previous day's foreign net buys: a model that reads them can beat
 the baselines; without it every day is noise.
+
+``settings`` makes such a history ending on Friday 16 October and the settings that read it, and
+``engine_on`` an engine on it that runs only the daily algorithms given, for the simulated
+probation's tests and the scheduled jobs that run it (#298, #511).
 """
 
 from __future__ import annotations
@@ -12,14 +16,21 @@ from __future__ import annotations
 import random
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from krx_quant.auctions import KEEP_DAYS, MINUTE_BAR, write_auctions
 from krx_quant.candles import write_candles, write_krx_days
+from krx_quant.clock import FakeClock
+from krx_quant.config import Settings
+from krx_quant.engine import PredictionEngine
+from krx_quant.features import FeatureVector
+from krx_quant.feeds.base import KST
+from krx_quant.kinds import DIRECTION_KIND
 from krx_quant.macro import Observation
 from krx_quant.market_calendar import MarketCalendar
+from krx_quant.predictions import DB_NAME, PredictionStore
 from krx_quant.supply import KIS, NET_MARKET, NXT_OPENED, write_supply
 from krx_quant.us_daily import write_us_daily
 
@@ -130,3 +141,53 @@ def made_history(
             }
             write_auctions(data_dir, symbol, kept)
     return Made(krx, us_days)
+
+
+FEE = 0.015 / 100
+LAST = date(2026, 10, 16)  # a Friday: the last made-up KRX day
+NIGHT = datetime(2026, 10, 16, 23, 0, tzinfo=KST)  # that night's scheduled jobs
+CALENDAR = MarketCalendar()
+
+
+def settings(tmp_path: Path, signal: float, days: int = 420, seed: int = 298) -> Settings:
+    made_history(tmp_path / "data", tmp_path / "state", LAST, days, signal=signal, seed=seed)
+    return Settings(
+        kis_app_key="",
+        kis_app_secret="",
+        symbols=SYMBOLS,
+        etf_symbols=(),
+        index_codes=(),
+        us_symbols=(),
+        data_dir=tmp_path / "data",
+        state_dir=tmp_path / "state",
+    )
+
+
+def store_of(s: Settings) -> PredictionStore:
+    return PredictionStore(s.state_dir / DB_NAME)
+
+
+class Source:
+    def days(self, symbol: str) -> list[Any]:
+        return []
+
+
+def no_features(algorithm: Any, symbol: str, day: date, past: Sequence[Any], band: Any) -> FeatureVector:
+    return FeatureVector({}, ())
+
+
+def engine_on(s: Settings, clock: FakeClock, algorithms: Sequence[Any]) -> PredictionEngine:
+    return PredictionEngine(
+        store_of(s),
+        CALENDAR,
+        SYMBOLS,
+        FEE,
+        clock,
+        algorithms=(),
+        kinds=(DIRECTION_KIND,),
+        kind_algorithms=(),
+        daily=Source(),
+        daily_algorithms=algorithms,
+        daily_features=no_features,
+        daily_feature_names={"us_sox"},
+    )

@@ -452,7 +452,7 @@ async def test_a_passed_algorithm_held_for_its_review_days_is_not_said_to_wait_a
     통과해야 돌기 시작합니다"."""
     from krx_quant.daily import StoredDays
     from krx_quant.replay import replay_into
-    from tests.test_lifecycle import Outbox
+    from tests.lifecycle_doubles import Outbox
 
     s = settings(tmp_path, 420)
     monday = date(2026, 10, 19)
@@ -500,7 +500,7 @@ async def test_a_refused_algorithm_is_told_once_across_restarts_and_waits_again_
     from krx_quant.engine import REFUSED_RUN
     from krx_quant.prevalidation import admits, refusals
     from krx_quant.replay import replay_into
-    from tests.test_lifecycle import Outbox
+    from tests.lifecycle_doubles import Outbox
 
     s = settings(tmp_path, 420)
     algorithm = Cox5d()

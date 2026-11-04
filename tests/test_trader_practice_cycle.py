@@ -36,9 +36,8 @@ from krx_quant.trader.selection import GONE, Pick, Selection, choose
 from krx_quant.trader.settings import TraderSettings
 from krx_quant.trader.store import DB_NAME, TraderStore, read_trader
 from tests.api_schema import check
-from tests.test_trader_mock import kis_mock, settings_of
+from tests.kis_doubles import kis_mock, settings_of
 from tests.test_trader_replay import ONE_CELL, TODAY, models, replayed
-from tests.test_trader_run import EngineApi
 from tests.trader_doubles import (
     BARRIER,
     CALENDAR,
@@ -46,6 +45,7 @@ from tests.trader_doubles import (
     FEE,
     Barrier,
     Day,
+    EngineApi,
     alone,
     at,
     cost_map,

@@ -13,8 +13,8 @@ import pytest
 
 from krx_quant.collector import measure_subscription_limit, run_collector
 from krx_quant.fake_kis import FakeKis
-from tests.test_collector import FIXED_NOW, read, settings_for
-from tests.waiting import until as until  # test_resilience.py still imports it from here
+from tests.collector_doubles import FIXED_NOW, read, settings_for
+from tests.waiting import until
 
 QUOTE, BOOK_SNAPSHOT = "FHKST01010100", "FHKST01010200"
 

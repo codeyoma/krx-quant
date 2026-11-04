@@ -9,22 +9,16 @@ against ``structure-check``.
 
 from __future__ import annotations
 
-import contextlib
-from collections.abc import AsyncIterator, Sequence
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
-from aiohttp.test_utils import TestClient, TestServer
+from aiohttp.test_utils import TestClient
 
-from krx_quant.api import create_app
-from krx_quant.barriers import ANSWER_VERSION as BARRIER_VERSION
-from krx_quant.barriers import BARRIER, CLIMATE, DOWN_FIRST, PERSIST, TIMEOUT, UP_FIRST
+from krx_quant.barriers import PERSIST
 from krx_quant.base_rates import NOT_COMPUTED, keep_base_rates
 from krx_quant.cost_map import NOT_SYMMETRIC
-from krx_quant.daily import StoredDays
-from krx_quant.engine import PredictionEngine
 from krx_quant.kinds import Answer
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.open_to_close import ANSWER_VERSION as OTC_VERSION
@@ -33,35 +27,13 @@ from krx_quant.predictions import NewKindPrediction, PredictionStore
 from krx_quant.pricing import Direction
 from krx_quant.structure_check import PERIODS, structure_check
 from krx_quant.touch import TouchResult
+from tests.api_doubles import OUTCOMES, SYMBOLS, barrier_board, baselines, cost_map, get, store_scored
 from tests.api_schema import check
-from tests.replay_events import DAY, at, run
-from tests.test_leaderboard_api import OUTCOMES, baselines, get, store_scored
+from tests.replay_events import DAY, at
 from tests.test_structure_check import SYMBOL, bar, flat_bar, write_bars
 
 UP, FLAT, DOWN = Direction.UP, Direction.FLAT, Direction.DOWN
-SYMBOLS = ("005930", "000660", "009150")
 FEE = 0.00015
-# The barrier's answers at the 40 bar closes from 09:01, as the direction's OUTCOMES.
-BARRIER_OUTCOMES = [UP_FIRST, TIMEOUT, DOWN_FIRST, TIMEOUT] * 10
-
-
-@contextlib.asynccontextmanager
-async def cost_map(
-    tmp_path: Path, min_sample: int = 20
-) -> AsyncIterator[tuple[PredictionEngine, TestClient[Any, Any]]]:
-    # A holiday: no mid-point now, so a card's price is the latest bar close's.
-    engine = await run(
-        tmp_path / "engine.db",
-        [],
-        until=at("16:00:00"),
-        calendar=MarketCalendar({DAY: False}),
-        symbols=SYMBOLS,
-        target_version=1,
-        daily=StoredDays(tmp_path / "data"),  # the daily kind's row
-    )
-    app = create_app(engine, min_sample=min_sample, state_dir=tmp_path / "state")
-    async with TestClient(TestServer(app)) as client:
-        yield engine, client
 
 
 async def ask(client: TestClient[Any, Any], query: str = "") -> Any:
@@ -231,36 +203,6 @@ async def test_a_predictor_s_rise_calls_are_counted_apart_from_its_rise_and_fall
     }
     assert baseline["long"]["calls"] == baseline["calls"] == 40
     assert baseline["long"]["precision"] == baseline["precision"], "no fall call: the same"
-
-
-def store_barrier(store: PredictionStore, algorithm: str, calls: Sequence[str], width: int = 10) -> None:
-    """``calls`` (one sure call per bar close from 09:01) of the barrier on 005930, answered by
-    BARRIER_OUTCOMES, ``width`` ticks from 81,250 won."""
-    start = datetime.combine(DAY, at("09:01:00").timetz())
-    made = []
-    for i, call in enumerate(calls):
-        t = start + timedelta(minutes=i)
-        output = dict(zip(BARRIER.p_keys(), (float(c == call) for c in BARRIER.classes), strict=True))
-        made.append(NewKindPrediction("005930", algorithm, "v1", t, t, output, width_ticks=width))
-    store.add_kind_predictions(BARRIER.name, made)
-    store.record_models([(algorithm, "v1", BARRIER_VERSION)])
-    path = {"w": width, "anchor": 81_250, "tick": 100, "cost": 1.86875, "upper": 82_250, "lower": 80_250}
-    path |= {"bid_start": 81_200, "ask_start": 81_300, "bid_end": 81_200, "ask_end": 81_300}
-    store.add_kind_answers(
-        BARRIER.name,
-        BARRIER_VERSION,
-        [
-            (s, start + timedelta(minutes=i), Answer(label, None, path), False)
-            for s in ("005930",)
-            for i, label in enumerate(BARRIER_OUTCOMES[: len(calls)])
-        ],
-    )
-
-
-def barrier_board(store: PredictionStore) -> None:
-    store_barrier(store, CLIMATE, [TIMEOUT] * 40)
-    store_barrier(store, PERSIST, [UP_FIRST] * 40)
-    store_barrier(store, "alpha", BARRIER_OUTCOMES)  # always right
 
 
 async def test_a_barrier_row_passes_where_its_hit_rate_s_lower_bound_is_above_p_star(tmp_path: Path) -> None:

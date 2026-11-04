@@ -17,10 +17,10 @@ from krx_quant.fake_kis import FakeKis
 from krx_quant.feeds import KRX_TRADE
 from krx_quant.feeds.base import KST
 from krx_quant.recorder import ParquetRecorder
+from tests.collector_doubles import settings_for
 from tests.kis_rest import MINUTE_BARS, minute_bars_api, requests_for
 from tests.replay_events import at, krx_trade
 from tests.test_auctions import candle, krx_bars
-from tests.test_collector import settings_for
 
 TODAY = date(2026, 10, 19)
 BEFORE, NO_BARS = date(2026, 9, 10), date(2026, 9, 11)

@@ -10,11 +10,9 @@ scheduler itself are made here: a listed one-off job leaves ``JOBS`` once it has
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import sys
-from collections.abc import AsyncIterator, Callable, Mapping, Sequence
-from contextlib import asynccontextmanager
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
@@ -29,7 +27,6 @@ from krx_quant.config import Settings, SettingsError
 from krx_quant.fake_kis import FakeKis
 from krx_quant.feeds.base import KST
 from krx_quant.github import GitHub
-from krx_quant.market_calendar import MarketCalendar
 from krx_quant.notify import Alerts
 from krx_quant.predictions import DB_NAME as ENGINE_DB
 from krx_quant.predictions import NewPrediction, PredictionStore
@@ -62,26 +59,26 @@ from krx_quant.scheduled import (
 )
 from krx_quant.scheduled.core import _first_night, _first_trading_night
 from krx_quant.swap import TRAINING_TIMEOUT, NightTraining, keep_training
-from tests.fake_github import REPO, TOKEN, FakeGitHub, fake_github
-from tests.test_collector import settings_for
-from tests.test_trader_run import EngineApi
-from tests.trader_doubles import cost_map, cost_row, predictor
+from tests.collector_doubles import settings_for
+from tests.fake_github import REPO, TOKEN, fake_github
+from tests.scheduled_doubles import (
+    AT,
+    CALENDAR,
+    COMMIT,
+    FRIDAY,
+    MONDAY,
+    SATURDAY,
+    SUNDAY,
+    THURSDAY,
+    Runs,
+    Told,
+    at,
+    saved,
+    scheduling,
+    settle,
+)
+from tests.trader_doubles import EngineApi, cost_map, cost_row, predictor
 from tests.waiting import until
-
-THURSDAY, FRIDAY, SATURDAY, SUNDAY, MONDAY = (date(2026, 10, d) for d in (15, 16, 17, 18, 19))
-CALENDAR = MarketCalendar({THURSDAY: True, FRIDAY: True, SATURDAY: False, SUNDAY: False, MONDAY: True})
-AT = time(22, 30)
-COMMIT = "0123456789abcdef0123"
-
-
-def at(day: date, hhmm: str) -> datetime:
-    return datetime.combine(day, time.fromisoformat(hhmm), KST)
-
-
-async def settle() -> None:
-    """Let every task run until it waits on the clock or a process."""
-    for _ in range(20):
-        await asyncio.sleep(0.005)
 
 
 def every_night(night: Night) -> bool:
@@ -102,39 +99,6 @@ def job(
     return Job(name=name, due=due, command=(name, "--flag"), timeout=timeout, targets=targets, attach=attach)
 
 
-class Runs:
-    """Stand-in job processes: each run is recorded with the time it started; ``hold`` keeps
-    them going until ``release``."""
-
-    def __init__(self, clock: FakeClock, ran: Ran | None = None) -> None:
-        self.clock = clock
-        self.ran = ran or Ran(0, "out\n", "")
-        self.started: list[tuple[str, datetime]] = []
-        self.ended: list[str] = []
-        self.held = asyncio.Event()
-        self.held.set()
-
-    def hold(self) -> None:
-        self.held.clear()
-
-    def release(self) -> None:
-        self.held.set()
-
-    def names(self) -> list[str]:
-        return [name for name, _ in self.started]
-
-    async def __call__(
-        self,
-        args: Sequence[str],
-        timeout: timedelta,
-        child: Child | None = None,
-    ) -> Ran:
-        self.started.append((args[0], self.clock.now()))
-        await self.held.wait()
-        self.ended.append(args[0])
-        return self.ran
-
-
 class Writes(Runs):
     """Stand-in runs that write files as they run: ``files`` gives each path its text."""
 
@@ -151,76 +115,6 @@ class Writes(Runs):
         for path, text in self.files.items():
             path.write_text(text)
         return await super().__call__(args, timeout, child)
-
-
-class Told(list[str]):
-    async def __call__(self, text: str) -> bool:
-        self.append(text)
-        return True
-
-    def saying(self, part: str) -> list[str]:
-        return [line for line in self if part in line]
-
-
-@asynccontextmanager
-async def scheduling(
-    tmp_path: Path,
-    start: datetime,
-    jobs: Sequence[Job],
-    *,
-    runs: Runs | None = None,
-    github: FakeGitHub | None = None,
-    token: str | None = TOKEN,
-    training: NightTraining | None = None,
-    facts: Facts | Callable[[], Facts] | None = None,
-    session_facts: Facts | None = None,
-    told: Told | None = None,
-    secrets: Sequence[str] = (),
-    clock: FakeClock | None = None,
-) -> AsyncIterator[tuple[FakeClock, Runs, Told, JobState]]:
-    """A scheduler running on a fake clock until the block ends (the collector stops)."""
-    clock = clock or FakeClock(start)
-    runs = runs or Runs(clock)
-    told = Told() if told is None else told
-    state = JobState.load(tmp_path / STATE_FILE)
-
-    async def read_facts() -> Facts:
-        if callable(facts):  # read each night, as the collector does
-            return facts()
-        return facts or Facts()
-
-    async def read_session_facts() -> Facts:
-        return session_facts or Facts()
-
-    async with aiohttp.ClientSession() as session:
-        hub = GitHub(session, token if github else None, REPO, github.url if github else "http://127.0.0.1:9")
-        scheduler = Scheduler(
-            jobs,
-            AT,
-            CALENDAR,
-            state,
-            hub,
-            told,
-            clock,
-            commit=COMMIT,
-            secrets=secrets,
-            training=training,
-            facts=read_facts,
-            session_facts=read_session_facts,
-            runner=runs,
-        )
-        task = asyncio.create_task(scheduler.run())
-        try:
-            await settle()
-            yield clock, runs, told, state
-        finally:
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-
-
-def saved(tmp_path: Path) -> dict[str, object]:
-    data: dict[str, object] = json.loads((tmp_path / STATE_FILE).read_text())
-    return data
 
 
 # When the jobs run
@@ -993,9 +887,9 @@ def test_the_signal_review_runs_a_third_time_once_its_fixed_window_of_20_days_is
 
 async def test_the_nightly_facts_count_the_fixed_window_s_days_in_the_engine_db(tmp_path: Path) -> None:
     from krx_quant.scheduled import read_facts
-    from tests.test_simulation_daily import CALENDAR as DAILY_CALENDAR
-    from tests.test_simulation_daily import NIGHT, engine_on
-    from tests.test_simulation_daily import settings as daily_settings
+    from tests.daily_doubles import CALENDAR as DAILY_CALENDAR
+    from tests.daily_doubles import NIGHT, engine_on
+    from tests.daily_doubles import settings as daily_settings
 
     s = daily_settings(tmp_path, signal=0.0, days=30)
     store = PredictionStore(s.state_dir / ENGINE_DB)

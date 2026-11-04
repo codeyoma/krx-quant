@@ -42,8 +42,8 @@ from krx_quant.scheduled import (
 )
 from krx_quant.stats import Scored, t_quantile
 from tests.fake_github import REPO, TOKEN, fake_github
+from tests.scheduled_doubles import AT, CALENDAR, COMMIT, FRIDAY, MONDAY, SATURDAY, Told, at
 from tests.test_holdout import AFTER_DAYS, OTHER, SYMBOL, Bar, bp, holdout, night, sigma_answers, stored
-from tests.test_scheduled import AT, CALENDAR, COMMIT, FRIDAY, MONDAY, SATURDAY, Told, at
 
 UP, FLAT, DOWN = Direction.UP, Direction.FLAT, Direction.DOWN
 P = {UP: (1.0, 0.0, 0.0), FLAT: (0.0, 1.0, 0.0), DOWN: (0.0, 0.0, 1.0)}

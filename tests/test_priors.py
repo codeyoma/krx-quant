@@ -25,7 +25,8 @@ from krx_quant.algorithms.shannon import PARAM_MEANINGS, Shannon
 from krx_quant.cards import Meaning
 from krx_quant.prevalidation import code_digest
 from krx_quant.pricing import Direction
-from tests.test_shannon import D1, D2, D3, a_day
+from tests.sample_doubles import a_day
+from tests.test_shannon import D1, D2, D3
 
 
 def test_a_training_sample_s_prior_counts_only_the_window_s_days_before_its_own() -> None:

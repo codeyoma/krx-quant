@@ -37,8 +37,8 @@ from krx_quant.ratelimit import RateLimiter
 from krx_quant.structure_check import structure_check
 from krx_quant.supply import INVESTORS, KIS, NET_MARKET, SupplyKeeper, krx_history_stored, read_supply
 from krx_quant.us_daily import US_DAILY, write_us_daily
+from tests.candle_doubles import candles_api, kis_candles
 from tests.kis_rest import rest_client
-from tests.test_candles import candles_api, kis_candles
 from tests.test_supply import KisSupply, ok
 
 CALENDAR = MarketCalendar()  # weekdays

@@ -22,10 +22,11 @@ from krx_quant.config import Settings, SettingsError
 from krx_quant.fake_kis import FakeKis
 from krx_quant.feeds import BOOK, KRX_TRADE, TRADE
 from krx_quant.trader.quotes import BestQuote, QuoteFeed, follow_quotes, parse_quote, quote_json, quote_of
+from tests.collector_doubles import settings_for
 from tests.kis_frames import book_frame
 from tests.replay_events import at, run
-from tests.test_collector import settings_for
-from tests.test_live_predictions import free_port, poll
+from tests.server_doubles import free_port, poll
+from tests.waiting import until
 
 RECEIVED = datetime(2026, 10, 14, 1, 0, 2, 500_000, tzinfo=UTC)  # 10:00:02.5 KST
 
@@ -80,13 +81,10 @@ async def test_a_client_gets_the_latest_quote_then_each_as_it_comes_of_the_trade
         url = str(client.make_url("/v1/quotes")).replace("http", "ws", 1)
         task = asyncio.create_task(follow_quotes(client.session, url, "005930", got.append))
         try:
-            async with asyncio.timeout(5):
-                while not got:
-                    await asyncio.sleep(0.01)
-                feed.on_event(BOOK.tr_id, book(symbol="000660"))  # not traded: not streamed
-                feed.on_event(BOOK.tr_id, book(received=RECEIVED.replace(second=3)))
-                while len(got) < 2:
-                    await asyncio.sleep(0.01)
+            await until(lambda: bool(got))
+            feed.on_event(BOOK.tr_id, book(symbol="000660"))  # not traded: not streamed
+            feed.on_event(BOOK.tr_id, book(received=RECEIVED.replace(second=3)))
+            await until(lambda: len(got) >= 2)
         finally:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)

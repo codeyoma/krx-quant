@@ -16,7 +16,7 @@ from krx_quant.fake_kis import FakeKis
 from krx_quant.net_buys_probe import MAX_FAILED_IN_A_ROW, probe_net_buys
 from krx_quant.probe_calls import Calls
 from krx_quant.supply import INVESTORS
-from tests.test_collector import settings_for
+from tests.collector_doubles import settings_for
 
 
 class Clock:

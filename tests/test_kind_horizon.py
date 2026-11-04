@@ -22,11 +22,10 @@ from krx_quant.touch import TARGET_VERSION
 from krx_quant.training import bar_answers, training_day
 from tests.api_schema import check
 from tests.kind_doubles import DRIFT, TEST_KIND
+from tests.replay_doubles import busy_morning, record
 from tests.replay_events import CALENDAR, DAY, FEE, SYMBOL, api, at, get_json, steady_book, vi
 from tests.synthetic_bars import day_of_bars
 from tests.test_kinds import answers, kind, kind_rows, quiet, run_kind
-from tests.test_replay import busy_morning
-from tests.test_replay_cli import record
 
 TEN = timedelta(minutes=10)
 LONG = replace(TEST_KIND, horizon=TEN)

@@ -24,9 +24,9 @@ from krx_quant.feeds import MEMBER, TRADE
 from krx_quant.feeds.base import KST
 from krx_quant.health import FeedHealth
 from krx_quant.recorder import ParquetRecorder
+from tests.collector_doubles import read, settings_for
 from tests.kis_frames import member_frame, trade_frame
-from tests.test_collector import read, settings_for
-from tests.test_live_predictions import free_port, poll
+from tests.server_doubles import free_port, poll
 
 # 2026-10-08, as the reading helpers name the day: 08:00:01, the NXT pre-market's start.
 MORNING = datetime(2026, 10, 8, 8, 0, 1, tzinfo=KST)

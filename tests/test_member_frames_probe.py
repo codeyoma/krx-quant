@@ -17,8 +17,8 @@ from krx_quant.feeds import MEMBER, RAW_SCHEMA, TRADE
 from krx_quant.feeds.base import KST
 from krx_quant.member_frames_probe import GROUPS, WIDTH, block_starts, grouped, report, shape
 from krx_quant.recorder import ParquetRecorder
+from tests.collector_doubles import FIXED_NOW, collect, read, settings_for
 from tests.kis_frames import MEMBER_COLUMNS, book_frame, member_frame, trade_frame
-from tests.test_collector import FIXED_NOW, collect, read, settings_for
 
 QUIET, SHORT, NO_NEXT = date(2026, 10, 22), date(2026, 10, 23), date(2026, 10, 26)
 NIGHT = datetime.combine(NO_NEXT, time(22, 30), KST)

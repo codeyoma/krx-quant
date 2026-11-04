@@ -44,20 +44,11 @@ from krx_quant.revisions import Code, Refactor, RevisionGate, Verdict
 from krx_quant.scheduled import Revising, revising_facts
 from krx_quant.simulation import _apply
 from krx_quant.touch import TARGET_VERSION
+from tests.lifecycle_doubles import RIGHT, put_days, stored, weekdays_before
+from tests.prevalidation_doubles import DAYS as PV_DAYS
+from tests.prevalidation_doubles import settings as pv_settings
 from tests.replay_events import DAY, at, run
-from tests.test_lifecycle import (
-    ALPHA,
-    BETA,
-    DELTA,
-    GAMMA,
-    RIGHT,
-    listed,
-    put_days,
-    stored,
-    weekdays_before,
-)
-from tests.test_prevalidation import DAYS as PV_DAYS
-from tests.test_prevalidation import settings as pv_settings
+from tests.test_lifecycle import ALPHA, BETA, DELTA, GAMMA, listed
 
 ON_TARGET = {name: Model(f"{name}-v", {}, target_version=TARGET_VERSION) for name in ("alpha", "beta")}
 

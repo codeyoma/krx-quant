@@ -61,7 +61,7 @@ from krx_quant.scheduled import (
 )
 from krx_quant.touch import TARGET_VERSION
 from tests.fake_github import REPO, TOKEN, fake_github
-from tests.test_scheduled import (
+from tests.scheduled_doubles import (
     AT,
     CALENDAR,
     COMMIT,
@@ -72,12 +72,12 @@ from tests.test_scheduled import (
     THURSDAY,
     Runs,
     Told,
-    Writes,
     at,
     saved,
     scheduling,
     settle,
 )
+from tests.test_scheduled import Writes
 from tests.waiting import until
 
 ORDER = ("mandelbrot", "breiman", "kalman", "shannon", "poisson")
